@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { execFileSync } from 'node:child_process'
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { openProtocol } from '@spexcode/session-protocol'
 import { deliverVerifiedAttempt, planPrivateDelivery } from './private-delivery.js'
@@ -111,4 +111,14 @@ test('中断后第三方更改候选文件，恢复保持原值并拒绝提交',
   const file = join(f.operation.deliveryPlan.canonicalRoot, 'b.txt'); writeFileSync(file, 'human private edit\n')
   await assert.rejects(deliverVerifiedAttempt(f.store, f.fence, f.options), /THIRD_PARTY/)
   assert.equal(readFileSync(file, 'utf8'), 'human private edit\n'); assert.equal(f.git('rev-parse', f.operation.deliveryPlan.branch), f.input.headCommit)
+})
+
+test('私有指令投影目录被重建会撤销写入授权，原source/index仍保留', { timeout: 30000 }, async t => {
+  const f = await fixture(t), footprint = join(dirname(f.operation.deliveryPlan.canonicalRoot), 'footprint')
+  await assert.rejects(deliverVerifiedAttempt(f.store, f.fence, { ...f.options, afterFileWrite: path => {
+    if (path !== 'a.txt') return
+    renameSync(footprint, `${footprint}-old`); mkdirSync(footprint, { mode: 0o700 })
+  } }), /OWNERSHIP/)
+  assert.equal(f.store.readOperation(f.operation.id).phase, 'recovery_required')
+  assert.equal((await captureInputSnapshot(f.root)).id, f.input.id); assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
 })

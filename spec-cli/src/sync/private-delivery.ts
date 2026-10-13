@@ -18,7 +18,7 @@ export type PrivateDeliveryOptions = {
   afterCommit?: () => void | Promise<void>
   afterReceipt?: () => void | Promise<void>
 }
-type Owner = { version: 1; operationId: string; attemptId: string; inputId: string; plan: DeliveryPlan; parentIdentity: string; stagingIdentity: string; journalId: string | null; commitIntent: BlobRef | null; published: boolean }
+type Owner = { version: 2; operationId: string; attemptId: string; inputId: string; plan: DeliveryPlan; parentIdentity: string; stagingIdentity: string; footprintIdentity: string; journalId: string | null; commitIntent: BlobRef | null; published: boolean }
 type CommitIntent = { version: 1; journalId: string; effectKey: string; tree: string; parent: string; ref: string; message: string; unchanged: boolean; binding: TrustedHooksBinding }
 export class PrivateDeliveryError extends Error { constructor(readonly code: string, message: string) { super(`${code}: ${message}`); this.name = 'PrivateDeliveryError' } }
 function fail(code: string, message: string): never { throw new PrivateDeliveryError(code, message) }
@@ -58,7 +58,7 @@ export async function deliverVerifiedAttempt(store: SyncStore, fence: WriteFence
   let operation = store.readOperation(fence.operationId)
   const attempt = store.readAttempt(fence.attemptId), candidate = attempt.candidate
   if (operation.currentAttemptId !== attempt.id || operation.generation !== fence.generation || attempt.leaseToken !== fence.leaseToken || !candidate || !attempt.verification?.passed || !['verified', 'applying', 'settled'].includes(attempt.status)) fail('SYNC_DELIVERY_NOT_VERIFIED', '当前尝试无完整验证或已经失权')
-  const managedRoot = managedDirectory(options.managedRoot, operation.input), root = operation.deliveryPlan.canonicalRoot, parent = dirname(root), staging = join(parent, 'staging'), ownerPath = join(parent, 'owner.json'), commonDir = operation.input.source.commonDir
+  const managedRoot = managedDirectory(options.managedRoot, operation.input), root = operation.deliveryPlan.canonicalRoot, parent = dirname(root), staging = join(parent, 'staging'), footprint = join(parent, 'footprint'), ownerPath = join(parent, 'owner.json'), commonDir = operation.input.source.commonDir
   if (dirname(parent) !== managedRoot || root !== join(parent, 'worktree') || !operation.deliveryPlan.branch.startsWith('refs/heads/codex/sync-')) fail('SYNC_DELIVERY_PLAN', '交付计划不属于私有受管根')
   const locks = join(managedRoot, '.locks')
   mkdirSync(locks, { recursive: true, mode: 0o700 }); physical(locks)
@@ -67,29 +67,31 @@ export async function deliverVerifiedAttempt(store: SyncStore, fence: WriteFence
   let owner: Owner | undefined, journal: ApplyJournal | undefined
   const assertOwner = (): void => {
     lock.assertHeld()
-    if (!owner || physical(parent) !== owner.parentIdentity || physical(staging) !== owner.stagingIdentity || !equal(JSON.parse(readFileSync(ownerPath, 'utf8')), owner)) fail('SYNC_DELIVERY_OWNERSHIP', '私有目录或所有权记录已改变')
+    if (!owner || physical(parent) !== owner.parentIdentity || physical(staging) !== owner.stagingIdentity || physical(footprint) !== owner.footprintIdentity || !equal(JSON.parse(readFileSync(ownerPath, 'utf8')), owner)) fail('SYNC_DELIVERY_OWNERSHIP', '私有目录或所有权记录已改变')
     if (operation.delivery && !equal(identifyWorktree(root), operation.delivery)) fail('SYNC_DELIVERY_OWNERSHIP', '交付工作树物理身份已改变')
   }
   const git = (binding: TrustedHooksBinding, cwd: string, args: string[]): string => execFileSync(binding.gitPath, ['--no-replace-objects', '--no-optional-locks', '-c', 'core.fsmonitor=false', '-C', cwd, ...args], { env: makeTrustedHookEnv(binding), encoding: 'utf8', maxBuffer: 8 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] }).trim()
   const trusted = (cwd: string, mode: 'prepare' | 'publish', tree: string): TrustedHooksBinding => {
-    const result = prepareTrustedHooksBinding(cwd, { ...options.tools, operation: mode, expectedTree: tree, expectedParent: operation.deliveryPlan.baseCommit, expectedRef: operation.deliveryPlan.branch })
+    const config = { ...options.tools, operation: mode, expectedTree: tree, expectedParent: operation.deliveryPlan.baseCommit, expectedRef: operation.deliveryPlan.branch, privateFootprintDir: footprint }
+    const result = prepareTrustedHooksBinding(cwd, config)
     if (result.status !== 'supported') fail('SYNC_DELIVERY_UNSUPPORTED', JSON.stringify(result.issues))
     return result.binding
   }
   try {
     if (existsSync(ownerPath)) {
       owner = JSON.parse(readFileSync(ownerPath, 'utf8')) as Owner
-      if (owner.version !== 1 || owner.operationId !== operation.id || owner.attemptId !== attempt.id || owner.inputId !== operation.input.id || !equal(owner.plan, operation.deliveryPlan)) fail('SYNC_DELIVERY_OWNERSHIP', '交付路径已属于其他输入/尝试')
+      if (owner.version !== 2 || owner.operationId !== operation.id || owner.attemptId !== attempt.id || owner.inputId !== operation.input.id || !equal(owner.plan, operation.deliveryPlan)) fail('SYNC_DELIVERY_OWNERSHIP', '交付路径已属于其他输入/尝试')
       assertOwner()
     } else {
       if (operation.control !== 'run' || attempt.status !== 'verified') fail('SYNC_DELIVERY_STOPPED', '暂停或取消后不能新建交付')
       const intent = writeEvidence(commonDir, { version: 1, kind: 'private-delivery-create', operationId: operation.id, attemptId: attempt.id, inputId: operation.input.id, plan: operation.deliveryPlan })
       store.checkpoint(fence, intent); lock.assertHeld()
       if (!existsSync(parent)) { mkdirSync(parent, { mode: 0o700 }); syncDirectory(managedRoot) }
-      if (readdirSync(parent).some(name => name !== 'staging' && !/^owner\.json\.[a-f0-9-]{36}\.tmp$/.test(name))) fail('SYNC_DELIVERY_OWNERSHIP', '未登记的私有目录含未知文件')
+      if (readdirSync(parent).some(name => !['staging', 'footprint'].includes(name) && !/^owner\.json\.[a-f0-9-]{36}\.tmp$/.test(name))) fail('SYNC_DELIVERY_OWNERSHIP', '未登记的私有目录含未知文件')
       if (!existsSync(staging)) mkdirSync(staging, { mode: 0o700 })
-      if (readdirSync(staging).length) fail('SYNC_DELIVERY_OWNERSHIP', '未登记暂存区非空')
-      owner = { version: 1, operationId: operation.id, attemptId: attempt.id, inputId: operation.input.id, plan: operation.deliveryPlan, parentIdentity: physical(parent), stagingIdentity: physical(staging), journalId: null, commitIntent: null, published: false }
+      if (!existsSync(footprint)) mkdirSync(footprint, { mode: 0o700 })
+      if (readdirSync(staging).length || readdirSync(footprint).length) fail('SYNC_DELIVERY_OWNERSHIP', '未登记暂存或指令投影区非空')
+      owner = { version: 2, operationId: operation.id, attemptId: attempt.id, inputId: operation.input.id, plan: operation.deliveryPlan, parentIdentity: physical(parent), stagingIdentity: physical(staging), footprintIdentity: physical(footprint), journalId: null, commitIntent: null, published: false }
       writeOwner(ownerPath, owner)
     }
     if (owner.journalId) journal = store.readJournal(owner.journalId)
