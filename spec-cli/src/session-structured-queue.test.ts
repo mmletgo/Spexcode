@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url'
 
 // Exercise the complete creation/queue/native-result path with a local RPC executor and no model calls.
 // A separate process starts in the fixture repo so the existing project-scoped layout caches stay truthful.
-test('two distinct structured requests complete sequentially without a watcher at maxActive=1', { skip: process.platform !== 'darwin' }, () => {
+for (const scenario of ['sequential', 'cancel', 'materializing', 'abort', 'timeout', 'queued', 'refused', 'ack-active']) test(`structured queue ${scenario} preserves native control and maxActive=1`, { skip: process.platform !== 'darwin' }, () => {
   const root = mkdtempSync(join(tmpdir(), 'spex-structured-queue-')), repo = join(root, 'repo'), bin = join(root, 'bin')
   try {
     mkdirSync(join(repo, '.spec'), { recursive: true }); mkdirSync(bin)
@@ -20,10 +20,10 @@ test('two distinct structured requests complete sequentially without a watcher a
     const executor = join(bin, 'codex')
     writeFileSync(executor, `#!/usr/bin/env node
 import {createServer} from 'node:net';
-const threads=new Map();let counter=0;
+const threads=new Map();let counter=0;let reads=0;
 const path=process.argv[process.argv.indexOf('--listen')+1].replace('unix://','');
 const server=createServer(socket=>{let buffer=Buffer.alloc(0),upgraded=false;
- const send=value=>{const p=Buffer.from(JSON.stringify(value));const h=p.length<126?Buffer.from([129,p.length]):Buffer.from([129,126,p.length>>8,p.length&255]);socket.write(Buffer.concat([h,p]));};
+ const send=value=>{if(socket.destroyed)return;const p=Buffer.from(JSON.stringify(value));const h=p.length<126?Buffer.from([129,p.length]):Buffer.from([129,126,p.length>>8,p.length&255]);socket.write(Buffer.concat([h,p]));};
  const handle=m=>{let result;
   if(m.id===undefined)return;
   if(m.method==='initialize')result={};
@@ -31,8 +31,10 @@ const server=createServer(socket=>{let buffer=Buffer.alloc(0),upgraded=false;
   else if(m.method==='hooks/list')result={data:[{hooks:[],errors:[]}]};
   else if(m.method==='mcpServerStatus/list')result={data:[],nextCursor:null};
   else if(m.method==='thread/start'){const id='thread-'+(++counter);const thread={id,turns:[]};threads.set(id,thread);result={thread};}
-  else if(m.method==='turn/start'){const thread=threads.get(m.params.threadId);const turn={id:'turn-'+counter,status:'completed',items:[{type:'agentMessage',phase:'final_answer',text:JSON.stringify({answer:m.params.input[0].text.includes('first')?'first':'second'})}]};thread.turns.push(turn);result={turn:{id:turn.id}};setTimeout(()=>send({method:'turn/completed',params:{threadId:thread.id,turn}}),5);}
+  else if(m.method==='turn/start'){const thread=threads.get(m.params.threadId);const turn={id:'turn-'+counter,status:m.params.input[0].text.includes('hold')?'inProgress':'completed',items:[{type:'userMessage',content:m.params.input},{type:'agentMessage',phase:'final_answer',text:JSON.stringify({answer:m.params.input[0].text.includes('first')?'first':'second'})}]};thread.turns.push(turn);result={turn:{id:turn.id}};if(turn.status==='completed')setTimeout(()=>send({method:'turn/completed',params:{threadId:thread.id,turn}}),5);}
+  else if(m.method==='turn/interrupt'){const thread=threads.get(m.params.threadId),turn=thread.turns.find(t=>t.id===m.params.turnId);if(thread.turns[0].items[0].content[0].text.includes('refused')){send({id:m.id,error:{message:'fixture refused exact interruption'}});return;}result={};if(!thread.turns[0].items[0].content[0].text.includes('ack-active'))setTimeout(()=>{turn.status='interrupted';send({method:'turn/completed',params:{threadId:thread.id,turn}})},50);}
   else if(m.method==='thread/read'||m.method==='thread/resume')result={thread:threads.get(m.params.threadId)};
+  else if(m.method==='thread/turns/list'){if(threads.get(m.params.threadId).turns[0].items[0].content[0].text.includes('materializing')&&reads++<2){send({id:m.id,error:{message:'rollout at fixture is empty'}});return;}result={data:threads.get(m.params.threadId).turns};}
   else if(m.method==='thread/loaded/list')result={data:[...threads.keys()]};
   else result={};
   send({id:m.id,result});
@@ -46,23 +48,53 @@ const server=createServer(socket=>{let buffer=Buffer.alloc(0),upgraded=false;
     writeFileSync(join(bin, 'package.json'), '{"type":"module"}\n'); chmodSync(executor, 0o755)
     const runner = join(root, 'runner.mts'), source = fileURLToPath(new URL('./session-structured.ts', import.meta.url))
     const generations = fileURLToPath(new URL('./codex-runtime-generations.ts', import.meta.url))
+    const sessions = fileURLToPath(new URL('./sessions.ts', import.meta.url))
+    const records = fileURLToPath(new URL('./session-record.ts', import.meta.url))
     const core = fileURLToPath(new URL('../../packages/spec-core/src/index.ts', import.meta.url))
-    writeFileSync(runner, `import {runStructuredSession} from ${JSON.stringify(source)};
+    writeFileSync(runner, `import {runStructuredSession,cancelStructuredSession} from ${JSON.stringify(source)};
+import {sessionIdForCreateKey,listSessions} from ${JSON.stringify(sessions)};
+import {readRecord} from ${JSON.stringify(records)};
 import {currentCodexGeneration} from ${JSON.stringify(generations)};
 import {runtimeRoot,verifyDetachedRuntime} from ${JSON.stringify(core)};
 import {readFileSync,writeFileSync} from 'node:fs';import {join} from 'node:path';
-const results=[];let error;
-try{for(const answer of ['first','second'])results.push(await runStructuredSession({root:process.cwd(),requestKey:'queue-'+answer,inputDigest:'frozen-'+answer,purpose:'queue-regression',prompt:'Return '+answer,schema:{type:'object',properties:{answer:{type:'string'}},required:['answer'],additionalProperties:false},timeoutMs:3000}));}
+const results=[];let error;let cancellation;const scenario=${JSON.stringify(scenario)};
+const request=(answer,key,timeoutMs=3000)=>({root:process.cwd(),requestKey:key,inputDigest:'frozen-'+key,purpose:'queue-regression',prompt:'Return '+answer,schema:{type:'object',properties:{answer:{type:'string'}},required:['answer'],additionalProperties:false},timeoutMs});
+const wait=async check=>{const until=Date.now()+2500;while(!check()){if(Date.now()>until)throw new Error('fixture native turn never started');await new Promise(r=>setTimeout(r,10));}};
+try{
+ if(scenario==='sequential'){for(const answer of ['first','second'])results.push(await runStructuredSession(request(answer,'queue-'+answer)));}
+ else{
+  const id=sessionIdForCreateKey('queue-active');const controller=new AbortController();const active=runStructuredSession({...request('hold '+scenario,'queue-active',scenario==='timeout'?1200:5000),...(scenario==='abort'?{signal:controller.signal}:{})}).then(result=>({result}),e=>({error:{code:e.code,message:e.message}}));
+  await wait(()=>!!readRecord(id)?.structuredExecution?.turnId);
+  if(scenario==='queued'){
+   const queuedId=sessionIdForCreateKey('queue-second');const queued=runStructuredSession(request('second','queue-second')).then(result=>({result}),e=>({error:{code:e.code}}));
+   await wait(()=>!!readRecord(queuedId));const neverStarted=await cancelStructuredSession(queuedId);
+   if(!neverStarted.nativeStopped||neverStarted.nativeStatus!=='notStarted'||readRecord(queuedId).harnessSessionId)throw new Error('queued cancellation guessed a native target');
+   results.push(await queued);
+  }
+  if(scenario==='abort')controller.abort();
+  if(scenario==='timeout'||scenario==='abort'){results.push(await active);cancellation=readRecord(id).structuredExecution.cancellation;}
+  else{cancellation=await cancelStructuredSession(id,{timeoutMs:scenario==='materializing'?1000:300});results.push(await active);}
+  if(scenario==='refused'||scenario==='ack-active'){
+   const row=(await listSessions()).find(s=>s.id===id);if(cancellation.nativeStopped||readRecord(id).structuredExecution.state!=='cancelling'||row.liveness!=='unknown')throw new Error('unconfirmed native stop became falsely terminal');
+   try{await runStructuredSession(request('second','queue-blocked',300));throw new Error('unconfirmed native task released its model capacity');}catch(e){if(e.code!=='timeout')throw e;}
+  }else{
+   if(!cancellation.nativeStopped||!cancellation.acknowledged||cancellation.nativeStatus!=='interrupted')throw new Error('cancellation lacks acknowledged exact native settlement');
+   if(scenario==='timeout'&&results[0].error.code!=='timeout')throw new Error('timeout lost its reason');
+   results.push(await runStructuredSession(request('second','queue-after-stop')));
+  }
+ }
+}
 catch(e){error={code:e.code,message:e.message,sessionId:e.sessionId,threadId:e.threadId};}
 finally{const endpoint=currentCodexGeneration(join(runtimeRoot(),'structured-read-only-v1/control'));if(endpoint){const pid=Number(readFileSync(endpoint.pidFile,'utf8'));if(verifyDetachedRuntime(pid,endpoint.receiptFile).ok)process.kill(-pid,'SIGTERM');}}
-writeFileSync(${JSON.stringify(join(root, 'results.json'))},JSON.stringify({results,error}));process.exit(results.length===2?0:1);
+writeFileSync(${JSON.stringify(join(root, 'results.json'))},JSON.stringify({results,error,cancellation}));process.exit(error?1:0);
 `)
     const child = spawnSync(process.execPath, ['--import', createRequire(import.meta.url).resolve('tsx/esm'), runner], {
-      cwd: repo, encoding: 'utf8', timeout: 12_000,
+      cwd: repo, encoding: 'utf8', timeout: 20_000,
       env: { ...process.env, SPEXCODE_HOME: join(root, 'runtime'), SPEX_SESSION_DATABASE_PATH: join(root, 'runtime/sessions.sqlite'), PATH: `${bin}:${process.env.PATH}` },
     })
     const evidence = readFileSync(join(root, 'results.json'), 'utf8')
     assert.equal(child.status, 0, `second distinct structured request never completed: ${evidence}\n${child.stderr.slice(-1000)}`)
+    if (scenario !== 'sequential') { const parsed = JSON.parse(evidence); assert.equal(parsed.error, undefined); return }
     const { results } = JSON.parse(evidence) as { results: Array<{ sessionId: string; threadId: string; turnId: string; output: { answer: string } }> }
     assert.deepEqual(results.map((result) => result.output.answer), ['first', 'second'])
     assert.notEqual(results[0].sessionId, results[1].sessionId)

@@ -2631,6 +2631,8 @@ export const codexHeadlessHarness: Harness = {
 export async function codexStructuredTurn(sock: string, cwd: string, prompt: string, execution: StructuredExecution, callbacks: {
   onThread(threadId: string): Promise<void>
   onTurn(turnId: string): Promise<void>
+  onTurnStarting?(): Promise<void>
+  onTimeout?(): Promise<void>
   signal?: AbortSignal
 }): Promise<{ threadId: string; turnId: string; text: string }> {
   const conn = createConnection(sock)
@@ -2696,12 +2698,13 @@ export async function codexStructuredTurn(sock: string, cwd: string, prompt: str
     })
   })
   const abort = (): void => {
-    if (threadId && turnId && upgraded) send({ method: 'turn/interrupt', id: ++requestId, params: { threadId, turnId } })
+    // Session cancellation owns the separately acknowledged native control connection. This signal
+    // detaches only the observer after the durable publication fence has been installed.
     fail(new StructuredSessionError('cancelled', 'structured Agent execution was cancelled'))
   }
   const timer = setTimeout(() => {
-    if (threadId && turnId && upgraded) send({ method: 'turn/interrupt', id: ++requestId, params: { threadId, turnId } })
-    fail(new StructuredSessionError('timeout', 'structured Agent execution exceeded its deadline'))
+    if (callbacks.onTimeout) void callbacks.onTimeout().catch((error: Error) => fail(error))
+    else fail(new StructuredSessionError('timeout', 'structured Agent execution exceeded its deadline'))
   }, execution.timeoutMs)
   callbacks.signal?.addEventListener('abort', abort, { once: true })
   try {
@@ -2741,6 +2744,7 @@ export async function codexStructuredTurn(sock: string, cwd: string, prompt: str
       await callbacks.onTurn(turnId)
     }
     if (!turnId) {
+      await callbacks.onTurnStarting?.()
       const accepted = await request('turn/start', { threadId, input: codexTextInput(prompt), cwd, approvalPolicy: 'never', sandboxPolicy: { type: 'readOnly' },
         outputSchema: execution.schema, ...(execution.model ? { model: execution.model } : {}), ...(execution.effort ? { effort: execution.effort } : {}) }) as { turn?: { id?: string } }
       if (!accepted.turn?.id) throw new StructuredSessionError('failed', 'Codex returned no structured turn identity')
@@ -2766,4 +2770,91 @@ export async function codexStructuredTurn(sock: string, cwd: string, prompt: str
     callbacks.signal?.removeEventListener('abort', abort)
     conn.destroy()
   }
+}
+
+
+export type CodexStructuredStop = { nativeStopped: boolean; acknowledged: boolean; turnId?: string; nativeStatus?: string; error?: string }
+
+async function codexReadStructuredTurn(sock: string, threadId: string, turnId: string | undefined, prompt: string, budgetMs: number): Promise<{ turnId: string; status: string }> {
+  return new Promise((resolve, reject) => {
+    const conn = createConnection(sock), frames: FrameState = { buf: Buffer.alloc(0), fragOp: 0, fragBuf: Buffer.alloc(0) }
+    let upgraded = false, settled = false
+    const done = (error?: Error, value?: { turnId: string; status: string }): void => {
+      if (settled) return
+      settled = true; clearTimeout(timer); conn.destroy()
+      if (error) reject(error); else resolve(value!)
+    }
+    const timer = setTimeout(() => done(new Error('exact structured turn read timed out')), budgetMs)
+    const send = (message: JsonRpc): void => { conn.write(wsText(JSON.stringify(message))) }
+    conn.on('error', (error) => done(error)); conn.on('close', () => done(new Error('exact structured turn read disconnected')))
+    conn.on('connect', () => conn.write(WS_UPGRADE(randomBytes(16).toString('base64'))))
+    const handle = (json: string): void => {
+      const message = JSON.parse(json) as JsonRpc
+      if (message.error) { done(new Error(message.error.message || 'exact structured turn read failed')); return }
+      if (message.id === 1) {
+        send({ method: 'initialized', params: {} })
+        send({ id: 2, method: turnId ? 'thread/turns/list' : 'thread/read', params: turnId
+          ? { threadId, limit: 100, itemsView: 'notLoaded' } : { threadId, includeTurns: true } })
+        return
+      }
+      if (message.id !== 2) return
+      type Turn = { id: string; status: string; items?: Array<{ type: string; content?: Array<{ type: string; text?: string }> }> }
+      const result = message.result as { data?: Turn[]; thread?: { id?: string; turns?: Turn[] } }
+      const turns = turnId ? result?.data : result?.thread?.id === threadId ? result.thread.turns : undefined
+      if (!Array.isArray(turns)) { done(new Error('exact structured thread identity is missing')); return }
+      const turn = turnId ? turns.find((item) => item.id === turnId) : turns.length === 1
+        && turns[0].items?.some((item) => item.type === 'userMessage' && item.content?.some((text) => text.type === 'text' && text.text === prompt)) ? turns[0] : undefined
+      if (!turn || !['inProgress', 'completed', 'interrupted', 'failed'].includes(turn.status)) { done(new Error('exact structured turn could not be proven; no other turn was interrupted')); return }
+      done(undefined, { turnId: turn.id, status: turn.status })
+    }
+    conn.on('data', (chunk: Buffer) => {
+      frames.buf = Buffer.concat([frames.buf, chunk])
+      try {
+        if (!upgraded) {
+          const end = frames.buf.indexOf('\r\n\r\n'); if (end < 0) return
+          if (!/^HTTP\/1\.1 101/.test(frames.buf.subarray(0, end).toString())) throw new Error('structured cancellation WebSocket refused')
+          frames.buf = frames.buf.subarray(end + 4); upgraded = true; send(wsInitialize)
+        }
+        if (drainWsFrames(frames, conn, handle)) done(new Error('structured cancellation WebSocket closed'))
+      } catch (error) { done(error as Error) }
+    })
+  })
+}
+
+// Reuse the existing acknowledged mutation primitive and generation fence, but target the pinned structured
+// turn, never whichever turn happens to be active later. Settlement is an exact native read, not a sent frame.
+export async function codexStopStructuredTurn(dir: string, endpoint: CodexGenerationEndpoint, threadId: string, turnId: string | undefined, prompt: string, budgetMs = 15_000): Promise<CodexStructuredStop> {
+  const generation = codexRuntimeGeneration(dir, endpoint)
+  if (!generation) return { nativeStopped: false, acknowledged: false, error: 'structured generation identity is unproven' }
+  const deadline = Date.now() + budgetMs
+  let acknowledged = false, exactTurn = turnId
+  // First-turn acceptance can precede native rollout materialization. Its explicit empty-rollout refusal
+  // is transient, not evidence of no native work. Retry within the cancellation budget and generation fence.
+  const readExact = async (): Promise<{ turnId: string; status: string }> => {
+    for (;;) {
+      if (codexRuntimeGeneration(dir, endpoint) !== generation) throw new Error('structured generation changed during cancellation read')
+      try { return await codexReadStructuredTurn(endpoint.socketPath, threadId, exactTurn, prompt, Math.max(1, Math.min(2000, deadline - Date.now()))) }
+      catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        if (Date.now() >= deadline || !((message.includes('rollout at ') && message.includes(' is empty')) || message.includes('is not materialized yet'))) throw error
+        await new Promise((resolve) => setTimeout(resolve, 100))
+      }
+    }
+  }
+  try {
+    const before = await readExact()
+    exactTurn = before.turnId
+    if (codexRuntimeGeneration(dir, endpoint) !== generation) throw new Error('structured generation changed before cancellation')
+    if (before.status !== 'inProgress') return { nativeStopped: true, acknowledged, turnId: exactTurn, nativeStatus: before.status }
+    const result = await codexThreadMutation(endpoint.socketPath, 'turn/interrupt', threadId, { dir, endpoint, generation }, exactTurn, Math.max(1, deadline - Date.now()))
+    if (!result.ok) return { nativeStopped: false, acknowledged: false, turnId: exactTurn, error: `${result.error}; native mutation ${result.commit}` }
+    acknowledged = true
+    do {
+      const after = await readExact()
+      if (codexRuntimeGeneration(dir, endpoint) !== generation) throw new Error('structured generation changed during cancellation settlement')
+      if (after.status !== 'inProgress') return { nativeStopped: true, acknowledged, turnId: exactTurn, nativeStatus: after.status }
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    } while (Date.now() < deadline)
+    return { nativeStopped: false, acknowledged, turnId: exactTurn, error: 'exact structured turn remained active after interrupt acknowledgement' }
+  } catch (error) { return { nativeStopped: false, acknowledged, turnId: exactTurn, error: error instanceof Error ? error.message : String(error) } }
 }

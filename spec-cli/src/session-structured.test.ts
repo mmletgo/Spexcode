@@ -90,13 +90,13 @@ for (const status of ['failed', 'interrupted']) test(`structured ${status} turn 
   finally { await f.close() }
 })
 
-for (const mode of ['cancel', 'timeout']) test(`structured ${mode} interrupts exact native turn`, async () => {
+for (const mode of ['cancel', 'timeout']) test(`structured ${mode} detaches its observer without claiming native settlement`, async () => {
   const controller = new AbortController()
   const f = await fixture((request) => request.method === 'turn/start' ? { turn: { id: 'turn-exact' } } : safePrelude(request))
   try {
     await assert.rejects(codexStructuredTurn(f.path, '/fixture', 'pinned prompt', execution({ timeoutMs: mode === 'timeout' ? 80 : 2000 }), { ...callbacks, signal: controller.signal, onTurn: async () => { if (mode === 'cancel') controller.abort() } }), (error: unknown) => error instanceof StructuredSessionError && error.code === (mode === 'cancel' ? 'cancelled' : 'timeout'))
     await new Promise((resolve) => setTimeout(resolve, 20))
-    assert.ok(f.calls.some((request) => request.method === 'turn/interrupt' && request.params.threadId === 'thread-exact' && request.params.turnId === 'turn-exact'))
+    assert.equal(f.calls.some((request) => request.method === 'turn/interrupt'), false, 'native cancellation is owned by the durable session control seam')
   } finally { await f.close() }
 })
 

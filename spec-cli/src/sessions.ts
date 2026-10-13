@@ -468,7 +468,7 @@ function corruptSession(id: string, entry: { path: string; error: string }): Ses
 }
 
 export function toSession(rec: SessRec, status: DisplayStatus, lv: Liveness, activity: string | null = null): Session {
-  if (rec.structuredExecution) lv = launching.has(rec.session) ? 'unknown' : 'offline'
+  if (rec.structuredExecution) lv = rec.structuredExecution.state === 'cancelling' || launching.has(rec.session) ? 'unknown' : 'offline'
   const prompt = readPromptFile(rec.session)   // the originating ask, captured at launch (store artifact; null for old sessions)
   // activity is the LIVE pane title; it only means anything while the worker is genuinely up — a
   // dead/booting session would show a stale or absent title, so it's suppressed unless liveness is online.

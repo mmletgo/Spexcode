@@ -17,7 +17,9 @@ export type StructuredExecution = {
   effort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
   threadId?: string
   turnId?: string
-  state?: 'running' | 'completed' | 'failed' | 'cancelled' | 'timeout'
+  state?: 'running' | 'completed' | 'failed' | 'cancelling' | 'cancelled' | 'timeout'
+  turnStartRequested?: boolean
+  cancellation?: { reason: 'cancelled' | 'timeout'; requestedAt: number; nativeStopped: boolean; acknowledged: boolean; nativeStatus?: string; error?: string }
   output?: unknown
   resultDigest?: string
   error?: string
@@ -26,7 +28,7 @@ export class StructuredSessionError extends Error {
   readonly sessionId?: string
   readonly threadId?: string
   readonly turnId?: string
-  constructor(readonly code: 'unsupported' | 'failed' | 'cancelled' | 'timeout' | 'key_reused' | 'stale_result', message: string, identity: { sessionId?: string; threadId?: string; turnId?: string } = {}) {
+  constructor(readonly code: 'unsupported' | 'failed' | 'cancelled' | 'timeout' | 'key_reused' | 'stale_result' | 'cancellation_pending', message: string, identity: { sessionId?: string; threadId?: string; turnId?: string } = {}) {
     super(message)
     this.name = 'StructuredSessionError'
     this.sessionId = identity.sessionId
