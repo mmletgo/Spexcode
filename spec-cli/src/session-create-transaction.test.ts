@@ -73,7 +73,7 @@ case " $* " in
     fi ;;
   *)
     if [ -e "$SPEX_CREATE_MATERIALIZE_FAILURE" ]; then
-      parent_cmd=$(tr '\\000' ' ' < "/proc/$PPID/cmdline" 2>/dev/null || true)
+      parent_cmd=$(ps -ww -o args= -p "$PPID")
       case "$parent_cmd" in
         *"cli.ts materialize"*)
           printf '%s\\n' 'fatal: config command "sh -c [test -r "$0" && exec bash "$0" clean "$1"]" C:\\broken\\path' >&2
@@ -82,7 +82,7 @@ case " $* " in
       esac
     fi
     if [ -e "$SPEX_CREATE_KILL_AFTER_STORE" ]; then
-      parent_cmd=$(tr '\\000' ' ' < "/proc/$PPID/cmdline" 2>/dev/null || true)
+      parent_cmd=$(ps -ww -o args= -p "$PPID")
       case "$parent_cmd" in
         *"cli.ts materialize"*)
           backend_pid=$(ps -o ppid= -p "$PPID" | tr -d ' ')
@@ -91,7 +91,7 @@ case " $* " in
       esac
     fi
     if [ -e "$SPEX_CREATE_BLOCK_RECEIPT_RETIRE" ]; then
-      parent_cmd=$(tr '\\000' ' ' < "/proc/$PPID/cmdline" 2>/dev/null || true)
+      parent_cmd=$(ps -ww -o args= -p "$PPID")
       case "$parent_cmd" in *"cli.ts materialize"*) chmod 500 "$SPEX_CREATE_CANDIDATE_DIR" ;; esac
     fi
     exec ${JSON.stringify(execFileSync('which', ['git'], { encoding: 'utf8' }).trim())} "$@" ;;
@@ -372,7 +372,10 @@ esac
 
     const gitRetry = await post('crash-3', crashPrompt)
     const gitRetryBody = await gitRetry.json() as any
+    assert.equal(gitRetry.status, 201, `matching recovery accepts the configured path alias: ${JSON.stringify(gitRetryBody)}`)
     assert.deepEqual(candidateReceipts(), [], 'matching Git-stage recovery retires its private receipt')
+    assert.equal(git(a.path, 'symbolic-ref', '--short', 'HEAD'), a.branch, 'crash recovery preserves the unrelated published worktree')
+    assert.equal(realpathSync(git(configuredMain, 'rev-parse', '--show-toplevel')), realpathSync(configuredMain), 'crash recovery preserves the configured main worktree')
 
     const beforeStoreCrash = { worktrees: worktrees(), stores: sessionDirs().length }
     await crashBackend(killAfterStore, 'store-crash', 'store crash recovery fixture')

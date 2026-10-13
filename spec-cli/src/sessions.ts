@@ -2363,7 +2363,15 @@ async function sessionCandidateState(root: string, path: string, branch: string,
   ]))
   if (!listed.ok) throw new SessionCreateError('session_create_failed', 'git-worktree', `cannot read worktree registry: ${listed.stderr.trim() || listed.failure}`, 500)
   if (!ref.ok && ref.failure !== 'exit') throw new SessionCreateError('session_create_failed', 'git-worktree', `cannot read candidate branch: ${ref.stderr.trim() || ref.failure}`, 500)
-  return { path: existsSync(path), worktree: listed.stdout.split('\0').includes(`worktree ${path}`), branch: ref.ok }
+  const pathExists = existsSync(path)
+  const candidatePath = pathExists ? realpathSync(path) : path
+  const worktree = listed.stdout.split('\0').some((entry) => {
+    if (!entry.startsWith('worktree ')) return false
+    const registeredPath = entry.slice('worktree '.length)
+    return registeredPath === path
+      || (pathExists && existsSync(registeredPath) && realpathSync(registeredPath) === candidatePath)
+  })
+  return { path: pathExists, worktree, branch: ref.ok }
 }
 
 async function cleanupSessionCandidate(root: string, id: string, path: string, branch: string, owned: SessionCandidateOwnership): Promise<string[]> {
