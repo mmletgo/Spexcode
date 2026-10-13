@@ -26,7 +26,7 @@ related:
 
 P1 通过后的 elaboratedSpecs 是需实现和交付的目标正文，contracts 可以来自该细化结果；它们不替换 original composed tree，不制造细化中间 tree/commit。生成提示要求最终 changes 包含详细 Spec、真实实现/测试和 anchors，所有 beforeDigest/beforeMode 仍对应 original composed。
 
-模型只返回现有 CANDIDATE_CHANGES_SCHEMA 的 sync-files-v1。freezeCandidate 以输入或 composed 基线的真实对象执行 beforeDigest/beforeMode CAS 和允许文件范围校验，并冻结实际 diff、完整 tree 与保活 refs。schema、CAS 或越界拒绝后不进入评审。此模块仅写既有不可变 Git 对象/证据/候选 refs，不改用户文件、index、HEAD 或交付树。
+模型只返回从现有文件语义 schema 派生的严格 CANDIDATE_RESPONSE_SCHEMA 的 sync-files-v1，所有属性 required，mode:null 表示沿用或新增普通模式。即使注入 runner 也验证该响应结构。freezeCandidate 以输入或 composed 基线的真实对象执行 beforeDigest/beforeMode CAS 和允许文件范围校验，并冻结实际 diff、完整 tree 与保活 refs。schema、CAS 或越界拒绝后不进入评审。此模块仅写既有不可变 Git 对象/证据/候选 refs，不改用户文件、index、HEAD 或交付树。评审响应采用原生服务支持的 schema 子集，checkedIds/affectedIds 唯一性由本地程序继续严格核验。
 
 validateCandidate 是必需可信硬门禁，按实际候选回调；没有回调、回调抛错或返回 error 都不得进入独立评审。返回 ContractFinding.severity，warning 只保留诊断，不阻断。raw/全局 REQ/AC/VERIFY 身份、语义和命令的程序保护由上层该回调统一提供，不在本模块维护第二套契约政策。
 

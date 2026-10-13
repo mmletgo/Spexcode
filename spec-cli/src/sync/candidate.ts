@@ -6,15 +6,22 @@ import { isUtf8Text } from './composition.js'
 import { contentHash, objectGit, readEvidence, readObject, readTree, safeSymlinkTarget, validateRepositoryPath, verifySnapshot, writeEvidence, writeObject, writeTree } from './snapshot.js'
 import type { TreeEntry } from './snapshot.js'
 
-type FileChange = { path: string; beforeDigest: string | null; beforeMode: TreeEntry['mode'] | null; content: string | null; mode?: '100644' | '100755' }
+type FileChange = { path: string; beforeDigest: string | null; beforeMode: TreeEntry['mode'] | null; content: string | null; mode?: '100644' | '100755' | null }
 export type CandidateChanges = { version: 'sync-files-v1'; changes: FileChange[] }
 export const CANDIDATE_CHANGES_SCHEMA = {
   type: 'object', additionalProperties: false, required: ['version', 'changes'], properties: {
-    version: { const: 'sync-files-v1' }, changes: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['path', 'beforeDigest', 'beforeMode', 'content'], properties: {
-      path: { type: 'string', minLength: 1 }, beforeDigest: { anyOf: [{ type: 'string', pattern: '^[0-9a-f]{64}$' }, { type: 'null' }] }, beforeMode: { enum: ['100644', '100755', '120000', null] }, content: { type: ['string', 'null'] }, mode: { enum: ['100644', '100755'] },
+    version: { type: 'string', const: 'sync-files-v1' }, changes: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['path', 'beforeDigest', 'beforeMode', 'content'], properties: {
+      path: { type: 'string', minLength: 1 }, beforeDigest: { anyOf: [{ type: 'string', pattern: '^[0-9a-f]{64}$' }, { type: 'null' }] }, beforeMode: { type: ['string', 'null'], enum: ['100644', '100755', '120000', null] }, content: { type: ['string', 'null'] }, mode: { type: ['string', 'null'], enum: ['100644', '100755', null] },
     } } },
   },
 } as const
+export const CANDIDATE_RESPONSE_SCHEMA = { ...CANDIDATE_CHANGES_SCHEMA, properties: {
+  ...CANDIDATE_CHANGES_SCHEMA.properties,
+  changes: { ...CANDIDATE_CHANGES_SCHEMA.properties.changes, items: {
+    ...CANDIDATE_CHANGES_SCHEMA.properties.changes.items,
+    required: Object.keys(CANDIDATE_CHANGES_SCHEMA.properties.changes.items.properties),
+  } },
+} }
 const validateChanges = new Ajv({ allErrors: true, strict: true, allowUnionTypes: true }).compile(CANDIDATE_CHANGES_SCHEMA)
 export function actualTreeDiff(before: TreeEntry[], after: TreeEntry[]): ApplyFilePlan[] {
   const old = new Map(before.map(entry => [entry.path, entry])), next = new Map(after.map(entry => [entry.path, entry]))

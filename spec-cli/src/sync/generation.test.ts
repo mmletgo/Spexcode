@@ -6,10 +6,10 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { parseContract } from '@spexcode/spec-core/contracts'
 import type { Acceptance, ContractFinding } from '@spexcode/spec-core/contracts'
-import { CANDIDATE_CHANGES_SCHEMA } from './candidate.js'
+import { CANDIDATE_RESPONSE_SCHEMA } from './candidate.js'
 import type { CandidateChanges } from './candidate.js'
 import type { ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
-import { runGeneration } from './generation.js'
+import { GENERATION_REVIEW_SCHEMA, runGeneration } from './generation.js'
 import type { GenerationInput, GenerationReview } from './generation-types.js'
 import { captureInputSnapshot, contentHash, readObject, readTree, writeEvidence, writeObject, writeTree } from './snapshot.js'
 
@@ -28,7 +28,7 @@ async function input(t: test.TestContext): Promise<GenerationInput> {
 }
 function changes(input: GenerationInput): unknown {
   const entry = input.manifest.entries.find(entry => entry.path === 'src/export.js')!
-  return { version: 'sync-files-v1', changes: [{ path: entry.path, beforeDigest: entry.digest, beforeMode: entry.mode, content: `${input.files.get(entry.path)}\n// actual candidate implementation\n` }] }
+  return { version: 'sync-files-v1', changes: [{ path: entry.path, beforeDigest: entry.digest, beforeMode: entry.mode, mode: null, content: `${input.files.get(entry.path)}\n// actual candidate implementation\n` }] }
 }
 function review(request: ElaborationSessionRequest): GenerationReview {
   const identity = JSON.parse(request.prompt.split('实际候选身份与 manifest:\n')[1].split('\n实际完整候选')[0]) as { inputId: string; candidate: { digest: string } }
@@ -45,6 +45,22 @@ function runner(input: GenerationInput, generation: (request: ElaborationSession
 }
 const valid = async (): Promise<ContractFinding[]> => []
 
+test('原生严格响应schema显式类型和required属性完整，不能仅以本地Ajv接受自证', () => {
+  const check = (schema: Record<string, unknown>): void => {
+    if (schema.const !== undefined || schema.enum) assert.ok(schema.type, '常量/枚举必须声明类型')
+    if (schema.type === 'object') {
+      assert.equal(schema.additionalProperties, false)
+      const properties = schema.properties as Record<string, Record<string, unknown>>
+      assert.deepEqual(new Set(schema.required as string[]), new Set(Object.keys(properties)))
+      Object.values(properties).forEach(check)
+    }
+    if (schema.items) check(schema.items as Record<string, unknown>)
+    if (schema.anyOf) (schema.anyOf as Record<string, unknown>[]).forEach(check)
+    assert.equal(schema.uniqueItems, undefined, '跨元素唯一性由本地业务门禁核验')
+  }
+  check(CANDIDATE_RESPONSE_SCHEMA); check(GENERATION_REVIEW_SCHEMA)
+})
+
 test('生成复用唯一文件 schema/CAS/scope，评审独立读取完整候选、源码与真实断言，仍不表示运行/交付', async t => {
   const source = await input(t); const native = runner(source); const events: string[] = []
   const index = readFileSync(join(source.root, '.git/index'))
@@ -52,7 +68,7 @@ test('生成复用唯一文件 schema/CAS/scope，评审独立读取完整候选
   const result = await runGeneration(source, { runner: native.run, onDispatch: async request => { events.push(`planned:${request.purpose}`) }, validateCandidate: async candidate => { events.push('hard-gate'); assert.equal(candidate.sourceInputId, source.snapshot.id); return [{ severity: 'warning', code: 'diagnostic', nodeId: 'export-contract', path: contractPath, message: '非阻断诊断' }] } })
   assert.equal(result.status, 'reviewed'); assert.equal(result.reviewPassed, true); assert.equal(result.candidateValidated, true)
   assert.equal(result.runtimeVerification, 'not_run'); assert.equal(result.delivery, 'not_applied')
-  assert.deepEqual(native.calls[0].schema, CANDIDATE_CHANGES_SCHEMA)
+  assert.deepEqual(native.calls[0].schema, CANDIDATE_RESPONSE_SCHEMA)
   assert.deepEqual(events, ['planned:code_generate', 'hard-gate', 'planned:code_review'])
   assert.deepEqual(native.calls.map(call => call.requestKey), ['operation-1:attempt-1:code_generate', 'operation-1:attempt-1:code_review'])
   assert.notEqual(result.traces[0].sessionId, result.traces[1].sessionId); assert.notEqual(result.traces[0].threadId, result.traces[1].threadId)
@@ -68,12 +84,13 @@ test('生成复用唯一文件 schema/CAS/scope，评审独立读取完整候选
 
 test('注入 runner 也不能绕过生成 schema、CAS 或越界，失败不进入硬门禁/评审', async t => {
   const source = await input(t)
-  for (const variant of ['schema', 'cas', 'scope']) {
+  for (const variant of ['schema', 'cas', 'scope', 'mode']) {
     const native = runner(source, () => {
-      const output = changes(source) as { changes: { path: string; beforeDigest: string | null; beforeMode: string | null }[] }
+      const output = changes(source) as { changes: { path: string; beforeDigest: string | null; beforeMode: string | null; mode?: string | null }[] }
       if (variant === 'schema') return { summary: '全部已通过' }
       if (variant === 'cas') output.changes[0].beforeDigest = '0'.repeat(64)
       if (variant === 'scope') { output.changes[0].path = 'outside.js'; output.changes[0].beforeDigest = null; output.changes[0].beforeMode = null }
+      if (variant === 'mode') delete output.changes[0].mode
       return output
     })
     const result = await runGeneration(source, { runner: native.run, validateCandidate: async () => assert.fail('无效候选不能进硬门禁') })
@@ -137,7 +154,7 @@ test('manifest/files与实际snapshot或composed tree绑定，磁盘变化和输
     if (request.purpose === 'code_generate') {
       const output = changes(composedInput) as CandidateChanges
       const specEntry = entries.find(item => item.path === contractPath)!
-      output.changes.push({ path: contractPath, beforeDigest: specEntry.digest, beforeMode: specEntry.mode, content: desiredSpec })
+      output.changes.push({ path: contractPath, beforeDigest: specEntry.digest, beforeMode: specEntry.mode, mode: null, content: desiredSpec })
       ;(composedInput.readyIds as string[]).push('REQ-MUTATED-01'); composedInput.policy.digest = 'mutated-policy'; composedInput.files.set('tests/export.test.mjs', 'erased assertions')
       writeFileSync(join(source.root, 'src/export.js'), 'live disk unrelated change')
       const generated = { sessionId: 'generation', threadId: 'generation-thread', turnId: 'turn-1', output, resultDigest: contentHash(JSON.stringify(output)) }
@@ -179,7 +196,7 @@ test('允许文件scope冻结且native摘要仍需真实匹配，硬门禁中取
   const scoped = { ...source, allowedScope: { ...source.allowedScope, paths: ['src'] } }
   const escaped = await runGeneration(scoped, { runner: async () => {
     scoped.allowedScope.paths.push('outside.js')
-    const output = { version: 'sync-files-v1', changes: [{ path: 'outside.js', beforeDigest: null, beforeMode: null, content: 'escape' }] }
+    const output = { version: 'sync-files-v1', changes: [{ path: 'outside.js', beforeDigest: null, beforeMode: null, mode: null, content: 'escape' }] }
     return { sessionId: 'generation', threadId: 'generation-thread', turnId: 'turn-1', output, resultDigest: contentHash(JSON.stringify(output)) }
   }, validateCandidate: async () => assert.fail('冻结scope不允许越界') })
   assert.equal(escaped.status, 'repair'); assert.match(escaped.failure!.message, /越界/)
@@ -219,7 +236,7 @@ test('不能省略契约测试断言，不能改没读取的既有文件', async
   writeFileSync(join(source.root, 'unread.txt'), 'unchanged context\n')
   const snapshot = await captureInputSnapshot(source.root), entries = readTree(snapshot.source.commonDir, snapshot.immutableTree), entry = entries.find(entry => entry.path === 'unread.txt')!
   const updated = { ...source, snapshot, manifest: { version: 1 as const, entries }, allowedScope: { ...source.allowedScope, paths: [...source.allowedScope.paths, 'unread.txt'] } }
-  const blind = runner(updated, () => ({ version: 'sync-files-v1', changes: [{ path: entry.path, beforeDigest: entry.digest, beforeMode: entry.mode, content: 'blind overwrite\n' }] }))
+  const blind = runner(updated, () => ({ version: 'sync-files-v1', changes: [{ path: entry.path, beforeDigest: entry.digest, beforeMode: entry.mode, mode: null, content: 'blind overwrite\n' }] }))
   const rejected = await runGeneration(updated, { runner: blind.run, validateCandidate: async () => assert.fail('盲改不能进入硬门禁') })
   assert.equal(rejected.status, 'repair'); assert.match(rejected.failure!.message, /未完整读取/); assert.equal(blind.calls.length, 1)
 })
