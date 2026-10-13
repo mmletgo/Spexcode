@@ -63,3 +63,5 @@ coloured on a light theme; the mistake is cheap to avoid at the start and awkwar
 extension as a separate chunk, so opening a plain-text file never pays for a parser, and an unrecognised
 extension simply reads unhighlighted. Bytes appearing is the contract; colour is an improvement on it, so a
 language that fails to load must never block the file from showing.
+
+源码选择的 surface identity 包含 targetTree 和文件路径。同路径的 main 与交付文件同时阅读时，不覆盖或清除另一树的选择。

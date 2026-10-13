@@ -64,6 +64,7 @@ export default {
 
   // the left navigation rail ([[side-nav]]) — one label per top-level page
   specView: {
+    deliveryTree: 'Delivery worktree · {name} · Read only', treeReadFailed: 'Delivery worktree read failed: {error}',
     missing: 'no such node: {id}',
     pendingChanges: ({ n }) => `${n} pending change${n === 1 ? '' : 's'}`,
     changeOpen: 'show the pending change',

@@ -1,4 +1,6 @@
-import { createContext, useContext, useMemo, useRef, useState } from 'react'
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react'
+import { apiFetch, readScopeUrl } from './data.js'
+import { useT } from './i18n/index.jsx'
 import { scopedKey } from './project.js'
 
 // [[workspace-shell]]'s two contexts. Every context in this app is split the same way and for the same
@@ -26,6 +28,33 @@ export function BoardProvider({ value, reload, children }) {
 // happened to render it — which is what let one component end up owning every page's props.
 export const useBoard = () => useContext(BoardState) || {}
 export const useBoardApi = () => useContext(BoardApi) || {}
+
+// Delivery documents read the actual registered tree, never main's graph overlays. Each host owns its
+// request; hiding it pauses refreshes and an invalid tree replaces its content with a visible failure.
+export function ReadScopeProvider({ targetTree = null, active = true, children }) {
+  const board = useBoard()
+  const t = useT()
+  const [held, setHeld] = useState(null)
+  const revision = board.contentRevision || 0
+  useEffect(() => {
+    if (!targetTree || !active) return undefined
+    let live = true
+    apiFetch(readScopeUrl('/api/specs', targetTree), { cache: 'no-store' }).then(async (response) => {
+      const body = await response.json()
+      if (!response.ok) throw new Error(body.error || `${response.status} ${response.statusText}`)
+      if (live) setHeld((previous) => ({ targetTree, specs: body, error: null, revision: (previous?.revision || 0) + 1 }))
+    }).catch((error) => { if (live) setHeld({ targetTree, specs: [], error: error.message }) })
+    return () => { live = false }
+  }, [targetTree, revision, active])
+  const current = held?.targetTree === targetTree ? held : null
+  const value = useMemo(() => targetTree ? {
+    ...board, specs: current?.specs || [], targetTree, contentRevision: `${revision}/${current?.revision || 0}`,
+  } : board, [board, targetTree, current, revision])
+  if (!targetTree) return children
+  if (!current) return active ? <div className="doc-empty" role="status">{t('hud.loading')}</div> : null
+  if (current.error) return <div className="doc-empty" role="alert">{t('specView.treeReadFailed', { error: current.error })}</div>
+  return <BoardState.Provider value={value}>{children}</BoardState.Provider>
+}
 
 // ---------------------------------------------------------------------------------------------------
 

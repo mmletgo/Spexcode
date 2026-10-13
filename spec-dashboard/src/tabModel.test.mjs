@@ -380,3 +380,27 @@ test('the retired one-strip and held-slot shapes migrate into the tree', () => {
   assert.deepEqual(groupKeys(held.root), [['#/file/a'], ['#/sessions/s1']])
   assert.equal(held.focus, groupsOf(held.root)[0].id, 'a focus naming no group falls back to the first')
 })
+
+test('delivery trees separate documents while version and diff remain faces within that tree', () => {
+  const main = specDocument('same-id')
+  const delivery = { ...main, query: { targetTree: '/repo/delivery a' } }
+  const version = { ...delivery, query: { targetTree: '/repo/delivery a', version: 'abc', surface: 'diff' } }
+  assert.notEqual(tabKey(main), tabKey(delivery))
+  assert.equal(tabKey(delivery), tabKey(version))
+  const tabs = placeTab([main], delivery, 'append', tabKey(main))
+  assert.equal(tabs.length, 2)
+  const updated = placeTab(tabs, version, 'append', tabKey(main))
+  assert.equal(updated.length, 2)
+  assert.deepEqual(updated[0], main)
+  assert.deepEqual(updated[1], version)
+  assert.equal(normalizeTabs([main, delivery, version]).length, 2)
+})
+
+test('two same-id documents from different trees can occupy separate workspace groups', () => {
+  const canonical = specDocument('same-id')
+  const delivery = { ...canonical, query: { targetTree: '/repo/delivery' } }
+  const canonicalGroup = { type: 'group', id: 'main', tabs: [canonical], active: tabKey(canonical) }
+  const deliveryGroup = { type: 'group', id: 'delivery', tabs: [delivery], active: tabKey(delivery) }
+  assert.notEqual(canonicalGroup.active, deliveryGroup.active)
+  assert.deepEqual(normalizeTabs([...canonicalGroup.tabs, ...deliveryGroup.tabs]), [canonical, delivery])
+})

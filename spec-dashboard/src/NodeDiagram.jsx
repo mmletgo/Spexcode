@@ -12,7 +12,7 @@ export default function NodeDiagram({ nodeId, diagram }) {
   const t = useT()
   const box = useRef(null)
   const instance = useId().replace(/[^\w-]/g, '')
-  const { specs } = useBoard()
+  const { specs, targetTree } = useBoard()
   const children = useMemo(() => new Set((specs || []).filter((s) => s.parent === nodeId).map((s) => s.id)), [specs, nodeId])
   // A popup and a background document can hold the same diagram at once; scoping the ids keeps each copy's
   // arrowheads its own.
@@ -26,7 +26,7 @@ export default function NodeDiagram({ nodeId, diagram }) {
     const onKeyDown = (event) => { if (event.key === 'Enter') focusDiagram(el, idOf(event)) }
     const onDoubleClick = (event) => {
       const id = idOf(event)
-      if (id && children.has(id)) navigate('spec', id)
+      if (id && children.has(id)) navigate('spec', id, { query: targetTree ? { targetTree } : null })
     }
     el.addEventListener('click', onClick)
     el.addEventListener('keydown', onKeyDown)
@@ -36,7 +36,7 @@ export default function NodeDiagram({ nodeId, diagram }) {
       el.removeEventListener('keydown', onKeyDown)
       el.removeEventListener('dblclick', onDoubleClick)
     }
-  }, [svg, children])
+  }, [svg, children, targetTree])
 
   if (!diagram) return null
   if (diagram.error) {

@@ -681,6 +681,7 @@ body.is-resizing .ft-resize::after, body.is-resizing .ctx-resize::after, body.is
 .specview-prose .pane-doc { padding: 18px 22px 28px; }
 
 /* [[file-view]] — a governed file addressed on its own. */
+.read-tree { margin: 0; padding: 8px 22px; border-bottom: 1px solid var(--line); font-size: var(--type-meta); color: var(--muted); overflow-wrap: anywhere; }
 .fileview { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .fileview .srcview { flex: 1; min-height: 0; margin: 0; border: 0; border-radius: 0; display: flex; flex-direction: column; }
 .fileview .srcview-body { height: auto; flex: 1; min-height: 0; }

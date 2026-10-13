@@ -63,6 +63,7 @@ export default {
 
   // 左侧导航栏（[[side-nav]]）——每个顶层页面一个标签
   specView: {
+    deliveryTree: '交付工作树 · {name} · 只读', treeReadFailed: '交付工作树读取失败：{error}',
     missing: '没有这个节点：{id}',
     pendingChanges: ({ n }) => `${n} 处进行中的改动`,
     changeOpen: '查看进行中的改动',

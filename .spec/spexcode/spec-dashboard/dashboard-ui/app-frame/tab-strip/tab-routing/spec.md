@@ -3,6 +3,8 @@ title: tab-routing
 status: active
 hue: 215
 desc: Workspace tab identity, placement, focus, and explicit new-tab gestures.
+code:
+  - spec-dashboard/src/tabModel.js
 related:
   - spec-dashboard/src/tabs.js
   - spec-dashboard/src/tabModel.js
@@ -23,7 +25,7 @@ resident page identity, while their selected detail remains in the URL. A spec n
 document, addressed by its own id exactly as a file is addressed by its path, so a gesture can open a second spec
 beside the one being read. A spec's pending-change face (`?surface=diff`) and its past-version faces
 (`?version=<hash>`, with or without `surface=diff`, [[spec-view]]) are faces of that document, the way a
-session's diff face is, so the query stays out of its identity: reading an old version replaces the address in
+session's diff face is, so surface and version stay out of its identity: reading an old version replaces the address in
 the same tab rather than minting one. Browsing the graph still holds one Spec tab, by the same focused-same-kind replacement
 every document gets, not by collapsing two specs into one identity. Graph, bare Sessions, New Session, and empty
 workspace routes are not documents and never enter the strip.
@@ -53,3 +55,5 @@ retain browser behavior; ctrl/command-click, palette ctrl/command-Enter, and the
 an address in a new tab. Double-click has no tab meaning: its first click already navigated. The Sessions view
 writes through its `ViewScope`; the shared tab store observes the resulting route and applies placement exactly
 once, naming the tab that was focused before the route changed.
+
+`targetTree` 是 Spec 的树身份而非文档面：同节点在 main 和不同交付树拥有不同标签页身份，显式新增标签或分屏可同时阅读。持久布局不会将它们去重；只有同树的 surface/version 切换复用同一标签。文件地址也保留 targetTree。

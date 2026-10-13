@@ -319,3 +319,5 @@ Measured with two live spec documents open: 0.02 seconds of script per 10 idle s
 **The palette is the shell's**, not a view's, because it floats above whichever view is showing; a hidden
 view must never be able to swallow it. The dock toggle and the project identity are the shell's for the
 same reason: they are true of the window, not of what it currently displays.
+
+交付工作树的 `targetTree` 属于文档身份。挂载池以树和节点区分，同 id 的 main 与交付文档可以同时保留；surface/version 仍只切换同一文档的面。每个阅读宿主从 [[delivery-read-scope]] 取得所选树的真实节点，不能将另一树节点冒充 main 图谱。

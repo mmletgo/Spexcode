@@ -34,7 +34,8 @@ const CHANGE_SURFACE = 'diff'
 function VersionFace({ node, hash, changeFace, onFace }) {
   const t = useT()
   const version = useSpecVersion(node.id, hash)
-  const current = routeHash('spec', node.id)
+  const { targetTree } = useBoard()
+  const current = routeHash('spec', node.id, targetTree ? { targetTree } : null)
   const back = (
     <a className="stat-back" href={current} onClick={(event) => newTabAnchor(event, current)}>
       <Icon name="corner-up-left" size={12} />{t('specView.versionBack', { n: node.version || 0 })}
@@ -71,7 +72,7 @@ function VersionFace({ node, hash, changeFace, onFace }) {
 
 export default function SpecView({ param, query }) {
   const t = useT()
-  const { specs, sessions, graphOnly, contentRevision = 0 } = useBoard()
+  const { specs, sessions, graphOnly, contentRevision = 0, targetTree = null } = useBoard()
   const scope = useViewScope()
   const active = usePaneActive()
   const node = useMemo(() => specs?.find((s) => s.id === param), [specs, param])
@@ -85,7 +86,7 @@ export default function SpecView({ param, query }) {
   // A past version always has a change to show, so its toggle is always there.
   const toggleable = !!node && !node.ghost && (!!version || pending > 0 || asked)
   const openFace = (change) => {
-    const face = { ...(version ? { version } : {}), ...(change ? { surface: CHANGE_SURFACE } : {}) }
+    const face = { ...(targetTree ? { targetTree } : {}), ...(version ? { version } : {}), ...(change ? { surface: CHANGE_SURFACE } : {}) }
     scope.open({ page: 'spec', param, query: Object.keys(face).length ? face : null }, { replace: true })
   }
   const toggle = () => openFace(!asked)
@@ -96,13 +97,14 @@ export default function SpecView({ param, query }) {
     id: 'change-switcher', icon: 'git-compare', priority: 79, pressed: asked, label: toggleLabel, onClick: toggle,
   } : null)
 
-  if (!specs?.length) return <div className="doc-empty">{t('hud.loading')}</div>
+  if (!specs) return <div className="doc-empty">{t('hud.loading')}</div>
   if (!node) return <div className="doc-empty">{t('specView.missing', { id: param })}</div>
 
   if (version) {
     return (
       <div className="specview">
         <div className="specview-prose">
+          {targetTree && <p className="read-tree" data-read-tree={targetTree} title={targetTree}>{t('specView.deliveryTree', { name: targetTree.split('/').filter(Boolean).at(-1) })}</p>}
           <VersionFace node={node} hash={version} changeFace={asked} onFace={(face) => openFace(face === 'change')} />
         </div>
       </div>
@@ -119,12 +121,13 @@ export default function SpecView({ param, query }) {
   return (
     <div className="specview">
       <div className="specview-prose" ref={proseRef}>
+        {targetTree && <p className="read-tree" data-read-tree={targetTree} title={targetTree}>{t('specView.deliveryTree', { name: targetTree.split('/').filter(Boolean).at(-1) })}</p>}
         <SpecPane node={node} stat={stat}>{changeFace ? <PendingChanges node={node} sessions={sessions} /> : null}</SpecPane>
-        {!changeFace && !graphOnly && node.contractSchema && <SyncContractPanel key={node.id} nodeId={node.id} enabled={active} stamp={`${node.version}/${contentRevision}`} />}
+        {!changeFace && !graphOnly && node.contractSchema && <SyncContractPanel key={`${targetTree || ''}/${node.id}`} nodeId={node.id} targetTree={targetTree} enabled={active} stamp={`${node.version}/${contentRevision}`} />}
         {/* the prose pane's selection layer ([[prose-dispatch]]) — pure z-layers over the reading column,
             so the document's own geometry is exactly what it was without it. Its line addressing is the
             prose's, so the change face carries none. */}
-        {!changeFace && <ProseActions node={node} hostRef={proseRef} openSend={query?.send === '1'} />}
+        {!changeFace && !targetTree && <ProseActions node={node} hostRef={proseRef} openSend={query?.send === '1'} />}
       </div>
     </div>
   )

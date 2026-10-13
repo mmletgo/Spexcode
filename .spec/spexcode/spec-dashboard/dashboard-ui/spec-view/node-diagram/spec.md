@@ -43,3 +43,5 @@ text in the slot the picture would take — never markup from the payload, and n
 
 The dashboard takes from `@spexcode/archify` only its browser half — the stylesheet and the browser module —
 and the dependency test fails if a dashboard source imports the renderer itself.
+
+交付树图表的子节点双击继续携带当前 targetTree；子节点成员从同一真实树节点清单判定。
