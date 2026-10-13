@@ -1,5 +1,6 @@
-import { closeSync, fchmodSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, symlinkSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs'
-import { dirname, join, posix } from 'node:path'
+import { randomUUID } from 'node:crypto'
+import { closeSync, fchmodSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, symlinkSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs'
+import { dirname, join, posix, resolve, sep } from 'node:path'
 import type { ApplyFilePlan, ApplyPlan, BlobRef, InputSnapshot, SyncAttempt, SyncOperation, WorktreeIdentity, WriteFence } from './operation-types.js'
 import type { SyncStore } from './store.js'
 import { actualTreeDiff, verifyCandidate } from './candidate.js'
@@ -57,21 +58,30 @@ function validateSourceLinks(attempt: SyncAttempt, files: ApplyFilePlan[], commo
   }
   return resolved
 }
+export type ApplyStagingIdentity = { rootDirectory: string; directory: string; physicalFingerprint: string; journalId: string; attemptId: string }
 export type ApplyFilesOptions = {
+  stagingDirectory: string
   /** 调用者必须用实际所有权记录/执行隔离保证独占，回调不得仅检查短暂无事件。 */
-  assertExclusivePrivateDelivery: (target: WorktreeIdentity) => void | Promise<void>
+  assertExclusivePrivateDelivery: (target: WorktreeIdentity, staging: ApplyStagingIdentity) => void | Promise<void>
+  afterStagingFileOpen?: (path: string, fd: number) => void
   afterFileWrite?: (path: string) => void | Promise<void>
   afterStepRecord?: (path: string) => void | Promise<void>
 }
 type ApplyStore = Pick<SyncStore, 'readJournal' | 'readOperation' | 'readAttempt' | 'recordApplyStep' | 'recordFailure'>
 type DiskEntry = { kind: 'missing' | 'directory' | 'file' | 'symlink'; digest: string | null; mode: string | null }
-function diskEntry(root: string, path: string, planned: ApplyFilePlan[]): DiskEntry {
+function diskEntry(root: string, path: string, planned: ApplyFilePlan[], candidate: TreeEntry[]): DiskEntry {
   const pieces = path.split('/')
   for (let count = 1; count < pieces.length; count++) {
     const parent = pieces.slice(0, count).join('/')
     let stat
     try { stat = lstatSync(join(root, parent)) } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { kind: 'missing', digest: null, mode: null }; throw error }
-    if (stat.isSymbolicLink()) fail('SYNC_APPLY_PARENT_SYMLINK', parent)
+    if (stat.isSymbolicLink()) {
+      const ancestor = planned.find(file => file.path === parent), digest = contentHash(readlinkSync(join(root, parent), { encoding: 'buffer' }))
+      const deletablePreimage = ancestor?.preMode === '120000' && ancestor.postDigest === null && ancestor.preDigest === digest
+      const appliedPostimage = ancestor?.postMode === '120000' && ancestor.postDigest === digest && !candidate.some(entry => entry.path === path || entry.path.startsWith(`${path}/`))
+      if (deletablePreimage || appliedPostimage) return { kind: 'missing', digest: null, mode: null }
+      fail('SYNC_APPLY_PARENT_SYMLINK', parent)
+    }
     if (!stat.isDirectory()) {
       if (planned.some(file => file.path === parent)) return { kind: 'missing', digest: null, mode: null }
       fail('SYNC_APPLY_PARENT_CONFLICT', parent)
@@ -81,7 +91,7 @@ function diskEntry(root: string, path: string, planned: ApplyFilePlan[]): DiskEn
   try { stat = lstatSync(join(root, path)) } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { kind: 'missing', digest: null, mode: null }; throw error }
   if (stat.isDirectory()) return { kind: 'directory', digest: null, mode: null }
   if (!stat.isFile() && !stat.isSymbolicLink()) fail('SYNC_APPLY_FILE_UNSUPPORTED', path)
-  const bytes = stat.isSymbolicLink() ? Buffer.from(readlinkSync(join(root, path))) : readFileSync(join(root, path))
+  const bytes = stat.isSymbolicLink() ? readlinkSync(join(root, path), { encoding: 'buffer' }) : readFileSync(join(root, path))
   return { kind: stat.isSymbolicLink() ? 'symlink' : 'file', digest: contentHash(bytes), mode: stat.isSymbolicLink() ? '120000' : stat.mode & 0o111 ? '100755' : '100644' }
 }
 function matches(state: DiskEntry, digest: string | null, mode: string | null, path: string, tree: TreeEntry[]): boolean {
@@ -103,22 +113,23 @@ function removeEmptyDirectories(path: string): void {
   for (const name of readdirSync(path)) { const child = join(path, name), stat = lstatSync(child); if (!stat.isDirectory() || stat.isSymbolicLink()) fail('SYNC_APPLY_DIRECTORY_CONFLICT', path); removeEmptyDirectories(child) }
   rmdirSync(path); syncDirectory(dirname(path))
 }
-function replaceFile(root: string, file: ApplyFilePlan, entry: TreeEntry, commonDir: string, journalId: string): void {
-  const absolute = join(root, file.path), temporary = join(dirname(absolute), `.spex-sync-${journalId}-${contentHash(file.path).slice(0, 16)}.tmp`)
+function stagingIdentity(directory: string, rootDirectory: string, journalId: string, attemptId: string): ApplyStagingIdentity {
+  const stat = lstatSync(directory, { bigint: true })
+  if (!stat.isDirectory() || stat.isSymbolicLink() || directory !== resolve(directory) || realpathSync(directory) !== directory) fail('SYNC_APPLY_STAGING_INVALID', directory)
+  return { rootDirectory, directory, physicalFingerprint: contentHash(`${stat.dev}:${stat.ino}:${stat.birthtimeNs}`), journalId, attemptId }
+}
+function replaceFile(root: string, file: ApplyFilePlan, entry: TreeEntry, commonDir: string, staging: string, options: ApplyFilesOptions): void {
+  const absolute = join(root, file.path), temporary = join(staging, `${randomUUID()}.tmp`)
   ensureParents(root, file.path)
   try { if (lstatSync(absolute).isDirectory()) removeEmptyDirectories(absolute) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
   const bytes = readObject(commonDir, entry.oid)
-  if (entry.mode === '120000') {
-    try { const stat = lstatSync(temporary); if (!stat.isSymbolicLink() || contentHash(Buffer.from(readlinkSync(temporary))) !== file.postDigest) fail('SYNC_APPLY_TEMP_CONFLICT', file.path) }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; symlinkSync(bytes.toString(), temporary) }
-    renameSync(temporary, absolute); syncDirectory(dirname(absolute)); return
+  if (entry.mode === '120000') symlinkSync(bytes.toString(), temporary)
+  else {
+    const fd = openSync(temporary, 'wx', 0o600)
+    try { options.afterStagingFileOpen?.(temporary, fd); writeFileSync(fd, bytes); fchmodSync(fd, file.postMode === '100755' ? 0o755 : 0o644); fsyncSync(fd) } finally { closeSync(fd) }
   }
-  let exists = false
-  try { const stat = lstatSync(temporary); if (!stat.isFile() || stat.isSymbolicLink() || contentHash(readFileSync(temporary)) !== file.postDigest) fail('SYNC_APPLY_TEMP_CONFLICT', file.path); exists = true }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
-  const fd = openSync(temporary, exists ? 'r+' : 'wx', 0o600)
-  try { if (!exists) writeFileSync(fd, bytes); fchmodSync(fd, file.postMode === '100755' ? 0o755 : 0o644); fsyncSync(fd) } finally { closeSync(fd) }
-  renameSync(temporary, absolute); syncDirectory(dirname(absolute))
+  syncDirectory(staging)
+  renameSync(temporary, absolute); syncDirectory(dirname(absolute)); syncDirectory(staging)
 }
 
 /** 仅完成已登记 journal 的私有逐文件单元；恢复保留第三方值，不自行提交、公开或结算 receipt。 */
@@ -135,37 +146,49 @@ export async function applyJournalFiles(store: ApplyStore, fence: WriteFence, jo
     if (plan.files.some(file => !pathCovered(validateRepositoryPath(file.path), attempt.verification!.coveredScope.paths))) fail('SYNC_APPLY_SCOPE', '差量超出实际验证范围')
     const linkTargets = validateSourceLinks(attempt, plan.files, commonDir, plan.target.canonicalRoot)
     const root = plan.target.canonicalRoot, postEntries = new Map(after.map(entry => [entry.path, entry]))
-    const assertAuthority = async (): Promise<void> => { await options.assertExclusivePrivateDelivery(plan.target); if (!sameIdentity(identifyWorktree(root), plan.target)) fail('SYNC_APPLY_TARGET_REBUILT', root) }
-    await assertAuthority()
+    const stagingRoot = stagingIdentity(options.stagingDirectory, options.stagingDirectory, journalId, attempt.id)
+    if ([operation.input.source.canonicalRoot, root].some(path => stagingRoot.directory === path || stagingRoot.directory.startsWith(`${path}${sep}`)) || lstatSync(stagingRoot.directory, { bigint: true }).dev !== lstatSync(root, { bigint: true }).dev) fail('SYNC_APPLY_STAGING_INVALID', '暂存必须位于来源和交付树之外且与交付树同filesystem')
+    const assertAuthority = async (staging: ApplyStagingIdentity): Promise<void> => {
+      await options.assertExclusivePrivateDelivery(plan.target, staging)
+      if (!sameIdentity(identifyWorktree(root), plan.target)) fail('SYNC_APPLY_TARGET_REBUILT', root)
+      if (lstatSync(staging.directory, { bigint: true }).dev !== lstatSync(root, { bigint: true }).dev) fail('SYNC_APPLY_STAGING_INVALID', '当前暂存与目标不在同filesystem')
+      if (stagingIdentity(stagingRoot.directory, stagingRoot.directory, journalId, attempt.id).physicalFingerprint !== stagingRoot.physicalFingerprint || stagingIdentity(staging.directory, stagingRoot.directory, journalId, attempt.id).physicalFingerprint !== staging.physicalFingerprint) fail('SYNC_APPLY_STAGING_REBUILT', staging.directory)
+    }
+    await assertAuthority(stagingRoot)
+    // 每次重入创建新 namespace；从不采用已有目录/链接或重用中断残片。
+    const scratch = mkdtempSync(join(stagingRoot.directory, `journal-${contentHash(`${journalId}:${attempt.id}`).slice(0, 24)}-`))
+    syncDirectory(stagingRoot.directory)
+    const staging = stagingIdentity(scratch, stagingRoot.directory, journalId, attempt.id)
+    await assertAuthority(staging)
     // 先检查所有 pre/post，不写第一份文件后才发现后面的第三方值。
     for (const file of plan.files) {
-      const state = diskEntry(root, file.path, plan.files), completed = journal.steps.find(step => step.key === file.path)?.status === 'completed'
+      const state = diskEntry(root, file.path, plan.files, after), completed = journal.steps.find(step => step.key === file.path)?.status === 'completed'
       if (!matches(state, file.postDigest, file.postMode, file.path, after) && (completed || !matches(state, file.preDigest, file.preMode, file.path, before))) fail('SYNC_APPLY_THIRD_PARTY', file.path)
       if (state.kind === 'directory' && file.postDigest !== null && directoryFiles(root, file.path).some(path => !plan.files.some(change => change.path === path && change.postDigest === null))) fail('SYNC_APPLY_DIRECTORY_CONFLICT', file.path)
     }
     const ordered = [...plan.files].sort((a, b) => Number(a.postDigest !== null) - Number(b.postDigest !== null) || Number(a.postMode === '120000') - Number(b.postMode === '120000') || (a.postDigest === null ? b.path.split('/').length - a.path.split('/').length : a.path.split('/').length - b.path.split('/').length) || a.path.localeCompare(b.path))
     for (const file of ordered) {
-      await assertAuthority()
+      await assertAuthority(staging)
       const currentJournal = store.readJournal(journalId), step = currentJournal.steps.find(step => step.key === file.path)!
       // 写前由既有 finishing fence 检查 generation/租约；取消只停止后续阶段。
       store.recordApplyStep(fence, journalId, step)
-      const state = diskEntry(root, file.path, plan.files)
+      const state = diskEntry(root, file.path, plan.files, after)
       if (matches(state, file.postDigest, file.postMode, file.path, after)) replayedPaths.push(file.path)
       else {
         if (step.status === 'completed' || !matches(state, file.preDigest, file.preMode, file.path, before)) fail('SYNC_APPLY_THIRD_PARTY', file.path)
         if (file.postDigest === null) { unlinkSync(join(root, file.path)); syncDirectory(dirname(join(root, file.path))) }
-        else replaceFile(root, file, postEntries.get(file.path)!, commonDir, journalId)
+        else replaceFile(root, file, postEntries.get(file.path)!, commonDir, staging.directory, options)
         await options.afterFileWrite?.(file.path)
       }
-      await assertAuthority()
-      if (!matches(diskEntry(root, file.path, plan.files), file.postDigest, file.postMode, file.path, after)) fail('SYNC_APPLY_WRITE_MISMATCH', file.path)
+      await assertAuthority(staging)
+      if (!matches(diskEntry(root, file.path, plan.files, after), file.postDigest, file.postMode, file.path, after)) fail('SYNC_APPLY_WRITE_MISMATCH', file.path)
       if (step.status !== 'completed') {
         const evidenceRef = writeEvidence(commonDir, { version: 1, journalId, path: file.path, digest: file.postDigest, mode: file.postMode })
         evidenceRefs.push(evidenceRef); store.recordApplyStep(fence, journalId, { key: file.path, status: 'completed', evidenceRef })
         await options.afterStepRecord?.(file.path)
       } else if (step.evidenceRef) evidenceRefs.push(step.evidenceRef)
     }
-    await assertAuthority()
+    await assertAuthority(staging)
     for (const [path, resolved] of linkTargets) if (realpathSync(join(root, path)) !== join(root, resolved)) fail('SYNC_APPLY_LINK_TARGET', path)
     const snapshot = await captureInputSnapshot(root)
     if (snapshot.immutableTree !== attempt.candidate.tree || snapshot.indexDigest !== payload.currentTarget.indexDigest || snapshot.headCommit !== payload.currentTarget.headCommit) fail('SYNC_APPLY_TARGET_MISMATCH', '完整交付树、index或HEAD不匹配冻结计划')

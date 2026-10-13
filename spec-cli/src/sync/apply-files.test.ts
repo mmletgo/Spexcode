@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { execFileSync } from 'node:child_process'
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, dirname, join, relative } from 'node:path'
 import { openProtocol } from '@spexcode/session-protocol'
 import { migrateSyncStore } from './migrations.js'
 import { SyncStore } from './store.js'
-import { captureInputSnapshot, readEvidence, verifySnapshot, writeEvidence } from './snapshot.js'
+import { captureInputSnapshot, contentHash, readEvidence, verifySnapshot, writeEvidence } from './snapshot.js'
 import { composeInputSnapshots } from './composition.js'
 import { freezeCandidate } from './candidate.js'
 import { applyJournalFiles, prepareApplyPlan } from './apply-files.js'
@@ -22,13 +22,14 @@ async function fixture(t: test.TestContext, build?: (input: InputSnapshot) => Ca
   git(root, 'init', '-b', 'main'); git(root, 'config', 'user.email', 'apply@example.invalid'); git(root, 'config', 'user.name', 'apply fixture')
   writeFileSync(join(root, 'a.ts'), 'old-a\n'); writeFileSync(join(root, 'b.ts'), 'old-b\n'); mkdirSync(join(root, 'folder')); writeFileSync(join(root, 'folder/child.ts'), 'old-child\n'); symlinkSync('b.ts', join(root, 'unchanged-link'))
   git(root, 'add', '.'); git(root, 'commit', '-m', 'base')
-  const targetRoot = join(root, 'delivery'); git(root, 'worktree', 'add', '-b', 'private-delivery', targetRoot, 'HEAD'); writeFileSync(join(root, '.git/info/exclude'), 'delivery/\n')
+  const deliveryParent = realpathSync(mkdtempSync(join(tmpdir(), 'sync-private-delivery-'))), targetRoot = join(deliveryParent, 'worktree'), stagingDirectory = join(deliveryParent, 'staging')
+  mkdirSync(stagingDirectory, { mode: 0o700 }); git(root, 'worktree', 'add', '-b', 'private-delivery', targetRoot, 'HEAD')
   writeFileSync(join(root, 'a.ts'), 'source-staged\n'); git(root, 'add', 'a.ts'); writeFileSync(join(root, 'a.ts'), 'source-unstaged\n')
   mutateSource?.(root)
   const sourceIndex = readFileSync(join(root, '.git/index')), input = await captureInputSnapshot(root), target = await captureInputSnapshot(targetRoot), targetIndex = readFileSync(join(target.source.gitDir, 'index'))
   const coveredScope: SyncScope = { paths: ['a.ts', 'b.ts', 'folder', 'unchanged-link', 'new-link', 'chain-link'], contractIds: ['REQ-APPLY'], flowIds: ['FLOW-APPLY'] }
   const protocol = openProtocol(join(root, '.git/apply.sqlite'))
-  t.after(() => { protocol.close(); rmSync(root, { recursive: true, force: true }) })
+  t.after(() => { protocol.close(); rmSync(deliveryParent, { recursive: true, force: true }); rmSync(root, { recursive: true, force: true }) })
   await migrateSyncStore(protocol, { backupPath: join(root, '.git/apply.backup') })
   const commonDir = input.source.commonDir, store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) })
   const operation = store.admitAndEnqueue({ ingressKey: input.id, rootCauseId: 'fixture', origin: 'combined', input, scope: coveredScope, budget: { maxAttempts: 3, maxCalls: 6, maxRepairs: 2, timeoutMs: 1000000 }, delivery: target.source, deliveryPlan: { canonicalRoot: target.source.canonicalRoot, branch: target.source.branch, baseCommit: target.headCommit }, policyDigest: 'policy', impactDigest: 'impact', readSetDigest: 'read' })
@@ -44,8 +45,18 @@ async function fixture(t: test.TestContext, build?: (input: InputSnapshot) => Ca
   store.recordVerification(claimed.fence, verification)
   const plan = prepareApplyPlan(store.readOperation(operation.id), store.readAttempt(claimed.attempt.id), target), journal = store.beginApply(claimed.fence, plan, target)
   let authorityChecks = 0
-  const options: ApplyFilesOptions = { assertExclusivePrivateDelivery: identity => { assert.equal(identity.canonicalRoot, target.source.canonicalRoot); assert.equal(identity.physicalFingerprint, target.source.physicalFingerprint); authorityChecks++ } }
-  return { root, targetRoot: target.source.canonicalRoot, input, target, sourceIndex, targetIndex, store, operation, claimed, candidate, plan, journal, options, checks: () => authorityChecks }
+  const ownerPath = join(deliveryParent, 'owner.json'), rootStat = lstatSync(stagingDirectory, { bigint: true })
+  writeFileSync(ownerPath, JSON.stringify({ target: target.source, stagingDirectory, stagingFingerprint: contentHash(`${rootStat.dev}:${rootStat.ino}:${rootStat.birthtimeNs}`), journalId: journal.id, attemptId: claimed.attempt.id }))
+  const options: ApplyFilesOptions = { stagingDirectory, assertExclusivePrivateDelivery: (identity, staging) => {
+    const owner = JSON.parse(readFileSync(ownerPath, 'utf8'))
+    assert.equal(identity.canonicalRoot, owner.target.canonicalRoot); assert.equal(identity.physicalFingerprint, owner.target.physicalFingerprint)
+    assert.equal(staging.rootDirectory, owner.stagingDirectory); assert.equal(staging.journalId, owner.journalId); assert.equal(staging.attemptId, owner.attemptId)
+    assert.ok(staging.directory === owner.stagingDirectory || dirname(staging.directory) === owner.stagingDirectory && basename(staging.directory).startsWith(`journal-${contentHash(`${journal.id}:${claimed.attempt.id}`).slice(0, 24)}-`))
+    const stat = lstatSync(staging.directory, { bigint: true }); assert.equal(stat.isSymbolicLink(), false); assert.equal(staging.physicalFingerprint, contentHash(`${stat.dev}:${stat.ino}:${stat.birthtimeNs}`))
+    if (staging.directory === owner.stagingDirectory) assert.equal(staging.physicalFingerprint, owner.stagingFingerprint)
+    authorityChecks++
+  } }
+  return { root, targetRoot: target.source.canonicalRoot, input, target, sourceIndex, targetIndex, store, operation, claimed, candidate, plan, journal, options, stagingDirectory, ownerPath, checks: () => authorityChecks }
 }
 
 test('写后checkpoint故障由真实journal恢复postimage，已完成文件不重复改，source/index不变', async t => {
@@ -106,7 +117,7 @@ test('无变更计划返回真实完整snapshot；所有权/原source/验证范�
   const f = await fixture(t, input => ({ version: 'sync-files-v1', changes: [change(input, 'a.ts', 'old-a\n')] }))
   assert.deepEqual(f.plan.files, [])
   assert.equal((await applyJournalFiles(f.store, f.claimed.fence, f.journal.id, f.options)).snapshot.immutableTree, f.candidate.tree)
-  await assert.rejects(applyJournalFiles(f.store, f.claimed.fence, f.journal.id, { assertExclusivePrivateDelivery: () => { throw new Error('not exclusively owned') } }), /not exclusively/)
+  await assert.rejects(applyJournalFiles(f.store, f.claimed.fence, f.journal.id, { ...f.options, assertExclusivePrivateDelivery: () => { throw new Error('not exclusively owned') } }), /not exclusively/)
   const op = f.store.readOperation(f.operation.id), attempt = f.store.readAttempt(f.claimed.attempt.id)
   assert.throws(() => prepareApplyPlan({ ...op, delivery: f.input.source }, { ...attempt, status: 'verified' }, f.input), /PRIVATE_DELIVERY/)
   // 执行期失败状态不伪装ready；计划生成单独验证差量超出已验证路径。
@@ -133,4 +144,73 @@ test('模型新增链接、外部链接目标与循环链接拒绝；第三方li
   symlinkSync('a.ts', join(source.targetRoot, 'new-link'))
   await assert.rejects(applyJournalFiles(source.store, source.claimed.fence, source.journal.id, source.options), /SYNC_APPLY_THIRD_PARTY/)
   assert.equal(readFileSync(join(source.targetRoot, 'new-link'), 'utf8'), 'old-a\n')
+})
+
+
+test('目录替换安全来源链接后receipt前重入，旧子文件删除可重放而不跟随链接', async t => {
+  const f = await fixture(t, undefined, root => { rmSync(join(root, 'folder'), { recursive: true }); symlinkSync('b.ts', join(root, 'folder')) })
+  const first = await applyJournalFiles(f.store, f.claimed.fence, f.journal.id, f.options)
+  const stat = lstatSync(join(f.targetRoot, 'folder'), { bigint: true })
+  const replay = await applyJournalFiles(f.store, f.claimed.fence, f.journal.id, f.options)
+  assert.equal(first.snapshot.immutableTree, f.candidate.tree); assert.equal(replay.snapshot.immutableTree, f.candidate.tree); assert.equal(lstatSync(join(f.targetRoot, 'folder'), { bigint: true }).ino, stat.ino)
+})
+
+test('来源链接替换目录首次预检与重复恢复不跟随应删preimage链接', async t => {
+  const f = await fixture(t, undefined, root => { rmSync(join(root, 'unchanged-link')); mkdirSync(join(root, 'unchanged-link')); writeFileSync(join(root, 'unchanged-link/child.ts'), 'source child\n') })
+  assert.equal((await applyJournalFiles(f.store, f.claimed.fence, f.journal.id, f.options)).snapshot.immutableTree, f.candidate.tree)
+  assert.equal((await applyJournalFiles(f.store, f.claimed.fence, f.journal.id, f.options)).snapshot.immutableTree, f.candidate.tree)
+})
+
+for (const bytesWritten of [0, 3]) {
+  test(`真实应用子进程暂存${bytesWritten}bytes后SIGKILL，保留残片并恢复同一journal`, async t => {
+    const f = await fixture(t)
+    const child = `
+      import assert from 'node:assert/strict';
+      import { readFileSync, lstatSync, writeSync, fsyncSync } from 'node:fs';
+      import { openProtocol } from '@spexcode/session-protocol';
+      import { SyncStore } from ${JSON.stringify(new URL('./store.ts', import.meta.url).href)};
+      import { applyJournalFiles } from ${JSON.stringify(new URL('./apply-files.ts', import.meta.url).href)};
+      import { readEvidence, contentHash } from ${JSON.stringify(new URL('./snapshot.ts', import.meta.url).href)};
+      const state = JSON.parse(readFileSync(0, 'utf8'));
+      const owner = JSON.parse(readFileSync(state.ownerPath, 'utf8'));
+      const protocol = openProtocol(state.dbPath);
+      const store = new SyncStore(protocol, { readBlob: ref => readEvidence(state.commonDir, ref) });
+      await applyJournalFiles(store, state.fence, state.journalId, {
+        stagingDirectory: state.stagingDirectory,
+        assertExclusivePrivateDelivery: (target, staging) => {
+          assert.equal(target.physicalFingerprint, owner.target.physicalFingerprint);
+          assert.equal(target.canonicalRoot, owner.target.canonicalRoot);
+          assert.equal(staging.rootDirectory, owner.stagingDirectory);
+          assert.equal(staging.journalId, owner.journalId); assert.equal(staging.attemptId, owner.attemptId);
+          const stat = lstatSync(staging.directory, { bigint: true });
+          assert.equal(staging.physicalFingerprint, contentHash(stat.dev+':'+stat.ino+':'+stat.birthtimeNs));
+        },
+        afterStagingFileOpen: (path, fd) => {
+          if (state.bytesWritten) writeSync(fd, Buffer.from('can'));
+          fsyncSync(fd); process.stdout.write(JSON.stringify({ path }));
+          process.kill(process.pid, 'SIGKILL');
+        }
+      });
+    `
+    const crashed = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', child], { input: JSON.stringify({ dbPath: join(f.root, '.git/apply.sqlite'), commonDir: f.input.source.commonDir, fence: f.claimed.fence, journalId: f.journal.id, stagingDirectory: f.stagingDirectory, ownerPath: f.ownerPath, bytesWritten }), encoding: 'utf8', timeout: 30000 })
+    assert.equal(crashed.signal, 'SIGKILL', crashed.stderr)
+    const temporary = (JSON.parse(crashed.stdout) as { path: string }).path, fragment = readFileSync(temporary)
+    assert.equal(fragment.length, bytesWritten); assert.equal(f.store.readJournal(f.journal.id).steps.find(step => step.key === 'a.ts')!.status, 'planned')
+    assert.equal(readFileSync(join(f.targetRoot, 'a.ts'), 'utf8'), 'old-a\n')
+    const result = await applyJournalFiles(f.store, f.claimed.fence, f.journal.id, f.options)
+    assert.equal(result.snapshot.immutableTree, f.candidate.tree); assert.deepEqual(readFileSync(temporary), fragment)
+    assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.sourceIndex); assert.deepEqual(readFileSync(join(f.target.source.gitDir, 'index')), f.targetIndex); assert.equal(readFileSync(join(f.root, 'a.ts'), 'utf8'), 'source-unstaged\n')
+    assert.ok(readdirSync(f.stagingDirectory).length >= 2); assert.equal(readdirSync(f.targetRoot).some(name => name.startsWith('.spex-sync-')), false)
+  })
+}
+
+test('暂存目录拒绝source/target内部与symlink，未知残片与其它namespace链接不采用或删除', async t => {
+  const f = await fixture(t)
+  for (const stagingDirectory of [f.targetRoot, f.root, relative(process.cwd(), f.stagingDirectory)]) await assert.rejects(applyJournalFiles(f.store, f.claimed.fence, f.journal.id, { ...f.options, stagingDirectory }), /SYNC_APPLY_STAGING_INVALID/)
+  const alias = join(dirname(f.stagingDirectory), 'alias'); symlinkSync(f.stagingDirectory, alias)
+  await assert.rejects(applyJournalFiles(f.store, f.claimed.fence, f.journal.id, { ...f.options, stagingDirectory: alias }), /SYNC_APPLY_STAGING_INVALID/)
+  const unknown = join(f.stagingDirectory, 'unknown.tmp'); writeFileSync(unknown, 'not owned by this apply invocation')
+  const unadopted = join(f.stagingDirectory, `journal-${contentHash(`${f.journal.id}:${f.claimed.attempt.id}`).slice(0, 24)}-unadopted`); symlinkSync(f.root, unadopted)
+  assert.equal((await applyJournalFiles(f.store, f.claimed.fence, f.journal.id, f.options)).snapshot.immutableTree, f.candidate.tree)
+  assert.equal(readFileSync(unknown, 'utf8'), 'not owned by this apply invocation'); assert.ok(lstatSync(unadopted).isSymbolicLink()); assert.equal(readFileSync(join(f.root, 'a.ts'), 'utf8'), 'source-unstaged\n')
 })
