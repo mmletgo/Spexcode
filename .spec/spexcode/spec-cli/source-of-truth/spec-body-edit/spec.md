@@ -71,3 +71,20 @@ the node's "last edited by" then reads, honestly.
 the trunk through the door above; on a session worktree it lands on that branch, where [[main-guard]] never
 fires at all — one call, no branch in the code, and the same meaning either way: an edit at the board lands
 where the board is looking.
+
+
+**Read-only preparation in an explicit checkout.** `prepareSpecBodyEdit(root, id, patch)` resolves the
+node through the existing filesystem-only spec loader for that exact root, including its canonical ID
+mint. It does not rely on the backend's implicit checkout, so two worktrees with the same node ID prepare
+against their own current bytes. It returns the repository-relative spec path, complete `source` and
+`next` strings, `changed`, and the resulting replacement's `startLine`/`endLine`. The existing trimmed-body
+line checks and exact original-text comparison apply before any result; nonexistent nodes and stale
+regions remain explicit errors. Frontmatter, leading body whitespace, untouched lines and the trailing
+suffix retain their original bytes.
+
+Preparation reads files only: it does not write a file, stage, commit, move HEAD, or reject an existing
+staged change merely to calculate a candidate. Identical text returns `changed: false`. `editSpecBody`
+reuses preparation for the backend checkout, then keeps its existing staged-conflict check, actual write,
+hook-enforced target-only commit, human identity and visible rollback on refusal. Preparation grants no
+write authority and does not promise exclusive access after it returns; a synchronizing coordinator must
+freeze and verify the prepared candidate and enforce its own delivery protocol before applying it.
