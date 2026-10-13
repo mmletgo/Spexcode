@@ -18,6 +18,8 @@ code:
 
 operation 保存不可变输入和 previousBaselinePair、generation/revision、根因及接入键、政策/影响/读集合摘要、8.2 全部阶段、控制与预算、真实 paths/contractIds/flowIds 范围、ready/blocked/delivered 范围及交付目标。attempt 独立保存稳定派发与 session 创建键、原生会话引用、完整 manifest 与实际 diff blob 候选、验证、checkpoint blob 与明确失败类型。fence 绑定 operation、attempt、generation、源物理身份与 lease token。
 
+受控编辑或裁决可提供 requestBlob 保存额外用户意图的不可变引用。input 仍表示实际采集的来源字节，不能为了接收 Dashboard 编辑而谎称 main 已改变或先单独提交 Spec；组合输入在已验证原文条件后叠加请求。纯文件观察事件无需 requestBlob。请求引用参与接入幂等摘要、恢复与证据保活。
+
 journal 保存唯一 effect key、候选/验证/目标绑定、逐文件 pre/post 摘要与 mode、持久 plan blob 和步骤状态。receipt 保存实际 tree/commit、交付快照及证据。baseline 必须同次结算 sourceInput 与 verifiedDelivery，并保存真实 coveredScope；下一次输入由 priorDelivery 加 priorSource→newSource 差量形成，不能丢弃已交付 Agent 内容。部分交付保留根阻塞状态；发布后的交付树作为新来源时建立该物理树自己的成对基线。
 
 adopter control envelope 仅派发协调身份，不作为普通 Agent 文本。共享类型不执行 SQLite、文件或 Git 副作用，调用方必须通过动作门禁修改记录。

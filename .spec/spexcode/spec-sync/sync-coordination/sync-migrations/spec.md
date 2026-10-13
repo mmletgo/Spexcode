@@ -19,3 +19,5 @@ code:
 初始v1保存 operation（内含冻结输入引用）、attempt（候选/证据/checkpoint 引用）、逐实际文件/规则 lease、apply journal（内含 receipt）、成对 baseline。检索身份、阶段、generation、唯一接入/派发/副作用键显式列，scope/budget/refs 小 JSON 保存运行记录，不保存正文、大契约图或第二份可编辑源码。lease tombstone 的 generation 在释放后保留。范围和动作门禁由 [[sync-store]] 负责。
 
 v2在v1原迁移字节保持不变的基础上增加sync_resources，记录稳定资源计划、生命周期阶段及checkpoint blob引用，按未removed状态索引所有历史attempt资源。升级使用一致性backup保存v1；已有会话、operation、attempt、journal与基线不改含义。不复制checkpoint正文，也不引入执行数据库或消息队列。
+
+v3 登记受控用户请求 requestBlob 的运行语义版本，无破坏性表结构或旧记录改写。升级前仍保存一致性备份；旧版写方因更高组件版本拒绝写入，不能忽略新请求后按旧输入执行。旧版无 requestBlob 的 payload 摘要保持相同，升级后重复事件继续命中原 operation。

@@ -61,6 +61,52 @@ test('same stable admission and capture-time replay create one operation and pro
   } finally { f.cleanup() }
 })
 
+test('controlled requests preserve source snapshots and take part in admission identity and blob pins', async () => {
+  const f = await fixture()
+  try {
+    const input = f.admit(), requestBlob = f.put({ kind: 'spec-edit', replacement: '新的明确原始需求' })
+    const first = f.store.admitAndEnqueue({ ...input, requestBlob })
+    assert.deepEqual(first.input, input.input)
+    assert.deepEqual(first.requestBlob, requestBlob)
+    assert.equal(f.store.admitAndEnqueue({ ...input, requestBlob }).id, first.id)
+    assert.ok(f.store.pinnedBlobRefs().some(ref => ref.sha256 === requestBlob.sha256))
+    const changedRequest = f.put({ kind: 'spec-edit', replacement: '后续用户修改' })
+    assert.throws(() => f.store.admitAndEnqueue({ ...input, requestBlob: changedRequest }), /IDEMPOTENCY_CONFLICT/)
+    const next = f.store.admitAndEnqueue({ ...input, ingressKey: 'next-request', requestBlob: changedRequest })
+    assert.notEqual(next.id, first.id)
+    assert.equal(next.input.id, first.input.id)
+    assert.equal(f.store.readOperation(first.id).phase, 'superseded')
+  } finally { f.cleanup() }
+})
+
+test('v2 upgrade preserves requestless dedup identity and backs up the old component version', async () => {
+  const f = await fixture(), legacy = openProtocol(join(f.root, 'v2.sqlite'))
+  let backup: ReturnType<typeof openProtocol> | null = null
+  try {
+    applyComponentMigrations(legacy, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 2))
+    legacy.initialize(SYNC_COORDINATOR_ADDRESS)
+    const input = f.admit(), old = f.store.admitAndEnqueue(input)
+    for (const table of ['protocol_messages', 'sync_operations'] as const) {
+      const rows = f.protocol.withTransaction(tx => tx.query(`SELECT * FROM ${table}`))
+      legacy.withTransaction(tx => {
+        for (const row of rows) {
+          const columns = Object.keys(row).filter(column => column !== 'enqueue_seq')
+          tx.exec(`INSERT INTO ${table}(${columns.join(',')}) VALUES(${columns.map(() => '?').join(',')})`, ...columns.map(column => row[column]) as SqlParam[])
+        }
+      })
+    }
+    assert.throws(() => new SyncStore(legacy, f.options), /SYNC_SCHEMA_UNSUPPORTED/)
+    const path = join(f.root, 'v2-backup.sqlite')
+    assert.equal(await migrateSyncStore(legacy, { backupPath: path }), 3)
+    const upgraded = new SyncStore(legacy, f.options)
+    assert.equal(upgraded.admitAndEnqueue(input).id, old.id)
+    assert.equal(upgraded.readOperation(old.id).payloadDigest, old.payloadDigest)
+    backup = openProtocol(path)
+    assert.equal(backup.withTransaction(tx => tx.query('SELECT MAX(version) AS version FROM schema_migrations WHERE component=?', SYNC_COMPONENT))[0].version, 2)
+    assert.equal(backup.listPending(SYNC_COORDINATOR_ADDRESS).length, 1)
+  } finally { backup?.close(); legacy.close(); f.cleanup() }
+})
+
 test('claim exact message and all leases are one transaction, native dispatch budget is atomic', async () => {
   const f = await fixture()
   try {
@@ -542,7 +588,7 @@ test('v1 upgrade keeps active attempt and queue data, online backup restores v1,
     assert.equal(legacy.withTransaction(tx => tx.query("SELECT * FROM sqlite_master WHERE name='sync_resources'")).length, 0)
     assert.equal(legacy.withTransaction(tx => tx.query('SELECT MAX(version) AS version FROM schema_migrations WHERE component=?', SYNC_COMPONENT))[0].version, 1)
     const backupPath = join(f.root, 'v1-upgrade.backup')
-    assert.equal(await migrateSyncStore(legacy, { backupPath }), 2)
+    assert.equal(await migrateSyncStore(legacy, { backupPath }), SYNC_MIGRATIONS.length)
     const upgraded = new SyncStore(legacy, f.options)
     assert.equal(upgraded.readAttempt(old.attempt.id).id, old.attempt.id)
     assert.equal(upgraded.readOperation(old.operation.id).currentAttemptId, old.attempt.id)
@@ -557,7 +603,7 @@ test('v1 upgrade keeps active attempt and queue data, online backup restores v1,
     try {
       assert.equal(recovered.findResource(old.attempt.id, 'after-upgrade')?.id, resource.id)
       assert.equal(recovered.listRecoverableResources()[0].attempt.id, old.attempt.id)
-      assert.equal(await migrateSyncStore(reopened), 2)
+      assert.equal(await migrateSyncStore(reopened), SYNC_MIGRATIONS.length)
     } finally { reopened.close() }
   } finally { restored?.close(); legacy.close(); f.cleanup() }
 })

@@ -41,6 +41,8 @@ export type SyncOperation = {
   origin: 'spec' | 'code' | 'combined' | 'reconcile' | 'decision'
   generation: number; revision: number; phase: SyncPhase; control: SyncControl
   input: InputSnapshot; previousBaselinePair: BaselinePair | null
+  /** 额外的受控用户编辑/裁决请求；与实际来源字节分开，自动文件事件无需该字段。 */
+  requestBlob?: BlobRef
   scope: SyncScope; readyScope: SyncScope; blockedScope: SyncScope; deliveredScope: SyncScope
   blockedReason: 'needs_input' | 'conflicted' | null
   policyDigest: string; impactDigest: string; readSetDigest: string
@@ -71,7 +73,7 @@ export type ApplyStep = { key: string; status: 'planned' | 'completed'; evidence
 export type ApplyReceipt = { id: string; journalId: string; effectKey: string; actualTree: string; actualCommit: string | null; deliverySnapshot: InputSnapshot; evidenceRefs: BlobRef[]; completedAtMs: number }
 export type ApplyJournal = { id: string; operationId: string; attemptId: string; generation: number; plan: ApplyPlan; status: 'prepared' | 'applying' | 'completed' | 'settled' | 'recovery_required'; steps: ApplyStep[]; receipt: ApplyReceipt | null; createdAtMs: number }
 export type SyncDispatchEnvelope = { version: 1; type: 'sync.dispatch'; operationId: string; inputId: string; generation: number; dispatchKey: string }
-export type AdmitSyncInput = Pick<SyncOperation, 'ingressKey' | 'rootCauseId' | 'origin' | 'input' | 'scope' | 'budget' | 'delivery' | 'policyDigest' | 'impactDigest' | 'readSetDigest' | 'deliveryPlan'> & { previousBaselinePair?: BaselinePair | null }
+export type AdmitSyncInput = Pick<SyncOperation, 'ingressKey' | 'rootCauseId' | 'origin' | 'input' | 'requestBlob' | 'scope' | 'budget' | 'delivery' | 'policyDigest' | 'impactDigest' | 'readSetDigest' | 'deliveryPlan'> & { previousBaselinePair?: BaselinePair | null }
 export type ClaimAttemptInput = { operationId: string; source: WorktreeIdentity; scope: SyncScope; leaseMs: number; expectedMessageId?: string }
 export type ClaimedAttempt = { operation: SyncOperation; attempt: SyncAttempt; fence: WriteFence; lease: ScopeLease }
 export type RecoverableSync = { operation: SyncOperation; attempt: SyncAttempt | null; journals: ApplyJournal[] }
