@@ -84,3 +84,9 @@ anchor ran between edit and add — is zero-bump.
 
 
 strict hook 的固定 Git wrapper 必须附加 --no-replace-objects，并为可信工具 child 固定 GIT_NO_REPLACE_OBJECTS=1；身份基于原始对象，refs/replace 不参与受控 tree/parent 判断，普通模式保持。
+
+
+严格 materialize 的 footprint 策略正常检查静态声明与契约，并仅写登记私有投影；surgery 仍核对实际 staged index。不能通过刷新托管 AGENTS/CLAUDE 块或新植入 command 污染冻结候选；既有 canonical filter 由静态 preflight 精确识别，其漂移阻断。
+
+
+非空内部冻结模式值未知时同样失败并传播，不能静默降级到 ordinary materialize 或 advisory；普通未设置内部模式的行为保留。

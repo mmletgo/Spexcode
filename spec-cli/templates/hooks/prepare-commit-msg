@@ -35,7 +35,10 @@ const visit=dir=>{for(const name of fs.readdirSync(dir).sort()){
 }};visit(root);
 for(const [file,expected] of [[e.SPEXCODE_SYNC_NODE,e.SPEXCODE_SYNC_NODE_SHA256],[e.SPEXCODE_SYNC_GIT,e.SPEXCODE_SYNC_GIT_SHA256],[e.SPEXCODE_SYNC_TOOL,e.SPEXCODE_SYNC_TOOL_SHA256]])
  if(!p.isAbsolute(file)||h(fs.readFileSync(file))!==expected)throw Error("trusted executable digest mismatch");
-if(h(JSON.stringify(entries))!==e.SPEXCODE_SYNC_RUNTIME_SHA256)throw Error("trusted runtime digest mismatch");'
+if(h(JSON.stringify(entries))!==e.SPEXCODE_SYNC_RUNTIME_SHA256)throw Error("trusted runtime digest mismatch");
+import(require("node:url").pathToFileURL(p.join(p.dirname(e.SPEXCODE_SYNC_TOOL),"sync/trusted-footprint.js")).href)
+ .then(m=>m.frozenFootprintFromEnv(e.SPEXCODE_SYNC_GIT,process.cwd()))
+ .catch(error=>{console.error("trusted frozen footprint binding unavailable or changed: "+error.message);process.exitCode=1;});'
 }
 if [ -n "${SPEXCODE_SYNC_HOOK_MODE:-}" ]; then
   if [ "$SPEXCODE_SYNC_HOOK_MODE" != trusted-v1 ] || [ -z "${SPEXCODE_SYNC_NODE:-}" ] || [ -z "${SPEXCODE_SYNC_TOOL:-}" ] || [ -z "${SPEXCODE_SYNC_GIT:-}" ] || ! spex_validate_trusted; then

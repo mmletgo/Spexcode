@@ -13,11 +13,14 @@ function fixture(t: test.TestContext) {
   const directory = mkdtempSync(join(tmpdir(), 'spex-trusted-hooks-'))
   t.after(() => rmSync(directory, { recursive: true, force: true }))
   const root = join(directory, 'candidate'), trusted = join(directory, 'trusted'), log = join(directory, 'trusted.log'), malicious = join(directory, 'candidate-executed')
-  mkdirSync(root); mkdirSync(join(trusted, 'dist'), { recursive: true }); mkdirSync(join(trusted, 'templates/hooks'), { recursive: true })
+  mkdirSync(root); mkdirSync(join(directory, 'footprint'), { mode: 0o700 }); mkdirSync(join(trusted, 'dist'), { recursive: true }); mkdirSync(join(trusted, 'templates/hooks'), { recursive: true })
   const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', PATH: '/usr/bin:/bin:/usr/sbin:/sbin' }
   const git = (...args: string[]): string => execFileSync('/usr/bin/git', ['-C', root, ...args], { env, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim()
   git('init', '-b', 'main'); git('config', 'user.name', 'Fixture'); git('config', 'user.email', 'fixture@example.invalid')
   writeFileSync(join(root, 'file.txt'), 'seed\n'); git('add', '.'); git('commit', '-m', 'seed'); git('switch', '-c', 'delivery'); git('branch', 'other')
+  mkdirSync(join(trusted, 'dist/sync'))
+  copyFileSync(fileURLToPath(new URL('../../dist/sync/trusted-footprint.js', import.meta.url)), join(trusted, 'dist/sync/trusted-footprint.js'))
+  writeFileSync(join(trusted, 'package.json'), JSON.stringify({ type: 'module' }))
   writeFileSync(join(trusted, 'dist/helper.mjs'), 'export const stable = true;\n')
   writeFileSync(join(trusted, 'dist/cli.mjs'), `import './helper.mjs';
 import { appendFileSync } from 'node:fs'; import { execFileSync } from 'node:child_process';
@@ -38,7 +41,7 @@ execFileSync(process.env.SPEXCODE_SYNC_GIT,['update-index','--cacheinfo','100644
   writeFileSync(join(root, 'node_modules/.bin/spex'), `#!/bin/sh\nprintf bad > '${malicious}'\nexit 0\n`); chmodSync(join(root, 'node_modules/.bin/spex'), 0o755)
   writeFileSync(join(root, 'file.txt'), 'candidate\n'); git('add', 'file.txt')
   const parent = git('rev-parse', 'HEAD'), tree = git('write-tree')
-  const options = { operation: 'publish' as const, nodePath: process.execPath, gitPath: '/usr/bin/git', toolEntry: join(trusted, 'dist/cli.mjs'), trustedRuntimeRoot: trusted, canonicalHooksDir: join(trusted, 'templates/hooks'), expectedTree: tree, expectedParent: parent, expectedRef: 'refs/heads/delivery' }
+  const options = { privateFootprintDir: join(directory, 'footprint'), operation: 'publish' as const, nodePath: process.execPath, gitPath: '/usr/bin/git', toolEntry: join(trusted, 'dist/cli.mjs'), trustedRuntimeRoot: trusted, canonicalHooksDir: join(trusted, 'templates/hooks'), expectedTree: tree, expectedParent: parent, expectedRef: 'refs/heads/delivery' }
   const prepared = prepareTrustedHooksBinding(root, options)
   assert.equal(prepared.status, 'supported', prepared.status === 'unsupported' ? JSON.stringify(prepared.issues) : '')
   const binding = (prepared as { binding: TrustedHooksBinding }).binding

@@ -63,3 +63,6 @@ commits still receive Session attribution while commit-context suppresses its ow
 
 
 strict hook 的固定 Git wrapper 必须附加 --no-replace-objects，并为可信工具 child 固定 GIT_NO_REPLACE_OBJECTS=1；身份基于原始对象，refs/replace 不参与受控 tree/parent 判断，普通模式保持。
+
+
+每次 strict 工具调用前还核对同一冻结 footprint 政策：执行配置、canonical filter 数据、实际 hooks 目录/文件和已登记私有目录；只调用完整 runtime 内的固定 builtins 校验模块，漂移阻断，不执行未知 filter/hook。

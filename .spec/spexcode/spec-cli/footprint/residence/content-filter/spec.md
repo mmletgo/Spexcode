@@ -81,3 +81,6 @@ What JSON co-ownership does NOT preserve is LAYOUT: a merge re-serializes the wh
 member per line), so a hand-compacted config comes back semantically identical and textually reformatted.
 Values, key order and the trailing-newline convention all round-trip; hand layout does not, because no JSON
 writer can reproduce it. That is an accepted, visible cost — unlike a whole-file write, it destroys nothing.
+
+
+受控冻结交付复用 describeCanonicalContractFilter 的唯一 SHIM/filterCmd 源，只读核对精确 effective commands 和实际 shim 普通文件字节/0755 模式；不按名称信任、不执行未知命令、不改变 ordinary 安装/降级/clean-smudge 行为。当前 common 属性/root/bindings 与外部 per-tree filter 数据纳入冻结政策。strict materialize 不调用植入/撤销/filter-stat repair，所有新托管投影只落登记私有目录。
