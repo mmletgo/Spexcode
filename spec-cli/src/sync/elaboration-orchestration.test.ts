@@ -327,3 +327,19 @@ test('AC-ELABORATION-22 程序复制原文和绑定，保留元数据，正确�
   assert.deepEqual(parsed.contract!.items.find(item => item.kind === 'VERIFY')!.command, output.changes[0].tables.VERIFY[0].command)
   assert.ok(!rendered.changes[0].source.includes('### GAP'))
 })
+
+test('AC-ELABORATION-23 总预算耗尽但原生停止未证实时保留pending身份，不派后续会话', async () => {
+  let calls = 0
+  const result = await elaborate({ ...input(), totalTimeoutMs: 10 }, { runner: async () => {
+    calls++
+    await new Promise(resolve => setTimeout(resolve, 20))
+    throw Object.assign(new Error('原生interrupt尚未证实停稳'), { code: 'cancellation_pending', sessionId: 'pending-session', threadId: 'pending-thread', turnId: 'pending-turn' })
+  } })
+  assert.equal(result.status, 'failed')
+  assert.equal(result.failure!.code, 'cancellation_pending')
+  assert.equal(result.failure!.sessionId, 'pending-session')
+  assert.equal(result.failure!.threadId, 'pending-thread')
+  assert.equal(result.failure!.turnId, 'pending-turn')
+  assert.equal(calls, 1)
+  assert.equal(result.reviewPassed, false)
+})

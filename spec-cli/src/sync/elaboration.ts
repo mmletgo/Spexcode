@@ -177,7 +177,7 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
         if (budget.signal.aborted && !input.signal?.aborted) throw Object.assign(new Error('细化总时间预算已耗尽，迟到产物只保留诊断'), { code: 'budget_exhausted', sessionId: session.sessionId, threadId: session.threadId, turnId: session.turnId })
         return session.output
       } catch (error) {
-        if (budget.signal.aborted && !input.signal?.aborted) throw Object.assign(new Error('细化总时间预算已耗尽'), { ...(error as object), code: 'budget_exhausted' })
+        if (budget.signal.aborted && !input.signal?.aborted && (error as { code?: string }).code !== 'cancellation_pending') throw Object.assign(new Error('细化总时间预算已耗尽'), { ...(error as object), code: 'budget_exhausted' })
         throw error
       } finally { clearTimeout(timer) }
     }
