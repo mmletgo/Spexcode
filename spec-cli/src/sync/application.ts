@@ -62,19 +62,24 @@ export class SyncApplication {
   }
   private enabled(snapshot: InputSnapshot): EnabledRecord | null {
     if (!existsSync(this.enabledPath)) return null
-    const record = JSON.parse(readFileSync(this.enabledPath, 'utf8')) as EnabledRecord
-    if (record.version !== 1 || JSON.stringify(record.source) !== JSON.stringify(snapshot.source)) throw new SyncApplicationError('sync_source_changed', '启用时的输入工作树身份已变化，请重新启用')
+    let record: EnabledRecord
+    try { record = JSON.parse(readFileSync(this.enabledPath, 'utf8')) as EnabledRecord }
+    catch { throw new SyncApplicationError('sync_activation_invalid', '同步启用记录无法读取，请重新启用当前授权') }
+    if (record?.version !== 1 || !record.source || typeof record.configDigest !== 'string') throw new SyncApplicationError('sync_activation_invalid', '同步启用记录不合法，请重新启用当前授权')
+    if (JSON.stringify(record.source) !== JSON.stringify(snapshot.source)) throw new SyncApplicationError('sync_source_changed', '启用时的输入工作树身份已变化，请重新启用')
     return record
   }
-  async readSettings(): Promise<{ enabled: boolean; configuration: ReturnType<typeof readSyncSettings>['settings'] | null; configDigest: string | null; input: WorktreeIdentity; deliveryRoot: string; capabilities: { origins: ['spec', 'initial']; externalWatcher: false; verification: 'docker-node-test' }; configurationError: { code: string; message: string } | null }> {
+  async readSettings(): Promise<{ activation: 'disabled' | 'enabled' | 'invalidated'; enabled: boolean; configuration: ReturnType<typeof readSyncSettings>['settings'] | null; configDigest: string | null; input: WorktreeIdentity; deliveryRoot: string; capabilities: { origins: ['spec', 'initial']; externalWatcher: false; verification: 'docker-node-test' }; configurationError: { code: string; message: string } | null }> {
     const snapshot = await captureInputSnapshot(this.root)
+    const activated = existsSync(this.enabledPath)
     const base = { input: snapshot.source, deliveryRoot: this.managedRoot, capabilities: { origins: ['spec', 'initial'] as ['spec', 'initial'], externalWatcher: false as const, verification: 'docker-node-test' as const } }
     try {
       const { settings, configDigest } = readSyncSettings(snapshot), record = this.enabled(snapshot)
-      return { ...base, enabled: record?.configDigest === configDigest, configuration: settings, configDigest, configurationError: record && record.configDigest !== configDigest ? { code: 'sync_configuration_changed', message: '授权配置已变化，请重新启用' } : null }
+      const enabled = record?.configDigest === configDigest
+      return { ...base, activation: enabled ? 'enabled' : activated ? 'invalidated' : 'disabled', enabled, configuration: settings, configDigest, configurationError: record && record.configDigest !== configDigest ? { code: 'sync_configuration_changed', message: '授权配置已变化，请重新启用' } : null }
     } catch (error) {
       if (!(error instanceof SyncApplicationError)) throw error
-      return { ...base, enabled: false, configuration: null, configDigest: null, configurationError: { code: error.code, message: error.message } }
+      return { ...base, activation: activated ? 'invalidated' : 'disabled', enabled: false, configuration: null, configDigest: null, configurationError: { code: error.code, message: error.message } }
     }
   }
   /** 仅授权当前已版本化配置；可选摘要防止用户阅读后配置已经被另一编辑者改变。 */

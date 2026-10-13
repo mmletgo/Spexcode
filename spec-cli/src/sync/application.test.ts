@@ -193,6 +193,26 @@ test('AC-APPLICATION-09 显式单次调用上限来自operation冻结配置，li
   } finally { f.cleanup() }
 })
 
+test('AC-APPLICATION-10 已启用后删除或损坏配置保持invalidated，不能降级为普通独立Spec提交', async () => {
+  const f = await fixture()
+  try {
+    assert.equal((await f.application.readSettings()).activation, 'disabled')
+    assert.equal((await f.application.enable()).activation, 'enabled')
+    const config = join(f.root, '.spec/spexcode.json')
+    rmSync(config)
+    const missing = await f.application.readSettings()
+    assert.equal(missing.activation, 'invalidated'); assert.equal(missing.enabled, false)
+    assert.equal(missing.configurationError?.code, 'sync_configuration_missing')
+    writeFileSync(config, '{broken JSON')
+    const malformed = await f.application.readSettings()
+    assert.equal(malformed.activation, 'invalidated'); assert.equal(malformed.configurationError?.code, 'sync_configuration_invalid')
+    writeFileSync(config, JSON.stringify({ sync: { ...settings, sourcePaths: ['../outside'] } }))
+    assert.equal((await f.application.readSettings()).activation, 'invalidated')
+    writeFileSync(config, JSON.stringify({ sync: settings }))
+    assert.equal((await f.application.readSettings()).activation, 'enabled')
+  } finally { f.cleanup() }
+})
+
 test('AC-APPLICATION-06 应用真实Docker及compiled hooks完整交付，completed重放沿原共同基线幂等', { skip: process.env.SPEX_DOCKER_VERIFICATION_TEST !== '1', timeout: 180000 }, async t => {
   const temp = mkdtempSync(join(tmpdir(), 'sync-application-delivery-')), root = join(temp, 'source')
   cpSync(new URL('../../test/fixtures/spec-sync/export-repo/', import.meta.url), root, { recursive: true })

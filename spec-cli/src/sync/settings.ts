@@ -18,7 +18,7 @@ export type SyncSettings = {
   callTimeoutMs?: number
 }
 export class SyncApplicationError extends Error {
-  constructor(readonly code: string, message: string, readonly status = 409) { super(message); this.name = 'SyncApplicationError' }
+  constructor(readonly code: string, message: string, readonly status: 400 | 404 | 409 = 409) { super(message); this.name = 'SyncApplicationError' }
 }
 const paths = { type: 'array', uniqueItems: true, items: { type: 'string', minLength: 1 } }
 const positive = { type: 'integer', minimum: 1 }
@@ -37,6 +37,10 @@ const validate = new Ajv({ allErrors: true }).compile({
   },
 })
 export const coveredPath = (path: string, parents: readonly string[]): boolean => parents.some(parent => path === parent || path.startsWith(`${parent}/`))
+function settingsPath(path: string): string {
+  try { return validateRepositoryPath(path) }
+  catch (error) { throw new SyncApplicationError('sync_configuration_invalid', error instanceof Error ? error.message : String(error)) }
+}
 
 /** 只读取不可变输入内的版本化授权；不猜宿主命令，也不合入本机凭据配置。 */
 export function readSyncSettings(snapshot: InputSnapshot): { settings: SyncSettings; configDigest: string } {
@@ -44,14 +48,14 @@ export function readSyncSettings(snapshot: InputSnapshot): { settings: SyncSetti
   if (!entry || entry.mode === '120000') throw new SyncApplicationError('sync_configuration_missing', '请在 .spec/spexcode.json 登记 sync 的授权目录、Docker 验证命令与预算后启用')
   let parsed: unknown
   try { parsed = JSON.parse(readObject(snapshot.source.commonDir, entry.oid).toString('utf8')) as unknown }
-  catch (error) { throw new SyncApplicationError('sync_configuration_invalid', `项目配置 JSON 无法解析：${error instanceof Error ? error.message : String(error)}`) }
+  catch { throw new SyncApplicationError('sync_configuration_invalid', '项目配置 JSON 无法解析，请检查格式') }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new SyncApplicationError('sync_configuration_invalid', '项目配置须为 JSON 对象')
   const config = parsed as { sync?: unknown }
   if (!validate(config.sync)) throw new SyncApplicationError('sync_configuration_invalid', `sync 配置缺口：${new Ajv().errorsText(validate.errors)}`)
   const settings = config.sync as SyncSettings
   if (settings.callTimeoutMs !== undefined && settings.callTimeoutMs > settings.budget.timeoutMs) throw new SyncApplicationError('sync_configuration_invalid', 'callTimeoutMs 不能超过操作总预算 timeoutMs')
   for (const path of [...settings.sourcePaths, ...settings.testPaths, ...settings.readPaths]) {
-    validateRepositoryPath(path)
+    settingsPath(path)
     if (isHostPrivatePath(path)) throw new SyncApplicationError('sync_configuration_invalid', `授权不能读取或写入私有资料：${path}`)
   }
   if ([...settings.sourcePaths, ...settings.testPaths].some(path => path === '.spec' || path.startsWith('.spec/') || path.split('/').some(part => ['node_modules', '.codex', '.claude', '.ssh'].includes(part)))) throw new SyncApplicationError('sync_configuration_invalid', '源码与测试授权不能覆盖 Spec、依赖或本机私有目录')
@@ -60,12 +64,12 @@ export function readSyncSettings(snapshot: InputSnapshot): { settings: SyncSetti
     const errors = outputErrors(item.definition, VERIFICATION_REGISTRATION_SCHEMA)
     if (errors.length) throw new SyncApplicationError('sync_configuration_invalid', `验证登记不合法：${errors.join('; ')}`)
     const { command, cwd } = item.definition
-    if (cwd !== '.') validateRepositoryPath(cwd)
+    if (cwd !== '.') settingsPath(cwd)
     if (command[0] !== 'node' || !command.includes('--test') || command.some(arg => arg.startsWith('--test-reporter') || arg === '--')) throw new SyncApplicationError('sync_verification_unsupported', '支持已登记的 Docker Node --test 验证')
   }
   if (settings.facts.some(fact => !fact.source.trim() || !fact.text.trim())) throw new SyncApplicationError('sync_configuration_invalid', '业务事实须有具名来源和非空文本')
   for (const item of settings.mandatoryTests) {
-    validateRepositoryPath(item.testPath)
+    settingsPath(item.testPath)
     if (!settings.verifications.some(verification => verification.definition.id === item.verificationId) || coveredPath(item.testPath, [...settings.sourcePaths, ...settings.testPaths])) throw new SyncApplicationError('sync_configuration_invalid', '保护测试须引用已登记验证，且不能位于模型可写范围')
   }
   return { settings, configDigest: entry.digest }
