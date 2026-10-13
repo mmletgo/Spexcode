@@ -9,6 +9,7 @@ import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
 import type { ElaborationCandidate, ElaborationInput, ElaborationResult, ElaborationReview, ElaborationRound, ElaborationRunner, ElaborationTrace } from './elaboration-types.js'
 export type { Applicability, AuthorizedContractChange, ElaborationCandidate, ElaborationChange, ElaborationFact, ElaborationInput, ElaborationResult, ElaborationReview, ElaborationReviewFinding, ElaborationRound, ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult, ElaborationTarget, ElaborationTrace } from './elaboration-types.js'
 
+const DEFAULT_CALL_TIMEOUT_MS = 900_000
 export const elaborationDigest = (source: string): string => createHash('sha256').update(source, 'utf8').digest('hex')
 const digest = (value: unknown): string => elaborationDigest(JSON.stringify(value))
 const specPath = (path: string): boolean => path.startsWith('.spec/') && path.endsWith('/spec.md') && posix.normalize(path) === path && !path.includes('\\')
@@ -48,7 +49,7 @@ function checkInput(input: ElaborationInput): void {
     authorizations.add(change.id)
   }
   if (!Number.isInteger(input.maxRepairs ?? 2) || (input.maxRepairs ?? 2) < 0 || (input.maxRepairs ?? 2) > 5) throw new TypeError('修复预算必须是0到5的整数')
-  if (!Number.isInteger(input.timeoutMs ?? 120_000) || (input.timeoutMs ?? 120_000) <= 0) throw new TypeError('每次调用超时必须为正整数')
+  if (!Number.isInteger(input.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS) || (input.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS) <= 0) throw new TypeError('每次调用超时必须为正整数')
   if (!Number.isInteger(input.maxCalls ?? 2 * ((input.maxRepairs ?? 2) + 1)) || (input.maxCalls ?? 1) <= 0) throw new TypeError('调用预算必须为正整数')
   if (input.totalTimeoutMs !== undefined && (!Number.isInteger(input.totalTimeoutMs) || input.totalTimeoutMs <= 0)) throw new TypeError('总时间预算必须为正整数')
 }
@@ -147,7 +148,7 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
   const inputDigest = digest(frozen)
   const result: ElaborationResult = { status: 'exhausted', inputDigest, candidateDigest: null, changes: [], contracts: [], graph: null, coverage: null, gaps: [], blockedIds: [], readyIds: [], retiredIds: [], structurePassed: false, reviewPassed: false, runtimeVerification: 'not_run', implementationReady: false, deferredImplementationFindings: [], blockedStructureFindings: [], rounds: [], failure: null }
   const maxCalls = input.maxCalls ?? 2 * ((input.maxRepairs ?? 2) + 1)
-  const deadline = Date.now() + (input.totalTimeoutMs ?? (input.timeoutMs ?? 120_000) * maxCalls)
+  const deadline = Date.now() + (input.totalTimeoutMs ?? (input.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS) * maxCalls)
   let calls = 0
   const runner: ElaborationRunner = options.runner ?? (async request => {
     const { runStructuredSession } = await import('../session-structured.js')
@@ -169,7 +170,7 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
       const signal = input.signal ? AbortSignal.any([input.signal, budget.signal]) : budget.signal
       const requestDigest = digest({ inputDigest, purpose, prompt, schema })
       try {
-        const session = await runner({ root: input.root, base: input.base, prompt, schema, requestKey: `${input.requestKey}:${index}:${purpose}`, inputDigest: requestDigest, purpose, timeoutMs: input.timeoutMs ?? 120_000, signal, model: input.model, effort: input.effort })
+        const session = await runner({ root: input.root, base: input.base, prompt, schema, requestKey: `${input.requestKey}:${index}:${purpose}`, inputDigest: requestDigest, purpose, timeoutMs: input.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS, signal, model: input.model, effort: input.effort })
         const trace: ElaborationTrace = { purpose, sessionId: session.sessionId, threadId: session.threadId, turnId: session.turnId, resultDigest: session.resultDigest, inputDigest: requestDigest }
         round.traces.push(trace)
         if (purpose === 'elaboration_generate') round.output = session.output

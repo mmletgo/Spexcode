@@ -343,3 +343,12 @@ test('AC-ELABORATION-23 总预算耗尽但原生停止未证实时保留pending�
   assert.equal(calls, 1)
   assert.equal(result.reviewPassed, false)
 })
+
+test('AC-ELABORATION-24 完整业务行生成默认保留900秒调用窗口，上层可明确覆盖', async () => {
+  const defaults = runner(request => candidate(request, source))
+  assert.equal((await elaborate(input(), { runner: defaults.run })).status, 'complete')
+  assert.ok(defaults.calls.every(call => call.timeoutMs === 900000))
+  const configured = runner(request => candidate(request, source))
+  assert.equal((await elaborate({ ...input(), timeoutMs: 1200000 }, { runner: configured.run })).status, 'complete')
+  assert.ok(configured.calls.every(call => call.timeoutMs === 1200000))
+})
