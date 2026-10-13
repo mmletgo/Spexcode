@@ -21,3 +21,5 @@ export * from './root-lru.js'
 export * from './specs.js'
 export * from './change-report.js'
 export * from './evidence.js'
+
+export * from './contracts/index.js'

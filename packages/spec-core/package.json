@@ -12,7 +12,9 @@
     "./graph-delta": "./dist/graph-delta.js",
     "./review": "./dist/review/index.js",
     "./identity": "./dist/identity-presets.js",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./contracts": "./dist/contracts/index.js",
+    "./spec-source": "./dist/spec-source.js"
   },
   "engines": {
     "node": ">=22"

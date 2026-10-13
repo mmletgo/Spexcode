@@ -35,8 +35,15 @@ ID 使用 `类型-业务域-稳定后缀`（ASCII 大写字母、数字和连字
 
 `GAP.kind` 为 `missing_fact/conflict`；每个 GAP 必须写明未知或互斥事实、影响 ID、证据与所需具体裁决。未决 GAP 阻断依赖项，不能以置信度或空值通过。
 
-一个治理叶节点的 `code:` 最多指向一个代码文件，可在该文件中列多个 `path#symbol`。`related:` 不计实现覆盖。`AC.test` 为 `仓库相对测试路径#稳定用例ID`；测试用例标题携带该 ID。`AC.command` 引用已登记 VERIFY-ID；VERIFY 与业务 ID 在同一同步范围内全局唯一，跨节点可引用，执行目录相对仓库根解析。VERIFY `command` 单元格是 JSON argv 数组文本，例如 `["node","--test","tests/export.test.mjs"]`，`cwd` 是仓库相对目录（`.` 为根），`timeout-ms` 是正整数。执行器通过 argv 调用工具，不把命令拼进 shell。命令、测试文件和断言是验证政策，删除或改弱都不能自行退出门禁。
+一个启用契约节点的 `code:` 最多指向一个代码文件；跨文件职责按需拆为子节点，可在该文件中列多个 `path#symbol`。`related:` 不计实现覆盖。`AC.test` 为 `仓库相对测试路径#稳定用例ID`；测试用例标题携带该 ID。`AC.command` 引用已登记 VERIFY-ID；VERIFY 与业务 ID 在同一同步范围内全局唯一，跨节点可引用，执行目录相对仓库根解析。VERIFY `command` 单元格是 JSON argv 数组文本，例如 `["node","--test","tests/export.test.mjs"]`，`cwd` 是仓库相对目录（`.` 为根），`timeout-ms` 是正整数。执行器通过 argv 直接调用工具，不把命令拼进 shell，也不登记 shell 可执行文件。命令、测试文件和断言是验证政策，删除或改弱都不能自行退出门禁。
 
 表格接受 Markdown 转义竖线 `\|` 与单元格代码字面量；解析时先识别转义和代码范围，再分列。测试绑定指向真实可运行场景。结构检查能证明引用、归属与声明处置，不能证明自然语言条件互斥完备；独立审查和具体运行补足语义。
 
-完整参考输入位于 `spec-cli/test/fixtures/spec-sync/export-repo/`；其规则只属于夹具演示，不是用户项目默认政策。缺失分支与违背下载权限的变体用于拒绝虚假通过。产品节点本身仍 pending，等待 [[sync-elaboration]] 和 [[sync-verification]] 的解析、覆盖及证据实现。
+完整参考输入位于 `spec-cli/test/fixtures/spec-sync/export-repo/`；其规则只属于夹具演示，不是用户项目默认政策。缺失分支与违背下载权限的变体用于拒绝虚假通过。产品节点本身仍 pending；纯解析与结构投影已落地，完整细化及运行证据由 [[sync-elaboration]] 和 [[sync-verification]] 继续交付。
+
+
+纯核心入口为 `@spexcode/spec-core/contracts`。`parseContract` 接受节点 ID、仓库相对 Spec 路径和源文本；未启用返回空契约，raw/REQ 草稿保留为可细化输入。默认完整性检查与草稿结构检查分离；重复 ID、悬空或类型错误引用、来源/推导依赖循环、归属错误、状态对象不一致、状态事件处置缺失、不可达状态及无出口非终态均阻断完成。业务状态循环与流程导航循环允许存在，只要流程有可达结束。
+
+GAP 的阻塞闭包沿来源、depends-on、规则使用及 AC 覆盖扩散，不沿流程归属或 next 导航扩散；仅重试政策缺失不得误挡成功流程。高层需求可以无本地 code，由明确推导关系、叶节点治理与 AC 绑定形成实现覆盖。覆盖只投影 `declared/bound/missing`，结构 bound 不代表真实测试通过。
+
+实际文件由调用方传入 `context.files`；缺少该上下文须报告绑定未验证。提供文件后检查治理文件、代码来源文件、测试文件和携带稳定 ID 的测试标题。已登记 VERIFY 可为直接测试入口或工具脚本；间接入口的用例选择不能由 argv 字面量机械证明，报告待运行证据确认。条件语义及竞争完备性始终需要独立审查，不能凭某状态存在一行 TR 自动通过。内容摘要包含原始意图、详细正文、治理、来源、全部条目及验证政策；派生图和覆盖不是另一份可编辑事实。

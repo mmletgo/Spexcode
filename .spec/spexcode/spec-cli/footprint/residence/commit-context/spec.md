@@ -9,7 +9,7 @@ related:
   - spec-cli/src/cli.ts
   - spec-cli/src/commit-context.test.ts
   - packages/spec-core/src/git.ts#gitTry
-  - packages/spec-core/src/specs.ts#parseFrontmatter
+  - packages/spec-core/src/spec-source.ts#parseFrontmatter
   - packages/spec-core/src/specs.ts#mintIds
   - packages/spec-core/src/anchors.ts
 ---
