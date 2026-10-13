@@ -72,6 +72,19 @@ export class SyncStore {
   private saveJournal(tx: ProtocolTransaction, journal: ApplyJournal): void {
     tx.exec('UPDATE sync_apply_journals SET status=?,receipt_id=?,record_json=? WHERE id=?', journal.status, journal.receipt?.id ?? null, JSON.stringify(journal), journal.id)
   }
+  private dispatchHead(tx: ProtocolTransaction): { operation: SyncOperation; messageId: string; envelope: SyncDispatchEnvelope } | null {
+    const row = tx.query('SELECT message_id,kind,body FROM protocol_messages WHERE target_session_id=? AND dequeued_at_ms IS NULL ORDER BY enqueue_seq LIMIT 1', SYNC_COORDINATOR_ADDRESS)[0]
+    if (!row) return null
+    if (row.kind !== SYNC_DISPATCH_KIND) fail('SYNC_DISPATCH_INVALID', 'coordinator head is not a typed sync dispatch')
+    let envelope: SyncDispatchEnvelope
+    try { envelope = JSON.parse(Buffer.from(row.body as Uint8Array).toString('utf8')) as SyncDispatchEnvelope }
+    catch (error) { if (error instanceof SyntaxError) fail('SYNC_DISPATCH_INVALID', 'dispatch envelope is not JSON'); throw error }
+    if (!envelope || envelope.version !== 1 || envelope.type !== 'sync.dispatch' || typeof envelope.operationId !== 'string') fail('SYNC_DISPATCH_INVALID', 'invalid dispatch envelope')
+    const operation = this.operation(tx, envelope.operationId), messageId = String(row.message_id)
+    if (operation.dispatchMessageId !== messageId || envelope.inputId !== operation.input.id || !Number.isSafeInteger(envelope.generation) || envelope.generation < 1 || envelope.generation > operation.generation || envelope.dispatchKey !== `sync-dispatch-${operation.id}-${envelope.generation}`) fail('SYNC_DISPATCH_BINDING', 'dispatch differs from durable operation')
+    return { operation, messageId, envelope }
+  }
+  nextDispatch(): { operation: SyncOperation; messageId: string; envelope: SyncDispatchEnvelope } | null { return this.write(tx => this.dispatchHead(tx)) }
   private release(tx: ProtocolTransaction, token: string): void {
     tx.exec('UPDATE sync_leases SET token=NULL,operation_id=NULL,attempt_id=NULL,expires_at_ms=NULL WHERE token=?', token)
   }
@@ -182,7 +195,16 @@ export class SyncStore {
       this.acquireResources(tx, operation, attempt, resources)
       if (input.expectedMessageId !== undefined) {
         if (input.expectedMessageId !== operation.dispatchMessageId) fail('SYNC_DISPATCH_MISMATCH', 'message does not belong to operation')
-        tx.dequeue(SYNC_COORDINATOR_ADDRESS, input.expectedMessageId)
+        const owned = tx.query('SELECT target_session_id,dequeued_at_ms FROM protocol_messages WHERE message_id=?', input.expectedMessageId)[0]
+        if (!owned || owned.target_session_id !== SYNC_COORDINATOR_ADDRESS) fail('SYNC_DISPATCH_BINDING', 'durable message is missing or belongs to another address')
+        if (owned.dequeued_at_ms === null) {
+          let head = this.dispatchHead(tx)
+          while (head && head.messageId !== input.expectedMessageId && (head.operation.control !== 'run' || TERMINAL.has(head.operation.phase))) {
+            tx.dequeue(SYNC_COORDINATOR_ADDRESS, head.messageId)
+            head = this.dispatchHead(tx)
+          }
+          tx.dequeue(SYNC_COORDINATOR_ADDRESS, input.expectedMessageId)
+        }
       }
       operation.currentAttemptId = id; operation.phase = 'analyzing'; operation.readyScope = canonicalScope(input.scope); this.saveOperation(tx, operation)
       const fence: WriteFence = { operationId: operation.id, attemptId: id, generation: operation.generation, sourceFingerprint: operation.input.source.physicalFingerprint, leaseToken: token }

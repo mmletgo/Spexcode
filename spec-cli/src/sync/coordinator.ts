@@ -222,6 +222,8 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
     const terminal = ['workspace_synced', 'canonical_synced', 'awaiting_landing', 'cancelled', 'superseded', 'paused', 'budget_exhausted']
     if (terminal.includes(operation.phase) || operation.control !== 'run' || attempt?.status === 'settled' || (attempt?.status === 'failed' && attempt.failure?.kind !== 'repairable')) {
       if (!await recoverResources(store, operation, options, true)) return current('recovery_required')
+      const head = store.nextDispatch()
+      if (head?.operation.id === operation.id && (operation.control !== 'run' || terminal.includes(operation.phase))) store.discardDispatch(operation.id, head.messageId)
       return current()
     }
     if (['code', 'combined'].includes(operation.origin)) {
@@ -250,6 +252,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           fence = claimed.fence; attempt = claimed.attempt; operation = claimed.operation
         } catch (error) {
           if (error instanceof SyncStoreError && error.code === 'SYNC_BUDGET_EXHAUSTED') { store.recordBudgetExhaustion(operationId); return current() }
+          if ((error as { code?: string }).code === 'PROTOCOL_CURSOR_INVALID') return current('busy')
           throw error
         }
       } else fence = fenceFor(operation, attempt!)

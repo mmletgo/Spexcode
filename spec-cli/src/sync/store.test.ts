@@ -223,6 +223,33 @@ test('claim exact message and all leases are one transaction, native dispatch bu
   } finally { f.cleanup() }
 })
 
+test('claim skips stopped FIFO heads in the same transaction while preserving every valid queued dispatch', async () => {
+  const f = await fixture()
+  try {
+    const older = f.store.admitAndEnqueue(f.admit()), latest = f.store.admitAndEnqueue(f.admit(source(), 'input-latest'))
+    assert.equal(f.store.readOperation(older.id).phase, 'superseded')
+    assert.equal(f.store.nextDispatch()!.messageId, older.dispatchMessageId)
+    assert.equal(f.store.nextDispatch()!.envelope.operationId, older.id)
+    assert.equal(f.protocol.listPending(SYNC_COORDINATOR_ADDRESS).length, 2)
+    const claimed = f.store.claimAttempt({ operationId: latest.id, source: latest.input.source, scope: latest.scope, leaseMs: 1000, expectedMessageId: latest.dispatchMessageId })
+    assert.equal(claimed.operation.id, latest.id); assert.equal(f.protocol.listPending(SYNC_COORDINATOR_ADDRESS).length, 0)
+    assert.equal(f.store.nextDispatch(), null)
+    const stopped = f.store.admitAndEnqueue(f.admit(source('stopped'), 'input-stop', scope('stop.ts', 'RULE-Z')))
+    f.store.requestControl(stopped.id, 'pause')
+    const before = f.store.admitAndEnqueue(f.admit(source('independent-a'), 'input-a', scope('a.ts', 'RULE-X'))), after = f.store.admitAndEnqueue(f.admit(source('independent-b'), 'input-b', scope('b.ts', 'RULE-Y')))
+    assert.throws(() => f.store.claimAttempt({ operationId: after.id, source: after.input.source, scope: after.scope, leaseMs: 1000, expectedMessageId: after.dispatchMessageId }))
+    assert.equal(f.store.readOperation(after.id).currentAttemptId, null)
+    assert.deepEqual(f.protocol.listPending(SYNC_COORDINATOR_ADDRESS).map(message => message.messageId), [stopped.dispatchMessageId, before.dispatchMessageId, after.dispatchMessageId])
+    assert.equal(f.store.nextDispatch()!.operation.id, stopped.id)
+    f.store.claimAttempt({ operationId: before.id, source: before.input.source, scope: before.scope, leaseMs: 1000, expectedMessageId: before.dispatchMessageId })
+    assert.equal(f.store.nextDispatch()!.operation.id, after.id)
+    f.store.requestControl(stopped.id, 'run')
+    const resumed = f.store.claimAttempt({ operationId: stopped.id, source: stopped.input.source, scope: stopped.scope, leaseMs: 1000, expectedMessageId: stopped.dispatchMessageId })
+    assert.equal(resumed.attempt.number, 1)
+    assert.equal(f.store.nextDispatch()!.operation.id, after.id)
+  } finally { f.cleanup() }
+})
+
 test('real SQLite handles contend on shared paths or rules, independent scope proceeds, release preserves generation', async () => {
   const f = await fixture(), secondProtocol = openProtocol(f.path), second = new SyncStore(secondProtocol, f.options)
   try {

@@ -39,7 +39,7 @@ export type BaselinePair = {
 }
 export type SyncOperation = {
   id: string; ingressKey: string; payloadDigest: string; rootCauseId: string
-  origin: 'spec' | 'code' | 'combined' | 'reconcile' | 'decision'
+  origin: 'initial' | 'spec' | 'code' | 'combined' | 'reconcile' | 'decision'
   generation: number; revision: number; phase: SyncPhase; control: SyncControl
   input: InputSnapshot; previousBaselinePair: BaselinePair | null
   /** 额外的受控用户编辑/裁决请求；与实际来源字节分开，自动文件事件无需该字段。 */
