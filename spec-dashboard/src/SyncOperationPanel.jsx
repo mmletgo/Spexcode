@@ -102,7 +102,7 @@ export default function SyncOperationPanel({ nodeId, nodePath, targetTree = null
     }
     void read()
     return () => { live = false; clearTimeout(timer); controller?.abort() }
-  }, [active, nodeId, targetTree, identity, refresh, refreshKey, contentRevision, onSettings, busy, visible])
+  }, [active, nodeId, targetTree, identity, refresh, refreshKey, onSettings, busy, visible])
   const current = held?.identity === identity ? held.value : null
   const currentError = error?.identity === identity ? error : null
   const recent = current?.operations[0]

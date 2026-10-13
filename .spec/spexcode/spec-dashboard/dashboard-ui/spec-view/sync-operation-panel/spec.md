@@ -24,3 +24,5 @@ related:
 完整代码/测试review复用 [[sync-operation-diff]]，Spec历史diff深链接只有已结算落地文件确实包含该节点path时才开放，避免把非该节点历史的commit误作Spec版本。
 
 activation=invalidated 表示既有同步配置/来源绑定失效，明确展示configurationError，不能画成用户主动关闭的普通Spec模式；有当前有效配置时可显式重新启用该版本。
+
+status 定时读取与用户保存refreshKey驱动刷新，不依赖全局graph-input/contentRevision重启请求；同步只读快照可能产生Git内部事件，不能据此取消自己正在进行的状态读取并自激重读。
