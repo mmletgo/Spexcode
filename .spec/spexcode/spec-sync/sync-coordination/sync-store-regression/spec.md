@@ -38,4 +38,6 @@ receipt树引用相同但manifest不同仍拒绝，journal保持未登记；相�
 
 journal精确查询证明未知operation拒绝、另一operation不可串读，终态已结算receipt仍可返回。
 
+接入key精确查询同时覆盖主key和alias、不存在返回null；不要求扫描操作列表或用latest baseline重建旧payload。
+
 真实部分 receipt 结算到 needs_input 后，新尝试只领取原 ready 范围；不同细化 evidence 扩展完整旧/新 ID 集合时，已有 blocked contract/flow ID 仍只在 blockedScope，新 ID 可进入 ready，不能因重新登记旧 ID 造成业务分区重叠。

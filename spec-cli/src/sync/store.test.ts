@@ -58,6 +58,9 @@ test('same stable admission and capture-time replay create one operation and pro
     assert.equal(f.store.readOperation(first.id).policyDigest, 'policy')
     const third = f.store.admitAndEnqueue({ ...input, ingressKey: 'another-event-key' })
     assert.equal(first.id, third.id)
+    assert.equal(f.store.findOperationByIngressKey(input.ingressKey)?.id, first.id)
+    assert.equal(f.store.findOperationByIngressKey('another-event-key')?.id, first.id)
+    assert.equal(f.store.findOperationByIngressKey('unknown-key'), null)
     assert.throws(() => f.store.admitAndEnqueue({ ...input, ingressKey: 'another-event-key', policyDigest: 'changed' }), /SYNC_IDEMPOTENCY_CONFLICT/)
     assert.equal(f.protocol.listPending(SYNC_COORDINATOR_ADDRESS).length, 1)
   } finally { f.cleanup() }

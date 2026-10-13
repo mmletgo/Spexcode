@@ -49,3 +49,5 @@ findResource(attemptId,key)按精确身份查询包括removed的资源，供同�
 listOperations(repositoryId, {limit?, sourceRoot?}) 在 SQL 内按仓库及可选精确来源根筛选，并按 rowid DESC 返回最新接入操作，包含运行中及终态。默认 limit=100，只接受整数1..500；读取仍校验组件版本，不以壁钟决定顺序，也不读全库后过滤。
 
 listJournals(operationId)先核operation存在，再按rowid顺序读取该操作全部journal及已结算receipt；终态交付事实不从恢复列表推断。
+
+findOperationByIngressKey(ingressKey)按精确主键或持久alias查询operation，不存在返回null。应用重放原operation冻结baseline，必须自行核仓库/物理来源、input/request/policy绑定；不能用latest baseline改变已接入payload。

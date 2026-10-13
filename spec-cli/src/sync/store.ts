@@ -440,6 +440,9 @@ export class SyncStore {
     })
   }
   readOperation(id: string): SyncOperation { return this.write(tx => this.operation(tx, id)) }
+  findOperationByIngressKey(ingressKey: string): SyncOperation | null {
+    return this.write(tx => parseRecord<SyncOperation>(tx.query('SELECT record_json FROM sync_operations WHERE ingress_key=? OR EXISTS (SELECT 1 FROM json_each(sync_operations.ingress_aliases_json) WHERE value=?)', ingressKey, ingressKey)[0]))
+  }
   listOperations(repositoryId: string, options: { limit?: number; sourceRoot?: string } = {}): SyncOperation[] {
     const limit = options.limit ?? 100
     if (!Number.isInteger(limit) || limit < 1 || limit > 500) fail('SYNC_LIST_LIMIT', 'limit must be an integer between 1 and 500')
