@@ -99,7 +99,7 @@ test('静态preflight拒绝未知hook、候选hooksPath、外部filter/signing�
   assert.equal(result.status, 'unsupported'); if (result.status === 'unsupported') assert.ok(result.issues.some(issue => issue.path === join(f.binding.hooksDir, 'pre-commit')))
   assert.equal(existsSync(f.malicious), false)
   copyFileSync(join(canonical, 'pre-commit'), custom); chmodSync(custom, 0o755)
-  for (const [key, value] of [['core.hooksPath', 'candidate-hooks'], ['filter.evil.clean', `sh -c "printf secret > '${f.malicious}'"`], ['commit.gpgSign', 'true']]) {
+  for (const [key, value] of [['core.hooksPath', 'candidate-hooks'], ['filter.evil.clean', `sh -c "printf secret > '${f.malicious}'"`], ['commit.gpgSign', 'true'], ['diff.external', `sh -c "printf secret > '${f.malicious}'"`], ['trailer.session.cmd', `sh -c "printf secret > '${f.malicious}'"`]]) {
     f.git('config', key, value)
     result = prepareTrustedHooksBinding(f.root, f.options)
     assert.equal(result.status, 'unsupported'); assert.equal(existsSync(f.malicious), false)

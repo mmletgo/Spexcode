@@ -74,7 +74,7 @@ export function prepareTrustedHooksBinding(root: string, options: TrustedHooksOp
     if (git(['check-ref-format', options.expectedRef]) !== '') issue(root, '交付 ref 非法')
     if (git(['cat-file', '-t', options.expectedTree]) !== 'tree' || git(['cat-file', '-t', options.expectedParent]) !== 'commit') issue(root, '预期 tree/parent 对象类型不匹配')
     if (realpathSync(git(['rev-parse', '--show-toplevel'])) !== root) issue(root, '必须提供实际 worktree 根目录')
-    const config = spawnSync(gitPath, ['--no-optional-locks', '-C', root, '-c', 'core.fsmonitor=false', 'config', '--null', '--show-origin', '--get-regexp', '^(core\\.hookspath|core\\.fsmonitor|core\\.attributesfile|filter\\..*\\.(clean|smudge|process|required)|commit\\.gpgsign|tag\\.gpgsign|gpg\\..*program|gpg\\.program|user\\.signingkey)$'], { env, encoding: 'utf8' })
+    const config = spawnSync(gitPath, ['--no-optional-locks', '-C', root, '-c', 'core.fsmonitor=false', 'config', '--null', '--show-origin', '--get-regexp', '^(core\\.hookspath|core\\.fsmonitor|core\\.attributesfile|filter\\..*\\.(clean|smudge|process|required)|commit\\.gpgsign|tag\\.gpgsign|gpg\\..*program|gpg\\.program|user\\.signingkey|diff\\.external|diff\\..*\\.(command|textconv)|trailer\\..*\\.(cmd|command))$'], { env, encoding: 'utf8' })
     if (config.status !== 0 && config.status !== 1) throw new Error('Git 执行配置无法静态读取')
     const records = config.stdout.split('\0').filter(Boolean)
     for (let index = 0; index < records.length; index += 2) {

@@ -18,7 +18,7 @@ prepareTrustedHooksBinding(root, options) 是内部协调器只读 preflight；i
 
 Node/Git 使用明确绝对 realpath 与文件摘要，默认 Node 为当前进程，Git 仅从固定系统位置查找，不读候选 PATH。工具入口必须为候选目录外已编译 dist/cli.js 或 cli.mjs，不启动源码 launcher，也不调用 npm build。当前构建是多模块；trustedRuntimeRoot 因此必须为候选外完整固定发布包，包含全部已编译模块、依赖和 canonical 模板。递归 manifest 绑定每个普通文件的 bytes/mode、目录 mode、内部 symlink target；外链和特殊文件 unsupported。完整 runtimeDigest、入口摘要与 Node/Git 摘要在四个 strict hook 每次工具调用前以固定 Node built-in 检查，不能替换 imported 模块后仍信入口 hash。发布包应由协调器准备为闭合固定 runtime；本模块不替调用者下载、构建或判断发布者身份。
 
-通过固定系统 Git 仅读取有效配置和实际 hooks 路径，明确拒绝 hookspath 重定向、无法证明来源的 filter/签名/fsmonitor/外部 attributes 配置。诊断不回显这些命令值，避免凭据泄露。实际可执行 hook 必须逐字等于受信 runtime 内 canonical 模板，必需 pre-commit/prepare-commit-msg/reference-transaction/post-checkout 全部存在且可执行；未知额外可执行文件同样拒绝，Git sample 文件不参与执行。仅 managed header 不能证明来源。
+通过固定系统 Git 仅读取有效配置和实际 hooks 路径，明确拒绝 hookspath 重定向、无法证明来源的 filter/签名/diff-driver/trailer-command/fsmonitor/外部 attributes 配置。诊断不回显这些命令值，避免凭据泄露。实际可执行 hook 必须逐字等于受信 runtime 内 canonical 模板，必需 pre-commit/prepare-commit-msg/reference-transaction/post-checkout 全部存在且可执行；未知额外可执行文件同样拒绝，Git sample 文件不参与执行。仅 managed header 不能证明来源。
 
 makeTrustedHookEnv 仅供内部 child 构建环境，清理 Node/shell/loader/Git 注入、继承的 lint/main/defer bypass 和旧同步字段，固定工具路径和 runtime digest，并设置 trusted-v1 与预定 tree/parent/ref。四 hook 使用该入口优先于 candidate.bin；工具 missing/失败/exit75 一律失败，普通 authoring 的 existing advisory 行为不变。pre-commit 仍执行 trunk gate/surgery；prepare-commit-msg 保留 identity 与 context；post-checkout 保留既有 refresh，严格模式失败返回非零。post-checkout 发生在 Git 切换后，非零不能当作切换没有副作用，调用者须核对真实 Git 并恢复。
 

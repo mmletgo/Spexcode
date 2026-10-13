@@ -16,6 +16,6 @@ code:
 
 测试使用独立临时 Git 仓库、候选外已编译闭合 fixture runtime 与实际 canonical templates。可信 fixture 仅模拟现有工具 verbs，Git checkout/commit/update-ref 都真实执行。候选 bin/custom hook/filter 为未执行 marker 断言，不在宿主运行其恶意代码。
 
-覆盖四 hook 固定可信入口、wrong tree/parent/ref 原 ref 不前进、surgery 改 index 后 prepared 拒绝、每个工具阶段的 missing/exit75/76 阻断、issue-only 不免冻结绑定、静态 unknown hook/hookspath/filter/signing 拒绝且不回显命令值、imported module 替换导致整个 runtime 摘要失效、源码 launcher 与候选模板不能自认可、普通 no-CLI advisory 保留以及 child 注入/bypass 清理。现有 candidate-gate、session-stamp、commit-context 和 post-checkout 单项回归提供普通行为证明。
+覆盖四 hook 固定可信入口、wrong tree/parent/ref 原 ref 不前进、surgery 改 index 后 prepared 拒绝、每个工具阶段的 missing/exit75/76 阻断、issue-only 不免冻结绑定、静态 unknown hook/hookspath/filter/signing/diff/trailer 拒绝且不回显命令值、imported module 替换导致整个 runtime 摘要失效、源码 launcher 与候选模板不能自认可、普通 no-CLI advisory 保留以及 child 注入/bypass 清理。现有 candidate-gate、session-stamp、commit-context 和 post-checkout 单项回归提供普通行为证明。
 
 针对命令：根目录 `npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/sync/trusted-hooks.test.ts`；`npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/commit-gate.test.ts spec-cli/src/session-stamp.test.ts spec-cli/src/commit-context.test.ts`；`npx tsx --import ./scripts/test-home.mjs --test --test-name-pattern='post-checkout defers only the session-owned refresh' spec-cli/src/init.test.ts`；局部 ESLint 与 typecheck。本测试不声称真实发布包已在完整 P2 coordinator 交付，该包准备和集成由上层证明。
