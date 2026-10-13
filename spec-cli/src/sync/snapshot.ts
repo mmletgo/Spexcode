@@ -34,12 +34,13 @@ const physicalStat = (path: string): string => {
   const stat = lstatSync(path, { bigint: true })
   return `${stat.dev}:${stat.ino}:${stat.birthtimeNs}`
 }
+const registeredWorktreeRoots = (root: string): string[] => sourceGit(root, ['worktree', 'list', '--porcelain', '-z']).toString().split('\0').filter(line => line.startsWith('worktree ')).map(line => resolve(line.slice(9)))
 export function identifyWorktree(root: string): WorktreeIdentity {
   const canonicalRoot = realpathSync(root)
   if (realpathSync(sourceGit(canonicalRoot, ['rev-parse', '--show-toplevel']).toString().trim()) !== canonicalRoot) throw new Error('输入必须为工作树根目录')
   const commonDir = realpathSync(sourceGit(canonicalRoot, ['rev-parse', '--path-format=absolute', '--git-common-dir']).toString().trim())
   const gitDir = realpathSync(sourceGit(canonicalRoot, ['rev-parse', '--absolute-git-dir']).toString().trim())
-  const registered = sourceGit(canonicalRoot, ['worktree', 'list', '--porcelain', '-z']).toString().split('\0').filter(line => line.startsWith('worktree ')).map(line => resolve(line.slice(9)))
+  const registered = registeredWorktreeRoots(canonicalRoot)
   if (!registered.includes(canonicalRoot)) throw new Error('输入不是 registered worktree')
   const branch = sourceGit(canonicalRoot, ['rev-parse', '--symbolic-full-name', 'HEAD']).toString().trim()
   return { repositoryId: contentHash(`${commonDir}:${physicalStat(commonDir)}`), commonDir, canonicalRoot, gitDir, branch, physicalFingerprint: contentHash(`${physicalStat(canonicalRoot)}:${physicalStat(gitDir)}`) }
@@ -119,10 +120,12 @@ function observe(root: string): Observation {
   const cachedRecords = objectGit(source.commonDir, ['ls-tree', '-rz', '--full-tree', indexTree]).toString().split('\0').filter(Boolean)
   if (cachedRecords.some(record => record.startsWith('160000 commit '))) throw new Error('不支持真实 gitlink/submodule 条目')
   const cachedPaths = new Set(cachedRecords.map(record => record.slice(record.indexOf('\t') + 1)))
+  const nestedWorktrees = registeredWorktreeRoots(root).filter(path => path.startsWith(`${root}${sep}`))
   const stamps: string[] = [], entries: TreeEntry[] = []
   for (const path of paths) {
-    validateRepositoryPath(path)
     const absolute = join(root, path)
+    if (!cachedPaths.has(path) && nestedWorktrees.some(nested => absolute === nested || absolute.startsWith(`${nested}${sep}`))) continue
+    validateRepositoryPath(path)
     // 已删除的 tracked 文件保留为 tree 中的删除差量。
     try { lstatSync(absolute) } catch (error) { if (['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) { stamps.push(`${path}:deleted`); continue } throw error }
     checkParents(root, path)
