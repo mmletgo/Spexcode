@@ -19,6 +19,8 @@ export type GenerationInput = {
   intent: { nodeId: string; rawSource: string }
   facts: readonly ElaborationFact[]
   existingAcceptance: readonly Acceptance[]
+  /** 已结算失败产物和诊断；修复上下文不是新的业务事实或通过证据。 */
+  repairContext?: { previousOutput: unknown; diagnostics: readonly { code: string; message: string }[] }
   allowedScope: SyncScope
   policy: { version: string; digest: string }
   timeoutMs: number

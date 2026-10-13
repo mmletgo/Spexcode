@@ -191,3 +191,35 @@ test('允许文件scope冻结且native摘要仍需真实匹配，硬门禁中取
   const stopped = await runGeneration({ ...source, signal: controller.signal }, { runner: cancelled.run, validateCandidate: async () => { controller.abort(); return [] } })
   assert.equal(stopped.status, 'cancelled'); assert.equal(cancelled.calls.length, 1); assert.equal(stopped.reviewOutput, null)
 })
+
+test('已冻结宿主凭据不外发，读集合保留真实auth业务源码和全部相关断言', async t => {
+  const initial = await input(t), marker = 'DO_NOT_DISCLOSE_FIXTURE_SECRET'
+  writeFileSync(join(initial.root, '.env'), `TOKEN=${marker}\n`)
+  writeFileSync(join(initial.root, 'unrelated.txt'), 'UNRELATED_CONTEXT_NOT_SENT\n')
+  writeFileSync(join(initial.root, 'src/auth.js'), 'export const authorize = actor => actor === "owner";\n')
+  execFileSync('git', ['-C', initial.root, 'add', '-f', '.env', 'unrelated.txt', 'src/auth.js'], { stdio: 'pipe' })
+  const snapshot = await captureInputSnapshot(initial.root), entries = readTree(snapshot.source.commonDir, snapshot.immutableTree)
+  const source = { ...initial, snapshot, manifest: { version: 1 as const, entries }, files: new Map(initial.files).set('src/auth.js', readFileSync(join(initial.root, 'src/auth.js'), 'utf8')) }
+  const native = runner(source), result = await runGeneration(source, { runner: native.run, validateCandidate: valid })
+  assert.equal(result.status, 'reviewed')
+  for (const call of native.calls) {
+    assert.ok(!call.prompt.includes(marker)); assert.ok(!call.prompt.includes('UNRELATED_CONTEXT_NOT_SENT'))
+    assert.ok(call.prompt.includes('export const authorize')); assert.ok(call.prompt.includes(JSON.stringify(source.files.get('tests/export.test.mjs')!)))
+  }
+  assert.ok(readTree(snapshot.source.commonDir, result.candidate!.tree).some(entry => entry.path === '.env'))
+  assert.equal(result.candidateFiles!.has('.env'), false)
+  const leaked = runner(source), rejected = await runGeneration({ ...source, files: new Map(source.files).set('.env', `TOKEN=${marker}\n`) }, { runner: leaked.run, validateCandidate: valid })
+  assert.equal(rejected.status, 'failed'); assert.equal(leaked.calls.length, 0)
+})
+
+test('不能省略契约测试断言，不能改没读取的既有文件', async t => {
+  const source = await input(t), files = new Map(source.files); files.delete('tests/export.test.mjs')
+  const native = runner(source), incomplete = await runGeneration({ ...source, files }, { runner: native.run, validateCandidate: valid })
+  assert.equal(incomplete.status, 'failed'); assert.match(incomplete.failure!.message, /缺少契约引用/); assert.equal(native.calls.length, 0)
+  writeFileSync(join(source.root, 'unread.txt'), 'unchanged context\n')
+  const snapshot = await captureInputSnapshot(source.root), entries = readTree(snapshot.source.commonDir, snapshot.immutableTree), entry = entries.find(entry => entry.path === 'unread.txt')!
+  const updated = { ...source, snapshot, manifest: { version: 1 as const, entries }, allowedScope: { ...source.allowedScope, paths: [...source.allowedScope.paths, 'unread.txt'] } }
+  const blind = runner(updated, () => ({ version: 'sync-files-v1', changes: [{ path: entry.path, beforeDigest: entry.digest, beforeMode: entry.mode, content: 'blind overwrite\n' }] }))
+  const rejected = await runGeneration(updated, { runner: blind.run, validateCandidate: async () => assert.fail('盲改不能进入硬门禁') })
+  assert.equal(rejected.status, 'repair'); assert.match(rejected.failure!.message, /未完整读取/); assert.equal(blind.calls.length, 1)
+})

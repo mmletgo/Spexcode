@@ -19,3 +19,5 @@ code:
 组合输入基线与完整 UTF-8 文本从实际 Git 对象核对；准备后磁盘变化及调用者 Map/array/policy 修改不能改变已冻结生成/审查。取消与unsupported保留真实原因，不增加派发或偷偷重试。检查用户文件/index/HEAD 保持原样，真实候选仅冻结为对象 refs；本测试不证明 Docker V3 或完整 P2 产品交付。
 
 针对命令：根目录 `npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/sync/generation.test.ts`；`npx eslint spec-cli/src/sync/generation*.ts`；`npm run typecheck`。独立依赖安装后先正常 build 提供 workspace 类型。
+
+模型读集合回归覆盖：实际冻结树里的 .env 不进入生成或审查、完整manifest仍绑定该不变条目；读取真实 src/auth 业务源码不被名称误屏蔽；省略未改 AC 断言文件或修改未读取既有文件时硬拒绝，不能以精简上下文缩减验证。

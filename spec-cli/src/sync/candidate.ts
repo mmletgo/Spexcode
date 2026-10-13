@@ -69,20 +69,20 @@ export function verifyCandidate(commonDir: string, candidate: CandidateRef): Tre
   if (readEvidence(commonDir, candidate.actualDiffBlob).toString() !== JSON.stringify(diff) || diff.some(file => !withinScope(file.path, candidate.coveredScope.paths))) throw new Error('候选实际 diff/范围不匹配真实 Git tree')
   return entries
 }
-const excludedFromValidation = (path: string): boolean => path.split('/').some(part => part === 'node_modules' || part === '.git' || part === '.ssh') || /(^|\/)\.(env(?:\..*)?|npmrc|netrc)$/.test(path) || path.startsWith('.spex/runtime/')
+export const isHostPrivatePath = (path: string): boolean => path.split('/').some(part => part === 'node_modules' || part === '.git' || part === '.ssh') || /(^|\/)\.(env(?:\..*)?|npmrc|netrc)$/.test(path) || path.startsWith('.spex/runtime/')
 /** 只向新的独立验证目录导出不可变 bytes，不带 Git、认证文件或共享运行依赖。 */
 export function exportCandidate(commonDir: string, candidate: CandidateRef, target: string): { root: string; excludedPaths: string[]; exclusionBlob: { sha256: string } } {
   const entries = verifyCandidate(commonDir, candidate)
   if (existsSync(target)) { if (lstatSync(target).isSymbolicLink() || readdirSync(target).length) throw new Error('验证目录必须为空且不是符号链接') }
   else mkdirSync(target, { recursive: true })
-  const root = realpathSync(target), excludedPaths = entries.filter(entry => excludedFromValidation(entry.path)).map(entry => entry.path), directories = new Set<string>([root])
-  const exported = entries.filter(entry => !excludedFromValidation(entry.path))
+  const root = realpathSync(target), excludedPaths = entries.filter(entry => isHostPrivatePath(entry.path)).map(entry => entry.path), directories = new Set<string>([root])
+  const exported = entries.filter(entry => !isHostPrivatePath(entry.path))
   // 先完整校验链接，避免导出半途才发现越界或链式逃逸。
   for (const entry of exported.filter(item => item.mode === '120000')) {
     const targetPath = readObject(commonDir, entry.oid).toString()
     safeSymlinkTarget(root, entry.path, targetPath)
     const linkPath = join(dirname(entry.path), targetPath)
-    if (excludedFromValidation(linkPath)) throw new Error(`符号链接指向禁止的运行/认证文件: ${entry.path}`)
+    if (isHostPrivatePath(linkPath)) throw new Error(`符号链接指向禁止的运行/认证文件: ${entry.path}`)
   }
   for (const entry of exported) {
     const absolute = join(root, entry.path)
