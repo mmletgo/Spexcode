@@ -32,3 +32,5 @@ related:
 `cancelStructuredSession(sessionId, { reason?, timeoutMs? })` 是结构化取消入口，返回精确 session/thread/turn、nativeStopped、acknowledged、nativeStatus 和未证实停止的 error。queued 或明确尚未发送首轮的请求可以证明 notStarted，无需进入普通 adapter 的无 thread 控制路径。已经接收的请求只控制其持久的 generation/thread/turn；收到 interrupt ACK 后仍须读取同一个 turn 的终态才能证明停止。原生首轮接受后的空 rollout 属于有限预算内的启动竞争，允许在 generation fence 内重读，不视为空闲。已自然结算的精确 turn 无需再次 interrupt。
 
 AbortSignal、caller 超时与显式取消使用同一持久取消协议。确认停止后 cancelled/timeout 为 offline 并允许下一请求使用容量；拒绝控制、连接中断、generation 身份失效或 ACK 后仍 active 时，保持 cancelling/unknown 和原容量保留，返回 cancellation_pending。调用方可以重试取消取得真实结算证据；不得 kill 共享 realm，不能仅凭已发送 frame、RPC ACK 或 caller 截止宣称模型停止。断连 running 的原恢复语义不变。
+
+跨进程取消共用独立的原生控制互斥；控制 RPC 不占用会话 record 锁，observer 可以保存身份并结束。取消开始及结算均在短 record 事务内重读当前记录；同一精确原生身份的 nativeStopped 终态证明不能被迟到的开始、失败、超时或 observer 诊断降回 cancelling。已收到 ACK 的历史也在重试中保留，返回结果来自实际持久结算。已绑定的 thread/turn 不能被不同迟到身份替换；同一身份的补全仍可保存。外部取消完成后，原 caller 撤销本地观察，新的无 Dashboard 进程可从持久证明释放容量并派发不同请求键。损坏的取消状态仅通过正式取消入口重读精确原生终态恢复，不手工清除容量或改写记录。

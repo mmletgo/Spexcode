@@ -8,6 +8,7 @@ import { codexStructuredTurn, codexStopStructuredTurn } from './codex-harness.js
 import { commitCodexGenerationRegistration, prepareCodexGenerationRegistration, readCodexGenerationLedger } from './codex-runtime-generations.js'
 import { structuredGeneration, prepareStructuredRealm, StructuredSessionError, StructuredSessionTransportError, type StructuredExecution } from './session-structured-policy.js'
 import { configuredSessionApplication } from './session-application.js'
+import { withDeliveryLocks } from './delivery-lock.js'
 export { StructuredSessionError } from './session-structured-policy.js'
 
 export type StructuredSessionRequest = {
@@ -44,6 +45,9 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
     await withRecordLock(id, async () => {
       const current = readRecord(id)
       if (!current?.structuredExecution) throw new StructuredSessionError('failed', 'structured session record disappeared')
+      for (const field of ['threadId', 'turnId'] as const)
+        if (current.structuredExecution[field] && change[field] && current.structuredExecution[field] !== change[field])
+          throw new StructuredSessionError('stale_result', `structured ${field} cannot replace its pinned identity`)
       if (['cancelling', 'cancelled', 'timeout'].includes(current.structuredExecution.state ?? '') && (change.state !== undefined || change.turnStartRequested !== undefined) && change.state !== current.structuredExecution.state)
         throw new StructuredSessionError(current.structuredExecution.cancellation?.reason ?? 'cancelled', current.structuredExecution.error || 'structured execution has already stopped')
       writeRecord({ ...current, structuredExecution: { ...current.structuredExecution, ...change } })
@@ -57,9 +61,11 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
       onTimeout: async () => { await cancelStructuredSession(id, { reason: 'timeout' }) },
       onTurnStarting: async () => update({ turnStartRequested: true }),
       onThread: async (threadId) => {
-        prepareCodexGenerationRegistration(runtimeDir, id, threadId, endpoint.id)
         await withRecordLock(id, async () => {
           const current = readRecord(id)!
+          if ((current.structuredExecution?.threadId && current.structuredExecution.threadId !== threadId) || (current.harnessSessionId && current.harnessSessionId !== threadId))
+            throw new StructuredSessionError('stale_result', 'structured thread cannot replace its pinned identity')
+          prepareCodexGenerationRegistration(runtimeDir, id, threadId, endpoint.id)
           writeRecord({ ...current, harnessSessionId: threadId, structuredExecution: { ...current.structuredExecution!, threadId, turnStartRequested: false } })
         })
         commitCodexGenerationRegistration(runtimeDir, id, threadId, endpoint.id)
@@ -135,12 +141,12 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
         const stopped = await cancel(state.cancellation?.reason ?? 'cancelled')
         throw new StructuredSessionError(stopped.nativeStopped ? state.cancellation?.reason ?? 'cancelled' : 'cancellation_pending', stopped.error || 'structured cancellation settled')
       }
-      if ((state.state === 'cancelled' || state.state === 'timeout') && !state.cancellation?.nativeStopped) {
+      if (state.state === 'cancelled' || state.state === 'timeout') {
         const stopped = await cancel(state.state)
         throw new StructuredSessionError(stopped.nativeStopped ? state.state : 'cancellation_pending', stopped.error || 'structured cancellation settlement recovered')
       }
-      if (state.state === 'failed' || state.state === 'cancelled' || state.state === 'timeout')
-        throw new StructuredSessionError(state.state === 'failed' ? 'failed' : state.state, state.error || `structured execution ${state.state}`)
+      if (state.state === 'failed')
+        throw new StructuredSessionError('failed', state.error || 'structured execution failed')
       if (rec?.status === 'error' && state.state === 'running' && !recoveryRequested) {
         recoveryRequested = true
         await queueStructuredRecovery(id)
@@ -179,7 +185,9 @@ export async function cancelStructuredSession(id: string, options: { reason?: 'c
     throw new StructuredSessionError('failed', 'structured cancellation needs a valid reason and positive bounded deadline', { sessionId: id })
   const existing = cancellations.get(id)
   if (existing) return existing
-  const flight = (async (): Promise<StructuredCancellationResult> => {
+  // This control lock is distinct from the record lock: native RPC may wait while the observer
+  // persists its exact identities and finishes. Cross-process callers join the same native cancellation.
+  const flight = withDeliveryLocks([`structured-cancel-${id}`], async (): Promise<StructuredCancellationResult> => {
     let reason = options.reason ?? 'cancelled'
     const before = await withRecordLock(id, async () => {
       const rec = readRecord(id)
@@ -188,14 +196,19 @@ export async function cancelStructuredSession(id: string, options: { reason?: 'c
       if (execution.state === 'completed' || execution.cancellation?.nativeStopped) return rec
       reason = execution.cancellation?.reason ?? reason
       writeRecord({ ...rec, stopped: true, structuredExecution: { ...execution, state: 'cancelling', cancellation: {
-        reason, requestedAt: execution.cancellation?.requestedAt ?? Date.now(), nativeStopped: false, acknowledged: false,
+        reason, requestedAt: execution.cancellation?.requestedAt ?? Date.now(), nativeStopped: false, acknowledged: execution.cancellation?.acknowledged ?? false,
       } } })
       return readRecord(id)!
     })
     const execution = before.structuredExecution!
-    if (execution.state === 'completed' || execution.cancellation?.nativeStopped)
+    if (execution.state === 'completed' || execution.cancellation?.nativeStopped) {
+      if (execution.cancellation?.nativeStopped) {
+        activeControllers.get(id)?.abort()
+        await activeFinished.get(id)
+      }
       return { sessionId: id, state: execution.state!, threadId: execution.threadId, turnId: execution.turnId,
         nativeStopped: true, acknowledged: execution.cancellation?.acknowledged ?? false, nativeStatus: execution.cancellation?.nativeStatus ?? execution.state }
+    }
     activeControllers.get(id)?.abort()
     const finished = activeFinished.get(id)
     if (finished && (execution.turnStartRequested || execution.turnId)) await finished
@@ -211,19 +224,24 @@ export async function cancelStructuredSession(id: string, options: { reason?: 'c
       else stop = await codexStopStructuredTurn(runtimeDir, generation.endpoint, state.threadId, state.turnId,
         readFileSync(sessionArtifactPath(id, 'launch'), 'utf8'), options.timeoutMs ?? 15_000)
     }
-    await withRecordLock(id, async () => {
+    const result = await withRecordLock(id, async (): Promise<StructuredCancellationResult> => {
       const latest = readRecord(id)!, pinned = latest.structuredExecution!
-      const cancellation = { reason, requestedAt: pinned.cancellation!.requestedAt, ...stop }
+      // A late native refusal/timeout cannot downgrade an already durable exact stop proof.
+      if (pinned.cancellation?.nativeStopped)
+        return { sessionId: id, state: pinned.state!, threadId: pinned.threadId, turnId: pinned.turnId,
+          nativeStopped: true, acknowledged: pinned.cancellation.acknowledged, nativeStatus: pinned.cancellation.nativeStatus }
+      const cancellation = { reason, requestedAt: pinned.cancellation!.requestedAt, ...stop, acknowledged: stop.acknowledged || pinned.cancellation!.acknowledged }
       const next = stop.nativeStopped ? reason : 'cancelling'
       const note = stop.nativeStopped ? `structured execution ${reason}; native ${stop.nativeStatus}` : `structured cancellation pending: ${stop.error}`
       configuredSessionApplication().transitionSession(id, { status: 'error', proposal: null, note })
       writeRecord({ ...latest, status: 'error', proposal: null, note, launchOwner: null, launchReadinessStartedAt: null,
         structuredExecution: { ...pinned, state: next, ...(stop.turnId ? { turnId: stop.turnId } : {}), cancellation, error: note } })
+      return { sessionId: id, state: next, threadId: pinned.threadId, turnId: stop.turnId ?? pinned.turnId, ...stop, acknowledged: cancellation.acknowledged }
     })
     const { refreshQueueCandidate, requestQueueDrain } = await import('./sessions.js')
     refreshQueueCandidate(id); requestQueueDrain()
-    return { sessionId: id, state: stop.nativeStopped ? reason : 'cancelling', threadId: state.threadId, turnId: stop.turnId ?? state.turnId, ...stop }
-  })()
+    return result
+  })
   cancellations.set(id, flight)
   try { return await flight } finally { if (cancellations.get(id) === flight) cancellations.delete(id) }
 }

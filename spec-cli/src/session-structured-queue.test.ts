@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url'
 
 // Exercise the complete creation/queue/native-result path with a local RPC executor and no model calls.
 // A separate process starts in the fixture repo so the existing project-scoped layout caches stay truthful.
-for (const scenario of ['sequential', 'cancel', 'materializing', 'abort', 'timeout', 'queued', 'refused', 'ack-active']) test(`structured queue ${scenario} preserves native control and maxActive=1`, { skip: process.platform !== 'darwin' }, () => {
+for (const scenario of ['sequential', 'cancel', 'materializing', 'abort', 'timeout', 'queued', 'refused', 'ack-active', 'cross-process']) test(`structured queue ${scenario} preserves native control and maxActive=1`, { skip: process.platform !== 'darwin' }, () => {
   const root = mkdtempSync(join(tmpdir(), 'spex-structured-queue-')), repo = join(root, 'repo'), bin = join(root, 'bin')
   try {
     mkdirSync(join(repo, '.spec'), { recursive: true }); mkdirSync(bin)
@@ -32,7 +32,7 @@ const server=createServer(socket=>{let buffer=Buffer.alloc(0),upgraded=false;
   else if(m.method==='mcpServerStatus/list')result={data:[],nextCursor:null};
   else if(m.method==='thread/start'){const id='thread-'+(++counter);const thread={id,turns:[]};threads.set(id,thread);result={thread};}
   else if(m.method==='turn/start'){const thread=threads.get(m.params.threadId);const turn={id:'turn-'+counter,status:m.params.input[0].text.includes('hold')?'inProgress':'completed',items:[{type:'userMessage',content:m.params.input},{type:'agentMessage',phase:'final_answer',text:JSON.stringify({answer:m.params.input[0].text.includes('first')?'first':'second'})}]};thread.turns.push(turn);result={turn:{id:turn.id}};if(turn.status==='completed')setTimeout(()=>send({method:'turn/completed',params:{threadId:thread.id,turn}}),5);}
-  else if(m.method==='turn/interrupt'){const thread=threads.get(m.params.threadId),turn=thread.turns.find(t=>t.id===m.params.turnId);if(thread.turns[0].items[0].content[0].text.includes('refused')){send({id:m.id,error:{message:'fixture refused exact interruption'}});return;}result={};if(!thread.turns[0].items[0].content[0].text.includes('ack-active'))setTimeout(()=>{turn.status='interrupted';send({method:'turn/completed',params:{threadId:thread.id,turn}})},50);}
+  else if(m.method==='turn/interrupt'){const thread=threads.get(m.params.threadId),turn=thread.turns.find(t=>t.id===m.params.turnId);if(thread.turns[0].items[0].content[0].text.includes('cross-process')){thread.interrupts=(thread.interrupts||0)+1;if(thread.interrupts>1)return;}if(thread.turns[0].items[0].content[0].text.includes('refused')){send({id:m.id,error:{message:'fixture refused exact interruption'}});return;}result={};if(!thread.turns[0].items[0].content[0].text.includes('ack-active'))setTimeout(()=>{turn.status='interrupted';send({method:'turn/completed',params:{threadId:thread.id,turn}})},thread.turns[0].items[0].content[0].text.includes('cross-process')?350:50);}
   else if(m.method==='thread/read'||m.method==='thread/resume')result={thread:threads.get(m.params.threadId)};
   else if(m.method==='thread/turns/list'){if(threads.get(m.params.threadId).turns[0].items[0].content[0].text.includes('materializing')&&reads++<2){send({id:m.id,error:{message:'rollout at fixture is empty'}});return;}result={data:threads.get(m.params.threadId).turns};}
   else if(m.method==='thread/loaded/list')result={data:[...threads.keys()]};
@@ -56,7 +56,7 @@ import {sessionIdForCreateKey,listSessions} from ${JSON.stringify(sessions)};
 import {readRecord} from ${JSON.stringify(records)};
 import {currentCodexGeneration} from ${JSON.stringify(generations)};
 import {runtimeRoot,verifyDetachedRuntime} from ${JSON.stringify(core)};
-import {readFileSync,writeFileSync} from 'node:fs';import {join} from 'node:path';
+import {readFileSync,writeFileSync} from 'node:fs';import {join} from 'node:path';import {spawn,spawnSync} from 'node:child_process';
 const results=[];let error;let cancellation;const scenario=${JSON.stringify(scenario)};
 const request=(answer,key,timeoutMs=3000)=>({root:process.cwd(),requestKey:key,inputDigest:'frozen-'+key,purpose:'queue-regression',prompt:'Return '+answer,schema:{type:'object',properties:{answer:{type:'string'}},required:['answer'],additionalProperties:false},timeoutMs});
 const wait=async check=>{const until=Date.now()+2500;while(!check()){if(Date.now()>until)throw new Error('fixture native turn never started');await new Promise(r=>setTimeout(r,10));}};
@@ -71,16 +71,26 @@ try{
    if(!neverStarted.nativeStopped||neverStarted.nativeStatus!=='notStarted'||readRecord(queuedId).harnessSessionId)throw new Error('queued cancellation guessed a native target');
    results.push(await queued);
   }
-  if(scenario==='abort')controller.abort();
-  if(scenario==='timeout'||scenario==='abort'){results.push(await active);cancellation=readRecord(id).structuredExecution.cancellation;}
-  else{cancellation=await cancelStructuredSession(id,{timeoutMs:scenario==='materializing'?1000:300});results.push(await active);}
+  if(scenario==='cross-process'){
+   const external=join(${JSON.stringify(root)},'external.mts');writeFileSync(external,'import {cancelStructuredSession} from '+JSON.stringify(${JSON.stringify(source)})+';import {writeFileSync} from "node:fs";const result=await cancelStructuredSession('+JSON.stringify(id)+',{timeoutMs:2000});writeFileSync('+JSON.stringify(${JSON.stringify(join(root,'external.json'))})+',JSON.stringify(result));process.exit();');
+   await new Promise((resolve,reject)=>{const child=spawn(process.execPath,['--import',${JSON.stringify(createRequire(import.meta.url).resolve('tsx/esm'))},external],{stdio:'inherit'});child.on('error',reject);child.on('close',code=>code===0?resolve():reject(new Error('external cancellation failed')))});
+   cancellation=JSON.parse(readFileSync(${JSON.stringify(join(root,'external.json'))},'utf8'));results.push(await active);
+   if(!readRecord(id).structuredExecution.cancellation.nativeStopped||readRecord(id).structuredExecution.state!=='cancelled'||results[0].error?.code!=='cancelled'||!readRecord(id).note.includes('native interrupted'))throw new Error('late owner cancellation downgraded externally confirmed native settlement');
+   const restart=join(${JSON.stringify(root)},'restart.mts');writeFileSync(restart,'import {runStructuredSession,cancelStructuredSession} from '+JSON.stringify(${JSON.stringify(source)})+';import {writeFileSync} from "node:fs";const settled=await cancelStructuredSession('+JSON.stringify(id)+',{reason:"timeout"});if(settled.state!=="cancelled"||!settled.nativeStopped||!settled.acknowledged||settled.nativeStatus!=="interrupted")throw new Error("late cancellation begin downgraded terminal proof");const result=await runStructuredSession('+JSON.stringify(request('second','queue-after-restart'))+');writeFileSync('+JSON.stringify(${JSON.stringify(join(root,'restart.json'))})+',JSON.stringify(result));process.exit();');
+   const next=spawnSync(process.execPath,['--import',${JSON.stringify(createRequire(import.meta.url).resolve('tsx/esm'))},restart],{encoding:'utf8',timeout:5000});if(next.status!==0)throw new Error('new embedded process did not start next unique request: '+next.stderr);results.push(JSON.parse(readFileSync(${JSON.stringify(join(root,'restart.json'))},'utf8')));
+  }
+  else if(scenario==='abort')controller.abort();
+  if(scenario!=='cross-process'){
+   if(scenario==='timeout'||scenario==='abort'){results.push(await active);cancellation=readRecord(id).structuredExecution.cancellation;}
+   else{cancellation=await cancelStructuredSession(id,{timeoutMs:scenario==='materializing'?1000:300});results.push(await active);}
+  }
   if(scenario==='refused'||scenario==='ack-active'){
    const row=(await listSessions()).find(s=>s.id===id);if(cancellation.nativeStopped||readRecord(id).structuredExecution.state!=='cancelling'||row.liveness!=='unknown')throw new Error('unconfirmed native stop became falsely terminal');
    try{await runStructuredSession(request('second','queue-blocked',300));throw new Error('unconfirmed native task released its model capacity');}catch(e){if(e.code!=='timeout')throw e;}
   }else{
    if(!cancellation.nativeStopped||!cancellation.acknowledged||cancellation.nativeStatus!=='interrupted')throw new Error('cancellation lacks acknowledged exact native settlement');
    if(scenario==='timeout'&&results[0].error.code!=='timeout')throw new Error('timeout lost its reason');
-   results.push(await runStructuredSession(request('second','queue-after-stop')));
+   if(scenario!=='cross-process')results.push(await runStructuredSession(request('second','queue-after-stop')));
   }
  }
 }

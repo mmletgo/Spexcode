@@ -1219,17 +1219,24 @@ async function startQueuedUnlocked(id: string): Promise<QueuedStartResult> {
   if (wt.rec.structuredExecution) {
     launching.add(id)
     void import('./session-structured.js').then(({ executeQueuedStructuredSession }) => executeQueuedStructuredSession(id))
-      .then(async (outcome) => {
+      .then(async () => {
         await withRecordLock(id, async () => {
           const current = readRecord(id)
           if (!current) return
-          publishCanonicalLifecycle(current, outcome === 'completed' ? 'awaiting' : 'error', outcome === 'completed' ? 'nothing' : null, current.structuredExecution?.error ?? null)
+          const completed = current.structuredExecution?.state === 'completed'
+          publishCanonicalLifecycle(current, completed ? 'awaiting' : 'error', completed ? 'nothing' : null, current.structuredExecution?.error ?? null)
           writeRecord({ ...current, launchOwner: null, launchReadinessStartedAt: null })
         })
       }).catch(async (error) => {
         await withRecordLock(id, async () => {
           const current = readRecord(id)
-          if (current) publishCanonicalLifecycle(current, 'error', null, error instanceof Error ? error.message : String(error))
+          if (current) {
+            const execution = current.structuredExecution!
+            const completed = execution.state === 'completed'
+            const durable = completed || execution.cancellation?.nativeStopped || execution.state === 'cancelling'
+            publishCanonicalLifecycle(current, completed ? 'awaiting' : 'error', completed ? 'nothing' : null,
+              durable ? execution.error ?? current.note : error instanceof Error ? error.message : String(error))
+          }
         })
       }).finally(() => { launching.delete(id); requestQueueDrain() })
     return 'started'
