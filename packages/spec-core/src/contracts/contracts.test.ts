@@ -173,6 +173,67 @@ test('ID全局唯一、引用类型/归属、依赖循环；正常失败重试�
   assert.ok(row.acceptanceIds.length > 0)
 })
 
+test('REQ、实现及验收各自归属节点时，推导关系仍绑定叶实现', () => {
+  const contract = parse()
+  const req = contract.items.find((item) => item.kind === 'REQ')!
+  const parent: Contract = { ...contract, nodeId: 'parent', path: 'parent/spec.md', code: [],
+    items: [{ ...req, nodeId: 'parent', path: 'parent/spec.md' }] }
+  const leaf: Contract = { ...contract, items: contract.items.filter((item) => !['REQ', 'AC', 'VERIFY'].includes(item.kind)) }
+  const acceptance: Contract = { ...contract, nodeId: 'acceptance', path: 'acceptance/spec.md', code: [],
+    items: contract.items.filter((item) => ['AC', 'VERIFY'].includes(item.kind)).map((item) => ({ ...item, nodeId: 'acceptance', path: 'acceptance/spec.md' })) }
+  const unrelated: Contract = { ...contract, nodeId: 'unrelated', path: 'unrelated/spec.md', code: ['src/unrelated.js'],
+    items: [{ ...req, id: 'REQ-OTHER-01', nodeId: 'unrelated', path: 'unrelated/spec.md' }] }
+  const graph = buildContractGraph([parent, leaf, acceptance, unrelated])
+  const row = projectContractCoverage(graph).items.find((item) => item.id === req.id)!
+  assert.equal(row.status, 'bound')
+  assert.deepEqual(row.code, ['src/export.js#ExportService'])
+  assert.ok(!validateContractGraph(graph, { files }).some((finding) => finding.itemId === req.id && finding.code === 'missing-implementation'))
+  assert.deepEqual(errors(validateContractGraph(buildContractGraph([parent, leaf, acceptance]), { files })), [])
+})
+
+test('AC可覆盖全部业务项，VERIFY仍不能冒充业务覆盖', () => {
+  const contract = parse()
+  const ac = contract.items.find((item) => item.kind === 'AC')!
+  if (ac.kind !== 'AC') throw new Error('夹具缺少 AC')
+  for (const kind of ['FLOW', 'STEP', 'STATE', 'EVENT'] as const) {
+    const covered = contract.items.find((item) => item.kind === kind)!
+    ac.covers.push(covered.id)
+    const graph = buildContractGraph([contract])
+    assert.deepEqual(errors(validateContractGraph(graph, { files })), [])
+    assert.ok(projectContractCoverage(graph).items.find((item) => item.id === covered.id)!.acceptanceIds.includes(ac.id))
+  }
+  ac.covers.push('VERIFY-EXPORT-01')
+  assert.ok(validateContractGraph(buildContractGraph([contract]), { files }).some((finding) => finding.code === 'reference-kind' && finding.itemId === ac.id))
+})
+
+test('真实Node测试导入别名保留静态标题，注释和字符串不能声明别名', () => {
+  const graph = buildContractGraph([parse()])
+  const fake = new Map(files)
+  for (const source of [
+    "import { test as check } from 'node:test'; check('AC-EXPORT-01 创建并完成', () => {});",
+    "import { it as check } from 'node:test'; check('AC-EXPORT-01 创建并完成', () => {});",
+    "import check from 'node:test'; check('AC-EXPORT-01 创建并完成', () => {});",
+    "check('AC-EXPORT-01 创建并完成', () => {}); import { test as check } from 'node:test';",
+  ]) {
+    fake.set('tests/export.test.mjs', source)
+    assert.ok(!validateContractGraph(graph, { files: fake }).some((finding) => finding.code === 'missing-test-case' && finding.itemId === 'AC-EXPORT-01'))
+    const output = execFileSync(process.execPath, ['--input-type=module', '-e', source], {
+      encoding: 'utf8', env: { ...process.env, NODE_TEST_CONTEXT: undefined },
+    })
+    assert.match(output, /ok 1 - AC-EXPORT-01 创建并完成/)
+  }
+  for (const source of [
+    "// import { test as check } from 'node:test';\ncheck('AC-EXPORT-01 注释', () => {});",
+    "/* import { test as check } from 'node:test'; */ check('AC-EXPORT-01 注释', () => {});",
+    'const example = "import { test as check } from \'node:test\';"; check("AC-EXPORT-01 示例", () => {});',
+    "import { test as check } from 'unrelated-library'; check('AC-EXPORT-01 非测试API', () => {});",
+    "import { test as check } from 'node:test'; check('AC-EXPORT-01-OTHER 其他ID', () => {});",
+  ]) {
+    fake.set('tests/export.test.mjs', source)
+    assert.ok(validateContractGraph(graph, { files: fake }).some((finding) => finding.code === 'missing-test-case' && finding.itemId === 'AC-EXPORT-01'))
+  }
+})
+
  test('非终态无出口、不可达状态、跨对象事件和未解释无状态分支被拒绝', () => {
   const contract = parse()
   const changed = structuredClone(contract)

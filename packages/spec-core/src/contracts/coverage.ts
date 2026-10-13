@@ -21,7 +21,10 @@ export function projectContractCoverage(graph: ContractGraph): ContractCoverage 
   })
   const items = [...graph.items.values()].filter((item): item is BusinessItem => item.kind !== 'VERIFY').map((item) => {
     const bindings = acceptanceBindings(graph, item)
-    const code = sorted([...(graph.owners.get(item.id)?.code ?? []), ...bindings.flatMap((ac) => graph.owners.get(ac.id)?.code ?? [])])
+    const code = sorted([
+      ...dependencyClosure(graph, [item.id]).flatMap((id) => graph.owners.get(id)?.code ?? []),
+      ...bindings.flatMap((ac) => graph.owners.get(ac.id)?.code ?? []),
+    ])
     return { id: item.id, kind: item.kind, nodeId: item.nodeId, status: bindings.length && code.length ? 'bound' as const : 'declared' as const,
       acceptanceIds: sorted(bindings.map((ac) => ac.id)), code: [...code], tests: sorted(bindings.map((ac) => ac.test)),
       verifyIds: sorted(bindings.map((ac) => ac.command)), blockedBy: gaps.filter((gap) => gap.affectedIds.includes(item.id)).map((gap) => gap.id).sort() }

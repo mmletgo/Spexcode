@@ -7,11 +7,26 @@ import type { ContractFinding, ContractGraph, ContractItem, ContractValidationCo
 function declaresTestCase(source: string, caseId: string): boolean {
   const escaped = caseId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   const id = new RegExp(`(?:^|[^A-Z0-9-])${escaped}(?![A-Z0-9-])`)
+  const testNames = new Set(['test', 'it'])
+  const declarations: { name: string; title: string }[] = []
   for (let at = 0; at < source.length;) {
     if (source.startsWith('//', at)) { const end = source.indexOf('\n', at + 2); at = end < 0 ? source.length : end + 1; continue }
     if (source.startsWith('/*', at)) { const end = source.indexOf('*/', at + 2); at = end < 0 ? source.length : end + 2; continue }
-    const call = !/[\w$]/.test(source[at - 1] ?? '') && source.slice(at).match(/^(?:test|it)(?:\.(?:only|skip|todo))?\s*\(\s*(['"`])/)
-    const quote = call ? call[1] : source[at]
+    const boundary = !/[\w$]/.test(source[at - 1] ?? '')
+    const imported = boundary && source.slice(at).match(/^import\s+([^;'"]+?)\s+from\s*(['"])(node:test|vitest|@jest\/globals|bun:test)\2/)
+    if (imported) {
+      const bindings = imported[1].replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, '').trim()
+      const defaultName = bindings.match(/^([A-Za-z_$][\w$]*)(?:\s*,|$)/)
+      if (imported[3] === 'node:test' && defaultName) testNames.add(defaultName[1])
+      for (const entry of bindings.match(/\{([^}]+)\}/)?.[1].split(',') ?? []) {
+        const alias = entry.trim().match(/^(?:test|it)\s+as\s+([A-Za-z_$][\w$]*)$/)
+        if (alias) testNames.add(alias[1])
+      }
+      at += imported[0].length
+      continue
+    }
+    const call = boundary && source.slice(at).match(/^([A-Za-z_$][\w$]*)(?:\.(?:only|skip|todo))?\s*\(\s*(['"`])/)
+    const quote = call ? call[2] : source[at]
     if (quote === "'" || quote === '"' || quote === '`') {
       at += call ? call[0].length : 1
       let title = ''
@@ -20,12 +35,12 @@ function declaresTestCase(source: string, caseId: string): boolean {
         title += source[at++]
       }
       at++
-      if (call && id.test(title)) return true
+      if (call) declarations.push({ name: call[1], title })
       continue
     }
     at++
   }
-  return false
+  return declarations.some(({ name, title }) => testNames.has(name) && id.test(title))
 }
 
 export function validateContractGraph(graph: ContractGraph, context: ContractValidationContext = {}): ContractFinding[] {

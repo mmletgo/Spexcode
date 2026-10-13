@@ -16,7 +16,7 @@ export function contractReferences(item: ContractItem): ContractReference[] {
     case 'FLOW': add('req', item.req, ['REQ']); add('steps', item.steps, ['STEP']); add('terminal', item.terminal, ['STATE']); break
     case 'STEP': add('flow', item.flow, ['FLOW']); add('rules', item.rules, ['RULE']); add('next', item.next, ['STEP', 'TR', 'STATE']); break
     case 'TR': add('from', item.from, ['STATE']); add('event', item.event, ['EVENT']); add('to', item.to, ['STATE']); add('rules', item.rules, ['RULE']); break
-    case 'AC': add('covers', item.covers, ['REQ', 'RULE', 'TR']); add('command', item.command, ['VERIFY']); break
+    case 'AC': add('covers', item.covers, BUSINESS); add('command', item.command, ['VERIFY']); break
     case 'GAP': add('affects', item.affects, BUSINESS); break
   }
   return refs
