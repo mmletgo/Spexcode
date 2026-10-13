@@ -17,6 +17,8 @@ driver 将白名单 UTF-8 夹具复制到独立真实 Git 仓库，capture 原�
 
 复用 elaborate、readFrozenContracts、runGeneration、checkGenerationContractIntent、freezeCandidate、planAcceptanceRuns 和 Docker executor；原 raw/REQ/AC/VERIFY 不得弱化，所有细化 AC 是必需验证集，加可信 oracle IDs。模型只可写详细叶 Spec、实现和新增 generated tests；实际完整 diff 门禁保护 oracle/facts/package。完整白名单文本进入生成，graph/完整派生图不序列化。冻结后只读导出无 Git/共享 node_modules，用固定官方 Node digest、linux/arm64、明确 cwd 和资源预算执行；unsupported 保留原因且不平台重试或宿主 fallback。
 
+在创建输入与任何 native 派发前，直接引用生产 ELABORATION_SCHEMA 的 VERIFY.id 与 AC.command 子 schema 校验可信登记 ID，固定登记为 VERIFY-EXPORT-01。不能把夹具自己不合法的技术 ID 与硬 schema 冲突归为用户业务 GAP；修正此类输入必须形成新的事实、冻结摘要及独立审查证据，不修改旧模型输出冒充合格。
+
 输入、输出、派发、原生身份、候选 manifest/actual diff、Docker 政策/检查点/结果保存指定用户可视化目录的 p2-export-preflight 独立 run 子目录；不复制认证、runtime 或 home。结束复核源 snapshot/index 未改；不 apply、commit 候选、发布 refs 到用户分支、结算 receipt 或标 synced。仅 library-preflight:passed 可代表这一限定预验，最终完整 P2 仍需真实产品协调与交付入口验收。
 
 运行：`npx tsx spec-cli/test/p2-export-preflight.ts <用户可视化目录>/p2-export-preflight`；针对类型：`npm run typecheck`；lint：`npx eslint spec-cli/test/p2-export-preflight*.ts spec-cli/test/fixtures/spec-sync/export-implementation-repo/trusted-oracle/*.mjs`。

@@ -4,10 +4,12 @@ import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { Ajv } from 'ajv'
 import { parseParts } from '@spexcode/spec-core/contracts'
 import type { Acceptance, ContractFinding } from '@spexcode/spec-core/contracts'
 import { runStructuredSession } from '../src/session-structured.js'
 import { elaborate, elaborationDigest } from '../src/sync/elaboration.js'
+import { ELABORATION_SCHEMA } from '../src/sync/elaboration-schema.js'
 import type { ElaborationRunner } from '../src/sync/elaboration-types.js'
 import { runGeneration } from '../src/sync/generation.js'
 import { checkGenerationContractIntent, readFrozenContracts } from '../src/sync/frozen-contracts.js'
@@ -20,13 +22,21 @@ import { executeVerification, verificationExportDigest } from '../src/sync/verif
 export const FIXTURE_FILES = ['AGENTS.md', 'package.json', 'fixture-facts.txt', '.spec/export/spec.md', '.spec/export/export-contract/spec.md', 'trusted-oracle/export.oracle.test.mjs'] as const
 export const WRITE_PATHS = ['.spec/export/export-contract/spec.md', 'src/export.js', 'tests/export.generated.test.mjs']
 export const ORACLE_IDS = ['ORACLE-ROWS', 'ORACLE-IDEMPOTENCY', 'ORACLE-INVALID', 'ORACLE-OWNER', 'ORACLE-CALLBACKS', 'ORACLE-ATTEMPTS', 'ORACLE-RACES', 'ORACLE-RETRY-STATE']
-export const VERIFICATION = { id: 'VERIFY-EXPORT', command: ['node', '--test', 'tests/export.generated.test.mjs', 'trusted-oracle/export.oracle.test.mjs'], cwd: '.', timeoutMs: 30_000 }
+export const VERIFICATION = { id: 'VERIFY-EXPORT-01', command: ['node', '--test', 'tests/export.generated.test.mjs', 'trusted-oracle/export.oracle.test.mjs'], cwd: '.', timeoutMs: 30_000 }
 const sourceDirectory = dirname(fileURLToPath(import.meta.url))
 const fixtureDirectory = join(sourceDirectory, 'fixtures/spec-sync/export-implementation-repo')
 const contractPath = '.spec/export/export-contract/spec.md'
+const registrationSchema = new Ajv().addSchema(ELABORATION_SCHEMA, 'elaboration')
+const validVerifyId = registrationSchema.compile({ $ref: 'elaboration#/properties/changes/items/properties/tables/properties/VERIFY/items/properties/id' })
+const validAcceptanceCommand = registrationSchema.compile({ $ref: 'elaboration#/properties/changes/items/properties/tables/properties/AC/items/properties/command' })
+
+export function assertVerificationRegistrationId(id: string): void {
+  if (!validVerifyId(id) || !validAcceptanceCommand(id)) throw new Error(`验证登记不符合生产 VERIFY ID/AC.command schema: ${id}`)
+}
 
 /** 独立 fixture 冻结业务输入；native 库级桥固定使用真实后端 commit，不冒充产品交付入口。 */
 export async function runExportPreflight(outputParent: string): Promise<{ status: string; evidenceDirectory: string }> {
+  assertVerificationRegistrationId(VERIFICATION.id)
   const backendRoot = resolve(sourceDirectory, '../..'), backendBase = execFileSync('git', ['-C', backendRoot, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
   const runId = randomUUID(), evidenceDirectory = join(resolve(outputParent), `run-${runId}`)
   mkdirSync(evidenceDirectory, { recursive: true })

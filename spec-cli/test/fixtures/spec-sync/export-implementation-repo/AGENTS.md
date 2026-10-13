@@ -4,4 +4,4 @@
 
 只允许生成或修改 `.spec/export/export-contract/spec.md`、`src/export.js`、`tests/export.generated.test.mjs`。原始需求、facts、package、oracle 与本指令不可修改。必须生成自己的完整业务测试，不能复制 oracle。
 
-运行：`node --test tests/export.generated.test.mjs trusted-oracle/export.oracle.test.mjs`。所有 AC 绑定 generated tests 的稳定标题 ID；固定 VERIFY-EXPORT 使用上述 argv、cwd `.`、timeoutMs `30000`。代码治理锚点只有实现存在后添加。
+运行：`node --test tests/export.generated.test.mjs trusted-oracle/export.oracle.test.mjs`。所有 AC 绑定 generated tests 的稳定标题 ID；固定 VERIFY-EXPORT-01 使用上述 argv、cwd `.`、timeoutMs `30000`。代码治理锚点只有实现存在后添加。
