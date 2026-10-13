@@ -25,3 +25,5 @@ adopter control envelope 仅派发协调身份，不作为普通 Agent 文本。
 每次原生调用先 reserveDispatch 原子预留 maxCalls/callsUsed 与截止时间；attempt 保存完整派发计划数组，稳定 sessionCreateKey 按调用 key 生成，各原生引用不可替换。交付树首次创建前 operation 保存 deliveryPlan，delivery 初始可空，后续绑定真实物理身份。attempt 的 composedInput 与原始 operation.input 分开，包含 sourceInputId、previousBaselinePairId 和组合 tree/manifest/contentDigest。验证引用绑定 policy/readSet/environment/context 摘要；result blob 使用 schemaVersion=1，V1至V4 每层恰有一个独立 verdict 与证据，不能只信任 passed 布尔值。
 
 候选显式绑定 baseTree=attempt.composedInput.tree 与 sourceInputId=operation.input.id。actualDiffBlob 表示组合输入→候选的模型差量；ApplyPlan.files 表示真实交付目标→候选的应用差量，两者不能混同。VerificationResultBlob 同时保存 coveredScope，与外层引用一致，防止扩大窄范围证据。
+
+原生资源计划固定绑定operation/attempt/generation、inputId、candidateDigest、稳定key/kind/payloadDigest及plan blob。verification资源必须绑定已冻结候选；native_session可在冻结前绑定空candidate及固定请求载荷。资源状态为planned→created→terminal→removed，checkpoint正文只存内容寻址引用。更新携expectedCheckpointRef做CAS；相同blob/阶段可幂等重放，迟到观测不能回退阶段或覆盖更完整原生身份。资源观测不授予任何候选、验证或应用写权。

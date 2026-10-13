@@ -78,3 +78,21 @@ export type RecoverableSync = { operation: SyncOperation; attempt: SyncAttempt |
 
 export type VerificationLayerResult = { layer: 'V1' | 'V2' | 'V3' | 'V4'; verdict: 'pass' | 'fail' | 'unsupported'; evidenceRefs: BlobRef[] }
 export type VerificationResultBlob = { schemaVersion: 1; coveredScope: SyncScope; inputId: string; candidateDigest: string; policyDigest: string; readSetDigest: string; environmentDigest: string; contextDigest: string; layers: VerificationLayerResult[] }
+
+/** 原生资源状态与业务写入授权分离；removed 才表示容量可释放。 */
+export type SyncResourcePhase = 'planned' | 'created' | 'terminal' | 'removed'
+export type SyncResourcePlan = {
+  key: string; kind: 'verification' | 'native_session'; payloadDigest: string
+  inputId: string; candidateDigest: string | null; planBlob: BlobRef; checkpointRef: BlobRef
+}
+export type SyncResourceRecord = {
+  id: string; operationId: string; attemptId: string; generation: number; plan: SyncResourcePlan
+  phase: SyncResourcePhase; checkpointRef: BlobRef
+  checkpoints: { phase: SyncResourcePhase; checkpointRef: BlobRef }[]
+  createdAtMs: number; updatedAtMs: number
+}
+export type SyncResourceCheckpoint = {
+  operationId: string; attemptId: string; inputId: string; candidateDigest: string | null
+  phase: SyncResourcePhase; expectedCheckpointRef: BlobRef; checkpointRef: BlobRef
+}
+export type RecoverableSyncResource = { operation: SyncOperation; attempt: SyncAttempt; resource: SyncResourceRecord }
