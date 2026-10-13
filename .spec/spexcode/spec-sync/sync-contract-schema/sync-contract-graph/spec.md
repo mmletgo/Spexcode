@@ -16,4 +16,4 @@ code:
 
 引用种类、身份唯一性及阻塞语义遵循 [[sync-contract-schema]]，不另定义规则或表格。`buildContractGraph` 按同步范围建立稳定 ID、节点归属、来源与 depends-on 索引，重复节点或条目保留明确诊断。`contractReferences` 提供每种引用的目标类型；AC 的业务覆盖与 VERIFY 命令引用分开检查。
 
-推导依赖只含来源和 depends-on，允许业务状态与步骤导航循环。`dependencyClosure` 沿来源、推导依赖、规则使用及 AC 覆盖反向扩散，排除流程归属和 next 导航；因此仅重试政策未知不会顺着导航阻塞成功流程。悬空、类型、循环和归属是否有效由 [[sync-contract-validator]] 检查。
+推导依赖只含来源和 depends-on，允许业务状态与步骤导航循环。`dependencyClosure` 沿来源、推导依赖、规则使用、AC 覆盖及 STEP.next 指向 TR 的处置引用反向扩散，排除流程归属、FLOW.steps 及 next 指向 STEP/STATE 的导航；实际执行处置未决时阻塞引用它的步骤，导航相邻步骤及同事件其他状态处置保持独立。悬空、类型、循环和归属是否有效由 [[sync-contract-validator]] 检查。

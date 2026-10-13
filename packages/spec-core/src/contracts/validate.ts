@@ -125,6 +125,15 @@ export function validateContractGraph(graph: ContractGraph, context: ContractVal
   }
   if (!final) return findings
   if (!graph.contracts.length) return findings
+  for (const step of steps) {
+    const refs = contractReferences(step)
+    const eventIds = new Set(refs.filter((ref) => ['depends-on', 'source'].includes(ref.field) && graph.items.get(ref.id)?.kind === 'EVENT').map((ref) => ref.id))
+    const dispositions = refs.filter((ref) => ['next', 'depends-on', 'source'].includes(ref.field))
+      .map((ref) => graph.items.get(ref.id)).filter((item): item is Transition => item?.kind === 'TR')
+    for (const eventId of eventIds) if (!dispositions.some((tr) => tr.event === eventId)) {
+      report('step-event-disposition-missing', `${step.id} 引用 ${eventId}，但未声明该事件的 TR 处置`, step, [eventId])
+    }
+  }
   for (const [kind, values] of [['REQ', reqs], ['RULE', rules], ['AC', acs], ['FLOW', flows], ['STEP', steps]] as const) {
     if (!values.length) report('incomplete-contract', `完成范围缺少 ${kind}；高层输入可以继续细化`, undefined)
   }

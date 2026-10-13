@@ -49,12 +49,13 @@ export function buildContractGraph(contracts: readonly Contract[]): ContractGrap
 }
 
 export function dependencyClosure(graph: ContractGraph, ids: readonly string[]): string[] {
-  // Ownership/navigation edges are deliberately excluded: a retry GAP must not block a successful flow.
+  // STEP.next to TR executes a disposition; STEP/STATE navigation and ownership do not spread blocking.
   const seen = new Set(ids), queue = [...ids]
   const consumers = new Map<string, Set<string>>()
   for (const item of graph.items.values()) {
     for (const ref of contractReferences(item)) {
-      if (!['depends-on', 'source', 'rules', 'covers'].includes(ref.field)) continue
+      if (!['depends-on', 'source', 'rules', 'covers'].includes(ref.field) &&
+        !(item.kind === 'STEP' && ref.field === 'next' && graph.items.get(ref.id)?.kind === 'TR')) continue
       const set = consumers.get(ref.id) ?? new Set<string>()
       set.add(item.id); consumers.set(ref.id, set)
     }

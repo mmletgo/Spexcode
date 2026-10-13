@@ -63,6 +63,66 @@ test('未知重试政策只扩散依赖闭包，成功流程保持独立', () =>
   assert.ok(gap.relatedIds?.includes('AC-EXPORT-08'))
 })
 
+test('仅TR处置GAP阻塞执行STEP，STEP和STATE导航及FLOW归属不传播', () => {
+  const source = baseline.replace('| END | derived:FLOW-EXPORT-01 |', '| STATE-EXPORT-RUNNING | derived:FLOW-EXPORT-01 |')
+  for (const [affected, expected] of [
+    ['TR-EXPORT-RUNNING-FAIL', ['AC-EXPORT-04', 'STEP-EXPORT-03', 'TR-EXPORT-RUNNING-FAIL']],
+    ['STEP-EXPORT-03', ['STEP-EXPORT-03']],
+    ['STATE-EXPORT-RUNNING', ['STATE-EXPORT-RUNNING']],
+  ] as const) {
+    const graph = buildContractGraph([parse(`${source}\n### GAP\n| id | kind | unknown | affects | evidence | decision | source | depends-on |\n|---|---|---|---|---|---|---|---|\n| GAP-EXPORT-DISPOSITION | missing_fact | 该处置政策待决定 | ${affected} | 用户未确认 | 确认该处置政策 | decision:EXPORT-POLICY | - |\n`)])
+    const coverage = projectContractCoverage(graph)
+    assert.deepEqual(coverage.gaps[0].affectedIds, expected)
+    assert.deepEqual(coverage.items.find((item) => item.id === 'STEP-EXPORT-03')!.blockedBy,
+      affected === 'STATE-EXPORT-RUNNING' ? [] : ['GAP-EXPORT-DISPOSITION'])
+    for (const id of ['STEP-EXPORT-02', 'STEP-EXPORT-04', 'FLOW-EXPORT-01']) {
+      assert.deepEqual(coverage.items.find((item) => item.id === id)!.blockedBy, [])
+    }
+    assert.deepEqual(errors(validateContractGraph(graph, { files })).map((finding) => finding.code), ['unresolved-gap'])
+  }
+})
+
+test('限定状态STEP只依赖显式TR，不被同EVENT其他状态的GAP污染', () => {
+  const source = baseline.replace('| derived:FLOW-EXPORT-01 | RULE-EXPORT-03,RULE-EXPORT-05 |',
+    '| derived:FLOW-EXPORT-01 | RULE-EXPORT-03,RULE-EXPORT-05,EVENT-EXPORT-FAIL |')
+  const graph = buildContractGraph([parse(`${source}\n### GAP\n| id | kind | unknown | affects | evidence | decision | source | depends-on |\n|---|---|---|---|---|---|---|---|\n| GAP-EXPORT-QUEUED-FAIL | missing_fact | 排队失败处置待决定 | TR-EXPORT-QUEUED-FAIL | 用户未确认 | 确认排队失败处置 | decision:EXPORT-POLICY | - |\n`)])
+  const coverage = projectContractCoverage(graph)
+  assert.deepEqual(coverage.gaps[0].affectedIds, ['AC-EXPORT-04', 'TR-EXPORT-QUEUED-FAIL'])
+  assert.deepEqual(coverage.items.find((item) => item.id === 'STEP-EXPORT-03')!.blockedBy, [])
+  assert.deepEqual(errors(validateContractGraph(graph, { files })).map((finding) => finding.code), ['unresolved-gap'])
+})
+
+test('完成模式拒绝STEP显式EVENT缺失或错误TR桥接，草稿允许待细化', () => {
+  for (const [sourceRef, dependsOn] of [
+    ['derived:FLOW-EXPORT-01', 'EVENT-EXPORT-START,EVENT-EXPORT-COMPLETE'],
+    ['derived:EVENT-EXPORT-START', 'RULE-EXPORT-03,RULE-EXPORT-04'],
+  ]) for (const next of ['STEP-EXPORT-03', 'STEP-EXPORT-03,TR-EXPORT-RUNNING-FAIL', 'STEP-EXPORT-03,STATE-EXPORT-RUNNING']) {
+    const source = baseline.replace(/^\| STEP-EXPORT-02 .*$/m,
+      `| STEP-EXPORT-02 | FLOW-EXPORT-01 | 开始当前attempt | id,attempt | RUNNING或旧回调原任务 | RULE-EXPORT-03,RULE-EXPORT-04 | ${next} | ${sourceRef} | ${dependsOn} |`)
+    const graph = buildContractGraph([parse(source)])
+    const findings = errors(validateContractGraph(graph, { files }))
+    const eventIds = dependsOn.includes('EVENT-EXPORT-COMPLETE') ? ['EVENT-EXPORT-START', 'EVENT-EXPORT-COMPLETE'] : ['EVENT-EXPORT-START']
+    assert.deepEqual(findings.map((finding) => [finding.code, finding.itemId, finding.relatedIds]),
+      eventIds.map((id) => ['step-event-disposition-missing', 'STEP-EXPORT-02', [id]]))
+    assert.deepEqual(errors(validateContractGraph(graph, { files, mode: 'draft' })), [])
+  }
+})
+
+test('STEP的next、depends-on和直接TR来源均可声明匹配EVENT处置', () => {
+  for (const [next, sourceRef, dependsOn] of [
+    ['STEP-EXPORT-03,TR-EXPORT-QUEUED-START', 'derived:FLOW-EXPORT-01', 'EVENT-EXPORT-START'],
+    ['STEP-EXPORT-03', 'derived:FLOW-EXPORT-01', 'EVENT-EXPORT-START,TR-EXPORT-QUEUED-START'],
+    ['STEP-EXPORT-03,TR-EXPORT-QUEUED-START', 'derived:EVENT-EXPORT-START', 'RULE-EXPORT-03'],
+    ['STEP-EXPORT-03', 'derived:TR-EXPORT-QUEUED-START', 'EVENT-EXPORT-START'],
+    ['STEP-EXPORT-03', 'derived:TR-EXPORT-QUEUED-START', 'RULE-EXPORT-03'],
+  ]) {
+    const source = baseline.replace(/^\| STEP-EXPORT-02 .*$/m,
+      `| STEP-EXPORT-02 | FLOW-EXPORT-01 | 开始当前attempt | id,attempt | RUNNING或旧回调原任务 | RULE-EXPORT-03,RULE-EXPORT-04 | ${next} | ${sourceRef} | ${dependsOn} |`)
+    const graph = buildContractGraph([parse(source)])
+    assert.deepEqual(errors(validateContractGraph(graph, { files })), [])
+  }
+})
+
 test('下载权限冲突留给真实运行和语义层，结构检查不伪检测', () => {
   const changed = variant('conflicting-download')
   assert.deepEqual(errors(validateContractGraph(buildContractGraph([parse(changed.source)]), { files: changed.files })), [])
