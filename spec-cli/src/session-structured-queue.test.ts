@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url'
 
 // Exercise the complete creation/queue/native-result path with a local RPC executor and no model calls.
 // A separate process starts in the fixture repo so the existing project-scoped layout caches stay truthful.
-for (const scenario of ['sequential', 'cancel', 'materializing', 'abort', 'timeout', 'queued', 'refused', 'ack-active', 'cross-process']) test(`structured queue ${scenario} preserves native control and maxActive=1`, { skip: process.platform !== 'darwin' }, () => {
+for (const scenario of ['sequential', 'cancel', 'materializing', 'abort', 'timeout', 'queued', 'refused', 'ack-active', 'cross-process', 'running-restart']) test(`structured queue ${scenario} preserves native control and maxActive=1`, { skip: process.platform !== 'darwin' }, () => {
   const root = mkdtempSync(join(tmpdir(), 'spex-structured-queue-')), repo = join(root, 'repo'), bin = join(root, 'bin')
   try {
     mkdirSync(join(repo, '.spec'), { recursive: true }); mkdirSync(bin)
@@ -32,7 +32,7 @@ const server=createServer(socket=>{let buffer=Buffer.alloc(0),upgraded=false;
   else if(m.method==='mcpServerStatus/list')result={data:[],nextCursor:null};
   else if(m.method==='thread/start'){const id='thread-'+(++counter);const thread={id,turns:[]};threads.set(id,thread);result={thread};}
   else if(m.method==='turn/start'){const thread=threads.get(m.params.threadId);const turn={id:'turn-'+counter,status:m.params.input[0].text.includes('hold')?'inProgress':'completed',items:[{type:'userMessage',content:m.params.input},{type:'agentMessage',phase:'final_answer',text:JSON.stringify({answer:m.params.input[0].text.includes('first')?'first':'second'})}]};thread.turns.push(turn);result={turn:{id:turn.id}};if(turn.status==='completed')setTimeout(()=>send({method:'turn/completed',params:{threadId:thread.id,turn}}),5);}
-  else if(m.method==='turn/interrupt'){const thread=threads.get(m.params.threadId),turn=thread.turns.find(t=>t.id===m.params.turnId);if(thread.turns[0].items[0].content[0].text.includes('cross-process')){thread.interrupts=(thread.interrupts||0)+1;if(thread.interrupts>1)return;}if(thread.turns[0].items[0].content[0].text.includes('refused')){send({id:m.id,error:{message:'fixture refused exact interruption'}});return;}result={};if(!thread.turns[0].items[0].content[0].text.includes('ack-active'))setTimeout(()=>{turn.status='interrupted';send({method:'turn/completed',params:{threadId:thread.id,turn}})},thread.turns[0].items[0].content[0].text.includes('cross-process')?350:50);}
+  else if(m.method==='turn/interrupt'){const thread=threads.get(m.params.threadId),turn=thread.turns.find(t=>t.id===m.params.turnId);if(thread.turns[0].items[0].content[0].text.includes('ack-active')){thread.interrupts=(thread.interrupts||0)+1;if(thread.interrupts>1){send({id:m.id,error:{message:'fixture retry refused after prior acknowledgement'}});return;}}if(thread.turns[0].items[0].content[0].text.includes('cross-process')){thread.interrupts=(thread.interrupts||0)+1;if(thread.interrupts>1)return;}if(thread.turns[0].items[0].content[0].text.includes('refused')){send({id:m.id,error:{message:'fixture refused exact interruption'}});return;}result={};if(!thread.turns[0].items[0].content[0].text.includes('ack-active'))setTimeout(()=>{turn.status='interrupted';send({method:'turn/completed',params:{threadId:thread.id,turn}})},thread.turns[0].items[0].content[0].text.includes('cross-process')?350:50);}
   else if(m.method==='thread/read'||m.method==='thread/resume')result={thread:threads.get(m.params.threadId)};
   else if(m.method==='thread/turns/list'){if(threads.get(m.params.threadId).turns[0].items[0].content[0].text.includes('materializing')&&reads++<2){send({id:m.id,error:{message:'rollout at fixture is empty'}});return;}result={data:threads.get(m.params.threadId).turns};}
   else if(m.method==='thread/loaded/list')result={data:[...threads.keys()]};
@@ -65,6 +65,11 @@ try{
  else{
   const id=sessionIdForCreateKey('queue-active');const controller=new AbortController();const active=runStructuredSession({...request('hold '+scenario,'queue-active',scenario==='timeout'?1200:5000),...(scenario==='abort'?{signal:controller.signal}:{})}).then(result=>({result}),e=>({error:{code:e.code,message:e.message}}));
   await wait(()=>!!readRecord(id)?.structuredExecution?.turnId);
+  const running=(await listSessions()).find(s=>s.id===id);if(readRecord(id).status!=='active'||running.lifecycle!=='active'||running.status!=='working'||running.liveness!=='unknown')throw new Error('accepted native turn still projects queued or fails to reserve capacity');
+  if(scenario==='running-restart'){
+   const inspect=join(${JSON.stringify(root)},'inspect.mts');writeFileSync(inspect,'import {runStructuredSession} from '+JSON.stringify(${JSON.stringify(source)})+';import {readRecord} from '+JSON.stringify(${JSON.stringify(records)})+';import {listSessions} from '+JSON.stringify(${JSON.stringify(sessions)})+';import {writeFileSync} from "node:fs";const id='+JSON.stringify(id)+';const before=readRecord(id);const row=(await listSessions()).find(s=>s.id===id);if(before.status!=="active"||row.lifecycle!=="active"||row.status!=="working"||row.liveness!=="unknown")throw new Error("fresh process lost exact accepted execution phase");let failure;try{await runStructuredSession('+JSON.stringify(request('second','queue-while-running',300))+');throw new Error("fresh process overlaunched while native task occupies capacity");}catch(error){if(error.code!=="timeout")throw error;failure=error.code;}writeFileSync('+JSON.stringify(${JSON.stringify(join(root,'inspect.json'))})+',JSON.stringify({row:{lifecycle:row.lifecycle,status:row.status,liveness:row.liveness},failure}));process.exit();');
+   const inspected=spawnSync(process.execPath,['--import',${JSON.stringify(createRequire(import.meta.url).resolve('tsx/esm'))},inspect],{encoding:'utf8',timeout:5000});if(inspected.status!==0)throw new Error('new embedded process failed active/capacity observation: '+inspected.stderr);
+  }
   if(scenario==='queued'){
    const queuedId=sessionIdForCreateKey('queue-second');const queued=runStructuredSession(request('second','queue-second')).then(result=>({result}),e=>({error:{code:e.code}}));
    await wait(()=>!!readRecord(queuedId));const neverStarted=await cancelStructuredSession(queuedId);
@@ -86,6 +91,7 @@ try{
   }
   if(scenario==='refused'||scenario==='ack-active'){
    const row=(await listSessions()).find(s=>s.id===id);if(cancellation.nativeStopped||readRecord(id).structuredExecution.state!=='cancelling'||row.liveness!=='unknown')throw new Error('unconfirmed native stop became falsely terminal');
+   if(scenario==='ack-active'){const before=readRecord(id).structuredExecution.cancellation;const retry=await cancelStructuredSession(id,{reason:'timeout',timeoutMs:100});const after=readRecord(id).structuredExecution.cancellation;if(retry.nativeStopped||!retry.acknowledged||!after.acknowledged||after.reason!==before.reason||after.requestedAt!==before.requestedAt)throw new Error('retry refusal discarded prior native ACK or cancellation identity');}
    try{await runStructuredSession(request('second','queue-blocked',300));throw new Error('unconfirmed native task released its model capacity');}catch(e){if(e.code!=='timeout')throw e;}
   }else{
    if(!cancellation.nativeStopped||!cancellation.acknowledged||cancellation.nativeStatus!=='interrupted')throw new Error('cancellation lacks acknowledged exact native settlement');

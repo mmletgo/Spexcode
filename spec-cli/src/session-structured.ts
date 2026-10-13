@@ -48,9 +48,13 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
       for (const field of ['threadId', 'turnId'] as const)
         if (current.structuredExecution[field] && change[field] && current.structuredExecution[field] !== change[field])
           throw new StructuredSessionError('stale_result', `structured ${field} cannot replace its pinned identity`)
-      if (['cancelling', 'cancelled', 'timeout'].includes(current.structuredExecution.state ?? '') && (change.state !== undefined || change.turnStartRequested !== undefined) && change.state !== current.structuredExecution.state)
-        throw new StructuredSessionError(current.structuredExecution.cancellation?.reason ?? 'cancelled', current.structuredExecution.error || 'structured execution has already stopped')
-      writeRecord({ ...current, structuredExecution: { ...current.structuredExecution, ...change } })
+      if (['completed', 'cancelling', 'cancelled', 'timeout'].includes(current.structuredExecution.state ?? '') && (change.state !== undefined || change.turnStartRequested !== undefined) && change.state !== current.structuredExecution.state)
+        throw new StructuredSessionError(current.structuredExecution.state === 'completed' ? 'stale_result' : current.structuredExecution.cancellation?.reason ?? 'cancelled', current.structuredExecution.error || 'structured execution has already settled')
+      const next = { ...current.structuredExecution, ...change }
+      if (change.turnId && next.state === 'running') {
+        configuredSessionApplication().transitionSession(id, { status: 'active', proposal: null, note: null })
+        writeRecord({ ...current, status: 'active', proposal: null, note: null, launchOwner: null, launchReadinessStartedAt: null, structuredExecution: next })
+      } else writeRecord({ ...current, structuredExecution: next })
     })
   }
   try {
@@ -66,7 +70,7 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
           if ((current.structuredExecution?.threadId && current.structuredExecution.threadId !== threadId) || (current.harnessSessionId && current.harnessSessionId !== threadId))
             throw new StructuredSessionError('stale_result', 'structured thread cannot replace its pinned identity')
           prepareCodexGenerationRegistration(runtimeDir, id, threadId, endpoint.id)
-          writeRecord({ ...current, harnessSessionId: threadId, structuredExecution: { ...current.structuredExecution!, threadId, turnStartRequested: false } })
+          writeRecord({ ...current, harnessSessionId: threadId, structuredExecution: { ...current.structuredExecution!, threadId, turnStartRequested: current.structuredExecution!.turnStartRequested ?? false } })
         })
         commitCodexGenerationRegistration(runtimeDir, id, threadId, endpoint.id)
       },
@@ -81,7 +85,7 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
     // A disconnected transport is recoverable from the same exact thread/turn. Preserve the running state
     // for a subsequent create retry; deterministic model, policy and JSON failures remain terminal.
     const pendingStop = readRecord(id)?.structuredExecution
-    if (pendingStop?.state === 'cancelling' || pendingStop?.state === 'cancelled' || pendingStop?.state === 'timeout') return pendingStop.state
+    if (pendingStop?.state === 'completed' || pendingStop?.state === 'cancelling' || pendingStop?.state === 'cancelled' || pendingStop?.state === 'timeout') return pendingStop.state
     if (error instanceof StructuredSessionTransportError) throw error
     const state = error instanceof StructuredSessionError && (error.code === 'cancelled' || error.code === 'timeout') ? error.code : 'failed'
     await update({ state, error: error instanceof Error ? error.message : String(error) })
