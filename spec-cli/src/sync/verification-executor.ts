@@ -1,8 +1,8 @@
 import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, readlink, realpath, symlink, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, readlink, realpath, stat, symlink, writeFile } from 'node:fs/promises'
 import { join, relative, sep } from 'node:path'
-import { safeSymlinkTarget } from './snapshot.js'
+import { safeSymlinkTarget, validateRepositoryPath } from './snapshot.js'
 import type { VerificationCheckpoint, VerificationCommandResult, VerificationConfig, VerificationDependencies, VerificationDriver, VerificationEvidence, VerificationPolicy, VerificationRequest, VerificationResult, VerificationTestResult } from './verification-executor-types.js'
 
 const digest = (value: string): string => createHash('sha256').update(value).digest('hex')
@@ -42,7 +42,8 @@ function validatePolicy(policy: VerificationPolicy): void {
   if (!/^\S+@sha256:[a-f0-9]{64}$/.test(policy.image)) throw new Error('unsupported: 需要冻结 image@sha256')
   if (!['linux/arm64', 'linux/amd64'].includes(policy.platform)) throw new Error('unsupported: 当前仅支持 Linux Docker')
   if (policy.argv[0] !== 'node' || !policy.argv.includes('--test') || policy.argv.some(arg => arg.startsWith('--test-reporter') || arg === '--')) throw new Error('unsupported: 当前仅支持受信 node --test 命令')
-  if (!policy.expectedTestIds.length || new Set(policy.expectedTestIds).size !== policy.expectedTestIds.length || policy.expectedTestIds.some(id => !/^[A-Z][A-Z0-9-]+$/.test(id))) throw new Error('unsupported: 验收 ID 必须唯一且非空')
+  if (policy.cwd !== '.') validateRepositoryPath(policy.cwd)
+  if (!policy.expectedTestIds.length || new Set(policy.expectedTestIds).size !== policy.expectedTestIds.length || policy.expectedTestIds.some(id => !id || /\s/.test(id) || [...id].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127))) throw new Error('unsupported: 验收 ID 必须唯一、非空且为无空白的稳定标识')
   for (const key of ['timeoutMs', 'memoryBytes', 'cpus', 'pidsLimit', 'scratchBytes', 'logBytes'] as const) {
     if (!Number.isFinite(policy[key]) || policy[key] <= 0) throw new Error(`unsupported: 无效 ${key} 预算`)
   }
@@ -99,7 +100,7 @@ function assertInspect(actual: Inspect, checkpoint: VerificationCheckpoint): voi
   const mounts = actual.Mounts.map(({ Type, Source, Destination, RW }) => ({ Type, Source, Destination, RW })).sort((a, b) => a.Destination.localeCompare(b.Destination))
   if (actual.Name !== `/${checkpoint.uniqueContainerName}` || actual.Image !== config.imageId || actual.Config.Image !== config.image || actual.Platform !== 'linux' || Object.entries(checkpoint.labels).some(([key, value]) => actual.Config.Labels[key] !== value) || Object.keys(actual.Config.Labels).filter(key => key.startsWith('spex.')).length !== Object.keys(checkpoint.labels).length) throw new Error('容器身份、labels 或镜像不匹配，拒绝接管')
   if (checkpoint.containerId && actual.Id !== checkpoint.containerId) throw new Error('容器 ID 不匹配，拒绝接管')
-  if (actual.Config.User !== '1000:1000' || actual.Config.WorkingDir !== '/candidate' || JSON.stringify(actual.Config.Entrypoint) !== JSON.stringify([config.argv[0]]) || JSON.stringify(actual.Config.Cmd) !== JSON.stringify(config.argv.slice(1)) || actual.Config.Healthcheck?.Test[0] !== 'NONE' || JSON.stringify([...actual.Config.Env].sort()) !== JSON.stringify([...config.environment].sort())) throw new Error('容器 command/user/healthcheck 不匹配')
+  if (actual.Config.User !== '1000:1000' || actual.Config.WorkingDir !== (config.policy.cwd === '.' ? '/candidate' : `/candidate/${config.policy.cwd}`) || JSON.stringify(actual.Config.Entrypoint) !== JSON.stringify([config.argv[0]]) || JSON.stringify(actual.Config.Cmd) !== JSON.stringify(config.argv.slice(1)) || actual.Config.Healthcheck?.Test[0] !== 'NONE' || JSON.stringify([...actual.Config.Env].sort()) !== JSON.stringify([...config.environment].sort())) throw new Error('容器 command/user/healthcheck 不匹配')
   if (!host.ReadonlyRootfs || host.NetworkMode !== 'none' || host.Privileged || JSON.stringify(host.CapDrop) !== '["ALL"]' || host.CapAdd?.length || JSON.stringify(host.SecurityOpt) !== '["no-new-privileges"]' || !host.Init || host.AutoRemove || host.CgroupnsMode !== 'private' || host.RestartPolicy.Name !== 'no' || host.Memory !== config.policy.memoryBytes || host.MemorySwap !== config.policy.memoryBytes || host.NanoCpus !== config.policy.cpus * 1e9 || host.PidsLimit !== config.policy.pidsLimit || host.Devices.length || host.PidMode || host.IpcMode !== 'private') throw new Error('容器安全或预算配置不匹配')
   if (JSON.stringify(mounts) !== JSON.stringify(expectedMounts) || host.Binds?.length || JSON.stringify(host.Tmpfs) !== JSON.stringify({ '/tmp': `rw,noexec,nosuid,nodev,size=${config.policy.scratchBytes},mode=1777` })) throw new Error('容器 mounts/scratch 不匹配')
   if (host.LogConfig.Type !== 'local' || host.LogConfig.Config['max-size'] !== String(config.policy.logBytes) || host.LogConfig.Config['max-file'] !== '1' || host.LogConfig.Config['compress'] !== 'false') throw new Error('容器日志预算不匹配')
@@ -108,7 +109,7 @@ function assertInspect(actual: Inspect, checkpoint: VerificationCheckpoint): voi
 function createArgs(checkpoint: VerificationCheckpoint): string[] {
   const { config, labels, uniqueContainerName } = checkpoint
   const policy = config.policy
-  return ['container', 'create', '--pull', 'never', '--name', uniqueContainerName, '--platform', config.platform, '--user', '1000:1000', '--read-only', '--network', 'none', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--init', '--restart', 'no', '--no-healthcheck', '--ipc', 'private', '--cgroupns', 'private', '--memory', String(policy.memoryBytes), '--memory-swap', String(policy.memoryBytes), '--cpus', String(policy.cpus), '--pids-limit', String(policy.pidsLimit), '--log-driver', 'local', '--log-opt', `max-size=${policy.logBytes}`, '--log-opt', 'max-file=1', '--log-opt', 'compress=false', '--tmpfs', `/tmp:rw,noexec,nosuid,nodev,size=${policy.scratchBytes},mode=1777`, '--mount', `type=bind,src=${config.candidatePath},dst=/candidate,readonly`, '--mount', `type=bind,src=${config.runnerPath},dst=/runner,readonly`, '--workdir', '/candidate', '--env', 'HOME=/tmp', '--env', 'NODE_OPTIONS=', '--entrypoint', config.argv[0], ...Object.entries(labels).flatMap(([key, value]) => ['--label', `${key}=${value}`]), config.image, ...config.argv.slice(1)]
+  return ['container', 'create', '--pull', 'never', '--name', uniqueContainerName, '--platform', config.platform, '--user', '1000:1000', '--read-only', '--network', 'none', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--init', '--restart', 'no', '--no-healthcheck', '--ipc', 'private', '--cgroupns', 'private', '--memory', String(policy.memoryBytes), '--memory-swap', String(policy.memoryBytes), '--cpus', String(policy.cpus), '--pids-limit', String(policy.pidsLimit), '--log-driver', 'local', '--log-opt', `max-size=${policy.logBytes}`, '--log-opt', 'max-file=1', '--log-opt', 'compress=false', '--tmpfs', `/tmp:rw,noexec,nosuid,nodev,size=${policy.scratchBytes},mode=1777`, '--mount', `type=bind,src=${config.candidatePath},dst=/candidate,readonly`, '--mount', `type=bind,src=${config.runnerPath},dst=/runner,readonly`, '--workdir', policy.cwd === '.' ? '/candidate' : `/candidate/${policy.cwd}`, '--env', 'HOME=/tmp', '--env', 'NODE_OPTIONS=', '--entrypoint', config.argv[0], ...Object.entries(labels).flatMap(([key, value]) => ['--label', `${key}=${value}`]), config.image, ...config.argv.slice(1)]
 }
 
 /** 仅消费可信 Node reporter 的事件；子测试 stdout/stderr 是数据，不冒充测试事件。 */
@@ -178,6 +179,7 @@ export async function executeVerification(request: VerificationRequest, dependen
       await mkdir(runnerPath, { mode: 0o755 })
       const exportDigest = await verificationExportDigest(request.candidateExportPath, candidatePath)
       if (exportDigest !== request.candidateExportDigest) throw new Error('unsupported: 候选 export 与冻结摘要不匹配')
+      if (!(await stat(join(candidatePath, request.policy.cwd))).isDirectory()) throw new Error('unsupported: 验证 cwd 必须为候选中的目录')
       await writeFile(join(runnerPath, 'reporter.mjs'), reporter(request.policy.logBytes), { mode: 0o444 })
       await chmod(directory, 0o755)
       const config: VerificationConfig = { image: request.policy.image, imageId: image.Id, environment: [...image.Config.Env.filter(value => !/^(HOME|NODE_OPTIONS)=/.test(value)), 'HOME=/tmp', 'NODE_OPTIONS='], platform: request.policy.platform, argv: ['node', '--test-reporter=/runner/reporter.mjs', ...request.policy.argv.slice(1)], candidatePath, runnerPath, exportDigest, policy: structuredClone(request.policy), runnerDigest: digest(reporter(request.policy.logBytes)) }

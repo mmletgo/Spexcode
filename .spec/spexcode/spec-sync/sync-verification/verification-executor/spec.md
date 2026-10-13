@@ -19,6 +19,8 @@ related:
 
 本叶节点实现 [[sync-verification]] 的 V3 执行边界；不单独证明 V1/V2/V4、候选交付或完整 P2 已完成。政策由上层可信校验器提供，固定镜像摘要、Linux 平台、Node 测试 argv、必需稳定测试 ID 与 CPU/内存/PID/时间/日志/scratch 预算。候选无法删减执行集合或改命令免检。
 
+实际工作目录严格采用受信 VERIFY 的仓库相对 cwd，并在容器 inspect 中复核；不能把子目录命令偷偷放到根目录执行。稳定 testID 来自 AC 的具体测试绑定，可以与 AC 的业务 ID 不同；必须在真实报告中唯一通过。
+
 只支持 Docker Linux `linux/arm64` 与 `linux/amd64`；macOS 宿主经 Docker 执行 Linux 行为，未声明原生 macOS 验收能力。Docker 不存在、平台不符、镜像未预置或政策不受支持时明确 unsupported，不回退宿主执行。镜像准备属于可信环境准备，不在宿主执行候选生命周期脚本。
 
 完整 export 先复制至当前用户独占的私有目录，以内容和执行权限摘要核对冻结输入。export 不含 `.git`、宿主 `node_modules` 或特殊文件。普通仓库内部的相对软链接保留链接语义，目标及完整解析结果必须留在 export 内且不指向排除内容；绝对、越界、悬空或循环链接拒绝。链接文本参与摘要，不把链接静默改成另一份普通文件。请求政策与恢复检查点在首次异步等待前复制，外部调用者后续改写不改变本轮绑定。仅挂载只读副本与可信只读 reporter；scratch 使用有大小限制的私有 tmpfs，产物不能污染冻结输入。容器以 1000:1000、只读 root、无网络、cap-drop ALL、no-new-privileges、init、独立 IPC/cgroup namespace、禁止 restart/healthcheck 及完整资源预算启动。创建后 inspect 实际 ID、label、镜像、命令、环境、安全配置和 mounts，不接受额外挂载或 anonymous volume。

@@ -7,7 +7,7 @@ import { executeVerification, parseVerificationReport, verificationExportDigest 
 import type { VerificationCheckpoint, VerificationCommandResult, VerificationDriver, VerificationPolicy, VerificationRequest } from './verification-executor-types.js'
 
 const image = 'node@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392'
-const policy: VerificationPolicy = { version: 'test-v1', image, platform: 'linux/arm64', argv: ['node', '--test', 'test.mjs'], expectedTestIds: ['AC-VERIFY-01'], timeoutMs: 30_000, memoryBytes: 128 * 1024 * 1024, cpus: 1, pidsLimit: 64, scratchBytes: 16 * 1024 * 1024, logBytes: 64 * 1024 }
+const policy: VerificationPolicy = { version: 'test-v1', image, platform: 'linux/arm64', cwd: '.', argv: ['node', '--test', 'test.mjs'], expectedTestIds: ['AC-VERIFY-01'], timeoutMs: 30_000, memoryBytes: 128 * 1024 * 1024, cpus: 1, pidsLimit: 64, scratchBytes: 16 * 1024 * 1024, logBytes: 64 * 1024 }
 const ok = (stdout = ''): VerificationCommandResult => ({ exitCode: 0, stdout, stderr: '', truncated: false })
 const report = (id = 'AC-VERIFY-01', type = 'test:pass'): string => `${JSON.stringify({ type, data: { name: `${id} title`, nesting: 0 } })}\n${JSON.stringify({ type: 'test:summary', data: { counts: { tests: 1 }, success: true } })}\n`
 async function request(): Promise<VerificationRequest> {
@@ -28,7 +28,7 @@ function fake() {
   let logs = report()
   const actual = () => {
     const config = checkpoint.config
-    return { Id: 'a'.repeat(64), Name: `/${checkpoint.uniqueContainerName}`, Image: config.imageId, Platform: 'linux', Config: { Image: config.image, User: '1000:1000', WorkingDir: '/candidate', Entrypoint: [config.argv[0]], Cmd: config.argv.slice(1), Labels: labelsMismatch ? { ...checkpoint.labels, 'spex.config': 'wrong' } : checkpoint.labels, Env: config.environment, Healthcheck: { Test: ['NONE'] } }, HostConfig: { ReadonlyRootfs: true, NetworkMode: configMismatch ? 'host' : 'none', Privileged: false, CapDrop: ['ALL'], CapAdd: null, SecurityOpt: ['no-new-privileges'], Init: true, AutoRemove: false, CgroupnsMode: 'private', RestartPolicy: { Name: 'no' }, Memory: config.policy.memoryBytes, MemorySwap: config.policy.memoryBytes, NanoCpus: config.policy.cpus * 1e9, PidsLimit: config.policy.pidsLimit, Tmpfs: { '/tmp': `rw,noexec,nosuid,nodev,size=${config.policy.scratchBytes},mode=1777` }, LogConfig: { Type: 'local', Config: { 'max-size': String(config.policy.logBytes), 'max-file': '1', compress: 'false' } }, Binds: null, Devices: [], PidMode: '', IpcMode: 'private' }, Mounts: [{ Type: 'bind', Source: config.candidatePath, Destination: '/candidate', RW: false }, { Type: 'bind', Source: config.runnerPath, Destination: '/runner', RW: false }], State: { Status: state, Running: state === 'running', ExitCode: 0, OOMKilled: false, Error: '' } }
+    return { Id: 'a'.repeat(64), Name: `/${checkpoint.uniqueContainerName}`, Image: config.imageId, Platform: 'linux', Config: { Image: config.image, User: '1000:1000', WorkingDir: config.policy.cwd === '.' ? '/candidate' : `/candidate/${config.policy.cwd}`, Entrypoint: [config.argv[0]], Cmd: config.argv.slice(1), Labels: labelsMismatch ? { ...checkpoint.labels, 'spex.config': 'wrong' } : checkpoint.labels, Env: config.environment, Healthcheck: { Test: ['NONE'] } }, HostConfig: { ReadonlyRootfs: true, NetworkMode: configMismatch ? 'host' : 'none', Privileged: false, CapDrop: ['ALL'], CapAdd: null, SecurityOpt: ['no-new-privileges'], Init: true, AutoRemove: false, CgroupnsMode: 'private', RestartPolicy: { Name: 'no' }, Memory: config.policy.memoryBytes, MemorySwap: config.policy.memoryBytes, NanoCpus: config.policy.cpus * 1e9, PidsLimit: config.policy.pidsLimit, Tmpfs: { '/tmp': `rw,noexec,nosuid,nodev,size=${config.policy.scratchBytes},mode=1777` }, LogConfig: { Type: 'local', Config: { 'max-size': String(config.policy.logBytes), 'max-file': '1', compress: 'false' } }, Binds: null, Devices: [], PidMode: '', IpcMode: 'private' }, Mounts: [{ Type: 'bind', Source: config.candidatePath, Destination: '/candidate', RW: false }, { Type: 'bind', Source: config.runnerPath, Destination: '/runner', RW: false }], State: { Status: state, Running: state === 'running', ExitCode: 0, OOMKilled: false, Error: '' } }
   }
   const driver: VerificationDriver = async argv => {
     calls.push([...argv])
@@ -142,4 +142,15 @@ test('AC-VERIFIER-09 等待驱动时调用者改写政策，不改变本轮绑�
   const result = await executeVerification(input, { driver, onCheckpoint: async checkpoint => engine.save(checkpoint) })
   assert.equal(result.status, 'passed')
   assert.equal(result.evidence!.tests[0].testId, 'AC-VERIFY-01')
+})
+
+test('AC-VERIFIER-10 验证目录拒绝越界，稳定用例无需冒用业务AC命名', async () => {
+  const input = await request(); const engine = fake()
+  input.policy.cwd = '../outside'
+  assert.equal((await executeVerification(input, { driver: engine.driver, onCheckpoint: async () => assert.fail() })).status, 'unsupported')
+  assert.equal(engine.calls.length, 0)
+  input.policy.cwd = '.'
+  input.policy.expectedTestIds = ['export.case:1']
+  engine.setLogs(report('export.case:1'))
+  assert.equal((await executeVerification(input, { driver: engine.driver, onCheckpoint: async checkpoint => engine.save(checkpoint) })).status, 'passed')
 })

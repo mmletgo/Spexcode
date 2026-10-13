@@ -4,6 +4,7 @@ export interface VerificationPolicy {
   image: string
   platform: 'linux/arm64' | 'linux/amd64'
   argv: string[]
+  cwd: string
   expectedTestIds: string[]
   timeoutMs: number
   memoryBytes: number
