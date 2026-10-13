@@ -29,3 +29,5 @@ AC-SYNC-02/03使用真实已有详细契约，分别经readonly prepareSpecBodyE
 真实受控编辑首次30秒租约在连续同步Git/结构微任务阶段过期并返回recovery_required；默认120秒及持权阶段让步后，用未显式指定lease的同一AC02/03场景验证完整Docker/Git交付。已有1500ms短lease/50ms heartbeat取消用例保持，默认调整不放宽过期fence或总deadline。
 
 受控model夹具按原生strict wire返回每个changes行mode:null（沿用或默认100644），包含新文件和既有文件，不以省略optional域掩盖原生服务schema拒绝；业务断言与预算不变。
+
+显式retryOf在真实SQLite重启后复用高层无未来ID输入已通过真实P1程序/独立identity审查的证据；再次P1会返回弱化AC的runner不得收到P1请求，新代码prompt义务摘要相同，新预算只计新dispatch，未输出候选时不伪造V3/交付。另用真实Docker/Git完成后prepare最新baseline、新ingress/allocation/预算证明仍归并原operation，alias沿原完整payload重放。

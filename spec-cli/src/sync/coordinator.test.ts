@@ -78,7 +78,7 @@ async function fixture(t: test.TestContext, budget = { maxAttempts: 3, maxCalls:
   }
   const protocol = openProtocol(join(parent, 'sync.sqlite')); await migrateSyncStore(protocol, { backupPath: join(parent, 'db-backup') })
   let store = new SyncStore(protocol, { readBlob: ref => readEvidence(input.source.commonDir, ref) })
-  const operation = store.admitAndEnqueue(await prepareSyncAdmission(input, plan, { ingressKey: input.id, rootCauseId: input.id, origin: 'spec', budget, managedRoot, ...(requestBlob ? { requestBlob } : {}) }))
+  let operation = store.admitAndEnqueue(await prepareSyncAdmission(input, plan, { ingressKey: input.id, rootCauseId: input.id, origin: 'spec', budget, managedRoot, ...(requestBlob ? { requestBlob } : {}) }))
   const calls: ElaborationSessionRequest[] = []
   let transform: ((output: unknown, request: ElaborationSessionRequest) => unknown | Promise<unknown>) | undefined
   const run: ElaborationRunner = async request => {
@@ -109,7 +109,7 @@ async function fixture(t: test.TestContext, budget = { maxAttempts: 3, maxCalls:
   }
   let closed = false
   t.after(() => { if (!closed) protocol.close(); unlock(parent); rmSync(parent, { recursive: true, force: true }) })
-  return { root, parent, managedRoot, artifactRoot, input, index, bytes, store, operation, plan, options, calls, git, priorCommitCount, realTools, closeForRestart: () => { protocol.close(); closed = true }, useStore: (next: SyncStore) => { store = next }, transform: (fn: typeof transform) => { transform = fn } }
+  return { root, parent, managedRoot, artifactRoot, input, index, bytes, store, operation, plan, options, calls, git, priorCommitCount, realTools, closeForRestart: () => { protocol.close(); closed = true }, useStore: (next: SyncStore) => { store = next }, useOperation: (next: typeof operation) => { operation = next }, transform: (fn: typeof transform) => { transform = fn } }
 }
 
 test('可信目录授权/完整readset固定，同source不同policy不混，uncovered dirty和可改oracle拒绝', async t => {
@@ -210,6 +210,14 @@ test('真实Docker→真实固定CLI hooks→私有完整交付，source/index�
   const replay = await runSyncOperation(f.store, f.operation.id, f.options)
   assert.deepEqual(replay.receipt, result.receipt); assert.equal(f.calls.length, 4)
   assert.equal(Number(f.git('rev-list', '--count', result.operation.deliveryPlan.branch)), f.priorCommitCount + 1)
+  const automatic = await prepareSyncAdmission(f.input, f.plan, { ingressKey: 'new-automatic-ingress', rootCauseId: 'new-automatic-ingress', origin: result.operation.origin, budget: { ...result.operation.budget, maxCalls: 99 }, managedRoot: f.managedRoot, previousBaselinePair: f.store.readBaseline(f.input.source) })
+  assert.notDeepEqual(automatic.deliveryPlan, result.operation.deliveryPlan)
+  assert.notEqual(automatic.readSetDigest, result.operation.readSetDigest, '真实交付细化进入新composed读集合，但source未变')
+  const unchanged = f.store.admitAndEnqueue(automatic)
+  assert.equal(unchanged.id, result.operation.id); assert.equal(unchanged.callsUsed, 4); assert.equal(unchanged.budget.maxCalls, result.operation.budget.maxCalls)
+  const aliasReplay = await prepareSyncAdmission(f.input, f.plan, { ingressKey: automatic.ingressKey, rootCauseId: automatic.rootCauseId, origin: unchanged.origin, budget: unchanged.budget, managedRoot: f.managedRoot, previousBaselinePair: unchanged.previousBaselinePair })
+  assert.equal(f.store.admitAndEnqueue({ ...aliasReplay, deliveryPlan: unchanged.deliveryPlan }).id, unchanged.id)
+  assert.equal(f.store.listOperations(f.input.source.repositoryId).length, 1); assert.equal(f.store.nextDispatch(f.input.source.repositoryId), null)
 })
 
 test('真实断言失败进入新attempt有限修复，保留失败输出，成功四层证据并同预算结算', docker, async t => {
@@ -399,4 +407,33 @@ for (const variant of ['raw', 'TR'] as const) test(`AC-SYNC-${variant === 'raw' 
   assert.equal(f.store.listRecoverableResources().length, 0)
   const verification = f.store.readAttempt(result.operation.currentAttemptId!).verification!
   assert.equal(JSON.parse(readEvidence(f.input.source.commonDir, verification.resultBlob).toString()).layers.find((layer: { layer: string }) => layer.layer === 'V3').evidenceRefs.length, 2)
+})
+
+test('显式retryOf在SQLite重启后继承无未来IDs输入的accepted P1，新预算不授权再次细化AC', async t => {
+  const raw = parseParts(original)!.rawSource, source = `---\ntitle: 导出事件服务契约\nstatus: active\n---\n# 导出事件服务契约\n\n## raw source\n\n${raw}\n\n## expanded spec\n\n待细化。\n`
+  const f = await fixture(t, undefined, false, source, 'project', original)
+  let p1Calls = 0
+  f.transform((output, request) => {
+    if (request.purpose === 'elaboration_generate') { p1Calls++; if (p1Calls > 1) return rows(original.replace('全部拒绝，原结果可由所有者下载', '无条件允许')) }
+    if (request.purpose === 'code_generate') throw Object.assign(new Error('可观察的原生构建器不支持，尚未创建候选'), { code: 'unsupported' })
+    return output
+  })
+  const failed = await runSyncOperation(f.store, f.operation.id, f.options)
+  assert.equal(failed.operation.phase, 'failed'); assert.equal(failed.operation.callsUsed, 3); assert.equal(p1Calls, 1)
+  assert.equal(f.store.readRetryEligibility(failed.operation.id).eligible, true)
+  f.closeForRestart()
+  const protocol = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => protocol.close())
+  const restarted = new SyncStore(protocol, { readBlob: ref => readEvidence(f.input.source.commonDir, ref) }); f.useStore(restarted)
+  const admission = await prepareSyncAdmission(f.input, f.plan, { ingressKey: 'explicit-user-retry', rootCauseId: 'explicit-user-retry', retryOf: failed.operation.id, origin: failed.operation.origin, budget: failed.operation.budget, managedRoot: f.managedRoot, previousBaselinePair: failed.operation.previousBaselinePair })
+  assert.equal(admission.retryOf, failed.operation.id)
+  const retry = restarted.admitAndEnqueue(admission); f.useOperation(retry)
+  const repeated = await runSyncOperation(restarted, retry.id, f.options)
+  assert.equal(repeated.operation.phase, 'failed'); assert.equal(repeated.operation.callsUsed, 1); assert.equal(p1Calls, 1)
+  const generation = f.calls.filter(call => call.purpose === 'code_generate').map(promptInput)
+  assert.equal(contentHash(JSON.stringify(generation[0].contracts)), contentHash(JSON.stringify(generation[1].contracts)))
+  assert.deepEqual(generation[0].elaboratedSpecs, generation[1].elaboratedSpecs)
+  const current = restarted.readAttempt(repeated.operation.currentAttemptId!)
+  assert.ok(current.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).some(value => value.fromOperationId === failed.operation.id && value.fromAttemptId && value.evidenceRef))
+  assert.equal(restarted.readOperation(failed.operation.id).callsUsed, 3); assert.equal(restarted.listJournals(retry.id).length, 0)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
 })

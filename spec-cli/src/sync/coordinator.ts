@@ -80,7 +80,7 @@ async function readInput(input: InputSnapshot, plan: SyncCoordinatorPlan, previo
 /** 接入之前冻结真实读集合和派生输入，只返回既有协议接入结构，不改 source/index。 */
 export async function prepareSyncAdmission(input: InputSnapshot, supplied: SyncCoordinatorPlan, options: SyncAdmissionOptions): Promise<AdmitSyncInput> {
   const plan = structuredClone(supplied), view = await readInput(input, plan, options.previousBaselinePair, options.requestBlob)
-  return { ingressKey: options.ingressKey, rootCauseId: options.rootCauseId, origin: options.origin, budget: options.budget, input, ...(options.requestBlob ? { requestBlob: options.requestBlob } : {}), planBlob: freezeSyncPlanEvidence(input.source.commonDir, plan), scope: { paths: unique(plan.writePaths), contractIds: [], flowIds: [] }, policyDigest: syncPlanDigest(plan), impactDigest: contentHash(canonical({ targets: plan.targets, writePaths: unique(plan.writePaths), readSetDigest: view.readSetDigest })), readSetDigest: view.readSetDigest, delivery: null, deliveryPlan: planPrivateDelivery(input, options.managedRoot, options.ingressKey), previousBaselinePair: options.previousBaselinePair ?? null }
+  return { ingressKey: options.ingressKey, rootCauseId: options.rootCauseId, origin: options.origin, budget: options.budget, input, ...(options.requestBlob ? { requestBlob: options.requestBlob } : {}), ...(options.retryOf ? { retryOf: options.retryOf } : {}), planBlob: freezeSyncPlanEvidence(input.source.commonDir, plan), scope: { paths: unique(plan.writePaths), contractIds: [], flowIds: [] }, policyDigest: syncPlanDigest(plan), impactDigest: contentHash(canonical({ targets: plan.targets, writePaths: unique(plan.writePaths), readSetDigest: view.readSetDigest })), readSetDigest: view.readSetDigest, delivery: null, deliveryPlan: planPrivateDelivery(input, options.managedRoot, options.ingressKey), previousBaselinePair: options.previousBaselinePair ?? null }
 }
 
 type Stage = { version: 'sync-stage-v1'; operationId: string; attemptId: string; inputId: string; policyDigest: string; stage: string; resultRef: BlobRef }
@@ -292,13 +292,18 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       const runner = options.runner ? injectedRunner(store, fence, options.runner) : createAttemptRunner(store, fence)
       let elaboration = stage<SavedElaboration>(store, operation, attempt, 'elaboration')
       if (!elaboration) {
-        for (const prior of store.listAttempts(operation.id).filter(item => item.number < attempt!.number)) {
-          const approved = stage<SavedElaboration>(store, operation, prior, 'elaboration')
-          if (!approved?.structurePassed || !approved.reviewPassed || !['complete', 'needs_input', 'conflict'].includes(approved.status)) continue
-          elaboration = approved
-          saveStage(store, fence, 'elaboration-provenance', { operationId: operation.id, inputId: operation.input.id, policyDigest: operation.policyDigest, fromAttemptId: prior.id, evidenceRef: writeEvidence(operation.input.source.commonDir, approved), candidateDigest: approved.candidateDigest })
-          saveStage(store, fence, 'elaboration', approved)
-          break
+        let ancestor: SyncOperation | null = operation
+        while (ancestor && !elaboration) {
+          if (ancestor.input.id !== operation.input.id || canonical(ancestor.input.source) !== canonical(operation.input.source) || ancestor.policyDigest !== operation.policyDigest || (ancestor.requestBlob?.sha256 ?? null) !== (operation.requestBlob?.sha256 ?? null) || ancestor.origin !== operation.origin) fail('retry_provenance_binding', '重试链不能借用另一来源或原意的已接受契约')
+          for (const prior of store.listAttempts(ancestor.id).filter(item => ancestor!.id !== operation.id || item.number < attempt!.number)) {
+            const approved = stage<SavedElaboration>(store, ancestor, prior, 'elaboration')
+            if (!approved?.structurePassed || !approved.reviewPassed || !['complete', 'needs_input', 'conflict'].includes(approved.status)) continue
+            elaboration = approved
+            saveStage(store, fence, 'elaboration-provenance', { operationId: operation.id, inputId: operation.input.id, policyDigest: operation.policyDigest, fromOperationId: ancestor.id, fromAttemptId: prior.id, evidenceRef: writeEvidence(operation.input.source.commonDir, approved), candidateDigest: approved.candidateDigest })
+            saveStage(store, fence, 'elaboration', approved)
+            break
+          }
+          ancestor = ancestor.retryOf ? store.readOperation(ancestor.retryOf) : null
         }
       }
       if (!elaboration) {

@@ -20,7 +20,7 @@ export type SyncCoordinatorPlan = {
 }
 export type SyncAdmissionOptions = {
   ingressKey: string; rootCauseId: string; origin: AdmitSyncInput['origin']; budget: SyncBudget
-  managedRoot: string; requestBlob?: BlobRef; previousBaselinePair?: BaselinePair | null
+  managedRoot: string; requestBlob?: BlobRef; retryOf?: string; previousBaselinePair?: BaselinePair | null
 }
 export type SyncCoordinatorOptions = {
   plan: SyncCoordinatorPlan

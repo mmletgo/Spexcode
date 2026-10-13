@@ -5,6 +5,7 @@ import { applyComponentMigrations, type ComponentMigration, type SessionProtocol
 export const SYNC_COMPONENT = 'spec-sync'
 export const SYNC_COORDINATOR_ADDRESS = 'spec-sync-coordinator'
 export const syncCoordinatorAddress = (repositoryId: string): string => `spec-sync-coordinator-${createHash('sha256').update(repositoryId).digest('hex')}`
+export const syncSemanticDigest = (input: Pick<SyncOperation, 'input' | 'origin' | 'requestBlob' | 'policyDigest' | 'scope' | 'retryOf'>): string => createHash('sha256').update(JSON.stringify({ inputId: input.input.id, source: input.input.source, origin: input.origin, requestBlob: input.requestBlob?.sha256 ?? null, policyDigest: input.policyDigest, paths: [...new Set(input.scope.paths)].sort(), retryOf: input.retryOf ?? null }, (_key, entry: unknown) => entry && typeof entry === 'object' && !Array.isArray(entry) ? Object.fromEntries(Object.entries(entry).sort(([a], [b]) => a.localeCompare(b))) : entry)).digest('hex')
 export const SYNC_MIGRATIONS: readonly ComponentMigration[] = [{ version: 1, sql: `
 CREATE TABLE sync_operations (
  id TEXT PRIMARY KEY, ingress_key TEXT NOT NULL UNIQUE, ingress_aliases_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(ingress_aliases_json)), payload_digest TEXT NOT NULL UNIQUE,
@@ -64,6 +65,12 @@ CREATE INDEX sync_resources_recovery ON sync_resources(operation_id,attempt_id) 
     const migrated = tx.enqueue(address, { kind: String(row.kind), body: row.body as Uint8Array, headers: JSON.parse(String(row.headers_json)) as Record<string,string>, senderSessionId: row.sender_session_id === null ? null : String(row.sender_session_id), protocolVersion: Number(row.protocol_version), idempotencyKey: `sync-route-v5-${row.message_id}` })
     operation.dispatchMessageId = migrated.messageId; operation.revision++
     tx.exec('UPDATE sync_operations SET record_json=? WHERE id=?', JSON.stringify(operation), operation.id)
+  }
+} } }, { version: 6, sql: `ALTER TABLE sync_operations ADD COLUMN semantic_digest TEXT;
+CREATE INDEX sync_operations_semantic ON sync_operations(semantic_digest);`, afterApply: { key: 'spec-sync-semantic-admission-v1', run(tx) {
+  for (const row of tx.query('SELECT id,record_json FROM sync_operations')) {
+    const operation = JSON.parse(String(row.record_json)) as SyncOperation
+    tx.exec('UPDATE sync_operations SET semantic_digest=? WHERE id=?', syncSemanticDigest(operation), operation.id)
   }
 } } }]
 

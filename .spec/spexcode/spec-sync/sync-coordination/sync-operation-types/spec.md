@@ -39,3 +39,5 @@ adopter control envelope 仅派发协调身份，不作为普通 Agent 文本。
 原生资源计划固定绑定operation/attempt/generation、inputId、candidateDigest、稳定key/kind/payloadDigest及plan blob。verification资源必须绑定已冻结候选；native_session可在冻结前绑定空candidate及固定请求载荷。资源状态为planned→created→terminal→removed，checkpoint正文只存内容寻址引用。更新携expectedCheckpointRef做CAS；相同blob/阶段可幂等重放，迟到观测不能回退阶段或覆盖更完整原生身份。资源观测不授予任何候选、验证或应用写权。
 
 ComposedInputRef 可携 authorProjectionBlob，记录 [[sync-author-input]] 对真实快照的 canonical clean 投影证据。它是派生输入的来源证据，不能替换 sourceInputId 或原始 source/index 身份。
+
+operation及admission可带retryOf，明确关联用户主动重开失败/预算耗尽或未曾交付的取消操作。它是新运行授权来源，参与payload身份，不能更换旧冻结input/request/policy/origin/source；自动事件不带此字段，预算不重置。
