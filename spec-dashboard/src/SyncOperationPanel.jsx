@@ -109,14 +109,16 @@ export default function SyncOperationPanel({ nodeId, nodePath, targetTree = null
   const detail = submittedOperation && (!recent || submittedOperation.createdAtMs > recent.operation.createdAtMs) ? { operation: submittedOperation, attempt: null, journals: [], stale: false, sourceSynced: false, executionAvailability: { status: 'ready' } } : recent || null
   const settings = current?.settings
   const model = detail && syncProjection(detail, settings?.activation)
+  const retryPhase = detail && ['failed', 'budget_exhausted', 'cancelled'].includes(detail.operation.phase)
+  const retryOf = retryPhase && model.canRetry ? detail.operation.id : null
   const perform = async (action) => {
     if (busyRef.current) return
     busyRef.current = true; setBusy(action); setError(null)
     try {
       if (action === 'enable') await enableSync(settings.configDigest, targetTree)
       else if (action === 'run') {
-        runRequest.current = requestIdentity(runRequest.current, { nodeId, targetTree, contentRevision, configDigest: settings.configDigest, staleOf: detail?.stale ? detail.operation.id : null, retryOf: detail && ['failed', 'needs_input', 'conflicted', 'budget_exhausted', 'cancelled'].includes(detail.operation.phase) ? detail.operation.id : null })
-        const result = await runSync(nodeId, runRequest.current.id, targetTree)
+        runRequest.current = requestIdentity(runRequest.current, { nodeId, targetTree, contentRevision, configDigest: settings.configDigest, staleOf: detail?.stale ? detail.operation.id : null, retryOf })
+        const result = await runSync(nodeId, runRequest.current.id, targetTree, retryOf ? { retryOf, origin: detail.operation.origin } : undefined)
         if (result.operation) setHeld({ identity, value: { settings, operations: [{ operation: result.operation, attempt: null, journals: [], stale: false, sourceSynced: false, executionAvailability: { status: 'ready' } }] } })
       } else {
         const value = await controlSync(detail.operation.id, action, targetTree)
@@ -133,7 +135,7 @@ export default function SyncOperationPanel({ nodeId, nodePath, targetTree = null
       <span role="status" className={model?.complete && !currentError ? 'sync-op-complete' : undefined}>{currentError || current || detail ? t(`syncOperation.phase.${state}`) : t('common.loading')}</span>
       <div className="sync-op-actions">
         {settings?.configuration && !settings.enabled && !targetTree && <button type="button" disabled={!!busy} onClick={() => perform('enable')}>{t('syncOperation.enable')}</button>}
-        {settings?.enabled && !targetTree && <button type="button" disabled={!!busy || (model && !['idle', 'stale', 'failed', 'needs_input', 'conflicted', 'budget_exhausted', 'cancelled', 'source_synced', 'workspace_synced', 'superseded'].includes(model.state))} onClick={() => perform('run')}>{t('syncOperation.run')}</button>}
+        {settings?.enabled && !targetTree && <button type="button" disabled={!!busy || (model && (retryPhase && !detail.stale ? !model.canRetry : !['idle', 'stale', 'source_synced', 'workspace_synced', 'superseded'].includes(model.state)))} onClick={() => perform('run')}>{t(retryPhase && !detail.stale ? 'syncOperation.retryRun' : 'syncOperation.run')}</button>}
         {!targetTree && model?.canPause && <button type="button" disabled={!!busy} onClick={() => perform('pause')}>{t('syncOperation.pause')}</button>}
         {!targetTree && model?.canResume && <button type="button" disabled={!!busy} onClick={() => perform('resume')}>{t('syncOperation.resume')}</button>}
         {!targetTree && model?.canCancel && <button type="button" disabled={!!busy} onClick={() => perform('cancel')}>{t('syncOperation.cancel')}</button>}
@@ -145,6 +147,7 @@ export default function SyncOperationPanel({ nodeId, nodePath, targetTree = null
     {settings && !settings.configuration && <p className="sync-op-note">{t('syncOperation.configure')}</p>}
     {settings && <p className="sync-op-note">{t('syncOperation.currentCapabilities')}</p>}
     {model?.failure && <p className="sync-op-error" role="alert"><code>{model.failure.code}</code> · {model.failure.message}</p>}
+    {retryPhase && !detail.stale && detail.retryEligibility?.reason && <p className="sync-op-note"><code>{detail.retryEligibility.reason.code}</code> · {detail.retryEligibility.reason.message}</p>}
     {detail && <OperationEvidence key={detail.operation.id} detail={detail} model={model} nodeId={nodeId} nodePath={nodePath} targetTree={targetTree} />}
   </section>
 }

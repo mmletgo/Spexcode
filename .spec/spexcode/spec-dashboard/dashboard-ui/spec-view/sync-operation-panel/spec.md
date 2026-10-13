@@ -26,3 +26,5 @@ related:
 activation=invalidated 表示既有同步配置/来源绑定失效，明确展示configurationError，不能画成用户主动关闭的普通Spec模式；有当前有效配置时可显式重新启用该版本。
 
 status 定时读取与用户保存refreshKey驱动刷新，不依赖全局graph-input/contentRevision重启请求；同步只读快照可能产生Git内部事件，不能据此取消自己正在进行的状态读取并自激重读。
+
+当前input未变化时，failed/budget_exhausted/cancelled的重试是用户显式动作，必须由实际Detail.retryEligibility.eligible开放并展示不开放的reason，不能凭phase猜门禁：用新requestId与retryOf关联旧操作并保原origin，不传新patch，由应用保留旧requestBlob的未落地正文意图且核资源/回执已结算。needs_input/conflicted不能无新事实随机重跑；stale时按最新来源普通同步，不带retryOf。恢复诊断不能生成重试预算。

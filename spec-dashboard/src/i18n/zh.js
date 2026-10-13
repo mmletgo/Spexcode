@@ -11,6 +11,7 @@ export default {
     "title": "同步操作",
     "enable": "启用同步",
     "run": "立即同步",
+    "retryRun": "重试同步",
     "pause": "暂停",
     "resume": "恢复",
     "cancel": "取消操作",

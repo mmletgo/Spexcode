@@ -144,6 +144,33 @@ test('plain-text service failures preserve HTTP status and a bounded diagnosis',
   } finally { globalThis.fetch = originalFetch }
 })
 
+test('explicit terminal retries preserve their operation intent and origin without supplying a new patch', async () => {
+  const originalFetch = globalThis.fetch
+  const requests = []
+  globalThis.fetch = async (_url, init) => {
+    requests.push(JSON.parse(init.body))
+    return new Response(JSON.stringify({ changed: true, operation }), { status: 200 })
+  }
+  try {
+    await runSync('alpha', 'new-retry-id', '/source', { retryOf: 'failed-op', origin: 'spec' })
+    await runSync('alpha', 'latest-input-id', '/source')
+    assert.deepEqual(requests[0], { nodeId: 'alpha', requestId: 'new-retry-id', origin: 'spec', retryOf: 'failed-op' })
+    assert.equal('patch' in requests[0], false)
+    assert.equal('retryOf' in requests[1], false)
+  } finally { globalThis.fetch = originalFetch }
+})
+
+test('retry controls require actual application eligibility rather than a terminal phase guess', () => {
+  const failed = { ...detail, operation: { ...operation, phase: 'failed' } }
+  assert.equal(syncProjection(failed).canRetry, false)
+  const eligible = { ...failed, retryEligibility: { eligible: true } }
+  assert.equal(syncProjection(eligible).canRetry, true)
+  assert.equal(syncProjection({ ...eligible, stale: true }).canRetry, false)
+  assert.equal(syncProjection(eligible, 'invalidated').canRetry, false)
+  assert.equal(syncProjection({ ...eligible, executionAvailability: { status: 'recovery_required' } }).canRetry, false)
+  assert.equal(syncProjection({ ...failed, retryEligibility: { eligible: false, reason: { code: 'SYNC_RESOURCE_UNSETTLED', message: 'Resources not settled' } } }).canRetry, false)
+})
+
 
 test('candidate and delivered code/test diffs preserve scope and show oversized-read failures', async () => {
   const originalFetch = globalThis.fetch

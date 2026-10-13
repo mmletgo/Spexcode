@@ -18,3 +18,5 @@ related:
 候选/交付代码及测试diff保持path、kind和targetTree；超过限额的413保留原错误，不截断或空白伪装为成功。
 
 即使存在已结算receipt，activation invalidated仍拒绝当前同步完成投影。
+
+显式终态重试保旧操作origin/retryOf且不携新patch；来源变化后的普通请求不携retryOf。

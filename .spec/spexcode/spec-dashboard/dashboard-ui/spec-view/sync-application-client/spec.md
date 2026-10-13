@@ -18,3 +18,5 @@ related:
 activation=invalidated 也使旧receipt不能投影为当前已同步，保留可读的历史交付链接但强制真实失效诊断。enabled=false本身不证明可退回Spec-only模式，必须区分disabled与invalidated。
 
 非2xx且非JSON的服务错误显示HTTP状态与最多500字符的服务诊断，不能将JSON解析异常冒充业务失败原因。
+
+显式终态重试发送retryOf与旧origin，不能把新patch混入重试；应用复用旧用户意图并确认当前input/policy及资源结算门禁，客户端只依据实际retryEligibility开放重试。普通来源同步不发送retryOf。

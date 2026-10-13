@@ -11,6 +11,7 @@ export default {
     "title": "Synchronization",
     "enable": "Enable sync",
     "run": "Synchronize now",
+    "retryRun": "Retry synchronization",
     "pause": "Pause",
     "resume": "Resume",
     "cancel": "Cancel operation",

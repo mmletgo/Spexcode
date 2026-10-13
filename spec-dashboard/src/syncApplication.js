@@ -21,7 +21,7 @@ const syncRead = async (path, targetTree, init) => {
 const post = (body) => ({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
 export const readSyncStatus = (nodeId, targetTree = null, signal) => syncRead(`status?${new URLSearchParams({ nodeId, limit: '8' })}`, targetTree, { signal, cache: 'no-store' })
 export const enableSync = (configDigest, targetTree = null) => syncRead('settings', targetTree, post({ expectedConfigDigest: configDigest }))
-export const runSync = (nodeId, requestId, targetTree = null) => syncRead('run', targetTree, post({ nodeId, requestId, origin: 'initial' }))
+export const runSync = (nodeId, requestId, targetTree = null, options = {}) => syncRead('run', targetTree, post({ nodeId, requestId, origin: options.origin || 'initial', ...(options.retryOf ? { retryOf: options.retryOf } : {}) }))
 export const controlSync = (id, action, targetTree = null) => syncRead(`operations/${encodeURIComponent(id)}/${action}`, targetTree, post({}))
 export const readSyncDiff = (id, path, kind, targetTree = null, signal) => syncRead(`operations/${encodeURIComponent(id)}/diff?${new URLSearchParams({ path, kind })}`, targetTree, { signal })
 export const readSyncEvidence = (id, hash, targetTree = null, signal) => syncRead(`operations/${encodeURIComponent(id)}/evidence/${encodeURIComponent(hash)}`, targetTree, { signal })
@@ -48,6 +48,7 @@ export function syncProjection(detail, activation) {
     deliveryRoot: settled?.receipt.deliverySnapshot.source.canonicalRoot || null,
     sourceRoot: operation.input.source.canonicalRoot,
     failure: recovery ? executionAvailability.failure : attempt?.failure,
+    canRetry: !recovery && !stale && activation !== 'invalidated' && detail.retryEligibility?.eligible === true,
     canPause: !recovery && !TERMINAL.has(operation.phase) && !['paused', 'pausing', 'cancelling'].includes(operation.phase),
     canResume: !recovery && operation.phase === 'paused',
     canCancel: !recovery && !TERMINAL.has(operation.phase) && !['cancelled', 'cancelling'].includes(operation.phase),
