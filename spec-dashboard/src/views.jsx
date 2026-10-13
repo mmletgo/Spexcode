@@ -1,7 +1,7 @@
 import { lazy } from 'react'
 import SessionsView from './SessionsView.jsx'
 import { useBoard, useBoardApi as _useBoardApi } from './workspace.jsx'
-import { registerPlugin, seedCoreViews, viewRegistry, viewRouteContract } from './viewCatalog.js'
+import { registerPlugin, unregisterPlugin, seedCoreViews, viewRegistry, viewRouteContract } from './viewCatalog.js'
 import { createSettingsViewPlugin } from './builtInViewPlugins.js'
 import { useViewScope } from './ViewScope.jsx'
 
@@ -113,7 +113,11 @@ seedCoreViews(VIEWS)
 export { viewRegistry, viewRouteContract }
 export { registerView, registerPlugin, unregisterPlugin, iconFor, isDocument, isResident } from './viewCatalog.js'
 
-registerPlugin(createSettingsViewPlugin(SettingsView))
+const settingsPlugin = registerPlugin(createSettingsViewPlugin(SettingsView))
+if (import.meta.hot) import.meta.hot.dispose(() => {
+  for (const name of Object.keys(VIEWS)) viewRegistry.unregisterView(name, 'core')
+  unregisterPlugin(settingsPlugin.id)
+})
 
 // The component lookup stays with the components: `viewFor` is what the shell renders through, and the
 // fallback names a view this module owns.

@@ -3,7 +3,7 @@ import { loadGraph, loadPublicGraph, subscribeBoardLive, projectIdentity } from 
 import { PROJECT_ID } from './project.js'
 import { SessionCloseProvider } from './SessionCloseProvider.jsx'
 import { observeSessionProjection } from './launch.js'
-import { CATALOG_POLL_MS, applyCatalogResult, loadProjects, selectGatewayIdentity, selectProjectIdentity, tabTitle } from './projects.js'
+import { CATALOG_POLL_MS, catalogNeedsPolling, applyCatalogResult, loadProjects, selectGatewayIdentity, selectProjectIdentity, tabTitle } from './projects.js'
 import CredentialGate from './CredentialGate.jsx'
 import { useIsMobile } from './useIsMobile.js'
 import { useT } from './i18n/index.jsx'
@@ -92,15 +92,15 @@ export default function App({ surface = 'workspace' }) {
     let id
     const poll = async () => {
       const result = await refresh()
-      if (result?.state === 'denied') {
+      if (!catalogNeedsPolling(result)) {
         if (id) { clearInterval(id); id = undefined }
       }
       return result
     }
     const start = async () => {
       const result = await poll()
-      // A denial is an answer. Stop the noisy retry loop until the credential gate explicitly retries.
-      if (live && result?.state !== 'denied') id = setInterval(poll, CATALOG_POLL_MS)
+      // A denial or a proven missing catalog settles this probe; transport failures remain retryable.
+      if (live && catalogNeedsPolling(result)) id = setInterval(poll, CATALOG_POLL_MS)
     }
     start()
     return () => { live = false; if (id) clearInterval(id) }

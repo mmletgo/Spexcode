@@ -44,3 +44,5 @@ The catalog starts empty and `seedCoreViews` is called once, by views.jsx, at mo
 lookup here runs inside a React render or an event handler, never at module scope, and the render tree that
 hosts them is mounted by the shell — which imports views.jsx for `viewFor`. That import is what orders
 seeding before the first lookup; it is a real dependency, not a side-effect import kept alive by convention.
+
+在开发 HMR 中，单例 catalog 保持地址侧身份；旧 views 模块 dispose 先移除其 core 登记与自有内置插件，新 views 模块再执行原严格 seed。每次模块求值仅登记一次；热替换不放宽重名拒绝、不清空其他运行期插件。

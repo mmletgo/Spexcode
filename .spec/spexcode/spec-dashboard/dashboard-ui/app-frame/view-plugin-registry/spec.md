@@ -29,3 +29,5 @@ view through `registerPlugin`, including the same route, resident-tab, icon, sur
 the shell already consumes. It is not seeded as a core view and does not acquire a plugin-only navigation
 path: `#/settings`, the rail, the tab strip, and `viewFor` continue through the one route and registry grammar.
 This proves the extension seam with a product view without inventing an external discovery or loading protocol.
+
+单个视图可通过 unregisterView(name, owner) 撤销，但必须与登记 owner 精确一致；owner 不匹配则拒绝且不修改 registry。开发 HMR 只撤销旧 views 模块自己的 core 名称与 dashboard-settings 插件，随后新模块登记新组件；外部插件保持其定义与所有权。
