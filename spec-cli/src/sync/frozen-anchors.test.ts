@@ -46,7 +46,7 @@ test('V1缺失related/source文件、未知语言与不可用解析器不能静�
 test('V1在异步解析前固定输入，多个锚点共享同一冻结文件解析', async () => {
   const files = new Map([['src/export.ts', 'original']])
   let calls = 0
-  const extractor: Extractor = { id: 'immutable-fixture', claims: () => true, ready: async () => { files.set('src/export.ts', 'changed'); return true },
+  const extractor: Extractor = { id: 'immutable-fixture', claims: () => true, ready: async () => { files.set('src/export.ts', 'changed'); return true as const },
     extract: source => { calls++; assert.equal(source, 'original'); return [{ name: 'run', kind: 'function', start: 1, end: 1 }] }, memoKey: path => `immutable-fixture:${path}` }
   const result = await validateFrozenAnchors(buildContractGraph([contract(['src/export.ts#run'], ['src/export.ts#run'], 'src/export.ts#run')]), files, [extractor])
   assert.deepEqual(result.findings, [])
