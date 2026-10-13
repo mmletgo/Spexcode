@@ -33,6 +33,15 @@ deterministically verifiable contract structure. Errors block; warnings advise. 
 rule, its level, its one-line meaning) is printed by `spex help spec` and `spex guide spec` — the manual
 lists ALL lint rules, always:
 
+**启用业务契约的草稿门禁。** `contract-schema: sync-v1` 使用 [[sync-contract-schema]] 的纯解析与
+引用图验证，映射为 `sync-contract` 诊断。错误表头、行、稳定 ID、悬空或类型错误引用、来源依赖循环
+以及已声明归属和状态约束错误阻止保存；未知 schema 明确拒绝。raw-only、REQ-only 和带未决 GAP 的
+高层草稿合法，不要求主流程、实现锚点、测试文件或实际测试已经完成。不提供文件上下文时绑定仅提示
+未验证；本门禁不运行 VERIFY、不调用 Agent，也不代替完整候选的语义与执行门禁。已有治理和锚点
+完整性规则继续独立生效。候选 lint 的契约解析与节点加载共用同一份 `options.tip` 提交树快照，
+不使用工作区字节判断该候选；普通 lint 使用本 root 的工作区源读取。真实 CLI 回归由
+[[sync-contract-lint-guide-regression]] 治理。
+
 **Machine report.** `spex spec lint --json` is the public, versioned report projection. Its stdout is one
 `{ projection: "spex.spec-lint.report", schemaVersion: 1, sourceFiles, findings }` JSON document and carries
 no human lint rendering. `sourceFiles` is the sorted, repo-relative raw candidate set selected by this

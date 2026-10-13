@@ -1,0 +1,6 @@
+{
+  "name": "spec-sync-export-fixture",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node --test tests/export.test.mjs" }
+}

@@ -51,6 +51,10 @@ the file this node governs (the deeper mechanism lives in its [[source-of-truth]
 serves content-addressed evidence bytes and accepts uploads through one `/api/evidence` route ([[evidence-store]]);
 the dashboard and issue threads use that same transport.
 
+The read-only /api/sync/contracts projection exposes authored sync-v1 contracts, real binding checks,
+coverage and gaps through [[sync-contract-report]]. Reading it never runs verification commands or
+starts an agent; its not_run verification field cannot be interpreted as synchronized behavior.
+
 A CLI output contract, in the same fail-loud spirit: a verb with unbounded stdout (`issue ls --json`,
 `graph --json`, `session review --json`, `spec search --json`, …) must FULLY reach a pipe. `process.exit()` force-quits
 without draining buffered pipe writes, silently truncating a large dump at the ~64KB pipe buffer, so those

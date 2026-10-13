@@ -220,6 +220,17 @@ export async function apiFetch(input, init) {
   }
 }
 
+// [[sync-contract-panel]] reads declarations and bindings; no authored VERIFY command is executed.
+export async function fetchSyncContractReport(targetTree = null) {
+  const query = targetTree ? `?${new URLSearchParams({ targetTree })}` : ''
+  const response = await apiFetch(`/api/sync/contracts${query}`)
+  if (!response.ok) {
+    const message = await response.text()
+    throw new Error(`${response.status} ${response.statusText}: ${message}`)
+  }
+  return response.json()
+}
+
 // conditional graph fetch ([[dashboard-shell]]): remember the last ETag and send If-None-Match, so the
 // always-on fallback poll costs headers only while nothing changed — the server answers a bodyless 304 and
 // we return null ("unchanged", the caller skips its repaint). cache:'no-store' keeps the browser HTTP cache
@@ -401,7 +412,7 @@ export async function fetchDirEntries(dir = '') {
 // converges within ~a second of becoming visible — no visibilitychange hook needed. EventSource still
 // auto-reconnects on a clean drop (a backend hot-reload); the dead-man only covers the silent-death case the
 // browser can't see. The fallback poll stays as the final belt. Returns an unsubscribe.
-export function subscribeBoardLive({ onBoard, onLegacyChange, onStatus }) {
+export function subscribeBoardLive({ onBoard, onLegacyChange, onStatus, onInput }) {
   let es = null
   let closed = false
   let values = null   // the client's copy of the server's decomposition, carrying each unit's serialization
@@ -479,7 +490,9 @@ export function subscribeBoardLive({ onBoard, onLegacyChange, onStatus }) {
     es.addEventListener('graph-changed', () => { bump(); onLegacyChange?.() })
     es.addEventListener('error', () => onStatus?.(false))
     es.addEventListener('ping', bump)     // keep-alive, carries no board — only proves liveness
-    es.addEventListener('ready', bump)    // stream-open ack — likewise a pure liveness beat
+    es.addEventListener('graph-input', () => { bump(); onInput?.() })
+    // Reconnect must reread file inputs even when the resumed graph tag has not changed.
+    es.addEventListener('ready', () => { bump(); onInput?.() })
   }
   open()
   onStatus?.(false)

@@ -35,8 +35,8 @@ const lockReaperPath = (root: string) => join(lockPath(root), 'reaper')
 const lockReaperOwnerPath = (root: string) => join(lockReaperPath(root), 'owner.json')
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
-export function codexGenerationSocketPath(root: string, generationId?: string): string {
-  const base = process.env.SPEXCODE_CODEX_SOCKET_DIR || join(tmpdir(), `spexcode-cx-${process.getuid?.() ?? 0}`)
+export function codexGenerationSocketPath(root: string, generationId?: string, socketDirectory?: string): string {
+  const base = socketDirectory || process.env.SPEXCODE_CODEX_SOCKET_DIR || join(tmpdir(), `spexcode-cx-${process.getuid?.() ?? 0}`)
   mkdirSync(base, { recursive: true, mode: 0o700 })
   // No suffix preserves the deployed legacy location. Every detached-v3 generation has an independent socket.
   const key = generationId ? `${root}\0${generationId}` : root
@@ -53,14 +53,14 @@ export function legacyCodexGenerationEndpoint(root: string): CodexGenerationEndp
   })
 }
 
-function newEndpoint(root: string, id = `detached-v3-${randomUUID()}`): CodexGenerationEndpoint {
+function newEndpoint(root: string, id = `detached-v3-${randomUUID()}`, socketDirectory?: string): CodexGenerationEndpoint {
   const dir = join(generationsDir(root), id)
   return Object.freeze({
     id,
     pidFile: join(dir, 'pid'),
     receiptFile: join(dir, 'detached.json'),
     logFile: join(dir, 'app-server.log'),
-    socketPath: codexGenerationSocketPath(root, id),
+    socketPath: codexGenerationSocketPath(root, id, socketDirectory),
   })
 }
 
@@ -466,7 +466,7 @@ function publishPendingGeneration(root: string, endpoint: CodexGenerationEndpoin
   })
 }
 
-export async function ensureCodexCurrentGeneration(root: string, start: (endpoint: CodexGenerationEndpoint) => Promise<void>): Promise<CodexGenerationEndpoint> {
+export async function ensureCodexCurrentGeneration(root: string, start: (endpoint: CodexGenerationEndpoint) => Promise<void>, options: { socketDirectory?: string } = {}): Promise<CodexGenerationEndpoint> {
   const deadline = Date.now() + 30_000
   for (;;) {
     const action = await withLedgerLock(root, async (): Promise<EnsureAction> => {
@@ -498,7 +498,7 @@ export async function ensureCodexCurrentGeneration(root: string, start: (endpoin
         writeLedger(root, previous, { current: null, pending: null, generations, bindings: previous.bindings })
       }
       const latest = readCodexGenerationLedger(root)
-      const endpoint = newEndpoint(root)
+      const endpoint = newEndpoint(root, undefined, options.socketDirectory)
       const startToken = processStartToken(process.pid)
       if (!startToken) throw new Error('cannot prove coordinator process identity for Codex generation reservation')
       mkdirSync(dirname(endpoint.pidFile), { recursive: true, mode: 0o700 })

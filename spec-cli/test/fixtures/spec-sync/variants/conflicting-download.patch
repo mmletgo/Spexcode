@@ -1,0 +1,11 @@
+--- a/src/export.js
++++ b/src/export.js
+@@ -21,7 +21,7 @@
+   dispatch(id, event, { actor, attempt, result, reason } = {}) {
+     const job = this.jobs.get(id);
+     if (!job) throw new Error('not-found');
+-    if (['CANCEL', 'RETRY', 'DOWNLOAD'].includes(event) && actor !== job.owner) throw new Error('forbidden');
++    if (['CANCEL', 'RETRY'].includes(event) && actor !== job.owner) throw new Error('forbidden');
+     if (['START', 'COMPLETE', 'FAIL'].includes(event) && attempt !== job.attempt) return { ...job };
+     switch (event) {
+       case 'START':

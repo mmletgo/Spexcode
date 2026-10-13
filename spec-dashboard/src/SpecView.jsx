@@ -9,7 +9,8 @@ import { routeHash } from './route.js'
 import { Segmented } from './Segmented.jsx'
 import { newTabAnchor } from './tabs.js'
 import { useViewScope } from './ViewScope.jsx'
-import { useBoard } from './workspace.jsx'
+import { useBoard, usePaneActive } from './workspace.jsx'
+import SyncContractPanel from './SyncContractPanel.jsx'
 
 // [[spec-view]]: a spec node is a DOCUMENT whose full surface is prose. Governed files and attachments are
 // links in that prose; their source lives at an independent file address and is never mounted here.
@@ -70,8 +71,9 @@ function VersionFace({ node, hash, changeFace, onFace }) {
 
 export default function SpecView({ param, query }) {
   const t = useT()
-  const { specs, sessions } = useBoard()
+  const { specs, sessions, graphOnly, contentRevision = 0 } = useBoard()
   const scope = useViewScope()
+  const active = usePaneActive()
   const node = useMemo(() => specs?.find((s) => s.id === param), [specs, param])
   const proseRef = useRef(null)
 
@@ -118,6 +120,7 @@ export default function SpecView({ param, query }) {
     <div className="specview">
       <div className="specview-prose" ref={proseRef}>
         <SpecPane node={node} stat={stat}>{changeFace ? <PendingChanges node={node} sessions={sessions} /> : null}</SpecPane>
+        {!changeFace && !graphOnly && node.contractSchema && <SyncContractPanel key={node.id} nodeId={node.id} enabled={active} stamp={`${node.version}/${contentRevision}`} />}
         {/* the prose pane's selection layer ([[prose-dispatch]]) — pure z-layers over the reading column,
             so the document's own geometry is exactly what it was without it. Its line addressing is the
             prose's, so the change face carries none. */}

@@ -20,6 +20,7 @@ related:
   - spec-dashboard/test/board-divergence-self-heals.e2e.mjs
   - spec-dashboard/test/board-digest-fallback.e2e.mjs
   - spec-dashboard/src/streamCtorThrow.test.mjs
+  - spec-dashboard/src/streamInput.test.mjs
   - spec-dashboard/src/styles.css
   - spec-dashboard/src/theme.js
   - spec-dashboard/THEME-CREDITS.md
@@ -34,6 +35,11 @@ has no single feature owner, so co-owning it fanned every shell/style edit acros
 foundation node; features REFERENCE what they touch via `related:` instead of co-owning it.
 
 ## expanded spec
+
+The existing board SSE forwards full-domain `graph-input` and stream `ready` into one content revision in
+BoardProvider. It invalidates current prose and [[sync-contract-panel]] readings independently of node commit
+version and graph tag. Session-only delta frames do not invalidate file readings; no feature owns a second
+stream or polling timer. Refreshing readers preserve their mounted reading geometry and keyboard focus.
 
 dashboard-shell owns the cross-cutting dashboard files: `App.jsx` (the entry — it boots the one shared data
 layer, owns the fail-loud boot below, picks the face by viewport width, and is the **one writer of the

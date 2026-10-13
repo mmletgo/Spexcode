@@ -57,6 +57,10 @@ loader rejects a tip mismatch before deriving anything, and history/drift use th
 is caller-owned, build-local input, not a resident cache: ordinary filesystem reads and the existing
 HEAD-owned indexes keep their current behavior.
 
+The lightweight node metadata includes the authored `contract-schema` as `contractSchema`, or null when
+absent. Contract readers can avoid requesting a sync report for legacy prose. Unknown nonempty values
+remain visible for a schema error; the metadata never certifies that a contract is complete or verified.
+
 Ownership itself has one relation algebra: exact path, directory prefix, or glob. The loader, candidate claim
 preflight, and session impact all call the same pure matcher; an immutable snapshot
 changes where declarations are read, never what a declaration claims.

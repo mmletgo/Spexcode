@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { parseFrontmatter } from '@spexcode/spec-core'
+import { loadSpecs, parseFrontmatter } from '@spexcode/spec-core'
 
 // [[source-of-truth]] — frontmatter is YAML to every other tool that opens a spec.md, and agents quote a scalar
 // whenever it carries ": " (a desc usually does). The quotes delimit the value; they are never part of it.
@@ -40,4 +40,16 @@ test('parseFrontmatter applies YAML escapes inside quotes and leaves unbalanced 
   assert.equal(fm.desc, "it's quoted")
   assert.equal(fm.a, '"starts only')
   assert.equal(fm.b, 'the "middle" stays')
+})
+
+test('node metadata distinguishes legacy prose, enabled contracts and unknown schemas without claiming verification', async () => {
+  const files = new Map([
+    ['.spec/legacy/spec.md', '---\ntitle: Legacy\n---\nA prose requirement.'],
+    ['.spec/enabled/spec.md', '---\ntitle: Enabled\ncontract-schema: sync-v1\n---\nA draft requirement.'],
+    ['.spec/unknown/spec.md', '---\ntitle: Unknown\ncontract-schema: future-v9\n---\nInvalid for this parser.'],
+  ])
+  const nodes = await loadSpecs(process.cwd(), { tip: 'frozen', history: null, drift: null, snapshot: { tip: 'frozen', files } })
+  assert.equal(nodes.find((node) => node.id === 'legacy')?.contractSchema, null)
+  assert.equal(nodes.find((node) => node.id === 'enabled')?.contractSchema, 'sync-v1')
+  assert.equal(nodes.find((node) => node.id === 'unknown')?.contractSchema, 'future-v9')
 })

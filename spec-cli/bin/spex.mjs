@@ -101,17 +101,19 @@ if (existsSync(sourceRoot)) {
         Atomics.wait(wait, 0, 0, 100)
       }
     }
+    let buildExitCode = null
     try {
       if (sourceIsStale()) {
         const build = spawnSync('npm', ['run', 'build'], { cwd: workspace, stdio: 'inherit' })
         if (build.error || build.status !== 0 || !existsSync(cli)) {
           console.error('spex: source workspace build failed; fix it, then retry.')
-          process.exit(build.status ?? 1)
+          buildExitCode = build.status ?? 1
         }
       }
     } finally {
       rmSync(buildLock, { recursive: true, force: true })
     }
+    if (buildExitCode !== null) process.exit(buildExitCode)
   }
 }
 const args = process.argv.slice(2)

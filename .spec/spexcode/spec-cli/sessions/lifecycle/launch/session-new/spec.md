@@ -59,6 +59,10 @@ one ownership receipt and removes only resources this transaction proved it crea
 the candidate name into authority to delete. A colliding request therefore cannot damage an already-published
 receipt, while a transaction that owns its candidate still removes exactly that candidate on abort.
 
+Worktree registry checks recognize a configured path alias and Git's canonical path as the same existing
+directory only after resolving their filesystem identities. Recovery still requires the exact matching
+candidate receipt; recognizing an alias never grants ownership over an unrelated registered worktree.
+
 Process-local ownership is not enough: the backend may die after creating Git or store resources but before
 publishing the record. Before the first Git mutation, while holding both the candidate id lock and exact
 `{branch,path}` lock, creation atomically publishes one private candidate receipt outside the session store.

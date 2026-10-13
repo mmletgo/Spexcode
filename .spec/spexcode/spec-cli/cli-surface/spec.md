@@ -59,6 +59,9 @@ borrow the caller's local cwd and therefore stay outside this first group.
 
 `spex spec lint --json` is the machine representation of the same blocking report, not another lint
 verb: it emits the [[spec-lint]] versioned report on stdout while retaining lint's error-derived exit code.
+`spex help spec` includes the enabled sync-v1 draft syntax, identity, source and reference checks under
+`sync-contract`; unknown schemas block and unverified bindings advise. This is a draft structure gate,
+not proof of complete synchronization or executed verification. [[guide]] supplies the authored format.
 
 A product precondition that has a direct repair is a user error at this boundary, not an implementation
 exception: the CLI renders one `spex:` line naming the situation and its next action, without a Node stack or

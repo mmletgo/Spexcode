@@ -1,4 +1,18 @@
 export default {
+  syncContract: {
+    title: '业务契约与缺口',
+    refreshing: '正在重新读取当前工作树…',
+    readOnly: '只读投影：声明与结构绑定不代表测试通过或已同步；尚未运行验证。',
+    targetTree: '读取工作树', scope: '契约节点', allNodes: '全部契约节点',
+    readFailed: '契约读取失败：{error}', retry: '重试读取',
+    declared: '已声明', bound: '已绑定', missing: '缺失处置',
+    coverage: '结构绑定 {bound}/{total} 项；状态事件处置缺失 {missing}/{cells} 格。',
+    matrix: '状态 × 事件处置矩阵', gaps: 'GAP 及依赖影响', findings: '语法与结构发现',
+    noFindings: '未发现结构问题；验证仍未运行。',
+    object: '对象', state: '状态', event: '事件', disposition: '处置', status: '结构状态',
+    acceptanceIds: 'AC 绑定', code: '代码绑定', tests: '测试绑定', verifyIds: 'VERIFY 绑定', blockedBy: '受 GAP 阻塞',
+    evidence: '证据', decision: '待决事项', affectedIds: '受影响契约（含依赖）', nodeIds: '受影响节点',
+  },
   common: {
     new: '新建',
     none: '无',

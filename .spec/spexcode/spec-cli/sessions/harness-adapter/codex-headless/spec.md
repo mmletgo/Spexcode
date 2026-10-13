@@ -81,3 +81,6 @@ operation that removes the record, worktree, branch, pane, and shared runtime re
 Every successful queued launch publication clears the retained `stopped` marker together with the active lifecycle.
 Leaving `stopped: true` on an active record makes the readiness proof reject its own candidate while the witness probe
 can still see the shared app-server, producing a false post-receipt readiness warning.
+
+
+后台结构化推理使用同一 Codex headless harness 身份与 app-server/generation 协议，但由可信内部会话策略选择独立只读 realm，不执行普通 launcher 脚本或项目 hook/trust 物化。输入正文由协调器冻结后提供，shell/MCP/apps/hooks 禁用，模型只返回受 schema 约束的 JSON。其原生 thread/turn 身份、结果及摘要在 envelope 中持久化，完成读取绑定精确 turn；独立 realm 的不支持或安全预检失败不得回退到普通宽松 headless 启动。普通 headless launcher 的原有行为保持不变。
