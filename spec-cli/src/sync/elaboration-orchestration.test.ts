@@ -454,3 +454,47 @@ test('AC-ELABORATION-29 渲染版本改变时保留原摘要，新Markdown必须
   assert.equal(fresh.calls.filter(call => call.purpose === 'elaboration_review').length, 1)
   assert.deepEqual(seed, original)
 })
+
+
+test('AC-ELABORATION-30 真实派发STEP的next→TR传递精确GAP，纯导航和独立流程不受父阻塞影响', () => {
+  const actual = readFileSync(new URL('./elaboration-fixtures/todo-gap.spec.md', import.meta.url), 'utf8')
+  const parsed = parseContract({ nodeId: 'todo', path: '.spec/todo/spec.md', source: actual })
+  assert.deepEqual(parsed.findings, [])
+  const gap = parsed.contract!.items.find(item => item.kind === 'GAP')!
+  assert.equal(gap.kind, 'GAP')
+  gap.affects = gap.affects.filter(id => id.startsWith('TR-'))
+  const graph = buildContractGraph([parsed.contract!])
+  const coverage = projectContractCoverage(graph)
+  const projected = projectElaborationFlowReadiness(graph, coverage)
+  assert.deepEqual(projected.readyFlowIds, ['FLOW-TODO-CREATE', 'FLOW-TODO-VIEW'])
+  assert.deepEqual(projected.blockedFlows, [
+    { flowId: 'FLOW-TODO-CANCEL', blockedStepIds: ['STEP-TODO-CANCEL-DISPATCH'], gapIds: ['GAP-TODO-MUTATION-AUTH'] },
+    { flowId: 'FLOW-TODO-COMPLETE', blockedStepIds: ['STEP-TODO-COMPLETE-DISPATCH'], gapIds: ['GAP-TODO-MUTATION-AUTH'] },
+  ])
+  for (const id of ['STEP-TODO-CREATE-COMMIT', 'STEP-TODO-VIEW-DISPATCH', 'STEP-TODO-COMPLETE-RESOLVE', 'STEP-TODO-CANCEL-RESOLVE', 'STEP-TODO-COMPLETE-FAIL', 'STEP-TODO-CANCEL-FAIL']) {
+    assert.deepEqual(coverage.items.find(item => item.id === id)!.blockedBy, [])
+  }
+  assert.ok(coverage.items.filter(item => item.id === 'FLOW-TODO-COMPLETE' || item.id === 'FLOW-TODO-CANCEL').every(item => item.blockedBy.length === 0))
+})
+
+
+test('AC-ELABORATION-31 旧拒绝种子的新结构缺口须反馈本轮构建，原发现和追踪保持不变', async () => {
+  const seed = await rejectedSeed()
+  const output = seed.output as GeneratedElaboration
+  const dependencies = output.changes[0].tables.STEP[0]['depends-on']
+  assert.ok(Array.isArray(dependencies))
+  dependencies.push('EVENT-EXPORT-COMPLETE')
+  seed.candidate = renderElaboration(input(), output, seed.inputDigest)
+  seed.candidateDigest = elaborationDigest(JSON.stringify(seed.candidate))
+  seed.traces[0].resultDigest = elaborationDigest(JSON.stringify(output))
+  seed.review!.candidateDigest = seed.candidateDigest
+  const original = structuredClone(seed)
+  const fresh = runner(request => candidate(request, source))
+  const result = await elaborate({ ...input(), requestKey: 'operation-current-check' }, { seed, runner: fresh.run })
+  assert.equal(result.status, 'complete')
+  assert.match(fresh.calls[0].prompt, /当前程序结构诊断/)
+  assert.match(fresh.calls[0].prompt, /step-event-disposition-missing/)
+  assert.ok(!seed.findings.some(issue => issue.code === 'step-event-disposition-missing'))
+  assert.deepEqual(seed, original)
+  assert.deepEqual(result.prior!.traces, original.traces)
+})

@@ -17,6 +17,6 @@ code:
 
 结果返回候选正文及内容摘要、解析图与覆盖投影、具体 GAP、受阻依赖 ID 和无直接 GAP 阻塞的声明项 `readyIds`、实际退役 ID、结构与独立审查结论。`readyIds` 不代表整条所属流程可交付。`readyFlowIds` 仅包含 FLOW 自身及全部声明 steps 均无 GAP 阻塞的流程；`blockedFlows` 返回 flowId、blockedStepIds 和 gapIds。聚合只向父流程形成结果，不回传父阻塞到无关子项，因此未知完成/取消权限不阻断创建/查看。可推进/退役结论仅在当前结构和独立审查通过后输出。每轮保留生成输出、审查输出、失败发现和 session/thread/turn/result 摘要，不能只保留最后“成功”声明。调用期间外部继续编辑不改变冻结输入。
 
-内部协调器可为新的请求键提供已结算拒绝候选 `seed`，只包含原冻结输入摘要、原候选/摘要、生成输出、具体失败、评审和原追踪。程序核对相同业务输入、原候选自摘要、生成输出与原 trace.resultDigest、评审 inputDigest/candidateDigest 及去除程序身份后的原生输出摘要，并用当前 schema 校验、重新渲染。它仍是不可信诊断候选，不能改写 raw/facts/source 或充当权威规则。只支持已有具体失败，不恢复运行中 native 或迁移持久 store。新预算由调用者显式决定；新 rounds 只记录新执行，prior 保留原请求键/摘要/追踪及重新渲染摘要。新独立审查必须重查当前完整 Markdown，并独立于新构建及所有种子会话；即使渲染版本改变也不得借用旧审查。
+内部协调器可为新的请求键提供已结算拒绝候选 `seed`，只包含原冻结输入摘要、原候选/摘要、生成输出、具体失败、评审和原追踪。程序核对相同业务输入、原候选自摘要、生成输出与原 trace.resultDigest、评审 inputDigest/candidateDigest 及去除程序身份后的原生输出摘要，并用当前 schema 校验、重新渲染；续修提示同时提供原失败及当前程序结构诊断，后者不改写原发现或追踪。它仍是不可信诊断候选，不能改写 raw/facts/source 或充当权威规则。只支持已有具体失败，不恢复运行中 native 或迁移持久 store。新预算由调用者显式决定；新 rounds 只记录新执行，prior 保留原请求键/摘要/追踪及重新渲染摘要。新独立审查必须重查当前完整 Markdown，并独立于新构建及所有种子会话；即使渲染版本改变也不得借用旧审查。
 
 细化状态遵循上层 [[sync-elaboration]]；实现缺口、实际执行 `not_run` 和 `implementationReady: false` 始终明确。P2 及验证服务必须另外完成代码、测试、当前版本证据和允许范围的实际落盘，才能形成 [[sync-verification]] 定义的同步结论。

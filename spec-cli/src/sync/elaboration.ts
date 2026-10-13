@@ -152,7 +152,7 @@ export function projectElaborationFlowReadiness(graph: ContractGraph, coverage: 
   return result
 }
 
-function validateRepairSeed(input: ElaborationInput, seed: ElaborationRepairSeed, inputDigest: string): ElaborationCandidate {
+function validateRepairSeed(input: ElaborationInput, seed: ElaborationRepairSeed, inputDigest: string): { candidate: ElaborationCandidate; findings: ContractFinding[] } {
   if (seed.settled !== true || !seed.requestKey || seed.requestKey === input.requestKey || seed.inputDigest !== inputDigest || seed.candidate.inputDigest !== inputDigest) throw new TypeError('续修种子须已结算、输入一致且使用新的请求键')
   if (digest(seed.candidate) !== seed.candidateDigest) throw new TypeError('续修种子原候选摘要不符')
   if (outputErrors(seed.output, ELABORATION_SCHEMA).length) throw new TypeError('续修种子不符合当前业务行schema')
@@ -166,7 +166,7 @@ function validateRepairSeed(input: ElaborationInput, seed: ElaborationRepairSeed
   const candidate = renderElaboration(input, seed.output as GeneratedElaboration, inputDigest)
   const checked = checkCandidate(input, candidate, inputDigest)
   if (!seed.findings.some(issue => repairRequired(issue, projectContractCoverage(checked.graph)))) throw new TypeError('续修种子必须保留具体被拒绝发现')
-  return candidate
+  return { candidate, findings: checked.findings }
 }
 
 /** 从不可变业务输入连续生成、解析和独立审查；仅返回候选，不拥有交付树写权限。 */
@@ -177,7 +177,8 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
   input = { ...input, ...frozen, files: frozen.files === null ? undefined : new Map(frozen.files) }
   const inputDigest = digest(frozen)
   const seed = options.seed ? structuredClone(options.seed) : undefined
-  const seedCandidate = seed ? validateRepairSeed(input, seed, inputDigest) : undefined
+  const seedChecked = seed ? validateRepairSeed(input, seed, inputDigest) : undefined
+  const seedCandidate = seedChecked?.candidate
   const prior = seed ? { requestKey: seed.requestKey, inputDigest, candidateDigest: seed.candidateDigest, renderedCandidateDigest: digest(seedCandidate), traces: seed.traces } : null
   const result: ElaborationResult = { status: 'exhausted', inputDigest, candidateDigest: null, prior, changes: [], contracts: [], graph: null, coverage: null, gaps: [], blockedIds: [], readyIds: [], readyFlowIds: [], blockedFlows: [], retiredIds: [], structurePassed: false, reviewPassed: false, runtimeVerification: 'not_run', implementationReady: false, deferredImplementationFindings: [], blockedStructureFindings: [], rounds: [], failure: null }
   const maxCalls = input.maxCalls ?? 2 * ((input.maxRepairs ?? 2) + 1)
@@ -188,7 +189,7 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
     return runStructuredSession(request)
   })
   const snapshot = JSON.stringify(frozen)
-  let repairContext = seed ? `已结算的拒绝候选，仅供重新诊断，绝非用户原意或权威事实。先对照raw/facts/代码来源核实旧发现；错误评审不得照单全收或制造GAP。当前程序重新渲染的候选:\n${JSON.stringify(seedCandidate)}\n原具体失败:\n${JSON.stringify(seed.findings)}\n原独立评审（可能误读，不能复用其结论）:\n${JSON.stringify(seed.review)}` : ''
+  let repairContext = seed ? `已结算的拒绝候选，仅供重新诊断，绝非用户原意或权威事实。先对照raw/facts/代码来源核实旧发现；错误评审不得照单全收或制造GAP。当前程序重新渲染的候选:\n${JSON.stringify(seedCandidate)}\n原具体失败:\n${JSON.stringify(seed.findings)}\n当前程序结构诊断（不改写原证据）:\n${JSON.stringify(seedChecked!.findings)}\n原独立评审（可能误读，不能复用其结论）:\n${JSON.stringify(seed.review)}` : ''
   for (let index = 0; index <= (input.maxRepairs ?? 2); index++) {
     if (input.signal?.aborted) { result.status = 'cancelled'; result.failure = { code: 'cancelled', message: '细化已取消' }; return result }
     const round: ElaborationRound = { index, output: null, candidate: null, candidateDigest: null, findings: [], reviewOutput: null, review: null, traces: [] }
