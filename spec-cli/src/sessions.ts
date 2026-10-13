@@ -1,4 +1,4 @@
-import type { StructuredExecution } from './session-structured-policy.js'
+import { structuredObserverState, type StructuredExecution } from './session-structured-policy.js'
 import { execFileSync, spawn } from 'node:child_process'
 import { createConnection } from 'node:net'
 import { createHash, randomUUID } from 'node:crypto'
@@ -1221,6 +1221,11 @@ async function startQueuedUnlocked(id: string): Promise<QueuedStartResult> {
   if (!canDrainQueued(wt.rec)) return 'retryable'
   const h = harnessById(wt.rec.harness || defaultHarness.id)
   if (wt.rec.structuredExecution) {
+    if (structuredObserverState(wt.rec.structuredExecution) !== 'gone') return 'retryable'
+    const startToken = processStartToken(process.pid)
+    if (!startToken) throw new ResourceConflict('structured observer process identity is unproven')
+    const observer = { pid: process.pid, startToken }
+    writeRecord({ ...wt.rec, structuredExecution: { ...wt.rec.structuredExecution, observer } })
     launching.add(id)
     void import('./session-structured.js').then(({ executeQueuedStructuredSession }) => executeQueuedStructuredSession(id))
       .then(async () => {
@@ -1242,7 +1247,17 @@ async function startQueuedUnlocked(id: string): Promise<QueuedStartResult> {
               durable ? execution.error ?? current.note : error instanceof Error ? error.message : String(error))
           }
         })
-      }).finally(() => { launching.delete(id); requestQueueDrain() })
+      }).finally(async () => {
+        try {
+          // Release only after the observer's canonical outcome has settled. Releasing before catch/then
+          // would let another process recover while a late lifecycle publication is still outstanding.
+          await withRecordLock(id, async () => {
+            const current = readRecord(id), owner = current?.structuredExecution?.observer
+            if (current && owner?.pid === observer.pid && owner.startToken === observer.startToken)
+              writeRecord({ ...current, structuredExecution: { ...current.structuredExecution!, observer: null } })
+          })
+        } finally { launching.delete(id); requestQueueDrain() }
+      })
     return 'started'
   }
   if (h.launchPayloadProof && hasReadableLaunchReceipt(id)) {
@@ -1442,14 +1457,16 @@ async function drainQueueUnlocked(): Promise<void> {
     if (queueDrainFlight === run) queueDrainFlight = null
   }
 }
-export async function queueStructuredRecovery(id: string): Promise<void> {
-  await withRecordLock(id, async () => {
+export async function queueStructuredRecovery(id: string): Promise<boolean> {
+  const queued = await withRecordLock(id, async () => {
     const current = readRecord(id)
-    if (!current?.structuredExecution || current.structuredExecution.state !== 'running' || launching.has(id)) return
+    if (!current?.structuredExecution || current.structuredExecution.state !== 'running' || launching.has(id) || structuredObserverState(current.structuredExecution) !== 'gone') return false
     publishCanonicalLifecycle(current, 'queued', null, null)
     writeRecord({ ...current, launchOwner: backendLaunchAuthority() })
+    return true
   })
-  requestQueueDrain()
+  if (queued) requestQueueDrain()
+  return queued
 }
 export const drainQueue = (): Promise<void> => drainQueueUnlocked()
 export const requestQueueDrain = (): void => {

@@ -5,8 +5,9 @@ import { mkdtempSync, rmSync, readFileSync, writeFileSync, realpathSync, mkdirSy
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { processStartToken } from '@spexcode/spec-core'
 import { codexStructuredTurn } from './codex-harness.js'
-import { prepareStructuredRealm, StructuredSessionError, StructuredSessionTransportError, type StructuredExecution } from './session-structured-policy.js'
+import { prepareStructuredRealm, structuredObserverState, StructuredSessionError, StructuredSessionTransportError, type StructuredExecution } from './session-structured-policy.js'
 
 type Rpc = { id?: number; method: string; params: Record<string, unknown> }
 const schema = { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'], additionalProperties: false }
@@ -189,4 +190,15 @@ test('structured completed receipts replay one session and bind policy/schema/in
   await assert.rejects(runStructuredSession(request), (error: unknown) => error instanceof StructuredSessionError && error.code === 'stale_result')
   const publicAttempt = await sessionCreateRequest({ prompt: 'input', structuredExecution: policy })
   assert.equal(publicAttempt.status, 400)
+})
+
+
+test('structured observer ownership distinguishes live, released, replaced and unproven identities', () => {
+  const startToken = processStartToken(process.pid)!
+  assert.ok(startToken)
+  assert.equal(structuredObserverState(execution({ state: 'running', observer: { pid: process.pid, startToken } })), 'live')
+  assert.equal(structuredObserverState(execution({ state: 'running', observer: null })), 'gone')
+  assert.equal(structuredObserverState(execution({ state: 'running', observer: { pid: process.pid, startToken: 'previous-process-start' } })), 'gone')
+  assert.equal(structuredObserverState(execution({ state: 'running' })), 'unproven')
+  assert.equal(structuredObserverState(execution({ state: 'running', observer: { pid: process.pid, startToken: '' } })), 'unproven')
 })

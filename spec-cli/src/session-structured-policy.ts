@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
+import { processStartToken, type ProcessIdentity } from '@spexcode/spec-core'
 import { spawnDetachedRuntime } from './runtime-ownership.js'
 import { ensureCodexCurrentGeneration, type CodexGenerationEndpoint } from './codex-runtime-generations.js'
 
@@ -18,12 +19,26 @@ export type StructuredExecution = {
   threadId?: string
   turnId?: string
   state?: 'running' | 'completed' | 'failed' | 'cancelling' | 'cancelled' | 'timeout'
+  observer?: ProcessIdentity | null
   turnStartRequested?: boolean
   cancellation?: { reason: 'cancelled' | 'timeout'; requestedAt: number; nativeStopped: boolean; acknowledged: boolean; nativeStatus?: string; error?: string }
   output?: unknown
   resultDigest?: string
   error?: string
 }
+// A missing process-start probe is not proof of death. Only an explicit release, ESRCH or a
+// different start token permits another process to claim this exact native turn's observation.
+export function structuredObserverState(execution: StructuredExecution): 'live' | 'gone' | 'unproven' {
+  const owner = execution.observer
+  if (owner === null) return 'gone'
+  if (!owner) return execution.state === 'running' ? 'unproven' : 'gone'
+  if (!Number.isInteger(owner.pid) || owner.pid <= 0 || typeof owner.startToken !== 'string' || !owner.startToken) return 'unproven'
+  const token = processStartToken(owner.pid)
+  if (token) return token === owner.startToken ? 'live' : 'gone'
+  try { process.kill(owner.pid, 0); return 'unproven' }
+  catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH' ? 'gone' : 'unproven' }
+}
+
 export class StructuredSessionError extends Error {
   readonly sessionId?: string
   readonly threadId?: string

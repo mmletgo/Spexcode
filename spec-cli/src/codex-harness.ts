@@ -2752,6 +2752,7 @@ export async function codexStructuredTurn(sock: string, cwd: string, prompt: str
       await callbacks.onTurn(turnId)
     }
     const stored = turns.find((turn) => turn.id === turnId)
+    if (execution.turnId && stored?.status === 'inProgress') await callbacks.onTurn(turnId)
     if (stored && stored.status !== 'inProgress') resolveCompletion(stored)
     if (earlyTurns.has(turnId)) resolveCompletion(earlyTurns.get(turnId))
     await completion

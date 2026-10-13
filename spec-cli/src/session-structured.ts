@@ -6,7 +6,7 @@ import { mainRoot, runtimeRoot, sessionArtifactPath } from '@spexcode/spec-core'
 import { readRecord, withRecordLock, writeRecord } from './session-record.js'
 import { codexStructuredTurn, codexStopStructuredTurn } from './codex-harness.js'
 import { commitCodexGenerationRegistration, prepareCodexGenerationRegistration, readCodexGenerationLedger } from './codex-runtime-generations.js'
-import { structuredGeneration, prepareStructuredRealm, StructuredSessionError, StructuredSessionTransportError, type StructuredExecution } from './session-structured-policy.js'
+import { structuredGeneration, prepareStructuredRealm, StructuredSessionError, StructuredSessionTransportError, structuredObserverState, type StructuredExecution } from './session-structured-policy.js'
 import { configuredSessionApplication } from './session-application.js'
 import { withDeliveryLocks } from './delivery-lock.js'
 export { StructuredSessionError } from './session-structured-policy.js'
@@ -133,7 +133,7 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
       const rec = readRecord(id)
       const state = rec?.structuredExecution
       if (!state) throw new StructuredSessionError('stale_result', 'structured execution policy/result is missing')
-      if (digest({ ...state, threadId: undefined, turnId: undefined, state: undefined, cancellation: undefined, turnStartRequested: undefined, output: undefined, resultDigest: undefined, error: undefined }) !== digest(execution))
+      if (digest({ ...state, threadId: undefined, turnId: undefined, state: undefined, observer: undefined, cancellation: undefined, turnStartRequested: undefined, output: undefined, resultDigest: undefined, error: undefined }) !== digest(execution))
         throw new StructuredSessionError('stale_result', 'structured result no longer matches its pinned input/schema/policy')
       if (state.state === 'completed') {
         if (!state.threadId || !state.turnId || !state.resultDigest || state.resultDigest !== digest(state.output) || !validate(state.output))
@@ -151,10 +151,8 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
       }
       if (state.state === 'failed')
         throw new StructuredSessionError('failed', state.error || 'structured execution failed')
-      if (rec?.status === 'error' && state.state === 'running' && !recoveryRequested) {
-        recoveryRequested = true
-        await queueStructuredRecovery(id)
-      }
+      if (state.state === 'running' && !recoveryRequested && structuredObserverState(state) === 'gone')
+        recoveryRequested = await queueStructuredRecovery(id)
       if (Date.now() >= deadline) {
         const stopped = await cancel('timeout')
         throw new StructuredSessionError(stopped.nativeStopped ? 'timeout' : 'cancellation_pending', stopped.error || 'structured execution exceeded caller deadline')
