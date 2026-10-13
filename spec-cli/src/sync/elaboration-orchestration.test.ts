@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
-import { parseContract } from '@spexcode/spec-core/contracts'
+import { CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
 import { elaborate, elaborationDigest } from './elaboration.js'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
-import type { ElaborationCandidate, ElaborationInput, ElaborationReview, ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
+import type { ElaborationInput, ElaborationReview, ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
+import type { ContractCell, GeneratedElaboration, GeneratedTables } from './elaboration-markdown.js'
+import { renderElaboration } from './elaboration-markdown.js'
+import { ELABORATION_SCHEMA, outputErrors } from './elaboration-schema.js'
 
 const fixture = new URL('../../test/fixtures/spec-sync/export-repo/', import.meta.url)
 const path = '.spec/export/export-contract/spec.md'
@@ -12,9 +15,20 @@ const source = readFileSync(new URL(path, fixture), 'utf8')
 const rawSource = parseContract({ nodeId: 'export-contract', path, source }).contract!.rawSource
 const files = new Map(['src/export.js', 'tests/export.test.mjs'].map(file => [file, readFileSync(new URL(file, fixture), 'utf8')]))
 const input = (existing = false): ElaborationInput => ({ root: '/test/frozen-repository', requestKey: 'operation-1', intent: { nodeId: 'export-contract', rawSource }, targets: [{ nodeId: 'export-contract', path, source: existing ? source : null, sourceDigest: existing ? elaborationDigest(source) : null }], facts: [{ source: 'decision:EXPORT-POLICY', text: source }], files, maxRepairs: 1 })
-const binding = (request: ElaborationSessionRequest, key: 'inputDigest' | 'candidateDigest'): string => request.prompt.match(new RegExp(`${key}=([a-f0-9]{64})`))![1]
-const candidate = (request: ElaborationSessionRequest, source: string, beforeDigest: string | null = null): ElaborationCandidate => ({ inputDigest: binding(request, 'inputDigest'), changes: [{ nodeId: 'export-contract', path, beforeDigest, source }], applicability: ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: true, basis: '冻结夹具的显式事件及政策', affectedIds: ['REQ-EXPORT-01'] })) })
-const review = (request: ElaborationSessionRequest): ElaborationReview => ({ inputDigest: binding(request, 'inputDigest'), candidateDigest: binding(request, 'candidateDigest'), verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] })
+const candidate = (_request: ElaborationSessionRequest, source: string, _beforeDigest: string | null = null): GeneratedElaboration => {
+  const contract = parseContract({ nodeId: 'export-contract', path, source }).contract!
+  const fm = parseFrontmatter(source).fm
+  const tables = Object.fromEntries(Object.entries(CONTRACT_COLUMNS).map(([kind, columns]) => {
+    const items = contract.items.filter(item => item.kind === kind)
+    return [kind, items.map(item => Object.fromEntries(columns.map(column => {
+      const key = column === 'depends-on' ? 'dependsOn' : column === 'timeout-ms' ? 'timeoutMs' : column === 'kind' ? 'gapKind' : column
+      const value = (item as unknown as Record<string, ContractCell>)[key]
+      return [column, column === 'source' && item.kind !== 'VERIFY' ? `${item.source.kind}:${item.source.ref}` : value]
+    })))]
+  })) as GeneratedTables
+  return { version: 'elaboration-rows-v1', changes: [{ nodeId: 'export-contract', path, title: String(fm.title), description: '', code: contract.code, related: contract.related, prose: parseParts(source)!.expandedSpec.split(/^### /m)[0], tables }], applicability: ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: true, basis: '冻结夹具的显式事件及政策', affectedIds: ['REQ-EXPORT-01'] })) }
+}
+const review = (_request: ElaborationSessionRequest): Omit<ElaborationReview, 'inputDigest' | 'candidateDigest'> => ({ verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] })
 const runner = (build: (request: ElaborationSessionRequest, call: number) => unknown, inspect = review): { run: ElaborationRunner; calls: ElaborationSessionRequest[] } => {
   const calls: ElaborationSessionRequest[] = []
   return { calls, run: async request => {
@@ -33,7 +47,7 @@ test('AC-ELABORATION-01 生产编排完成解析、矩阵和独立评审，完�
   assert.equal(result.runtimeVerification, 'not_run')
   assert.equal(result.implementationReady, false)
   assert.equal(result.coverage!.matrix.length, 30)
-  assert.equal(result.changes[0].source, source)
+  assert.equal(result.contracts[0].rawSource, rawSource)
   assert.deepEqual(fake.calls.map(call => call.purpose), ['elaboration_generate', 'elaboration_review'])
   assert.notEqual(fake.calls[0].requestKey, fake.calls[1].requestKey)
   assert.notEqual(result.rounds[0].traces[0].sessionId, result.rounds[0].traces[1].sessionId)
@@ -90,8 +104,8 @@ test('AC-ELABORATION-06 越界路径、错误源摘要和raw改写都不能绕�
     const fake = runner(request => {
       const output = candidate(request, source)
       if (variant === 'path') output.changes[0].path = '../escape/spec.md'
-      if (variant === 'digest') output.changes[0].beforeDigest = 'stale'
-      if (variant === 'raw') output.changes[0].source = source.replace(rawSource, '模型擅自替换用户目标')
+      if (variant === 'digest') Object.assign(output.changes[0], { beforeDigest: 'stale' })
+      if (variant === 'raw') Object.assign(output.changes[0], { rawSource: '模型擅自替换用户目标' })
       return output
     })
     const result = await elaborate({ ...input(), maxRepairs: 0 }, { runner: fake.run })
@@ -156,7 +170,7 @@ test('AC-ELABORATION-11 安全能力不足及执行失败保留真实状态，�
   const interrupted = await elaborate({ ...input(), signal: during.signal }, { runner: fake.run })
   assert.equal(interrupted.status, 'cancelled')
   assert.equal(fake.calls.length, 1)
-  assert.equal(interrupted.changes[0].source, source)
+  assert.equal(interrupted.contracts[0].rawSource, rawSource)
 })
 
 test('AC-ELABORATION-12 调用中外部继续编辑不改变冻结业务输入', async () => {
@@ -232,7 +246,7 @@ test('AC-ELABORATION-17 调用预算和总时间预算真实截止，保留生�
   assert.equal(calls.status, 'exhausted')
   assert.equal(calls.failure!.code, 'budget_exhausted')
   assert.equal(one.calls.length, 1)
-  assert.equal(calls.changes[0].source, source)
+  assert.equal(calls.contracts[0].rawSource, rawSource)
   const slow = runner(request => candidate(request, source))
   const expired = await elaborate({ ...input(), timeoutMs: 10000, totalTimeoutMs: 10 }, { runner: async request => {
     await new Promise(resolve => setTimeout(resolve, 20))
@@ -241,17 +255,16 @@ test('AC-ELABORATION-17 调用预算和总时间预算真实截止，保留生�
   assert.equal(expired.status, 'exhausted')
   assert.equal(expired.failure!.code, 'budget_exhausted')
   assert.equal(slow.calls.length, 1)
-  assert.ok(slow.calls[0].timeoutMs <= 10)
+  assert.equal(slow.calls[0].timeoutMs, 10000)
 })
 
-test('AC-ELABORATION-18 真实错列问题的提示协议给出parser可用的精确分隔行', async () => {
+test('AC-ELABORATION-18 真实错列问题由业务行协议和程序固定分隔行解决', async () => {
   const fake = runner(request => candidate(request, source))
-  await elaborate(input(), { runner: fake.run })
-  for (const call of fake.calls) {
-    assert.ok(call.prompt.includes('### RULE\n\n| id | scope | constraint | basis | authority | source | depends-on |\n| --- | --- | --- | --- | --- | --- | --- |'))
-    assert.ok(call.prompt.includes('### FLOW\n\n| id | req | actors | entry | preconditions | steps | terminal | source | depends-on |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- |'))
-    assert.match(call.prompt, /END不能和ID混写/)
-  }
+  const result = await elaborate(input(), { runner: fake.run })
+  assert.ok(result.changes[0].source.includes('### RULE\n\n| id | scope | constraint | basis | authority | source | depends-on |\n| --- | --- | --- | --- | --- | --- | --- |'))
+  assert.ok(result.changes[0].source.includes('### FLOW\n\n| id | req | actors | entry | preconditions | steps | terminal | source | depends-on |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- |'))
+  assert.match(fake.calls[0].prompt, /不填写Markdown\/表头\/分隔行\/raw\/digest/)
+  assert.ok(!fake.calls[0].prompt.includes('输出inputDigest='))
 })
 
 test('AC-ELABORATION-19 未提供真实文件时不能新造code锚点充实现覆盖', async () => {
@@ -259,4 +272,58 @@ test('AC-ELABORATION-19 未提供真实文件时不能新造code锚点充实现�
   const rejected = await elaborate({ ...input(), files: undefined, maxRepairs: 0 }, { runner: fake.run })
   assert.equal(rejected.status, 'exhausted')
   assert.ok(rejected.rounds[0].findings.some(issue => issue.code === 'unverified_new_code_anchor'))
+})
+
+test('AC-ELABORATION-20 固定调用身份不包含剩余预算，重放相同输入和阶段仍幂等', async () => {
+  const now = Date.now
+  let elapsed = 0
+  Date.now = () => now() + elapsed
+  try {
+    const snapshot = { ...input(), timeoutMs: 10000, totalTimeoutMs: 1000 }
+    const first = runner(request => candidate(request, source))
+    const second = runner(request => candidate(request, source))
+    const execute = async (fake: ReturnType<typeof runner>, delta: number) => elaborate(snapshot, { runner: async request => {
+      elapsed += delta
+      return fake.run(request)
+    } })
+    assert.equal((await execute(first, 100)).status, 'complete')
+    assert.equal((await execute(second, 200)).status, 'complete')
+    assert.deepEqual(first.calls.map(({ signal: _signal, ...identity }) => identity), second.calls.map(({ signal: _signal, ...identity }) => identity))
+    assert.ok(first.calls.every(call => call.timeoutMs === 10000))
+  } finally { Date.now = now }
+})
+
+test('AC-ELABORATION-21 行schema在模型边界拒绝拼接来源、错误引用/布尔/argv', () => {
+  const request = { purpose: 'elaboration_generate' } as ElaborationSessionRequest
+  for (const edit of [
+    (rows: GeneratedTables) => { rows.RULE[0].source = 'decision:EXPORT-POLICY,user:raw' },
+    (rows: GeneratedTables) => { rows.STATE[0].initial = 'true' },
+    (rows: GeneratedTables) => { rows.FLOW[0].req = ['不是稳定ID'] },
+    (rows: GeneratedTables) => { rows.VERIFY[0].command = '["node"]' },
+    (rows: GeneratedTables) => { rows.VERIFY[0].command = ['node', '非法\n参数'] },
+    (rows: GeneratedTables) => { rows.VERIFY[0]['timeout-ms'] = 0 },
+  ]) {
+    const output = candidate(request, source)
+    edit(output.changes[0].tables)
+    assert.ok(outputErrors(output, ELABORATION_SCHEMA).length)
+  }
+})
+
+test('AC-ELABORATION-22 程序复制原文和绑定，保留元数据，正确渲染转义及argv', () => {
+  const snapshot = input(true)
+  snapshot.targets[0].source = source.replace('status: active', 'status: active\nhue: 175')
+  snapshot.targets[0].sourceDigest = elaborationDigest(snapshot.targets[0].source!)
+  const output = candidate({ purpose: 'elaboration_generate' } as ElaborationSessionRequest, source)
+  output.changes[0].tables.REQ[0].goal = '管道 | 路径 \\ 和换行\n下一行'
+  output.changes[0].tables.VERIFY[0].command = ['node', '--test', 'tests/export.test.mjs', '`含|参数`', '路径\\参数']
+  const rendered = renderElaboration(snapshot, output, 'program-bound-input')
+  const parsed = parseContract({ nodeId: 'export-contract', path, source: rendered.changes[0].source })
+  assert.deepEqual(parsed.findings, [])
+  assert.equal(parsed.contract!.rawSource, snapshot.intent.rawSource)
+  assert.equal(rendered.inputDigest, 'program-bound-input')
+  assert.equal(rendered.changes[0].beforeDigest, snapshot.targets[0].sourceDigest)
+  assert.equal(parseFrontmatter(rendered.changes[0].source).fm.hue, parseFrontmatter(snapshot.targets[0].source!).fm.hue)
+  assert.equal(parsed.contract!.items.find(item => item.kind === 'REQ')!.goal, '管道 | 路径 \\ 和换行<br>下一行')
+  assert.deepEqual(parsed.contract!.items.find(item => item.kind === 'VERIFY')!.command, output.changes[0].tables.VERIFY[0].command)
+  assert.ok(!rendered.changes[0].source.includes('### GAP'))
 })
