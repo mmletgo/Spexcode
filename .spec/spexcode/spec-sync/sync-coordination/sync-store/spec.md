@@ -47,3 +47,5 @@ planResource在原生命令前核当前fence及固定input/candidate身份，按
 findResource(attemptId,key)按精确身份查询包括removed的资源，供同一run重入复用已持久checkpoint；不能只扫描未removed集合，否则完成后重试会再次创建真实资源。同阶段更新也需CAS，精确阶段与blob历史重放返回当前记录，不覆写较新的thread/turn或terminal结果。
 
 listOperations(repositoryId, {limit?, sourceRoot?}) 在 SQL 内按仓库及可选精确来源根筛选，并按 rowid DESC 返回最新接入操作，包含运行中及终态。默认 limit=100，只接受整数1..500；读取仍校验组件版本，不以壁钟决定顺序，也不读全库后过滤。
+
+listJournals(operationId)先核operation存在，再按rowid顺序读取该操作全部journal及已结算receipt；终态交付事实不从恢复列表推断。

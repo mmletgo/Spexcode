@@ -447,6 +447,9 @@ export class SyncStore {
   }
   readAttempt(id: string): SyncAttempt { return this.write(tx => this.attempt(tx, id)) }
   readJournal(id: string): ApplyJournal { return this.write(tx => this.journal(tx, id)) }
+  listJournals(operationId: string): ApplyJournal[] {
+    return this.write(tx => { this.operation(tx, operationId); return tx.query('SELECT record_json FROM sync_apply_journals WHERE operation_id=? ORDER BY rowid', operationId).map(row => parseRecord<ApplyJournal>(row)!) })
+  }
   private baseline(tx: ProtocolTransaction, source: WorktreeIdentity): BaselinePair | null { return parseRecord<BaselinePair>(tx.query('SELECT record_json FROM sync_baseline_pairs WHERE repository_id=? AND source_key=? ORDER BY rowid DESC LIMIT 1', source.repositoryId, identityKey(source))[0]) }
   readBaseline(source: WorktreeIdentity): BaselinePair | null { return this.write(tx => this.baseline(tx, source)) }
   listRecoverable(): RecoverableSync[] {

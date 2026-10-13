@@ -98,6 +98,22 @@ test('controlled requests preserve source snapshots and take part in admission i
   } finally { f.cleanup() }
 })
 
+test('journals query exact operation and retains settled receipts in terminal operations', async () => {
+  const f = await fixture()
+  try {
+    const r = f.ready(), journal = f.store.beginApply(r.fence, r.plan, r.target)
+    for (const step of journal.steps) f.store.recordApplyStep(r.fence, journal.id, { ...step, status: 'completed' })
+    const receipt = f.receipt(journal.id, r.plan)
+    f.store.recordReceipt(journal.id, receipt)
+    f.store.settleApply(journal.id, receipt.id)
+    assert.equal(f.store.listJournals(r.operation.id)[0].receipt?.id, receipt.id)
+    assert.equal(f.store.listJournals(r.operation.id)[0].status, 'settled')
+    const other = f.store.admitAndEnqueue(f.admit(source('other')))
+    assert.deepEqual(f.store.listJournals(other.id), [])
+    assert.throws(() => f.store.listJournals('unknown'), /SYNC_OPERATION_UNKNOWN/)
+  } finally { f.cleanup() }
+})
+
 test('v2 upgrade preserves requestless dedup identity and backs up the old component version', async () => {
   const f = await fixture(), legacy = openProtocol(join(f.root, 'v2.sqlite'))
   let backup: ReturnType<typeof openProtocol> | null = null
