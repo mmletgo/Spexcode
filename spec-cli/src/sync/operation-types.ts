@@ -21,6 +21,7 @@ export type InputSnapshot = {
   capturedAtMs: number
 }
 export type SyncScope = { paths: string[]; contractIds: string[]; flowIds: string[] }
+export type ContractScopeExpansion = Pick<SyncScope, 'contractIds' | 'flowIds'> & { evidenceRef: BlobRef }
 export const SYNC_PHASES = ['detected', 'queued', 'analyzing', 'elaborating', 'generating', 'verifying', 'repairing', 'needs_input', 'conflicted', 'ready_to_apply', 'applying', 'workspace_synced', 'awaiting_landing', 'canonical_synced', 'superseded', 'pausing', 'paused', 'cancelling', 'cancelled', 'failed', 'budget_exhausted', 'recovering', 'recovery_required'] as const
 export type SyncPhase = typeof SYNC_PHASES[number]
 export type SyncControl = 'run' | 'pause' | 'cancel'
@@ -44,6 +45,7 @@ export type SyncOperation = {
   /** 额外的受控用户编辑/裁决请求；与实际来源字节分开，自动文件事件无需该字段。 */
   requestBlob?: BlobRef
   scope: SyncScope; readyScope: SyncScope; blockedScope: SyncScope; deliveredScope: SyncScope
+  contractScopeExpansions?: ContractScopeExpansion[]
   blockedReason: 'needs_input' | 'conflicted' | null
   policyDigest: string; impactDigest: string; readSetDigest: string
   budget: SyncBudget; callsUsed: number; deadlineAtMs: number; currentAttemptId: string | null

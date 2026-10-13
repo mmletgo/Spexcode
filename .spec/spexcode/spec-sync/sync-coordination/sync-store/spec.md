@@ -22,6 +22,10 @@ bindComposedInput 同时核对 operation.requestBlob 与 composed.requestBlob �
 
 所有结果动作核对 operation/attempt/generation/物理来源/全部资源 lease。范围冲突按实际 paths 与 contractIds/flowIds 检查；独立范围可并行；释放后每资源 generation 不归零。superseded 或过期 fence 拒绝新候选、验证和 beginApply。native 会话创建、Git、blob/文件读取均在事务外，checkpoint 保存 executor runId 对应的内容寻址记录，不另建执行数据库。
 
+高层输入尚无未来业务 ID 时，expandContractScope(fence, {contractIds, flowIds}, evidenceRef) 在结构校验及独立评审已通过的内部可信细化结果上登记完整单调 ID 集合。先核证据 blob 的真实 SHA256，再在同一 protocol 事务核当前 run/fence，以既有 path/rule 资源键原子取得新增 ID 租约，并扩展 operation.scope 与可供分区的 readyScope。参数不得含 paths 或其它字段，原业务 ID 不可删除；input/payload/路径授权、generation、预算/截止时间和派发消息不改。冲突整体回滚并保留旧租约；每资源 generation 仍递增且释放不重置。operation 保存可选 contractScopeExpansions 证据记录，精确 ref+集合幂等，同 ref 不同集合拒绝；重复不会派发或计费。retry 通过已有 expanded scope 领取租约，幂等重放仍核当前 fence 与真实持有资源。
+
+细化后 startGeneration 的 ready/blocked 是业务分区：共享文件 paths 保持在 readyScope，blockedScope 可仅含 GAP 依赖的 contractIds/flowIds，不机械阻塞整个共享文件。ready 与 blocked 的同类业务 ID 不得重叠；现有路径重叠门禁保持。候选、四层验证和 receipt 的覆盖范围均受 ready 范围约束，未 ready 业务 ID 不能进入 deliveredScope；blockedReason 未消除时，部分 receipt 只能保持 needs_input/conflicted，不能宣称 workspace_synced。
+
 freezeCandidate 核对实际 diff blob 的文件范围，recordVerification 绑定输入与候选及真实 coveredScope。beginApply 核对控制、fence、完整目标物理身份与复核快照、共同 baseline、候选/验证/真实 target→candidate manifest diff，先提交 journal 才允许文件副作用。effectKey 同 payload 幂等，不同 payload 拒绝。recordApplyStep 保存写入单元进度，recordReceipt 保存真实 tree/commit/交付快照证据；没有实际副作用的回调不能成为 Git 完成证明。
 
 settleApply 原子保存 receipt、journal 结算、sourceInput+verifiedDelivery 成对 baseline 和真实 deliveredScope。部分交付只推进 coveredScope；根仍 needs_input/conflicted。源及交付物理身份不同的外部输入基线不得套到发布交付树后续编辑，交付树另建自己的 source=delivery 成对基线。pause/cancel 在 applying 只记请求并进入等待边界状态，写入单元完成登记结算后停；取消保留实际 receipt，不等于回滚。未结算副作用、过期 attempt 与未派发操作通过 listRecoverable 查询；pinnedBlobRefs 保护冻结输入、候选、证据、checkpoint 与基线引用。

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
+import { spawn } from 'node:child_process'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -25,10 +26,11 @@ async function fixture() {
   const store = new SyncStore(protocol, options)
   const admit = (identity = source(), id = 'input-1', covered = scope()): AdmitSyncInput => ({ ingressKey: `ingress-${identity.canonicalRoot}-${id}`, rootCauseId: 'cause', origin: 'spec', input: input(identity, id), scope: covered, budget: { maxAttempts: 4, maxCalls: 4, maxRepairs: 2, timeoutMs: 100000 }, policyDigest: 'policy', impactDigest: 'impact', readSetDigest: 'readset', delivery: null, deliveryPlan: { canonicalRoot: '/repo/delivery', branch: 'delivery', baseCommit: 'a'.repeat(40) } })
   const claim = (value = admit()): ClaimedAttempt => { const operation = store.admitAndEnqueue(value); return store.claimAttempt({ operationId: operation.id, source: value.input.source, scope: value.scope, leaseMs: 1000, expectedMessageId: operation.dispatchMessageId }) }
-  const ready = (value = admit(), readyScope = value.scope, blockedScope: SyncScope = { paths: [], contractIds: [], flowIds: [] }, blockedReason: 'needs_input' | 'conflicted' | null = null) => {
+  const ready = (value = admit(), readyScope = value.scope, blockedScope: SyncScope = { paths: [], contractIds: [], flowIds: [] }, blockedReason: 'needs_input' | 'conflicted' | null = null, beforeGeneration?: (claimed: ClaimedAttempt) => void) => {
     const claimed = claim(value), target = { ...input(value.deliveryPlan.canonicalRoot === value.input.source.canonicalRoot ? value.input.source : source('delivery'), 'target'), manifestBlob: put({ version: 1, entries: readyScope.paths.map(path => ({ path, mode: '100644', oid: 'a'.repeat(40), digest: '1'.repeat(64) })) }) }
     store.bindDelivery(claimed.fence, target.source)
     store.bindComposedInput(claimed.fence, { sourceInputId: value.input.id, previousBaselinePairId: value.previousBaselinePair?.id ?? null, tree: value.input.immutableTree, manifestBlob: target.manifestBlob, contentDigest: value.input.contentDigest })
+    beforeGeneration?.(claimed)
     store.startGeneration(claimed.fence, { readyScope, blockedScope, blockedReason })
     const files: ApplyFilePlan[] = readyScope.paths.map(path => ({ path, preDigest: '1'.repeat(64), postDigest: '2'.repeat(64), preMode: '100644', postMode: '100644' }))
     const candidate: CandidateRef = { baseTree: value.input.immutableTree, sourceInputId: value.input.id, tree: 'f'.repeat(40), digest: 'candidate', manifestBlob: put({ version: 1, entries: readyScope.paths.map(path => ({ path, mode: '100644', oid: 'b'.repeat(40), digest: '2'.repeat(64) })) }), actualDiffBlob: put(files), coveredScope: readyScope }
@@ -606,4 +608,136 @@ test('v1 upgrade keeps active attempt and queue data, online backup restores v1,
       assert.equal(await migrateSyncStore(reopened), SYNC_MIGRATIONS.length)
     } finally { reopened.close() }
   } finally { restored?.close(); legacy.close(); f.cleanup() }
+})
+
+test('trusted elaboration expands unknown future IDs; shared file stays ready while GAP business IDs remain blocked after partial receipt', async () => {
+  const f = await fixture()
+  try {
+    const input = f.admit(source(), 'natural-input', { paths: ['src/a.ts'], contractIds: [], flowIds: [] })
+    const ids = { contractIds: ['REQ-A', 'AC-A', 'REQ-B', 'GAP-B'], flowIds: ['FLOW-A', 'FLOW-B'] }
+    const readyScope = { paths: ['src/a.ts'], contractIds: ['AC-A', 'REQ-A'], flowIds: ['FLOW-A'] }
+    const blockedScope = { paths: [], contractIds: ['GAP-B', 'REQ-B'], flowIds: ['FLOW-B'] }
+    const evidence = f.put({ stage: 'reviewed-elaboration', inputId: input.input.id })
+    const prepared = f.ready(input, readyScope, blockedScope, 'needs_input', claimed => {
+      assert.throws(() => f.store.startGeneration(claimed.fence, { readyScope, blockedScope, blockedReason: 'needs_input' }), /SYNC_SCOPE_INVALID/)
+      const expanded = f.store.expandContractScope(claimed.fence, ids, evidence)
+      assert.deepEqual(expanded.scope, { paths: ['src/a.ts'], contractIds: ['AC-A', 'GAP-B', 'REQ-A', 'REQ-B'], flowIds: ['FLOW-A', 'FLOW-B'] })
+      for (const scopes of [
+        { readyScope, blockedScope: { ...blockedScope, contractIds: [...blockedScope.contractIds, 'REQ-A'] }, blockedReason: 'needs_input' as const },
+        { readyScope, blockedScope: { ...blockedScope, flowIds: [...blockedScope.flowIds, 'FLOW-A'] }, blockedReason: 'needs_input' as const },
+      ]) assert.throws(() => f.store.startGeneration(claimed.fence, scopes), /SYNC_SCOPE_INVALID/)
+    })
+    assert.throws(() => f.store.beginApply(prepared.fence, { ...prepared.plan, coveredScope: { ...readyScope, contractIds: [...readyScope.contractIds, 'REQ-B'] } }, prepared.target), /SYNC_APPLY_BINDING/)
+    const before = f.store.readOperation(prepared.operation.id)
+    assert.deepEqual(f.store.expandContractScope(prepared.fence, ids, evidence), before)
+    assert.deepEqual(before.blockedScope, blockedScope)
+    const journal = f.store.beginApply(prepared.fence, prepared.plan, prepared.target)
+    for (const file of prepared.plan.files) f.store.recordApplyStep(prepared.fence, journal.id, { key: file.path, status: 'completed', evidenceRef: f.put({ observed: file.path }) })
+    const receipt = f.receipt(journal.id, prepared.plan); f.store.recordReceipt(journal.id, receipt)
+    const settled = f.store.settleApply(journal.id, receipt.id)
+    assert.equal(settled.phase, 'needs_input'); assert.deepEqual(settled.deliveredScope, readyScope)
+    assert.deepEqual(f.store.readBaseline(source())?.coveredScope, readyScope)
+    assert.ok(f.store.pinnedBlobRefs().some(ref => ref.sha256 === evidence.sha256))
+  } finally { f.cleanup() }
+})
+
+test('scope expansion is canonical/idempotent, retains admission identity and budget, and survives restart/retry without reviving old fence', async () => {
+  const f = await fixture()
+  try {
+    const input = f.admit(source(), 'natural-input', { paths: ['src/a.ts'], contractIds: [], flowIds: [] }), first = f.claim(input)
+    const ids = { contractIds: ['REQ-A', 'AC-A'], flowIds: ['FLOW-A'] }, evidence = f.put({ reviewed: true })
+    f.store.reserveDispatch(first.fence, { key: 'elaborate', purpose: 'elaborate', requestDigest: 'request' })
+    const before = f.store.readOperation(first.operation.id), expanded = f.store.expandContractScope(first.fence, ids, evidence)
+    for (const key of ['input', 'payloadDigest', 'generation', 'deadlineAtMs', 'budget', 'callsUsed', 'dispatchMessageId'] as const) assert.deepEqual(expanded[key], before[key])
+    const leases = f.protocol.withTransaction(tx => tx.query('SELECT * FROM sync_leases ORDER BY resource_key'))
+    assert.deepEqual(f.store.expandContractScope(first.fence, { contractIds: ['AC-A', 'REQ-A', 'REQ-A'], flowIds: ['FLOW-A'] }, evidence), expanded)
+    assert.deepEqual(f.protocol.withTransaction(tx => tx.query('SELECT * FROM sync_leases ORDER BY resource_key')), leases)
+    assert.deepEqual(f.store.admitAndEnqueue(input), expanded)
+    const reopened = openProtocol(f.path), recovered = new SyncStore(reopened, f.options)
+    try {
+      assert.deepEqual(recovered.readOperation(expanded.id), expanded)
+      f.tick(1001)
+      const retry = recovered.claimAttempt({ operationId: expanded.id, source: input.input.source, scope: expanded.scope, leaseMs: 1000 })
+      assert.deepEqual(recovered.expandContractScope(retry.fence, ids, evidence), retry.operation)
+      assert.throws(() => f.store.expandContractScope(first.fence, ids, evidence), /SYNC_FENCE_EXPIRED/)
+      assert.equal(retry.operation.callsUsed, 1); assert.equal(retry.operation.deadlineAtMs, before.deadlineAtMs)
+      assert.equal(f.protocol.listPending(SYNC_COORDINATOR_ADDRESS).length, 0)
+    } finally { reopened.close() }
+  } finally { f.cleanup() }
+})
+
+test('two SQLite handles atomically acquire new ID resources; conflicting set rolls back every new lease and preserves held path', async () => {
+  const f = await fixture(), secondProtocol = openProtocol(f.path), second = new SyncStore(secondProtocol, f.options)
+  try {
+    const first = f.claim(f.admit(source(), 'natural-input', { paths: ['src/a.ts'], contractIds: [], flowIds: [] }))
+    const other = second.claimAttempt({ operationId: second.admitAndEnqueue(f.admit(source('other'), 'input-2', scope('src/b.ts', 'REQ-SHARED'))).id, source: source('other'), scope: scope('src/b.ts', 'REQ-SHARED'), leaseMs: 1000 })
+    const before = f.store.readOperation(first.operation.id), leases = f.protocol.withTransaction(tx => tx.query('SELECT * FROM sync_leases ORDER BY resource_key'))
+    const ids = { contractIds: ['AC-FREE', 'REQ-SHARED'], flowIds: ['FLOW-FREE'] }, evidence = f.put({ reviewed: 'conflicting-result' })
+    assert.throws(() => f.store.expandContractScope(first.fence, ids, evidence), /SYNC_LEASE_CONFLICT/)
+    assert.deepEqual(second.readOperation(first.operation.id), before)
+    assert.deepEqual(secondProtocol.withTransaction(tx => tx.query('SELECT * FROM sync_leases ORDER BY resource_key')), leases)
+    second.requestControl(other.operation.id, 'cancel')
+    const expanded = f.store.expandContractScope(first.fence, ids, evidence)
+    const acquired = secondProtocol.withTransaction(tx => tx.query('SELECT * FROM sync_leases WHERE token=? ORDER BY resource_key', first.fence.leaseToken))
+    assert.equal(acquired.length, 4)
+    assert.ok(acquired.every(row => row.attempt_id === first.attempt.id && row.expires_at_ms === first.attempt.expiresAtMs))
+    assert.equal(acquired.find(row => row.resource_key === 'contract:REQ-SHARED')?.generation, 2)
+    assert.equal(acquired.find(row => row.resource_key === 'path:src/a.ts')?.generation, 1)
+    assert.deepEqual(second.expandContractScope(first.fence, ids, evidence), expanded)
+  } finally { secondProtocol.close(); f.cleanup() }
+})
+
+test('scope expansion refuses path authority, deleting old IDs, evidence disagreement/tampering, expired fence and frozen phase', async () => {
+  const f = await fixture()
+  try {
+    const first = f.claim(), ids = { contractIds: ['RULE-A', 'REQ-A'], flowIds: [] }, evidence = f.put({ reviewed: true })
+    const initial = f.store.readOperation(first.operation.id)
+    assert.throws(() => f.store.expandContractScope(first.fence, { ...ids, paths: ['src/b.ts'] } as typeof ids, evidence), /SYNC_SCOPE_INVALID/)
+    assert.throws(() => f.store.expandContractScope(first.fence, { contractIds: ['REQ-A'], flowIds: [] }, evidence), /SYNC_SCOPE_INVALID/)
+    assert.deepEqual(f.store.readOperation(first.operation.id), initial)
+    const expanded = f.store.expandContractScope(first.fence, ids, evidence)
+    assert.throws(() => f.store.expandContractScope(first.fence, { ...ids, contractIds: [...ids.contractIds, 'REQ-B'] }, evidence), /SYNC_SCOPE_EVIDENCE_CONFLICT/)
+    const tampered = new SyncStore(f.protocol, { ...f.options, readBlob: () => Buffer.from('tampered evidence') })
+    assert.throws(() => tampered.expandContractScope(first.fence, ids, evidence), /SYNC_BLOB_DIGEST_MISMATCH/)
+    assert.deepEqual(f.store.readOperation(first.operation.id), expanded)
+    f.tick(1001)
+    assert.throws(() => f.store.expandContractScope(first.fence, ids, evidence), /SYNC_FENCE_EXPIRED/)
+    const prepared = f.ready(f.admit(source('fresh'), 'input-frozen'))
+    assert.throws(() => f.store.expandContractScope(prepared.fence, { contractIds: ['RULE-A', 'REQ-NEW'], flowIds: [] }, f.put({ reviewed: 'late' })), /SYNC_PHASE_INVALID/)
+  } finally { f.cleanup() }
+})
+
+test('simultaneous SQLite processes grant a new business ID to one attempt only', async t => {
+  const f = await fixture()
+  try {
+    const claims = ['first', 'second'].map(name => f.claim(f.admit(source(name), `input-${name}`, { paths: [`src/${name}.ts`], contractIds: [], flowIds: [] })))
+    const evidenceValue = { reviewed: 'simultaneous-expansion' }, evidence = f.put(evidenceValue)
+    const processes = claims.map(claimed => {
+      const script = `import {openProtocol} from '@spexcode/session-protocol';
+        import {SyncStore,SyncStoreError} from ${JSON.stringify(new URL('./store.ts', import.meta.url).href)};
+        const protocol=openProtocol(${JSON.stringify(f.path)});
+        const store=new SyncStore(protocol,{now:()=>1000,readBlob:()=>Buffer.from(${JSON.stringify(JSON.stringify(evidenceValue))})});
+        console.log('ready'); await new Promise(resolve=>process.stdin.once('data',resolve));
+        try {store.expandContractScope(${JSON.stringify(claimed.fence)},{contractIds:['REQ-CONTENDED'],flowIds:[]},${JSON.stringify(evidence)});console.log('ok');}
+        catch(error){if(!(error instanceof SyncStoreError))throw error;console.log(error.code);}
+        finally{protocol.close();process.stdin.destroy();}`
+      const child = spawn(process.execPath, ['--import', import.meta.resolve('tsx'), '--input-type=module', '--eval', script], { cwd: process.cwd(), stdio: 'pipe' })
+      t.after(() => { if (child.exitCode === null) child.kill() })
+      let output = '', errors = ''
+      child.stderr.on('data', chunk => { errors += String(chunk) })
+      const ready = new Promise<void>((resolve, reject) => {
+        child.stdout.on('data', chunk => { output += String(chunk); if (output.includes('ready\n')) resolve() })
+        child.once('error', reject); child.once('close', () => { if (!output.includes('ready\n')) reject(new Error(errors)) })
+      })
+      const completion = new Promise<string>((resolve, reject) => { child.once('error', reject); child.once('close', code => { if (code === 0) resolve(output.trim().split('\n').at(-1)!); else reject(new Error(errors)) }) })
+      return { child, ready, completion }
+    })
+    await Promise.all(processes.map(entry => entry.ready))
+    for (const entry of processes) entry.child.stdin.write('go\n')
+    assert.deepEqual((await Promise.all(processes.map(entry => entry.completion))).sort(), ['SYNC_LEASE_CONFLICT', 'ok'])
+    const holders = f.protocol.withTransaction(tx => tx.query("SELECT token,attempt_id,generation FROM sync_leases WHERE resource_key='contract:REQ-CONTENDED'"))
+    assert.equal(holders.length, 1); assert.equal(holders[0].generation, 1)
+    assert.equal(claims.filter(claimed => f.store.readOperation(claimed.operation.id).scope.contractIds.includes('REQ-CONTENDED')).length, 1)
+    assert.ok(claims.every(claimed => f.protocol.withTransaction(tx => tx.query('SELECT token FROM sync_leases WHERE resource_key=?', `path:src/${claimed.operation.input.source.branch}.ts`))[0].token === claimed.fence.leaseToken))
+  } finally { f.cleanup() }
 })

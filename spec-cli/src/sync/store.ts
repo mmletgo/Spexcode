@@ -75,6 +75,12 @@ export class SyncStore {
   private release(tx: ProtocolTransaction, token: string): void {
     tx.exec('UPDATE sync_leases SET token=NULL,operation_id=NULL,attempt_id=NULL,expires_at_ms=NULL WHERE token=?', token)
   }
+  private acquireResources(tx: ProtocolTransaction, operation: SyncOperation, attempt: SyncAttempt, keys: string[]): void {
+    const held = tx.query('SELECT l.resource_key,l.token,l.attempt_id,l.expires_at_ms,a.status FROM sync_leases l LEFT JOIN sync_attempts a ON a.id=l.attempt_id WHERE l.repository_id=? AND l.token IS NOT NULL', operation.input.source.repositoryId)
+    const owns = (row: Record<string, unknown>): boolean => row.token === attempt.leaseToken && row.attempt_id === attempt.id
+    for (const row of held) if (!owns(row) && (Number(row.expires_at_ms) > this.now() || row.status === 'applying') && keys.some(key => resourceOverlap(key, String(row.resource_key)))) fail('SYNC_LEASE_CONFLICT', String(row.resource_key))
+    for (const key of keys) if (!held.some(row => row.resource_key === key && owns(row))) tx.exec('INSERT INTO sync_leases(repository_id,resource_key,generation,token,operation_id,attempt_id,expires_at_ms) VALUES(?,?,1,?,?,?,?) ON CONFLICT(repository_id,resource_key) DO UPDATE SET generation=generation+1,token=excluded.token,operation_id=excluded.operation_id,attempt_id=excluded.attempt_id,expires_at_ms=excluded.expires_at_ms', operation.input.source.repositoryId, key, attempt.leaseToken, operation.id, attempt.id, attempt.expiresAtMs)
+  }
   private checkFence(tx: ProtocolTransaction, fence: WriteFence, finishing = false): { operation: SyncOperation; attempt: SyncAttempt } {
     const operation = this.operation(tx, fence.operationId), attempt = this.attempt(tx, fence.attemptId)
     if (operation.currentAttemptId !== attempt.id || operation.generation !== fence.generation || attempt.generation !== fence.generation || attempt.operationId !== operation.id || operation.input.source.physicalFingerprint !== fence.sourceFingerprint || attempt.leaseToken !== fence.leaseToken || attempt.status === 'superseded' || attempt.status === 'settled' || attempt.status === 'failed') fail('SYNC_FENCE_EXPIRED', 'operation, attempt, generation or physical source changed')
@@ -169,12 +175,10 @@ export class SyncStore {
       if (this.now() >= operation.deadlineAtMs || repairFailures > operation.budget.maxRepairs) fail('SYNC_BUDGET_EXHAUSTED', 'deadline or repair budget exhausted')
       if (number > operation.budget.maxAttempts) fail('SYNC_BUDGET_EXHAUSTED', 'attempt budget exhausted')
       const resources = scopeKeys(input.scope)
-      const held = tx.query('SELECT l.resource_key,l.token,l.expires_at_ms,a.status FROM sync_leases l LEFT JOIN sync_attempts a ON a.id=l.attempt_id WHERE l.repository_id=? AND l.token IS NOT NULL', operation.input.source.repositoryId)
-      for (const row of held) if ((Number(row.expires_at_ms) > this.now() || row.status === 'applying') && resources.some(key => resourceOverlap(key, String(row.resource_key)))) fail('SYNC_LEASE_CONFLICT', String(row.resource_key))
       const id = randomUUID(), token = randomUUID(), expiresAtMs = this.now() + input.leaseMs
       const attempt: SyncAttempt = { id, operationId: operation.id, number, generation: operation.generation, dispatchKey: `sync-attempt-${operation.id}-${number}`, sessionCreateKey: `sync-session-${operation.id}-${number}`, status: 'claimed', currentSession: null, dispatchPlans: [], composedInput: null, candidate: null, verification: null, checkpointRefs: [], failure: null, leaseToken: token, expiresAtMs }
       tx.exec('INSERT INTO sync_attempts(id,operation_id,number,generation,dispatch_key,session_create_key,status,expires_at_ms,record_json) VALUES(?,?,?,?,?,?,?,?,?)', id, operation.id, number, operation.generation, attempt.dispatchKey, attempt.sessionCreateKey, attempt.status, expiresAtMs, JSON.stringify(attempt))
-      for (const key of resources) tx.exec('INSERT INTO sync_leases(repository_id,resource_key,generation,token,operation_id,attempt_id,expires_at_ms) VALUES(?,?,1,?,?,?,?) ON CONFLICT(repository_id,resource_key) DO UPDATE SET generation=generation+1,token=excluded.token,operation_id=excluded.operation_id,attempt_id=excluded.attempt_id,expires_at_ms=excluded.expires_at_ms', operation.input.source.repositoryId, key, token, operation.id, id, expiresAtMs)
+      this.acquireResources(tx, operation, attempt, resources)
       if (input.expectedMessageId !== undefined) {
         if (input.expectedMessageId !== operation.dispatchMessageId) fail('SYNC_DISPATCH_MISMATCH', 'message does not belong to operation')
         tx.dequeue(SYNC_COORDINATOR_ADDRESS, input.expectedMessageId)
@@ -267,6 +271,27 @@ export class SyncStore {
   }
   startElaboration(fence: WriteFence): SyncOperation {
     return this.write(tx => { const { operation } = this.checkFence(tx, fence); if (operation.phase !== 'analyzing') fail('SYNC_PHASE_INVALID', operation.phase); operation.phase = 'elaborating'; this.saveOperation(tx, operation); return operation })
+  }
+  /** 可信细化只扩展业务 ID；路径授权和接入身份保持冻结，新增租约同事务取得。 */
+  expandContractScope(fence: WriteFence, ids: Pick<SyncScope, 'contractIds' | 'flowIds'>, evidenceRef: BlobRef): SyncOperation {
+    this.blob(evidenceRef)
+    if (Object.keys(ids).some(key => !['contractIds', 'flowIds'].includes(key)) || !(['contractIds', 'flowIds'] as const).every(key => Array.isArray(ids[key]) && ids[key].every(id => typeof id === 'string' && id.length > 0 && id === id.trim() && !id.includes('\0')))) fail('SYNC_SCOPE_INVALID', 'scope expansion accepts only complete contractIds/flowIds')
+    const requested = canonicalScope({ paths: [], ...ids })
+    const expansion = { contractIds: requested.contractIds, flowIds: requested.flowIds, evidenceRef: clone(evidenceRef) }
+    return this.write(tx => {
+      const { operation, attempt } = this.checkFence(tx, fence)
+      const prior = operation.contractScopeExpansions?.find(record => record.evidenceRef.sha256 === evidenceRef.sha256)
+      if (prior && digest(prior) !== digest(expansion)) fail('SYNC_SCOPE_EVIDENCE_CONFLICT', 'the same elaboration evidence cannot claim different ID sets')
+      const keys = scopeKeys(requested), owned = tx.query('SELECT resource_key FROM sync_leases WHERE repository_id=? AND token=? AND attempt_id=?', operation.input.source.repositoryId, attempt.leaseToken, attempt.id)
+      if (prior && keys.every(key => owned.some(row => row.resource_key === key))) return operation
+      if (!['analyzing', 'elaborating', 'repairing', 'needs_input', 'conflicted'].includes(operation.phase)) fail('SYNC_PHASE_INVALID', operation.phase)
+      if (!contains(requested, { paths: [], contractIds: operation.scope.contractIds, flowIds: operation.scope.flowIds })) fail('SYNC_SCOPE_INVALID', 'expanded ID sets cannot delete existing business authority')
+      this.acquireResources(tx, operation, attempt, keys)
+      operation.scope = union(operation.scope, requested)
+      operation.readyScope = union(operation.readyScope, requested)
+      if (!prior) operation.contractScopeExpansions = [...(operation.contractScopeExpansions ?? []), expansion]
+      this.saveOperation(tx, operation); return operation
+    })
   }
   startGeneration(fence: WriteFence, scopes?: { readyScope: SyncScope; blockedScope: SyncScope; blockedReason: 'needs_input' | 'conflicted' | null }): SyncOperation {
     if (scopes) { validateScope(scopes.readyScope); validateScope(scopes.blockedScope) }
