@@ -86,3 +86,15 @@ test('a spec source symlink cannot expose a document outside the selected worktr
     rmSync(parent, { recursive: true, force: true })
   }
 })
+
+test('an incomplete newly marked contract still reads its real governed file before reporting missing business rows', async () => {
+  const parent = mkdtempSync(join(tmpdir(), 'spex-contract-empty-'))
+  try {
+    cpSync(fixture, parent, { recursive: true })
+    writeFileSync(join(parent, '.spec/export/export-contract/spec.md'), '---\ntitle: Export\nstatus: active\ncontract-schema: sync-v1\ncode:\n  - src/export.js\n---\n# Export\n\n## raw source\nExport filtered records.\n\n## expanded spec\nDetails pending.\n')
+    const report = await readContractReport(parent)
+    assert.ok(report.findings.some(finding => finding.code === 'incomplete-contract'))
+    assert.ok(!report.findings.some(finding => finding.code === 'missing-governed-file'), JSON.stringify(report.findings))
+    assert.equal(report.verification, 'not_run')
+  } finally { rmSync(parent, { recursive: true, force: true }) }
+})

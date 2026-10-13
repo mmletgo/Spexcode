@@ -74,9 +74,10 @@ export async function readContractReport(root: string): Promise<ContractReport> 
   const impact = contractImpact(graph, [...graph.items.keys()])
   const files = new Map<string, string>()
   const findings = parsed.flatMap((result) => result.findings)
+  const declaredPaths = contracts.flatMap(contract => [...contract.code, ...contract.related].map(anchor => anchor.split('#')[0]))
   const sourcePaths = [...graph.items.values()].flatMap((item) =>
     item.kind !== 'VERIFY' && item.source.kind === 'code' ? [item.source.ref.split('#')[0]] : [])
-  for (const path of new Set([...impact.codePaths, ...impact.testPaths, ...sourcePaths])) {
+  for (const path of new Set([...declaredPaths, ...impact.codePaths, ...impact.testPaths, ...sourcePaths])) {
     const full = resolve(root, path)
     const lexical = relative(resolve(root), full)
     const outside = isAbsolute(path) || lexical === '..' || lexical.startsWith('..' + sep)
