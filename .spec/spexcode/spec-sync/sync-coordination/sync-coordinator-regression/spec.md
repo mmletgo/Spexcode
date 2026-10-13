@@ -23,3 +23,5 @@ V3失败后修复的模型若再次收到P1会返回弱化AC，因此测试必�
 高层raw输入没有REQ/FLOW/AC，初始scope只含目录前缀；通过真实细化登记未来业务ID、生成此前absent的新源码模块及可信原意已登记的新治理节点，再经真实Docker/normal Git hooks交付。任意reader-app根通过真实CLI init，作者managed投影不入候选，source/index保持；用户入口无需填写未来实现文件或AC。
 
 第一次V4后、Git准备前人类再次编辑source，beforeApply复采仍拒绝且持久conflicted/input_changed，无业务journal/commit；不被private catch降成environment或FENCE_EXPIRED。
+
+AC-SYNC-02/03使用真实已有详细契约，分别经readonly prepareSpecBodyEdit+requestBlob修改高层raw和具体TR，source/index全程不写。独立模型会话返回固定业务表并检查新意图和旧验收对照；真实V1保护accepted新契约，V3 Docker运行新/旧实际断言，固定CLI hooks/Git交付，receipt覆盖新验收。未受影响作者prose与原ID行保留，旧oracle文件不可改，不把成功从空Spec用例当修改既有契约证据。
