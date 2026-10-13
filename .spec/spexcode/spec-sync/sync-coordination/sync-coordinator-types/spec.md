@@ -21,3 +21,5 @@ mandatoryTests 是额外已有独立测试义务，包含 verificationId/testPat
 prepareSyncAdmission 返回既有 AdmitSyncInput；runSyncOperation 的 options 提供固定计划、再次读取当前可信计划、source 外预建0700的 managedRoot/artifactRoot及固定可信 tools。可注入模型 runner 或 Docker driver 仅作为明确测试接缝，生产默认既有原生执行。返回操作真实状态/receipt/typed failure，不以本地 Promise 成功代表交付。
 
 SyncAdmissionOptions可带retryOf，新用户显式重试身份透传admission；冻结input/request/policy与旧已接受契约义务不变，仅经store真实eligibility核验后授权新执行预算。
+
+SyncCoordinatorOptions.recoveryOnly?:boolean显式请求只结算已有资源或已开始journal；不启动未派发operation、新attempt/native/verification或无journal交付，保持用户control/input与执行预算。

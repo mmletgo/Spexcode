@@ -26,6 +26,7 @@ export type SyncCoordinatorOptions = {
   plan: SyncCoordinatorPlan
   readCurrentPlan: () => SyncCoordinatorPlan | Promise<SyncCoordinatorPlan>
   managedRoot: string; artifactRoot: string; tools: DeliveryTools
+  recoveryOnly?: boolean
   runner?: ElaborationRunner; verificationDriver?: VerificationDriver; signal?: AbortSignal
   leaseMs?: number; heartbeatMs?: number; callTimeoutMs?: number
   /** 故障注入只暂停已有真实副作用，不能替换 Git 完成证据。 */

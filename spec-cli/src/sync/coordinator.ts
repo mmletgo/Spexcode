@@ -22,7 +22,7 @@ import { captureInputSnapshot, contentHash, objectGit, readEvidence, readObject,
 import type { SnapshotManifest } from './snapshot.js'
 import { SyncStoreError } from './store.js'
 import type { SyncStore } from './store.js'
-import { verificationExportDigest } from './verification-executor.js'
+import { dockerVerificationDriver, verificationExportDigest } from './verification-executor.js'
 import type { VerificationRequest, VerificationResult } from './verification-executor-types.js'
 import { planAcceptanceRuns } from './verification-plan.js'
 import type { AcceptanceRun } from './verification-plan.js'
@@ -165,7 +165,11 @@ async function recoverResources(store: SyncStore, operation: SyncOperation, opti
     const fence = fenceFor(item.operation, item.attempt), commonDir = operation.input.source.commonDir
     if (item.resource.plan.kind === 'verification') {
       const request = JSON.parse(readEvidence(commonDir, item.resource.plan.planBlob).toString('utf8')) as Omit<VerificationRequest, 'previousCheckpoint'>
-      const recovered = await runAttemptVerification(store, fence, { ...request, signal: AbortSignal.abort() }, { driver: options.verificationDriver })
+      const driver = options.verificationDriver ?? dockerVerificationDriver
+      const recovered = await runAttemptVerification(store, fence, { ...request, signal: AbortSignal.abort() }, { driver: options.recoveryOnly ? (args, maxBytes) => {
+        if (args[0] === 'container' && ['create', 'start'].includes(args[1])) fail('resource_recovery', '只恢复既有容器，不新建或启动verification')
+        return driver(args, maxBytes)
+      } : driver })
       if (recovered.result.status === 'recovery_required' || store.findResource(item.attempt.id, item.resource.plan.key)?.phase !== 'removed') return false
     } else {
       const plan = JSON.parse(readEvidence(commonDir, item.resource.plan.planBlob).toString('utf8')) as NativeRunPlan
@@ -221,6 +225,16 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
   try {
     operation = store.readOperation(operationId)
     let attempt = operation.currentAttemptId ? store.readAttempt(operation.currentAttemptId) : null
+    if (options.recoveryOnly) {
+      if (!await recoverResources(store, operation, options, true)) return current('recovery_required')
+      const journals = store.listJournals(operationId).filter(journal => journal.status !== 'settled')
+      for (const journal of journals) {
+        if (!attempt || journal.attemptId !== attempt.id || !operation.delivery || attempt.status !== 'applying') fail('journal_recovery', '既定journal没有同attempt的已绑定交付写入单元')
+        const delivered = await deliverVerifiedAttempt(store, fenceFor(operation, attempt), { managedRoot: options.managedRoot, tools: options.tools, beforeApply: async () => fail('recovery_apply_forbidden', '只恢复已开始journal，禁止新apply') })
+        operation = delivered.operation
+      }
+      return current()
+    }
     if (attempt?.status === 'applying' || attempt?.status === 'verified') {
       fence = fenceFor(operation, attempt)
       if (attempt.status === 'verified' && (operation.control !== 'run' || attempt.expiresAtMs <= Date.now() || operation.deadlineAtMs <= Date.now())) {
@@ -426,6 +440,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       return { status: delivered.operation.phase, ...delivered }
     }
   } catch (error) {
+    if (options.recoveryOnly) return current('recovery_required', failure(error instanceof SyncCoordinatorError ? error.code : 'resource_recovery', error instanceof Error ? error.message : String(error), 'environment', error instanceof SyncCoordinatorError ? error.evidenceRefs : []))
     operation = store.readOperation(operationId)
     if (operation.phase === 'recovery_required') return current('recovery_required', operation.currentAttemptId ? store.readAttempt(operation.currentAttemptId).failure ?? undefined : undefined)
     if (error instanceof SyncCoordinatorError && error.code === 'resource_recovery') return current('recovery_required', { code: error.code, message: error.message, kind: 'environment', evidenceRefs: error.evidenceRefs })

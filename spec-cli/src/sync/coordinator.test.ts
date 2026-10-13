@@ -5,14 +5,16 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { openProtocol } from '@spexcode/session-protocol'
+import { applyComponentMigrations, openProtocol, type SqlParam } from '@spexcode/session-protocol'
 import { CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
 import type { ContractCell, GeneratedElaboration, GeneratedTables } from './elaboration-markdown.js'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
 import type { ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
 import { prepareSyncAdmission, runSyncOperation, syncPlanDigest } from './coordinator.js'
 import type { SyncCoordinatorOptions, SyncCoordinatorPlan } from './coordinator-types.js'
-import { migrateSyncStore } from './migrations.js'
+import { migrateSyncStore, SYNC_COMPONENT, SYNC_MIGRATIONS, syncCoordinatorAddress } from './migrations.js'
+import { dockerVerificationDriver } from './verification-executor.js'
+import type { VerificationCheckpoint } from './verification-executor-types.js'
 import { freezeDeliveryRuntime } from './runtime-freeze.js'
 import { captureInputSnapshot, contentHash, readEvidence, writeEvidence } from './snapshot.js'
 import type { NativeRunCheckpoint, NativeRunPlan } from './native-run.js'
@@ -186,13 +188,17 @@ test('取消后的历史native未知创建回执保留资源与recovery_required
   const request = { root: f.root, base: f.input.headCommit, prompt: '固定资源恢复请求', schema: { type: 'object' }, requestKey: 'pending-created-native', inputDigest: contentHash('fixed-input'), purpose: 'elaboration_generate', timeoutMs: 10000 }
   const requestDigest = contentHash(JSON.stringify(request)), dispatch = f.store.reserveDispatch(claimed.fence, { key: request.requestKey, purpose: request.purpose, requestDigest }), expectedSessionId = sessionIdForCreateKey(dispatch.sessionCreateKey)
   const identity = { operationId: f.operation.id, attemptId: claimed.attempt.id, inputId: f.input.id, candidateDigest: null }
-  const plan: NativeRunPlan = { schemaVersion: 1, ...identity, request, requestDigest, sessionCreateKey: dispatch.sessionCreateKey, expectedSessionId }
+  const plan: NativeRunPlan = { schemaVersion: 1, request, requestDigest, sessionCreateKey: dispatch.sessionCreateKey, expectedSessionId, ...identity }
   const checkpoint: NativeRunCheckpoint = { schemaVersion: 1, ...identity, requestDigest, expectedSessionId, phase: 'planned', nativeCallRequested: true, nativeStarted: false, nativeState: 'unpublished', session: { sessionId: expectedSessionId, threadId: null, turnId: null } }
   const plannedRef = writeEvidence(f.input.source.commonDir, checkpoint)
   const resource = f.store.planResource(claimed.fence, { key: request.requestKey, kind: 'native_session', payloadDigest: requestDigest, inputId: f.input.id, candidateDigest: null, planBlob: writeEvidence(f.input.source.commonDir, plan), checkpointRef: plannedRef })
   const createdRef = writeEvidence(f.input.source.commonDir, { ...checkpoint, phase: 'created', nativeState: 'queued' })
   f.store.recordResourceCheckpoint(resource.id, { ...identity, phase: 'created', expectedCheckpointRef: plannedRef, checkpointRef: createdRef })
   f.store.requestControl(f.operation.id, 'cancel')
+  const before = f.store.readOperation(f.operation.id)
+  const cleanupOnly = await runSyncOperation(f.store, f.operation.id, { ...f.options, recoveryOnly: true })
+  assert.equal(cleanupOnly.status, 'recovery_required'); assert.deepEqual(cleanupOnly.operation, before)
+  assert.ok(cleanupOnly.failure?.message.includes('creation may be in progress'))
   const result = await runSyncOperation(f.store, f.operation.id, f.options)
   assert.equal(result.status, 'recovery_required'); assert.equal(result.operation.phase, 'cancelled')
   assert.equal(f.store.findResource(claimed.attempt.id, request.requestKey)!.phase, 'created')
@@ -259,7 +265,9 @@ test('真实commit后DB未settle中断，恢复既有journal不重复生成/提�
   const failed = await runSyncOperation(f.store, f.operation.id, { ...f.options, deliveryHooks: { afterCommit: () => { throw new Error('actual commit crash') } } })
   assert.equal(failed.status, 'recovery_required', JSON.stringify(failed.failure))
   const commit = f.git('rev-parse', failed.operation.deliveryPlan.branch)
-  const recovered = await runSyncOperation(f.store, f.operation.id, f.options)
+  const before = f.store.readOperation(f.operation.id)
+  const recovered = await runSyncOperation(f.store, f.operation.id, { ...f.options, recoveryOnly: true })
+  assert.equal(recovered.operation.control, before.control); assert.equal(recovered.operation.callsUsed, before.callsUsed); assert.equal(recovered.operation.deadlineAtMs, before.deadlineAtMs); assert.deepEqual(recovered.operation.input, before.input)
   assert.equal(recovered.status, 'workspace_synced', JSON.stringify(recovered.failure)); assert.equal(recovered.receipt!.actualCommit, commit)
   assert.equal(f.calls.length, 4); assert.equal(Number(f.git('rev-list', '--count', failed.operation.deliveryPlan.branch)), f.priorCommitCount + 1)
 })
@@ -422,8 +430,28 @@ test('显式retryOf在SQLite重启后继承无未来IDs输入的accepted P1，�
   assert.equal(failed.operation.phase, 'failed'); assert.equal(failed.operation.callsUsed, 3); assert.equal(p1Calls, 1)
   assert.equal(f.store.readRetryEligibility(failed.operation.id).eligible, true)
   f.closeForRestart()
-  const protocol = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => protocol.close())
+  const sourceProtocol = openProtocol(join(f.parent, 'sync.sqlite')), protocol = openProtocol(join(f.parent, 'v5-sync.sqlite')); t.after(() => protocol.close())
+  applyComponentMigrations(protocol, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 5))
+  protocol.initialize(syncCoordinatorAddress(f.input.source.repositoryId))
+  const historical = sourceProtocol.readMessages(syncCoordinatorAddress(f.input.source.repositoryId))[0]
+  const copied = protocol.enqueue(syncCoordinatorAddress(f.input.source.repositoryId), { kind: historical.kind, body: historical.body, idempotencyKey: historical.idempotencyKey })
+  protocol.withTransaction(tx => tx.dequeue(syncCoordinatorAddress(f.input.source.repositoryId), copied.messageId))
+  for (const table of ['sync_operations', 'sync_attempts', 'sync_leases']) {
+    for (const row of sourceProtocol.withTransaction(tx => tx.query(`SELECT * FROM ${table}`))) {
+      if (table === 'sync_operations') { const record = JSON.parse(String(row.record_json)); record.dispatchMessageId = copied.messageId; row.record_json = JSON.stringify(record) }
+      const columns = Object.keys(row).filter(column => column !== 'semantic_digest')
+      protocol.withTransaction(tx => tx.exec(`INSERT INTO ${table}(${columns.join(',')}) VALUES(${columns.map(() => '?').join(',')})`, ...columns.map(column => row[column]) as SqlParam[]))
+    }
+  }
+  sourceProtocol.close()
+  const v5record = JSON.parse(String(protocol.withTransaction(tx => tx.query('SELECT record_json FROM sync_operations WHERE id=?', failed.operation.id))[0].record_json))
+  assert.ok(v5record.scope.contractIds.includes('AC-EXPORT-03')); assert.deepEqual(f.operation.input.id, f.input.id); assert.ok(!source.includes('AC-EXPORT-03'))
+  await migrateSyncStore(protocol, { backupPath: join(f.parent, 'v5-accepted-P1.backup') })
   const restarted = new SyncStore(protocol, { readBlob: ref => readEvidence(f.input.source.commonDir, ref) }); f.useStore(restarted)
+  const automatic = await prepareSyncAdmission(f.input, f.plan, { ingressKey: 'v5-new-automatic-ingress', rootCauseId: 'v5-new-automatic-ingress', origin: failed.operation.origin, budget: failed.operation.budget, managedRoot: f.managedRoot, previousBaselinePair: failed.operation.previousBaselinePair })
+  assert.equal(restarted.admitAndEnqueue(automatic).id, failed.operation.id)
+  assert.equal(restarted.readOperation(failed.operation.id).callsUsed, 3)
+  assert.equal(restarted.readOperation(failed.operation.id).payloadDigest, failed.operation.payloadDigest)
   const admission = await prepareSyncAdmission(f.input, f.plan, { ingressKey: 'explicit-user-retry', rootCauseId: 'explicit-user-retry', retryOf: failed.operation.id, origin: failed.operation.origin, budget: failed.operation.budget, managedRoot: f.managedRoot, previousBaselinePair: failed.operation.previousBaselinePair })
   assert.equal(admission.retryOf, failed.operation.id)
   const retry = restarted.admitAndEnqueue(admission); f.useOperation(retry)
@@ -435,5 +463,66 @@ test('显式retryOf在SQLite重启后继承无未来IDs输入的accepted P1，�
   const current = restarted.readAttempt(repeated.operation.currentAttemptId!)
   assert.ok(current.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).some(value => value.fromOperationId === failed.operation.id && value.fromAttemptId && value.evidenceRef))
   assert.equal(restarted.readOperation(failed.operation.id).callsUsed, 3); assert.equal(restarted.listJournals(retry.id).length, 0)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+})
+
+test('recoveryOnly不派发queued操作；paused且原生尚未调用的计划仅结算资源不改control/预算/input', async t => {
+  const f = await fixture(t), before = f.store.readOperation(f.operation.id)
+  const queued = await runSyncOperation(f.store, f.operation.id, { ...f.options, recoveryOnly: true })
+  assert.deepEqual(queued.operation, before); assert.equal(f.calls.length, 0); assert.equal(f.store.listAttempts(f.operation.id).length, 0)
+  assert.equal(f.store.nextDispatch(f.input.source.repositoryId)?.messageId, before.dispatchMessageId)
+  const claimed = f.store.claimAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 10000, expectedMessageId: f.operation.dispatchMessageId })
+  const request = { root: f.root, base: f.input.headCommit, prompt: '尚未发出原生命令的已登记请求', schema: { type: 'object' }, requestKey: 'not-dispatched', inputDigest: f.input.id, purpose: 'elaboration_generate', timeoutMs: 10000 }
+  const requestDigest = contentHash(JSON.stringify(request)), dispatch = f.store.reserveDispatch(claimed.fence, { key: request.requestKey, purpose: request.purpose, requestDigest }), expectedSessionId = sessionIdForCreateKey(dispatch.sessionCreateKey)
+  const identity = { operationId: f.operation.id, attemptId: claimed.attempt.id, inputId: f.input.id, candidateDigest: null }
+  const plan: NativeRunPlan = { schemaVersion: 1, request, requestDigest, sessionCreateKey: dispatch.sessionCreateKey, expectedSessionId, ...identity }
+  const checkpoint: NativeRunCheckpoint = { schemaVersion: 1, ...identity, requestDigest, expectedSessionId, phase: 'planned', nativeCallRequested: false, nativeStarted: false, nativeState: 'unpublished', session: { sessionId: expectedSessionId, threadId: null, turnId: null } }
+  f.store.planResource(claimed.fence, { key: request.requestKey, kind: 'native_session', payloadDigest: requestDigest, inputId: f.input.id, candidateDigest: null, planBlob: writeEvidence(f.input.source.commonDir, plan), checkpointRef: writeEvidence(f.input.source.commonDir, checkpoint) })
+  f.store.requestControl(f.operation.id, 'pause')
+  const pausedBefore = f.store.readOperation(f.operation.id), result = await runSyncOperation(f.store, f.operation.id, { ...f.options, recoveryOnly: true })
+  assert.equal(result.status, 'paused', JSON.stringify(result.failure)); assert.deepEqual(result.operation, pausedBefore)
+  const resource = f.store.findResource(claimed.attempt.id, request.requestKey)!
+  assert.equal(resource.phase, 'removed'); assert.deepEqual(resource.checkpoints.map(item => item.phase), ['planned', 'terminal', 'removed'])
+  assert.equal(JSON.parse(readEvidence(f.input.source.commonDir, resource.checkpointRef).toString()).stop.nativeStatus, 'notDispatched')
+  assert.equal(f.calls.length, 0); assert.equal(f.store.listAttempts(f.operation.id).length, 1); assert.equal(f.store.listJournals(f.operation.id).length, 0)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+})
+
+for (const missing of [false, true]) test(`recoveryOnly真实Docker planned创建回执丢失${missing ? '且目标不存在保unknown' : '只清理既有容器'}，不create/start`, docker, async t => {
+  const f = await fixture(t), commands: string[][] = []
+  f.options.verificationDriver = async (args, maxBytes) => {
+    const result = await dockerVerificationDriver(args, maxBytes)
+    if (args[0] === 'container' && args[1] === 'create') throw new Error('actual Docker create finished, result lost before created checkpoint')
+    return result
+  }
+  const first = await runSyncOperation(f.store, f.operation.id, f.options)
+  assert.equal(first.status, 'recovery_required'); assert.equal(f.calls.length, 4)
+  const item = f.store.listRecoverableResources().find(item => item.operation.id === f.operation.id)!, checkpoint = JSON.parse(readEvidence(f.input.source.commonDir, item.resource.checkpointRef).toString()) as VerificationCheckpoint
+  assert.equal(item.resource.phase, 'planned')
+  const inspected = await dockerVerificationDriver(['container', 'inspect', checkpoint.uniqueContainerName], 1024 * 1024), actual = JSON.parse(inspected.stdout)[0]
+  assert.equal(actual.Config.Labels['spex.run'], checkpoint.runId); assert.equal(actual.Config.Labels['spex.candidate'], checkpoint.candidateDigest)
+  t.after(async () => { await dockerVerificationDriver(['container', 'rm', '-f', actual.Id], 1024 * 1024) })
+  if (missing) assert.equal((await dockerVerificationDriver(['container', 'rm', actual.Id], 1024 * 1024)).exitCode, 0)
+  const before = f.store.readOperation(f.operation.id), attempts = f.store.listAttempts(f.operation.id).length
+  const result = await runSyncOperation(f.store, f.operation.id, { ...f.options, recoveryOnly: true, verificationDriver: async (args, maxBytes) => { commands.push([...args]); return dockerVerificationDriver(args, maxBytes) } })
+  assert.deepEqual(result.operation, before); assert.equal(f.calls.length, 4); assert.equal(f.store.listAttempts(f.operation.id).length, attempts)
+  assert.ok(commands.every(args => !(args[0] === 'container' && ['create', 'start'].includes(args[1])))); assert.equal(f.store.listJournals(f.operation.id).length, 0)
+  assert.equal(f.store.findResource(item.attempt.id, item.resource.plan.key)!.phase, missing ? 'planned' : 'removed')
+  assert.equal(result.status, missing ? 'recovery_required' : before.phase)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+})
+
+test('recoveryOnly面对真实V1-V4已登记verified但尚无journal的边界中断，只返回状态不开始交付', docker, async t => {
+  const f = await fixture(t), recordVerification = f.store.recordVerification.bind(f.store), recordFailure = f.store.recordFailure.bind(f.store)
+  f.store.recordVerification = (...args) => { recordVerification(...args); throw new Error('test interruption after actual durable four-layer verification') }
+  f.store.recordFailure = () => { throw new Error('test process boundary stopped before another business-state write') }
+  await assert.rejects(runSyncOperation(f.store, f.operation.id, f.options), /process boundary stopped/)
+  f.store.recordVerification = recordVerification; f.store.recordFailure = recordFailure
+  const before = f.store.readOperation(f.operation.id)
+  assert.equal(before.phase, 'ready_to_apply'); assert.equal(f.store.readAttempt(before.currentAttemptId!).status, 'verified')
+  assert.equal(f.store.listRecoverableResources().length, 0); assert.equal(f.store.listJournals(before.id).length, 0)
+  const recovered = await runSyncOperation(f.store, before.id, { ...f.options, recoveryOnly: true })
+  assert.deepEqual(recovered.operation, before); assert.equal(recovered.status, 'ready_to_apply'); assert.equal(f.calls.length, 4)
+  assert.equal(f.store.listJournals(before.id).length, 0); assert.ok(!existsSync(before.deliveryPlan.canonicalRoot)); assert.equal(f.store.listAttempts(before.id).length, 1)
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
 })
