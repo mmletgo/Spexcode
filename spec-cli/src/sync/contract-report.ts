@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { readFile, readdir } from 'node:fs/promises'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 import {
   buildContractGraph, contractDigest, contractImpact, gitA, loadSpecs, parseContract,
@@ -42,11 +43,27 @@ export async function readProjectContractReport(projectRoot: string, targetTree?
 /** Read authored contracts and real binding files without running any authored command. */
 export async function readContractReport(root: string): Promise<ContractReport> {
   const canonicalRoot = realpathSync(root)
-  const nodes = await loadSpecs(root, { history: null, drift: null })
+  const specSources = new Map<string, string>()
+  const specDirectory = resolve(canonicalRoot, '.spec')
+  if (existsSync(specDirectory)) {
+    const directoryRelative = relative(canonicalRoot, realpathSync(specDirectory))
+    if (directoryRelative === '..' || directoryRelative.startsWith('..' + sep) || isAbsolute(directoryRelative))
+      throw new ContractReportScopeError('Spec sources must resolve inside the selected worktree')
+    for (const entry of await readdir(specDirectory, { recursive: true, withFileTypes: true })) {
+      if (entry.name !== 'spec.md' || (!entry.isFile() && !entry.isSymbolicLink())) continue
+      const full = resolve(entry.parentPath, entry.name)
+      const actual = realpathSync(full)
+      const sourceRelative = relative(canonicalRoot, actual)
+      if (sourceRelative === '..' || sourceRelative.startsWith('..' + sep) || isAbsolute(sourceRelative))
+        throw new ContractReportScopeError('Spec sources must resolve inside the selected worktree')
+      specSources.set(relative(canonicalRoot, full).split(sep).join('/'), await readFile(actual, 'utf8'))
+    }
+  }
+  const nodes = await loadSpecs(root, { history: null, drift: null, snapshot: { tip: 'HEAD', files: specSources } })
   const parsed = nodes.map((node) => parseContract({
     nodeId: node.id,
     path: node.path,
-    source: readFileSync(resolve(root, node.path), 'utf8'),
+    source: specSources.get(node.path)!,
   }))
   const contracts = parsed.flatMap((result) => result.contract ? [result.contract] : [])
   const graph = buildContractGraph(contracts)

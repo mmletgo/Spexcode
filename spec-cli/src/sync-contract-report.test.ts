@@ -70,3 +70,19 @@ test('HTTP contract scope follows a registered worktree and rejects unrelated di
     rmSync(parent, { recursive: true, force: true })
   }
 })
+
+test('a spec source symlink cannot expose a document outside the selected worktree', async () => {
+  const parent = mkdtempSync(join(tmpdir(), 'spex-contract-source-'))
+  const root = join(parent, 'repo')
+  try {
+    cpSync(fixture, root, { recursive: true })
+    const path = join(root, '.spec/export/export-contract/spec.md')
+    const outside = join(parent, 'external-spec.md')
+    writeFileSync(outside, readFileSync(path))
+    rmSync(path)
+    symlinkSync(outside, path)
+    await assert.rejects(readContractReport(root), ContractReportScopeError)
+  } finally {
+    rmSync(parent, { recursive: true, force: true })
+  }
+})
