@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { getBlob, putBlob } from '@spexcode/spec-core'
 import { readRecord, type SessRec } from '../session-record.js'
-import { sessionIdForCreateKey } from '../sessions.js'
+import { sessionIdForCreateKey, readSessionCreateTermination, type SessionCreateTermination } from '../sessions.js'
 import { cancelStructuredSession, runStructuredSession, StructuredSessionError, type StructuredCancellationResult } from '../session-structured.js'
 import type { StructuredExecution } from '../session-structured-policy.js'
 import type { ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult } from './elaboration-types.js'
@@ -13,7 +13,7 @@ import type { BlobRef, NativeSessionRef, SyncResourcePhase, WriteFence } from '.
 type FrozenRequest = Omit<ElaborationSessionRequest, 'signal'>
 export type NativeRunRecord = Pick<SessRec, 'session' | 'status' | 'harnessSessionId' | 'structuredExecution' | 'createRequestId' | 'createPayloadHash'>
 export type AttemptRunnerOptions = {
-  runtime?: { run: typeof runStructuredSession; cancel: typeof cancelStructuredSession; readRecord: (id: string) => NativeRunRecord | null }
+  runtime?: { run: typeof runStructuredSession; cancel: typeof cancelStructuredSession; readRecord: (id: string) => NativeRunRecord | null; readCreateTermination?: typeof readSessionCreateTermination }
   blobIO?: { put: (bytes: Buffer) => BlobRef; read: (ref: BlobRef) => Buffer }
   pollMs?: number
 }
@@ -27,6 +27,7 @@ export type NativeRunCheckpoint = {
   nativeStarted: boolean; nativeState: StructuredExecution['state'] | 'queued' | 'unpublished'
   session: NativeSessionRef; result?: ElaborationSessionResult; status?: 'completed' | 'cancelled' | 'timeout'
   stop?: StructuredCancellationResult
+  creationTermination?: SessionCreateTermination
 }
 const sha = (bytes: string | Buffer): string => createHash('sha256').update(bytes).digest('hex')
 const hash = (value: unknown): string => sha(JSON.stringify(value))
@@ -41,7 +42,7 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
     if (!bytes) throw new StructuredSessionError('stale_result', 'native execution evidence blob is missing')
     return bytes
   } }
-  const runtime = options.runtime ?? { run: runStructuredSession, cancel: cancelStructuredSession, readRecord }
+  const runtime = options.runtime ?? { run: runStructuredSession, cancel: cancelStructuredSession, readRecord, readCreateTermination: readSessionCreateTermination }
   const flights = new Map<string, { digest: string; controller: AbortController; promise: Promise<ElaborationSessionResult> }>()
   const read = <T>(ref: BlobRef): T => {
     const bytes = blobs.read(ref)
@@ -108,18 +109,40 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
       if (authority()) store.bindSession(fence, request.requestKey, session)
       return record
     }
-    const settle = (status: 'completed' | 'cancelled' | 'timeout', extra: { result?: ElaborationSessionResult; stop?: StructuredCancellationResult }): void => {
+    let outcome: { ok: true; result: ElaborationSessionResult } | { ok: false; error: unknown } | undefined
+    let nativePromise: Promise<void> | undefined
+    const creationTermination = (): SessionCreateTermination | null => {
+      const receipt = runtime.readCreateTermination?.(dispatch!.sessionCreateKey) ?? null
+      if (!receipt) return null
+      if (receipt.version !== 1 || receipt.sessionId !== expectedSessionId || receipt.requestDigest !== sha(dispatch!.sessionCreateKey) || receipt.payloadHash !== expectedCreateHash || !['session_create_cancelled', 'session_create_timeout'].includes(receipt.code) || receipt.cleanupComplete !== true || receipt.nativeStopped !== true || receipt.nativeStatus !== 'notStarted' || checkpoint.session.threadId || checkpoint.session.turnId || checkpoint.nativeStarted)
+        throw new StructuredSessionError('stale_result', 'native creation termination differs from fixed request or started execution', errorIdentity())
+      return receipt
+    }
+    const settle = (status: 'completed' | 'cancelled' | 'timeout', extra: { result?: ElaborationSessionResult; stop?: StructuredCancellationResult; creationTermination?: SessionCreateTermination }): void => {
       if (resource!.phase !== 'terminal') save({ ...checkpoint, ...extra, status, phase: 'terminal' })
       save({ ...checkpoint, phase: 'removed' })
     }
     const stop = async (): Promise<never> => {
       controller.abort()
-      const record = observe()
+      let record = observe()
       if (!record && !checkpoint.nativeCallRequested) {
         settle('cancelled', { stop: { sessionId: expectedSessionId, state: 'cancelled', nativeStopped: true, acknowledged: false, nativeStatus: 'notDispatched' } })
         throw new StructuredSessionError('cancelled', 'native request cancelled before dispatch', errorIdentity())
       }
-      if (!record) throw new StructuredSessionError('cancellation_pending', 'native creation may be in progress; absence is not stop proof', errorIdentity())
+      if (!record) {
+        const deadline = Date.now() + Math.min(15_000, request.timeoutMs)
+        let receipt = creationTermination()
+        while (!record && !receipt && nativePromise && !outcome && Date.now() < deadline) {
+          await new Promise<void>(resolve => setTimeout(resolve, Math.min(options.pollMs ?? 50, Math.max(1, deadline - Date.now()))))
+          record = observe(); receipt = creationTermination()
+        }
+        if (!record && receipt) {
+          const status = receipt.code === 'session_create_timeout' ? 'timeout' : 'cancelled'
+          settle(status, { creationTermination: receipt, stop: { sessionId: expectedSessionId, state: status, nativeStopped: true, acknowledged: false, nativeStatus: receipt.nativeStatus } })
+          throw new StructuredSessionError(status, 'native creation cancelled and exact cleanup settled', errorIdentity())
+        }
+        if (!record) throw new StructuredSessionError('cancellation_pending', 'native creation may be in progress; absence is not stop proof', errorIdentity())
+      }
       let stopped: StructuredCancellationResult | undefined
       let failure: unknown
       try { stopped = await runtime.cancel(expectedSessionId, { reason: 'cancelled', timeoutMs: Math.min(15_000, request.timeoutMs) }) }
@@ -141,15 +164,15 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
       if (checkpoint.status === 'completed' && checkpoint.result) { checkResult(checkpoint.result); settle('completed', { result: checkpoint.result }); return copy(checkpoint.result) }
       return stop()
     }
-    if (controller.signal.aborted || !authority()) return stop()
+    if (creationTermination() || controller.signal.aborted || !authority()) return stop()
     save({ ...checkpoint, nativeCallRequested: true })
-    let outcome: { ok: true; result: ElaborationSessionResult } | { ok: false; error: unknown } | undefined
-    Promise.resolve().then(() => runtime.run({ ...request, requestKey: dispatch!.sessionCreateKey, signal: controller.signal })).then(result => { outcome = { ok: true, result } }, error => { outcome = { ok: false, error } })
+    nativePromise = Promise.resolve().then(() => runtime.run({ ...request, requestKey: dispatch!.sessionCreateKey, signal: controller.signal })).then(result => { outcome = { ok: true, result } }, error => { outcome = { ok: false, error } })
     for (;;) {
       observe()
       if (controller.signal.aborted || !authority()) return await stop()
       if (outcome) {
         if (!outcome.ok) {
+          if (!observe() && creationTermination()) return stop()
           const state = runtime.readRecord(expectedSessionId)?.structuredExecution
           if (state?.cancellation?.nativeStopped && (state.state === 'cancelled' || state.state === 'timeout')) settle(state.state, { stop: { sessionId: expectedSessionId, state: state.state, threadId: state.threadId, turnId: state.turnId, nativeStopped: true, acknowledged: state.cancellation.acknowledged, nativeStatus: state.cancellation.nativeStatus } })
           throw outcome.error

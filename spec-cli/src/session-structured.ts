@@ -108,7 +108,7 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
   const created = await sessionCreateRequest({ prompt: request.prompt, ...(request.base ? { base: request.base } : {}) }, {
     requestKey: request.requestKey, signal: request.signal, timeoutMs: Math.min(30_000, request.timeoutMs), structuredExecution: execution,
   })
-  if (created.status !== 201) throw new StructuredSessionError(created.code === 'session_create_key_reused' ? 'key_reused' : created.code === 'session_create_cancelled' ? 'cancelled' : created.code === 'session_create_timeout' ? 'timeout' : 'failed', created.error)
+  if (created.status !== 201) throw new StructuredSessionError(created.code === 'session_create_key_reused' ? 'key_reused' : created.code === 'session_create_cancelled' ? 'cancelled' : created.code === 'session_create_timeout' ? 'timeout' : 'failed', created.error, { sessionId: created.termination?.sessionId })
   const id = created.session.id
   let cancelTask: Promise<StructuredCancellationResult> | undefined
   const cancel = (reason: 'cancelled' | 'timeout'): Promise<StructuredCancellationResult> => cancelTask ??= cancelStructuredSession(id, { reason })

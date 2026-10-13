@@ -23,3 +23,5 @@ code:
 成功结果必须完整匹配原生session/thread/turn、schema与实际output hash，先保存完整terminal证据再removed；removed仅表示该turn执行容量结算，原会话和worktree历史保留。精确同键重入复用已持久结果，核blob哈希和完整请求绑定后重放，不再派发；未结算资源重入既有同键结构化执行或精确取消，不重复创建原生turn。旧generation只能登记资源观测，不能重新取得候选/验证/apply写权。
 
 终态result或精确停止证明已持久、removed尚未登记的窗口可仅据内容hash核验的terminal证据补removed，不重复原生调用。外层request.inputDigest属于冻结推理请求，不冒充source snapshot id；资源inputId始终来自operation原source输入，candidateDigest从实际durable attempt获取。
+
+创建已派发但会话尚未发布时，缺失 record 不能证明停止。同进程取消在固定预算内等待原创建事务；只有正式创建事务在 request-key 锁内完成清理、且 version/sessionId/requestDigest/payloadHash 与冻结计划一致的结构化终止收据才证明 notStarted。收据及精确停止事实先进入 terminal 再 removed；收据不存在、错配、创建仍在进行或清理失败时保留资源用于恢复。重启读取该精确收据即可结算，即使原 fence 仍有效也不再调用 runStructuredSession，不复活同键取消或重复计费。
