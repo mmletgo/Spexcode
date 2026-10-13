@@ -19,3 +19,5 @@ code:
 验证命令：`npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/sync/store.test.ts`。测试模拟已复核的 tree/commit 引用，只证明数据库结算，不替代真实Git应用与产品全链路验收。
 
 追加验证：交付intent先durable、物理target不可替换；人类输入与模型差量分别计算并共同journal；迟到native回调不降applying状态；窄验证范围不被外层扩大；partial同source再次接入保留blocked输入与原coveredScope；预算超时持久拒绝且不重置；旧派发安全消费后最新输入领取FIFO。
+
+receipt树引用相同但manifest不同仍拒绝，journal保持未登记；相同已冻结manifest可结算。

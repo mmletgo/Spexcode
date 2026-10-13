@@ -41,7 +41,7 @@ async function fixture() {
     const plan: ApplyPlan = { effectKey: `effect-${claimed.operation.id}`, payloadDigest: 'apply-digest', candidateDigest: candidate.digest, verificationBlob: verification.resultBlob, target: target.source, expectedTargetSnapshotId: target.id, expectedBaselinePairId: value.previousBaselinePair?.id ?? null, coveredScope: readyScope, files, planBlob: put({ files, candidateDigest: candidate.digest }) }
     return { ...claimed, target, candidate, verification, plan }
   }
-  const receipt = (journalId: string, plan: ApplyPlan): ApplyReceipt => ({ id: `receipt-${journalId}`, journalId, effectKey: plan.effectKey, actualTree: 'f'.repeat(40), actualCommit: '3'.repeat(40), deliverySnapshot: { ...input(source('delivery'), `delivered-${journalId}`), immutableTree: 'f'.repeat(40) }, evidenceRefs: [put({ bytesChecked: true })], completedAtMs: time })
+  const receipt = (journalId: string, plan: ApplyPlan): ApplyReceipt => ({ id: `receipt-${journalId}`, journalId, effectKey: plan.effectKey, actualTree: 'f'.repeat(40), actualCommit: '3'.repeat(40), deliverySnapshot: { ...input(source('delivery'), `delivered-${journalId}`), immutableTree: 'f'.repeat(40), manifestBlob: store.readAttempt(store.readJournal(journalId).attemptId).candidate!.manifestBlob }, evidenceRefs: [put({ bytesChecked: true })], completedAtMs: time })
   return { root, path, protocol, store, options, put, input, admit, claim, ready, receipt, tick: (ms: number) => { time += ms }, cleanup: () => { protocol.close(); rmSync(root, { recursive: true, force: true }) } }
 }
 
@@ -347,5 +347,19 @@ test('superseded pending dispatch is atomically discarded so a newer operation c
     const claimed = f.store.claimAttempt({ operationId: newer.id, source: newer.input.source, scope: newer.scope, leaseMs: 1000, expectedMessageId: newer.dispatchMessageId })
     assert.equal(claimed.operation.id, newer.id)
     assert.equal(f.protocol.listPending(SYNC_COORDINATOR_ADDRESS).length, 0)
+  } finally { f.cleanup() }
+})
+
+
+test('receipt cannot settle a manifest different from the frozen candidate', async () => {
+  const f = await fixture()
+  try {
+    const prepared = f.ready(), journal = f.store.beginApply(prepared.fence, prepared.plan, prepared.target)
+    for (const file of prepared.plan.files) f.store.recordApplyStep(prepared.fence, journal.id, { key: file.path, status: 'completed', evidenceRef: f.put({ checked: file.path }) })
+    const receipt = f.receipt(journal.id, prepared.plan)
+    assert.throws(() => f.store.recordReceipt(journal.id, { ...receipt, deliverySnapshot: { ...receipt.deliverySnapshot, manifestBlob: f.input().manifestBlob } }), /SYNC_RECEIPT_BINDING/)
+    assert.equal(f.store.readJournal(journal.id).receipt, null)
+    f.store.recordReceipt(journal.id, receipt)
+    assert.equal(f.store.settleApply(journal.id, receipt.id).phase, 'workspace_synced')
   } finally { f.cleanup() }
 })

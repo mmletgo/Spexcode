@@ -307,7 +307,7 @@ export class SyncStore {
     return this.write(tx => {
       const journal = this.journal(tx, journalId)
       const attempt = this.attempt(tx, journal.attemptId)
-      if (receipt.actualTree !== attempt.candidate?.tree || receipt.journalId !== journal.id || receipt.effectKey !== journal.plan.effectKey || identityKey(receipt.deliverySnapshot.source) !== identityKey(journal.plan.target) || receipt.actualTree !== receipt.deliverySnapshot.immutableTree) fail('SYNC_RECEIPT_BINDING', journalId)
+      if (receipt.actualTree !== attempt.candidate?.tree || receipt.deliverySnapshot.manifestBlob.sha256 !== attempt.candidate.manifestBlob.sha256 || receipt.journalId !== journal.id || receipt.effectKey !== journal.plan.effectKey || identityKey(receipt.deliverySnapshot.source) !== identityKey(journal.plan.target) || receipt.actualTree !== receipt.deliverySnapshot.immutableTree) fail('SYNC_RECEIPT_BINDING', journalId)
       if (journal.receipt) { if (digest(journal.receipt) !== digest(receipt)) fail('SYNC_RECEIPT_CONFLICT', receipt.id); return journal }
       if (journal.steps.some(step => step.status !== 'completed')) fail('SYNC_STEPS_INCOMPLETE', journalId)
       journal.receipt = clone(receipt); journal.status = 'completed'; this.saveJournal(tx, journal); return journal
