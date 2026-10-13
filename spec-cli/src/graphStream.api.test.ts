@@ -324,6 +324,14 @@ test('full file inputs invalidate delta readers even when the board tag is uncha
     await waitFor(() => events.includes('graph-full'), 'input fixture delta stream did not anchor')
     await waitForQuiet(events, 300)
     const count = events.filter((event) => event === 'graph-input').length
+    for (let read = 0; read < 3; read++) {
+      const settings = await fetch(`${base}/api/sync/settings`)
+      assert.equal(settings.status, 200)
+      await settings.json()
+    }
+    await waitForQuiet(events, 300)
+    assert.equal(events.filter((event) => event === 'graph-input').length, count,
+      'read-only synchronization snapshot pins must not invalidate document readers')
     writeFileSync(join(project, 'src/value.ts'), 'export const value = 2\n')
     await waitFor(() => events.filter((event) => event === 'graph-input').length > count,
       'uncommitted file content did not invalidate readers', 3_000)

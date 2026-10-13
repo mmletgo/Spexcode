@@ -656,6 +656,7 @@ export function watchRefs(
     root: join(common, 'refs'),
     source: 'refs',
     scope: 'full',
+    ignore: path => path === 'spex-sync' || path.startsWith('spex-sync/'),
     onInput: () => onInput(),
     onFailure: fail,
   })
