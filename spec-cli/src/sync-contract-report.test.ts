@@ -1,10 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { cpSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { cpSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { readContractReport } from './sync/contract-report.js'
+import { ContractReportScopeError, readContractReport, readProjectContractReport } from './sync/contract-report.js'
 
 const fixture = fileURLToPath(new URL('../test/fixtures/spec-sync/export-repo', import.meta.url))
 
@@ -41,6 +42,30 @@ test('a symlink binding cannot read a file outside the worktree', async () => {
     symlinkSync(outside, join(root, 'src/export.js'))
     const report = await readContractReport(root)
     assert.ok(report.findings.some((finding) => finding.code === 'binding-outside-root'))
+  } finally {
+    rmSync(parent, { recursive: true, force: true })
+  }
+})
+
+test('HTTP contract scope follows a registered worktree and rejects unrelated directories', async () => {
+  const parent = mkdtempSync(join(tmpdir(), 'spex-contract-scope-'))
+  const root = join(parent, 'repo'), worktree = join(parent, 'worktree')
+  try {
+    cpSync(fixture, root, { recursive: true })
+    for (const args of [
+      ['init', '-q', '-b', 'main'], ['config', 'user.email', 'fixture@example.test'],
+      ['config', 'user.name', 'fixture'], ['add', '.'], ['commit', '-qm', 'fixture'],
+      ['worktree', 'add', '-q', '-b', 'contract-scope', worktree],
+    ]) execFileSync('git', args, { cwd: root, stdio: 'pipe' })
+    rmSync(join(worktree, 'tests/export.test.mjs'))
+    const current = await readProjectContractReport(root)
+    const selected = await readProjectContractReport(root, worktree)
+    assert.equal(current.targetTree, realpathSync(root))
+    assert.equal(selected.targetTree, realpathSync(worktree))
+    assert.equal(current.findings.filter((item) => item.severity === 'error').length, 0)
+    assert.ok(selected.findings.some((item) => item.code === 'missing-test-file'))
+    await assert.rejects(readProjectContractReport(root, parent), ContractReportScopeError)
+    await assert.rejects(readProjectContractReport(root, '../repo'), ContractReportScopeError)
   } finally {
     rmSync(parent, { recursive: true, force: true })
   }

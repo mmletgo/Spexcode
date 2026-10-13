@@ -49,7 +49,7 @@ import { buildGuidanceCatalog } from './guidance-catalog.js'
 import { configuredSessionApplication, setSessionApplicationCommitObserver } from './session-application.js'
 import { SESSION_CHANGE } from '@spexcode/session-application'
 import { editSpecBody, readSpecBodyEdit, SpecBodyEditError } from './spec-body-edit.js'
-import { readContractReport } from './sync/contract-report.js'
+import { ContractReportScopeError, readProjectContractReport } from './sync/contract-report.js'
 const { serve, Hono, cors, etag, createNodeWebSocket } = await daemonRuntime()
 
 // last-resort net: an unforeseen async throw (e.g. a worktree vanishing mid-read during a worker
@@ -86,7 +86,14 @@ app.get('/', (c) => c.text('spec-cli — GET /api/graph · /api/specs · /api/sp
 // the supervisor's readiness gate (supervise.ts): a bare git-free 200 so a booting child reports ready the
 // instant Hono is listening. Not under /api/* — loopback-only (supervisor→child), no CORS needed.
 app.get('/health', (c) => c.text('ok'))
-app.get('/api/sync/contracts', async (c) => c.json(await readContractReport(repoRoot())))
+app.get('/api/sync/contracts', async (c) => {
+  try {
+    return c.json(await readProjectContractReport(repoRoot(), c.req.query('targetTree')))
+  } catch (error) {
+    if (error instanceof ContractReportScopeError) return c.json({ error: error.message }, error.status)
+    throw error
+  }
+})
 // @@@ instance identity - who THIS backend is: the serve generation's instanceId (minted by the supervisor,
 // constant across zero-downtime reloads, handed down via env) and the project root it serves. This is the
 // answer the host gateway ([[host-gateway]]) compares an endpoint record against before proxying to it — a
