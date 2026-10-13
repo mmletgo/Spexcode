@@ -38,20 +38,25 @@ execFileSync(process.env.SPEXCODE_SYNC_GIT,['update-index','--cacheinfo','100644
   writeFileSync(join(root, 'node_modules/.bin/spex'), `#!/bin/sh\nprintf bad > '${malicious}'\nexit 0\n`); chmodSync(join(root, 'node_modules/.bin/spex'), 0o755)
   writeFileSync(join(root, 'file.txt'), 'candidate\n'); git('add', 'file.txt')
   const parent = git('rev-parse', 'HEAD'), tree = git('write-tree')
-  const options = { nodePath: process.execPath, gitPath: '/usr/bin/git', toolEntry: join(trusted, 'dist/cli.mjs'), trustedRuntimeRoot: trusted, canonicalHooksDir: join(trusted, 'templates/hooks'), expectedTree: tree, expectedParent: parent, expectedRef: 'refs/heads/delivery' }
+  const options = { operation: 'publish' as const, nodePath: process.execPath, gitPath: '/usr/bin/git', toolEntry: join(trusted, 'dist/cli.mjs'), trustedRuntimeRoot: trusted, canonicalHooksDir: join(trusted, 'templates/hooks'), expectedTree: tree, expectedParent: parent, expectedRef: 'refs/heads/delivery' }
   const prepared = prepareTrustedHooksBinding(root, options)
   assert.equal(prepared.status, 'supported', prepared.status === 'unsupported' ? JSON.stringify(prepared.issues) : '')
   const binding = (prepared as { binding: TrustedHooksBinding }).binding
   const controlled = (extra: NodeJS.ProcessEnv = {}) => makeTrustedHookEnv(binding, { ...env, TRUSTED_HOOK_LOG: log, ...extra })
   const run = (args: string[], extra: NodeJS.ProcessEnv = {}) => spawnSync('/usr/bin/git', ['-C', root, ...args], { env: controlled(extra), encoding: 'utf8' })
-  return { root, trusted, log, malicious, git, parent, tree, options, binding, controlled, run }
+  const prepareRun = (args: string[], extra: NodeJS.ProcessEnv = {}, expectedRef = options.expectedRef) => {
+    const prepared = prepareTrustedHooksBinding(root, { ...options, operation: 'prepare' as const, expectedTree: git('rev-parse', `${parent}^{tree}`), expectedRef })
+    assert.equal(prepared.status, 'supported', prepared.status === 'unsupported' ? JSON.stringify(prepared.issues) : '')
+    return spawnSync('/usr/bin/git', ['-C', root, ...args], { env: makeTrustedHookEnv((prepared as { binding: TrustedHooksBinding }).binding, { ...env, TRUSTED_HOOK_LOG: log, ...extra }), encoding: 'utf8' })
+  }
+  return { root, trusted, log, malicious, git, parent, tree, options, binding, controlled, run, prepareRun, directory }
 }
 
 test('四个真实Git hook调用候选外固定编译入口，candidate.bin从未执行且ref/parent/tree绑定', t => {
   const f = fixture(t)
-  const checkout = f.run(['checkout', 'delivery'])
+  const checkout = f.prepareRun(['checkout', 'delivery'], { SPEXCODE_GATE_TRACE: '1' })
   assert.equal(checkout.status, 0, `${checkout.stdout}${checkout.stderr}`)
-  const committed = f.run(['commit', '-m', 'frozen delivery'])
+  const committed = f.run(['commit', '-m', 'frozen delivery'], { SPEXCODE_GATE_TRACE: '1' })
   assert.equal(committed.status, 0, `${committed.stdout}${committed.stderr}`)
   const calls = readFileSync(f.log, 'utf8')
   for (const command of ['internal refresh-footprint', 'internal trunk', 'internal commit-surgery', 'internal commit-context', 'spec lint --pending']) assert.ok(calls.includes(command), calls)
@@ -140,7 +145,7 @@ test('strict模式各工具阶段exit75/76均阻断，issue-only不能免frozen�
     const failed = f.run(['commit', '-m', `strict ${stage} failure`], { FIXTURE_FAIL_AT: stage })
     assert.notEqual(failed.status, 0); assert.equal(f.git('rev-parse', 'HEAD'), f.parent)
   }
-  assert.notEqual(f.run(['checkout', 'delivery'], { FIXTURE_FAIL_AT: 'refresh-footprint' }).status, 0)
+  assert.notEqual(f.prepareRun(['checkout', 'delivery'], { FIXTURE_FAIL_AT: 'refresh-footprint' }).status, 0)
   assert.notEqual(f.run(['commit', '-m', 'scope exit76 is not full proof'], { FIXTURE_LINT_76: '1' }).status, 0)
   assert.equal(f.git('rev-parse', 'HEAD'), f.parent)
   f.git('reset', '--hard', f.parent)
@@ -148,4 +153,64 @@ test('strict模式各工具阶段exit75/76均阻断，issue-only不能免frozen�
   const failed = f.run(['commit', '-m', 'issue-only wrong frozen tree'])
   assert.notEqual(failed.status, 0); assert.match(`${failed.stdout}${failed.stderr}`, /frozen delivery.*mismatch/)
   assert.equal(f.git('rev-parse', 'HEAD'), f.parent); assert.equal(existsSync(f.malicious), false)
+})
+
+
+test('prepare真实创建绑定分支与worktree，仅已有base身份', t => {
+  const f = fixture(t)
+  const delivery = join(f.directory, 'fresh-delivery')
+  const prepared = f.prepareRun(['worktree', 'add', '-b', 'fresh-delivery', delivery, f.parent], { SPEXCODE_GATE_TRACE: '1' }, 'refs/heads/fresh-delivery')
+  assert.equal(prepared.status, 0, `${prepared.stdout}${prepared.stderr}`)
+  assert.equal(f.git('rev-parse', 'refs/heads/fresh-delivery'), f.parent)
+  assert.ok(readFileSync(f.log, 'utf8').includes('internal refresh-footprint'))
+  assert.equal(existsSync(f.malicious), false)
+  // The coordinator later fills the exact candidate index in the created worktree and rebinds publish.
+  execFileSync('/usr/bin/git', ['-C', delivery, 'read-tree', f.tree])
+  const published = prepareTrustedHooksBinding(delivery, { ...f.options, expectedRef: 'refs/heads/fresh-delivery' })
+  assert.equal(published.status, 'supported', published.status === 'unsupported' ? JSON.stringify(published.issues) : '')
+  const committed = spawnSync('/usr/bin/git', ['-C', delivery, 'commit', '-m', 'prepared worktree publication'], { env: makeTrustedHookEnv((published as { binding: TrustedHooksBinding }).binding, { ...process.env, TRUSTED_HOOK_LOG: f.log }), encoding: 'utf8' })
+  assert.equal(committed.status, 0, `${committed.stdout}${committed.stderr}`)
+  assert.equal(f.git('show', '-s', '--format=%T', 'refs/heads/fresh-delivery'), f.tree)
+  assert.equal(f.git('show', '-s', '--format=%P', 'refs/heads/fresh-delivery'), f.parent)
+})
+
+test('publish拒绝HEAD-only作者提交，detached HEAD保持原base', t => {
+  const f = fixture(t)
+  const detached = f.prepareRun(['switch', '--detach', f.parent], { SPEXCODE_GATE_TRACE: '1' })
+  assert.equal(detached.status, 0, `${detached.stdout}${detached.stderr}`)
+  writeFileSync(join(f.root, 'file.txt'), 'unverified detached content\n'); f.git('add', 'file.txt')
+  const failed = f.run(['commit', '-m', 'detached author must fail'])
+  assert.notEqual(failed.status, 0, `${failed.stdout}${failed.stderr}`)
+  assert.equal(f.git('rev-parse', 'HEAD'), f.parent)
+  assert.equal(f.git('rev-parse', 'refs/heads/delivery'), f.parent)
+})
+
+
+test('prepare不接受作者对象、其它ref/base；operation必需且prepare tree必须为base', t => {
+  const f = fixture(t)
+  const author = f.git('commit-tree', f.tree, '-p', f.parent, '-m', 'not structural')
+  const failed = f.prepareRun(['update-ref', 'refs/heads/new-author', author, '0'.repeat(40)], {}, 'refs/heads/new-author')
+  assert.notEqual(failed.status, 0)
+  assert.equal(spawnSync('/usr/bin/git', ['-C', f.root, 'show-ref', '--verify', '--quiet', 'refs/heads/new-author']).status, 1)
+  const wrongRef = f.prepareRun(['branch', 'unbound-branch', f.parent])
+  assert.notEqual(wrongRef.status, 0)
+  assert.equal(spawnSync('/usr/bin/git', ['-C', f.root, 'show-ref', '--verify', '--quiet', 'refs/heads/unbound-branch']).status, 1)
+  const wrongBase = f.prepareRun(['switch', '--detach', author])
+  assert.notEqual(wrongBase.status, 0); assert.equal(f.git('rev-parse', 'HEAD'), f.parent)
+  assert.equal(prepareTrustedHooksBinding(f.root, { ...f.options, operation: 'prepare' }).status, 'unsupported')
+  const missing = { ...f.options }
+  delete (missing as Partial<typeof missing>).operation
+  assert.equal(prepareTrustedHooksBinding(f.root, missing as typeof f.options).status, 'unsupported')
+  assert.notEqual(spawnSync('/usr/bin/git', ['-C', f.root, 'commit', '-m', 'missing operation'], { env: { ...f.controlled(), SPEXCODE_SYNC_OPERATION: undefined }, encoding: 'utf8' }).status, 0)
+  assert.equal(f.git('rev-parse', 'HEAD'), f.parent)
+})
+
+test('post-checkout严格可信刷新失败不会抹去已完成的HEAD结构切换', t => {
+  const f = fixture(t)
+  const failed = f.prepareRun(['switch', '--detach', f.parent], { FIXTURE_FAIL_AT: 'refresh-footprint' })
+  assert.notEqual(failed.status, 0)
+  assert.equal(f.git('rev-parse', 'HEAD'), f.parent)
+  assert.equal(spawnSync('/usr/bin/git', ['-C', f.root, 'symbolic-ref', '-q', 'HEAD']).status, 1)
+  assert.ok(readFileSync(f.log, 'utf8').includes('internal refresh-footprint'))
+  assert.equal(existsSync(f.malicious), false)
 })

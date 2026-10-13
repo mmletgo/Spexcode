@@ -7,6 +7,7 @@ export type TrustedHookIssue = { path: string; reason: string }
 export type TrustedRuntimeEntry = { path: string; kind: 'file' | 'directory' | 'symlink'; mode: number; digest?: string; target?: string }
 export type TrustedHooksBinding = {
   version: 'trusted-hooks-v1'
+  operation: 'prepare' | 'publish'
   root: string
   nodePath: string; nodeDigest: string
   gitPath: string; gitDigest: string
@@ -15,7 +16,7 @@ export type TrustedHooksBinding = {
   canonicalHooksDir: string; hooksDir: string; hookDigests: Record<string, string>
   expectedTree: string; expectedParent: string; expectedRef: string
 }
-export type TrustedHooksOptions = Pick<TrustedHooksBinding, 'toolEntry' | 'trustedRuntimeRoot' | 'canonicalHooksDir' | 'expectedTree' | 'expectedParent' | 'expectedRef'> & { nodePath?: string; gitPath?: string }
+export type TrustedHooksOptions = Pick<TrustedHooksBinding, 'operation' | 'toolEntry' | 'trustedRuntimeRoot' | 'canonicalHooksDir' | 'expectedTree' | 'expectedParent' | 'expectedRef'> & { nodePath?: string; gitPath?: string }
 export type TrustedHooksInspection = { status: 'supported'; binding: TrustedHooksBinding } | { status: 'unsupported'; issues: TrustedHookIssue[] }
 const REQUIRED_HOOKS = ['pre-commit', 'prepare-commit-msg', 'reference-transaction', 'post-checkout']
 const hash = (bytes: Buffer | string): string => createHash('sha256').update(bytes).digest('hex')
@@ -43,12 +44,13 @@ export function inspectTrustedRuntime(root: string): TrustedRuntimeEntry[] {
 /** 内部交付 child 的确定环境；不继承 shell/Node/Git 注入或本地 lint/defer bypass。 */
 export function makeTrustedHookEnv(binding: TrustedHooksBinding, base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const env = Object.fromEntries(Object.entries(base).filter(([key]) => !key.startsWith('GIT_') && !key.startsWith('BASH_FUNC_') && !key.startsWith('LD_') && !key.startsWith('DYLD_') && !key.startsWith('SPEXCODE_SYNC_') && !['NODE_OPTIONS', 'NODE_PATH', 'BASH_ENV', 'ENV', 'SHELLOPTS', 'CDPATH', 'SPEXCODE_SKIP_LINT', 'SPEXCODE_DEFER_FOOTPRINT_REFRESH', 'SPEXCODE_ALLOW_MAIN', 'SPEXCODE_GATE_SCOPE_ONLY'].includes(key)))
-  return { ...env, PATH: `${dirname(binding.gitPath)}:/usr/bin:/bin:/usr/sbin:/sbin`, SPEXCODE_SYNC_HOOK_MODE: 'trusted-v1', SPEXCODE_SYNC_NODE: binding.nodePath, SPEXCODE_SYNC_NODE_SHA256: binding.nodeDigest, SPEXCODE_SYNC_GIT: binding.gitPath, SPEXCODE_SYNC_GIT_SHA256: binding.gitDigest, SPEXCODE_SYNC_TOOL: binding.toolEntry, SPEXCODE_SYNC_TOOL_SHA256: binding.toolDigest, SPEXCODE_SYNC_RUNTIME_ROOT: binding.trustedRuntimeRoot, SPEXCODE_SYNC_RUNTIME_SHA256: binding.runtimeDigest, SPEXCODE_SYNC_EXPECTED_TREE: binding.expectedTree, SPEXCODE_SYNC_EXPECTED_PARENT: binding.expectedParent, SPEXCODE_SYNC_EXPECTED_REF: binding.expectedRef }
+  return { ...env, PATH: `${dirname(binding.gitPath)}:/usr/bin:/bin:/usr/sbin:/sbin`, SPEXCODE_SYNC_HOOK_MODE: 'trusted-v1', SPEXCODE_SYNC_OPERATION: binding.operation, SPEXCODE_SYNC_NODE: binding.nodePath, SPEXCODE_SYNC_NODE_SHA256: binding.nodeDigest, SPEXCODE_SYNC_GIT: binding.gitPath, SPEXCODE_SYNC_GIT_SHA256: binding.gitDigest, SPEXCODE_SYNC_TOOL: binding.toolEntry, SPEXCODE_SYNC_TOOL_SHA256: binding.toolDigest, SPEXCODE_SYNC_RUNTIME_ROOT: binding.trustedRuntimeRoot, SPEXCODE_SYNC_RUNTIME_SHA256: binding.runtimeDigest, SPEXCODE_SYNC_EXPECTED_TREE: binding.expectedTree, SPEXCODE_SYNC_EXPECTED_PARENT: binding.expectedParent, SPEXCODE_SYNC_EXPECTED_REF: binding.expectedRef }
 }
 
 /** 静态 preflight 固定外部发布工具与实际 canonical hooks；无法证明时列出路径并拒绝。 */
 export function prepareTrustedHooksBinding(root: string, options: TrustedHooksOptions): TrustedHooksInspection {
   const issues: TrustedHookIssue[] = []
+  if (!['prepare', 'publish'].includes(options.operation)) return { status: 'unsupported', issues: [{ path: root, reason: '受控操作必须明确 prepare 或 publish' }] }
   const issue = (path: string, reason: string): void => { issues.push({ path, reason }) }
   try {
     for (const path of [options.nodePath, options.gitPath, options.toolEntry, options.trustedRuntimeRoot, options.canonicalHooksDir].filter((path): path is string => path !== undefined)) if (!isAbsolute(path)) issue(path, '受信工具与模板必须提供绝对路径')
@@ -73,6 +75,7 @@ export function prepareTrustedHooksBinding(root: string, options: TrustedHooksOp
     }
     if (git(['check-ref-format', options.expectedRef]) !== '') issue(root, '交付 ref 非法')
     if (git(['cat-file', '-t', options.expectedTree]) !== 'tree' || git(['cat-file', '-t', options.expectedParent]) !== 'commit') issue(root, '预期 tree/parent 对象类型不匹配')
+    if (options.operation === 'prepare' && git(['show', '-s', '--format=%T', options.expectedParent]) !== options.expectedTree) issue(root, 'prepare 必须绑定已有 parent 的 base tree')
     if (realpathSync(git(['rev-parse', '--show-toplevel'])) !== root) issue(root, '必须提供实际 worktree 根目录')
     const config = spawnSync(gitPath, ['--no-optional-locks', '-C', root, '-c', 'core.fsmonitor=false', 'config', '--null', '--show-origin', '--get-regexp', '^(core\\.hookspath|core\\.fsmonitor|core\\.attributesfile|filter\\..*\\.(clean|smudge|process|required)|commit\\.gpgsign|tag\\.gpgsign|gpg\\..*program|gpg\\.program|user\\.signingkey|diff\\.external|diff\\..*\\.(command|textconv)|trailer\\..*\\.(cmd|command))$'], { env, encoding: 'utf8' })
     if (config.status !== 0 && config.status !== 1) throw new Error('Git 执行配置无法静态读取')
@@ -98,7 +101,7 @@ export function prepareTrustedHooksBinding(root: string, options: TrustedHooksOp
     for (const name of REQUIRED_HOOKS) if (!hookDigests[name]) issue(join(hooksDir, name), '受控交付必需 canonical hook 缺失或未执行')
     if (issues.length) return { status: 'unsupported', issues }
     const runtimeManifest = inspectTrustedRuntime(trustedRuntimeRoot)
-    return { status: 'supported', binding: { version: 'trusted-hooks-v1', root, nodePath, nodeDigest: fileDigest(nodePath), gitPath, gitDigest: fileDigest(gitPath), toolEntry, toolDigest: fileDigest(toolEntry), trustedRuntimeRoot, runtimeManifest, runtimeDigest: hash(JSON.stringify(runtimeManifest)), canonicalHooksDir, hooksDir, hookDigests, expectedTree: options.expectedTree, expectedParent: options.expectedParent, expectedRef: options.expectedRef } }
+    return { status: 'supported', binding: { version: 'trusted-hooks-v1', operation: options.operation, root, nodePath, nodeDigest: fileDigest(nodePath), gitPath, gitDigest: fileDigest(gitPath), toolEntry, toolDigest: fileDigest(toolEntry), trustedRuntimeRoot, runtimeManifest, runtimeDigest: hash(JSON.stringify(runtimeManifest)), canonicalHooksDir, hooksDir, hookDigests, expectedTree: options.expectedTree, expectedParent: options.expectedParent, expectedRef: options.expectedRef } }
   } catch (error) {
     issue(root, error instanceof Error ? error.message : String(error))
     return { status: 'unsupported', issues }

@@ -31,6 +31,10 @@ if [ -n "${SPEXCODE_SYNC_HOOK_MODE:-}" ]; then
     echo "✗ SpexCode: trusted sync tool binding unavailable or changed; delivery refused." >&2
     exit 1
   fi
+  case "${SPEXCODE_SYNC_OPERATION:-}" in prepare|publish) ;; *)
+    echo "✗ SpexCode: trusted sync operation unavailable; delivery refused." >&2
+    exit 1 ;;
+  esac
   spex_strict=1
   git() { "$SPEXCODE_SYNC_GIT" "$@"; }
 fi
@@ -39,27 +43,76 @@ fi
 # @@@ frozen delivery binding - additional internal V4 proof before every existing lint classification.
 if [ "$spex_strict" -eq 1 ]; then
   heads=0
+  head_rows=0
+  cleanup_rows=0
+  origin_rows=0
   strict_candidate=
   strict_head_old=
   strict_head_new=
+  strict_mismatch() {
+    echo "✗ SpexCode: frozen delivery tree/parent/ref mismatch; current ref transaction refused." >&2
+    exit 1
+  }
   while read -r old new ref; do
     case "$ref" in
-      HEAD) strict_head_old="$old"; strict_head_new="$new" ;;
+      HEAD) head_rows=$((head_rows + 1)); strict_head_old="$old"; strict_head_new="$new" ;;
       refs/heads/*)
         heads=$((heads + 1))
-        if [ "$ref" != "${SPEXCODE_SYNC_EXPECTED_REF:-}" ] || [ "$old" != "${SPEXCODE_SYNC_EXPECTED_PARENT:-}" ] \
-          || [ "$(git cat-file -t "$new" 2>/dev/null)" != commit ] \
-          || [ "$(git show -s --format=%T "$new" 2>/dev/null)" != "${SPEXCODE_SYNC_EXPECTED_TREE:-}" ] \
-          || [ "$(git show -s --format=%P "$new" 2>/dev/null)" != "${SPEXCODE_SYNC_EXPECTED_PARENT:-}" ]; then
-          echo "✗ SpexCode: frozen delivery tree/parent/ref mismatch; ref unchanged." >&2
-          exit 1
+        [ "$ref" = "$SPEXCODE_SYNC_EXPECTED_REF" ] || strict_mismatch
+        if [ "$SPEXCODE_SYNC_OPERATION" = prepare ]; then
+          # A structural preparation can only name the already frozen base, never author a new commit.
+          { [[ "$old" =~ ^0+$ ]] || [ "$old" = "$SPEXCODE_SYNC_EXPECTED_PARENT" ]; } \
+            && [ "$new" = "$SPEXCODE_SYNC_EXPECTED_PARENT" ] || strict_mismatch
+        else
+          [ "$old" = "$SPEXCODE_SYNC_EXPECTED_PARENT" ] \
+            && [ "$(git cat-file -t "$new" 2>/dev/null)" = commit ] \
+            && [ "$(git show -s --format=%T "$new" 2>/dev/null)" = "$SPEXCODE_SYNC_EXPECTED_TREE" ] \
+            && [ "$(git show -s --format=%P "$new" 2>/dev/null)" = "$SPEXCODE_SYNC_EXPECTED_PARENT" ] || strict_mismatch
         fi
         strict_candidate="$new" ;;
+      AUTO_MERGE)
+        # Git checkout also requests deletion of an absent AUTO_MERGE ref after switching HEAD.
+        [[ "$old" =~ ^0+$ ]] && [[ "$new" =~ ^0+$ ]] || strict_mismatch
+        cleanup_rows=$((cleanup_rows + 1)) ;;
+      ORIG_HEAD)
+        [ "$SPEXCODE_SYNC_OPERATION" = prepare ] && [ "$new" = "$SPEXCODE_SYNC_EXPECTED_PARENT" ] \
+          && { [ "$old" = "$SPEXCODE_SYNC_EXPECTED_PARENT" ] || [[ "$old" =~ ^0+$ ]]; } || strict_mismatch
+        origin_rows=$((origin_rows + 1)) ;;
+      *) strict_mismatch ;;
     esac
   done <<< "$payload"
-  if [ "$heads" -gt 1 ] || { [ "$heads" -eq 1 ] && [ -n "$strict_head_new" ] && { [ "$strict_head_new" != "$strict_candidate" ] || [ "$strict_head_old" != "$SPEXCODE_SYNC_EXPECTED_PARENT" ]; }; }; then
-    echo "✗ SpexCode: frozen delivery ref set mismatch; refs unchanged." >&2
-    exit 1
+  [ "$heads" -le 1 ] && [ "$head_rows" -le 1 ] && [ "$cleanup_rows" -le 1 ] && [ "$origin_rows" -le 1 ] || strict_mismatch
+  if [ "$SPEXCODE_SYNC_OPERATION" = prepare ]; then
+    [ "$(git cat-file -t "$SPEXCODE_SYNC_EXPECTED_PARENT" 2>/dev/null)" = commit ] \
+      && [ "$(git show -s --format=%T "$SPEXCODE_SYNC_EXPECTED_PARENT" 2>/dev/null)" = "$SPEXCODE_SYNC_EXPECTED_TREE" ] || strict_mismatch
+    if [ "$cleanup_rows" -eq 1 ] || [ "$origin_rows" -eq 1 ]; then
+      [ "$heads" -eq 0 ] && [ "$head_rows" -eq 0 ] && [ "$((cleanup_rows + origin_rows))" -eq 1 ] \
+        && [ "$(git rev-parse --verify HEAD 2>/dev/null)" = "$SPEXCODE_SYNC_EXPECTED_PARENT" ] || strict_mismatch
+    else
+      [ "$heads" -eq 1 ] || [ "$head_rows" -eq 1 ] || strict_mismatch
+    fi
+    if [ "$head_rows" -eq 1 ]; then
+      if [ "$strict_head_new" = "ref:$SPEXCODE_SYNC_EXPECTED_REF" ]; then
+        [ "$(git rev-parse --verify "$SPEXCODE_SYNC_EXPECTED_REF" 2>/dev/null)" = "$SPEXCODE_SYNC_EXPECTED_PARENT" ] || strict_mismatch
+      else
+        [ "$strict_head_new" = "$SPEXCODE_SYNC_EXPECTED_PARENT" ] || strict_mismatch
+      fi
+      { [ "$strict_head_old" = "$SPEXCODE_SYNC_EXPECTED_PARENT" ] || [[ "$strict_head_old" =~ ^0+$ ]]; } || strict_mismatch
+    fi
+  else
+    # Publication must advance the named branch. A detached HEAD authoring transaction is never delivery.
+    if [ "$cleanup_rows" -eq 1 ]; then
+      # Git performs this null deletion AFTER advancing the publication ref. It authors no object/ref.
+      [ "$heads" -eq 0 ] && [ "$head_rows" -eq 0 ] \
+        && [ "$(git symbolic-ref -q HEAD 2>/dev/null)" = "$SPEXCODE_SYNC_EXPECTED_REF" ] \
+        && [ "$(git show -s --format=%T HEAD 2>/dev/null)" = "$SPEXCODE_SYNC_EXPECTED_TREE" ] \
+        && [ "$(git show -s --format=%P HEAD 2>/dev/null)" = "$SPEXCODE_SYNC_EXPECTED_PARENT" ] || strict_mismatch
+    else
+      [ "$heads" -eq 1 ] || strict_mismatch
+    fi
+    if [ "$head_rows" -eq 1 ]; then
+      [ "$strict_head_old" = "$SPEXCODE_SYNC_EXPECTED_PARENT" ] && [ "$strict_head_new" = "$strict_candidate" ] || strict_mismatch
+    fi
   fi
 fi
 
