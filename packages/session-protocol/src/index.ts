@@ -67,9 +67,12 @@ export interface OpenOptions {
   now?: () => number
 }
 
+/** A held local cross-process lock over an adopter-owned dedicated file, never a protocol database. */
+export interface FileMutex { assertHeld(): void; release(): void }
+
 export { canonicalPreimage, LIMITS, payloadHash, PROTOCOL_VERSION } from './canonical.js'
 export { ProtocolError } from './errors.js'
 export type { ProtocolErrorCode } from './errors.js'
-export { openProtocol } from './engine.js'
+export { openProtocol, claimFileMutex } from './engine.js'
 export { applyComponentMigrations, MIN_SQLITE_VERSION } from './schema.js'
 export type { ComponentMigration } from './schema.js'

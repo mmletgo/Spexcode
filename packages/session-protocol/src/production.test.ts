@@ -58,6 +58,7 @@ test('the published entry has every required runtime export and no extra runtime
     'ProtocolError',
     'applyComponentMigrations',
     'canonicalPreimage',
+    'claimFileMutex',
     'openProtocol',
     'payloadHash',
   ])
@@ -73,6 +74,7 @@ test('the published entry has every required runtime export and no extra runtime
     'SqlParam', 'MessageInput', 'Message', 'SessionAddress', 'ProtocolTransaction', 'SessionProtocol',
     'OpenOptions', 'ProtocolError', 'ProtocolErrorCode', 'ComponentMigration', 'applyComponentMigrations',
     'PROTOCOL_VERSION', 'MIN_SQLITE_VERSION', 'MESSAGE_KINDS', 'LIMITS', 'canonicalPreimage', 'payloadHash', 'openProtocol',
+    'claimFileMutex', 'FileMutex',
   ]) {
     assert.match(declarations, new RegExp(`\\b${name}\\b`), `${name} is absent from declarations`)
   }
