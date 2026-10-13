@@ -29,3 +29,5 @@ related:
 declared、bound、missing 只表示声明、结构绑定和处置缺失。报告 verification: not_run 明确显示；绑定分子/分母不作为真实运行通过或已同步的证据。解析及验证 findings 显示级别、位置、关联 ID 和原消息。旧版未启用节点不显示空面板；公开静态图、历史版本和 pending change face 不挂当前报告。
 
 读取失败显示真实错误并支持重试；加载中不抢焦点。原生 select、details/summary 与表格支持键盘阅读；窄屏在面板内横向滚动矩阵，不撑宽正文。复用现有 i18n、主题 token 和正文布局。
+
+当前阅读随 [[graph-stream]] 同一 SSE 的 full 输入失效及重连 ready 更新，不只依赖节点 commit version。未提交的 Spec、代码和测试编辑也重新读取真实报告；刷新期间保留面板 DOM、展开项和焦点并标记正在读取。会话专属事件不引起契约刷新；不新增轮询或后台同步机制。当前正文共享缓存使用同一内容 revision 失效，避免正文和契约读取版本不同。

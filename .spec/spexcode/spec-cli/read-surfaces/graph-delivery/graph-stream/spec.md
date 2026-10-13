@@ -8,6 +8,7 @@ code:
 related:
   - spec-cli/src/graphStream.test.ts
   - spec-cli/src/graphStream.api.test.ts
+  - spec-dashboard/src/streamInput.test.mjs
 ---
 
 # graph-stream
@@ -25,6 +26,12 @@ Then an adopter at 53 live worktrees showed the other half of that bill: watchin
 registration scheme that multiplies per spec file buys blindness rather than freshness.
 
 ## expanded spec
+
+Full-domain filesystem invalidation also sends `graph-input` on the existing delta SSE after its 25ms
+debounce, even when the graph tag stays unchanged. It names current reading inputs, never a new graph
+identity: uncommitted Spec bodies, governed code and test files can change without changing board metadata.
+Session-only signals do not emit it. Stream `ready` invalidates reading inputs after reconnect so missed
+file edits are reread even when the client resumes the same graph position; no extra stream or poll is added.
 
 graph-stream is the graph's live-delivery channel: `GET /api/graph/stream`, a server-sent-events stream a
 dashboard opens once, server→client only. The implementation and clients name the plain notification

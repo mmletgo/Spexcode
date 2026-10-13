@@ -395,6 +395,11 @@ function fireChanged(scope: Scope = 'full', affectedSessionIds?: readonly string
     const full = pendingFull, sessions = pendingSessions
     pendingFull = false
     pendingSessions = false
+    // File inputs can change while the lean board tag stays the same (Spec prose and test bindings).
+    // Reuse this stream and debounce; this is an input invalidation, never a graph-chain frame.
+    if (full) for (const send of [...deltaSubs]) {
+      try { send({ event: 'graph-input', data: 'x' }) } catch { /* swept on abort */ }
+    }
     if (deltaSubs.size) void rebuildAndBroadcast(false, sessions, full)
     else for (const notify of [...plainSubs]) { try { notify() } catch { /* swept on abort */ } }
   }, 25)

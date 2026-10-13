@@ -20,26 +20,28 @@ function ContractItem({ item, coverage, t }) {
   </details>
 }
 
-export default function SyncContractPanel({ nodeId, stamp, targetTree = null }) {
+export default function SyncContractPanel({ nodeId, stamp, targetTree = null, enabled = true }) {
   const t = useT()
   const labelId = useId()
   const [held, setHeld] = useState(null)
   const [scope, setScope] = useState(nodeId)
   const [retry, setRetry] = useState(0)
-  const requestKey = `${nodeId}/${targetTree || ''}/${stamp ?? ''}/${retry}`
+  const identity = `${nodeId}/${targetTree || ''}`
+  const requestKey = `${identity}/${stamp ?? ''}/${retry}`
   useEffect(() => {
+    if (!enabled) return undefined
     let active = true
     fetchSyncContractReport(targetTree).then((report) => {
-      if (active) setHeld({ key: requestKey, report })
+      if (active) setHeld({ identity, key: requestKey, report })
     }).catch((error) => {
-      if (active) setHeld({ key: requestKey, error: error.message })
+      if (active) setHeld((previous) => ({ identity, key: requestKey, report: previous?.identity === identity ? previous.report : null, error: error.message }))
     })
     return () => { active = false }
-  }, [requestKey, targetTree])
+  }, [enabled, identity, requestKey, targetTree])
 
-  const current = held?.key === requestKey ? held : null
+  const current = held?.identity === identity ? held : null
   if (!current) return null // Legacy nodes never flash an empty contract surface while discovering their schema.
-  if (current.error) return <section className="sync-contract-panel" aria-label={t('syncContract.title')}>
+  if (current.error && !current.report) return <section className="sync-contract-panel" aria-label={t('syncContract.title')}>
     <p role="alert">{t('syncContract.readFailed', { error: current.error })}</p>
     <button type="button" onClick={() => setRetry((value) => value + 1)}>{t('syncContract.retry')}</button>
   </section>
@@ -51,9 +53,11 @@ export default function SyncContractPanel({ nodeId, stamp, targetTree = null }) 
   const missing = view.matrix.filter((cell) => cell.status === 'missing').length
   const coverageById = new Map(view.coverage.map((item) => [item.id, item]))
 
-  return <section className="sync-contract-panel" aria-label={t('syncContract.title')} data-sync-contract-panel>
+  return <section className="sync-contract-panel" aria-label={t('syncContract.title')} aria-busy={current.key !== requestKey} data-sync-contract-panel>
     <header><h2>{t('syncContract.title')}</h2><span className="sync-contract-verification">verification: {report.verification}</span></header>
     <p className="sync-contract-note">{t('syncContract.readOnly')}</p>
+    {current.key !== requestKey && <p className="sync-contract-note">{t('syncContract.refreshing')}</p>}
+    {current.error && <div role="alert"><p>{t('syncContract.readFailed', { error: current.error })}</p><button type="button" onClick={() => setRetry((value) => value + 1)}>{t('syncContract.retry')}</button></div>}
     <p className="sync-contract-location"><b>{t('syncContract.targetTree')}</b> <code>{report.targetTree}</code></p>
     <p className="sync-contract-location"><b>digest</b> <code>{report.digest}</code></p>
     <label className="sync-contract-scope" htmlFor={labelId}>{t('syncContract.scope')}

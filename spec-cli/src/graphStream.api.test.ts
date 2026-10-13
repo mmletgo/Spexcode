@@ -279,6 +279,64 @@ function prepareEmptyProject(fixture: string, name: string, commit = true): stri
   return project
 }
 
+test('full file inputs invalidate delta readers even when the board tag is unchanged', { timeout: 30_000 }, async () => {
+  const fixture = mkdtempSync(join(tmpdir(), 'spex-graph-input-'))
+  const project = prepareEmptyProject(fixture, 'project')
+  const port = await freePort()
+  const child = spawn(process.execPath, ['--import', import.meta.resolve('tsx'), join(here, 'index.ts')], {
+    cwd: project, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, PORT: String(port), SPEXCODE_HOME: join(fixture, 'home'), SPEXCODE_API_URL: '', SPEXCODE_TMUX: `spex-graph-input-${port}` },
+  })
+  let serverLog = ''
+  child.stdout?.on('data', (chunk) => { serverLog += String(chunk) })
+  child.stderr?.on('data', (chunk) => { serverLog += String(chunk) })
+  const base = `http://127.0.0.1:${port}`
+  const abort = new AbortController()
+  const events: string[] = []
+  let read: Promise<void> | null = null
+  try {
+    await waitFor(() => fetch(`${base}/health`).then((response) => response.ok).catch(() => false), 'input fixture backend did not start')
+    const before = await fetch(`${base}/api/graph`)
+    await before.json()
+    const tag = before.headers.get('etag')
+    const response = await fetch(`${base}/api/graph/stream?mode=delta`, { signal: abort.signal })
+    read = (async () => {
+      const reader = response.body!.getReader()
+      const decoder = new TextDecoder()
+      let buffered = ''
+      while (true) {
+        const { value, done } = await reader.read()
+        if (done) return
+        buffered += decoder.decode(value, { stream: true })
+        let boundary: number
+        while ((boundary = buffered.indexOf('\n\n')) >= 0) {
+          const block = buffered.slice(0, boundary)
+          buffered = buffered.slice(boundary + 2)
+          const event = block.split('\n').find((line) => line.startsWith('event: '))?.slice(7)
+          if (event) events.push(event)
+        }
+      }
+    })().catch((error) => { if (!abort.signal.aborted) throw error })
+    await waitFor(() => events.includes('graph-full'), 'input fixture delta stream did not anchor')
+    await waitForQuiet(events, 300)
+    const count = events.filter((event) => event === 'graph-input').length
+    writeFileSync(join(project, 'src/value.ts'), 'export const value = 2\n')
+    await waitFor(() => events.filter((event) => event === 'graph-input').length > count,
+      'uncommitted file content did not invalidate readers', 3_000)
+    const after = await fetch(`${base}/api/graph`)
+    await after.json()
+    assert.equal(after.headers.get('etag'), tag, 'file input notification must not invent a moved board tag')
+    assert.equal(events.filter((event) => event === 'graph-full' || event === 'graph-delta').length, 1)
+  } catch (error) {
+    assert.fail(`${error instanceof Error ? error.stack : String(error)}\nevents=${events.join(',')}\nserver log:\n${serverLog}`)
+  } finally {
+    abort.abort()
+    await read?.catch(() => {})
+    await stopChild(child)
+    rmSync(fixture, { recursive: true, force: true })
+  }
+})
+
 test('a zero-commit served project starts empty and observes its first .spec tree without patrol', { timeout: 30_000 }, async (t) => {
   const fixture = mkdtempSync(join(tmpdir(), 'spex-graph-stream-unborn-root-'))
   try {

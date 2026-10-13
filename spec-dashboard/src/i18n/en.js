@@ -1,6 +1,7 @@
 export default {
   syncContract: {
     title: 'Business contracts and gaps',
+    refreshing: 'Rereading the current worktree…',
     readOnly: 'Read-only projection: declarations and structural bindings do not prove passing tests or completed synchronization. Verification has not run.',
     targetTree: 'Worktree read', scope: 'Contract node', allNodes: 'All contract nodes',
     readFailed: 'Contract read failed: {error}', retry: 'Retry read',

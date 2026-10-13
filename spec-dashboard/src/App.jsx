@@ -55,6 +55,7 @@ export default function App({ surface = 'workspace' }) {
     return undefined
   }, [isMobile])
   const [board, setBoard] = useState(null)
+  const [contentRevision, setContentRevision] = useState(0)
   const applyBoard = useCallback((next) => {
     observeSessionProjection(next.sessions)
     setBoard(next)
@@ -156,6 +157,7 @@ export default function App({ surface = 'workspace' }) {
     const unsub = subscribeBoardLive({
       onBoard: (b) => { reqSeq.current++; setLoadFailed(false); applyBoard(b) },
       onLegacyChange: () => { reload() },
+      onInput: () => { setContentRevision((revision) => revision + 1) },
     })
     const id = setInterval(() => { reload() }, 15000)
     return () => { unsub(); clearInterval(id) }
@@ -231,7 +233,7 @@ export default function App({ surface = 'workspace' }) {
     <Suspense fallback={<div className="loading">{t('hud.loading')}</div>}>
       {PUBLIC_GRAPH_ONLY
       ? <BoardProvider reload={reload} value={{ specs: board.nodes, sessions: [], issuesStamp: null, identity, catalog: null, graphOnly: true }}><KeyboardServiceProvider><WorkspaceProvider><WorkspaceSurface route={route} /></WorkspaceProvider></KeyboardServiceProvider></BoardProvider>
-        : <BoardProvider reload={reload} value={{ specs: board.nodes, sessions: board.sessions, issuesStamp: board.issuesStamp, identity, catalog: projAccess, graphOnly: false }}><SessionCloseProvider><KeyboardServiceProvider><WorkspaceProvider>{routed}</WorkspaceProvider></KeyboardServiceProvider></SessionCloseProvider></BoardProvider>}
+        : <BoardProvider reload={reload} value={{ specs: board.nodes, sessions: board.sessions, issuesStamp: board.issuesStamp, identity, catalog: projAccess, graphOnly: false, contentRevision }}><SessionCloseProvider><KeyboardServiceProvider><WorkspaceProvider>{routed}</WorkspaceProvider></KeyboardServiceProvider></SessionCloseProvider></BoardProvider>}
     </Suspense>
   )
 }

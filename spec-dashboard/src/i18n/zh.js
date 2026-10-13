@@ -1,6 +1,7 @@
 export default {
   syncContract: {
     title: '业务契约与缺口',
+    refreshing: '正在重新读取当前工作树…',
     readOnly: '只读投影：声明与结构绑定不代表测试通过或已同步；尚未运行验证。',
     targetTree: '读取工作树', scope: '契约节点', allNodes: '全部契约节点',
     readFailed: '契约读取失败：{error}', retry: '重试读取',
