@@ -98,3 +98,6 @@ local authoring rejects `P1`; code and governing spec must land atomically, remo
 This is an honesty property of commit paths that reach the installed, non-bypassed candidate gate, not a
 claim that Git makes lies or bypasses physically impossible: a meaningless spec byte edit can mechanically
 move the version, and an uncovered hook path or explicit bypass can still land first and acknowledge later.
+
+
+**同步交付的额外版本绑定。** trusted-v1 内部模式在 prepared 的既有 lint 前，逐项核对本次 refs/heads 更新只指向协调器预定 ref，old 等于预定 parent，new 实际 commit tree 等于冻结 tree，且 new 恰有一个预定 parent。绑定不通过时实际 ref 不前进；surgery 改动 index 后产生不同 tree 也拒绝，恢复由协调器结算。它不是普通提交的 marker/arming 或 bypass，不改变原 ref-scoped predicate。该模式使用候选外已编译完整可信工具包，不能以 missing CLI、exit75、issue-only 或 reachable/non-governed 分类跳过受控版本绑定和 required lint；现有普通模式语义保留。

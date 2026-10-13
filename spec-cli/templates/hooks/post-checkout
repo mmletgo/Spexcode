@@ -10,12 +10,42 @@
 #
 # args: <prev-HEAD> <new-HEAD> <flag>; flag=1 is a branch checkout, flag=0 a file checkout (git checkout --
 # <path> restores files and moves nothing the materialize depends on — skip those).
+# @@@ trusted sync tool - internal coordinator binding, never candidate.bin or a source launcher.
+spex_strict=0
+spex_validate_trusted() {
+  NODE_OPTIONS= NODE_PATH= LD_PRELOAD= DYLD_INSERT_LIBRARIES= "$SPEXCODE_SYNC_NODE" -e 'const fs=require("node:fs"),p=require("node:path"),c=require("node:crypto");
+const h=b=>c.createHash("sha256").update(b).digest("hex"),e=process.env;
+const root=fs.realpathSync(e.SPEXCODE_SYNC_RUNTIME_ROOT),entries=[];
+const visit=dir=>{for(const name of fs.readdirSync(dir).sort()){
+ const file=p.join(dir,name),s=fs.lstatSync(file),local=p.relative(root,file).split(p.sep).join("/");
+ if(s.isSymbolicLink()){const target=fs.realpathSync(file);if(target!==root&&!target.startsWith(root+p.sep))throw Error("external runtime symlink");entries.push({path:local,kind:"symlink",mode:s.mode&511,target:fs.readlinkSync(file)});}
+ else if(s.isDirectory()){entries.push({path:local,kind:"directory",mode:s.mode&511});visit(file);}
+ else if(s.isFile())entries.push({path:local,kind:"file",mode:s.mode&511,digest:h(fs.readFileSync(file))});
+ else throw Error("unsupported runtime file");
+}};visit(root);
+for(const [file,expected] of [[e.SPEXCODE_SYNC_NODE,e.SPEXCODE_SYNC_NODE_SHA256],[e.SPEXCODE_SYNC_GIT,e.SPEXCODE_SYNC_GIT_SHA256],[e.SPEXCODE_SYNC_TOOL,e.SPEXCODE_SYNC_TOOL_SHA256]])
+ if(!p.isAbsolute(file)||h(fs.readFileSync(file))!==expected)throw Error("trusted executable digest mismatch");
+if(h(JSON.stringify(entries))!==e.SPEXCODE_SYNC_RUNTIME_SHA256)throw Error("trusted runtime digest mismatch");'
+}
+if [ -n "${SPEXCODE_SYNC_HOOK_MODE:-}" ]; then
+  if [ "$SPEXCODE_SYNC_HOOK_MODE" != trusted-v1 ] || [ -z "${SPEXCODE_SYNC_NODE:-}" ] || [ -z "${SPEXCODE_SYNC_TOOL:-}" ] || [ -z "${SPEXCODE_SYNC_GIT:-}" ] || ! spex_validate_trusted; then
+    echo "✗ SpexCode: trusted sync tool binding unavailable or changed; delivery refused." >&2
+    exit 1
+  fi
+  spex_strict=1
+  git() { "$SPEXCODE_SYNC_GIT" "$@"; }
+fi
 [ "${3:-0}" = "1" ] || exit 0
 # Session creation owns the one post-seed materialize in its transaction.
-[ "${SPEXCODE_DEFER_FOOTPRINT_REFRESH:-}" = "session-create" ] && exit 0
+[ "$spex_strict" -eq 0 ] && [ "${SPEXCODE_DEFER_FOOTPRINT_REFRESH:-}" = "session-create" ] && exit 0
 repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
 # one spex: the project's own install, else the one on PATH ([[main-guard]]); never a launcher inside this checkout
-if [ -x "$repo_root/node_modules/.bin/spex" ]; then
+if [ "$spex_strict" -eq 1 ]; then
+  if ! spex_validate_trusted || ! NODE_OPTIONS= NODE_PATH= "$SPEXCODE_SYNC_NODE" "$SPEXCODE_SYNC_TOOL" internal refresh-footprint; then
+    echo "✗ SpexCode: trusted footprint refresh failed; delivery refused." >&2
+    exit 1
+  fi
+elif [ -x "$repo_root/node_modules/.bin/spex" ]; then
   "$repo_root/node_modules/.bin/spex" internal refresh-footprint >/dev/null 2>&1 || true
 elif command -v spex >/dev/null 2>&1; then
   spex internal refresh-footprint >/dev/null 2>&1 || true

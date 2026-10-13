@@ -78,3 +78,6 @@ the surgery makes that native escape hatch safe. One bump is the floor under git
 a pure materialized artifact must stay excluded or `??` noise and empty-file scooping return). Every other
 path — an
 anchor ran between edit and add — is zero-bump.
+
+
+**受控同步交付。** 内部 trusted-v1 hook 只启动协调器绑定的候选外完整已编译发布工具，不解析 candidate.bin。既有 surgery/refresh 仍执行，但工具不可用、失败或 exit75 必须返回失败；post-checkout 也不得沿用普通 best-effort 或 session-create defer 来隐藏该失败。surgery 若修改计划冻结的 index，reference-transaction prepared 以实际 commit tree 拒绝 ref 更新，不自动接受新 tree，不弱化门禁。未知 custom hooks、候选 hookspath 或无法证明的外部 signing/filter 由内部静态 preflight 明确 unsupported，不替换、删除或探测执行。普通 authoring 的 repair-and-proceed 与 refresh best-effort 保持。

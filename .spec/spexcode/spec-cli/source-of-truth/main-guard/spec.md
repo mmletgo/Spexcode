@@ -72,3 +72,6 @@ This node owns **only** the main-authoring guard. The same `pre-commit` file als
 [[commit-surgery]] footprint station (unconditional materialize + staged-index repair, after this gate)
 and the [[spec-lint]] shim (it runs `spex lint` last), but those blocks are those nodes' contracts, not
 this one's — they share a file, not a concern.
+
+
+**内部受控交付。** 同步协调器的 trusted-v1 模式在候选外固定绝对 Node/Git 和已编译 dist 工具入口，绑定完整受信发布 runtime 与 canonical hooks 字节摘要。它优先于候选 node_modules/.bin 与 PATH，但仍执行既有 trunk guard、surgery 和候选门禁，不使用 SKIP_LINT、禁 hook 或 no-verify。工具缺失、失败或 exit75 在该模式都阻断；普通提交的解析顺序及 advisory 行为不变。issue-only 和 tree-unchanged 分类不能跳过受控工具或后续 V4 的 frozen tree/ref/parent 核对。可信入口和交付预期仅由内部协调器提供，不是公开 HTTP 参数。
