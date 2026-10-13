@@ -448,7 +448,9 @@ code:/related: file does not exist; a dead/ambiguous/unverifiable \`path#symbol\
 whose language has no designated extractor or whose extractor can't run here; a duplicate entry, a
 base path both bare and scoped, or a selector on a glob/directory) · anchor-drift (a
 commit since the spec's version touched an ANCHORED unit's lines, unacked — the blocking tier of
-drift; same-file selectors OR'd, one error naming the hit selectors) · one-govern (a node
+drift; same-file selectors OR'd, one error naming the hit selectors) · sync-contract (sync-v1 draft
+table/ID/source/reference structure; unknown schemas error, unverified bindings warn; never complete
+synchronization or execution proof) · one-govern (a node
 governs >1 DISTINCT file) · living (a "## vN" changelog heading) · id-format (an
 id char outside the whitelist — ascii [a-z0-9-] or a non-ascii unicode letter/number/mark, CJK and
 combining-mark scripts ok — or a

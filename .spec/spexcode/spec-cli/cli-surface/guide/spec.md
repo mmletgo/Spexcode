@@ -41,6 +41,13 @@ the agent from one verb, picked by an optional topic:
   carries comment altitude, the lifecycle rule (one node per commit, lint at 0 errors before merge, product
   evidence to the reviewer through `spex session files add`), and the shared-checkout mid-merge recovery
   rule.
+  It documents the opt-in `contract-schema: sync-v1` field and derives every business table's fixed
+  columns directly from the pure contract parser's public definition ([[sync-contract-schema]]), rather
+  than maintaining a second schema. It explains one source origin versus multiple depends-on references,
+  fence-aware raw/expanded sections, GAP dependencies and AC/VERIFY declarations. Raw-only and REQ-only
+  drafts remain saveable; this guide distinguishes draft structure lint from semantic review, implementation
+  completion and real execution. It never advertises an unavailable synchronization command or claims
+  declaration coverage is test evidence. The real CLI regression belongs to [[sync-contract-lint-guide-regression]].
   The always-on system prompt is the **clue** that the format exists; this manual carries the detail. An
   unknown topic fails loud, naming **every** registered topic and never a silent setup dump — and that list
   is DERIVED from the topic registry rather than re-typed beside it. A hand-kept enumeration of the topics

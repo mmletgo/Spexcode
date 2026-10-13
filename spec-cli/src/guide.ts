@@ -1,3 +1,5 @@
+import { CONTRACT_COLUMNS } from '@spexcode/spec-core/contracts'
+
 const SETUP = `spex guide — run SpexCode on your own repo
 
 The product model: install SpexCode ONCE, then use it across all your projects — an agent drives
@@ -59,6 +61,7 @@ FRONTMATTER (YAML between the opening and closing --- lines; every field optiona
   desc     one-line summary shown on the graph.
   hue      node colour on the graph, 0–360. Default 210.
   status   pending | active | merged | drift. Usually DERIVED from git state — rarely hand-set.
+  contract-schema: sync-v1  opt into fixed Markdown business-contract tables; an unknown schema errors.
   code:    the file this node GOVERNS (is source of truth for) — a YAML list, but AT MOST ONE entry
            (the \`one-govern\` lint error otherwise: keep the true subject, move the rest to related:).
            Drives drift + measurement freshness. Many nodes MAY govern the same file (ordinary
@@ -101,6 +104,27 @@ code does it. Two optional level-2 headings split ground truth from detail:
 Bodies without those headings are read whole. Link sibling nodes with [[node-id]] — every link must name
 a REAL node (lint's mention rule; backtick a placeholder like \`[[node]]\` so it reads as sample text).
 
+SYNC-V1 DECLARED CONTRACTS (contract-schema: sync-v1):
+  Spec Markdown remains the authored source. Keep ## raw source for the human's intent and
+  ## expanded spec for derived detail. Headings inside fenced examples are content, never section or
+  table boundaries. Raw-only and REQ-only input are legal drafts; lint does not demand completed flows,
+  implementation anchors or executed tests merely to save them.
+  Each applicable table has its exact ### title and complete columns below (column order may vary):
+${Object.entries(CONTRACT_COLUMNS).map(([kind, columns]) => `  ### ${kind}: ${columns.join(', ')}`).join('\n')}
+  Each row is one item; ID is TYPE-DOMAIN-STABLE-SUFFIX using uppercase ASCII, digits and hyphens.
+  source is ONE origin: user:raw, user:REQ-ID, decision:decision-id, rule:RULE-ID,
+  derived:business-ID or code:repo-relative-path#symbol. depends-on is a comma-separated ID list;
+  references can cross enabled nodes. Empty optional values use -, booleans use true/false.
+  Markdown escaped pipes and cell code spans remain in their cells, not extra columns.
+  GAP records missing_fact/conflict with affected IDs, evidence and the needed decision. It blocks the
+  dependency closure, not unrelated navigation; lint permits an unresolved draft GAP.
+  AC binds covered business IDs, a repo-relative test path#stable-case-ID and one VERIFY-ID.
+  VERIFY registers JSON argv (not a shell), repo-relative cwd and a positive timeout-ms; lint NEVER
+  executes that command or launches an Agent. Missing tests/code and completion gaps belong to the
+  later full synchronization gate, not this draft structure check.
+  Derived coverage declared/bound/missing is declaration status. Bound does not mean a test ran,
+  a semantic review passed or the feature is synchronized; raw intent and policies remain authoritative.
+
 COMMENT ALTITUDE: specs own intent, invariants, policy, and observable contracts; comments only navigate
 non-obvious local decisions. Put contract or intent in the owning spec body, not a code comment. Keep a short
 nearby comment only for ordering, platform behavior, measured pitfalls, or why a plausible alternative is
@@ -109,6 +133,10 @@ version-specific behavior, and rejected alternatives not in the spec. \`@@@title
 genuinely tricky surviving local reasoning.
 
 WHAT lint CHECKS (spex spec lint; the pre-commit hook gates on errors):
+  sync-contract (error/warn) enabled sync-v1 table syntax, stable IDs, cross-node references,
+                      derivation cycles and declared ownership/state constraints. Unsupported schemas error;
+                      unprovided execution bindings warn. Draft completeness, semantic review and real
+                      execution are separate gates; raw/REQ-only drafts remain valid.
   integrity  (error)  every code:/related: path exists — and every anchor RESOLVES: a dead anchor (unit
                       deleted/renamed), an ambiguous one (two same-named units in one file), a file that
                       no longer parses, a language with no designated extractor, or an extractor that

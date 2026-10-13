@@ -1,9 +1,10 @@
 import { readFileSync, existsSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-import { readConfig, configPath, repoRoot, git, gitObjectFormat, sourceIndexes, rowsFor, treeFilePaths, treeFileText, withEventLedgerBuild, type DriftPathEvent } from '@spexcode/spec-core'
+import { readConfig, configPath, repoRoot, git, gitObjectFormat, sourceIndexes, rowsFor, treeFilePaths, treeFileText, treeTextFiles, withEventLedgerBuild, type DriftPathEvent } from '@spexcode/spec-core'
 import { bodyMentions, loadSpecs, parseFrontmatter } from '@spexcode/spec-core'
 import { extractors, extractorFor, extOf, extractCachedBlob, blobShaForContent, parseCodeEntry, relationClaimsPath, resolveSelectors, windowEvents, anchorHitQueries, type RelationEntry } from '@spexcode/spec-core'
 import { DEFAULT_TEST_GLOBS, isSourcePath, sourcePolicyDescription, trackedSourceFiles } from './source-files.js'
+import { buildContractGraph, parseContract, validateContractGraph } from '@spexcode/spec-core/contracts'
 
 export type Finding = { level: 'error' | 'warn'; rule: string; spec?: string; file?: string; msg: string }
 export const SPEC_LINT_REPORT_PROJECTION = 'spex.spec-lint.report'
@@ -228,8 +229,18 @@ async function specLintInLedger(root: string, regs: ReturnType<typeof extractors
   }
   const governed = trackedSourceFiles(root, cfg.governedRoots, cfg, tip)
   const [hidx, didx] = await sourceIndexes(root, tip)
-  const specs = await loadSpecs(root, { tip, history: hidx, drift: didx })
+  const snapshot = pending ? { tip, files: treeTextFiles(root, tip, '.spec') } : undefined
+  const specs = await loadSpecs(root, { tip, history: hidx, drift: didx, snapshot })
   const out: Finding[] = []
+  const parsedContracts = specs.map((spec) => parseContract({ nodeId: spec.id, path: spec.path,
+    source: snapshot ? snapshot.files.get(spec.path)! : textAtTip(spec.path)!,
+  }))
+  const contractGraph = buildContractGraph(parsedContracts.flatMap(({ contract }) => contract ? [contract] : []))
+  for (const finding of [...parsedContracts.flatMap(({ findings }) => findings),
+    ...validateContractGraph(contractGraph, { mode: 'draft', nodeIds: new Set(specs.map((spec) => spec.id)) })]) {
+    out.push({ level: finding.severity === 'error' ? 'error' : 'warn', rule: 'sync-contract', spec: finding.nodeId,
+      file: finding.path, msg: `${finding.code}: ${finding.message}${finding.line ? ` (line ${finding.line})` : ''}` })
+  }
 
   // integrity + build the file -> owners map. A relation's STRUCTURAL problems (a duplicate entry,
   // bare/scoped mixing on one base path, a selector on a glob — all from parseRelation,
