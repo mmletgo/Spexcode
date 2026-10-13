@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync, spawn } from 'node:child_process'
-import { copyFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
+import { copyFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createServer } from 'node:net'
@@ -48,6 +48,45 @@ for (const output of outputs) {
     const out = execFileSync(process.execPath, [launcher, 'help'], { cwd: root, encoding: 'utf8' })
     assert.match(out, /compiled source workspace/)
     assert.ok(existsSync(join(root, 'spec-cli', 'dist', 'cli.js')))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+for (const failureCode of [1, 17]) test(`failed source build exit ${failureCode} releases its lock before a successful retry`, () => {
+  const root = mkdtempSync(join(tmpdir(), 'spex-source-launcher-failure-'))
+  const launcher = join(root, 'spec-cli', 'bin', 'spex.mjs')
+  try {
+    mkdirSync(join(root, 'spec-cli', 'bin'), { recursive: true })
+    mkdirSync(join(root, 'spec-cli', 'src'), { recursive: true })
+    mkdirSync(join(root, 'spec-cli', 'dist'), { recursive: true })
+    copyFileSync(LAUNCHER, launcher)
+    writeFileSync(join(root, 'package.json'), JSON.stringify({ scripts: { build: 'node build.mjs' } }))
+    writeFileSync(join(root, 'spec-cli', 'dist', 'cli.js'), 'require("node:fs").writeFileSync("stale-cli-ran", "wrong")\n')
+    utimesSync(join(root, 'spec-cli', 'dist', 'cli.js'), new Date(0), new Date(0))
+    writeFileSync(join(root, 'spec-cli', 'src', 'runtime.ts'), 'export {}\n')
+    writeFileSync(join(root, 'build.mjs'), `process.exit(${failureCode})\n`)
+
+    const failed = spawnSync(process.execPath, [launcher, 'help'], { cwd: root, encoding: 'utf8', timeout: 10_000 })
+    assert.equal(failed.status, failureCode, failed.stderr)
+    assert.match(failed.stderr, /source workspace build failed/)
+    assert.equal(existsSync(join(root, 'stale-cli-ran')), false, 'failed build never runs the stale CLI')
+    assert.equal(existsSync(join(root, '.spex-build.lock')), false, 'failed build releases its owned lock before exit')
+
+    writeFileSync(join(root, 'build.mjs'), `
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+for (const output of ['spec-cli/dist/cli.js', 'packages/spec-core/dist/index.js', 'spec-forge/dist/index.js']) {
+  const path = join(process.cwd(), output)
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, output.endsWith('/cli.js') ? 'console.log("rebuilt after failure")\\n' : 'export {}\\n')
+}
+`)
+    const retried = spawnSync(process.execPath, [launcher, 'help'], { cwd: root, encoding: 'utf8', timeout: 10_000 })
+    assert.equal(retried.error, undefined, 'retry must not wait for the 120-second stale-lock recovery')
+    assert.equal(retried.status, 0, retried.stderr)
+    assert.match(retried.stdout, /rebuilt after failure/)
+    assert.equal(existsSync(join(root, '.spex-build.lock')), false)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

@@ -36,3 +36,6 @@ tsx, or a build script. The regression test constructs a source-shaped workspace
 real launcher, and proves its workspace build produces and executes the compiled CLI. A concurrent-launcher
 scenario proves the same stale closure is built exactly once across processes, and a test-edit scenario proves a
 test-only change leaves the compiled closure untouched.
+
+
+构建失败时，launcher 先保留构建进程的退出码，释放自己持有的 `.spex-build.lock` 后再退出。`process.exit` 不在锁的 try 区域内执行，保证正常失败经过 finally 清理。失败不能执行陈旧 dist，也不改变构建门禁或原退出码；用户修复构建后立即重试，无需等待 120 秒陈旧锁恢复。退出码 1 和 17 的临时源码工作区回归验证失败清锁、陈旧 CLI 未运行及随后成功重建。
