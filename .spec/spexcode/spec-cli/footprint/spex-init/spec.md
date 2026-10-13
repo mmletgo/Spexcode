@@ -81,6 +81,10 @@ weeks with a full spec tree and not one working hook, and re-running init could 
 whole scaffold was skipped. So when the scaffold is skipped, init still seeds `.plugins` into whichever root
 the tree already has, additively — anything already there stays the reader's. Exactly one root can own it;
 init refuses to guess when `.spec` holds several and says so.
+Newly copied Spec templates instantiate their `.spec/project/` path references with the actual root id,
+whether it belongs to an existing tree or a fresh `--title` adoption. This happens only while planting a
+new file; an existing root, child or plugin Spec remains byte-for-byte the reader's. Re-init is additive
+and leaves the already instantiated references alone. The neutral fresh root still uses `project`.
 
 **A tree without the machinery is adopted, not skipped past.** A single root with no `.plugins` is a tree that
 arrived before adoption (`spex init --pure`, an atlas run, a hand-written or copied tree), and taking it into

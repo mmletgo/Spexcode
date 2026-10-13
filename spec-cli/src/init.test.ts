@@ -529,3 +529,57 @@ test('re-init fills no launcher when the local overlay already configures them',
   assert.equal(cfg.sessions, undefined, 'the committed config gains no launcher pool')
   assert.deepEqual(JSON.parse(readFileSync(join(proj, '.spec/spexcode.local.json'), 'utf8')), local, 'the overlay is untouched')
 })
+
+for (const adoption of [
+  { root: 'export', existing: true },
+  { root: 'reader-app', existing: true },
+  { root: 'project', existing: false },
+  { root: 'named-app', existing: false, title: 'Named App' },
+]) {
+  test(`compiled init binds template paths to ${adoption.root} and ordinary hooks accept the adoption`, () => {
+    const { proj, home, codex, env, g } = freshRepo()
+    const compiledCLI = join(PACKAGE, 'dist', 'cli.js')
+    const run = (...args: string[]) => spawnSync(process.execPath, [compiledCLI, ...args], { cwd: proj, env, encoding: 'utf8' })
+    // A real installed CLI bridge, outside source-launcher/build behavior; every canonical hook invokes it.
+    const bin = join(proj, 'node_modules', '.bin')
+    mkdirSync(bin, { recursive: true })
+    const cliURL = new URL('../dist/cli.js', import.meta.url).href
+    writeFileSync(join(bin, 'spex'), `#!${process.execPath}\nimport ${JSON.stringify(cliURL)}\n`, { mode: 0o755 })
+    const rootPath = join(proj, '.spec', adoption.root, 'spec.md')
+    const author = `---\ntitle: ${adoption.root}\nstatus: active\n---\n# ${adoption.root}\nThe author's original contract stays here. Example: \`.spec/project/reader-example.md\`.\n`
+    try {
+      mkdirSync(join(proj, '.spec'), { recursive: true })
+      writeFileSync(join(proj, '.spec', 'spexcode.json'), '{"mainBranch":"main"}\n')
+      if (adoption.existing) {
+        mkdirSync(dirname(rootPath), { recursive: true })
+        writeFileSync(rootPath, author)
+      }
+      const originalMain = g('rev-parse', 'main').trim()
+      g('checkout', '-qb', 'node/adopt')
+      const args = ['init', '.', '--harness', 'none', ...(adoption.title ? ['--title', adoption.title] : [])]
+      const initialized = run(...args)
+      assert.equal(initialized.status, 0, `${initialized.stdout}\n${initialized.stderr}`)
+      assert.ok(initialized.stdout.includes(`Edit .spec/${adoption.root}/spec.md`), 'next steps name the actual root')
+      const before = filesUnder(join(proj, '.spec')).map((path) => [path, readFileSync(join(proj, '.spec', path), 'utf8')])
+      const again = run(...args)
+      assert.equal(again.status, 0, `${again.stdout}\n${again.stderr}`)
+      assert.deepEqual(filesUnder(join(proj, '.spec')).map((path) => [path, readFileSync(join(proj, '.spec', path), 'utf8')]), before, 're-init leaves all existing spec bytes untouched')
+      if (adoption.existing) assert.equal(readFileSync(rootPath, 'utf8'), author)
+      g('add', '.spec')
+      const lint = run('spec', 'lint')
+      const committed = spawnSync('git', ['-C', proj, 'commit', '-m', 'adopt existing contract'], { env, encoding: 'utf8' })
+      assert.equal(committed.status, 0, `init:\n${initialized.stdout}\n${initialized.stderr}\nlint:\n${lint.stdout}\n${lint.stderr}\ncanonical hooks commit:\n${committed.stdout}\n${committed.stderr}`)
+      assert.equal(lint.status, 0, `${lint.stdout}\n${lint.stderr}`)
+      assert.equal(g('rev-parse', 'main').trim(), originalMain, 'adoption authors only the feature branch')
+      const failSpec = readFileSync(join(proj, '.spec', adoption.root, '.plugins/core/session-fail/spec.md'), 'utf8')
+      assert.ok(failSpec.includes(`- .spec/${adoption.root}/.plugins/core/session-fail/fail.sh`))
+      assert.equal(existsSync(join(proj, '.spec/project')), adoption.root === 'project')
+      if (adoption.existing) assert.equal(g('show', `HEAD:.spec/${adoption.root}/spec.md`), author)
+      for (const hook of ['pre-commit', 'prepare-commit-msg', 'reference-transaction', 'post-checkout']) {
+        assert.equal(readFileSync(join(proj, '.git/hooks', hook), 'utf8'), readFileSync(join(HOOK_TEMPLATES, hook), 'utf8'))
+      }
+    } finally {
+      for (const path of [proj, home, codex, env.SPEXCODE_PI_AGENT_DIR]) rmSync(path, { recursive: true, force: true })
+    }
+  })
+}
