@@ -128,8 +128,12 @@ test('ID全局唯一、引用类型/归属、依赖循环；正常失败重试�
   missing.delete('tests/export.test.mjs')
   assert.ok(validateContractGraph(graph, { files: missing }).some((finding) => finding.code === 'missing-test-file'))
   const fake = new Map(files)
-  fake.set('tests/export.test.mjs', '// AC-EXPORT-01')
-  assert.ok(validateContractGraph(graph, { files: fake }).some((finding) => finding.code === 'missing-test-case'))
+  for (const source of ["// test('AC-EXPORT-01 注释', () => {})", "/* test('AC-EXPORT-01 注释', () => {}) */", 'const text = "test(\'AC-EXPORT-01 示例\', () => {})"', "test('AC-EXPORT-01-OTHER 不同稳定ID', () => {})"]) {
+    fake.set('tests/export.test.mjs', source)
+    assert.ok(validateContractGraph(graph, { files: fake }).some((finding) => finding.code === 'missing-test-case' && finding.itemId === 'AC-EXPORT-01'))
+  }
+  fake.set('tests/export.test.mjs', 'test("AC-EXPORT-01 owner\'s result", () => {})')
+  assert.ok(!validateContractGraph(graph, { files: fake }).some((finding) => finding.code === 'missing-test-case' && finding.itemId === 'AC-EXPORT-01'))
   const command = parse(baseline.replace('["node","--test","tests/export.test.mjs"]', '["node","--test","tests/other.mjs"]'))
   assert.ok(validateContractGraph(buildContractGraph([command]), { files }).some((finding) => finding.code === 'verification-selection-unverified' && finding.severity === 'warning'))
   const unrelated = parse(baseline.replace('code:', 'related:'))

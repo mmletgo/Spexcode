@@ -3,6 +3,31 @@ import { projectContractCoverage } from './coverage.js'
 import { isRepositoryPath } from './parser.js'
 import type { ContractFinding, ContractGraph, ContractItem, ContractValidationContext, State, Transition } from './types.js'
 
+// This is a declaration check, not proof that a test ran or that its assertion enforces the rule.
+function declaresTestCase(source: string, caseId: string): boolean {
+  const escaped = caseId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const id = new RegExp(`(?:^|[^A-Z0-9-])${escaped}(?![A-Z0-9-])`)
+  for (let at = 0; at < source.length;) {
+    if (source.startsWith('//', at)) { const end = source.indexOf('\n', at + 2); at = end < 0 ? source.length : end + 1; continue }
+    if (source.startsWith('/*', at)) { const end = source.indexOf('*/', at + 2); at = end < 0 ? source.length : end + 2; continue }
+    const call = !/[\w$]/.test(source[at - 1] ?? '') && source.slice(at).match(/^(?:test|it)(?:\.(?:only|skip|todo))?\s*\(\s*(['"`])/)
+    const quote = call ? call[1] : source[at]
+    if (quote === "'" || quote === '"' || quote === '`') {
+      at += call ? call[0].length : 1
+      let title = ''
+      while (at < source.length && source[at] !== quote) {
+        if (source[at] === '\\' && at + 1 < source.length) at++
+        title += source[at++]
+      }
+      at++
+      if (call && id.test(title)) return true
+      continue
+    }
+    at++
+  }
+  return false
+}
+
 export function validateContractGraph(graph: ContractGraph, context: ContractValidationContext = {}): ContractFinding[] {
   const findings = [...graph.findings]
   const final = context.mode !== 'draft'
@@ -76,9 +101,7 @@ export function validateContractGraph(graph: ContractGraph, context: ContractVal
     const source = context.files.get(testPath)
     if (source === undefined) report('missing-test-file', `${ac.id} 测试文件不存在：${testPath}`, ac)
     else {
-      const escaped = caseId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-      const declaration = new RegExp(`\\b(?:test|it)\\s*\\(\\s*(['"\x60])[^'"\x60\\r\\n]*\\b${escaped}\\b[^'"\x60\\r\\n]*\\1`)
-      if (!declaration.test(source)) report('missing-test-case', `${ac.id} 测试标题未声明稳定用例 ${caseId}`, ac)
+      if (!declaresTestCase(source, caseId)) report('missing-test-case', `${ac.id} 测试标题未声明稳定用例 ${caseId}`, ac)
     }
     if (command?.kind === 'VERIFY') {
       const resolves = (arg: string): string => `${command.cwd === '.' ? '' : `${command.cwd}/`}${arg.replace(/^\.\//, '')}`
