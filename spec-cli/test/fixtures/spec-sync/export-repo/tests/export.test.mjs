@@ -19,6 +19,12 @@ test('AC-EXPORT-01 响应丢失后同键返回同任务，参数冲突不重复�
   assert.equal(service.jobs.size, 1);
   assert.throws(() => service.submit('owner', 'key', 'all'), /idempotency-conflict/);
   assert.deepEqual(service.jobs.get(first.id), first);
+  const firstPair = service.submit('a:b', 'c', 'active');
+  const secondPair = service.submit('a', 'b:c', 'active');
+  assert.notEqual(firstPair.id, secondPair.id, '不同所有者与键的组合不能因分隔符碰撞共享任务');
+  assert.equal(secondPair.owner, 'a');
+  assert.deepEqual(service.submit('a:b', 'c', 'active'), firstPair);
+  assert.deepEqual(service.submit('a', 'b:c', 'active'), secondPair);
 });
 
 test('AC-EXPORT-02 输入和结果边界拒绝且保持状态', () => {

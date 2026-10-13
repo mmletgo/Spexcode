@@ -6,7 +6,8 @@ export class ExportService {
   submit(actor, key, filter) {
     if (!actor) throw new Error('forbidden');
     if (!key || typeof filter !== 'string' || !filter.trim()) throw new Error('invalid-request');
-    const previousId = this.keys.get(`${actor}:${key}`);
+    const identity = JSON.stringify([actor, key]);
+    const previousId = this.keys.get(identity);
     if (previousId) {
       const previous = this.jobs.get(previousId);
       if (previous.filter !== filter) throw new Error('idempotency-conflict');
@@ -14,7 +15,7 @@ export class ExportService {
     }
     const job = { id: `export-${this.nextId++}`, owner: actor, filter, state: 'QUEUED', attempt: 1, result: null, reason: null, published: 0 };
     this.jobs.set(job.id, job);
-    this.keys.set(`${actor}:${key}`, job.id);
+    this.keys.set(identity, job.id);
     return { ...job };
   }
 
