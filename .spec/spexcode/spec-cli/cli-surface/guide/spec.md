@@ -14,6 +14,11 @@ related:
 ---
 # guide
 
+`spex guide sync` documents the P2 shared [[sync-application]] workflow and versioned
+sync-settings-v1 configuration: directory authorization, exact Docker Node verification registrations,
+protected tests, business facts and budgets. Image placeholders require an actually prepared frozen
+image; the page does not promise external watching or code-driven writeback.
+
 `spex guide` is SpexCode's **reference surface as a command**, not buried docs. It serves the human and
 the agent from one verb, picked by an optional topic:
 

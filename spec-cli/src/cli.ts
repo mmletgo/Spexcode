@@ -648,6 +648,10 @@ if (cmd === 'serve') {
     process.exit(2)
   }
   await flushExit(0)
+} else if (cmd === 'sync') {
+  if (!process.argv[3]) console.log((await import('./help.js')).commandHelp('sync'))
+  else await (await import('./sync-cli.js')).runSyncCli(process.argv.slice(3))
+  await flushExit(0)
 } else if (cmd === 'spec') {
   const sub = process.argv[3]
   if (sub === undefined) {

@@ -427,6 +427,26 @@ grammar, not spex's: spex still owns its own \`--flag\` space, and a bare -F/-i/
 consumes the token after it.`,
     see: 'spex session send --ssh <address> <full-session-id> "<msg>" · spex dashboard (the host gateway)',
   },
+  sync: {
+    line: 'sync <verb>           Spec 驱动同步：配置 · 执行 · 状态 · 暂停 · 恢复 · 取消',
+    body: `Usage: spex sync settings
+       spex sync enable [--config-digest <sha256>]
+       spex sync status [--node <node-id>] [--limit N] [--json]
+       spex sync run <node-id> [--request-id <id>] [--patch-file <json>]
+       spex sync show <operation-id>
+       spex sync pause|resume|cancel <operation-id>
+
+在 .spec/spexcode.json 的 sync 字段登记 sync-settings-v1、sourcePaths/testPaths/readPaths、
+verifications、mandatoryTests、facts 与 budget，再启用当前输入工作树的授权。
+支持已登记的 Docker Node --test；缺少可信镜像、命令或预算明确拒绝。
+可配置有限 callTimeoutMs；缺省单次最多 120000ms，旧操作沿用自身冻结配置和总期限。
+run 返回持久 operation，后端继续实际细化、生成、验证与受管交付，不需要 Dashboard。
+--patch-file 使用 SpecBodyEdit 的 startLine/endLine/original/replacement 正文差量，
+直接进入完整操作，不先单独提交 Spec。重复 --request-id 幂等；不同内容不能复用同一键。
+show/status 展示真实失败、GAP、过期和交付工作树；workspace_synced 不代表原输入树已落地。
+本阶段尚未启用外部文件自动监听或代码反向同步。所有命令输出 JSON。
+配置示例：spex guide sync。\n\n${ROUTING_NOTE}`,
+  },
   spec: {
     line: 'spec <verb>           the governance graph: search · owner · lint · ack · report',
     body: `Usage: spex spec search <query…> [--limit N=10] [--json]

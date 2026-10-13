@@ -754,7 +754,48 @@ is still right an hour later, and it says so when the backend is gone instead of
 
 see also: spex guide files (hand over a whole artifact) · spex help session`
 
-const TOPICS: Record<string, string> = { spec: SPEC, settings: SETTINGS, footprint: FOOTPRINT, files: FILES, web: WEB, widget: WIDGET, diagram: DIAGRAM }
+const SYNC = `spex guide sync — Spec 驱动同步
+
+先在版本化 .spec/spexcode.json 合入 sync 字段，提交可信配置；源码和测试目录是一次启用授权，
+无需填写未来 AC 或每个实现函数。下列 image 占位符必须换成实际已准备的冻结 Docker 镜像：
+
+  "sync": {
+    "version": "sync-settings-v1",
+    "sourcePaths": ["src"], "testPaths": ["tests"], "readPaths": ["package.json"],
+    "verifications": [{
+      "definition": { "id": "VERIFY-PROJECT-01", "command": ["node", "--test"], "cwd": ".", "timeoutMs": 60000 },
+      "environment": {
+        "version": "project-node-v1", "image": "<镜像名称>@sha256:<64位摘要>", "platform": "linux/arm64",
+        "memoryBytes": 268435456, "cpus": 1, "pidsLimit": 128,
+        "scratchBytes": 16777216, "logBytes": 131072
+      }
+    }],
+    "mandatoryTests": [], "facts": [], "callTimeoutMs": 60000,
+    "budget": { "maxAttempts": 3, "maxCalls": 16, "maxRepairs": 2, "timeoutMs": 300000 }
+  }
+
+路径均为仓库相对目录或文件，不能指向任意磁盘。保护测试如需登记在 mandatoryTests，使用
+{ verificationId, testPath, testId }，放在可读但不可写目录；未来 AC 由细化生成。
+facts 仅放有来源的业务事实，执行环境、token 和本机路径不能作为业务政策。
+当前仅支持 Docker Node --test；export 不带宿主 node_modules，不猜 npm script。
+callTimeoutMs 是可选单次模型调用上限，正整数且不超过 budget.timeoutMs；缺省最多 120000ms，
+同时受操作总期限限制。复杂完整流程可在新操作的可信配置中明确设置更长有限值，不能扩大旧操作预算。
+
+启动本项目 spex serve 后执行：
+  spex sync settings
+  spex sync enable
+  spex sync run <node-id> --request-id <一次用户请求的稳定键>
+  spex sync status --node <node-id>
+  spex sync show <operation-id>
+
+无需打开 Dashboard。run 返回持久操作，后端继续细化、实现、独立评审、Docker 验证与实际交付。
+受控保存或 --patch-file 的正文差量不先修改/提交原树 Spec；no-op 不派发。同请求键不能改意图。
+workspace_synced 是交付工作树结果，原输入树待落地单独展示。新输入使旧结果过期，恢复只能用当前输入。
+本阶段尚未提供外部 watcher 或代码反向同步，不能据 enable 宣称双向持续已完成。
+
+see also: spex help sync`
+
+const TOPICS: Record<string, string> = { spec: SPEC, settings: SETTINGS, footprint: FOOTPRINT, files: FILES, web: WEB, widget: WIDGET, diagram: DIAGRAM, sync: SYNC }
 
 // every guide page ends by naming the OTHER help layer, so a reader never dead-ends here: guide is
 // the skill layer (workflows · formats · settings); command usage lives in help.ts's two layers.
