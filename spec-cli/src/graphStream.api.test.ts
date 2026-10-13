@@ -9,15 +9,16 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   watch,
   writeFileSync,
 } from 'node:fs'
 import net from 'node:net'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { processStartToken } from '@spexcode/spec-core'
+import { encodeProject, processStartToken } from '@spexcode/spec-core'
 
 const here = dirname(fileURLToPath(import.meta.url))
 
@@ -93,8 +94,10 @@ function fakeTmuxDir(fixture: string): string {
   return bin
 }
 
-function writeSessionRecord(spexHome: string, project: string, id: string, worktreePath: string, branch: string, status = 'active'): void {
-  const enc = project.replace(/[/.]/g, '-')
+function writeSessionRecord(spexHome: string, project: string, id: string, worktreePath: string, branch: string, status = 'active'): string {
+  // Runtime project identity is the canonical common-dir checkout, including macOS /var aliases.
+  const common = realpathSync(resolve(project, git(project, 'rev-parse', '--git-common-dir')))
+  const enc = encodeProject(dirname(common))
   const dir = join(spexHome, 'projects', enc, 'sessions', id)
   mkdirSync(dir, { recursive: true })
   writeFileSync(join(dir, 'session.json'), JSON.stringify({
@@ -103,6 +106,7 @@ function writeSessionRecord(spexHome: string, project: string, id: string, workt
     merges: 0, note: '', sortkey: '', createdAt: Date.now(), harness: 'claude',
     harness_session_id: '', launcher: 'fixture', launch_cmd: 'true',
   }, null, 2) + '\n')
+  return dir
 }
 
 async function stopChild(child: ChildProcess): Promise<void> {
@@ -771,7 +775,7 @@ test('a failed refresh keeps watcher causes through patrol recovery', { timeout:
   git(project, 'config', 'user.name', 'fixture')
   git(project, 'add', '.')
   git(project, 'commit', '-qm', 'seed')
-  writeSessionRecord(spexHome, project, sessionId, project, 'main')
+  const sessionDir = writeSessionRecord(spexHome, project, sessionId, project, 'main')
 
   const bin = join(fixture, 'bin')
   const hang = join(fixture, 'hang-history')
@@ -857,7 +861,7 @@ exec "${realGit}" "$@"
     await waitFor(() => existsSync(argvLog) && /HANG /.test(readFileSync(argvLog, 'utf8')),
       `the graph producer never entered the controlled wedge:\n${serverLog}`)
 
-    const sessionPath = join(spexHome, 'projects', project.replace(/[/.]/g, '-'), 'sessions', sessionId, 'runtime.json')
+    const sessionPath = join(sessionDir, 'runtime.json')
     const record = JSON.parse(readFileSync(sessionPath, 'utf8'))
     record.name = 'Changed during failed flight'
     writeFileSync(sessionPath, JSON.stringify(record, null, 2) + '\n')
@@ -988,6 +992,9 @@ exec "${realGit}" "$@"
   try {
     await waitFor(async () => fetch(`${base}/health`).then((response) => response.ok).catch(() => false),
       `backend did not become healthy:\n${serverLog}`)
+    const seeded = await fetch(`${base}/api/sessions/${sessionId}`)
+    assert.equal(seeded.status, 200, 'the canonical fixture session must exist before holding the full producer')
+    assert.equal((await seeded.json() as { id: string }).id, sessionId)
     const stream = await fetch(`${base}/api/graph/stream?mode=delta`, { signal: abort.signal })
     assert.equal(stream.status, 200)
     streamRead = (async () => {
