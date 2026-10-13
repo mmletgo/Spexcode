@@ -27,3 +27,5 @@ V3失败后修复的模型若再次收到P1会返回弱化AC，因此测试必�
 AC-SYNC-02/03使用真实已有详细契约，分别经readonly prepareSpecBodyEdit+requestBlob修改高层raw和具体TR，source/index全程不写。独立模型会话返回固定业务表并检查新意图和旧验收对照；真实V1保护accepted新契约，V3 Docker运行新/旧实际断言，固定CLI hooks/Git交付，receipt覆盖新验收。未受影响作者prose与原ID行保留，旧oracle文件不可改，不把成功从空Spec用例当修改既有契约证据。
 
 真实受控编辑首次30秒租约在连续同步Git/结构微任务阶段过期并返回recovery_required；默认120秒及持权阶段让步后，用未显式指定lease的同一AC02/03场景验证完整Docker/Git交付。已有1500ms短lease/50ms heartbeat取消用例保持，默认调整不放宽过期fence或总deadline。
+
+受控model夹具按原生strict wire返回每个changes行mode:null（沿用或默认100644），包含新文件和既有文件，不以省略optional域掩盖原生服务schema拒绝；业务断言与预算不变。

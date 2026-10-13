@@ -88,7 +88,7 @@ async function fixture(t: test.TestContext, budget = { maxAttempts: 3, maxCalls:
     else if (request.purpose === 'elaboration_review') output = { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
     else if (request.purpose === 'code_generate') {
       const frozen = promptInput(request), source = new Map(frozen.files).get('src/export.js')!
-      const change = (path: string, content: string) => { const entry = frozen.manifest.entries.find(item => item.path === path)!; return { path, beforeDigest: entry.digest, beforeMode: entry.mode, content } }
+      const change = (path: string, content: string) => { const entry = frozen.manifest.entries.find(item => item.path === path)!; return { path, beforeDigest: entry.digest, beforeMode: entry.mode, mode: null, content } }
       output = { version: 'sync-files-v1', changes: [...frozen.elaboratedSpecs.map(spec => change(spec.path, spec.source)), change('src/export.js', `${source}\n// independently reviewed generated implementation\n`)] }
     } else {
       const identity = JSON.parse(request.prompt.split('实际候选身份与 manifest:\n')[1].split('\n实际完整候选')[0]) as { inputId: string; candidate: { digest: string } }
@@ -320,12 +320,12 @@ test('高层raw无未来IDs，目录授权自动新增absent模块与治理叶�
   assert.ok(!highLevel.includes('AC-EXPORT-01')); assert.ok(!existsSync(join(f.root, 'src/request-key.js')))
   f.transform((output, request) => {
     if (request.purpose !== 'code_generate') return output
-    const value = output as { version: string; changes: { path: string; beforeDigest: string | null; beforeMode: string | null; content: string }[] }
+    const value = output as { version: string; changes: { path: string; beforeDigest: string | null; beforeMode: string | null; mode: null; content: string }[] }
     const source = value.changes.find(change => change.path === 'src/export.js')!
     assert.ok(source.content.includes('const identity = JSON.stringify([actor, key]);'))
     source.content = `import { requestKey } from './request-key.js';\n${source.content.replace('const identity = JSON.stringify([actor, key]);', 'const identity = requestKey(actor, key);')}`
-    value.changes.push({ path: 'src/request-key.js', beforeDigest: null, beforeMode: null, content: 'export function requestKey(actor, key) { return JSON.stringify([actor, key]); }\n' })
-    value.changes.push({ path: childPath, beforeDigest: null, beforeMode: null, content: `---\ntitle: 导出请求幂等键\nstatus: active\ncode:\n  - src/request-key.js#requestKey\n---\n# 导出请求幂等键\n\n## raw source\n\n${childRaw}\n\n## expanded spec\n\n将actor与key作为JSON数组编码，使每个字符串组合具有无歧义身份。\n` })
+    value.changes.push({ path: 'src/request-key.js', beforeDigest: null, beforeMode: null, mode: null, content: 'export function requestKey(actor, key) { return JSON.stringify([actor, key]); }\n' })
+    value.changes.push({ path: childPath, beforeDigest: null, beforeMode: null, mode: null, content: `---\ntitle: 导出请求幂等键\nstatus: active\ncode:\n  - src/request-key.js#requestKey\n---\n# 导出请求幂等键\n\n## raw source\n\n${childRaw}\n\n## expanded spec\n\n将actor与key作为JSON数组编码，使每个字符串组合具有无歧义身份。\n` })
     return value
   })
   const result = await runSyncOperation(f.store, f.operation.id, f.options)
@@ -375,11 +375,11 @@ for (const variant of ['raw', 'TR'] as const) test(`AC-SYNC-${variant === 'raw' 
   f.transform((output, request) => {
     if (request.purpose === 'elaboration_generate') { assert.ok(request.prompt.includes(intent)); return rows(accepted, '.spec/reader-app/export-contract/spec.md') }
     if (request.purpose === 'code_generate') {
-      const value = output as { changes: { path: string; beforeDigest: string | null; beforeMode: string | null; content: string }[] }, implementation = value.changes.find(change => change.path === 'src/export.js')!
+      const value = output as { changes: { path: string; beforeDigest: string | null; beforeMode: string | null; mode: null; content: string }[] }, implementation = value.changes.find(change => change.path === 'src/export.js')!
       assert.ok(request.prompt.includes(variant === 'raw' ? 'filter长度最多128字符' : 'lastFailureReason保留重试前原因'))
       assert.ok(request.prompt.includes(variant === 'raw' ? '明确拒绝，状态不变' : 'ID保持、attempt增加，旧结果无效'), '旧AC作为独立审查对照而非锁住新意图')
       implementation.content = variant === 'raw' ? implementation.content.replace("!filter.trim())", "!filter.trim() || filter.length > 128)") : implementation.content.replace('job.reason = null;', 'job.lastFailureReason = job.reason;\n        job.reason = null;')
-      value.changes.push({ path: testPath, beforeDigest: null, beforeMode: null, content: testSource }); return value
+      value.changes.push({ path: testPath, beforeDigest: null, beforeMode: null, mode: null, content: testSource }); return value
     }
     if (request.purpose === 'code_review') { assert.ok(request.prompt.includes(intent)); assert.ok(request.prompt.includes(marker)); assert.ok(request.prompt.includes(testSource.split('\n')[3].split("'", 2)[1])) }
     return output
