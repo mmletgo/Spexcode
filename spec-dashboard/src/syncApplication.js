@@ -2,7 +2,15 @@ import { apiFetch, readScopeUrl } from './data.js'
 
 const syncRead = async (path, targetTree, init) => {
   const response = await apiFetch(readScopeUrl(`/api/sync/${path}`, targetTree), init)
-  const body = await response.json()
+  const text = await response.text()
+  let body
+  try { body = JSON.parse(text) }
+  catch (failure) {
+    if (response.ok) throw failure
+    const error = new Error(`HTTP ${response.status}: ${text.slice(0, 500) || response.statusText}`)
+    error.code = 'http-error'
+    throw error
+  }
   if (!response.ok) {
     const error = new Error(body.error || `${response.status} ${response.statusText}`)
     error.code = body.code || 'http-error'

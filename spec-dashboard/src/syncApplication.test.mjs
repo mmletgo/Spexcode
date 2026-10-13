@@ -135,6 +135,15 @@ test('structured API failures surface their own code and aborted status reads ar
   } finally { globalThis.fetch = originalFetch }
 })
 
+test('plain-text service failures preserve HTTP status and a bounded diagnosis', async () => {
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => new Response(`Internal Server Error ${'x'.repeat(600)}`, { status: 500 })
+  try {
+    await assert.rejects(readSyncStatus('alpha'), (error) => error.code === 'http-error'
+      && error.message.startsWith('HTTP 500: Internal Server Error') && error.message.length === 510)
+  } finally { globalThis.fetch = originalFetch }
+})
+
 
 test('candidate and delivered code/test diffs preserve scope and show oversized-read failures', async () => {
   const originalFetch = globalThis.fetch
