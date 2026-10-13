@@ -46,7 +46,7 @@ CREATE TABLE sync_resources (
  record_json TEXT NOT NULL CHECK(json_valid(record_json)), UNIQUE(attempt_id,resource_key)
 ) STRICT;
 CREATE INDEX sync_resources_recovery ON sync_resources(operation_id,attempt_id) WHERE phase!='removed';
-` }, { version: 3, sql: 'SELECT 1; -- requestBlob is an optional immutable user-input reference in operation record_json; old writers must refuse this component version.' }]
+` }, { version: 3, sql: 'SELECT 1; -- requestBlob is an optional immutable user-input reference in operation record_json; old writers must refuse this component version.' }, { version: 4, sql: 'SELECT 1; -- planBlob pins the immutable policy bytes in operation record_json; old writers must refuse this component version.' }]
 
 /** 升级前以 SQLite online backup 保存一致性旧库；迁移本身由组件事务执行。 */
 export async function migrateSyncStore(protocol: SessionProtocol, options: { backupPath?: string } = {}): Promise<number> {

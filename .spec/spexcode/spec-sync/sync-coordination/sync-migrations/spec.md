@@ -21,3 +21,5 @@ code:
 v2在v1原迁移字节保持不变的基础上增加sync_resources，记录稳定资源计划、生命周期阶段及checkpoint blob引用，按未removed状态索引所有历史attempt资源。升级使用一致性backup保存v1；已有会话、operation、attempt、journal与基线不改含义。不复制checkpoint正文，也不引入执行数据库或消息队列。
 
 v3 登记受控用户请求 requestBlob 的运行语义版本，无破坏性表结构或旧记录改写。升级前仍保存一致性备份；旧版写方因更高组件版本拒绝写入，不能忽略新请求后按旧输入执行。旧版无 requestBlob 的 payload 摘要保持相同，升级后重复事件继续命中原 operation。
+
+v4登记可信计划planBlob直接持久引用/GC保活的语义版本，仍仅增marker、不改旧记录。v3升级先online backup，旧无plan操作和原payload/队列可读；旧writer拒绝新版本，不允许在忽略plan恢复引用的情况下写入。

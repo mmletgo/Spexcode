@@ -1,6 +1,6 @@
 ---
 title: 中央协调可信计划接口
-status: pending
+status: active
 hue: 175
 desc: 冻结可信读写影响、业务事实、验证命令与独立测试义务。
 code:

@@ -22,6 +22,8 @@ operation 可保存 contractScopeExpansions：每项只含完整 contractIds/flo
 
 受控编辑或裁决可提供 requestBlob 保存额外用户意图的不可变引用。input 仍表示实际采集的来源字节，不能为了接收 Dashboard 编辑而谎称 main 已改变或先单独提交 Spec；组合输入在已验证原文条件后叠加请求。纯文件观察事件无需 requestBlob。请求引用参与接入幂等摘要、恢复与证据保活。
 
+operation/admission可带planBlob固定完整可信计划，SHA256必须等于policyDigest；正文仅存既有evidence，operation直接引用以保活并支持queued进程重启。旧记录缺省可读，不能猜计划或借用新policy恢复。
+
 ComposedInputRef 可带 requestBlob，表示该组合 tree 已叠加同一不可变用户请求；原始 sourceInputId 不变，不能仅靠相同 source 快照混用两个用户编辑。
 
 journal 保存唯一 effect key、候选/验证/目标绑定、逐文件 pre/post 摘要与 mode、持久 plan blob 和步骤状态。receipt 保存实际 tree/commit、交付快照及证据。baseline 必须同次结算 sourceInput 与 verifiedDelivery，并保存真实 coveredScope；下一次输入由 priorDelivery 加 priorSource→newSource 差量形成，不能丢弃已交付 Agent 内容。部分交付保留根阻塞状态；发布后的交付树作为新来源时建立该物理树自己的成对基线。

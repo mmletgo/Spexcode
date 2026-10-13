@@ -157,13 +157,46 @@ test('v2 upgrade preserves requestless dedup identity and backs up the old compo
     }
     assert.throws(() => new SyncStore(legacy, f.options), /SYNC_SCHEMA_UNSUPPORTED/)
     const path = join(f.root, 'v2-backup.sqlite')
-    assert.equal(await migrateSyncStore(legacy, { backupPath: path }), 3)
+    assert.equal(await migrateSyncStore(legacy, { backupPath: path }), SYNC_MIGRATIONS.length)
     const upgraded = new SyncStore(legacy, f.options)
     assert.equal(upgraded.admitAndEnqueue(input).id, old.id)
     assert.equal(upgraded.readOperation(old.id).payloadDigest, old.payloadDigest)
     backup = openProtocol(path)
     assert.equal(backup.withTransaction(tx => tx.query('SELECT MAX(version) AS version FROM schema_migrations WHERE component=?', SYNC_COMPONENT))[0].version, 2)
     assert.equal(backup.listPending(SYNC_COORDINATOR_ADDRESS).length, 1)
+  } finally { backup?.close(); legacy.close(); f.cleanup() }
+})
+
+test('v3 upgrade backs up and preserves planless identity, v4 plans are hash-bound and pinned before dispatch', async () => {
+  const f = await fixture(), legacy = openProtocol(join(f.root, 'v3.sqlite'))
+  let backup: ReturnType<typeof openProtocol> | null = null
+  try {
+    applyComponentMigrations(legacy, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 3))
+    legacy.initialize(SYNC_COORDINATOR_ADDRESS)
+    const input = f.admit(), old = f.store.admitAndEnqueue(input)
+    for (const table of ['protocol_messages', 'sync_operations'] as const) for (const row of f.protocol.withTransaction(tx => tx.query(`SELECT * FROM ${table}`))) {
+      const columns = Object.keys(row).filter(column => column !== 'enqueue_seq')
+      legacy.withTransaction(tx => tx.exec(`INSERT INTO ${table}(${columns.join(',')}) VALUES(${columns.map(() => '?').join(',')})`, ...columns.map(column => row[column]) as SqlParam[]))
+    }
+    assert.throws(() => new SyncStore(legacy, f.options), /SYNC_SCHEMA_UNSUPPORTED/)
+    const path = join(f.root, 'v3-backup.sqlite')
+    assert.equal(await migrateSyncStore(legacy, { backupPath: path }), 4)
+    const upgraded = new SyncStore(legacy, f.options)
+    assert.equal(upgraded.admitAndEnqueue(input).payloadDigest, old.payloadDigest)
+    assert.equal(upgraded.readOperation(old.id).planBlob, undefined)
+    backup = openProtocol(path)
+    assert.equal(backup.withTransaction(tx => tx.query('SELECT MAX(version) AS version FROM schema_migrations WHERE component=?', SYNC_COMPONENT))[0].version, 3)
+    assert.equal(backup.listPending(SYNC_COORDINATOR_ADDRESS).length, 1)
+    const planBlob = f.put({ version: 'trusted-plan', readPaths: ['src'] })
+    const planned = { ...f.admit(source('planned')), planBlob, policyDigest: planBlob.sha256 }
+    const operation = upgraded.admitAndEnqueue(planned)
+    assert.equal(operation.phase, 'queued'); assert.deepEqual(operation.planBlob, planBlob)
+    assert.ok(upgraded.pinnedBlobRefs().some(ref => ref.sha256 === planBlob.sha256))
+    assert.equal(upgraded.admitAndEnqueue(planned).id, operation.id)
+    assert.throws(() => upgraded.admitAndEnqueue({ ...planned, policyDigest: 'different' }), /SYNC_PLAN_BINDING/)
+    assert.throws(() => new SyncStore(legacy, { ...f.options, readBlob: () => Buffer.from('changed bytes') }).admitAndEnqueue(planned), /SYNC_BLOB_DIGEST_MISMATCH/)
+    const reopened = openProtocol(legacy.databasePath)
+    try { assert.deepEqual(new SyncStore(reopened, f.options).readOperation(operation.id).planBlob, planBlob); assert.equal(await migrateSyncStore(reopened), 4) } finally { reopened.close() }
   } finally { backup?.close(); legacy.close(); f.cleanup() }
 })
 
