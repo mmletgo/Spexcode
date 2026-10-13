@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync, readFileSync, readdirSync, realpathSync, existsSync, rmSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -48,7 +48,7 @@ const freePort = () => new Promise<number>((resolvePort, reject) => {
 })
 
 function freshRepo(opts: { trackedContract?: boolean } = {}) {
-  const proj = mkdtempSync(join(tmpdir(), 'spex-init-'))
+  const proj = realpathSync(mkdtempSync(join(tmpdir(), 'spex-init-')))
   const home = mkdtempSync(join(tmpdir(), 'spex-home-'))
   const codex = mkdtempSync(join(tmpdir(), 'spex-codex-'))
   const piAgent = mkdtempSync(join(tmpdir(), 'spex-pi-'))
