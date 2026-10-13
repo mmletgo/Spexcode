@@ -78,7 +78,7 @@ function defaultTarget(live) {
   return [...live].sort((a, b) => (b.created || 0) - (a.created || 0))[0]?.id || 'new'
 }
 
-export default function ProseActions({ node, hostRef, codeSelection = null, onCodeSelectionClear, openSend = false, syncEnabled = null, onSaved }) {
+export default function ProseActions({ node, hostRef, codeSelection = null, onCodeSelectionClear, openSend = false, syncEnabled = null, syncActivation = null, syncError = null, onSaved }) {
   const t = useT()
   const { sessions = [], specs = [] } = useBoard()
   const { publish, clear: clearSnapshot } = useSelectionController()
@@ -336,7 +336,7 @@ export default function ProseActions({ node, hostRef, codeSelection = null, onCo
   }
 
   const commit = async () => {
-    if (!hit || saving.current) return
+    if (!hit || saving.current || syncActivation === 'invalidated') return
     saving.current = true
     setBusy(true)
     setError(null)
@@ -379,7 +379,7 @@ export default function ProseActions({ node, hostRef, codeSelection = null, onCo
   }
   return (
     <>
-      {!panel && menuOpen && selection && <ActionGroup t={t} hit={anchor} disabled={loading} manualEnabled={!activeCodeSelection} onPick={open} />}
+      {!panel && menuOpen && selection && <ActionGroup t={t} hit={anchor} disabled={loading} manualEnabled={!activeCodeSelection && syncActivation !== 'invalidated'} onPick={open} />}
       {!panel && nodeMenuOpen && <NodeActionGroup t={t} hit={anchor} disabled={loading} onSend={(event) => open({ key: 'send', preset: null, jump: false }, event)} onCopy={copyNode} crossings={crossings} onCross={crossTo} />}
       {!panel && menuOpen && loading && <span className="pa-loading" role="status" style={{ left: anchor.x, top: anchor.y }}><span className="spinner" aria-label={t('common.loading')} /></span>}
       {panel?.kind === 'send' && (
@@ -389,7 +389,7 @@ export default function ProseActions({ node, hostRef, codeSelection = null, onCo
       )}
       {panel?.kind === 'manual' && (
         <ManualEditor t={t} panel={panel} node={node} lines={hit.lines} draft={draft} setDraft={setDraft}
-          busy={busy} error={error} syncEnabled={syncEnabled} onCommit={commit} onClose={dismiss} />
+          busy={busy} error={error} syncEnabled={syncEnabled} syncActivation={syncActivation} syncError={syncError} onCommit={commit} onClose={dismiss} />
       )}
     </>
   )
@@ -568,7 +568,7 @@ function AddressInput({ t, live, launchers, launcher, up, onPick, onCancel }) {
 // The in-place editor. It holds the passage's SOURCE lines, verbatim — not the rendered text — because the
 // bytes it commits are the bytes in the file. What it sends back is the region it was opened with, so the
 // server can refuse an edit whose ground moved ([[spec-body-edit]]).
-function ManualEditor({ t, panel, node, lines, draft, setDraft, busy, error, syncEnabled, onCommit, onClose }) {
+function ManualEditor({ t, panel, node, lines, draft, setDraft, busy, error, syncEnabled, syncActivation, syncError, onCommit, onClose }) {
   const [ref, style] = useAnchored(panel.x, panel.y, [])
   const box = useRef(null)
   useEffect(() => { box.current?.focus() }, [])
@@ -582,10 +582,11 @@ function ManualEditor({ t, panel, node, lines, draft, setDraft, busy, error, syn
       <textarea ref={box} className="pa-input pa-edit-input" rows={10} value={draft} spellCheck={false}
         onChange={(event) => setDraft(event.target.value)} />
       {error && <div className="pa-error" role="alert">{error}</div>}
+      {syncActivation === 'invalidated' && <div className="pa-error" role="alert">{syncError ? `${syncError.code}: ${syncError.message}` : t('syncOperation.invalidated')}</div>}
       <div className="pa-foot">
-        <span className="pa-note">{t(syncEnabled === true ? 'syncOperation.saveNote' : syncEnabled === false ? 'proseActions.editNote' : 'syncOperation.savePolicyNote')}</span>
+        <span className="pa-note">{t(syncEnabled === true ? 'syncOperation.saveNote' : syncActivation === 'disabled' ? 'proseActions.editNote' : 'syncOperation.savePolicyNote')}</span>
         <button type="button" className="pa-btn" onClick={onClose}>{t('common.cancel')}</button>
-        <button type="button" className="pa-btn pa-go" disabled={busy} onClick={onCommit}>
+        <button type="button" className="pa-btn pa-go" disabled={busy || syncActivation === 'invalidated'} onClick={onCommit}>
           {busy ? t('proseActions.committing') : t(syncEnabled ? 'common.save' : 'proseActions.commit')}
         </button>
       </div>

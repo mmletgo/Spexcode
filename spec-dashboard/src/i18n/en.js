@@ -1,5 +1,6 @@
 export default {
   syncOperation: {
+    invalidated: 'Synchronization configuration was invalidated. Repair it and enable synchronization before saving.',
     candidateDiff: 'Candidate diff',
     deliveryDiff: 'Delivery diff',
     candidateReview: 'Review candidate code and tests',
@@ -49,6 +50,7 @@ export default {
     "savePolicyNote": "Saving follows the current project synchronization settings.",
     "phase": {
         "idle": "Waiting for synchronization",
+        "invalidated": 'Synchronization configuration was invalidated. Repair it and enable synchronization before saving.',
         "disabled": "Synchronization disabled",
         "detected": "Input detected",
         "queued": "Queued",

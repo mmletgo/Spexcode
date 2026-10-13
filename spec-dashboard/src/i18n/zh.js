@@ -1,5 +1,6 @@
 export default {
   syncOperation: {
+    invalidated: '同步配置已失效，修复并重新启用后才能保存。',
     candidateDiff: '候选差异',
     deliveryDiff: '交付差异',
     candidateReview: '审查候选代码与测试',
@@ -49,6 +50,7 @@ export default {
     "savePolicyNote": "保存按项目当前同步设置处理。",
     "phase": {
         "idle": "等待同步",
+        "invalidated": '同步配置已失效，修复并重新启用后才能保存。',
         "disabled": "尚未启用同步",
         "detected": "已发现输入",
         "queued": "等待执行",

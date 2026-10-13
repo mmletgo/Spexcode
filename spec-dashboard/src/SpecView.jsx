@@ -78,9 +78,9 @@ export default function SpecView({ param, query }) {
   const active = usePaneActive()
   const node = useMemo(() => specs?.find((s) => s.id === param), [specs, param])
   const proseRef = useRef(null)
-  const [syncEnabled, setSyncEnabled] = useState(null)
+  const [syncPolicy, setSyncPolicy] = useState(null)
   const [saved, setSaved] = useState({ revision: 0, operation: null })
-  const syncSettings = useCallback((settings) => setSyncEnabled(settings.enabled), [])
+  const syncSettings = useCallback((settings) => setSyncPolicy({ enabled: settings.enabled, activation: settings.activation, error: settings.configurationError }), [])
   const specSaved = useCallback((result) => setSaved((previous) => ({ revision: previous.revision + 1, operation: result.syncOperation || null })), [])
 
   const version = query?.version || null
@@ -134,7 +134,7 @@ export default function SpecView({ param, query }) {
         {/* the prose pane's selection layer ([[prose-dispatch]]) — pure z-layers over the reading column,
             so the document's own geometry is exactly what it was without it. Its line addressing is the
             prose's, so the change face carries none. */}
-        {!changeFace && !targetTree && <ProseActions node={node} hostRef={proseRef} syncEnabled={syncEnabled} onSaved={specSaved} openSend={query?.send === '1'} />}
+        {!changeFace && !targetTree && <ProseActions node={node} hostRef={proseRef} syncEnabled={syncPolicy?.enabled ?? null} syncActivation={syncPolicy?.activation ?? null} syncError={syncPolicy?.error ?? null} onSaved={specSaved} openSend={query?.send === '1'} />}
       </div>
     </div>
   )

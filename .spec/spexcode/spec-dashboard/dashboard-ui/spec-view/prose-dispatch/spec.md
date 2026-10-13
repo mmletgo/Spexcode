@@ -119,3 +119,5 @@ pointer instead of at the passage — one component with two anchors rather than
 the bar it mirrors.
 
 手工保存每次用户payload生成稳定幂等key，失败重试同payload沿用，新payload换key；等待中拒绝重复触发。项目同步启用时提示保存进入同步操作，新syncOperation回执只提示已接入同步并通知当前文档刷新面板，不冒称来源已commit；旧纯Spec回执保留真实commit反馈。交付树仍不挂载编辑动作。
+
+同步 activation=invalidated 不是普通Spec模式：手工编辑入口和已打开编辑器的保存按钮禁用，并显示真实configurationError。只有disabled才展示原Spec-only提交说明；配置状态尚未知时使用中性说明，服务仍负责最终授权。

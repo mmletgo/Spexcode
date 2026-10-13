@@ -22,3 +22,5 @@ related:
 来源、输入、授权范围、读集摘要、候选实际文件差量、验证、阶段/GAP及失败证据可展开。摘要不冒称真实完整读集。证据按需请求被操作授权的引用与 resultRef，不展示整段代理 prompt。阶段变化不自动展开证据，不改变用户焦点。P1业务契约面板保持原实现。
 
 完整代码/测试review复用 [[sync-operation-diff]]，Spec历史diff深链接只有已结算落地文件确实包含该节点path时才开放，避免把非该节点历史的commit误作Spec版本。
+
+activation=invalidated 表示既有同步配置/来源绑定失效，明确展示configurationError，不能画成用户主动关闭的普通Spec模式；有当前有效配置时可显式重新启用该版本。

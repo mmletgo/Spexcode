@@ -107,8 +107,8 @@ export default function SyncOperationPanel({ nodeId, nodePath, targetTree = null
   const currentError = error?.identity === identity ? error : null
   const recent = current?.operations[0]
   const detail = submittedOperation && (!recent || submittedOperation.createdAtMs > recent.operation.createdAtMs) ? { operation: submittedOperation, attempt: null, journals: [], stale: false, sourceSynced: false, executionAvailability: { status: 'ready' } } : recent || null
-  const model = detail && syncProjection(detail)
   const settings = current?.settings
+  const model = detail && syncProjection(detail, settings?.activation)
   const perform = async (action) => {
     if (busyRef.current) return
     busyRef.current = true; setBusy(action); setError(null)
@@ -126,7 +126,7 @@ export default function SyncOperationPanel({ nodeId, nodePath, targetTree = null
     } catch (failure) { setError({ identity, kind: 'action', code: failure.code || 'network-error', message: failure.message }) }
     finally { busyRef.current = false; setBusy(null) }
   }
-  const state = currentError ? 'read_error' : model?.state || (settings?.enabled ? 'idle' : 'disabled')
+  const state = currentError ? 'read_error' : model?.state || (settings?.activation === 'invalidated' ? 'invalidated' : settings?.enabled ? 'idle' : 'disabled')
   return <section className="sync-operation" aria-label={t('syncOperation.title')} data-sync-state={currentError ? 'read_error' : state}>
     <div className="sync-op-head">
       <h2>{t('syncOperation.title')}</h2>

@@ -154,3 +154,11 @@ test('candidate and delivered code/test diffs preserve scope and show oversized-
     assert.equal(requests.length, 2)
   } finally { globalThis.fetch = originalFetch }
 })
+
+
+test('an invalidated activation cannot reuse an old settled receipt as current synchronization', () => {
+  const view = syncProjection(detail, 'invalidated')
+  assert.equal(view.complete, false)
+  assert.equal(view.state, 'invalidated')
+  assert.equal(view.deliveryRoot, '/repo/published')
+})
