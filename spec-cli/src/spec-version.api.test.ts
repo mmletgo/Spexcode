@@ -162,6 +162,7 @@ test('/api/specs/:id/version and /diff answer only for the node\'s own versions,
     assert.equal((await post(`/api/sync/settings?targetTree=${encodeURIComponent(project)}`, { targetTree: delivery })).status, 400)
     assert.equal((await fetch(`${base}/api/sync/status?limit=0`)).status, 400)
     assert.equal((await fetch(`${base}/api/sync/operations/unknown`)).status, 404)
+    assert.equal((await post('/api/sync/operations/unknown/recover', {})).status, 404)
     assert.equal((await post('/api/sync/run', {})).status, 400)
     assert.equal((await post('/api/sync/settings', {})).status, 409)
     const patch = { startLine: 1, endLine: 1, original: '# alpha', replacement: '# alpha' }

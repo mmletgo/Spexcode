@@ -131,7 +131,7 @@ app.post('/api/sync/run', async c => {
   if (typeof body.nodeId !== 'string' || typeof body.requestId !== 'string' || (body.origin !== undefined && body.origin !== 'spec' && body.origin !== 'initial') || (body.retryOf !== undefined && (typeof body.retryOf !== 'string' || !body.retryOf.trim()))) throw new SyncApplicationError('sync_request_invalid', '需要 nodeId、requestId、支持的输入来源及有效的 retryOf（若提供）', 400)
   return c.json(await application.submit({ nodeId: body.nodeId, requestId: body.requestId, origin: body.origin, ...(body.retryOf === undefined ? {} : { retryOf: body.retryOf as string }), ...(body.patch === undefined ? {} : { patch: readSpecBodyEdit(body.patch) }) }))
 })
-for (const action of ['pause', 'resume', 'cancel'] as const) app.post(`/api/sync/operations/:id/${action}`, async c => {
+for (const action of ['pause', 'resume', 'cancel', 'recover'] as const) app.post(`/api/sync/operations/:id/${action}`, async c => {
   const body = await syncRequestBody(c.req)
   return c.json(await (await syncApplication(c.req.query('targetTree'), body.targetTree)).control(c.req.param('id'), action))
 })

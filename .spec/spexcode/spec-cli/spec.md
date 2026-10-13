@@ -128,7 +128,7 @@ Evidence bytes ride `/api/evidence` (`POST` = content-addressed put,
 
 只读 Spec 列表、正文、历史版本、源码目录和附件端点接受 targetTree，复用 [[sync-contract-report]] 的已注册同仓库工作树门禁。各读取函数必须使用同一个显式 root，未注册目录返回 400，交付树新增节点可直接阅读实际正文。未携带 targetTree 时保持后台树默认。
 
-`/api/sync/settings`、`/status`、`/run`、`/operations/:id` 及其 pause/resume/cancel/evidence/diff 子路径共享 [[sync-application]]。CLI 与 Dashboard 不持有第二套调度状态。读写都解析显式 targetTree；query 与请求正文同时提供且不同则拒绝。控制和证据只能访问该输入树所属操作，证据摘要必须属于该操作引用链，文件差量遵循 [[sync-operation-file-diff]]。
+`/api/sync/settings`、`/status`、`/run`、`/operations/:id` 及其 pause/resume/cancel/recover/evidence/diff 子路径共享 [[sync-application]]。CLI 与 Dashboard 不持有第二套调度状态。读写都解析显式 targetTree；query 与请求正文同时提供且不同则拒绝。控制和证据只能访问该输入树所属操作，证据摘要必须属于该操作引用链，文件差量遵循 [[sync-operation-file-diff]]。recover 只结算已有资源和应用 journal，不能借恢复发起新生成、验证或无 journal 的交付。
 
 `/api/sync/run` 显式传递 retryOf 至同一应用服务；无效身份格式返回 400，未知操作返回 404，不能忽略字段后发起普通执行。是否允许新预算、旧请求继承及重复接入由 [[sync-application]] 与 [[sync-store]] 的原规则裁定。
 
