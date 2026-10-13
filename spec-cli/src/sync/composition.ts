@@ -49,7 +49,7 @@ export function composeInputSnapshots(newSource: InputSnapshot, prior?: Baseline
   objectGit(commonDir, ['update-ref', `refs/spex-sync/compositions/${tree}`, tree])
   return { composed: { sourceInputId: newSource.id, previousBaselinePairId: prior?.id ?? null, tree, manifestBlob, contentDigest }, conflicts }
 }
-function mergeText(commonDir: string, delivery: TreeEntry, base: TreeEntry, source: TreeEntry): Buffer | null {
+export function mergeText(commonDir: string, delivery: TreeEntry, base: TreeEntry, source: TreeEntry): Buffer | null {
   const buffers = [delivery, base, source].map(entry => readObject(commonDir, entry.oid))
   if (!buffers.every(isUtf8Text)) return null
   const temp = mkdtempSync(join(tmpdir(), 'spex-sync-merge-'))

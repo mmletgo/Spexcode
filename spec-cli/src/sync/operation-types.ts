@@ -50,7 +50,7 @@ export type SyncOperation = {
   dispatchMessageId: string; delivery: WorktreeIdentity | null; deliveryPlan: DeliveryPlan; createdAtMs: number; updatedAtMs: number
 }
 export type DeliveryPlan = { canonicalRoot: string; branch: string; baseCommit: string }
-export type ComposedInputRef = { sourceInputId: string; previousBaselinePairId: string | null; tree: string; manifestBlob: BlobRef; contentDigest: string }
+export type ComposedInputRef = { sourceInputId: string; previousBaselinePairId: string | null; tree: string; manifestBlob: BlobRef; contentDigest: string; requestBlob?: BlobRef }
 export type DispatchPlan = { key: string; purpose: string; requestDigest: string; sessionCreateKey: string; session: NativeSessionRef | null }
 export type NativeSessionRef = { sessionId: string; threadId: string | null; turnId: string | null }
 export type CandidateRef = { baseTree: string; sourceInputId: string; tree: string; digest: string; manifestBlob: BlobRef; actualDiffBlob: BlobRef; coveredScope: SyncScope }

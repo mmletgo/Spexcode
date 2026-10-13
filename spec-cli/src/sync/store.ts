@@ -195,9 +195,10 @@ export class SyncStore {
   }
   bindComposedInput(fence: WriteFence, composed: ComposedInputRef): SyncAttempt {
     this.blob(composed.manifestBlob)
+    if (composed.requestBlob) this.blob(composed.requestBlob)
     return this.write(tx => {
       const { operation, attempt } = this.checkFence(tx, fence)
-      if (composed.sourceInputId !== operation.input.id || composed.previousBaselinePairId !== (operation.previousBaselinePair?.id ?? null)) fail('SYNC_COMPOSITION_BINDING', 'composition must retain original source and baseline pair')
+      if (composed.sourceInputId !== operation.input.id || composed.previousBaselinePairId !== (operation.previousBaselinePair?.id ?? null) || (composed.requestBlob?.sha256 ?? null) !== (operation.requestBlob?.sha256 ?? null)) fail('SYNC_COMPOSITION_BINDING', 'composition must retain original source, baseline pair and controlled request')
       if (attempt.composedInput && digest(attempt.composedInput) !== digest(composed)) fail('SYNC_COMPOSITION_FROZEN', 'composed input cannot be replaced')
       attempt.composedInput = clone(composed); this.saveAttempt(tx, attempt); return attempt
     })

@@ -20,6 +20,8 @@ operation 保存不可变输入和 previousBaselinePair、generation/revision、
 
 受控编辑或裁决可提供 requestBlob 保存额外用户意图的不可变引用。input 仍表示实际采集的来源字节，不能为了接收 Dashboard 编辑而谎称 main 已改变或先单独提交 Spec；组合输入在已验证原文条件后叠加请求。纯文件观察事件无需 requestBlob。请求引用参与接入幂等摘要、恢复与证据保活。
 
+ComposedInputRef 可带 requestBlob，表示该组合 tree 已叠加同一不可变用户请求；原始 sourceInputId 不变，不能仅靠相同 source 快照混用两个用户编辑。
+
 journal 保存唯一 effect key、候选/验证/目标绑定、逐文件 pre/post 摘要与 mode、持久 plan blob 和步骤状态。receipt 保存实际 tree/commit、交付快照及证据。baseline 必须同次结算 sourceInput 与 verifiedDelivery，并保存真实 coveredScope；下一次输入由 priorDelivery 加 priorSource→newSource 差量形成，不能丢弃已交付 Agent 内容。部分交付保留根阻塞状态；发布后的交付树作为新来源时建立该物理树自己的成对基线。
 
 adopter control envelope 仅派发协调身份，不作为普通 Agent 文本。共享类型不执行 SQLite、文件或 Git 副作用，调用方必须通过动作门禁修改记录。
