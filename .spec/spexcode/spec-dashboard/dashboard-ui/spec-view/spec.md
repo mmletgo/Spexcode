@@ -6,6 +6,7 @@ desc: A spec node read as a full-width prose document, with governed files and a
 code:
   - spec-dashboard/src/SpecView.jsx
 related:
+  - spec-dashboard/src/SyncContractPanel.jsx
   - spec-dashboard/src/NodeView.jsx
   - spec-dashboard/src/NodeDiagram.jsx
   - spec-dashboard/src/SourceView.jsx
@@ -15,6 +16,13 @@ related:
   - spec-dashboard/test/spec-history-dock.e2e.mjs
 ---
 # spec-view
+
+Current sync-v1 documents append the read-only [[sync-contract-panel]] after their prose. The report reads
+the same backend worktree as the current document and prints its canonical targetTree. Legacy documents,
+published graph documents, historical versions and pending-change faces do not show an empty contract pane.
+Contract node scope is selectable; declaration/binding/missing coverage, REQ/FLOW/STEP, the complete state-event
+matrix, AC bindings, sources, dependency-blocking GAPs and parser/validator findings remain inspectable.
+verification: not_run is always visible and never presented as passing tests or completed synchronization.
 
 A spec node opened as a **resident detail** at `#/spec/<id>`: its prose is the whole document surface, while
 the workspace identity remains the top-level `#/spec` tab. Governed files and node

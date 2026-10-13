@@ -1,4 +1,17 @@
 export default {
+  syncContract: {
+    title: 'Business contracts and gaps',
+    readOnly: 'Read-only projection: declarations and structural bindings do not prove passing tests or completed synchronization. Verification has not run.',
+    targetTree: 'Worktree read', scope: 'Contract node', allNodes: 'All contract nodes',
+    readFailed: 'Contract read failed: {error}', retry: 'Retry read',
+    declared: 'Declared', bound: 'Bound', missing: 'Missing disposition',
+    coverage: 'Structural bindings {bound}/{total} items; missing state-event dispositions {missing}/{cells} cells.',
+    matrix: 'State × event disposition matrix', gaps: 'GAPs and dependency impact', findings: 'Syntax and structural findings',
+    noFindings: 'No structural findings. Verification has not run.',
+    object: 'Object', state: 'State', event: 'Event', disposition: 'Disposition', status: 'Structural status',
+    acceptanceIds: 'AC bindings', code: 'Code bindings', tests: 'Test bindings', verifyIds: 'VERIFY bindings', blockedBy: 'Blocked by GAP',
+    evidence: 'Evidence', decision: 'Pending decision', affectedIds: 'Affected contracts (including dependents)', nodeIds: 'Affected nodes',
+  },
   common: {
     new: 'new',
     none: 'none',

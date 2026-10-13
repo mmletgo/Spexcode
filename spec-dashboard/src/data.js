@@ -220,6 +220,17 @@ export async function apiFetch(input, init) {
   }
 }
 
+// [[sync-contract-panel]] reads declarations and bindings; no authored VERIFY command is executed.
+export async function fetchSyncContractReport(targetTree = null) {
+  const query = targetTree ? `?${new URLSearchParams({ targetTree })}` : ''
+  const response = await apiFetch(`/api/sync/contracts${query}`)
+  if (!response.ok) {
+    const message = await response.text()
+    throw new Error(`${response.status} ${response.statusText}: ${message}`)
+  }
+  return response.json()
+}
+
 // conditional graph fetch ([[dashboard-shell]]): remember the last ETag and send If-None-Match, so the
 // always-on fallback poll costs headers only while nothing changed — the server answers a bodyless 304 and
 // we return null ("unchanged", the caller skips its repaint). cache:'no-store' keeps the browser HTTP cache
