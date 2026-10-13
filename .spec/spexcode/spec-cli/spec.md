@@ -130,4 +130,6 @@ Evidence bytes ride `/api/evidence` (`POST` = content-addressed put,
 
 `/api/sync/settings`、`/status`、`/run`、`/operations/:id` 及其 pause/resume/cancel/evidence/diff 子路径共享 [[sync-application]]。CLI 与 Dashboard 不持有第二套调度状态。读写都解析显式 targetTree；query 与请求正文同时提供且不同则拒绝。控制和证据只能访问该输入树所属操作，证据摘要必须属于该操作引用链，文件差量遵循 [[sync-operation-file-diff]]。
 
+`/api/sync/run` 显式传递 retryOf 至同一应用服务；无效身份格式返回 400，未知操作返回 404，不能忽略字段后发起普通执行。是否允许新预算、旧请求继承及重复接入由 [[sync-application]] 与 [[sync-store]] 的原规则裁定。
+
 正文保存先读取目标树的同步设置。已启用时要求稳定 idempotency-key，把用户 patch 作为不可变请求送入同一操作，返回 commit:null 和 syncOperation；不先单独提交 Spec。未启用且没有显式 targetTree 时保留 [[spec-body-edit]] 原有提交语义；显式树未启用则拒绝，不能静默写到后台树。应用错误保留具体 code/message 和正确 HTTP 状态，监听失联、未落盘或读取失败不能包装成成功。
