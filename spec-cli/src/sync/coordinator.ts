@@ -1,3 +1,4 @@
+import { setImmediate as yieldToControl } from 'node:timers/promises'
 import { existsSync, lstatSync, mkdirSync, realpathSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import type { ContractFinding } from '@spexcode/spec-core/contracts'
@@ -189,7 +190,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
   let fence: WriteFence | undefined, timer: ReturnType<typeof setInterval> | undefined, repairContext: { previousOutput: unknown; diagnostics: { code: string; message: string }[] } | undefined, seed: ElaborationRepairSeed | undefined, heartbeatFailure: SyncFailure | undefined
   const controller = new AbortController()
   const signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal
-  const leaseMs = options.leaseMs ?? 30_000, heartbeatMs = options.heartbeatMs ?? Math.min(5_000, Math.floor(leaseMs / 3))
+  const leaseMs = options.leaseMs ?? 120_000, heartbeatMs = options.heartbeatMs ?? Math.min(5_000, Math.floor(leaseMs / 3))
   if (!Number.isSafeInteger(leaseMs) || leaseMs < 3 || !Number.isSafeInteger(heartbeatMs) || heartbeatMs <= 0 || heartbeatMs >= leaseMs) { mutex.release(); fail('lease_configuration', 'heartbeat必须是正整数且小于leaseMs') }
   const receipt = (): ApplyReceipt | undefined => store.listJournals(operationId).find(journal => journal.status === 'settled')?.receipt ?? undefined
   const current = (status?: SyncCoordinatorResult['status'], failure?: SyncFailure): SyncCoordinatorResult => { operation = store.readOperation(operationId); return { status: status ?? operation.phase, operation, ...(receipt() ? { receipt: receipt() } : {}), ...(failure ? { failure } : {}) } }
@@ -301,6 +302,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         }
       }
       if (!elaboration) {
+        store.renewLease(fence, leaseMs); await yieldToControl(); store.renewLease(fence, leaseMs)
         if (operation.phase === 'analyzing') store.startElaboration(fence)
         const intent = view.frozen.nodes.find(node => node.id === options.plan.intentNodeId)
         const rawSource = options.plan.targets.find(target => target.nodeId === options.plan.intentNodeId)?.rawSource ?? intent?.rawSource
@@ -343,6 +345,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       }
       let generated = stage<SavedGeneration>(store, operation, store.readAttempt(attempt.id), 'generation')
       if (!generated) {
+        store.renewLease(fence, leaseMs); await yieldToControl(); store.renewLease(fence, leaseMs)
         if (attempt.candidate) fail('candidate_stage_missing', '已有冻结候选没有完整独立生成证据，不能覆盖或重新生成')
         store.startGeneration(fence, { readyScope: ready, blockedScope: blocked, blockedReason })
         const allowedGap = new Set([...elaboration.blockedStructureFindings, ...elaboration.rounds.flatMap(round => round.findings.filter(issue => ['unresolved-gap', 'unresolved-conflict'].includes(issue.code) && issue.itemId && accepted.graph.items.get(issue.itemId)?.kind === 'GAP'))].map(findingKey))
