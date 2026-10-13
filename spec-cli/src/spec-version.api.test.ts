@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
-import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import net from 'node:net'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -153,6 +153,40 @@ test('/api/specs/:id/version and /diff answer only for the node\'s own versions,
       assert.equal((await fetch(`${base}/api/specs/alpha/${route}/HEAD`)).status, 404, `a ref expression is not a version (${route})`)
       assert.equal((await fetch(`${base}/api/specs/nope/${route}/${v1}`)).status, 404, `an unknown node has no versions (${route})`)
     }
+
+    // Same registered-tree boundary serves CLI and Dashboard controls; disabled scopes cannot mutate.
+    const post = (path: string, value: unknown, headers: Record<string, string> = {}) => fetch(`${base}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(value) })
+    const settings = await (await fetch(`${base}/api/sync/settings`)).json()
+    assert.equal(settings.enabled, false)
+    assert.equal((await fetch(scoped('/api/sync/settings', fixture))).status, 400)
+    assert.equal((await post(`/api/sync/settings?targetTree=${encodeURIComponent(project)}`, { targetTree: delivery })).status, 400)
+    assert.equal((await fetch(`${base}/api/sync/status?limit=0`)).status, 400)
+    assert.equal((await fetch(`${base}/api/sync/operations/unknown`)).status, 404)
+    assert.equal((await post('/api/sync/run', {})).status, 400)
+    assert.equal((await post('/api/sync/settings', {})).status, 409)
+    const patch = { startLine: 1, endLine: 1, original: '# alpha', replacement: '# alpha' }
+    assert.equal((await post('/api/specs/alpha/body', patch)).status, 200, 'ordinary no-op remains available before activation')
+    const configPath = join(project, '.spec/spexcode.json'), config = JSON.parse(readFileSync(configPath, 'utf8'))
+    const sync = {
+      version: 'sync-settings-v1', sourcePaths: ['src'], testPaths: ['test'], readPaths: ['package.json'], facts: [], mandatoryTests: [],
+      budget: { maxAttempts: 2, maxCalls: 6, maxRepairs: 1, timeoutMs: 60000 },
+      verifications: [{ definition: { id: 'VERIFY-HTTP-01', command: ['node', '--test', 'test/one.test.mjs'], cwd: '.', timeoutMs: 10000 }, environment: { version: 'docker-node-v1', image: `node@sha256:${'a'.repeat(64)}`, platform: 'linux/arm64', memoryBytes: 268435456, cpus: 1, pidsLimit: 64, scratchBytes: 16777216, logBytes: 1048576 } }],
+    }
+    writeFileSync(configPath, JSON.stringify({ ...config, sync }))
+    const beforeEnable = readFileSync(join(project, '.git/index'))
+    assert.equal((await post('/api/sync/settings', {})).status, 200)
+    const enabled = await (await fetch(`${base}/api/sync/settings`)).json(); assert.equal(enabled.enabled, true)
+    assert.equal((await post('/api/specs/alpha/body', patch)).status, 400, 'enabled save requires stable request identity')
+    const noOp = await post('/api/specs/alpha/body', patch, { 'idempotency-key': 'http-noop' })
+    assert.equal(noOp.status, 200); assert.deepEqual(await noOp.json(), { ok: true, changed: false, commit: null, syncOperation: null })
+    assert.equal((await (await fetch(`${base}/api/sync/status`)).json()).operations.length, 0)
+    assert.equal(git(project, 'rev-parse', 'HEAD'), beforeHead)
+    assert.deepEqual(readFileSync(join(project, '.git/index')), beforeEnable)
+    writeFileSync(configPath, '{broken')
+    const refused = await post('/api/specs/alpha/body', { ...patch, replacement: '# changed' }, { 'idempotency-key': 'invalidated' })
+    assert.equal(refused.status, 409, 'invalidated synchronization must never fall back to a standalone prose commit')
+    assert.equal(git(project, 'rev-parse', 'HEAD'), beforeHead)
+    assert.deepEqual(readFileSync(join(project, '.git/index')), beforeEnable)
   } finally {
     if (backend?.pid) {
       try { process.kill(-backend.pid, 'SIGTERM') } catch { /* group already gone */ }

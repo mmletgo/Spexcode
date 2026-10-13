@@ -23,6 +23,8 @@ only that replacement.
 
 ## expanded spec
 
+以下即时提交保证适用于未启用同步的普通正文编辑。启用 [[sync-application]] 后，HTTP 入口只调用本模块只读 preparation，将 patch 与稳定请求标识交给完整同步操作；响应 commit:null，Spec、代码与测试经共同验证后在受管交付树落盘。原正文文件和 index 不会提前被单独修改。
+
 **Who this is for, and why it is not the dogfood ritual.** [[topology-eager]] rules that a node's body
 "carries the session's in-flight intent and is fine to sit as a worktree diff until reviewed and merged."
 That is the cadence for an AGENT's proposal — a proposal exists to be reviewed, so it waits for a review.
