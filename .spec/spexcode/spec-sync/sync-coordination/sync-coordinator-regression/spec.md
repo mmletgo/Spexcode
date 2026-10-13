@@ -21,3 +21,5 @@ code:
 V3失败后修复的模型若再次收到P1会返回弱化AC，因此测试必须证明不会再次派发P1、后续生成prompt使用精确相同accepted契约/AC内容摘要，callsUsed仅计两次代码调用不重置。数据库重启后失败attempt同样从原P1 evidence复用，不依赖内存状态。
 
 高层raw输入没有REQ/FLOW/AC，初始scope只含目录前缀；通过真实细化登记未来业务ID、生成此前absent的新源码模块及可信原意已登记的新治理节点，再经真实Docker/normal Git hooks交付。任意reader-app根通过真实CLI init，作者managed投影不入候选，source/index保持；用户入口无需填写未来实现文件或AC。
+
+第一次V4后、Git准备前人类再次编辑source，beforeApply复采仍拒绝且持久conflicted/input_changed，无业务journal/commit；不被private catch降成environment或FENCE_EXPIRED。

@@ -59,6 +59,19 @@ test('真实Git完整落盘和receipt，source/index保留，重入无重复提�
   assert.deepEqual(replay.receipt, delivered.receipt); assert.equal(f.git('rev-list', '--count', f.operation.deliveryPlan.branch), '2')
 })
 
+test('V4 guard already recorded typed conflict is preserved before journal, without a second stale-fence failure', { timeout: 30000 }, async t => {
+  const f = await fixture(t)
+  await assert.rejects(deliverVerifiedAttempt(f.store, f.fence, { ...f.options, beforeApply: () => {
+    f.store.recordFailure(f.fence, { code: 'input_changed', kind: 'conflict', message: 'V4实际input已变化', evidenceRefs: [writeEvidence(f.input.source.commonDir, { expected: f.input.id, actual: 'new-source' })] })
+    throw new Error('V4 typed conflict after actual prepared Git')
+  } }), /V4 typed conflict/)
+  assert.equal(f.store.readOperation(f.operation.id).phase, 'conflicted')
+  assert.equal(f.store.readAttempt(f.fence.attemptId).failure?.code, 'input_changed')
+  assert.equal(f.store.listJournals(f.operation.id).length, 0)
+  assert.equal(readFileSync(join(f.operation.deliveryPlan.canonicalRoot, 'a.txt'), 'utf8'), 'base-a\n')
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
+})
+
 test('commit已发生而receipt未写时恢复真实HEAD，不重复作者提交', { timeout: 30000 }, async t => {
   const f = await fixture(t)
   await assert.rejects(deliverVerifiedAttempt(f.store, f.fence, { ...f.options, afterCommit: () => { throw new Error('after commit crash') } }), /after commit crash/)

@@ -186,7 +186,7 @@ export async function deliverVerifiedAttempt(store: SyncStore, fence: WriteFence
     return { operation: settled, receipt }
   } catch (error) {
     const current = store.readAttempt(attempt.id)
-    if (current.status !== 'settled') {
+    if (!['settled', 'failed', 'superseded'].includes(current.status) && (current.status === 'applying' || current.expiresAtMs > Date.now())) {
       const evidence = writeEvidence(commonDir, { version: 1, kind: 'private-delivery-failure', operationId: operation.id, attemptId: attempt.id, journalId: journal?.id ?? null, message: error instanceof Error ? error.message : String(error) })
       store.recordFailure(fence, { code: error instanceof PrivateDeliveryError ? error.code : 'SYNC_DELIVERY_IO', kind: error instanceof PrivateDeliveryError && error.code.includes('UNSUPPORTED') ? 'unsupported' : 'environment', message: error instanceof Error ? error.message : String(error), evidenceRefs: [evidence] })
     }

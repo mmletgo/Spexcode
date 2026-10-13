@@ -31,3 +31,5 @@ receipt 使用真实最终 InputSnapshot，要求 tree/manifest 完全等于冻�
 候选 tree 与既有 parent tree 完全相同则登记明确 unchanged intent，复用实际 parent commit，不制造空提交；验证与receipt仍不可省略。publish 的 prepared 已成功后 Git 后续 AUTO_MERGE 清理可返回非零，即使退出128也必须先核实际结果；只有 tree、单parent、分支及 effectKey 都匹配才补结算。
 
 Git worktree 准备与提交各自持久保存带种类的真实退出码、signal、stdout/stderr 与启动错误，错误路径也可在 attempt 检查点追溯。准备失败的诊断不能只剩笼统 PREPARE_FAILED；不把非零退出解释为已撤销实际目录/ref。
+
+beforeApply的可信V4 guard可先通过store登记typed冲突/预算结果再抛原错误；catch遇attempt已failed/superseded/settled时保留该持久结论，不用失权fence再登记environment而遮蔽原因。非applying的过期attempt也不取得新失败写权；已applying的真实副作用仍走既有恢复结算。

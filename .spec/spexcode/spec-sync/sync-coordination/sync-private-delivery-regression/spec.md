@@ -19,3 +19,5 @@ code:
 交付故障夹具的受控 CLI 仍只替代业务 lint 前置；canonical hooks 的 footprint 校验使用实际编译模块，避免新门禁在测试中被替代。完整发布工具的行为另由 [[sync-trusted-hooks-product]] 验证。
 
 受控 prepare 失败保留真实 stderr 检查点，提交结果按独立种类读取，避免将成功准备的退出码误认成最终提交结果。
+
+先复现V4 callback已recordFailure(conflict)后catch二次使用旧fence，原错误被FENCE_EXPIRED遮蔽；修复证明真实Git已准备但无业务journal，保留原typed input_changed/conflicted及原错误，私有文件仍base、source/index未改。

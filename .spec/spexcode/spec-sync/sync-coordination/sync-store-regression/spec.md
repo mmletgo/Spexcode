@@ -48,4 +48,6 @@ attempt查询仅返回精确operation、包含历史及终态attempt并按插入
 
 先真实SQLite复现旧queued被supersede但FIFO残留阻新claim；修复证明controlled/terminal旧头及当前claim同tx消费。有效独立queued保持原FIFO，错误expectedMessageId导致全部回滚，readonly nextDispatch不改变queue且返回真实envelope/op绑定。
 
+已消费paused身份resume时，另一有效pending仍在则等待并不创建attempt；pending被正常claim后才恢复已dequeued操作。执行最相关session-protocol adopter-seams回归验证tx.query只读与tx.dequeue原子边界。
+
 真实部分 receipt 结算到 needs_input 后，新尝试只领取原 ready 范围；不同细化 evidence 扩展完整旧/新 ID 集合时，已有 blocked contract/flow ID 仍只在 blockedScope，新 ID 可进入 ready，不能因重新登记旧 ID 造成业务分区重叠。

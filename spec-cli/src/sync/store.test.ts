@@ -244,9 +244,13 @@ test('claim skips stopped FIFO heads in the same transaction while preserving ev
     f.store.claimAttempt({ operationId: before.id, source: before.input.source, scope: before.scope, leaseMs: 1000, expectedMessageId: before.dispatchMessageId })
     assert.equal(f.store.nextDispatch()!.operation.id, after.id)
     f.store.requestControl(stopped.id, 'run')
+    assert.throws(() => f.store.claimAttempt({ operationId: stopped.id, source: stopped.input.source, scope: stopped.scope, leaseMs: 1000, expectedMessageId: stopped.dispatchMessageId }), /SYNC_DISPATCH_WAITING/)
+    assert.equal(f.store.readOperation(stopped.id).currentAttemptId, null)
+    assert.equal(f.store.nextDispatch()!.operation.id, after.id)
+    f.store.claimAttempt({ operationId: after.id, source: after.input.source, scope: after.scope, leaseMs: 1000, expectedMessageId: after.dispatchMessageId })
     const resumed = f.store.claimAttempt({ operationId: stopped.id, source: stopped.input.source, scope: stopped.scope, leaseMs: 1000, expectedMessageId: stopped.dispatchMessageId })
     assert.equal(resumed.attempt.number, 1)
-    assert.equal(f.store.nextDispatch()!.operation.id, after.id)
+    assert.equal(f.store.nextDispatch(), null)
   } finally { f.cleanup() }
 })
 

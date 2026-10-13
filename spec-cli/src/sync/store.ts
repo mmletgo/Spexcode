@@ -204,6 +204,13 @@ export class SyncStore {
             head = this.dispatchHead(tx)
           }
           tx.dequeue(SYNC_COORDINATOR_ADDRESS, input.expectedMessageId)
+        } else {
+          let head = this.dispatchHead(tx)
+          while (head && (head.operation.control !== 'run' || TERMINAL.has(head.operation.phase))) {
+            tx.dequeue(SYNC_COORDINATOR_ADDRESS, head.messageId)
+            head = this.dispatchHead(tx)
+          }
+          if (head) fail('SYNC_DISPATCH_WAITING', 'valid pending FIFO dispatch must run before a dequeued operation resumes')
         }
       }
       operation.currentAttemptId = id; operation.phase = 'analyzing'; operation.readyScope = canonicalScope(input.scope); this.saveOperation(tx, operation)

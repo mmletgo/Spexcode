@@ -206,6 +206,17 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
     if (now.control !== 'run' || now.currentAttemptId !== attempt.id || attempt.expiresAtMs <= Date.now() || now.deadlineAtMs <= Date.now() || signal.aborted) fail('controlled', '交付门禁已停止或过期')
     return writeEvidence(operation.input.source.commonDir, { version: 1, layer: 'V4', inputId: snapshot.id, source: snapshot.source, policyDigest: now.policyDigest, readSetDigest: view.readSetDigest, checkedAtMs: Date.now() })
   }
+  const beforeApply = async (): Promise<void> => {
+    try { await v4() }
+    catch (error) {
+      const currentOperation = store.readOperation(operationId), attempt = store.readAttempt(fence!.attemptId)
+      if (currentOperation.control === 'run' && currentOperation.currentAttemptId === attempt.id && attempt.status === 'verified' && attempt.expiresAtMs > Date.now()) {
+        if (currentOperation.deadlineAtMs <= Date.now()) store.recordBudgetExhaustion(operationId)
+        else if (error instanceof SyncCoordinatorError && ['input_changed', 'policy_changed', 'readset_changed'].includes(error.code)) store.recordFailure(fence!, failure(error.code, error.message, 'conflict', error.evidenceRefs))
+      }
+      throw error
+    }
+  }
   try {
     operation = store.readOperation(operationId)
     let attempt = operation.currentAttemptId ? store.readAttempt(operation.currentAttemptId) : null
@@ -215,7 +226,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         if (!await recoverResources(store, operation, options, true)) return current('recovery_required')
       } else {
         if (attempt.status === 'verified') timer = setInterval(() => { try { store.renewLease(fence!, leaseMs) } catch (error) { heartbeatFailure = failure('lease_heartbeat', error instanceof Error ? error.message : String(error), 'environment'); controller.abort() } }, heartbeatMs)
-        const delivered = await deliverVerifiedAttempt(store, fence, { managedRoot: options.managedRoot, tools: options.tools, beforeApply: async () => { await v4() }, ...options.deliveryHooks })
+        const delivered = await deliverVerifiedAttempt(store, fence, { managedRoot: options.managedRoot, tools: options.tools, beforeApply, ...options.deliveryHooks })
         return { status: delivered.operation.phase, ...delivered }
       }
     }
@@ -226,10 +237,11 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       if (head?.operation.id === operation.id && (operation.control !== 'run' || terminal.includes(operation.phase))) store.discardDispatch(operation.id, head.messageId)
       return current()
     }
-    if (['code', 'combined'].includes(operation.origin)) {
+    const specOrigin = ['spec', 'initial'].includes(operation.origin) || (['decision', 'reconcile'].includes(operation.origin) && operation.requestBlob)
+    if (!specOrigin) {
       const claimed = store.claimAttempt({ operationId, source: operation.input.source, scope: operation.scope, leaseMs, ...(operation.currentAttemptId ? {} : { expectedMessageId: operation.dispatchMessageId }) })
       fence = claimed.fence
-      const denied = failure('p3_origin_unsupported', 'code/combined行为分类在P3接入，不能强行按Spec覆盖', 'unsupported')
+      const denied = failure('p3_origin_unsupported', '来源必须为Spec/initial或真实受控Spec请求；其它行为分类尚未接入，不能强行覆盖', 'unsupported')
       store.recordFailure(fence, denied); return current('unsupported', denied)
     }
     for (;;) {
@@ -252,7 +264,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           fence = claimed.fence; attempt = claimed.attempt; operation = claimed.operation
         } catch (error) {
           if (error instanceof SyncStoreError && error.code === 'SYNC_BUDGET_EXHAUSTED') { store.recordBudgetExhaustion(operationId); return current() }
-          if ((error as { code?: string }).code === 'PROTOCOL_CURSOR_INVALID') return current('busy')
+          if (['PROTOCOL_CURSOR_INVALID', 'SYNC_DISPATCH_WAITING'].includes((error as { code?: string }).code ?? '')) return current('busy')
           throw error
         }
       } else fence = fenceFor(operation, attempt!)
@@ -402,7 +414,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       const bindings = { inputId: operation.input.id, candidateDigest: candidate.digest, policyDigest: operation.policyDigest, readSetDigest: operation.readSetDigest, environmentDigest: contentHash(canonical(runs.map(run => run.policy))), contextDigest: contentHash(canonical({ readSetDigest: view.readSetDigest, elaboration: p1Evidence, composed: view.composed })) }
       const result: VerificationResultBlob = { schemaVersion: 1, coveredScope: ready, ...bindings, layers: [{ layer: 'V1', verdict: 'pass', evidenceRefs: [v1Ref] }, { layer: 'V2', verdict: 'pass', evidenceRefs: [v2Ref] }, { layer: 'V3', verdict: 'pass', evidenceRefs: v3Refs }, { layer: 'V4', verdict: 'pass', evidenceRefs: [v4Ref] }] }
       store.recordVerification(fence, { ...bindings, passed: true, coveredScope: ready, evidenceRefs: [p1Evidence, v1Ref, v2Ref, ...v3Refs, v4Ref], resultBlob: writeEvidence(operation.input.source.commonDir, result) })
-      const delivered = await deliverVerifiedAttempt(store, fence, { managedRoot: options.managedRoot, tools: options.tools, beforeApply: async () => { await v4() }, ...options.deliveryHooks })
+      const delivered = await deliverVerifiedAttempt(store, fence, { managedRoot: options.managedRoot, tools: options.tools, beforeApply, ...options.deliveryHooks })
       return { status: delivered.operation.phase, ...delivered }
     }
   } catch (error) {

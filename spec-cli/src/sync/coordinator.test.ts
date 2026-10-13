@@ -325,3 +325,20 @@ test('高层raw无未来IDs，目录授权自动新增absent模块与治理叶�
   assert.equal(f.calls.length, 4); assert.equal(result.operation.planBlob!.sha256, result.operation.policyDigest)
   assert.ok(f.store.pinnedBlobRefs().some(ref => ref.sha256 === result.operation.policyDigest))
 })
+
+test('V4初次通过后准备期间再次编辑source，beforeApply保留typed冲突且未开始业务journal', docker, async t => {
+  const f = await fixture(t); await f.realTools()
+  let checks = 0
+  f.options.readCurrentPlan = () => {
+    checks++
+    if (checks === 1) writeFileSync(join(f.root, 'src/export.js'), `${f.bytes.toString()}\n// actual user edit after first V4 observation\n`)
+    return f.plan
+  }
+  const result = await runSyncOperation(f.store, f.operation.id, f.options)
+  assert.equal(result.status, 'conflicted', JSON.stringify(result.failure)); assert.equal(result.failure?.code, 'input_changed')
+  assert.equal(f.store.readAttempt(result.operation.currentAttemptId!).failure?.kind, 'conflict')
+  assert.equal(f.store.listJournals(f.operation.id).length, 0)
+  assert.ok(existsSync(join(result.operation.deliveryPlan.canonicalRoot, '.git')))
+  assert.ok(!readFileSync(join(result.operation.deliveryPlan.canonicalRoot, 'src/export.js'), 'utf8').includes('independently reviewed generated'))
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
+})
