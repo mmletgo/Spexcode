@@ -60,3 +60,6 @@ commits still receive Session attribution while commit-context suppresses its ow
 
 
 受控同步交付的 trusted-v1 模式保留上述身份 stamping，并将 commit-context 的 CLI 固定为候选目录外的完整已编译受信发布包。候选 bin 与 PATH 不参与该模式解析；固定工具缺失、失败或 exit75 阻断提交。普通模式的无 CLI 静默和 context advisory 不变。内部工具/版本绑定不来自 commit message 或公开请求，不能用作 session 身份推断。可信桥接同样要求内部明确 prepare/publish operation，缺失或未知值直接失败；该操作字段不改变 Session trailer 的来源或内容。
+
+
+strict hook 的固定 Git wrapper 必须附加 --no-replace-objects，并为可信工具 child 固定 GIT_NO_REPLACE_OBJECTS=1；身份基于原始对象，refs/replace 不参与受控 tree/parent 判断，普通模式保持。

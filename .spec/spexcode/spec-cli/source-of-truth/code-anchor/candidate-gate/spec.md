@@ -104,3 +104,6 @@ move the version, and an uncovered hook path or explicit bypass can still land f
 
 
 受控绑定必须显式区分 prepare/publish。prepare 的 tree 是已有 parent 的 base tree，只允许绑定分支 0→base 或 HEAD 初始化投影的 base→base 空更新、HEAD 的同 base 结构切换及限定 ORIG_HEAD/AUTO_MERGE 初始化清理；publish 的作者事务必须包含绑定分支 old=parent→实际单父/tree 匹配的新 commit，HEAD-only 作者提交始终拒绝。发布后 Git 的 null→null AUTO_MERGE 清理只能在当前符号 HEAD 指向绑定分支且已落入实际匹配 commit 时接受，不构成作者事务。操作失败不代表之前结构性 ref/HEAD 更新未发生，恢复调用者须读取真实 Git 身份。
+
+
+strict hook 的固定 Git wrapper 必须附加 --no-replace-objects，并为可信工具 child 固定 GIT_NO_REPLACE_OBJECTS=1；身份基于原始对象，refs/replace 不参与受控 tree/parent 判断，普通模式保持。

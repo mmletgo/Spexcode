@@ -47,7 +47,8 @@ if [ -n "${SPEXCODE_SYNC_HOOK_MODE:-}" ]; then
     exit 1 ;;
   esac
   spex_strict=1
-  git() { "$SPEXCODE_SYNC_GIT" "$@"; }
+  export GIT_NO_REPLACE_OBJECTS=1
+  git() { "$SPEXCODE_SYNC_GIT" --no-replace-objects "$@"; }
 fi
 msg_file="$1"
 if ! grep -qiE '^Session:[[:space:]]' "$msg_file" && [ -n "${SPEXCODE_SESSION_ID:-}" ]; then

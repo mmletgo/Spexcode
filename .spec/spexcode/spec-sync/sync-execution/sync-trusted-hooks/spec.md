@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+受控身份读取始终使用原始 Git 对象，不能通过 refs/replace 伪造 tree 或 parent。makeTrustedHookEnv 固定 GIT_NO_REPLACE_OBJECTS=1；preflight 和四个 strict hook 的 Git 调用同时强制 --no-replace-objects，不只依赖可变 child env。refs/replace 不改变 raw valid commit 的结论，普通 authoring 的 replace 语义保留。
+
 prepareTrustedHooksBinding(root, options) 是内部协调器只读 preflight；inspectTrustedHooksBinding(root, binding) 在实际操作前再次核对已登记绑定。输入不是 HTTP 参数，工具/runtime/canonical 模板位置由协调器内置受信发布位置提供，不能由模型候选选择。返回 supported binding 或 unsupported 的路径与原因；不安装、替换、删除或探测执行 custom hook，不创建 worktree、commit 或交付副作用。
 
 Node/Git 使用明确绝对 realpath 与文件摘要，默认 Node 为当前进程，Git 仅从固定系统位置查找，不读候选 PATH。工具入口必须为候选目录外已编译 dist/cli.js 或 cli.mjs，不启动源码 launcher，也不调用 npm build。当前构建是多模块；trustedRuntimeRoot 因此必须为候选外完整固定发布包，包含全部已编译模块、依赖和 canonical 模板。递归 manifest 绑定每个普通文件的 bytes/mode、目录 mode、内部 symlink target；外链和特殊文件 unsupported。完整 runtimeDigest、入口摘要与 Node/Git 摘要在四个 strict hook 每次工具调用前以固定 Node built-in 检查，不能替换 imported 模块后仍信入口 hash。发布包应由协调器准备为闭合固定 runtime；本模块不替调用者下载、构建或判断发布者身份。

@@ -214,3 +214,37 @@ test('post-checkout严格可信刷新失败不会抹去已完成的HEAD结构切
   assert.ok(readFileSync(f.log, 'utf8').includes('internal refresh-footprint'))
   assert.equal(existsSync(f.malicious), false)
 })
+
+for (const defect of ['tree', 'parent'] as const) {
+  test(`refs/replace不能伪造实际commit的${defect}，移除child环境保护仍由严格Git参数拒绝`, t => {
+    const f = fixture(t)
+    const baseTree = f.git('rev-parse', `${f.parent}^{tree}`)
+    const wrong = defect === 'tree' ? f.git('commit-tree', baseTree, '-p', f.parent, '-m', 'raw wrong tree') : f.git('commit-tree', f.tree, '-m', 'raw wrong parent')
+    const good = f.git('commit-tree', f.tree, '-p', f.parent, '-m', 'replacement good')
+    assert.notEqual(f.git('--no-replace-objects', 'show', '-s', defect === 'tree' ? '--format=%T' : '--format=%P', wrong), defect === 'tree' ? f.tree : f.parent)
+    f.git('replace', wrong, good)
+    assert.equal(prepareTrustedHooksBinding(f.root, f.options).status, 'supported')
+    assert.equal(f.git('show', '-s', '--format=%T', wrong), f.tree)
+    assert.equal(f.git('show', '-s', '--format=%P', wrong), f.parent)
+    const failed = spawnSync('/usr/bin/git', ['-C', f.root, 'update-ref', f.options.expectedRef, wrong, f.parent], { env: { ...f.controlled(), GIT_NO_REPLACE_OBJECTS: undefined }, encoding: 'utf8' })
+    assert.notEqual(failed.status, 0, `${failed.stdout}${failed.stderr}`)
+    assert.equal(f.git('rev-parse', f.options.expectedRef), f.parent)
+  })
+}
+
+test('prepare静态读取不信替代parent的tree；child环境固定禁止replace；raw valid不被坏替代降级', t => {
+  const f = fixture(t)
+  const changedParent = f.git('commit-tree', f.tree, '-m', 'replacement parent with wrong base tree')
+  f.git('replace', f.parent, changedParent)
+  assert.equal(prepareTrustedHooksBinding(f.root, { ...f.options, operation: 'prepare' }).status, 'unsupported')
+  assert.equal(makeTrustedHookEnv(f.binding, { GIT_NO_REPLACE_OBJECTS: '0' }).GIT_NO_REPLACE_OBJECTS, '1')
+  f.git('replace', '-d', f.parent)
+  const good = f.git('commit-tree', f.tree, '-p', f.parent, '-m', 'raw valid')
+  const wrong = f.git('commit-tree', f.git('rev-parse', `${f.parent}^{tree}`), '-m', 'replacement wrong tree and parent')
+  f.git('replace', good, wrong)
+  const committed = spawnSync('/usr/bin/git', ['-C', f.root, 'update-ref', f.options.expectedRef, good, f.parent], { env: { ...f.controlled(), GIT_NO_REPLACE_OBJECTS: undefined }, encoding: 'utf8' })
+  assert.equal(committed.status, 0, `${committed.stdout}${committed.stderr}`)
+  assert.equal(f.git('rev-parse', f.options.expectedRef), good)
+  assert.equal(f.git('--no-replace-objects', 'show', '-s', '--format=%T', good), f.tree)
+  assert.equal(f.git('--no-replace-objects', 'show', '-s', '--format=%P', good), f.parent)
+})
