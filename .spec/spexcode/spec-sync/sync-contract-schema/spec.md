@@ -2,7 +2,7 @@
 title: sync-v1 Markdown 契约语法
 status: pending
 hue: 175
-desc: 唯一可编辑业务契约的固定表格、稳定 ID、来源和可执行验收绑定；解析器与指南落地后启用。
+desc: 唯一可编辑业务契约的固定表格、稳定 ID、来源和可执行验收绑定；纯核心已分叶治理，整体产品验收仍待交付。
 ---
 # sync-v1 Markdown 契约语法
 
@@ -40,6 +40,8 @@ ID 使用 `类型-业务域-稳定后缀`（ASCII 大写字母、数字和连字
 表格接受 Markdown 转义竖线 `\|` 与单元格代码字面量；解析时先识别转义和代码范围，再分列。测试绑定指向真实可运行场景。结构检查能证明引用、归属与声明处置，不能证明自然语言条件互斥完备；独立审查和具体运行补足语义。
 
 完整参考输入位于 `spec-cli/test/fixtures/spec-sync/export-repo/`；其规则只属于夹具演示，不是用户项目默认政策。缺失分支与违背下载权限的变体用于拒绝虚假通过。产品节点本身仍 pending；纯解析与结构投影已落地，完整细化及运行证据由 [[sync-elaboration]] 和 [[sync-verification]] 继续交付。
+
+本节点唯一维护语法与业务约束；实现治理分属 [[sync-contract-types]]、[[sync-contract-parser]]、[[sync-contract-graph]]、[[sync-contract-validator]]、[[sync-contract-coverage]]、[[sync-contract-digest]]、[[sync-contract-api]]，针对性回归由 [[sync-contract-regression]] 治理。叶节点 active 只表示该技术边界已有实现及局部验证，不改变父节点 pending，也不表示运行证据或全产品交付完成。
 
 
 纯核心入口为 `@spexcode/spec-core/contracts`。`parseContract` 接受节点 ID、仓库相对 Spec 路径和源文本；未启用返回空契约，raw/REQ 草稿保留为可细化输入。默认完整性检查与草稿结构检查分离；重复 ID、悬空或类型错误引用、来源/推导依赖循环、归属错误、状态对象不一致、状态事件处置缺失、不可达状态及无出口非终态均阻断完成。业务状态循环与流程导航循环允许存在，只要流程有可达结束。
