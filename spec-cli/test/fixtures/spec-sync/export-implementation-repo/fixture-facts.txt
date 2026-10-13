@@ -13,5 +13,3 @@ submit 返回任务视图，字段至少有 id:string、owner:string、category:
 view、download、cancel、retry 只有 owner 可调用，不论任务处于哪种状态，非 owner 均拒绝。download 仅 SUCCEEDED 返回保存的实际记录复制；QUEUED、RUNNING、FAILED、CANCELLED 均拒绝。cancel 在 QUEUED 或 RUNNING 进入 CANCELLED，rows 和 error 保持 null；已终态的 cancel 是幂等无变化，SUCCEEDED 结果和 FAILED 错误保留。完成与取消、失败与完成、失败与取消的竞争按服务调用顺序由首次终态胜出，后续回调不能翻转它。
 
 retry 仅 FAILED 合法，保留同一 id、owner、category 和原提交快照，attempt 增加 1，变为 QUEUED，清空 error 和 rows，并排队本次尝试。QUEUED、RUNNING、SUCCEEDED、CANCELLED 上的 retry 拒绝；刚重试后再次 retry 拒绝，不能增加 attempt 或重复排队。重试之前的 FAILED 视图仍保留错误；新的尝试不复用上次错误。旧尝试的 start/complete/fail 都不得影响新 QUEUED/RUNNING 状态。
-
-生成器必须新增 tests/export.generated.test.mjs，使用 node:test 和 node:assert/strict，以非平凡业务断言覆盖这些政策；每个测试标题以稳定无空格 ID 开头，所有 AC.test 只绑定该 generated 文件的真实标题。不得复制或调用 trusted-oracle，也不得修改本 facts、原 raw source、AGENTS、package 或 oracle。唯一可信验证登记为 VERIFY-EXPORT-01，command 为 ["node","--test","tests/export.generated.test.mjs","trusted-oracle/export.oracle.test.mjs"]，cwd 为 "."，timeoutMs 为 30000。细化阶段可以先声明待实现测试映射，不虚构尚不存在的 code 治理锚点；生成阶段补真实实现锚点和完整测试。

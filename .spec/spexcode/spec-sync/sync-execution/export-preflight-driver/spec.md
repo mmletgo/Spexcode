@@ -19,6 +19,10 @@ driver 将白名单 UTF-8 夹具复制到独立真实 Git 仓库，capture 原�
 
 在创建输入与任何 native 派发前，直接引用生产 ELABORATION_SCHEMA 的 VERIFY.id 与 AC.command 子 schema 校验可信登记 ID，固定登记为 VERIFY-EXPORT-01。不能把夹具自己不合法的技术 ID 与硬 schema 冲突归为用户业务 GAP；修正此类输入必须形成新的事实、冻结摘要及独立审查证据，不修改旧模型输出冒充合格。
 
+细化 facts 仅包含完整业务/API政策，files 仅传冻结业务 Spec 文本；AGENTS、package 脚本和 oracle 作者指令不作为业务输入。可信验证定义通过独立 verifications 字段传入，输出程序核对。生成阶段仍提供完整冻结 UTF-8 文件和 oracle 断言；driver 固定生成技术说明的 SHA 进入 GenerationInput.policy，并明确附在 code_generate/code_review 的只读桥请求中作为技术政策，artifact 同时记录该 SHA，不移入业务 facts。不允许实现阶段新增 REQ/RULE/AC 将作者职责变为业务承诺；真实模型输出始终原样保存。
+
+每个新冻结输入最多2次细化修复、6次细化调用、每次900秒、细化总3600秒；生成/独立审查使用各900秒的两次生产调用，Docker固定30秒。不无限重启相同输入，unsupported无平台重试。此前失败证据保留，新事实/执行根base/key/digest独立记录。
+
 输入、输出、派发、原生身份、候选 manifest/actual diff、Docker 政策/检查点/结果保存指定用户可视化目录的 p2-export-preflight 独立 run 子目录；不复制认证、runtime 或 home。结束复核源 snapshot/index 未改；不 apply、commit 候选、发布 refs 到用户分支、结算 receipt 或标 synced。仅 library-preflight:passed 可代表这一限定预验，最终完整 P2 仍需真实产品协调与交付入口验收。
 
 运行：`npx tsx spec-cli/test/p2-export-preflight.ts <用户可视化目录>/p2-export-preflight`；针对类型：`npm run typecheck`；lint：`npx eslint spec-cli/test/p2-export-preflight*.ts spec-cli/test/fixtures/spec-sync/export-implementation-repo/trusted-oracle/*.mjs`。

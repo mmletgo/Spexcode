@@ -5,7 +5,7 @@ import { cpSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { assertVerificationRegistrationId, FIXTURE_FILES, ORACLE_IDS, VERIFICATION, WRITE_PATHS } from './p2-export-preflight.js'
+import { assertVerificationRegistrationId, FIXTURE_FILES, GENERATION_POLICY, ORACLE_IDS, VERIFICATION, WRITE_PATHS } from './p2-export-preflight.js'
 import { captureInputSnapshot, contentHash } from '../src/sync/snapshot.js'
 import { freezeCandidate } from '../src/sync/candidate.js'
 
@@ -15,11 +15,16 @@ test('派发前直接复用生产 schema 拒绝不可满足的两段验证登记
   assert.throws(() => assertVerificationRegistrationId('AC-EXPORT-01'), /生产 VERIFY ID/)
   assert.doesNotThrow(() => assertVerificationRegistrationId(VERIFICATION.id))
   assert.equal(VERIFICATION.id, 'VERIFY-EXPORT-01')
-  for (const path of ['AGENTS.md', 'fixture-facts.txt']) {
+  for (const path of ['AGENTS.md']) {
     const text = readFileSync(join(fixture, path), 'utf8')
     assert.ok(text.includes(VERIFICATION.id))
     assert.doesNotMatch(text, /VERIFY-EXPORT(?!-01)/)
   }
+  const businessFacts = readFileSync(join(fixture, 'fixture-facts.txt'), 'utf8')
+  assert.doesNotMatch(businessFacts, /VERIFY-|trusted-oracle|generated\.test|生成器必须/)
+  assert.match(businessFacts, /原提交快照/)
+  assert.match(GENERATION_POLICY, /不写成业务 REQ\/RULE\/AC\/GAP/)
+  assert.match(GENERATION_POLICY, /不得复制、import 或调用 trusted-oracle/)
 })
 test('自然语言输入不预填契约或业务实现，可信验证包含独立 oracle', () => {
   for (const path of ['.spec/export/spec.md', '.spec/export/export-contract/spec.md']) {

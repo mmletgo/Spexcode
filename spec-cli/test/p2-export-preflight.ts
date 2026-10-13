@@ -23,6 +23,8 @@ export const FIXTURE_FILES = ['AGENTS.md', 'package.json', 'fixture-facts.txt', 
 export const WRITE_PATHS = ['.spec/export/export-contract/spec.md', 'src/export.js', 'tests/export.generated.test.mjs']
 export const ORACLE_IDS = ['ORACLE-ROWS', 'ORACLE-IDEMPOTENCY', 'ORACLE-INVALID', 'ORACLE-OWNER', 'ORACLE-CALLBACKS', 'ORACLE-ATTEMPTS', 'ORACLE-RACES', 'ORACLE-RETRY-STATE']
 export const VERIFICATION = { id: 'VERIFY-EXPORT-01', command: ['node', '--test', 'tests/export.generated.test.mjs', 'trusted-oracle/export.oracle.test.mjs'], cwd: '.', timeoutMs: 30_000 }
+export const GENERATION_POLICY = '以下仅为可信夹具作者的生成/验证技术政策，不是新增导出业务需求，不写成业务 REQ/RULE/AC/GAP：只可修改详细叶 Spec、src/export.js 与 tests/export.generated.test.mjs；原 raw、facts、AGENTS、package 和 oracle 不可改。必须新增自己的完整业务测试，使用 node:test/node:assert/strict、真实业务断言和稳定无空格标题ID；全部细化 AC.test 绑定 generated 文件真实标题。不得复制、import 或调用 trusted-oracle。独立可信执行器启动登记命令（包含 generated tests 和 oracle），汇总结果并检查完整 diff；generated 测试不启动该命令，不递归执行自身或 oracle，也不自证协调器的修改scope。登记不是用户业务事实未知，不能新增作者职责规则或验收。生成只补真实实现/测试/映射，保持全部已细化业务要求。'
+export const PREFLIGHT_BUDGET = { maxRepairs: 2, maxCalls: 6, timeoutMs: 900_000, totalTimeoutMs: 3_600_000 }
 const sourceDirectory = dirname(fileURLToPath(import.meta.url))
 const fixtureDirectory = join(sourceDirectory, 'fixtures/spec-sync/export-implementation-repo')
 const contractPath = '.spec/export/export-contract/spec.md'
@@ -58,12 +60,13 @@ export async function runExportPreflight(outputParent: string): Promise<{ status
   const manifest = JSON.parse(readEvidence(commonDir, snapshot.manifestBlob).toString()) as SnapshotManifest
   const files = new Map(manifest.entries.filter(entry => entry.mode !== '120000').map(entry => [entry.path, readObject(commonDir, entry.oid).toString('utf8')]))
   saveFiles('input', files)
-  save('input.json', { version: 1, runId, boundary: 'library-preflight-only; no apply/commit/receipt/product-entry proof', backend: { root: backendRoot, base: backendBase }, fixture: snapshot, manifest, verification: VERIFICATION, model: 'gpt-6.1-sol', effort: 'high' })
+  save('input.json', { version: 1, runId, boundary: 'library-preflight-only; no apply/commit/receipt/product-entry proof', backend: { root: backendRoot, base: backendBase }, fixture: snapshot, manifest, verification: VERIFICATION, generationPolicy: { text: GENERATION_POLICY, digest: contentHash(GENERATION_POLICY) }, budget: PREFLIGHT_BUDGET, model: 'gpt-6.1-sol', effort: 'high' })
   let dispatch = 0
   const runner: ElaborationRunner = async request => {
     const number = ++dispatch
-    const bridged = { ...request, root: backendRoot, base: backendBase, model: 'gpt-6.1-sol', effort: 'high' as const }
-    save(`native-${number}-request.json`, { ...bridged, signal: undefined, fixtureSnapshotId: snapshot.id })
+    const generationPolicy = request.purpose.startsWith('code_') ? `\n可信生成/验证技术政策（其SHA已进入GenerationInput.policy，独立于业务facts）:\n${GENERATION_POLICY}\n可信登记:\n${JSON.stringify(VERIFICATION)}` : ''
+    const bridged = { ...request, prompt: request.prompt + generationPolicy, root: backendRoot, base: backendBase, model: 'gpt-6.1-sol', effort: 'high' as const }
+    save(`native-${number}-request.json`, { ...bridged, signal: undefined, fixtureSnapshotId: snapshot.id, ...(generationPolicy ? { generationPolicyDigest: contentHash(GENERATION_POLICY) } : {}) })
     try {
       const result = await runStructuredSession(bridged)
       save(`native-${number}-result.json`, result)
@@ -76,7 +79,9 @@ export async function runExportPreflight(outputParent: string): Promise<{ status
   }
   const initialContract = files.get(contractPath)!, rawSource = parseParts(initialContract)!.rawSource
   const facts = [{ source: 'decision:fixture-author-policy', text: files.get('fixture-facts.txt')! }]
-  const elaboration = await elaborate({ root, requestKey: `${runId}:elaboration`, intent: { nodeId: 'export-contract', rawSource }, targets: [{ nodeId: 'export-contract', path: contractPath, source: initialContract, sourceDigest: elaborationDigest(initialContract) }], files, facts, model: 'gpt-6.1-sol', effort: 'high', maxRepairs: 2, maxCalls: 6, timeoutMs: 900_000, totalTimeoutMs: 3_600_000 }, { runner })
+  const businessFiles = new Map([...files].filter(([path]) => path.startsWith('.spec/') && path.endsWith('/spec.md')))
+  save('elaboration-context.json', { files: [...businessFiles.keys()], facts, verifications: [VERIFICATION] })
+  const elaboration = await elaborate({ root, requestKey: `${runId}:elaboration`, intent: { nodeId: 'export-contract', rawSource }, targets: [{ nodeId: 'export-contract', path: contractPath, source: initialContract, sourceDigest: elaborationDigest(initialContract) }], files: businessFiles, facts, verifications: [VERIFICATION], model: 'gpt-6.1-sol', effort: 'high', ...PREFLIGHT_BUDGET }, { runner })
   save('elaboration.json', { ...elaboration, graph: undefined, contracts: undefined, coverage: undefined })
   saveFiles('elaborated', new Map(elaboration.changes.map(change => [change.path, change.source])))
   const finish = async (status: string): Promise<{ status: string; evidenceDirectory: string }> => {
@@ -90,14 +95,15 @@ export async function runExportPreflight(outputParent: string): Promise<{ status
   for (const change of elaboration.changes) detailedFiles.set(change.path, change.source)
   const detailed = await readFrozenContracts(root, detailedFiles)
   const acceptance = [...detailed.graph.items.values()].filter((item): item is Acceptance => item.kind === 'AC')
-  if (!acceptance.length || elaboration.blockedIds.length || elaboration.blockedFlows.length) throw new Error('预检需要全业务细化且无阻塞，不能缩小必需集合')
+  if (!acceptance.length || elaboration.blockedIds.length || elaboration.blockedFlows.length) return finish('elaboration:blocked')
   const allowedScope = { paths: WRITE_PATHS, contractIds: elaboration.readyIds, flowIds: elaboration.readyFlowIds }
-  const generation = await runGeneration({ root, requestKey: `${runId}:generation`, snapshot, manifest, files, contracts: detailed.contracts, elaboratedSpecs: elaboration.changes.map(change => ({ path: change.path, source: change.source })), readyIds: elaboration.readyIds, blockedIds: elaboration.blockedIds, intent: { nodeId: 'export-contract', rawSource }, facts, existingAcceptance: acceptance, allowedScope, policy: { version: 'fixture-author-v1', digest: contentHash(JSON.stringify({ facts, VERIFICATION, allowedScope })) }, timeoutMs: 900_000, model: 'gpt-6.1-sol', effort: 'high' }, {
+  const generation = await runGeneration({ root, requestKey: `${runId}:generation`, snapshot, manifest, files, contracts: detailed.contracts, elaboratedSpecs: elaboration.changes.map(change => ({ path: change.path, source: change.source })), readyIds: elaboration.readyIds, blockedIds: elaboration.blockedIds, intent: { nodeId: 'export-contract', rawSource }, facts, existingAcceptance: acceptance, allowedScope, policy: { version: 'fixture-author-v2', digest: contentHash(JSON.stringify({ facts, VERIFICATION, allowedScope, generationPolicyDigest: contentHash(GENERATION_POLICY) })) }, timeoutMs: 900_000, model: 'gpt-6.1-sol', effort: 'high' }, {
     runner,
     validateCandidate: async candidate => {
       const candidateFiles = new Map(readTree(commonDir, candidate.tree).filter(entry => entry.mode !== '120000').map(entry => [entry.path, readObject(commonDir, entry.oid).toString('utf8')]))
       const next = await readFrozenContracts(root, candidateFiles)
       const findings: ContractFinding[] = [...next.findings, ...checkGenerationContractIntent(detailed, next, { newNodeRawSources: new Map(), verifications: [VERIFICATION] })]
+      for (const item of next.graph.items.values()) if (['REQ', 'RULE', 'AC'].includes(item.kind) && !detailed.graph.items.has(item.id)) findings.push({ code: 'generation-new-business-obligation', severity: 'error', nodeId: item.nodeId, path: item.path, itemId: item.id, message: '实现阶段不能把夹具作者编排政策新增为业务需求/规则/验收' })
       const ownTest = candidateFiles.get('tests/export.generated.test.mjs') ?? ''
       if (!ownTest.includes('assert') || /trusted-oracle|ORACLE-/.test(ownTest)) findings.push({ code: 'generated-test-independent', severity: 'error', nodeId: 'export-contract', path: contractPath, message: '生成测试必须新增业务断言且不能复制或调用 oracle' })
       return findings
