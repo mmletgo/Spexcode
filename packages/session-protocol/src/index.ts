@@ -38,6 +38,7 @@ export interface SessionAddress {
 }
 
 export interface ProtocolTransaction {
+  initialize(sessionId: string): SessionAddress
   exec(sql: string, ...params: SqlParam[]): { changes: number; lastInsertRowid: number }
   query(sql: string, ...params: SqlParam[]): Record<string, unknown>[]
   enqueue(sessionId: string, message: MessageInput): Message

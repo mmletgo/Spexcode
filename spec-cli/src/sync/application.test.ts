@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { chmodSync, cpSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, cpSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -17,6 +17,8 @@ import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
 import type { ElaborationSessionRequest } from './elaboration-types.js'
 import { sessionIdForCreateKey } from '../sessions.js'
 import { contentHash, identifyWorktree } from './snapshot.js'
+import { claimFileMutex } from './file-mutex.js'
+import type { FileMutex } from './file-mutex.js'
 
 const settings: SyncSettings = {
   version: 'sync-settings-v1', sourcePaths: ['src'], testPaths: ['tests'], readPaths: ['package.json'],
@@ -37,7 +39,7 @@ async function fixture(config: unknown = settings) {
   const protocol = openProtocol(join(temp, 'sessions.sqlite'))
   const calls: ElaborationSessionRequest[] = []
   const application = await SyncApplication.create(root, { protocol, runtimeDirectory: join(temp, 'runtime'), tools: { trustedRuntimeRoot: '/missing-runtime', toolEntry: '/missing-runtime/cli.js', canonicalHooksDir: '/missing-runtime/hooks' }, runner: async request => { calls.push(request); throw Object.assign(new Error('受控生成环境故障'), { code: 'unsupported' }) } })
-  return { temp, root, git, application, calls, cleanup: (): void => { protocol.close(); rmSync(temp, { recursive: true, force: true }) } }
+  return { temp, root, git, protocol, application, calls, cleanup: (): void => { protocol.close(); rmSync(temp, { recursive: true, force: true }) } }
 }
 
 test('AC-APPLICATION-01 缺少可信配置明确拒绝，现有配置启用CAS且不修改版本化文件', async () => {
@@ -211,6 +213,107 @@ test('AC-APPLICATION-10 已启用后删除或损坏配置保持invalidated，不
     writeFileSync(config, JSON.stringify({ sync: settings }))
     assert.equal((await f.application.readSettings()).activation, 'enabled')
   } finally { f.cleanup() }
+})
+
+test('AC-APPLICATION-11 initial来源真实入账并执行Spec业务管线，同键不同来源拒绝', async () => {
+  const f = await fixture()
+  try {
+    await f.application.enable()
+    const request = { nodeId: 'demo', requestId: 'initial-1', origin: 'initial' as const }
+    const submitted = await f.application.submit(request); assert.ok(submitted.operation)
+    const detail = await f.application.wait(submitted.operation.id)
+    assert.equal(detail.operation.origin, 'initial')
+    assert.equal(f.calls[0]?.purpose, 'elaboration_generate')
+    assert.equal((await f.application.submit(request)).operation?.id, submitted.operation.id)
+    await f.application.wait(submitted.operation.id)
+    await assert.rejects(f.application.submit({ ...request, origin: 'spec' }), /SYNC_IDEMPOTENCY_CONFLICT/)
+  } finally { f.cleanup() }
+})
+
+async function linkedApplication(f: Awaited<ReturnType<typeof fixture>>, directory: string) {
+  const root = join(f.temp, directory), calls: ElaborationSessionRequest[] = []
+  f.git(['worktree', 'add', '-b', `node/${directory}`, root, 'HEAD'])
+  const application = await SyncApplication.create(root, { protocol: f.protocol, runtimeDirectory: join(f.temp, `${directory}-runtime`), tools: { trustedRuntimeRoot: '/missing-runtime', toolEntry: '/missing-runtime/cli.js', canonicalHooksDir: '/missing-runtime/hooks' }, runner: async request => { calls.push(request); throw Object.assign(new Error('受控环境故障'), { code: 'unsupported' }) } })
+  await application.enable()
+  return { application, calls }
+}
+function holdNextAdmission(f: Awaited<ReturnType<typeof fixture>>) {
+  const held: { mutex: FileMutex | null } = { mutex: null }
+  const admit = f.application.store.admitAndEnqueue.bind(f.application.store)
+  f.application.store.admitAndEnqueue = input => {
+    const operation = admit(input), locks = join(realpathSync(f.temp), 'runtime/artifacts/.locks')
+    mkdirSync(locks, { recursive: true, mode: 0o700 })
+    held.mutex = claimFileMutex(join(locks, `${contentHash(operation.id)}.sqlite`)); assert.ok(held.mutex)
+    f.application.store.admitAndEnqueue = admit
+    return operation
+  }
+  return held
+}
+
+test('AC-APPLICATION-12 同仓库两个工作树沿真实FIFO，busy不自旋，结束自动接续另一来源', async () => {
+  const first = await fixture({ ...settings, budget: { ...settings.budget, timeoutMs: 120000 } })
+  const later = await linkedApplication(first, 'later-source'), held = holdNextAdmission(first)
+  const repositoryId = identifyWorktree(first.root).repositoryId
+  try {
+    await first.application.enable()
+    const earlier = await first.application.submit({ nodeId: 'demo', requestId: 'fifo-earlier' }); assert.ok(earlier.operation)
+    await first.application.wait(earlier.operation.id)
+    const queued = await later.application.submit({ nodeId: 'demo', requestId: 'fifo-later' }); assert.ok(queued.operation)
+    await first.application.wait(earlier.operation.id)
+    assert.equal(first.application.store.nextDispatch(repositoryId)?.operation.id, earlier.operation.id)
+    assert.equal(first.calls.length, 0); assert.equal(later.calls.length, 0)
+    assert.equal((await later.application.wait(queued.operation.id)).operation.phase, 'queued')
+    held.mutex!.release(); held.mutex = null
+    first.application.start(earlier.operation.id)
+    await later.application.wait(queued.operation.id)
+    assert.equal(first.calls.length, 1); assert.equal(later.calls.length, 1)
+    assert.equal(first.application.store.nextDispatch(repositoryId), null)
+    assert.equal((await later.application.readOperation(queued.operation.id)).operation.phase, 'failed')
+  } finally { held.mutex?.release(); first.cleanup() }
+})
+
+test('AC-APPLICATION-13 已出队暂停恢复先等有效FIFO，前序完成后自动恢复且wait等待真实执行', async () => {
+  const first = await fixture({ ...settings, budget: { ...settings.budget, timeoutMs: 120000 } })
+  const later = await linkedApplication(first, 'resume-source')
+  const repositoryId = identifyWorktree(first.root).repositoryId
+  const held = holdNextAdmission(first)
+  try {
+    await first.application.enable()
+    const submitted = await later.application.submit({ nodeId: 'demo', requestId: 'resume-first' }); assert.ok(submitted.operation)
+    const failed = await later.application.wait(submitted.operation.id)
+    assert.equal(failed.operation.phase, 'failed'); assert.equal(later.calls.length, 1)
+    await later.application.control(submitted.operation.id, 'pause')
+    const earlier = await first.application.submit({ nodeId: 'demo', requestId: 'pending-before-resume' }); assert.ok(earlier.operation)
+    await first.application.wait(earlier.operation.id)
+    const resumed = await later.application.control(submitted.operation.id, 'resume')
+    assert.equal(resumed.operation.phase, 'queued'); assert.equal(later.calls.length, 1)
+    assert.equal(first.application.store.nextDispatch(repositoryId)?.operation.id, earlier.operation.id)
+    held.mutex!.release(); held.mutex = null
+    first.application.start(earlier.operation.id)
+    const restored = await later.application.wait(submitted.operation.id)
+    assert.equal(restored.operation.phase, 'failed'); assert.equal(restored.attempt?.number, 2)
+    assert.equal(first.calls.length, 1); assert.equal(later.calls.length, 2)
+    assert.equal(restored.operation.deadlineAtMs, failed.operation.deadlineAtMs)
+    assert.equal(first.application.store.nextDispatch(repositoryId), null)
+  } finally { held.mutex?.release(); first.cleanup() }
+})
+
+test('AC-APPLICATION-14 不同仓库共享canonicalDB时分别派发，不执行另一仓库的FIFO头', async () => {
+  const first = await fixture({ ...settings, budget: { ...settings.budget, timeoutMs: 120000 } }), second = await fixture()
+  const held = holdNextAdmission(first), calls: ElaborationSessionRequest[] = []
+  const other = await SyncApplication.create(second.root, { protocol: first.protocol, runtimeDirectory: join(second.temp, 'shared-runtime'), tools: { trustedRuntimeRoot: '/missing-runtime', toolEntry: '/missing-runtime/cli.js', canonicalHooksDir: '/missing-runtime/hooks' }, runner: async request => { calls.push(request); throw Object.assign(new Error('另一仓库受控故障'), { code: 'unsupported' }) } })
+  try {
+    await first.application.enable(); await other.enable()
+    const blocked = await first.application.submit({ nodeId: 'demo', requestId: 'blocked-repository' }); assert.ok(blocked.operation)
+    await first.application.wait(blocked.operation.id)
+    const submitted = await other.submit({ nodeId: 'demo', requestId: 'independent-repository' }); assert.ok(submitted.operation)
+    assert.equal((await other.wait(submitted.operation.id)).operation.phase, 'failed')
+    assert.equal(first.calls.length, 0); assert.equal(calls.length, 1)
+    assert.equal(first.application.store.nextDispatch(identifyWorktree(first.root).repositoryId)?.operation.id, blocked.operation.id)
+    assert.equal(first.application.store.nextDispatch(identifyWorktree(second.root).repositoryId), null)
+    held.mutex!.release(); held.mutex = null
+    first.application.start(blocked.operation.id); await first.application.wait(blocked.operation.id)
+  } finally { held.mutex?.release(); second.cleanup(); first.cleanup() }
 })
 
 test('AC-APPLICATION-06 应用真实Docker及compiled hooks完整交付，completed重放沿原共同基线幂等', { skip: process.env.SPEX_DOCKER_VERIFICATION_TEST !== '1', timeout: 180000 }, async t => {

@@ -20,4 +20,6 @@ AC-APPLICATION-01 验证配置缺口、enable 摘要 CAS 与配置字节保留�
 
 09 验证显式 callTimeoutMs 只来自 operation 冻结配置，live 修改不扩大旧请求或总预算；10 验证已启用后删除、坏 JSON 或越界配置保持 invalidated，恢复原字节才恢复 enabled，不允许自动降级普通独立 Spec 提交。
 
+11 验证 initial 来源真实执行、持久入账和同键改来源拒绝；12 用同仓库两个真实 Git worktree 和 OS 互斥锁验证 FIFO、busy 无自旋及后继来源接续；13 验证已出队暂停恢复先等待有效 FIFO，前序结算后自动恢复，wait 等真实执行，预算不重置；14 验证两个仓库共享 canonical SQLite 时各自派发，不能执行或被另一仓库消息头堵塞。
+
 故障 runner 为测试接缝，不算真实模型产品验收。完整真实 Agent/Docker 落地仍按 [[spec-sync]] 分阶段验收。

@@ -1,10 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { getBlob } from '@spexcode/spec-core'
 import { applyComponentMigrations, type ProtocolTransaction, type SessionProtocol } from '@spexcode/session-protocol'
-import { SYNC_COMPONENT, SYNC_MIGRATIONS } from './migrations.js'
+import { SYNC_COMPONENT, SYNC_MIGRATIONS, syncCoordinatorAddress } from './migrations.js'
 import type { AdmitSyncInput, ApplyFilePlan, ApplyJournal, ApplyPlan, ApplyReceipt, ApplyStep, BaselinePair, BlobRef, CandidateRef, ClaimedAttempt, ClaimAttemptInput, ComposedInputRef, RecoverableSyncResource, SyncResourceCheckpoint, SyncResourcePlan, SyncResourceRecord, DispatchPlan, InputSnapshot, NativeSessionRef, RecoverableSync, ScopeLease, SyncAttempt, SyncControl, SyncDispatchEnvelope, SyncFailure, SyncOperation, SyncScope, VerificationRef, VerificationResultBlob, WorktreeIdentity, WriteFence } from './operation-types.js'
 
-export const SYNC_COORDINATOR_ADDRESS = 'spec-sync-coordinator'
+export { SYNC_COORDINATOR_ADDRESS, syncCoordinatorAddress } from './migrations.js'
 export const SYNC_DISPATCH_KIND = 'sync.dispatch.v1'
 export class SyncStoreError extends Error {
   constructor(readonly code: string, message: string) { super(`${code}: ${message}`); this.name = 'SyncStoreError' }
@@ -41,7 +41,6 @@ export class SyncStore {
     })
     this.protocol.withTransaction(tx => this.assertSchema(tx))
     applyComponentMigrations(this.protocol, SYNC_COMPONENT, SYNC_MIGRATIONS)
-    this.protocol.initialize(SYNC_COORDINATOR_ADDRESS)
   }
   private assertSchema(tx: ProtocolTransaction): void {
     const version = Number(tx.query('SELECT MAX(version) AS version FROM schema_migrations WHERE component=?', SYNC_COMPONENT)[0].version ?? 0)
@@ -72,8 +71,8 @@ export class SyncStore {
   private saveJournal(tx: ProtocolTransaction, journal: ApplyJournal): void {
     tx.exec('UPDATE sync_apply_journals SET status=?,receipt_id=?,record_json=? WHERE id=?', journal.status, journal.receipt?.id ?? null, JSON.stringify(journal), journal.id)
   }
-  private dispatchHead(tx: ProtocolTransaction): { operation: SyncOperation; messageId: string; envelope: SyncDispatchEnvelope } | null {
-    const row = tx.query('SELECT message_id,kind,body FROM protocol_messages WHERE target_session_id=? AND dequeued_at_ms IS NULL ORDER BY enqueue_seq LIMIT 1', SYNC_COORDINATOR_ADDRESS)[0]
+  private dispatchHead(tx: ProtocolTransaction, repositoryId: string): { operation: SyncOperation; messageId: string; envelope: SyncDispatchEnvelope } | null {
+    const row = tx.query('SELECT message_id,kind,body FROM protocol_messages WHERE target_session_id=? AND dequeued_at_ms IS NULL ORDER BY enqueue_seq LIMIT 1', syncCoordinatorAddress(repositoryId))[0]
     if (!row) return null
     if (row.kind !== SYNC_DISPATCH_KIND) fail('SYNC_DISPATCH_INVALID', 'coordinator head is not a typed sync dispatch')
     let envelope: SyncDispatchEnvelope
@@ -81,10 +80,10 @@ export class SyncStore {
     catch (error) { if (error instanceof SyntaxError) fail('SYNC_DISPATCH_INVALID', 'dispatch envelope is not JSON'); throw error }
     if (!envelope || envelope.version !== 1 || envelope.type !== 'sync.dispatch' || typeof envelope.operationId !== 'string') fail('SYNC_DISPATCH_INVALID', 'invalid dispatch envelope')
     const operation = this.operation(tx, envelope.operationId), messageId = String(row.message_id)
-    if (operation.dispatchMessageId !== messageId || envelope.inputId !== operation.input.id || !Number.isSafeInteger(envelope.generation) || envelope.generation < 1 || envelope.generation > operation.generation || envelope.dispatchKey !== `sync-dispatch-${operation.id}-${envelope.generation}`) fail('SYNC_DISPATCH_BINDING', 'dispatch differs from durable operation')
+    if (operation.input.source.repositoryId !== repositoryId || operation.dispatchMessageId !== messageId || envelope.inputId !== operation.input.id || !Number.isSafeInteger(envelope.generation) || envelope.generation < 1 || envelope.generation > operation.generation || envelope.dispatchKey !== `sync-dispatch-${operation.id}-${envelope.generation}`) fail('SYNC_DISPATCH_BINDING', 'dispatch differs from durable operation')
     return { operation, messageId, envelope }
   }
-  nextDispatch(): { operation: SyncOperation; messageId: string; envelope: SyncDispatchEnvelope } | null { return this.write(tx => this.dispatchHead(tx)) }
+  nextDispatch(repositoryId: string): { operation: SyncOperation; messageId: string; envelope: SyncDispatchEnvelope } | null { return this.write(tx => this.dispatchHead(tx, repositoryId)) }
   private release(tx: ProtocolTransaction, token: string): void {
     tx.exec('UPDATE sync_leases SET token=NULL,operation_id=NULL,attempt_id=NULL,expires_at_ms=NULL WHERE token=?', token)
   }
@@ -135,11 +134,12 @@ export class SyncStore {
     if (input.requestBlob) this.blob(input.requestBlob)
     if (input.planBlob) { this.blob(input.planBlob); if (input.planBlob.sha256 !== input.policyDigest) fail('SYNC_PLAN_BINDING', 'plan evidence must have exactly the frozen policy digest') }
     if (input.delivery && (input.delivery.canonicalRoot !== input.deliveryPlan.canonicalRoot || input.delivery.branch !== input.deliveryPlan.branch || input.delivery.repositoryId !== input.input.source.repositoryId)) fail('SYNC_DELIVERY_BINDING', 'bound delivery differs from durable plan')
-    const payloadDigest = digest({ input: inputPayload(input.input), ...(input.requestBlob ? { requestBlob: input.requestBlob } : {}), ...(input.planBlob ? { planBlob: input.planBlob } : {}), scope: canonicalScope(input.scope), policyDigest: input.policyDigest, impactDigest: input.impactDigest, readSetDigest: input.readSetDigest, deliveryPlan: input.deliveryPlan, previousBaselinePairId: input.previousBaselinePair?.id ?? null, budget: input.budget })
+    const payload = { input: inputPayload(input.input), ...(input.requestBlob ? { requestBlob: input.requestBlob } : {}), ...(input.planBlob ? { planBlob: input.planBlob } : {}), scope: canonicalScope(input.scope), policyDigest: input.policyDigest, impactDigest: input.impactDigest, readSetDigest: input.readSetDigest, deliveryPlan: input.deliveryPlan, previousBaselinePairId: input.previousBaselinePair?.id ?? null, budget: input.budget }
+    const legacyPayloadDigest = digest(payload), payloadDigest = digest({ ...payload, origin: input.origin })
     return this.write(tx => {
       const prior = parseRecord<SyncOperation>(tx.query('SELECT record_json FROM sync_operations WHERE ingress_key=? OR EXISTS (SELECT 1 FROM json_each(sync_operations.ingress_aliases_json) WHERE value=?)', input.ingressKey, input.ingressKey)[0])
-      if (prior) { if (prior.payloadDigest !== payloadDigest) fail('SYNC_IDEMPOTENCY_CONFLICT', input.ingressKey); return prior }
-      const sameInput = parseRecord<SyncOperation>(tx.query('SELECT record_json FROM sync_operations WHERE payload_digest=?', payloadDigest)[0])
+      if (prior) { if (prior.origin !== input.origin || ![payloadDigest, legacyPayloadDigest].includes(prior.payloadDigest)) fail('SYNC_IDEMPOTENCY_CONFLICT', input.ingressKey); return prior }
+      const sameInput = tx.query('SELECT record_json FROM sync_operations WHERE payload_digest IN (?,?)', payloadDigest, legacyPayloadDigest).map(row => parseRecord<SyncOperation>(row)!).find(operation => operation.origin === input.origin)
       if (sameInput) { tx.exec("UPDATE sync_operations SET ingress_aliases_json=json_insert(ingress_aliases_json,'$[#]',?) WHERE id=?", input.ingressKey, sameInput.id); return sameInput }
       if (input.previousBaselinePair) {
         const pair = parseRecord<BaselinePair>(tx.query('SELECT record_json FROM sync_baseline_pairs WHERE id=?', input.previousBaselinePair.id)[0])
@@ -160,7 +160,9 @@ export class SyncStore {
       }
       const id = randomUUID(), dispatchKey = `sync-dispatch-${id}-${generation}`
       const envelope: SyncDispatchEnvelope = { version: 1, type: 'sync.dispatch', operationId: id, inputId: input.input.id, generation, dispatchKey }
-      const message = tx.enqueue(SYNC_COORDINATOR_ADDRESS, { kind: SYNC_DISPATCH_KIND, body: Buffer.from(JSON.stringify(envelope)), idempotencyKey: dispatchKey })
+      const address = syncCoordinatorAddress(input.input.source.repositoryId)
+      tx.initialize(address)
+      const message = tx.enqueue(address, { kind: SYNC_DISPATCH_KIND, body: Buffer.from(JSON.stringify(envelope)), idempotencyKey: dispatchKey })
       const operation: SyncOperation = { ...clone(input), scope: canonicalScope(input.scope), id, payloadDigest, generation, revision: 1, phase: 'queued', control: 'run', previousBaselinePair: clone(input.previousBaselinePair ?? null), readyScope: canonicalScope(input.scope), blockedScope: emptyScope(), deliveredScope: emptyScope(), blockedReason: null, callsUsed: 0, deadlineAtMs: this.now() + input.budget.timeoutMs, currentAttemptId: null, dispatchMessageId: message.messageId, createdAtMs: this.now(), updatedAtMs: this.now() }
       tx.exec('INSERT INTO sync_operations(id,ingress_key,payload_digest,repository_id,source_key,source_root,generation,phase,control,current_attempt_id,updated_at_ms,record_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)', id, input.ingressKey, payloadDigest, input.input.source.repositoryId, identityKey(input.input.source), input.input.source.canonicalRoot, generation, operation.phase, operation.control, null, operation.updatedAtMs, JSON.stringify(operation))
       return operation
@@ -170,7 +172,7 @@ export class SyncStore {
     this.write(tx => {
       const operation = this.operation(tx, operationId)
       if (operation.dispatchMessageId !== expectedMessageId || (operation.control === 'run' && !TERMINAL.has(operation.phase))) fail('SYNC_DISPATCH_NOT_STALE', 'dispatch still requires a durable attempt')
-      tx.dequeue(SYNC_COORDINATOR_ADDRESS, expectedMessageId)
+      tx.dequeue(syncCoordinatorAddress(operation.input.source.repositoryId), expectedMessageId)
     })
   }
   claimAttempt(input: ClaimAttemptInput): ClaimedAttempt {
@@ -196,19 +198,19 @@ export class SyncStore {
       if (input.expectedMessageId !== undefined) {
         if (input.expectedMessageId !== operation.dispatchMessageId) fail('SYNC_DISPATCH_MISMATCH', 'message does not belong to operation')
         const owned = tx.query('SELECT target_session_id,dequeued_at_ms FROM protocol_messages WHERE message_id=?', input.expectedMessageId)[0]
-        if (!owned || owned.target_session_id !== SYNC_COORDINATOR_ADDRESS) fail('SYNC_DISPATCH_BINDING', 'durable message is missing or belongs to another address')
+        if (!owned || (owned.target_session_id !== syncCoordinatorAddress(operation.input.source.repositoryId) && !(owned.dequeued_at_ms !== null && owned.target_session_id === 'spec-sync-coordinator'))) fail('SYNC_DISPATCH_BINDING', 'durable message is missing or belongs to another address')
         if (owned.dequeued_at_ms === null) {
-          let head = this.dispatchHead(tx)
+          let head = this.dispatchHead(tx, operation.input.source.repositoryId)
           while (head && head.messageId !== input.expectedMessageId && (head.operation.control !== 'run' || TERMINAL.has(head.operation.phase))) {
-            tx.dequeue(SYNC_COORDINATOR_ADDRESS, head.messageId)
-            head = this.dispatchHead(tx)
+            tx.dequeue(syncCoordinatorAddress(operation.input.source.repositoryId), head.messageId)
+            head = this.dispatchHead(tx, operation.input.source.repositoryId)
           }
-          tx.dequeue(SYNC_COORDINATOR_ADDRESS, input.expectedMessageId)
+          tx.dequeue(syncCoordinatorAddress(operation.input.source.repositoryId), input.expectedMessageId)
         } else {
-          let head = this.dispatchHead(tx)
+          let head = this.dispatchHead(tx, operation.input.source.repositoryId)
           while (head && (head.operation.control !== 'run' || TERMINAL.has(head.operation.phase))) {
-            tx.dequeue(SYNC_COORDINATOR_ADDRESS, head.messageId)
-            head = this.dispatchHead(tx)
+            tx.dequeue(syncCoordinatorAddress(operation.input.source.repositoryId), head.messageId)
+            head = this.dispatchHead(tx, operation.input.source.repositoryId)
           }
           if (head) fail('SYNC_DISPATCH_WAITING', 'valid pending FIFO dispatch must run before a dequeued operation resumes')
         }

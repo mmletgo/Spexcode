@@ -8,7 +8,7 @@ import { test } from 'node:test'
 import { applyComponentMigrations, openProtocol, type SqlParam } from '@spexcode/session-protocol'
 import { migrateSyncStore, SYNC_COMPONENT, SYNC_MIGRATIONS } from './migrations.js'
 import type { AdmitSyncInput, ApplyFilePlan, ApplyPlan, ApplyReceipt, BlobRef, CandidateRef, ClaimedAttempt, InputSnapshot, SyncScope, VerificationRef, VerificationResultBlob, WorktreeIdentity } from './operation-types.js'
-import { SyncStore, SYNC_COORDINATOR_ADDRESS } from './store.js'
+import { SyncStore, SYNC_COORDINATOR_ADDRESS, syncCoordinatorAddress } from './store.js'
 
 const source = (name = 'source'): WorktreeIdentity => ({ repositoryId: 'repo', commonDir: '/repo/.git', canonicalRoot: `/repo/${name}`, gitDir: `/repo/.git/worktrees/${name}`, branch: name, physicalFingerprint: `${name}-inode-1` })
 const scope = (path = 'src/a.ts', rule = 'RULE-A'): SyncScope => ({ paths: [path], contractIds: [rule], flowIds: [] })
@@ -53,7 +53,7 @@ test('same stable admission and capture-time replay create one operation and pro
     const input = f.admit(), first = f.store.admitAndEnqueue(input)
     const second = f.store.admitAndEnqueue({ ...input, input: { ...input.input, capturedAtMs: 9000 } })
     assert.equal(first.id, second.id)
-    assert.equal(f.protocol.listPending(SYNC_COORDINATOR_ADDRESS).length, 1)
+    assert.equal(f.protocol.listPending(syncCoordinatorAddress('repo')).length, 1)
     assert.throws(() => f.store.admitAndEnqueue({ ...input, policyDigest: 'different' }), /SYNC_IDEMPOTENCY_CONFLICT/)
     assert.equal(f.store.readOperation(first.id).policyDigest, 'policy')
     const third = f.store.admitAndEnqueue({ ...input, ingressKey: 'another-event-key' })
@@ -62,7 +62,7 @@ test('same stable admission and capture-time replay create one operation and pro
     assert.equal(f.store.findOperationByIngressKey('another-event-key')?.id, first.id)
     assert.equal(f.store.findOperationByIngressKey('unknown-key'), null)
     assert.throws(() => f.store.admitAndEnqueue({ ...input, ingressKey: 'another-event-key', policyDigest: 'changed' }), /SYNC_IDEMPOTENCY_CONFLICT/)
-    assert.equal(f.protocol.listPending(SYNC_COORDINATOR_ADDRESS).length, 1)
+    assert.equal(f.protocol.listPending(syncCoordinatorAddress('repo')).length, 1)
   } finally { f.cleanup() }
 })
 
@@ -148,6 +148,7 @@ test('v2 upgrade preserves requestless dedup identity and backs up the old compo
   try {
     applyComponentMigrations(legacy, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 2))
     legacy.initialize(SYNC_COORDINATOR_ADDRESS)
+    legacy.initialize(syncCoordinatorAddress('repo'))
     const input = f.admit(), old = f.store.admitAndEnqueue(input)
     for (const table of ['protocol_messages', 'sync_operations'] as const) {
       const rows = f.protocol.withTransaction(tx => tx.query(`SELECT * FROM ${table}`))
@@ -166,7 +167,7 @@ test('v2 upgrade preserves requestless dedup identity and backs up the old compo
     assert.equal(upgraded.readOperation(old.id).payloadDigest, old.payloadDigest)
     backup = openProtocol(path)
     assert.equal(backup.withTransaction(tx => tx.query('SELECT MAX(version) AS version FROM schema_migrations WHERE component=?', SYNC_COMPONENT))[0].version, 2)
-    assert.equal(backup.listPending(SYNC_COORDINATOR_ADDRESS).length, 1)
+    assert.equal(backup.listPending(syncCoordinatorAddress('repo')).length, 1)
   } finally { backup?.close(); legacy.close(); f.cleanup() }
 })
 
@@ -176,6 +177,7 @@ test('v3 upgrade backs up and preserves planless identity, v4 plans are hash-bou
   try {
     applyComponentMigrations(legacy, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 3))
     legacy.initialize(SYNC_COORDINATOR_ADDRESS)
+    legacy.initialize(syncCoordinatorAddress('repo'))
     const input = f.admit(), old = f.store.admitAndEnqueue(input)
     for (const table of ['protocol_messages', 'sync_operations'] as const) for (const row of f.protocol.withTransaction(tx => tx.query(`SELECT * FROM ${table}`))) {
       const columns = Object.keys(row).filter(column => column !== 'enqueue_seq')
@@ -183,13 +185,13 @@ test('v3 upgrade backs up and preserves planless identity, v4 plans are hash-bou
     }
     assert.throws(() => new SyncStore(legacy, f.options), /SYNC_SCHEMA_UNSUPPORTED/)
     const path = join(f.root, 'v3-backup.sqlite')
-    assert.equal(await migrateSyncStore(legacy, { backupPath: path }), 4)
+    assert.equal(await migrateSyncStore(legacy, { backupPath: path }), SYNC_MIGRATIONS.length)
     const upgraded = new SyncStore(legacy, f.options)
     assert.equal(upgraded.admitAndEnqueue(input).payloadDigest, old.payloadDigest)
     assert.equal(upgraded.readOperation(old.id).planBlob, undefined)
     backup = openProtocol(path)
     assert.equal(backup.withTransaction(tx => tx.query('SELECT MAX(version) AS version FROM schema_migrations WHERE component=?', SYNC_COMPONENT))[0].version, 3)
-    assert.equal(backup.listPending(SYNC_COORDINATOR_ADDRESS).length, 1)
+    assert.equal(backup.listPending(syncCoordinatorAddress('repo')).length, 1)
     const planBlob = f.put({ version: 'trusted-plan', readPaths: ['src'] })
     const planned = { ...f.admit(source('planned')), planBlob, policyDigest: planBlob.sha256 }
     const operation = upgraded.admitAndEnqueue(planned)
@@ -199,7 +201,7 @@ test('v3 upgrade backs up and preserves planless identity, v4 plans are hash-bou
     assert.throws(() => upgraded.admitAndEnqueue({ ...planned, policyDigest: 'different' }), /SYNC_PLAN_BINDING/)
     assert.throws(() => new SyncStore(legacy, { ...f.options, readBlob: () => Buffer.from('changed bytes') }).admitAndEnqueue(planned), /SYNC_BLOB_DIGEST_MISMATCH/)
     const reopened = openProtocol(legacy.databasePath)
-    try { assert.deepEqual(new SyncStore(reopened, f.options).readOperation(operation.id).planBlob, planBlob); assert.equal(await migrateSyncStore(reopened), 4) } finally { reopened.close() }
+    try { assert.deepEqual(new SyncStore(reopened, f.options).readOperation(operation.id).planBlob, planBlob); assert.equal(await migrateSyncStore(reopened), SYNC_MIGRATIONS.length) } finally { reopened.close() }
   } finally { backup?.close(); legacy.close(); f.cleanup() }
 })
 
@@ -210,7 +212,7 @@ test('claim exact message and all leases are one transaction, native dispatch bu
     assert.throws(() => f.store.claimAttempt({ operationId: operation.id, source: operation.input.source, scope: operation.scope, leaseMs: 1000, expectedMessageId: 'wrong' }), /SYNC_DISPATCH_MISMATCH/)
     assert.equal(f.store.readOperation(operation.id).currentAttemptId, null)
     const claimed = f.store.claimAttempt({ operationId: operation.id, source: operation.input.source, scope: operation.scope, leaseMs: 1000, expectedMessageId: operation.dispatchMessageId })
-    assert.equal(f.protocol.listPending(SYNC_COORDINATOR_ADDRESS).length, 0)
+    assert.equal(f.protocol.listPending(syncCoordinatorAddress('repo')).length, 0)
     const dispatch = f.store.reserveDispatch(claimed.fence, { key: 'call-1', purpose: 'generate', requestDigest: 'request' })
     assert.ok(dispatch.sessionCreateKey.length <= 128)
     assert.deepEqual(f.store.reserveDispatch(claimed.fence, { key: 'call-1', purpose: 'generate', requestDigest: 'request' }), dispatch)
@@ -228,29 +230,29 @@ test('claim skips stopped FIFO heads in the same transaction while preserving ev
   try {
     const older = f.store.admitAndEnqueue(f.admit()), latest = f.store.admitAndEnqueue(f.admit(source(), 'input-latest'))
     assert.equal(f.store.readOperation(older.id).phase, 'superseded')
-    assert.equal(f.store.nextDispatch()!.messageId, older.dispatchMessageId)
-    assert.equal(f.store.nextDispatch()!.envelope.operationId, older.id)
-    assert.equal(f.protocol.listPending(SYNC_COORDINATOR_ADDRESS).length, 2)
+    assert.equal(f.store.nextDispatch('repo')!.messageId, older.dispatchMessageId)
+    assert.equal(f.store.nextDispatch('repo')!.envelope.operationId, older.id)
+    assert.equal(f.protocol.listPending(syncCoordinatorAddress('repo')).length, 2)
     const claimed = f.store.claimAttempt({ operationId: latest.id, source: latest.input.source, scope: latest.scope, leaseMs: 1000, expectedMessageId: latest.dispatchMessageId })
-    assert.equal(claimed.operation.id, latest.id); assert.equal(f.protocol.listPending(SYNC_COORDINATOR_ADDRESS).length, 0)
-    assert.equal(f.store.nextDispatch(), null)
+    assert.equal(claimed.operation.id, latest.id); assert.equal(f.protocol.listPending(syncCoordinatorAddress('repo')).length, 0)
+    assert.equal(f.store.nextDispatch('repo'), null)
     const stopped = f.store.admitAndEnqueue(f.admit(source('stopped'), 'input-stop', scope('stop.ts', 'RULE-Z')))
     f.store.requestControl(stopped.id, 'pause')
     const before = f.store.admitAndEnqueue(f.admit(source('independent-a'), 'input-a', scope('a.ts', 'RULE-X'))), after = f.store.admitAndEnqueue(f.admit(source('independent-b'), 'input-b', scope('b.ts', 'RULE-Y')))
     assert.throws(() => f.store.claimAttempt({ operationId: after.id, source: after.input.source, scope: after.scope, leaseMs: 1000, expectedMessageId: after.dispatchMessageId }))
     assert.equal(f.store.readOperation(after.id).currentAttemptId, null)
-    assert.deepEqual(f.protocol.listPending(SYNC_COORDINATOR_ADDRESS).map(message => message.messageId), [stopped.dispatchMessageId, before.dispatchMessageId, after.dispatchMessageId])
-    assert.equal(f.store.nextDispatch()!.operation.id, stopped.id)
+    assert.deepEqual(f.protocol.listPending(syncCoordinatorAddress('repo')).map(message => message.messageId), [stopped.dispatchMessageId, before.dispatchMessageId, after.dispatchMessageId])
+    assert.equal(f.store.nextDispatch('repo')!.operation.id, stopped.id)
     f.store.claimAttempt({ operationId: before.id, source: before.input.source, scope: before.scope, leaseMs: 1000, expectedMessageId: before.dispatchMessageId })
-    assert.equal(f.store.nextDispatch()!.operation.id, after.id)
+    assert.equal(f.store.nextDispatch('repo')!.operation.id, after.id)
     f.store.requestControl(stopped.id, 'run')
     assert.throws(() => f.store.claimAttempt({ operationId: stopped.id, source: stopped.input.source, scope: stopped.scope, leaseMs: 1000, expectedMessageId: stopped.dispatchMessageId }), /SYNC_DISPATCH_WAITING/)
     assert.equal(f.store.readOperation(stopped.id).currentAttemptId, null)
-    assert.equal(f.store.nextDispatch()!.operation.id, after.id)
+    assert.equal(f.store.nextDispatch('repo')!.operation.id, after.id)
     f.store.claimAttempt({ operationId: after.id, source: after.input.source, scope: after.scope, leaseMs: 1000, expectedMessageId: after.dispatchMessageId })
     const resumed = f.store.claimAttempt({ operationId: stopped.id, source: stopped.input.source, scope: stopped.scope, leaseMs: 1000, expectedMessageId: stopped.dispatchMessageId })
     assert.equal(resumed.attempt.number, 1)
-    assert.equal(f.store.nextDispatch(), null)
+    assert.equal(f.store.nextDispatch('repo'), null)
   } finally { f.cleanup() }
 })
 
@@ -519,7 +521,7 @@ test('superseded pending dispatch is atomically discarded so a newer operation c
     f.store.discardDispatch(old.id, old.dispatchMessageId)
     const claimed = f.store.claimAttempt({ operationId: newer.id, source: newer.input.source, scope: newer.scope, leaseMs: 1000, expectedMessageId: newer.dispatchMessageId })
     assert.equal(claimed.operation.id, newer.id)
-    assert.equal(f.protocol.listPending(SYNC_COORDINATOR_ADDRESS).length, 0)
+    assert.equal(f.protocol.listPending(syncCoordinatorAddress('repo')).length, 0)
   } finally { f.cleanup() }
 })
 
@@ -702,6 +704,7 @@ test('v1 upgrade keeps active attempt and queue data, online backup restores v1,
     legacy.initialize('existing_session')
     const message = legacy.enqueue('existing_session', { kind: 'session.text.v1', body: Buffer.from('existing durable message') })
     legacy.initialize(SYNC_COORDINATOR_ADDRESS)
+    legacy.initialize(syncCoordinatorAddress('repo'))
     for (const table of ['protocol_messages', 'sync_operations', 'sync_attempts', 'sync_leases'] as const) {
       const rows = f.protocol.withTransaction(tx => tx.query(`SELECT * FROM ${table}`))
       legacy.withTransaction(tx => {
@@ -786,7 +789,7 @@ test('scope expansion is canonical/idempotent, retains admission identity and bu
       assert.deepEqual(recovered.expandContractScope(retry.fence, ids, evidence), retry.operation)
       assert.throws(() => f.store.expandContractScope(first.fence, ids, evidence), /SYNC_FENCE_EXPIRED/)
       assert.equal(retry.operation.callsUsed, 1); assert.equal(retry.operation.deadlineAtMs, before.deadlineAtMs)
-      assert.equal(f.protocol.listPending(SYNC_COORDINATOR_ADDRESS).length, 0)
+      assert.equal(f.protocol.listPending(syncCoordinatorAddress('repo')).length, 0)
     } finally { reopened.close() }
   } finally { f.cleanup() }
 })
@@ -885,4 +888,81 @@ test('different elaboration evidence after needs_input adds only new ready IDs a
     assert.deepEqual(expanded.readyScope, { paths: ['src/a.ts'], contractIds: ['REQ-NEW', 'RULE-A'], flowIds: ['FLOW-A', 'FLOW-NEW'] })
     assert.equal(expanded.blockedReason, 'needs_input')
   } finally { f.cleanup() }
+})
+
+test('origin belongs to admission identity: same ingress refuses another origin and same input never coalesces across origins', async () => {
+  const f = await fixture()
+  try {
+    const input = f.admit(), first = f.store.admitAndEnqueue(input)
+    assert.throws(() => f.store.admitAndEnqueue({ ...input, origin: 'code' }), /SYNC_IDEMPOTENCY_CONFLICT/)
+    const initial = f.store.admitAndEnqueue({ ...input, ingressKey: 'initial-ingress', origin: 'initial' })
+    assert.notEqual(first.id, initial.id); assert.notEqual(first.payloadDigest, initial.payloadDigest)
+    assert.equal(f.store.admitAndEnqueue({ ...input, ingressKey: 'initial-alias', origin: 'initial' }).id, initial.id)
+    assert.throws(() => f.store.admitAndEnqueue({ ...input, ingressKey: 'initial-alias' }), /SYNC_IDEMPOTENCY_CONFLICT/)
+  } finally { f.cleanup() }
+})
+
+test('repository scoped FIFO has real independent addresses while same-repository worktrees cannot skip heads', async () => {
+  const f = await fixture(), other = openProtocol(f.path)
+  try {
+    const first = f.store.admitAndEnqueue(f.admit(source('first'))), second = f.store.admitAndEnqueue(f.admit(source('second')))
+    const separateInput = f.admit({ ...source('other'), repositoryId: 'other-repo' }), separate = new SyncStore(other, f.options).admitAndEnqueue(separateInput)
+    assert.equal(f.store.nextDispatch('repo')?.operation.id, first.id)
+    assert.equal(f.store.nextDispatch('other-repo')?.operation.id, separate.id)
+    const third = new SyncStore(other, f.options).claimAttempt({ operationId: separate.id, source: separateInput.input.source, scope: separateInput.scope, leaseMs: 1000, expectedMessageId: separate.dispatchMessageId })
+    assert.equal(third.operation.id, separate.id)
+    assert.equal(f.store.nextDispatch('repo')?.operation.id, first.id)
+    assert.throws(() => f.store.claimAttempt({ operationId: second.id, source: second.input.source, scope: second.scope, leaseMs: 1000, expectedMessageId: second.dispatchMessageId }), { code: 'PROTOCOL_CURSOR_INVALID' })
+    assert.equal(f.store.readOperation(second.id).currentAttemptId, null)
+  } finally { other.close(); f.cleanup() }
+})
+
+test('v4 to v5 routing is backed up and atomic, preserves old admission digests/history and reopens without duplicate dispatch', async () => {
+  const f = await fixture(), legacy = openProtocol(join(f.root, 'v4.sqlite'))
+  let backup: ReturnType<typeof openProtocol> | null = null
+  try {
+    applyComponentMigrations(legacy, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 4))
+    legacy.initialize(SYNC_COORDINATOR_ADDRESS)
+    const inputs = [f.admit(source('one')), f.admit({ ...source('other'), repositoryId: 'other-repo' }), f.admit(source('two'))]
+    const oldOperations = inputs.map(input => {
+      const current = f.store.admitAndEnqueue(input), { capturedAtMs: _capture, ...stableInput } = input.input
+      void _capture
+      const payload = { input: stableInput, scope: input.scope, policyDigest: input.policyDigest, impactDigest: input.impactDigest, readSetDigest: input.readSetDigest, deliveryPlan: input.deliveryPlan, previousBaselinePairId: null, budget: input.budget }
+      const hash = createHash('sha256').update(JSON.stringify(payload, (_key, entry: unknown) => entry && typeof entry === 'object' && !Array.isArray(entry) ? Object.fromEntries(Object.entries(entry).sort(([a], [b]) => a.localeCompare(b))) : entry)).digest('hex')
+      const envelope = { version: 1, type: 'sync.dispatch', operationId: current.id, inputId: current.input.id, generation: current.generation, dispatchKey: `sync-dispatch-${current.id}-${current.generation}` }
+      const message = legacy.enqueue(SYNC_COORDINATOR_ADDRESS, { kind: 'sync.dispatch.v1', body: Buffer.from(JSON.stringify(envelope)), idempotencyKey: envelope.dispatchKey })
+      const old = { ...current, payloadDigest: hash, dispatchMessageId: message.messageId }
+      const row = f.protocol.withTransaction(tx => tx.query('SELECT * FROM sync_operations WHERE id=?', current.id))[0]
+      row.payload_digest = hash; row.record_json = JSON.stringify(old)
+      const columns = Object.keys(row)
+      legacy.withTransaction(tx => tx.exec(`INSERT INTO sync_operations(${columns.join(',')}) VALUES(${columns.map(() => '?').join(',')})`, ...columns.map(column => row[column]) as SqlParam[]))
+      return old
+    })
+    assert.throws(() => new SyncStore(legacy, f.options), /SYNC_SCHEMA_UNSUPPORTED/)
+    const migration = SYNC_MIGRATIONS[4]
+    assert.throws(() => applyComponentMigrations(legacy, SYNC_COMPONENT, [...SYNC_MIGRATIONS.slice(0, 4), { ...migration, afterApply: { key: migration.afterApply!.key, run(tx) { migration.afterApply!.run(tx); throw new Error('route-interrupted') } } }]), /route-interrupted/)
+    assert.equal(legacy.withTransaction(tx => tx.query('SELECT MAX(version) AS version FROM schema_migrations WHERE component=?', SYNC_COMPONENT))[0].version, 4)
+    assert.deepEqual(legacy.listPending(SYNC_COORDINATOR_ADDRESS).map(row => row.messageId), oldOperations.map(op => op.dispatchMessageId))
+    assert.equal(legacy.withTransaction(tx => tx.query('SELECT record_json FROM sync_operations WHERE id=?', oldOperations[0].id))[0].record_json, JSON.stringify(oldOperations[0]))
+    const backupPath = join(f.root, 'v4-backup.sqlite')
+    assert.equal(await migrateSyncStore(legacy, { backupPath }), 5)
+    backup = openProtocol(backupPath)
+    assert.equal(backup.withTransaction(tx => tx.query('SELECT MAX(version) AS version FROM schema_migrations WHERE component=?', SYNC_COMPONENT))[0].version, 4)
+    assert.deepEqual(backup.listPending(SYNC_COORDINATOR_ADDRESS).map(row => row.messageId), oldOperations.map(op => op.dispatchMessageId))
+    assert.equal(legacy.listPending(SYNC_COORDINATOR_ADDRESS).length, 0)
+    assert.deepEqual(legacy.readMessages(SYNC_COORDINATOR_ADDRESS).map(row => row.messageId), oldOperations.map(op => op.dispatchMessageId))
+    const upgraded = new SyncStore(legacy, f.options)
+    assert.deepEqual(legacy.listPending(syncCoordinatorAddress('repo')).map(row => JSON.parse(Buffer.from(row.body).toString()).operationId), [oldOperations[0].id, oldOperations[2].id])
+    assert.equal(upgraded.nextDispatch('other-repo')?.operation.id, oldOperations[1].id)
+    assert.equal(upgraded.admitAndEnqueue(inputs[0]).id, oldOperations[0].id)
+    assert.equal(upgraded.admitAndEnqueue({ ...inputs[0], ingressKey: 'legacy-alias' }).payloadDigest, oldOperations[0].payloadDigest)
+    assert.throws(() => upgraded.admitAndEnqueue({ ...inputs[0], origin: 'code' }), /SYNC_IDEMPOTENCY_CONFLICT/)
+    assert.throws(() => applyComponentMigrations(legacy, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 4)), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
+    const reopened = openProtocol(legacy.databasePath)
+    try {
+      assert.equal(await migrateSyncStore(reopened), 5)
+      assert.equal(reopened.listPending(syncCoordinatorAddress('repo')).length, 2)
+      assert.equal(new SyncStore(reopened, f.options).readOperation(oldOperations[0].id).payloadDigest, oldOperations[0].payloadDigest)
+    } finally { reopened.close() }
+  } finally { backup?.close(); legacy.close(); f.cleanup() }
 })

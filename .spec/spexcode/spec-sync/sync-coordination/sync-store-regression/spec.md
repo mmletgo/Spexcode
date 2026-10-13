@@ -51,3 +51,5 @@ attempt查询仅返回精确operation、包含历史及终态attempt并按插入
 已消费paused身份resume时，另一有效pending仍在则等待并不创建attempt；pending被正常claim后才恢复已dequeued操作。执行最相关session-protocol adopter-seams回归验证tx.query只读与tx.dequeue原子边界。
 
 真实部分 receipt 结算到 needs_input 后，新尝试只领取原 ready 范围；不同细化 evidence 扩展完整旧/新 ID 集合时，已有 blocked contract/flow ID 仍只在 blockedScope，新 ID 可进入 ready，不能因重新登记旧 ID 造成业务分区重叠。
+
+v5真实SQLite证明同ingress不同origin拒、同input不同origin不归并、已有legacy摘要同origin可重放且不改原payload。两个仓库真实protocol地址独立，同仓库不同worktree有效头不可越过；v4旧global FIFO迁移保序且旧消息留审计，失败回滚并可重启。

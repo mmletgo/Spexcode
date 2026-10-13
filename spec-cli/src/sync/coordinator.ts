@@ -233,7 +233,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
     const terminal = ['workspace_synced', 'canonical_synced', 'awaiting_landing', 'cancelled', 'superseded', 'paused', 'budget_exhausted']
     if (terminal.includes(operation.phase) || operation.control !== 'run' || attempt?.status === 'settled' || (attempt?.status === 'failed' && attempt.failure?.kind !== 'repairable')) {
       if (!await recoverResources(store, operation, options, true)) return current('recovery_required')
-      const head = store.nextDispatch()
+      const head = store.nextDispatch(operation.input.source.repositoryId)
       if (head?.operation.id === operation.id && (operation.control !== 'run' || terminal.includes(operation.phase))) store.discardDispatch(operation.id, head.messageId)
       return current()
     }

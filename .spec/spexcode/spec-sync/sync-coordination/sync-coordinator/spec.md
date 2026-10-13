@@ -31,3 +31,5 @@ initial与spec共享P2入口。旧无planBlob operation先claim持久unsupported
 decision/reconcile还必须有绑定真实input/path的受控Spec requestBlob，才沿原Spec链；仅标记或自动代码reconcile不构成授权。code/combined及其它来源保持unsupported，不通过初始入口掩盖P3/P4尚未接入。
 
 交付准备后beforeApply再核V4；input/policy/readset变化先以当前fence登记精确conflict，再抛原错误供private-delivery保留，不能变成笼统environment。deadline真实耗尽保存budget_exhausted；controlled/过期旧fence不能借guard重新取得写权。
+
+运行及恢复只查询operation所属repositoryId的真实FIFO地址；不扫描global head后按仓库过滤，也不跨仓库运行另一项目的原生后端。

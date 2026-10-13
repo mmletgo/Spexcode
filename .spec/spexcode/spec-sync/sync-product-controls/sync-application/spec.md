@@ -20,8 +20,10 @@ enable 读取 [[sync-application-settings]]，可用预期配置摘要检查并�
 
 readSettings.activation 区分 disabled、enabled 与 invalidated：未有本机启用记录是 disabled；记录存在且当前身份/配置摘要一致是 enabled；已启用后配置删除、坏格式、越界授权、身份或摘要失配是 invalidated，并保留具体 configurationError。enabled:false 不等于用户关闭同步，invalidated 正文保存必须拒绝，不能降级为普通 Spec 独立提交。
 
-submit 接收 nodeId、稳定 requestId 与可选 SpecBodyEdit。受控编辑先 capture 真 source，从冻结节点解析路径，在准备函数读正文前检查 symlink；prepareControlledRequest 独立冻结请求，不改原文件、index 或 HEAD。相同字节 no-op 不入队；同请求键和相同内容返回原操作，不同内容拒绝。[[sync-application-planning]] 构造 plan；固定 compiled runtime 与内容寻址计划在 admit 前保存，随后唯一 coordinator 实际细化、生成、验证和交付。V4 重新读当前输入与可信配置，不能用旧 plan 自证。正常 typed failure 持久结算，后端持有运行 Promise 并显式诊断无法结算的故障，不丢 rejection；P4 停机自动补偿不属于当前阶段。
+submit 接收 nodeId、稳定 requestId、spec/initial 来源与可选 SpecBodyEdit。来源真实参与持久操作和幂等身份；initial 沿同一 Spec 业务管线，不能把同键改来源当重放。受控编辑先 capture 真 source，从冻结节点解析路径，在准备函数读正文前检查 symlink；prepareControlledRequest 独立冻结请求，不改原文件、index 或 HEAD。相同字节 no-op 不入队；同请求键和相同内容返回原操作，不同内容拒绝。[[sync-application-planning]] 构造 plan；固定 compiled runtime 与内容寻址计划在 admit 前保存，随后唯一 coordinator 实际细化、生成、验证和交付。V4 重新读当前输入与可信配置，不能用旧 plan 自证。正常 typed failure 持久结算，后端持有运行 Promise 并显式诊断无法结算的故障，不丢 rejection；P4 停机自动补偿不属于当前阶段。
 
 status 按节点及 bounded limit 查询，detail 返回 operation、当前 attempt、完整 journal 和 settled receipt；证据按 hash 校验读取。新 source input ID 使旧结果过期；workspace_synced 只表明实际受管交付，原树待落地单独展示。GAP/冲突与验证失败保留各自 phase/failure。pause/cancel 使用 store 控制及 AbortSignal，写入中由 coordinator 结算真实副作用；resume 先检查当前输入和授权，过期要求最新请求，不先改变旧控制。
 
 同 ingress 的准备及受理复用 file-mutex bounded 串接，并发相同请求只建立同一操作和固定 runtime，不重置预算。planBlob 由 coordinator 用 syncPlanDigest 的唯一规范化 bytes 冻结和 pin，应用直接按 op.planBlob 校验读取；旧操作无固定引用时明确不可猜测恢复。detail.executionAvailability 从实际固定计划、描述和 runtime manifest 推导恢复诊断，queued 也不能隐藏资料缺失。工具描述有 ownedruntime 副本；丢失索引时，只能校验同一原 runtime manifest/digest 后恢复。已有 attempt、verification 或 journal 且原描述不能恢复时，禁止以当前升级工具重冻结或沿用旧证据；仅未派发 queued 操作可重新准备并完整运行。resume 先等旧 abort 执行结算，再恢复 run 控制，避免旧结束回调覆盖恢复。
+
+派发使用 canonical protocol 中按 repositoryId 固定的真实地址，同仓库多个 source 工作树共享 FIFO，不同仓库共享 session DB 时互不堵塞。入口只唤醒当前仓库有效消息头，精确清理已停止的旧消息；同仓库来源由对应应用实例执行，禁止跨仓库 fallback。busy 返回真实 queued 状态，不自旋重试。前序结算后继续读取真实 FIFO；消息已耗尽时，从 canonical store 的 queued/run 状态恢复已出队暂停操作，不创建第二队列、不重置预算。wait 等待当前仓库实际运行中的前序和目标任务，外部互斥仍占用时诚实返回 queued 详情，不把它标为完成。

@@ -34,14 +34,17 @@ const completed = new Set(['workspace_synced', 'awaiting_landing', 'canonical_sy
 export class SyncApplication {
   readonly store: SyncStore
   private readonly root: string
+  private readonly repositoryId: string
   private readonly runtime: string
   private readonly managedRoot: string
   private readonly artifactRoot: string
   private readonly enabledPath: string
+  private routing: Promise<void> | null = null
   private readonly running = new Map<string, { controller: AbortController; finished: Promise<void> }>()
   private constructor(root: string, private readonly options: SyncApplicationOptions) {
     const source = identifyWorktree(root)
     this.root = source.canonicalRoot
+    this.repositoryId = source.repositoryId
     const directory = options.runtimeDirectory ?? join(runtimeRoot(root), 'sync')
     mkdirSync(directory, { recursive: true, mode: 0o700 })
     this.runtime = realpathSync(directory)
@@ -58,7 +61,9 @@ export class SyncApplication {
   }
   static async create(root: string, options: SyncApplicationOptions): Promise<SyncApplication> {
     await migrateSyncStore(options.protocol)
-    return new SyncApplication(root, options)
+    const application = new SyncApplication(root, options)
+    applicationOwners.set(`${options.protocol.databasePath}\0${application.repositoryId}\0${application.root}`, application)
+    return application
   }
   private enabled(snapshot: InputSnapshot): EnabledRecord | null {
     if (!existsSync(this.enabledPath)) return null
@@ -190,8 +195,8 @@ export class SyncApplication {
     }
     try {
       const prior = this.store.findOperationByIngressKey(ingressKey)
-      if (prior && (prior.input.id !== snapshot.id || JSON.stringify(prior.input.source) !== JSON.stringify(snapshot.source) || prior.policyDigest !== syncPlanDigest(plan) || (prior.requestBlob?.sha256 ?? null) !== (requestBlob?.sha256 ?? null))) throw new SyncStoreError('SYNC_IDEMPOTENCY_CONFLICT', ingressKey)
-      const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: input.requestId, origin: 'spec', budget: settings.budget, managedRoot: this.managedRoot, ...(requestBlob ? { requestBlob } : {}), previousBaselinePair: prior ? prior.previousBaselinePair : this.store.readBaseline(snapshot.source) })
+      if (prior && (prior.origin !== (input.origin ?? 'spec') || prior.input.id !== snapshot.id || JSON.stringify(prior.input.source) !== JSON.stringify(snapshot.source) || prior.policyDigest !== syncPlanDigest(plan) || (prior.requestBlob?.sha256 ?? null) !== (requestBlob?.sha256 ?? null))) throw new SyncStoreError('SYNC_IDEMPOTENCY_CONFLICT', ingressKey)
+      const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: input.requestId, origin: input.origin ?? 'spec', budget: settings.budget, managedRoot: this.managedRoot, ...(requestBlob ? { requestBlob } : {}), previousBaselinePair: prior ? prior.previousBaselinePair : this.store.readBaseline(snapshot.source) })
       this.prepareTools(admission.ingressKey, prior)
       const operation = this.store.admitAndEnqueue(admission)
       this.start(operation.id)
@@ -200,20 +205,68 @@ export class SyncApplication {
   }
   /** 长流程附着于后端进程；拒绝和环境失败必须持久结算，不能成为悬空 Promise。 */
   start(id: string): void {
+    this.assertSource(this.store.readOperation(id))
+    if (!this.startNextDispatch()) this.launch(id)
+  }
+  /** 先沿真实仓库 FIFO，再恢复 canonical store 中已出队的 queued 操作。 */
+  private startNextDispatch(): boolean {
+    if (this.routing) return true
+    let head = this.store.nextDispatch(this.repositoryId)
+    while (head && (head.operation.control !== 'run' || completed.has(head.operation.phase))) {
+      this.store.discardDispatch(head.operation.id, head.messageId)
+      head = this.store.nextDispatch(this.repositoryId)
+    }
+    const operation = head?.operation ?? this.store.listRecoverable().map(item => item.operation).find(operation =>
+      operation.input.source.repositoryId === this.repositoryId && operation.phase === 'queued' && operation.control === 'run' &&
+      !applicationOwners.get(this.ownerKey(operation.input.source.canonicalRoot))?.running.has(operation.id))
+    if (!operation) return false
+    const sourceRoot = operation.input.source.canonicalRoot
+    const owner = applicationOwners.get(this.ownerKey(sourceRoot))
+    if (owner) owner.launch(operation.id)
+    else {
+      const id = operation.id
+      const routing = configuredSyncApplication(sourceRoot).then(application => application.launch(id)).finally(() => { this.routing = null })
+      this.routing = routing
+      void routing.catch((error: unknown) => console.error(`sync FIFO ${id} 来源服务不可恢复：`, error))
+    }
+    return true
+  }
+  private ownerKey(root: string): string { return `${this.options.protocol.databasePath}\0${this.repositoryId}\0${root}` }
+  private launch(id: string): void {
     const operation = this.store.readOperation(id); this.assertSource(operation)
     if (this.running.has(id) || completed.has(operation.phase) || operation.control !== 'run') return
     const controller = new AbortController()
     const { plan, tools } = this.executionInputs(operation)
     const { settings } = readSyncSettings(operation.input)
+    let advance = false
     const finished = runSyncOperation(this.store, id, { plan, readCurrentPlan: async () => {
       const current = await captureInputSnapshot(this.root); this.requireEnabled(current)
       return buildSyncApplicationPlan(current, plan.intentNodeId)
-    }, managedRoot: this.managedRoot, artifactRoot: this.artifactRoot, tools, runner: this.options.runner, verificationDriver: this.options.verificationDriver, signal: controller.signal, callTimeoutMs: settings.callTimeoutMs }).then(() => {}).finally(() => { this.running.delete(id) })
+    }, managedRoot: this.managedRoot, artifactRoot: this.artifactRoot, tools, runner: this.options.runner, verificationDriver: this.options.verificationDriver, signal: controller.signal, callTimeoutMs: settings.callTimeoutMs }).then(result => { advance = result.status !== 'busy' }).finally(() => {
+      this.running.delete(id)
+      if (advance) {
+        try { this.startNextDispatch() }
+        catch (error) { console.error('sync FIFO 后继操作无法启动，需查询其运行资料恢复诊断：', error) }
+      }
+    })
     this.running.set(id, { controller, finished })
     // 结算失败本身不能吞掉；后端会得到明确诊断，操作仍保留在 canonical store。
     void finished.catch((error: unknown) => console.error(`sync operation ${id} 无法持久结算：`, error))
   }
-  async wait(id: string): Promise<SyncOperationDetail> { await this.running.get(id)?.finished; return this.readOperation(id) }
+  async wait(id: string): Promise<SyncOperationDetail> {
+    this.assertSource(this.store.readOperation(id))
+    const owners = (): SyncApplication[] => [...applicationOwners.values()].filter(owner => owner.repositoryId === this.repositoryId && owner.options.protocol.databasePath === this.options.protocol.databasePath)
+    for (;;) {
+      await Promise.all(owners().map(owner => owner.routing))
+      const own = this.running.get(id)
+      if (own) await own.finished
+      const operation = this.store.readOperation(id)
+      if (operation.phase !== 'queued' || operation.control !== 'run') return this.readOperation(id)
+      const preceding = owners().flatMap(owner => [...owner.running.values()].map(flight => flight.finished))
+      if (!preceding.length) return this.readOperation(id)
+      await Promise.race(preceding)
+    }
+  }
   async control(id: string, action: 'pause' | 'resume' | 'cancel'): Promise<SyncOperationDetail> {
     const operation = this.store.readOperation(id); this.assertSource(operation)
     if (!['pause', 'resume', 'cancel'].includes(action)) throw new SyncApplicationError('sync_control_invalid', '不支持的同步控制', 400)
@@ -246,6 +299,7 @@ export class SyncApplication {
     return JSON.parse(readEvidence(detail.operation.input.source.commonDir, ref).toString('utf8')) as unknown
   }
 }
+const applicationOwners = new Map<string, SyncApplication>()
 const applications = new Map<string, Promise<SyncApplication>>()
 /** 生产入口只使用现有 canonical session protocol；不新建队列或数据库。 */
 export function configuredSyncApplication(root: string): Promise<SyncApplication> {

@@ -20,3 +20,5 @@ keys and generated declarations are both part of the boundary: adding an export 
 current consumer imports it.
 
 公开 SessionProtocol.backupTo(destination): Promise<void> 与 ProtocolTransaction.dequeue(sessionId, expectedMessageId?)；前者提供一致性备份，后者提供消息消费与采用层 claim 的共享事务边界。
+
+ProtocolTransaction公开initialize(sessionId):SessionAddress；ComponentMigration可选afterApply:{key:string,run(tx):void}，稳定key标识回调语义版本，SQL-only旧摘要不改。

@@ -287,6 +287,21 @@ function buildHandle(
     return row
   }
 
+  const initializeAddress = (sessionId: string) => {
+    requireSessionId(sessionId)
+    const existing = database.prepare(SQL.session).get(sessionId) as SessionRow | undefined
+    if (existing) {
+      if (existing.retired_at_ms !== null) {
+        fail('PROTOCOL_SESSION_RETIRED', `protocol address is retired and cannot be resurrected: ${sessionId}`)
+      }
+      return { sessionId, createdAtMs: Number(existing.created_at_ms), retiredAtMs: null }
+    }
+    const createdAtMs = now()
+    database.prepare('INSERT INTO protocol_sessions(session_id, created_at_ms, retired_at_ms) VALUES(?,?,NULL)')
+      .run(sessionId, createdAtMs)
+    return { sessionId, createdAtMs, retiredAtMs: null }
+  }
+
   const insertNormalizedMessage = (message: NormalizedMessage): Message => {
     const sessionId = message.targetSessionId
     requireAddress(sessionId)
@@ -349,6 +364,7 @@ function buildHandle(
   }
 
   const transaction: ProtocolTransaction = {
+    initialize: initializeAddress,
     exec(sql, ...params) {
       requireSql(sql)
       requireSqlParams(params)
@@ -381,20 +397,7 @@ function buildHandle(
 
     initialize(sessionId) {
       rejectReentry('protocol.initialize')
-      requireSessionId(sessionId)
-      return write('protocol.initialize', () => {
-        const existing = database.prepare(SQL.session).get(sessionId) as SessionRow | undefined
-        if (existing) {
-          if (existing.retired_at_ms !== null) {
-            fail('PROTOCOL_SESSION_RETIRED', `protocol address is retired and cannot be resurrected: ${sessionId}`)
-          }
-          return { sessionId, createdAtMs: Number(existing.created_at_ms), retiredAtMs: null }
-        }
-        const createdAtMs = now()
-        database.prepare('INSERT INTO protocol_sessions(session_id, created_at_ms, retired_at_ms) VALUES(?,?,NULL)')
-          .run(sessionId, createdAtMs)
-        return { sessionId, createdAtMs, retiredAtMs: null }
-      })
+      return write('protocol.initialize', () => initializeAddress(sessionId))
     },
 
     enqueue(sessionId, input) {
@@ -554,10 +557,11 @@ function buildHandle(
       ensureOpen()
       rejectReentry('applyComponentMigrations')
       try {
-        return migrateComponent(database, component, migrations, now)
+        transactionActive = true
+        return migrateComponent(database, component, migrations, now, transaction)
       } catch (error) {
         rethrowProtocolError(error)
-      }
+      } finally { transactionActive = false }
     },
   })
   return handle
