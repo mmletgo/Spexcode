@@ -73,7 +73,7 @@ test('Git返回128但主ref已推进，按真实tree/parent/effect结算而不�
   const f = await fixture(t)
   writeFileSync(f.options.tools.toolEntry, `import { appendFileSync } from 'node:fs';\nif(process.argv[2]==='internal'&&process.argv[3]==='trunk') console.log('main');\nif(process.env.SPEXCODE_SYNC_OPERATION==='publish'&&process.argv[2]==='spec') appendFileSync(new URL(import.meta.url),'// runtime changed after prepared lint\\n');\n`)
   const delivered = await deliverVerifiedAttempt(f.store, f.fence, f.options)
-  const outcome = f.store.readAttempt(f.fence.attemptId).checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(value => typeof value.status === 'number')
+  const outcome = f.store.readAttempt(f.fence.attemptId).checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(value => value.kind === 'private-delivery-commit')
   assert.equal(outcome.status, 128); assert.match(outcome.stderr, /trusted sync tool binding/)
   assert.equal(delivered.operation.phase, 'workspace_synced'); assert.equal(f.git('rev-list', '--count', f.operation.deliveryPlan.branch), '2')
   assert.equal(f.git('show', '-s', '--format=%T', f.operation.deliveryPlan.branch), f.candidate.tree)
@@ -134,10 +134,12 @@ test('无owner的既有空parent不能被认领为自己的交付', { timeout: 3
 
 test('prepare失败后的精确base可由重新验证的新attempt接管，旧fence仍失权', { timeout: 40000 }, async t => {
   const f = await fixture(t)
-  writeFileSync(f.options.tools.toolEntry, `if(process.argv[2]==='internal'&&process.argv[3]==='refresh-footprint') process.exit(1);\nif(process.argv[2]==='internal'&&process.argv[3]==='trunk') console.log('main');\n`)
+  writeFileSync(f.options.tools.toolEntry, `if(process.argv[2]==='internal'&&process.argv[3]==='refresh-footprint') { console.error('controlled prepare diagnostic'); process.exit(1); }\nif(process.argv[2]==='internal'&&process.argv[3]==='trunk') console.log('main');\n`)
   await assert.rejects(deliverVerifiedAttempt(f.store, f.fence, f.options), /PREPARE_FAILED/)
   assert.ok(existsSync(join(f.operation.deliveryPlan.canonicalRoot, '.git')))
   assert.equal(f.store.readAttempt(f.fence.attemptId).status, 'failed')
+  const preparation = f.store.readAttempt(f.fence.attemptId).checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(value => value.kind === 'private-delivery-prepare')
+  assert.notEqual(preparation.status, 0); assert.match(preparation.stderr, /controlled prepare diagnostic/)
   writeFileSync(f.options.tools.toolEntry, `if(process.argv[2]==='internal'&&process.argv[3]==='trunk') console.log('main');\n`)
   await assert.rejects(deliverVerifiedAttempt(f.store, f.fence, f.options), /NOT_VERIFIED/)
   const previous = f.store.readAttempt(f.fence.attemptId), operation = f.store.readOperation(f.operation.id)

@@ -29,3 +29,5 @@ planPrivateDelivery 从受管根、实际 source 身份和稳定 ingressKey 得�
 receipt 使用真实最终 InputSnapshot，要求 tree/manifest 完全等于冻结候选且 index tree 等于 commit tree；所有文件步骤已完成后才能 recordReceipt/settleApply。已结算的重入只核对并返回原结果。结算前 owner 保持私有；结算后标记 published 并返回实际交付身份、commit 与 receipt，主分支合并由上层另行治理。此节点不宣称原 source 或主分支已经同步，不自动删除未知残片或用户产物。
 
 候选 tree 与既有 parent tree 完全相同则登记明确 unchanged intent，复用实际 parent commit，不制造空提交；验证与receipt仍不可省略。publish 的 prepared 已成功后 Git 后续 AUTO_MERGE 清理可返回非零，即使退出128也必须先核实际结果；只有 tree、单parent、分支及 effectKey 都匹配才补结算。
+
+Git worktree 准备与提交各自持久保存带种类的真实退出码、signal、stdout/stderr 与启动错误，错误路径也可在 attempt 检查点追溯。准备失败的诊断不能只剩笼统 PREPARE_FAILED；不把非零退出解释为已撤销实际目录/ref。

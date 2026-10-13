@@ -122,6 +122,7 @@ export async function deliverVerifiedAttempt(store: SyncStore, fence: WriteFence
         if (branchExists && git(binding, operation.input.source.canonicalRoot, ['rev-parse', '--verify', operation.deliveryPlan.branch]) !== operation.deliveryPlan.baseCommit) fail('SYNC_DELIVERY_PREPARE_CONFLICT', '预定分支已有其他提交')
         const args = branchExists ? ['worktree', 'add', root, operation.deliveryPlan.branch.slice(11)] : ['worktree', 'add', '-b', operation.deliveryPlan.branch.slice(11), root, operation.deliveryPlan.baseCommit]
         const created = spawnSync(binding.gitPath, ['--no-replace-objects', '-C', operation.input.source.canonicalRoot, ...args], { env: makeTrustedHookEnv(binding), encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 })
+        store.checkpoint(fence, writeEvidence(commonDir, { version: 1, kind: 'private-delivery-prepare', operationId: operation.id, attemptId: attempt.id, status: created.status, signal: created.signal, stdout: created.stdout, stderr: created.stderr, error: created.error?.message }))
         if (created.error) throw created.error
         if (created.status !== 0) fail('SYNC_DELIVERY_PREPARE_FAILED', 'Git准备未完整成功；实际ref/目录已保留，恢复须核对')
       }
@@ -169,7 +170,7 @@ export async function deliverVerifiedAttempt(store: SyncStore, fence: WriteFence
       store.checkpoint(fence, owner.commitIntent!)
       assertOwner(); git(intent.binding, root, ['read-tree', intent.tree])
       const committed = spawnSync(intent.binding.gitPath, ['--no-replace-objects', '-C', root, 'commit', '-F', '-'], { input: intent.message, env: makeTrustedHookEnv(intent.binding), encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 })
-      const outcome = writeEvidence(commonDir, { version: 1, journalId: journal.id, status: committed.status, signal: committed.signal, stdout: committed.stdout, stderr: committed.stderr, error: committed.error?.message })
+      const outcome = writeEvidence(commonDir, { version: 1, kind: 'private-delivery-commit', journalId: journal.id, status: committed.status, signal: committed.signal, stdout: committed.stdout, stderr: committed.stderr, error: committed.error?.message })
       store.checkpoint(fence, outcome)
       await options.afterCommit?.()
     }
