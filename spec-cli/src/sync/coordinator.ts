@@ -119,7 +119,7 @@ function injectedRunner(store: SyncStore, fence: WriteFence, runner: Elaboration
     const result = await runner(request)
     if (signal?.aborted) fail('cancelled', '模型结果到达时已停止')
     if (result.sessionId !== sessionIdForCreateKey(dispatch.sessionCreateKey) || !result.threadId || !result.turnId || contentHash(JSON.stringify(result.output)) !== result.resultDigest) fail('native_identity', '模型结果身份或摘要不匹配持久派发计划')
-    store.bindSession(fence, request.requestKey, result)
+    store.bindSession(fence, request.requestKey, { sessionId: result.sessionId, threadId: result.threadId, turnId: result.turnId })
     saveStage(store, fence, `injected:${request.requestKey}`, { requestDigest, result })
     return result
   }
@@ -263,6 +263,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         } catch (error) { heartbeatFailure = failure('lease_heartbeat', error instanceof Error ? error.message : String(error), 'environment'); controller.abort() }
       }, heartbeatMs)
       operation = store.readOperation(operationId); attempt = store.readAttempt(fence.attemptId)
+      if (!operation.planBlob) fail('plan_missing', '旧操作没有完整可信计划证据，不能猜测或借用另一份政策恢复')
       const savedRepair = stage<{ repairContext?: typeof repairContext; seed?: ElaborationRepairSeed }>(store, operation, attempt, 'repair-input')
       if (savedRepair) { repairContext = savedRepair.repairContext; seed = savedRepair.seed }
       else if (repairContext || seed) saveStage(store, fence, 'repair-input', { repairContext, seed })

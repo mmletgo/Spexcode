@@ -19,3 +19,5 @@ code:
 当前独立证据：真实Linux/arm64 Node固定镜像的完整成功链（真实CLI init与正常hooks、source/index保留、receipt重入）、断言失败新attempt修复、V4中途输入变化、Git commit后DB未结算恢复、GAP独立完整FLOW部分receipt均通过。明确注入模型业务行，V1使用实际Tree-sitter/图/意图门禁，V2程序检查独立session/thread/result摘要，V3与Git均实际执行；不声称已跑真实LLM或P3–P5。未知历史native创建终态保留resource与recovery_required，不假removed。
 
 V3失败后修复的模型若再次收到P1会返回弱化AC，因此测试必须证明不会再次派发P1、后续生成prompt使用精确相同accepted契约/AC内容摘要，callsUsed仅计两次代码调用不重置。数据库重启后失败attempt同样从原P1 evidence复用，不依赖内存状态。
+
+高层raw输入没有REQ/FLOW/AC，初始scope只含目录前缀；通过真实细化登记未来业务ID、生成此前absent的新源码模块及可信原意已登记的新治理节点，再经真实Docker/normal Git hooks交付。任意reader-app根通过真实CLI init，作者managed投影不入候选，source/index保持；用户入口无需填写未来实现文件或AC。
