@@ -32,7 +32,7 @@ function rows(source: string): GeneratedElaboration {
   })))])) as GeneratedTables
   return { version: 'elaboration-rows-v1', changes: [{ nodeId: 'export-contract', path: contractPath, title: String(parseFrontmatter(source).fm.title), description: '', code: contract.code, related: contract.related, prose: parseParts(source)!.expandedSpec.split(/^### /m)[0], tables }], applicability: ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: true, basis: '固定演示夹具的显式业务政策和原始范围', affectedIds: ['REQ-EXPORT-01'] })) }
 }
-type FrozenGenerationPrompt = { readyIds: string[]; elaboratedSpecs: { path: string; source: string }[]; manifest: { entries: { path: string; digest: string; mode: string }[] }; files: [string, string][] }
+type FrozenGenerationPrompt = { contracts: unknown[]; readyIds: string[]; elaboratedSpecs: { path: string; source: string }[]; manifest: { entries: { path: string; digest: string; mode: string }[] }; files: [string, string][] }
 const promptInput = (request: ElaborationSessionRequest): FrozenGenerationPrompt => JSON.parse(request.prompt.split(request.purpose === 'code_generate' ? '冻结完整输入:\n' : '冻结原意和基线完整输入:\n')[1].split('\n实际候选身份')[0]) as FrozenGenerationPrompt
 function unlock(root: string): void {
   if (!existsSync(root)) return
@@ -61,7 +61,7 @@ async function fixture(t: test.TestContext, budget = { maxAttempts: 3, maxCalls:
   assert.equal(definition.kind, 'VERIFY')
   const plan: SyncCoordinatorPlan = { version: 'sync-coordinator-v1', intentNodeId: 'export-contract', targets: [{ nodeId: 'export-contract', path: contractPath }], readPaths: ['.spec', 'src', 'tests'], writePaths: ['.spec', 'src'], facts: [{ source: 'decision:EXPORT-POLICY', text: specSource }], verifications: [{ definition: { id: definition.id, command: definition.command, cwd: definition.cwd, timeoutMs: definition.timeoutMs }, environment: { version: 'trusted-test-v1', image: 'node@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392', platform: 'linux/arm64', memoryBytes: 128 * 1024 * 1024, cpus: 1, pidsLimit: 64, scratchBytes: 16 * 1024 * 1024, logBytes: 128 * 1024 } }], mandatoryTests: [{ verificationId: definition.id, testPath: 'tests/export.test.mjs', testId: 'AC-EXPORT-03' }] }
   const protocol = openProtocol(join(parent, 'sync.sqlite')); await migrateSyncStore(protocol, { backupPath: join(parent, 'db-backup') })
-  const store = new SyncStore(protocol, { readBlob: ref => readEvidence(input.source.commonDir, ref) })
+  let store = new SyncStore(protocol, { readBlob: ref => readEvidence(input.source.commonDir, ref) })
   const operation = store.admitAndEnqueue(await prepareSyncAdmission(input, plan, { ingressKey: input.id, rootCauseId: input.id, origin: 'spec', budget, managedRoot }))
   const calls: ElaborationSessionRequest[] = []
   let transform: ((output: unknown, request: ElaborationSessionRequest) => unknown | Promise<unknown>) | undefined
@@ -91,9 +91,9 @@ async function fixture(t: test.TestContext, budget = { maxAttempts: 3, maxCalls:
     for (const name of readdirSync(runtime.canonicalHooksDir)) { copyFileSync(join(runtime.canonicalHooksDir, name), join(root, '.git/hooks', name)); chmodSync(join(root, '.git/hooks', name), 0o755) }
     return runtime
   }
-  let preserve = false
-  t.after(() => { protocol.close(); if (!preserve) { unlock(parent); rmSync(parent, { recursive: true, force: true }) } })
-  return { root, parent, managedRoot, artifactRoot, input, index, bytes, store, operation, plan, options, calls, git, priorCommitCount, realTools, preserve: () => { preserve = true }, transform: (fn: typeof transform) => { transform = fn } }
+  let closed = false
+  t.after(() => { if (!closed) protocol.close(); unlock(parent); rmSync(parent, { recursive: true, force: true }) })
+  return { root, parent, managedRoot, artifactRoot, input, index, bytes, store, operation, plan, options, calls, git, priorCommitCount, realTools, closeForRestart: () => { protocol.close(); closed = true }, useStore: (next: SyncStore) => { store = next }, transform: (fn: typeof transform) => { transform = fn } }
 }
 
 test('可信目录授权/完整readset固定，同source不同policy不混，uncovered dirty和可改oracle拒绝', async t => {
@@ -176,7 +176,6 @@ test('取消后的历史native未知创建回执保留资源与recovery_required
 test('真实Docker→真实固定CLI hooks→私有完整交付，source/index保留，receipt重入不重复native/commit', docker, async t => {
   const f = await fixture(t, undefined, true); await f.realTools()
   const result = await runSyncOperation(f.store, f.operation.id, f.options)
-  if (result.status !== 'workspace_synced') { f.preserve(); console.error('temporary coordinator diagnosis:', f.parent, result.operation.deliveryPlan.canonicalRoot) }
   assert.equal(result.status, 'workspace_synced', JSON.stringify({ failure: result.failure, attemptFailure: f.store.readAttempt(result.operation.currentAttemptId!).failure, commandEvidence: f.store.readAttempt(result.operation.currentAttemptId!).checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).filter(value => typeof value.status === 'number' || value.kind === 'private-delivery-prepare') }))
   assert.ok(result.receipt); assert.equal(f.calls.length, 4)
   assert.ok(readFileSync(join(result.operation.deliveryPlan.canonicalRoot, 'src/export.js'), 'utf8').includes('independently reviewed'))
@@ -189,7 +188,12 @@ test('真实Docker→真实固定CLI hooks→私有完整交付，source/index�
 
 test('真实断言失败进入新attempt有限修复，保留失败输出，成功四层证据并同预算结算', docker, async t => {
   const f = await fixture(t); await f.realTools()
+  let p1Calls = 0
   f.transform((output, request) => {
+    if (request.purpose === 'elaboration_generate') {
+      p1Calls++
+      if (p1Calls > 1) return rows(original.replace('全部拒绝，原结果可由所有者下载', '无条件允许，结果无需权限'))
+    }
     if (request.purpose !== 'code_generate') return output
     const attempt = f.store.readAttempt(f.store.readOperation(f.operation.id).currentAttemptId!)
     if (attempt.number === 1) {
@@ -201,7 +205,10 @@ test('真实断言失败进入新attempt有限修复，保留失败输出，成�
   const result = await runSyncOperation(f.store, f.operation.id, f.options)
   assert.equal(result.status, 'workspace_synced', JSON.stringify(result.failure))
   assert.equal(f.store.readAttempt(result.operation.currentAttemptId!).number, 2)
-  assert.equal(result.operation.callsUsed, 8); assert.equal(f.store.listRecoverableResources().length, 0)
+  assert.equal(result.operation.callsUsed, 6); assert.equal(p1Calls, 1); assert.equal(f.store.listRecoverableResources().length, 0)
+  const inputs = f.calls.filter(call => call.purpose === 'code_generate').map(promptInput)
+  assert.equal(contentHash(JSON.stringify(inputs[0].contracts)), contentHash(JSON.stringify(inputs[1].contracts)))
+  assert.deepEqual(inputs[0].elaboratedSpecs, inputs[1].elaboratedSpecs)
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
 })
 
@@ -238,4 +245,41 @@ test('GAP只阻重试业务分支，共享文件仍真实交付ready完整FLOW�
   const callCount = f.calls.length
   assert.deepEqual((await runSyncOperation(f.store, f.operation.id, f.options)).receipt, result.receipt)
   assert.equal(f.calls.length, callCount)
+})
+
+test('真实V3失败后SQLite重启复用首个accepted P1，新的弱化AC不会再次被细化批准', docker, async t => {
+  const f = await fixture(t); await f.realTools()
+  let activeStore = f.store, p1Calls = 0
+  f.transform((output, request) => {
+    if (request.purpose === 'elaboration_generate') {
+      p1Calls++
+      if (p1Calls > 1) return rows(original.replace('全部拒绝，原结果可由所有者下载', '无条件允许，结果无需权限'))
+    }
+    if (request.purpose === 'code_generate' && activeStore.readAttempt(activeStore.readOperation(f.operation.id).currentAttemptId!).number === 1) {
+      const value = output as { changes: { path: string; content: string }[] }
+      const source = value.changes.find(change => change.path === 'src/export.js')!
+      source.content = source.content.replace("if (!actor) throw new Error('forbidden');", "if (actor) throw new Error('forbidden');")
+    }
+    return output
+  })
+  const claim = f.store.claimAttempt.bind(f.store)
+  f.store.claimAttempt = request => {
+    if (f.store.listAttempts(f.operation.id).some(attempt => attempt.failure?.code === 'verification_failed')) throw new Error('restart fault after actual failed V3 and durable recordFailure')
+    return claim(request)
+  }
+  const first = await runSyncOperation(f.store, f.operation.id, f.options)
+  assert.equal(first.status, 'failed'); assert.equal(first.failure?.code, 'verification_failed'); assert.equal(first.operation.callsUsed, 4)
+  f.closeForRestart()
+  const protocol = openProtocol(join(f.parent, 'sync.sqlite'))
+  t.after(() => protocol.close())
+  const restarted = new SyncStore(protocol, { readBlob: ref => readEvidence(f.input.source.commonDir, ref) })
+  activeStore = restarted; f.useStore(restarted)
+  const resumed = await runSyncOperation(restarted, f.operation.id, f.options)
+  assert.equal(resumed.status, 'workspace_synced', JSON.stringify(resumed.failure)); assert.equal(resumed.operation.callsUsed, 6); assert.equal(p1Calls, 1)
+  const inputs = f.calls.filter(call => call.purpose === 'code_generate').map(promptInput)
+  assert.equal(contentHash(JSON.stringify(inputs[0].contracts)), contentHash(JSON.stringify(inputs[1].contracts)))
+  assert.deepEqual(inputs[0].elaboratedSpecs, inputs[1].elaboratedSpecs)
+  const second = restarted.readAttempt(resumed.operation.currentAttemptId!)
+  assert.ok(second.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).some(value => value.fromAttemptId && value.evidenceRef && value.candidateDigest))
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
 })

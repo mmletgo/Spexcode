@@ -114,6 +114,9 @@ test('journals query exact operation and retains settled receipts in terminal op
     const other = f.store.admitAndEnqueue(f.admit(source('other')))
     assert.deepEqual(f.store.listJournals(other.id), [])
     assert.throws(() => f.store.listJournals('unknown'), /SYNC_OPERATION_UNKNOWN/)
+    assert.deepEqual(f.store.listAttempts(r.operation.id).map(attempt => attempt.id), [r.attempt.id])
+    assert.deepEqual(f.store.listAttempts(other.id), [])
+    assert.throws(() => f.store.listAttempts('unknown'), /SYNC_OPERATION_UNKNOWN/)
   } finally { f.cleanup() }
 })
 

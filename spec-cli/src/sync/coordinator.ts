@@ -275,6 +275,16 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       const runner = options.runner ? injectedRunner(store, fence, options.runner) : createAttemptRunner(store, fence)
       let elaboration = stage<SavedElaboration>(store, operation, attempt, 'elaboration')
       if (!elaboration) {
+        for (const prior of store.listAttempts(operation.id).filter(item => item.number < attempt!.number)) {
+          const approved = stage<SavedElaboration>(store, operation, prior, 'elaboration')
+          if (!approved?.structurePassed || !approved.reviewPassed || !['complete', 'needs_input', 'conflict'].includes(approved.status)) continue
+          elaboration = approved
+          saveStage(store, fence, 'elaboration-provenance', { operationId: operation.id, inputId: operation.input.id, policyDigest: operation.policyDigest, fromAttemptId: prior.id, evidenceRef: writeEvidence(operation.input.source.commonDir, approved), candidateDigest: approved.candidateDigest })
+          saveStage(store, fence, 'elaboration', approved)
+          break
+        }
+      }
+      if (!elaboration) {
         if (operation.phase === 'analyzing') store.startElaboration(fence)
         const intent = view.frozen.nodes.find(node => node.id === options.plan.intentNodeId)
         const rawSource = options.plan.targets.find(target => target.nodeId === options.plan.intentNodeId)?.rawSource ?? intent?.rawSource
@@ -301,6 +311,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         continue
       }
       const acceptedFiles = new Map(view.files)
+      seed = undefined
       for (const change of elaboration.changes) acceptedFiles.set(change.path, change.source)
       const accepted = await readFrozenContracts(operation.input.source.canonicalRoot, acceptedFiles)
       const scopeIds = unique([...operation.scope.contractIds, ...[...accepted.graph.items.values()].filter(item => item.kind !== 'FLOW' && item.kind !== 'VERIFY').map(item => item.id)])

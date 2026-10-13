@@ -44,4 +44,6 @@ journal精确查询证明未知operation拒绝、另一operation不可串读，�
 
 计划引用回归证明queued直接GC pin、同键同计划幂等、policy/ref不匹配及错误bytes摘要拒绝；v3→v4备份可独立打开原v3库，旧无plan payload/队列不变，重复升级及新handle读取plan仍成立。
 
+attempt查询仅返回精确operation、包含历史及终态attempt并按插入顺序排列；未知operation拒绝，不能扫描全库拼接修复证据。
+
 真实部分 receipt 结算到 needs_input 后，新尝试只领取原 ready 范围；不同细化 evidence 扩展完整旧/新 ID 集合时，已有 blocked contract/flow ID 仍只在 blockedScope，新 ID 可进入 ready，不能因重新登记旧 ID 造成业务分区重叠。

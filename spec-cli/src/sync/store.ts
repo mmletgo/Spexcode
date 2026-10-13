@@ -453,6 +453,9 @@ export class SyncStore {
     return this.write(tx => tx.query(`SELECT record_json FROM sync_operations WHERE repository_id=?${options.sourceRoot === undefined ? '' : ' AND source_root=?'} ORDER BY rowid DESC LIMIT ?`, ...[repositoryId, ...(options.sourceRoot === undefined ? [] : [options.sourceRoot]), limit]).map(row => parseRecord<SyncOperation>(row)!))
   }
   readAttempt(id: string): SyncAttempt { return this.write(tx => this.attempt(tx, id)) }
+  listAttempts(operationId: string): SyncAttempt[] {
+    return this.write(tx => { this.operation(tx, operationId); return tx.query('SELECT record_json FROM sync_attempts WHERE operation_id=? ORDER BY rowid', operationId).map(row => parseRecord<SyncAttempt>(row)!) })
+  }
   readJournal(id: string): ApplyJournal { return this.write(tx => this.journal(tx, id)) }
   listJournals(operationId: string): ApplyJournal[] {
     return this.write(tx => { this.operation(tx, operationId); return tx.query('SELECT record_json FROM sync_apply_journals WHERE operation_id=? ORDER BY rowid', operationId).map(row => parseRecord<ApplyJournal>(row)!) })

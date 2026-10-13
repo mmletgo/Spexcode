@@ -23,3 +23,5 @@ P1 已审结构结果登记所有未来业务 ID，包括 GAP/partial FLOW；rea
 失败通过新attempt有限修复，冻结预算、deadline及政策不重置，诊断不能升格为事实；环境unsupported、真正业务 GAP/conflict、未知资源恢复停止自动重跑。候选冻结后不覆盖；applying/receipt恢复优先既定交付，真实Git commit及DB未结算不会再生成或重复提交。仅receipt结算可推进成对baseline和deliveredScope，根有blockedReason保持needs_input/conflicted。code/combined来源明确P3未接入。
 
 freezeSyncPlanEvidence复用同一canonical JSON排序，使planBlob.sha256严格等于policyDigest；接入直接保存plan引用，queued恢复不依赖另一个索引文件。派生authorProjection仅规范化已核canonical managed文本，真实snapshot不变；Spec受控decision/reconcile沿用P2，只有code/combined明确P3未接入。阶段result及嵌套refs直接checkpoint保活，不能只pin wrapper。
+
+同operation/input/policy首个P1结构及独立评审通过的细化结果永久冻结为生成义务；code/V3修复的新attempt与进程重启复用原精确结果，并checkpoint原attempt/result evidence provenance，不能再派发P1或更改其稳定AC/ID/政策。仅P1本身未通过时可再细化；通过后清空失败seed，未通过旧seed不能复活。
