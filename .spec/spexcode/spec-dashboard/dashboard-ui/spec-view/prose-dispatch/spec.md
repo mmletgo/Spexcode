@@ -117,3 +117,5 @@ Crossing is ordinary navigation, so it dismisses the menu before it moves.
 the native context-menu gesture is what reveals the actions. Same items, same handlers, anchored at the
 pointer instead of at the passage — one component with two anchors rather than a menu that can drift from
 the bar it mirrors.
+
+手工保存每次用户payload生成稳定幂等key，失败重试同payload沿用，新payload换key；等待中拒绝重复触发。项目同步启用时提示保存进入同步操作，新syncOperation回执只提示已接入同步并通知当前文档刷新面板，不冒称来源已commit；旧纯Spec回执保留真实commit反馈。交付树仍不挂载编辑动作。

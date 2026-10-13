@@ -211,6 +211,7 @@ export async function apiFetch(input, init) {
       return response
     }
     catch (e) {
+      if (init?.signal?.aborted) throw e
       if (i >= BACKOFF.length) {
         publishBackendHealth(true)
         throw e
@@ -642,12 +643,12 @@ export async function sendSessionCommand(id, text, { deliveryId, signal, replyVi
   return { ok: res.ok, status: res.status, outcome }
 }
 
-// [[spec-body-edit]]: replace a line range of a node's spec body and land it as a commit. `original` is
+// [[spec-body-save-client]]: send a source-line request through the project's active save policy. `original` is
 // the text the reader saw — the server refuses rather than merges when it no longer matches, so the whole
 // error body (message + code + the text that is actually there) is handed back for the editor to show.
-export async function postSpecBody(id, patch) {
+export async function postSpecBody(id, patch, requestId) {
   const res = await apiFetch(specUrl(id, 'body'), {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch),
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'idempotency-key': requestId }, body: JSON.stringify(patch),
   })
   const body = await res.json().catch(() => null)
   if (!res.ok) {

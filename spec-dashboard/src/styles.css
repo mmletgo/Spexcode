@@ -4262,3 +4262,33 @@ body.is-session-dragging .si-pill.archive:hover {
    it is a pointer, not a selection the page has to remember. */
 .fv-reply.is-thread-focus { animation: thread-focus 1.6s ease-out 1; }
 @keyframes thread-focus { from { background: var(--wash-selected); } to { background: transparent; } }
+
+/* [[sync-operation-panel]] shares the document's plain rules and type scale. */
+.sync-operation { margin: 12px 22px; padding: 10px 0; border-bottom: 1px solid var(--line); font-size: var(--type-meta); overflow-wrap: anywhere; }
+.sync-op-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.sync-op-head h2 { margin: 0; font-size: var(--type-meta); font-weight: var(--weight-semibold); color: var(--ink2); }
+.sync-op-head [role="status"] { flex: 1; }
+.sync-op-complete { color: var(--green); }
+.sync-op-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.sync-operation button { padding: 3px 7px; border: 1px solid var(--line); border-radius: var(--radius); background: transparent; color: var(--ink2); font: inherit; cursor: pointer; }
+.sync-operation button:disabled { opacity: .45; cursor: default; }
+
+.sync-operation p { margin: 8px 0 0; }
+.sync-op-note { color: var(--muted); }
+.sync-op-source, .sync-op-delivery { color: var(--ink2); }
+.sync-op-delivery a { margin-left: 10px; color: var(--blue); }
+.sync-op-error { color: var(--red); }
+.sync-op-details { margin-top: 8px; }
+.sync-operation summary { cursor: pointer; color: var(--muted); }
+.sync-operation dl { margin: 8px 0; }
+.sync-operation dl > div { display: grid; grid-template-columns: minmax(80px, 120px) minmax(0, 1fr); gap: 12px; margin: 5px 0; }
+.sync-operation dt { color: var(--muted); }
+.sync-operation dd { margin: 0; min-width: 0; }
+.sync-operation pre { max-height: 340px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--type-meta); padding: 8px; background: var(--paper); border: 1px solid var(--line); }
+.sync-op-evidence { margin: 6px 0; }
+
+.sync-op-delivery-files { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 8px; }
+.sync-op-delivery-files a { color: var(--blue); }
+
+.sync-op-diff-list, .sync-op-file-diff { margin: 8px 0; }
+.sync-op-file-diff figure { margin: 8px 0; }

@@ -253,7 +253,7 @@ function parseDiff(patch) {
 }
 
 // diff == null → still loading (lazy on expand); empty patch → a version with no recorded spec.md change
-function DiffEvidence({ diff }) {
+export function DiffEvidence({ diff, label = null }) {
   const t = useT()
   if (diff == null) return <figcaption className="ev-note">{t('nodeView.loadingChange')}</figcaption>
   if (diff.error) return <figcaption className="ev-note ev-error">{diff.error}</figcaption>
@@ -261,7 +261,7 @@ function DiffEvidence({ diff }) {
   if (!lines.length) return <figcaption className="ev-note">{t('nodeView.noChange')}</figcaption>
   return (
     <>
-      <figcaption className="ev-difflabel">{t('nodeView.diffLabel')}</figcaption>
+      <figcaption className="ev-difflabel">{label || t('nodeView.diffLabel')}</figcaption>
       <pre className="ev-diff">{lines.map((l, i) => <div key={i} className={`dl dl-${l.t}`}>{l.t === 'hunk' ? t('nodeView.changeAt', { n: l.n }) : l.s || ' '}</div>)}</pre>
     </>
   )

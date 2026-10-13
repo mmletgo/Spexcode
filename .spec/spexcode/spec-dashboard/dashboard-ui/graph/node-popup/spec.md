@@ -146,3 +146,5 @@ The current body slice also keeps ordinary Markdown visible as its authored stru
 their level (`h1` through `h6`), blockquotes remain quoted blocks, standard HTTP(S) links are real anchors,
 and Markdown images remain bounded to the body width. These forms share the same line stamps as the blocks
 that contain them; unsupported or malformed markup remains escaped readable prose.
+
+共享 DiffEvidence 支持调用者提供真实差异标签，Spec 历史默认仍为规格行差异；[[sync-operation-diff]] 复用它展示候选/交付的代码和测试 patch，不重复实现 patch 解析。
