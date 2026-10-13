@@ -24,6 +24,8 @@ test('AC-SYNC-CLI-01 sync help说明真实后端与阶段范围，错误flag和�
   assert.equal(bad.code, 1); assert.match(bad.stderr, /未知选项/)
   const missing = await cli(['sync', 'run'])
   assert.equal(missing.code, 1); assert.match(missing.stderr, /需要节点/)
+  const conflicting = await cli(['sync', 'run', 'demo', '--retry-of', 'op-1', '--patch-file', 'unread.json'])
+  assert.equal(conflicting.code, 1); assert.match(conflicting.stderr, /不能同时指定/)
 })
 test('AC-SYNC-CLI-02 CLI run/status/control 走相同持久服务HTTP且保留稳定request ID', async () => {
   const requests: { method: string; url: string; body: unknown }[] = []
@@ -47,6 +49,9 @@ test('AC-SYNC-CLI-02 CLI run/status/control 走相同持久服务HTTP且保留�
     assert.equal(requests[2].url, '/api/sync/operations/op-1/pause')
     assert.equal((await cli(['sync', 'show', 'op-1', '--api', api])).code, 0)
     assert.match(requests[3].url, /^\/api\/sync\/operations\/op-1\?targetTree=/)
+    const retry = await cli(['sync', 'run', 'demo', '--request-id', 'retry-1', '--retry-of', 'op-1', '--api', api])
+    assert.equal(retry.code, 0, retry.stderr)
+    assert.deepEqual(requests[4].body, { targetTree: workspace.replace(/\/$/, ''), nodeId: 'demo', requestId: 'retry-1', retryOf: 'op-1' })
   } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())) }
 })
 test('AC-SYNC-CLI-03 后端离线不回退mock或留下虚假成功输出', async () => {

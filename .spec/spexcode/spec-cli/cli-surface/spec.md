@@ -268,3 +268,5 @@ tidying: when some other module turns out to be hosting a CLI surface at the wro
 new home. Moving that surface's implementation here would trade one module hosting two altitudes for another
 doing the same — the hub would begin holding argv parsing AND verb bodies, which is the shape it is defined
 against. Such a surface goes to a module of its own, and the hub gains one more lazy line pointing at it.
+
+`spex help sync` 展示 `run --retry-of <operation-id>` 的显式新操作/预算语义，说明继承旧正文意图、不能与 --patch-file 同用、普通重复输入不重置预算，以及输入改变或资源未结算时拒绝。具体可重试性由 [[sync-application]] 的只读 eligibility 返回。

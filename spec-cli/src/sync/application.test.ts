@@ -16,7 +16,7 @@ import type { ContractCell, GeneratedTables } from './elaboration-markdown.js'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
 import type { ElaborationSessionRequest } from './elaboration-types.js'
 import { sessionIdForCreateKey } from '../sessions.js'
-import { contentHash, identifyWorktree } from './snapshot.js'
+import { contentHash, identifyWorktree, writeEvidence } from './snapshot.js'
 import { claimFileMutex } from './file-mutex.js'
 import type { FileMutex } from './file-mutex.js'
 
@@ -316,6 +316,98 @@ test('AC-APPLICATION-14 不同仓库共享canonicalDB时分别派发，不执行
   } finally { held.mutex?.release(); second.cleanup(); first.cleanup() }
 })
 
+test('AC-APPLICATION-15 仅显式retry建立关联新操作与新预算，普通重复及retry重放仍幂等', async () => {
+  const f = await fixture()
+  try {
+    await f.application.enable()
+    const submitted = await f.application.submit({ nodeId: 'demo', requestId: 'failed-original', origin: 'initial' }); assert.ok(submitted.operation)
+    const original = await f.application.wait(submitted.operation.id)
+    assert.equal(original.operation.phase, 'failed'); assert.equal(original.retryEligibility.eligible, true)
+    const repeatedRequest = { nodeId: 'demo', requestId: 'automatic-repeat', origin: 'initial' as const }
+    const repeated = await f.application.submit(repeatedRequest)
+    assert.equal(repeated.operation?.id, original.operation.id)
+    await f.application.wait(original.operation.id)
+    assert.equal((await f.application.submit(repeatedRequest)).operation?.id, original.operation.id)
+    await f.application.wait(original.operation.id)
+    const request = { nodeId: 'demo', requestId: 'explicit-retry', retryOf: original.operation.id }
+    const retried = await f.application.submit(request); assert.ok(retried.operation)
+    assert.notEqual(retried.operation.id, original.operation.id)
+    const result = await f.application.wait(retried.operation.id)
+    assert.equal(result.operation.retryOf, original.operation.id); assert.equal(result.operation.origin, 'initial')
+    assert.equal(result.operation.callsUsed, 1); assert.deepEqual(result.operation.budget, original.operation.budget)
+    assert.ok(result.operation.deadlineAtMs > original.operation.deadlineAtMs)
+    assert.equal((await f.application.readOperation(original.operation.id)).operation.callsUsed, 1)
+    assert.equal((await f.application.submit(request)).operation?.id, result.operation.id)
+    await f.application.wait(result.operation.id)
+    assert.equal(f.calls.length, 2); assert.equal((await f.application.status()).operations.length, 2)
+  } finally { f.cleanup() }
+})
+
+test('AC-APPLICATION-16 重试完整继承未落地正文意图，不能混入新patch或重放已变来源', async () => {
+  const f = await fixture()
+  try {
+    await f.application.enable()
+    const patch = { startLine: 5, endLine: 5, original: '返回用户指定的文本。', replacement: '重试必须保留这一段尚未落地的新正文。' }
+    const submitted = await f.application.submit({ nodeId: 'demo', requestId: 'saved-intent', patch }); assert.ok(submitted.operation)
+    const original = await f.application.wait(submitted.operation.id)
+    const request = { nodeId: 'demo', requestId: 'retry-saved-intent', retryOf: original.operation.id }
+    await assert.rejects(f.application.submit({ ...request, patch }), /沿用原正文意图/)
+    const retried = await f.application.submit(request); assert.ok(retried.operation)
+    const result = await f.application.wait(retried.operation.id)
+    assert.deepEqual(result.operation.requestBlob, original.operation.requestBlob)
+    assert.deepEqual(result.operation.previousBaselinePair, original.operation.previousBaselinePair)
+    assert.match(f.calls[1].prompt, /尚未落地的新正文/)
+    assert.equal(readFileSync(join(f.root, '.spec/demo/spec.md'), 'utf8'), source)
+    writeFileSync(join(f.root, 'src/demo.mjs'), 'export const demo = text => `${text}!`\n')
+    const stale = await f.application.readOperation(original.operation.id)
+    assert.equal(stale.retryEligibility.eligible, false); assert.equal(stale.retryEligibility.reason?.code, 'sync_retry_stale')
+    await assert.rejects(f.application.submit({ ...request, requestId: 'retry-after-change' }), /原输入已变化/)
+  } finally { f.cleanup() }
+})
+
+test('AC-APPLICATION-17 queued不可借retry重置预算，无交付cancelled可明确重试并清理旧FIFO', async () => {
+  const f = await fixture(), held = holdNextAdmission(f)
+  try {
+    await f.application.enable()
+    const submitted = await f.application.submit({ nodeId: 'demo', requestId: 'cancel-before-delivery' }); assert.ok(submitted.operation)
+    const queued = await f.application.wait(submitted.operation.id)
+    assert.equal(queued.operation.phase, 'queued'); assert.equal(queued.retryEligibility.eligible, false)
+    await assert.rejects(f.application.submit({ nodeId: 'demo', requestId: 'retry-active', retryOf: submitted.operation.id }))
+    const cancelled = await f.application.control(submitted.operation.id, 'cancel')
+    assert.equal(cancelled.operation.phase, 'cancelled'); assert.equal(cancelled.retryEligibility.eligible, true)
+    const retried = await f.application.submit({ nodeId: 'demo', requestId: 'retry-cancelled', retryOf: cancelled.operation.id }); assert.ok(retried.operation)
+    const result = await f.application.wait(retried.operation.id)
+    assert.equal(result.operation.retryOf, cancelled.operation.id); assert.equal(f.calls.length, 1)
+    assert.equal(f.application.store.nextDispatch(identifyWorktree(f.root).repositoryId), null)
+  } finally { held.mutex?.release(); f.cleanup() }
+})
+
+test('AC-APPLICATION-18 已停止操作仍有未结算资源时不能展示ready或借retry新预算', async () => {
+  const f = await fixture()
+  const application = await SyncApplication.create(f.root, { protocol: f.protocol, runtimeDirectory: join(f.temp, 'runtime'), tools: { trustedRuntimeRoot: '/missing-runtime', toolEntry: '/missing-runtime/cli.js', canonicalHooksDir: '/missing-runtime/hooks' }, runner: async request => {
+    const operation = f.application.store.listOperations(identifyWorktree(f.root).repositoryId)[0], attempt = f.application.store.readAttempt(operation.currentAttemptId!)
+    const dispatch = attempt.dispatchPlans.find(plan => plan.key === request.requestKey)!
+    const { signal: _signal, ...frozen } = request
+    const requestDigest = contentHash(JSON.stringify(frozen)), expectedSessionId = sessionIdForCreateKey(dispatch.sessionCreateKey)
+    const identity = { operationId: operation.id, attemptId: attempt.id, inputId: operation.input.id, candidateDigest: null }
+    const plan = { schemaVersion: 1, request: frozen, requestDigest, sessionCreateKey: dispatch.sessionCreateKey, expectedSessionId, ...identity }
+    const checkpoint = { schemaVersion: 1, ...identity, requestDigest, expectedSessionId, phase: 'planned', nativeCallRequested: true, nativeStarted: false, nativeState: 'unpublished', session: { sessionId: expectedSessionId, threadId: null, turnId: null } }
+    f.application.store.planResource({ operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: operation.input.source.physicalFingerprint }, { key: request.requestKey, kind: 'native_session', payloadDigest: requestDigest, inputId: operation.input.id, candidateDigest: null, planBlob: writeEvidence(operation.input.source.commonDir, plan), checkpointRef: writeEvidence(operation.input.source.commonDir, checkpoint) })
+    throw Object.assign(new Error('受控创建结果未知'), { code: 'unsupported' })
+  } })
+  try {
+    await application.enable()
+    const submitted = await application.submit({ nodeId: 'demo', requestId: 'pending-native-resource' }); assert.ok(submitted.operation)
+    const failed = await application.wait(submitted.operation.id)
+    assert.equal(failed.operation.phase, 'failed'); assert.equal(failed.resources[0]?.phase, 'planned')
+    assert.equal(failed.executionAvailability.status, 'recovery_required'); assert.equal(failed.executionAvailability.failure?.code, 'sync_resources_unsettled')
+    assert.equal(failed.retryEligibility.eligible, false); assert.ok(failed.retryEligibility.reason?.code)
+    await assert.rejects(application.submit({ nodeId: 'demo', requestId: 'retry-unknown-resource', retryOf: failed.operation.id }))
+    const paused = await application.control(failed.operation.id, 'pause')
+    assert.equal(paused.operation.phase, 'paused'); assert.equal(paused.executionAvailability.status, 'recovery_required')
+  } finally { f.cleanup() }
+})
+
 test('AC-APPLICATION-06 应用真实Docker及compiled hooks完整交付，completed重放沿原共同基线幂等', { skip: process.env.SPEX_DOCKER_VERIFICATION_TEST !== '1', timeout: 180000 }, async t => {
   const temp = mkdtempSync(join(tmpdir(), 'sync-application-delivery-')), root = join(temp, 'source')
   cpSync(new URL('../../test/fixtures/spec-sync/export-repo/', import.meta.url), root, { recursive: true })
@@ -351,7 +443,7 @@ test('AC-APPLICATION-06 应用真实Docker及compiled hooks完整交付，comple
     else {
       const frozen = JSON.parse(request.prompt.split(request.purpose === 'code_generate' ? '冻结完整输入:\n' : '冻结原意和基线完整输入:\n')[1].split('\n实际候选身份')[0]) as { files: [string, string][]; readyIds: string[]; elaboratedSpecs: { path: string; source: string }[]; manifest: { entries: { path: string; digest: string; mode: string }[] } }
       if (request.purpose === 'code_generate') {
-        const change = (path: string, content: string): unknown => { const entry = frozen.manifest.entries.find(entry => entry.path === path)!; return { path, beforeDigest: entry.digest, beforeMode: entry.mode, content } }
+        const change = (path: string, content: string): unknown => { const entry = frozen.manifest.entries.find(entry => entry.path === path)!; return { path, beforeDigest: entry.digest, beforeMode: entry.mode, content, mode: null } }
         output = { version: 'sync-files-v1', changes: [...frozen.elaboratedSpecs.map(spec => change(spec.path, spec.source)), change('src/export.js', `${new Map(frozen.files).get('src/export.js')}\n// application verified delivery\n`)] }
       } else {
         const identity = JSON.parse(request.prompt.split('实际候选身份与 manifest:\n')[1].split('\n实际完整候选')[0]) as { inputId: string; candidate: { digest: string } }

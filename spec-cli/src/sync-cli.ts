@@ -8,7 +8,7 @@ import { stripRefSigil } from './mentions.js'
 /** CLI 只提交真实后端操作并打印持久结果；操作在服务进程内继续，无 Dashboard 依赖。 */
 export async function runSyncCli(argv: readonly string[]): Promise<void> {
   const [verb] = argv
-  const values = new Set(['--node', '--request-id', '--patch-file', '--limit', '--config-digest', '--api', '--port', '--password'])
+  const values = new Set(['--node', '--request-id', '--retry-of', '--patch-file', '--limit', '--config-digest', '--api', '--port', '--password'])
   const allowed = new Set([...values, '--json', '--insecure'])
   const positional: string[] = []
   const flags = new Map<string, string>()
@@ -37,9 +37,11 @@ export async function runSyncCli(argv: readonly string[]): Promise<void> {
   } else if (verb === 'run') {
     const nodeId = flags.get('--node') ?? positional[0]
     if (!nodeId) throw usage('run 需要节点：spex sync run <node-id>')
+    const retryOf = flags.get('--retry-of')
     const patchFile = flags.get('--patch-file')
+    if (retryOf && patchFile) throw usage('--retry-of 沿用原正文意图，不能同时指定 --patch-file')
     const patch = patchFile ? readSpecBodyEdit(JSON.parse(readFileSync(patchFile, 'utf8')) as unknown) : undefined
-    result = await clientSyncRequest('/run', { targetTree, nodeId: stripRefSigil(nodeId), requestId: flags.get('--request-id') ?? randomUUID(), origin: 'spec', ...(patch ? { patch } : {}) })
+    result = await clientSyncRequest('/run', { targetTree, nodeId: stripRefSigil(nodeId), requestId: flags.get('--request-id') ?? randomUUID(), ...(retryOf ? { retryOf } : { origin: 'spec' }), ...(patch ? { patch } : {}) })
   } else if (verb === 'show' || ['pause', 'resume', 'cancel'].includes(verb ?? '')) {
     if (positional.length !== 1) throw usage(`${verb} 需要完整 operation ID`)
     const path = `/operations/${encodeURIComponent(positional[0])}`

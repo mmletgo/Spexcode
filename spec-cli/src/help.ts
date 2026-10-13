@@ -432,7 +432,7 @@ consumes the token after it.`,
     body: `Usage: spex sync settings
        spex sync enable [--config-digest <sha256>]
        spex sync status [--node <node-id>] [--limit N] [--json]
-       spex sync run <node-id> [--request-id <id>] [--patch-file <json>]
+       spex sync run <node-id> [--request-id <id>] [--patch-file <json>] [--retry-of <operation-id>]
        spex sync show <operation-id>
        spex sync pause|resume|cancel <operation-id>
 
@@ -443,6 +443,8 @@ verifications、mandatoryTests、facts 与 budget，再启用当前输入工作�
 run 返回持久 operation，后端继续实际细化、生成、验证与受管交付，不需要 Dashboard。
 --patch-file 使用 SpecBodyEdit 的 startLine/endLine/original/replacement 正文差量，
 直接进入完整操作，不先单独提交 Spec。重复 --request-id 幂等；不同内容不能复用同一键。
+--retry-of 显式重试可重试的失败操作，保留原正文意图并关联旧结果；不能同时传 --patch-file。
+只有显式重试建立新操作和新预算，普通重复请求继续归并。未结算资源或已变输入拒绝重试。
 show/status 展示真实失败、GAP、过期和交付工作树；workspace_synced 不代表原输入树已落地。
 本阶段尚未启用外部文件自动监听或代码反向同步。所有命令输出 JSON。
 配置示例：spex guide sync。\n\n${ROUTING_NOTE}`,

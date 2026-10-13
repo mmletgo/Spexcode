@@ -19,8 +19,8 @@ import { inspectTrustedRuntime } from './trusted-hooks.js'
 import { coveredPath, readSyncSettings, SyncApplicationError } from './settings.js'
 import { SyncStore, SyncStoreError } from './store.js'
 
-export type SyncSubmitInput = { nodeId: string; requestId: string; origin?: 'spec' | 'initial'; patch?: SpecBodyEdit }
-export type SyncOperationDetail = { operation: SyncOperation; attempt: ReturnType<SyncStore['readAttempt']> | null; journals: ReturnType<SyncStore['listJournals']>; stale: boolean; sourceSynced: boolean; executionAvailability: { status: 'ready' | 'recovery_required'; failure?: { code: string; message: string } } }
+export type SyncSubmitInput = { nodeId: string; requestId: string; origin?: 'spec' | 'initial'; patch?: SpecBodyEdit; retryOf?: string }
+export type SyncOperationDetail = { operation: SyncOperation; attempt: ReturnType<SyncStore['readAttempt']> | null; journals: ReturnType<SyncStore['listJournals']>; stale: boolean; sourceSynced: boolean; retryEligibility: ReturnType<SyncStore['readRetryEligibility']>; resources: ReturnType<SyncStore['listRecoverableResources']>[number]['resource'][]; executionAvailability: { status: 'ready' | 'recovery_required'; failure?: { code: string; message: string } } }
 export type SyncApplicationOptions = Partial<Pick<SyncCoordinatorOptions, 'runner' | 'verificationDriver'>> & {
   protocol: SessionProtocol
   runtimeDirectory?: string
@@ -110,11 +110,23 @@ export class SyncApplication {
       .map(operation => this.detail(operation, snapshot))
     return { settings: await this.readSettings(), operations }
   }
+  private retryEligibility(operation: SyncOperation, snapshot: InputSnapshot): SyncOperationDetail['retryEligibility'] {
+    const eligibility = this.store.readRetryEligibility(operation.id)
+    if (!eligibility.eligible) return eligibility
+    if (!['spec', 'initial'].includes(operation.origin)) return { eligible: false, reason: { code: 'sync_origin_unsupported', message: '当前入口接受 Spec 输入，原操作来源不能在此重试' } }
+    if (snapshot.id !== operation.input.id || JSON.stringify(snapshot.source) !== JSON.stringify(operation.input.source)) return { eligible: false, reason: { code: 'sync_retry_stale', message: '原输入已变化，请为当前 Spec 发起新操作' } }
+    try { this.requireEnabled(snapshot); this.operationPlan(operation) }
+    catch (error) { return { eligible: false, reason: { code: error instanceof SyncApplicationError ? error.code : 'sync_retry_plan_unavailable', message: error instanceof Error ? error.message : String(error) } } }
+    return eligibility
+  }
   private detail(operation: SyncOperation, snapshot: InputSnapshot): SyncOperationDetail {
     let executionAvailability: SyncOperationDetail['executionAvailability']
     try { this.executionInputs(operation); executionAvailability = { status: 'ready' } }
     catch (error) { executionAvailability = { status: 'recovery_required', failure: { code: 'sync_execution_metadata_unavailable', message: error instanceof Error ? error.message : String(error) } } }
-    return { operation, attempt: operation.currentAttemptId ? this.store.readAttempt(operation.currentAttemptId) : null, journals: this.store.listJournals(operation.id), stale: snapshot.id !== operation.input.id, sourceSynced: operation.phase === 'canonical_synced' && snapshot.id === operation.input.id, executionAvailability }
+    const journals = this.store.listJournals(operation.id), resources = this.store.listRecoverableResources().filter(item => item.operation.id === operation.id).map(item => item.resource)
+    const stopped = operation.control !== 'run' || completed.has(operation.phase) || ['paused', 'failed', 'budget_exhausted', 'needs_input', 'conflict', 'recovery_required'].includes(operation.phase)
+    if (executionAvailability.status === 'ready' && stopped && (resources.length || journals.some(journal => journal.status !== 'settled'))) executionAvailability = { status: 'recovery_required', failure: { code: 'sync_resources_unsettled', message: '操作仍有未结算资源或交付日志，请先恢复清理再重试' } }
+    return { operation, attempt: operation.currentAttemptId ? this.store.readAttempt(operation.currentAttemptId) : null, journals, resources, stale: snapshot.id !== operation.input.id, sourceSynced: operation.phase === 'canonical_synced' && snapshot.id === operation.input.id, retryEligibility: this.retryEligibility(operation, snapshot), executionAvailability }
   }
   async readOperation(id: string): Promise<SyncOperationDetail> {
     const operation = this.store.readOperation(id)
@@ -170,11 +182,22 @@ export class SyncApplication {
   /** 用户请求独立保存为不可变差量，no-op 不建操作；其它请求直接进入真实 pipeline。 */
   async submit(input: SyncSubmitInput): Promise<{ changed: boolean; operation: SyncOperation | null }> {
     if (!input || typeof input.nodeId !== 'string' || !input.nodeId.trim() || typeof input.requestId !== 'string' || !input.requestId.trim()) throw new SyncApplicationError('sync_request_invalid', '请求需要 nodeId 与稳定 requestId', 400)
+    if (input.retryOf !== undefined && (typeof input.retryOf !== 'string' || !input.retryOf.trim())) throw new SyncApplicationError('sync_retry_invalid', '显式重试需要完整旧 operation ID', 400)
+    if (input.retryOf && input.patch) throw new SyncApplicationError('sync_retry_changed', '显式重试沿用原正文意图；新的正文修改请发起新请求', 400)
     if (input.origin !== undefined && !['spec', 'initial'].includes(input.origin)) throw new SyncApplicationError('sync_origin_unsupported', '当前入口接受 Spec 输入，代码变更分析尚未启用', 400)
     const snapshot = await captureInputSnapshot(this.root)
     this.requireEnabled(snapshot)
+    const retry = input.retryOf ? this.store.readOperation(input.retryOf) : null
+    if (retry) {
+      this.assertSource(retry)
+      const eligibility = this.retryEligibility(retry, snapshot)
+      if (!eligibility.eligible) throw new SyncApplicationError(eligibility.reason!.code, eligibility.reason!.message)
+      if (this.operationPlan(retry).intentNodeId !== input.nodeId) throw new SyncApplicationError('sync_retry_changed', '显式重试不能改为另一个节点')
+    }
+    const origin = input.origin ?? retry?.origin ?? 'spec'
     const plan = await buildSyncApplicationPlan(snapshot, input.nodeId)
-    let requestBlob: BlobRef | undefined
+    if (retry && (origin !== retry.origin || syncPlanDigest(plan) !== retry.policyDigest)) throw new SyncApplicationError('sync_retry_changed', '显式重试必须沿用原来源和授权计划；新的输入请发起新请求')
+    let requestBlob: BlobRef | undefined = retry?.requestBlob
     if (input.patch) {
       const target = plan.targets.find(target => target.nodeId === input.nodeId)!
       guardControlledRequestPath(snapshot, target.path)
@@ -195,8 +218,9 @@ export class SyncApplication {
     }
     try {
       const prior = this.store.findOperationByIngressKey(ingressKey)
-      if (prior && (prior.origin !== (input.origin ?? 'spec') || prior.input.id !== snapshot.id || JSON.stringify(prior.input.source) !== JSON.stringify(snapshot.source) || prior.policyDigest !== syncPlanDigest(plan) || (prior.requestBlob?.sha256 ?? null) !== (requestBlob?.sha256 ?? null))) throw new SyncStoreError('SYNC_IDEMPOTENCY_CONFLICT', ingressKey)
-      const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: input.requestId, origin: input.origin ?? 'spec', budget: settings.budget, managedRoot: this.managedRoot, ...(requestBlob ? { requestBlob } : {}), previousBaselinePair: prior ? prior.previousBaselinePair : this.store.readBaseline(snapshot.source) })
+      if (prior && (prior.origin !== origin || (prior.retryOf ?? null) !== (retry?.id ?? null) || prior.input.id !== snapshot.id || JSON.stringify(prior.input.source) !== JSON.stringify(snapshot.source) || prior.policyDigest !== syncPlanDigest(plan) || (prior.requestBlob?.sha256 ?? null) !== (requestBlob?.sha256 ?? null))) throw new SyncStoreError('SYNC_IDEMPOTENCY_CONFLICT', ingressKey)
+      const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: input.requestId, origin, ...(retry ? { retryOf: retry.id } : {}), budget: settings.budget, managedRoot: this.managedRoot, ...(requestBlob ? { requestBlob } : {}), previousBaselinePair: prior ? prior.previousBaselinePair : retry ? retry.previousBaselinePair : this.store.readBaseline(snapshot.source) })
+      if (prior) { admission.deliveryPlan = prior.deliveryPlan; admission.budget = prior.budget }
       this.prepareTools(admission.ingressKey, prior)
       const operation = this.store.admitAndEnqueue(admission)
       this.start(operation.id)

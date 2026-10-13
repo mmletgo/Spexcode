@@ -27,3 +27,7 @@ status 按节点及 bounded limit 查询，detail 返回 operation、当前 atte
 同 ingress 的准备及受理复用 file-mutex bounded 串接，并发相同请求只建立同一操作和固定 runtime，不重置预算。planBlob 由 coordinator 用 syncPlanDigest 的唯一规范化 bytes 冻结和 pin，应用直接按 op.planBlob 校验读取；旧操作无固定引用时明确不可猜测恢复。detail.executionAvailability 从实际固定计划、描述和 runtime manifest 推导恢复诊断，queued 也不能隐藏资料缺失。工具描述有 ownedruntime 副本；丢失索引时，只能校验同一原 runtime manifest/digest 后恢复。已有 attempt、verification 或 journal 且原描述不能恢复时，禁止以当前升级工具重冻结或沿用旧证据；仅未派发 queued 操作可重新准备并完整运行。resume 先等旧 abort 执行结算，再恢复 run 控制，避免旧结束回调覆盖恢复。
 
 派发使用 canonical protocol 中按 repositoryId 固定的真实地址，同仓库多个 source 工作树共享 FIFO，不同仓库共享 session DB 时互不堵塞。入口只唤醒当前仓库有效消息头，精确清理已停止的旧消息；同仓库来源由对应应用实例执行，禁止跨仓库 fallback。busy 返回真实 queued 状态，不自旋重试。前序结算后继续读取真实 FIFO；消息已耗尽时，从 canonical store 的 queued/run 状态恢复已出队暂停操作，不创建第二队列、不重置预算。wait 等待当前仓库实际运行中的前序和目标任务，外部互斥仍占用时诚实返回 queued 详情，不把它标为完成。
+
+显式 retryOf 由用户授权为同一冻结输入、节点、政策、来源和正文请求建立关联的新 operation 及新预算；省略 patch 继承原 requestBlob，省略 origin 继承原 spec/initial 来源，沿旧 previousBaselinePair，不丢失未落地编辑。不能混入新 patch 或改节点、来源/政策，当前 source 已变应提交正常新输入。普通重复事件继续归并原 operation 及预算，同 retry requestId 精确幂等。detail.retryEligibility 复用 store 只读 phase、所有历史 resource/journal/live authority 门禁，并附当前输入/授权及固定 plan 诊断；只有 failed、budget_exhausted，以及从未交付的 cancelled 可重试，GAP、冲突、active 或未知资源禁止借新预算重启。准入事务重新检查门禁，不以先前只读结果代替原子检查。
+
+detail.resources 只列该操作尚未 removed 的真实历史资源；暂停、取消、失败/预算、待输入/冲突或完成状态若仍有此类资源或未 settled journal，executionAvailability 显示 recovery_required 与 sync_resources_unsettled，不能因工具描述可读就显示 ready。该投影不虚构资源已释放；retryEligibility 仍由 canonical 门禁拒绝，精确资源恢复由 coordinator 负责，恢复入口单独验收，不能因尚未恢复就允许重试。
