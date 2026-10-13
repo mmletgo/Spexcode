@@ -1,6 +1,6 @@
 import { execFileSync, spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve, sep } from 'node:path'
 import type { ApplyJournal, ApplyReceipt, BlobRef, DeliveryPlan, InputSnapshot, SyncOperation, WriteFence } from './operation-types.js'
 import type { SyncStore } from './store.js'
@@ -57,7 +57,8 @@ export function planPrivateDelivery(input: InputSnapshot, managedRoot: string, i
 export async function deliverVerifiedAttempt(store: SyncStore, fence: WriteFence, options: PrivateDeliveryOptions): Promise<{ operation: SyncOperation; receipt: ApplyReceipt }> {
   let operation = store.readOperation(fence.operationId)
   const attempt = store.readAttempt(fence.attemptId), candidate = attempt.candidate
-  if (operation.currentAttemptId !== attempt.id || operation.generation !== fence.generation || attempt.leaseToken !== fence.leaseToken || !candidate || !attempt.verification?.passed || !['verified', 'applying', 'settled'].includes(attempt.status)) fail('SYNC_DELIVERY_NOT_VERIFIED', '当前尝试无完整验证或已经失权')
+  if (operation.currentAttemptId !== attempt.id || operation.generation !== fence.generation || attempt.leaseToken !== fence.leaseToken || operation.input.source.physicalFingerprint !== fence.sourceFingerprint || !candidate || !attempt.verification?.passed || !['verified', 'applying', 'settled'].includes(attempt.status)) fail('SYNC_DELIVERY_NOT_VERIFIED', '当前尝试无完整验证或已经失权')
+  if (attempt.status === 'verified' && (operation.deadlineAtMs <= Date.now() || attempt.expiresAtMs <= Date.now())) fail('SYNC_DELIVERY_EXPIRED', '过期尝试不能开始新的交付准备')
   const managedRoot = managedDirectory(options.managedRoot, operation.input), root = operation.deliveryPlan.canonicalRoot, parent = dirname(root), staging = join(parent, 'staging'), footprint = join(parent, 'footprint'), ownerPath = join(parent, 'owner.json'), commonDir = operation.input.source.commonDir
   if (dirname(parent) !== managedRoot || root !== join(parent, 'worktree') || !operation.deliveryPlan.branch.startsWith('refs/heads/codex/sync-')) fail('SYNC_DELIVERY_PLAN', '交付计划不属于私有受管根')
   const locks = join(managedRoot, '.locks')
@@ -80,17 +81,28 @@ export async function deliverVerifiedAttempt(store: SyncStore, fence: WriteFence
   try {
     if (existsSync(ownerPath)) {
       owner = JSON.parse(readFileSync(ownerPath, 'utf8')) as Owner
-      if (owner.version !== 2 || owner.operationId !== operation.id || owner.attemptId !== attempt.id || owner.inputId !== operation.input.id || !equal(owner.plan, operation.deliveryPlan)) fail('SYNC_DELIVERY_OWNERSHIP', '交付路径已属于其他输入/尝试')
+      if (owner.version !== 2 || owner.operationId !== operation.id || owner.inputId !== operation.input.id || !equal(owner.plan, operation.deliveryPlan)) fail('SYNC_DELIVERY_OWNERSHIP', '交付路径已属于其他输入/计划')
       assertOwner()
+      if (owner.attemptId !== attempt.id) {
+        const previous = store.readAttempt(owner.attemptId)
+        if (attempt.status !== 'verified' || operation.control !== 'run' || previous.operationId !== operation.id || !['failed', 'superseded'].includes(previous.status) || owner.journalId || owner.commitIntent || owner.published) fail('SYNC_DELIVERY_OWNERSHIP', '旧交付不能转移给新尝试')
+        let observed: InputSnapshot | null = null
+        if (existsSync(root)) {
+          observed = await captureInputSnapshot(root)
+          const baseTree = objectGit(commonDir, ['rev-parse', `${operation.deliveryPlan.baseCommit}^{tree}`]).toString().trim()
+          if (observed.source.commonDir !== commonDir || observed.source.branch !== operation.deliveryPlan.branch || observed.headCommit !== operation.deliveryPlan.baseCommit || observed.immutableTree !== baseTree || observed.indexTree !== baseTree) fail('SYNC_DELIVERY_OWNERSHIP', '旧准备树已有非base内容，不能转移所有权')
+        }
+        const transfer = writeEvidence(commonDir, { version: 1, kind: 'private-delivery-transfer', previousOwner: owner, attemptId: attempt.id, observed })
+        store.checkpoint(fence, transfer); assertOwner()
+        owner = { ...owner, attemptId: attempt.id }; writeOwner(ownerPath, owner)
+      }
     } else {
       if (operation.control !== 'run' || attempt.status !== 'verified') fail('SYNC_DELIVERY_STOPPED', '暂停或取消后不能新建交付')
+      if (existsSync(parent)) fail('SYNC_DELIVERY_UNOWNED', '交付父目录已经存在但无所有权记录，不能采用；保留现场等待恢复或新的交付计划')
       const intent = writeEvidence(commonDir, { version: 1, kind: 'private-delivery-create', operationId: operation.id, attemptId: attempt.id, inputId: operation.input.id, plan: operation.deliveryPlan })
       store.checkpoint(fence, intent); lock.assertHeld()
-      if (!existsSync(parent)) { mkdirSync(parent, { mode: 0o700 }); syncDirectory(managedRoot) }
-      if (readdirSync(parent).some(name => !['staging', 'footprint'].includes(name) && !/^owner\.json\.[a-f0-9-]{36}\.tmp$/.test(name))) fail('SYNC_DELIVERY_OWNERSHIP', '未登记的私有目录含未知文件')
-      if (!existsSync(staging)) mkdirSync(staging, { mode: 0o700 })
-      if (!existsSync(footprint)) mkdirSync(footprint, { mode: 0o700 })
-      if (readdirSync(staging).length || readdirSync(footprint).length) fail('SYNC_DELIVERY_OWNERSHIP', '未登记暂存或指令投影区非空')
+      mkdirSync(parent, { mode: 0o700 }); syncDirectory(managedRoot)
+      mkdirSync(staging, { mode: 0o700 }); mkdirSync(footprint, { mode: 0o700 })
       owner = { version: 2, operationId: operation.id, attemptId: attempt.id, inputId: operation.input.id, plan: operation.deliveryPlan, parentIdentity: physical(parent), stagingIdentity: physical(staging), footprintIdentity: physical(footprint), journalId: null, commitIntent: null, published: false }
       writeOwner(ownerPath, owner)
     }
