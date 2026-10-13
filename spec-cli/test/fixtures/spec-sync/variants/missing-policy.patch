@@ -1,0 +1,23 @@
+--- a/.spec/export/export-contract/spec.md
++++ b/.spec/export/export-contract/spec.md
+@@ -30,7 +30,7 @@
+ | RULE-EXPORT-03 | 生命周期 | 仅声明的状态事件处置合法；拒绝不改任务；完成与取消先提交终态者获胜 | 状态竞争政策 | export-contract | decision:EXPORT-POLICY | REQ-EXPORT-01 |
+ | RULE-EXPORT-04 | worker回调 | START/COMPLETE/FAIL的attempt与当前不同则返回原任务，不改变状态或发布 | 旧尝试隔离 | export-contract | decision:EXPORT-POLICY | RULE-EXPORT-03 |
+ | RULE-EXPORT-05 | 结果反馈 | 成功需非空result、发布一次；失败需非空reason；重复完成保留首次结果 | 结果和失败事实 | export-contract | decision:EXPORT-POLICY | RULE-EXPORT-03 |
+-| RULE-EXPORT-06 | 重试 | 仅FAILED可由所有者重试，保持ID，attempt加一并清除失败原因 | 重试政策 | export-contract | decision:EXPORT-POLICY | RULE-EXPORT-01,RULE-EXPORT-03 |
++| RULE-EXPORT-06 | 重试 | 政策未确定，依赖该规则的实现不得发布 | 未知业务事实 | export-contract | user:raw | RULE-EXPORT-01,RULE-EXPORT-03 |
+
+ ### FLOW
+
+@@ -141,4 +141,10 @@
+ | --- | --- | --- | --- |
+ | VERIFY-EXPORT-01 | ["node","--test","tests/export.test.mjs"] | . | 10000 |
+
+-当前固定业务事实没有未决GAP。没有实际测试输出时不能伪造通过证据；完整产品P0–P5的验证独立建立。
++### GAP
++
++| id | kind | unknown | affects | evidence | decision | source | depends-on |
++|---|---|---|---|---|---|---|---|
++| GAP-EXPORT-RETRY | missing_fact | 失败后能否重试以及attempt身份政策未知 | RULE-EXPORT-06,TR-EXPORT-FAILED-RETRY,AC-EXPORT-08 | 高层目标未定义失败恢复 | 明确是否允许重试、ID和attempt规则 | user:raw | REQ-EXPORT-01 |
++
++此GAP阻塞重试分支，其他独立成功步骤可继续。没有实际测试输出时不能伪造通过证据；完整产品P0–P5的验证独立建立。
