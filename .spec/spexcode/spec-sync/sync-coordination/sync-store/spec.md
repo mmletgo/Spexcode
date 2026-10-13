@@ -51,3 +51,5 @@ listOperations(repositoryId, {limit?, sourceRoot?}) 在 SQL 内按仓库及可�
 listJournals(operationId)先核operation存在，再按rowid顺序读取该操作全部journal及已结算receipt；终态交付事实不从恢复列表推断。
 
 findOperationByIngressKey(ingressKey)按精确主键或持久alias查询operation，不存在返回null。应用重放原operation冻结baseline，必须自行核仓库/物理来源、input/request/policy绑定；不能用latest baseline改变已接入payload。
+
+applying期间pause在真实receipt结算后进入paused；随后requestControl(run)仅在当前attempt已settled且同op/attempt存在已settled journal及receipt时恢复原交付结论（blockedReason优先，完整deliveredScope为workspace_synced，否则needs_input），不回queued、不重派发/交付或重置budget/generation。未结算副作用仍按原journal恢复，cancelled不复活；恢复既有结论不替代应用对新source的检查。

@@ -405,7 +405,10 @@ export class SyncStore {
       const previousControl = operation.control
       operation.control = control
       if (['applying', 'pausing', 'cancelling', 'recovery_required'].includes(operation.phase)) operation.phase = control === 'cancel' ? 'cancelling' : control === 'pause' ? 'pausing' : 'applying'
-      else if (control === 'run' && previousControl !== 'run') operation.phase = 'queued'
+      else if (control === 'run' && previousControl !== 'run') {
+        const settled = operation.currentAttemptId && this.attempt(tx, operation.currentAttemptId).status === 'settled' && tx.query("SELECT id FROM sync_apply_journals WHERE operation_id=? AND attempt_id=? AND status='settled' AND receipt_id IS NOT NULL LIMIT 1", operation.id, operation.currentAttemptId).length > 0
+        operation.phase = settled ? operation.blockedReason ?? (contains(operation.deliveredScope, operation.scope) ? 'workspace_synced' : 'needs_input') : 'queued'
+      }
       else if (control !== 'run') {
         operation.phase = control === 'cancel' ? 'cancelled' : 'paused'
         if (operation.currentAttemptId) { const attempt = this.attempt(tx, operation.currentAttemptId); attempt.status = 'superseded'; this.saveAttempt(tx, attempt); this.release(tx, attempt.leaseToken) }

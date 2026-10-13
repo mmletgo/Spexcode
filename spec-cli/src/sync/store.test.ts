@@ -117,6 +117,28 @@ test('journals query exact operation and retains settled receipts in terminal op
   } finally { f.cleanup() }
 })
 
+test('resume after an applying pause and settled receipt restores actual delivery phase without a new attempt or budget', async () => {
+  for (const partial of [false, true]) {
+    const f = await fixture()
+    try {
+      const value = f.admit(), ready = partial ? { ...value.scope, contractIds: [] } : value.scope
+      const r = f.ready(value, ready, partial ? { paths: [], contractIds: value.scope.contractIds, flowIds: [] } : { paths: [], contractIds: [], flowIds: [] }, partial ? 'needs_input' : null)
+      const journal = f.store.beginApply(r.fence, r.plan, r.target)
+      f.store.requestControl(r.operation.id, 'pause')
+      for (const step of journal.steps) f.store.recordApplyStep(r.fence, journal.id, { ...step, status: 'completed' })
+      const receipt = f.receipt(journal.id, r.plan)
+      f.store.recordReceipt(journal.id, receipt)
+      assert.equal(f.store.settleApply(journal.id, receipt.id).phase, 'paused')
+      const before = f.store.readOperation(r.operation.id), after = f.store.requestControl(r.operation.id, 'run')
+      assert.equal(after.phase, partial ? 'needs_input' : 'workspace_synced')
+      assert.equal(after.currentAttemptId, before.currentAttemptId); assert.equal(after.generation, before.generation)
+      assert.equal(after.callsUsed, before.callsUsed); assert.equal(after.deadlineAtMs, before.deadlineAtMs)
+      assert.equal(f.store.readAttempt(r.attempt.id).status, 'settled')
+      assert.deepEqual(f.store.listJournals(r.operation.id)[0].receipt, receipt)
+    } finally { f.cleanup() }
+  }
+})
+
 test('v2 upgrade preserves requestless dedup identity and backs up the old component version', async () => {
   const f = await fixture(), legacy = openProtocol(join(f.root, 'v2.sqlite'))
   let backup: ReturnType<typeof openProtocol> | null = null
