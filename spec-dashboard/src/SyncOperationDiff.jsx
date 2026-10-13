@@ -19,7 +19,9 @@ function FileDiff({ operationId, path, kind, targetTree }) {
   }, [open, active, operationId, path, kind, targetTree])
   return <details className="sync-op-file-diff" onToggle={(event) => setOpen(event.currentTarget.open)}>
     <summary><code>{path}</code></summary>
-    {open && <figure><DiffEvidence diff={held} label={t(kind === 'candidate' ? 'syncOperation.candidateDiff' : 'syncOperation.deliveryDiff')} /></figure>}
+    {open && <figure>{held?.patch && !/^@@ /m.test(held.patch)
+      ? <><figcaption className="ev-difflabel">{t(kind === 'candidate' ? 'syncOperation.candidateDiff' : 'syncOperation.deliveryDiff')}</figcaption><pre className="ev-diff">{held.patch}</pre></>
+      : <DiffEvidence diff={held} label={t(kind === 'candidate' ? 'syncOperation.candidateDiff' : 'syncOperation.deliveryDiff')} />}</figure>}
   </details>
 }
 
