@@ -29,3 +29,5 @@ reserveDispatch 在每次原生调用前按key原子预留 callsUsed/maxCalls �
 receipt 的实际tree与交付manifest必须精确绑定已冻结候选，错误清单不能进入共同基线，即使其他receipt引用形式正确。
 
 协作回写中source与delivery是同一物理树时，仍保留原source→实际delivery历史pair，并建立发布快照sourceInput=verifiedDelivery的后续来源pair；后续人类输入以真实发布字节为基线，不把上一轮Agent输出重新当人类来源差量。
+
+最新成对baseline由SQLite事务插入顺序（rowid）确定，不以可回拨的settledAtMs排序；结算时间仅用于展示。时间回拨后重新打开数据库，source和发布delivery仍读取最近一次成功结算的pair，不能退回旧输入。

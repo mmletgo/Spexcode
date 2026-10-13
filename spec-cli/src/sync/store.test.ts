@@ -381,3 +381,33 @@ test('cooperative source and delivery sharing physical identity rebase the next 
     assert.equal(next.previousBaselinePair?.sourceInput.id, receipt.deliverySnapshot.id)
   } finally { f.cleanup() }
 })
+
+test('wall clock rollback cannot select an older settled source or delivery baseline after reopening', async () => {
+  const f = await fixture()
+  try {
+    const first = f.ready(), firstJournal = f.store.beginApply(first.fence, first.plan, first.target)
+    for (const file of first.plan.files) f.store.recordApplyStep(first.fence, firstJournal.id, { key: file.path, status: 'completed', evidenceRef: f.put({ checked: file.path }) })
+    const firstReceipt = f.receipt(firstJournal.id, first.plan)
+    f.store.recordReceipt(firstJournal.id, firstReceipt); f.store.settleApply(firstJournal.id, firstReceipt.id)
+    const firstBaseline = f.store.readBaseline(source())!
+    assert.equal(firstBaseline.settledAtMs, 1000)
+
+    f.tick(100)
+    const second = f.ready({ ...f.admit(source(), 'input-2'), previousBaselinePair: firstBaseline })
+    const secondJournal = f.store.beginApply(second.fence, second.plan, second.target)
+    f.tick(-200)
+    for (const file of second.plan.files) f.store.recordApplyStep(second.fence, secondJournal.id, { key: file.path, status: 'completed', evidenceRef: f.put({ checked: file.path }) })
+    const secondReceipt = f.receipt(secondJournal.id, second.plan)
+    f.store.recordReceipt(secondJournal.id, secondReceipt)
+    assert.equal(f.store.settleApply(secondJournal.id, secondReceipt.id).phase, 'workspace_synced')
+
+    const reopened = openProtocol(f.path), recovered = new SyncStore(reopened, f.options)
+    try {
+      const latest = recovered.readBaseline(source())!
+      assert.equal(latest.sourceInput.id, 'input-2')
+      assert.equal(latest.receiptId, secondReceipt.id)
+      assert.equal(latest.settledAtMs, 900)
+      assert.equal(recovered.readBaseline(source('delivery'))?.receiptId, secondReceipt.id)
+    } finally { reopened.close() }
+  } finally { f.cleanup() }
+})

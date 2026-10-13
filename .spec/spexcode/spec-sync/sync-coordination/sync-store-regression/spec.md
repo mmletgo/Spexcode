@@ -23,3 +23,5 @@ code:
 receipt树引用相同但manifest不同仍拒绝，journal保持未登记；相同已冻结manifest可结算。
 
 协作source与delivery同物理身份发布后，readBaseline返回真实发布快照同值pair，原冻结source pair仍持久保留。
+
+时钟回拨回归：input1在1000ms结算，input2于1100ms开始、回拨至900ms后成功结算；独立handle重开后source和delivery基线都对应input2的receipt，settledAtMs仍保留900ms展示值。
