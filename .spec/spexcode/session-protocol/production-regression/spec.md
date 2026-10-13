@@ -14,4 +14,4 @@ code:
 
 ## expanded spec
 
-验证 [[package-entry]] 的确切运行时导出与声明，包括 claimFileMutex/FileMutex。保持 [[engine]] 的事务与数据库行为回归，不能把内部连接或部分写入能力暴露给调用方。独占文件锁的跨进程与崩溃行为另由 [[file-mutex-regression]] 覆盖。
+验证 [[package-entry]] 的确切运行时导出与声明。保持 [[engine]] 的事务与数据库行为回归，不能把内部连接或部分写入能力暴露给调用方。物理文件交付锁属于采用层，不能扩展此包的协议语言。

@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto'
-import { existsSync, lstatSync, realpathSync, statSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, isAbsolute, sep } from 'node:path'
 
@@ -13,7 +13,6 @@ import type {
   ProtocolTransaction,
   SessionProtocol,
   SqlParam,
-  FileMutex,
 } from './index.js'
 import {
   MIN_SQLITE_VERSION,
@@ -623,47 +622,4 @@ export function openProtocol(databasePath: string, options: OpenOptions = {}): S
   }
 
   return buildHandle(database, { databasePath, readOnly, now })
-}
-
-/** A separate rollback-journal connection holds the OS writer lock across short adopter file work. */
-export function claimFileMutex(databasePath: string): FileMutex | null {
-  validateDatabasePath(databasePath)
-  checkParentDirectory(databasePath)
-  const identity = (path: string): string => {
-    const stat = lstatSync(path, { bigint: true })
-    if (stat.isSymbolicLink() || realpathSync(path) !== path) fail('PROTOCOL_PATH_INVALID', 'mutex paths must be canonical and cannot be symlinks')
-    return `${stat.dev}:${stat.ino}:${stat.birthtimeNs}`
-  }
-  const parent = dirname(databasePath), parentId = identity(parent)
-  if (existsSync(databasePath) && !lstatSync(databasePath).isFile()) fail('PROTOCOL_PATH_INVALID', 'mutex must be a dedicated regular file')
-  if (existsSync(databasePath)) identity(databasePath)
-  const database = new DatabaseSync(databasePath, { readOnly: false })
-  let held = false
-  try {
-    database.exec('PRAGMA busy_timeout=0')
-    database.exec('BEGIN EXCLUSIVE'); held = true
-    if (String(database.prepare('PRAGMA journal_mode').get()?.journal_mode) !== 'delete') fail('PROTOCOL_PATH_INVALID', 'mutex requires its own rollback-journal database')
-    const marker = Number(database.prepare('PRAGMA application_id').get()?.application_id)
-    if (marker === 0 && Number(database.prepare('SELECT count(*) AS n FROM sqlite_master').get()?.n) === 0) {
-      database.exec('PRAGMA application_id=1397771597')
-      database.exec('COMMIT'); held = false
-      database.exec('BEGIN EXCLUSIVE'); held = true
-    } else if (marker !== 1397771597) fail('PROTOCOL_PATH_INVALID', 'mutex cannot use another application database')
-    const fileId = identity(databasePath)
-    if (identity(parent) !== parentId) fail('PROTOCOL_PATH_INVALID', 'mutex parent was replaced')
-    let released = false
-    return {
-      assertHeld() {
-        if (released || identity(parent) !== parentId || identity(databasePath) !== fileId) fail('PROTOCOL_TRANSACTION_INVALID', 'file mutex is released or its physical path changed')
-      },
-      release() {
-        if (released) return
-        try { database.exec('ROLLBACK') } finally { released = true; database.close() }
-      },
-    }
-  } catch (error) {
-    try { if (held) database.exec('ROLLBACK') } finally { database.close() }
-    if (classifySqliteError(error) === 'PROTOCOL_DATABASE_BUSY') return null
-    rethrowProtocolError(error)
-  }
 }
