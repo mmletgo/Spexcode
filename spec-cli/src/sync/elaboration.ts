@@ -6,8 +6,8 @@ import { CONTRACT_INSTRUCTIONS, ELABORATION_REVIEW_SCHEMA, ELABORATION_SCHEMA, o
 import { renderElaboration } from './elaboration-markdown.js'
 import type { GeneratedElaboration } from './elaboration-markdown.js'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
-import type { ElaborationCandidate, ElaborationInput, ElaborationResult, ElaborationReview, ElaborationRound, ElaborationRunner, ElaborationTrace } from './elaboration-types.js'
-export type { Applicability, AuthorizedContractChange, BlockedElaborationFlow, ElaborationCandidate, ElaborationChange, ElaborationFact, ElaborationInput, ElaborationResult, ElaborationReview, ElaborationReviewFinding, ElaborationRound, ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult, ElaborationTarget, ElaborationTrace } from './elaboration-types.js'
+import type { ElaborationCandidate, ElaborationInput, ElaborationRepairSeed, ElaborationResult, ElaborationReview, ElaborationRound, ElaborationRunner, ElaborationTrace } from './elaboration-types.js'
+export type { Applicability, AuthorizedContractChange, BlockedElaborationFlow, ElaborationCandidate, ElaborationChange, ElaborationFact, ElaborationInput, ElaborationPriorReference, ElaborationRepairSeed, ElaborationResult, ElaborationReview, ElaborationReviewFinding, ElaborationRound, ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult, ElaborationTarget, ElaborationTrace } from './elaboration-types.js'
 
 const DEFAULT_CALL_TIMEOUT_MS = 900_000
 export const elaborationDigest = (source: string): string => createHash('sha256').update(source, 'utf8').digest('hex')
@@ -152,14 +152,34 @@ export function projectElaborationFlowReadiness(graph: ContractGraph, coverage: 
   return result
 }
 
+function validateRepairSeed(input: ElaborationInput, seed: ElaborationRepairSeed, inputDigest: string): ElaborationCandidate {
+  if (seed.settled !== true || !seed.requestKey || seed.requestKey === input.requestKey || seed.inputDigest !== inputDigest || seed.candidate.inputDigest !== inputDigest) throw new TypeError('续修种子须已结算、输入一致且使用新的请求键')
+  if (digest(seed.candidate) !== seed.candidateDigest) throw new TypeError('续修种子原候选摘要不符')
+  if (outputErrors(seed.output, ELABORATION_SCHEMA).length) throw new TypeError('续修种子不符合当前业务行schema')
+  const generation = seed.traces.filter(trace => trace.purpose === 'elaboration_generate')
+  const reviews = seed.traces.filter(trace => trace.purpose === 'elaboration_review')
+  if (generation.length !== 1 || reviews.length !== (seed.review ? 1 : 0) || seed.traces.length !== generation.length + reviews.length || generation[0].resultDigest !== digest(seed.output)) throw new TypeError('续修种子生成产物与原追踪摘要不符')
+  if (seed.review) {
+    const nativeReview = Object.fromEntries(Object.entries(seed.review).filter(([key]) => key !== 'inputDigest' && key !== 'candidateDigest'))
+    if (seed.review.inputDigest !== inputDigest || seed.review.candidateDigest !== seed.candidateDigest || outputErrors(nativeReview, ELABORATION_REVIEW_SCHEMA).length || reviews[0].resultDigest !== digest(nativeReview)) throw new TypeError('续修种子评审身份或原生输出摘要不符')
+  }
+  const candidate = renderElaboration(input, seed.output as GeneratedElaboration, inputDigest)
+  const checked = checkCandidate(input, candidate, inputDigest)
+  if (!seed.findings.some(issue => repairRequired(issue, projectContractCoverage(checked.graph)))) throw new TypeError('续修种子必须保留具体被拒绝发现')
+  return candidate
+}
+
 /** 从不可变业务输入连续生成、解析和独立审查；仅返回候选，不拥有交付树写权限。 */
-export async function elaborate(input: ElaborationInput, options: { runner?: ElaborationRunner } = {}): Promise<ElaborationResult> {
+export async function elaborate(input: ElaborationInput, options: { runner?: ElaborationRunner; seed?: ElaborationRepairSeed } = {}): Promise<ElaborationResult> {
   checkInput(input)
   const frozen = structuredClone({ execution: { root: input.root, base: input.base ?? null }, intent: input.intent, targets: input.targets, context: input.context ?? [], facts: input.facts ?? [], authorizedChanges: input.authorizedChanges ?? [], retiredIds: input.retiredIds ?? [], files: input.files ? [...input.files].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0) : null })
   // 在任何 await 前复制调用者输入，后续生成/评审不能混入继续编辑的字节。
   input = { ...input, ...frozen, files: frozen.files === null ? undefined : new Map(frozen.files) }
   const inputDigest = digest(frozen)
-  const result: ElaborationResult = { status: 'exhausted', inputDigest, candidateDigest: null, changes: [], contracts: [], graph: null, coverage: null, gaps: [], blockedIds: [], readyIds: [], readyFlowIds: [], blockedFlows: [], retiredIds: [], structurePassed: false, reviewPassed: false, runtimeVerification: 'not_run', implementationReady: false, deferredImplementationFindings: [], blockedStructureFindings: [], rounds: [], failure: null }
+  const seed = options.seed ? structuredClone(options.seed) : undefined
+  const seedCandidate = seed ? validateRepairSeed(input, seed, inputDigest) : undefined
+  const prior = seed ? { requestKey: seed.requestKey, inputDigest, candidateDigest: seed.candidateDigest, renderedCandidateDigest: digest(seedCandidate), traces: seed.traces } : null
+  const result: ElaborationResult = { status: 'exhausted', inputDigest, candidateDigest: null, prior, changes: [], contracts: [], graph: null, coverage: null, gaps: [], blockedIds: [], readyIds: [], readyFlowIds: [], blockedFlows: [], retiredIds: [], structurePassed: false, reviewPassed: false, runtimeVerification: 'not_run', implementationReady: false, deferredImplementationFindings: [], blockedStructureFindings: [], rounds: [], failure: null }
   const maxCalls = input.maxCalls ?? 2 * ((input.maxRepairs ?? 2) + 1)
   const deadline = Date.now() + (input.totalTimeoutMs ?? (input.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS) * maxCalls)
   let calls = 0
@@ -168,7 +188,7 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
     return runStructuredSession(request)
   })
   const snapshot = JSON.stringify(frozen)
-  let repairContext = ''
+  let repairContext = seed ? `已结算的拒绝候选，仅供重新诊断，绝非用户原意或权威事实。先对照raw/facts/代码来源核实旧发现；错误评审不得照单全收或制造GAP。当前程序重新渲染的候选:\n${JSON.stringify(seedCandidate)}\n原具体失败:\n${JSON.stringify(seed.findings)}\n原独立评审（可能误读，不能复用其结论）:\n${JSON.stringify(seed.review)}` : ''
   for (let index = 0; index <= (input.maxRepairs ?? 2); index++) {
     if (input.signal?.aborted) { result.status = 'cancelled'; result.failure = { code: 'cancelled', message: '细化已取消' }; return result }
     const round: ElaborationRound = { index, output: null, candidate: null, candidateDigest: null, findings: [], reviewOutput: null, review: null, traces: [] }
@@ -220,7 +240,7 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
           round.reviewOutput = reviewOutput
           if (input.signal?.aborted) throw Object.assign(new Error('细化已取消，保留当前候选和评审产物'), { code: 'cancelled' })
           round.findings.push(...outputErrors(reviewOutput, ELABORATION_REVIEW_SCHEMA).map(message => finding(input, 'review_schema', message)))
-          if (round.traces[0].sessionId === round.traces[1].sessionId || round.traces[0].threadId === round.traces[1].threadId) round.findings.push(finding(input, 'review_not_independent', '构建与审查必须使用不同会话及线程上下文'))
+          if (round.traces[0].sessionId === round.traces[1].sessionId || round.traces[0].threadId === round.traces[1].threadId || prior?.traces.some(trace => trace.sessionId === round.traces[1].sessionId || trace.threadId === round.traces[1].threadId)) round.findings.push(finding(input, 'review_not_independent', '新审查必须独立于构建及种子既有会话/线程'))
           if (!round.findings.some(issue => repairRequired(issue, result.coverage))) {
             round.review = { ...(reviewOutput as Omit<ElaborationReview, 'inputDigest' | 'candidateDigest'>), inputDigest, candidateDigest: round.candidateDigest }
             round.findings.push(...reviewErrors(input, round.review, inputDigest, round.candidateDigest, checked.graph))
@@ -241,7 +261,7 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
       result.status = failure.code === 'unsupported' ? 'unsupported' : failure.code === 'cancelled' ? 'cancelled' : failure.code === 'budget_exhausted' ? 'exhausted' : 'failed'
       return result
     }
-    repairContext = `修复本轮具体失败，不改变原始目标/范围/AC/验证政策。上轮候选:\n${JSON.stringify(round.output)}\n程序及独立评审发现:\n${JSON.stringify(round.findings)}\n独立评审:\n${JSON.stringify(round.review)}`
+    repairContext = `先对照raw/facts/代码来源重新核实每条发现；误读实现细节的评审必须纠正，不能照单全收或制造GAP。修复确实存在的具体失败，不改变原始目标/范围/AC/验证政策。上轮候选:\n${JSON.stringify(round.output)}\n程序及独立评审发现:\n${JSON.stringify(round.findings)}\n独立评审:\n${JSON.stringify(round.review)}`
   }
   result.failure = { code: 'repair_budget_exhausted', message: '细化仍存在具体失败，修复预算已耗尽' }
   return result

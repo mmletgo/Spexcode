@@ -35,10 +35,18 @@ export type ElaborationReview = { inputDigest: string; candidateDigest: string; 
 export type ElaborationTrace = { purpose: string; sessionId: string; threadId: string; turnId: string; resultDigest: string; inputDigest: string }
 export type ElaborationRound = { index: number; output: unknown; candidate: ElaborationCandidate | null; candidateDigest: string | null; findings: ContractFinding[]; reviewOutput: unknown; review: ElaborationReview | null; traces: ElaborationTrace[] }
 export type BlockedElaborationFlow = { flowId: string; blockedStepIds: string[]; gapIds: string[] }
+/** 仅由内部协调器提供的已结算、被拒绝候选；候选不是新的业务事实。 */
+export type ElaborationRepairSeed = {
+  settled: true; requestKey: string; inputDigest: string; candidateDigest: string
+  output: unknown; candidate: ElaborationCandidate; findings: ContractFinding[]
+  review: ElaborationReview | null; traces: ElaborationTrace[]
+}
+export type ElaborationPriorReference = { requestKey: string; inputDigest: string; candidateDigest: string; renderedCandidateDigest: string; traces: ElaborationTrace[] }
 export type ElaborationResult = {
   status: 'complete' | 'needs_input' | 'conflict' | 'unsupported' | 'failed' | 'cancelled' | 'exhausted'
   inputDigest: string
   candidateDigest: string | null
+  prior: ElaborationPriorReference | null
   changes: (ElaborationChange & { contentDigest: string })[]
   contracts: Contract[]
   graph: ContractGraph | null

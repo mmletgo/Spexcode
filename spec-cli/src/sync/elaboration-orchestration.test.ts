@@ -4,7 +4,7 @@ import test from 'node:test'
 import { buildContractGraph, CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts, projectContractCoverage } from '@spexcode/spec-core/contracts'
 import { elaborate, elaborationDigest, projectElaborationFlowReadiness } from './elaboration.js'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
-import type { ElaborationInput, ElaborationReview, ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
+import type { ElaborationInput, ElaborationRepairSeed, ElaborationReview, ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
 import type { ContractCell, GeneratedElaboration, GeneratedTables } from './elaboration-markdown.js'
 import { renderElaboration } from './elaboration-markdown.js'
 import { ELABORATION_SCHEMA, outputErrors } from './elaboration-schema.js'
@@ -370,4 +370,87 @@ test('AC-ELABORATION-25 真实GAP候选的父流程聚合阻塞，创建和查�
     { flowId: 'FLOW-TODO-COMPLETE', blockedStepIds: ['STEP-TODO-COMPLETE-DISPATCH'], gapIds: ['GAP-TODO-MUTATION-AUTH'] },
   ])
   assert.ok(coverage.items.filter(item => ['STEP-TODO-CREATE-COMMIT', 'STEP-TODO-VIEW-DISPATCH'].includes(item.id)).every(item => item.blockedBy.length === 0))
+})
+
+const rejectedSeed = async (goal?: string): Promise<ElaborationRepairSeed> => {
+  const fake = runner(request => {
+    const output = candidate(request, source)
+    if (goal) output.changes[0].tables.REQ[0].goal = goal
+    return output
+  }, request => ({ ...review(request), verdict: 'repair', findings: [{ code: 'recheck_sources', kind: 'repair', message: '应核实普通错误协议来源', affectedIds: ['RULE-EXPORT-01'], evidence: '错误名可由现存无冲突代码确认', decision: '不能为普通实现细节制造GAP' }] }))
+  const result = await elaborate({ ...input(), maxRepairs: 0 }, { runner: fake.run })
+  const last = result.rounds[0]
+  assert.equal(result.status, 'exhausted')
+  return { settled: true, requestKey: 'operation-1', inputDigest: result.inputDigest, candidateDigest: last.candidateDigest!, output: last.output, candidate: last.candidate!, findings: last.findings, review: last.review, traces: last.traces }
+}
+
+test('AC-ELABORATION-26 已结算失败种子仅作诊断，旧结果不变，新执行重新独立审查', async () => {
+  const seed = await rejectedSeed()
+  const original = structuredClone(seed)
+  const fresh = runner(request => candidate(request, source))
+  const result = await elaborate({ ...input(), requestKey: 'operation-2' }, { seed, runner: async request => {
+    const session = await fresh.run(request)
+    return { ...session, sessionId: `new-${session.sessionId}`, threadId: `new-${session.threadId}` }
+  } })
+  assert.equal(result.status, 'complete')
+  assert.equal(result.inputDigest, seed.inputDigest)
+  assert.equal(result.rounds.length, 1)
+  assert.deepEqual(seed, original)
+  assert.deepEqual(result.prior!.traces, original.traces)
+  assert.notEqual(result.rounds[0].traces[0].sessionId, original.traces[0].sessionId)
+  assert.match(fresh.calls[0].prompt, /绝非用户原意或权威事实/)
+  assert.match(fresh.calls[0].prompt, /可观察本身不等于重大业务政策/)
+  assert.ok(fresh.calls.every(call => call.requestKey.startsWith('operation-2:')))
+})
+
+test('AC-ELABORATION-27 输入改变、未结算、摘要/评审身份伪造不能恢复种子', async () => {
+  const original = await rejectedSeed()
+  const edits = [
+    (seed: ElaborationRepairSeed) => { seed.candidateDigest = 'forged' },
+    (seed: ElaborationRepairSeed) => { seed.traces[0].resultDigest = 'forged' },
+    (seed: ElaborationRepairSeed) => { seed.review!.inputDigest = 'forged' },
+    (seed: ElaborationRepairSeed) => { seed.review!.candidateDigest = 'forged' },
+    (seed: ElaborationRepairSeed) => { seed.review!.findings[0].evidence = '篡改原生评审' },
+    (seed: ElaborationRepairSeed) => { Object.assign(seed, { settled: false }) },
+    (seed: ElaborationRepairSeed) => { (seed.output as GeneratedElaboration).changes[0].tables.VERIFY[0].command = ['node', '非法\n参数'] },
+  ]
+  for (const edit of edits) {
+    const seed = structuredClone(original); edit(seed)
+    await assert.rejects(() => elaborate({ ...input(), requestKey: 'operation-2' }, { seed, runner: async () => assert.fail('无效种子不得派发') }), TypeError)
+  }
+  await assert.rejects(() => elaborate({ ...input(), requestKey: 'operation-2', facts: [...input().facts!, { source: 'decision:NEW', text: '改过事实' }] }, { seed: original }), /输入一致/)
+  await assert.rejects(() => elaborate({ ...input(), requestKey: 'operation-2', intent: { ...input().intent, rawSource: '用户已改原意' } }, { seed: original }), /输入一致/)
+  await assert.rejects(() => elaborate(input(), { seed: original }), /新的请求键/)
+})
+
+test('AC-ELABORATION-28 新评审复用种子线程不能继承过去上下文或伪装独立', async () => {
+  const seed = await rejectedSeed()
+  const fresh = runner(request => candidate(request, source))
+  const result = await elaborate({ ...input(), requestKey: 'operation-2', maxRepairs: 0 }, { seed, runner: async request => {
+    const session = await fresh.run(request)
+    return request.purpose === 'elaboration_review' ? { ...session, sessionId: seed.traces[1].sessionId, threadId: seed.traces[1].threadId } : { ...session, sessionId: 'new-builder', threadId: 'new-builder-thread' }
+  } })
+  assert.equal(result.status, 'exhausted')
+  assert.ok(result.rounds[0].findings.some(issue => issue.code === 'review_not_independent'))
+  assert.deepEqual(result.readyFlowIds, [])
+})
+
+test('AC-ELABORATION-29 渲染版本改变时保留原摘要，新Markdown必须新独立审查', async () => {
+  const goal = '导出`筛选`数据'
+  const seed = await rejectedSeed(goal)
+  seed.candidate.changes[0].source = seed.candidate.changes[0].source.replace(/\\`/g, '`')
+  seed.candidateDigest = elaborationDigest(JSON.stringify(seed.candidate))
+  seed.review!.candidateDigest = seed.candidateDigest
+  const original = structuredClone(seed)
+  const fresh = runner(request => { const output = candidate(request, source); output.changes[0].tables.REQ[0].goal = goal; return output })
+  const result = await elaborate({ ...input(), requestKey: 'operation-2' }, { seed, runner: async request => {
+    const session = await fresh.run(request)
+    return { ...session, sessionId: `new-${session.sessionId}`, threadId: `new-${session.threadId}` }
+  } })
+  assert.equal(result.status, 'complete')
+  assert.equal(result.prior!.candidateDigest, original.candidateDigest)
+  assert.notEqual(result.prior!.renderedCandidateDigest, original.candidateDigest)
+  assert.equal(result.rounds[0].review!.candidateDigest, result.candidateDigest)
+  assert.equal(fresh.calls.filter(call => call.purpose === 'elaboration_review').length, 1)
+  assert.deepEqual(seed, original)
 })

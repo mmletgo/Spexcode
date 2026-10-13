@@ -63,6 +63,8 @@ export function outputErrors(value: unknown, schema: Record<string, unknown>, pa
 }
 
 export const CONTRACT_INSTRUCTIONS = `最终唯一可编辑契约是规范 Markdown，由程序从业务行确定性渲染；程序复制原始raw、contract-schema: sync-v1、固定标题及表格，不让模型拼语法。业务行字段由schema定义；单元格简洁，避免同义政策复制。独立审查检查最终Markdown及业务语义。
+raw、冻结事实和权威业务规则优先。仅影响权限、资金或业务权益、数据范围、保留删除义务、不可逆副作用、竞争胜负、重复执行语义或业务承诺的重要未知事实，以及实际意图冲突才形成GAP。可观察本身不等于重大业务政策。既有无冲突错误名称/错误协议、普通字段表示/参数类型/序列化及等价校验顺序等实现细节可自动沿用，使用code来源并追到REQ；不冒充decision授权，不制造GAP或再次要求用户裁决。没有明确矛盾，不扩展管理员、防枚举等政策。参数类型或校验若违反明确raw/facts，必须保留要求并修实现，不能新增GAP掩盖冲突。不得仅凭代码授权上述重大业务政策。
+生成与审查均须核实每条评审发现是否获raw、facts或相应代码来源支持；误读实现细节、错把技术选择当业务政策的发现必须纠正，不能照单全收并扩大GAP。来源混合时拆分业务规则与实现细节或建立相应依赖，不能因仅能填写一个source而要求用户重复授权普通技术约定。
 所有出现表包含完整表头和非空数据行；空值用 -，布尔 true/false，引用集合逗号分隔。ID为类型-业务域-稳定后缀（ASCII大写/数字/连字符）。source必须是唯一单值，不能逗号拼多个来源；例如derived:REQ-EXPORT-01有效，user:REQ-EXPORT-01,decision:EXPORT-POLICY无效。REQ来源user:raw；其他单值来源user:REQ-ID、decision:裁决ID、rule:RULE-ID、derived:稳定ID、code:相对路径#符号。多个推导依赖只放depends-on引用列表。必须真实depends-on追到原意；每项业务政策有可核实来源。缺代码/测试属于待实现证据，不是业务事实GAP；不要为已有明确政策伪造缺失事实。
 FLOW.req引用REQ，FLOW.steps引用STEP；STEP.flow是单FLOW，STEP.next为STEP/TR/STATE引用列表或END单值，END不能和ID混写。有状态对象的FLOW.terminal列对应STATE结果；只有整个能力完全无状态时才用END，同步调用不等于无状态。无状态必须正文说明输入域、不变量、不适用依据和可观察结束。
 STATE/EVENT/TR.object为稳定对象名。每个适用对象全部可达状态×事件必须有TR，disposition为transition/reject/idempotent/not_applicable；reject/idempotent.to等于from；not_applicable.to为-且reason必填。condition成立、不成立、边界、失败/恢复、取消、重试、重复回调、竞争的必要到达顺序、副作用均覆盖。不能用“其他忽略”缩减范围。
