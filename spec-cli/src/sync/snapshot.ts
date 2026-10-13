@@ -116,14 +116,18 @@ function observe(root: string): Observation {
   } finally { rmSync(temp, { recursive: true, force: true }) }
   if (!Buffer.from(listing.toString('utf8')).equals(listing)) throw new Error('仓库路径必须为有效 UTF-8')
   const paths = [...new Set(listing.toString().split('\0').filter(Boolean))].sort()
+  const cachedRecords = objectGit(source.commonDir, ['ls-tree', '-rz', '--full-tree', indexTree]).toString().split('\0').filter(Boolean)
+  if (cachedRecords.some(record => record.startsWith('160000 commit '))) throw new Error('不支持真实 gitlink/submodule 条目')
+  const cachedPaths = new Set(cachedRecords.map(record => record.slice(record.indexOf('\t') + 1)))
   const stamps: string[] = [], entries: TreeEntry[] = []
   for (const path of paths) {
     validateRepositoryPath(path)
     const absolute = join(root, path)
     // 已删除的 tracked 文件保留为 tree 中的删除差量。
-    try { lstatSync(absolute) } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') { stamps.push(`${path}:deleted`); continue } throw error }
+    try { lstatSync(absolute) } catch (error) { if (['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) { stamps.push(`${path}:deleted`); continue } throw error }
     checkParents(root, path)
     const stat = lstatSync(absolute, { bigint: true })
+    if (stat.isDirectory() && cachedPaths.has(path)) { stamps.push(`${path}:directory-replacement`); continue }
     if (!stat.isFile() && !stat.isSymbolicLink()) throw new Error(`不支持目录/submodule条目: ${path}`)
     const bytes = stat.isSymbolicLink() ? Buffer.from(readlinkSync(absolute)) : readFileSync(absolute)
     const mode = stat.isSymbolicLink() ? '120000' : (stat.mode & 0o111n) !== 0n ? '100755' : '100644'

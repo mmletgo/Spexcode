@@ -211,3 +211,20 @@ test('外部修改file、Agent仅新增test：可信验证范围保留file，模
   const forgedRef = { ...ref, coveredScope: scope('file.ts') }
   assert.throws(() => verifyCandidate(input.source.commonDir, { ...forgedRef, digest: contentHash(JSON.stringify(forgedRef)) }), /实际 diff/)
 })
+
+test('file↔directory替换保留原index字节与mtime，完整采集新普通文件而不误认submodule', async t => {
+  const root = repo(t)
+  mkdirSync(join(root, 'folder')); writeFileSync(join(root, 'folder/old.ts'), 'old child\n'); git(root, 'add', '.'); git(root, 'commit', '-m', 'folder base')
+  const indexPath = join(root, '.git/index'), originalIndex = readFileSync(indexPath), originalTime = lstatSync(indexPath, { bigint: true }).mtimeNs
+  rmSync(join(root, 'file.ts')); mkdirSync(join(root, 'file.ts')); writeFileSync(join(root, 'file.ts/new.ts'), 'new child\n')
+  rmSync(join(root, 'folder'), { recursive: true }); writeFileSync(join(root, 'folder'), 'now file\n')
+  const snapshot = await captureInputSnapshot(root), mapped = files(snapshot)
+  assert.equal(mapped.get('file.ts/new.ts'), 'new child\n'); assert.equal(mapped.get('folder'), 'now file\n'); assert.equal(mapped.has('file.ts'), false); assert.equal(mapped.has('folder/old.ts'), false)
+  assert.deepEqual(readFileSync(indexPath), originalIndex); assert.equal(lstatSync(indexPath, { bigint: true }).mtimeNs, originalTime)
+})
+
+test('真实gitlink即使工作目录缺失仍明确拒绝，不能误当普通目录替换', async t => {
+  const root = repo(t), head = git(root, 'rev-parse', 'HEAD')
+  git(root, 'update-index', '--add', '--cacheinfo', `160000,${head},submodule`)
+  await assert.rejects(captureInputSnapshot(root), /submodule|gitlink/)
+})
