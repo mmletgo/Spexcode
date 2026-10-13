@@ -1,5 +1,11 @@
 export default {
   syncOperation: {
+    requestTitle: '本次提交的需求',
+    requestNote: '这是本次提交的用户原意，交付进度见上方操作状态。',
+    requestDiff: '请求正文差异',
+    requestReview: '查看提交的正文改动',
+    requestOnly: '本次请求相对原正文的改动；交付结果以操作回执为准。',
+    recover: '恢复清理',
     invalidated: '同步配置已失效，修复并重新启用后才能保存。',
     candidateDiff: '候选差异',
     deliveryDiff: '交付差异',

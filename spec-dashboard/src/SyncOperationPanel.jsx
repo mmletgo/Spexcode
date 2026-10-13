@@ -6,10 +6,10 @@ import { routeHash } from './route.js'
 import { newTabAnchor } from './tabs.js'
 import SyncOperationDiff from './SyncOperationDiff.jsx'
 
-function EvidenceRead({ operationId, reference, targetTree, label }) {
+function EvidenceRead({ operationId, reference, targetTree, label, request = false }) {
   const t = useT()
   const active = usePaneActive()
-  const [open, setOpen] = useState(false)
+  const [open, setOpen] = useState(request)
   const [held, setHeld] = useState(null)
   useEffect(() => {
     if (!open || !active) return undefined
@@ -19,6 +19,14 @@ function EvidenceRead({ operationId, reference, targetTree, label }) {
       .catch((error) => { if (!controller.signal.aborted) setHeld({ error: `${error.code}: ${error.message}` }) })
     return () => controller.abort()
   }, [open, active, operationId, reference.sha256, targetTree])
+  if (request) return <div className="sync-op-evidence" aria-label={label}>
+    <h3>{label}</h3>
+    <p className="sync-op-note">{t('syncOperation.requestNote')}</p>
+    {held?.error ? <p role="alert">{held.error}</p> : !held ? <p>{t('common.loading')}</p> : <>
+      <p>{held.value.origin.intent}</p>
+      <SyncOperationDiff operationId={operationId} files={[{ path: held.value.path }]} targetTree={targetTree} kind="request" />
+    </>}
+  </div>
   return <details className="sync-op-evidence" onToggle={(event) => setOpen(event.currentTarget.open)}>
     <summary>{label}</summary>
     {open && held?.resultRef && <EvidenceRead operationId={operationId} reference={held.resultRef} targetTree={targetTree} label={t('syncOperation.stageResult')} />}
@@ -33,6 +41,7 @@ function OperationEvidence({ detail, model, nodeId, nodePath, targetTree }) {
   const receiptCommit = model.receipt?.actualCommit
   const diffHref = receiptCommit && model.settledJournal.plan.files.some((file) => file.path === nodePath) && routeHash('spec', nodeId, { targetTree: model.deliveryRoot, version: receiptCommit, surface: 'diff' })
   return <>
+    {operation.requestBlob && <EvidenceRead operationId={operation.id} reference={operation.requestBlob} targetTree={targetTree} label={t('syncOperation.requestTitle')} request />}
     {currentHref && <p className="sync-op-delivery">
       <span>{t(model.complete ? 'syncOperation.delivery' : 'syncOperation.publishedDelivery')}</span> <code>{model.deliveryRoot}</code>
       <a href={currentHref} onClick={(event) => newTabAnchor(event, currentHref)}>{t('syncOperation.readDelivery')}</a>
@@ -106,7 +115,7 @@ export default function SyncOperationPanel({ nodeId, nodePath, targetTree = null
   const current = held?.identity === identity ? held.value : null
   const currentError = error?.identity === identity ? error : null
   const recent = current?.operations[0]
-  const detail = submittedOperation && (!recent || submittedOperation.createdAtMs > recent.operation.createdAtMs) ? { operation: submittedOperation, attempt: null, journals: [], stale: false, sourceSynced: false, executionAvailability: { status: 'ready' } } : recent || null
+  const detail = submittedOperation && (!recent || submittedOperation.createdAtMs > recent.operation.createdAtMs) ? { operation: submittedOperation, attempt: null, journals: [], resources: [], retryEligibility: { eligible: false }, stale: false, sourceSynced: false, executionAvailability: { status: 'ready' } } : recent || null
   const settings = current?.settings
   const model = detail && syncProjection(detail, settings?.activation)
   const retryPhase = detail && ['failed', 'budget_exhausted', 'cancelled'].includes(detail.operation.phase)
@@ -119,7 +128,7 @@ export default function SyncOperationPanel({ nodeId, nodePath, targetTree = null
       else if (action === 'run') {
         runRequest.current = requestIdentity(runRequest.current, { nodeId, targetTree, contentRevision, configDigest: settings.configDigest, staleOf: detail?.stale ? detail.operation.id : null, retryOf })
         const result = await runSync(nodeId, runRequest.current.id, targetTree, retryOf ? { retryOf, origin: detail.operation.origin } : undefined)
-        if (result.operation) setHeld({ identity, value: { settings, operations: [{ operation: result.operation, attempt: null, journals: [], stale: false, sourceSynced: false, executionAvailability: { status: 'ready' } }] } })
+        if (result.operation) setHeld({ identity, value: { settings, operations: [{ operation: result.operation, attempt: null, journals: [], resources: [], retryEligibility: { eligible: false }, stale: false, sourceSynced: false, executionAvailability: { status: 'ready' } }] } })
       } else {
         const value = await controlSync(detail.operation.id, action, targetTree)
         setHeld({ identity, value: { settings, operations: [value] } })
@@ -139,6 +148,7 @@ export default function SyncOperationPanel({ nodeId, nodePath, targetTree = null
         {!targetTree && model?.canPause && <button type="button" disabled={!!busy} onClick={() => perform('pause')}>{t('syncOperation.pause')}</button>}
         {!targetTree && model?.canResume && <button type="button" disabled={!!busy} onClick={() => perform('resume')}>{t('syncOperation.resume')}</button>}
         {!targetTree && model?.canCancel && <button type="button" disabled={!!busy} onClick={() => perform('cancel')}>{t('syncOperation.cancel')}</button>}
+        {!targetTree && model?.canRecover && <button type="button" disabled={!!busy} onClick={() => perform('recover')}>{t('syncOperation.recover')}</button>}
       </div>
     </div>
     {currentError && <p className="sync-op-error" role="alert"><code>{currentError.code}</code> · {currentError.message} <button type="button" onClick={() => { setError(null); setRefresh((value) => value + 1) }}>{t('syncOperation.retry')}</button></p>}

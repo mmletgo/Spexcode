@@ -35,7 +35,7 @@ export function requestIdentity(previous, payload, makeId = () => crypto.randomU
 const COMPLETED = new Set(['workspace_synced', 'awaiting_landing', 'canonical_synced'])
 const TERMINAL = new Set(['cancelled', 'superseded', 'failed', 'budget_exhausted', ...COMPLETED])
 export function syncProjection(detail, activation) {
-  const { operation, attempt, journals, stale, sourceSynced, executionAvailability } = detail
+  const { operation, attempt, journals, resources, stale, sourceSynced, executionAvailability } = detail
   const settled = journals.findLast((journal) => journal.status === 'settled' && journal.receipt
     && journal.generation === operation.generation && journal.attemptId === operation.currentAttemptId)
   const recovery = executionAvailability.status === 'recovery_required'
@@ -49,6 +49,7 @@ export function syncProjection(detail, activation) {
     sourceRoot: operation.input.source.canonicalRoot,
     failure: recovery ? executionAvailability.failure : attempt?.failure,
     canRetry: !recovery && !stale && activation !== 'invalidated' && detail.retryEligibility?.eligible === true,
+    canRecover: recovery && (resources.length > 0 || journals.some((journal) => journal.status !== 'settled')),
     canPause: !recovery && !TERMINAL.has(operation.phase) && !['paused', 'pausing', 'cancelling'].includes(operation.phase),
     canResume: !recovery && operation.phase === 'paused',
     canCancel: !recovery && !TERMINAL.has(operation.phase) && !['cancelled', 'cancelling'].includes(operation.phase),
@@ -67,6 +68,8 @@ export function evidenceProjection(value) {
       ['id', 'kind', 'code', 'message', 'unknown', 'evidence', 'decision', 'affectedIds', 'nodeIds'].filter((field) => item[field] != null).map((field) => [field, item[field]])))
   }
   if (value.plan) result.plan = Object.fromEntries(['readPaths', 'writePaths', 'intentNodeId'].filter((field) => value.plan[field] != null).map((field) => [field, value.plan[field]]))
+  if (value.origin) result.origin = { kind: value.origin.kind, nodeId: value.origin.nodeId, intent: value.origin.intent }
+  if (value.path) result.path = value.path
   if (value.failure) result.failure = { code: value.failure.code, message: value.failure.message }
   if (Array.isArray(value.changes)) result.changes = value.changes.map(({ path, nodeId, contentDigest }) => ({ path, nodeId, contentDigest }))
   if (Array.isArray(value.entries)) result.entries = value.entries.map(({ path, digest, mode, kind }) => ({ path, digest, mode, kind }))

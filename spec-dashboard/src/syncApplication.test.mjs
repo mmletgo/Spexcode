@@ -12,7 +12,7 @@ const scope = { paths: ['.spec/alpha/spec.md'], contractIds: ['REQ-1'], flowIds:
 const operation = { id: 'op', ingressKey: 'ingress', payloadDigest: 'payload', rootCauseId: 'root', origin: 'spec', generation: 1, revision: 1, phase: 'workspace_synced', control: 'run', input, previousBaselinePair: null, scope, readyScope: scope, blockedScope: { paths: [], contractIds: [], flowIds: [] }, deliveredScope: scope, blockedReason: null, policyDigest: 'policy', impactDigest: 'impact', readSetDigest: 'readset', budget: { maxAttempts: 3, maxCalls: 6, maxRepairs: 2, timeoutMs: 1000 }, callsUsed: 1, deadlineAtMs: 1001, currentAttemptId: 'attempt', dispatchMessageId: 'dispatch', delivery: null, deliveryPlan: { canonicalRoot: '/repo/private', branch: 'delivery', baseCommit: 'head' }, createdAtMs: 1, updatedAtMs: 2 }
 const receipt = { id: 'receipt', deliverySnapshot: { ...input, source: { ...source, canonicalRoot: '/repo/published' } } }
 const settled = { status: 'settled', receipt, generation: 1, attemptId: 'attempt' }
-const detail = { operation, attempt: null, journals: [settled], stale: false, sourceSynced: false, executionAvailability: { status: 'ready' } }
+const detail = { operation, attempt: null, journals: [settled], resources: [], retryEligibility: { eligible: false }, stale: false, sourceSynced: false, executionAvailability: { status: 'ready' } }
 
 test('only a settled current receipt projects delivery completion and its actual tree', () => {
   const view = syncProjection(detail)
@@ -169,6 +169,48 @@ test('retry controls require actual application eligibility rather than a termin
   assert.equal(syncProjection(eligible, 'invalidated').canRetry, false)
   assert.equal(syncProjection({ ...eligible, executionAvailability: { status: 'recovery_required' } }).canRetry, false)
   assert.equal(syncProjection({ ...failed, retryEligibility: { eligible: false, reason: { code: 'SYNC_RESOURCE_UNSETTLED', message: 'Resources not settled' } } }).canRetry, false)
+})
+
+test('recovery acts only on actual unsettled resources or journals, without retrying an operation', async () => {
+  const recovery = { ...detail, executionAvailability: { status: 'recovery_required' } }
+  assert.equal(syncProjection(recovery).canRecover, false)
+  assert.equal(syncProjection({ ...recovery, resources: [{ phase: 'unknown' }] }).canRecover, true)
+  assert.equal(syncProjection({ ...recovery, journals: [{ ...settled, status: 'recovery_required' }] }).canRecover, true)
+  assert.equal(syncProjection({ ...detail, resources: [{ phase: 'unknown' }] }).canRecover, false)
+  const originalFetch = globalThis.fetch
+  let request
+  globalThis.fetch = async (url, init) => {
+    request = { url, body: JSON.parse(init.body) }
+    return new Response(JSON.stringify(recovery), { status: 200 })
+  }
+  try {
+    await controlSync('recoverable-op', 'recover', '/source')
+    assert.equal(request.url, '/api/sync/operations/recoverable-op/recover?targetTree=%2Fsource')
+    assert.deepEqual(request.body, {})
+  } finally { globalThis.fetch = originalFetch }
+})
+
+test('pending request evidence preserves user intent and its actual path without exposing object internals', () => {
+  const request = evidenceProjection({ schemaVersion: 1, path: '.spec/alpha/spec.md', origin: { kind: 'user_edit', nodeId: 'alpha', requestId: 'request-id', intent: '把返回文本改为中文。' }, requestTree: 'private-tree', before: { oid: 'before' }, next: { oid: 'after' }, prompt: 'agent prompt' })
+  assert.equal(request.origin.intent, '把返回文本改为中文。')
+  assert.equal(request.path, '.spec/alpha/spec.md')
+  assert.equal('requestTree' in request, false)
+  assert.equal('prompt' in request, false)
+})
+
+test('requested body diffs preserve request kind and node path before any candidate exists', async () => {
+  const originalFetch = globalThis.fetch
+  let requested
+  globalThis.fetch = async (url) => {
+    requested = new URL(url, 'http://test')
+    return new Response(JSON.stringify({ path: '.spec/alpha/spec.md', kind: 'request', baseTree: 'input', candidateTree: 'request', delivered: false, patch: '+中文需求' }), { status: 200 })
+  }
+  try {
+    const value = await readSyncDiff('pending-op', '.spec/alpha/spec.md', 'request', '/source')
+    assert.equal(requested.searchParams.get('kind'), 'request')
+    assert.equal(requested.searchParams.get('targetTree'), '/source')
+    assert.equal(value.delivered, false)
+  } finally { globalThis.fetch = originalFetch }
 })
 
 

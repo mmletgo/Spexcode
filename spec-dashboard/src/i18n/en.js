@@ -1,5 +1,11 @@
 export default {
   syncOperation: {
+    requestTitle: 'Submitted requirement',
+    requestNote: 'This is the submitted user intent. Delivery progress appears in the operation status above.',
+    requestDiff: 'Requested body diff',
+    requestReview: 'Review submitted body changes',
+    requestOnly: 'These compare the request with the original body. The operation receipt records delivery.',
+    recover: 'Recover resources',
     invalidated: 'Synchronization configuration was invalidated. Repair it and enable synchronization before saving.',
     candidateDiff: 'Candidate diff',
     deliveryDiff: 'Delivery diff',
