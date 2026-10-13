@@ -1,7 +1,8 @@
 import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, readlink, realpath, writeFile } from 'node:fs/promises'
-import { join, relative } from 'node:path'
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, readlink, realpath, symlink, writeFile } from 'node:fs/promises'
+import { join, relative, sep } from 'node:path'
+import { safeSymlinkTarget } from './snapshot.js'
 import type { VerificationCheckpoint, VerificationCommandResult, VerificationConfig, VerificationDependencies, VerificationDriver, VerificationEvidence, VerificationPolicy, VerificationRequest, VerificationResult, VerificationTestResult } from './verification-executor-types.js'
 
 const digest = (value: string): string => createHash('sha256').update(value).digest('hex')
@@ -57,8 +58,14 @@ export async function verificationExportDigest(source: string, destination?: str
       const entry = await lstat(path)
       const local = relative(root, path)
       if (name === '.git' || name === 'node_modules') throw new Error(`unsupported: export 不得包含 ${name}`)
-      if (entry.isSymbolicLink()) throw new Error(`unsupported: export 不支持 symlink ${local} → ${await readlink(path)}`)
-      if (entry.isDirectory()) {
+      if (entry.isSymbolicLink()) {
+        const target = await readlink(path)
+        safeSymlinkTarget(root, local, target)
+        const resolved = await realpath(path)
+        if (!resolved.startsWith(root + sep) || relative(root, resolved).split(sep).some(part => part === '.git' || part === 'node_modules')) throw new Error(`unsupported: 符号链接越界或指向排除内容 ${local}`)
+        hash.update(`symlink:${local}\0${target}\0`)
+        if (destination) await symlink(target, join(destination, local))
+      } else if (entry.isDirectory()) {
         hash.update(`directory:${local}\0`)
         if (destination) await mkdir(join(destination, local), { recursive: true, mode: 0o755 })
         await visit(path)
@@ -135,6 +142,7 @@ export function parseVerificationReport(stdout: string, expectedIds: readonly st
 
 /** 运行/恢复一次真实隔离验收；持久失败保留容器，绝不释放未知资源。 */
 export async function executeVerification(request: VerificationRequest, dependencies: VerificationDependencies): Promise<VerificationResult> {
+  request = { ...request, policy: structuredClone(request.policy), ...(request.previousCheckpoint ? { previousCheckpoint: structuredClone(request.previousCheckpoint) } : {}) }
   const driver = dependencies.driver ?? dockerVerificationDriver
   let checkpoint = request.previousCheckpoint
   const command = async (args: string[], bytes = MAX_INSPECT): Promise<VerificationCommandResult> => {

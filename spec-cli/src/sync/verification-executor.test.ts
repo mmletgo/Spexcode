@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, readlink, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -118,4 +118,28 @@ test('AC-VERIFIER-07 不支持政策/无 Docker/含 Git export 明确 unsupporte
   assert.equal(missing.status, 'unsupported')
   await mkdir(join(input.candidateExportPath, '.git'))
   await assert.rejects(verificationExportDigest(input.candidateExportPath), /不得包含 .git/)
+})
+
+test('AC-VERIFIER-08 普通仓库内部相对软链接可验证，越界链接不能进入副本', async () => {
+  const input = await request()
+  await symlink('test.mjs', join(input.candidateExportPath, 'linked.mjs'))
+  const destination = join(input.privateScratchRoot, 'copy')
+  await mkdir(destination, { recursive: true })
+  const exported = await verificationExportDigest(input.candidateExportPath, destination)
+  assert.equal(exported, await verificationExportDigest(destination))
+  assert.equal(await readlink(join(destination, 'linked.mjs')), 'test.mjs')
+  assert.equal(await readFile(join(destination, 'linked.mjs'), 'utf8'), await readFile(join(destination, 'test.mjs'), 'utf8'))
+  await symlink('../elsewhere', join(input.candidateExportPath, 'outside'))
+  await assert.rejects(verificationExportDigest(input.candidateExportPath), /符号链接越界/)
+})
+
+test('AC-VERIFIER-09 等待驱动时调用者改写政策，不改变本轮绑定或验收集合', async () => {
+  const input = await request(); const engine = fake()
+  const driver: VerificationDriver = async (argv, maxBytes) => {
+    if (argv[0] === 'version') input.policy.expectedTestIds = ['AC-NOT-THIS-RUN']
+    return engine.driver(argv, maxBytes)
+  }
+  const result = await executeVerification(input, { driver, onCheckpoint: async checkpoint => engine.save(checkpoint) })
+  assert.equal(result.status, 'passed')
+  assert.equal(result.evidence!.tests[0].testId, 'AC-VERIFY-01')
 })

@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { cp, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import test from 'node:test'
@@ -81,4 +81,17 @@ test('AC-VERIFIER-DOCKER-04 CLI 进程真实退出后由新调用恢复同一容
   const recovered = await executeVerification({ ...request, previousCheckpoint }, { onCheckpoint: save })
   assert.equal(recovered.status, 'passed', recovered.reason)
   assert.equal(recovered.evidence!.containerId, actual.Id)
+})
+
+test('AC-VERIFIER-DOCKER-05 仓库内相对软链接在真实只读容器中保持可用', { skip: !enabled }, async () => {
+  const request = await input('internal-link')
+  const source = join(evidenceRoot, 'symlink-export')
+  await cp(fixture, source, { recursive: true })
+  await symlink('isolation.test.mjs', join(source, 'linked.test.mjs'))
+  request.candidateExportPath = source
+  request.candidateExportDigest = await verificationExportDigest(source)
+  request.policy.argv = ['node', '--test', 'linked.test.mjs']
+  const result = await executeVerification(request, { onCheckpoint: save })
+  assert.equal(result.status, 'passed', result.reason)
+  assert.equal(result.evidence!.tests.length, 5)
 })
