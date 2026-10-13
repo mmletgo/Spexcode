@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { posix } from 'node:path'
-import { buildContractGraph, parseContract, projectContractCoverage, validateContractGraph } from '@spexcode/spec-core/contracts'
-import type { Contract, ContractFinding, ContractGraph, Gap } from '@spexcode/spec-core/contracts'
+import { buildContractGraph, parseContract, parseParts, projectContractCoverage, validateContractGraph } from '@spexcode/spec-core/contracts'
+import type { Contract, ContractCoverage, ContractFinding, ContractGraph, Gap } from '@spexcode/spec-core/contracts'
 import { CONTRACT_INSTRUCTIONS, ELABORATION_REVIEW_SCHEMA, ELABORATION_SCHEMA, outputErrors } from './elaboration-schema.js'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
 import type { ElaborationCandidate, ElaborationInput, ElaborationResult, ElaborationReview, ElaborationRound, ElaborationRunner, ElaborationTrace } from './elaboration-types.js'
@@ -12,7 +12,12 @@ const digest = (value: unknown): string => elaborationDigest(JSON.stringify(valu
 const specPath = (path: string): boolean => path.startsWith('.spec/') && path.endsWith('/spec.md') && posix.normalize(path) === path && !path.includes('\\')
 // 未决事实保留为显式业务门禁；不能要求构建者编造事实来消除检查错误。
 const implementationFinding = (issue: ContractFinding): boolean => ['missing-implementation', 'missing-test-file', 'missing-test-case'].includes(issue.code)
-const repairRequired = (issue: ContractFinding): boolean => issue.severity === 'error' && issue.code !== 'unresolved-gap' && issue.code !== 'unresolved-conflict' && !implementationFinding(issue)
+const gapBlockedFinding = (issue: ContractFinding, coverage: ContractCoverage | null): boolean => {
+  if (!issue.itemId || !['missing-event-disposition', 'nonterminal-no-exit', 'unreachable-state', 'missing-acceptance', 'missing-requirement-flow', 'incomplete-stateless-step', 'missing-flow-terminal', 'flow-no-exit', 'unreachable-step'].includes(issue.code)) return false
+  const affected = [issue.itemId, ...(issue.relatedIds ?? [])]
+  return coverage?.gaps.some(gap => affected.every(id => gap.affectedIds.includes(id))) ?? false
+}
+const repairRequired = (issue: ContractFinding, coverage: ContractCoverage | null = null): boolean => issue.severity === 'error' && issue.code !== 'unresolved-gap' && issue.code !== 'unresolved-conflict' && !implementationFinding(issue) && !gapBlockedFinding(issue, coverage)
 
 function finding(input: ElaborationInput, code: string, message: string, itemId?: string): ContractFinding {
   const target = input.targets.find(target => target.nodeId === input.intent.nodeId)!
@@ -42,6 +47,8 @@ function checkInput(input: ElaborationInput): void {
   }
   if (!Number.isInteger(input.maxRepairs ?? 2) || (input.maxRepairs ?? 2) < 0 || (input.maxRepairs ?? 2) > 5) throw new TypeError('修复预算必须是0到5的整数')
   if (!Number.isInteger(input.timeoutMs ?? 120_000) || (input.timeoutMs ?? 120_000) <= 0) throw new TypeError('每次调用超时必须为正整数')
+  if (!Number.isInteger(input.maxCalls ?? 2 * ((input.maxRepairs ?? 2) + 1)) || (input.maxCalls ?? 1) <= 0) throw new TypeError('调用预算必须为正整数')
+  if (input.totalTimeoutMs !== undefined && (!Number.isInteger(input.totalTimeoutMs) || input.totalTimeoutMs <= 0)) throw new TypeError('总时间预算必须为正整数')
 }
 
 function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate, inputDigest: string): { contracts: Contract[]; graph: ContractGraph; findings: ContractFinding[] } {
@@ -60,9 +67,9 @@ function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate
     findings.push(...parsed.findings)
     if (!parsed.contract) { findings.push(finding(input, 'contract_required', `候选必须启用sync-v1: ${change.path}`)); continue }
     const before = target.source === null ? null : parseContract({ nodeId: target.nodeId, path: target.path, source: target.source }).contract
-    const raw = change.nodeId === input.intent.nodeId ? input.intent.rawSource : target.rawSource ?? before?.rawSource ?? target.source?.match(/^## raw source\s*\n([\s\S]*?)(?=^## expanded spec\s*$)/m)?.[1].trim()
-    const rawBlock = change.source.match(/^## raw source[^\S\n]*\r?\n([\s\S]*?)(?=^## expanded spec[^\S\n]*\r?$)/m)?.[1]
-    if (raw === undefined || parsed.contract.rawSource.trim() !== raw.trim() || !rawBlock?.includes(raw)) findings.push(finding(input, 'raw_changed', `用户原意必须原样保留: ${change.path}`))
+    for (const anchor of parsed.contract.code) if (!before?.code.includes(anchor) && !input.files?.has(anchor.split('#')[0])) findings.push(finding(input, 'unverified_new_code_anchor', `新治理锚点必须指向冻结上下文的真实代码文件: ${anchor}`))
+    const raw = change.nodeId === input.intent.nodeId ? input.intent.rawSource : target.rawSource ?? before?.rawSource ?? (target.source === null ? undefined : parseParts(target.source)?.rawSource)
+    if (raw === undefined || parsed.contract.rawSource !== raw.trim() || !change.source.includes(raw)) findings.push(finding(input, 'raw_changed', `用户原意必须原样保留: ${change.path}`))
     for (const item of before?.items ?? []) {
       if (['REQ', 'AC', 'VERIFY'].includes(item.kind) && !parsed.contract.items.some(next => next.id === item.id && next.kind === item.kind) && !input.authorizedChanges?.some(change => change.id === item.id && change.action === 'retire')) findings.push(finding(input, 'protected_item_removed', `缺少用户原意或可信裁决的退役依据: ${item.id}`, item.id))
       if (item.kind === 'VERIFY') {
@@ -136,7 +143,10 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
   // 在任何 await 前复制调用者输入，后续生成/评审不能混入继续编辑的字节。
   input = { ...input, ...frozen, files: frozen.files === null ? undefined : new Map(frozen.files) }
   const inputDigest = digest(frozen)
-  const result: ElaborationResult = { status: 'exhausted', inputDigest, candidateDigest: null, changes: [], contracts: [], graph: null, coverage: null, gaps: [], blockedIds: [], readyIds: [], retiredIds: [], structurePassed: false, reviewPassed: false, runtimeVerification: 'not_run', implementationReady: false, deferredImplementationFindings: [], rounds: [], failure: null }
+  const result: ElaborationResult = { status: 'exhausted', inputDigest, candidateDigest: null, changes: [], contracts: [], graph: null, coverage: null, gaps: [], blockedIds: [], readyIds: [], retiredIds: [], structurePassed: false, reviewPassed: false, runtimeVerification: 'not_run', implementationReady: false, deferredImplementationFindings: [], blockedStructureFindings: [], rounds: [], failure: null }
+  const maxCalls = input.maxCalls ?? 2 * ((input.maxRepairs ?? 2) + 1)
+  const deadline = Date.now() + (input.totalTimeoutMs ?? (input.timeoutMs ?? 120_000) * maxCalls)
+  let calls = 0
   const runner: ElaborationRunner = options.runner ?? (async request => {
     const { runStructuredSession } = await import('../session-structured.js')
     return runStructuredSession(request)
@@ -149,8 +159,11 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
     result.rounds.push(round)
     const call = async (purpose: string, prompt: string, schema: Record<string, unknown>): Promise<unknown> => {
       if (input.signal?.aborted) throw Object.assign(new Error('细化已取消，不再派发后续阶段'), { code: 'cancelled' })
+      const remainingMs = deadline - Date.now()
+      if (calls >= maxCalls || remainingMs <= 0) throw Object.assign(new Error('细化调用或总时间预算已耗尽'), { code: 'budget_exhausted' })
+      calls++
       const requestDigest = digest({ inputDigest, purpose, prompt, schema })
-      const session = await runner({ root: input.root, base: input.base, prompt, schema, requestKey: `${input.requestKey}:${index}:${purpose}`, inputDigest: requestDigest, purpose, timeoutMs: input.timeoutMs ?? 120_000, signal: input.signal, model: input.model, effort: input.effort })
+      const session = await runner({ root: input.root, base: input.base, prompt, schema, requestKey: `${input.requestKey}:${index}:${purpose}`, inputDigest: requestDigest, purpose, timeoutMs: Math.min(input.timeoutMs ?? 120_000, remainingMs), signal: input.signal, model: input.model, effort: input.effort })
       const trace: ElaborationTrace = { purpose, sessionId: session.sessionId, threadId: session.threadId, turnId: session.turnId, resultDigest: session.resultDigest, inputDigest: requestDigest }
       round.traces.push(trace)
       return session.output
@@ -171,19 +184,20 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
         result.blockedIds = result.coverage.items.filter(item => item.blockedBy.length > 0).map(item => item.id)
         result.readyIds = []
         result.deferredImplementationFindings = round.findings.filter(implementationFinding)
-        result.structurePassed = !round.findings.some(repairRequired)
+        result.blockedStructureFindings = round.findings.filter(issue => gapBlockedFinding(issue, result.coverage))
+        result.structurePassed = !round.findings.some(issue => repairRequired(issue, result.coverage))
         result.reviewPassed = false
-        if (!round.findings.some(repairRequired)) {
+        if (!round.findings.some(issue => repairRequired(issue, result.coverage))) {
           const reviewOutput = await call('elaboration_review', `你是独立业务审查者。重新从用户原意和冻结事实走正常、失败、边界、重试、取消、重复及必要竞争顺序；候选不是事实，不能信构建者结论。逐项重查所有适用性依据；若遗漏对象/事件/场景、scope被删除、AC变弱、政策无来源，提供具体repair发现。重大未知事实为missing_fact，互斥原意/规则为conflict，列影响ID、证据和具体裁决；已有准确GAP不要求编造规则。仅返回schema JSON，不修改文件。\n${CONTRACT_INSTRUCTIONS}\ninputDigest=${inputDigest}\ncandidateDigest=${round.candidateDigest}\n冻结业务输入:\n${snapshot}\n候选Markdown与适用性:\n${JSON.stringify(round.candidate)}`, ELABORATION_REVIEW_SCHEMA)
           round.reviewOutput = reviewOutput
           if (input.signal?.aborted) throw Object.assign(new Error('细化已取消，保留当前候选和评审产物'), { code: 'cancelled' })
           round.findings.push(...outputErrors(reviewOutput, ELABORATION_REVIEW_SCHEMA).map(message => finding(input, 'review_schema', message)))
           if (round.traces[0].sessionId === round.traces[1].sessionId || round.traces[0].threadId === round.traces[1].threadId) round.findings.push(finding(input, 'review_not_independent', '构建与审查必须使用不同会话及线程上下文'))
-          if (!round.findings.some(repairRequired)) {
+          if (!round.findings.some(issue => repairRequired(issue, result.coverage))) {
             round.review = reviewOutput as ElaborationReview
             round.findings.push(...reviewErrors(input, round.review, inputDigest, round.candidateDigest, checked.graph))
           }
-          if (!round.findings.some(repairRequired)) {
+          if (!round.findings.some(issue => repairRequired(issue, result.coverage))) {
             result.structurePassed = true; result.reviewPassed = true
             result.readyIds = result.coverage.items.filter(item => item.blockedBy.length === 0 && item.kind !== 'GAP').map(item => item.id)
             result.retiredIds = input.authorizedChanges!.filter(change => change.action === 'retire' && !checked.graph.items.has(change.id)).map(change => change.id)
@@ -195,7 +209,7 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
     } catch (error) {
       const failure = error as { code?: string; message?: string; sessionId?: string; threadId?: string; turnId?: string }
       result.failure = { code: failure.code ?? 'failed', message: failure.message ?? String(error), ...(failure.sessionId ? { sessionId: failure.sessionId } : {}), ...(failure.threadId ? { threadId: failure.threadId } : {}), ...(failure.turnId ? { turnId: failure.turnId } : {}) }
-      result.status = failure.code === 'unsupported' ? 'unsupported' : failure.code === 'cancelled' ? 'cancelled' : 'failed'
+      result.status = failure.code === 'unsupported' ? 'unsupported' : failure.code === 'cancelled' ? 'cancelled' : failure.code === 'budget_exhausted' ? 'exhausted' : 'failed'
       return result
     }
     repairContext = `修复本轮具体失败，不改变原始目标/范围/AC/验证政策。上轮候选:\n${JSON.stringify(round.output)}\n程序及独立评审发现:\n${JSON.stringify(round.findings)}\n独立评审:\n${JSON.stringify(round.review)}`

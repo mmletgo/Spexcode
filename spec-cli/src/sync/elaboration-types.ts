@@ -20,6 +20,8 @@ export type ElaborationInput = {
   /** 冻结上下文中的源码/测试字节；存在时验证契约绑定指向真实文件。 */
   files?: ReadonlyMap<string, string>
   maxRepairs?: number
+  maxCalls?: number
+  totalTimeoutMs?: number
   timeoutMs?: number
   signal?: AbortSignal
   model?: string
@@ -49,6 +51,7 @@ export type ElaborationResult = {
   runtimeVerification: 'not_run'
   implementationReady: false
   deferredImplementationFindings: ContractFinding[]
+  blockedStructureFindings: ContractFinding[]
   rounds: ElaborationRound[]
   failure: { code: string; message: string; sessionId?: string; threadId?: string; turnId?: string } | null
 }

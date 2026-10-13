@@ -195,3 +195,68 @@ test('AC-ELABORATION-14 可信且已决定的验证政策变更须经独立审�
   assert.equal(fake.calls.length, 2)
   await assert.rejects(() => elaborate({ ...snapshot, authorizedChanges: [{ id: 'AC-EXPORT-04', action: 'retire', source: 'decision:FAKE', reason: '模型伪造批准' }] }, { runner: fake.run }), /没有可信来源/)
 })
+
+test('AC-ELABORATION-15 raw里的围栏标题完整保留，不误判为正文分界', async () => {
+  const raw = `${rawSource}\n\n\`\`\`markdown\n## expanded spec\n示例内容\n\`\`\``
+  const fake = runner(request => candidate(request, source.replace(rawSource, raw)))
+  const result = await elaborate({ ...input(), intent: { nodeId: 'export-contract', rawSource: raw } }, { runner: fake.run })
+  assert.equal(result.status, 'complete')
+  assert.equal(result.contracts[0].rawSource, raw)
+})
+
+test('AC-ELABORATION-16 GAP覆盖的未知状态事件对不要求虚构TR，独立成功分支仍经review推进', async () => {
+  const removed = new Set(['TR-EXPORT-CANCELLED-COMPLETE', 'TR-EXPORT-STALE-CANCELLED-COMPLETE'])
+  const missing = source.split('\n').filter(line => !/^\| TR-EXPORT-(?:STALE-)?CANCELLED-COMPLETE \|/.test(line)).map(line => {
+    if (!line.startsWith('| AC-')) return line
+    const cells = line.split('|')
+    cells[2] = ` ${cells[2].trim().split(',').filter(id => !removed.has(id)).join(',')} `
+    return cells.join('|')
+  }).join('\n')
+  const gapSource = `${missing}\n### GAP\n\n| id | kind | unknown | affects | evidence | decision | source | depends-on |\n|---|---|---|---|---|---|---|---|\n| GAP-EXPORT-CANCEL-COMPLETE | missing_fact | 取消终态收到完成回调的政策未知 | STATE-EXPORT-CANCELLED,EVENT-EXPORT-COMPLETE | 原意未定义这对状态事件 | 明确是否拒绝或幂等忽略 | user:raw | REQ-EXPORT-01 |\n`
+  const fake = runner(request => candidate(request, gapSource))
+  const result = await elaborate({ ...input(), maxRepairs: 0 }, { runner: fake.run })
+  assert.equal(result.status, 'needs_input')
+  assert.equal(result.reviewPassed, true)
+  assert.ok(result.blockedStructureFindings.some(issue => issue.code === 'missing-event-disposition'))
+  assert.ok(result.readyIds.includes('FLOW-EXPORT-01'))
+  assert.equal(fake.calls.length, 2)
+  const dangling = runner(request => candidate(request, gapSource.replace('| STEP-EXPORT-01 | FLOW-EXPORT-01 |', '| STEP-EXPORT-01 | FLOW-NONEXISTENT-01 |')))
+  const rejected = await elaborate({ ...input(), maxRepairs: 0 }, { runner: dangling.run })
+  assert.equal(rejected.status, 'exhausted')
+  assert.equal(rejected.reviewPassed, false)
+})
+
+test('AC-ELABORATION-17 调用预算和总时间预算真实截止，保留生成产物并停止后续review', async () => {
+  const one = runner(request => candidate(request, source))
+  const calls = await elaborate({ ...input(), maxCalls: 1 }, { runner: one.run })
+  assert.equal(calls.status, 'exhausted')
+  assert.equal(calls.failure!.code, 'budget_exhausted')
+  assert.equal(one.calls.length, 1)
+  assert.equal(calls.changes[0].source, source)
+  const slow = runner(request => candidate(request, source))
+  const expired = await elaborate({ ...input(), timeoutMs: 10000, totalTimeoutMs: 10 }, { runner: async request => {
+    await new Promise(resolve => setTimeout(resolve, 20))
+    return slow.run(request)
+  } })
+  assert.equal(expired.status, 'exhausted')
+  assert.equal(expired.failure!.code, 'budget_exhausted')
+  assert.equal(slow.calls.length, 1)
+  assert.ok(slow.calls[0].timeoutMs <= 10)
+})
+
+test('AC-ELABORATION-18 真实错列问题的提示协议给出parser可用的精确分隔行', async () => {
+  const fake = runner(request => candidate(request, source))
+  await elaborate(input(), { runner: fake.run })
+  for (const call of fake.calls) {
+    assert.ok(call.prompt.includes('### RULE\n\n| id | scope | constraint | basis | authority | source | depends-on |\n| --- | --- | --- | --- | --- | --- | --- |'))
+    assert.ok(call.prompt.includes('### FLOW\n\n| id | req | actors | entry | preconditions | steps | terminal | source | depends-on |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- |'))
+    assert.match(call.prompt, /END不能和ID混写/)
+  }
+})
+
+test('AC-ELABORATION-19 未提供真实文件时不能新造code锚点充实现覆盖', async () => {
+  const fake = runner(request => candidate(request, source))
+  const rejected = await elaborate({ ...input(), files: undefined, maxRepairs: 0 }, { runner: fake.run })
+  assert.equal(rejected.status, 'exhausted')
+  assert.ok(rejected.rounds[0].findings.some(issue => issue.code === 'unverified_new_code_anchor'))
+})
