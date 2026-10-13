@@ -10,6 +10,7 @@ import { runtimeRoot, mainCheckout, harnessIdentity } from '@spexcode/spec-core'
 import { detachedRuntimeGenerationToken, migrateLegacyDetachedRuntimeReceipt, processStartToken, verifyDetachedRuntime, type VerifiedDetachedRuntime } from '@spexcode/spec-core'
 import { codexGenerationEndpoints, codexGenerationSocketPath, currentCodexGeneration, legacyCodexGenerationEndpoint, readCodexGenerationLedger, prepareCodexGenerationClose, resolveCodexGenerationForClose, resolveCodexGenerationForResume, resolveCodexGenerationForSession, rebindCodexGeneration, type CodexGenerationEndpoint } from './codex-runtime-generations.js'
 import { spawnDetachedRuntime } from './runtime-ownership.js'
+import { StructuredSessionError, type StructuredExecution } from './session-structured-policy.js'
 import { codexRolloutPath, codexTranscript } from '@spexcode/transcript'
 import { shQuote } from './sh.js'
 import { writeFileIfChanged } from './file-write.js'
@@ -2622,4 +2623,147 @@ export const codexHeadlessHarness: Harness = {
   // There is no TUI to restart and the project app-server keeps an identified thread addressable. A pre-identity
   // recovery still replays the authoritative resolved launch payload through codex-launch.
   resumeArg: codexResumeArg,
+}
+
+
+// Subscribe before the first turn on this connection. Reconnect reads only the exact durable turn, or the
+// sole first turn whose user input equals the pinned prompt when its acceptance reply was lost.
+export async function codexStructuredTurn(sock: string, cwd: string, prompt: string, execution: StructuredExecution, callbacks: {
+  onThread(threadId: string): Promise<void>
+  onTurn(turnId: string): Promise<void>
+  signal?: AbortSignal
+}): Promise<{ threadId: string; turnId: string; text: string }> {
+  const conn = createConnection(sock)
+  const frames: FrameState = { buf: Buffer.alloc(0), fragOp: 0, fragBuf: Buffer.alloc(0) }
+  let upgraded = false, requestId = 0
+  let failure: Error | undefined
+  const pending = new Map<number, { resolve(value: unknown): void; reject(error: Error): void }>()
+  let rejectReady: (error: Error) => void = () => {}
+  let rejectCompletion: (error: Error) => void = () => {}
+  let resolveCompletion: (turn: unknown) => void = () => {}
+  const completion = new Promise<unknown>((resolve, reject) => { resolveCompletion = resolve; rejectCompletion = reject })
+  // Establish the rejection handler before transport events can arrive during preflight.
+  void completion.catch(() => {})
+  let threadId = execution.threadId, turnId = execution.turnId
+  const earlyTurns = new Map<string, unknown>()
+  const fail = (error: Error): void => {
+    failure = error
+    for (const waiter of pending.values()) waiter.reject(error)
+    pending.clear()
+    rejectReady(error)
+    rejectCompletion(error)
+  }
+  const send = (message: JsonRpc): void => { conn.write(wsText(JSON.stringify(message))) }
+  const request = (method: string, params: Record<string, unknown>): Promise<unknown> => new Promise((resolve, reject) => {
+    if (failure) { reject(failure); return }
+    const id = ++requestId
+    pending.set(id, { resolve, reject })
+    send({ id, method, params })
+  })
+  const handle = (json: string): void => {
+    const message = JSON.parse(json) as JsonRpc
+    if (typeof message.id === 'number' && pending.has(message.id)) {
+      const waiter = pending.get(message.id)!; pending.delete(message.id)
+      if (message.error) waiter.reject(new StructuredSessionError('failed', `Codex RPC failed: ${message.error.message}`))
+      else waiter.resolve(message.result)
+      return
+    }
+    if (message.method === 'turn/completed') {
+      const params = message.params as { threadId?: string; turn?: { id?: string } }
+      if (params.threadId !== threadId || !params.turn?.id) return
+      if (turnId === params.turn.id) resolveCompletion(params.turn)
+      else earlyTurns.set(params.turn.id, params.turn)
+    }
+    // This client grants no approvals, user interaction, external tool calls or permission expansion.
+    if (message.id !== undefined && message.method)
+      send({ id: message.id, error: { code: -32601, message: 'Structured read-only execution does not grant external tools or approvals' } })
+  }
+  const ready = new Promise<void>((resolve, reject) => {
+    rejectReady = reject
+    conn.once('connect', () => conn.write(WS_UPGRADE(randomBytes(16).toString('base64'))))
+    conn.on('error', (error) => { reject(error); fail(error) })
+    conn.on('close', () => { const error = new StructuredSessionError('failed', 'Codex structured transport disconnected; exact turn can be recovered'); reject(error); fail(error) })
+    conn.on('data', (chunk: Buffer) => {
+      frames.buf = Buffer.concat([frames.buf, chunk])
+      try {
+        if (!upgraded) {
+          const end = frames.buf.indexOf('\r\n\r\n'); if (end < 0) return
+          if (!/^HTTP\/1\.1 101/.test(frames.buf.subarray(0, end).toString('utf8'))) throw new Error('Codex structured WebSocket upgrade refused')
+          frames.buf = frames.buf.subarray(end + 4); upgraded = true; resolve()
+        }
+        if (drainWsFrames(frames, conn, handle)) fail(new Error('Codex structured WebSocket closed'))
+      } catch (error) { reject(error); fail(error as Error) }
+    })
+  })
+  const abort = (): void => {
+    if (threadId && turnId && upgraded) send({ method: 'turn/interrupt', id: ++requestId, params: { threadId, turnId } })
+    fail(new StructuredSessionError('cancelled', 'structured Agent execution was cancelled'))
+  }
+  const timer = setTimeout(() => {
+    if (threadId && turnId && upgraded) send({ method: 'turn/interrupt', id: ++requestId, params: { threadId, turnId } })
+    fail(new StructuredSessionError('timeout', 'structured Agent execution exceeded its deadline'))
+  }, execution.timeoutMs)
+  callbacks.signal?.addEventListener('abort', abort, { once: true })
+  try {
+    if (callbacks.signal?.aborted) throw new StructuredSessionError('cancelled', 'structured Agent execution was cancelled')
+    await ready
+    await request('initialize', { clientInfo: { name: 'spexcode-structured', version: '1' }, capabilities: { experimentalApi: true } })
+    send({ method: 'initialized', params: {} })
+    const config = await request('config/read', { cwd, includeLayers: false }) as { config?: Record<string, unknown> }
+    const features = config.config?.features as Record<string, unknown> | undefined
+    const mcp = config.config?.mcp_servers as Record<string, unknown> | undefined
+    if (!config.config || config.config.sandbox_mode !== 'read-only' || config.config.approval_policy !== 'never'
+      || features?.apps !== false || features?.plugins !== false || features?.hooks !== false || features?.shell_tool !== false || features?.code_mode !== false || features?.code_mode_host !== false || (mcp && Object.keys(mcp).length))
+      throw new StructuredSessionError('unsupported', 'effective Codex config cannot prove the fixed read-only policy and zero external tools')
+    const hooks = await request('hooks/list', { cwds: [cwd] }) as { data?: Array<{ hooks?: unknown[]; errors?: unknown[] }> }
+    if (!Array.isArray(hooks.data) || hooks.data.some((entry) => !Array.isArray(entry.hooks) || entry.hooks.length || entry.errors?.length))
+      throw new StructuredSessionError('unsupported', 'effective Codex hooks are present or could not be audited')
+    const servers = await request('mcpServerStatus/list', {}) as { data?: unknown[]; nextCursor?: string | null }
+    if (!Array.isArray(servers.data) || servers.data.length || servers.nextCursor)
+      throw new StructuredSessionError('unsupported', 'effective Codex MCP servers/tools are present or could not be audited')
+    let thread: { id?: string; turns?: unknown[] }
+    if (threadId) {
+      const resumed = await request('thread/resume', { threadId, cwd, approvalPolicy: 'never', sandbox: 'read-only' }) as { thread: typeof thread }
+      thread = resumed.thread
+    } else {
+      const started = await request('thread/start', { cwd, approvalPolicy: 'never', sandbox: 'read-only', ...(execution.model ? { model: execution.model } : {}) }) as { thread: typeof thread }
+      thread = started.thread
+      if (!thread?.id) throw new StructuredSessionError('failed', 'Codex returned no structured thread identity')
+      threadId = thread.id
+      await callbacks.onThread(threadId)
+    }
+    if (thread.id !== threadId) throw new StructuredSessionError('stale_result', 'Codex resumed a different structured thread')
+    const turns = (thread.turns ?? []) as Array<{ id: string; status: string; items?: Array<{ type: string; content?: Array<{ type: string; text?: string }> }> }>
+    if (!turnId && turns.length) {
+      if (turns.length !== 1 || !turns[0].items?.some((item) => item.type === 'userMessage' && item.content?.some((input) => input.type === 'text' && input.text === prompt)))
+        throw new StructuredSessionError('stale_result', 'unacknowledged structured turn cannot be matched to its exact pinned input')
+      turnId = turns[0].id
+      await callbacks.onTurn(turnId)
+    }
+    if (!turnId) {
+      const accepted = await request('turn/start', { threadId, input: codexTextInput(prompt), cwd, approvalPolicy: 'never', sandboxPolicy: { type: 'readOnly' },
+        outputSchema: execution.schema, ...(execution.model ? { model: execution.model } : {}), ...(execution.effort ? { effort: execution.effort } : {}) }) as { turn?: { id?: string } }
+      if (!accepted.turn?.id) throw new StructuredSessionError('failed', 'Codex returned no structured turn identity')
+      turnId = accepted.turn.id
+      await callbacks.onTurn(turnId)
+    }
+    const stored = turns.find((turn) => turn.id === turnId)
+    if (stored && stored.status !== 'inProgress') resolveCompletion(stored)
+    if (earlyTurns.has(turnId)) resolveCompletion(earlyTurns.get(turnId))
+    await completion
+    // Completion notifications can omit full items. Read only after settled completion, and select by id.
+    const read = await request('thread/read', { threadId, includeTurns: true }) as { thread?: { id?: string; turns?: unknown[] } }
+    if (read.thread?.id !== threadId) throw new StructuredSessionError('stale_result', 'structured result names a different thread')
+    const turn = (read.thread.turns as Array<{ id: string; status: string; items: Array<{ type: string; phase?: string; text?: string }>; error?: { message?: string } }>).find((item) => item.id === turnId)
+    if (!turn) throw new StructuredSessionError('stale_result', 'exact structured turn is missing')
+    if (turn.status === 'interrupted') throw new StructuredSessionError('cancelled', 'structured Agent turn was interrupted')
+    if (turn.status !== 'completed') throw new StructuredSessionError('failed', turn.error?.message || `structured Agent turn ended ${turn.status}`)
+    const final = turn.items.filter((item) => item.type === 'agentMessage' && item.phase === 'final_answer')
+    if (final.length !== 1 || !final[0].text) throw new StructuredSessionError('failed', 'exact structured turn did not return one final answer')
+    return { threadId, turnId, text: final[0].text }
+  } finally {
+    clearTimeout(timer)
+    callbacks.signal?.removeEventListener('abort', abort)
+    conn.destroy()
+  }
 }

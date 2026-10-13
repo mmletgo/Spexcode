@@ -1,3 +1,4 @@
+import type { StructuredExecution } from './session-structured-policy.js'
 import { execFileSync, spawn } from 'node:child_process'
 import { createConnection } from 'node:net'
 import { createHash, randomUUID } from 'node:crypto'
@@ -467,6 +468,7 @@ function corruptSession(id: string, entry: { path: string; error: string }): Ses
 }
 
 export function toSession(rec: SessRec, status: DisplayStatus, lv: Liveness, activity: string | null = null): Session {
+  if (rec.structuredExecution) lv = launching.has(rec.session) ? 'unknown' : 'offline'
   const prompt = readPromptFile(rec.session)   // the originating ask, captured at launch (store artifact; null for old sessions)
   // activity is the LIVE pane title; it only means anything while the worker is genuinely up — a
   // dead/booting session would show a stale or absent title, so it's suppressed unless liveness is online.
@@ -1214,6 +1216,24 @@ async function startQueuedUnlocked(id: string): Promise<QueuedStartResult> {
   if (wt.rec.archived) return 'blocked'
   if (!canDrainQueued(wt.rec)) return 'retryable'
   const h = harnessById(wt.rec.harness || defaultHarness.id)
+  if (wt.rec.structuredExecution) {
+    launching.add(id)
+    void import('./session-structured.js').then(({ executeQueuedStructuredSession }) => executeQueuedStructuredSession(id))
+      .then(async (outcome) => {
+        await withRecordLock(id, async () => {
+          const current = readRecord(id)
+          if (!current) return
+          publishCanonicalLifecycle(current, outcome === 'completed' ? 'awaiting' : 'error', outcome === 'completed' ? 'nothing' : null, current.structuredExecution?.error ?? null)
+          writeRecord({ ...current, launchOwner: null, launchReadinessStartedAt: null })
+        })
+      }).catch(async (error) => {
+        await withRecordLock(id, async () => {
+          const current = readRecord(id)
+          if (current) publishCanonicalLifecycle(current, 'error', null, error instanceof Error ? error.message : String(error))
+        })
+      }).finally(() => { launching.delete(id); requestQueueDrain() })
+    return 'started'
+  }
   if (h.launchPayloadProof && hasReadableLaunchReceipt(id)) {
     launching.add(id)
     let readinessOwnsSlot = false
@@ -1411,8 +1431,17 @@ async function drainQueueUnlocked(): Promise<void> {
     if (queueDrainFlight === run) queueDrainFlight = null
   }
 }
+export async function queueStructuredRecovery(id: string): Promise<void> {
+  await withRecordLock(id, async () => {
+    const current = readRecord(id)
+    if (!current?.structuredExecution || current.structuredExecution.state !== 'running' || launching.has(id)) return
+    publishCanonicalLifecycle(current, 'queued', null, null)
+    writeRecord({ ...current, launchOwner: backendLaunchAuthority() })
+  })
+  requestQueueDrain()
+}
 export const drainQueue = (): Promise<void> => drainQueueUnlocked()
-const requestQueueDrain = (): void => {
+export const requestQueueDrain = (): void => {
   void drainQueue().catch((error) => {
     console.error(`spex: queue drain failed: ${error instanceof Error ? error.message : String(error)}`)
   })
@@ -1876,6 +1905,7 @@ type SessionCreateContext = {
   base?: string | null
   issue?: string | null
   initialReplyVia?: 'note'
+  structuredExecution?: StructuredExecution
 }
 
 // @@@ create parentage - the ONE answer to "whose subtree does this create belong to". Two sources can
@@ -1910,6 +1940,8 @@ async function settleCreateParentage(selectors: string[], callerParent: string |
   return { id: resolved.ok.id, source: 'directive' }
 }
 type SessionCreateRequestOptions = {
+  structuredExecution?: StructuredExecution
+
   requestKey?: string
   signal?: AbortSignal
   timeoutMs?: number
@@ -1966,7 +1998,9 @@ export async function sessionCreateRequest(body: unknown, options: SessionCreate
   // The prompt is the only field a human authors freely, so it is also where the grammar's `@parent:<sel>`
   // directive arrives ([[mentions]]). Read it off the raw text FIRST: the stripped prompt is what titles,
   // slugs, receipts, and the agent itself see, so the directive is never mistaken for task words.
-  const directive = parseParentDirective(typeof input.prompt === 'string' ? input.prompt : '')
+  const directive = options.structuredExecution
+    ? { text: typeof input.prompt === 'string' ? input.prompt : '', selectors: [] as string[] }
+    : parseParentDirective(typeof input.prompt === 'string' ? input.prompt : '')
   const prompt = directive.text
   if (!prompt.trim()) return { status: 400, error: 'empty prompt' }
   const launcher = typeof input.launcher === 'string' && input.launcher.trim() ? input.launcher.trim() : undefined
@@ -2000,7 +2034,7 @@ export async function sessionCreateRequest(body: unknown, options: SessionCreate
   // Keep no-name retries byte-compatible with pre-name receipts; an explicit non-empty name is one more
   // immutable creation input because it publishes the record's existing display override. `base` joins them
   // for the same reason and with the same shape: absent, it must not perturb an existing receipt's bytes.
-  const payloadHash = digest(JSON.stringify({ prompt, parent: parentage.id, launcher: launcher ?? null, ...(name ? { name } : {}), ...(base ? { base } : {}), ...(issue ? { issue } : {}), ...(initialReplyVia ? { initialReplyVia } : {}) }))
+  const payloadHash = digest(JSON.stringify({ prompt, parent: parentage.id, launcher: launcher ?? null, ...(name ? { name } : {}), ...(base ? { base } : {}), ...(issue ? { issue } : {}), ...(initialReplyVia ? { initialReplyVia } : {}), ...(options.structuredExecution ? { structuredExecution: options.structuredExecution } : {}) }))
   let freshStoreOwned = false
   let freshStoreCommitted = false
   try {
@@ -2024,7 +2058,7 @@ export async function sessionCreateRequest(body: unknown, options: SessionCreate
   traceSessionCreate(id, requestDigest, 'request', 'start')
   try {
     try {
-      const session = await prepareSession(prompt, parentage, launcher, name, { id, requestDigest, payloadHash, base, issue, initialReplyVia, signal: controller.signal })
+      const session = await prepareSession(prompt, parentage, launcher, name, { id, requestDigest, payloadHash, base, issue, initialReplyVia, structuredExecution: options.structuredExecution, signal: controller.signal })
       await options.onPublished?.(session)
       freshStoreCommitted = true
       traceSessionCreate(id, requestDigest, 'request', 'finish')
@@ -2456,10 +2490,12 @@ async function prepareSession(prompt: string, parentage: CreateParentage, launch
       let h: Harness
       let pinned: string
       try {
-        const lname = launcher ?? defaultLauncher(mainRoot())
-        chosen = resolveLauncher(lname)
+        const lname = context.structuredExecution ? 'structured-read-only' : launcher ?? defaultLauncher(mainRoot())
+        chosen = context.structuredExecution
+          ? { name: 'structured-read-only', harness: 'codex-headless', cmd: 'codex', headless: true, configDir: null }
+          : resolveLauncher(lname)
         h = harnessById(chosen.harness)
-        pinned = h.baseCmd(chosen.cmd)
+        pinned = context.structuredExecution ? 'codex' : h.baseCmd(chosen.cmd)
         if (h.ownsRendezvous) assertRvSockPath(id)
       } catch (error) {
         throw new SessionCreateError('session_create_failed', phase, error instanceof Error ? error.message : String(error), 400)
@@ -2494,7 +2530,7 @@ async function prepareSession(prompt: string, parentage: CreateParentage, launch
         + spawnerClause(parent ? readRecord(parent) : null, parentage.source)
       let launchPrompt: string
       try {
-        launchPrompt = (await composeSessionPrompt(rawPrompt, { session: id, harness: h.id }, {
+        launchPrompt = context.structuredExecution ? rawPrompt : (await composeSessionPrompt(rawPrompt, { session: id, harness: h.id }, {
           loadedSpecs: launchSpecs ?? undefined,
           suffix: suffix || undefined,
           replyVia: context.initialReplyVia,
@@ -2568,6 +2604,7 @@ async function prepareSession(prompt: string, parentage: CreateParentage, launch
           const forkCommit = forkResolved.ok && isGitObjectId(root, forkResolved.stdout.trim()) ? forkResolved.stdout.trim() : null
 
           let rec: SessRec = {
+            ...(context.structuredExecution ? { structuredExecution: context.structuredExecution } : {}),
             session: id, governed: true, worktreePath: path, branch,
             title, name, parent: parent && parent !== id ? parent : null,
             issues: issue ? [issue] : [], issue: issue ?? null,
@@ -2587,7 +2624,7 @@ async function prepareSession(prompt: string, parentage: CreateParentage, launch
 
           phase = 'materialize'
           traceSessionCreate(id, requestDigest, phase, 'start')
-          rec = await materializeSessionCandidate(rec, signal)
+          if (!context.structuredExecution) rec = await materializeSessionCandidate(rec, signal)
           traceSessionCreate(id, requestDigest, phase, 'finish')
 
           phase = 'record-write'

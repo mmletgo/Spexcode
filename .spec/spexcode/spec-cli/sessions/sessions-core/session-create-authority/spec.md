@@ -104,3 +104,6 @@ launch text, while a headless launcher still defaults to note through the target
 **A node branch never tracks the base branch.** Creation passes `--no-track` when forking from any start point,
 including a remote-tracking ref, because landing explicitly merges the base and the node has no business upstream.
 This keeps concurrent creates from contending on `.git/config` while Git writes branch upstream metadata.
+
+
+结构化后台任务复用同一创建事务与启动队列，但固定只读执行选项来自可信内部调用，不能由公开 JSON body 注入。安全策略、输出 schema 与输入摘要一起绑定请求载荷哈希并持久化在运行 envelope；重试不得切换权限或复用旧结构化结果。此类 prompt 不解析普通命令及 parent 指令、不物化项目 hook/trust 配置。普通会话的公开创建对象及既有 launcher 行为保持原契约。

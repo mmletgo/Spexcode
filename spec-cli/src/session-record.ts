@@ -10,6 +10,8 @@ import { gitTry } from '@spexcode/spec-core'
 import { ResourceConflict } from './host-resources.js'
 import { sessionHost, probeTimedOut, TMUX_PROBE_TIMEOUT_MS } from './session-host.js'
 
+import type { StructuredExecution } from './session-structured-policy.js'
+
 type Lifecycle = SessionLifecycle
 type Proposal = SessionProposal
 function canonicalRecordState(id: string, state: { status: string; proposal: string | null }) {
@@ -21,6 +23,7 @@ function canonicalRecordState(id: string, state: { status: string; proposal: str
 let withSessionTransition: <T>(id: string, body: () => Promise<T>) => Promise<T> = (_id, body) => body()
 
 export type SessRec = {
+  structuredExecution?: StructuredExecution
   session: string; governed: boolean; worktreePath: string; branch: string | null
   title: string | null; name: string | null
   parent: string | null   // the spawning session's id ([[session-nesting]]); null for a top-level launch
@@ -197,6 +200,7 @@ export function fromRaw(raw: RawRecord & { launch_owner?: string }): SessRec {
     throw new Error(`session '${raw.session_id}' has invalid issues`)
   const issues = [...new Set([...(rawIssues ?? []), ...(typeof raw.issue === 'string' && raw.issue.trim() ? [raw.issue.trim()] : [])])]
   return {
+    structuredExecution: (raw as RawRecord & { structured_execution?: StructuredExecution }).structured_execution,
     session: raw.session_id, governed: !!raw.governed, worktreePath: raw.worktree_path || '', branch: raw.branch || null,
     title: raw.title || null, name: raw.name || null, parent: raw.parent || null,
     issues, issue: issues[0] ?? null,
@@ -286,7 +290,7 @@ export function writeRecord(rec: SessRec): void {
   let previous: SessRec | null = null
   try { previous = readRecord(rec.session) } catch { /* a new or damaged record has no prior transition */ }
   const metadataChanged = !previous || [
-    'governed', 'worktreePath', 'branch', 'title', 'name', 'merges', 'sortKey', 'createdAt',
+    'structuredExecution', 'governed', 'worktreePath', 'branch', 'title', 'name', 'merges', 'sortKey', 'createdAt',
     'harness', 'harnessSessionId', 'runtimeStartToken', 'stopped', 'archived', 'closedAt', 'coldProof',
     'adapterRecovery', 'launcher', 'launchCmd', 'launchConfigDir', 'launchOwner', 'launchReadinessStartedAt', 'createRequestId',
     'createPayloadHash', 'zcodeChildSessionIds', 'base', 'forkCommit', 'diffComments', 'launchReadinessPending', 'issues',
@@ -295,6 +299,7 @@ export function writeRecord(rec: SessRec): void {
   // commits. Rewriting runtime.json here would recreate a second, stale status/proposal/note authority.
   if (canonicalMetadataOnly && previous && !metadataChanged) return
   const obj = {
+    ...(rec.structuredExecution ? { structured_execution: rec.structuredExecution } : {}),
     session_id: rec.session,
     governed: rec.governed,
     worktree_path: rec.worktreePath,

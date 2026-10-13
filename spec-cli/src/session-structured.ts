@@ -1,0 +1,131 @@
+import { Ajv } from 'ajv'
+import { createHash } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { join, resolve } from 'node:path'
+import { mainRoot, runtimeRoot, sessionArtifactPath } from '@spexcode/spec-core'
+import { readRecord, withRecordLock, writeRecord } from './session-record.js'
+import { codexStructuredTurn } from './codex-harness.js'
+import { commitCodexGenerationRegistration, prepareCodexGenerationRegistration } from './codex-runtime-generations.js'
+import { structuredGeneration, prepareStructuredRealm, StructuredSessionError, type StructuredExecution } from './session-structured-policy.js'
+export { StructuredSessionError } from './session-structured-policy.js'
+
+export type StructuredSessionRequest = {
+  root: string
+  base?: string
+  prompt: string
+  schema: Record<string, unknown>
+  requestKey: string
+  inputDigest: string
+  purpose: string
+  timeoutMs: number
+  signal?: AbortSignal
+  model?: string
+  effort?: StructuredExecution['effort']
+}
+export type StructuredSessionResult = { sessionId: string; threadId: string; turnId: string; output: unknown; resultDigest: string }
+const digest = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex')
+const realmRoot = (): string => join(runtimeRoot(), 'structured-read-only-v1')
+const activeControllers = new Map<string, AbortController>()
+
+export async function executeQueuedStructuredSession(id: string): Promise<StructuredExecution['state']> {
+  const rec = readRecord(id)
+  if (!rec?.structuredExecution) throw new StructuredSessionError('failed', 'queued structured session lost its execution policy')
+  if (rec.structuredExecution.state && rec.structuredExecution.state !== 'running') return rec.structuredExecution.state
+  const execution = rec.structuredExecution
+  if (execution.version !== 1 || execution.policy !== 'codex-read-only-v1' || rec.harness !== 'codex-headless' || rec.launchCmd !== 'codex')
+    throw new StructuredSessionError('unsupported', 'structured session no longer has the trusted fixed executor policy')
+  const controller = new AbortController(); activeControllers.set(id, controller)
+  const update = async (change: Partial<StructuredExecution>): Promise<void> => {
+    await withRecordLock(id, async () => {
+      const current = readRecord(id)
+      if (!current?.structuredExecution) throw new StructuredSessionError('failed', 'structured session record disappeared')
+      if ((current.structuredExecution.state === 'cancelled' || current.structuredExecution.state === 'timeout') && change.state !== current.structuredExecution.state)
+        throw new StructuredSessionError(current.structuredExecution.state, current.structuredExecution.error || 'structured execution has already stopped')
+      writeRecord({ ...current, structuredExecution: { ...current.structuredExecution, ...change } })
+    })
+  }
+  try {
+    await update({ state: 'running' })
+    const { endpoint, runtimeDir } = await structuredGeneration(realmRoot())
+    const result = await codexStructuredTurn(endpoint.socketPath, rec.worktreePath, readFileSync(sessionArtifactPath(id, 'launch'), 'utf8'), execution, {
+      signal: controller.signal,
+      onThread: async (threadId) => {
+        prepareCodexGenerationRegistration(runtimeDir, id, threadId, endpoint.id)
+        await withRecordLock(id, async () => {
+          const current = readRecord(id)!
+          writeRecord({ ...current, harnessSessionId: threadId, structuredExecution: { ...current.structuredExecution!, threadId } })
+        })
+        commitCodexGenerationRegistration(runtimeDir, id, threadId, endpoint.id)
+      },
+      onTurn: async (turnId) => update({ turnId }),
+    })
+    const output: unknown = JSON.parse(result.text)
+    const validate = new Ajv({ allErrors: true }).compile(execution.schema)
+    if (!validate(output)) throw new StructuredSessionError('failed', `structured output does not match JSON schema: ${JSON.stringify(validate.errors)}`)
+    await update({ state: 'completed', threadId: result.threadId, turnId: result.turnId, output, resultDigest: digest(output) })
+    return 'completed'
+  } catch (error) {
+    // A disconnected transport is recoverable from the same exact thread/turn. Preserve the running state
+    // for a subsequent create retry; deterministic model, policy and JSON failures remain terminal.
+    if (error instanceof Error && error.message.includes('transport disconnected')) throw error
+    const state = error instanceof StructuredSessionError && (error.code === 'cancelled' || error.code === 'timeout') ? error.code : 'failed'
+    await update({ state, error: error instanceof Error ? error.message : String(error) })
+    return state
+  } finally { activeControllers.delete(id) }
+}
+
+export async function runStructuredSession(request: StructuredSessionRequest): Promise<StructuredSessionResult> {
+  if (resolve(mainRoot(request.root)) !== resolve(mainRoot()))
+    throw new StructuredSessionError('unsupported', 'structured execution root must belong to the backend project')
+  if (!request.prompt.trim() || !request.inputDigest || !request.purpose || !Number.isFinite(request.timeoutMs) || request.timeoutMs <= 0
+    || !request.schema || request.schema.type !== 'object')
+    throw new StructuredSessionError('failed', 'structured execution requires a prompt, input digest, purpose, bounded timeout and object JSON schema')
+  const deadline = Date.now() + request.timeoutMs
+  const validate = new Ajv().compile(request.schema)
+  prepareStructuredRealm(realmRoot())
+  const { sessionCreateRequest, requestQueueDrain, queueStructuredRecovery } = await import('./sessions.js')
+  const execution: StructuredExecution = { version: 1, policy: 'codex-read-only-v1', schema: request.schema, inputDigest: request.inputDigest, purpose: request.purpose,
+    timeoutMs: request.timeoutMs, ...(request.model ? { model: request.model } : {}), ...(request.effort ? { effort: request.effort } : {}) }
+  const created = await sessionCreateRequest({ prompt: request.prompt, ...(request.base ? { base: request.base } : {}) }, {
+    requestKey: request.requestKey, signal: request.signal, timeoutMs: Math.min(30_000, request.timeoutMs), structuredExecution: execution,
+  })
+  if (created.status !== 201) throw new StructuredSessionError(created.code === 'session_create_key_reused' ? 'key_reused' : created.code === 'session_create_cancelled' ? 'cancelled' : created.code === 'session_create_timeout' ? 'timeout' : 'failed', created.error)
+  const id = created.session.id
+  const cancel = async (): Promise<void> => {
+    activeControllers.get(id)?.abort()
+    await withRecordLock(id, async () => {
+      const current = readRecord(id)
+      if (current?.structuredExecution && current.structuredExecution.state !== 'completed')
+        writeRecord({ ...current, stopped: true, structuredExecution: { ...current.structuredExecution, state: 'cancelled', error: 'structured caller cancelled' } })
+    })
+  }
+  const onAbort = (): void => { void cancel() }
+  request.signal?.addEventListener('abort', onAbort, { once: true })
+  try {
+    requestQueueDrain()
+    // Existing queue/drain owns execution capacity. A retry can rejoin an exact running native turn after
+    // transport loss without manufacturing a second session or consulting an arbitrary assistant message.
+    let recoveryRequested = false
+    for (;;) {
+      if (request.signal?.aborted) { await cancel(); throw new StructuredSessionError('cancelled', 'structured caller cancelled') }
+      const rec = readRecord(id)
+      const state = rec?.structuredExecution
+      if (!state) throw new StructuredSessionError('stale_result', 'structured execution policy/result is missing')
+      if (digest({ ...state, threadId: undefined, turnId: undefined, state: undefined, output: undefined, resultDigest: undefined, error: undefined }) !== digest(execution))
+        throw new StructuredSessionError('stale_result', 'structured result no longer matches its pinned input/schema/policy')
+      if (state.state === 'completed') {
+        if (!state.threadId || !state.turnId || !state.resultDigest || state.resultDigest !== digest(state.output) || !validate(state.output))
+          throw new StructuredSessionError('stale_result', 'structured result identity or digest is invalid')
+        return { sessionId: id, threadId: state.threadId, turnId: state.turnId, output: state.output, resultDigest: state.resultDigest }
+      }
+      if (state.state === 'failed' || state.state === 'cancelled' || state.state === 'timeout')
+        throw new StructuredSessionError(state.state === 'failed' ? 'failed' : state.state, state.error || `structured execution ${state.state}`)
+      if (rec?.status === 'error' && state.state === 'running' && !recoveryRequested) {
+        recoveryRequested = true
+        await queueStructuredRecovery(id)
+      }
+      if (Date.now() >= deadline) { await cancel(); throw new StructuredSessionError('timeout', 'structured execution exceeded caller deadline') }
+      await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 50))
+    }
+  } finally { request.signal?.removeEventListener('abort', onAbort) }
+}
