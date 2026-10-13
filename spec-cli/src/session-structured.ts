@@ -83,7 +83,7 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
   const deadline = Date.now() + request.timeoutMs
   const validate = new Ajv().compile(request.schema)
   prepareStructuredRealm(realmRoot())
-  const { sessionCreateRequest, requestQueueDrain, queueStructuredRecovery } = await import('./sessions.js')
+  const { sessionCreateRequest, requestQueueDrain, queueStructuredRecovery, refreshQueueCandidate } = await import('./sessions.js')
   const execution: StructuredExecution = { version: 1, policy: 'codex-read-only-v1', schema: request.schema, inputDigest: request.inputDigest, purpose: request.purpose,
     timeoutMs: request.timeoutMs, ...(request.model ? { model: request.model } : {}), ...(request.effort ? { effort: request.effort } : {}) }
   const created = await sessionCreateRequest({ prompt: request.prompt, ...(request.base ? { base: request.base } : {}) }, {
@@ -102,6 +102,8 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
   const onAbort = (): void => { void cancel() }
   request.signal?.addEventListener('abort', onAbort, { once: true })
   try {
+    // Embedded callers have no index/graph watcher to refresh the queue's durable candidate cache.
+    refreshQueueCandidate(id)
     requestQueueDrain()
     // Existing queue/drain owns execution capacity. A retry can rejoin an exact running native turn after
     // transport loss without manufacturing a second session or consulting an arbitrary assistant message.

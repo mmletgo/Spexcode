@@ -7,6 +7,7 @@ code:
   - spec-cli/src/session-structured.ts
 related:
   - spec-cli/src/session-structured.test.ts
+  - spec-cli/src/session-structured-queue.test.ts
   - spec-cli/src/sessions.ts
   - spec-cli/src/codex-harness.ts
 ---
@@ -25,3 +26,5 @@ related:
 传输断连保留 running 身份；重试通过原启动队列恢复该 thread/turn。丢失 turn 接受回复时，只有唯一初轮且用户输入匹配冻结 prompt 才可恢复。不得从历史最后一条 assistant 消息猜测结果。读取持久结果再次检查输入/schema/策略、精确身份及结果摘要，拒绝旧输入或损坏结果。取消中断原生 turn 并禁止迟到结果改写终态。
 
 本节点只交付结构化推理接缝；返回的文本差量由同步协调器负责验证与落盘，不代表上层 [[sync-execution]] 的 P2 完整交付已完成。
+
+每次结构化请求发布或复用会话后，runner 显式向原启动队列登记该精确候选 ID，再请求 drain；嵌入调用不依赖 Dashboard、index 或文件 watcher 通知。maxActive=1 时，不同请求键的生成、修复和独立审查可以连续实际启动并完成。已经结算的结构化会话保持原 awaiting/nothing 历史与 offline 投影，普通人工会话的 awaiting 资源语义不变。取消或超时标记仍禁止后续派发；断连的 running 请求继续按原精确身份恢复。
