@@ -18,4 +18,6 @@ code:
 
 请求采用 schemaVersion=1，绑定 inputId、完整来源物理身份、Spec path、原 before 与用户 next 的 path/mode/Git blob OID/SHA256 digest、requestTree，以及 kind、requestId、nodeId 和 intent 的用户原意来源。正文仍是 Git blob，请求 evidence blob 只保存不可变引用与意图。请求 tree 由原 source 仅替换目标 Spec 构成；私有 request ref 保活全部对象。validateControlledRequest 重新核请求 hash、输入身份、原文、目标对象、完整 tree 和 frontmatter；不同新 input 不能重放旧请求。
 
+只读历史展示通过 readControlledRequest 复用同一不可变对象校验，不访问当前来源路径；来源文件移动或删除后仍能审阅当时的用户请求。validateControlledRequest 在此基础上额外核当前物理来源及路径，保持应用前的原有门禁。
+
 composeControlledRequest 不修改 InputSnapshot 或伪造 BaselinePair。它验证已有 ComposedInputRef 的完整 manifest/tree/contentDigest，以原 source 为 base、用户 next 为 source、已有 composed 为 delivery，复用真实 UTF-8 三方合并。非重叠请求保留 prior delivery 的 expanded 内容与其它生成文件；重叠、删除/修改或 mode/symlink 分歧返回明确 base/source/delivery Git 对象证据，不能覆盖或吞掉冲突。成功另存完整 manifest/tree/private composition ref，并把 requestBlob 绑定到 resulting composed；同请求重入幂等，不同请求不能隐式复用已有请求结果。没有用户请求时，既有 composeInputSnapshots API 与行为保持不变。

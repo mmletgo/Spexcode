@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { freezeCandidate } from './candidate.js'
 import { readSyncFileDiff, SyncDiffReadError, type SyncDiffDetail } from './diff-read.js'
+import { prepareControlledRequest } from './request-input.js'
 import { captureInputSnapshot, readTree } from './snapshot.js'
 
 async function fixture(t: test.TestContext): Promise<{ root: string; detail: SyncDiffDetail }> {
@@ -14,6 +15,8 @@ async function fixture(t: test.TestContext): Promise<{ root: string; detail: Syn
   const git = (...args: string[]): string => execFileSync('git', ['-C', root, ...args], { env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }).toString().trim()
   git('init', '-b', 'main'); git('config', 'user.email', 'diff@example.invalid'); git('config', 'user.name', 'diff test')
   mkdirSync(join(root, 'test')); writeFileSync(join(root, 'test/a [one].test.ts'), 'base\n'); writeFileSync(join(root, 'unchanged'), 'keep\n')
+  mkdirSync(join(root, '.spec/fixture/intent'), { recursive: true })
+  writeFileSync(join(root, '.spec/fixture/intent/spec.md'), '---\ntitle: intent\n---\n# Intent\nOriginal requirement.\n')
   git('add', '.'); git('commit', '-m', 'base')
   writeFileSync(join(root, 'author.ts'), 'author input\n')
   const input = await captureInputSnapshot(root), before = readTree(input.source.commonDir, input.immutableTree).find(entry => entry.path === 'test/a [one].test.ts')!
@@ -45,4 +48,21 @@ test('拒绝操作外路径、认证文件、路径表达式、未知类型、�
   assert.throws(() => readSyncFileDiff(detail, 'big.ts'), { status: 413 })
   assert.throws(() => readSyncFileDiff({ ...detail, attempt: null }, 'author.ts'), SyncDiffReadError)
   assert.throws(() => readSyncFileDiff({ ...detail, attempt: { candidate: { ...detail.attempt!.candidate!, digest: '0'.repeat(64) } } }, 'author.ts'), /摘要/)
+})
+
+test('候选尚未生成时完整展示用户请求，来源删除后历史请求仍可读且不冒充已交付', async t => {
+  const { root, detail } = await fixture(t), path = '.spec/fixture/intent/spec.md'
+  const source = readFileSync(join(root, path), 'utf8'), next = source.replace('Original requirement.', 'Require cancellation before publication.')
+  const request = prepareControlledRequest(detail.operation.input, { path, source, next, changed: true, startLine: 2, endLine: 2 }, { kind: 'user_edit', requestId: 'request-diff', nodeId: 'intent', intent: 'Update cancellation rule' })
+  assert.equal(request.changed, true)
+  const pending: SyncDiffDetail = { ...detail, operation: { ...detail.operation, requestBlob: request.requestBlob! }, attempt: null }
+  const index = readFileSync(join(root, '.git/index')), result = readSyncFileDiff(pending, path, 'request')
+  assert.match(result.patch, /-Original requirement\./); assert.match(result.patch, /\+Require cancellation before publication\./)
+  assert.equal(result.kind, 'request'); assert.equal(result.delivered, false)
+  assert.equal(readFileSync(join(root, path), 'utf8'), source)
+  rmSync(join(root, path))
+  assert.equal(readSyncFileDiff(pending, path, 'request').patch, result.patch)
+  assert.deepEqual(readFileSync(join(root, '.git/index')), index)
+  assert.throws(() => readSyncFileDiff(pending, 'author.ts', 'request'), { status: 404 })
+  assert.throws(() => readSyncFileDiff(detail, path, 'request'), { status: 404 })
 })

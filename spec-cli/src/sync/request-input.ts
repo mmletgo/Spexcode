@@ -56,12 +56,11 @@ export function prepareControlledRequest(snapshot: InputSnapshot, prepared: Read
   return { changed: true, requestBlob }
 }
 
-/** 验请求不可变引用及其完整来源/目标对象；新 input 必须另建请求，不能自动重放。 */
-export function validateControlledRequest(snapshot: InputSnapshot, requestBlob: BlobRef): ControlledRequest {
+/** 从固定对象读取完整用户请求；历史展示不依赖当前来源路径是否仍存在。 */
+export function readControlledRequest(snapshot: InputSnapshot, requestBlob: BlobRef): ControlledRequest {
   const commonDir = snapshot.source.commonDir
   const request = JSON.parse(readEvidence(commonDir, requestBlob).toString('utf8')) as ControlledRequest
   if (request.schemaVersion !== 1 || request.inputId !== snapshot.id || JSON.stringify(request.source) !== JSON.stringify(snapshot.source)) throw new Error('受控请求 schema/input/来源绑定不一致')
-  guardControlledRequestPath(snapshot, request.path)
   checkOrigin(request.origin)
   const entries = verifySnapshot(snapshot), before = entries.find(entry => entry.path === request.path)
   if (!before || before.mode === '120000' || !request.before || !sameEntry(before, request.before)) throw new Error('受控请求 before 与冻结来源不一致')
@@ -72,6 +71,13 @@ export function validateControlledRequest(snapshot: InputSnapshot, requestBlob: 
   checkBody(original, nextBytes)
   if (original.equals(nextBytes)) throw new Error('受控请求没有字节差量，应使用 no-op')
   if (JSON.stringify(readTree(commonDir, request.requestTree)) !== JSON.stringify(entries.map(entry => entry.path === before.path ? request.next : entry))) throw new Error('受控请求 requestTree 与用户差量不一致')
+  return request
+}
+
+/** 写入前另核当前来源物理身份和路径；新 input 不能自动重放旧请求。 */
+export function validateControlledRequest(snapshot: InputSnapshot, requestBlob: BlobRef): ControlledRequest {
+  const request = readControlledRequest(snapshot, requestBlob)
+  guardControlledRequestPath(snapshot, request.path)
   return request
 }
 
