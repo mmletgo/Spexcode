@@ -43,11 +43,12 @@ export type SyncOperation = {
   input: InputSnapshot; previousBaselinePair: BaselinePair | null
   scope: SyncScope; readyScope: SyncScope; blockedScope: SyncScope; deliveredScope: SyncScope
   blockedReason: 'needs_input' | 'conflicted' | null
+  policyDigest: string; impactDigest: string; readSetDigest: string
   budget: SyncBudget; currentAttemptId: string | null
   dispatchMessageId: string; delivery: WorktreeIdentity; createdAtMs: number; updatedAtMs: number
 }
 export type NativeSessionRef = { sessionId: string; threadId: string | null; turnId: string | null }
-export type CandidateRef = { tree: string; digest: string; manifestBlob: BlobRef; coveredScope: SyncScope }
+export type CandidateRef = { tree: string; digest: string; manifestBlob: BlobRef; actualDiffBlob: BlobRef; coveredScope: SyncScope }
 export type VerificationRef = { candidateDigest: string; inputId: string; passed: boolean; coveredScope: SyncScope; evidenceRefs: BlobRef[]; resultBlob: BlobRef }
 export type SyncAttempt = {
   id: string; operationId: string; number: number; generation: number
@@ -67,7 +68,7 @@ export type ApplyStep = { key: string; status: 'planned' | 'completed'; evidence
 export type ApplyReceipt = { id: string; journalId: string; effectKey: string; actualTree: string; actualCommit: string | null; deliverySnapshot: InputSnapshot; evidenceRefs: BlobRef[]; completedAtMs: number }
 export type ApplyJournal = { id: string; operationId: string; attemptId: string; generation: number; plan: ApplyPlan; status: 'prepared' | 'applying' | 'completed' | 'settled' | 'recovery_required'; steps: ApplyStep[]; receipt: ApplyReceipt | null; createdAtMs: number }
 export type SyncDispatchEnvelope = { version: 1; type: 'sync.dispatch'; operationId: string; inputId: string; generation: number; dispatchKey: string }
-export type AdmitSyncInput = Pick<SyncOperation, 'ingressKey' | 'rootCauseId' | 'origin' | 'input' | 'scope' | 'budget' | 'delivery'> & { previousBaselinePair?: BaselinePair | null }
+export type AdmitSyncInput = Pick<SyncOperation, 'ingressKey' | 'rootCauseId' | 'origin' | 'input' | 'scope' | 'budget' | 'delivery' | 'policyDigest' | 'impactDigest' | 'readSetDigest'> & { previousBaselinePair?: BaselinePair | null }
 export type ClaimAttemptInput = { operationId: string; source: WorktreeIdentity; scope: SyncScope; leaseMs: number; expectedMessageId?: string }
 export type ClaimedAttempt = { operation: SyncOperation; attempt: SyncAttempt; fence: WriteFence; lease: ScopeLease }
 export type RecoverableSync = { operation: SyncOperation; attempt: SyncAttempt | null; journals: ApplyJournal[] }
