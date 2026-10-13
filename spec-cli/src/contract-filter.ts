@@ -1,4 +1,5 @@
-import { mkdirSync, readFileSync, rmSync, chmodSync, existsSync, readdirSync, statSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync, chmodSync, existsSync, readdirSync, statSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { git, gitBinary } from '@spexcode/spec-core'
@@ -111,6 +112,17 @@ export function canonicalContractFilterBindings(proj: string): ContractFilterBin
 /** 受控交付复用唯一 canonical 源，只描述命令/字节，不植入或执行。 */
 export function describeCanonicalContractFilter(common: string): { shim: { path: string; source: string; mode: number }; commands: Record<string, string>; metadataPaths: string[] } {
   return { shim: { path: shimPath(common), source: SHIM, mode: 0o755 }, commands: { 'filter.spexcode.clean': filterCmd(shimPath(common), 'clean'), 'filter.spexcode.smudge': filterCmd(shimPath(common), 'smudge') }, metadataPaths: [rootPath(common), bindingsPath(common), attributesPath(common)] }
+}
+
+/** 仅对冻结 stdin 使用可信发布 SHIM；不执行仓库配置命令或触碰其 index。 */
+export function cleanCanonicalContractText(bytes: Buffer, binding: ContractFilterBinding): Buffer {
+  const directory = mkdtempSync(join(tmpdir(), 'spex-canonical-clean-'))
+  try {
+    const shim = join(directory, 'contract-filter.sh')
+    writeFileSync(shim, SHIM, { mode: 0o600 })
+    writeFileSync(join(directory, 'contract-filter-bindings'), `${binding.file}\t${binding.start}\t${binding.end}\n`, { mode: 0o600 })
+    return execFileSync('/bin/bash', [shim, 'clean', binding.file], { cwd: directory, input: bytes, env: { PATH: '/usr/bin:/bin', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' }, maxBuffer: 128 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] })
+  } finally { rmSync(directory, { recursive: true, force: true }) }
 }
 
 // plant (or refresh) the filter for the given contract files (tracked, or untracked-with-host-content —

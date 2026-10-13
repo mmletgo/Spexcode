@@ -33,3 +33,5 @@ adopter control envelope 仅派发协调身份，不作为普通 Agent 文本。
 候选显式绑定 baseTree=attempt.composedInput.tree 与 sourceInputId=operation.input.id。actualDiffBlob 表示组合输入→候选的模型差量；ApplyPlan.files 表示真实交付目标→候选的应用差量，两者不能混同。VerificationResultBlob 同时保存 coveredScope，与外层引用一致，防止扩大窄范围证据。
 
 原生资源计划固定绑定operation/attempt/generation、inputId、candidateDigest、稳定key/kind/payloadDigest及plan blob。verification资源必须绑定已冻结候选；native_session可在冻结前绑定空candidate及固定请求载荷。资源状态为planned→created→terminal→removed，checkpoint正文只存内容寻址引用。更新携expectedCheckpointRef做CAS；相同blob/阶段可幂等重放，迟到观测不能回退阶段或覆盖更完整原生身份。资源观测不授予任何候选、验证或应用写权。
+
+ComposedInputRef 可携 authorProjectionBlob，记录 [[sync-author-input]] 对真实快照的 canonical clean 投影证据。它是派生输入的来源证据，不能替换 sourceInputId 或原始 source/index 身份。

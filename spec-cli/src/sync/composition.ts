@@ -11,14 +11,15 @@ export const isUtf8Text = (bytes: Buffer): boolean => !bytes.includes(0) && Buff
 const same = (a: TreeEntry | undefined, b: TreeEntry | undefined): boolean => a?.oid === b?.oid && a?.mode === b?.mode
 
 /** source 的真实差量叠加到前次已验证 delivery；任何重叠歧义保留三方对象而不自动覆盖。 */
-export function composeInputSnapshots(newSource: InputSnapshot, prior?: BaselinePair): { composed: ComposedInputRef | null; conflicts: CompositionConflict[] } {
-  const commonDir = newSource.source.commonDir, incoming = verifySnapshot(newSource)
+export function composeInputSnapshots(newSource: InputSnapshot, prior?: BaselinePair, options: { projectEntries?: (snapshot: InputSnapshot, entries: TreeEntry[]) => TreeEntry[] } = {}): { composed: ComposedInputRef | null; conflicts: CompositionConflict[] } {
+  const project = (snapshot: InputSnapshot): TreeEntry[] => { const entries = verifySnapshot(snapshot); return options.projectEntries ? options.projectEntries(snapshot, entries) : entries }
+  const commonDir = newSource.source.commonDir, incoming = project(newSource)
   let entries = incoming
   const conflicts: CompositionConflict[] = []
   if (prior) {
     if (JSON.stringify(prior.source) !== JSON.stringify(prior.sourceInput.source) || JSON.stringify(newSource.source) !== JSON.stringify(prior.sourceInput.source) || prior.repositoryId !== newSource.source.repositoryId || prior.verifiedDelivery.source.repositoryId !== newSource.source.repositoryId || prior.verifiedDelivery.source.commonDir !== commonDir) throw new Error('成对基线不属于当前来源物理身份/分支/仓库')
-    const base = new Map(verifySnapshot(prior.sourceInput).map(entry => [entry.path, entry]))
-    const delivery = new Map(verifySnapshot(prior.verifiedDelivery).map(entry => [entry.path, entry]))
+    const base = new Map(project(prior.sourceInput).map(entry => [entry.path, entry]))
+    const delivery = new Map(project(prior.verifiedDelivery).map(entry => [entry.path, entry]))
     const source = new Map(incoming.map(entry => [entry.path, entry]))
     const result = new Map(delivery)
     for (const path of new Set([...base.keys(), ...source.keys(), ...delivery.keys()])) {
