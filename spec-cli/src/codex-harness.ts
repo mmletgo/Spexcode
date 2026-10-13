@@ -10,7 +10,7 @@ import { runtimeRoot, mainCheckout, harnessIdentity } from '@spexcode/spec-core'
 import { detachedRuntimeGenerationToken, migrateLegacyDetachedRuntimeReceipt, processStartToken, verifyDetachedRuntime, type VerifiedDetachedRuntime } from '@spexcode/spec-core'
 import { codexGenerationEndpoints, codexGenerationSocketPath, currentCodexGeneration, legacyCodexGenerationEndpoint, readCodexGenerationLedger, prepareCodexGenerationClose, resolveCodexGenerationForClose, resolveCodexGenerationForResume, resolveCodexGenerationForSession, rebindCodexGeneration, type CodexGenerationEndpoint } from './codex-runtime-generations.js'
 import { spawnDetachedRuntime } from './runtime-ownership.js'
-import { StructuredSessionError, type StructuredExecution } from './session-structured-policy.js'
+import { StructuredSessionError, StructuredSessionTransportError, type StructuredExecution } from './session-structured-policy.js'
 import { codexRolloutPath, codexTranscript } from '@spexcode/transcript'
 import { shQuote } from './sh.js'
 import { writeFileIfChanged } from './file-write.js'
@@ -2681,8 +2681,8 @@ export async function codexStructuredTurn(sock: string, cwd: string, prompt: str
   const ready = new Promise<void>((resolve, reject) => {
     rejectReady = reject
     conn.once('connect', () => conn.write(WS_UPGRADE(randomBytes(16).toString('base64'))))
-    conn.on('error', (error) => { reject(error); fail(error) })
-    conn.on('close', () => { const error = new StructuredSessionError('failed', 'Codex structured transport disconnected; exact turn can be recovered'); reject(error); fail(error) })
+    conn.on('error', (error) => { const disconnected = new StructuredSessionTransportError(`Codex structured transport disconnected: ${error.message}`); reject(disconnected); fail(disconnected) })
+    conn.on('close', () => { const error = new StructuredSessionTransportError('Codex structured transport disconnected; exact turn can be recovered'); reject(error); fail(error) })
     conn.on('data', (chunk: Buffer) => {
       frames.buf = Buffer.concat([frames.buf, chunk])
       try {
@@ -2691,7 +2691,7 @@ export async function codexStructuredTurn(sock: string, cwd: string, prompt: str
           if (!/^HTTP\/1\.1 101/.test(frames.buf.subarray(0, end).toString('utf8'))) throw new Error('Codex structured WebSocket upgrade refused')
           frames.buf = frames.buf.subarray(end + 4); upgraded = true; resolve()
         }
-        if (drainWsFrames(frames, conn, handle)) fail(new Error('Codex structured WebSocket closed'))
+        if (drainWsFrames(frames, conn, handle)) fail(new StructuredSessionTransportError('Codex structured transport disconnected with WebSocket close; exact turn can be recovered'))
       } catch (error) { reject(error); fail(error as Error) }
     })
   })

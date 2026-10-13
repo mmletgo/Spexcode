@@ -6,7 +6,7 @@ import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { codexStructuredTurn } from './codex-harness.js'
-import { prepareStructuredRealm, StructuredSessionError, type StructuredExecution } from './session-structured-policy.js'
+import { prepareStructuredRealm, StructuredSessionError, StructuredSessionTransportError, type StructuredExecution } from './session-structured-policy.js'
 
 type Rpc = { id?: number; method: string; params: Record<string, unknown> }
 const schema = { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'], additionalProperties: false }
@@ -123,14 +123,14 @@ test('lost turn acceptance is recoverable only for the sole turn with pinned use
   } finally { await f.close() }
 })
 
-test('structured disconnection preserves exact accepted native identities for recovery', async () => {
+for (const mode of ['reset', 'websocket-close']) test(`structured ${mode} preserves exact accepted native identities for recovery`, async () => {
   const ids: string[] = []
   const f = await fixture((request, _send, socket) => {
-    if (request.method === 'turn/start') { setTimeout(() => socket.destroy(), 20); return { turn: { id: 'turn-exact' } } }
+    if (request.method === 'turn/start') { setTimeout(() => { if (mode === 'reset') socket.destroy(); else socket.write(Buffer.from([0x88, 0])) }, 20); return { turn: { id: 'turn-exact' } } }
     return safePrelude(request)
   })
   try {
-    await assert.rejects(codexStructuredTurn(f.path, '/fixture', 'pinned prompt', execution(), { onThread: async (id) => { ids.push(id) }, onTurn: async (id) => { ids.push(id) } }), /transport disconnected/)
+    await assert.rejects(codexStructuredTurn(f.path, '/fixture', 'pinned prompt', execution(), { onThread: async (id) => { ids.push(id) }, onTurn: async (id) => { ids.push(id) } }), (error: unknown) => error instanceof StructuredSessionTransportError)
     assert.deepEqual(ids, ['thread-exact', 'turn-exact'])
   } finally { await f.close() }
 })

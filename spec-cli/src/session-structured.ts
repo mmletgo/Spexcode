@@ -6,7 +6,7 @@ import { mainRoot, runtimeRoot, sessionArtifactPath } from '@spexcode/spec-core'
 import { readRecord, withRecordLock, writeRecord } from './session-record.js'
 import { codexStructuredTurn } from './codex-harness.js'
 import { commitCodexGenerationRegistration, prepareCodexGenerationRegistration } from './codex-runtime-generations.js'
-import { structuredGeneration, prepareStructuredRealm, StructuredSessionError, type StructuredExecution } from './session-structured-policy.js'
+import { structuredGeneration, prepareStructuredRealm, StructuredSessionError, StructuredSessionTransportError, type StructuredExecution } from './session-structured-policy.js'
 export { StructuredSessionError } from './session-structured-policy.js'
 
 export type StructuredSessionRequest = {
@@ -67,7 +67,7 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
   } catch (error) {
     // A disconnected transport is recoverable from the same exact thread/turn. Preserve the running state
     // for a subsequent create retry; deterministic model, policy and JSON failures remain terminal.
-    if (error instanceof Error && error.message.includes('transport disconnected')) throw error
+    if (error instanceof StructuredSessionTransportError) throw error
     const state = error instanceof StructuredSessionError && (error.code === 'cancelled' || error.code === 'timeout') ? error.code : 'failed'
     await update({ state, error: error instanceof Error ? error.message : String(error) })
     return state

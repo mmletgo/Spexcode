@@ -35,6 +35,13 @@ export class StructuredSessionError extends Error {
   }
 }
 
+export class StructuredSessionTransportError extends StructuredSessionError {
+  constructor(message: string) {
+    super('failed', message)
+    this.name = 'StructuredSessionTransportError'
+  }
+}
+
 const configText = `approval_policy = "never"\nsandbox_mode = "read-only"\nweb_search = "disabled"\n[features]\napps = false\nplugins = false\nhooks = false\nmulti_agent = false\nshell_tool = false\ncode_mode = false\ncode_mode_host = false\nunified_exec = false\n[mcp_servers]\n`
 
 // The outer boundary contains the app-server itself, hooks, MCP subprocesses and tool descendants. Native
