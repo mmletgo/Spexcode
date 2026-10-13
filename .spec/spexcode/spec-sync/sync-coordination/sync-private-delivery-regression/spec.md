@@ -15,3 +15,5 @@ code:
 ## expanded spec
 
 针对 [[sync-private-delivery]] 建立真实临时Git仓库、实际SQLite store及canonical四hook；V1-V3前置证明与CLI内容判定以明确的测试替身控制，不能把这些夹具当真实模型/完整发布runtime产品证据。覆盖source staged/unstaged保留、完整candidate commit与receipt、重入不重复、commit之后数据库结算之前中断、receipt之后owner公开之前中断、applying中取消完整结算、写前取消无交付目录、无变化不造空提交、第三方文件拒绝覆盖。真实发布工具集成与模型执行另行验收。
+
+交付故障夹具的受控 CLI 仍只替代业务 lint 前置；canonical hooks 的 footprint 校验使用实际编译模块，避免新门禁在测试中被替代。完整发布工具的行为另由 [[sync-trusted-hooks-product]] 验证。

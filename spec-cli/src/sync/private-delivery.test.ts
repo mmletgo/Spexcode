@@ -41,6 +41,8 @@ async function fixture(t: test.TestContext, unchanged = false) {
     copyFileSync(join(canonical, name), join(runtime, 'templates/hooks', name))
     copyFileSync(join(canonical, name), join(root, '.git/hooks', name)); chmodSync(join(root, '.git/hooks', name), 0o755)
   }
+  mkdirSync(join(runtime, 'dist/sync'))
+  copyFileSync(fileURLToPath(new URL('../../dist/sync/trusted-footprint.js', import.meta.url)), join(runtime, 'dist/sync/trusted-footprint.js'))
   writeFileSync(join(runtime, 'package.json'), '{"type":"module"}')
   writeFileSync(join(runtime, 'dist/cli.js'), `if(process.argv[2]==='internal'&&process.argv[3]==='trunk') console.log('main');\n`)
   const options: PrivateDeliveryOptions = { managedRoot: managed, tools: { trustedRuntimeRoot: runtime, toolEntry: join(runtime, 'dist/cli.js'), canonicalHooksDir: join(runtime, 'templates/hooks'), gitPath: '/usr/bin/git' }, beforeApply: async () => { assert.equal((await captureInputSnapshot(root)).id, input.id) } }
