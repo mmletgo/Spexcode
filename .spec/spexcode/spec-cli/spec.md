@@ -125,3 +125,5 @@ dashboard reloads. An explicit `deliverTo` list (the New issue composer's Send t
 session message and its success or failure is included in `outcomes`; omitting the list performs no delivery.
 Evidence bytes ride `/api/evidence` (`POST` = content-addressed put,
 `GET /:hash` = ranged streaming read — renamed from `/api/yatsu/blob` in v0.3.0).
+
+只读 Spec 列表、正文、历史版本、源码目录和附件端点接受 targetTree，复用 [[sync-contract-report]] 的已注册同仓库工作树门禁。各读取函数必须使用同一个显式 root，未注册目录返回 400，交付树新增节点可直接阅读实际正文。未携带 targetTree 时保持后台树默认。带 targetTree 的正文写请求仅允许通过同步应用服务处理；协调写入口未接入时明确返回 SYNC_SCOPED_EDIT_REQUIRED，不可静默写到后台树。

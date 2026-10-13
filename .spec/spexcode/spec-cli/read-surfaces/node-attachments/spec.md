@@ -47,3 +47,5 @@ Listing walks the folder recursively and is bounded on both depth and count, so 
 evidence dump degrades into a long list rather than a wedged read. `specDir` — the spec tree's own answer
 to *where does this node live* — belongs to the loader rather than being re-derived from an id by every
 caller that needs it.
+
+附件节点目录从显式 root 解析；另一工作树中新建或移动的节点必须使用自己的目录和附件，不能沿用后台树的同名节点。

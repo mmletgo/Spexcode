@@ -24,7 +24,7 @@ const OWN_SURFACE = new Set(['spec.md'])
 export type NodeAttachment = { name: string; size: number }
 
 function nodeRoot(root: string, id: string): string {
-  const dir = specDir(id)
+  const dir = specDir(id, root)
   if (!dir) throw new SourceReadError(`no such spec node: ${id}`, 404)
   return join(root, dir)
 }

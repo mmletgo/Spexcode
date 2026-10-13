@@ -22,8 +22,8 @@ export class ContractReportScopeError extends Error {
 }
 
 /** A HTTP caller may inspect only a still-registered worktree in this project. */
-export async function readProjectContractReport(projectRoot: string, targetTree?: string): Promise<ContractReport> {
-  if (!targetTree) return readContractReport(projectRoot)
+export async function resolveProjectReadRoot(projectRoot: string, targetTree?: string): Promise<string> {
+  if (!targetTree) return realpathSync(projectRoot)
   if (!isAbsolute(targetTree) || !existsSync(targetTree))
     throw new ContractReportScopeError('targetTree must identify an existing project worktree')
   const requested = realpathSync(targetTree)
@@ -37,7 +37,11 @@ export async function readProjectContractReport(projectRoot: string, targetTree?
   ])).trim())
   if (await common(requested) !== await common(projectRoot))
     throw new ContractReportScopeError('targetTree no longer belongs to this project')
-  return readContractReport(requested)
+  return requested
+}
+
+export async function readProjectContractReport(projectRoot: string, targetTree?: string): Promise<ContractReport> {
+  return readContractReport(await resolveProjectReadRoot(projectRoot, targetTree))
 }
 
 /** Read authored contracts and real binding files without running any authored command. */

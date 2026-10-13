@@ -31,14 +31,14 @@ const spec = (title: string, desc: string, body: string[]) => ['---', `title: ${
 // A node's past is read one version at a time, and only a hash from that node's OWN log is a version: the
 // read resolves where spec.md sat at that commit (a node moved between versions still reads its old text),
 // and any other string — another node's commit, an option-shaped `--output=…` — is a 404 that reaches no git.
-test('/api/specs/:id/version and /diff answer only for the node\'s own versions, at the path it had then', { timeout: 30_000 }, async () => {
+test('/api/specs/:id/version and /diff answer only for the node\'s own versions, at the path it had then', { timeout: 60_000 }, async () => {
   const fixture = mkdtempSync(join(tmpdir(), 'spex-spec-version-'))
   const project = join(fixture, 'project')
   const planted = join(fixture, 'planted-by-diff')
   let backend: ChildProcess | null = null
   try {
     mkdirSync(join(project, '.spec/fixture/alpha'), { recursive: true })
-    writeFileSync(join(project, '.spec/spexcode.json'), JSON.stringify({ harnesses: ['claude'] }) + '\n')
+    writeFileSync(join(project, '.spec/spexcode.json'), JSON.stringify({ harnesses: ['claude'], lint: { governedRoots: ['src'] } }) + '\n')
     writeFileSync(join(project, '.spec/fixture/spec.md'), spec('fixture', 'root', ['Root.']))
     writeFileSync(join(project, '.spec/fixture/alpha/spec.md'), spec('alpha', 'alpha as first written', ['Alpha began as a single promise.']))
     git(project, 'init', '-q', '-b', 'main')
@@ -61,6 +61,20 @@ test('/api/specs/:id/version and /diff answer only for the node\'s own versions,
     git(project, 'commit', '-qm', 'alpha: move under group')
     const v2 = git(project, 'rev-parse', 'HEAD')
 
+    const delivery = join(fixture, 'delivery')
+    git(project, 'worktree', 'add', '-q', '-b', 'delivery', delivery)
+    git(delivery, 'mv', '.spec/fixture/group/alpha', '.spec/fixture/alpha')
+    writeFileSync(join(delivery, '.spec/fixture/alpha/spec.md'), spec('alpha', 'delivery alpha', ['Delivery-only accepted behavior.']))
+    writeFileSync(join(delivery, '.spec/fixture/alpha/evidence.txt'), 'delivery evidence\n')
+    writeFileSync(join(delivery, '.spec/fixture/alpha/diagram.json'), JSON.stringify({ diagram_type: 'delivery-invalid-type' }))
+    mkdirSync(join(delivery, '.spec/fixture/new-node'))
+    writeFileSync(join(delivery, '.spec/fixture/new-node/spec.md'), spec('new-node', 'delivery only', ['New implementation contract.']))
+    mkdirSync(join(delivery, 'src'))
+    writeFileSync(join(delivery, 'src/result.js'), 'export const result = "delivery"\n')
+    git(delivery, 'add', '.')
+    git(delivery, 'commit', '-qm', 'delivery: implement alpha')
+    const delivered = git(delivery, 'rev-parse', 'HEAD')
+
     const port = await freePort()
     const env: NodeJS.ProcessEnv = { ...process.env }
     for (const key of Object.keys(env)) if (key.startsWith('SPEXCODE_') || key.startsWith('SPEX_SESSION_')) delete env[key]
@@ -77,6 +91,41 @@ test('/api/specs/:id/version and /diff answer only for the node\'s own versions,
       if (backend.exitCode !== null || Date.now() > deadline) throw new Error(`backend never became healthy: ${log}`)
       await new Promise((done) => setTimeout(done, 50))
     }
+
+    const scoped = (path: string, root = delivery) => `${base}${path}${path.includes('?') ? '&' : '?'}targetTree=${encodeURIComponent(root)}`
+    const body = await (await fetch(scoped('/api/specs/alpha/content'))).json()
+    assert.match(body.body, /Delivery-only accepted behavior/)
+    assert.equal(body.diagram.file, '.spec/fixture/alpha/diagram.json')
+    assert.equal(body.diagram.type, 'delivery-invalid-type')
+    assert.match((await (await fetch(`${base}/api/specs/alpha/content`)).json()).body, /moved under group/)
+    assert.equal((await fetch(`${base}/api/specs/new-node/content`)).status, 404)
+    assert.match((await (await fetch(scoped('/api/specs/new-node/content'))).json()).body, /New implementation contract/)
+    for (const route of ['/api/specs', '/api/specs/lite']) {
+      const nodes = await (await fetch(scoped(route))).json()
+      assert.ok(nodes.some((node: { id: string }) => node.id === 'new-node'))
+      assert.ok(!(await (await fetch(`${base}${route}`)).json()).some((node: { id: string }) => node.id === 'new-node'))
+    }
+    const selectedHistory = await (await fetch(scoped('/api/specs/alpha/history'))).json()
+    assert.equal(selectedHistory[0].hash, delivered)
+    assert.match((await (await fetch(scoped(`/api/specs/alpha/version/${delivered}`))).json()).body, /Delivery-only accepted behavior/)
+    assert.match((await (await fetch(scoped(`/api/specs/alpha/diff/${delivered}`))).json()).patch, /Delivery-only accepted behavior/)
+    assert.equal((await fetch(`${base}/api/specs/alpha/version/${delivered}`)).status, 404)
+    assert.equal((await fetch(scoped('/api/specs/alpha/version/HEAD'))).status, 404)
+    const files = await (await fetch(scoped('/api/specs/alpha/files'))).json()
+    assert.ok(files.files.some((file: { name: string }) => file.name === 'evidence.txt'))
+    assert.equal((await (await fetch(scoped('/api/specs/alpha/files/content?name=evidence.txt'))).json()).text, 'delivery evidence\n')
+    assert.equal((await (await fetch(scoped('/api/source?path=src/result.js'))).json()).text, 'export const result = "delivery"\n')
+    assert.equal((await fetch(`${base}/api/source?path=src/result.js`)).status, 404)
+    const listing = await (await fetch(scoped('/api/files?dir=src'))).json()
+    assert.ok(JSON.stringify(listing).includes('result.js'), JSON.stringify(listing))
+    for (const path of ['/api/specs', '/api/specs/lite', '/api/specs/alpha/content', '/api/specs/alpha/history', `/api/specs/alpha/version/${delivered}`, `/api/specs/alpha/diff/${delivered}`, '/api/specs/alpha/files', '/api/specs/alpha/files/content?name=evidence.txt', '/api/source?path=src/result.js', '/api/files']) {
+      assert.equal((await fetch(scoped(path, fixture))).status, 400, `unregistered target refused: ${path}`)
+    }
+    const beforeHead = git(project, 'rev-parse', 'HEAD')
+    assert.equal((await fetch(scoped('/api/specs/alpha/body'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status, 409)
+    assert.equal(git(project, 'rev-parse', 'HEAD'), beforeHead)
+    assert.equal(git(project, 'status', '--porcelain'), '')
+    assert.equal(git(delivery, 'status', '--porcelain'), '')
 
     const history = await (await fetch(`${base}/api/specs/alpha/history`)).json()
     assert.deepEqual(history.map((row: { hash: string }) => row.hash), [v2, v1], 'alpha has exactly its two versions, newest first')

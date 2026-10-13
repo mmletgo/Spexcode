@@ -49,7 +49,7 @@ import { buildGuidanceCatalog } from './guidance-catalog.js'
 import { configuredSessionApplication, setSessionApplicationCommitObserver } from './session-application.js'
 import { SESSION_CHANGE } from '@spexcode/session-application'
 import { editSpecBody, readSpecBodyEdit, SpecBodyEditError } from './spec-body-edit.js'
-import { ContractReportScopeError, readProjectContractReport } from './sync/contract-report.js'
+import { ContractReportScopeError, readProjectContractReport, resolveProjectReadRoot } from './sync/contract-report.js'
 const { serve, Hono, cors, etag, createNodeWebSocket } = await daemonRuntime()
 
 // last-resort net: an unforeseen async throw (e.g. a worktree vanishing mid-read during a worker
@@ -75,6 +75,7 @@ app.onError((error, c) => {
   // is deliberate and already carries its own diagnosis + repair ([[sessions-core]]). Answering 500 with a
   // stack would hide exactly the sentence the human needs.
   if (error instanceof SessionRecordUnusable) return c.json({ error: error.message, code: error.code }, 409)
+  if (error instanceof ContractReportScopeError) return c.json({ error: error.message }, error.status)
   if (error instanceof ResourceConflict) return c.json({ error: error.message, code: error.code }, 409)
   if (error instanceof SessionReparentRequestError) return c.json({ error: error.message }, 400)
   console.error(error)
@@ -158,19 +159,20 @@ app.get('/api/graph', async (c) => {
 // the graph's push channel: an SSE that fires `graph-changed` on any session-store write, so the dashboard
 // reloads the instant status moves instead of waiting for its slow fallback poll ([[graph-stream]]).
 app.get('/api/graph/stream', (c) => boardStream(c))
-app.get('/api/specs', async (c) => c.json(await loadSpecs()))
+app.get('/api/specs', async (c) => c.json(await loadSpecs(await resolveProjectReadRoot(repoRoot(), c.req.query('targetTree')))))
 // the search corpus ([[graph-lean]]): a filesystem-only {id,title,path,desc,body} for every node, NO git. The
 // board omits `body` to stay lean, so the search palette fetches this ONCE when it opens (cached client-side)
 // to rank nodes over their prose — off the board's hot poll. Review rows, including scenarios, come only
 // from their paged endpoints and cannot be reconstructed from this corpus.
-app.get('/api/specs/lite', (c) => c.json(loadSpecsLite()))
+app.get('/api/specs/lite', async (c) => c.json(loadSpecsLite(await resolveProjectReadRoot(repoRoot(), c.req.query('targetTree')))))
 // one node's body + parsed parts ([[graph-lean]]): the board no longer ships either, so the detail view
 // fetches this when a node opens — with the node's rendered diagram, if it carries one ([[diagram]]). 404 for
 // an unknown id.
 app.get('/api/specs/:id/content', async (c) => {
   const id = c.req.param('id')
-  const x = specContent(id)
-  return x ? c.json({ ...x, diagram: await specDiagram(id) }) : c.json({ body: '', parts: null, diagram: null }, 404)
+  const root = await resolveProjectReadRoot(repoRoot(), c.req.query('targetTree'))
+  const x = specContent(id, root)
+  return x ? c.json({ ...x, diagram: await specDiagram(id, root) }) : c.json({ body: '', parts: null, diagram: null }, 404)
 })
 // [[spec-body-edit]]: the WRITE half of the spec document — a human at the board replaces a line range of
 // a node's body and it lands as a real commit. The endpoint takes no path (it derives one from the node id)
@@ -179,6 +181,7 @@ app.get('/api/specs/:id/content', async (c) => {
 // recomputed from the commit by [[source-of-truth]] — nothing else is written.
 app.post('/api/specs/:id/body', async (c) => {
   try {
+    if (c.req.query('targetTree')) return c.json({ error: 'Scoped worktree editing must use the synchronization operation.', code: 'SYNC_SCOPED_EDIT_REQUIRED' }, 409)
     const result = await editSpecBody(c.req.param('id'), readSpecBodyEdit(await c.req.json().catch(() => null)))
     if (result.changed) notifyBoardChanged('full')
     return c.json(result)
@@ -187,17 +190,17 @@ app.post('/api/specs/:id/body', async (c) => {
     throw e
   }
 })
-app.get('/api/specs/:id/history', async (c) => c.json(await specHistory(c.req.param('id'))))
+app.get('/api/specs/:id/history', async (c) => c.json(await specHistory(c.req.param('id'), await resolveProjectReadRoot(repoRoot(), c.req.query('targetTree')))))
 // one version of a node, by hash — only a hash from the node's own version log answers; any other string is
 // a 404 and never reaches git. `diff` is the spec.md line diff that version introduced (the history pane's
 // per-version proof-of-change, fetched lazily on expand); `version` is spec.md as it stood then.
 const noVersion = (c: any) => c.json({ error: `${c.req.param('hash')} is not a version of ${c.req.param('id')}` }, 404)
 app.get('/api/specs/:id/diff/:hash', async (c) => {
-  const diff = await specDiffAt(c.req.param('id'), c.req.param('hash'))
+  const diff = await specDiffAt(c.req.param('id'), c.req.param('hash'), await resolveProjectReadRoot(repoRoot(), c.req.query('targetTree')))
   return diff ? c.json(diff) : noVersion(c)
 })
 app.get('/api/specs/:id/version/:hash', async (c) => {
-  const version = await specAt(c.req.param('id'), c.req.param('hash'))
+  const version = await specAt(c.req.param('id'), c.req.param('hash'), await resolveProjectReadRoot(repoRoot(), c.req.query('targetTree')))
   return version ? c.json(version) : noVersion(c)
 })
 // [[source-read]]: a governed source file, read as a byte WINDOW. The spec tree names the files it governs
@@ -205,9 +208,9 @@ app.get('/api/specs/:id/version/:hash', async (c) => {
 // gate is `isSourceFile`, the SAME predicate the coverage walk uses, so the set of files the board can show
 // is by construction the set the project governs. Query: path (repo-relative), offset, limit; the response
 // carries the file's total size so the client can page without a second HEAD.
-app.get('/api/source', (c) => {
+app.get('/api/source', async (c) => {
   try {
-    const root = repoRoot()
+    const root = await resolveProjectReadRoot(repoRoot(), c.req.query('targetTree'))
     const slice = readSourceSlice(
       root,
       c.req.query('path') || '',
@@ -225,9 +228,9 @@ app.get('/api/source', (c) => {
 // name; this names what is there to open, one directory at a time, so the explorer can browse ordinary code
 // the way any editor does. Same `isSourceFile` gate and the same refusals — a row the reader clicks and gets
 // a 404 from is worse than a row that was never drawn. `dir` empty lists the governed roots themselves.
-app.get('/api/files', (c) => {
+app.get('/api/files', async (c) => {
   try {
-    const root = repoRoot()
+    const root = await resolveProjectReadRoot(repoRoot(), c.req.query('targetTree'))
     const cfg = loadLintConfig(root)
     return c.json(listSourceDir(root, c.req.query('dir') || '', cfg, cfg.governedRoots))
   } catch (e) {
@@ -239,18 +242,18 @@ app.get('/api/files', (c) => {
 // showed exactly one file per node folder; these are the rest — eval contracts, evidence dirs, raw captures.
 // A different gate from /api/source on purpose (the spec tree is the product's own data, deliberately outside
 // the coverage policy), the same windowed read underneath.
-app.get('/api/specs/:id/files', (c) => {
+app.get('/api/specs/:id/files', async (c) => {
   try {
-    return c.json({ files: listNodeAttachments(repoRoot(), c.req.param('id')) })
+    return c.json({ files: listNodeAttachments(await resolveProjectReadRoot(repoRoot(), c.req.query('targetTree')), c.req.param('id')) })
   } catch (e) {
     if (e instanceof SourceReadError) return c.json({ error: e.message }, e.status as 400 | 404)
     throw e
   }
 })
-app.get('/api/specs/:id/files/content', (c) => {
+app.get('/api/specs/:id/files/content', async (c) => {
   try {
     const slice = readNodeAttachment(
-      repoRoot(),
+      await resolveProjectReadRoot(repoRoot(), c.req.query('targetTree')),
       c.req.param('id'),
       c.req.query('name') || '',
       Number(c.req.query('offset') ?? 0),

@@ -65,3 +65,5 @@ check` to repair from archify's receipts until it passes ([[diagram-cli]]). The 
 the node's body spends its words on, keeps every card line grounded, and puts no self-moving numbers on the
 picture — node counts, drift, import counts — since nothing re-checks them. What an author learns about the spec
 while drawing (a claim the code does not bear out) is filed as an issue, not stored with the picture.
+
+图表的节点目录由与正文相同的 root 解析。显式选择交付工作树时，不得从后台树解析同名节点位置。

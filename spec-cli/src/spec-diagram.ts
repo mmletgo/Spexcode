@@ -44,7 +44,7 @@ async function render(file: string, text: string): Promise<SpecDiagram> {
 
 // null when the node has no diagram (or is not a node).
 export async function specDiagram(id: string, root: string = repoRoot()): Promise<SpecDiagram | null> {
-  const dir = specDir(id)
+  const dir = specDir(id, root)
   if (!dir) return null
   const file = `${dir}/${DIAGRAM_FILE}`
   if (!existsSync(join(root, file))) return null
