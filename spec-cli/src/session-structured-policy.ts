@@ -23,9 +23,15 @@ export type StructuredExecution = {
   error?: string
 }
 export class StructuredSessionError extends Error {
-  constructor(readonly code: 'unsupported' | 'failed' | 'cancelled' | 'timeout' | 'key_reused' | 'stale_result', message: string) {
+  readonly sessionId?: string
+  readonly threadId?: string
+  readonly turnId?: string
+  constructor(readonly code: 'unsupported' | 'failed' | 'cancelled' | 'timeout' | 'key_reused' | 'stale_result', message: string, identity: { sessionId?: string; threadId?: string; turnId?: string } = {}) {
     super(message)
     this.name = 'StructuredSessionError'
+    this.sessionId = identity.sessionId
+    this.threadId = identity.threadId
+    this.turnId = identity.turnId
   }
 }
 

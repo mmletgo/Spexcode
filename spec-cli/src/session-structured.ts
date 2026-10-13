@@ -127,5 +127,11 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
       if (Date.now() >= deadline) { await cancel(); throw new StructuredSessionError('timeout', 'structured execution exceeded caller deadline') }
       await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 50))
     }
+  } catch (error) {
+    if (error instanceof StructuredSessionError) {
+      const state = readRecord(id)?.structuredExecution
+      throw new StructuredSessionError(error.code, error.message, { sessionId: id, threadId: state?.threadId, turnId: state?.turnId })
+    }
+    throw error
   } finally { request.signal?.removeEventListener('abort', onAbort) }
 }

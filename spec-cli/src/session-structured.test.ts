@@ -184,7 +184,7 @@ test('structured completed receipts replay one session and bind policy/schema/in
   assert.equal(readRecord(id)?.structuredExecution?.policy, 'codex-read-only-v1')
   await assert.rejects(runStructuredSession({ ...request, schema: { type: 'object', properties: {} } }), (error: unknown) => error instanceof StructuredSessionError && error.code === 'key_reused')
   writeRecord({ ...rec, structuredExecution: { ...rec.structuredExecution, inputDigest: 'old-input' } })
-  await assert.rejects(runStructuredSession(request), (error: unknown) => error instanceof StructuredSessionError && error.code === 'stale_result')
+  await assert.rejects(runStructuredSession(request), (error: unknown) => error instanceof StructuredSessionError && error.code === 'stale_result' && error.sessionId === id && error.threadId === 'thread-exact' && error.turnId === 'turn-exact')
   writeRecord({ ...rec, structuredExecution: { ...rec.structuredExecution, resultDigest: 'corrupt-result' } })
   await assert.rejects(runStructuredSession(request), (error: unknown) => error instanceof StructuredSessionError && error.code === 'stale_result')
   const publicAttempt = await sessionCreateRequest({ prompt: 'input', structuredExecution: policy })
