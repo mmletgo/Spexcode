@@ -741,3 +741,23 @@ test('simultaneous SQLite processes grant a new business ID to one attempt only'
     assert.ok(claims.every(claimed => f.protocol.withTransaction(tx => tx.query('SELECT token FROM sync_leases WHERE resource_key=?', `path:src/${claimed.operation.input.source.branch}.ts`))[0].token === claimed.fence.leaseToken))
   } finally { f.cleanup() }
 })
+
+test('different elaboration evidence after needs_input adds only new ready IDs and retains the existing blocked partition', async () => {
+  const f = await fixture()
+  try {
+    const readyScope = { paths: ['src/a.ts'], contractIds: ['RULE-A'], flowIds: ['FLOW-A'] }
+    const blockedScope = { paths: [], contractIds: ['RULE-B'], flowIds: ['FLOW-B'] }
+    const fullScope = { paths: ['src/a.ts'], contractIds: ['RULE-A', 'RULE-B'], flowIds: ['FLOW-A', 'FLOW-B'] }
+    const first = f.ready(f.admit(source(), 'partial-input', fullScope), readyScope, blockedScope, 'needs_input')
+    const journal = f.store.beginApply(first.fence, first.plan, first.target)
+    for (const file of first.plan.files) f.store.recordApplyStep(first.fence, journal.id, { key: file.path, status: 'completed', evidenceRef: f.put({ observed: file.path }) })
+    const receipt = f.receipt(journal.id, first.plan); f.store.recordReceipt(journal.id, receipt)
+    const partial = f.store.settleApply(journal.id, receipt.id)
+    assert.equal(partial.phase, 'needs_input')
+    const next = f.store.claimAttempt({ operationId: partial.id, source: partial.input.source, scope: partial.readyScope, leaseMs: 1000 })
+    const expanded = f.store.expandContractScope(next.fence, { contractIds: [...fullScope.contractIds, 'REQ-NEW'], flowIds: [...fullScope.flowIds, 'FLOW-NEW'] }, f.put({ reviewed: 'new-proof' }))
+    assert.deepEqual(expanded.blockedScope, blockedScope)
+    assert.deepEqual(expanded.readyScope, { paths: ['src/a.ts'], contractIds: ['REQ-NEW', 'RULE-A'], flowIds: ['FLOW-A', 'FLOW-NEW'] })
+    assert.equal(expanded.blockedReason, 'needs_input')
+  } finally { f.cleanup() }
+})

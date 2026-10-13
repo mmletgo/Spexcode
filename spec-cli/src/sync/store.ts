@@ -287,8 +287,9 @@ export class SyncStore {
       if (!['analyzing', 'elaborating', 'repairing', 'needs_input', 'conflicted'].includes(operation.phase)) fail('SYNC_PHASE_INVALID', operation.phase)
       if (!contains(requested, { paths: [], contractIds: operation.scope.contractIds, flowIds: operation.scope.flowIds })) fail('SYNC_SCOPE_INVALID', 'expanded ID sets cannot delete existing business authority')
       this.acquireResources(tx, operation, attempt, keys)
+      const added: SyncScope = { paths: [], contractIds: requested.contractIds.filter(id => !operation.scope.contractIds.includes(id)), flowIds: requested.flowIds.filter(id => !operation.scope.flowIds.includes(id)) }
       operation.scope = union(operation.scope, requested)
-      operation.readyScope = union(operation.readyScope, requested)
+      operation.readyScope = union(operation.readyScope, added)
       if (!prior) operation.contractScopeExpansions = [...(operation.contractScopeExpansions ?? []), expansion]
       this.saveOperation(tx, operation); return operation
     })

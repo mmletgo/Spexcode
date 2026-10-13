@@ -33,3 +33,5 @@ receipt树引用相同但manifest不同仍拒绝，journal保持未登记；相�
 细化范围回归使用真实 SQLite：初始 path scope 没有未来 ID，新增 REQ/AC/FLOW 后共享路径保持 ready、GAP 依赖 ID 单独 blocked，部分 receipt 与 baseline 只推进真实已验证 ID，根仍 needs_input。扩展参数夹带 paths、删除旧 ID、同证据不同集合、错误 hash、过期/旧 fence 或冻结候选后新扩展均拒绝。两个连接竞争新增 ID 时全部回滚，旧路径 lease/token/generation 不变；成功 ID 租约沿用 attempt token/期限，精确重放不增资源 generation/operation revision、不重复派发或计费。证据引用被 GC pin，数据库重启与 retry 保留 expanded scope 和证据。
 
 两个独立进程同时操作同一 SQLite 文件争抢新业务 ID，只有一方扩展成功，另一方明确 lease conflict；数据库只登记一个 ID holder，双方原路径租约保持原 token。
+
+真实部分 receipt 结算到 needs_input 后，新尝试只领取原 ready 范围；不同细化 evidence 扩展完整旧/新 ID 集合时，已有 blocked contract/flow ID 仍只在 blockedScope，新 ID 可进入 ready，不能因重新登记旧 ID 造成业务分区重叠。
