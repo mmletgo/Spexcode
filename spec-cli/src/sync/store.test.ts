@@ -26,7 +26,7 @@ async function fixture() {
   const admit = (identity = source(), id = 'input-1', covered = scope()): AdmitSyncInput => ({ ingressKey: `ingress-${identity.canonicalRoot}-${id}`, rootCauseId: 'cause', origin: 'spec', input: input(identity, id), scope: covered, budget: { maxAttempts: 4, maxCalls: 4, maxRepairs: 2, timeoutMs: 100000 }, policyDigest: 'policy', impactDigest: 'impact', readSetDigest: 'readset', delivery: null, deliveryPlan: { canonicalRoot: '/repo/delivery', branch: 'delivery', baseCommit: 'a'.repeat(40) } })
   const claim = (value = admit()): ClaimedAttempt => { const operation = store.admitAndEnqueue(value); return store.claimAttempt({ operationId: operation.id, source: value.input.source, scope: value.scope, leaseMs: 1000, expectedMessageId: operation.dispatchMessageId }) }
   const ready = (value = admit(), readyScope = value.scope, blockedScope: SyncScope = { paths: [], contractIds: [], flowIds: [] }, blockedReason: 'needs_input' | 'conflicted' | null = null) => {
-    const claimed = claim(value), target = { ...input(source('delivery'), 'target'), manifestBlob: put({ version: 1, entries: readyScope.paths.map(path => ({ path, mode: '100644', oid: 'a'.repeat(40), digest: '1'.repeat(64) })) }) }
+    const claimed = claim(value), target = { ...input(value.deliveryPlan.canonicalRoot === value.input.source.canonicalRoot ? value.input.source : source('delivery'), 'target'), manifestBlob: put({ version: 1, entries: readyScope.paths.map(path => ({ path, mode: '100644', oid: 'a'.repeat(40), digest: '1'.repeat(64) })) }) }
     store.bindDelivery(claimed.fence, target.source)
     store.bindComposedInput(claimed.fence, { sourceInputId: value.input.id, previousBaselinePairId: value.previousBaselinePair?.id ?? null, tree: value.input.immutableTree, manifestBlob: target.manifestBlob, contentDigest: value.input.contentDigest })
     store.startGeneration(claimed.fence, { readyScope, blockedScope, blockedReason })
@@ -41,7 +41,7 @@ async function fixture() {
     const plan: ApplyPlan = { effectKey: `effect-${claimed.operation.id}`, payloadDigest: 'apply-digest', candidateDigest: candidate.digest, verificationBlob: verification.resultBlob, target: target.source, expectedTargetSnapshotId: target.id, expectedBaselinePairId: value.previousBaselinePair?.id ?? null, coveredScope: readyScope, files, planBlob: put({ files, candidateDigest: candidate.digest }) }
     return { ...claimed, target, candidate, verification, plan }
   }
-  const receipt = (journalId: string, plan: ApplyPlan): ApplyReceipt => ({ id: `receipt-${journalId}`, journalId, effectKey: plan.effectKey, actualTree: 'f'.repeat(40), actualCommit: '3'.repeat(40), deliverySnapshot: { ...input(source('delivery'), `delivered-${journalId}`), immutableTree: 'f'.repeat(40), manifestBlob: store.readAttempt(store.readJournal(journalId).attemptId).candidate!.manifestBlob }, evidenceRefs: [put({ bytesChecked: true })], completedAtMs: time })
+  const receipt = (journalId: string, plan: ApplyPlan): ApplyReceipt => ({ id: `receipt-${journalId}`, journalId, effectKey: plan.effectKey, actualTree: 'f'.repeat(40), actualCommit: '3'.repeat(40), deliverySnapshot: { ...input(store.readJournal(journalId).plan.target, `delivered-${journalId}`), immutableTree: 'f'.repeat(40), manifestBlob: store.readAttempt(store.readJournal(journalId).attemptId).candidate!.manifestBlob }, evidenceRefs: [put({ bytesChecked: true })], completedAtMs: time })
   return { root, path, protocol, store, options, put, input, admit, claim, ready, receipt, tick: (ms: number) => { time += ms }, cleanup: () => { protocol.close(); rmSync(root, { recursive: true, force: true }) } }
 }
 
@@ -361,5 +361,23 @@ test('receipt cannot settle a manifest different from the frozen candidate', asy
     assert.equal(f.store.readJournal(journal.id).receipt, null)
     f.store.recordReceipt(journal.id, receipt)
     assert.equal(f.store.settleApply(journal.id, receipt.id).phase, 'workspace_synced')
+  } finally { f.cleanup() }
+})
+
+
+test('cooperative source and delivery sharing physical identity rebase the next source baseline onto actual publication', async () => {
+  const f = await fixture()
+  try {
+    const value = f.admit()
+    value.deliveryPlan = { canonicalRoot: value.input.source.canonicalRoot, branch: value.input.source.branch, baseCommit: value.input.headCommit }
+    const prepared = f.ready(value), journal = f.store.beginApply(prepared.fence, prepared.plan, prepared.target)
+    for (const file of prepared.plan.files) f.store.recordApplyStep(prepared.fence, journal.id, { key: file.path, status: 'completed', evidenceRef: f.put({ checked: file.path }) })
+    const receipt = f.receipt(journal.id, prepared.plan); f.store.recordReceipt(journal.id, receipt); f.store.settleApply(journal.id, receipt.id)
+    const baseline = f.store.readBaseline(source())!
+    assert.deepEqual(baseline.sourceInput, receipt.deliverySnapshot)
+    assert.deepEqual(baseline.verifiedDelivery, receipt.deliverySnapshot)
+    assert.equal(f.protocol.withTransaction(tx => tx.query('SELECT record_json FROM sync_baseline_pairs WHERE id=?', `baseline-${journal.id}`)).length, 1)
+    const next = f.store.admitAndEnqueue({ ...value, ingressKey: 'after-publication', input: { ...receipt.deliverySnapshot, id: 'new-user-edit' }, previousBaselinePair: baseline })
+    assert.equal(next.previousBaselinePair?.sourceInput.id, receipt.deliverySnapshot.id)
   } finally { f.cleanup() }
 })
