@@ -292,6 +292,7 @@ export async function loadSpecs(root: string = ROOT, options: LoadSpecsOptions =
       session,
       hue: Number(str(r.fm.hue, '210')),
       desc: str(r.fm.desc),
+      contractSchema: str(r.fm['contract-schema']) || null,
       code,
       codeEntries,
       codeScoped,
