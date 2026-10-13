@@ -52,11 +52,11 @@ function useAnchored(x, y, deps) {
   const ref = useRef(null)
   const [style, setStyle] = useState({ left: x, top: y, visibility: 'hidden' })
   useLayoutEffect(() => {
-    const rect = ref.current?.getBoundingClientRect()
-    if (!rect) return
+    const card = ref.current
+    if (!card) return
     setStyle({
-      left: Math.max(GAP, Math.min(x, window.innerWidth - rect.width - GAP)),
-      top: Math.max(GAP, Math.min(y, window.innerHeight - rect.height - GAP)),
+      left: Math.max(GAP, Math.min(x, window.innerWidth - card.offsetWidth - GAP)),
+      top: Math.max(GAP, Math.min(y, window.innerHeight - card.offsetHeight - GAP)),
       visibility: 'visible',
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -569,7 +569,7 @@ function AddressInput({ t, live, launchers, launcher, up, onPick, onCancel }) {
 // bytes it commits are the bytes in the file. What it sends back is the region it was opened with, so the
 // server can refuse an edit whose ground moved ([[spec-body-edit]]).
 function ManualEditor({ t, panel, node, lines, draft, setDraft, busy, error, syncEnabled, syncActivation, syncError, onCommit, onClose }) {
-  const [ref, style] = useAnchored(panel.x, panel.y, [])
+  const [ref, style] = useAnchored(panel.x, panel.y, [error, syncEnabled, syncActivation, syncError?.message])
   const box = useRef(null)
   useEffect(() => { box.current?.focus() }, [])
   return (
