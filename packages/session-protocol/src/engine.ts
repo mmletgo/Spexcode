@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto'
-import { statSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, isAbsolute, sep } from 'node:path'
 
@@ -67,7 +67,9 @@ const require = createRequire(import.meta.url)
 // pins on purpose, and a caller asserting on the command's stderr sees the runtime's voice mixed into it.
 // The interception is scoped to the one require and restored immediately, so it silences exactly this
 // notice — a different experimental warning, or any warning before or after, still prints in full.
-function loadSqlite(): { DatabaseSync: DatabaseConstructor } {
+type SqliteModule = { DatabaseSync: DatabaseConstructor; backup(source: DatabaseLike, destination: string): Promise<number> }
+
+function loadSqlite(): SqliteModule {
   const emitWarning = process.emitWarning
   process.emitWarning = ((warning: string | Error, ...rest: unknown[]) => {
     const text = typeof warning === 'string' ? warning : warning?.message ?? ''
@@ -77,13 +79,13 @@ function loadSqlite(): { DatabaseSync: DatabaseConstructor } {
     return (emitWarning as (...args: unknown[]) => void).call(process, warning, ...rest)
   }) as typeof process.emitWarning
   try {
-    return require('node:sqlite') as { DatabaseSync: DatabaseConstructor }
+    return require('node:sqlite') as SqliteModule
   } finally {
     process.emitWarning = emitWarning
   }
 }
 
-const { DatabaseSync } = loadSqlite()
+const { DatabaseSync, backup } = loadSqlite()
 const JOURNAL_MODE = 'wal'
 
 const SELECT_COLUMNS = `enqueue_seq, message_id, target_session_id, sender_session_id, protocol_version,
@@ -233,13 +235,14 @@ function buildHandle(
   const { readOnly, now } = config
   let transactionActive = false
   let closed = false
+  let backupActive = false
 
   const ensureOpen = (): void => {
     if (closed) fail('PROTOCOL_SQLITE_ERROR', 'protocol handle is closed')
   }
 
   const rejectReentry = (operation: string): void => {
-    if (transactionActive) {
+    if (transactionActive || backupActive) {
       fail(
         'PROTOCOL_TRANSACTION_INVALID',
         `${operation} cannot be called inside withTransaction; use tx.enqueue for messages and tx.exec or tx.query for SQL`,
@@ -326,6 +329,25 @@ function buildHandle(
   const insertMessage = (sessionId: string, input: MessageInput): Message =>
     insertNormalizedMessage(normalizeMessage(sessionId, input))
 
+  const dequeueHead = (sessionId: string, expectedMessageId?: string): Message | null => {
+    requireSessionId(sessionId)
+    requireAddress(sessionId)
+    const row = database.prepare(SQL.head).get(sessionId) as MessageRow | undefined
+    if (!row) {
+      if (expectedMessageId !== undefined) fail('PROTOCOL_CURSOR_INVALID', 'expected FIFO message is not pending')
+      return null
+    }
+    if (expectedMessageId !== undefined && row.message_id !== expectedMessageId) {
+      fail('PROTOCOL_CURSOR_INVALID', 'expected message is not the FIFO head')
+    }
+    const dequeuedAtMs = now()
+    const result = database.prepare(
+      'UPDATE protocol_messages SET dequeued_at_ms=? WHERE enqueue_seq=? AND dequeued_at_ms IS NULL',
+    ).run(dequeuedAtMs, row.enqueue_seq)
+    if (Number(result.changes) !== 1) fail('PROTOCOL_SQLITE_ERROR', 'FIFO head changed inside a write transaction')
+    return toMessage({ ...row, dequeued_at_ms: dequeuedAtMs })
+  }
+
   const transaction: ProtocolTransaction = {
     exec(sql, ...params) {
       requireSql(sql)
@@ -350,6 +372,7 @@ function buildHandle(
       requireSessionId(sessionId)
       return insertMessage(sessionId, message)
     },
+    dequeue: dequeueHead,
   }
 
   const handle: SessionProtocol = {
@@ -384,19 +407,7 @@ function buildHandle(
     dequeue(sessionId) {
       rejectReentry('protocol.dequeue')
       requireSessionId(sessionId)
-      return write('protocol.dequeue', () => {
-        requireAddress(sessionId)
-        const row = database.prepare(SQL.head).get(sessionId) as MessageRow | undefined
-        if (!row) return null
-        const dequeuedAtMs = now()
-        const result = database.prepare(
-          'UPDATE protocol_messages SET dequeued_at_ms=? WHERE enqueue_seq=? AND dequeued_at_ms IS NULL',
-        ).run(dequeuedAtMs, row.enqueue_seq)
-        if (Number(result.changes) !== 1) {
-          fail('PROTOCOL_SQLITE_ERROR', 'FIFO head changed inside a write transaction')
-        }
-        return toMessage({ ...row, dequeued_at_ms: dequeuedAtMs })
-      })
+      return write('protocol.dequeue', () => dequeueHead(sessionId))
     },
 
     listPending(sessionId) {
@@ -483,6 +494,24 @@ function buildHandle(
 
     dataVersion() {
       return read(() => Number(database.prepare('PRAGMA data_version').get()?.data_version))
+    },
+
+    async backupTo(destination) {
+      ensureOpen()
+      rejectReentry('protocol.backupTo')
+      validateDatabasePath(destination)
+      checkParentDirectory(destination)
+      if (destination === config.databasePath || existsSync(destination)) {
+        fail('PROTOCOL_PATH_INVALID', 'backup destination must be a new file distinct from the live database')
+      }
+      backupActive = true
+      try {
+        await backup(database, destination)
+      } catch (error) {
+        rethrowProtocolError(error)
+      } finally {
+        backupActive = false
+      }
     },
 
     close() {

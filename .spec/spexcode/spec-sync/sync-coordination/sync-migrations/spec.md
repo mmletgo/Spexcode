@@ -1,0 +1,19 @@
+---
+title: 协调数据库增量迁移
+status: active
+hue: 175
+desc: 在既有会话 SQLite 注册独立 spec-sync 组件，备份后事务升级并拒绝未知版本。
+code:
+  - spec-cli/src/sync/migrations.ts
+---
+# 协调数据库增量迁移
+
+## raw source
+
+持续同步必须能安全升级既有会话数据库，失败不破坏已有会话和恢复记录。
+
+## expanded spec
+
+复用现有 SessionProtocol 和 applyComponentMigrations，不打开第二执行数据库或第二消息队列。升级前使用 backupTo 的 SQLite online backup；禁止直接复制 WAL 主文件。组件迁移在 BEGIN IMMEDIATE 中原子执行，错误全部回滚；重复启动核对 checksum，未知更高 generation 拒绝同步写入。不做破坏性 down migration，回退保留表和 blob。
+
+仅存 operation（内含冻结输入引用）、attempt（候选/证据/checkpoint 引用）、逐实际文件/规则 lease、apply journal（内含 receipt）、成对 baseline。检索身份、阶段、generation、唯一接入/派发/副作用键显式列，scope/budget/refs 小 JSON 保存运行记录，不保存正文、大契约图或第二份可编辑源码。lease tombstone 的 generation 在释放后保留。范围和动作门禁由 [[sync-store]] 负责。

@@ -114,14 +114,16 @@ Exactly one condition yields null: an empty queue on a known active address. Rea
 exception to retirement being terminal, because the tombstone and history stay auditable.
 
 A consumer that needs a stronger downstream guarantee than at-most-once delivery owns a handler journal
-keyed by message identifier, in its own tables, outside the protocol schema and outside any protocol lock.
-The contract is fixed here; the implementation is not, and the journal never becomes an acknowledgment state
-on the queue. The same-database transaction seam does not admit a dequeue: it spans a topology mutation and
-the enqueues that mutation requires, and nothing more. A consumer therefore cannot make its journal write
-atomic with taking a message, so dying between the two loses the record that handling was owed. That cost is
-chosen rather than overlooked, and no adopter may present its own journal as protocol-level at-least-once. A
-crash fixture holds the line: a handler killed after its dequeue commits never sees the message offered
-again, and a counter-example whose dequeue skips the state transition makes that fixture fire.
+keyed by message identifier, in its own tables, outside the protocol schema. The shared transaction seam
+admits exact FIFO dequeue together with that adopter's SQL journal or claim. Both commit or both roll back;
+after commit the message remains dequeued and the adopter resumes from its durable handler record. This
+never becomes an acknowledgment or retry state on the protocol queue. A crash after dequeue still never
+reoffers that message, while the adopter's unfinished record prevents loss of the downstream work.
+
+Online backup uses the SQLite backup API over the live connection, outside synchronous transactions. It
+preserves committed WAL bytes and produces an independently openable database, rejects existing targets,
+and fences writes/close/migration on the source handle until completion. Raw main-file copying is not a
+consistent backup of a WAL database. Backup retention and operational scheduling remain adopter policy.
 
 ## Evidence standard
 
@@ -177,5 +179,5 @@ refuses to convert. It must never arrive as a configuration flag or a runtime br
 
 Sweep cadence, retention and purge, backup operational policy, planner-statistics maintenance, the effect of
 reader-blocks-writer under realistic adopter load, locality detection on platforms that report no usable
-filesystem identity, verification of the network-filesystem verdicts against a real mount, and whether the
-shared transaction seam admits dequeue all remain open, each with the missing evidence named.
+filesystem identity and verification of the network-filesystem verdicts against a real mount remain open,
+each with the missing evidence named.
