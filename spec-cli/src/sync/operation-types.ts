@@ -24,7 +24,7 @@ export type SyncScope = { paths: string[]; contractIds: string[]; flowIds: strin
 export const SYNC_PHASES = ['detected', 'queued', 'analyzing', 'elaborating', 'generating', 'verifying', 'repairing', 'needs_input', 'conflicted', 'ready_to_apply', 'applying', 'workspace_synced', 'awaiting_landing', 'canonical_synced', 'superseded', 'pausing', 'paused', 'cancelling', 'cancelled', 'failed', 'budget_exhausted', 'recovering', 'recovery_required'] as const
 export type SyncPhase = typeof SYNC_PHASES[number]
 export type SyncControl = 'run' | 'pause' | 'cancel'
-export type SyncBudget = { maxAttempts: number; maxRepairs: number; timeoutMs: number }
+export type SyncBudget = { maxAttempts: number; maxCalls: number; maxRepairs: number; timeoutMs: number }
 export type SyncFailure = { code: string; message: string; kind: 'repairable' | 'environment' | 'conflict' | 'missing_input' | 'unsupported' | 'budget'; evidenceRefs: BlobRef[] }
 export type BaselinePair = {
   id: string
@@ -44,16 +44,19 @@ export type SyncOperation = {
   scope: SyncScope; readyScope: SyncScope; blockedScope: SyncScope; deliveredScope: SyncScope
   blockedReason: 'needs_input' | 'conflicted' | null
   policyDigest: string; impactDigest: string; readSetDigest: string
-  budget: SyncBudget; currentAttemptId: string | null
-  dispatchMessageId: string; delivery: WorktreeIdentity; createdAtMs: number; updatedAtMs: number
+  budget: SyncBudget; callsUsed: number; deadlineAtMs: number; currentAttemptId: string | null
+  dispatchMessageId: string; delivery: WorktreeIdentity | null; deliveryPlan: DeliveryPlan; createdAtMs: number; updatedAtMs: number
 }
+export type DeliveryPlan = { canonicalRoot: string; branch: string; baseCommit: string }
+export type ComposedInputRef = { sourceInputId: string; previousBaselinePairId: string | null; tree: string; manifestBlob: BlobRef; contentDigest: string }
+export type DispatchPlan = { key: string; purpose: string; requestDigest: string; sessionCreateKey: string; session: NativeSessionRef | null }
 export type NativeSessionRef = { sessionId: string; threadId: string | null; turnId: string | null }
 export type CandidateRef = { tree: string; digest: string; manifestBlob: BlobRef; actualDiffBlob: BlobRef; coveredScope: SyncScope }
-export type VerificationRef = { candidateDigest: string; inputId: string; passed: boolean; coveredScope: SyncScope; evidenceRefs: BlobRef[]; resultBlob: BlobRef }
+export type VerificationRef = { candidateDigest: string; inputId: string; passed: boolean; coveredScope: SyncScope; policyDigest: string; readSetDigest: string; environmentDigest: string; contextDigest: string; evidenceRefs: BlobRef[]; resultBlob: BlobRef }
 export type SyncAttempt = {
   id: string; operationId: string; number: number; generation: number
   dispatchKey: string; sessionCreateKey: string; status: 'claimed' | 'running' | 'frozen' | 'verified' | 'applying' | 'settled' | 'failed' | 'superseded'
-  session: NativeSessionRef | null; candidate: CandidateRef | null; verification: VerificationRef | null
+  currentSession: NativeSessionRef | null; dispatchPlans: DispatchPlan[]; composedInput: ComposedInputRef | null; candidate: CandidateRef | null; verification: VerificationRef | null
   checkpointRefs: BlobRef[]; failure: SyncFailure | null; leaseToken: string; expiresAtMs: number
 }
 export type WriteFence = { operationId: string; attemptId: string; generation: number; sourceFingerprint: string; leaseToken: string }
@@ -68,7 +71,10 @@ export type ApplyStep = { key: string; status: 'planned' | 'completed'; evidence
 export type ApplyReceipt = { id: string; journalId: string; effectKey: string; actualTree: string; actualCommit: string | null; deliverySnapshot: InputSnapshot; evidenceRefs: BlobRef[]; completedAtMs: number }
 export type ApplyJournal = { id: string; operationId: string; attemptId: string; generation: number; plan: ApplyPlan; status: 'prepared' | 'applying' | 'completed' | 'settled' | 'recovery_required'; steps: ApplyStep[]; receipt: ApplyReceipt | null; createdAtMs: number }
 export type SyncDispatchEnvelope = { version: 1; type: 'sync.dispatch'; operationId: string; inputId: string; generation: number; dispatchKey: string }
-export type AdmitSyncInput = Pick<SyncOperation, 'ingressKey' | 'rootCauseId' | 'origin' | 'input' | 'scope' | 'budget' | 'delivery' | 'policyDigest' | 'impactDigest' | 'readSetDigest'> & { previousBaselinePair?: BaselinePair | null }
+export type AdmitSyncInput = Pick<SyncOperation, 'ingressKey' | 'rootCauseId' | 'origin' | 'input' | 'scope' | 'budget' | 'delivery' | 'policyDigest' | 'impactDigest' | 'readSetDigest' | 'deliveryPlan'> & { previousBaselinePair?: BaselinePair | null }
 export type ClaimAttemptInput = { operationId: string; source: WorktreeIdentity; scope: SyncScope; leaseMs: number; expectedMessageId?: string }
 export type ClaimedAttempt = { operation: SyncOperation; attempt: SyncAttempt; fence: WriteFence; lease: ScopeLease }
 export type RecoverableSync = { operation: SyncOperation; attempt: SyncAttempt | null; journals: ApplyJournal[] }
+
+export type VerificationLayerResult = { layer: 'V1' | 'V2' | 'V3' | 'V4'; verdict: 'pass' | 'fail' | 'unsupported'; evidenceRefs: BlobRef[] }
+export type VerificationResultBlob = { schemaVersion: 1; inputId: string; candidateDigest: string; policyDigest: string; readSetDigest: string; environmentDigest: string; contextDigest: string; layers: VerificationLayerResult[] }
