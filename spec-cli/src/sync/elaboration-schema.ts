@@ -27,6 +27,7 @@ export const ELABORATION_SCHEMA = object({
   changes: { type: 'array', minItems: 1, items: object({ nodeId: string, path: string, title: { ...string, pattern: '^[^\\r\\n]+$' }, description: { type: 'string' }, code: strings, related: strings, prose: { type: 'string' }, tables: object(Object.fromEntries(Object.entries(CONTRACT_COLUMNS).map(([kind, columns]) => [kind, { type: 'array', items: object(Object.fromEntries(columns.map(column => [column, rowProperty(kind, column)]))) }]))) }) },
   applicability: { type: 'array', minItems: ELABORATION_BOUNDARIES.length, items: object({ boundary: { enum: ELABORATION_BOUNDARIES }, applies: { type: 'boolean' }, basis: string, affectedIds: strings }) },
 })
+export const VERIFICATION_REGISTRATION_SCHEMA = object({ id: rowProperty('VERIFY', 'id'), command: rowProperty('VERIFY', 'command'), cwd: rowProperty('VERIFY', 'cwd'), timeoutMs: rowProperty('VERIFY', 'timeout-ms') })
 export const ELABORATION_REVIEW_SCHEMA = object({
   verdict: { enum: ['accept', 'repair', 'needs_input', 'conflict'] },
   checkedBoundaries: { type: 'array', items: { enum: ELABORATION_BOUNDARIES }, minItems: ELABORATION_BOUNDARIES.length },
@@ -63,6 +64,7 @@ export function outputErrors(value: unknown, schema: Record<string, unknown>, pa
 }
 
 export const CONTRACT_INSTRUCTIONS = `最终唯一可编辑契约是规范 Markdown，由程序从业务行确定性渲染；程序复制原始raw、contract-schema: sync-v1、固定标题及表格，不让模型拼语法。业务行字段由schema定义；单元格简洁，避免同义政策复制。独立审查检查最终Markdown及业务语义。
+冻结输入中的 verifications 是可信执行器的独立技术登记，不属于业务facts，不是用户未知，也不授予改变已有业务契约的权限。提供时，VERIFY.id/command/cwd/timeout-ms 必须精确符合登记，AC.command 只引用已登记VERIFY；不得自行造占位ID、换命令或放宽预算。执行器启动这些命令并汇总真实结果；generated业务测试只实现业务断言，不自行启动runner/oracle或递归运行登记命令。不要为这些已明确编排职责新增业务REQ/RULE/AC，或将它们误写为业务GAP。真正业务GAP仍按raw/facts保留；没有verifications时细化不代表命令已登记、已执行或具备交付权。
 raw、冻结事实和权威业务规则优先。仅影响权限、资金或业务权益、数据范围、保留删除义务、不可逆副作用、竞争胜负、重复执行语义或业务承诺的重要未知事实，以及实际意图冲突才形成GAP。可观察本身不等于重大业务政策。既有无冲突错误名称/错误协议、普通字段表示/参数类型/序列化及等价校验顺序等实现细节可自动沿用，使用code来源并追到REQ；不冒充decision授权，不制造GAP或再次要求用户裁决。没有明确矛盾，不扩展管理员、防枚举等政策。参数类型或校验若违反明确raw/facts，必须保留要求并修实现，不能新增GAP掩盖冲突。不得仅凭代码授权上述重大业务政策。
 生成与审查均须核实每条评审发现是否获raw、facts或相应代码来源支持；误读实现细节、错把技术选择当业务政策的发现必须纠正，不能照单全收并扩大GAP。只修已核实缺口及直接依赖，逐条保留未受影响且符合raw/facts的既有AC细分断言，包括已有测试支持的断言；不因重写表格把断言挪成前置条件、缩成部分效果或删除。来源混合时拆分业务规则与实现细节或建立相应依赖，不能因仅能填写一个source而要求用户重复授权普通技术约定。
 所有出现表包含完整表头和非空数据行；空值用 -，布尔 true/false，引用集合逗号分隔。ID为类型-业务域-稳定后缀（ASCII大写/数字/连字符）。source必须是唯一单值，不能逗号拼多个来源；例如derived:REQ-EXPORT-01有效，user:REQ-EXPORT-01,decision:EXPORT-POLICY无效。REQ来源user:raw；其他单值来源user:REQ-ID、decision:裁决ID、rule:RULE-ID、derived:稳定ID、code:相对路径#符号。多个推导依赖只放depends-on引用列表。必须真实depends-on追到原意；每项业务政策有可核实来源。缺代码/测试属于待实现证据，不是业务事实GAP；不要为已有明确政策伪造缺失事实。

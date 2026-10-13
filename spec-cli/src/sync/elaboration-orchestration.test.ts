@@ -38,6 +38,62 @@ const runner = (build: (request: ElaborationSessionRequest, call: number) => unk
   } }
 }
 
+const registeredVerification = (() => {
+  const item = parseContract({ nodeId: 'export-contract', path, source }).contract!.items.find(item => item.kind === 'VERIFY')!
+  assert.equal(item.kind, 'VERIFY')
+  return { id: item.id, command: [...item.command], cwd: item.cwd, timeoutMs: item.timeoutMs }
+})()
+
+test('AC-ELABORATION-32 不合法可信登记在任何native前拒绝，复用schema与parser', async () => {
+  for (const verifications of [
+    [{ ...registeredVerification, id: 'VERIFY-EXPORT' }],
+    [{ ...registeredVerification, command: ['sh', '-c', 'node --test'] }],
+    [{ ...registeredVerification, command: ['node', '\n'] }],
+    [{ ...registeredVerification, cwd: '../outside' }],
+    [{ ...registeredVerification, timeoutMs: 0 }],
+    [registeredVerification, registeredVerification],
+  ]) {
+    const fake = runner(request => candidate(request, source))
+    await assert.rejects(elaborate({ ...input(), verifications }, { runner: fake.run }), /可信验证登记/)
+    assert.equal(fake.calls.length, 0)
+  }
+})
+
+test('AC-ELABORATION-33 登记不符的输出先硬拒，不能借GAP占位或进入独立review', async () => {
+  for (const replaced of [
+    source.replaceAll(registeredVerification.id, 'VERIFY-EXPORT-PLACEHOLDER'),
+    source.replace(JSON.stringify(registeredVerification.command), JSON.stringify(['node', '--version'])),
+  ]) {
+    const fake = runner(request => candidate(request, replaced))
+    const result = await elaborate({ ...input(), verifications: [registeredVerification], maxRepairs: 0 }, { runner: fake.run })
+    assert.equal(result.status, 'exhausted')
+    assert.equal(result.reviewPassed, false)
+    assert.deepEqual(fake.calls.map(call => call.purpose), ['elaboration_generate'])
+    assert.ok(result.rounds[0].findings.some(issue => issue.code === 'verification_registration_mismatch'))
+  }
+})
+
+test('AC-ELABORATION-34 合法独立登记绑定输入摘要，不造作者职责业务GAP或验证完成声明', async () => {
+  const verification = structuredClone(registeredVerification)
+  const original = structuredClone(verification)
+  const fake = runner(request => {
+    verification.command[0] = 'changed-after-freeze'
+    return candidate(request, source)
+  })
+  const result = await elaborate({ ...input(), verifications: [verification] }, { runner: fake.run })
+  assert.equal(result.status, 'complete')
+  assert.deepEqual(result.gaps, [])
+  assert.equal(result.runtimeVerification, 'not_run')
+  assert.equal(result.implementationReady, false)
+  assert.match(fake.calls[0].prompt, /verifications.*可信执行器/)
+  assert.ok(fake.calls[0].prompt.includes(JSON.stringify(original)))
+  assert.match(fake.calls[0].prompt, /不自行启动runner\/oracle/)
+  const noRegistration = runner(request => candidate(request, source))
+  const other = await elaborate(input(), { runner: noRegistration.run })
+  assert.notEqual(result.inputDigest, other.inputDigest)
+  assert.equal(other.runtimeVerification, 'not_run')
+})
+
 test('AC-ELABORATION-01 生产编排完成解析、矩阵和独立评审，完整绑定仍不宣称运行或同步', async () => {
   const fake = runner(request => candidate(request, source))
   const result = await elaborate(input(), { runner: fake.run })

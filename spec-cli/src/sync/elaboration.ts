@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto'
 import { posix } from 'node:path'
-import { buildContractGraph, parseContract, parseParts, projectContractCoverage, validateContractGraph } from '@spexcode/spec-core/contracts'
+import { buildContractGraph, CONTRACT_COLUMNS, parseContract, parseParts, projectContractCoverage, validateContractGraph } from '@spexcode/spec-core/contracts'
 import type { Contract, ContractCoverage, ContractFinding, ContractGraph, Gap } from '@spexcode/spec-core/contracts'
-import { CONTRACT_INSTRUCTIONS, ELABORATION_REVIEW_SCHEMA, ELABORATION_SCHEMA, outputErrors } from './elaboration-schema.js'
+import { CONTRACT_INSTRUCTIONS, ELABORATION_REVIEW_SCHEMA, ELABORATION_SCHEMA, VERIFICATION_REGISTRATION_SCHEMA, outputErrors } from './elaboration-schema.js'
 import { renderElaboration } from './elaboration-markdown.js'
-import type { GeneratedElaboration } from './elaboration-markdown.js'
+import type { GeneratedElaboration, GeneratedTables } from './elaboration-markdown.js'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
 import type { ElaborationCandidate, ElaborationInput, ElaborationRepairSeed, ElaborationResult, ElaborationReview, ElaborationRound, ElaborationRunner, ElaborationTrace } from './elaboration-types.js'
 export type { Applicability, AuthorizedContractChange, BlockedElaborationFlow, ElaborationCandidate, ElaborationChange, ElaborationFact, ElaborationInput, ElaborationPriorReference, ElaborationRepairSeed, ElaborationResult, ElaborationReview, ElaborationReviewFinding, ElaborationRound, ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult, ElaborationTarget, ElaborationTrace } from './elaboration-types.js'
@@ -40,6 +40,21 @@ function checkInput(input: ElaborationInput): void {
     if (target.source === null && target.nodeId !== input.intent.nodeId && !target.rawSource) throw new TypeError(`新子节点需冻结原意或上层引用正文: ${target.path}`)
   }
   for (const fact of input.facts ?? []) if (!fact.source.trim() || !fact.text.trim()) throw new TypeError('冻结业务事实必须有来源及非空正文')
+  if (input.verifications) {
+    const ids = new Set<string>()
+    for (const verification of input.verifications) {
+      const errors = outputErrors(verification, VERIFICATION_REGISTRATION_SCHEMA)
+      if (errors.length || ids.has(verification.id)) throw new TypeError(`可信验证登记不合法或重复: ${verification.id}; ${errors.join('; ')}`)
+      ids.add(verification.id)
+    }
+    // 复用唯一 Markdown 渲染及契约解析器检查 cwd、shell argv 和转义边界。
+    const tables = Object.fromEntries(Object.keys(CONTRACT_COLUMNS).map(kind => [kind, []])) as unknown as GeneratedTables
+    tables.VERIFY = input.verifications.map(verification => ({ id: verification.id, command: verification.command, cwd: verification.cwd, 'timeout-ms': verification.timeoutMs }))
+    const target = input.targets.find(item => item.nodeId === input.intent.nodeId)!
+    const rendered = renderElaboration(input, { version: 'elaboration-rows-v1', changes: [{ nodeId: target.nodeId, path: target.path, title: '可信验证登记', description: '', code: [], related: [], prose: '', tables }], applicability: [] }, 'registration-validation').changes[0]
+    const errors = parseContract({ nodeId: target.nodeId, path: target.path, source: rendered.source }).findings.filter(issue => issue.severity === 'error')
+    if (errors.length) throw new TypeError(`可信验证登记不合法: ${errors.map(issue => `${issue.code}: ${issue.message}`).join('; ')}`)
+  }
   const items = input.targets.flatMap(target => target.source === null ? [] : parseContract({ nodeId: target.nodeId, path: target.path, source: target.source }).contract?.items ?? [])
   const authorizations = new Set<string>()
   for (const change of input.authorizedChanges ?? []) {
@@ -90,6 +105,15 @@ function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate
     if (parsed.contract) contracts.push(parsed.contract)
   }
   const graph = buildContractGraph(contracts)
+  if (input.verifications) {
+    const registered = new Map(input.verifications.map(verification => [verification.id, verification]))
+    for (const item of graph.items.values()) {
+      if (item.kind === 'VERIFY') {
+        const policy = registered.get(item.id)
+        if (!policy || item.cwd !== policy.cwd || item.timeoutMs !== policy.timeoutMs || JSON.stringify(item.command) !== JSON.stringify(policy.command)) findings.push(finding(input, 'verification_registration_mismatch', `VERIFY 必须精确符合可信执行器登记: ${item.id}`, item.id))
+      } else if (item.kind === 'AC' && !registered.has(item.command)) findings.push(finding(input, 'verification_reference_unregistered', `AC.command 未引用可信登记: ${item.command}`, item.id))
+    }
+  }
   for (const id of input.retiredIds ?? []) if (graph.items.has(id)) findings.push(finding(input, 'retired_id_reused', `不能复用退役稳定身份: ${id}`, id))
   for (const change of input.authorizedChanges ?? []) if (change.action === 'retire' && graph.items.has(change.id)) findings.push(finding(input, 'retirement_not_applied', `用户已决定退役的身份仍存在: ${change.id}`, change.id))
   findings.push(...validateContractGraph(graph, { mode: 'final', files: input.files, nodeIds: new Set([...input.targets, ...(input.context ?? [])].map(source => source.nodeId)) }))
@@ -172,7 +196,7 @@ function validateRepairSeed(input: ElaborationInput, seed: ElaborationRepairSeed
 /** 从不可变业务输入连续生成、解析和独立审查；仅返回候选，不拥有交付树写权限。 */
 export async function elaborate(input: ElaborationInput, options: { runner?: ElaborationRunner; seed?: ElaborationRepairSeed } = {}): Promise<ElaborationResult> {
   checkInput(input)
-  const frozen = structuredClone({ execution: { root: input.root, base: input.base ?? null }, intent: input.intent, targets: input.targets, context: input.context ?? [], facts: input.facts ?? [], authorizedChanges: input.authorizedChanges ?? [], retiredIds: input.retiredIds ?? [], files: input.files ? [...input.files].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0) : null })
+  const frozen = structuredClone({ execution: { root: input.root, base: input.base ?? null }, intent: input.intent, targets: input.targets, context: input.context ?? [], facts: input.facts ?? [], ...(input.verifications ? { verifications: input.verifications } : {}), authorizedChanges: input.authorizedChanges ?? [], retiredIds: input.retiredIds ?? [], files: input.files ? [...input.files].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0) : null })
   // 在任何 await 前复制调用者输入，后续生成/评审不能混入继续编辑的字节。
   input = { ...input, ...frozen, files: frozen.files === null ? undefined : new Map(frozen.files) }
   const inputDigest = digest(frozen)
