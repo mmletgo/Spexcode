@@ -51,7 +51,7 @@ export type DeliveryPlan = { canonicalRoot: string; branch: string; baseCommit: 
 export type ComposedInputRef = { sourceInputId: string; previousBaselinePairId: string | null; tree: string; manifestBlob: BlobRef; contentDigest: string }
 export type DispatchPlan = { key: string; purpose: string; requestDigest: string; sessionCreateKey: string; session: NativeSessionRef | null }
 export type NativeSessionRef = { sessionId: string; threadId: string | null; turnId: string | null }
-export type CandidateRef = { tree: string; digest: string; manifestBlob: BlobRef; actualDiffBlob: BlobRef; coveredScope: SyncScope }
+export type CandidateRef = { baseTree: string; sourceInputId: string; tree: string; digest: string; manifestBlob: BlobRef; actualDiffBlob: BlobRef; coveredScope: SyncScope }
 export type VerificationRef = { candidateDigest: string; inputId: string; passed: boolean; coveredScope: SyncScope; policyDigest: string; readSetDigest: string; environmentDigest: string; contextDigest: string; evidenceRefs: BlobRef[]; resultBlob: BlobRef }
 export type SyncAttempt = {
   id: string; operationId: string; number: number; generation: number
@@ -77,4 +77,4 @@ export type ClaimedAttempt = { operation: SyncOperation; attempt: SyncAttempt; f
 export type RecoverableSync = { operation: SyncOperation; attempt: SyncAttempt | null; journals: ApplyJournal[] }
 
 export type VerificationLayerResult = { layer: 'V1' | 'V2' | 'V3' | 'V4'; verdict: 'pass' | 'fail' | 'unsupported'; evidenceRefs: BlobRef[] }
-export type VerificationResultBlob = { schemaVersion: 1; inputId: string; candidateDigest: string; policyDigest: string; readSetDigest: string; environmentDigest: string; contextDigest: string; layers: VerificationLayerResult[] }
+export type VerificationResultBlob = { schemaVersion: 1; coveredScope: SyncScope; inputId: string; candidateDigest: string; policyDigest: string; readSetDigest: string; environmentDigest: string; contextDigest: string; layers: VerificationLayerResult[] }
