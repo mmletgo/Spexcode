@@ -10,7 +10,7 @@ import { CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@
 import { SyncApplication } from './application.js'
 import { buildSyncApplicationPlan } from './planning.js'
 import { captureInputSnapshot } from './snapshot.js'
-import { readSyncSettings } from './settings.js'
+import { readSyncSettings, SyncApplicationError } from './settings.js'
 import type { SyncSettings } from './settings.js'
 import type { ContractCell, GeneratedTables } from './elaboration-markdown.js'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
@@ -382,29 +382,86 @@ test('AC-APPLICATION-17 queued不可借retry重置预算，无交付cancelled可
   } finally { held.mutex?.release(); f.cleanup() }
 })
 
-test('AC-APPLICATION-18 已停止操作仍有未结算资源时不能展示ready或借retry新预算', async () => {
+async function resourceFixture(options: { conflict?: boolean; callRequested?: boolean; invalidPlan?: boolean } = {}) {
   const f = await fixture()
+  let calls = 0
   const application = await SyncApplication.create(f.root, { protocol: f.protocol, runtimeDirectory: join(f.temp, 'runtime'), tools: { trustedRuntimeRoot: '/missing-runtime', toolEntry: '/missing-runtime/cli.js', canonicalHooksDir: '/missing-runtime/hooks' }, runner: async request => {
+    calls++
     const operation = f.application.store.listOperations(identifyWorktree(f.root).repositoryId)[0], attempt = f.application.store.readAttempt(operation.currentAttemptId!)
     const dispatch = attempt.dispatchPlans.find(plan => plan.key === request.requestKey)!
     const { signal: _signal, ...frozen } = request
     const requestDigest = contentHash(JSON.stringify(frozen)), expectedSessionId = sessionIdForCreateKey(dispatch.sessionCreateKey)
     const identity = { operationId: operation.id, attemptId: attempt.id, inputId: operation.input.id, candidateDigest: null }
-    const plan = { schemaVersion: 1, request: frozen, requestDigest, sessionCreateKey: dispatch.sessionCreateKey, expectedSessionId, ...identity }
-    const checkpoint = { schemaVersion: 1, ...identity, requestDigest, expectedSessionId, phase: 'planned', nativeCallRequested: true, nativeStarted: false, nativeState: 'unpublished', session: { sessionId: expectedSessionId, threadId: null, turnId: null } }
-    f.application.store.planResource({ operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: operation.input.source.physicalFingerprint }, { key: request.requestKey, kind: 'native_session', payloadDigest: requestDigest, inputId: operation.input.id, candidateDigest: null, planBlob: writeEvidence(operation.input.source.commonDir, plan), checkpointRef: writeEvidence(operation.input.source.commonDir, checkpoint) })
+    const plan = { schemaVersion: 1, request: frozen, requestDigest, sessionCreateKey: dispatch.sessionCreateKey, expectedSessionId: options.invalidPlan ? 'invalid-owned-session' : expectedSessionId, ...identity }
+    const checkpoint = { schemaVersion: 1, ...identity, requestDigest, expectedSessionId, phase: 'planned', nativeCallRequested: options.callRequested ?? true, nativeStarted: false, nativeState: 'unpublished', session: { sessionId: expectedSessionId, threadId: null, turnId: null } }
+    const fence = { operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: operation.input.source.physicalFingerprint }
+    f.application.store.planResource(fence, { key: request.requestKey, kind: 'native_session', payloadDigest: requestDigest, inputId: operation.input.id, candidateDigest: null, planBlob: writeEvidence(operation.input.source.commonDir, plan), checkpointRef: writeEvidence(operation.input.source.commonDir, checkpoint) })
+    if (options.conflict) f.application.store.recordFailure(fence, { code: 'input_changed', message: '受控来源冲突故障', kind: 'conflict', evidenceRefs: [] })
     throw Object.assign(new Error('受控创建结果未知'), { code: 'unsupported' })
   } })
+  return { ...f, application, modelCalls: (): number => calls }
+}
+
+test('AC-APPLICATION-18 已停止操作仍有未结算资源时不能展示ready或借retry新预算', async () => {
+  const f = await resourceFixture()
   try {
-    await application.enable()
-    const submitted = await application.submit({ nodeId: 'demo', requestId: 'pending-native-resource' }); assert.ok(submitted.operation)
-    const failed = await application.wait(submitted.operation.id)
+    await f.application.enable()
+    const submitted = await f.application.submit({ nodeId: 'demo', requestId: 'pending-native-resource' }); assert.ok(submitted.operation)
+    const failed = await f.application.wait(submitted.operation.id)
     assert.equal(failed.operation.phase, 'failed'); assert.equal(failed.resources[0]?.phase, 'planned')
     assert.equal(failed.executionAvailability.status, 'recovery_required'); assert.equal(failed.executionAvailability.failure?.code, 'sync_resources_unsettled')
     assert.equal(failed.retryEligibility.eligible, false); assert.ok(failed.retryEligibility.reason?.code)
-    await assert.rejects(application.submit({ nodeId: 'demo', requestId: 'retry-unknown-resource', retryOf: failed.operation.id }))
-    const paused = await application.control(failed.operation.id, 'pause')
+    await assert.rejects(f.application.submit({ nodeId: 'demo', requestId: 'retry-unknown-resource', retryOf: failed.operation.id }))
+    const paused = await f.application.control(failed.operation.id, 'pause')
     assert.equal(paused.operation.phase, 'paused'); assert.equal(paused.executionAvailability.status, 'recovery_required')
+  } finally { f.cleanup() }
+})
+
+test('AC-APPLICATION-19 recover不派发queued任务，不改control/预算/输入或出队有效消息', async () => {
+  const f = await fixture(), held = holdNextAdmission(f)
+  try {
+    await f.application.enable()
+    const submitted = await f.application.submit({ nodeId: 'demo', requestId: 'recover-only-queued' }); assert.ok(submitted.operation)
+    const before = await f.application.wait(submitted.operation.id)
+    held.mutex!.release(); held.mutex = null
+    await f.application.control(before.operation.id, 'recover')
+    const after = await f.application.wait(before.operation.id)
+    assert.deepEqual(after.operation, before.operation)
+    assert.equal(after.operation.phase, 'queued'); assert.equal(after.attempt, null); assert.equal(f.calls.length, 0)
+    assert.equal(f.application.store.nextDispatch(identifyWorktree(f.root).repositoryId)?.operation.id, before.operation.id)
+  } finally { held.mutex?.release(); f.cleanup() }
+})
+
+test('AC-APPLICATION-20 conflicted仍有资源不能ready；recover只结算已固定未派发资源并保留冲突', async () => {
+  const f = await resourceFixture({ conflict: true, callRequested: false })
+  try {
+    await f.application.enable()
+    const submitted = await f.application.submit({ nodeId: 'demo', requestId: 'conflict-with-resource' }); assert.ok(submitted.operation)
+    const before = await f.application.wait(submitted.operation.id)
+    assert.equal(before.operation.phase, 'conflicted'); assert.equal(before.resources[0]?.phase, 'planned')
+    assert.equal(before.executionAvailability.status, 'recovery_required'); assert.equal(before.executionAvailability.failure?.code, 'sync_resources_unsettled')
+    // 来源和启用配置变化不阻止清理旧资源；恢复不能偷偷启用或推进新输入。
+    writeFileSync(join(f.root, '.spec/spexcode.json'), '{broken JSON')
+    await f.application.control(before.operation.id, 'recover')
+    const after = await f.application.wait(before.operation.id)
+    assert.deepEqual(after.operation, before.operation); assert.equal(after.operation.phase, 'conflicted')
+    assert.equal(after.resources.length, 0); assert.equal(after.executionAvailability.status, 'ready')
+    assert.equal(f.modelCalls(), 1); assert.equal(f.application.store.listAttempts(before.operation.id).length, 1)
+    assert.equal((await f.application.readSettings()).activation, 'invalidated')
+  } finally { f.cleanup() }
+})
+
+test('AC-APPLICATION-21 recover具体协调失败返回可见409，资源与原业务结果仍保留', async () => {
+  const f = await resourceFixture({ invalidPlan: true, callRequested: false })
+  try {
+    await f.application.enable()
+    const submitted = await f.application.submit({ nodeId: 'demo', requestId: 'recover-invalid-binding' }); assert.ok(submitted.operation)
+    const before = await f.application.wait(submitted.operation.id)
+    await assert.rejects(f.application.control(before.operation.id, 'recover'), (error: unknown) => error instanceof SyncApplicationError && error.status === 409 && error.code === 'resource_recovery' && /native resource plan differs/.test(error.message))
+    const after = await f.application.readOperation(before.operation.id)
+    assert.deepEqual(after.operation, before.operation)
+    assert.equal(after.resources[0]?.phase, 'planned'); assert.equal(after.executionAvailability.status, 'recovery_required')
+    assert.equal(f.modelCalls(), 1); assert.equal(f.application.store.listAttempts(before.operation.id).length, 1)
   } finally { f.cleanup() }
 })
 

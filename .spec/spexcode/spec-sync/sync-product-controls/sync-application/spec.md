@@ -31,3 +31,7 @@ status 按节点及 bounded limit 查询，detail 返回 operation、当前 atte
 显式 retryOf 由用户授权为同一冻结输入、节点、政策、来源和正文请求建立关联的新 operation 及新预算；省略 patch 继承原 requestBlob，省略 origin 继承原 spec/initial 来源，沿旧 previousBaselinePair，不丢失未落地编辑。不能混入新 patch 或改节点、来源/政策，当前 source 已变应提交正常新输入。普通重复事件继续归并原 operation 及预算，同 retry requestId 精确幂等。detail.retryEligibility 复用 store 只读 phase、所有历史 resource/journal/live authority 门禁，并附当前输入/授权及固定 plan 诊断；只有 failed、budget_exhausted，以及从未交付的 cancelled 可重试，GAP、冲突、active 或未知资源禁止借新预算重启。准入事务重新检查门禁，不以先前只读结果代替原子检查。
 
 detail.resources 只列该操作尚未 removed 的真实历史资源；暂停、取消、失败/预算、待输入/冲突或完成状态若仍有此类资源或未 settled journal，executionAvailability 显示 recovery_required 与 sync_resources_unsettled，不能因工具描述可读就显示 ready。该投影不虚构资源已释放；retryEligibility 仍由 canonical 门禁拒绝，精确资源恢复由 coordinator 负责，恢复入口单独验收，不能因尚未恢复就允许重试。
+
+control(recover) 是独立于 resume/retry 的清理入口：保原 control、输入、预算和业务结果，不要求重新启用当前已经变化的配置；先等旧执行结算，再用原固定计划和工具调用 coordinator.recoveryOnly。它只核已有 native/verification 资源与已经开始的 journal，不创建 attempt、模型调用、验证或新 apply，也不自动唤醒其它 queued 任务。资料缺失或资源仍未知时保留具体恢复诊断，不假称释放；清理后另由明确 resume/retry 推进。conflicted 状态也必须按真实未结算资源投影 recovery_required。
+
+recover 等待本次协调清理结果：具体 failure 以原 code/message 的 409 返回，仍未知且无更细 failure 时返回 sync_resources_unsettled。不能仅打印服务器日志；查询详情仍从实际资源/journal保留恢复诊断，不写虚构业务失败或改原冲突结果。

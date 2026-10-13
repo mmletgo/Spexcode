@@ -22,6 +22,7 @@ export async function runSyncCli(argv: readonly string[]): Promise<void> {
       flags.set(token, value)
     }
   }
+  if (verb !== 'run' && flags.has('--retry-of')) throw usage('--retry-of 只用于 sync run')
   const targetTree = repoRoot(), query = new URLSearchParams({ targetTree })
   let result: unknown
   if (verb === 'enable') result = await clientSyncRequest('/settings', { targetTree, ...(flags.has('--config-digest') ? { expectedConfigDigest: flags.get('--config-digest') } : {}) })
@@ -42,11 +43,11 @@ export async function runSyncCli(argv: readonly string[]): Promise<void> {
     if (retryOf && patchFile) throw usage('--retry-of 沿用原正文意图，不能同时指定 --patch-file')
     const patch = patchFile ? readSpecBodyEdit(JSON.parse(readFileSync(patchFile, 'utf8')) as unknown) : undefined
     result = await clientSyncRequest('/run', { targetTree, nodeId: stripRefSigil(nodeId), requestId: flags.get('--request-id') ?? randomUUID(), ...(retryOf ? { retryOf } : { origin: 'spec' }), ...(patch ? { patch } : {}) })
-  } else if (verb === 'show' || ['pause', 'resume', 'cancel'].includes(verb ?? '')) {
+  } else if (verb === 'show' || ['pause', 'resume', 'cancel', 'recover'].includes(verb ?? '')) {
     if (positional.length !== 1) throw usage(`${verb} 需要完整 operation ID`)
     const path = `/operations/${encodeURIComponent(positional[0])}`
     result = verb === 'show' ? await clientSyncRequest(`${path}?${query}`) : await clientSyncRequest(`${path}/${verb}`, { targetTree })
-  } else throw usage('用法：spex sync settings|enable|status|run|show|pause|resume|cancel（spex help sync）')
+  } else throw usage('用法：spex sync settings|enable|status|run|show|pause|resume|cancel|recover（spex help sync）')
   console.log(JSON.stringify(result, null, 2))
 }
 function usage(message: string): Error { const error = new Error(message); error.name = 'UsageError'; return error }

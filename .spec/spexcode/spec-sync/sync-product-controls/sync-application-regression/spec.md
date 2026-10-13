@@ -26,4 +26,8 @@ AC-APPLICATION-01 验证配置缺口、enable 摘要 CAS 与配置字节保留�
 
 18 用真实 SQLite 注册 native 创建结果未知的固定 plan/checkpoint，验证已失败/暂停但资源未 removed 时 executionAvailability 为 recovery_required，retryEligibility 拒绝新预算。创建故障为明确测试接缝，不代表实际模型或未知宿主进程已验收。
 
+19 验证 recover 对 queued 不派发、不改 operation/control/预算/输入、不消费有效 FIFO；20 用真实 store conflict 事件验证 conflicted + 未结算资源不能 ready，再恢复固定且未曾请求 native call 的资源，保留冲突、attempt和预算，配置失效也不阻清理。恢复已创建 native 或 Docker 的真实案例仍由 coordinator 的资源恢复验收覆盖。
+
+21 注入内容可寻址但 native 身份不匹配的固定恢复计划，验证 coordinator 的具体 resource_recovery 以可见 409 返回，原业务 operation/attempt/预算及未释放资源保留，不只打印日志。
+
 故障 runner 为测试接缝，不算真实模型产品验收。完整真实 Agent/Docker 落地仍按 [[spec-sync]] 分阶段验收。

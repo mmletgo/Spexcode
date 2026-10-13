@@ -21,6 +21,8 @@ image; the page does not promise external watching or code-driven writeback.
 The workflow teaches explicit `--retry-of`, preserved original body intent and origin,
 read-only retryEligibility and refusal for changed input, unresolved resources or business GAP/conflict.
 An ordinary repeated input does not grant a fresh operation budget.
+It distinguishes recover (settle existing side effects without new work), resume and retry,
+and preserves control/input/budget while recovery remains uncertain.
 
 `spex guide` is SpexCode's **reference surface as a command**, not buried docs. It serves the human and
 the agent from one verb, picked by an optional topic:

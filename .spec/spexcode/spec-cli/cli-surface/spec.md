@@ -270,3 +270,5 @@ doing the same — the hub would begin holding argv parsing AND verb bodies, whi
 against. Such a surface goes to a module of its own, and the hub gains one more lazy line pointing at it.
 
 `spex help sync` 展示 `run --retry-of <operation-id>` 的显式新操作/预算语义，说明继承旧正文意图、不能与 --patch-file 同用、普通重复输入不重置预算，以及输入改变或资源未结算时拒绝。具体可重试性由 [[sync-application]] 的只读 eligibility 返回。
+
+`spex help sync` 区分 recover 的既有副作用清理、resume 的原操作继续，以及 retryOf 的显式新预算。recover 不开始新任务或交付，并返回尚未确认释放的诊断，不能用清理入口绕过业务门禁。

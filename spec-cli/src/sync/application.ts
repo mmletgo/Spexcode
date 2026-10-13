@@ -7,7 +7,7 @@ import { configuredSessionApplication } from '../session-application.js'
 import { prepareSpecBodyEdit, readSpecBodyEdit } from '../spec-body-edit.js'
 import type { SpecBodyEdit } from '../spec-body-edit.js'
 import { prepareSyncAdmission, runSyncOperation, syncPlanDigest } from './coordinator.js'
-import type { SyncCoordinatorOptions, SyncCoordinatorPlan } from './coordinator-types.js'
+import type { SyncCoordinatorOptions, SyncCoordinatorPlan, SyncCoordinatorResult } from './coordinator-types.js'
 import { migrateSyncStore } from './migrations.js'
 import type { BlobRef, InputSnapshot, SyncOperation, WorktreeIdentity } from './operation-types.js'
 import { buildSyncApplicationPlan } from './planning.js'
@@ -40,7 +40,7 @@ export class SyncApplication {
   private readonly artifactRoot: string
   private readonly enabledPath: string
   private routing: Promise<void> | null = null
-  private readonly running = new Map<string, { controller: AbortController; finished: Promise<void> }>()
+  private readonly running = new Map<string, { controller: AbortController; finished: Promise<SyncCoordinatorResult> }>()
   private constructor(root: string, private readonly options: SyncApplicationOptions) {
     const source = identifyWorktree(root)
     this.root = source.canonicalRoot
@@ -124,7 +124,7 @@ export class SyncApplication {
     try { this.executionInputs(operation); executionAvailability = { status: 'ready' } }
     catch (error) { executionAvailability = { status: 'recovery_required', failure: { code: 'sync_execution_metadata_unavailable', message: error instanceof Error ? error.message : String(error) } } }
     const journals = this.store.listJournals(operation.id), resources = this.store.listRecoverableResources().filter(item => item.operation.id === operation.id).map(item => item.resource)
-    const stopped = operation.control !== 'run' || completed.has(operation.phase) || ['paused', 'failed', 'budget_exhausted', 'needs_input', 'conflict', 'recovery_required'].includes(operation.phase)
+    const stopped = operation.control !== 'run' || completed.has(operation.phase) || ['paused', 'failed', 'budget_exhausted', 'needs_input', 'conflicted', 'recovery_required'].includes(operation.phase)
     if (executionAvailability.status === 'ready' && stopped && (resources.length || journals.some(journal => journal.status !== 'settled'))) executionAvailability = { status: 'recovery_required', failure: { code: 'sync_resources_unsettled', message: '操作仍有未结算资源或交付日志，请先恢复清理再重试' } }
     return { operation, attempt: operation.currentAttemptId ? this.store.readAttempt(operation.currentAttemptId) : null, journals, resources, stale: snapshot.id !== operation.input.id, sourceSynced: operation.phase === 'canonical_synced' && snapshot.id === operation.input.id, retryEligibility: this.retryEligibility(operation, snapshot), executionAvailability }
   }
@@ -256,17 +256,17 @@ export class SyncApplication {
     return true
   }
   private ownerKey(root: string): string { return `${this.options.protocol.databasePath}\0${this.repositoryId}\0${root}` }
-  private launch(id: string): void {
+  private launch(id: string, recoveryOnly = false): void {
     const operation = this.store.readOperation(id); this.assertSource(operation)
-    if (this.running.has(id) || completed.has(operation.phase) || operation.control !== 'run') return
+    if (this.running.has(id) || !recoveryOnly && (completed.has(operation.phase) || operation.control !== 'run')) return
     const controller = new AbortController()
     const { plan, tools } = this.executionInputs(operation)
     const { settings } = readSyncSettings(operation.input)
     let advance = false
-    const finished = runSyncOperation(this.store, id, { plan, readCurrentPlan: async () => {
+    const finished = runSyncOperation(this.store, id, { plan, ...(recoveryOnly ? { recoveryOnly: true } : {}), readCurrentPlan: async () => {
       const current = await captureInputSnapshot(this.root); this.requireEnabled(current)
       return buildSyncApplicationPlan(current, plan.intentNodeId)
-    }, managedRoot: this.managedRoot, artifactRoot: this.artifactRoot, tools, runner: this.options.runner, verificationDriver: this.options.verificationDriver, signal: controller.signal, callTimeoutMs: settings.callTimeoutMs }).then(result => { advance = result.status !== 'busy' }).finally(() => {
+    }, managedRoot: this.managedRoot, artifactRoot: this.artifactRoot, tools, runner: this.options.runner, verificationDriver: this.options.verificationDriver, signal: controller.signal, callTimeoutMs: settings.callTimeoutMs }).then(result => { advance = !recoveryOnly && result.status !== 'busy'; return result }).finally(() => {
       this.running.delete(id)
       if (advance) {
         try { this.startNextDispatch() }
@@ -291,10 +291,16 @@ export class SyncApplication {
       await Promise.race(preceding)
     }
   }
-  async control(id: string, action: 'pause' | 'resume' | 'cancel'): Promise<SyncOperationDetail> {
+  async control(id: string, action: 'pause' | 'resume' | 'cancel' | 'recover'): Promise<SyncOperationDetail> {
     const operation = this.store.readOperation(id); this.assertSource(operation)
-    if (!['pause', 'resume', 'cancel'].includes(action)) throw new SyncApplicationError('sync_control_invalid', '不支持的同步控制', 400)
-    if (action === 'resume') {
+    if (!['pause', 'resume', 'cancel', 'recover'].includes(action)) throw new SyncApplicationError('sync_control_invalid', '不支持的同步控制', 400)
+    if (action === 'recover') {
+      await this.running.get(id)?.finished
+      this.launch(id, true)
+      const result = await this.running.get(id)!.finished
+      if (result.failure) throw new SyncApplicationError(result.failure.code, result.failure.message)
+      if (result.status === 'recovery_required') throw new SyncApplicationError('sync_resources_unsettled', '已有资源或交付日志尚未确认结算，请查询实际记录后继续恢复')
+    } else if (action === 'resume') {
       await this.running.get(id)?.finished
       const current = await captureInputSnapshot(this.root); this.requireEnabled(current)
       if (current.id !== operation.input.id) throw new SyncApplicationError('sync_input_stale', '恢复输入已变化，请为最新 Spec 发起新操作')
