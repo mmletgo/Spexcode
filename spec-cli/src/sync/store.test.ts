@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { applyComponentMigrations, openProtocol } from '@spexcode/session-protocol'
+import { applyComponentMigrations, openProtocol, type SqlParam } from '@spexcode/session-protocol'
 import { migrateSyncStore, SYNC_COMPONENT, SYNC_MIGRATIONS } from './migrations.js'
 import type { AdmitSyncInput, ApplyFilePlan, ApplyPlan, ApplyReceipt, BlobRef, CandidateRef, ClaimedAttempt, InputSnapshot, SyncScope, VerificationRef, VerificationResultBlob, WorktreeIdentity } from './operation-types.js'
 import { SyncStore, SYNC_COORDINATOR_ADDRESS } from './store.js'
@@ -229,7 +229,7 @@ test('component migration online backup restores old database, failed DDL rolls 
     assert.throws(() => applyComponentMigrations(f.protocol, 'broken-test', [{ version: 1, sql: 'CREATE TABLE will_rollback(id TEXT) STRICT; INSERT INTO missing VALUES(1);' }]))
     assert.equal(f.protocol.withTransaction(tx => tx.query("SELECT * FROM sqlite_master WHERE name='will_rollback'")).length, 0)
     assert.equal(await migrateSyncStore(f.protocol), SYNC_MIGRATIONS.length)
-    f.protocol.withTransaction(tx => tx.exec('INSERT INTO schema_migrations(component,version,checksum,applied_at_ms) VALUES(?,?,?,?)', SYNC_COMPONENT, 2, 'future', 1000))
+    f.protocol.withTransaction(tx => tx.exec('INSERT INTO schema_migrations(component,version,checksum,applied_at_ms) VALUES(?,?,?,?)', SYNC_COMPONENT, SYNC_MIGRATIONS.length + 1, 'future', 1000))
     await assert.rejects(migrateSyncStore(f.protocol), /SYNC_SCHEMA_UNSUPPORTED/)
     assert.throws(() => f.store.admitAndEnqueue(f.admit()), /SYNC_SCHEMA_UNSUPPORTED/)
   } finally { f.cleanup() }
@@ -410,4 +410,154 @@ test('wall clock rollback cannot select an older settled source or delivery base
       assert.equal(recovered.readBaseline(source('delivery'))?.receiptId, secondReceipt.id)
     } finally { reopened.close() }
   } finally { f.cleanup() }
+})
+
+test('cancelled verification attempt persists resource checkpoints without restoring business authority', async () => {
+  const f = await fixture()
+  try {
+    const prepared = f.ready()
+    const planned = f.put({ runId: 'verification-run', phase: 'planned' })
+    const resource = f.store.planResource(prepared.fence, { key: 'verification-run', kind: 'verification', payloadDigest: 'resource-payload', inputId: prepared.operation.input.id, candidateDigest: prepared.candidate.digest, planBlob: planned, checkpointRef: planned })
+    f.store.requestControl(prepared.operation.id, 'cancel')
+    const created = f.put({ runId: 'verification-run', phase: 'created', containerId: 'actual-created-container' })
+    assert.throws(() => f.store.checkpoint(prepared.fence, created), /SYNC_FENCE_EXPIRED/)
+    const binding = { operationId: resource.operationId, attemptId: resource.attemptId, inputId: resource.plan.inputId, candidateDigest: resource.plan.candidateDigest }
+    f.store.recordResourceCheckpoint(resource.id, { ...binding, phase: 'created', expectedCheckpointRef: planned, checkpointRef: created })
+    assert.equal(f.store.listRecoverableResources()[0].resource.id, resource.id)
+    assert.equal(f.store.listRecoverableResources()[0].operation.phase, 'cancelled')
+    assert.throws(() => f.store.recordVerification(prepared.fence, prepared.verification), /SYNC_FENCE_EXPIRED/)
+    assert.throws(() => f.store.beginApply(prepared.fence, prepared.plan, prepared.target), /SYNC_FENCE_EXPIRED/)
+    const terminal = f.put({ runId: 'verification-run', phase: 'terminal', exitCode: 137 })
+    f.store.recordResourceCheckpoint(resource.id, { ...binding, phase: 'terminal', expectedCheckpointRef: created, checkpointRef: terminal })
+    const reopened = openProtocol(f.path), recovered = new SyncStore(reopened, f.options)
+    try {
+      assert.equal(recovered.listRecoverableResources()[0].resource.phase, 'terminal')
+      const removed = f.put({ runId: 'verification-run', phase: 'removed' })
+      recovered.recordResourceCheckpoint(resource.id, { ...binding, phase: 'removed', expectedCheckpointRef: terminal, checkpointRef: removed })
+      assert.equal(recovered.listRecoverableResources().length, 0)
+      assert.equal(recovered.readOperation(prepared.operation.id).phase, 'cancelled')
+      assert.equal(recovered.readAttempt(prepared.attempt.id).status, 'superseded')
+      assert.ok(recovered.pinnedBlobRefs().some(ref => ref.sha256 === terminal.sha256))
+    } finally { reopened.close() }
+  } finally { f.cleanup() }
+})
+
+
+test('resource plan binding, exact replay and checkpoint CAS protect newer same-phase evidence across handles', async () => {
+  const f = await fixture(), otherProtocol = openProtocol(f.path), other = new SyncStore(otherProtocol, f.options)
+  try {
+    const prepared = f.ready(), planned = f.put({ runId: 'run', phase: 'planned' })
+    const plan = { key: 'run', kind: 'verification' as const, payloadDigest: 'fixed-payload', inputId: prepared.operation.input.id, candidateDigest: prepared.candidate.digest, planBlob: planned, checkpointRef: planned }
+    const resource = f.store.planResource(prepared.fence, plan)
+    assert.equal(f.store.planResource(prepared.fence, plan).id, resource.id)
+    assert.equal(other.findResource(prepared.attempt.id, 'run')?.id, resource.id)
+    assert.equal(other.findResource(prepared.attempt.id, 'missing'), null)
+    assert.throws(() => f.store.planResource(prepared.fence, { ...plan, payloadDigest: 'different' }), /SYNC_RESOURCE_PLAN_CONFLICT/)
+    assert.throws(() => f.store.planResource(prepared.fence, { ...plan, inputId: 'different-input' }), /SYNC_RESOURCE_BINDING/)
+    assert.throws(() => f.store.planResource(prepared.fence, { ...plan, candidateDigest: 'different-candidate' }), /SYNC_RESOURCE_BINDING/)
+    const binding = { operationId: resource.operationId, attemptId: resource.attemptId, inputId: resource.plan.inputId, candidateDigest: resource.plan.candidateDigest }
+    const created = f.put({ phase: 'created', threadId: 'thread', turnId: null })
+    const updated = f.put({ phase: 'created', threadId: 'thread', turnId: 'actual-turn' })
+    f.store.recordResourceCheckpoint(resource.id, { ...binding, phase: 'created', expectedCheckpointRef: planned, checkpointRef: created })
+    other.recordResourceCheckpoint(resource.id, { ...binding, phase: 'created', expectedCheckpointRef: created, checkpointRef: updated })
+    const lateCreated = f.put({ phase: 'created', threadId: 'thread', turnId: null, stale: true })
+    assert.throws(() => f.store.recordResourceCheckpoint(resource.id, { ...binding, phase: 'created', expectedCheckpointRef: created, checkpointRef: lateCreated }), /SYNC_RESOURCE_CHECKPOINT_CONFLICT/)
+    assert.deepEqual(f.store.readResource(resource.id).checkpointRef, updated)
+    assert.deepEqual(f.store.recordResourceCheckpoint(resource.id, { ...binding, phase: 'created', expectedCheckpointRef: planned, checkpointRef: created }).checkpointRef, updated)
+    assert.throws(() => f.store.recordResourceCheckpoint(resource.id, { ...binding, attemptId: 'different-attempt', phase: 'terminal', expectedCheckpointRef: updated, checkpointRef: f.put({ phase: 'terminal' }) }), /SYNC_RESOURCE_BINDING/)
+    const terminal = f.put({ phase: 'terminal', exitCode: 0 })
+    f.store.recordResourceCheckpoint(resource.id, { ...binding, phase: 'terminal', expectedCheckpointRef: updated, checkpointRef: terminal })
+    const stalePlanned = f.put({ phase: 'planned', stale: true })
+    assert.throws(() => other.recordResourceCheckpoint(resource.id, { ...binding, phase: 'planned', expectedCheckpointRef: terminal, checkpointRef: stalePlanned }), /SYNC_RESOURCE_PHASE_INVALID/)
+    assert.equal(other.listRecoverableResources()[0].resource.phase, 'terminal')
+    const removed = f.put({ phase: 'removed' })
+    other.recordResourceCheckpoint(resource.id, { ...binding, phase: 'removed', expectedCheckpointRef: terminal, checkpointRef: removed })
+    assert.equal(f.store.listRecoverableResources().length, 0)
+    assert.deepEqual(f.store.findResource(prepared.attempt.id, 'run')?.checkpointRef, removed)
+    assert.equal(f.store.planResource(prepared.fence, plan).phase, 'removed')
+    assert.deepEqual(f.store.recordResourceCheckpoint(resource.id, { ...binding, phase: 'terminal', expectedCheckpointRef: updated, checkpointRef: terminal }).checkpointRef, removed)
+  } finally { otherProtocol.close(); f.cleanup() }
+})
+
+test('resources from superseded historical attempts remain recoverable without renewing their fence', async () => {
+  const f = await fixture()
+  try {
+    const old = f.ready(), planned = f.put({ runId: 'old-run', phase: 'planned' })
+    const resource = f.store.planResource(old.fence, { key: 'old-run', kind: 'verification', payloadDigest: 'fixed-payload', inputId: old.operation.input.id, candidateDigest: old.candidate.digest, planBlob: planned, checkpointRef: planned })
+    f.tick(1001)
+    const next = f.store.claimAttempt({ operationId: old.operation.id, source: old.operation.input.source, scope: old.operation.scope, leaseMs: 1000 })
+    assert.equal(f.store.listRecoverable()[0].attempt?.id, next.attempt.id)
+    assert.equal(f.store.listRecoverableResources()[0].attempt.id, old.attempt.id)
+    const binding = { operationId: resource.operationId, attemptId: resource.attemptId, inputId: resource.plan.inputId, candidateDigest: resource.plan.candidateDigest }
+    const created = f.put({ runId: 'old-run', phase: 'created', actualContainerId: 'old-container' })
+    f.store.recordResourceCheckpoint(resource.id, { ...binding, phase: 'created', expectedCheckpointRef: planned, checkpointRef: created })
+    assert.throws(() => f.store.planResource(old.fence, resource.plan), /SYNC_FENCE_EXPIRED/)
+    assert.throws(() => f.store.recordVerification(old.fence, old.verification), /SYNC_FENCE_EXPIRED/)
+    assert.throws(() => f.store.beginApply(old.fence, old.plan, old.target), /SYNC_FENCE_EXPIRED/)
+    assert.equal(f.store.readOperation(old.operation.id).currentAttemptId, next.attempt.id)
+    assert.equal(f.store.readOperation(old.operation.id).generation, next.operation.generation)
+    assert.equal(f.store.readAttempt(old.attempt.id).status, 'superseded')
+  } finally { f.cleanup() }
+})
+
+test('native resource planned before candidate freeze can terminate without creation and requires removal before capacity release', async () => {
+  const f = await fixture()
+  try {
+    const claimed = f.claim(), planned = f.put({ sessionCreateKey: claimed.attempt.sessionCreateKey, phase: 'planned' })
+    const plan = { key: 'session-request', kind: 'native_session' as const, payloadDigest: 'request-digest', inputId: claimed.operation.input.id, candidateDigest: null, planBlob: planned, checkpointRef: planned }
+    assert.throws(() => f.store.planResource(claimed.fence, { ...plan, kind: 'verification' }), /SYNC_RESOURCE_BINDING/)
+    const resource = f.store.planResource(claimed.fence, plan)
+    f.store.requestControl(claimed.operation.id, 'cancel')
+    const binding = { operationId: resource.operationId, attemptId: resource.attemptId, inputId: resource.plan.inputId, candidateDigest: null }
+    assert.throws(() => f.store.recordResourceCheckpoint(resource.id, { ...binding, phase: 'removed', expectedCheckpointRef: planned, checkpointRef: f.put({ phase: 'removed' }) }), /SYNC_RESOURCE_PHASE_INVALID/)
+    const terminal = f.put({ phase: 'terminal', reason: 'cancelled_before_creation' })
+    f.store.recordResourceCheckpoint(resource.id, { ...binding, phase: 'terminal', expectedCheckpointRef: planned, checkpointRef: terminal })
+    assert.equal(f.store.listRecoverableResources()[0].resource.phase, 'terminal')
+    const removed = f.put({ phase: 'removed', actualResourceAbsent: true })
+    f.store.recordResourceCheckpoint(resource.id, { ...binding, phase: 'removed', expectedCheckpointRef: terminal, checkpointRef: removed })
+    assert.equal(f.store.listRecoverableResources().length, 0)
+    assert.equal(f.store.readOperation(claimed.operation.id).phase, 'cancelled')
+  } finally { f.cleanup() }
+})
+
+test('v1 upgrade keeps active attempt and queue data, online backup restores v1, interrupted v2 DDL rolls back', async () => {
+  const f = await fixture(), path = join(f.root, 'v1.sqlite'), legacy = openProtocol(path)
+  let restored: ReturnType<typeof openProtocol> | null = null
+  try {
+    applyComponentMigrations(legacy, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 1))
+    const old = f.claim()
+    legacy.initialize('existing_session')
+    const message = legacy.enqueue('existing_session', { kind: 'session.text.v1', body: Buffer.from('existing durable message') })
+    legacy.initialize(SYNC_COORDINATOR_ADDRESS)
+    for (const table of ['protocol_messages', 'sync_operations', 'sync_attempts', 'sync_leases'] as const) {
+      const rows = f.protocol.withTransaction(tx => tx.query(`SELECT * FROM ${table}`))
+      legacy.withTransaction(tx => {
+        for (const row of rows) {
+          const columns = Object.keys(row).filter(column => column !== 'enqueue_seq')
+          tx.exec(`INSERT INTO ${table}(${columns.join(',')}) VALUES(${columns.map(() => '?').join(',')})`, ...columns.map(column => row[column]) as SqlParam[])
+        }
+      })
+    }
+    assert.throws(() => applyComponentMigrations(legacy, SYNC_COMPONENT, [SYNC_MIGRATIONS[0], { version: 2, sql: `${SYNC_MIGRATIONS[1].sql} INSERT INTO missing_resource_table VALUES(1);` }]))
+    assert.equal(legacy.withTransaction(tx => tx.query("SELECT * FROM sqlite_master WHERE name='sync_resources'")).length, 0)
+    assert.equal(legacy.withTransaction(tx => tx.query('SELECT MAX(version) AS version FROM schema_migrations WHERE component=?', SYNC_COMPONENT))[0].version, 1)
+    const backupPath = join(f.root, 'v1-upgrade.backup')
+    assert.equal(await migrateSyncStore(legacy, { backupPath }), 2)
+    const upgraded = new SyncStore(legacy, f.options)
+    assert.equal(upgraded.readAttempt(old.attempt.id).id, old.attempt.id)
+    assert.equal(upgraded.readOperation(old.operation.id).currentAttemptId, old.attempt.id)
+    assert.equal(legacy.listPending('existing_session')[0].messageId, message.messageId)
+    const planned = f.put({ phase: 'planned' })
+    const resource = upgraded.planResource(old.fence, { key: 'after-upgrade', kind: 'native_session', payloadDigest: 'fixed-request', inputId: old.operation.input.id, candidateDigest: null, planBlob: planned, checkpointRef: planned })
+    restored = openProtocol(backupPath)
+    assert.equal(restored.listPending('existing_session')[0].messageId, message.messageId)
+    assert.equal(restored.withTransaction(tx => tx.query('SELECT MAX(version) AS version FROM schema_migrations WHERE component=?', SYNC_COMPONENT))[0].version, 1)
+    assert.equal(restored.withTransaction(tx => tx.query("SELECT * FROM sqlite_master WHERE name='sync_resources'")).length, 0)
+    const reopened = openProtocol(path), recovered = new SyncStore(reopened, f.options)
+    try {
+      assert.equal(recovered.findResource(old.attempt.id, 'after-upgrade')?.id, resource.id)
+      assert.equal(recovered.listRecoverableResources()[0].attempt.id, old.attempt.id)
+      assert.equal(await migrateSyncStore(reopened), 2)
+    } finally { reopened.close() }
+  } finally { restored?.close(); legacy.close(); f.cleanup() }
 })

@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { getBlob } from '@spexcode/spec-core'
 import { applyComponentMigrations, type ProtocolTransaction, type SessionProtocol } from '@spexcode/session-protocol'
 import { SYNC_COMPONENT, SYNC_MIGRATIONS } from './migrations.js'
-import type { AdmitSyncInput, ApplyFilePlan, ApplyJournal, ApplyPlan, ApplyReceipt, ApplyStep, BaselinePair, BlobRef, CandidateRef, ClaimedAttempt, ClaimAttemptInput, ComposedInputRef, DispatchPlan, InputSnapshot, NativeSessionRef, RecoverableSync, ScopeLease, SyncAttempt, SyncControl, SyncDispatchEnvelope, SyncFailure, SyncOperation, SyncScope, VerificationRef, VerificationResultBlob, WorktreeIdentity, WriteFence } from './operation-types.js'
+import type { AdmitSyncInput, ApplyFilePlan, ApplyJournal, ApplyPlan, ApplyReceipt, ApplyStep, BaselinePair, BlobRef, CandidateRef, ClaimedAttempt, ClaimAttemptInput, ComposedInputRef, RecoverableSyncResource, SyncResourceCheckpoint, SyncResourcePlan, SyncResourceRecord, DispatchPlan, InputSnapshot, NativeSessionRef, RecoverableSync, ScopeLease, SyncAttempt, SyncControl, SyncDispatchEnvelope, SyncFailure, SyncOperation, SyncScope, VerificationRef, VerificationResultBlob, WorktreeIdentity, WriteFence } from './operation-types.js'
 
 export const SYNC_COORDINATOR_ADDRESS = 'spec-sync-coordinator'
 export const SYNC_DISPATCH_KIND = 'sync.dispatch.v1'
@@ -58,6 +58,9 @@ export class SyncStore {
   }
   private journal(tx: ProtocolTransaction, id: string): ApplyJournal {
     return parseRecord<ApplyJournal>(tx.query('SELECT record_json FROM sync_apply_journals WHERE id=?', id)[0]) ?? fail('SYNC_JOURNAL_UNKNOWN', id)
+  }
+  private resource(tx: ProtocolTransaction, id: string): SyncResourceRecord {
+    return parseRecord<SyncResourceRecord>(tx.query('SELECT record_json FROM sync_resources WHERE id=?', id)[0]) ?? fail('SYNC_RESOURCE_UNKNOWN', id)
   }
   private saveOperation(tx: ProtocolTransaction, operation: SyncOperation): void {
     operation.revision++; operation.updatedAtMs = this.now()
@@ -216,6 +219,41 @@ export class SyncStore {
       if (plan.session && (plan.session.sessionId !== session.sessionId || (plan.session.threadId !== null && plan.session.threadId !== session.threadId) || (plan.session.turnId !== null && plan.session.turnId !== session.turnId))) fail('SYNC_SESSION_CONFLICT', 'native identities cannot be replaced')
       plan.session = clone(session); attempt.currentSession = clone(session); if (attempt.status === 'claimed') attempt.status = 'running'; this.saveAttempt(tx, attempt); return attempt
     })
+  }
+  /** 在创建原生资源前登记固定计划，仍必须持有当前业务fence。 */
+  planResource(fence: WriteFence, plan: SyncResourcePlan): SyncResourceRecord {
+    this.blob(plan.planBlob); this.blob(plan.checkpointRef)
+    return this.write(tx => {
+      const { operation, attempt } = this.checkFence(tx, fence)
+      if (plan.inputId !== operation.input.id || plan.candidateDigest !== (attempt.candidate?.digest ?? null) || (plan.kind === 'verification' && !attempt.candidate)) fail('SYNC_RESOURCE_BINDING', 'resource plan does not bind current input and frozen candidate')
+      const prior = parseRecord<SyncResourceRecord>(tx.query('SELECT record_json FROM sync_resources WHERE attempt_id=? AND resource_key=?', attempt.id, plan.key)[0])
+      if (prior) { if (digest(prior.plan) !== digest(plan)) fail('SYNC_RESOURCE_PLAN_CONFLICT', plan.key); return prior }
+      const resource: SyncResourceRecord = { id: randomUUID(), operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, plan: clone(plan), phase: 'planned', checkpointRef: clone(plan.checkpointRef), checkpoints: [{ phase: 'planned', checkpointRef: clone(plan.checkpointRef) }], createdAtMs: this.now(), updatedAtMs: this.now() }
+      tx.exec('INSERT INTO sync_resources(id,operation_id,attempt_id,generation,resource_key,kind,input_id,candidate_digest,payload_digest,phase,checkpoint_sha,created_at_ms,updated_at_ms,record_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)', resource.id, operation.id, attempt.id, attempt.generation, plan.key, plan.kind, plan.inputId, plan.candidateDigest, plan.payloadDigest, resource.phase, resource.checkpointRef.sha256, resource.createdAtMs, resource.updatedAtMs, JSON.stringify(resource))
+      return resource
+    })
+  }
+  /** 资源观测只核固定身份与CAS；取消、过期或历史attempt仍需登记真实清理。 */
+  recordResourceCheckpoint(resourceId: string, checkpoint: SyncResourceCheckpoint): SyncResourceRecord {
+    this.blob(checkpoint.checkpointRef)
+    return this.write(tx => {
+      const resource = this.resource(tx, resourceId)
+      if (checkpoint.operationId !== resource.operationId || checkpoint.attemptId !== resource.attemptId || checkpoint.inputId !== resource.plan.inputId || checkpoint.candidateDigest !== resource.plan.candidateDigest) fail('SYNC_RESOURCE_BINDING', 'observation belongs to a different resource attempt or immutable input')
+      if (resource.checkpoints.some(prior => prior.phase === checkpoint.phase && prior.checkpointRef.sha256 === checkpoint.checkpointRef.sha256)) return resource
+      if (checkpoint.expectedCheckpointRef.sha256 !== resource.checkpointRef.sha256) fail('SYNC_RESOURCE_CHECKPOINT_CONFLICT', 'checkpoint changed after this observation was prepared')
+      const phases = ['planned', 'created', 'terminal', 'removed'] as const
+      const current = phases.indexOf(resource.phase), next = phases.indexOf(checkpoint.phase)
+      const preCreateTermination = resource.phase === 'planned' && checkpoint.phase === 'terminal'
+      if (next < current || next < 0 || (next > current + 1 && !preCreateTermination)) fail('SYNC_RESOURCE_PHASE_INVALID', `${resource.phase} cannot advance to ${checkpoint.phase}`)
+      resource.phase = checkpoint.phase; resource.checkpointRef = clone(checkpoint.checkpointRef); resource.checkpoints.push({ phase: checkpoint.phase, checkpointRef: clone(checkpoint.checkpointRef) }); resource.updatedAtMs = this.now()
+      tx.exec('UPDATE sync_resources SET phase=?,checkpoint_sha=?,updated_at_ms=?,record_json=? WHERE id=? AND checkpoint_sha=?', resource.phase, resource.checkpointRef.sha256, resource.updatedAtMs, JSON.stringify(resource), resource.id, checkpoint.expectedCheckpointRef.sha256)
+      return resource
+    })
+  }
+  findResource(attemptId: string, key: string): SyncResourceRecord | null { return this.write(tx => parseRecord<SyncResourceRecord>(tx.query('SELECT record_json FROM sync_resources WHERE attempt_id=? AND resource_key=?', attemptId, key)[0])) }
+  readResource(id: string): SyncResourceRecord { return this.write(tx => this.resource(tx, id)) }
+  listRecoverableResources(): RecoverableSyncResource[] {
+    return this.write(tx => tx.query("SELECT r.record_json AS resource_json,o.record_json AS operation_json,a.record_json AS attempt_json FROM sync_resources r JOIN sync_operations o ON o.id=r.operation_id JOIN sync_attempts a ON a.id=r.attempt_id WHERE r.phase!='removed' ORDER BY r.rowid").map(row => ({ operation: JSON.parse(String(row.operation_json)) as SyncOperation, attempt: JSON.parse(String(row.attempt_json)) as SyncAttempt, resource: JSON.parse(String(row.resource_json)) as SyncResourceRecord })))
   }
   checkpoint(fence: WriteFence, ref: BlobRef): SyncAttempt {
     this.blob(ref)
@@ -389,7 +427,7 @@ export class SyncStore {
     return this.write(tx => {
       const refs = new Set<string>()
       const visit = (value: unknown): void => { if (!value || typeof value !== 'object') return; if ('sha256' in value && typeof value.sha256 === 'string') refs.add(value.sha256); for (const entry of Object.values(value)) visit(entry) }
-      for (const table of ['sync_operations', 'sync_attempts', 'sync_apply_journals', 'sync_baseline_pairs']) for (const row of tx.query(`SELECT record_json FROM ${table}`)) visit(JSON.parse(String(row.record_json)))
+      for (const table of ['sync_operations', 'sync_attempts', 'sync_apply_journals', 'sync_baseline_pairs', 'sync_resources']) for (const row of tx.query(`SELECT record_json FROM ${table}`)) visit(JSON.parse(String(row.record_json)))
       return [...refs].sort().map(sha256 => ({ sha256 }))
     })
   }

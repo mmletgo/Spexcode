@@ -35,6 +35,17 @@ CREATE TABLE sync_baseline_pairs (
  record_json TEXT NOT NULL CHECK(json_valid(record_json))
 ) STRICT;
 CREATE INDEX sync_baseline_pairs_source ON sync_baseline_pairs(repository_id,source_key,settled_at_ms);
+` }, { version: 2, sql: `
+CREATE TABLE sync_resources (
+ id TEXT PRIMARY KEY, operation_id TEXT NOT NULL REFERENCES sync_operations(id),
+ attempt_id TEXT NOT NULL REFERENCES sync_attempts(id), generation INTEGER NOT NULL,
+ resource_key TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('verification','native_session')),
+ input_id TEXT NOT NULL, candidate_digest TEXT, payload_digest TEXT NOT NULL,
+ phase TEXT NOT NULL CHECK(phase IN ('planned','created','terminal','removed')),
+ checkpoint_sha TEXT NOT NULL, created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL,
+ record_json TEXT NOT NULL CHECK(json_valid(record_json)), UNIQUE(attempt_id,resource_key)
+) STRICT;
+CREATE INDEX sync_resources_recovery ON sync_resources(operation_id,attempt_id) WHERE phase!='removed';
 ` }]
 
 /** 升级前以 SQLite online backup 保存一致性旧库；迁移本身由组件事务执行。 */

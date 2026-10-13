@@ -25,3 +25,5 @@ receipt树引用相同但manifest不同仍拒绝，journal保持未登记；相�
 协作source与delivery同物理身份发布后，readBaseline返回真实发布快照同值pair，原冻结source pair仍持久保留。
 
 时钟回拨回归：input1在1000ms结算，input2于1100ms开始、回拨至900ms后成功结算；独立handle重开后source和delivery基线都对应input2的receipt，settledAtMs仍保留900ms展示值。
+
+资源生命周期回归先复现取消后checkpoint被旧fence拒绝且恢复查询遗漏；新增typed资源路径证明取消后created/terminal/removed可持久且业务写权仍撤销。覆盖真实SQLite多handle同阶段CAS冲突、精确重放、错input/candidate/attempt拒绝、历史attempt资源查询、未创建终止仍需terminal→removed、removed精确查询防重复创建、资源证据GC pin。v1→v2保留已有active attempt和protocol消息，online backup独立恢复v1、v2 DDL中断回滚、重复启动及升级后资源重开查询。
