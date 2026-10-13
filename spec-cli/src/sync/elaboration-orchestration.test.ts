@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
-import { CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
-import { elaborate, elaborationDigest } from './elaboration.js'
+import { buildContractGraph, CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts, projectContractCoverage } from '@spexcode/spec-core/contracts'
+import { elaborate, elaborationDigest, projectElaborationFlowReadiness } from './elaboration.js'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
 import type { ElaborationInput, ElaborationReview, ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
 import type { ContractCell, GeneratedElaboration, GeneratedTables } from './elaboration-markdown.js'
@@ -48,6 +48,8 @@ test('AC-ELABORATION-01 生产编排完成解析、矩阵和独立评审，完�
   assert.equal(result.implementationReady, false)
   assert.equal(result.coverage!.matrix.length, 30)
   assert.equal(result.contracts[0].rawSource, rawSource)
+  assert.deepEqual(result.readyFlowIds, ['FLOW-EXPORT-01', 'FLOW-EXPORT-02'])
+  assert.deepEqual(result.blockedFlows, [])
   assert.deepEqual(fake.calls.map(call => call.purpose), ['elaboration_generate', 'elaboration_review'])
   assert.notEqual(fake.calls[0].requestKey, fake.calls[1].requestKey)
   assert.notEqual(result.rounds[0].traces[0].sessionId, result.rounds[0].traces[1].sessionId)
@@ -351,4 +353,21 @@ test('AC-ELABORATION-24 完整业务行生成默认保留900秒调用窗口，�
   const configured = runner(request => candidate(request, source))
   assert.equal((await elaborate({ ...input(), timeoutMs: 1200000 }, { runner: configured.run })).status, 'complete')
   assert.ok(configured.calls.every(call => call.timeoutMs === 1200000))
+})
+
+test('AC-ELABORATION-25 真实GAP候选的父流程聚合阻塞，创建和查看仍独立可推进', () => {
+  const actual = readFileSync(new URL('./elaboration-fixtures/todo-gap.spec.md', import.meta.url), 'utf8')
+  const parsed = parseContract({ nodeId: 'todo', path: '.spec/todo/spec.md', source: actual })
+  assert.deepEqual(parsed.findings, [])
+  const graph = buildContractGraph([parsed.contract!])
+  const coverage = projectContractCoverage(graph)
+  // core 的导航边不污染声明依赖；这里复现真实结果中父 FLOW 仍未直接阻塞的缺口。
+  assert.ok(coverage.items.filter(item => item.id === 'FLOW-TODO-COMPLETE' || item.id === 'FLOW-TODO-CANCEL').every(item => item.blockedBy.length === 0))
+  const projected = projectElaborationFlowReadiness(graph, coverage)
+  assert.deepEqual(projected.readyFlowIds, ['FLOW-TODO-CREATE', 'FLOW-TODO-VIEW'])
+  assert.deepEqual(projected.blockedFlows, [
+    { flowId: 'FLOW-TODO-CANCEL', blockedStepIds: ['STEP-TODO-CANCEL-DISPATCH'], gapIds: ['GAP-TODO-MUTATION-AUTH'] },
+    { flowId: 'FLOW-TODO-COMPLETE', blockedStepIds: ['STEP-TODO-COMPLETE-DISPATCH'], gapIds: ['GAP-TODO-MUTATION-AUTH'] },
+  ])
+  assert.ok(coverage.items.filter(item => ['STEP-TODO-CREATE-COMMIT', 'STEP-TODO-VIEW-DISPATCH'].includes(item.id)).every(item => item.blockedBy.length === 0))
 })

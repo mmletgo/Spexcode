@@ -5,6 +5,7 @@ hue: 175
 desc: 受限生成、结构检查、独立审查和有限修复；真实产品联合验收通过前保持待交付。
 code:
   - spec-cli/src/sync/elaboration.ts#elaborate
+  - spec-cli/src/sync/elaboration.ts#projectElaborationFlowReadiness
 related:
   - spec-cli/src/sync/elaboration-orchestration.test.ts
 ---
@@ -30,4 +31,4 @@ related:
 
 这些均是细化阶段结果；`runtimeVerification: not_run`、`implementationReady: false` 不能作为已同步证据。尚无实现锚点或测试的具体缺口保留给 P2，不制造虚构 `code:` 或运行通过结论。
 
-编排回归由 `AC-ELABORATION-01` 至 `AC-ELABORATION-24` 覆盖解析/矩阵/独立审查、状态缺支修复、语义发现修复、GAP 独立分支、冲突证据、路径/摘要/raw 边界、既有验收保护、无效结构与重复会话、待实现证据、伪造裁决、安全失败/取消、输入冻结、合法退役、验证政策演进、围栏原意、未知矩阵单元、调用/总时间预算、行 schema、固定格式渲染、幂等预算身份及字符/argv 转义、未停稳取消和证据支持的可覆盖默认超时。注入 runner 仅用于控制这些编排路径；P1 的真实 Agent 自然语言细化验收仍由完整产品链路单独验证。
+编排回归由 `AC-ELABORATION-01` 至 `AC-ELABORATION-25` 覆盖解析/矩阵/独立审查、状态缺支修复、语义发现修复、GAP 独立分支、冲突证据、路径/摘要/raw 边界、既有验收保护、无效结构与重复会话、待实现证据、伪造裁决、安全失败/取消、输入冻结、合法退役、验证政策演进、围栏原意、未知矩阵单元、调用/总时间预算、行 schema、固定格式渲染、幂等预算身份及字符/argv 转义、未停稳取消、证据支持的可覆盖默认超时及真实 GAP 候选的父流程聚合。注入 runner 仅用于控制这些编排路径；P1 的真实 Agent 自然语言细化验收仍由完整产品链路单独验证。

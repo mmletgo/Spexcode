@@ -34,6 +34,7 @@ export type ElaborationReviewFinding = { code: string; kind: 'repair' | 'missing
 export type ElaborationReview = { inputDigest: string; candidateDigest: string; verdict: 'accept' | 'repair' | 'needs_input' | 'conflict'; checkedBoundaries: ElaborationBoundary[]; findings: ElaborationReviewFinding[] }
 export type ElaborationTrace = { purpose: string; sessionId: string; threadId: string; turnId: string; resultDigest: string; inputDigest: string }
 export type ElaborationRound = { index: number; output: unknown; candidate: ElaborationCandidate | null; candidateDigest: string | null; findings: ContractFinding[]; reviewOutput: unknown; review: ElaborationReview | null; traces: ElaborationTrace[] }
+export type BlockedElaborationFlow = { flowId: string; blockedStepIds: string[]; gapIds: string[] }
 export type ElaborationResult = {
   status: 'complete' | 'needs_input' | 'conflict' | 'unsupported' | 'failed' | 'cancelled' | 'exhausted'
   inputDigest: string
@@ -44,7 +45,10 @@ export type ElaborationResult = {
   coverage: ContractCoverage | null
   gaps: Gap[]
   blockedIds: string[]
+  /** 无直接 GAP 阻塞的声明项，不代表所属流程全部可推进。 */
   readyIds: string[]
+  readyFlowIds: string[]
+  blockedFlows: BlockedElaborationFlow[]
   retiredIds: string[]
   structurePassed: boolean
   reviewPassed: boolean

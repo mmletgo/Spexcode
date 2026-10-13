@@ -7,7 +7,7 @@ import { renderElaboration } from './elaboration-markdown.js'
 import type { GeneratedElaboration } from './elaboration-markdown.js'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
 import type { ElaborationCandidate, ElaborationInput, ElaborationResult, ElaborationReview, ElaborationRound, ElaborationRunner, ElaborationTrace } from './elaboration-types.js'
-export type { Applicability, AuthorizedContractChange, ElaborationCandidate, ElaborationChange, ElaborationFact, ElaborationInput, ElaborationResult, ElaborationReview, ElaborationReviewFinding, ElaborationRound, ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult, ElaborationTarget, ElaborationTrace } from './elaboration-types.js'
+export type { Applicability, AuthorizedContractChange, BlockedElaborationFlow, ElaborationCandidate, ElaborationChange, ElaborationFact, ElaborationInput, ElaborationResult, ElaborationReview, ElaborationReviewFinding, ElaborationRound, ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult, ElaborationTarget, ElaborationTrace } from './elaboration-types.js'
 
 const DEFAULT_CALL_TIMEOUT_MS = 900_000
 export const elaborationDigest = (source: string): string => createHash('sha256').update(source, 'utf8').digest('hex')
@@ -139,6 +139,19 @@ function reviewErrors(input: ElaborationInput, review: ElaborationReview, inputD
   return findings
 }
 
+/** FLOW 可整体推进须自身和声明步骤均无 GAP；聚合阻塞不反向污染独立子项。 */
+export function projectElaborationFlowReadiness(graph: ContractGraph, coverage: ContractCoverage): Pick<ElaborationResult, 'readyFlowIds' | 'blockedFlows'> {
+  const items = new Map(coverage.items.map(item => [item.id, item]))
+  const result: Pick<ElaborationResult, 'readyFlowIds' | 'blockedFlows'> = { readyFlowIds: [], blockedFlows: [] }
+  for (const flow of [...graph.items.values()].filter(item => item.kind === 'FLOW').sort((a, b) => a.id.localeCompare(b.id))) {
+    const blockedStepIds = flow.steps.filter(id => items.get(id)!.blockedBy.length > 0)
+    const gapIds = [...new Set([flow.id, ...blockedStepIds].flatMap(id => items.get(id)!.blockedBy))].sort()
+    if (gapIds.length) result.blockedFlows.push({ flowId: flow.id, blockedStepIds, gapIds })
+    else result.readyFlowIds.push(flow.id)
+  }
+  return result
+}
+
 /** 从不可变业务输入连续生成、解析和独立审查；仅返回候选，不拥有交付树写权限。 */
 export async function elaborate(input: ElaborationInput, options: { runner?: ElaborationRunner } = {}): Promise<ElaborationResult> {
   checkInput(input)
@@ -146,7 +159,7 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
   // 在任何 await 前复制调用者输入，后续生成/评审不能混入继续编辑的字节。
   input = { ...input, ...frozen, files: frozen.files === null ? undefined : new Map(frozen.files) }
   const inputDigest = digest(frozen)
-  const result: ElaborationResult = { status: 'exhausted', inputDigest, candidateDigest: null, changes: [], contracts: [], graph: null, coverage: null, gaps: [], blockedIds: [], readyIds: [], retiredIds: [], structurePassed: false, reviewPassed: false, runtimeVerification: 'not_run', implementationReady: false, deferredImplementationFindings: [], blockedStructureFindings: [], rounds: [], failure: null }
+  const result: ElaborationResult = { status: 'exhausted', inputDigest, candidateDigest: null, changes: [], contracts: [], graph: null, coverage: null, gaps: [], blockedIds: [], readyIds: [], readyFlowIds: [], blockedFlows: [], retiredIds: [], structurePassed: false, reviewPassed: false, runtimeVerification: 'not_run', implementationReady: false, deferredImplementationFindings: [], blockedStructureFindings: [], rounds: [], failure: null }
   const maxCalls = input.maxCalls ?? 2 * ((input.maxRepairs ?? 2) + 1)
   const deadline = Date.now() + (input.totalTimeoutMs ?? (input.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS) * maxCalls)
   let calls = 0
@@ -197,6 +210,7 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
         result.gaps = checked.contracts.flatMap(contract => contract.items.filter((item): item is Gap => item.kind === 'GAP'))
         result.blockedIds = result.coverage.items.filter(item => item.blockedBy.length > 0).map(item => item.id)
         result.readyIds = []
+        result.readyFlowIds = []; result.blockedFlows = []
         result.deferredImplementationFindings = round.findings.filter(implementationFinding)
         result.blockedStructureFindings = round.findings.filter(issue => gapBlockedFinding(issue, result.coverage))
         result.structurePassed = !round.findings.some(issue => repairRequired(issue, result.coverage))
@@ -214,6 +228,7 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
           if (!round.findings.some(issue => repairRequired(issue, result.coverage))) {
             result.structurePassed = true; result.reviewPassed = true
             result.readyIds = result.coverage.items.filter(item => item.blockedBy.length === 0 && item.kind !== 'GAP').map(item => item.id)
+            Object.assign(result, projectElaborationFlowReadiness(checked.graph, result.coverage))
             result.retiredIds = input.authorizedChanges!.filter(change => change.action === 'retire' && !checked.graph.items.has(change.id)).map(change => change.id)
             result.status = result.gaps.some(gap => gap.gapKind === 'conflict') ? 'conflict' : result.gaps.length ? 'needs_input' : 'complete'
             return result
