@@ -2,9 +2,11 @@
 title: 业务契约细化与追踪
 status: pending
 hue: 175
-desc: 待实现 — 业务契约细化与追踪，证据与产品验收完成前不宣称交付。
+desc: 受限生成、结构检查、独立审查和有限修复；真实产品联合验收通过前保持待交付。
+code:
+  - spec-cli/src/sync/elaboration.ts#elaborate
 related:
-  - packages/spec-core/src/specs.ts
+  - spec-cli/src/sync/elaboration-orchestration.test.ts
 ---
 # 业务契约细化与追踪
 
@@ -14,8 +16,16 @@ related:
 
 ## expanded spec
 
-范围映射：REQ-SYNC-03、04；P1；AC-SYNC-01、02、03、08、14、25。实施依据为 `docs/spec-code-continuous-sync-plan.md`，当前绑定和真实产品证据尚待实现，不能把本节点作为已同步证明。
+范围映射：REQ-SYNC-03、04；P1；AC-SYNC-01、02、03、08、14、25。实施依据为 `docs/spec-code-continuous-sync-plan.md`，真实产品联合验收仍须独立完成，不能把本节点作为已同步证明。
 
 构建者产出 REQ→FLOW/STEP→RULE/TR→code→AC，独立审查者从原意重新走路径。每个适用状态×事件必须明确转移、拒绝、幂等或有依据的不适用。覆盖权限、边界、竞争顺序与副作用。图和覆盖投影只能派生自 [[sync-contract-schema]]；无状态能力须说明输入域、不变量和不适用依据。
 
 上层完整需求见 [[spec-sync]]；所有来源、稳定 ID、契约与验证绑定遵循 [[sync-contract-schema]]。`related:` 只提供现存接入点上下文，不计实现覆盖。适用产品验收由上层映射保留，不能用局部夹具通过替代全量结果。
+
+`elaborate` 接收冻结的目标路径、节点身份、原文字节及摘要、用户原意、已有契约和有来源的事实；生成、审查都调用受限只读结构化会话，返回完整 Markdown 候选，交付写权限仍属于协调器。候选不得越过目标范围、更换源摘要或改写用户原意；无明确变更依据时保留既有 REQ、AC、VERIFY 和验证政策。用户原意或可信裁决已决定退役或改变验证政策时，冻结 `authorizedChanges` 提供具体 ID、操作、来源及理由，程序允许该变化并由独立审查核对依据，无需再次批准。返回实际退役 ID，拒绝复用协调器提供的历史退役 ID；退役记录由后续协调交付持久化。新增裁决来源必须属于冻结事实或既有可信契约中的裁决 ID，不能由模型声明获得授权。每个业务项经来源与依赖能追到用户需求。
+
+每轮先验证 [[elaboration-output]] 的结构，再调用 [[sync-contract-schema]] 解析与引用、完整性和状态矩阵检查；独立审查使用另一会话及线程，从原意、冻结事实、全部适用性和候选重新走路径。程序或审查的具体缺口触发有限修复；重要未知事实或业务冲突须先形成准确 GAP，不能自动编造政策消除错误。GAP 仅阻塞来源、规则和验收依赖闭包，独立流程仍输出可推进项。
+
+[[elaboration-result]] 保存各轮完整候选、生成与审查原始输出、具体发现、会话追踪及摘要。业务结构与独立审查通过后，根据 GAP 返回 `complete`、`needs_input` 或 `conflict`；安全能力不足为 `unsupported`，执行失败为 `failed`，取消为 `cancelled`，未消除失败且预算耗尽为 `exhausted`。这些均是细化阶段结果；`runtimeVerification: not_run`、`implementationReady: false` 不能作为已同步证据。尚无实现锚点或测试的具体缺口保留给 P2，不制造虚构 `code:` 或运行通过结论。
+
+编排回归由 `AC-ELABORATION-01` 至 `AC-ELABORATION-14` 覆盖解析/矩阵/独立审查、状态缺支修复、语义发现修复、GAP 独立分支、冲突证据、路径/摘要/raw 边界、既有验收保护、无效结构与重复会话、待实现证据、伪造裁决、安全失败/取消、输入冻结、合法退役和验证政策演进。注入 runner 仅用于控制这些编排路径；P1 的真实 Agent 自然语言细化验收仍由完整产品链路单独验证。
