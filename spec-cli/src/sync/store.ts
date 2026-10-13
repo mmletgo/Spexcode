@@ -440,6 +440,11 @@ export class SyncStore {
     })
   }
   readOperation(id: string): SyncOperation { return this.write(tx => this.operation(tx, id)) }
+  listOperations(repositoryId: string, options: { limit?: number; sourceRoot?: string } = {}): SyncOperation[] {
+    const limit = options.limit ?? 100
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500) fail('SYNC_LIST_LIMIT', 'limit must be an integer between 1 and 500')
+    return this.write(tx => tx.query(`SELECT record_json FROM sync_operations WHERE repository_id=?${options.sourceRoot === undefined ? '' : ' AND source_root=?'} ORDER BY rowid DESC LIMIT ?`, ...[repositoryId, ...(options.sourceRoot === undefined ? [] : [options.sourceRoot]), limit]).map(row => parseRecord<SyncOperation>(row)!))
+  }
   readAttempt(id: string): SyncAttempt { return this.write(tx => this.attempt(tx, id)) }
   readJournal(id: string): ApplyJournal { return this.write(tx => this.journal(tx, id)) }
   private baseline(tx: ProtocolTransaction, source: WorktreeIdentity): BaselinePair | null { return parseRecord<BaselinePair>(tx.query('SELECT record_json FROM sync_baseline_pairs WHERE repository_id=? AND source_key=? ORDER BY rowid DESC LIMIT 1', source.repositoryId, identityKey(source))[0]) }

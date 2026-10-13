@@ -63,6 +63,23 @@ test('same stable admission and capture-time replay create one operation and pro
   } finally { f.cleanup() }
 })
 
+test('operation lists include terminal records, isolate repository/root and use insertion order with bounded limit', async () => {
+  const f = await fixture()
+  try {
+    const first = f.store.admitAndEnqueue(f.admit(source('a')))
+    f.store.requestControl(first.id, 'cancel')
+    f.tick(-100)
+    const second = f.store.admitAndEnqueue(f.admit(source('b')))
+    f.store.admitAndEnqueue(f.admit({ ...source('other'), repositoryId: 'other-repo' }))
+    assert.deepEqual(f.store.listOperations('repo').map(op => op.id), [second.id, first.id])
+    assert.equal(f.store.listOperations('repo')[1].phase, 'cancelled')
+    assert.deepEqual(f.store.listOperations('repo', { sourceRoot: first.input.source.canonicalRoot }).map(op => op.id), [first.id])
+    assert.deepEqual(f.store.listOperations('repo', { limit: 1 }).map(op => op.id), [second.id])
+    assert.deepEqual(f.store.listOperations('unknown'), [])
+    for (const limit of [0, 501, 1.5, NaN]) assert.throws(() => f.store.listOperations('repo', { limit }), /SYNC_LIST_LIMIT/)
+  } finally { f.cleanup() }
+})
+
 test('controlled requests preserve source snapshots and take part in admission identity and blob pins', async () => {
   const f = await fixture()
   try {

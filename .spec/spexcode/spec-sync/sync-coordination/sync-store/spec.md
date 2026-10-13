@@ -45,3 +45,5 @@ receipt 的实际tree与交付manifest必须精确绑定已冻结候选，错误
 planResource在原生命令前核当前fence及固定input/candidate身份，按attempt+key幂等登记资源计划；同键不同载荷拒绝。recordResourceCheckpoint核资源自己的operation/attempt/input/candidate绑定及expectedCheckpointRef CAS，即使attempt过期、superseded或operation取消仍可保存真实资源证据；任何phase更新都不恢复业务写权。阶段只能逐步planned→created→terminal→removed，相同blob/阶段幂等重放，迟到planned不能覆盖terminal/removed。开始前取消且未实际创建，也明确terminal后removed；仅removed释放资源容量。listRecoverableResources独立查询所有历史attempt的未removed资源，终态取消op与非current attempt不能被遗漏。pinnedBlobRefs包含资源plan与所有checkpoint引用。
 
 findResource(attemptId,key)按精确身份查询包括removed的资源，供同一run重入复用已持久checkpoint；不能只扫描未removed集合，否则完成后重试会再次创建真实资源。同阶段更新也需CAS，精确阶段与blob历史重放返回当前记录，不覆写较新的thread/turn或terminal结果。
+
+listOperations(repositoryId, {limit?, sourceRoot?}) 在 SQL 内按仓库及可选精确来源根筛选，并按 rowid DESC 返回最新接入操作，包含运行中及终态。默认 limit=100，只接受整数1..500；读取仍校验组件版本，不以壁钟决定顺序，也不读全库后过滤。
