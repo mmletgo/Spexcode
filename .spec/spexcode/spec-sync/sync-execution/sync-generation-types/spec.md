@@ -21,3 +21,5 @@ GenerationOptions 必须提供 ElaborationRunner 和异步 validateCandidate；�
 GenerationReview 绑定 inputId/candidateDigest、verdict、checkedIds 和全部阻断 GenerationFinding；发现包含类别、影响业务 ID、规则/代码位置、证据、反例与信息。GenerationResult 区分 reviewed、repair、needs_input、conflict、failed、cancelled、unsupported，保留候选 refs、程序门禁发现、独立 review、native traces 和失败原因。完整 candidateFiles 仅本地消费；runtimeVerification 和 delivery 明确尚未运行及尚未交付。接口不隐含持久队列、重试预算或同步完成权限。
 
 repairContext 可携带既有失败产物和具体诊断，只是修复输入，不能升格为需求、政策或通过证据。
+
+生成可携 [[sync-writeback-types]] 的独审行为证据、节点迁移及明确direction。合法外部行为必须保留，纯重构保持业务正文；保持需求的裁决才授权纠正外部行为。分析结果属于绑定执行上下文，不能追加到冻结计划改变policyDigest。

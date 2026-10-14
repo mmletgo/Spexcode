@@ -36,6 +36,7 @@ export type BaselinePair = {
   coveredScope: SyncScope
   receiptId: string
   settledAtMs: number
+  retiredIds?: string[]
 }
 export type SyncOperation = {
   id: string; ingressKey: string; payloadDigest: string; rootCauseId: string
@@ -56,7 +57,7 @@ export type SyncOperation = {
   dispatchMessageId: string; delivery: WorktreeIdentity | null; deliveryPlan: DeliveryPlan; createdAtMs: number; updatedAtMs: number
 }
 export type DeliveryPlan = { canonicalRoot: string; branch: string; baseCommit: string }
-export type ComposedInputRef = { sourceInputId: string; previousBaselinePairId: string | null; tree: string; manifestBlob: BlobRef; contentDigest: string; requestBlob?: BlobRef; authorProjectionBlob?: BlobRef }
+export type ComposedInputRef = { sourceInputId: string; previousBaselinePairId: string | null; tree: string; manifestBlob: BlobRef; contentDigest: string; requestBlob?: BlobRef; authorProjectionBlob?: BlobRef; compositionEvidenceBlob?: BlobRef }
 export type DispatchPlan = { key: string; purpose: string; requestDigest: string; sessionCreateKey: string; session: NativeSessionRef | null }
 export type NativeSessionRef = { sessionId: string; threadId: string | null; turnId: string | null }
 export type CandidateRef = { baseTree: string; sourceInputId: string; tree: string; digest: string; manifestBlob: BlobRef; actualDiffBlob: BlobRef; coveredScope: SyncScope }
@@ -85,7 +86,7 @@ export type ClaimedAttempt = { operation: SyncOperation; attempt: SyncAttempt; f
 export type RecoverableSync = { operation: SyncOperation; attempt: SyncAttempt | null; journals: ApplyJournal[] }
 
 export type VerificationLayerResult = { layer: 'V1' | 'V2' | 'V3' | 'V4'; verdict: 'pass' | 'fail' | 'unsupported'; evidenceRefs: BlobRef[] }
-export type VerificationResultBlob = { schemaVersion: 1; coveredScope: SyncScope; inputId: string; candidateDigest: string; policyDigest: string; readSetDigest: string; environmentDigest: string; contextDigest: string; layers: VerificationLayerResult[] }
+export type VerificationResultBlob = { schemaVersion: 1; coveredScope: SyncScope; inputId: string; candidateDigest: string; policyDigest: string; readSetDigest: string; environmentDigest: string; contextDigest: string; layers: VerificationLayerResult[]; retiredIds?: string[] }
 
 /** 原生资源状态与业务写入授权分离；removed 才表示容量可释放。 */
 export type SyncResourcePhase = 'planned' | 'created' | 'terminal' | 'removed'

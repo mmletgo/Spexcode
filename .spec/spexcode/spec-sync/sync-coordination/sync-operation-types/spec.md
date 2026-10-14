@@ -43,3 +43,5 @@ ComposedInputRef 可携 authorProjectionBlob，记录 [[sync-author-input]] 对�
 operation及admission可带retryOf，明确关联用户主动重开失败/预算耗尽或未曾交付的取消操作。它是新运行授权来源，参与payload身份，不能更换旧冻结input/request/policy/origin/source；自动事件不带此字段，预算不重置。
 
 SyncIngressReceipt 只保存原接入的精确 payload 摘要、operation 引用、requestBlob 与预算/交付计划/旧基线小引用，用于 alias 重放审计，不替代唯一 operation 事实。
+
+共同BaselinePair和VerificationResultBlob可携retiredIds，旧JSON缺省为空。ComposedInputRef可携compositionEvidenceBlob保留三方文本重叠对象，重叠不是业务冲突结论；独立行为审查之后才形成完整交付候选。

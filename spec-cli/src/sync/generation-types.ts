@@ -1,3 +1,4 @@
+import type { CodeBehaviorEvidence, ContractNodeChange, GenerationDirection } from './writeback-types.js'
 import type { Acceptance, Contract, ContractFinding } from '@spexcode/spec-core/contracts'
 import type { ElaborationFact, ElaborationRunner, ElaborationSessionRequest, ElaborationTrace } from './elaboration-types.js'
 import type { CandidateRef, ComposedInputRef, InputSnapshot, SyncScope } from './operation-types.js'
@@ -21,6 +22,9 @@ export type GenerationInput = {
   existingAcceptance: readonly Acceptance[]
   /** 已结算失败产物和诊断；修复上下文不是新的业务事实或通过证据。 */
   repairContext?: { previousOutput: unknown; diagnostics: readonly { code: string; message: string }[] }
+  analysis?: CodeBehaviorEvidence
+  direction?: GenerationDirection
+  nodeChanges?: readonly ContractNodeChange[]
   allowedScope: SyncScope
   policy: { version: string; digest: string }
   timeoutMs: number
