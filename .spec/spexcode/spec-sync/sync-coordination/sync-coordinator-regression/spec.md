@@ -43,3 +43,5 @@ P3真实code来源沿analyzing独立会话、同attempt checkpoint与冻结polic
 原raw及TR明确作者编辑场景复用新行为分析/独审并保持真实Docker、原oracle、源码/index和未影响作者内容的完整断言。新裁决独审仍发现同历史ID互斥时不得生成或写journal。
 
 公开buildSyncApplicationPlan无手工退役授权完成新叶→实际receipt→git ff→治理目录搬迁→新叶ID公共入口→实际Docker/receipt→git ff→删能力/治理叶→逐项退役→旧保护oracle及真实负向AC Docker→新receipt/退役累计。未暂存搬迁保稳定业务ID，旧位置删除与新位置创建均进入可信范围；产品交付及重入保source/index、不新增call/commit。receipt后fixture作者显式接受交付，先将未跟踪草稿移到外部保留目录并核对原字节，再以普通ff接受候选，不把该作者动作冒称自动写源。部分正文A实际Docker交付后，B原immutable作者patch同行真重叠；受审整合的精确raw进入P1及实际候选，独审接受后经真实Docker、普通hooks结算receipt。receipt实际tree与deliverySnapshot保A/B及全部原业务义务，source/index保留，重入不新增call/commit。
+
+P3 oracle 绑定负例从真实 Git/SQLite 受控 decision 进入生成独审，错误当前 decision、非 mandatory test、未选 RULE、规则未改或 keep 选择都必须 review_invalid；原版同输入/finding 泛 missing_input 的 fail→pass 成对保存。原 source/index/预算/输入身份与零 receipt 保持。

@@ -12,6 +12,7 @@ import { elaborate } from './elaboration.js'
 import type { ElaborationResult, ElaborationRunner, ElaborationSessionResult, ElaborationRepairSeed } from './elaboration-types.js'
 import { claimFileMutex } from './file-mutex.js'
 import { checkGenerationContractIntent, readFrozenContracts } from './frozen-contracts.js'
+import { decisionAuthorizationErrors, sameContractBusinessMeaning } from './contract-evolution.js'
 import type { FrozenContracts } from './frozen-contracts.js'
 import { runGeneration } from './generation.js'
 import type { GenerationResult } from './generation-types.js'
@@ -438,7 +439,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         if (attempt.candidate) fail('candidate_stage_missing', '已有冻结候选没有完整独立生成证据，不能覆盖或重新生成')
         store.startGeneration(fence, { readyScope: ready, blockedScope: blocked, blockedReason })
         const allowedGap = new Set([...elaboration.blockedStructureFindings, ...elaboration.rounds.flatMap(round => round.findings.filter(issue => ['unresolved-gap', 'unresolved-conflict'].includes(issue.code) && issue.itemId && accepted.graph.items.get(issue.itemId)?.kind === 'GAP'))].map(findingKey))
-        const result = await runGeneration({ root: operation.input.source.canonicalRoot, requestKey: `sync:${attempt.id}:generation`, snapshot: operation.input, composed: view.composed, manifest: view.manifest, files: view.files, contracts: accepted.contracts, elaboratedSpecs: elaboration.changes.map(change => ({ path: change.path, source: change.source })), readyIds: [...ready.contractIds, ...ready.flowIds], blockedIds: [...blocked.contractIds, ...blocked.flowIds], retiredIds, intent: { nodeId: options.plan.intentNodeId, rawSource: (accepted.nodes.find(node => node.id === options.plan.intentNodeId) ?? retirementBefore.nodes.find(node => node.id === options.plan.intentNodeId))!.rawSource! }, facts: behaviorFacts, analysis, nodeChanges: elaboration.nodeChanges ?? nodeChanges, direction: decision && decision.decision.choice !== 'adopt_behavior' ? 'repair_to_intent' : preserveBusiness ? 'preserve_business' : analysis?.analysis.authorChanges?.length && !decision ? 'repair_to_intent' : analysis ? 'preserve_observed_behavior' : undefined, existingAcceptance: retirementBefore.contracts.flatMap(contract => contract.items.filter(item => item.kind === 'AC')), repairContext, allowedScope: ready, policy: { version: options.plan.version, digest: operation.policyDigest }, timeoutMs: callTimeoutMs, signal, model: 'gpt-6.1-sol', effort: 'high' }, { runner, validateCandidate: async candidate => {
+        const result = await runGeneration({ root: operation.input.source.canonicalRoot, requestKey: `sync:${attempt.id}:generation`, snapshot: operation.input, composed: view.composed, manifest: view.manifest, files: view.files, contracts: accepted.contracts, elaboratedSpecs: elaboration.changes.map(change => ({ path: change.path, source: change.source })), readyIds: [...ready.contractIds, ...ready.flowIds], blockedIds: [...blocked.contractIds, ...blocked.flowIds], retiredIds, intent: { nodeId: options.plan.intentNodeId, rawSource: (accepted.nodes.find(node => node.id === options.plan.intentNodeId) ?? retirementBefore.nodes.find(node => node.id === options.plan.intentNodeId))!.rawSource! }, facts: behaviorFacts, analysis, nodeChanges: elaboration.nodeChanges ?? nodeChanges, direction: decision && decision.decision.choice !== 'adopt_behavior' ? 'repair_to_intent' : preserveBusiness ? 'preserve_business' : analysis?.analysis.authorChanges?.length && !decision ? 'repair_to_intent' : analysis ? 'preserve_observed_behavior' : undefined, existingAcceptance: retirementBefore.contracts.flatMap(contract => contract.items.filter(item => item.kind === 'AC')), mandatoryTests: options.plan.mandatoryTests, verifications: options.plan.verifications.map(item => item.definition), repairContext, allowedScope: ready, policy: { version: options.plan.version, digest: operation.policyDigest }, timeoutMs: callTimeoutMs, signal, model: 'gpt-6.1-sol', effort: 'high' }, { runner, validateCandidate: async candidate => {
           const frozen = await candidateContext(operation, candidate, view)
           const findings = frozen.findings.filter(issue => !(allowedGap.has(findingKey(issue)) && (!issue.itemId || blocked.contractIds.includes(issue.itemId) || blocked.flowIds.includes(issue.itemId))))
           for (const gap of [...accepted.graph.items.values()].filter(item => item.kind === 'GAP')) {
@@ -455,8 +456,25 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       }
       if (generated.status !== 'reviewed' || !generated.candidate || !generated.candidateValidated || !generated.reviewPassed) {
         if (generated.failure?.code === 'SYNC_BUDGET_EXHAUSTED') throw new SyncStoreError('SYNC_BUDGET_EXHAUSTED', generated.failure.message)
-        const kind: SyncFailure['kind'] = generated.status === 'needs_input' ? 'missing_input' : generated.status === 'conflict' ? 'conflict' : generated.status === 'unsupported' || ['input_invalid', 'context_budget'].includes(generated.failure?.code ?? '') ? 'unsupported' : 'repairable'
-        const issue = failure(generated.failure?.code ?? 'generation_failed', generated.failure?.message ?? '实现候选或独立评审未通过', kind, [writeEvidence(operation.input.source.commonDir, generated)])
+        const oracleFindings = generated.review?.findings.filter(finding => finding.ruleLocation.startsWith('oracle-policy:')) ?? []
+        const oracleErrors: string[] = [], oracleConflicts: unknown[] = []
+        for (const finding of oracleFindings) {
+          const source = finding.ruleLocation.slice('oracle-policy:'.length)
+          const authorities = analysis?.analysis.decisionAuthorities?.filter(authority => authority.requestRef.sha256 === operation.requestBlob?.sha256 && source === `decision:${authority.stableDecisionId}`) ?? []
+          const oracles = options.plan.mandatoryTests.filter(test => finding.codeLocation === `${test.testPath}#${test.testId}`)
+          if (!decision || generated.review?.verdict !== 'needs_input' || finding.kind !== 'missing_fact' || authorities.length !== 1 || authorities[0].decision.choice === 'keep_intent' || oracles.length !== 1) { oracleErrors.push('oracle发现没有当前adopt/new_rule及精确不可变mandatory绑定'); continue }
+          const authority = authorities[0], oracle = oracles[0], verification = options.plan.verifications.find(item => item.definition.id === oracle.verificationId)!
+          oracleErrors.push(...decisionAuthorizationErrors(source, finding.affectedIds, retirementBefore, { analysis, decisionAuthorities: [authority] }))
+          const ruleIds = finding.affectedIds.filter(id => {
+            const before = retirementBefore.graph.items.get(id), after = accepted.graph.items.get(id)
+            return before && after && ['RULE', 'TR'].includes(before.kind) && before.kind === after.kind && !sameContractBusinessMeaning(before, after)
+          })
+          if (!ruleIds.length) oracleErrors.push('oracle发现没有真实变更的适用RULE/TR')
+          oracleConflicts.push({ decisionRef: authority.requestRef, stableDecisionId: authority.stableDecisionId, decision: authority.decision, ruleIds, verification: verification.definition, testPath: oracle.testPath, testId: oracle.testId, oracleDigest: contentHash(view.files.get(oracle.testPath)!), evidence: finding.evidence, counterexample: finding.counterexample, message: finding.message })
+        }
+        const oracleFailure = oracleErrors.length ? { code: 'review_invalid', message: JSON.stringify({ errors: oracleErrors, review: generated.review }) } : oracleConflicts.length ? { code: 'oracle_policy_conflict', message: JSON.stringify({ requiredAction: '由可信owner发布与所选新意图相容的oracle版本；当前oracle/固定命令仍有效且未通过，不得改回旧意图或自免检', conflicts: oracleConflicts, findings: generated.review!.findings }) } : null
+        const kind: SyncFailure['kind'] = oracleErrors.length ? 'repairable' : generated.status === 'needs_input' ? 'missing_input' : generated.status === 'conflict' ? 'conflict' : generated.status === 'unsupported' || ['input_invalid', 'context_budget'].includes(generated.failure?.code ?? '') ? 'unsupported' : 'repairable'
+        const issue = failure(oracleFailure?.code ?? generated.failure?.code ?? 'generation_failed', oracleFailure?.message ?? generated.failure?.message ?? '实现候选或独立评审未通过', kind, [writeEvidence(operation.input.source.commonDir, generated)])
         if (signal.aborted || generated.status === 'cancelled') fail('cancelled', issue.message, issue.evidenceRefs)
         if (kind === 'repairable' && generated.review?.verdict === 'repair' && generated.candidate && !nodeChanges.length) {
           const omissions = generated.review.findings.filter(finding => finding.kind === 'repair' && finding.ruleLocation.startsWith('contract:') && accepted.nodes.some(node => finding.ruleLocation.slice('contract:'.length).split('#')[0] === node.path))

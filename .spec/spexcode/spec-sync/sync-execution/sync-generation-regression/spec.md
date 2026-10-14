@@ -21,3 +21,5 @@ code:
 针对命令：根目录 `npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/sync/generation.test.ts`；`npx eslint spec-cli/src/sync/generation*.ts`；`npm run typecheck`。独立依赖安装后先正常 build 提供 workspace 类型。
 
 模型读集合回归覆盖：实际冻结树里的 .env 不进入生成或审查、完整manifest仍绑定该不变条目；读取真实 src/auth 业务源码不被名称误屏蔽；省略未改 AC 断言文件或修改未读取既有文件时硬拒绝，不能以精简上下文缩减验证。
+
+oracle 定向回归核 mandatory tuple、固定 verification definition 与完整旧断言进入同一生成/独审输入；调用者后改 testId/command 不改变冻结内容和摘要。未绑定当前真实裁决的 reserved missing_fact/needs_input finding 必须 review_invalid，不自免检。

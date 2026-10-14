@@ -24,7 +24,7 @@ async function input(t: test.TestContext): Promise<GenerationInput> {
   const entries = readTree(snapshot.source.commonDir, snapshot.immutableTree)
   const files = new Map(entries.map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString()]))
   const contract = parseContract({ nodeId: 'export-contract', path: contractPath, source: files.get(contractPath)! }).contract!
-  return { root, requestKey: 'operation-1:attempt-1', snapshot, manifest: { version: 1, entries }, files, contracts: [contract], elaboratedSpecs: [{ path: contractPath, source: files.get(contractPath)! }], readyIds: ['REQ-EXPORT-01', 'AC-EXPORT-03'], blockedIds: [], intent: { nodeId: contract.nodeId, rawSource: contract.rawSource }, facts: [{ source: 'rule:RULE-EXPORT-01', text: '保留已有下载权限规则' }], existingAcceptance: contract.items.filter((item): item is Acceptance => item.kind === 'AC'), allowedScope: { paths: ['src', 'tests', '.spec'], contractIds: ['REQ-EXPORT-01', 'AC-EXPORT-03'], flowIds: [] }, policy: { version: 'trusted-v1', digest: 'policy-digest' }, timeoutMs: 30_000, model: 'gpt-6.1-sol', effort: 'high' }
+  return { root, requestKey: 'operation-1:attempt-1', snapshot, manifest: { version: 1, entries }, files, contracts: [contract], elaboratedSpecs: [{ path: contractPath, source: files.get(contractPath)! }], readyIds: ['REQ-EXPORT-01', 'AC-EXPORT-03'], blockedIds: [], intent: { nodeId: contract.nodeId, rawSource: contract.rawSource }, facts: [{ source: 'rule:RULE-EXPORT-01', text: '保留已有下载权限规则' }], existingAcceptance: contract.items.filter((item): item is Acceptance => item.kind === 'AC'), mandatoryTests: [], verifications: contract.items.filter(item => item.kind === 'VERIFY').map(item => ({ id: item.id, command: item.command, cwd: item.cwd, timeoutMs: item.timeoutMs })), allowedScope: { paths: ['src', 'tests', '.spec'], contractIds: ['REQ-EXPORT-01', 'AC-EXPORT-03'], flowIds: [] }, policy: { version: 'trusted-v1', digest: 'policy-digest' }, timeoutMs: 30_000, model: 'gpt-6.1-sol', effort: 'high' }
 }
 function changes(input: GenerationInput): unknown {
   const entry = input.manifest.entries.find(entry => entry.path === 'src/export.js')!
@@ -270,4 +270,33 @@ test('不能省略契约测试断言，不能改没读取的既有文件', async
   const blind = runner(updated, () => ({ version: 'sync-files-v1', changes: [{ path: entry.path, beforeDigest: entry.digest, beforeMode: entry.mode, mode: null, content: 'blind overwrite\n' }] }))
   const rejected = await runGeneration(updated, { runner: blind.run, validateCandidate: async () => assert.fail('盲改不能进入硬门禁') })
   assert.equal(rejected.status, 'repair'); assert.match(rejected.failure!.message, /未完整读取/); assert.equal(blind.calls.length, 1)
+})
+
+
+test('mandatory oracle全文及冻结定义进入同一输入，调用者后改登记不混入独审', async t => {
+  const source = await input(t)
+  source.mandatoryTests = [{ verificationId: source.verifications[0].id, testPath: 'tests/export.test.mjs', testId: 'AC-EXPORT-03' }]
+  const original = structuredClone({ mandatoryTests: source.mandatoryTests, verifications: source.verifications })
+  const native = runner(source, request => {
+    const context = JSON.parse(request.prompt.split('冻结完整输入:\n')[1]) as GenerationInput
+    assert.deepEqual(context.mandatoryTests, original.mandatoryTests); assert.deepEqual(context.verifications, original.verifications)
+    source.mandatoryTests[0].testId = 'MUTATED-ORACLE'
+    source.verifications[0].command.push('--skip')
+    return changes(source)
+  }, request => {
+    const context = JSON.parse(request.prompt.split('冻结原意和基线完整输入:\n')[1].split('\n实际候选身份')[0]) as GenerationInput
+    assert.deepEqual(context.mandatoryTests, original.mandatoryTests); assert.deepEqual(context.verifications, original.verifications)
+    assert.ok(request.prompt.includes(JSON.stringify(source.files.get('tests/export.test.mjs')!)))
+    return review(request)
+  })
+  const result = await runGeneration(source, { runner: native.run, validateCandidate: valid })
+  assert.equal(result.status, 'reviewed'); assert.equal(native.calls[0].inputDigest, native.calls[1].inputDigest)
+})
+
+test('未绑定当前裁决的reserved oracle finding不能仅靠needs_input逃过review gate', async t => {
+  const source = await input(t)
+  source.mandatoryTests = [{ verificationId: source.verifications[0].id, testPath: 'tests/export.test.mjs', testId: 'AC-EXPORT-03' }]
+  const native = runner(source, undefined, request => ({ ...review(request), verdict: 'needs_input', findings: [{ kind: 'missing_fact', affectedIds: ['AC-EXPORT-03'], ruleLocation: 'oracle-policy:decision:unbound', codeLocation: 'tests/export.test.mjs#AC-EXPORT-03', evidence: '没有真实当前adopt/new_rule授权的声明', counterexample: '任意测试失败不能当作政策互斥', message: '不能授予未知事实分类' }] }))
+  const result = await runGeneration(source, { runner: native.run, validateCandidate: valid })
+  assert.equal(result.failure?.code, 'review_invalid'); assert.equal(result.reviewPassed, false); assert.equal(result.review, null)
 })

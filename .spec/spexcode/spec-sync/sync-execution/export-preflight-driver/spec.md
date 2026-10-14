@@ -26,3 +26,5 @@ driver 将白名单 UTF-8 夹具复制到独立真实 Git 仓库，capture 原�
 输入、输出、派发、原生身份、候选 manifest/actual diff、Docker 政策/检查点/结果保存指定用户可视化目录的 p2-export-preflight 独立 run 子目录；不复制认证、runtime 或 home。结束复核源 snapshot/index 未改；不 apply、commit 候选、发布 refs 到用户分支、结算 receipt 或标 synced。仅 library-preflight:passed 可代表这一限定预验，最终完整 P2 仍需真实产品协调与交付入口验收。
 
 运行：`npx tsx spec-cli/test/p2-export-preflight.ts <用户可视化目录>/p2-export-preflight`；针对类型：`npm run typecheck`；lint：`npx eslint spec-cli/test/p2-export-preflight*.ts spec-cli/test/fixtures/spec-sync/export-implementation-repo/trusted-oracle/*.mjs`。
+
+生成输入显式传现有 ORACLE_IDS 的 mandatory tuples 与同一 VERIFICATION 定义，参与冻结摘要和完整正文门禁；不新增登记、默认配置或放宽生成写范围。

@@ -39,3 +39,5 @@ validateCandidate 是必需可信硬门禁，按实际候选回调；没有回�
 已审三方analysis及明确direction纳入同一冻结输入和独审上下文。合法外部行为及resolutions保持，纯重构业务正文稳定；明确裁决或真实作者raw/规则变更时依对应新原意修实现，其他合法外部行为保持。retiredIds明确负向测试义务，旧binding标识/固定命令仍执行。发现普通契约遗漏通过具体contract:path#id位置回细化，不自行新增或改已接受业务项。持久Spec不写暂态V3尚未运行/已通过，运行状态只在receipt及证据记录。
 
 采用行为裁决只保所选外部行为，不阻独立作者目标。
+
+外部不可改 mandatoryTests 和可信 verifications 复用冻结计划中的现有类型，登记定义与 oracle 完整正文同入生成/独审输入摘要及 2MiB 门禁。独审仅在当前 adopt_behavior/new_rule 已批准规则与具体不可改旧 oracle 断言互斥时用 needs_input/missing_fact，ruleLocation 为 oracle-policy:decision:<stableDecisionId>，codeLocation 为 <testPath>#<testId>，具体受影响 RULE/TR、AC、旧断言、新规则与同一反例完整保留。程序核唯一当前 requestRef/decision、精确 mandatory tuple 及 verification 登记；错误绑定为 review_invalid。此发现只诊断缺失可信输入，不授予修改 oracle、跳过命令或改回旧意图的权利；普通实现错误继续 repair，managed 业务测试沿现有契约授权演化。

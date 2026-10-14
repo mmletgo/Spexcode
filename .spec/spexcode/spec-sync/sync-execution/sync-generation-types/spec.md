@@ -25,3 +25,5 @@ repairContext 可携带既有失败产物和具体诊断，只是修复输入，
 生成可携 [[sync-writeback-types]] 的独审行为证据、节点迁移及明确direction。合法外部行为必须保留，纯重构保持业务正文；保持需求的裁决才授权纠正外部行为。分析结果属于绑定执行上下文，不能追加到冻结计划改变policyDigest。
 
 retiredIds可由已接受细化携入生成；已明确退役的验收身份保留为负向验证义务，独审必须核对应实际代码移除及真实反例测试。没有active AC不能靠空集合自动通过，退役仍须执行固定登记命令及旧验收绑定的测试标识。
+
+GenerationInput 必填 mandatoryTests 与 verifications 直接复用 SyncCoordinatorPlan 的可信 tuple/definition 类型；两者纳入同一冻结输入，不另建授权配置。reserved oracle-policy:decision:<stableDecisionId> 复用既有 missing_fact finding 与 needs_input verdict，只传具体政策互斥诊断，不增加写入权或新的审查阶段。

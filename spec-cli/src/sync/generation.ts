@@ -43,6 +43,7 @@ function frozenEntries(input: GenerationInput): TreeEntry[] {
   const actualFiles = textFiles(input.snapshot.source.commonDir, entries)
   if ([...input.files].some(([path, source]) => isHostPrivatePath(path) || actualFiles.get(path) !== source)) throw new Error('模型读集合必须逐字匹配冻结 UTF-8 普通文件，且不能包含宿主凭据或运行依赖')
   const required = new Set(input.elaboratedSpecs.map(spec => spec.path))
+  for (const oracle of input.mandatoryTests) required.add(oracle.testPath)
   for (const contract of input.contracts) {
     required.add(contract.path)
     for (const anchor of [...contract.code, ...contract.related]) required.add(anchor.split('#')[0])
@@ -65,6 +66,12 @@ function reviewError(input: GenerationInput, review: GenerationReview, candidate
   const kind = { repair: 'repair', needs_input: 'missing_fact', conflict: 'conflict' } as const
   const expectedKind = review.verdict === 'accept' ? null : kind[review.verdict]
   if (expectedKind && !review.findings.some(finding => finding.kind === expectedKind)) return '拒绝结论必须有对应类型、位置、证据和反例的发现'
+  for (const finding of review.findings.filter(finding => finding.ruleLocation.startsWith('oracle-policy:'))) {
+    const decision = input.analysis?.analysis.decision?.requestRef
+    const authorities = input.analysis?.analysis.decisionAuthorities?.filter(authority => authority.requestRef.sha256 === decision?.sha256 && finding.ruleLocation === `oracle-policy:decision:${authority.stableDecisionId}`) ?? []
+    const oracles = input.mandatoryTests.filter(oracle => finding.codeLocation === `${oracle.testPath}#${oracle.testId}`)
+    if (review.verdict !== 'needs_input' || finding.kind !== 'missing_fact' || authorities.length !== 1 || authorities[0].decision.choice === 'keep_intent' || oracles.length !== 1 || input.verifications.filter(definition => definition.id === oracles[0].verificationId).length !== 1) return 'oracle政策发现必须精确绑定当前adopt/new_rule裁决、唯一mandatory test及可信verification定义，并仅声明needs_input/missing_fact'
+  }
   return null
 }
 
@@ -130,7 +137,7 @@ export async function runGeneration(supplied: GenerationInput, options: Generati
     const reviewManifest = candidateEntries.filter(entry => reviewPaths.has(entry.path))
     if (Buffer.byteLength(context) + Buffer.byteLength(JSON.stringify(reviewFiles)) > 2 * 1024 * 1024) throw Object.assign(new Error('完整候选审查读集合超过2MiB预算，不能截断断言或源码后继续'), { code: 'context_budget' })
     stage = 'review_failed'
-    const reviewOutput = await dispatch('code_review', `你是独立实现语义审查者。重新从冻结原始 raw、可信事实、已细化契约、elaboratedSpecs 的待交付详细正文与既有验收重走主流程/状态、失败/边界/取消/重试/重复与必要竞争顺序。检查下面影响闭包内实际候选的完整 Spec、源码和真实测试断言，以及全部新增/修改文件；测试数、builder 总结、Agent 完成声明都不是证据。若发现已有原意明确支持的普通业务边界在已接受Spec中遗漏，返回repair并将ruleLocation写为contract:<仓库Spec路径>#<关联既有ID>，协调器回细化保留原完整义务后补齐；重大政策未知仍missing_fact，不得把自身错误当新需求。发现缺少必要依赖上下文时返回repair说明缺失文件，不能猜测依赖行为或接受不完整闭包。独立核对analysis三方字节对应的合法外部行为及resolutions没有被恢复成旧行为，refactor没有业务正文漂移；运行状态不得写入业务正文。核查遗漏分支、权限/副作用/次序变化、raw/REQ/AC/VERIFY弱化、空测试/假断言/跳过/自免检。checkedIds 独立列实际检查的候选项并覆盖全部预定 readyIds，不能列不存在项；未知事实和冲突保留具体位置、影响ID、实际证据与可观察反例。accept 必须无发现；发现均阻断。只返回绑定 inputId/candidateDigest 的 schema JSON，不修改文件或执行候选。\n冻结原意和基线完整输入:\n${context}\n实际候选身份与 manifest:\n${JSON.stringify({ inputId: input.snapshot.id, candidate: result.candidate, manifest: { version: 1, entries: reviewManifest }, completeManifestDigest: contentHash(JSON.stringify({ version: 1, entries: candidateEntries })) })}\n实际完整候选 Spec/源码/测试（包含闭包未修改文件和全部 assertions）:\n${JSON.stringify(reviewFiles)}`, GENERATION_REVIEW_SCHEMA)
+    const reviewOutput = await dispatch('code_review', `你是独立实现语义审查者。重新从冻结原始 raw、可信事实、已细化契约、elaboratedSpecs 的待交付详细正文与既有验收重走主流程/状态、失败/边界/取消/重试/重复与必要竞争顺序。检查下面影响闭包内实际候选的完整 Spec、源码和真实测试断言，以及全部新增/修改文件；测试数、builder 总结、Agent 完成声明都不是证据。若发现已有原意明确支持的普通业务边界在已接受Spec中遗漏，返回repair并将ruleLocation写为contract:<仓库Spec路径>#<关联既有ID>，协调器回细化保留原完整义务后补齐；重大政策未知仍missing_fact，不得把自身错误当新需求。mandatoryTests及verifications是冻结的外部不可改oracle与固定命令，不是managed业务测试；managed AC/test按已批准授权正常演化。若当前adopt/new_rule已批准规则与具体旧oracle断言互斥，且任何符合新规则的实现都会失败，则needs_input/missing_fact，ruleLocation严格为oracle-policy:decision:<当前stableDecisionId>，codeLocation严格为<mandatory testPath>#<testId>，affectedIds列所选真实变更RULE/TR与对应AC，evidence/counterexample逐项引用旧完整断言、新已批准规则及同一矛盾输入，要求可信owner更新oracle版本；不能改回旧意图、改oracle或跳过命令。普通代码缺陷、未选/未改规则及任意V3 nonzero不能冒充oracle政策互斥，仍repair。发现缺少必要依赖上下文时返回repair说明缺失文件，不能猜测依赖行为或接受不完整闭包。独立核对analysis三方字节对应的合法外部行为及resolutions没有被恢复成旧行为，refactor没有业务正文漂移；运行状态不得写入业务正文。核查遗漏分支、权限/副作用/次序变化、raw/REQ/AC/VERIFY弱化、空测试/假断言/跳过/自免检。checkedIds 独立列实际检查的候选项并覆盖全部预定 readyIds，不能列不存在项；未知事实和冲突保留具体位置、影响ID、实际证据与可观察反例。accept 必须无发现；发现均阻断。只返回绑定 inputId/candidateDigest 的 schema JSON，不修改文件或执行候选。\n冻结原意和基线完整输入:\n${context}\n实际候选身份与 manifest:\n${JSON.stringify({ inputId: input.snapshot.id, candidate: result.candidate, manifest: { version: 1, entries: reviewManifest }, completeManifestDigest: contentHash(JSON.stringify({ version: 1, entries: candidateEntries })) })}\n实际完整候选 Spec/源码/测试（包含闭包未修改文件和全部 assertions）:\n${JSON.stringify(reviewFiles)}`, GENERATION_REVIEW_SCHEMA)
     const generate = result.traces[0], reviewTrace = result.traces[1]
     if (generate.sessionId === reviewTrace.sessionId || generate.threadId === reviewTrace.threadId) throw Object.assign(new Error('评审必须使用与构建者不同的会话及线程'), { code: 'review_not_independent' })
     if (!validateReview(reviewOutput)) throw Object.assign(new Error(`评审 schema 不合法: ${JSON.stringify(validateReview.errors)}`), { code: 'review_schema' })

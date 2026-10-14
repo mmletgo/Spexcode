@@ -470,7 +470,7 @@ test('AC-APPLICATION-21 recover具体协调失败返回可见409，资源与原�
   } finally { f.cleanup() }
 })
 
-async function exportApplicationFixture(t: test.TestContext, choice?: 'keep_intent' | 'adopt_behavior' | 'new_rule') {
+async function exportApplicationFixture(t: test.TestContext, choice?: 'keep_intent' | 'adopt_behavior' | 'new_rule', oraclePolicy: { legacyFilter: boolean; reviewConflict?: boolean } = { legacyFilter: false }) {
   const temp = mkdtempSync(join(tmpdir(), 'sync-application-delivery-')), root = join(temp, 'source')
   cpSync(new URL('../../test/fixtures/spec-sync/export-repo/', import.meta.url), root, { recursive: true })
   renameSync(join(root, '.spec/export'), join(root, '.spec/project'))
@@ -478,6 +478,11 @@ async function exportApplicationFixture(t: test.TestContext, choice?: 'keep_inte
   const contract = parseContract({ nodeId: 'export-contract', path, source: original }).contract!
   const verify = contract.items.find(item => item.kind === 'VERIFY')!; assert.equal(verify.kind, 'VERIFY')
   const config: SyncSettings = { ...settings, sourcePaths: ['src'], testPaths: ['generated-tests'], readPaths: ['tests', 'package.json'], budget: { maxAttempts: 3, maxCalls: 16, maxRepairs: 2, timeoutMs: 300000 }, facts: [{ source: 'decision:EXPORT-POLICY', text: original }], mandatoryTests: [{ verificationId: verify.id, testPath: 'tests/export.test.mjs', testId: 'AC-EXPORT-03' }], verifications: [{ definition: { id: verify.id, command: verify.command, cwd: verify.cwd, timeoutMs: verify.timeoutMs }, environment: { ...settings.verifications[0].environment, image: 'node@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392' } }] }
+  if (oraclePolicy.legacyFilter) {
+    const oraclePath = join(root, 'tests/export.test.mjs')
+    writeFileSync(oraclePath, `${readFileSync(oraclePath, 'utf8')}\ntest('ORACLE-FILTER-LEGACY', () => { const service = new ExportService(); for (const length of [9, 129]) assert.equal(service.submit('owner', 'legacy-' + length, 'x'.repeat(length)).filter.length, length); });\n`)
+    config.mandatoryTests = [...config.mandatoryTests, { verificationId: verify.id, testPath: 'tests/export.test.mjs', testId: 'ORACLE-FILTER-LEGACY' }]
+  }
   if (choice) config.verifications.push({ ...config.verifications[0], definition: { id: 'VERIFY-DECISION-01', command: ['node', '--test', 'generated-tests/decision.test.mjs'], cwd: '.', timeoutMs: 10000 } })
   writeFileSync(join(root, '.spec/spexcode.json'), JSON.stringify({ mainBranch: 'main', harnesses: [], sync: config }))
   const git = (args: string[]): string => execFileSync('/usr/bin/git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }).trim()
@@ -536,7 +541,9 @@ async function exportApplicationFixture(t: test.TestContext, choice?: 'keep_inte
         output = { version: 'sync-files-v1', changes: [...frozen.elaboratedSpecs.map(spec => change(spec.path, spec.source)), change('src/export.js', choice && decisionFact ? limitCode(limit) : `${new Map(frozen.files).get('src/export.js')}\n// application verified delivery\n`), ...(choice && decisionFact ? [change('generated-tests/decision.test.mjs', `import assert from 'node:assert/strict'; import test from 'node:test'; import { ExportService } from '../src/export.js'; test('AC-DECISION-01', () => { const service = new ExportService(); const limit = ${limit}; for (const length of [8,9,128,129]) { const submit = () => service.submit('owner', 'length-' + length, 'x'.repeat(length)); if (limit !== null && length > limit) assert.throws(submit, /invalid-request/); else assert.equal(submit().filter.length, length); } assert.throws(() => service.submit('owner', 'empty', ''), /invalid-request/); assert.throws(() => service.submit('', 'denied', 'active'), /forbidden/); const job = service.submit('owner', 'same', 'active'); assert.deepEqual(service.submit('owner', 'same', 'active'), job); assert.throws(() => service.submit('owner', 'same', 'all'), /idempotency-conflict/); service.dispatch(job.id, 'START', { attempt: 1 }); service.dispatch(job.id, 'COMPLETE', { attempt: 1, result: 'file.csv' }); assert.throws(() => service.dispatch(job.id, 'DOWNLOAD', { actor: 'other' }), /forbidden/); assert.equal(service.dispatch(job.id, 'DOWNLOAD', { actor: 'owner' }), 'file.csv'); });\n`)] : [])] }
       } else {
         const identity = JSON.parse(request.prompt.split('实际候选身份与 manifest:\n')[1].split('\n实际完整候选')[0]) as { inputId: string; candidate: { digest: string } }
-        output = { inputId: identity.inputId, candidateDigest: identity.candidate.digest, verdict: 'accept', checkedIds: frozen.readyIds, findings: [] }
+        output = oraclePolicy.reviewConflict && decisionFact && choice !== 'keep_intent'
+          ? { inputId: identity.inputId, candidateDigest: identity.candidate.digest, verdict: 'needs_input', checkedIds: frozen.readyIds, findings: [{ kind: 'missing_fact', affectedIds: ['RULE-EXPORT-02', 'AC-EXPORT-02'], ruleLocation: `oracle-policy:${decisionFact.source}`, codeLocation: 'tests/export.test.mjs#ORACLE-FILTER-LEGACY', evidence: `起始可信ORACLE-FILTER-LEGACY明确9/129字符必须接受；当前已批准规则filter最多${limit}字符，与该完整旧断言互斥`, counterexample: `长度${limit! + 1}：当前已批准意图要求拒绝，旧oracle要求接受`, message: '必须由可信owner发布与所选新规则相容的oracle版本；不能修回旧规则或跳过旧oracle' }] }
+          : { inputId: identity.inputId, candidateDigest: identity.candidate.digest, verdict: 'accept', checkedIds: frozen.readyIds, findings: [] }
       }
     }
     const dispatch = application.store.readAttempt(operation.currentAttemptId!).dispatchPlans.find(plan => plan.key === request.requestKey)!
@@ -545,6 +552,40 @@ async function exportApplicationFixture(t: test.TestContext, choice?: 'keep_inte
   await application.enable()
   return { temp, root, path, original, originalCode, contract, git, application, nativeRequests, calls: (): number => calls }
 }
+
+for (const choice of ['keep_intent', 'adopt_behavior', 'new_rule'] as const) test(`AC-APPLICATION-P3-ORACLE-REAL ${choice} 起始不可改oracle旧9/129断言与真实裁决固定Docker命令`, { skip: process.env.SPEX_DOCKER_VERIFICATION_TEST !== '1', timeout: 600000 }, async t => {
+  const f = await exportApplicationFixture(t, choice, { legacyFilter: true }), before = await captureInputSnapshot(f.root), index = readFileSync(join(f.root, '.git/index')), oracle = readFileSync(join(f.root, 'tests/export.test.mjs'))
+  const submitted = await f.application.submit({ nodeId: 'export-contract', requestId: `oracle-real-conflict-${choice}`, origin: 'code' }); assert.ok(submitted.operation)
+  const first = await f.application.wait(submitted.operation.id); assert.ok(first.decisionContext)
+  const request = { operationId: first.operation.id, inputId: first.operation.input.id, analysisRef: first.decisionContext.analysisRef, findingIds: first.decisionContext.analysis.findings.map(finding => finding.id), requestId: `oracle-real-decision-${choice}`, decision: choice === 'new_rule' ? { choice, rule: 'filter长度不得超过128字符；其他原需求保持有效。' } : { choice } }
+  const decision = await f.application.decide(request), result = await f.application.wait(decision.operation.id)
+  const attempts = f.application.store.listAttempts(result.operation.id)
+  const verifications = attempts.flatMap(attempt => attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(before.source.commonDir, ref).toString()))).filter(value => value.status && value.checkpoint?.config?.policy?.argv?.join(' ') === 'node --test tests/export.test.mjs').map(value => ({ status: value.status, argv: value.checkpoint.config.policy.argv, exitCode: value.evidence?.exitCode, tests: value.evidence?.tests }))
+  if (process.env.SPEX_ORACLE_EVIDENCE_DIR) writeFileSync(join(process.env.SPEX_ORACLE_EVIDENCE_DIR, `oracle-real-${choice}.json`), JSON.stringify({ choice, phase: result.operation.phase, callsUsed: result.operation.callsUsed, budget: result.operation.budget, oracleDigest: contentHash(oracle), sourceInputId: before.id, receiptIds: result.journals.flatMap(journal => journal.receipt ? [journal.receipt.id] : []), verifications }, null, 2))
+  assert.equal(result.operation.phase, choice === 'keep_intent' ? 'workspace_synced' : 'budget_exhausted', JSON.stringify(result.attempt?.failure))
+  assert.equal(result.journals.some(journal => journal.receipt), choice === 'keep_intent')
+  assert.ok(verifications.some(value => value.status === (choice === 'keep_intent' ? 'passed' : 'failed')), JSON.stringify(verifications))
+  for (const verification of verifications.filter(value => value.status === 'failed')) { assert.notEqual(verification.exitCode, 0); assert.ok(verification.tests.some((test: { testId: string; status: string }) => test.testId === 'ORACLE-FILTER-LEGACY' && test.status === 'failed'), JSON.stringify(verification)) }
+  assert.deepEqual(readFileSync(join(f.root, 'tests/export.test.mjs')), oracle); assert.deepEqual(readFileSync(join(f.root, '.git/index')), index)
+  assert.equal((await captureInputSnapshot(f.root)).id, before.id)
+})
+
+for (const choice of ['adopt_behavior', 'new_rule'] as const) test(`AC-APPLICATION-P3-ORACLE-PROTOCOL ${choice} 同一精确独审finding停止oracle政策互斥不授写权`, async t => {
+  const f = await exportApplicationFixture(t, choice, { legacyFilter: true, reviewConflict: true }), before = await captureInputSnapshot(f.root), oracle = readFileSync(join(f.root, 'tests/export.test.mjs')), index = readFileSync(join(f.root, '.git/index'))
+  const submitted = await f.application.submit({ nodeId: 'export-contract', requestId: `oracle-protocol-conflict-${choice}`, origin: 'code' }); assert.ok(submitted.operation)
+  const first = await f.application.wait(submitted.operation.id); assert.ok(first.decisionContext)
+  const decision = await f.application.decide({ operationId: first.operation.id, inputId: first.operation.input.id, analysisRef: first.decisionContext.analysisRef, findingIds: first.decisionContext.analysis.findings.map(finding => finding.id), requestId: `oracle-protocol-decision-${choice}`, decision: choice === 'new_rule' ? { choice, rule: 'filter长度不得超过128字符；其他原需求保持有效。' } : { choice } })
+  const result = await f.application.wait(decision.operation.id)
+  assert.equal(result.operation.phase, 'needs_input'); assert.equal(result.attempt?.failure?.code, 'oracle_policy_conflict')
+  assert.equal(result.operation.callsUsed, 6); assert.equal(result.journals.length, 0); assert.equal(result.attempt?.verification, null)
+  const diagnosis = JSON.parse(result.attempt!.failure!.message)
+  assert.equal(diagnosis.conflicts[0].testId, 'ORACLE-FILTER-LEGACY'); assert.equal(diagnosis.conflicts[0].oracleDigest, contentHash(oracle))
+  assert.equal(diagnosis.conflicts[0].decisionRef.sha256, result.operation.requestBlob!.sha256)
+  assert.deepEqual(diagnosis.conflicts[0].verification.command, ['node', '--test', 'tests/export.test.mjs'])
+  assert.ok(diagnosis.conflicts[0].counterexample.includes(choice === 'adopt_behavior' ? '9' : '129'))
+  const calls = f.calls(); assert.equal((await f.application.wait(result.operation.id)).operation.phase, 'needs_input'); assert.equal(f.calls(), calls)
+  assert.deepEqual(readFileSync(join(f.root, 'tests/export.test.mjs')), oracle); assert.deepEqual(readFileSync(join(f.root, '.git/index')), index); assert.equal((await captureInputSnapshot(f.root)).id, before.id)
+})
 
 for (const choice of ['keep_intent', 'adopt_behavior', 'new_rule'] as const) test(`AC-APPLICATION-P3-DELIVERY ${choice} 公共裁决从真实已审冲突经Docker与普通hooks结算receipt`, { skip: process.env.SPEX_DOCKER_VERIFICATION_TEST !== '1', timeout: 600000 }, async t => {
     const f = await exportApplicationFixture(t, choice), before = await captureInputSnapshot(f.root), index = readFileSync(join(f.root, '.git/index')), oracle = readFileSync(join(f.root, 'tests/export.test.mjs'))

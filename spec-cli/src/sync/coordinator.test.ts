@@ -24,7 +24,7 @@ import type { NativeRunCheckpoint, NativeRunPlan } from './native-run.js'
 import { SyncStore } from './store.js'
 import { sessionIdForCreateKey } from '../sessions.js'
 import { claimFileMutex } from './file-mutex.js'
-import { guardControlledRequestPath, prepareControlledDecision, prepareControlledRequest } from './request-input.js'
+import { controlledDecisionIdentity, guardControlledRequestPath, prepareControlledDecision, prepareControlledRequest } from './request-input.js'
 import { prepareSpecBodyEdit } from '../spec-body-edit.js'
 
 const contractPath = '.spec/project/export-contract/spec.md'
@@ -668,6 +668,34 @@ test('新decision独审仍有相同稳定冲突ID时完整阻断，不因旧find
   const analysis = JSON.parse(readEvidence(f.input.source.commonDir, newWrapper.resultRef).toString()) as { findings: { id: string }[]; policyDigest: string }
   assert.equal(analysis.policyDigest, result.operation.policyDigest); assert.equal(analysis.findings[0].id, originalAnalysis.findings[0].id)
   assert.equal(f.store.listJournals(next.id).length, 0)
+})
+
+for (const invalid of ['foreign-decision', 'wrong-test', 'unselected-rule', 'unchanged-rule', 'keep-choice'] as const) test(`P3 oracle政策声明 ${invalid} 不得误报needs_input或获得授权`, async t => {
+  const f = await fixture(t, { maxAttempts: 1, maxCalls: 10, maxRepairs: 0, timeoutMs: 120000 }, false, original, 'project', original, {}, undefined, 'code')
+  let source = ''
+  const fact = { source: '', text: '只按当前所选裁决将filter限制为8字符；其他政策保持' }
+  f.transform((output, request) => {
+    const chosen = Boolean(source)
+    if (request.purpose === 'code_behavior_analyze') return { ...(output as object), changes: (output as { changes: object[] }).changes.map(change => ({ ...change, kind: chosen ? 'allowed_change' : 'conflict', affectedIds: chosen ? ['RULE-EXPORT-02', 'AC-EXPORT-02'] : ['REQ-EXPORT-01'], ruleIds: ['RULE-EXPORT-02'] })), facts: chosen ? [fact] : [], acceptanceChanges: chosen && invalid !== 'keep-choice' ? [{ id: 'AC-EXPORT-02', ruleIds: ['RULE-EXPORT-02'], source, reason: '对应当前已选filter8规则' }] : [] }
+    if (chosen && request.purpose === 'elaboration_generate' && invalid !== 'keep-choice' && invalid !== 'unchanged-rule') {
+      const candidate = structuredClone(output) as GeneratedElaboration, rule = candidate.changes[0].tables.RULE.find(row => row.id === 'RULE-EXPORT-02')!, ac = candidate.changes[0].tables.AC.find(row => row.id === 'AC-EXPORT-02')!
+      rule.constraint = `${rule.constraint}；filter最多8字符`; rule.source = source; ac.assertion = `${ac.assertion}；9字符拒绝`; ac.source = source
+      return candidate
+    }
+    if (request.purpose === 'code_review') return { ...(output as object), verdict: 'needs_input', findings: [{ kind: 'missing_fact', affectedIds: invalid === 'unselected-rule' ? ['RULE-EXPORT-01', 'AC-EXPORT-02'] : ['RULE-EXPORT-02', 'AC-EXPORT-02'], ruleLocation: invalid === 'foreign-decision' ? 'oracle-policy:decision:old-other-decision' : `oracle-policy:${source}`, codeLocation: `tests/export.test.mjs#${invalid === 'wrong-test' ? 'NOT-MANDATORY' : 'AC-EXPORT-03'}`, evidence: '宣称新规则与旧只读oracle相撞，必须先核真实裁决/规则/精确test绑定', counterexample: 'filter9必须接受或拒绝，不能把无绑定声明当业务输入', message: '需要更新oracle版本' }] }
+    return output
+  })
+  const originalResult = await runSyncOperation(f.store, f.operation.id, f.options)
+  assert.equal(originalResult.status, 'conflicted', JSON.stringify({ failure: f.store.readAttempt(originalResult.operation.currentAttemptId!).failure, calls: f.calls.map(call => call.purpose) }))
+  const previous = f.store.readAttempt(originalResult.operation.currentAttemptId!), wrapper = previous.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(value => value.stage === 'analysis'), analysis = JSON.parse(readEvidence(f.input.source.commonDir, wrapper.resultRef).toString()) as { findings: { id: string }[] }
+  const request = { requestId: `oracle-invalid-${invalid}`, operationId: f.operation.id, inputId: f.input.id, analysisRef: wrapper.resultRef, findingIds: analysis.findings.map(finding => finding.id), decision: invalid === 'keep-choice' ? { choice: 'keep_intent' as const } : { choice: 'new_rule' as const, rule: 'filter最多8字符，其他政策保持。' } }
+  source = `decision:${controlledDecisionIdentity(request)}`; fact.source = source
+  const requestBlob = prepareControlledDecision(f.input, request), plan = { ...f.plan, facts: [...f.plan.facts, fact] }
+  const next = f.store.admitAndEnqueue(await prepareSyncAdmission(f.input, plan, { ingressKey: `decision-${invalid}`, rootCauseId: f.operation.rootCauseId, origin: 'decision', budget: f.operation.budget, managedRoot: f.managedRoot, requestBlob })); f.useOperation(next)
+  const result = await runSyncOperation(f.store, next.id, { ...f.options, plan, readCurrentPlan: () => plan })
+  assert.equal(f.store.readAttempt(result.operation.currentAttemptId!).failure?.code, 'review_invalid', JSON.stringify(result.failure))
+  assert.notEqual(result.status, 'needs_input'); assert.equal(result.receipt, undefined); assert.equal(f.store.listJournals(next.id).length, 0)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
 })
 
 
