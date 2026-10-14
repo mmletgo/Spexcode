@@ -61,7 +61,8 @@ export function selectedAuthoredContractChanges(evidence: ReturnType<typeof read
     if (!owner) continue
     const existing = changes.get(owner.path)
     const rawChanged = residual.before?.rawSource !== residual.source?.rawSource
-    const changedIds = [residual.resource.id]
+    const semanticChanged = residual.before && residual.source ? !sameContractBusinessMeaning(residual.before.item, residual.source.item) : residual.before !== residual.source
+    const changedIds = semanticChanged || rawChanged && owner.item.kind === 'REQ' ? [residual.resource.id] : []
     if (rawChanged && owner.item.kind !== 'REQ') {
       // raw本身的REQ种子必须来自同一真实owner对象，不从上游REQ扩大所有消费者。
       const peers = [...evidence.intents, ...evidence.controlledAuthorPatch?.intents ?? []].filter(item => (item.source?.path ?? item.before?.path) === owner.path && (item.source?.item.kind ?? item.before?.item.kind) === 'REQ')
@@ -110,7 +111,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
     if (bases.size > 1 && new Set([...bases.values()].map(item => item.rawSource)).size > 1) reject(`SYNC_COMPOSITION_BLOCKED: raw归属无法证明共同完整作者基准 ${change.path}`)
     if (broad.length) authorBefore.set(change.path, readObject(commonDir, broad[0].before!.entry.oid).toString('utf8'))
   }
-  if (controlledAuthorBefore) authorBefore.set(controlledAuthorBefore.path, controlledAuthorBefore.text)
+  if (selectedEvidence && controlledAuthorBefore && !selectedEvidence.intents.some(item => item.pairId && (item.source?.path ?? item.before?.path) === controlledAuthorBefore!.path && item.before?.rawSource !== item.source?.rawSource)) authorBefore.set(controlledAuthorBefore.path, controlledAuthorBefore.text)
   const knownCode = new Set(composed.filter(([path]) => path.startsWith('.spec/') && path.endsWith('/spec.md')).flatMap(([, text]) => { const anchors = parseFrontmatter(text).fm.code; return Array.isArray(anchors) ? anchors.filter((anchor): anchor is string => typeof anchor === 'string').map(anchor => anchor.split('#')[0]) : [] }))
   const ungoverned = source.filter(([path]) => !path.startsWith('.spec/') && /\.(?:[cm]?[jt]sx?|py|go|rs|java|rb)$/.test(path) && !/\.(?:test|spec)\./.test(path) && !knownCode.has(path) && within(path, input.plan.writePaths)).map(([path]) => path)
   const authorEntries = new Map(readTree(commonDir, oldTree).map(entry => [entry.path, entry]))
@@ -239,7 +240,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
     for (const residual of rows) {
       const previous = residual.delivery!.item, next = resolved?.items.find(item => item.id === previous.id)
       const wholeNodeDeleted = resolution.content === null && !authorSource.has(resolution.path)
-      const authorChanged = residual.changed || selectedEvidence.controlledAuthorPatch?.intents.some(item => item.resource.id === previous.id && item.changed)
+      const authorChanged = authorChanges.some(change => change.path === resolution.path && change.changedIds.includes(previous.id))
       if ((!authorChanged || previous.kind === 'VERIFY') && (!next || !sameContractBusinessMeaning(previous, next)) || previous.kind === 'AC' && !next && !wholeNodeDeleted) reject(`精确组合破坏未消费之外的交付义务: ${resolution.path} ${previous.id}`)
     }
     for (const policy of oldFrozen.graph.items.values()) if (policy.kind === 'VERIFY' && policy.path === resolution.path) {

@@ -134,6 +134,7 @@ const sameIntent = (a: IntentObject | null, b: IntentObject | null): boolean => 
 /** 文件只做真实 byte-pair 三方；逐 ID 的 source 残差独立于文件级未变化判定。 */
 function composeSelectedInput(input: InputSnapshot, selection: FrozenBaselineSelection, options: CompositionOptions): ReturnType<typeof composeInputSnapshots> {
   verifyBaselineSelection(input, selection)
+  for (const path of options.executionPaths ?? []) if (!selection.bindings.some(binding => binding.resource.kind === 'path' && binding.resource.path === path)) throw new Error(`SYNC_COMPOSITION_BLOCKED: execution path missing exact byte binding ${path}`)
   const commonDir = input.source.commonDir, cache = new Map<string, TreeEntry[]>()
   const project = (snapshot: InputSnapshot): TreeEntry[] => {
     let entries = cache.get(snapshot.id)
@@ -214,7 +215,7 @@ export function readCompositionEvidence(input: InputSnapshot, composed: Composed
   const actualEntries = (snapshot: InputSnapshot): TreeEntry[] => { let value = entriesCache.get(snapshot.id); if (!value) { value = verifySnapshot(snapshot); entriesCache.set(snapshot.id, value) }; return value }
   const cache = new Map<string, Map<string, IntentObject>>(), adoption = new Map<string, Set<string>>()
   const objects = (snapshot: InputSnapshot): Map<string, IntentObject> => { let value = cache.get(snapshot.id); if (!value) { value = intentObjects(commonDir, actualEntries(snapshot)); cache.set(snapshot.id, value) }; return value }
-  const current = objects(input), patch = evidence.controlledAuthorPatch
+  const current = new Map(objects(input)), patch = evidence.controlledAuthorPatch
   const pathBindings = selection.bindings.filter(binding => 'bytePair' in binding)
   if (pathBindings.length !== evidence.paths.length) throw new Error('SYNC_COMPOSITION_BINDING: byte resources differ')
   const canonicalBindings = canonicalContractFilterBindings(input.source.canonicalRoot)
