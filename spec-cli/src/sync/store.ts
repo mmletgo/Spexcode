@@ -532,7 +532,7 @@ export class SyncStore {
     })
   }
   private decisionEligibility(tx: ProtocolTransaction, operation: SyncOperation): SyncDecisionEligibility {
-    if (!['conflicted', 'needs_input', 'superseded'].includes(operation.phase) && !(['failed', 'budget_exhausted'].includes(operation.phase) && operation.blockedReason === 'conflicted')) return { eligible: false, reason: { code: 'SYNC_DECISION_BINDING', message: '此操作没有待裁决的已结算具体业务分歧' } }
+    if (!['conflicted', 'needs_input', 'superseded'].includes(operation.phase) && !(['failed', 'budget_exhausted'].includes(operation.phase) && operation.blockedReason !== null)) return { eligible: false, reason: { code: 'SYNC_DECISION_BINDING', message: '此操作没有待裁决的已结算具体业务分歧' } }
     if (operation.currentAttemptId && !['failed', 'superseded', 'settled'].includes(this.attempt(tx, operation.currentAttemptId).status)) return { eligible: false, reason: { code: 'SYNC_DECISION_BINDING', message: '当前执行尝试尚未结算，不能裁决在途业务阶段' } }
     if (tx.query("SELECT id FROM sync_resources WHERE operation_id=? AND phase!='removed' LIMIT 1", operation.id).length || tx.query("SELECT id FROM sync_apply_journals WHERE operation_id=? AND status!='settled' LIMIT 1", operation.id).length) return { eligible: false, reason: { code: 'SYNC_DECISION_RESOURCE_PENDING', message: '请先恢复原操作的未结算资源或写入日志' } }
     return { eligible: true }

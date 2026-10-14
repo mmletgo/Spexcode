@@ -1280,3 +1280,28 @@ test('decision admission事务复核当前阶段/attempt/资源，早期conflict
     } finally { f.cleanup() }
   }
 })
+
+
+test('partial needs_input原因在生成失败或预算耗尽后仍可裁决，在途生成继续拒绝', async () => {
+  for (const terminal of ['failed', 'budget_exhausted'] as const) {
+    const f = await fixture()
+    try {
+      const real = await f.controlled(), value = { ...f.admit(real.input.source), input: real.input, origin: 'code' as const }, claimed = f.claim(value)
+      f.store.startGeneration(claimed.fence, { readyScope: { paths: value.scope.paths, contractIds: [], flowIds: [] }, blockedScope: { paths: [], contractIds: value.scope.contractIds, flowIds: [] }, blockedReason: 'needs_input' })
+      const requestBlob = prepareControlledDecision(real.input, { requestId: `partial-fact-${terminal}`, operationId: claimed.operation.id, inputId: real.input.id, analysisRef: { sha256: 'a'.repeat(64) }, findingIds: ['finding-1'], decision: { choice: 'new_rule', rule: '补充已选分支的具体业务事实' } })
+      f.blobs.set(requestBlob.sha256, readEvidence(real.input.source.commonDir, requestBlob))
+      const decision: AdmitSyncInput = { ...value, ingressKey: `partial-fact-${terminal}`, origin: 'decision', requestBlob }
+      assert.equal(f.store.readDecisionEligibility(claimed.operation.id).eligible, false)
+      assert.throws(() => f.store.admitAndEnqueue(decision), /SYNC_DECISION_BINDING/)
+      const issue = { code: 'generation_environment', message: '独立ready分支生成失败，业务缺事实原因仍保留', kind: 'environment' as const, evidenceRefs: [f.put({ originalFailure: terminal })] }
+      f.store.recordFailure(claimed.fence, issue)
+      if (terminal === 'budget_exhausted') { f.tick(100001); f.store.recordBudgetExhaustion(claimed.operation.id) }
+      const parent = f.store.readOperation(claimed.operation.id)
+      assert.equal(parent.phase, terminal); assert.equal(parent.blockedReason, 'needs_input'); assert.deepEqual(f.store.readAttempt(claimed.attempt.id).failure, issue)
+      assert.equal(f.store.readDecisionEligibility(parent.id).eligible, true)
+      const admitted = f.store.admitAndEnqueue(decision)
+      assert.equal(admitted.origin, 'decision'); assert.notEqual(admitted.id, parent.id); assert.equal(admitted.currentAttemptId, null)
+      assert.deepEqual(f.store.readAttempt(claimed.attempt.id).failure, issue); assert.equal(f.store.listJournals(parent.id).length, 0)
+    } finally { f.cleanup() }
+  }
+})

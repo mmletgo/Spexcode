@@ -1178,7 +1178,7 @@ for (const scenario of ['failed', 'budget', 'unreviewed', 'no-conflict', 'active
     await enteredP1
     try {
       const active = await application.readOperation(admitted.operation!.id), context = active.decisionContext!
-      assert.equal(active.operation.phase, 'elaborating'); assert.equal(active.operation.blockedReason, 'conflicted'); assert.equal(active.attempt!.status, 'running')
+      assert.equal(active.decisionEligibility.eligible, false); assert.equal(active.operation.phase, 'elaborating'); assert.equal(active.operation.blockedReason, 'conflicted'); assert.equal(active.attempt!.status, 'running')
       await assert.rejects(application.decide({ requestId: 'active-p1-choice', operationId: active.operation.id, inputId: active.operation.input.id, analysisRef: context.analysisRef, findingIds: context.analysis.findings.map(finding => finding.id), decision: { choice: 'keep_intent' } }), /尚未结算|已结算/)
     } finally { resumeP1() }
   }
@@ -1188,11 +1188,12 @@ for (const scenario of ['failed', 'budget', 'unreviewed', 'no-conflict', 'active
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), protectedIndex); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
   assert.deepEqual(operation.budget, budget)
   if (scenario === 'unreviewed' || scenario === 'no-conflict') {
-    assert.equal(operation.blockedReason, null)
+    assert.equal(operation.blockedReason, null); assert.equal(detail.decisionEligibility.eligible, false)
     if (scenario === 'unreviewed') assert.equal(detail.decisionContext, null)
     else assert.deepEqual(detail.decisionContext!.analysis.findings, [])
     return
   }
+  assert.equal(detail.decisionEligibility.eligible, true)
   const context = detail.decisionContext!; assert.equal(context.analysis.reviewPassed, true); assert.ok(context.analysis.findings.some(finding => finding.kind === 'conflict'))
   assert.equal(operation.phase, scenario === 'failed' ? 'failed' : 'budget_exhausted')
   assert.equal(operation.blockedReason, 'conflicted', JSON.stringify({ phase: operation.phase, blockedReason: operation.blockedReason, failure: attempt.failure, reviewPassed: context.analysis.reviewPassed }))

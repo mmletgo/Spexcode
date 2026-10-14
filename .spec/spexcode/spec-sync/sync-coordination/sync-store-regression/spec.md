@@ -64,3 +64,6 @@ P3覆盖retiredIds在receipt前不推进、结算及重启/published pair累积�
 
 
 当前fence的独审冲突原因与执行状态分开持久，错误generation/物理来源/旧fence拒绝，失败、预算及独立handle重开保原因且不改原证据。decision admission事务测试活动analyzing、applying、未removed资源及资格读取后新attempt竞态均拒；缺事实needs_input不因本次conflict修复被收窄。
+
+
+partial startGeneration登记needs_input后，生成environment失败及后续预算耗尽分别保原业务reason与失败证据，结清attempt/资源后eligibility和实际decision admission通过；仍在generating时同请求被拒。不以数据库伪造状态证明该路径。

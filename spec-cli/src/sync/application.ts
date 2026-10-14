@@ -23,7 +23,7 @@ import { coveredPath, readSyncSettings, SyncApplicationError } from './settings.
 import { SyncStore, SyncStoreError } from './store.js'
 
 export type SyncSubmitInput = { nodeId: string; requestId: string; origin?: 'spec' | 'initial' | 'code' | 'combined' | 'decision'; patch?: SpecBodyEdit; retryOf?: string }
-export type SyncOperationDetail = { operation: SyncOperation; attempt: ReturnType<SyncStore['readAttempt']> | null; journals: ReturnType<SyncStore['listJournals']>; stale: boolean; sourceSynced: boolean; retryEligibility: ReturnType<SyncStore['readRetryEligibility']>; resources: ReturnType<SyncStore['listRecoverableResources']>[number]['resource'][]; decisionContext: { analysisRef: BlobRef; analysis: CodeBehaviorAnalysis } | null; executionAvailability: { status: 'ready' | 'recovery_required'; failure?: { code: string; message: string } } }
+export type SyncOperationDetail = { operation: SyncOperation; attempt: ReturnType<SyncStore['readAttempt']> | null; journals: ReturnType<SyncStore['listJournals']>; stale: boolean; sourceSynced: boolean; retryEligibility: ReturnType<SyncStore['readRetryEligibility']>; decisionEligibility: ReturnType<SyncStore['readDecisionEligibility']>; resources: ReturnType<SyncStore['listRecoverableResources']>[number]['resource'][]; decisionContext: { analysisRef: BlobRef; analysis: CodeBehaviorAnalysis } | null; executionAvailability: { status: 'ready' | 'recovery_required'; failure?: { code: string; message: string } } }
 export type SyncApplicationOptions = Partial<Pick<SyncCoordinatorOptions, 'runner' | 'verificationDriver'>> & {
   protocol: SessionProtocol
   runtimeDirectory?: string
@@ -129,7 +129,7 @@ export class SyncApplication {
     const journals = this.store.listJournals(operation.id), resources = this.store.listRecoverableResources().filter(item => item.operation.id === operation.id).map(item => item.resource)
     const stopped = operation.control !== 'run' || completed.has(operation.phase) || ['paused', 'failed', 'budget_exhausted', 'needs_input', 'conflicted', 'recovery_required'].includes(operation.phase)
     if (executionAvailability.status === 'ready' && stopped && (resources.length || journals.some(journal => journal.status !== 'settled'))) executionAvailability = { status: 'recovery_required', failure: { code: 'sync_resources_unsettled', message: '操作仍有未结算资源或交付日志，请先恢复清理再重试' } }
-    return { operation, decisionContext: this.decisionContext(operation), attempt: operation.currentAttemptId ? this.store.readAttempt(operation.currentAttemptId) : null, journals, resources, stale: snapshot.id !== operation.input.id, sourceSynced: operation.phase === 'canonical_synced' && snapshot.id === operation.input.id, retryEligibility: this.retryEligibility(operation, snapshot), executionAvailability }
+    return { operation, decisionContext: this.decisionContext(operation), attempt: operation.currentAttemptId ? this.store.readAttempt(operation.currentAttemptId) : null, journals, resources, stale: snapshot.id !== operation.input.id, sourceSynced: operation.phase === 'canonical_synced' && snapshot.id === operation.input.id, retryEligibility: this.retryEligibility(operation, snapshot), decisionEligibility: this.store.readDecisionEligibility(operation.id), executionAvailability }
   }
   /** 只有原操作当前 attempt 的可信分析检查点能成为业务裁决对象。 */
   private decisionContext(operation: SyncOperation): SyncOperationDetail['decisionContext'] {

@@ -59,3 +59,6 @@ P3生成诊断在真实SQLite/Git复现普通contract引用错误回P1和symbol�
 
 
 真实Git/SQLite及明确native接缝复现reviewPassed conflict→重复AC非法P1→执行failed/预算耗尽、资源清零，却丢blockedReason的失败。修复后保原failure/预算/source/index，正式application.decide精确绑定当前analysis/finding并建立新不可变操作；unreviewed/无conflict不记原因，foreign/stale/finding及活动P1仍拒。无Docker/native实际执行或receipt成功声明。
+
+
+应用detail的decisionEligibility投影在活动P1为false、结清的已审冲突failed/budget为true、无合格业务原因的失败为false；它直接复用实际store判断，无额外模型调用。
