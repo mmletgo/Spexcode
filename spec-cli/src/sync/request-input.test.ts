@@ -164,7 +164,7 @@ test('业务裁决无正文差量仍冻结请求，只绑定所选分析与当�
   const ref = prepareControlledDecision(snapshot, input)
   assert.deepEqual(readControlledDecision(snapshot, ref), { ...input, schemaVersion: 1, type: 'sync.decision', source: snapshot.source })
   assert.deepEqual(ref, prepareControlledDecision(snapshot, input))
-  const composed = (await composeInputSnapshots(snapshot, null)).composed!
+  const composed = (await composeInputSnapshots(snapshot)).composed!
   const result = composeControlledRequest(snapshot, composed, ref)
   assert.deepEqual(result.conflicts, [])
   assert.deepEqual(result.composed, { ...composed, requestBlob: ref })
@@ -176,4 +176,17 @@ test('业务裁决无正文差量仍冻结请求，只绑定所选分析与当�
   const next = prepareControlledDecision(snapshot, { ...input, decision: { choice: 'new_rule', rule: '明确采用新的限制。' } })
   assert.notEqual(next.sha256, ref.sha256)
   assert.equal(readControlledDecision(snapshot, next).decision.choice, 'new_rule')
+})
+
+
+test('裁决继承原受控正文差量，不丢尚未落地的用户需求', async t => {
+  const { root } = fixture(t), snapshot = await captureInputSnapshot(root), patchRef = requestRef(await prepare(snapshot))
+  const decision = prepareControlledDecision(snapshot, { requestId: 'decision-patch', operationId: 'combined-op', inputId: snapshot.id, analysisRef: { sha256: 'b'.repeat(64) }, findingIds: ['conflict-1'], decision: { choice: 'keep_intent' } }, patchRef)
+  const composed = composeInputSnapshots(snapshot).composed!
+  const result = composeControlledRequest(snapshot, composed, decision)
+  assert.ok(result.composed)
+  assert.match(content(snapshot, result.composed), /Next user rule/)
+  assert.equal(result.composed.requestBlob?.sha256, decision.sha256)
+  assert.deepEqual(composeControlledRequest(snapshot, result.composed, decision).composed, result.composed)
+  assert.throws(() => prepareControlledDecision(snapshot, readControlledDecision(snapshot, decision), decision), /来源绑定|来源|before/)
 })

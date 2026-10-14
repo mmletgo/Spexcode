@@ -24,3 +24,5 @@ composeControlledRequest 不修改 InputSnapshot 或伪造 BaselinePair。它验
 
 
 裁决使用显式 type=sync.decision 的 schemaVersion=1 不可变请求，prepareControlledDecision/readControlledDecision 绑定原 operationId、inputId、可信 analysisRef、非空且不重复的 findingIds、稳定 requestId、source 与 keep_intent/adopt_behavior/new_rule 选择；new_rule 必须有用户规则正文。保持原需求没有正文差量也保存有效请求。它与正文差量明确区分，composeControlledRequest 仅绑定裁决 requestBlob、保持组合 tree/manifest/contentDigest，实际规则或代码变化由经验证的裁决协调方向生成。请求本身不把任意 analysisRef 升为授权；可信分析的原操作/检查点归属由应用与协调器核验。
+
+裁决原操作有尚未交付的受控正文编辑时，originalRequestBlob 由可信应用从原 operation 继承，调用者不能自行指定；该引用只能是同 input 的有效正文请求，不能递归指向另一裁决。组合先应用原用户正文再绑定新裁决，保持原需求差量、先前生成细化和 source readonly。

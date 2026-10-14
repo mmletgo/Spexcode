@@ -13,18 +13,19 @@ export type ControlledRequest = {
   schemaVersion: 1; inputId: string; source: WorktreeIdentity; path: string
   before: TreeEntry; next: TreeEntry; requestTree: string; origin: ControlledRequestOrigin
 }
-export type ControlledDecision = SyncDecisionInput & { schemaVersion: 1; type: 'sync.decision'; source: WorktreeIdentity }
+export type ControlledDecision = SyncDecisionInput & { schemaVersion: 1; type: 'sync.decision'; source: WorktreeIdentity; originalRequestBlob?: BlobRef }
 export type PreparedControlledRequest = { changed: false; requestBlob: null } | { changed: true; requestBlob: BlobRef }
 
 /** 用户裁决是独立输入，即使保持原需求没有正文差量也必须保留。 */
-export function prepareControlledDecision(snapshot: InputSnapshot, input: SyncDecisionInput): BlobRef {
-  const request: ControlledDecision = { schemaVersion: 1, type: 'sync.decision', requestId: input.requestId, operationId: input.operationId, inputId: input.inputId, analysisRef: input.analysisRef, findingIds: input.findingIds, decision: input.decision, source: snapshot.source }
+export function prepareControlledDecision(snapshot: InputSnapshot, input: SyncDecisionInput, originalRequestBlob?: BlobRef): BlobRef {
+  const request: ControlledDecision = { schemaVersion: 1, type: 'sync.decision', requestId: input.requestId, operationId: input.operationId, inputId: input.inputId, analysisRef: input.analysisRef, findingIds: input.findingIds, decision: input.decision, source: snapshot.source, ...(originalRequestBlob ? { originalRequestBlob } : {}) }
   checkDecision(snapshot, request)
   return writeEvidence(snapshot.source.commonDir, request)
 }
 function checkDecision(snapshot: InputSnapshot, request: ControlledDecision): void {
   if (!request || request.schemaVersion !== 1 || request.type !== 'sync.decision' || request.inputId !== snapshot.id || JSON.stringify(request.source) !== JSON.stringify(snapshot.source)) throw new Error('裁决请求 schema/input/来源绑定不一致')
   if (![request.requestId, request.operationId].every(value => typeof value === 'string' && value.trim()) || !/^[a-f0-9]{64}$/.test(request.analysisRef?.sha256 ?? '') || !Array.isArray(request.findingIds) || !request.findingIds.length || !request.findingIds.every(id => typeof id === 'string' && id.trim()) || new Set(request.findingIds).size !== request.findingIds.length) throw new Error('裁决请求缺少有效分析或具体分歧身份')
+  if (request.originalRequestBlob) readControlledRequest(snapshot, request.originalRequestBlob)
   if (!request.decision || !['keep_intent', 'adopt_behavior', 'new_rule'].includes(request.decision.choice) || request.decision.choice === 'new_rule' && (typeof request.decision.rule !== 'string' || !request.decision.rule.trim())) throw new Error('裁决请求缺少明确选择或新规则')
 }
 /** 读取固定裁决，并核原输入；分析可信归属由应用和协调器从原操作证据核验。 */
@@ -113,7 +114,11 @@ export function composeControlledRequest(snapshot: InputSnapshot, composed: Comp
     if (composed.requestBlob.sha256 !== requestBlob.sha256) throw new Error('组合输入已绑定另一受控请求')
     return { composed, conflicts: [] }
   }
-  if (decision) return { composed: { ...composed, requestBlob }, conflicts: [] }
+  if (decision) {
+    if (!decision.originalRequestBlob) return { composed: { ...composed, requestBlob }, conflicts: [] }
+    const result = composeControlledRequest(snapshot, composed, decision.originalRequestBlob)
+    return result.composed ? { composed: { ...result.composed, requestBlob }, conflicts: [] } : result
+  }
   if (!request) throw new Error('受控请求不合法')
   const delivery = entries.find(entry => entry.path === request.path)
   let next: TreeEntry | undefined
