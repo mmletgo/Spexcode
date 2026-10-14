@@ -102,6 +102,19 @@ test('独审不完整/不独立、遗漏外部路径、自授权删除与弱化�
   await assert.rejects(analyzeCodeBehavior(input, runner('allowed_change', proposal => { proposal.facts = [{ source: 'decision:SELF-APPROVED', text: '自批允许所有人下载' }] })), /没有冻结代码来源/)
 })
 
+test('独审路径错误仍把同次业务遗漏与反例交给下一轮修复，不丢失诊断或产生授权', async t => {
+  const f = await fixture(t); writeFileSync(join(f.root, 'src/export.js'), `${f.source}\n// observable extension\n`)
+  const input = await f.input(), finding = { message: '遗漏成功分支的计数验收', evidence: '成功视图沿用运行中计数期望', counterexample: '完成返回2而完整期望仍为null' }
+  input.plan.readPaths = ['src', 'tests', '.spec/export/spec.md', '.spec/export/export-contract/spec.md']
+  let rejected: { code: string; message: string } | undefined
+  await assert.rejects(analyzeCodeBehavior(input, runner('allowed_change', undefined, review => { review.checkedPaths = ['src/export.js', '.spec/export/.plugins']; review.verdict = 'repair'; review.findings = [finding] })), (error: Error & { code?: string }) => {
+    assert.equal(error.code, 'behavior_analysis_invalid'); assert.match(error.message, /未完整读取的路径/)
+    assert.ok(error.message.includes(JSON.stringify(finding))); rejected = { code: error.code!, message: error.message }; return true
+  })
+  const fake = runner('refactor')
+  await analyzeCodeBehavior({ ...input, repairDiagnostics: [rejected!] }, async request => { assert.ok(request.prompt.includes(finding.counterexample)); return fake(request) })
+})
+
 test('无治理新增实现自动定位真实上层并生成唯一叶身份；未知上层不能略过', async t => {
   const f = await fixture(t); writeFileSync(join(f.root, 'src/view.js'), 'export const view = job => ({ id: job.id });\n')
   const input = await f.input(), analysis = await analyzeCodeBehavior(input, runner('allowed_change', proposal => { proposal.newNodes = [{ codePath: 'src/view.js', parentNodeId: 'export-contract', basis: '导出任务可见反馈属于明确raw' }] }))

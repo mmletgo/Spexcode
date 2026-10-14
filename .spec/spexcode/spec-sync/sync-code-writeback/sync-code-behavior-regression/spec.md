@@ -19,3 +19,5 @@ code:
 定向覆盖真正同raw行重叠的原immutable作者patch与前次A整合、程序choice后缀/作者字节分离、无授权raw改写拒绝；真实raw128种子到具体RULE02+AC02的analyze→derive→parsed evolution闭环，currentB=RULE06不阻A、不授权裸C。独立作者真实删除A与B选择并存仍用userraw退役，不借B来源。
 
 攻击回归复现并拒绝两类raw越权：仅选源码retry的keep裁决改无作者差量raw、真实A/B重叠弱化双方未改权限C；相容A/B合成保持C仍通过。完整P2交付ff接受后只改源码时，changedPaths排除前次已生成Spec/tests且authorChanges为空。
+
+独审同时包含越界checkedPath和具体业务遗漏时仍拒绝批准，但失败诊断保留同次完整finding、证据和反例，并通过下一次冻结repairDiagnostics传给分析与独审；不能只保路径错误而让有限修复预算反复丢失必要验收遗漏。
