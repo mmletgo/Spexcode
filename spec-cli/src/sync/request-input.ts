@@ -1,6 +1,6 @@
 import { lstatSync } from 'node:fs'
 import { join } from 'node:path'
-import type { SyncDecisionInput } from './writeback-types.js'
+import type { CodeBehaviorAnalysis, SyncDecisionInput } from './writeback-types.js'
 import type { PreparedSpecBodyEdit } from '../spec-body-edit.js'
 import { isUtf8Text, mergeText } from './composition.js'
 import type { CompositionConflict } from './composition.js'
@@ -19,6 +19,16 @@ export type PreparedControlledRequest = { changed: false; requestBlob: null } | 
 /** 业务裁决身份不含运输请求键；同选择的重放不能重开预算。 */
 export function controlledDecisionIdentity(input: SyncDecisionInput): string {
   return contentHash(JSON.stringify({ operationId: input.operationId, inputId: input.inputId, analysisRef: input.analysisRef.sha256, findingIds: [...input.findingIds].sort(), decision: input.decision.choice === 'new_rule' ? { choice: input.decision.choice, rule: input.decision.rule } : { choice: input.decision.choice } }))
+}
+/** 已绑定用户选择只由程序追加；受审合成正文保留此前接受及未选规则。 */
+export function renderControlledDecisionRaw(raw: string, input: SyncDecisionInput, analysis: CodeBehaviorAnalysis): string {
+  if (input.decision.choice === 'keep_intent') return raw
+  const findingIds = [...input.findingIds].sort()
+  const findings = findingIds.map(id => analysis.findings.find(finding => finding.id === id)!)
+  const selectedRules = [...new Set(findings.flatMap(finding => finding.ruleIds))].sort()
+  const boundary = `本次裁决仅适用于分歧 ${findingIds.join(', ')}，业务规则 ${selectedRules.join(', ') || '该分歧明确指出的未覆盖行为'}；未选中的原需求、其他规则与全部验证政策保持有效。`
+  const text = input.decision.choice === 'new_rule' ? input.decision.rule : findings.map(finding => `采用当前行为并更新需求：${finding.sourceBehavior}；原需求：${finding.originalIntent}`).join('\n')
+  return `${raw.trim()}\n\n用户裁决（${controlledDecisionIdentity(input)}，分析 ${input.analysisRef.sha256}）：\n${boundary}\n以下选择明确替代所选规则中的旧行为要求，其余原文继续有效：\n${text}`
 }
 /** 用户裁决是独立输入，即使保持原需求没有正文差量也必须保留。 */
 export function prepareControlledDecision(snapshot: InputSnapshot, input: SyncDecisionInput, originalRequestBlob?: BlobRef): BlobRef {
@@ -105,6 +115,22 @@ export function validateControlledRequest(snapshot: InputSnapshot, requestBlob: 
   return request
 }
 
+/** 行级合并误报冲突时，仅整合字节含义不重叠的两段真实文本编辑。 */
+function mergeSeparateTextEdits(commonDir: string, baseEntry: TreeEntry, sourceEntry: TreeEntry, deliveryEntry: TreeEntry): Buffer | null {
+  const buffers = [baseEntry, sourceEntry, deliveryEntry].map(entry => readObject(commonDir, entry.oid))
+  if (!buffers.every(isUtf8Text)) return null
+  const [base, source, delivery] = buffers.map(bytes => Array.from(bytes.toString('utf8')))
+  const edits = [source, delivery].map(next => {
+    let start = 0, suffix = 0
+    while (start < base.length && start < next.length && base[start] === next[start]) start++
+    while (suffix < base.length - start && suffix < next.length - start && base[base.length - suffix - 1] === next[next.length - suffix - 1]) suffix++
+    return { start, end: base.length - suffix, text: next.slice(start, next.length - suffix) }
+  }).sort((left, right) => left.start - right.start)
+  const [left, right] = edits
+  if (left.start === right.start || left.end > right.start) return null
+  return Buffer.from([...base.slice(0, left.start), ...left.text, ...base.slice(left.end, right.start), ...right.text, ...base.slice(right.end)].join(''))
+}
+
 /** 以真实来源为 base 叠加用户差量，保留已组合细化；冲突返回三方 Git 对象证据。 */
 export function composeControlledRequest(snapshot: InputSnapshot, composed: ComposedInputRef, requestBlob: BlobRef, options: { retainConflicts?: boolean } = {}): { composed: ComposedInputRef | null; conflicts: CompositionConflict[] } {
   const commonDir = snapshot.source.commonDir
@@ -128,7 +154,7 @@ export function composeControlledRequest(snapshot: InputSnapshot, composed: Comp
   let next: TreeEntry | undefined
   if (sameEntry(delivery, request.before) || sameEntry(delivery, request.next)) next = request.next
   else if (delivery && delivery.mode !== '120000') {
-    const merged = mergeText(commonDir, delivery, request.before, request.next)
+    const merged = mergeText(commonDir, delivery, request.before, request.next) ?? mergeSeparateTextEdits(commonDir, request.before, request.next, delivery)
     if (merged) next = { ...delivery, oid: writeObject(commonDir, merged), digest: contentHash(merged) }
   }
   const conflicts: CompositionConflict[] = []

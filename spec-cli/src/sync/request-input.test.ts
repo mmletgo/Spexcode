@@ -9,7 +9,8 @@ import { prepareSpecBodyEdit } from '../spec-body-edit.js'
 import { composeInputSnapshots } from './composition.js'
 import { migrateSyncStore } from './migrations.js'
 import type { AdmitSyncInput, BaselinePair, BlobRef, ComposedInputRef, InputSnapshot } from './operation-types.js'
-import { composeControlledRequest, controlledDecisionIdentity, guardControlledRequestPath, prepareControlledRequest, prepareControlledDecision, readControlledDecision, validateControlledRequest } from './request-input.js'
+import { composeControlledRequest, controlledDecisionIdentity, guardControlledRequestPath, prepareControlledRequest, prepareControlledDecision, readControlledDecision, renderControlledDecisionRaw, validateControlledRequest } from './request-input.js'
+import type { CodeBehaviorAnalysis } from './writeback-types.js'
 import { captureInputSnapshot, readEvidence, readObject, readTree, writeEvidence } from './snapshot.js'
 import { SyncStore } from './store.js'
 
@@ -222,4 +223,29 @@ test('受控正文文本重叠可先冻结作者字节与三方证据，留给�
   assert.equal(decision.composed?.requestBlob?.sha256, decisionRef.sha256)
   assert.equal(decision.composed?.compositionEvidenceBlob?.sha256, retained.composed.compositionEvidenceBlob.sha256)
   assert.deepEqual(state(root), before)
+})
+
+test('同行内互不重叠的真实文本编辑自动保留作者和已交付字节', async t => {
+  const { root, directory } = fixture(t), snapshot = await captureInputSnapshot(root), before = state(root)
+  const prior = await priorComposition(snapshot, directory, source.replace('User rule.', 'User rule. 已接受规则A。'))
+  const patchRef = requestRef(await prepare(snapshot))
+  const result = composeControlledRequest(snapshot, prior, patchRef)
+  assert.ok(result.composed)
+  assert.equal(content(snapshot, result.composed), source.replace('User rule.', 'Next user rule. 已接受规则A。'))
+  assert.deepEqual(result.conflicts, [])
+  assert.equal(result.composed.compositionEvidenceBlob, undefined)
+  assert.deepEqual(state(root), before)
+})
+
+test('裁决raw程序追加明确选择并保受审正文，keep_intent字节不变', () => {
+  const raw = '已接受规则A。\n未选义务。'
+  const analysis = { findings: [{ id: 'B', ruleIds: ['RULE-B'], originalIntent: '保持B', sourceBehavior: '新B行为' }, { id: 'A', ruleIds: ['RULE-A'], originalIntent: '保持A', sourceBehavior: '不能被B采用' }] } as CodeBehaviorAnalysis
+  const input = { operationId: 'original', inputId: 'input', requestId: 'transport', analysisRef: { sha256: 'b'.repeat(64) }, findingIds: ['B'], decision: { choice: 'adopt_behavior' as const } }
+  const adopted = renderControlledDecisionRaw(raw, input, analysis)
+  assert.ok(adopted.startsWith(raw))
+  assert.match(adopted, /新B行为/)
+  assert.doesNotMatch(adopted, /不能被B采用|RULE-A/)
+  assert.equal(renderControlledDecisionRaw(raw, { ...input, decision: { choice: 'keep_intent' } }, analysis), raw)
+  assert.match(renderControlledDecisionRaw(raw, { ...input, decision: { choice: 'new_rule', rule: '明确新B规则' } }, analysis), /明确新B规则/)
+  assert.equal(renderControlledDecisionRaw(raw, { ...input, requestId: 'another-transport' }, analysis), adopted)
 })
