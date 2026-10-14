@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import test from 'node:test'
 import { CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
-import { contractBusinessProse, validateContractEvolution } from './contract-evolution.js'
+import { contractBusinessMeaning, contractBusinessProse, validateContractEvolution } from './contract-evolution.js'
 import type { ContractEvolutionPolicy } from './contract-evolution.js'
 import { checkGenerationContractIntent, readFrozenContracts } from './frozen-contracts.js'
 import { elaborate, elaborationDigest } from './elaboration.js'
@@ -182,18 +182,39 @@ test('P1审查必须使用不同于行为分析的当前会话线程', async () 
 })
 
 
-test('实现诊断有限再细化只新增遗漏边界，冻结摘要且保留全部已接受业务', async () => {
+test('实现诊断再细化接入已有主流程失败STEP与TR，保留原意和旧验收', async () => {
   const refinement: NonNullable<ElaborationInput['refinement']> = { candidateDigest: sha, diagnostics: [{ code: 'missing_boundary', message: '既定幂等组合缺少空键边界断言' }] }
   const output = build(source), original = structuredClone(output.changes[0].tables.AC[0])
   output.changes[0].prose = contractBusinessProse(parseParts(source)!.expandedSpec)
-  output.changes[0].tables.AC.push({ ...original, id: 'AC-EXPORT-NEW', action: '空键调用', assertion: '明确拒绝且不创建任务', test: 'tests/export.test.mjs#AC-EXPORT-NEW' })
+  const node = output.changes[0]
+  const flow = node.tables.FLOW.find(row => row.id === 'FLOW-EXPORT-01')!
+  flow.steps = [...flow.steps as string[], 'STEP-EXPORT-FAILURE']
+  flow.terminal = [...flow.terminal as string[], 'STATE-EXPORT-FAILED']
+  const dispatch = node.tables.STEP.find(row => row.id === 'STEP-EXPORT-03')!
+  dispatch.next = [...dispatch.next as string[], 'STEP-EXPORT-FAILURE', 'TR-EXPORT-RUNNING-EMPTY-FAIL']
+  const transition = node.tables.TR.find(row => row.id === 'TR-EXPORT-RUNNING-FAIL')!
+  transition.effects = '保留失败原因，返回FAILED状态'
+  node.tables.TR.push({ ...transition, id: 'TR-EXPORT-RUNNING-EMPTY-FAIL', condition: '当前attempt且reason为空', to: 'STATE-EXPORT-RUNNING', disposition: 'reject', reason: 'invalid-input', effects: '明确拒绝且保持RUNNING' })
+  node.tables.STEP.push({ ...dispatch, id: 'STEP-EXPORT-FAILURE', action: '处理当前attempt失败回调，reason非空转FAILED，空reason明确拒绝', input: '当前attempt,reason', output: 'FAILED与原因或保持RUNNING', next: ['TR-EXPORT-RUNNING-FAIL', 'TR-EXPORT-RUNNING-EMPTY-FAIL'], 'depends-on': ['RULE-EXPORT-03', 'RULE-EXPORT-05', 'EVENT-EXPORT-FAIL'] })
+  node.tables.AC.push({ ...original, id: 'AC-EXPORT-NEW', covers: ['RULE-EXPORT-05', 'TR-EXPORT-RUNNING-EMPTY-FAIL'], action: '当前attempt提交空reason失败回调', assertion: '明确拒绝且保持RUNNING', test: 'tests/export.test.mjs#AC-EXPORT-NEW' })
   const prompts: string[] = []
   const result = await elaborate({ ...input(), refinement }, { runner: runner(output, prompts) })
   assert.equal(result.status, 'complete')
   assert.ok(result.graph!.items.has('AC-EXPORT-NEW'))
+  assert.deepEqual(result.graph!.items.get('AC-EXPORT-01') && contractBusinessMeaning(result.graph!.items.get('AC-EXPORT-01')!), contractBusinessMeaning(parseContract({ nodeId: 'export-contract', path, source }).contract!.items.find(item => item.id === 'AC-EXPORT-01')!))
   assert.ok(prompts[0].includes('仅是失败诊断，不是新业务事实或授权'))
   const ordinary = await elaborate(input(), { runner: runner(output) })
   assert.notEqual(result.inputDigest, ordinary.inputDigest)
+  const unknown = structuredClone(output)
+  unknown.changes[0].tables.GAP.push({ id: 'GAP-EXPORT-FAILURE-AUTO', kind: 'missing_fact', unknown: '新增失败出口是否允许后台自动重试', affects: ['STEP-EXPORT-FAILURE', 'AC-EXPORT-NEW'], evidence: '当前原意只明确所有者重试，未授权后台主体', decision: '明确是否允许后台自动重试', source: 'user:raw', 'depends-on': ['REQ-EXPORT-01'] })
+  const blocked = await elaborate({ ...input(), refinement }, { runner: runner(unknown) })
+  assert.equal(blocked.status, 'needs_input')
+  assert.ok(blocked.blockedIds.includes('AC-EXPORT-NEW'))
+  assert.ok(blocked.readyIds.includes('AC-EXPORT-01'))
+  const notApplicable = structuredClone(output)
+  notApplicable.changes[0].tables.TR.find(row => row.id === 'TR-EXPORT-RUNNING-FAIL')!.disposition = 'not_applicable'
+  const escaped = await elaborate({ ...input(), refinement }, { runner: runner(notApplicable) })
+  assert.ok(escaped.rounds[0].findings.some(issue => issue.code === 'refinement_accepted_disposition_removed'))
   output.changes[0].tables.RULE[0].constraint = '实现失败就取消原政策'
   const rejected = await elaborate({ ...input(), refinement }, { runner: runner(output) })
   assert.equal(rejected.status, 'exhausted')

@@ -7,7 +7,7 @@ import type { CodeBehaviorEvidence, ContractNodeChange } from './writeback-types
 
 export type ContractEvolutionPolicy = {
   mode: 'preserve_business' | 'reelaborate'
-  /** 实现诊断只允许扩展边界，不授予改写已接受业务的权限。 */
+  /** 实现诊断允许细节增补，不能改变已接受原意、验收和政策。 */
   preserveAcceptedItems?: boolean
   authorizedChanges: readonly AuthorizedContractChange[]
   nodeChanges: readonly ContractNodeChange[]
@@ -112,7 +112,8 @@ export function validateContractEvolution(before: FrozenContracts, after: Frozen
       if (relocation) priorMeaning.authority = next.authority
     }
     if (same(priorMeaning, nextMeaning)) continue
-    if (policy.mode === 'preserve_business' || policy.preserveAcceptedItems) issue(policy.preserveAcceptedItems ? 'refinement_accepted_meaning_changed' : 'refactor_business_meaning_changed', next, policy.preserveAcceptedItems ? '再细化诊断不能改写已接受业务字段' : '纯重构只允许实现与测试符号绑定变化', item.id)
+    if (policy.mode === 'preserve_business' || policy.preserveAcceptedItems && ['REQ', 'AC', 'VERIFY', 'RULE'].includes(item.kind)) issue(policy.preserveAcceptedItems ? 'refinement_accepted_meaning_changed' : 'refactor_business_meaning_changed', next, policy.preserveAcceptedItems ? '再细化诊断不能改写已接受业务字段' : '纯重构只允许实现与测试符号绑定变化', item.id)
+    else if (policy.preserveAcceptedItems && item.kind === 'TR' && next.kind === 'TR' && item.disposition !== 'not_applicable' && next.disposition === 'not_applicable') issue('refinement_accepted_disposition_removed', next, '已接受状态处置不能改为不适用逃避义务', item.id)
     else if (item.kind === 'VERIFY' && authorization?.action !== 'update_verification') issue('verification_policy_changed', next, '验证命令、目录或预算变更缺少已确认依据', item.id)
     else if (item.kind === 'AC' && next.kind === 'AC') {
       if (authorization?.action !== 'update_acceptance') issue('acceptance_update_unauthorized', next, '验收语义变更必须有规则变化及独立分析授权', item.id)
