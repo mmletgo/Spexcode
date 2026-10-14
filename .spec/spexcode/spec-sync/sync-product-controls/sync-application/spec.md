@@ -74,3 +74,5 @@ P4 stale/retry/resume采用协调器唯一isSyncInputCurrent判据，比较真�
 每个operation detail单独投影其原physical scope的physicalControl；show不依赖另读status即可看见物理暂停，operation.control和phase仍保真实单操作控制与检查点，不伪造阶段。
 
 重复补偿仅在同不可变snapshot、完整真实baseline资源/heads摘要与配置政策均相同时复用锁外规划/差异；不是仅按input ID跳过。真实heads或输入变化重新规划。此前同difference已admitted/coalesced/duplicate的观察只继续记录真实snapshot，避免重复冻结runtime阻塞异步验证；paused-only observation不挡resume首次准入，store仍执行最终准入CAS。
+
+P4运行时重建固定计划与裁决raw也使用原operation.input/selection；live snapshot仅用于enable与协调器相关输入复核，scope外全snapshot变化不能使受控裁决请求被误读为旧analysis绑定失败。

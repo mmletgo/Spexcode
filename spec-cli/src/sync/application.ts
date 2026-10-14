@@ -606,8 +606,9 @@ export class SyncApplication {
     let advance = false
     const finished = runSyncOperation(this.store, id, { plan, ...(recoveryOnly ? { recoveryOnly: true } : {}), readCurrentPlan: async () => {
       const current = await captureInputSnapshot(this.root); this.requireEnabled(current)
-      const currentPlan = await buildSyncApplicationPlan(current, plan.intentNodeId, operation.baselineSelection ?? operation.previousBaselinePair)
-      if (operation.origin === 'decision' && operation.requestBlob) this.restoreDecisionPlan(currentPlan, current, operation.requestBlob, operation.baselineSelection ?? operation.previousBaselinePair)
+      const planningInput = operation.baselineSelection ? operation.input : current
+      const currentPlan = await buildSyncApplicationPlan(planningInput, plan.intentNodeId, operation.baselineSelection ?? operation.previousBaselinePair)
+      if (operation.origin === 'decision' && operation.requestBlob) this.restoreDecisionPlan(currentPlan, planningInput, operation.requestBlob, operation.baselineSelection ?? operation.previousBaselinePair)
       return currentPlan
     }, managedRoot: this.managedRoot, artifactRoot: this.artifactRoot, tools, runner: this.options.runner, verificationDriver: this.options.verificationDriver, signal: controller.signal, callTimeoutMs: settings.callTimeoutMs }).then(result => { advance = !recoveryOnly && result.status !== 'busy' && result.operation.phase !== 'queued'; return result }).finally(() => {
       this.running.delete(id)
