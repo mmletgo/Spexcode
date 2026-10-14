@@ -1,8 +1,8 @@
 import { posix } from 'node:path'
 import { loadSpecs } from '@spexcode/spec-core'
-import { contractImpact } from '@spexcode/spec-core/contracts'
+import { contractImpact, contractReferences } from '@spexcode/spec-core/contracts'
 import type { SyncCoordinatorPlan } from './coordinator-types.js'
-import type { BaselinePair, BaselineResource, FrozenBaselineSelection, InputSnapshot } from './operation-types.js'
+import type { BaselinePair, BaselineResource, FrozenBaselineSelection, InputSnapshot, SyncScope } from './operation-types.js'
 import { verifyBaselineSelection } from './composition.js'
 import { readFrozenContracts } from './frozen-contracts.js'
 import { readEvidence, readObject, readTree, verifySnapshot } from './snapshot.js'
@@ -12,7 +12,7 @@ import type { CodeBehaviorAnalysis, SyncDecisionInput } from './writeback-types.
 import { coveredPath, readSyncSettings, SyncApplicationError } from './settings.js'
 
 /** 冻结契约影响与既有节点治理共同决定闭包；目录授权允许新自然语言需求创建实现。 */
-export async function buildSyncApplicationPlan(snapshot: InputSnapshot, nodeId: string, baseline?: BaselinePair | FrozenBaselineSelection | null): Promise<SyncCoordinatorPlan> {
+export async function buildSyncApplicationPlan(snapshot: InputSnapshot, nodeId: string, baseline?: BaselinePair | FrozenBaselineSelection | null): Promise<SyncCoordinatorPlan & { executionScope: SyncScope }> {
   const selection = baseline && 'version' in baseline ? baseline : null
   if (selection) verifyBaselineSelection(snapshot, selection)
   const baselinePair = baseline && !('version' in baseline) ? baseline : null
@@ -60,9 +60,19 @@ export async function buildSyncApplicationPlan(snapshot: InputSnapshot, nodeId: 
     const selectedFindings = analysis.findings.filter(finding => request.findingIds.includes(finding.id))
     return { source: `decision:${controlledDecisionIdentity(request)}`, text: JSON.stringify({ settledDecisionRef: ref, decision: request.decision, ruleIds: [...new Set(selectedFindings.flatMap(finding => finding.ruleIds))], findings: selectedFindings, supersession: '仅上述所选规则按用户裁决生效；原facts在这些规则上保留为历史，不得恢复旧规则；未选政策及VERIFY执行政策保持有效。' }) }
   })
+  const selectedContractIds = new Set([...frozen.contracts, ...oldFrozen.contracts, ...protectedGraphs.flatMap(graph => graph.contracts)].filter(contract => selected.has(contract.nodeId)).flatMap(contract => contract.items.filter(item => item.kind !== 'VERIFY').map(item => item.id)))
+  const readIds = new Set(selectedContractIds)
+  const graphs = [frozen.graph, oldFrozen.graph, ...protectedGraphs.map(graph => graph.graph)]
+  let expanded = true
+  while (expanded) { expanded = false; for (const graph of graphs) for (const id of [...readIds]) { const item = graph.items.get(id); if (!item) continue; for (const ref of contractReferences(item)) if (graph.items.has(ref.id) && !readIds.has(ref.id)) { readIds.add(ref.id); expanded = true } } }
+  const specReadPaths = new Set([...targets.map(target => target.path), ...priorTargets.map(target => target.path)])
+  for (const graph of graphs) for (const id of readIds) { const item = graph.items.get(id); if (item) specReadPaths.add(item.path) }
+  for (const node of [...nodes, ...oldFrozen.nodes]) if (targets.some(target => target.path.startsWith(`${posix.dirname(node.path)}/`))) specReadPaths.add(node.path)
+  const executionScope: SyncScope = { paths: [...new Set([...targets.map(target => target.path), ...priorTargets.map(target => target.path), ...codePaths, ...impact.testPaths])].sort(), contractIds: [...selectedContractIds].filter(id => !graphs.some(graph => graph.items.get(id)?.kind === 'FLOW')).sort(), flowIds: [...selectedContractIds].filter(id => graphs.some(graph => graph.items.get(id)?.kind === 'FLOW')).sort() }
   return {
+    executionScope,
     version: 'sync-coordinator-v1', intentNodeId: intent.id, targets,
-    readPaths: [...new Set([...specEntries.map(entry => entry.path), ...oldFiles.keys(), '.spec/spexcode.json', ...writable, ...settings.readPaths, ...codePaths, ...impact.testPaths, ...settings.mandatoryTests.map(test => test.testPath)])].sort(),
+    readPaths: [...new Set([...specReadPaths, '.spec/spexcode.json', ...settings.readPaths, ...codePaths, ...impact.testPaths, ...settings.mandatoryTests.map(test => test.testPath)])].sort(),
     writePaths: [...new Set([...targets.map(target => target.path), ...targets.map(target => posix.dirname(target.path)), ...priorTargets.map(target => target.path), ...writable])].sort(),
     facts: [...settings.facts, ...decisionFacts], decisionAuthorities: decisionRefs.map(ref => readDecisionAuthority(snapshot.source.commonDir, ref)), decisionRefs, retiredIds, verifications: settings.verifications, mandatoryTests: settings.mandatoryTests,
   }
@@ -81,8 +91,9 @@ export async function deriveSyncBaselineResources(snapshot: InputSnapshot, plan:
     const files = new Map(entries.filter(entry => entry.mode !== '120000' && entry.path.startsWith('.spec/') && entry.path.endsWith('/spec.md')).map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString('utf8')]))
     const frozen = await readFrozenContracts(snapshot.source.canonicalRoot, files)
     for (const item of frozen.graph.items.values()) {
-      resources.set(`contract:${item.id}`, { kind: 'contract', id: item.id })
+      if (item.kind === 'VERIFY') continue
       if (item.kind === 'FLOW') resources.set(`flow:${item.id}`, { kind: 'flow', id: item.id })
+      else resources.set(`contract:${item.id}`, { kind: 'contract', id: item.id })
     }
   }
   // 精确已知的缺失文件/tombstone仍是读取对象，目录前缀不能假扮该对象。

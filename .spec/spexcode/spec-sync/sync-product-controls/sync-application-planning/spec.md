@@ -25,3 +25,5 @@ readPaths 纳入冻结 Spec、版本化配置、授权源码/测试目录、额�
 已消失的显式旧nodeId始终保留旧目标及raw、旧新图的测试影响。上层仍存在则以最近上层原意协调；最后业务节点被删时以旧验证交付冻结原意定位退役，仍须独审及真实负向验收，不因当前树404或0AC自免。已结算结构化decisionAuthorities从immutable request/原finding程序派生，文字facts说明不扩授权范围。
 
 P4规划可读取精确 FrozenBaselineSelection：文件正文以各 path 真 bytePair 的交付对象恢复保护上下文，逐 ID 不同旧交付图的真实影响保持并集。deriveSyncBaselineResources 从真实当前/既有快照及 plan 的实际读取/保护文件推导 exact path 与既有契约/flow ID；授权目录不是完整范围或已验证覆盖。缺失的精确目标、保护测试、配置与既有 tombstone 仍是资源；未来新业务 ID 由真实细化结果原子扩范围，不猜测。已结算裁决与退役历史按实际选中 pair 去重继承。
+
+P4的executionScope只含实际目标Spec/治理代码/影响测试路径及目标业务身份。readPaths只含目标、实际引用权威、祖先需求、影响code/test、mandatory测试与明确额外上下文；source/test授权目录保持模型写授权，不能假冒本次完整读取。FLOW只用flow资源，VERIFY保执行政策而不是已消费业务身份；只读与保护资源不等同写lease或验证覆盖。

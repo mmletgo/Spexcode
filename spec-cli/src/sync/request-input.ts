@@ -2,8 +2,8 @@ import { lstatSync } from 'node:fs'
 import { join } from 'node:path'
 import type { CodeBehaviorAnalysis, SyncDecisionInput } from './writeback-types.js'
 import type { PreparedSpecBodyEdit } from '../spec-body-edit.js'
-import { isUtf8Text, mergeText } from './composition.js'
-import type { CompositionConflict } from './composition.js'
+import { isUtf8Text, mergeText, projectSelectedAuthorPatch } from './composition.js'
+import type { CompositionConflict, SelectedCompositionEvidence } from './composition.js'
 import type { BlobRef, ComposedInputRef, InputSnapshot, WorktreeIdentity } from './operation-types.js'
 import { contentHash, identifyWorktree, objectGit, readEvidence, readObject, readTree, validateRepositoryPath, verifySnapshot, writeEvidence, writeObject, writeTree } from './snapshot.js'
 import type { TreeEntry } from './snapshot.js'
@@ -167,7 +167,16 @@ export function composeControlledRequest(snapshot: InputSnapshot, composed: Comp
   const resultEntries = entries.map(entry => entry.path === request.path ? next! : entry), tree = writeTree(commonDir, resultEntries)
   const manifestBlob = writeEvidence(commonDir, { version: 1, entries: resultEntries }), contentDigest = contentHash(JSON.stringify(resultEntries))
   objectGit(commonDir, ['update-ref', `refs/spex-sync/compositions/${tree}`, tree])
-  const priorConflicts = composed.compositionEvidenceBlob ? (JSON.parse(readEvidence(commonDir, composed.compositionEvidenceBlob).toString('utf8')) as { conflicts: CompositionConflict[] }).conflicts : []
-  const compositionEvidenceBlob = conflicts.length ? writeEvidence(commonDir, { version: 'composition-overlap-v1', sourceInputId: snapshot.id, baselinePairId: composed.previousBaselinePairId, conflicts: [...priorConflicts, ...conflicts] }) : composed.compositionEvidenceBlob
-  return { composed: { ...composed, tree, manifestBlob, contentDigest, requestBlob, ...(compositionEvidenceBlob ? { compositionEvidenceBlob } : {}) }, conflicts }
+  const priorEvidence = composed.compositionEvidenceBlob ? JSON.parse(readEvidence(commonDir, composed.compositionEvidenceBlob).toString('utf8')) as { version: string; conflicts: CompositionConflict[] } : null
+  const priorConflicts = priorEvidence?.conflicts ?? []
+  let compositionEvidenceBlob = conflicts.length ? writeEvidence(commonDir, { version: 'composition-overlap-v1', sourceInputId: snapshot.id, baselinePairId: composed.previousBaselinePairId, conflicts: [...priorConflicts, ...conflicts] }) : composed.compositionEvidenceBlob
+  let authorProjectionBlob = composed.authorProjectionBlob
+  if (composed.baselineSelectionDigest) {
+    if (priorEvidence?.version !== 'selected-composition-v1') throw new Error('受控请求缺少精确基线组合证据')
+    const evidence = projectSelectedAuthorPatch(snapshot, priorEvidence as SelectedCompositionEvidence, requestBlob, request.before, request.next)
+    evidence.conflicts = [...priorConflicts, ...conflicts]
+    compositionEvidenceBlob = writeEvidence(commonDir, evidence)
+    authorProjectionBlob = writeEvidence(commonDir, { version: 'selected-author-projection-v1', sourceInputId: snapshot.id, baselineSelectionDigest: composed.baselineSelectionDigest, intents: evidence.intents, residualPaths: evidence.residualPaths, controlledAuthorPatch: evidence.controlledAuthorPatch, priorProjection: composed.authorProjectionBlob ?? null })
+  }
+  return { composed: { ...composed, tree, manifestBlob, contentDigest, requestBlob, ...(authorProjectionBlob ? { authorProjectionBlob } : {}), ...(compositionEvidenceBlob ? { compositionEvidenceBlob } : {}) }, conflicts }
 }

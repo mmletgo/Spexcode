@@ -29,3 +29,5 @@ P3协调可显式retainConflicts，重叠位置暂采用新source字节并将完
 采纳集合包含coveredScope内旧source与delivery路径并集的已交付删除：HEAD树与verified snapshot均缺失也构成tombstone证明。ff接受删除后重建相同旧字节是真新输入；未接受来源旧字节不复活已验证删除。作者基准对采纳tombstone删除旧条目，退役业务身份仍禁止复用。
 
 P4按冻结 FrozenBaselineSelection 逐资源组合：path 的 bytePair 只负责该真实完整文件 bytes/mode/tombstone；contract/flow 的 intentPair 只证明其 covered ID 已消费的作者意图。两者可长期不同，不以 pair ID 不同造冲突，也不以 byte source 未变化认定业务无变化。每个非空 pair 核验来源身份、真实覆盖及不可变对象，空绑定不回退全局 latest。selection digest 同时绑定 ComposedInputRef、作者投影与完整组合证据。逐 ID source/delivery/newSource 的真实 owner path/blob/mode、语义摘要与 Git 采纳证明随证据保留；未消费语义残差的 owner path 进入必分析路径。残差不能按 ID 伪拼 raw 或整文件作者基准，组合正文遗漏真实残差时要求完整文件独立整合；归属不明明确 blocked。
+
+精确资源可以由历史P3目录覆盖证明，但选择键必须是实际journal文件路径，目录覆盖不变成虚构文件。执行路径通过executionPaths精确冻结；非执行路径的作者dirty/untracked不进入派生候选，基础采用真实HEAD，完整InputSnapshot继续保原内容。只读资源保完整证据而不授交付写权。读取组合证据时重核真实tree/manifest、路径source/base/delivery对象、每ID真实owner和语义残差及采纳证明，合法hash不能把虚构无变化或替换OID升级成作者事实。

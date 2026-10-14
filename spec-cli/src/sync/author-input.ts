@@ -1,13 +1,14 @@
 import { readFileSync } from 'node:fs'
 import { canonicalContractFilterBindings, cleanCanonicalContractText, describeCanonicalContractFilter } from '../contract-filter.js'
 import { composeInputSnapshots, isUtf8Text } from './composition.js'
+import type { CompositionOptions } from './composition.js'
 import type { BaselinePair, FrozenBaselineSelection, InputSnapshot } from './operation-types.js'
 import { contentHash, objectGit, readEvidence, readObject, writeEvidence, writeObject } from './snapshot.js'
 import type { TreeEntry } from './snapshot.js'
 import { readFootprintConfiguration, snapshotFootprintFile } from './trusted-footprint.js'
 
 /** 真实快照不变；canonical clean 的作者字节才参与三方整合和后续候选。 */
-export function composeAuthoredInput(input: InputSnapshot, prior?: BaselinePair | FrozenBaselineSelection, options: { retainConflicts?: boolean } = {}): ReturnType<typeof composeInputSnapshots> {
+export function composeAuthoredInput(input: InputSnapshot, prior?: BaselinePair | FrozenBaselineSelection, options: Pick<CompositionOptions, 'retainConflicts' | 'executionPaths'> = {}): ReturnType<typeof composeInputSnapshots> {
   const root = input.source.canonicalRoot, commonDir = input.source.commonDir
   const configuration = readFootprintConfiguration('/usr/bin/git', root)
   const filters = configuration.records.filter((_, index) => index % 2 === 1).filter(record => record.startsWith('filter.'))

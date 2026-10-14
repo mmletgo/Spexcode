@@ -23,3 +23,5 @@ composeAuthoredInput 保持真实 InputSnapshot 和原 index 字节，复用 [[s
 P3 retainConflicts透传同一作者投影原语，保留待独审的文本重叠对象。作者文字的Git重叠不直接断言业务互斥；完整行为分类与最终整合证据由 [[sync-code-behavior]] 承担。
 
 P4透传精确逐资源 FrozenBaselineSelection；canonical clean 仍对每个实际 pair 的 source 与 delivery 使用相同不可变属性投影。canonical作者证据保留内嵌逐ID真实语义投影及selection digest，不能以工具clean覆盖或丢弃未消费业务意图。
+
+executionPaths透传精确候选写范围；只读上下文可从真实InputSnapshot独立读取，不把授权目录内不相关的作者dirty夹带进候选。
