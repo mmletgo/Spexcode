@@ -178,3 +178,40 @@ test('显式prose替换新canonical表头时继承旧非canonical列序行仍按
   assert.ok(rendered.includes('| id | goal | source |'))
   assert.ok(rendered.includes('显式更新的业务说明。'))
 })
+
+test('标题和导言先出现完整raw，null正文的raw更新只修改真实段落，含CRLF和围栏伪标题', () => {
+  const oldRaw = '返回文本', nextRaw = '返回大写文本'
+  const fakeHeadings = '~~~markdown\n## raw source\n返回文本\n## expanded spec\n伪正文。\n~~~'
+  const body = source.replace(baseline.rawSource, oldRaw).replace('# 导出事件服务契约', `# ${oldRaw}\n\n导言重复：${oldRaw}。\n\n${fakeHeadings}`)
+  for (const frozen of [body, body.replace(/\n/g, '\r\n')]) {
+    const output = patch()
+    const snapshot = { ...input, intent: { ...input.intent, rawSource: nextRaw }, targets: [{ ...input.targets[0], source: frozen, sourceDigest: elaborationDigest(frozen) }] }
+    const rendered = renderElaboration(snapshot, output, 'input').changes[0].source
+    assert.equal(parseParts(rendered)!.rawSource, nextRaw)
+    assert.ok(rendered.includes(`# ${oldRaw}`))
+    assert.ok(rendered.includes(`导言重复：${oldRaw}。`))
+    assert.ok(rendered.includes(frozen.includes('\r\n') ? fakeHeadings.replace(/\n/g, '\r\n') : fakeHeadings))
+    assert.equal(parseParts(rendered)!.expandedSpec, baseline.expandedSpec)
+    if (frozen.includes('\r\n')) assert.ok(!/(?<!\r)\n/.test(rendered))
+  }
+})
+
+test('重复识别段落的位置不跨过另一业务段，raw更新保留交错expanded正文及围栏', () => {
+  const firstRaw = '返回文本', secondRaw = '保留范围'
+  const mixed = source.replace(baseline.rawSource, firstRaw).replace('## expanded spec', '## expanded spec\n\n首段正文。\n\n## raw source\n\n保留范围\n\n## expanded spec')
+  assert.ok(parseParts(mixed)!.rawSource.includes(firstRaw) && parseParts(mixed)!.rawSource.includes(secondRaw))
+  const output = patch(), nextRaw = '返回大写文本并保留范围'
+  const rendered = renderElaboration({ ...input, intent: { ...input.intent, rawSource: nextRaw }, targets: [{ ...input.targets[0], source: mixed, sourceDigest: elaborationDigest(mixed) }] }, output, 'input').changes[0].source
+  assert.equal(parseParts(rendered)!.rawSource, nextRaw)
+  assert.equal(parseParts(rendered)!.expandedSpec, parseParts(mixed)!.expandedSpec)
+  assert.ok(rendered.includes('首段正文。'))
+  assert.deepEqual(parseContract({ nodeId: 'export-contract', path, source: rendered }).findings, [])
+  output.changes[0].tables.RULE.push({ id: 'RULE-EXPORT-SPAN-DELTA', scope: '导出', constraint: '新增行保持原意', basis: '冻结原意', authority: 'export-contract', source: 'user:REQ-EXPORT-01', 'depends-on': ['REQ-EXPORT-01'] })
+  const bothChanged = renderElaboration({ ...input, intent: { ...input.intent, rawSource: nextRaw }, targets: [{ ...input.targets[0], source: mixed, sourceDigest: elaborationDigest(mixed) }] }, output, 'input').changes[0].source
+  assert.equal(parseParts(bothChanged)!.rawSource, nextRaw)
+  const parsed = parseContract({ nodeId: 'export-contract', path, source: bothChanged })
+  assert.deepEqual(parsed.findings, [])
+  assert.ok(parsed.contract!.items.some(item => item.id === 'RULE-EXPORT-SPAN-DELTA'))
+  assert.equal(parsed.contract!.items.length, baseline.items.length + 1)
+  assert.ok(parseParts(bothChanged)!.expandedSpec.includes('首段正文。'))
+})

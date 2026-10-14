@@ -115,10 +115,28 @@ export function renderElaboration(input: ElaborationInput, generated: GeneratedE
       if (added.length) expanded += `\n\n${added.join('\n\n')}`
       const normalized = target!.source!.replace(/\r\n?/g, '\n')
       const originalBody = parseFrontmatter(normalized).body
-      const rawOffset = originalBody.indexOf(parts!.rawSource)
-      const expandedOffset = originalBody.indexOf(parts!.expandedSpec, rawOffset + parts!.rawSource.length)
-      let body = originalBody.slice(0, expandedOffset) + expanded + originalBody.slice(expandedOffset + parts!.expandedSpec.length)
-      if (raw !== parts!.rawSource) body = body.slice(0, rawOffset) + raw! + body.slice(rawOffset + parts!.rawSource.length)
+      const ranges: Record<'rawSource' | 'expandedSpec', { start: number; end: number }[]> = { rawSource: [], expandedSpec: [] }
+      parseParts(originalBody, (part, line, offset) => {
+        const previous = ranges[part].at(-1)
+        if (previous && previous.end + 1 === offset) previous.end = offset + line.length
+        else ranges[part].push({ start: offset, end: offset + line.length })
+      })
+      const edits: { start: number; end: number; text: string }[] = []
+      for (const [part, replacement] of [['rawSource', raw!], ['expandedSpec', expanded]] as const) {
+        if (replacement === parts![part]) continue
+        let written = false
+        for (const range of ranges[part]) {
+          const content = originalBody.slice(range.start, range.end)
+          if (!content.trim()) continue
+          const start = range.start + content.length - content.trimStart().length
+          const end = range.end - (content.length - content.trimEnd().length)
+          edits.push({ start, end, text: written ? '' : replacement })
+          written = true
+        }
+        if (!written) edits.push({ start: ranges[part][0].start, end: ranges[part][0].start, text: replacement })
+      }
+      let body = originalBody
+      for (const edit of edits.sort((left, right) => right.start - left.start)) body = body.slice(0, edit.start) + edit.text + body.slice(edit.end)
       let rendered = normalized.slice(0, normalized.length - originalBody.length) + body
 
       if (!metadataEqual) rendered = `---\n${metadata}\n---\n${parseFrontmatter(rendered).body}`
