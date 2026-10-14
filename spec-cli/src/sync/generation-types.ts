@@ -17,6 +17,7 @@ export type GenerationInput = {
   elaboratedSpecs: readonly { path: string; source: string }[]
   readyIds: readonly string[]
   blockedIds: readonly string[]
+  retiredIds?: readonly string[]
   intent: { nodeId: string; rawSource: string }
   facts: readonly ElaborationFact[]
   existingAcceptance: readonly Acceptance[]
