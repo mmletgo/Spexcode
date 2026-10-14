@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { mintIds } from '@spexcode/spec-core'
-import { contractAuthorizationErrors, validateContractEvolution } from './contract-evolution.js'
+import { contractAuthorizationErrors, resolvedDecisionGapIds, validateContractEvolution } from './contract-evolution.js'
 import type { FrozenContracts } from './frozen-contracts.js'
 import { posix } from 'node:path'
 import { buildContractGraph, CONTRACT_COLUMNS, parseContract, parseParts, projectContractCoverage, validateContractGraph } from '@spexcode/spec-core/contracts'
@@ -95,7 +95,7 @@ function checkInput(input: ElaborationInput): void {
   if (input.totalTimeoutMs !== undefined && (!Number.isInteger(input.totalTimeoutMs) || input.totalTimeoutMs <= 0)) throw new TypeError('总时间预算必须为正整数')
 }
 
-function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate, inputDigest: string): { contracts: Contract[]; graph: ContractGraph; findings: ContractFinding[] } {
+function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate, inputDigest: string): { contracts: Contract[]; graph: ContractGraph; findings: ContractFinding[]; resolvedGapIds: string[] } {
   const findings: ContractFinding[] = []
   if (candidate.inputDigest !== inputDigest) findings.push(finding(input, 'input_digest', '候选未绑定当前冻结输入'))
   const paths = new Set<string>(), nodes = new Set<string>()
@@ -139,7 +139,9 @@ function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate
   const after = frozenState(nextSources, afterFiles)
   for (const change of candidate.changes) if (!after.nodes.some(node => node.id === change.nodeId && node.path === change.path)) findings.push(finding(input, 'node_identity_invalid', `节点身份必须复用共享 mintIds: ${change.path}`))
   if (JSON.stringify(candidate.nodeChanges ?? []) !== JSON.stringify(input.nodeChanges ?? [])) findings.push(finding(input, 'node_changes_unbound', '节点迁移和退役未绑定冻结输入'))
-  findings.push(...validateContractEvolution(before, after, { mode: input.mode ?? 'reelaborate', preserveAcceptedItems: input.refinement !== undefined, authorizedChanges: input.authorizedChanges ?? [], nodeChanges: input.nodeChanges ?? [], retiredIds: input.retiredIds ?? [], newNodeRawSources: new Map(input.targets.map(target => [target.path, target.nodeId === input.intent.nodeId ? input.intent.rawSource : target.rawSource ?? parseParts(target.source ?? '')?.rawSource ?? ''])), facts: input.facts, analysis: input.analysis, decisionAuthorities: input.decisionAuthorities }))
+  const evolutionPolicy = { mode: input.mode ?? 'reelaborate', preserveAcceptedItems: input.refinement !== undefined, authorizedChanges: input.authorizedChanges ?? [], nodeChanges: input.nodeChanges ?? [], retiredIds: input.retiredIds ?? [], newNodeRawSources: new Map(input.targets.map(target => [target.path, target.nodeId === input.intent.nodeId ? input.intent.rawSource : target.rawSource ?? parseParts(target.source ?? '')?.rawSource ?? ''])), facts: input.facts, analysis: input.analysis, decisionAuthorities: input.decisionAuthorities }
+  const resolvedGapIds = [...resolvedDecisionGapIds(before, after, evolutionPolicy)]
+  findings.push(...validateContractEvolution(before, after, evolutionPolicy))
   if (input.verifications) {
     const registered = new Map(input.verifications.map(verification => [verification.id, verification]))
     for (const item of graph.items.values()) {
@@ -176,7 +178,7 @@ function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate
       for (const id of entry.affectedIds) if (!graph.items.has(id)) findings.push(finding(input, 'applicability_reference', `适用性引用不存在: ${id}`))
     }
   }
-  return { contracts, graph, findings }
+  return { contracts, graph, findings, resolvedGapIds }
 }
 
 function reviewErrors(input: ElaborationInput, review: ElaborationReview, inputDigest: string, candidateDigest: string, graph: ContractGraph): ContractFinding[] {
@@ -322,7 +324,7 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
             result.structurePassed = true; result.reviewPassed = true
             result.readyIds = result.coverage.items.filter(item => item.blockedBy.length === 0 && item.kind !== 'GAP').map(item => item.id)
             Object.assign(result, projectElaborationFlowReadiness(checked.graph, result.coverage))
-            result.retiredIds = [...new Set([...input.retiredIds ?? [], ...input.authorizedChanges!.filter(change => change.action === 'retire' && !checked.graph.items.has(change.id)).map(change => change.id), ...input.nodeChanges!.filter(change => change.action === 'retire').map(change => change.from.nodeId)])]
+            result.retiredIds = [...new Set([...checked.resolvedGapIds, ...input.retiredIds ?? [], ...input.authorizedChanges!.filter(change => change.action === 'retire' && !checked.graph.items.has(change.id)).map(change => change.id), ...input.nodeChanges!.filter(change => change.action === 'retire').map(change => change.from.nodeId)])]
             result.status = result.gaps.some(gap => gap.gapKind === 'conflict') ? 'conflict' : result.gaps.length ? 'needs_input' : 'complete'
             return result
           }

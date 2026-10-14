@@ -30,3 +30,6 @@ refinement可携已接受candidateDigest和生成独审的具体失败诊断，�
 decisionAuthorities携可信程序派生裁决范围；update_acceptance及具体retire既核独审分析，又核所选规则/业务ID闭包。使用同decision source或改标user:raw均不能授权无关政策。未选冲突仍为独审finding阻断项。
 
 程序由公共节点删除/所选裁决派生的retire可携analysisRef证明逐项已独审授权；旧可信显式raw/plan授权仍沿自身来源门禁。它不授予验证执行政策变更，退休仍保留旧负向运行义务。
+
+
+retiredIds同时承载逐项合法业务退役与经当前精确裁决确证结清的旧诊断GAP身份。GAP删除仅在本轮P1结构与独审通过后输出；独审拒绝、旧/foreign裁决、共享选外或未解决诊断不记入此集合。协调验证与baseline复用该既有字段累计，后续候选禁止复用。诊断结清不改变用户原意或增加业务退役计划。

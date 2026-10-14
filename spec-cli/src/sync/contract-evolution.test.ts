@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import test from 'node:test'
 import { CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
-import { contractBusinessMeaning, contractBusinessProse, decisionScopeIds, validateContractEvolution } from './contract-evolution.js'
+import { contractBusinessMeaning, contractBusinessProse, decisionScopeIds, resolvedDecisionGapIds, validateContractEvolution } from './contract-evolution.js'
 import type { ContractEvolutionPolicy } from './contract-evolution.js'
 import { checkGenerationContractIntent, readFrozenContracts } from './frozen-contracts.js'
 import { elaborate, elaborationDigest } from './elaboration.js'
@@ -518,4 +518,66 @@ test('共享REQ自然语言扩大未选操作仍由原P1完整候选独审拒绝
   } })
   assert.equal(calls, 2); assert.equal(result.structurePassed, true); assert.equal(result.reviewPassed, false); assert.equal(result.failure?.code, 'repair_budget_exhausted')
   assert.ok(result.rounds.flatMap(round => round.findings).some(finding => finding.code === 'selected-policy-contradiction'))
+})
+
+
+test('已审精确裁决仅删除所选旧诊断GAP与依赖，独审后记录退役且不扩大keep业务权', async () => {
+  const gapId = 'GAP-EXPORT-DOWNLOAD-DIAGNOSTIC', flowId = 'FLOW-EXPORT-01', stepId = 'STEP-EXPORT-04'
+  const flowRow = source.split('\n').find(line => line.startsWith(`| ${flowId} `))!, stepRow = source.split('\n').find(line => line.startsWith(`| ${stepId} `))!
+  const gapSection = `\n### GAP\n\n| id | kind | unknown | affects | evidence | decision | source | depends-on |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| ${gapId} | conflict | 实现下载权限与既定政策冲突 | ${flowId},${stepId},AC-EXPORT-03 | 冻结下载源码未检查所有者 | 按原政策恢复权限 | derived:RULE-EXPORT-01 | REQ-EXPORT-01,RULE-EXPORT-01 |\n`
+  const previousSource = source.replace(flowRow, flowRow.replace(/ \|$/, `,${gapId} |`)).replace(stepRow, stepRow.replace(/ \|$/, `,${gapId} |`)) + gapSection
+  const previousFiles = files(); previousFiles.set(path, previousSource)
+  const before = await readFrozenContracts('/frozen', previousFiles), after = await readFrozenContracts('/frozen', files()), analysis = evidence()
+  const authority = { stableDecisionId: sha, requestRef: { sha256: sha }, operationId: 'old-operation', inputId: 'old-input', analysisRef: { sha256: sha }, findingIds: ['selected-download-conflict'], ruleIds: ['RULE-EXPORT-01'], affectedIds: ['REQ-EXPORT-01', 'RULE-EXPORT-01', stepId, 'AC-EXPORT-03'], paths: ['src/export.js'], decision: { choice: 'keep_intent' as const } }
+  analysis.analysis.decisionAuthorities = [authority]; analysis.analysis.decision = { requestRef: authority.requestRef, analysisRef: authority.analysisRef, findingIds: authority.findingIds }
+  analysis.analysis.changes[0] = { ...analysis.analysis.changes[0], ruleIds: authority.ruleIds, affectedIds: authority.affectedIds }; analysis.analysis.authorizedChanges = []
+  analysis.ref = { sha256: elaborationDigest(JSON.stringify(analysis.analysis)) }
+  const selected = policy({ analysis, decisionAuthorities: [authority] })
+  assert.deepEqual([...resolvedDecisionGapIds(before, after, selected)], [gapId]); assert.deepEqual(validateContractEvolution(before, after, selected), [])
+  assert.equal(authority.affectedIds.includes(flowId), false, '父FLOW只有纯诊断依赖清理，不获得业务授权')
+  assert.deepEqual([...resolvedDecisionGapIds(before, before, selected)], [], '仍存在的GAP不冒称已删除')
+  for (const choice of ['adopt_behavior', 'new_rule'] as const) {
+    const alternative = structuredClone(selected); alternative.decisionAuthorities![0].decision = choice === 'new_rule' ? { choice, rule: '仅结清所选下载分歧' } : { choice }; alternative.analysis!.analysis.decisionAuthorities = alternative.decisionAuthorities as typeof analysis.analysis.decisionAuthorities; alternative.analysis!.ref = { sha256: elaborationDigest(JSON.stringify(alternative.analysis!.analysis)) }
+    assert.deepEqual(validateContractEvolution(before, after, alternative), [])
+  }
+  const mutations: ((value: ContractEvolutionPolicy) => void)[] = [
+    value => { value.analysis!.analysis.reviewPassed = false },
+    value => { value.analysis!.analysis.decision!.requestRef = { sha256: elaborationDigest('foreign-request') } },
+    value => { value.analysis!.analysis.decision!.analysisRef = { sha256: elaborationDigest('old-analysis') } },
+    value => { value.analysis!.analysis.decision!.findingIds = ['unselected-finding'] },
+    value => { value.analysis!.analysis.changes[0].evidence = '' },
+    value => { value.analysis!.analysis.changes[0].ruleIds = [] },
+    value => { value.analysis!.analysis.changes[0].affectedIds = ['RULE-EXPORT-01'] },
+    value => { value.analysis!.analysis.findings = [{ id: 'still-open', kind: 'conflict', affectedIds: [stepId], paths: [path], ruleIds: authority.ruleIds, originalIntent: '下载权限保持', sourceBehavior: '仍开放', deliveryBehavior: '仍开放', evidence: '当前仍冲突', counterexample: '非所有者仍可下载', decision: '待解决' }] },
+    value => { value.mode = 'preserve_business' },
+    value => { value.preserveAcceptedItems = true },
+  ]
+  for (const mutate of mutations) {
+    const rejected = structuredClone(selected); mutate(rejected); rejected.analysis!.ref = { sha256: elaborationDigest(JSON.stringify(rejected.analysis!.analysis)) }
+    assert.deepEqual([...resolvedDecisionGapIds(before, after, rejected)], [])
+    assert.ok(validateContractEvolution(before, after, rejected).some(issue => issue.itemId === gapId))
+  }
+  for (const old of [previousSource.replace(`${flowId},${stepId},AC-EXPORT-03 | 冻结`, `${flowId},${stepId},AC-EXPORT-03,AC-EXPORT-08 | 冻结`), previousSource.replace('derived:RULE-EXPORT-01 | REQ-EXPORT-01,RULE-EXPORT-01', 'derived:RULE-EXPORT-02 | REQ-EXPORT-01,RULE-EXPORT-02'), previousSource.replace('REQ-EXPORT-01,RULE-EXPORT-01 |\n', 'REQ-EXPORT-01,RULE-EXPORT-01,RULE-EXPORT-02 |\n'), previousSource.replace('| RULE-EXPORT-01,RULE-EXPORT-06 |', `| RULE-EXPORT-01,RULE-EXPORT-06,${gapId} |`)]) {
+    const prior = files(); prior.set(path, old)
+    assert.deepEqual([...resolvedDecisionGapIds(await readFrozenContracts('/frozen', prior), after, selected)], [], '共享选外义务及隐藏消费者不能借诊断自批清除')
+  }
+  const flow = before.graph.items.get(flowId)!, step = before.graph.items.get(stepId)!, rule = before.graph.items.get('RULE-EXPORT-01')!, ac = before.graph.items.get('AC-EXPORT-03')!, verify = before.graph.items.get('VERIFY-EXPORT-01')!
+  assert.equal(flow.kind, 'FLOW'); assert.equal(step.kind, 'STEP'); assert.equal(rule.kind, 'RULE'); assert.equal(ac.kind, 'AC'); assert.equal(verify.kind, 'VERIFY')
+  for (const changed of [source.replace(flow.entry, '任意人可操作其他任务'), source.replace(step.action, '无条件下载'), source.replace('| END | derived:FLOW-EXPORT-01 | RULE-EXPORT-01,RULE-EXPORT-03 |', '| STEP-EXPORT-05 | derived:FLOW-EXPORT-01 | RULE-EXPORT-01,RULE-EXPORT-03 |'), source.replace(rule.constraint, '不要求所有者'), source.replace(ac.assertion, '无条件允许'), source.replace(JSON.stringify(verify.command), '["node","--version"]'), source.replace(parseParts(source)!.rawSource, '改变原始业务目标'), source.replace(/^\| AC-EXPORT-03 .*\n/m, ''), source.replace(/^\| VERIFY-EXPORT-01 .*\n/m, '')]) {
+    const next = files(); next.set(path, changed)
+    assert.ok(validateContractEvolution(before, await readFrozenContracts('/frozen', next), selected).length, '清理不授权raw/政策/业务字段/AC/VERIFY改变或删除')
+  }
+  const output = build(source); output.changes[0].removeIds = [gapId]
+  const elaborationInput = { ...input(), targets: [{ nodeId: 'export-contract', path, source: previousSource, sourceDigest: elaborationDigest(previousSource) }], files: previousFiles, analysis, decisionAuthorities: [authority] }
+  const accepted = await elaborate(elaborationInput, { runner: runner(output) })
+  assert.equal(accepted.status, 'complete', JSON.stringify(accepted.rounds.map(round => round.findings))); assert.equal(accepted.reviewPassed, true); assert.deepEqual(accepted.retiredIds, [gapId])
+  let calls = 0
+  const rejected = await elaborate(elaborationInput, { runner: async request => {
+    calls++; const result = await runner(output)(request)
+    if (request.purpose === 'elaboration_review') { result.output = { verdict: 'repair', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [{ code: 'diagnostic-not-resolved', kind: 'repair', message: '候选尚不能结清诊断', affectedIds: [stepId], evidence: '完整候选审查发现权限仍冲突', decision: '恢复诊断并修复权限' }] }; result.resultDigest = elaborationDigest(JSON.stringify(result.output)) }
+    return { ...result, sessionId: `gap-review-${calls}`, threadId: `gap-review-thread-${calls}` }
+  } })
+  assert.equal(rejected.reviewPassed, false); assert.deepEqual(rejected.retiredIds, [])
+  const reused = await elaborate({ ...input(), retiredIds: accepted.retiredIds }, { runner: runner(build(previousSource)) })
+  assert.ok(reused.rounds[0].findings.some(issue => issue.code === 'retired_id_reused' && issue.itemId === gapId))
 })

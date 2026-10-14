@@ -53,3 +53,6 @@ P3生成诊断在真实SQLite/Git复现普通contract引用错误回P1和symbol�
 旧规则引用RULE位置而affectedIds仅有关联AC的真实历史形态单独回归：先复现误套新omission includes(ID)造成unsupported，再验证只撤细化权、完整独审发现不丢且不再派P1。
 
 合法增补链用真实Git/SQLite及独立native接缝验证：首P1批准后专用遗漏触发第二P1实际新增FLOW/STEP/TR/AC并连入原主流程，经结构和独审批准后再遇普通测试repair；第三次实际code_generate仍收到新增全文、原raw/REQ/RULE/AC/VERIFY义务及第二批准attempt的provenance。live、SQLite重启及同绑定显式retryOf均不再派P1。旧contract:权限证据和未审增补候选不得升级冻结正文；原source/index/预算/deadline、固定验证定义及零receipt断言保持。该接缝在code_review终止，不冒称Docker或交付通过。
+
+
+已解决诊断GAP定向回归使用真实SQLite、不可变Git裁决、真实dispatch记录和normal hooks私有Git交付，验证部分baseline含旧诊断→keep精确清理→verification/receipt/baseline累计retiredIds→重开SQLite后禁止复用；P1独审拒绝保持无新receipt和无退役记录。V3 adapter与测试report明确模拟，只证明协调/持久化边界，不作为Docker执行或实际产品运行通过的证据；当前产品Docker验收仍另行完成。

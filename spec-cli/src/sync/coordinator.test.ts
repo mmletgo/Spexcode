@@ -17,7 +17,7 @@ import { prepareSyncAdmission, runSyncOperation, syncPlanDigest } from './coordi
 import type { SyncCoordinatorOptions, SyncCoordinatorPlan } from './coordinator-types.js'
 import { migrateSyncStore, SYNC_COMPONENT, SYNC_MIGRATIONS, syncCoordinatorAddress } from './migrations.js'
 import { dockerVerificationDriver } from './verification-executor.js'
-import type { VerificationCheckpoint } from './verification-executor-types.js'
+import type { VerificationCheckpoint, VerificationCommandResult } from './verification-executor-types.js'
 import { freezeDeliveryRuntime } from './runtime-freeze.js'
 import { captureInputSnapshot, contentHash, readEvidence, readObject, readTree, writeEvidence } from './snapshot.js'
 import type { NativeRunCheckpoint, NativeRunPlan } from './native-run.js'
@@ -1068,4 +1068,77 @@ for (const mode of ['live', 'restart', 'legacy', 'unreviewed'] as const) test(`P
     assert.deepEqual(replay.operation.input, f.operation.input); assert.deepEqual(replay.operation.budget, f.operation.budget); assert.equal(replay.operation.policyDigest, f.operation.policyDigest); assert.equal(replay.receipt, undefined)
     assert.equal(activeStore.listJournals(next.id).length, 0); assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
   }
+})
+
+
+test('已解决诊断GAP经真实SQLite派发与Git receipt累计退役，重启后禁复用；模拟V3不冒实际Docker', { timeout: 240000 }, async t => {
+  const gapId = 'GAP-EXPORT-RETRY-DIAGNOSTIC', flowId = 'FLOW-EXPORT-02', stepId = 'STEP-EXPORT-05'
+  const flowRow = original.split('\n').find(line => line.startsWith(`| ${flowId} `))!, stepRow = original.split('\n').find(line => line.startsWith(`| ${stepId} `))!
+  const gapSource = original.replace(flowRow, flowRow.replace(/ \|$/, `,${gapId} |`)).replace(stepRow, stepRow.replace(/ \|$/, `,${gapId} |`)) + `\n### GAP\n\n| id | kind | unknown | affects | evidence | decision | source | depends-on |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| ${gapId} | conflict | 重试权限实现与原政策分歧 | ${flowId},${stepId},AC-EXPORT-08 | 冻结重试实现缺所有者检查 | 恢复既定重试权限 | derived:RULE-EXPORT-06 | RULE-EXPORT-06 |\n`
+  const f = await fixture(t, { maxAttempts: 1, maxCalls: 12, maxRepairs: 0, timeoutMs: 240000 }, false, gapSource, 'project', original, {}, undefined, 'code'); await f.realTools()
+  f.options.leaseMs = 120000
+  let activeStore = f.store, activeOperation = f.operation, phase: 'conflict' | 'reject' | 'accept' | 'reuse' = 'conflict'
+  let source = '', containerExists = false, containerState = 'created'
+  const simulatedCommands: string[][] = []
+  const ok = (stdout = ''): VerificationCommandResult => ({ exitCode: 0, stdout, stderr: '', truncated: false })
+  f.options.verificationDriver = async argv => {
+    simulatedCommands.push([...argv])
+    if (argv[0] === 'version') return ok(JSON.stringify({ Os: 'linux', Arch: 'arm64', Version: '29.4.3' }))
+    if (argv[0] === 'image') return ok(JSON.stringify([{ Id: 'sha256:image', Os: 'linux', Architecture: 'arm64', Config: { Env: ['PATH=/usr/local/bin'], Volumes: null } }]))
+    const resource = activeStore.listRecoverableResources().find(item => item.operation.id === activeOperation.id && item.resource.plan.kind === 'verification')!.resource
+    const checkpoint = JSON.parse(readEvidence(f.input.source.commonDir, resource.checkpointRef).toString()) as VerificationCheckpoint, config = checkpoint.config
+    if (argv[1] === 'inspect') return containerExists ? ok(JSON.stringify([{ Id: 'a'.repeat(64), Name: `/${checkpoint.uniqueContainerName}`, Image: config.imageId, Platform: 'linux', Config: { Image: config.image, User: '1000:1000', WorkingDir: config.policy.cwd === '.' ? '/candidate' : `/candidate/${config.policy.cwd}`, Entrypoint: [config.argv[0]], Cmd: config.argv.slice(1), Labels: checkpoint.labels, Env: config.environment, Healthcheck: { Test: ['NONE'] } }, HostConfig: { ReadonlyRootfs: true, NetworkMode: 'none', Privileged: false, CapDrop: ['ALL'], CapAdd: null, SecurityOpt: ['no-new-privileges'], Init: true, AutoRemove: false, CgroupnsMode: 'private', RestartPolicy: { Name: 'no' }, Memory: config.policy.memoryBytes, MemorySwap: config.policy.memoryBytes, NanoCpus: config.policy.cpus * 1e9, PidsLimit: config.policy.pidsLimit, Tmpfs: { '/tmp': `rw,noexec,nosuid,nodev,size=${config.policy.scratchBytes},mode=1777` }, LogConfig: { Type: 'local', Config: { 'max-size': String(config.policy.logBytes), 'max-file': '1', compress: 'false' } }, Binds: null, Devices: [], PidMode: '', IpcMode: 'private' }, Mounts: [{ Type: 'bind', Source: config.candidatePath, Destination: '/candidate', RW: false }, { Type: 'bind', Source: config.runnerPath, Destination: '/runner', RW: false }], State: { Status: containerState, Running: false, ExitCode: 0, OOMKilled: false, Error: '' } }])) : { ...ok(), exitCode: 1, stderr: 'Error: No such container' }
+    if (argv[1] === 'create') { containerExists = true; containerState = 'created'; return ok('a'.repeat(64)) }
+    if (argv[1] === 'start') { containerState = 'exited'; return ok('a'.repeat(64)) }
+    if (argv[1] === 'logs') return ok([...config.policy.expectedTestIds.map(id => JSON.stringify({ type: 'test:pass', data: { name: `${id} simulated`, nesting: 0 } })), JSON.stringify({ type: 'test:summary', data: { counts: { tests: config.policy.expectedTestIds.length }, success: true } })].join('\n'))
+    if (argv[1] === 'rm') { containerExists = false; return ok('a'.repeat(64)) }
+    assert.fail(`unexpected simulated verifier argv ${argv}`)
+  }
+  f.transform((output, request) => {
+    if (request.purpose === 'code_behavior_analyze') {
+      const value = output as { changes: object[]; facts: object[] }
+      value.changes = [{ kind: phase === 'conflict' ? 'conflict' : 'allowed_change', paths: ['src/export.js'], affectedIds: ['RULE-EXPORT-06', stepId, 'AC-EXPORT-08'], ruleIds: ['RULE-EXPORT-06'], originalIntent: '重试仍限当前所有者', previousBehavior: '存在重试权限分歧诊断', sourceBehavior: '待修重试实现', deliveryBehavior: '保既定所有者政策', evidence: '冻结原finding与当前明确keep裁决仅恢复重试政策，旧诊断已解决', counterexample: '非所有者重试须拒绝' }]
+      value.facts = source ? [{ source, text: '保持既定重试权限并结清对应诊断' }] : []; return value
+    }
+    if (request.purpose === 'elaboration_generate') { const result = rows(phase === 'conflict' || phase === 'reuse' ? gapSource : original); if (phase !== 'conflict' && phase !== 'reuse') result.changes[0].removeIds = [gapId]; return result }
+    if (request.purpose === 'elaboration_review' && phase === 'reject') return { verdict: 'repair', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [{ code: 'diagnostic-not-resolved', kind: 'repair', message: '权限诊断尚未解决', affectedIds: [stepId], evidence: '完整候选仍有权限矛盾', decision: '保诊断并修实现' }] }
+    return output
+  })
+  const partial = await runSyncOperation(activeStore, activeOperation.id, f.options)
+  assert.ok(partial.receipt, JSON.stringify({ status: partial.status, failure: partial.failure, attempts: activeStore.listAttempts(activeOperation.id).map(attempt => attempt.failure) }))
+  const baseline = activeStore.readBaseline(f.input.source)!
+  assert.ok(readFileSync(join(baseline.verifiedDelivery.source.canonicalRoot, contractPath), 'utf8').includes(gapId))
+  const firstAttempt = activeStore.readAttempt(partial.operation.currentAttemptId!), wrapper = firstAttempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(value => value.stage === 'analysis')
+  const previous = JSON.parse(readEvidence(f.input.source.commonDir, wrapper.resultRef).toString()) as { findings: { id: string }[] }
+  for (const verdict of ['reject', 'accept'] as const) {
+    phase = verdict
+    const request = { requestId: 'resolved-gap-current-keep', operationId: f.operation.id, inputId: f.input.id, analysisRef: wrapper.resultRef, findingIds: previous.findings.map(finding => finding.id), decision: { choice: 'keep_intent' as const } }
+    source = `decision:${controlledDecisionIdentity(request)}`
+    const requestBlob = prepareControlledDecision(f.input, request), plan = { ...f.plan, facts: [...f.plan.facts, { source, text: '保持既定重试权限并结清对应诊断' }] }
+    activeOperation = activeStore.admitAndEnqueue(await prepareSyncAdmission(f.input, plan, { ingressKey: `gap-${verdict}`, rootCauseId: `gap-${verdict}`, ...(verdict === 'accept' ? { retryOf: activeOperation.id } : {}), origin: 'decision', previousBaselinePair: activeStore.readBaseline(f.input.source)!, budget: f.operation.budget, managedRoot: f.managedRoot, requestBlob })); f.useOperation(activeOperation)
+    const result = await runSyncOperation(activeStore, activeOperation.id, { ...f.options, plan, readCurrentPlan: () => plan })
+    const attempt = activeStore.readAttempt(result.operation.currentAttemptId!), stages = attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
+    const elaboration = JSON.parse(readEvidence(f.input.source.commonDir, stages.find(value => value.stage === 'elaboration').resultRef).toString())
+    if (verdict === 'reject') {
+      assert.equal(result.receipt, undefined); assert.deepEqual(elaboration.retiredIds, []); assert.equal(activeStore.listJournals(activeOperation.id).length, 0); assert.ok(!(activeStore.readBaseline(f.input.source)!.retiredIds ?? []).includes(gapId)); continue
+    }
+    assert.equal(result.status, 'workspace_synced', JSON.stringify({ failure: result.failure, findings: elaboration.rounds.map((round: { findings: unknown[] }) => round.findings), attempts: activeStore.listAttempts(activeOperation.id).map(attempt => attempt.failure) })); assert.ok(result.receipt)
+    assert.ok(elaboration.retiredIds.includes(gapId)); assert.equal(attempt.verification!.passed, true)
+    const verification = JSON.parse(readEvidence(f.input.source.commonDir, attempt.verification!.resultBlob).toString()); assert.ok(verification.retiredIds.includes(gapId))
+    assert.ok(activeStore.listJournals(activeOperation.id)[0].receipt); assert.ok(activeStore.readBaseline(f.input.source)!.retiredIds!.includes(gapId))
+    assert.equal(readFileSync(join(activeStore.readBaseline(f.input.source)!.verifiedDelivery.source.canonicalRoot, contractPath), 'utf8').includes(gapId), false)
+  }
+  assert.ok(simulatedCommands.some(argv => argv[1] === 'start')); assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+  f.closeForRestart(); const restartedProtocol = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => restartedProtocol.close())
+  activeStore = new SyncStore(restartedProtocol, { readBlob: ref => readEvidence(f.input.source.commonDir, ref) }); f.useStore(activeStore)
+  const settled = activeStore.readBaseline(f.input.source)!; assert.ok(settled.retiredIds!.includes(gapId))
+  phase = 'reuse'; source = ''
+  const nextInput = await captureInputSnapshot(f.root), reusePlan = { ...f.plan, facts: [...f.plan.facts, { source: 'code:src/export.js#ExportService', text: '新来源重新提出旧诊断' }] }
+  activeOperation = activeStore.admitAndEnqueue(await prepareSyncAdmission(nextInput, reusePlan, { ingressKey: 'gap-reuse-after-restart', rootCauseId: 'gap-reuse-after-restart', origin: 'code', previousBaselinePair: settled, budget: f.operation.budget, managedRoot: f.managedRoot })); f.useOperation(activeOperation)
+  const refused = await runSyncOperation(activeStore, activeOperation.id, { ...f.options, plan: reusePlan, readCurrentPlan: () => reusePlan })
+  assert.equal(refused.receipt, undefined); assert.equal(activeStore.listJournals(activeOperation.id).length, 0)
+  const lastAttempt = activeStore.readAttempt(refused.operation.currentAttemptId!), lastStages = lastAttempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
+  const refusal = JSON.parse(readEvidence(f.input.source.commonDir, lastStages.find(value => value.stage === 'elaboration').resultRef).toString())
+  assert.ok(refusal.rounds.flatMap((round: { findings: { code: string; itemId?: string }[] }) => round.findings).some((issue: { code: string; itemId?: string }) => issue.code === 'retired_id_reused' && issue.itemId === gapId))
+  assert.ok(activeStore.readBaseline(f.input.source)!.retiredIds!.includes(gapId))
 })

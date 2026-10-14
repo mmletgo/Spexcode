@@ -52,3 +52,6 @@ related:
 现行生成只使用 [[elaboration-output]] 的 v2 行差量，程序从冻结 Markdown 重建完整唯一候选；独立审查与原 raw、REQ/AC/VERIFY、稳定 ID、节点生命周期和全图演进门禁继续读取完整输入和候选。失败 seed 仅供诊断：历史 v1 不能用当前差量渲染器重放，原拒绝候选按既有摘要与会话追踪读取并明确标识，绝不成为事实或新基线，原持久结果和历史摘要不改写。修复反馈按现有判断分为当前阻断、P2 待实现证据与已有 GAP 闭包阻断；缺代码/测试不得要求在 P1 造 GAP、放宽政策或把新断言挪绑旧测试。AC-ELABORATION-35–37 验证差量独审仍看到完整义务、历史诊断隔离和修复分类。
 
 AC-ELABORATION-38–40 验证空 changes 的完整既有目标、只返回子叶差量时省略 primary/其他既有叶、及新/raw-only目标省略拒绝；真实节点 move 的空行差量仍按冻结生命周期迁移 RULE authority，未授权改名保持 scope 拒绝。
+
+
+已解决裁决诊断的删除由[[sync-contract-evolution]]从旧图、精确当前独审裁决和实际候选确认。checkCandidate保留此次确证删除的GAP身份；仅在完整P1结构检查与新独审通过后并入既有retiredIds，未批准或仍未解决的候选不记录退役。后续协调验证、receipt和baseline沿原字段累计身份并阻止未来复用，不新增用户业务退役提案。

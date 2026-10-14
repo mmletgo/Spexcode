@@ -65,6 +65,27 @@ export function decisionScopeIds(before: FrozenContracts, authority: SyncDecisio
   return scope
 }
 
+/** 精确已审当前裁决只能结清所选旧义务的派生诊断，不能藉此退役业务。 */
+export function resolvedDecisionGapIds(before: FrozenContracts, after: FrozenContracts, policy: ContractEvolutionPolicy): Set<string> {
+  const resolved = new Set<string>(), analysis = policy.analysis?.analysis, decision = analysis?.decision
+  if (policy.mode !== 'reelaborate' || policy.preserveAcceptedItems || !decision || reviewedAnalysisErrors(policy.analysis, policy.analysis!.ref.sha256).length) return resolved
+  const authorities = (policy.decisionAuthorities ?? analysis!.decisionAuthorities ?? []).filter(authority => authority.requestRef.sha256 === decision.requestRef.sha256 && authority.analysisRef.sha256 === decision.analysisRef.sha256 && same([...authority.findingIds].sort(), [...decision.findingIds].sort()))
+  if (authorities.length !== 1) return resolved
+  const authority = authorities[0], rules = new Set(authority.ruleIds.filter(id => ['RULE', 'TR'].includes(before.graph.items.get(id)?.kind ?? '')))
+  const requirements = new Set(authority.affectedIds.filter(id => before.graph.items.get(id)?.kind === 'REQ'))
+  const obligations = new Set(authority.affectedIds.filter(id => ['STEP', 'AC'].includes(before.graph.items.get(id)?.kind ?? '')))
+  const flows = new Set([...obligations].flatMap(id => { const item = before.graph.items.get(id)!; return item.kind === 'STEP' ? [item.flow] : [] }))
+  for (const gap of before.graph.items.values()) {
+    if (gap.kind !== 'GAP' || after.graph.items.has(gap.id) || !['derived', 'rule'].includes(gap.source.kind) || !rules.has(gap.source.ref) || !gap.dependsOn.every(id => rules.has(id) || requirements.has(id)) || !gap.affects.length || !gap.affects.every(id => obligations.has(id) || flows.has(id))) continue
+    const affected = gap.affects.filter(id => !flows.has(id)), dependencies = gap.dependsOn.filter(id => requirements.has(id)), related = new Set([gap.id, gap.source.ref, ...gap.dependsOn, ...gap.affects])
+    if (analysis!.findings.some(finding => [...finding.affectedIds, ...finding.ruleIds].some(id => related.has(id)))) continue
+    if ([...before.graph.items.values()].some(item => contractReferences(item).some(reference => reference.id === gap.id && (reference.field !== 'depends-on' || !related.has(item.id))))) continue
+    if (!analysis!.changes.some(change => change.kind === 'allowed_change' && change.evidence.trim() && [gap.source.ref, ...gap.dependsOn.filter(id => rules.has(id))].every(id => change.ruleIds.includes(id)) && [...affected, ...dependencies].every(id => change.affectedIds.includes(id)))) continue
+    resolved.add(gap.id)
+  }
+  return resolved
+}
+
 /** 裁决事实的文字不是授权；仅使用程序从真实请求和所选旧发现冻结的作用范围。 */
 export function decisionAuthorizationErrors(source: string, ids: readonly string[], before: FrozenContracts, policy: Pick<ContractEvolutionPolicy, 'analysis' | 'decisionAuthorities'>): string[] {
   const authorities = policy.decisionAuthorities ?? policy.analysis?.analysis.decisionAuthorities ?? []
@@ -165,6 +186,8 @@ export function validateContractEvolution(before: FrozenContracts, after: Frozen
     findings.push({ code, severity: 'error', path: location.path, nodeId: location.nodeId ?? location.id!, message, ...(itemId ? { itemId } : {}) })
   }
   const authorizations = new Map(policy.authorizedChanges.map(change => [change.id, change]))
+  const resolvedGaps = resolvedDecisionGapIds(before, after, policy)
+  const onlyDiagnosticDependenciesChanged = (item: ContractItem, next: ContractItem | undefined): boolean => item.kind !== 'VERIFY' && next?.kind === item.kind && item.dependsOn.some(id => resolvedGaps.has(id)) && same({ ...contractBusinessMeaning(item), dependsOn: item.dependsOn.filter(id => !resolvedGaps.has(id)) }, contractBusinessMeaning(next))
   if (authorizations.size !== policy.authorizedChanges.length && before.nodes.length) issue('contract_authorization_duplicate', before.nodes[0], '同一身份不能收到重复契约变更授权')
   const authorities = policy.decisionAuthorities ?? policy.analysis?.analysis.decisionAuthorities ?? []
   const decision = policy.analysis?.analysis.decision
@@ -172,7 +195,7 @@ export function validateContractEvolution(before: FrozenContracts, after: Frozen
   const currentScope = current ? decisionScopeIds(before, current, decision, after) : new Set<string>()
   if (decision) for (const item of before.graph.items.values()) {
     const next = after.graph.items.get(item.id)
-    if (next && sameContractBusinessMeaning(item, next)) continue
+    if (resolvedGaps.has(item.id) || onlyDiagnosticDependenciesChanged(item, next) || next && sameContractBusinessMeaning(item, next)) continue
     if (item.kind !== 'VERIFY' && item.source.kind === 'code' && next && next.kind !== 'VERIFY' && next.source.kind === 'code') continue
     const authorization = authorizations.get(item.id)
     if (authorization && independentlyAuthoredChange(authorization, before, policy)) continue
@@ -239,6 +262,7 @@ export function validateContractEvolution(before: FrozenContracts, after: Frozen
   for (const item of before.graph.items.values()) {
     const next = after.graph.items.get(item.id)
     const authorization = authorizations.get(item.id)
+    if (resolvedGaps.has(item.id) || onlyDiagnosticDependenciesChanged(item, next)) continue
     if (!next || next.kind !== item.kind) {
       if (policy.mode === 'preserve_business' || policy.preserveAcceptedItems || authorization?.action !== 'retire') issue('protected_item_removed', item, '删除契约项必须有用户原意或可信裁决的退役依据', item.id)
       continue
@@ -262,7 +286,7 @@ export function validateContractEvolution(before: FrozenContracts, after: Frozen
       }
     }
   }
-  const retired = new Set([...policy.retiredIds, ...policy.authorizedChanges.filter(change => change.action === 'retire').map(change => change.id), ...policy.nodeChanges.filter(change => change.action === 'retire').map(change => change.from.nodeId)])
+  const retired = new Set([...resolvedGaps, ...policy.retiredIds, ...policy.authorizedChanges.filter(change => change.action === 'retire').map(change => change.id), ...policy.nodeChanges.filter(change => change.action === 'retire').map(change => change.from.nodeId)])
   for (const id of retired) if (after.graph.items.has(id) || after.nodes.some(node => node.id === id)) issue('retired_id_reused', after.graph.items.get(id) ?? after.nodes.find(node => node.id === id)!, '不能复用历史退役身份', id)
   for (const item of after.graph.items.values()) {
     for (const reference of contractReferences(item)) if (retired.has(reference.id)) issue('retired_reference_remaining', item, `退役后引用必须清理: ${reference.id}`, item.id)
