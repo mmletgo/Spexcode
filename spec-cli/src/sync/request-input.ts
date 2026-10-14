@@ -106,7 +106,7 @@ export function validateControlledRequest(snapshot: InputSnapshot, requestBlob: 
 }
 
 /** 以真实来源为 base 叠加用户差量，保留已组合细化；冲突返回三方 Git 对象证据。 */
-export function composeControlledRequest(snapshot: InputSnapshot, composed: ComposedInputRef, requestBlob: BlobRef): { composed: ComposedInputRef | null; conflicts: CompositionConflict[] } {
+export function composeControlledRequest(snapshot: InputSnapshot, composed: ComposedInputRef, requestBlob: BlobRef, options: { retainConflicts?: boolean } = {}): { composed: ComposedInputRef | null; conflicts: CompositionConflict[] } {
   const commonDir = snapshot.source.commonDir
   const saved = JSON.parse(readEvidence(commonDir, requestBlob).toString('utf8')) as { type?: string }
   const decision = saved.type === 'sync.decision' ? readControlledDecision(snapshot, requestBlob) : null
@@ -120,8 +120,8 @@ export function composeControlledRequest(snapshot: InputSnapshot, composed: Comp
   }
   if (decision) {
     if (!decision.originalRequestBlob) return { composed: { ...composed, requestBlob }, conflicts: [] }
-    const result = composeControlledRequest(snapshot, composed, decision.originalRequestBlob)
-    return result.composed ? { composed: { ...result.composed, requestBlob }, conflicts: [] } : result
+    const result = composeControlledRequest(snapshot, composed, decision.originalRequestBlob, options)
+    return result.composed ? { composed: { ...result.composed, requestBlob }, conflicts: result.conflicts } : result
   }
   if (!request) throw new Error('受控请求不合法')
   const delivery = entries.find(entry => entry.path === request.path)
@@ -131,9 +131,17 @@ export function composeControlledRequest(snapshot: InputSnapshot, composed: Comp
     const merged = mergeText(commonDir, delivery, request.before, request.next)
     if (merged) next = { ...delivery, oid: writeObject(commonDir, merged), digest: contentHash(merged) }
   }
-  if (!next) return { composed: null, conflicts: [{ path: request.path, base: request.before, source: request.next, delivery: delivery ?? null }] }
+  const conflicts: CompositionConflict[] = []
+  if (!next) {
+    const conflict = { path: request.path, base: request.before, source: request.next, delivery: delivery ?? null }
+    if (!options.retainConflicts) return { composed: null, conflicts: [conflict] }
+    conflicts.push(conflict)
+    next = request.next
+  }
   const resultEntries = entries.map(entry => entry.path === request.path ? next! : entry), tree = writeTree(commonDir, resultEntries)
   const manifestBlob = writeEvidence(commonDir, { version: 1, entries: resultEntries }), contentDigest = contentHash(JSON.stringify(resultEntries))
   objectGit(commonDir, ['update-ref', `refs/spex-sync/compositions/${tree}`, tree])
-  return { composed: { ...composed, tree, manifestBlob, contentDigest, requestBlob }, conflicts: [] }
+  const priorConflicts = composed.compositionEvidenceBlob ? (JSON.parse(readEvidence(commonDir, composed.compositionEvidenceBlob).toString('utf8')) as { conflicts: CompositionConflict[] }).conflicts : []
+  const compositionEvidenceBlob = conflicts.length ? writeEvidence(commonDir, { version: 'composition-overlap-v1', sourceInputId: snapshot.id, baselinePairId: composed.previousBaselinePairId, conflicts: [...priorConflicts, ...conflicts] }) : composed.compositionEvidenceBlob
+  return { composed: { ...composed, tree, manifestBlob, contentDigest, requestBlob, ...(compositionEvidenceBlob ? { compositionEvidenceBlob } : {}) }, conflicts }
 }
