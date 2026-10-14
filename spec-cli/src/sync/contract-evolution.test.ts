@@ -146,3 +146,37 @@ test('用户明确raw变化的简单REQ来源能授权AC更新，不要求虚构
   const result = await elaborate({ ...input(), intent: { nodeId: 'export-contract', rawSource: raw }, analysis, authorizedChanges: [authorization] }, { runner: runner(build(changed)) })
   assert.equal(result.status, 'complete')
 })
+
+test('已发生作者规则变化的真实独审差量允许反写AC，错误raw绑定及code自批拒绝', async () => {
+  const prior = await readFrozenContracts('/frozen', files()), rule = prior.graph.items.get('RULE-EXPORT-02')!
+  assert.equal(rule.kind, 'RULE')
+  const authored = source.replace(rule.constraint, `${rule.constraint}；重复调用同时返回当前状态`)
+  const sourceFiles = files(); sourceFiles.set(path, authored)
+  const before = await readFrozenContracts('/frozen', sourceFiles), afterFiles = new Map(sourceFiles)
+  afterFiles.set(path, updatedSource(authored))
+  const after = await readFrozenContracts('/frozen', afterFiles), analysis = evidence()
+  analysis.analysis.authorizedChanges = [{ ...proposal, source: 'user:raw' }]
+  analysis.analysis.authorChanges = [{ nodeId: 'export-contract', path, beforeRaw: prior.contracts[0].rawSource, afterRaw: before.contracts[0].rawSource, changedIds: ['RULE-EXPORT-02'] }]
+  analysis.ref.sha256 = elaborationDigest(JSON.stringify(analysis.analysis))
+  const authorized = (): AuthorizedContractChange => ({ ...analysis.analysis.authorizedChanges[0], analysisRef: analysis.ref })
+  assert.deepEqual(validateContractEvolution(before, after, policy({ analysis, authorizedChanges: [authorized()] })), [])
+  const result = await elaborate({ ...input(), targets: [{ nodeId: 'export-contract', path, source: authored, sourceDigest: elaborationDigest(authored) }], analysis, authorizedChanges: [authorized()] }, { runner: runner(build(updatedSource(authored))) })
+  assert.equal(result.status, 'complete')
+  analysis.analysis.authorChanges[0].afterRaw = '不属于当前输入的旧原意'
+  analysis.ref.sha256 = elaborationDigest(JSON.stringify(analysis.analysis))
+  assert.ok(validateContractEvolution(before, after, policy({ analysis, authorizedChanges: [authorized()] })).some(issue => issue.code === 'acceptance_rule_unchanged'))
+  analysis.analysis.authorizedChanges = [proposal]
+  analysis.analysis.authorChanges[0].afterRaw = before.contracts[0].rawSource
+  analysis.ref.sha256 = elaborationDigest(JSON.stringify(analysis.analysis))
+  assert.ok(validateContractEvolution(before, after, policy({ analysis, authorizedChanges: [authorization(analysis)] })).some(issue => issue.code === 'acceptance_rule_unchanged'))
+})
+
+test('P1审查必须使用不同于行为分析的当前会话线程', async () => {
+  const analysis = evidence()
+  analysis.analysis.traces[1].sessionId = 'session-2'
+  analysis.analysis.traces[1].threadId = 'thread-2'
+  analysis.ref.sha256 = elaborationDigest(JSON.stringify(analysis.analysis))
+  const result = await elaborate({ ...input(), analysis }, { runner: runner(build(source)) })
+  assert.equal(result.status, 'exhausted')
+  assert.ok(result.rounds[0].findings.some(issue => issue.code === 'review_not_independent'))
+})

@@ -127,7 +127,8 @@ export function validateContractEvolution(before: FrozenContracts, after: Frozen
           const priorSource = before.graph.items.get(id), nextSource = after.graph.items.get(id)
           if (!nextSource || !['REQ', 'RULE', 'TR'].includes(nextSource.kind) || !sources.has(id)) return false
           const rawChanged = nextSource.kind === 'REQ' && before.nodes.find(node => node.path === priorSource?.path)?.rawSource !== after.nodes.find(node => node.path === nextSource.path)?.rawSource
-          return !priorSource || !same(contractBusinessMeaning(priorSource), contractBusinessMeaning(nextSource)) || rawChanged
+          const authorChanged = authorization.source === 'user:raw' && policy.analysis?.analysis.authorChanges?.some(change => change.nodeId === nextSource.nodeId && change.path === nextSource.path && change.changedIds.includes(id) && change.afterRaw === after.nodes.find(node => node.path === nextSource.path)?.rawSource)
+          return !priorSource || !same(contractBusinessMeaning(priorSource), contractBusinessMeaning(nextSource)) || rawChanged || authorChanged === true
         })) issue('acceptance_rule_unchanged', next, '验收更新必须追溯到实际变化的合法需求、规则或状态处置', item.id)
       }
     }

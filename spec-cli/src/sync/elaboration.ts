@@ -291,7 +291,7 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
           round.reviewOutput = reviewOutput
           if (input.signal?.aborted) throw Object.assign(new Error('细化已取消，保留当前候选和评审产物'), { code: 'cancelled' })
           round.findings.push(...outputErrors(reviewOutput, ELABORATION_REVIEW_SCHEMA).map(message => finding(input, 'review_schema', message)))
-          if (round.traces[0].sessionId === round.traces[1].sessionId || round.traces[0].threadId === round.traces[1].threadId || prior?.traces.some(trace => trace.sessionId === round.traces[1].sessionId || trace.threadId === round.traces[1].threadId)) round.findings.push(finding(input, 'review_not_independent', '新审查必须独立于构建及种子既有会话/线程'))
+          if (round.traces[0].sessionId === round.traces[1].sessionId || round.traces[0].threadId === round.traces[1].threadId || prior?.traces.some(trace => trace.sessionId === round.traces[1].sessionId || trace.threadId === round.traces[1].threadId) || input.analysis?.analysis.traces.some(trace => trace.sessionId === round.traces[1].sessionId || trace.threadId === round.traces[1].threadId)) round.findings.push(finding(input, 'review_not_independent', '新审查必须独立于构建、行为分析及种子既有会话/线程'))
           if (!round.findings.some(issue => repairRequired(issue, result.coverage))) {
             round.review = { ...(reviewOutput as Omit<ElaborationReview, 'inputDigest' | 'candidateDigest'>), inputDigest, candidateDigest: round.candidateDigest }
             round.findings.push(...reviewErrors(input, round.review, inputDigest, round.candidateDigest, checked.graph))
