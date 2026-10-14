@@ -1,4 +1,7 @@
 import { createHash } from 'node:crypto'
+import { mintIds } from '@spexcode/spec-core'
+import { acceptanceAuthorizationErrors, validateContractEvolution } from './contract-evolution.js'
+import type { FrozenContracts } from './frozen-contracts.js'
 import { posix } from 'node:path'
 import { buildContractGraph, CONTRACT_COLUMNS, parseContract, parseParts, projectContractCoverage, validateContractGraph } from '@spexcode/spec-core/contracts'
 import type { Contract, ContractCoverage, ContractFinding, ContractGraph, Gap } from '@spexcode/spec-core/contracts'
@@ -26,6 +29,14 @@ function finding(input: ElaborationInput, code: string, message: string, itemId?
   const target = input.targets.find(target => target.nodeId === input.intent.nodeId)!
   return { code, severity: 'error', nodeId: target.nodeId, path: target.path, message, ...(itemId ? { itemId } : {}) }
 }
+
+function frozenState(sources: readonly { nodeId: string; path: string; source: string }[], files?: ReadonlyMap<string, string>): FrozenContracts {
+  const contracts = sources.flatMap(source => parseContract(source).contract ?? [])
+  const graph = buildContractGraph(contracts)
+  const identities = mintIds(sources.map(source => source.path.split('/').slice(1, -1)))
+  return { files: files ?? new Map(), nodes: sources.map((source, index) => ({ id: identities[index], path: source.path, rawSource: parseParts(source.source)?.rawSource ?? null })), contracts, graph, coverage: projectContractCoverage(graph), findings: [] }
+}
+const baselineSources = (input: ElaborationInput): { nodeId: string; path: string; source: string }[] => [...input.targets.filter((target): target is typeof target & { source: string } => target.source !== null), ...(input.context ?? [])]
 
 function checkInput(input: ElaborationInput): void {
   if (!input.intent.rawSource.trim() || !input.requestKey) throw new TypeError('业务原意与请求键不能为空')
@@ -55,13 +66,24 @@ function checkInput(input: ElaborationInput): void {
     const errors = parseContract({ nodeId: target.nodeId, path: target.path, source: rendered.source }).findings.filter(issue => issue.severity === 'error')
     if (errors.length) throw new TypeError(`可信验证登记不合法: ${errors.map(issue => `${issue.code}: ${issue.message}`).join('; ')}`)
   }
-  const items = input.targets.flatMap(target => target.source === null ? [] : parseContract({ nodeId: target.nodeId, path: target.path, source: target.source }).contract?.items ?? [])
+  const baseline = frozenState(baselineSources(input), input.files)
+  const items = [...baseline.graph.items.values()]
   const authorizations = new Set<string>()
   for (const change of input.authorizedChanges ?? []) {
     const existing = items.find(item => item.id === change.id)
-    if (!existing || !change.reason.trim() || authorizations.has(change.id) || !['retire', 'update_verification'].includes(change.action) || (change.action === 'update_verification' && existing.kind !== 'VERIFY')) throw new TypeError(`合法契约变更需明确既有身份、操作和依据: ${change.id}`)
-    if (change.source !== 'user:raw' && !(input.facts ?? []).some(fact => fact.source === change.source && fact.source.startsWith('decision:'))) throw new TypeError(`契约变更没有可信来源: ${change.id}`)
+    if (!existing || !change.reason.trim() || authorizations.has(change.id) || !['retire', 'update_verification', 'update_acceptance'].includes(change.action) || (change.action === 'update_verification' && existing.kind !== 'VERIFY') || (change.action === 'update_acceptance' && existing?.kind !== 'AC')) throw new TypeError(`合法契约变更需明确既有身份、操作和依据: ${change.id}`)
+    if (change.action === 'update_acceptance') {
+      const errors = acceptanceAuthorizationErrors(change, baseline, input)
+      if (errors.length) throw new TypeError(`验收变更没有可信分析: ${change.id}; ${errors.join('; ')}`)
+    } else if (change.source !== 'user:raw' && !(input.facts ?? []).some(fact => fact.source === change.source && fact.source.startsWith('decision:'))) throw new TypeError(`契约变更没有可信来源: ${change.id}`)
     authorizations.add(change.id)
+  }
+  const lifecyclePaths = new Set<string>(), destinations = new Set<string>()
+  for (const change of input.nodeChanges ?? []) {
+    const target = input.targets.find(target => target.nodeId === change.from.nodeId && target.path === change.from.path && target.source !== null)
+    if (!target || lifecyclePaths.has(change.from.path) || !/^[a-f0-9]{64}$/.test(change.evidenceRef.sha256) || (change.action === 'move' && (!specPath(change.to.path) || destinations.has(change.to.path) || [...input.targets, ...(input.context ?? [])].some(source => source.path === change.to.path)))) throw new TypeError('节点生命周期变更必须明确唯一冻结旧新范围与证据')
+    lifecyclePaths.add(change.from.path)
+    if (change.action === 'move') destinations.add(change.to.path)
   }
   if (!Number.isInteger(input.maxRepairs ?? 2) || (input.maxRepairs ?? 2) < 0 || (input.maxRepairs ?? 2) > 5) throw new TypeError('修复预算必须是0到5的整数')
   if (!Number.isInteger(input.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS) || (input.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS) <= 0) throw new TypeError('每次调用超时必须为正整数')
@@ -75,8 +97,9 @@ function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate
   const paths = new Set<string>(), nodes = new Set<string>()
   const changed = new Map<string, Contract>()
   for (const change of candidate.changes) {
-    const target = input.targets.find(target => target.path === change.path && target.nodeId === change.nodeId)
-    if (!specPath(change.path) || !target || paths.has(change.path) || nodes.has(change.nodeId)) {
+    const moved = input.nodeChanges?.find(node => node.action === 'move' && node.to.path === change.path && node.to.nodeId === change.nodeId)
+    const target = input.targets.find(target => moved ? target.path === moved.from.path && target.nodeId === moved.from.nodeId : target.path === change.path && target.nodeId === change.nodeId)
+    if (!specPath(change.path) || !target || input.nodeChanges?.some(node => node.from.path === change.path) || paths.has(change.path) || nodes.has(change.nodeId)) {
       findings.push(finding(input, 'write_scope', `候选越界或重复: ${change.path}`)); continue
     }
     paths.add(change.path); nodes.add(change.nodeId)
@@ -86,25 +109,27 @@ function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate
     if (!parsed.contract) { findings.push(finding(input, 'contract_required', `候选必须启用sync-v1: ${change.path}`)); continue }
     const before = target.source === null ? null : parseContract({ nodeId: target.nodeId, path: target.path, source: target.source }).contract
     for (const anchor of parsed.contract.code) if (!before?.code.includes(anchor) && !input.files?.has(anchor.split('#')[0])) findings.push(finding(input, 'unverified_new_code_anchor', `新治理锚点必须指向冻结上下文的真实代码文件: ${anchor}`))
-    const raw = change.nodeId === input.intent.nodeId ? input.intent.rawSource : target.rawSource ?? before?.rawSource ?? (target.source === null ? undefined : parseParts(target.source)?.rawSource)
+    const raw = moved ? before?.rawSource : change.nodeId === input.intent.nodeId ? input.intent.rawSource : target.rawSource ?? before?.rawSource ?? (target.source === null ? undefined : parseParts(target.source)?.rawSource)
     if (raw === undefined || parsed.contract.rawSource !== raw.trim() || !change.source.includes(raw)) findings.push(finding(input, 'raw_changed', `用户原意必须原样保留: ${change.path}`))
-    for (const item of before?.items ?? []) {
-      if (['REQ', 'AC', 'VERIFY'].includes(item.kind) && !parsed.contract.items.some(next => next.id === item.id && next.kind === item.kind) && !input.authorizedChanges?.some(change => change.id === item.id && change.action === 'retire')) findings.push(finding(input, 'protected_item_removed', `缺少用户原意或可信裁决的退役依据: ${item.id}`, item.id))
-      if (item.kind === 'VERIFY') {
-        const next = parsed.contract.items.find(next => next.id === item.id)
-        if (next && next.kind === 'VERIFY' && (JSON.stringify(next.command) !== JSON.stringify(item.command) || next.cwd !== item.cwd || next.timeoutMs !== item.timeoutMs) && !input.authorizedChanges?.some(change => change.id === item.id && change.action === 'update_verification')) findings.push(finding(input, 'verification_policy_changed', `缺少已确认的验证政策变更依据: ${item.id}`, item.id))
-      }
-    }
     changed.set(change.nodeId, parsed.contract)
   }
-  if (!nodes.has(input.intent.nodeId)) findings.push(finding(input, 'intent_not_elaborated', '候选必须包含用户原意节点'))
+  if (!nodes.has(input.intent.nodeId) && !input.nodeChanges?.some(change => change.from.nodeId === input.intent.nodeId && (change.action === 'retire' || nodes.has(change.to.nodeId)))) findings.push(finding(input, 'intent_not_elaborated', '候选必须包含用户原意节点'))
   const contracts = [...changed.values()]
-  for (const source of [...input.targets.filter(target => !changed.has(target.nodeId) && target.source !== null), ...(input.context ?? [])]) {
+  for (const source of [...input.targets.filter(target => !changed.has(target.nodeId) && target.source !== null && !input.nodeChanges?.some(change => change.from.path === target.path)), ...(input.context ?? [])]) {
     const parsed = parseContract({ nodeId: source.nodeId, path: source.path, source: source.source! })
     findings.push(...parsed.findings)
     if (parsed.contract) contracts.push(parsed.contract)
   }
   const graph = buildContractGraph(contracts)
+  const before = frozenState(baselineSources(input), input.files)
+  const nextSources = [...baselineSources(input).filter(source => !paths.has(source.path) && !input.nodeChanges?.some(change => change.from.path === source.path)), ...candidate.changes.map(change => ({ nodeId: change.nodeId, path: change.path, source: change.source }))]
+  const afterFiles = new Map(input.files)
+  for (const change of input.nodeChanges ?? []) afterFiles.delete(change.from.path)
+  for (const source of nextSources) afterFiles.set(source.path, source.source)
+  const after = frozenState(nextSources, afterFiles)
+  for (const change of candidate.changes) if (!after.nodes.some(node => node.id === change.nodeId && node.path === change.path)) findings.push(finding(input, 'node_identity_invalid', `节点身份必须复用共享 mintIds: ${change.path}`))
+  if (JSON.stringify(candidate.nodeChanges ?? []) !== JSON.stringify(input.nodeChanges ?? [])) findings.push(finding(input, 'node_changes_unbound', '节点迁移和退役未绑定冻结输入'))
+  findings.push(...validateContractEvolution(before, after, { mode: input.mode ?? 'reelaborate', authorizedChanges: input.authorizedChanges ?? [], nodeChanges: input.nodeChanges ?? [], retiredIds: input.retiredIds ?? [], newNodeRawSources: new Map(input.targets.map(target => [target.path, target.nodeId === input.intent.nodeId ? input.intent.rawSource : target.rawSource ?? parseParts(target.source ?? '')?.rawSource ?? ''])), facts: input.facts, analysis: input.analysis }))
   if (input.verifications) {
     const registered = new Map(input.verifications.map(verification => [verification.id, verification]))
     for (const item of graph.items.values()) {
@@ -116,7 +141,7 @@ function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate
   }
   for (const id of input.retiredIds ?? []) if (graph.items.has(id)) findings.push(finding(input, 'retired_id_reused', `不能复用退役稳定身份: ${id}`, id))
   for (const change of input.authorizedChanges ?? []) if (change.action === 'retire' && graph.items.has(change.id)) findings.push(finding(input, 'retirement_not_applied', `用户已决定退役的身份仍存在: ${change.id}`, change.id))
-  findings.push(...validateContractGraph(graph, { mode: 'final', files: input.files, nodeIds: new Set([...input.targets, ...(input.context ?? [])].map(source => source.nodeId)) }))
+  findings.push(...validateContractGraph(graph, { mode: 'final', files: input.files, nodeIds: new Set(after.nodes.map(source => source.id)) }))
   const baseline = [...input.targets.filter(target => target.source !== null), ...(input.context ?? [])].flatMap(source => parseContract({ nodeId: source.nodeId, path: source.path, source: source.source! }).contract?.items ?? [])
   const decisions = new Set([...(input.facts ?? []).filter(fact => fact.source.startsWith('decision:')).map(fact => fact.source), ...baseline.flatMap(item => item.kind !== 'VERIFY' && item.source.kind === 'decision' ? [`decision:${item.source.ref}`] : [])])
   for (const contract of changed.values()) for (const item of contract.items) {
@@ -196,7 +221,7 @@ function validateRepairSeed(input: ElaborationInput, seed: ElaborationRepairSeed
 /** 从不可变业务输入连续生成、解析和独立审查；仅返回候选，不拥有交付树写权限。 */
 export async function elaborate(input: ElaborationInput, options: { runner?: ElaborationRunner; seed?: ElaborationRepairSeed } = {}): Promise<ElaborationResult> {
   checkInput(input)
-  const frozen = structuredClone({ execution: { root: input.root, base: input.base ?? null }, intent: input.intent, targets: input.targets, context: input.context ?? [], facts: input.facts ?? [], ...(input.verifications ? { verifications: input.verifications } : {}), authorizedChanges: input.authorizedChanges ?? [], retiredIds: input.retiredIds ?? [], files: input.files ? [...input.files].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0) : null })
+  const frozen = structuredClone({ execution: { root: input.root, base: input.base ?? null }, intent: input.intent, targets: input.targets, context: input.context ?? [], facts: input.facts ?? [], ...(input.verifications ? { verifications: input.verifications } : {}), authorizedChanges: input.authorizedChanges ?? [], mode: input.mode ?? 'reelaborate', nodeChanges: input.nodeChanges ?? [], analysis: input.analysis, retiredIds: input.retiredIds ?? [], files: input.files ? [...input.files].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0) : null })
   // 在任何 await 前复制调用者输入，后续生成/评审不能混入继续编辑的字节。
   input = { ...input, ...frozen, files: frozen.files === null ? undefined : new Map(frozen.files) }
   const inputDigest = digest(frozen)
@@ -204,7 +229,7 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
   const seedChecked = seed ? validateRepairSeed(input, seed, inputDigest) : undefined
   const seedCandidate = seedChecked?.candidate
   const prior = seed ? { requestKey: seed.requestKey, inputDigest, candidateDigest: seed.candidateDigest, renderedCandidateDigest: digest(seedCandidate), traces: seed.traces } : null
-  const result: ElaborationResult = { status: 'exhausted', inputDigest, candidateDigest: null, prior, changes: [], contracts: [], graph: null, coverage: null, gaps: [], blockedIds: [], readyIds: [], readyFlowIds: [], blockedFlows: [], retiredIds: [], structurePassed: false, reviewPassed: false, runtimeVerification: 'not_run', implementationReady: false, deferredImplementationFindings: [], blockedStructureFindings: [], rounds: [], failure: null }
+  const result: ElaborationResult = { status: 'exhausted', inputDigest, candidateDigest: null, prior, changes: [], contracts: [], graph: null, coverage: null, gaps: [], blockedIds: [], readyIds: [], readyFlowIds: [], blockedFlows: [], retiredIds: [], nodeChanges: [], structurePassed: false, reviewPassed: false, runtimeVerification: 'not_run', implementationReady: false, deferredImplementationFindings: [], blockedStructureFindings: [], rounds: [], failure: null }
   const maxCalls = input.maxCalls ?? 2 * ((input.maxRepairs ?? 2) + 1)
   const deadline = Date.now() + (input.totalTimeoutMs ?? (input.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS) * maxCalls)
   let calls = 0
@@ -248,6 +273,7 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
         round.candidateDigest = digest(round.candidate)
         const checked = checkCandidate(input, round.candidate, inputDigest)
         round.findings.push(...checked.findings)
+        result.nodeChanges = round.candidate.nodeChanges ?? []
         result.changes = round.candidate.changes.map(change => ({ ...change, contentDigest: elaborationDigest(change.source) }))
         result.candidateDigest = round.candidateDigest
         result.contracts = checked.contracts; result.graph = checked.graph
@@ -274,7 +300,7 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
             result.structurePassed = true; result.reviewPassed = true
             result.readyIds = result.coverage.items.filter(item => item.blockedBy.length === 0 && item.kind !== 'GAP').map(item => item.id)
             Object.assign(result, projectElaborationFlowReadiness(checked.graph, result.coverage))
-            result.retiredIds = input.authorizedChanges!.filter(change => change.action === 'retire' && !checked.graph.items.has(change.id)).map(change => change.id)
+            result.retiredIds = [...new Set([...input.retiredIds ?? [], ...input.authorizedChanges!.filter(change => change.action === 'retire' && !checked.graph.items.has(change.id)).map(change => change.id), ...input.nodeChanges!.filter(change => change.action === 'retire').map(change => change.from.nodeId)])]
             result.status = result.gaps.some(gap => gap.gapKind === 'conflict') ? 'conflict' : result.gaps.length ? 'needs_input' : 'complete'
             return result
           }

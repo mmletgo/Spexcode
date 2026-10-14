@@ -1,6 +1,7 @@
 import { loadSpecs } from '@spexcode/spec-core'
 import { buildContractGraph, parseContract, parseParts, projectContractCoverage, validateContractGraph } from '@spexcode/spec-core/contracts'
-import type { Contract, ContractCoverage, ContractFinding, ContractGraph, ContractItem, Verification } from '@spexcode/spec-core/contracts'
+import type { Contract, ContractCoverage, ContractFinding, ContractGraph, Verification } from '@spexcode/spec-core/contracts'
+import { contractBusinessMeaning, contractBusinessProse } from './contract-evolution.js'
 import { validateFrozenAnchors } from './frozen-anchors.js'
 
 export type FrozenContracts = {
@@ -32,11 +33,6 @@ export type GenerationContractPolicy = {
 }
 const policyShape = (item: Verification): unknown => ({ command: item.command, cwd: item.cwd, timeoutMs: item.timeoutMs })
 const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b)
-function protectedMeaning(item: ContractItem): unknown {
-  if (item.kind === 'REQ') return { goal: item.goal, constraints: item.constraints, success: item.success, source: item.source, dependsOn: item.dependsOn }
-  if (item.kind === 'AC') return { covers: item.covers, preconditions: item.preconditions, action: item.action, assertion: item.assertion, command: item.command, source: item.source, dependsOn: item.dependsOn }
-  return item.kind === 'VERIFY' ? policyShape(item) : null
-}
 
 /** 对生成基线与候选的并集检查保护项；业务改动必须先成为新的细化输入。 */
 export function checkGenerationContractIntent(before: FrozenContracts, after: FrozenContracts, policy: GenerationContractPolicy): ContractFinding[] {
@@ -53,15 +49,17 @@ export function checkGenerationContractIntent(before: FrozenContracts, after: Fr
   for (const node of after.nodes) if (!priorNodes.has(node.path) && (!policy.newNodeRawSources.has(node.path) || node.rawSource !== policy.newNodeRawSources.get(node.path))) {
     issue('generation-new-intent', node.path, node.id, '新增节点必须使用协调器冻结的原意或上层引用')
   }
-  for (const contract of before.contracts) if (!after.contracts.some(next => next.path === contract.path)) {
-    issue('generation-schema-removed', contract.path, contract.nodeId, '已有同步契约不能退出检查范围')
+  for (const contract of before.contracts) {
+    const next = after.contracts.find(next => next.path === contract.path)
+    if (!next) issue('generation-schema-removed', contract.path, contract.nodeId, '已有同步契约不能退出检查范围')
+    else if (contractBusinessProse(next.expandedSpec) !== contractBusinessProse(contract.expandedSpec)) issue('generation-business-prose-changed', next.path, next.nodeId, '生成器不能改写已接受的业务正文')
   }
   for (const item of before.graph.items.values()) {
-    if (!['REQ', 'AC', 'VERIFY'].includes(item.kind)) continue
     const next = after.graph.items.get(item.id)
-    if (!next || next.kind !== item.kind) issue('generation-protected-item-removed', item.path, item.nodeId, '生成候选必须保留需求、验收和验证身份', item.id)
-    else if (!same(protectedMeaning(item), protectedMeaning(next))) issue('generation-protected-meaning-changed', next.path, next.nodeId, '生成器不能更改已细化需求、验收语义或验证政策', item.id)
+    if (!next || next.kind !== item.kind) issue('generation-protected-item-removed', item.path, item.nodeId, '生成候选必须保留已接受契约的全部稳定身份', item.id)
+    else if (!same(contractBusinessMeaning(item), contractBusinessMeaning(next))) issue('generation-protected-meaning-changed', next.path, next.nodeId, '生成器不能更改已接受的需求、业务流程、规则、验收语义或验证政策', item.id)
   }
+  for (const item of after.graph.items.values()) if (item.kind !== 'VERIFY' && !before.graph.items.has(item.id)) issue('generation-unaccepted-item', item.path, item.nodeId, '新业务契约项必须先进入接受细化，不能由生成器自批', item.id)
   const registered = new Map(policy.verifications.map(item => [item.id, item]))
   for (const item of after.graph.items.values()) if (item.kind === 'VERIFY') {
     const trusted = registered.get(item.id)

@@ -26,3 +26,5 @@ raw、事实及权威业务规则优先。重大未知仅指权限/资金/业务
 严格 schema 拒绝缺字段、未知字段、错误类型及无效枚举；即使注入执行器也执行相同输出边界检查。任何非接受结论必须有具体发现；接受结论不得仍带未解决发现。
 
 可信输入登记 schema 复用 VERIFY 行的 ID、argv、cwd 与超时属性；登记还经唯一 Markdown 渲染及契约解析器检查安全 cwd、直接工具 argv、转义与唯一 ID。三段 ID 不合法、shell/空/换行 argv、越界 cwd、非法超时或重复登记在任何 native 派发前拒绝。模型输出若提供独立登记，VERIFY 与 AC.command 必须引用并精确符合登记，不得自造占位或改命令/预算。CONTRACT_INSTRUCTIONS 区分业务规则与执行器编排：测试不自行启动 runner/oracle，不能将这些明确技术职责发明成业务 REQ/RULE/AC 或业务 GAP；真实业务 GAP 仍完整保留。
+
+changes 允许空数组以表达已冻结的全节点退役，空输出自身不授权删除；节点生命周期从调用者 nodeChanges 程序复制并在全图确认。独立审查看到旧新路径、原文及逐项授权；不能因当前 active AC 数量为零跳过旧契约及退役检查。既有验收更新要求 update_acceptance 引用变化 ruleIds 和真实独审分析；普通无冲突反写可自动更新，模型自身失败不能转成要求。pure refactor/preserve_business 保留业务正文和字段，仅更新必要绑定。
