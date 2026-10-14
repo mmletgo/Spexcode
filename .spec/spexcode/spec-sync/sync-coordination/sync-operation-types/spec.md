@@ -45,3 +45,5 @@ operation及admission可带retryOf，明确关联用户主动重开失败/预算
 SyncIngressReceipt 只保存原接入的精确 payload 摘要、operation 引用、requestBlob 与预算/交付计划/旧基线小引用，用于 alias 重放审计，不替代唯一 operation 事实。
 
 共同BaselinePair和VerificationResultBlob可携retiredIds，旧JSON缺省为空。ComposedInputRef可携compositionEvidenceBlob保留三方文本重叠对象，重叠不是业务冲突结论；独立行为审查之后才形成完整交付候选。
+
+共同BaselinePair与验证结算blob可携decisionRefs，引用不可变用户裁决输入。旧JSON为空；仅receipt结算累积引用，未验证/未应用裁决不会成为后续权威。后续planning据引用重读具体finding及ruleIds形成精确supersession，保留原facts历史全文且不改变未选政策或执行授权。

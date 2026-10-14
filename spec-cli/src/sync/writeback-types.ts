@@ -15,7 +15,7 @@ export type CodeBehaviorChange = {
   evidence: string; counterexample: string
 }
 export type CodeBehaviorFinding = {
-  id: string; kind: 'coverage_gap' | 'conflict'; affectedIds: string[]; paths: string[]
+  id: string; kind: 'coverage_gap' | 'conflict'; affectedIds: string[]; paths: string[]; ruleIds: string[]
   originalIntent: string; sourceBehavior: string; deliveryBehavior: string; evidence: string
   counterexample: string; decision: string
 }

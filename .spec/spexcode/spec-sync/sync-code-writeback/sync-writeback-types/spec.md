@@ -15,3 +15,5 @@ code:
 节点迁移携旧新node/path及证据，退役携旧node/path及证据；业务ID保持连续，退役历史只在真实receipt结算后累积。生成方向区分业务正文稳定、保留外部可观察行为与按明确裁决纠正代码。整体真实产品验收仍由 [[sync-code-writeback]] 承担。
 
 分析正文保存无自身引用的验收及节点proposal；分析证据先冻结为内容寻址blob，再由程序派生带同analysisRef/evidenceRef的具体授权，避免内容摘要自引用。move必须携to，retire不得携to；文件解决方案mode限定Git普通/可执行/符号链接模式或删除。
+
+具体finding保存ruleIds，裁决能仅覆盖选择的业务规则；未选事实和验证/工具政策不受影响。结算后下一无关代码输入沿decisionRefs继承同一用户裁决，不退回历史政策。

@@ -37,6 +37,7 @@ export type BaselinePair = {
   receiptId: string
   settledAtMs: number
   retiredIds?: string[]
+  decisionRefs?: BlobRef[]
 }
 export type SyncOperation = {
   id: string; ingressKey: string; payloadDigest: string; rootCauseId: string
@@ -86,7 +87,7 @@ export type ClaimedAttempt = { operation: SyncOperation; attempt: SyncAttempt; f
 export type RecoverableSync = { operation: SyncOperation; attempt: SyncAttempt | null; journals: ApplyJournal[] }
 
 export type VerificationLayerResult = { layer: 'V1' | 'V2' | 'V3' | 'V4'; verdict: 'pass' | 'fail' | 'unsupported'; evidenceRefs: BlobRef[] }
-export type VerificationResultBlob = { schemaVersion: 1; coveredScope: SyncScope; inputId: string; candidateDigest: string; policyDigest: string; readSetDigest: string; environmentDigest: string; contextDigest: string; layers: VerificationLayerResult[]; retiredIds?: string[] }
+export type VerificationResultBlob = { schemaVersion: 1; coveredScope: SyncScope; inputId: string; candidateDigest: string; policyDigest: string; readSetDigest: string; environmentDigest: string; contextDigest: string; layers: VerificationLayerResult[]; retiredIds?: string[]; decisionRefs?: BlobRef[] }
 
 /** 原生资源状态与业务写入授权分离；removed 才表示容量可释放。 */
 export type SyncResourcePhase = 'planned' | 'created' | 'terminal' | 'removed'

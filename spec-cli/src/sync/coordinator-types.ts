@@ -16,6 +16,7 @@ export type SyncCoordinatorPlan = {
   mandatoryTests: readonly { verificationId: string; testPath: string; testId: string }[]
   authorizedChanges?: readonly AuthorizedContractChange[]
   retiredIds?: readonly string[]
+  decisionRefs?: readonly BlobRef[]
   newNodeRawSources?: readonly { path: string; rawSource: string }[]
 }
 export type SyncAdmissionOptions = {

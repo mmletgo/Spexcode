@@ -1,7 +1,7 @@
 export * from './types.js'
 export { parseFrontmatter, parseParts } from '../spec-source.js'
 export { CONTRACT_COLUMNS, parseContract } from './parser.js'
-export { buildContractGraph, contractReferences } from './graph.js'
+export { buildContractGraph, contractReferences, dependencyClosure } from './graph.js'
 export { validateContractGraph } from './validate.js'
 export { projectContractCoverage, contractImpact } from './coverage.js'
 export { contractDigest } from './digest.js'
