@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { applyComponentMigrations, openProtocol, type SqlParam } from '@spexcode/session-protocol'
 import { CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
 import type { ContractCell, GeneratedElaboration, GeneratedTables } from './elaboration-markdown.js'
+import { sameContractBusinessMeaning } from './contract-evolution.js'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
 import type { ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
 import { buildSyncApplicationPlan } from './planning.js'
@@ -589,7 +590,7 @@ test('新decision独审仍有相同稳定冲突ID时完整阻断，不因旧find
 })
 
 
-test('P3公共计划新增治理实际receipt后ff接受并完整退役，旧oracle和负向AC仍经Docker', { skip: docker.skip, timeout: 600000 }, async t => {
+test('P3公共计划新增治理实际receipt后ff接受、搬迁再完整退役，旧oracle和负向AC仍经Docker', { skip: docker.skip, timeout: 600000 }, async t => {
   const f = await fixture(t)
   f.git('reset', '--hard', 'HEAD')
   const verification = { ...f.plan.verifications[0], definition: { id: 'VERIFY-SUMMARY-01', command: ['node', '--test', 'generated-tests/summary.test.mjs'], cwd: '.', timeoutMs: 10000 } }
@@ -623,18 +624,20 @@ code:
 | VERIFY-SUMMARY-01 | ["node","--test","generated-tests/summary.test.mjs"] | . | 10000 |
 `
   assert.ok(parseContract({ nodeId, path, source: child }).contract, JSON.stringify(parseContract({ nodeId, path, source: child }).findings))
-  let retiring = false
+  let retiring = false, moving = false
+  const movedId = 'moved-summary', movedPath = `.spec/project/export-contract/${movedId}/spec.md`
+  let activePath = path, activeNodeId = nodeId
   f.transform((output, request) => {
     if (request.purpose === 'code_behavior_analyze') {
       const value = output as { changes: { kind: string; paths: string[] }[]; newNodes: unknown[]; resolutions: unknown[] }
       value.changes.forEach(change => { change.kind = 'allowed_change' })
-      value.newNodes = retiring ? [] : [{ codePath: 'src/summary.js', parentNodeId: 'export-contract', basis: '已有结果反馈原意支持内部长度辅助，无新增政策' }]
-      value.resolutions = retiring ? [{ path, content: null, mode: null }] : []
+      value.newNodes = retiring || moving ? [] : [{ codePath: 'src/summary.js', parentNodeId: 'export-contract', basis: '已有结果反馈原意支持内部长度辅助，无新增政策' }]
+      value.resolutions = retiring ? [{ path: activePath, content: null, mode: null }] : []
       return value
     }
     if (request.purpose === 'elaboration_generate' && !retiring) {
-      const value = output as GeneratedElaboration, generated = rows(child, path).changes[0]
-      generated.nodeId = nodeId; return { ...value, changes: [...value.changes, generated] }
+      const value = output as GeneratedElaboration, generated = rows(child, activePath).changes[0]
+      generated.nodeId = activeNodeId; return { ...value, changes: [...value.changes.filter(change => f.options.plan.targets.some(target => target.path === change.path)), generated] }
     }
     if (request.purpose === 'code_generate') {
       const value = output as { changes: { path: string; beforeDigest: string | null; beforeMode: string | null; mode: string | null; content: string | null }[] }, frozen = promptInput(request), previous = frozen.manifest.entries.find(entry => entry.path === 'generated-tests/summary.test.mjs')
@@ -652,25 +655,54 @@ code:
   assert.equal(existsSync(join(f.root, path)), false); assert.equal(existsSync(join(delivery, path)), true)
   assert.ok(f.store.listJournals(first.id)[0].receipt); assert.equal(baseline.sourceInput.id, snapshot.id)
   f.git('merge', '--ff-only', baseline.verifiedDelivery.headCommit)
-  rmSync(join(f.root, path)); rmSync(join(f.root, 'src/summary.js'))
+  moving = true; activePath = movedPath; activeNodeId = movedId
+  renameSync(join(f.root, path.slice(0, -'spec.md'.length)), join(f.root, movedPath.slice(0, -'spec.md'.length)))
+  const movedInput = await captureInputSnapshot(f.root), movedPlan = await buildSyncApplicationPlan(movedInput, movedId, baseline)
+  const moved = f.store.admitAndEnqueue(await prepareSyncAdmission(movedInput, movedPlan, { ingressKey: 'public-move', rootCauseId: 'public-move', origin: 'code', previousBaselinePair: baseline, budget: f.operation.budget, managedRoot: f.managedRoot }))
+  f.useOperation(moved); f.options.plan = movedPlan; f.options.readCurrentPlan = () => buildSyncApplicationPlan(movedInput, movedId, baseline)
+  const moveIndex = readFileSync(join(f.root, '.git/index')), movedResult = await runSyncOperation(f.store, moved.id, f.options)
+  assert.equal(movedResult.status, 'workspace_synced', JSON.stringify(f.store.listAttempts(moved.id).map(attempt => ({ failure: attempt.failure, prepare: attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(movedInput.source.commonDir, ref).toString('utf8'))).filter(value => value.kind === 'private-delivery-prepare'), detail: attempt.failure?.evidenceRefs.map(ref => { const value = JSON.parse(readEvidence(movedInput.source.commonDir, ref).toString('utf8')) as { rounds?: { findings?: unknown[] }[] }; return value.rounds?.map(round => round.findings) ?? value }) }))))
+  const movedBaseline = f.store.readBaseline(movedInput.source)!, movedJournal = f.store.listJournals(moved.id)[0]
+  assert.equal(movedJournal.status, 'settled'); assert.ok(movedJournal.receipt)
+  assert.ok(f.store.readAttempt(f.store.readOperation(moved.id).currentAttemptId!).verification!.passed)
+  const moveTree = readTree(movedInput.source.commonDir, movedJournal.receipt.actualTree)
+  assert.equal(moveTree.some(entry => entry.path === path), false); assert.equal(moveTree.some(entry => entry.path === movedPath), true)
+  const movedContract = parseContract({ nodeId: movedId, path: movedPath, source: readFileSync(join(movedBaseline.verifiedDelivery.source.canonicalRoot, movedPath), 'utf8') }).contract!
+  assert.deepEqual(movedContract.items.map(item => item.id).sort(), ['AC-SUMMARY-01', 'VERIFY-SUMMARY-01'])
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), moveIndex); assert.equal((await captureInputSnapshot(f.root)).id, movedInput.id)
+  const moveCalls = f.calls.length, moveCommits = f.git('rev-list', '--count', moved.deliveryPlan.branch)
+  assert.deepEqual((await runSyncOperation(f.store, moved.id, f.options)).receipt, movedJournal.receipt)
+  assert.equal(f.calls.length, moveCalls); assert.equal(f.git('rev-list', '--count', moved.deliveryPlan.branch), moveCommits)
+  // 作者接受已验证交付后保留未跟踪草稿，避免Git覆盖其字节。
+  const moveDraft = readFileSync(join(f.root, movedPath)), savedDraft = join(f.parent, 'accepted-move-draft.md')
+  renameSync(join(f.root, movedPath), savedDraft)
+  assert.deepEqual(readFileSync(savedDraft), moveDraft)
+  f.git('merge', '--ff-only', movedBaseline.verifiedDelivery.headCommit)
+  rmSync(join(f.root, movedPath)); rmSync(join(f.root, 'src/summary.js'))
   retiring = true
-  const nextInput = await captureInputSnapshot(f.root), nextPlan = await buildSyncApplicationPlan(nextInput, nodeId, baseline)
+  const nextInput = await captureInputSnapshot(f.root), nextIndex = readFileSync(join(f.root, '.git/index')), nextPlan = await buildSyncApplicationPlan(nextInput, movedId, movedBaseline)
   assert.equal(nextPlan.intentNodeId, 'export-contract'); assert.equal(nextPlan.authorizedChanges, undefined)
-  const next = f.store.admitAndEnqueue(await prepareSyncAdmission(nextInput, nextPlan, { ingressKey: 'public-retire', rootCauseId: 'public-retire', origin: 'code', previousBaselinePair: baseline, budget: f.operation.budget, managedRoot: f.managedRoot }))
-  f.useOperation(next); f.options.plan = nextPlan; f.options.readCurrentPlan = () => buildSyncApplicationPlan(nextInput, nodeId, baseline)
+  const next = f.store.admitAndEnqueue(await prepareSyncAdmission(nextInput, nextPlan, { ingressKey: 'public-retire', rootCauseId: 'public-retire', origin: 'code', previousBaselinePair: movedBaseline, budget: f.operation.budget, managedRoot: f.managedRoot }))
+  f.useOperation(next); f.options.plan = nextPlan; f.options.readCurrentPlan = () => buildSyncApplicationPlan(nextInput, movedId, movedBaseline)
   const result = await runSyncOperation(f.store, next.id, f.options)
   assert.equal(result.status, 'workspace_synced', JSON.stringify(f.store.listAttempts(next.id).map(attempt => attempt.failure)))
   const settled = f.store.readBaseline(nextInput.source)!
-  assert.ok(['AC-SUMMARY-01', 'VERIFY-SUMMARY-01', nodeId].every(id => settled.retiredIds!.includes(id)))
+  assert.ok(['AC-SUMMARY-01', 'VERIFY-SUMMARY-01', movedId].every(id => settled.retiredIds!.includes(id)))
   const finalDelivery = settled.verifiedDelivery.source.canonicalRoot
-  assert.equal(existsSync(join(finalDelivery, path)), false); assert.equal(existsSync(join(finalDelivery, 'src/summary.js')), false)
+  assert.equal(existsSync(join(finalDelivery, movedPath)), false); assert.equal(existsSync(join(finalDelivery, 'src/summary.js')), false)
   assert.equal(readFileSync(join(finalDelivery, 'tests/export.test.mjs'), 'utf8'), readFileSync(join(f.root, 'tests/export.test.mjs'), 'utf8'))
   assert.ok(readFileSync(join(finalDelivery, 'generated-tests/summary.test.mjs'), 'utf8').includes('existsSync'))
   assert.ok(f.store.readAttempt(f.store.readOperation(next.id).currentAttemptId!).verification!.passed)
+  const retirementJournal = f.store.listJournals(next.id)[0]
+  assert.equal(retirementJournal.status, 'settled'); assert.ok(retirementJournal.receipt)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), nextIndex); assert.equal((await captureInputSnapshot(f.root)).id, nextInput.id)
+  const retirementCalls = f.calls.length, retirementCommits = f.git('rev-list', '--count', next.deliveryPlan.branch)
+  assert.deepEqual((await runSyncOperation(f.store, next.id, f.options)).receipt, retirementJournal.receipt)
+  assert.equal(f.calls.length, retirementCalls); assert.equal(f.git('rev-list', '--count', next.deliveryPlan.branch), retirementCommits)
 })
 
 
-test('P3实际partial正文A与后续immutable作者B同行重叠，独审resolution原意进入P1及候选不被plan覆盖', { skip: docker.skip, timeout: 300000 }, async t => {
+test('P3实际partial正文A与后续immutable作者B同行重叠，独审resolution原意经Docker与receipt完整交付', { skip: docker.skip, timeout: 300000 }, async t => {
   const sentence = '用户可以提交符合筛选条件的数据导出，任务完成后下载结果。', a = `${sentence} 已交付A保持有效。`, b = `${sentence} 原immutable作者B保持有效。`, merged = original.replace(sentence, `${sentence} 已交付A保持有效。原immutable作者B保持有效。`)
   const f = await fixture(t, undefined, false, original, 'project', original, {}, { original: sentence + '此输入是固定业务验收夹具；decision:EXPORT-POLICY 表示测试作者提供的显式业务事实，只适用于夹具。', replacement: a + '此输入是固定业务验收夹具；decision:EXPORT-POLICY 表示测试作者提供的显式业务事实，只适用于夹具。', intent: '明确作者A原意，业务规则与原oracle不改', testPath: 'generated-tests/unused-author-registration.test.mjs' })
   let second = false
@@ -688,7 +720,7 @@ test('P3实际partial正文A与后续immutable作者B同行重叠，独审resolu
     if (second && request.purpose === 'code_review') {
       const frozen = promptInput(request), spec = frozen.elaboratedSpecs.find(spec => spec.path === contractPath)!.source
       assert.ok(spec.includes('已交付A')); assert.ok(spec.includes('原immutable作者B'))
-      return { ...(output as object), verdict: 'conflict', findings: [{ kind: 'conflict', affectedIds: ['RULE-EXPORT-05'], ruleLocation: 'RULE-EXPORT-05', codeLocation: 'src/export.js#ExportService', evidence: '定向证明受审raw已到真实候选，停在独审边界', counterexample: '不伪称此B候选已运行V3', message: 'fixture stop after raw candidate proof' }] }
+      assert.equal(parseParts(spec)!.rawSource, parseParts(merged)!.rawSource)
     }
     return output
   })
@@ -702,10 +734,19 @@ test('P3实际partial正文A与后续immutable作者B同行重叠，独审resolu
   const admission = await prepareSyncAdmission(f.input, f.plan, { ingressKey: 'raw-integrated-B', rootCauseId: 'raw-integrated-B', origin: 'combined', previousBaselinePair: baseline, budget: f.operation.budget, managedRoot: f.managedRoot, requestBlob: author.requestBlob })
   const operation = f.store.admitAndEnqueue(admission); f.useOperation(operation); second = true
   const result = await runSyncOperation(f.store, operation.id, f.options)
-  assert.equal(result.status, 'conflicted', JSON.stringify(f.store.listAttempts(operation.id).map(attempt => attempt.failure)))
-  const attempt = f.store.readAttempt(f.store.readOperation(operation.id).currentAttemptId!), generated = JSON.parse(readEvidence(f.input.source.commonDir, attempt.failure!.evidenceRefs[0]).toString('utf8')) as { candidate: { tree: string } | null }
-  assert.ok(generated.candidate)
-  const entry = readTree(f.input.source.commonDir, generated.candidate.tree).find(entry => entry.path === contractPath)!
-  const actual = readObject(f.input.source.commonDir, entry.oid).toString('utf8'); assert.ok(actual.includes('已交付A')); assert.ok(actual.includes('原immutable作者B'))
-  assert.equal(attempt.candidate, null); assert.equal(f.store.listJournals(operation.id).length, 0)
+  assert.equal(result.status, 'workspace_synced', JSON.stringify(f.store.listAttempts(operation.id).map(attempt => attempt.failure)))
+  const attempt = f.store.readAttempt(f.store.readOperation(operation.id).currentAttemptId!)
+  assert.equal(attempt.verification!.passed, true)
+  const journal = f.store.listJournals(operation.id)[0]
+  assert.equal(journal.status, 'settled'); assert.ok(journal.receipt); assert.deepEqual(result.receipt, journal.receipt)
+  const receipt = journal.receipt, entry = readTree(f.input.source.commonDir, receipt.actualTree).find(entry => entry.path === contractPath)!
+  const actual = readObject(f.input.source.commonDir, entry.oid).toString('utf8')
+  assert.equal(parseParts(actual)!.rawSource, parseParts(merged)!.rawSource)
+  assert.equal(readFileSync(join(receipt.deliverySnapshot.source.canonicalRoot, contractPath), 'utf8'), actual)
+  const delivered = parseContract({ nodeId: 'export-contract', path: contractPath, source: actual }).contract!
+  for (const item of parseContract({ nodeId: 'export-contract', path: contractPath, source: original }).contract!.items) assert.ok(sameContractBusinessMeaning(item, delivered.items.find(current => current.id === item.id)!), item.id)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.equal((await captureInputSnapshot(f.root)).id, f.input.id)
+  const calls = f.calls.length, commits = f.git('rev-list', '--count', operation.deliveryPlan.branch)
+  assert.deepEqual((await runSyncOperation(f.store, operation.id, f.options)).receipt, receipt)
+  assert.equal(f.calls.length, calls); assert.equal(f.git('rev-list', '--count', operation.deliveryPlan.branch), commits)
 })

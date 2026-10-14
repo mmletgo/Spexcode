@@ -14,15 +14,16 @@ import { captureInputSnapshot } from './snapshot.js'
 import { readSyncSettings, SyncApplicationError } from './settings.js'
 import type { SyncSettings } from './settings.js'
 import type { ContractCell, GeneratedTables } from './elaboration-markdown.js'
+import { sameContractBusinessMeaning } from './contract-evolution.js'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
 import type { ElaborationSessionRequest } from './elaboration-types.js'
 import { sessionIdForCreateKey } from '../sessions.js'
-import { contentHash, identifyWorktree, writeEvidence, readEvidence } from './snapshot.js'
+import { contentHash, identifyWorktree, writeEvidence, readEvidence, readObject, readTree } from './snapshot.js'
 import { claimFileMutex } from './file-mutex.js'
 import type { FileMutex } from './file-mutex.js'
 import { composeAuthoredInput } from './author-input.js'
-import { composeControlledRequest } from './request-input.js'
-import type { ApplyJournal, BaselinePair } from './operation-types.js'
+import { composeControlledRequest, renderControlledDecisionRaw } from './request-input.js'
+import type { ApplyJournal, BaselinePair, VerificationResultBlob } from './operation-types.js'
 
 const settings: SyncSettings = {
   version: 'sync-settings-v1', sourcePaths: ['src'], testPaths: ['tests'], readPaths: ['package.json'],
@@ -469,7 +470,7 @@ test('AC-APPLICATION-21 recover具体协调失败返回可见409，资源与原�
   } finally { f.cleanup() }
 })
 
-test('AC-APPLICATION-06 应用真实Docker及compiled hooks完整交付，completed重放沿原共同基线幂等', { skip: process.env.SPEX_DOCKER_VERIFICATION_TEST !== '1', timeout: 180000 }, async t => {
+async function exportApplicationFixture(t: test.TestContext, choice?: 'keep_intent' | 'adopt_behavior' | 'new_rule') {
   const temp = mkdtempSync(join(tmpdir(), 'sync-application-delivery-')), root = join(temp, 'source')
   cpSync(new URL('../../test/fixtures/spec-sync/export-repo/', import.meta.url), root, { recursive: true })
   renameSync(join(root, '.spec/export'), join(root, '.spec/project'))
@@ -477,6 +478,7 @@ test('AC-APPLICATION-06 应用真实Docker及compiled hooks完整交付，comple
   const contract = parseContract({ nodeId: 'export-contract', path, source: original }).contract!
   const verify = contract.items.find(item => item.kind === 'VERIFY')!; assert.equal(verify.kind, 'VERIFY')
   const config: SyncSettings = { ...settings, sourcePaths: ['src'], testPaths: ['generated-tests'], readPaths: ['tests', 'package.json'], budget: { maxAttempts: 3, maxCalls: 16, maxRepairs: 2, timeoutMs: 300000 }, facts: [{ source: 'decision:EXPORT-POLICY', text: original }], mandatoryTests: [{ verificationId: verify.id, testPath: 'tests/export.test.mjs', testId: 'AC-EXPORT-03' }], verifications: [{ definition: { id: verify.id, command: verify.command, cwd: verify.cwd, timeoutMs: verify.timeoutMs }, environment: { ...settings.verifications[0].environment, image: 'node@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392' } }] }
+  if (choice) config.verifications.push({ ...config.verifications[0], definition: { id: 'VERIFY-DECISION-01', command: ['node', '--test', 'generated-tests/decision.test.mjs'], cwd: '.', timeoutMs: 10000 } })
   writeFileSync(join(root, '.spec/spexcode.json'), JSON.stringify({ mainBranch: 'main', harnesses: [], sync: config }))
   const git = (args: string[]): string => execFileSync('/usr/bin/git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }).trim()
   git(['init', '-b', 'main']); git(['config', 'user.name', 'application fixture']); git(['config', 'user.email', 'application@example.invalid']); git(['add', '.']); git(['commit', '-m', 'fixture']); git(['switch', '-c', 'node/source'])
@@ -485,37 +487,108 @@ test('AC-APPLICATION-06 应用真实Docker及compiled hooks完整交付，comple
   const protocol = openProtocol(join(temp, 'canonical.sqlite'))
   let application: SyncApplication
   let calls = 0
+  const nativeRequests: ElaborationSessionRequest[] = []
+  const originalCode = readFileSync(join(root, 'src/export.js'), 'utf8')
+  const limitCode = (limit: number | null): string => originalCode.replace("!filter.trim())", `!filter.trim()${limit === null ? '' : ` || filter.length > ${limit}`})`)
+  if (choice) writeFileSync(join(root, 'src/export.js'), limitCode(8))
   t.after(() => {
     protocol.close()
     const unlock = (directory: string): void => { chmodSync(directory, 0o700); for (const entry of readdirSync(directory, { withFileTypes: true })) if (entry.isDirectory()) unlock(join(directory, entry.name)) }
     unlock(temp); rmSync(temp, { recursive: true, force: true })
   })
   application = await SyncApplication.create(root, { protocol, runtimeDirectory: join(temp, 'runtime'), runner: async request => {
-    calls++
+    calls++; nativeRequests.push(request)
+    const operation = application.store.listOperations(identifyWorktree(root).repositoryId, { sourceRoot: identifyWorktree(root).canonicalRoot })[0]
+    const plan = JSON.parse(readEvidence(operation.input.source.commonDir, operation.planBlob!).toString('utf8')) as { facts: { source: string; text: string }[]; decisionAuthorities: { paths: string[] }[] }
+    const decisionFact = plan.facts.find(fact => fact.source.startsWith('decision:') && fact.source !== 'decision:EXPORT-POLICY')
+    const limit = choice === 'keep_intent' ? null : choice === 'adopt_behavior' ? 8 : 128
     let output: unknown
-    if (request.purpose === 'elaboration_generate') {
+    if (request.purpose === 'code_behavior_analyze') {
+      const frozen = JSON.parse(request.prompt.split('冻结三方输入:\n')[1]) as { changedPaths: string[] }
+      const paths = [...new Set([...frozen.changedPaths, ...(decisionFact ? plan.decisionAuthorities.flatMap(authority => authority.paths) : [])])]
+      output = { changes: paths.map(changed => ({ kind: decisionFact ? 'allowed_change' : 'conflict', paths: [changed], affectedIds: ['RULE-EXPORT-02', 'AC-EXPORT-02'], ruleIds: ['RULE-EXPORT-02'], originalIntent: 'key与非空字符串filter必需，未授权filter长度上限；幂等政策保持', previousBehavior: '9字符非空filter可提交', sourceBehavior: 'filter长度超过8字符拒绝，8字符可提交；原权限与幂等保持', deliveryBehavior: '非空filter无长度上限', evidence: `冻结src/export.js#ExportService.submit 的filter.length > 8与RULE-EXPORT-02、AC-EXPORT-02逐项对照；${decisionFact?.text ?? '无上限授权'}`, counterexample: 'filter=123456789：原意接受但现源码invalid-request' })), facts: decisionFact ? [decisionFact] : [], acceptanceChanges: decisionFact && choice !== 'keep_intent' ? [{ id: 'AC-EXPORT-02', ruleIds: ['RULE-EXPORT-02'], source: decisionFact.source, reason: `仅按所选裁决增加filter${limit}字符边界，保空输入、权限、幂等与结果义务` }] : [], newNodes: [], resolutions: [] }
+    } else if (request.purpose === 'code_behavior_review') {
+      const frozen = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as { changedPaths: string[] }
+      const value = JSON.parse(request.prompt.split('待审分析:\n')[1]) as { analysisDigest: string; analysis: { changes: { id: string; paths: string[] }[] } }
+      output = { inputDigest: request.inputDigest, analysisDigest: value.analysisDigest, verdict: 'accept', checkedPaths: [...new Set([...frozen.changedPaths, ...value.analysis.changes.flatMap(change => change.paths)])], checkedChangeIds: value.analysis.changes.map(change => change.id), findings: [] }
+    } else if (request.purpose === 'elaboration_generate') {
       const tables = Object.fromEntries(Object.entries(CONTRACT_COLUMNS).map(([kind, columns]) => [kind, contract.items.filter(item => item.kind === kind).map(item => Object.fromEntries(columns.map(column => {
         const key = column === 'depends-on' ? 'dependsOn' : column === 'timeout-ms' ? 'timeoutMs' : column === 'kind' ? 'gapKind' : column
         const value = (item as unknown as Record<string, ContractCell>)[key]
         return [column, column === 'source' && item.kind !== 'VERIFY' ? `${item.source.kind}:${item.source.ref}` : value]
       })))])) as GeneratedTables
+      if (choice && decisionFact) {
+        if (choice !== 'keep_intent') {
+          const rule = tables.RULE!.find(row => row.id === 'RULE-EXPORT-02')!
+          rule.constraint = `${rule.constraint}；filter长度不得超过${limit}字符`; rule.source = decisionFact!.source
+          const ac = tables.AC!.find(row => row.id === 'AC-EXPORT-02')!
+          ac.assertion = `${ac.assertion}；filter长度${limit}字符接受，${limit! + 1}字符拒绝`; ac.source = decisionFact!.source
+        }
+        tables.AC!.push({ id: 'AC-DECISION-01', covers: ['RULE-EXPORT-01', 'RULE-EXPORT-02'], preconditions: '无任务与成功任务', action: '检验filter边界、空输入、幂等及非所有者下载', assertion: limit === null ? '8、9、128、129字符均接受；空输入拒绝、幂等与权限保持' : `${limit}字符接受，${limit + 1}字符拒绝；空输入拒绝、幂等与权限保持`, test: 'generated-tests/decision.test.mjs#AC-DECISION-01', command: 'VERIFY-DECISION-01', source: 'derived:RULE-EXPORT-02', 'depends-on': ['RULE-EXPORT-01', 'RULE-EXPORT-02'] })
+        tables.VERIFY!.push({ id: 'VERIFY-DECISION-01', command: ['node', '--test', 'generated-tests/decision.test.mjs'], cwd: '.', 'timeout-ms': 10000 })
+      }
       output = { version: 'elaboration-rows-v1', changes: [{ nodeId: 'export-contract', path, title: String(parseFrontmatter(original).fm.title), description: '', code: contract.code, related: contract.related, prose: parseParts(original)!.expandedSpec.split(/^### /m)[0], tables }], applicability: ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: true, basis: '固定业务政策', affectedIds: ['REQ-EXPORT-01'] })) }
     } else if (request.purpose === 'elaboration_review') output = { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
     else {
       const frozen = JSON.parse(request.prompt.split(request.purpose === 'code_generate' ? '冻结完整输入:\n' : '冻结原意和基线完整输入:\n')[1].split('\n实际候选身份')[0]) as { files: [string, string][]; readyIds: string[]; elaboratedSpecs: { path: string; source: string }[]; manifest: { entries: { path: string; digest: string; mode: string }[] } }
       if (request.purpose === 'code_generate') {
-        const change = (path: string, content: string): unknown => { const entry = frozen.manifest.entries.find(entry => entry.path === path)!; return { path, beforeDigest: entry.digest, beforeMode: entry.mode, content, mode: null } }
-        output = { version: 'sync-files-v1', changes: [...frozen.elaboratedSpecs.map(spec => change(spec.path, spec.source)), change('src/export.js', `${new Map(frozen.files).get('src/export.js')}\n// application verified delivery\n`)] }
+        const change = (path: string, content: string): unknown => { const entry = frozen.manifest.entries.find(entry => entry.path === path); return { path, beforeDigest: entry?.digest ?? null, beforeMode: entry?.mode ?? null, content, mode: null } }
+        output = { version: 'sync-files-v1', changes: [...frozen.elaboratedSpecs.map(spec => change(spec.path, spec.source)), change('src/export.js', choice && decisionFact ? limitCode(limit) : `${new Map(frozen.files).get('src/export.js')}\n// application verified delivery\n`), ...(choice && decisionFact ? [change('generated-tests/decision.test.mjs', `import assert from 'node:assert/strict'; import test from 'node:test'; import { ExportService } from '../src/export.js'; test('AC-DECISION-01', () => { const service = new ExportService(); const limit = ${limit}; for (const length of [8,9,128,129]) { const submit = () => service.submit('owner', 'length-' + length, 'x'.repeat(length)); if (limit !== null && length > limit) assert.throws(submit, /invalid-request/); else assert.equal(submit().filter.length, length); } assert.throws(() => service.submit('owner', 'empty', ''), /invalid-request/); assert.throws(() => service.submit('', 'denied', 'active'), /forbidden/); const job = service.submit('owner', 'same', 'active'); assert.deepEqual(service.submit('owner', 'same', 'active'), job); assert.throws(() => service.submit('owner', 'same', 'all'), /idempotency-conflict/); service.dispatch(job.id, 'START', { attempt: 1 }); service.dispatch(job.id, 'COMPLETE', { attempt: 1, result: 'file.csv' }); assert.throws(() => service.dispatch(job.id, 'DOWNLOAD', { actor: 'other' }), /forbidden/); assert.equal(service.dispatch(job.id, 'DOWNLOAD', { actor: 'owner' }), 'file.csv'); });\n`)] : [])] }
       } else {
         const identity = JSON.parse(request.prompt.split('实际候选身份与 manifest:\n')[1].split('\n实际完整候选')[0]) as { inputId: string; candidate: { digest: string } }
         output = { inputId: identity.inputId, candidateDigest: identity.candidate.digest, verdict: 'accept', checkedIds: frozen.readyIds, findings: [] }
       }
     }
-    const operation = application.store.listOperations(identifyWorktree(root).repositoryId, { sourceRoot: identifyWorktree(root).canonicalRoot })[0]
     const dispatch = application.store.readAttempt(operation.currentAttemptId!).dispatchPlans.find(plan => plan.key === request.requestKey)!
     return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `independent-${request.requestKey}`, turnId: 'turn-1', output, resultDigest: contentHash(JSON.stringify(output)) }
   } })
   await application.enable()
+  return { temp, root, path, original, originalCode, contract, git, application, nativeRequests, calls: (): number => calls }
+}
+
+for (const choice of ['keep_intent', 'adopt_behavior', 'new_rule'] as const) test(`AC-APPLICATION-P3-DELIVERY ${choice} 公共裁决从真实已审冲突经Docker与普通hooks结算receipt`, { skip: process.env.SPEX_DOCKER_VERIFICATION_TEST !== '1', timeout: 600000 }, async t => {
+    const f = await exportApplicationFixture(t, choice), before = await captureInputSnapshot(f.root), index = readFileSync(join(f.root, '.git/index')), oracle = readFileSync(join(f.root, 'tests/export.test.mjs'))
+    execFileSync(process.execPath, ['--input-type=module', '-e', "import assert from 'node:assert/strict'; import { ExportService } from './src/export.js'; const service = new ExportService(); assert.equal(service.submit('owner','eight','12345678').filter.length,8); assert.throws(() => service.submit('owner','nine','123456789'), /invalid-request/);"], { cwd: f.root, stdio: 'pipe' })
+    const submitted = await f.application.submit({ nodeId: 'export-contract', requestId: `external-eight-${choice}`, origin: 'code' }); assert.ok(submitted.operation)
+    const conflicted = await f.application.wait(submitted.operation.id)
+    assert.equal(conflicted.operation.phase, 'conflicted', JSON.stringify(conflicted.attempt?.failure))
+    assert.ok(conflicted.decisionContext); assert.equal(conflicted.decisionContext.analysis.reviewPassed, true)
+    const { analysisRef, analysis } = conflicted.decisionContext
+    assert.equal(analysis.findings.length, 1)
+    const finding = analysis.findings[0]
+    assert.equal(finding.kind, 'conflict'); assert.deepEqual(finding.ruleIds, ['RULE-EXPORT-02']); assert.deepEqual(finding.affectedIds, ['AC-EXPORT-02', 'RULE-EXPORT-02'])
+    assert.deepEqual(f.nativeRequests.slice(0, 2).map(request => request.purpose), ['code_behavior_analyze', 'code_behavior_review'])
+    const priorCalls = f.calls()
+    const request = { operationId: submitted.operation.id, inputId: submitted.operation.input.id, analysisRef, findingIds: [finding.id], requestId: `decide-${choice}`, decision: choice === 'new_rule' ? { choice, rule: 'filter长度不得超过128字符；非空输入、所有者权限、幂等及其他原需求保持有效。' } : { choice } }
+    const decision = await f.application.decide(request), delivered = await f.application.wait(decision.operation.id)
+    assert.equal(delivered.operation.phase, 'workspace_synced', JSON.stringify(delivered.attempt?.failure))
+    assert.equal(delivered.attempt!.verification!.passed, true)
+    const proof = JSON.parse(readEvidence(before.source.commonDir, delivered.attempt!.verification!.resultBlob).toString('utf8')) as VerificationResultBlob
+    assert.deepEqual(proof.layers.map(layer => [layer.layer, layer.verdict]), [['V1', 'pass'], ['V2', 'pass'], ['V3', 'pass'], ['V4', 'pass']])
+    const journal = delivered.journals[0]; assert.equal(journal.status, 'settled'); assert.ok(journal.receipt)
+    const receipt = journal.receipt, entries = readTree(before.source.commonDir, receipt.actualTree), entry = entries.find(entry => entry.path === f.path)!
+    const actual = readObject(before.source.commonDir, entry.oid).toString('utf8'), raw = parseParts(actual)!.rawSource!
+    assert.equal(readFileSync(join(receipt.deliverySnapshot.source.canonicalRoot, f.path), 'utf8'), actual)
+    const contract = parseContract({ nodeId: 'export-contract', path: f.path, source: actual }).contract!
+    const rule = contract.items.find(item => item.id === 'RULE-EXPORT-02')!, ac = contract.items.find(item => item.id === 'AC-EXPORT-02')!
+    const expectedLimit = choice === 'adopt_behavior' ? 8 : choice === 'new_rule' ? 128 : null
+    assert.equal(raw, renderControlledDecisionRaw(parseParts(f.original)!.rawSource!, request, analysis))
+    if (expectedLimit === null) { assert.equal(raw, parseParts(f.original)!.rawSource); assert.ok(sameContractBusinessMeaning(f.contract.items.find(item => item.id === rule.id)!, rule)); assert.ok(sameContractBusinessMeaning(f.contract.items.find(item => item.id === ac.id)!, ac)) }
+    else { assert.match(raw, new RegExp(`(?:${expectedLimit}字符|超过${expectedLimit}字符)`)); assert.equal(rule.kind, 'RULE'); assert.match(rule.constraint, new RegExp(`${expectedLimit}字符`)); assert.equal(ac.kind, 'AC'); assert.match(ac.assertion, new RegExp(`${expectedLimit + 1}字符拒绝`)) }
+    for (const originalItem of f.contract.items.filter(item => !['RULE-EXPORT-02', 'AC-EXPORT-02'].includes(item.id))) assert.ok(sameContractBusinessMeaning(originalItem, contract.items.find(item => item.id === originalItem.id)!), originalItem.id)
+    const deliveryCode = readFileSync(join(receipt.deliverySnapshot.source.canonicalRoot, 'src/export.js'), 'utf8')
+    assert.equal(deliveryCode.includes('filter.length > 8'), expectedLimit === 8); assert.equal(deliveryCode.includes('filter.length > 128'), expectedLimit === 128)
+    assert.deepEqual(readFileSync(join(receipt.deliverySnapshot.source.canonicalRoot, 'tests/export.test.mjs')), oracle)
+    assert.equal((await captureInputSnapshot(f.root)).id, before.id); assert.deepEqual(readFileSync(join(f.root, '.git/index')), index)
+    assert.equal(delivered.operation.callsUsed, 6); assert.equal(f.calls(), priorCalls + 6)
+    const calls = f.calls(), commits = f.git(['rev-list', '--count', delivered.operation.deliveryPlan.branch])
+    assert.equal((await f.application.decide(request)).operation.id, decision.operation.id)
+    assert.deepEqual((await f.application.wait(decision.operation.id)).journals, delivered.journals)
+    assert.equal(f.calls(), calls); assert.equal(f.git(['rev-list', '--count', delivered.operation.deliveryPlan.branch]), commits)
+})
+
+test('AC-APPLICATION-06 应用真实Docker及compiled hooks完整交付，completed重放沿原共同基线幂等', { skip: process.env.SPEX_DOCKER_VERIFICATION_TEST !== '1', timeout: 180000 }, async t => {
+  const { temp, root, application, calls } = await exportApplicationFixture(t)
   const before = await captureInputSnapshot(root), request = { nodeId: 'export-contract', requestId: 'complete-replay', origin: 'initial' as const }
   const admitted = await application.submit(request); assert.ok(admitted.operation)
   const delivered = await application.wait(admitted.operation.id)
@@ -524,8 +597,8 @@ test('AC-APPLICATION-06 应用真实Docker及compiled hooks完整交付，comple
   assert.equal(delivered.sourceSynced, false); assert.equal(delivered.stale, false)
   assert.match(readFileSync(join(delivered.operation.deliveryPlan.canonicalRoot, 'src/export.js'), 'utf8'), /application verified delivery/)
   assert.equal((await captureInputSnapshot(root)).id, before.id)
-  const callCount = calls, replay = await application.submit(request)
-  assert.equal(replay.operation?.id, admitted.operation.id); assert.equal(calls, callCount)
+  const callCount = calls(), replay = await application.submit(request)
+  assert.equal(replay.operation?.id, admitted.operation.id); assert.equal(calls(), callCount)
   assert.deepEqual((await application.readOperation(admitted.operation.id)).journals, delivered.journals)
   const key = contentHash(delivered.operation.ingressKey), descriptor = join(temp, 'runtime/artifacts', `application-runtime-${key}.json`)
   const frozenDescriptor = readFileSync(descriptor)
@@ -533,7 +606,7 @@ test('AC-APPLICATION-06 应用真实Docker及compiled hooks完整交付，comple
   assert.equal((await application.readOperation(admitted.operation.id)).executionAvailability.status, 'recovery_required')
   await application.submit(request)
   assert.deepEqual(readFileSync(descriptor), frozenDescriptor)
-  assert.equal(calls, callCount)
+  assert.equal(calls(), callCount)
 })
 
 
