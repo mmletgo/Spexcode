@@ -6,6 +6,7 @@ import { tags } from '@lezer/highlight'
 import { fetchSourceSlice } from './data.js'
 import { useT } from './i18n/index.jsx'
 import { useSelectionController } from './selectionController.js'
+import { useBoard } from './workspace.jsx'
 
 // [[source-view]]: the read-only face of a governed source file. CodeMirror carries this rather than a list
 // of rendered rows because it VIRTUALISES the viewport natively — measured, a 200k-line document renders in
@@ -63,6 +64,8 @@ const PREFETCH_PX = 900
 // knowing which one it is rendering.
 export default function SourceView({ path, read, className = '', onSelection }) {
   const t = useT()
+  const { targetTree } = useBoard()
+  const surfaceId = `source:${targetTree || ''}/${path}`
   const { publish, clear } = useSelectionController()
   const host = useRef(null)
   const view = useRef(null)
@@ -102,7 +105,7 @@ export default function SourceView({ path, read, className = '', onSelection }) 
         const { from, to } = u.state.selection.main
         if (from === to) {
           onSelectionRef.current?.(null)
-          clear(`source:${path}`)
+          clear(surfaceId)
         }
         else {
           const startLine = u.state.doc.lineAt(from).number
@@ -115,10 +118,10 @@ export default function SourceView({ path, read, className = '', onSelection }) 
           const text = next.text
           onSelectionRef.current?.(next)
           publish({
-            surfaceId: `source:${path}`,
+            surfaceId,
             kind: 'codemirror',
             text,
-            semantic: { path, startLine, endLine },
+            semantic: { path, startLine, endLine, ...(targetTree ? { targetTree } : {}) },
             visualRect: { x, y, width: Math.max(0, (end?.right ?? start?.right ?? x) - x), height: Math.max(0, (end?.bottom ?? start?.bottom ?? y) - y) },
             source: { view: u.view, from, to },
           })
@@ -157,11 +160,11 @@ export default function SourceView({ path, read, className = '', onSelection }) 
     return () => {
       live = false
       onSelectionRef.current?.(null)
-      clear(`source:${path}`)
+      clear(surfaceId)
       view.current?.destroy()
       view.current = null
     }
-  }, [path, read, publish, clear])
+  }, [path, read, publish, clear, surfaceId, targetTree])
 
   const pct = status.size > 0 ? Math.min(100, Math.round((status.loaded / status.size) * 100)) : 0
   // The viewer shows the file, and nothing about the file. Its path is already the address, the tab and the

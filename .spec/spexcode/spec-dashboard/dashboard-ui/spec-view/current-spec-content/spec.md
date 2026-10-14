@@ -18,3 +18,5 @@ related:
 ## expanded spec
 
 复用 [[dashboard-shell]] 的内容 revision 失效共享缓存，不以 commit 次数证明文件未变。缓存按节点和版本保留一份，带当前 revision，避免每个输入更新保留新的历史缓存键。读取新正文期间保留已显示内容；已嵌入正文不读取 API。公开静态文档使用自己的静态缓存，不订阅实时输入。历史版本的不可变读取由 specHistory 独立管理。失败显式给调用者 error。
+
+正文缓存身份包含 targetTree、节点和版本；main 与交付树同 id 不共享内容。交付树正文及 diagram 从该树的 content 端点读取，错误明确显示。树节点清单已有 body 时，diagram 与当前正文仍通过同树端点保持一致。

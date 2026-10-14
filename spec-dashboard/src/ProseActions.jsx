@@ -8,6 +8,7 @@ import { useEscLayer } from './escStack.js'
 import { encodePrompt } from './codeSelection.js'
 import { proseSelection, PROSE_PRESETS, regionText, stampedRange } from './proseSelection.js'
 import { postSpecBody, sendSessionText } from './data.js'
+import { requestIdentity } from './syncApplication.js'
 import { createSession, useLaunchers } from './launch.js'
 import { useSpecContent } from './specContent.js'
 import { overlaySessions, sessionDisplayState, sessionFooterState, sessionHeadline } from './session.js'
@@ -51,11 +52,11 @@ function useAnchored(x, y, deps) {
   const ref = useRef(null)
   const [style, setStyle] = useState({ left: x, top: y, visibility: 'hidden' })
   useLayoutEffect(() => {
-    const rect = ref.current?.getBoundingClientRect()
-    if (!rect) return
+    const card = ref.current
+    if (!card) return
     setStyle({
-      left: Math.max(GAP, Math.min(x, window.innerWidth - rect.width - GAP)),
-      top: Math.max(GAP, Math.min(y, window.innerHeight - rect.height - GAP)),
+      left: Math.max(GAP, Math.min(x, window.innerWidth - card.offsetWidth - GAP)),
+      top: Math.max(GAP, Math.min(y, window.innerHeight - card.offsetHeight - GAP)),
       visibility: 'visible',
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -77,7 +78,7 @@ function defaultTarget(live) {
   return [...live].sort((a, b) => (b.created || 0) - (a.created || 0))[0]?.id || 'new'
 }
 
-export default function ProseActions({ node, hostRef, codeSelection = null, onCodeSelectionClear, openSend = false }) {
+export default function ProseActions({ node, hostRef, codeSelection = null, onCodeSelectionClear, openSend = false, syncEnabled = null, syncActivation = null, syncError = null, onSaved }) {
   const t = useT()
   const { sessions = [], specs = [] } = useBoard()
   const { publish, clear: clearSnapshot } = useSelectionController()
@@ -89,6 +90,8 @@ export default function ProseActions({ node, hostRef, codeSelection = null, onCo
   const codeSelectionRef = useRef(null)
   if (codeSelection) codeSelectionRef.current = codeSelection
   const hitRef = useRef(null)
+  const saveRequest = useRef(null)
+  const saving = useRef(false)
 
   const [hit, setHit] = useState(null)        // { lines, x, y } — a live selection and where to point at it
   const [menuOpen, setMenuOpen] = useState(false) // the action group is opened explicitly by the native context menu
@@ -333,26 +336,30 @@ export default function ProseActions({ node, hostRef, codeSelection = null, onCo
   }
 
   const commit = async () => {
-    if (!hit) return
+    if (!hit || saving.current || syncActivation === 'invalidated') return
+    saving.current = true
     setBusy(true)
     setError(null)
     try {
-      const result = await postSpecBody(node.id, {
+      const patch = {
         startLine: hit.lines.startLine,
         endLine: hit.lines.endLine,
         original: regionText(body, hit.lines.startLine, hit.lines.endLine),
         replacement: draft,
-      })
+      }
+      saveRequest.current = requestIdentity(saveRequest.current, { nodeId: node.id, patch })
+      const result = await postSpecBody(node.id, patch, saveRequest.current.id)
+      onSaved?.(result)
       setBusy(false)
-      notify(result.changed ? t('proseActions.committed', { sha: (result.commit || '').slice(0, 7) }) : t('proseActions.noChange'),
-        { kind: result.changed ? 'success' : 'info' })
+      notify(result.syncOperation ? t('syncOperation.submitted') : result.changed ? t('proseActions.committed', { sha: (result.commit || '').slice(0, 7) }) : t('proseActions.noChange'),
+        { kind: result.syncOperation ? 'info' : result.changed ? 'success' : 'info' })
       clear()
     } catch (e) {
       setBusy(false)
       // loud, and specific: a region that moved shows what is there now, so the human sees the collision
       // rather than a generic failure.
       setError(e?.current ? `${e.message}\n\n${e.current}` : String(e?.message || e))
-    }
+    } finally { saving.current = false }
   }
 
   const copyNode = async () => {
@@ -372,7 +379,7 @@ export default function ProseActions({ node, hostRef, codeSelection = null, onCo
   }
   return (
     <>
-      {!panel && menuOpen && selection && <ActionGroup t={t} hit={anchor} disabled={loading} manualEnabled={!activeCodeSelection} onPick={open} />}
+      {!panel && menuOpen && selection && <ActionGroup t={t} hit={anchor} disabled={loading} manualEnabled={!activeCodeSelection && syncActivation !== 'invalidated'} onPick={open} />}
       {!panel && nodeMenuOpen && <NodeActionGroup t={t} hit={anchor} disabled={loading} onSend={(event) => open({ key: 'send', preset: null, jump: false }, event)} onCopy={copyNode} crossings={crossings} onCross={crossTo} />}
       {!panel && menuOpen && loading && <span className="pa-loading" role="status" style={{ left: anchor.x, top: anchor.y }}><span className="spinner" aria-label={t('common.loading')} /></span>}
       {panel?.kind === 'send' && (
@@ -382,7 +389,7 @@ export default function ProseActions({ node, hostRef, codeSelection = null, onCo
       )}
       {panel?.kind === 'manual' && (
         <ManualEditor t={t} panel={panel} node={node} lines={hit.lines} draft={draft} setDraft={setDraft}
-          busy={busy} error={error} onCommit={commit} onClose={dismiss} />
+          busy={busy} error={error} syncEnabled={syncEnabled} syncActivation={syncActivation} syncError={syncError} onCommit={commit} onClose={dismiss} />
       )}
     </>
   )
@@ -561,8 +568,8 @@ function AddressInput({ t, live, launchers, launcher, up, onPick, onCancel }) {
 // The in-place editor. It holds the passage's SOURCE lines, verbatim — not the rendered text — because the
 // bytes it commits are the bytes in the file. What it sends back is the region it was opened with, so the
 // server can refuse an edit whose ground moved ([[spec-body-edit]]).
-function ManualEditor({ t, panel, node, lines, draft, setDraft, busy, error, onCommit, onClose }) {
-  const [ref, style] = useAnchored(panel.x, panel.y, [])
+function ManualEditor({ t, panel, node, lines, draft, setDraft, busy, error, syncEnabled, syncActivation, syncError, onCommit, onClose }) {
+  const [ref, style] = useAnchored(panel.x, panel.y, [error, syncEnabled, syncActivation, syncError?.message])
   const box = useRef(null)
   useEffect(() => { box.current?.focus() }, [])
   return (
@@ -575,11 +582,12 @@ function ManualEditor({ t, panel, node, lines, draft, setDraft, busy, error, onC
       <textarea ref={box} className="pa-input pa-edit-input" rows={10} value={draft} spellCheck={false}
         onChange={(event) => setDraft(event.target.value)} />
       {error && <div className="pa-error" role="alert">{error}</div>}
+      {syncActivation === 'invalidated' && <div className="pa-error" role="alert">{syncError ? `${syncError.code}: ${syncError.message}` : t('syncOperation.invalidated')}</div>}
       <div className="pa-foot">
-        <span className="pa-note">{t('proseActions.editNote')}</span>
+        <span className="pa-note">{t(syncEnabled === true ? 'syncOperation.saveNote' : syncActivation === 'disabled' ? 'proseActions.editNote' : 'syncOperation.savePolicyNote')}</span>
         <button type="button" className="pa-btn" onClick={onClose}>{t('common.cancel')}</button>
-        <button type="button" className="pa-btn pa-go" disabled={busy} onClick={onCommit}>
-          {busy ? t('proseActions.committing') : t('proseActions.commit')}
+        <button type="button" className="pa-btn pa-go" disabled={busy || syncActivation === 'invalidated'} onClick={onCommit}>
+          {busy ? t('proseActions.committing') : t(syncEnabled ? 'common.save' : 'proseActions.commit')}
         </button>
       </div>
     </div>

@@ -1,0 +1,15 @@
+本文件是本测试夹具作者已经决定的事实，属于明确的技术接口和业务政策，不是所有产品的默认要求。不要把这里已决定的事项写成 GAP。错误类和错误名称由实现自行决定，拒绝用同步 throw 表达即可。公共接口必须是 src/export.js 的命名导出 createExportService({readRows, enqueue})。它返回同步方法 submit(actor, key, category)、view(actor, jobId)、download(actor, jobId)、cancel(actor, jobId)、retry(actor, jobId)、start(jobId, attempt)、complete(jobId, attempt)、fail(jobId, attempt, error)。回调方法属于可信系统，无 actor 参数；其他方法均执行 owner 权限。未知 jobId 必须拒绝且不产生副作用。
+
+数据源返回普通记录数组，每行固定含 id:string、category:string、value:number，数据源保证合法且不抛错。readRows 是可信同步读取函数。新有效提交恰好调用一次 readRows，并在 submit 返回前复制整个数组与每条记录，建立原提交快照。相同幂等提交、查看、回调、取消、重试及下载都不再次调用 readRows。结果保留快照输入顺序，并包含整条实际匹配记录。view 和 download 返回的数据都必须复制，调用者修改返回对象或数组不能影响任务或快照。
+
+actor 与 key 必须为非空字符串；全空白字符串拒绝，但有效字符串保持原值，不 trim actor/key。category 必须为字符串，先 trim 两端空白，空值拒绝；此后按完整 category 精确区分大小写匹配原记录的 category，不做前缀或包含匹配，也不 trim 原记录。无匹配允许成功，下载是空数组。非法提交不调用 readRows，也不排队。
+
+submit 返回任务视图，字段至少有 id:string、owner:string、category:string、status:string、attempt:number、error:string|null、rows:array|null。id 在服务实例内唯一且不为空。view 与所有改变任务的方法返回同样的任务视图。submit 的幂等身份是 actor 加 key：同身份同规范化 category 返回原任务当前视图，无论当前状态是什么，不重读数据、不增加尝试、不排队；同身份不同 category 必须拒绝；不同 actor 使用相同 key 是独立任务。
+
+新任务为 QUEUED，attempt 为 1，error 和 rows 为 null。enqueue 可信、只记录 {jobId, attempt} 事件、不抛错、不在调用中同步回调服务。这是夹具内部保证，不验证真实队列失败、部署 worker、HTTP、数据库持久化、进程恢复或定时调度；不应为这些不适用事项制造业务 GAP。每次新任务提交或合法重试恰好调用一次 enqueue，其他操作不排队。
+
+每个系统回调先验证 jobId 和 attempt。缺失、非正整数或未来 attempt 必须拒绝且无状态变化。合法旧 attempt 小于当前 attempt 时忽略，返回当前视图，甚至不验证旧 fail 的错误参数，不改变任何字段。当前 attempt 在 QUEUED 时 start 改为 RUNNING；complete 和 fail 均拒绝，不能绕过 start。在 RUNNING 时重复 start 不变；complete 以原提交快照和规范化 category 真正计算并保存实际匹配行，进入 SUCCEEDED，error 为 null；fail 接受非空字符串 error（全空白拒绝），进入 FAILED，保留传入的原错误字符串，rows 为 null。当前 RUNNING 的非法 fail 参数拒绝且不改变任务。在 SUCCEEDED、FAILED、CANCELLED 的当前 attempt，start、complete、fail 全部忽略并返回原视图，不再验证 fail payload。任何已结束状态保持首次终态与已有 error/rows，不能由重复或竞争回调覆盖。
+
+view、download、cancel、retry 只有 owner 可调用，不论任务处于哪种状态，非 owner 均拒绝。download 仅 SUCCEEDED 返回保存的实际记录复制；QUEUED、RUNNING、FAILED、CANCELLED 均拒绝。cancel 在 QUEUED 或 RUNNING 进入 CANCELLED，rows 和 error 保持 null；已终态的 cancel 是幂等无变化，SUCCEEDED 结果和 FAILED 错误保留。完成与取消、失败与完成、失败与取消的竞争按服务调用顺序由首次终态胜出，后续回调不能翻转它。
+
+retry 仅 FAILED 合法，保留同一 id、owner、category 和原提交快照，attempt 增加 1，变为 QUEUED，清空 error 和 rows，并排队本次尝试。QUEUED、RUNNING、SUCCEEDED、CANCELLED 上的 retry 拒绝；刚重试后再次 retry 拒绝，不能增加 attempt 或重复排队。重试之前的 FAILED 视图仍保留错误；新的尝试不复用上次错误。旧尝试的 start/complete/fail 都不得影响新 QUEUED/RUNNING 状态。

@@ -1,4 +1,4 @@
-import { useMemo, useRef } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 import { PendingChanges, ProseBody, SpecPane, VersionDiff } from './NodeView.jsx'
 import ProseActions from './ProseActions.jsx'
 import { useSpecVersion } from './specHistory.js'
@@ -11,6 +11,7 @@ import { newTabAnchor } from './tabs.js'
 import { useViewScope } from './ViewScope.jsx'
 import { useBoard, usePaneActive } from './workspace.jsx'
 import SyncContractPanel from './SyncContractPanel.jsx'
+import SyncOperationPanel from './SyncOperationPanel.jsx'
 
 // [[spec-view]]: a spec node is a DOCUMENT whose full surface is prose. Governed files and attachments are
 // links in that prose; their source lives at an independent file address and is never mounted here.
@@ -34,7 +35,8 @@ const CHANGE_SURFACE = 'diff'
 function VersionFace({ node, hash, changeFace, onFace }) {
   const t = useT()
   const version = useSpecVersion(node.id, hash)
-  const current = routeHash('spec', node.id)
+  const { targetTree } = useBoard()
+  const current = routeHash('spec', node.id, targetTree ? { targetTree } : null)
   const back = (
     <a className="stat-back" href={current} onClick={(event) => newTabAnchor(event, current)}>
       <Icon name="corner-up-left" size={12} />{t('specView.versionBack', { n: node.version || 0 })}
@@ -71,11 +73,15 @@ function VersionFace({ node, hash, changeFace, onFace }) {
 
 export default function SpecView({ param, query }) {
   const t = useT()
-  const { specs, sessions, graphOnly, contentRevision = 0 } = useBoard()
+  const { specs, sessions, graphOnly, contentRevision = 0, targetTree = null } = useBoard()
   const scope = useViewScope()
   const active = usePaneActive()
   const node = useMemo(() => specs?.find((s) => s.id === param), [specs, param])
   const proseRef = useRef(null)
+  const [syncPolicy, setSyncPolicy] = useState(null)
+  const [saved, setSaved] = useState({ revision: 0, operation: null })
+  const syncSettings = useCallback((settings) => setSyncPolicy({ enabled: settings.enabled, activation: settings.activation, error: settings.configurationError }), [])
+  const specSaved = useCallback((result) => setSaved((previous) => ({ revision: previous.revision + 1, operation: result.syncOperation || null })), [])
 
   const version = query?.version || null
   const pending = node?.overlays?.length || 0
@@ -85,7 +91,7 @@ export default function SpecView({ param, query }) {
   // A past version always has a change to show, so its toggle is always there.
   const toggleable = !!node && !node.ghost && (!!version || pending > 0 || asked)
   const openFace = (change) => {
-    const face = { ...(version ? { version } : {}), ...(change ? { surface: CHANGE_SURFACE } : {}) }
+    const face = { ...(targetTree ? { targetTree } : {}), ...(version ? { version } : {}), ...(change ? { surface: CHANGE_SURFACE } : {}) }
     scope.open({ page: 'spec', param, query: Object.keys(face).length ? face : null }, { replace: true })
   }
   const toggle = () => openFace(!asked)
@@ -96,13 +102,15 @@ export default function SpecView({ param, query }) {
     id: 'change-switcher', icon: 'git-compare', priority: 79, pressed: asked, label: toggleLabel, onClick: toggle,
   } : null)
 
-  if (!specs?.length) return <div className="doc-empty">{t('hud.loading')}</div>
+  if (!specs) return <div className="doc-empty">{t('hud.loading')}</div>
   if (!node) return <div className="doc-empty">{t('specView.missing', { id: param })}</div>
 
   if (version) {
     return (
       <div className="specview">
         <div className="specview-prose">
+          {targetTree && <p className="read-tree" data-read-tree={targetTree} title={targetTree}>{t('specView.deliveryTree', { name: targetTree.split('/').filter(Boolean).at(-1) })}</p>}
+          {!graphOnly && <SyncOperationPanel nodeId={param} nodePath={node.path} targetTree={targetTree} onSettings={syncSettings} />}
           <VersionFace node={node} hash={version} changeFace={asked} onFace={(face) => openFace(face === 'change')} />
         </div>
       </div>
@@ -119,12 +127,14 @@ export default function SpecView({ param, query }) {
   return (
     <div className="specview">
       <div className="specview-prose" ref={proseRef}>
+        {targetTree && <p className="read-tree" data-read-tree={targetTree} title={targetTree}>{t('specView.deliveryTree', { name: targetTree.split('/').filter(Boolean).at(-1) })}</p>}
+        {!graphOnly && <SyncOperationPanel nodeId={param} nodePath={node.path} targetTree={targetTree} refreshKey={saved.revision} submittedOperation={saved.operation} onSettings={syncSettings} />}
         <SpecPane node={node} stat={stat}>{changeFace ? <PendingChanges node={node} sessions={sessions} /> : null}</SpecPane>
-        {!changeFace && !graphOnly && node.contractSchema && <SyncContractPanel key={node.id} nodeId={node.id} enabled={active} stamp={`${node.version}/${contentRevision}`} />}
+        {!changeFace && !graphOnly && node.contractSchema && <SyncContractPanel key={`${targetTree || ''}/${node.id}`} nodeId={node.id} targetTree={targetTree} enabled={active} stamp={`${node.version}/${contentRevision}`} />}
         {/* the prose pane's selection layer ([[prose-dispatch]]) — pure z-layers over the reading column,
             so the document's own geometry is exactly what it was without it. Its line addressing is the
             prose's, so the change face carries none. */}
-        {!changeFace && <ProseActions node={node} hostRef={proseRef} openSend={query?.send === '1'} />}
+        {!changeFace && !targetTree && <ProseActions node={node} hostRef={proseRef} syncEnabled={syncPolicy?.enabled ?? null} syncActivation={syncPolicy?.activation ?? null} syncError={syncPolicy?.error ?? null} onSaved={specSaved} openSend={query?.send === '1'} />}
       </div>
     </div>
   )

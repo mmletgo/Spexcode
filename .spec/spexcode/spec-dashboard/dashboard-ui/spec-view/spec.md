@@ -130,3 +130,7 @@ words and desc in the same single tab, with no line stamps, and the dock marks v
 line diff v2 introduced, and the dock lights that door. The segmented switch and the tab-row action both move
 between v2's text and its change. "Back to current" restores the bare address and its current, stamped
 body. Another node's commit named as a version is refused in the document.
+
+交付文档接受 `#/spec/<id>?targetTree=<已注册工作树绝对路径>`。页面清楚显示交付工作树及只读状态，正文、契约、历史/版本/diff、正文节点引用、图表子节点、附件和源码链接均保留同一树；main 没有的新节点也直接可读。所选树失效时显示读取错误，不能回落 main。交付树未具备统一写入服务前不挂载正文编辑/发送动作，且不展示 main 的 Issues 面板。读取不代表已同步。
+
+每张当前或历史 Spec 文档复用 [[sync-operation-panel]] 持续呈现该节点的真实同步操作；正常来源正文编辑保留。受控保存收到 syncOperation 时显示“已接入同步”，立即刷新该节点面板并等待真实交付；来源正文尚未commit。读取交付树仍只读，未结算的私有树无阅读门。

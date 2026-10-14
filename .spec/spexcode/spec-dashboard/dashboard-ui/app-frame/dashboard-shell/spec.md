@@ -270,3 +270,5 @@ existing graph subscription, not a second EventSource, WebSocket, REST poll, or 
 the address reader, so it writes `place · project`; App stays silent there. App writes the plain project
 title only for the faces with no address to speak of: the hub, the phone, and every pre-board state. Both
 writing would race, and the parent effect runs last.
+
+项目目录探测收到明确的非重定向 404 或成功 HTML 非目录响应时，保留 absent 投影并停止该 effect 的目录轮询，避免单项目服务每五秒重复请求缺失 /projects。认证拒绝仍等待原 credential retry；网络断开、5xx、认证重定向与不可解析 JSON 保持可恢复轮询，暂时故障不证明该服务永久不支持目录。

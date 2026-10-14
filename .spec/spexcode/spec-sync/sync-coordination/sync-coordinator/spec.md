@@ -1,0 +1,41 @@
+---
+title: P2 中央应用编排
+status: active
+hue: 175
+desc: 从稳定输入经独立细化生成及四层验证结算真实私有交付。
+code:
+  - spec-cli/src/sync/coordinator.ts
+---
+# P2 中央应用编排
+
+## raw source
+
+一次高层需求应自动完成可信细化、实现、真实验收和可复核交付；暂停、取消、进程中断和输入变化不能重复副作用或用旧结果覆盖新输入。
+
+## expanded spec
+
+复用现有快照、成对 composition、受控 request overlay、P1 elaborate、scope 扩充/租约、generation、真实 V3 resource 执行与 private delivery，不另建消息队列、契约图或事实数据库。原 source/composed/candidate 分开，policy/readset 内容摘要必须绑定 operation。读集合完整保留契约及 source/code/related/AC 测试全文，2MiB 预算失败不截断。host private、越界路径、目录未授权字节拒绝。
+
+operation 独立本机 kernel mutex 防双 coordinator；紧凑 stage checkpoint 只保存 refs、独立结果及诊断，不复制整张契约图。当前 attempt 在独占证明下重入稳定 requestKey，派发前原子计费、持久资源意图，完整真实结果/hash/独立身份保存后重放。lease heartbeat 贯穿原生长调用，控制/总deadline触发 Abort；旧 generation 只能结算真实资源证据。历史未removed资源精确恢复，未知终态保留 recovery_required，不假释放容量。
+
+P1 已审结构结果登记所有未来业务 ID，包括 GAP/partial FLOW；ready/blocked 分区只隔离业务 ID，共享 paths 留 ready。无可执行 ready AC 不生成或写半成品；V1 仅容许已审 GAP 精确解释的缺口。generation 硬门禁保护 raw/全局REQ/AC/VERIFY、实际diff与独立oracle，V2使用不同会话；V3仅执行 ready AC 和 mandatoryTests 的固定命令/镜像；V4复采完整source、当前可信plan/readset与物理身份，一致才可交付，并于 beginApply 前再核。完整V1–V4 pass才 recordVerification(pass)，范围精确ready声明/完整FLOW，不包含blocked。
+
+失败通过新attempt有限修复，冻结预算、deadline及政策不重置，诊断不能升格为事实；环境unsupported、真正业务 GAP/conflict、未知资源恢复停止自动重跑。候选冻结后不覆盖；applying/receipt恢复优先既定交付，真实Git commit及DB未结算不会再生成或重复提交。仅receipt结算可推进成对baseline和deliveredScope，根有blockedReason保持needs_input/conflicted。code/combined来源明确P3未接入。
+
+freezeSyncPlanEvidence复用同一canonical JSON排序，使planBlob.sha256严格等于policyDigest；接入直接保存plan引用，queued恢复不依赖另一个索引文件。派生authorProjection仅规范化已核canonical managed文本，真实snapshot不变；Spec受控decision/reconcile沿用P2，只有code/combined明确P3未接入。阶段result及嵌套refs直接checkpoint保活，不能只pin wrapper。
+
+同operation/input/policy首个P1结构及独立评审通过的细化结果永久冻结为生成义务；code/V3修复的新attempt与进程重启复用原精确结果，并checkpoint原attempt/result evidence provenance，不能再派发P1或更改其稳定AC/ID/政策。仅P1本身未通过时可再细化；通过后清空失败seed，未通过旧seed不能复活。
+
+initial与spec共享P2入口。旧无planBlob operation先claim持久unsupported，不借当前plan猜恢复。终态/controlled操作只精确消费自己的stopped FIFO头；有效queued头由应用FIFO调度，中央重入不把顺序冲突误报成永久unsupported，也不跳过有效pending。
+
+decision/reconcile还必须有绑定真实input/path的受控Spec requestBlob，才沿原Spec链；仅标记或自动代码reconcile不构成授权。code/combined及其它来源保持unsupported，不通过初始入口掩盖P3/P4尚未接入。
+
+交付准备后beforeApply再核V4；input/policy/readset变化先以当前fence登记精确conflict，再抛原错误供private-delivery保留，不能变成笼统environment。deadline真实耗尽保存budget_exhausted；controlled/过期旧fence不能借guard重新取得写权。
+
+运行及恢复只查询operation所属repositoryId的真实FIFO地址；不扫描global head后按仓库过滤，也不跨仓库运行另一项目的原生后端。
+
+默认租约120秒，heartbeat最多5秒且小于lease，总deadline与预算不因租约调整改变。持权细化/生成阶段边界先renewLease门禁再setImmediate给控制/heartbeat一次执行机会，再核控制和fence；长native调用由heartbeat续约/Abort，已过期authority绝不能恢复。该窗口覆盖实际同步Git/Tree-sitter可信读取阶段。
+
+显式retryOf沿真实operation链读取同source/input/policy/request的持久accepted P1证据；保留原approved contract/AC及原attempt/evidence provenance，不重新细化弱化AC。只有链上从未approved时才P1新派发；新operation重新执行generation/V1-V4，不借旧fence或receipt发布。
+
+recoveryOnly在独占mutex后先于普通phase/claim运行：精确终止所有历史未removed资源，再仅恢复当前attempt已存在且绑定delivery的未settled journal。Docker恢复driver拒绝create/start，planned容器不存在保留未知恢复状态，不新建容器补齐。原生资源只以aborted既有请求桥取真实stop证据；无journal即使verified也不进入prepare/apply。错误返回recovery_required及诊断而不自动pause/run、扣budget或新建attempt；已有journal结算可登记真实receipt/原结论。

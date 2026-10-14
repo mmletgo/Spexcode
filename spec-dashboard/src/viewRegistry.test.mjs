@@ -17,7 +17,7 @@ test('registry views receive route props and do not acquire the global route', (
 
   // Shell is the route owner. ViewPool/ViewHost pass the captured address down explicitly.
   assert.match(shell, /<View param=\{entry\.param\} query=\{entry\.query\} \/>/)
-  assert.match(shell, /<View key=\{poolKey\(page, param\)\} param=\{param\} query=\{query\} \/>/)
+  assert.match(shell, /<View key=\{poolKey\(page, param, query\)\} param=\{param\} query=\{query\} \/>/)
   assert.doesNotMatch(registry, /(?:import[^\n]*useRoute|\buseRoute\s*\()/)
   assert.doesNotMatch(workspace, /VIEW_ROUTE_CONTRACT/)
 })
@@ -109,4 +109,21 @@ test('settings is installed as a real built-in plugin on the canonical view path
   const coreSeed = product.slice(product.indexOf('export const VIEWS'), product.indexOf('// Product-owned views'))
   assert.doesNotMatch(coreSeed, /^\s*settings:/m)
   assert.match(product, /registerPlugin\(createSettingsViewPlugin\(SettingsView\)\)/)
+})
+
+
+test('HMR disposal removes only module-owned core views before their fresh registration', () => {
+  const graph = () => null, nextGraph = () => null
+  const registry = createViewRegistry({ graph: { component: graph } })
+  registry.registerPlugin(createSettingsViewPlugin(component))
+  registry.registerPlugin({ id: 'user-plugin', views: { custom: { component } } })
+  assert.throws(() => registry.unregisterView('custom', 'core'), /owned by/)
+  assert.equal(registry.unregisterView('graph', 'core'), true)
+  assert.equal(registry.unregisterPlugin('dashboard-settings'), true)
+  registry.registerView('graph', { component: nextGraph }, 'core')
+  registry.registerPlugin(createSettingsViewPlugin(nextGraph))
+  assert.equal(registry.get('graph').component, nextGraph)
+  assert.equal(registry.get('settings').component, nextGraph)
+  assert.equal(registry.ownerOf('custom'), 'user-plugin')
+  assert.throws(() => registry.registerView('graph', { component: graph }, 'core'), /already registered/)
 })

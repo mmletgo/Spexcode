@@ -27,6 +27,10 @@ backend answers.
 
 **Three roles, one question per verb.**
 
+The P2 `sync` drawer calls the backend's shared [[sync-application]] through clientSyncRequest. Every
+sync mutation uses the existing project guard; reads and writes both refuse an unreachable backend,
+without a cached or mock fallback. The backend owns long-running sync operations independently of a browser.
+
 - **Owner** — doing it twice is destructive, and it needs a resource only an owner may hold: `new`, `resume`,
   `stop`, `close`, `quarantine`, `interrupt`, `merge`, the poke half of `send`, and the delivery wake of a local
   state write (below). These prefer

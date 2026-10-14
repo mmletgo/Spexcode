@@ -53,6 +53,15 @@ export function createViewRegistry(initial = {}) {
     return views.get(name)
   }
 
+  const unregisterView = (name, owner = 'runtime') => {
+    assertName(name)
+    if (!views.has(name)) return false
+    if (owners.get(name) !== owner) throw new Error(`view ${name} is owned by ${owners.get(name)}`)
+    views.delete(name)
+    owners.delete(name)
+    return true
+  }
+
   const registerPlugin = (plugin) => {
     if (!plugin || typeof plugin !== 'object' || typeof plugin.id !== 'string' || plugin.id.length === 0) {
       throw new TypeError('plugin requires a non-empty id')
@@ -125,6 +134,7 @@ export function createViewRegistry(initial = {}) {
     ownerOf: (name) => owners.get(name),
     entries: () => [...views.entries()],
     registerView,
+    unregisterView,
     registerPlugin,
     unregisterPlugin,
     routeContract,

@@ -6,19 +6,55 @@
 # to run the launcher it happens to carry in its tree - that made the gate depend on where a worktree sat on
 # disk (a launcher's bare imports resolve by walking UP to a node_modules, which a detached worktree outside
 # the main checkout does not have), and it judged a branch that changes lint by its own half-built lint.
-# On a dogfood machine the PATH `spex` IS the main checkout's development build; CI judges every branch with
+# For ordinary authoring, on a dogfood machine the PATH `spex` IS the main checkout's development build; CI judges every branch with
 # the branch's own code. First that exists wins:
 #   1. <repo>/node_modules/.bin/spex   - a project that did `npm i @spexcode/spec-cli` (the dep's bin).
 #   2. `spex` on PATH                  - installed globally / the dogfood machine's main-checkout shim.
+# @@@ trusted sync tool - internal coordinator binding, never candidate.bin or a source launcher.
+spex_strict=0
+spex_validate_trusted() {
+  NODE_OPTIONS= NODE_PATH= LD_PRELOAD= DYLD_INSERT_LIBRARIES= "$SPEXCODE_SYNC_NODE" -e 'const fs=require("node:fs"),p=require("node:path"),c=require("node:crypto");
+const h=b=>c.createHash("sha256").update(b).digest("hex"),e=process.env;
+const root=fs.realpathSync(e.SPEXCODE_SYNC_RUNTIME_ROOT),entries=[];
+const visit=dir=>{for(const name of fs.readdirSync(dir).sort()){
+ const file=p.join(dir,name),s=fs.lstatSync(file),local=p.relative(root,file).split(p.sep).join("/");
+ if(s.isSymbolicLink()){const target=fs.realpathSync(file);if(target!==root&&!target.startsWith(root+p.sep))throw Error("external runtime symlink");entries.push({path:local,kind:"symlink",mode:s.mode&511,target:fs.readlinkSync(file)});}
+ else if(s.isDirectory()){entries.push({path:local,kind:"directory",mode:s.mode&511});visit(file);}
+ else if(s.isFile())entries.push({path:local,kind:"file",mode:s.mode&511,digest:h(fs.readFileSync(file))});
+ else throw Error("unsupported runtime file");
+}};visit(root);
+for(const [file,expected] of [[e.SPEXCODE_SYNC_NODE,e.SPEXCODE_SYNC_NODE_SHA256],[e.SPEXCODE_SYNC_GIT,e.SPEXCODE_SYNC_GIT_SHA256],[e.SPEXCODE_SYNC_TOOL,e.SPEXCODE_SYNC_TOOL_SHA256]])
+ if(!p.isAbsolute(file)||h(fs.readFileSync(file))!==expected)throw Error("trusted executable digest mismatch");
+if(h(JSON.stringify(entries))!==e.SPEXCODE_SYNC_RUNTIME_SHA256)throw Error("trusted runtime digest mismatch");
+import(require("node:url").pathToFileURL(p.join(p.dirname(e.SPEXCODE_SYNC_TOOL),"sync/trusted-footprint.js")).href)
+ .then(m=>m.frozenFootprintFromEnv(e.SPEXCODE_SYNC_GIT,process.cwd()))
+ .catch(error=>{console.error("trusted frozen footprint binding unavailable or changed: "+error.message);process.exitCode=1;});'
+}
+if [ -n "${SPEXCODE_SYNC_HOOK_MODE:-}" ]; then
+  if [ "$SPEXCODE_SYNC_HOOK_MODE" != trusted-v1 ] || [ -z "${SPEXCODE_SYNC_NODE:-}" ] || [ -z "${SPEXCODE_SYNC_TOOL:-}" ] || [ -z "${SPEXCODE_SYNC_GIT:-}" ] || ! spex_validate_trusted; then
+    echo "✗ SpexCode: trusted sync tool binding unavailable or changed; delivery refused." >&2
+    exit 1
+  fi
+  case "${SPEXCODE_SYNC_OPERATION:-}" in prepare|publish) ;; *)
+    echo "✗ SpexCode: trusted sync operation unavailable; delivery refused." >&2
+    exit 1 ;;
+  esac
+  spex_strict=1
+  export GIT_NO_REPLACE_OBJECTS=1
+  git() { "$SPEXCODE_SYNC_GIT" --no-replace-objects "$@"; }
+fi
 repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
 spex_kind=
-if [ -x "$repo_root/node_modules/.bin/spex" ]; then
+if [ "$spex_strict" -eq 1 ]; then
+  spex_kind=trusted
+elif [ -x "$repo_root/node_modules/.bin/spex" ]; then
   spex_kind=local
 elif command -v spex >/dev/null 2>&1; then
   spex_kind=path
 fi
 spex_cli() {
   case "$spex_kind" in
+    trusted) spex_validate_trusted && NODE_OPTIONS= NODE_PATH= "$SPEXCODE_SYNC_NODE" "$SPEXCODE_SYNC_TOOL" "$@" ;;
     path)  spex "$@" ;;
     local) "$repo_root/node_modules/.bin/spex" "$@" ;;
     *)     return 127 ;;
@@ -34,7 +70,7 @@ while IFS= read -r -d '' staged_path; do
   staged_any=1
   case "$staged_path" in .spec/.issues/*) ;; *) staged_issue_only=0 ;; esac
 done < <(git diff --cached --name-only -z 2>/dev/null)
-if [ "$staged_any" -eq 1 ] && [ "$staged_issue_only" -eq 1 ]; then
+if [ "$spex_strict" -eq 0 ] && [ "$staged_any" -eq 1 ] && [ "$staged_issue_only" -eq 1 ]; then
   exit 0
 fi
 
@@ -46,7 +82,7 @@ fi
 # with a DIRTY real index (the lint shim below reads the real index via git.ts's env-strip, which would
 # otherwise block the stamp on the very drift it acknowledges). Deliberately a one-line tree compare, not an
 # "is this an amend?" heuristic (undecidable at pre-commit time).
-if [ "$(git write-tree 2>/dev/null)" = "$(git rev-parse 'HEAD^{tree}' 2>/dev/null || echo none)" ]; then
+if [ "$spex_strict" -eq 0 ] && [ "$(git write-tree 2>/dev/null)" = "$(git rev-parse 'HEAD^{tree}' 2>/dev/null || echo none)" ]; then
   exit 0
 fi
 
@@ -60,8 +96,15 @@ fi
 # mode), only the convention is available: shell does not guess identity from a mutable checkout.
 branch=$(git symbolic-ref --short HEAD 2>/dev/null || echo)
 git_dir=$(git rev-parse --git-dir 2>/dev/null)
-trunk=$(spex_cli internal trunk 2>/dev/null | head -1)
-[ -n "$trunk" ] || trunk=main
+if [ "$spex_strict" -eq 1 ]; then
+  if ! trunk=$(spex_cli internal trunk) || [ -z "$trunk" ]; then
+    echo "✗ SpexCode: trusted trunk lookup failed; delivery refused." >&2
+    exit 1
+  fi
+else
+  trunk=$(spex_cli internal trunk 2>/dev/null | head -1)
+  [ -n "$trunk" ] || trunk=main
+fi
 if [ "$branch" = "$trunk" ] && [ ! -f "$git_dir/MERGE_HEAD" ] && [ -z "${SPEXCODE_ALLOW_MAIN:-}" ]; then
   echo "✗ SpexCode: direct commits on $trunk (the trunk) are blocked." >&2
   echo "  Work in a worktree (.worktrees/<node>, branch node/<id>) and merge back." >&2
@@ -76,7 +119,13 @@ fi
 # hook env on purpose: the surgery honors GIT_INDEX_FILE so a pathspec/`-a` commit's TEMPORARY index is the
 # one repaired. Advisory when spex is unresolvable or errors (CI lint enforces); never blocks the commit.
 if [ -n "$spex_kind" ]; then
-  spex_cli internal commit-surgery || echo "• SpexCode: footprint surgery skipped (error above) — a generated artifact may be staged; CI still enforces." >&2
+  if ! spex_cli internal commit-surgery; then
+    if [ "$spex_strict" -eq 1 ]; then
+      echo "✗ SpexCode: trusted commit surgery failed; delivery refused." >&2
+      exit 1
+    fi
+    echo "• SpexCode: footprint surgery skipped (error above) — a generated artifact may be staged; CI still enforces." >&2
+  fi
 fi
 
 # @@@ spec-lint - reference-transaction owns the candidate gate. When the installed consumer is the
@@ -84,7 +133,7 @@ fi
 # removes. A missing/custom consumer keeps the old full lint fallback, so a hook collision never reduces
 # local coverage. Static identity matters: never execute a user-owned hook with made-up probe arguments.
 # Bypass with SPEXCODE_SKIP_LINT=1. It shims through shared spex_cli() resolved above.
-if [ -z "${SPEXCODE_SKIP_LINT:-}" ]; then
+if [ "$spex_strict" -eq 1 ] || [ -z "${SPEXCODE_SKIP_LINT:-}" ]; then
   if [ -n "$spex_kind" ]; then
     consume_hook=$(git rev-parse --git-path hooks/reference-transaction 2>/dev/null)
     if [ -x "$consume_hook" ] && grep -q 'one unmarked predicate at Git' "$consume_hook" 2>/dev/null; then
@@ -95,7 +144,7 @@ if [ -z "${SPEXCODE_SKIP_LINT:-}" ]; then
     fi
     # exit 75 = the launcher's mid-merge guard (spex's own source holds conflict markers — transient).
     # Degrade to advisory rather than walling every commit behind a merge someone else is resolving.
-    if [ "$lint_rc" -eq 75 ]; then
+    if [ "$lint_rc" -eq 75 ] && [ "$spex_strict" -eq 0 ]; then
       echo "• SpexCode: spec-lint skipped — spex is paused mid-merge (exit 75); CI still enforces." >&2
     elif [ "$lint_rc" -ne 0 ]; then
       echo "✗ SpexCode: spec-lint failed — fix the spec↔code links or bypass with SPEXCODE_SKIP_LINT=1." >&2

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { apiFetch, specUrl } from './data.js'
+import { useBoard } from './workspace.jsx'
 
 // A node's past, as three reads: its version log, the change one version made, and spec.md as one version
 // left it. The popup's history pane, the context dock's history panel and the spec document's version face
@@ -21,33 +22,36 @@ const readJson = (url) => apiFetch(url).then(async (response) => {
 // rows are held against the id they belong to, so a surface that moves to another node never shows the
 // previous node's log while the new one loads.
 export function useHistory(id, enabled = true, stamp = null) {
-  const [held, setHeld] = useState({ id: null, rows: null })
+  const { targetTree = null } = useBoard()
+  const key = `${targetTree || ''}/${id}`
+  const [held, setHeld] = useState({ key: null, rows: null })
   useEffect(() => {
     if (!enabled) return undefined
     let on = true
-    readJson(specUrl(id, 'history'))
-      .then((rows) => { if (on) setHeld({ id, rows }) })
-      .catch((error) => { if (on) setHeld({ id, rows: { error: error.message } }) })
+    readJson(specUrl(id, 'history', { targetTree }))
+      .then((rows) => { if (on) setHeld({ key, rows }) })
+      .catch((error) => { if (on) setHeld({ key, rows: { error: error.message } }) })
     return () => { on = false }
-  }, [id, enabled, stamp])
-  return held.id === id ? held.rows : null
+  }, [id, enabled, stamp, key, targetTree])
+  return held.key === key ? held.rows : null
 }
 
 // A version is immutable, so both per-version reads are memoised per (id,hash) — re-opening one reads the
-// cache with no refetch or flash. A failure is `{ error }` and is NOT cached, so the next open asks again.
+// cache with no refetch or flash. The worktree is part of that identity. A failure is `{ error }` and is NOT cached, so the next open asks again.
 function useImmutable(cache, id, hash, what, enabled) {
-  const key = `${id}/${hash}`
+  const { targetTree = null } = useBoard()
+  const key = `${targetTree || ''}/${id}/${hash}`
   const [held, setHeld] = useState(() => ({ key, value: cache.get(key) ?? null }))
   useEffect(() => {
     if (!enabled) return undefined
     const hit = cache.get(key)
     if (hit) { setHeld({ key, value: hit }); return undefined }
     let on = true
-    readJson(specUrl(id, what, hash))
+    readJson(specUrl(id, what, hash, { targetTree }))
       .then((value) => { cache.set(key, value); if (on) setHeld({ key, value }) })
       .catch((error) => { if (on) setHeld({ key, value: { error: error.message } }) })
     return () => { on = false }
-  }, [cache, id, hash, what, enabled, key])
+  }, [cache, id, hash, what, enabled, key, targetTree])
   return held.key === key ? held.value : null
 }
 

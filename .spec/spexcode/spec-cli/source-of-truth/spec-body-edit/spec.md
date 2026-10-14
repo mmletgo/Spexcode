@@ -23,6 +23,8 @@ only that replacement.
 
 ## expanded spec
 
+以下即时提交保证适用于未启用同步的普通正文编辑。启用 [[sync-application]] 后，HTTP 入口只调用本模块只读 preparation，将 patch 与稳定请求标识交给完整同步操作；响应 commit:null，Spec、代码与测试经共同验证后在受管交付树落盘。原正文文件和 index 不会提前被单独修改。
+
 **Who this is for, and why it is not the dogfood ritual.** [[topology-eager]] rules that a node's body
 "carries the session's in-flight intent and is fine to sit as a worktree diff until reviewed and merged."
 That is the cadence for an AGENT's proposal — a proposal exists to be reviewed, so it waits for a review.
@@ -71,3 +73,20 @@ the node's "last edited by" then reads, honestly.
 the trunk through the door above; on a session worktree it lands on that branch, where [[main-guard]] never
 fires at all — one call, no branch in the code, and the same meaning either way: an edit at the board lands
 where the board is looking.
+
+
+**Read-only preparation in an explicit checkout.** `prepareSpecBodyEdit(root, id, patch)` resolves the
+node through the existing filesystem-only spec loader for that exact root, including its canonical ID
+mint. It does not rely on the backend's implicit checkout, so two worktrees with the same node ID prepare
+against their own current bytes. It returns the repository-relative spec path, complete `source` and
+`next` strings, `changed`, and the resulting replacement's `startLine`/`endLine`. The existing trimmed-body
+line checks and exact original-text comparison apply before any result; nonexistent nodes and stale
+regions remain explicit errors. Frontmatter, leading body whitespace, untouched lines and the trailing
+suffix retain their original bytes.
+
+Preparation reads files only: it does not write a file, stage, commit, move HEAD, or reject an existing
+staged change merely to calculate a candidate. Identical text returns `changed: false`. `editSpecBody`
+reuses preparation for the backend checkout, then keeps its existing staged-conflict check, actual write,
+hook-enforced target-only commit, human identity and visible rollback on refusal. Preparation grants no
+write authority and does not promise exclusive access after it returns; a synchronizing coordinator must
+freeze and verify the prepared candidate and enforce its own delivery protocol before applying it.

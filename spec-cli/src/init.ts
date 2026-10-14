@@ -38,7 +38,7 @@ const presetRank = (name: string): number => (PRESET_TIERS as readonly string[])
 
 // recursively copy srcDir -> destDir, NEVER overwriting an existing file. Returns the repo-relative
 // paths of files actually written (so the caller can report exactly what was planted vs already there).
-function copyTreeNoClobber(srcDir: string, destDir: string, base: string, includeDir: (dir: string) => boolean = () => true): string[] {
+function copyTreeNoClobber(srcDir: string, destDir: string, base: string, includeDir: (dir: string) => boolean = () => true, rootId = 'project'): string[] {
   if (!includeDir(srcDir)) return []
   const written: string[] = []
   mkdirSync(destDir, { recursive: true })
@@ -46,12 +46,16 @@ function copyTreeNoClobber(srcDir: string, destDir: string, base: string, includ
     const src = join(srcDir, e.name)
     const dest = join(destDir, e.name)
     if (e.isDirectory()) {
-      written.push(...copyTreeNoClobber(src, dest, base, includeDir))
+      written.push(...copyTreeNoClobber(src, dest, base, includeDir, rootId))
     } else if (existsSync(dest)) {
       // additive only — a pre-existing file is the user's, leave it untouched.
       continue
     } else {
       copyFileSync(src, dest)
+      if (e.name === 'spec.md' && rootId !== 'project') {
+        const source = readFileSync(dest, 'utf8')
+        writeFileSync(dest, source.replaceAll('.spec/project/', `.spec/${rootId}/`))
+      }
       written.push(relative(base, dest))
     }
   }
@@ -251,6 +255,7 @@ export async function specInit(targetArg: string | undefined, presetArg?: string
   // What blocks the scaffold is a real tree — any entry that is not one of the two config files.
   const specDest = join(targetDir, '.spec')
   const specTreeExists = hasSpecTree(specDest)
+  let adoptedRoot = 'project'
   const includeSeedDir = (dir: string) => selectedNativeEvents === null || seedableForEvents(dir, selectedNativeEvents)
   if (specTreeExists) {
     const roots = readdirSync(specDest, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name)
@@ -266,19 +271,21 @@ export async function specInit(targetArg: string | undefined, presetArg?: string
     // it either, because the whole scaffold was skipped. Seed the plugins into whichever root the tree
     // already has — copyTreeNoClobber is additive, so anything already there stays the reader's.
     if (roots.length === 1) {
+      adoptedRoot = roots[0]
       const planted = copyTreeNoClobber(
-        join(TEMPLATES, 'spec', 'project', '.plugins'), join(specDest, roots[0], '.plugins'), targetDir, includeSeedDir,
+        join(TEMPLATES, 'spec', 'project', '.plugins'), join(specDest, adoptedRoot, '.plugins'), targetDir, includeSeedDir, adoptedRoot,
       )
       if (planted.length) console.log(`✓ seeded ${planted.length} .plugins file(s) into the existing root '${roots[0]}' — the hook manifest is built from these`)
     } else if (roots.length > 1) {
       console.warn(`• .spec holds ${roots.length} root directories (${roots.join(', ')}) — cannot tell which one owns .plugins. Seed it by hand, or keep one root.`)
     }
   } else {
+    const seededRootId = rootNodeId(title)
+    adoptedRoot = seededRootId ?? 'project'
     const planted = copyTreeNoClobber(
       join(TEMPLATES, 'spec'), specDest, targetDir,
-      includeSeedDir,
+      includeSeedDir, adoptedRoot,
     )
-    const seededRootId = rootNodeId(title)
     if (seededRootId) nameRoot(specDest, 'project', seededRootId)
     console.log(`✓ seeded ${planted.length} spec file(s) under .spec/ (root '${seededRootId ?? 'project'}' node + default .plugins)`)
     // 1a. stack the selected preset's package(s) ON TOP of the default set — cumulative, so every tier from
@@ -288,7 +295,7 @@ export async function specInit(targetArg: string | undefined, presetArg?: string
       const tier = PRESET_TIERS[r]
       const pkg = join(TEMPLATES, 'presets', tier)
       if (!existsSync(pkg)) { console.warn(`• preset '${tier}' has no package at ${pkg} — skipped.`); continue }
-      const added = copyTreeNoClobber(pkg, join(specDest, seededRootId ?? 'project'), targetDir, includeSeedDir)
+      const added = copyTreeNoClobber(pkg, join(specDest, adoptedRoot), targetDir, includeSeedDir, adoptedRoot)
       console.log(`✓ seeded preset '${tier}' (${added.length} file(s)) into .plugins`)
     }
   }
@@ -407,7 +414,7 @@ export async function specInit(targetArg: string | undefined, presetArg?: string
 Next steps:
   1. The seeded .spec/ tree and .spec/spexcode.json are project source of truth: add and commit them. Generated
      harness artifacts are machine-local and can stay untracked.
-  2. Edit .spec/project/spec.md to describe YOUR project, then grow child nodes beneath it.
+  2. Edit .spec/${adoptedRoot}/spec.md to describe YOUR project, then grow child nodes beneath it.
   3. lint.governedRoots in .spec/spexcode.json (currently ${rootsNow}) names what \`spex spec lint\` governs —
      ["."] governs the whole git-tracked tree (tests excluded); narrow it to explicit source roots
      when you want a curated graph.

@@ -2,13 +2,123 @@
 # spexcode-managed-hook-v1
 # @@@ candidate lint ([[code-anchor]]) - one unmarked predicate at Git's prepared ref boundary:
 # a refs/heads update that introduces a commit object which is not already reachable from refs/reflogs.
-# Structural ref plumbing is inert; no commit-msg arm, marker, TTL, tree, parent, or message identity exists.
+# Ordinary ref plumbing is inert; no commit-msg arm or authoring identity exists.
+# Internal trusted-v1 additionally binds the frozen delivery tree/parent/ref below.
 set -u
 state="${1:-}"
 payload=$(cat)
 [ -z "${SPEXCODE_GATE_TRACE:-}" ] || printf 'spexcode-gate: reference state=%s action=%s payload=%s\n' "$state" "${GIT_REFLOG_ACTION:-}" "$(printf '%s' "$payload" | tr '\n' ';')" >&2
 [ "$state" = prepared ] || exit 0
-[ -z "${SPEXCODE_SKIP_LINT:-}" ] || exit 0
+# @@@ trusted sync tool - internal coordinator binding, never candidate.bin or a source launcher.
+spex_strict=0
+spex_validate_trusted() {
+  NODE_OPTIONS= NODE_PATH= LD_PRELOAD= DYLD_INSERT_LIBRARIES= "$SPEXCODE_SYNC_NODE" -e 'const fs=require("node:fs"),p=require("node:path"),c=require("node:crypto");
+const h=b=>c.createHash("sha256").update(b).digest("hex"),e=process.env;
+const root=fs.realpathSync(e.SPEXCODE_SYNC_RUNTIME_ROOT),entries=[];
+const visit=dir=>{for(const name of fs.readdirSync(dir).sort()){
+ const file=p.join(dir,name),s=fs.lstatSync(file),local=p.relative(root,file).split(p.sep).join("/");
+ if(s.isSymbolicLink()){const target=fs.realpathSync(file);if(target!==root&&!target.startsWith(root+p.sep))throw Error("external runtime symlink");entries.push({path:local,kind:"symlink",mode:s.mode&511,target:fs.readlinkSync(file)});}
+ else if(s.isDirectory()){entries.push({path:local,kind:"directory",mode:s.mode&511});visit(file);}
+ else if(s.isFile())entries.push({path:local,kind:"file",mode:s.mode&511,digest:h(fs.readFileSync(file))});
+ else throw Error("unsupported runtime file");
+}};visit(root);
+for(const [file,expected] of [[e.SPEXCODE_SYNC_NODE,e.SPEXCODE_SYNC_NODE_SHA256],[e.SPEXCODE_SYNC_GIT,e.SPEXCODE_SYNC_GIT_SHA256],[e.SPEXCODE_SYNC_TOOL,e.SPEXCODE_SYNC_TOOL_SHA256]])
+ if(!p.isAbsolute(file)||h(fs.readFileSync(file))!==expected)throw Error("trusted executable digest mismatch");
+if(h(JSON.stringify(entries))!==e.SPEXCODE_SYNC_RUNTIME_SHA256)throw Error("trusted runtime digest mismatch");
+import(require("node:url").pathToFileURL(p.join(p.dirname(e.SPEXCODE_SYNC_TOOL),"sync/trusted-footprint.js")).href)
+ .then(m=>m.frozenFootprintFromEnv(e.SPEXCODE_SYNC_GIT,process.cwd()))
+ .catch(error=>{console.error("trusted frozen footprint binding unavailable or changed: "+error.message);process.exitCode=1;});'
+}
+if [ -n "${SPEXCODE_SYNC_HOOK_MODE:-}" ]; then
+  if [ "$SPEXCODE_SYNC_HOOK_MODE" != trusted-v1 ] || [ -z "${SPEXCODE_SYNC_NODE:-}" ] || [ -z "${SPEXCODE_SYNC_TOOL:-}" ] || [ -z "${SPEXCODE_SYNC_GIT:-}" ] || ! spex_validate_trusted; then
+    echo "✗ SpexCode: trusted sync tool binding unavailable or changed; delivery refused." >&2
+    exit 1
+  fi
+  case "${SPEXCODE_SYNC_OPERATION:-}" in prepare|publish) ;; *)
+    echo "✗ SpexCode: trusted sync operation unavailable; delivery refused." >&2
+    exit 1 ;;
+  esac
+  spex_strict=1
+  export GIT_NO_REPLACE_OBJECTS=1
+  git() { "$SPEXCODE_SYNC_GIT" --no-replace-objects "$@"; }
+fi
+[ "$spex_strict" -eq 1 ] || [ -z "${SPEXCODE_SKIP_LINT:-}" ] || exit 0
+
+# @@@ frozen delivery binding - additional internal V4 proof before every existing lint classification.
+if [ "$spex_strict" -eq 1 ]; then
+  heads=0
+  head_rows=0
+  cleanup_rows=0
+  origin_rows=0
+  strict_candidate=
+  strict_head_old=
+  strict_head_new=
+  strict_mismatch() {
+    echo "✗ SpexCode: frozen delivery tree/parent/ref mismatch; current ref transaction refused." >&2
+    exit 1
+  }
+  while read -r old new ref; do
+    case "$ref" in
+      HEAD) head_rows=$((head_rows + 1)); strict_head_old="$old"; strict_head_new="$new" ;;
+      refs/heads/*)
+        heads=$((heads + 1))
+        [ "$ref" = "$SPEXCODE_SYNC_EXPECTED_REF" ] || strict_mismatch
+        if [ "$SPEXCODE_SYNC_OPERATION" = prepare ]; then
+          # A structural preparation can only name the already frozen base, never author a new commit.
+          { [[ "$old" =~ ^0+$ ]] || [ "$old" = "$SPEXCODE_SYNC_EXPECTED_PARENT" ]; } \
+            && [ "$new" = "$SPEXCODE_SYNC_EXPECTED_PARENT" ] || strict_mismatch
+        else
+          [ "$old" = "$SPEXCODE_SYNC_EXPECTED_PARENT" ] \
+            && [ "$(git cat-file -t "$new" 2>/dev/null)" = commit ] \
+            && [ "$(git show -s --format=%T "$new" 2>/dev/null)" = "$SPEXCODE_SYNC_EXPECTED_TREE" ] \
+            && [ "$(git show -s --format=%P "$new" 2>/dev/null)" = "$SPEXCODE_SYNC_EXPECTED_PARENT" ] || strict_mismatch
+        fi
+        strict_candidate="$new" ;;
+      AUTO_MERGE)
+        # Git checkout also requests deletion of an absent AUTO_MERGE ref after switching HEAD.
+        [[ "$old" =~ ^0+$ ]] && [[ "$new" =~ ^0+$ ]] || strict_mismatch
+        cleanup_rows=$((cleanup_rows + 1)) ;;
+      ORIG_HEAD)
+        [ "$SPEXCODE_SYNC_OPERATION" = prepare ] && [ "$new" = "$SPEXCODE_SYNC_EXPECTED_PARENT" ] \
+          && { [ "$old" = "$SPEXCODE_SYNC_EXPECTED_PARENT" ] || [[ "$old" =~ ^0+$ ]]; } || strict_mismatch
+        origin_rows=$((origin_rows + 1)) ;;
+      *) strict_mismatch ;;
+    esac
+  done <<< "$payload"
+  [ "$heads" -le 1 ] && [ "$head_rows" -le 1 ] && [ "$cleanup_rows" -le 1 ] && [ "$origin_rows" -le 1 ] || strict_mismatch
+  if [ "$SPEXCODE_SYNC_OPERATION" = prepare ]; then
+    [ "$(git cat-file -t "$SPEXCODE_SYNC_EXPECTED_PARENT" 2>/dev/null)" = commit ] \
+      && [ "$(git show -s --format=%T "$SPEXCODE_SYNC_EXPECTED_PARENT" 2>/dev/null)" = "$SPEXCODE_SYNC_EXPECTED_TREE" ] || strict_mismatch
+    if [ "$cleanup_rows" -eq 1 ] || [ "$origin_rows" -eq 1 ]; then
+      [ "$heads" -eq 0 ] && [ "$head_rows" -eq 0 ] && [ "$((cleanup_rows + origin_rows))" -eq 1 ] \
+        && [ "$(git rev-parse --verify HEAD 2>/dev/null)" = "$SPEXCODE_SYNC_EXPECTED_PARENT" ] || strict_mismatch
+    else
+      [ "$heads" -eq 1 ] || [ "$head_rows" -eq 1 ] || strict_mismatch
+    fi
+    if [ "$head_rows" -eq 1 ]; then
+      if [ "$strict_head_new" = "ref:$SPEXCODE_SYNC_EXPECTED_REF" ]; then
+        [ "$(git rev-parse --verify "$SPEXCODE_SYNC_EXPECTED_REF" 2>/dev/null)" = "$SPEXCODE_SYNC_EXPECTED_PARENT" ] || strict_mismatch
+      else
+        [ "$strict_head_new" = "$SPEXCODE_SYNC_EXPECTED_PARENT" ] || strict_mismatch
+      fi
+      { [ "$strict_head_old" = "$SPEXCODE_SYNC_EXPECTED_PARENT" ] || [[ "$strict_head_old" =~ ^0+$ ]]; } || strict_mismatch
+    fi
+  else
+    # Publication must advance the named branch. A detached HEAD authoring transaction is never delivery.
+    if [ "$cleanup_rows" -eq 1 ]; then
+      # Git performs this null deletion AFTER advancing the publication ref. It authors no object/ref.
+      [ "$heads" -eq 0 ] && [ "$head_rows" -eq 0 ] \
+        && [ "$(git symbolic-ref -q HEAD 2>/dev/null)" = "$SPEXCODE_SYNC_EXPECTED_REF" ] \
+        && [ "$(git show -s --format=%T HEAD 2>/dev/null)" = "$SPEXCODE_SYNC_EXPECTED_TREE" ] \
+        && [ "$(git show -s --format=%P HEAD 2>/dev/null)" = "$SPEXCODE_SYNC_EXPECTED_PARENT" ] || strict_mismatch
+    else
+      [ "$heads" -eq 1 ] || strict_mismatch
+    fi
+    if [ "$head_rows" -eq 1 ]; then
+      [ "$strict_head_old" = "$SPEXCODE_SYNC_EXPECTED_PARENT" ] && [ "$strict_head_new" = "$strict_candidate" ] || strict_mismatch
+    fi
+  fi
+fi
 
 candidate=
 candidate_old=
@@ -35,7 +145,7 @@ if [ -d "$operation_git_dir/rebase-merge" ] || [ -d "$operation_git_dir/rebase-a
   || [ -f "$operation_git_dir/REVERT_HEAD" ]; then
   force_operation=1
 fi
-if [ "$force_operation" -eq 0 ]; then
+if [ "$spex_strict" -eq 0 ] && [ "$force_operation" -eq 0 ]; then
   if [ -n "$(git for-each-ref --contains "$candidate" --format='%(refname)' 2>/dev/null)" ] \
     || git reflog --all --format=%H 2>/dev/null | grep -Fqx "$candidate"; then
     [ -z "${SPEXCODE_GATE_TRACE:-}" ] || echo "spexcode-gate: reachable candidate=$candidate skipped" >&2
@@ -57,20 +167,23 @@ while IFS= read -r path; do
   [ -n "$path" ] || continue
   case "$path" in .spec/.issues/*) ;; *) issue_only=0; break ;; esac
 done <<< "$changed_paths"
-if [ "$issue_only" -eq 1 ]; then
+if [ "$spex_strict" -eq 0 ] && [ "$issue_only" -eq 1 ]; then
   [ -z "${SPEXCODE_GATE_TRACE:-}" ] || echo "spexcode-gate: issue-only candidate=$candidate skipped before lint" >&2
   exit 0
 fi
 
 repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
 spex_kind=
-if [ -x "$repo_root/node_modules/.bin/spex" ]; then
+if [ "$spex_strict" -eq 1 ]; then
+  spex_kind=trusted
+elif [ -x "$repo_root/node_modules/.bin/spex" ]; then
   spex_kind=local
 elif command -v spex >/dev/null 2>&1; then
   spex_kind=path
 fi
 spex_cli() {
   case "$spex_kind" in
+    trusted) spex_validate_trusted && NODE_OPTIONS= NODE_PATH= "$SPEXCODE_SYNC_NODE" "$SPEXCODE_SYNC_TOOL" "$@" ;;
     path)  spex "$@" ;;
     local) "$repo_root/node_modules/.bin/spex" "$@" ;;
     *)     return 127 ;;
@@ -80,14 +193,16 @@ if [ -z "$spex_kind" ]; then
   echo "• SpexCode: candidate spec-lint skipped — no \`spex\` CLI found; CI still enforces." >&2
   exit 0
 fi
-SPEXCODE_GATE_SCOPE_ONLY=1 spex_cli spec lint --pending "$candidate" >&2
+gate_scope=1
+[ "$spex_strict" -eq 0 ] || gate_scope=
+SPEXCODE_GATE_SCOPE_ONLY="$gate_scope" spex_cli spec lint --pending "$candidate" >&2
 lint_rc=$?
-if [ "$lint_rc" -eq 76 ]; then
+if [ "$lint_rc" -eq 76 ] && [ "$spex_strict" -eq 0 ]; then
   [ -z "${SPEXCODE_GATE_TRACE:-}" ] || echo "spexcode-gate: non-governed candidate=$candidate skipped before full lint" >&2
   exit 0
 fi
 [ -z "${SPEXCODE_GATE_TRACE:-}" ] || echo "spexcode-gate: lint_rc=$lint_rc candidate=$candidate" >&2
-if [ "$lint_rc" -eq 75 ]; then
+if [ "$lint_rc" -eq 75 ] && [ "$spex_strict" -eq 0 ]; then
   echo "• SpexCode: candidate spec-lint skipped — spex is paused mid-merge (exit 75); CI still enforces." >&2
   exit 0
 fi

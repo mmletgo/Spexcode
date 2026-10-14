@@ -47,16 +47,16 @@ export function deriveStatus(d: { version: number; drift: number; hasOverlay?: b
   return 'pending'
 }
 
-function walk(dir: string, parent: string | null, acc: Raw[]) {
+function walk(dir: string, parent: string | null, acc: Raw[], root: string) {
   let myId = parent
   if (existsSync(join(dir, 'spec.md'))) {
     myId = basename(dir)
-    const relPath = relative(ROOT, join(dir, 'spec.md'))
+    const relPath = relative(root, join(dir, 'spec.md'))
     const { fm, body } = parseFrontmatter(readFileSync(join(dir, 'spec.md'), 'utf8'))
     acc.push({ id: myId, parent, relPath, fm, body })
   }
   for (const e of readdirSync(dir, { withFileTypes: true })) {
-    if (e.isDirectory()) walk(join(dir, e.name), myId, acc)
+    if (e.isDirectory()) walk(join(dir, e.name), myId, acc, root)
   }
 }
 
@@ -97,9 +97,9 @@ function reId(acc: Raw[]): void {
   }
 }
 
-function raws(): Raw[] {
-  const acc: Raw[] = []
-  if (existsSync(SPEC_DIR)) walk(SPEC_DIR, null, acc)
+function raws(root: string = ROOT): Raw[] {
+  const acc: Raw[] = [], specDir = join(root, '.spec')
+  if (existsSync(specDir)) walk(specDir, null, acc, root)
   reId(acc)
   return acc
 }
@@ -170,12 +170,12 @@ export function specRelated(file: string): { id: string; desc: string }[] {
 // memo fileDiffAt by (version sha + spec.md path) — a commit's patch is immutable. Keyed by path too: one
 // commit can patch several nodes' spec.md. `{hash:'',patch:''}` for an unversioned node (no git call).
 const diffCache = new Map<string, { hash: string; patch: string }>()
-async function latestDiff(relPath: string, hash: string): Promise<{ hash: string; patch: string }> {
+async function latestDiff(root: string, relPath: string, hash: string): Promise<{ hash: string; patch: string }> {
   if (!hash) return { hash: '', patch: '' }
-  const key = `${hash}\0${relPath}`
+  const key = `${root}\0${hash}\0${relPath}`
   const hit = diffCache.get(key)
   if (hit) return hit
-  const val = { hash, patch: await fileDiffAt(ROOT, relPath, hash) }
+  const val = { hash, patch: await fileDiffAt(root, relPath, hash) }
   diffCache.set(key, val)
   return val
 }
@@ -183,8 +183,8 @@ async function latestDiff(relPath: string, hash: string): Promise<{ hash: string
 // filesystem-only slice of a node (id/title/path/desc/body, no git) for hot lexical reads like
 // [[spec-search]]; same fields loadSpecs reports, without the git history/drift walk.
 export type SpecLite = { id: string; title: string; path: string; desc: string; body: string }
-export function loadSpecsLite(): SpecLite[] {
-  return raws().map((r) => ({
+export function loadSpecsLite(root: string = ROOT): SpecLite[] {
+  return raws(root).map((r) => ({
     id: r.id,
     title: str(r.fm.title, r.id),
     path: r.relPath,
@@ -195,16 +195,16 @@ export function loadSpecsLite(): SpecLite[] {
 
 // one node's body + parsed parts, filesystem-only (no git). The board omits both to stay lean
 // ([[graph-lean]]); the detail view fetches them here when a node opens. null when the id isn't a node.
-export function specContent(id: string): { body: string; parts: ReturnType<typeof parseParts> } | null {
-  const r = raws().find((x) => x.id === id)
+export function specContent(id: string, root: string = ROOT): { body: string; parts: ReturnType<typeof parseParts> } | null {
+  const r = raws(root).find((x) => x.id === id)
   return r ? { body: r.body.trim(), parts: parseParts(r.body) } : null
 }
 
 // Where a node LIVES, repo-relative — its own folder, not its spec.md. A node's folder is the unit (the
 // same rule the plugin instances are built on), so anything that wants to see what a node carries besides
 // its body asks the spec tree's own reader rather than re-deriving a path from an id.
-export function specDir(id: string): string | null {
-  const r = raws().find((x) => x.id === id)
+export function specDir(id: string, root: string = ROOT): string | null {
+  const r = raws(root).find((x) => x.id === id)
   // Strip the leaf with EITHER separator: relPath is built by the host's path module, so on Windows it is
   // back-slashed and a '/'-only strip left the file path in place — every diagram then resolved to
   // `…\\spec.md\\diagram.json`, a path that cannot exist.
@@ -317,13 +317,13 @@ export async function loadSpecs(root: string = ROOT, options: LoadSpecsOptions =
 
 // per-node version timeline; each row sums the node's spec.md stat (rename-followed, read on demand) and its
 // governed-code stat (pathsStats) — separate because spec.md needs rename-following a plain `git log -- path` can't do.
-export async function specHistory(id: string) {
-  const node = raws().find((r) => r.id === id)
+export async function specHistory(id: string, root: string = ROOT) {
+  const node = raws(root).find((r) => r.id === id)
   if (!node) return []
   const codePaths = [...new Set(list(node.fm.code).map((e) => parseCodeEntry(e).path))]
   // index (cached) and the code-path walk are independent — run them in parallel, both async git.
-  const [idx, cStats] = await Promise.all([historyIndex(ROOT), pathsStats(ROOT, codePaths)])
-  const sStats = await historyStats(ROOT, idx, node.relPath)
+  const [idx, cStats] = await Promise.all([historyIndex(root), pathsStats(root, codePaths)])
+  const sStats = await historyStats(root, idx, node.relPath)
   return rowsFor(idx, node.relPath).map((v) => {
     const s = sStats.get(v.hash) ?? { additions: 0, deletions: 0, files: 0 }
     const c = cStats.get(v.hash) ?? { additions: 0, deletions: 0, files: 0 }
@@ -334,10 +334,10 @@ export async function specHistory(id: string) {
 // @@@ version gate - a hash from a URL names a version only when the node's OWN log lists it. Both per-version
 // reads answer through here, so another commit, a ref expression, or an option-shaped string (`--output=…`,
 // which `git show` would obey) is refused before any of it reaches git. Also yields where spec.md sat then.
-async function nodeVersion(id: string, hash: string) {
-  const node = raws().find((r) => r.id === id)
+async function nodeVersion(id: string, hash: string, root: string) {
+  const node = raws(root).find((r) => r.id === id)
   if (!node) return null
-  const idx = await historyIndex(ROOT)
+  const idx = await historyIndex(root)
   const rows = rowsFor(idx, node.relPath)
   const at = rows.findIndex((v) => v.hash === hash)
   if (at < 0) return null
@@ -347,18 +347,18 @@ async function nodeVersion(id: string, hash: string) {
 // the line-diff one of a node's versions introduced to its spec.md; fetched lazily when a history item
 // expands. fileDiffAt resolves the spec.md path AT that commit (reparents). null for an unknown id or a hash
 // that is not one of this node's versions.
-export async function specDiffAt(id: string, hash: string) {
-  const version = await nodeVersion(id, hash)
-  return version ? latestDiff(version.node.relPath, hash) : null
+export async function specDiffAt(id: string, hash: string, root: string = ROOT) {
+  const version = await nodeVersion(id, hash, root)
+  return version ? latestDiff(root, version.node.relPath, hash) : null
 }
 
 // a node's spec.md as it stood at one of its versions ([[spec-view]]'s version face): body and parts parsed
 // the way the live node's are, with that version's own title/desc and its place in the log (v`ordinal` of
 // `count`). null for an unknown id or a hash that is not one of this node's versions.
-export async function specAt(id: string, hash: string) {
-  const version = await nodeVersion(id, hash)
+export async function specAt(id: string, hash: string, root: string = ROOT) {
+  const version = await nodeVersion(id, hash, root)
   if (!version) return null
-  const source = await gitRequiredA(['-C', ROOT, 'cat-file', 'blob', `${hash}:${version.path}`], `read ${id} at ${hash.slice(0, 7)}`)
+  const source = await gitRequiredA(['-C', root, 'cat-file', 'blob', `${hash}:${version.path}`], `read ${id} at ${hash.slice(0, 7)}`)
   const { fm, body } = parseFrontmatter(source)
   return {
     ...version.row, path: version.path, version: version.ordinal, versions: version.count,

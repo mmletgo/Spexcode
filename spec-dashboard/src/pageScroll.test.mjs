@@ -50,7 +50,7 @@ test('document pages consume PageScroll while Graph and Sessions keep their own 
   assert.match(projects, /<PageScroll className="page-projects-scroll">/)
   assert.doesNotMatch(dashboard, /<PageScroll/)
   assert.match(shell, /<PageScroll className="lp-page">[\s\S]*className="rl-content"/)
-  assert.match(mobile, /const Settings = lazy[\s\S]*page === 'settings'[\s\S]*<Settings \/>/)
+  assert.match(mobile, /const Settings = lazy[\s\S]*plane === 'settings'[\s\S]*<Settings \/>/)
 
   assert.match(css, /\.page-scroll\s*\{[^}]*overflow-x:\s*hidden;[^}]*overflow-y:\s*auto;/s)
   assert.doesNotMatch(css, /\.lp-page\s*\{[^}]*overflow-[xy]:/s)

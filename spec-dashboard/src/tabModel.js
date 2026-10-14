@@ -19,12 +19,14 @@ export const tabKind = (route) => isResourceRoute(route) ? 'file' : route?.page
 // redundant with `placeTab`'s focused-same-kind replacement, which is what actually keeps browsing the graph
 // from minting a tab per node, and it cost the strip its headline law: no gesture could mint a second Spec
 // tab, so "open in a new tab" on a spec silently overwrote the document the reader was reading. A spec's
-// query is a face (`?surface=diff`, its pending change; `?version=<hash>`, a past version) and is dropped
-// exactly like a session face.
+// surface/version query is a face and is dropped exactly like a session face. targetTree names the
+// actual document's repository tree, so it remains in identity alongside the node id.
 const RESIDENT_BOARDS = new Set(['issues', 'settings'])
 export const tabRoute = (route) => RESIDENT_BOARDS.has(route?.page)
   ? { ...route, param: null, query: null }
-  : (route?.page === 'spec' && route?.param) || (route?.page === 'sessions' && route?.param && !isResourceRoute(route))
+  : route?.page === 'spec' && route?.param
+    ? { ...route, query: route.query?.targetTree ? { targetTree: route.query.targetTree } : null }
+    : route?.page === 'sessions' && route?.param && !isResourceRoute(route)
     ? { ...route, query: null }
     : route
 export const tabKey = (t) => {

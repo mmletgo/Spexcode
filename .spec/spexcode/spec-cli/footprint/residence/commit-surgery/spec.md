@@ -78,3 +78,15 @@ the surgery makes that native escape hatch safe. One bump is the floor under git
 a pure materialized artifact must stay excluded or `??` noise and empty-file scooping return). Every other
 path — an
 anchor ran between edit and add — is zero-bump.
+
+
+**受控同步交付。** 内部 trusted-v1 hook 只启动协调器绑定的候选外完整已编译发布工具，不解析 candidate.bin。既有 surgery/refresh 仍执行，真实 commitSurgery 的 materialize 异常在 trusted-v1 模式传播原异常，不能只打印 advisory 后返回成功；普通模式仍只打印 footprint may be stale 提醒并继续。工具不可用、失败或 exit75 必须返回失败；post-checkout 也不得沿用普通 best-effort 或 session-create defer 来隐藏该失败。surgery 若修改计划冻结的 index，reference-transaction prepared 以实际 commit tree 拒绝 ref 更新，不自动接受新 tree，不弱化门禁。未知 custom hooks、候选 hookspath 或无法证明的外部 signing/filter 由内部静态 preflight 明确 unsupported，不替换、删除或探测执行。普通 authoring 的 repair-and-proceed 与 refresh best-effort 保持。
+
+
+strict hook 的固定 Git wrapper 必须附加 --no-replace-objects，并为可信工具 child 固定 GIT_NO_REPLACE_OBJECTS=1；身份基于原始对象，refs/replace 不参与受控 tree/parent 判断，普通模式保持。
+
+
+严格 materialize 的 footprint 策略正常检查静态声明与契约，并仅写登记私有投影；surgery 仍核对实际 staged index。不能通过刷新托管 AGENTS/CLAUDE 块或新植入 command 污染冻结候选；既有 canonical filter 由静态 preflight 精确识别，其漂移阻断。
+
+
+非空内部冻结模式值未知时同样失败并传播，不能静默降级到 ordinary materialize 或 advisory；普通未设置内部模式的行为保留。

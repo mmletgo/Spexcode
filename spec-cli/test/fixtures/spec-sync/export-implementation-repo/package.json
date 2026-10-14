@@ -1,0 +1,1 @@
+{"name":"export-implementation-preflight","private":true,"type":"module","scripts":{"test":"node --test tests/export.generated.test.mjs trusted-oracle/export.oracle.test.mjs"}}

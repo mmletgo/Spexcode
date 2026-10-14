@@ -151,3 +151,5 @@ the host extension leaves `online` unknown and the UI falls back to probe-only h
 default) so the same frontend runs against every deployment generation. All hub/credential/selector
 styling reads the shared palette AND typography tokens only — every theme preset skins these surfaces,
 the config/setup drawers, and the transcript block with no extra rules.
+
+项目目录的 absent 投影区分能力缺失与暂时不可达：明确非重定向 404、成功 HTML fallback 返回 retry:false，shell 停止后续目录轮询；认证状态、网关 5xx、网络故障及重定向不被当作能力缺失。last-good identity 仍由 applyCatalogResult 保留；目录功能和权限仍来自正式网关接口。

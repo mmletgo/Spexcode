@@ -26,6 +26,7 @@ import NodeDiagram from './NodeDiagram.jsx'
 import { useSpecContent } from './specContent.js'
 import { useHistory, useVersionDiff } from './specHistory.js'
 import { useBackdropDismiss } from './backdropDismiss.js'
+import { useBoard } from './workspace.jsx'
 import 'katex/dist/katex.min.css'
 
 export { useSpecContent } from './specContent.js'
@@ -66,13 +67,14 @@ const pageFilterModel = (data, t) => {
 // implementation above remains named (and removable in the later surface migrations), but is no longer
 // reachable from a dashboard surface.
 export function SpecBody({ body, lineBase = 0 }) {
+  const { targetTree } = useBoard()
   // A spec body is a document: its authoring wraps reflow (Prose's default), unlike the session timeline.
   if (!body) return null
   const { source, removedLines } = stripProseTitle(body)
   const base = lineBase > 0 ? lineBase + removedLines : 0
   return <Prose className="doc-body" lineBase={base}
     renderSpecRef={(id, token, provenance) => {
-      const href = routeHash('spec', id)
+      const href = routeHash('spec', id, targetTree ? { targetTree } : null)
       return <a className="doc-link" href={href} {...provenance} onClick={(event) => newTabAnchor(event, href)}>{id}</a>
     }}
     renderIssueRef={(id, token, provenance) => {
@@ -129,6 +131,7 @@ export function ProseBody({ body, parts, stamped = true }) {
 // ctrl/⌘ uses the same hold helper as the explorer.
 function GovernedFiles({ files, count }) {
   const t = useT()
+  const { targetTree } = useBoard()
   // a `code:` entry may name a SYMBOL inside a file (`SpecNode.jsx#SpecNode`) — several entries then point
   // at one file. The chip keeps the claim's own wording; the door is the file address.
   const pathOf = (entry) => entry.split('#')[0]
@@ -138,7 +141,7 @@ function GovernedFiles({ files, count }) {
       <div className="doc-gov-files">
         {files.map((f) => {
           const path = pathOf(f)
-          const href = routeHash('file', path)
+          const href = routeHash('file', path, targetTree ? { targetTree } : null)
           return (
             <a key={f} className="gov-f" href={href} onClick={(event) => newTabAnchor(event, href)}>{f}</a>
           )
@@ -156,20 +159,22 @@ const attachmentPath = (nodeId, name) => `.spec/${nodeId}/${name}`
 
 function NodeAttachments({ nodeId, enabled }) {
   const t = useT()
+  const { targetTree } = useBoard()
   const [files, setFiles] = useState(null)
   useEffect(() => {
     if (!enabled) return undefined
     let live = true
-    fetchNodeFiles(nodeId).then((f) => live && setFiles(f)).catch(() => live && setFiles([]))
+    fetchNodeFiles(nodeId, targetTree).then((f) => live && setFiles(f)).catch((error) => live && setFiles({ error: error.message }))
     return () => { live = false }
-  }, [nodeId, enabled])
+  }, [nodeId, enabled, targetTree])
+  if (files?.error) return <p className="ev-error" role="alert">{files.error}</p>
   if (!files?.length) return null
   return (
     <div className="doc-gov doc-att">
       <span className="doc-gov-h">{t('nodeView.carries')} <b>{files.length}</b></span>
       <div className="doc-gov-files">
         {files.map((f) => {
-          const href = routeHash('file', attachmentPath(nodeId, f.name))
+          const href = routeHash('file', attachmentPath(nodeId, f.name), targetTree ? { targetTree } : null)
           return <a key={f.name} className="gov-f" href={href} data-tip={`${(f.size / 1024).toFixed(1)} KB`}
             onClick={(event) => newTabAnchor(event, href)}>{f.name}</a>
         })}
@@ -182,16 +187,17 @@ function NodeAttachments({ nodeId, enabled }) {
 // stand in for everything under that row — the document's change face keeps the node's head and swaps the rest.
 export function SpecPane({ node, graphOnly = PUBLIC_GRAPH_ONLY, stat = null, children = null }) {
   const t = useT()
-  const content = useSpecContent(node.id, node.version, { embedded: node.body != null })
+  const { targetTree } = useBoard()
+  const content = useSpecContent(node.id, node.version, { embedded: node.body != null && !targetTree })
   const driftTitle = (node.driftFiles || []).map((d) => `${d.file}: ${t('specNode.driftAhead', { n: d.behind })}`).join('\n')
   return (
     <div className="pane-doc">
       <h1 className="doc-title">{node.title}</h1>
       <blockquote className="doc-desc">{node.desc}</blockquote>
       <div className="doc-stat">
-        <span className={`stat-status st-${node.status}`} data-tip={t('nodeView.statusLabel')}>
+        {!targetTree && <span className={`stat-status st-${node.status}`} data-tip={t('nodeView.statusLabel')}>
           <i className="stat-dot" />{t(`status.${node.status}`)}
-        </span>
+        </span>}
         <span className="stat-chip" data-tip={t('nodeView.versionLabel')}>v{node.version || 0}</span>
         {node.drift > 0 && <span className="stat-chip stat-drift" data-tip={driftTitle}>⚠{node.drift}</span>}
         {stat}
@@ -204,6 +210,8 @@ export function SpecPane({ node, graphOnly = PUBLIC_GRAPH_ONLY, stat = null, chi
 
 function SpecReading({ node, graphOnly, content }) {
   const t = useT()
+  const { targetTree } = useBoard()
+  if (content?.error) return <p className="ev-error" role="alert">{content.error}</p>
   return (
     <>
       {node.code?.length > 0 ? (
@@ -219,8 +227,8 @@ function SpecReading({ node, graphOnly, content }) {
         // empty pane, so a slow/remote /content read reads as loading, not as a bodyless node. A FAILED fetch
         // resolves content to `{body:'',parts:null}` (not null), so it lands on the empty body, never a spinner
         // that never stops. parts come from the backend (`/content`); null → a legacy one-blob body renders whole.
-        if (content === null && node.body == null) return <div className="pane-loading"><span className="spinner" aria-label={t('common.loading')} /></div>
-        return <ProseBody body={node.body ?? content?.body ?? ''} parts={node.parts ?? content?.parts ?? null} />
+        if (content === null && (targetTree || node.body == null)) return <div className="pane-loading"><span className="spinner" aria-label={t('common.loading')} /></div>
+        return <ProseBody body={(targetTree ? content?.body : node.body) ?? content?.body ?? ''} parts={targetTree ? content?.parts ?? null : node.parts ?? content?.parts ?? null} />
       })()}
     </>
   )
@@ -245,7 +253,7 @@ function parseDiff(patch) {
 }
 
 // diff == null → still loading (lazy on expand); empty patch → a version with no recorded spec.md change
-function DiffEvidence({ diff }) {
+export function DiffEvidence({ diff, label = null }) {
   const t = useT()
   if (diff == null) return <figcaption className="ev-note">{t('nodeView.loadingChange')}</figcaption>
   if (diff.error) return <figcaption className="ev-note ev-error">{diff.error}</figcaption>
@@ -253,7 +261,7 @@ function DiffEvidence({ diff }) {
   if (!lines.length) return <figcaption className="ev-note">{t('nodeView.noChange')}</figcaption>
   return (
     <>
-      <figcaption className="ev-difflabel">{t('nodeView.diffLabel')}</figcaption>
+      <figcaption className="ev-difflabel">{label || t('nodeView.diffLabel')}</figcaption>
       <pre className="ev-diff">{lines.map((l, i) => <div key={i} className={`dl dl-${l.t}`}>{l.t === 'hunk' ? t('nodeView.changeAt', { n: l.n }) : l.s || ' '}</div>)}</pre>
     </>
   )

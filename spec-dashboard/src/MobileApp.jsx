@@ -13,7 +13,8 @@ import { ComposerTextarea, composingKey } from './Composer.jsx'
 import { Icon } from './icons.jsx'
 import { ViewScopeProvider } from './ViewScope.jsx'
 import { createViewScope } from './viewScope.js'
-import { viewRouteContract } from './views.jsx'
+import { viewFor, viewRouteContract } from './views.jsx'
+import { ReadScopeProvider } from './workspace.jsx'
 
 // the routed review page ([[issues-view]]) — the SAME component the desktop mounts, reflowed to one
 // column by [[review-chrome]]'s CSS.
@@ -247,7 +248,9 @@ export default function MobileApp({ specs, sessions, issuesStamp, _reloadBoard, 
   // how [[plugins-page]] shipped.
   const { page = 'graph', param = null } = route
   const ROUTED = ['issues', 'settings', 'plugins']
-  const plane = ROUTED.includes(page) ? page : tab
+  const documentRoute = (page === 'spec' || page === 'file') && param != null
+  const { component: DocumentView } = viewFor(page)
+  const plane = ROUTED.includes(page) || documentRoute ? page : tab
   // Review pages are the same scoped views as desktop. The phone shell has no ViewHost component, so it
   // provides the route-owned scope at this boundary instead of weakening the views' required hook.
   const reviewScope = useMemo(() => createViewScope({
@@ -284,7 +287,7 @@ export default function MobileApp({ specs, sessions, issuesStamp, _reloadBoard, 
   const pickPlane = (p) => {
     if (p === 'issues') { navigate(p); return }
     setTab(p)
-    if (page === 'issues' || page === 'settings') navigate(p === 'specs' ? 'graph' : 'sessions')
+    if (ROUTED.includes(page) || documentRoute) navigate(p === 'specs' ? 'graph' : 'sessions')
   }
   // a filer/originator chip click on a review page opens that session's conversation here.
   const openSession = (id) => { setTab('sessions'); setOpenSessionId(id); navigate('sessions', id) }
@@ -302,11 +305,12 @@ export default function MobileApp({ specs, sessions, issuesStamp, _reloadBoard, 
   return (
     <div className="m-app">
       <main className="m-main">
-        {ROUTED.includes(plane) ? (
+        {ROUTED.includes(plane) || documentRoute ? (
           <div className="m-review">
             <ViewScopeProvider scope={reviewScope.scope}>
               <Suspense fallback={<div className="m-empty">{t('common.loading')}</div>}>
-                {plane === 'settings' ? <Settings />
+                {documentRoute ? <ReadScopeProvider targetTree={route.query?.targetTree}><DocumentView key={`${page}/${param}/${route.query?.targetTree || ''}`} param={param} query={route.query} /></ReadScopeProvider>
+                  : plane === 'settings' ? <Settings />
                   : plane === 'plugins' ? <PluginsView />
                     : <IssuesPage param={param} query={route.query} specs={specs} sessions={sessions} issuesStamp={issuesStamp} onOpenSession={openSession} />}
               </Suspense>

@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { parseFrontmatter, repoRoot, specDir, gitTry } from '@spexcode/spec-core'
+import { parseFrontmatter, repoRoot, loadSpecs, gitTry } from '@spexcode/spec-core'
 
 // [[spec-body-edit]]: the one seam through which a human at the board edits a spec BODY and lands it as a
 // real commit — the "edit this file on the web" affordance, held to this project's law rather than
@@ -34,6 +34,15 @@ export type SpecBodyEdit = {
   original: string
   replacement: string
   reason?: string
+}
+
+export type PreparedSpecBodyEdit = {
+  path: string
+  source: string
+  next: string
+  changed: boolean
+  startLine: number
+  endLine: number
 }
 
 export type SpecBodyEditResult = {
@@ -75,13 +84,12 @@ export function readSpecBodyEdit(raw: unknown): SpecBodyEdit {
   }
 }
 
-export async function editSpecBody(id: string, patch: SpecBodyEdit): Promise<SpecBodyEditResult> {
-  const root = repoRoot()
-  const dir = specDir(id)
-  if (!dir) throw new SpecBodyEditError(`no such spec node: ${id}`, 404, 'no-node')
+export async function prepareSpecBodyEdit(root: string, id: string, patch: SpecBodyEdit): Promise<PreparedSpecBodyEdit> {
+  const node = (await loadSpecs(root, { history: null, drift: null })).find(node => node.id === id)
+  if (!node) throw new SpecBodyEditError(`no such spec node: ${id}`, 404, 'no-node')
   // guarantee 1, made structural: the path came from the spec tree, and it must still look like one. A
   // node whose folder resolved outside `.spec/` is a broken tree, not an edit target.
-  const relPath = `${dir}/spec.md`
+  const relPath = node.path
   if (!relPath.startsWith('.spec/') || !relPath.endsWith('/spec.md') || relPath.includes('..')) {
     throw new SpecBodyEditError(`node ${id} does not resolve to a spec body inside .spec/`, 404, 'no-node')
   }
@@ -105,7 +113,15 @@ export async function editSpecBody(id: string, patch: SpecBodyEdit): Promise<Spe
   }
 
   const next = prefix + [...lines.slice(0, patch.startLine - 1), ...patch.replacement.split('\n'), ...lines.slice(patch.endLine)].join('\n') + suffix
-  if (next === source) return { ok: true, changed: false, path: relPath, commit: null, startLine: patch.startLine, endLine: patch.endLine }
+  return { path: relPath, source, next, changed: next !== source, startLine: patch.startLine, endLine: patch.startLine + patch.replacement.split('\n').length - 1 }
+}
+
+export async function editSpecBody(id: string, patch: SpecBodyEdit): Promise<SpecBodyEditResult> {
+  const root = repoRoot()
+  const prepared = await prepareSpecBodyEdit(root, id, patch)
+  const { path: relPath, source, next } = prepared
+  if (!prepared.changed) return { ok: true, changed: false, path: relPath, commit: null, startLine: prepared.startLine, endLine: prepared.endLine }
+  const file = join(root, relPath)
 
   // Everything above is read-only, and deliberately: the caller gets the diagnosis that is actually about
   // their edit before the tree's state is allowed to have an opinion. Only a real write needs a clean index
@@ -155,7 +171,7 @@ export async function editSpecBody(id: string, patch: SpecBodyEdit): Promise<Spe
     changed: true,
     path: relPath,
     commit: head.ok ? head.stdout.trim() : null,
-    startLine: patch.startLine,
-    endLine: patch.startLine + patch.replacement.split('\n').length - 1,
+    startLine: prepared.startLine,
+    endLine: prepared.endLine,
   }
 }

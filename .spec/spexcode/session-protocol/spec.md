@@ -48,6 +48,8 @@ The public operations are:
 - `listPending(sessionId)` returns the current ordered messages without changing them.
 - `readMessages(sessionId, afterSequence?)` reads immutable history in stable enqueue sequence without changing
   queue state. Reader position is consumer-owned and is not protocol state.
+- `backupTo(destination)` uses SQLite online backup to a new absolute file, preserving committed WAL bytes;
+  it runs outside a shared transaction and fences mutations on that source handle while pending.
 - `retire(sessionId)` requires an empty queue, atomically refuses future enqueue, and retains an auditable tombstone
   and message history. Purge and retention are adopter maintenance policy, not implicit retirement behavior.
 
@@ -100,7 +102,7 @@ The package does not depend on `spec-core` for storage placement. SpexCode's ado
 root and project namespace, then passes the resulting absolute database path to this package. Another adopter may
 use a different configuration system and path without changing any protocol operation or schema. The public entry
 exposes complete operations and read models. A controlled synchronous transaction capability may compose
-owner-specific tables and protocol enqueue in the same database; raw connections and half-operations are not a
+owner-specific tables and complete protocol enqueue/dequeue in the same database; raw connections and half-operations are not a
 general consumer surface, and an external adopter must never reconstruct enqueue or dequeue from partial writes.
 
 Failures must preserve these language-neutral distinctions even if an implementation chooses different class
@@ -130,7 +132,7 @@ vectors through its public operations against a fresh temporary database:
 8. Opaque body bytes and headers round-trip exactly, including unknown message kinds; no topology, lifecycle,
    harness, or product field changes protocol behavior.
 9. In a fixture-owned extension table, one synchronous transaction can commit an extension mutation and zero or
-   more enqueues together; forced rollback leaves neither side visible. The fixture contains no outbox or replay
+   more enqueues or exact FIFO dequeue together; forced rollback leaves neither side visible. The fixture contains no outbox or replay
    dispatcher.
 10. Missing every wake hint does not change durable results: a newly opened process discovers and dequeues the same
     pending rows by querying the database.

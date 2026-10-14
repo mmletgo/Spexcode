@@ -241,3 +241,59 @@ test('proxyHttp pairs normal and abruptly-closed downstream/upstream lifetimes',
     })
   })
 })
+
+
+test('proxyHttp recovers one read reset on a reused upstream socket without replaying writes or fresh failures', async (t) => {
+  const visits = new Map<net.Socket, number>()
+  const attempts = new Map<string, number>()
+  const upstream = http.createServer((req, res) => {
+    visits.set(req.socket, (visits.get(req.socket) ?? 0) + 1)
+    attempts.set(req.url!, (attempts.get(req.url!) ?? 0) + 1)
+    if (req.url === '/fresh-failure' || req.url === '/always-failure' || (visits.get(req.socket)! > 1 && req.url !== '/warm')) { req.socket.destroy(); return }
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end('{"sessions":[{"id":"retained-session"}],"receipt":"retained-receipt"}')
+  })
+  const upstreamPort = await listen(upstream)
+  const proxy = http.createServer((req, res) => proxyHttp(req, res, upstreamPort, undefined, { ...req.headers, connection: 'keep-alive' }))
+  const proxyPort = await listen(proxy)
+  t.after(() => { proxy.closeAllConnections(); upstream.closeAllConnections(); proxy.close(); upstream.close() })
+  assert.equal((await getBuffer(proxyPort, '/warm', { connection: 'keep-alive' })).status, 200)
+  const recovered = await getBuffer(proxyPort, '/api/graph', { connection: 'keep-alive' })
+  assert.equal(recovered.status, 200, `reused read socket must reconnect once; got ${recovered.body.toString()}, requests ${JSON.stringify([...attempts])}`)
+  assert.equal(attempts.get('/api/graph'), 2)
+  assert.equal(JSON.parse(recovered.body.toString()).sessions[0].id, 'retained-session')
+  assert.equal((await getBuffer(proxyPort, '/warm', { connection: 'keep-alive' })).status, 200)
+  const post = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+    const request = http.request({ host: '127.0.0.1', port: proxyPort, path: '/mutation', method: 'POST', headers: { connection: 'keep-alive' } }, response => {
+      let body = ''; response.on('data', bytes => { body += bytes }); response.on('end', () => resolve({ status: response.statusCode!, body }))
+    })
+    request.on('error', reject); request.end()
+  })
+  assert.equal(post.status, 502)
+  assert.equal(attempts.get('/mutation'), 1)
+  assert.equal((await getBuffer(proxyPort, '/warm', { connection: 'keep-alive' })).status, 200)
+  const headed = await new Promise<number>((resolve, reject) => {
+    const request = http.request({ host: '127.0.0.1', port: proxyPort, path: '/head-read', method: 'HEAD', headers: { connection: 'keep-alive' } }, response => {
+      response.resume(); response.on('end', () => resolve(response.statusCode!))
+    })
+    request.on('error', reject); request.end()
+  })
+  assert.equal(headed, 200)
+  assert.equal(attempts.get('/head-read'), 2)
+  assert.equal((await getBuffer(proxyPort, '/warm', { connection: 'keep-alive' })).status, 200)
+  const bodyRead = await new Promise<number>((resolve, reject) => {
+    const request = http.request({ host: '127.0.0.1', port: proxyPort, path: '/body-read', method: 'GET', headers: { connection: 'keep-alive', 'content-length': '1' } }, response => {
+      response.resume(); response.on('end', () => resolve(response.statusCode!))
+    })
+    request.on('error', reject); request.end('x')
+  })
+  assert.equal(bodyRead, 502)
+  assert.equal(attempts.get('/body-read'), 1)
+  assert.equal((await getBuffer(proxyPort, '/warm', { connection: 'keep-alive' })).status, 200)
+  const twiceFailed = await getBuffer(proxyPort, '/always-failure', { connection: 'keep-alive' })
+  assert.equal(twiceFailed.status, 502)
+  assert.equal(attempts.get('/always-failure'), 2)
+  const failed = await getBuffer(proxyPort, '/fresh-failure', { connection: 'keep-alive' })
+  assert.equal(failed.status, 502)
+  assert.equal(attempts.get('/fresh-failure'), 1)
+})

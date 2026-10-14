@@ -54,6 +54,8 @@ function Issues({ id }) {
 // The row the document is showing is marked current; its change door is pressed while the change face shows.
 function History({ node, query }) {
   const t = useT()
+  const { targetTree } = useBoard()
+  const treeQuery = targetTree ? { targetTree } : {}
   const rows = useHistory(node.id, true, node.version)
   if (!rows) return <div className="ctx-empty">{t('contextDock.loadingHistory')}</div>
   if (rows.error) return <div className="ctx-empty ctx-error">{rows.error}</div>
@@ -62,8 +64,8 @@ function History({ node, query }) {
   const changeFace = query?.surface === 'diff'
   return <div className="ctx-list">{rows.map((row, i) => {
     const ordinal = rows.length - i
-    const textHref = i === 0 ? routeHash('spec', node.id) : routeHash('spec', node.id, { version: row.hash })
-    const changeHref = routeHash('spec', node.id, { version: row.hash, surface: 'diff' })
+    const textHref = i === 0 ? routeHash('spec', node.id, treeQuery) : routeHash('spec', node.id, { ...treeQuery, version: row.hash })
+    const changeHref = routeHash('spec', node.id, { ...treeQuery, version: row.hash, surface: 'diff' })
     const current = row.hash === showing && (!!query?.version || !changeFace)
     return <div key={row.hash} className={`ctx-version${current ? ' on' : ''}`}>
       <Row href={textHref} className="ctx-row ctx-version-text" current={current && !changeFace}
@@ -95,7 +97,7 @@ function Panel({ title, open, onToggle, children }) {
 // to say what it says. The shell-owned right-edge switch stays mounted outside the animated panel.
 export default function ContextDock({ page, param, query = null, open = true }) {
   const t = useT()
-  const { specs } = useBoard()
+  const { specs, targetTree } = useBoard()
   const [width, onDrag, reset] = useResizable('spex.ctxWidth', 276, { min: 220, max: 460, dir: -1 })
   const [panels, setPanels] = useState(readPanels)
   // the same fold every panel in the frame uses ([[dock-modes]]): the dock outlives `open` by one panel
@@ -127,9 +129,9 @@ export default function ContextDock({ page, param, query = null, open = true }) 
         sidebars; without an inner scroller that clipping would make a long issue list unreachable instead
         of scrollable. The resize grip stays outside it so it cannot scroll away from its own edge. */}
     <div className="ctx-body">
-      <Panel title={t('contextDock.issues')} open={panels.issues} onToggle={() => togglePanel('issues')}>
+      {!targetTree && <Panel title={t('contextDock.issues')} open={panels.issues} onToggle={() => togglePanel('issues')}>
         <Issues id={param} />
-      </Panel>
+      </Panel>}
       <Panel title={t('contextDock.history')} open={panels.history} onToggle={() => togglePanel('history')}>
         <History node={node} query={query} />
       </Panel>

@@ -32,3 +32,5 @@ It exists because arrival is not always through a node. A reader following a pat
 link, the tree's file row, or a spec chip is looking at a *file*, and asking them to first find which node
 governs or carries it would be asking them to answer a question they do not have. FileView owns no tab
 placement policy; ordinary and held navigation are supplied by [[tab-strip]].
+
+从交付 Spec 打开的源码和逻辑附件地址保留 targetTree，分页请求读取同一注册工作树。文件页面显示交付树只读标识，独立挂载并保留该树自己的选区；失效树错误不能回落 main。

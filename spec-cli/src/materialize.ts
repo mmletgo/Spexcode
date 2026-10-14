@@ -1,15 +1,16 @@
-import { writeFileSync, mkdirSync, readFileSync, existsSync, readdirSync, renameSync, rmSync, rmdirSync, copyFileSync, chmodSync } from 'node:fs'
+import { writeFileSync, mkdirSync, readFileSync, realpathSync, existsSync, readdirSync, renameSync, rmSync, rmdirSync, copyFileSync, chmodSync } from 'node:fs'
 import { join, dirname, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { footprintDigest, frozenFootprintFromEnv } from './sync/trusted-footprint.js'
 import { execFileSync } from 'node:child_process'
 import { loadSystemConfig, loadSkillConfig, loadAgentConfig, loadConfig, configPath } from '@spexcode/spec-core'
 import { compileManifest } from './hooks.js'
 import { writeManagedBlock, removeManagedBlock, unappendManagedBlock, writeManagedJsonHooks, removeManagedJsonHooks, sharedShimHasHostContent, isGeneratedArtifact, GENERATED_MARK, HARNESSES, type HarnessArtifacts } from './harness.js'
-import { git, gitBinary } from '@spexcode/spec-core'
+import { git, gitBinary, repoRoot } from '@spexcode/spec-core'
 import { runtimeRoot, treeSlotDir, mainCheckout, readConfig } from '@spexcode/spec-core'
 import { resolveHarnessTargets, partitionHarnesses } from './harness-select.js'
 import { emitPlugin, cleanPlugin, pluginBundleDir, pluginVersion } from './plugin-harness.js'
-import { clearContractFilterPayload, contractFilterPlanted, plantContractFilter, removeContractFilter, settleIndexStat, type ContractFilterBinding, type ContractFilterPayload } from './contract-filter.js'
+import { canonicalContractFilterBindings, clearContractFilterPayload, contractFilterPlanted, plantContractFilter, removeContractFilter, settleIndexStat, type ContractFilterBinding, type ContractFilterPayload } from './contract-filter.js'
 import { writeFileIfChanged } from './file-write.js'
 
 export type MaterializedArtifact = {
@@ -338,9 +339,37 @@ export function dematerialize(proj = process.cwd(), arts: HarnessArtifacts = { s
   removeContractFilter(proj, [...HARNESSES.flatMap((h) => h.contractFiles(proj)), join(proj, '.gitignore')], true)
 }
 
+/** 冻结交付仍编译/检查契约与配置，所有托管投影只写已登记私有目录。 */
+function materializeFrozenDelivery(proj: string): MaterializeResult {
+  if (realpathSync(proj) !== realpathSync(repoRoot())) throw new Error('冻结 footprint 必须在目标 worktree 的独立 CLI 进程解析契约')
+  const policy = frozenFootprintFromEnv(gitBinary(process.env), proj)
+  const targets = resolveHarnessTargets(readConfig(proj).harnesses)
+  const contract = loadSystemConfig().map(node => node.body.trim()).filter(Boolean).join('\n\n')
+  const projection = {
+    version: 'frozen-delivery-footprint-v1',
+    runtimeDigest: process.env.SPEXCODE_SYNC_RUNTIME_SHA256,
+    root: proj,
+    targets,
+    contract,
+    hooks: compileManifest(),
+    skills: loadSkillConfig(),
+    agents: loadAgentConfig(),
+    commands: loadConfig(),
+  }
+  const content = JSON.stringify(projection, null, 2) + '\n'
+  const file = join(policy.privateDirectory.path, 'footprint.json')
+  writeFileIfChanged(file, content)
+  chmodSync(file, 0o600)
+  return { contentHash: footprintDigest(content), planted: [{ kind: 'contract', path: file }] }
+}
+
 // the whole pay-per-change materialize. proj defaults to cwd. Its receipt is populated at each successful
 // write so callers report the actual selected footprint instead of maintaining a second artifact inventory.
 export function materialize(proj = process.cwd()): MaterializeResult {
+  if (process.env.SPEXCODE_SYNC_HOOK_MODE) {
+    if (process.env.SPEXCODE_SYNC_HOOK_MODE !== 'trusted-v1') throw new Error('未支持的冻结交付 footprint 模式')
+    return materializeFrozenDelivery(proj)
+  }
   refreshCorePluginHandlers(proj)
   const rt = treeSlotDir(proj)                                            // this tree's slot in the global store, not the worktree
   mkdirSync(rt, { recursive: true })
@@ -597,11 +626,7 @@ export function materialize(proj = process.cwd()): MaterializeResult {
 
   const payloads: ContractFilterPayload[] = filterContracts.map((file) => ({ file: relative(proj, file), content: contract }))
   if (ignoreTracked || ignoreHost.trim()) payloads.push({ file: '.gitignore', content: ignoreBody })
-  const bindings: ContractFilterBinding[] = [
-    ...[...new Set(HARNESSES.flatMap((h) => h.contractFiles(proj).map((file) => relative(proj, file))))]
-      .map((file) => ({ file, start: '<!-- spexcode:start -->', end: '<!-- spexcode:end -->' })),
-    { file: '.gitignore', start: '# spexcode:start', end: '# spexcode:end' },
-  ]
+  const bindings: ContractFilterBinding[] = canonicalContractFilterBindings(proj)
   if (payloads.length) plantContractFilter(proj, payloads, bindings, [...changedMaterialized])
   else if (contractFilterPlanted(proj)) removeContractFilter(proj, [...HARNESSES.flatMap((h) => h.contractFiles(proj)), join(proj, '.gitignore')])
   // (5) finish diagnostics, then atomically publish the allowlist LAST. Dispatch consumes only that

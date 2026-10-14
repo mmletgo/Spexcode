@@ -1,4 +1,4 @@
-import type { Contract, ContractCoverage, ContractFinding, ContractGraph, Gap, ParseContractInput } from '@spexcode/spec-core/contracts'
+import type { Contract, ContractCoverage, ContractFinding, ContractGraph, Gap, ParseContractInput, Verification } from '@spexcode/spec-core/contracts'
 
 export const ELABORATION_BOUNDARIES = ['permissions', 'mutation', 'async', 'network', 'concurrency', 'callbacks', 'retries', 'cancellation', 'idempotency', 'external_side_effects'] as const
 export type ElaborationBoundary = typeof ELABORATION_BOUNDARIES[number]
@@ -14,6 +14,8 @@ export type ElaborationInput = {
   targets: readonly ElaborationTarget[]
   context?: readonly ParseContractInput[]
   facts?: readonly ElaborationFact[]
+  /** 可信执行器登记属于技术编排，不是待裁决的业务事实或变更授权。 */
+  verifications?: readonly Pick<Verification, 'id' | 'command' | 'cwd' | 'timeoutMs'>[]
   authorizedChanges?: readonly AuthorizedContractChange[]
   /** 协调器保存的稳定 ID 退役记录，新候选不可复用。 */
   retiredIds?: readonly string[]

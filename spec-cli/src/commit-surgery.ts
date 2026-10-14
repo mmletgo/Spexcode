@@ -34,6 +34,7 @@ export function commitSurgery(proj = process.cwd()): void {
   // (1) unconditional materialize — machine-fixable state (exclude entries, filter binding, kind flips)
   // is repaired BEFORE the index is inspected, so the inspection below judges against fresh masks.
   try { materialize(proj) } catch (e) {
+    if (process.env.SPEXCODE_SYNC_HOOK_MODE) throw e
     console.error(`spexcode: pre-commit materialize failed (${(e as Error).message}) — footprint may be stale this commit`)
   }
   const staged = raw(['diff', '--cached', '--name-only', '-z']).split('\0').filter(Boolean)

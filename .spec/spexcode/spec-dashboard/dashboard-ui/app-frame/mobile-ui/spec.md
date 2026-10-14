@@ -175,3 +175,5 @@ board: acting on proposals is the manager cockpit's job, a deliberate scope line
 
 This node's slice of the shared `styles.css` is the narrow-viewport mobile face; classes other surfaces
 add there are those features' churn, not mobile-ui's drift.
+
+窄屏中 `#/spec/<id>` 与 `#/file/<path>` 深链接复用桌面的文档组件和阅读 scope，包含 targetTree 时读取真实交付树并保留源码/附件/节点门。切换底部规格或会话入口离开文档深链接，继续沿既有手机主流程。

@@ -5,6 +5,7 @@ hue: 280
 desc: How SpexCode reaches a USER-self-launched claude/codex (no dashboard, no SpexCode process) — materialize the spec tree's surface nodes into harness-auto-discovered files, so the contract + hooks arrive with zero friction on both harnesses.
 code:
   - spec-cli/src/materialize.ts#materialize
+  - spec-cli/src/materialize.ts#materializeFrozenDelivery
   - spec-cli/src/materialize.ts#dematerialize
 related:
   - spec-cli/src/init.ts
@@ -191,3 +192,6 @@ The net ideal path: `npm install spexcode` → `spex init` → the user launches
 further operation, no global pollution beyond the scoped Codex trust. The contract files are SpexCode-owned
 generated artifacts, so a clone never carries a stale committed copy — and the only tracked source they are
 assembled from is the plugin tree, so what an agent carries is always exactly what the graph says.
+
+
+**内部冻结交付 footprint。** trusted-v1 仍执行 materialize 配置/契约/静态 surface 编译，但按登记政策校验 canonical filter 与私有目录，并将托管投影写入 private footprint.json；它是交付验收上下文，不安装 agent dispatcher，不执行 candidate plugin 脚本，不写冻结作者文件、harness trust、shared Git filter 配置或 source index。普通用户 self-launch 的原自动发现投影行为保留。私有政策缺失或漂移直接失败，不能降级到 ordinary。

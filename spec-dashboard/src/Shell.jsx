@@ -15,7 +15,7 @@ import ViewErrorBoundary from './ViewErrorBoundary.jsx'
 import { useRoute, navigate, routeHash } from './route.js'
 import { navigateAddress, routeAddress } from './address.js'
 import { useT } from './i18n/index.jsx'
-import { PaneProvider, useBoard, useWorkspace, useWorkspaceApi } from './workspace.jsx'
+import { PaneProvider, ReadScopeProvider, useBoard, useWorkspace, useWorkspaceApi } from './workspace.jsx'
 import { viewFor, viewRouteContract } from './views.jsx'
 import { Icon } from './icons.jsx'
 import { IdentityIcon } from './IdentityIcon.jsx'
@@ -77,7 +77,7 @@ const dockFor = (page) => {
 // address's, and the session console holds every live terminal's socket and scrollback behind its own
 // layers ([[session-console]]) — keying it per session id is what made every session switch a cold boot.
 const POOL_PAGES = new Set(['graph', 'sessions'])
-const poolKey = (page, param) => (POOL_PAGES.has(page) ? page : `${page}/${param ?? ''}`)
+const poolKey = (page, param, query) => (POOL_PAGES.has(page) ? page : tabKey({ page, param, query }))
 // How many documents stay mounted. Small enough that an idle workspace is idle, large enough that the tab
 // strip's usual working set is entirely warm — a bound that fits the strip, not a guess about memory.
 const POOL_LIMIT = 6
@@ -105,7 +105,7 @@ function ViewScopeHost({ page, param, query, active, children }) {
   useEffect(() => {
     holder.update({ route: { page, param, query }, active })
   }, [holder, page, param, query, active])
-  return <ViewScopeProvider scope={holder.scope}>{children}</ViewScopeProvider>
+  return <ViewScopeProvider scope={holder.scope}><ReadScopeProvider targetTree={(page === 'spec' && param != null) || page === 'file' ? query?.targetTree : null} active={active}>{children}</ReadScopeProvider></ViewScopeProvider>
 }
 
 // [[workspace-shell]]'s MOUNTED-DOCUMENT POOL. Switching tabs used to remount the document from scratch —
@@ -125,7 +125,7 @@ function ViewPool({ group, override = null, inactive = false }) {
   const page = active.page
   const param = active.param ?? null
   const query = active.query ?? null
-  const key = poolKey(page, param)
+  const key = poolKey(page, param, query)
   const address = routeHash(page, param, query)
   const seq = useRef(0)
   const [pool, setPool] = useState(() => [{ key, address, page, param, query, seq: 0 }])
@@ -191,7 +191,7 @@ function ViewHost({ page, param, query, inactive = false, primary = true }) {
         <PaneProvider value={{ address, active: !inactive, primary }}>
           <ViewScopeHost page={page} param={param} query={query} active={!inactive}>
             <Suspense fallback={<div className="loading">{t('hud.loading')}</div>}>
-              <View key={poolKey(page, param)} param={param} query={query} />
+              <View key={poolKey(page, param, query)} param={param} query={query} />
             </Suspense>
           </ViewScopeHost>
         </PaneProvider>
@@ -489,7 +489,9 @@ function DocumentRegion({ group, single, specs, sessions, dock, foldable, inacti
         <div className="app-main">
           <ViewPool group={group} override={showing} inactive={inactive} />
         </div>
-        <ContextDock page={route?.page} param={route?.param} query={route?.query} open={hasContext && contextOpen} />
+        <ReadScopeProvider targetTree={hasContext ? route?.query?.targetTree : null} active={hasContext && contextOpen && !inactive}>
+          <ContextDock page={route?.page} param={route?.param} query={route?.query} open={hasContext && contextOpen} />
+        </ReadScopeProvider>
       </div>
       {/* the slot is positioned by the REGION, not by its body, so its top-right corner is the band's right end
           — the column the strip's trailing reservation keeps free. Inside the body it would land on the document. */}

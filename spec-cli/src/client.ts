@@ -124,6 +124,14 @@ const guarded = (verb: string) => assertProjectMatch(`spex ${verb}`)
 const post = (body: unknown): RequestInit => ({ method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
 const seg = (id: string) => encodeURIComponent(id)
 
+/** 同步 CLI 始终调用后端的同一应用服务；离线不能伪装执行或用浏览器代替生命周期。 */
+export async function clientSyncRequest<T>(path: string, body?: unknown): Promise<T> {
+  if (body !== undefined) await guarded('sync')
+  const response = await apiFetch(`/api/sync${path}`, body === undefined ? undefined : post(body))
+  if (!response.ok) throw new BackendError(`同步请求失败 (${response.status})：${await response.text()}`, response.status)
+  return await response.json() as T
+}
+
 // A rendezvous liveness probe can displace the real delivery client.
 function cachedStatus(rec: ReturnType<typeof fromRaw>): DisplayStatus {
   if (rec.archived) return 'offline'

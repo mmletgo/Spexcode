@@ -6,6 +6,16 @@ hue: 200
 desc: .spec on main is canonical; worktrees hold session-attributed proposals.
 code:
   - packages/spec-core/src/specs.ts#loadSpecs
+  - packages/spec-core/src/specs.ts#raws
+  - packages/spec-core/src/specs.ts#walk
+  - packages/spec-core/src/specs.ts#loadSpecsLite
+  - packages/spec-core/src/specs.ts#specContent
+  - packages/spec-core/src/specs.ts#specDir
+  - packages/spec-core/src/specs.ts#specHistory
+  - packages/spec-core/src/specs.ts#specDiffAt
+  - packages/spec-core/src/specs.ts#specAt
+  - packages/spec-core/src/specs.ts#nodeVersion
+  - packages/spec-core/src/specs.ts#latestDiff
 related:
   - spec-cli/src/frontmatter.test.ts
   - packages/spec-core/src/git.ts
@@ -115,3 +125,5 @@ re-deriving one shape out of another: a consumer handed only the views had to mi
 and re-parse them to recover entries the loader already held, which is precisely the round-trip a
 downstream fixed-revision projection once performed. Publish the source, derive the views; never ship only the
 views and make someone reconstruct the source.
+
+正文、节点目录、轻量列表和历史版本读取使用与加载器相同的显式工作树参数。默认仍是后台工作树；指定交付树时，节点存在性、历史门禁、差异缓存和 Git 读取都来自该树，不能用后台的同名节点替代。版本差异缓存同时绑定工作树、提交和路径。

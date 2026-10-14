@@ -5,7 +5,7 @@ import {
   setProjectPassword, clearProjectPassword, setAdminPassword, submitCredential,
   browseProjectDirectories, addProject, loadProjectConfig, saveProjectConfig, runProjectOp, initProject, doctorProject, startProjectBackend,
   saveGatewayIcon, saveProjectIcon, removeProject, addProjectHarnessTarget,
-  selectGatewayIdentity, selectProjectIdentity, tabTitle, applyCatalogResult, paginateProjects,
+  catalogNeedsPolling, selectGatewayIdentity, selectProjectIdentity, tabTitle, applyCatalogResult, paginateProjects,
 } from './projects.js'
 
 // The narrow catalog client ([[projects-hub]]): these tests pin the client half of the LANDED hub
@@ -139,11 +139,11 @@ test('loadProjects: the denial reason is the STATUS — 401 admin-login, 403 loc
 
 test('loadProjects: a pre-hub SPA fallback (HTML 200) or a network failure reads as absent', async () => {
   const spa = await withFetch(async () => htmlRes(200), loadProjects)
-  assert.deepEqual(spa, { state: 'absent' })
+  assert.deepEqual(spa, { state: 'absent', retry: false })
   const dead = await withFetch(async () => { throw new TypeError('fetch failed') }, loadProjects)
   assert.deepEqual(dead, { state: 'absent' })
   const notFound = await withFetch(async () => jsonRes(404, { error: 'no' }), loadProjects)
-  assert.deepEqual(notFound, { state: 'absent' })
+  assert.deepEqual(notFound, { state: 'absent', retry: false })
 })
 
 test('password writes: PUT sets with a JSON body, DELETE clears; admin twin included; ids encoded', async () => {
@@ -387,4 +387,28 @@ test('startProjectBackend: 200 online is success, 409 already-online is the desi
   const dead = await withFetch(async () => jsonRes(502, { error: 'backend for /r did not come online within 45s — see /log' }), () => startProjectBackend('a'))
   assert.equal(dead.ok, false)
   assert.match(dead.error, /did not come online/)
+})
+
+
+test('catalog polling stops on proven missing catalog while network failures and gateway errors remain recoverable', async () => {
+  const missing = await withFetch(async () => jsonRes(404, { error: 'not found' }), loadProjects)
+  assert.equal(missing.retry, false)
+  assert.equal(catalogNeedsPolling(missing), false)
+  const legacy = await withFetch(async () => htmlRes(200), loadProjects)
+  assert.equal(legacy.retry, false)
+  assert.equal(catalogNeedsPolling(legacy), false)
+  for (const status of [500, 502, 503, 504]) {
+    const unavailable = await withFetch(async () => htmlRes(status), loadProjects)
+    assert.notEqual(unavailable.retry, false)
+    assert.equal(catalogNeedsPolling(unavailable), true)
+  }
+  const disconnected = await withFetch(async () => { throw new TypeError('offline') }, loadProjects)
+  assert.notEqual(disconnected.retry, false)
+  assert.equal(catalogNeedsPolling(disconnected), true)
+  const redirected = await withFetch(async () => ({ ...htmlRes(200), redirected: true }), loadProjects)
+  assert.equal(catalogNeedsPolling(redirected), true, 'redirected authentication HTML is not proof of absent catalog')
+  const redirectedMissing = await withFetch(async () => ({ ...htmlRes(404), redirected: true }), loadProjects)
+  assert.equal(catalogNeedsPolling(redirectedMissing), true)
+  assert.equal(catalogNeedsPolling({ state: 'denied', reason: 'admin-login' }), false)
+  assert.equal(catalogNeedsPolling({ state: 'ok', projects: [] }), true)
 })

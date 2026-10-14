@@ -120,3 +120,5 @@ board/workspace hooks rather than introducing a mixed context. A failed issues o
 as an explicit panel error; it is not silently rendered as an empty list. The history read lives in its own
 light module rather than in the popup's component file, because the dock mounts with the shell and must not
 pull the prose renderer into the shell's chunk.
+
+交付文档的上下文使用该 targetTree 的节点与历史，历史的当前、过去版本和 diff 门都保留 targetTree。尚未支持工作树范围的 Issues 请求时不展示 main 的 Issues 为交付树上下文。

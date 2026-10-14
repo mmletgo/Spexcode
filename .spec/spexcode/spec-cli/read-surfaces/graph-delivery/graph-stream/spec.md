@@ -33,6 +33,8 @@ identity: uncommitted Spec bodies, governed code and test files can change witho
 Session-only signals do not emit it. Stream `ready` invalidates reading inputs after reconnect so missed
 file edits are reread even when the client resumes the same graph position; no extra stream or poll is added.
 
+同步只读快照与候选保活使用私有 `refs/spex-sync/` 命名空间。该目录及其子项不构成正文或图输入，refs watcher 不订阅也不广播这些事件；否则读取同步状态会反复触发 graph-input、取消正文读取并形成循环。用户分支、标签、HEAD、packed-refs、index 和真实文件编辑仍按原规则失效；未知/pathless 事件仍走明确故障与修复。
+
 graph-stream is the graph's live-delivery channel: `GET /api/graph/stream`, a server-sent-events stream a
 dashboard opens once, server→client only. The implementation and clients name the plain notification
 `graph-changed` consistently. It speaks two protocols on one route. **Plain mode** (no query) is

@@ -35,6 +35,7 @@ const jsonOf = async (res) => {
 }
 
 export const CATALOG_POLL_MS = 5000
+export const catalogNeedsPolling = (result) => result?.state !== 'denied' && result?.retry !== false
 
 const normalizeIdentity = (identity, fallbackTitle, fallbackIcon) => ({
   title: typeof identity?.title === 'string' && identity.title ? identity.title : fallbackTitle,
@@ -119,7 +120,9 @@ export async function loadProjects(base = '') {
   catch { return { state: 'absent' } }
   if (res.status === 401) return { state: 'denied', reason: 'admin-login' }
   if (res.status === 403) return { state: 'denied', reason: 'locked' }
+  if (res.status === 404 && !res.redirected) return { state: 'absent', retry: false }
   if (!res.ok) return { state: 'absent' }
+  if (!res.redirected && (res.headers.get('content-type') || '').includes('text/html')) return { state: 'absent', retry: false }
   const body = await jsonOf(res)
   const projects = normalizeProjects(body)
   if (!projects) return { state: 'absent' }

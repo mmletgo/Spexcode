@@ -74,3 +74,6 @@ never blocks the commit. When a CLI resolves but the verb is unknown or the invo
 prints one advisory line with the first captured output line and still proceeds; this keeps failures
 visible without turning context into a gate. Successful output is printed once. Identity stamping works
 even without a resolving CLI.
+
+
+内部 trusted-v1 同步交付通过固定候选外完整已编译工具包调用同一个 commit-context seam，仍从实际 candidate index 推导上下文和 trailer；工具缺失、失败或 exit75 在该模式阻断，普通 authoring 的 advisory 规则不变。此内部模式不提供新的 context verdict，也不替代 reference prepared 的 frozen tree/ref/parent 绑定。

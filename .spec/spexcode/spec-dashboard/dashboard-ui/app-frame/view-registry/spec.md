@@ -84,3 +84,5 @@ rather than one still fetching its chunk. That edge is the reason the address-si
 module: see [[view-catalog]]. The retry that survives a stale dist lives here too, wrapped
 around every importer, because `React.lazy` caches the rejection — a chunk that 404s once is a dead view
 for the life of the page, and the importer is the only place a second attempt is still possible.
+
+开发热更新使用正式 HMR dispose 生命周期：views.jsx 只撤销自身 VIEWS 的 core 登记和自身安装的 Settings 插件，再由新模块重新严格注册。重复登记仍报错；其他运行期插件与 registry 单例保持原身份，不因热更新被清空。

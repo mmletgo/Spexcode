@@ -38,9 +38,12 @@ export interface SessionAddress {
 }
 
 export interface ProtocolTransaction {
+  initialize(sessionId: string): SessionAddress
   exec(sql: string, ...params: SqlParam[]): { changes: number; lastInsertRowid: number }
   query(sql: string, ...params: SqlParam[]): Record<string, unknown>[]
   enqueue(sessionId: string, message: MessageInput): Message
+  /** Atomically dequeue the FIFO head, optionally requiring its exact identity. */
+  dequeue(sessionId: string, expectedMessageId?: string): Message | null
 }
 
 export interface SessionProtocol {
@@ -54,6 +57,8 @@ export interface SessionProtocol {
   retire(sessionId: string): SessionAddress
   withTransaction<T>(body: (tx: ProtocolTransaction) => T): T
   dataVersion(): number
+  /** SQLite online backup; never copy a WAL database main file. */
+  backupTo(destination: string): Promise<void>
   close(): void
 }
 

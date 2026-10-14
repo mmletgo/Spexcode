@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto'
 
 import { fail } from './errors.js'
-import type { SessionProtocol, SqlParam } from './index.js'
+import type { ProtocolTransaction, SessionProtocol, SqlParam } from './index.js'
 
 export interface ComponentMigration {
   readonly version: number
   readonly sql: string
+  readonly afterApply?: { readonly key: string; readonly run: (tx: ProtocolTransaction) => void }
 }
 
 interface StatementResult {
@@ -177,7 +178,8 @@ function prepareMigrations(migrations: readonly ComponentMigration[]): PreparedM
         `migration versions must be contiguous from 1; invalid entry at ${index + 1}`,
       )
     }
-    return { ...migration, checksum: migrationChecksum(migration.sql) }
+    if (migration.afterApply && (typeof migration.afterApply.key !== 'string' || !/^[0-9A-Za-z._-]{1,128}$/.test(migration.afterApply.key) || typeof migration.afterApply.run !== 'function')) invalidComponent('afterApply requires a stable key and synchronous run')
+    return { ...migration, checksum: migrationChecksum(migration.afterApply ? JSON.stringify({ version: migration.version, sql: migration.sql, afterApplyKey: migration.afterApply.key }) : migration.sql) }
   })
 }
 
@@ -195,12 +197,18 @@ function applyPending(
   migrations: readonly PreparedMigration[],
   done: number,
   now: () => number,
+  transaction?: ProtocolTransaction,
 ): void {
   const insert = database.prepare(
     'INSERT INTO schema_migrations(component,version,checksum,applied_at_ms) VALUES(?,?,?,?)',
   )
   for (const migration of migrations.slice(done)) {
     database.exec(migration.sql)
+    if (migration.afterApply) {
+      if (!transaction) invalidComponent('afterApply requires the engine transaction')
+      const result: unknown = migration.afterApply.run(transaction)
+      if (result && typeof (result as { then?: unknown }).then === 'function') invalidComponent('afterApply must be synchronous')
+    }
     insert.run(component, migration.version, migration.checksum, validTimestamp(now))
   }
 }
@@ -253,6 +261,7 @@ export function migrateComponent(
   component: string,
   migrations: readonly ComponentMigration[],
   now: () => number,
+  transaction?: ProtocolTransaction,
 ): number {
   const prepared = prepareMigrations(migrations)
   const applied = readApplied(database, component)
@@ -263,7 +272,7 @@ export function migrateComponent(
   return inImmediateTransaction(database, () => {
     database.exec(REGISTRY_SQL)
     const done = verifyApplied(component, readApplied(database, component) ?? [], prepared)
-    applyPending(database, component, prepared, done, now)
+    applyPending(database, component, prepared, done, now, transaction)
     return prepared.length
   })
 }

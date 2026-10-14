@@ -190,3 +190,46 @@ test('camera clamps an oversized vertical frontier to a reachable top edge', () 
   assert.equal(viewport.zoom, 0.85)
   assert.equal(viewport.y, -minY * viewport.zoom)
 })
+
+test('scoped read URLs preserve targetTree with attachment and source paging selectors', async () => {
+  const { specUrl, readScopeUrl, fetchNodeFiles, fetchNodeFileSlice, fetchSourceSlice, fetchDirEntries } = await import('./data.js')
+  const targetTree = '/repo/delivery a#b'
+  const spec = new URL(specUrl('node & one', 'version', 'abc', { targetTree }), 'http://test')
+  assert.equal(spec.pathname, '/api/specs/node%20%26%20one/version/abc')
+  assert.equal(spec.searchParams.get('targetTree'), targetTree)
+  assert.equal(new URL(readScopeUrl('/api/source?path=a', targetTree), 'http://test').searchParams.get('path'), 'a')
+  const previousFetch = globalThis.fetch
+  const seen = []
+  globalThis.fetch = async (url) => {
+    seen.push(new URL(url, 'http://test'))
+    return new Response(JSON.stringify({ files: [], entries: [], text: 'delivery', bytes: 8, eof: true }), { status: 200 })
+  }
+  try {
+    await fetchNodeFiles('new-node', targetTree)
+    await fetchNodeFileSlice('new-node', 'evidence.md', 12, 24, targetTree)
+    await fetchSourceSlice('src/new.js', 16, 32, targetTree)
+    await fetchDirEntries('src', targetTree)
+    assert.equal(seen.length, 4)
+    for (const url of seen) assert.equal(url.searchParams.get('targetTree'), targetTree)
+    assert.equal(seen[1].searchParams.get('name'), 'evidence.md')
+    assert.equal(seen[1].searchParams.get('offset'), '12')
+    assert.equal(seen[1].searchParams.get('limit'), '24')
+    assert.equal(seen[2].searchParams.get('path'), 'src/new.js')
+    assert.equal(seen[3].searchParams.get('dir'), 'src')
+  } finally { globalThis.fetch = previousFetch }
+})
+
+test('an unavailable delivery read is rejected instead of retrying its canonical address', async () => {
+  const { fetchSourceSlice } = await import('./data.js')
+  const previousFetch = globalThis.fetch
+  const seen = []
+  globalThis.fetch = async (url) => {
+    seen.push(url)
+    return new Response(JSON.stringify({ error: 'target tree is not registered' }), { status: 400 })
+  }
+  try {
+    await assert.rejects(fetchSourceSlice('src/a.js', 0, undefined, '/gone'), /not registered/)
+    assert.equal(seen.length, 1)
+    assert.equal(new URL(seen[0], 'http://test').searchParams.get('targetTree'), '/gone')
+  } finally { globalThis.fetch = previousFetch }
+})

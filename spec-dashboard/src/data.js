@@ -211,6 +211,7 @@ export async function apiFetch(input, init) {
       return response
     }
     catch (e) {
+      if (init?.signal?.aborted) throw e
       if (i >= BACKOFF.length) {
         publishBackendHealth(true)
         throw e
@@ -344,26 +345,34 @@ export async function loadPublicSpecContent(id) {
 // hand-interpolating the id, so no call site can reintroduce a broken URL for an id with an awkward char.
 // `parts` are trailing path segments (fixed route words like 'content'/'history', or an already-safe git
 // hash) appended verbatim. Ids never contain '/' by construction, but encoding stays the invariant.
-export const specUrl = (id, ...parts) =>
-  apiUrl(`/api/specs/${encodeURIComponent(id)}${parts.map((p) => '/' + p).join('')}`)
+export const specUrl = (id, ...parts) => {
+  const options = typeof parts.at(-1) === 'object' ? parts.pop() : null
+  return readScopeUrl(`/api/specs/${encodeURIComponent(id)}${parts.map((p) => '/' + p).join('')}`, options?.targetTree)
+}
+
+// The tree is part of a read address, including when the endpoint already has paging selectors.
+export function readScopeUrl(path, targetTree = null) {
+  if (!targetTree) return apiUrl(path)
+  return apiUrl(`${path}${path.includes('?') ? '&' : '?'}${new URLSearchParams({ targetTree })}`)
+}
 
 // what a node carries in its own folder besides its body and readings ([[node-attachments]]). A different
 // gate from the source read — the spec tree sits outside the coverage policy on purpose — reached through
 // the node's own id rather than a repo path, because the folder belongs to the node.
-export async function fetchNodeFiles(id) {
+export async function fetchNodeFiles(id, targetTree = null) {
   // A published tree carries each node's body and nothing from its folder, so there is no attachment list to
   // ask for. Answering empty here keeps every reader of a node right in both builds.
   if (PUBLIC_GRAPH_ONLY) return []
-  const res = await apiFetch(specUrl(id, 'files'))
+  const res = await apiFetch(specUrl(id, 'files', { targetTree }))
   const body = await res.json().catch(() => null)
   if (!res.ok) throw new Error(body?.error || `attachment list failed (${res.status})`)
   return body?.files || []
 }
 
-export async function fetchNodeFileSlice(id, name, offset = 0, limit) {
+export async function fetchNodeFileSlice(id, name, offset = 0, limit, targetTree = null) {
   const q = new URLSearchParams({ name, offset: String(offset) })
   if (limit != null) q.set('limit', String(limit))
-  const res = await apiFetch(`${specUrl(id, 'files', 'content')}?${q}`)
+  const res = await apiFetch(readScopeUrl(`${specUrl(id, 'files', 'content')}?${q}`, targetTree))
   const body = await res.json().catch(() => null)
   if (!res.ok) throw new Error(body?.error || `attachment read failed (${res.status})`)
   return body
@@ -374,10 +383,10 @@ export async function fetchNodeFileSlice(id, name, offset = 0, limit) {
 // `offset + bytes` and the total `size` is known from the first response. A refusal (outside the worktree,
 // or not a source file under the project's policy) arrives as `{error}` with a 400/404 — surfaced, never
 // swallowed into an empty view that reads as "this file is blank".
-export async function fetchSourceSlice(path, offset = 0, limit) {
+export async function fetchSourceSlice(path, offset = 0, limit, targetTree = null) {
   const q = new URLSearchParams({ path, offset: String(offset) })
   if (limit != null) q.set('limit', String(limit))
-  const res = await apiFetch(`/api/source?${q}`)
+  const res = await apiFetch(readScopeUrl(`/api/source?${q}`, targetTree))
   const body = await res.json().catch(() => null)
   if (!res.ok) throw new Error(body?.error || `source read failed (${res.status})`)
   return body
@@ -388,8 +397,8 @@ export async function fetchSourceSlice(path, offset = 0, limit) {
 // the tree fetches a level when the reader expands it, so a repository's size is never a cost the explorer
 // pays up front. A refusal (an escape, a directory outside the governed roots) arrives as `{error}` with a
 // 400/404 and is surfaced, never swallowed into an empty branch that reads as "this folder is empty".
-export async function fetchDirEntries(dir = '') {
-  const res = await apiFetch(`/api/files?${new URLSearchParams({ dir })}`)
+export async function fetchDirEntries(dir = '', targetTree = null) {
+  const res = await apiFetch(readScopeUrl(`/api/files?${new URLSearchParams({ dir })}`, targetTree))
   const body = await res.json().catch(() => null)
   if (!res.ok) throw new Error(body?.error || `directory list failed (${res.status})`)
   return { entries: body?.entries || [], truncated: !!body?.truncated }
@@ -634,12 +643,12 @@ export async function sendSessionCommand(id, text, { deliveryId, signal, replyVi
   return { ok: res.ok, status: res.status, outcome }
 }
 
-// [[spec-body-edit]]: replace a line range of a node's spec body and land it as a commit. `original` is
+// [[spec-body-save-client]]: send a source-line request through the project's active save policy. `original` is
 // the text the reader saw — the server refuses rather than merges when it no longer matches, so the whole
 // error body (message + code + the text that is actually there) is handed back for the editor to show.
-export async function postSpecBody(id, patch) {
+export async function postSpecBody(id, patch, requestId) {
   const res = await apiFetch(specUrl(id, 'body'), {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch),
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'idempotency-key': requestId }, body: JSON.stringify(patch),
   })
   const body = await res.json().catch(() => null)
   if (!res.ok) {
