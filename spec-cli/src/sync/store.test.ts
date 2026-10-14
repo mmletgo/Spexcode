@@ -1216,3 +1216,67 @@ test('P3同选择新requestId/finding次序复用原预算，真实新选择撤�
     assert.equal(f.store.listAttempts(old.operation.id).length, 1)
   } finally { f.cleanup() }
 })
+
+
+test('当前fence记录独审业务conflict不改变执行状态，失败/预算与重启仍保原因', async () => {
+  const f = await fixture()
+  try {
+    const claimed = f.claim(), before = f.store.readOperation(claimed.operation.id)
+    assert.throws(() => f.store.recordReviewedConflict({ ...claimed.fence, generation: claimed.fence.generation + 1 }), /SYNC_FENCE_EXPIRED/)
+    assert.throws(() => f.store.recordReviewedConflict({ ...claimed.fence, sourceFingerprint: 'foreign-source' }), /SYNC_FENCE_EXPIRED/)
+    const marked = f.store.recordReviewedConflict(claimed.fence)
+    assert.equal(marked.phase, 'analyzing'); assert.equal(marked.blockedReason, 'conflicted')
+    assert.deepEqual(marked.input, before.input); assert.deepEqual(marked.scope, before.scope); assert.deepEqual(marked.readyScope, before.readyScope); assert.deepEqual(marked.blockedScope, before.blockedScope)
+    assert.deepEqual(marked.budget, before.budget); assert.equal(marked.callsUsed, before.callsUsed); assert.equal(marked.deadlineAtMs, before.deadlineAtMs)
+    assert.equal(f.store.recordReviewedConflict(claimed.fence).revision, marked.revision)
+    const issue = { code: 'invalid_p1', message: 'P1非法候选并非合法业务义务', kind: 'environment' as const, evidenceRefs: [f.put({ rejectedCandidate: true })] }
+    f.store.recordFailure(claimed.fence, issue)
+    assert.equal(f.store.readOperation(marked.id).phase, 'failed'); assert.equal(f.store.readOperation(marked.id).blockedReason, 'conflicted')
+    assert.deepEqual(f.store.readAttempt(claimed.attempt.id).failure, issue); assert.equal(f.store.listJournals(marked.id).length, 0)
+    const reopened = openProtocol(f.path)
+    try { assert.equal(new SyncStore(reopened, f.options).readOperation(marked.id).blockedReason, 'conflicted') } finally { reopened.close() }
+    f.tick(100001); f.store.recordBudgetExhaustion(marked.id)
+    assert.equal(f.store.readOperation(marked.id).phase, 'budget_exhausted'); assert.equal(f.store.readOperation(marked.id).blockedReason, 'conflicted')
+    assert.deepEqual(f.store.readAttempt(claimed.attempt.id).failure, issue)
+    assert.throws(() => f.store.recordReviewedConflict(claimed.fence), /SYNC_FENCE_EXPIRED/)
+  } finally { f.cleanup() }
+})
+
+
+test('decision admission事务复核当前阶段/attempt/资源，早期conflict与applying不能授裁决权', async () => {
+  for (const state of ['active', 'applying', 'pending-resource', 'race', 'coverage-gap'] as const) {
+    const f = await fixture()
+    try {
+      const real = await f.controlled(), value = { ...f.admit(real.input.source), input: real.input, origin: 'code' as const, deliveryPlan: { canonicalRoot: real.input.source.canonicalRoot, branch: real.input.source.branch, baseCommit: real.input.headCommit } }
+      const make = (operationId: string): AdmitSyncInput => {
+        const requestBlob = prepareControlledDecision(real.input, { requestId: `choice-${state}`, operationId, inputId: real.input.id, analysisRef: { sha256: 'a'.repeat(64) }, findingIds: ['finding-1'], decision: { choice: 'keep_intent' } })
+        f.blobs.set(requestBlob.sha256, readEvidence(real.input.source.commonDir, requestBlob))
+        return { ...value, ingressKey: `choice-${state}`, origin: 'decision', requestBlob }
+      }
+      if (state === 'applying') {
+        const ready = f.ready(value, value.scope, undefined, null, claimed => { f.store.recordReviewedConflict(claimed.fence) })
+        f.store.beginApply(ready.fence, ready.plan, ready.target)
+        assert.equal(f.store.readDecisionEligibility(ready.operation.id).eligible, false)
+        assert.throws(() => f.store.admitAndEnqueue(make(ready.operation.id)), /SYNC_DECISION_BINDING/)
+        assert.equal(f.store.readOperation(ready.operation.id).phase, 'applying'); assert.equal(f.store.listJournals(ready.operation.id).length, 1)
+        continue
+      }
+      const claimed = f.claim(value)
+      if (state !== 'coverage-gap') f.store.recordReviewedConflict(claimed.fence)
+      if (state === 'pending-resource') f.store.planResource(claimed.fence, { key: 'native-unsettled', kind: 'native_session', payloadDigest: 'original-native-request', inputId: real.input.id, candidateDigest: null, planBlob: f.put({ nativeIntent: true }), checkpointRef: f.put({ phase: 'planned' }) })
+      if (state !== 'active') f.store.recordFailure(claimed.fence, { code: 'p1_failed', message: '保原具体业务原因', kind: state === 'coverage-gap' ? 'missing_input' : 'environment', evidenceRefs: [f.put({ failure: state })] })
+      const input = make(claimed.operation.id)
+      if (state === 'coverage-gap') {
+        assert.equal(f.store.readOperation(claimed.operation.id).blockedReason, null); assert.equal(f.store.readDecisionEligibility(claimed.operation.id).eligible, true)
+        assert.equal(f.store.admitAndEnqueue(input).origin, 'decision', '真实缺事实仍可按旧入口裁决'); continue
+      }
+      if (state === 'race') {
+        assert.equal(f.store.readDecisionEligibility(claimed.operation.id).eligible, true)
+        f.store.claimAttempt({ operationId: claimed.operation.id, source: real.input.source, scope: value.scope, leaseMs: 1000, expectedMessageId: claimed.operation.dispatchMessageId })
+      }
+      assert.equal(f.store.readDecisionEligibility(claimed.operation.id).eligible, false)
+      assert.throws(() => f.store.admitAndEnqueue(input), state === 'pending-resource' ? /SYNC_DECISION_RESOURCE_PENDING/ : /SYNC_DECISION_BINDING/)
+      assert.equal(f.store.listOperations(real.input.source.repositoryId).length, 1); assert.equal(f.store.listJournals(claimed.operation.id).length, 0)
+    } finally { f.cleanup() }
+  }
+})

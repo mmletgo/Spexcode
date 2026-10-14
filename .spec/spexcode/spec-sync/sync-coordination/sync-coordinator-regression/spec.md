@@ -56,3 +56,6 @@ P3生成诊断在真实SQLite/Git复现普通contract引用错误回P1和symbol�
 
 
 已解决诊断GAP定向回归使用真实SQLite、不可变Git裁决、真实dispatch记录和normal hooks私有Git交付，验证部分baseline含旧诊断→keep精确清理→verification/receipt/baseline累计retiredIds→重开SQLite后禁止复用；P1独审拒绝保持无新receipt和无退役记录。V3 adapter与测试report明确模拟，只证明协调/持久化边界，不作为Docker执行或实际产品运行通过的证据；当前产品Docker验收仍另行完成。
+
+
+真实Git/SQLite及明确native接缝复现reviewPassed conflict→重复AC非法P1→执行failed/预算耗尽、资源清零，却丢blockedReason的失败。修复后保原failure/预算/source/index，正式application.decide精确绑定当前analysis/finding并建立新不可变操作；unreviewed/无conflict不记原因，foreign/stale/finding及活动P1仍拒。无Docker/native实际执行或receipt成功声明。

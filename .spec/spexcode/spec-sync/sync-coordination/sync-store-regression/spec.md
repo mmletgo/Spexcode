@@ -61,3 +61,6 @@ v5真实SQLite证明同ingress不同origin拒、同input不同origin不归并、
 P3覆盖retiredIds在receipt前不推进、结算及重启/published pair累积，v7→v8在线backup及旧writer拒写，immutable decision相同选择换requestId/finding顺序复用原预算，同key新choice冲突、新真实choice撤旧fence而完整历史保留；旧superseded resume不重新授权。
 
 裁决同choice跨requestId/finding顺序/运输ref派生policy及真实receipt结算后的历史facts复用原operation与预算；旧v8索引核验重算，同key新choice拒绝，v8→v9先备份且旧writer拒写。
+
+
+当前fence的独审冲突原因与执行状态分开持久，错误generation/物理来源/旧fence拒绝，失败、预算及独立handle重开保原因且不改原证据。decision admission事务测试活动analyzing、applying、未removed资源及资格读取后新attempt竞态均拒；缺事实needs_input不因本次conflict修复被收窄。

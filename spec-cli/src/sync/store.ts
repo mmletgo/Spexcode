@@ -7,6 +7,7 @@ import type { AdmitSyncInput, ApplyFilePlan, ApplyJournal, ApplyPlan, ApplyRecei
 
 export { SYNC_COORDINATOR_ADDRESS, syncCoordinatorAddress } from './migrations.js'
 export const SYNC_DISPATCH_KIND = 'sync.dispatch.v1'
+export type SyncDecisionEligibility = { eligible: boolean; reason?: { code: string; message: string } }
 export type SyncRetryEligibility = { eligible: boolean; reason?: { code: string; message: string } }
 export class SyncStoreError extends Error {
   constructor(readonly code: string, message: string) { super(`${code}: ${message}`); this.name = 'SyncStoreError' }
@@ -180,7 +181,11 @@ export class SyncStore {
         const pair = parseRecord<BaselinePair>(tx.query('SELECT record_json FROM sync_baseline_pairs WHERE id=?', input.previousBaselinePair.id)[0])
         if (!pair || identityKey(pair.source) !== identityKey(input.input.source) || digest(pair) !== digest(input.previousBaselinePair)) fail('SYNC_BASELINE_STALE', 'previous source baseline does not match durable pair')
       }
-      if (decision) { const parent = this.operation(tx, decision.operationId); if (parent.input.id !== input.input.id || identityKey(parent.input.source) !== identityKey(input.input.source) || !['conflicted', 'needs_input', 'superseded'].includes(parent.phase) && !parent.blockedReason) fail('SYNC_DECISION_BINDING', '裁决必须绑定仍需业务输入的原操作和完整冻结来源') }
+      if (decision) {
+        const parent = this.operation(tx, decision.operationId), eligibility = this.decisionEligibility(tx, parent)
+        if (parent.input.id !== input.input.id || identityKey(parent.input.source) !== identityKey(input.input.source)) fail('SYNC_DECISION_BINDING', '裁决必须绑定原操作完整冻结来源')
+        if (!eligibility.eligible) fail(eligibility.reason!.code, eligibility.reason!.message)
+      }
       const older = tx.query('SELECT record_json FROM sync_operations WHERE repository_id=? AND source_root=?', input.input.source.repositoryId, input.input.source.canonicalRoot).map(row => parseRecord<SyncOperation>(row)!)
       const generation = Math.max(0, ...older.map(operation => operation.generation)) + 1
       for (const operation of older) {
@@ -338,6 +343,15 @@ export class SyncStore {
   renewLease(fence: WriteFence, leaseMs: number): SyncAttempt {
     if (!Number.isSafeInteger(leaseMs) || leaseMs <= 0) fail('SYNC_LEASE_INVALID', 'leaseMs must be positive')
     return this.write(tx => { const { attempt } = this.checkFence(tx, fence); attempt.expiresAtMs = this.now() + leaseMs; tx.exec('UPDATE sync_leases SET expires_at_ms=? WHERE token=?', attempt.expiresAtMs, attempt.leaseToken); this.saveAttempt(tx, attempt); return attempt })
+  }
+  /** 协调器核对并持久保存当前独审分析后，记录其业务冲突而不改变执行结论。 */
+  recordReviewedConflict(fence: WriteFence): SyncOperation {
+    return this.write(tx => {
+      const { operation } = this.checkFence(tx, fence)
+      if (operation.phase !== 'analyzing') fail('SYNC_PHASE_INVALID', operation.phase)
+      if (operation.blockedReason !== 'conflicted') { operation.blockedReason = 'conflicted'; this.saveOperation(tx, operation) }
+      return operation
+    })
   }
   startElaboration(fence: WriteFence): SyncOperation {
     return this.write(tx => { const { operation } = this.checkFence(tx, fence); if (operation.phase !== 'analyzing') fail('SYNC_PHASE_INVALID', operation.phase); operation.phase = 'elaborating'; this.saveOperation(tx, operation); return operation })
@@ -517,6 +531,13 @@ export class SyncStore {
       this.saveAttempt(tx, attempt); this.saveOperation(tx, operation); return operation
     })
   }
+  private decisionEligibility(tx: ProtocolTransaction, operation: SyncOperation): SyncDecisionEligibility {
+    if (!['conflicted', 'needs_input', 'superseded'].includes(operation.phase) && !(['failed', 'budget_exhausted'].includes(operation.phase) && operation.blockedReason === 'conflicted')) return { eligible: false, reason: { code: 'SYNC_DECISION_BINDING', message: '此操作没有待裁决的已结算具体业务分歧' } }
+    if (operation.currentAttemptId && !['failed', 'superseded', 'settled'].includes(this.attempt(tx, operation.currentAttemptId).status)) return { eligible: false, reason: { code: 'SYNC_DECISION_BINDING', message: '当前执行尝试尚未结算，不能裁决在途业务阶段' } }
+    if (tx.query("SELECT id FROM sync_resources WHERE operation_id=? AND phase!='removed' LIMIT 1", operation.id).length || tx.query("SELECT id FROM sync_apply_journals WHERE operation_id=? AND status!='settled' LIMIT 1", operation.id).length) return { eligible: false, reason: { code: 'SYNC_DECISION_RESOURCE_PENDING', message: '请先恢复原操作的未结算资源或写入日志' } }
+    return { eligible: true }
+  }
+  readDecisionEligibility(operationId: string): SyncDecisionEligibility { return this.write(tx => this.decisionEligibility(tx, this.operation(tx, operationId))) }
   private retryEligibility(tx: ProtocolTransaction, operation: SyncOperation): SyncRetryEligibility {
     const refused = (code: string, message: string): SyncRetryEligibility => ({ eligible: false, reason: { code, message } })
     if (!['failed', 'budget_exhausted', 'cancelled'].includes(operation.phase)) return refused('SYNC_RETRY_PHASE', '当前操作未以失败、预算耗尽或取消结束')

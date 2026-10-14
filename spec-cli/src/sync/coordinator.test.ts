@@ -13,6 +13,7 @@ import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
 import { elaborate } from './elaboration.js'
 import type { ElaborationResult, ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
 import { buildSyncApplicationPlan } from './planning.js'
+import { SyncApplication } from './application.js'
 import { prepareSyncAdmission, runSyncOperation, syncPlanDigest } from './coordinator.js'
 import type { SyncCoordinatorOptions, SyncCoordinatorPlan } from './coordinator-types.js'
 import { migrateSyncStore, SYNC_COMPONENT, SYNC_MIGRATIONS, syncCoordinatorAddress } from './migrations.js'
@@ -1141,4 +1142,71 @@ test('已解决诊断GAP经真实SQLite派发与Git receipt累计退役，重启
   const refusal = JSON.parse(readEvidence(f.input.source.commonDir, lastStages.find(value => value.stage === 'elaboration').resultRef).toString())
   assert.ok(refusal.rounds.flatMap((round: { findings: { code: string; itemId?: string }[] }) => round.findings).some((issue: { code: string; itemId?: string }) => issue.code === 'retired_id_reused' && issue.itemId === gapId))
   assert.ok(activeStore.readBaseline(f.input.source)!.retiredIds!.includes(gapId))
+})
+
+
+for (const scenario of ['failed', 'budget', 'unreviewed', 'no-conflict', 'active-p1'] as const) test(`已审conflict保独立裁决资格：P1 ${scenario} 不覆盖原分析与失败`, { timeout: 120000 }, async t => {
+  const budget = { maxAttempts: scenario === 'failed' ? 2 : 1, maxCalls: 8, maxRepairs: 1, timeoutMs: 120000 }
+  const f = await fixture(t, budget, false, original, 'project', original, {}, undefined, 'code')
+  f.store.requestControl(f.operation.id, 'cancel'); f.store.discardDispatch(f.operation.id, f.operation.dispatchMessageId)
+  writeFileSync(join(f.root, '.spec/spexcode.json'), JSON.stringify({ mainBranch: 'main', harnesses: [], sync: { version: 'sync-settings-v1', sourcePaths: ['src'], testPaths: ['generated-tests'], readPaths: ['tests', 'package.json'], facts: f.plan.facts, verifications: f.plan.verifications, mandatoryTests: f.plan.mandatoryTests, budget } }))
+  f.git('add', '.spec/spexcode.json'); f.git('commit', '--only', '-m', 'authorize application fixture policy', '.spec/spexcode.json')
+  const protectedIndex = readFileSync(join(f.root, '.git/index'))
+  let p1Calls = 0, announceP1!: () => void, resumeP1!: () => void
+  const enteredP1 = new Promise<void>(resolve => { announceP1 = resolve }), finishP1 = new Promise<void>(resolve => { resumeP1 = resolve })
+  f.transform(async (output, request) => {
+    const current = f.store.listOperations(f.input.source.repositoryId).find(operation => operation.currentAttemptId && f.store.readAttempt(operation.currentAttemptId).dispatchPlans.some(dispatch => dispatch.key === request.requestKey))!
+    f.useOperation(current)
+    if (request.purpose === 'code_behavior_analyze') {
+      const value = output as { changes: { kind: string; affectedIds: string[]; ruleIds: string[] }[] }
+      value.changes.forEach(change => { change.kind = scenario === 'no-conflict' ? 'refactor' : 'conflict'; change.affectedIds = ['RULE-EXPORT-01', 'AC-EXPORT-03']; change.ruleIds = ['RULE-EXPORT-01'] }); return value
+    }
+    if (request.purpose === 'code_behavior_review' && scenario === 'unreviewed') return { ...(output as object), checkedPaths: [] }
+    if (request.purpose === 'elaboration_generate') {
+      p1Calls++
+      if (scenario === 'active-p1') { announceP1(); await finishP1 }
+      if (scenario === 'failed' && p1Calls === 2) throw Object.assign(new Error('非法P1修复时执行环境不支持，保留原已审conflict'), { code: 'unsupported' })
+      const candidate = rows(original); candidate.changes[0].tables.AC.push({ ...candidate.changes[0].tables.AC[0] }); return candidate
+    }
+    return output
+  })
+  const protocol = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => protocol.close())
+  const application = await SyncApplication.create(f.root, { protocol, runtimeDirectory: join(f.parent, 'application'), tools: f.options.tools, runner: f.options.runner })
+  await application.enable()
+  const admitted = await application.submit({ nodeId: 'export-contract', requestId: `reviewed-conflict-${scenario}`, origin: 'code' })
+  if (scenario === 'active-p1') {
+    await enteredP1
+    try {
+      const active = await application.readOperation(admitted.operation!.id), context = active.decisionContext!
+      assert.equal(active.operation.phase, 'elaborating'); assert.equal(active.operation.blockedReason, 'conflicted'); assert.equal(active.attempt!.status, 'running')
+      await assert.rejects(application.decide({ requestId: 'active-p1-choice', operationId: active.operation.id, inputId: active.operation.input.id, analysisRef: context.analysisRef, findingIds: context.analysis.findings.map(finding => finding.id), decision: { choice: 'keep_intent' } }), /尚未结算|已结算/)
+    } finally { resumeP1() }
+  }
+  const detail = await application.wait(admitted.operation!.id), operation = detail.operation, attempt = detail.attempt!
+  assert.equal(detail.resources.length, 0, JSON.stringify(detail.resources)); assert.equal(detail.journals.length, 0)
+  assert.equal(detail.executionAvailability.status, 'ready'); assert.ok(attempt.failure)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), protectedIndex); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+  assert.deepEqual(operation.budget, budget)
+  if (scenario === 'unreviewed' || scenario === 'no-conflict') {
+    assert.equal(operation.blockedReason, null)
+    if (scenario === 'unreviewed') assert.equal(detail.decisionContext, null)
+    else assert.deepEqual(detail.decisionContext!.analysis.findings, [])
+    return
+  }
+  const context = detail.decisionContext!; assert.equal(context.analysis.reviewPassed, true); assert.ok(context.analysis.findings.some(finding => finding.kind === 'conflict'))
+  assert.equal(operation.phase, scenario === 'failed' ? 'failed' : 'budget_exhausted')
+  assert.equal(operation.blockedReason, 'conflicted', JSON.stringify({ phase: operation.phase, blockedReason: operation.blockedReason, failure: attempt.failure, reviewPassed: context.analysis.reviewPassed }))
+  const failure = structuredClone(attempt.failure), callsUsed = operation.callsUsed, request = { requestId: `exact-choice-${scenario}`, operationId: operation.id, inputId: operation.input.id, analysisRef: context.analysisRef, findingIds: context.analysis.findings.map(finding => finding.id), decision: { choice: 'keep_intent' as const } }
+  await assert.rejects(application.decide({ ...request, analysisRef: { sha256: contentHash('foreign-analysis') } }), /可信当前检查点/)
+  await assert.rejects(application.decide({ ...request, findingIds: ['unselected-finding'] }), /分歧|finding/)
+  await assert.rejects(application.decide({ ...request, inputId: contentHash('foreign-input') }), /原输入已变化/)
+  const start = application.start.bind(application); application.start = () => undefined
+  try {
+    const decision = await application.decide(request)
+    assert.notEqual(decision.operation.id, operation.id); assert.equal(decision.operation.origin, 'decision'); assert.equal(decision.operation.phase, 'queued')
+    const immutable = JSON.parse(readEvidence(operation.input.source.commonDir, decision.operation.requestBlob!).toString())
+    assert.equal(immutable.analysisRef.sha256, context.analysisRef.sha256); assert.deepEqual(immutable.findingIds, request.findingIds)
+    assert.deepEqual(application.store.readAttempt(attempt.id).failure, failure); assert.equal(application.store.readOperation(operation.id).callsUsed, callsUsed)
+    assert.equal(application.store.readOperation(operation.id).deadlineAtMs, operation.deadlineAtMs); assert.equal(application.store.listJournals(operation.id).length, 0)
+  } finally { application.start = start }
 })

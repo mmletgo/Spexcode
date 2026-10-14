@@ -313,7 +313,8 @@ export class SyncApplication {
         if (prior.origin !== 'decision' || ((ingress ?? prior).requestBlob?.sha256 ?? null) !== requestBlob.sha256) throw new SyncStoreError('SYNC_IDEMPOTENCY_CONFLICT', ingressKey)
         return { changed: true, operation: prior }
       }
-      if (!['needs_input', 'conflicted', 'superseded'].includes(original.phase) && !original.blockedReason) throw new SyncApplicationError('sync_decision_not_needed', '此操作没有待裁决的具体业务分歧')
+      const eligibility = this.store.readDecisionEligibility(original.id)
+      if (!eligibility.eligible) throw new SyncApplicationError(eligibility.reason!.code === 'SYNC_DECISION_RESOURCE_PENDING' ? 'sync_resources_unsettled' : 'sync_decision_not_needed', eligibility.reason!.message)
       const detail = this.detail(original, snapshot)
       if (detail.executionAvailability.status !== 'ready') throw new SyncApplicationError('sync_resources_unsettled', '请先恢复原操作的未结算资源')
       const previousBaselinePair = this.store.readBaseline(snapshot.source) ?? original.previousBaselinePair

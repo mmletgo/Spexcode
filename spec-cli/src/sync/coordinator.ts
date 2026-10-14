@@ -373,6 +373,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         const ref = writeEvidence(operation.input.source.commonDir, approved)
         if (!approved.reviewPassed || approved.inputId !== operation.input.id || approved.baselinePairId !== (operation.previousBaselinePair?.id ?? null) || approved.policyDigest !== operation.policyDigest || approved.readSetDigest !== operation.readSetDigest || approved.composedDigest !== view.composed.contentDigest) fail('analysis_binding', '已审行为分析与冻结输入/基线/政策不一致')
         analysis = { ref, analysis: approved }
+        if (approved.findings.some(finding => finding.kind === 'conflict')) store.recordReviewedConflict(fence)
       }
       const effectiveFindings = analysis?.analysis.findings ?? []
       const behaviorFacts = [...options.plan.facts, ...(analysis?.analysis.facts ?? []), ...effectiveFindings.map(finding => ({ source: `derived:${finding.ruleIds[0] ?? finding.affectedIds[0]}`, text: JSON.stringify(finding) }))]
