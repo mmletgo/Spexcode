@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { parseContract } from '@spexcode/spec-core/contracts'
 import type { Acceptance, ContractFinding } from '@spexcode/spec-core/contracts'
-import { CANDIDATE_RESPONSE_SCHEMA } from './candidate.js'
+import { CANDIDATE_RESPONSE_SCHEMA, verifyCandidate } from './candidate.js'
 import type { CandidateChanges } from './candidate.js'
 import type { ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
 import { GENERATION_REVIEW_SCHEMA, runGeneration } from './generation.js'
@@ -24,7 +24,7 @@ async function input(t: test.TestContext): Promise<GenerationInput> {
   const entries = readTree(snapshot.source.commonDir, snapshot.immutableTree)
   const files = new Map(entries.map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString()]))
   const contract = parseContract({ nodeId: 'export-contract', path: contractPath, source: files.get(contractPath)! }).contract!
-  return { root, requestKey: 'operation-1:attempt-1', snapshot, manifest: { version: 1, entries }, files, contracts: [contract], elaboratedSpecs: [{ path: contractPath, source: files.get(contractPath)! }], readyIds: ['REQ-EXPORT-01', 'AC-EXPORT-03'], blockedIds: [], intent: { nodeId: contract.nodeId, rawSource: contract.rawSource }, facts: [{ source: 'rule:RULE-EXPORT-01', text: '保留已有下载权限规则' }], existingAcceptance: contract.items.filter((item): item is Acceptance => item.kind === 'AC'), allowedScope: { paths: ['src', 'tests', '.spec'], contractIds: ['REQ-EXPORT-01', 'AC-EXPORT-03'], flowIds: [] }, policy: { version: 'trusted-v1', digest: 'policy-digest' }, timeoutMs: 30_000, model: 'gpt-6.1-sol', effort: 'high' }
+  return { root, requestKey: 'operation-1:attempt-1', snapshot, manifest: { version: 1, entries }, files, contracts: [contract], elaboratedSpecs: [{ path: contractPath, source: files.get(contractPath)! }], readyIds: ['REQ-EXPORT-01', 'AC-EXPORT-03'], blockedIds: [], intent: { nodeId: contract.nodeId, rawSource: contract.rawSource }, facts: [{ source: 'rule:RULE-EXPORT-01', text: '保留已有下载权限规则' }], existingAcceptance: contract.items.filter((item): item is Acceptance => item.kind === 'AC'), mandatoryTests: [], verifications: contract.items.filter(item => item.kind === 'VERIFY').map(item => ({ id: item.id, command: item.command, cwd: item.cwd, timeoutMs: item.timeoutMs })), allowedScope: { paths: ['src', 'tests', '.spec'], contractIds: ['REQ-EXPORT-01', 'AC-EXPORT-03'], flowIds: [] }, policy: { version: 'trusted-v1', digest: 'policy-digest' }, timeoutMs: 30_000, model: 'gpt-6.1-sol', effort: 'high' }
 }
 function changes(input: GenerationInput): unknown {
   const entry = input.manifest.entries.find(entry => entry.path === 'src/export.js')!
@@ -176,6 +176,37 @@ test('manifest/files与实际snapshot或composed tree绑定，磁盘变化和输
   assert.equal(wrongManifest.status, 'failed'); assert.equal(bad.calls.length, 0)
 })
 
+test('已审详细Spec由程序加入实际候选，生成器只需返回实现差量', async t => {
+  const source = await input(t)
+  const desiredSpec = `${source.files.get(contractPath)}\n已审补充：保留既有权限与全部验收。\n`
+  const supplied = { ...source, elaboratedSpecs: [{ path: contractPath, source: desiredSpec }] }
+  const native = runner(supplied)
+  const result = await runGeneration(supplied, { runner: native.run, validateCandidate: valid })
+  assert.equal(result.status, 'reviewed')
+  assert.equal(result.candidateFiles!.get(contractPath), desiredSpec)
+  assert.equal((result.output as CandidateChanges).changes.some(change => change.path === contractPath), false)
+  assert.equal(result.traces[0].resultDigest, contentHash(JSON.stringify(result.output)))
+  assert.ok(native.calls[1].prompt.includes(JSON.stringify(desiredSpec)))
+  assert.equal(readFileSync(join(source.root, contractPath), 'utf8'), source.files.get(contractPath))
+
+  const denied = runner(supplied)
+  const outside = await runGeneration({ ...supplied, allowedScope: { ...source.allowedScope, paths: ['src'] } }, { runner: denied.run, validateCandidate: valid })
+  assert.equal(outside.status, 'repair'); assert.match(outside.failure!.message, /越界/); assert.equal(denied.calls.length, 1)
+
+  const explicit = runner(supplied, () => {
+    const output = changes(supplied) as CandidateChanges
+    const entry = source.manifest.entries.find(entry => entry.path === contractPath)!
+    output.changes.push({ path: contractPath, beforeDigest: entry.digest, beforeMode: entry.mode, mode: null, content: 'unauthorized raw replacement' })
+    return output
+  })
+  const rejected = await runGeneration(supplied, { runner: explicit.run, validateCandidate: async candidate => {
+    const entry = verifyCandidate(source.snapshot.source.commonDir, candidate).find(entry => entry.path === contractPath)!
+    assert.equal(readObject(source.snapshot.source.commonDir, entry.oid).toString('utf8'), 'unauthorized raw replacement')
+    return [{ code: 'raw_changed', severity: 'error', message: '不得改写原意', nodeId: 'export-contract', path: contractPath }]
+  } })
+  assert.equal(rejected.status, 'repair'); assert.equal(explicit.calls.length, 1)
+})
+
 test('取消、unsupported和派发持久失败保持明确原因，不额外调用或发布晚结果', async t => {
   const source = await input(t)
   const controller = new AbortController(); controller.abort()
@@ -239,4 +270,45 @@ test('不能省略契约测试断言，不能改没读取的既有文件', async
   const blind = runner(updated, () => ({ version: 'sync-files-v1', changes: [{ path: entry.path, beforeDigest: entry.digest, beforeMode: entry.mode, mode: null, content: 'blind overwrite\n' }] }))
   const rejected = await runGeneration(updated, { runner: blind.run, validateCandidate: async () => assert.fail('盲改不能进入硬门禁') })
   assert.equal(rejected.status, 'repair'); assert.match(rejected.failure!.message, /未完整读取/); assert.equal(blind.calls.length, 1)
+})
+
+
+test('mandatory oracle全文及冻结定义进入同一输入，调用者后改登记不混入独审', async t => {
+  const source = await input(t)
+  source.mandatoryTests = [{ verificationId: source.verifications[0].id, testPath: 'tests/export.test.mjs', testId: 'AC-EXPORT-03' }]
+  const original = structuredClone({ mandatoryTests: source.mandatoryTests, verifications: source.verifications })
+  const native = runner(source, request => {
+    const context = JSON.parse(request.prompt.split('冻结完整输入:\n')[1]) as GenerationInput
+    assert.deepEqual(context.mandatoryTests, original.mandatoryTests); assert.deepEqual(context.verifications, original.verifications)
+    source.mandatoryTests[0].testId = 'MUTATED-ORACLE'
+    source.verifications[0].command.push('--skip')
+    return changes(source)
+  }, request => {
+    const context = JSON.parse(request.prompt.split('冻结原意和基线完整输入:\n')[1].split('\n实际候选身份')[0]) as GenerationInput
+    assert.deepEqual(context.mandatoryTests, original.mandatoryTests); assert.deepEqual(context.verifications, original.verifications)
+    assert.ok(request.prompt.includes(JSON.stringify(source.files.get('tests/export.test.mjs')!)))
+    return review(request)
+  })
+  const result = await runGeneration(source, { runner: native.run, validateCandidate: valid })
+  assert.equal(result.status, 'reviewed'); assert.equal(native.calls[0].inputDigest, native.calls[1].inputDigest)
+})
+
+test('未绑定当前裁决的reserved oracle finding不能仅靠needs_input逃过review gate', async t => {
+  const source = await input(t)
+  source.mandatoryTests = [{ verificationId: source.verifications[0].id, testPath: 'tests/export.test.mjs', testId: 'AC-EXPORT-03' }]
+  const native = runner(source, undefined, request => ({ ...review(request), verdict: 'needs_input', findings: [{ kind: 'missing_fact', affectedIds: ['AC-EXPORT-03'], ruleLocation: 'oracle-policy:decision:unbound', codeLocation: 'tests/export.test.mjs#AC-EXPORT-03', evidence: '没有真实当前adopt/new_rule授权的声明', counterexample: '任意测试失败不能当作政策互斥', message: '不能授予未知事实分类' }] }))
+  const result = await runGeneration(source, { runner: native.run, validateCandidate: valid })
+  assert.equal(result.failure?.code, 'review_invalid'); assert.equal(result.reviewPassed, false); assert.equal(result.review, null)
+})
+
+
+test('contract-omission必须精确绑定已审Spec路径和关联existingID，普通contract引用仍是代码repair', async t => {
+  const source = await input(t)
+  for (const marker of [`contract-omission:${contractPath}#RULE-EXPORT-05`, 'contract-omission:.spec/foreign/spec.md#AC-EXPORT-03', `contract-omission:${contractPath}#MISSING-ID`, `contract:${contractPath}#AC-EXPORT-03`]) {
+    const native = runner(source, undefined, request => ({ ...review(request), verdict: 'repair', findings: [{ kind: 'repair', affectedIds: ['AC-EXPORT-03'], ruleLocation: marker, codeLocation: 'tests/export.test.mjs#assertCall', evidence: '已有明确验收的测试helper错误', counterexample: 'TypeError不是新业务边界', message: '修代码和断言' }] }))
+    const result = await runGeneration(source, { runner: native.run, validateCandidate: valid })
+    if (marker.startsWith('contract-omission:')) { assert.equal(result.failure?.code, 'review_invalid', marker); assert.equal(result.review, null) }
+    else { assert.equal(result.status, 'repair'); assert.equal(result.review!.findings[0].ruleLocation, marker) }
+    assert.equal(result.reviewPassed, false); assert.equal(native.calls.length, 2)
+  }
 })

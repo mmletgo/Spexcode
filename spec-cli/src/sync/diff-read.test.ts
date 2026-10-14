@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { freezeCandidate } from './candidate.js'
 import { readSyncFileDiff, SyncDiffReadError, type SyncDiffDetail } from './diff-read.js'
-import { prepareControlledRequest } from './request-input.js'
+import { prepareControlledRequest, prepareControlledDecision } from './request-input.js'
 import { captureInputSnapshot, readTree } from './snapshot.js'
 
 async function fixture(t: test.TestContext): Promise<{ root: string; detail: SyncDiffDetail }> {
@@ -60,6 +60,12 @@ test('候选尚未生成时完整展示用户请求，来源删除后历史请�
   assert.match(result.patch, /-Original requirement\./); assert.match(result.patch, /\+Require cancellation before publication\./)
   assert.equal(result.kind, 'request'); assert.equal(result.delivered, false)
   assert.equal(readFileSync(join(root, path), 'utf8'), source)
+  const decisionInput = { operationId: 'original', requestId: 'decision-diff', inputId: detail.operation.input.id, analysisRef: { sha256: 'a'.repeat(64) }, findingIds: ['conflict-1'], decision: { choice: 'keep_intent' as const } }
+  const decisionRef = prepareControlledDecision(detail.operation.input, decisionInput, request.requestBlob!)
+  const decisionDetail = { ...pending, operation: { ...pending.operation, requestBlob: decisionRef } }
+  assert.equal(readSyncFileDiff(decisionDetail, path, 'request').patch, result.patch)
+  const noDelta = prepareControlledDecision(detail.operation.input, decisionInput)
+  assert.throws(() => readSyncFileDiff({ ...pending, operation: { ...pending.operation, requestBlob: noDelta } }, path, 'request'), { status: 404 })
   rmSync(join(root, path))
   assert.equal(readSyncFileDiff(pending, path, 'request').patch, result.patch)
   assert.deepEqual(readFileSync(join(root, '.git/index')), index)

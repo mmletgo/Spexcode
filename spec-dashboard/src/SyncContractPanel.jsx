@@ -54,7 +54,7 @@ export default function SyncContractPanel({ nodeId, stamp, targetTree = null, en
   const coverageById = new Map(view.coverage.map((item) => [item.id, item]))
 
   return <section className="sync-contract-panel" aria-label={t('syncContract.title')} aria-busy={current.key !== requestKey} data-sync-contract-panel>
-    <header><h2>{t('syncContract.title')}</h2><span className="sync-contract-verification">verification: {report.verification}</span></header>
+    <header><h2>{t('syncContract.title')}</h2><span className="sync-contract-verification">{t('syncContract.verification')}</span></header>
     <p className="sync-contract-note">{t('syncContract.readOnly')}</p>
     {current.key !== requestKey && <p className="sync-contract-note">{t('syncContract.refreshing')}</p>}
     {current.error && <div role="alert"><p>{t('syncContract.readFailed', { error: current.error })}</p><button type="button" onClick={() => setRetry((value) => value + 1)}>{t('syncContract.retry')}</button></div>}
@@ -105,7 +105,7 @@ export default function SyncContractPanel({ nodeId, stamp, targetTree = null, en
     <details className="sync-contract-group" open={view.findings.length > 0}>
       <summary>{t('syncContract.findings')} <span>{view.findings.length}</span></summary>
       {view.findings.length ? <ul>{view.findings.map((finding, index) => <li key={`${finding.code}/${finding.itemId}/${index}`}>
-        <b className={`sync-finding-${finding.severity}`}>{finding.severity}</b> · <code>{finding.code}</code> · {finding.message}
+        <b className={`sync-finding-${finding.severity}`}>{finding.severity}</b> · <code>{finding.code}</code> · {finding.code === 'semantic-review-required' && <>{t('syncContract.semanticReminder')} · </>}{finding.message}
         <p className="sync-contract-location"><code>{finding.path}{finding.line ? `:${finding.line}` : ''} · {finding.itemId} {displayValue(finding.relatedIds)}</code></p>
       </li>)}</ul> : <p>{t('syncContract.noFindings')}</p>}
     </details>

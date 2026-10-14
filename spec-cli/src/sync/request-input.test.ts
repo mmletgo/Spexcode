@@ -9,7 +9,8 @@ import { prepareSpecBodyEdit } from '../spec-body-edit.js'
 import { composeInputSnapshots } from './composition.js'
 import { migrateSyncStore } from './migrations.js'
 import type { AdmitSyncInput, BaselinePair, BlobRef, ComposedInputRef, InputSnapshot } from './operation-types.js'
-import { composeControlledRequest, guardControlledRequestPath, prepareControlledRequest, validateControlledRequest } from './request-input.js'
+import { composeControlledRequest, controlledDecisionIdentity, guardControlledRequestPath, prepareControlledRequest, prepareControlledDecision, readControlledDecision, renderControlledDecisionRaw, validateControlledRequest } from './request-input.js'
+import type { CodeBehaviorAnalysis } from './writeback-types.js'
 import { captureInputSnapshot, readEvidence, readObject, readTree, writeEvidence } from './snapshot.js'
 import { SyncStore } from './store.js'
 
@@ -155,4 +156,96 @@ test('真实 SQLite 拒 operation/composed 请求错绑并在重启后保留正�
     assert.throws(() => store.bindComposedInput(automatic.fence, composed), /SYNC_COMPOSITION_BINDING/)
     store.bindComposedInput(automatic.fence, base)
   } finally { protocol.close() }
+})
+
+
+test('业务裁决无正文差量仍冻结请求，只绑定所选分析与当前输入', async t => {
+  const { root } = fixture(t), snapshot = await captureInputSnapshot(root), before = state(root)
+  const input = { requestId: 'decision-1', operationId: 'original-op', inputId: snapshot.id, analysisRef: { sha256: 'a'.repeat(64) }, findingIds: ['finding-1'], decision: { choice: 'keep_intent' as const } }
+  const ref = prepareControlledDecision(snapshot, input)
+  assert.deepEqual(readControlledDecision(snapshot, ref), { ...input, schemaVersion: 1, type: 'sync.decision', source: snapshot.source })
+  assert.deepEqual(ref, prepareControlledDecision(snapshot, input))
+  const composed = (await composeInputSnapshots(snapshot)).composed!
+  const result = composeControlledRequest(snapshot, composed, ref)
+  assert.deepEqual(result.conflicts, [])
+  assert.deepEqual(result.composed, { ...composed, requestBlob: ref })
+  assert.deepEqual(state(root), before)
+  assert.throws(() => readControlledDecision({ ...snapshot, id: 'stale' }, ref), /input/)
+  assert.throws(() => prepareControlledDecision(snapshot, { ...input, findingIds: [] }), /分歧/)
+  assert.throws(() => prepareControlledDecision(snapshot, { ...input, findingIds: ['finding-1', 'finding-1'] }), /分歧/)
+  assert.throws(() => prepareControlledDecision(snapshot, { ...input, decision: { choice: 'new_rule', rule: ' ' } }), /新规则/)
+  const next = prepareControlledDecision(snapshot, { ...input, decision: { choice: 'new_rule', rule: '明确采用新的限制。' } })
+  assert.notEqual(next.sha256, ref.sha256)
+  assert.equal(readControlledDecision(snapshot, next).decision.choice, 'new_rule')
+})
+
+
+test('裁决继承原受控正文差量，不丢尚未落地的用户需求', async t => {
+  const { root } = fixture(t), snapshot = await captureInputSnapshot(root), patchRef = requestRef(await prepare(snapshot))
+  const decision = prepareControlledDecision(snapshot, { requestId: 'decision-patch', operationId: 'combined-op', inputId: snapshot.id, analysisRef: { sha256: 'b'.repeat(64) }, findingIds: ['conflict-1'], decision: { choice: 'keep_intent' } }, patchRef)
+  const composed = composeInputSnapshots(snapshot).composed!
+  const result = composeControlledRequest(snapshot, composed, decision)
+  assert.ok(result.composed)
+  assert.match(content(snapshot, result.composed), /Next user rule/)
+  assert.equal(result.composed.requestBlob?.sha256, decision.sha256)
+  assert.deepEqual(composeControlledRequest(snapshot, result.composed, decision).composed, result.composed)
+  assert.throws(() => prepareControlledDecision(snapshot, readControlledDecision(snapshot, decision), decision), /来源绑定|来源|before/)
+})
+
+
+test('裁决业务身份排除运输UUID与finding顺序，但绑定原分析与明确业务选择', () => {
+  const input = { requestId: 'transport-a', operationId: 'original-op', inputId: 'input-a', analysisRef: { sha256: 'a'.repeat(64) }, findingIds: ['finding-b', 'finding-a'], decision: { choice: 'adopt_behavior' as const } }
+  const id = controlledDecisionIdentity(input)
+  assert.equal(controlledDecisionIdentity({ ...input, requestId: 'transport-b', findingIds: ['finding-a', 'finding-b'] }), id)
+  assert.notEqual(controlledDecisionIdentity({ ...input, decision: { choice: 'keep_intent' } }), id)
+  assert.notEqual(controlledDecisionIdentity({ ...input, analysisRef: { sha256: 'b'.repeat(64) } }), id)
+  assert.notEqual(controlledDecisionIdentity({ ...input, decision: { choice: 'new_rule', rule: '新的明确业务规则。' } }), id)
+})
+
+
+test('受控正文文本重叠可先冻结作者字节与三方证据，留给业务独审而不静默批准', async t => {
+  const { root, directory } = fixture(t), snapshot = await captureInputSnapshot(root), before = state(root)
+  const prior = await priorComposition(snapshot, directory, source.replace('User rule.', 'Agent rule.'))
+  const patchRef = requestRef(await prepare(snapshot))
+  assert.equal(composeControlledRequest(snapshot, prior, patchRef).composed, null)
+  const retained = composeControlledRequest(snapshot, prior, patchRef, { retainConflicts: true })
+  assert.ok(retained.composed?.compositionEvidenceBlob)
+  assert.match(content(snapshot, retained.composed), /Next user rule/)
+  assert.equal(retained.conflicts.length, 1)
+  const overlap = JSON.parse(readEvidence(snapshot.source.commonDir, retained.composed.compositionEvidenceBlob).toString('utf8'))
+  assert.equal(overlap.version, 'composition-overlap-v1')
+  assert.equal(overlap.sourceInputId, snapshot.id)
+  assert.equal(overlap.baselinePairId, prior.previousBaselinePairId)
+  assert.equal(overlap.conflicts[0].path, path)
+  assert.match(readObject(snapshot.source.commonDir, overlap.conflicts[0].delivery.oid).toString(), /Agent rule/)
+  const decisionRef = prepareControlledDecision(snapshot, { requestId: 'overlap-decision', operationId: 'original-op', inputId: snapshot.id, analysisRef: { sha256: 'b'.repeat(64) }, findingIds: ['conflict-1'], decision: { choice: 'keep_intent' } }, patchRef)
+  const decision = composeControlledRequest(snapshot, prior, decisionRef, { retainConflicts: true })
+  assert.equal(decision.composed?.requestBlob?.sha256, decisionRef.sha256)
+  assert.equal(decision.composed?.compositionEvidenceBlob?.sha256, retained.composed.compositionEvidenceBlob.sha256)
+  assert.deepEqual(state(root), before)
+})
+
+test('同行内互不重叠的真实文本编辑自动保留作者和已交付字节', async t => {
+  const { root, directory } = fixture(t), snapshot = await captureInputSnapshot(root), before = state(root)
+  const prior = await priorComposition(snapshot, directory, source.replace('User rule.', 'User rule. 已接受规则A。'))
+  const patchRef = requestRef(await prepare(snapshot))
+  const result = composeControlledRequest(snapshot, prior, patchRef)
+  assert.ok(result.composed)
+  assert.equal(content(snapshot, result.composed), source.replace('User rule.', 'Next user rule. 已接受规则A。'))
+  assert.deepEqual(result.conflicts, [])
+  assert.equal(result.composed.compositionEvidenceBlob, undefined)
+  assert.deepEqual(state(root), before)
+})
+
+test('裁决raw程序追加明确选择并保受审正文，keep_intent字节不变', () => {
+  const raw = '已接受规则A。\n未选义务。'
+  const analysis = { findings: [{ id: 'B', ruleIds: ['RULE-B'], originalIntent: '保持B', sourceBehavior: '新B行为' }, { id: 'A', ruleIds: ['RULE-A'], originalIntent: '保持A', sourceBehavior: '不能被B采用' }] } as CodeBehaviorAnalysis
+  const input = { operationId: 'original', inputId: 'input', requestId: 'transport', analysisRef: { sha256: 'b'.repeat(64) }, findingIds: ['B'], decision: { choice: 'adopt_behavior' as const } }
+  const adopted = renderControlledDecisionRaw(raw, input, analysis)
+  assert.ok(adopted.startsWith(raw))
+  assert.match(adopted, /新B行为/)
+  assert.doesNotMatch(adopted, /不能被B采用|RULE-A/)
+  assert.equal(renderControlledDecisionRaw(raw, { ...input, decision: { choice: 'keep_intent' } }, analysis), raw)
+  assert.match(renderControlledDecisionRaw(raw, { ...input, decision: { choice: 'new_rule', rule: '明确新B规则' } }, analysis), /明确新B规则/)
+  assert.equal(renderControlledDecisionRaw(raw, { ...input, requestId: 'another-transport' }, analysis), adopted)
 })

@@ -398,3 +398,34 @@ test('pending lint still honours a legacy root-level config, so an unmigrated re
   const out = `${pending.stdout}${pending.stderr}`
   assert.match(out, /coverage: no spec governs: src\/calc\.ts/, out)
 })
+
+test('pending lint ignores untracked author drafts but still rejects defects in the frozen candidate', { skip }, () => {
+  const fx = fixture()
+  try {
+    fx.node('calc', 'code:\n  - src/calc.ts#applyRate')
+    fx.commit('governed baseline')
+    const tip = fx.g('rev-parse', 'HEAD')
+    fx.node('draft', 'code:\n  - src/untracked-draft.ts')
+    const draftPath = join(fx.proj, '.spec/proj/draft/spec.md')
+    const draft = readFileSync(draftPath), index = readFileSync(join(fx.proj, '.git/index'))
+    const live = fx.lint()
+    assert.equal(live.code, 1, live.out)
+    assert.match(live.out, /project source of truth is untracked/)
+    const pending = spawnSync(process.execPath, [TSX, CLI, 'spec', 'lint', '--pending', tip], { cwd: fx.proj, encoding: 'utf8' })
+    assert.equal(pending.status, 0, `${pending.stdout}${pending.stderr}`)
+    assert.deepEqual(readFileSync(draftPath), draft)
+    assert.deepEqual(readFileSync(join(fx.proj, '.git/index')), index)
+
+    fx.node('calc', 'code:\n  - src/missing-candidate.ts')
+    fx.g('add', '.spec/proj/calc/spec.md')
+    const candidate = fx.g('commit-tree', fx.g('write-tree'), '-p', tip, '-m', 'invalid frozen candidate')
+    fx.node('calc', 'code:\n  - src/calc.ts#applyRate')
+    const candidateIndex = readFileSync(join(fx.proj, '.git/index'))
+    const rejected = spawnSync(process.execPath, [TSX, CLI, 'spec', 'lint', '--pending', candidate], { cwd: fx.proj, encoding: 'utf8' })
+    assert.equal(rejected.status, 1)
+    assert.match(`${rejected.stdout}${rejected.stderr}`, /integrity:.*src\/missing-candidate\.ts/)
+    assert.doesNotMatch(`${rejected.stdout}${rejected.stderr}`, /project source of truth is untracked/)
+    assert.deepEqual(readFileSync(join(fx.proj, '.git/index')), candidateIndex)
+    assert.deepEqual(readFileSync(draftPath), draft)
+  } finally { rmSync(fx.proj, { recursive: true, force: true }) }
+})

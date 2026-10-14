@@ -22,3 +22,8 @@ related:
 显式终态重试保旧操作origin/retryOf且不携新patch；来源变化后的普通请求不携retryOf。
 
 恢复资格须有真实待结算副作用，recover请求不发新预算；请求证据可读用户原意，request diff保实际kind/path，未交付不能画成功。
+
+
+裁决客户端验证原operation/input/analysis/selected findings和稳定请求正文完整透传，与retry/patch明确分离；证据投影保新规则并排除prompt。
+
+裁决资格投影回归验证在途 P1 虽有 early conflicted reason，服务端 eligible=false 仍禁写；已结算 failed/budget_exhausted、conflicted、needs_input、superseded 的 eligible=true 可开放。stale、资源恢复或 invalidated 始终覆盖真实资格并禁用，不以 JSX 字串或模拟截图冒充交互验收。

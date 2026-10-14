@@ -22,3 +22,14 @@ code:
 细化状态遵循上层 [[sync-elaboration]]；实现缺口、实际执行 `not_run` 和 `implementationReady: false` 始终明确。P2 及验证服务必须另外完成代码、测试、当前版本证据和允许范围的实际落盘，才能形成 [[sync-verification]] 定义的同步结论。
 
 调用者可提供可选 `verifications: readonly Pick<Verification,'id'|'command'|'cwd'|'timeoutMs'>[]`，其权威类型来自 spec-core 契约。它是独立可信执行器登记，不混入 ElaborationFact 业务事实，不代表新增业务政策或变更授权；开始前与其他输入一起复制并进入冻结摘要。未提供登记仍保留独立 P1 细化语义，执行未运行、实现不可交付，不能凭模型 VERIFY 获得执行权。
+
+细化输入可携独审行为分析证据、节点迁移及preserve_business/reelaborate模式。update_acceptance必须绑定合法规则ID、analysisRef和具体依据；代码来源仅授权符合明确原意的细节变更，不能删除既有验收或改变验证政策。候选及结果保留nodeChanges供协调器形成同一迁移候选。
+
+refinement可携已接受candidateDigest和生成独审的具体失败诊断，只表示在既定原意下补齐遗漏边界；它不能成为新事实、来源或政策授权。上一完整已接受契约作为输入，REQ/AC/VERIFY和既有义务保留，再经独审后新增普通必要状态/转移及验收。
+
+decisionAuthorities携可信程序派生裁决范围；update_acceptance及具体retire既核独审分析，又核所选规则/业务ID闭包。使用同decision source或改标user:raw均不能授权无关政策。未选冲突仍为独审finding阻断项。
+
+程序由公共节点删除/所选裁决派生的retire可携analysisRef证明逐项已独审授权；旧可信显式raw/plan授权仍沿自身来源门禁。它不授予验证执行政策变更，退休仍保留旧负向运行义务。
+
+
+retiredIds同时承载逐项合法业务退役与经当前精确裁决确证结清的旧诊断GAP身份。GAP删除仅在本轮P1结构与独审通过后输出；独审拒绝、旧/foreign裁决、共享选外或未解决诊断不记入此集合。协调验证与baseline复用该既有字段累计，后续候选禁止复用。诊断结清不改变用户原意或增加业务退役计划。

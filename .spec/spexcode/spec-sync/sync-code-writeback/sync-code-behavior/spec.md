@@ -1,0 +1,35 @@
+---
+title: 冻结三方行为分类与独立审查
+status: active
+code:
+  - spec-cli/src/sync/code-behavior.ts
+---
+## raw source
+
+外部代码和两边同改应依据真实共同验证基线自动协调；文本重叠不是业务冲突，模型自身错误不能成为新需求或批准。
+
+## expanded spec
+
+[[sync-code-writeback]] 的行为分析复用独立受限native会话及既有budget/checkpoint。完整旧source、已验证delivery/newsource、共同coveredScope和冻结raw/规则/调用/测试字节进入分析，原意与真实外部差量分别保留；未读取上下文或超预算拒绝，不截断断言。构建与审查session/thread独立，输出及完整readSet/policy/composed/input绑定；审查重新检查每个变化和实际影响路径。
+
+分类为refactor、allowed_change、coverage_gap或conflict。重构不授权业务正文漂移；合法变化保外部行为、沿明确原意补齐必要状态边界及验收。过窄测试不能把允许行为反改成旧代码。每项发现含原意、原/新及双方行为、影响路径与ID、实际证据、具体反例和所需裁决，程序形成稳定ID。
+
+原始作者raw/规则差量是已有用户授权，不重复提问；authorChanges由程序从冻结字节求语义差量并进入独审。AC更新proposal仅在合法已审REQ/RULE/TR变化与完整来源链成立时派生，不删验收或改VERIFY。独审proposal先冻结，程序再绑定真实analysisRef形成授权；模型不能自填作者证据或可信批准。
+
+相容重叠必须提供完整整合正文并独审，不丢前次交付或合法外部行为。无治理新增代码自动定位真实上层raw、生成唯一治理叶；目标未知提出具体GAP，不跳过该文件。节点移动保业务ID及旧新路径证据，节点退役仍需逐项用户原意/裁决授权。裁决新操作重读原具体分析和不可变choice，在当前policy/readset下重新独审；未选冲突保持，仅选择采用行为保对应外部行为，保留原意/新规则按明确目标修代码。
+
+交付内容被来源接受时属于三方回声，不能将详细表再次升为用户新授权；仅不同于旧来源与已交付业务含义的真实raw/REQ/RULE/TR作者差量形成authorChanges。裁决范围由不可变request及原独审所选finding程序派生结构化authority；既有ID只取旧图依赖闭包，新图闭包仅接新ID，候选不能靠新连边扩权。新的裁决独审全部findings保持有效，即使ID恰与已选择历史finding相同也阻其依赖。
+
+公开作者删除：已采纳交付的准确作者基准中旧节点存在、新source真正缺失，独审allowed_change和对应Spec null整合方案成立时，程序从旧图生成全部旧身份逐项退役授权。当前裁决退役还须非keep选择、所选原finding精确含节点及全部旧身份范围；普通局部规则裁决不能删除整节点。无需调用者预注入plan退役权限，不能凭模型任意列表删验收。
+
+受审Spec raw整合保sourceRaw真实来源及原immutable作者patch、deliveryRaw历史交付，resolvedRaw为完整相容整合，expectedRaw仅由真实原choice程序追加说明。proof在同analysis独审hash内；作者afterRaw/changedIds保持真实差量。真实raw-only作者种子只能经具体已独审AC提案、明确派生RULE/TR集合及目标旧来源关系授权；独立B裁决不阻作者A，也不赋未列无关规则改义权限。raw整合先按真实作者基准、source和delivery的Unicode细粒度编辑合成：无冲突部分逐字保留，只有双方真正交叠的不同局部编辑可由独审自动相容重述。裁决本身不豁免该边界；keep恢复被删Spec仅能恢复精确所选历史原raw，随后程序追加choice说明。产品源码排除.spec内治理/插件资源；未治理但已commit产品源码亦必须完整分析及独审治理，不依赖未提交diff才发现。
+
+changedPaths从已采纳交付的逐路径作者基准与当前source真实差量，再联合delivery到composed差量形成；旧source完整上下文仍保留，已ff接受的生成Spec/tests不再次当本轮改动。模型resolutions不得提前写未来治理叶或未改路径，普通合法变化交后续细化/生成；事实复用须source/text逐字相同，affectedIds只用契约图稳定身份，错误明确路径及非法ID便于自动修复。
+
+AC提案的非作者raw来源必须精确引用本次已校验facts；单独的规则标识不是已绑定事实。独审checkedPaths只声明实际冻结读取且位于授权readPaths内的具体文件，元数据清单、目录名和符号链接不能冒充完整读取。独审路径校验失败时仍携带同次完整审查结果供下一轮诊断，保留业务遗漏和反例；该失败不产生分析批准或新授权。
+
+分析与独审输入前置 requiredChangedPaths 和具体 readablePaths，后者从 oldSource/newSource/verifiedDelivery/composedFiles 的完整文本求出并逐路径标明所在快照；目录前缀授权覆盖新未跟踪源码，删除文件仍核旧全文，元数据或链接不是全文。虚拟冻结快照是唯一输入权威，cwd 的旧 HEAD 不替代冻结字节。必读集合保持真实 changedPaths；不得自动补 checkedPaths 冒充模型已读。前置清单及完整原上下文、repairDiagnostics 共同计入 2MiB 上界，超限明确失败，不截断正文或诊断。
+
+拒绝诊断以 approved:false 的 JSON 保存当次完整 proposal、尚未批准的 analysis 和 review（在各阶段实际产生时），分列 missingPaths/missingChangeIds/unknownChangeIds、身份摘要或会话不一致、verdict 和 findings；路径错误仍保同次业务证据及反例。AC复合门禁给出目标类型、同一 allowed_change 中缺失的 affectedId、不支撑的 ruleIds、非法规则类型及 source 是否绑定。AC ruleIds 只列本次变化依据，其他未改 covers 义务保持；不得拼接多个 allowed_change 的并集授权。既有 failure.message 进入下一轮 repairDiagnostics 供逐项修复，不重复嵌入整个冻结上下文；前轮提案、未通过的 accept 或伪造批准仅是数据，不能产生基线、授权或替代新独审。
+
+所选裁决scope复用 [[sync-contract-evolution]]：旧FLOW/STEP仅取所选规则旧闭包与原所选finding affectedIds交集；共享上游REQ只在当前精确不可变请求/旧分析/所选finding绑定下加入REQ本身，不扩其消费者或借新图边授权其他旧目标。分析阶段只判断有限eligible来源范围；最终REQ改义仍须同一已审allowed_change及所选旧规则的实际政策定义变化，并接受原P1独审。AC仍绑定同一具体allowed_change、实际来源事实和精确提案，不能凭REQ扩大整个AC集合。

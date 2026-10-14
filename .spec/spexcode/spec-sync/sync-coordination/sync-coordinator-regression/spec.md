@@ -20,6 +20,8 @@ code:
 
 V3失败后修复的模型若再次收到P1会返回弱化AC，因此测试必须证明不会再次派发P1、后续生成prompt使用精确相同accepted契约/AC内容摘要，callsUsed仅计两次代码调用不重置。数据库重启后失败attempt同样从原P1 evidence复用，不依赖内存状态。
 
+P3 容量失败回归使用真实 SQLite/Git 及明确 native 接缝：已通过行为独审，P1 合法候选仅有 warning/deferredImplementation 缺测试时，独审基础设施失败不能成为业务 seed。live 与 SQLite 重启均在同预算和冻结 inputDigest 内重新生成及独审；此前具体业务拒绝先经 seed 续修，随后容量失败必须清 seed，不借旧 review。取消/总调用预算耗尽及终态重入不增加 calls，source/index/快照身份不变；用例在独立 code review 停止，不冒称 Docker 或交付成功。
+
 高层raw输入没有REQ/FLOW/AC，初始scope只含目录前缀；通过真实细化登记未来业务ID、生成此前absent的新源码模块及可信原意已登记的新治理节点，再经真实Docker/normal Git hooks交付。任意reader-app根通过真实CLI init，作者managed投影不入候选，source/index保持；用户入口无需填写未来实现文件或AC。
 
 第一次V4后、Git准备前人类再次编辑source，beforeApply复采仍拒绝且持久conflicted/input_changed，无业务journal/commit；不被private catch降成environment或FENCE_EXPIRED。
@@ -35,3 +37,28 @@ AC-SYNC-02/03使用真实已有详细契约，分别经readonly prepareSpecBodyE
 recoveryOnly真实SQLite证明queued无attempt与paused已计划未原生派发的资源均不新call/attempt/apply；paused/cancel未知创建窗口保持resource未removed与原control/input/budget。真实Docker planned create回执丢失后只inspect/stop/rm既有容器、不create/start；planned目标实际不存在时保持recovery_required，不虚构removed。真实已commit未settle journal恢复只同receipt结算，不新native或commit。
 
 旧 planless 恢复夹具使用明确独立旧政策身份，避免普通相同输入去重命中已取消现代 operation；仍核 plan_missing 持久失败且零 native 派发。
+
+P3真实code来源沿analyzing独立会话、同attempt checkpoint与冻结policy进入P1/生成；refactor保持正文，未完整checkedPaths的独审不得晋级。接缝在生成独审明确终止，不冒称V3或receipt。短租约长调用的真实heartbeat/cancel及重入不重派继续保持。
+
+原raw及TR明确作者编辑场景复用新行为分析/独审并保持真实Docker、原oracle、源码/index和未影响作者内容的完整断言。新裁决独审仍发现同历史ID互斥时不得生成或写journal。
+
+公开buildSyncApplicationPlan无手工退役授权完成新叶→实际receipt→git ff→治理目录搬迁→新叶ID公共入口→实际Docker/receipt→git ff→删能力/治理叶→逐项退役→旧保护oracle及真实负向AC Docker→新receipt/退役累计。未暂存搬迁保稳定业务ID，旧位置删除与新位置创建均进入可信范围；产品交付及重入保source/index、不新增call/commit。receipt后fixture作者显式接受交付，先将未跟踪草稿移到外部保留目录并核对原字节，再以普通ff接受候选，不把该作者动作冒称自动写源。部分正文A实际Docker交付后，B原immutable作者patch同行真重叠；受审整合的精确raw进入P1及实际候选，独审接受后经真实Docker、普通hooks结算receipt。receipt实际tree与deliverySnapshot保A/B及全部原业务义务，source/index保留，重入不新增call/commit。
+
+P3 oracle 绑定负例从真实 Git/SQLite 受控 decision 进入生成独审，错误当前 decision、非 mandatory test、未选 RULE、规则未改或 keep 选择都必须 review_invalid；原版同输入/finding 泛 missing_input 的 fail→pass 成对保存。原 source/index/预算/输入身份与零 receipt 保持。
+
+P3生成诊断在真实SQLite/Git复现普通contract引用错误回P1和symbol修复丢完整finding；live及重开SQLite后均只一次P1、下一代码生成逐字收到全部finding（含重复完成先突变的反例），完整已批准正文/预算/deadline/source/index保持。专用contract-omission绑定真实path/existingID/affectedIds仍回原refinement，代码独审在V3前明确停止，不冒称运行或交付通过；终态重入不增call。
+
+旧refinement stage与已保存repair-input分别经SQLite重启证明合法旧marker不再派P1，仍从实际generation独审恢复全部具体findings；新marker错existingID及损坏JSON保留失败、零新call/receipt。首轮规范P1 implementation-review通过原P1独审defer后，实际code_generate收到完整ContractFinding（证据/修复决定/relatedIds）及previousOutput:null，完整批准义务不改。
+
+旧规则引用RULE位置而affectedIds仅有关联AC的真实历史形态单独回归：先复现误套新omission includes(ID)造成unsupported，再验证只撤细化权、完整独审发现不丢且不再派P1。
+
+合法增补链用真实Git/SQLite及独立native接缝验证：首P1批准后专用遗漏触发第二P1实际新增FLOW/STEP/TR/AC并连入原主流程，经结构和独审批准后再遇普通测试repair；第三次实际code_generate仍收到新增全文、原raw/REQ/RULE/AC/VERIFY义务及第二批准attempt的provenance。live、SQLite重启及同绑定显式retryOf均不再派P1。旧contract:权限证据和未审增补候选不得升级冻结正文；原source/index/预算/deadline、固定验证定义及零receipt断言保持。该接缝在code_review终止，不冒称Docker或交付通过。
+
+
+已解决诊断GAP定向回归使用真实SQLite、不可变Git裁决、真实dispatch记录和normal hooks私有Git交付，验证部分baseline含旧诊断→keep精确清理→verification/receipt/baseline累计retiredIds→重开SQLite后禁止复用；P1独审拒绝保持无新receipt和无退役记录。V3 adapter与测试report明确模拟，只证明协调/持久化边界，不作为Docker执行或实际产品运行通过的证据；当前产品Docker验收仍另行完成。
+
+
+真实Git/SQLite及明确native接缝复现reviewPassed conflict→重复AC非法P1→执行failed/预算耗尽、资源清零，却丢blockedReason的失败。修复后保原failure/预算/source/index，正式application.decide精确绑定当前analysis/finding并建立新不可变操作；unreviewed/无conflict不记原因，foreign/stale/finding及活动P1仍拒。无Docker/native实际执行或receipt成功声明。
+
+
+应用detail的decisionEligibility投影在活动P1为false、结清的已审冲突failed/budget为true、无合格业务原因的失败为false；它直接复用实际store判断，无额外模型调用。

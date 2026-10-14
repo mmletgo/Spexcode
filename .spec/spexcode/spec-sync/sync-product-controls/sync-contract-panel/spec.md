@@ -26,7 +26,9 @@ related:
 
 默认筛选当前节点，可切换启用契约的节点及全部契约。关联状态事件单元及跨节点 GAP 依赖必须可见：显示 affectedIds、nodeIds、blockedBy 和声明的 dependsOn。每项展示稳定 ID、类型、来源定位与全部契约字段；AC 展示 covers、test、VERIFY command；完整矩阵明确缺失的状态事件处置。
 
-declared、bound、missing 只表示声明、结构绑定和处置缺失。报告 verification: not_run 明确显示；绑定分子/分母不作为真实运行通过或已同步的证据。解析及验证 findings 显示级别、位置、关联 ID 和原消息。旧版未启用节点不显示空面板；公开静态图、历史版本和 pending change face 不挂当前报告。
+面板明确标为“静态声明与绑定检查”。declared、bound、missing 只表示声明、结构绑定和处置缺失；报告 verification: not_run 显示为“本检查不执行运行验证”，实际运行验证由同步操作回执提供，不能推断已交付结果尚未验证。
+
+统计分别说明声明总数及直接关联验收声明、代码映射的条目数，不作为实现完整率、真实运行通过或已同步证据。FLOW、STEP 等已声明但没有直接 AC 绑定的条目不能仅因该统计被视为结构错误。解析及验证 findings 保留级别、位置、关联 ID 和原消息；semantic-review-required 明确标为静态独立审查要求，实际结论见同步操作证据，不推断当前交付尚未受审。旧版未启用节点不显示空面板；公开静态图、历史版本和 pending change face 不挂当前报告。
 
 读取失败显示真实错误并支持重试；加载中不抢焦点。原生 select、details/summary 与表格支持键盘阅读；窄屏在面板内横向滚动矩阵，不撑宽正文。复用现有 i18n、主题 token 和正文布局。
 

@@ -21,3 +21,16 @@ code:
 只读历史展示通过 readControlledRequest 复用同一不可变对象校验，不访问当前来源路径；来源文件移动或删除后仍能审阅当时的用户请求。validateControlledRequest 在此基础上额外核当前物理来源及路径，保持应用前的原有门禁。
 
 composeControlledRequest 不修改 InputSnapshot 或伪造 BaselinePair。它验证已有 ComposedInputRef 的完整 manifest/tree/contentDigest，以原 source 为 base、用户 next 为 source、已有 composed 为 delivery，复用真实 UTF-8 三方合并。非重叠请求保留 prior delivery 的 expanded 内容与其它生成文件；重叠、删除/修改或 mode/symlink 分歧返回明确 base/source/delivery Git 对象证据，不能覆盖或吞掉冲突。成功另存完整 manifest/tree/private composition ref，并把 requestBlob 绑定到 resulting composed；同请求重入幂等，不同请求不能隐式复用已有请求结果。没有用户请求时，既有 composeInputSnapshots API 与行为保持不变。
+
+
+裁决使用显式 type=sync.decision 的 schemaVersion=1 不可变请求，prepareControlledDecision/readControlledDecision 绑定原 operationId、inputId、可信 analysisRef、非空且不重复的 findingIds、稳定 requestId、source 与 keep_intent/adopt_behavior/new_rule 选择；new_rule 必须有用户规则正文。保持原需求没有正文差量也保存有效请求。它与正文差量明确区分，composeControlledRequest 仅绑定裁决 requestBlob、保持组合 tree/manifest/contentDigest，实际规则或代码变化由经验证的裁决协调方向生成。请求本身不把任意 analysisRef 升为授权；可信分析的原操作/检查点归属由应用与协调器核验。
+
+裁决原操作有尚未交付的受控正文编辑时，originalRequestBlob 由可信应用从原 operation 继承，调用者不能自行指定；该引用只能是同 input 的有效正文请求，不能递归指向另一裁决。组合先应用原用户正文再绑定新裁决，保持原需求差量、先前生成细化和 source readonly。
+
+controlledDecisionIdentity 从原operation/input/analysis、排序finding IDs与choice/精确rule计算稳定业务摘要，排除运输requestId。同选择换UUID或finding顺序仍为同一业务身份，不应重开operation/预算；改变选择、规则或原分析则是新的业务输入。原requestId仍用于接入收据与同key全payload严格重放。
+
+P3业务分析调用retainConflicts:true时，正文文本重叠先冻结作者next字节和完整三方Git对象，保存composition-overlap-v1/sourceInputId/baselinePairId/conflicts；保留既有组合冲突证据，裁决继承原body时透传相同选择。它不证明业务获准，协调器必须依据原始三方上下文独立分析，要求具体resolved正文或业务finding；默认受控编辑组合仍明确返回冲突，不能静默吞掉。
+
+行级Git三方合并遇冲突时，若两侧最小Unicode文本编辑区间互不重叠（包括同一行前句替换与末尾追加），程序按原区间保留双方字节自动合成；不推断业务含义，也不授新权限。区间真正重叠或同点不同插入继续保存三方证据，交给完整行为分析与独审，不以行级冲突要求用户确认。
+
+renderControlledDecisionRaw只向完整受审合成raw程序追加不可变所选finding及用户adopt/new_rule正文；keep_intent保持传入字节。choice、analysis引用与规则边界不由模型自造。运输UUID不进入正文，未选finding不进入选择说明；该说明不替代结构化授权。

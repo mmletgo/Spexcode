@@ -35,3 +35,18 @@ AC-APPLICATION-01 验证配置缺口、enable 摘要 CAS 与配置字节保留�
 22 先复现同受控 patch 仅换 requestId 导致两次模型调用和新预算；修复验证同一 failed operation/deadline/calls、B 再次重放、不同 patch/意图分离、同 key 冲突、显式 retry 原 requestBlob；实际 source/index/HEAD 不改。
 
 23 以正式 v6 schema 及保留原请求/payload/预算的历史受理记录重开真实应用，再提交相同 patch 的新 requestId 和 alias 重放；仍只一个操作、零新增模型调用。
+
+
+AC-APPLICATION-P3 在真实临时Git和canonical SQLite中冻结可信analysis checkpoint；手动code/combined入口真实受理。三个选择各自建立decision新operation，keep_intent无正文差量不丢请求，adopt/new_rule固定plan确含用户新输入且保旧原意；相同请求并发只派发一次，同key不同选择拒绝。错analysis、未知finding、stale input拒绝，旧operation superseded但分析可查，source/index/HEAD不先写。该场景只证明应用准入，真实生成/独审/Docker由协调器与上层验收。
+
+跨应用/store验证：同choice换运输UUID、同findings换顺序仍复用同operation/deadline/calls，不只验证samekey幂等；修改选择仍需新业务输入且samekey拒绝。
+
+P3准入同时断言固定plan的decisionAuthorities精确只含所选finding的规则/影响项/路径及不可变requestRef，不从用户任意字段或自然语言fact提取授权；未选独立GAP不进入该结构。
+
+AC-APPLICATION-P3-PARTIAL用真实临时Git及明确fixture结算基线验证：已交付A规则后在同一原输入选择B，冻结raw同时保留A、未选义务、原受控正文编辑和B选择，source字节保持只读；先复现旧attempt raw丢失A，再验证修复。不将fixture receipt宣称真实模型或Docker交付。
+
+P3-PARTIAL同时覆盖分行及同行互不重叠的A交付/B裁决，完整原raw和受控字节均保留；同行失败证据先确认旧行级冲突fallback丢A。真正覆盖同一文本区间时，准入冻结plan不得写临时rawSource，完整三方对象仍可读，留给绑定当前operation的独审整合；本应用场景仅验证准入与原意保真，独审解析和最终候选另由协调器回归。
+
+AC-APPLICATION-P3-DELIVERY复用06的真实临时Git、canonical SQLite、compiled CLI与普通hooks，可信预登记VERIFY-DECISION-01。外部源码新增filter超过8字符拒绝，与原RULE-EXPORT-02/AC-EXPORT-02的非空要求形成具体冲突；submit(code)真实分析和独审生成检查点，公共wait读取analysisRef/finding，三choice分别decide→wait→V1–V4/Docker→settled receipt。keep_intent移除上限且raw不变，adopt_behavior明确8上限，new_rule明确128上限；原oracle不改，新generated-tests覆盖8/9、128/129、空、幂等和权限。实际receipt正文、规则及源码符合冻结选择，未选原义务保持，source/index保留、重复裁决不新增call/commit。native输出为确定性替身，不宣称真实模型验收。
+
+AC-APPLICATION-P3-ORACLE-REAL 在 fixture 作者起始可信提交中登记不可改旧 oracle：9/129 长度均接受。公共 submit(code)→decide→wait 三选择执行同一完整 Docker 命令，keep 相容分支真实 receipt；adopt/new_rule 新限额真实 V3 非零、预算耗尽且无 receipt，绝不在裁决后改 oracle。ORACLE-PROTOCOL 用同一精确独审 finding 和冻结输入验证互斥分类由泛 generation_failed 改为 needs_input/oracle_policy_conflict，保具体裁决、定义、旧 oracle 摘要及矛盾反例；终态 wait 重放不新增 call，source/index 保留。本协议 runner 为明确独审接缝，不冒称真实模型判断。

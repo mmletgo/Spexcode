@@ -2378,6 +2378,58 @@ type SessionCandidateReceiptRead =
 const sessionCandidateReceiptDir = () => join(runtimeRoot(), '.session-create-candidates')
 const sessionCandidateReceiptPath = (id: string) => join(sessionCandidateReceiptDir(), `${id}.json`)
 const sessionCandidateLockId = (path: string, branch: string) => `create-resource-${digest(`${path}\0${branch}`)}`
+function sessionCandidateTarget(prompt: string, id: string): { root: string; path: string; branch: string; ref: string | null; title: string | null } {
+  const ref = nodeFromPrompt(prompt), title = titleFromPrompt(prompt)
+  const slug = `${slugify(ref || title)}-${id.slice(0, 4)}`, root = mainRoot()
+  return { root, path: join(root, '.worktrees', slug), branch: `${readConfig(dirname(gitCommonDir())).branchPrefix ?? 'node/'}${slug}`, ref, title }
+}
+
+/** 在原创建锁内恢复精确未发布候选；缺少所有权收据不构成未启动证明。 */
+export async function recoverSessionCreateTermination(requestKey: string, options: { prompt: string; payloadHash: string; base?: string; signal: AbortSignal }): Promise<SessionCreateTermination | null> {
+  const key = normalizeCreateKey(requestKey), id = sessionIdForCreateKey(key), requestDigest = digest(key)
+  return withRecordLock(id, async () => {
+    const termination = readSessionCreateTerminationById(id, requestDigest)
+    if (termination) return termination
+    if (readRecord(id)) return null
+    const { root, path, branch } = sessionCandidateTarget(options.prompt, id)
+    return withRecordLock(sessionCandidateLockId(path, branch), async () => {
+      const durable = readSessionCandidateReceipt(id)
+      if (durable.kind === 'absent') return null
+      if (durable.kind === 'invalid') throw new SessionCreateError('session_create_failed', 'cleanup', durable.error, 409)
+      const receipt = durable.receipt
+      if (receipt.requestDigest !== requestDigest || receipt.payloadHash !== options.payloadHash || receipt.root !== root || receipt.path !== path || receipt.branch !== branch)
+        throw new SessionCreateError('session_create_failed', 'cleanup', 'private candidate receipt does not match cancelled create request; preserving candidate resources', 409)
+      const state = await sessionCandidateState(root, path, branch, options.signal)
+      if (state.path && !state.worktree) throw new SessionCreateError('session_create_failed', 'cleanup', 'candidate path has no matching Git registration; preserving unknown contents', 409)
+      if (state.worktree) {
+        const mismatch = await proveSessionCandidate(path, branch, options.signal)
+        if (mismatch) throw new SessionCreateError('session_create_failed', 'cleanup', `candidate recovery identity mismatch: ${mismatch}`, 409)
+        const status = await withGitAbortSignal(options.signal, () => gitTry(['-C', path, 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored']))
+        if (!status.ok) throw new SessionCreateError('session_create_failed', 'cleanup', `cannot inspect candidate contents: ${status.stderr.trim() || status.failure}`, 409)
+        const seeded = '.spec/spexcode.local.json'
+        const unknown = status.stdout.split('\0').filter(Boolean).some(entry => entry !== `!! ${seeded}`
+          || !existsSync(join(root, seeded)) || !readFileSync(join(root, seeded)).equals(readFileSync(join(path, seeded))))
+        if (unknown) throw new SessionCreateError('session_create_failed', 'cleanup', 'candidate contains new or modified contents; preserving user edits', 409)
+      }
+      let recoveryBranchCommit: string | undefined
+      if (state.branch) {
+        if (!options.base) throw new SessionCreateError('session_create_failed', 'cleanup', 'candidate recovery has no frozen fork point; preserving branch', 409)
+        const [expected, actual] = await withGitAbortSignal(options.signal, () => Promise.all([
+          gitTry(['-C', root, 'rev-parse', '--verify', `${options.base}^{commit}`]),
+          gitTry(['-C', root, 'rev-parse', '--verify', `refs/heads/${branch}^{commit}`]),
+        ]))
+        if (!expected.ok || !actual.ok || expected.stdout.trim() !== actual.stdout.trim()) throw new SessionCreateError('session_create_failed', 'cleanup', 'candidate branch differs from frozen fork point; preserving branch', 409)
+        recoveryBranchCommit = expected.stdout.trim()
+      }
+      const residues = await cleanupSessionCandidate(root, id, path, branch, { ...state, store: existsSync(sessionStoreDir(id)) }, false, recoveryBranchCommit)
+      if (!residues.length && !retireSessionCandidateReceipt(id)) residues.push(`private candidate receipt remains at ${sessionCandidateReceiptPath(id)}`)
+      if (residues.length) throw new SessionCreateError('session_create_cleanup_failed', 'cleanup', `matching candidate recovery left residue: ${residues.join('; ')}`, 500)
+      const recovered: SessionCreateTermination = { version: 1, sessionId: id, requestDigest, payloadHash: options.payloadHash, code: 'session_create_cancelled', phase: 'cleanup', nativeStopped: true, nativeStatus: 'notStarted', cleanupComplete: true }
+      writeSessionCreateTermination(recovered)
+      return recovered
+    }, options.signal)
+  }, options.signal)
+}
 // The graph watcher uses this private fence to avoid rebuilding the full board while Git is still
 // registering a session candidate. The receipt is written before `git worktree add` and retired only
 // after publication or bounded cleanup, so the path names exactly the transaction-owned worktree.
@@ -2471,7 +2523,7 @@ async function sessionCandidateState(root: string, path: string, branch: string,
   return { path: pathExists, worktree, branch: ref.ok }
 }
 
-async function cleanupSessionCandidate(root: string, id: string, path: string, branch: string, owned: SessionCandidateOwnership): Promise<string[]> {
+async function cleanupSessionCandidate(root: string, id: string, path: string, branch: string, owned: SessionCandidateOwnership, forceWorktree = true, recoveryBranchCommit?: string): Promise<string[]> {
   const residues: string[] = []
   if (owned.store) {
     try { rmSync(sessionStoreDir(id), { recursive: true, force: true }) } catch { /* verified below */ }
@@ -2479,21 +2531,28 @@ async function cleanupSessionCandidate(root: string, id: string, path: string, b
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 10_000)
   timer.unref?.()
+  let command = 'candidate-state'
   try {
     await withGitAbortSignal(controller.signal, async () => {
       if (owned.worktree) {
-        const removed = await gitTry(['-C', root, 'worktree', 'remove', '--force', path])
+        command = 'worktree remove'
+        const removed = await gitTry(['-C', root, 'worktree', 'remove', ...(forceWorktree ? ['--force'] : []), path])
         if (!removed.ok) residues.push(`worktree remove failed: ${removed.stderr.trim() || removed.failure}`)
       }
+      command = 'candidate-state after remove'
       const afterRemove = await sessionCandidateState(root, path, branch, controller.signal)
-      if (owned.path && afterRemove.path && !afterRemove.worktree) {
+      if (forceWorktree && owned.path && afterRemove.path && !afterRemove.worktree) {
         try { rmSync(path, { recursive: true, force: true }) } catch { /* verified below */ }
       }
       const ref = `refs/heads/${branch}`
-      if (owned.branch) {
-        const deleted = await gitTry(['-C', root, 'branch', '-D', branch])
+      if (owned.branch && (forceWorktree || !afterRemove.worktree)) {
+        command = 'branch delete'
+        const deleted = await gitTry(recoveryBranchCommit
+          ? ['-C', root, 'update-ref', '-d', ref, recoveryBranchCommit]
+          : ['-C', root, 'branch', '-D', branch])
         if (!deleted.ok) residues.push(`branch delete failed: ${deleted.stderr.trim() || deleted.failure}`)
       }
+      command = 'candidate-state after delete'
       const state = await sessionCandidateState(root, path, branch, controller.signal)
       if ((owned.path && state.path) || (owned.worktree && state.worktree)) residues.push(`owned worktree remains at ${path}`)
       if (owned.branch && state.branch) residues.push(`owned branch remains at ${ref}`)
@@ -2501,7 +2560,8 @@ async function cleanupSessionCandidate(root: string, id: string, path: string, b
       if (!owned.branch && state.branch) residues.push(`unowned candidate branch preserved at ${ref}`)
     })
   } catch (error) {
-    residues.push(`Git cleanup did not settle: ${error instanceof Error ? error.message : error}`)
+    const stderr = (error as { stderr?: string }).stderr?.trim()
+    residues.push(`Git cleanup did not settle during ${command}${controller.signal.aborted ? ' (cleanup deadline expired)' : ''}: ${error instanceof Error ? error.message : error}${stderr ? `; ${stderr}` : ''}`)
   } finally { clearTimeout(timer) }
   if (owned.store && existsSync(sessionStoreDir(id))) residues.push(`owned session store remains at ${sessionStoreDir(id)}`)
   return residues
@@ -2578,11 +2638,8 @@ async function prepareSession(prompt: string, parentage: CreateParentage, launch
         const rawPrompt = prompt
         // @@@ the first mention is read TWICE and stored NEVER - it names the worktree slug and, when that id
         // exists, the [[spec-pointer]] line. The record carries no spec node: a session is not bound to one.
-        const ref = nodeFromPrompt(rawPrompt)
+        const { ref, title, root, branch, path } = sessionCandidateTarget(rawPrompt, id)
         const launchSpecs = ref ? loadSpecsLite() : null
-        const title = titleFromPrompt(rawPrompt)
-        const slug = `${slugify(ref || title)}-${id.slice(0, 4)}`
-        const root = mainRoot()
         // An explicit base pins the fork point so a run is reproducible against a frozen commit instead of
         // whatever the source-of-truth branch has drifted to. Resolve it here, before any git mutation: an
         // unknown ref must fail the create request outright, never leave a half-made worktree behind.
@@ -2593,8 +2650,6 @@ async function prepareSession(prompt: string, parentage: CreateParentage, launch
             throw new SessionCreateError('session_create_failed', phase, `session-create base does not name a commit: ${base}`, 400)
           }
         }
-        const branch = `${readConfig(dirname(gitCommonDir())).branchPrefix ?? 'node/'}${slug}`
-        const path = join(root, '.worktrees', slug)
         const spec = ref ? launchSpecs?.find((node) => node.id === ref) : undefined
         const suffix = (spec ? `\n\nThe spec node \`${ref}\` is your ground truth — read its spec at ${join(path, spec.path)}.` : '')
           + spawnerClause(parent ? readRecord(parent) : null, parentage.source)

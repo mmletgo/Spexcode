@@ -29,3 +29,7 @@ v5保持v1-v4迁移字节/checksum，新增origin摘要与按仓库protocol地�
 v6增加retryOf显式用户重试语义及semantic_digest索引，由checksummed callback从旧冻结record回填，不改v1-v5迁移字节/checksum。升级前online backup，旧记录无retryOf仍按旧精确摘要重放，旧writer拒写更高版本，禁止downmigration。
 
 v7新增规范请求语义索引和精确 ingress 接入收据，不改 v6 helper、checksum 或历史 payload/record。DDL 迁移不读取任何仓库 Git/blob；旧受控请求在当前来源接入边界惰性核验后填索引。升级仍 online backup、原子回滚、重启幂等和旧 writer 拒写；其它已移除仓库的证据缺失不阻数据库升级。
+
+v8登记P3行为授权、已结算精确业务裁决和退役身份的writer语义版本，保持v1-v7迁移字节/checksum不变。升级前online backup、marker同事务、重启幂等；旧P2 writer必须因generation更高拒绝，不能忽略新JSON引用后丢弃已确认用户规则。旧缺省refs仍可读，禁止破坏性downgrade。
+
+v9登记结构化裁决授权范围和结算后稳定裁决身份语义，v1-v8迁移字节/checksum不变；先online backup，marker事务幂等，旧v8 writer拒写。旧裁决规范索引仅在真实不可变request可核验的当前来源接入边界重算，历史payload/record/receipt不改。

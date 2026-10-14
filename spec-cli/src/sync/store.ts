@@ -1,12 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { getBlob } from '@spexcode/spec-core'
 import { applyComponentMigrations, type ProtocolTransaction, type SessionProtocol } from '@spexcode/session-protocol'
-import { readControlledRequest } from './request-input.js'
+import { controlledDecisionIdentity, readControlledDecision, readControlledRequest } from './request-input.js'
 import { SYNC_COMPONENT, SYNC_MIGRATIONS, syncCoordinatorAddress, syncSemanticDigest } from './migrations.js'
 import type { AdmitSyncInput, ApplyFilePlan, ApplyJournal, ApplyPlan, ApplyReceipt, ApplyStep, BaselinePair, BlobRef, CandidateRef, ClaimedAttempt, ClaimAttemptInput, ComposedInputRef, RecoverableSyncResource, SyncResourceCheckpoint, SyncResourcePlan, SyncResourceRecord, DispatchPlan, InputSnapshot, NativeSessionRef, RecoverableSync, ScopeLease, SyncAttempt, SyncControl, SyncDispatchEnvelope, SyncFailure, SyncOperation, SyncIngressReceipt, SyncScope, VerificationRef, VerificationResultBlob, WorktreeIdentity, WriteFence } from './operation-types.js'
 
 export { SYNC_COORDINATOR_ADDRESS, syncCoordinatorAddress } from './migrations.js'
 export const SYNC_DISPATCH_KIND = 'sync.dispatch.v1'
+export type SyncDecisionEligibility = { eligible: boolean; reason?: { code: string; message: string } }
 export type SyncRetryEligibility = { eligible: boolean; reason?: { code: string; message: string } }
 export class SyncStoreError extends Error {
   constructor(readonly code: string, message: string) { super(`${code}: ${message}`); this.name = 'SyncStoreError' }
@@ -132,7 +133,11 @@ export class SyncStore {
   }
   private normalizedSemanticDigest(input: Pick<SyncOperation, 'input' | 'requestBlob' | 'origin' | 'policyDigest' | 'scope' | 'retryOf'>): string {
     if (!input.requestBlob) return syncSemanticDigest(input)
-    this.blob(input.requestBlob)
+    const evidence = JSON.parse(this.blob(input.requestBlob).toString('utf8')) as { type?: string }
+    if (evidence.type === 'sync.decision') {
+      const decision = readControlledDecision(input.input, input.requestBlob)
+      return digest({ source: input.input.source, inputId: input.input.id, origin: input.origin, decision: controlledDecisionIdentity(decision), retryOf: input.retryOf ?? null })
+    }
     const request = readControlledRequest(input.input, input.requestBlob)
     const { requestId: _requestId, ...origin } = request.origin
     return syncSemanticDigest({ ...input, requestBlob: { sha256: digest({ ...request, origin }) } })
@@ -151,14 +156,17 @@ export class SyncStore {
     if (input.delivery && (input.delivery.canonicalRoot !== input.deliveryPlan.canonicalRoot || input.delivery.branch !== input.deliveryPlan.branch || input.delivery.repositoryId !== input.input.source.repositoryId)) fail('SYNC_DELIVERY_BINDING', 'bound delivery differs from durable plan')
     const payload = { input: inputPayload(input.input), ...(input.requestBlob ? { requestBlob: input.requestBlob } : {}), ...(input.planBlob ? { planBlob: input.planBlob } : {}), ...(input.retryOf ? { retryOf: input.retryOf } : {}), scope: canonicalScope(input.scope), policyDigest: input.policyDigest, impactDigest: input.impactDigest, readSetDigest: input.readSetDigest, deliveryPlan: input.deliveryPlan, previousBaselinePairId: input.previousBaselinePair?.id ?? null, budget: input.budget }
     const legacyPayloadDigest = digest(payload), payloadDigest = digest({ ...payload, origin: input.origin })
+    const requestType = input.requestBlob ? JSON.parse(this.blob(input.requestBlob).toString('utf8')) as { type?: string } : null
+    const decision = requestType?.type === 'sync.decision' ? readControlledDecision(input.input, input.requestBlob!) : null
+    if (decision && input.origin !== 'decision') fail('SYNC_DECISION_BINDING', '业务裁决需要decision来源')
     const semanticDigest = this.normalizedSemanticDigest(input)
-    const legacyCandidates = this.write(tx => tx.query("SELECT record_json FROM sync_operations WHERE normalized_semantic_digest IS NULL AND repository_id=? AND source_key=? AND json_extract(record_json,'$.input.id')=? AND json_extract(record_json,'$.policyDigest')=? AND json_extract(record_json,'$.origin')=? AND json_extract(record_json,'$.retryOf') IS ?", input.input.source.repositoryId, identityKey(input.input.source), input.input.id, input.policyDigest, input.origin, input.retryOf ?? null).map(row => parseRecord<SyncOperation>(row)!).filter(operation => digest(canonicalScope(operation.scope).paths) === digest(canonicalScope(input.scope).paths)))
+    const legacyCandidates = this.write(tx => tx.query("SELECT record_json FROM sync_operations WHERE repository_id=? AND source_key=? AND json_extract(record_json,'$.input.id')=? AND json_extract(record_json,'$.origin')=? AND json_extract(record_json,'$.retryOf') IS ? AND (? OR normalized_semantic_digest IS NULL AND json_extract(record_json,'$.policyDigest')=?)", input.input.source.repositoryId, identityKey(input.input.source), input.input.id, input.origin, input.retryOf ?? null, decision ? 1 : 0, input.policyDigest).map(row => parseRecord<SyncOperation>(row)!).filter(operation => decision || digest(canonicalScope(operation.scope).paths) === digest(canonicalScope(input.scope).paths)))
     const normalized = legacyCandidates.map(operation => {
       try { return { id: operation.id, digest: this.normalizedSemanticDigest(operation) } }
       catch (error) { fail('SYNC_REQUEST_IDENTITY_UNAVAILABLE', `旧请求 ${operation.id} 的不可变证据不能核验：${error instanceof Error ? error.message : String(error)}`) }
     })
     return this.write(tx => {
-      for (const operation of normalized) tx.exec('UPDATE sync_operations SET normalized_semantic_digest=? WHERE id=? AND normalized_semantic_digest IS NULL', operation.digest, operation.id)
+      for (const operation of normalized) tx.exec('UPDATE sync_operations SET normalized_semantic_digest=? WHERE id=?', operation.digest, operation.id)
       const prior = parseRecord<SyncOperation>(tx.query('SELECT record_json FROM sync_operations WHERE ingress_key=? OR EXISTS (SELECT 1 FROM json_each(sync_operations.ingress_aliases_json) WHERE value=?)', input.ingressKey, input.ingressKey)[0])
       if (prior) { const receipt = parseRecord<SyncIngressReceipt>(tx.query('SELECT record_json FROM sync_ingress_receipts WHERE ingress_key=?', input.ingressKey)[0]); if (prior.origin !== input.origin || !(receipt ? receipt.payloadDigest === payloadDigest : [payloadDigest, legacyPayloadDigest].includes(prior.payloadDigest))) fail('SYNC_IDEMPOTENCY_CONFLICT', input.ingressKey); return prior }
       const sameInput = parseRecord<SyncOperation>(tx.query('SELECT record_json FROM sync_operations WHERE normalized_semantic_digest=? ORDER BY rowid DESC LIMIT 1', semanticDigest)[0])
@@ -172,6 +180,11 @@ export class SyncStore {
       if (input.previousBaselinePair) {
         const pair = parseRecord<BaselinePair>(tx.query('SELECT record_json FROM sync_baseline_pairs WHERE id=?', input.previousBaselinePair.id)[0])
         if (!pair || identityKey(pair.source) !== identityKey(input.input.source) || digest(pair) !== digest(input.previousBaselinePair)) fail('SYNC_BASELINE_STALE', 'previous source baseline does not match durable pair')
+      }
+      if (decision) {
+        const parent = this.operation(tx, decision.operationId), eligibility = this.decisionEligibility(tx, parent)
+        if (parent.input.id !== input.input.id || identityKey(parent.input.source) !== identityKey(input.input.source)) fail('SYNC_DECISION_BINDING', '裁决必须绑定原操作完整冻结来源')
+        if (!eligibility.eligible) fail(eligibility.reason!.code, eligibility.reason!.message)
       }
       const older = tx.query('SELECT record_json FROM sync_operations WHERE repository_id=? AND source_root=?', input.input.source.repositoryId, input.input.source.canonicalRoot).map(row => parseRecord<SyncOperation>(row)!)
       const generation = Math.max(0, ...older.map(operation => operation.generation)) + 1
@@ -261,6 +274,7 @@ export class SyncStore {
   bindComposedInput(fence: WriteFence, composed: ComposedInputRef): SyncAttempt {
     this.blob(composed.manifestBlob)
     if (composed.requestBlob) this.blob(composed.requestBlob)
+    if (composed.compositionEvidenceBlob) this.blob(composed.compositionEvidenceBlob)
     return this.write(tx => {
       const { operation, attempt } = this.checkFence(tx, fence)
       if (composed.sourceInputId !== operation.input.id || composed.previousBaselinePairId !== (operation.previousBaselinePair?.id ?? null) || (composed.requestBlob?.sha256 ?? null) !== (operation.requestBlob?.sha256 ?? null)) fail('SYNC_COMPOSITION_BINDING', 'composition must retain original source, baseline pair and controlled request')
@@ -329,6 +343,15 @@ export class SyncStore {
   renewLease(fence: WriteFence, leaseMs: number): SyncAttempt {
     if (!Number.isSafeInteger(leaseMs) || leaseMs <= 0) fail('SYNC_LEASE_INVALID', 'leaseMs must be positive')
     return this.write(tx => { const { attempt } = this.checkFence(tx, fence); attempt.expiresAtMs = this.now() + leaseMs; tx.exec('UPDATE sync_leases SET expires_at_ms=? WHERE token=?', attempt.expiresAtMs, attempt.leaseToken); this.saveAttempt(tx, attempt); return attempt })
+  }
+  /** 协调器核对并持久保存当前独审分析后，记录其业务冲突而不改变执行结论。 */
+  recordReviewedConflict(fence: WriteFence): SyncOperation {
+    return this.write(tx => {
+      const { operation } = this.checkFence(tx, fence)
+      if (operation.phase !== 'analyzing') fail('SYNC_PHASE_INVALID', operation.phase)
+      if (operation.blockedReason !== 'conflicted') { operation.blockedReason = 'conflicted'; this.saveOperation(tx, operation) }
+      return operation
+    })
   }
   startElaboration(fence: WriteFence): SyncOperation {
     return this.write(tx => { const { operation } = this.checkFence(tx, fence); if (operation.phase !== 'analyzing') fail('SYNC_PHASE_INVALID', operation.phase); operation.phase = 'elaborating'; this.saveOperation(tx, operation); return operation })
@@ -441,11 +464,16 @@ export class SyncStore {
     })
   }
   settleApply(journalId: string, receiptId: string): SyncOperation {
+    const verificationRef = this.write(tx => { const journal = this.journal(tx, journalId); return this.attempt(tx, journal.attemptId).verification!.resultBlob })
+    const verification = JSON.parse(this.blob(verificationRef).toString('utf8')) as VerificationResultBlob
     return this.write(tx => {
       const journal = this.journal(tx, journalId), operation = this.operation(tx, journal.operationId), attempt = this.attempt(tx, journal.attemptId)
       if (!journal.receipt || journal.receipt.id !== receiptId) fail('SYNC_RECEIPT_MISSING', receiptId)
       if (journal.status === 'settled') return operation
-      const pair: BaselinePair = { id: `baseline-${journal.id}`, repositoryId: operation.input.source.repositoryId, source: clone(operation.input.source), sourceInput: clone(operation.input), verifiedDelivery: clone(journal.receipt.deliverySnapshot), coveredScope: clone(journal.plan.coveredScope), receiptId, settledAtMs: this.now() }
+      if (attempt.verification?.resultBlob.sha256 !== verificationRef.sha256) fail('SYNC_VERIFICATION_INVALID', 'settlement verification changed')
+      const retiredIds = [...new Set([...(operation.previousBaselinePair?.retiredIds ?? []), ...(verification.retiredIds ?? [])])].sort()
+      const decisionRefs = [...new Map([...(operation.previousBaselinePair?.decisionRefs ?? []), ...(verification.decisionRefs ?? [])].map(ref => [ref.sha256, ref])).values()]
+      const pair: BaselinePair = { id: `baseline-${journal.id}`, repositoryId: operation.input.source.repositoryId, source: clone(operation.input.source), sourceInput: clone(operation.input), verifiedDelivery: clone(journal.receipt.deliverySnapshot), coveredScope: clone(journal.plan.coveredScope), retiredIds, decisionRefs, receiptId, settledAtMs: this.now() }
       tx.exec('INSERT INTO sync_baseline_pairs(id,repository_id,source_key,receipt_id,settled_at_ms,record_json) VALUES(?,?,?,?,?,?)', pair.id, pair.repositoryId, identityKey(pair.source), pair.receiptId, pair.settledAtMs, JSON.stringify(pair))
       if (identityKey(pair.source) !== identityKey(pair.verifiedDelivery.source) || pair.sourceInput.id !== pair.verifiedDelivery.id) {
         const published: BaselinePair = { ...pair, id: `${pair.id}-delivery`, source: clone(pair.verifiedDelivery.source), sourceInput: clone(pair.verifiedDelivery) }
@@ -486,7 +514,7 @@ export class SyncStore {
       if (TERMINAL.has(operation.phase)) return operation
       const attempt = operation.currentAttemptId ? this.attempt(tx, operation.currentAttemptId) : null
       if (attempt) {
-        attempt.failure = { code: 'SYNC_BUDGET_EXHAUSTED', message: '执行预算或截止时间已耗尽', kind: 'budget', evidenceRefs: [] }
+        attempt.failure ??= { code: 'SYNC_BUDGET_EXHAUSTED', message: '执行预算或截止时间已耗尽', kind: 'budget', evidenceRefs: [] }
         if (attempt.status === 'applying') operation.phase = 'recovery_required'
         else { attempt.status = 'failed'; operation.phase = 'budget_exhausted'; this.release(tx, attempt.leaseToken) }
         this.saveAttempt(tx, attempt)
@@ -503,6 +531,13 @@ export class SyncStore {
       this.saveAttempt(tx, attempt); this.saveOperation(tx, operation); return operation
     })
   }
+  private decisionEligibility(tx: ProtocolTransaction, operation: SyncOperation): SyncDecisionEligibility {
+    if (!['conflicted', 'needs_input', 'superseded'].includes(operation.phase) && !(['failed', 'budget_exhausted'].includes(operation.phase) && operation.blockedReason !== null)) return { eligible: false, reason: { code: 'SYNC_DECISION_BINDING', message: '此操作没有待裁决的已结算具体业务分歧' } }
+    if (operation.currentAttemptId && !['failed', 'superseded', 'settled'].includes(this.attempt(tx, operation.currentAttemptId).status)) return { eligible: false, reason: { code: 'SYNC_DECISION_BINDING', message: '当前执行尝试尚未结算，不能裁决在途业务阶段' } }
+    if (tx.query("SELECT id FROM sync_resources WHERE operation_id=? AND phase!='removed' LIMIT 1", operation.id).length || tx.query("SELECT id FROM sync_apply_journals WHERE operation_id=? AND status!='settled' LIMIT 1", operation.id).length) return { eligible: false, reason: { code: 'SYNC_DECISION_RESOURCE_PENDING', message: '请先恢复原操作的未结算资源或写入日志' } }
+    return { eligible: true }
+  }
+  readDecisionEligibility(operationId: string): SyncDecisionEligibility { return this.write(tx => this.decisionEligibility(tx, this.operation(tx, operationId))) }
   private retryEligibility(tx: ProtocolTransaction, operation: SyncOperation): SyncRetryEligibility {
     const refused = (code: string, message: string): SyncRetryEligibility => ({ eligible: false, reason: { code, message } })
     if (!['failed', 'budget_exhausted', 'cancelled'].includes(operation.phase)) return refused('SYNC_RETRY_PHASE', '当前操作未以失败、预算耗尽或取消结束')

@@ -42,13 +42,16 @@ const PART_ALIASES: Record<string, 'rawSource' | 'expandedSpec'> = {
   'raw source': 'rawSource',
   'expanded spec': 'expandedSpec',
 }
-export function parseParts(body: string): SpecParts | null {
+/** 可选回调复用本次围栏感知扫描，提供规范化换行后的真实段落内容行位置。 */
+export function parseParts(body: string, onContentLine?: (part: keyof SpecParts, line: string, offset: number) => void): SpecParts | null {
   const acc = { rawSource: [] as string[], expandedSpec: [] as string[] }
   let cur: 'rawSource' | 'expandedSpec' | null = null
   let fenceMarker: string | null = null
   let fenceLength = 0
-  let any = false
+  let any = false, offset = 0
   for (const line of body.replace(/\r\n?/g, '\n').split('\n')) {
+    const lineOffset = offset
+    offset += line.length + 1
     const fence = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/)
     const wasInFence = fenceMarker !== null
     if (fence) {
@@ -63,8 +66,7 @@ export function parseParts(body: string): SpecParts | null {
         // an unrecognized `## …` heading is just content of the current part — fall through.
       }
     }
-    if (cur === 'rawSource') acc.rawSource.push(line)
-    else if (cur === 'expandedSpec') acc.expandedSpec.push(line)
+    if (cur) { acc[cur].push(line); onContentLine?.(cur, line, lineOffset) }
   }
   if (!any) return null
   const t = (a: string[]) => a.join('\n').trim()

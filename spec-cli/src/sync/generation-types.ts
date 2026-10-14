@@ -1,7 +1,9 @@
+import type { CodeBehaviorEvidence, ContractNodeChange, GenerationDirection } from './writeback-types.js'
 import type { Acceptance, Contract, ContractFinding } from '@spexcode/spec-core/contracts'
 import type { ElaborationFact, ElaborationRunner, ElaborationSessionRequest, ElaborationTrace } from './elaboration-types.js'
 import type { CandidateRef, ComposedInputRef, InputSnapshot, SyncScope } from './operation-types.js'
 import type { SnapshotManifest } from './snapshot.js'
+import type { SyncCoordinatorPlan } from './coordinator-types.js'
 
 /** 一次生成尝试的全部可信输入；调用者管理预算、attempt 和持久状态。 */
 export type GenerationInput = {
@@ -16,11 +18,17 @@ export type GenerationInput = {
   elaboratedSpecs: readonly { path: string; source: string }[]
   readyIds: readonly string[]
   blockedIds: readonly string[]
+  retiredIds?: readonly string[]
   intent: { nodeId: string; rawSource: string }
   facts: readonly ElaborationFact[]
   existingAcceptance: readonly Acceptance[]
+  mandatoryTests: SyncCoordinatorPlan['mandatoryTests']
+  verifications: readonly SyncCoordinatorPlan['verifications'][number]['definition'][]
   /** 已结算失败产物和诊断；修复上下文不是新的业务事实或通过证据。 */
   repairContext?: { previousOutput: unknown; diagnostics: readonly { code: string; message: string }[] }
+  analysis?: CodeBehaviorEvidence
+  direction?: GenerationDirection
+  nodeChanges?: readonly ContractNodeChange[]
   allowedScope: SyncScope
   policy: { version: string; digest: string }
   timeoutMs: number

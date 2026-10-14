@@ -9,7 +9,7 @@ import { applyComponentMigrations, openProtocol, type SqlParam } from '@spexcode
 import { migrateSyncStore, SYNC_COMPONENT, SYNC_MIGRATIONS } from './migrations.js'
 import type { AdmitSyncInput, ApplyFilePlan, ApplyPlan, ApplyReceipt, BlobRef, CandidateRef, ClaimedAttempt, InputSnapshot, SyncScope, VerificationRef, VerificationResultBlob, WorktreeIdentity } from './operation-types.js'
 import { captureInputSnapshot, readEvidence } from './snapshot.js'
-import { prepareControlledRequest } from './request-input.js'
+import { prepareControlledDecision, prepareControlledRequest } from './request-input.js'
 import { SyncStore, SYNC_COORDINATOR_ADDRESS, syncCoordinatorAddress } from './store.js'
 
 const source = (name = 'source'): WorktreeIdentity => ({ repositoryId: 'repo', commonDir: '/repo/.git', canonicalRoot: `/repo/${name}`, gitDir: `/repo/.git/worktrees/${name}`, branch: name, physicalFingerprint: `${name}-inode-1` })
@@ -28,10 +28,10 @@ async function fixture() {
   const store = new SyncStore(protocol, options)
   const admit = (identity = source(), id = 'input-1', covered = scope()): AdmitSyncInput => ({ ingressKey: `ingress-${identity.canonicalRoot}-${id}`, rootCauseId: 'cause', origin: 'spec', input: input(identity, id), scope: covered, budget: { maxAttempts: 4, maxCalls: 4, maxRepairs: 2, timeoutMs: 100000 }, policyDigest: 'policy', impactDigest: 'impact', readSetDigest: 'readset', delivery: null, deliveryPlan: { canonicalRoot: '/repo/delivery', branch: 'delivery', baseCommit: 'a'.repeat(40) } })
   const claim = (value = admit()): ClaimedAttempt => { const operation = store.admitAndEnqueue(value); return store.claimAttempt({ operationId: operation.id, source: value.input.source, scope: value.scope, leaseMs: 1000, expectedMessageId: operation.dispatchMessageId }) }
-  const ready = (value = admit(), readyScope = value.scope, blockedScope: SyncScope = { paths: [], contractIds: [], flowIds: [] }, blockedReason: 'needs_input' | 'conflicted' | null = null, beforeGeneration?: (claimed: ClaimedAttempt) => void) => {
+  const ready = (value = admit(), readyScope = value.scope, blockedScope: SyncScope = { paths: [], contractIds: [], flowIds: [] }, blockedReason: 'needs_input' | 'conflicted' | null = null, beforeGeneration?: (claimed: ClaimedAttempt) => void, verificationMetadata: Pick<VerificationResultBlob, 'retiredIds' | 'decisionRefs'> = {}) => {
     const claimed = claim(value), target = { ...input(value.deliveryPlan.canonicalRoot === value.input.source.canonicalRoot ? value.input.source : source('delivery'), 'target'), manifestBlob: put({ version: 1, entries: readyScope.paths.map(path => ({ path, mode: '100644', oid: 'a'.repeat(40), digest: '1'.repeat(64) })) }) }
     store.bindDelivery(claimed.fence, target.source)
-    store.bindComposedInput(claimed.fence, { sourceInputId: value.input.id, previousBaselinePairId: value.previousBaselinePair?.id ?? null, tree: value.input.immutableTree, manifestBlob: target.manifestBlob, contentDigest: value.input.contentDigest })
+    store.bindComposedInput(claimed.fence, { sourceInputId: value.input.id, previousBaselinePairId: value.previousBaselinePair?.id ?? null, tree: value.input.immutableTree, manifestBlob: target.manifestBlob, contentDigest: value.input.contentDigest, ...(value.requestBlob ? { requestBlob: value.requestBlob } : {}) })
     beforeGeneration?.(claimed)
     store.startGeneration(claimed.fence, { readyScope, blockedScope, blockedReason })
     const files: ApplyFilePlan[] = readyScope.paths.map(path => ({ path, preDigest: '1'.repeat(64), postDigest: '2'.repeat(64), preMode: '100644', postMode: '100644' }))
@@ -39,7 +39,7 @@ async function fixture() {
     store.freezeCandidate(claimed.fence, candidate)
     const evidence = put({ observed: 'layer evidence' })
     const bindings = { inputId: value.input.id, candidateDigest: candidate.digest, policyDigest: value.policyDigest, readSetDigest: value.readSetDigest, environmentDigest: 'env', contextDigest: 'context' }
-    const result: VerificationResultBlob = { schemaVersion: 1, coveredScope: readyScope, ...bindings, layers: (['V1', 'V2', 'V3', 'V4'] as const).map(layer => ({ layer, verdict: 'pass', evidenceRefs: [evidence] })) }
+    const result: VerificationResultBlob = { schemaVersion: 1, coveredScope: readyScope, ...bindings, layers: (['V1', 'V2', 'V3', 'V4'] as const).map(layer => ({ layer, verdict: 'pass', evidenceRefs: [evidence] })), ...verificationMetadata }
     const verification: VerificationRef = { ...bindings, passed: true, coveredScope: readyScope, evidenceRefs: [evidence], resultBlob: put(result) }
     store.recordVerification(claimed.fence, verification)
     const plan: ApplyPlan = { effectKey: `effect-${claimed.operation.id}`, payloadDigest: 'apply-digest', candidateDigest: candidate.digest, verificationBlob: verification.resultBlob, target: target.source, expectedTargetSnapshotId: target.id, expectedBaselinePairId: value.previousBaselinePair?.id ?? null, coveredScope: readyScope, files, planBlob: put({ files, candidateDigest: candidate.digest }) }
@@ -1123,7 +1123,7 @@ test('v6 controlled request normalization is lazy, preserves historical identity
     assert.ok(!legacy.withTransaction(tx => tx.query('PRAGMA table_info(sync_operations)')).some(column => column.name === 'normalized_semantic_digest'))
     assert.equal(legacy.listPending(syncCoordinatorAddress(a.input.source.repositoryId))[0].messageId, message.messageId)
     const backupPath = join(f.root, 'v6.backup')
-    assert.equal(await migrateSyncStore(legacy, { backupPath }), 7)
+    assert.equal(await migrateSyncStore(legacy, { backupPath }), SYNC_MIGRATIONS.length)
     assert.throws(() => applyComponentMigrations(legacy, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 6)), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
     backup = openProtocol(backupPath)
     assert.equal(backup.withTransaction(tx => tx.query('SELECT MAX(version) AS version FROM schema_migrations WHERE component=?', SYNC_COMPONENT))[0].version, 6)
@@ -1141,10 +1141,167 @@ test('v6 controlled request normalization is lazy, preserves historical identity
     assert.equal(legacy.withTransaction(tx => tx.query('SELECT normalized_semantic_digest FROM sync_operations WHERE id=?', gone.id))[0].normalized_semantic_digest, null)
     const reopened = openProtocol(join(f.root, 'v6.sqlite'))
     try {
-      assert.equal(await migrateSyncStore(reopened), 7)
+      assert.equal(await migrateSyncStore(reopened), SYNC_MIGRATIONS.length)
       assert.equal(new SyncStore(reopened, f.options).admitAndEnqueue(alias).id, historical.id)
       assert.deepEqual(new SyncStore(reopened, f.options).findIngressReceipt('new-B')?.requestBlob, b.requestBlob)
     } finally { reopened.close() }
     assert.equal(legacy.listPending(syncCoordinatorAddress(a.input.source.repositoryId)).length, 1)
   } finally { backup?.close(); legacy.close(); f.cleanup() }
+})
+
+test('P3退役记录只随真实receipt结算进入成对基线，重启及重复settle保持', async () => {
+  const f = await fixture()
+  try {
+    const r = f.ready(undefined, undefined, undefined, undefined, undefined, { retiredIds: ['AC-EXPORT-OLD'] })
+    assert.equal(f.store.readBaseline(r.operation.input.source), null)
+    const journal = f.store.beginApply(r.fence, r.plan, r.target), receipt = f.receipt(journal.id, r.plan)
+    for (const step of journal.steps) f.store.recordApplyStep(r.fence, journal.id, { ...step, status: 'completed' })
+    f.store.recordReceipt(journal.id, receipt)
+    assert.equal(f.store.readBaseline(r.operation.input.source), null)
+    f.store.settleApply(journal.id, receipt.id)
+    assert.deepEqual(f.store.readBaseline(r.operation.input.source)!.retiredIds, ['AC-EXPORT-OLD'])
+    assert.deepEqual(f.store.readBaseline(receipt.deliverySnapshot.source)!.retiredIds, ['AC-EXPORT-OLD'])
+    const reopened = openProtocol(f.path)
+    try { const store = new SyncStore(reopened, f.options); store.settleApply(journal.id, receipt.id); assert.deepEqual(store.readBaseline(r.operation.input.source)!.retiredIds, ['AC-EXPORT-OLD']) } finally { reopened.close() }
+  } finally { f.cleanup() }
+})
+
+test('P3 v8→v9先备份后登记授权writer版本，旧writer拒写且无改历史记录', async () => {
+  const f = await fixture(), legacy = openProtocol(join(f.root, 'v8.sqlite'))
+  let backup: ReturnType<typeof openProtocol> | undefined
+  try {
+    applyComponentMigrations(legacy, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 8))
+    assert.throws(() => new SyncStore(legacy, f.options), /SYNC_SCHEMA_UNSUPPORTED/)
+    const backupPath = join(f.root, 'v8.backup')
+    assert.equal(await migrateSyncStore(legacy, { backupPath }), SYNC_MIGRATIONS.length)
+    assert.throws(() => applyComponentMigrations(legacy, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 8)), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
+    backup = openProtocol(backupPath)
+    assert.equal(backup.withTransaction(tx => tx.query('SELECT MAX(version) AS version FROM schema_migrations WHERE component=?', SYNC_COMPONENT))[0].version, 8)
+    assert.equal(await migrateSyncStore(legacy), SYNC_MIGRATIONS.length)
+    assert.deepEqual(new SyncStore(legacy, f.options).listOperations('repo'), [])
+  } finally { backup?.close(); legacy.close(); f.cleanup() }
+})
+
+test('P3同选择新requestId/finding次序复用原预算，真实新选择撤旧fence且历史conflict保留', async () => {
+  const f = await fixture()
+  try {
+    const real = await f.controlled(), base = { ...f.admit(real.input.source, real.input.id), origin: 'code' as const, input: real.input, deliveryPlan: { canonicalRoot: real.input.source.canonicalRoot, branch: real.input.source.branch, baseCommit: real.input.headCommit } }
+    const old = f.claim(base)
+    f.store.recordFailure(old.fence, { code: 'business_conflict', message: '双方权限规则互斥；保真实历史分析', kind: 'conflict', evidenceRefs: [] })
+    const make = (requestId: string, findingIds: string[], choice: 'keep_intent' | 'adopt_behavior') => {
+      const requestBlob = prepareControlledDecision(real.input, { requestId, operationId: old.operation.id, inputId: real.input.id, analysisRef: { sha256: 'a'.repeat(64) }, findingIds, decision: { choice } })
+      f.blobs.set(requestBlob.sha256, readEvidence(real.input.source.commonDir, requestBlob))
+      return { ...base, ingressKey: requestId, origin: 'decision' as const, requestBlob }
+    }
+    const firstInput = make('choice-A', ['finding-1', 'finding-2'], 'keep_intent'), first = f.store.admitAndEnqueue(firstInput)
+    assert.equal(f.store.readOperation(old.operation.id).phase, 'superseded')
+    assert.equal(f.store.readAttempt(old.attempt.id).failure!.code, 'business_conflict')
+    assert.throws(() => f.store.renewLease(old.fence, 1000), /SYNC_FENCE_EXPIRED/)
+    const alias = f.store.admitAndEnqueue({ ...make('choice-B', ['finding-2', 'finding-1'], 'keep_intent'), policyDigest: 'new-request-ref-and-settled-facts', readSetDigest: 'derived-readset', scope: { ...base.scope, contractIds: [...base.scope.contractIds, 'AC-SETTLED-NEW'] } })
+    assert.equal(alias.id, first.id); assert.equal(alias.callsUsed, 0); assert.equal(alias.deadlineAtMs, first.deadlineAtMs)
+    assert.throws(() => f.store.admitAndEnqueue(make('choice-A', ['finding-1', 'finding-2'], 'adopt_behavior')), /SYNC_IDEMPOTENCY_CONFLICT/)
+    const ready = f.ready(firstInput, firstInput.scope, undefined, null, undefined, { decisionRefs: [firstInput.requestBlob] })
+    const journal = f.store.beginApply(ready.fence, ready.plan, ready.target), receipt = f.receipt(journal.id, ready.plan)
+    for (const step of journal.steps) f.store.recordApplyStep(ready.fence, journal.id, { ...step, status: 'completed' })
+    f.store.recordReceipt(journal.id, receipt); f.store.settleApply(journal.id, receipt.id)
+    const settled = f.store.readOperation(first.id), baseline = f.store.readBaseline(base.input.source)!
+    assert.deepEqual(baseline.decisionRefs, [firstInput.requestBlob])
+    f.protocol.withTransaction(tx => tx.exec('UPDATE sync_operations SET normalized_semantic_digest=? WHERE id=?', 'old-v8-derived-policy-identity', first.id))
+    const repeated = f.store.admitAndEnqueue({ ...make('choice-after-receipt', ['finding-2', 'finding-1'], 'keep_intent'), policyDigest: 'settled-history-and-new-transport-reference', previousBaselinePair: baseline })
+    assert.equal(repeated.id, first.id); assert.equal(repeated.callsUsed, settled.callsUsed); assert.equal(repeated.deadlineAtMs, settled.deadlineAtMs)
+
+    const replacement = f.store.admitAndEnqueue(make('choice-C', ['finding-1', 'finding-2'], 'adopt_behavior'))
+    assert.notEqual(replacement.id, first.id); assert.equal(f.store.readOperation(first.id).phase, 'workspace_synced')
+    assert.equal(f.store.requestControl(old.operation.id, 'run').phase, 'superseded')
+    assert.equal(f.store.listAttempts(old.operation.id).length, 1)
+  } finally { f.cleanup() }
+})
+
+
+test('当前fence记录独审业务conflict不改变执行状态，失败/预算与重启仍保原因', async () => {
+  const f = await fixture()
+  try {
+    const claimed = f.claim(), before = f.store.readOperation(claimed.operation.id)
+    assert.throws(() => f.store.recordReviewedConflict({ ...claimed.fence, generation: claimed.fence.generation + 1 }), /SYNC_FENCE_EXPIRED/)
+    assert.throws(() => f.store.recordReviewedConflict({ ...claimed.fence, sourceFingerprint: 'foreign-source' }), /SYNC_FENCE_EXPIRED/)
+    const marked = f.store.recordReviewedConflict(claimed.fence)
+    assert.equal(marked.phase, 'analyzing'); assert.equal(marked.blockedReason, 'conflicted')
+    assert.deepEqual(marked.input, before.input); assert.deepEqual(marked.scope, before.scope); assert.deepEqual(marked.readyScope, before.readyScope); assert.deepEqual(marked.blockedScope, before.blockedScope)
+    assert.deepEqual(marked.budget, before.budget); assert.equal(marked.callsUsed, before.callsUsed); assert.equal(marked.deadlineAtMs, before.deadlineAtMs)
+    assert.equal(f.store.recordReviewedConflict(claimed.fence).revision, marked.revision)
+    const issue = { code: 'invalid_p1', message: 'P1非法候选并非合法业务义务', kind: 'environment' as const, evidenceRefs: [f.put({ rejectedCandidate: true })] }
+    f.store.recordFailure(claimed.fence, issue)
+    assert.equal(f.store.readOperation(marked.id).phase, 'failed'); assert.equal(f.store.readOperation(marked.id).blockedReason, 'conflicted')
+    assert.deepEqual(f.store.readAttempt(claimed.attempt.id).failure, issue); assert.equal(f.store.listJournals(marked.id).length, 0)
+    const reopened = openProtocol(f.path)
+    try { assert.equal(new SyncStore(reopened, f.options).readOperation(marked.id).blockedReason, 'conflicted') } finally { reopened.close() }
+    f.tick(100001); f.store.recordBudgetExhaustion(marked.id)
+    assert.equal(f.store.readOperation(marked.id).phase, 'budget_exhausted'); assert.equal(f.store.readOperation(marked.id).blockedReason, 'conflicted')
+    assert.deepEqual(f.store.readAttempt(claimed.attempt.id).failure, issue)
+    assert.throws(() => f.store.recordReviewedConflict(claimed.fence), /SYNC_FENCE_EXPIRED/)
+  } finally { f.cleanup() }
+})
+
+
+test('decision admission事务复核当前阶段/attempt/资源，早期conflict与applying不能授裁决权', async () => {
+  for (const state of ['active', 'applying', 'pending-resource', 'race', 'coverage-gap'] as const) {
+    const f = await fixture()
+    try {
+      const real = await f.controlled(), value = { ...f.admit(real.input.source), input: real.input, origin: 'code' as const, deliveryPlan: { canonicalRoot: real.input.source.canonicalRoot, branch: real.input.source.branch, baseCommit: real.input.headCommit } }
+      const make = (operationId: string): AdmitSyncInput => {
+        const requestBlob = prepareControlledDecision(real.input, { requestId: `choice-${state}`, operationId, inputId: real.input.id, analysisRef: { sha256: 'a'.repeat(64) }, findingIds: ['finding-1'], decision: { choice: 'keep_intent' } })
+        f.blobs.set(requestBlob.sha256, readEvidence(real.input.source.commonDir, requestBlob))
+        return { ...value, ingressKey: `choice-${state}`, origin: 'decision', requestBlob }
+      }
+      if (state === 'applying') {
+        const ready = f.ready(value, value.scope, undefined, null, claimed => { f.store.recordReviewedConflict(claimed.fence) })
+        f.store.beginApply(ready.fence, ready.plan, ready.target)
+        assert.equal(f.store.readDecisionEligibility(ready.operation.id).eligible, false)
+        assert.throws(() => f.store.admitAndEnqueue(make(ready.operation.id)), /SYNC_DECISION_BINDING/)
+        assert.equal(f.store.readOperation(ready.operation.id).phase, 'applying'); assert.equal(f.store.listJournals(ready.operation.id).length, 1)
+        continue
+      }
+      const claimed = f.claim(value)
+      if (state !== 'coverage-gap') f.store.recordReviewedConflict(claimed.fence)
+      if (state === 'pending-resource') f.store.planResource(claimed.fence, { key: 'native-unsettled', kind: 'native_session', payloadDigest: 'original-native-request', inputId: real.input.id, candidateDigest: null, planBlob: f.put({ nativeIntent: true }), checkpointRef: f.put({ phase: 'planned' }) })
+      if (state !== 'active') f.store.recordFailure(claimed.fence, { code: 'p1_failed', message: '保原具体业务原因', kind: state === 'coverage-gap' ? 'missing_input' : 'environment', evidenceRefs: [f.put({ failure: state })] })
+      const input = make(claimed.operation.id)
+      if (state === 'coverage-gap') {
+        assert.equal(f.store.readOperation(claimed.operation.id).blockedReason, null); assert.equal(f.store.readDecisionEligibility(claimed.operation.id).eligible, true)
+        assert.equal(f.store.admitAndEnqueue(input).origin, 'decision', '真实缺事实仍可按旧入口裁决'); continue
+      }
+      if (state === 'race') {
+        assert.equal(f.store.readDecisionEligibility(claimed.operation.id).eligible, true)
+        f.store.claimAttempt({ operationId: claimed.operation.id, source: real.input.source, scope: value.scope, leaseMs: 1000, expectedMessageId: claimed.operation.dispatchMessageId })
+      }
+      assert.equal(f.store.readDecisionEligibility(claimed.operation.id).eligible, false)
+      assert.throws(() => f.store.admitAndEnqueue(input), state === 'pending-resource' ? /SYNC_DECISION_RESOURCE_PENDING/ : /SYNC_DECISION_BINDING/)
+      assert.equal(f.store.listOperations(real.input.source.repositoryId).length, 1); assert.equal(f.store.listJournals(claimed.operation.id).length, 0)
+    } finally { f.cleanup() }
+  }
+})
+
+
+test('partial needs_input原因在生成失败或预算耗尽后仍可裁决，在途生成继续拒绝', async () => {
+  for (const terminal of ['failed', 'budget_exhausted'] as const) {
+    const f = await fixture()
+    try {
+      const real = await f.controlled(), value = { ...f.admit(real.input.source), input: real.input, origin: 'code' as const }, claimed = f.claim(value)
+      f.store.startGeneration(claimed.fence, { readyScope: { paths: value.scope.paths, contractIds: [], flowIds: [] }, blockedScope: { paths: [], contractIds: value.scope.contractIds, flowIds: [] }, blockedReason: 'needs_input' })
+      const requestBlob = prepareControlledDecision(real.input, { requestId: `partial-fact-${terminal}`, operationId: claimed.operation.id, inputId: real.input.id, analysisRef: { sha256: 'a'.repeat(64) }, findingIds: ['finding-1'], decision: { choice: 'new_rule', rule: '补充已选分支的具体业务事实' } })
+      f.blobs.set(requestBlob.sha256, readEvidence(real.input.source.commonDir, requestBlob))
+      const decision: AdmitSyncInput = { ...value, ingressKey: `partial-fact-${terminal}`, origin: 'decision', requestBlob }
+      assert.equal(f.store.readDecisionEligibility(claimed.operation.id).eligible, false)
+      assert.throws(() => f.store.admitAndEnqueue(decision), /SYNC_DECISION_BINDING/)
+      const issue = { code: 'generation_environment', message: '独立ready分支生成失败，业务缺事实原因仍保留', kind: 'environment' as const, evidenceRefs: [f.put({ originalFailure: terminal })] }
+      f.store.recordFailure(claimed.fence, issue)
+      if (terminal === 'budget_exhausted') { f.tick(100001); f.store.recordBudgetExhaustion(claimed.operation.id) }
+      const parent = f.store.readOperation(claimed.operation.id)
+      assert.equal(parent.phase, terminal); assert.equal(parent.blockedReason, 'needs_input'); assert.deepEqual(f.store.readAttempt(claimed.attempt.id).failure, issue)
+      assert.equal(f.store.readDecisionEligibility(parent.id).eligible, true)
+      const admitted = f.store.admitAndEnqueue(decision)
+      assert.equal(admitted.origin, 'decision'); assert.notEqual(admitted.id, parent.id); assert.equal(admitted.currentAttemptId, null)
+      assert.deepEqual(f.store.readAttempt(claimed.attempt.id).failure, issue); assert.equal(f.store.listJournals(parent.id).length, 0)
+    } finally { f.cleanup() }
+  }
 })

@@ -50,7 +50,8 @@ import { configuredSessionApplication, setSessionApplicationCommitObserver } fro
 import { SESSION_CHANGE } from '@spexcode/session-application'
 import { editSpecBody, readSpecBodyEdit, SpecBodyEditError } from './spec-body-edit.js'
 import { ContractReportScopeError, readProjectContractReport, resolveProjectReadRoot } from './sync/contract-report.js'
-import { configuredSyncApplication } from './sync/application.js'
+import { configuredSyncApplication, type SyncSubmitInput } from './sync/application.js'
+import type { SyncDecisionInput } from './sync/writeback-types.js'
 import { SyncApplicationError } from './sync/settings.js'
 import { SyncStoreError } from './sync/store.js'
 import { readSyncFileDiff, SyncDiffReadError } from './sync/diff-read.js'
@@ -128,8 +129,12 @@ app.get('/api/sync/status', async c => {
 app.get('/api/sync/operations/:id', async c => c.json(await (await syncApplication(c.req.query('targetTree'))).readOperation(c.req.param('id'))))
 app.post('/api/sync/run', async c => {
   const body = await syncRequestBody(c.req), application = await syncApplication(c.req.query('targetTree'), body.targetTree)
-  if (typeof body.nodeId !== 'string' || typeof body.requestId !== 'string' || (body.origin !== undefined && body.origin !== 'spec' && body.origin !== 'initial') || (body.retryOf !== undefined && (typeof body.retryOf !== 'string' || !body.retryOf.trim()))) throw new SyncApplicationError('sync_request_invalid', '需要 nodeId、requestId、支持的输入来源及有效的 retryOf（若提供）', 400)
-  return c.json(await application.submit({ nodeId: body.nodeId, requestId: body.requestId, origin: body.origin, ...(body.retryOf === undefined ? {} : { retryOf: body.retryOf as string }), ...(body.patch === undefined ? {} : { patch: readSpecBodyEdit(body.patch) }) }))
+  return c.json(await application.submit({ nodeId: body.nodeId as string, requestId: body.requestId as string, ...(body.origin === undefined ? {} : { origin: body.origin as SyncSubmitInput['origin'] }), ...(body.retryOf === undefined ? {} : { retryOf: body.retryOf as string }), ...(body.patch === undefined ? {} : { patch: readSpecBodyEdit(body.patch) }) }))
+})
+app.post('/api/sync/operations/:id/decide', async c => {
+  const body = await syncRequestBody(c.req)
+  if (body.operationId !== undefined && body.operationId !== c.req.param('id')) throw new SyncApplicationError('sync_decision_invalid', '裁决 operation 身份不一致', 400)
+  return c.json(await (await syncApplication(c.req.query('targetTree'), body.targetTree)).decide({ ...body, operationId: c.req.param('id') } as SyncDecisionInput))
 })
 for (const action of ['pause', 'resume', 'cancel', 'recover'] as const) app.post(`/api/sync/operations/:id/${action}`, async c => {
   const body = await syncRequestBody(c.req)

@@ -1,7 +1,7 @@
 import { actualTreeDiff, isHostPrivatePath, verifyCandidate } from './candidate.js'
 import type { ApplyJournal, SyncAttempt, SyncOperation } from './operation-types.js'
-import { readControlledRequest } from './request-input.js'
-import { objectGit, readTree, validateRepositoryPath } from './snapshot.js'
+import { readControlledDecision, readControlledRequest } from './request-input.js'
+import { objectGit, readEvidence, readTree, validateRepositoryPath } from './snapshot.js'
 
 export class SyncDiffReadError extends Error {
   constructor(readonly status: 400 | 404 | 413, readonly code: string, message: string) { super(message) }
@@ -18,7 +18,14 @@ export function readSyncFileDiff(detail: SyncDiffDetail, path: string, kind = 'd
   let baseTree: string, candidateTree: string, delivered = false
   if (kind === 'request') {
     if (!detail.operation.requestBlob) throw new SyncDiffReadError(404, 'SYNC_DIFF_NOT_READY', '此操作没有受控用户请求')
-    const request = readControlledRequest(detail.operation.input, detail.operation.requestBlob)
+    let requestRef = detail.operation.requestBlob
+    const saved = JSON.parse(readEvidence(commonDir, requestRef).toString('utf8')) as { type?: string }
+    if (saved.type === 'sync.decision') {
+      const decision = readControlledDecision(detail.operation.input, requestRef)
+      if (!decision.originalRequestBlob) throw new SyncDiffReadError(404, 'SYNC_DIFF_NOT_READY', '此裁决没有正文差量；请读取固定用户选择')
+      requestRef = decision.originalRequestBlob
+    }
+    const request = readControlledRequest(detail.operation.input, requestRef)
     if (request.path !== path) throw new SyncDiffReadError(404, 'SYNC_DIFF_NOT_FOUND', '文件不在此用户请求差量中')
     baseTree = detail.operation.input.immutableTree; candidateTree = request.requestTree
   } else {

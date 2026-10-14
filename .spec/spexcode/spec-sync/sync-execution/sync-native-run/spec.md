@@ -14,7 +14,7 @@ code:
 
 ## expanded spec
 
-原生执行权威属于 [[structured-session-runtime]]，资源CAS与恢复记录属于 [[sync-store]]。createAttemptRunner复用runStructuredSession/cancelStructuredSession/readRecord和sessionIdForCreateKey。每个请求保存完整root/base/prompt/schema/input/purpose/timeout/model/effort摘要，reserveDispatch同键同载荷不重复计费；返回sessionCreateKey是唯一原生创建键，不另造会话ID。资源计划在调用前持久固定key、预期sessionId、原source input和当次durable attempt候选摘要；正文只进既有commonDir evidence blob。
+原生执行权威属于 [[structured-session-runtime]]，资源CAS与恢复记录属于 [[sync-store]]。createAttemptRunner复用runStructuredSession/cancelStructuredSession/readRecord、sessionIdForCreateKey和正式创建恢复入口recoverSessionCreateTermination。每个请求保存完整root/base/prompt/schema/input/purpose/timeout/model/effort摘要，reserveDispatch同键同载荷不重复计费；返回sessionCreateKey是唯一原生创建键，不另造会话ID。资源计划在调用前持久固定key、预期sessionId、原source input和当次durable attempt候选摘要；正文只进既有commonDir evidence blob。
 
 只观察精确预期session ID，不扫session树或造第二队列。published record创建载荷和固定结构化策略匹配时资源进入created，即使仍queued、thread/turn未知；nativeStarted仅表示实际turn实锚已出现，不把queued当原生执行。thread/turn出现后同phase CAS保存实锚，只有当前fence可bindSession。错误身份或摘要拒绝，已绑定身份不可退回或替换。
 
@@ -25,3 +25,5 @@ code:
 终态result或精确停止证明已持久、removed尚未登记的窗口可仅据内容hash核验的terminal证据补removed，不重复原生调用。外层request.inputDigest属于冻结推理请求，不冒充source snapshot id；资源inputId始终来自operation原source输入，candidateDigest从实际durable attempt获取。
 
 创建已派发但会话尚未发布时，缺失 record 不能证明停止。同进程取消在固定预算内等待原创建事务；只有正式创建事务在 request-key 锁内完成清理、且 version/sessionId/requestDigest/payloadHash 与冻结计划一致的结构化终止收据才证明 notStarted。收据及精确停止事实先进入 terminal 再 removed；收据不存在、错配、创建仍在进行或清理失败时保留资源用于恢复。重启读取该精确收据即可结算，即使原 fence 仍有效也不再调用 runStructuredSession，不复活同键取消或重复计费。
+
+原创建调用已结束或重启后的取消恢复没有本地创建 Promise 时，桥可按冻结计划向 [[session-create-authority]] 请求精确候选清理恢复，再重读 canonical record 与正式终止收据。桥不把 Promise 结束当成证明，不自行删除 Git/FS 资源；正式入口拒绝未知/错配/已发布候选时资源仍保留。清理完成后仍经同一 terminal→removed 与完整收据校验，不增加调用次数；另一个创建者锁内发布的会话转走正式原生取消路径。

@@ -213,8 +213,8 @@ async function specLintInLedger(root: string, regs: ReturnType<typeof extractors
   const pendingConfigSource = () =>
     treeFileText(root, tip, '.spec/spexcode.json') ?? treeFileText(root, tip, 'spexcode.json')
   const cfg = loadConfig(root, pending ? pendingConfigSource() : undefined)
-  const pathspec = adoptionPathspec(root)
-  const untracked = untrackedAdoptionFiles(root, pathspec)
+  const pathspec = pending ? [] : adoptionPathspec(root)
+  const untracked = pending ? [] : untrackedAdoptionFiles(root, pathspec)
   if (untracked.length) {
     const shown = untracked.slice(0, 6)
     const suffix = untracked.length > shown.length ? ` (+${untracked.length - shown.length} more)` : ''

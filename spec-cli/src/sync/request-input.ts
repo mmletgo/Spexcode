@@ -1,5 +1,6 @@
 import { lstatSync } from 'node:fs'
 import { join } from 'node:path'
+import type { CodeBehaviorAnalysis, SyncDecisionInput } from './writeback-types.js'
 import type { PreparedSpecBodyEdit } from '../spec-body-edit.js'
 import { isUtf8Text, mergeText } from './composition.js'
 import type { CompositionConflict } from './composition.js'
@@ -12,8 +13,41 @@ export type ControlledRequest = {
   schemaVersion: 1; inputId: string; source: WorktreeIdentity; path: string
   before: TreeEntry; next: TreeEntry; requestTree: string; origin: ControlledRequestOrigin
 }
+export type ControlledDecision = SyncDecisionInput & { schemaVersion: 1; type: 'sync.decision'; source: WorktreeIdentity; originalRequestBlob?: BlobRef }
 export type PreparedControlledRequest = { changed: false; requestBlob: null } | { changed: true; requestBlob: BlobRef }
 
+/** 业务裁决身份不含运输请求键；同选择的重放不能重开预算。 */
+export function controlledDecisionIdentity(input: SyncDecisionInput): string {
+  return contentHash(JSON.stringify({ operationId: input.operationId, inputId: input.inputId, analysisRef: input.analysisRef.sha256, findingIds: [...input.findingIds].sort(), decision: input.decision.choice === 'new_rule' ? { choice: input.decision.choice, rule: input.decision.rule } : { choice: input.decision.choice } }))
+}
+/** 已绑定用户选择只由程序追加；受审合成正文保留此前接受及未选规则。 */
+export function renderControlledDecisionRaw(raw: string, input: SyncDecisionInput, analysis: CodeBehaviorAnalysis): string {
+  if (input.decision.choice === 'keep_intent') return raw
+  const findingIds = [...input.findingIds].sort()
+  const findings = findingIds.map(id => analysis.findings.find(finding => finding.id === id)!)
+  const selectedRules = [...new Set(findings.flatMap(finding => finding.ruleIds))].sort()
+  const boundary = `本次裁决仅适用于分歧 ${findingIds.join(', ')}，业务规则 ${selectedRules.join(', ') || '该分歧明确指出的未覆盖行为'}；未选中的原需求、其他规则与全部验证政策保持有效。`
+  const text = input.decision.choice === 'new_rule' ? input.decision.rule : findings.map(finding => `采用当前行为并更新需求：${finding.sourceBehavior}；原需求：${finding.originalIntent}`).join('\n')
+  return `${raw.trim()}\n\n用户裁决（${controlledDecisionIdentity(input)}，分析 ${input.analysisRef.sha256}）：\n${boundary}\n以下选择明确替代所选规则中的旧行为要求，其余原文继续有效：\n${text}`
+}
+/** 用户裁决是独立输入，即使保持原需求没有正文差量也必须保留。 */
+export function prepareControlledDecision(snapshot: InputSnapshot, input: SyncDecisionInput, originalRequestBlob?: BlobRef): BlobRef {
+  const request: ControlledDecision = { schemaVersion: 1, type: 'sync.decision', requestId: input.requestId, operationId: input.operationId, inputId: input.inputId, analysisRef: input.analysisRef, findingIds: input.findingIds, decision: input.decision, source: snapshot.source, ...(originalRequestBlob ? { originalRequestBlob } : {}) }
+  checkDecision(snapshot, request)
+  return writeEvidence(snapshot.source.commonDir, request)
+}
+function checkDecision(snapshot: InputSnapshot, request: ControlledDecision): void {
+  if (!request || request.schemaVersion !== 1 || request.type !== 'sync.decision' || request.inputId !== snapshot.id || JSON.stringify(request.source) !== JSON.stringify(snapshot.source)) throw new Error('裁决请求 schema/input/来源绑定不一致')
+  if (![request.requestId, request.operationId].every(value => typeof value === 'string' && value.trim()) || !/^[a-f0-9]{64}$/.test(request.analysisRef?.sha256 ?? '') || !Array.isArray(request.findingIds) || !request.findingIds.length || !request.findingIds.every(id => typeof id === 'string' && id.trim()) || new Set(request.findingIds).size !== request.findingIds.length) throw new Error('裁决请求缺少有效分析或具体分歧身份')
+  if (request.originalRequestBlob) readControlledRequest(snapshot, request.originalRequestBlob)
+  if (!request.decision || !['keep_intent', 'adopt_behavior', 'new_rule'].includes(request.decision.choice) || request.decision.choice === 'new_rule' && (typeof request.decision.rule !== 'string' || !request.decision.rule.trim())) throw new Error('裁决请求缺少明确选择或新规则')
+}
+/** 读取固定裁决，并核原输入；分析可信归属由应用和协调器从原操作证据核验。 */
+export function readControlledDecision(snapshot: InputSnapshot, ref: BlobRef): ControlledDecision {
+  const request = JSON.parse(readEvidence(snapshot.source.commonDir, ref).toString('utf8')) as ControlledDecision
+  checkDecision(snapshot, request)
+  return request
+}
 /** 在旧编辑准备函数读取正文前核已知路径；只观察路径元数据，不跟随任何 symlink。 */
 export function guardControlledRequestPath(snapshot: InputSnapshot, path: string): void {
   validateRepositoryPath(path)
@@ -81,9 +115,28 @@ export function validateControlledRequest(snapshot: InputSnapshot, requestBlob: 
   return request
 }
 
+/** 行级合并误报冲突时，仅整合字节含义不重叠的两段真实文本编辑。 */
+function mergeSeparateTextEdits(commonDir: string, baseEntry: TreeEntry, sourceEntry: TreeEntry, deliveryEntry: TreeEntry): Buffer | null {
+  const buffers = [baseEntry, sourceEntry, deliveryEntry].map(entry => readObject(commonDir, entry.oid))
+  if (!buffers.every(isUtf8Text)) return null
+  const [base, source, delivery] = buffers.map(bytes => Array.from(bytes.toString('utf8')))
+  const edits = [source, delivery].map(next => {
+    let start = 0, suffix = 0
+    while (start < base.length && start < next.length && base[start] === next[start]) start++
+    while (suffix < base.length - start && suffix < next.length - start && base[base.length - suffix - 1] === next[next.length - suffix - 1]) suffix++
+    return { start, end: base.length - suffix, text: next.slice(start, next.length - suffix) }
+  }).sort((left, right) => left.start - right.start)
+  const [left, right] = edits
+  if (left.start === right.start || left.end > right.start) return null
+  return Buffer.from([...base.slice(0, left.start), ...left.text, ...base.slice(left.end, right.start), ...right.text, ...base.slice(right.end)].join(''))
+}
+
 /** 以真实来源为 base 叠加用户差量，保留已组合细化；冲突返回三方 Git 对象证据。 */
-export function composeControlledRequest(snapshot: InputSnapshot, composed: ComposedInputRef, requestBlob: BlobRef): { composed: ComposedInputRef | null; conflicts: CompositionConflict[] } {
-  const request = validateControlledRequest(snapshot, requestBlob), commonDir = snapshot.source.commonDir
+export function composeControlledRequest(snapshot: InputSnapshot, composed: ComposedInputRef, requestBlob: BlobRef, options: { retainConflicts?: boolean } = {}): { composed: ComposedInputRef | null; conflicts: CompositionConflict[] } {
+  const commonDir = snapshot.source.commonDir
+  const saved = JSON.parse(readEvidence(commonDir, requestBlob).toString('utf8')) as { type?: string }
+  const decision = saved.type === 'sync.decision' ? readControlledDecision(snapshot, requestBlob) : null
+  const request = decision ? null : validateControlledRequest(snapshot, requestBlob)
   if (composed.sourceInputId !== snapshot.id) throw new Error('组合输入与受控请求 input 绑定不一致')
   const entries = readTree(commonDir, composed.tree)
   if (contentHash(JSON.stringify(entries)) !== composed.contentDigest || !readEvidence(commonDir, composed.manifestBlob).equals(Buffer.from(JSON.stringify({ version: 1, entries })))) throw new Error('受控请求组合 manifest/contentDigest 不一致')
@@ -91,16 +144,30 @@ export function composeControlledRequest(snapshot: InputSnapshot, composed: Comp
     if (composed.requestBlob.sha256 !== requestBlob.sha256) throw new Error('组合输入已绑定另一受控请求')
     return { composed, conflicts: [] }
   }
+  if (decision) {
+    if (!decision.originalRequestBlob) return { composed: { ...composed, requestBlob }, conflicts: [] }
+    const result = composeControlledRequest(snapshot, composed, decision.originalRequestBlob, options)
+    return result.composed ? { composed: { ...result.composed, requestBlob }, conflicts: result.conflicts } : result
+  }
+  if (!request) throw new Error('受控请求不合法')
   const delivery = entries.find(entry => entry.path === request.path)
   let next: TreeEntry | undefined
   if (sameEntry(delivery, request.before) || sameEntry(delivery, request.next)) next = request.next
   else if (delivery && delivery.mode !== '120000') {
-    const merged = mergeText(commonDir, delivery, request.before, request.next)
+    const merged = mergeText(commonDir, delivery, request.before, request.next) ?? mergeSeparateTextEdits(commonDir, request.before, request.next, delivery)
     if (merged) next = { ...delivery, oid: writeObject(commonDir, merged), digest: contentHash(merged) }
   }
-  if (!next) return { composed: null, conflicts: [{ path: request.path, base: request.before, source: request.next, delivery: delivery ?? null }] }
+  const conflicts: CompositionConflict[] = []
+  if (!next) {
+    const conflict = { path: request.path, base: request.before, source: request.next, delivery: delivery ?? null }
+    if (!options.retainConflicts) return { composed: null, conflicts: [conflict] }
+    conflicts.push(conflict)
+    next = request.next
+  }
   const resultEntries = entries.map(entry => entry.path === request.path ? next! : entry), tree = writeTree(commonDir, resultEntries)
   const manifestBlob = writeEvidence(commonDir, { version: 1, entries: resultEntries }), contentDigest = contentHash(JSON.stringify(resultEntries))
   objectGit(commonDir, ['update-ref', `refs/spex-sync/compositions/${tree}`, tree])
-  return { composed: { ...composed, tree, manifestBlob, contentDigest, requestBlob }, conflicts: [] }
+  const priorConflicts = composed.compositionEvidenceBlob ? (JSON.parse(readEvidence(commonDir, composed.compositionEvidenceBlob).toString('utf8')) as { conflicts: CompositionConflict[] }).conflicts : []
+  const compositionEvidenceBlob = conflicts.length ? writeEvidence(commonDir, { version: 'composition-overlap-v1', sourceInputId: snapshot.id, baselinePairId: composed.previousBaselinePairId, conflicts: [...priorConflicts, ...conflicts] }) : composed.compositionEvidenceBlob
+  return { composed: { ...composed, tree, manifestBlob, contentDigest, requestBlob, ...(compositionEvidenceBlob ? { compositionEvidenceBlob } : {}) }, conflicts }
 }

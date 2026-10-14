@@ -3,15 +3,26 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { BaselinePair, ComposedInputRef, InputSnapshot } from './operation-types.js'
-import { contentHash, objectGit, readObject, verifySnapshot, writeEvidence, writeObject, writeTree } from './snapshot.js'
+import { contentHash, objectGit, readObject, readTree, verifySnapshot, writeEvidence, writeObject, writeTree } from './snapshot.js'
 import type { TreeEntry } from './snapshot.js'
 
 export type CompositionConflict = { path: string; base: TreeEntry | null; source: TreeEntry | null; delivery: TreeEntry | null }
 export const isUtf8Text = (bytes: Buffer): boolean => !bytes.includes(0) && Buffer.from(bytes.toString('utf8')).equals(bytes)
 const same = (a: TreeEntry | undefined, b: TreeEntry | undefined): boolean => a?.oid === b?.oid && a?.mode === b?.mode
 
+/** 已验证交付被来源 Git 采纳后，以实际已提交的覆盖路径作为作者差量基准。 */
+export function adoptedDeliveryPaths(source: InputSnapshot, prior?: BaselinePair | null): Set<string> {
+  if (!prior) return new Set()
+  try { objectGit(source.source.commonDir, ['merge-base', '--is-ancestor', prior.verifiedDelivery.headCommit, source.headCommit]) }
+  catch (error) { if ((error as { status?: number }).status === 1) return new Set(); throw error }
+  const committed = new Map(readTree(source.source.commonDir, objectGit(source.source.commonDir, ['rev-parse', `${prior.verifiedDelivery.headCommit}^{tree}`]).toString().trim()).map(entry => [entry.path, entry]))
+  const delivered = new Map(verifySnapshot(prior.verifiedDelivery).map(entry => [entry.path, entry]))
+  const paths = new Set([...verifySnapshot(prior.sourceInput).map(entry => entry.path), ...delivered.keys()])
+  return new Set([...paths].filter(path => same(delivered.get(path), committed.get(path)) && prior.coveredScope.paths.some(scope => path === scope || path.startsWith(`${scope}/`))))
+}
+
 /** source 的真实差量叠加到前次已验证 delivery；任何重叠歧义保留三方对象而不自动覆盖。 */
-export function composeInputSnapshots(newSource: InputSnapshot, prior?: BaselinePair, options: { projectEntries?: (snapshot: InputSnapshot, entries: TreeEntry[]) => TreeEntry[] } = {}): { composed: ComposedInputRef | null; conflicts: CompositionConflict[] } {
+export function composeInputSnapshots(newSource: InputSnapshot, prior?: BaselinePair | null, options: { projectEntries?: (snapshot: InputSnapshot, entries: TreeEntry[]) => TreeEntry[]; retainConflicts?: boolean } = {}): { composed: ComposedInputRef | null; conflicts: CompositionConflict[] } {
   const project = (snapshot: InputSnapshot): TreeEntry[] => { const entries = verifySnapshot(snapshot); return options.projectEntries ? options.projectEntries(snapshot, entries) : entries }
   const commonDir = newSource.source.commonDir, incoming = project(newSource)
   let entries = incoming
@@ -21,9 +32,10 @@ export function composeInputSnapshots(newSource: InputSnapshot, prior?: Baseline
     const base = new Map(project(prior.sourceInput).map(entry => [entry.path, entry]))
     const delivery = new Map(project(prior.verifiedDelivery).map(entry => [entry.path, entry]))
     const source = new Map(incoming.map(entry => [entry.path, entry]))
+    const adopted = adoptedDeliveryPaths(newSource, prior)
     const result = new Map(delivery)
     for (const path of new Set([...base.keys(), ...source.keys(), ...delivery.keys()])) {
-      const old = base.get(path), next = source.get(path), delivered = delivery.get(path)
+      const old = adopted.has(path) ? delivery.get(path) : base.get(path), next = source.get(path), delivered = delivery.get(path)
       // 成对基线只证明已交付 scope，未覆盖的旧来源编辑仍是待生成输入。
       if (!prior.coveredScope.paths.some(scope => path === scope || path.startsWith(`${scope}/`))) {
         if (next) result.set(path, next); else result.delete(path)
@@ -36,6 +48,7 @@ export function composeInputSnapshots(newSource: InputSnapshot, prior?: Baseline
         const merged = mode ? mergeText(commonDir, delivered, old, next) : null
         if (merged && mode) { result.set(path, { path, mode, oid: writeObject(commonDir, merged), digest: contentHash(merged) }); continue }
       }
+      if (options.retainConflicts) { if (next) result.set(path, next); else result.delete(path) }
       conflicts.push({ path, base: old ?? null, source: next ?? null, delivery: delivered ?? null })
     }
     entries = [...result.values()].sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
@@ -45,10 +58,10 @@ export function composeInputSnapshots(newSource: InputSnapshot, prior?: Baseline
       if (ancestor && !conflicts.some(conflict => conflict.path === entry.path)) conflicts.push({ path: entry.path, base: base.get(entry.path) ?? null, source: source.get(entry.path) ?? null, delivery: delivery.get(entry.path) ?? null })
     }
   }
-  if (conflicts.length) return { composed: null, conflicts }
+  if (conflicts.length && !options.retainConflicts) return { composed: null, conflicts }
   const tree = writeTree(commonDir, entries), contentDigest = contentHash(JSON.stringify(entries)), manifestBlob = writeEvidence(commonDir, { version: 1, entries })
   objectGit(commonDir, ['update-ref', `refs/spex-sync/compositions/${tree}`, tree])
-  return { composed: { sourceInputId: newSource.id, previousBaselinePairId: prior?.id ?? null, tree, manifestBlob, contentDigest }, conflicts }
+  return { composed: { sourceInputId: newSource.id, previousBaselinePairId: prior?.id ?? null, tree, manifestBlob, contentDigest, ...(conflicts.length ? { compositionEvidenceBlob: writeEvidence(commonDir, { version: 'composition-overlap-v1', sourceInputId: newSource.id, baselinePairId: prior?.id ?? null, conflicts }) } : {}) }, conflicts }
 }
 export function mergeText(commonDir: string, delivery: TreeEntry, base: TreeEntry, source: TreeEntry): Buffer | null {
   const buffers = [delivery, base, source].map(entry => readObject(commonDir, entry.oid))

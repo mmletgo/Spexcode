@@ -163,7 +163,12 @@ test('/api/specs/:id/version and /diff answer only for the node\'s own versions,
     assert.equal((await fetch(`${base}/api/sync/status?limit=0`)).status, 400)
     assert.equal((await fetch(`${base}/api/sync/operations/unknown`)).status, 404)
     assert.equal((await post('/api/sync/operations/unknown/recover', {})).status, 404)
+    assert.equal((await post('/api/sync/operations/unknown/decide', {})).status, 404)
+    assert.equal((await post('/api/sync/operations/unknown/decide', { operationId: 'different' })).status, 400)
     assert.equal((await post('/api/sync/run', {})).status, 400)
+    const codeInput = await post('/api/sync/run', { nodeId: 'alpha', requestId: 'external-code', origin: 'code' })
+    assert.equal(codeInput.status, 409)
+    assert.notEqual((await codeInput.json()).code, 'sync_origin_unsupported')
     assert.equal((await post('/api/sync/settings', {})).status, 409)
     const patch = { startLine: 1, endLine: 1, original: '# alpha', replacement: '# alpha' }
     assert.equal((await post('/api/specs/alpha/body', patch)).status, 200, 'ordinary no-op remains available before activation')

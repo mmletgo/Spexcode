@@ -15,3 +15,6 @@ request 差异比较原始输入 tree 与受控用户请求的完整 tree，仅�
 读取先校验候选摘要与真实 Git tree，且文件必须属于相应完整实际差量。只接收仓库相对路径，不接受调用者提供 Git 对象、引用或命令；禁止宿主认证/运行路径。使用 literal pathspec 并禁用 external diff、textconv 和 rename 推断。结果完整返回固定对象身份与 patch，超过 2 MiB 明确拒绝，不能截断后显示为完整证据。读取不修改任何工作树、index 或引用。
 
 是否已交付只能由同候选的 settled journal receipt 证明。后续源文件编辑不改变历史候选差异；来源、当前输入是否陈旧仍由应用详情独立展示。需求归属 [[sync-product-controls]]。
+
+
+裁决若继承原controlled正文请求，request差异读取originalRequestBlob完整正文tree，保原用户提交差量且不冒充采用行为后的生成结果；无原正文差量的裁决明确404，使用固定选择证据审阅，不抛body解析500或伪造空diff。
