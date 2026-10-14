@@ -10,7 +10,8 @@ import { CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@
 import type { ContractCell, GeneratedElaboration, GeneratedTables } from './elaboration-markdown.js'
 import { sameContractBusinessMeaning } from './contract-evolution.js'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
-import type { ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
+import { elaborate } from './elaboration.js'
+import type { ElaborationResult, ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
 import { buildSyncApplicationPlan } from './planning.js'
 import { prepareSyncAdmission, runSyncOperation, syncPlanDigest } from './coordinator.js'
 import type { SyncCoordinatorOptions, SyncCoordinatorPlan } from './coordinator-types.js'
@@ -138,6 +139,86 @@ test('kernel mutex阻止同operation双编排，尚无native派发', async t => 
   const f = await fixture(t), locks = join(f.artifactRoot, '.locks'); mkdirSync(locks, { mode: 0o700 })
   const lock = claimFileMutex(join(locks, `${contentHash(f.operation.id)}.sqlite`))!
   try { assert.equal((await runSyncOperation(f.store, f.operation.id, f.options)).status, 'busy'); assert.equal(f.calls.length, 0) } finally { lock.release() }
+})
+
+for (const mode of ['live', 'restart', 'prior-repair'] as const) test(`P3细化独审容量失败 ${mode} 同预算重新独立细化，不把未拒候选当业务seed`, async t => {
+  const f = await fixture(t, { maxAttempts: 3, maxCalls: 12, maxRepairs: 2, timeoutMs: 120000 }, false, original, 'project', original, {}, undefined, 'code')
+  let activeStore = f.store
+  const capacityAttempt = mode === 'prior-repair' ? 2 : 1, originalBudget = structuredClone(f.operation.budget), originalDeadline = f.operation.deadlineAtMs
+  f.transform((output, request) => {
+    const number = activeStore.readAttempt(activeStore.readOperation(f.operation.id).currentAttemptId!).number
+    if (request.purpose === 'code_behavior_analyze') return { ...(output as object), changes: (output as { changes: object[] }).changes.map(change => ({ ...change, kind: 'allowed_change' })) }
+    if (request.purpose === 'elaboration_generate') {
+      if (number === capacityAttempt) {
+        if (mode === 'prior-repair') assert.match(request.prompt, /原具体失败:[\s\S]*result_boundary_missing/)
+        const candidate = structuredClone(output) as GeneratedElaboration
+        candidate.changes[0].tables.AC.push({ ...candidate.changes[0].tables.AC[0], id: 'AC-EXPORT-SUMMARY-01', test: 'tests/export.test.mjs#TEST-EXPORT-SUMMARY-01' })
+        return candidate
+      }
+      if (number > capacityAttempt) assert.doesNotMatch(request.prompt, /已结算的拒绝候选|result_boundary_missing/)
+    }
+    if (request.purpose === 'elaboration_review') {
+      if (number === capacityAttempt) throw Object.assign(new Error('Selected model is at capacity. Please try a different model.'), { code: 'failed' })
+      if (mode === 'prior-repair' && number === 1) return { ...(output as object), verdict: 'repair', findings: [{ code: 'result_boundary_missing', kind: 'repair', message: '应核对重复完成边界', affectedIds: ['RULE-EXPORT-05'], evidence: '冻结结果政策要求首次结果稳定', decision: '保持原结果义务并重新独审' }] }
+    }
+    if (request.purpose === 'code_review') return { ...(output as object), verdict: 'conflict', findings: [{ kind: 'conflict', affectedIds: ['RULE-EXPORT-05'], ruleLocation: 'RULE-EXPORT-05', codeLocation: 'src/export.js#ExportService', evidence: '测试只验证容量失败后的真实协调续行', counterexample: '不冒称Docker或交付已通过', message: 'fixture stops before V3' }] }
+    return output
+  })
+  if (mode === 'restart') {
+    const claim = activeStore.claimAttempt.bind(activeStore)
+    activeStore.claimAttempt = request => {
+      if (activeStore.listAttempts(f.operation.id).some(attempt => attempt.failure?.code === 'failed')) throw new Error('fixture process boundary after durable capacity failure')
+      return claim(request)
+    }
+    const interrupted = await runSyncOperation(activeStore, f.operation.id, f.options)
+    assert.equal(interrupted.status, 'failed'); assert.equal(interrupted.failure?.code, 'failed'); assert.equal(interrupted.operation.callsUsed, 4)
+    f.closeForRestart()
+    const protocol = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => protocol.close())
+    activeStore = new SyncStore(protocol, { readBlob: ref => readEvidence(f.input.source.commonDir, ref) }); f.useStore(activeStore)
+  }
+  const result = await runSyncOperation(activeStore, f.operation.id, f.options)
+  assert.equal(result.status, 'conflicted', JSON.stringify(result.failure)); assert.equal(result.receipt, undefined)
+  assert.deepEqual(result.operation.budget, originalBudget); assert.equal(result.operation.deadlineAtMs, originalDeadline)
+  assert.equal(result.operation.callsUsed, mode === 'prior-repair' ? 10 : 8)
+  const attempts = activeStore.listAttempts(f.operation.id)
+  assert.equal(attempts.length, capacityAttempt + 1)
+  const elaborations = attempts.map(attempt => {
+    const stage = attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(value => value.stage === 'elaboration')
+    return JSON.parse(readEvidence(f.input.source.commonDir, stage.resultRef).toString()) as ElaborationResult
+  })
+  const rejected = elaborations[capacityAttempt - 1], fresh = elaborations[capacityAttempt]
+  assert.equal(rejected.structurePassed, true); assert.equal(rejected.reviewPassed, false); assert.equal(rejected.rounds[0].review, null)
+  assert.ok(rejected.rounds[0].findings.some(issue => issue.code === 'missing-test-case' && issue.severity === 'error'))
+  assert.equal(rejected.failure?.code, 'failed'); assert.equal(fresh.reviewPassed, true); assert.equal(fresh.prior, null)
+  assert.equal(fresh.inputDigest, rejected.inputDigest); assert.equal(fresh.rounds[0].traces.length, 2)
+  assert.notEqual(fresh.rounds[0].traces[0].sessionId, fresh.rounds[0].traces[1].sessionId)
+  assert.notEqual(fresh.rounds[0].traces[0].sessionId, rejected.rounds[0].traces[0].sessionId)
+  if (mode === 'live') {
+    const { execution, files, ...frozen } = JSON.parse(f.calls.find(call => call.purpose === 'elaboration_generate')!.prompt.split('冻结业务输入:\n')[1])
+    const last = rejected.rounds[0]
+    await assert.rejects(elaborate({ ...frozen, ...execution, files: new Map<string, string>(files), requestKey: 'invalid-infrastructure-seed' }, { seed: { settled: true, requestKey: `sync:${attempts[0].id}:elaborate`, inputDigest: rejected.inputDigest, candidateDigest: last.candidateDigest!, candidate: last.candidate!, output: last.output, findings: last.findings, review: last.review, traces: last.traces }, runner: async () => assert.fail('无具体业务拒绝的seed不得派发') }), /续修种子必须保留具体被拒绝发现/)
+  }
+  if (mode === 'prior-repair') { assert.equal(elaborations[0].failure?.code, 'repair_budget_exhausted'); assert.ok(rejected.prior); assert.equal(elaborations[0].reviewPassed, false) }
+  const beforeReplay = f.calls.length
+  assert.equal((await runSyncOperation(activeStore, f.operation.id, f.options)).status, 'conflicted'); assert.equal(f.calls.length, beforeReplay)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+  assert.equal((await captureInputSnapshot(f.root)).id, f.input.id); assert.equal(activeStore.listJournals(f.operation.id).length, 0)
+})
+
+for (const stop of ['budget', 'cancel'] as const) test(`P3细化独审容量失败 ${stop} 保冻结终止，不重复派发`, async t => {
+  const f = await fixture(t, { maxAttempts: 3, maxCalls: 4, maxRepairs: 2, timeoutMs: 120000 }, false, original, 'project', original, {}, undefined, 'code')
+  f.transform((output, request) => {
+    if (request.purpose === 'elaboration_review') {
+      if (stop === 'cancel') f.store.requestControl(f.operation.id, 'cancel')
+      throw Object.assign(new Error('Selected model is at capacity. Please try a different model.'), { code: 'failed' })
+    }
+    return output
+  })
+  const result = await runSyncOperation(f.store, f.operation.id, f.options)
+  assert.equal(result.status, stop === 'budget' ? 'budget_exhausted' : 'cancelled', JSON.stringify(result.failure)); assert.equal(result.operation.callsUsed, 4)
+  assert.deepEqual(result.operation.budget, f.operation.budget); assert.equal(result.operation.deadlineAtMs, f.operation.deadlineAtMs)
+  assert.equal((await runSyncOperation(f.store, f.operation.id, f.options)).status, result.status); assert.equal(f.calls.length, 4)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.equal(f.store.listJournals(f.operation.id).length, 0)
 })
 
 test('缺planBlob的旧queued操作持久unsupported，不借当前计划猜恢复或派发', async t => {

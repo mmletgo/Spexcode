@@ -22,6 +22,8 @@ P1 已审结构结果登记所有未来业务 ID，包括 GAP/partial FLOW；rea
 
 失败通过新attempt有限修复，冻结预算、deadline及政策不重置，诊断不能升格为事实；环境unsupported、真正业务 GAP/conflict、未知资源恢复停止自动重跑。候选冻结后不覆盖；applying/receipt恢复优先既定交付，真实Git commit及DB未结算不会再生成或重复提交。仅receipt结算可推进成对baseline和deliveredScope，根有blockedReason保持needs_input/conflicted。
 
+P1 续修种子仅取完整结算的具体业务拒绝轮（repair_budget_exhausted）。模型容量或原生执行等基础设施失败不构成业务拒绝，即使保留了合法候选、语义审查 warning 或 deferredImplementation 缺测试 error；连续执行及 checkpoint 恢复均清空旧 seed，在原预算/deadline/冻结输入内用新 attempt 重新生成及独立审查，不批准未审候选或沿用旧 review。此前真正业务拒绝的 seed 继续沿既有严格校验修复；无具体业务拒绝的种子仍被拒绝，取消及总预算耗尽不新增派发。
+
 freezeSyncPlanEvidence复用同一canonical JSON排序，使planBlob.sha256严格等于policyDigest；接入直接保存plan引用，queued恢复不依赖另一个索引文件。派生authorProjection仅规范化已核canonical managed文本，真实snapshot不变；受控Spec输入与代码行为分析共用冻结计划和交付链。阶段result及嵌套refs直接checkpoint保活，不能只pin wrapper。
 
 同operation/input/policy首个P1结构及独立评审通过的细化结果永久冻结为生成义务；code/V3修复的新attempt与进程重启复用原精确结果，并checkpoint原attempt/result evidence provenance，不能再派发P1或更改其稳定AC/ID/政策。仅P1本身未通过时可再细化；通过后清空失败seed，未通过旧seed不能复活。

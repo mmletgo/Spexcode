@@ -271,7 +271,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           if (previous) repairContext = { previousOutput: previous.output, diagnostics: [{ code: attempt.failure.code, message: attempt.failure.message }, ...previous.validationFindings.map(item => ({ code: item.code, message: item.message }))] }
           else {
             const elaboration = stage<SavedElaboration>(store, operation, attempt, 'elaboration'), last = elaboration?.rounds.at(-1)
-            if (elaboration && last?.candidate && last.candidateDigest) seed = { settled: true, requestKey: `sync:${attempt.id}:elaborate`, inputDigest: elaboration.inputDigest, candidateDigest: last.candidateDigest, output: last.output, candidate: last.candidate, findings: last.findings, review: last.review, traces: last.traces }
+            seed = elaboration?.failure?.code === 'repair_budget_exhausted' && last?.candidate && last.candidateDigest ? { settled: true, requestKey: `sync:${attempt.id}:elaborate`, inputDigest: elaboration.inputDigest, candidateDigest: last.candidateDigest, output: last.output, candidate: last.candidate, findings: last.findings, review: last.review, traces: last.traces } : undefined
           }
         }
         try {
@@ -409,7 +409,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         if (stopped) fail('cancelled', issue.message, issue.evidenceRefs)
         store.recordFailure(fence, issue)
         if (kind !== 'repairable') return current(unsupported ? 'unsupported' : undefined, issue)
-        if (last?.candidate && last.candidateDigest) seed = { settled: true, requestKey: `sync:${attempt.id}:elaborate`, inputDigest: elaboration.inputDigest, candidateDigest: last.candidateDigest, output: last.output, candidate: last.candidate, findings: last.findings, review: last.review, traces: last.traces }
+        seed = elaboration.failure?.code === 'repair_budget_exhausted' && last?.candidate && last.candidateDigest ? { settled: true, requestKey: `sync:${attempt.id}:elaborate`, inputDigest: elaboration.inputDigest, candidateDigest: last.candidateDigest, output: last.output, candidate: last.candidate, findings: last.findings, review: last.review, traces: last.traces } : undefined
         continue
       }
       const acceptedFiles = new Map(view.files)

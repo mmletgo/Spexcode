@@ -20,6 +20,8 @@ code:
 
 V3失败后修复的模型若再次收到P1会返回弱化AC，因此测试必须证明不会再次派发P1、后续生成prompt使用精确相同accepted契约/AC内容摘要，callsUsed仅计两次代码调用不重置。数据库重启后失败attempt同样从原P1 evidence复用，不依赖内存状态。
 
+P3 容量失败回归使用真实 SQLite/Git 及明确 native 接缝：已通过行为独审，P1 合法候选仅有 warning/deferredImplementation 缺测试时，独审基础设施失败不能成为业务 seed。live 与 SQLite 重启均在同预算和冻结 inputDigest 内重新生成及独审；此前具体业务拒绝先经 seed 续修，随后容量失败必须清 seed，不借旧 review。取消/总调用预算耗尽及终态重入不增加 calls，source/index/快照身份不变；用例在独立 code review 停止，不冒称 Docker 或交付成功。
+
 高层raw输入没有REQ/FLOW/AC，初始scope只含目录前缀；通过真实细化登记未来业务ID、生成此前absent的新源码模块及可信原意已登记的新治理节点，再经真实Docker/normal Git hooks交付。任意reader-app根通过真实CLI init，作者managed投影不入候选，source/index保持；用户入口无需填写未来实现文件或AC。
 
 第一次V4后、Git准备前人类再次编辑source，beforeApply复采仍拒绝且持久conflicted/input_changed，无业务journal/commit；不被private catch降成environment或FENCE_EXPIRED。
