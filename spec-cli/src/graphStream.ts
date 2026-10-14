@@ -1,6 +1,6 @@
 import { daemonRuntime } from './daemon-runtime.js'
 import type { Context } from 'hono'
-import { mkdirSync, readdirSync, readFileSync, existsSync, type Dirent } from 'node:fs'
+import { mkdirSync, readdirSync, readFileSync, existsSync, realpathSync, type Dirent } from 'node:fs'
 import { join, dirname, resolve, basename } from 'node:path'
 import { sessionsRoot, gitCommonDir, repoRoot, isTrashWorktreePath } from '@spexcode/spec-core'
 import { resolveDatabasePath } from '@spexcode/session-application'
@@ -669,13 +669,22 @@ function watcherFailed(name: string, path: string, error: Error): void {
 const forcedWorktreeSessions = new Set<string>()
 let worktreeReconcileFlight: Promise<void> | null = null
 
+function canonicalWatchPath(path: string): string {
+  const absolute = resolve(path)
+  try { return realpathSync(absolute) }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    return join(canonicalWatchPath(dirname(absolute)), basename(absolute))
+  }
+}
+
 export function sessionWorktreeWatchPaths(
   sessions: { id: string; path: string; liveness?: string }[],
   forcedSessions: Set<string> = new Set(),
 ): Set<string> {
   return new Set(sessions
     .filter((session) => session.liveness !== 'offline' || forcedSessions.has(session.id))
-    .map((session) => resolve(session.path)))
+    .map((session) => canonicalWatchPath(session.path)))
 }
 
 async function reconcileWorktreePass(forcedSessions: Set<string>, era: number, common: string): Promise<void> {
@@ -693,7 +702,7 @@ async function reconcileWorktreePass(forcedSessions: Set<string>, era: number, c
     let wtPath: string
     try { wtPath = dirname(readFileSync(join(dir, e.name, 'gitdir'), 'utf8').trim()) } catch { continue }
     if (isTrashWorktreePath(wtPath)) continue
-    const normalizedPath = resolve(wtPath)
+    const normalizedPath = canonicalWatchPath(wtPath)
     if (!wantedPaths.has(normalizedPath)) {
       if (dropWorktreeWatcher(e.name)) released = true
       noteSourceHealthy(worktreeSource(e.name))
