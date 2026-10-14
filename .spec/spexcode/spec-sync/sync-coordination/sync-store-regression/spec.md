@@ -73,3 +73,5 @@ P4 针对性回归覆盖精确资源 frontier、物理暂停跨分支/重启、F
 P4新增定向矩阵使用真实SQLite句柄/事务、online backup及真实Git分支快照：共享byteB与intentA残差、explicit null vs legacy未知、readonly共享并行与read CAS、self future echo与foreign新语义、same selected差异+无关dirty不重开失败、ack提交前rollback/后reopen、原位置successor、全预算族统计、物理pause apply安全结算、旧P3 applying迁移恢复、P1新path/ID选择扩展及readset重组、health实例CAS和失败观测保活。存储文件与adopter-seams为定向套件，不运行完整测试集；完整业务author/raw归属与真实产品Agent闭环由协调/组合/应用验收证明。
 
 补充fail→pass：外repo/branch同名FLOW污染本source退休kind的迁移反例，旧kind缺证明应始终legacy unknown；同source真实前驱正例仍得到准确flow tombstone。P4后续同ID新intent head保selection中的裁决/退役历史，未覆盖历史ID的head/coverage保持不动。
+
+自动预算回归通过真实 observeAndAdmit 验证不可变 successor 继承 FIFO/全族预算/截止时间，包括失败后的新 byte；显式新输入和 P3 无 selection 获独立预算族，旧未 removed 原生资源仍阻止新 claim，清理后才可使用新预算。

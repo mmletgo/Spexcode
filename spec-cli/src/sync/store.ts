@@ -2,6 +2,8 @@ import { createHash, randomUUID } from 'node:crypto'
 import { getBlob } from '@spexcode/spec-core'
 import { applyComponentMigrations, type ProtocolTransaction, type SessionProtocol } from '@spexcode/session-protocol'
 import { controlledDecisionIdentity, readControlledDecision, readControlledRequest } from './request-input.js'
+import { verifyPublicationBase } from './publication-base.js'
+import type { PublicationBase, PublicationHeads } from './operation-types.js'
 import { SYNC_COMPONENT, SYNC_MIGRATIONS, syncCoordinatorAddress, syncSemanticDigest } from './migrations.js'
 import type { BaselineResource, BaselineBinding, FrozenBaselineSelection, BaselineSelectionResult, PhysicalScope, PhysicalControl, ClaimQueuedAttemptInput, SyncObserverHealth, SyncObservationInput, SyncObservation, ObserveAndAdmitResult, AdmitSyncInput, ApplyFilePlan, ApplyJournal, ApplyPlan, ApplyReceipt, ApplyStep, BaselinePair, BlobRef, CandidateRef, ClaimedAttempt, ClaimAttemptInput, ComposedInputRef, RecoverableSyncResource, SyncResourceCheckpoint, SyncResourcePlan, SyncResourceRecord, DispatchPlan, InputSnapshot, NativeSessionRef, RecoverableSync, ScopeLease, SyncAttempt, SyncControl, SyncDispatchEnvelope, SyncFailure, SyncOperation, SyncIngressReceipt, SyncScope, VerificationRef, VerificationResultBlob, WorktreeIdentity, WriteFence } from './operation-types.js'
 
@@ -150,6 +152,19 @@ export class SyncStore {
     validateScope({ paths: exactResources.flatMap(resource => resource.kind === 'path' ? [resource.path] : []), contractIds: [], flowIds: [] })
     return this.write(tx => this.baselineSelection(tx, source, exactResources))
   }
+  private publicationHeads(tx: ProtocolTransaction, source: WorktreeIdentity): PublicationHeads {
+    const bindings: BaselineBinding[] = [], unknownPaths: PublicationHeads['unknownPaths'] = []
+    for (const row of tx.query("SELECT resource_key,pair_id,legacy_reason FROM sync_baseline_heads WHERE source_key=? AND resource_key LIKE 'path:%' ORDER BY resource_key", identityKey(source))) {
+      const path = String(row.resource_key).slice(5)
+      if (row.legacy_reason) { unknownPaths.push({ path, reason: String(row.legacy_reason) }); continue }
+      const pair = row.pair_id ? parseRecord<BaselinePair>(tx.query('SELECT record_json FROM sync_baseline_pairs WHERE id=?', String(row.pair_id))[0]) : null
+      if (!pair || !tx.query("SELECT id FROM sync_apply_journals WHERE receipt_id=? AND status='settled'", pair.receiptId).length) fail('SYNC_PUBLICATION_BASE_BINDING', 'path head lacks settled receipt')
+      bindings.push({ resource: { kind: 'path', path }, bytePair: pair })
+    }
+    const body = { version: 'sync-baseline-selection-v1' as const, source: clone(source), bindings }
+    return { selection: { ...body, digest: digest(body) }, unknownPaths }
+  }
+  readPublicationHeads(source: WorktreeIdentity): PublicationHeads { return this.write(tx => this.publicationHeads(tx, source)) }
   listBaselineResources(source: WorktreeIdentity): BaselineResource[] {
     return this.write(tx => tx.query('SELECT resource_key FROM sync_baseline_heads WHERE source_key=? ORDER BY resource_key', identityKey(source)).map(row => {
       const key = String(row.resource_key), separator = key.indexOf(':'), kind = key.slice(0, separator), value = key.slice(separator + 1)
@@ -343,7 +358,7 @@ export class SyncStore {
         if (!eligibility.eligible) fail(eligibility.reason!.code, eligibility.reason!.message)
       }
       const older = tx.query('SELECT record_json FROM sync_operations WHERE repository_id=? AND source_root=?', input.input.source.repositoryId, input.input.source.canonicalRoot).map(row => parseRecord<SyncOperation>(row)!)
-      const predecessor = !input.retryOf ? older.filter(operation => identityKey(operation.input.source) === identityKey(input.input.source) && digest(canonicalScope(operation.scope)) === digest(canonicalScope(input.scope)) && !TERMINAL.has(operation.phase)).sort((a,b) => (b.dispatchAnchor?.firstEnqueueSeq ?? 0) - (a.dispatchAnchor?.firstEnqueueSeq ?? 0))[0] : undefined
+      const predecessor = observation && input.baselineSelection && !input.retryOf ? older.filter(operation => identityKey(operation.input.source) === identityKey(input.input.source) && digest(canonicalScope(operation.scope)) === digest(canonicalScope(input.scope)) && !TERMINAL.has(operation.phase)).sort((a,b) => (b.dispatchAnchor?.firstEnqueueSeq ?? 0) - (a.dispatchAnchor?.firstEnqueueSeq ?? 0))[0] : undefined
       const inheritedAnchor = predecessor ? predecessor.dispatchAnchor ?? {
         scope: physicalScope(predecessor.input.source), firstMessageId: predecessor.dispatchMessageId,
         firstEnqueueSeq: Number(tx.query('SELECT enqueue_seq FROM protocol_messages WHERE message_id=?', predecessor.dispatchMessageId)[0].enqueue_seq),
@@ -497,6 +512,20 @@ export class SyncStore {
       attempt.composedInput = clone(composed); this.saveAttempt(tx, attempt); return attempt
     })
   }
+  bindPublicationBase(fence: WriteFence, base: PublicationBase): SyncAttempt {
+    const originalOperation = this.readOperation(fence.operationId), originalAttempt = this.readAttempt(fence.attemptId)
+    const provenance = verifyPublicationBase(originalOperation, originalAttempt, base)
+    return this.write(tx => {
+      const { operation, attempt } = this.checkFence(tx, fence)
+      if (operation.phase !== 'generating' || attempt.candidate || attempt.verification || !operation.baselineSelection || !attempt.composedInput || digest(attempt.composedInput) !== digest(originalAttempt.composedInput)) fail('SYNC_PUBLICATION_BASE_FROZEN', 'publication base only binds before candidate freeze')
+      if (attempt.publicationBase) {
+        if (digest(attempt.publicationBase) !== digest(base)) fail('SYNC_PUBLICATION_BASE_FROZEN', 'publication base cannot be replaced')
+        return attempt
+      }
+      if (digest(provenance.heads) !== digest(this.publicationHeads(tx, operation.input.source))) fail('SYNC_PUBLICATION_BASE_STALE', 'publication frontier advanced before binding')
+      attempt.publicationBase = clone(base); this.saveAttempt(tx, attempt); return attempt
+    })
+  }
   reserveDispatch(fence: WriteFence, input: Pick<DispatchPlan, 'key' | 'purpose' | 'requestDigest'>): DispatchPlan {
     return this.write(tx => {
       const { operation, attempt } = this.checkFence(tx, fence)
@@ -627,11 +656,12 @@ export class SyncStore {
     const priorAttempt = this.readAttempt(fence.attemptId)
     if (!priorAttempt.composedInput) fail('SYNC_COMPOSITION_MISSING', fence.attemptId)
     const files = this.diff(candidate)
-    if (digest(files) !== digest(this.manifestDiff(priorAttempt.composedInput.manifestBlob, candidate.manifestBlob))) fail('SYNC_DIFF_BINDING', 'model diff differs from composed input to candidate manifest')
+    const composed = priorAttempt.publicationBase?.composed ?? priorAttempt.composedInput
+    if (digest(files) !== digest(this.manifestDiff(composed.manifestBlob, candidate.manifestBlob))) fail('SYNC_DIFF_BINDING', 'model diff differs from composed input to candidate manifest')
     if (!contains(candidate.coveredScope, { paths: files.map(file => file.path), contractIds: [], flowIds: [] })) fail('SYNC_CANDIDATE_SCOPE', 'actual changed files escape claimed candidate scope')
     return this.write(tx => {
       const { operation, attempt } = this.checkFence(tx, fence)
-      if (operation.phase !== 'generating' || !attempt.composedInput || candidate.baseTree !== attempt.composedInput.tree || candidate.sourceInputId !== operation.input.id) fail('SYNC_PHASE_INVALID', operation.phase)
+      if (operation.phase !== 'generating' || !attempt.composedInput || candidate.baseTree !== (attempt.publicationBase?.composed ?? attempt.composedInput).tree || candidate.sourceInputId !== operation.input.id) fail('SYNC_PHASE_INVALID', operation.phase)
       if (!contains(operation.readyScope, candidate.coveredScope)) fail('SYNC_CANDIDATE_SCOPE', 'candidate escapes acquired ready scope')
       if (attempt.candidate && digest(attempt.candidate) !== digest(candidate)) fail('SYNC_CANDIDATE_FROZEN', 'frozen candidate cannot be replaced')
       attempt.candidate = clone(candidate); attempt.status = 'frozen'; operation.phase = 'verifying'; this.saveAttempt(tx, attempt); this.saveOperation(tx, operation); return attempt
@@ -666,6 +696,8 @@ export class SyncStore {
       if (plan.candidateDigest !== attempt.candidate.digest || plan.verificationBlob.sha256 !== attempt.verification.resultBlob.sha256 || digest(plan.files) !== digest(files) || !contains(attempt.verification.coveredScope, plan.coveredScope) || !contains(plan.coveredScope, { paths: files.map(file => file.path), contractIds: [], flowIds: [] })) fail('SYNC_APPLY_BINDING', 'plan differs from frozen candidate or verified scope')
       if (!operation.delivery || identityKey(plan.target) !== identityKey(operation.delivery) || identityKey(currentTarget.source) !== identityKey(plan.target) || currentTarget.id !== plan.expectedTargetSnapshotId) fail('SYNC_TARGET_STALE', 'physical target or current snapshot changed')
       if (plan.expectedBaselinePairId !== (operation.previousBaselinePair?.id ?? null)) fail('SYNC_BASELINE_STALE', 'plan baseline differs from frozen operation')
+      if ((plan.publicationBaseRef?.sha256 ?? null) !== (attempt.publicationBase?.provenanceBlob.sha256 ?? null)) fail('SYNC_PUBLICATION_BASE_BINDING', 'apply publication base differs from frozen attempt')
+      if (attempt.publicationBase && (currentTarget.headCommit !== attempt.publicationBase.parentCommit || currentTarget.immutableTree !== attempt.publicationBase.parentTree || currentTarget.manifestBlob.sha256 !== attempt.publicationBase.parentManifestBlob.sha256 || currentTarget.indexTree !== attempt.publicationBase.parentTree)) fail('SYNC_PUBLICATION_BASE_BINDING', 'actual target differs from frozen publication parent')
       if (operation.baselineSelection) {
         if (plan.expectedBaselineSelectionDigest !== operation.baselineSelection.digest) fail('SYNC_BASELINE_STALE', 'apply selection differs from frozen operation')
         this.assertSelection(tx, operation.input.source, operation.baselineSelection, scopeResources(operation.scope))

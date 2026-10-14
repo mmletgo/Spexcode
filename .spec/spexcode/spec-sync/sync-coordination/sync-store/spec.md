@@ -83,7 +83,7 @@ P3业务decision请求沿同一接入门禁归一化去transport requestId、fin
 
 recordReviewedConflict仅在当前analyzing fence内登记已由协调器完整核验并持久保存的当前独审业务冲突原因，精确重放幂等；phase、scope、预算、失败与交付事实不变。readDecisionEligibility与decision admission事务复用同一真实资格：保既有needs_input/conflicted/superseded入口，failed/budget_exhausted另需非null业务blockedReason（needs_input或conflicted）；当前attempt须settled/failed/superseded，所有历史资源removed且journal全settled。早期原因不授权在途阶段、applying/recovering或未结算资源；事务重新读取parent实际状态防应用检查后发生竞态。
 
-P4 精确资源 frontier 独立保存路径字节头与 contract/flow 作者意图头。readBaselineSelection 对每个请求资源返回显式 null 或精确 pair；历史不可证明时返回失败。settleApply 同事务推进实际 journal.files 路径、真实 verified covered IDs 与 retired tombstone heads；未交付 ID、读目录不推进。beginApply 只复核冻结选择对应资源，独立资源交付不使任务过期。物理 pause 由 scope/revision CAS 持久门禁，claim/checkFence/beginApply 事务复核，已登记 applying finishing 可以结算。ackDispatch 只消费真实协议头并保存 durable queued 与首入 anchor；claimQueuedAttempt 不 dequeue，按原 enqueue_seq 检查重叠前序与锁，独立范围可推进。未领取同范围最新观察建立不可变 successor，继承 anchor、预算族及截止时间，运行输入不改；所有族成员的 attempts/calls/repair failures 汇总。所有观察与接入、协议 enqueue、ingress 结算同事务，Git/FS/blob 核验在事务外。
+P4 精确资源 frontier 独立保存路径字节头与 contract/flow 作者意图头。readBaselineSelection 对每个请求资源返回显式 null 或精确 pair；历史不可证明时返回失败。settleApply 同事务推进实际 journal.files 路径、真实 verified covered IDs 与 retired tombstone heads；未交付 ID、读目录不推进。beginApply 只复核冻结选择对应资源，独立资源交付不使任务过期。物理 pause 由 scope/revision CAS 持久门禁，claim/checkFence/beginApply 事务复核，已登记 applying finishing 可以结算。ackDispatch 只消费真实协议头并保存 durable queued 与首入 anchor；claimQueuedAttempt 不 dequeue，按原 enqueue_seq 检查重叠前序与锁，独立范围可推进。自动观察的同范围最新输入建立不可变 successor，继承 anchor、预算族及截止时间，运行输入不改；所有族成员的 attempts/calls/repair failures 汇总。所有观察与接入、协议 enqueue、ingress 结算同事务，Git/FS/blob 核验在事务外。
 
 新P4 lease路径分别绑定完整来源身份和交付计划仓库/根/分支命名空间；业务ID绑定完整来源身份。共享真实交付分支的同路径互斥，独立树/分支不因同名资源互锁。P3未命名旧租约保守阻塞相同资源直到恢复移除。selection摘要同时绑定attempt及verification外层/blob；scope扩展同事务补显式binding并更新attempt选择，旧已组合摘要不能取得generation授权。预算根只保存dispatchAnchor.budgetRootOperationId这一事实，按全族真实attempt的dispatchPlans累加calls。
 
@@ -98,3 +98,7 @@ readLatestObservation/listObservations按事务插入顺序提供当前完整来
 物理run仅对同scope、原control仍run、实际settled attempt+journal+receipt的paused操作恢复已交付结论，保blockedReason和真实完整度；不新claim、不重应用或重置预算。所有历史原生resources必须removed、journals必须settled才允许新P4 claim/continuation；callback仍可登记真实清理并在removed后释放终结attempt租约。
 
 P4 receipt结算从冻结selection各真实pair以及legacy previous保留已有retiredIds/decisionRefs历史，再追加本次真实verification。history refs不扩展coveredScope；heads仍只推进实际journal.files、verified covered IDs和本次已验证retired ID。后续同ID非decision交付不能让其新intent head遗失之前已结算裁决。
+
+bindPublicationBase 消费 [[sync-publication-base]] 实际对象证明，只在 generating 且无 candidate/verification、fence/原 selected 资源仍有效时绑定一次；事务外核 Git/manifest/read closure，事务内核同来源完整 path frontier CAS，原 composed 保留。readPublicationHeads 单事务返回已结算 receipt 支持的 path heads，无关 legacy 未知单列诊断。freezeCandidate 的模型 manifest diff 与 baseTree 改核冻结 publication composed；beginApply 同时绑定 publication ref 和真实 parent，不改变本轮 scope/头推进规则。
+
+自动预算继承只适用于 observeAndAdmit 携 P4 selection 的新不可变观察（非 retry），同来源同 scope 的未完成前序含 failed/budget_exhausted 均保持原 FIFO anchor、预算族和 deadline。显式 admitAndEnqueue 新输入是新预算授权，P3 缺 selection 不继承 P4 自动族；同意图精确去重仍复用原 operation，旧未 removed resources/未 settled journals 仍阻止新执行。

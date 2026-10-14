@@ -1408,10 +1408,12 @@ test('P4 FIFO ack 与 claim 分离，暂停的重叠前序阻 A后继而独立 B
 test('P4 不可变 successor 继承原FIFO位置、预算和deadline，重复失败不自动重开，显式retry新族', async () => {
   const f = await fixture()
   try {
-    const original = f.store.admitAndEnqueue({ ...f.admit(), budget: { maxAttempts: 2, maxCalls: 1, maxRepairs: 1, timeoutMs: 1000 } })
+    const selected = f.store.readBaselineSelection(source(), [{ kind: 'path', path: 'src/a.ts' }, { kind: 'contract', id: 'RULE-A' }]); assert.ok('selection' in selected)
+    const automatic = (input: AdmitSyncInput) => { const admission = { ...input, baselineSelection: selected.selection }; const result = f.store.observeAndAdmit({ input: admission.input, configRef: f.put({ config: 'automatic' }), selection: selected.selection, latestDifferenceDigest: admission.input.id }, admission, { controlRevision: 0, selectionDigest: selected.selection.digest }); assert.ok('operation' in result); return result.operation }
+    const original = automatic({ ...f.admit(), budget: { maxAttempts: 2, maxCalls: 1, maxRepairs: 1, timeoutMs: 1000 } })
     const b = f.store.admitAndEnqueue(f.admit(source('b'), 'b', scope('src/b.ts', 'RULE-B')))
     f.tick(100)
-    const successor = f.store.admitAndEnqueue({ ...f.admit(source(), 'input-2'), budget: { maxAttempts: 99, maxCalls: 99, maxRepairs: 99, timeoutMs: 999999 } })
+    const successor = automatic({ ...f.admit(source(), 'input-2'), budget: { maxAttempts: 99, maxCalls: 99, maxRepairs: 99, timeoutMs: 999999 } })
     assert.equal(f.store.readOperation(original.id).phase, 'superseded')
     assert.equal(successor.successorOf, original.id)
     assert.deepEqual(successor.dispatchAnchor, original.dispatchAnchor)
@@ -1424,10 +1426,36 @@ test('P4 不可变 successor 继承原FIFO位置、预算和deadline，重复失
     const claimed = f.store.claimQueuedAttempt({ operationId: successor.id, source: successor.input.source, scope: successor.scope, leaseMs: 500, expectedRevision: ack.revision })
     f.store.reserveDispatch(claimed.fence, { key: 'native', purpose: 'generate', requestDigest: 'request' })
     f.store.recordFailure(claimed.fence, { code: 'FAIL', message: 'actual failure', kind: 'environment', evidenceRefs: [] })
-    assert.equal(f.store.admitAndEnqueue({ ...f.admit(source(), 'input-2'), ingressKey: 'repeat-failure' }).id, successor.id)
-    const retry = f.store.admitAndEnqueue({ ...f.admit(source(), 'input-2'), retryOf: successor.id, ingressKey: 'explicit-retry', rootCauseId: 'explicit-retry' })
+    assert.equal(automatic({ ...f.admit(source(), 'input-2'), ingressKey: 'repeat-failure' }).id, successor.id)
+    const retry = f.store.admitAndEnqueue({ ...f.admit(source(), 'input-2'), retryOf: successor.id, baselineSelection: selected.selection, ingressKey: 'explicit-retry', rootCauseId: 'explicit-retry' })
     assert.equal(retry.dispatchAnchor?.budgetRootOperationId, retry.id)
     assert.notEqual(retry.dispatchAnchor?.budgetRootOperationId, successor.dispatchAnchor?.budgetRootOperationId)
+  } finally { f.cleanup() }
+})
+
+test('显式新输入授权独立预算族；P3无selection不继承自动族，旧未知资源仍阻止执行', async () => {
+  const f = await fixture()
+  try {
+    const selected = f.store.readBaselineSelection(source(), [{ kind: 'path', path: 'src/a.ts' }, { kind: 'contract', id: 'RULE-A' }]); assert.ok('selection' in selected)
+    const oldInput = { ...f.admit(), baselineSelection: selected.selection, budget: { maxAttempts: 1, maxCalls: 1, maxRepairs: 0, timeoutMs: 1000 } }
+    const observed = f.store.observeAndAdmit({ input: oldInput.input, configRef: f.put({ config: 'automatic' }), selection: selected.selection, latestDifferenceDigest: 'A1' }, oldInput, { controlRevision: 0, selectionDigest: selected.selection.digest }); assert.ok('operation' in observed)
+    const ack = f.store.ackDispatch('repo', observed.operation.dispatchMessageId), old = f.store.claimQueuedAttempt({ operationId: observed.operation.id, source: source(), scope: scope(), leaseMs: 1000, expectedRevision: ack.revision })
+    const checkpoint = f.put({ native: 'unknown-live-resource' })
+    const resource = f.store.planResource(old.fence, { key: 'unknown-native', kind: 'native_session', payloadDigest: 'native', inputId: oldInput.input.id, candidateDigest: null, planBlob: checkpoint, checkpointRef: checkpoint })
+    f.store.reserveDispatch(old.fence, { key: 'last-call', purpose: 'generation', requestDigest: 'request' }); f.store.recordFailure(old.fence, { code: 'FAILED', kind: 'environment', message: 'real failure', evidenceRefs: [] })
+    const manual = f.store.admitAndEnqueue({ ...f.admit(source(), 'explicit-new-A2'), baselineSelection: selected.selection })
+    assert.equal(manual.successorOf, undefined); assert.equal(manual.dispatchAnchor?.budgetRootOperationId, manual.id)
+    assert.deepEqual(manual.budget, f.admit().budget); assert.notEqual(manual.deadlineAtMs, old.operation.deadlineAtMs)
+    const next = f.store.ackDispatch('repo', manual.dispatchMessageId)
+    assert.equal(f.store.nextQueued('repo'), null)
+    assert.throws(() => f.store.claimQueuedAttempt({ operationId: manual.id, source: source(), scope: scope(), leaseMs: 1000, expectedRevision: next.revision }), /QUEUED_STALE/)
+    f.store.recordResourceCheckpoint(resource.id, { operationId: old.operation.id, attemptId: old.attempt.id, inputId: oldInput.input.id, candidateDigest: null, phase: 'terminal', expectedCheckpointRef: checkpoint, checkpointRef: checkpoint })
+    f.store.recordResourceCheckpoint(resource.id, { operationId: old.operation.id, attemptId: old.attempt.id, inputId: oldInput.input.id, candidateDigest: null, phase: 'removed', expectedCheckpointRef: checkpoint, checkpointRef: checkpoint })
+    const claimed = f.store.claimQueuedAttempt({ operationId: manual.id, source: source(), scope: scope(), leaseMs: 1000, expectedRevision: next.revision })
+    f.store.reserveDispatch(claimed.fence, { key: 'new-call', purpose: 'generation', requestDigest: 'new-request' })
+    assert.equal(f.store.readBudgetUsage(manual.id).callsUsed, 1)
+    const legacy = f.store.admitAndEnqueue(f.admit(source(), 'legacy-new-A3'))
+    assert.equal(legacy.successorOf, undefined); assert.equal(legacy.dispatchAnchor?.budgetRootOperationId, legacy.id)
   } finally { f.cleanup() }
 })
 
@@ -1552,8 +1580,10 @@ test('P4 ack提交前故障整体回滚、提交后重启保durable queue且不�
 test('P4 自动预算族汇总所有历史attempt/native/repair，pause恢复和新byte不能局部重置', async () => {
   const f = await fixture()
   try {
+    const selected = f.store.readBaselineSelection(source(), [{ kind: 'path', path: 'src/a.ts' }, { kind: 'contract', id: 'RULE-A' }]); assert.ok('selection' in selected)
+    const automatic = (input: AdmitSyncInput) => { const admission = { ...input, budget, baselineSelection: selected.selection }; const result = f.store.observeAndAdmit({ input: admission.input, configRef: f.put({ config: 'automatic' }), selection: selected.selection, latestDifferenceDigest: admission.input.id }, admission, { controlRevision: 0, selectionDigest: selected.selection.digest }); assert.ok('operation' in result); return result.operation }
     const budget = { maxAttempts: 3, maxCalls: 3, maxRepairs: 1, timeoutMs: 100000 }
-    const claim = (input: AdmitSyncInput) => { const op = f.store.admitAndEnqueue({ ...input, budget }); const ack = f.store.ackDispatch('repo', op.dispatchMessageId); return f.store.claimQueuedAttempt({ operationId: op.id, source: op.input.source, scope: op.scope, leaseMs: 1000, expectedRevision: ack.revision }) }
+    const claim = (input: AdmitSyncInput) => { const op = automatic(input); const ack = f.store.ackDispatch('repo', op.dispatchMessageId); return f.store.claimQueuedAttempt({ operationId: op.id, source: op.input.source, scope: op.scope, leaseMs: 1000, expectedRevision: ack.revision }) }
     const first = claim(f.admit())
     f.store.reserveDispatch(first.fence, { key: 'call1', purpose: 'generation', requestDigest: '1' })
     f.store.recordFailure(first.fence, { code: 'FAIL1', kind: 'repairable', message: 'first genuine repair failure', evidenceRefs: [] })
@@ -1562,13 +1592,13 @@ test('P4 自动预算族汇总所有历史attempt/native/repair，pause恢复和
     assert.equal(second.operation.dispatchAnchor?.budgetRootOperationId, first.operation.id)
     f.store.reserveDispatch(second.fence, { key: 'call2', purpose: 'repair', requestDigest: '2' })
     f.store.recordFailure(second.fence, { code: 'FAIL2', kind: 'repairable', message: 'second genuine repair failure', evidenceRefs: [] })
-    const third = f.store.admitAndEnqueue({ ...f.admit(source(), 'new-byte-3'), budget }), ack = f.store.ackDispatch('repo', third.dispatchMessageId)
+    const third = automatic(f.admit(source(), 'new-byte-3')), ack = f.store.ackDispatch('repo', third.dispatchMessageId)
     assert.throws(() => f.store.claimQueuedAttempt({ operationId: third.id, source: third.input.source, scope: third.scope, leaseMs: 1000, expectedRevision: ack.revision }), /SYNC_BUDGET_EXHAUSTED/)
     assert.equal(f.store.listAttempts(third.id).length, 0)
     assert.equal(f.store.recordBudgetExhaustion(third.id).phase, 'budget_exhausted')
     assert.equal(f.store.nextQueued('repo'), null)
-    assert.equal(f.store.admitAndEnqueue({ ...f.admit(source(), 'new-byte-3'), ingressKey: 'duplicate-exhausted', budget }).id, third.id)
-    const retry = f.store.admitAndEnqueue({ ...f.admit(source(), 'new-byte-3'), ingressKey: 'user-new-budget', rootCauseId: 'user-new-budget', retryOf: third.id, budget })
+    assert.equal(automatic({ ...f.admit(source(), 'new-byte-3'), ingressKey: 'duplicate-exhausted' }).id, third.id)
+    const retry = f.store.admitAndEnqueue({ ...f.admit(source(), 'new-byte-3'), ingressKey: 'user-new-budget', rootCauseId: 'user-new-budget', retryOf: third.id, baselineSelection: selected.selection, budget })
     assert.equal(retry.dispatchAnchor?.budgetRootOperationId, retry.id)
   } finally { f.cleanup() }
 })

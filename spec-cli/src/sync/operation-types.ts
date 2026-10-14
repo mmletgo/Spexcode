@@ -70,6 +70,8 @@ export type SyncOperation = {
 }
 export type DeliveryPlan = { canonicalRoot: string; branch: string; baseCommit: string }
 export type ComposedInputRef = { sourceInputId: string; previousBaselinePairId: string | null; baselineSelectionDigest?: string; tree: string; manifestBlob: BlobRef; contentDigest: string; requestBlob?: BlobRef; authorProjectionBlob?: BlobRef; compositionEvidenceBlob?: BlobRef }
+export type PublicationHeads = { selection: FrozenBaselineSelection; unknownPaths: { path: string; reason: string }[] }
+export type PublicationBase = { parentCommit: string; parentTree: string; parentManifestBlob: BlobRef; provenanceBlob: BlobRef; composed: ComposedInputRef }
 export type DispatchPlan = { key: string; purpose: string; requestDigest: string; sessionCreateKey: string; session: NativeSessionRef | null }
 export type NativeSessionRef = { sessionId: string; threadId: string | null; turnId: string | null }
 export type CandidateRef = { baseTree: string; sourceInputId: string; tree: string; digest: string; manifestBlob: BlobRef; actualDiffBlob: BlobRef; coveredScope: SyncScope }
@@ -77,6 +79,7 @@ export type VerificationRef = { candidateDigest: string; inputId: string; passed
 export type SyncAttempt = {
   id: string; operationId: string; number: number; generation: number
   baselineSelectionDigest?: string
+  publicationBase?: PublicationBase
   dispatchKey: string; sessionCreateKey: string; status: 'claimed' | 'running' | 'frozen' | 'verified' | 'applying' | 'settled' | 'failed' | 'superseded'
   currentSession: NativeSessionRef | null; dispatchPlans: DispatchPlan[]; composedInput: ComposedInputRef | null; candidate: CandidateRef | null; verification: VerificationRef | null
   checkpointRefs: BlobRef[]; failure: SyncFailure | null; leaseToken: string; expiresAtMs: number
@@ -87,6 +90,7 @@ export type ApplyFilePlan = { path: string; preDigest: string | null; postDigest
 export type ApplyPlan = {
   effectKey: string; payloadDigest: string; candidateDigest: string; verificationBlob: BlobRef
   target: WorktreeIdentity; expectedTargetSnapshotId: string; expectedBaselinePairId: string | null; expectedBaselineSelectionDigest?: string
+  publicationBaseRef?: BlobRef
   coveredScope: SyncScope; files: ApplyFilePlan[]; planBlob: BlobRef
 }
 export type ApplyStep = { key: string; status: 'planned' | 'completed'; evidenceRef: BlobRef | null }
