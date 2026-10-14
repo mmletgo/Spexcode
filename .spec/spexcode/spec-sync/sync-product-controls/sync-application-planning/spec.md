@@ -18,7 +18,7 @@ code:
 
 readPaths 纳入冻结 Spec、版本化配置、授权源码/测试目录、额外 readPaths、影响代码/测试及保护测试；writePaths 只含目标 Spec 精确路径和 source/test 授权目录。目录授权允许新自然语言需求创建实现，不授权任意磁盘或模型创造新 raw 意图。plan 传递 facts、精确 verification 和 mandatoryTests 给 coordinator；全部 source/composed 差量仍经过完整 read/write 检查，不能偷偷交付未验证的其它 dirty 修改。V4 重新构造当前 plan，不能沿用旧影响自证。
 
-可携最近共同BaselinePair，对旧verifiedDelivery及当前source图求影响并集，旧测试/治理路径与移动退役目标仍纳入完整范围，不因删除文件退出验收。移动的规范节点ID可依同业务ID识别；被明确移除的意图定位最近仍存在的上层需求。目标Spec目录受控授权自动新治理叶，但不授权宿主或其它未选节点。
+可携最近共同BaselinePair，对旧verifiedDelivery及当前source图求影响并集，旧测试/治理路径与移动退役目标仍纳入完整范围，不因删除文件退出验收。从移动后的节点发起同步时，同样依稳定业务ID找到旧节点并读取旧影响闭包；已匹配新位置的旧节点不重复成为生成目标，其旧Spec精确路径仍在写范围中，以便真实删除旧位置。被明确移除的意图定位最近仍存在的上层需求。目标Spec目录受控授权自动新治理叶，但不授权宿主或其它未选节点。
 
 已receipt结算decisionRefs重读不可变用户裁决与所选finding.ruleIds，派生精确supersession事实。原settings facts全文留历史，只有所选规则按裁决生效；未选业务事实、VERIFY及工具政策保持。后续无关代码输入继承同一已结算裁决，不恢复旧行为。
 

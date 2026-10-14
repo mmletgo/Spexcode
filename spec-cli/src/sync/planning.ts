@@ -20,10 +20,12 @@ export async function buildSyncApplicationPlan(snapshot: InputSnapshot, nodeId: 
   const oldFrozen = await readFrozenContracts(snapshot.source.canonicalRoot, oldFiles)
   const frozen = await readFrozenContracts(snapshot.source.canonicalRoot, files)
   const nodes = await loadSpecs(snapshot.source.canonicalRoot, { tip: snapshot.headCommit, history: null, drift: null, snapshot: { tip: snapshot.headCommit, files: new Map([...files].filter(([path]) => path.startsWith('.spec/') && path.endsWith('/spec.md'))) } })
-  const previousIntent = oldFrozen.nodes.find(node => node.id === nodeId)
-  const intent = nodes.find(node => node.id === nodeId) ?? nodes.find(node => previousIntent && (oldFrozen.contracts.find(contract => contract.nodeId === nodeId)?.items.some(item => frozen.contracts.find(contract => contract.nodeId === node.id)?.items.some(next => next.id === item.id)) || previousIntent.rawSource === node.parts?.rawSource)) ?? nodes.filter(node => previousIntent && previousIntent.path.startsWith(`${posix.dirname(node.path)}/`) && node.parts?.rawSource).sort((a, b) => b.path.length - a.path.length)[0] ?? previousIntent
+  const currentIntent = nodes.find(node => node.id === nodeId)
+  const currentIntentIds = new Set(frozen.contracts.find(contract => contract.nodeId === currentIntent?.id)?.items.map(item => item.id) ?? [])
+  const previousIntent = oldFrozen.nodes.find(node => node.id === nodeId) ?? oldFrozen.nodes.find(node => oldFrozen.contracts.find(contract => contract.nodeId === node.id)?.items.some(item => currentIntentIds.has(item.id)))
+  const intent = currentIntent ?? nodes.find(node => previousIntent && (oldFrozen.contracts.find(contract => contract.nodeId === previousIntent.id)?.items.some(item => frozen.contracts.find(contract => contract.nodeId === node.id)?.items.some(next => next.id === item.id)) || previousIntent.rawSource === node.parts?.rawSource)) ?? nodes.filter(node => previousIntent && previousIntent.path.startsWith(`${posix.dirname(node.path)}/`) && node.parts?.rawSource).sort((a, b) => b.path.length - a.path.length)[0] ?? previousIntent
   if (!intent) throw new SyncApplicationError('sync_node_unknown', `不存在 Spec 节点 ${nodeId}`, 404)
-  const currentImpact = contractImpact(frozen.graph, [nodeId, intent.id]), priorImpact = contractImpact(oldFrozen.graph, [nodeId])
+  const currentImpact = contractImpact(frozen.graph, [nodeId, intent.id]), priorImpact = contractImpact(oldFrozen.graph, [nodeId, ...(previousIntent ? [previousIntent.id] : [])])
   const impact = { nodeIds: [...new Set([...currentImpact.nodeIds, ...priorImpact.nodeIds])], codePaths: [...new Set([...currentImpact.codePaths, ...priorImpact.codePaths])], testPaths: [...new Set([...currentImpact.testPaths, ...priorImpact.testPaths])] }
   const selected = new Set([nodeId, intent.id, ...impact.nodeIds, ...nodes.filter(node => node.path.startsWith(intent.path.slice(0, -'spec.md'.length))).map(node => node.id)])
   // 普通旧节点尚无 sync-v1 契约时仍按共同治理文件纳入其它权威叶。
@@ -35,7 +37,8 @@ export async function buildSyncApplicationPlan(snapshot: InputSnapshot, nodeId: 
   }
   const targets = nodes.filter(node => selected.has(node.id)).map(node => ({ nodeId: node.id, path: node.path }))
   const codePaths = [...new Set([...impact.codePaths, ...nodes.filter(node => selected.has(node.id)).flatMap(node => node.code)])]
-  const missingPrior = oldFrozen.nodes.filter(node => (selected.has(node.id) || impact.nodeIds.includes(node.id)) && !targets.some(target => target.nodeId === node.id || frozen.contracts.find(contract => contract.nodeId === target.nodeId)?.items.some(item => oldFrozen.contracts.find(contract => contract.nodeId === node.id)?.items.some(previous => item.id === previous.id))))
+  const priorTargets = oldFrozen.nodes.filter(node => selected.has(node.id) || impact.nodeIds.includes(node.id))
+  const missingPrior = priorTargets.filter(node => !targets.some(target => target.nodeId === node.id || frozen.contracts.find(contract => contract.nodeId === target.nodeId)?.items.some(item => oldFrozen.contracts.find(contract => contract.nodeId === node.id)?.items.some(previous => item.id === previous.id))))
   targets.push(...missingPrior.map(node => ({ nodeId: node.id, path: node.path, ...(node.rawSource ? { rawSource: node.rawSource } : {}) })))
   const writable = [...settings.sourcePaths, ...settings.testPaths]
   for (const path of [...codePaths, ...impact.testPaths]) if (!coveredPath(path, writable) && !settings.mandatoryTests.some(test => test.testPath === path)) throw new SyncApplicationError('sync_scope_unauthorized', `受影响文件未在可信授权中：${path}`)
@@ -49,7 +52,7 @@ export async function buildSyncApplicationPlan(snapshot: InputSnapshot, nodeId: 
   return {
     version: 'sync-coordinator-v1', intentNodeId: intent.id, targets,
     readPaths: [...new Set([...specEntries.map(entry => entry.path), ...oldFiles.keys(), '.spec/spexcode.json', ...writable, ...settings.readPaths, ...codePaths, ...impact.testPaths, ...settings.mandatoryTests.map(test => test.testPath)])].sort(),
-    writePaths: [...new Set([...targets.map(target => target.path), ...targets.map(target => posix.dirname(target.path)), ...writable])].sort(),
+    writePaths: [...new Set([...targets.map(target => target.path), ...targets.map(target => posix.dirname(target.path)), ...priorTargets.map(target => target.path), ...writable])].sort(),
     facts: [...settings.facts, ...decisionFacts], decisionAuthorities: (baselinePair?.decisionRefs ?? []).map(ref => readDecisionAuthority(snapshot.source.commonDir, ref)), decisionRefs: baselinePair?.decisionRefs ?? [], retiredIds: baselinePair?.retiredIds ?? [], verifications: settings.verifications, mandatoryTests: settings.mandatoryTests,
   }
 }
