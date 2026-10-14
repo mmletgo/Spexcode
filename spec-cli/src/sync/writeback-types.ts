@@ -30,6 +30,7 @@ export type CodeBehaviorAnalysis = {
   composedDigest: string; readSetDigest: string; policyDigest: string; inputDigest: string
   decisionAuthorities?: SyncDecisionAuthority[]
   decision?: { requestRef: BlobRef; analysisRef: BlobRef; findingIds: string[] }
+  rawIntegrations?: { path: string; sourceRaw: string | null; deliveryRaw: string | null; resolvedRaw: string; expectedRaw: string }[]
   authorChanges?: { nodeId: string; path: string; beforeRaw: string | null; afterRaw: string | null; changedIds: string[] }[]
   changes: CodeBehaviorChange[]; findings: CodeBehaviorFinding[]
   facts: ElaborationFact[]; authorizedChanges: ContractChangeProposal[]; nodeChanges: ContractNodeProposal[]
