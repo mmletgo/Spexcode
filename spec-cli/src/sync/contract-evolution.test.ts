@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import test from 'node:test'
 import { CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
-import { validateContractEvolution } from './contract-evolution.js'
+import { contractBusinessProse, validateContractEvolution } from './contract-evolution.js'
 import type { ContractEvolutionPolicy } from './contract-evolution.js'
 import { checkGenerationContractIntent, readFrozenContracts } from './frozen-contracts.js'
 import { elaborate, elaborationDigest } from './elaboration.js'
@@ -179,4 +179,24 @@ test('P1审查必须使用不同于行为分析的当前会话线程', async () 
   const result = await elaborate({ ...input(), analysis }, { runner: runner(build(source)) })
   assert.equal(result.status, 'exhausted')
   assert.ok(result.rounds[0].findings.some(issue => issue.code === 'review_not_independent'))
+})
+
+
+test('实现诊断有限再细化只新增遗漏边界，冻结摘要且保留全部已接受业务', async () => {
+  const refinement: NonNullable<ElaborationInput['refinement']> = { candidateDigest: sha, diagnostics: [{ code: 'missing_boundary', message: '既定幂等组合缺少空键边界断言' }] }
+  const output = build(source), original = structuredClone(output.changes[0].tables.AC[0])
+  output.changes[0].prose = contractBusinessProse(parseParts(source)!.expandedSpec)
+  output.changes[0].tables.AC.push({ ...original, id: 'AC-EXPORT-NEW', action: '空键调用', assertion: '明确拒绝且不创建任务', test: 'tests/export.test.mjs#AC-EXPORT-NEW' })
+  const prompts: string[] = []
+  const result = await elaborate({ ...input(), refinement }, { runner: runner(output, prompts) })
+  assert.equal(result.status, 'complete')
+  assert.ok(result.graph!.items.has('AC-EXPORT-NEW'))
+  assert.ok(prompts[0].includes('仅是失败诊断，不是新业务事实或授权'))
+  const ordinary = await elaborate(input(), { runner: runner(output) })
+  assert.notEqual(result.inputDigest, ordinary.inputDigest)
+  output.changes[0].tables.RULE[0].constraint = '实现失败就取消原政策'
+  const rejected = await elaborate({ ...input(), refinement }, { runner: runner(output) })
+  assert.equal(rejected.status, 'exhausted')
+  assert.ok(rejected.rounds[0].findings.some(issue => issue.code === 'refinement_accepted_meaning_changed'))
+  await assert.rejects(elaborate({ ...input(), refinement: { ...refinement, candidateDigest: 'stale' } }, { runner: runner(output) }), /再细化诊断/)
 })

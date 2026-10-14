@@ -7,6 +7,8 @@ import type { CodeBehaviorEvidence, ContractNodeChange } from './writeback-types
 
 export type ContractEvolutionPolicy = {
   mode: 'preserve_business' | 'reelaborate'
+  /** 实现诊断只允许扩展边界，不授予改写已接受业务的权限。 */
+  preserveAcceptedItems?: boolean
   authorizedChanges: readonly AuthorizedContractChange[]
   nodeChanges: readonly ContractNodeChange[]
   retiredIds: readonly string[]
@@ -73,16 +75,16 @@ export function validateContractEvolution(before: FrozenContracts, after: Frozen
     if (moves.has(node.path)) continue
     const next = after.nodes.find(next => next.path === node.path)
     if (!next) issue('protected_node_removed', node, '节点删除或迁移必须保留明确生命周期记录')
-    else if (next.rawSource !== (policy.mode === 'preserve_business' ? node.rawSource : policy.newNodeRawSources.get(next.path)?.trim() ?? node.rawSource)) issue('raw_changed', next, '原意必须符合调用者冻结字节')
+    else if (next.rawSource !== (policy.mode === 'preserve_business' || policy.preserveAcceptedItems ? node.rawSource : policy.newNodeRawSources.get(next.path)?.trim() ?? node.rawSource)) issue('raw_changed', next, '原意必须符合调用者冻结字节')
   }
   for (const node of after.nodes) if (!before.nodes.some(prior => prior.path === node.path) && !destinations.has(node.path) && node.rawSource !== policy.newNodeRawSources.get(node.path)?.trim()) issue('new_node_intent_unfrozen', node, '新增节点原意必须由调用者冻结')
   for (const contract of before.contracts) {
     const change = moves.get(contract.path)
     const expectedPath = change?.action === 'move' ? change.to!.path : contract.path
     if (change?.action !== 'retire' && !after.contracts.some(next => next.path === expectedPath)) issue('contract_schema_removed', contract, '启用契约节点不能删除 schema 退出检查')
-    if (policy.mode === 'preserve_business' && change?.action !== 'retire') {
+    if ((policy.mode === 'preserve_business' || policy.preserveAcceptedItems) && change?.action !== 'retire') {
       const next = after.contracts.find(next => next.path === expectedPath)
-      if (next && contractBusinessProse(next.expandedSpec) !== contractBusinessProse(contract.expandedSpec)) issue('refactor_business_prose_changed', next, '纯重构必须保留 expanded 业务正文')
+      if (next && (policy.preserveAcceptedItems ? !contractBusinessProse(next.expandedSpec).includes(contractBusinessProse(contract.expandedSpec)) : contractBusinessProse(next.expandedSpec) !== contractBusinessProse(contract.expandedSpec))) issue(policy.preserveAcceptedItems ? 'refinement_accepted_prose_changed' : 'refactor_business_prose_changed', next, '既有 expanded 业务正文必须保留')
     }
   }
   for (const change of policy.authorizedChanges) {
@@ -100,7 +102,7 @@ export function validateContractEvolution(before: FrozenContracts, after: Frozen
     const next = after.graph.items.get(item.id)
     const authorization = authorizations.get(item.id)
     if (!next || next.kind !== item.kind) {
-      if (policy.mode === 'preserve_business' || authorization?.action !== 'retire') issue('protected_item_removed', item, '删除契约项必须有用户原意或可信裁决的退役依据', item.id)
+      if (policy.mode === 'preserve_business' || policy.preserveAcceptedItems || authorization?.action !== 'retire') issue('protected_item_removed', item, '删除契约项必须有用户原意或可信裁决的退役依据', item.id)
       continue
     }
     const priorMeaning = contractBusinessMeaning(item)
@@ -110,7 +112,7 @@ export function validateContractEvolution(before: FrozenContracts, after: Frozen
       if (relocation) priorMeaning.authority = next.authority
     }
     if (same(priorMeaning, nextMeaning)) continue
-    if (policy.mode === 'preserve_business') issue('refactor_business_meaning_changed', next, '纯重构只允许实现与测试符号绑定变化', item.id)
+    if (policy.mode === 'preserve_business' || policy.preserveAcceptedItems) issue(policy.preserveAcceptedItems ? 'refinement_accepted_meaning_changed' : 'refactor_business_meaning_changed', next, policy.preserveAcceptedItems ? '再细化诊断不能改写已接受业务字段' : '纯重构只允许实现与测试符号绑定变化', item.id)
     else if (item.kind === 'VERIFY' && authorization?.action !== 'update_verification') issue('verification_policy_changed', next, '验证命令、目录或预算变更缺少已确认依据', item.id)
     else if (item.kind === 'AC' && next.kind === 'AC') {
       if (authorization?.action !== 'update_acceptance') issue('acceptance_update_unauthorized', next, '验收语义变更必须有规则变化及独立分析授权', item.id)
