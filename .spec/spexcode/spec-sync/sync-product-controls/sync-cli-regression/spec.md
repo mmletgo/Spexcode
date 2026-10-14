@@ -20,3 +20,5 @@ AC-SYNC-CLI-01 用实际子进程检查阶段 help 与未知 flag/缺参及 retr
 客户端HTTP记录器同时验证 --origin code 入账与 decide完整原input/analysis/finding IDs/新rule/request身份运输，不混入retry或body patch；仍不替代真实应用和Agent验收。
 
 P4 客户端运输回归同时核无ID pause/resume 的 /automatic 路由、verify节点与稳定请求键；help展示真实后台观察语义，不继续声称无外部watcher。
+
+AC-SYNC-CLI-01还在HTTP前拒绝pause/resume误带--node与verify误带--patch-file，不能把用户的局部控制或正文编辑静默扩大/丢弃。

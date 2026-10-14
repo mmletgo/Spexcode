@@ -1030,6 +1030,7 @@ test('AC-APPLICATION-P4-10 活动native时物理暂停保operation控制，暂�
     await f.application.automaticControl('pause')
     await f.application.wait(active.id)
     assert.equal(f.application.store.readOperation(active.id).control, 'run')
+    assert.equal((await f.application.readOperation(active.id)).physicalControl.control, 'pause')
     const first = f.application.observationStatus().latestSnapshot!.id
     writeFileSync(join(f.root, '.spec/demo/spec.md'), source.replace('返回用户指定的文本。', '返回用户指定的文本并记录确认。'))
     await observeUntil(() => f.application.observationStatus().latestSnapshot?.id !== first)
