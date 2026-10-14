@@ -3,7 +3,7 @@ import { contractReferences, dependencyClosure, parseParts } from '@spexcode/spe
 import type { ContractFinding, ContractItem } from '@spexcode/spec-core/contracts'
 import type { AuthorizedContractChange, ElaborationFact } from './elaboration-types.js'
 import type { FrozenContracts } from './frozen-contracts.js'
-import type { CodeBehaviorEvidence, ContractNodeChange, SyncDecisionAuthority } from './writeback-types.js'
+import type { CodeBehaviorAnalysis, CodeBehaviorEvidence, ContractNodeChange, SyncDecisionAuthority } from './writeback-types.js'
 
 export type ContractEvolutionPolicy = {
   mode: 'preserve_business' | 'reelaborate'
@@ -48,6 +48,20 @@ function reviewedAnalysisErrors(evidence: CodeBehaviorEvidence | undefined, expe
   return []
 }
 
+/** 原所选发现只授权旧规则范围；共享上游REQ只加入本身，不扩其消费者。 */
+export function decisionScopeIds(before: FrozenContracts, authority: SyncDecisionAuthority, current?: CodeBehaviorAnalysis['decision'], after?: FrozenContracts): Set<string> {
+  const seeds = authority.ruleIds.length ? authority.ruleIds : authority.affectedIds
+  const scope = new Set(dependencyClosure(before.graph, seeds).filter(id => !['FLOW', 'STEP'].includes(before.graph.items.get(id)?.kind ?? '') || authority.affectedIds.includes(id)))
+  if (after) for (const id of dependencyClosure(after.graph, seeds)) if (!before.graph.items.has(id)) scope.add(id)
+  if (current && authority.decision.choice !== 'keep_intent' && authority.requestRef.sha256 === current.requestRef.sha256 && authority.analysisRef.sha256 === current.analysisRef.sha256 && same([...authority.findingIds].sort(), [...current.findingIds].sort())) {
+    for (const id of authority.affectedIds) if (before.graph.items.get(id)?.kind === 'REQ' && authority.ruleIds.some(ruleId => {
+      const rule = before.graph.items.get(ruleId)
+      return rule && ['RULE', 'TR'].includes(rule.kind) && contractReferences(rule).some(reference => ['source', 'depends-on'].includes(reference.field) && reference.id === id)
+    })) scope.add(id)
+  }
+  return scope
+}
+
 /** 裁决事实的文字不是授权；仅使用程序从真实请求和所选旧发现冻结的作用范围。 */
 export function decisionAuthorizationErrors(source: string, ids: readonly string[], before: FrozenContracts, policy: Pick<ContractEvolutionPolicy, 'analysis' | 'decisionAuthorities'>): string[] {
   const authorities = policy.decisionAuthorities ?? policy.analysis?.analysis.decisionAuthorities ?? []
@@ -55,7 +69,7 @@ export function decisionAuthorizationErrors(source: string, ids: readonly string
   if (matching.length !== 1) return ['裁决来源没有唯一可信结构化作用范围']
   const authority = matching[0]
   if (authority.decision.choice === 'keep_intent') return ['保留原意的裁决不能授权业务契约变更']
-  const scope = new Set(dependencyClosure(before.graph, authority.ruleIds.length ? authority.ruleIds : authority.affectedIds))
+  const scope = decisionScopeIds(before, authority, policy.analysis?.analysis.decision)
   return ids.every(id => scope.has(id)) ? [] : ['契约目标或来源规则超出所选裁决作用范围']
 }
 
@@ -153,7 +167,8 @@ export function validateContractEvolution(before: FrozenContracts, after: Frozen
   const decision = policy.analysis?.analysis.decision
   const current = decision ? authorities.find(authority => authority.requestRef.sha256 === decision.requestRef.sha256 && authority.analysisRef.sha256 === decision.analysisRef.sha256 && authority.findingIds.length === decision.findingIds.length && authority.findingIds.every(id => decision.findingIds.includes(id))) : undefined
   const currentSeeds = current ? current.ruleIds.length ? current.ruleIds : current.affectedIds : []
-  const currentScope = new Set([...dependencyClosure(before.graph, currentSeeds), ...dependencyClosure(after.graph, currentSeeds).filter(id => !before.graph.items.has(id))])
+  const currentScope = current ? decisionScopeIds(before, current, decision, after) : new Set<string>()
+  const previousScope = new Set(dependencyClosure(before.graph, currentSeeds))
   if (decision) for (const item of before.graph.items.values()) {
     const next = after.graph.items.get(item.id)
     if (next && sameContractBusinessMeaning(item, next)) continue
@@ -163,6 +178,16 @@ export function validateContractEvolution(before: FrozenContracts, after: Frozen
     if (['RULE', 'TR'].includes(item.kind) && policy.authorizedChanges.some(change => change.action === 'update_acceptance' && change.ruleIds.includes(item.id) && independentlyAuthoredChange(change, before, policy))) continue
     if (next && !['AC', 'VERIFY'].includes(item.kind) && !reviewedAnalysisErrors(policy.analysis, policy.analysis!.ref.sha256).length && authoredSourceMatches(item.id, before, policy) && !policy.analysis!.analysis.findings.some(finding => finding.affectedIds.includes(item.id)) && policy.analysis!.analysis.changes.some(change => change.kind === 'allowed_change' && change.affectedIds.includes(item.id) && change.evidence.trim())) continue
     if (!current || reviewedAnalysisErrors(policy.analysis, policy.analysis!.ref.sha256).length || current.decision.choice === 'keep_intent' || !currentScope.has(item.id)) issue('decision_scope_exceeded', next ?? item, '当前裁决不能改变或退役未选义务，user:raw和旧decision事实不能扩大作用范围', item.id)
+    else if (item.kind === 'REQ' && !previousScope.has(item.id)) {
+      const source = `decision:${current.stableDecisionId}`
+      const witnessed = current.ruleIds.some(id => {
+        const rule = before.graph.items.get(id), updated = after.graph.items.get(id)
+        if (!rule || !updated || rule.kind !== updated.kind || !['RULE', 'TR'].includes(rule.kind) || updated.kind === 'VERIFY' || `${updated.source.kind}:${updated.source.ref}` !== source || !contractReferences(rule).some(reference => ['source', 'depends-on'].includes(reference.field) && reference.id === item.id)) return false
+        const fields = rule.kind === 'RULE' ? ['scope', 'constraint'] : ['from', 'event', 'to', 'condition', 'disposition', 'reason', 'effects']
+        return fields.some(field => !same((rule as unknown as Record<string, unknown>)[field], (updated as unknown as Record<string, unknown>)[field])) && policy.analysis!.analysis.changes.some(change => change.kind === 'allowed_change' && change.affectedIds.includes(item.id) && change.affectedIds.includes(id) && change.ruleIds.includes(id) && change.evidence.trim())
+      })
+      if (!next || next.kind !== 'REQ' || `${next.source.kind}:${next.source.ref}` !== source || !witnessed) issue('decision_scope_exceeded', next ?? item, '共享需求更新须绑定当前裁决、同一已审变化和所选旧规则的实际政策定义变化', item.id)
+    }
   }
   const moves = new Map<string, ContractNodeChange>()
   const destinations = new Set<string>()

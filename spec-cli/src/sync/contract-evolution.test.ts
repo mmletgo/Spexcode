@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import test from 'node:test'
 import { CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
-import { contractBusinessMeaning, contractBusinessProse, validateContractEvolution } from './contract-evolution.js'
+import { contractBusinessMeaning, contractBusinessProse, decisionScopeIds, validateContractEvolution } from './contract-evolution.js'
 import type { ContractEvolutionPolicy } from './contract-evolution.js'
 import { checkGenerationContractIntent, readFrozenContracts } from './frozen-contracts.js'
 import { elaborate, elaborationDigest } from './elaboration.js'
@@ -468,4 +468,50 @@ test('真实冻结move允许空tables保留RULE稳定ID并程序迁移authority�
   const unauthorized = await elaborate(input(), { runner: runner(output) })
   assert.equal(unauthorized.status, 'exhausted')
   assert.ok(unauthorized.rounds[0].findings.some(issue => issue.code === 'write_scope'))
+})
+
+
+test('共享REQ仅当前真实所选规则上游本身eligible，不从父REQ扩闭包或借新连边', async () => {
+  const previousFiles = files(), row = source.split('\n').find(line => line.startsWith('| REQ-EXPORT-01 '))!
+  previousFiles.set(path, source.replace(row, `${row}\n${row.replace('REQ-EXPORT-01', 'REQ-EXPORT-OTHER').replace('提交筛选数据导出并下载完成结果', '独立管理义务不得被本次下载裁决改变')}`))
+  const before = await readFrozenContracts('/frozen', previousFiles)
+  const authority = { stableDecisionId: sha, requestRef: { sha256: sha }, operationId: 'operation', inputId: 'input', analysisRef: { sha256: sha }, findingIds: ['selected-owner'], ruleIds: ['RULE-EXPORT-01'], affectedIds: ['REQ-EXPORT-01', 'REQ-EXPORT-OTHER', 'RULE-EXPORT-01', 'STEP-EXPORT-04', 'AC-EXPORT-03'], paths: ['src/export.js'], decision: { choice: 'new_rule' as const, rule: '只变更下载权限，其他需求与原所有者操作保持' } }
+  const current = { requestRef: authority.requestRef, analysisRef: authority.analysisRef, findingIds: authority.findingIds }
+  const scope = decisionScopeIds(before, authority, current)
+  assert.ok(scope.has('REQ-EXPORT-01')); assert.ok(scope.has('AC-EXPORT-03')); assert.ok(scope.has('STEP-EXPORT-04'))
+  assert.equal(scope.has('REQ-EXPORT-OTHER'), false, 'affectedIds包含也不构成所选旧规则来源')
+  assert.equal(scope.has('RULE-EXPORT-02'), false, '父REQ不能重新成为闭包种子')
+  assert.equal(scope.has('FLOW-EXPORT-02'), false); assert.equal(scope.has('STEP-EXPORT-05'), false, '共享规则的未选旧流程/步骤保持')
+  assert.equal(decisionScopeIds(before, authority).has('REQ-EXPORT-01'), false, '旧authority没有当前请求绑定不能追加上游权限')
+  for (const binding of [{ ...current, requestRef: { sha256: elaborationDigest('foreign-request') } }, { ...current, analysisRef: { sha256: elaborationDigest('foreign-analysis') } }, { ...current, findingIds: ['unselected-finding'] }]) assert.equal(decisionScopeIds(before, authority, binding).has('REQ-EXPORT-01'), false)
+  assert.equal(decisionScopeIds(before, { ...authority, decision: { choice: 'keep_intent' } }, current).has('REQ-EXPORT-01'), false)
+  const nextFiles = new Map(previousFiles), rule = before.graph.items.get('RULE-EXPORT-01')!; assert.equal(rule.kind, 'RULE')
+  const oldRuleRow = previousFiles.get(path)!.split('\n').find(line => line.startsWith('| RULE-EXPORT-01 '))!
+  nextFiles.set(path, previousFiles.get(path)!.replace(oldRuleRow, oldRuleRow.replace('REQ-EXPORT-01', 'REQ-EXPORT-01,REQ-EXPORT-OTHER')))
+  assert.equal(decisionScopeIds(before, authority, current, await readFrozenContracts('/frozen', nextFiles)).has('REQ-EXPORT-OTHER'), false, '新依赖边不能自批旧上游')
+})
+
+
+test('共享REQ自然语言扩大未选操作仍由原P1完整候选独审拒绝，eligible不是语义通过', async () => {
+  const before = await readFrozenContracts('/frozen', files()), analysis = evidence(), sourceDecision = `decision:${sha}` as const
+  const authority = { stableDecisionId: sha, requestRef: { sha256: sha }, operationId: 'operation', inputId: 'input', analysisRef: { sha256: sha }, findingIds: ['selected-download'], ruleIds: ['RULE-EXPORT-01'], affectedIds: ['REQ-EXPORT-01', 'RULE-EXPORT-01', 'AC-EXPORT-03'], paths: ['src/export.js'], decision: { choice: 'new_rule' as const, rule: '仅成功结果下载允许非所有者；取消、重试仍限所有者' } }
+  analysis.analysis.decisionAuthorities = [authority]; analysis.analysis.decision = { requestRef: authority.requestRef, analysisRef: authority.analysisRef, findingIds: authority.findingIds }
+  analysis.analysis.changes[0] = { ...analysis.analysis.changes[0], affectedIds: authority.affectedIds, ruleIds: authority.ruleIds }
+  const proposal: AcceptanceChangeProposal = { id: 'AC-EXPORT-03', action: 'update_acceptance', source: sourceDecision, reason: '仅成功下载权限按所选裁决演化', ruleIds: ['RULE-EXPORT-01'] }
+  analysis.analysis.authorizedChanges = [proposal]; analysis.analysis.facts = [{ source: sourceDecision, text: authority.decision.rule }]; analysis.ref = { sha256: elaborationDigest(JSON.stringify(analysis.analysis)) }
+  const req = before.graph.items.get('REQ-EXPORT-01')!, rule = before.graph.items.get('RULE-EXPORT-01')!; assert.equal(req.kind, 'REQ'); assert.equal(rule.kind, 'RULE')
+  const oldReq = source.split('\n').find(line => line.startsWith('| REQ-EXPORT-01 '))!, oldRule = source.split('\n').find(line => line.startsWith('| RULE-EXPORT-01 '))!
+  const candidate = source.replace(oldReq, oldReq.replace(req.goal, '非所有者也可下载、取消、重试其他人的任务').replace('user:raw', sourceDecision)).replace(oldRule, oldRule.replace(rule.constraint, '成功结果允许非所有者下载；取消、重试仍必须所有者').replace('decision:EXPORT-POLICY', sourceDecision)).replace('全部拒绝，原结果可由所有者下载', '成功下载允许非所有者，取消与重试仍拒绝')
+  const authorization = { ...proposal, analysisRef: analysis.ref }, afterFiles = files(); afterFiles.set(path, candidate)
+  const selected = policy({ analysis, authorizedChanges: [authorization], facts: analysis.analysis.facts, decisionAuthorities: [authority] })
+  assert.deepEqual(validateContractEvolution(before, await readFrozenContracts('/frozen', afterFiles), selected), [], '图关系不冒充自由文本语义判定')
+  let calls = 0
+  const result = await elaborate({ ...input(), analysis, authorizedChanges: [authorization], facts: [...input().facts!, ...analysis.analysis.facts], decisionAuthorities: [authority] }, { runner: async request => {
+    calls++
+    if (request.purpose === 'elaboration_review') { assert.ok(request.prompt.includes('非所有者也可下载、取消、重试')); assert.ok(request.prompt.includes(authority.decision.rule)) }
+    const output = request.purpose === 'elaboration_generate' ? build(candidate) : { verdict: 'repair', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [{ code: 'selected-policy-contradiction', kind: 'repair', message: '共享REQ扩大取消与重试，超出明确仅下载的裁决', affectedIds: ['REQ-EXPORT-01', 'RULE-EXPORT-06'], evidence: 'REQ声明非所有者可重试，而原RULE-EXPORT-06仍要求FAILED且所有者', decision: '只同步下载例外，保取消及重试的原所有权约束' }] }
+    return { sessionId: `semantic-session-${calls}`, threadId: `semantic-thread-${calls}`, turnId: 'turn', output, resultDigest: elaborationDigest(JSON.stringify(output)) }
+  } })
+  assert.equal(calls, 2); assert.equal(result.structurePassed, true); assert.equal(result.reviewPassed, false); assert.equal(result.failure?.code, 'repair_budget_exhausted')
+  assert.ok(result.rounds.flatMap(round => round.findings).some(finding => finding.code === 'selected-policy-contradiction'))
 })

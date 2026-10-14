@@ -29,10 +29,14 @@ preserve_business 保持 raw、expanded 业务正文和全部业务字段，只�
 
 RULE 独立跨叶搬迁时，旧定义与新定义的 authority 均须等于各自 canonical owner，归属路径发生变化才把 authority 调整视为定位变化；业务 constraint、范围、来源及依赖仍保护。错误 authority 不豁免，不能全局忽略治理字段；单纯搬迁也不能冒充业务规则变化来授权 AC 更新。
 
-当前及已结算裁决使用程序从真实 request、旧独审 analysis 与所选 finding 冻结的 decisionAuthorities；fact.text 或模型声明不能提供作用范围。decision 来源的 AC 授权同时核对验收目标和每个来源 ID，仅沿所选规则的依赖闭包授权，不上溯父 REQ 扩成全域。当前裁决还限制实际既有业务语义变化与退役，换成 user:raw、新 code 来源或旧 decision 名称不能扩权；既有身份必须属于旧图闭包，新图仅补入新身份，不能加一条依赖边给旧无关义务自批权限。原有 code 来源的独立实现细节及合法定位搬迁保持各自门禁。
+当前及已结算裁决使用程序从真实 request、旧独审 analysis 与所选 finding 冻结的 decisionAuthorities；fact.text 或模型声明不能提供作用范围。decision 来源的 AC 授权同时核对验收目标和每个来源 ID，沿所选规则的旧依赖闭包核对AC与来源；当前真实所选发现明确涉及且属于所选旧RULE/TR依赖或来源的共享REQ，仅可追加该REQ本身，不从父REQ展开全域。当前裁决还限制实际既有业务语义变化与退役，换成 user:raw、新 code 来源或旧 decision 名称不能扩权；既有身份必须属于旧图闭包，新图仅补入新身份，不能加一条依赖边给旧无关义务自批权限。原有 code 来源的独立实现细节及合法定位搬迁保持各自门禁。
 
 同一操作的独立真实作者需求编辑仍可自动结算：具体 user:raw 验收提案经独审，来源 ID 对应程序作者差量及旧来源闭包，可更新对应 AC；raw-only 高层需求可使用合法 REQ 来源，不强制虚构 RULE。它不豁免未选规则；其他既有业务项变化仅在该 ID 本身属于实际作者差量且独审明确 allowed_change 时通过。相容整合保留真实作者 afterRaw，以独审冻结 rawIntegrations 的 sourceRaw、具体 resolution 的 resolvedRaw 与本轮 expectedRaw 精确匹配，不能用 contains 或把模型整合正文回填为作者事实。已审真实作者节点删除仍可逐项退役，不借另一裁决扩大范围。
 
 真实 raw-only 高层编辑可同时派生已有 RULE/TR 和对应 AC：同一独审 allowed_change 明确列出实际作者 REQ 来源、具体规则来源及受影响规则/AC，逐字 user:raw 验收提案的 ruleIds 同时关联真实作者来源和该具体规则，且来源均属于该 AC 的旧来源闭包，才允许这组详细业务变化。父 REQ 的整个依赖闭包仅用于核对来源关系，不能无条件放行其他规则；缺少具体映射或提案的未选规则仍拒绝。
 
 带 analysisRef 的逐项退役必须对应已审提案、同节点退休记录、content:null 删除候选和具体 allowed_change；user:raw 还要求程序冻结的作者删除差量（对应节点/路径/ID、beforeRaw 非空缺且 afterRaw 为 null）。三方来源中的 raw 版本可以不同，不能把前轮交付新原意误当作作者未删除。decision 退役使用具体所选作用范围及删除证明，不冒充作者先删除；不带分析引用的明确用户/计划授权仍须可信来源。
+
+当前裁决的旧FLOW/STEP目标还须属于原真实所选finding affectedIds；共享权限规则的闭包不能改未选操作流程。新图闭包仅补新身份，不能加边扩大旧目标。decisionAuthorizationErrors、演进currentScope与行为分析复用同一有限scope；eligible只表示可继续校验，不代表语义批准。
+
+共享REQ更新必须精确绑定当前requestRef/analysisRef/findingIds及已独审分析，REQ来源为本次decision；同一个已审allowed_change同时列该REQ及所选旧RULE/TR，且最终候选中该规则政策定义真实变化。RULE的scope/constraint或TR的状态、条件、处置、反馈与效果定义构成见证，source、定位及实现绑定变化不构成政策变化。旧authority、keep、无关REQ、新连边、缺同次见证均不授权。REQ自由文本与未选规则的语义矛盾仍由原P1完整候选独审判定，图关系不冒充自然语言证明；既有AC精确提案、真实变化来源、RAW/VERIFY和全部未选业务守卫保持。

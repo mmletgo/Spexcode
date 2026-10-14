@@ -5,7 +5,7 @@ import { outputErrors } from './elaboration-schema.js'
 import { actualTreeDiff, isHostPrivatePath } from './candidate.js'
 import { adoptedDeliveryPaths, isUtf8Text } from './composition.js'
 import { validateRawIntegration } from './raw-integration.js'
-import { sameContractBusinessMeaning } from './contract-evolution.js'
+import { decisionScopeIds, sameContractBusinessMeaning } from './contract-evolution.js'
 import { controlledDecisionIdentity, readControlledDecision, readControlledRequest, renderControlledDecisionRaw } from './request-input.js'
 import { readFrozenContracts } from './frozen-contracts.js'
 import type { BaselinePair, ComposedInputRef, InputSnapshot } from './operation-types.js'
@@ -137,7 +137,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
     return { ...item, source: item.source as AcceptanceChangeProposal['source'], action: 'update_acceptance' }
   })
   const currentAuthority = input.decision && decisionAuthorities.find(authority => authority.requestRef.sha256 === input.composed.requestBlob?.sha256)
-  const authorityIds = (authority: SyncDecisionAuthority): Set<string> => new Set([...dependencyClosure(oldFrozen.graph, authority.ruleIds.length ? authority.ruleIds : authority.affectedIds), ...dependencyClosure(current.graph, authority.ruleIds.length ? authority.ruleIds : authority.affectedIds).filter(id => !oldFrozen.graph.items.has(id))])
+  const authorityIds = (authority: SyncDecisionAuthority): Set<string> => decisionScopeIds(oldFrozen, authority, input.decision && { requestRef: input.composed.requestBlob!, analysisRef: input.decision.request.analysisRef, findingIds: input.decision.request.findingIds }, current)
   for (const authorization of authorizedChanges) {
     const authority = authorization.source.startsWith('decision:') ? decisionAuthorities.find(item => `decision:${item.stableDecisionId}` === authorization.source) : currentAuthority
     if (authorization.source.startsWith('decision:') && !authority) reject(`验收裁决来源没有结构化可信范围: ${authorization.id}`)
