@@ -708,8 +708,9 @@ export class SyncStore {
       if (!journal.receipt || journal.receipt.id !== receiptId) fail('SYNC_RECEIPT_MISSING', receiptId)
       if (journal.status === 'settled') return operation
       if (attempt.verification?.resultBlob.sha256 !== verificationRef.sha256) fail('SYNC_VERIFICATION_INVALID', 'settlement verification changed')
-      const retiredIds = [...new Set([...(operation.previousBaselinePair?.retiredIds ?? []), ...(verification.retiredIds ?? [])])].sort()
-      const decisionRefs = [...new Map([...(operation.previousBaselinePair?.decisionRefs ?? []), ...(verification.decisionRefs ?? [])].map(ref => [ref.sha256, ref])).values()]
+      const historicalPairs = [...(operation.previousBaselinePair ? [operation.previousBaselinePair] : []), ...(operation.baselineSelection?.bindings.flatMap(binding => { const pair = 'bytePair' in binding ? binding.bytePair : binding.intentPair; return pair ? [pair] : [] }) ?? [])]
+      const retiredIds = [...new Set([...historicalPairs.flatMap(pair => pair.retiredIds ?? []), ...(verification.retiredIds ?? [])])].sort()
+      const decisionRefs = [...new Map([...historicalPairs.flatMap(pair => pair.decisionRefs ?? []), ...(verification.decisionRefs ?? [])].map(ref => [ref.sha256, ref])).values()]
       const pair: BaselinePair = { id: `baseline-${journal.id}`, repositoryId: operation.input.source.repositoryId, source: clone(operation.input.source), sourceInput: clone(operation.input), verifiedDelivery: clone(journal.receipt.deliverySnapshot), coveredScope: clone(journal.plan.coveredScope), retiredIds, decisionRefs, receiptId, settledAtMs: this.now() }
       tx.exec('INSERT INTO sync_baseline_pairs(id,repository_id,source_key,receipt_id,settled_at_ms,record_json) VALUES(?,?,?,?,?,?)', pair.id, pair.repositoryId, identityKey(pair.source), pair.receiptId, pair.settledAtMs, JSON.stringify(pair))
       const advance = (published: BaselinePair): void => {

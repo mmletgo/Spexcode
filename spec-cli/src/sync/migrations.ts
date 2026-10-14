@@ -91,6 +91,24 @@ CREATE TABLE sync_observations (id TEXT PRIMARY KEY, source_key TEXT NOT NULL, o
     if (!attempt || attempt.operation_id !== journal.operationId || Number(attempt.generation) !== journal.generation || !operations.some(operation => operation.id === journal.operationId)) throw new Error('SYNC_MIGRATION_RECOVERY_INVALID: frozen journal has no matching operation/attempt generation')
   }
   const stable = (value: unknown): string => createHash('sha256').update(JSON.stringify(value, (_key, entry: unknown) => entry && typeof entry === 'object' && !Array.isArray(entry) ? Object.fromEntries(Object.entries(entry).sort(([a], [b]) => a.localeCompare(b))) : entry)).digest('hex')
+  const pairById = new Map(pairs.map(pair => [pair.id, pair]))
+  const operationById = new Map(operations.map(operation => [operation.id, operation]))
+  const settledByReceipt = new Map(journals.flatMap(journal => journal.status === 'settled' && journal.receipt ? [[journal.receipt.id, journal] as const] : []))
+  const causalScopes = (pair: typeof pairs[number]): import('./operation-types.js').SyncScope[] => {
+    const sourceKey = stable(pair.source), scopes: import('./operation-types.js').SyncScope[] = [], seen = new Set<string>()
+    const visit = (current: typeof pair): void => {
+      if (seen.has(current.id) || stable(current.source) !== sourceKey) return
+      seen.add(current.id)
+      const journal = settledByReceipt.get(current.receiptId)
+      if (!journal) return
+      const operation = operationById.get(journal.operationId)!
+      scopes.push(current.coveredScope, operation.scope)
+      const prior = operation.previousBaselinePair ? pairById.get(operation.previousBaselinePair.id) : undefined
+      if (prior) for (const ancestor of pairs) if (ancestor.receiptId === prior.receiptId && stable(ancestor.source) === sourceKey) visit(ancestor)
+    }
+    visit(pair)
+    return scopes
+  }
   const uncertain = new Map<string, { sourceKey: string; resourceKey: string; reason: string }>()
   const groups = new Map<string, { sourceKey: string; resourceKey: string; pairs: typeof pairs }>()
   for (const pair of pairs) {
@@ -100,8 +118,9 @@ CREATE TABLE sync_observations (id TEXT PRIMARY KEY, source_key TEXT NOT NULL, o
       for (const resourceKey of [...pair.coveredScope.paths.map(path => `path:${path}`), ...pair.coveredScope.contractIds.map(id => `contract:${id}`), ...pair.coveredScope.flowIds.map(id => `flow:${id}`)]) uncertain.set(`${sourceKey}:${resourceKey}`, { sourceKey, resourceKey, reason: 'P3 history has no settled journal proving actual resource delivery' })
       continue
     }
+    const kindScopes = causalScopes(pair)
     const retiredKeys = (pair.retiredIds ?? []).filter(id => !operations.find(item => item.id === journal.operationId)?.previousBaselinePair?.retiredIds?.includes(id)).flatMap(id => {
-      const keys = [...(pairs.some(item => item.coveredScope.flowIds.includes(id)) || operations.some(item => item.scope.flowIds.includes(id)) ? [`flow:${id}`] : []), ...(pairs.some(item => item.coveredScope.contractIds.includes(id)) || operations.some(item => item.scope.contractIds.includes(id)) ? [`contract:${id}`] : [])]
+      const keys = [...(kindScopes.some(scope => scope.flowIds.includes(id)) ? [`flow:${id}`] : []), ...(kindScopes.some(scope => scope.contractIds.includes(id)) ? [`contract:${id}`] : [])]
       if (keys.length) return keys
       for (const resourceKey of [`flow:${id}`, `contract:${id}`]) uncertain.set(`${sourceKey}:${resourceKey}`, { sourceKey, resourceKey, reason: 'P3 retirement kind has no covered scope proof' })
       return []

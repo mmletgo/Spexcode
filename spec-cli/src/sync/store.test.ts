@@ -1745,3 +1745,40 @@ test('P4 automatic同selected差异在无关HEAD/dirty变化后仍复用失败�
     assert.equal(admitted.operation.dispatchAnchor?.budgetRootOperationId, first.operation.id)
   } finally { f.cleanup() }
 })
+
+test('P4 迁移退休kind只信同source因果证明，外repo/branch同名ID不能消除legacy未知', async () => {
+  const f = await fixture()
+  try {
+    const settle = (r: ReturnType<typeof f.ready>) => { const journal = f.store.beginApply(r.fence, r.plan, r.target); for (const step of journal.steps) f.store.recordApplyStep(r.fence, journal.id, { ...step, status: 'completed' }); const receipt = f.receipt(journal.id, r.plan); f.store.recordReceipt(journal.id, receipt); f.store.settleApply(journal.id, receipt.id); return { pair: f.store.readBaseline(r.operation.input.source)!, receipt } }
+    settle(f.ready(undefined, undefined, undefined, undefined, undefined, { retiredIds: ['FLOW-COLLISION'] }))
+    const causalSource = source('causal'), previous = settle(f.ready(f.admit(causalSource, 'flow-before', { paths: ['src/flow.ts'], contractIds: [], flowIds: ['FLOW-PROVEN'] })))
+    const retired = settle(f.ready({ ...f.admit(causalSource, 'flow-retired', scope('src/flow.ts', 'RULE-NEXT')), previousBaselinePair: previous.pair }, undefined, undefined, undefined, undefined, { retiredIds: ['FLOW-PROVEN'] }))
+    const foreignRepo = { ...source('foreign-repository'), repositoryId: 'repo-foreign', commonDir: '/foreign/.git', gitDir: '/foreign/.git', canonicalRoot: '/foreign/source' }, foreignBranch = { ...source(), branch: 'foreign-branch' }
+    f.store.admitAndEnqueue(f.admit(foreignRepo, 'foreign-repo-flow', { paths: [], contractIds: [], flowIds: ['FLOW-COLLISION', 'FLOW-PROVEN'] }))
+    f.store.admitAndEnqueue(f.admit(foreignBranch, 'foreign-branch-flow', { paths: [], contractIds: ['FLOW-PROVEN'], flowIds: ['FLOW-COLLISION'] }))
+    f.protocol.withTransaction(tx => { tx.exec('DROP TABLE sync_observations'); tx.exec('DROP TABLE sync_observer_health'); tx.exec('DROP TABLE sync_physical_controls'); tx.exec('DROP TABLE sync_baseline_heads'); tx.exec('DELETE FROM schema_migrations WHERE component=? AND version=10', SYNC_COMPONENT) })
+    await migrateSyncStore(f.protocol, { backupPath: join(f.root, 'kind-proof-v9.backup') })
+    for (const kind of ['contract', 'flow'] as const) { const unknown = f.store.readBaselineSelection(source(), [{ kind, id: 'FLOW-COLLISION' }]); assert.ok('failure' in unknown); assert.equal(unknown.failure.code, 'SYNC_BASELINE_LEGACY_UNKNOWN') }
+    for (const foreign of [foreignRepo, foreignBranch]) { const fresh = f.store.readBaselineSelection(foreign, [{ kind: 'flow', id: 'FLOW-COLLISION' }]); assert.ok('selection' in fresh); assert.equal(fresh.selection.bindings.find(binding => 'intentPair' in binding)?.intentPair, null) }
+    const proven = f.store.readBaselineSelection(causalSource, [{ kind: 'flow', id: 'FLOW-PROVEN' }]); assert.ok('selection' in proven); assert.equal(proven.selection.bindings.find(binding => 'intentPair' in binding)?.intentPair?.receiptId, retired.receipt.id)
+    const unrelatedKind = f.store.readBaselineSelection(causalSource, [{ kind: 'contract', id: 'FLOW-PROVEN' }]); assert.ok('selection' in unrelatedKind); assert.equal(unrelatedKind.selection.bindings.find(binding => 'intentPair' in binding)?.intentPair, null)
+  } finally { f.cleanup() }
+})
+
+test('P4 新intent head继承冻结selection的裁决/退役历史，readonly历史不冒充本次覆盖', async () => {
+  const f = await fixture()
+  try {
+    const selected = (covered: SyncScope) => { const result = f.store.readBaselineSelection(source(), [...covered.paths.map(path => ({ kind: 'path' as const, path })), ...covered.contractIds.map(id => ({ kind: 'contract' as const, id }))]); assert.ok('selection' in result); return result.selection }
+    const settle = (r: ReturnType<typeof f.ready>) => { const journal = f.store.beginApply(r.fence, r.plan, r.target); for (const step of journal.steps) f.store.recordApplyStep(r.fence, journal.id, { ...step, status: 'completed' }); const receipt = f.receipt(journal.id, r.plan); f.store.recordReceipt(journal.id, receipt); return { operation: f.store.settleApply(journal.id, receipt.id), receipt } }
+    const originalScope = { paths: ['src/a.ts'], contractIds: ['RULE-A', 'RULE-OLD'], flowIds: [] }, decision = f.put({ actualFrozenDecision: 'approved RULE-A' })
+    const first = settle(f.ready({ ...f.admit(source(), 'history-original', originalScope), baselineSelection: selected(originalScope) }, undefined, undefined, undefined, undefined, { decisionRefs: [decision], retiredIds: ['RULE-OLD'] }))
+    const actual = scope(), next = settle(f.ready({ ...f.admit(source(), 'history-next', actual), baselineSelection: selected(actual) }))
+    assert.deepEqual(next.operation.deliveredScope.contractIds, ['RULE-A'])
+    const current = selected(actual).bindings.find(binding => 'intentPair' in binding)?.intentPair
+    assert.equal(current?.receiptId, next.receipt.id)
+    assert.deepEqual(current?.decisionRefs, [decision])
+    assert.deepEqual(current?.retiredIds, ['RULE-OLD'])
+    const old = f.store.readBaselineSelection(source(), [{ kind: 'contract', id: 'RULE-OLD' }]); assert.ok('selection' in old); assert.equal(old.selection.bindings.find(binding => 'intentPair' in binding)?.intentPair?.receiptId, first.receipt.id)
+    assert.ok(f.store.pinnedBlobRefs().some(ref => ref.sha256 === decision.sha256))
+  } finally { f.cleanup() }
+})
