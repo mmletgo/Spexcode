@@ -19,3 +19,5 @@ code:
 Spec 文件及父目录 symlink 越界在 guard 阶段拒绝，不跟随外部读取；错误物理 root、原文、frontmatter、请求 hash、inputId、next digest、requestTree、composed manifest 均拒绝。新 source 不重放旧请求。SQLite 的 bindComposedInput 只接受与 operation.requestBlob 相同的请求引用，无请求操作不接受有请求的组合输入；正确绑定可在数据库重启后读取。
 
 无正文差量的 keep_intent 裁决仍冻结有效对象并绑定组合输入，保持原 tree/manifest/contentDigest；校验 input、非空不重复 finding IDs 和新规则内容。原 controlled patch 由 originalRequestBlob 继承，重新组合和重复绑定保持原用户需求；跨输入或嵌套裁决引用拒绝。
+
+controlledDecisionIdentity 从原operation/input/analysis、排序finding IDs与choice/精确rule计算稳定业务摘要，排除运输requestId。同选择换UUID或finding顺序仍为同一业务身份，不应重开operation/预算；改变选择、规则或原分析则是新的业务输入。原requestId仍用于接入收据与同key全payload严格重放。

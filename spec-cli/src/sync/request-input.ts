@@ -16,6 +16,10 @@ export type ControlledRequest = {
 export type ControlledDecision = SyncDecisionInput & { schemaVersion: 1; type: 'sync.decision'; source: WorktreeIdentity; originalRequestBlob?: BlobRef }
 export type PreparedControlledRequest = { changed: false; requestBlob: null } | { changed: true; requestBlob: BlobRef }
 
+/** 业务裁决身份不含运输请求键；同选择的重放不能重开预算。 */
+export function controlledDecisionIdentity(input: SyncDecisionInput): string {
+  return contentHash(JSON.stringify({ operationId: input.operationId, inputId: input.inputId, analysisRef: input.analysisRef.sha256, findingIds: [...input.findingIds].sort(), decision: input.decision.choice === 'new_rule' ? { choice: input.decision.choice, rule: input.decision.rule } : { choice: input.decision.choice } }))
+}
 /** 用户裁决是独立输入，即使保持原需求没有正文差量也必须保留。 */
 export function prepareControlledDecision(snapshot: InputSnapshot, input: SyncDecisionInput, originalRequestBlob?: BlobRef): BlobRef {
   const request: ControlledDecision = { schemaVersion: 1, type: 'sync.decision', requestId: input.requestId, operationId: input.operationId, inputId: input.inputId, analysisRef: input.analysisRef, findingIds: input.findingIds, decision: input.decision, source: snapshot.source, ...(originalRequestBlob ? { originalRequestBlob } : {}) }

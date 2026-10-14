@@ -9,7 +9,7 @@ import { prepareSpecBodyEdit } from '../spec-body-edit.js'
 import { composeInputSnapshots } from './composition.js'
 import { migrateSyncStore } from './migrations.js'
 import type { AdmitSyncInput, BaselinePair, BlobRef, ComposedInputRef, InputSnapshot } from './operation-types.js'
-import { composeControlledRequest, guardControlledRequestPath, prepareControlledRequest, prepareControlledDecision, readControlledDecision, validateControlledRequest } from './request-input.js'
+import { composeControlledRequest, controlledDecisionIdentity, guardControlledRequestPath, prepareControlledRequest, prepareControlledDecision, readControlledDecision, validateControlledRequest } from './request-input.js'
 import { captureInputSnapshot, readEvidence, readObject, readTree, writeEvidence } from './snapshot.js'
 import { SyncStore } from './store.js'
 
@@ -189,4 +189,14 @@ test('裁决继承原受控正文差量，不丢尚未落地的用户需求', as
   assert.equal(result.composed.requestBlob?.sha256, decision.sha256)
   assert.deepEqual(composeControlledRequest(snapshot, result.composed, decision).composed, result.composed)
   assert.throws(() => prepareControlledDecision(snapshot, readControlledDecision(snapshot, decision), decision), /来源绑定|来源|before/)
+})
+
+
+test('裁决业务身份排除运输UUID与finding顺序，但绑定原分析与明确业务选择', () => {
+  const input = { requestId: 'transport-a', operationId: 'original-op', inputId: 'input-a', analysisRef: { sha256: 'a'.repeat(64) }, findingIds: ['finding-b', 'finding-a'], decision: { choice: 'adopt_behavior' as const } }
+  const id = controlledDecisionIdentity(input)
+  assert.equal(controlledDecisionIdentity({ ...input, requestId: 'transport-b', findingIds: ['finding-a', 'finding-b'] }), id)
+  assert.notEqual(controlledDecisionIdentity({ ...input, decision: { choice: 'keep_intent' } }), id)
+  assert.notEqual(controlledDecisionIdentity({ ...input, analysisRef: { sha256: 'b'.repeat(64) } }), id)
+  assert.notEqual(controlledDecisionIdentity({ ...input, decision: { choice: 'new_rule', rule: '新的明确业务规则。' } }), id)
 })
