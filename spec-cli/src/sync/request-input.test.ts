@@ -9,7 +9,7 @@ import { prepareSpecBodyEdit } from '../spec-body-edit.js'
 import { composeInputSnapshots } from './composition.js'
 import { migrateSyncStore } from './migrations.js'
 import type { AdmitSyncInput, BaselinePair, BlobRef, ComposedInputRef, InputSnapshot } from './operation-types.js'
-import { composeControlledRequest, guardControlledRequestPath, prepareControlledRequest, validateControlledRequest } from './request-input.js'
+import { composeControlledRequest, guardControlledRequestPath, prepareControlledRequest, prepareControlledDecision, readControlledDecision, validateControlledRequest } from './request-input.js'
 import { captureInputSnapshot, readEvidence, readObject, readTree, writeEvidence } from './snapshot.js'
 import { SyncStore } from './store.js'
 
@@ -155,4 +155,25 @@ test('真实 SQLite 拒 operation/composed 请求错绑并在重启后保留正�
     assert.throws(() => store.bindComposedInput(automatic.fence, composed), /SYNC_COMPOSITION_BINDING/)
     store.bindComposedInput(automatic.fence, base)
   } finally { protocol.close() }
+})
+
+
+test('业务裁决无正文差量仍冻结请求，只绑定所选分析与当前输入', async t => {
+  const { root } = fixture(t), snapshot = await captureInputSnapshot(root), before = state(root)
+  const input = { requestId: 'decision-1', operationId: 'original-op', inputId: snapshot.id, analysisRef: { sha256: 'a'.repeat(64) }, findingIds: ['finding-1'], decision: { choice: 'keep_intent' as const } }
+  const ref = prepareControlledDecision(snapshot, input)
+  assert.deepEqual(readControlledDecision(snapshot, ref), { ...input, schemaVersion: 1, type: 'sync.decision', source: snapshot.source })
+  assert.deepEqual(ref, prepareControlledDecision(snapshot, input))
+  const composed = (await composeInputSnapshots(snapshot, null)).composed!
+  const result = composeControlledRequest(snapshot, composed, ref)
+  assert.deepEqual(result.conflicts, [])
+  assert.deepEqual(result.composed, { ...composed, requestBlob: ref })
+  assert.deepEqual(state(root), before)
+  assert.throws(() => readControlledDecision({ ...snapshot, id: 'stale' }, ref), /input/)
+  assert.throws(() => prepareControlledDecision(snapshot, { ...input, findingIds: [] }), /分歧/)
+  assert.throws(() => prepareControlledDecision(snapshot, { ...input, findingIds: ['finding-1', 'finding-1'] }), /分歧/)
+  assert.throws(() => prepareControlledDecision(snapshot, { ...input, decision: { choice: 'new_rule', rule: ' ' } }), /新规则/)
+  const next = prepareControlledDecision(snapshot, { ...input, decision: { choice: 'new_rule', rule: '明确采用新的限制。' } })
+  assert.notEqual(next.sha256, ref.sha256)
+  assert.equal(readControlledDecision(snapshot, next).decision.choice, 'new_rule')
 })

@@ -21,3 +21,6 @@ code:
 只读历史展示通过 readControlledRequest 复用同一不可变对象校验，不访问当前来源路径；来源文件移动或删除后仍能审阅当时的用户请求。validateControlledRequest 在此基础上额外核当前物理来源及路径，保持应用前的原有门禁。
 
 composeControlledRequest 不修改 InputSnapshot 或伪造 BaselinePair。它验证已有 ComposedInputRef 的完整 manifest/tree/contentDigest，以原 source 为 base、用户 next 为 source、已有 composed 为 delivery，复用真实 UTF-8 三方合并。非重叠请求保留 prior delivery 的 expanded 内容与其它生成文件；重叠、删除/修改或 mode/symlink 分歧返回明确 base/source/delivery Git 对象证据，不能覆盖或吞掉冲突。成功另存完整 manifest/tree/private composition ref，并把 requestBlob 绑定到 resulting composed；同请求重入幂等，不同请求不能隐式复用已有请求结果。没有用户请求时，既有 composeInputSnapshots API 与行为保持不变。
+
+
+裁决使用显式 type=sync.decision 的 schemaVersion=1 不可变请求，prepareControlledDecision/readControlledDecision 绑定原 operationId、inputId、可信 analysisRef、非空且不重复的 findingIds、稳定 requestId、source 与 keep_intent/adopt_behavior/new_rule 选择；new_rule 必须有用户规则正文。保持原需求没有正文差量也保存有效请求。它与正文差量明确区分，composeControlledRequest 仅绑定裁决 requestBlob、保持组合 tree/manifest/contentDigest，实际规则或代码变化由经验证的裁决协调方向生成。请求本身不把任意 analysisRef 升为授权；可信分析的原操作/检查点归属由应用与协调器核验。
