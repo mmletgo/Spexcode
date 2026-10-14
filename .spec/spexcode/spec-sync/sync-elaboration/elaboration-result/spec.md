@@ -24,3 +24,5 @@ code:
 调用者可提供可选 `verifications: readonly Pick<Verification,'id'|'command'|'cwd'|'timeoutMs'>[]`，其权威类型来自 spec-core 契约。它是独立可信执行器登记，不混入 ElaborationFact 业务事实，不代表新增业务政策或变更授权；开始前与其他输入一起复制并进入冻结摘要。未提供登记仍保留独立 P1 细化语义，执行未运行、实现不可交付，不能凭模型 VERIFY 获得执行权。
 
 细化输入可携独审行为分析证据、节点迁移及preserve_business/reelaborate模式。update_acceptance必须绑定合法规则ID、analysisRef和具体依据；代码来源仅授权符合明确原意的细节变更，不能删除既有验收或改变验证政策。候选及结果保留nodeChanges供协调器形成同一迁移候选。
+
+refinement可携已接受candidateDigest和生成独审的具体失败诊断，只表示在既定原意下补齐遗漏边界；它不能成为新事实、来源或政策授权。上一完整已接受契约作为输入，REQ/AC/VERIFY和既有义务保留，再经独审后新增普通必要状态/转移及验收。

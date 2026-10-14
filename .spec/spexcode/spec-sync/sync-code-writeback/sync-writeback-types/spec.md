@@ -19,3 +19,5 @@ code:
 具体finding保存ruleIds，裁决能仅覆盖选择的业务规则；未选事实和验证/工具政策不受影响。结算后下一无关代码输入沿decisionRefs继承同一用户裁决，不退回历史政策。
 
 authorChanges由程序对真实旧作者输入与新作者/受控请求文本比较得出，包含节点路径、前后raw及语义变化ID，并进入同一独审分析。它证明用户已实际修改原意或显式规则，user:raw验收授权不要求细化再重复改一次相同规则；合法来源闭包允许REQ/RULE/TR，仍不能让模型自行填写作者证据。
+
+裁决新操作重新运行独立行为分析，绑定当前policy/readSet/composed及不可变decision provenance（原requestRef/analysisRef/findingIds）；不能改旧analysis字节冒充新的独审。保留原意和新规则按明确目标修实现，只有采用行为选择保留所选外部行为；未选冲突继续阻依赖。

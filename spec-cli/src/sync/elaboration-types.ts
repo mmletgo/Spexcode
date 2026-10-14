@@ -24,6 +24,7 @@ export type ElaborationInput = {
   nodeChanges?: readonly ContractNodeChange[]
   mode?: 'preserve_business' | 'reelaborate'
   analysis?: CodeBehaviorEvidence
+  refinement?: { candidateDigest: string; diagnostics: readonly { code: string; message: string }[] }
   /** 冻结上下文中的源码/测试字节；存在时验证契约绑定指向真实文件。 */
   files?: ReadonlyMap<string, string>
   maxRepairs?: number

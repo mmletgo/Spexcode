@@ -22,6 +22,7 @@ export type CodeBehaviorFinding = {
 export type CodeBehaviorAnalysis = {
   version: 'code-behavior-v1'; inputId: string; baselinePairId: string | null
   composedDigest: string; readSetDigest: string; policyDigest: string; inputDigest: string
+  decision?: { requestRef: BlobRef; analysisRef: BlobRef; findingIds: string[] }
   authorChanges?: { nodeId: string; path: string; beforeRaw: string | null; afterRaw: string | null; changedIds: string[] }[]
   changes: CodeBehaviorChange[]; findings: CodeBehaviorFinding[]
   facts: ElaborationFact[]; authorizedChanges: AcceptanceChangeProposal[]; nodeChanges: ContractNodeProposal[]
