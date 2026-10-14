@@ -3,12 +3,21 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { BaselinePair, ComposedInputRef, InputSnapshot } from './operation-types.js'
-import { contentHash, objectGit, readObject, verifySnapshot, writeEvidence, writeObject, writeTree } from './snapshot.js'
+import { contentHash, objectGit, readObject, readTree, verifySnapshot, writeEvidence, writeObject, writeTree } from './snapshot.js'
 import type { TreeEntry } from './snapshot.js'
 
 export type CompositionConflict = { path: string; base: TreeEntry | null; source: TreeEntry | null; delivery: TreeEntry | null }
 export const isUtf8Text = (bytes: Buffer): boolean => !bytes.includes(0) && Buffer.from(bytes.toString('utf8')).equals(bytes)
 const same = (a: TreeEntry | undefined, b: TreeEntry | undefined): boolean => a?.oid === b?.oid && a?.mode === b?.mode
+
+/** 已验证交付被来源 Git 采纳后，以实际已提交的覆盖路径作为作者差量基准。 */
+export function adoptedDeliveryPaths(source: InputSnapshot, prior?: BaselinePair | null): Set<string> {
+  if (!prior) return new Set()
+  try { objectGit(source.source.commonDir, ['merge-base', '--is-ancestor', prior.verifiedDelivery.headCommit, source.headCommit]) }
+  catch (error) { if ((error as { status?: number }).status === 1) return new Set(); throw error }
+  const committed = new Map(readTree(source.source.commonDir, objectGit(source.source.commonDir, ['rev-parse', `${prior.verifiedDelivery.headCommit}^{tree}`]).toString().trim()).map(entry => [entry.path, entry]))
+  return new Set(verifySnapshot(prior.verifiedDelivery).filter(entry => same(entry, committed.get(entry.path)) && prior.coveredScope.paths.some(scope => entry.path === scope || entry.path.startsWith(`${scope}/`))).map(entry => entry.path))
+}
 
 /** source 的真实差量叠加到前次已验证 delivery；任何重叠歧义保留三方对象而不自动覆盖。 */
 export function composeInputSnapshots(newSource: InputSnapshot, prior?: BaselinePair | null, options: { projectEntries?: (snapshot: InputSnapshot, entries: TreeEntry[]) => TreeEntry[]; retainConflicts?: boolean } = {}): { composed: ComposedInputRef | null; conflicts: CompositionConflict[] } {
@@ -21,9 +30,10 @@ export function composeInputSnapshots(newSource: InputSnapshot, prior?: Baseline
     const base = new Map(project(prior.sourceInput).map(entry => [entry.path, entry]))
     const delivery = new Map(project(prior.verifiedDelivery).map(entry => [entry.path, entry]))
     const source = new Map(incoming.map(entry => [entry.path, entry]))
+    const adopted = adoptedDeliveryPaths(newSource, prior)
     const result = new Map(delivery)
     for (const path of new Set([...base.keys(), ...source.keys(), ...delivery.keys()])) {
-      const old = base.get(path), next = source.get(path), delivered = delivery.get(path)
+      const old = adopted.has(path) ? delivery.get(path) : base.get(path), next = source.get(path), delivered = delivery.get(path)
       // 成对基线只证明已交付 scope，未覆盖的旧来源编辑仍是待生成输入。
       if (!prior.coveredScope.paths.some(scope => path === scope || path.startsWith(`${scope}/`))) {
         if (next) result.set(path, next); else result.delete(path)

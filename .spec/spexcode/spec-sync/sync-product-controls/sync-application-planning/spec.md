@@ -21,3 +21,5 @@ readPaths 纳入冻结 Spec、版本化配置、授权源码/测试目录、额�
 可携最近共同BaselinePair，对旧verifiedDelivery及当前source图求影响并集，旧测试/治理路径与移动退役目标仍纳入完整范围，不因删除文件退出验收。移动的规范节点ID可依同业务ID识别；被明确移除的意图定位最近仍存在的上层需求。目标Spec目录受控授权自动新治理叶，但不授权宿主或其它未选节点。
 
 已receipt结算decisionRefs重读不可变用户裁决与所选finding.ruleIds，派生精确supersession事实。原settings facts全文留历史，只有所选规则按裁决生效；未选业务事实、VERIFY及工具政策保持。后续无关代码输入继承同一已结算裁决，不恢复旧行为。
+
+已消失的显式旧nodeId始终保留旧目标及raw、旧新图的测试影响。上层仍存在则以最近上层原意协调；最后业务节点被删时以旧验证交付冻结原意定位退役，仍须独审及真实负向验收，不因当前树404或0AC自免。已结算结构化decisionAuthorities从immutable request/原finding程序派生，文字facts说明不扩授权范围。

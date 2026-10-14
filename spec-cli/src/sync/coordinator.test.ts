@@ -10,6 +10,7 @@ import { CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@
 import type { ContractCell, GeneratedElaboration, GeneratedTables } from './elaboration-markdown.js'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
 import type { ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
+import { buildSyncApplicationPlan } from './planning.js'
 import { prepareSyncAdmission, runSyncOperation, syncPlanDigest } from './coordinator.js'
 import type { SyncCoordinatorOptions, SyncCoordinatorPlan } from './coordinator-types.js'
 import { migrateSyncStore, SYNC_COMPONENT, SYNC_MIGRATIONS, syncCoordinatorAddress } from './migrations.js'
@@ -97,7 +98,7 @@ async function fixture(t: test.TestContext, budget = { maxAttempts: 3, maxCalls:
     else if (request.purpose === 'elaboration_review') output = { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
     else if (request.purpose === 'code_generate') {
       const frozen = promptInput(request), source = new Map(frozen.files).get('src/export.js')!
-      const change = (path: string, content: string) => { const entry = frozen.manifest.entries.find(item => item.path === path)!; return { path, beforeDigest: entry.digest, beforeMode: entry.mode, mode: null, content } }
+      const change = (path: string, content: string) => { const entry = frozen.manifest.entries.find(item => item.path === path)!; return { path, beforeDigest: entry?.digest ?? null, beforeMode: entry?.mode ?? null, mode: entry ? null : '100644', content } }
       output = { version: 'sync-files-v1', changes: [...frozen.elaboratedSpecs.map(spec => change(spec.path, spec.source)), change('src/export.js', `${source}\n// independently reviewed generated implementation\n`)] }
     } else {
       const identity = JSON.parse(request.prompt.split('实际候选身份与 manifest:\n')[1].split('\n实际完整候选')[0]) as { inputId: string; candidate: { digest: string } }
@@ -585,4 +586,85 @@ test('新decision独审仍有相同稳定冲突ID时完整阻断，不因旧find
   const analysis = JSON.parse(readEvidence(f.input.source.commonDir, newWrapper.resultRef).toString()) as { findings: { id: string }[]; policyDigest: string }
   assert.equal(analysis.policyDigest, result.operation.policyDigest); assert.equal(analysis.findings[0].id, originalAnalysis.findings[0].id)
   assert.equal(f.store.listJournals(next.id).length, 0)
+})
+
+
+test('P3公共计划新增治理实际receipt后ff接受并完整退役，旧oracle和负向AC仍经Docker', { skip: docker.skip, timeout: 600000 }, async t => {
+  const f = await fixture(t)
+  f.git('reset', '--hard', 'HEAD')
+  const verification = { ...f.plan.verifications[0], definition: { id: 'VERIFY-SUMMARY-01', command: ['node', '--test', 'generated-tests/summary.test.mjs'], cwd: '.', timeoutMs: 10000 } }
+  writeFileSync(join(f.root, '.spec/spexcode.json'), JSON.stringify({ mainBranch: 'main', harnesses: [], sync: { version: 'sync-settings-v1', sourcePaths: ['src'], testPaths: ['generated-tests'], readPaths: ['package.json'], verifications: [...f.plan.verifications, verification], mandatoryTests: f.plan.mandatoryTests, facts: f.plan.facts, budget: { maxAttempts: 3, maxCalls: 16, maxRepairs: 2, timeoutMs: 300000 } } }))
+  writeFileSync(join(f.root, 'src/summary.js'), 'export const resultCount = rows => rows.length;\n')
+  f.git('add', '.'); f.git('commit', '-m', 'explicit authorized helper source and verification')
+  const nodeId = `sync-code-${contentHash('src/summary.js').slice(0, 16)}`, path = `.spec/project/export-contract/${nodeId}/spec.md`
+  const child = `---
+title: 导出计数辅助
+status: active
+contract-schema: sync-v1
+code:
+  - src/summary.js#resultCount
+---
+## raw source
+
+遵循导出原始反馈需求。
+
+## expanded spec
+
+### AC
+
+| id | covers | preconditions | action | assertion | test | command | source | depends-on |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| AC-SUMMARY-01 | REQ-EXPORT-01,RULE-EXPORT-05 | 成功行数组 | 读取计数辅助 | 返回rows.length | generated-tests/summary.test.mjs#AC-SUMMARY-01 | VERIFY-SUMMARY-01 | derived:REQ-EXPORT-01 | REQ-EXPORT-01 |
+
+### VERIFY
+
+| id | command | cwd | timeout-ms |
+| --- | --- | --- | --- |
+| VERIFY-SUMMARY-01 | ["node","--test","generated-tests/summary.test.mjs"] | . | 10000 |
+`
+  assert.ok(parseContract({ nodeId, path, source: child }).contract, JSON.stringify(parseContract({ nodeId, path, source: child }).findings))
+  let retiring = false
+  f.transform((output, request) => {
+    if (request.purpose === 'code_behavior_analyze') {
+      const value = output as { changes: { kind: string; paths: string[] }[]; newNodes: unknown[]; resolutions: unknown[] }
+      value.changes.forEach(change => { change.kind = 'allowed_change' })
+      value.newNodes = retiring ? [] : [{ codePath: 'src/summary.js', parentNodeId: 'export-contract', basis: '已有结果反馈原意支持内部长度辅助，无新增政策' }]
+      value.resolutions = retiring ? [{ path, content: null, mode: null }] : []
+      return value
+    }
+    if (request.purpose === 'elaboration_generate' && !retiring) {
+      const value = output as GeneratedElaboration, generated = rows(child, path).changes[0]
+      generated.nodeId = nodeId; return { ...value, changes: [...value.changes, generated] }
+    }
+    if (request.purpose === 'code_generate') {
+      const value = output as { changes: { path: string; beforeDigest: string | null; beforeMode: string | null; mode: string | null; content: string | null }[] }, frozen = promptInput(request), previous = frozen.manifest.entries.find(entry => entry.path === 'generated-tests/summary.test.mjs')
+      return { ...value, changes: [...value.changes, { path: 'generated-tests/summary.test.mjs', beforeDigest: previous?.digest ?? null, beforeMode: previous?.mode ?? null, mode: previous ? null : '100644', content: retiring ? "import assert from 'node:assert/strict'; import test from 'node:test'; import { existsSync } from 'node:fs'; test('AC-SUMMARY-01', () => assert.equal(existsSync(new URL('../src/summary.js', import.meta.url)), false));\n" : "import assert from 'node:assert/strict'; import test from 'node:test'; import { resultCount } from '../src/summary.js'; test('AC-SUMMARY-01', () => assert.equal(resultCount([1,2]), 2));\n" }] }
+    }
+    return output
+  })
+  await f.realTools()
+  const snapshot = await captureInputSnapshot(f.root), plan = await buildSyncApplicationPlan(snapshot, 'export-contract')
+  const first = f.store.admitAndEnqueue(await prepareSyncAdmission(snapshot, plan, { ingressKey: 'public-helper', rootCauseId: 'public-helper', origin: 'code', budget: f.operation.budget, managedRoot: f.managedRoot }))
+  f.useOperation(first); f.options.plan = plan; f.options.readCurrentPlan = () => buildSyncApplicationPlan(snapshot, 'export-contract')
+  const initial = await runSyncOperation(f.store, first.id, f.options)
+  assert.equal(initial.status, 'workspace_synced', JSON.stringify(f.store.listAttempts(first.id).map(attempt => ({ failure: attempt.failure, detail: attempt.failure?.evidenceRefs.map(ref => { const value = JSON.parse(readEvidence(snapshot.source.commonDir, ref).toString('utf8')) as { rounds?: { findings?: unknown[] }[] }; return value.rounds?.map(round => round.findings) ?? value }) }))))
+  const baseline = f.store.readBaseline(snapshot.source)!, delivery = baseline.verifiedDelivery.source.canonicalRoot
+  assert.equal(existsSync(join(f.root, path)), false); assert.equal(existsSync(join(delivery, path)), true)
+  assert.ok(f.store.listJournals(first.id)[0].receipt); assert.equal(baseline.sourceInput.id, snapshot.id)
+  f.git('merge', '--ff-only', baseline.verifiedDelivery.headCommit)
+  rmSync(join(f.root, path)); rmSync(join(f.root, 'src/summary.js'))
+  retiring = true
+  const nextInput = await captureInputSnapshot(f.root), nextPlan = await buildSyncApplicationPlan(nextInput, nodeId, baseline)
+  assert.equal(nextPlan.intentNodeId, 'export-contract'); assert.equal(nextPlan.authorizedChanges, undefined)
+  const next = f.store.admitAndEnqueue(await prepareSyncAdmission(nextInput, nextPlan, { ingressKey: 'public-retire', rootCauseId: 'public-retire', origin: 'code', previousBaselinePair: baseline, budget: f.operation.budget, managedRoot: f.managedRoot }))
+  f.useOperation(next); f.options.plan = nextPlan; f.options.readCurrentPlan = () => buildSyncApplicationPlan(nextInput, nodeId, baseline)
+  const result = await runSyncOperation(f.store, next.id, f.options)
+  assert.equal(result.status, 'workspace_synced', JSON.stringify(f.store.listAttempts(next.id).map(attempt => attempt.failure)))
+  const settled = f.store.readBaseline(nextInput.source)!
+  assert.ok(['AC-SUMMARY-01', 'VERIFY-SUMMARY-01', nodeId].every(id => settled.retiredIds!.includes(id)))
+  const finalDelivery = settled.verifiedDelivery.source.canonicalRoot
+  assert.equal(existsSync(join(finalDelivery, path)), false); assert.equal(existsSync(join(finalDelivery, 'src/summary.js')), false)
+  assert.equal(readFileSync(join(finalDelivery, 'tests/export.test.mjs'), 'utf8'), readFileSync(join(f.root, 'tests/export.test.mjs'), 'utf8'))
+  assert.ok(readFileSync(join(finalDelivery, 'generated-tests/summary.test.mjs'), 'utf8').includes('existsSync'))
+  assert.ok(f.store.readAttempt(f.store.readOperation(next.id).currentAttemptId!).verification!.passed)
 })

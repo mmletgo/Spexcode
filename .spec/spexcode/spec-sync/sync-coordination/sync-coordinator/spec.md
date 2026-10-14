@@ -47,3 +47,5 @@ code/combined/reconcile及已共同验证基线上的外部代码差量、真实
 三种裁决作为新immutable operation进入分析，保旧分析/ref/具体finding历史，绑定新input/policy/readset独审。只有adopt_behavior保所选外部行为，keep_intent及new_rule按对应明确意图修实现；未选分歧不被顺便采用。分析、裁决与细化证据都进入contextDigest，V4仍核原source和当前可信政策。
 
 已接受契约为普通生成修复的冻结义务。独立code review明确contract:path#id普通遗漏时，保留失败candidate及已接受完整正文的refinement checkpoint，在同预算的新attempt回P1；诊断不是fact/批准。再次细化只补已确定原意下的新必要边界，既有REQ/AC/VERIFY及全部业务义务不被弱化；真正重大未知仍GAP。node生命周期与此路径独立结算，不能用修复扩大迁移授权。
+
+行为独审完整findings决定阻断；用户选中过的历史ID不能清除新审查同ID发现。作者基准识别实际Git采纳的前次交付，明确raw/TR变更进入独立分析，交付回声不授权新业务。移动及公开删除沿旧目标/旧raw与新路径执行，生成读取旧verifiedDelivery全部AC作为退役历史，最后节点退役仍用旧固定命令及负向测试完成V1–V4。

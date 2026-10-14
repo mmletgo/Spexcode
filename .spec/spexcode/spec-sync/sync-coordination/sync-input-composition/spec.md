@@ -23,3 +23,5 @@ mergeText 导出同一真实三方文本算法供 [[sync-controlled-request]] �
 可信作者投影可在三方整合之前对各快照的对象条目应用同一已验证规则。InputSnapshot 身份和原始对象保持不变，冲突仍引用参与整合的真实派生 blob；只有经过 [[sync-author-input]] 核对的托管文本可采用该接缝。
 
 P3协调可显式retainConflicts，重叠位置暂采用新source字节并将完整base/source/delivery对象存compositionEvidenceBlob；它只是待分析输入，不是冲突裁决或可交付证明。默认原语仍在文本重叠返回null。独审相容整合或具体业务finding之后的最终候选必须再通过完整V1–V4，不能把暂选字节当自动覆盖授权。
+
+来源HEAD已包含旧verifiedDelivery提交时，仅对delivery快照等于该提交树字节/mode且在coveredScope内的路径采用已交付条目作为真实作者基准。此Git采纳证明使前次新增叶后来移动/删除成为真实差量；未采纳来源缺失不删前次delivery，也不将交付回声重新升级为作者授权。
