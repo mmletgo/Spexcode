@@ -2411,6 +2411,7 @@ export async function recoverSessionCreateTermination(requestKey: string, option
           || !existsSync(join(root, seeded)) || !readFileSync(join(root, seeded)).equals(readFileSync(join(path, seeded))))
         if (unknown) throw new SessionCreateError('session_create_failed', 'cleanup', 'candidate contains new or modified contents; preserving user edits', 409)
       }
+      let recoveryBranchCommit: string | undefined
       if (state.branch) {
         if (!options.base) throw new SessionCreateError('session_create_failed', 'cleanup', 'candidate recovery has no frozen fork point; preserving branch', 409)
         const [expected, actual] = await withGitAbortSignal(options.signal, () => Promise.all([
@@ -2418,8 +2419,9 @@ export async function recoverSessionCreateTermination(requestKey: string, option
           gitTry(['-C', root, 'rev-parse', '--verify', `refs/heads/${branch}^{commit}`]),
         ]))
         if (!expected.ok || !actual.ok || expected.stdout.trim() !== actual.stdout.trim()) throw new SessionCreateError('session_create_failed', 'cleanup', 'candidate branch differs from frozen fork point; preserving branch', 409)
+        recoveryBranchCommit = expected.stdout.trim()
       }
-      const residues = await cleanupSessionCandidate(root, id, path, branch, { ...state, store: existsSync(sessionStoreDir(id)) }, false)
+      const residues = await cleanupSessionCandidate(root, id, path, branch, { ...state, store: existsSync(sessionStoreDir(id)) }, false, recoveryBranchCommit)
       if (!residues.length && !retireSessionCandidateReceipt(id)) residues.push(`private candidate receipt remains at ${sessionCandidateReceiptPath(id)}`)
       if (residues.length) throw new SessionCreateError('session_create_cleanup_failed', 'cleanup', `matching candidate recovery left residue: ${residues.join('; ')}`, 500)
       const recovered: SessionCreateTermination = { version: 1, sessionId: id, requestDigest, payloadHash: options.payloadHash, code: 'session_create_cancelled', phase: 'cleanup', nativeStopped: true, nativeStatus: 'notStarted', cleanupComplete: true }
@@ -2521,7 +2523,7 @@ async function sessionCandidateState(root: string, path: string, branch: string,
   return { path: pathExists, worktree, branch: ref.ok }
 }
 
-async function cleanupSessionCandidate(root: string, id: string, path: string, branch: string, owned: SessionCandidateOwnership, forceWorktree = true): Promise<string[]> {
+async function cleanupSessionCandidate(root: string, id: string, path: string, branch: string, owned: SessionCandidateOwnership, forceWorktree = true, recoveryBranchCommit?: string): Promise<string[]> {
   const residues: string[] = []
   if (owned.store) {
     try { rmSync(sessionStoreDir(id), { recursive: true, force: true }) } catch { /* verified below */ }
@@ -2539,13 +2541,15 @@ async function cleanupSessionCandidate(root: string, id: string, path: string, b
       }
       command = 'candidate-state after remove'
       const afterRemove = await sessionCandidateState(root, path, branch, controller.signal)
-      if (owned.path && afterRemove.path && !afterRemove.worktree) {
+      if (forceWorktree && owned.path && afterRemove.path && !afterRemove.worktree) {
         try { rmSync(path, { recursive: true, force: true }) } catch { /* verified below */ }
       }
       const ref = `refs/heads/${branch}`
-      if (owned.branch) {
+      if (owned.branch && (forceWorktree || !afterRemove.worktree)) {
         command = 'branch delete'
-        const deleted = await gitTry(['-C', root, 'branch', '-D', branch])
+        const deleted = await gitTry(recoveryBranchCommit
+          ? ['-C', root, 'update-ref', '-d', ref, recoveryBranchCommit]
+          : ['-C', root, 'branch', '-D', branch])
         if (!deleted.ok) residues.push(`branch delete failed: ${deleted.stderr.trim() || deleted.failure}`)
       }
       command = 'candidate-state after delete'

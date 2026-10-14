@@ -114,3 +114,5 @@ This keeps concurrent creates from contending on `.git/config` while Git writes 
 取消恢复可经 recoverSessionCreateTermination 重入既有候选清理：先取得原 request-key 锁再取得精确候选资源锁，拒绝已有 canonical 会话（即使运行 envelope 缺失）。私有候选收据须精确匹配请求、载荷和从原 prompt 推导的 root/path/branch；没有收据、路径注册身份未知或分支偏离冻结 fork point 均不得删除或生成 notStarted 证明。已移除候选也必须锁内重读确认 Git registry、目录、分支与 session store 清理完成，退休私有候选收据后才写正式终止收据。首次清理失败或超时保留候选所有权，后续恢复不重建会话、不占新调用预算；清理错误保留 Git 命令阶段、截止事实和 stderr 诊断，不输出环境或凭据。
 
 候选资源所有权不能证明后来的文件字节仍属于创建事务。恢复须拒绝 tracked/staged/untracked/ignored 的新增或修改内容；只有既有 host-state seed `.spec/spexcode.local.json` 与 source 副本逐字节相同可视作已知可重建内容。恢复使用非 force 的 Git worktree remove，检查后出现未提交或未跟踪编辑仍由 Git 拒绝删除；未知内容不生成终止证明，原资源和预算保留。
+
+恢复清理仅由非 force 的 Git worktree remove 删除目录；命令完成后同路径出现的未知残留或外部重建内容保持原样并阻止终止证明，不能用递归 FS 删除兜底。恢复分支删除使用已解析的真实冻结 fork commit 作为 Git expected-old CAS，正常 reference-transaction hooks 继续执行；检查后分支前进则保留引用与残留，不生成 notStarted 收据。Git registry 尚未移除候选时不删除恢复分支。

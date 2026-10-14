@@ -23,3 +23,5 @@ code:
 创建阶段覆盖真实 Git target-resolution 与 worktree-add 后被取消：锁等待者取消不能替已取得创建权的事务写收据，worktree/branch 清理完成后方可结算资源。新进程同键重放取消收据且不同载荷拒绝；取消资源恢复不重派发、不增预算。未证实停止继续保留容量，收据版本、session、request、payload、清理与 nativeStopped 任一错配都拒绝。真实 Git fail→pass 验证仍不代表真实模型已经执行。
 
 真实 Git 清理失败和 10 秒截止中断后重入正式恢复：已有精确候选收据才可继续，已移除候选重读确认后结算；调用次数与预算均不增加。源 checkout 的 staged/unstaged 内容、index 以及另一个用户 worktree 逐字节保留。候选后来出现 unstaged/staged/untracked/ignored 内容时恢复拒绝并保留原文件；撤去测试新增内容后原候选可正常清理。并发 canonical publication 持有同 request-key 锁时恢复不得抢先，发布后即使 envelope 缺失仍拒绝 notStarted 清理。
+
+检查后竞争使用真实 Git 命令复现：worktree remove 完成后外部重建同路径内容、分支在删除前前进时均拒绝结算并保留文件或引用；撤去竞争后同键恢复通过，正常 reference-transaction hook 可观察删除。两种拒绝及成功恢复均保留源 checkout/index、其它用户 worktree 与原调用预算。
