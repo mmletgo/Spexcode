@@ -15,3 +15,7 @@ code:
 定向回归覆盖接受前次真实delivery不产生作者授权、其后真实raw差量仍可识别，以及retry范围不能借decision或user:raw授权改无关幂等AC。
 
 真实Git新增治理叶的旧source不含叶、delivery包含叶；未ff采纳时缺失保留交付，实际ff后旧nodeId经公开buildSyncApplicationPlan定位移动/删除，程序逐旧身份退役且已有核心AC保持。最后节点缺失仍有旧raw目标，不以404跳过。此定向用fake native独审，整体真实模型/Docker/交付证据另由上层验收。
+
+定向覆盖真正同raw行重叠的原immutable作者patch与前次A整合、程序choice后缀/作者字节分离、无授权raw改写拒绝；真实raw128种子到具体RULE02+AC02的analyze→derive→parsed evolution闭环，currentB=RULE06不阻A、不授权裸C。独立作者真实删除A与B选择并存仍用userraw退役，不借B来源。
+
+攻击回归复现并拒绝两类raw越权：仅选源码retry的keep裁决改无作者差量raw、真实A/B重叠弱化双方未改权限C；相容A/B合成保持C仍通过。完整P2交付ff接受后只改源码时，changedPaths排除前次已生成Spec/tests且authorChanges为空。

@@ -16,7 +16,9 @@ export function adoptedDeliveryPaths(source: InputSnapshot, prior?: BaselinePair
   try { objectGit(source.source.commonDir, ['merge-base', '--is-ancestor', prior.verifiedDelivery.headCommit, source.headCommit]) }
   catch (error) { if ((error as { status?: number }).status === 1) return new Set(); throw error }
   const committed = new Map(readTree(source.source.commonDir, objectGit(source.source.commonDir, ['rev-parse', `${prior.verifiedDelivery.headCommit}^{tree}`]).toString().trim()).map(entry => [entry.path, entry]))
-  return new Set(verifySnapshot(prior.verifiedDelivery).filter(entry => same(entry, committed.get(entry.path)) && prior.coveredScope.paths.some(scope => entry.path === scope || entry.path.startsWith(`${scope}/`))).map(entry => entry.path))
+  const delivered = new Map(verifySnapshot(prior.verifiedDelivery).map(entry => [entry.path, entry]))
+  const paths = new Set([...verifySnapshot(prior.sourceInput).map(entry => entry.path), ...delivered.keys()])
+  return new Set([...paths].filter(path => same(delivered.get(path), committed.get(path)) && prior.coveredScope.paths.some(scope => path === scope || path.startsWith(`${scope}/`))))
 }
 
 /** source 的真实差量叠加到前次已验证 delivery；任何重叠歧义保留三方对象而不自动覆盖。 */

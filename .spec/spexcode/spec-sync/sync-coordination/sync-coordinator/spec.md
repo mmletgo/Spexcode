@@ -49,3 +49,5 @@ code/combined/reconcile及已共同验证基线上的外部代码差量、真实
 已接受契约为普通生成修复的冻结义务。独立code review明确contract:path#id普通遗漏时，保留失败candidate及已接受完整正文的refinement checkpoint，在同预算的新attempt回P1；诊断不是fact/批准。再次细化只补已确定原意下的新必要边界，既有REQ/AC/VERIFY及全部业务义务不被弱化；真正重大未知仍GAP。node生命周期与此路径独立结算，不能用修复扩大迁移授权。
 
 行为独审完整findings决定阻断；用户选中过的历史ID不能清除新审查同ID发现。作者基准识别实际Git采纳的前次交付，明确raw/TR变更进入独立分析，交付回声不授权新业务。移动及公开删除沿旧目标/旧raw与新路径执行，生成读取旧verifiedDelivery全部AC作为退役历史，最后节点退役仍用旧固定命令及负向测试完成V1–V4。
+
+已完整独审的rawIntegrations.expectedRaw优先进入派生P1 intent/targets，真实source/composed manifest仍作diff/readSet基准，不修改冻结plan/policy。原immutable作者patch在decision分析中按原ref重读，不能丢或冒作模型事实。真实作者新raw/明确规则驱动对应实现修复；旧代码行为不因曾符合旧原意就覆盖新用户意图，其余合法外部行为保持。

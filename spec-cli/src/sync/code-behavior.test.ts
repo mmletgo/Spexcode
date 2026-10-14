@@ -11,15 +11,17 @@ import { buildSyncApplicationPlan } from './planning.js'
 import { readFrozenContracts } from './frozen-contracts.js'
 import type { ElaborationRunner } from './elaboration-types.js'
 import type { BaselinePair } from './operation-types.js'
-import { controlledDecisionIdentity, prepareControlledDecision } from './request-input.js'
+import { composeControlledRequest, controlledDecisionIdentity, prepareControlledDecision, prepareControlledRequest, renderControlledDecisionRaw } from './request-input.js'
 import { captureInputSnapshot, contentHash, readEvidence, readObject, readTree, writeEvidence } from './snapshot.js'
+import { validateContractEvolution } from './contract-evolution.js'
+import { parseParts } from '@spexcode/spec-core/contracts'
 import type { CodeBehaviorAnalysis, CodeBehaviorKind } from './writeback-types.js'
 
 const fixturePath = new URL('../../test/fixtures/spec-sync/export-repo/', import.meta.url)
 const git = (root: string, ...args: string[]): string => execFileSync('/usr/bin/git', ['-C', root, ...args], { encoding: 'utf8', stdio: 'pipe', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }).trim()
-async function fixture(t: test.TestContext) {
+async function fixture(t: test.TestContext, prepare?: (source: string) => string) {
   const parent = mkdtempSync(join(tmpdir(), 'sync-behavior-')), root = join(parent, 'source'), delivery = join(parent, 'delivery')
-  mkdirSync(root); cpSync(fixturePath, root, { recursive: true }); git(root, 'init', '-b', 'main'); git(root, 'config', 'user.name', 'behavior fixture'); git(root, 'config', 'user.email', 'fixture@example.invalid'); git(root, 'add', '.'); git(root, 'commit', '-m', 'base')
+  mkdirSync(root); cpSync(fixturePath, root, { recursive: true }); if (prepare) { const path = join(root, '.spec/export/export-contract/spec.md'); writeFileSync(path, prepare(readFileSync(path, 'utf8'))) } git(root, 'init', '-b', 'main'); git(root, 'config', 'user.name', 'behavior fixture'); git(root, 'config', 'user.email', 'fixture@example.invalid'); git(root, 'add', '.'); git(root, 'commit', '-m', 'base')
   git(root, 'switch', '-c', 'source'); git(root, 'worktree', 'add', '-b', 'delivery', delivery, 'HEAD')
   t.after(() => rmSync(parent, { recursive: true, force: true }))
   const base = await captureInputSnapshot(root), raw = readFileSync(join(root, '.spec/export/export-contract/spec.md'), 'utf8')
@@ -204,9 +206,141 @@ code:
     if (choice !== 'keep_intent') assert.ok(selected.authorizedChanges.every(item => item.source === `decision:${controlledDecisionIdentity(request)}`))
   }
 
+  writeFileSync(join(f.root, 'src/export.js'), f.source.replace("if (job.state !== 'FAILED')", "if (job.state !== 'FAILED' && job.state !== 'CANCELLED')"))
+  const independentSnapshot = await captureInputSnapshot(f.root), independentComposed = composeInputSnapshots(independentSnapshot, baseline).composed!, independentPlan = await buildSyncApplicationPlan(independentSnapshot, 'summary-child', baseline)
+  const independentRunner = (unresolved: boolean): ElaborationRunner => runner('allowed_change', (proposal, frozen) => {
+    proposal.changes = frozen.changedPaths.map(changed => ({ kind: unresolved && changed === 'src/export.js' ? 'conflict' : 'allowed_change', paths: [changed], affectedIds: changed === 'src/export.js' ? ['RULE-EXPORT-06', 'AC-EXPORT-08'] : ['REQ-SUMMARY-01', 'AC-SUMMARY-01'], ruleIds: changed === 'src/export.js' ? ['RULE-EXPORT-06'] : [], originalIntent: '独立作者删除计数A，重试B只保明确意图', previousBehavior: '计数A存在且只有FAILED重试', sourceBehavior: '作者明确删除A，代码另扩大重试B', deliveryBehavior: '保上次已验证计数与重试政策', evidence: `冻结独立删除/重试路径 ${changed}`, counterexample: 'B保原意不应复活用户已删A' }))
+    proposal.resolutions = [{ path, content: null, mode: null }]
+  })
+  const independentInput = { snapshot: independentSnapshot, composed: independentComposed, baseline, plan: independentPlan, readSetDigest: 'readset-independent-A-B', policyDigest: 'policy-independent-A-B', requestKey: 'independent-A-B', timeoutMs: 10000 }
+  const originalAnalysis = await analyzeCodeBehavior(independentInput, independentRunner(true)), originalRef = writeEvidence(independentSnapshot.source.commonDir, originalAnalysis), selectedB = originalAnalysis.findings.find(finding => finding.ruleIds.includes('RULE-EXPORT-06'))!
+  const current = { requestId: 'B-does-not-block-author-A', operationId: 'independent-A-B-op', inputId: independentSnapshot.id, analysisRef: originalRef, findingIds: [selectedB.id], decision: { choice: 'keep_intent' as const } }, currentRef = prepareControlledDecision(independentSnapshot, current)
+  const concurrent = await analyzeCodeBehavior({ ...independentInput, composed: { ...independentComposed, requestBlob: currentRef }, origin: 'decision', decision: { request: current, previous: { ref: originalRef, analysis: originalAnalysis } } }, independentRunner(false))
+  assert.equal(concurrent.findings.length, 0); assert.ok(concurrent.nodeChanges.some(change => change.action === 'retire' && change.from.path === path)); assert.ok(concurrent.authorizedChanges.every(change => change.source === 'user:raw'))
   rmSync(join(f.root, '.spec/export/export-contract'), { recursive: true })
   const empty = await captureInputSnapshot(f.root), finalPlan = await buildSyncApplicationPlan(empty, 'export-contract', baseline)
   assert.equal(finalPlan.intentNodeId, 'export-contract'); assert.ok(finalPlan.targets.some(target => target.path === '.spec/export/export-contract/spec.md' && target.rawSource))
   const frozen = await readFrozenContracts(f.root, new Map(readTree(snapshot.source.commonDir, composed.tree).filter(entry => entry.path.endsWith('/spec.md')).map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString('utf8')])))
   assert.ok(frozen.graph.items.has('AC-EXPORT-01'))
+})
+
+
+test('已ff接受交付删除后重建相同源码仍是真新差量，未接受的原source不复活删除', async t => {
+  const f = await fixture(t), path = 'src/export.js'
+  git(f.delivery, 'rm', path); git(f.delivery, 'commit', '-m', 'verified delivery removes obsolete implementation path')
+  const before = await captureInputSnapshot(f.root), baseline = (await f.input()).baseline!
+  assert.equal(adoptedDeliveryPaths(before, baseline).has(path), false)
+  assert.equal(readTree(before.source.commonDir, composeInputSnapshots(before, baseline).composed!.tree).some(entry => entry.path === path), false)
+  git(f.root, 'merge', '--ff-only', baseline.verifiedDelivery.headCommit)
+  mkdirSync(join(f.root, 'src'), { recursive: true }); writeFileSync(join(f.root, path), f.source)
+  const rebuilt = await captureInputSnapshot(f.root), result = composeInputSnapshots(rebuilt, baseline)
+  assert.equal(adoptedDeliveryPaths(rebuilt, baseline).has(path), true); assert.equal(result.conflicts.length, 0)
+  const entry = readTree(rebuilt.source.commonDir, result.composed!.tree).find(item => item.path === path)!
+  assert.equal(readObject(rebuilt.source.commonDir, entry.oid).toString('utf8'), f.source)
+})
+
+
+test('原immutable作者patch与已交付同一raw行真正重叠由独审整合，choice说明不冒作者字节', async t => {
+  const f = await fixture(t), path = '.spec/export/export-contract/spec.md', old = '用户可以提交符合筛选条件的数据导出，任务完成后下载结果。'
+  const a = f.raw.replace(old, `${old} 已交付A保持有效。`), b = f.raw.replace(old, `${old} 原immutable作者B保持有效。`), merged = f.raw.replace(old, `${old} 已交付A保持有效。原immutable作者B保持有效。`)
+  writeFileSync(join(f.delivery, path), a)
+  const original = await f.input(), author = prepareControlledRequest(original.snapshot, { path, source: f.raw, next: b, changed: true, startLine: 1, endLine: 1 }, { kind: 'user_edit', requestId: 'original-author-B', nodeId: 'export-contract', intent: '原作者B只影响结果反馈' })
+  assert.ok(author.changed)
+  const conflictInput = { ...original, composed: composeControlledRequest(original.snapshot, original.composed, author.requestBlob, { retainConflicts: true }).composed! }
+  assert.ok(conflictInput.composed.compositionEvidenceBlob)
+  const previous = await analyzeCodeBehavior(conflictInput, runner('conflict')), previousRef = writeEvidence(original.snapshot.source.commonDir, previous)
+  const request = { requestId: 'only-B-choice', operationId: 'original-partial-operation', inputId: original.snapshot.id, analysisRef: previousRef, findingIds: [previous.findings.find(finding => finding.paths.includes(path))!.id], decision: { choice: 'new_rule' as const, rule: 'B采用明确新反馈，未选A和验证义务保持' } }
+  const requestBlob = prepareControlledDecision(original.snapshot, request, author.requestBlob), composed = composeControlledRequest(original.snapshot, original.composed, requestBlob, { retainConflicts: true }).composed!
+  const analysis = await analyzeCodeBehavior({ ...original, composed, origin: 'decision', decision: { request, previous: { ref: previousRef, analysis: previous } } }, runner('allowed_change', proposal => { proposal.resolutions = [{ path, content: merged, mode: '100644' }] }))
+  const proof = analysis.rawIntegrations![0]
+  assert.equal(proof.sourceRaw, parseParts(b)!.rawSource); assert.equal(proof.deliveryRaw, parseParts(a)!.rawSource); assert.equal(proof.resolvedRaw, parseParts(merged)!.rawSource)
+  assert.equal(proof.expectedRaw, renderControlledDecisionRaw(parseParts(merged)!.rawSource!, request, previous))
+  assert.ok(proof.expectedRaw.includes('已交付A')); assert.ok(proof.expectedRaw.includes('原immutable作者B')); assert.ok(proof.expectedRaw.includes('B采用明确新反馈'))
+  assert.equal(analysis.authorChanges!.find(change => change.path === path)!.afterRaw, parseParts(b)!.rawSource)
+  assert.notEqual(analysis.authorChanges![0].afterRaw, proof.expectedRaw)
+  writeFileSync(join(f.root, path), f.raw.replace('适用域：', '实现说明。适用域：'))
+  const codeOnly = await f.input()
+  writeFileSync(join(f.delivery, path), f.raw)
+  const noOverlap = { ...codeOnly, baseline: (await f.input()).baseline, composed: (await f.input()).composed }
+  await assert.rejects(analyzeCodeBehavior(noOverlap, runner('allowed_change', proposal => { proposal.resolutions = [{ path, content: merged, mode: '100644' }] })), /raw整合越过实际作者/)
+})
+
+
+test('combined真实raw-only作者种子映射具体RULE02及AC02，独立裁决B不能扩无关C', async t => {
+  const f = await fixture(t), path = '.spec/export/export-contract/spec.md'
+  writeFileSync(join(f.root, 'src/export.js'), f.source.replace("if (job.state !== 'FAILED')", "if (job.state !== 'FAILED' && job.state !== 'CANCELLED')"))
+  const input = await f.input(), raw = f.raw.replace('用户可以提交符合筛选条件的数据导出，任务完成后下载结果。', '用户可以提交符合筛选条件的数据导出，filter最多128字符，任务完成后下载结果；权限等其余规则不变。')
+  const author = prepareControlledRequest(input.snapshot, { path, source: f.raw, next: raw, changed: true, startLine: 1, endLine: 1 }, { kind: 'user_edit', requestId: 'filter-128-author', nodeId: 'export-contract', intent: 'filter最多128，独立重试分歧另裁决' })
+  assert.ok(author.changed)
+  const composed = composeControlledRequest(input.snapshot, input.composed, author.requestBlob, { retainConflicts: true }).composed!
+  const mapped = (proposal: Record<string, unknown>, frozen: { changedPaths: string[] }, unresolved: boolean): void => {
+    proposal.changes = frozen.changedPaths.map(changed => ({ kind: unresolved && changed === 'src/export.js' ? 'conflict' : 'allowed_change', paths: [changed], affectedIds: changed === path ? ['RULE-EXPORT-02', 'AC-EXPORT-02'] : ['RULE-EXPORT-06', 'AC-EXPORT-08'], ruleIds: changed === path ? ['REQ-EXPORT-01', 'RULE-EXPORT-02'] : ['RULE-EXPORT-06'], originalIntent: '参数明确边界和所有者失败重试分别处理', previousBehavior: '参数无128上界，只有FAILED重试', sourceBehavior: '作者明确128边界，代码引入另一重试变化', deliveryBehavior: '保原权限和幂等约束', evidence: `冻结真实作者raw/旧RULE/源码 ${changed}`, counterexample: '129字符拒绝；未选幂等键不得变化' }))
+    proposal.acceptanceChanges = [{ id: 'AC-EXPORT-02', ruleIds: ['REQ-EXPORT-01', 'RULE-EXPORT-02'], source: 'user:raw', reason: '原immutable raw明确filter128，独审具体派生RULE02与AC02，不授权其它规则' }]
+  }
+  const previous = await analyzeCodeBehavior({ ...input, composed, origin: 'combined' }, runner('allowed_change', (proposal, frozen) => mapped(proposal, frozen, true))), ref = writeEvidence(input.snapshot.source.commonDir, previous)
+  const finding = previous.findings.find(item => item.ruleIds.includes('RULE-EXPORT-06'))!
+  assert.ok(finding)
+  const request = { requestId: 'only-retry-B', operationId: 'combined-filter-and-retry', inputId: input.snapshot.id, analysisRef: ref, findingIds: [finding.id], decision: { choice: 'keep_intent' as const } }, requestBlob = prepareControlledDecision(input.snapshot, request, author.requestBlob)
+  const finalComposed = composeControlledRequest(input.snapshot, input.composed, requestBlob, { retainConflicts: true }).composed!
+  const analysis = await analyzeCodeBehavior({ ...input, composed: finalComposed, origin: 'decision', decision: { request, previous: { ref, analysis: previous } } }, runner('allowed_change', (proposal, frozen) => mapped(proposal, frozen, false)))
+  assert.deepEqual(analysis.authorChanges![0].changedIds, ['REQ-EXPORT-01'])
+  assert.deepEqual(analysis.decisionAuthorities![0].ruleIds, ['RULE-EXPORT-06'])
+  const analysisRef = writeEvidence(input.snapshot.source.commonDir, analysis), authorization = deriveBehaviorAuthorization(analysis, analysisRef)[0]
+  assert.equal(authorization.id, 'AC-EXPORT-02'); assert.deepEqual(authorization.action === 'update_acceptance' && authorization.ruleIds, ['REQ-EXPORT-01', 'RULE-EXPORT-02'])
+  const beforeFiles = new Map(readTree(input.snapshot.source.commonDir, input.baseline!.verifiedDelivery.immutableTree).map(entry => [entry.path, readObject(input.snapshot.source.commonDir, entry.oid).toString('utf8')]))
+  const before = await readFrozenContracts(f.root, beforeFiles)
+  const updated = raw.replace('key与非空字符串filter必需；', 'key与非空字符串filter必需，filter最多128字符；').replace('明确拒绝，状态不变 | tests/export.test.mjs#AC-EXPORT-02', '非法输入/129字符明确拒绝，状态不变 | tests/export.test.mjs#AC-EXPORT-02')
+  const afterFiles = new Map(beforeFiles); afterFiles.set(path, updated)
+  const after = await readFrozenContracts(f.root, afterFiles), policy = { mode: 'reelaborate' as const, authorizedChanges: deriveBehaviorAuthorization(analysis, analysisRef), nodeChanges: [], retiredIds: [], newNodeRawSources: new Map([[path, parseParts(updated)!.rawSource!]]), facts: input.plan.facts, analysis: { ref: analysisRef, analysis }, decisionAuthorities: analysis.decisionAuthorities }
+  assert.deepEqual(validateContractEvolution(before, after, policy).filter(issue => issue.severity === 'error'), [])
+  afterFiles.set(path, updated.replace('成功需非空result、发布一次；失败需非空reason；重复完成保留首次结果', '失败不需要reason，允许无结果成功'))
+  const unrelated = await readFrozenContracts(f.root, afterFiles)
+  assert.ok(validateContractEvolution(before, unrelated, policy).some(issue => issue.code === 'decision_scope_exceeded' && issue.itemId === 'RULE-EXPORT-05'))
+
+  await assert.rejects(analyzeCodeBehavior({ ...input, composed: finalComposed, origin: 'decision', decision: { request, previous: { ref, analysis: previous } } }, runner('allowed_change', (proposal, frozen) => { mapped(proposal, frozen, false); (proposal.acceptanceChanges as { ruleIds: string[] }[])[0].ruleIds = ['RULE-EXPORT-02'] })), /所选裁决范围/)
+})
+
+
+test('ff接受完整P2生成后仅源码小改，真实changedPaths排除已接受Spec和测试回声', async t => {
+  const f = await fixture(t), path = '.spec/export/export-contract/spec.md'
+  git(f.root, 'rm', 'src/export.js', 'tests/export.test.mjs')
+  writeFileSync(join(f.root, path), `---\ntitle: 导出契约原始输入\nstatus: pending\n---\n## raw source\n\n${parseParts(f.raw)!.rawSource}\n`)
+  git(f.root, 'add', '.'); git(f.root, 'commit', '-m', 'pre-P2 author intent without generated implementation')
+  git(f.delivery, 'merge', '--ff-only', git(f.root, 'rev-parse', 'HEAD'))
+  const before = await captureInputSnapshot(f.root)
+  mkdirSync(join(f.delivery, 'src'), { recursive: true }); mkdirSync(join(f.delivery, 'tests'), { recursive: true }); writeFileSync(join(f.delivery, 'src/export.js'), f.source); writeFileSync(join(f.delivery, path), f.raw)
+  writeFileSync(join(f.delivery, 'tests/export.test.mjs'), readFileSync(new URL('tests/export.test.mjs', fixturePath), 'utf8'))
+  git(f.delivery, 'add', '.'); git(f.delivery, 'commit', '-m', 'complete verified P2 implementation contracts and tests')
+  const baseline: BaselinePair = { id: 'complete-p2-verified', repositoryId: before.source.repositoryId, source: before.source, sourceInput: before, verifiedDelivery: await captureInputSnapshot(f.delivery), coveredScope: { paths: ['src', '.spec', 'tests'], contractIds: [], flowIds: [] }, receiptId: 'complete-p2-receipt', settledAtMs: 1 }
+  git(f.root, 'merge', '--ff-only', baseline.verifiedDelivery.headCommit)
+  writeFileSync(join(f.root, 'src/export.js'), `${f.source}\n// behavior preserving implementation edit\n`)
+  const snapshot = await captureInputSnapshot(f.root), composed = composeInputSnapshots(snapshot, baseline).composed!, plan = (await f.input()).plan
+  let checked = false
+  const analysis = await analyzeCodeBehavior({ snapshot, composed, baseline, plan, readSetDigest: 'readset-ff-delta', policyDigest: 'policy-ff-delta', requestKey: 'ff-source-delta', timeoutMs: 10000 }, runner('refactor', (_proposal, frozen) => { checked = true; assert.deepEqual(frozen.changedPaths, ['src/export.js']) }))
+  assert.equal(checked, true); assert.deepEqual(analysis.authorChanges, []); assert.equal(analysis.changes.length, 1); assert.equal(analysis.changes[0].kind, 'refactor')
+})
+
+
+test('未选代码keep裁决不能改写无作者差量raw；真实重叠也不能丢双方未改权限C', async t => {
+  const f = await fixture(t, source => source.replace('此输入是固定业务验收夹具；', '任何下载均须当前所有者权限。此输入是固定业务验收夹具；'))
+  const path = '.spec/export/export-contract/spec.md', originalRaw = parseParts(f.raw)!.rawSource!
+  writeFileSync(join(f.root, 'src/export.js'), `${f.source}\n// external delta\n`)
+  writeFileSync(join(f.root, path), f.raw.replace('适用域：', '实现说明。适用域：'))
+  const input = await f.input()
+  const scope = (proposal: Record<string, unknown>): void => { proposal.changes = (proposal.changes as object[]).map(change => ({ ...change, affectedIds: ['RULE-EXPORT-06'], ruleIds: ['RULE-EXPORT-06'] })) }
+  const previous = await analyzeCodeBehavior(input, runner('conflict', scope)), ref = writeEvidence(input.snapshot.source.commonDir, previous)
+  assert.deepEqual(previous.authorChanges, [])
+  const request = { requestId: 'raw-scope-attack', operationId: 'previous', inputId: input.snapshot.id, analysisRef: ref, findingIds: [previous.findings.find(item => item.paths.includes('src/export.js'))!.id], decision: { choice: 'keep_intent' as const } }
+  input.composed.requestBlob = prepareControlledDecision(input.snapshot, request); input.decision = { request, previous: { ref, analysis: previous } }; input.origin = 'decision'
+  const malicious = f.raw.replace(originalRaw, '以后任何人均可下载任何导出结果，无须所有者权限。')
+  await assert.rejects(analyzeCodeBehavior(input, runner('allowed_change', proposal => { scope(proposal); proposal.resolutions = [{ path, content: malicious, mode: '100644' }] })), /raw整合越过实际作者\/交付编辑范围/)
+
+  const a = f.raw.replace('符合筛选条件的数据导出', 'filter最多128字符的数据导出'), b = f.raw.replace('任务完成后下载结果', '任务完成后下载结果并显示完成时间')
+  writeFileSync(join(f.root, path), a); writeFileSync(join(f.delivery, path), b)
+  const overlap = await f.input(); assert.ok(overlap.composed.compositionEvidenceBlob)
+  const compatible = f.raw.replace('符合筛选条件的数据导出', 'filter最多128字符的数据导出').replace('任务完成后下载结果', '任务完成后下载结果并显示完成时间')
+  const changedC = compatible.replace('任何下载均须当前所有者权限。', '任何人均可下载任何导出结果，不要求当前所有者。')
+  await assert.rejects(analyzeCodeBehavior({ ...overlap, origin: 'combined' }, runner('allowed_change', proposal => { proposal.resolutions = [{ path, content: changedC, mode: '100644' }] })), /raw整合越过实际作者\/交付编辑范围/)
+  const accepted = await analyzeCodeBehavior({ ...overlap, origin: 'combined' }, runner('allowed_change', proposal => { proposal.resolutions = [{ path, content: compatible, mode: '100644' }] }))
+  assert.equal(accepted.rawIntegrations![0].resolvedRaw, parseParts(compatible)!.rawSource); assert.ok(accepted.rawIntegrations![0].expectedRaw.includes('任何下载均须当前所有者权限。'))
 })

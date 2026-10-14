@@ -39,3 +39,5 @@ recoveryOnly真实SQLite证明queued无attempt与paused已计划未原生派发�
 P3真实code来源沿analyzing独立会话、同attempt checkpoint与冻结policy进入P1/生成；refactor保持正文，未完整checkedPaths的独审不得晋级。接缝在生成独审明确终止，不冒称V3或receipt。短租约长调用的真实heartbeat/cancel及重入不重派继续保持。
 
 原raw及TR明确作者编辑场景复用新行为分析/独审并保持真实Docker、原oracle、源码/index和未影响作者内容的完整断言。新裁决独审仍发现同历史ID互斥时不得生成或写journal。
+
+公开buildSyncApplicationPlan无手工退役授权完成新叶→实际receipt→git ff→删能力/治理叶→旧nodeId→逐项退役→旧保护oracle及真实负向AC Docker→新receipt/退役累计。部分正文A实际Docker交付后，B原immutable作者patch同行真重叠；受审整合进入P1及实际候选，未审候选不进入可写fence/journal。

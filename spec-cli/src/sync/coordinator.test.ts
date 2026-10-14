@@ -17,7 +17,7 @@ import { migrateSyncStore, SYNC_COMPONENT, SYNC_MIGRATIONS, syncCoordinatorAddre
 import { dockerVerificationDriver } from './verification-executor.js'
 import type { VerificationCheckpoint } from './verification-executor-types.js'
 import { freezeDeliveryRuntime } from './runtime-freeze.js'
-import { captureInputSnapshot, contentHash, readEvidence, writeEvidence } from './snapshot.js'
+import { captureInputSnapshot, contentHash, readEvidence, readObject, readTree, writeEvidence } from './snapshot.js'
 import type { NativeRunCheckpoint, NativeRunPlan } from './native-run.js'
 import { SyncStore } from './store.js'
 import { sessionIdForCreateKey } from '../sessions.js'
@@ -416,7 +416,7 @@ for (const variant of ['raw', 'TR'] as const) test(`AC-SYNC-${variant === 'raw' 
     return output
   })
   const result = await runSyncOperation(f.store, f.operation.id, f.options)
-  assert.equal(result.status, 'workspace_synced', JSON.stringify({ failure: result.failure, phase: result.operation.phase, refs: f.store.readAttempt(result.operation.currentAttemptId!).checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).filter(value => value.rounds || value.validationFindings).map(value => ({ status: value.status, findings: value.validationFindings ?? value.rounds.flatMap((round: { findings: unknown[] }) => round.findings) })) }))
+  assert.equal(result.status, 'workspace_synced', JSON.stringify({ failure: result.failure, attempts: f.store.listAttempts(result.operation.id).map(attempt => ({ failure: attempt.failure, detail: attempt.failure?.evidenceRefs.map(ref => { const value = JSON.parse(readEvidence(f.input.source.commonDir, ref).toString('utf8')); return value.rounds?.map((round: { findings: unknown[] }) => round.findings) ?? value.validationFindings ?? value }) })), phase: result.operation.phase, refs: f.store.readAttempt(result.operation.currentAttemptId!).checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).filter(value => value.rounds || value.validationFindings).map(value => ({ status: value.status, findings: value.validationFindings ?? value.rounds.flatMap((round: { findings: unknown[] }) => round.findings) })) }))
   assert.equal(result.operation.callsUsed, 6); assert.ok(result.operation.requestBlob); assert.equal(result.operation.input.id, f.input.id)
   assert.ok(result.operation.deliveredScope.contractIds.includes(`AC-EXPORT-${variant === 'raw' ? '02' : '08'}`))
   assert.equal(Number(f.git('rev-list', '--count', result.operation.deliveryPlan.branch)), f.priorCommitCount + 1)
@@ -667,4 +667,45 @@ code:
   assert.equal(readFileSync(join(finalDelivery, 'tests/export.test.mjs'), 'utf8'), readFileSync(join(f.root, 'tests/export.test.mjs'), 'utf8'))
   assert.ok(readFileSync(join(finalDelivery, 'generated-tests/summary.test.mjs'), 'utf8').includes('existsSync'))
   assert.ok(f.store.readAttempt(f.store.readOperation(next.id).currentAttemptId!).verification!.passed)
+})
+
+
+test('P3实际partial正文A与后续immutable作者B同行重叠，独审resolution原意进入P1及候选不被plan覆盖', { skip: docker.skip, timeout: 300000 }, async t => {
+  const sentence = '用户可以提交符合筛选条件的数据导出，任务完成后下载结果。', a = `${sentence} 已交付A保持有效。`, b = `${sentence} 原immutable作者B保持有效。`, merged = original.replace(sentence, `${sentence} 已交付A保持有效。原immutable作者B保持有效。`)
+  const f = await fixture(t, undefined, false, original, 'project', original, {}, { original: sentence + '此输入是固定业务验收夹具；decision:EXPORT-POLICY 表示测试作者提供的显式业务事实，只适用于夹具。', replacement: a + '此输入是固定业务验收夹具；decision:EXPORT-POLICY 表示测试作者提供的显式业务事实，只适用于夹具。', intent: '明确作者A原意，业务规则与原oracle不改', testPath: 'generated-tests/unused-author-registration.test.mjs' })
+  let second = false
+  f.transform((output, request) => {
+    if (request.purpose === 'code_behavior_analyze') {
+      const value = output as { changes: { kind: string }[]; resolutions: unknown[] }
+      value.changes.forEach(change => { change.kind = 'allowed_change' }); if (second) value.resolutions = [{ path: contractPath, content: merged, mode: '100644' }]
+      return value
+    }
+    if (second && request.purpose === 'elaboration_generate') {
+      const frozen = JSON.parse(request.prompt.split('冻结业务输入:\n')[1].split('\n')[0]) as { intent: { rawSource: string }; targets: { path: string; rawSource?: string }[] }
+      assert.ok(frozen.intent.rawSource.includes('已交付A')); assert.ok(frozen.intent.rawSource.includes('原immutable作者B'))
+      assert.ok(frozen.targets.find(target => target.path === contractPath)!.rawSource!.includes('已交付A'))
+    }
+    if (second && request.purpose === 'code_review') {
+      const frozen = promptInput(request), spec = frozen.elaboratedSpecs.find(spec => spec.path === contractPath)!.source
+      assert.ok(spec.includes('已交付A')); assert.ok(spec.includes('原immutable作者B'))
+      return { ...(output as object), verdict: 'conflict', findings: [{ kind: 'conflict', affectedIds: ['RULE-EXPORT-05'], ruleLocation: 'RULE-EXPORT-05', codeLocation: 'src/export.js#ExportService', evidence: '定向证明受审raw已到真实候选，停在独审边界', counterexample: '不伪称此B候选已运行V3', message: 'fixture stop after raw candidate proof' }] }
+    }
+    return output
+  })
+  await f.realTools()
+  const initial = await runSyncOperation(f.store, f.operation.id, f.options)
+  assert.equal(initial.status, 'workspace_synced', JSON.stringify(f.store.listAttempts(f.operation.id).map(attempt => attempt.failure)))
+  const baseline = f.store.readBaseline(f.input.source)!
+  assert.ok(readFileSync(join(baseline.verifiedDelivery.source.canonicalRoot, contractPath), 'utf8').includes('已交付A'))
+  const author = prepareControlledRequest(f.input, { path: contractPath, source: original, next: original.replace(sentence, b), changed: true, startLine: 1, endLine: 1 }, { kind: 'user_edit', requestId: 'raw-B-after-A', nodeId: 'export-contract', intent: '原作者B与A相容，原业务及验证政策保持' })
+  assert.ok(author.changed)
+  const admission = await prepareSyncAdmission(f.input, f.plan, { ingressKey: 'raw-integrated-B', rootCauseId: 'raw-integrated-B', origin: 'combined', previousBaselinePair: baseline, budget: f.operation.budget, managedRoot: f.managedRoot, requestBlob: author.requestBlob })
+  const operation = f.store.admitAndEnqueue(admission); f.useOperation(operation); second = true
+  const result = await runSyncOperation(f.store, operation.id, f.options)
+  assert.equal(result.status, 'conflicted', JSON.stringify(f.store.listAttempts(operation.id).map(attempt => attempt.failure)))
+  const attempt = f.store.readAttempt(f.store.readOperation(operation.id).currentAttemptId!), generated = JSON.parse(readEvidence(f.input.source.commonDir, attempt.failure!.evidenceRefs[0]).toString('utf8')) as { candidate: { tree: string } | null }
+  assert.ok(generated.candidate)
+  const entry = readTree(f.input.source.commonDir, generated.candidate.tree).find(entry => entry.path === contractPath)!
+  const actual = readObject(f.input.source.commonDir, entry.oid).toString('utf8'); assert.ok(actual.includes('已交付A')); assert.ok(actual.includes('原immutable作者B'))
+  assert.equal(attempt.candidate, null); assert.equal(f.store.listJournals(operation.id).length, 0)
 })
