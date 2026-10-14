@@ -26,7 +26,7 @@ P1 续修种子仅取完整结算的具体业务拒绝轮（repair_budget_exhaus
 
 freezeSyncPlanEvidence复用同一canonical JSON排序，使planBlob.sha256严格等于policyDigest；接入直接保存plan引用，queued恢复不依赖另一个索引文件。派生authorProjection仅规范化已核canonical managed文本，真实snapshot不变；受控Spec输入与代码行为分析共用冻结计划和交付链。阶段result及嵌套refs直接checkpoint保活，不能只pin wrapper。
 
-同operation/input/policy首个P1结构及独立评审通过的细化结果永久冻结为生成义务；code/V3修复的新attempt与进程重启复用原精确结果，并checkpoint原attempt/result evidence provenance，不能再派发P1或更改其稳定AC/ID/政策。仅P1本身未通过时可再细化；通过后清空失败seed，未通过旧seed不能复活。
+同operation/input/policy首个P1结构及独立评审通过的细化结果作为普通实现修复的冻结义务；code/V3修复的新attempt与进程重启复用精确结果，并checkpoint原attempt/result evidence provenance。真正绑定的contract-omission可经新P1结构与独立评审批准增补已明确原意的必要边界，后续普通修复冻结该合法增补链；稳定AC/ID/政策不被弱化。P1本身未通过时沿原续修语义处理；通过后清空失败seed，未通过旧seed不能复活。
 
 initial与spec共享P2入口。旧无planBlob operation先claim持久unsupported，不借当前plan猜恢复。终态/controlled操作只精确消费自己的stopped FIFO头；有效queued头由应用FIFO调度，中央重入不把顺序冲突误报成永久unsupported，也不跳过有效pending。
 
@@ -56,8 +56,10 @@ code/combined/reconcile及已共同验证基线上的外部代码差量、真实
 
 已批准 adopt_behavior/new_rule 与不可改外部 oracle 真实互斥时，独立 code_review 的 oracle-policy:decision:<stableDecisionId> missing_fact 复用现有 needs_input 停止路径。程序核当前 immutable requestRef、实际 mandatory testPath/testId/verification 定义、现有 decisionAuthorizationErrors 的所选范围，且旧/新适用 RULE/TR 确已改义。错误裁决、非登记测试、未选规则、未变规则或 keep_intent 均为 review_invalid，不能泛从 V3 nonzero 推断政策冲突。有效失败 code 为 oracle_policy_conflict，保存旧 oracle 内容摘要、精确测试/定义、裁决与规则、证据/反例，要求可信 owner 发布相容版本；旧 oracle 未通过，固定 whole command、全部守卫和原总预算仍有效。managed AC/test 演化继续原精确授权机制；不自动修改外部测试、不再造 checkpoint 或模型阶段。
 
-普通 contract:path#id 引用不赋予重细化权限；代码/测试错误保持首个已批准完整P1正文，在原预算的新attempt修生成。live与checkpoint恢复均将每个实际 GenerationFinding 完整JSON存入现有 repairContext.diagnostics.message，保 codeLocation/evidence/counterexample，不嵌冻结全文或旧诊断递归体，不增加DB/恢复层。下一生成仍需新的独立code_review；取消/耗尽/终态重入不额外派发。
+普通 contract:path#id 引用不赋予重细化权限；代码/测试错误保持当前合法增补链的已批准完整P1正文，在原预算的新attempt修生成。live与checkpoint恢复均将每个实际 GenerationFinding 完整JSON存入现有 repairContext.diagnostics.message，保 codeLocation/evidence/counterexample，不嵌冻结全文或旧诊断递归体，不增加DB/恢复层。下一生成仍需新的独立code_review；取消/耗尽/终态重入不额外派发。
 
 新遗漏权限在live、refinement stage及repair-input恢复复用同一精确path/existingID/affectedIds判断。旧合法contract:诊断不再赋予重细化权：原批准P1保持，按对应实际generation checkpoint重新提取完整独审finding继续普通修复，不修改历史证据。新marker绑定错误、空/损坏诊断或未批准P1明确失败，JSON解析错误保原诊断，不吞错误或猜恢复。首轮生成仅将P1规范implementation-review的完整ContractFinding JSON加入既有repairContext；没有前轮代码产物时previousOutput为null，普通missing-test-*不灌入该诊断，不把P1 review升格为实现通过。
 
 旧合法contract规则引用不要求被引用RULE本身包含于affectedIds；撤销旧细化权前，candidateDigest定位对应同绑定SavedGeneration，并逐项核完整finding与独审原件一致，再核既有path/ID。实际affectedIds沿已验证独审原件保留，禁止把旧marker转为新授权；外来路径/ID、来源原件不符或损坏证据仍明确失败。
+
+冻结选择默认保首个批准P1，只按真实批准增补链前进：同attempt已有refinement的prior须完整绑定当前冻结结果，专用遗漏诊断须绑定现有path/ID/affectedIds，并由此前实际generation的完整candidate/digest及独审repair finding原件证明；增补P1自身仍须结构及独审通过。普通repair、旧contract:标记及未审/失败增补候选不升级义务。复用既有repair-input、elaboration与provenance，SQLite恢复及同绑定retryOf保实际选中增补来源；不新增持久字段或重开预算。

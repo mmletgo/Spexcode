@@ -959,3 +959,113 @@ test('P3首轮生成收到规范P1 implementation-review完整诊断而不改批
   assert.equal(f.calls.filter(call => call.purpose === 'elaboration_generate').length, 1); assert.equal(result.receipt, undefined); assert.equal(f.store.listJournals(f.operation.id).length, 0)
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
 })
+
+
+for (const mode of ['live', 'restart', 'legacy', 'unreviewed'] as const) test(`P3合法增补链 ${mode} 冻结真实新增义务、旧marker和未审候选不升级`, async t => {
+  const newIds = ['STEP-EXPORT-FAILURE', 'TR-EXPORT-RUNNING-EMPTY-FAIL', 'AC-EXPORT-EMPTY-FAIL', 'FLOW-EXPORT-FAILURE', 'STEP-EXPORT-FAILURE-CHECK'], testPath = 'generated-tests/empty-fail.test.mjs'
+  const originalContract = parseContract({ nodeId: 'export-contract', path: contractPath, source: original }).contract!, registration = originalContract.items.find(item => item.kind === 'VERIFY')!
+  assert.equal(registration.kind, 'VERIFY')
+  const environment = { version: 'trusted-test-v1', image: 'node@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392', platform: 'linux/arm64' as const, memoryBytes: 128 * 1024 * 1024, cpus: 1, pidsLimit: 64, scratchBytes: 16 * 1024 * 1024, logBytes: 128 * 1024 }
+  const f = await fixture(t, { maxAttempts: 3, maxCalls: 12, maxRepairs: 2, timeoutMs: 180000 }, false, original, 'project', original, { readPaths: ['.spec', 'src', 'tests', 'generated-tests'], writePaths: ['.spec', 'src', 'generated-tests'], verifications: [{ definition: { id: registration.id, command: registration.command, cwd: registration.cwd, timeoutMs: registration.timeoutMs }, environment }, { definition: { id: 'VERIFY-EXPORT-02', command: ['node', '--test', testPath], cwd: '.', timeoutMs: 10000 }, environment }] })
+  let activeStore = f.store, current = f.operation, approvedSource = '', approvedAttemptId = '', p1Calls = 0, firstSource = ''
+  f.transform((output, request) => {
+    const attempt = activeStore.readAttempt(activeStore.readOperation(current.id).currentAttemptId!)
+    const retried = current.id !== f.operation.id
+    if (request.purpose === 'elaboration_generate') {
+      assert.equal(retried, false, 'retryOf不能重新细化已批准义务')
+      p1Calls++
+      if (attempt.number === 2) {
+        const candidate = structuredClone(output) as GeneratedElaboration, node = candidate.changes[0]
+        const flow = node.tables.FLOW.find(row => row.id === 'FLOW-EXPORT-01')!, dispatch = node.tables.STEP.find(row => row.id === 'STEP-EXPORT-03')!, transition = node.tables.TR.find(row => row.id === 'TR-EXPORT-RUNNING-FAIL')!, acceptance = node.tables.AC.find(row => row.id === 'AC-EXPORT-02')!
+        flow.steps = [...flow.steps as string[], newIds[0]]; flow.terminal = [...flow.terminal as string[], 'STATE-EXPORT-FAILED']
+        dispatch.next = [...dispatch.next as string[], newIds[0], newIds[1]]
+        node.tables.TR.push({ ...transition, id: newIds[1], condition: '当前attempt且reason为空', to: 'STATE-EXPORT-RUNNING', disposition: 'reject', reason: 'invalid-reason', effects: '明确拒绝且保持RUNNING和旧反馈' })
+        node.tables.STEP.push({ ...dispatch, id: newIds[0], action: '处理当前attempt失败回调，reason非空转FAILED，空reason明确拒绝', input: '当前attempt,reason', output: 'FAILED与原因或保持RUNNING', next: ['TR-EXPORT-RUNNING-FAIL', newIds[1]], 'depends-on': ['RULE-EXPORT-03', 'RULE-EXPORT-05', 'EVENT-EXPORT-FAIL'] })
+        node.tables.STEP.at(-1)!['depends-on'] = ['RULE-EXPORT-03', 'RULE-EXPORT-05', 'EVENT-EXPORT-FAIL', newIds[3]]
+        node.tables.FLOW.push({ ...flow, id: newIds[3], actors: 'worker', entry: '运行中处理当前attempt失败回调', preconditions: '任务RUNNING，worker可信且attempt当前', steps: [newIds[4]], terminal: ['STATE-EXPORT-RUNNING', 'STATE-EXPORT-FAILED'], source: 'rule:RULE-EXPORT-05', 'depends-on': ['RULE-EXPORT-03', 'RULE-EXPORT-05'] })
+        node.tables.STEP.push({ ...node.tables.STEP.at(-1)!, id: newIds[4], flow: newIds[3], source: `derived:${newIds[3]}`, 'depends-on': ['RULE-EXPORT-03', 'RULE-EXPORT-05', 'EVENT-EXPORT-FAIL'] })
+        node.tables.VERIFY.push({ id: 'VERIFY-EXPORT-02', command: ['node', '--test', testPath], cwd: '.', 'timeout-ms': 10000 })
+        node.tables.AC.push({ ...acceptance, id: newIds[2], covers: ['RULE-EXPORT-05', newIds[1]], action: '当前attempt提交空reason失败回调', assertion: '明确拒绝且保持RUNNING及旧反馈', test: `${testPath}#${newIds[2]}`, command: 'VERIFY-EXPORT-02', source: 'rule:RULE-EXPORT-05' })
+        return candidate
+      }
+    }
+    if (request.purpose === 'elaboration_review' && mode === 'unreviewed' && attempt.number === 2) throw Object.assign(new Error('fixture capacity failure leaves supplementation unreviewed'), { code: 'failed' })
+    if (request.purpose === 'code_generate' && !retried && attempt.number === 1) firstSource = promptInput(request).elaboratedSpecs[0].source
+    if (request.purpose === 'code_generate' && (attempt.number >= 2 || retried)) {
+      const frozen = promptInput(request)
+      const source = frozen.elaboratedSpecs.find(spec => spec.path === contractPath)!.source, contract = parseContract({ nodeId: 'export-contract', path: contractPath, source }).contract!
+      if (mode === 'unreviewed') {
+        for (const id of newIds) assert.equal(contract.items.some(item => item.id === id), false, '未审候选不能成为冻结义务')
+        assert.equal(source, firstSource); return output
+      }
+      for (const id of newIds) assert.ok(contract.items.some(item => item.id === id), `第${attempt.number}attempt丢失已批准新增义务 ${id}`)
+      assert.equal(parseParts(source)!.rawSource, parseParts(original)!.rawSource)
+      for (const before of originalContract.items.filter(item => ['REQ', 'RULE', 'AC', 'VERIFY'].includes(item.kind))) assert.ok(sameContractBusinessMeaning(before, contract.items.find(item => item.id === before.id)!), before.id)
+      const flow = contract.items.find(item => item.id === 'FLOW-EXPORT-01')!; assert.equal(flow.kind, 'FLOW'); assert.ok(flow.steps.includes(newIds[0]))
+      const dispatch = contract.items.find(item => item.id === 'STEP-EXPORT-03')!; assert.equal(dispatch.kind, 'STEP'); assert.ok(dispatch.next.includes(newIds[1]))
+      if (!retried && attempt.number === 2) { approvedSource = source; approvedAttemptId = attempt.id }
+      else {
+        assert.equal(source, approvedSource, '第三attempt必须保新增批准正文全文')
+        const provenance = attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(value => value.stage === 'elaboration-provenance')
+        const origin = JSON.parse(readEvidence(f.input.source.commonDir, provenance.resultRef).toString()) as { fromAttemptId: string; fromOperationId: string }
+        assert.equal(origin.fromAttemptId, approvedAttemptId); assert.equal(origin.fromOperationId, f.operation.id)
+      }
+      const value = output as { changes: { path: string; beforeDigest: null; beforeMode: null; mode: null; content: string }[] }
+      value.changes.push({ path: testPath, beforeDigest: null, beforeMode: null, mode: null, content: `import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { ExportService } from '../src/export.js';\ntest('${newIds[2]}',()=>{ const service=new ExportService(),job=service.submit('owner','key','active');service.dispatch(job.id,'START',{attempt:1});assert.throws(()=>service.dispatch(job.id,'FAIL',{attempt:1,reason:''}),/invalid-reason/);assert.equal(service.jobs.get(job.id).state,'RUNNING');assert.equal(service.jobs.get(job.id).reason,null); });\n` })
+      return value
+    }
+    if (request.purpose === 'code_review') return { ...(output as object), verdict: attempt.number === 3 || retried ? 'conflict' : 'repair', findings: [{ kind: attempt.number === 3 || retried ? 'conflict' : 'repair', affectedIds: ['RULE-EXPORT-05'], ruleLocation: attempt.number === 1 && !retried ? `contract-omission:${contractPath}#RULE-EXPORT-05` : 'RULE-EXPORT-05', codeLocation: attempt.number === 1 && !retried ? `${contractPath}#STEP-EXPORT-03` : `${testPath}#assertCall`, evidence: attempt.number === 1 && !retried ? '已批准主流程缺当前attempt空reason失败回调的具体拒绝出口，明确原意要求非空reason' : '普通测试helper错误，只修实现和断言，不改新增已批准义务', counterexample: 'START当前attempt→FAIL空reason必须明确拒绝且保RUNNING/反馈', message: attempt.number === 3 || retried ? 'fixture在V3前停止，不冒称交付' : '按既定原意修复具体缺陷' }] }
+    return output
+  })
+  if (mode === 'legacy') {
+    const record = activeStore.recordFailure.bind(activeStore)
+    activeStore.recordFailure = (fence, issue) => {
+      if (activeStore.readAttempt(fence.attemptId).number === 2 && issue.code === 'generation_failed') {
+        const wrapper = activeStore.readAttempt(fence.attemptId).checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(value => value.stage === 'repair-input')
+        const repair = JSON.parse(readEvidence(f.input.source.commonDir, wrapper.resultRef).toString()) as { refinement: { diagnostics: { message: string }[] } }
+        repair.refinement.diagnostics = repair.refinement.diagnostics.map(item => { const finding = JSON.parse(item.message) as { ruleLocation: string }; finding.ruleLocation = finding.ruleLocation.replace('contract-omission:', 'contract:'); return { ...item, message: JSON.stringify(finding) } })
+        const resultRef = writeEvidence(f.input.source.commonDir, repair)
+        activeStore.checkpoint(fence, resultRef); activeStore.checkpoint(fence, writeEvidence(f.input.source.commonDir, { ...wrapper, resultRef }))
+      }
+      return record(fence, issue)
+    }
+  }
+  if (mode === 'restart' || mode === 'unreviewed') {
+    const claim = activeStore.claimAttempt.bind(activeStore)
+    activeStore.claimAttempt = request => {
+      if (activeStore.listAttempts(f.operation.id).some(attempt => attempt.number === 2 && attempt.failure)) throw new Error('fixture process boundary after durable second-attempt result')
+      return claim(request)
+    }
+    const stopped = await runSyncOperation(activeStore, f.operation.id, f.options)
+    assert.equal(stopped.status, 'failed'); assert.equal(stopped.operation.callsUsed, mode === 'unreviewed' ? 6 : 8)
+    f.closeForRestart()
+    const protocol = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => protocol.close())
+    activeStore = new SyncStore(protocol, { readBlob: ref => readEvidence(f.input.source.commonDir, ref) }); f.useStore(activeStore)
+  }
+  const result = await runSyncOperation(activeStore, f.operation.id, f.options)
+  const history = activeStore.listAttempts(f.operation.id).map(attempt => {
+    const wrappers = attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())), p1Ref = wrappers.find(value => value.stage === 'elaboration')?.resultRef, generationRef = wrappers.find(value => value.stage === 'generation')?.resultRef
+    const p1 = p1Ref ? JSON.parse(readEvidence(f.input.source.commonDir, p1Ref).toString()) as ElaborationResult : null, generation = generationRef ? JSON.parse(readEvidence(f.input.source.commonDir, generationRef).toString()) as { status: string; review: { verdict: string } | null } : null
+    return { number: attempt.number, attemptId: attempt.id, failure: attempt.failure, p1Ref, p1StructurePassed: p1?.structurePassed, p1ReviewPassed: p1?.reviewPassed, p1Findings: p1?.rounds.flatMap(round => round.findings), p1NewIds: p1?.changes.flatMap(change => parseContract({ nodeId: change.nodeId, path: change.path, source: change.source }).contract?.items.filter(item => newIds.includes(item.id)).map(item => item.id) ?? []), generationStatus: generation?.status, generationVerdict: generation?.review?.verdict }
+  })
+  if (process.env.SPEX_REFINEMENT_LINEAGE_EVIDENCE_DIR) writeFileSync(join(process.env.SPEX_REFINEMENT_LINEAGE_EVIDENCE_DIR, `lineage-${process.env.SPEX_REFINEMENT_LINEAGE_EVIDENCE_PHASE ?? 'run'}-${mode}.json`), JSON.stringify({ status: result.status, callsUsed: result.operation.callsUsed, newIds, history }, null, 2))
+  if (mode === 'legacy') {
+    assert.equal(result.failure?.code, 'SYNC_SCOPE_EVIDENCE_CONFLICT'); assert.deepEqual(history[2].p1NewIds, [], '旧协议marker不得将后来approved正文升级为新冻结义务'); assert.equal(p1Calls, 2); assert.equal(result.operation.callsUsed, 8)
+  } else {
+    assert.equal(result.status, 'conflicted', JSON.stringify({ failure: result.failure, history }))
+    assert.equal(p1Calls, 2); assert.equal(result.operation.callsUsed, mode === 'unreviewed' ? 8 : 10)
+    if (mode !== 'unreviewed') assert.ok(approvedSource.includes(newIds[2]))
+  }
+  assert.deepEqual(result.operation.budget, f.operation.budget); assert.equal(result.operation.deadlineAtMs, f.operation.deadlineAtMs); assert.equal(result.operation.input.id, f.input.id)
+  assert.equal(result.receipt, undefined); assert.equal(activeStore.listJournals(f.operation.id).length, 0); assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+  if (mode === 'live' || mode === 'restart') {
+    activeStore.requestControl(f.operation.id, 'cancel')
+    assert.equal((await runSyncOperation(activeStore, f.operation.id, f.options)).status, 'cancelled')
+    const next = activeStore.admitAndEnqueue(await prepareSyncAdmission(f.input, f.plan, { ingressKey: `lineage-retry-${mode}`, rootCauseId: `lineage-retry-${mode}`, origin: f.operation.origin, budget: f.operation.budget, managedRoot: f.managedRoot, retryOf: f.operation.id }))
+    current = next; f.useOperation(next)
+    const replay = await runSyncOperation(activeStore, next.id, f.options)
+    assert.equal(replay.status, 'conflicted', JSON.stringify(replay.failure)); assert.equal(replay.operation.callsUsed, 2); assert.equal(p1Calls, 2)
+    assert.deepEqual(replay.operation.input, f.operation.input); assert.deepEqual(replay.operation.budget, f.operation.budget); assert.equal(replay.operation.policyDigest, f.operation.policyDigest); assert.equal(replay.receipt, undefined)
+    assert.equal(activeStore.listJournals(next.id).length, 0); assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+  }
+})

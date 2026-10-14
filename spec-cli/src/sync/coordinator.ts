@@ -103,6 +103,13 @@ function stage<T>(store: SyncStore, operation: SyncOperation, attempt: SyncAttem
   }
   return null
 }
+function refinementGeneration(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, refinement: Refinement): SavedGeneration {
+  const previous = store.listAttempts(operation.id).filter(prior => prior.number < attempt.number).reverse().map(prior => stage<SavedGeneration>(store, operation, prior, 'generation')).find(value => value?.candidate?.digest === refinement.candidateDigest)
+  const findings = refinement.diagnostics.map(item => JSON.parse(item.message) as GenerationFinding)
+  if (!previous?.review || previous.review.verdict !== 'repair' || canonical(previous.candidate) !== canonical(refinement.candidate) || findings.some(finding => !previous.review!.findings.some(actual => canonical(actual) === canonical(finding)))) fail('refinement_binding', '持久遗漏诊断缺少对应实际候选及完整独审原件')
+  return previous
+}
+
 function saveStage(store: SyncStore, fence: WriteFence, name: string, value: unknown): BlobRef {
   const operation = store.readOperation(fence.operationId), commonDir = operation.input.source.commonDir
   const resultRef = writeEvidence(commonDir, value)
@@ -305,8 +312,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         const findings = refinement.diagnostics.map(item => JSON.parse(item.message) as GenerationFinding)
         if (!findings.length || !refinement.prior.structurePassed || !refinement.prior.reviewPassed) fail('refinement_binding', '持久遗漏诊断必须保留已批准P1与具体发现')
         const contracts = refinement.prior.changes.flatMap(change => parseContract({ nodeId: change.nodeId, path: change.path, source: change.source }).contract ?? [])
-        const previous = store.listAttempts(operation.id).filter(prior => prior.number <= attempt!.number).reverse().map(prior => stage<SavedGeneration>(store, operation, prior, 'generation')).find(value => value?.candidate?.digest === refinement!.candidateDigest)
-        if (!previous?.review || findings.some(finding => !previous.review!.findings.some(actual => canonical(actual) === canonical(finding)))) fail('refinement_binding', '持久遗漏诊断缺少对应实际候选及完整独审原件')
+        const previous = refinementGeneration(store, operation, attempt, refinement)
         if (!findings.every(finding => contractOmissionBound(finding, contracts))) {
           const legacy = findings.every(finding => {
             const [path, id, extra] = finding.ruleLocation.slice('contract:'.length).split('#')
@@ -382,13 +388,23 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         let ancestor: SyncOperation | null = operation
         while (ancestor && !elaboration) {
           if (ancestor.input.id !== operation.input.id || canonical(ancestor.input.source) !== canonical(operation.input.source) || ancestor.policyDigest !== operation.policyDigest || (ancestor.requestBlob?.sha256 ?? null) !== (operation.requestBlob?.sha256 ?? null) || ancestor.origin !== operation.origin) fail('retry_provenance_binding', '重试链不能借用另一来源或原意的已接受契约')
+          let selected: { result: SavedElaboration; attemptId: string } | undefined
           for (const prior of store.listAttempts(ancestor.id).filter(item => ancestor!.id !== operation.id || item.number < attempt!.number)) {
             const approved = stage<SavedElaboration>(store, ancestor, prior, 'elaboration')
             if (!approved?.structurePassed || !approved.reviewPassed || !['complete', 'needs_input', 'conflict'].includes(approved.status)) continue
-            elaboration = approved
-            saveStage(store, fence, 'elaboration-provenance', { operationId: operation.id, inputId: operation.input.id, policyDigest: operation.policyDigest, fromOperationId: ancestor.id, fromAttemptId: prior.id, evidenceRef: writeEvidence(operation.input.source.commonDir, approved), candidateDigest: approved.candidateDigest })
-            saveStage(store, fence, 'elaboration', approved)
-            break
+            if (!selected) { selected = { result: approved, attemptId: prior.id }; continue }
+            const supplementation = stage<{ refinement?: Refinement }>(store, ancestor, prior, 'repair-input')?.refinement
+            if (!supplementation || canonical(supplementation.prior) !== canonical(selected.result) || !supplementation.diagnostics.length) continue
+            const findings = supplementation.diagnostics.map(item => JSON.parse(item.message) as GenerationFinding)
+            const contracts = selected.result.changes.flatMap(change => parseContract({ nodeId: change.nodeId, path: change.path, source: change.source }).contract ?? [])
+            if (!findings.every(finding => contractOmissionBound(finding, contracts))) continue
+            refinementGeneration(store, ancestor, prior, supplementation)
+            selected = { result: approved, attemptId: prior.id }
+          }
+          if (selected) {
+            elaboration = selected.result
+            saveStage(store, fence, 'elaboration-provenance', { operationId: operation.id, inputId: operation.input.id, policyDigest: operation.policyDigest, fromOperationId: ancestor.id, fromAttemptId: selected.attemptId, evidenceRef: writeEvidence(operation.input.source.commonDir, selected.result), candidateDigest: selected.result.candidateDigest })
+            saveStage(store, fence, 'elaboration', selected.result)
           }
           ancestor = ancestor.retryOf ? store.readOperation(ancestor.retryOf) : null
         }
