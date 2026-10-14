@@ -73,3 +73,7 @@ readRetryEligibility(id)只读返回{eligible,reason?:{code,message}}真实事�
 v6原semantic_digest仍保留真实inputId/完整物理source、origin、精确requestBlob、policyDigest、授权paths与retryOf；v7使用normalized_semantic_digest按受控请求语义归并。两者均排除per-ingress交付allocation、预算和可推进baseline派生impact/readSet，使同source的已交付细化不成为新输入或自动补预算。同ingress严格核完整payload；新alias指向既有operation，有精确收据时重放沿本ingress原delivery/budget/baseline，没有收据的旧alias维持owner operation的原重放规则。历史重复记录不删并，按rowid DESC选择已有记录，不改旧payload/消息/native/journal。
 
 受控请求的普通去重按已核不可变请求去除 origin.requestId 后的语义摘要进行，保留 kind/nodeId/intent、原 input/source、path、before/next 与 requestTree。相同编辑仅换请求来源归原 operation/预算；不同编辑或意图不归并。每个新 ingress 保存精确 payload 摘要及恢复接入所需小引用收据，alias 重放按自己的原接入核验，operation 的原 requestBlob/payload 不改，所有 alias 请求引用保活。旧 v6 请求按当前仓库、物理来源、input、政策和授权范围惰性核验；缺证据明确拒接，不猜同意图或建立新预算。
+
+P3业务decision请求沿同一接入门禁归一化去transport requestId、findingIds次序，精确payload收据仍核同key全内容。新裁决保原analysis历史并supersede旧运行写权；旧fence/resume不能覆盖新意图。compositionEvidenceBlob直接核hash并保活。
+
+真实verification包含的retiredIds和decisionRefs只在receipt结算事务累积进共同BaselinePair；未验证/未应用候选不推进历史。settle先在事务外读取并核verification blob，事务内复核同ref。published delivery基线继承相同退役及裁决引用，后续无关代码变化不退回原已裁决规则。

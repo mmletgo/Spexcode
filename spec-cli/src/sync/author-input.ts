@@ -7,11 +7,11 @@ import type { TreeEntry } from './snapshot.js'
 import { readFootprintConfiguration, snapshotFootprintFile } from './trusted-footprint.js'
 
 /** 真实快照不变；canonical clean 的作者字节才参与三方整合和后续候选。 */
-export function composeAuthoredInput(input: InputSnapshot, prior?: BaselinePair): ReturnType<typeof composeInputSnapshots> {
+export function composeAuthoredInput(input: InputSnapshot, prior?: BaselinePair, options: { retainConflicts?: boolean } = {}): ReturnType<typeof composeInputSnapshots> {
   const root = input.source.canonicalRoot, commonDir = input.source.commonDir
   const configuration = readFootprintConfiguration('/usr/bin/git', root)
   const filters = configuration.records.filter((_, index) => index % 2 === 1).filter(record => record.startsWith('filter.'))
-  if (!filters.length) return composeInputSnapshots(input, prior)
+  if (!filters.length) return composeInputSnapshots(input, prior, options)
   const canonical = describeCanonicalContractFilter(commonDir), bindings = canonicalContractFilterBindings(root)
   for (const record of filters) {
     const split = record.indexOf('\n'), key = record.slice(0, split), value = record.slice(split + 1)
@@ -24,7 +24,7 @@ export function composeAuthoredInput(input: InputSnapshot, prior?: BaselinePair)
   const expectedBindings = bindings.map(binding => `${binding.file}\t${binding.start}\t${binding.end}`).join('\n') + '\n'
   if (readFileSync(canonical.metadataPaths[1], 'utf8') !== expectedBindings) throw new Error('SYNC_AUTHOR_FILTER_UNSUPPORTED: canonical bindings differ')
   const projections: { snapshotId: string; changes: { path: string; before: TreeEntry; after: TreeEntry }[] }[] = []
-  const result = composeInputSnapshots(input, prior, { projectEntries(snapshot, entries) {
+  const result = composeInputSnapshots(input, prior, { ...options, projectEntries(snapshot, entries) {
     // --source reads each immutable tree's .gitattributes, never the editor's current files or index.
     const attributes = objectGit(commonDir, ['check-attr', `--source=${snapshot.immutableTree}`, '-z', '--stdin', 'filter'], Buffer.from(bindings.map(binding => binding.file).join('\0') + '\0')).toString().split('\0')
     const enabled = new Set<string>()

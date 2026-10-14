@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { getBlob } from '@spexcode/spec-core'
 import { applyComponentMigrations, type ProtocolTransaction, type SessionProtocol } from '@spexcode/session-protocol'
-import { readControlledRequest } from './request-input.js'
+import { readControlledDecision, readControlledRequest } from './request-input.js'
 import { SYNC_COMPONENT, SYNC_MIGRATIONS, syncCoordinatorAddress, syncSemanticDigest } from './migrations.js'
 import type { AdmitSyncInput, ApplyFilePlan, ApplyJournal, ApplyPlan, ApplyReceipt, ApplyStep, BaselinePair, BlobRef, CandidateRef, ClaimedAttempt, ClaimAttemptInput, ComposedInputRef, RecoverableSyncResource, SyncResourceCheckpoint, SyncResourcePlan, SyncResourceRecord, DispatchPlan, InputSnapshot, NativeSessionRef, RecoverableSync, ScopeLease, SyncAttempt, SyncControl, SyncDispatchEnvelope, SyncFailure, SyncOperation, SyncIngressReceipt, SyncScope, VerificationRef, VerificationResultBlob, WorktreeIdentity, WriteFence } from './operation-types.js'
 
@@ -132,7 +132,11 @@ export class SyncStore {
   }
   private normalizedSemanticDigest(input: Pick<SyncOperation, 'input' | 'requestBlob' | 'origin' | 'policyDigest' | 'scope' | 'retryOf'>): string {
     if (!input.requestBlob) return syncSemanticDigest(input)
-    this.blob(input.requestBlob)
+    const evidence = JSON.parse(this.blob(input.requestBlob).toString('utf8')) as { type?: string }
+    if (evidence.type === 'sync.decision') {
+      const { requestId: _requestId, ...decision } = readControlledDecision(input.input, input.requestBlob)
+      return syncSemanticDigest({ ...input, requestBlob: { sha256: digest({ ...decision, findingIds: [...decision.findingIds].sort() }) } })
+    }
     const request = readControlledRequest(input.input, input.requestBlob)
     const { requestId: _requestId, ...origin } = request.origin
     return syncSemanticDigest({ ...input, requestBlob: { sha256: digest({ ...request, origin }) } })
@@ -151,6 +155,9 @@ export class SyncStore {
     if (input.delivery && (input.delivery.canonicalRoot !== input.deliveryPlan.canonicalRoot || input.delivery.branch !== input.deliveryPlan.branch || input.delivery.repositoryId !== input.input.source.repositoryId)) fail('SYNC_DELIVERY_BINDING', 'bound delivery differs from durable plan')
     const payload = { input: inputPayload(input.input), ...(input.requestBlob ? { requestBlob: input.requestBlob } : {}), ...(input.planBlob ? { planBlob: input.planBlob } : {}), ...(input.retryOf ? { retryOf: input.retryOf } : {}), scope: canonicalScope(input.scope), policyDigest: input.policyDigest, impactDigest: input.impactDigest, readSetDigest: input.readSetDigest, deliveryPlan: input.deliveryPlan, previousBaselinePairId: input.previousBaselinePair?.id ?? null, budget: input.budget }
     const legacyPayloadDigest = digest(payload), payloadDigest = digest({ ...payload, origin: input.origin })
+    const requestType = input.requestBlob ? JSON.parse(this.blob(input.requestBlob).toString('utf8')) as { type?: string } : null
+    const decision = requestType?.type === 'sync.decision' ? readControlledDecision(input.input, input.requestBlob!) : null
+    if (decision && input.origin !== 'decision') fail('SYNC_DECISION_BINDING', '业务裁决需要decision来源')
     const semanticDigest = this.normalizedSemanticDigest(input)
     const legacyCandidates = this.write(tx => tx.query("SELECT record_json FROM sync_operations WHERE normalized_semantic_digest IS NULL AND repository_id=? AND source_key=? AND json_extract(record_json,'$.input.id')=? AND json_extract(record_json,'$.policyDigest')=? AND json_extract(record_json,'$.origin')=? AND json_extract(record_json,'$.retryOf') IS ?", input.input.source.repositoryId, identityKey(input.input.source), input.input.id, input.policyDigest, input.origin, input.retryOf ?? null).map(row => parseRecord<SyncOperation>(row)!).filter(operation => digest(canonicalScope(operation.scope).paths) === digest(canonicalScope(input.scope).paths)))
     const normalized = legacyCandidates.map(operation => {
@@ -173,6 +180,7 @@ export class SyncStore {
         const pair = parseRecord<BaselinePair>(tx.query('SELECT record_json FROM sync_baseline_pairs WHERE id=?', input.previousBaselinePair.id)[0])
         if (!pair || identityKey(pair.source) !== identityKey(input.input.source) || digest(pair) !== digest(input.previousBaselinePair)) fail('SYNC_BASELINE_STALE', 'previous source baseline does not match durable pair')
       }
+      if (decision) { const parent = this.operation(tx, decision.operationId); if (parent.input.id !== input.input.id || identityKey(parent.input.source) !== identityKey(input.input.source) || !['conflicted', 'needs_input', 'superseded'].includes(parent.phase) && !parent.blockedReason) fail('SYNC_DECISION_BINDING', '裁决必须绑定仍需业务输入的原操作和完整冻结来源') }
       const older = tx.query('SELECT record_json FROM sync_operations WHERE repository_id=? AND source_root=?', input.input.source.repositoryId, input.input.source.canonicalRoot).map(row => parseRecord<SyncOperation>(row)!)
       const generation = Math.max(0, ...older.map(operation => operation.generation)) + 1
       for (const operation of older) {
@@ -261,6 +269,7 @@ export class SyncStore {
   bindComposedInput(fence: WriteFence, composed: ComposedInputRef): SyncAttempt {
     this.blob(composed.manifestBlob)
     if (composed.requestBlob) this.blob(composed.requestBlob)
+    if (composed.compositionEvidenceBlob) this.blob(composed.compositionEvidenceBlob)
     return this.write(tx => {
       const { operation, attempt } = this.checkFence(tx, fence)
       if (composed.sourceInputId !== operation.input.id || composed.previousBaselinePairId !== (operation.previousBaselinePair?.id ?? null) || (composed.requestBlob?.sha256 ?? null) !== (operation.requestBlob?.sha256 ?? null)) fail('SYNC_COMPOSITION_BINDING', 'composition must retain original source, baseline pair and controlled request')
@@ -441,11 +450,16 @@ export class SyncStore {
     })
   }
   settleApply(journalId: string, receiptId: string): SyncOperation {
+    const verificationRef = this.write(tx => { const journal = this.journal(tx, journalId); return this.attempt(tx, journal.attemptId).verification!.resultBlob })
+    const verification = JSON.parse(this.blob(verificationRef).toString('utf8')) as VerificationResultBlob
     return this.write(tx => {
       const journal = this.journal(tx, journalId), operation = this.operation(tx, journal.operationId), attempt = this.attempt(tx, journal.attemptId)
       if (!journal.receipt || journal.receipt.id !== receiptId) fail('SYNC_RECEIPT_MISSING', receiptId)
       if (journal.status === 'settled') return operation
-      const pair: BaselinePair = { id: `baseline-${journal.id}`, repositoryId: operation.input.source.repositoryId, source: clone(operation.input.source), sourceInput: clone(operation.input), verifiedDelivery: clone(journal.receipt.deliverySnapshot), coveredScope: clone(journal.plan.coveredScope), receiptId, settledAtMs: this.now() }
+      if (attempt.verification?.resultBlob.sha256 !== verificationRef.sha256) fail('SYNC_VERIFICATION_INVALID', 'settlement verification changed')
+      const retiredIds = [...new Set([...(operation.previousBaselinePair?.retiredIds ?? []), ...(verification.retiredIds ?? [])])].sort()
+      const decisionRefs = [...new Map([...(operation.previousBaselinePair?.decisionRefs ?? []), ...(verification.decisionRefs ?? [])].map(ref => [ref.sha256, ref])).values()]
+      const pair: BaselinePair = { id: `baseline-${journal.id}`, repositoryId: operation.input.source.repositoryId, source: clone(operation.input.source), sourceInput: clone(operation.input), verifiedDelivery: clone(journal.receipt.deliverySnapshot), coveredScope: clone(journal.plan.coveredScope), retiredIds, decisionRefs, receiptId, settledAtMs: this.now() }
       tx.exec('INSERT INTO sync_baseline_pairs(id,repository_id,source_key,receipt_id,settled_at_ms,record_json) VALUES(?,?,?,?,?,?)', pair.id, pair.repositoryId, identityKey(pair.source), pair.receiptId, pair.settledAtMs, JSON.stringify(pair))
       if (identityKey(pair.source) !== identityKey(pair.verifiedDelivery.source) || pair.sourceInput.id !== pair.verifiedDelivery.id) {
         const published: BaselinePair = { ...pair, id: `${pair.id}-delivery`, source: clone(pair.verifiedDelivery.source), sourceInput: clone(pair.verifiedDelivery) }

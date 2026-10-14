@@ -11,7 +11,7 @@ export const isUtf8Text = (bytes: Buffer): boolean => !bytes.includes(0) && Buff
 const same = (a: TreeEntry | undefined, b: TreeEntry | undefined): boolean => a?.oid === b?.oid && a?.mode === b?.mode
 
 /** source 的真实差量叠加到前次已验证 delivery；任何重叠歧义保留三方对象而不自动覆盖。 */
-export function composeInputSnapshots(newSource: InputSnapshot, prior?: BaselinePair, options: { projectEntries?: (snapshot: InputSnapshot, entries: TreeEntry[]) => TreeEntry[] } = {}): { composed: ComposedInputRef | null; conflicts: CompositionConflict[] } {
+export function composeInputSnapshots(newSource: InputSnapshot, prior?: BaselinePair | null, options: { projectEntries?: (snapshot: InputSnapshot, entries: TreeEntry[]) => TreeEntry[]; retainConflicts?: boolean } = {}): { composed: ComposedInputRef | null; conflicts: CompositionConflict[] } {
   const project = (snapshot: InputSnapshot): TreeEntry[] => { const entries = verifySnapshot(snapshot); return options.projectEntries ? options.projectEntries(snapshot, entries) : entries }
   const commonDir = newSource.source.commonDir, incoming = project(newSource)
   let entries = incoming
@@ -36,6 +36,7 @@ export function composeInputSnapshots(newSource: InputSnapshot, prior?: Baseline
         const merged = mode ? mergeText(commonDir, delivered, old, next) : null
         if (merged && mode) { result.set(path, { path, mode, oid: writeObject(commonDir, merged), digest: contentHash(merged) }); continue }
       }
+      if (options.retainConflicts) { if (next) result.set(path, next); else result.delete(path) }
       conflicts.push({ path, base: old ?? null, source: next ?? null, delivery: delivered ?? null })
     }
     entries = [...result.values()].sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
@@ -45,10 +46,10 @@ export function composeInputSnapshots(newSource: InputSnapshot, prior?: Baseline
       if (ancestor && !conflicts.some(conflict => conflict.path === entry.path)) conflicts.push({ path: entry.path, base: base.get(entry.path) ?? null, source: source.get(entry.path) ?? null, delivery: delivery.get(entry.path) ?? null })
     }
   }
-  if (conflicts.length) return { composed: null, conflicts }
+  if (conflicts.length && !options.retainConflicts) return { composed: null, conflicts }
   const tree = writeTree(commonDir, entries), contentDigest = contentHash(JSON.stringify(entries)), manifestBlob = writeEvidence(commonDir, { version: 1, entries })
   objectGit(commonDir, ['update-ref', `refs/spex-sync/compositions/${tree}`, tree])
-  return { composed: { sourceInputId: newSource.id, previousBaselinePairId: prior?.id ?? null, tree, manifestBlob, contentDigest }, conflicts }
+  return { composed: { sourceInputId: newSource.id, previousBaselinePairId: prior?.id ?? null, tree, manifestBlob, contentDigest, ...(conflicts.length ? { compositionEvidenceBlob: writeEvidence(commonDir, { version: 'composition-overlap-v1', sourceInputId: newSource.id, baselinePairId: prior?.id ?? null, conflicts }) } : {}) }, conflicts }
 }
 export function mergeText(commonDir: string, delivery: TreeEntry, base: TreeEntry, source: TreeEntry): Buffer | null {
   const buffers = [delivery, base, source].map(entry => readObject(commonDir, entry.oid))

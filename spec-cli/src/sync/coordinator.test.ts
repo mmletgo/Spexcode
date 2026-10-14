@@ -43,7 +43,7 @@ function unlock(root: string): void {
   for (const entry of readdirSync(root, { withFileTypes: true })) if (entry.isDirectory()) { chmodSync(join(root, entry.name), 0o700); unlock(join(root, entry.name)) }
   chmodSync(root, 0o700)
 }
-async function fixture(t: test.TestContext, budget = { maxAttempts: 3, maxCalls: 16, maxRepairs: 2, timeoutMs: 300_000 }, adopt = false, specSource = original, projectId = 'project', factsSource = specSource, planPatch: Partial<SyncCoordinatorPlan> = {}, controlledEdit?: { original: string; replacement: string; intent: string; testPath: string }) {
+async function fixture(t: test.TestContext, budget = { maxAttempts: 3, maxCalls: 16, maxRepairs: 2, timeoutMs: 300_000 }, adopt = false, specSource = original, projectId = 'project', factsSource = specSource, planPatch: Partial<SyncCoordinatorPlan> = {}, controlledEdit?: { original: string; replacement: string; intent: string; testPath: string }, origin: 'spec' | 'code' | 'combined' = 'spec') {
   const parent = realpathSync(mkdtempSync(join(tmpdir(), 'sync-coordinator-'))), root = join(parent, 'source'), managedRoot = join(parent, 'managed'), artifactRoot = join(parent, 'artifacts')
   mkdirSync(root); mkdirSync(managedRoot, { mode: 0o700 }); mkdirSync(artifactRoot, { mode: 0o700 }); cpSync(fixturePath, root, { recursive: true })
   const targetPath = `.spec/${projectId}/export-contract/spec.md`
@@ -80,13 +80,20 @@ async function fixture(t: test.TestContext, budget = { maxAttempts: 3, maxCalls:
   }
   const protocol = openProtocol(join(parent, 'sync.sqlite')); await migrateSyncStore(protocol, { backupPath: join(parent, 'db-backup') })
   let store = new SyncStore(protocol, { readBlob: ref => readEvidence(input.source.commonDir, ref) })
-  let operation = store.admitAndEnqueue(await prepareSyncAdmission(input, plan, { ingressKey: input.id, rootCauseId: input.id, origin: 'spec', budget, managedRoot, ...(requestBlob ? { requestBlob } : {}) }))
+  let operation = store.admitAndEnqueue(await prepareSyncAdmission(input, plan, { ingressKey: input.id, rootCauseId: input.id, origin, budget, managedRoot, ...(requestBlob ? { requestBlob } : {}) }))
   const calls: ElaborationSessionRequest[] = []
   let transform: ((output: unknown, request: ElaborationSessionRequest) => unknown | Promise<unknown>) | undefined
   const run: ElaborationRunner = async request => {
     calls.push(request)
     let output: unknown
-    if (request.purpose === 'elaboration_generate') output = rows(original, targetPath)
+    if (request.purpose === 'code_behavior_analyze') {
+      const context = JSON.parse(request.prompt.split('冻结三方输入:\n')[1]) as { changedPaths: string[] }
+      output = { changes: context.changedPaths.map(path => ({ kind: 'refactor', paths: [path], affectedIds: ['RULE-EXPORT-05'], ruleIds: ['RULE-EXPORT-05'], originalIntent: '遵守导出明确原意', previousBehavior: '导出任务结果不变', sourceBehavior: '内部实现文字编辑，导出结果不变', deliveryBehavior: '共同已验证语义不变', evidence: `冻结源码/断言 ${path}`, counterexample: '重复COMPLETE保首次结果，未改变此断言' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+    } else if (request.purpose === 'code_behavior_review') {
+      const value = JSON.parse(request.prompt.split('待审分析:\n')[1]) as { analysisDigest: string; analysis: { changes: { id: string }[] } }
+      const context = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as { changedPaths: string[] }
+      output = { inputDigest: request.inputDigest, analysisDigest: value.analysisDigest, verdict: 'accept', checkedPaths: context.changedPaths, checkedChangeIds: value.analysis.changes.map(item => item.id), findings: [] }
+    } else if (request.purpose === 'elaboration_generate') output = rows(original, targetPath)
     else if (request.purpose === 'elaboration_review') output = { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
     else if (request.purpose === 'code_generate') {
       const frozen = promptInput(request), source = new Map(frozen.files).get('src/export.js')!
@@ -175,7 +182,7 @@ test('租约heartbeat贯穿长调用，取消不派发下一阶段，重入不�
     return output
   })
   const stopped = await runSyncOperation(f.store, f.operation.id, f.options)
-  assert.equal(stopped.status, 'cancelled')
+  assert.equal(stopped.status, 'cancelled', JSON.stringify(stopped.failure))
   assert.equal(f.calls.length, 1)
   assert.equal((await runSyncOperation(f.store, f.operation.id, f.options)).status, 'cancelled')
   assert.equal(f.calls.length, 1); assert.equal(f.store.listJournals(f.operation.id).length, 0)
@@ -525,4 +532,31 @@ test('recoveryOnly面对真实V1-V4已登记verified但尚无journal的边界中
   assert.deepEqual(recovered.operation, before); assert.equal(recovered.status, 'ready_to_apply'); assert.equal(f.calls.length, 4)
   assert.equal(f.store.listJournals(before.id).length, 0); assert.ok(!existsSync(before.deliveryPlan.canonicalRoot)); assert.equal(f.store.listAttempts(before.id).length, 1)
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+})
+
+test('P3真实code来源先持久独立analyzing再细化/生成，policy冻结且refactor保原业务正文', async t => {
+  const f = await fixture(t, undefined, false, original, 'project', original, {}, undefined, 'code')
+  f.transform((output, request) => {
+    if (request.purpose === 'elaboration_generate') assert.ok(request.prompt.includes('preserve_business'))
+    if (request.purpose === 'code_generate') { const frozen = promptInput(request); assert.equal(new Map(frozen.files).get('src/export.js'), f.bytes.toString()); assert.ok(request.prompt.includes('preserve_business')) }
+    if (request.purpose === 'code_review') return { ...(output as object), verdict: 'conflict', findings: [{ kind: 'conflict', affectedIds: ['RULE-EXPORT-05'], ruleLocation: 'RULE-EXPORT-05', codeLocation: 'src/export.js#ExportService', evidence: '显式测试接缝终止于独审候选，不伪造V3', counterexample: '演示仅核到候选阶段', message: 'fixture stop before V3' }] }
+    return output
+  })
+  const result = await runSyncOperation(f.store, f.operation.id, f.options)
+  assert.equal(result.status, 'conflicted', JSON.stringify(result.failure))
+  assert.equal(result.operation.policyDigest, syncPlanDigest(f.plan)); assert.equal(result.operation.callsUsed, 6)
+  assert.deepEqual(f.calls.map(call => call.purpose), ['code_behavior_analyze', 'code_behavior_review', 'elaboration_generate', 'elaboration_review', 'code_generate', 'code_review'])
+  const attempt = f.store.readAttempt(result.operation.currentAttemptId!), checkpoints = attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
+  const analysis = checkpoints.find(value => value.version === 'code-behavior-v1')
+  assert.equal(analysis.policyDigest, result.operation.policyDigest); assert.equal(analysis.readSetDigest, result.operation.readSetDigest); assert.equal(analysis.reviewPassed, true)
+  assert.ok(checkpoints.some(value => value.stage === 'analysis' && value.attemptId === attempt.id))
+  assert.equal(f.store.listJournals(result.operation.id).length, 0); assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
+})
+
+test('P3未完整独审的行为分析不能晋级细化或写入，具体path遗漏持久失败', async t => {
+  const f = await fixture(t, undefined, false, original, 'project', original, {}, undefined, 'code')
+  f.transform((output, request) => request.purpose === 'code_behavior_review' ? { ...(output as object), checkedPaths: [] } : output)
+  const result = await runSyncOperation(f.store, f.operation.id, f.options)
+  assert.equal(result.failure?.code, 'behavior_review_failed'); assert.equal(f.calls.length, 2)
+  assert.equal(f.calls.some(call => call.purpose === 'elaboration_generate'), false); assert.equal(f.store.listJournals(f.operation.id).length, 0)
 })

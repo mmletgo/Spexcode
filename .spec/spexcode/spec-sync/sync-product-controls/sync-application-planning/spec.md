@@ -17,3 +17,7 @@ code:
 [[sync-application]] 从 source snapshot 读取 Spec，复用 loadSpecs、readFrozenContracts 和 contractImpact，不维护第二份业务图。初始上下文仅读 Spec，不把整仓未授权文件或凭据转成字符串。目标包含意图节点、其子节点、图影响节点和共享代码治理闭包；related 不计治理。受影响 code/test 必须在 [[sync-application-settings]] 的授权或独立保护测试登记，否则显示未授权路径。
 
 readPaths 纳入冻结 Spec、版本化配置、授权源码/测试目录、额外 readPaths、影响代码/测试及保护测试；writePaths 只含目标 Spec 精确路径和 source/test 授权目录。目录授权允许新自然语言需求创建实现，不授权任意磁盘或模型创造新 raw 意图。plan 传递 facts、精确 verification 和 mandatoryTests 给 coordinator；全部 source/composed 差量仍经过完整 read/write 检查，不能偷偷交付未验证的其它 dirty 修改。V4 重新构造当前 plan，不能沿用旧影响自证。
+
+可携最近共同BaselinePair，对旧verifiedDelivery及当前source图求影响并集，旧测试/治理路径与移动退役目标仍纳入完整范围，不因删除文件退出验收。移动的规范节点ID可依同业务ID识别；被明确移除的意图定位最近仍存在的上层需求。目标Spec目录受控授权自动新治理叶，但不授权宿主或其它未选节点。
+
+已receipt结算decisionRefs重读不可变用户裁决与所选finding.ruleIds，派生精确supersession事实。原settings facts全文留历史，只有所选规则按裁决生效；未选业务事实、VERIFY及工具政策保持。后续无关代码输入继承同一已结算裁决，不恢复旧行为。

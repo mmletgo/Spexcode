@@ -35,3 +35,5 @@ AC-SYNC-02/03使用真实已有详细契约，分别经readonly prepareSpecBodyE
 recoveryOnly真实SQLite证明queued无attempt与paused已计划未原生派发的资源均不新call/attempt/apply；paused/cancel未知创建窗口保持resource未removed与原control/input/budget。真实Docker planned create回执丢失后只inspect/stop/rm既有容器、不create/start；planned目标实际不存在时保持recovery_required，不虚构removed。真实已commit未settle journal恢复只同receipt结算，不新native或commit。
 
 旧 planless 恢复夹具使用明确独立旧政策身份，避免普通相同输入去重命中已取消现代 operation；仍核 plan_missing 持久失败且零 native 派发。
+
+P3真实code来源沿analyzing独立会话、同attempt checkpoint与冻结policy进入P1/生成；refactor保持正文，未完整checkedPaths的独审不得晋级。接缝在生成独审明确终止，不冒称V3或receipt。短租约长调用的真实heartbeat/cancel及重入不重派继续保持。

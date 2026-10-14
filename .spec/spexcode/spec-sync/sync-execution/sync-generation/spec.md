@@ -35,3 +35,5 @@ validateCandidate 是必需可信硬门禁，按实际候选回调；没有回�
 取消检查贯穿派发前、登记后、native 输出后和硬门禁后，拒绝继续派发或发布晚结果；unsupported 保留平台原因，不隐式重试。结果保留候选引用、真实结构化输出和 native trace；完整 candidateFiles Map 仅作本地检查，不能写入 store 或外发 JSON。成功仅为 reviewed，始终 runtimeVerification=not_run、delivery=not_applied；上层必须另行完成真实 V3、版本交付门禁和 journal 结算。
 
 模型输入拒绝 [[sync-frozen-candidate]] 定义的宿主凭据和运行文件；业务 src/auth 不因名称被排除。发送的 manifest 只含已读取路径并附完整 manifest 摘要，本地冻结仍使用完整 manifest。生成输入及审查上下文分别执行 2MiB 预算，超过就明确失败，不截断源码或断言。candidateFiles 作为本地投影排除同一凭据路径；审查只发送可信读集合及实际变化的完整文件。原 source 与 candidate 身份不因投影改变。repairContext 仅为既有失败诊断，不是新原意、政策或通过证据。
+
+已审三方analysis及明确direction纳入同一冻结输入和独审上下文。合法外部行为及resolutions保持，纯重构业务正文稳定；只有明确裁决修原意/新规则时纠正外部代码。retiredIds明确负向测试义务，旧binding标识/固定命令仍执行。发现普通契约遗漏通过具体contract:path#id位置回细化，不自行新增或改已接受业务项。持久Spec不写暂态V3尚未运行/已通过，运行状态只在receipt及证据记录。
