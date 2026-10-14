@@ -21,7 +21,7 @@ import type { NativeRunCheckpoint, NativeRunPlan } from './native-run.js'
 import { SyncStore } from './store.js'
 import { sessionIdForCreateKey } from '../sessions.js'
 import { claimFileMutex } from './file-mutex.js'
-import { guardControlledRequestPath, prepareControlledRequest } from './request-input.js'
+import { guardControlledRequestPath, prepareControlledDecision, prepareControlledRequest } from './request-input.js'
 import { prepareSpecBodyEdit } from '../spec-body-edit.js'
 
 const contractPath = '.spec/project/export-contract/spec.md'
@@ -396,6 +396,13 @@ for (const variant of ['raw', 'TR'] as const) test(`AC-SYNC-${variant === 'raw' 
   const sourceSpecBytes = readFileSync(join(f.root, '.spec/reader-app/export-contract/spec.md')), oracleBytes = readFileSync(join(f.root, 'tests/export.test.mjs'))
   const testSource = `import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { ExportService } from '../src/export.js';\n${variant === 'raw' ? `test('AC-EXPORT-02 原输入和结果边界及128字符限制', () => {\n const service = new ExportService();\n assert.throws(() => service.submit('', 'key', 'active'), /forbidden/);\n assert.throws(() => service.submit('owner', '', 'active'), /invalid-request/);\n assert.throws(() => service.submit('owner', 'key', ''), /invalid-request/);\n assert.throws(() => service.submit('owner', 'key', 'x'.repeat(129)), /invalid-request/);\n assert.equal(service.jobs.size, 0);\n const job = service.submit('owner', 'key', 'x'.repeat(128));\n assert.throws(() => service.dispatch(job.id, 'DOWNLOAD', {actor:'owner'}), /not-ready/);\n service.dispatch(job.id, 'START', {attempt:1});\n assert.throws(() => service.dispatch(job.id, 'COMPLETE', {attempt:1,result:''}), /invalid-result/);\n assert.throws(() => service.dispatch(job.id, 'FAIL', {attempt:1,reason:''}), /invalid-reason/);\n assert.equal(service.jobs.get(job.id).state, 'RUNNING');\n});` : `test('AC-EXPORT-08 重试保存失败诊断且旧attempt不能发布', () => {\n const service = new ExportService(), job = service.submit('owner','key','active');\n service.dispatch(job.id,'START',{attempt:1});\n service.dispatch(job.id,'FAIL',{attempt:1,reason:'source-unavailable'});\n const retried = service.dispatch(job.id,'RETRY',{actor:'owner'});\n assert.equal(retried.id,job.id); assert.equal(retried.attempt,2);\n assert.equal(retried.lastFailureReason,'source-unavailable'); assert.equal(retried.reason,null);\n service.dispatch(job.id,'COMPLETE',{attempt:1,result:'stale.csv'});\n assert.equal(service.jobs.get(job.id).state,'QUEUED');\n service.dispatch(job.id,'START',{attempt:2});\n service.dispatch(job.id,'COMPLETE',{attempt:2,result:'fresh.csv'});\n assert.equal(service.dispatch(job.id,'DOWNLOAD',{actor:'owner'}),'fresh.csv');\n});`}\n`
   f.transform((output, request) => {
+    if (request.purpose === 'code_behavior_analyze') {
+      const proposal = output as { changes: { kind: string; paths: string[]; affectedIds: string[]; ruleIds: string[] }[]; acceptanceChanges: unknown[] }
+      const ruleId = variant === 'raw' ? 'RULE-EXPORT-02' : 'RULE-EXPORT-06', acceptanceId = variant === 'raw' ? 'AC-EXPORT-02' : 'AC-EXPORT-08'
+      for (const change of proposal.changes) if (change.paths.some(path => path.startsWith('.spec/'))) { change.kind = 'allowed_change'; change.affectedIds = [ruleId, acceptanceId]; change.ruleIds = [ruleId] }
+      proposal.acceptanceChanges = [{ id: acceptanceId, ruleIds: [ruleId], source: 'user:raw', reason: intent }]
+      return proposal
+    }
     if (request.purpose === 'elaboration_generate') { assert.ok(request.prompt.includes(intent)); return rows(accepted, '.spec/reader-app/export-contract/spec.md') }
     if (request.purpose === 'code_generate') {
       const value = output as { changes: { path: string; beforeDigest: string | null; beforeMode: string | null; mode: null; content: string }[] }, implementation = value.changes.find(change => change.path === 'src/export.js')!
@@ -409,7 +416,7 @@ for (const variant of ['raw', 'TR'] as const) test(`AC-SYNC-${variant === 'raw' 
   })
   const result = await runSyncOperation(f.store, f.operation.id, f.options)
   assert.equal(result.status, 'workspace_synced', JSON.stringify({ failure: result.failure, phase: result.operation.phase, refs: f.store.readAttempt(result.operation.currentAttemptId!).checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).filter(value => value.rounds || value.validationFindings).map(value => ({ status: value.status, findings: value.validationFindings ?? value.rounds.flatMap((round: { findings: unknown[] }) => round.findings) })) }))
-  assert.equal(result.operation.callsUsed, 4); assert.ok(result.operation.requestBlob); assert.equal(result.operation.input.id, f.input.id)
+  assert.equal(result.operation.callsUsed, 6); assert.ok(result.operation.requestBlob); assert.equal(result.operation.input.id, f.input.id)
   assert.ok(result.operation.deliveredScope.contractIds.includes(`AC-EXPORT-${variant === 'raw' ? '02' : '08'}`))
   assert.equal(Number(f.git('rev-list', '--count', result.operation.deliveryPlan.branch)), f.priorCommitCount + 1)
   assert.equal(f.calls.filter(call => call.purpose === 'elaboration_generate').length, 1)
@@ -554,9 +561,28 @@ test('P3真实code来源先持久独立analyzing再细化/生成，policy冻结�
 })
 
 test('P3未完整独审的行为分析不能晋级细化或写入，具体path遗漏持久失败', async t => {
-  const f = await fixture(t, undefined, false, original, 'project', original, {}, undefined, 'code')
+  const f = await fixture(t, { maxAttempts: 1, maxCalls: 2, maxRepairs: 0, timeoutMs: 120000 }, false, original, 'project', original, {}, undefined, 'code')
   f.transform((output, request) => request.purpose === 'code_behavior_review' ? { ...(output as object), checkedPaths: [] } : output)
   const result = await runSyncOperation(f.store, f.operation.id, f.options)
-  assert.equal(result.failure?.code, 'behavior_review_failed'); assert.equal(f.calls.length, 2)
+  assert.equal(result.status, 'budget_exhausted'); assert.equal(f.store.listAttempts(f.operation.id)[0].failure?.code, 'behavior_review_failed'); assert.equal(f.calls.length, 2)
   assert.equal(f.calls.some(call => call.purpose === 'elaboration_generate'), false); assert.equal(f.store.listJournals(f.operation.id).length, 0)
+})
+
+test('新decision独审仍有相同稳定冲突ID时完整阻断，不因旧finding被选择而删除发现', async t => {
+  const f = await fixture(t, undefined, false, original, 'project', original, {}, undefined, 'code')
+  f.transform((output, request) => request.purpose === 'code_behavior_analyze' ? { ...(output as object), changes: (output as { changes: object[] }).changes.map(change => ({ ...change, kind: 'conflict', affectedIds: ['REQ-EXPORT-01'] })) } : output)
+  const first = await runSyncOperation(f.store, f.operation.id, f.options)
+  assert.equal(first.status, 'conflicted', JSON.stringify(first.failure))
+  const attempt = f.store.readAttempt(first.operation.currentAttemptId!), wrapper = attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(value => value.stage === 'analysis')
+  const originalAnalysis = JSON.parse(readEvidence(f.input.source.commonDir, wrapper.resultRef).toString()) as { findings: { id: string }[] }
+  const requestBlob = prepareControlledDecision(f.input, { requestId: 'keep-original-intent', operationId: first.operation.id, inputId: f.input.id, analysisRef: wrapper.resultRef, findingIds: originalAnalysis.findings.map(finding => finding.id), decision: { choice: 'keep_intent' } })
+  const plan = structuredClone(f.plan); plan.facts = [...plan.facts, { source: 'decision:keep-original-intent', text: '保留原意纠正实现；仍须独审其他明确政策' }]
+  const next = f.store.admitAndEnqueue(await prepareSyncAdmission(f.input, plan, { ingressKey: 'decision-after-conflict', rootCauseId: first.operation.rootCauseId, origin: 'decision', budget: first.operation.budget, managedRoot: f.managedRoot, requestBlob }))
+  f.useOperation(next)
+  const result = await runSyncOperation(f.store, next.id, { ...f.options, plan, readCurrentPlan: () => plan })
+  assert.equal(result.status, 'conflicted', JSON.stringify(result.failure)); assert.equal(f.calls.some(call => call.purpose === 'code_generate'), false)
+  const newAttempt = f.store.readAttempt(result.operation.currentAttemptId!), newWrapper = newAttempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(value => value.stage === 'analysis')
+  const analysis = JSON.parse(readEvidence(f.input.source.commonDir, newWrapper.resultRef).toString()) as { findings: { id: string }[]; policyDigest: string }
+  assert.equal(analysis.policyDigest, result.operation.policyDigest); assert.equal(analysis.findings[0].id, originalAnalysis.findings[0].id)
+  assert.equal(f.store.listJournals(next.id).length, 0)
 })

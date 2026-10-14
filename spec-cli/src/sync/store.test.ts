@@ -31,7 +31,7 @@ async function fixture() {
   const ready = (value = admit(), readyScope = value.scope, blockedScope: SyncScope = { paths: [], contractIds: [], flowIds: [] }, blockedReason: 'needs_input' | 'conflicted' | null = null, beforeGeneration?: (claimed: ClaimedAttempt) => void, verificationMetadata: Pick<VerificationResultBlob, 'retiredIds' | 'decisionRefs'> = {}) => {
     const claimed = claim(value), target = { ...input(value.deliveryPlan.canonicalRoot === value.input.source.canonicalRoot ? value.input.source : source('delivery'), 'target'), manifestBlob: put({ version: 1, entries: readyScope.paths.map(path => ({ path, mode: '100644', oid: 'a'.repeat(40), digest: '1'.repeat(64) })) }) }
     store.bindDelivery(claimed.fence, target.source)
-    store.bindComposedInput(claimed.fence, { sourceInputId: value.input.id, previousBaselinePairId: value.previousBaselinePair?.id ?? null, tree: value.input.immutableTree, manifestBlob: target.manifestBlob, contentDigest: value.input.contentDigest })
+    store.bindComposedInput(claimed.fence, { sourceInputId: value.input.id, previousBaselinePairId: value.previousBaselinePair?.id ?? null, tree: value.input.immutableTree, manifestBlob: target.manifestBlob, contentDigest: value.input.contentDigest, ...(value.requestBlob ? { requestBlob: value.requestBlob } : {}) })
     beforeGeneration?.(claimed)
     store.startGeneration(claimed.fence, { readyScope, blockedScope, blockedReason })
     const files: ApplyFilePlan[] = readyScope.paths.map(path => ({ path, preDigest: '1'.repeat(64), postDigest: '2'.repeat(64), preMode: '100644', postMode: '100644' }))
@@ -1166,18 +1166,18 @@ test('P3退役记录只随真实receipt结算进入成对基线，重启及重�
   } finally { f.cleanup() }
 })
 
-test('P3 v7→v8先备份后登记授权writer版本，旧writer拒写且无改历史记录', async () => {
-  const f = await fixture(), legacy = openProtocol(join(f.root, 'v7.sqlite'))
+test('P3 v8→v9先备份后登记授权writer版本，旧writer拒写且无改历史记录', async () => {
+  const f = await fixture(), legacy = openProtocol(join(f.root, 'v8.sqlite'))
   let backup: ReturnType<typeof openProtocol> | undefined
   try {
-    applyComponentMigrations(legacy, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 7))
+    applyComponentMigrations(legacy, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 8))
     assert.throws(() => new SyncStore(legacy, f.options), /SYNC_SCHEMA_UNSUPPORTED/)
-    const backupPath = join(f.root, 'v7.backup')
-    assert.equal(await migrateSyncStore(legacy, { backupPath }), 8)
-    assert.throws(() => applyComponentMigrations(legacy, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 7)), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
+    const backupPath = join(f.root, 'v8.backup')
+    assert.equal(await migrateSyncStore(legacy, { backupPath }), SYNC_MIGRATIONS.length)
+    assert.throws(() => applyComponentMigrations(legacy, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 8)), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
     backup = openProtocol(backupPath)
-    assert.equal(backup.withTransaction(tx => tx.query('SELECT MAX(version) AS version FROM schema_migrations WHERE component=?', SYNC_COMPONENT))[0].version, 7)
-    assert.equal(await migrateSyncStore(legacy), 8)
+    assert.equal(backup.withTransaction(tx => tx.query('SELECT MAX(version) AS version FROM schema_migrations WHERE component=?', SYNC_COMPONENT))[0].version, 8)
+    assert.equal(await migrateSyncStore(legacy), SYNC_MIGRATIONS.length)
     assert.deepEqual(new SyncStore(legacy, f.options).listOperations('repo'), [])
   } finally { backup?.close(); legacy.close(); f.cleanup() }
 })
@@ -1185,7 +1185,7 @@ test('P3 v7→v8先备份后登记授权writer版本，旧writer拒写且无改�
 test('P3同选择新requestId/finding次序复用原预算，真实新选择撤旧fence且历史conflict保留', async () => {
   const f = await fixture()
   try {
-    const real = await f.controlled(), base = { ...f.admit(real.input.source, real.input.id), origin: 'code' as const, input: real.input }
+    const real = await f.controlled(), base = { ...f.admit(real.input.source, real.input.id), origin: 'code' as const, input: real.input, deliveryPlan: { canonicalRoot: real.input.source.canonicalRoot, branch: real.input.source.branch, baseCommit: real.input.headCommit } }
     const old = f.claim(base)
     f.store.recordFailure(old.fence, { code: 'business_conflict', message: '双方权限规则互斥；保真实历史分析', kind: 'conflict', evidenceRefs: [] })
     const make = (requestId: string, findingIds: string[], choice: 'keep_intent' | 'adopt_behavior') => {
@@ -1197,11 +1197,21 @@ test('P3同选择新requestId/finding次序复用原预算，真实新选择撤�
     assert.equal(f.store.readOperation(old.operation.id).phase, 'superseded')
     assert.equal(f.store.readAttempt(old.attempt.id).failure!.code, 'business_conflict')
     assert.throws(() => f.store.renewLease(old.fence, 1000), /SYNC_FENCE_EXPIRED/)
-    const alias = f.store.admitAndEnqueue(make('choice-B', ['finding-2', 'finding-1'], 'keep_intent'))
+    const alias = f.store.admitAndEnqueue({ ...make('choice-B', ['finding-2', 'finding-1'], 'keep_intent'), policyDigest: 'new-request-ref-and-settled-facts', readSetDigest: 'derived-readset', scope: { ...base.scope, contractIds: [...base.scope.contractIds, 'AC-SETTLED-NEW'] } })
     assert.equal(alias.id, first.id); assert.equal(alias.callsUsed, 0); assert.equal(alias.deadlineAtMs, first.deadlineAtMs)
     assert.throws(() => f.store.admitAndEnqueue(make('choice-A', ['finding-1', 'finding-2'], 'adopt_behavior')), /SYNC_IDEMPOTENCY_CONFLICT/)
+    const ready = f.ready(firstInput, firstInput.scope, undefined, null, undefined, { decisionRefs: [firstInput.requestBlob] })
+    const journal = f.store.beginApply(ready.fence, ready.plan, ready.target), receipt = f.receipt(journal.id, ready.plan)
+    for (const step of journal.steps) f.store.recordApplyStep(ready.fence, journal.id, { ...step, status: 'completed' })
+    f.store.recordReceipt(journal.id, receipt); f.store.settleApply(journal.id, receipt.id)
+    const settled = f.store.readOperation(first.id), baseline = f.store.readBaseline(base.input.source)!
+    assert.deepEqual(baseline.decisionRefs, [firstInput.requestBlob])
+    f.protocol.withTransaction(tx => tx.exec('UPDATE sync_operations SET normalized_semantic_digest=? WHERE id=?', 'old-v8-derived-policy-identity', first.id))
+    const repeated = f.store.admitAndEnqueue({ ...make('choice-after-receipt', ['finding-2', 'finding-1'], 'keep_intent'), policyDigest: 'settled-history-and-new-transport-reference', previousBaselinePair: baseline })
+    assert.equal(repeated.id, first.id); assert.equal(repeated.callsUsed, settled.callsUsed); assert.equal(repeated.deadlineAtMs, settled.deadlineAtMs)
+
     const replacement = f.store.admitAndEnqueue(make('choice-C', ['finding-1', 'finding-2'], 'adopt_behavior'))
-    assert.notEqual(replacement.id, first.id); assert.equal(f.store.readOperation(first.id).phase, 'superseded')
+    assert.notEqual(replacement.id, first.id); assert.equal(f.store.readOperation(first.id).phase, 'workspace_synced')
     assert.equal(f.store.requestControl(old.operation.id, 'run').phase, 'superseded')
     assert.equal(f.store.listAttempts(old.operation.id).length, 1)
   } finally { f.cleanup() }

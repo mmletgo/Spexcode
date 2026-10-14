@@ -77,7 +77,7 @@ CREATE INDEX sync_operations_normalized_semantic ON sync_operations(normalized_s
 CREATE TABLE sync_ingress_receipts (
  ingress_key TEXT PRIMARY KEY, operation_id TEXT NOT NULL REFERENCES sync_operations(id),
  payload_digest TEXT NOT NULL, record_json TEXT NOT NULL CHECK(json_valid(record_json))
-) STRICT;` }, { version: 8, sql: 'SELECT 1; -- P3 behavior authorization, scoped decision history and retired IDs require this writer generation; old writers must refuse.' }]
+) STRICT;` }, { version: 8, sql: 'SELECT 1; -- P3 behavior authorization, scoped decision history and retired IDs require this writer generation; old writers must refuse.' }, { version: 9, sql: 'SELECT 1; -- P3 exact structured decision authority and stable post-settlement decision identity require this writer generation.' }]
 
 /** 升级前以 SQLite online backup 保存一致性旧库；迁移本身由组件事务执行。 */
 export async function migrateSyncStore(protocol: SessionProtocol, options: { backupPath?: string } = {}): Promise<number> {

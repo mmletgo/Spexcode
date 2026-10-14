@@ -6,6 +6,7 @@ import type { BaselinePair, InputSnapshot } from './operation-types.js'
 import { readFrozenContracts } from './frozen-contracts.js'
 import { readEvidence, readObject, readTree, verifySnapshot } from './snapshot.js'
 import { controlledDecisionIdentity } from './request-input.js'
+import { readDecisionAuthority } from './code-behavior.js'
 import type { CodeBehaviorAnalysis, SyncDecisionInput } from './writeback-types.js'
 import { coveredPath, readSyncSettings, SyncApplicationError } from './settings.js'
 
@@ -49,6 +50,6 @@ export async function buildSyncApplicationPlan(snapshot: InputSnapshot, nodeId: 
     version: 'sync-coordinator-v1', intentNodeId: intent.id, targets,
     readPaths: [...new Set([...specEntries.map(entry => entry.path), ...oldFiles.keys(), '.spec/spexcode.json', ...writable, ...settings.readPaths, ...codePaths, ...impact.testPaths, ...settings.mandatoryTests.map(test => test.testPath)])].sort(),
     writePaths: [...new Set([...targets.map(target => target.path), ...targets.map(target => posix.dirname(target.path)), ...writable])].sort(),
-    facts: [...settings.facts, ...decisionFacts], decisionRefs: baselinePair?.decisionRefs ?? [], retiredIds: baselinePair?.retiredIds ?? [], verifications: settings.verifications, mandatoryTests: settings.mandatoryTests,
+    facts: [...settings.facts, ...decisionFacts], decisionAuthorities: (baselinePair?.decisionRefs ?? []).map(ref => readDecisionAuthority(snapshot.source.commonDir, ref)), decisionRefs: baselinePair?.decisionRefs ?? [], retiredIds: baselinePair?.retiredIds ?? [], verifications: settings.verifications, mandatoryTests: settings.mandatoryTests,
   }
 }

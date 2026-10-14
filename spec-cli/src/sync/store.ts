@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { getBlob } from '@spexcode/spec-core'
 import { applyComponentMigrations, type ProtocolTransaction, type SessionProtocol } from '@spexcode/session-protocol'
-import { readControlledDecision, readControlledRequest } from './request-input.js'
+import { controlledDecisionIdentity, readControlledDecision, readControlledRequest } from './request-input.js'
 import { SYNC_COMPONENT, SYNC_MIGRATIONS, syncCoordinatorAddress, syncSemanticDigest } from './migrations.js'
 import type { AdmitSyncInput, ApplyFilePlan, ApplyJournal, ApplyPlan, ApplyReceipt, ApplyStep, BaselinePair, BlobRef, CandidateRef, ClaimedAttempt, ClaimAttemptInput, ComposedInputRef, RecoverableSyncResource, SyncResourceCheckpoint, SyncResourcePlan, SyncResourceRecord, DispatchPlan, InputSnapshot, NativeSessionRef, RecoverableSync, ScopeLease, SyncAttempt, SyncControl, SyncDispatchEnvelope, SyncFailure, SyncOperation, SyncIngressReceipt, SyncScope, VerificationRef, VerificationResultBlob, WorktreeIdentity, WriteFence } from './operation-types.js'
 
@@ -134,8 +134,8 @@ export class SyncStore {
     if (!input.requestBlob) return syncSemanticDigest(input)
     const evidence = JSON.parse(this.blob(input.requestBlob).toString('utf8')) as { type?: string }
     if (evidence.type === 'sync.decision') {
-      const { requestId: _requestId, ...decision } = readControlledDecision(input.input, input.requestBlob)
-      return syncSemanticDigest({ ...input, requestBlob: { sha256: digest({ ...decision, findingIds: [...decision.findingIds].sort() }) } })
+      const decision = readControlledDecision(input.input, input.requestBlob)
+      return digest({ source: input.input.source, inputId: input.input.id, origin: input.origin, decision: controlledDecisionIdentity(decision), retryOf: input.retryOf ?? null })
     }
     const request = readControlledRequest(input.input, input.requestBlob)
     const { requestId: _requestId, ...origin } = request.origin
@@ -159,13 +159,13 @@ export class SyncStore {
     const decision = requestType?.type === 'sync.decision' ? readControlledDecision(input.input, input.requestBlob!) : null
     if (decision && input.origin !== 'decision') fail('SYNC_DECISION_BINDING', '业务裁决需要decision来源')
     const semanticDigest = this.normalizedSemanticDigest(input)
-    const legacyCandidates = this.write(tx => tx.query("SELECT record_json FROM sync_operations WHERE normalized_semantic_digest IS NULL AND repository_id=? AND source_key=? AND json_extract(record_json,'$.input.id')=? AND json_extract(record_json,'$.policyDigest')=? AND json_extract(record_json,'$.origin')=? AND json_extract(record_json,'$.retryOf') IS ?", input.input.source.repositoryId, identityKey(input.input.source), input.input.id, input.policyDigest, input.origin, input.retryOf ?? null).map(row => parseRecord<SyncOperation>(row)!).filter(operation => digest(canonicalScope(operation.scope).paths) === digest(canonicalScope(input.scope).paths)))
+    const legacyCandidates = this.write(tx => tx.query("SELECT record_json FROM sync_operations WHERE repository_id=? AND source_key=? AND json_extract(record_json,'$.input.id')=? AND json_extract(record_json,'$.origin')=? AND json_extract(record_json,'$.retryOf') IS ? AND (? OR normalized_semantic_digest IS NULL AND json_extract(record_json,'$.policyDigest')=?)", input.input.source.repositoryId, identityKey(input.input.source), input.input.id, input.origin, input.retryOf ?? null, decision ? 1 : 0, input.policyDigest).map(row => parseRecord<SyncOperation>(row)!).filter(operation => decision || digest(canonicalScope(operation.scope).paths) === digest(canonicalScope(input.scope).paths)))
     const normalized = legacyCandidates.map(operation => {
       try { return { id: operation.id, digest: this.normalizedSemanticDigest(operation) } }
       catch (error) { fail('SYNC_REQUEST_IDENTITY_UNAVAILABLE', `旧请求 ${operation.id} 的不可变证据不能核验：${error instanceof Error ? error.message : String(error)}`) }
     })
     return this.write(tx => {
-      for (const operation of normalized) tx.exec('UPDATE sync_operations SET normalized_semantic_digest=? WHERE id=? AND normalized_semantic_digest IS NULL', operation.digest, operation.id)
+      for (const operation of normalized) tx.exec('UPDATE sync_operations SET normalized_semantic_digest=? WHERE id=?', operation.digest, operation.id)
       const prior = parseRecord<SyncOperation>(tx.query('SELECT record_json FROM sync_operations WHERE ingress_key=? OR EXISTS (SELECT 1 FROM json_each(sync_operations.ingress_aliases_json) WHERE value=?)', input.ingressKey, input.ingressKey)[0])
       if (prior) { const receipt = parseRecord<SyncIngressReceipt>(tx.query('SELECT record_json FROM sync_ingress_receipts WHERE ingress_key=?', input.ingressKey)[0]); if (prior.origin !== input.origin || !(receipt ? receipt.payloadDigest === payloadDigest : [payloadDigest, legacyPayloadDigest].includes(prior.payloadDigest))) fail('SYNC_IDEMPOTENCY_CONFLICT', input.ingressKey); return prior }
       const sameInput = parseRecord<SyncOperation>(tx.query('SELECT record_json FROM sync_operations WHERE normalized_semantic_digest=? ORDER BY rowid DESC LIMIT 1', semanticDigest)[0])
@@ -500,7 +500,7 @@ export class SyncStore {
       if (TERMINAL.has(operation.phase)) return operation
       const attempt = operation.currentAttemptId ? this.attempt(tx, operation.currentAttemptId) : null
       if (attempt) {
-        attempt.failure = { code: 'SYNC_BUDGET_EXHAUSTED', message: '执行预算或截止时间已耗尽', kind: 'budget', evidenceRefs: [] }
+        attempt.failure ??= { code: 'SYNC_BUDGET_EXHAUSTED', message: '执行预算或截止时间已耗尽', kind: 'budget', evidenceRefs: [] }
         if (attempt.status === 'applying') operation.phase = 'recovery_required'
         else { attempt.status = 'failed'; operation.phase = 'budget_exhausted'; this.release(tx, attempt.leaseToken) }
         this.saveAttempt(tx, attempt)

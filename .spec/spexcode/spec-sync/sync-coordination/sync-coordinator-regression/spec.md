@@ -37,3 +37,5 @@ recoveryOnly真实SQLite证明queued无attempt与paused已计划未原生派发�
 旧 planless 恢复夹具使用明确独立旧政策身份，避免普通相同输入去重命中已取消现代 operation；仍核 plan_missing 持久失败且零 native 派发。
 
 P3真实code来源沿analyzing独立会话、同attempt checkpoint与冻结policy进入P1/生成；refactor保持正文，未完整checkedPaths的独审不得晋级。接缝在生成独审明确终止，不冒称V3或receipt。短租约长调用的真实heartbeat/cancel及重入不重派继续保持。
+
+原raw及TR明确作者编辑场景复用新行为分析/独审并保持真实Docker、原oracle、源码/index和未影响作者内容的完整断言。新裁决独审仍发现同历史ID互斥时不得生成或写journal。

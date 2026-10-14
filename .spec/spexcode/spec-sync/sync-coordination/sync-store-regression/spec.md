@@ -59,3 +59,5 @@ v5真实SQLite证明同ingress不同origin拒、同input不同origin不归并、
 真实受控请求覆盖同 patch 不同 requestId 归原操作/预算、alias 精确重放及同 key 改 payload 拒绝；不同 patch/用户意图分离，显式 retry 继承原 requestBlob 才建立新预算。真实 v6 库重开惰性归一化保持旧 payload、记录和队列，缺当前来源证据拒接，已移除其它仓库不被读取。v6→v7备份可恢复、失败事务回滚、重启及旧 writer 拒写。
 
 P3覆盖retiredIds在receipt前不推进、结算及重启/published pair累积，v7→v8在线backup及旧writer拒写，immutable decision相同选择换requestId/finding顺序复用原预算，同key新choice冲突、新真实choice撤旧fence而完整历史保留；旧superseded resume不重新授权。
+
+裁决同choice跨requestId/finding顺序/运输ref派生policy及真实receipt结算后的历史facts复用原operation与预算；旧v8索引核验重算，同key新choice拒绝，v8→v9先备份且旧writer拒写。

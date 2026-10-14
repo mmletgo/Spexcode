@@ -9,6 +9,7 @@ import type { CodeBehaviorInput } from './code-behavior.js'
 import { composeInputSnapshots } from './composition.js'
 import type { ElaborationRunner } from './elaboration-types.js'
 import type { BaselinePair } from './operation-types.js'
+import { controlledDecisionIdentity, prepareControlledDecision } from './request-input.js'
 import { captureInputSnapshot, contentHash, readEvidence, readObject, readTree, writeEvidence } from './snapshot.js'
 import type { CodeBehaviorAnalysis, CodeBehaviorKind } from './writeback-types.js'
 
@@ -103,4 +104,36 @@ test('无治理新增实现自动定位真实上层并生成唯一叶身份；�
   assert.equal(analysis.newNodes.length, 1); assert.match(analysis.newNodes[0].path, /^\.spec\/export\/export-contract\/sync-code-/)
   assert.ok(analysis.newNodes[0].rawSource.includes('[[export-contract]]')); assert.equal(analysis.newNodes[0].codePath, 'src/view.js')
   await assert.rejects(analyzeCodeBehavior(input, runner('allowed_change', proposal => { proposal.newNodes = [{ codePath: 'src/view.js', parentNodeId: 'unknown', basis: '猜测目标' }] })), /没有真实上层需求/)
+})
+
+test('共同基线区分前次交付接受回声与真实新raw，已交付详细规则不升为user:raw', async t => {
+  const f = await fixture(t), path = '.spec/export/export-contract/spec.md'
+  const delivered = f.raw.replace('成功需非空result、发布一次', '成功需非空result、发布一次并返回额外可观察字段')
+  writeFileSync(join(f.delivery, path), delivered); writeFileSync(join(f.root, path), delivered)
+  const echo = await analyzeCodeBehavior(await f.input(), runner('refactor'))
+  assert.deepEqual(echo.authorChanges, [])
+  writeFileSync(join(f.root, path), f.raw.replace('用户可以提交符合筛选条件的数据导出，任务完成后下载结果。', '用户可以提交符合筛选条件的数据导出，任务完成后下载结果并看到明确的计数。'))
+  const changed = await analyzeCodeBehavior(await f.input(), runner('allowed_change'))
+  assert.equal(changed.authorChanges!.length, 1); assert.ok(changed.authorChanges![0].changedIds.includes('REQ-EXPORT-01'))
+  assert.equal(changed.authorChanges![0].changedIds.includes('RULE-EXPORT-05'), false)
+})
+
+test('结构化所选retry裁决不能借decision或user:raw来源更改无关幂等RULE/AC', async t => {
+  const f = await fixture(t); writeFileSync(join(f.root, 'src/export.js'), `${f.source}\n// external behavior\n`)
+  const input = await f.input(), previous = await analyzeCodeBehavior(input, runner('conflict', proposal => { proposal.changes = (proposal.changes as { paths: string[] }[]).map(change => ({ ...change, kind: 'conflict', affectedIds: ['RULE-EXPORT-06'], ruleIds: ['RULE-EXPORT-06'], originalIntent: '明确失败后所有者重试', previousBehavior: '保持ID并增加attempt', sourceBehavior: '外部重试规则待裁决', deliveryBehavior: '原明确重试规则', evidence: '重试分支冻结差异', counterexample: '失败后重复RETRY应保持隔离' })) }))
+  const ref = writeEvidence(input.snapshot.source.commonDir, previous)
+  const request = { requestId: 'retry-only', operationId: 'original-operation', inputId: input.snapshot.id, analysisRef: ref, findingIds: previous.findings.map(finding => finding.id), decision: { choice: 'new_rule' as const, rule: '失败后仅允许重试两次' } }
+  input.composed.requestBlob = prepareControlledDecision(input.snapshot, request); input.decision = { request, previous: { ref, analysis: previous } }; input.origin = 'decision'
+  const source = `decision:${controlledDecisionIdentity(request)}`
+  const fact = { source, text: '只变更失败重试次数，幂等、权限和其他规则保持' }
+  input.plan.facts = [...input.plan.facts, fact]
+  for (const authorizationSource of [source, 'user:raw']) await assert.rejects(analyzeCodeBehavior(input, runner('allowed_change', proposal => {
+    proposal.changes = (proposal.changes as object[]).map(change => ({ ...change, affectedIds: ['AC-EXPORT-01'], ruleIds: ['RULE-EXPORT-02'] }))
+    proposal.facts = [fact]; proposal.acceptanceChanges = [{ id: 'AC-EXPORT-01', ruleIds: ['RULE-EXPORT-02'], source: authorizationSource, reason: '借重试裁决更改幂等政策' }]
+  })), /所选裁决范围/)
+  const scoped = await analyzeCodeBehavior(input, runner('allowed_change', proposal => {
+    proposal.changes = (proposal.changes as object[]).map(change => ({ ...change, affectedIds: ['AC-EXPORT-08'], ruleIds: ['RULE-EXPORT-06'] }))
+    proposal.facts = [fact]; proposal.acceptanceChanges = [{ id: 'AC-EXPORT-08', ruleIds: ['RULE-EXPORT-06'], source, reason: '仅对应明确的失败重试新规则' }]
+  }))
+  assert.equal(scoped.authorizedChanges[0].id, 'AC-EXPORT-08'); assert.deepEqual(scoped.decisionAuthorities![0].ruleIds, ['RULE-EXPORT-06'])
 })
