@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -49,6 +49,97 @@ function runner(kind: CodeBehaviorKind, patch?: (proposal: Record<string, unknow
     return { sessionId: `session-${request.purpose}`, threadId: `thread-${request.purpose}`, turnId: 'turn-1', output, resultDigest: contentHash(JSON.stringify(output)) }
   }
 }
+
+test('目录授权的新增helper与删除文件前置完整冻结读取清单，metadata和links不冒全文', async t => {
+  const f = await fixture(t), path = 'src/export-summary.js', helper = 'export const resultCount = rows => rows === null ? null : rows.length;\n'
+  writeFileSync(join(f.root, path), helper); rmSync(join(f.root, 'tests/export.test.mjs')); symlinkSync('export.js', join(f.root, 'src/link'))
+  const input = await f.input(), fake = runner('allowed_change', proposal => { proposal.newNodes = [{ codePath: path, parentNodeId: 'export-contract', basis: '实际结果反馈需要派生计数' }] })
+  const prompts: string[] = []
+  await assert.rejects(analyzeCodeBehavior(input, async request => {
+    prompts.push(request.prompt)
+    const manifest = JSON.parse(request.prompt.split('冻结读取清单:\n')[1].split('\n分析要求:')[0]) as { requiredChangedPaths: string[]; readablePaths: { path: string; snapshots: string[] }[] }
+    assert.ok(request.prompt.indexOf('冻结读取清单:') < request.prompt.indexOf('分析要求:'))
+    assert.deepEqual(manifest.requiredChangedPaths, ['src/export-summary.js', 'src/link', 'tests/export.test.mjs'])
+    assert.deepEqual(manifest.readablePaths.find(item => item.path === path)!.snapshots, ['newSource', 'composedFiles'])
+    assert.deepEqual(manifest.readablePaths.find(item => item.path === 'tests/export.test.mjs')!.snapshots, ['oldSource', 'verifiedDelivery'])
+    assert.ok(!manifest.readablePaths.some(item => item.path === 'src/link' || item.path === 'src'))
+    assert.ok(request.prompt.includes(JSON.stringify(helper))); assert.match(request.prompt, /cwd.*不是.*输入/)
+    return fake(request)
+  }), /未完整读取的路径/)
+  assert.equal(prompts.length, 2)
+  rmSync(join(f.root, 'src/link'))
+  assert.equal((await analyzeCodeBehavior(await f.input(), fake)).reviewPassed, true)
+  assert.equal(git(f.root, 'ls-tree', 'HEAD', path), '')
+})
+
+test('漏helper的accept具体拒绝并携完整前轮proposal与未批准analysis供新独审逐项修复', async t => {
+  const f = await fixture(t), path = 'src/export-summary.js', helper = 'export const resultCount = rows => rows === null ? null : rows.length;\n'
+  writeFileSync(join(f.root, path), helper); writeFileSync(join(f.root, 'src/export.js'), `${f.source}\n// uses resultCount\n`)
+  const input = await f.input(), propose = (proposal: Record<string, unknown>): void => { proposal.newNodes = [{ codePath: path, parentNodeId: 'export-contract', basis: '实际结果反馈需要派生计数' }]; proposal.facts = [{ source: `code:${path}#resultCount`, text: '保存结果数组长度，尚无结果为null' }] }
+  let rejected: { code: string; message: string } | undefined
+  await assert.rejects(analyzeCodeBehavior(input, runner('allowed_change', propose, review => { review.checkedPaths = ['src/export.js'] })), (error: Error & { code: string }) => {
+    const diagnostic = JSON.parse(error.message) as { approved: boolean; details: { missingPaths: string[] }; proposal: { facts: object[] }; analysis: CodeBehaviorAnalysis; review: { verdict: string } }
+    assert.equal(error.code, 'behavior_review_failed'); assert.equal(diagnostic.approved, false)
+    assert.deepEqual(diagnostic.details.missingPaths, [path]); assert.equal(diagnostic.review.verdict, 'accept')
+    assert.deepEqual(diagnostic.proposal.facts, [{ source: `code:${path}#resultCount`, text: '保存结果数组长度，尚无结果为null' }])
+    assert.equal(diagnostic.analysis.reviewPassed, false)
+    assert.throws(() => deriveBehaviorAuthorization(diagnostic.analysis, writeEvidence(input.snapshot.source.commonDir, diagnostic.analysis)), /已冻结独审blob/)
+    rejected = { code: error.code, message: error.message }; return true
+  })
+  const fake = runner('allowed_change', propose)
+  const repaired = await analyzeCodeBehavior({ ...input, repairDiagnostics: [rejected!] }, async request => {
+    const context = request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]
+    const frozen = JSON.parse(context) as { repairDiagnostics: { code: string; message: string }[]; readSetDigest: string; policyDigest: string }
+    assert.deepEqual(frozen.repairDiagnostics, [rejected]); assert.equal(request.inputDigest, contentHash(context))
+    assert.equal(frozen.policyDigest, input.policyDigest); assert.equal(frozen.readSetDigest, input.readSetDigest); assert.equal(request.timeoutMs, input.timeoutMs)
+    return fake(request)
+  })
+  assert.equal(repaired.reviewPassed, true); assert.notEqual(repaired.inputDigest, JSON.parse(rejected!.message).analysis.inputDigest)
+  const finding = { message: '缺少完成计数边界', evidence: '两个保存结果需计数2', counterexample: '旧断言期望null' }
+  await assert.rejects(analyzeCodeBehavior(input, runner('allowed_change', propose, review => { review.checkedPaths = ['src/export.js']; review.verdict = 'repair'; review.findings = [finding] })), (error: Error) => {
+    const diagnostic = JSON.parse(error.message)
+    assert.deepEqual(diagnostic.details.missingPaths, [path]); assert.deepEqual(diagnostic.details.findings, [finding]); assert.deepEqual(diagnostic.review.findings, [finding]); return true
+  })
+  await assert.rejects(analyzeCodeBehavior({ ...input, repairDiagnostics: [{ code: 'behavior_review_failed', message: JSON.stringify({ approved: true, analysis: repaired, review: { verdict: 'accept' } }) }] }, runner('allowed_change', propose, review => { review.inputDigest = 'old-approved-input'; review.analysisDigest = 'old-approved-analysis'; review.checkedChangeIds = ['unknown-change'] })), (error: Error) => {
+    const diagnostic = JSON.parse(error.message)
+    assert.deepEqual(diagnostic.details.identityMismatch, ['inputDigest', 'analysisDigest']); assert.deepEqual(diagnostic.details.unknownChangeIds, ['unknown-change'])
+    assert.equal(diagnostic.details.missingChangeIds.length, 2); assert.equal(diagnostic.approved, false); return true
+  })
+})
+
+test('AC复合门禁逐项诊断未变规则与不绑定来源，不把多个allowed_change并集授权', async t => {
+  const f = await fixture(t); writeFileSync(join(f.root, 'src/export.js'), `${f.source}\n// result count extension\n`)
+  const input = await f.input(), source = 'code:src/export.js#ExportService.dispatch'
+  await assert.rejects(analyzeCodeBehavior(input, runner('allowed_change', proposal => {
+    proposal.facts = [{ source, text: '只新增结果派生计数，不更改权限' }]
+    proposal.acceptanceChanges = [{ id: 'AC-EXPORT-01', ruleIds: ['RULE-EXPORT-05', 'RULE-EXPORT-01'], source, reason: '原AC同时覆盖权限但本次权限未改变' }]
+  })), (error: Error) => {
+    const diagnostic = JSON.parse(error.message)
+    assert.equal(diagnostic.details.targetKind, 'AC'); assert.equal(diagnostic.details.sourceBound, true)
+    assert.deepEqual(diagnostic.details.allowedChanges[0].unsupportedRuleIds, ['RULE-EXPORT-01']); assert.equal(diagnostic.details.allowedChanges[0].missingAffectedId, null)
+    assert.ok(diagnostic.proposal.acceptanceChanges); return true
+  })
+  await assert.rejects(analyzeCodeBehavior(input, runner('allowed_change', proposal => {
+    const changes = proposal.changes as Record<string, unknown>[]
+    proposal.changes = [changes[0], { ...changes[0], ruleIds: ['RULE-EXPORT-01'], evidence: '独立权限变化' }]
+    proposal.facts = [{ source, text: '两个不同变化不能合并成一个AC批准' }]
+    proposal.acceptanceChanges = [{ id: 'AC-EXPORT-01', ruleIds: ['RULE-EXPORT-05', 'RULE-EXPORT-01'], source, reason: '尝试跨不同change拼接授权' }]
+  })), /没有合法已审规则变化/)
+  await assert.rejects(analyzeCodeBehavior(input, runner('allowed_change', proposal => { proposal.acceptanceChanges = [{ id: 'AC-EXPORT-01', ruleIds: ['RULE-EXPORT-05'], source, reason: '省略来源事实' }] })), (error: Error) => {
+    assert.equal(JSON.parse(error.message).details.sourceBound, false); return true
+  })
+  await assert.rejects(analyzeCodeBehavior(input, runner('allowed_change', proposal => {
+    (proposal.changes as { affectedIds: string[] }[])[0].affectedIds = ['RULE-EXPORT-05']
+    proposal.facts = [{ source, text: '依据完整，但change没有目标AC' }]
+    proposal.acceptanceChanges = [{ id: 'AC-EXPORT-01', ruleIds: ['RULE-EXPORT-05'], source, reason: '目标AC未列在同次具体变化' }]
+  })), (error: Error) => { assert.equal(JSON.parse(error.message).details.allowedChanges[0].missingAffectedId, 'AC-EXPORT-01'); return true })
+  const approved = await analyzeCodeBehavior(input, runner('allowed_change', proposal => {
+    proposal.facts = [{ source, text: '只新增结果派生计数，原AC其他义务仍保留' }]
+    proposal.acceptanceChanges = [{ id: 'AC-EXPORT-01', ruleIds: ['RULE-EXPORT-05'], source, reason: '只绑定本次改变的结果规则，保原其他covers义务' }]
+  }))
+  assert.equal(approved.authorizedChanges[0].id, 'AC-EXPORT-01')
+  await assert.rejects(analyzeCodeBehavior({ ...input, repairDiagnostics: [{ code: 'behavior_review_failed', message: 'x'.repeat(2 * 1024 * 1024) }] }, runner('allowed_change')), /超过2MiB/)
+})
 
 test('真实三方Git对象进入独立行为分析，允许外部行为证据先冻结再派生AC授权', async t => {
   const f = await fixture(t)
@@ -107,9 +198,9 @@ test('独审路径错误仍把同次业务遗漏与反例交给下一轮修复�
   const input = await f.input(), finding = { message: '遗漏成功分支的计数验收', evidence: '成功视图沿用运行中计数期望', counterexample: '完成返回2而完整期望仍为null' }
   input.plan.readPaths = ['src', 'tests', '.spec/export/spec.md', '.spec/export/export-contract/spec.md']
   let rejected: { code: string; message: string } | undefined
-  await assert.rejects(analyzeCodeBehavior(input, runner('allowed_change', undefined, review => { review.checkedPaths = ['src/export.js', '.spec/export/.plugins']; review.verdict = 'repair'; review.findings = [finding] })), (error: Error & { code?: string }) => {
-    assert.equal(error.code, 'behavior_analysis_invalid'); assert.match(error.message, /未完整读取的路径/)
-    assert.ok(error.message.includes(JSON.stringify(finding))); rejected = { code: error.code!, message: error.message }; return true
+  for (const path of ['.spec/export/.plugins', '../outside']) await assert.rejects(analyzeCodeBehavior(input, runner('allowed_change', undefined, review => { review.checkedPaths = ['src/export.js', path]; review.verdict = 'repair'; review.findings = [finding] })), (error: Error & { code?: string }) => {
+    assert.equal(error.code, 'behavior_analysis_invalid'); assert.match(error.message, /未完整读取的路径|不合法仓库路径/)
+    assert.deepEqual(JSON.parse(error.message).review.findings, [finding]); rejected = { code: error.code!, message: error.message }; return true
   })
   const fake = runner('refactor')
   await analyzeCodeBehavior({ ...input, repairDiagnostics: [rejected!] }, async request => { assert.ok(request.prompt.includes(finding.counterexample)); return fake(request) })

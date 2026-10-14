@@ -21,3 +21,5 @@ code:
 攻击回归复现并拒绝两类raw越权：仅选源码retry的keep裁决改无作者差量raw、真实A/B重叠弱化双方未改权限C；相容A/B合成保持C仍通过。完整P2交付ff接受后只改源码时，changedPaths排除前次已生成Spec/tests且authorChanges为空。
 
 独审同时包含越界checkedPath和具体业务遗漏时仍拒绝批准，但失败诊断保留同次完整finding、证据和反例，并通过下一次冻结repairDiagnostics传给分析与独审；不能只保路径错误而让有限修复预算反复丢失必要验收遗漏。
+
+真实 Git 目录授权新增未跟踪 helper 的完整字节及所在快照进入前置必读/全文清单；旧 HEAD 无该文件不影响读取，删除文件保旧全文，目录、元数据和链接不冒全文或缩小必读集合。漏 helper 的 accept 明确给 missingPaths，并携前轮完整 proposal/未批准 analysis/review 进入新分析及独审；missingPath 和业务 findings 共存不丢。AC 混入未变规则、遗漏目标 affectedId 或不绑定来源给具体诊断，多个 allowed_change 并集不能授权。伪造 diagnostic 或旧 accept 不豁免新摘要/身份/范围门禁，readSet/policy/timeout 仍绑定，诊断与清单共同超 2MiB 时明确失败。
