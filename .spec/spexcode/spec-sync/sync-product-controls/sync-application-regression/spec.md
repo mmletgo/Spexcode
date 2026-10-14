@@ -63,4 +63,4 @@ AC-APPLICATION-P4-08 真实Git/SQLite、正式观察服务、compiled hooks与Do
 
 AC-APPLICATION-P4-09 真实失败后scope外编辑不改变stale/重试资格，同request重放沿原receipt，新retry绑定原input；相关原始意图变动则stale并拒绝旧输入重试。
 
-AC-APPLICATION-P4-10 在可控native执行期间物理pause，原operation.control保持run且资源在安全边界结算；暂停编辑仍更新latest且无新调用，resume先准入最新input，原active input不被改写。
+AC-APPLICATION-P4-10 在可控native执行期间物理pause，单operation detail独立展示physicalControl=pause，原operation.control保持run且资源在安全边界结算；暂停编辑仍更新latest且无新调用，resume先准入最新input，原active input不被改写。
