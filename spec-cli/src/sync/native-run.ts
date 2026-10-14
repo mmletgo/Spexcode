@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { getBlob, putBlob } from '@spexcode/spec-core'
 import { readRecord, type SessRec } from '../session-record.js'
-import { sessionIdForCreateKey, readSessionCreateTermination, type SessionCreateTermination } from '../sessions.js'
+import { sessionIdForCreateKey, readSessionCreateTermination, recoverSessionCreateTermination, type SessionCreateTermination } from '../sessions.js'
 import { cancelStructuredSession, runStructuredSession, StructuredSessionError, type StructuredCancellationResult } from '../session-structured.js'
 import type { StructuredExecution } from '../session-structured-policy.js'
 import type { ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult } from './elaboration-types.js'
@@ -13,7 +13,7 @@ import type { BlobRef, NativeSessionRef, SyncResourcePhase, WriteFence } from '.
 type FrozenRequest = Omit<ElaborationSessionRequest, 'signal'>
 export type NativeRunRecord = Pick<SessRec, 'session' | 'status' | 'harnessSessionId' | 'structuredExecution' | 'createRequestId' | 'createPayloadHash'>
 export type AttemptRunnerOptions = {
-  runtime?: { run: typeof runStructuredSession; cancel: typeof cancelStructuredSession; readRecord: (id: string) => NativeRunRecord | null; readCreateTermination?: typeof readSessionCreateTermination }
+  runtime?: { run: typeof runStructuredSession; cancel: typeof cancelStructuredSession; readRecord: (id: string) => NativeRunRecord | null; readCreateTermination?: typeof readSessionCreateTermination; recoverCreateTermination?: typeof recoverSessionCreateTermination }
   blobIO?: { put: (bytes: Buffer) => BlobRef; read: (ref: BlobRef) => Buffer }
   pollMs?: number
 }
@@ -42,7 +42,7 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
     if (!bytes) throw new StructuredSessionError('stale_result', 'native execution evidence blob is missing')
     return bytes
   } }
-  const runtime = options.runtime ?? { run: runStructuredSession, cancel: cancelStructuredSession, readRecord, readCreateTermination: readSessionCreateTermination }
+  const runtime = options.runtime ?? { run: runStructuredSession, cancel: cancelStructuredSession, readRecord, readCreateTermination: readSessionCreateTermination, recoverCreateTermination: recoverSessionCreateTermination }
   const flights = new Map<string, { digest: string; controller: AbortController; promise: Promise<ElaborationSessionResult> }>()
   const read = <T>(ref: BlobRef): T => {
     const bytes = blobs.read(ref)
@@ -134,6 +134,10 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
         let receipt = creationTermination()
         while (!record && !receipt && nativePromise && !outcome && Date.now() < deadline) {
           await new Promise<void>(resolve => setTimeout(resolve, Math.min(options.pollMs ?? 50, Math.max(1, deadline - Date.now()))))
+          record = observe(); receipt = creationTermination()
+        }
+        if (!record && !receipt && (!nativePromise || outcome) && runtime.recoverCreateTermination) {
+          await runtime.recoverCreateTermination(dispatch!.sessionCreateKey, { prompt: request.prompt, payloadHash: expectedCreateHash, base: request.base, signal: AbortSignal.timeout(Math.min(15_000, request.timeoutMs)) })
           record = observe(); receipt = creationTermination()
         }
         if (!record && receipt) {
