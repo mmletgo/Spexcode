@@ -8,6 +8,9 @@ export type WorktreeIdentity = {
   branch: string
   physicalFingerprint: string
 }
+export type PhysicalScope = Pick<WorktreeIdentity, 'repositoryId' | 'canonicalRoot' | 'physicalFingerprint'>
+export type PhysicalControl = { scope: PhysicalScope; control: 'run' | 'pause'; revision: number }
+export type DispatchAnchor = { scope: PhysicalScope; firstMessageId: string; firstEnqueueSeq: number; budgetRootOperationId: string }
 export type InputSnapshot = {
   /** 内容与物理身份形成稳定 ID；采集时间不参与。 */
   id: string
@@ -39,11 +42,19 @@ export type BaselinePair = {
   retiredIds?: string[]
   decisionRefs?: BlobRef[]
 }
+export type BaselineResource = { kind: 'path'; path: string } | { kind: 'contract' | 'flow'; id: string }
+export type BaselineBinding = { resource: { kind: 'path'; path: string }; bytePair: BaselinePair | null } | { resource: { kind: 'contract' | 'flow'; id: string }; intentPair: BaselinePair | null }
+export type FrozenBaselineSelection = { version: 'sync-baseline-selection-v1'; source: WorktreeIdentity; bindings: BaselineBinding[]; digest: string }
+export type BaselineSelectionResult = { selection: FrozenBaselineSelection } | { failure: SyncFailure }
 export type SyncOperation = {
   id: string; ingressKey: string; payloadDigest: string; rootCauseId: string
   origin: 'initial' | 'spec' | 'code' | 'combined' | 'reconcile' | 'decision'
   generation: number; revision: number; phase: SyncPhase; control: SyncControl
   input: InputSnapshot; previousBaselinePair: BaselinePair | null
+  baselineSelection?: FrozenBaselineSelection
+  dispatchAnchor?: DispatchAnchor
+  dispatchAcknowledged?: boolean
+  successorOf?: string
   /** 额外的受控用户编辑/裁决请求；与实际来源字节分开，自动文件事件无需该字段。 */
   requestBlob?: BlobRef
   /** 用户显式重开已结束操作；冻结业务输入不变，新执行预算属于新operation。 */
@@ -58,7 +69,7 @@ export type SyncOperation = {
   dispatchMessageId: string; delivery: WorktreeIdentity | null; deliveryPlan: DeliveryPlan; createdAtMs: number; updatedAtMs: number
 }
 export type DeliveryPlan = { canonicalRoot: string; branch: string; baseCommit: string }
-export type ComposedInputRef = { sourceInputId: string; previousBaselinePairId: string | null; tree: string; manifestBlob: BlobRef; contentDigest: string; requestBlob?: BlobRef; authorProjectionBlob?: BlobRef; compositionEvidenceBlob?: BlobRef }
+export type ComposedInputRef = { sourceInputId: string; previousBaselinePairId: string | null; baselineSelectionDigest?: string; tree: string; manifestBlob: BlobRef; contentDigest: string; requestBlob?: BlobRef; authorProjectionBlob?: BlobRef; compositionEvidenceBlob?: BlobRef }
 export type DispatchPlan = { key: string; purpose: string; requestDigest: string; sessionCreateKey: string; session: NativeSessionRef | null }
 export type NativeSessionRef = { sessionId: string; threadId: string | null; turnId: string | null }
 export type CandidateRef = { baseTree: string; sourceInputId: string; tree: string; digest: string; manifestBlob: BlobRef; actualDiffBlob: BlobRef; coveredScope: SyncScope }
@@ -74,14 +85,14 @@ export type ScopeLease = { token: string; operationId: string; attemptId: string
 export type ApplyFilePlan = { path: string; preDigest: string | null; postDigest: string | null; preMode: string | null; postMode: string | null }
 export type ApplyPlan = {
   effectKey: string; payloadDigest: string; candidateDigest: string; verificationBlob: BlobRef
-  target: WorktreeIdentity; expectedTargetSnapshotId: string; expectedBaselinePairId: string | null
+  target: WorktreeIdentity; expectedTargetSnapshotId: string; expectedBaselinePairId: string | null; expectedBaselineSelectionDigest?: string
   coveredScope: SyncScope; files: ApplyFilePlan[]; planBlob: BlobRef
 }
 export type ApplyStep = { key: string; status: 'planned' | 'completed'; evidenceRef: BlobRef | null }
 export type ApplyReceipt = { id: string; journalId: string; effectKey: string; actualTree: string; actualCommit: string | null; deliverySnapshot: InputSnapshot; evidenceRefs: BlobRef[]; completedAtMs: number }
 export type ApplyJournal = { id: string; operationId: string; attemptId: string; generation: number; plan: ApplyPlan; status: 'prepared' | 'applying' | 'completed' | 'settled' | 'recovery_required'; steps: ApplyStep[]; receipt: ApplyReceipt | null; createdAtMs: number }
 export type SyncDispatchEnvelope = { version: 1; type: 'sync.dispatch'; operationId: string; inputId: string; generation: number; dispatchKey: string }
-export type AdmitSyncInput = Pick<SyncOperation, 'ingressKey' | 'rootCauseId' | 'origin' | 'input' | 'requestBlob' | 'retryOf' | 'planBlob' | 'scope' | 'budget' | 'delivery' | 'policyDigest' | 'impactDigest' | 'readSetDigest' | 'deliveryPlan'> & { previousBaselinePair?: BaselinePair | null }
+export type AdmitSyncInput = Pick<SyncOperation, 'ingressKey' | 'rootCauseId' | 'origin' | 'input' | 'requestBlob' | 'retryOf' | 'planBlob' | 'scope' | 'budget' | 'delivery' | 'policyDigest' | 'impactDigest' | 'readSetDigest' | 'deliveryPlan'> & { previousBaselinePair?: BaselinePair | null; baselineSelection?: FrozenBaselineSelection }
 export type ClaimAttemptInput = { operationId: string; source: WorktreeIdentity; scope: SyncScope; leaseMs: number; expectedMessageId?: string }
 export type ClaimedAttempt = { operation: SyncOperation; attempt: SyncAttempt; fence: WriteFence; lease: ScopeLease }
 export type RecoverableSync = { operation: SyncOperation; attempt: SyncAttempt | null; journals: ApplyJournal[] }
@@ -108,3 +119,8 @@ export type SyncResourceCheckpoint = {
 export type RecoverableSyncResource = { operation: SyncOperation; attempt: SyncAttempt; resource: SyncResourceRecord }
 
 export type SyncIngressReceipt = Pick<AdmitSyncInput, 'requestBlob' | 'budget' | 'deliveryPlan' | 'previousBaselinePair'> & { operationId: string; payloadDigest: string }
+
+export type ClaimQueuedAttemptInput = ClaimAttemptInput & { expectedRevision: number }
+export type SyncObservationInput = { input: InputSnapshot; configRef: BlobRef; selection: FrozenBaselineSelection | null; latestDifferenceDigest: string; failure?: SyncFailure }
+export type SyncObservation = SyncObservationInput & { id: string; controlRevision: number; selectionDigest: string | null; observedAtMs: number; operationId: string | null; outcome: 'observed' | 'admitted' | 'coalesced' | 'duplicate' | 'blocked'; reason: SyncFailure | null }
+export type ObserveAndAdmitResult = { outcome: 'admitted' | 'coalesced' | 'duplicate'; operation: SyncOperation; observation: SyncObservation } | { outcome: 'blocked'; observation: SyncObservation; reason: SyncFailure }

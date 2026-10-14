@@ -67,3 +67,5 @@ P3覆盖retiredIds在receipt前不推进、结算及重启/published pair累积�
 
 
 partial startGeneration登记needs_input后，生成environment失败及后续预算耗尽分别保原业务reason与失败证据，结清attempt/资源后eligibility和实际decision admission通过；仍在generating时同请求被拒。不以数据库伪造状态证明该路径。
+
+P4 针对性回归覆盖精确资源 frontier、物理暂停跨分支/重启、FIFO 收件与领取分离、暂停重叠前序和独立范围、不可变 successor 原位置与预算族、事务 CAS 与旧基线恢复；迁移覆盖在线备份、失败回滚、未知 writer 拒绝及原会话读取。

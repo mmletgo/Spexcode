@@ -3,7 +3,7 @@ import { getBlob } from '@spexcode/spec-core'
 import { applyComponentMigrations, type ProtocolTransaction, type SessionProtocol } from '@spexcode/session-protocol'
 import { controlledDecisionIdentity, readControlledDecision, readControlledRequest } from './request-input.js'
 import { SYNC_COMPONENT, SYNC_MIGRATIONS, syncCoordinatorAddress, syncSemanticDigest } from './migrations.js'
-import type { AdmitSyncInput, ApplyFilePlan, ApplyJournal, ApplyPlan, ApplyReceipt, ApplyStep, BaselinePair, BlobRef, CandidateRef, ClaimedAttempt, ClaimAttemptInput, ComposedInputRef, RecoverableSyncResource, SyncResourceCheckpoint, SyncResourcePlan, SyncResourceRecord, DispatchPlan, InputSnapshot, NativeSessionRef, RecoverableSync, ScopeLease, SyncAttempt, SyncControl, SyncDispatchEnvelope, SyncFailure, SyncOperation, SyncIngressReceipt, SyncScope, VerificationRef, VerificationResultBlob, WorktreeIdentity, WriteFence } from './operation-types.js'
+import type { BaselineResource, BaselineBinding, FrozenBaselineSelection, BaselineSelectionResult, PhysicalScope, PhysicalControl, ClaimQueuedAttemptInput, SyncObservationInput, SyncObservation, ObserveAndAdmitResult, AdmitSyncInput, ApplyFilePlan, ApplyJournal, ApplyPlan, ApplyReceipt, ApplyStep, BaselinePair, BlobRef, CandidateRef, ClaimedAttempt, ClaimAttemptInput, ComposedInputRef, RecoverableSyncResource, SyncResourceCheckpoint, SyncResourcePlan, SyncResourceRecord, DispatchPlan, InputSnapshot, NativeSessionRef, RecoverableSync, ScopeLease, SyncAttempt, SyncControl, SyncDispatchEnvelope, SyncFailure, SyncOperation, SyncIngressReceipt, SyncScope, VerificationRef, VerificationResultBlob, WorktreeIdentity, WriteFence } from './operation-types.js'
 
 export { SYNC_COORDINATOR_ADDRESS, syncCoordinatorAddress } from './migrations.js'
 export const SYNC_DISPATCH_KIND = 'sync.dispatch.v1'
@@ -14,6 +14,9 @@ export class SyncStoreError extends Error {
 }
 function fail(code: string, message: string): never { throw new SyncStoreError(code, message) }
 const digest = (value: unknown): string => createHash('sha256').update(JSON.stringify(value, (_key, entry: unknown) => entry && typeof entry === 'object' && !Array.isArray(entry) ? Object.fromEntries(Object.entries(entry).sort(([a], [b]) => a.localeCompare(b))) : entry)).digest('hex')
+const physicalScope = ({ repositoryId, canonicalRoot, physicalFingerprint }: WorktreeIdentity): PhysicalScope => ({ repositoryId, canonicalRoot, physicalFingerprint })
+const resourceKey = (resource: BaselineResource): string => resource.kind === 'path' ? `path:${resource.path}` : `${resource.kind}:${resource.id}`
+const scopeResources = (scope: SyncScope): BaselineResource[] => [...scope.paths.map(path => ({ kind: 'path' as const, path })), ...scope.contractIds.map(id => ({ kind: 'contract' as const, id })), ...scope.flowIds.map(id => ({ kind: 'flow' as const, id }))]
 const identityKey = (identity: WorktreeIdentity): string => digest(identity)
 const scopeKeys = (scope: SyncScope): string[] => [...new Set([...scope.paths.map(path => `path:${path}`), ...scope.contractIds.map(id => `contract:${id}`), ...scope.flowIds.map(id => `flow:${id}`)])].sort()
 const pathOverlap = (a: string, b: string): boolean => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`)
@@ -88,20 +91,85 @@ export class SyncStore {
     return { operation, messageId, envelope }
   }
   nextDispatch(repositoryId: string): { operation: SyncOperation; messageId: string; envelope: SyncDispatchEnvelope } | null { return this.write(tx => this.dispatchHead(tx, repositoryId)) }
+  private physicalControl(tx: ProtocolTransaction, scope: PhysicalScope): PhysicalControl {
+    return parseRecord<PhysicalControl>(tx.query('SELECT record_json FROM sync_physical_controls WHERE scope_key=?', digest(scope))[0]) ?? { scope: clone(scope), control: 'run', revision: 0 }
+  }
+  readPhysicalControl(scope: PhysicalScope): PhysicalControl { return this.write(tx => this.physicalControl(tx, scope)) }
+  requestPhysicalControl(scope: PhysicalScope, control: 'run' | 'pause', expectedRevision: number): PhysicalControl {
+    return this.write(tx => {
+      const current = this.physicalControl(tx, scope)
+      if (current.revision !== expectedRevision) fail('SYNC_CONTROL_STALE', 'physical control revision changed')
+      const record: PhysicalControl = { scope: clone(scope), control, revision: current.revision + 1 }
+      tx.exec('INSERT INTO sync_physical_controls(scope_key,record_json) VALUES(?,?) ON CONFLICT(scope_key) DO UPDATE SET record_json=excluded.record_json', digest(scope), JSON.stringify(record))
+      return record
+    })
+  }
+  private baselineSelection(tx: ProtocolTransaction, source: WorktreeIdentity, resources: BaselineResource[]): BaselineSelectionResult {
+    const exact = [...new Map(resources.map(resource => [resourceKey(resource), resource])).values()].sort((a, b) => resourceKey(a).localeCompare(resourceKey(b)))
+    const bindings: BaselineBinding[] = []
+    for (const resource of exact) {
+      const head = tx.query('SELECT pair_id,legacy_reason FROM sync_baseline_heads WHERE source_key=? AND resource_key=?', identityKey(source), resourceKey(resource))[0]
+      if (head?.legacy_reason) return { failure: { code: 'SYNC_BASELINE_LEGACY_UNKNOWN', message: String(head.legacy_reason), kind: 'unsupported', evidenceRefs: [] } }
+      const pair = head?.pair_id ? parseRecord<BaselinePair>(tx.query('SELECT record_json FROM sync_baseline_pairs WHERE id=?', String(head.pair_id))[0])! : null
+      bindings.push(resource.kind === 'path' ? { resource, bytePair: pair } : { resource, intentPair: pair })
+    }
+    const body = { version: 'sync-baseline-selection-v1' as const, source: clone(source), bindings }
+    return { selection: { ...body, digest: digest(body) } }
+  }
+  readBaselineSelection(source: WorktreeIdentity, exactResources: BaselineResource[]): BaselineSelectionResult {
+    validateScope({ paths: exactResources.flatMap(resource => resource.kind === 'path' ? [resource.path] : []), contractIds: [], flowIds: [] })
+    return this.write(tx => this.baselineSelection(tx, source, exactResources))
+  }
+  private assertSelection(tx: ProtocolTransaction, source: WorktreeIdentity, selection: FrozenBaselineSelection, resources: BaselineResource[]): void {
+    const current = this.baselineSelection(tx, source, resources)
+    if ('failure' in current) fail(current.failure.code, current.failure.message)
+    if (digest(selection.source) !== digest(source) || selection.digest !== digest({ version: selection.version, source: selection.source, bindings: selection.bindings }) || current.selection.digest !== selection.digest) fail('SYNC_BASELINE_STALE', 'exact baseline frontier changed or selection is incomplete')
+  }
+  ackDispatch(repositoryId: string, expectedMessageId: string): SyncOperation {
+    return this.write(tx => {
+      const head = this.dispatchHead(tx, repositoryId)
+      if (!head || head.messageId !== expectedMessageId) fail('SYNC_DISPATCH_MISMATCH', 'expected message is not protocol FIFO head')
+      const { operation } = head
+      const row = tx.query('SELECT enqueue_seq FROM protocol_messages WHERE message_id=?', expectedMessageId)[0]
+      operation.dispatchAnchor ??= { scope: physicalScope(operation.input.source), firstMessageId: expectedMessageId, firstEnqueueSeq: Number(row.enqueue_seq), budgetRootOperationId: operation.id }
+      operation.dispatchAcknowledged = true
+      this.saveOperation(tx, operation)
+      tx.dequeue(syncCoordinatorAddress(repositoryId), expectedMessageId)
+      return operation
+    })
+  }
+  private queuedPredecessor(tx: ProtocolTransaction, operation: SyncOperation): boolean {
+    const seq = operation.dispatchAnchor!.firstEnqueueSeq
+    return tx.query('SELECT record_json FROM sync_operations WHERE repository_id=?', operation.input.source.repositoryId).map(row => parseRecord<SyncOperation>(row)!).some(other => {
+      if (other.id === operation.id || TERMINAL.has(other.phase) || ['failed', 'budget_exhausted', 'conflicted', 'needs_input'].includes(other.phase) || !overlaps(other.scope, operation.scope)) return false
+      const otherSeq = other.dispatchAnchor?.firstEnqueueSeq ?? Number(tx.query('SELECT enqueue_seq FROM protocol_messages WHERE message_id=?', other.dispatchMessageId)[0]?.enqueue_seq)
+      return otherSeq < seq || otherSeq === seq && other.successorOf === operation.id
+    })
+  }
+  private queuedRunnable(tx: ProtocolTransaction, operation: SyncOperation): boolean {
+    if (!operation.dispatchAcknowledged || !operation.dispatchAnchor || operation.control !== 'run' || this.physicalControl(tx, physicalScope(operation.input.source)).control !== 'run' || dispatchStopped(operation) || ['applying', 'analyzing', 'elaborating', 'generating', 'verifying', 'ready_to_apply', 'recovery_required'].includes(operation.phase) || this.queuedPredecessor(tx, operation)) return false
+    const held = tx.query('SELECT resource_key,operation_id,attempt_id,expires_at_ms FROM sync_leases WHERE repository_id=? AND token IS NOT NULL', operation.input.source.repositoryId)
+    return !held.some(row => row.operation_id !== operation.id && (Number(row.expires_at_ms) > this.now() || tx.query("SELECT id FROM sync_resources WHERE attempt_id=? AND phase!='removed' LIMIT 1", String(row.attempt_id)).length > 0) && scopeKeys(operation.scope).some(key => resourceOverlap(key, String(row.resource_key))))
+  }
+  nextQueued(repositoryId: string): SyncOperation | null {
+    return this.write(tx => tx.query('SELECT record_json FROM sync_operations WHERE repository_id=?', repositoryId).map(row => parseRecord<SyncOperation>(row)!).filter(operation => this.queuedRunnable(tx, operation)).sort((a,b) => a.dispatchAnchor!.firstEnqueueSeq - b.dispatchAnchor!.firstEnqueueSeq)[0] ?? null)
+  }
+  claimQueuedAttempt(input: ClaimQueuedAttemptInput): ClaimedAttempt { return this.claim(input, true) }
   private release(tx: ProtocolTransaction, token: string): void {
+    if (tx.query("SELECT r.id FROM sync_resources r JOIN sync_attempts a ON a.id=r.attempt_id WHERE a.record_json->>'$.leaseToken'=? AND r.phase!='removed' LIMIT 1", token).length) return
     tx.exec('UPDATE sync_leases SET token=NULL,operation_id=NULL,attempt_id=NULL,expires_at_ms=NULL WHERE token=?', token)
   }
   private acquireResources(tx: ProtocolTransaction, operation: SyncOperation, attempt: SyncAttempt, keys: string[]): void {
     const held = tx.query('SELECT l.resource_key,l.token,l.attempt_id,l.expires_at_ms,a.status FROM sync_leases l LEFT JOIN sync_attempts a ON a.id=l.attempt_id WHERE l.repository_id=? AND l.token IS NOT NULL', operation.input.source.repositoryId)
     const owns = (row: Record<string, unknown>): boolean => row.token === attempt.leaseToken && row.attempt_id === attempt.id
-    for (const row of held) if (!owns(row) && (Number(row.expires_at_ms) > this.now() || row.status === 'applying') && keys.some(key => resourceOverlap(key, String(row.resource_key)))) fail('SYNC_LEASE_CONFLICT', String(row.resource_key))
+    for (const row of held) if (!owns(row) && (Number(row.expires_at_ms) > this.now() || row.status === 'applying' || tx.query("SELECT id FROM sync_resources WHERE attempt_id=? AND phase!='removed' LIMIT 1", String(row.attempt_id)).length > 0) && keys.some(key => resourceOverlap(key, String(row.resource_key)))) fail('SYNC_LEASE_CONFLICT', String(row.resource_key))
     for (const key of keys) if (!held.some(row => row.resource_key === key && owns(row))) tx.exec('INSERT INTO sync_leases(repository_id,resource_key,generation,token,operation_id,attempt_id,expires_at_ms) VALUES(?,?,1,?,?,?,?) ON CONFLICT(repository_id,resource_key) DO UPDATE SET generation=generation+1,token=excluded.token,operation_id=excluded.operation_id,attempt_id=excluded.attempt_id,expires_at_ms=excluded.expires_at_ms', operation.input.source.repositoryId, key, attempt.leaseToken, operation.id, attempt.id, attempt.expiresAtMs)
   }
   private checkFence(tx: ProtocolTransaction, fence: WriteFence, finishing = false): { operation: SyncOperation; attempt: SyncAttempt } {
     const operation = this.operation(tx, fence.operationId), attempt = this.attempt(tx, fence.attemptId)
     if (operation.currentAttemptId !== attempt.id || operation.generation !== fence.generation || attempt.generation !== fence.generation || attempt.operationId !== operation.id || operation.input.source.physicalFingerprint !== fence.sourceFingerprint || attempt.leaseToken !== fence.leaseToken || attempt.status === 'superseded' || attempt.status === 'settled' || attempt.status === 'failed') fail('SYNC_FENCE_EXPIRED', 'operation, attempt, generation or physical source changed')
     const applying = ['applying', 'cancelling', 'pausing', 'recovery_required'].includes(operation.phase)
-    if ((!finishing && this.now() >= operation.deadlineAtMs) || operation.phase === 'superseded' || (!finishing && operation.control !== 'run') || (attempt.expiresAtMs <= this.now() && !(finishing && applying))) fail('SYNC_FENCE_EXPIRED', 'write authority is expired or controlled')
+    if ((!finishing && this.now() >= operation.deadlineAtMs) || operation.phase === 'superseded' || (!finishing && (operation.control !== 'run' || this.physicalControl(tx, physicalScope(operation.input.source)).control !== 'run')) || (attempt.expiresAtMs <= this.now() && !(finishing && applying))) fail('SYNC_FENCE_EXPIRED', 'write authority is expired or controlled')
     const rows = tx.query('SELECT resource_key,token,attempt_id FROM sync_leases WHERE token=?', fence.leaseToken)
     const required = scopeKeys(operation.readyScope)
     if (!required.every(key => rows.some(row => row.resource_key === key && row.attempt_id === attempt.id))) fail('SYNC_FENCE_EXPIRED', 'a resource lease was released or replaced')
@@ -147,14 +215,14 @@ export class SyncStore {
     tx.exec('INSERT INTO sync_ingress_receipts(ingress_key,operation_id,payload_digest,record_json) VALUES(?,?,?,?)', input.ingressKey, operationId, payloadDigest, JSON.stringify(receipt))
   }
   /** 稳定接入记录与既有消息派发计划共享一个 SQL 事务。 */
-  admitAndEnqueue(input: AdmitSyncInput): SyncOperation {
+  admitAndEnqueue(input: AdmitSyncInput, observation?: SyncObservation): SyncOperation {
     validateScope(input.scope)
     if (input.retryOf !== undefined && (typeof input.retryOf !== 'string' || !input.retryOf.trim())) fail('SYNC_RETRY_BINDING', '显式重试需要有效的原operation身份')
     this.blob(input.input.manifestBlob)
     if (input.retryOf && (this.readOperation(input.retryOf).requestBlob?.sha256 ?? null) !== (input.requestBlob?.sha256 ?? null)) fail('SYNC_RETRY_BINDING', '显式重试必须继承原始用户请求引用')
     if (input.planBlob) { this.blob(input.planBlob); if (input.planBlob.sha256 !== input.policyDigest) fail('SYNC_PLAN_BINDING', 'plan evidence must have exactly the frozen policy digest') }
     if (input.delivery && (input.delivery.canonicalRoot !== input.deliveryPlan.canonicalRoot || input.delivery.branch !== input.deliveryPlan.branch || input.delivery.repositoryId !== input.input.source.repositoryId)) fail('SYNC_DELIVERY_BINDING', 'bound delivery differs from durable plan')
-    const payload = { input: inputPayload(input.input), ...(input.requestBlob ? { requestBlob: input.requestBlob } : {}), ...(input.planBlob ? { planBlob: input.planBlob } : {}), ...(input.retryOf ? { retryOf: input.retryOf } : {}), scope: canonicalScope(input.scope), policyDigest: input.policyDigest, impactDigest: input.impactDigest, readSetDigest: input.readSetDigest, deliveryPlan: input.deliveryPlan, previousBaselinePairId: input.previousBaselinePair?.id ?? null, budget: input.budget }
+    const payload = { input: inputPayload(input.input), ...(input.requestBlob ? { requestBlob: input.requestBlob } : {}), ...(input.planBlob ? { planBlob: input.planBlob } : {}), ...(input.retryOf ? { retryOf: input.retryOf } : {}), scope: canonicalScope(input.scope), policyDigest: input.policyDigest, impactDigest: input.impactDigest, readSetDigest: input.readSetDigest, deliveryPlan: input.deliveryPlan, previousBaselinePairId: input.previousBaselinePair?.id ?? null, ...(input.baselineSelection ? { baselineSelectionDigest: input.baselineSelection.digest } : {}), budget: input.budget }
     const legacyPayloadDigest = digest(payload), payloadDigest = digest({ ...payload, origin: input.origin })
     const requestType = input.requestBlob ? JSON.parse(this.blob(input.requestBlob).toString('utf8')) as { type?: string } : null
     const decision = requestType?.type === 'sync.decision' ? readControlledDecision(input.input, input.requestBlob!) : null
@@ -166,11 +234,20 @@ export class SyncStore {
       catch (error) { fail('SYNC_REQUEST_IDENTITY_UNAVAILABLE', `旧请求 ${operation.id} 的不可变证据不能核验：${error instanceof Error ? error.message : String(error)}`) }
     })
     return this.write(tx => {
+      if (observation) {
+        if (this.physicalControl(tx, physicalScope(input.input.source)).revision !== observation.controlRevision) fail('SYNC_CONTROL_STALE', 'observation physical control changed')
+        if (!input.baselineSelection || input.baselineSelection.digest !== observation.selectionDigest) fail('SYNC_BASELINE_STALE', 'observation selection differs from frozen input')
+      }
+      if (input.baselineSelection) this.assertSelection(tx, input.input.source, input.baselineSelection, scopeResources(input.scope))
+      const finish = (operation: SyncOperation, outcome: 'admitted' | 'coalesced' | 'duplicate'): SyncOperation => {
+        if (observation) { observation.operationId = operation.id; observation.outcome = outcome; this.saveObservation(tx, observation) }
+        return operation
+      }
       for (const operation of normalized) tx.exec('UPDATE sync_operations SET normalized_semantic_digest=? WHERE id=?', operation.digest, operation.id)
       const prior = parseRecord<SyncOperation>(tx.query('SELECT record_json FROM sync_operations WHERE ingress_key=? OR EXISTS (SELECT 1 FROM json_each(sync_operations.ingress_aliases_json) WHERE value=?)', input.ingressKey, input.ingressKey)[0])
-      if (prior) { const receipt = parseRecord<SyncIngressReceipt>(tx.query('SELECT record_json FROM sync_ingress_receipts WHERE ingress_key=?', input.ingressKey)[0]); if (prior.origin !== input.origin || !(receipt ? receipt.payloadDigest === payloadDigest : [payloadDigest, legacyPayloadDigest].includes(prior.payloadDigest))) fail('SYNC_IDEMPOTENCY_CONFLICT', input.ingressKey); return prior }
+      if (prior) { const receipt = parseRecord<SyncIngressReceipt>(tx.query('SELECT record_json FROM sync_ingress_receipts WHERE ingress_key=?', input.ingressKey)[0]); if (prior.origin !== input.origin || !(receipt ? receipt.payloadDigest === payloadDigest : [payloadDigest, legacyPayloadDigest].includes(prior.payloadDigest))) fail('SYNC_IDEMPOTENCY_CONFLICT', input.ingressKey); return finish(prior, 'duplicate') }
       const sameInput = parseRecord<SyncOperation>(tx.query('SELECT record_json FROM sync_operations WHERE normalized_semantic_digest=? ORDER BY rowid DESC LIMIT 1', semanticDigest)[0])
-      if (sameInput) { tx.exec("UPDATE sync_operations SET ingress_aliases_json=json_insert(ingress_aliases_json,'$[#]',?) WHERE id=?", input.ingressKey, sameInput.id); this.saveIngressReceipt(tx, input, sameInput.id, payloadDigest); return sameInput }
+      if (sameInput) { tx.exec("UPDATE sync_operations SET ingress_aliases_json=json_insert(ingress_aliases_json,'$[#]',?) WHERE id=?", input.ingressKey, sameInput.id); this.saveIngressReceipt(tx, input, sameInput.id, payloadDigest); return finish(sameInput, 'duplicate') }
       if (input.retryOf) {
         const previous = this.operation(tx, input.retryOf), eligibility = this.retryEligibility(tx, previous)
         if (!eligibility.eligible) fail(eligibility.reason!.code, eligibility.reason!.message)
@@ -187,6 +264,12 @@ export class SyncStore {
         if (!eligibility.eligible) fail(eligibility.reason!.code, eligibility.reason!.message)
       }
       const older = tx.query('SELECT record_json FROM sync_operations WHERE repository_id=? AND source_root=?', input.input.source.repositoryId, input.input.source.canonicalRoot).map(row => parseRecord<SyncOperation>(row)!)
+      const predecessor = !input.retryOf ? older.filter(operation => identityKey(operation.input.source) === identityKey(input.input.source) && digest(canonicalScope(operation.scope)) === digest(canonicalScope(input.scope)) && !TERMINAL.has(operation.phase)).sort((a,b) => (b.dispatchAnchor?.firstEnqueueSeq ?? 0) - (a.dispatchAnchor?.firstEnqueueSeq ?? 0))[0] : undefined
+      const inheritedAnchor = predecessor ? predecessor.dispatchAnchor ?? {
+        scope: physicalScope(predecessor.input.source), firstMessageId: predecessor.dispatchMessageId,
+        firstEnqueueSeq: Number(tx.query('SELECT enqueue_seq FROM protocol_messages WHERE message_id=?', predecessor.dispatchMessageId)[0].enqueue_seq),
+        budgetRootOperationId: predecessor.id,
+      } : undefined
       const generation = Math.max(0, ...older.map(operation => operation.generation)) + 1
       for (const operation of older) {
         if (TERMINAL.has(operation.phase) || operation.id === input.retryOf) continue
@@ -204,11 +287,42 @@ export class SyncStore {
       const address = syncCoordinatorAddress(input.input.source.repositoryId)
       tx.initialize(address)
       const message = tx.enqueue(address, { kind: SYNC_DISPATCH_KIND, body: Buffer.from(JSON.stringify(envelope)), idempotencyKey: dispatchKey })
-      const operation: SyncOperation = { ...clone(input), scope: canonicalScope(input.scope), id, payloadDigest, generation, revision: 1, phase: 'queued', control: 'run', previousBaselinePair: clone(input.previousBaselinePair ?? null), readyScope: canonicalScope(input.scope), blockedScope: emptyScope(), deliveredScope: emptyScope(), blockedReason: null, callsUsed: 0, deadlineAtMs: this.now() + input.budget.timeoutMs, currentAttemptId: null, dispatchMessageId: message.messageId, createdAtMs: this.now(), updatedAtMs: this.now() }
+      const operation: SyncOperation = { ...clone(input), scope: canonicalScope(input.scope), id, payloadDigest, generation, revision: 1, phase: 'queued', control: 'run', previousBaselinePair: clone(input.previousBaselinePair ?? null), ...(predecessor ? { successorOf: predecessor.id, ...(inheritedAnchor ? { dispatchAnchor: clone(inheritedAnchor) } : {}), budget: clone(predecessor.budget) } : {}), readyScope: canonicalScope(input.scope), blockedScope: emptyScope(), deliveredScope: emptyScope(), blockedReason: null, callsUsed: 0, deadlineAtMs: predecessor?.deadlineAtMs ?? this.now() + input.budget.timeoutMs, currentAttemptId: null, dispatchMessageId: message.messageId, createdAtMs: this.now(), updatedAtMs: this.now() }
       tx.exec('INSERT INTO sync_operations(id,ingress_key,payload_digest,semantic_digest,normalized_semantic_digest,repository_id,source_key,source_root,generation,phase,control,current_attempt_id,updated_at_ms,record_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)', id, input.ingressKey, payloadDigest, syncSemanticDigest(input), semanticDigest, input.input.source.repositoryId, identityKey(input.input.source), input.input.source.canonicalRoot, generation, operation.phase, operation.control, null, operation.updatedAtMs, JSON.stringify(operation))
+      operation.dispatchAnchor ??= { scope: physicalScope(operation.input.source), firstMessageId: message.messageId, firstEnqueueSeq: Number(tx.query('SELECT enqueue_seq FROM protocol_messages WHERE message_id=?', message.messageId)[0].enqueue_seq), budgetRootOperationId: operation.id }
+      tx.exec('UPDATE sync_operations SET record_json=? WHERE id=?', JSON.stringify(operation), operation.id)
       this.saveIngressReceipt(tx, input, operation.id, payloadDigest)
-      return operation
+      return finish(operation, predecessor ? 'coalesced' : 'admitted')
     })
+  }
+  private saveObservation(tx: ProtocolTransaction, observation: SyncObservation): void {
+    tx.exec('INSERT INTO sync_observations(id,source_key,operation_id,record_json) VALUES(?,?,?,?)', observation.id, identityKey(observation.input.source), observation.operationId, JSON.stringify(observation))
+  }
+  recordObservation(input: SyncObservationInput, expected: { controlRevision: number; selectionDigest: string | null }): SyncObservation {
+    this.blob(input.configRef); this.blob(input.input.manifestBlob)
+    const observation: SyncObservation = { ...clone(input), id: randomUUID(), ...expected, observedAtMs: this.now(), operationId: null, outcome: 'observed', reason: null }
+    return this.write(tx => { this.saveObservation(tx, observation); return observation })
+  }
+  observeAndAdmit(input: SyncObservationInput, admission: AdmitSyncInput, expected: { controlRevision: number; selectionDigest: string }): ObserveAndAdmitResult {
+    this.blob(input.configRef)
+    const observation: SyncObservation = { ...clone(input), id: randomUUID(), ...expected, observedAtMs: this.now(), operationId: null, outcome: 'observed', reason: null }
+    try {
+      if (input.failure || !input.selection || digest(inputPayload(input.input)) !== digest(inputPayload(admission.input)) || input.selection.digest !== admission.baselineSelection?.digest || input.selection.digest !== expected.selectionDigest) fail('SYNC_OBSERVATION_BINDING', 'captured snapshot or selection differs from planned admission')
+      const operation = this.admitAndEnqueue(admission, observation)
+      return { outcome: observation.outcome as 'admitted' | 'coalesced' | 'duplicate', operation, observation }
+    } catch (error) {
+      if (!(error instanceof SyncStoreError)) throw error
+      const reason: SyncFailure = { code: error.code, message: error.message, kind: error.code === 'SYNC_BASELINE_LEGACY_UNKNOWN' ? 'unsupported' : 'conflict', evidenceRefs: [] }
+      observation.outcome = 'blocked'; observation.reason = reason
+      this.write(tx => this.saveObservation(tx, observation))
+      return { outcome: 'blocked', observation, reason }
+    }
+  }
+  private family(tx: ProtocolTransaction, operation: SyncOperation): { calls: number; attempts: SyncAttempt[] } {
+    const root = operation.dispatchAnchor?.budgetRootOperationId ?? operation.id
+    const ids = tx.query('SELECT record_json FROM sync_operations WHERE repository_id=?', operation.input.source.repositoryId).map(row => parseRecord<SyncOperation>(row)!).filter(item => (item.dispatchAnchor?.budgetRootOperationId ?? item.id) === root).map(item => item.id)
+    const attempts = ids.flatMap(id => tx.query('SELECT record_json FROM sync_attempts WHERE operation_id=?', id).map(row => parseRecord<SyncAttempt>(row)!))
+    return { attempts, calls: attempts.reduce((sum, attempt) => sum + attempt.dispatchPlans.length, 0) }
   }
   discardDispatch(operationId: string, expectedMessageId: string): void {
     this.write(tx => {
@@ -217,10 +331,13 @@ export class SyncStore {
       tx.dequeue(syncCoordinatorAddress(operation.input.source.repositoryId), expectedMessageId)
     })
   }
-  claimAttempt(input: ClaimAttemptInput): ClaimedAttempt {
+  claimAttempt(input: ClaimAttemptInput): ClaimedAttempt { return this.claim(input, false) }
+  private claim(input: ClaimAttemptInput | ClaimQueuedAttemptInput, queued: boolean): ClaimedAttempt {
     validateScope(input.scope)
     return this.write(tx => {
       const operation = this.operation(tx, input.operationId)
+      if (queued && (!('expectedRevision' in input) || operation.revision !== input.expectedRevision || !this.queuedRunnable(tx, operation))) fail('SYNC_QUEUED_STALE', 'queued operation revision, control, predecessor or leases changed')
+      if (this.physicalControl(tx, physicalScope(operation.input.source)).control !== 'run') fail('SYNC_PHYSICAL_PAUSED', 'physical scope is paused')
       if (operation.control !== 'run' || TERMINAL.has(operation.phase) || ['applying', 'cancelling', 'pausing', 'recovery_required'].includes(operation.phase)) fail('SYNC_CLAIM_REFUSED', operation.phase)
       if (identityKey(operation.input.source) !== identityKey(input.source)) fail('SYNC_SOURCE_CHANGED', 'worktree physical identity changed')
       if (!contains(operation.scope, input.scope) || !scopeKeys(input.scope).length) fail('SYNC_SCOPE_INVALID', 'lease scope must be a nonempty operation subset')
@@ -229,15 +346,16 @@ export class SyncStore {
       if (old && old.expiresAtMs > this.now() && !['failed', 'superseded', 'settled'].includes(old.status)) fail('SYNC_ATTEMPT_ACTIVE', old.id)
       if (old) { old.status = 'superseded'; this.saveAttempt(tx, old); this.release(tx, old.leaseToken); operation.generation++ }
       const number = Number(tx.query('SELECT MAX(number) AS number FROM sync_attempts WHERE operation_id=?', operation.id)[0].number ?? 0) + 1
-      const repairFailures = tx.query('SELECT record_json FROM sync_attempts WHERE operation_id=?', operation.id).map(row => parseRecord<SyncAttempt>(row)!).filter(attempt => attempt.verification?.passed === false || attempt.failure?.kind === 'repairable').length
+      const family = this.family(tx, operation)
+      const repairFailures = family.attempts.filter(attempt => attempt.verification?.passed === false || attempt.failure?.kind === 'repairable').length
       if (this.now() >= operation.deadlineAtMs || repairFailures > operation.budget.maxRepairs) fail('SYNC_BUDGET_EXHAUSTED', 'deadline or repair budget exhausted')
-      if (number > operation.budget.maxAttempts) fail('SYNC_BUDGET_EXHAUSTED', 'attempt budget exhausted')
+      if (family.attempts.length >= operation.budget.maxAttempts) fail('SYNC_BUDGET_EXHAUSTED', 'attempt budget exhausted')
       const resources = scopeKeys(input.scope)
       const id = randomUUID(), token = randomUUID(), expiresAtMs = this.now() + input.leaseMs
       const attempt: SyncAttempt = { id, operationId: operation.id, number, generation: operation.generation, dispatchKey: `sync-attempt-${operation.id}-${number}`, sessionCreateKey: `sync-session-${operation.id}-${number}`, status: 'claimed', currentSession: null, dispatchPlans: [], composedInput: null, candidate: null, verification: null, checkpointRefs: [], failure: null, leaseToken: token, expiresAtMs }
       tx.exec('INSERT INTO sync_attempts(id,operation_id,number,generation,dispatch_key,session_create_key,status,expires_at_ms,record_json) VALUES(?,?,?,?,?,?,?,?,?)', id, operation.id, number, operation.generation, attempt.dispatchKey, attempt.sessionCreateKey, attempt.status, expiresAtMs, JSON.stringify(attempt))
       this.acquireResources(tx, operation, attempt, resources)
-      if (input.expectedMessageId !== undefined) {
+      if (!queued && input.expectedMessageId !== undefined) {
         if (input.expectedMessageId !== operation.dispatchMessageId) fail('SYNC_DISPATCH_MISMATCH', 'message does not belong to operation')
         const owned = tx.query('SELECT target_session_id,dequeued_at_ms FROM protocol_messages WHERE message_id=?', input.expectedMessageId)[0]
         if (!owned || (owned.target_session_id !== syncCoordinatorAddress(operation.input.source.repositoryId) && !(owned.dequeued_at_ms !== null && owned.target_session_id === 'spec-sync-coordinator'))) fail('SYNC_DISPATCH_BINDING', 'durable message is missing or belongs to another address')
@@ -277,6 +395,7 @@ export class SyncStore {
     if (composed.compositionEvidenceBlob) this.blob(composed.compositionEvidenceBlob)
     return this.write(tx => {
       const { operation, attempt } = this.checkFence(tx, fence)
+      if (operation.baselineSelection && composed.baselineSelectionDigest !== operation.baselineSelection.digest) fail('SYNC_COMPOSITION_BINDING', 'composition baseline selection digest differs')
       if (composed.sourceInputId !== operation.input.id || composed.previousBaselinePairId !== (operation.previousBaselinePair?.id ?? null) || (composed.requestBlob?.sha256 ?? null) !== (operation.requestBlob?.sha256 ?? null)) fail('SYNC_COMPOSITION_BINDING', 'composition must retain original source, baseline pair and controlled request')
       if (attempt.composedInput && digest(attempt.composedInput) !== digest(composed)) fail('SYNC_COMPOSITION_FROZEN', 'composed input cannot be replaced')
       attempt.composedInput = clone(composed); this.saveAttempt(tx, attempt); return attempt
@@ -287,7 +406,7 @@ export class SyncStore {
       const { operation, attempt } = this.checkFence(tx, fence)
       const prior = attempt.dispatchPlans.find(plan => plan.key === input.key)
       if (prior) { if (prior.purpose !== input.purpose || prior.requestDigest !== input.requestDigest) fail('SYNC_DISPATCH_CONFLICT', input.key); return prior }
-      if (operation.callsUsed >= operation.budget.maxCalls || this.now() >= operation.deadlineAtMs) fail('SYNC_BUDGET_EXHAUSTED', 'native call budget or deadline exhausted')
+      if (this.family(tx, operation).calls >= operation.budget.maxCalls || this.now() >= operation.deadlineAtMs) fail('SYNC_BUDGET_EXHAUSTED', 'native call budget or deadline exhausted')
       const plan: DispatchPlan = { ...clone(input), sessionCreateKey: `sync-call-${digest({ attemptId: attempt.id, key: input.key })}`, session: null }
       attempt.dispatchPlans.push(plan); operation.callsUsed++; this.saveAttempt(tx, attempt); this.saveOperation(tx, operation); return plan
     })
@@ -328,6 +447,10 @@ export class SyncStore {
       if (next < current || next < 0 || (next > current + 1 && !preCreateTermination)) fail('SYNC_RESOURCE_PHASE_INVALID', `${resource.phase} cannot advance to ${checkpoint.phase}`)
       resource.phase = checkpoint.phase; resource.checkpointRef = clone(checkpoint.checkpointRef); resource.checkpoints.push({ phase: checkpoint.phase, checkpointRef: clone(checkpoint.checkpointRef) }); resource.updatedAtMs = this.now()
       tx.exec('UPDATE sync_resources SET phase=?,checkpoint_sha=?,updated_at_ms=?,record_json=? WHERE id=? AND checkpoint_sha=?', resource.phase, resource.checkpointRef.sha256, resource.updatedAtMs, JSON.stringify(resource), resource.id, checkpoint.expectedCheckpointRef.sha256)
+      if (resource.phase === 'removed') {
+        const attempt = this.attempt(tx, resource.attemptId)
+        if (['superseded', 'failed', 'settled'].includes(attempt.status)) this.release(tx, attempt.leaseToken)
+      }
       return resource
     })
   }
@@ -372,6 +495,12 @@ export class SyncStore {
       if (!contains(requested, { paths: [], contractIds: operation.scope.contractIds, flowIds: operation.scope.flowIds })) fail('SYNC_SCOPE_INVALID', 'expanded ID sets cannot delete existing business authority')
       this.acquireResources(tx, operation, attempt, keys)
       const added: SyncScope = { paths: [], contractIds: requested.contractIds.filter(id => !operation.scope.contractIds.includes(id)), flowIds: requested.flowIds.filter(id => !operation.scope.flowIds.includes(id)) }
+      if (operation.baselineSelection) {
+        this.assertSelection(tx, operation.input.source, operation.baselineSelection, scopeResources(operation.scope))
+        const expanded = this.baselineSelection(tx, operation.input.source, scopeResources(union(operation.scope, requested)))
+        if ('failure' in expanded) fail(expanded.failure.code, expanded.failure.message)
+        operation.baselineSelection = expanded.selection
+      }
       operation.scope = union(operation.scope, requested)
       operation.readyScope = union(operation.readyScope, added)
       if (!prior) operation.contractScopeExpansions = [...(operation.contractScopeExpansions ?? []), expansion]
@@ -434,8 +563,13 @@ export class SyncStore {
       if (plan.candidateDigest !== attempt.candidate.digest || plan.verificationBlob.sha256 !== attempt.verification.resultBlob.sha256 || digest(plan.files) !== digest(files) || !contains(attempt.verification.coveredScope, plan.coveredScope) || !contains(plan.coveredScope, { paths: files.map(file => file.path), contractIds: [], flowIds: [] })) fail('SYNC_APPLY_BINDING', 'plan differs from frozen candidate or verified scope')
       if (!operation.delivery || identityKey(plan.target) !== identityKey(operation.delivery) || identityKey(currentTarget.source) !== identityKey(plan.target) || currentTarget.id !== plan.expectedTargetSnapshotId) fail('SYNC_TARGET_STALE', 'physical target or current snapshot changed')
       if (plan.expectedBaselinePairId !== (operation.previousBaselinePair?.id ?? null)) fail('SYNC_BASELINE_STALE', 'plan baseline differs from frozen operation')
-      const latest = this.baseline(tx, operation.input.source)
-      if (operation.previousBaselinePair && latest?.id !== operation.previousBaselinePair.id) fail('SYNC_BASELINE_STALE', 'source baseline advanced')
+      if (operation.baselineSelection) {
+        if (plan.expectedBaselineSelectionDigest !== operation.baselineSelection.digest) fail('SYNC_BASELINE_STALE', 'apply selection differs from frozen operation')
+        this.assertSelection(tx, operation.input.source, operation.baselineSelection, scopeResources(operation.scope))
+      } else {
+        const latest = this.baseline(tx, operation.input.source)
+        if (operation.previousBaselinePair && latest?.id !== operation.previousBaselinePair.id) fail('SYNC_BASELINE_STALE', 'legacy source baseline advanced')
+      }
       const journal: ApplyJournal = { id: randomUUID(), operationId: operation.id, attemptId: attempt.id, generation: operation.generation, plan: clone(plan), status: 'prepared', steps: plan.files.map(file => ({ key: file.path, status: 'planned', evidenceRef: null })), receipt: null, createdAtMs: this.now() }
       tx.exec('INSERT INTO sync_apply_journals(id,operation_id,attempt_id,effect_key,payload_digest,status,receipt_id,record_json) VALUES(?,?,?,?,?,?,NULL,?)', journal.id, operation.id, attempt.id, plan.effectKey, plan.payloadDigest, journal.status, JSON.stringify(journal))
       operation.phase = 'applying'; attempt.status = 'applying'; this.saveAttempt(tx, attempt); this.saveOperation(tx, operation); return journal
@@ -475,13 +609,19 @@ export class SyncStore {
       const decisionRefs = [...new Map([...(operation.previousBaselinePair?.decisionRefs ?? []), ...(verification.decisionRefs ?? [])].map(ref => [ref.sha256, ref])).values()]
       const pair: BaselinePair = { id: `baseline-${journal.id}`, repositoryId: operation.input.source.repositoryId, source: clone(operation.input.source), sourceInput: clone(operation.input), verifiedDelivery: clone(journal.receipt.deliverySnapshot), coveredScope: clone(journal.plan.coveredScope), retiredIds, decisionRefs, receiptId, settledAtMs: this.now() }
       tx.exec('INSERT INTO sync_baseline_pairs(id,repository_id,source_key,receipt_id,settled_at_ms,record_json) VALUES(?,?,?,?,?,?)', pair.id, pair.repositoryId, identityKey(pair.source), pair.receiptId, pair.settledAtMs, JSON.stringify(pair))
+      const advance = (published: BaselinePair): void => {
+        const resources = [...journal.plan.files.map(file => `path:${file.path}`), ...journal.plan.coveredScope.contractIds.map(id => `contract:${id}`), ...journal.plan.coveredScope.flowIds.map(id => `flow:${id}`), ...(verification.retiredIds ?? []).map(id => `contract:${id}`)]
+        for (const key of new Set(resources)) tx.exec('INSERT INTO sync_baseline_heads(source_key,resource_key,pair_id,legacy_reason) VALUES(?,?,?,NULL) ON CONFLICT(source_key,resource_key) DO UPDATE SET pair_id=excluded.pair_id,legacy_reason=NULL', identityKey(published.source), key, published.id)
+      }
+      advance(pair)
       if (identityKey(pair.source) !== identityKey(pair.verifiedDelivery.source) || pair.sourceInput.id !== pair.verifiedDelivery.id) {
         const published: BaselinePair = { ...pair, id: `${pair.id}-delivery`, source: clone(pair.verifiedDelivery.source), sourceInput: clone(pair.verifiedDelivery) }
         tx.exec('INSERT INTO sync_baseline_pairs(id,repository_id,source_key,receipt_id,settled_at_ms,record_json) VALUES(?,?,?,?,?,?)', published.id, published.repositoryId, identityKey(published.source), receiptId, published.settledAtMs, JSON.stringify(published))
+        advance(published)
       }
       operation.deliveredScope = union(operation.deliveredScope, journal.plan.coveredScope)
       if (operation.control === 'cancel') operation.phase = 'cancelled'
-      else if (operation.control === 'pause') operation.phase = 'paused'
+      else if (operation.control === 'pause' || this.physicalControl(tx, physicalScope(operation.input.source)).control === 'pause') operation.phase = 'paused'
       else if (operation.blockedReason) operation.phase = operation.blockedReason
       else operation.phase = contains(operation.deliveredScope, operation.scope) ? 'workspace_synced' : 'needs_input'
       attempt.status = 'settled'; journal.status = 'settled'; this.saveJournal(tx, journal); this.saveAttempt(tx, attempt); this.release(tx, attempt.leaseToken); this.saveOperation(tx, operation); return operation
@@ -508,9 +648,9 @@ export class SyncStore {
   recordBudgetExhaustion(operationId: string): SyncOperation {
     return this.write(tx => {
       const operation = this.operation(tx, operationId)
-      const attempts = tx.query('SELECT record_json FROM sync_attempts WHERE operation_id=?', operationId).map(row => parseRecord<SyncAttempt>(row)!)
+      const family = this.family(tx, operation), attempts = family.attempts
       const repairs = attempts.filter(attempt => attempt.verification?.passed === false || attempt.failure?.kind === 'repairable').length
-      if (this.now() < operation.deadlineAtMs && operation.callsUsed < operation.budget.maxCalls && attempts.length < operation.budget.maxAttempts && repairs <= operation.budget.maxRepairs) fail('SYNC_BUDGET_NOT_EXHAUSTED', 'budget remains available')
+      if (this.now() < operation.deadlineAtMs && family.calls < operation.budget.maxCalls && attempts.length < operation.budget.maxAttempts && repairs <= operation.budget.maxRepairs) fail('SYNC_BUDGET_NOT_EXHAUSTED', 'budget remains available')
       if (TERMINAL.has(operation.phase)) return operation
       const attempt = operation.currentAttemptId ? this.attempt(tx, operation.currentAttemptId) : null
       if (attempt) {
@@ -579,7 +719,7 @@ export class SyncStore {
     return this.write(tx => {
       const refs = new Set<string>()
       const visit = (value: unknown): void => { if (!value || typeof value !== 'object') return; if ('sha256' in value && typeof value.sha256 === 'string') refs.add(value.sha256); for (const entry of Object.values(value)) visit(entry) }
-      for (const table of ['sync_operations', 'sync_attempts', 'sync_apply_journals', 'sync_baseline_pairs', 'sync_resources', 'sync_ingress_receipts']) for (const row of tx.query(`SELECT record_json FROM ${table}`)) visit(JSON.parse(String(row.record_json)))
+      for (const table of ['sync_operations', 'sync_attempts', 'sync_apply_journals', 'sync_baseline_pairs', 'sync_resources', 'sync_ingress_receipts', 'sync_observations']) for (const row of tx.query(`SELECT record_json FROM ${table}`)) visit(JSON.parse(String(row.record_json)))
       return [...refs].sort().map(sha256 => ({ sha256 }))
     })
   }

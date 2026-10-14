@@ -82,3 +82,5 @@ P3业务decision请求沿同一接入门禁归一化去transport requestId、fin
 
 
 recordReviewedConflict仅在当前analyzing fence内登记已由协调器完整核验并持久保存的当前独审业务冲突原因，精确重放幂等；phase、scope、预算、失败与交付事实不变。readDecisionEligibility与decision admission事务复用同一真实资格：保既有needs_input/conflicted/superseded入口，failed/budget_exhausted另需非null业务blockedReason（needs_input或conflicted）；当前attempt须settled/failed/superseded，所有历史资源removed且journal全settled。早期原因不授权在途阶段、applying/recovering或未结算资源；事务重新读取parent实际状态防应用检查后发生竞态。
+
+P4 精确资源 frontier 独立保存路径字节头与 contract/flow 作者意图头。readBaselineSelection 对每个请求资源返回显式 null 或精确 pair；历史不可证明时返回失败。settleApply 同事务推进实际 journal.files 路径、真实 verified covered IDs 与 retired tombstone heads；未交付 ID、读目录不推进。beginApply 只复核冻结选择对应资源，独立资源交付不使任务过期。物理 pause 由 scope/revision CAS 持久门禁，claim/checkFence/beginApply 事务复核，已登记 applying finishing 可以结算。ackDispatch 只消费真实协议头并保存 durable queued 与首入 anchor；claimQueuedAttempt 不 dequeue，按原 enqueue_seq 检查重叠前序与锁，独立范围可推进。未领取同范围最新观察建立不可变 successor，继承 anchor、预算族及截止时间，运行输入不改；所有族成员的 attempts/calls/repair failures 汇总。所有观察与接入、协议 enqueue、ingress 结算同事务，Git/FS/blob 核验在事务外。

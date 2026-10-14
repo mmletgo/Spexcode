@@ -47,3 +47,5 @@ SyncIngressReceipt 只保存原接入的精确 payload 摘要、operation 引用
 共同BaselinePair和VerificationResultBlob可携retiredIds，旧JSON缺省为空。ComposedInputRef可携compositionEvidenceBlob保留三方文本重叠对象，重叠不是业务冲突结论；独立行为审查之后才形成完整交付候选。
 
 共同BaselinePair与验证结算blob可携decisionRefs，引用不可变用户裁决输入。旧JSON为空；仅receipt结算累积引用，未验证/未应用裁决不会成为后续权威。后续planning据引用重读具体finding及ruleIds形成精确supersession，保留原facts历史全文且不改变未选政策或执行授权。
+
+P4 新接入保存 FrozenBaselineSelection：每个精确 path 恰有 bytePair，每个 contract/flow 恰有 intentPair；没有基线显式 null，禁止整对 latest 回退。选择摘要贯穿 composed/apply CAS。PhysicalScope 只含 repositoryId/canonicalRoot/physicalFingerprint，暂停跨同物理树切分支持久生效，基线仍按完整身份隔离。DispatchAnchor 固定首次真实 protocol enqueue_seq、messageId 及预算族根；当前 dispatchMessageId 与 anchor 分开。观察冻结输入、配置 ref、选择摘要、差异与控制 revision。

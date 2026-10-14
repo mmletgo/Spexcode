@@ -5,7 +5,7 @@ import { applyComponentMigrations, type ComponentMigration, type SessionProtocol
 export const SYNC_COMPONENT = 'spec-sync'
 export const SYNC_COORDINATOR_ADDRESS = 'spec-sync-coordinator'
 export const syncCoordinatorAddress = (repositoryId: string): string => `spec-sync-coordinator-${createHash('sha256').update(repositoryId).digest('hex')}`
-export const syncSemanticDigest = (input: Pick<SyncOperation, 'input' | 'origin' | 'requestBlob' | 'policyDigest' | 'scope' | 'retryOf'>): string => createHash('sha256').update(JSON.stringify({ inputId: input.input.id, source: input.input.source, origin: input.origin, requestBlob: input.requestBlob?.sha256 ?? null, policyDigest: input.policyDigest, paths: [...new Set(input.scope.paths)].sort(), retryOf: input.retryOf ?? null }, (_key, entry: unknown) => entry && typeof entry === 'object' && !Array.isArray(entry) ? Object.fromEntries(Object.entries(entry).sort(([a], [b]) => a.localeCompare(b))) : entry)).digest('hex')
+export const syncSemanticDigest = (input: Pick<SyncOperation, 'input' | 'origin' | 'requestBlob' | 'policyDigest' | 'scope' | 'retryOf'>): string => createHash('sha256').update(JSON.stringify({ inputId: input.input.id, source: input.input.source, origin: input.origin, requestBlob: input.requestBlob?.sha256 ?? null, policyDigest: input.policyDigest, paths: [...new Set(input.scope.paths)].sort(), ...('baselineSelection' in input && input.baselineSelection ? { contractIds: [...new Set(input.scope.contractIds)].sort(), flowIds: [...new Set(input.scope.flowIds)].sort() } : {}), retryOf: input.retryOf ?? null }, (_key, entry: unknown) => entry && typeof entry === 'object' && !Array.isArray(entry) ? Object.fromEntries(Object.entries(entry).sort(([a], [b]) => a.localeCompare(b))) : entry)).digest('hex')
 export const SYNC_MIGRATIONS: readonly ComponentMigration[] = [{ version: 1, sql: `
 CREATE TABLE sync_operations (
  id TEXT PRIMARY KEY, ingress_key TEXT NOT NULL UNIQUE, ingress_aliases_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(ingress_aliases_json)), payload_digest TEXT NOT NULL UNIQUE,
@@ -77,7 +77,46 @@ CREATE INDEX sync_operations_normalized_semantic ON sync_operations(normalized_s
 CREATE TABLE sync_ingress_receipts (
  ingress_key TEXT PRIMARY KEY, operation_id TEXT NOT NULL REFERENCES sync_operations(id),
  payload_digest TEXT NOT NULL, record_json TEXT NOT NULL CHECK(json_valid(record_json))
-) STRICT;` }, { version: 8, sql: 'SELECT 1; -- P3 behavior authorization, scoped decision history and retired IDs require this writer generation; old writers must refuse.' }, { version: 9, sql: 'SELECT 1; -- P3 exact structured decision authority and stable post-settlement decision identity require this writer generation.' }]
+) STRICT;` }, { version: 8, sql: 'SELECT 1; -- P3 behavior authorization, scoped decision history and retired IDs require this writer generation; old writers must refuse.' }, { version: 9, sql: 'SELECT 1; -- P3 exact structured decision authority and stable post-settlement decision identity require this writer generation.' }, { version: 10, sql: `
+CREATE TABLE sync_physical_controls (scope_key TEXT PRIMARY KEY, record_json TEXT NOT NULL CHECK(json_valid(record_json))) STRICT;
+CREATE TABLE sync_baseline_heads (source_key TEXT NOT NULL, resource_key TEXT NOT NULL, pair_id TEXT REFERENCES sync_baseline_pairs(id), legacy_reason TEXT, PRIMARY KEY(source_key,resource_key)) STRICT;
+CREATE TABLE sync_observations (id TEXT PRIMARY KEY, source_key TEXT NOT NULL, operation_id TEXT REFERENCES sync_operations(id), record_json TEXT NOT NULL CHECK(json_valid(record_json))) STRICT;
+`, afterApply: { key: 'spec-sync-resource-frontier-v1', run(tx) {
+  const pairs = tx.query('SELECT record_json FROM sync_baseline_pairs').map(row => JSON.parse(String(row.record_json)) as import('./operation-types.js').BaselinePair)
+  const journals = tx.query('SELECT record_json FROM sync_apply_journals').map(row => JSON.parse(String(row.record_json)) as import('./operation-types.js').ApplyJournal)
+  const operations = tx.query('SELECT record_json FROM sync_operations').map(row => JSON.parse(String(row.record_json)) as SyncOperation)
+  const stable = (value: unknown): string => createHash('sha256').update(JSON.stringify(value, (_key, entry: unknown) => entry && typeof entry === 'object' && !Array.isArray(entry) ? Object.fromEntries(Object.entries(entry).sort(([a], [b]) => a.localeCompare(b))) : entry)).digest('hex')
+  const groups = new Map<string, { sourceKey: string; resourceKey: string; pairs: typeof pairs }>()
+  for (const pair of pairs) {
+    const journal = journals.find(item => item.receipt?.id === pair.receiptId && item.status === 'settled')
+    if (!journal) continue
+    const sourceKey = stable(pair.source)
+    const keys = [...journal.plan.files.map(file => `path:${file.path}`), ...pair.coveredScope.contractIds.map(id => `contract:${id}`), ...pair.coveredScope.flowIds.map(id => `flow:${id}`), ...(pair.retiredIds ?? []).map(id => `contract:${id}`)]
+    for (const resourceKey of new Set(keys)) {
+      const key = `${sourceKey}:${resourceKey}`, group = groups.get(key) ?? { sourceKey, resourceKey, pairs: [] }
+      group.pairs.push(pair); groups.set(key, group)
+    }
+  }
+  const predecessors = (pair: typeof pairs[number]): string[] => {
+    const journal = journals.find(item => item.receipt?.id === pair.receiptId), operation = operations.find(item => item.id === journal?.operationId)
+    const prior = operation?.previousBaselinePair?.id
+    return prior ? [prior] : []
+  }
+  const follows = (later: typeof pairs[number], earlier: typeof pairs[number], seen = new Set<string>()): boolean => {
+    if (seen.has(later.id)) return false
+    seen.add(later.id)
+    for (const id of predecessors(later)) {
+      const prior = pairs.find(item => item.id === id)
+      if (id === earlier.id || prior?.receiptId === earlier.receiptId || prior && follows(prior, earlier, seen)) return true
+    }
+    return false
+  }
+  for (const group of groups.values()) {
+    const candidates = group.pairs.filter(pair => !group.pairs.some(other => other.id !== pair.id && follows(other, pair)))
+    const byReceipt = [...new Map(candidates.map(pair => [pair.receiptId, pair])).values()]
+    tx.exec('INSERT INTO sync_baseline_heads(source_key,resource_key,pair_id,legacy_reason) VALUES(?,?,?,?)', group.sourceKey, group.resourceKey, byReceipt.length === 1 ? byReceipt[0].id : null, byReceipt.length === 1 ? null : 'P3 frontier order cannot be proven by frozen predecessor chain')
+  }
+} } }]
 
 /** 升级前以 SQLite online backup 保存一致性旧库；迁移本身由组件事务执行。 */
 export async function migrateSyncStore(protocol: SessionProtocol, options: { backupPath?: string } = {}): Promise<number> {
