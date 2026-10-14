@@ -71,9 +71,29 @@ function authoredSourceMatches(id: string, before: FrozenContracts, policy: Auth
   return analysis.rawIntegrations?.some(proof => proof.path === item.path && proof.sourceRaw === change.afterRaw && proof.expectedRaw === expectedRaw && analysis.resolutions.some(resolution => resolution.path === item.path && resolution.content !== null && parseParts(resolution.content)?.rawSource === proof.resolvedRaw)) === true
 }
 
+function acceptanceSources(frozen: FrozenContracts, id: string): Set<string> {
+  const sources = new Set<string>(), pending = [id]
+  while (pending.length) {
+    const current = pending.pop()!
+    if (sources.has(current)) continue
+    sources.add(current)
+    const item = frozen.graph.items.get(current)
+    if (item) pending.push(...contractReferences(item).filter(reference => ['source', 'depends-on', 'covers', 'rules', 'req'].includes(reference.field)).map(reference => reference.id))
+  }
+  return sources
+}
+
 function independentlyAuthoredChange(change: AuthorizedContractChange, before: FrozenContracts, policy: AuthorizationPolicy): boolean {
   if (change.source !== 'user:raw' || !policy.analysis || reviewedAnalysisErrors(policy.analysis, policy.analysis.ref.sha256).length) return false
-  if (change.action === 'update_acceptance') return !acceptanceAuthorizationErrors(change, before, policy).length && change.ruleIds.every(id => authoredSourceMatches(id, before, policy)) && dependencyClosure(before.graph, change.ruleIds).includes(change.id)
+  if (change.action === 'update_acceptance') {
+    if (acceptanceAuthorizationErrors(change, before, policy).length || !change.ruleIds.every(id => acceptanceSources(before, change.id).has(id))) return false
+    if (change.ruleIds.every(id => authoredSourceMatches(id, before, policy))) return true
+    return policy.analysis.analysis.changes.some(entry => {
+      if (entry.kind !== 'allowed_change' || !entry.affectedIds.includes(change.id) || !change.ruleIds.every(id => entry.ruleIds.includes(id))) return false
+      const authored = change.ruleIds.filter(id => authoredSourceMatches(id, before, policy)), scope = new Set(dependencyClosure(before.graph, authored))
+      return authored.length > 0 && scope.has(change.id) && change.ruleIds.every(id => scope.has(id) && (authored.includes(id) || entry.affectedIds.includes(id)))
+    })
+  }
   if (change.action !== 'retire' || !change.analysisRef) return false
   const item = before.graph.items.get(change.id)!
   return policy.analysis.analysis.authorChanges?.some(entry => entry.path === item.path && entry.nodeId === item.nodeId && entry.beforeRaw !== null && entry.afterRaw === null && entry.changedIds.includes(item.id)) === true
@@ -140,6 +160,7 @@ export function validateContractEvolution(before: FrozenContracts, after: Frozen
     if (item.kind !== 'VERIFY' && item.source.kind === 'code' && next && next.kind !== 'VERIFY' && next.source.kind === 'code') continue
     const authorization = authorizations.get(item.id)
     if (authorization && independentlyAuthoredChange(authorization, before, policy)) continue
+    if (['RULE', 'TR'].includes(item.kind) && policy.authorizedChanges.some(change => change.action === 'update_acceptance' && change.ruleIds.includes(item.id) && independentlyAuthoredChange(change, before, policy))) continue
     if (next && !['AC', 'VERIFY'].includes(item.kind) && !reviewedAnalysisErrors(policy.analysis, policy.analysis!.ref.sha256).length && authoredSourceMatches(item.id, before, policy) && !policy.analysis!.analysis.findings.some(finding => finding.affectedIds.includes(item.id)) && policy.analysis!.analysis.changes.some(change => change.kind === 'allowed_change' && change.affectedIds.includes(item.id) && change.evidence.trim())) continue
     if (!current || reviewedAnalysisErrors(policy.analysis, policy.analysis!.ref.sha256).length || current.decision.choice === 'keep_intent' || !currentScope.has(item.id)) issue('decision_scope_exceeded', next ?? item, '当前裁决不能改变或退役未选义务，user:raw和旧decision事实不能扩大作用范围', item.id)
   }
@@ -201,14 +222,7 @@ export function validateContractEvolution(before: FrozenContracts, after: Frozen
     else if (item.kind === 'AC' && next.kind === 'AC') {
       if (authorization?.action !== 'update_acceptance') issue('acceptance_update_unauthorized', next, '验收语义变更必须有规则变化及独立分析授权', item.id)
       else {
-        const sources = new Set<string>(), pending = [next.id]
-        while (pending.length) {
-          const id = pending.pop()!
-          if (sources.has(id)) continue
-          sources.add(id)
-          const item = after.graph.items.get(id)
-          if (item) pending.push(...contractReferences(item).filter(reference => ['source', 'depends-on', 'covers', 'rules', 'req'].includes(reference.field)).map(reference => reference.id))
-        }
+        const sources = acceptanceSources(after, next.id)
         if (!authorization.ruleIds.every(id => {
           const priorSource = before.graph.items.get(id), nextSource = after.graph.items.get(id)
           if (!nextSource || !['REQ', 'RULE', 'TR'].includes(nextSource.kind) || !sources.has(id)) return false

@@ -412,3 +412,31 @@ test('当前裁决保留独立raw-only作者更新，精确三方正文及具体
   analysis.ref.sha256 = elaborationDigest(JSON.stringify(analysis.analysis))
   assert.deepEqual(validateContractEvolution(before, await readFrozenContracts('/frozen', explicitRuleFiles), policy({ analysis, decisionAuthorities: [authority] })), [])
 })
+
+test('独立raw-only参数需求可派生既有RULE及AC，具体独审映射不授权无关规则', async () => {
+  const before = await readFrozenContracts('/frozen', files()), analysis = evidence(), originalRaw = before.contracts[0].rawSource
+  const authorRaw = `${originalRaw}\n导出filter长度最多128个字符。`, expectedRaw = `${authorRaw}\n失败重试最多两次。`
+  const authority = { stableDecisionId: 'RETRY-ONLY', requestRef: { sha256: sha }, operationId: 'operation', inputId: 'input', analysisRef: { sha256: sha }, findingIds: ['finding-retry'], ruleIds: ['RULE-EXPORT-06'], affectedIds: ['RULE-EXPORT-06'], paths: [path], decision: { choice: 'new_rule' as const, rule: '失败重试最多两次。' } }
+  const proposal = { id: 'AC-EXPORT-02', action: 'update_acceptance' as const, source: 'user:raw' as const, reason: '真实高层参数长度需求更新下游规则与边界验收', ruleIds: ['REQ-EXPORT-01', 'RULE-EXPORT-02'] }
+  analysis.analysis.decision = { requestRef: authority.requestRef, analysisRef: authority.analysisRef, findingIds: authority.findingIds }
+  analysis.analysis.decisionAuthorities = [authority]
+  analysis.analysis.authorizedChanges = [proposal]
+  analysis.analysis.authorChanges = [{ nodeId: 'export-contract', path, beforeRaw: originalRaw, afterRaw: authorRaw, changedIds: ['REQ-EXPORT-01'] }]
+  analysis.analysis.resolutions = [{ path, content: source.replace(originalRaw, authorRaw), mode: '100644' }]
+  analysis.analysis.rawIntegrations = [{ path, sourceRaw: authorRaw, deliveryRaw: originalRaw, resolvedRaw: authorRaw, expectedRaw }]
+  analysis.analysis.changes[0].affectedIds = ['RULE-EXPORT-02', 'AC-EXPORT-02']
+  analysis.analysis.changes[0].ruleIds = ['REQ-EXPORT-01', 'RULE-EXPORT-02']
+  analysis.analysis.changes[0].paths = [path]
+  analysis.ref.sha256 = elaborationDigest(JSON.stringify(analysis.analysis))
+  const authorizedChanges = (): AuthorizedContractChange[] => [{ ...proposal, analysisRef: analysis.ref }]
+  const candidate = source.replace(originalRaw, expectedRaw).replace('key与非空字符串filter必需；', 'key与非空字符串filter必需且长度最多128；').replace('非法输入或空结果回调 | 明确拒绝，状态不变', '非法输入、129字符filter或空结果回调 | 明确拒绝，状态不变')
+  const candidateFiles = files(); candidateFiles.set(path, candidate)
+  const selectedPolicy = (): ContractEvolutionPolicy => policy({ analysis, authorizedChanges: authorizedChanges(), decisionAuthorities: [authority], newNodeRawSources: new Map([[path, expectedRaw]]) })
+  assert.deepEqual(validateContractEvolution(before, await readFrozenContracts('/frozen', candidateFiles), selectedPolicy()), [])
+  assert.equal((await elaborate({ ...input(), intent: { nodeId: 'export-contract', rawSource: expectedRaw }, analysis, authorizedChanges: authorizedChanges(), decisionAuthorities: [authority] }, { runner: runner(build(candidate)) })).status, 'complete')
+  const unrelatedFiles = new Map(candidateFiles); unrelatedFiles.set(path, candidate.replace('成功需非空result、发布一次', '成功允许空result且发布两次'))
+  assert.ok(validateContractEvolution(before, await readFrozenContracts('/frozen', unrelatedFiles), selectedPolicy()).some(issue => issue.code === 'decision_scope_exceeded' && issue.itemId === 'RULE-EXPORT-05'))
+  analysis.analysis.changes[0].ruleIds = ['RULE-EXPORT-02']
+  analysis.ref.sha256 = elaborationDigest(JSON.stringify(analysis.analysis))
+  assert.ok(validateContractEvolution(before, await readFrozenContracts('/frozen', candidateFiles), selectedPolicy()).some(issue => issue.code === 'decision_scope_exceeded' && issue.itemId === 'RULE-EXPORT-02'))
+})
