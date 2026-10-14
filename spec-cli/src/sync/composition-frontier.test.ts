@@ -114,6 +114,12 @@ test('同一Git反例 fail→pass：B.source夹A2但onlycoveredB，nextSource不
     assert.deepEqual(frozen.changedPaths, [path]); assert.equal((frozen.authorChanges as CodeBehaviorAnalysis['authorChanges'])![0].changedIds[0], a)
   }))
   assert.match(analysis.resolutions[0].content!, /版本A2/); assert.match(analysis.resolutions[0].content!, /交付B1政策保留/)
+  const evidenceRoot = process.env.SPEX_COMPOSITION_EVIDENCE_DIR
+  if (evidenceRoot) writeFileSync(join(evidenceRoot, 'real-git-unconsumed-A2.json'), JSON.stringify({
+    scenario: 'B.source夹带未消费A2且nextSource不变', verification: '真实Git/store事务；四层验证及行为runner为fake，不是native产品验收',
+    sourceInput: input, bytePair: f.pairB, intentPairA: f.pairA, selection,
+    before: { legacyText, authorChanges: [] }, after: { evidence, analysis },
+  }, null, 2))
 })
 
 test('真实ff接受实际commit/blob/mode：B回声无作者变化，随后A编辑仍检测', async t => {
