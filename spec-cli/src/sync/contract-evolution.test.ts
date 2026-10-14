@@ -481,6 +481,10 @@ test('共享REQ仅当前真实所选规则上游本身eligible，不从父REQ扩
   assert.ok(scope.has('REQ-EXPORT-01')); assert.ok(scope.has('AC-EXPORT-03')); assert.ok(scope.has('STEP-EXPORT-04'))
   assert.equal(scope.has('REQ-EXPORT-OTHER'), false, 'affectedIds包含也不构成所选旧规则来源')
   assert.equal(scope.has('RULE-EXPORT-02'), false, '父REQ不能重新成为闭包种子')
+  const mixed = decisionScopeIds(before, { ...authority, ruleIds: ['REQ-EXPORT-01', ...authority.ruleIds] }, current)
+  assert.deepEqual([...mixed].sort(), [...scope].sort(), 'REQ在原ruleIds中也不能扩消费者')
+  const requirementOnly = { ...authority, ruleIds: ['REQ-EXPORT-01'], affectedIds: ['REQ-EXPORT-01', 'RULE-EXPORT-01'] }
+  assert.deepEqual([...decisionScopeIds(before, requirementOnly, current)].sort(), [...requirementOnly.affectedIds].sort(), 'REQ-only只保明确affected旧项')
   assert.equal(scope.has('FLOW-EXPORT-02'), false); assert.equal(scope.has('STEP-EXPORT-05'), false, '共享规则的未选旧流程/步骤保持')
   assert.equal(decisionScopeIds(before, authority).has('REQ-EXPORT-01'), false, '旧authority没有当前请求绑定不能追加上游权限')
   for (const binding of [{ ...current, requestRef: { sha256: elaborationDigest('foreign-request') } }, { ...current, analysisRef: { sha256: elaborationDigest('foreign-analysis') } }, { ...current, findingIds: ['unselected-finding'] }]) assert.equal(decisionScopeIds(before, authority, binding).has('REQ-EXPORT-01'), false)

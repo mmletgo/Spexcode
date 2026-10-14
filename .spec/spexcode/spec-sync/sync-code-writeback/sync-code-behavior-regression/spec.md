@@ -25,3 +25,6 @@ code:
 真实 Git 目录授权新增未跟踪 helper 的完整字节及所在快照进入前置必读/全文清单；旧 HEAD 无该文件不影响读取，删除文件保旧全文，目录、元数据和链接不冒全文或缩小必读集合。漏 helper 的 accept 明确给 missingPaths，并携前轮完整 proposal/未批准 analysis/review 进入新分析及独审；missingPath 和业务 findings 共存不丢。AC 混入未变规则、遗漏目标 affectedId 或不绑定来源给具体诊断，多个 allowed_change 并集不能授权。伪造 diagnostic 或旧 accept 不豁免新摘要/身份/范围门禁，readSet/policy/timeout 仍绑定，诊断与清单共同超 2MiB 时明确失败。
 
 共享REQ回归以真实Git、canonical不可变裁决和既有全契约图证明：原规则上游REQ可同步具体权限例外，AC精确授权继续有效；source-only、旧/foreign裁决、keep、缺同一allowed_change及未选规则/流程被拒。共享REQ只加入本身，旧FLOW/STEP须为真实affected；不能从父REQ或新连边扩其他需求。自由文本单独扩大未选操作的矛盾由原P1完整候选独审拒绝，明确区分eligible与语义通过，不用关键词模拟通用语义判断。
+
+
+真实canonical裁决回归包含原finding ruleIds混合REQ/RULE：REQ改义、所选RULE仅换来源、未选RULE02改政策的完整候选必须拒绝，实质所选政策变化及精确AC授权仍通过。纯REQ与空ruleIds明确affectedREQ选择分别覆盖无旧政策见证的直接明确需求演进、原affected旧RULE的有限实质见证，均拒绝未affected规则改义、旧来源及缺同次allowed_change；REQ消费者不自动获得权限。

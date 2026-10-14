@@ -454,7 +454,7 @@ test('真实不可变裁决同步所选共享REQ，来源或未选流程不能�
   const f = await fixture(t), path = '.spec/export/export-contract/spec.md'
   writeFileSync(join(f.root, 'src/export.js'), `${f.source}\n// external permission difference\n`)
   const input = await f.input(), previous = await analyzeCodeBehavior(input, runner('conflict', proposal => {
-    proposal.changes = (proposal.changes as object[]).map(change => ({ ...change, affectedIds: ['REQ-EXPORT-01', 'RULE-EXPORT-01', 'STEP-EXPORT-04', 'AC-EXPORT-03'], ruleIds: ['RULE-EXPORT-01'] }))
+    proposal.changes = (proposal.changes as object[]).map(change => ({ ...change, affectedIds: ['REQ-EXPORT-01', 'RULE-EXPORT-01', 'STEP-EXPORT-04', 'AC-EXPORT-03'], ruleIds: ['REQ-EXPORT-01', 'RULE-EXPORT-01'] }))
   }))
   const ref = writeEvidence(input.snapshot.source.commonDir, previous), request = { requestId: 'selected-download-permission', operationId: 'original-permission-conflict', inputId: input.snapshot.id, analysisRef: ref, findingIds: previous.findings.map(finding => finding.id), decision: { choice: 'new_rule' as const, rule: '成功结果允许非所有者下载；提交、取消、重试、筛选与其他政策保持。' } }
   input.composed.requestBlob = prepareControlledDecision(input.snapshot, request); input.decision = { request, previous: { ref, analysis: previous } }; input.origin = 'decision'
@@ -463,12 +463,6 @@ test('真实不可变裁决同步所选共享REQ，来源或未选流程不能�
     proposal.changes = (proposal.changes as object[]).map(change => ({ ...change, affectedIds: ['REQ-EXPORT-01', 'RULE-EXPORT-01', 'STEP-EXPORT-04', 'AC-EXPORT-03'], ruleIds: ['REQ-EXPORT-01', 'RULE-EXPORT-01'] })); proposal.facts = [fact]
     proposal.acceptanceChanges = [{ id: 'AC-EXPORT-03', ruleIds: ['REQ-EXPORT-01', 'RULE-EXPORT-01'], source, reason: '共享需求与所选权限规则同时反映具体下载例外，未选义务保持' }]
   }))
-  const keepRequest = { ...request, requestId: 'keep-original-permission', decision: { choice: 'keep_intent' as const } }, keepRef = prepareControlledDecision(input.snapshot, keepRequest), keepSource = `decision:${controlledDecisionIdentity(keepRequest)}`, keepFact = { source: keepSource, text: '保持原权限，修复外部实现' }
-  await assert.rejects(analyzeCodeBehavior({ ...input, composed: { ...input.composed, requestBlob: keepRef }, decision: { request: keepRequest, previous: { ref, analysis: previous } }, plan: { ...input.plan, facts: [...input.plan.facts, keepFact] } }, runner('allowed_change', proposal => {
-    proposal.changes = (proposal.changes as object[]).map(change => ({ ...change, affectedIds: ['REQ-EXPORT-01', 'RULE-EXPORT-01', 'AC-EXPORT-03'], ruleIds: ['REQ-EXPORT-01', 'RULE-EXPORT-01'] })); proposal.facts = [keepFact]; proposal.acceptanceChanges = [{ id: 'AC-EXPORT-03', ruleIds: ['REQ-EXPORT-01', 'RULE-EXPORT-01'], source: keepSource, reason: '试图把keep当作权限变更' }]
-  })), /所选裁决范围/)
-  const foreign = { ...request, requestId: 'foreign-choice', decision: { choice: 'new_rule' as const, rule: '另一选择允许非所有者取消' } }, foreignRef = prepareControlledDecision(input.snapshot, foreign)
-  await assert.rejects(analyzeCodeBehavior({ ...input, composed: { ...input.composed, requestBlob: foreignRef } }, runner('allowed_change')), /不能借用另一选择或原分析/)
   const analysisRef = writeEvidence(input.snapshot.source.commonDir, analysis), beforeFiles = new Map(readTree(input.snapshot.source.commonDir, input.baseline!.verifiedDelivery.immutableTree).map(entry => [entry.path, readObject(input.snapshot.source.commonDir, entry.oid).toString('utf8')]))
   const before = await readFrozenContracts(f.root, beforeFiles), req = before.graph.items.get('REQ-EXPORT-01')!, rule = before.graph.items.get('RULE-EXPORT-01')!
   assert.equal(req.kind, 'REQ'); assert.equal(rule.kind, 'RULE')
@@ -479,6 +473,18 @@ test('真实不可变裁决同步所选共享REQ，来源或未选流程不能�
   const selectedPolicy = { mode: 'reelaborate' as const, authorizedChanges: deriveBehaviorAuthorization(analysis, analysisRef), nodeChanges: [], retiredIds: [], newNodeRawSources: new Map(), facts: input.plan.facts, analysis: { ref: analysisRef, analysis }, decisionAuthorities: analysis.decisionAuthorities }
   const validate = async (source: string, override = selectedPolicy) => { const next = new Map(beforeFiles); next.set(path, source); return validateContractEvolution(before, await readFrozenContracts(f.root, next), override) }
   assert.deepEqual(await validate(updated), [])
+  const unrelatedRule = before.graph.items.get('RULE-EXPORT-02')!; assert.equal(unrelatedRule.kind, 'RULE')
+  const unrelatedRow = f.raw.split('\n').find(line => line.startsWith('| RULE-EXPORT-02 '))!
+  const bypass = f.raw.replace(reqRow, updatedReq).replace(ruleRow, sourceOnlyRule).replace(unrelatedRow, unrelatedRow.replace(unrelatedRule.constraint, '任意空filter也可提交，不检查幂等组合').replace('decision:EXPORT-POLICY', source))
+  const bypassIssues = await validate(bypass)
+  assert.ok(bypassIssues.some(issue => issue.code === 'decision_scope_exceeded' && issue.itemId === req.id), 'mixed原finding中的REQ仍必须有实质政策见证')
+  assert.ok(bypassIssues.some(issue => issue.code === 'decision_scope_exceeded' && issue.itemId === unrelatedRule.id), 'mixed原finding中的REQ不能扩权未选RULE02')
+  const keepRequest = { ...request, requestId: 'keep-original-permission', decision: { choice: 'keep_intent' as const } }, keepRef = prepareControlledDecision(input.snapshot, keepRequest), keepSource = `decision:${controlledDecisionIdentity(keepRequest)}`, keepFact = { source: keepSource, text: '保持原权限，修复外部实现' }
+  await assert.rejects(analyzeCodeBehavior({ ...input, composed: { ...input.composed, requestBlob: keepRef }, decision: { request: keepRequest, previous: { ref, analysis: previous } }, plan: { ...input.plan, facts: [...input.plan.facts, keepFact] } }, runner('allowed_change', proposal => {
+    proposal.changes = (proposal.changes as object[]).map(change => ({ ...change, affectedIds: ['REQ-EXPORT-01', 'RULE-EXPORT-01', 'AC-EXPORT-03'], ruleIds: ['REQ-EXPORT-01', 'RULE-EXPORT-01'] })); proposal.facts = [keepFact]; proposal.acceptanceChanges = [{ id: 'AC-EXPORT-03', ruleIds: ['REQ-EXPORT-01', 'RULE-EXPORT-01'], source: keepSource, reason: '试图把keep当作权限变更' }]
+  })), /所选裁决范围/)
+  const foreign = { ...request, requestId: 'foreign-choice', decision: { choice: 'new_rule' as const, rule: '另一选择允许非所有者取消' } }, foreignRef = prepareControlledDecision(input.snapshot, foreign)
+  await assert.rejects(analyzeCodeBehavior({ ...input, composed: { ...input.composed, requestBlob: foreignRef } }, runner('allowed_change')), /不能借用另一选择或原分析/)
   const missingWitness = structuredClone(selectedPolicy); missingWitness.analysis.analysis.changes[0].affectedIds = missingWitness.analysis.analysis.changes[0].affectedIds.filter(id => id !== req.id); missingWitness.analysis.ref = { sha256: contentHash(JSON.stringify(missingWitness.analysis.analysis)) }; missingWitness.authorizedChanges = deriveBehaviorAuthorization(missingWitness.analysis.analysis, missingWitness.analysis.ref)
   assert.ok((await validate(updated, missingWitness)).some(issue => issue.code === 'decision_scope_exceeded' && issue.itemId === req.id), '同一allowed_change缺少REQ不能借别的变化拼授权')
   assert.ok((await validate(updated.replace(updatedRule, sourceOnlyRule))).some(issue => issue.code === 'decision_scope_exceeded' && issue.itemId === req.id), '只换规则来源不能授权REQ改义')
@@ -490,4 +496,42 @@ test('真实不可变裁决同步所选共享REQ，来源或未选流程不能�
   assert.ok((await validate(updated.replace('key与非空字符串filter必需；', '允许空filter；'))).some(issue => issue.code === 'decision_scope_exceeded' && issue.itemId === 'RULE-EXPORT-02'))
   const flow = before.graph.items.get('FLOW-EXPORT-02')!; assert.equal(flow.kind, 'FLOW')
   assert.ok((await validate(updated.replace(flow.entry, '任何人可以重试别人的失败任务'))).some(issue => issue.code === 'decision_scope_exceeded' && issue.itemId === flow.id))
+})
+
+
+test('真实REQ-only裁决保留明确需求入口与有限旧政策见证，不能从父需求扩未选义务', async t => {
+  const f = await fixture(t), path = '.spec/export/export-contract/spec.md'
+  writeFileSync(join(f.root, 'src/export.js'), `${f.source}\n// external requirement difference\n`)
+  for (const [policyWitness, emptyRuleIds] of [[false, false], [true, false], [false, true], [true, true]]) {
+    const input = await f.input(), affectedIds = policyWitness ? ['REQ-EXPORT-01', 'RULE-EXPORT-01'] : ['REQ-EXPORT-01']
+    const previous = await analyzeCodeBehavior(input, runner('conflict', proposal => {
+      proposal.changes = (proposal.changes as object[]).map(change => ({ ...change, affectedIds, ruleIds: emptyRuleIds ? [] : ['REQ-EXPORT-01'] }))
+    }))
+    const ref = writeEvidence(input.snapshot.source.commonDir, previous), request = { requestId: `requirement-only-${policyWitness}-${emptyRuleIds}`, operationId: 'original-requirement-conflict', inputId: input.snapshot.id, analysisRef: ref, findingIds: previous.findings.map(finding => finding.id), decision: { choice: 'new_rule' as const, rule: policyWitness ? '仅成功下载允许非所有者，其他操作保持。' : '明确导出结果包含筛选数据，详细规则保持。' } }
+    input.composed.requestBlob = prepareControlledDecision(input.snapshot, request); input.decision = { request, previous: { ref, analysis: previous } }; input.origin = 'decision'
+    const source = `decision:${controlledDecisionIdentity(request)}`, fact = { source, text: request.decision.rule }; input.plan.facts = [...input.plan.facts, fact]
+    const analysis = await analyzeCodeBehavior(input, runner('allowed_change', proposal => {
+      proposal.changes = (proposal.changes as object[]).map(change => ({ ...change, affectedIds, ruleIds: policyWitness ? ['REQ-EXPORT-01', 'RULE-EXPORT-01'] : ['REQ-EXPORT-01'] })); proposal.facts = [fact]
+    }))
+    const analysisRef = writeEvidence(input.snapshot.source.commonDir, analysis), beforeFiles = new Map(readTree(input.snapshot.source.commonDir, input.baseline!.verifiedDelivery.immutableTree).map(entry => [entry.path, readObject(input.snapshot.source.commonDir, entry.oid).toString('utf8')]))
+    const before = await readFrozenContracts(f.root, beforeFiles), req = before.graph.items.get('REQ-EXPORT-01')!, rule = before.graph.items.get('RULE-EXPORT-01')!, unrelated = before.graph.items.get('RULE-EXPORT-02')!
+    assert.equal(req.kind, 'REQ'); assert.equal(rule.kind, 'RULE'); assert.equal(unrelated.kind, 'RULE')
+    const reqRow = f.raw.split('\n').find(line => line.startsWith('| REQ-EXPORT-01 '))!, ruleRow = f.raw.split('\n').find(line => line.startsWith('| RULE-EXPORT-01 '))!, unrelatedRow = f.raw.split('\n').find(line => line.startsWith('| RULE-EXPORT-02 '))!
+    const updatedReq = reqRow.replace(req.goal, request.decision.rule).replace('user:raw', source), sourceOnlyRule = ruleRow.replace('decision:EXPORT-POLICY', source)
+    const updatedRule = sourceOnlyRule.replace(rule.constraint, 'SUCCEEDED允许非所有者下载，取消和重试仍限所有者')
+    const candidate = f.raw.replace(reqRow, updatedReq).replace(ruleRow, policyWitness ? updatedRule : ruleRow)
+    const selectedPolicy = { mode: 'reelaborate' as const, authorizedChanges: [], nodeChanges: [], retiredIds: [], newNodeRawSources: new Map(), facts: input.plan.facts, analysis: { ref: analysisRef, analysis }, decisionAuthorities: analysis.decisionAuthorities }
+    const validate = async (text: string, override = selectedPolicy) => { const next = new Map(beforeFiles); next.set(path, text); return validateContractEvolution(before, await readFrozenContracts(f.root, next), override) }
+    assert.deepEqual(await validate(candidate), [], policyWitness ? 'REQ-only可用原affected旧RULE的实质政策见证' : '没有所选/受影响RULE时明确REQ可独立演进')
+    const unrelatedChange = candidate.replace(unrelatedRow, unrelatedRow.replace(unrelated.constraint, '任意空filter也可提交').replace('decision:EXPORT-POLICY', source))
+    assert.ok((await validate(unrelatedChange)).some(issue => issue.code === 'decision_scope_exceeded' && issue.itemId === unrelated.id))
+    assert.ok((await validate(candidate.replace(updatedReq, updatedReq.replace(source, 'decision:EXPORT-POLICY')))).some(issue => issue.code === 'decision_scope_exceeded' && issue.itemId === req.id))
+    const missingChange = structuredClone(selectedPolicy); missingChange.analysis.analysis.changes[0].affectedIds = []; missingChange.analysis.ref = { sha256: contentHash(JSON.stringify(missingChange.analysis.analysis)) }
+    assert.ok((await validate(candidate, missingChange)).some(issue => issue.code === 'decision_scope_exceeded' && issue.itemId === req.id))
+    if (policyWitness) {
+      assert.ok((await validate(candidate.replace(updatedRule, sourceOnlyRule))).some(issue => issue.code === 'decision_scope_exceeded' && issue.itemId === req.id))
+      const omittedRule = structuredClone(selectedPolicy); omittedRule.analysis.analysis.changes[0].ruleIds = ['REQ-EXPORT-01']; omittedRule.analysis.ref = { sha256: contentHash(JSON.stringify(omittedRule.analysis.analysis)) }
+      assert.ok((await validate(candidate, omittedRule)).some(issue => issue.code === 'decision_scope_exceeded' && issue.itemId === req.id))
+    }
+  }
 })

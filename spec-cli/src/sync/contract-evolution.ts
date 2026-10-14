@@ -50,14 +50,17 @@ function reviewedAnalysisErrors(evidence: CodeBehaviorEvidence | undefined, expe
 
 /** 原所选发现只授权旧规则范围；共享上游REQ只加入本身，不扩其消费者。 */
 export function decisionScopeIds(before: FrozenContracts, authority: SyncDecisionAuthority, current?: CodeBehaviorAnalysis['decision'], after?: FrozenContracts): Set<string> {
-  const seeds = authority.ruleIds.length ? authority.ruleIds : authority.affectedIds
+  const selectedRules = authority.ruleIds.filter(id => ['RULE', 'TR'].includes(before.graph.items.get(id)?.kind ?? ''))
+  const requirementOnly = authority.ruleIds.length ? authority.ruleIds.every(id => before.graph.items.get(id)?.kind === 'REQ') : authority.affectedIds.some(id => before.graph.items.get(id)?.kind === 'REQ')
+  const seeds = selectedRules.length ? selectedRules : requirementOnly || authority.ruleIds.length ? [] : authority.affectedIds.filter(id => before.graph.items.get(id)?.kind !== 'REQ')
   const scope = new Set(dependencyClosure(before.graph, seeds).filter(id => !['FLOW', 'STEP'].includes(before.graph.items.get(id)?.kind ?? '') || authority.affectedIds.includes(id)))
+  if (requirementOnly) for (const id of authority.affectedIds) if (before.graph.items.has(id) && before.graph.items.get(id)!.kind !== 'REQ') scope.add(id)
   if (after) for (const id of dependencyClosure(after.graph, seeds)) if (!before.graph.items.has(id)) scope.add(id)
-  if (current && authority.decision.choice !== 'keep_intent' && authority.requestRef.sha256 === current.requestRef.sha256 && authority.analysisRef.sha256 === current.analysisRef.sha256 && same([...authority.findingIds].sort(), [...current.findingIds].sort())) {
-    for (const id of authority.affectedIds) if (before.graph.items.get(id)?.kind === 'REQ' && authority.ruleIds.some(ruleId => {
-      const rule = before.graph.items.get(ruleId)
-      return rule && ['RULE', 'TR'].includes(rule.kind) && contractReferences(rule).some(reference => ['source', 'depends-on'].includes(reference.field) && reference.id === id)
-    })) scope.add(id)
+  if (current && (authority.decision.choice !== 'keep_intent' || requirementOnly && !authority.ruleIds.length) && authority.requestRef.sha256 === current.requestRef.sha256 && authority.analysisRef.sha256 === current.analysisRef.sha256 && same([...authority.findingIds].sort(), [...current.findingIds].sort())) {
+    for (const id of authority.affectedIds) if (before.graph.items.get(id)?.kind === 'REQ' && (selectedRules.length ? selectedRules.some(ruleId => {
+      const rule = before.graph.items.get(ruleId)!
+      return contractReferences(rule).some(reference => ['source', 'depends-on'].includes(reference.field) && reference.id === id)
+    }) : requirementOnly && (!authority.ruleIds.length || authority.ruleIds.includes(id)))) scope.add(id)
   }
   return scope
 }
@@ -166,9 +169,7 @@ export function validateContractEvolution(before: FrozenContracts, after: Frozen
   const authorities = policy.decisionAuthorities ?? policy.analysis?.analysis.decisionAuthorities ?? []
   const decision = policy.analysis?.analysis.decision
   const current = decision ? authorities.find(authority => authority.requestRef.sha256 === decision.requestRef.sha256 && authority.analysisRef.sha256 === decision.analysisRef.sha256 && authority.findingIds.length === decision.findingIds.length && authority.findingIds.every(id => decision.findingIds.includes(id))) : undefined
-  const currentSeeds = current ? current.ruleIds.length ? current.ruleIds : current.affectedIds : []
   const currentScope = current ? decisionScopeIds(before, current, decision, after) : new Set<string>()
-  const previousScope = new Set(dependencyClosure(before.graph, currentSeeds))
   if (decision) for (const item of before.graph.items.values()) {
     const next = after.graph.items.get(item.id)
     if (next && sameContractBusinessMeaning(item, next)) continue
@@ -178,15 +179,18 @@ export function validateContractEvolution(before: FrozenContracts, after: Frozen
     if (['RULE', 'TR'].includes(item.kind) && policy.authorizedChanges.some(change => change.action === 'update_acceptance' && change.ruleIds.includes(item.id) && independentlyAuthoredChange(change, before, policy))) continue
     if (next && !['AC', 'VERIFY'].includes(item.kind) && !reviewedAnalysisErrors(policy.analysis, policy.analysis!.ref.sha256).length && authoredSourceMatches(item.id, before, policy) && !policy.analysis!.analysis.findings.some(finding => finding.affectedIds.includes(item.id)) && policy.analysis!.analysis.changes.some(change => change.kind === 'allowed_change' && change.affectedIds.includes(item.id) && change.evidence.trim())) continue
     if (!current || reviewedAnalysisErrors(policy.analysis, policy.analysis!.ref.sha256).length || current.decision.choice === 'keep_intent' || !currentScope.has(item.id)) issue('decision_scope_exceeded', next ?? item, '当前裁决不能改变或退役未选义务，user:raw和旧decision事实不能扩大作用范围', item.id)
-    else if (item.kind === 'REQ' && !previousScope.has(item.id)) {
+    else if (item.kind === 'REQ' && next?.kind === 'REQ') {
       const source = `decision:${current.stableDecisionId}`
-      const witnessed = current.ruleIds.some(id => {
+      const selectedRules = current.ruleIds.filter(id => ['RULE', 'TR'].includes(before.graph.items.get(id)?.kind ?? ''))
+      const witnesses = selectedRules.length ? selectedRules : current.ruleIds.every(id => before.graph.items.get(id)?.kind === 'REQ') ? current.affectedIds.filter(id => ['RULE', 'TR'].includes(before.graph.items.get(id)?.kind ?? '')) : []
+      const witnessed = witnesses.some(id => {
         const rule = before.graph.items.get(id), updated = after.graph.items.get(id)
         if (!rule || !updated || rule.kind !== updated.kind || !['RULE', 'TR'].includes(rule.kind) || updated.kind === 'VERIFY' || `${updated.source.kind}:${updated.source.ref}` !== source || !contractReferences(rule).some(reference => ['source', 'depends-on'].includes(reference.field) && reference.id === item.id)) return false
         const fields = rule.kind === 'RULE' ? ['scope', 'constraint'] : ['from', 'event', 'to', 'condition', 'disposition', 'reason', 'effects']
         return fields.some(field => !same((rule as unknown as Record<string, unknown>)[field], (updated as unknown as Record<string, unknown>)[field])) && policy.analysis!.analysis.changes.some(change => change.kind === 'allowed_change' && change.affectedIds.includes(item.id) && change.affectedIds.includes(id) && change.ruleIds.includes(id) && change.evidence.trim())
       })
-      if (!next || next.kind !== 'REQ' || `${next.source.kind}:${next.source.ref}` !== source || !witnessed) issue('decision_scope_exceeded', next ?? item, '共享需求更新须绑定当前裁决、同一已审变化和所选旧规则的实际政策定义变化', item.id)
+      const directRequirement = !witnesses.length && !selectedRules.length && (current.ruleIds.length ? current.ruleIds : current.affectedIds).includes(item.id) && policy.analysis!.analysis.changes.some(change => change.kind === 'allowed_change' && change.affectedIds.includes(item.id) && change.ruleIds.includes(item.id) && change.evidence.trim())
+      if (`${next.source.kind}:${next.source.ref}` !== source || !witnessed && !directRequirement) issue('decision_scope_exceeded', next ?? item, '共享需求更新须绑定当前裁决、同一已审变化和所选旧规则的实际政策定义变化', item.id)
     }
   }
   const moves = new Map<string, ContractNodeChange>()
