@@ -50,7 +50,7 @@ import { configuredSessionApplication, setSessionApplicationCommitObserver } fro
 import { SESSION_CHANGE } from '@spexcode/session-application'
 import { editSpecBody, readSpecBodyEdit, SpecBodyEditError } from './spec-body-edit.js'
 import { ContractReportScopeError, readProjectContractReport, resolveProjectReadRoot } from './sync/contract-report.js'
-import { configuredSyncApplication, type SyncSubmitInput } from './sync/application.js'
+import { configuredSyncApplication, startConfiguredSyncServices, closeConfiguredSyncServices, type SyncSubmitInput } from './sync/application.js'
 import type { SyncDecisionInput } from './sync/writeback-types.js'
 import { SyncApplicationError } from './sync/settings.js'
 import { SyncStoreError } from './sync/store.js'
@@ -125,6 +125,14 @@ app.get('/api/sync/status', async c => {
   const rawLimit = c.req.query('limit'), limit = rawLimit === undefined ? undefined : Number(rawLimit)
   if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1 || limit > 200)) throw new SyncApplicationError('sync_request_invalid', 'limit 必须为 1 至 200 的整数', 400)
   return c.json(await (await syncApplication(c.req.query('targetTree'))).status({ nodeId: c.req.query('nodeId'), limit }))
+})
+for (const action of ['pause', 'resume'] as const) app.post(`/api/sync/automatic/${action}`, async c => {
+  const body = await syncRequestBody(c.req)
+  return c.json(await (await syncApplication(c.req.query('targetTree'), body.targetTree)).automaticControl(action))
+})
+app.post('/api/sync/verify', async c => {
+  const body = await syncRequestBody(c.req)
+  return c.json(await (await syncApplication(c.req.query('targetTree'), body.targetTree)).submit({ nodeId: body.nodeId as string, requestId: body.requestId as string, origin: 'combined' }))
 })
 app.get('/api/sync/operations/:id', async c => c.json(await (await syncApplication(c.req.query('targetTree'))).readOperation(c.req.param('id'))))
 app.post('/api/sync/run', async c => {
@@ -1203,6 +1211,7 @@ const port = Number(process.env.PORT || 8787)
 // the trust boundary" true — without a hostname Node binds all interfaces and the child is reachable from
 // the LAN with no password, bypassing the gate entirely (measured: eval auth-boundary).
 const server = serve({ fetch: app.fetch, port, hostname: '127.0.0.1' })
+await startConfiguredSyncServices(repoRoot())
 installConnectionReaper(server as unknown as HttpServer)
 injectWebSocket(server)
 // Reclaim only stale, draining Codex generations whose exact detached identity and native reference census
@@ -1235,7 +1244,10 @@ const closeGraphWatchers = (): void => {
   graphWatchersClosed = true
   closeBoardFileWatchers()
 }
-process.once('exit', closeGraphWatchers)
+process.once('exit', () => {
+  closeGraphWatchers()
+  void closeConfiguredSyncServices().catch(error => console.error('sync 服务停止失败：', error))
+})
 
 // graceful drain (the other half of zero-downtime reload, supervise.ts): on SIGTERM stop accepting new
 // connections, let in-flight requests finish, and sweep now-idle keep-alive sockets so close() fires the
@@ -1244,6 +1256,10 @@ process.on('SIGTERM', () => {
   closeGraphWatchers()
   const srv = server as unknown as { close(cb?: () => void): void; closeIdleConnections?(): void }
   const sweep = setInterval(() => srv.closeIdleConnections?.(), 200)
-  srv.close(() => { clearInterval(sweep); process.exit(0) })
+  const syncClosed = closeConfiguredSyncServices()
+  srv.close(() => {
+    clearInterval(sweep)
+    void syncClosed.then(() => process.exit(0), error => { console.error('sync 服务停止失败：', error); process.exit(1) })
+  })
   setTimeout(() => process.exit(0), 10000).unref()
 })

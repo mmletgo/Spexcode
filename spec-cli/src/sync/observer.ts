@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { TreeWatcherRegistry } from '../tree-watcher.js'
 import type { TreeWatcherOptions } from '../tree-watcher.js'
@@ -22,6 +22,7 @@ export type SyncObserverOptions = {
 
 /** 服务持有观察器；事件合并只减少突发扫描，不丢扫描期间的最后一次保存。 */
 export class SyncInputObserver {
+  private rootFingerprint: string | null = null
   private watchers: TreeWatcherRegistry[] = []
   private timer: ReturnType<typeof setTimeout> | null = null
   private compensation: ReturnType<typeof setInterval> | null = null
@@ -39,7 +40,10 @@ export class SyncInputObserver {
     for (const watcher of this.watchers) watcher.close()
     this.watchers = []
     this.watchFailure = null
+    this.rootFingerprint = null
     if (!existsSync(this.options.root)) { this.report('missing', { code: 'sync_source_missing', message: '已注册输入工作树不存在，等待补偿扫描确认恢复' }); return }
+    const stat = statSync(this.options.root)
+    this.rootFingerprint = `${stat.dev}:${stat.ino}`
     const paths = [...new Set([this.options.root, this.options.gitDir, this.options.commonDir, join(this.options.commonDir, 'refs')])]
     for (const root of paths) {
       const sourceTree = root === this.options.root, refsTree = root === join(this.options.commonDir, 'refs')
@@ -63,7 +67,8 @@ export class SyncInputObserver {
     this.attach()
     this.compensation = setInterval(() => {
       if (this.flight) return
-      if (this.watchFailure || !existsSync(this.options.root) || !this.watchers.length) this.attach()
+      const stat = existsSync(this.options.root) ? statSync(this.options.root) : null
+      if (this.watchFailure || !stat || !this.watchers.length || this.rootFingerprint !== `${stat.dev}:${stat.ino}`) this.attach()
       void this.scanNow()
     }, this.options.compensationMs ?? 15000)
     this.compensation.unref?.()

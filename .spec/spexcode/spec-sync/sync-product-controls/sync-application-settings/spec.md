@@ -21,3 +21,5 @@ verifications 非空，每项 definition 精确登记 id、command argv、cwd、
 budget 给出 maxAttempts、maxCalls、maxRepairs、timeoutMs。结构由唯一 Ajv schema 验证；环境和 image 可用性在 coordinator/Docker 中产生证据，不把配置合法视作运行通过。实际配置文件摘要用于本机 enable 授权及并发检查。
 
 callTimeoutMs 可显式给出有限单次 native 调用上限，必须为正整数且不超过 budget.timeoutMs；缺省由 coordinator 使用 min(120000,总预算)，并始终受原 operation 截止时间限制。应用只从 operation.input 内冻结的配置读取，字节绑定 input/readSet；修改 live 配置只能用于新操作，不能给旧操作重置期限或放宽已开始预算。
+
+nodeIds 可选，登记本次允许的 Spec 意图根节点；真实子树和影响闭包复用当前图，配置摘要同样绑定授权。省略时只从受授权 source/test 路径的真实治理绑定推导注册意图，未治理/越界节点不伪装成已纳入。无实现绑定的新纯raw意图须显式nodeIds，已注册意图子树内的新raw自动纳入。手動直接请求越nodeIds范围明确拒绝；coverage报告纳入/未纳入节点，分模块接入不能宣称全项目同步。

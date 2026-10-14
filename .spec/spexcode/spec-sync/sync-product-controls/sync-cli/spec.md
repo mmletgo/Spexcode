@@ -26,3 +26,5 @@ recover 提交完整旧 operation ID 到同后端清理入口；保持原控制�
 
 
 P3增加run --origin spec|initial|code|combined与decide。decide接受完整operation ID、原input-id、可信analysis hash、逗号分隔findings、keep_intent/adopt_behavior/new_rule choice、稳定request-id；new_rule必须带非空rule。裁决选项不能放其它命令，rule不能放其它choice，origin只属run；HTTP共享应用校验具体身份、scope和stale，不由CLI自行授权。help诚实说明手动代码接入和三种裁决已提供，外部watcher尚未启用。
+
+P4 增加无operation参数的 pause/resume，调用 /automatic/pause|resume 物理输入门禁；带完整ID仍只控制指定操作。verify <node-id> 调 /verify 沿同一真实完整管线，status查询后台实际监听/快照/差异。enable 后服务保存即观察，CLI离线仍非零退出。

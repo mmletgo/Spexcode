@@ -26,7 +26,7 @@ import { composeControlledRequest, renderControlledDecisionRaw } from './request
 import type { ApplyJournal, BaselinePair, VerificationResultBlob } from './operation-types.js'
 
 const settings: SyncSettings = {
-  version: 'sync-settings-v1', sourcePaths: ['src'], testPaths: ['tests'], readPaths: ['package.json'],
+  version: 'sync-settings-v1', nodeIds: ['demo'], sourcePaths: ['src'], testPaths: ['tests'], readPaths: ['package.json'],
   verifications: [{ definition: { id: 'VERIFY-DEMO-01', command: ['node', '--test', 'tests/demo.test.mjs'], cwd: '.', timeoutMs: 1000 }, environment: { version: 'v1', image: `node@sha256:${'a'.repeat(64)}`, platform: 'linux/arm64', memoryBytes: 100000000, cpus: 1, pidsLimit: 64, scratchBytes: 1000000, logBytes: 100000 } }],
   mandatoryTests: [], facts: [], budget: { maxAttempts: 2, maxCalls: 4, maxRepairs: 1, timeoutMs: 30000 },
 }
@@ -827,4 +827,120 @@ test('AC-APPLICATION-P3-PARTIAL 剩余裁决保留最新交付raw及原受控正
     assert.equal(readFileSync(join(f.root, path), 'utf8'), authored)
   } finally { f.cleanup() }
   })
+})
+
+async function observeUntil(predicate: () => boolean): Promise<void> {
+  const deadline = Date.now() + 5000
+  while (!predicate()) { assert.ok(Date.now() < deadline, '后台同步观察超时'); await new Promise(resolve => setTimeout(resolve, 10)) }
+}
+test('AC-APPLICATION-P4-01 无浏览器暂停仍记录保存，恢复最新输入且重复失败不重开调用', async () => {
+  const f = await fixture()
+  try {
+    await f.application.enable()
+    await f.application.automaticControl('pause')
+    await f.application.startService({ compensationMs: 40, debounceMs: 5 })
+    const initial = f.application.observationStatus().latestSnapshot!.id
+    writeFileSync(join(f.root, 'src/demo.mjs'), 'export const demo = text => `${text}!`\n')
+    await observeUntil(() => f.application.observationStatus().latestSnapshot?.id !== initial)
+    assert.equal(f.calls.length, 0)
+    assert.equal(f.application.observationStatus().control.control, 'pause')
+    assert.equal(f.application.observationStatus().latest?.operationId, null)
+    await f.application.automaticControl('resume')
+    await observeUntil(() => f.calls.length === 1)
+    const operations = (await f.application.status()).operations
+    assert.equal(operations.length, 1)
+    const detail = await f.application.wait(operations[0].operation.id)
+    assert.equal(detail.operation.input.id, f.application.observationStatus().latestSnapshot!.id)
+    await new Promise(resolve => setTimeout(resolve, 100))
+    assert.equal(f.calls.length, 1)
+    assert.equal((await f.application.status()).operations.length, 1)
+  } finally { await f.application.stopService(); f.cleanup() }
+})
+test('AC-APPLICATION-P4-02 停机修改及外部Git提交启动补偿，离线状态不冒充监听在线', async () => {
+  const f = await fixture()
+  try {
+    await f.application.enable(); await f.application.automaticControl('pause')
+    await f.application.startService({ compensationMs: 40, debounceMs: 5 })
+    const first = f.application.observationStatus().latestSnapshot!.id
+    await f.application.stopService()
+    assert.equal(f.application.observationStatus().health.watchOnline, false)
+    writeFileSync(join(f.root, 'src/demo.mjs'), 'export const demo = text => `offline:${text}`\n')
+    f.git(['add', 'src/demo.mjs']); f.git(['commit', '-qm', 'external offline commit'])
+    await f.application.startService({ compensationMs: 40, debounceMs: 5 })
+    assert.notEqual(f.application.observationStatus().latestSnapshot!.id, first)
+    assert.equal(f.application.observationStatus().latestSnapshot!.headCommit, f.git(['rev-parse', 'HEAD']).trim())
+    assert.equal(f.calls.length, 0)
+  } finally { await f.application.stopService(); f.cleanup() }
+})
+test('AC-APPLICATION-P4-03 分支切换撤旧授权且物理暂停跨分支保留，显式重新启用才观察', async () => {
+  const f = await fixture()
+  try {
+    await f.application.enable(); await f.application.automaticControl('pause')
+    await f.application.startService({ compensationMs: 30, debounceMs: 5 })
+    f.git(['switch', '-qc', 'new-branch'])
+    await observeUntil(() => f.application.observationStatus().latestSnapshot?.source.branch.endsWith('new-branch') === true)
+    assert.equal((await f.application.readSettings()).activation, 'invalidated')
+    assert.equal(f.application.observationStatus().control.control, 'pause')
+    assert.equal(f.calls.length, 0)
+    await f.application.enable()
+    assert.equal((await f.application.readSettings()).activation, 'enabled')
+    assert.equal(f.application.observationStatus().latest?.input.source.branch.endsWith('new-branch'), true)
+    assert.equal(f.calls.length, 0)
+  } finally { await f.application.stopService(); f.cleanup() }
+})
+
+test('AC-APPLICATION-P4-04 nodeIds仅注册明确意图子树，新增raw纳入且无关节点未授权', async () => {
+  const f = await fixture()
+  try {
+    mkdirSync(join(f.root, '.spec/demo/child'), { recursive: true }); writeFileSync(join(f.root, '.spec/demo/child/spec.md'), source.replace('Demo', 'Child'))
+    mkdirSync(join(f.root, '.spec/other'), { recursive: true }); writeFileSync(join(f.root, '.spec/other/spec.md'), source.replace('Demo', 'Other'))
+    await f.application.enable(); await f.application.automaticControl('pause')
+    await f.application.startService({ compensationMs: 10000, debounceMs: 5 })
+    assert.deepEqual(f.application.observationStatus().registeredNodes, ['demo'])
+    assert.deepEqual(f.application.observationStatus().coverage.includedNodeIds.sort(), ['child', 'demo'])
+    assert.deepEqual(f.application.observationStatus().coverage.excludedNodeIds, ['other'])
+    await assert.rejects(f.application.submit({ nodeId: 'other', requestId: 'unauthorized' }), /未在 sync.nodeIds 授权/)
+    mkdirSync(join(f.root, '.spec/demo/new-raw'), { recursive: true }); writeFileSync(join(f.root, '.spec/demo/new-raw/spec.md'), source.replace('Demo', 'New'))
+    await observeUntil(() => f.application.observationStatus().coverage.includedNodeIds.includes('new-raw'))
+    assert.equal(f.application.observationStatus().registeredNodes.length, 1)
+    assert.equal(f.calls.length, 0)
+  } finally { await f.application.stopService(); f.cleanup() }
+})
+test('AC-APPLICATION-P4-05 缺省node作用域只含真实治理授权源码，纯raw需要明确注册', async () => {
+  const f = await fixture({ ...settings, nodeIds: undefined })
+  try {
+    await assert.rejects(f.application.enable(), /sync.nodeIds 明确登记/)
+    writeFileSync(join(f.root, '.spec/demo/spec.md'), source.replace('status: pending', 'status: pending\ncode:\n  - src/demo.mjs'))
+    mkdirSync(join(f.root, '.spec/other'), { recursive: true }); writeFileSync(join(f.root, '.spec/other/spec.md'), source.replace('status: pending', 'status: pending\ncode:\n  - private/other.mjs'))
+    await f.application.enable(); await f.application.automaticControl('pause')
+    await f.application.startService({ compensationMs: 10000 })
+    assert.deepEqual(f.application.observationStatus().registeredNodes, ['demo'])
+    assert.deepEqual(f.application.observationStatus().coverage.excludedNodeIds, ['other'])
+  } finally { await f.application.stopService(); f.cleanup() }
+})
+
+test('AC-APPLICATION-P4-06 持久健康和最后差异可查询，缺失重建不会伪造快照或沿旧授权继续', async () => {
+  const f = await fixture(), saved = join(f.temp, 'original-source')
+  try {
+    await f.application.enable(); await f.application.automaticControl('pause')
+    await f.application.startService({ compensationMs: 40, debounceMs: 5 })
+    const first = f.application.observationStatus()
+    assert.equal(first.health.watchOnline, true)
+    assert.equal(first.persistedHealth?.status, 'watching')
+    assert.ok(first.latestDifference)
+    const snapshotId = first.latestSnapshot!.id
+    renameSync(f.root, saved)
+    await observeUntil(() => f.application.observationStatus().health.status === 'missing')
+    assert.equal(f.application.observationStatus().latestSnapshot!.id, snapshotId)
+    assert.equal((await f.application.status()).settings.configurationError?.code, 'sync_source_missing')
+    mkdirSync(f.root); f.git(['init', '-q', '-b', 'main'])
+    await observeUntil(() => f.application.observationStatus().health.status === 'degraded')
+    assert.ok(f.application.observationStatus().health.reason?.message)
+    assert.equal(f.application.observationStatus().latestSnapshot!.id, snapshotId)
+    assert.equal(f.application.observationStatus().health.watchOnline, false)
+    assert.equal(f.calls.length, 0)
+    await f.application.stopService()
+    assert.equal(f.application.observationStatus().persistedHealth?.status, 'stopped')
+    assert.equal(f.application.observationStatus().health.watchOnline, false)
+  } finally { await f.application.stopService(); rmSync(saved, { recursive: true, force: true }); f.cleanup() }
 })

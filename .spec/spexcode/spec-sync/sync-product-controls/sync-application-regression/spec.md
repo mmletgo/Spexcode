@@ -50,3 +50,9 @@ P3-PARTIAL同时覆盖分行及同行互不重叠的A交付/B裁决，完整原r
 AC-APPLICATION-P3-DELIVERY复用06的真实临时Git、canonical SQLite、compiled CLI与普通hooks，可信预登记VERIFY-DECISION-01。外部源码新增filter超过8字符拒绝，与原RULE-EXPORT-02/AC-EXPORT-02的非空要求形成具体冲突；submit(code)真实分析和独审生成检查点，公共wait读取analysisRef/finding，三choice分别decide→wait→V1–V4/Docker→settled receipt。keep_intent移除上限且raw不变，adopt_behavior明确8上限，new_rule明确128上限；原oracle不改，新generated-tests覆盖8/9、128/129、空、幂等和权限。实际receipt正文、规则及源码符合冻结选择，未选原义务保持，source/index保留、重复裁决不新增call/commit。native输出为确定性替身，不宣称真实模型验收。
 
 AC-APPLICATION-P3-ORACLE-REAL 在 fixture 作者起始可信提交中登记不可改旧 oracle：9/129 长度均接受。公共 submit(code)→decide→wait 三选择执行同一完整 Docker 命令，keep 相容分支真实 receipt；adopt/new_rule 新限额真实 V3 非零、预算耗尽且无 receipt，绝不在裁决后改 oracle。ORACLE-PROTOCOL 用同一精确独审 finding 和冻结输入验证互斥分类由泛 generation_failed 改为 needs_input/oracle_policy_conflict，保具体裁决、定义、旧 oracle 摘要及矛盾反例；终态 wait 重放不新增 call，source/index 保留。本协议 runner 为明确独审接缝，不冒称真实模型判断。
+
+AC-APPLICATION-P4-01 使用真实Git/SQLite和明确故障runner验证无Dashboard持续服务：物理暂停期间保存保持0dispatch，恢复绑定最新snapshot，重复补偿不重开失败调用；02 验证服务offline、停机外部Git提交和启动补偿；03 验证branch切换旧授权失效、物理pause跨branch保持以及显式新授权。
+
+AC-APPLICATION-P4-04 验证nodeIds明确子树、新纯raw后续保存、parent/child不重复注册和越域manual拒绝；05验证省略nodeIds仅从实际受治理授权路径接入、未授权code保持excluded以及纯raw首次需显式注册。
+
+AC-APPLICATION-P4-06 使用真实Git root移动/重建，验证持久健康、实际process在线、最后差异证据、missing query与snapshot保留；新物理root未授权不冻结新snapshot、不派发，stop持久stopped而非旧online。

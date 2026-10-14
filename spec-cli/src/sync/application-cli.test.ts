@@ -19,7 +19,7 @@ function cli(args: string[], cwd = workspace): Promise<{ code: number | null; st
 test('AC-SYNC-CLI-01 sync help说明真实后端与阶段范围，错误flag和缺失参数明确拒绝', async () => {
   const help = await cli(['sync', '--help'])
   assert.equal(help.code, 0, help.stderr)
-  assert.match(help.stdout, /sync run/); assert.match(help.stdout, /不先单独提交 Spec/); assert.match(help.stdout, /尚未启用外部文件自动监听/)
+  assert.match(help.stdout, /sync run/); assert.match(help.stdout, /不先单独提交 Spec/); assert.match(help.stdout, /持续观察授权来源/)
   const bad = await cli(['sync', 'run', 'demo', '--pretend'])
   assert.equal(bad.code, 1); assert.match(bad.stderr, /未知选项/)
   const missing = await cli(['sync', 'run'])
@@ -64,6 +64,13 @@ test('AC-SYNC-CLI-02 CLI run/status/control 走相同持久服务HTTP且保留�
     assert.equal(decision.code, 0, decision.stderr)
     assert.equal(requests[7].url, '/api/sync/operations/op-1/decide')
     assert.deepEqual(requests[7].body, { targetTree: workspace.replace(/\/$/, ''), requestId: 'decision-1', inputId: 'input-1', analysisRef: { sha256: 'a'.repeat(64) }, findingIds: ['finding-1', 'finding-2'], decision: { choice: 'new_rule', rule: '新的明确规则' } })
+
+    assert.equal((await cli(['sync', 'pause', '--api', api])).code, 0)
+    assert.equal(requests[8].url, '/api/sync/automatic/pause')
+    assert.equal((await cli(['sync', 'resume', '--api', api])).code, 0)
+    assert.equal(requests[9].url, '/api/sync/automatic/resume')
+    assert.equal((await cli(['sync', 'verify', 'demo', '--request-id', 'verify-1', '--api', api])).code, 0)
+    assert.equal(requests[10].url, '/api/sync/verify')
 
   } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())) }
 })
