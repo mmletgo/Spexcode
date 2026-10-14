@@ -281,3 +281,93 @@ test('独立RULE跨叶搬迁可更新canonical authority，真实constraint变�
     assert.ok(validateContractEvolution(before, invalid, policy({ mode: 'preserve_business', newNodeRawSources })).some(issue => issue.code === 'refactor_business_meaning_changed'))
   }
 })
+
+test('当前裁决的规则与AC范围双检，旧facts、假user:raw和新连边不能扩大作用范围', async () => {
+  const before = await readFrozenContracts('/frozen', files()), analysis = evidence()
+  const authority = { stableDecisionId: 'RETRY-ONLY', requestRef: { sha256: sha }, operationId: 'operation', inputId: 'input', analysisRef: { sha256: sha }, findingIds: ['finding-retry'], ruleIds: ['RULE-EXPORT-06'], affectedIds: ['RULE-EXPORT-06'], paths: [path], decision: { choice: 'new_rule' as const, rule: '只允许失败后重试两次' } }
+  const sourceDecision = `decision:${authority.stableDecisionId}` as const
+  analysis.analysis.decisionAuthorities = [authority]
+  analysis.analysis.decision = { requestRef: authority.requestRef, analysisRef: authority.analysisRef, findingIds: authority.findingIds }
+  analysis.analysis.authorizedChanges = [{ ...proposal, source: sourceDecision }]
+  const facts = [{ source: sourceDecision, text: '模型声称裁决授权所有规则，实际只选择重试' }, { source: 'decision:EXPORT-POLICY', text: source }]
+  analysis.ref.sha256 = elaborationDigest(JSON.stringify(analysis.analysis))
+  const authorization = (): AuthorizedContractChange => ({ ...proposal, source: sourceDecision, analysisRef: analysis.ref })
+  const changedFiles = files(), rule = before.graph.items.get('RULE-EXPORT-02')!
+  assert.equal(rule.kind, 'RULE')
+  changedFiles.set(path, updatedSource(source).replace(rule.constraint, `${rule.constraint}；重复调用同时返回当前状态`))
+  const after = await readFrozenContracts('/frozen', changedFiles)
+  const rejected = validateContractEvolution(before, after, policy({ analysis, authorizedChanges: [authorization()], facts, decisionAuthorities: [authority] }))
+  assert.ok(rejected.some(issue => issue.code === 'acceptance_update_unauthorized' && issue.itemId === 'AC-EXPORT-01'))
+  assert.ok(rejected.some(issue => issue.code === 'decision_scope_exceeded' && issue.itemId === 'RULE-EXPORT-02'))
+  const ruleOnly = files(); ruleOnly.set(path, source.replace(rule.constraint, `${rule.constraint}；取消隔离`))
+  assert.ok(validateContractEvolution(before, await readFrozenContracts('/frozen', ruleOnly), policy({ analysis, facts, decisionAuthorities: [authority] })).some(issue => issue.code === 'decision_scope_exceeded' && issue.itemId === 'RULE-EXPORT-02'))
+  analysis.analysis.authorizedChanges = [{ ...proposal, source: 'user:raw' }]
+  analysis.ref.sha256 = elaborationDigest(JSON.stringify(analysis.analysis))
+  const rawAuthorization: AuthorizedContractChange = { ...proposal, source: 'user:raw', analysisRef: analysis.ref }
+  await assert.rejects(elaborate({ ...input(), analysis, facts, authorizedChanges: [rawAuthorization], decisionAuthorities: [authority] }, { runner: runner(build(changedFiles.get(path)!)) }), /作用范围/)
+  const relinked = changedFiles.get(path)!.replace('| decision:EXPORT-POLICY | REQ-EXPORT-01 |', '| decision:EXPORT-POLICY | REQ-EXPORT-01,RULE-EXPORT-06 |')
+  changedFiles.set(path, relinked)
+  const linked = await readFrozenContracts('/frozen', changedFiles)
+  assert.ok(validateContractEvolution(before, linked, policy({ analysis, facts, decisionAuthorities: [authority] })).some(issue => issue.code === 'decision_scope_exceeded' && issue.itemId === 'RULE-EXPORT-02'))
+})
+
+test('合法所选重试规则及其旧AC通过，已结算裁决不能借事实授权无关AC', async () => {
+  const before = await readFrozenContracts('/frozen', files()), analysis = evidence()
+  const authority = { stableDecisionId: 'RETRY-ONLY', requestRef: { sha256: sha }, operationId: 'operation', inputId: 'input', analysisRef: { sha256: sha }, findingIds: ['finding-retry'], ruleIds: ['RULE-EXPORT-06'], affectedIds: ['RULE-EXPORT-06'], paths: [path], decision: { choice: 'new_rule' as const, rule: '只允许失败后重试两次' } }
+  const sourceDecision = `decision:${authority.stableDecisionId}` as const
+  analysis.analysis.decisionAuthorities = [authority]
+  analysis.analysis.decision = { requestRef: authority.requestRef, analysisRef: authority.analysisRef, findingIds: authority.findingIds }
+  const authorized: Extract<AuthorizedContractChange, { action: 'update_acceptance' }> = { id: 'AC-EXPORT-08', action: 'update_acceptance', source: sourceDecision, reason: '用户裁决只更新失败重试次数', ruleIds: ['RULE-EXPORT-06'], analysisRef: analysis.ref }
+  analysis.analysis.authorizedChanges = [{ ...authorized }]
+  delete (analysis.analysis.authorizedChanges[0] as unknown as Record<string, unknown>).analysisRef
+  analysis.analysis.changes[0].affectedIds = ['RULE-EXPORT-06', 'AC-EXPORT-08']; analysis.analysis.changes[0].ruleIds = ['RULE-EXPORT-06']
+  analysis.ref.sha256 = elaborationDigest(JSON.stringify(analysis.analysis)); authorized.analysisRef = { ...analysis.ref }
+  const nextFiles = files(), changed = source.replace('仅FAILED可由所有者重试，保持ID，attempt加一并清除失败原因', '仅FAILED可由所有者重试最多两次，保持ID，attempt加一并清除失败原因').replace('ID保持、attempt增加，旧结果无效', 'ID保持、attempt增加，旧结果无效；第三次明确拒绝')
+  nextFiles.set(path, changed)
+  const after = await readFrozenContracts('/frozen', nextFiles), facts = [{ source: sourceDecision, text: '只允许失败后重试两次' }]
+  assert.deepEqual(validateContractEvolution(before, after, policy({ analysis, authorizedChanges: [authorized], facts, decisionAuthorities: [authority] })), [])
+  const result = await elaborate({ ...input(), analysis, authorizedChanges: [authorized], facts: [...input().facts!, ...facts], decisionAuthorities: [authority] }, { runner: runner(build(changed)) })
+  assert.equal(result.status, 'complete')
+  delete analysis.analysis.decision
+  analysis.analysis.authorizedChanges = [{ ...proposal, source: sourceDecision }]
+  analysis.analysis.changes[0].affectedIds = ['AC-EXPORT-01']; analysis.analysis.changes[0].ruleIds = ['RULE-EXPORT-02']
+  analysis.ref.sha256 = elaborationDigest(JSON.stringify(analysis.analysis))
+  const unrelated: AuthorizedContractChange = { ...proposal, source: sourceDecision, analysisRef: analysis.ref }
+  await assert.rejects(elaborate({ ...input(), analysis, authorizedChanges: [unrelated], facts, decisionAuthorities: [authority] }, { runner: runner(build(source)) }), /作用范围/)
+  const oldRow = source.match(/^\| RULE-EXPORT-02 .*$/m)![0]
+  const oldScoped = source.replace(oldRow, oldRow.replace('decision:EXPORT-POLICY', sourceDecision))
+  const previousFiles = files(); previousFiles.set(path, oldScoped)
+  const changedFiles = files(); changedFiles.set(path, oldScoped.replace('不同filter拒绝且原任务不变', '不同filter也返回同任务'))
+  const oldAuthorityIssues = validateContractEvolution(await readFrozenContracts('/frozen', previousFiles), await readFrozenContracts('/frozen', changedFiles), policy({ analysis, facts, decisionAuthorities: [authority] }))
+  assert.ok(oldAuthorityIssues.some(issue => issue.code === 'decision_scope_exceeded' && issue.itemId === 'RULE-EXPORT-02'))
+})
+
+test('裁决退役逐项绑定旧节点删除独审，全节点选择通过、部分规则选择不得扩大退役', async () => {
+  const before = await readFrozenContracts('/frozen', files()), analysis = evidence()
+  const ids = [...before.graph.items.keys()], authority = { stableDecisionId: 'RETIRE-EXPORT', requestRef: { sha256: sha }, operationId: 'operation', inputId: 'input', analysisRef: { sha256: sha }, findingIds: ['finding-node-removal'], ruleIds: [] as string[], affectedIds: ids, paths: [path], decision: { choice: 'adopt_behavior' as const } }
+  const sourceDecision = `decision:${authority.stableDecisionId}` as const
+  analysis.analysis.decisionAuthorities = [authority]
+  analysis.analysis.decision = { requestRef: authority.requestRef, analysisRef: authority.analysisRef, findingIds: authority.findingIds }
+  analysis.analysis.authorizedChanges = ids.map(id => ({ id, action: 'retire', source: sourceDecision, reason: '用户选择已查证的整个节点退役' }))
+  analysis.analysis.nodeChanges = [{ action: 'retire', from: { nodeId: 'export-contract', path } }]
+  analysis.analysis.resolutions = [{ path, content: null, mode: null }]
+  analysis.analysis.changes[0].paths = [path]; analysis.analysis.changes[0].affectedIds = ids
+  analysis.ref.sha256 = elaborationDigest(JSON.stringify(analysis.analysis))
+  const authorizedChanges: AuthorizedContractChange[] = analysis.analysis.authorizedChanges.map(proposal => ({ ...proposal, analysisRef: analysis.ref }))
+  const nextFiles = files(); nextFiles.delete(path)
+  const after = await readFrozenContracts('/frozen', nextFiles), facts = [{ source: sourceDecision, text: '整个导出节点退役，已查证源与交付差量' }]
+  assert.deepEqual(validateContractEvolution(before, after, policy({ analysis, authorizedChanges, facts, decisionAuthorities: [authority], nodeChanges: [{ ...analysis.analysis.nodeChanges[0], evidenceRef: analysis.ref }] })), [])
+  const authorDeleted = structuredClone(analysis)
+  delete authorDeleted.analysis.decision
+  authorDeleted.analysis.authorizedChanges = ids.map(id => ({ id, action: 'retire', source: 'user:raw', reason: '作者明确删除已采纳节点' }))
+  authorDeleted.ref.sha256 = elaborationDigest(JSON.stringify(authorDeleted.analysis))
+  const authorPolicy = (): ContractEvolutionPolicy => policy({ analysis: authorDeleted, authorizedChanges: authorDeleted.analysis.authorizedChanges.map(proposal => ({ ...proposal, analysisRef: authorDeleted.ref })), nodeChanges: [{ ...authorDeleted.analysis.nodeChanges[0], evidenceRef: authorDeleted.ref }] })
+  assert.ok(validateContractEvolution(before, after, authorPolicy()).some(issue => issue.code === 'contract_authorization_untrusted'))
+  authorDeleted.analysis.authorChanges = [{ nodeId: 'export-contract', path, beforeRaw: '作者原文与尚未ff的前轮交付原意版本不同。', afterRaw: null, changedIds: ids }]
+  authorDeleted.ref.sha256 = elaborationDigest(JSON.stringify(authorDeleted.analysis))
+  assert.deepEqual(validateContractEvolution(before, after, authorPolicy()), [])
+  const partial = { ...authority, ruleIds: ['RULE-EXPORT-06'], affectedIds: ['RULE-EXPORT-06'] }
+  analysis.analysis.decisionAuthorities = [partial]
+  analysis.ref.sha256 = elaborationDigest(JSON.stringify(analysis.analysis))
+  assert.ok(validateContractEvolution(before, after, policy({ analysis, authorizedChanges: authorizedChanges.map(change => ({ ...change, analysisRef: analysis.ref })), facts, decisionAuthorities: [partial], nodeChanges: [{ ...analysis.analysis.nodeChanges[0], evidenceRef: analysis.ref }] })).some(issue => issue.code === 'contract_authorization_untrusted' && issue.itemId === 'AC-EXPORT-01'))
+})

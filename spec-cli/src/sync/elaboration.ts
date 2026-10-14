@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { mintIds } from '@spexcode/spec-core'
-import { acceptanceAuthorizationErrors, validateContractEvolution } from './contract-evolution.js'
+import { contractAuthorizationErrors, validateContractEvolution } from './contract-evolution.js'
 import type { FrozenContracts } from './frozen-contracts.js'
 import { posix } from 'node:path'
 import { buildContractGraph, CONTRACT_COLUMNS, parseContract, parseParts, projectContractCoverage, validateContractGraph } from '@spexcode/spec-core/contracts'
@@ -73,10 +73,8 @@ function checkInput(input: ElaborationInput): void {
   for (const change of input.authorizedChanges ?? []) {
     const existing = items.find(item => item.id === change.id)
     if (!existing || !change.reason.trim() || authorizations.has(change.id) || !['retire', 'update_verification', 'update_acceptance'].includes(change.action) || (change.action === 'update_verification' && existing.kind !== 'VERIFY') || (change.action === 'update_acceptance' && existing?.kind !== 'AC')) throw new TypeError(`合法契约变更需明确既有身份、操作和依据: ${change.id}`)
-    if (change.action === 'update_acceptance') {
-      const errors = acceptanceAuthorizationErrors(change, baseline, input)
-      if (errors.length) throw new TypeError(`验收变更没有可信分析: ${change.id}; ${errors.join('; ')}`)
-    } else if (change.source !== 'user:raw' && !(input.facts ?? []).some(fact => fact.source === change.source && fact.source.startsWith('decision:'))) throw new TypeError(`契约变更没有可信来源: ${change.id}`)
+    const errors = contractAuthorizationErrors(change, baseline, input)
+    if (errors.length) throw new TypeError(`${change.action === 'update_acceptance' ? '验收变更没有可信分析' : '契约变更没有可信来源'}: ${change.id}; ${errors.join('; ')}`)
     authorizations.add(change.id)
   }
   const lifecyclePaths = new Set<string>(), destinations = new Set<string>()
@@ -130,7 +128,7 @@ function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate
   const after = frozenState(nextSources, afterFiles)
   for (const change of candidate.changes) if (!after.nodes.some(node => node.id === change.nodeId && node.path === change.path)) findings.push(finding(input, 'node_identity_invalid', `节点身份必须复用共享 mintIds: ${change.path}`))
   if (JSON.stringify(candidate.nodeChanges ?? []) !== JSON.stringify(input.nodeChanges ?? [])) findings.push(finding(input, 'node_changes_unbound', '节点迁移和退役未绑定冻结输入'))
-  findings.push(...validateContractEvolution(before, after, { mode: input.mode ?? 'reelaborate', preserveAcceptedItems: input.refinement !== undefined, authorizedChanges: input.authorizedChanges ?? [], nodeChanges: input.nodeChanges ?? [], retiredIds: input.retiredIds ?? [], newNodeRawSources: new Map(input.targets.map(target => [target.path, target.nodeId === input.intent.nodeId ? input.intent.rawSource : target.rawSource ?? parseParts(target.source ?? '')?.rawSource ?? ''])), facts: input.facts, analysis: input.analysis }))
+  findings.push(...validateContractEvolution(before, after, { mode: input.mode ?? 'reelaborate', preserveAcceptedItems: input.refinement !== undefined, authorizedChanges: input.authorizedChanges ?? [], nodeChanges: input.nodeChanges ?? [], retiredIds: input.retiredIds ?? [], newNodeRawSources: new Map(input.targets.map(target => [target.path, target.nodeId === input.intent.nodeId ? input.intent.rawSource : target.rawSource ?? parseParts(target.source ?? '')?.rawSource ?? ''])), facts: input.facts, analysis: input.analysis, decisionAuthorities: input.decisionAuthorities }))
   if (input.verifications) {
     const registered = new Map(input.verifications.map(verification => [verification.id, verification]))
     for (const item of graph.items.values()) {
@@ -222,7 +220,7 @@ function validateRepairSeed(input: ElaborationInput, seed: ElaborationRepairSeed
 /** 从不可变业务输入连续生成、解析和独立审查；仅返回候选，不拥有交付树写权限。 */
 export async function elaborate(input: ElaborationInput, options: { runner?: ElaborationRunner; seed?: ElaborationRepairSeed } = {}): Promise<ElaborationResult> {
   checkInput(input)
-  const frozen = structuredClone({ execution: { root: input.root, base: input.base ?? null }, intent: input.intent, targets: input.targets, context: input.context ?? [], facts: input.facts ?? [], ...(input.verifications ? { verifications: input.verifications } : {}), authorizedChanges: input.authorizedChanges ?? [], mode: input.mode ?? 'reelaborate', nodeChanges: input.nodeChanges ?? [], analysis: input.analysis, refinement: input.refinement, retiredIds: input.retiredIds ?? [], files: input.files ? [...input.files].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0) : null })
+  const frozen = structuredClone({ execution: { root: input.root, base: input.base ?? null }, intent: input.intent, targets: input.targets, context: input.context ?? [], facts: input.facts ?? [], ...(input.verifications ? { verifications: input.verifications } : {}), authorizedChanges: input.authorizedChanges ?? [], mode: input.mode ?? 'reelaborate', nodeChanges: input.nodeChanges ?? [], analysis: input.analysis, decisionAuthorities: input.decisionAuthorities, refinement: input.refinement, retiredIds: input.retiredIds ?? [], files: input.files ? [...input.files].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0) : null })
   // 在任何 await 前复制调用者输入，后续生成/评审不能混入继续编辑的字节。
   input = { ...input, ...frozen, files: frozen.files === null ? undefined : new Map(frozen.files) }
   const inputDigest = digest(frozen)
