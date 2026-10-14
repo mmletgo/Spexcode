@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+P4 计划的 executionScope 单独冻结本次实际写入文件及目标契约/流程；writePaths 继续表达生成授权，不能作为写锁或已验证覆盖范围。baselineSelection 完整记录精确读取、保护和写入资源的独立字节/意图基线，接入使用同一已捕获 InputSnapshot，不为观察事件重新采集另一版本。既有 P3 冻结操作缺少这些字段时仍按其原计划恢复。
+
 SyncCoordinatorPlan 是普通可内容寻址 JSON；version、intentNodeId、targets、readPaths、writePaths、facts、verifications、mandatoryTests、明确授权变更及新节点原意均参与 policyDigest。readPaths/writePaths 可是可信目录前缀；读取冻结完整 manifest 展开现存文件，不存在的精确路径也参与 readSetDigest，新增文件以整个冻结树中的不存在身份为基线。外部输入与 HEAD 的实际差异必须在授权写范围且进入可信读集合，不能静默提交无关 dirty 内容。
 
 mandatoryTests 是额外已有独立测试义务，包含 verificationId/testPath/testId；文件不能与模型 writePaths 重叠，必须在冻结读集合，不能由模型改 oracle 自免。未来 ready AC 由可信契约图计算，完整流程使用 readyFlowIds。verification definitions 明确进入 P1 verifications 字段，不能当待裁决业务 facts。

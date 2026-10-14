@@ -1,6 +1,6 @@
 import type { SyncDecisionAuthority } from './writeback-types.js'
 import type { AuthorizedContractChange, ElaborationFact, ElaborationRunner } from './elaboration-types.js'
-import type { AdmitSyncInput, ApplyReceipt, BaselinePair, BlobRef, SyncBudget, SyncFailure, SyncOperation } from './operation-types.js'
+import type { AdmitSyncInput, ApplyReceipt, BaselinePair, BlobRef, FrozenBaselineSelection, SyncBudget, SyncFailure, SyncOperation, SyncScope } from './operation-types.js'
 import type { DeliveryTools, PrivateDeliveryOptions } from './private-delivery.js'
 import type { RegisteredVerification } from './verification-plan.js'
 import type { VerificationDriver } from './verification-executor-types.js'
@@ -12,6 +12,7 @@ export type SyncCoordinatorPlan = {
   targets: readonly { nodeId: string; path: string; rawSource?: string }[]
   readPaths: readonly string[]
   writePaths: readonly string[]
+  executionScope?: SyncScope
   facts: readonly ElaborationFact[]
   verifications: readonly RegisteredVerification[]
   mandatoryTests: readonly { verificationId: string; testPath: string; testId: string }[]
@@ -23,7 +24,7 @@ export type SyncCoordinatorPlan = {
 }
 export type SyncAdmissionOptions = {
   ingressKey: string; rootCauseId: string; origin: AdmitSyncInput['origin']; budget: SyncBudget
-  managedRoot: string; requestBlob?: BlobRef; retryOf?: string; previousBaselinePair?: BaselinePair | null
+  managedRoot: string; requestBlob?: BlobRef; retryOf?: string; previousBaselinePair?: BaselinePair | null; baselineSelection?: FrozenBaselineSelection
 }
 export type SyncCoordinatorOptions = {
   plan: SyncCoordinatorPlan

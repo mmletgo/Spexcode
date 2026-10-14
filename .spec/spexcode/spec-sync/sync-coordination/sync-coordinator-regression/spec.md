@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+P4 精确接入测试使用真实 Git 快照和 SQLite 基线读取：完整读取选择可含只读 oracle，实际写入范围只含目标文件；同一 InputSnapshot 直接进入 admission，不重新捕获或修改作者 index/字节。缺少实际执行范围时拒绝把目录授权自动当成写锁。
+
 针对性测试使用真实 SQLite 与临时Git，可明确注入模型行但V1/意图/diff/独立身份程序门禁保留。真实Docker完整成功、真实断言失败及有限修复；保护AC与命令、GAP独立分支、输入中途变化无交付、取消/重入不重复native或commit，以及source/index原样保留。完成状态重入读取真实receipt。预算和未知资源终态不能假通过。命令：`npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/sync/coordinator.test.ts`；Docker cases由 `SPEX_DOCKER_VERIFICATION_TEST=1` 启用。
 
 当前独立证据：真实Linux/arm64 Node固定镜像的完整成功链（真实CLI init与正常hooks、source/index保留、receipt重入）、断言失败新attempt修复、V4中途输入变化、Git commit后DB未结算恢复、GAP独立完整FLOW部分receipt均通过。明确注入模型业务行，V1使用实际Tree-sitter/图/意图门禁，V2程序检查独立session/thread/result摘要，V3与Git均实际执行；不声称已跑真实LLM或P3–P5。未知历史native创建终态保留resource与recovery_required，不假removed。

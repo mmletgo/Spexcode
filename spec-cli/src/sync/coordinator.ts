@@ -18,7 +18,7 @@ import { contractOmissionBound, runGeneration } from './generation.js'
 import type { GenerationFinding, GenerationResult } from './generation-types.js'
 import { createAttemptRunner } from './native-run.js'
 import type { NativeRunPlan } from './native-run.js'
-import type { AdmitSyncInput, ApplyReceipt, BlobRef, CandidateRef, ComposedInputRef, InputSnapshot, SyncAttempt, SyncFailure, SyncOperation, SyncScope, VerificationResultBlob, WriteFence } from './operation-types.js'
+import type { AdmitSyncInput, ApplyReceipt, BlobRef, CandidateRef, ComposedInputRef, FrozenBaselineSelection, InputSnapshot, SyncAttempt, SyncFailure, SyncOperation, SyncScope, VerificationResultBlob, WriteFence } from './operation-types.js'
 import { deliverVerifiedAttempt, planPrivateDelivery } from './private-delivery.js'
 import { composeControlledRequest, readControlledDecision, readControlledRequest } from './request-input.js'
 import { sessionIdForCreateKey } from '../sessions.js'
@@ -46,14 +46,14 @@ const unique = (ids: readonly string[]): string[] => [...new Set(ids)].sort()
 const fenceFor = (operation: SyncOperation, attempt: SyncAttempt): WriteFence => ({ operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: operation.input.source.physicalFingerprint })
 type InputView = { composed: ComposedInputRef; manifest: SnapshotManifest; files: Map<string, string>; readSetDigest: string; frozen: FrozenContracts }
 
-async function readInput(input: InputSnapshot, plan: SyncCoordinatorPlan, previous?: SyncOperation['previousBaselinePair'], requestBlob?: BlobRef): Promise<InputView> {
+async function readInput(input: InputSnapshot, plan: SyncCoordinatorPlan, previous?: SyncOperation['previousBaselinePair'], requestBlob?: BlobRef, selection?: FrozenBaselineSelection): Promise<InputView> {
   if (plan.version !== 'sync-coordinator-v1' || !plan.targets.length || !plan.writePaths.length) fail('invalid_plan', '可信计划缺少版本、目标或写范围')
   for (const path of [...plan.readPaths, ...plan.writePaths, ...plan.targets.map(item => item.path), ...(plan.newNodeRawSources ?? []).map(item => item.path)]) {
     validateRepositoryPath(path)
     if (isHostPrivatePath(path)) fail('private_context', `可信读写集合包含宿主运行资料: ${path}`)
   }
   verifySnapshot(input)
-  let composition = composeAuthoredInput(input, previous ?? undefined, { retainConflicts: true })
+  let composition = composeAuthoredInput(input, selection ?? previous ?? undefined, { retainConflicts: true })
   if (!composition.composed) fail('composition_conflict', '人类输入与前次交付存在重叠冲突', [writeEvidence(input.source.commonDir, composition.conflicts)])
   if (requestBlob) composition = composeControlledRequest(input, composition.composed, requestBlob, { retainConflicts: true })
   if (!composition.composed) fail('request_conflict', '用户受控差量与已交付细化存在重叠冲突', [writeEvidence(input.source.commonDir, composition.conflicts)])
@@ -77,14 +77,16 @@ async function readInput(input: InputSnapshot, plan: SyncCoordinatorPlan, previo
   const headTree = objectGit(input.source.commonDir, ['rev-parse', `${input.headCommit}^{tree}`]).toString().trim()
   const uncovered = actualTreeDiff(readTree(input.source.commonDir, headTree), entries).filter(file => !within(file.path, plan.writePaths) || !within(file.path, plan.readPaths))
   if (uncovered.length) fail('uncovered_source_change', `外部输入/前次交付差量不在可信影响范围: ${uncovered.map(file => file.path).join(', ')}`, [writeEvidence(input.source.commonDir, uncovered)])
-  const readSetDigest = contentHash(canonical({ baseline: previous ? { id: previous.id, sourceInput: previous.sourceInput.immutableTree, verifiedDelivery: previous.verifiedDelivery.immutableTree, coveredScope: previous.coveredScope } : null, compositionEvidence: composed.compositionEvidenceBlob ?? null, declared: unique(plan.readPaths), entries: readEntries, absent: unique(plan.readPaths.filter(path => !entries.some(entry => within(entry.path, [path])))) }))
+  const readSetDigest = contentHash(canonical({ baseline: selection ? { selectionDigest: selection.digest } : previous ? { id: previous.id, sourceInput: previous.sourceInput.immutableTree, verifiedDelivery: previous.verifiedDelivery.immutableTree, coveredScope: previous.coveredScope } : null, compositionEvidence: composed.compositionEvidenceBlob ?? null, declared: unique(plan.readPaths), entries: readEntries, absent: unique(plan.readPaths.filter(path => !entries.some(entry => within(entry.path, [path])))) }))
   return { composed, manifest: { version: 1, entries }, files, readSetDigest, frozen: await readFrozenContracts(input.source.canonicalRoot, files) }
 }
 
 /** 接入之前冻结真实读集合和派生输入，只返回既有协议接入结构，不改 source/index。 */
 export async function prepareSyncAdmission(input: InputSnapshot, supplied: SyncCoordinatorPlan, options: SyncAdmissionOptions): Promise<AdmitSyncInput> {
-  const plan = structuredClone(supplied), view = await readInput(input, plan, options.previousBaselinePair, options.requestBlob)
-  return { ingressKey: options.ingressKey, rootCauseId: options.rootCauseId, origin: options.origin, budget: options.budget, input, ...(options.requestBlob ? { requestBlob: options.requestBlob } : {}), ...(options.retryOf ? { retryOf: options.retryOf } : {}), planBlob: freezeSyncPlanEvidence(input.source.commonDir, plan), scope: { paths: unique(plan.writePaths), contractIds: [], flowIds: [] }, policyDigest: syncPlanDigest(plan), impactDigest: contentHash(canonical({ targets: plan.targets, writePaths: unique(plan.writePaths), readSetDigest: view.readSetDigest })), readSetDigest: view.readSetDigest, delivery: null, deliveryPlan: planPrivateDelivery(input, options.managedRoot, options.ingressKey), previousBaselinePair: options.previousBaselinePair ?? null }
+  const plan = structuredClone(supplied), view = await readInput(input, plan, options.previousBaselinePair, options.requestBlob, options.baselineSelection)
+  if (options.baselineSelection && !plan.executionScope) fail('execution_scope_missing', '精确基线接入必须冻结实际目标写入范围')
+  const scope = plan.executionScope ?? { paths: unique(plan.writePaths), contractIds: [], flowIds: [] }
+  return { ingressKey: options.ingressKey, rootCauseId: options.rootCauseId, origin: options.origin, budget: options.budget, input, ...(options.requestBlob ? { requestBlob: options.requestBlob } : {}), ...(options.retryOf ? { retryOf: options.retryOf } : {}), ...(options.baselineSelection ? { baselineSelection: options.baselineSelection } : {}), planBlob: freezeSyncPlanEvidence(input.source.commonDir, plan), scope, policyDigest: syncPlanDigest(plan), impactDigest: contentHash(canonical({ targets: plan.targets, ...(plan.executionScope ? { scope } : {}), writePaths: unique(plan.writePaths), readSetDigest: view.readSetDigest })), readSetDigest: view.readSetDigest, delivery: null, deliveryPlan: planPrivateDelivery(input, options.managedRoot, options.ingressKey), previousBaselinePair: options.previousBaselinePair ?? null }
 }
 
 type Stage = { version: 'sync-stage-v1'; operationId: string; attemptId: string; inputId: string; policyDigest: string; stage: string; resultRef: BlobRef }

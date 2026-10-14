@@ -136,6 +136,23 @@ test('可信目录授权/完整readset固定，同source不同policy不混，unc
   assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
 })
 
+test('P4精确接入使用同一快照并区分读取基线与实际写入范围', async t => {
+  const f = await fixture(t)
+  const selected = f.store.readBaselineSelection(f.input.source, [{ kind: 'path', path: contractPath }, { kind: 'path', path: 'src/export.js' }, { kind: 'path', path: 'tests/export.test.mjs' }])
+  assert.ok('selection' in selected)
+  const scope = { paths: [contractPath, 'src/export.js'], contractIds: [], flowIds: [] }
+  const options = { ingressKey: 'selected-admission', rootCauseId: 'selected-admission', origin: 'spec' as const, budget: f.operation.budget, managedRoot: f.managedRoot, baselineSelection: selected.selection }
+  await assert.rejects(prepareSyncAdmission(f.input, f.plan, options), /execution_scope_missing/)
+  const admission = await prepareSyncAdmission(f.input, { ...f.plan, executionScope: scope }, options)
+  assert.equal(admission.input, f.input)
+  assert.deepEqual(admission.baselineSelection, selected.selection)
+  assert.deepEqual(admission.scope, scope)
+  assert.notEqual(admission.readSetDigest, f.operation.readSetDigest)
+  assert.equal(admission.scope.paths.includes('tests/export.test.mjs'), false)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
+  assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+})
+
 test('kernel mutex阻止同operation双编排，尚无native派发', async t => {
   const f = await fixture(t), locks = join(f.artifactRoot, '.locks'); mkdirSync(locks, { mode: 0o700 })
   const lock = claimFileMutex(join(locks, `${contentHash(f.operation.id)}.sqlite`))!
