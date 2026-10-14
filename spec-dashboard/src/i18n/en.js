@@ -1,5 +1,9 @@
 export default {
   syncOperation: {
+    runCode: 'Ingest code changes',
+    originalRequest: 'Original request body',
+    history: 'Operation history',
+    decision: {"title": "Resolve business differences", "note": "Resolve selected findings; other gaps block only their dependent scope.", "baseline": "Common baseline", "noBaseline": "No common baseline", "coverage_gap": "Uncovered behavior", "conflict": "Business conflict", "intent": "Original intent", "source": "Source code behavior", "delivery": "Delivered behavior", "affected": "Affected rules and paths", "counterexample": "Counterexample", "evidence": "Analysis evidence", "question": "Business fact to clarify", "keep_intent": "Keep intent and repair code", "adopt_behavior": "Adopt behavior and update intent", "new_rule": "Enter a new rule", "rule": "New business rule for selected findings", "submitRule": "Submit new rule"},
     requestTitle: 'Submitted requirement',
     requestNote: 'This is the submitted user intent. Delivery progress appears in the operation status above.',
     requestDiff: 'Requested body diff',
@@ -23,7 +27,7 @@ export default {
     "cancel": "Cancel operation",
     "retry": "Read again",
     "configure": "Register the project read/write scope, budget, and verification plan before enabling synchronization here.",
-    "currentCapabilities": "Spec saves and manual synchronization are supported. External code changes are not yet admitted automatically.",
+    "currentCapabilities": "Spec saves, manual code input and business decisions are supported. External changes are not watched yet.",
     "source": "Source worktree",
     "viewedTree": "Currently viewed worktree",
     "sourceBranch": "Source branch",

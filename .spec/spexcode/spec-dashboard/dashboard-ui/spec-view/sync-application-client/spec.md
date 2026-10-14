@@ -22,3 +22,6 @@ activation=invalidated 也使旧receipt不能投影为当前已同步，保留�
 显式终态重试发送retryOf与旧origin，不能把新patch混入重试；应用复用旧用户意图并确认当前input/policy及资源结算门禁，客户端只依据实际retryEligibility开放重试。普通来源同步不发送retryOf。
 
 资源恢复资格只由真实recovery_required与未结算resources/journals共同决定，发送recover控制不附新请求/预算。请求证据投影保留用户origin.intent与实际path，原Git对象/代理prompt不直接dump；请求diff透传kind=request，不能改成候选或交付读取。
+
+
+decideSync直接传原operation ID、inputId、analysisRef、选中finding IDs及用户choice/rule到共享decide HTTP入口；保持payload幂等键与原错误code/message，不混成retry或SpecBodyEdit。业务分析证据投影保具体路径、原意、双方行为、反例；裁决投影保选择/新规则/所选项/原operation身份，不泄露prompt。

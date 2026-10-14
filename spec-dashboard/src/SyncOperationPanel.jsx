@@ -4,6 +4,7 @@ import { useT } from './i18n/index.jsx'
 import { useBoard, usePaneActive } from './workspace.jsx'
 import { routeHash } from './route.js'
 import { newTabAnchor } from './tabs.js'
+import SyncBusinessDecision from './SyncBusinessDecision.jsx'
 import SyncOperationDiff from './SyncOperationDiff.jsx'
 
 function EvidenceRead({ operationId, reference, targetTree, label, request = false }) {
@@ -15,7 +16,7 @@ function EvidenceRead({ operationId, reference, targetTree, label, request = fal
     if (!open || !active) return undefined
     const controller = new AbortController()
     readSyncEvidence(operationId, reference.sha256, targetTree, controller.signal)
-      .then((value) => { if (!controller.signal.aborted) setHeld({ value: evidenceProjection(value), resultRef: value.resultRef }) })
+      .then((value) => { if (!controller.signal.aborted) setHeld({ value: evidenceProjection(value), resultRef: value.resultRef, originalRequestBlob: value.originalRequestBlob }) })
       .catch((error) => { if (!controller.signal.aborted) setHeld({ error: `${error.code}: ${error.message}` }) })
     return () => controller.abort()
   }, [open, active, operationId, reference.sha256, targetTree])
@@ -23,8 +24,7 @@ function EvidenceRead({ operationId, reference, targetTree, label, request = fal
     <h3>{label}</h3>
     <p className="sync-op-note">{t('syncOperation.requestNote')}</p>
     {held?.error ? <p role="alert">{held.error}</p> : !held ? <p>{t('common.loading')}</p> : <>
-      <p>{held.value.origin.intent}</p>
-      <SyncOperationDiff operationId={operationId} files={[{ path: held.value.path }]} targetTree={targetTree} kind="request" />
+      {held.value.type === 'sync.decision' ? <><p>{t(`syncOperation.decision.${held.value.decision.choice}`)}</p>{held.value.decision.rule && <p>{held.value.decision.rule}</p>}<p>{held.value.findingIds.join(', ')}</p><code>{held.value.operationId}</code>{held.originalRequestBlob && <EvidenceRead operationId={operationId} reference={held.originalRequestBlob} targetTree={targetTree} label={t('syncOperation.originalRequest')} request />}</> : <><p>{held.value.origin.intent}</p><SyncOperationDiff operationId={operationId} files={[{ path: held.value.path }]} targetTree={targetTree} kind="request" /></>}
     </>}
   </div>
   return <details className="sync-op-evidence" onToggle={(event) => setOpen(event.currentTarget.open)}>
@@ -89,6 +89,7 @@ export default function SyncOperationPanel({ nodeId, nodePath, targetTree = null
   const [error, setError] = useState(null)
   const [busy, setBusy] = useState(null)
   const [refresh, setRefresh] = useState(0)
+  const [selectedOperationId, setSelectedOperationId] = useState(null)
   const busyRef = useRef(false)
   const runRequest = useRef(null)
   const identity = `${targetTree || ''}/${nodeId}`
@@ -115,7 +116,7 @@ export default function SyncOperationPanel({ nodeId, nodePath, targetTree = null
   const current = held?.identity === identity ? held.value : null
   const currentError = error?.identity === identity ? error : null
   const recent = current?.operations[0]
-  const detail = submittedOperation && (!recent || submittedOperation.createdAtMs > recent.operation.createdAtMs) ? { operation: submittedOperation, attempt: null, journals: [], resources: [], retryEligibility: { eligible: false }, stale: false, sourceSynced: false, executionAvailability: { status: 'ready' } } : recent || null
+  const detail = submittedOperation && (!recent || submittedOperation.createdAtMs > recent.operation.createdAtMs) ? { operation: submittedOperation, attempt: null, journals: [], resources: [], retryEligibility: { eligible: false }, stale: false, sourceSynced: false, executionAvailability: { status: 'ready' } } : current?.operations.find(item => item.operation.id === selectedOperationId) || recent || null
   const settings = current?.settings
   const model = detail && syncProjection(detail, settings?.activation)
   const retryPhase = detail && ['failed', 'budget_exhausted', 'cancelled'].includes(detail.operation.phase)
@@ -125,9 +126,9 @@ export default function SyncOperationPanel({ nodeId, nodePath, targetTree = null
     busyRef.current = true; setBusy(action); setError(null)
     try {
       if (action === 'enable') await enableSync(settings.configDigest, targetTree)
-      else if (action === 'run') {
-        runRequest.current = requestIdentity(runRequest.current, { nodeId, targetTree, contentRevision, configDigest: settings.configDigest, staleOf: detail?.stale ? detail.operation.id : null, retryOf })
-        const result = await runSync(nodeId, runRequest.current.id, targetTree, retryOf ? { retryOf, origin: detail.operation.origin } : undefined)
+      else if (action === 'run' || action === 'code') {
+        runRequest.current = requestIdentity(runRequest.current, { nodeId, targetTree, contentRevision, configDigest: settings.configDigest, staleOf: detail?.stale ? detail.operation.id : null, retryOf: action === 'run' ? retryOf : null, origin: action === 'code' ? 'code' : 'initial' })
+        const result = await runSync(nodeId, runRequest.current.id, targetTree, action === 'code' ? { origin: 'code' } : retryOf ? { retryOf, origin: detail.operation.origin } : undefined)
         if (result.operation) setHeld({ identity, value: { settings, operations: [{ operation: result.operation, attempt: null, journals: [], resources: [], retryEligibility: { eligible: false }, stale: false, sourceSynced: false, executionAvailability: { status: 'ready' } }] } })
       } else {
         const value = await controlSync(detail.operation.id, action, targetTree)
@@ -145,6 +146,7 @@ export default function SyncOperationPanel({ nodeId, nodePath, targetTree = null
       <div className="sync-op-actions">
         {settings?.configuration && !settings.enabled && !targetTree && <button type="button" disabled={!!busy} onClick={() => perform('enable')}>{t('syncOperation.enable')}</button>}
         {settings?.enabled && !targetTree && <button type="button" disabled={!!busy || (model && (retryPhase && !detail.stale ? !model.canRetry : !['idle', 'stale', 'source_synced', 'workspace_synced', 'superseded'].includes(model.state)))} onClick={() => perform('run')}>{t(retryPhase && !detail.stale ? 'syncOperation.retryRun' : 'syncOperation.run')}</button>}
+        {settings?.enabled && !targetTree && <button type="button" disabled={!!busy || (model && !['idle', 'stale', 'source_synced', 'workspace_synced', 'superseded'].includes(model.state))} onClick={() => perform('code')}>{t('syncOperation.runCode')}</button>}
         {!targetTree && model?.canPause && <button type="button" disabled={!!busy} onClick={() => perform('pause')}>{t('syncOperation.pause')}</button>}
         {!targetTree && model?.canResume && <button type="button" disabled={!!busy} onClick={() => perform('resume')}>{t('syncOperation.resume')}</button>}
         {!targetTree && model?.canCancel && <button type="button" disabled={!!busy} onClick={() => perform('cancel')}>{t('syncOperation.cancel')}</button>}
@@ -156,8 +158,10 @@ export default function SyncOperationPanel({ nodeId, nodePath, targetTree = null
     {!targetTree && settings?.configurationError && <p className="sync-op-error" role="alert"><code>{settings.configurationError.code}</code> · {settings.configurationError.message}</p>}
     {!targetTree && settings && !settings.configuration && <p className="sync-op-note">{t('syncOperation.configure')}</p>}
     {!targetTree && settings && <p className="sync-op-note">{t('syncOperation.currentCapabilities')}</p>}
+    {current?.operations.length > 1 && <label className="sync-op-history">{t('syncOperation.history')} <select disabled={!!busy} value={detail.operation.id} onChange={event => setSelectedOperationId(event.target.value)}>{current.operations.map(item => <option key={item.operation.id} value={item.operation.id}>{item.operation.origin} · {t(`syncOperation.phase.${item.operation.phase}`)} · {item.operation.id}</option>)}</select></label>}
     {model?.failure && <p className="sync-op-error" role="alert"><code>{model.failure.code}</code> · {model.failure.message}</p>}
     {retryPhase && !detail.stale && detail.retryEligibility?.reason && <p className="sync-op-note"><code>{detail.retryEligibility.reason.code}</code> · {detail.retryEligibility.reason.message}</p>}
+    {detail?.decisionContext && <SyncBusinessDecision key={detail.operation.id} detail={detail} targetTree={targetTree} disabled={!!busy || !!targetTree || detail.stale || model?.state === 'recovery_required' || !settings?.enabled} onSubmitted={() => setRefresh(value => value + 1)} />}
     {detail && <OperationEvidence key={detail.operation.id} detail={detail} model={model} nodeId={nodeId} nodePath={nodePath} targetTree={targetTree} />}
   </section>
 }

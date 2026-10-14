@@ -57,6 +57,14 @@ test('AC-SYNC-CLI-02 CLI run/status/control 走相同持久服务HTTP且保留�
     const recover = await cli(['sync', 'recover', 'op-1', '--api', api])
     assert.equal(recover.code, 0, recover.stderr); assert.equal(requests[5].url, '/api/sync/operations/op-1/recover')
     assert.deepEqual(requests[5].body, { targetTree: workspace.replace(/\/$/, '') })
+    const codeInput = await cli(['sync', 'run', 'demo', '--origin', 'code', '--request-id', 'code-1', '--api', api])
+    assert.equal(codeInput.code, 0, codeInput.stderr)
+    assert.deepEqual(requests[6].body, { targetTree: workspace.replace(/\/$/, ''), nodeId: 'demo', requestId: 'code-1', origin: 'code' })
+    const decision = await cli(['sync', 'decide', 'op-1', '--input-id', 'input-1', '--analysis', 'a'.repeat(64), '--findings', 'finding-1,finding-2', '--choice', 'new_rule', '--rule', '新的明确规则', '--request-id', 'decision-1', '--api', api])
+    assert.equal(decision.code, 0, decision.stderr)
+    assert.equal(requests[7].url, '/api/sync/operations/op-1/decide')
+    assert.deepEqual(requests[7].body, { targetTree: workspace.replace(/\/$/, ''), requestId: 'decision-1', inputId: 'input-1', analysisRef: { sha256: 'a'.repeat(64) }, findingIds: ['finding-1', 'finding-2'], decision: { choice: 'new_rule', rule: '新的明确规则' } })
+
   } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())) }
 })
 test('AC-SYNC-CLI-03 后端离线不回退mock或留下虚假成功输出', async () => {

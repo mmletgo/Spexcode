@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { controlSync, enableSync, evidenceProjection, readSyncStatus, readSyncDiff, requestIdentity, runSync, syncProjection } from './syncApplication.js'
+import { decideSync, controlSync, enableSync, evidenceProjection, readSyncStatus, readSyncDiff, requestIdentity, runSync, syncProjection } from './syncApplication.js'
 import { apiFetch, postSpecBody } from './data.js'
 
 /** @type {import('../../spec-cli/src/sync/operation-types.ts').WorktreeIdentity} */
@@ -239,4 +239,29 @@ test('an invalidated activation cannot reuse an old settled receipt as current s
   assert.equal(view.complete, false)
   assert.equal(view.state, 'invalidated')
   assert.equal(view.deliveryRoot, '/repo/published')
+})
+
+
+test('business decision transport binds original input, analysis and selected findings without retry or body edits', async () => {
+  const originalFetch = globalThis.fetch
+  const requests = []
+  globalThis.fetch = async (url, init) => {
+    requests.push({ url: new URL(url, 'http://test'), body: JSON.parse(init.body) })
+    return new Response(JSON.stringify({ changed: true, operation }), { status: 200 })
+  }
+  try {
+    const input = { requestId: 'stable-decision', inputId: 'original-input', analysisRef: { sha256: 'a'.repeat(64) }, findingIds: ['conflict-1'], decision: { choice: 'keep_intent' } }
+    await decideSync('original operation', input, '/source')
+    await decideSync('original operation', input, '/source')
+    assert.equal(requests[0].url.pathname, '/api/sync/operations/original%20operation/decide')
+    assert.equal(requests[0].url.searchParams.get('targetTree'), '/source')
+    assert.deepEqual(requests[0].body, input)
+    assert.deepEqual(requests[0].body, requests[1].body)
+    assert.equal('retryOf' in requests[0].body, false)
+    assert.equal('patch' in requests[0].body, false)
+    const projected = evidenceProjection({ type: 'sync.decision', decision: { choice: 'new_rule', rule: '明确新规则' }, findingIds: ['conflict-1'], operationId: 'original', prompt: 'private' })
+    assert.equal(projected.decision.rule, '明确新规则')
+    assert.deepEqual(projected.findingIds, ['conflict-1'])
+    assert.equal('prompt' in projected, false)
+  } finally { globalThis.fetch = originalFetch }
 })

@@ -32,3 +32,6 @@ status 定时读取与用户保存refreshKey驱动刷新，不依赖全局graph-
 当前input未变化时，failed/budget_exhausted/cancelled的重试是用户显式动作，必须由实际Detail.retryEligibility.eligible开放并展示不开放的reason，不能凭phase猜门禁：用新requestId与retryOf关联旧操作并保原origin，不传新patch，由应用保留旧requestBlob的未落地正文意图且核资源/回执已结算。needs_input/conflicted不能无新事实随机重跑；stale时按最新来源普通同步，不带retryOf。恢复诊断不能生成重试预算。
 
 存在requestBlob时直接在功能上下文展示授权证据中的用户origin.intent，来源正文仍来自原文件。请求实际path的完整正文diff可展开，始终明确这是提交的用户请求、交付结果以receipt为准；不能用候选生成与否限制请求阅读，也不能把用户需求埋在摘要hash或代理prompt中。
+
+
+P3手动“接入代码修改”提交code来源，正常“立即同步”保initial语义；后台外部watcher尚未启用。可信decisionContext由 [[sync-business-decision]] 展示三种业务裁决，无分歧不加确认。操作记录可切换历史原operation查原analysis和请求；裁决请求展示选择、所选finding IDs、用户新rule、原operation与继承原正文diff。新operation可以supersede原冲突但不能丢原始需求链。

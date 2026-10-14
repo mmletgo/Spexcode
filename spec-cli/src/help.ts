@@ -432,7 +432,8 @@ consumes the token after it.`,
     body: `Usage: spex sync settings
        spex sync enable [--config-digest <sha256>]
        spex sync status [--node <node-id>] [--limit N] [--json]
-       spex sync run <node-id> [--request-id <id>] [--patch-file <json>] [--retry-of <operation-id>]
+       spex sync run <node-id> [--request-id <id>] [--patch-file <json>] [--retry-of <operation-id>] [--origin spec|initial|code|combined]
+       spex sync decide <operation-id> --input-id <id> --analysis <sha256> --findings <id,...> --choice keep_intent|adopt_behavior|new_rule [--rule <text>] [--request-id <id>]
        spex sync show <operation-id>
        spex sync pause|resume|cancel|recover <operation-id>
 
@@ -448,7 +449,9 @@ resume 继续原操作，--retry-of 建立关联新操作；三个入口各自�
 --retry-of 显式重试可重试的失败操作，保留原正文意图并关联旧结果；不能同时传 --patch-file。
 只有显式重试建立新操作和新预算，普通重复请求继续归并。未结算资源或已变输入拒绝重试。
 show/status 展示真实失败、GAP、过期和交付工作树；workspace_synced 不代表原输入树已落地。
-本阶段尚未启用外部文件自动监听或代码反向同步。所有命令输出 JSON。
+手动 --origin code|combined 接入外部代码变更并分析业务冲突；来源不构成采用新业务的授权。
+decide 绑定 show 中的原输入、可信分析及具体 finding IDs；保持需求、采用行为或新规则进入新关联操作。
+本阶段尚未启用外部文件自动监听。所有命令输出 JSON。
 配置示例：spex guide sync。\n\n${ROUTING_NOTE}`,
   },
   spec: {

@@ -798,7 +798,13 @@ show/status 的 retryEligibility 给出能否显式重试及具体拒绝原因�
 关联的新操作和新预算，继承原正文保存意图及来源；不能同时 --patch-file。普通重复请求不重置预算，
 同重试请求幂等。输入或配置已变时发起当前输入的新请求；未结算资源、GAP或冲突不能用重试绕过。
 workspace_synced 是交付工作树结果，原输入树待落地单独展示。新输入使旧结果过期，恢复只能用当前输入。
-本阶段尚未提供外部 watcher 或代码反向同步，不能据 enable 宣称双向持续已完成。
+手动外部代码接入：spex sync run <node-id> --origin code（正文与代码同时改用 combined）。
+系统按最近共同基线分析业务行为，来源类型本身不授权改变业务规则。正常无冲突无需新确认。
+show 的 decisionContext 展示原意、双方行为、规则/路径、反例、具体 finding IDs 与可信 analysisRef。
+真实业务冲突使用 spex sync decide <operation-id> --input-id <原input> --analysis <sha256>
+--findings <id,...> --choice keep_intent|adopt_behavior|new_rule [--rule <用户新规则>] --request-id <稳定键>。
+只裁决选中项，旧原意与分析可追踪，其它GAP仅阻依赖；不通过 retryOf 伪造授权。
+本阶段尚未提供外部 watcher，不能据 enable 宣称后台外部文件监听已完成。
 
 see also: spex help sync`
 

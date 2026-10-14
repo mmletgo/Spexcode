@@ -1,5 +1,9 @@
 export default {
   syncOperation: {
+    runCode: '接入代码修改',
+    originalRequest: '原请求正文',
+    history: '操作记录',
+    decision: {"title": "业务分歧裁决", "note": "只裁决所选分歧；其它缺口继续按各自依赖范围阻塞。", "baseline": "共同基线", "noBaseline": "无共同基线", "coverage_gap": "未覆盖的业务行为", "conflict": "业务冲突", "intent": "原始需求", "source": "来源代码行为", "delivery": "已交付行为", "affected": "受影响规则与路径", "counterexample": "反例", "evidence": "分析证据", "question": "需要明确的业务事实", "keep_intent": "保持需求并修代码", "adopt_behavior": "采用新行为并更新需求", "new_rule": "输入新规则", "rule": "适用于所选分歧的新业务规则", "submitRule": "提交新规则"},
     requestTitle: '本次提交的需求',
     requestNote: '这是本次提交的用户原意，交付进度见上方操作状态。',
     requestDiff: '请求正文差异',
@@ -23,7 +27,7 @@ export default {
     "cancel": "取消操作",
     "retry": "重新读取",
     "configure": "请先在项目中登记同步配置的读写范围、预算和验证方案；配置就绪后可在这里启用。",
-    "currentCapabilities": "当前支持 Spec 保存与手动同步；外部代码变更尚未自动接入。",
+    "currentCapabilities": "当前支持 Spec 保存、手动接入代码变更与业务裁决；外部代码变更尚未自动监听。",
     "source": "来源工作树",
     "viewedTree": "当前查看的工作树",
     "sourceBranch": "来源分支",

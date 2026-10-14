@@ -22,6 +22,7 @@ const post = (body) => ({ method: 'POST', headers: { 'Content-Type': 'applicatio
 export const readSyncStatus = (nodeId, targetTree = null, signal) => syncRead(`status?${new URLSearchParams({ nodeId, limit: '8' })}`, targetTree, { signal, cache: 'no-store' })
 export const enableSync = (configDigest, targetTree = null) => syncRead('settings', targetTree, post({ expectedConfigDigest: configDigest }))
 export const runSync = (nodeId, requestId, targetTree = null, options = {}) => syncRead('run', targetTree, post({ nodeId, requestId, origin: options.origin || 'initial', ...(options.retryOf ? { retryOf: options.retryOf } : {}) }))
+export const decideSync = (id, input, targetTree = null) => syncRead(`operations/${encodeURIComponent(id)}/decide`, targetTree, post(input))
 export const controlSync = (id, action, targetTree = null) => syncRead(`operations/${encodeURIComponent(id)}/${action}`, targetTree, post({}))
 export const readSyncDiff = (id, path, kind, targetTree = null, signal) => syncRead(`operations/${encodeURIComponent(id)}/diff?${new URLSearchParams({ path, kind })}`, targetTree, { signal })
 export const readSyncEvidence = (id, hash, targetTree = null, signal) => syncRead(`operations/${encodeURIComponent(id)}/evidence/${encodeURIComponent(hash)}`, targetTree, { signal })
@@ -65,9 +66,10 @@ export function evidenceProjection(value) {
   }
   for (const key of ['gaps', 'findings', 'blockedStructureFindings', 'deferredImplementationFindings']) {
     if (Array.isArray(value[key])) result[key] = value[key].map((item) => Object.fromEntries(
-      ['id', 'kind', 'code', 'message', 'unknown', 'evidence', 'decision', 'affectedIds', 'nodeIds'].filter((field) => item[field] != null).map((field) => [field, item[field]])))
+      ['id', 'kind', 'code', 'message', 'unknown', 'evidence', 'decision', 'affectedIds', 'nodeIds', 'paths', 'originalIntent', 'sourceBehavior', 'deliveryBehavior', 'counterexample'].filter((field) => item[field] != null).map((field) => [field, item[field]])))
   }
   if (value.plan) result.plan = Object.fromEntries(['readPaths', 'writePaths', 'intentNodeId'].filter((field) => value.plan[field] != null).map((field) => [field, value.plan[field]]))
+  if (value.type === 'sync.decision') { result.type = value.type; result.decision = value.decision; result.findingIds = value.findingIds; result.operationId = value.operationId }
   if (value.origin) result.origin = { kind: value.origin.kind, nodeId: value.origin.nodeId, intent: value.origin.intent }
   if (value.path) result.path = value.path
   if (value.failure) result.failure = { code: value.failure.code, message: value.failure.message }

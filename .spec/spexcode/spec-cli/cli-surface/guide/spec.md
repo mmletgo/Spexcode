@@ -17,7 +17,7 @@ related:
 `spex guide sync` documents the P2 shared [[sync-application]] workflow and versioned
 sync-settings-v1 configuration: directory authorization, exact Docker Node verification registrations,
 protected tests, business facts and budgets. Image placeholders require an actually prepared frozen
-image; the page does not promise external watching or code-driven writeback.
+image; the page does not promise external watching.
 The workflow teaches explicit `--retry-of`, preserved original body intent and origin,
 read-only retryEligibility and refusal for changed input, unresolved resources or business GAP/conflict.
 An ordinary repeated input does not grant a fresh operation budget.
@@ -134,3 +134,6 @@ This node's stake in `cli.ts` is now a thin dispatch (`process.argv[3]` → `gui
 for the unknown-topic list so that list cannot drift from the registry); the content lives
 in `guide.ts`. `cli.ts` is the shared command hub every verb routes through, so a sibling verb's churn
 there is that feature's, not `guide`'s drift.
+
+
+P3 sync guide additionally documents manual code/combined ingestion and bound business decisions via [[sync-cli]]. It explains trusted analysis/finding references and keep/adopt/new-rule choices; ordinary completion needs no extra confirmation, retry does not authorize business changes, and external watcher is still unavailable.

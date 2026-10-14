@@ -22,3 +22,6 @@ related:
 显式终态重试保旧操作origin/retryOf且不携新patch；来源变化后的普通请求不携retryOf。
 
 恢复资格须有真实待结算副作用，recover请求不发新预算；请求证据可读用户原意，request diff保实际kind/path，未交付不能画成功。
+
+
+裁决客户端验证原operation/input/analysis/selected findings和稳定请求正文完整透传，与retry/patch明确分离；证据投影保新规则并排除prompt。
