@@ -48,6 +48,8 @@ const physicalStat = (path: string): string => {
   const stat = lstatSync(path, { bigint: true })
   return `${stat.dev}:${stat.ino}:${stat.birthtimeNs}`
 }
+/** 已授权路径可在 HEAD 不可读前核对物理替换，不为缺失来源伪造快照。 */
+export const readPhysicalFingerprint = (canonicalRoot: string, gitDir: string): string => contentHash(`${physicalStat(canonicalRoot)}:${physicalStat(gitDir)}`)
 const registeredWorktreeRoots = (root: string): string[] => sourceGit(root, ['worktree', 'list', '--porcelain', '-z']).toString().split('\0').filter(line => line.startsWith('worktree ')).map(line => resolve(line.slice(9)))
 export function identifyWorktree(root: string): WorktreeIdentity {
   const canonicalRoot = realpathSync(root)
@@ -57,7 +59,7 @@ export function identifyWorktree(root: string): WorktreeIdentity {
   const registered = registeredWorktreeRoots(canonicalRoot)
   if (!registered.includes(canonicalRoot)) throw new Error('输入不是 registered worktree')
   const branch = sourceGit(canonicalRoot, ['rev-parse', '--symbolic-full-name', 'HEAD']).toString().trim()
-  return { repositoryId: contentHash(`${commonDir}:${physicalStat(commonDir)}`), commonDir, canonicalRoot, gitDir, branch, physicalFingerprint: contentHash(`${physicalStat(canonicalRoot)}:${physicalStat(gitDir)}`) }
+  return { repositoryId: contentHash(`${commonDir}:${physicalStat(commonDir)}`), commonDir, canonicalRoot, gitDir, branch, physicalFingerprint: readPhysicalFingerprint(canonicalRoot, gitDir) }
 }
 export function readTree(commonDir: string, tree: string): TreeEntry[] {
   if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(tree)) throw new Error('tree 必须为不可变 Git OID')

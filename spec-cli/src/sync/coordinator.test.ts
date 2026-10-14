@@ -14,7 +14,7 @@ import { elaborate } from './elaboration.js'
 import type { ElaborationResult, ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
 import { buildSyncApplicationPlan } from './planning.js'
 import { SyncApplication } from './application.js'
-import { prepareSyncAdmission, runSyncOperation, syncPlanDigest } from './coordinator.js'
+import { isSyncInputCurrent, prepareSyncAdmission, runSyncOperation, syncPlanDigest } from './coordinator.js'
 import type { SyncCoordinatorOptions, SyncCoordinatorPlan } from './coordinator-types.js'
 import { migrateSyncStore, SYNC_COMPONENT, SYNC_MIGRATIONS, syncCoordinatorAddress } from './migrations.js'
 import { dockerVerificationDriver } from './verification-executor.js'
@@ -151,6 +151,25 @@ test('P4精确接入使用同一快照并区分读取基线与实际写入范围
   assert.equal(admission.scope.paths.includes('tests/export.test.mjs'), false)
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
   assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+})
+
+test('P4当前输入只比较实际闭包，保留无关编辑与提交并拒绝相关index变化', async t => {
+  const f = await fixture(t)
+  const plan = { ...f.plan, readPaths: [contractPath, 'src/export.js', 'tests/export.test.mjs', '.spec/spexcode.json'], executionScope: { paths: [contractPath, 'src/export.js'], contractIds: [], flowIds: [] } }
+  const result = f.store.readBaselineSelection(f.input.source, plan.readPaths.map(path => ({ kind: 'path', path })))
+  assert.ok('selection' in result)
+  const operation = f.store.admitAndEnqueue(await prepareSyncAdmission(f.input, plan, { ingressKey: 'current-closure', rootCauseId: 'current-closure', origin: 'spec', budget: f.operation.budget, managedRoot: f.managedRoot, baselineSelection: result.selection }))
+  writeFileSync(join(f.root, 'notes.txt'), '作者的独立说明\n')
+  f.git('add', 'notes.txt'); f.git('commit', '--only', 'notes.txt', '-m', 'unrelated author commit')
+  const current = await captureInputSnapshot(f.root), index = readFileSync(join(f.root, '.git/index'))
+  assert.notEqual(current.id, operation.input.id)
+  assert.equal(await isSyncInputCurrent(operation, current, plan), true)
+  assert.equal(await isSyncInputCurrent(f.operation, current, f.plan), false)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), index)
+  f.git('add', 'src/export.js')
+  const staged = await captureInputSnapshot(f.root)
+  assert.equal(staged.immutableTree, current.immutableTree)
+  assert.equal(await isSyncInputCurrent(operation, staged, plan), false)
 })
 
 test('kernel mutex阻止同operation双编排，尚无native派发', async t => {
@@ -1155,6 +1174,7 @@ test('已解决诊断GAP经真实SQLite派发与Git receipt累计退役，重启
   activeOperation = activeStore.admitAndEnqueue(await prepareSyncAdmission(nextInput, reusePlan, { ingressKey: 'gap-reuse-after-restart', rootCauseId: 'gap-reuse-after-restart', origin: 'code', previousBaselinePair: settled, budget: f.operation.budget, managedRoot: f.managedRoot })); f.useOperation(activeOperation)
   const refused = await runSyncOperation(activeStore, activeOperation.id, { ...f.options, plan: reusePlan, readCurrentPlan: () => reusePlan })
   assert.equal(refused.receipt, undefined); assert.equal(activeStore.listJournals(activeOperation.id).length, 0)
+  assert.ok(refused.operation.currentAttemptId, JSON.stringify({ refused, dispatch: activeStore.nextDispatch(f.input.source.repositoryId), attempts: activeStore.listAttempts(activeOperation.id) }))
   const lastAttempt = activeStore.readAttempt(refused.operation.currentAttemptId!), lastStages = lastAttempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
   const refusal = JSON.parse(readEvidence(f.input.source.commonDir, lastStages.find(value => value.stage === 'elaboration').resultRef).toString())
   assert.ok(refusal.rounds.flatMap((round: { findings: { code: string; itemId?: string }[] }) => round.findings).some((issue: { code: string; itemId?: string }) => issue.code === 'retired_id_reused' && issue.itemId === gapId))
