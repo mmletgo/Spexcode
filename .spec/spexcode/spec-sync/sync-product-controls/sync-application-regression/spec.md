@@ -31,3 +31,7 @@ AC-APPLICATION-01 验证配置缺口、enable 摘要 CAS 与配置字节保留�
 21 注入内容可寻址但 native 身份不匹配的固定恢复计划，验证 coordinator 的具体 resource_recovery 以可见 409 返回，原业务 operation/attempt/预算及未释放资源保留，不只打印日志。
 
 故障 runner 为测试接缝，不算真实模型产品验收。完整真实 Agent/Docker 落地仍按 [[spec-sync]] 分阶段验收。
+
+22 先复现同受控 patch 仅换 requestId 导致两次模型调用和新预算；修复验证同一 failed operation/deadline/calls、B 再次重放、不同 patch/意图分离、同 key 冲突、显式 retry 原 requestBlob；实际 source/index/HEAD 不改。
+
+23 以正式 v6 schema 及保留原请求/payload/预算的历史受理记录重开真实应用，再提交相同 patch 的新 requestId 和 alias 重放；仍只一个操作、零新增模型调用。

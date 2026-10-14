@@ -72,7 +72,12 @@ CREATE INDEX sync_operations_semantic ON sync_operations(semantic_digest);`, aft
     const operation = JSON.parse(String(row.record_json)) as SyncOperation
     tx.exec('UPDATE sync_operations SET semantic_digest=? WHERE id=?', syncSemanticDigest(operation), operation.id)
   }
-} } }]
+} } }, { version: 7, sql: `ALTER TABLE sync_operations ADD COLUMN normalized_semantic_digest TEXT;
+CREATE INDEX sync_operations_normalized_semantic ON sync_operations(normalized_semantic_digest);
+CREATE TABLE sync_ingress_receipts (
+ ingress_key TEXT PRIMARY KEY, operation_id TEXT NOT NULL REFERENCES sync_operations(id),
+ payload_digest TEXT NOT NULL, record_json TEXT NOT NULL CHECK(json_valid(record_json))
+) STRICT;` }]
 
 /** 升级前以 SQLite online backup 保存一致性旧库；迁移本身由组件事务执行。 */
 export async function migrateSyncStore(protocol: SessionProtocol, options: { backupPath?: string } = {}): Promise<number> {

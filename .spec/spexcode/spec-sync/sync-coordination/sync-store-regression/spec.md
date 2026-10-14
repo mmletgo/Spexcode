@@ -14,7 +14,7 @@ code:
 
 ## expanded spec
 
-受控用户请求回归证明：同一实际来源快照上的不同 requestBlob 不被错误归并；同键改变请求拒绝，原来源字节不改，请求证据被 GC pin 保留。真实 v2 数据库备份升级至 v3 后，无额外请求的旧事件仍命中相同 operation/payload，备份保留 v2 与原消息。
+受控用户请求回归证明：同一实际来源快照上的不同用户编辑语义不被错误归并，仅来源requestId不同则归并原预算；同键改变请求拒绝，原来源字节不改，请求证据被 GC pin 保留。真实 v2 数据库备份升级至 v3 后，无额外请求的旧事件仍命中相同 operation/payload，备份保留 v2 与原消息。
 
 覆盖 [[sync-store]] 与 [[sync-migrations]] 的数据库边界：重复输入/capture时间回放只一operation一message；同key不同payload拒绝；claim与exact FIFO dequeue及所有租约同事务；共享path/规则冲突、独立范围并行、释放后generation不归零；独立原生dispatch预算及稳定创建键；过期fence、物理树重建失权；actual diff和V1至V4绑定门禁；取消前无journal、写入中待receipt结算、取消后保留receipt；receipt登记后重启幂等结算；partial保留needs_input；成对源/交付基线；GC pin；旧库online backup可恢复、失败DDL事务回滚、未知高版本拒写。
 
@@ -55,3 +55,5 @@ attempt查询仅返回精确operation、包含历史及终态attempt并按插入
 v5真实SQLite证明同ingress不同origin拒、同input不同origin不归并、已有legacy摘要同origin可重放且不改原payload。两个仓库真实protocol地址独立，同仓库不同worktree有效头不可越过；v4旧global FIFO迁移保序且旧消息留审计，失败回滚并可重启。
 
 先复现failed/budget相同input自动去重无法显式新run；真实SQLite验证retryOf新operation/新budget及链接，自动旧事件仍去重原op，同retry ingress幂等，跨身份/request/policy拒，历史非removed资源/未知journal/liveauthority拒。cancelled无receipt可重开，有真实receipt拒；v5→v6 backup可恢复、旧writer拒写。
+
+真实受控请求覆盖同 patch 不同 requestId 归原操作/预算、alias 精确重放及同 key 改 payload 拒绝；不同 patch/用户意图分离，显式 retry 继承原 requestBlob 才建立新预算。真实 v6 库重开惰性归一化保持旧 payload、记录和队列，缺当前来源证据拒接，已移除其它仓库不被读取。v6→v7备份可恢复、失败事务回滚、重启及旧 writer 拒写。

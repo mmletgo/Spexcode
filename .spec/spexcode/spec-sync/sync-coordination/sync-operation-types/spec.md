@@ -41,3 +41,5 @@ adopter control envelope 仅派发协调身份，不作为普通 Agent 文本。
 ComposedInputRef 可携 authorProjectionBlob，记录 [[sync-author-input]] 对真实快照的 canonical clean 投影证据。它是派生输入的来源证据，不能替换 sourceInputId 或原始 source/index 身份。
 
 operation及admission可带retryOf，明确关联用户主动重开失败/预算耗尽或未曾交付的取消操作。它是新运行授权来源，参与payload身份，不能更换旧冻结input/request/policy/origin/source；自动事件不带此字段，预算不重置。
+
+SyncIngressReceipt 只保存原接入的精确 payload 摘要、operation 引用、requestBlob 与预算/交付计划/旧基线小引用，用于 alias 重放审计，不替代唯一 operation 事实。

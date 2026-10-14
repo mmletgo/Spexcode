@@ -27,3 +27,5 @@ v4登记可信计划planBlob直接持久引用/GC保活的语义版本，仍仅�
 v5保持v1-v4迁移字节/checksum，新增origin摘要与按仓库protocol地址的语义版本。升级先online backup；旧global pending按真实FIFO逐个tx.dequeue再tx.enqueue到仓库地址并更新operation.dispatchMessageId，稳定迁移key幂等，旧消息保留审计。迁移不得直接更新protocol内部消息字段。版本marker与数据迁移必须同事务；中断全部回滚。旧writer拒写v5；已消费消息/native/attempt/journal身份保留。
 
 v6增加retryOf显式用户重试语义及semantic_digest索引，由checksummed callback从旧冻结record回填，不改v1-v5迁移字节/checksum。升级前online backup，旧记录无retryOf仍按旧精确摘要重放，旧writer拒写更高版本，禁止downmigration。
+
+v7新增规范请求语义索引和精确 ingress 接入收据，不改 v6 helper、checksum 或历史 payload/record。DDL 迁移不读取任何仓库 Git/blob；旧受控请求在当前来源接入边界惰性核验后填索引。升级仍 online backup、原子回滚、重启幂等和旧 writer 拒写；其它已移除仓库的证据缺失不阻数据库升级。

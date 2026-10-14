@@ -35,3 +35,5 @@ detail.resources 只列该操作尚未 removed 的真实历史资源；暂停、
 control(recover) 是独立于 resume/retry 的清理入口：保原 control、输入、预算和业务结果，不要求重新启用当前已经变化的配置；先等旧执行结算，再用原固定计划和工具调用 coordinator.recoveryOnly。它只核已有 native/verification 资源与已经开始的 journal，不创建 attempt、模型调用、验证或新 apply，也不自动唤醒其它 queued 任务。资料缺失或资源仍未知时保留具体恢复诊断，不假称释放；清理后另由明确 resume/retry 推进。conflicted 状态也必须按真实未结算资源投影 recovery_required。
 
 recover 等待本次协调清理结果：具体 failure 以原 code/message 的 409 返回，仍未知且无更细 failure 时返回 sync_resources_unsettled。不能仅打印服务器日志；查询详情仍从实际资源/journal保留恢复诊断，不写虚构业务失败或改原冲突结果。
+
+普通受控保存仅换 requestId 仍归同 operation/原预算；精确 alias 接入收据保其请求来源，B 归 A 后 B 重放沿 B 原接入的派生值和 requestBlob 核验，业务执行仍使用 A 冻结证据。改变同 key 正文或用户意图明确拒绝，只有 retryOf 授权新预算。

@@ -104,3 +104,5 @@ export type SyncResourceCheckpoint = {
   phase: SyncResourcePhase; expectedCheckpointRef: BlobRef; checkpointRef: BlobRef
 }
 export type RecoverableSyncResource = { operation: SyncOperation; attempt: SyncAttempt; resource: SyncResourceRecord }
+
+export type SyncIngressReceipt = Pick<AdmitSyncInput, 'requestBlob' | 'budget' | 'deliveryPlan' | 'previousBaselinePair'> & { operationId: string; payloadDigest: string }

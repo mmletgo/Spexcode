@@ -1,13 +1,15 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { spawn } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { execFileSync, spawn } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { applyComponentMigrations, openProtocol, type SqlParam } from '@spexcode/session-protocol'
 import { migrateSyncStore, SYNC_COMPONENT, SYNC_MIGRATIONS } from './migrations.js'
 import type { AdmitSyncInput, ApplyFilePlan, ApplyPlan, ApplyReceipt, BlobRef, CandidateRef, ClaimedAttempt, InputSnapshot, SyncScope, VerificationRef, VerificationResultBlob, WorktreeIdentity } from './operation-types.js'
+import { captureInputSnapshot, readEvidence } from './snapshot.js'
+import { prepareControlledRequest } from './request-input.js'
 import { SyncStore, SYNC_COORDINATOR_ADDRESS, syncCoordinatorAddress } from './store.js'
 
 const source = (name = 'source'): WorktreeIdentity => ({ repositoryId: 'repo', commonDir: '/repo/.git', canonicalRoot: `/repo/${name}`, gitDir: `/repo/.git/worktrees/${name}`, branch: name, physicalFingerprint: `${name}-inode-1` })
@@ -43,8 +45,21 @@ async function fixture() {
     const plan: ApplyPlan = { effectKey: `effect-${claimed.operation.id}`, payloadDigest: 'apply-digest', candidateDigest: candidate.digest, verificationBlob: verification.resultBlob, target: target.source, expectedTargetSnapshotId: target.id, expectedBaselinePairId: value.previousBaselinePair?.id ?? null, coveredScope: readyScope, files, planBlob: put({ files, candidateDigest: candidate.digest }) }
     return { ...claimed, target, candidate, verification, plan }
   }
+  const controlled = async (requestId = 'edit-A', replacement = '新的明确需求', intent = '保留原用户意图'): Promise<{ input: InputSnapshot; requestBlob: BlobRef }> => {
+    const sourceRoot = join(root, 'source'), path = '.spec/demo/spec.md', text = '---\ntitle: Demo\nstatus: pending\n---\n# 原始需求\n'
+    if (!existsSync(sourceRoot)) {
+      mkdirSync(join(sourceRoot, '.spec/demo'), { recursive: true }); writeFileSync(join(sourceRoot, path), text)
+      const git = (args: string[]): void => { execFileSync('git', ['-C', sourceRoot, ...args], { stdio: 'pipe' }) }
+      git(['init', '-q', '-b', 'main']); git(['config', 'user.name', 'Test']); git(['config', 'user.email', 'test@example.invalid']); git(['add', '.']); git(['commit', '-qm', 'fixture'])
+    }
+    const snapshot = await captureInputSnapshot(sourceRoot)
+    const prepared = prepareControlledRequest(snapshot, { path, source: text, next: text.replace('原始需求', replacement), changed: true, startLine: 1, endLine: 1 }, { kind: 'user_edit', requestId, nodeId: 'demo', intent })
+    assert.ok(prepared.changed)
+    for (const ref of [snapshot.manifestBlob, prepared.requestBlob]) blobs.set(ref.sha256, readEvidence(snapshot.source.commonDir, ref))
+    return { input: snapshot, requestBlob: prepared.requestBlob }
+  }
   const receipt = (journalId: string, plan: ApplyPlan): ApplyReceipt => ({ id: `receipt-${journalId}`, journalId, effectKey: plan.effectKey, actualTree: 'f'.repeat(40), actualCommit: '3'.repeat(40), deliverySnapshot: { ...input(store.readJournal(journalId).plan.target, `delivered-${journalId}`), immutableTree: 'f'.repeat(40), manifestBlob: store.readAttempt(store.readJournal(journalId).attemptId).candidate!.manifestBlob }, evidenceRefs: [put({ bytesChecked: true })], completedAtMs: time })
-  return { root, path, protocol, store, options, put, input, admit, claim, ready, receipt, tick: (ms: number) => { time += ms }, cleanup: () => { protocol.close(); rmSync(root, { recursive: true, force: true }) } }
+  return { root, path, protocol, store, options, put, input, admit, claim, ready, receipt, controlled, blobs, tick: (ms: number) => { time += ms }, cleanup: () => { protocol.close(); rmSync(root, { recursive: true, force: true }) } }
 }
 
 test('same stable admission and capture-time replay create one operation and protocol message; conflict rolls back', async () => {
@@ -86,13 +101,13 @@ test('operation lists include terminal records, isolate repository/root and use 
 test('controlled requests preserve source snapshots and take part in admission identity and blob pins', async () => {
   const f = await fixture()
   try {
-    const input = f.admit(), requestBlob = f.put({ kind: 'spec-edit', replacement: '新的明确原始需求' })
+    const request = await f.controlled(), input = { ...f.admit(request.input.source), input: request.input }, requestBlob = request.requestBlob
     const first = f.store.admitAndEnqueue({ ...input, requestBlob })
     assert.deepEqual(first.input, input.input)
     assert.deepEqual(first.requestBlob, requestBlob)
     assert.equal(f.store.admitAndEnqueue({ ...input, requestBlob }).id, first.id)
     assert.ok(f.store.pinnedBlobRefs().some(ref => ref.sha256 === requestBlob.sha256))
-    const changedRequest = f.put({ kind: 'spec-edit', replacement: '后续用户修改' })
+    const changedRequest = (await f.controlled('edit-B', '后续用户修改')).requestBlob
     assert.throws(() => f.store.admitAndEnqueue({ ...input, requestBlob: changedRequest }), /IDEMPOTENCY_CONFLICT/)
     const next = f.store.admitAndEnqueue({ ...input, ingressKey: 'next-request', requestBlob: changedRequest })
     assert.notEqual(next.id, first.id)
@@ -154,7 +169,7 @@ test('v2 upgrade preserves requestless dedup identity and backs up the old compo
       const rows = f.protocol.withTransaction(tx => tx.query(`SELECT * FROM ${table}`))
       legacy.withTransaction(tx => {
         for (const row of rows) {
-          const columns = Object.keys(row).filter(column => column !== 'enqueue_seq' && column !== 'semantic_digest')
+          const columns = Object.keys(row).filter(column => column !== 'enqueue_seq' && column !== 'semantic_digest' && column !== 'normalized_semantic_digest')
           tx.exec(`INSERT INTO ${table}(${columns.join(',')}) VALUES(${columns.map(() => '?').join(',')})`, ...columns.map(column => row[column]) as SqlParam[])
         }
       })
@@ -180,7 +195,7 @@ test('v3 upgrade backs up and preserves planless identity, v4 plans are hash-bou
     legacy.initialize(syncCoordinatorAddress('repo'))
     const input = f.admit(), old = f.store.admitAndEnqueue(input)
     for (const table of ['protocol_messages', 'sync_operations'] as const) for (const row of f.protocol.withTransaction(tx => tx.query(`SELECT * FROM ${table}`))) {
-      const columns = Object.keys(row).filter(column => column !== 'enqueue_seq' && column !== 'semantic_digest')
+      const columns = Object.keys(row).filter(column => column !== 'enqueue_seq' && column !== 'semantic_digest' && column !== 'normalized_semantic_digest')
       legacy.withTransaction(tx => tx.exec(`INSERT INTO ${table}(${columns.join(',')}) VALUES(${columns.map(() => '?').join(',')})`, ...columns.map(column => row[column]) as SqlParam[]))
     }
     assert.throws(() => new SyncStore(legacy, f.options), /SYNC_SCHEMA_UNSUPPORTED/)
@@ -709,7 +724,7 @@ test('v1 upgrade keeps active attempt and queue data, online backup restores v1,
       const rows = f.protocol.withTransaction(tx => tx.query(`SELECT * FROM ${table}`))
       legacy.withTransaction(tx => {
         for (const row of rows) {
-          const columns = Object.keys(row).filter(column => column !== 'enqueue_seq' && column !== 'semantic_digest')
+          const columns = Object.keys(row).filter(column => column !== 'enqueue_seq' && column !== 'semantic_digest' && column !== 'normalized_semantic_digest')
           tx.exec(`INSERT INTO ${table}(${columns.join(',')}) VALUES(${columns.map(() => '?').join(',')})`, ...columns.map(column => row[column]) as SqlParam[])
         }
       })
@@ -935,7 +950,7 @@ test('v4 to v5 routing is backed up and atomic, preserves old admission digests/
       const old = { ...current, payloadDigest: hash, dispatchMessageId: message.messageId }
       const row = f.protocol.withTransaction(tx => tx.query('SELECT * FROM sync_operations WHERE id=?', current.id))[0]
       row.payload_digest = hash; row.record_json = JSON.stringify(old)
-      const columns = Object.keys(row).filter(column => column !== 'semantic_digest')
+      const columns = Object.keys(row).filter(column => column !== 'semantic_digest' && column !== 'normalized_semantic_digest')
       legacy.withTransaction(tx => tx.exec(`INSERT INTO sync_operations(${columns.join(',')}) VALUES(${columns.map(() => '?').join(',')})`, ...columns.map(column => row[column]) as SqlParam[]))
       return old
     })
@@ -990,7 +1005,7 @@ test('explicit user retry receives a fresh operation and budget while automatic 
 test('retry gating uses historical resource settlement and immutable controlled request bytes', async () => {
   const f = await fixture()
   try {
-    const input = { ...f.admit(), requestBlob: f.put({ immutable: '尚未落地原用户编辑' }) }, claimed = f.claim(input), planned = f.put({ phase: 'planned' })
+    const request = await f.controlled(), input = { ...f.admit(request.input.source), ...request }, claimed = f.claim(input), planned = f.put({ phase: 'planned' })
     const resource = f.store.planResource(claimed.fence, { key: 'native-retry', kind: 'native_session', inputId: input.input.id, candidateDigest: null, payloadDigest: 'same-request', planBlob: planned, checkpointRef: planned })
     f.store.recordFailure(claimed.fence, { code: 'native_failed', kind: 'environment', message: '终态回执尚未完整持久', evidenceRefs: [] })
     const retry = { ...input, retryOf: claimed.operation.id, ingressKey: 'retry-native', rootCauseId: 'retry-native' }
@@ -1039,7 +1054,7 @@ test('v5 to v6 backs up the original marker and refuses older writers without re
     const message = previous.enqueue(syncCoordinatorAddress('repo'), { kind: 'sync.dispatch.v1', body: Buffer.from(JSON.stringify({ version: 1, type: 'sync.dispatch', operationId: admitted.id, inputId: admitted.input.id, generation: admitted.generation, dispatchKey: `sync-dispatch-${admitted.id}-${admitted.generation}` })), idempotencyKey: `sync-dispatch-${admitted.id}-${admitted.generation}` })
     const original = { ...admitted, dispatchMessageId: message.messageId }, row = f.protocol.withTransaction(tx => tx.query('SELECT * FROM sync_operations WHERE id=?', admitted.id))[0]
     row.record_json = JSON.stringify(original)
-    const columns = Object.keys(row).filter(column => column !== 'semantic_digest')
+    const columns = Object.keys(row).filter(column => column !== 'semantic_digest' && column !== 'normalized_semantic_digest')
     previous.withTransaction(tx => tx.exec(`INSERT INTO sync_operations(${columns.join(',')}) VALUES(${columns.map(() => '?').join(',')})`, ...columns.map(column => row[column]) as SqlParam[]))
     const migration = SYNC_MIGRATIONS[5]
     assert.throws(() => applyComponentMigrations(previous, SYNC_COMPONENT, [...SYNC_MIGRATIONS.slice(0, 5), { ...migration, afterApply: { key: migration.afterApply!.key, run(tx) { migration.afterApply!.run(tx); throw new Error('semantic-backfill-interrupted') } } }]), /semantic-backfill-interrupted/)
@@ -1047,7 +1062,7 @@ test('v5 to v6 backs up the original marker and refuses older writers without re
     assert.equal(previous.listPending(syncCoordinatorAddress('repo'))[0].messageId, message.messageId)
     const backupPath = join(f.root, 'v5-backup.sqlite')
     assert.throws(() => new SyncStore(previous, f.options), /SYNC_SCHEMA_UNSUPPORTED/)
-    assert.equal(await migrateSyncStore(previous, { backupPath }), 6)
+    assert.equal(await migrateSyncStore(previous, { backupPath }), SYNC_MIGRATIONS.length)
     assert.throws(() => applyComponentMigrations(previous, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 5)), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
     backup = openProtocol(backupPath)
     assert.equal(backup.withTransaction(tx => tx.query('SELECT MAX(version) AS version FROM schema_migrations WHERE component=?', SYNC_COMPONENT))[0].version, 5)
@@ -1056,6 +1071,80 @@ test('v5 to v6 backs up the original marker and refuses older writers without re
     assert.deepEqual(upgraded.readOperation(original.id), original)
     assert.equal(upgraded.admitAndEnqueue({ ...input, ingressKey: 'new-auto-allocation', budget: { ...input.budget, maxCalls: 99 }, readSetDigest: 'advanced-composed-readset', impactDigest: 'advanced-baseline-impact', deliveryPlan: { ...input.deliveryPlan, canonicalRoot: '/repo/new-auto-allocation', branch: 'new-auto-allocation' } }).id, original.id)
     assert.equal(upgraded.readOperation(original.id).payloadDigest, original.payloadDigest)
-    assert.equal(await migrateSyncStore(previous), 6)
+    assert.equal(await migrateSyncStore(previous), SYNC_MIGRATIONS.length)
   } finally { backup?.close(); previous.close(); f.cleanup() }
+})
+
+test('canonical controlled intent retains one operation and budget with exact per-ingress receipts and pinned provenance', async () => {
+  const f = await fixture()
+  try {
+    const a = await f.controlled('ordinary-A'), b = await f.controlled('ordinary-B')
+    const admission = { ...f.admit(a.input.source), ...a, ingressKey: 'ordinary-A' }, claimed = f.claim(admission)
+    f.store.reserveDispatch(claimed.fence, { key: 'model-1', purpose: 'elaborate', requestDigest: 'request' })
+    f.store.recordFailure(claimed.fence, { code: 'unsupported', kind: 'environment', message: '已结束失败', evidenceRefs: [] })
+    const original = f.store.readOperation(claimed.operation.id)
+    f.tick(1000)
+    const alias = { ...admission, ...b, ingressKey: 'ordinary-B', rootCauseId: 'ordinary-B', budget: { ...admission.budget, maxCalls: 99 }, deliveryPlan: { ...admission.deliveryPlan, canonicalRoot: '/repo/alias-B', branch: 'alias-B' } }
+    assert.equal(f.store.admitAndEnqueue(alias).id, original.id)
+    assert.equal(f.store.admitAndEnqueue(alias).id, original.id)
+    assert.deepEqual(f.store.readOperation(original.id), original)
+    const receipt = f.store.findIngressReceipt(alias.ingressKey)!
+    assert.deepEqual(receipt.requestBlob, b.requestBlob); assert.deepEqual(receipt.deliveryPlan, alias.deliveryPlan)
+    assert.notEqual(receipt.requestBlob!.sha256, original.requestBlob!.sha256)
+    assert.ok(f.store.pinnedBlobRefs().some(ref => ref.sha256 === b.requestBlob.sha256))
+    assert.throws(() => f.store.admitAndEnqueue({ ...alias, budget: { ...alias.budget, maxCalls: 100 } }), /SYNC_IDEMPOTENCY_CONFLICT/)
+    const changed = await f.controlled('ordinary-B', '不同正文')
+    assert.throws(() => f.store.admitAndEnqueue({ ...alias, ...changed }), /SYNC_IDEMPOTENCY_CONFLICT/)
+    const intent = await f.controlled('ordinary-C', '新的明确需求', '不同用户原意')
+    assert.notEqual(f.store.admitAndEnqueue({ ...admission, ...intent, ingressKey: 'ordinary-C' }).id, original.id)
+    assert.equal(f.store.listOperations(a.input.source.repositoryId).length, 2)
+  } finally { f.cleanup() }
+})
+
+test('v6 controlled request normalization is lazy, preserves historical identity and fails closed on missing current-source evidence', async () => {
+  const f = await fixture(), legacy = openProtocol(join(f.root, 'v6.sqlite'))
+  let backup: ReturnType<typeof openProtocol> | null = null
+  try {
+    applyComponentMigrations(legacy, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 6))
+    const a = await f.controlled('old-A'), b = await f.controlled('new-B'), value = { ...f.admit(a.input.source), ...a }
+    const original = f.store.admitAndEnqueue(value)
+    const row = f.protocol.withTransaction(tx => tx.query('SELECT * FROM sync_operations WHERE id=?', original.id))[0]
+    const columns = Object.keys(row).filter(column => column !== 'normalized_semantic_digest')
+    legacy.initialize(syncCoordinatorAddress(a.input.source.repositoryId))
+    const message = legacy.enqueue(syncCoordinatorAddress(a.input.source.repositoryId), { kind: 'sync.dispatch.v1', body: Buffer.from(JSON.stringify({ version: 1, type: 'sync.dispatch', operationId: original.id, inputId: a.input.id, generation: original.generation, dispatchKey: `sync-dispatch-${original.id}-${original.generation}` })), idempotencyKey: `sync-dispatch-${original.id}-${original.generation}` })
+    const historical = { ...original, dispatchMessageId: message.messageId }
+    row.record_json = JSON.stringify(historical)
+    const gone = { ...historical, id: 'removed-repository-operation', ingressKey: 'removed-repository-ingress', payloadDigest: 'removed-payload', input: { ...historical.input, source: { ...historical.input.source, repositoryId: 'removed-repository', commonDir: '/missing/removed/.git', canonicalRoot: '/missing/removed' } }, requestBlob: { sha256: 'f'.repeat(64) } }
+    legacy.withTransaction(tx => {
+      tx.exec(`INSERT INTO sync_operations(${columns.join(',')}) VALUES(${columns.map(() => '?').join(',')})`, ...columns.map(column => row[column]) as SqlParam[])
+      tx.exec(`INSERT INTO sync_operations(${columns.join(',')}) VALUES(${columns.map(() => '?').join(',')})`, ...columns.map(column => column === 'id' ? gone.id : column === 'ingress_key' ? gone.ingressKey : column === 'payload_digest' ? gone.payloadDigest : column === 'repository_id' ? gone.input.source.repositoryId : column === 'source_root' ? gone.input.source.canonicalRoot : column === 'record_json' ? JSON.stringify(gone) : row[column]) as SqlParam[])
+    })
+    assert.throws(() => applyComponentMigrations(legacy, SYNC_COMPONENT, [...SYNC_MIGRATIONS.slice(0, 6), { version: 7, sql: `${SYNC_MIGRATIONS[6].sql} INSERT INTO missing_v7_table VALUES(1);` }]))
+    assert.ok(!legacy.withTransaction(tx => tx.query('PRAGMA table_info(sync_operations)')).some(column => column.name === 'normalized_semantic_digest'))
+    assert.equal(legacy.listPending(syncCoordinatorAddress(a.input.source.repositoryId))[0].messageId, message.messageId)
+    const backupPath = join(f.root, 'v6.backup')
+    assert.equal(await migrateSyncStore(legacy, { backupPath }), 7)
+    assert.throws(() => applyComponentMigrations(legacy, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 6)), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
+    backup = openProtocol(backupPath)
+    assert.equal(backup.withTransaction(tx => tx.query('SELECT MAX(version) AS version FROM schema_migrations WHERE component=?', SYNC_COMPONENT))[0].version, 6)
+    assert.equal(backup.withTransaction(tx => tx.query('SELECT record_json FROM sync_operations WHERE id=?', original.id))[0].record_json, JSON.stringify(historical))
+    const upgraded = new SyncStore(legacy, f.options), alias = { ...value, ...b, ingressKey: 'new-B' }
+    f.blobs.delete(a.requestBlob.sha256)
+    assert.throws(() => upgraded.admitAndEnqueue(alias), /SYNC_REQUEST_IDENTITY_UNAVAILABLE/)
+    assert.equal(upgraded.listOperations(a.input.source.repositoryId).length, 1)
+    assert.equal(legacy.withTransaction(tx => tx.query('SELECT normalized_semantic_digest FROM sync_operations WHERE id=?', original.id))[0].normalized_semantic_digest, null)
+    f.blobs.set(a.requestBlob.sha256, readEvidence(a.input.source.commonDir, a.requestBlob))
+    assert.equal(upgraded.admitAndEnqueue(alias).id, original.id)
+    assert.deepEqual(upgraded.readOperation(original.id), historical)
+    assert.equal(upgraded.admitAndEnqueue(alias).id, original.id)
+    assert.throws(() => upgraded.admitAndEnqueue({ ...alias, impactDigest: 'changed' }), /SYNC_IDEMPOTENCY_CONFLICT/)
+    assert.equal(legacy.withTransaction(tx => tx.query('SELECT normalized_semantic_digest FROM sync_operations WHERE id=?', gone.id))[0].normalized_semantic_digest, null)
+    const reopened = openProtocol(join(f.root, 'v6.sqlite'))
+    try {
+      assert.equal(await migrateSyncStore(reopened), 7)
+      assert.equal(new SyncStore(reopened, f.options).admitAndEnqueue(alias).id, historical.id)
+      assert.deepEqual(new SyncStore(reopened, f.options).findIngressReceipt('new-B')?.requestBlob, b.requestBlob)
+    } finally { reopened.close() }
+    assert.equal(legacy.listPending(syncCoordinatorAddress(a.input.source.repositoryId)).length, 1)
+  } finally { backup?.close(); legacy.close(); f.cleanup() }
 })

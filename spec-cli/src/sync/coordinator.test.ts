@@ -134,7 +134,7 @@ test('kernel mutex阻止同operation双编排，尚无native派发', async t => 
 test('缺planBlob的旧queued操作持久unsupported，不借当前计划猜恢复或派发', async t => {
   const f = await fixture(t)
   f.store.requestControl(f.operation.id, 'cancel'); f.store.discardDispatch(f.operation.id, f.operation.dispatchMessageId)
-  const old = f.store.admitAndEnqueue({ ingressKey: 'legacy-planless', rootCauseId: 'legacy-planless', origin: 'spec', input: f.input, scope: f.operation.scope, budget: f.operation.budget, policyDigest: f.operation.policyDigest, impactDigest: f.operation.impactDigest, readSetDigest: f.operation.readSetDigest, delivery: null, deliveryPlan: f.operation.deliveryPlan })
+  const old = f.store.admitAndEnqueue({ ingressKey: 'legacy-planless', rootCauseId: 'legacy-planless', origin: 'spec', input: f.input, scope: f.operation.scope, budget: f.operation.budget, policyDigest: contentHash('legacy-planless-policy'), impactDigest: f.operation.impactDigest, readSetDigest: f.operation.readSetDigest, delivery: null, deliveryPlan: f.operation.deliveryPlan })
   const result = await runSyncOperation(f.store, old.id, f.options)
   assert.equal(result.status, 'unsupported'); assert.equal(result.failure?.code, 'plan_missing')
   assert.equal(f.store.readAttempt(result.operation.currentAttemptId!).failure!.code, 'plan_missing'); assert.equal(f.calls.length, 0)
@@ -439,7 +439,7 @@ test('显式retryOf在SQLite重启后继承无未来IDs输入的accepted P1，�
   for (const table of ['sync_operations', 'sync_attempts', 'sync_leases']) {
     for (const row of sourceProtocol.withTransaction(tx => tx.query(`SELECT * FROM ${table}`))) {
       if (table === 'sync_operations') { const record = JSON.parse(String(row.record_json)); record.dispatchMessageId = copied.messageId; row.record_json = JSON.stringify(record) }
-      const columns = Object.keys(row).filter(column => column !== 'semantic_digest')
+      const columns = Object.keys(row).filter(column => column !== 'semantic_digest' && column !== 'normalized_semantic_digest')
       protocol.withTransaction(tx => tx.exec(`INSERT INTO ${table}(${columns.join(',')}) VALUES(${columns.map(() => '?').join(',')})`, ...columns.map(column => row[column]) as SqlParam[]))
     }
   }

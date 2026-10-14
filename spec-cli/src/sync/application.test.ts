@@ -5,8 +5,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { openProtocol } from '@spexcode/session-protocol'
+import { applyComponentMigrations, openProtocol, type SqlParam } from '@spexcode/session-protocol'
 import { CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
+import { SYNC_COMPONENT, SYNC_MIGRATIONS, syncCoordinatorAddress } from './migrations.js'
 import { SyncApplication } from './application.js'
 import { buildSyncApplicationPlan } from './planning.js'
 import { captureInputSnapshot } from './snapshot.js'
@@ -530,4 +531,67 @@ test('AC-APPLICATION-06 应用真实Docker及compiled hooks完整交付，comple
   await application.submit(request)
   assert.deepEqual(readFileSync(descriptor), frozenDescriptor)
   assert.equal(calls, callCount)
+})
+
+
+test('AC-APPLICATION-22 同受控编辑更换requestId仍归原failed预算，alias重放精确且只有retryOf开新预算', async () => {
+  const f = await fixture()
+  try {
+    await f.application.enable()
+    const bytes = readFileSync(join(f.root, '.spec/demo/spec.md')), index = readFileSync(join(f.root, '.git/index')), head = f.git(['rev-parse', 'HEAD'])
+    const patch = { startLine: 5, endLine: 5, original: '返回用户指定的文本。', replacement: '返回用户指定文本，并保留空文本。' }
+    const first = await f.application.submit({ nodeId: 'demo', requestId: 'ordinary-A', patch }); assert.ok(first.operation)
+    const original = (await f.application.wait(first.operation.id)).operation
+    const second = await f.application.submit({ nodeId: 'demo', requestId: 'ordinary-B', patch }); assert.ok(second.operation)
+    const replay = await f.application.submit({ nodeId: 'demo', requestId: 'ordinary-B', patch })
+    assert.equal(second.operation.id, original.id); assert.equal(replay.operation?.id, original.id)
+    await f.application.wait(original.id)
+    assert.deepEqual((await f.application.readOperation(original.id)).operation, original)
+    assert.equal(f.calls.length, 1); assert.equal((await f.application.status()).operations.length, 1)
+    const ingress = f.application.store.findIngressReceipt(`application:${original.input.source.repositoryId}:${original.input.source.canonicalRoot}:ordinary-B`)!
+    assert.notEqual(ingress.requestBlob?.sha256, original.requestBlob?.sha256)
+    assert.ok(f.application.store.pinnedBlobRefs().some(ref => ref.sha256 === ingress.requestBlob?.sha256))
+    await assert.rejects(f.application.submit({ nodeId: 'demo', requestId: 'ordinary-B', patch: { ...patch, reason: '不同用户授权意图' } }), /SYNC_IDEMPOTENCY_CONFLICT/)
+    await assert.rejects(f.application.submit({ nodeId: 'demo', requestId: 'ordinary-B', patch: { ...patch, replacement: '另一个正文' } }), /SYNC_IDEMPOTENCY_CONFLICT/)
+    const retry = await f.application.submit({ nodeId: 'demo', requestId: 'explicit-retry', retryOf: original.id }); assert.ok(retry.operation)
+    assert.notEqual(retry.operation.id, original.id); assert.deepEqual(retry.operation.requestBlob, original.requestBlob)
+    await f.application.wait(retry.operation.id); assert.equal(f.calls.length, 2)
+    const next = await f.application.submit({ nodeId: 'demo', requestId: 'new-patch', patch: { ...patch, replacement: '另一项真实用户编辑' } }); assert.ok(next.operation)
+    assert.notEqual(next.operation.id, original.id); await f.application.wait(next.operation.id); assert.equal(f.calls.length, 3)
+    const intent = await f.application.submit({ nodeId: 'demo', requestId: 'new-intent', patch: { ...patch, reason: '新的授权意图' } }); assert.ok(intent.operation)
+    assert.notEqual(intent.operation.id, original.id); await f.application.wait(intent.operation.id); assert.equal(f.calls.length, 4)
+    assert.deepEqual(readFileSync(join(f.root, '.spec/demo/spec.md')), bytes); assert.deepEqual(readFileSync(join(f.root, '.git/index')), index); assert.equal(f.git(['rev-parse', 'HEAD']), head)
+  } finally { f.cleanup() }
+})
+
+
+test('AC-APPLICATION-23 正式v6结构旧patch重开后换requestId及alias重放不产生新预算或模型调用', async () => {
+  const f = await fixture(), legacy = openProtocol(join(f.temp, 'legacy-v6.sqlite'))
+  try {
+    await f.application.enable()
+    const patch = { startLine: 5, endLine: 5, original: '返回用户指定的文本。', replacement: '返回用户指定文本，并保留空文本。' }
+    const accepted = await f.application.submit({ nodeId: 'demo', requestId: 'old-A', patch }); assert.ok(accepted.operation)
+    const old = (await f.application.wait(accepted.operation.id)).operation
+    applyComponentMigrations(legacy, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 6))
+    const address = syncCoordinatorAddress(old.input.source.repositoryId)
+    legacy.initialize(address)
+    const originalMessage = f.protocol.readMessages(address).find(message => message.messageId === old.dispatchMessageId)!
+    const message = legacy.enqueue(address, { kind: originalMessage.kind, body: originalMessage.body, idempotencyKey: originalMessage.idempotencyKey })
+    legacy.withTransaction(tx => tx.dequeue(address, message.messageId))
+    for (const table of ['sync_operations', 'sync_attempts', 'sync_leases']) for (const row of f.protocol.withTransaction(tx => tx.query(`SELECT * FROM ${table}`))) {
+      if (table === 'sync_operations') { const record = JSON.parse(String(row.record_json)); record.dispatchMessageId = message.messageId; row.record_json = JSON.stringify(record) }
+      const columns = Object.keys(row).filter(column => column !== 'normalized_semantic_digest')
+      legacy.withTransaction(tx => tx.exec(`INSERT INTO ${table}(${columns.join(',')}) VALUES(${columns.map(() => '?').join(',')})`, ...columns.map(column => row[column]) as SqlParam[]))
+    }
+    let newCalls = 0
+    const reopened = await SyncApplication.create(f.root, { protocol: legacy, runtimeDirectory: join(f.temp, 'runtime'), tools: { trustedRuntimeRoot: '/missing-runtime', toolEntry: '/missing-runtime/cli.js', canonicalHooksDir: '/missing-runtime/hooks' }, runner: async () => { newCalls++; throw new Error('旧受控请求不应再派发') } })
+    const second = await reopened.submit({ nodeId: 'demo', requestId: 'new-B', patch }); assert.ok(second.operation)
+    assert.equal(second.operation.id, old.id); assert.equal(second.operation.payloadDigest, old.payloadDigest)
+    assert.equal(second.operation.callsUsed, old.callsUsed); assert.equal(second.operation.deadlineAtMs, old.deadlineAtMs)
+    assert.deepEqual(second.operation.requestBlob, old.requestBlob)
+    assert.equal((await reopened.submit({ nodeId: 'demo', requestId: 'new-B', patch })).operation?.id, old.id)
+    await reopened.wait(old.id); assert.equal(newCalls, 0); assert.equal(f.calls.length, 1)
+    assert.equal((await reopened.status()).operations.length, 1)
+    await assert.rejects(reopened.submit({ nodeId: 'demo', requestId: 'new-B', patch: { ...patch, replacement: '不同原意' } }), /SYNC_IDEMPOTENCY_CONFLICT/)
+  } finally { legacy.close(); f.cleanup() }
 })

@@ -217,10 +217,10 @@ export class SyncApplication {
       mutex = claimFileMutex(join(locks, `${contentHash(ingressKey)}.sqlite`))
     }
     try {
-      const prior = this.store.findOperationByIngressKey(ingressKey)
-      if (prior && (prior.origin !== origin || (prior.retryOf ?? null) !== (retry?.id ?? null) || prior.input.id !== snapshot.id || JSON.stringify(prior.input.source) !== JSON.stringify(snapshot.source) || prior.policyDigest !== syncPlanDigest(plan) || (prior.requestBlob?.sha256 ?? null) !== (requestBlob?.sha256 ?? null))) throw new SyncStoreError('SYNC_IDEMPOTENCY_CONFLICT', ingressKey)
-      const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: input.requestId, origin, ...(retry ? { retryOf: retry.id } : {}), budget: settings.budget, managedRoot: this.managedRoot, ...(requestBlob ? { requestBlob } : {}), previousBaselinePair: prior ? prior.previousBaselinePair : retry ? retry.previousBaselinePair : this.store.readBaseline(snapshot.source) })
-      if (prior) { admission.deliveryPlan = prior.deliveryPlan; admission.budget = prior.budget }
+      const prior = this.store.findOperationByIngressKey(ingressKey), ingress = this.store.findIngressReceipt(ingressKey)
+      if (prior && (prior.origin !== origin || (prior.retryOf ?? null) !== (retry?.id ?? null) || prior.input.id !== snapshot.id || JSON.stringify(prior.input.source) !== JSON.stringify(snapshot.source) || prior.policyDigest !== syncPlanDigest(plan) || ((ingress ?? prior).requestBlob?.sha256 ?? null) !== (requestBlob?.sha256 ?? null))) throw new SyncStoreError('SYNC_IDEMPOTENCY_CONFLICT', ingressKey)
+      const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: input.requestId, origin, ...(retry ? { retryOf: retry.id } : {}), budget: settings.budget, managedRoot: this.managedRoot, ...(requestBlob ? { requestBlob } : {}), previousBaselinePair: prior ? (ingress ?? prior).previousBaselinePair : retry ? retry.previousBaselinePair : this.store.readBaseline(snapshot.source) })
+      if (prior) { admission.deliveryPlan = (ingress ?? prior).deliveryPlan; admission.budget = (ingress ?? prior).budget }
       this.prepareTools(admission.ingressKey, prior)
       const operation = this.store.admitAndEnqueue(admission)
       this.start(operation.id)

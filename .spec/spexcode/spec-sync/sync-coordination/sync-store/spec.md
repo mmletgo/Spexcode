@@ -70,4 +70,6 @@ readRetryEligibility(id)只读返回{eligible,reason?:{code,message}}真实事�
 
 预算耗尽的未消费dispatch已无自动执行资格，作为stopped头由同事务精确消费，避免显式新retry在旧budget头之后永远阻塞；不将可修复failed阶段机械归为终态。
 
-semantic_digest显式索引绑定真实inputId/完整物理source、origin、requestBlob、policyDigest、授权paths与retryOf。它排除per-ingress交付allocation、预算以及可推进baseline派生impact/readSet，使同source的已交付细化不成为新输入或自动补预算。同ingress仍严格核完整payload；新alias指向既有operation，重放沿该operation原delivery/budget/baseline。历史重复语义记录不删并，按rowid DESC选择已有记录；迁移只回填派生索引，不改旧payload/消息/native/journal。
+v6原semantic_digest仍保留真实inputId/完整物理source、origin、精确requestBlob、policyDigest、授权paths与retryOf；v7使用normalized_semantic_digest按受控请求语义归并。两者均排除per-ingress交付allocation、预算和可推进baseline派生impact/readSet，使同source的已交付细化不成为新输入或自动补预算。同ingress严格核完整payload；新alias指向既有operation，有精确收据时重放沿本ingress原delivery/budget/baseline，没有收据的旧alias维持owner operation的原重放规则。历史重复记录不删并，按rowid DESC选择已有记录，不改旧payload/消息/native/journal。
+
+受控请求的普通去重按已核不可变请求去除 origin.requestId 后的语义摘要进行，保留 kind/nodeId/intent、原 input/source、path、before/next 与 requestTree。相同编辑仅换请求来源归原 operation/预算；不同编辑或意图不归并。每个新 ingress 保存精确 payload 摘要及恢复接入所需小引用收据，alias 重放按自己的原接入核验，operation 的原 requestBlob/payload 不改，所有 alias 请求引用保活。旧 v6 请求按当前仓库、物理来源、input、政策和授权范围惰性核验；缺证据明确拒接，不猜同意图或建立新预算。

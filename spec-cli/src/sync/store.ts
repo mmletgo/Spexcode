@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { getBlob } from '@spexcode/spec-core'
 import { applyComponentMigrations, type ProtocolTransaction, type SessionProtocol } from '@spexcode/session-protocol'
+import { readControlledRequest } from './request-input.js'
 import { SYNC_COMPONENT, SYNC_MIGRATIONS, syncCoordinatorAddress, syncSemanticDigest } from './migrations.js'
-import type { AdmitSyncInput, ApplyFilePlan, ApplyJournal, ApplyPlan, ApplyReceipt, ApplyStep, BaselinePair, BlobRef, CandidateRef, ClaimedAttempt, ClaimAttemptInput, ComposedInputRef, RecoverableSyncResource, SyncResourceCheckpoint, SyncResourcePlan, SyncResourceRecord, DispatchPlan, InputSnapshot, NativeSessionRef, RecoverableSync, ScopeLease, SyncAttempt, SyncControl, SyncDispatchEnvelope, SyncFailure, SyncOperation, SyncScope, VerificationRef, VerificationResultBlob, WorktreeIdentity, WriteFence } from './operation-types.js'
+import type { AdmitSyncInput, ApplyFilePlan, ApplyJournal, ApplyPlan, ApplyReceipt, ApplyStep, BaselinePair, BlobRef, CandidateRef, ClaimedAttempt, ClaimAttemptInput, ComposedInputRef, RecoverableSyncResource, SyncResourceCheckpoint, SyncResourcePlan, SyncResourceRecord, DispatchPlan, InputSnapshot, NativeSessionRef, RecoverableSync, ScopeLease, SyncAttempt, SyncControl, SyncDispatchEnvelope, SyncFailure, SyncOperation, SyncIngressReceipt, SyncScope, VerificationRef, VerificationResultBlob, WorktreeIdentity, WriteFence } from './operation-types.js'
 
 export { SYNC_COORDINATOR_ADDRESS, syncCoordinatorAddress } from './migrations.js'
 export const SYNC_DISPATCH_KIND = 'sync.dispatch.v1'
@@ -129,21 +130,39 @@ export class SyncStore {
     validateScope({ paths: files.map(file => file.path), contractIds: [], flowIds: [] })
     return files as ApplyFilePlan[]
   }
+  private normalizedSemanticDigest(input: Pick<SyncOperation, 'input' | 'requestBlob' | 'origin' | 'policyDigest' | 'scope' | 'retryOf'>): string {
+    if (!input.requestBlob) return syncSemanticDigest(input)
+    this.blob(input.requestBlob)
+    const request = readControlledRequest(input.input, input.requestBlob)
+    const { requestId: _requestId, ...origin } = request.origin
+    return syncSemanticDigest({ ...input, requestBlob: { sha256: digest({ ...request, origin }) } })
+  }
+  private saveIngressReceipt(tx: ProtocolTransaction, input: AdmitSyncInput, operationId: string, payloadDigest: string): void {
+    const receipt: SyncIngressReceipt = { operationId, payloadDigest, ...(input.requestBlob ? { requestBlob: input.requestBlob } : {}), budget: input.budget, deliveryPlan: input.deliveryPlan, previousBaselinePair: input.previousBaselinePair ?? null }
+    tx.exec('INSERT INTO sync_ingress_receipts(ingress_key,operation_id,payload_digest,record_json) VALUES(?,?,?,?)', input.ingressKey, operationId, payloadDigest, JSON.stringify(receipt))
+  }
   /** 稳定接入记录与既有消息派发计划共享一个 SQL 事务。 */
   admitAndEnqueue(input: AdmitSyncInput): SyncOperation {
     validateScope(input.scope)
     if (input.retryOf !== undefined && (typeof input.retryOf !== 'string' || !input.retryOf.trim())) fail('SYNC_RETRY_BINDING', '显式重试需要有效的原operation身份')
     this.blob(input.input.manifestBlob)
-    if (input.requestBlob) this.blob(input.requestBlob)
+    if (input.retryOf && (this.readOperation(input.retryOf).requestBlob?.sha256 ?? null) !== (input.requestBlob?.sha256 ?? null)) fail('SYNC_RETRY_BINDING', '显式重试必须继承原始用户请求引用')
     if (input.planBlob) { this.blob(input.planBlob); if (input.planBlob.sha256 !== input.policyDigest) fail('SYNC_PLAN_BINDING', 'plan evidence must have exactly the frozen policy digest') }
     if (input.delivery && (input.delivery.canonicalRoot !== input.deliveryPlan.canonicalRoot || input.delivery.branch !== input.deliveryPlan.branch || input.delivery.repositoryId !== input.input.source.repositoryId)) fail('SYNC_DELIVERY_BINDING', 'bound delivery differs from durable plan')
     const payload = { input: inputPayload(input.input), ...(input.requestBlob ? { requestBlob: input.requestBlob } : {}), ...(input.planBlob ? { planBlob: input.planBlob } : {}), ...(input.retryOf ? { retryOf: input.retryOf } : {}), scope: canonicalScope(input.scope), policyDigest: input.policyDigest, impactDigest: input.impactDigest, readSetDigest: input.readSetDigest, deliveryPlan: input.deliveryPlan, previousBaselinePairId: input.previousBaselinePair?.id ?? null, budget: input.budget }
     const legacyPayloadDigest = digest(payload), payloadDigest = digest({ ...payload, origin: input.origin })
+    const semanticDigest = this.normalizedSemanticDigest(input)
+    const legacyCandidates = this.write(tx => tx.query("SELECT record_json FROM sync_operations WHERE normalized_semantic_digest IS NULL AND repository_id=? AND source_key=? AND json_extract(record_json,'$.input.id')=? AND json_extract(record_json,'$.policyDigest')=? AND json_extract(record_json,'$.origin')=? AND json_extract(record_json,'$.retryOf') IS ?", input.input.source.repositoryId, identityKey(input.input.source), input.input.id, input.policyDigest, input.origin, input.retryOf ?? null).map(row => parseRecord<SyncOperation>(row)!).filter(operation => digest(canonicalScope(operation.scope).paths) === digest(canonicalScope(input.scope).paths)))
+    const normalized = legacyCandidates.map(operation => {
+      try { return { id: operation.id, digest: this.normalizedSemanticDigest(operation) } }
+      catch (error) { fail('SYNC_REQUEST_IDENTITY_UNAVAILABLE', `旧请求 ${operation.id} 的不可变证据不能核验：${error instanceof Error ? error.message : String(error)}`) }
+    })
     return this.write(tx => {
+      for (const operation of normalized) tx.exec('UPDATE sync_operations SET normalized_semantic_digest=? WHERE id=? AND normalized_semantic_digest IS NULL', operation.digest, operation.id)
       const prior = parseRecord<SyncOperation>(tx.query('SELECT record_json FROM sync_operations WHERE ingress_key=? OR EXISTS (SELECT 1 FROM json_each(sync_operations.ingress_aliases_json) WHERE value=?)', input.ingressKey, input.ingressKey)[0])
-      if (prior) { if (prior.origin !== input.origin || ![payloadDigest, legacyPayloadDigest].includes(prior.payloadDigest)) fail('SYNC_IDEMPOTENCY_CONFLICT', input.ingressKey); return prior }
-      const sameInput = parseRecord<SyncOperation>(tx.query('SELECT record_json FROM sync_operations WHERE semantic_digest=? ORDER BY rowid DESC LIMIT 1', syncSemanticDigest(input))[0])
-      if (sameInput) { tx.exec("UPDATE sync_operations SET ingress_aliases_json=json_insert(ingress_aliases_json,'$[#]',?) WHERE id=?", input.ingressKey, sameInput.id); return sameInput }
+      if (prior) { const receipt = parseRecord<SyncIngressReceipt>(tx.query('SELECT record_json FROM sync_ingress_receipts WHERE ingress_key=?', input.ingressKey)[0]); if (prior.origin !== input.origin || !(receipt ? receipt.payloadDigest === payloadDigest : [payloadDigest, legacyPayloadDigest].includes(prior.payloadDigest))) fail('SYNC_IDEMPOTENCY_CONFLICT', input.ingressKey); return prior }
+      const sameInput = parseRecord<SyncOperation>(tx.query('SELECT record_json FROM sync_operations WHERE normalized_semantic_digest=? ORDER BY rowid DESC LIMIT 1', semanticDigest)[0])
+      if (sameInput) { tx.exec("UPDATE sync_operations SET ingress_aliases_json=json_insert(ingress_aliases_json,'$[#]',?) WHERE id=?", input.ingressKey, sameInput.id); this.saveIngressReceipt(tx, input, sameInput.id, payloadDigest); return sameInput }
       if (input.retryOf) {
         const previous = this.operation(tx, input.retryOf), eligibility = this.retryEligibility(tx, previous)
         if (!eligibility.eligible) fail(eligibility.reason!.code, eligibility.reason!.message)
@@ -173,7 +192,8 @@ export class SyncStore {
       tx.initialize(address)
       const message = tx.enqueue(address, { kind: SYNC_DISPATCH_KIND, body: Buffer.from(JSON.stringify(envelope)), idempotencyKey: dispatchKey })
       const operation: SyncOperation = { ...clone(input), scope: canonicalScope(input.scope), id, payloadDigest, generation, revision: 1, phase: 'queued', control: 'run', previousBaselinePair: clone(input.previousBaselinePair ?? null), readyScope: canonicalScope(input.scope), blockedScope: emptyScope(), deliveredScope: emptyScope(), blockedReason: null, callsUsed: 0, deadlineAtMs: this.now() + input.budget.timeoutMs, currentAttemptId: null, dispatchMessageId: message.messageId, createdAtMs: this.now(), updatedAtMs: this.now() }
-      tx.exec('INSERT INTO sync_operations(id,ingress_key,payload_digest,semantic_digest,repository_id,source_key,source_root,generation,phase,control,current_attempt_id,updated_at_ms,record_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)', id, input.ingressKey, payloadDigest, syncSemanticDigest(input), input.input.source.repositoryId, identityKey(input.input.source), input.input.source.canonicalRoot, generation, operation.phase, operation.control, null, operation.updatedAtMs, JSON.stringify(operation))
+      tx.exec('INSERT INTO sync_operations(id,ingress_key,payload_digest,semantic_digest,normalized_semantic_digest,repository_id,source_key,source_root,generation,phase,control,current_attempt_id,updated_at_ms,record_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)', id, input.ingressKey, payloadDigest, syncSemanticDigest(input), semanticDigest, input.input.source.repositoryId, identityKey(input.input.source), input.input.source.canonicalRoot, generation, operation.phase, operation.control, null, operation.updatedAtMs, JSON.stringify(operation))
+      this.saveIngressReceipt(tx, input, operation.id, payloadDigest)
       return operation
     })
   }
@@ -497,6 +517,7 @@ export class SyncStore {
   findOperationByIngressKey(ingressKey: string): SyncOperation | null {
     return this.write(tx => parseRecord<SyncOperation>(tx.query('SELECT record_json FROM sync_operations WHERE ingress_key=? OR EXISTS (SELECT 1 FROM json_each(sync_operations.ingress_aliases_json) WHERE value=?)', ingressKey, ingressKey)[0]))
   }
+  findIngressReceipt(ingressKey: string): SyncIngressReceipt | null { return this.write(tx => parseRecord<SyncIngressReceipt>(tx.query('SELECT record_json FROM sync_ingress_receipts WHERE ingress_key=?', ingressKey)[0])) }
   listOperations(repositoryId: string, options: { limit?: number; sourceRoot?: string } = {}): SyncOperation[] {
     const limit = options.limit ?? 100
     if (!Number.isInteger(limit) || limit < 1 || limit > 500) fail('SYNC_LIST_LIMIT', 'limit must be an integer between 1 and 500')
@@ -523,7 +544,7 @@ export class SyncStore {
     return this.write(tx => {
       const refs = new Set<string>()
       const visit = (value: unknown): void => { if (!value || typeof value !== 'object') return; if ('sha256' in value && typeof value.sha256 === 'string') refs.add(value.sha256); for (const entry of Object.values(value)) visit(entry) }
-      for (const table of ['sync_operations', 'sync_attempts', 'sync_apply_journals', 'sync_baseline_pairs', 'sync_resources']) for (const row of tx.query(`SELECT record_json FROM ${table}`)) visit(JSON.parse(String(row.record_json)))
+      for (const table of ['sync_operations', 'sync_attempts', 'sync_apply_journals', 'sync_baseline_pairs', 'sync_resources', 'sync_ingress_receipts']) for (const row of tx.query(`SELECT record_json FROM ${table}`)) visit(JSON.parse(String(row.record_json)))
       return [...refs].sort().map(sha256 => ({ sha256 }))
     })
   }
