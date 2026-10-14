@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { existsSync, lstatSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, lstatSync, mkdtempSync, openSync, readFileSync, readlinkSync, realpathSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
 import { putBlob, readBlobByHash } from '@spexcode/spec-core'
@@ -12,13 +12,27 @@ export class UnstableSnapshotError extends Error { override name = 'UnstableSnap
 export const contentHash = (bytes: Buffer | string): string => createHash('sha256').update(bytes).digest('hex')
 const evidenceDir = (commonDir: string): string => join(commonDir, 'spexcode', 'evidence')
 const gitEnv = (): NodeJS.ProcessEnv => Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')))
+const GIT_TIMEOUT_MS = Number(process.env.SPEXCODE_GIT_TIMEOUT_MS || 120000)
 
 /** Git 对象操作只面向明确的 commonDir；永不复用进程中的用户 index。 */
 export function objectGit(commonDir: string, args: string[], input?: Buffer, indexFile?: string, worktreeRoot?: string): Buffer {
   const gitDir = indexFile ? dirname(indexFile) : commonDir
-  return execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'core.splitIndex=false', `--git-dir=${gitDir}`, ...(worktreeRoot ? [`--work-tree=${worktreeRoot}`] : []), ...args], { input, cwd: worktreeRoot ?? commonDir, env: { ...gitEnv(), GIT_NO_REPLACE_OBJECTS: '1', ...(indexFile ? { GIT_INDEX_FILE: indexFile, GIT_COMMON_DIR: commonDir } : {}) }, maxBuffer: 128 * 1024 * 1024 })
+  const temp = input === undefined ? undefined : mkdtempSync(join(tmpdir(), 'spex-sync-git-input-'))
+  let inputFd: number | undefined
+  try {
+    if (temp) {
+      // 同步 stdin socket 的 EOF 曾阻塞快照；普通文件给 Git 固定字节与明确 EOF。
+      const path = join(temp, 'input')
+      writeFileSync(path, input!, { flag: 'wx', mode: 0o600 })
+      inputFd = openSync(path, 'r')
+    }
+    return execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'core.splitIndex=false', `--git-dir=${gitDir}`, ...(worktreeRoot ? [`--work-tree=${worktreeRoot}`] : []), ...args], { stdio: [inputFd ?? 'ignore', 'pipe', 'pipe'], cwd: worktreeRoot ?? commonDir, env: { ...gitEnv(), GIT_NO_REPLACE_OBJECTS: '1', ...(indexFile ? { GIT_INDEX_FILE: indexFile, GIT_COMMON_DIR: commonDir } : {}) }, timeout: GIT_TIMEOUT_MS, killSignal: 'SIGKILL', maxBuffer: 128 * 1024 * 1024 })
+  } finally {
+    if (inputFd !== undefined) closeSync(inputFd)
+    if (temp) rmSync(temp, { recursive: true, force: true })
+  }
 }
-const sourceGit = (root: string, args: string[]): Buffer => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'core.splitIndex=false', '-C', root, ...args], { env: { ...gitEnv(), GIT_NO_REPLACE_OBJECTS: '1' }, maxBuffer: 128 * 1024 * 1024 })
+const sourceGit = (root: string, args: string[]): Buffer => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'core.splitIndex=false', '-C', root, ...args], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...gitEnv(), GIT_NO_REPLACE_OBJECTS: '1' }, timeout: GIT_TIMEOUT_MS, killSignal: 'SIGKILL', maxBuffer: 128 * 1024 * 1024 })
 export function writeEvidence(commonDir: string, value: unknown): BlobRef { return { sha256: putBlob(Buffer.from(JSON.stringify(value)), evidenceDir(commonDir)) } }
 export function readEvidence(commonDir: string, ref: BlobRef): Buffer {
   const result = readBlobByHash(ref.sha256, evidenceDir(commonDir))
@@ -60,7 +74,8 @@ export function readTree(commonDir: string, tree: string): TreeEntry[] {
 }
 export function readObject(commonDir: string, oid: string): Buffer {
   const bytes = objectGit(commonDir, ['cat-file', 'blob', oid])
-  if (objectGit(commonDir, ['hash-object', '--stdin'], bytes).toString().trim() !== oid) throw new Error('Git blob OID 不匹配')
+  const actualOid = createHash(oid.length === 40 ? 'sha1' : 'sha256').update(`blob ${bytes.byteLength}\0`).update(bytes).digest('hex')
+  if (actualOid !== oid) throw new Error('Git blob OID 不匹配')
   return bytes
 }
 export function writeObject(commonDir: string, bytes: Buffer): string { return objectGit(commonDir, ['hash-object', '-w', '--stdin'], bytes).toString().trim() }
