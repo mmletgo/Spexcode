@@ -2,7 +2,7 @@
 title: Spec 驱动隔离执行与完整交付
 status: pending
 hue: 175
-desc: 待实现 — Spec 驱动隔离执行与完整交付，证据与产品验收完成前不宣称交付。
+desc: 已提供受控 Spec 请求、隔离生成、验证与完整交付；外部保存监听及最终落地策略继续扩展。
 related:
   - spec-cli/src/spec-body-edit.ts
   - spec-cli/src/sessions.ts
@@ -15,7 +15,7 @@ related:
 
 ## expanded spec
 
-范围映射：REQ-SYNC-01、06；P2；AC-SYNC-01、02、03、12、16、17、21、23。实施依据为 `docs/spec-code-continuous-sync-plan.md`，当前绑定和真实产品证据尚待实现，不能把本节点作为已同步证明。
+范围映射：REQ-SYNC-01、06；P2；AC-SYNC-01、02、03、12、16、17、21、23。实施依据为 `docs/spec-code-continuous-sync-plan.md`。受控保存和显式运行通过 [[sync-application]]、[[sync-generation]]、[[sync-coordinator]] 与 [[sync-private-delivery]] 自动交付实际 Spec、代码和测试；外部文件事件的持续接入、主分支最终门禁及全量范围仍受后续阶段约束。
 
 执行前先满足 [[sync-coordination]] 的隔离、generation、范围校验、journal 与回声安全原语。程序限制实际 diff 和适配器写权限，不能只靠提示词。生成失败在有限预算内修复，不改弱原始需求或验收。统一候选含 Spec、代码、测试与映射。协作输入树只回写生成差量并保持用户 index；非协作外部输入树不后台改写，实际受管交付树自动落盘。main dirty 保留完整结果等待落地。
 
@@ -28,4 +28,4 @@ P1 的生成与独立审查通过 `session-structured.ts#runStructuredSession` �
 
 协调器提供冻结上下文正文，Agent 只推理并返回 JSON。固定 `codex-read-only-v1` 配置不继承 launcher 的宽松权限、用户 config、MCP、apps、plugins 或 hooks；shell、code mode 与多 Agent 执行关闭，启动前检查有效配置及零 MCP/hook 工具。macOS 外层 Seatbelt 保护源码树、交付树和用户配置，允许独立 runtime 的 rollout/cache 及精确 daemon socket/log 写入。认证通过既有系统认证文件的只读安全引用复用，不读取、复制或打印凭据。外层写入探针必须通过；暂未验证等效隔离的平台明确返回 unsupported，后续 P4/P5 继续补齐与验证，不能声称全平台完成。
 
-初轮开始前就在同一连接订阅事件，持久化 thread/turn 后只读取该精确 turn 的最终回答及完成状态；失败、中断、超时、丢失最终回答或 schema 不符均不算成功。断连重试恢复原 thread/turn，不重复发起模型 turn；接受回执丢失时，仅唯一初轮且用户输入与固定 prompt 一致可恢复，不从任意历史最后一条 assistant 消息取结果。结果及摘要持久化，读取时复核输入/schema/策略与结果摘要。取消先撤销后续结果发布并中断精确 turn。返回的文本变更只有协调器能够写入交付树；本接缝不证明 P2 的完整隔离交付已完成。
+初轮开始前就在同一连接订阅事件，持久化 thread/turn 后只读取该精确 turn 的最终回答及完成状态；失败、中断、超时、丢失最终回答或 schema 不符均不算成功。断连重试恢复原 thread/turn，不重复发起模型 turn；接受回执丢失时，仅唯一初轮且用户输入与固定 prompt 一致可恢复，不从任意历史最后一条 assistant 消息取结果。结果及摘要持久化，读取时复核输入/schema/策略与结果摘要。取消先撤销后续结果发布并中断精确 turn。返回的文本变更只有协调器能够写入交付树；本接缝的模型结果仍须经过 [[sync-coordinator]] 的验证与真实交付结算，不能单独作为完成证明。

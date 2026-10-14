@@ -2,7 +2,7 @@
 title: Spec 与代码持续双向同步
 status: pending
 hue: 175
-desc: 正常变更全自动完成详细契约、代码、测试和落盘，业务冲突经裁决后继续；当前实施待完成。
+desc: 已提供业务细化与 Spec 驱动隔离交付；双向变更、后台持续运行和全量验收仍待完成。
 ---
 # Spec 与代码持续双向同步
 
@@ -13,6 +13,8 @@ desc: 正常变更全自动完成详细契约、代码、测试和落盘，业�
 ## expanded spec
 
 基线来自 `docs/spec-code-continuous-sync-plan.md`（2026-10-13、42f4cf169），九项需求和全部二十八项验收保留。此节点是产品范围，尚无全部运行证据，保持 pending；新增结构化契约遵循 [[sync-contract-schema]]，不得由本文件状态推断同步成功。
+
+当前受控 Spec 保存及显式运行已通过同一应用服务进入业务细化、实现生成、独立审查、四层验证与实际交付。[[sync-application]]、[[sync-coordinator]] 和 [[sync-private-delivery]] 定义该运行路径；它不替代下表中的代码反写、持续观察、业务裁决和全项目验收。
 
 | 需求 ID | 用户结果 | 阶段 | AC-SYNC 编号 | 权威子节点 |
 |---|---|---|---|---|
