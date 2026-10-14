@@ -35,3 +35,8 @@ AC-APPLICATION-01 验证配置缺口、enable 摘要 CAS 与配置字节保留�
 22 先复现同受控 patch 仅换 requestId 导致两次模型调用和新预算；修复验证同一 failed operation/deadline/calls、B 再次重放、不同 patch/意图分离、同 key 冲突、显式 retry 原 requestBlob；实际 source/index/HEAD 不改。
 
 23 以正式 v6 schema 及保留原请求/payload/预算的历史受理记录重开真实应用，再提交相同 patch 的新 requestId 和 alias 重放；仍只一个操作、零新增模型调用。
+
+
+AC-APPLICATION-P3 在真实临时Git和canonical SQLite中冻结可信analysis checkpoint；手动code/combined入口真实受理。三个选择各自建立decision新operation，keep_intent无正文差量不丢请求，adopt/new_rule固定plan确含用户新输入且保旧原意；相同请求并发只派发一次，同key不同选择拒绝。错analysis、未知finding、stale input拒绝，旧operation superseded但分析可查，source/index/HEAD不先写。该场景只证明应用准入，真实生成/独审/Docker由协调器与上层验收。
+
+跨应用/store验证：同choice换运输UUID、同findings换顺序仍复用同operation/deadline/calls，不只验证samekey幂等；修改选择仍需新业务输入且samekey拒绝。

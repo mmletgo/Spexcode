@@ -161,7 +161,7 @@ export default function SyncOperationPanel({ nodeId, nodePath, targetTree = null
     {current?.operations.length > 1 && <label className="sync-op-history">{t('syncOperation.history')} <select disabled={!!busy} value={detail.operation.id} onChange={event => setSelectedOperationId(event.target.value)}>{current.operations.map(item => <option key={item.operation.id} value={item.operation.id}>{item.operation.origin} · {t(`syncOperation.phase.${item.operation.phase}`)} · {item.operation.id}</option>)}</select></label>}
     {model?.failure && <p className="sync-op-error" role="alert"><code>{model.failure.code}</code> · {model.failure.message}</p>}
     {retryPhase && !detail.stale && detail.retryEligibility?.reason && <p className="sync-op-note"><code>{detail.retryEligibility.reason.code}</code> · {detail.retryEligibility.reason.message}</p>}
-    {detail?.decisionContext && <SyncBusinessDecision key={detail.operation.id} detail={detail} targetTree={targetTree} disabled={!!busy || !!targetTree || detail.stale || model?.state === 'recovery_required' || !settings?.enabled} onSubmitted={() => setRefresh(value => value + 1)} />}
-    {detail && <OperationEvidence key={detail.operation.id} detail={detail} model={model} nodeId={nodeId} nodePath={nodePath} targetTree={targetTree} />}
+    {detail?.decisionContext && <SyncBusinessDecision key={`decision:${detail.operation.id}`} detail={detail} targetTree={targetTree} disabled={!!busy || !!targetTree || detail.stale || model?.state === 'recovery_required' || !settings?.enabled} onSubmitted={() => setRefresh(value => value + 1)} />}
+    {detail && <OperationEvidence key={`evidence:${detail.operation.id}`} detail={detail} model={model} nodeId={nodeId} nodePath={nodePath} targetTree={targetTree} />}
   </section>
 }

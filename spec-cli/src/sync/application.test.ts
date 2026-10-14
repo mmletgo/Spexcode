@@ -17,7 +17,7 @@ import type { ContractCell, GeneratedTables } from './elaboration-markdown.js'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
 import type { ElaborationSessionRequest } from './elaboration-types.js'
 import { sessionIdForCreateKey } from '../sessions.js'
-import { contentHash, identifyWorktree, writeEvidence } from './snapshot.js'
+import { contentHash, identifyWorktree, writeEvidence, readEvidence } from './snapshot.js'
 import { claimFileMutex } from './file-mutex.js'
 import type { FileMutex } from './file-mutex.js'
 
@@ -68,7 +68,7 @@ test('AC-APPLICATION-02 受控no-op不提交不派发，来源身份与body必�
     assert.equal((await f.application.status()).operations.length, 0)
     assert.equal(f.git(['rev-parse', 'HEAD']), head)
     await assert.rejects(f.application.submit({ nodeId: 'demo', requestId: 'stale-patch', patch: { startLine: 1, endLine: 1, original: '# Older', replacement: '# Next' } }), /changed since/)
-    await assert.rejects(f.application.submit({ nodeId: 'demo', requestId: 'code', origin: 'code' as 'spec' }), /当前入口接受 Spec/)
+    await assert.rejects(f.application.submit({ nodeId: 'demo', requestId: 'bad-origin', origin: 'external' as 'spec' }), /输入来源必须/)
   } finally { f.cleanup() }
 })
 
@@ -594,4 +594,64 @@ test('AC-APPLICATION-23 正式v6结构旧patch重开后换requestId及alias重�
     assert.equal((await reopened.status()).operations.length, 1)
     await assert.rejects(reopened.submit({ nodeId: 'demo', requestId: 'new-B', patch: { ...patch, replacement: '不同原意' } }), /SYNC_IDEMPOTENCY_CONFLICT/)
   } finally { legacy.close(); f.cleanup() }
+})
+
+
+test('AC-APPLICATION-P3 code/combined手动接入与可信裁决冻结，旧原意和冲突保留且重复至多一次', async () => {
+  for (const choice of ['keep_intent', 'adopt_behavior', 'new_rule'] as const) {
+    const f = await fixture()
+    try {
+      await f.application.enable()
+      const starts: string[] = []
+      f.application.start = id => { starts.push(id) }
+      const code = (await f.application.submit({ nodeId: 'demo', requestId: 'code-input', origin: 'code' })).operation!
+      assert.equal(code.origin, 'code')
+      const first = (await f.application.submit({ nodeId: 'demo', requestId: 'combined-input', origin: 'combined' })).operation!
+      assert.equal(first.origin, 'combined')
+      const claimed = f.application.store.claimAttempt({ operationId: first.id, source: first.input.source, scope: first.scope, leaseMs: 60000 })
+      const analysis = { version: 'code-behavior-v1', inputId: first.input.id, baselinePairId: null, composedDigest: 'composed', readSetDigest: first.readSetDigest, policyDigest: first.policyDigest, inputDigest: first.input.contentDigest, reviewPassed: true, changes: [], findings: [{ id: 'conflict-1', kind: 'conflict', ruleIds: ['REQ-DEMO-1'], affectedIds: ['REQ-DEMO-1'], paths: ['src/demo.mjs'], originalIntent: '返回用户指定的文本。', sourceBehavior: '返回大写文本。', deliveryBehavior: '保留原文本。', counterexample: 'a → A', evidence: 'src/demo.mjs', decision: '是否允许改变大小写？' }, { id: 'gap-2', kind: 'coverage_gap', ruleIds: [], affectedIds: ['REQ-OTHER-1'], paths: ['src/other.mjs'], originalIntent: '独立规则', sourceBehavior: '未知规则', deliveryBehavior: '', counterexample: '', evidence: '', decision: '另一项事实' }], facts: [], authorizedChanges: [], nodeChanges: [], newNodes: [], resolutions: [], traces: [] }
+      const analysisRef = writeEvidence(first.input.source.commonDir, analysis)
+      const stageRef = writeEvidence(first.input.source.commonDir, { version: 'sync-stage-v1', operationId: first.id, attemptId: claimed.attempt.id, inputId: first.input.id, policyDigest: first.policyDigest, stage: 'analysis', resultRef: analysisRef })
+      f.application.store.checkpoint(claimed.fence, analysisRef)
+      f.application.store.checkpoint(claimed.fence, stageRef)
+      f.application.store.recordFailure(claimed.fence, { code: 'business_conflict', message: '有具体业务分歧', kind: 'conflict', evidenceRefs: [analysisRef] })
+      const request = { operationId: first.id, inputId: first.input.id, requestId: 'keep-1', analysisRef, findingIds: ['conflict-1'], decision: choice === 'new_rule' ? { choice, rule: '只改变 ASCII 字母大小写。' } : { choice } }
+      await assert.rejects(f.application.decide({ ...request, analysisRef: writeEvidence(first.input.source.commonDir, { ...analysis, findings: [] }) }), /可信当前检查点/)
+      await assert.rejects(f.application.decide({ ...request, findingIds: ['invented'] }), /真实存在/)
+      await assert.rejects(f.application.decide({ ...request, inputId: 'stale' }), /旧分歧裁决/)
+      const [keep, duplicate] = await Promise.all([f.application.decide(request), f.application.decide(request)])
+      assert.equal(keep.operation.id, duplicate.operation.id)
+      const alias = await f.application.decide({ ...request, requestId: 'same-choice-another-transport-id' })
+      assert.equal(alias.operation.id, keep.operation.id)
+      assert.equal(alias.operation.deadlineAtMs, keep.operation.deadlineAtMs)
+      assert.equal(alias.operation.callsUsed, keep.operation.callsUsed)
+      const twoFindings = await f.application.decide({ ...request, requestId: 'two-findings', findingIds: ['conflict-1', 'gap-2'] })
+      const reordered = await f.application.decide({ ...request, requestId: 'two-findings-another-uuid', findingIds: ['gap-2', 'conflict-1'] })
+      assert.equal(twoFindings.operation.id, reordered.operation.id)
+      assert.equal(twoFindings.operation.deadlineAtMs, reordered.operation.deadlineAtMs)
+      assert.equal(twoFindings.operation.callsUsed, reordered.operation.callsUsed)
+
+
+      assert.equal(keep.operation.origin, 'decision')
+      assert.equal(keep.operation.rootCauseId, first.rootCauseId)
+      assert.ok(keep.operation.requestBlob)
+      assert.equal(starts.filter(id => id === keep.operation.id).length, 1)
+      await assert.rejects(f.application.decide({ ...request, decision: { choice: choice === 'adopt_behavior' ? 'keep_intent' : 'adopt_behavior' } }), /SYNC_IDEMPOTENCY_CONFLICT/)
+      const frozenPlan = JSON.parse(readEvidence(first.input.source.commonDir, keep.operation.planBlob!).toString('utf8'))
+      if (choice !== 'keep_intent') {
+        const raw = frozenPlan.targets.find((target: { nodeId: string }) => target.nodeId === 'demo').rawSource
+        assert.match(raw, /返回用户指定的文本/)
+        assert.match(raw, choice === 'new_rule' ? /ASCII/ : /返回大写/)
+      }
+      assert.equal(frozenPlan.facts.filter((fact: { source: string }) => fact.source.startsWith('decision:')).length, 1)
+      const saved = JSON.parse(readEvidence(first.input.source.commonDir, keep.operation.requestBlob!).toString('utf8'))
+      assert.deepEqual(saved.findingIds, ['conflict-1'])
+      const history = await f.application.readOperation(first.id)
+      assert.equal(history.operation.phase, 'superseded')
+      assert.equal(history.decisionContext?.analysisRef.sha256, analysisRef.sha256)
+      assert.equal(readFileSync(join(f.root, '.spec/demo/spec.md'), 'utf8'), source)
+      writeFileSync(join(f.root, 'src/demo.mjs'), 'export const demo = text => text.toUpperCase()\n')
+      await assert.rejects(f.application.decide({ ...request, requestId: 'after-source-edit' }), /旧分歧裁决/)
+    } finally { f.cleanup() }
+  }
 })
