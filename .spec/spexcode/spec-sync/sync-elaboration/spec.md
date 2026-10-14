@@ -31,6 +31,8 @@ related:
 
 这些均是细化阶段结果；`runtimeVerification: not_run`、`implementationReady: false` 不能作为已同步证据。尚无实现锚点或测试的具体缺口保留给 P2，不制造虚构 `code:` 或运行通过结论。
 
+独立审查发现完整业务契约下的源码或测试缺陷时，用 `kind: repair`、规范 `code: implementation-review` 交给 P2；例如代码 TypeError、DTO 被当完整对象递归、修改返回值后按污染结构比较导致误断言，不触发业务细化或新 REQ/RULE/GAP。该发现必须关联当前契约图真实且非空的 affectedIds，并在 evidence 中提供冻结上下文中受治理 code 或 AC.test 的具体相对路径加符号或行号、失败反例；decision 明确仅修实现并保留业务义务。程序核对身份和冻结治理位置，绑定不成立仍作为具体阻断发现。原 review 完整留存，待实现发现保留受影响身份、位置、证据及修复决定；review 新增发现后刷新 deferredImplementationFindings。任意自定义业务 repair、真实遗漏边界、重大未知和冲突继续按原门禁处理；reviewPassed 仅表示业务独审通过，不是运行通过。仅有待实现发现的候选不能成为要求具体业务阻断的 repair seed。AC-ELABORATION-41–43 覆盖完整契约不变与实现证据延后、位置/身份不合法的硬拒和混合业务缺口阻断。
+
 编排回归由 `AC-ELABORATION-01` 至 `AC-ELABORATION-31` 覆盖解析/矩阵/独立审查、状态缺支修复、语义发现修复、GAP 独立分支、冲突证据、路径/摘要/raw 边界、既有验收保护、无效结构与重复会话、待实现证据、伪造裁决、安全失败/取消、输入冻结、合法退役、验证政策演进、围栏原意、未知矩阵单元、调用/总时间预算、行 schema、固定格式渲染、幂等预算身份及字符/argv 转义、未停稳取消、证据支持的可覆盖默认超时、真实 GAP 候选的父流程聚合及已结算拒绝候选的摘要/输入/原生审查追踪核对、渲染升级和新独立审查，以及 GAP 仅影响 TR 时经派发步骤传递的父流程阻塞、旧种子在当前结构检查新增缺口后的准确修复反馈。注入 runner 仅用于控制这些编排路径；P1 的真实 Agent 自然语言细化验收仍由完整产品链路单独验证。
 
 可选 verifications 是与 facts 分开的可信执行器登记；schema/解析器及唯一性在派发前校验，登记冻结进入输入摘要。候选 VERIFY 的 id/argv/cwd/timeout 与 AC.command 经程序逐项核对全契约图，未登记或漂移是具体可修复错误，不能以 GAP 豁免或进入独立审查。执行器怎样启动命令/汇总、generated 测试不自启 oracle 等技术职责不额外生成导出业务规则和验收。登记不替代既有契约变更授权，也不证明运行通过。AC-ELABORATION-32–34 验证非法登记零派发、错输出在 review 前拒绝、合法独立登记冻结与无作者假 GAP，原31项业务GAP/独立审查回归保持。

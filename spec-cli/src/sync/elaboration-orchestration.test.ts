@@ -663,3 +663,67 @@ test('AC-ELABORATION-40 省略新目标或raw-only目标不能假细化，不能
     assert.deepEqual(fake.calls.map(call => call.purpose), ['elaboration_generate'])
   }
 })
+
+test('AC-ELABORATION-41 完整业务契约的规范实现独审缺陷交P2，保留位置反例与全部受影响身份', async () => {
+  const defects = [
+    { code: 'implementation-review', kind: 'repair' as const, message: '测试将请求DTO误当完整任务递归，导致测试自身TypeError', affectedIds: ['AC-EXPORT-03', 'REQ-EXPORT-01'], evidence: 'tests/export.test.mjs#AC-EXPORT-03：符合规定的DTO不含rows，递归copy[0]产生TypeError；业务契约已完整。', decision: '仅修测试对象对应关系，保留raw、REQ、RULE、AC、VERIFY，不新增业务政策或GAP。' },
+    { code: 'implementation-review', kind: 'repair' as const, message: '重复调用断言按已污染first的新增字段遍历正确third', affectedIds: ['AC-EXPORT-03'], evidence: 'tests/export.test.mjs:30：mutateResult(first)新增extra后assertDetached(third,first)，正确third无extra却触发断言失败。', decision: '仅修测试引用比较，不改变既有重复调用语义和验收义务。' },
+  ]
+  const output = candidate({} as ElaborationSessionRequest, source); output.changes = []
+  const fake = runner(() => output, request => ({ ...review(request), verdict: 'repair', findings: defects }))
+  const result = await elaborate({ ...input(true), maxRepairs: 0 }, { runner: fake.run })
+  assert.equal(result.status, 'complete')
+  assert.equal(result.structurePassed, true)
+  assert.equal(result.reviewPassed, true)
+  assert.equal(result.implementationReady, false)
+  assert.equal(result.runtimeVerification, 'not_run')
+  assert.deepEqual(result.gaps, [])
+  assert.equal(result.changes[0].source, source)
+  assert.deepEqual(result.rounds[0].review!.findings, defects)
+  assert.equal(result.deferredImplementationFindings.length, 2)
+  for (const [index, defect] of defects.entries()) {
+    const deferred = result.deferredImplementationFindings[index]
+    assert.equal(deferred.code, defect.code)
+    assert.deepEqual(deferred.relatedIds, defect.affectedIds)
+    assert.ok(deferred.message.includes(defect.evidence))
+    assert.ok(deferred.message.includes(defect.decision))
+  }
+  assert.deepEqual(fake.calls.map(call => call.purpose), ['elaboration_generate', 'elaboration_review'])
+  assert.match(fake.calls[1].prompt, /implementation-review/)
+  const last = result.rounds[0]
+  const seed: ElaborationRepairSeed = { settled: true, requestKey: 'operation-1', inputDigest: result.inputDigest, candidateDigest: last.candidateDigest!, output: last.output, candidate: last.candidate!, findings: last.findings, review: last.review, traces: last.traces }
+  await assert.rejects(elaborate({ ...input(true), requestKey: 'implementation-only-seed' }, { seed, runner: async () => assert.fail('仅待实现发现不得续修业务契约') }), /具体被拒绝发现/)
+})
+
+test('AC-ELABORATION-42 实现review缺少冻结治理位置或有效受影响ID时仍具体阻塞', async () => {
+  const defect = { code: 'implementation-review', kind: 'repair' as const, message: '测试存在断言形状缺陷', affectedIds: ['AC-EXPORT-03'], evidence: 'tests/export.test.mjs#AC-EXPORT-03：正确结果被断言误判。', decision: '只修测试。' }
+  for (const invalid of [
+    { ...defect, evidence: 'tests/outside.test.mjs#AC-EXPORT-03：断言有问题。' },
+    { ...defect, evidence: 'unrelated/export.test.mjs#AC-EXPORT-03：断言有问题。' },
+    { ...defect, evidence: 'tests/export.test.mjs：测试有问题，未提供位置。' },
+    { ...defect, affectedIds: ['AC-EXPORT-NOT-FOUND'] },
+    { ...defect, affectedIds: [] },
+  ]) {
+    const fake = runner(request => candidate(request, source), request => ({ ...review(request), verdict: 'repair', findings: [invalid] }))
+    const result = await elaborate({ ...input(), files: new Map([...files, ['unrelated/export.test.mjs', 'not governed']]), maxRepairs: 0 }, { runner: fake.run })
+    assert.equal(result.status, 'exhausted')
+    assert.equal(result.reviewPassed, false)
+    assert.equal(result.deferredImplementationFindings.length, 0)
+    assert.ok(result.rounds[0].findings.some(issue => issue.code === 'review_implementation_binding'))
+    assert.deepEqual(result.rounds[0].review!.findings, [invalid])
+  }
+})
+
+test('AC-ELABORATION-43 自定义业务repair和遗漏边界继续阻塞，不能因实现发现绕过', async () => {
+  for (const code of ['condition_boundary_missing', 'custom-business-repair']) {
+    const business = { code, kind: 'repair' as const, message: '完成条件不成立缺少用户反馈', affectedIds: ['TR-EXPORT-RUNNING-COMPLETE'], evidence: '冻结原意要求失败出口，候选遗漏。', decision: '补齐确定业务分支。' }
+    const implementation = { code: 'implementation-review', kind: 'repair' as const, message: '已确定契约下测试有错误', affectedIds: ['AC-EXPORT-03'], evidence: 'tests/export.test.mjs#AC-EXPORT-03：正确结果被断言误判。', decision: '只修测试。' }
+    const fake = runner(request => candidate(request, source), request => ({ ...review(request), verdict: 'repair', findings: [implementation, business] }))
+    const result = await elaborate({ ...input(), maxRepairs: 0 }, { runner: fake.run })
+    assert.equal(result.status, 'exhausted')
+    assert.equal(result.reviewPassed, false)
+    assert.ok(result.rounds[0].findings.some(issue => issue.code === code && issue.severity === 'error'))
+    assert.equal(result.deferredImplementationFindings[0].code, 'implementation-review')
+    assert.deepEqual(result.rounds[0].review!.findings, [implementation, business])
+  }
+})

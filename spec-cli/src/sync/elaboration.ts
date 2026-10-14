@@ -17,7 +17,7 @@ export const elaborationDigest = (source: string): string => createHash('sha256'
 const digest = (value: unknown): string => elaborationDigest(JSON.stringify(value))
 const specPath = (path: string): boolean => path.startsWith('.spec/') && path.endsWith('/spec.md') && posix.normalize(path) === path && !path.includes('\\')
 // 未决事实保留为显式业务门禁；不能要求构建者编造事实来消除检查错误。
-const implementationFinding = (issue: ContractFinding): boolean => ['missing-implementation', 'missing-test-file', 'missing-test-case'].includes(issue.code)
+const implementationFinding = (issue: ContractFinding): boolean => ['missing-implementation', 'missing-test-file', 'missing-test-case', 'implementation-review'].includes(issue.code)
 const gapBlockedFinding = (issue: ContractFinding, coverage: ContractCoverage | null): boolean => {
   if (!issue.itemId || !['missing-event-disposition', 'nonterminal-no-exit', 'unreachable-state', 'missing-acceptance', 'missing-requirement-flow', 'incomplete-stateless-step', 'missing-flow-terminal', 'flow-no-exit', 'unreachable-step'].includes(issue.code)) return false
   const affected = [issue.itemId, ...(issue.relatedIds ?? [])]
@@ -189,7 +189,15 @@ function reviewErrors(input: ElaborationInput, review: ElaborationReview, inputD
   if (review.verdict === 'needs_input' && !review.findings.some(issue => issue.kind === 'missing_fact')) findings.push(finding(input, 'review_verdict', '待输入结论缺少具体缺失事实'))
   if (review.verdict === 'conflict' && !review.findings.some(issue => issue.kind === 'conflict')) findings.push(finding(input, 'review_verdict', '冲突结论缺少互斥事实证据'))
   for (const issue of review.findings) {
-    if (issue.kind === 'repair') findings.push(finding(input, issue.code, `${issue.message}；证据: ${issue.evidence}`))
+    if (issue.kind === 'repair') {
+      const message = `${issue.message}；证据: ${issue.evidence}；修复决定: ${issue.decision}`
+      if (issue.code === 'implementation-review') {
+        const owners = issue.affectedIds.map(id => graph.owners.get(id))
+        const paths = owners.flatMap(owner => owner ? [...owner.code, ...owner.items.filter(item => item.kind === 'AC').map(item => item.test)].map(anchor => anchor.split('#')[0]) : [])
+        const bound = issue.affectedIds.length > 0 && owners.every(Boolean) && paths.some(path => input.files?.has(path) && new RegExp(`(?:^|[^A-Za-z0-9_./-])${path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:#[^\\s；，。]+|:[1-9]\\d*)(?=$|[^A-Za-z0-9_./-])`).test(issue.evidence))
+        findings.push({ ...finding(input, bound ? issue.code : 'review_implementation_binding', bound ? message : `待实现发现必须关联当前契约ID和冻结治理文件的具体符号或行号；${message}`), relatedIds: [...issue.affectedIds] })
+      } else findings.push({ ...finding(input, issue.code, message), relatedIds: [...issue.affectedIds] })
+    }
     else {
       const gap = [...graph.items.values()].find(item => item.kind === 'GAP' && item.gapKind === issue.kind && issue.affectedIds.length > 0 && issue.affectedIds.every(id => item.affects.includes(id)))
       if (!gap) findings.push(finding(input, 'review_gap_missing', `评审发现必须形成具体GAP: ${issue.message}；证据: ${issue.evidence}；裁决: ${issue.decision}`))
@@ -300,7 +308,7 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
         result.structurePassed = !round.findings.some(issue => repairRequired(issue, result.coverage))
         result.reviewPassed = false
         if (!round.findings.some(issue => repairRequired(issue, result.coverage))) {
-          const reviewOutput = await call('elaboration_review', `你是独立业务审查者。重新从用户原意和冻结事实走正常、失败、边界、重试、取消、重复及必要竞争顺序；候选不是事实，不能信构建者结论。逐项重查所有适用性依据；若遗漏对象/事件/场景、scope被删除、AC变弱、政策无来源，提供具体repair发现。重大未知事实为missing_fact，互斥原意/规则为conflict，列影响ID、证据和具体裁决；已有准确GAP不要求编造规则。仅返回schema JSON，不修改文件，不生成摘要或版本身份，绑定由程序与受限runtime完成。\n${CONTRACT_INSTRUCTIONS}\n冻结业务输入:\n${snapshot}\n候选Markdown与适用性:\n${JSON.stringify(round.candidate)}`, ELABORATION_REVIEW_SCHEMA)
+          const reviewOutput = await call('elaboration_review', `你是独立业务审查者。重新从用户原意和冻结事实走正常、失败、边界、重试、取消、重复及必要竞争顺序；候选不是事实，不能信构建者结论。逐项重查所有适用性依据；若遗漏对象/事件/场景、scope被删除、AC变弱、政策无来源，提供具体repair发现。业务契约已完整而源码或测试错误时（如代码TypeError、DTO误按完整对象递归、修改返回值后按污染结构比较造成误断言），用kind:repair、code:implementation-review延后给P2；affectedIds必须是当前契约图的真实非空ID，evidence必须含冻结上下文中关联code或AC.test的相对路径#符号或:行号及具体失败反例，decision明确只修实现、保留业务义务。不能用任意自定code冒充实现发现，也不能把真实业务遗漏降为实现错误；不要为测试缺陷新增REQ/RULE/GAP或弱化AC/VERIFY。重大未知事实为missing_fact，互斥原意/规则为conflict，列影响ID、证据和具体裁决；已有准确GAP不要求编造规则。仅返回schema JSON，不修改文件，不生成摘要或版本身份，绑定由程序与受限runtime完成。\n${CONTRACT_INSTRUCTIONS}\n冻结业务输入:\n${snapshot}\n候选Markdown与适用性:\n${JSON.stringify(round.candidate)}`, ELABORATION_REVIEW_SCHEMA)
           round.reviewOutput = reviewOutput
           if (input.signal?.aborted) throw Object.assign(new Error('细化已取消，保留当前候选和评审产物'), { code: 'cancelled' })
           round.findings.push(...outputErrors(reviewOutput, ELABORATION_REVIEW_SCHEMA).map(message => finding(input, 'review_schema', message)))
@@ -309,6 +317,7 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
             round.review = { ...(reviewOutput as Omit<ElaborationReview, 'inputDigest' | 'candidateDigest'>), inputDigest, candidateDigest: round.candidateDigest }
             round.findings.push(...reviewErrors(input, round.review, inputDigest, round.candidateDigest, checked.graph))
           }
+          result.deferredImplementationFindings = round.findings.filter(implementationFinding)
           if (!round.findings.some(issue => repairRequired(issue, result.coverage))) {
             result.structurePassed = true; result.reviewPassed = true
             result.readyIds = result.coverage.items.filter(item => item.blockedBy.length === 0 && item.kind !== 'GAP').map(item => item.id)
