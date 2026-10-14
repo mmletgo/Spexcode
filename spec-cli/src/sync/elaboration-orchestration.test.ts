@@ -15,7 +15,7 @@ const source = readFileSync(new URL(path, fixture), 'utf8')
 const rawSource = parseContract({ nodeId: 'export-contract', path, source }).contract!.rawSource
 const files = new Map(['src/export.js', 'tests/export.test.mjs'].map(file => [file, readFileSync(new URL(file, fixture), 'utf8')]))
 const input = (existing = false): ElaborationInput => ({ root: '/test/frozen-repository', requestKey: 'operation-1', intent: { nodeId: 'export-contract', rawSource }, targets: [{ nodeId: 'export-contract', path, source: existing ? source : null, sourceDigest: existing ? elaborationDigest(source) : null }], facts: [{ source: 'decision:EXPORT-POLICY', text: source }], files, maxRepairs: 1 })
-const candidate = (_request: ElaborationSessionRequest, source: string, _beforeDigest: string | null = null): GeneratedElaboration => {
+const candidate = (_request: ElaborationSessionRequest, source: string, beforeDigest: string | null = null): GeneratedElaboration => {
   const contract = parseContract({ nodeId: 'export-contract', path, source }).contract!
   const fm = parseFrontmatter(source).fm
   const tables = Object.fromEntries(Object.entries(CONTRACT_COLUMNS).map(([kind, columns]) => {
@@ -26,7 +26,7 @@ const candidate = (_request: ElaborationSessionRequest, source: string, _beforeD
       return [column, column === 'source' && item.kind !== 'VERIFY' ? `${item.source.kind}:${item.source.ref}` : value]
     })))]
   })) as GeneratedTables
-  return { version: 'elaboration-rows-v1', changes: [{ nodeId: 'export-contract', path, title: String(fm.title), description: '', code: contract.code, related: contract.related, prose: parseParts(source)!.expandedSpec.split(/^### /m)[0], tables }], applicability: ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: true, basis: '冻结夹具的显式事件及政策', affectedIds: ['REQ-EXPORT-01'] })) }
+  return { version: 'elaboration-rows-v2', changes: [{ nodeId: 'export-contract', path, title: String(fm.title), description: '', code: contract.code, related: contract.related, removeIds: beforeDigest ? parseContract({ nodeId: 'export-contract', path, source: input(true).targets[0].source! }).contract!.items.filter(item => !contract.items.some(next => next.id === item.id)).map(item => item.id) : [], prose: parseParts(source)!.expandedSpec.split(/^### /m)[0], tables }], applicability: ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: true, basis: '冻结夹具的显式事件及政策', affectedIds: ['REQ-EXPORT-01'] })) }
 }
 const review = (_request: ElaborationSessionRequest): Omit<ElaborationReview, 'inputDigest' | 'candidateDigest'> => ({ verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] })
 const runner = (build: (request: ElaborationSessionRequest, call: number) => unknown, inspect = review): { run: ElaborationRunner; calls: ElaborationSessionRequest[] } => {
@@ -553,4 +553,113 @@ test('AC-ELABORATION-31 旧拒绝种子的新结构缺口须反馈本轮构建�
   assert.ok(!seed.findings.some(issue => issue.code === 'step-event-disposition-missing'))
   assert.deepEqual(seed, original)
   assert.deepEqual(result.prior!.traces, original.traces)
+})
+
+test('AC-ELABORATION-35 v2小增量独审收到完整Markdown，保留旧义务与输入事实', async () => {
+  const output = candidate({} as ElaborationSessionRequest, source)
+  const fullBytes = JSON.stringify(output).length
+  output.changes[0].prose = null
+  output.changes[0].tables = Object.fromEntries(Object.keys(CONTRACT_COLUMNS).map(kind => [kind, []])) as unknown as GeneratedTables
+  output.changes[0].tables.RULE.push({ id: 'RULE-EXPORT-DELTA', scope: '导出', constraint: '保持明确旧政策', basis: '冻结业务事实', authority: 'export-contract', source: 'user:REQ-EXPORT-01', 'depends-on': ['REQ-EXPORT-01'] })
+  output.changes[0].tables.AC.push({ ...candidate({} as ElaborationSessionRequest, source).changes[0].tables.AC[0], id: 'AC-EXPORT-DELTA', covers: ['RULE-EXPORT-DELTA'], source: 'rule:RULE-EXPORT-DELTA', 'depends-on': ['RULE-EXPORT-DELTA'], test: 'tests/export.test.mjs#AC-EXPORT-DELTA' })
+  const fake = runner(() => output)
+  const result = await elaborate({ ...input(true), maxRepairs: 0 }, { runner: fake.run })
+  assert.equal(result.status, 'complete')
+  assert.ok(JSON.stringify(output).length < fullBytes / 5)
+  assert.equal(Object.values(output.changes[0].tables).flat().length, 2)
+  assert.equal(result.contracts[0].items.length, parseContract({ nodeId: 'export-contract', path, source }).contract!.items.length + 2)
+  for (const item of parseContract({ nodeId: 'export-contract', path, source }).contract!.items) assert.ok(fake.calls[1].prompt.includes(item.id), item.id)
+  assert.ok(fake.calls[1].prompt.includes(JSON.stringify(result.rounds[0].candidate)))
+  assert.ok(fake.calls[0].prompt.includes(JSON.stringify(input(true).facts)))
+  assert.deepEqual((fake.calls[0].schema.properties as Record<string, { enum?: string[] }>).version.enum, ['elaboration-rows-v2'])
+})
+
+test('AC-ELABORATION-36 旧v1失败seed仅按原摘要读诊断，新v1输出拒绝且不继承seed新增政策', async () => {
+  const seed = await rejectedSeed()
+  const output = seed.output as GeneratedElaboration
+  output.changes[0].tables.RULE.push({ id: 'RULE-EXPORT-SEED-ONLY', scope: '导出', constraint: '失败候选自行提出的政策', basis: '拒绝候选', authority: 'export-contract', source: 'user:REQ-EXPORT-01', 'depends-on': ['REQ-EXPORT-01'] })
+  seed.candidate = renderElaboration(input(), output, seed.inputDigest)
+  const legacy = structuredClone(output) as unknown as { version: string; changes: { removeIds?: string[] }[] }
+  legacy.version = 'elaboration-rows-v1'
+  for (const node of legacy.changes) delete node.removeIds
+  seed.output = legacy
+  seed.candidateDigest = elaborationDigest(JSON.stringify(seed.candidate))
+  seed.traces[0].resultDigest = elaborationDigest(JSON.stringify(seed.output))
+  seed.review!.candidateDigest = seed.candidateDigest
+  const original = structuredClone(seed)
+  const fresh = runner(request => candidate(request, source))
+  const result = await elaborate({ ...input(), requestKey: 'new-v2' }, { seed, runner: async request => {
+    const session = await fresh.run(request)
+    return { ...session, sessionId: `v2-${session.sessionId}`, threadId: `v2-${session.threadId}` }
+  } })
+  assert.equal(result.status, 'complete')
+  assert.deepEqual(seed, original)
+  assert.equal(result.prior!.candidateDigest, original.candidateDigest)
+  assert.equal(result.prior!.renderedCandidateDigest, original.candidateDigest)
+  assert.ok(!result.graph!.items.has('RULE-EXPORT-SEED-ONLY'))
+  assert.match(fresh.calls[0].prompt, /旧v1协议不可用当前行差量渲染器重放/)
+  const rejected = await elaborate({ ...input(), maxRepairs: 0 }, { runner: runner(() => legacy).run })
+  assert.equal(rejected.status, 'exhausted')
+  assert.ok(rejected.rounds[0].findings.some(issue => issue.code === 'output_schema'))
+})
+
+test('AC-ELABORATION-37 修复反馈分类保留P2缺测试与GAP闭包，只要求当前P1阻断', async () => {
+  const incompleteFiles = new Map(files)
+  incompleteFiles.set('tests/export.test.mjs', '')
+  const fake = runner(request => candidate(request, source), request => ({ ...review(request), verdict: 'repair', findings: [{ code: 'business_check', kind: 'repair', message: '核实当前明确主流程', affectedIds: ['REQ-EXPORT-01'], evidence: '冻结原意', decision: '保留政策' }] }))
+  const result = await elaborate({ ...input(true), files: incompleteFiles, maxRepairs: 1 }, { runner: fake.run })
+  assert.equal(result.status, 'exhausted')
+  assert.ok(result.deferredImplementationFindings.some(issue => issue.code === 'missing-test-case'))
+  const repair = fake.calls.find(call => call.requestKey.startsWith('operation-1:1:'))!.prompt
+  const diagnostics = JSON.parse(repair.split('分类诊断（仅blocking需P1修复；deferredImplementation交P2实现，blockedByGap保留已有未知闭包，不造GAP或挪绑旧测试）:\n')[1].split('\n独立评审:')[0]) as { blocking: { code: string }[]; deferredImplementation: { code: string }[] }
+  assert.ok(diagnostics.blocking.some(issue => issue.code === 'business_check'))
+  assert.ok(diagnostics.blocking.every(issue => !issue.code.startsWith('missing-test')))
+  assert.ok(diagnostics.deferredImplementation.some(issue => issue.code === 'missing-test-case'))
+})
+
+test('AC-ELABORATION-38 空changes保留所有既有完整目标并经真实编排独审', async () => {
+  const output = candidate({} as ElaborationSessionRequest, source)
+  output.changes = []
+  const fake = runner(() => output)
+  const result = await elaborate({ ...input(true), maxRepairs: 0 }, { runner: fake.run })
+  assert.equal(result.status, 'complete')
+  assert.equal(result.changes[0].source, source)
+  assert.deepEqual(fake.calls.map(call => call.purpose), ['elaboration_generate', 'elaboration_review'])
+  assert.ok(fake.calls[1].prompt.includes(JSON.stringify(result.rounds[0].candidate)))
+})
+
+test('AC-ELABORATION-39 只回传child差量仍保留省略primary与其他既有目标', async () => {
+  const childPath = '.spec/export/export-count/spec.md', childId = 'export-count', childRaw = '原始业务需求见 [[export-contract]]。'
+  const output = candidate({} as ElaborationSessionRequest, source), child = structuredClone(output.changes[0])
+  child.nodeId = childId; child.path = childPath; child.title = '计数规则'; child.prose = '保持原始导出业务政策。'
+  child.tables = Object.fromEntries(Object.keys(CONTRACT_COLUMNS).map(kind => [kind, []])) as unknown as GeneratedTables
+  child.tables.RULE = [{ id: 'RULE-EXPORT-COUNT', scope: '导出计数', constraint: '按原始记录计数', basis: '冻结业务原意', authority: childId, source: 'user:REQ-EXPORT-01', 'depends-on': ['REQ-EXPORT-01'] }]
+  child.tables.AC = [{ ...output.changes[0].tables.AC[0], id: 'AC-EXPORT-COUNT', covers: ['RULE-EXPORT-COUNT'], source: 'rule:RULE-EXPORT-COUNT', 'depends-on': ['RULE-EXPORT-COUNT'], test: 'tests/export.test.mjs#AC-EXPORT-COUNT' }]
+  const freshTarget = { nodeId: childId, path: childPath, source: null, sourceDigest: null, rawSource: childRaw }
+  const childSource = renderElaboration({ ...input(true), targets: [...input(true).targets, freshTarget] }, { ...output, changes: [child] }, 'input').changes.find(change => change.nodeId === childId)!.source
+  const extraPath = '.spec/export/export-extra/spec.md', extraSource = childSource.replaceAll('export-count', 'export-extra').replaceAll('RULE-EXPORT-COUNT', 'RULE-EXPORT-EXTRA').replaceAll('AC-EXPORT-COUNT', 'AC-EXPORT-EXTRA')
+  const snapshot = { ...input(true), targets: [...input(true).targets, { ...freshTarget, source: childSource, sourceDigest: elaborationDigest(childSource) }, { nodeId: 'export-extra', path: extraPath, source: extraSource, sourceDigest: elaborationDigest(extraSource) }], maxRepairs: 0 }
+  child.prose = null; child.tables = Object.fromEntries(Object.keys(CONTRACT_COLUMNS).map(kind => [kind, []])) as unknown as GeneratedTables
+  child.tables.AC = [{ ...output.changes[0].tables.AC[0], id: 'AC-EXPORT-COUNT-BOUNDARY', covers: ['RULE-EXPORT-COUNT'], source: 'rule:RULE-EXPORT-COUNT', 'depends-on': ['RULE-EXPORT-COUNT'], test: 'tests/export.test.mjs#AC-EXPORT-COUNT-BOUNDARY' }]
+  const fake = runner(() => ({ ...output, changes: [child] }))
+  const result = await elaborate(snapshot, { runner: fake.run })
+  assert.equal(result.status, 'complete')
+  assert.equal(result.changes.find(change => change.nodeId === 'export-contract')!.source, source)
+  assert.equal(result.changes.find(change => change.nodeId === 'export-extra')!.source, extraSource)
+  assert.ok(result.graph!.items.has('RULE-EXPORT-COUNT') && result.graph!.items.has('AC-EXPORT-COUNT-BOUNDARY'))
+  assert.ok(fake.calls[1].prompt.includes(JSON.stringify(result.rounds[0].candidate)))
+})
+
+
+test('AC-ELABORATION-40 省略新目标或raw-only目标不能假细化，不能进入独审', async () => {
+  const output = candidate({} as ElaborationSessionRequest, source)
+  output.changes = []
+  for (const targetSource of [null, '---\ntitle: 新子能力\n---\n## raw source\n真实待细化原意。\n## expanded spec\n已有业务说明。\n']) {
+    const fake = runner(() => output)
+    const target = { nodeId: 'export-child', path: '.spec/export/export-child/spec.md', source: targetSource, sourceDigest: targetSource === null ? null : elaborationDigest(targetSource), rawSource: '真实待细化原意。' }
+    const result = await elaborate({ ...input(true), targets: [...input(true).targets, target], maxRepairs: 0 }, { runner: fake.run })
+    assert.equal(result.status, 'exhausted')
+    assert.ok(result.rounds[0].findings.some(issue => issue.code === 'target_not_elaborated'))
+    assert.deepEqual(fake.calls.map(call => call.purpose), ['elaboration_generate'])
+  }
 })

@@ -36,7 +36,7 @@ const build = (text: string, nodeId = 'export-contract', nodePath = path): Gener
     const key = column === 'depends-on' ? 'dependsOn' : column === 'timeout-ms' ? 'timeoutMs' : column === 'kind' ? 'gapKind' : column
     return [column, column === 'source' && item.kind !== 'VERIFY' ? `${item.source.kind}:${item.source.ref}` : (item as unknown as Record<string, ContractCell>)[key]]
   })))])) as GeneratedTables
-  return { version: 'elaboration-rows-v1', changes: [{ nodeId, path: nodePath, title: String(fm.title), description: '', code: contract.code, related: contract.related, prose: parseParts(text)!.expandedSpec.split(/^### /m)[0], tables }], applicability: ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: false, basis: '冻结业务约束', affectedIds: [] })) }
+  return { version: 'elaboration-rows-v2', changes: [{ nodeId, path: nodePath, title: String(fm.title), description: '', code: contract.code, related: contract.related, removeIds: [], prose: parseParts(text)!.expandedSpec.split(/^### /m)[0], tables }], applicability: ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: false, basis: '冻结业务约束', affectedIds: [] })) }
 }
 const input = (): ElaborationInput => ({ root: '/frozen', requestKey: 'evolution', intent: { nodeId: 'export-contract', rawSource: parseParts(source)!.rawSource }, targets: [{ nodeId: 'export-contract', path, source, sourceDigest: elaborationDigest(source) }], facts: [{ source: 'decision:EXPORT-POLICY', text: '冻结既有业务政策' }], files: files(), maxRepairs: 0 })
 const runner = (output: GeneratedElaboration, prompts: string[] = []): ElaborationRunner => async request => {
@@ -269,9 +269,15 @@ test('独立RULE跨叶搬迁可更新canonical authority，真实constraint变�
   assert.deepEqual(checkGenerationContractIntent(before, after, generationPolicy), [])
   assert.deepEqual(validateContractEvolution(before, after, policy({ mode: 'preserve_business', newNodeRawSources })), [])
   const snapshot = input(), output = build(nextFiles.get(path)!)
+  output.changes[0].removeIds = ['RULE-EXPORT-02']
   output.changes.push(build(addedSource, 'export-idempotency', addedPath).changes[0])
   const result = await elaborate({ ...snapshot, mode: 'preserve_business', targets: [...snapshot.targets, { nodeId: 'export-idempotency', path: addedPath, source: null, sourceDigest: null, rawSource: raw }] }, { runner: runner(output) })
   assert.equal(result.status, 'complete')
+  const omittedRemoval = structuredClone(output)
+  omittedRemoval.changes[0].removeIds = []
+  const duplicate = await elaborate({ ...snapshot, mode: 'preserve_business', targets: [...snapshot.targets, { nodeId: 'export-idempotency', path: addedPath, source: null, sourceDigest: null, rawSource: raw }] }, { runner: runner(omittedRemoval) })
+  assert.equal(duplicate.status, 'exhausted')
+  assert.ok(duplicate.rounds[0].findings.some(issue => issue.code === 'duplicate-id'))
   const rule = after.graph.items.get('RULE-EXPORT-02')!
   assert.equal(rule.kind, 'RULE')
   for (const invalidSource of [addedSource.replace(rule.constraint, '所有组合均可合并，取消幂等隔离'), addedSource.replace('| export-idempotency |', '| export-contract |')]) {
@@ -439,4 +445,27 @@ test('独立raw-only参数需求可派生既有RULE及AC，具体独审映射不
   analysis.analysis.changes[0].ruleIds = ['RULE-EXPORT-02']
   analysis.ref.sha256 = elaborationDigest(JSON.stringify(analysis.analysis))
   assert.ok(validateContractEvolution(before, await readFrozenContracts('/frozen', candidateFiles), selectedPolicy()).some(issue => issue.code === 'decision_scope_exceeded' && issue.itemId === 'RULE-EXPORT-02'))
+})
+
+test('真实冻结move允许空tables保留RULE稳定ID并程序迁移authority，未授权rename仍拒', async () => {
+  const nextPath = '.spec/export/renamed-contract/spec.md'
+  const move: ContractNodeChange = { action: 'move', from: { nodeId: 'export-contract', path }, to: { nodeId: 'renamed-contract', path: nextPath }, evidenceRef: { sha256: sha } }
+  const output = build(source, 'renamed-contract', nextPath)
+  output.changes[0].prose = null
+  output.changes[0].tables = Object.fromEntries(Object.keys(CONTRACT_COLUMNS).map(kind => [kind, []])) as unknown as GeneratedTables
+  const result = await elaborate({ ...input(), nodeChanges: [move] }, { runner: runner(output) })
+  assert.equal(result.status, 'complete')
+  assert.equal(result.changes[0].path, nextPath)
+  assert.equal(result.contracts[0].rawSource, parseParts(source)!.rawSource)
+  assert.ok(result.changes[0].source.includes(parseParts(source)!.rawSource))
+  const rules = result.contracts[0].items.filter(item => item.kind === 'RULE')
+  assert.ok(rules.length > 0 && rules.every(rule => rule.authority === move.to.nodeId))
+  assert.deepEqual(rules.map(rule => rule.id), parseContract({ nodeId: 'export-contract', path, source }).contract!.items.filter(item => item.kind === 'RULE').map(rule => rule.id))
+  const omitted = await elaborate({ ...input(), nodeChanges: [move] }, { runner: runner({ ...output, changes: [] }) })
+  assert.equal(omitted.status, 'complete')
+  assert.equal(omitted.changes[0].path, nextPath)
+  assert.ok(omitted.contracts[0].items.filter(item => item.kind === 'RULE').every(rule => rule.authority === move.to.nodeId))
+  const unauthorized = await elaborate(input(), { runner: runner(output) })
+  assert.equal(unauthorized.status, 'exhausted')
+  assert.ok(unauthorized.rounds[0].findings.some(issue => issue.code === 'write_scope'))
 })

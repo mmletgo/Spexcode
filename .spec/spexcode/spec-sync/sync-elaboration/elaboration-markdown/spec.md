@@ -4,6 +4,9 @@ status: pending
 desc: 原意及绑定由程序复制，临时业务行生成唯一可编辑契约。
 code:
   - spec-cli/src/sync/elaboration-markdown.ts#renderElaboration
+  - spec-cli/src/sync/elaboration-markdown.ts#elaborationPatchErrors
+related:
+  - spec-cli/src/sync/elaboration-markdown.test.ts
 ---
 # 业务行确定性渲染 Markdown
 
@@ -22,3 +25,13 @@ code:
 冻结 nodeChanges 决定节点搬迁与退役，模型不能自行指定生命周期授权。move 按旧节点复制原意、元数据及源摘要，输出新 canonical 定位，并在候选显式保存生命周期记录；retire 可产生没有文件正文变更的候选，由完整旧新图继续检查授权和引用。preserve_business 使用既有正文和元数据，忽略模型重写的业务解释与标题，仅渲染必要契约行绑定及 code/related，防止纯重构改写文案。
 
 纯重构替换业务表时识别反引号和波浪线围栏，围栏中的固定标题与示例表格逐字保留；仅替换围栏外的真实契约表。验证登记的临时技术渲染始终使用独立 reelaborate 上下文，不继承业务纯重构、迁移或再细化模式，不会清空既有业务表。
+
+当前统一行差量协议从本轮冻结 sync-v1 Markdown 解析旧行身份，只替换同 ID 完整行、追加新行及显式 removeIds；未列旧行保持原字节、顺序和义务。同节点重复更新、重复删除、未知删除或同 ID 删除后更新被明确拒绝，不能用合并掩盖重复。跨叶移动以旧叶 removeIds 与新叶完整行表达，再经旧新全图核对；缺少删除仍保留旧行并触发重复 ID，节点迁移或退役仍仅来自冻结生命周期授权。
+
+prose:null保留完整既有 expanded 段，包括表间/表后说明、围栏示例和无状态不适用依据；显式 string 替换只改业务解释，仍受原意与既有义务门禁。没有业务行的 raw-only 或新节点从空基线应用同一协议。删空类型省略该表，无状态与有状态转换使用显式正文及普通 STATE/EVENT/TR 行，渲染器不猜业务 N/A。空差量且元数据不变、原样行更新逐字返回既有文件（含换行格式），不能借纯重构重排表格或改写说明。
+
+差量回归验证大冻结基线只返回一条新行但完整保留全部旧 ID、raw 和后置正文，响应大小由新行决定；更新、显式删除、重复操作、raw-only、正文围栏和状态不适用转换均保持可解析完整候选。
+
+changes 省略已启用 sync-v1 的既有目标时，程序把该冻结文件补入完整候选，保持原字节；只返回子叶差量或空 changes 不要求模型重抄 primary/其他未变叶。新节点或 raw-only 目标没有可沿用的完整行基线，省略它们是明确未细化错误。冻结 retire 排除旧目标，不能因补全而复活；冻结 move 以新定位补入旧内容，保留 RULE 行或提供旧 canonical authority 时仅按该真实 move 将 authority 更新为新 nodeId，业务 ID/约束/raw 保持，不授权任意改名。
+
+冻结表头可使用解析器允许的非canonical列顺序。沿用正文保留旧表头时，新增/替换行按现解析器 contractTableCells 读出的旧列序渲染；显式正文替换使用canonical新表头时，所有继承旧行先按已解析字段重建到新列序。两方向均保留原字段语义，不能将目标、来源或验证绑定错列。
