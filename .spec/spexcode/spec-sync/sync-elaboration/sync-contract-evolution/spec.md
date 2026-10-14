@@ -31,4 +31,6 @@ RULE 独立跨叶搬迁时，旧定义与新定义的 authority 均须等于各�
 
 当前及已结算裁决使用程序从真实 request、旧独审 analysis 与所选 finding 冻结的 decisionAuthorities；fact.text 或模型声明不能提供作用范围。decision 来源的 AC 授权同时核对验收目标和每个来源 ID，仅沿所选规则的依赖闭包授权，不上溯父 REQ 扩成全域。当前裁决还限制实际既有业务语义变化与退役，换成 user:raw、新 code 来源或旧 decision 名称不能扩权；既有身份必须属于旧图闭包，新图仅补入新身份，不能加一条依赖边给旧无关义务自批权限。原有 code 来源的独立实现细节及合法定位搬迁保持各自门禁。
 
+同一操作的独立真实作者需求编辑仍可自动结算：具体 user:raw 验收提案经独审，来源 ID 对应程序作者差量及旧来源闭包，可更新对应 AC；raw-only 高层需求可使用合法 REQ 来源，不强制虚构 RULE。它不豁免未选规则；其他既有业务项变化仅在该 ID 本身属于实际作者差量且独审明确 allowed_change 时通过。相容整合保留真实作者 afterRaw，以独审冻结 rawIntegrations 的 sourceRaw、具体 resolution 的 resolvedRaw 与本轮 expectedRaw 精确匹配，不能用 contains 或把模型整合正文回填为作者事实。已审真实作者节点删除仍可逐项退役，不借另一裁决扩大范围。
+
 带 analysisRef 的逐项退役必须对应已审提案、同节点退休记录、content:null 删除候选和具体 allowed_change；user:raw 还要求程序冻结的作者删除差量（对应节点/路径/ID、beforeRaw 非空缺且 afterRaw 为 null）。三方来源中的 raw 版本可以不同，不能把前轮交付新原意误当作作者未删除。decision 退役使用具体所选作用范围及删除证明，不冒充作者先删除；不带分析引用的明确用户/计划授权仍须可信来源。

@@ -73,7 +73,7 @@ function checkInput(input: ElaborationInput): void {
   for (const change of input.authorizedChanges ?? []) {
     const existing = items.find(item => item.id === change.id)
     if (!existing || !change.reason.trim() || authorizations.has(change.id) || !['retire', 'update_verification', 'update_acceptance'].includes(change.action) || (change.action === 'update_verification' && existing.kind !== 'VERIFY') || (change.action === 'update_acceptance' && existing?.kind !== 'AC')) throw new TypeError(`合法契约变更需明确既有身份、操作和依据: ${change.id}`)
-    const errors = contractAuthorizationErrors(change, baseline, input)
+    const errors = contractAuthorizationErrors(change, baseline, { ...input, newNodeRawSources: new Map(input.targets.map(target => [target.path, target.nodeId === input.intent.nodeId ? input.intent.rawSource : target.rawSource ?? parseParts(target.source ?? '')?.rawSource ?? ''])) })
     if (errors.length) throw new TypeError(`${change.action === 'update_acceptance' ? '验收变更没有可信分析' : '契约变更没有可信来源'}: ${change.id}; ${errors.join('; ')}`)
     authorizations.add(change.id)
   }

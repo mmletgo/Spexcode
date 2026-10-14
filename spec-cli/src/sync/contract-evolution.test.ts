@@ -370,4 +370,45 @@ test('裁决退役逐项绑定旧节点删除独审，全节点选择通过、�
   analysis.analysis.decisionAuthorities = [partial]
   analysis.ref.sha256 = elaborationDigest(JSON.stringify(analysis.analysis))
   assert.ok(validateContractEvolution(before, after, policy({ analysis, authorizedChanges: authorizedChanges.map(change => ({ ...change, analysisRef: analysis.ref })), facts, decisionAuthorities: [partial], nodeChanges: [{ ...analysis.analysis.nodeChanges[0], evidenceRef: analysis.ref }] })).some(issue => issue.code === 'contract_authorization_untrusted' && issue.itemId === 'AC-EXPORT-01'))
+  authorDeleted.analysis.decision = { requestRef: partial.requestRef, analysisRef: partial.analysisRef, findingIds: partial.findingIds }
+  authorDeleted.analysis.decisionAuthorities = [partial]
+  authorDeleted.ref.sha256 = elaborationDigest(JSON.stringify(authorDeleted.analysis))
+  assert.deepEqual(validateContractEvolution(before, after, authorPolicy()), [])
+})
+
+test('当前裁决保留独立raw-only作者更新，精确三方正文及具体AC授权不扩未选规则范围', async () => {
+  const before = await readFrozenContracts('/frozen', files()), analysis = evidence(), originalRaw = before.contracts[0].rawSource
+  const authorRaw = `${originalRaw}\n重复提交还应返回当前状态。`, integratedRaw = `${authorRaw}\n失败重试最多两次。`
+  const authority = { stableDecisionId: 'RETRY-ONLY', requestRef: { sha256: sha }, operationId: 'operation', inputId: 'input', analysisRef: { sha256: sha }, findingIds: ['finding-retry'], ruleIds: ['RULE-EXPORT-06'], affectedIds: ['RULE-EXPORT-06'], paths: [path], decision: { choice: 'new_rule' as const, rule: '失败重试最多两次。' } }
+  const proposal = { id: 'AC-EXPORT-01', action: 'update_acceptance' as const, source: 'user:raw' as const, reason: '原不可变作者请求明确返回当前状态', ruleIds: ['REQ-EXPORT-01'] }
+  analysis.analysis.decision = { requestRef: authority.requestRef, analysisRef: authority.analysisRef, findingIds: authority.findingIds }
+  analysis.analysis.decisionAuthorities = [authority]
+  analysis.analysis.authorizedChanges = [proposal]
+  analysis.analysis.authorChanges = [{ nodeId: 'export-contract', path, beforeRaw: originalRaw, afterRaw: authorRaw, changedIds: ['REQ-EXPORT-01'] }]
+  analysis.analysis.rawIntegrations = [{ path, sourceRaw: authorRaw, deliveryRaw: originalRaw, resolvedRaw: authorRaw, expectedRaw: integratedRaw }]
+  analysis.analysis.resolutions = [{ path, content: source.replace(originalRaw, authorRaw), mode: '100644' }]
+  analysis.analysis.changes[0].ruleIds = proposal.ruleIds
+  analysis.analysis.changes[0].paths = [path]
+  analysis.ref.sha256 = elaborationDigest(JSON.stringify(analysis.analysis))
+  const changes = (): AuthorizedContractChange[] => [{ ...proposal, analysisRef: analysis.ref }]
+  const expectedRaw = new Map([[path, integratedRaw]])
+  const candidate = source.replace(originalRaw, integratedRaw).replace('同组合返回同ID，冲突不改原任务', '同组合返回同ID及当前状态，冲突不改原任务')
+  const candidateFiles = files(); candidateFiles.set(path, candidate)
+  const after = await readFrozenContracts('/frozen', candidateFiles)
+  const selectedPolicy = (): ContractEvolutionPolicy => policy({ analysis, authorizedChanges: changes(), decisionAuthorities: [authority], newNodeRawSources: expectedRaw })
+  assert.deepEqual(validateContractEvolution(before, after, selectedPolicy()), [])
+  const result = await elaborate({ ...input(), intent: { nodeId: 'export-contract', rawSource: integratedRaw }, analysis, authorizedChanges: changes(), decisionAuthorities: [authority] }, { runner: runner(build(candidate)) })
+  assert.equal(result.status, 'complete')
+  const bareRuleFiles = new Map(candidateFiles); bareRuleFiles.set(path, candidate.replace('不同filter拒绝且原任务不变', '不同filter也返回同任务'))
+  assert.ok(validateContractEvolution(before, await readFrozenContracts('/frozen', bareRuleFiles), selectedPolicy()).some(issue => issue.code === 'decision_scope_exceeded' && issue.itemId === 'RULE-EXPORT-02'))
+  analysis.analysis.rawIntegrations[0].expectedRaw = authorRaw
+  analysis.ref.sha256 = elaborationDigest(JSON.stringify(analysis.analysis))
+  assert.ok(validateContractEvolution(before, after, selectedPolicy()).some(issue => issue.code === 'decision_scope_exceeded' && issue.itemId === 'AC-EXPORT-01'))
+  const explicitRuleFiles = files(); explicitRuleFiles.set(path, source.replace('不同filter拒绝且原任务不变', '不同filter明确拒绝并保持原任务状态'))
+  analysis.analysis.authorizedChanges = []
+  analysis.analysis.authorChanges = [{ nodeId: 'export-contract', path, beforeRaw: originalRaw, afterRaw: originalRaw, changedIds: ['RULE-EXPORT-02'] }]
+  analysis.analysis.changes[0].affectedIds = ['RULE-EXPORT-02']
+  analysis.analysis.changes[0].ruleIds = ['RULE-EXPORT-02']
+  analysis.ref.sha256 = elaborationDigest(JSON.stringify(analysis.analysis))
+  assert.deepEqual(validateContractEvolution(before, await readFrozenContracts('/frozen', explicitRuleFiles), policy({ analysis, decisionAuthorities: [authority] })), [])
 })
