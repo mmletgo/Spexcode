@@ -25,3 +25,5 @@ P3 retainConflicts透传同一作者投影原语，保留待独审的文本重�
 P4透传精确逐资源 FrozenBaselineSelection；canonical clean 仍对每个实际 pair 的 source 与 delivery 使用相同不可变属性投影。canonical作者证据保留内嵌逐ID真实语义投影及selection digest，不能以工具clean覆盖或丢弃未消费业务意图。
 
 executionPaths透传精确候选写范围；只读上下文可从真实InputSnapshot独立读取，不把授权目录内不相关的作者dirty夹带进候选。
+
+contextPaths透传选中只读上下文；其原物理source对象保持真实，包含dirty配置、oracle删除与mode。作者clean投影仍服务执行路径的三方整合，不把旧HEAD只读内容冒充当前输入；readonly上下文不会自动取得执行授权。

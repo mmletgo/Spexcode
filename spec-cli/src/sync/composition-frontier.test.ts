@@ -283,3 +283,23 @@ test('code-only真实ff采纳完整byte head后无代码回声，再A3仍进入�
   const analysis = await analyzeCodeBehavior({ snapshot: next, baseline: null, baselineSelection: selection, composed: updated, readSetDigest: 'test-read-A3', policyDigest: 'test-policy-code', requestKey: 'code-A3', timeoutMs: 10000, plan: f.plan }, fakeBehavior(codeA3, frozen => { assert.deepEqual(frozen.requiredChangedPaths, [f.codePath]) }, f.codePath))
   assert.match(analysis.resolutions[0].content!, /resultVersion = 'A3'/); assert.match(analysis.resolutions[0].content!, /deliveryPolicy = 'B1'/)
 })
+
+test('readonly context使用真实dirty config/oracle对象，保持mode/删除且不升写范围', async t => {
+  const f = await fixture(t), configPath = '.spec/spexcode.json', oracle = 'tests/export.test.mjs'
+  writeFileSync(join(f.root, configPath), '{"name":"old readonly context"}\n')
+  git(f.root, 'add', configPath); git(f.root, 'commit', '-m', 'tracked readonly configuration')
+  writeFileSync(join(f.root, configPath), '{"name":"actual dirty readonly context"}\n'); chmodSync(join(f.root, configPath), 0o755)
+  rmSync(join(f.root, oracle))
+  const input = await captureInputSnapshot(f.root), selection = f.selection()
+  const result = composeInputSnapshots(input, selection, { retainConflicts: true, executionPaths: [path], contextPaths: [configPath, oracle] })
+  const entries = readTree(input.source.commonDir, result.composed!.tree), actual = verifySnapshot(input).find(entry => entry.path === configPath)!
+  assert.equal(entries.find(entry => entry.path === configPath)?.oid, actual.oid)
+  assert.equal(entries.find(entry => entry.path === configPath)?.mode, '100755')
+  assert.ok(!entries.some(entry => entry.path === oracle))
+  assert.deepEqual(result.composed!.sourceInputId, input.id)
+  const evidence = readCompositionEvidence(input, result.composed!, selection)
+  assert.deepEqual(evidence.executionPaths, [path]); assert.deepEqual(evidence.contextPaths, [configPath, oracle].sort())
+  const forged = structuredClone(evidence); forged.contextPaths = []
+  assert.throws(() => readCompositionEvidence(input, { ...result.composed!, compositionEvidenceBlob: writeEvidence(input.source.commonDir, forged) }, selection), /true readonly source\/HEAD object differs/)
+  const after = await captureInputSnapshot(f.root); assert.equal(after.id, input.id); assert.equal(after.indexDigest, input.indexDigest)
+})

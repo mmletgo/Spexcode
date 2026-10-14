@@ -7,7 +7,7 @@ import type { ContractItem } from '@spexcode/spec-core/contracts'
 import { contractBusinessMeaning, contractBusinessProse, sameContractBusinessMeaning } from './contract-evolution.js'
 import { canonicalContractFilterBindings, cleanCanonicalContractText } from '../contract-filter.js'
 import type { BaselinePair, BaselineResource, BlobRef, ComposedInputRef, FrozenBaselineSelection, InputSnapshot } from './operation-types.js'
-import { contentHash, objectGit, readEvidence, readObject, readTree, verifySnapshot, writeEvidence, writeObject, writeTree } from './snapshot.js'
+import { contentHash, objectGit, readEvidence, readObject, readTree, validateRepositoryPath, verifySnapshot, writeEvidence, writeObject, writeTree } from './snapshot.js'
 import type { TreeEntry } from './snapshot.js'
 
 export type CompositionConflict = { path: string; base: TreeEntry | null; source: TreeEntry | null; delivery: TreeEntry | null }
@@ -26,7 +26,7 @@ export function adoptedDeliveryPaths(source: InputSnapshot, prior?: BaselinePair
 }
 
 /** source 的真实差量叠加到前次已验证 delivery；任何重叠歧义保留三方对象而不自动覆盖。 */
-export type CompositionOptions = { projectEntries?: (snapshot: InputSnapshot, entries: TreeEntry[]) => TreeEntry[]; retainConflicts?: boolean; executionPaths?: readonly string[] }
+export type CompositionOptions = { projectEntries?: (snapshot: InputSnapshot, entries: TreeEntry[]) => TreeEntry[]; retainConflicts?: boolean; executionPaths?: readonly string[]; contextPaths?: readonly string[] }
 export function composeInputSnapshots(newSource: InputSnapshot, prior?: BaselinePair | FrozenBaselineSelection | null, options: CompositionOptions = {}): { composed: ComposedInputRef | null; conflicts: CompositionConflict[] } {
   if (prior && 'version' in prior) return composeSelectedInput(newSource, prior, options)
   const project = (snapshot: InputSnapshot): TreeEntry[] => { const entries = verifySnapshot(snapshot); return options.projectEntries ? options.projectEntries(snapshot, entries) : entries }
@@ -91,6 +91,7 @@ export type IntentResidual = {
 }
 export type SelectedCompositionEvidence = {
   version: 'selected-composition-v1'; sourceInputId: string; baselineSelectionDigest: string
+  executionPaths: string[]; contextPaths: string[]
   paths: { path: string; pairId: string | null; base: TreeEntry | null; delivery: TreeEntry | null; source: TreeEntry | null; adopted: boolean }[]
   intents: IntentResidual[]; artifacts: IntentArtifactResidual[]; residualPaths: string[]; conflicts: CompositionConflict[]
   controlledAuthorPatch?: { requestBlob: BlobRef; before: TreeEntry; next: TreeEntry; intents: IntentResidual[] }
@@ -178,7 +179,8 @@ function composeSelectedInput(input: InputSnapshot, selection: FrozenBaselineSel
   }
   const incoming = project(input), next = new Map(incoming.map(entry => [entry.path, entry]))
   const headEntries = readTree(commonDir, objectGit(commonDir, ['rev-parse', `${input.headCommit}^{tree}`]).toString().trim())
-  const writable = (path: string): boolean => options.executionPaths ? options.executionPaths.includes(path) : selection.bindings.some(binding => binding.resource.kind === 'path' && binding.resource.path === path)
+  const executionPaths = [...new Set(options.executionPaths ?? selection.bindings.flatMap(binding => binding.resource.kind === 'path' ? [binding.resource.path] : []))].sort()
+  const writable = (path: string): boolean => executionPaths.includes(path)
   const result = new Map(headEntries.map(entry => [entry.path, entry])), paths: SelectedCompositionEvidence['paths'] = [], conflicts: CompositionConflict[] = []
   const adoption = new Map<string, Set<string>>()
   const adoptedPaths = (pair: BaselinePair): Set<string> => { let value = adoption.get(pair.id); if (!value) { value = adoptedDeliveryPaths(input, pair); adoption.set(pair.id, value) }; return value }
@@ -239,10 +241,17 @@ function composeSelectedInput(input: InputSnapshot, selection: FrozenBaselineSel
       conflicts.push({ path: artifact.path, base: byte.base, source: byte.source, delivery: byte.delivery })
     }
   }
+  const physicalSource = new Map(verifySnapshot(input).map(entry => [entry.path, entry]))
+  const requestedContext = (options.contextPaths ?? []).map(validateRepositoryPath)
+  const contextPaths = [...new Set(requestedContext.flatMap(parent => {
+    const known = [...new Set([...physicalSource.keys(), ...headEntries.map(entry => entry.path)])].filter(path => path === parent || path.startsWith(`${parent}/`))
+    return known.length ? known : [parent]
+  }).filter(path => !writable(path)))].sort()
+  for (const path of contextPaths) { const entry = physicalSource.get(path); if (entry) result.set(path, entry); else result.delete(path) }
   const entries = [...result.values()].sort((a, b) => a.path.localeCompare(b.path))
   for (const entry of entries) if (entries.some(other => entry.path.startsWith(`${other.path}/`)) && !conflicts.some(conflict => conflict.path === entry.path)) conflicts.push({ path: entry.path, base: null, source: next.get(entry.path) ?? null, delivery: result.get(entry.path) ?? null })
   if (conflicts.length && !options.retainConflicts) return { composed: null, conflicts }
-  const evidence: SelectedCompositionEvidence = { version: 'selected-composition-v1', sourceInputId: input.id, baselineSelectionDigest: selection.digest, paths, intents, artifacts, residualPaths: [...residualPaths].sort(), conflicts }
+  const evidence: SelectedCompositionEvidence = { version: 'selected-composition-v1', sourceInputId: input.id, baselineSelectionDigest: selection.digest, executionPaths, contextPaths, paths, intents, artifacts, residualPaths: [...residualPaths].sort(), conflicts }
   const tree = writeTree(commonDir, entries), contentDigest = contentHash(JSON.stringify(entries)), manifestBlob = writeEvidence(commonDir, { version: 1, entries })
   objectGit(commonDir, ['update-ref', `refs/spex-sync/compositions/${tree}`, tree])
   return { composed: { sourceInputId: input.id, previousBaselinePairId: null, baselineSelectionDigest: selection.digest, tree, manifestBlob, contentDigest, compositionEvidenceBlob: writeEvidence(commonDir, evidence), authorProjectionBlob: writeEvidence(commonDir, { version: 'selected-author-projection-v1', sourceInputId: input.id, baselineSelectionDigest: selection.digest, intents, artifacts, residualPaths: evidence.residualPaths }) }, conflicts }
@@ -258,6 +267,18 @@ export function readCompositionEvidence(input: InputSnapshot, composed: Composed
   if (contentHash(JSON.stringify(entries)) !== composed.contentDigest || !readEvidence(commonDir, composed.manifestBlob).equals(Buffer.from(JSON.stringify({ version: 1, entries })))) throw new Error('SYNC_COMPOSITION_BINDING: tree or manifest')
   const entriesCache = new Map<string, TreeEntry[]>()
   const actualEntries = (snapshot: InputSnapshot): TreeEntry[] => { let value = entriesCache.get(snapshot.id); if (!value) { value = verifySnapshot(snapshot); entriesCache.set(snapshot.id, value) }; return value }
+  for (const paths of [evidence.executionPaths, evidence.contextPaths]) {
+    if (!Array.isArray(paths) || canonical([...new Set(paths)].sort()) !== canonical(paths)) throw new Error('SYNC_COMPOSITION_BINDING: execution/context paths missing or duplicated')
+    paths.forEach(validateRepositoryPath)
+  }
+  if (evidence.executionPaths.some(path => !selection.bindings.some(binding => binding.resource.kind === 'path' && binding.resource.path === path)) || evidence.contextPaths.some(path => evidence.executionPaths.includes(path))) throw new Error('SYNC_COMPOSITION_BINDING: execution/context scope differs')
+  const physical = new Map(actualEntries(input).map(entry => [entry.path, entry])), composedFiles = new Map(entries.map(entry => [entry.path, entry]))
+  const head = new Map(readTree(commonDir, objectGit(commonDir, ['rev-parse', `${input.headCommit}^{tree}`]).toString().trim()).map(entry => [entry.path, entry]))
+  for (const path of new Set([...physical.keys(), ...composedFiles.keys(), ...head.keys(), ...evidence.contextPaths])) {
+    if (evidence.executionPaths.includes(path)) continue
+    const expected = evidence.contextPaths.includes(path) ? physical.get(path) : head.get(path)
+    if (!same(expected, composedFiles.get(path))) throw new Error(`SYNC_COMPOSITION_BINDING: true readonly source/HEAD object differs ${path}`)
+  }
   const cache = new Map<string, Map<string, IntentObject>>(), adoption = new Map<string, Set<string>>()
   const objects = (snapshot: InputSnapshot): Map<string, IntentObject> => { let value = cache.get(snapshot.id); if (!value) { value = intentObjects(commonDir, actualEntries(snapshot)); cache.set(snapshot.id, value) }; return value }
   const current = new Map(objects(input)), patch = evidence.controlledAuthorPatch

@@ -8,7 +8,7 @@ import type { TreeEntry } from './snapshot.js'
 import { readFootprintConfiguration, snapshotFootprintFile } from './trusted-footprint.js'
 
 /** 真实快照不变；canonical clean 的作者字节才参与三方整合和后续候选。 */
-export function composeAuthoredInput(input: InputSnapshot, prior?: BaselinePair | FrozenBaselineSelection, options: Pick<CompositionOptions, 'retainConflicts' | 'executionPaths'> = {}): ReturnType<typeof composeInputSnapshots> {
+export function composeAuthoredInput(input: InputSnapshot, prior?: BaselinePair | FrozenBaselineSelection, options: Pick<CompositionOptions, 'retainConflicts' | 'executionPaths' | 'contextPaths'> = {}): ReturnType<typeof composeInputSnapshots> {
   const root = input.source.canonicalRoot, commonDir = input.source.commonDir
   const configuration = readFootprintConfiguration('/usr/bin/git', root)
   const filters = configuration.records.filter((_, index) => index % 2 === 1).filter(record => record.startsWith('filter.'))
