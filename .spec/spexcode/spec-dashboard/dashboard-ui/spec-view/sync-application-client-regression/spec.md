@@ -25,3 +25,5 @@ related:
 
 
 裁决客户端验证原operation/input/analysis/selected findings和稳定请求正文完整透传，与retry/patch明确分离；证据投影保新规则并排除prompt。
+
+裁决资格投影回归验证在途 P1 虽有 early conflicted reason，服务端 eligible=false 仍禁写；已结算 failed/budget_exhausted、conflicted、needs_input、superseded 的 eligible=true 可开放。stale、资源恢复或 invalidated 始终覆盖真实资格并禁用，不以 JSX 字串或模拟截图冒充交互验收。

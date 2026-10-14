@@ -12,7 +12,7 @@ export default function SyncBusinessDecision({ detail, targetTree, disabled, onS
   const request = useRef(null)
   const busyRef = useRef(false)
   const { operation, decisionContext } = detail
-  const pending = ['needs_input', 'conflicted'].includes(operation.phase) || !!operation.blockedReason
+  const pending = ['needs_input', 'conflicted'].includes(operation.phase) || !!operation.blockedReason || detail.decisionEligibility.eligible
   const submit = async (choice) => {
     if (busyRef.current) return
     const payload = { operationId: operation.id, inputId: operation.input.id, analysisRef: decisionContext.analysisRef, findingIds: selected, decision: choice === 'new_rule' ? { choice, rule } : { choice } }

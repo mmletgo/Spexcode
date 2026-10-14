@@ -116,7 +116,7 @@ export default function SyncOperationPanel({ nodeId, nodePath, targetTree = null
   const current = held?.identity === identity ? held.value : null
   const currentError = error?.identity === identity ? error : null
   const recent = current?.operations[0]
-  const detail = submittedOperation && (!recent || submittedOperation.createdAtMs > recent.operation.createdAtMs) ? { operation: submittedOperation, attempt: null, journals: [], resources: [], retryEligibility: { eligible: false }, stale: false, sourceSynced: false, executionAvailability: { status: 'ready' } } : current?.operations.find(item => item.operation.id === selectedOperationId) || recent || null
+  const detail = submittedOperation && (!recent || submittedOperation.createdAtMs > recent.operation.createdAtMs) ? { operation: submittedOperation, attempt: null, journals: [], resources: [], retryEligibility: { eligible: false }, decisionEligibility: { eligible: false }, stale: false, sourceSynced: false, executionAvailability: { status: 'ready' } } : current?.operations.find(item => item.operation.id === selectedOperationId) || recent || null
   const settings = current?.settings
   const model = detail && syncProjection(detail, settings?.activation)
   const retryPhase = detail && ['failed', 'budget_exhausted', 'cancelled'].includes(detail.operation.phase)
@@ -129,7 +129,7 @@ export default function SyncOperationPanel({ nodeId, nodePath, targetTree = null
       else if (action === 'run' || action === 'code') {
         runRequest.current = requestIdentity(runRequest.current, { nodeId, targetTree, contentRevision, configDigest: settings.configDigest, staleOf: detail?.stale ? detail.operation.id : null, retryOf: action === 'run' ? retryOf : null, origin: action === 'code' ? 'code' : 'initial' })
         const result = await runSync(nodeId, runRequest.current.id, targetTree, action === 'code' ? { origin: 'code' } : retryOf ? { retryOf, origin: detail.operation.origin } : undefined)
-        if (result.operation) setHeld({ identity, value: { settings, operations: [{ operation: result.operation, attempt: null, journals: [], resources: [], retryEligibility: { eligible: false }, stale: false, sourceSynced: false, executionAvailability: { status: 'ready' } }] } })
+        if (result.operation) setHeld({ identity, value: { settings, operations: [{ operation: result.operation, attempt: null, journals: [], resources: [], retryEligibility: { eligible: false }, decisionEligibility: { eligible: false }, stale: false, sourceSynced: false, executionAvailability: { status: 'ready' } }] } })
       } else {
         const value = await controlSync(detail.operation.id, action, targetTree)
         setHeld({ identity, value: { settings, operations: [value] } })
@@ -161,7 +161,7 @@ export default function SyncOperationPanel({ nodeId, nodePath, targetTree = null
     {current?.operations.length > 1 && <label className="sync-op-history">{t('syncOperation.history')} <select disabled={!!busy} value={detail.operation.id} onChange={event => setSelectedOperationId(event.target.value)}>{current.operations.map(item => <option key={item.operation.id} value={item.operation.id}>{item.operation.origin} · {t(`syncOperation.phase.${item.operation.phase}`)} · {item.operation.id}</option>)}</select></label>}
     {model?.failure && <p className="sync-op-error" role="alert"><code>{model.failure.code}</code> · {model.failure.message}</p>}
     {retryPhase && !detail.stale && detail.retryEligibility?.reason && <p className="sync-op-note"><code>{detail.retryEligibility.reason.code}</code> · {detail.retryEligibility.reason.message}</p>}
-    {detail?.decisionContext && <SyncBusinessDecision key={`decision:${detail.operation.id}`} detail={detail} targetTree={targetTree} disabled={!!busy || !!targetTree || detail.stale || model?.state === 'recovery_required' || !settings?.enabled} onSubmitted={() => setRefresh(value => value + 1)} />}
+    {detail?.decisionContext && <SyncBusinessDecision key={`decision:${detail.operation.id}`} detail={detail} targetTree={targetTree} disabled={!!busy || !!targetTree || !model.canDecide || !settings?.enabled} onSubmitted={() => setRefresh(value => value + 1)} />}
     {detail && <OperationEvidence key={`evidence:${detail.operation.id}`} detail={detail} model={model} nodeId={nodeId} nodePath={nodePath} targetTree={targetTree} />}
   </section>
 }

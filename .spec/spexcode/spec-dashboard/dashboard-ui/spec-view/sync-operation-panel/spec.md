@@ -35,3 +35,5 @@ status 定时读取与用户保存refreshKey驱动刷新，不依赖全局graph-
 
 
 P3手动“接入代码修改”提交code来源，正常“立即同步”保initial语义；后台外部watcher尚未启用。可信decisionContext由 [[sync-business-decision]] 展示三种业务裁决，无分歧不加确认。操作记录可切换历史原operation查原analysis和请求；裁决请求展示选择、所选finding IDs、用户新rule、原operation与继承原正文diff。新operation可以supersede原冲突但不能丢原始需求链。
+
+裁决按钮复用 syncProjection.canDecide 消费实际 Detail.decisionEligibility；活动 P1 的冲突证据继续可读，尚不可裁决时原三按钮禁用，结算并取得真实资格后开放。global busy、只读树、未启用配置仍额外禁写；两个准入后尚未查询的临时 Detail 明确 eligible=false，不猜执行资格。前端不另建 phase/attempt/resource 判定，既有布局、焦点与 Hooks 顺序保持。

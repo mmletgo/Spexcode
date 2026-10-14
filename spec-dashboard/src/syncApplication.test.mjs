@@ -12,7 +12,19 @@ const scope = { paths: ['.spec/alpha/spec.md'], contractIds: ['REQ-1'], flowIds:
 const operation = { id: 'op', ingressKey: 'ingress', payloadDigest: 'payload', rootCauseId: 'root', origin: 'spec', generation: 1, revision: 1, phase: 'workspace_synced', control: 'run', input, previousBaselinePair: null, scope, readyScope: scope, blockedScope: { paths: [], contractIds: [], flowIds: [] }, deliveredScope: scope, blockedReason: null, policyDigest: 'policy', impactDigest: 'impact', readSetDigest: 'readset', budget: { maxAttempts: 3, maxCalls: 6, maxRepairs: 2, timeoutMs: 1000 }, callsUsed: 1, deadlineAtMs: 1001, currentAttemptId: 'attempt', dispatchMessageId: 'dispatch', delivery: null, deliveryPlan: { canonicalRoot: '/repo/private', branch: 'delivery', baseCommit: 'head' }, createdAtMs: 1, updatedAtMs: 2 }
 const receipt = { id: 'receipt', deliverySnapshot: { ...input, source: { ...source, canonicalRoot: '/repo/published' } } }
 const settled = { status: 'settled', receipt, generation: 1, attemptId: 'attempt' }
-const detail = { operation, attempt: null, journals: [settled], resources: [], retryEligibility: { eligible: false }, stale: false, sourceSynced: false, executionAvailability: { status: 'ready' } }
+const detail = { operation, attempt: null, journals: [settled], resources: [], retryEligibility: { eligible: false }, decisionEligibility: { eligible: false }, stale: false, sourceSynced: false, executionAvailability: { status: 'ready' } }
+
+test('early conflict evidence does not grant a decision before backend eligibility settles', () => {
+  const inFlight = { ...detail, operation: { ...operation, phase: 'elaborating', blockedReason: 'conflicted' }, attempt: { status: 'running' }, journals: [], decisionEligibility: { eligible: false, reason: { code: 'SYNC_DECISION_ACTIVE', message: '当前细化仍在执行' } } }
+  assert.equal(syncProjection(inFlight, 'enabled').canDecide, false)
+  for (const phase of ['failed', 'budget_exhausted', 'conflicted', 'needs_input', 'superseded']) {
+    const qualified = { ...inFlight, operation: { ...inFlight.operation, phase }, attempt: { status: 'failed' }, decisionEligibility: { eligible: true } }
+    assert.equal(syncProjection(qualified, 'enabled').canDecide, true, phase)
+    assert.equal(syncProjection({ ...qualified, stale: true }, 'enabled').canDecide, false)
+    assert.equal(syncProjection({ ...qualified, executionAvailability: { status: 'recovery_required' } }, 'enabled').canDecide, false)
+    assert.equal(syncProjection(qualified, 'invalidated').canDecide, false)
+  }
+})
 
 test('only a settled current receipt projects delivery completion and its actual tree', () => {
   const view = syncProjection(detail)

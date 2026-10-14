@@ -25,3 +25,5 @@ activation=invalidated 也使旧receipt不能投影为当前已同步，保留�
 
 
 decideSync直接传原operation ID、inputId、analysisRef、选中finding IDs及用户choice/rule到共享decide HTTP入口；保持payload幂等键与原错误code/message，不混成retry或SpecBodyEdit。业务分析证据投影保具体路径、原意、双方行为、反例；裁决投影保选择/新规则/所选项/原operation身份，不泄露prompt。
+
+Detail.decisionEligibility 是服务端始终返回的裁决资格；syncProjection 的 canDecide 仅在该 eligible 为真且非 stale、非 recovery_required、授权未 invalidated 时开放。前端不重算 phase、attempt、资源或 journal 的裁决算法；早期 conflict 证据不代表当前可提交裁决。

@@ -50,6 +50,7 @@ export function syncProjection(detail, activation) {
     sourceRoot: operation.input.source.canonicalRoot,
     failure: recovery ? executionAvailability.failure : attempt?.failure,
     canRetry: !recovery && !stale && activation !== 'invalidated' && detail.retryEligibility?.eligible === true,
+    canDecide: !recovery && !stale && activation !== 'invalidated' && detail.decisionEligibility.eligible,
     canRecover: recovery && (resources.length > 0 || journals.some((journal) => journal.status !== 'settled')),
     canPause: !recovery && !TERMINAL.has(operation.phase) && !['paused', 'pausing', 'cancelling'].includes(operation.phase),
     canResume: !recovery && operation.phase === 'paused',
