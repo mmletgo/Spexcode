@@ -40,3 +40,7 @@ AC-APPLICATION-01 验证配置缺口、enable 摘要 CAS 与配置字节保留�
 AC-APPLICATION-P3 在真实临时Git和canonical SQLite中冻结可信analysis checkpoint；手动code/combined入口真实受理。三个选择各自建立decision新operation，keep_intent无正文差量不丢请求，adopt/new_rule固定plan确含用户新输入且保旧原意；相同请求并发只派发一次，同key不同选择拒绝。错analysis、未知finding、stale input拒绝，旧operation superseded但分析可查，source/index/HEAD不先写。该场景只证明应用准入，真实生成/独审/Docker由协调器与上层验收。
 
 跨应用/store验证：同choice换运输UUID、同findings换顺序仍复用同operation/deadline/calls，不只验证samekey幂等；修改选择仍需新业务输入且samekey拒绝。
+
+P3准入同时断言固定plan的decisionAuthorities精确只含所选finding的规则/影响项/路径及不可变requestRef，不从用户任意字段或自然语言fact提取授权；未选独立GAP不进入该结构。
+
+AC-APPLICATION-P3-PARTIAL用真实临时Git及明确fixture结算基线验证：已交付A规则后在同一原输入选择B，冻结raw同时保留A、未选义务、原受控正文编辑和B选择，source字节保持只读；先复现旧attempt raw丢失A，再验证修复。不将fixture receipt宣称真实模型或Docker交付。

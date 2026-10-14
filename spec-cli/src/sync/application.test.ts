@@ -20,6 +20,9 @@ import { sessionIdForCreateKey } from '../sessions.js'
 import { contentHash, identifyWorktree, writeEvidence, readEvidence } from './snapshot.js'
 import { claimFileMutex } from './file-mutex.js'
 import type { FileMutex } from './file-mutex.js'
+import { composeAuthoredInput } from './author-input.js'
+import { composeControlledRequest } from './request-input.js'
+import type { ApplyJournal, BaselinePair } from './operation-types.js'
 
 const settings: SyncSettings = {
   version: 'sync-settings-v1', sourcePaths: ['src'], testPaths: ['tests'], readPaths: ['package.json'],
@@ -609,7 +612,7 @@ test('AC-APPLICATION-P3 code/combined手动接入与可信裁决冻结，旧原�
       const first = (await f.application.submit({ nodeId: 'demo', requestId: 'combined-input', origin: 'combined' })).operation!
       assert.equal(first.origin, 'combined')
       const claimed = f.application.store.claimAttempt({ operationId: first.id, source: first.input.source, scope: first.scope, leaseMs: 60000 })
-      const analysis = { version: 'code-behavior-v1', inputId: first.input.id, baselinePairId: null, composedDigest: 'composed', readSetDigest: first.readSetDigest, policyDigest: first.policyDigest, inputDigest: first.input.contentDigest, reviewPassed: true, changes: [], findings: [{ id: 'conflict-1', kind: 'conflict', ruleIds: ['REQ-DEMO-1'], affectedIds: ['REQ-DEMO-1'], paths: ['src/demo.mjs'], originalIntent: '返回用户指定的文本。', sourceBehavior: '返回大写文本。', deliveryBehavior: '保留原文本。', counterexample: 'a → A', evidence: 'src/demo.mjs', decision: '是否允许改变大小写？' }, { id: 'gap-2', kind: 'coverage_gap', ruleIds: [], affectedIds: ['REQ-OTHER-1'], paths: ['src/other.mjs'], originalIntent: '独立规则', sourceBehavior: '未知规则', deliveryBehavior: '', counterexample: '', evidence: '', decision: '另一项事实' }], facts: [], authorizedChanges: [], nodeChanges: [], newNodes: [], resolutions: [], traces: [] }
+      const analysis = { version: 'code-behavior-v1', inputId: first.input.id, baselinePairId: null, composedDigest: 'composed', readSetDigest: first.readSetDigest, policyDigest: first.policyDigest, inputDigest: first.input.contentDigest, reviewPassed: true, changes: [], findings: [{ id: 'conflict-1', kind: 'conflict', ruleIds: ['RULE-DEMO-01'], affectedIds: ['REQ-DEMO-1'], paths: ['src/demo.mjs'], originalIntent: '返回用户指定的文本。', sourceBehavior: '返回大写文本。', deliveryBehavior: '保留原文本。', counterexample: 'a → A', evidence: 'src/demo.mjs', decision: '是否允许改变大小写？' }, { id: 'gap-2', kind: 'coverage_gap', ruleIds: [], affectedIds: ['REQ-OTHER-1'], paths: ['src/other.mjs'], originalIntent: '独立规则', sourceBehavior: '未知规则', deliveryBehavior: '', counterexample: '', evidence: '', decision: '另一项事实' }], facts: [], authorizedChanges: [], nodeChanges: [], newNodes: [], resolutions: [], traces: [] }
       const analysisRef = writeEvidence(first.input.source.commonDir, analysis)
       const stageRef = writeEvidence(first.input.source.commonDir, { version: 'sync-stage-v1', operationId: first.id, attemptId: claimed.attempt.id, inputId: first.input.id, policyDigest: first.policyDigest, stage: 'analysis', resultRef: analysisRef })
       f.application.store.checkpoint(claimed.fence, analysisRef)
@@ -638,6 +641,11 @@ test('AC-APPLICATION-P3 code/combined手动接入与可信裁决冻结，旧原�
       assert.equal(starts.filter(id => id === keep.operation.id).length, 1)
       await assert.rejects(f.application.decide({ ...request, decision: { choice: choice === 'adopt_behavior' ? 'keep_intent' : 'adopt_behavior' } }), /SYNC_IDEMPOTENCY_CONFLICT/)
       const frozenPlan = JSON.parse(readEvidence(first.input.source.commonDir, keep.operation.planBlob!).toString('utf8'))
+      assert.deepEqual(frozenPlan.decisionAuthorities, [{
+        stableDecisionId: frozenPlan.facts.find((fact: { source: string }) => fact.source.startsWith('decision:')).source.slice('decision:'.length),
+        requestRef: keep.operation.requestBlob, operationId: first.id, inputId: first.input.id, analysisRef,
+        findingIds: ['conflict-1'], ruleIds: ['RULE-DEMO-01'], affectedIds: ['REQ-DEMO-1'], paths: ['src/demo.mjs'], decision: request.decision,
+      }])
       if (choice !== 'keep_intent') {
         const raw = frozenPlan.targets.find((target: { nodeId: string }) => target.nodeId === 'demo').rawSource
         assert.match(raw, /返回用户指定的文本/)
@@ -654,4 +662,44 @@ test('AC-APPLICATION-P3 code/combined手动接入与可信裁决冻结，旧原�
       await assert.rejects(f.application.decide({ ...request, requestId: 'after-source-edit' }), /旧分歧裁决/)
     } finally { f.cleanup() }
   }
+})
+
+test('AC-APPLICATION-P3-PARTIAL 剩余裁决保留最新交付raw及原受控正文差量', async () => {
+  const f = await fixture()
+  try {
+    const path = '.spec/demo/spec.md'
+    const authored = source.replace('返回用户指定的文本。', '返回用户指定的文本。\n\n未选义务：保持隔离。\n\n待修改事实：原文字节。')
+    writeFileSync(join(f.root, path), authored)
+    await f.application.enable(); f.application.start = () => {}
+    const original = (await f.application.submit({ nodeId: 'demo', requestId: 'partial-original', origin: 'combined', patch: { startLine: 9, endLine: 9, original: '待修改事实：原文字节。', replacement: '待修改事实：必须保留本次作者输入。' } })).operation!
+    const claim = f.application.store.claimAttempt({ operationId: original.id, source: original.input.source, scope: original.scope, leaseMs: 60000 })
+    const composed = composeControlledRequest(original.input, composeAuthoredInput(original.input).composed!, original.requestBlob!).composed!
+    f.application.store.bindComposedInput(claim.fence, composed)
+    const analysis = { version: 'code-behavior-v1', inputId: original.input.id, baselinePairId: null, composedDigest: composed.contentDigest, readSetDigest: original.readSetDigest, policyDigest: original.policyDigest, inputDigest: original.input.contentDigest, reviewPassed: true, changes: [], findings: [{ id: 'remaining-B', kind: 'conflict', ruleIds: ['RULE-DEMO-B'], affectedIds: ['REQ-DEMO-1'], paths: ['src/demo.mjs'], originalIntent: '保持文本', sourceBehavior: '转换大小写', deliveryBehavior: '保持文本', counterexample: 'a → A', evidence: 'src/demo.mjs', decision: '选择B规则' }], facts: [], authorizedChanges: [], nodeChanges: [], newNodes: [], resolutions: [], traces: [] }
+    const analysisRef = writeEvidence(original.input.source.commonDir, analysis)
+    f.application.store.checkpoint(claim.fence, analysisRef)
+    f.application.store.checkpoint(claim.fence, writeEvidence(original.input.source.commonDir, { version: 'sync-stage-v1', operationId: original.id, attemptId: claim.attempt.id, inputId: original.input.id, policyDigest: original.policyDigest, stage: 'analysis', resultRef: analysisRef }))
+    f.application.store.recordFailure(claim.fence, { code: 'business_conflict', message: 'B待决', kind: 'conflict', evidenceRefs: [analysisRef] })
+    writeFileSync(join(f.root, path), authored.replace('未选义务：保持隔离。', '未选义务：保持隔离。\n已结算规则A：保留此前接受的计数。'))
+    const delivery = await captureInputSnapshot(f.root)
+    writeFileSync(join(f.root, path), authored)
+    const pair: BaselinePair = { id: 'partial-A', repositoryId: original.input.source.repositoryId, source: original.input.source, sourceInput: original.input, verifiedDelivery: delivery, coveredScope: original.scope, receiptId: 'verified-partial-A', settledAtMs: Date.now() }
+    const journal: ApplyJournal = { id: 'fixture-partial-A', operationId: original.id, attemptId: claim.attempt.id, generation: original.generation, status: 'settled', steps: [], createdAtMs: pair.settledAtMs,
+      plan: { effectKey: 'fixture-partial-A', payloadDigest: 'fixture', candidateDigest: 'fixture', verificationBlob: writeEvidence(original.input.source.commonDir, { fixture: true }), target: delivery.source, expectedTargetSnapshotId: delivery.id, expectedBaselinePairId: null, coveredScope: original.scope, files: [], planBlob: writeEvidence(original.input.source.commonDir, { fixture: true }) },
+      receipt: { id: pair.receiptId, journalId: 'fixture-partial-A', effectKey: 'fixture-partial-A', actualTree: delivery.immutableTree, actualCommit: null, deliverySnapshot: delivery, evidenceRefs: [], completedAtMs: pair.settledAtMs } }
+    f.protocol.withTransaction(tx => {
+      tx.exec('INSERT INTO sync_apply_journals(id,operation_id,attempt_id,effect_key,payload_digest,status,receipt_id,record_json) VALUES(?,?,?,?,?,?,?,?)', journal.id, original.id, claim.attempt.id, journal.plan.effectKey, journal.plan.payloadDigest, journal.status, pair.receiptId, JSON.stringify(journal))
+      const sourceKey = String(tx.query('SELECT source_key FROM sync_operations WHERE id=?', original.id)[0].source_key)
+      tx.exec('INSERT INTO sync_baseline_pairs(id,repository_id,source_key,receipt_id,settled_at_ms,record_json) VALUES(?,?,?,?,?,?)', pair.id, pair.repositoryId, sourceKey, pair.receiptId, pair.settledAtMs, JSON.stringify(pair))
+    })
+    const result = await f.application.decide({ requestId: 'remaining-choice-B', operationId: original.id, inputId: original.input.id, analysisRef, findingIds: ['remaining-B'], decision: { choice: 'new_rule', rule: '规则B：仅转换ASCII字母。' } })
+    const plan = JSON.parse(readEvidence(original.input.source.commonDir, result.operation.planBlob!).toString('utf8'))
+    const raw = plan.targets.find((target: { nodeId: string }) => target.nodeId === 'demo').rawSource
+    assert.match(raw, /已结算规则A：保留此前接受的计数/)
+    assert.match(raw, /未选义务：保持隔离/)
+    assert.match(raw, /待修改事实：必须保留本次作者输入/)
+    assert.match(raw, /规则B：仅转换ASCII字母/)
+    assert.equal(result.operation.previousBaselinePair?.id, pair.id)
+    assert.equal(readFileSync(join(f.root, path), 'utf8'), authored)
+  } finally { f.cleanup() }
 })

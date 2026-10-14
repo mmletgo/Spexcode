@@ -9,10 +9,12 @@ import type { SpecBodyEdit } from '../spec-body-edit.js'
 import { prepareSyncAdmission, runSyncOperation, syncPlanDigest } from './coordinator.js'
 import type { SyncCoordinatorOptions, SyncCoordinatorPlan, SyncCoordinatorResult } from './coordinator-types.js'
 import { migrateSyncStore } from './migrations.js'
-import type { BlobRef, InputSnapshot, SyncOperation, WorktreeIdentity } from './operation-types.js'
+import type { BaselinePair, BlobRef, InputSnapshot, SyncOperation, WorktreeIdentity } from './operation-types.js'
 import { buildSyncApplicationPlan } from './planning.js'
+import { readDecisionAuthority } from './code-behavior.js'
+import { composeAuthoredInput } from './author-input.js'
 import { claimFileMutex } from './file-mutex.js'
-import { controlledDecisionIdentity, guardControlledRequestPath, prepareControlledDecision, readControlledDecision, prepareControlledRequest } from './request-input.js'
+import { composeControlledRequest, controlledDecisionIdentity, guardControlledRequestPath, prepareControlledDecision, readControlledDecision, prepareControlledRequest } from './request-input.js'
 import type { CodeBehaviorAnalysis, SyncDecisionInput } from './writeback-types.js'
 import { freezeDeliveryRuntime } from './runtime-freeze.js'
 import { captureInputSnapshot, contentHash, identifyWorktree, readEvidence, readObject, readTree, verifySnapshot } from './snapshot.js'
@@ -227,7 +229,7 @@ export class SyncApplication {
       const prior = this.store.findOperationByIngressKey(ingressKey), ingress = this.store.findIngressReceipt(ingressKey)
       const previousBaselinePair = prior ? (ingress ?? prior).previousBaselinePair : retry ? retry.previousBaselinePair : this.store.readBaseline(snapshot.source)
       const plan = await buildSyncApplicationPlan(snapshot, input.nodeId, previousBaselinePair)
-      if (retry?.origin === 'decision' && retry.requestBlob) this.restoreDecisionPlan(plan, snapshot, retry.requestBlob)
+      if (retry?.origin === 'decision' && retry.requestBlob) this.restoreDecisionPlan(plan, snapshot, retry.requestBlob, previousBaselinePair ?? null)
       if (retry && (origin !== retry.origin || syncPlanDigest(plan) !== retry.policyDigest)) throw new SyncApplicationError('sync_retry_changed', '显式重试必须沿用原来源和授权计划；新的输入请发起新请求')
       let requestBlob: BlobRef | undefined = retry?.requestBlob
       if (input.patch) {
@@ -247,17 +249,20 @@ export class SyncApplication {
       return { changed: true, operation: this.store.readOperation(operation.id) }
     } finally { mutex.release() }
   }
-  private decorateDecisionPlan(plan: SyncCoordinatorPlan, original: SyncOperation, snapshot: InputSnapshot, input: SyncDecisionInput, analysis: CodeBehaviorAnalysis): void {
+  private decorateDecisionPlan(plan: SyncCoordinatorPlan, snapshot: InputSnapshot, input: SyncDecisionInput, analysis: CodeBehaviorAnalysis, requestRef: BlobRef, previousBaselinePair: BaselinePair | null): void {
     const findingIds = [...input.findingIds].sort(), decisionId = controlledDecisionIdentity(input)
     const findings = findingIds.map(id => analysis.findings.find(finding => finding.id === id))
     const selectedRules = [...new Set(findings.flatMap(finding => finding!.ruleIds))].sort()
     const affectedIds = new Set(findings.flatMap(finding => [...finding!.ruleIds, ...finding!.affectedIds]))
+    const authority = readDecisionAuthority(snapshot.source.commonDir, requestRef)
+    plan.decisionAuthorities = [...(plan.decisionAuthorities ?? []).filter(prior => prior.stableDecisionId !== decisionId), authority]
     const boundary = `本次裁决仅适用于分歧 ${findingIds.join(', ')}，业务规则 ${selectedRules.join(', ') || '该分歧明确指出的未覆盖行为'}；未选中的原需求、其他规则与全部验证政策保持有效。`
     const decisionText = input.decision.choice === 'new_rule' ? input.decision.rule : input.decision.choice === 'keep_intent' ? findings.map(finding => `保持需求：${finding!.originalIntent}；修复与需求不符的代码：${finding!.sourceBehavior}`).join('\n') : findings.map(finding => `采用当前行为并更新需求：${finding!.sourceBehavior}；原需求：${finding!.originalIntent}`).join('\n')
     plan.facts = [...plan.facts, { source: `decision:${decisionId}`, text: `${boundary}\n${decisionText}` }]
     if (input.decision.choice !== 'keep_intent') {
-      const attempt = original.currentAttemptId ? this.store.readAttempt(original.currentAttemptId) : null
-      const entries = attempt?.composedInput ? readTree(snapshot.source.commonDir, attempt.composedInput.tree) : verifySnapshot(snapshot)
+      const authored = composeAuthoredInput(snapshot, previousBaselinePair ?? undefined, { retainConflicts: true }).composed!
+      const composed = composeControlledRequest(snapshot, authored, requestRef, { retainConflicts: true }).composed!
+      const entries = readTree(snapshot.source.commonDir, composed.tree)
       plan.targets = plan.targets.map(target => {
         const entry = entries.find(entry => entry.path === target.path)
         if (!entry) return target
@@ -270,11 +275,11 @@ export class SyncApplication {
       })
     }
   }
-  private restoreDecisionPlan(plan: SyncCoordinatorPlan, snapshot: InputSnapshot, requestBlob: BlobRef): void {
+  private restoreDecisionPlan(plan: SyncCoordinatorPlan, snapshot: InputSnapshot, requestBlob: BlobRef, previousBaselinePair: BaselinePair | null): void {
     const decision = readControlledDecision(snapshot, requestBlob)
     const original = this.store.readOperation(decision.operationId), context = this.decisionContext(original)
     if (!context || context.analysisRef.sha256 !== decision.analysisRef.sha256) throw new SyncApplicationError('sync_decision_analysis', '原操作分析已变化，不能沿用旧裁决')
-    this.decorateDecisionPlan(plan, original, snapshot, decision, context.analysis)
+    this.decorateDecisionPlan(plan, snapshot, decision, context.analysis, requestBlob, previousBaselinePair)
   }
   /** 具体分歧的用户选择建立新协调操作，保留原冲突和 root cause 证据链。 */
   async decide(input: SyncDecisionInput): Promise<{ changed: true; operation: SyncOperation }> {
@@ -310,7 +315,7 @@ export class SyncApplication {
       if (detail.executionAvailability.status !== 'ready') throw new SyncApplicationError('sync_resources_unsettled', '请先恢复原操作的未结算资源')
       const previousBaselinePair = this.store.readBaseline(snapshot.source) ?? original.previousBaselinePair
       const plan = await buildSyncApplicationPlan(snapshot, this.operationPlan(original).intentNodeId, previousBaselinePair)
-      this.decorateDecisionPlan(plan, original, snapshot, input, context.analysis)
+      this.decorateDecisionPlan(plan, snapshot, input, context.analysis, requestBlob, previousBaselinePair)
       const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: original.rootCauseId, origin: 'decision', budget: settings.budget, managedRoot: this.managedRoot, requestBlob, previousBaselinePair })
       this.prepareTools(ingressKey, null)
       const operation = this.store.admitAndEnqueue(admission)
@@ -357,7 +362,7 @@ export class SyncApplication {
     const finished = runSyncOperation(this.store, id, { plan, ...(recoveryOnly ? { recoveryOnly: true } : {}), readCurrentPlan: async () => {
       const current = await captureInputSnapshot(this.root); this.requireEnabled(current)
       const currentPlan = await buildSyncApplicationPlan(current, plan.intentNodeId, operation.previousBaselinePair)
-      if (operation.origin === 'decision' && operation.requestBlob) this.restoreDecisionPlan(currentPlan, current, operation.requestBlob)
+      if (operation.origin === 'decision' && operation.requestBlob) this.restoreDecisionPlan(currentPlan, current, operation.requestBlob, operation.previousBaselinePair)
       return currentPlan
     }, managedRoot: this.managedRoot, artifactRoot: this.artifactRoot, tools, runner: this.options.runner, verificationDriver: this.options.verificationDriver, signal: controller.signal, callTimeoutMs: settings.callTimeoutMs }).then(result => { advance = !recoveryOnly && result.status !== 'busy'; return result }).finally(() => {
       this.running.delete(id)
