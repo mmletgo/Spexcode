@@ -33,3 +33,5 @@ AC提案的非作者raw来源必须精确引用本次已校验facts；单独的�
 拒绝诊断以 approved:false 的 JSON 保存当次完整 proposal、尚未批准的 analysis 和 review（在各阶段实际产生时），分列 missingPaths/missingChangeIds/unknownChangeIds、身份摘要或会话不一致、verdict 和 findings；路径错误仍保同次业务证据及反例。AC复合门禁给出目标类型、同一 allowed_change 中缺失的 affectedId、不支撑的 ruleIds、非法规则类型及 source 是否绑定。AC ruleIds 只列本次变化依据，其他未改 covers 义务保持；不得拼接多个 allowed_change 的并集授权。既有 failure.message 进入下一轮 repairDiagnostics 供逐项修复，不重复嵌入整个冻结上下文；前轮提案、未通过的 accept 或伪造批准仅是数据，不能产生基线、授权或替代新独审。
 
 所选裁决scope复用 [[sync-contract-evolution]]：旧FLOW/STEP仅取所选规则旧闭包与原所选finding affectedIds交集；共享上游REQ只在当前精确不可变请求/旧分析/所选finding绑定下加入REQ本身，不扩其消费者或借新图边授权其他旧目标。分析阶段只判断有限eligible来源范围；最终REQ改义仍须同一已审allowed_change及所选旧规则的实际政策定义变化，并接受原P1独审。AC仍绑定同一具体allowed_change、实际来源事实和精确提案，不能凭REQ扩大整个AC集合。
+
+P4精确selection存在时，分析/独审输入与输出摘要绑定 baselineSelectionDigest；path字节基准和每ID真实intent基准分别展示，不以最新文件pair来源冒充全部作者语义已消费。authorChanges从各真实owner对象求未消费残差，即使path三方source未变也强制进入changedPaths、requiredChangedPaths与native完整上下文。raw/shared prose/归属变化保真实完整作者对象；无法证明共同raw基准明确blocked。完整整合正文由程序核对每个未改ID的交付语义及VERIFY政策，AC不能局部删除；不能凭模型accept丢未选policy/验收义务。

@@ -21,3 +21,5 @@ composeAuthoredInput 保持真实 InputSnapshot 和原 index 字节，复用 [[s
 证据保存配置与元数据摘要、各快照及其 path/preimage/postimage 对象，不保存宿主命令值或凭据。composed 引用该证据，原 physical snapshot 身份继续供 V4 检测并发用户编辑。正常无改仓库的组合作者 tree 与 HEAD 相符，作者实际编辑仍进入差量，原 index 从不被重写。
 
 P3 retainConflicts透传同一作者投影原语，保留待独审的文本重叠对象。作者文字的Git重叠不直接断言业务互斥；完整行为分类与最终整合证据由 [[sync-code-behavior]] 承担。
+
+P4透传精确逐资源 FrozenBaselineSelection；canonical clean 仍对每个实际 pair 的 source 与 delivery 使用相同不可变属性投影。canonical作者证据保留内嵌逐ID真实语义投影及selection digest，不能以工具clean覆盖或丢弃未消费业务意图。

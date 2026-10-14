@@ -2,8 +2,11 @@ import { spawnSync } from 'node:child_process'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { BaselinePair, ComposedInputRef, InputSnapshot } from './operation-types.js'
-import { contentHash, objectGit, readObject, readTree, verifySnapshot, writeEvidence, writeObject, writeTree } from './snapshot.js'
+import { parseContract, parseParts } from '@spexcode/spec-core/contracts'
+import type { ContractItem } from '@spexcode/spec-core/contracts'
+import { contractBusinessMeaning, contractBusinessProse, sameContractBusinessMeaning } from './contract-evolution.js'
+import type { BaselinePair, BaselineResource, ComposedInputRef, FrozenBaselineSelection, InputSnapshot } from './operation-types.js'
+import { contentHash, objectGit, readEvidence, readObject, readTree, verifySnapshot, writeEvidence, writeObject, writeTree } from './snapshot.js'
 import type { TreeEntry } from './snapshot.js'
 
 export type CompositionConflict = { path: string; base: TreeEntry | null; source: TreeEntry | null; delivery: TreeEntry | null }
@@ -22,7 +25,9 @@ export function adoptedDeliveryPaths(source: InputSnapshot, prior?: BaselinePair
 }
 
 /** source 的真实差量叠加到前次已验证 delivery；任何重叠歧义保留三方对象而不自动覆盖。 */
-export function composeInputSnapshots(newSource: InputSnapshot, prior?: BaselinePair | null, options: { projectEntries?: (snapshot: InputSnapshot, entries: TreeEntry[]) => TreeEntry[]; retainConflicts?: boolean } = {}): { composed: ComposedInputRef | null; conflicts: CompositionConflict[] } {
+export type CompositionOptions = { projectEntries?: (snapshot: InputSnapshot, entries: TreeEntry[]) => TreeEntry[]; retainConflicts?: boolean }
+export function composeInputSnapshots(newSource: InputSnapshot, prior?: BaselinePair | FrozenBaselineSelection | null, options: CompositionOptions = {}): { composed: ComposedInputRef | null; conflicts: CompositionConflict[] } {
+  if (prior && 'version' in prior) return composeSelectedInput(newSource, prior, options)
   const project = (snapshot: InputSnapshot): TreeEntry[] => { const entries = verifySnapshot(snapshot); return options.projectEntries ? options.projectEntries(snapshot, entries) : entries }
   const commonDir = newSource.source.commonDir, incoming = project(newSource)
   let entries = incoming
@@ -75,4 +80,118 @@ export function mergeText(commonDir: string, delivery: TreeEntry, base: TreeEntr
     if (result.status !== null && result.status >= 1 && result.status <= 127) return null
     throw new Error(`三方合并失败: ${result.stderr.toString()}`)
   } finally { rmSync(temp, { recursive: true, force: true }) }
+}
+
+export type IntentObject = { path: string; entry: TreeEntry; item: ContractItem; semanticDigest: string; rawSource: string | null; businessProse: string }
+export type IntentResidual = {
+  resource: Exclude<BaselineResource, { kind: 'path' }>; pairId: string | null
+  before: IntentObject | null; delivery: IntentObject | null; source: IntentObject | null
+  adopted: boolean; changed: boolean; broadChange: boolean
+}
+export type SelectedCompositionEvidence = {
+  version: 'selected-composition-v1'; sourceInputId: string; baselineSelectionDigest: string
+  paths: { path: string; pairId: string | null; base: TreeEntry | null; delivery: TreeEntry | null; source: TreeEntry | null; adopted: boolean }[]
+  intents: IntentResidual[]; residualPaths: string[]; conflicts: CompositionConflict[]
+}
+const canonical = (value: unknown): string => JSON.stringify(value, (_key, item: unknown) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b))) : item)
+
+/** 精确选择是边界输入；不接受遗漏、错误归属或由全局 latest 补出的基线。 */
+export function verifyBaselineSelection(input: InputSnapshot, selection: FrozenBaselineSelection): void {
+  if (selection.version !== 'sync-baseline-selection-v1' || canonical(selection.source) !== canonical(input.source) || selection.digest !== contentHash(canonical({ version: selection.version, source: selection.source, bindings: selection.bindings }))) throw new Error('SYNC_BASELINE_SELECTION_INVALID: identity or digest')
+  const keys = new Set<string>()
+  for (const binding of selection.bindings) {
+    const resource = binding.resource, key = resource.kind === 'path' ? `path:${resource.path}` : `${resource.kind}:${resource.id}`
+    if (keys.has(key)) throw new Error(`SYNC_BASELINE_SELECTION_INVALID: duplicate ${key}`)
+    keys.add(key)
+    const pair = 'bytePair' in binding ? binding.bytePair : binding.intentPair
+    if (!pair) continue
+    if (canonical(pair.source) !== canonical(input.source) || canonical(pair.sourceInput.source) !== canonical(input.source) || pair.repositoryId !== input.source.repositoryId || pair.verifiedDelivery.source.repositoryId !== input.source.repositoryId || pair.verifiedDelivery.source.commonDir !== input.source.commonDir) throw new Error(`SYNC_BASELINE_SELECTION_INVALID: pair identity ${pair.id}`)
+    const covered = resource.kind === 'path' ? pair.coveredScope.paths.includes(resource.path) : resource.kind === 'flow' ? pair.coveredScope.flowIds.includes(resource.id) : pair.coveredScope.contractIds.includes(resource.id)
+    if (!covered) throw new Error(`SYNC_BASELINE_SELECTION_INVALID: uncovered ${key}`)
+    verifySnapshot(pair.sourceInput); verifySnapshot(pair.verifiedDelivery)
+  }
+}
+
+function intentObjects(commonDir: string, entries: readonly TreeEntry[]): Map<string, IntentObject> {
+  const objects = new Map<string, IntentObject>()
+  for (const entry of entries.filter(entry => entry.mode !== '120000' && entry.path.startsWith('.spec/') && entry.path.endsWith('/spec.md'))) {
+    const bytes = readObject(commonDir, entry.oid)
+    if (!isUtf8Text(bytes)) throw new Error(`SYNC_COMPOSITION_BLOCKED: non UTF-8 contract ${entry.path}`)
+    const text = bytes.toString('utf8'), contract = parseContract({ nodeId: entry.path.split('/').at(-2)!, path: entry.path, source: text }).contract
+    for (const item of contract?.items ?? []) {
+      if (objects.has(item.id)) throw new Error(`SYNC_COMPOSITION_BLOCKED: ambiguous owner ${item.id}`)
+      objects.set(item.id, { path: entry.path, entry, item, semanticDigest: contentHash(canonical(contractBusinessMeaning(item))), rawSource: parseParts(text)?.rawSource ?? null, businessProse: contractBusinessProse(contract!.expandedSpec) })
+    }
+  }
+  return objects
+}
+const sameIntent = (a: IntentObject | null, b: IntentObject | null): boolean => a && b ? sameContractBusinessMeaning(a.item, b.item) : a === b
+
+/** 文件只做真实 byte-pair 三方；逐 ID 的 source 残差独立于文件级未变化判定。 */
+function composeSelectedInput(input: InputSnapshot, selection: FrozenBaselineSelection, options: CompositionOptions): ReturnType<typeof composeInputSnapshots> {
+  verifyBaselineSelection(input, selection)
+  const commonDir = input.source.commonDir, cache = new Map<string, TreeEntry[]>()
+  const project = (snapshot: InputSnapshot): TreeEntry[] => {
+    let entries = cache.get(snapshot.id)
+    if (!entries) { const actual = verifySnapshot(snapshot); entries = options.projectEntries ? options.projectEntries(snapshot, actual) : actual; cache.set(snapshot.id, entries) }
+    return entries
+  }
+  const incoming = project(input), next = new Map(incoming.map(entry => [entry.path, entry])), result = new Map(next), paths: SelectedCompositionEvidence['paths'] = [], conflicts: CompositionConflict[] = []
+  for (const binding of selection.bindings) {
+    const pair = 'bytePair' in binding ? binding.bytePair : binding.intentPair
+    if (!('bytePair' in binding)) continue
+    const path = binding.resource.path, source = next.get(path)
+    if (!pair) { paths.push({ path, pairId: null, base: null, delivery: null, source: source ?? null, adopted: false }); continue }
+    const base = new Map(project(pair.sourceInput).map(entry => [entry.path, entry])), delivered = new Map(project(pair.verifiedDelivery).map(entry => [entry.path, entry]))
+    const adopted = adoptedDeliveryPaths(input, pair).has(path), old = adopted ? delivered.get(path) : base.get(path), delivery = delivered.get(path)
+    paths.push({ path, pairId: pair.id, base: old ?? null, delivery: delivery ?? null, source: source ?? null, adopted })
+    if (same(old, source)) { if (delivery) result.set(path, delivery); else result.delete(path); continue }
+    if (same(old, delivery) || same(source, delivery)) { if (source) result.set(path, source); else result.delete(path); continue }
+    const mode = old && source && delivery && source.mode !== '120000' && old.mode !== '120000' && delivery.mode !== '120000' ? source.mode === old.mode ? delivery.mode : delivery.mode === old.mode || source.mode === delivery.mode ? source.mode : null : null
+    const merged = mode && old && source && delivery ? mergeText(commonDir, delivery, old, source) : null
+    if (merged && mode) result.set(path, { path, mode, oid: writeObject(commonDir, merged), digest: contentHash(merged) })
+    else conflicts.push({ path, base: old ?? null, source: source ?? null, delivery: delivery ?? null })
+  }
+  const currentObjects = intentObjects(commonDir, incoming), objectCache = new Map<string, Map<string, IntentObject>>()
+  const objects = (snapshot: InputSnapshot): Map<string, IntentObject> => { let value = objectCache.get(snapshot.id); if (!value) { value = intentObjects(commonDir, project(snapshot)); objectCache.set(snapshot.id, value) }; return value }
+  const intents: IntentResidual[] = [], residualPaths = new Set<string>(), composedObjects = intentObjects(commonDir, [...result.values()])
+  for (const binding of selection.bindings) {
+    if (!('intentPair' in binding)) continue
+    const resource = binding.resource, pair = binding.intentPair, source = currentObjects.get(resource.id) ?? null
+    const original = pair ? objects(pair.sourceInput).get(resource.id) ?? null : null, delivery = pair ? objects(pair.verifiedDelivery).get(resource.id) ?? null : null
+    const adopted = !!pair && !!(delivery ?? original) && adoptedDeliveryPaths(input, pair).has((delivery ?? original)!.path)
+    const before = adopted ? delivery : original
+    const broadChange = before?.rawSource !== source?.rawSource || before?.businessProse !== source?.businessProse || before?.path !== source?.path || before?.entry.mode !== source?.entry.mode
+    const changed = !sameIntent(before, source) || broadChange
+    const evidence: IntentResidual = { resource, pairId: pair?.id ?? null, before, delivery, source, adopted, changed, broadChange }
+    intents.push(evidence)
+    if (!changed) continue
+    for (const path of [before?.path, source?.path].filter((path): path is string => !!path)) residualPaths.add(path)
+    // 差量只用于识别，绝不把多个 intent-pair 伪拼成 raw/整文件作者基线。
+    const composed = composedObjects.get(resource.id) ?? null
+    if (!sameIntent(source, composed) || source?.rawSource !== composed?.rawSource || source?.businessProse !== composed?.businessProse || source?.path !== composed?.path) {
+      const path = source?.path ?? before?.path
+      if (path && !conflicts.some(conflict => conflict.path === path)) {
+        const byte = paths.find(item => item.path === path)
+        if (!byte) throw new Error(`SYNC_COMPOSITION_BLOCKED: semantic owner missing byte binding ${path}`)
+        conflicts.push({ path, base: byte.base, source: byte.source, delivery: byte.delivery })
+      }
+    }
+  }
+  const entries = [...result.values()].sort((a, b) => a.path.localeCompare(b.path))
+  for (const entry of entries) if (entries.some(other => entry.path.startsWith(`${other.path}/`)) && !conflicts.some(conflict => conflict.path === entry.path)) conflicts.push({ path: entry.path, base: null, source: next.get(entry.path) ?? null, delivery: result.get(entry.path) ?? null })
+  if (conflicts.length && !options.retainConflicts) return { composed: null, conflicts }
+  const evidence: SelectedCompositionEvidence = { version: 'selected-composition-v1', sourceInputId: input.id, baselineSelectionDigest: selection.digest, paths, intents, residualPaths: [...residualPaths].sort(), conflicts }
+  const tree = writeTree(commonDir, entries), contentDigest = contentHash(JSON.stringify(entries)), manifestBlob = writeEvidence(commonDir, { version: 1, entries })
+  objectGit(commonDir, ['update-ref', `refs/spex-sync/compositions/${tree}`, tree])
+  return { composed: { sourceInputId: input.id, previousBaselinePairId: null, baselineSelectionDigest: selection.digest, tree, manifestBlob, contentDigest, compositionEvidenceBlob: writeEvidence(commonDir, evidence), authorProjectionBlob: writeEvidence(commonDir, { version: 'selected-author-projection-v1', sourceInputId: input.id, baselineSelectionDigest: selection.digest, intents, residualPaths: evidence.residualPaths }) }, conflicts }
+}
+
+/** 重读 hash 校验后的证据，逐资源的真实对象仍由 selection 再计算并校验。 */
+export function readCompositionEvidence(input: InputSnapshot, composed: ComposedInputRef, selection: FrozenBaselineSelection): SelectedCompositionEvidence {
+  verifyBaselineSelection(input, selection)
+  if (!composed.compositionEvidenceBlob || composed.sourceInputId !== input.id || composed.baselineSelectionDigest !== selection.digest) throw new Error('SYNC_COMPOSITION_BINDING: selection or evidence missing')
+  const evidence = JSON.parse(readEvidence(input.source.commonDir, composed.compositionEvidenceBlob).toString('utf8')) as SelectedCompositionEvidence
+  if (evidence.version !== 'selected-composition-v1' || evidence.sourceInputId !== input.id || evidence.baselineSelectionDigest !== selection.digest) throw new Error('SYNC_COMPOSITION_BINDING: evidence identity')
+  return evidence
 }
