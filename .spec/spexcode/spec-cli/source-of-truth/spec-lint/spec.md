@@ -59,7 +59,7 @@ One lint build opens the [[source-of-truth]] event ledger transaction around bot
 anchor-hunk demand. The linter therefore shares one decoded, integrity-checked snapshot and at most one
 locked replacement with its anchor engine; it never causes a hunk lookup to reopen or rewrite that ledger.
 
-Before constructing history indexes, lint checks a worktree's adoption boundary. An untracked `.spec/` file
+Before constructing history indexes, ordinary worktree lint checks that worktree's adoption boundary. An untracked `.spec/` file
 or `.spec/spexcode.json` is an **integrity error** naming the untracked project source of truth and the ordinary
 `git add .spec` repair. **What counts as source of truth follows the loader, never a second list.** Config
 resolution prefers `.spec/spexcode.json` and reads the root-level legacy `spexcode.json` only when that one is
@@ -71,9 +71,11 @@ pending run reads its policy out of the tip it judges, preferring `.spec/spexcod
 to the legacy path, because a pending read that knows only the legacy path silently seats DEFAULT policy — the
 blocking gate would then judge a different `governedRoots` than `spex spec lint` does, and a project whose roots
 differ from the defaults would govern nothing at the one moment that blocks. Harness delivery files such as `.codex/`, `.claude/`, and `AGENTS.md`
-are machine-local and are not part of this check. A staged candidate is judged from its candidate tree, so
-staged adoption data is valid; an untracked seed cannot masquerade as a clean graph. Bare receivers have no
-worktree state to inspect and continue with the immutable candidate tree.
+are machine-local and are not part of this check. Pending lint judges only its immutable candidate tree;
+untracked author drafts in the source worktree neither enter that graph nor block it. This also applies to
+strict synchronization prepare/publish hooks, which must preserve the source files and index. Candidate
+configuration, contract, anchor and governor-transition integrity checks still apply. Ordinary worktree lint
+continues to reject untracked adoption data. Bare receivers likewise use only the immutable candidate tree.
 
 - **integrity** (error): every file a spec lists in `code:` exists — broken links block. A SELECTOR
   (`path#symbol` on either relation, [[code-anchor]]) must also resolve: dead (unit deleted/renamed),
