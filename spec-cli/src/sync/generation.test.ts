@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { parseContract } from '@spexcode/spec-core/contracts'
 import type { Acceptance, ContractFinding } from '@spexcode/spec-core/contracts'
-import { CANDIDATE_RESPONSE_SCHEMA } from './candidate.js'
+import { CANDIDATE_RESPONSE_SCHEMA, verifyCandidate } from './candidate.js'
 import type { CandidateChanges } from './candidate.js'
 import type { ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
 import { GENERATION_REVIEW_SCHEMA, runGeneration } from './generation.js'
@@ -174,6 +174,37 @@ test('manifest/files与实际snapshot或composed tree绑定，磁盘变化和输
   assert.equal(mismatched.failure!.code, 'input_invalid'); assert.equal(bad.calls.length, 0)
   const wrongManifest = await runGeneration({ ...source, manifest: { version: 1, entries: [] } }, { runner: bad.run, validateCandidate: valid })
   assert.equal(wrongManifest.status, 'failed'); assert.equal(bad.calls.length, 0)
+})
+
+test('已审详细Spec由程序加入实际候选，生成器只需返回实现差量', async t => {
+  const source = await input(t)
+  const desiredSpec = `${source.files.get(contractPath)}\n已审补充：保留既有权限与全部验收。\n`
+  const supplied = { ...source, elaboratedSpecs: [{ path: contractPath, source: desiredSpec }] }
+  const native = runner(supplied)
+  const result = await runGeneration(supplied, { runner: native.run, validateCandidate: valid })
+  assert.equal(result.status, 'reviewed')
+  assert.equal(result.candidateFiles!.get(contractPath), desiredSpec)
+  assert.equal((result.output as CandidateChanges).changes.some(change => change.path === contractPath), false)
+  assert.equal(result.traces[0].resultDigest, contentHash(JSON.stringify(result.output)))
+  assert.ok(native.calls[1].prompt.includes(JSON.stringify(desiredSpec)))
+  assert.equal(readFileSync(join(source.root, contractPath), 'utf8'), source.files.get(contractPath))
+
+  const denied = runner(supplied)
+  const outside = await runGeneration({ ...supplied, allowedScope: { ...source.allowedScope, paths: ['src'] } }, { runner: denied.run, validateCandidate: valid })
+  assert.equal(outside.status, 'repair'); assert.match(outside.failure!.message, /越界/); assert.equal(denied.calls.length, 1)
+
+  const explicit = runner(supplied, () => {
+    const output = changes(supplied) as CandidateChanges
+    const entry = source.manifest.entries.find(entry => entry.path === contractPath)!
+    output.changes.push({ path: contractPath, beforeDigest: entry.digest, beforeMode: entry.mode, mode: null, content: 'unauthorized raw replacement' })
+    return output
+  })
+  const rejected = await runGeneration(supplied, { runner: explicit.run, validateCandidate: async candidate => {
+    const entry = verifyCandidate(source.snapshot.source.commonDir, candidate).find(entry => entry.path === contractPath)!
+    assert.equal(readObject(source.snapshot.source.commonDir, entry.oid).toString('utf8'), 'unauthorized raw replacement')
+    return [{ code: 'raw_changed', severity: 'error', message: '不得改写原意', nodeId: 'export-contract', path: contractPath }]
+  } })
+  assert.equal(rejected.status, 'repair'); assert.equal(explicit.calls.length, 1)
 })
 
 test('取消、unsupported和派发持久失败保持明确原因，不额外调用或发布晚结果', async t => {
