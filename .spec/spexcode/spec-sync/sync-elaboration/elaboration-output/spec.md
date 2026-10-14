@@ -27,6 +27,8 @@ raw、事实及权威业务规则优先。重大未知仅指权限/资金/业务
 
 可信输入登记 schema 复用 VERIFY 行的 ID、argv、cwd 与超时属性；登记还经唯一 Markdown 渲染及契约解析器检查安全 cwd、直接工具 argv、转义与唯一 ID。三段 ID 不合法、shell/空/换行 argv、越界 cwd、非法超时或重复登记在任何 native 派发前拒绝。模型输出若提供独立登记，VERIFY 与 AC.command 必须引用并精确符合登记，不得自造占位或改命令/预算。CONTRACT_INSTRUCTIONS 区分业务规则与执行器编排：测试不自行启动 runner/oracle，不能将这些明确技术职责发明成业务 REQ/RULE/AC 或业务 GAP；真实业务 GAP 仍完整保留。
 
+生成与独审共用的来源说明须与 [[sync-contract-evolution]] 一致：普通 raw 需求使用 user:raw，其他合法冻结 code/derived 来源继续沿用。当前精确已独审裁决合法改变 REQ 意义时，REQ.source 必须为当前 decision:stableDecisionId；共享上游 REQ 仍受旧规则直接来源、原 affected、同一 allowed_change 与实质政策变化见证限制，不能只写 RULE basis 或反向依赖造循环。明确 REQ-only 且无旧政策的裁决不强制虚构规则；keep 保持原来源和业务意义，未选义务不变。AC-ELABORATION-44 用受控生成读取实际派发指令、完整候选门禁及独审捕获验证来源说明一致，user:raw 改义和仅换规则来源仍拒绝；它不替代真实 native 产品验收。
+
 changes 允许空数组表达无行差量或已冻结的全节点退役：既有完整契约目标由程序补全；新/raw-only目标仍须显式构建，空输出自身不授权删除；节点生命周期从调用者 nodeChanges 程序复制并在全图确认。独立审查看到旧新路径、原文及逐项授权；不能因当前 active AC 数量为零跳过旧契约及退役检查。既有验收更新要求 update_acceptance 引用变化 ruleIds 和真实独审分析；普通无冲突反写可自动更新，模型自身失败不能转成要求。pure refactor/preserve_business 保留业务正文和字段，仅更新必要绑定。
 
 P1 的 prose 和持久契约只写业务约定；V3 尚未运行、通过或失败等本轮状态与生成进度查冻结执行证据，不得写进业务正文成为持久政策。

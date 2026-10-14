@@ -8,6 +8,7 @@ import type { ElaborationInput, ElaborationRepairSeed, ElaborationReview, Elabor
 import type { ContractCell, GeneratedElaboration, GeneratedTables } from './elaboration-markdown.js'
 import { renderElaboration } from './elaboration-markdown.js'
 import { ELABORATION_SCHEMA, outputErrors } from './elaboration-schema.js'
+import type { CodeBehaviorEvidence, SyncDecisionAuthority } from './writeback-types.js'
 
 const fixture = new URL('../../test/fixtures/spec-sync/export-repo/', import.meta.url)
 const path = '.spec/export/export-contract/spec.md'
@@ -725,5 +726,49 @@ test('AC-ELABORATION-43 自定义业务repair和遗漏边界继续阻塞，不�
     assert.ok(result.rounds[0].findings.some(issue => issue.code === code && issue.severity === 'error'))
     assert.equal(result.deferredImplementationFindings[0].code, 'implementation-review')
     assert.deepEqual(result.rounds[0].review!.findings, [implementation, business])
+  }
+})
+
+test('AC-ELABORATION-44 当前裁决REQ来源指令同入生成与独审，受控候选仍受原授权门禁', async () => {
+  const sha = elaborationDigest('captured decision provenance'), decisionSource = `decision:${sha}`
+  const authority: SyncDecisionAuthority = { stableDecisionId: sha, requestRef: { sha256: sha }, analysisRef: { sha256: sha }, operationId: 'parent-operation', inputId: 'frozen-input', findingIds: ['selected-download'], ruleIds: ['RULE-EXPORT-01'], affectedIds: ['REQ-EXPORT-01', 'RULE-EXPORT-01'], paths: ['src/export.js'], decision: { choice: 'new_rule', rule: '成功结果下载必须包含全部匹配记录，不以摘要代替；其他政策保持。' } }
+  const analysis: CodeBehaviorEvidence = { ref: { sha256: sha }, analysis: { version: 'code-behavior-v1', inputId: authority.inputId, baselinePairId: 'baseline', composedDigest: sha, readSetDigest: sha, policyDigest: sha, inputDigest: sha, decisionAuthorities: [authority], decision: { requestRef: authority.requestRef, analysisRef: authority.analysisRef, findingIds: authority.findingIds }, authorChanges: [], rawIntegrations: [], changes: [{ id: 'selected-change', kind: 'allowed_change', paths: authority.paths, affectedIds: authority.affectedIds, ruleIds: authority.ruleIds, originalIntent: '下载完整结果', previousBehavior: '返回记录', sourceBehavior: '明确完整结果范围', deliveryBehavior: '保留其他权限和状态限制', evidence: '所选当前裁决明确完整结果下载，未选义务保持', counterexample: '摘要不能替代完整匹配记录' }], findings: [], facts: [], authorizedChanges: [], nodeChanges: [], newNodes: [], resolutions: [], traces: ['code_behavior_analyze', 'code_behavior_review'].map((purpose, index) => ({ purpose, sessionId: `analysis-${index}`, threadId: `analysis-thread-${index}`, turnId: 'turn', resultDigest: sha, inputDigest: sha })), reviewPassed: true } }
+  analysis.ref = { sha256: elaborationDigest(JSON.stringify(analysis.analysis)) }
+  const frozenInput: ElaborationInput = { ...input(true), maxRepairs: 0, analysis, decisionAuthorities: [authority], facts: [...input(true).facts!, { source: decisionSource, text: authority.decision.choice === 'new_rule' ? authority.decision.rule : '' }] }
+  const fake = runner(request => {
+    const output = candidate(request, source), req = output.changes[0].tables.REQ.find(row => row.id === 'REQ-EXPORT-01')!, rule = output.changes[0].tables.RULE.find(row => row.id === 'RULE-EXPORT-01')!
+    req.goal = `${req.goal}；成功下载返回全部匹配记录，不以摘要代替。`
+    // 受控builder依据真实派发指令填写来源，不模拟native自然语言能力。
+    req.source = request.prompt.includes('REQ.source必须准确为decision:<当前stableDecisionId>') ? decisionSource : 'user:raw'
+    rule.constraint = `${rule.constraint}；成功下载返回全部匹配记录，不以摘要代替。`; rule.source = decisionSource
+    return output
+  })
+  const accepted = await elaborate(frozenInput, { runner: fake.run })
+  assert.equal(accepted.status, 'complete', JSON.stringify(accepted.rounds.map(round => round.findings)))
+  assert.deepEqual(fake.calls.map(call => call.purpose), ['elaboration_generate', 'elaboration_review'])
+  for (const request of fake.calls) {
+    assert.match(request.prompt, /REQ.source必须准确为decision:<当前stableDecisionId>/)
+    assert.match(request.prompt, /同一已独审allowed_change/)
+    assert.match(request.prompt, /keep_intent.*来源和业务意义/)
+    assert.match(request.prompt, /仅更换RULE来源/)
+    assert.doesNotMatch(request.prompt, /REQ来源user:raw；其他单值来源/)
+    assert.ok(request.prompt.includes(decisionSource))
+  }
+  const req = accepted.contracts.flatMap(contract => contract.items).find(item => item.id === 'REQ-EXPORT-01')!
+  assert.equal(req.kind, 'REQ'); assert.deepEqual(req.source, { kind: 'decision', ref: sha })
+  assert.equal(accepted.changes[0].source.includes(rawSource), true)
+  const originalRule = parseContract({ nodeId: 'export-contract', path, source }).contract!.items.find(item => item.id === 'RULE-EXPORT-01')!
+  assert.equal(originalRule.kind, 'RULE')
+  for (const invalid of ['raw-source', 'source-only-rule'] as const) {
+    const rejected = runner(request => {
+      const output = candidate(request, accepted.changes[0].source)
+      if (invalid === 'raw-source') output.changes[0].tables.REQ.find(row => row.id === req.id)!.source = 'user:raw'
+      else output.changes[0].tables.RULE.find(row => row.id === 'RULE-EXPORT-01')!.constraint = originalRule.constraint
+      return output
+    })
+    const result = await elaborate(frozenInput, { runner: rejected.run })
+    assert.equal(result.reviewPassed, false)
+    assert.ok(result.rounds[0].findings.some(issue => issue.code === 'decision_scope_exceeded' && issue.itemId === req.id))
+    assert.deepEqual(rejected.calls.map(call => call.purpose), ['elaboration_generate'])
   }
 })
