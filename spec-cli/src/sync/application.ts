@@ -14,7 +14,7 @@ import { buildSyncApplicationPlan } from './planning.js'
 import { readDecisionAuthority } from './code-behavior.js'
 import { composeAuthoredInput } from './author-input.js'
 import { claimFileMutex } from './file-mutex.js'
-import { composeControlledRequest, controlledDecisionIdentity, guardControlledRequestPath, prepareControlledDecision, readControlledDecision, prepareControlledRequest } from './request-input.js'
+import { composeControlledRequest, controlledDecisionIdentity, guardControlledRequestPath, prepareControlledDecision, readControlledDecision, prepareControlledRequest, renderControlledDecisionRaw } from './request-input.js'
 import type { CodeBehaviorAnalysis, SyncDecisionInput } from './writeback-types.js'
 import { freezeDeliveryRuntime } from './runtime-freeze.js'
 import { captureInputSnapshot, contentHash, identifyWorktree, readEvidence, readObject, readTree, verifySnapshot } from './snapshot.js'
@@ -263,15 +263,18 @@ export class SyncApplication {
       const authored = composeAuthoredInput(snapshot, previousBaselinePair ?? undefined, { retainConflicts: true }).composed!
       const composed = composeControlledRequest(snapshot, authored, requestRef, { retainConflicts: true }).composed!
       const entries = readTree(snapshot.source.commonDir, composed.tree)
+      const overlaps = composed.compositionEvidenceBlob ? (JSON.parse(readEvidence(snapshot.source.commonDir, composed.compositionEvidenceBlob).toString('utf8')) as { conflicts: { path: string }[] }).conflicts : []
       plan.targets = plan.targets.map(target => {
         const entry = entries.find(entry => entry.path === target.path)
         if (!entry) return target
+        // 重叠处暂选作者字节只供分析，不覆盖随后独审整合的完整正文。
+        if (overlaps.some(conflict => conflict.path === target.path)) return target
         const source = readObject(snapshot.source.commonDir, entry.oid).toString('utf8')
         const contract = parseContract({ nodeId: target.nodeId, path: target.path, source }).contract
         if (target.nodeId !== plan.intentNodeId && !affectedIds.has(target.nodeId) && !contract?.items.some(item => affectedIds.has(item.id))) return target
         const raw = target.rawSource ?? parseParts(source)?.rawSource
         if (!raw) throw new SyncApplicationError('sync_decision_intent', '原需求正文不可读取，不能猜测新需求')
-        return { ...target, rawSource: `${raw.trim()}\n\n用户裁决（${decisionId}，分析 ${input.analysisRef.sha256}）：\n${boundary}\n以下选择明确替代所选规则中的旧行为要求，其余原文继续有效：\n${decisionText}` }
+        return { ...target, rawSource: renderControlledDecisionRaw(raw, input, analysis) }
       })
     }
   }

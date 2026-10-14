@@ -664,7 +664,8 @@ test('AC-APPLICATION-P3 code/combined手动接入与可信裁决冻结，旧原�
   }
 })
 
-test('AC-APPLICATION-P3-PARTIAL 剩余裁决保留最新交付raw及原受控正文差量', async () => {
+test('AC-APPLICATION-P3-PARTIAL 剩余裁决保留最新交付raw及原受控正文差量', async t => {
+  for (const placement of ['separate', 'same-line', 'overlap-review'] as const) await t.test(placement, async () => {
   const f = await fixture()
   try {
     const path = '.spec/demo/spec.md'
@@ -680,7 +681,7 @@ test('AC-APPLICATION-P3-PARTIAL 剩余裁决保留最新交付raw及原受控正
     f.application.store.checkpoint(claim.fence, analysisRef)
     f.application.store.checkpoint(claim.fence, writeEvidence(original.input.source.commonDir, { version: 'sync-stage-v1', operationId: original.id, attemptId: claim.attempt.id, inputId: original.input.id, policyDigest: original.policyDigest, stage: 'analysis', resultRef: analysisRef }))
     f.application.store.recordFailure(claim.fence, { code: 'business_conflict', message: 'B待决', kind: 'conflict', evidenceRefs: [analysisRef] })
-    writeFileSync(join(f.root, path), authored.replace('未选义务：保持隔离。', '未选义务：保持隔离。\n已结算规则A：保留此前接受的计数。'))
+    writeFileSync(join(f.root, path), placement === 'separate' ? authored.replace('未选义务：保持隔离。', '未选义务：保持隔离。\n已结算规则A：保留此前接受的计数。') : authored.replace('待修改事实：原文字节。', placement === 'same-line' ? '待修改事实：原文字节。 已结算规则A：保留此前接受的计数。' : '待修改事实：此前接受的事实。 已结算规则A：保留此前接受的计数。'))
     const delivery = await captureInputSnapshot(f.root)
     writeFileSync(join(f.root, path), authored)
     const pair: BaselinePair = { id: 'partial-A', repositoryId: original.input.source.repositoryId, source: original.input.source, sourceInput: original.input, verifiedDelivery: delivery, coveredScope: original.scope, receiptId: 'verified-partial-A', settledAtMs: Date.now() }
@@ -695,11 +696,21 @@ test('AC-APPLICATION-P3-PARTIAL 剩余裁决保留最新交付raw及原受控正
     const result = await f.application.decide({ requestId: 'remaining-choice-B', operationId: original.id, inputId: original.input.id, analysisRef, findingIds: ['remaining-B'], decision: { choice: 'new_rule', rule: '规则B：仅转换ASCII字母。' } })
     const plan = JSON.parse(readEvidence(original.input.source.commonDir, result.operation.planBlob!).toString('utf8'))
     const raw = plan.targets.find((target: { nodeId: string }) => target.nodeId === 'demo').rawSource
-    assert.match(raw, /已结算规则A：保留此前接受的计数/)
-    assert.match(raw, /未选义务：保持隔离/)
-    assert.match(raw, /待修改事实：必须保留本次作者输入/)
-    assert.match(raw, /规则B：仅转换ASCII字母/)
+    if (placement === 'overlap-review') {
+      assert.equal(raw, undefined, '暂选作者正文不得固定为raw覆盖后续独审结果')
+      const decisionRef = result.operation.requestBlob!
+      const composition = composeControlledRequest(original.input, composeAuthoredInput(original.input, pair, { retainConflicts: true }).composed!, decisionRef, { retainConflicts: true }).composed!
+      assert.ok(composition.compositionEvidenceBlob)
+      const evidence = JSON.parse(readEvidence(original.input.source.commonDir, composition.compositionEvidenceBlob).toString('utf8'))
+      assert.ok(evidence.conflicts.some((conflict: { path: string }) => conflict.path === path))
+    } else {
+      assert.match(raw, /已结算规则A：保留此前接受的计数/)
+      assert.match(raw, /未选义务：保持隔离/)
+      assert.match(raw, /待修改事实：必须保留本次作者输入/)
+      assert.match(raw, /规则B：仅转换ASCII字母/)
+    }
     assert.equal(result.operation.previousBaselinePair?.id, pair.id)
     assert.equal(readFileSync(join(f.root, path), 'utf8'), authored)
   } finally { f.cleanup() }
+  })
 })
