@@ -137,7 +137,7 @@ export default function SyncOperationPanel({ nodeId, nodePath, targetTree = null
     } catch (failure) { setError({ identity, kind: 'action', code: failure.code || 'network-error', message: failure.message }) }
     finally { busyRef.current = false; setBusy(null) }
   }
-  const state = currentError ? 'read_error' : model?.state || (settings?.activation === 'invalidated' ? 'invalidated' : settings?.enabled ? 'idle' : 'disabled')
+  const state = currentError ? 'read_error' : targetTree ? 'readonly' : model?.state || (settings?.activation === 'invalidated' ? 'invalidated' : settings?.enabled ? 'idle' : 'disabled')
   return <section className="sync-operation" aria-label={t('syncOperation.title')} data-sync-state={currentError ? 'read_error' : state}>
     <div className="sync-op-head">
       <h2>{t('syncOperation.title')}</h2>
@@ -152,10 +152,10 @@ export default function SyncOperationPanel({ nodeId, nodePath, targetTree = null
       </div>
     </div>
     {currentError && <p className="sync-op-error" role="alert"><code>{currentError.code}</code> · {currentError.message} <button type="button" onClick={() => { setError(null); setRefresh((value) => value + 1) }}>{t('syncOperation.retry')}</button></p>}
-    {settings && <p className="sync-op-source">{t('syncOperation.source')} <code>{settings.input.canonicalRoot}</code></p>}
-    {settings?.configurationError && <p className="sync-op-error" role="alert"><code>{settings.configurationError.code}</code> · {settings.configurationError.message}</p>}
-    {settings && !settings.configuration && <p className="sync-op-note">{t('syncOperation.configure')}</p>}
-    {settings && <p className="sync-op-note">{t('syncOperation.currentCapabilities')}</p>}
+    {settings && <p className="sync-op-source">{t(targetTree ? 'syncOperation.viewedTree' : 'syncOperation.source')} <code>{settings.input.canonicalRoot}</code></p>}
+    {!targetTree && settings?.configurationError && <p className="sync-op-error" role="alert"><code>{settings.configurationError.code}</code> · {settings.configurationError.message}</p>}
+    {!targetTree && settings && !settings.configuration && <p className="sync-op-note">{t('syncOperation.configure')}</p>}
+    {!targetTree && settings && <p className="sync-op-note">{t('syncOperation.currentCapabilities')}</p>}
     {model?.failure && <p className="sync-op-error" role="alert"><code>{model.failure.code}</code> · {model.failure.message}</p>}
     {retryPhase && !detail.stale && detail.retryEligibility?.reason && <p className="sync-op-note"><code>{detail.retryEligibility.reason.code}</code> · {detail.retryEligibility.reason.message}</p>}
     {detail && <OperationEvidence key={detail.operation.id} detail={detail} model={model} nodeId={nodeId} nodePath={nodePath} targetTree={targetTree} />}
