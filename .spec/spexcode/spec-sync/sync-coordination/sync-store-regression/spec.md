@@ -69,3 +69,5 @@ P3覆盖retiredIds在receipt前不推进、结算及重启/published pair累积�
 partial startGeneration登记needs_input后，生成environment失败及后续预算耗尽分别保原业务reason与失败证据，结清attempt/资源后eligibility和实际decision admission通过；仍在generating时同请求被拒。不以数据库伪造状态证明该路径。
 
 P4 针对性回归覆盖精确资源 frontier、物理暂停跨分支/重启、FIFO 收件与领取分离、暂停重叠前序和独立范围、不可变 successor 原位置与预算族、事务 CAS 与旧基线恢复；迁移覆盖在线备份、失败回滚、未知 writer 拒绝及原会话读取。
+
+P4新增定向矩阵使用真实SQLite句柄/事务、online backup及真实Git分支快照：共享byteB与intentA残差、explicit null vs legacy未知、readonly共享并行与read CAS、self future echo与foreign新语义、same selected差异+无关dirty不重开失败、ack提交前rollback/后reopen、原位置successor、全预算族统计、物理pause apply安全结算、旧P3 applying迁移恢复、P1新path/ID选择扩展及readset重组、health实例CAS和失败观测保活。存储文件与adopter-seams为定向套件，不运行完整测试集；完整业务author/raw归属与真实产品Agent闭环由协调/组合/应用验收证明。

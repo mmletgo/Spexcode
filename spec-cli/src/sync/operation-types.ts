@@ -24,7 +24,7 @@ export type InputSnapshot = {
   capturedAtMs: number
 }
 export type SyncScope = { paths: string[]; contractIds: string[]; flowIds: string[] }
-export type ContractScopeExpansion = Pick<SyncScope, 'contractIds' | 'flowIds'> & { evidenceRef: BlobRef }
+export type ContractScopeExpansion = Pick<SyncScope, 'contractIds' | 'flowIds'> & { paths?: string[]; previousBaselineSelectionDigest?: string; baselineSelectionDigest?: string; evidenceRef: BlobRef }
 export const SYNC_PHASES = ['detected', 'queued', 'analyzing', 'elaborating', 'generating', 'verifying', 'repairing', 'needs_input', 'conflicted', 'ready_to_apply', 'applying', 'workspace_synced', 'awaiting_landing', 'canonical_synced', 'superseded', 'pausing', 'paused', 'cancelling', 'cancelled', 'failed', 'budget_exhausted', 'recovering', 'recovery_required'] as const
 export type SyncPhase = typeof SYNC_PHASES[number]
 export type SyncControl = 'run' | 'pause' | 'cancel'
@@ -73,9 +73,10 @@ export type ComposedInputRef = { sourceInputId: string; previousBaselinePairId: 
 export type DispatchPlan = { key: string; purpose: string; requestDigest: string; sessionCreateKey: string; session: NativeSessionRef | null }
 export type NativeSessionRef = { sessionId: string; threadId: string | null; turnId: string | null }
 export type CandidateRef = { baseTree: string; sourceInputId: string; tree: string; digest: string; manifestBlob: BlobRef; actualDiffBlob: BlobRef; coveredScope: SyncScope }
-export type VerificationRef = { candidateDigest: string; inputId: string; passed: boolean; coveredScope: SyncScope; policyDigest: string; readSetDigest: string; environmentDigest: string; contextDigest: string; evidenceRefs: BlobRef[]; resultBlob: BlobRef }
+export type VerificationRef = { candidateDigest: string; inputId: string; passed: boolean; coveredScope: SyncScope; policyDigest: string; readSetDigest: string; baselineSelectionDigest?: string; environmentDigest: string; contextDigest: string; evidenceRefs: BlobRef[]; resultBlob: BlobRef }
 export type SyncAttempt = {
   id: string; operationId: string; number: number; generation: number
+  baselineSelectionDigest?: string
   dispatchKey: string; sessionCreateKey: string; status: 'claimed' | 'running' | 'frozen' | 'verified' | 'applying' | 'settled' | 'failed' | 'superseded'
   currentSession: NativeSessionRef | null; dispatchPlans: DispatchPlan[]; composedInput: ComposedInputRef | null; candidate: CandidateRef | null; verification: VerificationRef | null
   checkpointRefs: BlobRef[]; failure: SyncFailure | null; leaseToken: string; expiresAtMs: number
@@ -98,7 +99,7 @@ export type ClaimedAttempt = { operation: SyncOperation; attempt: SyncAttempt; f
 export type RecoverableSync = { operation: SyncOperation; attempt: SyncAttempt | null; journals: ApplyJournal[] }
 
 export type VerificationLayerResult = { layer: 'V1' | 'V2' | 'V3' | 'V4'; verdict: 'pass' | 'fail' | 'unsupported'; evidenceRefs: BlobRef[] }
-export type VerificationResultBlob = { schemaVersion: 1; coveredScope: SyncScope; inputId: string; candidateDigest: string; policyDigest: string; readSetDigest: string; environmentDigest: string; contextDigest: string; layers: VerificationLayerResult[]; retiredIds?: string[]; decisionRefs?: BlobRef[] }
+export type VerificationResultBlob = { schemaVersion: 1; coveredScope: SyncScope; inputId: string; candidateDigest: string; policyDigest: string; readSetDigest: string; baselineSelectionDigest?: string; environmentDigest: string; contextDigest: string; layers: VerificationLayerResult[]; retiredIds?: string[]; decisionRefs?: BlobRef[] }
 
 /** 原生资源状态与业务写入授权分离；removed 才表示容量可释放。 */
 export type SyncResourcePhase = 'planned' | 'created' | 'terminal' | 'removed'
@@ -118,9 +119,11 @@ export type SyncResourceCheckpoint = {
 }
 export type RecoverableSyncResource = { operation: SyncOperation; attempt: SyncAttempt; resource: SyncResourceRecord }
 
-export type SyncIngressReceipt = Pick<AdmitSyncInput, 'requestBlob' | 'budget' | 'deliveryPlan' | 'previousBaselinePair'> & { operationId: string; payloadDigest: string }
+export type SyncIngressReceipt = Pick<AdmitSyncInput, 'requestBlob' | 'budget' | 'deliveryPlan' | 'previousBaselinePair' | 'baselineSelection'> & { operationId: string; payloadDigest: string; input?: InputSnapshot; origin?: SyncOperation['origin'] }
 
-export type ClaimQueuedAttemptInput = ClaimAttemptInput & { expectedRevision: number }
+export type ClaimQueuedAttemptInput = ClaimAttemptInput & { expectedRevision: number; continuation?: true }
 export type SyncObservationInput = { input: InputSnapshot; configRef: BlobRef; selection: FrozenBaselineSelection | null; latestDifferenceDigest: string; failure?: SyncFailure }
 export type SyncObservation = SyncObservationInput & { id: string; controlRevision: number; selectionDigest: string | null; observedAtMs: number; operationId: string | null; outcome: 'observed' | 'admitted' | 'coalesced' | 'duplicate' | 'blocked'; reason: SyncFailure | null }
 export type ObserveAndAdmitResult = { outcome: 'admitted' | 'coalesced' | 'duplicate'; operation: SyncOperation; observation: SyncObservation } | { outcome: 'blocked'; observation: SyncObservation; reason: SyncFailure }
+
+export type SyncObserverHealth = { scope: PhysicalScope; instanceId: string; processId: number; startedAtMs: number; updatedAtMs: number; status: 'starting' | 'watching' | 'degraded' | 'stopped'; failure?: SyncFailure }

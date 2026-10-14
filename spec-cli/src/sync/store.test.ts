@@ -27,22 +27,31 @@ async function fixture() {
   await migrateSyncStore(protocol, { backupPath: join(root, 'initial.backup') })
   const store = new SyncStore(protocol, options)
   const admit = (identity = source(), id = 'input-1', covered = scope()): AdmitSyncInput => ({ ingressKey: `ingress-${identity.canonicalRoot}-${id}`, rootCauseId: 'cause', origin: 'spec', input: input(identity, id), scope: covered, budget: { maxAttempts: 4, maxCalls: 4, maxRepairs: 2, timeoutMs: 100000 }, policyDigest: 'policy', impactDigest: 'impact', readSetDigest: 'readset', delivery: null, deliveryPlan: { canonicalRoot: '/repo/delivery', branch: 'delivery', baseCommit: 'a'.repeat(40) } })
-  const claim = (value = admit()): ClaimedAttempt => { const operation = store.admitAndEnqueue(value); return store.claimAttempt({ operationId: operation.id, source: value.input.source, scope: value.scope, leaseMs: 1000, expectedMessageId: operation.dispatchMessageId }) }
+  const claim = (value = admit()): ClaimedAttempt => {
+    const operation = store.admitAndEnqueue(value)
+    if (value.baselineSelection) { const ack = store.ackDispatch(value.input.source.repositoryId, operation.dispatchMessageId); return store.claimQueuedAttempt({ operationId: operation.id, source: value.input.source, scope: value.scope, leaseMs: 1000, expectedRevision: ack.revision }) }
+    return store.claimAttempt({ operationId: operation.id, source: value.input.source, scope: value.scope, leaseMs: 1000, expectedMessageId: operation.dispatchMessageId })
+  }
   const ready = (value = admit(), readyScope = value.scope, blockedScope: SyncScope = { paths: [], contractIds: [], flowIds: [] }, blockedReason: 'needs_input' | 'conflicted' | null = null, beforeGeneration?: (claimed: ClaimedAttempt) => void, verificationMetadata: Pick<VerificationResultBlob, 'retiredIds' | 'decisionRefs'> = {}) => {
     const claimed = claim(value), target = { ...input(value.deliveryPlan.canonicalRoot === value.input.source.canonicalRoot ? value.input.source : source('delivery'), 'target'), manifestBlob: put({ version: 1, entries: readyScope.paths.map(path => ({ path, mode: '100644', oid: 'a'.repeat(40), digest: '1'.repeat(64) })) }) }
     store.bindDelivery(claimed.fence, target.source)
-    store.bindComposedInput(claimed.fence, { sourceInputId: value.input.id, previousBaselinePairId: value.previousBaselinePair?.id ?? null, tree: value.input.immutableTree, manifestBlob: target.manifestBlob, contentDigest: value.input.contentDigest, ...(value.requestBlob ? { requestBlob: value.requestBlob } : {}) })
+    store.bindComposedInput(claimed.fence, { sourceInputId: value.input.id, previousBaselinePairId: value.previousBaselinePair?.id ?? null, tree: value.input.immutableTree, manifestBlob: target.manifestBlob, contentDigest: value.input.contentDigest, ...(value.requestBlob ? { requestBlob: value.requestBlob } : {}), ...(value.baselineSelection ? { baselineSelectionDigest: value.baselineSelection.digest } : {}) })
     beforeGeneration?.(claimed)
+    const expandedSelection = store.readOperation(claimed.operation.id).baselineSelection
+    if (expandedSelection && expandedSelection.digest !== value.baselineSelection?.digest) {
+      value = { ...value, baselineSelection: expandedSelection }
+      store.bindComposedInput(claimed.fence, { sourceInputId: value.input.id, previousBaselinePairId: value.previousBaselinePair?.id ?? null, baselineSelectionDigest: expandedSelection.digest, tree: value.input.immutableTree, manifestBlob: target.manifestBlob, contentDigest: value.input.contentDigest, ...(value.requestBlob ? { requestBlob: value.requestBlob } : {}) })
+    }
     store.startGeneration(claimed.fence, { readyScope, blockedScope, blockedReason })
     const files: ApplyFilePlan[] = readyScope.paths.map(path => ({ path, preDigest: '1'.repeat(64), postDigest: '2'.repeat(64), preMode: '100644', postMode: '100644' }))
     const candidate: CandidateRef = { baseTree: value.input.immutableTree, sourceInputId: value.input.id, tree: 'f'.repeat(40), digest: 'candidate', manifestBlob: put({ version: 1, entries: readyScope.paths.map(path => ({ path, mode: '100644', oid: 'b'.repeat(40), digest: '2'.repeat(64) })) }), actualDiffBlob: put(files), coveredScope: readyScope }
     store.freezeCandidate(claimed.fence, candidate)
     const evidence = put({ observed: 'layer evidence' })
-    const bindings = { inputId: value.input.id, candidateDigest: candidate.digest, policyDigest: value.policyDigest, readSetDigest: value.readSetDigest, environmentDigest: 'env', contextDigest: 'context' }
+    const bindings = { inputId: value.input.id, candidateDigest: candidate.digest, policyDigest: value.policyDigest, readSetDigest: value.readSetDigest, ...(value.baselineSelection ? { baselineSelectionDigest: value.baselineSelection.digest } : {}), environmentDigest: 'env', contextDigest: 'context' }
     const result: VerificationResultBlob = { schemaVersion: 1, coveredScope: readyScope, ...bindings, layers: (['V1', 'V2', 'V3', 'V4'] as const).map(layer => ({ layer, verdict: 'pass', evidenceRefs: [evidence] })), ...verificationMetadata }
     const verification: VerificationRef = { ...bindings, passed: true, coveredScope: readyScope, evidenceRefs: [evidence], resultBlob: put(result) }
     store.recordVerification(claimed.fence, verification)
-    const plan: ApplyPlan = { effectKey: `effect-${claimed.operation.id}`, payloadDigest: 'apply-digest', candidateDigest: candidate.digest, verificationBlob: verification.resultBlob, target: target.source, expectedTargetSnapshotId: target.id, expectedBaselinePairId: value.previousBaselinePair?.id ?? null, coveredScope: readyScope, files, planBlob: put({ files, candidateDigest: candidate.digest }) }
+    const plan: ApplyPlan = { effectKey: `effect-${claimed.operation.id}`, payloadDigest: 'apply-digest', candidateDigest: candidate.digest, verificationBlob: verification.resultBlob, target: target.source, expectedTargetSnapshotId: target.id, expectedBaselinePairId: value.previousBaselinePair?.id ?? null, ...(value.baselineSelection ? { expectedBaselineSelectionDigest: value.baselineSelection.digest } : {}), coveredScope: readyScope, files, planBlob: put({ files, candidateDigest: candidate.digest }) }
     return { ...claimed, target, candidate, verification, plan }
   }
   const controlled = async (requestId = 'edit-A', replacement = '新的明确需求', intent = '保留原用户意图'): Promise<{ input: InputSnapshot; requestBlob: BlobRef }> => {
@@ -1311,4 +1320,428 @@ test('partial needs_input原因在生成失败或预算耗尽后仍可裁决，�
       assert.deepEqual(f.store.readAttempt(claimed.attempt.id).failure, issue); assert.equal(f.store.listJournals(parent.id).length, 0)
     } finally { f.cleanup() }
   }
+})
+
+
+test('P4 精确 frontier 将共享路径字节与独立作者 ID 分开，显式 null 不回退全局最新 pair', async () => {
+  const f = await fixture()
+  try {
+    const resources = (id: string) => [{ kind: 'path' as const, path: 'src/shared.ts' }, { kind: 'contract' as const, id }]
+    const selected = (id: string) => { const result = f.store.readBaselineSelection(source(), resources(id)); assert.ok('selection' in result); return result.selection }
+    const initial = selected('RULE-A')
+    assert.equal(initial.bindings.length, 2)
+    assert.ok(initial.bindings.every(binding => ('bytePair' in binding ? binding.bytePair : binding.intentPair) === null))
+    const settle = (r: ReturnType<typeof f.ready>) => { const journal = f.store.beginApply(r.fence, r.plan, r.target); for (const step of journal.steps) f.store.recordApplyStep(r.fence, journal.id, { ...step, status: 'completed' }); const receipt = f.receipt(journal.id, r.plan); f.store.recordReceipt(journal.id, receipt); f.store.settleApply(journal.id, receipt.id); return f.store.readBaseline(source())! }
+    const a = settle(f.ready({ ...f.admit(source(), 'A0', scope('src/shared.ts', 'RULE-A')), baselineSelection: initial }))
+    const beforeB = selected('RULE-B')
+    assert.equal(beforeB.bindings.find(binding => 'bytePair' in binding)?.bytePair?.id, a.id)
+    assert.equal(beforeB.bindings.find(binding => 'intentPair' in binding)?.intentPair, null)
+    const b = settle(f.ready({ ...f.admit(source(), 'A2-B0', scope('src/shared.ts', 'RULE-B')), baselineSelection: beforeB }))
+    const after = selected('RULE-A')
+    assert.equal(after.bindings.find(binding => 'bytePair' in binding)?.bytePair?.id, b.id)
+    assert.equal(after.bindings.find(binding => 'intentPair' in binding)?.intentPair?.id, a.id)
+    assert.equal(after.bindings.find(binding => 'intentPair' in binding)?.intentPair?.sourceInput.id, 'A0')
+    const input = { ...f.admit(source(), 'A2', scope('src/shared.ts', 'RULE-A')), baselineSelection: after }
+    const incomplete = { ...after, bindings: after.bindings.filter(binding => 'bytePair' in binding) }
+    assert.throws(() => f.store.admitAndEnqueue({ ...input, baselineSelection: incomplete }), /SYNC_BASELINE_STALE/)
+    f.protocol.withTransaction(tx => tx.exec('UPDATE sync_baseline_heads SET legacy_reason=? WHERE resource_key=?', 'unproven legacy history', 'contract:RULE-A'))
+    assert.ok('failure' in f.store.readBaselineSelection(source(), resources('RULE-A')))
+  } finally { f.cleanup() }
+})
+
+test('P4 无关 path/ID 交付不使已冻结选择过期，相同资源 frontier 前进拒绝 beginApply', async () => {
+  const f = await fixture()
+  try {
+    const selected = (covered: SyncScope) => { const result = f.store.readBaselineSelection(source(), [...covered.paths.map(path => ({ kind: 'path' as const, path })), ...covered.contractIds.map(id => ({ kind: 'contract' as const, id }))]); assert.ok('selection' in result); return result.selection }
+    const left = scope('src/a.ts', 'RULE-A'), right = scope('src/b.ts', 'RULE-B')
+    const a = f.ready({ ...f.admit(source(), 'a', left), baselineSelection: selected(left) })
+    const b = f.ready({ ...f.admit(source(), 'b', right), baselineSelection: selected(right) })
+    const journal = f.store.beginApply(b.fence, b.plan, b.target)
+    for (const step of journal.steps) f.store.recordApplyStep(b.fence, journal.id, { ...step, status: 'completed' })
+    const receipt = f.receipt(journal.id, b.plan); f.store.recordReceipt(journal.id, receipt); f.store.settleApply(journal.id, receipt.id)
+    assert.equal(f.store.beginApply(a.fence, a.plan, a.target).status, 'prepared')
+    const before = selected(right)
+    f.protocol.withTransaction(tx => tx.exec('UPDATE sync_baseline_heads SET pair_id=NULL WHERE resource_key=?', 'contract:RULE-B'))
+    assert.throws(() => f.store.admitAndEnqueue({ ...f.admit(source(), 'b2', right), baselineSelection: before }), /SYNC_BASELINE_STALE/)
+  } finally { f.cleanup() }
+})
+
+test('P4 物理暂停跨分支及重启保留，仍收件和观察，run revision CAS 后领取', async () => {
+  const f = await fixture()
+  const physical = { repositoryId: 'repo', canonicalRoot: source().canonicalRoot, physicalFingerprint: source().physicalFingerprint }
+  try {
+    assert.deepEqual(f.store.readPhysicalControl(physical), { scope: physical, control: 'run', revision: 0 })
+    f.store.requestPhysicalControl(physical, 'pause', 0)
+    const branch = { ...source(), branch: 'other-branch' }, covered = scope()
+    const result = f.store.readBaselineSelection(branch, [{ kind: 'path', path: 'src/a.ts' }, { kind: 'contract', id: 'RULE-A' }]); assert.ok('selection' in result)
+    const admission = { ...f.admit(branch, 'during-pause', covered), baselineSelection: result.selection }, configRef = f.put({ policy: 'frozen' })
+    const observed = f.store.observeAndAdmit({ input: admission.input, configRef, selection: result.selection, latestDifferenceDigest: 'new-bytes' }, admission, { controlRevision: 1, selectionDigest: result.selection.digest })
+    assert.notEqual(observed.outcome, 'blocked'); assert.ok('operation' in observed)
+    const acknowledged = f.store.ackDispatch('repo', observed.operation.dispatchMessageId)
+    assert.equal(f.store.nextQueued('repo'), null)
+    assert.equal(f.protocol.listPending(syncCoordinatorAddress('repo')).length, 0)
+    const reopened = openProtocol(f.path)
+    try { const store = new SyncStore(reopened, f.options); assert.equal(store.readPhysicalControl(physical).control, 'pause'); assert.equal(store.pinnedBlobRefs().some(ref => ref.sha256 === configRef.sha256), true); assert.throws(() => store.requestPhysicalControl(physical, 'run', 0), /SYNC_CONTROL_STALE/); store.requestPhysicalControl(physical, 'run', 1); const queued = store.nextQueued('repo')!; assert.equal(queued.id, acknowledged.id); store.claimQueuedAttempt({ operationId: queued.id, source: branch, scope: covered, leaseMs: 1000, expectedRevision: queued.revision }); assert.equal(store.readOperation(queued.id).phase, 'analyzing') } finally { reopened.close() }
+    const failed = f.store.recordObservation({ input: admission.input, configRef, selection: null, latestDifferenceDigest: 'captured-plan-failed', failure: { code: 'PLAN_FAILED', message: 'true plan failure', kind: 'unsupported', evidenceRefs: [] } }, { controlRevision: 2, selectionDigest: null })
+    assert.equal(failed.failure?.code, 'PLAN_FAILED')
+  } finally { f.cleanup() }
+})
+
+test('P4 FIFO ack 与 claim 分离，暂停的重叠前序阻 A后继而独立 B 可执行', async () => {
+  const f = await fixture()
+  try {
+    const a = f.store.admitAndEnqueue(f.admit(source('a'), 'a', scope('src/a.ts', 'RULE-A')))
+    const overlap = f.store.admitAndEnqueue(f.admit(source('a-prime'), 'aprime', scope('src/a.ts', 'RULE-A')))
+    const b = f.store.admitAndEnqueue(f.admit(source('b'), 'b', scope('src/b.ts', 'RULE-B')))
+    assert.throws(() => f.store.ackDispatch('repo', b.dispatchMessageId), /SYNC_DISPATCH_MISMATCH/)
+    f.store.requestPhysicalControl({ repositoryId: 'repo', canonicalRoot: a.input.source.canonicalRoot, physicalFingerprint: a.input.source.physicalFingerprint }, 'pause', 0)
+    const ackA = f.store.ackDispatch('repo', a.dispatchMessageId), ackOverlap = f.store.ackDispatch('repo', overlap.dispatchMessageId), ackB = f.store.ackDispatch('repo', b.dispatchMessageId)
+    assert.equal(f.store.nextQueued('repo')?.id, b.id)
+    assert.throws(() => f.store.claimQueuedAttempt({ operationId: overlap.id, source: overlap.input.source, scope: overlap.scope, leaseMs: 1000, expectedRevision: ackOverlap.revision }), /SYNC_QUEUED_STALE/)
+    const claimed = f.store.claimQueuedAttempt({ operationId: b.id, source: b.input.source, scope: b.scope, leaseMs: 1000, expectedRevision: ackB.revision })
+    assert.equal(claimed.operation.id, b.id)
+    assert.equal(ackA.dispatchAnchor?.firstMessageId, a.dispatchMessageId)
+    assert.equal(f.protocol.listPending(syncCoordinatorAddress('repo')).length, 0)
+  } finally { f.cleanup() }
+})
+
+test('P4 不可变 successor 继承原FIFO位置、预算和deadline，重复失败不自动重开，显式retry新族', async () => {
+  const f = await fixture()
+  try {
+    const original = f.store.admitAndEnqueue({ ...f.admit(), budget: { maxAttempts: 2, maxCalls: 1, maxRepairs: 1, timeoutMs: 1000 } })
+    const b = f.store.admitAndEnqueue(f.admit(source('b'), 'b', scope('src/b.ts', 'RULE-B')))
+    f.tick(100)
+    const successor = f.store.admitAndEnqueue({ ...f.admit(source(), 'input-2'), budget: { maxAttempts: 99, maxCalls: 99, maxRepairs: 99, timeoutMs: 999999 } })
+    assert.equal(f.store.readOperation(original.id).phase, 'superseded')
+    assert.equal(successor.successorOf, original.id)
+    assert.deepEqual(successor.dispatchAnchor, original.dispatchAnchor)
+    assert.deepEqual(successor.budget, original.budget)
+    assert.equal(successor.deadlineAtMs, original.deadlineAtMs)
+    f.store.ackDispatch('repo', original.dispatchMessageId); f.store.ackDispatch('repo', b.dispatchMessageId)
+    assert.equal(f.store.nextQueued('repo')?.id, b.id)
+    const ack = f.store.ackDispatch('repo', successor.dispatchMessageId)
+    assert.equal(f.store.nextQueued('repo')?.id, successor.id)
+    const claimed = f.store.claimQueuedAttempt({ operationId: successor.id, source: successor.input.source, scope: successor.scope, leaseMs: 500, expectedRevision: ack.revision })
+    f.store.reserveDispatch(claimed.fence, { key: 'native', purpose: 'generate', requestDigest: 'request' })
+    f.store.recordFailure(claimed.fence, { code: 'FAIL', message: 'actual failure', kind: 'environment', evidenceRefs: [] })
+    assert.equal(f.store.admitAndEnqueue({ ...f.admit(source(), 'input-2'), ingressKey: 'repeat-failure' }).id, successor.id)
+    const retry = f.store.admitAndEnqueue({ ...f.admit(source(), 'input-2'), retryOf: successor.id, ingressKey: 'explicit-retry', rootCauseId: 'explicit-retry' })
+    assert.equal(retry.dispatchAnchor?.budgetRootOperationId, retry.id)
+    assert.notEqual(retry.dispatchAnchor?.budgetRootOperationId, successor.dispatchAnchor?.budgetRootOperationId)
+  } finally { f.cleanup() }
+})
+
+test('P4 v9 frontier迁移只信明确前驱链与实际files，备份保旧数据及writer拒绝未知新代', async () => {
+  const f = await fixture()
+  try {
+    const settle = (r: ReturnType<typeof f.ready>) => { const journal = f.store.beginApply(r.fence, r.plan, r.target); for (const step of journal.steps) f.store.recordApplyStep(r.fence, journal.id, { ...step, status: 'completed' }); const receipt = f.receipt(journal.id, r.plan); f.store.recordReceipt(journal.id, receipt); f.store.settleApply(journal.id, receipt.id); return f.store.readBaseline(source())! }
+    const a = settle(f.ready({ ...f.admit(source(), 'legacy-A', scope('src/shared.ts', 'RULE-A')) }))
+    const b = settle(f.ready({ ...f.admit(source(), 'legacy-B', scope('src/shared.ts', 'RULE-B')) }))
+    f.protocol.initialize('original-session')
+    f.protocol.enqueue('original-session', { kind: 'user', body: Buffer.from('original session data'), idempotencyKey: 'original-user-message' })
+    f.protocol.withTransaction(tx => { tx.exec('DROP TABLE sync_observations'); tx.exec('DROP TABLE sync_observer_health'); tx.exec('DROP TABLE sync_physical_controls'); tx.exec('DROP TABLE sync_baseline_heads'); tx.exec('DELETE FROM schema_migrations WHERE component=? AND version=10', SYNC_COMPONENT) })
+    const backup = join(f.root, 'v9.before-upgrade.backup')
+    await migrateSyncStore(f.protocol, { backupPath: backup })
+    assert.ok(existsSync(backup))
+    const old = openProtocol(backup)
+    try { assert.equal(old.withTransaction(tx => tx.query('SELECT MAX(version) AS version FROM schema_migrations WHERE component=?', SYNC_COMPONENT)[0].version), 9); assert.equal(Buffer.from(old.listPending('original-session')[0].body).toString('utf8'), 'original session data') } finally { old.close() }
+    const resources = [{ kind: 'path' as const, path: 'src/shared.ts' }, { kind: 'contract' as const, id: 'RULE-A' }]
+    const unproven = f.store.readBaselineSelection(source(), resources)
+    assert.ok('failure' in unproven); assert.equal(unproven.failure.code, 'SYNC_BASELINE_LEGACY_UNKNOWN')
+    const intentA = f.store.readBaselineSelection(source(), [{ kind: 'contract', id: 'RULE-A' }]); assert.ok('selection' in intentA); assert.equal(intentA.selection.bindings.find(binding => 'intentPair' in binding)?.intentPair?.id, a.id)
+    const intentB = f.store.readBaselineSelection(source(), [{ kind: 'contract', id: 'RULE-B' }]); assert.ok('selection' in intentB); assert.equal(intentB.selection.bindings.find(binding => 'intentPair' in binding)?.intentPair?.id, b.id)
+    assert.throws(() => applyComponentMigrations(f.protocol, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 9)), /schema generation 10; this build understands 9/)
+    assert.equal(Buffer.from(f.protocol.listPending('original-session')[0].body).toString('utf8'), 'original session data')
+    await migrateSyncStore(f.protocol, { backupPath: join(f.root, 'should-not-create.backup') })
+    assert.equal(existsSync(join(f.root, 'should-not-create.backup')), false)
+  } finally { f.cleanup() }
+})
+
+test('P4 升级事务失败回滚且旧P3 applying冻结journal升级后可真实结算', async () => {
+  const f = await fixture()
+  try {
+    const r = f.ready(), journal = f.store.beginApply(r.fence, r.plan, r.target)
+    f.protocol.withTransaction(tx => { tx.exec('DROP TABLE sync_observations'); tx.exec('DROP TABLE sync_observer_health'); tx.exec('DROP TABLE sync_physical_controls'); tx.exec('DROP TABLE sync_baseline_heads'); tx.exec('DELETE FROM schema_migrations WHERE component=? AND version=10', SYNC_COMPONENT); tx.exec('UPDATE sync_apply_journals SET record_json=? WHERE id=?', JSON.stringify({ ...journal, attemptId: 'missing-frozen-attempt' }), journal.id) })
+    await assert.rejects(() => migrateSyncStore(f.protocol, { backupPath: join(f.root, 'failed-v9.backup') }), /SYNC_MIGRATION_RECOVERY_INVALID/)
+    assert.equal(f.protocol.withTransaction(tx => tx.query('SELECT MAX(version) AS version FROM schema_migrations WHERE component=?', SYNC_COMPONENT)[0].version), 9)
+    assert.equal(f.protocol.withTransaction(tx => tx.query("SELECT name FROM sqlite_master WHERE name='sync_baseline_heads'").length), 0)
+    f.protocol.withTransaction(tx => tx.exec('UPDATE sync_apply_journals SET record_json=? WHERE id=?', JSON.stringify(journal), journal.id))
+    await migrateSyncStore(f.protocol, { backupPath: join(f.root, 'recoverable-v9.backup') })
+    for (const step of journal.steps) f.store.recordApplyStep(r.fence, journal.id, { ...step, status: 'completed' })
+    const receipt = f.receipt(journal.id, r.plan); f.store.recordReceipt(journal.id, receipt)
+    assert.equal(f.store.settleApply(journal.id, receipt.id).phase, 'workspace_synced')
+    const selected = f.store.readBaselineSelection(source(), [{ kind: 'path', path: 'src/a.ts' }, { kind: 'contract', id: 'RULE-A' }]); assert.ok('selection' in selected); assert.ok(selected.selection.bindings.every(binding => ('bytePair' in binding ? binding.bytePair : binding.intentPair)?.receiptId === receipt.id))
+  } finally { f.cleanup() }
+})
+
+test('P4 source与target分支命名空间允许独立同名资源，共享target仍互斥且control/expand事务竞态失败', async () => {
+  const f = await fixture()
+  const otherProtocol = openProtocol(f.path), other = new SyncStore(otherProtocol, f.options)
+  try {
+    const admitted = (name: string, target: string) => { const identity = source(name), selected = f.store.readBaselineSelection(identity, [{ kind: 'path', path: 'src/a.ts' }, { kind: 'contract', id: 'RULE-A' }]); assert.ok('selection' in selected); return f.store.admitAndEnqueue({ ...f.admit(identity), deliveryPlan: { canonicalRoot: `/repo/${target}`, branch: target, baseCommit: 'a'.repeat(40) }, baselineSelection: selected.selection }) }
+    const a = admitted('a', 'delivery-a'), b = admitted('b', 'delivery-b'), conflict = admitted('c', 'delivery-a')
+    const ackA = f.store.ackDispatch('repo', a.dispatchMessageId), ackB = f.store.ackDispatch('repo', b.dispatchMessageId), ackC = f.store.ackDispatch('repo', conflict.dispatchMessageId)
+    const claimA = f.store.claimQueuedAttempt({ operationId: a.id, source: a.input.source, scope: a.scope, leaseMs: 1000, expectedRevision: ackA.revision })
+    const claimB = other.claimQueuedAttempt({ operationId: b.id, source: b.input.source, scope: b.scope, leaseMs: 1000, expectedRevision: ackB.revision })
+    assert.equal(claimB.operation.phase, 'analyzing')
+    assert.throws(() => other.claimQueuedAttempt({ operationId: conflict.id, source: conflict.input.source, scope: conflict.scope, leaseMs: 1000, expectedRevision: ackC.revision }), /SYNC_QUEUED_STALE/)
+    const physical = { repositoryId: 'repo', canonicalRoot: a.input.source.canonicalRoot, physicalFingerprint: a.input.source.physicalFingerprint }
+    other.requestPhysicalControl(physical, 'pause', 0)
+    assert.throws(() => f.store.expandContractScope(claimA.fence, { contractIds: ['RULE-A', 'RULE-NEW'], flowIds: [] }, f.put({ reviewed: true })), /SYNC_FENCE_EXPIRED/)
+    assert.deepEqual(f.store.readOperation(a.id).scope.contractIds, ['RULE-A'])
+    assert.equal(f.store.readOperation(a.id).baselineSelection?.bindings.length, 2)
+    assert.throws(() => f.store.requestPhysicalControl(physical, 'run', 0), /SYNC_CONTROL_STALE/)
+  } finally { otherProtocol.close(); f.cleanup() }
+})
+
+test('P4 真实Git切分支保持物理pause且冻结来源身份不同，观察/ack不会偷偷派发', async () => {
+  const f = await fixture()
+  try {
+    const original = (await f.controlled()).input
+    const physical = { repositoryId: original.source.repositoryId, canonicalRoot: original.source.canonicalRoot, physicalFingerprint: original.source.physicalFingerprint }
+    f.store.requestPhysicalControl(physical, 'pause', 0)
+    execFileSync('git', ['-C', original.source.canonicalRoot, 'switch', '-c', 'p4-observed-other'], { stdio: 'pipe' })
+    const next = await captureInputSnapshot(original.source.canonicalRoot)
+    assert.notEqual(next.source.branch, original.source.branch)
+    assert.equal(next.source.physicalFingerprint, original.source.physicalFingerprint)
+    f.blobs.set(next.manifestBlob.sha256, readEvidence(next.source.commonDir, next.manifestBlob))
+    const selected = f.store.readBaselineSelection(next.source, [{ kind: 'path', path: '.spec/demo/spec.md' }]); assert.ok('selection' in selected)
+    const admission = { ...f.admit(next.source, next.id, { paths: ['.spec/demo/spec.md'], contractIds: [], flowIds: [] }), input: next, baselineSelection: selected.selection }, configRef = f.put({ trusted: 'same-policy' })
+    const result = f.store.observeAndAdmit({ input: next, configRef, selection: selected.selection, latestDifferenceDigest: next.contentDigest }, admission, { controlRevision: 1, selectionDigest: selected.selection.digest })
+    assert.ok('operation' in result)
+    f.store.ackDispatch(next.source.repositoryId, result.operation.dispatchMessageId)
+    assert.equal(f.store.nextQueued(next.source.repositoryId), null)
+    assert.equal(f.store.listAttempts(result.operation.id).length, 0)
+    assert.equal(f.store.readPhysicalControl(physical).control, 'pause')
+  } finally { f.cleanup() }
+})
+
+test('P4 已证明前驱链迁移按因果而非rowid/壁钟选头，目录授权不伪造精确path基线', async () => {
+  const f = await fixture()
+  try {
+    const settle = (r: ReturnType<typeof f.ready>) => { const journal = f.store.beginApply(r.fence, r.plan, r.target); for (const step of journal.steps) f.store.recordApplyStep(r.fence, journal.id, { ...step, status: 'completed' }); const receipt = f.receipt(journal.id, r.plan); f.store.recordReceipt(journal.id, receipt); f.store.settleApply(journal.id, receipt.id); return f.store.readBaseline(source())! }
+    const first = settle(f.ready(f.admit(source(), 'chain-A')))
+    f.tick(-500)
+    const last = settle(f.ready({ ...f.admit(source(), 'chain-B'), previousBaselinePair: first }))
+    f.protocol.withTransaction(tx => { const row = tx.query('SELECT record_json FROM sync_baseline_pairs WHERE id=?', first.id)[0]; const record = JSON.parse(String(row.record_json)) as typeof first; record.coveredScope.paths = ['src']; tx.exec('UPDATE sync_baseline_pairs SET record_json=? WHERE id=?', JSON.stringify(record), first.id); tx.exec('DROP TABLE sync_observations'); tx.exec('DROP TABLE sync_observer_health'); tx.exec('DROP TABLE sync_physical_controls'); tx.exec('DROP TABLE sync_baseline_heads'); tx.exec('DELETE FROM schema_migrations WHERE component=? AND version=10', SYNC_COMPONENT) })
+    await migrateSyncStore(f.protocol, { backupPath: join(f.root, 'causal-v9.backup') })
+    const selected = f.store.readBaselineSelection(source(), [{ kind: 'path', path: 'src/a.ts' }, { kind: 'contract', id: 'RULE-A' }]); assert.ok('selection' in selected); assert.ok(selected.selection.bindings.every(binding => ('bytePair' in binding ? binding.bytePair : binding.intentPair)?.id === last.id))
+    const directory = f.store.readBaselineSelection(source(), [{ kind: 'path', path: 'src' }]); assert.ok('selection' in directory); assert.equal(directory.selection.bindings.find(binding => 'bytePair' in binding)?.bytePair, null)
+  } finally { f.cleanup() }
+})
+
+test('P4 ack提交前故障整体回滚、提交后重启保durable queue且不漏收件', async () => {
+  const f = await fixture()
+  let failCommit = false
+  const originalTransaction = f.protocol.withTransaction
+  f.protocol.withTransaction = body => originalTransaction(tx => { const result = body(tx); if (failCommit) throw new Error('injected ack commit failure'); return result })
+  try {
+    const op = f.store.admitAndEnqueue(f.admit())
+    failCommit = true
+    assert.throws(() => f.store.ackDispatch('repo', op.dispatchMessageId), /injected ack commit failure/)
+    failCommit = false
+    assert.equal(f.store.readOperation(op.id).dispatchAcknowledged, undefined)
+    assert.equal(f.protocol.listPending(syncCoordinatorAddress('repo'))[0].messageId, op.dispatchMessageId)
+    assert.equal(f.store.nextQueued('repo'), null)
+    f.store.ackDispatch('repo', op.dispatchMessageId)
+    const reopened = openProtocol(f.path)
+    try { const store = new SyncStore(reopened, f.options); const queued = store.nextQueued('repo')!; assert.equal(queued.id, op.id); assert.equal(reopened.listPending(syncCoordinatorAddress('repo')).length, 0); const claimed = store.claimQueuedAttempt({ operationId: op.id, source: op.input.source, scope: op.scope, leaseMs: 1000, expectedRevision: queued.revision }); assert.equal(claimed.attempt.number, 1) } finally { reopened.close() }
+  } finally { f.protocol.withTransaction = originalTransaction; f.cleanup() }
+})
+
+test('P4 自动预算族汇总所有历史attempt/native/repair，pause恢复和新byte不能局部重置', async () => {
+  const f = await fixture()
+  try {
+    const budget = { maxAttempts: 3, maxCalls: 3, maxRepairs: 1, timeoutMs: 100000 }
+    const claim = (input: AdmitSyncInput) => { const op = f.store.admitAndEnqueue({ ...input, budget }); const ack = f.store.ackDispatch('repo', op.dispatchMessageId); return f.store.claimQueuedAttempt({ operationId: op.id, source: op.input.source, scope: op.scope, leaseMs: 1000, expectedRevision: ack.revision }) }
+    const first = claim(f.admit())
+    f.store.reserveDispatch(first.fence, { key: 'call1', purpose: 'generation', requestDigest: '1' })
+    f.store.recordFailure(first.fence, { code: 'FAIL1', kind: 'repairable', message: 'first genuine repair failure', evidenceRefs: [] })
+    const second = claim(f.admit(source(), 'new-byte-2'))
+    assert.equal(second.attempt.number, 1)
+    assert.equal(second.operation.dispatchAnchor?.budgetRootOperationId, first.operation.id)
+    f.store.reserveDispatch(second.fence, { key: 'call2', purpose: 'repair', requestDigest: '2' })
+    f.store.recordFailure(second.fence, { code: 'FAIL2', kind: 'repairable', message: 'second genuine repair failure', evidenceRefs: [] })
+    const third = f.store.admitAndEnqueue({ ...f.admit(source(), 'new-byte-3'), budget }), ack = f.store.ackDispatch('repo', third.dispatchMessageId)
+    assert.throws(() => f.store.claimQueuedAttempt({ operationId: third.id, source: third.input.source, scope: third.scope, leaseMs: 1000, expectedRevision: ack.revision }), /SYNC_BUDGET_EXHAUSTED/)
+    assert.equal(f.store.listAttempts(third.id).length, 0)
+    assert.equal(f.store.recordBudgetExhaustion(third.id).phase, 'budget_exhausted')
+    assert.equal(f.store.nextQueued('repo'), null)
+    assert.equal(f.store.admitAndEnqueue({ ...f.admit(source(), 'new-byte-3'), ingressKey: 'duplicate-exhausted', budget }).id, third.id)
+    const retry = f.store.admitAndEnqueue({ ...f.admit(source(), 'new-byte-3'), ingressKey: 'user-new-budget', rootCauseId: 'user-new-budget', retryOf: third.id, budget })
+    assert.equal(retry.dispatchAnchor?.budgetRootOperationId, retry.id)
+  } finally { f.cleanup() }
+})
+
+test('P4 pause/apply竞态不建journal，已登记applying结算后pause且resume只恢复真实交付结论', async () => {
+  const f = await fixture()
+  try {
+    const selected = f.store.readBaselineSelection(source(), [{ kind: 'path', path: 'src/a.ts' }, { kind: 'contract', id: 'RULE-A' }]); assert.ok('selection' in selected)
+    const r = f.ready({ ...f.admit(), baselineSelection: selected.selection }), physical = { repositoryId: 'repo', canonicalRoot: source().canonicalRoot, physicalFingerprint: source().physicalFingerprint }
+    f.store.requestPhysicalControl(physical, 'pause', 0)
+    assert.throws(() => f.store.beginApply(r.fence, r.plan, r.target), /SYNC_FENCE_EXPIRED/)
+    assert.equal(f.store.listJournals(r.operation.id).length, 0)
+    f.store.requestPhysicalControl(physical, 'run', 1)
+    const journal = f.store.beginApply(r.fence, r.plan, r.target)
+    f.store.requestPhysicalControl(physical, 'pause', 2)
+    for (const step of journal.steps) f.store.recordApplyStep(r.fence, journal.id, { ...step, status: 'completed' })
+    const receipt = f.receipt(journal.id, r.plan); f.store.recordReceipt(journal.id, receipt)
+    assert.equal(f.store.settleApply(journal.id, receipt.id).phase, 'paused')
+    f.store.requestPhysicalControl(physical, 'run', 3)
+    assert.equal(f.store.readOperation(r.operation.id).phase, 'workspace_synced')
+    assert.equal(f.store.listAttempts(r.operation.id).length, 1)
+    assert.equal(f.store.nextQueued('repo'), null)
+  } finally { f.cleanup() }
+})
+
+test('P4 真实已审future ID扩展补null binding，退役FLOW推进flow tombstone并保原作者头', async () => {
+  const f = await fixture()
+  try {
+    const covered = { paths: ['src/a.ts'], contractIds: ['RULE-A'], flowIds: ['FLOW-OLD'] }, selected = f.store.readBaselineSelection(source(), [{ kind: 'path', path: 'src/a.ts' }, { kind: 'contract', id: 'RULE-A' }, { kind: 'flow', id: 'FLOW-OLD' }]); assert.ok('selection' in selected)
+    const input = { ...f.admit(source(), 'flow-retire', covered), baselineSelection: selected.selection }
+    const r = f.ready(input, covered, undefined, undefined, undefined, { retiredIds: ['FLOW-OLD'] })
+    const journal = f.store.beginApply(r.fence, r.plan, r.target); for (const step of journal.steps) f.store.recordApplyStep(r.fence, journal.id, { ...step, status: 'completed' }); const receipt = f.receipt(journal.id, r.plan); f.store.recordReceipt(journal.id, receipt); f.store.settleApply(journal.id, receipt.id)
+    const flow = f.store.readBaselineSelection(source(), [{ kind: 'flow', id: 'FLOW-OLD' }]); assert.ok('selection' in flow); assert.equal(flow.selection.bindings.find(binding => 'intentPair' in binding)?.intentPair?.receiptId, receipt.id)
+    const fresh = f.store.readBaselineSelection(source(), [{ kind: 'path', path: 'src/new.ts' }]); assert.ok('selection' in fresh)
+    const op = f.store.admitAndEnqueue({ ...f.admit(source(), 'new-future', { paths: ['src/new.ts'], contractIds: [], flowIds: [] }), baselineSelection: fresh.selection }), ack = f.store.ackDispatch('repo', op.dispatchMessageId), claimed = f.store.claimQueuedAttempt({ operationId: op.id, source: op.input.source, scope: op.scope, leaseMs: 1000, expectedRevision: ack.revision })
+    const expanded = f.store.expandContractScope(claimed.fence, { contractIds: ['RULE-FUTURE'], flowIds: ['FLOW-FUTURE'] }, f.put({ actualIndependentReview: 'passed' }))
+    assert.equal(expanded.baselineSelection?.bindings.length, 3)
+    assert.ok(expanded.baselineSelection?.bindings.filter(binding => 'intentPair' in binding).every(binding => binding.intentPair === null))
+    assert.equal(f.store.readAttempt(claimed.attempt.id).baselineSelectionDigest, expanded.baselineSelection?.digest)
+  } finally { f.cleanup() }
+})
+
+test('P4 显式continuation只恢复已ack安全repair/过期attempt，failed不自动出队且legacy不能绕收件', async () => {
+  const f = await fixture()
+  try {
+    const selected = f.store.readBaselineSelection(source(), [{ kind: 'path', path: 'src/a.ts' }, { kind: 'contract', id: 'RULE-A' }]); assert.ok('selection' in selected)
+    const op = f.store.admitAndEnqueue({ ...f.admit(), baselineSelection: selected.selection })
+    assert.throws(() => f.store.claimAttempt({ operationId: op.id, source: op.input.source, scope: op.scope, leaseMs: 1000 }), /SYNC_CLAIM_LEGACY_ONLY/)
+    assert.throws(() => f.store.claimQueuedAttempt({ operationId: op.id, source: op.input.source, scope: op.scope, leaseMs: 1000, expectedRevision: op.revision }), /SYNC_QUEUED_STALE/)
+    const ack = f.store.ackDispatch('repo', op.dispatchMessageId), first = f.store.claimQueuedAttempt({ operationId: op.id, source: op.input.source, scope: op.scope, leaseMs: 1000, expectedRevision: ack.revision })
+    f.store.recordFailure(first.fence, { code: 'FIXABLE', message: 'genuine repairable fault', kind: 'repairable', evidenceRefs: [] })
+    assert.equal(f.store.nextQueued('repo'), null)
+    const failed = f.store.readOperation(op.id)
+    assert.throws(() => f.store.claimQueuedAttempt({ operationId: op.id, source: op.input.source, scope: op.scope, leaseMs: 1000, expectedRevision: failed.revision }), /SYNC_QUEUED_STALE/)
+    const second = f.store.claimQueuedAttempt({ operationId: op.id, source: op.input.source, scope: op.scope, leaseMs: 1000, expectedRevision: failed.revision, continuation: true })
+    assert.equal(second.attempt.number, 2)
+    assert.equal(second.operation.deadlineAtMs, op.deadlineAtMs)
+    assert.deepEqual(f.store.readBudgetUsage(op.id), { budgetRootOperationId: op.id, callsUsed: 0, attemptsUsed: 2, repairFailures: 1 })
+    assert.throws(() => f.store.checkpoint(first.fence, f.put({ stale: true })), /SYNC_FENCE_EXPIRED/)
+  } finally { f.cleanup() }
+})
+
+test('P4 已审P1路径扩展绑定真实旧path head或null，并只允许前生成重组到新selection', async () => {
+  const f = await fixture()
+  try {
+    const old = f.ready(f.admit(source(), 'old-file', scope('src/old.ts', 'RULE-OLD'))), journal = f.store.beginApply(old.fence, old.plan, old.target)
+    for (const step of journal.steps) f.store.recordApplyStep(old.fence, journal.id, { ...step, status: 'completed' })
+    const receipt = f.receipt(journal.id, old.plan); f.store.recordReceipt(journal.id, receipt); f.store.settleApply(journal.id, receipt.id)
+    const covered = { paths: ['.spec/new/spec.md'], contractIds: [], flowIds: [] }, selection = f.store.readBaselineSelection(source(), [{ kind: 'path', path: '.spec/new/spec.md' }]); assert.ok('selection' in selection)
+    const claimed = f.claim({ ...f.admit(source(), 'new-P1', covered), baselineSelection: selection.selection })
+    const composed = { sourceInputId: claimed.operation.input.id, previousBaselinePairId: null, baselineSelectionDigest: selection.selection.digest, tree: claimed.operation.input.immutableTree, manifestBlob: claimed.operation.input.manifestBlob, contentDigest: claimed.operation.input.contentDigest }
+    f.store.bindComposedInput(claimed.fence, composed)
+    f.store.startElaboration(claimed.fence)
+    const expanded = f.store.expandContractScope(claimed.fence, { paths: ['src/old.ts', 'src/new.ts'], contractIds: ['RULE-FUTURE'], flowIds: [] }, f.put({ actualP1Review: 'new files authorized' }))
+    assert.ok(expanded.scope.paths.includes('src/old.ts'))
+    const paths = expanded.baselineSelection!.bindings.filter(binding => 'bytePair' in binding)
+    assert.equal(paths.find(binding => binding.resource.path === 'src/old.ts')?.bytePair?.receiptId, receipt.id)
+    assert.equal(paths.find(binding => binding.resource.path === 'src/new.ts')?.bytePair, null)
+    assert.throws(() => f.store.startGeneration(claimed.fence), /SYNC_COMPOSITION_BINDING/)
+    const recomposed = { ...composed, baselineSelectionDigest: expanded.baselineSelection!.digest, tree: '9'.repeat(40) }
+    f.store.bindComposedInput(claimed.fence, recomposed, { readSetDigest: 'expanded-real-read-set' })
+    assert.equal(f.store.readOperation(claimed.operation.id).readSetDigest, 'expanded-real-read-set')
+    assert.throws(() => f.store.bindComposedInput(claimed.fence, recomposed, { readSetDigest: 'second-unreviewed-read-set' }), /SYNC_READ_SET_FROZEN/)
+    assert.throws(() => f.store.bindComposedInput(claimed.fence, { ...recomposed, tree: '8'.repeat(40) }), /SYNC_COMPOSITION_FROZEN/)
+    f.store.startGeneration(claimed.fence)
+    assert.throws(() => f.store.bindComposedInput(claimed.fence, { ...recomposed, tree: '7'.repeat(40) }), /SYNC_COMPOSITION_FROZEN/)
+    assert.ok(f.store.listBaselineResources(source()).some(resource => resource.kind === 'path' && resource.path === 'src/old.ts'))
+  } finally { f.cleanup() }
+})
+
+test('P4 观察按事务顺序持久保留失败快照，health实例CAS阻旧进程覆盖且不假造source', async () => {
+  const f = await fixture()
+  try {
+    const configRef = f.put({ trusted: 'policy' }), evidence = f.put({ observer: 'missing source' }), physical = { repositoryId: 'repo', canonicalRoot: '/repo/missing-root', physicalFingerprint: 'missing-original-fingerprint' }
+    const first = f.store.recordObservation({ input: f.input(), configRef, selection: null, latestDifferenceDigest: 'known-before-failure', failure: { code: 'PLANNING_FAIL', message: 'captured input, planning unavailable', kind: 'unsupported', evidenceRefs: [] } }, { controlRevision: 0, selectionDigest: null })
+    f.tick(-500)
+    const second = f.store.recordObservation({ input: f.input(), configRef, selection: null, latestDifferenceDigest: 'latest-captured-difference' }, { controlRevision: 0, selectionDigest: null })
+    assert.equal(f.store.readLatestObservation(source())?.id, second.id)
+    assert.deepEqual(f.store.listObservations(source(), 2).map(observation => observation.id), [second.id, first.id])
+    assert.throws(() => f.store.listObservations(source(), 0), /SYNC_LIST_LIMIT/)
+    const health = { scope: physical, instanceId: 'instance-1', processId: 42, startedAtMs: 1000, updatedAtMs: 1100, status: 'degraded' as const, failure: { code: 'SOURCE_MISSING', message: 'real source vanished', kind: 'environment' as const, evidenceRefs: [evidence] } }
+    f.store.recordObserverHealth(health, null)
+    f.store.recordObserverHealth({ ...health, instanceId: 'instance-2', processId: 43 }, 'instance-1')
+    assert.throws(() => f.store.recordObserverHealth({ ...health, status: 'stopped' }, 'instance-1'), /SYNC_OBSERVER_STALE/)
+    assert.equal(f.store.readObserverHealth(physical)?.instanceId, 'instance-2')
+    assert.equal(f.store.pinnedBlobRefs().some(ref => ref.sha256 === evidence.sha256), true)
+    assert.equal(f.store.listObservations({ ...source(), canonicalRoot: physical.canonicalRoot }).length, 0)
+  } finally { f.cleanup() }
+})
+
+test('P4 两实际write scope共享readonly配置与REQ仍并行，相关read frontier变化拒绝apply', async () => {
+  const f = await fixture()
+  try {
+    const readonly = [{ kind: 'path' as const, path: 'config/shared.json' }, { kind: 'contract' as const, id: 'REQ-SHARED' }]
+    const select = (actual: SyncScope) => { const result = f.store.readBaselineSelection(source(), [...readonly, ...actual.paths.map(path => ({ kind: 'path' as const, path })), ...actual.contractIds.map(id => ({ kind: 'contract' as const, id }))]); assert.ok('selection' in result); return result.selection }
+    const aScope = scope('src/a.ts', 'RULE-A'), bScope = scope('src/b.ts', 'RULE-B')
+    const a = f.ready({ ...f.admit(source(), 'readonly-a', aScope), baselineSelection: select(aScope) }), b = f.ready({ ...f.admit(source(), 'readonly-b', bScope), baselineSelection: select(bScope) })
+    assert.equal(f.store.readAttempt(a.attempt.id).status, 'verified')
+    assert.equal(f.store.readAttempt(b.attempt.id).status, 'verified')
+    assert.ok(!a.operation.scope.paths.includes('config/shared.json'))
+    const changedScope = scope('config/shared.json', 'REQ-SHARED'), changed = f.ready({ ...f.admit(source(), 'readonly-config-changed', changedScope), baselineSelection: select(changedScope) })
+    const queuedScope = scope('src/queued.ts', 'RULE-QUEUED'), queued = f.store.admitAndEnqueue({ ...f.admit(source(), 'readonly-queued', queuedScope), baselineSelection: select(queuedScope) })
+    const journal = f.store.beginApply(changed.fence, changed.plan, changed.target); for (const step of journal.steps) f.store.recordApplyStep(changed.fence, journal.id, { ...step, status: 'completed' }); const receipt = f.receipt(journal.id, changed.plan); f.store.recordReceipt(journal.id, receipt); f.store.settleApply(journal.id, receipt.id)
+    assert.throws(() => f.store.beginApply(a.fence, a.plan, a.target), /SYNC_BASELINE_STALE/)
+    assert.throws(() => f.store.beginApply(b.fence, b.plan, b.target), /SYNC_BASELINE_STALE/)
+    assert.throws(() => f.store.reserveDispatch(a.fence, { key: 'late-stale', purpose: 'repair', requestDigest: 'stale-read' }), /SYNC_BASELINE_STALE/)
+    const ack = f.store.ackDispatch('repo', queued.dispatchMessageId)
+    assert.throws(() => f.store.claimQueuedAttempt({ operationId: queued.id, source: queued.input.source, scope: queued.scope, leaseMs: 1000, expectedRevision: ack.revision }), /SYNC_BASELINE_STALE/)
+    assert.equal(f.store.listAttempts(queued.id).length, 0)
+  } finally { f.cleanup() }
+})
+
+test('P4 self已审future范围回声不新开预算，foreign相关frontier同input是真新语义而不吞残差', async () => {
+  const f = await fixture()
+  try {
+    const actual = scope('src/a.ts', 'RULE-A'), future = { paths: ['src/a.ts', 'src/future.ts'], contractIds: ['RULE-A', 'RULE-FUTURE'], flowIds: [] }
+    const select = (covered: SyncScope) => { const result = f.store.readBaselineSelection(source(), [...covered.paths.map(path => ({ kind: 'path' as const, path })), ...covered.contractIds.map(id => ({ kind: 'contract' as const, id }))]); assert.ok('selection' in result); return result.selection }
+    const initial = { ...f.admit(source(), 'same-source-bytes', actual), baselineSelection: select(actual) }
+    const own = f.ready(initial, future, undefined, undefined, claimed => { f.store.expandContractScope(claimed.fence, { paths: ['src/future.ts'], contractIds: future.contractIds, flowIds: [] }, f.put({ actuallyReviewedP1: 'future scope' })) })
+    const settle = (r: ReturnType<typeof f.ready>) => { const journal = f.store.beginApply(r.fence, r.plan, r.target); for (const step of journal.steps) f.store.recordApplyStep(r.fence, journal.id, { ...step, status: 'completed' }); const receipt = f.receipt(journal.id, r.plan); f.store.recordReceipt(journal.id, receipt); f.store.settleApply(journal.id, receipt.id) }
+    settle(own)
+    const echo = { ...f.admit(source(), 'same-source-bytes', future), ingressKey: 'self-future-echo', baselineSelection: select(future) }
+    assert.equal(f.store.admitAndEnqueue(echo).id, own.operation.id)
+    assert.equal(f.store.findIngressReceipt('self-future-echo')?.baselineSelection?.digest, echo.baselineSelection.digest)
+    const foreign = f.ready({ ...f.admit(source(), 'foreign-authority', actual), baselineSelection: select(actual) }); settle(foreign)
+    const newMeaning = { ...echo, ingressKey: 'foreign-new-meaning', baselineSelection: select(future) }
+    const admitted = f.store.admitAndEnqueue(newMeaning)
+    assert.notEqual(admitted.id, own.operation.id)
+    assert.equal(admitted.input.id, own.operation.input.id)
+    assert.equal(f.store.admitAndEnqueue({ ...newMeaning, ingressKey: 'foreign-meaning-repeat' }).id, admitted.id)
+    assert.equal(f.store.readOperation(own.operation.id).phase, 'workspace_synced')
+  } finally { f.cleanup() }
+})
+
+test('P4 automatic同selected差异在无关HEAD/dirty变化后仍复用失败预算，真实meaning变化才能新准入', async () => {
+  const f = await fixture()
+  try {
+    const selection = f.store.readBaselineSelection(source(), [{ kind: 'path', path: 'src/a.ts' }, { kind: 'contract', id: 'RULE-A' }]); assert.ok('selection' in selection)
+    const configRef = f.put({ frozen: 'automatic policy' }), firstInput = { ...f.admit(), baselineSelection: selection.selection }
+    const first = f.store.observeAndAdmit({ input: firstInput.input, configRef, selection: selection.selection, latestDifferenceDigest: 'same-selected-meaning' }, firstInput, { controlRevision: 0, selectionDigest: selection.selection.digest }); assert.ok('operation' in first)
+    const ack = f.store.ackDispatch('repo', first.operation.dispatchMessageId), claimed = f.store.claimQueuedAttempt({ operationId: first.operation.id, source: first.operation.input.source, scope: first.operation.scope, leaseMs: 1000, expectedRevision: ack.revision })
+    f.store.recordFailure(claimed.fence, { code: 'ENV_FAILED', message: 'unchanged actual failure', kind: 'environment', evidenceRefs: [] })
+    const unrelated = { ...firstInput, ingressKey: 'unrelated-full-snapshot', input: { ...firstInput.input, id: 'scope-external-byte-change', headCommit: '9'.repeat(40), immutableTree: '8'.repeat(40), contentDigest: '7'.repeat(64) } }
+    const repeated = f.store.observeAndAdmit({ input: unrelated.input, configRef, selection: selection.selection, latestDifferenceDigest: 'same-selected-meaning' }, unrelated, { controlRevision: 0, selectionDigest: selection.selection.digest }); assert.ok('operation' in repeated)
+    assert.equal(repeated.outcome, 'duplicate'); assert.equal(repeated.operation.id, first.operation.id)
+    assert.equal(f.store.listAttempts(first.operation.id).length, 1)
+    assert.equal(f.protocol.listPending(syncCoordinatorAddress('repo')).length, 0)
+    assert.equal(f.store.readLatestObservation(source())?.input.id, unrelated.input.id)
+    assert.equal(f.store.findIngressReceipt(unrelated.ingressKey)?.input?.id, unrelated.input.id)
+    assert.equal(f.store.readOperation(first.operation.id).input.id, firstInput.input.id)
+    const changed = { ...unrelated, ingressKey: 'genuine-selected-difference', input: { ...unrelated.input, id: 'actual-selected-edit' } }
+    const admitted = f.store.observeAndAdmit({ input: changed.input, configRef, selection: selection.selection, latestDifferenceDigest: 'changed-selected-meaning' }, changed, { controlRevision: 0, selectionDigest: selection.selection.digest }); assert.ok('operation' in admitted)
+    assert.notEqual(admitted.operation.id, first.operation.id)
+    assert.equal(admitted.operation.dispatchAnchor?.budgetRootOperationId, first.operation.id)
+  } finally { f.cleanup() }
 })

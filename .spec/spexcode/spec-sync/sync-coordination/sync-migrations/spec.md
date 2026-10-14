@@ -35,3 +35,5 @@ v8登记P3行为授权、已结算精确业务裁决和退役身份的writer语�
 v9登记结构化裁决授权范围和结算后稳定裁决身份语义，v1-v8迁移字节/checksum不变；先online backup，marker事务幂等，旧v8 writer拒写。旧裁决规范索引仅在真实不可变request可核验的当前来源接入边界重算，历史payload/record/receipt不改。
 
 P4 采用第10代增量组件迁移：新增物理控制、资源 frontier、持久观察，原会话数据意义不变。升级前在线一致备份；组件事务失败整体回滚，重复启动幂等，未知新版拒绝同步写入。P3 资源头仅从 coveredScope、实际 journal.files、receipt 与明确前驱链回填；不能以 rowid、时间或文件授权目录猜精确历史。无法证明的资源记录 legacy 阻断，新接入失败而旧冻结 journal 恢复保留。
+
+第10代同组件增量表包含observer health，旧实例CAS与观察/头记录不影响原会话读义。升级事务核在途journal的operation/attempt/generation绑定；异常整体回滚并保升级前online backup。缺settled journal的旧coverage记录legacy未知；退役kind只从原coveredScope/operation.scope证明，未知kind明确阻断而不猜contract或flow初始null。实际path头仅来自完整journal.files；path授权目录不伪造成文件头。源同物理发布pair仅凭同receipt且sourceInput=verifiedDelivery的明确发布关系选取，不凭rowid/updatedAt/settledAt猜语义先后。

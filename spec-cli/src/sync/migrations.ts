@@ -5,7 +5,7 @@ import { applyComponentMigrations, type ComponentMigration, type SessionProtocol
 export const SYNC_COMPONENT = 'spec-sync'
 export const SYNC_COORDINATOR_ADDRESS = 'spec-sync-coordinator'
 export const syncCoordinatorAddress = (repositoryId: string): string => `spec-sync-coordinator-${createHash('sha256').update(repositoryId).digest('hex')}`
-export const syncSemanticDigest = (input: Pick<SyncOperation, 'input' | 'origin' | 'requestBlob' | 'policyDigest' | 'scope' | 'retryOf'>): string => createHash('sha256').update(JSON.stringify({ inputId: input.input.id, source: input.input.source, origin: input.origin, requestBlob: input.requestBlob?.sha256 ?? null, policyDigest: input.policyDigest, paths: [...new Set(input.scope.paths)].sort(), ...('baselineSelection' in input && input.baselineSelection ? { contractIds: [...new Set(input.scope.contractIds)].sort(), flowIds: [...new Set(input.scope.flowIds)].sort() } : {}), retryOf: input.retryOf ?? null }, (_key, entry: unknown) => entry && typeof entry === 'object' && !Array.isArray(entry) ? Object.fromEntries(Object.entries(entry).sort(([a], [b]) => a.localeCompare(b))) : entry)).digest('hex')
+export const syncSemanticDigest = (input: Pick<SyncOperation, 'input' | 'origin' | 'requestBlob' | 'policyDigest' | 'scope' | 'retryOf' | 'baselineSelection'>): string => createHash('sha256').update(JSON.stringify({ inputId: input.input.id, source: input.input.source, origin: input.origin, requestBlob: input.requestBlob?.sha256 ?? null, policyDigest: input.policyDigest, paths: [...new Set(input.scope.paths)].sort(), ...(input.baselineSelection ? { baselineSelectionDigest: input.baselineSelection.digest, contractIds: [...new Set(input.scope.contractIds)].sort(), flowIds: [...new Set(input.scope.flowIds)].sort() } : {}), retryOf: input.retryOf ?? null }, (_key, entry: unknown) => entry && typeof entry === 'object' && !Array.isArray(entry) ? Object.fromEntries(Object.entries(entry).sort(([a], [b]) => a.localeCompare(b))) : entry)).digest('hex')
 export const SYNC_MIGRATIONS: readonly ComponentMigration[] = [{ version: 1, sql: `
 CREATE TABLE sync_operations (
  id TEXT PRIMARY KEY, ingress_key TEXT NOT NULL UNIQUE, ingress_aliases_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(ingress_aliases_json)), payload_digest TEXT NOT NULL UNIQUE,
@@ -78,6 +78,7 @@ CREATE TABLE sync_ingress_receipts (
  ingress_key TEXT PRIMARY KEY, operation_id TEXT NOT NULL REFERENCES sync_operations(id),
  payload_digest TEXT NOT NULL, record_json TEXT NOT NULL CHECK(json_valid(record_json))
 ) STRICT;` }, { version: 8, sql: 'SELECT 1; -- P3 behavior authorization, scoped decision history and retired IDs require this writer generation; old writers must refuse.' }, { version: 9, sql: 'SELECT 1; -- P3 exact structured decision authority and stable post-settlement decision identity require this writer generation.' }, { version: 10, sql: `
+CREATE TABLE sync_observer_health (scope_key TEXT PRIMARY KEY, record_json TEXT NOT NULL CHECK(json_valid(record_json))) STRICT;
 CREATE TABLE sync_physical_controls (scope_key TEXT PRIMARY KEY, record_json TEXT NOT NULL CHECK(json_valid(record_json))) STRICT;
 CREATE TABLE sync_baseline_heads (source_key TEXT NOT NULL, resource_key TEXT NOT NULL, pair_id TEXT REFERENCES sync_baseline_pairs(id), legacy_reason TEXT, PRIMARY KEY(source_key,resource_key)) STRICT;
 CREATE TABLE sync_observations (id TEXT PRIMARY KEY, source_key TEXT NOT NULL, operation_id TEXT REFERENCES sync_operations(id), record_json TEXT NOT NULL CHECK(json_valid(record_json))) STRICT;
@@ -85,13 +86,27 @@ CREATE TABLE sync_observations (id TEXT PRIMARY KEY, source_key TEXT NOT NULL, o
   const pairs = tx.query('SELECT record_json FROM sync_baseline_pairs').map(row => JSON.parse(String(row.record_json)) as import('./operation-types.js').BaselinePair)
   const journals = tx.query('SELECT record_json FROM sync_apply_journals').map(row => JSON.parse(String(row.record_json)) as import('./operation-types.js').ApplyJournal)
   const operations = tx.query('SELECT record_json FROM sync_operations').map(row => JSON.parse(String(row.record_json)) as SyncOperation)
+  for (const journal of journals) {
+    const attempt = tx.query('SELECT operation_id,generation FROM sync_attempts WHERE id=?', journal.attemptId)[0]
+    if (!attempt || attempt.operation_id !== journal.operationId || Number(attempt.generation) !== journal.generation || !operations.some(operation => operation.id === journal.operationId)) throw new Error('SYNC_MIGRATION_RECOVERY_INVALID: frozen journal has no matching operation/attempt generation')
+  }
   const stable = (value: unknown): string => createHash('sha256').update(JSON.stringify(value, (_key, entry: unknown) => entry && typeof entry === 'object' && !Array.isArray(entry) ? Object.fromEntries(Object.entries(entry).sort(([a], [b]) => a.localeCompare(b))) : entry)).digest('hex')
+  const uncertain = new Map<string, { sourceKey: string; resourceKey: string; reason: string }>()
   const groups = new Map<string, { sourceKey: string; resourceKey: string; pairs: typeof pairs }>()
   for (const pair of pairs) {
     const journal = journals.find(item => item.receipt?.id === pair.receiptId && item.status === 'settled')
-    if (!journal) continue
     const sourceKey = stable(pair.source)
-    const keys = [...journal.plan.files.map(file => `path:${file.path}`), ...pair.coveredScope.contractIds.map(id => `contract:${id}`), ...pair.coveredScope.flowIds.map(id => `flow:${id}`), ...(pair.retiredIds ?? []).map(id => `contract:${id}`)]
+    if (!journal) {
+      for (const resourceKey of [...pair.coveredScope.paths.map(path => `path:${path}`), ...pair.coveredScope.contractIds.map(id => `contract:${id}`), ...pair.coveredScope.flowIds.map(id => `flow:${id}`)]) uncertain.set(`${sourceKey}:${resourceKey}`, { sourceKey, resourceKey, reason: 'P3 history has no settled journal proving actual resource delivery' })
+      continue
+    }
+    const retiredKeys = (pair.retiredIds ?? []).filter(id => !operations.find(item => item.id === journal.operationId)?.previousBaselinePair?.retiredIds?.includes(id)).flatMap(id => {
+      const keys = [...(pairs.some(item => item.coveredScope.flowIds.includes(id)) || operations.some(item => item.scope.flowIds.includes(id)) ? [`flow:${id}`] : []), ...(pairs.some(item => item.coveredScope.contractIds.includes(id)) || operations.some(item => item.scope.contractIds.includes(id)) ? [`contract:${id}`] : [])]
+      if (keys.length) return keys
+      for (const resourceKey of [`flow:${id}`, `contract:${id}`]) uncertain.set(`${sourceKey}:${resourceKey}`, { sourceKey, resourceKey, reason: 'P3 retirement kind has no covered scope proof' })
+      return []
+    })
+    const keys = [...journal.plan.files.map(file => `path:${file.path}`), ...pair.coveredScope.contractIds.map(id => `contract:${id}`), ...pair.coveredScope.flowIds.map(id => `flow:${id}`), ...retiredKeys]
     for (const resourceKey of new Set(keys)) {
       const key = `${sourceKey}:${resourceKey}`, group = groups.get(key) ?? { sourceKey, resourceKey, pairs: [] }
       group.pairs.push(pair); groups.set(key, group)
@@ -113,9 +128,16 @@ CREATE TABLE sync_observations (id TEXT PRIMARY KEY, source_key TEXT NOT NULL, o
   }
   for (const group of groups.values()) {
     const candidates = group.pairs.filter(pair => !group.pairs.some(other => other.id !== pair.id && follows(other, pair)))
-    const byReceipt = [...new Map(candidates.map(pair => [pair.receiptId, pair])).values()]
+    const receiptGroups = new Map<string, typeof pairs>()
+    for (const pair of candidates) receiptGroups.set(pair.receiptId, [...(receiptGroups.get(pair.receiptId) ?? []), pair])
+    const byReceipt = [...receiptGroups.values()].flatMap(group => {
+      if (group.length === 1) return group
+      const publication = group.filter(pair => pair.sourceInput.id === pair.verifiedDelivery.id && stable(pair.source) === stable(pair.verifiedDelivery.source))
+      return publication.length === 1 ? publication : group
+    })
     tx.exec('INSERT INTO sync_baseline_heads(source_key,resource_key,pair_id,legacy_reason) VALUES(?,?,?,?)', group.sourceKey, group.resourceKey, byReceipt.length === 1 ? byReceipt[0].id : null, byReceipt.length === 1 ? null : 'P3 frontier order cannot be proven by frozen predecessor chain')
   }
+  for (const entry of uncertain.values()) tx.exec('INSERT INTO sync_baseline_heads(source_key,resource_key,pair_id,legacy_reason) VALUES(?,?,NULL,?) ON CONFLICT(source_key,resource_key) DO UPDATE SET legacy_reason=excluded.legacy_reason', entry.sourceKey, entry.resourceKey, entry.reason)
 } } }]
 
 /** 升级前以 SQLite online backup 保存一致性旧库；迁移本身由组件事务执行。 */
