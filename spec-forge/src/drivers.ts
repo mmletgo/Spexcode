@@ -67,7 +67,7 @@ export function resolveForgeHost(): string {
   if (cached && now - cached.at < RESOLVE_TTL_MS) return cached.host
   const url = gitOut(['remote', 'get-url', 'origin'])
   const hostname = url ? remoteHostname(url) : null
-  const host = configuredHost() ?? (hostname ? hostFor(hostname) : DEFAULT_FORGE_HOST)
+  const host = configuredHost() ?? (hostname ? hostFor(hostname) : 'local')
   cached = { host, at: now }
   return host
 }

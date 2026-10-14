@@ -3,6 +3,8 @@ title: forge-host
 status: active
 hue: 280
 desc: WHICH forge a repo talks to is a repo fact, not a constant — resolveForgeHost() derives the host from the origin remote (github.com → github, gitlab/self-hosted forms → gitlab), an explicit forge.host config overrides, and a resolved host with no registered driver degrades to an empty slice, never a wrong-host call.
+related:
+  - spec-forge/src/drivers.test.ts
 code:
   - spec-forge/src/drivers.ts#resolveForgeHost
   - spec-forge/src/drivers.ts#forgeDriverFor
@@ -25,7 +27,7 @@ and every "this repo's forge" consumer — the resident cache, the board/issues 
   github domain → `github`, bitbucket → `bitbucket`, and **any other resolvable host → `gitlab`** —
   the common self-hosted forge shape (e.g. `dev.innerdev.cn`), deliberately a guess because a wrong
   guess costs only an empty slice (next clause) while "unknown means github" was simply wrong.
-- no repo / no origin → `DEFAULT_FORGE_HOST` (`github`), the pre-seam behaviour.
+- no repo / no origin hostname → `local`, a driverless repository fact. Resident reads keep the local slice and spawn no Forge command or network call. An explicit `forge.host` still wins, including in a repo without origin; the `DEFAULT_FORGE_HOST` constant remains available to explicitly named CLI operations.
 
 **The degrade contract — resolved host without a registered driver.** The registry (`FORGE_DRIVERS` /
 `forgeDriverFor`) stays the single meeting point: a new host lands by adding one driver entry, nothing

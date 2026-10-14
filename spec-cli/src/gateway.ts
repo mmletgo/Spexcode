@@ -300,32 +300,48 @@ export function proxyHttp(req: http.IncomingMessage, res: http.ServerResponse, u
 
   // loopbackHttpAgent: every proxyHttp upstream is a loopback service, and a proxy-less agent keeps the
   // hop direct under environment proxying ([[loopback-transport]]).
-  const up = http.request({ host: upstreamHost, port: upstreamPort, path: path ?? req.url, method: req.method, headers, agent: loopbackHttpAgent }, (received) => {
-    if (settled || res.destroyed) { received.destroy(); up.destroy(); return }
-    upstreamResponse = received
-    received.once('aborted', failFromUpstream)
-    received.once('error', failFromUpstream)
-    received.once('close', () => { if (!received.complete) failFromUpstream() })
+  let retriedRead = false
+  const connectUpstream = (): http.ClientRequest => {
+    const next = http.request({ host: upstreamHost, port: upstreamPort, path: path ?? req.url, method: req.method, headers, agent: retriedRead ? new http.Agent({ keepAlive: false }) : loopbackHttpAgent }, (received) => {
+      if (settled || res.destroyed) { received.destroy(); up.destroy(); return }
+      upstreamResponse = received
+      received.once('aborted', failFromUpstream)
+      received.once('error', failFromUpstream)
+      received.once('close', () => { if (!received.complete) failFromUpstream() })
 
-    const type = String(received.headers['content-type'] || '')
-    const eligible = !received.headers['content-encoding'] && COMPRESSIBLE.test(type) && !type.startsWith('text/event-stream')
-    const upstreamHeaders = rewriteResponseHeaders ? rewriteResponseHeaders(received.headers) : received.headers
-    const responseHeaders: http.OutgoingHttpHeaders = eligible
-      ? { ...upstreamHeaders, vary: appendVary(upstreamHeaders.vary as string | string[] | undefined, 'Accept-Encoding') }
-      : upstreamHeaders
-    if (!eligible || !wantsGzip(req)) {
-      res.writeHead(received.statusCode || 502, responseHeaders)
-      received.pipe(res)
-      return
-    }
-    const headers = { ...responseHeaders, 'content-encoding': 'gzip' }
-    delete headers['content-length']   // streamed; the encoded length isn't knowable up front
-    res.writeHead(received.statusCode || 502, headers)
-    transform = createGzip(GZIP_OPTIONS)
-    transform.once('error', failFromUpstream)
-    received.pipe(transform).pipe(res)
-  })
-  up.once('error', failFromUpstream)
+      const type = String(received.headers['content-type'] || '')
+      const eligible = !received.headers['content-encoding'] && COMPRESSIBLE.test(type) && !type.startsWith('text/event-stream')
+      const upstreamHeaders = rewriteResponseHeaders ? rewriteResponseHeaders(received.headers) : received.headers
+      const responseHeaders: http.OutgoingHttpHeaders = eligible
+        ? { ...upstreamHeaders, vary: appendVary(upstreamHeaders.vary as string | string[] | undefined, 'Accept-Encoding') }
+        : upstreamHeaders
+      if (!eligible || !wantsGzip(req)) {
+        res.writeHead(received.statusCode || 502, responseHeaders)
+        received.pipe(res)
+        return
+      }
+      const headers = { ...responseHeaders, 'content-encoding': 'gzip' }
+      delete headers['content-length']   // streamed; the encoded length isn't knowable up front
+      res.writeHead(received.statusCode || 502, headers)
+      transform = createGzip(GZIP_OPTIONS)
+      transform.once('error', failFromUpstream)
+      received.pipe(transform).pipe(res)
+    })
+    next.once('error', (error: NodeJS.ErrnoException) => {
+      const bodylessRead = (req.method === 'GET' || req.method === 'HEAD') && body === undefined
+        && !req.headers['transfer-encoding'] && (req.headers['content-length'] === undefined || req.headers['content-length'] === '0')
+      if (!retriedRead && next.reusedSocket && error.code === 'ECONNRESET' && bodylessRead && req.complete && !upstreamResponse && !res.headersSent && !settled) {
+        retriedRead = true
+        next.destroy()
+        up = connectUpstream()
+        up.end()
+        return
+      }
+      failFromUpstream()
+    })
+    return next
+  }
+  let up = connectUpstream()
   req.once('aborted', abortFromDownstream)
   req.once('error', abortFromDownstream)
   req.once('end', onRequestEnd)

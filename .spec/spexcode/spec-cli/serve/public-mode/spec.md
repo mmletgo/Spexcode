@@ -3,6 +3,7 @@ title: public-mode
 hue: 150
 desc: Expose the dashboard + API on a public IP behind one password and TLS — one command, no domain, no extra infrastructure.
 code:
+  - spec-cli/src/gateway.ts#proxyHttp
   - spec-cli/src/gateway.ts#startGateway
   - spec-cli/src/gateway.ts#resolvePublicConfig
   - spec-cli/src/gateway.ts#serveDashboardLocal
@@ -109,3 +110,5 @@ mounted on its extension seam.)
 **A busy port fails loudly.** The gateway obeys [[serve]]'s port-ownership contract: a port already in
 use (or permission-denied) is a non-zero exit naming the port and the repair, never a silent or half-up
 serve — and `spex serve`, `spex serve ui`, and `spex dashboard` answer it identically.
+
+Loopback HTTP proxy reads may encounter the normal connection-pool race with a backend's idle socket retirement. Only a bodyless GET/HEAD whose complete incoming request used a reused upstream socket and received ECONNRESET before any response headers may reconnect once through a fresh direct one-shot Agent. The exact path and headers are preserved; no new timeout or broad error retry is added. Writes, reads carrying a body, fresh connection failures, partial upstream responses and a failed reconnect remain loud terminal failures. Abandoned downstream requests still reap their upstream, and gzip/SSE/resource identity behavior is unchanged.
