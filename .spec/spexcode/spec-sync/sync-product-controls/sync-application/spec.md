@@ -22,7 +22,7 @@ readSettings.activation 区分 disabled、enabled 与 invalidated：未有本机
 
 submit 接收 nodeId、稳定 requestId、spec/initial/code/combined 来源与可选 SpecBodyEdit。来源真实参与持久操作和幂等身份；initial 沿同一 Spec 业务管线，不能把同键改来源当重放。受控编辑先 capture 真 source，从冻结节点解析路径，在准备函数读正文前检查 symlink；prepareControlledRequest 独立冻结请求，不改原文件、index 或 HEAD。相同字节 no-op 不入队；同请求键和相同内容返回原操作，不同内容拒绝。[[sync-application-planning]] 构造 plan；固定 compiled runtime 与内容寻址计划在 admit 前保存，随后唯一 coordinator 实际细化、生成、验证和交付。V4 重新读当前输入与可信配置，不能用旧 plan 自证。正常 typed failure 持久结算，后端持有运行 Promise 并显式诊断无法结算的故障，不丢 rejection；P4停机自动补偿由正式观察器执行。
 
-status 按节点及 bounded limit 查询，detail 返回 operation、当前 attempt、完整 journal 和 settled receipt；证据按 hash 校验读取。新 source input ID 使旧结果过期；workspace_synced 只表明实际受管交付，原树待落地单独展示。GAP/冲突与验证失败保留各自 phase/failure。pause/cancel 使用 store 控制及 AbortSignal，写入中由 coordinator 结算真实副作用；resume 先检查当前输入和授权，过期要求最新请求，不先改变旧控制。
+status 按节点及 bounded limit 查询，detail 返回 operation、当前 attempt、完整 journal 和 settled receipt；证据按 hash 校验读取。旧P3以完整source input ID判断过期，P4使用协调器精确闭包判据；workspace_synced 只表明实际受管交付，原树待落地单独展示。GAP/冲突与验证失败保留各自 phase/failure。pause/cancel 使用 store 控制及 AbortSignal，写入中由 coordinator 结算真实副作用；resume 先检查当前输入和授权，过期要求最新请求，不先改变旧控制。
 
 同 ingress 的准备及受理复用 file-mutex bounded 串接，并发相同请求只建立同一操作和固定 runtime，不重置预算。planBlob 由 coordinator 用 syncPlanDigest 的唯一规范化 bytes 冻结和 pin，应用直接按 op.planBlob 校验读取；旧操作无固定引用时明确不可猜测恢复。detail.executionAvailability 从实际固定计划、描述和 runtime manifest 推导恢复诊断，queued 也不能隐藏资料缺失。工具描述有 ownedruntime 副本；丢失索引时，只能校验同一原 runtime manifest/digest 后恢复。已有 attempt、verification 或 journal 且原描述不能恢复时，禁止以当前升级工具重冻结或沿用旧证据；仅未派发 queued 操作可重新准备并完整运行。resume 先等旧 abort 执行结算，再恢复 run 控制，避免旧结束回调覆盖恢复。
 
@@ -36,7 +36,7 @@ control(recover) 是独立于 resume/retry 的清理入口：保原 control、�
 
 recover 等待本次协调清理结果：具体 failure 以原 code/message 的 409 返回，仍未知且无更细 failure 时返回 sync_resources_unsettled。不能仅打印服务器日志；查询详情仍从实际资源/journal保留恢复诊断，不写虚构业务失败或改原冲突结果。
 
-普通受控保存仅换 requestId 仍归同 operation/原预算；精确 alias 接入收据保其请求来源，B 归 A 后 B 重放沿 B 原接入的派生值和 requestBlob 核验，业务执行仍使用 A 冻结证据。改变同 key 正文或用户意图明确拒绝，只有 retryOf 授权新预算。
+普通受控保存仅换 requestId 仍归同 operation/原预算；精确 alias 接入收据保其请求来源，B 归 A 后 B 重放沿 B 原接入的派生值和 requestBlob 核验，业务执行仍使用 A 冻结证据。改变同 key 正文或用户意图明确拒绝，同语义重复不重置预算；显式新输入的新manual requestId或合法retryOf授权新预算，自动未完成后继继续继承原预算。
 
 
 本节点同时覆盖 P3 手动 code/combined 接入与业务裁决，外部watcher由P4后台观察器执行。submit/readSettings公开 spec、initial、code、combined 入口；origin本身不构成采用新行为的业务授权。计划使用最近已结算共同基线；retry沿旧input/request/基线/原意，不能把重试当业务裁决。
@@ -45,7 +45,7 @@ decide 只接受原needs_input/conflicted（或有明确blockedReason）的可�
 
 adopt_behavior/new_rule由用户选择冻结新facts与intent raw，保留旧raw并注明具体被采用行为/用户规则；keep_intent不改变用户raw。固定计划及运行前复核使用同一确定性裁决装饰，不能运行中重新编政策。相同裁决请求受入口mutex保护，至多建立一个操作；CLI、HTTP和Dashboard使用同一准入/错误码。detail.decisionContext提供共同基线、具体规则路径、原意、双方行为、反例及待决事实。
 
-业务裁决的事实来源与raw引用使用controlledDecisionIdentity稳定业务摘要（原operation/input/analysis、排序finding IDs与choice/精确rule），不含运输UUID；同选择换requestId或finding顺序不重开操作/预算，同key不同payload仍拒绝。raw明确只替代所选ruleIds的旧行为，未选规则及全部验证政策保持有效。部分独立分支已结算时，新裁决采用最新已验证共同基线并保旧分析provenance；运行复核始终使用该操作冻结基线，不在运行中改政策。
+业务裁决的事实来源与raw引用使用controlledDecisionIdentity稳定业务摘要（原operation/input/analysis、排序finding IDs与choice/精确rule），不含运输UUID；同选择换requestId或finding顺序不重开操作/预算，同key不同payload仍拒绝。raw明确只替代所选ruleIds的旧行为，未选规则及全部验证政策保持有效。部分独立分支已结算时，P3新裁决采用真实最新共同基线；P4保原已审selection与analysis输入绑定，并按实际扩展ledger验证后推进；运行复核始终使用该操作冻结基线，不在运行中改政策。
 
 裁决计划同时冻结结构化decisionAuthorities：stableDecisionId/requestRef/原operation/input/analysis、所选finding IDs及其ruleIds/affectedIds/paths、用户choice/rule。范围仅由可信旧分析的选中finding派生，调用者不能另交规则或路径授权；自然语言facts/raw说明不作为扩大范围的授权。运行复核按同request重建该结构，未选规则不能借同decision source修改。
 
@@ -66,3 +66,7 @@ P4 的正式服务生命周期持有 [[sync-input-observer]]，不依赖浏览�
 健康持久记录绑定instanceId/真实PID/startToken，查询重新验证进程身份；旧online字段不能证明服务活着。热重载通过instance CAS接管，旧观察器准入前重核所有权。status.sources列明确enable的物理来源、注册意图、存在性、控制、最近观测及持久健康；缺失来源启动仍保观察职责，周期重试。删除重建改变物理身份先报需重新授权，未授权新物理树不创建快照。最后差异正文保存在同一内容寻址evidence；commonDir被删除/移动导致证据不可读时返回明确unavailable/hash/reason，仍可查询missing健康和最后已捕获snapshot身份。
 
 派发先ack真实protocol消息成为durablequeued，再使用store.nextQueued资格与原anchor FIFO；已开始的安全checkpoint仅按原anchor恢复，失败/预算/冲突不能自动重开。coordinator未领取前的明确unsupported不能触发递归自旋。fresh manual与自动输入统一exactselection规划；P4previousBaselinePair为空，逐资源真实pair不被latest伪拼。旧P3显式retry只沿原冻结pair/plan，P4retry沿原selection。
+
+重新enable与新配置只保当前注册意图，不把旧branch/config下的root继续扫描。已注册意图根删除后保留missingNodeIds与真实planning failure，不能因当前nodes缺失清掉责任；上下文祖先单列contextNodeIds，不把只读上下文冒充完整业务范围已同步。
+
+P4 stale/retry/resume采用协调器唯一isSyncInputCurrent判据，比较真实source身份与读取/写入闭包的working/index/HEAD对象；无关路径或提交不使精确操作过期。retry和裁决仍绑定原完整input及原selection，不能借新snapshot套用旧analysis；当前分析查询复用协调器阶段校验，已审null资源扩展不得隐藏可信分析。相同request重放沿其原接入收据，scope外编辑不重新冻结旧请求。sourceSynced仍仅由实际canonical交付阶段与原树接收事实决定，不能由闭包current推定。

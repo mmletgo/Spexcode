@@ -31,7 +31,7 @@ const settings: SyncSettings = {
   mandatoryTests: [], facts: [], budget: { maxAttempts: 2, maxCalls: 4, maxRepairs: 1, timeoutMs: 30000 },
 }
 const source = '---\ntitle: Demo\nstatus: pending\n---\n# Demo\n\n## raw source\n\n返回用户指定的文本。\n\n## expanded spec\n\n待细化。\n'
-async function fixture(config: unknown = settings) {
+async function fixture(config: unknown = settings, onRun?: (request: ElaborationSessionRequest) => Promise<never>) {
   const temp = mkdtempSync(join(tmpdir(), 'sync-application-')), root = join(temp, 'source')
   mkdirSync(join(root, '.spec', 'demo'), { recursive: true }); mkdirSync(join(root, 'src')); mkdirSync(join(root, 'tests'))
   writeFileSync(join(root, '.spec', 'demo', 'spec.md'), source)
@@ -43,7 +43,7 @@ async function fixture(config: unknown = settings) {
   git(['init', '-q', '-b', 'main']); git(['config', 'user.name', 'Test']); git(['config', 'user.email', 'test@example.invalid']); git(['add', '.']); git(['commit', '-qm', 'fixture'])
   const protocol = openProtocol(join(temp, 'sessions.sqlite'))
   const calls: ElaborationSessionRequest[] = []
-  const application = await SyncApplication.create(root, { protocol, runtimeDirectory: join(temp, 'runtime'), tools: { trustedRuntimeRoot: '/missing-runtime', toolEntry: '/missing-runtime/cli.js', canonicalHooksDir: '/missing-runtime/hooks' }, runner: async request => { calls.push(request); throw Object.assign(new Error('受控生成环境故障'), { code: 'unsupported' }) } })
+  const application = await SyncApplication.create(root, { protocol, runtimeDirectory: join(temp, 'runtime'), tools: { trustedRuntimeRoot: '/missing-runtime', toolEntry: '/missing-runtime/cli.js', canonicalHooksDir: '/missing-runtime/hooks' }, runner: async request => { calls.push(request); if (onRun) return onRun(request); throw Object.assign(new Error('受控生成环境故障'), { code: 'unsupported' }) } })
   return { temp, root, git, protocol, application, calls, cleanup: (): void => { protocol.close(); rmSync(temp, { recursive: true, force: true }) } }
 }
 
@@ -477,7 +477,7 @@ async function exportApplicationFixture(t: test.TestContext, choice?: 'keep_inte
   const path = '.spec/project/export-contract/spec.md', original = readFileSync(join(root, path), 'utf8')
   const contract = parseContract({ nodeId: 'export-contract', path, source: original }).contract!
   const verify = contract.items.find(item => item.kind === 'VERIFY')!; assert.equal(verify.kind, 'VERIFY')
-  const config: SyncSettings = { ...settings, sourcePaths: ['src'], testPaths: ['generated-tests'], readPaths: ['tests', 'package.json'], budget: { maxAttempts: 3, maxCalls: 16, maxRepairs: 2, timeoutMs: 300000 }, facts: [{ source: 'decision:EXPORT-POLICY', text: original }], mandatoryTests: [{ verificationId: verify.id, testPath: 'tests/export.test.mjs', testId: 'AC-EXPORT-03' }], verifications: [{ definition: { id: verify.id, command: verify.command, cwd: verify.cwd, timeoutMs: verify.timeoutMs }, environment: { ...settings.verifications[0].environment, image: 'node@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392' } }] }
+  const config: SyncSettings = { ...settings, nodeIds: ['export-contract'], sourcePaths: ['src'], testPaths: ['generated-tests'], readPaths: ['tests', 'package.json'], budget: { maxAttempts: 3, maxCalls: 16, maxRepairs: 2, timeoutMs: 300000 }, facts: [{ source: 'decision:EXPORT-POLICY', text: original }], mandatoryTests: [{ verificationId: verify.id, testPath: 'tests/export.test.mjs', testId: 'AC-EXPORT-03' }], verifications: [{ definition: { id: verify.id, command: verify.command, cwd: verify.cwd, timeoutMs: verify.timeoutMs }, environment: { ...settings.verifications[0].environment, image: 'node@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392' } }] }
   if (oraclePolicy.legacyFilter) {
     const oraclePath = join(root, 'tests/export.test.mjs')
     writeFileSync(oraclePath, `${readFileSync(oraclePath, 'utf8')}\ntest('ORACLE-FILTER-LEGACY', () => { const service = new ExportService(); for (const length of [9, 129]) assert.equal(service.submit('owner', 'legacy-' + length, 'x'.repeat(length)).filter.length, length); });\n`)
@@ -496,7 +496,8 @@ async function exportApplicationFixture(t: test.TestContext, choice?: 'keep_inte
   const originalCode = readFileSync(join(root, 'src/export.js'), 'utf8')
   const limitCode = (limit: number | null): string => originalCode.replace("!filter.trim())", `!filter.trim()${limit === null ? '' : ` || filter.length > ${limit}`})`)
   if (choice) writeFileSync(join(root, 'src/export.js'), limitCode(8))
-  t.after(() => {
+  t.after(async () => {
+    await application.stopService()
     protocol.close()
     const unlock = (directory: string): void => { chmodSync(directory, 0o700); for (const entry of readdirSync(directory, { withFileTypes: true })) if (entry.isDirectory()) unlock(join(directory, entry.name)) }
     unlock(temp); rmSync(temp, { recursive: true, force: true })
@@ -829,8 +830,8 @@ test('AC-APPLICATION-P3-PARTIAL 剩余裁决保留最新交付raw及原受控正
   })
 })
 
-async function observeUntil(predicate: () => boolean): Promise<void> {
-  const deadline = Date.now() + 5000
+async function observeUntil(predicate: () => boolean, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
   while (!predicate()) { assert.ok(Date.now() < deadline, '后台同步观察超时'); await new Promise(resolve => setTimeout(resolve, 10)) }
 }
 test('AC-APPLICATION-P4-01 无浏览器暂停仍记录保存，恢复最新输入且重复失败不重开调用', async () => {
@@ -943,4 +944,102 @@ test('AC-APPLICATION-P4-06 持久健康和最后差异可查询，缺失重建�
     assert.equal(f.application.observationStatus().persistedHealth?.status, 'stopped')
     assert.equal(f.application.observationStatus().health.watchOnline, false)
   } finally { await f.application.stopService(); rmSync(saved, { recursive: true, force: true }); f.cleanup() }
+})
+
+test('AC-APPLICATION-P4-07 重新授权撤销旧意图，删除已注册根保留缺失范围与明确失败', async () => {
+  const f = await fixture()
+  try {
+    mkdirSync(join(f.root, '.spec/other'), { recursive: true }); writeFileSync(join(f.root, '.spec/other/spec.md'), source.replace('Demo', 'Other'))
+    await f.application.enable(); await f.application.automaticControl('pause')
+    await f.application.startService({ compensationMs: 10000, debounceMs: 5 })
+    assert.deepEqual(f.application.observationStatus().registeredNodes, ['demo'])
+    writeFileSync(join(f.root, '.spec/spexcode.json'), JSON.stringify({ sync: { ...settings, nodeIds: ['other'] } }))
+    await f.application.enable()
+    assert.deepEqual(f.application.observationStatus().registeredNodes, ['other'])
+    await assert.rejects(f.application.submit({ nodeId: 'demo', requestId: 'revoked' }), /未在 sync.nodeIds 授权/)
+    rmSync(join(f.root, '.spec/other/spec.md'))
+    await observeUntil(() => f.application.observationStatus().coverage.missingNodeIds.includes('other'))
+    await observeUntil(() => f.application.observationStatus().latest?.failure?.code === 'sync_node_unknown')
+    assert.deepEqual(f.application.observationStatus().registeredNodes, ['other'])
+    assert.equal(f.calls.length, 0)
+  } finally { await f.application.stopService(); f.cleanup() }
+})
+
+
+test('AC-APPLICATION-P4-08 无浏览器真实Docker自动交付，补偿及scope外编辑不形成回声重跑', { skip: process.env.SPEX_DOCKER_VERIFICATION_TEST !== '1', timeout: 600000 }, async t => {
+  const f = await exportApplicationFixture(t)
+  t.after(() => f.application.stopService())
+  writeFileSync(join(f.root, 'src/export.js'), `${f.originalCode}\n// human save before background startup\n`)
+  const source = await captureInputSnapshot(f.root), index = readFileSync(join(f.root, '.git/index')), head = f.git(['rev-parse', 'HEAD'])
+  await f.application.startService({ compensationMs: 10000, debounceMs: 5 })
+  const admitted = (await f.application.status()).operations[0]?.operation
+  assert.ok(admitted, '正式service启动扫描必须建立自动操作')
+  const delivered = await f.application.wait(admitted.id)
+  assert.equal(delivered.operation.phase, 'workspace_synced', JSON.stringify(delivered.attempt?.failure))
+  assert.ok(delivered.journals[0]?.receipt)
+  assert.match(readFileSync(join(delivered.operation.deliveryPlan.canonicalRoot, 'src/export.js'), 'utf8'), /human save before background startup/)
+  assert.match(readFileSync(join(delivered.operation.deliveryPlan.canonicalRoot, 'src/export.js'), 'utf8'), /application verified delivery/)
+  assert.equal((await captureInputSnapshot(f.root)).id, source.id)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), index); assert.equal(f.git(['rev-parse', 'HEAD']), head)
+  const count = f.calls()
+  writeFileSync(join(f.root, 'unrelated.txt'), 'scope外真实作者编辑\n')
+  await observeUntil(() => f.application.observationStatus().latestSnapshot?.id !== source.id)
+  assert.equal((await f.application.readOperation(admitted.id)).stale, false)
+  await new Promise(resolve => setTimeout(resolve, 300))
+  assert.equal(f.calls(), count)
+  assert.equal((await f.application.status()).operations.length, 1)
+})
+
+test('AC-APPLICATION-P4-09 scope外变化不使查询重放重试过期，相关编辑仍明确拒绝', async () => {
+  const f = await fixture()
+  try {
+    await f.application.enable()
+    const request = { nodeId: 'demo', requestId: 'scoped-failure', origin: 'initial' as const }
+    const admitted = await f.application.submit(request); assert.ok(admitted.operation)
+    const original = await f.application.wait(admitted.operation.id)
+    assert.equal(original.operation.phase, 'failed', JSON.stringify(original.attempt?.failure))
+    writeFileSync(join(f.root, 'unrelated.txt'), '不属于该操作读取或写入闭包\n')
+    assert.notEqual((await captureInputSnapshot(f.root)).id, original.operation.input.id)
+    const current = await f.application.readOperation(original.operation.id)
+    assert.equal(current.stale, false); assert.equal(current.retryEligibility.eligible, true)
+    assert.equal((await f.application.submit(request)).operation?.id, original.operation.id)
+    const retried = await f.application.submit({ nodeId: 'demo', requestId: 'scoped-retry', retryOf: original.operation.id })
+    assert.ok(retried.operation); assert.equal(retried.operation.input.id, original.operation.input.id)
+    await f.application.wait(retried.operation.id)
+    writeFileSync(join(f.root, '.spec/demo/spec.md'), source.replace('返回用户指定的文本。', '返回用户指定文本并添加后缀。'))
+    const stale = await f.application.readOperation(retried.operation.id)
+    assert.equal(stale.stale, true); assert.equal(stale.retryEligibility.eligible, false)
+    await assert.rejects(f.application.submit({ nodeId: 'demo', requestId: 'stale-retry', retryOf: retried.operation.id }), /原输入已变化/)
+  } finally { await f.application.stopService(); f.cleanup() }
+})
+
+
+test('AC-APPLICATION-P4-10 活动native时物理暂停保operation控制，暂停编辑恢复先采用最新输入', async () => {
+  let held = true
+  const f = await fixture(settings, async request => {
+    if (held) {
+      held = false
+      await new Promise<never>((_resolve, reject) => request.signal!.addEventListener('abort', () => reject(new Error('测试native已响应物理暂停')), { once: true }))
+    }
+    throw Object.assign(new Error('受控生成环境故障'), { code: 'unsupported' })
+  })
+  try {
+    await f.application.enable(); await f.application.startService({ compensationMs: 10000, debounceMs: 5 })
+    await observeUntil(() => f.calls.length === 1, 30000)
+    const active = (await f.application.status()).operations[0].operation
+    await f.application.automaticControl('pause')
+    await f.application.wait(active.id)
+    assert.equal(f.application.store.readOperation(active.id).control, 'run')
+    const first = f.application.observationStatus().latestSnapshot!.id
+    writeFileSync(join(f.root, '.spec/demo/spec.md'), source.replace('返回用户指定的文本。', '返回用户指定的文本并记录确认。'))
+    await observeUntil(() => f.application.observationStatus().latestSnapshot?.id !== first)
+    const latest = f.application.observationStatus().latestSnapshot!.id
+    assert.equal(f.calls.length, 1)
+    await f.application.automaticControl('resume')
+    const newest = (await f.application.status()).operations.find(item => item.operation.input.id === latest)?.operation
+    assert.ok(newest, '恢复应先准入最新冻结输入')
+    await f.application.wait(newest.id)
+    assert.equal(f.calls.length, 2)
+    assert.equal(f.application.store.readOperation(active.id).input.id, first)
+  } finally { await f.application.stopService(); f.cleanup() }
 })

@@ -23,6 +23,8 @@ export async function runSyncCli(argv: readonly string[]): Promise<void> {
     }
   }
   if (verb !== 'decide' && ['--input-id', '--analysis', '--findings', '--choice', '--rule'].some(flag => flags.has(flag))) throw usage('裁决选项只用于 sync decide')
+  if (!['run', 'verify', 'status'].includes(verb ?? '') && flags.has('--node')) throw usage('--node 只用于 sync run、verify 或 status，物理暂停请省略节点选项')
+  if (verb !== 'run' && flags.has('--patch-file')) throw usage('--patch-file 只用于 sync run')
   if (verb !== 'run' && flags.has('--origin')) throw usage('--origin 只用于 sync run')
   if (verb !== 'run' && flags.has('--retry-of')) throw usage('--retry-of 只用于 sync run')
   const targetTree = repoRoot(), query = new URLSearchParams({ targetTree })

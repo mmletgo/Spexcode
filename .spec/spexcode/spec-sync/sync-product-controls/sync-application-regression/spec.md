@@ -56,3 +56,11 @@ AC-APPLICATION-P4-01 使用真实Git/SQLite和明确故障runner验证无Dashboa
 AC-APPLICATION-P4-04 验证nodeIds明确子树、新纯raw后续保存、parent/child不重复注册和越域manual拒绝；05验证省略nodeIds仅从实际受治理授权路径接入、未授权code保持excluded以及纯raw首次需显式注册。
 
 AC-APPLICATION-P4-06 使用真实Git root移动/重建，验证持久健康、实际process在线、最后差异证据、missing query与snapshot保留；新物理root未授权不冻结新snapshot、不派发，stop持久stopped而非旧online。
+
+AC-APPLICATION-P4-07 验证重新授权后旧root确实撤权，已注册root被删除时仍在missing范围且保留真实node_unknown观测，不把它显示为空项目正常。
+
+AC-APPLICATION-P4-08 真实Git/SQLite、正式观察服务、compiled hooks与Docker验证无浏览器保存触发自动交付；native runner是明确确定性替身。原source/index/HEAD保持，交付含真实作者保存与受审生成，补偿及scope外作者编辑不新开回声operation，scope外变化不错误标stale。
+
+AC-APPLICATION-P4-09 真实失败后scope外编辑不改变stale/重试资格，同request重放沿原receipt，新retry绑定原input；相关原始意图变动则stale并拒绝旧输入重试。
+
+AC-APPLICATION-P4-10 在可控native执行期间物理pause，原operation.control保持run且资源在安全边界结算；暂停编辑仍更新latest且无新调用，resume先准入最新input，原active input不被改写。
