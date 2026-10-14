@@ -1,4 +1,4 @@
-import type { CodeBehaviorEvidence, ContractNodeChange } from './writeback-types.js'
+import type { CodeBehaviorEvidence, ContractNodeChange, SyncDecisionAuthority } from './writeback-types.js'
 import type { BlobRef } from './operation-types.js'
 import type { Contract, ContractCoverage, ContractFinding, ContractGraph, Gap, ParseContractInput, Verification } from '@spexcode/spec-core/contracts'
 
@@ -24,6 +24,7 @@ export type ElaborationInput = {
   nodeChanges?: readonly ContractNodeChange[]
   mode?: 'preserve_business' | 'reelaborate'
   analysis?: CodeBehaviorEvidence
+  decisionAuthorities?: readonly SyncDecisionAuthority[]
   refinement?: { candidateDigest: string; diagnostics: readonly { code: string; message: string }[] }
   /** 冻结上下文中的源码/测试字节；存在时验证契约绑定指向真实文件。 */
   files?: ReadonlyMap<string, string>

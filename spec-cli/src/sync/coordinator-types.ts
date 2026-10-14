@@ -1,3 +1,4 @@
+import type { SyncDecisionAuthority } from './writeback-types.js'
 import type { AuthorizedContractChange, ElaborationFact, ElaborationRunner } from './elaboration-types.js'
 import type { AdmitSyncInput, ApplyReceipt, BaselinePair, BlobRef, SyncBudget, SyncFailure, SyncOperation } from './operation-types.js'
 import type { DeliveryTools, PrivateDeliveryOptions } from './private-delivery.js'
@@ -17,6 +18,7 @@ export type SyncCoordinatorPlan = {
   authorizedChanges?: readonly AuthorizedContractChange[]
   retiredIds?: readonly string[]
   decisionRefs?: readonly BlobRef[]
+  decisionAuthorities?: readonly SyncDecisionAuthority[]
   newNodeRawSources?: readonly { path: string; rawSource: string }[]
 }
 export type SyncAdmissionOptions = {

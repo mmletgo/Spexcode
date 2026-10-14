@@ -7,6 +7,12 @@ export type SyncDecisionInput = {
 }
 export type ContractNodeProposal = { action: 'move'; from: { nodeId: string; path: string }; to: { nodeId: string; path: string } } | { action: 'retire'; from: { nodeId: string; path: string } }
 export type ContractNodeChange = ContractNodeProposal & { evidenceRef: BlobRef }
+export type RetirementChangeProposal = { id: string; action: 'retire'; source: 'user:raw' | `decision:${string}`; reason: string }
+export type ContractChangeProposal = AcceptanceChangeProposal | RetirementChangeProposal
+export type SyncDecisionAuthority = {
+  stableDecisionId: string; requestRef: BlobRef; operationId: string; inputId: string; analysisRef: BlobRef
+  findingIds: string[]; ruleIds: string[]; affectedIds: string[]; paths: string[]; decision: SyncDecisionInput['decision']
+}
 export type AcceptanceChangeProposal = { id: string; action: 'update_acceptance'; source: 'user:raw' | `decision:${string}` | `code:${string}`; reason: string; ruleIds: string[] }
 export type CodeBehaviorKind = 'refactor' | 'allowed_change' | 'coverage_gap' | 'conflict'
 export type CodeBehaviorChange = {
@@ -22,10 +28,11 @@ export type CodeBehaviorFinding = {
 export type CodeBehaviorAnalysis = {
   version: 'code-behavior-v1'; inputId: string; baselinePairId: string | null
   composedDigest: string; readSetDigest: string; policyDigest: string; inputDigest: string
+  decisionAuthorities?: SyncDecisionAuthority[]
   decision?: { requestRef: BlobRef; analysisRef: BlobRef; findingIds: string[] }
   authorChanges?: { nodeId: string; path: string; beforeRaw: string | null; afterRaw: string | null; changedIds: string[] }[]
   changes: CodeBehaviorChange[]; findings: CodeBehaviorFinding[]
-  facts: ElaborationFact[]; authorizedChanges: AcceptanceChangeProposal[]; nodeChanges: ContractNodeProposal[]
+  facts: ElaborationFact[]; authorizedChanges: ContractChangeProposal[]; nodeChanges: ContractNodeProposal[]
   newNodes: { nodeId: string; path: string; rawSource: string; codePath: string }[]
   resolutions: { path: string; content: string | null; mode: '100644' | '100755' | '120000' | null }[]
   traces: ElaborationTrace[]; reviewPassed: boolean

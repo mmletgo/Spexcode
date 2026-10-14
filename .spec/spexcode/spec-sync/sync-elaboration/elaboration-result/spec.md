@@ -26,3 +26,5 @@ code:
 细化输入可携独审行为分析证据、节点迁移及preserve_business/reelaborate模式。update_acceptance必须绑定合法规则ID、analysisRef和具体依据；代码来源仅授权符合明确原意的细节变更，不能删除既有验收或改变验证政策。候选及结果保留nodeChanges供协调器形成同一迁移候选。
 
 refinement可携已接受candidateDigest和生成独审的具体失败诊断，只表示在既定原意下补齐遗漏边界；它不能成为新事实、来源或政策授权。上一完整已接受契约作为输入，REQ/AC/VERIFY和既有义务保留，再经独审后新增普通必要状态/转移及验收。
+
+decisionAuthorities携可信程序派生裁决范围；update_acceptance及具体retire既核独审分析，又核所选规则/业务ID闭包。使用同decision source或改标user:raw均不能授权无关政策。未选冲突仍为独审finding阻断项。
