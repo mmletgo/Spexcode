@@ -45,3 +45,9 @@ P3真实code来源沿analyzing独立会话、同attempt checkpoint与冻结polic
 公开buildSyncApplicationPlan无手工退役授权完成新叶→实际receipt→git ff→治理目录搬迁→新叶ID公共入口→实际Docker/receipt→git ff→删能力/治理叶→逐项退役→旧保护oracle及真实负向AC Docker→新receipt/退役累计。未暂存搬迁保稳定业务ID，旧位置删除与新位置创建均进入可信范围；产品交付及重入保source/index、不新增call/commit。receipt后fixture作者显式接受交付，先将未跟踪草稿移到外部保留目录并核对原字节，再以普通ff接受候选，不把该作者动作冒称自动写源。部分正文A实际Docker交付后，B原immutable作者patch同行真重叠；受审整合的精确raw进入P1及实际候选，独审接受后经真实Docker、普通hooks结算receipt。receipt实际tree与deliverySnapshot保A/B及全部原业务义务，source/index保留，重入不新增call/commit。
 
 P3 oracle 绑定负例从真实 Git/SQLite 受控 decision 进入生成独审，错误当前 decision、非 mandatory test、未选 RULE、规则未改或 keep 选择都必须 review_invalid；原版同输入/finding 泛 missing_input 的 fail→pass 成对保存。原 source/index/预算/输入身份与零 receipt 保持。
+
+P3生成诊断在真实SQLite/Git复现普通contract引用错误回P1和symbol修复丢完整finding；live及重开SQLite后均只一次P1、下一代码生成逐字收到全部finding（含重复完成先突变的反例），完整已批准正文/预算/deadline/source/index保持。专用contract-omission绑定真实path/existingID/affectedIds仍回原refinement，代码独审在V3前明确停止，不冒称运行或交付通过；终态重入不增call。
+
+旧refinement stage与已保存repair-input分别经SQLite重启证明合法旧marker不再派P1，仍从实际generation独审恢复全部具体findings；新marker错existingID及损坏JSON保留失败、零新call/receipt。首轮规范P1 implementation-review通过原P1独审defer后，实际code_generate收到完整ContractFinding（证据/修复决定/relatedIds）及previousOutput:null，完整批准义务不改。
+
+旧规则引用RULE位置而affectedIds仅有关联AC的真实历史形态单独回归：先复现误套新omission includes(ID)造成unsupported，再验证只撤细化权、完整独审发现不丢且不再派P1。

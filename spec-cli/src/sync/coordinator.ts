@@ -1,7 +1,7 @@
 import { setImmediate as yieldToControl } from 'node:timers/promises'
 import { existsSync, lstatSync, mkdirSync, realpathSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
-import { dependencyClosure, parseParts } from '@spexcode/spec-core/contracts'
+import { dependencyClosure, parseContract, parseParts } from '@spexcode/spec-core/contracts'
 import type { ContractFinding } from '@spexcode/spec-core/contracts'
 import { actualTreeDiff, exportCandidate, isHostPrivatePath, verifyCandidate } from './candidate.js'
 import { analyzeCodeBehavior, authoredContractChanges, deriveBehaviorAuthorization } from './code-behavior.js'
@@ -14,8 +14,8 @@ import { claimFileMutex } from './file-mutex.js'
 import { checkGenerationContractIntent, readFrozenContracts } from './frozen-contracts.js'
 import { decisionAuthorizationErrors, sameContractBusinessMeaning } from './contract-evolution.js'
 import type { FrozenContracts } from './frozen-contracts.js'
-import { runGeneration } from './generation.js'
-import type { GenerationResult } from './generation-types.js'
+import { contractOmissionBound, runGeneration } from './generation.js'
+import type { GenerationFinding, GenerationResult } from './generation-types.js'
 import { createAttemptRunner } from './native-run.js'
 import type { NativeRunPlan } from './native-run.js'
 import type { AdmitSyncInput, ApplyReceipt, BlobRef, CandidateRef, ComposedInputRef, InputSnapshot, SyncAttempt, SyncFailure, SyncOperation, SyncScope, VerificationResultBlob, WriteFence } from './operation-types.js'
@@ -90,6 +90,9 @@ export async function prepareSyncAdmission(input: InputSnapshot, supplied: SyncC
 type Stage = { version: 'sync-stage-v1'; operationId: string; attemptId: string; inputId: string; policyDigest: string; stage: string; resultRef: BlobRef }
 type SavedElaboration = Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>
 type SavedGeneration = Omit<GenerationResult, 'candidateFiles'>
+function generationRepairInput(previous: SavedGeneration, issue?: SyncFailure): { previousOutput: unknown; diagnostics: { code: string; message: string }[] } {
+  return { previousOutput: previous.output, diagnostics: [...(issue ? [{ code: issue.code, message: issue.message }] : []), ...previous.validationFindings.map(item => ({ code: item.code, message: item.message })), ...(previous.review?.findings.map(item => ({ code: item.kind, message: JSON.stringify(item) })) ?? [])] }
+}
 type Refinement = { prior: SavedElaboration; candidate: CandidateRef; candidateDigest: string; diagnostics: { code: string; message: string }[] }
 function stage<T>(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, name: string): T | null {
   for (const ref of [...attempt.checkpointRefs].reverse()) {
@@ -269,7 +272,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         if (attempt?.failure?.kind === 'repairable') {
           refinement = stage<Refinement>(store, operation, attempt, 'refinement') ?? refinement
           const previous = stage<SavedGeneration>(store, operation, attempt, 'generation')
-          if (previous) repairContext = { previousOutput: previous.output, diagnostics: [{ code: attempt.failure.code, message: attempt.failure.message }, ...previous.validationFindings.map(item => ({ code: item.code, message: item.message }))] }
+          if (previous) repairContext = generationRepairInput(previous, attempt.failure)
           else {
             const elaboration = stage<SavedElaboration>(store, operation, attempt, 'elaboration'), last = elaboration?.rounds.at(-1)
             seed = elaboration?.failure?.code === 'repair_budget_exhausted' && last?.candidate && last.candidateDigest ? { settled: true, requestKey: `sync:${attempt.id}:elaborate`, inputDigest: elaboration.inputDigest, candidateDigest: last.candidateDigest, output: last.output, candidate: last.candidate, findings: last.findings, review: last.review, traces: last.traces } : undefined
@@ -298,6 +301,21 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       const savedRepair = stage<{ repairContext?: typeof repairContext; seed?: ElaborationRepairSeed; refinement?: Refinement }>(store, operation, attempt, 'repair-input')
       if (savedRepair) { repairContext = savedRepair.repairContext; seed = savedRepair.seed; refinement = savedRepair.refinement }
       else if (repairContext || seed || refinement) saveStage(store, fence, 'repair-input', { repairContext, seed, refinement })
+      if (refinement) {
+        const findings = refinement.diagnostics.map(item => JSON.parse(item.message) as GenerationFinding)
+        if (!findings.length || !refinement.prior.structurePassed || !refinement.prior.reviewPassed) fail('refinement_binding', '持久遗漏诊断必须保留已批准P1与具体发现')
+        const contracts = refinement.prior.changes.flatMap(change => parseContract({ nodeId: change.nodeId, path: change.path, source: change.source }).contract ?? [])
+        const previous = store.listAttempts(operation.id).filter(prior => prior.number <= attempt!.number).reverse().map(prior => stage<SavedGeneration>(store, operation, prior, 'generation')).find(value => value?.candidate?.digest === refinement!.candidateDigest)
+        if (!previous?.review || findings.some(finding => !previous.review!.findings.some(actual => canonical(actual) === canonical(finding)))) fail('refinement_binding', '持久遗漏诊断缺少对应实际候选及完整独审原件')
+        if (!findings.every(finding => contractOmissionBound(finding, contracts))) {
+          const legacy = findings.every(finding => {
+            const [path, id, extra] = finding.ruleLocation.slice('contract:'.length).split('#')
+            return finding.kind === 'repair' && finding.ruleLocation.startsWith('contract:') && extra === undefined && contracts.some(contract => contract.path === path && contract.items.some(item => item.id === id))
+          })
+          if (!legacy) fail('refinement_binding', '持久遗漏诊断未绑定已批准Spec路径、既有ID与affectedIds')
+          repairContext = generationRepairInput(previous); refinement = undefined
+        }
+      }
       if (syncPlanDigest(options.plan) !== operation.policyDigest) fail('policy_binding', '提供的可信计划与operation.policyDigest不同')
       const view = await readInput(operation.input, options.plan, operation.previousBaselinePair, operation.requestBlob)
       if (view.readSetDigest !== operation.readSetDigest) fail('readset_binding', '冻结读集合与operation.readSetDigest不同')
@@ -428,6 +446,8 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       const behaviorBlockedFlows = new Set([...accepted.graph.items.values()].filter(item => item.kind === 'FLOW' && item.steps.some(id => behaviorBlocked.has(id))).map(item => item.id))
       const ready: SyncScope = { paths: [...operation.scope.paths], contractIds: unique([...retiredIds.filter(id => !id.startsWith('FLOW-')), ...elaboration.readyIds.filter(id => accepted.graph.items.get(id)?.kind !== 'FLOW' && !behaviorBlocked.has(id))]), flowIds: unique([...retiredIds.filter(id => id.startsWith('FLOW-')), ...elaboration.readyFlowIds.filter(id => !behaviorBlockedFlows.has(id))]) }
       const blocked: SyncScope = { paths: [], contractIds: scopeIds.filter(id => !ready.contractIds.includes(id)), flowIds: flowIds.filter(id => !ready.flowIds.includes(id)) }
+      const implementationDiagnostics = elaboration.deferredImplementationFindings.filter(item => item.code === 'implementation-review').map(item => ({ code: item.code, message: JSON.stringify(item) }))
+      if (implementationDiagnostics.length) repairContext = { previousOutput: repairContext?.previousOutput ?? null, diagnostics: [...(repairContext?.diagnostics ?? []), ...implementationDiagnostics] }
       const blockedReason = effectiveFindings.some(finding => finding.kind === 'conflict') || elaboration.status === 'conflict' ? 'conflicted' : elaboration.status === 'needs_input' || blocked.contractIds.length || blocked.flowIds.length ? 'needs_input' : null
       if (!ready.contractIds.some(id => accepted.graph.items.get(id)?.kind === 'AC' || retiredIds.includes(id) && retirementBefore.graph.items.get(id)?.kind === 'AC')) {
         const issue = failure('no_ready_acceptance', '业务缺口阻塞全部可执行验收，保留细化证据而不写半成品', blockedReason === 'conflicted' ? 'conflict' : 'missing_input', [p1Evidence])
@@ -477,12 +497,12 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         const issue = failure(oracleFailure?.code ?? generated.failure?.code ?? 'generation_failed', oracleFailure?.message ?? generated.failure?.message ?? '实现候选或独立评审未通过', kind, [writeEvidence(operation.input.source.commonDir, generated)])
         if (signal.aborted || generated.status === 'cancelled') fail('cancelled', issue.message, issue.evidenceRefs)
         if (kind === 'repairable' && generated.review?.verdict === 'repair' && generated.candidate && !nodeChanges.length) {
-          const omissions = generated.review.findings.filter(finding => finding.kind === 'repair' && finding.ruleLocation.startsWith('contract:') && accepted.nodes.some(node => finding.ruleLocation.slice('contract:'.length).split('#')[0] === node.path))
+          const omissions = generated.review.findings.filter(finding => contractOmissionBound(finding, accepted.contracts))
           if (omissions.length) { refinement = { prior: elaboration, candidate: generated.candidate, candidateDigest: generated.candidate.digest, diagnostics: omissions.map(finding => ({ code: 'contract_boundary_omission', message: JSON.stringify(finding) })) }; saveStage(store, fence, 'refinement', refinement) }
         }
         store.recordFailure(fence, issue)
         if (kind !== 'repairable') return current(kind === 'unsupported' ? 'unsupported' : undefined, issue)
-        repairContext = { previousOutput: generated.output, diagnostics: generated.validationFindings.map(item => ({ code: item.code, message: item.message })).concat(generated.review?.findings.map(item => ({ code: item.kind, message: item.message })) ?? []) }; continue
+        repairContext = generationRepairInput(generated); continue
       }
       const candidate = generated.candidate
       attempt = store.readAttempt(attempt.id)

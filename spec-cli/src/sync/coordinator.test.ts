@@ -859,3 +859,103 @@ test('P3实际partial正文A与后续immutable作者B同行重叠，独审resolu
   assert.deepEqual((await runSyncOperation(f.store, operation.id, f.options)).receipt, receipt)
   assert.equal(f.calls.length, calls); assert.equal(f.git('rev-list', '--count', operation.deliveryPlan.branch), commits)
 })
+
+
+for (const mode of ['contract-live', 'contract-restart', 'symbol-live', 'symbol-restart', 'omission-live', 'legacy-stage-restart', 'legacy-rule-ac-stage-restart', 'legacy-repair-input-restart', 'invalid-stage-restart', 'corrupt-stage-restart'] as const) test(`P3生成诊断 ${mode} 区分普通测试修复与明确契约遗漏并保完整发现`, async t => {
+  const f = await fixture(t, { maxAttempts: 3, maxCalls: 12, maxRepairs: 2, timeoutMs: 120000 })
+  let activeStore = f.store, p1Calls = 0
+  const path = '.spec/project/export-contract/spec.md', omission = mode === 'omission-live', persisted = /^(legacy|invalid|corrupt)-/.test(mode), broken = /^(invalid|corrupt)-/.test(mode), contractReference = mode.startsWith('contract') || persisted
+  const findings = [
+    { kind: 'repair' as const, affectedIds: mode === 'legacy-rule-ac-stage-restart' ? ['AC-EXPORT-07'] : ['RULE-EXPORT-05'], ruleLocation: `${omission ? 'contract-omission:' : contractReference ? 'contract:' : ''}${path}#RULE-EXPORT-05`, codeLocation: 'tests/export.test.mjs#assertCall', evidence: omission ? 'raw明确重复完成保首次结果，已接受Spec缺少必要重复失败边界' : '测试 helper 参数错误导致 TypeError，已批准规则完整', counterexample: '重复COMPLETE先突变result再校验，second.csv覆盖first.csv，必须先保旧结果', message: omission ? '原意明确但已接受契约遗漏必要重复边界' : '修测试helper和重复断言，不改已审业务正文' },
+    { kind: 'repair' as const, affectedIds: ['AC-EXPORT-07'], ruleLocation: `${contractReference ? 'contract:' : ''}${path}#AC-EXPORT-07`, codeLocation: 'tests/export.test.mjs#repeat-complete', evidence: '断言读取错误字段', counterexample: 'COMPLETE(first.csv)后再次COMPLETE(second.csv)必须仍first.csv', message: '保留首次结果的具体断言' },
+  ]
+  f.transform((output, request) => {
+    const attempt = activeStore.readAttempt(activeStore.readOperation(f.operation.id).currentAttemptId!)
+    if (request.purpose === 'elaboration_generate') {
+      p1Calls++
+      if (p1Calls > 1) {
+        assert.equal(omission, true, '普通code/test修复不得再次派发P1')
+        const frozen = JSON.parse(request.prompt.split('冻结业务输入:\n')[1].split('\n')[0]) as { refinement: { diagnostics: { message: string }[] } }
+        assert.deepEqual(JSON.parse(frozen.refinement.diagnostics[0].message), findings[0], '明确遗漏进入既有refinement诊断')
+      }
+    }
+    if (request.purpose === 'code_generate' && attempt.number > 1 && !omission) {
+      const frozen = promptInput(request) as FrozenGenerationPrompt & { repairContext: { diagnostics: { code: string; message: string }[] } }
+      for (const finding of findings) assert.ok(frozen.repairContext.diagnostics.some(item => item.code === finding.kind && item.message === JSON.stringify(finding)), '下一生成必须逐字收到完整实际finding，含位置/证据/反例')
+      const first = promptInput(f.calls.find(call => call.purpose === 'code_generate')!)
+      assert.deepEqual(frozen.elaboratedSpecs, first.elaboratedSpecs); assert.deepEqual(frozen.contracts, first.contracts)
+    }
+    if (request.purpose === 'code_review') return attempt.number === 1 ? { ...(output as object), verdict: 'repair', findings } : { ...(output as object), verdict: 'conflict', findings: [{ kind: 'conflict', affectedIds: ['RULE-EXPORT-05'], ruleLocation: 'RULE-EXPORT-05', codeLocation: 'src/export.js#dispatch', evidence: 'fixture在新独审停止，不冒称V3通过', counterexample: '真实运行另验', message: 'fixture stops before V3' }] }
+    return output
+  })
+  if (mode.endsWith('restart')) {
+    let legacyRefinement: unknown, legacyRepairContext: unknown
+    const checkpoint = (fence: Parameters<SyncStore['checkpoint']>[0], name: string, value: unknown): void => {
+      const operation = activeStore.readOperation(f.operation.id), resultRef = writeEvidence(f.input.source.commonDir, value)
+      activeStore.checkpoint(fence, resultRef)
+      activeStore.checkpoint(fence, writeEvidence(f.input.source.commonDir, { version: 'sync-stage-v1', operationId: operation.id, attemptId: fence.attemptId, inputId: operation.input.id, policyDigest: operation.policyDigest, stage: name, resultRef }))
+    }
+    if (persisted) {
+      const record = activeStore.recordFailure.bind(activeStore)
+      activeStore.recordFailure = (fence, issue) => {
+        if (issue.code === 'generation_failed') {
+          const stages = activeStore.readAttempt(fence.attemptId).checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
+          const prior = JSON.parse(readEvidence(f.input.source.commonDir, stages.find(value => value.stage === 'elaboration').resultRef).toString()), generation = JSON.parse(readEvidence(f.input.source.commonDir, stages.find(value => value.stage === 'generation').resultRef).toString())
+          const finding = mode === 'invalid-stage-restart' ? { ...findings[0], ruleLocation: `contract-omission:${path}#MISSING-ID` } : findings[0]
+          legacyRepairContext = { previousOutput: generation.output, diagnostics: [{ code: 'generation_failed', message: '实现候选或独立评审未通过' }, ...generation.validationFindings.map((item: { code: string; message: string }) => ({ code: item.code, message: item.message }))] }
+          legacyRefinement = { prior, candidate: generation.candidate, candidateDigest: generation.candidate.digest, diagnostics: findings.map((actual, index) => ({ code: 'contract_boundary_omission', message: mode === 'corrupt-stage-restart' && index === 0 ? '{broken-json' : JSON.stringify(index === 0 ? finding : actual) })) }
+          if (mode !== 'legacy-repair-input-restart') checkpoint(fence, 'refinement', legacyRefinement)
+        }
+        return record(fence, issue)
+      }
+    }
+    const claim = activeStore.claimAttempt.bind(activeStore)
+    activeStore.claimAttempt = request => {
+      if (activeStore.listAttempts(f.operation.id).some(attempt => attempt.failure?.code === 'generation_failed')) {
+        if (mode === 'legacy-repair-input-restart') { const claimed = claim(request); checkpoint(claimed.fence, 'repair-input', { refinement: legacyRefinement, repairContext: legacyRepairContext }) }
+        throw new Error('fixture process boundary after durable code review rejection')
+      }
+      return claim(request)
+    }
+    const first = await runSyncOperation(activeStore, f.operation.id, f.options)
+    assert.equal(first.status, mode === 'legacy-repair-input-restart' ? 'unsupported' : 'failed'); assert.equal(first.operation.callsUsed, 4)
+    f.closeForRestart()
+    const protocol = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => protocol.close())
+    activeStore = new SyncStore(protocol, { readBlob: ref => readEvidence(f.input.source.commonDir, ref) }); f.useStore(activeStore)
+  }
+  const result = await runSyncOperation(activeStore, f.operation.id, f.options)
+  if (broken) { assert.equal(result.failure?.code, mode === 'corrupt-stage-restart' ? 'coordinator_failed' : 'refinement_binding'); assert.equal(p1Calls, 1); assert.equal(result.operation.callsUsed, 4); assert.equal(activeStore.listJournals(f.operation.id).length, 0); assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes); return }
+  assert.equal(result.status, 'conflicted', JSON.stringify({ failure: result.failure, attempts: activeStore.listAttempts(f.operation.id).map(attempt => attempt.failure) }))
+  assert.equal(p1Calls, omission ? 2 : 1); assert.equal(result.operation.callsUsed, omission ? 8 : 6)
+  assert.deepEqual(result.operation.budget, f.operation.budget); assert.equal(result.operation.deadlineAtMs, f.operation.deadlineAtMs); assert.equal(result.operation.input.id, f.input.id)
+  assert.equal(activeStore.listJournals(f.operation.id).length, 0); assert.equal(result.receipt, undefined)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+  const calls = f.calls.length
+  assert.equal((await runSyncOperation(activeStore, f.operation.id, f.options)).status, 'conflicted'); assert.equal(f.calls.length, calls)
+})
+
+
+test('P3首轮生成收到规范P1 implementation-review完整诊断而不改批准义务', async t => {
+  const f = await fixture(t, { maxAttempts: 2, maxCalls: 8, maxRepairs: 1, timeoutMs: 120000 })
+  const finding = { code: 'implementation-review', kind: 'repair', affectedIds: ['RULE-EXPORT-05', 'AC-EXPORT-07'], message: '测试重复结果断言字段错误，业务契约完整', evidence: 'tests/export.test.mjs#AC-EXPORT-07 重复COMPLETE应仍first.csv，helper读错字段导致TypeError', decision: '只修测试helper和实现，保留全部已批准业务与验收义务' }
+  f.transform((output, request) => {
+    if (request.purpose === 'elaboration_review') return { ...(output as object), verdict: 'repair', findings: [finding] }
+    if (request.purpose === 'code_generate') {
+      const frozen = promptInput(request) as FrozenGenerationPrompt & { repairContext: { previousOutput: unknown; diagnostics: { code: string; message: string }[] } }
+      assert.equal(frozen.repairContext.previousOutput, null, '尚无code输出不能虚造旧生成产物')
+      const attempt = f.store.readAttempt(f.store.readOperation(f.operation.id).currentAttemptId!), wrapper = attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(value => value.stage === 'elaboration')
+      const approved = JSON.parse(readEvidence(f.input.source.commonDir, wrapper.resultRef).toString()) as ElaborationResult
+      assert.equal(approved.structurePassed, true); assert.equal(approved.reviewPassed, true)
+      const diagnostic = approved.deferredImplementationFindings.find(item => item.code === 'implementation-review')!
+      assert.deepEqual(frozen.repairContext.diagnostics, [{ code: diagnostic.code, message: JSON.stringify(diagnostic) }], '仅规范implementation-review进入诊断，不灌入普通missing-test-*')
+      assert.ok(diagnostic.message.includes(finding.evidence)); assert.ok(diagnostic.message.includes(finding.decision)); assert.deepEqual(diagnostic.relatedIds, finding.affectedIds)
+      assert.deepEqual(frozen.elaboratedSpecs, approved.changes.map(change => ({ path: change.path, source: change.source })))
+    }
+    if (request.purpose === 'code_review') return { ...(output as object), verdict: 'conflict', findings: [{ kind: 'conflict', affectedIds: ['RULE-EXPORT-05'], ruleLocation: 'RULE-EXPORT-05', codeLocation: 'src/export.js#dispatch', evidence: '明确接缝在V3前停止', counterexample: '不能冒称运行通过', message: 'fixture stops before V3' }] }
+    return output
+  })
+  const result = await runSyncOperation(f.store, f.operation.id, f.options)
+  assert.equal(result.status, 'conflicted', JSON.stringify({ failure: result.failure, attempts: f.store.listAttempts(f.operation.id).map(attempt => attempt.failure) })); assert.equal(result.operation.callsUsed, 4)
+  assert.equal(f.calls.filter(call => call.purpose === 'elaboration_generate').length, 1); assert.equal(result.receipt, undefined); assert.equal(f.store.listJournals(f.operation.id).length, 0)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+})

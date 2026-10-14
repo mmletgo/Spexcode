@@ -48,10 +48,16 @@ code/combined/reconcile及已共同验证基线上的外部代码差量、真实
 
 三种裁决作为新immutable operation进入分析，保旧分析/ref/具体finding历史，绑定新input/policy/readset独审。只有adopt_behavior保所选外部行为，keep_intent及new_rule按对应明确意图修实现；未选分歧不被顺便采用。分析、裁决与细化证据都进入contextDigest，V4仍核原source和当前可信政策。
 
-已接受契约为普通生成修复的冻结义务。独立code review明确contract:path#id普通遗漏时，保留失败candidate及已接受完整正文的refinement checkpoint，在同预算的新attempt回P1；诊断不是fact/批准。再次细化只补已确定原意下的新必要边界，既有REQ/AC/VERIFY及全部业务义务不被弱化；真正重大未知仍GAP。node生命周期与此路径独立结算，不能用修复扩大迁移授权。
+已接受契约为普通生成修复的冻结义务。独立code review明确contract-omission:path#existingID且通过已审路径/ID/affectedIds绑定时，保留失败candidate及已接受完整正文的refinement checkpoint，在同预算的新attempt回P1；诊断不是fact/批准。再次细化只补已确定原意下的新必要边界，既有REQ/AC/VERIFY及全部业务义务不被弱化；真正重大未知仍GAP。node生命周期与此路径独立结算，不能用修复扩大迁移授权。
 
 行为独审完整findings决定阻断；用户选中过的历史ID不能清除新审查同ID发现。作者基准识别实际Git采纳的前次交付，明确raw/TR变更进入独立分析，交付回声不授权新业务。移动及公开删除沿旧目标/旧raw与新路径执行，生成读取旧verifiedDelivery全部AC作为退役历史，最后节点退役仍用旧固定命令及负向测试完成V1–V4。
 
 已完整独审的rawIntegrations.expectedRaw优先进入派生P1 intent/targets，真实source/composed manifest仍作diff/readSet基准，不修改冻结plan/policy。原immutable作者patch在decision分析中按原ref重读，不能丢或冒作模型事实。真实作者新raw/明确规则驱动对应实现修复；旧代码行为不因曾符合旧原意就覆盖新用户意图，其余合法外部行为保持。
 
 已批准 adopt_behavior/new_rule 与不可改外部 oracle 真实互斥时，独立 code_review 的 oracle-policy:decision:<stableDecisionId> missing_fact 复用现有 needs_input 停止路径。程序核当前 immutable requestRef、实际 mandatory testPath/testId/verification 定义、现有 decisionAuthorizationErrors 的所选范围，且旧/新适用 RULE/TR 确已改义。错误裁决、非登记测试、未选规则、未变规则或 keep_intent 均为 review_invalid，不能泛从 V3 nonzero 推断政策冲突。有效失败 code 为 oracle_policy_conflict，保存旧 oracle 内容摘要、精确测试/定义、裁决与规则、证据/反例，要求可信 owner 发布相容版本；旧 oracle 未通过，固定 whole command、全部守卫和原总预算仍有效。managed AC/test 演化继续原精确授权机制；不自动修改外部测试、不再造 checkpoint 或模型阶段。
+
+普通 contract:path#id 引用不赋予重细化权限；代码/测试错误保持首个已批准完整P1正文，在原预算的新attempt修生成。live与checkpoint恢复均将每个实际 GenerationFinding 完整JSON存入现有 repairContext.diagnostics.message，保 codeLocation/evidence/counterexample，不嵌冻结全文或旧诊断递归体，不增加DB/恢复层。下一生成仍需新的独立code_review；取消/耗尽/终态重入不额外派发。
+
+新遗漏权限在live、refinement stage及repair-input恢复复用同一精确path/existingID/affectedIds判断。旧合法contract:诊断不再赋予重细化权：原批准P1保持，按对应实际generation checkpoint重新提取完整独审finding继续普通修复，不修改历史证据。新marker绑定错误、空/损坏诊断或未批准P1明确失败，JSON解析错误保原诊断，不吞错误或猜恢复。首轮生成仅将P1规范implementation-review的完整ContractFinding JSON加入既有repairContext；没有前轮代码产物时previousOutput为null，普通missing-test-*不灌入该诊断，不把P1 review升格为实现通过。
+
+旧合法contract规则引用不要求被引用RULE本身包含于affectedIds；撤销旧细化权前，candidateDigest定位对应同绑定SavedGeneration，并逐项核完整finding与独审原件一致，再核既有path/ID。实际affectedIds沿已验证独审原件保留，禁止把旧marker转为新授权；外来路径/ID、来源原件不符或损坏证据仍明确失败。

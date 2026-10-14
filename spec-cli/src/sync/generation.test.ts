@@ -300,3 +300,15 @@ test('未绑定当前裁决的reserved oracle finding不能仅靠needs_input逃�
   const result = await runGeneration(source, { runner: native.run, validateCandidate: valid })
   assert.equal(result.failure?.code, 'review_invalid'); assert.equal(result.reviewPassed, false); assert.equal(result.review, null)
 })
+
+
+test('contract-omission必须精确绑定已审Spec路径和关联existingID，普通contract引用仍是代码repair', async t => {
+  const source = await input(t)
+  for (const marker of [`contract-omission:${contractPath}#RULE-EXPORT-05`, 'contract-omission:.spec/foreign/spec.md#AC-EXPORT-03', `contract-omission:${contractPath}#MISSING-ID`, `contract:${contractPath}#AC-EXPORT-03`]) {
+    const native = runner(source, undefined, request => ({ ...review(request), verdict: 'repair', findings: [{ kind: 'repair', affectedIds: ['AC-EXPORT-03'], ruleLocation: marker, codeLocation: 'tests/export.test.mjs#assertCall', evidence: '已有明确验收的测试helper错误', counterexample: 'TypeError不是新业务边界', message: '修代码和断言' }] }))
+    const result = await runGeneration(source, { runner: native.run, validateCandidate: valid })
+    if (marker.startsWith('contract-omission:')) { assert.equal(result.failure?.code, 'review_invalid', marker); assert.equal(result.review, null) }
+    else { assert.equal(result.status, 'repair'); assert.equal(result.review!.findings[0].ruleLocation, marker) }
+    assert.equal(result.reviewPassed, false); assert.equal(native.calls.length, 2)
+  }
+})
