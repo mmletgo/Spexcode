@@ -83,7 +83,7 @@ export function mergeText(commonDir: string, delivery: TreeEntry, base: TreeEntr
   } finally { rmSync(temp, { recursive: true, force: true }) }
 }
 
-export type IntentObject = { path: string; entry: TreeEntry; item: ContractItem; semanticDigest: string; rawSource: string | null; businessProse: string }
+export type IntentObject = { path: string; entry: TreeEntry; item: ContractItem; semanticDigest: string; rawSource: string | null; businessProse: string; codePaths: string[]; testPaths: string[] }
 export type IntentResidual = {
   resource: Exclude<BaselineResource, { kind: 'path' }>; pairId: string | null
   before: IntentObject | null; delivery: IntentObject | null; source: IntentObject | null
@@ -92,8 +92,14 @@ export type IntentResidual = {
 export type SelectedCompositionEvidence = {
   version: 'selected-composition-v1'; sourceInputId: string; baselineSelectionDigest: string
   paths: { path: string; pairId: string | null; base: TreeEntry | null; delivery: TreeEntry | null; source: TreeEntry | null; adopted: boolean }[]
-  intents: IntentResidual[]; residualPaths: string[]; conflicts: CompositionConflict[]
+  intents: IntentResidual[]; artifacts: IntentArtifactResidual[]; residualPaths: string[]; conflicts: CompositionConflict[]
   controlledAuthorPatch?: { requestBlob: BlobRef; before: TreeEntry; next: TreeEntry; intents: IntentResidual[] }
+}
+export type IntentArtifactResidual = {
+  resource: IntentResidual['resource']; pairId: string | null; path: string; binding: 'code' | 'test'
+  owners: { before: string | null; delivery: string | null; source: string | null }
+  before: TreeEntry | null; delivery: TreeEntry | null; source: TreeEntry | null; authorBase: TreeEntry | null
+  adoptionPairId: string | null; adoptionCommit: string | null; changed: boolean
 }
 const canonical = (value: unknown): string => JSON.stringify(value, (_key, item: unknown) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b))) : item)
 
@@ -124,12 +130,41 @@ function intentObjects(commonDir: string, entries: readonly TreeEntry[]): Map<st
     const text = bytes.toString('utf8'), contract = parseContract({ nodeId: entry.path.split('/').at(-2)!, path: entry.path, source: text }).contract
     for (const item of contract?.items ?? []) {
       if (objects.has(item.id)) throw new Error(`SYNC_COMPOSITION_BLOCKED: ambiguous owner ${item.id}`)
-      objects.set(item.id, { path: entry.path, entry, item, semanticDigest: contentHash(canonical(contractBusinessMeaning(item))), rawSource: parseParts(text)?.rawSource ?? null, businessProse: contractBusinessProse(contract!.expandedSpec) })
+      // 只读本真实owner的code及AC绑定，不从共享上游REQ扩散到无关消费者。
+      const codePaths = [...new Set([...contract!.code, ...item.kind !== 'VERIFY' && item.source.kind === 'code' ? [item.source.ref] : []].map(binding => binding.split('#')[0]))].sort()
+      const testPaths = [...new Set(contract!.items.filter(item => item.kind === 'AC').map(item => item.test.split('#')[0]))].sort()
+      objects.set(item.id, { path: entry.path, entry, item, semanticDigest: contentHash(canonical(contractBusinessMeaning(item))), rawSource: parseParts(text)?.rawSource ?? null, businessProse: contractBusinessProse(contract!.expandedSpec), codePaths, testPaths })
     }
   }
   return objects
 }
 const sameIntent = (a: IntentObject | null, b: IntentObject | null): boolean => a && b ? sameContractBusinessMeaning(a.item, b.item) : a === b
+
+/** ID语义未变化也不能证明其实际治理源码已消费；每个对象保真实pair和Git采纳来源。 */
+function intentArtifactResiduals(input: InputSnapshot, selection: FrozenBaselineSelection, intents: readonly IntentResidual[], entries: (snapshot: InputSnapshot) => readonly TreeEntry[], adoptedPaths: (pair: BaselinePair) => ReadonlySet<string>): IntentArtifactResidual[] {
+  const maps = new Map<string, Map<string, TreeEntry>>()
+  const files = (snapshot: InputSnapshot): Map<string, TreeEntry> => { let value = maps.get(snapshot.id); if (!value) { value = new Map(entries(snapshot).map(entry => [entry.path, entry])); maps.set(snapshot.id, value) }; return value }
+  const ownerMaps = new Map<string, Map<string, IntentObject>>()
+  const owners = (snapshot: InputSnapshot): Map<string, IntentObject> => { let value = ownerMaps.get(snapshot.id); if (!value) { value = intentObjects(input.source.commonDir, entries(snapshot)); ownerMaps.set(snapshot.id, value) }; return value }
+  const pairs = new Map(selection.bindings.flatMap(binding => 'intentPair' in binding ? [[`${binding.resource.kind}:${binding.resource.id}`, binding.intentPair] as const] : []))
+  const bytePairs = new Map(selection.bindings.flatMap(binding => 'bytePair' in binding ? [[binding.resource.path, binding.bytePair] as const] : []))
+  const artifacts: IntentArtifactResidual[] = []
+  for (const intent of intents) {
+    const pair = pairs.get(`${intent.resource.kind}:${intent.resource.id}`) ?? null
+    const priorOwner = pair ? owners(pair.sourceInput).get(intent.resource.id) ?? null : null, deliveredOwner = pair ? owners(pair.verifiedDelivery).get(intent.resource.id) ?? null : null
+    for (const binding of ['code', 'test'] as const) {
+      const paths = [...new Set([priorOwner, deliveredOwner, intent.source].flatMap(owner => owner ? binding === 'code' ? owner.codePaths : owner.testPaths : []))].sort()
+      for (const path of paths) {
+        const before = pair ? files(pair.sourceInput).get(path) ?? null : null, delivery = pair ? files(pair.verifiedDelivery).get(path) ?? null : null, source = files(input).get(path) ?? null
+        const bytePair = bytePairs.get(path), adoptedByte = bytePair && adoptedPaths(bytePair).has(path)
+        const adoptedPair = adoptedByte ? bytePair : pair && adoptedPaths(pair).has(path) ? pair : null
+        const authorBase = adoptedPair ? files(adoptedPair.verifiedDelivery).get(path) ?? null : before
+        artifacts.push({ resource: intent.resource, pairId: pair?.id ?? null, path, binding, owners: { before: priorOwner?.path ?? null, delivery: deliveredOwner?.path ?? null, source: intent.source?.path ?? null }, before, delivery, source, authorBase, adoptionPairId: adoptedPair?.id ?? null, adoptionCommit: adoptedPair?.verifiedDelivery.headCommit ?? null, changed: !same(authorBase ?? undefined, source ?? undefined) })
+      }
+    }
+  }
+  return artifacts
+}
 
 /** 文件只做真实 byte-pair 三方；逐 ID 的 source 残差独立于文件级未变化判定。 */
 function composeSelectedInput(input: InputSnapshot, selection: FrozenBaselineSelection, options: CompositionOptions): ReturnType<typeof composeInputSnapshots> {
@@ -194,13 +229,23 @@ function composeSelectedInput(input: InputSnapshot, selection: FrozenBaselineSel
       }
     }
   }
+  const artifacts = intentArtifactResiduals(input, selection, intents, project, adoptedPaths)
+  for (const artifact of artifacts.filter(item => item.changed)) {
+    residualPaths.add(artifact.path)
+    if (!writable(artifact.path) || same(artifact.source ?? undefined, result.get(artifact.path))) continue
+    if (!conflicts.some(conflict => conflict.path === artifact.path)) {
+      const byte = paths.find(item => item.path === artifact.path)
+      if (!byte) throw new Error(`SYNC_COMPOSITION_BLOCKED: code owner missing byte binding ${artifact.path}`)
+      conflicts.push({ path: artifact.path, base: byte.base, source: byte.source, delivery: byte.delivery })
+    }
+  }
   const entries = [...result.values()].sort((a, b) => a.path.localeCompare(b.path))
   for (const entry of entries) if (entries.some(other => entry.path.startsWith(`${other.path}/`)) && !conflicts.some(conflict => conflict.path === entry.path)) conflicts.push({ path: entry.path, base: null, source: next.get(entry.path) ?? null, delivery: result.get(entry.path) ?? null })
   if (conflicts.length && !options.retainConflicts) return { composed: null, conflicts }
-  const evidence: SelectedCompositionEvidence = { version: 'selected-composition-v1', sourceInputId: input.id, baselineSelectionDigest: selection.digest, paths, intents, residualPaths: [...residualPaths].sort(), conflicts }
+  const evidence: SelectedCompositionEvidence = { version: 'selected-composition-v1', sourceInputId: input.id, baselineSelectionDigest: selection.digest, paths, intents, artifacts, residualPaths: [...residualPaths].sort(), conflicts }
   const tree = writeTree(commonDir, entries), contentDigest = contentHash(JSON.stringify(entries)), manifestBlob = writeEvidence(commonDir, { version: 1, entries })
   objectGit(commonDir, ['update-ref', `refs/spex-sync/compositions/${tree}`, tree])
-  return { composed: { sourceInputId: input.id, previousBaselinePairId: null, baselineSelectionDigest: selection.digest, tree, manifestBlob, contentDigest, compositionEvidenceBlob: writeEvidence(commonDir, evidence), authorProjectionBlob: writeEvidence(commonDir, { version: 'selected-author-projection-v1', sourceInputId: input.id, baselineSelectionDigest: selection.digest, intents, residualPaths: evidence.residualPaths }) }, conflicts }
+  return { composed: { sourceInputId: input.id, previousBaselinePairId: null, baselineSelectionDigest: selection.digest, tree, manifestBlob, contentDigest, compositionEvidenceBlob: writeEvidence(commonDir, evidence), authorProjectionBlob: writeEvidence(commonDir, { version: 'selected-author-projection-v1', sourceInputId: input.id, baselineSelectionDigest: selection.digest, intents, artifacts, residualPaths: evidence.residualPaths }) }, conflicts }
 }
 
 /** 重读 hash 校验后的证据，逐资源的真实对象仍由 selection 再计算并校验。 */
@@ -265,7 +310,11 @@ export function readCompositionEvidence(input: InputSnapshot, composed: Composed
     expected.push({ resource: binding.resource, pairId: pair?.id ?? null, before, delivery, source, adopted, broadChange, changed: !sameIntent(before, source) || broadChange })
   }
   if (canonical(expected) !== canonical(evidence.intents)) throw new Error('SYNC_COMPOSITION_BINDING: true intent objects or residual differ')
+  const adoptedPaths = (pair: BaselinePair): ReadonlySet<string> => { let paths = adoption.get(pair.id); if (!paths) { paths = adoptedDeliveryPaths(input, pair); adoption.set(pair.id, paths) }; return paths }
+  const artifacts = intentArtifactResiduals(input, selection, expected, actualEntries, adoptedPaths)
+  if (canonical(artifacts) !== canonical(evidence.artifacts)) throw new Error('SYNC_COMPOSITION_BINDING: true code/test objects or residual differ')
   const residualPaths = [...new Set(expected.filter(item => item.changed).flatMap(item => [item.before?.path, item.source?.path].filter((path): path is string => !!path)))].sort()
+  for (const artifact of artifacts.filter(item => item.changed)) if (!residualPaths.includes(artifact.path)) residualPaths.push(artifact.path)
   if (patch && !same(patch.before, patch.next) && !residualPaths.includes(patch.next.path)) residualPaths.push(patch.next.path)
   if (canonical(residualPaths.sort()) !== canonical(evidence.residualPaths)) throw new Error('SYNC_COMPOSITION_BINDING: residual paths differ')
   return evidence
@@ -280,7 +329,7 @@ export function projectSelectedAuthorPatch(input: InputSnapshot, evidence: Selec
     const broadChange = residual.before?.rawSource !== source?.rawSource || residual.before?.businessProse !== source?.businessProse || residual.before?.path !== source?.path
     return { ...residual, source, broadChange, changed: !sameIntent(residual.before, source) || broadChange }
   })
-  const residualPaths = [...new Set(intents.filter(item => item.changed).flatMap(item => [item.before?.path, item.source?.path].filter((path): path is string => !!path)))].sort()
+  const residualPaths = [...new Set([...intents.filter(item => item.changed).flatMap(item => [item.before?.path, item.source?.path].filter((path): path is string => !!path)), ...evidence.artifacts.filter(item => item.changed).map(item => item.path)])].sort()
   // 原不可变patch独立保留；不能因与历史delivery相同或文件byte未变而丢弃本次用户授权。
   if (!same(before, next) && !residualPaths.includes(next.path)) residualPaths.push(next.path)
   const patchIntents: IntentResidual[] = [...new Set([...previous.keys(), ...current.keys()])].map(id => {

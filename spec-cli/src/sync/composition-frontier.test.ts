@@ -23,62 +23,65 @@ const git = (root: string, ...args: string[]): string => execFileSync('/usr/bin/
 const texts = (input: InputSnapshot): Map<string, string> => new Map(verifySnapshot(input).map(entry => [entry.path, readObject(input.source.commonDir, entry.oid).toString('utf8')]))
 
 /** Git快照、提交、mode与store事务是真实的；验证四层是显式fake，不能作为native产品通过证据。 */
-async function fixture(t: test.TestContext, pendingInB = false, legacyDirectoryCoverage = false) {
+async function fixture(t: test.TestContext, pendingInB = false, legacyDirectoryCoverage = false, codeOnly = false) {
   const parent = mkdtempSync(join(tmpdir(), 'sync-frontier-')), root = join(parent, 'source'), deliveryRoot = join(parent, 'delivery')
   mkdirSync(root); cpSync(new URL('../../test/fixtures/spec-sync/export-repo/', import.meta.url), root, { recursive: true })
   git(root, 'init', '-b', 'main'); git(root, 'config', 'user.name', '真实组合夹具'); git(root, 'config', 'user.email', 'test@example.invalid'); git(root, 'add', '.'); git(root, 'commit', '-m', 'sourceA0')
   git(root, 'worktree', 'add', '-b', 'delivery', deliveryRoot, 'HEAD')
   const original = readFileSync(join(root, path), 'utf8'), firstA = original.replace('成功需非空result、发布一次', '成功需非空result、版本A1、发布一次'), nextA = original.replace('成功需非空result、发布一次', '成功需非空result、版本A2、发布一次')
   const addB = (text: string): string => text.replace('key与非空字符串filter必需', 'key与非空字符串filter必需；交付B1政策保留')
+  const codePath = 'src/export.js', sourceCode = readFileSync(join(root, codePath), 'utf8')
+  const codeA1 = sourceCode.replace('job.result = result;', "job.result = result; job.resultVersion = 'A1';"), codeA2 = sourceCode.replace('job.result = result;', "job.result = result; job.resultVersion = 'A2';")
+  const addCodeB = (text: string): string => text.replace('  jobs = new Map();', "  jobs = new Map();\n  deliveryPolicy = 'B1';")
+  const deliveredPaths = codeOnly ? [path, codePath] : [path]
   const sourceA0 = await captureInputSnapshot(root)
   const protocol = openProtocol(join(parent, 'db.sqlite')); await migrateSyncStore(protocol, { backupPath: join(parent, 'backup.sqlite') })
   const store = new SyncStore(protocol, { readBlob: ref => readEvidence(sourceA0.source.commonDir, ref) })
   t.after(() => { protocol.close(); rmSync(parent, { recursive: true, force: true }) })
   const settle = async (source: InputSnapshot, delivery: InputSnapshot, id: string, ids: string[]): Promise<BaselinePair> => {
-    const scope: SyncScope = { paths: [legacyDirectoryCoverage ? '.spec' : path], contractIds: ids.filter(id => !id.startsWith('FLOW-') && !id.startsWith('VERIFY-')), flowIds: ids.filter(id => id.startsWith('FLOW-')) }, commonDir = source.source.commonDir
+    const scope: SyncScope = { paths: legacyDirectoryCoverage ? ['.spec'] : deliveredPaths, contractIds: ids.filter(id => !id.startsWith('FLOW-') && !id.startsWith('VERIFY-')), flowIds: ids.filter(id => id.startsWith('FLOW-')) }, commonDir = source.source.commonDir
     const put = (value: unknown) => writeEvidence(commonDir, value)
     const admitted = store.admitAndEnqueue({ ingressKey: id, rootCauseId: id, origin: 'spec', input: source, scope, budget: { maxAttempts: 2, maxCalls: 4, maxRepairs: 1, timeoutMs: 100000 }, policyDigest: `fake-policy-${id}`, impactDigest: id, readSetDigest: id, delivery: null, deliveryPlan: { canonicalRoot: delivery.source.canonicalRoot, branch: delivery.source.branch, baseCommit: source.headCommit } })
     const claim = store.claimAttempt({ operationId: admitted.id, source: source.source, scope, leaseMs: 100000, expectedMessageId: admitted.dispatchMessageId })
     store.bindDelivery(claim.fence, delivery.source)
     store.bindComposedInput(claim.fence, composeInputSnapshots(source).composed!)
     store.startGeneration(claim.fence, { readyScope: scope, blockedScope: { paths: [], contractIds: [], flowIds: [] }, blockedReason: null })
-    const before = verifySnapshot(source).find(entry => entry.path === path)!, after = verifySnapshot(delivery).find(entry => entry.path === path)!
-    const files = [{ path, preDigest: before.digest, postDigest: after.digest, preMode: before.mode, postMode: after.mode }]
-    const candidate = { sourceInputId: source.id, baseTree: source.immutableTree, tree: delivery.immutableTree, digest: delivery.contentDigest, manifestBlob: delivery.manifestBlob, actualDiffBlob: put(files), coveredScope: scope }
+    const files = deliveredPaths.map(path => { const before = verifySnapshot(source).find(entry => entry.path === path)!, after = verifySnapshot(delivery).find(entry => entry.path === path)!; return { path, preDigest: before.digest, postDigest: after.digest, preMode: before.mode, postMode: after.mode } })
+    const candidate = { sourceInputId: source.id, baseTree: source.immutableTree, tree: delivery.immutableTree, digest: delivery.contentDigest, manifestBlob: delivery.manifestBlob, actualDiffBlob: put(files.filter(file => file.preDigest !== file.postDigest || file.preMode !== file.postMode)), coveredScope: scope }
     store.freezeCandidate(claim.fence, candidate)
     const fake = put({ fake: true, reason: '验证协议仅供基线结算，非业务验收' }), bindings = { inputId: source.id, candidateDigest: candidate.digest, policyDigest: `fake-policy-${id}`, readSetDigest: id, environmentDigest: 'fake-env', contextDigest: 'fake-context' }
     const verification: VerificationResultBlob = { schemaVersion: 1, ...bindings, coveredScope: scope, layers: (['V1', 'V2', 'V3', 'V4'] as const).map(layer => ({ layer, verdict: 'pass', evidenceRefs: [fake] })) }
     const resultBlob = put(verification); store.recordVerification(claim.fence, { ...bindings, passed: true, coveredScope: scope, evidenceRefs: [fake], resultBlob })
-    const plan = { effectKey: id, payloadDigest: id, candidateDigest: candidate.digest, verificationBlob: resultBlob, target: delivery.source, expectedTargetSnapshotId: source.id, expectedBaselinePairId: null, coveredScope: scope, files, planBlob: put({ files, candidateDigest: candidate.digest }) }
+    const plan = { effectKey: id, payloadDigest: id, candidateDigest: candidate.digest, verificationBlob: resultBlob, target: delivery.source, expectedTargetSnapshotId: source.id, expectedBaselinePairId: null, coveredScope: scope, files: files.filter(file => file.preDigest !== file.postDigest || file.preMode !== file.postMode), planBlob: put({ files: files.filter(file => file.preDigest !== file.postDigest || file.preMode !== file.postMode), candidateDigest: candidate.digest }) }
     const target = { ...source, source: delivery.source }, journal = store.beginApply(claim.fence, plan, target)
     for (const step of journal.steps) store.recordApplyStep(claim.fence, journal.id, { ...step, status: 'completed' })
     const receipt = { id: `receipt-${id}`, journalId: journal.id, effectKey: id, actualTree: delivery.immutableTree, actualCommit: delivery.headCommit, deliverySnapshot: delivery, evidenceRefs: [fake], completedAtMs: Date.now() }
     store.recordReceipt(journal.id, receipt); store.settleApply(journal.id, receipt.id)
     return store.readBaseline(source.source)!
   }
-  writeFileSync(join(deliveryRoot, path), firstA); git(deliveryRoot, 'add', path); git(deliveryRoot, 'commit', '-m', 'deliveryA1')
+  writeFileSync(join(deliveryRoot, path), codeOnly ? original : firstA); if (codeOnly) writeFileSync(join(deliveryRoot, codePath), codeA1); git(deliveryRoot, 'add', '.'); git(deliveryRoot, 'commit', '-m', 'deliveryA1')
   const deliveryA1 = await captureInputSnapshot(deliveryRoot), pairA = await settle(sourceA0, deliveryA1, 'settle-A', [a])
-  if (pendingInB) writeFileSync(join(root, path), nextA)
+  if (pendingInB) writeFileSync(join(root, codeOnly ? codePath : path), codeOnly ? codeA2 : nextA)
   const sourceB = pendingInB ? await captureInputSnapshot(root) : sourceA0
-  writeFileSync(join(deliveryRoot, path), addB(firstA)); chmodSync(join(deliveryRoot, path), 0o755); git(deliveryRoot, 'add', path); git(deliveryRoot, 'commit', '-m', 'deliveryA1B1 executable')
+  writeFileSync(join(deliveryRoot, path), addB(codeOnly ? original : firstA)); chmodSync(join(deliveryRoot, path), 0o755); if (codeOnly) { writeFileSync(join(deliveryRoot, codePath), addCodeB(codeA1)); chmodSync(join(deliveryRoot, codePath), 0o755) }; git(deliveryRoot, 'add', '.'); git(deliveryRoot, 'commit', '-m', 'deliveryA1B1 executable')
   const deliveryB1 = await captureInputSnapshot(deliveryRoot)
   const allIds = parseContract({ nodeId: 'export-contract', path, source: original }).contract!.items.map(item => item.id)
   const pairB = await settle(sourceB, deliveryB1, 'settle-B', allIds.filter(id => id !== a))
   const selection = (): FrozenBaselineSelection => {
-    const result = store.readBaselineSelection(sourceA0.source, [{ kind: 'path', path }, ...allIds.filter(id => !id.startsWith('VERIFY-')).map(id => ({ kind: id.startsWith('FLOW-') ? 'flow' as const : 'contract' as const, id }))])
+    const result = store.readBaselineSelection(sourceA0.source, [...deliveredPaths.map(path => ({ kind: 'path' as const, path })), ...allIds.filter(id => !id.startsWith('VERIFY-')).map(id => ({ kind: id.startsWith('FLOW-') ? 'flow' as const : 'contract' as const, id }))])
     assert.ok('selection' in result); return result.selection
   }
   const plan: SyncCoordinatorPlan = { version: 'sync-coordinator-v1', intentNodeId: 'export-contract', targets: [{ nodeId: 'export-contract', path }], readPaths: ['.spec', 'src', 'tests'], writePaths: ['.spec', 'src', 'tests'], facts: [], verifications: [], mandatoryTests: [] }
-  return { root, deliveryRoot, original, nextA, addB, sourceA0, pairA, pairB, deliveryB1, selection, plan, allIds }
+  return { root, deliveryRoot, original, nextA, addB, sourceA0, pairA, pairB, deliveryB1, selection, plan, allIds, codePath, sourceCode, codeA1, codeA2, addCodeB }
 }
 
-function fakeBehavior(resolution?: string, assertInput?: (frozen: Record<string, unknown>) => void): ElaborationRunner {
+function fakeBehavior(resolution?: string, assertInput?: (frozen: Record<string, unknown>) => void, resolutionPath = path, resolutionMode: '100644' | '100755' = '100755'): ElaborationRunner {
   return async request => {
     let output: unknown
     if (request.purpose === 'code_behavior_analyze') {
       const frozen = JSON.parse(request.prompt.split('冻结三方输入:\n')[1]) as { changedPaths: string[] }
       assertInput?.(frozen)
-      output = { changes: frozen.changedPaths.map(path => ({ kind: 'allowed_change', paths: [path], affectedIds: [a], ruleIds: [a], originalIntent: '保留作者A与已交付B', previousBehavior: 'A1', sourceBehavior: 'A2', deliveryBehavior: 'A1+B1', evidence: '真实Git对象及逐ID残差', counterexample: '不能把A2隐藏为A1' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: resolution ? [{ path, content: resolution, mode: '100755' }] : [] }
+      output = { changes: frozen.changedPaths.map(path => ({ kind: 'allowed_change', paths: [path], affectedIds: [a], ruleIds: [a], originalIntent: '保留作者A与已交付B', previousBehavior: 'A1', sourceBehavior: 'A2', deliveryBehavior: 'A1+B1', evidence: '真实Git对象及逐ID残差', counterexample: '不能把A2隐藏为A1' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: resolution ? [{ path: resolutionPath, content: resolution, mode: resolutionMode }] : [] }
     } else {
       const reviewed = JSON.parse(request.prompt.split('待审分析:\n')[1]) as { analysisDigest: string; analysis: CodeBehaviorAnalysis }
       const frozen = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as { changedPaths: string[] }
@@ -228,4 +231,55 @@ test('规划只读实际闭包，宽src/tests授权不把独立节点锁入scope
   assert.ok(!resources.some(resource => resource.kind === 'path' && resource.path.includes('independent')))
   assert.ok(!plan.executionScope.paths.some(path => path.includes('independent')))
   assert.ok(plan.executionScope.paths.includes('src/export.js'))
+})
+
+
+test('code-only A2夹在B.source但未消费：实际行为分析必须读取并完整整合A2与B1', async t => {
+  const f = await fixture(t, true, false, true), input = await captureInputSnapshot(f.root), selection = f.selection()
+  const composed = composeInputSnapshots(input, selection, { retainConflicts: true }).composed!
+  const analysis = await analyzeCodeBehavior({ snapshot: input, baseline: null, baselineSelection: selection, composed, readSetDigest: 'test-read-code', policyDigest: 'test-policy-code', requestKey: 'code-only-A2', timeoutMs: 10000, plan: f.plan }, fakeBehavior(f.addCodeB(f.codeA2), frozen => {
+    assert.deepEqual(frozen.requiredChangedPaths, [f.codePath])
+    assert.deepEqual(frozen.changedPaths, [f.codePath])
+    assert.deepEqual(frozen.authorChanges, [])
+    const files = frozen.intentArtifactFiles as { path: string; text: string }[]
+    assert.ok(files.some(file => file.path === f.codePath && file.text === f.sourceCode))
+    assert.ok(files.some(file => file.path === f.codePath && file.text === f.codeA2))
+    assert.ok(files.some(file => file.path === f.codePath && file.text === f.addCodeB(f.codeA1)))
+  }, f.codePath))
+  assert.match(analysis.resolutions[0].content!, /resultVersion = 'A2'/)
+  assert.match(analysis.resolutions[0].content!, /deliveryPolicy = 'B1'/)
+  const evidence = readCompositionEvidence(input, composed, selection), artifact = evidence.artifacts.find(item => item.resource.id === a && item.path === f.codePath)!
+  assert.equal(artifact.pairId, f.pairA.id); assert.equal(artifact.changed, true)
+  assert.notEqual(artifact.before?.oid, artifact.source?.oid)
+  assert.equal(evidence.paths.find(item => item.path === f.codePath)!.pairId, f.pairB.id)
+  assert.equal(artifact.source?.oid, evidence.paths.find(item => item.path === f.codePath)!.base?.oid)
+  const forged = structuredClone(evidence); forged.artifacts.find(item => item.resource.id === a && item.path === f.codePath)!.changed = false; forged.residualPaths = []
+  assert.throws(() => readCompositionEvidence(input, { ...composed, compositionEvidenceBlob: writeEvidence(input.source.commonDir, forged) }, selection), /true code\/test objects or residual differ/)
+  const evidenceRoot = process.env.SPEX_COMPOSITION_EVIDENCE_DIR
+  if (evidenceRoot) writeFileSync(join(evidenceRoot, 'code-only-after.json'), JSON.stringify({ scenario: '真实code-only A2尚未消费', limitation: '真实Git/store；验证及行为runner fake', input, selection, artifact, evidence, analysis, files: { source: f.sourceCode, newSource: f.codeA2, delivered: f.addCodeB(f.codeA1) } }, null, 2))
+})
+
+test('code-only完整整合不能删除B1或弱化未选权限，即使fake独审accept', async t => {
+  const f = await fixture(t, true, false, true), input = await captureInputSnapshot(f.root), selection = f.selection(), composed = composeInputSnapshots(input, selection, { retainConflicts: true }).composed!
+  for (const wrong of [f.codeA2, f.addCodeB(f.codeA2).replace("throw new Error('forbidden');", 'return null;')]) {
+    await assert.rejects(analyzeCodeBehavior({ snapshot: input, baseline: null, baselineSelection: selection, composed, readSetDigest: 'test-read-code', policyDigest: 'test-policy-code', requestKey: 'code-reject-B', timeoutMs: 10000, plan: f.plan }, fakeBehavior(wrong, undefined, f.codePath)), /源码整合丢失/)
+  }
+  await assert.rejects(analyzeCodeBehavior({ snapshot: input, baseline: null, baselineSelection: selection, composed, readSetDigest: 'test-read-code', policyDigest: 'test-policy-code', requestKey: 'code-reject-mode', timeoutMs: 10000, plan: f.plan }, fakeBehavior(f.addCodeB(f.codeA2), undefined, f.codePath, '100644')), /源码整合丢失真实三方mode/)
+})
+
+test('code-only真实ff采纳完整byte head后无代码回声，再A3仍进入实际独审必读路径', async t => {
+  const f = await fixture(t, true, false, true)
+  git(f.root, 'restore', f.codePath); git(f.root, 'merge', '--ff-only', f.deliveryB1.headCommit)
+  const selection = f.selection(), accepted = await captureInputSnapshot(f.root), composed = composeInputSnapshots(accepted, selection, { retainConflicts: true }).composed!
+  const evidence = readCompositionEvidence(accepted, composed, selection)
+  assert.deepEqual(evidence.residualPaths, []); assert.ok(evidence.artifacts.every(item => !item.changed))
+  const acceptedA = evidence.artifacts.find(item => item.resource.id === a && item.path === f.codePath)!
+  assert.equal(acceptedA.adoptionPairId, f.pairB.id); assert.equal(acceptedA.adoptionCommit, f.deliveryB1.headCommit)
+  assert.equal(acceptedA.source!.mode, '100755')
+  await analyzeCodeBehavior({ snapshot: accepted, baseline: null, baselineSelection: selection, composed, readSetDigest: 'accepted-read', policyDigest: 'test-policy-code', requestKey: 'code-echo', timeoutMs: 10000, plan: f.plan }, fakeBehavior(undefined, frozen => { assert.deepEqual(frozen.changedPaths, []); assert.deepEqual(frozen.authorChanges, []) }))
+  const codeA3 = f.addCodeB(f.codeA2).replace("'A2'", "'A3'")
+  writeFileSync(join(f.root, f.codePath), codeA3)
+  const next = await captureInputSnapshot(f.root), updated = composeInputSnapshots(next, selection, { retainConflicts: true }).composed!
+  const analysis = await analyzeCodeBehavior({ snapshot: next, baseline: null, baselineSelection: selection, composed: updated, readSetDigest: 'test-read-A3', policyDigest: 'test-policy-code', requestKey: 'code-A3', timeoutMs: 10000, plan: f.plan }, fakeBehavior(codeA3, frozen => { assert.deepEqual(frozen.requiredChangedPaths, [f.codePath]) }, f.codePath))
+  assert.match(analysis.resolutions[0].content!, /resultVersion = 'A3'/); assert.match(analysis.resolutions[0].content!, /deliveryPolicy = 'B1'/)
 })

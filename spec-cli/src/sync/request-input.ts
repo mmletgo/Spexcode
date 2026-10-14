@@ -176,7 +176,7 @@ export function composeControlledRequest(snapshot: InputSnapshot, composed: Comp
     const evidence = projectSelectedAuthorPatch(snapshot, priorEvidence as SelectedCompositionEvidence, requestBlob, request.before, request.next)
     evidence.conflicts = [...priorConflicts, ...conflicts]
     compositionEvidenceBlob = writeEvidence(commonDir, evidence)
-    authorProjectionBlob = writeEvidence(commonDir, { version: 'selected-author-projection-v1', sourceInputId: snapshot.id, baselineSelectionDigest: composed.baselineSelectionDigest, intents: evidence.intents, residualPaths: evidence.residualPaths, controlledAuthorPatch: evidence.controlledAuthorPatch, priorProjection: composed.authorProjectionBlob ?? null })
+    authorProjectionBlob = writeEvidence(commonDir, { version: 'selected-author-projection-v1', sourceInputId: snapshot.id, baselineSelectionDigest: composed.baselineSelectionDigest, intents: evidence.intents, artifacts: evidence.artifacts, residualPaths: evidence.residualPaths, controlledAuthorPatch: evidence.controlledAuthorPatch, priorProjection: composed.authorProjectionBlob ?? null })
   }
   return { composed: { ...composed, tree, manifestBlob, contentDigest, requestBlob, ...(authorProjectionBlob ? { authorProjectionBlob } : {}), ...(compositionEvidenceBlob ? { compositionEvidenceBlob } : {}) }, conflicts }
 }

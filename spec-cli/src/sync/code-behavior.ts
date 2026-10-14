@@ -3,7 +3,7 @@ import { dependencyClosure, parseContract, parseFrontmatter, parseParts } from '
 import type { AuthorizedContractChange, ElaborationRunner, ElaborationTrace } from './elaboration-types.js'
 import { outputErrors } from './elaboration-schema.js'
 import { actualTreeDiff, isHostPrivatePath } from './candidate.js'
-import { adoptedDeliveryPaths, isUtf8Text, readCompositionEvidence } from './composition.js'
+import { adoptedDeliveryPaths, isUtf8Text, mergeText, readCompositionEvidence } from './composition.js'
 import { validateRawIntegration } from './raw-integration.js'
 import { decisionScopeIds, sameContractBusinessMeaning } from './contract-evolution.js'
 import { controlledDecisionIdentity, readControlledDecision, readControlledRequest, renderControlledDecisionRaw } from './request-input.js'
@@ -121,12 +121,14 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
     for (const entry of selectedEvidence.paths) { if (entry.base) authorEntries.set(entry.path, entry.base); else authorEntries.delete(entry.path); if (entry.delivery) deliveryEntries.set(entry.path, entry.delivery); else deliveryEntries.delete(entry.path) }
   }
   const changedPaths = sorted([...(selectedEvidence?.residualPaths ?? []), ...ungoverned, ...actualTreeDiff([...authorEntries.values()], verifySnapshot(input.snapshot)).map(file => file.path), ...actualTreeDiff([...deliveryEntries.values()], readTree(commonDir, input.composed.tree)).map(file => file.path)].filter(path => within(path, input.plan.readPaths)))
+  const artifactEntries = new Map((selectedEvidence?.artifacts ?? []).flatMap(item => [item.before, item.delivery, item.source, item.authorBase].filter((entry): entry is NonNullable<typeof entry> => !!entry)).map(entry => [`${entry.path}:${entry.mode}:${entry.oid}`, entry]))
+  const intentArtifactFiles = [...artifactEntries.values()].filter(entry => within(entry.path, input.plan.readPaths) && entry.mode !== '120000' && !isHostPrivatePath(entry.path)).flatMap(entry => { const bytes = readObject(commonDir, entry.oid); return isUtf8Text(bytes) ? [{ ...entry, text: bytes.toString('utf8') }] : [] })
   const snapshots = { oldSource, newSource: source, verifiedDelivery: delivery, composedFiles: composed }
   const snapshotPaths = Object.entries(snapshots).map(([name, files]) => [name, new Set(files.map(([path]) => path))] as const)
-  const readablePaths = sorted(snapshotPaths.flatMap(([, paths]) => [...paths])).map(path => ({ path, snapshots: snapshotPaths.filter(([, paths]) => paths.has(path)).map(([name]) => name) }))
+  const readablePaths = sorted([...snapshotPaths.flatMap(([, paths]) => [...paths]), ...intentArtifactFiles.map(file => file.path)]).map(path => ({ path, snapshots: [...snapshotPaths.filter(([, paths]) => paths.has(path)).map(([name]) => name), ...intentArtifactFiles.some(file => file.path === path) ? ['intentArtifactFiles'] : []] }))
   const readingManifest = JSON.stringify({ requiredChangedPaths: changedPaths, readablePaths })
   const readingInstructions = `冻结读取清单:\n${readingManifest}\n分析要求:\nrequiredChangedPaths必须逐项覆盖，不得缩小。readablePaths标明该具体文件全文在哪些冻结快照中存在；删除文件仍重读旧全文。plan.readPaths是目录前缀授权而非仅路径字符串相等；manifest/目录/链接只属元数据，不冒充全文。以下虚拟冻结快照是唯一输入权威，cwd的旧HEAD不是本次输入；不要以cwd缺少新增文件忽略已冻结正文。\n`
-  const frozen = { requiredChangedPaths: changedPaths, readablePaths, origin: input.origin ?? 'code', decision: input.decision ?? null, repairDiagnostics: input.repairDiagnostics ?? [], inputId: input.snapshot.id, baselinePair: input.baseline, baselineSelection: input.baselineSelection ?? null, compositionEvidence: selectedEvidence, composed: input.composed, readSetDigest: input.readSetDigest, policyDigest: input.policyDigest, plan: input.plan, changedPaths, authorChanges, adoptedDeliveryPaths: sorted([...adopted]), authorBaseline: [...authorBefore], oldSource, verifiedDelivery: delivery, newSource: source, composedFiles: composed }
+  const frozen = { requiredChangedPaths: changedPaths, readablePaths, origin: input.origin ?? 'code', decision: input.decision ?? null, repairDiagnostics: input.repairDiagnostics ?? [], inputId: input.snapshot.id, baselinePair: input.baseline, baselineSelection: input.baselineSelection ?? null, compositionEvidence: selectedEvidence, intentArtifactFiles, composed: input.composed, readSetDigest: input.readSetDigest, policyDigest: input.policyDigest, plan: input.plan, changedPaths, authorChanges, adoptedDeliveryPaths: sorted([...adopted]), authorBaseline: [...authorBefore], oldSource, verifiedDelivery: delivery, newSource: source, composedFiles: composed }
   const context = JSON.stringify(frozen)
   if (Buffer.byteLength(context) + Buffer.byteLength(readingManifest) > 2 * 1024 * 1024) reject('完整三方行为上下文超过2MiB，不截断源码或测试')
   const decisionAuthorities = [...input.plan.decisionAuthorities ?? []]
@@ -234,6 +236,24 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   const governedPaths = new Set(composed.filter(([path]) => path.startsWith('.spec/') && path.endsWith('/spec.md')).flatMap(([, text]) => { const code = parseFrontmatter(text).fm.code; return Array.isArray(code) ? code.filter((anchor): anchor is string => typeof anchor === 'string').map(anchor => anchor.split('#')[0]) : [] }))
   for (const path of changedPaths) if (!path.startsWith('.spec/') && sourceMap.has(path) && /\.(?:[cm]?[jt]sx?|py|go|rs|java|rb)$/.test(path) && !/\.(?:test|spec)\./.test(path) && !governedPaths.has(path) && !newNodes.some(node => node.codePath === path) && !changes.some(item => item.paths.includes(path) && ['coverage_gap', 'conflict'].includes(item.kind))) reject(`无治理代码未创建真实归属或具体GAP: ${path}`)
   for (const resolution of proposal.resolutions) { validatePaths([resolution.path]); if (!changedPaths.includes(resolution.path) || !within(resolution.path, input.plan.writePaths) || !changes.some(item => item.paths.includes(resolution.path) && !['conflict', 'coverage_gap'].includes(item.kind))) reject(`整合解决方案没有相容分析/授权范围: ${resolution.path}；只处理已存在且实际changedPaths需三方整合/真实作者删除的位置，普通合法code变化只分类/newNodes，不提前写Spec或tests正文`); if ((resolution.content === null) !== (resolution.mode === null) || resolution.mode === '120000') reject('业务整合只接受普通UTF-8文件或明确删除') }
+  if (selectedEvidence) for (const resolution of proposal.resolutions.filter(item => !item.path.startsWith('.spec/'))) {
+    const delivered = selectedEvidence.paths.find(item => item.path === resolution.path)?.delivery
+    const residuals = new Map(selectedEvidence.artifacts.filter(item => item.path === resolution.path && item.changed).map(item => [item.authorBase?.oid ?? 'null', item]))
+    for (const residual of residuals.values()) if (residual.authorBase && residual.source && delivered && resolution.content !== null) {
+      const mode = residual.source.mode === residual.authorBase.mode ? delivered.mode : delivered.mode === residual.authorBase.mode || residual.source.mode === delivered.mode ? residual.source.mode : null
+      if (resolution.mode !== mode) reject(`源码整合丢失真实三方mode: ${resolution.path}`)
+      const bytes = [residual.authorBase, residual.source, delivered].map(entry => readObject(commonDir, entry.oid))
+      if (!bytes.every(isUtf8Text)) reject(`源码整合缺少完整UTF-8三方: ${resolution.path}`)
+      let errors = validateRawIntegration(bytes[0].toString('utf8'), bytes[1].toString('utf8'), bytes[2].toString('utf8'), resolution.content)
+      // 重复代码片段的Unicode LCS可能选不同插入锚点；真实Git重叠行交独审，固定行仍须逐字保留。
+      if (errors.length && mergeText(commonDir, delivered, residual.authorBase, residual.source) === null) {
+        const lines = new Map<string, string>()
+        const encode = (text: string): string => text.split('\n').map(line => { let token = lines.get(line); if (!token) { token = String.fromCodePoint(lines.size + 256); lines.set(line, token) }; return token }).join('')
+        errors = validateRawIntegration(encode(bytes[0].toString('utf8')), encode(bytes[1].toString('utf8')), encode(bytes[2].toString('utf8')), encode(resolution.content))
+      }
+      if (errors.length) reject(`源码整合丢失真实作者或未选交付编辑: ${resolution.path}: ${errors.join('; ')}`)
+    }
+  }
   if (selectedEvidence) for (const resolution of proposal.resolutions) {
     const rows = selectedEvidence.intents.filter(item => item.delivery?.path === resolution.path)
     const resolved = resolution.content === null ? null : parseContract({ nodeId: resolution.path.split('/').at(-2)!, path: resolution.path, source: resolution.content }).contract
