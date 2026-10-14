@@ -200,3 +200,14 @@ test('实现诊断有限再细化只新增遗漏边界，冻结摘要且保留�
   assert.ok(rejected.rounds[0].findings.some(issue => issue.code === 'refinement_accepted_meaning_changed'))
   await assert.rejects(elaborate({ ...input(), refinement: { ...refinement, candidateDigest: 'stale' } }, { runner: runner(output) }), /再细化诊断/)
 })
+
+test('同一操作退役节点后也不能换路径立即复用canonical身份', async () => {
+  const before = await readFrozenContracts('/frozen', files()), nextFiles = files()
+  nextFiles.delete(path)
+  const addedPath = '.spec/new/export-contract/spec.md', raw = '新业务原意，与旧能力无关。'
+  nextFiles.set(addedPath, `## raw source\n${raw}\n\n## expanded spec\n新业务说明。\n`)
+  const after = await readFrozenContracts('/frozen', nextFiles)
+  const authorizedChanges: AuthorizedContractChange[] = [...before.graph.items.values()].map(item => ({ id: item.id, action: 'retire', source: 'user:raw', reason: '用户明确退役旧能力' }))
+  const findings = validateContractEvolution(before, after, policy({ authorizedChanges, nodeChanges: [{ action: 'retire', from: { nodeId: 'export-contract', path }, evidenceRef: { sha256: sha } }], newNodeRawSources: new Map([[addedPath, raw]]) }))
+  assert.ok(findings.some(issue => issue.code === 'retired_id_reused' && issue.itemId === 'export-contract'))
+})

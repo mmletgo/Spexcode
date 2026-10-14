@@ -135,7 +135,7 @@ export function validateContractEvolution(before: FrozenContracts, after: Frozen
       }
     }
   }
-  const retired = new Set([...policy.retiredIds, ...policy.authorizedChanges.filter(change => change.action === 'retire').map(change => change.id)])
+  const retired = new Set([...policy.retiredIds, ...policy.authorizedChanges.filter(change => change.action === 'retire').map(change => change.id), ...policy.nodeChanges.filter(change => change.action === 'retire').map(change => change.from.nodeId)])
   for (const id of retired) if (after.graph.items.has(id) || after.nodes.some(node => node.id === id)) issue('retired_id_reused', after.graph.items.get(id) ?? after.nodes.find(node => node.id === id)!, '不能复用历史退役身份', id)
   for (const item of after.graph.items.values()) {
     for (const reference of contractReferences(item)) if (retired.has(reference.id)) issue('retired_reference_remaining', item, `退役后引用必须清理: ${reference.id}`, item.id)
