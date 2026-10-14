@@ -28,6 +28,16 @@ export function contractBusinessMeaning(item: ContractItem): Record<string, unkn
   return meaning
 }
 
+/** 规则的 canonical 权威随定义归属搬迁，其他业务字段仍逐项保护。 */
+export function sameContractBusinessMeaning(before: ContractItem, after: ContractItem): boolean {
+  const previous = contractBusinessMeaning(before), next = contractBusinessMeaning(after)
+  if (before.kind === 'RULE' && after.kind === 'RULE') {
+    if (before.authority !== before.nodeId || after.authority !== after.nodeId) return false
+    if (before.path !== after.path) previous.authority = after.authority
+  }
+  return same(previous, next)
+}
+
 /** 验收演进必须引用当前冻结的独立行为分析，不能以生成器失败自批。 */
 export function acceptanceAuthorizationErrors(change: Extract<AuthorizedContractChange, { action: 'update_acceptance' }>, before: FrozenContracts, policy: Pick<ContractEvolutionPolicy, 'analysis' | 'facts'>): string[] {
   const evidence = policy.analysis
@@ -105,13 +115,7 @@ export function validateContractEvolution(before: FrozenContracts, after: Frozen
       if (policy.mode === 'preserve_business' || policy.preserveAcceptedItems || authorization?.action !== 'retire') issue('protected_item_removed', item, '删除契约项必须有用户原意或可信裁决的退役依据', item.id)
       continue
     }
-    const priorMeaning = contractBusinessMeaning(item)
-    const nextMeaning = contractBusinessMeaning(next)
-    if (item.kind === 'RULE' && next.kind === 'RULE') {
-      const relocation = policy.nodeChanges.find(change => change.action === 'move' && change.from.nodeId === item.authority && change.to?.nodeId === next.authority)
-      if (relocation) priorMeaning.authority = next.authority
-    }
-    if (same(priorMeaning, nextMeaning)) continue
+    if (sameContractBusinessMeaning(item, next)) continue
     if (policy.mode === 'preserve_business' || policy.preserveAcceptedItems && ['REQ', 'AC', 'VERIFY', 'RULE'].includes(item.kind)) issue(policy.preserveAcceptedItems ? 'refinement_accepted_meaning_changed' : 'refactor_business_meaning_changed', next, policy.preserveAcceptedItems ? '再细化诊断不能改写已接受业务字段' : '纯重构只允许实现与测试符号绑定变化', item.id)
     else if (policy.preserveAcceptedItems && item.kind === 'TR' && next.kind === 'TR' && item.disposition !== 'not_applicable' && next.disposition === 'not_applicable') issue('refinement_accepted_disposition_removed', next, '已接受状态处置不能改为不适用逃避义务', item.id)
     else if (item.kind === 'VERIFY' && authorization?.action !== 'update_verification') issue('verification_policy_changed', next, '验证命令、目录或预算变更缺少已确认依据', item.id)
@@ -131,7 +135,7 @@ export function validateContractEvolution(before: FrozenContracts, after: Frozen
           if (!nextSource || !['REQ', 'RULE', 'TR'].includes(nextSource.kind) || !sources.has(id)) return false
           const rawChanged = nextSource.kind === 'REQ' && before.nodes.find(node => node.path === priorSource?.path)?.rawSource !== after.nodes.find(node => node.path === nextSource.path)?.rawSource
           const authorChanged = authorization.source === 'user:raw' && policy.analysis?.analysis.authorChanges?.some(change => change.nodeId === nextSource.nodeId && change.path === nextSource.path && change.changedIds.includes(id) && change.afterRaw === after.nodes.find(node => node.path === nextSource.path)?.rawSource)
-          return !priorSource || !same(contractBusinessMeaning(priorSource), contractBusinessMeaning(nextSource)) || rawChanged || authorChanged === true
+          return !priorSource || !sameContractBusinessMeaning(priorSource, nextSource) || rawChanged || authorChanged === true
         })) issue('acceptance_rule_unchanged', next, '验收更新必须追溯到实际变化的合法需求、规则或状态处置', item.id)
       }
     }
@@ -155,10 +159,10 @@ export function contractBusinessProse(source: string): string {
   const lines = source.split('\n'), prose: string[] = []
   let fence: { marker: string; length: number } | null = null
   for (let index = 0; index < lines.length; index++) {
-    const line = lines[index], marker = line.match(/^ {0,3}(`{3,}|~{3,})/)
+    const line = lines[index], marker = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/)
     if (marker) {
       if (!fence) fence = { marker: marker[1][0], length: marker[1].length }
-      else if (marker[1][0] === fence.marker && marker[1].length >= fence.length) fence = null
+      else if (marker[1][0] === fence.marker && marker[1].length >= fence.length && !marker[2].trim()) fence = null
       prose.push(line); continue
     }
     if (!fence && /^### (?:REQ|FLOW|STEP|STATE|EVENT|TR|RULE|AC|GAP|VERIFY)[ \t]*$/.test(line)) {

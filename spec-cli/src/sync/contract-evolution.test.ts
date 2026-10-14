@@ -232,3 +232,52 @@ test('同一操作退役节点后也不能换路径立即复用canonical身份',
   const findings = validateContractEvolution(before, after, policy({ authorizedChanges, nodeChanges: [{ action: 'retire', from: { nodeId: 'export-contract', path }, evidenceRef: { sha256: sha } }], newNodeRawSources: new Map([[addedPath, raw]]) }))
   assert.ok(findings.some(issue => issue.code === 'retired_id_reused' && issue.itemId === 'export-contract'))
 })
+
+test('preserve_business的可信VERIFY登记只校验技术行，不清空已有业务表', async () => {
+  const verification = parseContract({ nodeId: 'export-contract', path, source }).contract!.items.filter(item => item.kind === 'VERIFY')
+  const result = await elaborate({ ...input(), mode: 'preserve_business', verifications: verification.map(item => ({ id: item.id, command: item.command, cwd: item.cwd, timeoutMs: item.timeoutMs })) }, { runner: runner(build(source)) })
+  assert.equal(result.status, 'complete')
+  assert.equal(result.contracts[0].items.length, parseContract({ nodeId: 'export-contract', path, source }).contract!.items.length)
+})
+
+test('纯重构保留反引号及波浪线围栏中的契约表格示例原字节', async () => {
+  for (const marker of ['```', '~~~~', '````']) {
+    const example = `${marker}markdown\n### REQ\n\n| id | example |\n| --- | --- |\n| REQ-EXAMPLE-01 | 示例 |\n${marker}\n`
+    const fenced = source.replace('## expanded spec\n', `## expanded spec\n\n${example}`)
+    const context = files(); context.set(path, fenced)
+    const state = await readFrozenContracts('/frozen', context)
+    assert.deepEqual(state.findings.filter(issue => issue.severity === 'error'), [])
+    const snapshot: ElaborationInput = { ...input(), mode: 'preserve_business', targets: [{ nodeId: 'export-contract', path, source: fenced, sourceDigest: elaborationDigest(fenced) }], files: context }
+    const output = build(fenced), rendered = renderElaboration(snapshot, output, sha)
+    assert.ok(rendered.changes[0].source.includes(example))
+    const prompts: string[] = []
+    const result = await elaborate(snapshot, { runner: runner(output, prompts) })
+    assert.equal(result.status, 'complete')
+    assert.equal(prompts.length, 2)
+  }
+})
+
+test('独立RULE跨叶搬迁可更新canonical authority，真实constraint变化及错误authority仍拒', async () => {
+  const before = await readFrozenContracts('/frozen', files()), nextFiles = files()
+  const row = source.match(/^\| RULE-EXPORT-02 .*$/m)![0]
+  const addedPath = '.spec/export/export-idempotency/spec.md', raw = '原始原意见 [[export-contract]]。'
+  const addedSource = `---\ntitle: 幂等权威规则\ncontract-schema: sync-v1\ncode:\n  - src/export.js#ExportService\n---\n## raw source\n\n${raw}\n\n## expanded spec\n\n### RULE\n\n| id | scope | constraint | basis | authority | source | depends-on |\n| --- | --- | --- | --- | --- | --- | --- |\n${row.replace('| export-contract |', '| export-idempotency |')}\n`
+  nextFiles.set(path, source.replace(`${row}\n`, '')); nextFiles.set(addedPath, addedSource)
+  const after = await readFrozenContracts('/frozen', nextFiles), newNodeRawSources = new Map([[addedPath, raw]])
+  assert.deepEqual(after.findings.filter(issue => issue.severity === 'error'), [])
+  const generationPolicy = { newNodeRawSources, verifications: before.contracts[0].items.filter(item => item.kind === 'VERIFY') }
+  assert.deepEqual(checkGenerationContractIntent(before, after, generationPolicy), [])
+  assert.deepEqual(validateContractEvolution(before, after, policy({ mode: 'preserve_business', newNodeRawSources })), [])
+  const snapshot = input(), output = build(nextFiles.get(path)!)
+  output.changes.push(build(addedSource, 'export-idempotency', addedPath).changes[0])
+  const result = await elaborate({ ...snapshot, mode: 'preserve_business', targets: [...snapshot.targets, { nodeId: 'export-idempotency', path: addedPath, source: null, sourceDigest: null, rawSource: raw }] }, { runner: runner(output) })
+  assert.equal(result.status, 'complete')
+  const rule = after.graph.items.get('RULE-EXPORT-02')!
+  assert.equal(rule.kind, 'RULE')
+  for (const invalidSource of [addedSource.replace(rule.constraint, '所有组合均可合并，取消幂等隔离'), addedSource.replace('| export-idempotency |', '| export-contract |')]) {
+    const invalidFiles = new Map(nextFiles); invalidFiles.set(addedPath, invalidSource)
+    const invalid = await readFrozenContracts('/frozen', invalidFiles)
+    assert.ok(checkGenerationContractIntent(before, invalid, generationPolicy).some(issue => issue.code === 'generation-protected-meaning-changed'))
+    assert.ok(validateContractEvolution(before, invalid, policy({ mode: 'preserve_business', newNodeRawSources })).some(issue => issue.code === 'refactor_business_meaning_changed'))
+  }
+})

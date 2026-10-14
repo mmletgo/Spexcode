@@ -1,7 +1,7 @@
 import { loadSpecs } from '@spexcode/spec-core'
 import { buildContractGraph, parseContract, parseParts, projectContractCoverage, validateContractGraph } from '@spexcode/spec-core/contracts'
 import type { Contract, ContractCoverage, ContractFinding, ContractGraph, Verification } from '@spexcode/spec-core/contracts'
-import { contractBusinessMeaning, contractBusinessProse } from './contract-evolution.js'
+import { sameContractBusinessMeaning, contractBusinessProse } from './contract-evolution.js'
 import { validateFrozenAnchors } from './frozen-anchors.js'
 
 export type FrozenContracts = {
@@ -57,7 +57,7 @@ export function checkGenerationContractIntent(before: FrozenContracts, after: Fr
   for (const item of before.graph.items.values()) {
     const next = after.graph.items.get(item.id)
     if (!next || next.kind !== item.kind) issue('generation-protected-item-removed', item.path, item.nodeId, '生成候选必须保留已接受契约的全部稳定身份', item.id)
-    else if (!same(contractBusinessMeaning(item), contractBusinessMeaning(next))) issue('generation-protected-meaning-changed', next.path, next.nodeId, '生成器不能更改已接受的需求、业务流程、规则、验收语义或验证政策', item.id)
+    else if (!sameContractBusinessMeaning(item, next)) issue('generation-protected-meaning-changed', next.path, next.nodeId, '生成器不能更改已接受的需求、业务流程、规则、验收语义或验证政策', item.id)
   }
   for (const item of after.graph.items.values()) if (item.kind !== 'VERIFY' && !before.graph.items.has(item.id)) issue('generation-unaccepted-item', item.path, item.nodeId, '新业务契约项必须先进入接受细化，不能由生成器自批', item.id)
   const registered = new Map(policy.verifications.map(item => [item.id, item]))

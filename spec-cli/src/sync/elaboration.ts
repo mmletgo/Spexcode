@@ -63,7 +63,7 @@ function checkInput(input: ElaborationInput): void {
     const tables = Object.fromEntries(Object.keys(CONTRACT_COLUMNS).map(kind => [kind, []])) as unknown as GeneratedTables
     tables.VERIFY = input.verifications.map(verification => ({ id: verification.id, command: verification.command, cwd: verification.cwd, 'timeout-ms': verification.timeoutMs }))
     const target = input.targets.find(item => item.nodeId === input.intent.nodeId)!
-    const rendered = renderElaboration(input, { version: 'elaboration-rows-v1', changes: [{ nodeId: target.nodeId, path: target.path, title: '可信验证登记', description: '', code: [], related: [], prose: '', tables }], applicability: [] }, 'registration-validation').changes[0]
+    const rendered = renderElaboration({ ...input, mode: 'reelaborate', nodeChanges: [], refinement: undefined }, { version: 'elaboration-rows-v1', changes: [{ nodeId: target.nodeId, path: target.path, title: '可信验证登记', description: '', code: [], related: [], prose: '', tables }], applicability: [] }, 'registration-validation').changes[0]
     const errors = parseContract({ nodeId: target.nodeId, path: target.path, source: rendered.source }).findings.filter(issue => issue.severity === 'error')
     if (errors.length) throw new TypeError(`可信验证登记不合法: ${errors.map(issue => `${issue.code}: ${issue.message}`).join('; ')}`)
   }

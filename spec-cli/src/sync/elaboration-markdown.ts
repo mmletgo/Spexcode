@@ -31,7 +31,19 @@ export function renderElaboration(input: ElaborationInput, generated: GeneratedE
     }).join('\n\n')
     if (input.mode === 'preserve_business' && target?.source) {
       const parts = parseParts(target.source)!
-      const expanded = parts.expandedSpec.replace(/^(### (?:REQ|FLOW|STEP|STATE|EVENT|TR|RULE|AC|GAP|VERIFY)\s*\n)(?:[ \t]*\n)*(?:\|[^\n]*\n?)+/gm, section => {
+      const fencedRanges: { start: number; end: number }[] = []
+      let fence: { start: number; marker: string; length: number } | null = null, offset = 0
+      for (const line of parts.expandedSpec.split('\n')) {
+        const marker = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/)
+        if (marker && !fence) fence = { start: offset, marker: marker[1][0], length: marker[1].length }
+        else if (marker && fence && marker[1][0] === fence.marker && marker[1].length >= fence.length && !marker[2].trim()) {
+          fencedRanges.push({ start: fence.start, end: offset + line.length + 1 }); fence = null
+        }
+        offset += line.length + 1
+      }
+      if (fence) fencedRanges.push({ start: fence.start, end: parts.expandedSpec.length })
+      const expanded = parts.expandedSpec.replace(/^(### (?:REQ|FLOW|STEP|STATE|EVENT|TR|RULE|AC|GAP|VERIFY)\s*\n)(?:[ \t]*\n)*(?:\|[^\n]*\n?)+/gm, (section: string, _heading: string, offset: number) => {
+        if (fencedRanges.some(range => offset >= range.start && offset < range.end)) return section
         const kind = section.match(/^### (\w+)/)![1] as ContractKind
         const columns = CONTRACT_COLUMNS[kind]
         const rows = node.tables[kind].map(row => `| ${columns.map(column => markdownCell(row[column], kind === 'VERIFY' && column === 'command')).join(' | ')} |`)

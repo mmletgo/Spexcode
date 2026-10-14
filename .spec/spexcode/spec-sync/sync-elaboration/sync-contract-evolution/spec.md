@@ -26,3 +26,5 @@ preserve_business 保持 raw、expanded 业务正文和全部业务字段，只�
 用户已经编辑 raw/详细规则、保留旧 AC 时，真实作者 old→new 差量由程序生成并纳入同一独审分析：changedIds 包含合法来源，定位匹配该来源节点，afterRaw 必须精确匹配当前冻结原意。它证明用户变更已经发生，不要求细化再改一次规则；模型不能填此作者差量，旧合法分析不能跨输入复用，版本绑定由协调器核对。
 
 实现遗漏诊断触发再细化时，preserveAcceptedItems 保护全部既有稳定身份、raw/REQ、RULE政策、AC/VERIFY与原业务说明；FLOW/STEP/TR等详细逻辑可增补原意允许的失败出口与边界，并经结构检查及独审接受。已有TR不能改为not_applicable逃检查。诊断本身不授予任何原意、政策或验收变更授权。
+
+RULE 独立跨叶搬迁时，旧定义与新定义的 authority 均须等于各自 canonical owner，归属路径发生变化才把 authority 调整视为定位变化；业务 constraint、范围、来源及依赖仍保护。错误 authority 不豁免，不能全局忽略治理字段；单纯搬迁也不能冒充业务规则变化来授权 AC 更新。
