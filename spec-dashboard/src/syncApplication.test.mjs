@@ -62,6 +62,9 @@ test('adoption follows the settled receipt and backend eligibility, and disappea
   const landed = syncProjection({ ...detail, sourceSynced: true, canonicalSynced: true }, 'enabled')
   assert.equal(landed.canAdopt, false)
   assert.equal(landed.adoptionReason, null)
+  const canonicalOnly = syncProjection({ ...detail, canonicalSynced: true }, 'enabled')
+  assert.equal(canonicalOnly.canAdopt, false)
+  assert.equal(canonicalOnly.adoptionReason, null)
 
   const unsettled = syncProjection({ ...detail, journals: [] }, 'enabled')
   assert.equal(unsettled.canAdopt, false)

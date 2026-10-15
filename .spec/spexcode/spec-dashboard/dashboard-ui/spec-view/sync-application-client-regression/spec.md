@@ -35,3 +35,5 @@ related:
 物理自动 pause/resume transport 核对 endpoint、targetTree query 和空请求体，并保留后端控制错误码/消息。HTTP 200 缺少 settings/operations/observation/sources 时 readSyncStatus 返回可重试错误。观察器投影分别覆盖 live online、离线/退化/缺失/失效、持久 watching 但身份未确认、无状态数据、真实补偿扫描时间、项目 coverage 分母与原始节点集合；status.sources 必须按 physical root 对应真实状态，不能把失联的持久 watching 显示为在线，baseline 数只对应最近观测节点，selection 无效时不当作零缺失或全项目结论。
 
 回归覆盖 canonicalSynced/sourceSynced 的分别显示、canonical_synced 仍可作为新输入、source stale 时 backend eligible 仍开放成组撤销但 recovery/invalidated 关闭。Revert transport 失败后稳定 requestId 不变，并校验 response operation；stop-writer transport 保持物理 action scope、pause control 与恢复 operations 子集响应。真实 UI 验收须确认恢复子集不替换历史列表，暂停写入与单项取消文案/行为分离。
+
+采纳回归验证状态/响应必须携带有效的 `adoptionEligibility`，false 必须保留 reason code/message；采纳 transport 将编码后的 operation ID POST 到 `/api/sync/operations/:id/adopt`，不附 targetTree，保留服务端错误。投影只对已结算的当前回执且后端 eligible=true 开放，资格 false 时保留原 reason，sourceSynced/canonicalSynced 成立或回执未结算时不再诱导重复采纳。
