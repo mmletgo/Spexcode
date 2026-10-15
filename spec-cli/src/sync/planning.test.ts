@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { openProtocol } from '@spexcode/session-protocol'
-import { parseContract } from '@spexcode/spec-core/contracts'
+import { parseContract, validateContractGraph } from '@spexcode/spec-core/contracts'
 import { freezeCandidate } from './candidate.js'
 import { composeInputSnapshots } from './composition.js'
 import { checkGenerationContractIntent, readFrozenContracts } from './frozen-contracts.js'
@@ -45,12 +45,12 @@ async function fixture(t: test.TestContext) {
 }
 
 /** 真实store动作建立旧政策pair；Git对象与receipt真实，四层验证显式fake，不是产品验收。 */
-async function settleBaseline(t: test.TestContext, parent: string, source: InputSnapshot, delivery: InputSnapshot): Promise<BaselinePair> {
+async function settleBaseline(t: test.TestContext, parent: string, source: InputSnapshot, delivery: InputSnapshot, requestedScope?: SyncScope): Promise<BaselinePair> {
   const protocol = openProtocol(join(parent, 'policy.sqlite')); t.after(() => protocol.close())
   await migrateSyncStore(protocol, { backupPath: join(parent, 'backup.sqlite') })
   const store = new SyncStore(protocol, { readBlob: ref => readEvidence(source.source.commonDir, ref) }), put = (value: unknown) => writeEvidence(source.source.commonDir, value)
   const contract = parseContract({ nodeId: 'export-contract', path: specA, source: readObject(source.source.commonDir, verifySnapshot(source).find(entry => entry.path === specA)!.oid).toString('utf8') }).contract!
-  const scope: SyncScope = { paths: [specA, 'src/export.js'], contractIds: contract.items.filter(item => !['VERIFY', 'FLOW'].includes(item.kind)).map(item => item.id), flowIds: contract.items.filter(item => item.kind === 'FLOW').map(item => item.id) }
+  const scope: SyncScope = requestedScope ?? { paths: [specA, 'src/export.js'], contractIds: contract.items.filter(item => !['VERIFY', 'FLOW'].includes(item.kind)).map(item => item.id), flowIds: contract.items.filter(item => item.kind === 'FLOW').map(item => item.id) }
   const operation = store.admitAndEnqueue({ ingressKey: 'policy-baseline', rootCauseId: 'policy-baseline', origin: 'spec', input: source, scope, budget: { maxAttempts: 2, maxCalls: 4, maxRepairs: 1, timeoutMs: 100000 }, policyDigest: 'fake-policy', impactDigest: 'fake-impact', readSetDigest: 'fake-read', delivery: null, deliveryPlan: { canonicalRoot: delivery.source.canonicalRoot, branch: delivery.source.branch, baseCommit: source.headCommit } })
   const claim = store.claimAttempt({ operationId: operation.id, source: source.source, scope, leaseMs: 100000, expectedMessageId: operation.dispatchMessageId })
   store.bindDelivery(claim.fence, delivery.source); store.bindComposedInput(claim.fence, composeInputSnapshots(source).composed!)
@@ -129,4 +129,70 @@ test('无owner预登记不被丢弃，坏配置仍在可信schema边界拒绝', 
   assert.ok(plan.mandatoryTests.some(item => item.verificationId === future.definition.id)); assert.ok(plan.readPaths.includes('tests/future.test.mjs'))
   future.definition.command = ['bash', 'unsafe']; f.configure()
   await assert.rejects(buildSyncApplicationPlan(await captureInputSnapshot(f.root), 'export-contract'), /支持已登记的 Docker Node --test/)
+})
+
+for (const historical of [false, true]) test(`移动子节点完整读取readonly父契约声明assets，历史映射${historical ? '变化' : '保持'}且不扩大写范围`, async t => {
+  const f = await fixture(t), oldChild = '.spec/export/export-contract/summary/spec.md', movedChild = '.spec/export/export-contract/moved-summary/spec.md'
+  const child = `---
+title: 导出计数辅助
+status: active
+contract-schema: sync-v1
+code:
+  - src/summary.js#resultCount
+---
+## raw source
+
+遵循导出原始反馈需求。
+
+## expanded spec
+
+### AC
+
+| id | covers | preconditions | action | assertion | test | command | source | depends-on |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| AC-SUMMARY-01 | REQ-EXPORT-01,RULE-EXPORT-05 | 成功行数组 | 读取计数辅助 | 返回rows.length | generated-tests/summary.test.mjs#AC-SUMMARY-01 | VERIFY-SUMMARY-01 | derived:REQ-EXPORT-01 | REQ-EXPORT-01 |
+
+### VERIFY
+
+| id | command | cwd | timeout-ms |
+| --- | --- | --- | --- |
+| VERIFY-SUMMARY-01 | ["node","--test","generated-tests/summary.test.mjs"] | . | 10000 |
+`
+  const childContract = parseContract({ nodeId: 'summary', path: oldChild, source: child })
+  assert.ok(childContract.contract, JSON.stringify(childContract.findings))
+  assert.deepEqual(childContract.contract.items.map(item => item.id), ['AC-SUMMARY-01', 'VERIFY-SUMMARY-01'])
+  mkdirSync(join(f.root, oldChild, '..'), { recursive: true }); mkdirSync(join(f.root, 'generated-tests'))
+  writeFileSync(join(f.root, oldChild), child)
+  writeFileSync(join(f.root, 'src/summary.js'), 'export const resultCount = rows => rows.length;\n')
+  writeFileSync(join(f.root, 'generated-tests/summary.test.mjs'), "import test from 'node:test'; test('AC-SUMMARY-01', () => {});\n")
+  f.config.mandatoryTests = []
+  f.config.verifications.push({ ...f.config.verifications[0], definition: { id: 'VERIFY-SUMMARY-01', command: ['node', '--test', 'generated-tests/summary.test.mjs'], cwd: '.', timeoutMs: 10000 } }); f.configure()
+  git(f.root, 'add', '.'); git(f.root, 'commit', '-m', 'governed child with readonly parent obligations')
+  git(f.delivery.source.canonicalRoot, 'reset', '--hard', 'main')
+  const source = await captureInputSnapshot(f.root), delivery = await captureInputSnapshot(f.delivery.source.canonicalRoot)
+  const parentContract = parseContract({ nodeId: 'export-contract', path: specA, source: f.original }).contract!
+  const baseline = await settleBaseline(t, f.parent, source, delivery, { paths: [specA, oldChild, 'src/export.js', 'src/summary.js', 'generated-tests/summary.test.mjs'], contractIds: [...parentContract.items.filter(item => !['VERIFY', 'FLOW'].includes(item.kind)).map(item => item.id), 'AC-SUMMARY-01'], flowIds: parentContract.items.filter(item => item.kind === 'FLOW').map(item => item.id) })
+  renameSync(join(f.root, '.spec/export/export-contract/summary'), join(f.root, '.spec/export/export-contract/moved-summary'))
+  if (historical) {
+    writeFileSync(join(f.root, specA), f.original.replaceAll('src/export.js', 'src/current-export.js').replaceAll('tests/export.test.mjs', 'tests/current-export.test.mjs'))
+    cpSync(join(f.root, 'src/export.js'), join(f.root, 'src/current-export.js')); cpSync(join(f.root, 'tests/export.test.mjs'), join(f.root, 'tests/current-export.test.mjs'))
+    f.config.verifications[0].definition.command = ['node', '--test', 'tests/current-export.test.mjs']; f.configure()
+  }
+  const current = await captureInputSnapshot(f.root), plan = await buildSyncApplicationPlan(current, 'moved-summary', baseline)
+  assert.ok(plan.readPaths.includes(specA)); assert.ok(!plan.targets.some(target => target.nodeId === 'export-contract'))
+  for (const path of ['src/export.js', 'tests/export.test.mjs', ...(historical ? ['src/current-export.js', 'tests/current-export.test.mjs'] : [])]) {
+    assert.ok(plan.readPaths.includes(path), `完整readonly父契约与历史声明必须读取${path}`)
+    assert.ok(!plan.executionScope.paths.includes(path), `readonly声明不能取得${path}写范围`)
+    const entry = verifySnapshot(current).find(entry => entry.path === path)!
+    assert.throws(() => freezeCandidate(current, { version: 'sync-files-v1', changes: [{ path, beforeDigest: entry.digest, beforeMode: entry.mode, content: 'unauthorized overwrite\n' }] }, plan.executionScope), /越界/)
+  }
+  const frozen = await context(current, plan.readPaths)
+  assert.deepEqual(validateContractGraph(frozen.graph, { mode: 'final', files: frozen.files, nodeIds: new Set(frozen.nodes.map(node => node.id)) }).filter(finding => finding.severity === 'error'), [])
+  assert.deepEqual(plan.executionScope.paths, [oldChild, movedChild, 'src/summary.js', 'generated-tests/summary.test.mjs'].sort())
+  assert.ok(parentContract.items.every(item => !plan.executionScope.contractIds.includes(item.id) && !plan.executionScope.flowIds.includes(item.id)))
+  assert.deepEqual(plan.writePaths, [oldChild, movedChild, '.spec/export/export-contract/moved-summary', 'src', 'generated-tests'].sort())
+  for (const path of [specB, 'src/other.js', 'tests/other.test.mjs']) assert.ok(!plan.readPaths.includes(path), `独立B的${path}不能进入读取`)
+  const resources = await deriveSyncBaselineResources(current, plan)
+  assert.ok(resources.some(resource => resource.kind === 'path' && resource.path === 'src/export.js'))
+  assert.ok(!resources.some(resource => resource.kind === 'path' && resource.path.includes('other')))
 })
