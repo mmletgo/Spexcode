@@ -13,6 +13,12 @@ const canonical = readFileSync(canonicalPath, 'utf8')
 const displayStatus = [...(canonical.match(/export type DisplayStatus\s*=\s*([^\n]+)/)?.[1] || '').matchAll(/'([^']+)'/g)]
   .map((match) => match[1])
 const vocabulary = new Set(displayStatus)
+const observerPath = join(repo, 'spec-cli/src/sync/observer.ts')
+const observerContract = readFileSync(observerPath, 'utf8')
+const observerDeclaration = observerContract.match(/export type SyncObserverHealth\s*=\s*\{([\s\S]*?)^\}/m)?.[1] || ''
+const observerStatusUnion = observerDeclaration.match(/^\s*status:\s*('[^']+'(?:\s*\|\s*'[^']+')*)/m)?.[1] || ''
+const observerStatuses = [...observerStatusUnion.matchAll(/'([^']+)'/g)].map((match) => match[1])
+const syncApplication = readFileSync(join(here, 'syncApplication.js'), 'utf8')
 
 const sourceExtensions = new Set(['.js', '.jsx', '.mjs'])
 const walk = (root) => {
@@ -72,6 +78,13 @@ test('DisplayStatus is the dashboard presentation vocabulary and both dictionari
   }
 })
 
+test('observer health projection mirrors the canonical observer status contract', () => {
+  assert.ok(observerStatuses.length > 0, 'SyncObserverHealth.status is a closed observer lifecycle vocabulary')
+  const healthStatuses = [...(syncApplication.match(/\bconst healthStatuses\s*=\s*\[([^\]]*)\]/)?.[1] || '').matchAll(/'([^']+)'/g)]
+    .map((match) => match[1])
+  assert.deepEqual(new Set(healthStatuses), new Set(observerStatuses), 'syncObserverProjection healthStatuses members must track SyncObserverHealth.status')
+})
+
 test('dashboard source does not mint a second multi-status literal', () => {
   const self = join(here, 'statusVocabulary.test.mjs')
   const allowed = new Map([
@@ -89,6 +102,8 @@ test('dashboard source does not mint a second multi-status literal', () => {
     // issue is the human's ordinary act ([[issue-binding]]).
     ['issueClose.js', new Set(['CLOSABLE'])],
     ['issueLedger.test.mjs', new Set(['events'])],
+    // Observer health is its own API lifecycle; this projection mirrors SyncObserverHealth.status above, per [[sync-application-client]].
+    ['syncApplication.js', new Set(['healthStatuses'])],
   ])
   const violations = []
   for (const path of walk(here)) {
