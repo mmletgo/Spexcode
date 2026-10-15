@@ -25,3 +25,5 @@ code:
 真实 Git 清理失败和 10 秒截止中断后重入正式恢复：已有精确候选收据才可继续，已移除候选重读确认后结算；调用次数与预算均不增加。源 checkout 的 staged/unstaged 内容、index 以及另一个用户 worktree 逐字节保留。候选后来出现 unstaged/staged/untracked/ignored 内容时恢复拒绝并保留原文件；撤去测试新增内容后原候选可正常清理。并发 canonical publication 持有同 request-key 锁时恢复不得抢先，发布后即使 envelope 缺失仍拒绝 notStarted 清理。
 
 检查后竞争使用真实 Git 命令复现：worktree remove 完成后外部重建同路径内容、分支在删除前前进时均拒绝结算并保留文件或引用；撤去竞争后同键恢复通过，正常 reference-transaction hook 可观察删除。两种拒绝及成功恢复均保留源 checkout/index、其它用户 worktree 与原调用预算。
+
+冻结读取回归另外验证业务requestKey与实际sessionCreateKey分离、真实attempt/policy绑定、派发摘要前自动无损冻结超大prompt、稳定引用同键重入、精确native history proof保存与removed重放核验。此文件使用受控runtime接缝；真正原生大于2MiB读取和能力隔离证据由 [[frozen-context-reader]] 的独立native测试承担，不混称为LLM验收。

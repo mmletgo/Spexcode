@@ -10,8 +10,11 @@ import { codexStructuredTurn } from './codex-harness.js'
 import { freezeContext, frozenContextPrompt, verifyFrozenReadProof, type FrozenReadReceipt } from './frozen-context.js'
 import { assertFrozenReaderRuntime, prepareFrozenReaderRuntime, structuredGeneration, structuredExecutionPolicy } from './session-structured-policy.js'
 
+const nativeEvidence = process.env.SPEX_FROZEN_NATIVE_TEST === '1'
+  ? realpathSync(process.env.SPEX_FROZEN_EVIDENCE_DIR ?? mkdtempSync(join(tmpdir(), 'spex-frozen-native-'))) : undefined
+
 test('actual native Codex reads every byte above 2MiB only through frozen dynamic tools and recovers completed exact history', { skip: process.env.SPEX_FROZEN_NATIVE_TEST !== '1', timeout: 300_000 }, async () => {
-  const evidence = realpathSync(process.env.SPEX_FROZEN_EVIDENCE_DIR ?? mkdtempSync(join(tmpdir(), 'spex-frozen-native-')))
+  const evidence = nativeEvidence!
   const source = join(evidence, 'source'); mkdirSync(source, { recursive: true, mode: 0o700 })
   execFileSync('git', ['init', '-q', source])
   const markers = { first: `FIRST_${randomUUID()}`, middle: `MIDDLE_${randomUUID()}`, last: `LAST_${randomUUID()}` }
@@ -60,7 +63,7 @@ test('actual native Codex reads every byte above 2MiB only through frozen dynami
 })
 
 test('frozen native capability identity rejects changed CLI, catalog digest and catalog bytes', { skip: process.env.SPEX_FROZEN_NATIVE_TEST !== '1' }, async () => {
-  const evidence = realpathSync(process.env.SPEX_FROZEN_EVIDENCE_DIR!)
+  const evidence = nativeEvidence!
   const runtime = await prepareFrozenReaderRuntime(join(evidence, 'reader-policy'))
   assert.throws(() => assertFrozenReaderRuntime({ ...runtime, cliVersion: 'unverified-cli' }), /identity differs/)
   assert.throws(() => assertFrozenReaderRuntime({ ...runtime, catalogDigest: '0'.repeat(64) }), /identity differs/)

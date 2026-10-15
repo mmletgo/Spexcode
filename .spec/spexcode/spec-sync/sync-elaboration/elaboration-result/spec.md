@@ -33,3 +33,5 @@ decisionAuthorities携可信程序派生裁决范围；update_acceptance及具�
 
 
 retiredIds同时承载逐项合法业务退役与经当前精确裁决确证结清的旧诊断GAP身份。GAP删除仅在本轮P1结构与独审通过后输出；独审拒绝、旧/foreign裁决、共享选外或未解决诊断不记入此集合。协调验证与baseline复用该既有字段累计，后续候选禁止复用。诊断结清不改变用户原意或增加业务退役计划。
+
+结构化runner请求可携 [[frozen-context-reader]] 的不可变frozenContext引用；结果可携精确thread/turn的frozenReadProof，包含真实原生history摘要与完整required内容覆盖。它仅是输入读取证据，不替代业务结果、独立审查、运行验证或落盘证明；inputDigest保持业务输入语义。
