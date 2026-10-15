@@ -54,6 +54,14 @@ ledger path and reuse the parsed object while its `mtimeNs` and byte size are un
 after an atomic replacement. No ledger content or cache survives the process, so generation routing remains
 derived from the current runtime files.
 
+Structured execution records select their own Codex control root from the persisted fixed policy: v1 uses
+`structured-read-only-v1/control`, while v2 uses
+`structured-frozen-read-only-v2/<readerRuntime.catalogDigest>/control`. Ordinary Codex records continue to use
+the project root. Descriptor selection, turn control, retirement, close, and compensation derive that same root
+from the record and still require its exact session/thread generation binding; an empty structured ledger never
+falls through to the project's legacy endpoint. The close contract is [[archive]], and structured execution owns
+the policy identity in [[structured-session-runtime]].
+
 **Started once, under a portable lock.** Check-and-start is serialized by an atomic `mkdir` mutex with a bounded
 wait, not `flock` — absent on macOS, where it failed the whole bootstrap and left the pane at a shell. The lock
 is held only across check-and-start, and a stale dir left by a dead launcher clears after a bounded wait so it

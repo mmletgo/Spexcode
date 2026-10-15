@@ -33,7 +33,7 @@ export type { ListenerProbe } from './harness-shim.js'
 // (materialize writes every harness's artifacts).
 
 export type { HarnessId } from '@spexcode/spec-core'
-export type HarnessLivenessRecord = { session: string; harnessSessionId?: string | null; stopped?: boolean; archived?: boolean }
+export type HarnessLivenessRecord = { session: string; harnessSessionId?: string | null; structuredExecution?: unknown; stopped?: boolean; archived?: boolean }
 export type HarnessLaunchReadyRecord = HarnessLivenessRecord & { governed?: boolean; runtimeDir: string }
 export type HarnessLaunchReadinessFence = {
   readonly proof: Readonly<Record<string, unknown>>
@@ -135,7 +135,7 @@ export async function adapterLoadedReferenceState(
     if (!rec.harnessSessionId) continue
     const harness = harnessById(rec.harness || defaultHarness.id)
     const exactKey = harness.targetDescriptorKey?.(rec) ?? null
-    const keys = (harness.sharedRuntimes?.(runtimeDir) ?? []).filter((descriptor) => !exactKey || descriptor.key === exactKey).map((descriptor) => {
+    const keys = (harness.sharedRuntimes?.(runtimeDir, rec) ?? []).filter((descriptor) => !exactKey || descriptor.key === exactKey).map((descriptor) => {
       descriptors.set(descriptor.key, descriptor)
       return descriptor.key
     })
@@ -373,7 +373,7 @@ export interface Harness {
   quarantineOrphanThread?(threadId: string, opts: { excludingSessionId: string }): Promise<HarnessOrphanThreadQuarantine>
   // Project-scoped runtimes are adapter facts. Resource governance consumes these descriptors to report
   // references and protect a sibling-owned control plane without learning harness command names.
-  sharedRuntimes?(runtimeDir: string): readonly SharedRuntimeDescriptor[]
+  sharedRuntimes?(runtimeDir: string, rec?: HarnessLivenessRecord): readonly SharedRuntimeDescriptor[]
   // Select the exact shared descriptor a record owns when an adapter has more than one resident generation.
   // Null is an unproven binding and must fail closed before lifecycle mutation.
   targetDescriptorKey?(rec: HarnessLivenessRecord & { harnessSessionId?: string | null }): string | null

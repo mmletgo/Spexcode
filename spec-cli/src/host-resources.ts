@@ -286,6 +286,11 @@ const publicRecordInventory = (): PublicRecordInventory => {
 // Resource ownership must use the same lifecycle projection as the board. The raw reader remains for
 // ungoverned/runtime identity discovery, but governed rows come from the canonical inventory above.
 const rawRecords = (): RawRecord[] => publicRecordInventory().records
+const harnessRuntimeRecord = (rec: RawRecord): HarnessLivenessRecord => ({
+  session: rec.session_id,
+  harnessSessionId: rec.harness_session_id,
+  ...(rec.structured_execution !== undefined ? { structuredExecution: rec.structured_execution } : {}),
+})
 const runtimePid = (file: string): number | null => {
   try { const pid = Number(readFileSync(file, 'utf8').trim()); return Number.isFinite(pid) && pid > 0 ? pid : null }
   catch { return null }
@@ -349,8 +354,9 @@ const sharedDescriptors = (recs: RawRecord[], retainRegistry = false): Map<strin
     if (!rec.governed) continue
     const harness = harnessByIdOrNull(rec.harness || defaultHarness.id)
     if (!harness) continue   // joined to no descriptor; surfaced as a finding on that record's own session owner
-    const exactKey = harness.targetDescriptorKey?.({ session: rec.session_id, harnessSessionId: rec.harness_session_id }) ?? null
-    for (const descriptor of harness.sharedRuntimes?.(runtimeRoot()) ?? []) {
+    const target = harnessRuntimeRecord(rec)
+    const exactKey = harness.targetDescriptorKey?.(target) ?? null
+    for (const descriptor of harness.sharedRuntimes?.(runtimeRoot(), target) ?? []) {
       if (exactKey && descriptor.key !== exactKey) continue
       const entry = out.get(descriptor.key) ?? { descriptor, recs: [] }
       entry.recs.push(rec)
@@ -545,11 +551,12 @@ const sessionStopBlocker = async (
   const targetThread = targetRecord?.harness_session_id
   const ownerBlocker = sessionOwnerBlocker(id, harnessId, recs)
   if (ownerBlocker) return ownerBlocker
-  const exactKey = targetHarness?.targetDescriptorKey?.({ session: id, harnessSessionId: targetRecord?.harness_session_id }) ?? null
-  const targetDescriptors = targetHarness?.sharedRuntimes?.(runtimeRoot()) ?? []
-  if (targetHarness && targetDescriptors.length === 0) return null
-  if (targetRecord?.harness_session_id && targetHarness?.targetDescriptorKey && targetDescriptors.length && !exactKey)
+  const target = targetRecord ? harnessRuntimeRecord(targetRecord) : null
+  const exactKey = targetHarness?.targetDescriptorKey?.(target ?? { session: id, harnessSessionId: null }) ?? null
+  const targetDescriptors = targetHarness?.sharedRuntimes?.(runtimeRoot(), target ?? undefined) ?? []
+  if (targetRecord?.harness_session_id && targetHarness?.targetDescriptorKey && !exactKey)
     return `${targetHarness.id} target has no exact shared-runtime generation binding`
+  if (targetHarness && targetDescriptors.length === 0) return null
   const allowed = targetHarness
     ? new Set(exactKey ? [exactKey] : targetDescriptors.map((descriptor) => descriptor.key))
     : null

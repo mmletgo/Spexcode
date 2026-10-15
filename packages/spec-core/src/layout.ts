@@ -314,6 +314,7 @@ export type RawRecord = {
   title: string | null; name: string | null; parent?: string | null
   status: string; proposal: string | null; merges: number; note: string | null
   sortkey: number | null; createdAt: number; harness?: string; harness_session_id?: string
+  structured_execution?: unknown
   runtime_start_token?: string
   stopped?: boolean
   archived?: boolean  // the human ARCHIVED this session ([[archive]]) — only a proven cold/offline row; absent → false on old records

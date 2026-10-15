@@ -10,7 +10,7 @@ import { runtimeRoot, mainCheckout, harnessIdentity } from '@spexcode/spec-core'
 import { detachedRuntimeGenerationToken, migrateLegacyDetachedRuntimeReceipt, processStartToken, verifyDetachedRuntime, type VerifiedDetachedRuntime } from '@spexcode/spec-core'
 import { codexGenerationEndpoints, codexGenerationSocketPath, currentCodexGeneration, legacyCodexGenerationEndpoint, readCodexGenerationLedger, prepareCodexGenerationClose, resolveCodexGenerationForClose, resolveCodexGenerationForResume, resolveCodexGenerationForSession, rebindCodexGeneration, type CodexGenerationEndpoint } from './codex-runtime-generations.js'
 import { spawnDetachedRuntime } from './runtime-ownership.js'
-import { assertFrozenReaderRuntime, frozenReaderDisabledFeatures, StructuredSessionError, StructuredSessionTransportError, type StructuredExecution } from './session-structured-policy.js'
+import { assertFrozenReaderRuntime, frozenReaderDisabledFeatures, StructuredSessionError, StructuredSessionTransportError, structuredRealmRoot, type StructuredExecution } from './session-structured-policy.js'
 import { FROZEN_READ_TOOL, frozenReadTool, persistFrozenRead, proveFrozenReads, type FrozenNativeItem, type FrozenReadProof, type FrozenReadReceipt } from './frozen-context.js'
 import { codexRolloutPath, codexTranscript } from '@spexcode/transcript'
 import { shQuote } from './sh.js'
@@ -86,10 +86,22 @@ function codexMutationGeneration(dir = runtimeRoot(), endpoint = legacyCodexGene
 
 const codexDescriptorKey = (endpoint: CodexGenerationEndpoint) => endpoint.id === 'legacy' ? 'codex-app-server' : `codex-app-server:${endpoint.id}`
 
+function codexRuntimeDirForRecord(rec: HarnessLivenessRecord, dir = runtimeRoot()): string | null {
+  if (rec.structuredExecution === undefined) return dir
+  const execution = rec.structuredExecution as Partial<StructuredExecution> | null
+  if (!rec.harnessSessionId || !execution || execution.threadId !== rec.harnessSessionId) return null
+  const realm = structuredRealmRoot(execution, dir)
+  return realm ? join(realm, 'control') : null
+}
+
 function codexEndpointForRecord(rec: HarnessLivenessRecord & { harnessSessionId?: string | null }, dir = runtimeRoot(), includeGone = false): CodexGenerationEndpoint | null {
   if (!rec.harnessSessionId) return null
+  const runtimeDir = codexRuntimeDirForRecord(rec, dir)
+  if (!runtimeDir) return null
+  dir = runtimeDir
   const ledger = readCodexGenerationLedger(dir)
-  if (ledger.revision === 0 && !ledger.current && !Object.keys(ledger.generations).length) return legacyCodexGenerationEndpoint(dir)
+  if (rec.structuredExecution === undefined && ledger.revision === 0 && !ledger.current && !Object.keys(ledger.generations).length)
+    return legacyCodexGenerationEndpoint(dir)
   if (includeGone) return resolveCodexGenerationForClose(dir, rec.session, rec.harnessSessionId)?.endpoint ?? null
   return resolveCodexGenerationForSession(dir, rec.session, rec.harnessSessionId)
 }
@@ -1524,7 +1536,7 @@ async function codexPlanCollections(plan: CodexColdPlan): Promise<{ ok: true; ac
   return { ok: true, active, archived }
 }
 
-async function codexRestoreColdPlan(plan: CodexColdPlan, dir = runtimeRoot()): Promise<{ ok: true } | { ok: false; reason: string }> {
+async function codexRestoreColdPlan(plan: CodexColdPlan, dir: string): Promise<{ ok: true } | { ok: false; reason: string }> {
   if (codexRuntimeGeneration(dir, plan.endpoint) !== plan.generation)
     return { ok: false, reason: 'shared Codex app-server generation changed, so no compensation was attempted' }
   const sock = plan.endpoint.socketPath
@@ -2236,7 +2248,12 @@ function codexRuntimeDescriptor(endpoint: CodexGenerationEndpoint, runtimeDir: s
   }
 }
 
-function codexRuntimeDescriptors(runtimeDir: string): SharedRuntimeDescriptor[] {
+function codexRuntimeDescriptors(runtimeDir: string, rec?: HarnessLivenessRecord): SharedRuntimeDescriptor[] {
+  if (rec) {
+    const routed = codexRuntimeDirForRecord(rec, runtimeDir)
+    if (!routed) return []
+    runtimeDir = routed
+  }
   const endpoints = codexGenerationEndpoints(runtimeDir)
   return (endpoints.length ? endpoints : [legacyCodexGenerationEndpoint(runtimeDir)])
     .map((endpoint) => codexRuntimeDescriptor(endpoint, runtimeDir))
@@ -2326,8 +2343,10 @@ export const codexHarness: Harness = {
   rebindNativeIdentity: (rec, change) => {
     if (rec.harnessSessionId !== change.previousThreadId)
       throw new Error(`refusing Codex thread successor ${change.nextThreadId}: the predecessor binding changed`)
-    const root = runtimeRoot()
-    const endpoint = codexEndpointForRecord(rec, root, true)
+    const projectRoot = runtimeRoot()
+    const root = codexRuntimeDirForRecord(rec, projectRoot)
+    if (!root) throw new Error(`refusing Codex thread successor ${change.nextThreadId}: structured realm binding is invalid`)
+    const endpoint = codexEndpointForRecord(rec, projectRoot, true)
     if (!endpoint || codexDescriptorKey(endpoint) !== change.runtimeKey)
       throw new Error(`refusing Codex thread successor ${change.nextThreadId}: generation binding is not exact`)
     rebindCodexGeneration(root, rec.session, change.previousThreadId, change.nextThreadId)
@@ -2343,8 +2362,10 @@ export const codexHarness: Harness = {
   coldRetirementPreflight: async (rec) => {
     if (!rec.harnessSessionId) return { ok: false, reason: 'no exact Codex thread identity is registered' }
     const threadId = rec.harnessSessionId
-    const dir = runtimeRoot()
-    const endpoint = codexEndpointForRecord(rec, dir)
+    const projectRoot = runtimeRoot()
+    const dir = codexRuntimeDirForRecord(rec, projectRoot)
+    if (!dir) return { ok: false, reason: 'no exact Codex structured realm binding is registered for this target' }
+    const endpoint = codexEndpointForRecord(rec, projectRoot)
     if (!endpoint) return { ok: false, reason: 'no exact Codex generation binding is registered for this target' }
     const scope = codexRecordScope(rec)
     if (!scope) return { ok: false, reason: CODEX_NO_SCOPE }
@@ -2359,12 +2380,14 @@ export const codexHarness: Harness = {
   },
   coldPreflight: async (rec) => {
     if (!rec.harnessSessionId) return { ok: false, reason: 'no exact Codex thread identity is registered' }
-    const dir = runtimeRoot()
+    const projectRoot = runtimeRoot()
+    const dir = codexRuntimeDirForRecord(rec, projectRoot)
+    if (!dir) return { ok: false, reason: 'no exact Codex structured realm binding is registered for this target' }
     const binding = resolveCodexGenerationForClose(dir, rec.session, rec.harnessSessionId)
     if (binding?.gone) {
       return { ok: true, alreadyCold: true }
     }
-    const endpoint = binding?.endpoint ?? codexEndpointForRecord(rec, dir)
+    const endpoint = binding?.endpoint ?? codexEndpointForRecord(rec, projectRoot)
     if (!endpoint) return { ok: false, reason: 'no exact Codex generation binding is registered for this target' }
     const scope = codexRecordScope(rec)
     return scope ? codexColdPreflight(rec.harnessSessionId, scope, dir, undefined, endpoint) : { ok: false, reason: CODEX_NO_SCOPE }
@@ -2372,13 +2395,15 @@ export const codexHarness: Harness = {
   coldRuntime: async (rec, suppliedReceipt) => {
     if (!rec.harnessSessionId) return { ok: false, reason: 'no exact Codex thread identity is registered' }
     const threadId = rec.harnessSessionId
-    const dir = runtimeRoot()
+    const projectRoot = runtimeRoot()
+    const dir = codexRuntimeDirForRecord(rec, projectRoot)
+    if (!dir) return { ok: false, reason: 'no exact Codex structured realm binding is registered for this target' }
     const binding = resolveCodexGenerationForClose(dir, rec.session, threadId)
     if (binding?.gone) {
       prepareCodexGenerationClose(dir, rec.session, threadId)
       return { ok: true }
     }
-    const endpoint = binding?.endpoint ?? codexEndpointForRecord(rec, dir)
+    const endpoint = binding?.endpoint ?? codexEndpointForRecord(rec, projectRoot)
     if (!endpoint) return { ok: false, reason: 'no exact Codex generation binding is registered for this target' }
     const sock = endpoint.socketPath
     if (suppliedReceipt !== undefined && (!isCodexColdPlan(suppliedReceipt) || suppliedReceipt.threadId !== threadId))
@@ -2462,13 +2487,20 @@ export const codexHarness: Harness = {
   quarantineOrphanThread: codexQuarantineOrphanThread,
   restoreRuntime: async (rec, suppliedReceipt) => {
     if (!rec.harnessSessionId) return { ok: false, reason: 'no exact Codex thread identity is registered' }
+    const projectRoot = runtimeRoot()
+    const dir = codexRuntimeDirForRecord(rec, projectRoot)
+    if (!dir) return { ok: false, reason: 'no exact Codex structured realm binding is registered for this target' }
     if (suppliedReceipt !== undefined) {
       if (!isCodexColdPlan(suppliedReceipt) || suppliedReceipt.threadId !== rec.harnessSessionId)
         return { ok: false, reason: 'Codex cold compensation receipt is invalid or names a different target' }
       if (suppliedReceipt.unmaterialized) return { ok: true }
-      return codexRestoreColdPlan(suppliedReceipt)
+      const endpoint = codexEndpointForRecord(rec, projectRoot, true)
+      if (!endpoint || endpoint.id !== suppliedReceipt.endpoint.id || endpoint.pidFile !== suppliedReceipt.endpoint.pidFile
+        || endpoint.receiptFile !== suppliedReceipt.endpoint.receiptFile || endpoint.socketPath !== suppliedReceipt.endpoint.socketPath)
+        return { ok: false, reason: 'Codex cold compensation receipt no longer matches the exact session generation binding' }
+      return codexRestoreColdPlan(suppliedReceipt, dir)
     }
-    const endpoint = codexEndpointForRecord(rec)
+    const endpoint = codexEndpointForRecord(rec, projectRoot)
     if (!endpoint) return { ok: false, reason: 'no exact Codex generation binding is registered for this target' }
     const sock = endpoint.socketPath
     const scope = codexRecordScope(rec)
