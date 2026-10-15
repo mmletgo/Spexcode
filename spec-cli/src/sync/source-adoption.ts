@@ -71,15 +71,18 @@ export function prepareSourceAdoption(store: SyncStore, operation: SyncOperation
   const deliveredScope = journals.reduce<SyncScope>((scope, journal) => ({ paths: [...scope.paths, ...journal.plan.coveredScope.paths], contractIds: [...scope.contractIds, ...journal.plan.coveredScope.contractIds], flowIds: [...scope.flowIds, ...journal.plan.coveredScope.flowIds] }), { paths: [], contractIds: [], flowIds: [] })
   if (!covers(deliveredScope, operation.scope)) fail('sync_adoption_incomplete', '实际已结算交付未覆盖完整操作范围')
   const commit = latest.receipt.actualCommit!, alreadyAdopted = readSyncLandingStatus(operation, snapshot, journals, options).sourceSynced
-  if (!alreadyAdopted && !ancestor(snapshot.source.commonDir, snapshot.headCommit, commit)) fail('sync_adoption_not_fast_forward', '原输入工作树与交付已分叉或有后续相关提交，无法快进采纳')
+  const adoption = { source: snapshot.source, headCommit: snapshot.headCommit, actualCommit: commit, actualTree: latest.receipt.actualTree, alreadyAdopted }
+  if (alreadyAdopted) return { ...adoption, binding: latest.intent.binding }
+  if (!ancestor(snapshot.source.commonDir, snapshot.headCommit, commit)) fail('sync_adoption_not_fast_forward', '原输入工作树与交付已分叉或有后续相关提交，无法快进采纳')
   const footprint = latest.intent.binding.footprintPolicy.privateDirectory
   if (footprint.path !== join(dirname(operation.deliveryPlan.canonicalRoot), 'footprint')) fail('sync_adoption_hooks_unavailable', '交付缺少原可信 footprint 目录')
   const inspected = prepareTrustedHooksBinding(snapshot.source.canonicalRoot, { ...options.tools, privateFootprintDir: footprint.path, operation: 'publish', expectedTree: latest.receipt.actualTree, expectedParent: snapshot.headCommit, expectedRef: snapshot.source.branch })
   if (inspected.status !== 'supported') fail('sync_adoption_hooks_unavailable', '原工作树的 canonical hooks、可信工具或执行配置无法证明，请检查现有 hooks 和固定 runtime')
   if (!same(inspected.binding.footprintPolicy.privateDirectory, footprint)) fail('sync_adoption_hooks_unavailable', '交付 footprint 物理身份已改变')
   const toolKeys = ['nodePath', 'nodeDigest', 'gitPath', 'gitDigest', 'toolEntry', 'toolDigest', 'trustedRuntimeRoot', 'runtimeDigest', 'canonicalHooksDir', 'hooksDir', 'hookDigests'] as const
-  if (toolKeys.some(key => !same(inspected.binding[key], latest.intent.binding[key])) || inspected.binding.footprintPolicy.configurationDigest !== latest.intent.binding.footprintPolicy.configurationDigest) fail('sync_adoption_hooks_changed', '交付时固定的工具、hooks 或执行配置已经变化')
-  return { source: snapshot.source, headCommit: snapshot.headCommit, actualCommit: commit, actualTree: latest.receipt.actualTree, alreadyAdopted, binding: inspected.binding }
+  const footprintKeys = ['version', 'files', 'configurationDigest'] as const
+  if (toolKeys.some(key => !same(inspected.binding[key], latest.intent.binding[key])) || footprintKeys.some(key => !same(inspected.binding.footprintPolicy[key], latest.intent.binding.footprintPolicy[key]))) fail('sync_adoption_hooks_changed', '交付时固定的工具、hooks 或执行配置已经变化')
+  return { ...adoption, binding: inspected.binding }
 }
 
 /** 持有来源锁并重检后执行普通 fast-forward；不启用私有发布模式或绕过 Git hooks。 */

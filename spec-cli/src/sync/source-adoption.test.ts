@@ -81,6 +81,7 @@ test('AC-ADOPT-01 服务采纳真实settled提交，正常hooks执行，主分�
   assert.equal(adopted.sourceSynced, true); assert.equal(adopted.canonicalSynced, true); assert.equal(adopted.operation.phase, 'canonical_synced')
   assert.equal(f.application.store.readOperation(f.operation.id).phase, 'workspace_synced')
   assert.equal(readFileSync(join(f.temp, 'hook-trace'), 'utf8'), 'normal:clear:clear\n')
+  writeFileSync(join(f.root, '.git/hooks/extra.sample'), 'non-executable hook sample after adoption\n')
   assert.equal((await f.application.adopt(f.operation.id)).canonicalSynced, true)
   assert.equal(readFileSync(join(f.temp, 'hook-trace'), 'utf8'), 'normal:clear:clear\n')
   assert.equal(f.git('rev-list', '--count', 'HEAD'), '2')
@@ -178,4 +179,10 @@ test('AC-ADOPT-08 最终Git边界拒绝preflight后的切支与HEAD改变，不�
   assert.throws(() => fastForwardSource(plan), error => (error as { code: string }).code === 'sync_source_changed')
   assert.equal(f.git('rev-parse', 'HEAD'), head)
   assert.equal(f.git('rev-parse', 'another-branch'), f.input.headCommit)
+})
+
+test('AC-ADOPT-09 交付后的hooks目录footprint变化拒绝采纳并保留原树', { timeout: 90000 }, async t => {
+  const f = await fixture(t)
+  writeFileSync(join(f.root, '.git/hooks/extra.sample'), 'non-executable hook sample\n')
+  await rejectedUnchanged(f, 'sync_adoption_hooks_changed')
 })
