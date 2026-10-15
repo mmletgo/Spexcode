@@ -58,3 +58,5 @@ elsewhere is never walled behind a merge someone else is resolving; CI still enf
 existing bounded block/escape paths stay clean because `$SPEX` failures now carry a real reason. This is
 deliberately a stop-the-bleeding guard, not a cure: state declarations still cannot land while the merge is
 unresolved — they fail fast, legibly, and retryably.
+
+正常源码重建同样保持命令输出通道：npm构建的两路日志写入stderr，compiled CLI继续继承原stdout/stderr，首次JSON命令不会混入构建横幅。此通道划分不改变mid-merge退出75、构建失败清锁与退出码或信号转发。
