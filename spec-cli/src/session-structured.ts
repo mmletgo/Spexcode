@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path'
 import { mainRoot, runtimeRoot, sessionArtifactPath } from '@spexcode/spec-core'
 import { readRecord, withRecordLock, writeRecord } from './session-record.js'
 import { codexStructuredTurn, codexStopStructuredTurn } from './codex-harness.js'
-import { commitCodexGenerationRegistration, prepareCodexGenerationRegistration, readCodexGenerationLedger } from './codex-runtime-generations.js'
+import { commitCodexGenerationRegistration, prepareCodexGenerationRegistration, readCodexGenerationLedger, resolveCodexGenerationForClose } from './codex-runtime-generations.js'
 import { structuredGeneration, prepareStructuredRealm, prepareFrozenReaderRuntime, assertFrozenReaderRuntime, StructuredSessionError, StructuredSessionTransportError, structuredObserverState, structuredExecutionPolicy, type StructuredExecution, type FrozenReaderRuntime } from './session-structured-policy.js'
 import { assertFrozenBinding, prepareFrozenPrompt, readFrozenManifest, verifyFrozenReadProof, type FrozenContextRef, type FrozenReadProof } from './frozen-context.js'
 import { configuredSessionApplication } from './session-application.js'
@@ -257,11 +257,11 @@ export async function cancelStructuredSession(id: string, options: { reason?: 'c
     if ((!state.threadId || state.turnStartRequested === false) && !state.turnId) stop = { nativeStopped: true, acknowledged: false, nativeStatus: 'notStarted' }
     else {
       const runtimeDir = join(realmRoot(state.readerRuntime), 'control')
-      const ledger = readCodexGenerationLedger(runtimeDir), binding = ledger.bindings[id]
-      const generation = binding && ledger.generations[binding.generationId]
-      if (!state.threadId || current.harnessSessionId !== state.threadId || binding?.threadId !== state.threadId || !generation || generation.state === 'reclaimed')
+      const binding = state.threadId && current.harnessSessionId === state.threadId ? resolveCodexGenerationForClose(runtimeDir, id, state.threadId) : null
+      if (!binding)
         stop = { nativeStopped: false, acknowledged: false, error: 'exact structured generation/thread binding is unavailable; native stop is unproven' }
-      else stop = await codexStopStructuredTurn(runtimeDir, generation.endpoint, state.threadId, state.turnId,
+      else if (binding.gone) stop = { nativeStopped: true, acknowledged: false, nativeStatus: 'generationGone' }
+      else stop = await codexStopStructuredTurn(runtimeDir, binding.endpoint, state.threadId!, state.turnId,
         readFileSync(sessionArtifactPath(id, 'launch'), 'utf8'), options.timeoutMs ?? 15_000)
     }
     const result = await withRecordLock(id, async (): Promise<StructuredCancellationResult> => {

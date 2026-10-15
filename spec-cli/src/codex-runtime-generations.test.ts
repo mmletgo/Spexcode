@@ -22,7 +22,7 @@ import {
   type CodexGenerationEndpoint,
 } from './codex-runtime-generations.js'
 import { spawnDetachedRuntime } from './runtime-ownership.js'
-import { processStartToken } from '@spexcode/spec-core'
+import { hostProcessAdapter, processStartToken } from '@spexcode/spec-core'
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -59,14 +59,14 @@ async function waitForSocket(path: string): Promise<void> {
   throw new Error(`socket did not become live: ${path}`)
 }
 
-async function startEndpoint(endpoint: CodexGenerationEndpoint): Promise<void> {
+async function startEndpoint(endpoint: CodexGenerationEndpoint, workerPidFile?: string): Promise<void> {
   await spawnDetachedRuntime({
     cwd: dirname(endpoint.pidFile),
     logFile: endpoint.logFile,
     pidFile: endpoint.pidFile,
     receiptFile: endpoint.receiptFile,
     command: process.execPath,
-    args: ['-e', 'require("node:net").createServer().listen(process.argv[1])', endpoint.socketPath],
+    args: ['-e', `${workerPidFile ? 'const worker=require("node:child_process").spawn(process.execPath,["-e","setInterval(()=>{},1000)"],{stdio:"ignore"});require("node:fs").writeFileSync(process.argv[2],String(worker.pid));' : ''}require("node:net").createServer().listen(process.argv[1])`, endpoint.socketPath, ...(workerPidFile ? [workerPidFile] : [])],
     env: process.env,
   })
   await waitForSocket(endpoint.socketPath)
@@ -326,6 +326,69 @@ test('a host restart retires the gone root and re-pins its sessions, while an un
       if (pid > 0 && processStartToken(pid)) {
         try { process.kill(pid, 'SIGTERM') } catch { /* reclaimed or already gone */ }
       }
+    }
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('read-only close proves an exited detached generation before ledger reclaim and refuses ambiguous live roots', { concurrency: false }, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'spex-generation-close-death-'))
+  let endpoint: CodexGenerationEndpoint | undefined
+  try {
+    endpoint = await ensureCodexCurrentGeneration(root, startEndpoint)
+    recordSession(root, 'closing', 'thread-closing')
+    bindCodexGeneration(root, 'closing', 'thread-closing', endpoint.id)
+    const ledger = readFileSync(join(root, 'codex-app-server-generations.json'), 'utf8')
+    const receipt = readFileSync(endpoint.receiptFile, 'utf8')
+    assert.equal(resolveCodexGenerationForClose(root, 'closing', 'thread-closing')?.gone, false)
+    const original = readCodexGenerationLedger(root)
+    writeFileSync(join(root, 'codex-app-server-generations.json'), JSON.stringify({ ...original, generations: { ...original.generations, [endpoint.id]: { ...original.generations[endpoint.id], state: 'reclaimed' } } }))
+    assert.equal(resolveCodexGenerationForClose(root, 'closing', 'thread-closing')?.gone, false, 'a reclaimed marker cannot bypass a live detached process')
+    writeFileSync(join(root, 'codex-app-server-generations.json'), ledger)
+    rmSync(endpoint.socketPath, { force: true })
+    assert.equal(resolveCodexGenerationForClose(root, 'closing', 'thread-closing')?.gone, false, 'live PID with missing socket is not death')
+    assert.equal(resolveCodexGenerationForClose(root, 'closing', 'wrong-thread'), null)
+    assert.equal(resolveCodexGenerationForClose(root, 'wrong-session', 'thread-closing'), null)
+    const pid = Number(requirePid(endpoint.pidFile))
+    process.kill(-pid, 'SIGTERM')
+    for (let attempt = 0; attempt < 100 && processStartToken(pid); attempt++) await sleep(20)
+    assert.equal(resolveCodexGenerationForClose(root, 'closing', 'thread-closing')?.gone, true, 'the dedicated detached process exited without ledger reclamation')
+    assert.equal(readCodexGenerationLedger(root).generations[endpoint.id].state, 'current')
+    assert.equal(readFileSync(join(root, 'codex-app-server-generations.json'), 'utf8'), ledger, 'close proof is read-only')
+    const wrong = JSON.parse(receipt) as Record<string, unknown>; wrong.processGroupId = pid + 1
+    writeFileSync(endpoint.receiptFile, JSON.stringify(wrong))
+    assert.equal(resolveCodexGenerationForClose(root, 'closing', 'thread-closing')?.gone, false, 'wrong receipt cannot prove group death')
+    writeFileSync(endpoint.receiptFile, receipt)
+  } finally {
+    if (endpoint) {
+      const pid = Number(requirePid(endpoint.pidFile, '0'))
+      if (pid > 0 && processStartToken(pid)) process.kill(-pid, 'SIGTERM')
+    }
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('reclaim retains a draining generation when the detached leader exits but its worker survives', { concurrency: false }, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'spex-generation-residual-worker-'))
+  let endpoint: CodexGenerationEndpoint | undefined
+  try {
+    endpoint = await ensureCodexCurrentGeneration(root, value => startEndpoint(value, join(root, 'worker.pid')))
+    const pid = Number(requirePid(endpoint.pidFile)), worker = Number(requirePid(join(root, 'worker.pid')))
+    await rotateCodexCurrentGeneration(root, startEndpoint)
+    const result = await reclaimDrainingCodexGeneration(root, endpoint.id, async () => ({ healthy: true, referenceIds: [], peerCount: 0 }))
+    assert.equal(result.reclaimed, false, 'leader exit alone cannot publish reclaimed while its real worker remains')
+    assert.equal(readCodexGenerationLedger(root).generations[endpoint.id].state, 'draining')
+    assert.equal(hostProcessAdapter.liveness(worker), 'present')
+    const previous = readCodexGenerationLedger(root)
+    writeFileSync(join(root, 'codex-app-server-generations.json'), JSON.stringify({ ...previous, generations: { ...previous.generations, [endpoint.id]: { ...previous.generations[endpoint.id], state: 'reclaimed' } }, bindings: { ...previous.bindings, closing: { generationId: endpoint.id, threadId: 'thread-closing' } } }))
+    assert.equal(resolveCodexGenerationForClose(root, 'closing', 'thread-closing')?.gone, false, 'a historical reclaimed marker cannot hide residual workers')
+    process.kill(-pid, 'SIGTERM')
+    for (let attempt = 0; attempt < 100 && hostProcessAdapter.liveness(-pid) !== 'absent'; attempt++) await sleep(20)
+    assert.equal(resolveCodexGenerationForClose(root, 'closing', 'thread-closing')?.gone, true, 'whole-group death provides the positive close proof')
+  } finally {
+    for (const value of Object.values(readCodexGenerationLedger(root).generations)) {
+      const pid = Number(requirePid(value.endpoint.pidFile, '0'))
+      if (pid > 0 && hostProcessAdapter.liveness(-pid) === 'present') process.kill(-pid, 'SIGTERM')
     }
     rmSync(root, { recursive: true, force: true })
   }

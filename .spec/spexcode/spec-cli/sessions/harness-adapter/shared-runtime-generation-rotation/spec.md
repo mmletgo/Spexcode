@@ -117,10 +117,9 @@ nothing left for a removal transaction to protect. Bootstrap enters dead legacy 
 and still records its governed bindings, so an inherited root that has since died yields repairable sessions
 instead of blocking every launch.
 
-Close treats that reclaimed state as a positive empty control plane. It does not run a native subtree census or
-require the retired PID/socket proof again; the exact binding is removed and the record's own cold-stop/archive
-path continues. A live generation that is active, ambiguous, or only temporarily unproven still follows the
-existing bounded census and refusal rules.
+Close treats a reclaimed generation as an empty control plane only when the recorded detached identity still supplies positive whole-group death proof. The reclaimed marker alone cannot override a live leader, surviving worker or unknown probe. It does not run a native subtree census; the exact binding and record's own cold-stop/archive path continue only after that proof. A live generation that is active, ambiguous, or only temporarily unproven still follows the existing bounded census and refusal rules. Reclaim publication after SIGTERM uses the same whole-group death proof for its bounded wait and final check; a surviving group or unknown probe leaves the generation draining.
+
+Close resolution also recognizes the exact recorded detached generation whose PID/start/receipt and kernel process-group probes positively prove death before the ledger has been marked reclaimed. This resolution is read-only: it preserves the ledger, binding and endpoint, and performs no native RPC or replacement. A missing socket, unreadable PID/start identity, unknown probe, mismatched receipt or surviving process-group member cannot supply that proof. The shared identity boundary [[detached-runtime-identity]] owns these checks.
 
 A live root is never treated this way. A bound root that still answers keeps its session, and a root that is
 merely unaddressable — its process alive, its exact identity or socket no longer provable — is ambiguity, not

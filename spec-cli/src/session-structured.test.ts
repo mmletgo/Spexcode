@@ -274,6 +274,56 @@ test('structured completed receipts replay one session and bind policy/schema/in
   assert.equal(publicAttempt.status, 400)
 })
 
+test('structured cancellation settles an exactly bound dead generation without reclaim or native RPC', { skip: process.platform === 'win32' }, async () => {
+  const { runtimeRoot, sessionArtifactPath } = await import('@spexcode/spec-core')
+  const { fromRaw, writeRecord, readRecord } = await import('./session-record.js')
+  const { configuredSessionApplication } = await import('./session-application.js')
+  const { cancelStructuredSession } = await import('./session-structured.js')
+  const { legacyCodexGenerationEndpoint } = await import('./codex-runtime-generations.js')
+  const { spawnDetachedRuntime } = await import('./runtime-ownership.js')
+  const root = join(runtimeRoot(), 'structured-read-only-v1', 'control'), endpoint = legacyCodexGenerationEndpoint(root)
+  mkdirSync(root, { recursive: true })
+  const identity = spawnDetachedRuntime({ cwd: root, logFile: endpoint.logFile, pidFile: endpoint.pidFile, receiptFile: endpoint.receiptFile, command: process.execPath, args: ['-e', 'setInterval(() => {}, 1000)'] })
+  const id = `structured-generation-gone-${process.pid}`, threadId = 'exact-rejected-first-thread'
+  const ledger = { version: 3, revision: 1, current: endpoint.id, pending: null, generations: { [endpoint.id]: { state: 'current', endpoint } }, bindings: { [id]: { generationId: endpoint.id, threadId } } }
+  const ledgerPath = join(root, 'codex-app-server-generations.json')
+  const writeLedger = () => writeFileSync(ledgerPath, JSON.stringify(ledger))
+  const receipt = readFileSync(endpoint.receiptFile, 'utf8')
+  try {
+    configuredSessionApplication().createSession({ sessionId: id, status: 'error' })
+    const rec = fromRaw({ session_id: id, governed: true, worktree_path: process.cwd(), branch: null, title: null, name: null, status: 'error', proposal: null, merges: 0, note: null, sortkey: null, createdAt: 1, stopped: false, archived: false, harness: 'codex-headless', launch_cmd: 'codex', harness_session_id: threadId })
+    rec.structuredExecution = execution({ state: 'failed', threadId, turnStartRequested: true, error: 'first turn refused' })
+    writeRecord(rec); writeLedger()
+    const launch = sessionArtifactPath(id, 'launch'); mkdirSync(join(launch, '..'), { recursive: true }); writeFileSync(launch, 'pinned prompt')
+    const live = await cancelStructuredSession(id)
+    assert.equal(live.nativeStopped, false, 'live PID with missing socket stays pending')
+    ledger.generations[endpoint.id].state = 'reclaimed'; writeLedger()
+    assert.equal((await cancelStructuredSession(id)).nativeStopped, false, 'a reclaimed marker cannot release a live native generation')
+    ledger.generations[endpoint.id].state = 'current'; writeLedger()
+    ledger.bindings[id].threadId = 'wrong-thread'; writeLedger()
+    assert.equal((await cancelStructuredSession(id)).nativeStopped, false, 'mismatched exact binding stays pending')
+    ledger.bindings[id].threadId = threadId; writeLedger()
+    process.kill(-identity.pid, 'SIGTERM')
+    for (let attempt = 0; attempt < 100 && processStartToken(identity.pid); attempt++) await new Promise(resolve => setTimeout(resolve, 20))
+    const wrong = JSON.parse(receipt) as Record<string, unknown>; wrong.processGroupId = identity.pid + 1
+    writeFileSync(endpoint.receiptFile, JSON.stringify(wrong))
+    assert.equal((await cancelStructuredSession(id)).nativeStopped, false, 'wrong receipt does not release capacity')
+    rmSync(endpoint.receiptFile)
+    assert.equal((await cancelStructuredSession(id)).nativeStopped, false, 'missing receipt leaves native stop unproven')
+    writeFileSync(endpoint.receiptFile, receipt)
+    const before = readFileSync(ledgerPath, 'utf8'), stopped = await cancelStructuredSession(id)
+    assert.equal(stopped.nativeStopped, true)
+    assert.equal(stopped.nativeStatus, 'generationGone')
+    assert.equal(stopped.acknowledged, false, 'no native interrupt acknowledgement was invented')
+    assert.equal(stopped.threadId, threadId); assert.equal(stopped.turnId, undefined)
+    assert.equal(readRecord(id)?.structuredExecution?.state, 'cancelled')
+    assert.equal(readFileSync(ledgerPath, 'utf8'), before, 'settlement neither reclaims nor rebinds the generation')
+  } finally {
+    if (processStartToken(identity.pid) === identity.startToken) process.kill(-identity.pid, 'SIGTERM')
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 
 test('structured observer ownership distinguishes live, released, replaced and unproven identities', () => {
   const startToken = processStartToken(process.pid)!

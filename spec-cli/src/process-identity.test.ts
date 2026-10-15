@@ -7,6 +7,8 @@ import { platform, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   processStartToken,
+  detachedRuntimeIsGone,
+  hostProcessAdapter,
   migrateLegacyDetachedRuntimeReceipt,
   verifyDetachedRuntime,
   writeDetachedRuntimeReceipt,
@@ -20,6 +22,43 @@ const fakeAdapter = (hostPlatform: NodeJS.Platform, state: FakeState, onLinuxSes
   startToken: () => state.start,
   processGroupId: () => state.processGroupId,
   linuxSessionId: () => { onLinuxSessionRead?.(); return state.linuxSessionId },
+  liveness: () => 'present',
+})
+
+test('detached death needs exact receipt and positive PID plus empty process-group proof', () => {
+  const root = mkdtempSync(join(tmpdir(), 'spex-detached-death-')), receipt = join(root, 'receipt.json')
+  const state: FakeState = { start: 'original', processGroupId: 71, linuxSessionId: 71 }
+  const base = fakeAdapter('linux', state)
+  const probe = (start: string | null, pid: 'present' | 'absent' | 'unknown', group: 'present' | 'absent' | 'unknown') => detachedRuntimeIsGone(71, receipt, { ...base, startToken: () => start, liveness: id => id === 71 ? pid : group })
+  try {
+    writeDetachedRuntimeReceipt(71, receipt, base)
+    assert.equal(probe('original', 'present', 'absent'), false, 'same start identity remains live')
+    assert.equal(probe(null, 'unknown', 'absent'), false, 'failed PID lookup is not death')
+    assert.equal(probe('replacement', 'unknown', 'absent'), false, 'unknown kernel probe stays fail-closed')
+    assert.equal(probe(null, 'present', 'absent'), false, 'unreadable live PID identity is ambiguous')
+    assert.equal(probe(null, 'absent', 'present'), false, 'a surviving process-group member retains the generation')
+    assert.equal(probe(null, 'absent', 'unknown'), false, 'unknown group probe is not empty')
+    assert.equal(probe(null, 'absent', 'absent'), true, 'both kernel probes positively absent')
+    assert.equal(probe('replacement', 'present', 'absent'), true, 'reused PID does not retain the dead original group')
+    for (const field of ['pid', 'processGroupId', 'linuxSessionId']) {
+      writeDetachedRuntimeReceipt(71, receipt, base)
+      rewriteReceipt(receipt, value => { value[field] = 72 })
+      assert.equal(probe(null, 'absent', 'absent'), false, `wrong ${field} receipt cannot prove death`)
+    }
+    writeDetachedRuntimeReceipt(71, receipt, base)
+    assert.equal(detachedRuntimeIsGone(71, receipt, { ...base, platform: 'win32', startToken: () => null, liveness: () => 'absent' }), false)
+    if (platform() !== 'win32') {
+      const kill = process.kill
+      try {
+        process.kill = (() => { throw Object.assign(new Error('denied'), { code: 'EPERM' }) }) as typeof process.kill
+        assert.equal(hostProcessAdapter.liveness(71), 'unknown')
+        process.kill = (() => { throw Object.assign(new Error('unavailable'), { code: 'EIO' }) }) as typeof process.kill
+        assert.equal(hostProcessAdapter.liveness(-71), 'unknown')
+        process.kill = (() => { throw Object.assign(new Error('gone'), { code: 'ESRCH' }) }) as typeof process.kill
+        assert.equal(hostProcessAdapter.liveness(-71), 'absent')
+      } finally { process.kill = kill }
+    } else assert.equal(hostProcessAdapter.liveness(-71), 'unknown')
+  } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
 const rewriteReceipt = (file: string, change: (receipt: Record<string, unknown>) => void) => {
