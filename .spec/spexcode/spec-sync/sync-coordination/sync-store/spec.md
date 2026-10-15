@@ -80,6 +80,8 @@ P3业务decision请求沿同一接入门禁归一化去transport requestId、fin
 
 裁决语义由实际来源/input、原operation/analysis、所选finding集合及choice/新规则决定；运输requestId、绑定该运输ref的派生policy和已结算历史fact不新建预算。精确ingress仍校完整payload；同choice结算后重放仍返回旧operation，真实来源/配置字节变化和显式retry保持独立身份。旧v8裁决索引在接入前从不可变request核验并重算，不重写业务记录。
 
+P4 裁决的 selection/readSet 是新操作执行时的完整 CAS 绑定，不改变人的同一选择身份；即使后续真实 receipt 推进该资源头，同一原分析/finding/choice 的新运输仍复用原操作、预算和回执，不能再次执行旧选择覆盖后来结果。新 ingress 保其实际选择快照；同 key 变 payload 仍拒绝。自动观察继续按精确 selection 区分新语义，不能套用此裁决归并。
+
 
 recordReviewedConflict仅在当前analyzing fence内登记已由协调器完整核验并持久保存的当前独审业务冲突原因，精确重放幂等；phase、scope、预算、失败与交付事实不变。readDecisionEligibility与decision admission事务复用同一真实资格：保既有needs_input/conflicted/superseded入口，failed/budget_exhausted另需非null业务blockedReason（needs_input或conflicted）；当前attempt须settled/failed/superseded，所有历史资源removed且journal全settled。早期原因不授权在途阶段、applying/recovering或未结算资源；事务重新读取parent实际状态防应用检查后发生竞态。
 

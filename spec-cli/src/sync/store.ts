@@ -304,7 +304,7 @@ export class SyncStore {
     const evidence = JSON.parse(this.blob(input.requestBlob).toString('utf8')) as { type?: string }
     if (evidence.type === 'sync.decision') {
       const decision = readControlledDecision(input.input, input.requestBlob)
-      return digest({ source: input.input.source, inputId: input.input.id, origin: input.origin, decision: controlledDecisionIdentity(decision), ...(input.baselineSelection ? { baselineSelectionDigest: input.baselineSelection.digest } : {}), retryOf: input.retryOf ?? null })
+      return digest({ source: input.input.source, inputId: input.input.id, origin: input.origin, decision: controlledDecisionIdentity(decision), retryOf: input.retryOf ?? null })
     }
     const request = readControlledRequest(input.input, input.requestBlob)
     const { requestId: _requestId, ...origin } = request.origin

@@ -75,3 +75,5 @@ P4新增定向矩阵使用真实SQLite句柄/事务、online backup及真实Git�
 补充fail→pass：外repo/branch同名FLOW污染本source退休kind的迁移反例，旧kind缺证明应始终legacy unknown；同source真实前驱正例仍得到准确flow tombstone。P4后续同ID新intent head保selection中的裁决/退役历史，未覆盖历史ID的head/coverage保持不动。
 
 自动预算回归通过真实 observeAndAdmit 验证不可变 successor 继承 FIFO/全族预算/截止时间，包括失败后的新 byte；显式新输入和 P3 无 selection 获独立预算族，旧未 removed 原生资源仍阻止新 claim，清理后才可使用新预算。
+
+P4 裁决复现已结算选择后，另一真实 SQLite journal/receipt 推进相同资源头，同一选择因 selection 变化错误新建操作的失败。修复后运输 alias 与独立 handle 重开均保原 operation/calls/deadline/receipt，保存新 ingress 的实际 selection，同 key 换 choice 拒绝。测试的 Git tree/四层证据明确模拟，只证明事务归并，不冒称产品 Docker 或原生模型执行。

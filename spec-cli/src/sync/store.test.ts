@@ -1234,6 +1234,52 @@ test('P3同选择新requestId/finding次序复用原预算，真实新选择撤�
 })
 
 
+test('P4同裁决在真实head继续结算后仍复用原操作，selection只约束执行而不新增选择预算', async () => {
+  const f = await fixture()
+  try {
+    const real = await f.controlled()
+    const base = { ...f.admit(real.input.source, real.input.id), input: real.input, deliveryPlan: { canonicalRoot: real.input.source.canonicalRoot, branch: real.input.source.branch, baseCommit: real.input.headCommit } }
+    const parent = f.claim({ ...base, origin: 'code' })
+    f.store.recordFailure(parent.fence, { code: 'business_conflict', message: '已核验业务冲突的存储边界夹具', kind: 'conflict', evidenceRefs: [] })
+    const selected = () => {
+      const value = f.store.readBaselineSelection(real.input.source, [{ kind: 'path' as const, path: 'src/a.ts' }, { kind: 'contract' as const, id: 'RULE-A' }])
+      assert.ok('selection' in value); return value.selection
+    }
+    const make = (requestId: string, choice: 'keep_intent' | 'adopt_behavior' = 'keep_intent') => {
+      const requestBlob = prepareControlledDecision(real.input, { requestId, operationId: parent.operation.id, inputId: real.input.id, analysisRef: { sha256: 'a'.repeat(64) }, findingIds: ['finding-1'], decision: { choice } })
+      f.blobs.set(requestBlob.sha256, readEvidence(real.input.source.commonDir, requestBlob))
+      return { ...base, ingressKey: requestId, rootCauseId: requestId, origin: 'decision' as const, requestBlob, baselineSelection: selected() }
+    }
+    const settle = (ready: ReturnType<typeof f.ready>) => {
+      const journal = f.store.beginApply(ready.fence, ready.plan, ready.target)
+      for (const step of journal.steps) f.store.recordApplyStep(ready.fence, journal.id, { ...step, status: 'completed' })
+      const receipt = f.receipt(journal.id, ready.plan)
+      f.store.recordReceipt(journal.id, receipt); f.store.settleApply(journal.id, receipt.id)
+      return receipt
+    }
+    const admission = make('first-exact-choice'), first = f.ready(admission)
+    const receipt = settle(first), afterOwn = selected()
+    assert.notEqual(afterOwn.digest, admission.baselineSelection.digest)
+    const later = f.ready({ ...base, ingressKey: 'later-real-head', rootCauseId: 'later-real-head', baselineSelection: afterOwn })
+    const laterReceipt = settle(later)
+    const latest = selected()
+    assert.notEqual(latest.digest, afterOwn.digest)
+    assert.ok(latest.bindings.every(binding => ('bytePair' in binding ? binding.bytePair : binding.intentPair)?.receiptId === laterReceipt.id))
+    const before = f.store.readOperation(first.operation.id), operationCount = f.store.listOperations(real.input.source.repositoryId).length
+    const aliasInput = make('repeated-exact-choice'), repeated = f.store.admitAndEnqueue(aliasInput)
+    assert.equal(repeated.id, first.operation.id)
+    assert.equal(repeated.callsUsed, before.callsUsed); assert.equal(repeated.deadlineAtMs, before.deadlineAtMs)
+    assert.equal(f.store.listOperations(real.input.source.repositoryId).length, operationCount)
+    assert.equal(f.store.listJournals(repeated.id)[0].receipt!.id, receipt.id)
+    assert.equal(f.store.findIngressReceipt(aliasInput.ingressKey)!.baselineSelection!.digest, latest.digest)
+    assert.equal(f.store.admitAndEnqueue(aliasInput).id, repeated.id)
+    assert.throws(() => f.store.admitAndEnqueue(make(aliasInput.ingressKey, 'adopt_behavior')), /SYNC_IDEMPOTENCY_CONFLICT/)
+    const reopened = openProtocol(f.path)
+    try { assert.equal(new SyncStore(reopened, f.options).admitAndEnqueue(make('same-choice-after-reopen')).id, repeated.id) }
+    finally { reopened.close() }
+  } finally { f.cleanup() }
+})
+
 test('当前fence记录独审业务conflict不改变执行状态，失败/预算与重启仍保原因', async () => {
   const f = await fixture()
   try {
