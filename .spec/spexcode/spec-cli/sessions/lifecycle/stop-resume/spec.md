@@ -8,6 +8,7 @@ code:
   - spec-cli/src/sessions.ts#resumeSessionUnlocked
 related:
   - spec-cli/src/sessions.ts
+  - spec-cli/src/sessions.test.ts
   - spec-cli/src/cli.ts
   - spec-cli/src/commit-gate.test.ts
   - spec-cli/src/harness.ts

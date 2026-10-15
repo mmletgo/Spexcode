@@ -1206,7 +1206,7 @@ test('a stopped queued record is ineligible for automatic and repeated queue dra
   }
 })
 
-test('resume missing, failed, or invalidated readiness preserves the stopped offline record', serial, async (t) => {
+test('failed resume readiness restores the stopped record after the candidate helper exits', serial, async (t) => {
   for (const outcome of ['missing', 'timeout', 'thrown', 'invalidated'] as const) await t.test(outcome, async () => {
     const liveBefore = liveSessionsCensus()
     const previousHome = process.env.SPEXCODE_HOME
@@ -1227,23 +1227,39 @@ test('resume missing, failed, or invalidated readiness preserves the stopped off
     process.env.PATH = `${bin}:${previousPath}`
     const id = `resume-ready-${outcome}-${process.pid}`
     assertIsolatedResumeStore(home, id)
-    const helper = join(home, 'helper.sh'); writeFileSync(helper, '#!/usr/bin/env bash\nexit 7\n'); chmodSync(helper, 0o755)
+    const helperStartedPath = join(home, 'helper.started')
+    const helperExitPath = join(home, 'helper.exit')
+    const helper = join(home, 'helper.sh')
+    writeFileSync(helper, `#!/usr/bin/env bash
+printf started > ${JSON.stringify(helperStartedPath)}
+while [[ ! -f ${JSON.stringify(helperExitPath)} ]]; do sleep 0.02; done
+exit 7
+`)
+    chmodSync(helper, 0o755)
     writeResumeFixtureRecord(id, project, helper)
     const original = JSON.parse(readFileSync(sessionRecordPath(id), 'utf8'))
     const initialTimeline = readTimeline(id)?.events ?? []
     try {
       codexHeadlessHarness.launchCmd = () => helper
       ;(codexHeadlessHarness as any).sharedRuntimeSpawn = false
-      ;(codexHeadlessHarness as any).launchReady = outcome === 'missing'
-        ? async () => null
-        : async () => ({
+      ;(codexHeadlessHarness as any).launchReady = async () => {
+        await waitUntil(() => existsSync(helperStartedPath), 'failed readiness helper to start')
+        const agentPid = Number(readFileSync(sessionArtifactPath(id, 'agent.pid'), 'utf8').trim())
+        assert.ok(processStartToken(agentPid), 'the helper reached readiness as a live candidate')
+        writeFileSync(helperExitPath, '')
+        await waitForFixtureLaunchExit(launchPidPath)
+        assert.equal(processStartToken(agentPid), null, 'the candidate exited before readiness fails')
+        return outcome === 'missing'
+          ? null
+          : {
             proof: { kind: `test-${outcome}` },
             validate: outcome === 'timeout'
               ? async () => { throw new Error('bounded helper readiness timeout') }
               : outcome === 'thrown'
                 ? async () => { throw new Error('adapter validator threw') }
                 : async () => false,
-          })
+          }
+      }
       const result = await resumeSession(id, { force: true })
       assert.equal(result.ok, false)
       assert.equal(result.refused, true)
@@ -1254,7 +1270,7 @@ test('resume missing, failed, or invalidated readiness preserves the stopped off
           : /did not become ready|readiness changed/)
       const stored = JSON.parse(readFileSync(sessionRecordPath(id), 'utf8'))
       assert.deepEqual(withoutLifecycleFields(stored), withoutLifecycleFields(original),
-        'every failed readiness outcome restores the complete runtime envelope')
+        'an offline candidate restores the complete runtime envelope after any readiness failure')
       const originalState = {
         status: original.status,
         proposal: original.proposal || null,
@@ -1262,7 +1278,7 @@ test('resume missing, failed, or invalidated readiness preserves the stopped off
       }
       const restoredState = canonicalState(id)
       assert.deepEqual({ status: restoredState.status, proposal: restoredState.proposal, note: restoredState.note }, originalState,
-        'every failed readiness outcome restores the canonical lifecycle')
+        'an offline candidate restores the canonical lifecycle after any readiness failure')
       assert.equal(codexHeadlessHarness.liveness({ session: id, stopped: stored.stopped }, false), 'offline')
       assert.deepEqual(readTimeline(id)?.events ?? [], initialTimeline, 'failed readiness emits no lifecycle transition')
     } finally {
@@ -1272,6 +1288,7 @@ test('resume missing, failed, or invalidated readiness preserves the stopped off
       if (previousHome === undefined) delete process.env.SPEXCODE_HOME
       else process.env.SPEXCODE_HOME = previousHome
       process.env.PATH = previousPath
+      writeFileSync(helperExitPath, '')
       await waitForFixtureLaunchExit(launchPidPath)
       rmSync(home, { recursive: true, force: true })
       assert.equal(existsSync(home), false, `${outcome} resume fixture root is removed exactly`)
@@ -2014,7 +2031,7 @@ test('launchPreflight refuses a launch that cannot succeed, naming which fact se
     session: 'preflight-test', governed: true, worktreePath: join(home, 'gone'), branch: null,
     title: null, name: null, parent: null, issues: [], issue: null, status: 'idle', proposal: null, merges: 0, note: null,
     sortKey: null, createdAt: 1, harness: 'claude', harnessSessionId: null, runtimeStartToken: null, stopped: false, archived: false, closedAt: null,
-    launcher: null, launchCmd: '/bin/true', launchOwner: null,
+    launcher: null, launchCmd: process.execPath, launchOwner: null,
   }
   try {
     assert.equal(launchPreflight(base)?.code, 'no-worktree', 'a worktree that is gone settles the launch')
