@@ -571,11 +571,12 @@ export class SyncApplication {
       if (!eligibility.eligible) throw new SyncApplicationError(eligibility.reason!.code === 'SYNC_DECISION_RESOURCE_PENDING' ? 'sync_resources_unsettled' : 'sync_decision_not_needed', eligibility.reason!.message)
       const detail = await this.detail(original, snapshot)
       if (detail.executionAvailability.status !== 'ready') throw new SyncApplicationError('sync_resources_unsettled', '请先恢复原操作的未结算资源')
-      const previousBaselinePair = null
-      const frozen = original.baselineSelection ? { plan: this.operationPlan(original), selection: original.baselineSelection } : await this.freezeNodePlan(snapshot, this.operationPlan(original).intentNodeId)
-      const plan = frozen.plan
-      this.decorateDecisionPlan(plan, snapshot, input, context.analysis, requestBlob, frozen.selection)
-      const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: original.rootCauseId, origin: 'decision', budget: settings.budget, managedRoot: this.managedRoot, requestBlob, previousBaselinePair, baselineSelection: frozen.selection })
+      const previousBaselinePair = original.baselineSelection ? null : this.store.readBaseline(snapshot.source) ?? original.previousBaselinePair
+      const selected = original.baselineSelection ? this.store.readBaselineSelection(snapshot.source, original.baselineSelection.bindings.map(binding => binding.resource)) : null
+      if (selected && 'failure' in selected) throw Object.assign(new SyncApplicationError(selected.failure.code, selected.failure.message), { syncFailure: selected.failure })
+      const selection = selected?.selection, plan = this.operationPlan(original)
+      this.decorateDecisionPlan(plan, snapshot, input, context.analysis, requestBlob, selection ?? previousBaselinePair)
+      const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: original.rootCauseId, origin: 'decision', budget: settings.budget, managedRoot: this.managedRoot, requestBlob, previousBaselinePair, ...(selection ? { baselineSelection: selection, executionScope: original.scope, impactDigest: original.impactDigest } : {}) })
       this.prepareTools(ingressKey, null)
       const operation = this.store.admitAndEnqueue(admission)
       if (operation.ingressKey === ingressKey) this.start(operation.id)

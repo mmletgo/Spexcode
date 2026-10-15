@@ -9,6 +9,8 @@ import { applyComponentMigrations, openProtocol, type SqlParam } from '@spexcode
 import { CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
 import { SYNC_COMPONENT, SYNC_MIGRATIONS, syncCoordinatorAddress } from './migrations.js'
 import { SyncApplication } from './application.js'
+import { prepareSpecBodyEdit } from '../spec-body-edit.js'
+import { prepareSyncAdmission } from './coordinator.js'
 import { buildSyncApplicationPlan } from './planning.js'
 import { captureInputSnapshot } from './snapshot.js'
 import { readSyncSettings, SyncApplicationError } from './settings.js'
@@ -23,7 +25,7 @@ import { claimFileMutex } from './file-mutex.js'
 import type { FileMutex } from './file-mutex.js'
 import { composeAuthoredInput } from './author-input.js'
 import { readCompositionEvidence } from './composition.js'
-import { composeControlledRequest, renderControlledDecisionRaw } from './request-input.js'
+import { composeControlledRequest, prepareControlledRequest, renderControlledDecisionRaw } from './request-input.js'
 import type { ApplyJournal, BaselinePair, VerificationResultBlob } from './operation-types.js'
 
 const settings: SyncSettings = {
@@ -539,7 +541,7 @@ async function exportApplicationFixture(t: test.TestContext, choice?: 'keep_inte
     if (request.purpose === 'code_behavior_analyze') {
       const frozen = JSON.parse(request.prompt.split('冻结三方输入:\n')[1]) as { changedPaths: string[] }
       const paths = [...new Set([...frozen.changedPaths, ...(decisionFact ? plan.decisionAuthorities.flatMap(authority => authority.paths) : [])])]
-      output = { changes: paths.map(changed => ({ kind: decisionFact ? 'allowed_change' : 'conflict', paths: [changed], affectedIds: ['RULE-EXPORT-02', 'AC-EXPORT-02'], ruleIds: ['RULE-EXPORT-02'], originalIntent: 'key与非空字符串filter必需，未授权filter长度上限；幂等政策保持', previousBehavior: '9字符非空filter可提交', sourceBehavior: 'filter长度超过8字符拒绝，8字符可提交；原权限与幂等保持', deliveryBehavior: '非空filter无长度上限', evidence: `冻结src/export.js#ExportService.submit 的filter.length > 8与RULE-EXPORT-02、AC-EXPORT-02逐项对照；${decisionFact?.text ?? '无上限授权'}`, counterexample: 'filter=123456789：原意接受但现源码invalid-request' })), facts: decisionFact ? [decisionFact] : [], acceptanceChanges: decisionFact && choice !== 'keep_intent' ? [{ id: 'AC-EXPORT-02', ruleIds: ['RULE-EXPORT-02'], source: decisionFact.source, reason: `仅按所选裁决增加filter${limit}字符边界，保空输入、权限、幂等与结果义务` }] : [], newNodes: [], resolutions: [] }
+      output = { changes: paths.map(changed => changed === codePath ? ({ kind: decisionFact ? 'allowed_change' : 'conflict', paths: [changed], affectedIds: ['RULE-EXPORT-02', 'AC-EXPORT-02'], ruleIds: ['RULE-EXPORT-02'], originalIntent: 'key与非空字符串filter必需，未授权filter长度上限；幂等政策保持', previousBehavior: '9字符非空filter可提交', sourceBehavior: 'filter长度超过8字符拒绝，8字符可提交；原权限与幂等保持', deliveryBehavior: '非空filter无长度上限', evidence: `冻结src/export.js#ExportService.submit 的filter.length > 8与RULE-EXPORT-02、AC-EXPORT-02逐项对照；${decisionFact?.text ?? '无上限授权'}`, counterexample: 'filter=123456789：原意接受但现源码invalid-request' }) : ({ kind: 'refactor', paths: [changed], affectedIds: [], ruleIds: [], originalIntent: '原业务契约与可信测试不变', previousBehavior: '原完整导出行为', sourceBehavior: '治理文本与上下文无新增业务变化', deliveryBehavior: '原业务义务保持', evidence: `已完整读取${changed}，长度边界冲突仅在${codePath}`, counterexample: '固定oracle验证原权限、幂等与状态转换' })), facts: decisionFact ? [decisionFact] : [], acceptanceChanges: decisionFact && choice !== 'keep_intent' ? [{ id: 'AC-EXPORT-02', ruleIds: ['RULE-EXPORT-02'], source: decisionFact.source, reason: `仅按所选裁决增加filter${limit}字符边界，保空输入、权限、幂等与结果义务` }] : [], newNodes: [], resolutions: [] }
       if (independentNode || !choice) output = { changes: paths.map(changed => ({ kind: 'refactor', paths: [changed], affectedIds: [], ruleIds: [], originalIntent: '固定导出规则与验收保持', previousBehavior: '固定ExportService完整行为', sourceBehavior: '仅添加测试指定注释，不改变业务执行', deliveryBehavior: '原完整业务与已生成注释保持', evidence: `真实冻结${changed}的业务语句保持，新增仅注释`, counterexample: '固定可信oracle仍验证权限、幂等和全部状态转换' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
     } else if (request.purpose === 'code_behavior_review') {
       const frozen = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as { changedPaths: string[] }
@@ -624,6 +626,11 @@ for (const choice of ['keep_intent', 'adopt_behavior', 'new_rule'] as const) tes
     const conflicted = await f.application.wait(submitted.operation.id)
     assert.equal(conflicted.operation.phase, 'conflicted', JSON.stringify(conflicted.attempt?.failure))
     assert.ok(conflicted.decisionContext); assert.equal(conflicted.decisionContext.analysis.reviewPassed, true)
+    assert.ok(conflicted.operation.baselineSelection, 'fresh code入口必须为真实P4 exact操作')
+    assert.ok(conflicted.journals.some(journal => journal.status === 'settled' && journal.receipt), '未冲突部分必须已真实交付，不能只伪造partial heads')
+    const settled = f.application.store.readBaselineSelection(conflicted.operation.input.source, conflicted.operation.baselineSelection.bindings.map(binding => binding.resource))
+    assert.ok('selection' in settled)
+    assert.notEqual(settled.selection.digest, conflicted.operation.baselineSelection.digest)
     const { analysisRef, analysis } = conflicted.decisionContext
     assert.equal(analysis.findings.length, 1)
     const finding = analysis.findings[0]
@@ -631,7 +638,11 @@ for (const choice of ['keep_intent', 'adopt_behavior', 'new_rule'] as const) tes
     assert.deepEqual(f.nativeRequests.slice(0, 2).map(request => request.purpose), ['code_behavior_analyze', 'code_behavior_review'])
     const priorCalls = f.calls()
     const request = { operationId: submitted.operation.id, inputId: submitted.operation.input.id, analysisRef, findingIds: [finding.id], requestId: `decide-${choice}`, decision: choice === 'new_rule' ? { choice, rule: 'filter长度不得超过128字符；非空输入、所有者权限、幂等及其他原需求保持有效。' } : { choice } }
-    const decision = await f.application.decide(request), delivered = await f.application.wait(decision.operation.id)
+    const decision = await f.application.decide(request)
+    assert.equal(decision.operation.input.id, conflicted.operation.input.id)
+    assert.equal(decision.operation.baselineSelection?.digest, settled.selection.digest, '新decision沿同资源已实际结算heads，原analysis/input不变')
+    assert.deepEqual(decision.operation.scope, conflicted.operation.scope)
+    const delivered = await f.application.wait(decision.operation.id)
     assert.equal(delivered.operation.phase, 'workspace_synced', JSON.stringify({ failure: delivered.attempt?.failure, blockedReason: delivered.operation.blockedReason, journals: delivered.journals }))
     assert.equal(delivered.attempt!.verification!.passed, true)
     const proof = JSON.parse(readEvidence(before.source.commonDir, delivered.attempt!.verification!.resultBlob).toString('utf8')) as VerificationResultBlob
@@ -654,6 +665,9 @@ for (const choice of ['keep_intent', 'adopt_behavior', 'new_rule'] as const) tes
     assert.equal(delivered.operation.callsUsed, 6); assert.equal(f.calls(), priorCalls + 6)
     const calls = f.calls(), commits = f.git(['rev-list', '--count', delivered.operation.deliveryPlan.branch])
     assert.equal((await f.application.decide(request)).operation.id, decision.operation.id)
+    const alias = await f.application.decide({ ...request, requestId: `${request.requestId}-transport-after-receipt` })
+    assert.equal(alias.operation.id, decision.operation.id)
+    assert.equal(alias.operation.deadlineAtMs, decision.operation.deadlineAtMs)
     assert.deepEqual((await f.application.wait(decision.operation.id)).journals, delivered.journals)
     assert.equal(f.calls(), calls); assert.equal(f.git(['rev-list', '--count', delivered.operation.deliveryPlan.branch]), commits)
 })
@@ -820,7 +834,13 @@ test('AC-APPLICATION-P3-PARTIAL 剩余裁决保留最新交付raw及原受控正
     const authored = source.replace('返回用户指定的文本。', '返回用户指定的文本。\n\n未选义务：保持隔离。\n\n待修改事实：原文字节。')
     writeFileSync(join(f.root, path), authored)
     await f.application.enable(); f.application.start = () => {}
-    const original = (await f.application.submit({ nodeId: 'demo', requestId: 'partial-original', origin: 'combined', patch: { startLine: 9, endLine: 9, original: '待修改事实：原文字节。', replacement: '待修改事实：必须保留本次作者输入。' } })).operation!
+    const snapshot = await captureInputSnapshot(f.root)
+    const prepared = await prepareSpecBodyEdit(f.root, 'demo', { startLine: 9, endLine: 9, original: '待修改事实：原文字节。', replacement: '待修改事实：必须保留本次作者输入。' })
+    const request = prepareControlledRequest(snapshot, prepared, { kind: 'user_edit', requestId: 'legacy-partial-original', nodeId: 'demo', intent: '保留尚未落地的正文意图' })
+    const admission = await prepareSyncAdmission(snapshot, await buildSyncApplicationPlan(snapshot, 'demo'), { ingressKey: 'legacy-partial-original', rootCauseId: 'legacy-partial-original', origin: 'combined', budget: settings.budget, managedRoot: f.application['managedRoot'], requestBlob: request.requestBlob! })
+    f.application['prepareTools'](admission.ingressKey, null)
+    const original = f.application.store.admitAndEnqueue(admission)
+    assert.equal(original.baselineSelection, undefined, '本case保留明确P3历史入口，不将legacy pair伪装成P4 heads')
     const claim = f.application.store.claimAttempt({ operationId: original.id, source: original.input.source, scope: original.scope, leaseMs: 60000 })
     const composed = composeControlledRequest(original.input, composeAuthoredInput(original.input).composed!, original.requestBlob!).composed!
     f.application.store.bindComposedInput(claim.fence, composed)
