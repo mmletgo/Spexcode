@@ -104,7 +104,7 @@ if (existsSync(sourceRoot)) {
     let buildExitCode = null
     try {
       if (sourceIsStale()) {
-        const build = spawnSync('npm', ['run', 'build'], { cwd: workspace, stdio: 'inherit' })
+        const build = spawnSync('npm', ['run', 'build'], { cwd: workspace, stdio: ['inherit', 2, 2] })
         if (build.error || build.status !== 0 || !existsSync(cli)) {
           console.error('spex: source workspace build failed; fix it, then retry.')
           buildExitCode = build.status ?? 1
