@@ -564,10 +564,19 @@ export class SyncApplication {
       const requestBlob = prepareHistoryRequest(snapshot, { ...input, nodeId, receiptId: receipt.id, featureCommit: receipt.actualCommit }), request = readHistoryRequest(snapshot, requestBlob)
       if (!request.changes.length) return { changed: false, operation: null }
       const frozen = await this.freezeNodePlan(snapshot, nodeId), plan = frozen.plan
+      const historicalFiles = new Set(journals.flatMap(journal => journal.plan.files.map(file => file.path)))
+      const historicalSpecPaths = request.changes.map(change => change.path).filter(path => /^\.spec\/.+\/spec\.md$/.test(path) && historicalFiles.has(path))
+      plan.writePaths = [...new Set([...plan.writePaths, ...historicalSpecPaths])].sort()
       for (const change of request.changes) if (!coveredPath(change.path, plan.writePaths) || settings.mandatoryTests.some(test => test.testPath === change.path)) throw new SyncApplicationError('sync_scope_unauthorized', `补偿文件不在当前可信写入授权内：${change.path}`)
       const beforeFiles = new Map(verifySnapshot(snapshot).filter(entry => entry.path.startsWith('.spec/') && entry.path.endsWith('/spec.md') && entry.mode !== '120000').map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString('utf8')]))
       const afterFiles = new Map(readTree(snapshot.source.commonDir, request.requestTree).filter(entry => entry.path.startsWith('.spec/') && entry.path.endsWith('/spec.md') && entry.mode !== '120000').map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString('utf8')]))
       const before = await readFrozenContracts(this.root, beforeFiles), after = await readFrozenContracts(this.root, afterFiles)
+      plan.targets = plan.targets.map(target => {
+        const requested = after.nodes.find(node => node.id === target.nodeId), previous = before.nodes.find(node => node.id === target.nodeId)
+        if (!request.changes.some(change => change.path === target.path || change.path === requested?.path)) return target
+        const rawSource = requested?.rawSource ?? previous?.rawSource
+        return rawSource ? { ...target, rawSource } : target
+      })
       const paths = [...new Set([...plan.executionScope!.paths, ...request.changes.map(change => change.path)])].sort()
       plan.executionScope = { ...plan.executionScope!, paths }
       plan.readPaths = [...new Set([...plan.readPaths, ...paths])].sort()

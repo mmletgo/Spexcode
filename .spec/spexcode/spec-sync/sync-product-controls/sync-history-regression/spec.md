@@ -18,3 +18,5 @@ AC-SYNC-24 的成组撤销和版本回退必须由可运行入口证明，不能
 stopWriter 验证物理暂停先持久化，当前观察/执行者停止，receipt 与 journal 不删除，新服务仍受暂停约束。v10 升级先 online backup，未来 schema 拒同步写入，既有会话仍可读取。原生 Agent 的完整实际补偿验收由上层产品交付证据承担，本回归不伪称执行了真实模型。
 
 通过 SPEX_VERIFICATION_EVIDENCE_DIR 外放 SQLite 一致备份、实际 Git 对象与操作/尝试/journal，便于审阅新提交和未覆盖边界。
+
+真实跨目录 rename 回归先以明确受控迁移交付为前置，再从正式 revert 入口恢复历史精确 Spec 路径，检查当前 leaf 授权原本不含该路径、补偿只增加该文件、源/测试目录权限保持、实际交付节点及全部业务 ID 连续。

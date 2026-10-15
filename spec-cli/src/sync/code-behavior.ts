@@ -98,6 +98,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   for (const path of adopted) { const text = deliveryFiles.get(path); if (text === undefined) authorBefore.delete(path); else authorBefore.set(path, text) }
   const authorSource = new Map(source)
   const controlledAuthorBefore: { path: string; text: string | null }[] = []
+  let historyAuthor = false
   if (input.composed.requestBlob) {
     const rawRequest = JSON.parse(readEvidence(commonDir, input.composed.requestBlob).toString('utf8')) as { type?: string }
     const original = rawRequest.type === 'sync.decision' ? readControlledDecision(input.snapshot, input.composed.requestBlob).originalRequestBlob : input.composed.requestBlob
@@ -105,9 +106,13 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
       if (change.next) authorSource.set(change.path, readObject(commonDir, change.next.oid).toString('utf8')); else authorSource.delete(change.path)
       controlledAuthorBefore.push({ path: change.path, text: change.before ? readObject(commonDir, change.before.oid).toString('utf8') : null })
     }
-    if (rawRequest.type === 'sync.history' || selectedEvidence?.controlledAuthorGroup) source.splice(0, source.length, ...authorSource)
+    historyAuthor = rawRequest.type === 'sync.history' || !!selectedEvidence?.controlledAuthorGroup
+    if (historyAuthor) source.splice(0, source.length, ...authorSource)
   }
-  const oldFrozen = await readFrozenContracts(input.snapshot.source.canonicalRoot, new Map(delivery)), current = await readFrozenContracts(input.snapshot.source.canonicalRoot, new Map(composed))
+  const controlledBeforeFiles = historyAuthor ? controlledAuthorBefore.filter((item): item is { path: string; text: string } => item.text !== null).map(item => [item.path, item.text] as [string, string]) : []
+  const precedingContracts = new Map(delivery)
+  for (const [path, text] of controlledBeforeFiles) if (path.startsWith('.spec/') && path.endsWith('/spec.md')) precedingContracts.set(path, text)
+  const oldFrozen = await readFrozenContracts(input.snapshot.source.canonicalRoot, precedingContracts), current = await readFrozenContracts(input.snapshot.source.canonicalRoot, new Map(composed))
   const authorChanges = selectedEvidence ? selectedAuthoredContractChanges(selectedEvidence) : authoredContractChanges(authorBefore, authorSource, new Map(delivery), [...oldFrozen.nodes, ...current.nodes])
   if (selectedEvidence) for (const change of authorChanges) {
     const broad = selectedEvidence.intents.filter(item => item.changed && item.broadChange && (item.source?.path ?? item.before?.path) === change.path && item.before)
@@ -129,12 +134,12 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   const changedPaths = sorted([...(selectedEvidence?.residualPaths ?? []), ...ungoverned, ...actualTreeDiff([...authorEntries.values()], verifySnapshot(input.snapshot)).map(file => file.path), ...actualTreeDiff([...deliveryEntries.values()], readTree(commonDir, input.composed.tree)).map(file => file.path)].filter(path => within(path, input.plan.readPaths)))
   const artifactEntries = new Map((selectedEvidence?.artifacts ?? []).flatMap(item => [item.before, item.delivery, item.source, item.authorBase].filter((entry): entry is NonNullable<typeof entry> => !!entry)).map(entry => [`${entry.path}:${entry.mode}:${entry.oid}`, entry]))
   const intentArtifactFiles = [...artifactEntries.values()].filter(entry => within(entry.path, input.plan.readPaths) && entry.mode !== '120000' && !isHostPrivatePath(entry.path)).flatMap(entry => { const bytes = readObject(commonDir, entry.oid); return isUtf8Text(bytes) ? [{ ...entry, text: bytes.toString('utf8') }] : [] })
-  const snapshots = { oldSource, newSource: source, verifiedDelivery: delivery, composedFiles: composed }
+  const snapshots = { oldSource, newSource: source, verifiedDelivery: delivery, composedFiles: composed, controlledBeforeFiles }
   const snapshotPaths = Object.entries(snapshots).map(([name, files]) => [name, new Set(files.map(([path]) => path))] as const)
   const readablePaths = sorted([...snapshotPaths.flatMap(([, paths]) => [...paths]), ...intentArtifactFiles.map(file => file.path)]).map(path => ({ path, snapshots: [...snapshotPaths.filter(([, paths]) => paths.has(path)).map(([name]) => name), ...intentArtifactFiles.some(file => file.path === path) ? ['intentArtifactFiles'] : []] }))
   const readingManifest = JSON.stringify({ requiredChangedPaths: changedPaths, readablePaths })
   const readingInstructions = `冻结读取清单:\n${readingManifest}\n分析要求:\nrequiredChangedPaths必须逐项覆盖，不得缩小。readablePaths标明该具体文件全文在哪些冻结快照中存在；删除文件仍重读旧全文。plan.readPaths是目录前缀授权而非仅路径字符串相等；manifest/目录/链接只属元数据，不冒充全文。以下虚拟冻结快照是唯一输入权威，cwd的旧HEAD不是本次输入；不要以cwd缺少新增文件忽略已冻结正文。\n`
-  const frozen = { requiredChangedPaths: changedPaths, readablePaths, origin: input.origin ?? 'code', decision: input.decision ?? null, repairDiagnostics: input.repairDiagnostics ?? [], inputId: input.snapshot.id, baselinePair: input.baseline, baselineSelection: input.baselineSelection ?? null, compositionEvidence: selectedEvidence, intentArtifactFiles, composed: input.composed, readSetDigest: input.readSetDigest, policyDigest: input.policyDigest, plan: input.plan, changedPaths, authorChanges, adoptedDeliveryPaths: sorted([...adopted]), authorBaseline: [...authorBefore], oldSource, verifiedDelivery: delivery, newSource: source, composedFiles: composed }
+  const frozen = { requiredChangedPaths: changedPaths, readablePaths, origin: input.origin ?? 'code', decision: input.decision ?? null, repairDiagnostics: input.repairDiagnostics ?? [], inputId: input.snapshot.id, baselinePair: input.baseline, baselineSelection: input.baselineSelection ?? null, compositionEvidence: selectedEvidence, intentArtifactFiles, composed: input.composed, readSetDigest: input.readSetDigest, policyDigest: input.policyDigest, plan: input.plan, changedPaths, authorChanges, adoptedDeliveryPaths: sorted([...adopted]), authorBaseline: [...authorBefore], oldSource, verifiedDelivery: delivery, newSource: source, composedFiles: composed, controlledBeforeFiles }
   const context = JSON.stringify(frozen)
   const decisionAuthorities = [...input.plan.decisionAuthorities ?? []]
   if (input.decision) {
@@ -217,7 +222,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
       const independentAuthorDeleted = authorDeleted && (!currentAuthority || !currentAuthority.paths.includes(node.path))
       if (items.length && resolution && allowed && !authorSource.has(node.path) && (decisionDeleted || independentAuthorDeleted)) {
         const source = decisionDeleted ? `decision:${currentAuthority!.stableDecisionId}` as const : 'user:raw'
-        for (const item of items) authorizedChanges.push({ id: item.id, action: 'retire', source, reason: `冻结来源删除节点 ${node.id}；独审确认全部旧义务按明确作者/所选裁决退役，原验证命令与负向测试保留` })
+        for (const item of items) if (!input.plan.authorizedChanges?.some(change => change.id === item.id && change.action === 'retire' && change.source === source)) authorizedChanges.push({ id: item.id, action: 'retire', source, reason: `冻结来源删除节点 ${node.id}；独审确认全部旧义务按明确作者/所选裁决退役，原验证命令与负向测试保留` })
         nodeChanges.push({ action: 'retire', from: { nodeId: node.id, path: node.path } })
       } else if (items.length && items.every(item => input.plan.authorizedChanges?.some(auth => auth.id === item.id && auth.action === 'retire'))) nodeChanges.push({ action: 'retire', from: { nodeId: node.id, path: node.path } })
       else if (!changes.some(change => change.kind === 'conflict' && change.paths.includes(node.path))) changes.push({ id: stable('change', node), kind: 'conflict', paths: [node.path], affectedIds: items.map(item => item.id), ruleIds: [], originalIntent: node.rawSource ?? '已存在权威节点', previousBehavior: '旧共同基线保留权威需求与验收', sourceBehavior: '外部来源删除了权威节点', deliveryBehavior: '前次交付仍保留该权威节点', evidence: `旧节点 ${node.id} 与新source缺失对比`, counterexample: '删除节点后原有验收无法找到权威契约，尚无逐项合法退役依据' })

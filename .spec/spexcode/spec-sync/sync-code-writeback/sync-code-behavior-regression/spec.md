@@ -28,3 +28,5 @@ code:
 
 
 真实canonical裁决回归包含原finding ruleIds混合REQ/RULE：REQ改义、所选RULE仅换来源、未选RULE02改政策的完整候选必须拒绝，实质所选政策变化及精确AC授权仍通过。纯REQ与空ruleIds明确affectedREQ选择分别覆盖无旧政策见证的直接明确需求演进、原affected旧RULE的有限实质见证，均拒绝未affected规则改义、旧来源及缺同次allowed_change；REQ消费者不自动获得权限。
+
+既有可信计划已对整节点逐项授权 user:raw 退役时，真实删除仍完整分析/独审并保 lifecycle，但不派生同 ID 的第二份授权；实际删除路径、原验证命令与退休身份政策保持原门禁。

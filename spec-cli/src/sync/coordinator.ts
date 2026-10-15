@@ -495,6 +495,13 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       }
       const effectiveFindings = analysis?.analysis.findings ?? []
       const deliveredFiles = priorDeliveryFiles(operation, view, [...options.plan.readPaths, ...operation.scope.paths])
+      const historyGroup = operation.baselineSelection && operation.requestBlob ? readCompositionEvidence(operation.input, view.composed, operation.baselineSelection).controlledAuthorGroup : undefined
+      for (const change of historyGroup?.changes ?? []) {
+        if (!change.path.startsWith('.spec/') || !change.path.endsWith('/spec.md')) continue
+        const binding = operation.baselineSelection!.bindings.find(binding => binding.resource.kind === 'path' && binding.resource.path === change.path)
+        if (!binding || !('bytePair' in binding) || binding.bytePair) continue
+        if (change.before) deliveredFiles.set(change.path, readObject(operation.input.source.commonDir, change.before.oid).toString('utf8')); else deliveredFiles.delete(change.path)
+      }
       const historicalRetiredIds = unique([...(operation.previousBaselinePair?.retiredIds ?? []), ...(operation.baselineSelection?.bindings.flatMap(binding => ('bytePair' in binding ? binding.bytePair : binding.intentPair)?.retiredIds ?? []) ?? [])])
       const behaviorFacts = [...options.plan.facts, ...(analysis?.analysis.facts ?? []), ...effectiveFindings.map(finding => ({ source: `derived:${finding.ruleIds[0] ?? finding.affectedIds[0]}`, text: JSON.stringify(finding) }))]
       const nodeChanges = analysis?.analysis.nodeChanges.map(change => ({ ...change, evidenceRef: analysis.ref })) ?? []

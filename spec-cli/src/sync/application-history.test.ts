@@ -13,7 +13,8 @@ import { SyncStore } from './store.js'
 import { composeAuthoredInput } from './author-input.js'
 import { freezeCandidate } from './candidate.js'
 import { deliverVerifiedAttempt } from './private-delivery.js'
-import { contentHash, identifyWorktree, readObject, readTree, writeEvidence } from './snapshot.js'
+import { captureInputSnapshot, contentHash, identifyWorktree, readObject, readTree, writeEvidence } from './snapshot.js'
+import { prepareSyncAdmission } from './coordinator.js'
 import { readHistoryRequest } from './history-input.js'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
 import type { ContractCell, GeneratedTables } from './elaboration-markdown.js'
@@ -21,7 +22,7 @@ import type { VerificationResultBlob } from './operation-types.js'
 import type { SyncSettings } from './settings.js'
 import { sessionIdForCreateKey } from '../sessions.js'
 
-async function fixture(t: test.TestContext) {
+async function fixture(t: test.TestContext, moveNode = false) {
   const temp = realpathSync(mkdtempSync(join(tmpdir(), 'sync-application-history-'))), root = join(temp, 'source')
   cpSync(new URL('../../test/fixtures/spec-sync/export-repo/', import.meta.url), root, { recursive: true })
   renameSync(join(root, '.spec/export'), join(root, '.spec/project')); renameSync(join(root, 'tests'), join(root, 'generated-tests'))
@@ -83,16 +84,27 @@ async function fixture(t: test.TestContext) {
   })
   await application.enable()
   const start = application.start.bind(application); application.start = () => {}
-  const admitted = await application.submit({ nodeId: 'export-contract', requestId: 'seed-completed-feature' }), operation = admitted.operation!
+  const movedPath = '.spec/archive/export-contract/spec.md'
+  let operation
+  if (moveNode) {
+    const snapshot = await captureInputSnapshot(root), frozen = await application['freezeNodePlan'](snapshot, 'export-contract')
+    frozen.plan.writePaths = [...frozen.plan.writePaths, movedPath]; frozen.plan.readPaths = [...frozen.plan.readPaths, movedPath]
+    frozen.plan.executionScope = { ...frozen.plan.executionScope!, paths: [...frozen.plan.executionScope!.paths, movedPath].sort() }
+    const selected = application.store.readBaselineSelection(snapshot.source, [...frozen.selection.bindings.map(binding => binding.resource), { kind: 'path', path: movedPath }]); assert.ok('selection' in selected)
+    const admission = await prepareSyncAdmission(snapshot, frozen.plan, { ingressKey: 'seed-explicit-node-migration', rootCauseId: 'seed-explicit-node-migration', origin: 'combined', budget: settings.budget, managedRoot: application['managedRoot'], baselineSelection: selected.selection })
+    application['prepareTools'](admission.ingressKey, null)
+    operation = application.store.admitAndEnqueue(admission)
+  } else operation = (await application.submit({ nodeId: 'export-contract', requestId: 'seed-completed-feature' })).operation!
   application.start = start
   const store = application.store, plan = application['operationPlan'](operation), ack = store.ackDispatch(operation.input.source.repositoryId, operation.dispatchMessageId)
   const claimed = store.claimQueuedAttempt({ operationId: operation.id, source: operation.input.source, scope: operation.scope, leaseMs: 300000, expectedRevision: ack.revision })
   const composed = composeAuthoredInput(operation.input, operation.baselineSelection, { executionPaths: operation.scope.paths, contextPaths: plan.readPaths }).composed!
   store.bindComposedInput(claimed.fence, composed); store.startGeneration(claimed.fence)
   const files = new Map(readTree(operation.input.source.commonDir, composed.tree).map(entry => [entry.path, entry]))
-  const candidate = freezeCandidate(operation.input, { version: 'sync-files-v1', changes: [path, 'src/export.js', 'generated-tests/export.test.mjs'].map(file => {
-    const before = files.get(file)!, text = readObject(operation.input.source.commonDir, before.oid).toString('utf8')
-    return { path: file, beforeDigest: before.digest, beforeMode: before.mode, content: file === path ? text.replace('此输入是固定业务验收夹具', 'FEATURE-MARK 此输入是固定业务验收夹具') : `// FEATURE-MARK\n${text}` }
+  const candidate = freezeCandidate(operation.input, { version: 'sync-files-v1', changes: [path, ...(moveNode ? [movedPath] : []), 'src/export.js', 'generated-tests/export.test.mjs'].map(file => {
+    const before = files.get(file), text = readObject(operation.input.source.commonDir, (before ?? files.get(path)!).oid).toString('utf8')
+    const content = moveNode && file === path ? null : file === path || file === movedPath ? text.replace('此输入是固定业务验收夹具', 'FEATURE-MARK 此输入是固定业务验收夹具') : `// FEATURE-MARK\n${text}`
+    return { path: file, beforeDigest: before?.digest ?? null, beforeMode: before?.mode ?? null, content, ...(content === null ? { mode: null } : {}) }
   }) }, operation.scope, composed)
   store.freezeCandidate(claimed.fence, candidate)
   const evidence = writeEvidence(operation.input.source.commonDir, { fixture: '原已落地交付的明确受控前置；不是模型或完整产品验收证明' }), bindings = { inputId: operation.input.id, candidateDigest: candidate.digest, policyDigest: operation.policyDigest, readSetDigest: operation.readSetDigest, baselineSelectionDigest: operation.baselineSelection!.digest, environmentDigest: 'seed-fixture', contextDigest: 'seed-fixture' }
@@ -101,7 +113,7 @@ async function fixture(t: test.TestContext) {
   const delivered = await deliverVerifiedAttempt(store, claimed.fence, { managedRoot: application['managedRoot'], tools: application['executionInputs'](operation).tools, beforeApply: async () => {} })
   git('merge', '--ff-only', operation.deliveryPlan.branch)
   git('switch', 'main'); git('merge', '--ff-only', 'node/source'); await application.enable()
-  return { root, temp, git, application, protocol, original: delivered.operation, calls, path }
+  return { root, temp, git, application, protocol, original: delivered.operation, calls, path, movedPath, contract }
 }
 
 test('AC-SYNC-24 正式revert入口经同一协调器、真实Docker与新提交保留后续编辑', { skip: process.env.SPEX_DOCKER_VERIFICATION_TEST !== '1', timeout: 600000 }, async t => {
@@ -147,6 +159,24 @@ test('AC-SYNC-24 真正Git重叠进入同一业务冲突，无补偿提交且不
   assert.ok(result.decisionContext?.analysis.findings.some(finding => finding.kind === 'conflict'))
   assert.deepEqual(result.journals, []); assert.equal(f.git('rev-parse', 'HEAD'), head)
   assert.deepEqual(readFileSync(path), current); assert.deepEqual(readFileSync(join(f.root, '.git/index')), index)
+})
+
+test('AC-SYNC-24 正式revert恢复历史Spec精确路径，真实rename保持节点与全部业务ID', { skip: process.env.SPEX_DOCKER_VERIFICATION_TEST !== '1', timeout: 600000 }, async t => {
+  const f = await fixture(t, true), before = await captureInputSnapshot(f.root)
+  assert.equal(existsSync(join(f.root, f.path)), false); assert.equal(existsSync(join(f.root, f.movedPath)), true)
+  const current = await f.application['freezeNodePlan'](before, 'export-contract')
+  assert.equal(current.plan.writePaths.some(path => f.path === path || f.path.startsWith(`${path}/`)), false)
+  const submitted = await f.application.revert({ operationId: f.original.id, requestId: 'restore-node-path' }); assert.ok(submitted.operation)
+  const delivered = await f.application.wait(submitted.operation.id)
+  assert.equal(delivered.operation.phase, 'workspace_synced', JSON.stringify(delivered.attempt?.failure))
+  const root = delivered.operation.deliveryPlan.canonicalRoot
+  assert.equal(existsSync(join(root, f.movedPath)), false)
+  const source = readFileSync(join(root, f.path), 'utf8'), contract = parseContract({ nodeId: 'export-contract', path: f.path, source }).contract!
+  assert.deepEqual(contract.items.map(item => item.id).sort(), f.contract.items.map(item => item.id).sort())
+  assert.equal(contract.nodeId, 'export-contract'); assert.equal((await captureInputSnapshot(f.root)).id, before.id)
+  const plan = f.application['operationPlan'](delivered.operation)
+  assert.ok(plan.writePaths.includes(f.path)); assert.equal(plan.writePaths.includes('.spec/project'), false)
+  assert.deepEqual(plan.writePaths.filter(path => path === 'src' || path === 'generated-tests'), current.plan.writePaths.filter(path => path === 'src' || path === 'generated-tests'))
 })
 
 test('版本writer fencing：旧schema升级备份、future版本拒写且原会话数据保留', async t => {

@@ -15,7 +15,7 @@ CLI/HTTP/Dashboard 共享协调应用服务；无浏览器仍持续同步，界�
 
 ## expanded spec
 
-范围映射：REQ-SYNC-06、07、08；P1至P5；AC-SYNC-07、21、26、28。实施依据为 `docs/spec-code-continuous-sync-plan.md`。[[sync-application]]、[[sync-cli]] 与 [[sync-operation-panel]] 已共享启用、受控保存、运行、暂停、取消、显式重试、恢复和真实差异读取。业务裁决、无界面的持续观察、迁移回退与成组补偿仍按完整方案继续实现。
+范围映射：REQ-SYNC-06、07、08；P1至P5；AC-SYNC-07、21、26、28。实施依据为 `docs/spec-code-continuous-sync-plan.md`。[[sync-application]]、[[sync-cli]] 与 [[sync-operation-panel]] 已共享启用、受控保存、运行、暂停、取消、显式重试、恢复和真实差异读取。同一应用服务也承载具体业务裁决、无浏览器观察、版本回退前停止 writer，以及已采纳交付的成组补偿。当前版本的完整 P5 产品验收仍须依上层要求提交真实入口与原生 Agent 证据。
 
 首次 enable 说明输入/交付工作树、分支、可写范围与资源。run/status/pause/resume/verify 与取消/裁决使用同一操作。状态显示监听离线、待同步、细化、生成、验证、待输入、冲突、写入、工作树已同步、主分支待落地/已同步、过期、暂停、取消、失败和恢复。显示具体覆盖分子/分母，打开实际产物，键盘可完成操作，动态状态不抢焦点。UI 不自行判断完成。迁移在 worktree 保留原意和节点身份；独立 spec-sync 数据迁移事务失败可回滚，版本回退先结算 journal，保留新增表和证据；撤销使用成组补偿提交，不重写共享历史。
 
