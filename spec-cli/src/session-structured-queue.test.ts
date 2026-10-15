@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url'
 
 // Exercise the complete creation/queue/native-result path with a local RPC executor and no model calls.
 // A separate process starts in the fixture repo so the existing project-scoped layout caches stay truthful.
-for (const scenario of ['sequential', 'cancel', 'materializing', 'abort', 'timeout', 'queued', 'refused', 'ack-active', 'cross-process', 'running-restart', 'owner-crashed-running', 'owner-crashed-completed', 'owner-crashed-concurrent', 'owner-live', 'owner-live-disconnect']) test(`structured queue ${scenario} preserves native control and maxActive=1`, { skip: process.platform !== 'darwin' }, () => {
+for (const scenario of ['sequential', 'cancel', 'materializing', 'abort', 'timeout', 'queued', 'refused', 'ack-active', 'settled-read-pending', 'cross-process', 'running-restart', 'owner-crashed-running', 'owner-crashed-completed', 'owner-crashed-concurrent', 'owner-live', 'owner-live-disconnect']) test(`structured queue ${scenario} preserves native control and maxActive=1`, { skip: process.platform !== 'darwin' }, () => {
   const root = mkdtempSync(join(tmpdir(), 'spex-structured-queue-')), repo = join(root, 'repo'), bin = join(root, 'bin')
   try {
     mkdirSync(join(repo, '.spec'), { recursive: true }); mkdirSync(bin)
@@ -18,10 +18,10 @@ for (const scenario of ['sequential', 'cancel', 'materializing', 'abort', 'timeo
     for (const args of [['init', '-b', 'main'], ['config', 'user.name', 'Fixture'], ['config', 'user.email', 'fixture@example.invalid'], ['add', '.'], ['commit', '-m', 'fixture']])
       execFileSync('git', ['-C', repo, ...args], { stdio: 'ignore' })
     const executor = join(bin, 'codex')
-    // Ordinary positive interrupts settle after ACK without depending on a timer beating the 300ms proof budget.
+    // Ordinary positive interrupts settle after ACK in protocol order; the read-pending case fences their proof.
     // Only cross-process cancellation intentionally delays settlement to exercise the late-owner race.
     writeFileSync(executor, `#!/usr/bin/env node
-import {createServer} from 'node:net';import{writeFileSync}from'node:fs';import{join}from'node:path';
+import {createServer} from 'node:net';import{existsSync,writeFileSync}from'node:fs';import{join}from'node:path';
 const threads=new Map();const listeners=new Set(),owners=new Map();let counter=0;let reads=0;const counts={threadStarts:0,turnStarts:0,resumes:0};const trace=()=>writeFileSync(join(process.env.CODEX_HOME,'protocol-counts.json'),JSON.stringify(counts));const complete=thread=>{thread.turns[0].status='completed';for(const send of listeners)send({method:'turn/completed',params:{threadId:thread.id,turn:thread.turns[0]}});};
 const path=process.argv[process.argv.indexOf('--listen')+1].replace('unix://','');
 const server=createServer(socket=>{let buffer=Buffer.alloc(0),upgraded=false;
@@ -34,10 +34,10 @@ const server=createServer(socket=>{let buffer=Buffer.alloc(0),upgraded=false;
   else if(m.method==='hooks/list')result={data:[{hooks:[],errors:[]}]};
   else if(m.method==='mcpServerStatus/list')result={data:[],nextCursor:null};
   else if(m.method==='thread/start'){counts.threadStarts++;trace();const id='thread-'+(++counter);const thread={id,turns:[]};threads.set(id,thread);result={thread};}
-  else if(m.method==='turn/start'){counts.turnStarts++;trace();const thread=threads.get(m.params.threadId);const turn={id:'turn-'+counter,status:m.params.input[0].text.includes('hold')?'inProgress':'completed',items:[{type:'userMessage',content:m.params.input},{type:'agentMessage',phase:'final_answer',text:JSON.stringify({answer:m.params.input[0].text.includes('first')?'first':'second'})}]};thread.turns.push(turn);owners.set(thread.id,socket);result={turn:{id:turn.id}};if(m.params.input[0].text.includes('owner-live-disconnect'))setTimeout(()=>socket.destroy(),50);if(m.params.input[0].text.includes('owner-live'))setTimeout(()=>complete(thread),1200);if(turn.status==='completed')setTimeout(()=>send({method:'turn/completed',params:{threadId:thread.id,turn}}),5);}
+  else if(m.method==='turn/start'){counts.turnStarts++;trace();const thread=threads.get(m.params.threadId);const turn={id:'turn-'+counter,status:m.params.input[0].text.includes('hold')?'inProgress':'completed',items:[{type:'userMessage',content:m.params.input},{type:'agentMessage',phase:'final_answer',text:JSON.stringify({answer:m.params.input[0].text.includes('first')?'first':'second'})}]};thread.turns.push(turn);owners.set(thread.id,socket);result={turn:{id:turn.id}};if(m.params.input[0].text.includes('settled-read-pending'))queueMicrotask(()=>{turn.status='interrupted';writeFileSync(join(process.env.CODEX_HOME,'pending-settlement-read.json'),JSON.stringify({threadId:thread.id,turnId:turn.id,status:turn.status}));});if(m.params.input[0].text.includes('owner-live-disconnect'))setTimeout(()=>socket.destroy(),50);if(m.params.input[0].text.includes('owner-live'))setTimeout(()=>complete(thread),1200);if(turn.status==='completed')setTimeout(()=>send({method:'turn/completed',params:{threadId:thread.id,turn}}),5);}
   else if(m.method==='turn/interrupt'){const thread=threads.get(m.params.threadId),turn=thread.turns.find(t=>t.id===m.params.turnId);if(thread.turns[0].items[0].content[0].text.includes('ack-active')){thread.interrupts=(thread.interrupts||0)+1;if(thread.interrupts>1){send({id:m.id,error:{message:'fixture retry refused after prior acknowledgement'}});return;}}if(thread.turns[0].items[0].content[0].text.includes('cross-process')){thread.interrupts=(thread.interrupts||0)+1;if(thread.interrupts>1)return;}if(thread.turns[0].items[0].content[0].text.includes('refused')){send({id:m.id,error:{message:'fixture refused exact interruption'}});return;}result={};if(!thread.turns[0].items[0].content[0].text.includes('ack-active')){const settle=()=>{turn.status='interrupted';send({method:'turn/completed',params:{threadId:thread.id,turn}})};if(thread.turns[0].items[0].content[0].text.includes('cross-process'))setTimeout(settle,350);else queueMicrotask(settle);};}
   else if(m.method==='thread/read'||m.method==='thread/resume'){const thread=threads.get(m.params.threadId);if(m.method==='thread/resume'){counts.resumes++;trace();if(thread.turns[0].items[0].content[0].text.includes('owner-crashed-running')||thread.turns[0].items[0].content[0].text.includes('owner-crashed-concurrent')||thread.turns[0].items[0].content[0].text.includes('owner-live-disconnect'))setTimeout(()=>complete(thread),100);}result={thread};}
-  else if(m.method==='thread/turns/list'){if(threads.get(m.params.threadId).turns[0].items[0].content[0].text.includes('materializing')&&reads++<2){send({id:m.id,error:{message:'rollout at fixture is empty'}});return;}result={data:threads.get(m.params.threadId).turns};}
+  else if(m.method==='thread/turns/list'){const thread=threads.get(m.params.threadId),turn=thread.turns[0];if(turn.status==='interrupted'&&turn.items[0].content[0].text.includes('settled-read-pending')&&!existsSync(join(process.env.CODEX_HOME,'release-settlement-read')))return;if(threads.get(m.params.threadId).turns[0].items[0].content[0].text.includes('materializing')&&reads++<2){send({id:m.id,error:{message:'rollout at fixture is empty'}});return;}result={data:threads.get(m.params.threadId).turns};}
   else if(m.method==='thread/loaded/list')result={data:[...threads.keys()]};
   else result={};
   send({id:m.id,result});
@@ -97,7 +97,7 @@ try{
    results.push(await queued);
   }
   if(scenario==='cross-process'){
-   const external=join(${JSON.stringify(root)},'external.mts');writeFileSync(external,'import {cancelStructuredSession} from '+JSON.stringify(${JSON.stringify(source)})+';import {writeFileSync} from "node:fs";const result=await cancelStructuredSession('+JSON.stringify(id)+',{timeoutMs:2000});writeFileSync('+JSON.stringify(${JSON.stringify(join(root,'external.json'))})+',JSON.stringify(result));process.exit();');
+   const external=join(${JSON.stringify(root)},'external.mts');writeFileSync(external,'import {cancelStructuredSession} from '+JSON.stringify(${JSON.stringify(source)})+';import {writeFileSync} from "node:fs";const result=await cancelStructuredSession('+JSON.stringify(id)+');writeFileSync('+JSON.stringify(${JSON.stringify(join(root,'external.json'))})+',JSON.stringify(result));process.exit();');
    await new Promise((resolve,reject)=>{const child=spawn(process.execPath,['--import',${JSON.stringify(createRequire(import.meta.url).resolve('tsx/esm'))},external],{stdio:'inherit'});child.on('error',reject);child.on('close',code=>code===0?resolve():reject(new Error('external cancellation failed')))});
    cancellation=JSON.parse(readFileSync(${JSON.stringify(join(root,'external.json'))},'utf8'));results.push(await active);
    if(!readRecord(id).structuredExecution.cancellation.nativeStopped||readRecord(id).structuredExecution.state!=='cancelled'||results[0].error?.code!=='cancelled'||!readRecord(id).note.includes('native interrupted'))throw new Error('late owner cancellation downgraded externally confirmed native settlement');
@@ -105,16 +105,32 @@ try{
    const next=spawnSync(process.execPath,['--import',${JSON.stringify(createRequire(import.meta.url).resolve('tsx/esm'))},restart],{encoding:'utf8',timeout:5000});if(next.status!==0)throw new Error('new embedded process did not start next unique request: '+next.stderr);results.push(JSON.parse(readFileSync(${JSON.stringify(join(root,'restart.json'))},'utf8')));
   }
   else if(scenario==='abort')controller.abort();
+  if(scenario==='settled-read-pending'){
+   // Native settlement precedes the short deadline; omit its notification and gate only the exact read reply.
+   await wait(()=>{try{return JSON.parse(readFileSync(join(runtimeRoot(),'structured-read-only-v1/data/codex-home/pending-settlement-read.json'),'utf8')).status==='interrupted'}catch{return false}});
+  }
   if(scenario!=='cross-process'){
    if(scenario==='timeout'||scenario==='abort'){results.push(await active);cancellation=readRecord(id).structuredExecution.cancellation;}
-   else{cancellation=await cancelStructuredSession(id,{timeoutMs:scenario==='materializing'?1000:300});results.push(await active);}
+   // Positive paths prove the public cancellation contract; only refusal/unknown probes impose short deadlines.
+   else{cancellation=await cancelStructuredSession(id,scenario==='refused'||scenario==='ack-active'||scenario==='settled-read-pending'?{timeoutMs:300}:undefined);results.push(await active);}
+  }
+  if(scenario==='settled-read-pending'){
+   const home=join(runtimeRoot(),'structured-read-only-v1/data/codex-home'),proof=JSON.parse(readFileSync(join(home,'pending-settlement-read.json'),'utf8')),before=readRecord(id).structuredExecution.cancellation;
+   const row=(await listSessions()).find(s=>s.id===id);
+   if(proof.threadId!==cancellation.threadId||proof.turnId!==cancellation.turnId||proof.status!=='interrupted'||cancellation.nativeStopped||cancellation.acknowledged||cancellation.error!=='exact structured turn read timed out'||readRecord(id).structuredExecution.state!=='cancelling'||row.liveness!=='unknown')throw new Error('settled native turn without an exact read became falsely terminal');
+   try{await runStructuredSession(request('second','queue-before-read-proof',300));throw new Error('unread settled native task released its model capacity');}catch(e){if(e.code!=='timeout')throw e;}
+   const count=JSON.parse(readFileSync(join(home,'protocol-counts.json'),'utf8'));if(count.threadStarts!==1||count.turnStarts!==1)throw new Error('unread settlement launched a second native task');
+   writeFileSync(join(home,'release-settlement-read'),'released');
+   cancellation=await cancelStructuredSession(id);
+   const after=readRecord(id).structuredExecution.cancellation;
+   if(cancellation.threadId!==proof.threadId||cancellation.turnId!==proof.turnId||cancellation.acknowledged||after.reason!==before.reason||after.requestedAt!==before.requestedAt)throw new Error('exact settlement recovery lost its cancellation identity or invented an interrupt ACK');
   }
   if(scenario==='refused'||scenario==='ack-active'){
    const row=(await listSessions()).find(s=>s.id===id);if(cancellation.nativeStopped||readRecord(id).structuredExecution.state!=='cancelling'||row.liveness!=='unknown')throw new Error('unconfirmed native stop became falsely terminal');
    if(scenario==='ack-active'){const before=readRecord(id).structuredExecution.cancellation;const retry=await cancelStructuredSession(id,{reason:'timeout',timeoutMs:100});const after=readRecord(id).structuredExecution.cancellation;if(retry.nativeStopped||!retry.acknowledged||!after.acknowledged||after.reason!==before.reason||after.requestedAt!==before.requestedAt)throw new Error('retry refusal discarded prior native ACK or cancellation identity');}
    try{await runStructuredSession(request('second','queue-blocked',300));throw new Error('unconfirmed native task released its model capacity');}catch(e){if(e.code!=='timeout')throw e;}
   }else{
-   if(!cancellation.nativeStopped||!cancellation.acknowledged||cancellation.nativeStatus!=='interrupted')throw new Error('cancellation lacks acknowledged exact native settlement');
+   if(!cancellation.nativeStopped||(scenario!=='settled-read-pending'&&!cancellation.acknowledged)||cancellation.nativeStatus!=='interrupted')throw new Error('cancellation lacks acknowledged exact native settlement');
    if(scenario==='timeout'&&results[0].error.code!=='timeout')throw new Error('timeout lost its reason');
    if(scenario!=='cross-process')results.push(await runStructuredSession(request('second','queue-after-stop')));
   }
