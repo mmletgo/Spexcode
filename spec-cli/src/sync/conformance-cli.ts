@@ -16,7 +16,7 @@ export async function runConformanceCli(argv: readonly string[]): Promise<void> 
   if (!baseCommit || !candidateCommit) throw usage('用法：spex sync check --base <commit-sha> --candidate <commit-sha> [--policy <trusted-commit-sha>] [--repository <path>] [--evidence-directory <existing-directory>]')
   const result = await runConformance({ repository: flags.get('--repository') ?? repoRoot(), baseCommit, candidateCommit, policyCommit: flags.get('--policy') ?? baseCommit, ...(flags.has('--evidence-directory') ? { evidenceDirectory: flags.get('--evidence-directory') } : {}) })
   console.log(JSON.stringify(result, null, 2))
-  process.exitCode = result.status === 'passed' ? 0 : result.status === 'unsupported' ? 2 : 1
+  process.exitCode = result.status === 'passed' || result.status === 'not_applicable' ? 0 : result.status === 'unsupported' ? 2 : 1
 }
 
 function usage(message: string): Error { const error = new Error(message); error.name = 'UsageError'; return error }

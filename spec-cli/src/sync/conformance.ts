@@ -32,13 +32,16 @@ export type ConformanceInput = {
 }
 export type ConformanceResult = {
   version: 'sync-conformance-v1'
-  status: 'passed' | 'failed' | 'unsupported' | 'recovery_required'
+  status: 'passed' | 'not_applicable' | 'failed' | 'unsupported' | 'recovery_required'
   applicable: boolean
   identities: { baseCommit: string; candidateCommit: string; policyCommit: string; baseTree: string; candidateTree: string; policyTree: string } | null
   inputDigest: string | null
   readSetDigest: string | null
   scope: { nodeIds: string[]; itemIds: string[]; acceptanceIds: string[]; retiredIds: string[]; readPaths: string[] }
   unmanagedPaths: string[]
+  /** 映射覆盖与本次影响范围的通过分开；不能从scope通过推断全项目同步。 */
+  coverage: { mapping: 'unconfigured' | 'partial' | 'complete'; governedNodeIds: string[]; uncoveredNodeIds: string[]; governedPaths: string[]; uncoveredPaths: string[] }
+  verificationExtent: 'affected_scope'
   reviewExecution: 'native' | 'injected'
   verificationExecution: 'docker' | 'injected'
   review: GenerationReview | null
@@ -108,7 +111,7 @@ function acceptances(graph: ContractGraph, ids: readonly string[]): Acceptance[]
 export async function runConformance(supplied: ConformanceInput, options: ConformanceOptions = {}): Promise<ConformanceResult> {
   const { signal, ...data } = supplied, input = structuredClone(data)
   const evidenceDirectory = input.evidenceDirectory ? realpathSync(input.evidenceDirectory) : mkdtempSync(join(tmpdir(), 'spex-conformance-'))
-  const result: ConformanceResult = { version: 'sync-conformance-v1', status: 'failed', applicable: false, identities: null, inputDigest: null, readSetDigest: null, scope: { nodeIds: [], itemIds: [], acceptanceIds: [], retiredIds: [], readPaths: [] }, unmanagedPaths: [], reviewExecution: options.testReviewRunner ? 'injected' : 'native', verificationExecution: options.testVerificationDriver ? 'injected' : 'docker', review: null, trace: null, runs: [], diagnostics: [], evidenceDirectory }
+  const result: ConformanceResult = { version: 'sync-conformance-v1', status: 'failed', applicable: false, identities: null, inputDigest: null, readSetDigest: null, scope: { nodeIds: [], itemIds: [], acceptanceIds: [], retiredIds: [], readPaths: [] }, unmanagedPaths: [], coverage: { mapping: 'unconfigured', governedNodeIds: [], uncoveredNodeIds: [], governedPaths: [], uncoveredPaths: [] }, verificationExtent: 'affected_scope', reviewExecution: options.testReviewRunner ? 'injected' : 'native', verificationExecution: options.testVerificationDriver ? 'injected' : 'docker', review: null, trace: null, runs: [], diagnostics: [], evidenceDirectory }
   try {
     if (signal?.aborted) fail('cancelled', '检查已取消')
     const root = realpathSync(input.repository), sourceCommon = realpathSync(git(root, ['rev-parse', '--path-format=absolute', '--git-common-dir']))
@@ -117,18 +120,25 @@ export async function runConformance(supplied: ConformanceInput, options: Confor
     git(commonDir, ['init', '--bare', '--quiet'])
     writeFileSync(join(commonDir, 'objects/info/alternates'), `${join(sourceCommon, 'objects')}\n`)
     const base = commit(commonDir, input.baseCommit), candidate = commit(commonDir, input.candidateCommit), policy = commit(commonDir, input.policyCommit)
-    const baseEntries = readTree(commonDir, base.tree), candidateEntries = readTree(commonDir, candidate.tree), policyEntries = readTree(commonDir, policy.tree)
+    const baseEntries = readTree(commonDir, base.tree), candidateEntries = candidate.tree === base.tree ? baseEntries : readTree(commonDir, candidate.tree)
+    const policyEntries = policy.tree === base.tree ? baseEntries : policy.tree === candidate.tree ? candidateEntries : readTree(commonDir, policy.tree)
     result.identities = { baseCommit: base.commit, candidateCommit: candidate.commit, policyCommit: policy.commit, baseTree: base.tree, candidateTree: candidate.tree, policyTree: policy.tree }
-    const before = await readFrozenContracts(root, files(commonDir, baseEntries)), after = await readFrozenContracts(root, files(commonDir, candidateEntries))
+    const before = await readFrozenContracts(root, files(commonDir, baseEntries))
+    const after = candidate.tree === base.tree ? before : await readFrozenContracts(root, files(commonDir, candidateEntries))
+    result.coverage.governedNodeIds = sorted(after.contracts.map(contract => contract.nodeId))
+    result.coverage.uncoveredNodeIds = sorted(after.nodes.filter(node => !after.contracts.some(contract => contract.path === node.path)).map(node => node.id))
+    result.coverage.governedPaths = sorted(after.contracts.flatMap(contract => [...contract.code.map(pathOf), ...contract.items.flatMap(item => item.kind === 'AC' ? [pathOf(item.test)] : [])]))
     const changed = actualTreeDiff(baseEntries, candidateEntries).map(change => change.path)
     const policyPath = '.spec/spexcode.json'
-    const policyFiles = files(commonDir, policyEntries), policyConfig = policyFiles.get(policyPath)
+    const policyFiles = policy.tree === base.tree ? before.files : policy.tree === candidate.tree ? after.files : files(commonDir, policyEntries), policyConfig = policyFiles.get(policyPath)
     const hasPolicy = policyConfig && (JSON.parse(policyConfig) as { sync?: unknown }).sync !== undefined
     const trustedSettings = hasPolicy ? readSyncSettings(frozenSnapshot(commonDir, root, policy, policyEntries)).settings : null
     const baseConfig = before.files.get(policyPath)
     const baseHasPolicy = baseConfig && (JSON.parse(baseConfig) as { sync?: unknown }).sync !== undefined
     const baseSettings = baseHasPolicy ? readSyncSettings(frozenSnapshot(commonDir, root, base, baseEntries)).settings : null
     const policies = [baseSettings, trustedSettings].filter(settings => settings !== null)
+    result.coverage.uncoveredPaths = sorted([...after.files.keys()].filter(path => policies.some(settings => coveredPath(path, [...settings.sourcePaths, ...settings.testPaths])) && !result.coverage.governedPaths.includes(path)))
+    result.coverage.mapping = !baseSettings || !trustedSettings ? 'unconfigured' : result.coverage.uncoveredNodeIds.length || result.coverage.uncoveredPaths.length ? 'partial' : 'complete'
     const dependencyChanged = policies.some(settings => changed.some(path => coveredPath(path, settings.readPaths)))
     const effectiveChanged = [...changed]
     let unknownOracleChanged = false
@@ -155,7 +165,8 @@ export async function runConformance(supplied: ConformanceInput, options: Confor
     if (!result.applicable) {
       // 新同步授权仍需可信政策；不能把首次声明自批为免检。
       if (changed.some(path => path === policyPath && after.files.get(path) !== before.files.get(path))) fail('unsupported_policy_introduction', '无契约闭包的同步政策变更需要可信政策接入验证')
-      result.status = 'passed'; return result
+      if (!baseSettings || !trustedSettings) fail('unsupported_unconfigured', '仓库尚未建立可信sync配置和共同基线；未纳入节点已列入coverage，空影响范围不能证明同步完成')
+      result.status = 'not_applicable'; return result
     }
     const oldPolicy = baseSettings ?? fail('unsupported_baseline_policy', '基线缺少已验证的同步政策，须先建立可信接入基线')
     const trusted = trustedSettings ?? fail('unsupported_policy_missing', '受信policyCommit缺少同步政策')

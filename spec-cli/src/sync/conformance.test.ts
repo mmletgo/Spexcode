@@ -104,7 +104,7 @@ test('AC-CONFORMANCE-03 独立clone无本机DB与receipt仍重算；无关修改
   const clone = mkdtempSync(join(tmpdir(), 'spex-conformance-clone-')); git(clone, ['clone', '--no-local', '-q', repo.root, '.'])
   const before = git(clone, ['status', '--porcelain=v1'])
   const result = await runConformance({ ...repo.input(candidate), repository: clone }, { testReviewRunner: async () => assert.fail('unrelated不派发模型'), testVerificationDriver: async () => assert.fail('unrelated不派发验收') })
-  assert.equal(result.status, 'passed'); assert.equal(result.applicable, false); assert.deepEqual(result.unmanagedPaths, ['README.md']); assert.equal(git(clone, ['status', '--porcelain=v1']), before); assert.equal(git(clone, ['rev-parse', 'HEAD']), candidate)
+  assert.equal(result.status, 'not_applicable'); assert.equal(result.applicable, false); assert.deepEqual(result.unmanagedPaths, ['README.md']); assert.equal(git(clone, ['status', '--porcelain=v1']), before); assert.equal(git(clone, ['rev-parse', 'HEAD']), candidate)
 })
 
 test('AC-CONFORMANCE-04 错candidate/readset/policy绑定与缺失语义/Docker不能伪通过', async () => {
@@ -203,4 +203,17 @@ test('AC-CONFORMANCE-09 新旧真实VERIFY归属选择oracle，无关模块不�
   rmSync(join(repo.root, specPath)); const deleted = save(repo.root)
   const guarded = await runConformance({ ...repo.input(deleted), baseCommit: base, policyCommit: base }, { testReviewRunner: reviewer(), testVerificationDriver: noDocker })
   assert.equal(guarded.status, 'failed'); assert.ok(guarded.scope.itemIds.includes('VERIFY-GREET-01'))
+})
+
+
+test('AC-CONFORMANCE-10 无sync配置或既有非sync-v1范围明确未纳入，绝不空scope passed', async () => {
+  const repo = fixture()
+  put(repo.root, specPath, source.replace('contract-schema: sync-v1\n', '')); put(repo.root, '.spec/spexcode.json', '{}'); const unconfiguredBase = save(repo.root)
+  put(repo.root, 'README.md', 'unrelated\n'); const candidate = save(repo.root)
+  const uncovered = await runConformance({ ...repo.input(candidate), baseCommit: unconfiguredBase, policyCommit: unconfiguredBase }, { testReviewRunner: reviewer() })
+  assert.equal(uncovered.status, 'unsupported'); assert.equal(uncovered.coverage.mapping, 'unconfigured'); assert.deepEqual(uncovered.coverage.uncoveredNodeIds, ['greeting']); assert.equal(uncovered.diagnostics[0].code, 'unsupported_unconfigured'); assert.equal(uncovered.review, null)
+  const configured = fixture(); put(configured.root, '.spec/product/legacy/spec.md', '---\ntitle: 旧需求\n---\n## raw source\n旧需求尚未迁移\n## expanded spec\n尚未纳入\n'); const base = save(configured.root)
+  put(configured.root, 'src/greet.mjs', implementation + '// internal\n'); const changed = save(configured.root)
+  const partial = await runConformance({ ...configured.input(changed), baseCommit: base, policyCommit: base }, { testReviewRunner: reviewer(), testVerificationDriver: noDocker })
+  assert.equal(partial.coverage.mapping, 'partial'); assert.deepEqual(partial.coverage.uncoveredNodeIds, ['legacy']); assert.deepEqual(partial.coverage.governedNodeIds, ['greeting']); assert.equal(partial.verificationExtent, 'affected_scope')
 })
