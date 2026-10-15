@@ -15,6 +15,8 @@
 
 SpexCode 是一个基于 git 的 spec 树和 coding agent 会话管理器。
 
+完整的业务流程、操作步骤、状态含义和常见问题，请阅读 [用户使用手册](USER-MANUAL.zh-CN.md)。
+
 天下苦「spec 漂移」久矣。agent 改代码的速度，远快于有人去更新「这段代码是干什么的」那份说明，而 spec 什么时候不再描述系统，没有任何东西会提醒你。在 SpexCode 里，每个 spec 写明自己管辖哪个文件或函数。之后的 commit 改了这段代码却没动 spec，SpexCode 会指出是哪个 spec、哪个 commit。装了钩子以后，改到被锚定的函数的提交会被拦下，直到有人更新 spec，或写明它为什么仍然成立。
 
 session 让每个 agent 在自己的分支和 worktree 里工作，每次改动交回来时，commit 里都写着它碰过哪些 spec。

@@ -15,6 +15,8 @@ English · [中文](docs/README.zh-CN.md)
 
 SpexCode is a Git-backed spec tree and session manager for coding agents.
 
+For a detailed guide to product workflows and user operations, see the [Chinese user manual](docs/USER-MANUAL.zh-CN.md).
+
 It is built around one problem: spec drift. Agents change code faster than anyone updates the documents that say what the code is for, and nothing tells you when a spec stopped describing the system. In SpexCode each spec names the file or function it governs. When a later commit changes that code and leaves the spec alone, SpexCode names the spec and the commit. With the hooks installed, a change inside an anchored function is blocked until someone updates the spec or records why it still holds.
 
 Sessions run each agent in its own branch and worktree, so every change comes back with the specs it touched named in its commits.
