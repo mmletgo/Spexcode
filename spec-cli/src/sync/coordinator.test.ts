@@ -11,6 +11,7 @@ import type { ContractCell, GeneratedElaboration, GeneratedTables } from './elab
 import { sameContractBusinessMeaning } from './contract-evolution.js'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
 import { elaborate } from './elaboration.js'
+import { checkGenerationContractIntent, readFrozenContracts } from './frozen-contracts.js'
 import type { ElaborationResult, ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
 import { buildSyncApplicationPlan } from './planning.js'
 import { SyncApplication } from './application.js'
@@ -1033,6 +1034,99 @@ for (const mode of ['contract-live', 'contract-restart', 'symbol-live', 'symbol-
   assert.equal((await runSyncOperation(activeStore, f.operation.id, f.options)).status, 'conflicted'); assert.equal(f.calls.length, calls)
 })
 
+
+test('P2 anchor-dead来源修复只改真实代码绑定并保留AC测试与业务契约', async t => {
+  const sourcePath = 'src/export.js', testPath = 'tests/export.test.mjs', targetPath = '.spec/project/export-contract/spec.md'
+  const initialSource = original.split('\n').map(line => line.startsWith('| AC-EXPORT-') ? line.replace(' | derived:REQ-EXPORT-01 | REQ-EXPORT-01 |', ` | code:${sourcePath}#ExportService | REQ-EXPORT-01 |`) : line).join('\n')
+  const f = await fixture(t, { maxAttempts: 3, maxCalls: 12, maxRepairs: 2, timeoutMs: 120_000 }, false, initialSource)
+  let codeGenerations = 0, initialSpec = '', repairedSpec = '', repairDiagnostics: { code: string; message: string }[] = [], frozenPrompt: FrozenGenerationPrompt | null = null
+  f.transform((output, request) => {
+    if (request.purpose === 'elaboration_generate') {
+      const generated = structuredClone(output) as GeneratedElaboration
+      for (const acceptance of generated.changes[0].tables.AC) acceptance.source = `code:${testPath}#${String(acceptance.id)}`
+      return generated
+    }
+    if (request.purpose === 'code_generate') {
+      codeGenerations++
+      const frozen = promptInput(request) as FrozenGenerationPrompt & { repairContext?: { previousOutput: unknown; diagnostics: { code: string; message: string }[] } }
+      const elaborated = frozen.elaboratedSpecs.find(spec => spec.path === targetPath)!
+      if (codeGenerations === 1) {
+        initialSpec = elaborated.source
+        frozenPrompt = frozen
+        return output
+      }
+      assert.equal(codeGenerations, 2, '该夹具只需一次源绑定修复')
+      assert.equal(elaborated.source, initialSpec, '修复继续使用同一份已接受的P1契约')
+      assert.ok(frozen.repairContext, '失败诊断必须到达下一次代码生成')
+      repairDiagnostics = frozen.repairContext!.diagnostics.filter(item => item.code === 'anchor-dead')
+      const before = parseContract({ nodeId: 'export-contract', path: targetPath, source: initialSpec }).contract!
+      const acceptanceIds = before.items.filter(item => item.kind === 'AC').map(item => item.id)
+      assert.equal(repairDiagnostics.length, acceptanceIds.length, '每个无效AC代码锚点都应带入下一次修复')
+      for (const id of acceptanceIds) assert.ok(repairDiagnostics.some(item => item.message.includes(`${testPath}#${id}`)), `具体anchor-dead诊断必须指向${id}`)
+      repairedSpec = initialSpec
+      for (const id of acceptanceIds) {
+        const oldCell = `| code:${testPath}#${id} |`
+        assert.ok(repairedSpec.includes(oldCell), `AC.test ID ${id} 当前被错误写成代码符号`)
+        repairedSpec = repairedSpec.replace(oldCell, `| code:${sourcePath}#ExportService |`)
+      }
+      const candidate = structuredClone(output) as { changes: { path: string; content: string }[] }
+      candidate.changes.find(change => change.path === targetPath)!.content = repairedSpec
+      return candidate
+    }
+    if (request.purpose === 'code_review') return { ...(output as Record<string, unknown>), verdict: 'conflict', findings: [{ kind: 'conflict', affectedIds: ['AC-EXPORT-01'], ruleLocation: 'RULE-EXPORT-01', codeLocation: `${sourcePath}#ExportService`, evidence: '测试在验证硬门禁后停止，不覆盖真实独立审查或V3', counterexample: '完整产品验收由真实Dashboard场景另行证明', message: '窄回归在可信候选门禁后停止' }] }
+    return output
+  })
+
+  const result = await runSyncOperation(f.store, f.operation.id, f.options)
+  assert.equal(result.status, 'conflicted', JSON.stringify({ failure: result.failure, calls: f.calls.map(call => call.purpose), attempts: f.store.listAttempts(f.operation.id).map(attempt => attempt.failure) }))
+  assert.equal(codeGenerations, 2)
+  const attempts = f.store.listAttempts(f.operation.id)
+  const generationFor = (attempt: typeof attempts[number]) => {
+    const ref = attempt.checkpointRefs.map(item => JSON.parse(readEvidence(f.input.source.commonDir, item).toString())).find(item => item.version === 'sync-stage-v1' && item.stage === 'generation')
+    assert.ok(ref, `attempt ${attempt.number} 应保存生成证据`)
+    return JSON.parse(readEvidence(f.input.source.commonDir, ref.resultRef).toString()) as { status: string; candidate: { tree: string } | null; candidateValidated: boolean; reviewPassed: boolean; validationFindings: { code: string; message: string; severity: string }[] }
+  }
+  const failedGeneration = generationFor(attempts.find(attempt => attempt.number === 1)!)
+  const anchorFindings = failedGeneration.validationFindings.filter(item => item.code === 'anchor-dead')
+  assert.equal(anchorFindings.length, parseContract({ nodeId: 'export-contract', path: targetPath, source: initialSpec }).contract!.items.filter(item => item.kind === 'AC').length)
+  assert.deepEqual(repairDiagnostics, anchorFindings.map(({ code, message }) => ({ code, message })), '修复输入逐字保留了实际V1诊断')
+
+  const repairedGeneration = generationFor(attempts.find(attempt => attempt.number === 2)!)
+  assert.equal(repairedGeneration.status, 'conflict', '仅由本夹具注入的后续review停止，证明候选已越过V1硬门禁')
+  assert.equal(repairedGeneration.candidateValidated, true)
+  assert.equal(repairedGeneration.validationFindings.some(item => item.code === 'anchor-dead' || item.severity === 'error'), false, '修复后不再存在阻断锚点或硬门禁错误')
+  const entry = readTree(f.input.source.commonDir, repairedGeneration.candidate!.tree).find(item => item.path === targetPath)!
+  const candidateSpec = readObject(f.input.source.commonDir, entry.oid).toString('utf8')
+  assert.equal(candidateSpec, repairedSpec, '候选只能将错误source绑定替换为真实声明符号')
+
+  const beforeContract = parseContract({ nodeId: 'export-contract', path: targetPath, source: initialSpec }).contract!
+  const afterContract = parseContract({ nodeId: 'export-contract', path: targetPath, source: candidateSpec }).contract!
+  assert.deepEqual(afterContract.items.map(item => item.id), beforeContract.items.map(item => item.id), '全部业务稳定ID保持')
+  for (const prior of beforeContract.items) {
+    const next = afterContract.items.find(item => item.id === prior.id)!
+    assert.ok(sameContractBusinessMeaning(prior, next), prior.id)
+    if (prior.kind === 'AC' && next.kind === 'AC') assert.equal(next.test, prior.test, `${prior.id} 的AC.test绑定保持`)
+  }
+  assert.ok(afterContract.items.filter(item => item.kind === 'AC').every(item => item.source.kind === 'code' && item.source.ref === `${sourcePath}#ExportService`))
+
+  const acceptedFiles = new Map(frozenPrompt!.files)
+  acceptedFiles.set(targetPath, initialSpec)
+  const before = await readFrozenContracts(f.root, acceptedFiles)
+  const repairedFiles = new Map(acceptedFiles).set(targetPath, candidateSpec)
+  const after = await readFrozenContracts(f.root, repairedFiles)
+  const policy = { newNodeRawSources: new Map<string, string>(), verifications: f.plan.verifications.map(item => item.definition) }
+  assert.deepEqual(checkGenerationContractIntent(before, after, policy), [], '保护项门禁允许单独修正真实source绑定')
+  assert.equal(after.findings.some(item => item.code === 'anchor-dead'), false, '修复后的真实声明锚点通过冻结源码解析')
+
+  const bareSource = candidateSpec.replace(`| code:${sourcePath}#ExportService |`, `| code:${sourcePath} |`)
+  assert.ok(parseContract({ nodeId: 'export-contract', path: targetPath, source: bareSource }).findings.some(item => item.code === 'invalid-source'), '裸code:path仍须由现有schema拒绝')
+  const acceptedAcceptance = afterContract.items.find(item => item.kind === 'AC' && item.id === 'AC-EXPORT-07')!
+  if (acceptedAcceptance.kind !== 'AC') assert.fail('预期AC-EXPORT-07仍是验收契约')
+  const weakenedSpec = candidateSpec.replace(acceptedAcceptance.assertion, '有结果即可')
+  assert.notEqual(weakenedSpec, candidateSpec, '夹具应实际触及一条保护断言')
+  const weakened = await readFrozenContracts(f.root, new Map(repairedFiles).set(targetPath, weakenedSpec))
+  assert.ok(checkGenerationContractIntent(before, weakened, policy).some(item => item.code === 'generation-protected-meaning-changed' && item.itemId === 'AC-EXPORT-07'), '保护AC断言变化仍由既有硬门禁拒绝')
+})
 
 test('P3首轮生成收到规范P1 implementation-review完整诊断而不改批准义务', async t => {
   const f = await fixture(t, { maxAttempts: 2, maxCalls: 8, maxRepairs: 1, timeoutMs: 120000 })

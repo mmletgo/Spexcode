@@ -56,6 +56,8 @@ P3 oracle 绑定负例从真实 Git/SQLite 受控 decision 进入生成独审，
 
 P3生成诊断在真实SQLite/Git复现普通contract引用错误回P1和symbol修复丢完整finding；live及重开SQLite后均只一次P1、下一代码生成逐字收到全部finding（含重复完成先突变的反例），完整已批准正文/预算/deadline/source/index保持。专用contract-omission绑定真实path/existingID/affectedIds仍回原refinement，代码独审在V3前明确停止，不冒称运行或交付通过；终态重入不增call。
 
+P2 `anchor-dead` 来源修复回归从真实 P1 输出含测试用例 ID 的错误 `source=code` 开始，证明 V1 finding 原样进入下一代码生成；将来源仅修正为冻结源码中的真实声明后通过硬门禁，保持完整 sync-v1 正文、业务稳定 ID、AC 断言及 `AC.test`。裸 `code:path` 仍报 `invalid-source`，改动 AC 断言仍触发保护项门禁；独立审查由夹具明确停止，不冒称 V3 或交付通过。
+
 旧refinement stage与已保存repair-input分别经SQLite重启证明合法旧marker不再派P1，仍从实际generation独审恢复全部具体findings；新marker错existingID及损坏JSON保留失败、零新call/receipt。首轮规范P1 implementation-review通过原P1独审defer后，实际code_generate收到完整ContractFinding（证据/修复决定/relatedIds）及previousOutput:null，完整批准义务不改。
 
 旧规则引用RULE位置而affectedIds仅有关联AC的真实历史形态单独回归：先复现误套新omission includes(ID)造成unsupported，再验证只撤细化权、完整独审发现不丢且不再派P1。
