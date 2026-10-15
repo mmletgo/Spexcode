@@ -438,6 +438,7 @@ consumes the token after it.`,
        spex sync pause|resume
        spex sync verify <node-id> [--request-id <id>]
        spex sync pause|resume|cancel|recover <operation-id>
+       spex sync check --base <sha> --candidate <sha> [--policy <trusted-sha>] [--repository <path>] [--evidence-directory <existing-directory>]
 
 在 .spec/spexcode.json 的 sync 字段登记 sync-settings-v1、sourcePaths/testPaths/readPaths、
 verifications、mandatoryTests、facts 与 budget，再启用当前输入工作树的授权。
@@ -455,6 +456,10 @@ show/status 展示真实失败、GAP、过期和交付工作树；workspace_sync
 手动 --origin code|combined 接入外部代码变更并分析业务冲突；来源不构成采用新业务的授权。
 decide 绑定 show 中的原输入、可信分析及具体 finding IDs；保持需求、采用行为或新规则进入新关联操作。
 启用后服务持续观察授权来源；无参数 pause/resume 控制物理输入自动执行，带 operation ID 控制单个操作。暂停仍记录最新输入；服务停止明确离线。所有命令输出 JSON。
+check 无需后台或本机操作数据库，从真实 Git base/candidate/policy 重算旧新完整影响范围并独审、隔离执行。
+policy 缺省 base，只有可信调用者才能指定已受信政策；候选不能用自己的配置自免检。
+退出码：passed 或已配置且无影响的 not_applicable 为0，失败/未完成恢复为1，unsupported为2。
+coverage 明确列未纳入范围；局部检查通过不表示全项目已同步。
 配置示例：spex guide sync。\n\n${ROUTING_NOTE}`,
   },
   spec: {

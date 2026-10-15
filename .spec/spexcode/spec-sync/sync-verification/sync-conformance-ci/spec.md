@@ -22,3 +22,5 @@ related:
 配套 workflow 使用 pull_request_target，从明确 base SHA checkout/安装/构建。候选只 fetch Git 对象，不 checkout；验证 merge snapshot 两个父提交精确等于事件 base/head，目标前进则失败并等待新组合检查。Git token只读、不持久写入配置，候选代码只在 [[verification-executor]] 无网络/认证挂载的容器运行。无 native readonly 语义能力、认证或 Docker 返回 unsupported，不以 CI 运行完成替代业务通过。
 
 workflow 文件落地不等于远端 required-check 已配置；需要仓库管理者在外部保护设置登记 sync-conformance，并提供既有受支持 readonly adapter 的实际运行环境。未启用同步范围仍明确显示未治理，不由单个 green check 推断所有需求完成。既有 CI job 保留。
+
+配套 workflow 的受支持环境及不可变候选获取由 [[sync-protected-workflow]] 约束。
