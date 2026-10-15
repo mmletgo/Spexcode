@@ -12,13 +12,15 @@ related:
 
 ## raw source
 
-CI 不能依赖开发机数据库或候选自行提交的通过记录，也不能因候选删除节点、验收或弱化命令让旧义务消失。
+CI 不能依赖开发机数据库或候选自行提交的通过记录，也不能因候选删除节点、验收或弱化命令让旧义务消失。原始需求变化由受信 policyCommit 精确登记前后摘要，之后自动验证，不重复批准同一需求。
 
 ## expanded spec
 
 实现 [[sync-verification]] 的可携带检查入口。调用者明确提供真实 baseCommit、candidateCommit 与受信 policyCommit 的不可变提交 SHA；policy 默认受保护基线，外部 CI 才能指定其他已受信政策版本。候选配置不能选择自己的 runner 或政策。读取真实 Git 对象；原工作文件、index、HEAD 与本机数据库不参与结论、不被修改。临时 Git evidence 只保存本次检查材料，不复用开发机 receipt。
 
 影响范围使用 base 与 candidate 契约图及真实变化路径并集，复用 parser、contractImpact、coverage 和完整冻结锚点校验。删除 schema、节点、AC、测试、修改 VERIFY 或同步配置仍进入旧范围。命令及 mandatory oracle 从新旧真实 owner 和影响闭包选择；删除 owner 仍受基线归属约束，无 owner 的外部保护登记继续严格保留。oracle 自身变更按旧新归属进入影响范围，不能因没有 AC 引用略过。无关路径不强制全仓验证，结果列明未治理路径；局部 passed 不能宣称全项目覆盖。结果独立列 coverage.mapping、governed/uncovered NodeIds 和 Paths，verificationExtent 固定为 affected_scope。无可信sync配置或共同基线时 unsupported，不因空scope给passed；已配置且纯无关变化为 not_applicable，不运行模型或容器，也不计作passed。已有非sync-v1节点始终列入未纳入，不能进最终全项目完成分子。候选不能在保留节点时去除 schema。合法 raw/规则演化和新增验收交由同一独立候选审查核实来源；退役的旧 AC 保留旧 test 路径、稳定 ID 与固定命令，必须有变化后的真实负向断言，完整旧新源码和断言一起独审。
+
+影响闭包中原始需求的新增、修改和删除必须通过 [[sync-intent-authorization]]，缺失或摘要不匹配在模型和容器执行前拒绝；结果保留每条路径与前后摘要。候选自带授权文件不能自批。匹配的受信登记、完整旧新原意、授权文件摘要及 policyCommit 进入独审冻结输入及其摘要。授权只证明所选政策批准精确意图差量，不证明实现正确，也不豁免结构、旧稳定测试、固定命令或 oracle。
 
 每次新建独立 native 请求，不回放先前会话通过结果。V2 使用 [[sync-candidate-review]] 与既有 readonly native structured adapter，完整绑定 base/candidate/policy/tree、范围和读集合摘要。完整上下文超过2MiB时复用 [[frozen-context-reader]] 无损读取与精确native history覆盖证明，不因内联大小unsupported或截断；不存在已验证语义/读取能力仍明确unsupported。测试可注入 runner，结果明确标记 injected；产品入口不接受传入 passed JSON。V3 仅复用 [[verification-executor]]，基线和候选 AC 分别按可信固定政策计划，再合并全部必需稳定 test ID；候选导出无 Git 和宿主认证依赖。旧命令与新政策命令均执行，无法登记的新政策变更明确阻塞。Docker 不可用、测试缺失/跳过/失败、独审拒绝与绑定不匹配都不能通过。
 

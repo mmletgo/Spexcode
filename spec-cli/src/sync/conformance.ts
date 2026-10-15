@@ -12,6 +12,8 @@ import type { ElaborationRunner, ElaborationTrace } from './elaboration-types.js
 import { readFrozenContracts } from './frozen-contracts.js'
 import type { FrozenContracts } from './frozen-contracts.js'
 import type { GenerationReview } from './generation-types.js'
+import { bindIntentAuthorizations, INTENT_AUTHORIZATION_PATH, rawIntentChanges } from './intent-authorization.js'
+import type { IntentAuthorizationCheck } from './intent-authorization.js'
 import type { CandidateRef, InputSnapshot } from './operation-types.js'
 import { coveredPath, readSyncSettings } from './settings.js'
 import { contentHash, objectGit, readObject, readTree, writeEvidence } from './snapshot.js'
@@ -37,6 +39,7 @@ export type ConformanceResult = {
   identities: { baseCommit: string; candidateCommit: string; policyCommit: string; baseTree: string; candidateTree: string; policyTree: string } | null
   inputDigest: string | null
   readSetDigest: string | null
+  intentAuthorization: IntentAuthorizationCheck
   scope: { nodeIds: string[]; itemIds: string[]; acceptanceIds: string[]; retiredIds: string[]; readPaths: string[] }
   unmanagedPaths: string[]
   /** 映射覆盖与本次影响范围的通过分开；不能从scope通过推断全项目同步。 */
@@ -111,7 +114,7 @@ function acceptances(graph: ContractGraph, ids: readonly string[]): Acceptance[]
 export async function runConformance(supplied: ConformanceInput, options: ConformanceOptions = {}): Promise<ConformanceResult> {
   const { signal, ...data } = supplied, input = structuredClone(data)
   const evidenceDirectory = input.evidenceDirectory ? realpathSync(input.evidenceDirectory) : mkdtempSync(join(tmpdir(), 'spex-conformance-'))
-  const result: ConformanceResult = { version: 'sync-conformance-v1', status: 'failed', applicable: false, identities: null, inputDigest: null, readSetDigest: null, scope: { nodeIds: [], itemIds: [], acceptanceIds: [], retiredIds: [], readPaths: [] }, unmanagedPaths: [], coverage: { mapping: 'unconfigured', governedNodeIds: [], uncoveredNodeIds: [], governedPaths: [], uncoveredPaths: [] }, verificationExtent: 'affected_scope', reviewExecution: options.testReviewRunner ? 'injected' : 'native', verificationExecution: options.testVerificationDriver ? 'injected' : 'docker', review: null, trace: null, runs: [], diagnostics: [], evidenceDirectory }
+  const result: ConformanceResult = { version: 'sync-conformance-v1', status: 'failed', applicable: false, identities: null, inputDigest: null, readSetDigest: null, intentAuthorization: { artifactPath: INTENT_AUTHORIZATION_PATH, artifactDigest: null, changes: [] }, scope: { nodeIds: [], itemIds: [], acceptanceIds: [], retiredIds: [], readPaths: [] }, unmanagedPaths: [], coverage: { mapping: 'unconfigured', governedNodeIds: [], uncoveredNodeIds: [], governedPaths: [], uncoveredPaths: [] }, verificationExtent: 'affected_scope', reviewExecution: options.testReviewRunner ? 'injected' : 'native', verificationExecution: options.testVerificationDriver ? 'injected' : 'docker', review: null, trace: null, runs: [], diagnostics: [], evidenceDirectory }
   try {
     if (signal?.aborted) fail('cancelled', '检查已取消')
     const root = realpathSync(input.repository), sourceCommon = realpathSync(git(root, ['rev-parse', '--path-format=absolute', '--git-common-dir']))
@@ -147,8 +150,10 @@ export async function runConformance(supplied: ConformanceInput, options: Confor
       if (owners.length) effectiveChanged.push(...owners.map(owner => owner.path))
       else unknownOracleChanged = true
     }
-    const scope = scopeOf(before, after, effectiveChanged, changed.includes(policyPath) || policy.commit !== base.commit || dependencyChanged || unknownOracleChanged)
+    const scope = scopeOf(before, after, effectiveChanged, changed.includes(policyPath) || digest(baseSettings) !== digest(trustedSettings) || dependencyChanged || unknownOracleChanged)
     result.scope.nodeIds = scope.nodeIds; result.scope.itemIds = scope.itemIds
+    const intentChanges = rawIntentChanges(before.files, after.files, [...before.contracts, ...after.contracts].filter(contract => scope.nodeIds.includes(contract.nodeId)).map(contract => contract.path))
+    result.intentAuthorization = bindIntentAuthorizations(intentChanges, undefined)
     result.applicable = scope.nodeIds.length > 0
     if (trustedSettings) for (const node of after.nodes.filter(node => changed.includes(node.path))) {
       const roots = trustedSettings.nodeIds?.flatMap(id => [...before.nodes, ...after.nodes].filter(rootNode => rootNode.id === id).map(rootNode => rootNode.path.slice(0, -'/spec.md'.length)))
@@ -210,6 +215,11 @@ export async function runConformance(supplied: ConformanceInput, options: Confor
       if (before.files.get(oracle.testPath) !== after.files.get(oracle.testPath)) fail('oracle_changed', `基线不可改 oracle 被更改: ${oracle.testPath}`)
     }
     for (const oracle of newMandatory) if (policyFiles.get(oracle.testPath) !== after.files.get(oracle.testPath)) fail('oracle_changed', `候选必须保留受信政策版本oracle全文: ${oracle.testPath}`)
+    const intentPolicy = policyFiles.get(INTENT_AUTHORIZATION_PATH)
+    if (policyEntries.some(entry => entry.path === INTENT_AUTHORIZATION_PATH) && intentPolicy === undefined) fail('invalid_intent_authorizations', '受信原意授权文件必须是普通 UTF-8 Git blob')
+    result.intentAuthorization = bindIntentAuthorizations(intentChanges, intentPolicy)
+    const unauthorized = result.intentAuthorization.changes.filter(change => change.authorization === null)
+    if (unauthorized.length) fail('intent_unauthorized', `受信 policyCommit 未授权精确原意差量: ${JSON.stringify(unauthorized)}`)
     const readPaths = new Set<string>([policyPath, ...changed.filter(path => !isHostPrivatePath(path))])
     for (const frozen of [before, after]) for (const contract of frozen.contracts.filter(contract => scope.nodeIds.includes(contract.nodeId))) {
       readPaths.add(contract.path)
@@ -227,7 +237,7 @@ export async function runConformance(supplied: ConformanceInput, options: Confor
     result.scope.readPaths = sorted(readPaths)
     const readSet = result.scope.readPaths.map(path => ({ path, before: before.files.get(path) ?? null, candidate: after.files.get(path) ?? null }))
     result.readSetDigest = digest(readSet)
-    const context = { identities: result.identities, scope: result.scope, readSetDigest: result.readSetDigest, readSet, oldPolicy, trustedPolicy: trusted, oldContracts: before.contracts.filter(contract => scope.nodeIds.includes(contract.nodeId)), candidateContracts: after.contracts.filter(contract => scope.nodeIds.includes(contract.nodeId)), runs }
+    const context = { identities: result.identities, scope: result.scope, readSetDigest: result.readSetDigest, readSet, intentAuthorization: result.intentAuthorization, intentChanges, oldPolicy, trustedPolicy: trusted, oldContracts: before.contracts.filter(contract => scope.nodeIds.includes(contract.nodeId)), candidateContracts: after.contracts.filter(contract => scope.nodeIds.includes(contract.nodeId)), runs }
     result.inputDigest = digest(context)
     const candidateDigest = digest({ commit: candidate.commit, tree: candidate.tree, entries: candidateEntries })
     const reviewContext = { ...context, inputId: result.inputDigest, candidateDigest }
@@ -235,7 +245,7 @@ export async function runConformance(supplied: ConformanceInput, options: Confor
     writeFileSync(join(evidenceDirectory, 'input.json'), serialized)
     const runner: ElaborationRunner = options.testReviewRunner ?? (async request => (await import('../session-structured.js')).runStructuredSession(request))
     const reviewed = await runCandidateReview({ root, base: base.commit, requestKey: `conformance:${result.inputDigest}:${randomUUID()}`, inputDigest: result.inputDigest, purpose: 'code_review', timeoutMs: trusted.callTimeoutMs ?? trusted.budget.timeoutMs, signal, model: 'gpt-6.1-sol', effort: 'high', schema: GENERATION_REVIEW_SCHEMA,
-      prompt: `${CANDIDATE_REVIEW_INSTRUCTIONS}\n这是从真实Git对象重建的独立CI候选检查，没有builder总结或本机passed证据。base∪candidate旧新完整契约和断言同入读集合。candidate raw变化只能是确有业务来源的合法新需求；退役必须由真实raw或上层规则变更支持，旧AC保留原test路径、稳定ID与固定命令，改成验证移除后行为的真实负向断言。逐项核退役来源和负向断言，随意删schema/node/AC/test、弱化raw或断言均repair。新旧所有itemIds均必须checkedIds，retiredIds仍是本次实际待审义务。没有裁决权限，不得用oracle-policy批准命令或oracle更新。缺少调用依赖必须repair。\n冻结完整输入:\n${serialized}` }, runner, { inputId: result.inputDigest, candidateDigest, requiredIds: scope.itemIds, actualIds: scope.itemIds, priorIds: [...before.graph.items.keys()] })
+      prompt: `${CANDIDATE_REVIEW_INSTRUCTIONS}\n这是从真实Git对象重建的独立CI候选检查，没有builder总结或本机passed证据。base∪candidate旧新完整契约和断言同入读集合。intentAuthorization仅来自外部可信调用者选定的policyCommit，程序已精确匹配intentChanges的path及旧新raw摘要；此登记批准该具体原意差量，source是来源说明而非身份签名，候选自带记录不提供权限。授权不证明实现正确；仍须核对完整旧新raw、实现、规则及断言。退役必须由授权raw或上层规则变更支持，旧AC保留原test路径、稳定ID与固定命令，改成验证移除后行为的真实负向断言。逐项核退役来源和负向断言，随意删schema/node/AC/test、弱化未授权raw或断言均repair。新旧所有itemIds均必须checkedIds，retiredIds仍是本次实际待审义务。没有裁决权限，不得用oracle-policy批准命令或oracle更新。缺少调用依赖必须repair。\n冻结完整输入:\n${serialized}` }, runner, { inputId: result.inputDigest, candidateDigest, requiredIds: scope.itemIds, actualIds: scope.itemIds, priorIds: [...before.graph.items.keys()] })
     result.review = reviewed.review; result.trace = reviewed.trace
     if (reviewed.review.verdict !== 'accept') fail('review_rejected', JSON.stringify(reviewed.review.findings))
     if (signal?.aborted) fail('cancelled', '独审后已取消，拒绝运行候选')
