@@ -97,7 +97,6 @@ async function readInput(input: InputSnapshot, plan: SyncCoordinatorPlan, previo
     const bytes = readObject(input.source.commonDir, entry.oid)
     if (entry.mode !== '120000' && isUtf8Text(bytes)) files.set(entry.path, bytes.toString('utf8'))
   }
-  if (Buffer.byteLength(canonical([...files])) > 2 * 1024 * 1024) fail('context_budget', '完整可信上下文超过2MiB，不截断')
   for (const target of plan.targets) if (!within(target.path, plan.writePaths) || !within(target.path, plan.readPaths)) fail('target_scope', `目标必须在可信读写集合: ${target.path}`)
   const ids = new Set<string>()
   for (const test of plan.mandatoryTests) {
@@ -661,7 +660,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           oracleConflicts.push({ decisionRef: authority.requestRef, stableDecisionId: authority.stableDecisionId, decision: authority.decision, ruleIds, verification: verification.definition, testPath: oracle.testPath, testId: oracle.testId, oracleDigest: contentHash(view.files.get(oracle.testPath)!), evidence: finding.evidence, counterexample: finding.counterexample, message: finding.message })
         }
         const oracleFailure = oracleErrors.length ? { code: 'review_invalid', message: JSON.stringify({ errors: oracleErrors, review: generated.review }) } : oracleConflicts.length ? { code: 'oracle_policy_conflict', message: JSON.stringify({ requiredAction: '由可信owner发布与所选新意图相容的oracle版本；当前oracle/固定命令仍有效且未通过，不得改回旧意图或自免检', conflicts: oracleConflicts, findings: generated.review!.findings }) } : null
-        const kind: SyncFailure['kind'] = oracleErrors.length ? 'repairable' : generated.status === 'needs_input' ? 'missing_input' : generated.status === 'conflict' ? 'conflict' : generated.status === 'unsupported' || ['input_invalid', 'context_budget'].includes(generated.failure?.code ?? '') ? 'unsupported' : 'repairable'
+        const kind: SyncFailure['kind'] = oracleErrors.length ? 'repairable' : generated.status === 'needs_input' ? 'missing_input' : generated.status === 'conflict' ? 'conflict' : generated.status === 'unsupported' || generated.failure?.code === 'input_invalid' ? 'unsupported' : 'repairable'
         const issue = failure(oracleFailure?.code ?? generated.failure?.code ?? 'generation_failed', oracleFailure?.message ?? generated.failure?.message ?? '实现候选或独立评审未通过', kind, [writeEvidence(operation.input.source.commonDir, generated)])
         if (signal.aborted || generated.status === 'cancelled') fail('cancelled', issue.message, issue.evidenceRefs)
         if (kind === 'repairable' && generated.review?.verdict === 'repair' && generated.candidate && !nodeChanges.length) {

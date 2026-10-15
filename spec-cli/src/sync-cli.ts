@@ -5,9 +5,10 @@ import { clientSyncRequest } from './client.js'
 import { readSpecBodyEdit } from './spec-body-edit.js'
 import { stripRefSigil } from './mentions.js'
 
-/** CLI 只提交真实后端操作并打印持久结果；操作在服务进程内继续，无 Dashboard 依赖。 */
+/** 同步操作交由真实后端持续执行；独立 check 直接调用同一候选验证能力。 */
 export async function runSyncCli(argv: readonly string[]): Promise<void> {
   const [verb] = argv
+  if (verb === 'check') return (await import('./sync/conformance-cli.js')).runConformanceCli(argv.slice(1))
   const values = new Set(['--node', '--request-id', '--retry-of', '--patch-file', '--limit', '--config-digest', '--api', '--port', '--password', '--origin', '--input-id', '--analysis', '--findings', '--choice', '--rule'])
   const allowed = new Set([...values, '--json', '--insecure'])
   const positional: string[] = []

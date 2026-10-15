@@ -138,7 +138,14 @@ test('AC复合门禁逐项诊断未变规则与不绑定来源，不把多个all
     proposal.acceptanceChanges = [{ id: 'AC-EXPORT-01', ruleIds: ['RULE-EXPORT-05'], source, reason: '只绑定本次改变的结果规则，保原其他covers义务' }]
   }))
   assert.equal(approved.authorizedChanges[0].id, 'AC-EXPORT-01')
-  await assert.rejects(analyzeCodeBehavior({ ...input, repairDiagnostics: [{ code: 'behavior_review_failed', message: 'x'.repeat(2 * 1024 * 1024) }] }, runner('allowed_change')), /超过2MiB/)
+  const diagnostic = { code: 'behavior_review_failed', message: `完整诊断开始${'x'.repeat(2 * 1024 * 1024)}完整诊断结束` }, calls: string[] = []
+  await analyzeCodeBehavior({ ...input, repairDiagnostics: [diagnostic] }, async request => {
+    calls.push(request.purpose)
+    assert.ok(Buffer.byteLength(request.prompt) > 2 * 1024 * 1024)
+    assert.ok(request.prompt.includes(JSON.stringify(diagnostic)), request.purpose)
+    return runner('allowed_change')(request)
+  })
+  assert.deepEqual(calls, ['code_behavior_analyze', 'code_behavior_review'])
 })
 
 test('真实三方Git对象进入独立行为分析，允许外部行为证据先冻结再派生AC授权', async t => {

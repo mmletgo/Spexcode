@@ -30,3 +30,5 @@ P3增加run --origin spec|initial|code|combined与decide。decide接受完整ope
 P4 增加无operation参数的 pause/resume，调用 /automatic/pause|resume 物理输入门禁；带完整ID仍只控制指定操作。verify <node-id> 调 /verify 沿同一真实完整管线，status查询后台实际监听/快照/差异。enable 后服务保存即观察，CLI离线仍非零退出。
 
 --node只用于run/verify/status，不能在pause/resume上静默扩大为整个物理来源；--patch-file只用于run，verify不能默默忽略正文请求。非法组合必须在发送HTTP前明确拒绝。
+
+`spex sync check` 在普通后端命令解析前路由到 [[sync-conformance-cli]]；这是显式基线、候选与可信政策的独立重验，不调用后端或修改同步状态。顶层保留真实检查退出码。

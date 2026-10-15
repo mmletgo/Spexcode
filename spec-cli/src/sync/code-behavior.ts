@@ -130,7 +130,6 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   const readingInstructions = `冻结读取清单:\n${readingManifest}\n分析要求:\nrequiredChangedPaths必须逐项覆盖，不得缩小。readablePaths标明该具体文件全文在哪些冻结快照中存在；删除文件仍重读旧全文。plan.readPaths是目录前缀授权而非仅路径字符串相等；manifest/目录/链接只属元数据，不冒充全文。以下虚拟冻结快照是唯一输入权威，cwd的旧HEAD不是本次输入；不要以cwd缺少新增文件忽略已冻结正文。\n`
   const frozen = { requiredChangedPaths: changedPaths, readablePaths, origin: input.origin ?? 'code', decision: input.decision ?? null, repairDiagnostics: input.repairDiagnostics ?? [], inputId: input.snapshot.id, baselinePair: input.baseline, baselineSelection: input.baselineSelection ?? null, compositionEvidence: selectedEvidence, intentArtifactFiles, composed: input.composed, readSetDigest: input.readSetDigest, policyDigest: input.policyDigest, plan: input.plan, changedPaths, authorChanges, adoptedDeliveryPaths: sorted([...adopted]), authorBaseline: [...authorBefore], oldSource, verifiedDelivery: delivery, newSource: source, composedFiles: composed }
   const context = JSON.stringify(frozen)
-  if (Buffer.byteLength(context) + Buffer.byteLength(readingManifest) > 2 * 1024 * 1024) reject('完整三方行为上下文超过2MiB，不截断源码或测试')
   const decisionAuthorities = [...input.plan.decisionAuthorities ?? []]
   if (input.decision) {
     if (!input.composed.requestBlob) reject('新裁决没有冻结requestRef')

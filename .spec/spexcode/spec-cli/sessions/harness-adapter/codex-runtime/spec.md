@@ -398,3 +398,5 @@ offending name, then the probe declaration was removed. This third-module bounda
 for future large-adapter splits, rather than copying helpers to bypass a runtime import cycle. No behavior bug was
 found or changed during the relocation. The same copy-versus-shared-helper wall also appeared in the concurrent
 record-I/O extraction lane and is recorded here as a structural lesson, not a behavior fix.
+
+内部结构化执行的受限分支沿 [[structured-session-runtime]] 与 [[structured-readonly-policy]]，不继承普通项目daemon能力。v2仅登记 [[frozen-context-reader]] 的动态工具，按精确thread/turn/callId服务并持久化真实回复；原生history独立核验完整覆盖。CLI与去工具provider目录构成冻结能力身份，未答请求恢复不伪造RPC回执；普通项目runtime的归属与控制契约保持本节点定义。
