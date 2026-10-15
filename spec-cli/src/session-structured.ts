@@ -6,7 +6,7 @@ import { mainRoot, runtimeRoot, sessionArtifactPath } from '@spexcode/spec-core'
 import { readRecord, withRecordLock, writeRecord } from './session-record.js'
 import { codexStructuredTurn, codexStopStructuredTurn } from './codex-harness.js'
 import { commitCodexGenerationRegistration, prepareCodexGenerationRegistration, readCodexGenerationLedger, resolveCodexGenerationForClose } from './codex-runtime-generations.js'
-import { structuredGeneration, prepareStructuredRealm, prepareFrozenReaderRuntime, assertFrozenReaderRuntime, StructuredSessionError, StructuredSessionTransportError, structuredObserverState, structuredExecutionPolicy, type StructuredExecution, type FrozenReaderRuntime } from './session-structured-policy.js'
+import { structuredGeneration, prepareStructuredRealm, prepareFrozenReaderRuntime, assertFrozenReaderRuntime, StructuredSessionError, StructuredSessionTransportError, structuredObserverState, structuredExecutionPolicy, structuredRealmRoot, type StructuredExecution, type FrozenReaderRuntime } from './session-structured-policy.js'
 import { assertFrozenBinding, prepareFrozenPrompt, readFrozenManifest, verifyFrozenReadProof, type FrozenContextRef, type FrozenReadProof } from './frozen-context.js'
 import { configuredSessionApplication } from './session-application.js'
 import { withDeliveryLocks } from './delivery-lock.js'
@@ -31,7 +31,11 @@ export type StructuredSessionRequest = {
 }
 export type StructuredSessionResult = { sessionId: string; threadId: string; turnId: string; output: unknown; resultDigest: string; frozenReadProof?: FrozenReadProof }
 const digest = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex')
-const realmRoot = (readerRuntime?: FrozenReaderRuntime): string => readerRuntime ? join(runtimeRoot(), 'structured-frozen-read-only-v2', readerRuntime.catalogDigest) : join(runtimeRoot(), 'structured-read-only-v1')
+const requiredRealmRoot = (execution: StructuredExecution): string => {
+  const root = structuredRealmRoot(execution)
+  if (!root) throw new StructuredSessionError('unsupported', 'structured execution policy cannot select a trusted control realm')
+  return root
+}
 const activeControllers = new Map<string, AbortController>()
 const activeFinished = new Map<string, Promise<void>>()
 const cancellations = new Map<string, Promise<StructuredCancellationResult>>()
@@ -64,7 +68,7 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
   }
   try {
     await update({ state: 'running' })
-    const { endpoint, runtimeDir } = await structuredGeneration(realmRoot(execution.readerRuntime), execution.readerRuntime)
+    const { endpoint, runtimeDir } = await structuredGeneration(requiredRealmRoot(execution), execution.readerRuntime)
     const result = await codexStructuredTurn(endpoint.socketPath, rec.worktreePath, readFileSync(sessionArtifactPath(id, 'launch'), 'utf8'), execution, {
       signal: controller.signal,
       onTimeout: async () => { await cancelStructuredSession(id, { reason: 'timeout' }) },
@@ -124,9 +128,9 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
   const validate = new Ajv().compile(request.schema)
   if (request.frozenContext && !request.readerRuntime) request = { ...request, readerRuntime: await prepareFrozenReaderRuntime(join(runtimeRoot(), 'structured-frozen-read-only-v2')) }
   if (request.readerRuntime) assertFrozenReaderRuntime(request.readerRuntime, request.model)
-  prepareStructuredRealm(realmRoot(request.readerRuntime), request.readerRuntime)
   const { sessionCreateRequest, requestQueueDrain, queueStructuredRecovery, refreshQueueCandidate } = await import('./sessions.js')
   const execution = structuredExecutionPolicy(request)
+  prepareStructuredRealm(requiredRealmRoot(execution), request.readerRuntime)
   const created = await sessionCreateRequest({ prompt: request.prompt, ...(request.base ? { base: request.base } : {}) }, {
     requestKey: request.sessionCreateKey ?? request.requestKey, signal: request.signal, timeoutMs: Math.min(30_000, request.timeoutMs), structuredExecution: execution,
   })
@@ -164,7 +168,7 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
           throw new StructuredSessionError('stale_result', 'structured frozen result lacks exact native history coverage evidence')
         if (state.frozenContext) {
           verifyFrozenReadProof(state.frozenContext, state.frozenReadProof!, { threadId: state.threadId, turnId: state.turnId })
-          const runtimeDir = join(realmRoot(state.readerRuntime), 'control'), ledger = readCodexGenerationLedger(runtimeDir)
+          const runtimeDir = join(requiredRealmRoot(state), 'control'), ledger = readCodexGenerationLedger(runtimeDir)
           const binding = ledger.bindings[id], generation = binding && ledger.generations[binding.generationId]
           if (!generation || generation.state === 'reclaimed' || binding.threadId !== state.threadId || rec.harnessSessionId !== state.threadId)
             throw new StructuredSessionError('stale_result', 'frozen completed result lost its exact native generation binding')
@@ -256,7 +260,7 @@ export async function cancelStructuredSession(id: string, options: { reason?: 'c
     let stop: { nativeStopped: boolean; acknowledged: boolean; turnId?: string; nativeStatus?: string; error?: string }
     if ((!state.threadId || state.turnStartRequested === false) && !state.turnId) stop = { nativeStopped: true, acknowledged: false, nativeStatus: 'notStarted' }
     else {
-      const runtimeDir = join(realmRoot(state.readerRuntime), 'control')
+      const runtimeDir = join(requiredRealmRoot(state), 'control')
       const binding = state.threadId && current.harnessSessionId === state.threadId ? resolveCodexGenerationForClose(runtimeDir, id, state.threadId) : null
       if (!binding)
         stop = { nativeStopped: false, acknowledged: false, error: 'exact structured generation/thread binding is unavailable; native stop is unproven' }

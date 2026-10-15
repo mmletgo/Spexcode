@@ -33,6 +33,8 @@ related:
 
 精确 session/thread 与 generation binding 一致时，取消复用 [[shared-runtime-generation-rotation]] 的只读 close 解析。原 detached 进程组已由 [[detached-runtime-identity]] 正面证明消失，即使 ledger 尚未 reclaimed，也可持久结算 nativeStopped/generationGone；不发送 RPC、不启动或恢复 native、不替换绑定。原失败首轮只有 thread 而没有 turnId 也适用。缺失或不匹配绑定、错 receipt、PID 查询未知、仅 socket 消失或残留进程组仍保持 pending，不能从错误字符串或原生缺行推断停止。
 
+结构化 record 的固定 policy 唯一决定其 Codex control realm：v1 使用 `structured-read-only-v1/control`；v2 使用 `structured-frozen-read-only-v2/<readerRuntime.catalogDigest>/control`。创建登记、恢复、取消以及后续 close 都解析同一 realm，并继续核对精确 session/thread/generation binding；另一个 realm 中看似匹配的 binding 不能替代。
+
 AbortSignal、caller 超时与显式取消使用同一持久取消协议。确认停止后 cancelled/timeout 为 offline 并允许下一请求使用容量；拒绝控制、连接中断、generation 身份失效或 ACK 后仍 active 时，保持 cancelling/unknown 和原容量保留，返回 cancellation_pending。调用方可以重试取消取得真实结算证据；不得 kill 共享 realm，不能仅凭已发送 frame、RPC ACK 或 caller 截止宣称模型停止。断连 running 的原恢复语义不变。
 
 跨进程取消共用独立的原生控制互斥；控制 RPC 不占用会话 record 锁，observer 可以保存身份并结束。取消开始及结算均在短 record 事务内重读当前记录；同一精确原生身份的 nativeStopped 终态证明不能被迟到的开始、失败、超时或 observer 诊断降回 cancelling。已收到 ACK 的历史也在重试中保留，返回结果来自实际持久结算。已绑定的 thread/turn 不能被不同迟到身份替换；同一身份的补全仍可保存。外部取消完成后，原 caller 撤销本地观察，新的无 Dashboard 进程可从持久证明释放容量并派发不同请求键。损坏的取消状态仅通过正式取消入口重读精确原生终态恢复，不手工清除容量或改写记录。

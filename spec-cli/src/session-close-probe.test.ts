@@ -1,8 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { platform, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { codexHarness } from './codex-harness.js'
 import { processStartToken } from '@spexcode/spec-core'
@@ -38,6 +38,8 @@ test('close uses a target tmux probe when the global listing is busy', { concurr
   const branch = `node/${id}`
   const tmuxState = join(home, 'tmux-killed')
   let leaf: ReturnType<typeof spawn> | null = null
+  let rejectRepeatColdProof = false
+  let exposeUnrelatedAbsentRoot = false
 
   mkdirSync(project, { recursive: true })
   mkdirSync(join(project, '.spec'), { recursive: true })
@@ -86,8 +88,14 @@ esac
       await new Promise((resolve) => setTimeout(resolve, 20))
     assert.ok(processStartToken(leaf.pid!), 'target probe fixture acquires a stable leaf start identity')
     writeFileSync(sessionArtifactPath(id, 'agent.pid'), `${leaf.pid}\n`)
-    codexHarness.sharedRuntimes = () => []
-    codexHarness.coldPreflight = async () => ({ ok: true, receipt: Object.freeze({ fixture: 'target-probe' }) })
+    codexHarness.sharedRuntimes = () => exposeUnrelatedAbsentRoot ? [{
+      key: 'unrelated-codex-generation', label: 'unrelated Codex generation', pidFile: join(home, 'unrelated.pid'),
+      receiptFile: join(home, 'unrelated.receipt'), residency: async () => ({ healthy: true, referenceIds: [], rootAbsent: true }),
+      probe: async () => ({ healthy: true, references: [] }),
+    }] : []
+    codexHarness.coldPreflight = async () => rejectRepeatColdProof
+      ? { ok: false, reason: 'exact target generation binding is missing' }
+      : { ok: true, receipt: Object.freeze({ fixture: 'target-probe' }) }
     codexHarness.coldRuntime = async () => ({ ok: true })
     codexHarness.cleanupRuntime = async () => {}
     const selfSend = await sendText(id, 'self-send lock probe', id, { deferDrain: true })
@@ -108,7 +116,13 @@ esac
     const postCloseSend = await sendText(id, 'must not leave closed-sender debt', id)
     assert.equal(postCloseSend.ok, false, 'a closed sender cannot append new outbound debt')
     assert.match(postCloseSend.error ?? '', /sender session .* is closed/)
-    assert.equal(runtimeRoot(), join(home, 'projects', project.replace(/[/.]/g, '-')))
+    assert.equal(runtimeRoot(), join(home, 'projects', realpathSync(project).replace(/[/.]/g, '-')))
+
+    execFileSync('git', ['-C', project, 'worktree', 'add', '-q', worktree, branch])
+    rejectRepeatColdProof = true
+    exposeUnrelatedAbsentRoot = true
+    await assert.rejects(() => closeSession(id), /exact target generation binding|exact shared-runtime generation binding/,
+      'an unrelated empty descriptor cannot short-circuit an archived record retry')
   } finally {
     codexHarness.sharedRuntimes = originalShared
     codexHarness.coldPreflight = originalColdPreflight
@@ -129,7 +143,7 @@ esac
   }
 })
 
-test('close reports detached residue by PID and stays quiet when no residue remains', { concurrency: false, timeout: 30_000 }, async () => {
+test('close reports detached residue by PID and stays quiet when no residue remains', { concurrency: false, timeout: 30_000, skip: platform() !== 'linux' }, async () => {
   const leave = await enterCloseProbe()
   const previousHome = process.env.SPEXCODE_HOME
   const previousPath = process.env.PATH

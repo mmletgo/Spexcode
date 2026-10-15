@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
-import { processStartToken, verifyDetachedRuntime, type ProcessIdentity } from '@spexcode/spec-core'
+import { processStartToken, runtimeRoot, verifyDetachedRuntime, type ProcessIdentity } from '@spexcode/spec-core'
 import { spawnDetachedRuntime } from './runtime-ownership.js'
 import { ensureCodexCurrentGeneration, type CodexGenerationEndpoint } from './codex-runtime-generations.js'
 import type { FrozenContextRef, FrozenReadProof, FrozenReadReceipt } from './frozen-context.js'
@@ -33,6 +33,19 @@ export type StructuredExecution = {
   frozenReads?: FrozenReadReceipt[]
   frozenReadProof?: FrozenReadProof
   readerRuntime?: FrozenReaderRuntime
+}
+
+/** 从持久化策略推导结构化 realm；无效或不完整策略不获得控制根。 */
+export function structuredRealmRoot(execution: unknown, root = runtimeRoot()): string | null {
+  if (!execution || typeof execution !== 'object') return null
+  const state = execution as Partial<StructuredExecution>
+  if (state.version === 1 && state.policy === 'codex-read-only-v1' && state.readerRuntime === undefined && state.frozenContext === undefined)
+    return join(root, 'structured-read-only-v1')
+  const readerRuntime = state.readerRuntime
+  if (state.version === 2 && state.policy === 'codex-frozen-read-only-v2' && state.frozenContext?.version === 1 && readerRuntime?.version === 1
+    && /^[a-f0-9]{64}$/.test(readerRuntime.catalogDigest))
+    return join(root, 'structured-frozen-read-only-v2', readerRuntime.catalogDigest)
+  return null
 }
 
 /** 固定策略只有一份构造，运行观测与冻结读取证明不参与创建载荷。 */

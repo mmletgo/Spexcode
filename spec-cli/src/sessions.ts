@@ -674,7 +674,7 @@ export async function listSessions(
     const resident = projectedRecord.harnessSessionId
       ? residentCensus.get(`${projectedRecord.harness || defaultHarness.id}:${projectedRecord.harnessSessionId}`)
       : undefined
-    const residentRequired = sessionHarness.runtimeOwnership === 'adapter' && !!projectedRecord.harnessSessionId && !!sessionHarness.sharedRuntimes?.(runtimeRoot()).length
+    const residentRequired = sessionHarness.runtimeOwnership === 'adapter' && !!projectedRecord.harnessSessionId && !!sessionHarness.sharedRuntimes?.(runtimeRoot(), projectedRecord).length
     const physical = projectedRecord.archived
       ? (sessionHarness.runtimeOwnership === 'adapter'
         ? (resident && !resident.healthy ? 'unknown' : resident?.loaded ? 'online' : snap.windows.has(id) ? 'online' : 'offline')
@@ -1765,7 +1765,7 @@ function runtimeDescriptorForRecord(rec: SessRec): { harness: Harness; descripto
   if (!rec.governed || rec.stopped || rec.archived || !rec.harnessSessionId) return null
   const harness = harnessById(rec.harness || defaultHarness.id)
   const exactKey = harness.targetDescriptorKey?.(rec) ?? null
-  const candidates = (harness.sharedRuntimes?.(runtimeRoot()) ?? []).filter((candidate) => !!candidate.observeNativeIdentity)
+  const candidates = (harness.sharedRuntimes?.(runtimeRoot(), rec) ?? []).filter((candidate) => !!candidate.observeNativeIdentity)
   const descriptor = exactKey
     ? candidates.find((candidate) => candidate.key === exactKey)
     : candidates.length === 1 ? candidates[0] : undefined
@@ -3908,18 +3908,8 @@ async function coldStopSessionUnlocked(id: string): Promise<boolean> {
       : liveness({ ...wt.rec, archived: false, stopped: false }, proofSnap)
     if (proofLv === 'unknown' || proofLv === 'starting') throw new ResourceConflict(`refusing to close ${id}: session liveness is ${proofLv}; exact cold state is unproven`)
     if (proofLv === 'offline') {
-      // A deliberately stopped shared control plane is a valid empty resident census. A durable proof plus
-      // an adapter-owned root-absent fact is the only idempotent short-circuit; a live root still has to prove
-      // the thread's archived/non-archived disk collection before we can claim it is already cold.
-      const rootAbsent = await Promise.all((h.sharedRuntimes?.(runtimeRoot()) ?? []).map(async (descriptor) => {
-        if (!descriptor.residency) return false
-        const state = await descriptor.residency()
-        return state.healthy && state.rootAbsent === true && state.referenceIds.length === 0
-      })).then((states) => states.some(Boolean))
-      if (rootAbsent) {
-        settleArchiveRecovery()
-        return true
-      }
+      // Idempotent close repeats the adapter's exact session/generation cold proof. A different empty shared
+      // descriptor cannot stand in for the native target's own durable binding and death evidence.
       const pre = await h.coldPreflight?.({ ...wt.rec, archived: false, stopped: true })
       if (!pre || pre.ok) {
         const cold = await h.coldRuntime?.({ ...wt.rec, archived: false, stopped: true }, pre?.ok ? pre.receipt : undefined)

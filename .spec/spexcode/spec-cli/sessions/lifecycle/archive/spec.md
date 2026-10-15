@@ -42,6 +42,11 @@ host process/transport is proven absent. The close guard must not treat a stale 
 For a shared Codex session whose exact generation is already positively retired, generation absence is the cold
 proof: the adapter reports an empty control plane, drops the stale binding, and close continues through its own
 archive/worktree removal. Only a live or genuinely ambiguous generation can refuse on the generation/census seam.
+For structured Codex records, that proof is read from the control root selected by the persisted v1 policy or the
+v2 reader catalog digest, and every close or compensation step uses that same root. A canonical-root or other
+realm binding cannot replace the target's exact session/thread binding. An archived retry repeats the target's
+cold preflight; an unrelated empty shared runtime does not prove this target cold. See [[codex-runtime]] and
+[[structured-session-runtime]].
 
 After cold proof, close writes the worktree tree (tracked and untracked files) as a commit whose parent is the
 current branch tip, then atomically publishes `refs/spex-archive/<session-id>` and verifies that ref. A ref or
