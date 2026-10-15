@@ -24,6 +24,8 @@ prepareSyncAdmission 返回既有 AdmitSyncInput；runSyncOperation 的 options 
 
 SyncAdmissionOptions可带retryOf，新用户显式重试身份透传admission；冻结input/request/policy与旧已接受契约义务不变，仅经store真实eligibility核验后授权新执行预算。
 
+可信应用沿旧 operation 的 executionScope 与 impactDigest 重建显式重试接入：P1 已审扩展的路径及业务 ID 进入实际读取/选择，原计划正文与 policyDigest 保持。store 仍逐项核原 scope、readSet、selection、impact 及请求，外部请求不能直接指定这两个内部值。
+
 SyncCoordinatorOptions.recoveryOnly?:boolean显式请求只结算已有资源或已开始journal；不启动未派发operation、新attempt/native/verification或无journal交付，保持用户control/input与执行预算。
 
 可信计划可携已结算decisionRefs，完整参与policyDigest，并以不可变用户裁决及已审finding.ruleIds派生精确业务supersession。模型分析产出的事实及授权通过独立checkpoint绑定，不修改计划或政策摘要。

@@ -25,6 +25,8 @@ export type SyncCoordinatorPlan = {
 export type SyncAdmissionOptions = {
   ingressKey: string; rootCauseId: string; origin: AdmitSyncInput['origin']; budget: SyncBudget
   managedRoot: string; requestBlob?: BlobRef; retryOf?: string; previousBaselinePair?: BaselinePair | null; baselineSelection?: FrozenBaselineSelection
+  /** 可信重试入口沿原 operation 已审扩展重建读集合，不改冻结计划或影响身份。 */
+  executionScope?: SyncScope; impactDigest?: string
 }
 export type SyncCoordinatorOptions = {
   plan: SyncCoordinatorPlan

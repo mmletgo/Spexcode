@@ -18,6 +18,8 @@ P4 精确 queued 场景必须先消费真实 FIFO 并确认；未确认零模型
 
 P4 精确接入测试使用真实 Git 快照和 SQLite 基线读取：完整读取选择可含只读 oracle，实际写入范围只含目标文件；同一 InputSnapshot 直接进入 admission，不重新捕获或修改作者 index/字节。缺少实际执行范围时拒绝把目录授权自动当成写锁。
 
+P4 显式重试回归先经实际 P1 扩展源码路径和业务 ID，再以明确生成执行失败停止；同一冻结计划、原 impact 及最终 selection/readSet 可重新接入，重试不再派发 P1，批准正文逐字不变，source/index 及零 journal 保持。省略已审扩展的旧实现真实失败，模型和生成执行接缝明确受控，不冒称 Docker 或真实模型完成。
+
 当前版本测试用真实无关文件提交改变全局快照 ID，证明精确操作仍有效且查询不写 index；同一 working tree 的相关 staged 对象变化仍使其过期。历史 P3 完整快照判据保持，不能由新 helper 授予旧操作更宽写权。
 
 针对性测试使用真实 SQLite 与临时Git，可明确注入模型行但V1/意图/diff/独立身份程序门禁保留。真实Docker完整成功、真实断言失败及有限修复；保护AC与命令、GAP独立分支、输入中途变化无交付、取消/重入不重复native或commit，以及source/index原样保留。完成状态重入读取真实receipt。预算和未知资源终态不能假通过。命令：`npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/sync/coordinator.test.ts`；Docker cases由 `SPEX_DOCKER_VERIFICATION_TEST=1` 启用。

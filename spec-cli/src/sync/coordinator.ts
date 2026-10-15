@@ -114,10 +114,11 @@ async function readInput(input: InputSnapshot, plan: SyncCoordinatorPlan, previo
 
 /** 接入之前冻结真实读集合和派生输入，只返回既有协议接入结构，不改 source/index。 */
 export async function prepareSyncAdmission(input: InputSnapshot, supplied: SyncCoordinatorPlan, options: SyncAdmissionOptions): Promise<AdmitSyncInput> {
-  const plan = structuredClone(supplied), view = await readInput(input, plan, options.previousBaselinePair, options.requestBlob, options.baselineSelection)
-  if (options.baselineSelection && !plan.executionScope) fail('execution_scope_missing', '精确基线接入必须冻结实际目标写入范围')
-  const scope = plan.executionScope ?? { paths: unique(plan.writePaths), contractIds: [], flowIds: [] }
-  return { ingressKey: options.ingressKey, rootCauseId: options.rootCauseId, origin: options.origin, budget: options.budget, input, ...(options.requestBlob ? { requestBlob: options.requestBlob } : {}), ...(options.retryOf ? { retryOf: options.retryOf } : {}), ...(options.baselineSelection ? { baselineSelection: options.baselineSelection } : {}), planBlob: freezeSyncPlanEvidence(input.source.commonDir, plan), scope, policyDigest: syncPlanDigest(plan), impactDigest: contentHash(canonical({ targets: plan.targets, ...(plan.executionScope ? { scope } : {}), writePaths: unique(plan.writePaths), readSetDigest: view.readSetDigest })), readSetDigest: view.readSetDigest, delivery: null, deliveryPlan: planPrivateDelivery(input, options.managedRoot, options.ingressKey), previousBaselinePair: options.previousBaselinePair ?? null }
+  const plan = structuredClone(supplied), executionScope = options.executionScope ?? plan.executionScope
+  if (options.baselineSelection && !executionScope) fail('execution_scope_missing', '精确基线接入必须冻结实际目标写入范围')
+  const scope = executionScope ?? { paths: unique(plan.writePaths), contractIds: [], flowIds: [] }
+  const view = await readInput(input, plan, options.previousBaselinePair, options.requestBlob, options.baselineSelection, executionScope?.paths)
+  return { ingressKey: options.ingressKey, rootCauseId: options.rootCauseId, origin: options.origin, budget: options.budget, input, ...(options.requestBlob ? { requestBlob: options.requestBlob } : {}), ...(options.retryOf ? { retryOf: options.retryOf } : {}), ...(options.baselineSelection ? { baselineSelection: options.baselineSelection } : {}), planBlob: freezeSyncPlanEvidence(input.source.commonDir, plan), scope, policyDigest: syncPlanDigest(plan), impactDigest: options.impactDigest ?? contentHash(canonical({ targets: plan.targets, ...(plan.executionScope ? { scope } : {}), writePaths: unique(plan.writePaths), readSetDigest: view.readSetDigest })), readSetDigest: view.readSetDigest, delivery: null, deliveryPlan: planPrivateDelivery(input, options.managedRoot, options.ingressKey), previousBaselinePair: options.previousBaselinePair ?? null }
 }
 
 type Stage = { version: 'sync-stage-v1'; operationId: string; attemptId: string; inputId: string; policyDigest: string; readSetDigest?: string; baselineSelectionRef?: BlobRef; stage: string; resultRef: BlobRef }

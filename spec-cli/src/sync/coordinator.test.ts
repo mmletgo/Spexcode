@@ -623,6 +623,44 @@ test('显式retryOf在SQLite重启后继承无未来IDs输入的accepted P1，�
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
 })
 
+test('P4显式重试保留P1扩展后的路径和readSet，冻结原计划且不再次细化', async t => {
+  const f = await fixture(t)
+  const plan = { ...f.plan, readPaths: [contractPath, '.spec/project/spec.md', '.spec/spexcode.json', 'src/export.js', 'tests/export.test.mjs'], executionScope: { paths: [contractPath], contractIds: [], flowIds: [] } }
+  const selected = f.store.readBaselineSelection(f.input.source, plan.readPaths.map(path => ({ kind: 'path', path })))
+  assert.ok('selection' in selected)
+  const operation = f.store.admitAndEnqueue(await prepareSyncAdmission(f.input, plan, { ingressKey: 'p4-expanded-before-retry', rootCauseId: 'p4-expanded-before-retry', origin: 'spec', budget: f.operation.budget, managedRoot: f.managedRoot, baselineSelection: selected.selection }))
+  f.useOperation(operation)
+  const acknowledge = (id: string) => { for (;;) { const head = f.store.nextDispatch(f.input.source.repositoryId)!; f.store.ackDispatch(f.input.source.repositoryId, head.messageId); if (head.operation.id === id) break } }
+  acknowledge(operation.id)
+  let p1Calls = 0
+  f.transform((output, request) => {
+    if (request.purpose === 'elaboration_generate') p1Calls++
+    if (request.purpose === 'code_generate') throw Object.assign(new Error('明确生成执行能力失败，未创建候选'), { code: 'unsupported' })
+    return output
+  })
+  const options = { ...f.options, plan, readCurrentPlan: () => plan }
+  const failed = await runSyncOperation(f.store, operation.id, options)
+  assert.equal(failed.operation.phase, 'failed', JSON.stringify({ failure: failed.failure, failures: f.store.listAttempts(operation.id).map(attempt => attempt.failure), purposes: f.calls.map(call => call.purpose) }))
+  assert.equal(p1Calls, 1)
+  assert.ok(failed.operation.scope.paths.includes('src/export.js'))
+  assert.ok(!plan.executionScope.paths.includes('src/export.js'))
+  const admissionOptions = { ingressKey: 'p4-expanded-explicit-retry', rootCauseId: 'p4-expanded-explicit-retry', retryOf: operation.id, origin: operation.origin, budget: operation.budget, managedRoot: f.managedRoot, previousBaselinePair: operation.previousBaselinePair, baselineSelection: failed.operation.baselineSelection!, executionScope: failed.operation.scope, impactDigest: failed.operation.impactDigest }
+  const admission = await prepareSyncAdmission(f.input, plan, admissionOptions)
+  assert.deepEqual(admission.scope, failed.operation.scope)
+  assert.equal(admission.readSetDigest, failed.operation.readSetDigest)
+  assert.equal(admission.policyDigest, operation.policyDigest)
+  assert.deepEqual(admission.planBlob, operation.planBlob)
+  const retry = f.store.admitAndEnqueue(admission); f.useOperation(retry); acknowledge(retry.id)
+  const repeated = await runSyncOperation(f.store, retry.id, options)
+  assert.equal(repeated.operation.phase, 'failed')
+  assert.equal(p1Calls, 1)
+  const prompts = f.calls.filter(call => call.purpose === 'code_generate').map(promptInput)
+  assert.deepEqual(prompts[1].elaboratedSpecs, prompts[0].elaboratedSpecs)
+  assert.equal(f.store.listJournals(retry.id).length, 0)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
+  assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+})
+
 test('recoveryOnly不派发queued操作；paused且原生尚未调用的计划仅结算资源不改control/预算/input', async t => {
   const f = await fixture(t), before = f.store.readOperation(f.operation.id)
   const queued = await runSyncOperation(f.store, f.operation.id, { ...f.options, recoveryOnly: true })
