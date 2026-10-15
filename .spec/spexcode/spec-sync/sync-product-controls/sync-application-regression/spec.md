@@ -77,6 +77,8 @@ AC-APPLICATION-P4-13以真实Git快照、显式仅投影fixture pair及公共三
 
 AC-APPLICATION-P4-14复现真实source作者注释、delivery等于source、所有bytehead均null而仅intent已消费时的源码回声，再验证统一消费判据；无生成字节差量不强迫模型添加无意义注释。P3公开裁决入口测试通过正式ack/claimQueued领取fresh exact操作，组合与analysis stage绑定真实selection/readset；旧legacy claim不再用于新操作。
 
+AC-APPLICATION-P4-15用真实 Git 快照和明确只读投影 pair 复现旧非 null 源码 byte head 对已完整消费源码的回声，不向 SQLite 登记假 receipt。统一组合证明后重复 observeNode 不新建 operation 或派发；后续新源码与新 raw 仍分别显示真实 code/spec 变化。真实 journal 只写 Spec 而保旧源码头的证明由 [[sync-composition-frontier-regression]] 补齐，实际自动重复与修复后的 Dashboard 采纳由产品验收留证。
+
 P4 partial→decide使用原P3-DELIVERY keep_intent真实链补强：fresh exact source先产生settled partial receipt，断言原selection与真实heads已分离；旧caller准入复现SYNC_BASELINE_STALE。修后新decision保原input/analysis/scope，沿相同资源当前selection经Docker落地，交付后同选择新运输ID仍归原operation/deadline/calls/receipt。确定性冲突仅指真实src的filter边界，其他changed路径逐项refactor覆盖，不能制造无关分歧或漏分析。P3-PARTIAL历史case通过公开无selection legacy准入明确旧身份，保既有历史pair夹具，不用它代替P4真实partial验收。
 
 确定性细化夹具保留表格之间全部业务说明，不按首张表截断。partial裁决整合仅在冻结source与base逐字一致、Spec原raw及全部业务项和说明等价时沿完整真实delivery；双节点停机补偿则逐字核对source仅新增指定作者注释、delivery仅新增受审生成注释，再提交保留两者的完整resolution。两者均经过正式独审与候选门禁，不能以refactor分类代替文本重叠整合。

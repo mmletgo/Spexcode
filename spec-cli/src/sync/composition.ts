@@ -162,6 +162,7 @@ function intentArtifactResiduals(input: InputSnapshot, selection: FrozenBaseline
   const owners = (snapshot: InputSnapshot): Map<string, IntentObject> => { let value = ownerMaps.get(snapshot.id); if (!value) { value = intentObjects(input.source.commonDir, entries(snapshot)); ownerMaps.set(snapshot.id, value) }; return value }
   const pairs = new Map(selection.bindings.flatMap(binding => 'intentPair' in binding ? [[`${binding.resource.kind}:${binding.resource.id}`, binding.intentPair] as const] : []))
   const bytePairs = new Map(selection.bindings.flatMap(binding => 'bytePair' in binding ? [[binding.resource.path, binding.bytePair] as const] : []))
+  const consumedAdoptions = new Map<string, Set<string>>()
   const artifacts: IntentArtifactResidual[] = []
   const authored = authoredEntries ? new Map(authoredEntries.map(entry => [entry.path, entry])) : files(input)
   for (const intent of intents) {
@@ -172,7 +173,14 @@ function intentArtifactResiduals(input: InputSnapshot, selection: FrozenBaseline
       for (const path of paths) {
         const before = pair ? files(pair.sourceInput).get(path) ?? null : null, delivery = pair ? files(pair.verifiedDelivery).get(path) ?? null : null, source = authored.get(path) ?? null
         const bytePair = bytePairs.get(path), adoptedByte = bytePair && adoptedPaths(bytePair).has(path)
-        const adoptedPair = adoptedByte ? bytePair : pair && adoptedPaths(pair).has(path) ? pair : null
+        let consumedByteAdoption = false
+        if (pair && bytePair && adoptedByte) {
+          const key = `${pair.sourceInput.id}:${bytePair.id}`
+          let paths = consumedAdoptions.get(key)
+          if (!paths) { paths = adoptedDeliveryPaths(pair.sourceInput, bytePair); consumedAdoptions.set(key, paths) }
+          consumedByteAdoption = paths.has(path)
+        }
+        const adoptedPair = adoptedByte && !consumedByteAdoption ? bytePair : pair && adoptedPaths(pair).has(path) ? pair : null
         const authorBase = adoptedPair ? files(adoptedPair.verifiedDelivery).get(path) ?? null : before
         artifacts.push({ resource: intent.resource, pairId: pair?.id ?? null, path, binding, owners: { before: priorOwner?.path ?? null, delivery: deliveredOwner?.path ?? null, source: intent.source?.path ?? null }, before, delivery, source, authorBase, adoptionPairId: adoptedPair?.id ?? null, adoptionCommit: adoptedPair?.verifiedDelivery.headCommit ?? null, changed: !same(authorBase ?? undefined, source ?? undefined) })
       }

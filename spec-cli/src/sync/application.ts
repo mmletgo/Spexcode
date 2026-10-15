@@ -323,7 +323,6 @@ export class SyncApplication {
     const intentPairs = new Map(selection.bindings.flatMap(binding => 'intentPair' in binding && binding.intentPair ? [[binding.intentPair.id, binding.intentPair] as const] : []))
     const intentSources = new Map<string, ReturnType<typeof readTree>>()
     const consumedPath = (path: SelectedCompositionEvidence['paths'][number]): boolean => {
-      if (path.base) return false
       const artifacts = evidence.artifacts.filter(artifact => artifact.path === path.path)
       const intents = evidence.intents.filter(intent => intent.before?.path === path.path || intent.source?.path === path.path || artifacts.some(artifact => artifact.resource.kind === intent.resource.kind && artifact.resource.id === intent.resource.id))
       if (!intents.length || intents.some(intent => intent.changed || !intent.pairId) || artifacts.some(artifact => artifact.changed || !artifact.pairId)) return false
