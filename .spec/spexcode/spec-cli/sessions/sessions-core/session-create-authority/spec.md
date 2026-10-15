@@ -5,6 +5,7 @@ hue: 280
 desc: What a public create must establish before it may use the local path — one identity probe with its own budget and its single ECONNREFUSED licence — plus the fork point it may pin, the fork commit it always records, and the supervisor its prompt may address.
 code:
   - spec-cli/src/sessions.ts#sessionCreateRequest
+  - spec-cli/src/sessions.ts#sessionCandidateTarget
   - spec-cli/src/sessions.ts#recoverSessionCreateTermination
 related:
   - spec-cli/src/session-create-cli.test.ts
@@ -108,6 +109,8 @@ This keeps concurrent creates from contending on `.git/config` while Git writes 
 
 
 结构化后台任务复用同一创建事务与启动队列，但固定只读执行选项来自可信内部调用，不能由公开 JSON body 注入。安全策略、输出 schema 与输入摘要一起绑定请求载荷哈希并持久化在运行 envelope；重试不得切换权限或复用旧结构化结果。此类 prompt 不解析普通命令及 parent 指令、不物化项目 hook/trust 配置。普通会话的公开创建对象及既有 launcher 行为保持原契约。
+
+结构化候选 worktree 固定创建于项目外部 runtime 的 `structured-worktrees/<slug>`，父目录权限为0700；runtime 或既有受管父目录的真实路径落在主 checkout 或当前 source checkout 内时，target-resolution 明确拒绝，不创建分支或候选。普通会话仍采用主 checkout 的 `.worktrees/<slug>`。候选创建与取消恢复从可信内部结构化策略选择同一个目标，并继续核对原root/path/branch拥有权收据；公开JSON不能指定结构化策略或任意候选路径。已发布会话的恢复沿已持久worktreePath，不能重新按普通目录推算。
 
 受限结构化创建的取消/超时终止事实由原 request-key record 锁内写入私有原子收据，精确绑定 sessionId、requestDigest、payloadHash、phase 与 cleanupComplete/notStarted；仅已取得创建权、未publish、自己拥有的候选资源已清理完毕时写入。等待锁时退出、未知候选或清理残留不产生证明；readSessionCreateTermination 是只读入口。相同结构化键和载荷返回原终态，不重新创建；不同载荷仍 key_reused。收据不保存 prompt 或凭据，普通会话仍沿用原创建重试语义。
 
