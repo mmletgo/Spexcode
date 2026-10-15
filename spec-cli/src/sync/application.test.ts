@@ -1111,6 +1111,43 @@ test('AC-APPLICATION-P4-14 无生成字节差量时真实intent消费源码仍�
   assert.equal(f.calls(), 0, '真实Git投影不以假receipt登记权威')
 })
 
+test('AC-APPLICATION-P4-15 旧非null源码bytehead不重开已完整消费的同一输入', async t => {
+  const f = await exportApplicationFixture(t), old = await captureInputSnapshot(f.root)
+  writeFileSync(join(f.root, 'src/export.js'), `${f.originalCode}\n// already consumed author source\n`)
+  const input = await captureInputSnapshot(f.root), frozen = await f.application['freezeNodePlan'](input, 'export-contract')
+  writeFileSync(join(f.root, f.path), `${f.original}\n本轮已读取作者源码，原业务规则保持。\n`)
+  const delivery = await captureInputSnapshot(f.root)
+  writeFileSync(join(f.root, f.path), f.original)
+  const bytePair: BaselinePair = { id: 'fixture-old-byte', source: old.source, repositoryId: old.source.repositoryId, sourceInput: old, verifiedDelivery: old, coveredScope: frozen.plan.executionScope!, receiptId: 'fixture-old-byte-projection-only', settledAtMs: Date.now() }
+  const intentPair: BaselinePair = { id: 'fixture-consumed-intent', source: input.source, repositoryId: input.source.repositoryId, sourceInput: input, verifiedDelivery: delivery, coveredScope: frozen.plan.executionScope!, receiptId: 'fixture-intent-projection-only', settledAtMs: Date.now() }
+  const { digest: _digest, ...body } = frozen.selection
+  const selected = { ...body, bindings: body.bindings.map(binding => 'intentPair' in binding ? { ...binding, intentPair } : binding.resource.path === 'src/export.js' ? { ...binding, bytePair } : binding) }
+  const selection = { ...selected, digest: contentHash(JSON.stringify(selected, (_key, value: unknown) => value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value)) }
+  const changes = async () => {
+    const snapshot = await captureInputSnapshot(f.root), composed = composeAuthoredInput(snapshot, selection, { executionPaths: frozen.plan.executionScope!.paths, contextPaths: frozen.plan.readPaths, retainConflicts: true }).composed!
+    const evidence = readCompositionEvidence(snapshot, composed, selection)
+    return { evidence, difference: f.application['observationChanges'](snapshot, frozen.plan, selection, evidence) }
+  }
+  const unchanged = await changes()
+  assert.ok(unchanged.evidence.paths.find(item => item.path === 'src/export.js')!.base)
+  assert.ok(unchanged.evidence.intents.every(item => !item.changed))
+  assert.equal(unchanged.difference.changed, false, '同一已消费源码不能因旧非null字节头重复自动准入')
+  f.application['freezeNodePlan'] = async () => ({ plan: frozen.plan, selection })
+  f.application['ownsObservation'] = () => true
+  let dispatched = 0
+  f.application.start = () => { dispatched++ }
+  await f.application['observeNode'](input, 'export-contract')
+  await f.application['observeNode'](input, 'export-contract')
+  assert.equal(f.application.store.listOperations(input.source.repositoryId).length, 0)
+  assert.equal(dispatched, 0)
+  writeFileSync(join(f.root, 'src/export.js'), `${f.originalCode}\n// new author source not consumed\n`)
+  assert.equal((await changes()).difference.codeChanged, true)
+  writeFileSync(join(f.root, 'src/export.js'), `${f.originalCode}\n// already consumed author source\n`)
+  writeFileSync(join(f.root, f.path), f.original.replace(parseParts(f.original)!.rawSource!, `${parseParts(f.original)!.rawSource!}\n新增原始义务。`))
+  assert.equal((await changes()).difference.specChanged, true)
+  assert.equal(f.calls(), 0, '只读投影不登记假receipt或调用模型')
+})
+
 test('AC-APPLICATION-P4-13 Spec无bytehead时按真实intent来源字节识别已消费与新原始意图', async t => {
   const f = await exportApplicationFixture(t)
   const before = await captureInputSnapshot(f.root)

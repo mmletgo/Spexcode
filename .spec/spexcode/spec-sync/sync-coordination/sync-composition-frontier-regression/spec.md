@@ -22,6 +22,8 @@ code:
 
 同一真实Git/store夹具另验证code-only A2：Spec行和raw没有本轮变化，B.source已夹A2但交付A1+B1且only覆盖B，直接actual analyzeCodeBehavior的requiredChangedPaths旧版为空而修复后含真实源码。完整整合保A2/B1，fakeaccept也不能删B、弱化权限或mode；getter拒hash正确的伪造artifact无残差。ff采纳真实receipt commit/blob/mode后无代码回声，再A3仍必读；真实原source、交付、newsource全文与OID分别进入上下文，不伪造作者基准。
 
+另以真实 store journal 复现：先 FF 采纳旧源码 byte head，再由新 intent 消费作者源码，本轮交付的 files 只有 Spec，源码 byte head 继续指旧 pair。所有 owner intent 均已消费时 artifact 与 residualPaths 不得重复标记旧源码；新源码、新 raw 和回退到未消费 owner 的 partial selection 仍保真实残差。四层验证沿夹具的明确 fake，不冒称原生模型或 Docker 验收。
+
 只读上下文反例使用真实tracked配置HEAD旧对象与source dirty新对象、mode变化及oracle删除：旧组合返回HEAD旧OID，contextPaths修复后等于实际source且不扩大executionPaths。hash合法的新证据移除context metadata仍因真实source/HEAD不一致而拒绝；input/index不变，原controlled与未选dirty隔离回归保持。
 
 只读范围回归另使用testPaths=generated-tests与现存tests/export.test.mjs保护oracle，证明影响图仍读取并冻结oracle，但executionScope排除它，不以扩大测试授权掩盖写范围错误。

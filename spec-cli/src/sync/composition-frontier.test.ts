@@ -289,6 +289,42 @@ test('code-only真实ff采纳完整byte head后无代码回声，再A3仍进入�
   assert.match(analysis.resolutions[0].content!, /resultVersion = 'A3'/); assert.match(analysis.resolutions[0].content!, /deliveryPolicy = 'B1'/)
 })
 
+test('旧byte head已采纳且新intent已消费源码：只写Spec的真实journal不制造重复源码残差', async t => {
+  const f = await fixture(t, false, false, true)
+  git(f.root, 'merge', '--ff-only', f.deliveryB1.headCommit)
+  const sourceSpec = readFileSync(join(f.root, path), 'utf8'), consumedCode = `${readFileSync(join(f.root, f.codePath), 'utf8')}\n// author change consumed by latest intent\n`
+  writeFileSync(join(f.root, f.codePath), consumedCode)
+  const input = await captureInputSnapshot(f.root)
+  writeFileSync(join(f.deliveryRoot, f.codePath), consumedCode)
+  writeFileSync(join(f.deliveryRoot, path), `${sourceSpec}\n本轮已读取作者源码，原业务规则保持。\n`)
+  git(f.deliveryRoot, 'add', '.'); git(f.deliveryRoot, 'commit', '-m', 'consume code with spec-only journal')
+  const delivery = await captureInputSnapshot(f.deliveryRoot), consumed = await f.settle(input, delivery, 'settle-consumed-code', f.allIds, [path])
+  const operation = f.store.findOperationByIngressKey('settle-consumed-code')!
+  assert.deepEqual(f.store.listJournals(operation.id)[0].plan.files.map(file => file.path), [path])
+  const selection = f.selection(), byte = selection.bindings.find(binding => binding.resource.kind === 'path' && binding.resource.path === f.codePath)!
+  assert.ok('bytePair' in byte); assert.equal(byte.bytePair!.id, f.pairB.id)
+  const inspect = async (selected = selection) => {
+    const snapshot = await captureInputSnapshot(f.root), composed = composeInputSnapshots(snapshot, selected, { retainConflicts: true }).composed!
+    return readCompositionEvidence(snapshot, composed, selected)
+  }
+  const evidence = await inspect()
+  assert.ok(evidence.paths.find(item => item.path === f.codePath)!.base)
+  assert.ok(evidence.intents.every(item => !item.changed && item.pairId === consumed.id))
+  assert.ok(evidence.artifacts.filter(item => item.path === f.codePath).every(item => !item.changed), '较新intent已消费的源码不能再以旧采纳byte head作作者基准')
+  assert.deepEqual(evidence.residualPaths, [])
+  writeFileSync(join(f.root, f.codePath), `${consumedCode}// new unconsumed source\n`)
+  assert.ok((await inspect()).residualPaths.includes(f.codePath), '后续新源码必须保留')
+  writeFileSync(join(f.root, f.codePath), consumedCode)
+  const { digest: _digest, ...body } = selection
+  const partial = { ...body, bindings: body.bindings.map(binding => binding.resource.kind === 'contract' && binding.resource.id === a ? { ...binding, intentPair: f.pairA } : binding) }
+  const partialSelection = { ...partial, digest: contentHash(JSON.stringify(partial, (_key, value: unknown) => value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value)) }
+  const unconsumed = await inspect(partialSelection)
+  assert.equal(unconsumed.artifacts.find(item => item.path === f.codePath && item.resource.id === a)!.changed, true, '未消费owner仍须独立分析')
+  assert.ok(unconsumed.residualPaths.includes(f.codePath))
+  writeFileSync(join(f.root, path), sourceSpec.replace('用户可以提交符合筛选条件的数据导出', '用户可以提交符合筛选条件的数据导出并查看新的确认提醒'))
+  assert.ok((await inspect()).residualPaths.includes(path), '新原始意图不得按同输入粗略跳过')
+})
+
 test('readonly context使用真实dirty config/oracle对象，保持mode/删除且不升写范围', async t => {
   const f = await fixture(t), configPath = '.spec/spexcode.json', oracle = 'tests/export.test.mjs'
   writeFileSync(join(f.root, configPath), '{"name":"old readonly context"}\n')
