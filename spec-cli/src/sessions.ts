@@ -873,6 +873,7 @@ function isOccupying(s: Session, _snap: LiveSnap): boolean {
 // In-memory in the single server process (the only drainer) — lost on restart, which is fine: a restart drains
 // the durable `queued` worktrees fresh with nothing in flight.
 const launching = new Set<string>()
+const queuedLaunchReadiness = new Map<string, AbortController>()
 // A queued launch and a cold archive must not cross between their final read and record write. This is a
 // narrow per-session intent latch, not a second cleanup primitive; the launch path simply leaves an archiving id
 // alone and the archive path re-probes before filing.
@@ -1166,11 +1167,15 @@ const launchReadinessTimeoutReason = (harness: Harness, stage: LaunchReadinessSt
       : 'adapter liveness did not become ready before launch readiness timed out'
 
 function observeQueuedLaunchReadiness(id: string, harness: Harness, timeoutMs = SOCKET_READY_TIMEOUT_MS): void {
-  void waitForReady(id, harness, undefined, timeoutMs)
+  const owner = new AbortController()
+  queuedLaunchReadiness.set(id, owner)
+  void waitForReady(id, harness, undefined, timeoutMs, false, owner.signal)
     .then(async (outcome) => {
+      if (owner.signal.aborted) return
       if (!outcome.ok) throw new LaunchReadinessTimeout(outcome.stage, launchReadinessTimeoutReason(harness, outcome.stage))
       let readyToPublish = false
       await withRecordLock(id, async () => {
+        if (owner.signal.aborted) return
         const candidate = readRecord(id)
         if (!candidate) return
         const stillReady = await outcome.fence.validate(() => {
@@ -1190,12 +1195,14 @@ function observeQueuedLaunchReadiness(id: string, harness: Harness, timeoutMs = 
       await drainSession(id)
     })
     .catch(async (error) => {
+      if (owner.signal.aborted) return
       const reason = error instanceof Error ? error.message : String(error)
       const timedOut = error instanceof LaunchReadinessTimeout
       let live = false
       let terminal = timedOut
       try {
         await withRecordLock(id, async () => {
+          if (owner.signal.aborted) return
           const current = readRecord(id)
           if (timedOut && current) live = await launchReadinessWitnessAlive(id, harness, current)
           terminal = timedOut && !live
@@ -1206,7 +1213,11 @@ function observeQueuedLaunchReadiness(id: string, harness: Harness, timeoutMs = 
         console.error(`spex: session ${id}: queued launch failure could not be recorded: ${recordError instanceof Error ? recordError.message : String(recordError)}; original failure: ${reason}`)
       }
     })
-    .finally(() => launching.delete(id))
+    .finally(() => {
+      if (queuedLaunchReadiness.get(id) !== owner) return
+      queuedLaunchReadiness.delete(id)
+      launching.delete(id)
+    })
 }
 
 type QueuedStartResult = 'started' | 'blocked' | 'retryable'
@@ -1371,64 +1382,61 @@ async function drainQueueUnlocked(): Promise<void> {
       const present = new Set(sessions.map((session) => session.id))
       for (const id of queueRecordLogReasons.keys()) if (!present.has(id)) queueRecordLogReasons.delete(id)
       for (const session of sessions) {
-        const rec = records.get(session.id)
-        if (!rec || rec.launchReadinessPending || launching.has(session.id)) continue
-        // Older timed-out rows predate the durable readiness timestamp. Reconcile their recorded failure
-        // before any queue/watch work so a backend restart cannot resurrect the old active/limbo projection.
-        if (rec.status !== 'queued' && /^queued launch readiness failed:/.test(rec.note || '')) {
-          const priorReason = (rec.note || '').replace(/^queued launch readiness failed:\s*/, '') || 'launch readiness timed out'
-          const harness = harnessById(rec.harness || defaultHarness.id)
-          const live = await launchReadinessWitnessAlive(session.id, harness, rec)
-          if (live) {
-            await withRecordLock(session.id, async () => {
-              const current = readRecord(session.id)
-              if (current && !current.archived && !current.stopped) clearReadinessResidueUnlocked(current, true)
-            })
-            continue
+        const candidate = records.get(session.id)
+        if (!candidate || candidate.stopped || candidate.archived || candidate.launchReadinessPending || launching.has(session.id)) continue
+        if (!candidate.launchReadinessStartedAt && !/^queued launch readiness failed:/.test(candidate.note || '')
+          && !(candidate.status === 'active' && existsSync(sessionArtifactPath(session.id, 'launch')))) continue
+        await withRecordLock(session.id, async () => {
+          const rec = readQueueRecord(session.id)
+          records.set(session.id, rec)
+          if (!rec || rec.stopped || rec.archived || rec.launchReadinessPending || launching.has(session.id)) return
+          // Older timed-out rows predate the durable readiness timestamp. Reconcile their recorded failure
+          // before any queue/watch work so a backend restart cannot resurrect the old active/limbo projection.
+          if (rec.status !== 'queued' && /^queued launch readiness failed:/.test(rec.note || '')) {
+            const priorReason = (rec.note || '').replace(/^queued launch readiness failed:\s*/, '') || 'launch readiness timed out'
+            const harness = harnessById(rec.harness || defaultHarness.id)
+            const live = await launchReadinessWitnessAlive(session.id, harness, rec)
+            if (live) {
+              clearReadinessResidueUnlocked(rec, true)
+              return
+            }
+            noteQueuedLaunchFailureUnlocked(
+              session.id,
+              priorReason,
+              !live,
+              live ? 'launch readiness warning' : undefined,
+              live,
+            )
+            return
           }
-          await withRecordLock(session.id, async () => noteQueuedLaunchFailureUnlocked(
-            session.id,
-            priorReason,
-            !live,
-            live ? 'launch readiness warning' : undefined,
-            live,
-          ))
-          continue
-        }
-        // A pre-fix active row may still carry the authoritative launch artifact without a timestamp. Its
-        // mtime is the only durable age witness available; seed the new field so the same bounded recovery
-        // rule applies on this and later restarts.
-        if (rec.status === 'active' && !rec.stopped && existsSync(sessionArtifactPath(session.id, 'launch')) && rec.launchReadinessStartedAt == null) {
-          const harness = harnessById(rec.harness || defaultHarness.id)
-          const live = await launchReadinessWitnessAlive(session.id, harness, rec)
-          if (!live) {
-            let startedAt = Date.now()
-            try { startedAt = statSync(sessionArtifactPath(session.id, 'launch')).mtimeMs } catch { /* race: observer below will fail loud */ }
-            const updated = { ...rec, launchReadinessStartedAt: startedAt }
-            writeRecord(updated)
-            records.set(session.id, updated)
+          // A pre-fix active row may still carry the authoritative launch artifact without a timestamp. Its
+          // mtime is the only durable age witness available; seed the new field so the same bounded recovery
+          // rule applies on this and later restarts.
+          if (rec.status === 'active' && !rec.stopped && existsSync(sessionArtifactPath(session.id, 'launch')) && rec.launchReadinessStartedAt == null) {
+            const harness = harnessById(rec.harness || defaultHarness.id)
+            const live = await launchReadinessWitnessAlive(session.id, harness, rec)
+            if (!live) {
+              let startedAt = Date.now()
+              try { startedAt = statSync(sessionArtifactPath(session.id, 'launch')).mtimeMs } catch { /* race: observer below will fail loud */ }
+              const updated = { ...rec, launchReadinessStartedAt: startedAt }
+              writeRecord(updated)
+              records.set(session.id, updated)
+            }
           }
-        }
-        const refreshed = records.get(session.id)
-        if (!refreshed || refreshed.launchReadinessPending) { reservations.add(session.id); continue }
-        if (refreshed.launchReadinessStartedAt && !refreshed.stopped && !refreshed.archived) {
-          const harness = harnessById(refreshed.harness || defaultHarness.id)
-          const live = await launchReadinessWitnessAlive(session.id, harness, refreshed)
-          if (live) {
-            await withRecordLock(session.id, async () => {
-              const current = readRecord(session.id)
-              if (current && !current.archived && !current.stopped) {
-                clearReadinessResidueUnlocked(current, /^launch readiness warning:/.test(current.note || ''))
-              }
-            })
-            continue
+          const refreshed = records.get(session.id)
+          if (!refreshed || refreshed.launchReadinessPending) { reservations.add(session.id); return }
+          if (refreshed.launchReadinessStartedAt && !refreshed.stopped && !refreshed.archived) {
+            const harness = harnessById(refreshed.harness || defaultHarness.id)
+            const live = await launchReadinessWitnessAlive(session.id, harness, refreshed)
+            if (live) {
+              clearReadinessResidueUnlocked(refreshed, /^launch readiness warning:/.test(refreshed.note || ''))
+              return
+            }
+            launching.add(session.id)
+            const remaining = Math.max(0, SOCKET_READY_TIMEOUT_MS - (Date.now() - refreshed.launchReadinessStartedAt))
+            observeQueuedLaunchReadiness(session.id, harness, remaining)
           }
-          launching.add(session.id)
-          const remaining = Math.max(0, SOCKET_READY_TIMEOUT_MS - (Date.now() - refreshed.launchReadinessStartedAt))
-          observeQueuedLaunchReadiness(session.id, harness, remaining)
-          continue
-        }
-        if (rec.status === 'queued') continue
+        })
       }
       // if the liveness probe FAILED (tmux timing out — the overload condition), occupancy is UNKNOWABLE: every
       // session would read window-less and isOccupying would undercount, so the drainer would OVER-launch and pile
@@ -2865,8 +2873,9 @@ const SOCKET_READY_TIMEOUT_MS = 30000   // spans launchScript's bounded fast-fai
                                         // waitForReady (slot-hold + resume) waits through a daemon-race retry
                                         // instead of returning before a recovering socket
 const SOCKET_POLL_MS = 200
-async function waitForReady(id: string, harness: Harness, pending?: SessRec, timeoutMs = SOCKET_READY_TIMEOUT_MS, recordLockHeld = false): Promise<LaunchReadinessOutcome> {
+async function waitForReady(id: string, harness: Harness, pending?: SessRec, timeoutMs = SOCKET_READY_TIMEOUT_MS, recordLockHeld = false, signal?: AbortSignal): Promise<LaunchReadinessOutcome> {
   const current = () => {
+    signal?.throwIfAborted()
     const stored = readRecord(id)
     const rec = stored && pending
       ? { ...pending, ...stored, stopped: pending.stopped, archived: pending.archived }
@@ -2884,6 +2893,7 @@ async function waitForReady(id: string, harness: Harness, pending?: SessRec, tim
       if (current()?.harnessSessionId) break
       if (hasReadableLaunchReceipt(id)) {
         const consume = (): void => {
+          signal?.throwIfAborted()
           readinessWakeSuppressed.add(id)
           try { if (hasReadableLaunchReceipt(id)) consumeHarnessLaunchProofUnlocked(id) }
           finally { readinessWakeSuppressed.delete(id) }
@@ -2898,6 +2908,7 @@ async function waitForReady(id: string, harness: Harness, pending?: SessRec, tim
   }
   if (harness.launchReady) {
     const fence = await harness.launchReady(current, deadline)
+    signal?.throwIfAborted()
     return fence ? { ok: true, fence } : { ok: false, stage: 'liveness' }
   }
   const genericFence = (): HarnessLaunchReadinessFence => ({
@@ -3824,6 +3835,14 @@ async function stopAgentProcess(id: string, rec: SessRec | null, requireCold = f
   if (requireCold) {
     const cold = await harness.coldRuntime?.(rec, coldReceipt)
     if (cold && !cold.ok) throw new ResourceConflict(`refusing to close ${id}: ${cold.reason}`)
+  }
+  const current = readRecord(id)
+  if (current?.launchReadinessStartedAt != null) writeRecord({ ...current, launchReadinessStartedAt: null })
+  const readiness = queuedLaunchReadiness.get(id)
+  if (readiness) {
+    queuedLaunchReadiness.delete(id)
+    readiness.abort()
+    launching.delete(id)
   }
 }
 
