@@ -1,19 +1,21 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { execFileSync } from 'node:child_process'
+import { createRequire, syncBuiltinESMExports } from 'node:module'
+import { deflateSync } from 'node:zlib'
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { captureInputSnapshot, contentHash, identifyWorktree, readEvidence, readObject, readTree, UnstableSnapshotError, verifySnapshot } from './snapshot.js'
+import { captureInputSnapshot, contentHash, identifyWorktree, readEvidence, readObject, readTree, UnstableSnapshotError, verifySnapshot, writeObject, writeTree } from './snapshot.js'
 import { composeInputSnapshots } from './composition.js'
 import { exportCandidate, freezeCandidate, verifyCandidate } from './candidate.js'
 import type { BaselinePair, InputSnapshot, SyncScope } from './operation-types.js'
 
 const git = (root: string, ...args: string[]): string => execFileSync('git', ['-C', root, ...args], { env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }).toString().trim()
-function repo(t: test.TestContext): string {
+function repo(t: test.TestContext, objectFormat: 'sha1' | 'sha256' = 'sha1'): string {
   const root = mkdtempSync(join(tmpdir(), 'spex-sync-test-'))
   t.after(() => { const unlock = (path: string): void => { if (!existsSync(path) || lstatSync(path).isSymbolicLink()) return; if (lstatSync(path).isDirectory()) { chmodSync(path, 0o755); for (const child of readdirSync(path)) unlock(join(path, child)) } }; unlock(root); rmSync(root, { recursive: true, force: true }) })
-  git(root, 'init', '-b', 'main'); git(root, 'config', 'user.email', 'sync@example.invalid'); git(root, 'config', 'user.name', 'sync fixture')
+  git(root, 'init', '-b', 'main', `--object-format=${objectFormat}`); git(root, 'config', 'user.email', 'sync@example.invalid'); git(root, 'config', 'user.name', 'sync fixture')
   writeFileSync(join(root, 'file.ts'), 'one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\n')
   git(root, 'add', '.'); git(root, 'commit', '-m', 'base')
   return root
@@ -22,6 +24,71 @@ const scope = (...paths: string[]): SyncScope => ({ paths, contractIds: ['REQ-TE
 const files = (snapshot: InputSnapshot): Map<string, string> => new Map(readTree(snapshot.source.commonDir, snapshot.immutableTree).map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString()]))
 const change = (snapshot: InputSnapshot, path: string, content: string | null, mode?: '100644' | '100755'): object => { const entry = verifySnapshot(snapshot).find(entry => entry.path === path); return { path, beforeDigest: entry?.digest ?? null, beforeMode: entry?.mode ?? null, content, ...(mode ? { mode } : {}) } }
 const pair = (sourceInput: InputSnapshot, verifiedDelivery: InputSnapshot): BaselinePair => ({ id: 'baseline-1', repositoryId: sourceInput.source.repositoryId, source: sourceInput.source, sourceInput, verifiedDelivery, receiptId: 'verified-receipt', coveredScope: scope('file.ts', 'generated.ts'), settledAtMs: Date.now() })
+
+for (const format of ['sha1', 'sha256'] as const) {
+  test(`${format} 真实批量对象保留二进制、UTF-8特殊路径、空文件与mode，每轮只启动一个写入和读取进程`, async t => {
+    const root = repo(t, format), expected = new Map<string, Buffer>([['file.ts', readFileSync(join(root, 'file.ts'))]])
+    for (let index = 0; index < 40; index++) {
+      const path = `原字节 ${index}\t换\n行`, bytes = index === 0 ? Buffer.alloc(0) : Buffer.from([0, 10, 13, 255, index])
+      writeFileSync(join(root, path), bytes); expected.set(path, bytes)
+    }
+    chmodSync(join(root, 'file.ts'), 0o755); symlinkSync('file.ts', join(root, 'link')); expected.set('link', Buffer.from('file.ts'))
+    const indexBytes = readFileSync(join(root, '.git/index')), cp = createRequire(import.meta.url)('node:child_process') as typeof import('node:child_process'), original = cp.execFileSync
+    const calls: string[][] = []
+    cp.execFileSync = ((...args: Parameters<typeof execFileSync>) => { if (args[0] === 'git') calls.push(args[1] as string[]); return Reflect.apply(original, cp, args) }) as typeof execFileSync
+    syncBuiltinESMExports()
+    let snapshot: InputSnapshot
+    try { snapshot = await captureInputSnapshot(root) }
+    finally { cp.execFileSync = original; syncBuiltinESMExports() }
+    assert.equal(calls.filter(args => args.includes('hash-object')).length, 2)
+    assert.equal(calls.filter(args => args.includes('cat-file')).length, 2)
+    assert.ok(calls.filter(args => args.includes('hash-object')).every(args => args.includes('--stdin-paths') && args.includes('--no-filters')))
+    assert.deepEqual(readFileSync(join(root, '.git/index')), indexBytes)
+    const entries = readTree(snapshot.source.commonDir, snapshot.immutableTree)
+    assert.deepEqual(entries.map(entry => entry.path), [...expected.keys()].sort())
+    for (const entry of entries) {
+      assert.equal(entry.oid.length, format === 'sha1' ? 40 : 64)
+      assert.deepEqual(readObject(snapshot.source.commonDir, entry.oid), expected.get(entry.path))
+      assert.equal(entry.digest, contentHash(expected.get(entry.path)!))
+      assert.equal(entry.mode, entry.path === 'link' ? '120000' : entry.path === 'file.ts' ? '100755' : '100644')
+    }
+    assert.equal((await captureInputSnapshot(root)).id, snapshot.id)
+  })
+
+  test(`${format} 每次真实读回对象，拒绝missing与同OID路径下篡改而不复用缓存`, async t => {
+    const root = repo(t, format), snapshot = await captureInputSnapshot(root), [entry] = readTree(snapshot.source.commonDir, snapshot.immutableTree)
+    const path = join(snapshot.source.commonDir, 'objects', entry.oid.slice(0, 2), entry.oid.slice(2)), original = readFileSync(path), altered = Buffer.from('tampered\0\xff')
+    chmodSync(path, 0o600); writeFileSync(path, deflateSync(Buffer.concat([Buffer.from(`blob ${altered.length}\0`), altered])))
+    assert.throws(() => readTree(snapshot.source.commonDir, snapshot.immutableTree), /OID 不匹配/)
+    assert.throws(() => readObject(snapshot.source.commonDir, entry.oid), /OID 不匹配/)
+    writeFileSync(path, original); assert.deepEqual(readTree(snapshot.source.commonDir, snapshot.immutableTree), [entry])
+    rmSync(path)
+    assert.throws(() => readTree(snapshot.source.commonDir, snapshot.immutableTree), (error: unknown) => typeof (error as { status?: unknown }).status === 'number')
+  })
+}
+
+test('缺失用户index和空树仍真实采集，批处理不创建用户index', async t => {
+  const root = repo(t), index = join(root, '.git/index')
+  rmSync(index)
+  const input = await captureInputSnapshot(root)
+  assert.equal(existsSync(index), false); assert.equal(input.indexDigest, contentHash(Buffer.alloc(0)))
+  assert.equal(files(input).size, 1); assert.deepEqual(readTree(input.source.commonDir, input.indexTree), [])
+  rmSync(join(root, 'file.ts'))
+  const empty = await captureInputSnapshot(root)
+  assert.equal(existsSync(index), false); assert.deepEqual(verifySnapshot(empty), [])
+})
+
+test('批量聚合超过128MiB仍分段成功，单个128MiB边界保持原读取容量与超限失败', t => {
+  const root = repo(t), commonDir = join(root, '.git'), bytes = Buffer.alloc(65 * 1024 * 1024, 97)
+  const first = { path: 'first', mode: '100644' as const, oid: writeObject(commonDir, bytes), digest: contentHash(bytes) }
+  bytes[0] = 98
+  const second = { path: 'second', mode: '100644' as const, oid: writeObject(commonDir, bytes), digest: contentHash(bytes) }
+  assert.deepEqual(readTree(commonDir, writeTree(commonDir, [first, second])), [first, second])
+  const boundary = Buffer.alloc(128 * 1024 * 1024, 99), entry = { path: 'boundary', mode: '100644' as const, oid: writeObject(commonDir, boundary), digest: contentHash(boundary) }
+  assert.deepEqual(readTree(commonDir, writeTree(commonDir, [entry])), [entry])
+  const over = Buffer.alloc(128 * 1024 * 1024 + 1, 100), overflow = { ...entry, oid: writeObject(commonDir, over), digest: contentHash(over) }
+  assert.throws(() => readTree(commonDir, writeTree(commonDir, [overflow])), (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOBUFS')
+})
 
 test('来源树没有ignore时，真实登记的嵌套会话worktree不成为作者输入或读取错误', async t => {
   const root = repo(t), before = await captureInputSnapshot(root), nested = join(root, '.worktrees/native-session')

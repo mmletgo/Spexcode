@@ -13,6 +13,7 @@ export const contentHash = (bytes: Buffer | string): string => createHash('sha25
 const evidenceDir = (commonDir: string): string => join(commonDir, 'spexcode', 'evidence')
 const gitEnv = (): NodeJS.ProcessEnv => Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')))
 const GIT_TIMEOUT_MS = Number(process.env.SPEXCODE_GIT_TIMEOUT_MS || 120000)
+const GIT_MAX_BUFFER = 128 * 1024 * 1024
 
 /** Git 对象操作只面向明确的 commonDir；永不复用进程中的用户 index。 */
 export function objectGit(commonDir: string, args: string[], input?: Buffer, indexFile?: string, worktreeRoot?: string): Buffer {
@@ -26,7 +27,7 @@ export function objectGit(commonDir: string, args: string[], input?: Buffer, ind
       writeFileSync(path, input!, { flag: 'wx', mode: 0o600 })
       inputFd = openSync(path, 'r')
     }
-    return execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'core.splitIndex=false', `--git-dir=${gitDir}`, ...(worktreeRoot ? [`--work-tree=${worktreeRoot}`] : []), ...args], { stdio: [inputFd ?? 'ignore', 'pipe', 'pipe'], cwd: worktreeRoot ?? commonDir, env: { ...gitEnv(), GIT_NO_REPLACE_OBJECTS: '1', ...(indexFile ? { GIT_INDEX_FILE: indexFile, GIT_COMMON_DIR: commonDir } : {}) }, timeout: GIT_TIMEOUT_MS, killSignal: 'SIGKILL', maxBuffer: 128 * 1024 * 1024 })
+    return execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'core.splitIndex=false', `--git-dir=${gitDir}`, ...(worktreeRoot ? [`--work-tree=${worktreeRoot}`] : []), ...args], { stdio: [inputFd ?? 'ignore', 'pipe', 'pipe'], cwd: worktreeRoot ?? commonDir, env: { ...gitEnv(), GIT_NO_REPLACE_OBJECTS: '1', ...(indexFile ? { GIT_INDEX_FILE: indexFile, GIT_COMMON_DIR: commonDir } : {}) }, timeout: GIT_TIMEOUT_MS, killSignal: 'SIGKILL', maxBuffer: GIT_MAX_BUFFER })
   } finally {
     if (inputFd !== undefined) closeSync(inputFd)
     if (temp) rmSync(temp, { recursive: true, force: true })
@@ -63,21 +64,56 @@ export function identifyWorktree(root: string): WorktreeIdentity {
 }
 export function readTree(commonDir: string, tree: string): TreeEntry[] {
   if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(tree)) throw new Error('tree 必须为不可变 Git OID')
-  const listing = objectGit(commonDir, ['ls-tree', '-rz', '--full-tree', tree])
+  const listing = objectGit(commonDir, ['ls-tree', '-rlz', '--full-tree', tree])
   if (!Buffer.from(listing.toString('utf8')).equals(listing)) throw new Error('仓库路径必须为有效 UTF-8')
   const records = listing.toString().split('\0').filter(Boolean)
-  return records.map(record => {
-    const tab = record.indexOf('\t'), [mode, type, oid] = record.slice(0, tab).split(' '), path = record.slice(tab + 1)
+  const entries = records.map(record => {
+    const tab = record.indexOf('\t'), [mode, type, oid, size] = record.slice(0, tab).split(/ +/), path = record.slice(tab + 1)
     validateRepositoryPath(path)
     if (type !== 'blob' || !['100644', '100755', '120000'].includes(mode)) throw new Error(`不支持的 Git 条目: ${path} (${mode})`)
-    const bytes = readObject(commonDir, oid)
-    return { path, mode: mode as TreeEntry['mode'], oid, digest: contentHash(bytes) }
-  }).sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
+    return { path, mode: mode as TreeEntry['mode'], oid, size: /^\d+$/.test(size) ? Number(size) : NaN }
+  })
+  const digests = readObjectDigests(commonDir, entries)
+  return entries.map(({ size: _size, ...entry }, index) => ({ ...entry, digest: digests[index] })).sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
+}
+function verifyObjectOid(oid: string, bytes: Buffer): void {
+  const actualOid = createHash(oid.length === 40 ? 'sha1' : 'sha256').update(`blob ${bytes.byteLength}\0`).update(bytes).digest('hex')
+  if (actualOid !== oid) throw new Error('Git blob OID 不匹配')
+}
+function readObjectDigests(commonDir: string, objects: { oid: string; size: number }[]): string[] {
+  const digests: string[] = []
+  for (let start = 0; start < objects.length;) {
+    let end = start, capacity = 0
+    while (end < objects.length) {
+      const { oid, size } = objects[end], framedSize = Buffer.byteLength(`${oid} blob ${size}\n`) + size + 1
+      if (!Number.isSafeInteger(size) || capacity + framedSize > GIT_MAX_BUFFER) break
+      capacity += framedSize; end++
+    }
+    // 单个 blob 的原 128 MiB 输出上限不因 batch framing 缩小，也不被聚合放大。
+    if (end === start) { digests.push(contentHash(readObject(commonDir, objects[start].oid))); start++; continue }
+    const batch = objects.slice(start, end), output = objectGit(commonDir, ['cat-file', '--batch'], Buffer.from(batch.map(item => `${item.oid}\n`).join('')))
+    let offset = 0
+    for (const { oid, size } of batch) {
+      const header = Buffer.from(`${oid} blob ${size}\n`)
+      if (!output.subarray(offset, offset + header.length).equals(header)) {
+        // missing/type 错误沿用单对象 Git 失败，保留采集端的有界重试分类。
+        readObject(commonDir, oid)
+        throw new Error('Git batch blob 响应不匹配')
+      }
+      offset += header.length
+      const bytes = output.subarray(offset, offset + size)
+      if (bytes.length !== size || output[offset + size] !== 10) throw new Error('Git batch blob 字节不完整')
+      verifyObjectOid(oid, bytes)
+      digests.push(contentHash(bytes)); offset += size + 1
+    }
+    if (offset !== output.length) throw new Error('Git batch blob 响应存在额外字节')
+    start = end
+  }
+  return digests
 }
 export function readObject(commonDir: string, oid: string): Buffer {
   const bytes = objectGit(commonDir, ['cat-file', 'blob', oid])
-  const actualOid = createHash(oid.length === 40 ? 'sha1' : 'sha256').update(`blob ${bytes.byteLength}\0`).update(bytes).digest('hex')
-  if (actualOid !== oid) throw new Error('Git blob OID 不匹配')
+  verifyObjectOid(oid, bytes)
   return bytes
 }
 export function writeObject(commonDir: string, bytes: Buffer): string { return objectGit(commonDir, ['hash-object', '-w', '--stdin'], bytes).toString().trim() }
@@ -138,22 +174,30 @@ function observe(root: string): Observation {
   if (cachedRecords.some(record => record.startsWith('160000 commit '))) throw new Error('不支持真实 gitlink/submodule 条目')
   const cachedPaths = new Set(cachedRecords.map(record => record.slice(record.indexOf('\t') + 1)))
   const nestedWorktrees = registeredWorktreeRoots(root).filter(path => path.startsWith(`${root}${sep}`))
-  const stamps: string[] = [], entries: TreeEntry[] = []
-  for (const path of paths) {
-    const absolute = join(root, path)
-    if (!cachedPaths.has(path) && nestedWorktrees.some(nested => absolute === nested || absolute.startsWith(`${nested}${sep}`))) continue
-    validateRepositoryPath(path)
-    // 已删除的 tracked 文件保留为 tree 中的删除差量。
-    try { lstatSync(absolute) } catch (error) { if (['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) { stamps.push(`${path}:deleted`); continue } throw error }
-    checkParents(root, path)
-    const stat = lstatSync(absolute, { bigint: true })
-    if (stat.isDirectory() && cachedPaths.has(path)) { stamps.push(`${path}:directory-replacement`); continue }
-    if (!stat.isFile() && !stat.isSymbolicLink()) throw new Error(`不支持目录/submodule条目: ${path}`)
-    const bytes = stat.isSymbolicLink() ? Buffer.from(readlinkSync(absolute)) : readFileSync(absolute)
-    const mode = stat.isSymbolicLink() ? '120000' : (stat.mode & 0o111n) !== 0n ? '100755' : '100644'
-    entries.push({ path, mode, oid: writeObject(source.commonDir, bytes), digest: contentHash(bytes) })
-    stamps.push(`${path}:${stat.dev}:${stat.ino}:${stat.mtimeNs}:${stat.ctimeNs}:${mode}:${contentHash(bytes)}`)
-  }
+  const stamps: string[] = [], entries: TreeEntry[] = [], objects = mkdtempSync(join(tmpdir(), 'spex-sync-objects-'))
+  try {
+    for (const path of paths) {
+      const absolute = join(root, path)
+      if (!cachedPaths.has(path) && nestedWorktrees.some(nested => absolute === nested || absolute.startsWith(`${nested}${sep}`))) continue
+      validateRepositoryPath(path)
+      // 已删除的 tracked 文件保留为 tree 中的删除差量。
+      try { lstatSync(absolute) } catch (error) { if (['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) { stamps.push(`${path}:deleted`); continue } throw error }
+      checkParents(root, path)
+      const stat = lstatSync(absolute, { bigint: true })
+      if (stat.isDirectory() && cachedPaths.has(path)) { stamps.push(`${path}:directory-replacement`); continue }
+      if (!stat.isFile() && !stat.isSymbolicLink()) throw new Error(`不支持目录/submodule条目: ${path}`)
+      const bytes = stat.isSymbolicLink() ? Buffer.from(readlinkSync(absolute)) : readFileSync(absolute)
+      const mode = stat.isSymbolicLink() ? '120000' : (stat.mode & 0o111n) !== 0n ? '100755' : '100644'
+      writeFileSync(join(objects, String(entries.length)), bytes, { flag: 'wx', mode: 0o600 })
+      entries.push({ path, mode, oid: '', digest: contentHash(bytes) })
+      stamps.push(`${path}:${stat.dev}:${stat.ino}:${stat.mtimeNs}:${stat.ctimeNs}:${mode}:${contentHash(bytes)}`)
+    }
+    if (entries.length) {
+      const oids = objectGit(source.commonDir, ['hash-object', '-w', '--no-filters', '--stdin-paths'], Buffer.from(entries.map((_, index) => `${index}\n`).join('')), undefined, objects).toString().trim().split('\n')
+      if (oids.length !== entries.length || oids.some(oid => !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(oid))) throw new Error('Git batch 对象写入响应不匹配')
+      entries.forEach((entry, index) => { entry.oid = oids[index] })
+    }
+  } finally { rmSync(objects, { recursive: true, force: true }) }
   return { source, head, indexTree, sharedIndexDigest: contentHash(JSON.stringify(sharedDigests)), indexDigest: contentHash(indexBytes ?? Buffer.alloc(0)), entries, fileStamp: contentHash(JSON.stringify(stamps)) }
 }
 const observationKey = (item: Observation): string => JSON.stringify({ source: item.source, head: item.head, indexDigest: item.indexDigest, indexTree: item.indexTree, sharedIndexDigest: item.sharedIndexDigest, entries: item.entries, fileStamp: item.fileStamp })
