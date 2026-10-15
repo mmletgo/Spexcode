@@ -1,6 +1,9 @@
-import type { BlobRef, InputSnapshot, WorktreeIdentity } from './operation-types.js'
-import { objectGit, readEvidence, readTree, verifySnapshot, writeEvidence, writeTree } from './snapshot.js'
+import type { ApplyJournal, BlobRef, InputSnapshot, SyncOperation, WorktreeIdentity } from './operation-types.js'
+import { objectGit, readEvidence, readObject, readTree, verifySnapshot, writeEvidence, writeTree } from './snapshot.js'
 import type { TreeEntry } from './snapshot.js'
+import { parseContract } from '@spexcode/spec-core/contracts'
+import type { Contract, ContractItem } from '@spexcode/spec-core/contracts'
+import { mintIds } from '@spexcode/spec-core'
 
 export type HistoryChange = { path: string; before: TreeEntry | null; next: TreeEntry | null }
 export type HistoryRequest = {
@@ -10,8 +13,49 @@ export type HistoryRequest = {
   changes: HistoryChange[]; conflicts: string[]; mergeOutput: string
 }
 export type HistoryRequestInput = Pick<HistoryRequest, 'requestId' | 'nodeId' | 'operationId' | 'receiptId' | 'featureCommit'>
-const canonical = (value: unknown): string => JSON.stringify(value)
+const canonical = (value: unknown): string => JSON.stringify(value, (_key, entry: unknown) => entry && typeof entry === 'object' && !Array.isArray(entry) ? Object.fromEntries(Object.entries(entry).sort(([a], [b]) => a.localeCompare(b))) : entry)
 const same = (left: TreeEntry | undefined, right: TreeEntry | undefined): boolean => left?.oid === right?.oid && left?.mode === right?.mode
+
+export type HistoryRestoration = { id: string; nodeId: string; path: string; source: string; item: ContractItem | null; contract: Contract }
+/** 只识别原提交确实删除、本次固定请求按原身份恢复的历史对象，不授予新业务复用权。 */
+export function readHistoryRestorations(snapshot: InputSnapshot, ref: BlobRef): HistoryRestoration[] {
+  const request = readHistoryRequest(snapshot, ref), commonDir = snapshot.source.commonDir
+  const tree = (commit: string): string => objectGit(commonDir, ['rev-parse', `${commit}^{tree}`]).toString().trim()
+  const parent = new Map(readTree(commonDir, tree(request.parentCommit)).map(entry => [entry.path, entry]))
+  const feature = new Map(readTree(commonDir, tree(request.featureCommit)).map(entry => [entry.path, entry]))
+  const parentPaths = [...parent.keys()].filter(path => /^\.spec\/.+\/spec\.md$/.test(path)), nodeIds = mintIds(parentPaths.map(path => path.split('/').slice(1, -1)))
+  const identities = (entries: readonly TreeEntry[]): { nodes: Set<string>; items: Set<string> } => {
+    const specs = entries.filter(entry => entry.mode !== '120000' && /^\.spec\/.+\/spec\.md$/.test(entry.path)), nodes = mintIds(specs.map(entry => entry.path.split('/').slice(1, -1)))
+    const items = specs.flatMap((entry, index) => parseContract({ nodeId: nodes[index], path: entry.path, source: readObject(commonDir, entry.oid).toString('utf8') }).contract?.items.map(item => item.id) ?? [])
+    return { nodes: new Set(nodes), items: new Set(items) }
+  }
+  const deliveredIds = identities([...feature.values()]), currentIds = identities(readTree(commonDir, snapshot.immutableTree))
+  const result: HistoryRestoration[] = []
+  for (const change of request.changes) {
+    if (!change.next || !/^\.spec\/.+\/spec\.md$/.test(change.path) || request.conflicts.includes(change.path)) continue
+    const nodeId = nodeIds[parentPaths.indexOf(change.path)], previous = parent.get(change.path)
+    if (!previous || previous.mode === '120000' || change.next.mode === '120000') continue
+    const parse = (entry: TreeEntry | null | undefined): Contract | null => entry ? parseContract({ nodeId, path: change.path, source: readObject(commonDir, entry.oid).toString('utf8') }).contract : null
+    const old = parse(previous), removed = parse(feature.get(change.path)), before = parse(change.before), restored = parse(change.next)
+    if (!old || !restored || !old.code.every(anchor => restored.code.includes(anchor))) continue
+    for (const item of old.items) {
+      const next = restored.items.find(next => next.id === item.id)
+      const fields = (value: ContractItem): string => { const { line: _line, ...fields } = value; return JSON.stringify(fields) }
+      if (next && !deliveredIds.items.has(item.id) && !currentIds.items.has(item.id) && fields(item) === fields(next)) result.push({ id: item.id, nodeId, path: change.path, source: readObject(commonDir, change.next.oid).toString('utf8'), item, contract: old })
+    }
+    if (!removed && !before && !deliveredIds.nodes.has(nodeId) && !currentIds.nodes.has(nodeId) && old.rawSource === restored.rawSource) result.push({ id: nodeId, nodeId, path: change.path, source: readObject(commonDir, change.next.oid).toString('utf8'), item: null, contract: old })
+  }
+  return result
+}
+
+/** 真实原操作与结算回执授予历史恢复范围；请求中的来源字符串本身不构成授权。 */
+export function readReceiptHistoryRestorations(snapshot: InputSnapshot, ref: BlobRef, original: SyncOperation, journals: readonly ApplyJournal[]): HistoryRestoration[] {
+  const request = readHistoryRequest(snapshot, ref)
+  const settled = journals.find(journal => journal.status === 'settled' && journal.receipt?.id === request.receiptId && journal.receipt.actualCommit === request.featureCommit)
+  const restored = readHistoryRestorations(snapshot, ref)
+  if (request.operationId !== original.id || !settled || journals.some(journal => journal.status !== 'settled') || original.input.source.repositoryId !== snapshot.source.repositoryId || original.input.source.canonicalRoot !== snapshot.source.canonicalRoot || restored.some(item => !settled.plan.files.some(file => file.path === item.path))) throw new Error('SYNC_RESTORE_BINDING: 恢复未绑定原已结算receipt及同一历史Spec对象')
+  return restored
+}
 
 /** Git 的反向三方只产生对象；原工作树、index 和共享分支均不写入。 */
 function reverseTree(snapshot: InputSnapshot, featureCommit: string, parentCommit: string): { tree: string; conflicts: string[]; output: string } {

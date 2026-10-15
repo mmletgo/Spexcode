@@ -312,7 +312,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   return analysis
 }
 
-export function deriveBehaviorAuthorization(analysis: CodeBehaviorAnalysis, ref: { sha256: string }): AuthorizedContractChange[] {
+export function deriveBehaviorAuthorization(analysis: CodeBehaviorAnalysis, ref: { sha256: string }): Exclude<AuthorizedContractChange, { action: 'restore' }>[] {
   if (!analysis.reviewPassed || contentHash(JSON.stringify(analysis)) !== ref.sha256) problem('行为授权必须由已冻结独审blob派生')
   return analysis.authorizedChanges.map(change => ({ ...change, analysisRef: ref }))
 }

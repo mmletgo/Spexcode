@@ -4,6 +4,8 @@ import { applyComponentMigrations, type ProtocolTransaction, type SessionProtoco
 import { controlledDecisionIdentity, readControlledDecision, readControlledRequest } from './request-input.js'
 import { readHistoryRequest } from './history-input.js'
 import { verifyPublicationBase } from './publication-base.js'
+import { selectedRetiredIds } from './composition.js'
+import type { SyncCoordinatorPlan } from './coordinator-types.js'
 import type { PublicationBase, PublicationHeads } from './operation-types.js'
 import { SYNC_COMPONENT, SYNC_MIGRATIONS, syncCoordinatorAddress, syncSemanticDigest } from './migrations.js'
 import type { BaselineResource, BaselineBinding, FrozenBaselineSelection, BaselineSelectionResult, PhysicalScope, PhysicalControl, ClaimQueuedAttemptInput, SyncObserverHealth, SyncObservationInput, SyncObservation, ObserveAndAdmitResult, AdmitSyncInput, ApplyFilePlan, ApplyJournal, ApplyPlan, ApplyReceipt, ApplyStep, BaselinePair, BlobRef, CandidateRef, ClaimedAttempt, ClaimAttemptInput, ComposedInputRef, RecoverableSyncResource, SyncResourceCheckpoint, SyncResourcePlan, SyncResourceRecord, DispatchPlan, InputSnapshot, NativeSessionRef, RecoverableSync, ScopeLease, SyncAttempt, SyncControl, SyncDispatchEnvelope, SyncFailure, SyncOperation, SyncIngressReceipt, SyncScope, VerificationRef, VerificationResultBlob, WorktreeIdentity, WriteFence } from './operation-types.js'
@@ -764,13 +766,17 @@ export class SyncStore {
   settleApply(journalId: string, receiptId: string): SyncOperation {
     const verificationRef = this.write(tx => { const journal = this.journal(tx, journalId); return this.attempt(tx, journal.attemptId).verification!.resultBlob })
     const verification = JSON.parse(this.blob(verificationRef).toString('utf8')) as VerificationResultBlob
+    const operation = this.write(tx => this.operation(tx, this.journal(tx, journalId).operationId))
+    const plan = operation.planBlob ? JSON.parse(this.blob(operation.planBlob).toString('utf8')) as SyncCoordinatorPlan : null
+    const restoredIds = plan?.authorizedChanges?.filter(change => change.action === 'restore').map(change => change.id).sort() ?? []
+    if (digest(restoredIds) !== digest([...(verification.restoredIds ?? [])].sort())) fail('SYNC_RESTORE_BINDING', 'verified restoration differs from frozen authority')
     return this.write(tx => {
       const journal = this.journal(tx, journalId), operation = this.operation(tx, journal.operationId), attempt = this.attempt(tx, journal.attemptId)
       if (!journal.receipt || journal.receipt.id !== receiptId) fail('SYNC_RECEIPT_MISSING', receiptId)
       if (journal.status === 'settled') return operation
       if (attempt.verification?.resultBlob.sha256 !== verificationRef.sha256) fail('SYNC_VERIFICATION_INVALID', 'settlement verification changed')
       const historicalPairs = [...(operation.previousBaselinePair ? [operation.previousBaselinePair] : []), ...(operation.baselineSelection?.bindings.flatMap(binding => { const pair = 'bytePair' in binding ? binding.bytePair : binding.intentPair; return pair ? [pair] : [] }) ?? [])]
-      const retiredIds = [...new Set([...historicalPairs.flatMap(pair => pair.retiredIds ?? []), ...(verification.retiredIds ?? [])])].sort()
+      const retiredIds = [...new Set([...(operation.baselineSelection ? selectedRetiredIds(operation.baselineSelection) : historicalPairs.flatMap(pair => pair.retiredIds ?? [])), ...(verification.retiredIds ?? [])])].filter(id => !restoredIds.includes(id)).sort()
       const decisionRefs = [...new Map([...historicalPairs.flatMap(pair => pair.decisionRefs ?? []), ...(verification.decisionRefs ?? [])].map(ref => [ref.sha256, ref])).values()]
       const pair: BaselinePair = { id: `baseline-${journal.id}`, repositoryId: operation.input.source.repositoryId, source: clone(operation.input.source), sourceInput: clone(operation.input), verifiedDelivery: clone(journal.receipt.deliverySnapshot), coveredScope: clone(journal.plan.coveredScope), retiredIds, decisionRefs, receiptId, settledAtMs: this.now() }
       tx.exec('INSERT INTO sync_baseline_pairs(id,repository_id,source_key,receipt_id,settled_at_ms,record_json) VALUES(?,?,?,?,?,?)', pair.id, pair.repositoryId, identityKey(pair.source), pair.receiptId, pair.settledAtMs, JSON.stringify(pair))

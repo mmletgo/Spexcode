@@ -20,3 +20,9 @@ stopWriter 验证物理暂停先持久化，当前观察/执行者停止，recei
 通过 SPEX_VERIFICATION_EVIDENCE_DIR 外放 SQLite 一致备份、实际 Git 对象与操作/尝试/journal，便于审阅新提交和未覆盖边界。
 
 真实跨目录 rename 回归先以明确受控迁移交付为前置，再从正式 revert 入口恢复历史精确 Spec 路径，检查当前 leaf 授权原本不含该路径、补偿只增加该文件、源/测试目录权限保持、实际交付节点及全部业务 ID 连续。
+
+恢复同一历史退役对象的回归保留原 receipt、退役账本、旧节点与业务 ID，验证完整 Spec、代码、验收及映射成组恢复；不得通过移除历史退役记录或放开新业务复用 ID 获得通过。
+
+历史child种子在交付前由现有完整冻结契约检查断言零error，涵盖无状态FLOW/STEP/RULE及真实代码测试绑定。原node tombstone与REQ/FLOW/STEP/RULE/AC均进入真实已结算head；精确恢复后再运行普通源码编辑，检查旧退休pair不改且较新node/业务ID head保持可推进。错误receipt/operation、错误ID/路径及仅伪source均不授恢复权。
+
+完整恢复回归包含child自身VERIFY及种子前明确可信固定命令登记；正式恢复后直接读取node/VERIFY和业务head，必须绑定新receipt，再验证普通后继修改。

@@ -32,7 +32,7 @@ async function fixture() {
     if (value.baselineSelection) { const ack = store.ackDispatch(value.input.source.repositoryId, operation.dispatchMessageId); return store.claimQueuedAttempt({ operationId: operation.id, source: value.input.source, scope: value.scope, leaseMs: 1000, expectedRevision: ack.revision }) }
     return store.claimAttempt({ operationId: operation.id, source: value.input.source, scope: value.scope, leaseMs: 1000, expectedMessageId: operation.dispatchMessageId })
   }
-  const ready = (value = admit(), readyScope = value.scope, blockedScope: SyncScope = { paths: [], contractIds: [], flowIds: [] }, blockedReason: 'needs_input' | 'conflicted' | null = null, beforeGeneration?: (claimed: ClaimedAttempt) => void, verificationMetadata: Pick<VerificationResultBlob, 'retiredIds' | 'decisionRefs'> = {}) => {
+  const ready = (value = admit(), readyScope = value.scope, blockedScope: SyncScope = { paths: [], contractIds: [], flowIds: [] }, blockedReason: 'needs_input' | 'conflicted' | null = null, beforeGeneration?: (claimed: ClaimedAttempt) => void, verificationMetadata: Pick<VerificationResultBlob, 'retiredIds' | 'restoredIds' | 'decisionRefs'> = {}) => {
     const claimed = claim(value), target = { ...input(value.deliveryPlan.canonicalRoot === value.input.source.canonicalRoot ? value.input.source : source('delivery'), 'target'), manifestBlob: put({ version: 1, entries: readyScope.paths.map(path => ({ path, mode: '100644', oid: 'a'.repeat(40), digest: '1'.repeat(64) })) }) }
     store.bindDelivery(claimed.fence, target.source)
     store.bindComposedInput(claimed.fence, { sourceInputId: value.input.id, previousBaselinePairId: value.previousBaselinePair?.id ?? null, tree: value.input.immutableTree, manifestBlob: target.manifestBlob, contentDigest: value.input.contentDigest, ...(value.requestBlob ? { requestBlob: value.requestBlob } : {}), ...(value.baselineSelection ? { baselineSelectionDigest: value.baselineSelection.digest } : {}) })
@@ -431,6 +431,19 @@ test('component migration online backup restores old database, failed DDL rolls 
     f.protocol.withTransaction(tx => tx.exec('INSERT INTO schema_migrations(component,version,checksum,applied_at_ms) VALUES(?,?,?,?)', SYNC_COMPONENT, SYNC_MIGRATIONS.length + 1, 'future', 1000))
     await assert.rejects(migrateSyncStore(f.protocol), /SYNC_SCHEMA_UNSUPPORTED/)
     assert.throws(() => f.store.admitAndEnqueue(f.admit()), /SYNC_SCHEMA_UNSUPPORTED/)
+  } finally { f.cleanup() }
+})
+
+test('restored IDs cannot publish a new head without the exact frozen restore authority', async () => {
+  const f = await fixture()
+  try {
+    const r = f.ready(undefined, undefined, undefined, null, undefined, { restoredIds: ['RULE-A'] })
+    const journal = f.store.beginApply(r.fence, r.plan, r.target), receipt = f.receipt(journal.id, r.plan)
+    for (const step of journal.steps) f.store.recordApplyStep(r.fence, journal.id, { ...step, status: 'completed' })
+    f.store.recordReceipt(journal.id, receipt)
+    assert.throws(() => f.store.settleApply(journal.id, receipt.id), /SYNC_RESTORE_BINDING/)
+    assert.equal(f.store.readBaseline(r.operation.input.source), null)
+    assert.equal(f.store.readJournal(journal.id).status, 'completed')
   } finally { f.cleanup() }
 })
 

@@ -1,5 +1,5 @@
 import type { CodeBehaviorEvidence, ContractNodeChange, SyncDecisionAuthority } from './writeback-types.js'
-import type { BlobRef } from './operation-types.js'
+import type { BlobRef, InputSnapshot } from './operation-types.js'
 import type { FrozenContextRef, FrozenReadProof } from '../frozen-context.js'
 import type { Contract, ContractCoverage, ContractFinding, ContractGraph, Gap, ParseContractInput, Verification } from '@spexcode/spec-core/contracts'
 
@@ -8,7 +8,7 @@ export type ElaborationBoundary = typeof ELABORATION_BOUNDARIES[number]
 export type ElaborationTarget = { nodeId: string; path: string; source: string | null; sourceDigest: string | null; rawSource?: string }
 export type ElaborationFact = { source: string; text: string }
 /** 调用者已确认的用户原意或裁决变更；不是 Agent 自己生成的批准请求。 */
-export type AuthorizedContractChange = { id: string; action: 'retire' | 'update_verification'; source: 'user:raw' | `decision:${string}`; reason: string; analysisRef?: BlobRef } | { id: string; action: 'update_acceptance'; source: 'user:raw' | `decision:${string}` | `code:${string}`; reason: string; ruleIds: string[]; analysisRef: BlobRef }
+export type AuthorizedContractChange = { id: string; action: 'retire' | 'update_verification'; source: 'user:raw' | `decision:${string}`; reason: string; analysisRef?: BlobRef } | { id: string; action: 'update_acceptance'; source: 'user:raw' | `decision:${string}` | `code:${string}`; reason: string; ruleIds: string[]; analysisRef: BlobRef } | { id: string; action: 'restore'; source: 'user:raw'; reason: string; history: { inputId: string; requestBlob: BlobRef } }
 export type ElaborationInput = {
   root: string
   base?: string
@@ -22,6 +22,8 @@ export type ElaborationInput = {
   authorizedChanges?: readonly AuthorizedContractChange[]
   /** 协调器保存的稳定 ID 退役记录，新候选不可复用。 */
   retiredIds?: readonly string[]
+  /** 当前真实操作输入；仅供核验既有restore授权，不成为模型授权。 */
+  historyInput?: InputSnapshot
   nodeChanges?: readonly ContractNodeChange[]
   mode?: 'preserve_business' | 'reelaborate'
   analysis?: CodeBehaviorEvidence

@@ -126,6 +126,16 @@ export function verifyBaselineSelection(input: InputSnapshot, selection: FrozenB
   }
 }
 
+/** 精确 ID 的当前意图头决定禁用状态，旧路径头只保留无该 ID 头的历史退役。 */
+export function selectedRetiredIds(selection: FrozenBaselineSelection): string[] {
+  const historical = new Set(selection.bindings.flatMap(binding => ('bytePair' in binding ? binding.bytePair : binding.intentPair)?.retiredIds ?? []))
+  for (const binding of selection.bindings) if ('intentPair' in binding && binding.intentPair) {
+    if (binding.intentPair.retiredIds?.includes(binding.resource.id)) historical.add(binding.resource.id)
+    else historical.delete(binding.resource.id)
+  }
+  return [...historical].sort()
+}
+
 function intentObjects(commonDir: string, entries: readonly TreeEntry[]): Map<string, IntentObject> {
   const objects = new Map<string, IntentObject>()
   for (const entry of entries.filter(entry => entry.mode !== '120000' && entry.path.startsWith('.spec/') && entry.path.endsWith('/spec.md'))) {
@@ -145,7 +155,7 @@ function intentObjects(commonDir: string, entries: readonly TreeEntry[]): Map<st
 const sameIntent = (a: IntentObject | null, b: IntentObject | null): boolean => a && b ? sameContractBusinessMeaning(a.item, b.item) : a === b
 
 /** ID语义未变化也不能证明其实际治理源码已消费；每个对象保真实pair和Git采纳来源。 */
-function intentArtifactResiduals(input: InputSnapshot, selection: FrozenBaselineSelection, intents: readonly IntentResidual[], entries: (snapshot: InputSnapshot) => readonly TreeEntry[], adoptedPaths: (pair: BaselinePair) => ReadonlySet<string>): IntentArtifactResidual[] {
+function intentArtifactResiduals(input: InputSnapshot, selection: FrozenBaselineSelection, intents: readonly IntentResidual[], entries: (snapshot: InputSnapshot) => readonly TreeEntry[], adoptedPaths: (pair: BaselinePair) => ReadonlySet<string>, authoredEntries?: readonly TreeEntry[]): IntentArtifactResidual[] {
   const maps = new Map<string, Map<string, TreeEntry>>()
   const files = (snapshot: InputSnapshot): Map<string, TreeEntry> => { let value = maps.get(snapshot.id); if (!value) { value = new Map(entries(snapshot).map(entry => [entry.path, entry])); maps.set(snapshot.id, value) }; return value }
   const ownerMaps = new Map<string, Map<string, IntentObject>>()
@@ -153,13 +163,14 @@ function intentArtifactResiduals(input: InputSnapshot, selection: FrozenBaseline
   const pairs = new Map(selection.bindings.flatMap(binding => 'intentPair' in binding ? [[`${binding.resource.kind}:${binding.resource.id}`, binding.intentPair] as const] : []))
   const bytePairs = new Map(selection.bindings.flatMap(binding => 'bytePair' in binding ? [[binding.resource.path, binding.bytePair] as const] : []))
   const artifacts: IntentArtifactResidual[] = []
+  const authored = authoredEntries ? new Map(authoredEntries.map(entry => [entry.path, entry])) : files(input)
   for (const intent of intents) {
     const pair = pairs.get(`${intent.resource.kind}:${intent.resource.id}`) ?? null
     const priorOwner = pair ? owners(pair.sourceInput).get(intent.resource.id) ?? null : null, deliveredOwner = pair ? owners(pair.verifiedDelivery).get(intent.resource.id) ?? null : null
     for (const binding of ['code', 'test'] as const) {
       const paths = [...new Set([priorOwner, deliveredOwner, intent.source].flatMap(owner => owner ? binding === 'code' ? owner.codePaths : owner.testPaths : []))].sort()
       for (const path of paths) {
-        const before = pair ? files(pair.sourceInput).get(path) ?? null : null, delivery = pair ? files(pair.verifiedDelivery).get(path) ?? null : null, source = files(input).get(path) ?? null
+        const before = pair ? files(pair.sourceInput).get(path) ?? null : null, delivery = pair ? files(pair.verifiedDelivery).get(path) ?? null : null, source = authored.get(path) ?? null
         const bytePair = bytePairs.get(path), adoptedByte = bytePair && adoptedPaths(bytePair).has(path)
         const adoptedPair = adoptedByte ? bytePair : pair && adoptedPaths(pair).has(path) ? pair : null
         const authorBase = adoptedPair ? files(adoptedPair.verifiedDelivery).get(path) ?? null : before
@@ -347,8 +358,7 @@ export function readCompositionEvidence(input: InputSnapshot, composed: Composed
   }
   if (canonical(expected) !== canonical(evidence.intents)) throw new Error('SYNC_COMPOSITION_BINDING: true intent objects or residual differ')
   const adoptedPaths = (pair: BaselinePair): ReadonlySet<string> => { let paths = adoption.get(pair.id); if (!paths) { paths = adoptedDeliveryPaths(input, pair); adoption.set(pair.id, paths) }; return paths }
-  const authorEntries = (snapshot: InputSnapshot): TreeEntry[] => snapshot.id === input.id && group ? applyAuthorChanges(actualEntries(snapshot), group.changes) : actualEntries(snapshot)
-  const artifacts = intentArtifactResiduals(input, selection, expected, authorEntries, adoptedPaths)
+  const artifacts = intentArtifactResiduals(input, selection, expected, actualEntries, adoptedPaths, group ? applyAuthorChanges(actualEntries(input), group.changes) : undefined)
   if (canonical(artifacts) !== canonical(evidence.artifacts)) throw new Error('SYNC_COMPOSITION_BINDING: true code/test objects or residual differ')
   const residualPaths = [...new Set(expected.filter(item => item.changed).flatMap(item => [item.before?.path, item.source?.path].filter((path): path is string => !!path)))].sort()
   for (const artifact of artifacts.filter(item => item.changed)) if (!residualPaths.includes(artifact.path)) residualPaths.push(artifact.path)
@@ -379,8 +389,10 @@ export function projectSelectedAuthorGroup(input: InputSnapshot, evidence: Selec
     const prior = before.get(id) ?? null, source = next.get(id) ?? null, broadChange = prior?.rawSource !== source?.rawSource || prior?.businessProse !== source?.businessProse
     return { resource: { kind: 'contract', id }, pairId: null, before: prior, delivery: evidence.intents.find(item => item.resource.id === id)?.delivery ?? null, source, adopted: false, broadChange, changed: !sameIntent(prior, source) || broadChange }
   })
-  const entries = (snapshot: InputSnapshot): TreeEntry[] => snapshot.id === input.id ? incoming : verifySnapshot(snapshot)
-  const artifacts = intentArtifactResiduals(input, selection, intents, entries, pair => adoptedDeliveryPaths(input, pair))
+  const snapshots = new Map<string, TreeEntry[]>(), adoption = new Map<string, ReadonlySet<string>>()
+  const entries = (snapshot: InputSnapshot): TreeEntry[] => { let value = snapshots.get(snapshot.id); if (!value) { value = verifySnapshot(snapshot); snapshots.set(snapshot.id, value) }; return value }
+  const adopted = (pair: BaselinePair): ReadonlySet<string> => { let value = adoption.get(pair.id); if (!value) { value = adoptedDeliveryPaths(input, pair); adoption.set(pair.id, value) }; return value }
+  const artifacts = intentArtifactResiduals(input, selection, intents, entries, adopted, incoming)
   const residualPaths = [...new Set([...intents.filter(item => item.changed).flatMap(item => [item.before?.path, item.source?.path].filter((path): path is string => !!path)), ...artifacts.filter(item => item.changed).map(item => item.path), ...changes.map(change => change.path)])].sort()
   return { ...evidence, intents, artifacts, residualPaths, controlledAuthorGroup: { requestBlob, changes, intents: groupIntents } }
 }

@@ -20,3 +20,5 @@ code:
 读取固定请求重核 input/source、feature/parent、完整三方结果、变化清单与 Git tree；不能伪造、遗漏或替换成单文件请求。新输入不能重放旧补偿。
 
 反向三方仅使用 Git 内置合并，拒绝外部 merge driver，明确关闭 renormalize，避免不可变候选触发宿主自定义合并命令或过滤器。Git 输出中的冲突树仅作证据，分析暂选明确 parent 对象而不传入冲突标记。
+
+同一历史身份恢复从固定 history 请求的真实 parent/feature/current-before/request-next 四方核验：原 parent 项存在，原 feature 与当前来源该 ID 均缺失，请求恢复原路径的同业务字段和代码/测试绑定。仅得出恢复证明，不代替原 receipt 的可信结算核验或授权新的业务对象。

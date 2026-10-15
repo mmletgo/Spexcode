@@ -82,3 +82,7 @@ code/combined/reconcile及已共同验证基线上的外部代码差量、真实
 已落地交付的成组补偿与正文编辑统一进入受控输入、精确基线、完整行为分析、P1、生成及四层验证。作者差量逐文件展开，删除不会被单 path/next 假设遗漏。补偿不直接写来源或自行产生完成状态；完整私有新提交、journal 和 receipt 仍是唯一交付结算路径。
 
 成组受控请求发生节点迁移或删除时，明确 bytePair:null 的 Spec 路径用 immutable group.before 作为当前作者真实前置；before:null 的新增目的路径不冒充旧契约。它只补无基线时的生命周期原文，已有非 null 交付头仍保持权威，不创建虚构 BaselinePair、receipt 或已验证声明。固定旧节点全文进入 P1，当前请求中的同节点目标 raw 保持作者原意，身份及退役政策照常验证。
+
+精确历史恢复核原receipt、节点与业务项；node tombstone沿原scope/head结算，生成及独审只检查实际业务readyIds，已审Spec节点身份另由路径和恢复授权保护。
+
+恢复Spec自带VERIFY时，其原技术ID与node tombstone同样纳入已审scope/head覆盖并推进新receipt；generation/review的readyIds仍只业务ID。P1及当前可信verifications的argv/cwd/预算精确登记不变，restore不能批准旧验证命令覆盖新政策。

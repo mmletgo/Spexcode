@@ -77,7 +77,7 @@ function checkInput(input: ElaborationInput): void {
   const authorizations = new Set<string>()
   for (const change of input.authorizedChanges ?? []) {
     const existing = items.find(item => item.id === change.id)
-    if (!existing || !change.reason.trim() || authorizations.has(change.id) || !['retire', 'update_verification', 'update_acceptance'].includes(change.action) || (change.action === 'update_verification' && existing.kind !== 'VERIFY') || (change.action === 'update_acceptance' && existing?.kind !== 'AC')) throw new TypeError(`合法契约变更需明确既有身份、操作和依据: ${change.id}`)
+    if (change.action !== 'restore' && !existing || !change.reason.trim() || authorizations.has(change.id) || !['retire', 'update_verification', 'update_acceptance', 'restore'].includes(change.action) || (change.action === 'update_verification' && existing?.kind !== 'VERIFY') || (change.action === 'update_acceptance' && existing?.kind !== 'AC')) throw new TypeError(`合法契约变更需明确既有身份、操作和依据: ${change.id}`)
     const errors = contractAuthorizationErrors(change, baseline, { ...input, newNodeRawSources: new Map(input.targets.map(target => [target.path, target.nodeId === input.intent.nodeId ? input.intent.rawSource : target.rawSource ?? parseParts(target.source ?? '')?.rawSource ?? ''])) })
     if (errors.length) throw new TypeError(`${change.action === 'update_acceptance' ? '验收变更没有可信分析' : '契约变更没有可信来源'}: ${change.id}; ${errors.join('; ')}`)
     authorizations.add(change.id)
@@ -139,7 +139,7 @@ function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate
   const after = frozenState(nextSources, afterFiles)
   for (const change of candidate.changes) if (!after.nodes.some(node => node.id === change.nodeId && node.path === change.path)) findings.push(finding(input, 'node_identity_invalid', `节点身份必须复用共享 mintIds: ${change.path}`))
   if (JSON.stringify(candidate.nodeChanges ?? []) !== JSON.stringify(input.nodeChanges ?? [])) findings.push(finding(input, 'node_changes_unbound', '节点迁移和退役未绑定冻结输入'))
-  const evolutionPolicy = { mode: input.mode ?? 'reelaborate', preserveAcceptedItems: input.refinement !== undefined, authorizedChanges: input.authorizedChanges ?? [], nodeChanges: input.nodeChanges ?? [], retiredIds: input.retiredIds ?? [], newNodeRawSources: new Map(input.targets.map(target => [target.path, target.nodeId === input.intent.nodeId ? input.intent.rawSource : target.rawSource ?? parseParts(target.source ?? '')?.rawSource ?? ''])), facts: input.facts, analysis: input.analysis, decisionAuthorities: input.decisionAuthorities }
+  const evolutionPolicy = { mode: input.mode ?? 'reelaborate', preserveAcceptedItems: input.refinement !== undefined, authorizedChanges: input.authorizedChanges ?? [], nodeChanges: input.nodeChanges ?? [], retiredIds: input.retiredIds ?? [], historyInput: input.historyInput, newNodeRawSources: new Map(input.targets.map(target => [target.path, target.nodeId === input.intent.nodeId ? input.intent.rawSource : target.rawSource ?? parseParts(target.source ?? '')?.rawSource ?? ''])), facts: input.facts, analysis: input.analysis, decisionAuthorities: input.decisionAuthorities }
   const resolvedGapIds = [...resolvedDecisionGapIds(before, after, evolutionPolicy)]
   findings.push(...validateContractEvolution(before, after, evolutionPolicy))
   if (input.verifications) {
@@ -151,7 +151,7 @@ function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate
       } else if (item.kind === 'AC' && !registered.has(item.command)) findings.push(finding(input, 'verification_reference_unregistered', `AC.command 未引用可信登记: ${item.command}`, item.id))
     }
   }
-  for (const id of input.retiredIds ?? []) if (graph.items.has(id)) findings.push(finding(input, 'retired_id_reused', `不能复用退役稳定身份: ${id}`, id))
+  for (const id of input.retiredIds ?? []) if (graph.items.has(id) && !input.authorizedChanges?.some(change => change.action === 'restore' && change.id === id && !contractAuthorizationErrors(change, before, evolutionPolicy).length)) findings.push(finding(input, 'retired_id_reused', `不能复用退役稳定身份: ${id}`, id))
   for (const change of input.authorizedChanges ?? []) if (change.action === 'retire' && graph.items.has(change.id)) findings.push(finding(input, 'retirement_not_applied', `用户已决定退役的身份仍存在: ${change.id}`, change.id))
   findings.push(...validateContractGraph(graph, { mode: 'final', files: input.files, nodeIds: new Set(after.nodes.map(source => source.id)) }))
   const baseline = [...input.targets.filter(target => target.source !== null), ...(input.context ?? [])].flatMap(source => parseContract({ nodeId: source.nodeId, path: source.path, source: source.source! }).contract?.items ?? [])
@@ -243,7 +243,7 @@ function validateRepairSeed(input: ElaborationInput, seed: ElaborationRepairSeed
 /** 从不可变业务输入连续生成、解析和独立审查；仅返回候选，不拥有交付树写权限。 */
 export async function elaborate(input: ElaborationInput, options: { runner?: ElaborationRunner; seed?: ElaborationRepairSeed } = {}): Promise<ElaborationResult> {
   checkInput(input)
-  const frozen = structuredClone({ execution: { root: input.root, base: input.base ?? null }, intent: input.intent, targets: input.targets, context: input.context ?? [], facts: input.facts ?? [], ...(input.verifications ? { verifications: input.verifications } : {}), authorizedChanges: input.authorizedChanges ?? [], mode: input.mode ?? 'reelaborate', nodeChanges: input.nodeChanges ?? [], analysis: input.analysis, decisionAuthorities: input.decisionAuthorities, refinement: input.refinement, retiredIds: input.retiredIds ?? [], files: input.files ? [...input.files].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0) : null })
+  const frozen = structuredClone({ execution: { root: input.root, base: input.base ?? null }, intent: input.intent, targets: input.targets, context: input.context ?? [], facts: input.facts ?? [], ...(input.verifications ? { verifications: input.verifications } : {}), authorizedChanges: input.authorizedChanges ?? [], mode: input.mode ?? 'reelaborate', nodeChanges: input.nodeChanges ?? [], analysis: input.analysis, decisionAuthorities: input.decisionAuthorities, refinement: input.refinement, retiredIds: input.retiredIds ?? [], historyInput: input.historyInput, files: input.files ? [...input.files].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0) : null })
   // 在任何 await 前复制调用者输入，后续生成/评审不能混入继续编辑的字节。
   input = { ...input, ...frozen, files: frozen.files === null ? undefined : new Map(frozen.files) }
   const inputDigest = digest(frozen)
@@ -324,7 +324,7 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
             result.structurePassed = true; result.reviewPassed = true
             result.readyIds = result.coverage.items.filter(item => item.blockedBy.length === 0 && item.kind !== 'GAP').map(item => item.id)
             Object.assign(result, projectElaborationFlowReadiness(checked.graph, result.coverage))
-            result.retiredIds = [...new Set([...checked.resolvedGapIds, ...input.retiredIds ?? [], ...input.authorizedChanges!.filter(change => change.action === 'retire' && !checked.graph.items.has(change.id)).map(change => change.id), ...input.nodeChanges!.filter(change => change.action === 'retire').map(change => change.from.nodeId)])]
+            result.retiredIds = [...new Set([...checked.resolvedGapIds, ...(input.retiredIds ?? []).filter(id => !input.authorizedChanges?.some(change => change.action === 'restore' && change.id === id)), ...input.authorizedChanges!.filter(change => change.action === 'retire' && !checked.graph.items.has(change.id)).map(change => change.id), ...input.nodeChanges!.filter(change => change.action === 'retire').map(change => change.from.nodeId)])]
             result.status = result.gaps.some(gap => gap.gapKind === 'conflict') ? 'conflict' : result.gaps.length ? 'needs_input' : 'complete'
             return result
           }

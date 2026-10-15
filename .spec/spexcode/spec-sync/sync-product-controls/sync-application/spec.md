@@ -92,3 +92,5 @@ stopWriter 在版本回退前先持久暂停当前物理来源，停止相同来
 detail 的原来源采纳与主分支完成由 [[sync-landing-status]] 只读推导。sourceSynced 表示真实原树包含已验证完整交付且当前执行/读取闭包字节一致；canonicalSynced 还要求当前分支是仓库明确 mainBranch。已采纳后快照身份变化不单独制造 stale，无关提交允许保当前证据；相关工作文件、index、HEAD、配置或只读上下文变化仍过期。返回 operation 的 canonical 阶段是当前 Git 事实投影，不写虚构持久完成状态。
 
 历史节点路径恢复仅额外接受原完整 settled receipt 的实际 files 中、被本次 Git 反向三方触及的精确 .spec/.../spec.md 路径；当前原冻结意图仍须通过已注册 node 授权。它不扩大源代码、测试目录、配置或整个 .spec 目录的权限。目标 raw 取本次真实请求中同一节点的正文，删除时保留原历史 raw 供退役验证；节点迁移沿既有生命周期检查保持节点及业务 ID。
+
+revert 将精确历史恢复 Spec 作为可信目标，保原节点/业务 ID 与原路径；restore 授权只能由原 settled receipt 和固定 history 请求派生。原 retired ledger 保留，新完整交付推进该身份当前有效 head，后续普通操作继续使用该 head。

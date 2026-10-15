@@ -157,7 +157,7 @@ CREATE TABLE sync_observations (id TEXT PRIMARY KEY, source_key TEXT NOT NULL, o
     tx.exec('INSERT INTO sync_baseline_heads(source_key,resource_key,pair_id,legacy_reason) VALUES(?,?,?,?)', group.sourceKey, group.resourceKey, byReceipt.length === 1 ? byReceipt[0].id : null, byReceipt.length === 1 ? null : 'P3 frontier order cannot be proven by frozen predecessor chain')
   }
   for (const entry of uncertain.values()) tx.exec('INSERT INTO sync_baseline_heads(source_key,resource_key,pair_id,legacy_reason) VALUES(?,?,NULL,?) ON CONFLICT(source_key,resource_key) DO UPDATE SET legacy_reason=excluded.legacy_reason', entry.sourceKey, entry.resourceKey, entry.reason)
-} } }, { version: 11, sql: 'SELECT 1; -- Grouped immutable history requests require this writer generation; old writers must refuse without discarding request authority.' }]
+} } }, { version: 11, sql: 'SELECT 1; -- Grouped immutable history requests require this writer generation; old writers must refuse without discarding request authority.' }, { version: 12, sql: 'SELECT 1; -- Exact historical identity restoration and current per-ID retirement heads require this writer generation.' }]
 
 /** 升级前以 SQLite online backup 保存一致性旧库；迁移本身由组件事务执行。 */
 export async function migrateSyncStore(protocol: SessionProtocol, options: { backupPath?: string } = {}): Promise<number> {

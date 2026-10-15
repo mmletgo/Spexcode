@@ -23,7 +23,7 @@ import { inspectTrustedRuntime } from './trusted-hooks.js'
 import { coveredPath, readSyncSettings, SyncApplicationError } from './settings.js'
 import { SyncInputObserver, type SyncObserverHealth } from './observer.js'
 import { SyncStore, SyncStoreError } from './store.js'
-import { prepareHistoryRequest, readHistoryRequest } from './history-input.js'
+import { prepareHistoryRequest, readHistoryRequest, readReceiptHistoryRestorations } from './history-input.js'
 import { readSyncLandingStatus } from './landing-status.js'
 import { readFrozenContracts } from './frozen-contracts.js'
 
@@ -577,12 +577,20 @@ export class SyncApplication {
         const rawSource = requested?.rawSource ?? previous?.rawSource
         return rawSource ? { ...target, rawSource } : target
       })
+      const restorations = readReceiptHistoryRestorations(snapshot, requestBlob, original, journals)
+      for (const restored of restorations) if (!plan.targets.some(target => target.path === restored.path)) {
+        const node = after.nodes.find(node => node.path === restored.path)
+        if (!node || node.id !== restored.nodeId || !node.rawSource) throw new SyncApplicationError('sync_restore_identity', '历史恢复节点身份与固定请求不一致')
+        plan.targets = [...plan.targets, { nodeId: node.id, path: node.path, rawSource: node.rawSource }]
+      }
       const paths = [...new Set([...plan.executionScope!.paths, ...request.changes.map(change => change.path)])].sort()
       plan.executionScope = { ...plan.executionScope!, paths }
       plan.readPaths = [...new Set([...plan.readPaths, ...paths])].sort()
       plan.authorizedChanges = [...plan.authorizedChanges ?? [], ...[...before.graph.items.values()].filter(item => request.changes.some(change => change.path === item.path) && !after.graph.items.has(item.id)).map(item => ({ id: item.id, action: 'retire' as const, source: 'user:raw' as const, reason: `用户明确撤销交付 ${original.id} 的提交 ${request.featureCommit}；固定输入 ${snapshot.id} 的成组补偿删除该身份，仍须当前业务独审与完整验证` }))]
+      plan.authorizedChanges = [...plan.authorizedChanges, ...restorations.map(restored => ({ id: restored.id, action: 'restore' as const, source: 'user:raw' as const, reason: `用户明确撤销交付 ${original.id}；仅恢复提交 ${request.featureCommit} 的 parent 中同一历史业务身份`, history: { inputId: snapshot.id, requestBlob } }))]
       const resources = new Map(frozen.selection.bindings.map(binding => [JSON.stringify(binding.resource), binding.resource]))
       for (const path of paths) resources.set(JSON.stringify({ kind: 'path', path }), { kind: 'path', path })
+      for (const restored of restorations) { const resource = restored.item?.kind === 'FLOW' ? { kind: 'flow' as const, id: restored.id } : { kind: 'contract' as const, id: restored.id }; resources.set(JSON.stringify(resource), resource) }
       for (const item of after.graph.items.values()) if (paths.includes(item.path) && item.kind !== 'VERIFY') { const resource = item.kind === 'FLOW' ? { kind: 'flow' as const, id: item.id } : { kind: 'contract' as const, id: item.id }; resources.set(JSON.stringify(resource), resource) }
       const selected = this.store.readBaselineSelection(snapshot.source, [...resources.values()])
       if ('failure' in selected) throw new SyncApplicationError(selected.failure.code, selected.failure.message)
