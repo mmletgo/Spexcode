@@ -26,11 +26,13 @@ import { SyncStore, SyncStoreError } from './store.js'
 import { prepareHistoryRequest, readHistoryRequest, readReceiptHistoryRestorations } from './history-input.js'
 import { readSyncLandingStatus } from './landing-status.js'
 import { isSyncSpecPath, readFrozenContracts } from './frozen-contracts.js'
+import { assertSourceAdoptionComplete, fastForwardSource, prepareSourceAdoption, sourceAdoptionMutexPath, type SourceAdoptionPlan } from './source-adoption.js'
 
 export type SyncScopeCoverage = { includedNodeIds: string[]; contextNodeIds: string[]; missingNodeIds: string[]; excludedNodeIds: string[]; totalNodeCount: number }
 export type SyncSubmitInput = { nodeId: string; requestId: string; origin?: 'spec' | 'initial' | 'code' | 'combined' | 'decision'; patch?: SpecBodyEdit; retryOf?: string }
 export type SyncRevertEligibility = { eligible: true } | { eligible: false; reason: { code: string; message: string } }
-export type SyncOperationDetail = { operation: SyncOperation; physicalControl: PhysicalControl; attempt: ReturnType<SyncStore['readAttempt']> | null; journals: ReturnType<SyncStore['listJournals']>; stale: boolean; sourceSynced: boolean; canonicalSynced: boolean; revertEligibility: SyncRevertEligibility; retryEligibility: ReturnType<SyncStore['readRetryEligibility']>; decisionEligibility: ReturnType<SyncStore['readDecisionEligibility']>; resources: ReturnType<SyncStore['listRecoverableResources']>[number]['resource'][]; decisionContext: { analysisRef: BlobRef; analysis: CodeBehaviorAnalysis } | null; executionAvailability: { status: 'ready' | 'recovery_required'; failure?: { code: string; message: string } } }
+export type SyncAdoptEligibility = { eligible: true } | { eligible: false; reason: { code: string; message: string } }
+export type SyncOperationDetail = { operation: SyncOperation; physicalControl: PhysicalControl; attempt: ReturnType<SyncStore['readAttempt']> | null; journals: ReturnType<SyncStore['listJournals']>; stale: boolean; sourceSynced: boolean; canonicalSynced: boolean; adoptionEligibility: SyncAdoptEligibility; revertEligibility: SyncRevertEligibility; retryEligibility: ReturnType<SyncStore['readRetryEligibility']>; decisionEligibility: ReturnType<SyncStore['readDecisionEligibility']>; resources: ReturnType<SyncStore['listRecoverableResources']>[number]['resource'][]; decisionContext: { analysisRef: BlobRef; analysis: CodeBehaviorAnalysis } | null; executionAvailability: { status: 'ready' | 'recovery_required'; failure?: { code: string; message: string } } }
 export type SyncApplicationOptions = Partial<Pick<SyncCoordinatorOptions, 'runner' | 'verificationDriver'>> & {
   protocol: SessionProtocol
   runtimeDirectory?: string
@@ -402,9 +404,47 @@ export class SyncApplication {
     if (executionAvailability.status === 'ready' && stopped && (resources.length || journals.some(journal => journal.status !== 'settled'))) executionAvailability = { status: 'recovery_required', failure: { code: 'sync_resources_unsettled', message: '操作仍有未结算资源或交付日志，请先恢复清理再重试' } }
     const available = existsSync(this.root) && executionAvailability.status === 'ready'
     const plan = available ? this.operationPlan(operation) : null
-    const landing = available ? readSyncLandingStatus(operation, snapshot, journals, { canonicalBranch: `refs/heads/${readConfig(this.root).mainBranch?.trim() || 'main'}`, readPaths: plan!.readPaths }) : { sourceSynced: false, canonicalSynced: false, phase: operation.phase }
+    let landing = { sourceSynced: false, canonicalSynced: false, phase: operation.phase }
+    try { if (available) landing = readSyncLandingStatus(operation, snapshot, journals, { canonicalBranch: `refs/heads/${readConfig(this.root).mainBranch?.trim() || 'main'}`, readPaths: plan!.readPaths }) }
+    catch (error) { executionAvailability = { status: 'recovery_required', failure: { code: 'sync_delivery_evidence_invalid', message: error instanceof Error ? error.message : String(error) } } }
     const current = available && (landing.sourceSynced || await isSyncInputCurrent(operation, snapshot, plan!))
-    return { operation: landing.phase === operation.phase ? operation : { ...operation, phase: landing.phase }, physicalControl: this.store.readPhysicalControl(this.physicalScope(operation.input.source)), decisionContext: existsSync(operation.input.source.commonDir) ? this.decisionContext(operation) : null, attempt: operation.currentAttemptId ? this.store.readAttempt(operation.currentAttemptId) : null, journals, resources, stale: !current, sourceSynced: landing.sourceSynced, canonicalSynced: landing.canonicalSynced, revertEligibility: await this.revertEligibility(operation, snapshot, journals, resources), retryEligibility: await this.retryEligibility(operation, snapshot), decisionEligibility: this.store.readDecisionEligibility(operation.id), executionAvailability }
+    return { operation: landing.phase === operation.phase ? operation : { ...operation, phase: landing.phase }, physicalControl: this.store.readPhysicalControl(this.physicalScope(operation.input.source)), decisionContext: existsSync(operation.input.source.commonDir) ? this.decisionContext(operation) : null, attempt: operation.currentAttemptId ? this.store.readAttempt(operation.currentAttemptId) : null, journals, resources, stale: !current, sourceSynced: landing.sourceSynced, canonicalSynced: landing.canonicalSynced, adoptionEligibility: await this.adoptionEligibility(operation, snapshot), revertEligibility: await this.revertEligibility(operation, snapshot, journals, resources), retryEligibility: await this.retryEligibility(operation, snapshot), decisionEligibility: this.store.readDecisionEligibility(operation.id), executionAvailability }
+  }
+  private async adoptionPlan(operation: SyncOperation, snapshot: InputSnapshot): Promise<SourceAdoptionPlan> {
+    try {
+      assertSourceAdoptionComplete(operation)
+      this.assertSource(operation)
+      this.requireEnabled(snapshot, operation)
+      const { plan, tools } = this.executionInputs(operation)
+      await this.requireNodeAuthorized(snapshot, plan.intentNodeId)
+      return prepareSourceAdoption(this.store, operation, snapshot, { tools, canonicalBranch: `refs/heads/${readConfig(this.root).mainBranch?.trim() || 'main'}`, readPaths: plan.readPaths })
+    } catch (error) {
+      if (error instanceof SyncApplicationError) throw error
+      throw new SyncApplicationError('sync_adoption_evidence_invalid', error instanceof Error ? error.message : String(error))
+    }
+  }
+  private async adoptionEligibility(operation: SyncOperation, snapshot: InputSnapshot): Promise<SyncAdoptEligibility> {
+    try { await this.adoptionPlan(operation, snapshot); return { eligible: true } }
+    catch (error) { return { eligible: false, reason: { code: error instanceof SyncApplicationError ? error.code : 'sync_adoption_evidence_invalid', message: error instanceof Error ? error.message : String(error) } } }
+  }
+  /** 只采纳完整已验证提交；资格与详情共用，来源发布锁内再次核实真实 Git 状态。 */
+  async adopt(operationId: string): Promise<SyncOperationDetail> {
+    const operation = this.store.readOperation(operationId)
+    assertSourceAdoptionComplete(operation)
+    await this.adoptionPlan(operation, await captureInputSnapshot(this.root))
+    const path = sourceAdoptionMutexPath(this.artifactRoot, operation.input.source)
+    mkdirSync(join(this.artifactRoot, '.publication-locks'), { recursive: true, mode: 0o700 })
+    const mutex = claimFileMutex(path)
+    if (!mutex) throw new SyncApplicationError('sync_adoption_busy', '同一来源正在发布或采纳，请稍后重试')
+    try {
+      const current = this.store.readOperation(operationId), snapshot = await captureInputSnapshot(this.root)
+      const plan = await this.adoptionPlan(current, snapshot)
+      mutex.assertHeld()
+      fastForwardSource(plan)
+      const detail = await this.readOperation(operationId)
+      if (!detail.sourceSynced) throw new SyncApplicationError('sync_adoption_result_changed', 'Git 快进已执行，但当前工作文件、index 或读取闭包未保持已验证交付；请读取当前状态')
+      return detail
+    } finally { mutex.release() }
   }
   private async revertEligibility(operation: SyncOperation, snapshot: InputSnapshot, journals: SyncOperationDetail['journals'], resources: SyncOperationDetail['resources']): Promise<SyncRevertEligibility> {
     const refused = (code: string, message: string): SyncRevertEligibility => ({ eligible: false, reason: { code, message } })

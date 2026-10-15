@@ -12,6 +12,8 @@ code:
 
 启用、保存 Spec、显式执行、查询、暂停、恢复和取消必须进入同一真实协调操作。失败或新输入到来后能查询具体结果，不由界面推断完成。
 
+已验证交付通过同一服务采纳到原工作树，资格和执行沿同一后端判据，不由界面复制安全判断。
+
 ## expanded spec
 
 本节点落实 [[sync-product-controls]] 的 P2 应用入口与 P3 手动代码意图/裁决；P4 外部 watcher由本服务实现，完整恢复矩阵与P5最终验收由上层保留。生产 configuredSyncApplication 复用后端同仓库的 canonical session protocol，按已注册 source 工作树实例化，不创建其它数据库或队列，迁移先备份。运行资料及固定 compiled CLI 位于源码外当前用户拥有的独占 0700 runtime。
@@ -92,6 +94,8 @@ revert 接受 operationId 与稳定 requestId，意图节点从原固定计划�
 stopWriter 在版本回退前先持久暂停当前物理来源，停止相同来源本进程执行者和观察服务，等待已开始执行在安全边界结算；剩余 journal/resource 作为可恢复记录与具体诊断返回，不删除表、worktree 或 blob。物理暂停跨服务重启保留，未知新版 schema 继续由 store 每事务 fencing 拒旧 writer。
 
 detail 的原来源采纳与主分支完成由 [[sync-landing-status]] 只读推导。sourceSynced 表示真实原树包含已验证完整交付且当前执行/读取闭包字节一致；canonicalSynced 还要求当前分支是仓库明确 mainBranch。已采纳后快照身份变化不单独制造 stale，无关提交允许保当前证据；相关工作文件、index、HEAD、配置或只读上下文变化仍过期。返回 operation 的 canonical 阶段是当前 Git 事实投影，不写虚构持久完成状态。
+
+adopt(operationId) 依 [[sync-source-adoption]] 采纳实际 settled receipt.actualCommit。detail 必须返回 adoptionEligibility（eligible:true，或包含 code/message 的明确拒因）；执行复用相同判据，锁内再次核来源、启用配置/节点授权和完整交付证据。只有干净原树且 HEAD 可快进到交付时执行普通 hooks 的 fast-forward；重复已采纳请求返回真实当前详情，不另建请求键或业务完成记录。损坏交付证据保留 recovery_required 诊断及拒因，不让状态读取因 receipt 绑定异常失去可查询性。
 
 历史节点路径恢复仅额外接受原完整 settled receipt 的实际 files 中、被本次 Git 反向三方触及的精确 .spec/.../spec.md 路径；当前原冻结意图仍须通过已注册 node 授权。它不扩大源代码、测试目录、配置或整个 .spec 目录的权限。目标 raw 取本次真实请求中同一节点的正文，删除时保留原历史 raw 供退役验证；节点迁移沿既有生命周期检查保持节点及业务 ID。
 
