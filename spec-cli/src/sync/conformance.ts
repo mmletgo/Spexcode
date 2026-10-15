@@ -216,7 +216,7 @@ export async function runConformance(supplied: ConformanceInput, options: Confor
     }
     for (const oracle of newMandatory) if (policyFiles.get(oracle.testPath) !== after.files.get(oracle.testPath)) fail('oracle_changed', `候选必须保留受信政策版本oracle全文: ${oracle.testPath}`)
     const intentPolicy = policyFiles.get(INTENT_AUTHORIZATION_PATH)
-    if (policyEntries.some(entry => entry.path === INTENT_AUTHORIZATION_PATH) && intentPolicy === undefined) fail('invalid_intent_authorizations', '受信原意授权文件必须是普通 UTF-8 Git blob')
+    if (policyEntries.some(entry => entry.path === INTENT_AUTHORIZATION_PATH) && intentPolicy === undefined) fail('invalid_intent_authorizations', '受信原意授权文件必须是普通 UTF-8 Git 对象')
     result.intentAuthorization = bindIntentAuthorizations(intentChanges, intentPolicy)
     const unauthorized = result.intentAuthorization.changes.filter(change => change.authorization === null)
     if (unauthorized.length) fail('intent_unauthorized', `受信 policyCommit 未授权精确原意差量: ${JSON.stringify(unauthorized)}`)

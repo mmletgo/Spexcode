@@ -40,14 +40,14 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
   const evidenceDir = join(operation.input.source.commonDir, 'spexcode', 'evidence')
   const blobs = options.blobIO ?? { put: (bytes: Buffer): BlobRef => ({ sha256: putBlob(bytes, evidenceDir) }), read: (ref: BlobRef): Buffer => {
     const bytes = getBlob(ref.sha256, evidenceDir)
-    if (!bytes) throw new StructuredSessionError('stale_result', 'native execution evidence blob is missing')
+    if (!bytes) throw new StructuredSessionError('stale_result', 'native execution evidence object is missing')
     return bytes
   } }
   const runtime = options.runtime ?? { run: runStructuredSession, cancel: cancelStructuredSession, readRecord, readCreateTermination: readSessionCreateTermination, recoverCreateTermination: recoverSessionCreateTermination }
   const flights = new Map<string, { digest: string; controller: AbortController; promise: Promise<ElaborationSessionResult> }>()
   const read = <T>(ref: BlobRef): T => {
     const bytes = blobs.read(ref)
-    if (sha(bytes) !== ref.sha256) throw new StructuredSessionError('stale_result', 'native execution evidence blob digest is invalid')
+    if (sha(bytes) !== ref.sha256) throw new StructuredSessionError('stale_result', 'native execution evidence object digest is invalid')
     return JSON.parse(bytes.toString('utf8')) as T
   }
   const put = (value: unknown): BlobRef => blobs.put(Buffer.from(JSON.stringify(value)))
@@ -74,7 +74,7 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
     const checkResult = (result: ElaborationSessionResult): void => {
       if (!result || result.sessionId !== expectedSessionId || !result.threadId || !result.turnId || (checkpoint.session.threadId !== null && result.threadId !== checkpoint.session.threadId) || (checkpoint.session.turnId !== null && result.turnId !== checkpoint.session.turnId) || !validate(result.output) || result.resultDigest !== hash(result.output)) throw new StructuredSessionError('stale_result', 'native result identity, schema or hash is invalid')
       if (request.frozenContext) {
-        if (!result.frozenReadProof) throw new StructuredSessionError('stale_result', 'native frozen result has no real history coverage proof')
+        if (!result.frozenReadProof) throw new StructuredSessionError('stale_result', 'native frozen result has no real history coverage evidence')
         verifyFrozenReadProof(request.frozenContext, result.frozenReadProof, { threadId: result.threadId, turnId: result.turnId })
       }
     }
@@ -151,14 +151,14 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
           settle(status, { creationTermination: receipt, stop: { sessionId: expectedSessionId, state: status, nativeStopped: true, acknowledged: false, nativeStatus: receipt.nativeStatus } })
           throw new StructuredSessionError(status, 'native creation cancelled and exact cleanup settled', errorIdentity())
         }
-        if (!record) throw new StructuredSessionError('cancellation_pending', 'native creation may be in progress; absence is not stop proof', errorIdentity())
+        if (!record) throw new StructuredSessionError('cancellation_pending', 'native creation may be in progress; absence alone does not confirm stop', errorIdentity())
       }
       let stopped: StructuredCancellationResult | undefined
       let failure: unknown
       try { stopped = await runtime.cancel(expectedSessionId, { reason: 'cancelled', timeoutMs: Math.min(15_000, request.timeoutMs) }) }
       catch (error) { failure = error }
       const after = observe()
-      if (!after?.structuredExecution) throw new StructuredSessionError('cancellation_pending', 'native record disappeared before exact stop proof', errorIdentity())
+      if (!after?.structuredExecution) throw new StructuredSessionError('cancellation_pending', 'native record disappeared before exact stop confirmation', errorIdentity())
       const state = after.structuredExecution
       const durableStop = state.cancellation?.nativeStopped && (state.state === 'cancelled' || state.state === 'timeout')
       if (!stopped && durableStop) stopped = { sessionId: expectedSessionId, state: state.state!, threadId: state.threadId, turnId: state.turnId, nativeStopped: true, acknowledged: state.cancellation!.acknowledged, nativeStatus: state.cancellation!.nativeStatus }
@@ -190,7 +190,7 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
         const record = observe(), state = record?.structuredExecution
         checkResult(outcome.result)
         if (state?.state !== 'completed' || state.threadId !== outcome.result.threadId || state.turnId !== outcome.result.turnId || state.resultDigest !== outcome.result.resultDigest || hash(state.output) !== outcome.result.resultDigest) throw new StructuredSessionError('stale_result', 'native result lacks matching durable exact-turn completion')
-        if (request.frozenContext && hash(state.frozenReadProof) !== hash(outcome.result.frozenReadProof)) throw new StructuredSessionError('stale_result', 'native frozen result differs from its durable history proof')
+        if (request.frozenContext && hash(state.frozenReadProof) !== hash(outcome.result.frozenReadProof)) throw new StructuredSessionError('stale_result', 'native frozen result differs from its durable history evidence')
         settle('completed', { result: copy(outcome.result) })
         return copy(outcome.result)
       }

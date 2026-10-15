@@ -161,7 +161,7 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
         if (!state.threadId || !state.turnId || !state.resultDigest || state.resultDigest !== digest(state.output) || !validate(state.output))
           throw new StructuredSessionError('stale_result', 'structured result identity or digest is invalid')
         if (state.frozenContext && (!state.frozenReadProof || state.frozenReadProof.contextDigest !== state.frozenContext.contextDigest || state.frozenReadProof.threadId !== state.threadId || state.frozenReadProof.turnId !== state.turnId))
-          throw new StructuredSessionError('stale_result', 'structured frozen result lacks exact native history coverage proof')
+          throw new StructuredSessionError('stale_result', 'structured frozen result lacks exact native history coverage evidence')
         if (state.frozenContext) {
           verifyFrozenReadProof(state.frozenContext, state.frozenReadProof!, { threadId: state.threadId, turnId: state.turnId })
           const runtimeDir = join(realmRoot(state.readerRuntime), 'control'), ledger = readCodexGenerationLedger(runtimeDir)

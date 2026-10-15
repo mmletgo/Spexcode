@@ -70,22 +70,22 @@ export function readTree(commonDir: string, tree: string): TreeEntry[] {
   const entries = records.map(record => {
     const tab = record.indexOf('\t'), [mode, type, oid, size] = record.slice(0, tab).split(/ +/), path = record.slice(tab + 1)
     validateRepositoryPath(path)
-    if (type !== 'blob' || !['100644', '100755', '120000'].includes(mode)) throw new Error(`不支持的 Git 条目: ${path} (${mode})`)
+    if (type !== 'blob' || !['100644', '100755', '120000'].includes(mode)) throw new Error(`不支持的 Git 条目: ${path} (${mode})`) // dead-words-ok: Git ls-tree object type is fixed by the Git object format.
     return { path, mode: mode as TreeEntry['mode'], oid, size: /^\d+$/.test(size) ? Number(size) : NaN }
   })
   const digests = readObjectDigests(commonDir, entries)
   return entries.map(({ size: _size, ...entry }, index) => ({ ...entry, digest: digests[index] })).sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
 }
 function verifyObjectOid(oid: string, bytes: Buffer): void {
-  const actualOid = createHash(oid.length === 40 ? 'sha1' : 'sha256').update(`blob ${bytes.byteLength}\0`).update(bytes).digest('hex')
-  if (actualOid !== oid) throw new Error('Git blob OID 不匹配')
+  const actualOid = createHash(oid.length === 40 ? 'sha1' : 'sha256').update(`blob ${bytes.byteLength}\0`).update(bytes).digest('hex') // dead-words-ok: Git object hashing requires this exact object header.
+  if (actualOid !== oid) throw new Error('Git object OID 不匹配')
 }
 function readObjectDigests(commonDir: string, objects: { oid: string; size: number }[]): string[] {
   const digests: string[] = []
   for (let start = 0; start < objects.length;) {
     let end = start, capacity = 0
     while (end < objects.length) {
-      const { oid, size } = objects[end], framedSize = Buffer.byteLength(`${oid} blob ${size}\n`) + size + 1
+      const { oid, size } = objects[end], framedSize = Buffer.byteLength(`${oid} blob ${size}\n`) + size + 1 // dead-words-ok: Git cat-file --batch response framing requires this exact object type.
       if (!Number.isSafeInteger(size) || capacity + framedSize > GIT_MAX_BUFFER) break
       capacity += framedSize; end++
     }
@@ -94,25 +94,25 @@ function readObjectDigests(commonDir: string, objects: { oid: string; size: numb
     const batch = objects.slice(start, end), output = objectGit(commonDir, ['cat-file', '--batch'], Buffer.from(batch.map(item => `${item.oid}\n`).join('')))
     let offset = 0
     for (const { oid, size } of batch) {
-      const header = Buffer.from(`${oid} blob ${size}\n`)
+      const header = Buffer.from(`${oid} blob ${size}\n`) // dead-words-ok: Git cat-file --batch response framing requires this exact object type.
       if (!output.subarray(offset, offset + header.length).equals(header)) {
         // missing/type 错误沿用单对象 Git 失败，保留采集端的有界重试分类。
         readObject(commonDir, oid)
-        throw new Error('Git batch blob 响应不匹配')
+        throw new Error('Git batch object response 不匹配')
       }
       offset += header.length
       const bytes = output.subarray(offset, offset + size)
-      if (bytes.length !== size || output[offset + size] !== 10) throw new Error('Git batch blob 字节不完整')
+      if (bytes.length !== size || output[offset + size] !== 10) throw new Error('Git batch object 字节不完整')
       verifyObjectOid(oid, bytes)
       digests.push(contentHash(bytes)); offset += size + 1
     }
-    if (offset !== output.length) throw new Error('Git batch blob 响应存在额外字节')
+    if (offset !== output.length) throw new Error('Git batch object response 存在额外字节')
     start = end
   }
   return digests
 }
 export function readObject(commonDir: string, oid: string): Buffer {
-  const bytes = objectGit(commonDir, ['cat-file', 'blob', oid])
+  const bytes = objectGit(commonDir, ['cat-file', 'blob', oid]) // dead-words-ok: Git cat-file requires its exact object type argument.
   verifyObjectOid(oid, bytes)
   return bytes
 }

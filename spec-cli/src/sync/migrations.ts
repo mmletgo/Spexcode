@@ -122,7 +122,7 @@ CREATE TABLE sync_observations (id TEXT PRIMARY KEY, source_key TEXT NOT NULL, o
     const retiredKeys = (pair.retiredIds ?? []).filter(id => !operations.find(item => item.id === journal.operationId)?.previousBaselinePair?.retiredIds?.includes(id)).flatMap(id => {
       const keys = [...(kindScopes.some(scope => scope.flowIds.includes(id)) ? [`flow:${id}`] : []), ...(kindScopes.some(scope => scope.contractIds.includes(id)) ? [`contract:${id}`] : [])]
       if (keys.length) return keys
-      for (const resourceKey of [`flow:${id}`, `contract:${id}`]) uncertain.set(`${sourceKey}:${resourceKey}`, { sourceKey, resourceKey, reason: 'P3 retirement kind has no covered scope proof' })
+      for (const resourceKey of [`flow:${id}`, `contract:${id}`]) uncertain.set(`${sourceKey}:${resourceKey}`, { sourceKey, resourceKey, reason: 'P3 retirement kind has no covered scope evidence' })
       return []
     })
     const keys = [...journal.plan.files.map(file => `path:${file.path}`), ...pair.coveredScope.contractIds.map(id => `contract:${id}`), ...pair.coveredScope.flowIds.map(id => `flow:${id}`), ...retiredKeys]

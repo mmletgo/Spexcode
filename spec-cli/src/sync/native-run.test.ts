@@ -87,7 +87,7 @@ test('native intent precedes run, published queued session is created with unkno
     assert.ok(f.records.has(id))
     const ref = f.resource().checkpointRef
     f.cache.set(ref.sha256, Buffer.from('{"tampered":true}'))
-    await assert.rejects(run(f.request), /evidence blob digest is invalid/)
+    await assert.rejects(run(f.request), /evidence object digest is invalid/)
     assert.equal(calls, 1)
   } finally { f.cleanup() }
 })
@@ -372,13 +372,13 @@ test('creation cancellation does not release unpublished resources before the cr
     const pending = run(input)
     await waitUntil(() => calls === 1)
     f.store.requestControl(f.claimed.operation.id, 'pause')
-    await assert.rejects(pending, /absence is not stop proof/)
+    await assert.rejects(pending, /absence alone does not confirm stop/)
     assert.equal(cancelled, true)
     assert.equal(f.resource().phase, 'planned')
     assert.equal(f.checkpoint().nativeStarted, false)
     assert.equal(f.store.listRecoverableResources().length, 1)
     finishCreation()
-    await assert.rejects(f.runner({ ...f.runtimeBase, run: async () => { calls++; throw new Error('must not redispatch cancelled creation') } })(input), /absence is not stop proof/)
+    await assert.rejects(f.runner({ ...f.runtimeBase, run: async () => { calls++; throw new Error('must not redispatch cancelled creation') } })(input), /absence alone does not confirm stop/)
     assert.equal(calls, 1)
     assert.equal(f.store.readOperation(f.claimed.operation.id).callsUsed, 1)
   } finally { finishCreation(); f.cleanup() }

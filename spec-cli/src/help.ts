@@ -476,7 +476,7 @@ stop-writer 为版本回退暂停新写入，并结算或保留未完成资源�
        spex spec ack <node-id>… --reason "<why the contract still holds>"
 
 search — which spec node GOVERNS a topic, ranked by user-story relevance (which surfaces user-facing
-behaviour a code-grep misses). Run it BEFORE touching code: the node's spec.md body is the current
+behaviour a code search misses). Run it BEFORE touching code: the node's spec.md body is the current
 contract. The corpus is English — query in English.
 
 owner — the reverse edge: a file's GOVERNORS (code: — drives drift) and REFERENCERS (related:
@@ -490,7 +490,7 @@ base path both bare and scoped, or a selector on a glob/directory) · anchor-dri
 commit since the spec's version touched an ANCHORED unit's lines, unacked — the blocking tier of
 drift; same-file selectors OR'd, one error naming the hit selectors) · sync-contract (sync-v1 draft
 table/ID/source/reference structure; unknown schemas error, unverified bindings warn; never complete
-synchronization or execution proof) · one-govern (a node
+synchronization or execution evidence) · one-govern (a node
 governs >1 DISTINCT file) · living (a "## vN" changelog heading) · id-format (an
 id char outside the whitelist — ascii [a-z0-9-] or a non-ascii unicode letter/number/mark, CJK and
 combining-mark scripts ok — or a

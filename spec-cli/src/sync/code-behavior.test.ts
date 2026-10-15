@@ -83,7 +83,7 @@ test('漏helper的accept具体拒绝并携完整前轮proposal与未批准analys
     assert.deepEqual(diagnostic.details.missingPaths, [path]); assert.equal(diagnostic.review.verdict, 'accept')
     assert.deepEqual(diagnostic.proposal.facts, [{ source: `code:${path}#resultCount`, text: '保存结果数组长度，尚无结果为null' }])
     assert.equal(diagnostic.analysis.reviewPassed, false)
-    assert.throws(() => deriveBehaviorAuthorization(diagnostic.analysis, writeEvidence(input.snapshot.source.commonDir, diagnostic.analysis)), /已冻结独审blob/)
+    assert.throws(() => deriveBehaviorAuthorization(diagnostic.analysis, writeEvidence(input.snapshot.source.commonDir, diagnostic.analysis)), /已冻结独审证据对象/)
     rejected = { code: error.code, message: error.message }; return true
   })
   const fake = runner('allowed_change', propose)
@@ -159,7 +159,7 @@ test('真实三方Git对象进入独立行为分析，允许外部行为证据�
   const ref = writeEvidence(input.snapshot.source.commonDir, analysis), auth = deriveBehaviorAuthorization(analysis, ref)
   assert.equal(auth[0].action, 'update_acceptance'); assert.deepEqual(auth[0].action === 'update_acceptance' && auth[0].analysisRef, ref)
   assert.deepEqual(JSON.parse(readEvidence(input.snapshot.source.commonDir, ref).toString()), analysis)
-  assert.throws(() => deriveBehaviorAuthorization(analysis, { sha256: 'f'.repeat(64) }), /已冻结独审blob/)
+  assert.throws(() => deriveBehaviorAuthorization(analysis, { sha256: 'f'.repeat(64) }), /已冻结独审证据对象/)
 })
 
 test('文本冲突先保留三方对象，不因git重叠判业务冲突；相容解决方案由独审核对', async t => {

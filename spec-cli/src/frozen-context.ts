@@ -162,7 +162,7 @@ export function proveFrozenReads(ref: FrozenContextRef, identity: { threadId: st
 
 /** 已结算资源重放核验保存的原生历史全文和同一逻辑覆盖，不再派发工具。 */
 export function verifyFrozenReadProof(ref: FrozenContextRef, proof: FrozenReadProof, identity: { threadId: string; turnId: string }): void {
-  if (proof.contextDigest !== ref.contextDigest || proof.threadId !== identity.threadId || proof.turnId !== identity.turnId || !/^[a-f0-9]{64}$/.test(proof.historyDigest)) stale('frozen coverage proof differs from its exact context/thread/turn')
+  if (proof.contextDigest !== ref.contextDigest || proof.threadId !== identity.threadId || proof.turnId !== identity.turnId || !/^[a-f0-9]{64}$/.test(proof.historyDigest)) stale('frozen coverage evidence differs from its exact context/thread/turn')
   const history = readFileSync(join(dirname(ref.manifestPath), 'histories', proof.historyDigest))
   if (sha(history) !== proof.historyDigest) stale('saved native frozen history digest differs')
   const actual = proveFrozenReads(ref, identity, JSON.parse(history.toString('utf8')) as FrozenNativeItem[])
