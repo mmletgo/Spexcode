@@ -2396,7 +2396,7 @@ function sessionCandidateTarget(prompt: string, id: string, structured: boolean)
   return { root, path: join(parent, slug), branch: `${readConfig(dirname(gitCommonDir())).branchPrefix ?? 'node/'}${slug}`, ref, title }
 }
 
-/** 在原创建锁内恢复精确未发布候选；缺少所有权收据不构成未启动证明。 */
+/** 在原双锁内核验写前拥有权或从未发布的精确创建，再登记正式终止证明。 */
 export async function recoverSessionCreateTermination(requestKey: string, options: { prompt: string; payloadHash: string; base?: string; signal: AbortSignal; structuredExecution?: StructuredExecution }): Promise<SessionCreateTermination | null> {
   const key = normalizeCreateKey(requestKey), id = sessionIdForCreateKey(key), requestDigest = digest(key)
   return withRecordLock(id, async () => {
@@ -2406,7 +2406,20 @@ export async function recoverSessionCreateTermination(requestKey: string, option
     const { root, path, branch } = sessionCandidateTarget(options.prompt, id, !!options.structuredExecution)
     return withRecordLock(sessionCandidateLockId(path, branch), async () => {
       const durable = readSessionCandidateReceipt(id)
-      if (durable.kind === 'absent') return null
+      if (durable.kind === 'absent') {
+        if (!options.structuredExecution) return null
+        const payloadHash = digest(JSON.stringify({ prompt: options.prompt, parent: null, launcher: null, ...(options.base?.trim() ? { base: options.base.trim() } : {}), structuredExecution: options.structuredExecution }))
+        if (payloadHash !== options.payloadHash) throw new SessionCreateError('session_create_failed', 'target-resolution', 'structured recovery payload does not match fixed create request', 409)
+        const state = await sessionCandidateState(root, path, branch, options.signal)
+        const application = configuredSessionApplication()
+        // @@@ canonical address survives retirement; native dispatch is impossible before its publication.
+        if (application.readAddress(id) || readRecord(id) || existsSync(sessionStoreDir(id)) || state.path || state.worktree || state.branch
+          || codexGenerationBindingForSession(join(runtimeRoot(), 'structured-read-only-v1', 'control'), id)) return null
+        throwIfCreateAborted(options.signal, 'target-resolution')
+        const recovered: SessionCreateTermination = { version: 1, sessionId: id, requestDigest, payloadHash, code: 'session_create_cancelled', phase: 'target-resolution', nativeStopped: true, nativeStatus: 'notStarted', cleanupComplete: true }
+        writeSessionCreateTermination(recovered)
+        return recovered
+      }
       if (durable.kind === 'invalid') throw new SessionCreateError('session_create_failed', 'cleanup', durable.error, 409)
       const receipt = durable.receipt
       if (receipt.requestDigest !== requestDigest || receipt.payloadHash !== options.payloadHash || receipt.root !== root || receipt.path !== path || receipt.branch !== branch)
