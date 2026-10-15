@@ -27,3 +27,7 @@ activation=invalidated 也使旧receipt不能投影为当前已同步，保留�
 decideSync直接传原operation ID、inputId、analysisRef、选中finding IDs及用户choice/rule到共享decide HTTP入口；保持payload幂等键与原错误code/message，不混成retry或SpecBodyEdit。业务分析证据投影保具体路径、原意、双方行为、反例；裁决投影保选择/新规则/所选项/原operation身份，不泄露prompt。
 
 Detail.decisionEligibility 是服务端始终返回的裁决资格；syncProjection 的 canDecide 仅在该 eligible 为真且非 stale、非 recovery_required、授权未 invalidated 时开放。前端不重算 phase、attempt、资源或 journal 的裁决算法；早期 conflict 证据不代表当前可提交裁决。
+
+automaticControl(action, targetTree) 只把 pause/resume 发送到既有 `/api/sync/automatic/{action}` 物理控制入口，经现有 targetTree URL helper 传递工作树且不附 operation ID；面板仅从 enabled 的默认来源视图调用，所有 targetTree 视图由面板Spec保持只读。返回实际 observation；非成功响应继续透传 code/message。syncObserverProjection 整理 health.watchOnline/status/lastScanAtMs、物理控制、真实 coverage 数组、最近 observation 的 baseline selection 和 status.sources 物理来源摘要供界面显示：persistedHealth 和更新时间不能生成在线或扫描结论，baseline 汇总明确限于 latestDifference.nodeId，不能补造项目级 per-node 结果。来源列表从 source.watchOnline 判断在线，并且只读。
+
+readSyncStatus 要求实际 settings、operations、observation 和 sources 结构；HTTP 成功但缺少同步 UI 必需字段时返回可重试的 sync_response_invalid，不能让缺字段被解释为空覆盖或离线状态。

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { decideSync, controlSync, enableSync, evidenceProjection, readSyncStatus, readSyncDiff, requestIdentity, runSync, syncProjection } from './syncApplication.js'
+import { automaticControl, decideSync, controlSync, enableSync, evidenceProjection, readSyncStatus, readSyncDiff, requestIdentity, runSync, syncObserverProjection, syncProjection } from './syncApplication.js'
 import { apiFetch, postSpecBody } from './data.js'
 
 /** @type {import('../../spec-cli/src/sync/operation-types.ts').WorktreeIdentity} */
@@ -97,7 +97,7 @@ test('transport preserves selected tree, configuration precondition and stable r
   const requests = []
   globalThis.fetch = async (url, init) => {
     requests.push({ url: new URL(url, 'http://test'), init })
-    return new Response(JSON.stringify({ operations: [] }), { status: 200 })
+    return new Response(JSON.stringify({ settings: { input: source }, operations: [], observation: {}, sources: [] }), { status: 200 })
   }
   try {
     await readSyncStatus('node & one', '/delivery')
@@ -111,6 +111,105 @@ test('transport preserves selected tree, configuration precondition and stable r
     assert.equal(requests[2].init.body, requests[3].init.body)
     assert.equal(requests[4].url.pathname, '/api/sync/operations/operation%20one/pause')
   } finally { globalThis.fetch = originalFetch }
+})
+
+test('automatic intake controls use the physical pause/resume API and preserve scoped errors', async () => {
+  const originalFetch = globalThis.fetch
+  const requests = []
+  globalThis.fetch = async (url, init) => {
+    requests.push({ url: new URL(url, 'http://test'), init })
+    if (requests.length === 1) return new Response(JSON.stringify({ health: { status: 'watching', watchOnline: true }, control: { control: 'pause' } }), { status: 200 })
+    return new Response(JSON.stringify({ code: 'SYNC_CONTROL_CONFLICT', error: 'Physical control changed' }), { status: 409 })
+  }
+  try {
+    const result = await automaticControl('pause', '/source tree')
+    assert.equal(result.control.control, 'pause')
+    assert.equal(requests[0].url.pathname, '/api/sync/automatic/pause')
+    assert.equal(requests[0].url.searchParams.get('targetTree'), '/source tree')
+    assert.deepEqual(JSON.parse(requests[0].init.body), {})
+    await assert.rejects(automaticControl('resume', '/source tree'), error => error.code === 'SYNC_CONTROL_CONFLICT' && error.message === 'Physical control changed')
+    assert.equal(requests[1].url.pathname, '/api/sync/automatic/resume')
+  } finally { globalThis.fetch = originalFetch }
+})
+
+test('incomplete status responses become retryable read errors instead of fake offline status', async () => {
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => new Response(JSON.stringify({ settings: { input: source }, operations: [] }), { status: 200 })
+  try {
+    await assert.rejects(readSyncStatus('alpha'), error => error.code === 'sync_response_invalid')
+  } finally { globalThis.fetch = originalFetch }
+})
+
+test('observer projection distinguishes live health, physical control, project coverage, and the latest node baseline', () => {
+  const sources = [
+    { source: { canonicalRoot: '/repo/source', branch: 'feature' }, exists: true, watchOnline: true, health: { status: 'watching' }, control: { control: 'pause' }, registeredNodeIds: ['alpha'], latest: { observedAtMs: 88, outcome: 'admitted', reason: null } },
+    { source: { canonicalRoot: '/repo/other', branch: 'other' }, exists: true, watchOnline: false, health: { status: 'watching' }, control: { control: 'run' }, registeredNodeIds: ['beta'], latest: null },
+    { source: { canonicalRoot: '/repo/missing', branch: 'gone' }, exists: false, watchOnline: false, health: { status: 'stopped' }, control: { control: 'pause' }, registeredNodeIds: ['gone'], latest: null },
+  ]
+  const observation = {
+    health: { status: 'watching', watchOnline: true, reason: null, lastScanAtMs: 123 },
+    persistedHealth: { status: 'watching', updatedAtMs: 999 },
+    control: { control: 'pause' },
+    registeredNodes: ['alpha'],
+    coverage: { includedNodeIds: ['alpha', 'child'], contextNodeIds: ['parent'], missingNodeIds: ['gone'], excludedNodeIds: ['parent', 'other'], totalNodeCount: 5 },
+    latestDifference: { nodeId: 'alpha' },
+    latest: {
+      outcome: 'blocked', reason: { code: 'BASELINE_REVIEW', message: 'A decision is required' },
+      selection: { bindings: [
+        { resource: { kind: 'path', path: 'src/a.js' }, bytePair: { id: 'pair-a' } },
+        { resource: { kind: 'contract', id: 'REQ-1' }, intentPair: null },
+      ] },
+    },
+  }
+  const projection = syncObserverProjection(observation, sources)
+  assert.equal(projection.healthStatus, 'watching')
+  assert.equal(projection.watchOnline, true)
+  assert.equal(projection.lastScanAtMs, 123)
+  assert.equal(projection.control, 'pause')
+  assert.deepEqual(projection.coverage.includedNodeIds, ['alpha', 'child'])
+  assert.equal(projection.coverage.totalNodeCount, 5)
+  assert.equal(projection.baseline.nodeId, 'alpha')
+  assert.equal(projection.baseline.establishedCount, 1)
+  assert.deepEqual(projection.baseline.missingResources, ['contract:REQ-1'])
+  assert.equal(projection.latest.reason.code, 'BASELINE_REVIEW')
+  assert.equal(projection.sources[0].healthStatus, 'watching')
+  assert.equal(projection.sources[0].control, 'pause')
+  assert.equal(projection.sources[1].healthStatus, 'identity_unconfirmed')
+  assert.equal(projection.sources[2].healthStatus, 'missing')
+  assert.equal(projection.sources[2].exists, false)
+})
+
+test('persisted watching and identity mismatch never project an online observer or a scan timestamp', () => {
+  const projection = syncObserverProjection({
+    health: { status: 'watching', watchOnline: false, reason: null, lastScanAtMs: null },
+    persistedHealth: { status: 'watching', updatedAtMs: 456 },
+    control: { control: 'run' },
+    coverage: { includedNodeIds: [], contextNodeIds: [], missingNodeIds: [], excludedNodeIds: [], totalNodeCount: 0 },
+    latest: { selection: null, reason: { code: 'SYNC_BASELINE_UNKNOWN', message: 'Baseline could not be read' } },
+  })
+  assert.equal(projection.healthStatus, 'identity_unconfirmed')
+  assert.equal(projection.watchOnline, false)
+  assert.equal(projection.lastScanAtMs, null)
+  assert.equal(projection.coverage, null)
+  assert.equal(projection.baseline.status, 'unavailable')
+  assert.equal(projection.baseline.failure.code, 'SYNC_BASELINE_UNKNOWN')
+
+  assert.equal(syncObserverProjection(null).healthStatus, 'unavailable')
+  assert.equal(syncObserverProjection(null).watchOnline, false)
+  assert.equal(syncObserverProjection(null).control, null)
+})
+
+test('observer projection preserves offline, degraded, missing, and invalidated health without marking the watcher online', () => {
+  for (const status of ['offline', 'degraded', 'missing', 'invalidated']) {
+    const projection = syncObserverProjection({
+      health: { status, watchOnline: false, reason: { code: `observer_${status}`, message: 'Observer state is not healthy' }, lastScanAtMs: null },
+    })
+
+    assert.equal(projection.healthStatus, status)
+    assert.equal(projection.watchOnline, false)
+    assert.equal(projection.lastScanAtMs, null)
+    assert.equal(projection.reason.code, `observer_${status}`)
+  }
 })
 
 test('save retries retain their idempotency header and return a sync receipt without fabricating a commit', async () => {
