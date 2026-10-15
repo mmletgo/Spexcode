@@ -50,6 +50,43 @@ function runner(kind: CodeBehaviorKind, patch?: (proposal: Record<string, unknow
   }
 }
 
+test('分析及独审收到真实契约项正文，raw-only初始化不借未交付资源名虚构既有义务', async t => {
+  const f = await fixture(t)
+  writeFileSync(join(f.root, 'src/export.js'), `${f.source}\n// refactor context\n`)
+  const input = await f.input(), expected = await readFrozenContracts(f.root, new Map([
+    ['.spec/export/export-contract/spec.md', f.raw],
+  ])), calls: string[] = []
+  const check: ElaborationRunner = async request => {
+    const frozen = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as { contractItems: { previous: unknown[]; current: unknown[] } }
+    assert.deepEqual(frozen.contractItems.previous, [...expected.graph.items.values()])
+    assert.deepEqual(frozen.contractItems.current, [...expected.graph.items.values()])
+    calls.push(request.purpose)
+    return runner('refactor')(request)
+  }
+  assert.equal((await analyzeCodeBehavior(input, check)).reviewPassed, true)
+  assert.deepEqual(calls, ['code_behavior_analyze', 'code_behavior_review'])
+
+  const highLevel = await fixture(t, source => source.split('## expanded spec')[0])
+  writeFileSync(join(highLevel.root, 'src/export.js'), `${highLevel.source}\n// initial source\n`)
+  const baseInput = await highLevel.input(), initial: CodeBehaviorInput = {
+    ...baseInput, baseline: null, origin: 'initial',
+    composed: composeInputSnapshots(baseInput.snapshot, null).composed!,
+    plan: { ...baseInput.plan, facts: [] },
+  }
+  const bootstrapCalls: string[] = []
+  assert.equal((await analyzeCodeBehavior(initial, async request => {
+    const frozen = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as { contractItems: { previous: unknown[]; current: unknown[] } }
+    assert.deepEqual(frozen.contractItems, { previous: [], current: [] })
+    assert.match(request.prompt, /raw-only.*尚无.*稳定.*ID/)
+    assert.match(request.prompt, /未通过P1结构检查或独审.*候选.*不.*既有.*义务/)
+    bootstrapCalls.push(request.purpose)
+    return runner('allowed_change', proposal => {
+      proposal.changes = (proposal.changes as object[]).map(change => ({ ...change, affectedIds: [], ruleIds: [] }))
+    })(request)
+  })).reviewPassed, true)
+  assert.deepEqual(bootstrapCalls, ['code_behavior_analyze', 'code_behavior_review'])
+})
+
 test('目录授权的新增helper与删除文件前置完整冻结读取清单，metadata和links不冒全文', async t => {
   const f = await fixture(t), path = 'src/export-summary.js', helper = 'export const resultCount = rows => rows === null ? null : rows.length;\n'
   writeFileSync(join(f.root, path), helper); rmSync(join(f.root, 'tests/export.test.mjs')); symlinkSync('export.js', join(f.root, 'src/link'))
