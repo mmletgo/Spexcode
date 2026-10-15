@@ -40,6 +40,8 @@ export default {
     "viewedTree": "当前查看的工作树",
     "sourceBranch": "来源分支",
     "sourceAccepted": "来源工作树已采纳这次交付。",
+    "adopt": "采纳到原工作树",
+    "adoptionBlocked": "暂不能采纳到原工作树",
     "configuredDeliveryRoot": "已配置的交付根目录",
     "deliveryPlanBranch": "计划交付分支",
     "deliveryBranch": "回执中的交付分支",
