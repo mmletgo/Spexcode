@@ -539,7 +539,7 @@ async function exportApplicationFixture(t: test.TestContext, choice?: 'keep_inte
       const frozen = JSON.parse(request.prompt.split('冻结三方输入:\n')[1]) as { changedPaths: string[] }
       const paths = [...new Set([...frozen.changedPaths, ...(decisionFact ? plan.decisionAuthorities.flatMap(authority => authority.paths) : [])])]
       output = { changes: paths.map(changed => ({ kind: decisionFact ? 'allowed_change' : 'conflict', paths: [changed], affectedIds: ['RULE-EXPORT-02', 'AC-EXPORT-02'], ruleIds: ['RULE-EXPORT-02'], originalIntent: 'key与非空字符串filter必需，未授权filter长度上限；幂等政策保持', previousBehavior: '9字符非空filter可提交', sourceBehavior: 'filter长度超过8字符拒绝，8字符可提交；原权限与幂等保持', deliveryBehavior: '非空filter无长度上限', evidence: `冻结src/export.js#ExportService.submit 的filter.length > 8与RULE-EXPORT-02、AC-EXPORT-02逐项对照；${decisionFact?.text ?? '无上限授权'}`, counterexample: 'filter=123456789：原意接受但现源码invalid-request' })), facts: decisionFact ? [decisionFact] : [], acceptanceChanges: decisionFact && choice !== 'keep_intent' ? [{ id: 'AC-EXPORT-02', ruleIds: ['RULE-EXPORT-02'], source: decisionFact.source, reason: `仅按所选裁决增加filter${limit}字符边界，保空输入、权限、幂等与结果义务` }] : [], newNodes: [], resolutions: [] }
-      if (independentNode) output = { changes: paths.map(changed => ({ kind: 'refactor', paths: [changed], affectedIds: [], ruleIds: [], originalIntent: '固定导出规则与验收保持', previousBehavior: '固定ExportService完整行为', sourceBehavior: '仅添加测试指定注释，不改变业务执行', deliveryBehavior: '原完整业务与已生成注释保持', evidence: `真实冻结${changed}的业务语句保持，新增仅注释`, counterexample: '固定可信oracle仍验证权限、幂等和全部状态转换' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+      if (independentNode || !choice) output = { changes: paths.map(changed => ({ kind: 'refactor', paths: [changed], affectedIds: [], ruleIds: [], originalIntent: '固定导出规则与验收保持', previousBehavior: '固定ExportService完整行为', sourceBehavior: '仅添加测试指定注释，不改变业务执行', deliveryBehavior: '原完整业务与已生成注释保持', evidence: `真实冻结${changed}的业务语句保持，新增仅注释`, counterexample: '固定可信oracle仍验证权限、幂等和全部状态转换' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
     } else if (request.purpose === 'code_behavior_review') {
       const frozen = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as { changedPaths: string[] }
       const value = JSON.parse(request.prompt.split('待审分析:\n')[1]) as { analysisDigest: string; analysis: { changes: { id: string; paths: string[] }[] } }
@@ -1041,6 +1041,29 @@ test('AC-APPLICATION-P4-09 scope外变化不使查询重放重试过期，相关
   } finally { await f.application.stopService(); f.cleanup() }
 })
 
+
+test('AC-APPLICATION-P4-12 同request不能换授权子节点，重新授权配置不能复用旧计划', async () => {
+  const f = await fixture()
+  try {
+    mkdirSync(join(f.root, '.spec/demo/child'))
+    writeFileSync(join(f.root, '.spec/demo/child/spec.md'), source.replace('Demo', 'Child'))
+    await f.application.enable()
+    const request = { nodeId: 'demo', requestId: 'frozen-plan', origin: 'initial' as const }
+    const admitted = await f.application.submit(request); assert.ok(admitted.operation)
+    const original = await f.application.wait(admitted.operation.id)
+    assert.equal(original.operation.phase, 'failed')
+    await assert.rejects(f.application.submit({ ...request, nodeId: 'child' }), /SYNC_IDEMPOTENCY_CONFLICT/)
+    assert.equal((await f.application.status()).operations.length, 1)
+    writeFileSync(join(f.root, '.spec/spexcode.json'), JSON.stringify({ sync: { ...settings, budget: { ...settings.budget, maxCalls: 6 } } }))
+    await f.application.enable()
+    const detail = await f.application.readOperation(original.operation.id)
+    assert.equal(detail.retryEligibility.eligible, false)
+    assert.equal(detail.retryEligibility.reason?.code, 'sync_configuration_changed')
+    await assert.rejects(f.application.submit(request), /原操作的可信配置已变化/)
+    await assert.rejects(f.application.submit({ nodeId: 'demo', requestId: 'new-budget', retryOf: original.operation.id }), /原操作的可信配置已变化/)
+    assert.equal(f.calls.length, 1)
+  } finally { await f.application.stopService(); f.cleanup() }
+})
 
 test('AC-APPLICATION-P4-10 活动native时物理暂停保operation控制，暂停编辑恢复先采用最新输入', async () => {
   let held = true

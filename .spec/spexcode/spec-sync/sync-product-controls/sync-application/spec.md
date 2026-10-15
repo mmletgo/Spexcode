@@ -20,7 +20,7 @@ enable 读取 [[sync-application-settings]]，可用预期配置摘要检查并�
 
 readSettings.activation 区分 disabled、enabled 与 invalidated：未有本机启用记录是 disabled；记录存在且当前身份/配置摘要一致是 enabled；已启用后配置删除、坏格式、越界授权、身份或摘要失配是 invalidated，并保留具体 configurationError。enabled:false 不等于用户关闭同步，invalidated 正文保存必须拒绝，不能降级为普通 Spec 独立提交。
 
-submit 接收 nodeId、稳定 requestId、spec/initial/code/combined 来源与可选 SpecBodyEdit。来源真实参与持久操作和幂等身份；initial 沿同一 Spec 业务管线，不能把同键改来源当重放。受控编辑先 capture 真 source，从冻结节点解析路径，在准备函数读正文前检查 symlink；prepareControlledRequest 独立冻结请求，不改原文件、index 或 HEAD。相同字节 no-op 不入队；同请求键和相同内容返回原操作，不同内容拒绝。[[sync-application-planning]] 构造 plan；固定 compiled runtime 与内容寻址计划在 admit 前保存，随后唯一 coordinator 实际细化、生成、验证和交付。V4 重新读当前输入与可信配置，不能用旧 plan 自证。正常 typed failure 持久结算，后端持有运行 Promise 并显式诊断无法结算的故障，不丢 rejection；P4停机自动补偿由正式观察器执行。
+submit 接收 nodeId、稳定 requestId、spec/initial/code/combined 来源与可选 SpecBodyEdit。来源真实参与持久操作和幂等身份；initial 沿同一 Spec 业务管线，不能把同键改来源当重放。受控编辑先 capture 真 source，从冻结节点解析路径，在准备函数读正文前检查 symlink；prepareControlledRequest 独立冻结请求，不改原文件、index 或 HEAD。相同字节 no-op 不入队；同请求键和相同内容返回原操作，不同内容拒绝。[[sync-application-planning]] 构造 plan；固定 compiled runtime 与内容寻址计划在 admit 前保存，随后唯一 coordinator 实际细化、生成、验证和交付。V4 重新读当前相关输入与可信配置；固定计划与当前配置摘要必须一致，不能因重新enable而让旧请求沿用新政策。正常 typed failure 持久结算，后端持有运行 Promise 并显式诊断无法结算的故障，不丢 rejection；P4停机自动补偿由正式观察器执行。
 
 status 按节点及 bounded limit 查询，detail 返回 operation、当前 attempt、完整 journal 和 settled receipt；证据按 hash 校验读取。旧P3以完整source input ID判断过期，P4使用协调器精确闭包判据；workspace_synced 只表明实际受管交付，原树待落地单独展示。GAP/冲突与验证失败保留各自 phase/failure。pause/cancel 使用 store 控制及 AbortSignal，写入中由 coordinator 结算真实副作用；resume 先检查当前输入和授权，过期要求最新请求，不先改变旧控制。
 
@@ -78,3 +78,5 @@ P4 stale/retry/resume采用协调器唯一isSyncInputCurrent判据，比较真�
 P4运行时重建固定计划与裁决raw也使用原operation.input/selection；live snapshot仅用于enable与协调器相关输入复核，scope外全snapshot变化不能使受控裁决请求被误读为旧analysis绑定失败。
 
 观察差异组合与正式准入同用executionScope.paths作为执行字节、plan.readPaths作为真实只读上下文，不能把全部selection绑定当可写路径。自动changed同时保真正选中意图的artifact/residualPaths：byte head已推进但意图尚未消费的代码变化仍须准入，不能因base/source文件相同压掉。
+
+新输入的三次exact规划沿同一原始heads选择传递discoverySelection；它仅作已治理发现元数据，不是基线或写入授权。同request重放、retry、decide及V4保留原冻结plan与政策，不用latest broad heads重建；同request更换已授权子节点仍拒绝。P1扩展后的显式retry沿原operation最终selection、execution scope与impact摘要重组readset，原planBlob/policy不变；重复retry请求仍沿该接入最初范围，不借后续扩展改原请求。
