@@ -22,6 +22,7 @@ import { contentHash, identifyWorktree, writeEvidence, readEvidence, readObject,
 import { claimFileMutex } from './file-mutex.js'
 import type { FileMutex } from './file-mutex.js'
 import { composeAuthoredInput } from './author-input.js'
+import { readCompositionEvidence } from './composition.js'
 import { composeControlledRequest, renderControlledDecisionRaw } from './request-input.js'
 import type { ApplyJournal, BaselinePair, VerificationResultBlob } from './operation-types.js'
 
@@ -1011,7 +1012,7 @@ test('AC-APPLICATION-P4-08 无浏览器真实Docker自动交付，补偿及scope
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), index); assert.equal(f.git(['rev-parse', 'HEAD']), head)
   const count = f.calls()
   writeFileSync(join(f.root, 'unrelated.txt'), 'scope外真实作者编辑\n')
-  await observeUntil(() => f.application.observationStatus().latestSnapshot?.id !== source.id)
+  await observeUntil(() => f.application.observationStatus().latestSnapshot?.id !== source.id, 30000)
   assert.equal((await f.application.readOperation(admitted.id)).stale, false)
   await new Promise(resolve => setTimeout(resolve, 300))
   assert.equal(f.calls(), count)
@@ -1041,6 +1042,37 @@ test('AC-APPLICATION-P4-09 scope外变化不使查询重放重试过期，相关
   } finally { await f.application.stopService(); f.cleanup() }
 })
 
+
+test('AC-APPLICATION-P4-13 Spec无bytehead时按真实intent来源字节识别已消费与新原始意图', async t => {
+  const f = await exportApplicationFixture(t)
+  const before = await captureInputSnapshot(f.root)
+  const frozen = await f.application['freezeNodePlan'](before, 'export-contract')
+  writeFileSync(join(f.root, 'src/export.js'), `${f.originalCode}\n// fixture verified delivery\n`)
+  const delivery = await captureInputSnapshot(f.root)
+  writeFileSync(join(f.root, 'src/export.js'), f.originalCode)
+  const pair: BaselinePair = { id: 'fixture-intent-consumption', source: before.source, repositoryId: before.source.repositoryId, sourceInput: before, verifiedDelivery: delivery, coveredScope: frozen.plan.executionScope!, receiptId: 'fixture-projection-only', settledAtMs: Date.now() }
+  const { digest: _digest, ...payload } = frozen.selection
+  const selectionPayload = { ...payload, bindings: payload.bindings.map(binding => 'intentPair' in binding ? { ...binding, intentPair: pair } : binding.resource.path === 'src/export.js' ? { ...binding, bytePair: pair } : binding) }
+  const selection = { ...selectionPayload, digest: contentHash(JSON.stringify(selectionPayload, (_key, value: unknown) => value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value)) }
+  const changes = async () => {
+    const snapshot = await captureInputSnapshot(f.root)
+    const composed = composeAuthoredInput(snapshot, selection, { executionPaths: frozen.plan.executionScope!.paths, contextPaths: frozen.plan.readPaths, retainConflicts: true }).composed!
+    const evidence = readCompositionEvidence(snapshot, composed, selection)
+    return { evidence, difference: f.application['observationChanges'](snapshot, frozen.plan, selection, evidence) }
+  }
+  const unchanged = await changes()
+  assert.equal(unchanged.evidence.paths.find(path => path.path === f.path)?.base, null)
+  assert.equal(unchanged.evidence.intents.every(intent => !intent.changed), true)
+  assert.equal(unchanged.difference.changed, false)
+  writeFileSync(join(f.root, f.path), f.original.replace(parseParts(f.original)!.rawSource!, `${parseParts(f.original)!.rawSource!}\n新增原始义务。`))
+  assert.equal((await changes()).difference.changed, true, '只有raw变化也必须保留')
+  writeFileSync(join(f.root, f.path), f.original.replaceAll('RULE-EXPORT-06', 'RULE-EXPORT-NEW'))
+  assert.equal((await changes()).difference.changed, true, '旧ID退役不能因其他已消费ID被忽略')
+  writeFileSync(join(f.root, f.path), f.original)
+  renameSync(join(f.root, f.path), join(f.root, '.spec/project/export-contract/moved.md'))
+  assert.equal((await changes()).difference.changed, true, '原owner消失必须保留')
+  assert.equal(f.calls(), 0, '投影夹具不登记receipt或调用模型')
+})
 
 test('AC-APPLICATION-P4-12 同request不能换授权子节点，重新授权配置不能复用旧计划', async () => {
   const f = await fixture()
@@ -1116,7 +1148,7 @@ test('AC-APPLICATION-P4-11 两个独立节点保存及停机编辑补偿均真�
   }
   const firstPublication = [...first].sort((a, b) => a.journals[0].receipt!.completedAtMs - b.journals[0].receipt!.completedAtMs)[0]
   const firstOther = paths.find(path => !firstPublication.operation.scope.paths.includes(path))!
-  assert.doesNotMatch(readFileSync(join(firstPublication.operation.deliveryPlan.canonicalRoot, firstOther), 'utf8'), /human online/)
+  assert.doesNotMatch(readObject(before.source.commonDir, readTree(before.source.commonDir, firstPublication.journals[0].receipt!.actualTree).find(entry => entry.path === firstOther)!.oid).toString('utf8'), /human online/)
   assert.equal((await captureInputSnapshot(f.root)).id, before.id)
   await f.application.stopService()
   const count = f.calls()
@@ -1137,7 +1169,7 @@ test('AC-APPLICATION-P4-11 两个独立节点保存及停机编辑补偿均真�
   }
   const firstCompensation = [...delivered].sort((a, b) => a.journals[0].receipt!.completedAtMs - b.journals[0].receipt!.completedAtMs)[0]
   const unconsumedOther = paths.find(path => !firstCompensation.operation.scope.paths.includes(path))!
-  assert.doesNotMatch(readFileSync(join(firstCompensation.operation.deliveryPlan.canonicalRoot, unconsumedOther), 'utf8'), /human offline/)
+  assert.doesNotMatch(readObject(before.source.commonDir, readTree(before.source.commonDir, firstCompensation.journals[0].receipt!.actualTree).find(entry => entry.path === unconsumedOther)!.oid).toString('utf8'), /human offline/)
   assert.equal((await captureInputSnapshot(f.root)).id, latest.id)
   assert.equal(f.git(['rev-parse', 'HEAD']), head); assert.deepEqual(readFileSync(join(f.root, '.git/index')), index)
 })

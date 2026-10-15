@@ -70,3 +70,5 @@ AC-APPLICATION-P4-11 同一真实Git/SQLite来源两个独立节点分别保存�
 Docker应用夹具可复用SPEX_VERIFICATION_EVIDENCE_DIR保存实际观察/operation/attempt/journal投影、关闭后的真实SQLite与Git对象证据，失败断言含journal与blockedReason；归档不制造基线或修改权威状态。独立节点以首个真实receipt的完成顺序核对另一未消费输入，不能假设独立范围的完成顺序。
 
 纯注释自动场景的确定性行为分析明确返回refactor；只有显式choice冲突夹具返回filter长度冲突，不能把夹具主动冲突误报为产品交付失败。AC-APPLICATION-P4-12验证同request换已授权child拒绝且无新派发，重新enable变更预算后旧请求重放/重试均保配置失效，不能以新配置重用旧政策。
+
+AC-APPLICATION-P4-13以真实Git快照、显式仅投影fixture pair及公共三方getter先复现Spec nullbytehead回声，再验证已消费原样Spec不变、raw编辑/退役ID/owner消失仍有变化；不登记假receipt或改SQLite。真实首receipt只改src的自动回声fail→pass仍由08同场景验收。
