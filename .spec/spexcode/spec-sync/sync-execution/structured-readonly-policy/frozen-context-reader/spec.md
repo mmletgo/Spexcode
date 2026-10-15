@@ -22,7 +22,11 @@ related:
 
 [[structured-readonly-policy]] 的v2仍保留既有只读隔离，仅增加spex_read_frozen。源码树外0700目录存储内容寻址字节与清单；contextDigest绑定logicalentry、类型、SHA256、字节长度、required及业务requestKey/inputDigest。真实attempt/policy存在时额外严格绑定，普通结构化调用不编造身份。相同bytes去重，logical身份仍保留。
 
-工具参数仅contextDigest/entryId/startByte/endByte，区间end-exclusive、每次不超过262144字节；UTF8字符边界、binary base64、absence均显式处理。路径、URL、额外参数、错摘要、篡改、非法区间立即拒绝。模型索引不含控制路径。真实请求与回复全文及摘要先持久后回RPC；精确turn的真实native history再次核验arguments、completed/success、contentItems全文和required完整coverage，相同kind/SHA/长度可共享覆盖。生成/审查各自在自己turn取得完整证明。
+工具参数仅contextDigest/entryId/startByte/endByte，区间end-exclusive、每次请求不超过262144字节；binary base64、absence均显式处理。UTF8完整entry在冻结时严格校验；合法请求切入多字节码点时，解码区间向外扩至完整码点边界，两端最多各多3字节，包含全部请求字节，只允许重叠、不截断或替换字符。arguments、startByte/endByte与rangeSha256仍绑定原请求；仅确实扩展时，文本额外列decodedStartByte/decodedEndByte。原对齐响应的全文、字段顺序与摘要保持不变，binary行为不变。
+
+只有实际扩展的解码使用ignoreBOM保留开头BOM码点，不能因解码器默认行为丢掉新增覆盖的字符；原对齐区间的既有BOM解码结果及持久响应摘要仍逐字节保持。
+
+路径、URL、额外参数、错摘要、篡改、非法区间立即拒绝。模型索引不含控制路径。真实请求与回复全文及摘要先持久后回RPC；精确turn的真实native history再次核验arguments、completed/success、contentItems全文和required完整coverage，相同kind/SHA/长度可共享覆盖。coverage只累计原requested区间，不用扩展解码字节豁免缺口；精确响应仍由同一解码规则重建。生成/审查各自在自己turn取得完整证明。直接回归覆盖中文和emoji每个字节切点、相邻片段、完整coverage与隐藏缺口，以及旧对齐响应的全文和hash兼容。
 
 prepareFrozenPrompt在创建或新资源计划摘要前将超过512KiB的完整正文转换为单个required UTF8 entry和短读取指令，保原inputDigest；较小正文保持v1。该保守阈值只选择无损传输，不截断或拒绝业务输入，避免1至2MiB正文仍超过原生RPC字符串上限。相同绑定/内容返回稳定ref，重试不因随机路径改变幂等哈希。createAttemptRunner附加真实policy/attempt并保持业务requestKey，sessionCreateKey另承接正式派发键。provided ref在派发前严格校验绑定。
 

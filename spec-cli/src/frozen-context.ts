@@ -107,7 +107,14 @@ export function readFrozenRange(ref: FrozenContextRef, value: unknown): { argume
   const bytes = readFileSync(bytesPath(ref, entry.sha256))
   if (bytes.length !== entry.byteLength || sha(bytes) !== entry.sha256) stale('frozen entry bytes differ from their immutable digest')
   const range = bytes.subarray(args.startByte, args.endByte)
-  const content = entry.kind === 'utf8' ? { text: new TextDecoder('utf-8', { fatal: true }).decode(range) }
+  let decodedStartByte = args.startByte, decodedEndByte = args.endByte
+  if (entry.kind === 'utf8') {
+    while (decodedStartByte > 0 && (bytes[decodedStartByte] & 0xc0) === 0x80) decodedStartByte--
+    while (decodedEndByte < bytes.length && (bytes[decodedEndByte] & 0xc0) === 0x80) decodedEndByte++
+  }
+  const expanded = decodedStartByte !== args.startByte || decodedEndByte !== args.endByte
+  const content = entry.kind === 'utf8' ? { text: new TextDecoder('utf-8', { fatal: true, ignoreBOM: expanded }).decode(bytes.subarray(decodedStartByte, decodedEndByte)),
+    ...(expanded ? { decodedStartByte, decodedEndByte } : {}) }
     : entry.kind === 'binary' ? { base64: range.toString('base64') } : { absent: true }
   const text = JSON.stringify({ ...args, kind: entry.kind, sha256: entry.sha256, byteLength: entry.byteLength, rangeSha256: sha(range), ...content })
   return { arguments: { ...args }, response: { contentItems: [{ type: 'inputText', text }], success: true } }

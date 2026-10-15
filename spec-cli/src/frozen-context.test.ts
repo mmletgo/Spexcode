@@ -28,11 +28,63 @@ test('frozen manifest binds request and immutable bytes without exposing control
     assert.equal(JSON.parse(read.response.contentItems[0].text).text, '首')
     const persisted = persistFrozenRead(f.ref, { ...identity, callId: 'native-call' }, f.args(0, 9))
     assert.deepEqual(JSON.parse(readFileSync(join(dirname(f.ref.manifestPath), 'responses', persisted.receipt.responseDigest), 'utf8')), persisted.response)
-    assert.throws(() => readFrozenRange(f.ref, f.args(1, 3)), /encoded data/)
+    assert.equal(JSON.parse(readFrozenRange(f.ref, f.args(1, 3)).response.contentItems[0].text).text, '首')
     assert.throws(() => readFrozenRange(f.ref, { ...f.args(0, 3), path: '/etc/passwd' }), /argument shape/)
     assert.throws(() => readFrozenRange(f.ref, { ...f.args(0, 3), contextDigest: 'wrong' }), /identity/)
     assert.throws(() => readFrozenRange(f.ref, f.args(0, 10)), /range/)
     assert.throws(() => readFrozenRange(f.ref, f.args(0, 3, 'foreign')), /entry/)
+  } finally { f.close() }
+})
+
+test('UTF8 byte cuts expand only decoding while exact requested ranges and legacy response hashes stay fixed', () => {
+  const original = '甲🙂乙🌍丙', bytes = Buffer.from(original, 'utf8')
+  const f = fixture([{ id: 'a', label: 'frozen source', kind: 'utf8', bytes }])
+  const sha = (value: Buffer | string) => createHash('sha256').update(value).digest('hex')
+  const boundaries = [0]
+  for (const character of original) boundaries.push(boundaries.at(-1)! + Buffer.byteLength(character))
+  try {
+    for (let startByte = 0; startByte < bytes.length; startByte++) for (let endByte = startByte + 1; endByte <= bytes.length; endByte++) {
+      const args = f.args(startByte, endByte), actual = readFrozenRange(f.ref, args)
+      const decoded = JSON.parse(actual.response.contentItems[0].text) as { text: string; startByte: number; endByte: number; rangeSha256: string; decodedStartByte?: number; decodedEndByte?: number }
+      const expectedStart = boundaries.filter(value => value <= startByte).at(-1)!, expectedEnd = boundaries.find(value => value >= endByte)!
+      assert.deepEqual(actual.arguments, args)
+      assert.equal(decoded.startByte, startByte); assert.equal(decoded.endByte, endByte)
+      assert.equal(decoded.rangeSha256, sha(bytes.subarray(startByte, endByte)))
+      assert.equal(decoded.text, bytes.subarray(expectedStart, expectedEnd).toString('utf8'))
+      assert.ok(startByte - expectedStart <= 3 && expectedEnd - endByte <= 3)
+      if (expectedStart === startByte && expectedEnd === endByte) {
+        assert.equal(Object.hasOwn(decoded, 'decodedStartByte'), false); assert.equal(Object.hasOwn(decoded, 'decodedEndByte'), false)
+        const text = JSON.stringify({ ...args, kind: 'utf8', sha256: sha(bytes), byteLength: bytes.length, rangeSha256: sha(bytes.subarray(startByte, endByte)), text: bytes.subarray(startByte, endByte).toString('utf8') })
+        const legacy = { contentItems: [{ type: 'inputText', text }], success: true }
+        assert.equal(JSON.stringify(actual.response), JSON.stringify(legacy), 'aligned persisted response remains byte-for-byte identical')
+        assert.equal(persistFrozenRead(f.ref, { ...identity, callId: `legacy-${startByte}-${endByte}` }, args).receipt.responseDigest, sha(JSON.stringify(legacy)))
+      } else {
+        assert.equal(decoded.decodedStartByte, expectedStart); assert.equal(decoded.decodedEndByte, expectedEnd)
+      }
+    }
+    for (let cut = 1; cut < bytes.length; cut++) {
+      const proof = proveFrozenReads(f.ref, identity, [f.item(0, cut, 'left'), f.item(cut, bytes.length, 'right')])
+      assert.deepEqual(proof.coveredEntryIds, ['a']); verifyFrozenReadProof(f.ref, proof, identity)
+    }
+    const everyByte = Array.from({ length: bytes.length }, (_, index) => f.item(index, index + 1, `byte-${index}`))
+    assert.deepEqual(proveFrozenReads(f.ref, identity, everyByte).coveredEntryIds, ['a'])
+    assert.throws(() => proveFrozenReads(f.ref, identity, everyByte.filter((_, index) => index !== 1)), /not completely read/, 'overlapping decoded text cannot conceal a missing requested byte')
+  } finally { f.close() }
+})
+
+test('expanded UTF8 reads retain BOM codepoints while aligned legacy decoding stays byte-identical', () => {
+  const original = '\uFEFF甲🙂', bytes = Buffer.from(original, 'utf8')
+  const f = fixture([{ id: 'a', label: 'frozen source', kind: 'utf8', bytes }])
+  try {
+    const cut = JSON.parse(readFrozenRange(f.ref, f.args(1, 2)).response.contentItems[0].text) as { text: string; decodedStartByte: number; decodedEndByte: number }
+    assert.equal(cut.text, '\uFEFF', 'an expanded BOM codepoint must not disappear during decoding')
+    assert.equal(cut.decodedStartByte, 0); assert.equal(cut.decodedEndByte, 3)
+    assert.equal(JSON.parse(readFrozenRange(f.ref, f.args(1, 8)).response.contentItems[0].text).text, original)
+    const args = f.args(0, bytes.length), sha = createHash('sha256').update(bytes).digest('hex')
+    const text = JSON.stringify({ ...args, kind: 'utf8', sha256: sha, byteLength: bytes.length, rangeSha256: sha, text: '甲🙂' })
+    const legacy = { contentItems: [{ type: 'inputText', text }], success: true }
+    assert.equal(JSON.stringify(readFrozenRange(f.ref, args).response), JSON.stringify(legacy))
+    assert.equal(persistFrozenRead(f.ref, { ...identity, callId: 'legacy-bom' }, args).receipt.responseDigest, createHash('sha256').update(JSON.stringify(legacy)).digest('hex'))
   } finally { f.close() }
 })
 
