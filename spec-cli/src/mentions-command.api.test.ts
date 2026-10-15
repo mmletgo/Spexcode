@@ -188,9 +188,14 @@ test('a Command Box @new creates a child under the selected session, optionally 
     await waitFor(async () => (await request(base, `/api/sessions/${source}`)).body as { liveness?: string }, (session) => session.liveness === 'online', `session ${source} online`)
 
     const dispatch = async (text: string, token: string) => {
-      const result = await request(base, `/api/sessions/${source}/input`, {
-        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ kind: 'command', text }),
-      })
+      // The source receives its prompt while @new is still starting the child. Observe that live pane
+      // concurrently: the fake harness keeps printing ticks, so waiting for child readiness loses the line.
+      const [result] = await Promise.all([
+        request(base, `/api/sessions/${source}/input`, {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ kind: 'command', text }),
+        }),
+        waitFor(async () => (await request(base, `/api/sessions/${source}/capture`)).text, (pane) => pane.includes(text), 'source prompt'),
+      ])
       assert.equal(result.status, 200, result.text)
       const body = result.body as { outcomes?: Array<{ token?: string; result?: string; detail?: string }>; mentionSummary?: string }
       assert.equal(body.outcomes?.length, 1, result.text)
@@ -203,7 +208,6 @@ test('a Command Box @new creates a child under the selected session, optionally 
       const childRecord = await waitFor(async () => (await request(base, `/api/sessions/${child}`)).body as { parent?: string; launcher?: string; liveness?: string },
         (session) => session.parent === source && session.liveness === 'online', `child ${child} under source`)
       assert.equal(childRecord.parent, source)
-      await waitFor(async () => (await request(base, `/api/sessions/${source}/capture`)).text, (pane) => pane.includes(text), 'source prompt')
       return childRecord
     }
 
@@ -211,18 +215,21 @@ test('a Command Box @new creates a child under the selected session, optionally 
     assert.equal((await dispatch('@new:fake inspect the selected work', 'new:fake')).launcher, 'fake')
     // the Conversation footer is a Command Box on a terminal-free surface: the same kind, plus replyVia:note,
     // spawns the child AND delivers the prompt with the note-reply insert
-    const noted = await request(base, `/api/sessions/${source}/input`, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ kind: 'command', text: '@new:fake from the conversation', replyVia: 'note' }),
-    })
+    const noteText = '@new:fake from the conversation'
+    const [noted] = await Promise.all([
+      request(base, `/api/sessions/${source}/input`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ kind: 'command', text: noteText, replyVia: 'note' }),
+      }),
+      waitFor(async () => (await request(base, `/api/sessions/${source}/capture`)).text, (pane) => pane.includes('SEND FROM NOTE FLOW'), 'the note-reply insert rides the command delivery'),
+    ])
     assert.equal(noted.status, 200, noted.text)
     const notedChild = (noted.body as { outcomes?: Array<{ detail?: string }> }).outcomes?.[0]?.detail
     assert.ok(notedChild, noted.text)
     created.push(notedChild)
     const timeline = (await request(base, `/api/sessions/${source}/timeline`)).body as { events: Array<{ kind: string; text?: string; replyVia?: string }> }
-    const sent = timeline.events.filter((event) => event.kind === 'sent').at(-1)
+    const sent = timeline.events.filter((event) => event.kind === 'sent' && event.text === noteText).at(-1)
     assert.match(sent?.text || '', /from the conversation/)
     assert.equal(sent?.replyVia, 'note', 'the record keeps the terminal-free sender mark')
-    await waitFor(async () => (await request(base, `/api/sessions/${source}/capture`)).text, (pane) => pane.includes('SEND FROM NOTE FLOW'), 'the note-reply insert rides the command delivery')
   } finally {
     for (const id of created.reverse()) await request(base, `/api/sessions/${id}/close`, { method: 'POST' }).catch(() => {})
     await stopBackend(backend)
