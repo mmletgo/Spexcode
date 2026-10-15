@@ -186,11 +186,12 @@ export function syncProjection(detail, activation) {
   const settled = journals.findLast((journal) => journal.status === 'settled' && journal.receipt
     && journal.generation === operation.generation && journal.attemptId === operation.currentAttemptId)
   const recovery = executionAvailability.status === 'recovery_required'
-  const complete = !!settled && activation !== 'invalidated' && !stale && !recovery && COMPLETED.has(operation.phase)
+  const settledDelivery = !!settled && COMPLETED.has(operation.phase)
+  const complete = settledDelivery && activation !== 'invalidated' && !stale && !recovery
   const state = recovery ? 'recovery_required' : activation === 'invalidated' ? 'invalidated' : stale ? 'stale'
     : complete ? canonicalSynced ? 'canonical_synced' : sourceSynced ? 'source_synced' : 'workspace_synced'
       : COMPLETED.has(operation.phase) ? 'unsettled' : operation.phase
-  const adoptionPending = complete && !sourceSynced && !canonicalSynced
+  const adoptionPending = settledDelivery && !sourceSynced && !canonicalSynced
   return {
     state, complete, sourceSynced, canonicalSynced, receipt: settled?.receipt || null, settledJournal: settled || null,
     deliveryRoot: settled?.receipt.deliverySnapshot.source.canonicalRoot || null,

@@ -56,6 +56,19 @@ test('adoption follows the settled receipt and backend eligibility, and disappea
   assert.equal(blocked.canAdopt, false)
   assert.deepEqual(blocked.adoptionReason, detail.adoptionEligibility.reason)
 
+  const dirtyReason = { code: 'SYNC_SOURCE_DIRTY', message: 'Source worktree has uncommitted changes' }
+  const stale = syncProjection({ ...detail, stale: true, adoptionEligibility: { eligible: false, reason: dirtyReason } }, 'enabled')
+  assert.equal(stale.complete, false)
+  assert.equal(stale.canAdopt, false)
+  assert.deepEqual(stale.adoptionReason, dirtyReason)
+  assert.equal(syncProjection({ ...detail, stale: true, adoptionEligibility: { eligible: true } }, 'enabled').canAdopt, true)
+
+  const invalidatedReason = { code: 'SYNC_ADOPTION_INVALIDATED', message: 'Source authorization has been invalidated' }
+  const invalidated = syncProjection({ ...detail, adoptionEligibility: { eligible: false, reason: invalidatedReason } }, 'invalidated')
+  assert.equal(invalidated.complete, false)
+  assert.equal(invalidated.canAdopt, false)
+  assert.deepEqual(invalidated.adoptionReason, invalidatedReason)
+
   const adopted = syncProjection({ ...detail, sourceSynced: true }, 'enabled')
   assert.equal(adopted.canAdopt, false)
   assert.equal(adopted.adoptionReason, null)

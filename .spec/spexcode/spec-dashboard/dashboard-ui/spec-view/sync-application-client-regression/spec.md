@@ -36,4 +36,4 @@ related:
 
 回归覆盖 canonicalSynced/sourceSynced 的分别显示、canonical_synced 仍可作为新输入、source stale 时 backend eligible 仍开放成组撤销但 recovery/invalidated 关闭。Revert transport 失败后稳定 requestId 不变，并校验 response operation；stop-writer transport 保持物理 action scope、pause control 与恢复 operations 子集响应。真实 UI 验收须确认恢复子集不替换历史列表，暂停写入与单项取消文案/行为分离。
 
-采纳回归验证状态/响应必须携带有效的 `adoptionEligibility`，false 必须保留 reason code/message；采纳 transport 将编码后的 operation ID POST 到 `/api/sync/operations/:id/adopt`，不附 targetTree，保留服务端错误。投影只对已结算的当前回执且后端 eligible=true 开放，资格 false 时保留原 reason，sourceSynced/canonicalSynced 成立或回执未结算时不再诱导重复采纳。
+采纳回归验证状态/响应必须携带有效的 `adoptionEligibility`，false 必须保留 reason code/message；采纳 transport 将编码后的 operation ID POST 到 `/api/sync/operations/:id/adopt`，不附 targetTree，保留服务端错误。pending 资格展示由完成阶段、当前 settled receipt、sourceSynced/canonicalSynced 未成立决定，不随 stale/invalidated/recovery 隐藏；测试覆盖 stale + dirty 与 invalidated 的具体后端 reason。按钮仍只在 backend eligible=true 时开放；已采纳或未结算时不重复诱导。

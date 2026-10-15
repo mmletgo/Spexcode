@@ -50,7 +50,7 @@ status.sources 按实际启用的物理来源工作树只读列出 root、branch
 
 operation Detail 的 `sourceSynced` 与 `canonicalSynced` 是独立事实：来源已采纳单独标记，只有服务端确认 canonicalSynced=true 才显示“主分支已同步”；不按分支名或 deliveryPlan 推断落地。Run/code 在 canonical_synced 状态仍可作为新输入启动。
 
-已结算且完成的交付提供“采纳到原工作树”入口，仅默认来源视图可见；目标工作树仍只读。入口只消费真实 `adoptionEligibility`：eligible=true 才可提交，false 时原样显示服务端的 reason code/message；不得在客户端重算工作树安全门禁。sourceSynced 或 canonicalSynced 已成立时隐藏入口，避免重复诱导，并显示来源已采纳状态。提交期间不可重复操作，失败保留具体服务端错误；成功后刷新真实状态，以 `sourceSynced`/`canonicalSynced` 回执显示结果，不乐观改写状态。采纳呈现只使用资格与状态字段，不展示原始记录或 leaseToken。
+有当前完成阶段的真实 settled receipt 且 sourceSynced/canonicalSynced 均未成立时，默认来源视图显示采纳区域；目标工作树仍只读。区域只消费真实 `adoptionEligibility`：eligible=true 才显示可提交按钮，false 时原样显示服务端的 reason code/message；即使 stale、invalidated 或 recovery_required 使同步完成状态关闭，也不能因此隐藏仍待采纳交付的具体资格原因；不得在客户端重算工作树安全门禁。sourceSynced 或 canonicalSynced 已成立时隐藏入口，避免重复诱导，并显示来源已采纳状态。提交期间不可重复操作，失败保留具体服务端错误；成功后刷新真实状态，以 `sourceSynced`/`canonicalSynced` 回执显示结果，不乐观改写状态。采纳呈现只使用资格与状态字段，不展示原始记录或 leaseToken。
 
 已结算交付详情可提供“生成成组撤销”，只在 backend `revertEligibility.eligible` 且执行/恢复资料可用时开放，不因 `stale` 单独禁止；后续编辑由后端冻结为新的受控候选。文案须说明撤销会进入新的业务审查与验证，不会立即改写主分支。失败重试复用同一操作稳定 requestId。
 
