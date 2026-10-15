@@ -35,3 +35,5 @@ Git worktree 准备与提交各自持久保存带种类的真实退出码、sign
 beforeApply的可信V4 guard可先通过store登记typed冲突/预算结果再抛原错误；catch遇attempt已failed/superseded/settled时保留该持久结论，不用失权fence再登记environment而遮蔽原因。非applying的过期attempt也不取得新失败写权；已applying的真实副作用仍走既有恢复结算。
 
 P4 attempt 带 [[sync-publication-base]] 时，实际 delivery plan 只把 baseCommit 绑定到该冻结 parentCommit；ownership、Git prepare、trusted hooks、commit intent、实际 target 与提交单 parent 全部核同一有效 plan。原 operation.deliveryPlan 不改写，旧 P3 缺字段沿原 base。恢复只用已冻结 parent，不从后来的 path heads 换树；完整最终 receipt 必须等于已验证实际候选。
+
+带 publication base 的 verified 尝试在任何新交付目录/Git 副作用前调用 store.assertPublicationBaseCurrent；BUSY/stale 在失败登记 try 之外原样返回，不能把等待发布权持久成 environment failure。真实 applying 恢复沿既有 owner/journal/parent 结算，不用后来 frontier 换树。新 beginApply 在同事务再核，不能凭早期只读检查绕过持久 gate。

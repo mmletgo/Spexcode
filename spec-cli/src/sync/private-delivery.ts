@@ -60,6 +60,7 @@ export async function deliverVerifiedAttempt(store: SyncStore, fence: WriteFence
   const deliveryPlan = { ...operation.deliveryPlan, ...(attempt.publicationBase ? { baseCommit: attempt.publicationBase.parentCommit } : {}) }
   if (operation.currentAttemptId !== attempt.id || operation.generation !== fence.generation || attempt.leaseToken !== fence.leaseToken || operation.input.source.physicalFingerprint !== fence.sourceFingerprint || !candidate || !attempt.verification?.passed || !['verified', 'applying', 'settled'].includes(attempt.status)) fail('SYNC_DELIVERY_NOT_VERIFIED', '当前尝试无完整验证或已经失权')
   if (attempt.status === 'verified' && (operation.deadlineAtMs <= Date.now() || attempt.expiresAtMs <= Date.now())) fail('SYNC_DELIVERY_EXPIRED', '过期尝试不能开始新的交付准备')
+  if (attempt.status === 'verified') store.assertPublicationBaseCurrent(operation.id, attempt.id)
   const managedRoot = managedDirectory(options.managedRoot, operation.input), root = deliveryPlan.canonicalRoot, parent = dirname(root), staging = join(parent, 'staging'), footprint = join(parent, 'footprint'), ownerPath = join(parent, 'owner.json'), commonDir = operation.input.source.commonDir
   if (dirname(parent) !== managedRoot || root !== join(parent, 'worktree') || !deliveryPlan.branch.startsWith('refs/heads/codex/sync-')) fail('SYNC_DELIVERY_PLAN', '交付计划不属于私有受管根')
   const locks = join(managedRoot, '.locks')

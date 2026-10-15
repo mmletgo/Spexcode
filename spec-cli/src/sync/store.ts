@@ -165,6 +165,27 @@ export class SyncStore {
     return { selection: { ...body, digest: digest(body) }, unknownPaths }
   }
   readPublicationHeads(source: WorktreeIdentity): PublicationHeads { return this.write(tx => this.publicationHeads(tx, source)) }
+  private assertPublicationCurrent(tx: ProtocolTransaction, operation: SyncOperation, attempt: SyncAttempt, heads: PublicationHeads): void {
+    const others = tx.query('SELECT a.record_json FROM sync_attempts a JOIN sync_operations o ON o.id=a.operation_id WHERE o.source_key=? AND a.id!=?', identityKey(operation.input.source), attempt.id)
+    for (const row of others) {
+      const other = parseRecord<SyncAttempt>(row)!
+      if (other.publicationBase && (!['failed', 'superseded', 'settled'].includes(other.status) || tx.query("SELECT id FROM sync_resources WHERE attempt_id=? AND phase!='removed' LIMIT 1", other.id).length || tx.query("SELECT id FROM sync_apply_journals WHERE attempt_id=? AND status!='settled' LIMIT 1", other.id).length)) fail('SYNC_PUBLICATION_BUSY', 'same-source frozen publication has not settled or released its resources')
+    }
+    if (operation.baselineSelection) this.assertSelection(tx, operation.input.source, operation.baselineSelection, scopeResources(operation.scope))
+    if (digest(heads) !== digest(this.publicationHeads(tx, operation.input.source))) fail('SYNC_PUBLICATION_BASE_STALE', 'publication frontier advanced after freezing')
+  }
+  /** 已冻结但尚未应用时复核持久发布权；真实 applying 恢复仍结算原 journal。 */
+  assertPublicationBaseCurrent(operationId: string, attemptId: string): void {
+    const before = this.readAttempt(attemptId)
+    if (!before.publicationBase) return
+    const ref = before.publicationBase.provenanceBlob, provenance = JSON.parse(this.blob(ref).toString()) as { heads: PublicationHeads }
+    this.write(tx => {
+      const operation = this.operation(tx, operationId), attempt = this.attempt(tx, attemptId)
+      if (attempt.operationId !== operation.id || operation.currentAttemptId !== attempt.id || attempt.publicationBase?.provenanceBlob.sha256 !== ref.sha256) fail('SYNC_PUBLICATION_BASE_BINDING', 'publication attempt changed')
+      if (['applying', 'settled'].includes(attempt.status)) return
+      this.assertPublicationCurrent(tx, operation, attempt, provenance.heads)
+    })
+  }
   listBaselineResources(source: WorktreeIdentity): BaselineResource[] {
     return this.write(tx => tx.query('SELECT resource_key FROM sync_baseline_heads WHERE source_key=? ORDER BY resource_key', identityKey(source)).map(row => {
       const key = String(row.resource_key), separator = key.indexOf(':'), kind = key.slice(0, separator), value = key.slice(separator + 1)
@@ -520,9 +541,10 @@ export class SyncStore {
       if (operation.phase !== 'generating' || attempt.candidate || attempt.verification || !operation.baselineSelection || !attempt.composedInput || digest(attempt.composedInput) !== digest(originalAttempt.composedInput)) fail('SYNC_PUBLICATION_BASE_FROZEN', 'publication base only binds before candidate freeze')
       if (attempt.publicationBase) {
         if (digest(attempt.publicationBase) !== digest(base)) fail('SYNC_PUBLICATION_BASE_FROZEN', 'publication base cannot be replaced')
+        this.assertPublicationCurrent(tx, operation, attempt, provenance.heads)
         return attempt
       }
-      if (digest(provenance.heads) !== digest(this.publicationHeads(tx, operation.input.source))) fail('SYNC_PUBLICATION_BASE_STALE', 'publication frontier advanced before binding')
+      this.assertPublicationCurrent(tx, operation, attempt, provenance.heads)
       attempt.publicationBase = clone(base); this.saveAttempt(tx, attempt); return attempt
     })
   }
@@ -688,10 +710,12 @@ export class SyncStore {
     const before = this.readAttempt(fence.attemptId)
     if (!before?.candidate) fail('SYNC_CANDIDATE_MISSING', fence.attemptId)
     const files = this.manifestDiff(currentTarget.manifestBlob, before.candidate.manifestBlob)
+    const publication = before.publicationBase ? JSON.parse(this.blob(before.publicationBase.provenanceBlob).toString()) as { heads: PublicationHeads } : null
     return this.write(tx => {
       const { operation, attempt } = this.checkFence(tx, fence)
       const prior = parseRecord<ApplyJournal>(tx.query('SELECT record_json FROM sync_apply_journals WHERE effect_key=?', plan.effectKey)[0])
       if (prior) { if (prior.plan.payloadDigest !== plan.payloadDigest || digest(prior.plan) !== digest(plan) || prior.attemptId !== attempt.id) fail('SYNC_EFFECT_CONFLICT', plan.effectKey); return prior }
+      if (publication) this.assertPublicationCurrent(tx, operation, attempt, publication.heads)
       if (operation.phase !== 'ready_to_apply' || !attempt.candidate || !attempt.verification?.passed) fail('SYNC_APPLY_NOT_VERIFIED', operation.phase)
       if (plan.candidateDigest !== attempt.candidate.digest || plan.verificationBlob.sha256 !== attempt.verification.resultBlob.sha256 || digest(plan.files) !== digest(files) || !contains(attempt.verification.coveredScope, plan.coveredScope) || !contains(plan.coveredScope, { paths: files.map(file => file.path), contractIds: [], flowIds: [] })) fail('SYNC_APPLY_BINDING', 'plan differs from frozen candidate or verified scope')
       if (!operation.delivery || identityKey(plan.target) !== identityKey(operation.delivery) || identityKey(currentTarget.source) !== identityKey(plan.target) || currentTarget.id !== plan.expectedTargetSnapshotId) fail('SYNC_TARGET_STALE', 'physical target or current snapshot changed')
