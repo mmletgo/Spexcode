@@ -25,6 +25,14 @@ test('AC-EXPORT-01 响应丢失后同键返回同任务，参数冲突不重复�
   assert.equal(secondPair.owner, 'a');
   assert.deepEqual(service.submit('a:b', 'c', 'active'), firstPair);
   assert.deepEqual(service.submit('a', 'b:c', 'active'), secondPair);
+  const positive = service.submit('owner', Infinity, 'active');
+  const negative = service.submit('owner', -Infinity, 'active');
+  assert.notEqual(positive.id, negative.id, '已接受的不同数字键不能因JSON编码碰撞');
+  assert.deepEqual(service.submit('owner', Infinity, 'active'), positive);
+  const actor = {}, anotherActor = {};
+  const actorJob = service.submit(actor, 'object-key', 'active');
+  assert.notEqual(service.submit(anotherActor, 'object-key', 'active').id, actorJob.id);
+  assert.deepEqual(service.submit(actor, 'object-key', 'active'), actorJob);
 });
 
 test('AC-EXPORT-02 输入和结果边界拒绝且保持状态', () => {
@@ -115,6 +123,8 @@ test('AC-EXPORT-08 失败可行动，重试保持ID并拒绝旧成功', () => {
   const retry = service.dispatch(id, 'RETRY', { actor: 'owner' });
   assert.equal(retry.id, id);
   assert.equal(retry.attempt, 2);
+  assert.equal(retry.reason, null);
+  assert.equal(service.jobs.get(id).reason, null);
   service.dispatch(id, 'COMPLETE', { attempt: 1, result: 'stale.csv' });
   assert.equal(service.jobs.get(id).state, 'QUEUED');
   service.dispatch(id, 'START', { attempt: 2 });

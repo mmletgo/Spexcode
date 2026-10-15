@@ -14,6 +14,16 @@ code:
 
 ## expanded spec
 
+P4 接入在同一真实快照上冻结完整资源基线选择及实际执行范围；读取/保护集合、生成授权和写入/验收覆盖分别保留，不能用目录授权取得整个目录的写锁。资源选择参与组合与读集合摘要，尚未建立的基线显式为 null；既有 P3 操作按原冻结成对基线恢复；没有精确资源选择时保留原writePaths目录准入范围，只有精确选择接入才默认采用plan.executionScope，显式可信重试范围仍优先。后台观察和显式入口共用这一接入动作。
+
+精确操作的当前输入判据比较完整物理身份/分支及实际读写闭包的 working、HEAD 与 index 对象；无关文件或无关提交不会使本节点证据过期，也不会进入候选。闭包内编辑、成员增删、index 或 HEAD 对象变化仍立即过期。状态查询、重试资格与交付 V4 复用同一判据，既有 P3 冻结操作继续使用完整快照 ID。
+
+P4 派发先由应用消费真实 protocol FIFO 头并事务确认到持久 queued，协调器只按已确认记录与 revision 领取；内部有限修复/过期原 attempt 用显式 continuation，同一预算族不重置。未确认、前序或租约冲突返回 busy，不当成永久失败或另造消息。物理暂停由安全边界和 heartbeat 停止新阶段，结算真实资源后返回暂停位置，保持单操作 control 与检查点；全局恢复不能解除用户另行设置的单操作暂停。已登记 applying 继续原短写单元完整性结算。
+
+P1 只把实际目标正文及其已审代码/可写验收路径、业务 ID 加入执行范围；只读上下文的声明不取得覆盖或写锁。新增资源由同一 fence 事务取得精确选择及租约，再从原不可变输入重组并绑定新 readSet。阶段复用保原选择与 readSet 证据：仅追加 null 资源且原绑定不变可沿用已审义务；真实组合字节变化或引入既有非 null 基线时，在原预算内重新分析。V1–V4、验证 blob 与 apply 均绑定最终选择。目标及退役历史按各文件的实际交付头读取，不能借另一个资源的全局最新交付作为作者来源。
+
+生成可独立并行；结构化生成响应核验后才取得同来源发布 mutex，冻结 [[sync-publication-base]]，随后独审、真实验证和完整交付针对同一实际组合树。只读上下文保持当前冻结 source 的 bytes/mode/absence，不成为模型写权。闭包外的已结算组件只作可继承交付，不进入本轮业务覆盖；结构检查只重读实际影响闭包与本轮修改，不能把继承节点冒作本轮新增需求。发布父树及 provenance 参与 contextDigest；恢复保原冻结父树与 journal，不读取 latest 换候选。失败或安全边界释放本机 mutex，持久门禁负责跨进程的已冻结发布次序。
+
 复用现有快照、成对 composition、受控 request overlay、P1 elaborate、scope 扩充/租约、generation、真实 V3 resource 执行与 private delivery，不另建消息队列、契约图或事实数据库。原 source/composed/candidate 分开，policy/readset 内容摘要必须绑定 operation。读集合完整保留契约及 source/code/related/AC 测试全文，2MiB 预算失败不截断。host private、越界路径、目录未授权字节拒绝。
 
 operation 独立本机 kernel mutex 防双 coordinator；紧凑 stage checkpoint 只保存 refs、独立结果及诊断，不复制整张契约图。当前 attempt 在独占证明下重入稳定 requestKey，派发前原子计费、持久资源意图，完整真实结果/hash/独立身份保存后重放。lease heartbeat 贯穿原生长调用，控制/总deadline触发 Abort；旧 generation 只能结算真实资源证据。历史未removed资源精确恢复，未知终态保留 recovery_required，不假释放容量。
@@ -39,6 +49,8 @@ initial与spec共享P2入口。旧无planBlob operation先claim持久unsupported
 默认租约120秒，heartbeat最多5秒且小于lease，总deadline与预算不因租约调整改变。持权细化/生成阶段边界先renewLease门禁再setImmediate给控制/heartbeat一次执行机会，再核控制和fence；长native调用由heartbeat续约/Abort，已过期authority绝不能恢复。该窗口覆盖实际同步Git/Tree-sitter可信读取阶段。
 
 显式retryOf沿真实operation链读取同source/input/policy/request的持久accepted P1证据；保留原approved contract/AC及原attempt/evidence provenance，不重新细化弱化AC。只有链上从未approved时才P1新派发；新operation重新执行generation/V1-V4，不借旧fence或receipt发布。
+
+P4 显式重试按原 operation 已审扩展后的 scope 及最终 selection 重组同一 readSet，复用原 impactDigest；冻结 planBlob 和 policyDigest 不被扩展结果改写。原严格接入事务仍拒绝缺失路径、改变义务或不匹配的读取/选择，不能以重试丢弃已批准的实现范围。
 
 recoveryOnly在独占mutex后先于普通phase/claim运行：精确终止所有历史未removed资源，再仅恢复当前attempt已存在且绑定delivery的未settled journal。Docker恢复driver拒绝create/start，planned容器不存在保留未知恢复状态，不新建容器补齐。原生资源只以aborted既有请求桥取真实stop证据；无journal即使verified也不进入prepare/apply。错误返回recovery_required及诊断而不自动pause/run、扣budget或新建attempt；已有journal结算可登记真实receipt/原结论。
 

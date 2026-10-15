@@ -312,3 +312,34 @@ test('contract-omission必须精确绑定已审Spec路径和关联existingID，�
     assert.equal(result.reviewPassed, false); assert.equal(native.calls.length, 2)
   }
 })
+
+test('可信freeze回调发生在生成返回后，实际候选继承闭包外字节且原模型输入/readonly保持原绑定', async t => {
+  const source = await input(t), native = runner(source), originalManifest = structuredClone(source.manifest)
+  source.allowedScope.paths = ['src/export.js']
+  const inherited = Buffer.from('settled independent delivery\n'), entries = [...source.manifest.entries, { path: 'unselected.txt', mode: '100644' as const, oid: writeObject(source.snapshot.source.commonDir, inherited), digest: contentHash(inherited) }]
+  const tree = writeTree(source.snapshot.source.commonDir, entries), actual = readTree(source.snapshot.source.commonDir, tree)
+  let bound = false
+  const result = await runGeneration(source, { runner: native.run, protectedReadPaths: [...source.files.keys(), 'absent-readonly.txt'], beforeFreezeCandidate: async () => {
+    assert.equal(native.calls.length, 1); assert.equal(native.calls[0].purpose, 'code_generate'); bound = true
+    return { sourceInputId: source.snapshot.id, previousBaselinePairId: null, tree, manifestBlob: writeEvidence(source.snapshot.source.commonDir, { version: 1, entries: actual }), contentDigest: contentHash(JSON.stringify(actual)) }
+  }, validateCandidate: async candidate => { assert.equal(bound, true); assert.equal(candidate.baseTree, tree); return [] } })
+  assert.equal(result.status, 'reviewed'); assert.equal(result.candidateFiles?.get('unselected.txt'), inherited.toString())
+  assert.deepEqual(source.manifest, originalManifest)
+  assert.ok(!native.calls[0].prompt.includes(inherited.toString().trim()))
+  assert.ok(native.calls[1].prompt.includes(result.candidate!.digest))
+  assert.equal(result.candidateFiles?.get('tests/export.test.mjs'), source.files.get('tests/export.test.mjs'))
+})
+
+test('可信publication回调仍不能改变readonly或缺失路径；模型改readonly也硬拒绝', async t => {
+  const source = await input(t); source.allowedScope.paths = ['src/export.js']
+  for (const path of ['tests/export.test.mjs', 'absent-readonly.txt']) {
+    const bytes = Buffer.from('modified readonly\n'), entries = source.manifest.entries.filter(entry => entry.path !== path)
+    entries.push({ path, mode: '100644', oid: writeObject(source.snapshot.source.commonDir, bytes), digest: contentHash(bytes) })
+    const tree = writeTree(source.snapshot.source.commonDir, entries), actual = readTree(source.snapshot.source.commonDir, tree), native = runner(source)
+    const result = await runGeneration(source, { runner: native.run, protectedReadPaths: ['absent-readonly.txt'], beforeFreezeCandidate: async () => ({ sourceInputId: source.snapshot.id, previousBaselinePairId: null, tree, manifestBlob: writeEvidence(source.snapshot.source.commonDir, { version: 1, entries: actual }), contentDigest: contentHash(JSON.stringify(actual)) }), validateCandidate: valid })
+    assert.equal(result.status, 'repair'); assert.equal(result.candidate, null); assert.match(result.failure!.message, /读写闭包/); assert.equal(native.calls.length, 1)
+  }
+  const path = 'tests/export.test.mjs', before = source.manifest.entries.find(entry => entry.path === path)!, native = runner(source, () => ({ version: 'sync-files-v1', changes: [{ path, beforeDigest: before.digest, beforeMode: before.mode, content: 'model changed oracle\n', mode: null }] }))
+  const result = await runGeneration(source, { runner: native.run, validateCandidate: valid })
+  assert.equal(result.status, 'repair'); assert.match(result.failure!.message, /越界/); assert.equal(result.candidate, null)
+})

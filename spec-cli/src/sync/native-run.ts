@@ -137,7 +137,7 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
           record = observe(); receipt = creationTermination()
         }
         if (!record && !receipt && (!nativePromise || outcome) && runtime.recoverCreateTermination) {
-          await runtime.recoverCreateTermination(dispatch!.sessionCreateKey, { prompt: request.prompt, payloadHash: expectedCreateHash, base: request.base, signal: AbortSignal.timeout(Math.min(15_000, request.timeoutMs)) })
+          await runtime.recoverCreateTermination(dispatch!.sessionCreateKey, { prompt: request.prompt, payloadHash: expectedCreateHash, base: request.base, signal: AbortSignal.timeout(Math.min(15_000, request.timeoutMs)), structuredExecution: execution })
           record = observe(); receipt = creationTermination()
         }
         if (!record && receipt) {

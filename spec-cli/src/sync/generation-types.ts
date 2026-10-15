@@ -58,6 +58,10 @@ export type GenerationOptions = {
   validateCandidate: (candidate: CandidateRef) => Promise<readonly ContractFinding[]>
   /** 必须在 native 派发前完成持久登记；native 身份绑定由 runner 包装者负责。 */
   onDispatch?: (request: ElaborationSessionRequest) => Promise<void>
+  /** 可信发布器在生成响应核验后锁定发布父树；原始模型输入不变。 */
+  beforeFreezeCandidate?: () => Promise<ComposedInputRef>
+  /** 包含不存在文件的完整只读闭包，不加入模型提示或输入摘要。 */
+  protectedReadPaths?: readonly string[]
 }
 export type GenerationResult = {
   status: 'reviewed' | 'repair' | 'needs_input' | 'conflict' | 'failed' | 'cancelled' | 'unsupported'

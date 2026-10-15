@@ -304,3 +304,7 @@ The exclusion is scoped to that sweep alone. A live session worktree keeps its o
 at its own path, because there the tree IS the input. And the cut has to be checked from both sides:
 "fewer watches" reads identically whether the useless directories went or the useful ones did, so a
 spec edit inside the served tree must still be observed to fire.
+
+TreeWatcherRegistry 与平台 transport 已下沉到 [[sync-tree-watcher]]，本模块继续 reexport 既有公共接口；SSE 生命周期与调度行为不变。
+
+worktree注册匹配采用同一个canonical filesystem路径。已删除worktree无法直接realpath时，从实际存在祖先保留缺失后缀；macOS /var与/private/var或其他符号别名不能让仍live的注册源被漏掉。缺失源继续真实watch失败、持有与有界恢复，不能因匹配失败静默退出责任域。

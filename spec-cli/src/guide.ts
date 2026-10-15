@@ -778,6 +778,8 @@ const SYNC = `spex guide sync — Spec 驱动同步
 { verificationId, testPath, testId }，放在可读但不可写目录；未来 AC 由细化生成。
 facts 仅放有来源的业务事实，执行环境、token 和本机路径不能作为业务政策。
 当前仅支持 Docker Node --test；export 不带宿主 node_modules，不猜 npm script。
+nodeIds 可登记明确意图根与其子树。省略时只纳入真实治理已授权源码/测试的节点；新纯raw需求须先明确 nodeIds。
+status.observation.coverage 展示纳入与未纳入范围，分模块启用不能冒称全项目已同步。
 callTimeoutMs 是可选单次模型调用上限，正整数且不超过 budget.timeoutMs；缺省最多 120000ms，
 同时受操作总期限限制。复杂完整流程可在新操作的可信配置中明确设置更长有限值，不能扩大旧操作预算。
 
@@ -804,7 +806,7 @@ show 的 decisionContext 展示原意、双方行为、规则/路径、反例、
 真实业务冲突使用 spex sync decide <operation-id> --input-id <原input> --analysis <sha256>
 --findings <id,...> --choice keep_intent|adopt_behavior|new_rule [--rule <用户新规则>] --request-id <稳定键>。
 只裁决选中项，旧原意与分析可追踪，其它GAP仅阻依赖；不通过 retryOf 伪造授权。
-本阶段尚未提供外部 watcher，不能据 enable 宣称后台外部文件监听已完成。
+enable 后由正式服务持续观察授权来源，保存即触发；停机后、外部提交及监听故障通过补偿扫描处理。sync pause/resume（无 operation ID）控制物理输入自动执行，暂停仍记录最新输入；恢复先扫描最新版本。sync verify <node-id> 沿同一真实完整验证管线建立操作。
 
 see also: spex help sync`
 

@@ -57,10 +57,12 @@ export function planPrivateDelivery(input: InputSnapshot, managedRoot: string, i
 export async function deliverVerifiedAttempt(store: SyncStore, fence: WriteFence, options: PrivateDeliveryOptions): Promise<{ operation: SyncOperation; receipt: ApplyReceipt }> {
   let operation = store.readOperation(fence.operationId)
   const attempt = store.readAttempt(fence.attemptId), candidate = attempt.candidate
+  const deliveryPlan = { ...operation.deliveryPlan, ...(attempt.publicationBase ? { baseCommit: attempt.publicationBase.parentCommit } : {}) }
   if (operation.currentAttemptId !== attempt.id || operation.generation !== fence.generation || attempt.leaseToken !== fence.leaseToken || operation.input.source.physicalFingerprint !== fence.sourceFingerprint || !candidate || !attempt.verification?.passed || !['verified', 'applying', 'settled'].includes(attempt.status)) fail('SYNC_DELIVERY_NOT_VERIFIED', '当前尝试无完整验证或已经失权')
   if (attempt.status === 'verified' && (operation.deadlineAtMs <= Date.now() || attempt.expiresAtMs <= Date.now())) fail('SYNC_DELIVERY_EXPIRED', '过期尝试不能开始新的交付准备')
-  const managedRoot = managedDirectory(options.managedRoot, operation.input), root = operation.deliveryPlan.canonicalRoot, parent = dirname(root), staging = join(parent, 'staging'), footprint = join(parent, 'footprint'), ownerPath = join(parent, 'owner.json'), commonDir = operation.input.source.commonDir
-  if (dirname(parent) !== managedRoot || root !== join(parent, 'worktree') || !operation.deliveryPlan.branch.startsWith('refs/heads/codex/sync-')) fail('SYNC_DELIVERY_PLAN', '交付计划不属于私有受管根')
+  if (attempt.status === 'verified') store.assertPublicationBaseCurrent(operation.id, attempt.id)
+  const managedRoot = managedDirectory(options.managedRoot, operation.input), root = deliveryPlan.canonicalRoot, parent = dirname(root), staging = join(parent, 'staging'), footprint = join(parent, 'footprint'), ownerPath = join(parent, 'owner.json'), commonDir = operation.input.source.commonDir
+  if (dirname(parent) !== managedRoot || root !== join(parent, 'worktree') || !deliveryPlan.branch.startsWith('refs/heads/codex/sync-')) fail('SYNC_DELIVERY_PLAN', '交付计划不属于私有受管根')
   const locks = join(managedRoot, '.locks')
   mkdirSync(locks, { recursive: true, mode: 0o700 }); physical(locks)
   const lock = claimFileMutex(join(locks, `${contentHash(root)}.sqlite`))
@@ -73,7 +75,7 @@ export async function deliverVerifiedAttempt(store: SyncStore, fence: WriteFence
   }
   const git = (binding: TrustedHooksBinding, cwd: string, args: string[]): string => execFileSync(binding.gitPath, ['--no-replace-objects', '--no-optional-locks', '-c', 'core.fsmonitor=false', '-C', cwd, ...args], { env: makeTrustedHookEnv(binding), encoding: 'utf8', maxBuffer: 8 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] }).trim()
   const trusted = (cwd: string, mode: 'prepare' | 'publish', tree: string): TrustedHooksBinding => {
-    const config = { ...options.tools, operation: mode, expectedTree: tree, expectedParent: operation.deliveryPlan.baseCommit, expectedRef: operation.deliveryPlan.branch, privateFootprintDir: footprint }
+    const config = { ...options.tools, operation: mode, expectedTree: tree, expectedParent: deliveryPlan.baseCommit, expectedRef: deliveryPlan.branch, privateFootprintDir: footprint }
     const result = prepareTrustedHooksBinding(cwd, config)
     if (result.status !== 'supported') fail('SYNC_DELIVERY_UNSUPPORTED', JSON.stringify(result.issues))
     return result.binding
@@ -81,7 +83,7 @@ export async function deliverVerifiedAttempt(store: SyncStore, fence: WriteFence
   try {
     if (existsSync(ownerPath)) {
       owner = JSON.parse(readFileSync(ownerPath, 'utf8')) as Owner
-      if (owner.version !== 2 || owner.operationId !== operation.id || owner.inputId !== operation.input.id || !equal(owner.plan, operation.deliveryPlan)) fail('SYNC_DELIVERY_OWNERSHIP', '交付路径已属于其他输入/计划')
+      if (owner.version !== 2 || owner.operationId !== operation.id || owner.inputId !== operation.input.id || !equal(owner.plan, deliveryPlan)) fail('SYNC_DELIVERY_OWNERSHIP', '交付路径已属于其他输入/计划')
       assertOwner()
       if (owner.attemptId !== attempt.id) {
         const previous = store.readAttempt(owner.attemptId)
@@ -89,8 +91,8 @@ export async function deliverVerifiedAttempt(store: SyncStore, fence: WriteFence
         let observed: InputSnapshot | null = null
         if (existsSync(root)) {
           observed = await captureInputSnapshot(root)
-          const baseTree = objectGit(commonDir, ['rev-parse', `${operation.deliveryPlan.baseCommit}^{tree}`]).toString().trim()
-          if (observed.source.commonDir !== commonDir || observed.source.branch !== operation.deliveryPlan.branch || observed.headCommit !== operation.deliveryPlan.baseCommit || observed.immutableTree !== baseTree || observed.indexTree !== baseTree) fail('SYNC_DELIVERY_OWNERSHIP', '旧准备树已有非base内容，不能转移所有权')
+          const baseTree = objectGit(commonDir, ['rev-parse', `${deliveryPlan.baseCommit}^{tree}`]).toString().trim()
+          if (observed.source.commonDir !== commonDir || observed.source.branch !== deliveryPlan.branch || observed.headCommit !== deliveryPlan.baseCommit || observed.immutableTree !== baseTree || observed.indexTree !== baseTree) fail('SYNC_DELIVERY_OWNERSHIP', '旧准备树已有非base内容，不能转移所有权')
         }
         const transfer = writeEvidence(commonDir, { version: 1, kind: 'private-delivery-transfer', previousOwner: owner, attemptId: attempt.id, observed })
         store.checkpoint(fence, transfer); assertOwner()
@@ -99,11 +101,11 @@ export async function deliverVerifiedAttempt(store: SyncStore, fence: WriteFence
     } else {
       if (operation.control !== 'run' || attempt.status !== 'verified') fail('SYNC_DELIVERY_STOPPED', '暂停或取消后不能新建交付')
       if (existsSync(parent)) fail('SYNC_DELIVERY_UNOWNED', '交付父目录已经存在但无所有权记录，不能采用；保留现场等待恢复或新的交付计划')
-      const intent = writeEvidence(commonDir, { version: 1, kind: 'private-delivery-create', operationId: operation.id, attemptId: attempt.id, inputId: operation.input.id, plan: operation.deliveryPlan })
+      const intent = writeEvidence(commonDir, { version: 1, kind: 'private-delivery-create', operationId: operation.id, attemptId: attempt.id, inputId: operation.input.id, plan: deliveryPlan })
       store.checkpoint(fence, intent); lock.assertHeld()
       mkdirSync(parent, { mode: 0o700 }); syncDirectory(managedRoot)
       mkdirSync(staging, { mode: 0o700 }); mkdirSync(footprint, { mode: 0o700 })
-      owner = { version: 2, operationId: operation.id, attemptId: attempt.id, inputId: operation.input.id, plan: operation.deliveryPlan, parentIdentity: physical(parent), stagingIdentity: physical(staging), footprintIdentity: physical(footprint), journalId: null, commitIntent: null, published: false }
+      owner = { version: 2, operationId: operation.id, attemptId: attempt.id, inputId: operation.input.id, plan: deliveryPlan, parentIdentity: physical(parent), stagingIdentity: physical(staging), footprintIdentity: physical(footprint), journalId: null, commitIntent: null, published: false }
       writeOwner(ownerPath, owner)
     }
     if (owner.journalId) journal = store.readJournal(owner.journalId)
@@ -111,23 +113,23 @@ export async function deliverVerifiedAttempt(store: SyncStore, fence: WriteFence
     if (owner.published && !journal?.receipt) fail('SYNC_DELIVERY_OWNERSHIP', '已公开目录缺失真实receipt')
     if (!operation.delivery) {
       if (operation.control !== 'run') fail('SYNC_DELIVERY_STOPPED', '暂停或取消后不开始新的Git准备')
-      const baseTree = objectGit(commonDir, ['rev-parse', `${operation.deliveryPlan.baseCommit}^{tree}`]).toString().trim()
+      const baseTree = objectGit(commonDir, ['rev-parse', `${deliveryPlan.baseCommit}^{tree}`]).toString().trim()
       const binding = trusted(operation.input.source.canonicalRoot, 'prepare', baseTree)
       if (!existsSync(join(root, '.git'))) {
         assertOwner()
-        const ref = spawnSync(binding.gitPath, ['--no-replace-objects', '-C', operation.input.source.canonicalRoot, 'show-ref', '--verify', '--quiet', operation.deliveryPlan.branch], { env: makeTrustedHookEnv(binding) })
+        const ref = spawnSync(binding.gitPath, ['--no-replace-objects', '-C', operation.input.source.canonicalRoot, 'show-ref', '--verify', '--quiet', deliveryPlan.branch], { env: makeTrustedHookEnv(binding) })
         if (ref.error) throw ref.error
         if (ref.status !== 0 && ref.status !== 1) fail('SYNC_DELIVERY_PREPARE_CONFLICT', '无法读取预定分支')
         const branchExists = ref.status === 0
-        if (branchExists && git(binding, operation.input.source.canonicalRoot, ['rev-parse', '--verify', operation.deliveryPlan.branch]) !== operation.deliveryPlan.baseCommit) fail('SYNC_DELIVERY_PREPARE_CONFLICT', '预定分支已有其他提交')
-        const args = branchExists ? ['worktree', 'add', root, operation.deliveryPlan.branch.slice(11)] : ['worktree', 'add', '-b', operation.deliveryPlan.branch.slice(11), root, operation.deliveryPlan.baseCommit]
+        if (branchExists && git(binding, operation.input.source.canonicalRoot, ['rev-parse', '--verify', deliveryPlan.branch]) !== deliveryPlan.baseCommit) fail('SYNC_DELIVERY_PREPARE_CONFLICT', '预定分支已有其他提交')
+        const args = branchExists ? ['worktree', 'add', root, deliveryPlan.branch.slice(11)] : ['worktree', 'add', '-b', deliveryPlan.branch.slice(11), root, deliveryPlan.baseCommit]
         const created = spawnSync(binding.gitPath, ['--no-replace-objects', '-C', operation.input.source.canonicalRoot, ...args], { env: makeTrustedHookEnv(binding), encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 })
         store.checkpoint(fence, writeEvidence(commonDir, { version: 1, kind: 'private-delivery-prepare', operationId: operation.id, attemptId: attempt.id, status: created.status, signal: created.signal, stdout: created.stdout, stderr: created.stderr, error: created.error?.message }))
         if (created.error) throw created.error
         if (created.status !== 0) fail('SYNC_DELIVERY_PREPARE_FAILED', 'Git准备未完整成功；实际ref/目录已保留，恢复须核对')
       }
       const identity = identifyWorktree(root)
-      if (identity.commonDir !== commonDir || identity.branch !== operation.deliveryPlan.branch || git(binding, root, ['rev-parse', 'HEAD']) !== operation.deliveryPlan.baseCommit) fail('SYNC_DELIVERY_PREPARE_CONFLICT', '准备后的实际Git身份或base不匹配')
+      if (identity.commonDir !== commonDir || identity.branch !== deliveryPlan.branch || git(binding, root, ['rev-parse', 'HEAD']) !== deliveryPlan.baseCommit) fail('SYNC_DELIVERY_PREPARE_CONFLICT', '准备后的实际Git身份或base不匹配')
       operation = store.bindDelivery(fence, identity)
     }
     assertOwner()
@@ -155,11 +157,11 @@ export async function deliverVerifiedAttempt(store: SyncStore, fence: WriteFence
     if (owner.commitIntent) intent = JSON.parse(readEvidence(commonDir, owner.commitIntent).toString()) as CommitIntent
     else {
       const binding = trusted(root, 'publish', candidate.tree)
-      intent = { version: 1, journalId: journal.id, effectKey: journal.plan.effectKey, tree: candidate.tree, parent: operation.deliveryPlan.baseCommit, ref: operation.deliveryPlan.branch, message: `Synchronize verified Spec and implementation\n\nSpex-Sync-Effect: ${journal.plan.effectKey}\n`, unchanged: git(binding, root, ['rev-parse', `${operation.deliveryPlan.baseCommit}^{tree}`]) === candidate.tree, binding }
+      intent = { version: 1, journalId: journal.id, effectKey: journal.plan.effectKey, tree: candidate.tree, parent: deliveryPlan.baseCommit, ref: deliveryPlan.branch, message: `Synchronize verified Spec and implementation\n\nSpex-Sync-Effect: ${journal.plan.effectKey}\n`, unchanged: git(binding, root, ['rev-parse', `${deliveryPlan.baseCommit}^{tree}`]) === candidate.tree, binding }
       const ref = writeEvidence(commonDir, intent); store.checkpoint(fence, ref)
       owner = { ...owner, commitIntent: ref }; writeOwner(ownerPath, owner)
     }
-    if (intent.version !== 1 || intent.journalId !== journal.id || intent.effectKey !== journal.plan.effectKey || intent.tree !== candidate.tree || intent.parent !== operation.deliveryPlan.baseCommit || intent.ref !== operation.deliveryPlan.branch) fail('SYNC_DELIVERY_COMMIT_BINDING', '提交intent不属于已验证journal')
+    if (intent.version !== 1 || intent.journalId !== journal.id || intent.effectKey !== journal.plan.effectKey || intent.tree !== candidate.tree || intent.parent !== deliveryPlan.baseCommit || intent.ref !== deliveryPlan.branch) fail('SYNC_DELIVERY_COMMIT_BINDING', '提交intent不属于已验证journal')
     const head = git(intent.binding, root, ['rev-parse', 'HEAD'])
     const parentTree = git(intent.binding, root, ['rev-parse', `${intent.parent}^{tree}`])
     if (intent.unchanged !== (parentTree === intent.tree)) fail('SYNC_DELIVERY_COMMIT_BINDING', 'no-op提交身份不匹配')

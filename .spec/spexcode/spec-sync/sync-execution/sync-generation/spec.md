@@ -45,3 +45,5 @@ validateCandidate 是必需可信硬门禁，按实际候选回调；没有回�
 专用 contract-omission 发现必须为 repair，精确引用已审 contracts 的仓库Spec路径与既有ID，且 affectedIds 包含该ID；错路径、未知/不关联ID或错分类均 review_invalid。它只请求既有受限refinement，不新增授权。普通修复诊断完整保留实际finding的规则/代码位置、证据、反例与信息，仍不作为新需求或批准证据。
 
 contractOmissionBound为生成独审、协调器live与持久恢复共用的专用marker/path/existingID/affectedIds判断；旧contract:合法诊断仅可校验后撤销重细化权限，不作为新marker别名或授权。
+
+P4 可在模型响应核 schema、计算 approvedSpecs 后调用可信 beforeFreezeCandidate。程序逐 entry 核 protectedReadPaths、原 files 和实际 allowedScope 的完整原字节/mode/OID/absence 未变，随后在发布组合树 freeze 并执行 V1/V2、实际候选独审；模型 prompt、beforeDigest/beforeMode、inputDigest 和行为分析仍绑定 original composed/readSet。闭包外真实已结算继承进入实际 candidate manifest/完整摘要，不能成为模型写权限；readonly 模型修改继续按原 scope 拒绝。

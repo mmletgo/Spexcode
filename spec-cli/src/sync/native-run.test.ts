@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 import { openProtocol } from '@spexcode/session-protocol'
 import { sessionIdForCreateKey, readSessionCreateTermination, recoverSessionCreateTermination, type SessionCreateTermination } from '../sessions.js'
@@ -373,12 +373,14 @@ for (const creationPhase of ['target-resolution', 'git-worktree', 'cleanup-faile
         assert.match(creationError.message, /cleanup left residue/)
         if (creationPhase === 'cleanup-interrupted') assert.match(creationError.message, /during branch delete \(cleanup deadline expired\)/)
         const record = published({ ...request, requestKey: createKey })
-        const recoveryOptions = { prompt: request.prompt, payloadHash: record.createPayloadHash!, base: request.base, signal: AbortSignal.timeout(5000) }
+        const recoveryOptions = { prompt: request.prompt, payloadHash: record.createPayloadHash!, base: request.base, signal: AbortSignal.timeout(5000), structuredExecution: record.structuredExecution! }
         await assert.rejects(recoverSessionCreateTermination(createKey, { ...recoveryOptions, payloadHash: '0'.repeat(64) }), /does not match cancelled create request/)
         if (creationPhase === 'cleanup-failed') {
+          await assert.rejects(recoverSessionCreateTermination(createKey, { ...recoveryOptions, structuredExecution: undefined }), /does not match cancelled create request/)
           process.env.SPEX_NATIVE_CREATE_PROOF_PHASE = 'recovery'
           const { runtimeRoot } = await import('@spexcode/spec-core')
           const candidate = JSON.parse(readFileSync(join(runtimeRoot(), '.session-create-candidates', `${record.session}.json`), 'utf8')) as { path: string }
+          assert.equal(dirname(candidate.path), join(realpathSync(runtimeRoot()), 'structured-worktrees'))
           const original = readFileSync(join(candidate.path, 'README'))
           for (const kind of ['unstaged', 'staged', 'untracked', 'ignored'] as const) {
             const userFile = join(candidate.path, kind === 'unstaged' || kind === 'staged' ? 'README' : `${kind}-user-data`)

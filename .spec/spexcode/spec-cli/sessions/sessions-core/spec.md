@@ -283,3 +283,5 @@ from being read as machinery is [[prompt-operand]]'s. Each anchors on the functi
 implements it, so its drift is its own.
 
 受限结构化创建复用原 request-key record 锁、候选拥有权及清理协议：取消或超时完成清理且尚未发布才原子写入精确创建终止收据。只读恢复与同键拒绝复活的具体合同见 [[session-create-authority]]；未知或清理失败仍保留原资源，不在 canonical lifecycle 中伪造会话。
+
+结构化候选目录由 [[session-create-authority]] 固定外置到项目runtime受管目录，创建和未发布取消恢复共享同一目标推导；普通会话仍沿主checkout的既有布局。

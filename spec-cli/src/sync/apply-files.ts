@@ -7,7 +7,7 @@ import { actualTreeDiff, verifyCandidate } from './candidate.js'
 import { captureInputSnapshot, contentHash, identifyWorktree, readEvidence, readObject, readTree, safeSymlinkTarget, validateRepositoryPath, verifySnapshot, writeEvidence } from './snapshot.js'
 import type { TreeEntry } from './snapshot.js'
 
-type PlanPayload = { version: 1; operationId: string; attemptId: string; inputId: string; source: WorktreeIdentity; currentTarget: Omit<InputSnapshot, 'capturedAtMs'>; candidateDigest: string; verificationBlob: BlobRef; expectedBaselinePairId: string | null; coveredScope: ApplyPlan['coveredScope']; files: ApplyFilePlan[] }
+type PlanPayload = { version: 1; operationId: string; attemptId: string; inputId: string; source: WorktreeIdentity; currentTarget: Omit<InputSnapshot, 'capturedAtMs'>; candidateDigest: string; verificationBlob: BlobRef; expectedBaselinePairId: string | null; expectedBaselineSelectionDigest?: string; publicationBaseRef?: BlobRef; coveredScope: ApplyPlan['coveredScope']; files: ApplyFilePlan[] }
 export class ApplyFilesError extends Error { constructor(readonly code: string, message: string) { super(`${code}: ${message}`); this.name = 'ApplyFilesError' } }
 function fail(code: string, message: string): never { throw new ApplyFilesError(code, message) }
 const sameIdentity = (a: WorktreeIdentity, b: WorktreeIdentity): boolean => (['repositoryId', 'commonDir', 'canonicalRoot', 'gitDir', 'branch', 'physicalFingerprint'] as const).every(key => a[key] === b[key])
@@ -20,19 +20,21 @@ export function prepareApplyPlan(operation: SyncOperation, attempt: SyncAttempt,
   const candidate = attempt.candidate, verification = attempt.verification, commonDir = currentTarget.source.commonDir
   if (candidate.sourceInputId !== operation.input.id || verification.inputId !== operation.input.id || verification.candidateDigest !== candidate.digest || verification.policyDigest !== operation.policyDigest || verification.readSetDigest !== operation.readSetDigest || commonDir !== operation.input.source.commonDir) fail('SYNC_APPLY_BINDING', '验证、候选和原始来源绑定不一致')
   readEvidence(commonDir, verification.resultBlob)
+  if (attempt.publicationBase && (currentTarget.headCommit !== attempt.publicationBase.parentCommit || currentTarget.immutableTree !== attempt.publicationBase.parentTree || currentTarget.manifestBlob.sha256 !== attempt.publicationBase.parentManifestBlob.sha256)) fail('SYNC_PUBLICATION_BASE_BINDING', '实际目标不是当前尝试冻结的发布父树')
   const files = actualTreeDiff(verifySnapshot(currentTarget), verifyCandidate(commonDir, candidate))
   if (files.some(file => !pathCovered(file.path, verification.coveredScope.paths))) fail('SYNC_APPLY_SCOPE', '完整交付差量超出实际验证范围')
   validateSourceLinks(attempt, files, commonDir, currentTarget.source.canonicalRoot)
   const { capturedAtMs: _captureTime, ...targetFacts } = currentTarget
-  const payload: PlanPayload = { version: 1, operationId: operation.id, attemptId: attempt.id, inputId: operation.input.id, source: operation.input.source, currentTarget: targetFacts, candidateDigest: candidate.digest, verificationBlob: verification.resultBlob, expectedBaselinePairId: operation.previousBaselinePair?.id ?? null, coveredScope: verification.coveredScope, files }
+  const publication = { ...(operation.baselineSelection ? { expectedBaselineSelectionDigest: operation.baselineSelection.digest } : {}), ...(attempt.publicationBase ? { publicationBaseRef: attempt.publicationBase.provenanceBlob } : {}) }
+  const payload: PlanPayload = { version: 1, operationId: operation.id, attemptId: attempt.id, inputId: operation.input.id, source: operation.input.source, currentTarget: targetFacts, candidateDigest: candidate.digest, verificationBlob: verification.resultBlob, expectedBaselinePairId: operation.previousBaselinePair?.id ?? null, ...publication, coveredScope: verification.coveredScope, files }
   const payloadDigest = contentHash(JSON.stringify(payload)), effectKey = `sync-apply-${operation.id}-${attempt.id}-${payloadDigest}`
-  return { effectKey, payloadDigest, candidateDigest: candidate.digest, verificationBlob: verification.resultBlob, target: currentTarget.source, expectedTargetSnapshotId: currentTarget.id, expectedBaselinePairId: payload.expectedBaselinePairId, coveredScope: verification.coveredScope, files, planBlob: writeEvidence(commonDir, payload) }
+  return { effectKey, payloadDigest, candidateDigest: candidate.digest, verificationBlob: verification.resultBlob, target: currentTarget.source, expectedTargetSnapshotId: currentTarget.id, expectedBaselinePairId: payload.expectedBaselinePairId, ...publication, coveredScope: verification.coveredScope, files, planBlob: writeEvidence(commonDir, payload) }
 }
 function validateSourceLinks(attempt: SyncAttempt, files: ApplyFilePlan[], commonDir: string, root: string): Map<string, string> {
   const links = files.filter(file => file.postMode === '120000'), resolved = new Map<string, string>()
   if (!links.length) return resolved
   if (!attempt.composedInput || !attempt.candidate) fail('SYNC_APPLY_LINK_SOURCE', '链接缺失组合输入来源')
-  const source = new Map(readTree(commonDir, attempt.composedInput.tree).map(entry => [entry.path, entry]))
+  const source = new Map(readTree(commonDir, (attempt.publicationBase?.composed ?? attempt.composedInput).tree).map(entry => [entry.path, entry]))
   const candidate = new Map(verifyCandidate(commonDir, attempt.candidate).map(entry => [entry.path, entry]))
   const modelDiff = JSON.parse(readEvidence(commonDir, attempt.candidate.actualDiffBlob).toString()) as ApplyFilePlan[]
   for (const link of links) {

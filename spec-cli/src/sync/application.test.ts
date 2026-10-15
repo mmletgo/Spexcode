@@ -9,12 +9,14 @@ import { applyComponentMigrations, openProtocol, type SqlParam } from '@spexcode
 import { CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
 import { SYNC_COMPONENT, SYNC_MIGRATIONS, syncCoordinatorAddress } from './migrations.js'
 import { SyncApplication } from './application.js'
+import { prepareSpecBodyEdit } from '../spec-body-edit.js'
+import { prepareSyncAdmission } from './coordinator.js'
 import { buildSyncApplicationPlan } from './planning.js'
 import { captureInputSnapshot } from './snapshot.js'
 import { readSyncSettings, SyncApplicationError } from './settings.js'
 import type { SyncSettings } from './settings.js'
 import type { ContractCell, GeneratedTables } from './elaboration-markdown.js'
-import { sameContractBusinessMeaning } from './contract-evolution.js'
+import { contractBusinessProse, sameContractBusinessMeaning } from './contract-evolution.js'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
 import type { ElaborationSessionRequest } from './elaboration-types.js'
 import { sessionIdForCreateKey } from '../sessions.js'
@@ -22,16 +24,17 @@ import { contentHash, identifyWorktree, writeEvidence, readEvidence, readObject,
 import { claimFileMutex } from './file-mutex.js'
 import type { FileMutex } from './file-mutex.js'
 import { composeAuthoredInput } from './author-input.js'
-import { composeControlledRequest, renderControlledDecisionRaw } from './request-input.js'
+import { readCompositionEvidence } from './composition.js'
+import { composeControlledRequest, prepareControlledRequest, renderControlledDecisionRaw } from './request-input.js'
 import type { ApplyJournal, BaselinePair, VerificationResultBlob } from './operation-types.js'
 
 const settings: SyncSettings = {
-  version: 'sync-settings-v1', sourcePaths: ['src'], testPaths: ['tests'], readPaths: ['package.json'],
+  version: 'sync-settings-v1', nodeIds: ['demo'], sourcePaths: ['src'], testPaths: ['tests'], readPaths: ['package.json'],
   verifications: [{ definition: { id: 'VERIFY-DEMO-01', command: ['node', '--test', 'tests/demo.test.mjs'], cwd: '.', timeoutMs: 1000 }, environment: { version: 'v1', image: `node@sha256:${'a'.repeat(64)}`, platform: 'linux/arm64', memoryBytes: 100000000, cpus: 1, pidsLimit: 64, scratchBytes: 1000000, logBytes: 100000 } }],
   mandatoryTests: [], facts: [], budget: { maxAttempts: 2, maxCalls: 4, maxRepairs: 1, timeoutMs: 30000 },
 }
 const source = '---\ntitle: Demo\nstatus: pending\n---\n# Demo\n\n## raw source\n\n返回用户指定的文本。\n\n## expanded spec\n\n待细化。\n'
-async function fixture(config: unknown = settings) {
+async function fixture(config: unknown = settings, onRun?: (request: ElaborationSessionRequest) => Promise<never>) {
   const temp = mkdtempSync(join(tmpdir(), 'sync-application-')), root = join(temp, 'source')
   mkdirSync(join(root, '.spec', 'demo'), { recursive: true }); mkdirSync(join(root, 'src')); mkdirSync(join(root, 'tests'))
   writeFileSync(join(root, '.spec', 'demo', 'spec.md'), source)
@@ -43,7 +46,7 @@ async function fixture(config: unknown = settings) {
   git(['init', '-q', '-b', 'main']); git(['config', 'user.name', 'Test']); git(['config', 'user.email', 'test@example.invalid']); git(['add', '.']); git(['commit', '-qm', 'fixture'])
   const protocol = openProtocol(join(temp, 'sessions.sqlite'))
   const calls: ElaborationSessionRequest[] = []
-  const application = await SyncApplication.create(root, { protocol, runtimeDirectory: join(temp, 'runtime'), tools: { trustedRuntimeRoot: '/missing-runtime', toolEntry: '/missing-runtime/cli.js', canonicalHooksDir: '/missing-runtime/hooks' }, runner: async request => { calls.push(request); throw Object.assign(new Error('受控生成环境故障'), { code: 'unsupported' }) } })
+  const application = await SyncApplication.create(root, { protocol, runtimeDirectory: join(temp, 'runtime'), tools: { trustedRuntimeRoot: '/missing-runtime', toolEntry: '/missing-runtime/cli.js', canonicalHooksDir: '/missing-runtime/hooks' }, runner: async request => { calls.push(request); if (onRun) return onRun(request); throw Object.assign(new Error('受控生成环境故障'), { code: 'unsupported' }) } })
   return { temp, root, git, protocol, application, calls, cleanup: (): void => { protocol.close(); rmSync(temp, { recursive: true, force: true }) } }
 }
 
@@ -470,14 +473,27 @@ test('AC-APPLICATION-21 recover具体协调失败返回可见409，资源与原�
   } finally { f.cleanup() }
 })
 
-async function exportApplicationFixture(t: test.TestContext, choice?: 'keep_intent' | 'adopt_behavior' | 'new_rule', oraclePolicy: { legacyFilter: boolean; reviewConflict?: boolean } = { legacyFilter: false }) {
+async function exportApplicationFixture(t: test.TestContext, choice?: 'keep_intent' | 'adopt_behavior' | 'new_rule', oraclePolicy: { legacyFilter: boolean; reviewConflict?: boolean } = { legacyFilter: false }, independentNode = false) {
   const temp = mkdtempSync(join(tmpdir(), 'sync-application-delivery-')), root = join(temp, 'source')
   cpSync(new URL('../../test/fixtures/spec-sync/export-repo/', import.meta.url), root, { recursive: true })
   renameSync(join(root, '.spec/export'), join(root, '.spec/project'))
   const path = '.spec/project/export-contract/spec.md', original = readFileSync(join(root, path), 'utf8')
   const contract = parseContract({ nodeId: 'export-contract', path, source: original }).contract!
   const verify = contract.items.find(item => item.kind === 'VERIFY')!; assert.equal(verify.kind, 'VERIFY')
-  const config: SyncSettings = { ...settings, sourcePaths: ['src'], testPaths: ['generated-tests'], readPaths: ['tests', 'package.json'], budget: { maxAttempts: 3, maxCalls: 16, maxRepairs: 2, timeoutMs: 300000 }, facts: [{ source: 'decision:EXPORT-POLICY', text: original }], mandatoryTests: [{ verificationId: verify.id, testPath: 'tests/export.test.mjs', testId: 'AC-EXPORT-03' }], verifications: [{ definition: { id: verify.id, command: verify.command, cwd: verify.cwd, timeoutMs: verify.timeoutMs }, environment: { ...settings.verifications[0].environment, image: 'node@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392' } }] }
+  const config: SyncSettings = { ...settings, nodeIds: ['export-contract'], sourcePaths: ['src'], testPaths: ['generated-tests'], readPaths: ['tests', 'package.json'], budget: { maxAttempts: 3, maxCalls: 16, maxRepairs: 2, timeoutMs: 300000 }, facts: [{ source: 'decision:EXPORT-POLICY', text: original }], mandatoryTests: [{ verificationId: verify.id, testPath: 'tests/export.test.mjs', testId: 'AC-EXPORT-03' }], verifications: [{ definition: { id: verify.id, command: verify.command, cwd: verify.cwd, timeoutMs: verify.timeoutMs }, environment: { ...settings.verifications[0].environment, image: 'node@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392' } }] }
+  if (independentNode) {
+    const other = original.replaceAll('export-contract', 'other-contract').replaceAll('EXPORT', 'OTHER').replaceAll('src/export.js', 'src/other.js').replaceAll('tests/export.test.mjs', 'tests/other.test.mjs')
+    mkdirSync(join(root, '.spec/project/other-contract'))
+    writeFileSync(join(root, '.spec/project/other-contract/spec.md'), other)
+    cpSync(join(root, 'src/export.js'), join(root, 'src/other.js'))
+    writeFileSync(join(root, 'tests/other.test.mjs'), readFileSync(join(root, 'tests/export.test.mjs'), 'utf8').replaceAll('EXPORT', 'OTHER').replaceAll('../src/export.js', '../src/other.js'))
+    const otherContract = parseContract({ nodeId: 'other-contract', path: '.spec/project/other-contract/spec.md', source: other }).contract!
+    const otherVerify = otherContract.items.find(item => item.kind === 'VERIFY')!; assert.equal(otherVerify.kind, 'VERIFY')
+    config.nodeIds!.push('other-contract')
+    config.facts.push({ source: 'decision:OTHER-POLICY', text: other })
+    config.mandatoryTests.push({ verificationId: otherVerify.id, testPath: 'tests/other.test.mjs', testId: 'AC-OTHER-03' })
+    config.verifications.push({ definition: { id: otherVerify.id, command: otherVerify.command, cwd: otherVerify.cwd, timeoutMs: otherVerify.timeoutMs }, environment: config.verifications[0].environment })
+  }
   if (oraclePolicy.legacyFilter) {
     const oraclePath = join(root, 'tests/export.test.mjs')
     writeFileSync(oraclePath, `${readFileSync(oraclePath, 'utf8')}\ntest('ORACLE-FILTER-LEGACY', () => { const service = new ExportService(); for (const length of [9, 129]) assert.equal(service.submit('owner', 'legacy-' + length, 'x'.repeat(length)).filter.length, length); });\n`)
@@ -496,22 +512,59 @@ async function exportApplicationFixture(t: test.TestContext, choice?: 'keep_inte
   const originalCode = readFileSync(join(root, 'src/export.js'), 'utf8')
   const limitCode = (limit: number | null): string => originalCode.replace("!filter.trim())", `!filter.trim()${limit === null ? '' : ` || filter.length > ${limit}`})`)
   if (choice) writeFileSync(join(root, 'src/export.js'), limitCode(8))
-  t.after(() => {
+  t.after(async () => {
+    await application.stopService()
+    const evidenceRoot = process.env.SPEX_VERIFICATION_EVIDENCE_DIR
+    const evidence = evidenceRoot ? join(evidenceRoot, `application-${contentHash(temp).slice(0, 12)}`) : null
+    if (evidence) {
+      mkdirSync(evidence, { recursive: true, mode: 0o700 })
+      const identity = identifyWorktree(root)
+      const operations = application.store.listOperations(identity.repositoryId, { sourceRoot: identity.canonicalRoot })
+      writeFileSync(join(evidence, 'state.json'), JSON.stringify({ test: t.name, source: identity, observations: application.store.listObservations(identity), operations: operations.map(operation => ({ operation, attempts: application.store.listAttempts(operation.id), journals: application.store.listJournals(operation.id) })) }, null, 2))
+    }
     protocol.close()
+    if (evidence) {
+      cpSync(join(temp, 'canonical.sqlite'), join(evidence, 'canonical.sqlite'))
+      cpSync(join(root, '.git'), join(evidence, 'git'), { recursive: true })
+    }
     const unlock = (directory: string): void => { chmodSync(directory, 0o700); for (const entry of readdirSync(directory, { withFileTypes: true })) if (entry.isDirectory()) unlock(join(directory, entry.name)) }
     unlock(temp); rmSync(temp, { recursive: true, force: true })
   })
   application = await SyncApplication.create(root, { protocol, runtimeDirectory: join(temp, 'runtime'), runner: async request => {
     calls++; nativeRequests.push(request)
-    const operation = application.store.listOperations(identifyWorktree(root).repositoryId, { sourceRoot: identifyWorktree(root).canonicalRoot })[0]
-    const plan = JSON.parse(readEvidence(operation.input.source.commonDir, operation.planBlob!).toString('utf8')) as { facts: { source: string; text: string }[]; decisionAuthorities: { paths: string[] }[] }
-    const decisionFact = plan.facts.find(fact => fact.source.startsWith('decision:') && fact.source !== 'decision:EXPORT-POLICY')
+    const operation = application.store.listOperations(identifyWorktree(root).repositoryId, { sourceRoot: identifyWorktree(root).canonicalRoot }).find(operation => operation.currentAttemptId && application.store.readAttempt(operation.currentAttemptId).dispatchPlans.some(dispatch => dispatch.key === request.requestKey))!
+    const plan = JSON.parse(readEvidence(operation.input.source.commonDir, operation.planBlob!).toString('utf8')) as { intentNodeId: string; facts: { source: string; text: string }[]; decisionAuthorities: { paths: string[] }[] }
+    const otherNode = plan.intentNodeId === 'other-contract', codePath = otherNode ? 'src/other.js' : 'src/export.js'
+    const decisionFact = plan.facts.find(fact => fact.source.startsWith('decision:') && !fact.source.endsWith('-POLICY'))
     const limit = choice === 'keep_intent' ? null : choice === 'adopt_behavior' ? 8 : 128
     let output: unknown
     if (request.purpose === 'code_behavior_analyze') {
-      const frozen = JSON.parse(request.prompt.split('冻结三方输入:\n')[1]) as { changedPaths: string[] }
+      const frozen = JSON.parse(request.prompt.split('冻结三方输入:\n')[1]) as { changedPaths: string[]; oldSource: [string, string][]; newSource: [string, string][]; verifiedDelivery: [string, string][]; compositionEvidence: { conflicts: { path: string; delivery: { mode: '100644' | '100755' } | null }[] } | null }
       const paths = [...new Set([...frozen.changedPaths, ...(decisionFact ? plan.decisionAuthorities.flatMap(authority => authority.paths) : [])])]
-      output = { changes: paths.map(changed => ({ kind: decisionFact ? 'allowed_change' : 'conflict', paths: [changed], affectedIds: ['RULE-EXPORT-02', 'AC-EXPORT-02'], ruleIds: ['RULE-EXPORT-02'], originalIntent: 'key与非空字符串filter必需，未授权filter长度上限；幂等政策保持', previousBehavior: '9字符非空filter可提交', sourceBehavior: 'filter长度超过8字符拒绝，8字符可提交；原权限与幂等保持', deliveryBehavior: '非空filter无长度上限', evidence: `冻结src/export.js#ExportService.submit 的filter.length > 8与RULE-EXPORT-02、AC-EXPORT-02逐项对照；${decisionFact?.text ?? '无上限授权'}`, counterexample: 'filter=123456789：原意接受但现源码invalid-request' })), facts: decisionFact ? [decisionFact] : [], acceptanceChanges: decisionFact && choice !== 'keep_intent' ? [{ id: 'AC-EXPORT-02', ruleIds: ['RULE-EXPORT-02'], source: decisionFact.source, reason: `仅按所选裁决增加filter${limit}字符边界，保空输入、权限、幂等与结果义务` }] : [], newNodes: [], resolutions: [] }
+      output = { changes: paths.map(changed => changed === codePath ? ({ kind: decisionFact ? 'allowed_change' : 'conflict', paths: [changed], affectedIds: ['RULE-EXPORT-02', 'AC-EXPORT-02'], ruleIds: ['RULE-EXPORT-02'], originalIntent: 'key与非空字符串filter必需，未授权filter长度上限；幂等政策保持', previousBehavior: '9字符非空filter可提交', sourceBehavior: 'filter长度超过8字符拒绝，8字符可提交；原权限与幂等保持', deliveryBehavior: '非空filter无长度上限', evidence: `冻结src/export.js#ExportService.submit 的filter.length > 8与RULE-EXPORT-02、AC-EXPORT-02逐项对照；${decisionFact?.text ?? '无上限授权'}`, counterexample: 'filter=123456789：原意接受但现源码invalid-request' }) : ({ kind: 'refactor', paths: [changed], affectedIds: [], ruleIds: [], originalIntent: '原业务契约与可信测试不变', previousBehavior: '原完整导出行为', sourceBehavior: '治理文本与上下文无新增业务变化', deliveryBehavior: '原业务义务保持', evidence: `已完整读取${changed}，长度边界冲突仅在${codePath}`, counterexample: '固定oracle验证原权限、幂等与状态转换' })), facts: decisionFact ? [decisionFact] : [], acceptanceChanges: decisionFact && choice !== 'keep_intent' ? [{ id: 'AC-EXPORT-02', ruleIds: ['RULE-EXPORT-02'], source: decisionFact.source, reason: `仅按所选裁决增加filter${limit}字符边界，保空输入、权限、幂等与结果义务` }] : [], newNodes: [], resolutions: [] }
+      if (independentNode || !choice) output = { changes: paths.map(changed => ({ kind: 'refactor', paths: [changed], affectedIds: [], ruleIds: [], originalIntent: '固定导出规则与验收保持', previousBehavior: '固定ExportService完整行为', sourceBehavior: '仅添加测试指定注释，不改变业务执行', deliveryBehavior: '原完整业务与已生成注释保持', evidence: `真实冻结${changed}的业务语句保持，新增仅注释`, counterexample: '固定可信oracle仍验证权限、幂等和全部状态转换' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+      if (decisionFact) (output as { resolutions: unknown[] }).resolutions = (frozen.compositionEvidence?.conflicts ?? []).map(conflict => {
+        const current = new Map(frozen.newSource).get(conflict.path)!, before = new Map(frozen.oldSource).get(conflict.path)!, delivery = new Map(frozen.verifiedDelivery).get(conflict.path)!
+        assert.equal(current, before, '只有真实冻结作者字节未变才沿用完整partial交付，不能盲选覆盖新作者输入')
+        assert.ok(delivery && conflict.delivery)
+        if (conflict.path.endsWith('/spec.md')) {
+          const sourceContract = parseContract({ nodeId: 'export-contract', path: conflict.path, source: current }).contract!
+          const deliveryContract = parseContract({ nodeId: 'export-contract', path: conflict.path, source: delivery }).contract!
+          assert.equal(parseParts(current)!.rawSource, parseParts(delivery)!.rawSource)
+          assert.equal(contractBusinessProse(sourceContract.expandedSpec), contractBusinessProse(deliveryContract.expandedSpec))
+          assert.deepEqual(sourceContract.items.map(item => item.id).sort(), deliveryContract.items.map(item => item.id).sort())
+          for (const item of sourceContract.items) assert.ok(sameContractBusinessMeaning(item, deliveryContract.items.find(value => value.id === item.id)!))
+        }
+        return { path: conflict.path, content: delivery, mode: conflict.delivery.mode }
+      })
+      if (independentNode) (output as { resolutions: unknown[] }).resolutions = (frozen.compositionEvidence?.conflicts ?? []).map(conflict => {
+        const current = new Map(frozen.newSource).get(conflict.path)!, before = new Map(frozen.oldSource).get(conflict.path)!, delivery = new Map(frozen.verifiedDelivery).get(conflict.path)!
+        assert.equal(conflict.path, codePath)
+        assert.equal(current, `// human offline ${codePath}\n${before}`, '补偿只整合夹具明确新增的作者注释，保留完整原代码')
+        assert.equal(delivery, `${before}\n// application verified delivery\n`, '已交付完整正文只有受审生成注释，不猜测业务整合')
+        assert.ok(conflict.delivery)
+        return { path: conflict.path, content: `${current}\n// application verified delivery\n`, mode: conflict.delivery.mode }
+      })
     } else if (request.purpose === 'code_behavior_review') {
       const frozen = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as { changedPaths: string[] }
       const value = JSON.parse(request.prompt.split('待审分析:\n')[1]) as { analysisDigest: string; analysis: { changes: { id: string; paths: string[] }[] } }
@@ -532,13 +585,13 @@ async function exportApplicationFixture(t: test.TestContext, choice?: 'keep_inte
         tables.AC!.push({ id: 'AC-DECISION-01', covers: ['RULE-EXPORT-01', 'RULE-EXPORT-02'], preconditions: '无任务与成功任务', action: '检验filter边界、空输入、幂等及非所有者下载', assertion: limit === null ? '8、9、128、129字符均接受；空输入拒绝、幂等与权限保持' : `${limit}字符接受，${limit + 1}字符拒绝；空输入拒绝、幂等与权限保持`, test: 'generated-tests/decision.test.mjs#AC-DECISION-01', command: 'VERIFY-DECISION-01', source: 'derived:RULE-EXPORT-02', 'depends-on': ['RULE-EXPORT-01', 'RULE-EXPORT-02'] })
         tables.VERIFY!.push({ id: 'VERIFY-DECISION-01', command: ['node', '--test', 'generated-tests/decision.test.mjs'], cwd: '.', 'timeout-ms': 10000 })
       }
-      output = { version: 'elaboration-rows-v2', changes: [{ nodeId: 'export-contract', path, title: String(parseFrontmatter(original).fm.title), description: '', code: contract.code, related: contract.related, prose: parseParts(original)!.expandedSpec.split(/^### /m)[0], tables, removeIds: [] }], applicability: ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: true, basis: '固定业务政策', affectedIds: ['REQ-EXPORT-01'] })) }
+      output = { version: 'elaboration-rows-v2', changes: [{ nodeId: 'export-contract', path, title: String(parseFrontmatter(original).fm.title), description: '', code: contract.code, related: contract.related, prose: contractBusinessProse(parseParts(original)!.expandedSpec), tables, removeIds: [] }], applicability: ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: true, basis: '固定业务政策', affectedIds: ['REQ-EXPORT-01'] })) }
     } else if (request.purpose === 'elaboration_review') output = { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
     else {
       const frozen = JSON.parse(request.prompt.split(request.purpose === 'code_generate' ? '冻结完整输入:\n' : '冻结原意和基线完整输入:\n')[1].split('\n实际候选身份')[0]) as { files: [string, string][]; readyIds: string[]; elaboratedSpecs: { path: string; source: string }[]; manifest: { entries: { path: string; digest: string; mode: string }[] } }
       if (request.purpose === 'code_generate') {
         const change = (path: string, content: string): unknown => { const entry = frozen.manifest.entries.find(entry => entry.path === path); return { path, beforeDigest: entry?.digest ?? null, beforeMode: entry?.mode ?? null, content, mode: null } }
-        output = { version: 'sync-files-v1', changes: [...frozen.elaboratedSpecs.map(spec => change(spec.path, spec.source)), change('src/export.js', choice && decisionFact ? limitCode(limit) : `${new Map(frozen.files).get('src/export.js')}\n// application verified delivery\n`), ...(choice && decisionFact ? [change('generated-tests/decision.test.mjs', `import assert from 'node:assert/strict'; import test from 'node:test'; import { ExportService } from '../src/export.js'; test('AC-DECISION-01', () => { const service = new ExportService(); const limit = ${limit}; for (const length of [8,9,128,129]) { const submit = () => service.submit('owner', 'length-' + length, 'x'.repeat(length)); if (limit !== null && length > limit) assert.throws(submit, /invalid-request/); else assert.equal(submit().filter.length, length); } assert.throws(() => service.submit('owner', 'empty', ''), /invalid-request/); assert.throws(() => service.submit('', 'denied', 'active'), /forbidden/); const job = service.submit('owner', 'same', 'active'); assert.deepEqual(service.submit('owner', 'same', 'active'), job); assert.throws(() => service.submit('owner', 'same', 'all'), /idempotency-conflict/); service.dispatch(job.id, 'START', { attempt: 1 }); service.dispatch(job.id, 'COMPLETE', { attempt: 1, result: 'file.csv' }); assert.throws(() => service.dispatch(job.id, 'DOWNLOAD', { actor: 'other' }), /forbidden/); assert.equal(service.dispatch(job.id, 'DOWNLOAD', { actor: 'owner' }), 'file.csv'); });\n`)] : [])] }
+        output = { version: 'sync-files-v1', changes: [...frozen.elaboratedSpecs.map(spec => change(spec.path, spec.source)), change(codePath, choice && decisionFact ? limitCode(limit) : `${new Map(frozen.files).get(codePath)}\n// application verified delivery\n`), ...(choice && decisionFact ? [change('generated-tests/decision.test.mjs', `import assert from 'node:assert/strict'; import test from 'node:test'; import { ExportService } from '../src/export.js'; test('AC-DECISION-01', () => { const service = new ExportService(); const limit = ${limit}; for (const length of [8,9,128,129]) { const submit = () => service.submit('owner', 'length-' + length, 'x'.repeat(length)); if (limit !== null && length > limit) assert.throws(submit, /invalid-request/); else assert.equal(submit().filter.length, length); } assert.throws(() => service.submit('owner', 'empty', ''), /invalid-request/); assert.throws(() => service.submit('', 'denied', 'active'), /forbidden/); const job = service.submit('owner', 'same', 'active'); assert.deepEqual(service.submit('owner', 'same', 'active'), job); assert.throws(() => service.submit('owner', 'same', 'all'), /idempotency-conflict/); service.dispatch(job.id, 'START', { attempt: 1 }); service.dispatch(job.id, 'COMPLETE', { attempt: 1, result: 'file.csv' }); assert.throws(() => service.dispatch(job.id, 'DOWNLOAD', { actor: 'other' }), /forbidden/); assert.equal(service.dispatch(job.id, 'DOWNLOAD', { actor: 'owner' }), 'file.csv'); });\n`)] : [])] }
       } else {
         const identity = JSON.parse(request.prompt.split('实际候选身份与 manifest:\n')[1].split('\n实际完整候选')[0]) as { inputId: string; candidate: { digest: string } }
         output = oraclePolicy.reviewConflict && decisionFact && choice !== 'keep_intent'
@@ -546,6 +599,7 @@ async function exportApplicationFixture(t: test.TestContext, choice?: 'keep_inte
           : { inputId: identity.inputId, candidateDigest: identity.candidate.digest, verdict: 'accept', checkedIds: frozen.readyIds, findings: [] }
       }
     }
+    if (otherNode && request.purpose === 'elaboration_generate') output = JSON.parse(JSON.stringify(output).replaceAll('EXPORT', 'OTHER').replaceAll('export-contract', 'other-contract').replaceAll('src/export.js', 'src/other.js').replaceAll('tests/export.test.mjs', 'tests/other.test.mjs')) as unknown
     const dispatch = application.store.readAttempt(operation.currentAttemptId!).dispatchPlans.find(plan => plan.key === request.requestKey)!
     return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `independent-${request.requestKey}`, turnId: 'turn-1', output, resultDigest: contentHash(JSON.stringify(output)) }
   } })
@@ -594,6 +648,11 @@ for (const choice of ['keep_intent', 'adopt_behavior', 'new_rule'] as const) tes
     const conflicted = await f.application.wait(submitted.operation.id)
     assert.equal(conflicted.operation.phase, 'conflicted', JSON.stringify(conflicted.attempt?.failure))
     assert.ok(conflicted.decisionContext); assert.equal(conflicted.decisionContext.analysis.reviewPassed, true)
+    assert.ok(conflicted.operation.baselineSelection, 'fresh code入口必须为真实P4 exact操作')
+    assert.ok(conflicted.journals.some(journal => journal.status === 'settled' && journal.receipt), '未冲突部分必须已真实交付，不能只伪造partial heads')
+    const settled = f.application.store.readBaselineSelection(conflicted.operation.input.source, conflicted.operation.baselineSelection.bindings.map(binding => binding.resource))
+    assert.ok('selection' in settled)
+    assert.notEqual(settled.selection.digest, conflicted.operation.baselineSelection.digest)
     const { analysisRef, analysis } = conflicted.decisionContext
     assert.equal(analysis.findings.length, 1)
     const finding = analysis.findings[0]
@@ -601,8 +660,12 @@ for (const choice of ['keep_intent', 'adopt_behavior', 'new_rule'] as const) tes
     assert.deepEqual(f.nativeRequests.slice(0, 2).map(request => request.purpose), ['code_behavior_analyze', 'code_behavior_review'])
     const priorCalls = f.calls()
     const request = { operationId: submitted.operation.id, inputId: submitted.operation.input.id, analysisRef, findingIds: [finding.id], requestId: `decide-${choice}`, decision: choice === 'new_rule' ? { choice, rule: 'filter长度不得超过128字符；非空输入、所有者权限、幂等及其他原需求保持有效。' } : { choice } }
-    const decision = await f.application.decide(request), delivered = await f.application.wait(decision.operation.id)
-    assert.equal(delivered.operation.phase, 'workspace_synced', JSON.stringify(delivered.attempt?.failure))
+    const decision = await f.application.decide(request)
+    assert.equal(decision.operation.input.id, conflicted.operation.input.id)
+    assert.equal(decision.operation.baselineSelection?.digest, settled.selection.digest, '新decision沿同资源已实际结算heads，原analysis/input不变')
+    assert.deepEqual(decision.operation.scope, conflicted.operation.scope)
+    const delivered = await f.application.wait(decision.operation.id)
+    assert.equal(delivered.operation.phase, 'workspace_synced', JSON.stringify({ failure: delivered.attempt?.failure, blockedReason: delivered.operation.blockedReason, journals: delivered.journals }))
     assert.equal(delivered.attempt!.verification!.passed, true)
     const proof = JSON.parse(readEvidence(before.source.commonDir, delivered.attempt!.verification!.resultBlob).toString('utf8')) as VerificationResultBlob
     assert.deepEqual(proof.layers.map(layer => [layer.layer, layer.verdict]), [['V1', 'pass'], ['V2', 'pass'], ['V3', 'pass'], ['V4', 'pass']])
@@ -624,6 +687,9 @@ for (const choice of ['keep_intent', 'adopt_behavior', 'new_rule'] as const) tes
     assert.equal(delivered.operation.callsUsed, 6); assert.equal(f.calls(), priorCalls + 6)
     const calls = f.calls(), commits = f.git(['rev-list', '--count', delivered.operation.deliveryPlan.branch])
     assert.equal((await f.application.decide(request)).operation.id, decision.operation.id)
+    const alias = await f.application.decide({ ...request, requestId: `${request.requestId}-transport-after-receipt` })
+    assert.equal(alias.operation.id, decision.operation.id)
+    assert.equal(alias.operation.deadlineAtMs, decision.operation.deadlineAtMs)
     assert.deepEqual((await f.application.wait(decision.operation.id)).journals, delivered.journals)
     assert.equal(f.calls(), calls); assert.equal(f.git(['rev-list', '--count', delivered.operation.deliveryPlan.branch]), commits)
 })
@@ -633,7 +699,7 @@ test('AC-APPLICATION-06 应用真实Docker及compiled hooks完整交付，comple
   const before = await captureInputSnapshot(root), request = { nodeId: 'export-contract', requestId: 'complete-replay', origin: 'initial' as const }
   const admitted = await application.submit(request); assert.ok(admitted.operation)
   const delivered = await application.wait(admitted.operation.id)
-  assert.equal(delivered.operation.phase, 'workspace_synced', JSON.stringify(delivered.attempt?.failure))
+  assert.equal(delivered.operation.phase, 'workspace_synced', JSON.stringify({ failure: delivered.attempt?.failure, blockedReason: delivered.operation.blockedReason, journals: delivered.journals }))
   assert.ok(delivered.journals[0]?.receipt)
   assert.equal(delivered.sourceSynced, false); assert.equal(delivered.stale, false)
   assert.match(readFileSync(join(delivered.operation.deliveryPlan.canonicalRoot, 'src/export.js'), 'utf8'), /application verified delivery/)
@@ -725,10 +791,14 @@ test('AC-APPLICATION-P3 code/combined手动接入与可信裁决冻结，旧原�
       assert.equal(code.origin, 'code')
       const first = (await f.application.submit({ nodeId: 'demo', requestId: 'combined-input', origin: 'combined' })).operation!
       assert.equal(first.origin, 'combined')
-      const claimed = f.application.store.claimAttempt({ operationId: first.id, source: first.input.source, scope: first.scope, leaseMs: 60000 })
-      const analysis = { version: 'code-behavior-v1', inputId: first.input.id, baselinePairId: null, composedDigest: 'composed', readSetDigest: first.readSetDigest, policyDigest: first.policyDigest, inputDigest: first.input.contentDigest, reviewPassed: true, changes: [], findings: [{ id: 'conflict-1', kind: 'conflict', ruleIds: ['RULE-DEMO-01'], affectedIds: ['REQ-DEMO-1'], paths: ['src/demo.mjs'], originalIntent: '返回用户指定的文本。', sourceBehavior: '返回大写文本。', deliveryBehavior: '保留原文本。', counterexample: 'a → A', evidence: 'src/demo.mjs', decision: '是否允许改变大小写？' }, { id: 'gap-2', kind: 'coverage_gap', ruleIds: [], affectedIds: ['REQ-OTHER-1'], paths: ['src/other.mjs'], originalIntent: '独立规则', sourceBehavior: '未知规则', deliveryBehavior: '', counterexample: '', evidence: '', decision: '另一项事实' }], facts: [], authorizedChanges: [], nodeChanges: [], newNodes: [], resolutions: [], traces: [] }
+      f.application.store.ackDispatch(first.input.source.repositoryId, code.dispatchMessageId)
+      const acknowledged = f.application.store.ackDispatch(first.input.source.repositoryId, first.dispatchMessageId)
+      const claimed = f.application.store.claimQueuedAttempt({ operationId: first.id, source: first.input.source, scope: first.scope, leaseMs: 60000, expectedRevision: acknowledged.revision })
+      const composed = composeAuthoredInput(first.input, first.baselineSelection!, { executionPaths: first.scope.paths, contextPaths: f.application['operationPlan'](first).readPaths }).composed!
+      f.application.store.bindComposedInput(claimed.fence, composed)
+      const analysis = { version: 'code-behavior-v1', inputId: first.input.id, baselinePairId: null, composedDigest: composed.contentDigest, baselineSelectionDigest: first.baselineSelection!.digest, readSetDigest: first.readSetDigest, policyDigest: first.policyDigest, inputDigest: first.input.contentDigest, reviewPassed: true, changes: [], findings: [{ id: 'conflict-1', kind: 'conflict', ruleIds: ['RULE-DEMO-01'], affectedIds: ['REQ-DEMO-1'], paths: ['src/demo.mjs'], originalIntent: '返回用户指定的文本。', sourceBehavior: '返回大写文本。', deliveryBehavior: '保留原文本。', counterexample: 'a → A', evidence: 'src/demo.mjs', decision: '是否允许改变大小写？' }, { id: 'gap-2', kind: 'coverage_gap', ruleIds: [], affectedIds: ['REQ-OTHER-1'], paths: ['src/other.mjs'], originalIntent: '独立规则', sourceBehavior: '未知规则', deliveryBehavior: '', counterexample: '', evidence: '', decision: '另一项事实' }], facts: [], authorizedChanges: [], nodeChanges: [], newNodes: [], resolutions: [], traces: [] }
       const analysisRef = writeEvidence(first.input.source.commonDir, analysis)
-      const stageRef = writeEvidence(first.input.source.commonDir, { version: 'sync-stage-v1', operationId: first.id, attemptId: claimed.attempt.id, inputId: first.input.id, policyDigest: first.policyDigest, stage: 'analysis', resultRef: analysisRef })
+      const stageRef = writeEvidence(first.input.source.commonDir, { version: 'sync-stage-v1', operationId: first.id, attemptId: claimed.attempt.id, inputId: first.input.id, policyDigest: first.policyDigest, readSetDigest: first.readSetDigest, baselineSelectionRef: writeEvidence(first.input.source.commonDir, first.baselineSelection!), stage: 'analysis', resultRef: analysisRef })
       f.application.store.checkpoint(claimed.fence, analysisRef)
       f.application.store.checkpoint(claimed.fence, stageRef)
       f.application.store.recordFailure(claimed.fence, { code: 'business_conflict', message: '有具体业务分歧', kind: 'conflict', evidenceRefs: [analysisRef] })
@@ -786,7 +856,13 @@ test('AC-APPLICATION-P3-PARTIAL 剩余裁决保留最新交付raw及原受控正
     const authored = source.replace('返回用户指定的文本。', '返回用户指定的文本。\n\n未选义务：保持隔离。\n\n待修改事实：原文字节。')
     writeFileSync(join(f.root, path), authored)
     await f.application.enable(); f.application.start = () => {}
-    const original = (await f.application.submit({ nodeId: 'demo', requestId: 'partial-original', origin: 'combined', patch: { startLine: 9, endLine: 9, original: '待修改事实：原文字节。', replacement: '待修改事实：必须保留本次作者输入。' } })).operation!
+    const snapshot = await captureInputSnapshot(f.root)
+    const prepared = await prepareSpecBodyEdit(f.root, 'demo', { startLine: 9, endLine: 9, original: '待修改事实：原文字节。', replacement: '待修改事实：必须保留本次作者输入。' })
+    const request = prepareControlledRequest(snapshot, prepared, { kind: 'user_edit', requestId: 'legacy-partial-original', nodeId: 'demo', intent: '保留尚未落地的正文意图' })
+    const admission = await prepareSyncAdmission(snapshot, await buildSyncApplicationPlan(snapshot, 'demo'), { ingressKey: 'legacy-partial-original', rootCauseId: 'legacy-partial-original', origin: 'combined', budget: settings.budget, managedRoot: f.application['managedRoot'], requestBlob: request.requestBlob! })
+    f.application['prepareTools'](admission.ingressKey, null)
+    const original = f.application.store.admitAndEnqueue(admission)
+    assert.equal(original.baselineSelection, undefined, '本case保留明确P3历史入口，不将legacy pair伪装成P4 heads')
     const claim = f.application.store.claimAttempt({ operationId: original.id, source: original.input.source, scope: original.scope, leaseMs: 60000 })
     const composed = composeControlledRequest(original.input, composeAuthoredInput(original.input).composed!, original.requestBlob!).composed!
     f.application.store.bindComposedInput(claim.fence, composed)
@@ -827,4 +903,336 @@ test('AC-APPLICATION-P3-PARTIAL 剩余裁决保留最新交付raw及原受控正
     assert.equal(readFileSync(join(f.root, path), 'utf8'), authored)
   } finally { f.cleanup() }
   })
+})
+
+async function observeUntil(predicate: () => boolean, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!predicate()) { assert.ok(Date.now() < deadline, '后台同步观察超时'); await new Promise(resolve => setTimeout(resolve, 10)) }
+}
+test('AC-APPLICATION-P4-01 无浏览器暂停仍记录保存，恢复最新输入且重复失败不重开调用', async () => {
+  const f = await fixture()
+  try {
+    await f.application.enable()
+    await f.application.automaticControl('pause')
+    await f.application.startService({ compensationMs: 40, debounceMs: 5 })
+    const initial = f.application.observationStatus().latestSnapshot!.id
+    writeFileSync(join(f.root, 'src/demo.mjs'), 'export const demo = text => `${text}!`\n')
+    await observeUntil(() => f.application.observationStatus().latestSnapshot?.id !== initial)
+    assert.equal(f.calls.length, 0)
+    assert.equal(f.application.observationStatus().control.control, 'pause')
+    assert.equal(f.application.observationStatus().latest?.operationId, null)
+    await f.application.automaticControl('resume')
+    await observeUntil(() => f.calls.length === 1)
+    const operations = (await f.application.status()).operations
+    assert.equal(operations.length, 1)
+    const detail = await f.application.wait(operations[0].operation.id)
+    assert.equal(detail.operation.input.id, f.application.observationStatus().latestSnapshot!.id)
+    await new Promise(resolve => setTimeout(resolve, 100))
+    assert.equal(f.calls.length, 1)
+    assert.equal((await f.application.status()).operations.length, 1)
+  } finally { await f.application.stopService(); f.cleanup() }
+})
+test('AC-APPLICATION-P4-02 停机修改及外部Git提交启动补偿，离线状态不冒充监听在线', async () => {
+  const f = await fixture()
+  try {
+    await f.application.enable(); await f.application.automaticControl('pause')
+    await f.application.startService({ compensationMs: 40, debounceMs: 5 })
+    const first = f.application.observationStatus().latestSnapshot!.id
+    await f.application.stopService()
+    assert.equal(f.application.observationStatus().health.watchOnline, false)
+    writeFileSync(join(f.root, 'src/demo.mjs'), 'export const demo = text => `offline:${text}`\n')
+    f.git(['add', 'src/demo.mjs']); f.git(['commit', '-qm', 'external offline commit'])
+    await f.application.startService({ compensationMs: 40, debounceMs: 5 })
+    assert.notEqual(f.application.observationStatus().latestSnapshot!.id, first)
+    assert.equal(f.application.observationStatus().latestSnapshot!.headCommit, f.git(['rev-parse', 'HEAD']).trim())
+    assert.equal(f.calls.length, 0)
+  } finally { await f.application.stopService(); f.cleanup() }
+})
+test('AC-APPLICATION-P4-03 分支切换撤旧授权且物理暂停跨分支保留，显式重新启用才观察', async () => {
+  const f = await fixture()
+  try {
+    await f.application.enable(); await f.application.automaticControl('pause')
+    await f.application.startService({ compensationMs: 30, debounceMs: 5 })
+    f.git(['switch', '-qc', 'new-branch'])
+    await observeUntil(() => f.application.observationStatus().latestSnapshot?.source.branch.endsWith('new-branch') === true)
+    assert.equal((await f.application.readSettings()).activation, 'invalidated')
+    assert.equal(f.application.observationStatus().control.control, 'pause')
+    assert.equal(f.calls.length, 0)
+    await f.application.enable()
+    assert.equal((await f.application.readSettings()).activation, 'enabled')
+    assert.equal(f.application.observationStatus().latest?.input.source.branch.endsWith('new-branch'), true)
+    assert.equal(f.calls.length, 0)
+  } finally { await f.application.stopService(); f.cleanup() }
+})
+
+test('AC-APPLICATION-P4-04 nodeIds仅注册明确意图子树，新增raw纳入且无关节点未授权', async () => {
+  const f = await fixture()
+  try {
+    mkdirSync(join(f.root, '.spec/demo/child'), { recursive: true }); writeFileSync(join(f.root, '.spec/demo/child/spec.md'), source.replace('Demo', 'Child'))
+    mkdirSync(join(f.root, '.spec/other'), { recursive: true }); writeFileSync(join(f.root, '.spec/other/spec.md'), source.replace('Demo', 'Other'))
+    await f.application.enable(); await f.application.automaticControl('pause')
+    await f.application.startService({ compensationMs: 10000, debounceMs: 5 })
+    assert.deepEqual(f.application.observationStatus().registeredNodes, ['demo'])
+    assert.deepEqual(f.application.observationStatus().coverage.includedNodeIds.sort(), ['child', 'demo'])
+    assert.deepEqual(f.application.observationStatus().coverage.excludedNodeIds, ['other'])
+    await assert.rejects(f.application.submit({ nodeId: 'other', requestId: 'unauthorized' }), /未在 sync.nodeIds 授权/)
+    mkdirSync(join(f.root, '.spec/demo/new-raw'), { recursive: true }); writeFileSync(join(f.root, '.spec/demo/new-raw/spec.md'), source.replace('Demo', 'New'))
+    await observeUntil(() => f.application.observationStatus().coverage.includedNodeIds.includes('new-raw'))
+    assert.equal(f.application.observationStatus().registeredNodes.length, 1)
+    assert.equal(f.calls.length, 0)
+  } finally { await f.application.stopService(); f.cleanup() }
+})
+test('AC-APPLICATION-P4-05 缺省node作用域只含真实治理授权源码，纯raw需要明确注册', async () => {
+  const f = await fixture({ ...settings, nodeIds: undefined })
+  try {
+    await assert.rejects(f.application.enable(), /sync.nodeIds 明确登记/)
+    writeFileSync(join(f.root, '.spec/demo/spec.md'), source.replace('status: pending', 'status: pending\ncode:\n  - src/demo.mjs'))
+    mkdirSync(join(f.root, '.spec/other'), { recursive: true }); writeFileSync(join(f.root, '.spec/other/spec.md'), source.replace('status: pending', 'status: pending\ncode:\n  - private/other.mjs'))
+    await f.application.enable(); await f.application.automaticControl('pause')
+    await f.application.startService({ compensationMs: 10000 })
+    assert.deepEqual(f.application.observationStatus().registeredNodes, ['demo'])
+    assert.deepEqual(f.application.observationStatus().coverage.excludedNodeIds, ['other'])
+  } finally { await f.application.stopService(); f.cleanup() }
+})
+
+test('AC-APPLICATION-P4-06 持久健康和最后差异可查询，缺失重建不会伪造快照或沿旧授权继续', async () => {
+  const f = await fixture(), saved = join(f.temp, 'original-source')
+  try {
+    await f.application.enable(); await f.application.automaticControl('pause')
+    await f.application.startService({ compensationMs: 40, debounceMs: 5 })
+    const first = f.application.observationStatus()
+    assert.equal(first.health.watchOnline, true)
+    assert.equal(first.persistedHealth?.status, 'watching')
+    assert.ok(first.latestDifference)
+    const snapshotId = first.latestSnapshot!.id
+    renameSync(f.root, saved)
+    await observeUntil(() => f.application.observationStatus().health.status === 'missing')
+    assert.equal(f.application.observationStatus().latestSnapshot!.id, snapshotId)
+    assert.equal((await f.application.status()).settings.configurationError?.code, 'sync_source_missing')
+    mkdirSync(f.root); f.git(['init', '-q', '-b', 'main'])
+    await observeUntil(() => f.application.observationStatus().health.status === 'degraded')
+    assert.ok(f.application.observationStatus().health.reason?.message)
+    assert.equal(f.application.observationStatus().latestSnapshot!.id, snapshotId)
+    assert.equal(f.application.observationStatus().health.watchOnline, false)
+    assert.equal(f.calls.length, 0)
+    await f.application.stopService()
+    assert.equal(f.application.observationStatus().persistedHealth?.status, 'stopped')
+    assert.equal(f.application.observationStatus().health.watchOnline, false)
+  } finally { await f.application.stopService(); rmSync(saved, { recursive: true, force: true }); f.cleanup() }
+})
+
+test('AC-APPLICATION-P4-07 重新授权撤销旧意图，删除已注册根保留缺失范围与明确失败', async () => {
+  const f = await fixture()
+  try {
+    mkdirSync(join(f.root, '.spec/other'), { recursive: true }); writeFileSync(join(f.root, '.spec/other/spec.md'), source.replace('Demo', 'Other'))
+    await f.application.enable(); await f.application.automaticControl('pause')
+    await f.application.startService({ compensationMs: 10000, debounceMs: 5 })
+    assert.deepEqual(f.application.observationStatus().registeredNodes, ['demo'])
+    writeFileSync(join(f.root, '.spec/spexcode.json'), JSON.stringify({ sync: { ...settings, nodeIds: ['other'] } }))
+    await f.application.enable()
+    assert.deepEqual(f.application.observationStatus().registeredNodes, ['other'])
+    await assert.rejects(f.application.submit({ nodeId: 'demo', requestId: 'revoked' }), /未在 sync.nodeIds 授权/)
+    rmSync(join(f.root, '.spec/other/spec.md'))
+    await observeUntil(() => f.application.observationStatus().coverage.missingNodeIds.includes('other'))
+    await observeUntil(() => f.application.observationStatus().latest?.failure?.code === 'sync_node_unknown')
+    assert.deepEqual(f.application.observationStatus().registeredNodes, ['other'])
+    assert.equal(f.calls.length, 0)
+  } finally { await f.application.stopService(); f.cleanup() }
+})
+
+
+test('AC-APPLICATION-P4-08 无浏览器真实Docker自动交付，补偿及scope外编辑不形成回声重跑', { skip: process.env.SPEX_DOCKER_VERIFICATION_TEST !== '1', timeout: 600000 }, async t => {
+  const f = await exportApplicationFixture(t)
+  t.after(() => f.application.stopService())
+  writeFileSync(join(f.root, 'src/export.js'), `${f.originalCode}\n// human save before background startup\n`)
+  const source = await captureInputSnapshot(f.root), index = readFileSync(join(f.root, '.git/index')), head = f.git(['rev-parse', 'HEAD'])
+  await f.application.startService({ compensationMs: 10000, debounceMs: 5 })
+  const admitted = (await f.application.status()).operations[0]?.operation
+  assert.ok(admitted, '正式service启动扫描必须建立自动操作')
+  const delivered = await f.application.wait(admitted.id)
+  assert.equal(delivered.operation.phase, 'workspace_synced', JSON.stringify({ failure: delivered.attempt?.failure, blockedReason: delivered.operation.blockedReason, journals: delivered.journals }))
+  assert.ok(delivered.journals[0]?.receipt)
+  assert.match(readFileSync(join(delivered.operation.deliveryPlan.canonicalRoot, 'src/export.js'), 'utf8'), /human save before background startup/)
+  assert.match(readFileSync(join(delivered.operation.deliveryPlan.canonicalRoot, 'src/export.js'), 'utf8'), /application verified delivery/)
+  assert.equal((await captureInputSnapshot(f.root)).id, source.id)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), index); assert.equal(f.git(['rev-parse', 'HEAD']), head)
+  const count = f.calls()
+  writeFileSync(join(f.root, 'unrelated.txt'), 'scope外真实作者编辑\n')
+  await observeUntil(() => f.application.observationStatus().latestSnapshot?.id !== source.id, 30000)
+  assert.equal((await f.application.readOperation(admitted.id)).stale, false)
+  await new Promise(resolve => setTimeout(resolve, 300))
+  assert.equal(f.calls(), count)
+  assert.equal((await f.application.status()).operations.length, 1)
+})
+
+test('AC-APPLICATION-P4-09 scope外变化不使查询重放重试过期，相关编辑仍明确拒绝', async () => {
+  const f = await fixture()
+  try {
+    await f.application.enable()
+    const request = { nodeId: 'demo', requestId: 'scoped-failure', origin: 'initial' as const }
+    const admitted = await f.application.submit(request); assert.ok(admitted.operation)
+    const original = await f.application.wait(admitted.operation.id)
+    assert.equal(original.operation.phase, 'failed', JSON.stringify(original.attempt?.failure))
+    writeFileSync(join(f.root, 'unrelated.txt'), '不属于该操作读取或写入闭包\n')
+    assert.notEqual((await captureInputSnapshot(f.root)).id, original.operation.input.id)
+    const current = await f.application.readOperation(original.operation.id)
+    assert.equal(current.stale, false); assert.equal(current.retryEligibility.eligible, true)
+    assert.equal((await f.application.submit(request)).operation?.id, original.operation.id)
+    const retried = await f.application.submit({ nodeId: 'demo', requestId: 'scoped-retry', retryOf: original.operation.id })
+    assert.ok(retried.operation); assert.equal(retried.operation.input.id, original.operation.input.id)
+    await f.application.wait(retried.operation.id)
+    writeFileSync(join(f.root, '.spec/demo/spec.md'), source.replace('返回用户指定的文本。', '返回用户指定文本并添加后缀。'))
+    const stale = await f.application.readOperation(retried.operation.id)
+    assert.equal(stale.stale, true); assert.equal(stale.retryEligibility.eligible, false)
+    await assert.rejects(f.application.submit({ nodeId: 'demo', requestId: 'stale-retry', retryOf: retried.operation.id }), /原输入已变化/)
+  } finally { await f.application.stopService(); f.cleanup() }
+})
+
+
+test('AC-APPLICATION-P4-14 无生成字节差量时真实intent消费源码仍不形成回声', async t => {
+  const f = await exportApplicationFixture(t)
+  writeFileSync(join(f.root, 'src/export.js'), `${f.originalCode}\n// human comment requiring no code generation\n`)
+  const input = await captureInputSnapshot(f.root), frozen = await f.application['freezeNodePlan'](input, 'export-contract')
+  const pair: BaselinePair = { id: 'fixture-empty-generation', source: input.source, repositoryId: input.source.repositoryId, sourceInput: input, verifiedDelivery: input, coveredScope: frozen.plan.executionScope!, receiptId: 'fixture-empty-projection-only', settledAtMs: Date.now() }
+  const { digest: _digest, ...payload } = frozen.selection
+  const selected = { ...payload, bindings: payload.bindings.map(binding => 'intentPair' in binding ? { ...binding, intentPair: pair } : binding) }
+  const selection = { ...selected, digest: contentHash(JSON.stringify(selected, (_key, value: unknown) => value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value)) }
+  assert.equal(selection.bindings.every(binding => !('bytePair' in binding) || binding.bytePair === null), true)
+  const composed = composeAuthoredInput(input, selection, { executionPaths: frozen.plan.executionScope!.paths, contextPaths: frozen.plan.readPaths }).composed!
+  const evidence = readCompositionEvidence(input, composed, selection)
+  assert.equal(evidence.artifacts.every(artifact => !artifact.changed), true)
+  assert.equal(evidence.residualPaths.length, 0)
+  assert.equal(f.application['observationChanges'](input, frozen.plan, selection, evidence).changed, false)
+  assert.equal(f.calls(), 0, '真实Git投影不以假receipt登记权威')
+})
+
+test('AC-APPLICATION-P4-13 Spec无bytehead时按真实intent来源字节识别已消费与新原始意图', async t => {
+  const f = await exportApplicationFixture(t)
+  const before = await captureInputSnapshot(f.root)
+  const frozen = await f.application['freezeNodePlan'](before, 'export-contract')
+  writeFileSync(join(f.root, 'src/export.js'), `${f.originalCode}\n// fixture verified delivery\n`)
+  const delivery = await captureInputSnapshot(f.root)
+  writeFileSync(join(f.root, 'src/export.js'), f.originalCode)
+  const pair: BaselinePair = { id: 'fixture-intent-consumption', source: before.source, repositoryId: before.source.repositoryId, sourceInput: before, verifiedDelivery: delivery, coveredScope: frozen.plan.executionScope!, receiptId: 'fixture-projection-only', settledAtMs: Date.now() }
+  const { digest: _digest, ...payload } = frozen.selection
+  const selectionPayload = { ...payload, bindings: payload.bindings.map(binding => 'intentPair' in binding ? { ...binding, intentPair: pair } : binding.resource.path === 'src/export.js' ? { ...binding, bytePair: pair } : binding) }
+  const selection = { ...selectionPayload, digest: contentHash(JSON.stringify(selectionPayload, (_key, value: unknown) => value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value)) }
+  const changes = async () => {
+    const snapshot = await captureInputSnapshot(f.root)
+    const composed = composeAuthoredInput(snapshot, selection, { executionPaths: frozen.plan.executionScope!.paths, contextPaths: frozen.plan.readPaths, retainConflicts: true }).composed!
+    const evidence = readCompositionEvidence(snapshot, composed, selection)
+    return { evidence, difference: f.application['observationChanges'](snapshot, frozen.plan, selection, evidence) }
+  }
+  const unchanged = await changes()
+  assert.equal(unchanged.evidence.paths.find(path => path.path === f.path)?.base, null)
+  assert.equal(unchanged.evidence.intents.every(intent => !intent.changed), true)
+  assert.equal(unchanged.difference.changed, false)
+  writeFileSync(join(f.root, f.path), f.original.replace(parseParts(f.original)!.rawSource!, `${parseParts(f.original)!.rawSource!}\n新增原始义务。`))
+  assert.equal((await changes()).difference.changed, true, '只有raw变化也必须保留')
+  writeFileSync(join(f.root, f.path), f.original.replaceAll('RULE-EXPORT-06', 'RULE-EXPORT-NEW'))
+  assert.equal((await changes()).difference.changed, true, '旧ID退役不能因其他已消费ID被忽略')
+  writeFileSync(join(f.root, f.path), f.original)
+  renameSync(join(f.root, f.path), join(f.root, '.spec/project/export-contract/moved.md'))
+  assert.equal((await changes()).difference.changed, true, '原owner消失必须保留')
+  assert.equal(f.calls(), 0, '投影夹具不登记receipt或调用模型')
+})
+
+test('AC-APPLICATION-P4-12 同request不能换授权子节点，重新授权配置不能复用旧计划', async () => {
+  const f = await fixture()
+  try {
+    mkdirSync(join(f.root, '.spec/demo/child'))
+    writeFileSync(join(f.root, '.spec/demo/child/spec.md'), source.replace('Demo', 'Child'))
+    await f.application.enable()
+    const request = { nodeId: 'demo', requestId: 'frozen-plan', origin: 'initial' as const }
+    const admitted = await f.application.submit(request); assert.ok(admitted.operation)
+    const original = await f.application.wait(admitted.operation.id)
+    assert.equal(original.operation.phase, 'failed')
+    await assert.rejects(f.application.submit({ ...request, nodeId: 'child' }), /SYNC_IDEMPOTENCY_CONFLICT/)
+    assert.equal((await f.application.status()).operations.length, 1)
+    writeFileSync(join(f.root, '.spec/spexcode.json'), JSON.stringify({ sync: { ...settings, budget: { ...settings.budget, maxCalls: 6 } } }))
+    await f.application.enable()
+    const detail = await f.application.readOperation(original.operation.id)
+    assert.equal(detail.retryEligibility.eligible, false)
+    assert.equal(detail.retryEligibility.reason?.code, 'sync_configuration_changed')
+    await assert.rejects(f.application.submit(request), /原操作的可信配置已变化/)
+    await assert.rejects(f.application.submit({ nodeId: 'demo', requestId: 'new-budget', retryOf: original.operation.id }), /原操作的可信配置已变化/)
+    assert.equal(f.calls.length, 1)
+  } finally { await f.application.stopService(); f.cleanup() }
+})
+
+test('AC-APPLICATION-P4-10 活动native时物理暂停保operation控制，暂停编辑恢复先采用最新输入', async () => {
+  let held = true
+  const f = await fixture(settings, async request => {
+    if (held) {
+      held = false
+      await new Promise<never>((_resolve, reject) => request.signal!.addEventListener('abort', () => reject(new Error('测试native已响应物理暂停')), { once: true }))
+    }
+    throw Object.assign(new Error('受控生成环境故障'), { code: 'unsupported' })
+  })
+  try {
+    await f.application.enable(); await f.application.startService({ compensationMs: 10000, debounceMs: 5 })
+    await observeUntil(() => f.calls.length === 1, 30000)
+    const active = (await f.application.status()).operations[0].operation
+    await f.application.automaticControl('pause')
+    await f.application.wait(active.id)
+    assert.equal(f.application.store.readOperation(active.id).control, 'run')
+    assert.equal((await f.application.readOperation(active.id)).physicalControl.control, 'pause')
+    const first = f.application.observationStatus().latestSnapshot!.id
+    writeFileSync(join(f.root, '.spec/demo/spec.md'), source.replace('返回用户指定的文本。', '返回用户指定的文本并记录确认。'))
+    await observeUntil(() => f.application.observationStatus().latestSnapshot?.id !== first)
+    const latest = f.application.observationStatus().latestSnapshot!.id
+    assert.equal(f.calls.length, 1)
+    await f.application.automaticControl('resume')
+    const newest = (await f.application.status()).operations.find(item => item.operation.input.id === latest)?.operation
+    assert.ok(newest, '恢复应先准入最新冻结输入')
+    await f.application.wait(newest.id)
+    assert.equal(f.calls.length, 2)
+    assert.equal(f.application.store.readOperation(active.id).input.id, first)
+  } finally { await f.application.stopService(); f.cleanup() }
+})
+
+
+test('AC-APPLICATION-P4-11 两个独立节点保存及停机编辑补偿均真实交付，不夹带另一节点未消费输入', { skip: process.env.SPEX_DOCKER_VERIFICATION_TEST !== '1', timeout: 600000 }, async t => {
+  const f = await exportApplicationFixture(t, undefined, undefined, true)
+  const paths = ['src/export.js', 'src/other.js']
+  for (const path of paths) writeFileSync(join(f.root, path), `// human online ${path}\n${readFileSync(join(f.root, path), 'utf8')}`)
+  const before = await captureInputSnapshot(f.root), head = f.git(['rev-parse', 'HEAD']), index = readFileSync(join(f.root, '.git/index'))
+  await f.application.startService({ compensationMs: 10000, debounceMs: 5 })
+  const admitted = (await f.application.status()).operations.map(item => item.operation)
+  assert.equal(admitted.length, 2)
+  const first = await Promise.all(admitted.map(operation => f.application.wait(operation.id)))
+  for (const detail of first) {
+    assert.equal(detail.operation.phase, 'workspace_synced', JSON.stringify({ failure: detail.attempt?.failure, blockedReason: detail.operation.blockedReason, journals: detail.journals }))
+    assert.ok(detail.journals[0]?.receipt)
+    const own = paths.find(path => detail.operation.scope.paths.includes(path))!
+    assert.ok(own, '每个独立节点具有实际代码写范围')
+    assert.match(readFileSync(join(detail.operation.deliveryPlan.canonicalRoot, own), 'utf8'), /human online/)
+    assert.match(readFileSync(join(detail.operation.deliveryPlan.canonicalRoot, own), 'utf8'), /application verified delivery/)
+  }
+  const firstPublication = [...first].sort((a, b) => a.journals[0].receipt!.completedAtMs - b.journals[0].receipt!.completedAtMs)[0]
+  const firstOther = paths.find(path => !firstPublication.operation.scope.paths.includes(path))!
+  assert.doesNotMatch(readObject(before.source.commonDir, readTree(before.source.commonDir, firstPublication.journals[0].receipt!.actualTree).find(entry => entry.path === firstOther)!.oid).toString('utf8'), /human online/)
+  assert.equal((await captureInputSnapshot(f.root)).id, before.id)
+  await f.application.stopService()
+  const count = f.calls()
+  for (const path of paths) writeFileSync(join(f.root, path), `// human offline ${path}\n${readFileSync(join(f.root, path), 'utf8')}`)
+  const latest = await captureInputSnapshot(f.root)
+  assert.equal(f.calls(), count)
+  await f.application.startService({ compensationMs: 10000, debounceMs: 5 })
+  const successors = (await f.application.status()).operations.map(item => item.operation).filter(operation => !admitted.some(prior => prior.id === operation.id))
+  assert.equal(successors.length, 2)
+  const delivered = await Promise.all(successors.map(operation => f.application.wait(operation.id)))
+  for (const detail of delivered) {
+    assert.equal(detail.operation.phase, 'workspace_synced', JSON.stringify({ failure: detail.attempt?.failure, blockedReason: detail.operation.blockedReason, journals: detail.journals }))
+    assert.ok(detail.journals[0]?.receipt)
+    const own = paths.find(path => detail.operation.scope.paths.includes(path))!
+    assert.match(readFileSync(join(detail.operation.deliveryPlan.canonicalRoot, own), 'utf8'), /human offline/)
+    assert.match(readFileSync(join(detail.operation.deliveryPlan.canonicalRoot, own), 'utf8'), /human online/)
+    assert.match(readFileSync(join(detail.operation.deliveryPlan.canonicalRoot, own), 'utf8'), /application verified delivery/)
+  }
+  const firstCompensation = [...delivered].sort((a, b) => a.journals[0].receipt!.completedAtMs - b.journals[0].receipt!.completedAtMs)[0]
+  const unconsumedOther = paths.find(path => !firstCompensation.operation.scope.paths.includes(path))!
+  assert.doesNotMatch(readObject(before.source.commonDir, readTree(before.source.commonDir, firstCompensation.journals[0].receipt!.actualTree).find(entry => entry.path === unconsumedOther)!.oid).toString('utf8'), /human offline/)
+  assert.equal((await captureInputSnapshot(f.root)).id, latest.id)
+  assert.equal(f.git(['rev-parse', 'HEAD']), head); assert.deepEqual(readFileSync(join(f.root, '.git/index')), index)
 })

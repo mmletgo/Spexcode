@@ -22,7 +22,7 @@ test('the launcher actually runs a compiled CLI command through node', () => {
   assert.match(out, /SpexCode CLI/)
 })
 
-test('a source workspace launcher builds its missing runtime closure before it invokes it', () => {
+test('a source workspace launcher builds its missing runtime closure without contaminating JSON stdout', () => {
   const root = mkdtempSync(join(tmpdir(), 'spex-source-launcher-'))
   const launcher = join(root, 'spec-cli', 'bin', 'spex.mjs')
   try {
@@ -33,6 +33,8 @@ test('a source workspace launcher builds its missing runtime closure before it i
     writeFileSync(join(root, 'build.mjs'), `
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+console.log('source build stdout progress')
+console.error('source build stderr diagnostic')
 const outputs = [
   'spec-cli/dist/cli.js',
   'packages/spec-core/dist/index.js',
@@ -41,12 +43,16 @@ const outputs = [
 for (const output of outputs) {
   const path = join(process.cwd(), output)
   mkdirSync(dirname(path), { recursive: true })
-  writeFileSync(path, output === 'spec-cli/dist/cli.js' ? 'console.log("compiled source workspace")\\n' : 'export {}\\n')
+  writeFileSync(path, output === 'spec-cli/dist/cli.js' ? 'console.log(JSON.stringify({message:"compiled source workspace",args:process.argv.slice(2)}))\\n' : 'export {}\\n')
 }
 `)
 
-    const out = execFileSync(process.execPath, [launcher, 'help'], { cwd: root, encoding: 'utf8' })
-    assert.match(out, /compiled source workspace/)
+    const out = spawnSync(process.execPath, [launcher, 'status', '--json'], { cwd: root, encoding: 'utf8', timeout: 10000 })
+    assert.equal(out.status, 0, out.stderr)
+    assert.doesNotThrow(() => JSON.parse(out.stdout), out.stdout)
+    assert.deepEqual(JSON.parse(out.stdout), { message: 'compiled source workspace', args: ['status', '--json'] })
+    assert.match(out.stderr, /source build stdout progress/)
+    assert.match(out.stderr, /source build stderr diagnostic/)
     assert.ok(existsSync(join(root, 'spec-cli', 'dist', 'cli.js')))
   } finally {
     rmSync(root, { recursive: true, force: true })

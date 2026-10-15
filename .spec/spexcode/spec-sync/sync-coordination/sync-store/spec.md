@@ -22,7 +22,7 @@ bindComposedInput 同时核对 operation.requestBlob 与 composed.requestBlob �
 
 所有结果动作核对 operation/attempt/generation/物理来源/全部资源 lease。范围冲突按实际 paths 与 contractIds/flowIds 检查；独立范围可并行；释放后每资源 generation 不归零。superseded 或过期 fence 拒绝新候选、验证和 beginApply。native 会话创建、Git、blob/文件读取均在事务外，checkpoint 保存 executor runId 对应的内容寻址记录，不另建执行数据库。
 
-高层输入尚无未来业务 ID 时，expandContractScope(fence, {contractIds, flowIds}, evidenceRef) 在结构校验及独立评审已通过的内部可信细化结果上登记完整单调 ID 集合。先核证据 blob 的真实 SHA256，再在同一 protocol 事务核当前 run/fence，以既有 path/rule 资源键原子取得新增 ID 租约，并扩展 operation.scope 与可供分区的 readyScope。参数不得含 paths 或其它字段，原业务 ID 不可删除；input/payload/路径授权、generation、预算/截止时间和派发消息不改。冲突整体回滚并保留旧租约；每资源 generation 仍递增且释放不重置。operation 保存可选 contractScopeExpansions 证据记录，精确 ref+集合幂等，同 ref 不同集合拒绝；重复不会派发或计费。retry 通过已有 expanded scope 领取租约，幂等重放仍核当前 fence 与真实持有资源。
+P3冻结恢复只允许未来业务ID扩展；P4已审P1可同时登记真实精确新paths。高层输入尚无未来业务 ID 时，expandContractScope(fence, {contractIds, flowIds}, evidenceRef) 在结构校验及独立评审已通过的内部可信细化结果上登记完整单调 ID 集合。先核证据 blob 的真实 SHA256，再在同一 protocol 事务核当前 run/fence，以既有 path/rule 资源键原子取得新增 ID 租约，并扩展 operation.scope 与可供分区的 readyScope。参数不得含 paths 或其它字段，原业务 ID 不可删除；input/payload/路径授权、generation、预算/截止时间和派发消息不改。冲突整体回滚并保留旧租约；每资源 generation 仍递增且释放不重置。operation 保存可选 contractScopeExpansions 证据记录，精确 ref+集合幂等，同 ref 不同集合拒绝；重复不会派发或计费。retry 通过已有 expanded scope 领取租约，幂等重放仍核当前 fence 与真实持有资源。
 
 细化后 startGeneration 的 ready/blocked 是业务分区：共享文件 paths 保持在 readyScope，blockedScope 可仅含 GAP 依赖的 contractIds/flowIds，不机械阻塞整个共享文件。ready 与 blocked 的同类业务 ID 不得重叠；现有路径重叠门禁保持。候选、四层验证和 receipt 的覆盖范围均受 ready 范围约束，未 ready 业务 ID 不能进入 deliveredScope；blockedReason 未消除时，部分 receipt 只能保持 needs_input/conflicted，不能宣称 workspace_synced。
 
@@ -40,7 +40,7 @@ receipt 的实际tree与交付manifest必须精确绑定已冻结候选，错误
 
 协作回写中source与delivery是同一物理树时，仍保留原source→实际delivery历史pair，并建立发布快照sourceInput=verifiedDelivery的后续来源pair；后续人类输入以真实发布字节为基线，不把上一轮Agent输出重新当人类来源差量。
 
-最新成对baseline由SQLite事务插入顺序（rowid）确定，不以可回拨的settledAtMs排序；结算时间仅用于展示。时间回拨后重新打开数据库，source和发布delivery仍读取最近一次成功结算的pair，不能退回旧输入。
+仅供P3冻结历史恢复的readBaseline最新成对baseline由SQLite事务插入顺序（rowid）确定，不以可回拨的settledAtMs排序；结算时间仅用于展示。时间回拨后重新打开数据库，source和发布delivery仍读取最近一次成功结算的pair，不能退回旧输入。
 
 planResource在原生命令前核当前fence及固定input/candidate身份，按attempt+key幂等登记资源计划；同键不同载荷拒绝。recordResourceCheckpoint核资源自己的operation/attempt/input/candidate绑定及expectedCheckpointRef CAS，即使attempt过期、superseded或operation取消仍可保存真实资源证据；任何phase更新都不恢复业务写权。阶段只能逐步planned→created→terminal→removed，相同blob/阶段幂等重放，迟到planned不能覆盖terminal/removed。开始前取消且未实际创建，也明确terminal后removed；仅removed释放资源容量。listRecoverableResources独立查询所有历史attempt的未removed资源，终态取消op与非current attempt不能被遗漏。pinnedBlobRefs包含资源plan与所有checkpoint引用。
 
@@ -58,7 +58,7 @@ planBlob在admit边界核真实bytes SHA256且ref.sha256=policyDigest；引用�
 
 listAttempts(operationId)先核operation存在，再按rowid返回该操作全部真实attempt，供从既有checkpoint恢复固定细化证据；不能由另一operation借用候选/义务。
 
-nextDispatch()只读现有protocol的精确FIFO头，返回operation/messageId/envelope，包含已停止或终态头；校typed kind、envelope及持久operation/message/input绑定。claimAttempt携expectedMessageId时，在同一个领取事务精确消费已controlled/terminal的旧sync.dispatch头，再校当前头并dequeue；有效queued头绝不可跳过，任一步失败使旧头消费及attempt/全部lease一起回滚。应用按真实FIFO调度，不按最新operation列表猜顺序。
+nextDispatch()只读现有protocol的精确FIFO头，返回operation/messageId/envelope，包含已停止或终态头；校typed kind、envelope及持久operation/message/input绑定。claimAttempt携expectedMessageId时，在同一个领取事务精确消费已controlled/terminal的旧sync.dispatch头，再校当前头并dequeue；有效queued头绝不可跳过，任一步失败使旧头消费及attempt/全部lease一起回滚。P3冻结恢复可沿此入口；新P4应用使用ackDispatch与claimQueuedAttempt两阶段调度，不按最新operation列表猜顺序。
 
 paused且尚无attempt的头已被合法消费后resume，claim可依据同op精确owned已dequeued message和持久operation恢复，不再次dequeue或改动别人的有效pending顺序；不造第二队列。应用先FIFO派发，再恢复无pending的unfinished operation；显式resume可直接恢复该持久身份。
 
@@ -80,5 +80,29 @@ P3业务decision请求沿同一接入门禁归一化去transport requestId、fin
 
 裁决语义由实际来源/input、原operation/analysis、所选finding集合及choice/新规则决定；运输requestId、绑定该运输ref的派生policy和已结算历史fact不新建预算。精确ingress仍校完整payload；同choice结算后重放仍返回旧operation，真实来源/配置字节变化和显式retry保持独立身份。旧v8裁决索引在接入前从不可变request核验并重算，不重写业务记录。
 
+P4 裁决的 selection/readSet 是新操作执行时的完整 CAS 绑定，不改变人的同一选择身份；即使后续真实 receipt 推进该资源头，同一原分析/finding/choice 的新运输仍复用原操作、预算和回执，不能再次执行旧选择覆盖后来结果。新 ingress 保其实际选择快照；同 key 变 payload 仍拒绝。自动观察继续按精确 selection 区分新语义，不能套用此裁决归并。
+
 
 recordReviewedConflict仅在当前analyzing fence内登记已由协调器完整核验并持久保存的当前独审业务冲突原因，精确重放幂等；phase、scope、预算、失败与交付事实不变。readDecisionEligibility与decision admission事务复用同一真实资格：保既有needs_input/conflicted/superseded入口，failed/budget_exhausted另需非null业务blockedReason（needs_input或conflicted）；当前attempt须settled/failed/superseded，所有历史资源removed且journal全settled。早期原因不授权在途阶段、applying/recovering或未结算资源；事务重新读取parent实际状态防应用检查后发生竞态。
+
+P4 精确资源 frontier 独立保存路径字节头与 contract/flow 作者意图头。readBaselineSelection 对每个请求资源返回显式 null 或精确 pair；历史不可证明时返回失败。settleApply 同事务推进实际 journal.files 路径、真实 verified covered IDs 与 retired tombstone heads；未交付 ID、读目录不推进。beginApply 只复核冻结选择对应资源，独立资源交付不使任务过期。物理 pause 由 scope/revision CAS 持久门禁，claim/checkFence/beginApply 事务复核，已登记 applying finishing 可以结算。ackDispatch 只消费真实协议头并保存 durable queued 与首入 anchor；claimQueuedAttempt 不 dequeue，按原 enqueue_seq 检查重叠前序与锁，独立范围可推进。自动观察的同范围最新输入建立不可变 successor，继承 anchor、预算族及截止时间，运行输入不改；所有族成员的 attempts/calls/repair failures 汇总。所有观察与接入、协议 enqueue、ingress 结算同事务，Git/FS/blob 核验在事务外。
+
+新P4 lease路径分别绑定完整来源身份和交付计划仓库/根/分支命名空间；业务ID绑定完整来源身份。共享真实交付分支的同路径互斥，独立树/分支不因同名资源互锁。P3未命名旧租约保守阻塞相同资源直到恢复移除。selection摘要同时绑定attempt及verification外层/blob；scope扩展同事务补显式binding并更新attempt选择，旧已组合摘要不能取得generation授权。预算根只保存dispatchAnchor.budgetRootOperationId这一事实，按全族真实attempt的dispatchPlans累加calls。
+
+selection保存完整精确语义read/protection与write资源；assertSelection重读全部binding并至少含实际operation.scope，允许readonly extras。scope、ready/blocked/delivered只计实际意图/write资源，readonly不取得write lease。expand保原全部readonly binding，union已审新ID/path，任何缺证明的旧资源不能推定null。
+
+P4原自动语义摘要包括冻结selection；仅逐binding完全相同、或变成该operation自身已settled receipt头才可兼容归并自身已审扩展scope回声。新外来相关byte/intent/read头不能仅凭sameInput/policy吞掉；不同头的新语义重新准入，仍受自动预算族约束。观察的自动去重在同事务以完整source identity、configRef、latestDifferenceDigest和实际selectionDigest命中已有已准入观测；即使全输入/HEAD因无关字节改变，也保存当前真实snapshot与alias payload收据，复用原op/预算而不改其input。仅observed、blocked/failure及显式request/retry不取得此快捷授权。
+
+bindComposedInput可带readSetDigest绑定：只有已审scope扩展真实改变selection、仍analyzing/elaborating/repairing且无candidate/verification，才允许从旧composed重组到新digest并原子更新readSet。扩展ledger保存前后摘要。相同selection二次换composed/readSet、生成后换或没有真实扩展均拒绝，输入/policy/原payload不改。新增非null author意图的重新独审由协调器证明，存储不解析业务。
+
+readLatestObservation/listObservations按事务插入顺序提供当前完整来源观测及失败信息，不按可回拨壁钟排序。listBaselineResources只列真实heads及明确legacy未知条目，不造新头。recordObserverHealth以expectedInstanceId CAS保存当前物理scope进程实例健康；旧实例不能覆盖新实例。缺失来源用health记录，不伪造snapshot。readBudgetUsage从全族真实attempt及dispatchPlans派生calls/attempts/repair统计，显示不得以新op局部callsUsed假充剩余预算。
+
+物理run仅对同scope、原control仍run、实际settled attempt+journal+receipt的paused操作恢复已交付结论，保blockedReason和真实完整度；不新claim、不重应用或重置预算。所有历史原生resources必须removed、journals必须settled才允许新P4 claim/continuation；callback仍可登记真实清理并在removed后释放终结attempt租约。
+
+P4 receipt结算从冻结selection各真实pair以及legacy previous保留已有retiredIds/decisionRefs历史，再追加本次真实verification。history refs不扩展coveredScope；heads仍只推进实际journal.files、verified covered IDs和本次已验证retired ID。后续同ID非decision交付不能让其新intent head遗失之前已结算裁决。
+
+bindPublicationBase 消费 [[sync-publication-base]] 实际对象证明，只在 generating 且无 candidate/verification、fence/原 selected 资源仍有效时绑定一次；事务外核 Git/manifest/read closure，事务内核同来源完整 path frontier CAS，原 composed 保留。readPublicationHeads 单事务返回已结算 receipt 支持的 path heads，无关 legacy 未知单列诊断。freezeCandidate 的模型 manifest diff 与 baseTree 改核冻结 publication composed；beginApply 同时绑定 publication ref 和真实 parent，不改变本轮 scope/头推进规则。
+
+自动预算继承只适用于 observeAndAdmit 携 P4 selection 的新不可变观察（非 retry），同来源同 scope 的未完成前序含 failed/budget_exhausted 均保持原 FIFO anchor、预算族和 deadline。显式 admitAndEnqueue 新输入是新预算授权，P3 缺 selection 不继承 P4 自动族；同意图精确去重仍复用原 operation，旧未 removed resources/未 settled journals 仍阻止新执行。
+
+同来源持久 publication gate 复用 attempts/resources/journals，不建第二锁表。其它 attempt 已有 publicationBase 且仍运行，或其仍有未 removed resource/未 settled journal（即使 attempt failed/superseded/settled）时，bind/尚未应用的恢复/new beginApply 返回 SYNC_PUBLICATION_BUSY。没有 publicationBase 的独立生成资源不参加该 gate。bind 同 base 重入也复核完整 frozen frontier；assertPublicationBaseCurrent 是只读恢复门禁，事务外核 provenance hash、事务内核当前 attempt/selection/全 path heads，旧 image 不能因重入跳过 CAS。实际 applying/settled 沿原 journal/receipt，不重新选择 heads 或修改 parent。

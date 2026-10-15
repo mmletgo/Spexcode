@@ -435,10 +435,13 @@ consumes the token after it.`,
        spex sync run <node-id> [--request-id <id>] [--patch-file <json>] [--retry-of <operation-id>] [--origin spec|initial|code|combined]
        spex sync decide <operation-id> --input-id <id> --analysis <sha256> --findings <id,...> --choice keep_intent|adopt_behavior|new_rule [--rule <text>] [--request-id <id>]
        spex sync show <operation-id>
+       spex sync pause|resume
+       spex sync verify <node-id> [--request-id <id>]
        spex sync pause|resume|cancel|recover <operation-id>
 
 在 .spec/spexcode.json 的 sync 字段登记 sync-settings-v1、sourcePaths/testPaths/readPaths、
 verifications、mandatoryTests、facts 与 budget，再启用当前输入工作树的授权。
+nodeIds 可明确限定意图根；新纯raw需求须登记根节点，status显示实际纳入与未纳入范围。
 支持已登记的 Docker Node --test；缺少可信镜像、命令或预算明确拒绝。
 可配置有限 callTimeoutMs；缺省单次最多 120000ms，旧操作沿用自身冻结配置和总期限。
 run 返回持久 operation，后端继续实际细化、生成、验证与受管交付，不需要 Dashboard。
@@ -451,7 +454,7 @@ resume 继续原操作，--retry-of 建立关联新操作；三个入口各自�
 show/status 展示真实失败、GAP、过期和交付工作树；workspace_synced 不代表原输入树已落地。
 手动 --origin code|combined 接入外部代码变更并分析业务冲突；来源不构成采用新业务的授权。
 decide 绑定 show 中的原输入、可信分析及具体 finding IDs；保持需求、采用行为或新规则进入新关联操作。
-本阶段尚未启用外部文件自动监听。所有命令输出 JSON。
+启用后服务持续观察授权来源；无参数 pause/resume 控制物理输入自动执行，带 operation ID 控制单个操作。暂停仍记录最新输入；服务停止明确离线。所有命令输出 JSON。
 配置示例：spex guide sync。\n\n${ROUTING_NOTE}`,
   },
   spec: {

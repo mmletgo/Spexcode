@@ -2,8 +2,8 @@ import { structuredObserverState, type StructuredExecution } from './session-str
 import { execFileSync, spawn } from 'node:child_process'
 import { createConnection } from 'node:net'
 import { createHash, randomUUID } from 'node:crypto'
-import { readFileSync, writeFileSync, existsSync, renameSync, linkSync, mkdirSync, rmSync, readdirSync, realpathSync, statSync, unlinkSync, type Dirent } from 'node:fs'
-import { join, dirname, isAbsolute, resolve } from 'node:path'
+import { readFileSync, writeFileSync, existsSync, renameSync, linkSync, mkdirSync, chmodSync, rmSync, readdirSync, realpathSync, statSync, unlinkSync, type Dirent } from 'node:fs'
+import { join, dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { rm as rmAsync, readdir as readdirAsync } from 'node:fs/promises'
 import { seedWorktreeHostState } from './worktree-sources.js'
@@ -13,7 +13,7 @@ import { adapterLoadedReferenceState, assertRvSockPath, defaultHarness, defaultL
 import { materialize } from './materialize.js'
 import { parseParentDirective, stripRefSigil } from './mentions.js'
 import { resolveSession } from './session-selectors.js'
-import { mainBranch, mainRoot, gitCommonDir, readConfig, runtimeRoot, treeSlotDir, sessionStoreDir, sessionArtifactPath, listSessionIds, readRecordEntry, readPublicRecordEntry, envSessionId, isSessionWorkLifecycle, parseSessionLifecycle, parseSessionProposal, resumedSessionLifecycle, type PublicRecordEntry, type SessionLifecycle, type SessionWorkLifecycle, type SessionProposal } from '@spexcode/spec-core'
+import { mainBranch, mainRoot, repoRoot, gitCommonDir, readConfig, runtimeRoot, treeSlotDir, sessionStoreDir, sessionArtifactPath, listSessionIds, readRecordEntry, readPublicRecordEntry, envSessionId, isSessionWorkLifecycle, parseSessionLifecycle, parseSessionProposal, resumedSessionLifecycle, type PublicRecordEntry, type SessionLifecycle, type SessionWorkLifecycle, type SessionProposal } from '@spexcode/spec-core'
 import { readSessionFiles, sessionUploads, type SessionUpload } from './session-files.js'
 import { readSessionWebs, type SessionWeb } from './session-web.js'
 import { readSessionWidgets, type SessionWidget } from './session-widgets.js'
@@ -2378,23 +2378,48 @@ type SessionCandidateReceiptRead =
 const sessionCandidateReceiptDir = () => join(runtimeRoot(), '.session-create-candidates')
 const sessionCandidateReceiptPath = (id: string) => join(sessionCandidateReceiptDir(), `${id}.json`)
 const sessionCandidateLockId = (path: string, branch: string) => `create-resource-${digest(`${path}\0${branch}`)}`
-function sessionCandidateTarget(prompt: string, id: string): { root: string; path: string; branch: string; ref: string | null; title: string | null } {
+function sessionCandidateTarget(prompt: string, id: string, structured: boolean): { root: string; path: string; branch: string; ref: string | null; title: string | null } {
   const ref = nodeFromPrompt(prompt), title = titleFromPrompt(prompt)
   const slug = `${slugify(ref || title)}-${id.slice(0, 4)}`, root = mainRoot()
-  return { root, path: join(root, '.worktrees', slug), branch: `${readConfig(dirname(gitCommonDir())).branchPrefix ?? 'node/'}${slug}`, ref, title }
+  let parent = join(root, '.worktrees')
+  if (structured) {
+    parent = join(realpathSync(runtimeRoot()), 'structured-worktrees')
+    if (existsSync(parent)) parent = realpathSync(parent)
+    for (const source of [root, repoRoot()]) {
+      const inside = relative(realpathSync(source), parent)
+      if (inside !== '..' && !inside.startsWith(`..${sep}`) && !isAbsolute(inside))
+        throw new SessionCreateError('session_create_failed', 'target-resolution', 'structured runtime must remain outside source and main checkouts', 400)
+    }
+    mkdirSync(parent, { recursive: true, mode: 0o700 })
+    chmodSync(parent, 0o700)
+  }
+  return { root, path: join(parent, slug), branch: `${readConfig(dirname(gitCommonDir())).branchPrefix ?? 'node/'}${slug}`, ref, title }
 }
 
-/** 在原创建锁内恢复精确未发布候选；缺少所有权收据不构成未启动证明。 */
-export async function recoverSessionCreateTermination(requestKey: string, options: { prompt: string; payloadHash: string; base?: string; signal: AbortSignal }): Promise<SessionCreateTermination | null> {
+/** 在原双锁内核验写前拥有权或从未发布的精确创建，再登记正式终止证明。 */
+export async function recoverSessionCreateTermination(requestKey: string, options: { prompt: string; payloadHash: string; base?: string; signal: AbortSignal; structuredExecution?: StructuredExecution }): Promise<SessionCreateTermination | null> {
   const key = normalizeCreateKey(requestKey), id = sessionIdForCreateKey(key), requestDigest = digest(key)
   return withRecordLock(id, async () => {
     const termination = readSessionCreateTerminationById(id, requestDigest)
     if (termination) return termination
     if (readRecord(id)) return null
-    const { root, path, branch } = sessionCandidateTarget(options.prompt, id)
+    const { root, path, branch } = sessionCandidateTarget(options.prompt, id, !!options.structuredExecution)
     return withRecordLock(sessionCandidateLockId(path, branch), async () => {
       const durable = readSessionCandidateReceipt(id)
-      if (durable.kind === 'absent') return null
+      if (durable.kind === 'absent') {
+        if (!options.structuredExecution) return null
+        const payloadHash = digest(JSON.stringify({ prompt: options.prompt, parent: null, launcher: null, ...(options.base?.trim() ? { base: options.base.trim() } : {}), structuredExecution: options.structuredExecution }))
+        if (payloadHash !== options.payloadHash) throw new SessionCreateError('session_create_failed', 'target-resolution', 'structured recovery payload does not match fixed create request', 409)
+        const state = await sessionCandidateState(root, path, branch, options.signal)
+        const application = configuredSessionApplication()
+        // @@@ canonical address survives retirement; native dispatch is impossible before its publication.
+        if (application.readAddress(id) || readRecord(id) || existsSync(sessionStoreDir(id)) || state.path || state.worktree || state.branch
+          || codexGenerationBindingForSession(join(runtimeRoot(), 'structured-read-only-v1', 'control'), id)) return null
+        throwIfCreateAborted(options.signal, 'target-resolution')
+        const recovered: SessionCreateTermination = { version: 1, sessionId: id, requestDigest, payloadHash, code: 'session_create_cancelled', phase: 'target-resolution', nativeStopped: true, nativeStatus: 'notStarted', cleanupComplete: true }
+        writeSessionCreateTermination(recovered)
+        return recovered
+      }
       if (durable.kind === 'invalid') throw new SessionCreateError('session_create_failed', 'cleanup', durable.error, 409)
       const receipt = durable.receipt
       if (receipt.requestDigest !== requestDigest || receipt.payloadHash !== options.payloadHash || receipt.root !== root || receipt.path !== path || receipt.branch !== branch)
@@ -2638,7 +2663,7 @@ async function prepareSession(prompt: string, parentage: CreateParentage, launch
         const rawPrompt = prompt
         // @@@ the first mention is read TWICE and stored NEVER - it names the worktree slug and, when that id
         // exists, the [[spec-pointer]] line. The record carries no spec node: a session is not bound to one.
-        const { ref, title, root, branch, path } = sessionCandidateTarget(rawPrompt, id)
+        const { ref, title, root, branch, path } = sessionCandidateTarget(rawPrompt, id, !!context.structuredExecution)
         const launchSpecs = ref ? loadSpecsLite() : null
         // An explicit base pins the fork point so a run is reproducible against a frozen commit instead of
         // whatever the source-of-truth branch has drifted to. Resolve it here, before any git mutation: an

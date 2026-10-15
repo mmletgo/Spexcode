@@ -1,0 +1,397 @@
+import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import test from 'node:test'
+import { openProtocol } from '@spexcode/session-protocol'
+import { parseContract } from '@spexcode/spec-core/contracts'
+import { analyzeCodeBehavior, authoredContractChanges, selectedAuthoredContractChanges } from './code-behavior.js'
+import { composeInputSnapshots, readCompositionEvidence } from './composition.js'
+import { buildSyncApplicationPlan, deriveSyncBaselineResources } from './planning.js'
+import { migrateSyncStore } from './migrations.js'
+import { SyncStore } from './store.js'
+import { composeControlledRequest, prepareControlledRequest } from './request-input.js'
+import { captureInputSnapshot, contentHash, readEvidence, readObject, readTree, verifySnapshot, writeEvidence } from './snapshot.js'
+import type { BaselinePair, FrozenBaselineSelection, InputSnapshot, SyncScope, VerificationResultBlob } from './operation-types.js'
+import type { ElaborationRunner } from './elaboration-types.js'
+import type { SyncCoordinatorPlan } from './coordinator-types.js'
+import type { CodeBehaviorAnalysis } from './writeback-types.js'
+
+const path = '.spec/export/export-contract/spec.md', a = 'RULE-EXPORT-05'
+const git = (root: string, ...args: string[]): string => execFileSync('/usr/bin/git', ['-C', root, ...args], { encoding: 'utf8', stdio: 'pipe', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }).trim()
+const texts = (input: InputSnapshot): Map<string, string> => new Map(verifySnapshot(input).map(entry => [entry.path, readObject(input.source.commonDir, entry.oid).toString('utf8')]))
+
+/** Git快照、提交、mode与store事务是真实的；验证四层是显式fake，不能作为native产品通过证据。 */
+async function fixture(t: test.TestContext, pendingInB = false, legacyDirectoryCoverage = false, codeOnly = false) {
+  const parent = mkdtempSync(join(tmpdir(), 'sync-frontier-')), root = join(parent, 'source'), deliveryRoot = join(parent, 'delivery')
+  mkdirSync(root); cpSync(new URL('../../test/fixtures/spec-sync/export-repo/', import.meta.url), root, { recursive: true })
+  git(root, 'init', '-b', 'main'); git(root, 'config', 'user.name', '真实组合夹具'); git(root, 'config', 'user.email', 'test@example.invalid'); git(root, 'add', '.'); git(root, 'commit', '-m', 'sourceA0')
+  git(root, 'worktree', 'add', '-b', 'delivery', deliveryRoot, 'HEAD')
+  const original = readFileSync(join(root, path), 'utf8'), firstA = original.replace('成功需非空result、发布一次', '成功需非空result、版本A1、发布一次'), nextA = original.replace('成功需非空result、发布一次', '成功需非空result、版本A2、发布一次')
+  const addB = (text: string): string => text.replace('key与非空字符串filter必需', 'key与非空字符串filter必需；交付B1政策保留')
+  const codePath = 'src/export.js', sourceCode = readFileSync(join(root, codePath), 'utf8')
+  const codeA1 = sourceCode.replace('job.result = result;', "job.result = result; job.resultVersion = 'A1';"), codeA2 = sourceCode.replace('job.result = result;', "job.result = result; job.resultVersion = 'A2';")
+  const addCodeB = (text: string): string => text.replace('  jobs = new Map();', "  jobs = new Map();\n  deliveryPolicy = 'B1';")
+  const deliveredPaths = codeOnly ? [path, codePath] : [path]
+  const sourceA0 = await captureInputSnapshot(root)
+  const protocol = openProtocol(join(parent, 'db.sqlite')); await migrateSyncStore(protocol, { backupPath: join(parent, 'backup.sqlite') })
+  const store = new SyncStore(protocol, { readBlob: ref => readEvidence(sourceA0.source.commonDir, ref) })
+  t.after(() => { protocol.close(); rmSync(parent, { recursive: true, force: true }) })
+  const settle = async (source: InputSnapshot, delivery: InputSnapshot, id: string, ids: string[], paths: string[] = deliveredPaths): Promise<BaselinePair> => {
+    const scope: SyncScope = { paths: legacyDirectoryCoverage ? ['.spec'] : paths, contractIds: ids.filter(id => !id.startsWith('FLOW-') && !id.startsWith('VERIFY-')), flowIds: ids.filter(id => id.startsWith('FLOW-')) }, commonDir = source.source.commonDir
+    const put = (value: unknown) => writeEvidence(commonDir, value)
+    const admitted = store.admitAndEnqueue({ ingressKey: id, rootCauseId: id, origin: 'spec', input: source, scope, budget: { maxAttempts: 2, maxCalls: 4, maxRepairs: 1, timeoutMs: 100000 }, policyDigest: `fake-policy-${id}`, impactDigest: id, readSetDigest: id, delivery: null, deliveryPlan: { canonicalRoot: delivery.source.canonicalRoot, branch: delivery.source.branch, baseCommit: source.headCommit } })
+    const claim = store.claimAttempt({ operationId: admitted.id, source: source.source, scope, leaseMs: 100000, expectedMessageId: admitted.dispatchMessageId })
+    store.bindDelivery(claim.fence, delivery.source)
+    store.bindComposedInput(claim.fence, composeInputSnapshots(source).composed!)
+    store.startGeneration(claim.fence, { readyScope: scope, blockedScope: { paths: [], contractIds: [], flowIds: [] }, blockedReason: null })
+    const files = [...paths].sort().map(path => { const before = verifySnapshot(source).find(entry => entry.path === path), after = verifySnapshot(delivery).find(entry => entry.path === path); return { path, preDigest: before?.digest ?? null, postDigest: after?.digest ?? null, preMode: before?.mode ?? null, postMode: after?.mode ?? null } })
+    const candidate = { sourceInputId: source.id, baseTree: source.immutableTree, tree: delivery.immutableTree, digest: delivery.contentDigest, manifestBlob: delivery.manifestBlob, actualDiffBlob: put(files.filter(file => file.preDigest !== file.postDigest || file.preMode !== file.postMode)), coveredScope: scope }
+    store.freezeCandidate(claim.fence, candidate)
+    const fake = put({ fake: true, reason: '验证协议仅供基线结算，非业务验收' }), bindings = { inputId: source.id, candidateDigest: candidate.digest, policyDigest: `fake-policy-${id}`, readSetDigest: id, environmentDigest: 'fake-env', contextDigest: 'fake-context' }
+    const verification: VerificationResultBlob = { schemaVersion: 1, ...bindings, coveredScope: scope, layers: (['V1', 'V2', 'V3', 'V4'] as const).map(layer => ({ layer, verdict: 'pass', evidenceRefs: [fake] })) }
+    const resultBlob = put(verification); store.recordVerification(claim.fence, { ...bindings, passed: true, coveredScope: scope, evidenceRefs: [fake], resultBlob })
+    const plan = { effectKey: id, payloadDigest: id, candidateDigest: candidate.digest, verificationBlob: resultBlob, target: delivery.source, expectedTargetSnapshotId: source.id, expectedBaselinePairId: null, coveredScope: scope, files: files.filter(file => file.preDigest !== file.postDigest || file.preMode !== file.postMode), planBlob: put({ files: files.filter(file => file.preDigest !== file.postDigest || file.preMode !== file.postMode), candidateDigest: candidate.digest }) }
+    const target = { ...source, source: delivery.source }, journal = store.beginApply(claim.fence, plan, target)
+    for (const step of journal.steps) store.recordApplyStep(claim.fence, journal.id, { ...step, status: 'completed' })
+    const receipt = { id: `receipt-${id}`, journalId: journal.id, effectKey: id, actualTree: delivery.immutableTree, actualCommit: delivery.headCommit, deliverySnapshot: delivery, evidenceRefs: [fake], completedAtMs: Date.now() }
+    store.recordReceipt(journal.id, receipt); store.settleApply(journal.id, receipt.id)
+    return store.readBaseline(source.source)!
+  }
+  writeFileSync(join(deliveryRoot, path), codeOnly ? original : firstA); if (codeOnly) writeFileSync(join(deliveryRoot, codePath), codeA1); git(deliveryRoot, 'add', '.'); git(deliveryRoot, 'commit', '-m', 'deliveryA1')
+  const deliveryA1 = await captureInputSnapshot(deliveryRoot), pairA = await settle(sourceA0, deliveryA1, 'settle-A', [a])
+  if (pendingInB) writeFileSync(join(root, codeOnly ? codePath : path), codeOnly ? codeA2 : nextA)
+  const sourceB = pendingInB ? await captureInputSnapshot(root) : sourceA0
+  writeFileSync(join(deliveryRoot, path), addB(codeOnly ? original : firstA)); chmodSync(join(deliveryRoot, path), 0o755); if (codeOnly) { writeFileSync(join(deliveryRoot, codePath), addCodeB(codeA1)); chmodSync(join(deliveryRoot, codePath), 0o755) }; git(deliveryRoot, 'add', '.'); git(deliveryRoot, 'commit', '-m', 'deliveryA1B1 executable')
+  const deliveryB1 = await captureInputSnapshot(deliveryRoot)
+  const allIds = parseContract({ nodeId: 'export-contract', path, source: original }).contract!.items.map(item => item.id)
+  const pairB = await settle(sourceB, deliveryB1, 'settle-B', allIds.filter(id => id !== a))
+  const selection = (): FrozenBaselineSelection => {
+    const result = store.readBaselineSelection(sourceA0.source, [...deliveredPaths.map(path => ({ kind: 'path' as const, path })), ...allIds.filter(id => !id.startsWith('VERIFY-')).map(id => ({ kind: id.startsWith('FLOW-') ? 'flow' as const : 'contract' as const, id }))])
+    assert.ok('selection' in result); return result.selection
+  }
+  const plan: SyncCoordinatorPlan = { version: 'sync-coordinator-v1', intentNodeId: 'export-contract', targets: [{ nodeId: 'export-contract', path }], readPaths: ['.spec', 'src', 'tests'], writePaths: ['.spec', 'src', 'tests'], facts: [], verifications: [], mandatoryTests: [] }
+  return { root, deliveryRoot, store, settle, original, nextA, addB, sourceA0, pairA, pairB, deliveryB1, selection, plan, allIds, codePath, sourceCode, codeA1, codeA2, addCodeB }
+}
+
+function fakeBehavior(resolution?: string, assertInput?: (frozen: Record<string, unknown>) => void, resolutionPath = path, resolutionMode: '100644' | '100755' = '100755'): ElaborationRunner {
+  return async request => {
+    let output: unknown
+    if (request.purpose === 'code_behavior_analyze') {
+      const frozen = JSON.parse(request.prompt.split('冻结三方输入:\n')[1]) as { changedPaths: string[] }
+      assertInput?.(frozen)
+      output = { changes: frozen.changedPaths.map(path => ({ kind: 'allowed_change', paths: [path], affectedIds: [a], ruleIds: [a], originalIntent: '保留作者A与已交付B', previousBehavior: 'A1', sourceBehavior: 'A2', deliveryBehavior: 'A1+B1', evidence: '真实Git对象及逐ID残差', counterexample: '不能把A2隐藏为A1' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: resolution ? [{ path: resolutionPath, content: resolution, mode: resolutionMode }] : [] }
+    } else {
+      const reviewed = JSON.parse(request.prompt.split('待审分析:\n')[1]) as { analysisDigest: string; analysis: CodeBehaviorAnalysis }
+      const frozen = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as { changedPaths: string[] }
+      output = { inputDigest: request.inputDigest, analysisDigest: reviewed.analysisDigest, verdict: 'accept', checkedPaths: frozen.changedPaths, checkedChangeIds: reviewed.analysis.changes.map(change => change.id), findings: [] }
+    }
+    return { sessionId: `fake-session-${request.purpose}`, threadId: `fake-thread-${request.purpose}`, turnId: 'fake-turn', output, resultDigest: contentHash(JSON.stringify(output)) }
+  }
+}
+
+test('真实store partial heads：A作者残差保留B交付，不以不同pairID制造业务冲突', async t => {
+  const f = await fixture(t)
+  writeFileSync(join(f.root, path), f.nextA)
+  const input = await captureInputSnapshot(f.root), selection = f.selection(), result = composeInputSnapshots(input, selection, { retainConflicts: true })
+  const selectedA = selection.bindings.find(binding => binding.resource.kind === 'contract' && binding.resource.id === a)
+  assert.ok(selectedA && 'intentPair' in selectedA); assert.equal(selectedA.intentPair?.id, f.pairA.id)
+  const evidence = readCompositionEvidence(input, result.composed!, selection)
+  assert.equal(evidence.paths[0].pairId, f.pairB.id)
+  assert.deepEqual(selectedAuthoredContractChanges(evidence).flatMap(change => change.changedIds), [a])
+  const analysis = await analyzeCodeBehavior({ snapshot: input, baseline: null, baselineSelection: selection, composed: result.composed!, readSetDigest: 'test-read', policyDigest: 'test-policy', requestKey: 'case1', timeoutMs: 10000, plan: f.plan }, fakeBehavior(f.addB(f.nextA)))
+  assert.equal(analysis.findings.length, 0); assert.equal(analysis.baselineSelectionDigest, selection.digest)
+  assert.match(analysis.resolutions[0].content!, /版本A2/); assert.match(analysis.resolutions[0].content!, /交付B1政策保留/)
+})
+
+test('同一Git反例 fail→pass：B.source夹A2但onlycoveredB，nextSource不变仍强制A2整合', async t => {
+  const f = await fixture(t, true), input = await captureInputSnapshot(f.root)
+  const legacy = composeInputSnapshots(input, f.pairB, { retainConflicts: true }).composed!
+  assert.deepEqual(authoredContractChanges(texts(f.pairB.sourceInput), texts(input), texts(f.pairB.verifiedDelivery), [{ id: 'export-contract', path }]), [])
+  const legacyText = readObject(input.source.commonDir, readTree(input.source.commonDir, legacy.tree).find(entry => entry.path === path)!.oid).toString('utf8')
+  assert.match(legacyText, /版本A1/); assert.doesNotMatch(legacyText, /版本A2/)
+  const selection = f.selection(), composed = composeInputSnapshots(input, selection, { retainConflicts: true }).composed!, evidence = readCompositionEvidence(input, composed, selection)
+  assert.deepEqual(evidence.residualPaths, [path]); assert.deepEqual(selectedAuthoredContractChanges(evidence).flatMap(change => change.changedIds), [a])
+  const analysis = await analyzeCodeBehavior({ snapshot: input, baseline: null, baselineSelection: selection, composed, readSetDigest: 'test-read', policyDigest: 'test-policy', requestKey: 'case2', timeoutMs: 10000, plan: f.plan }, fakeBehavior(f.addB(f.nextA), frozen => {
+    assert.deepEqual(frozen.changedPaths, [path]); assert.equal((frozen.authorChanges as CodeBehaviorAnalysis['authorChanges'])![0].changedIds[0], a)
+  }))
+  assert.match(analysis.resolutions[0].content!, /版本A2/); assert.match(analysis.resolutions[0].content!, /交付B1政策保留/)
+  const evidenceRoot = process.env.SPEX_COMPOSITION_EVIDENCE_DIR
+  if (evidenceRoot) writeFileSync(join(evidenceRoot, 'real-git-unconsumed-A2.json'), JSON.stringify({
+    scenario: 'B.source夹带未消费A2且nextSource不变', verification: '真实Git/store事务；四层验证及行为runner为fake，不是native产品验收',
+    sourceInput: input, bytePair: f.pairB, intentPairA: f.pairA, selection,
+    before: { legacyText, authorChanges: [] }, after: { evidence, analysis },
+  }, null, 2))
+})
+
+test('真实ff接受实际commit/blob/mode：B回声无作者变化，随后A编辑仍检测', async t => {
+  const f = await fixture(t)
+  git(f.root, 'merge', '--ff-only', f.deliveryB1.headCommit)
+  const accepted = await captureInputSnapshot(f.root), selection = f.selection(), composed = composeInputSnapshots(accepted, selection, { retainConflicts: true }).composed!
+  const evidence = readCompositionEvidence(accepted, composed, selection)
+  assert.equal(evidence.paths[0].adopted, true); assert.equal(evidence.paths[0].source?.mode, '100755')
+  assert.deepEqual(selectedAuthoredContractChanges(evidence), []); assert.deepEqual(evidence.residualPaths, [])
+  writeFileSync(join(f.root, path), f.addB(f.nextA))
+  const next = await captureInputSnapshot(f.root), changed = readCompositionEvidence(next, composeInputSnapshots(next, selection, { retainConflicts: true }).composed!, selection)
+  assert.deepEqual(selectedAuthoredContractChanges(changed).flatMap(change => change.changedIds), [a])
+})
+
+test('完整整合即使fake独审accept，程序仍拒Bpolicy、AC删除和权限弱化', async t => {
+  const f = await fixture(t, true), input = await captureInputSnapshot(f.root), selection = f.selection(), composed = composeInputSnapshots(input, selection, { retainConflicts: true }).composed!
+  const safe = f.addB(f.nextA), wrong = [safe.replace('交付B1政策保留', '被恶意改写'), safe.split('\n').filter(line => !line.startsWith('| AC-EXPORT-01 |')).join('\n'), safe.replace('CANCEL/RETRY/DOWNLOAD必须是当前所有者', 'CANCEL/RETRY/DOWNLOAD允许任何人')]
+  for (const content of wrong) await assert.rejects(analyzeCodeBehavior({ snapshot: input, baseline: null, baselineSelection: selection, composed, readSetDigest: 'test-read', policyDigest: 'test-policy', requestKey: content.slice(0, 20), timeoutMs: 10000, plan: f.plan }, fakeBehavior(content)), /精确组合破坏/)
+})
+
+test('实际读取资源含代码/保护契约与旧tombstone，不把授权目录当资源或coverage', async t => {
+  const f = await fixture(t), input = await captureInputSnapshot(f.root), resources = await deriveSyncBaselineResources(input, f.plan, f.selection())
+  assert.ok(resources.some(resource => resource.kind === 'path' && resource.path === 'src/export.js'))
+  assert.ok(resources.some(resource => resource.kind === 'contract' && resource.id === 'AC-EXPORT-01'))
+  assert.ok(resources.some(resource => resource.kind === 'flow' && resource.id === 'FLOW-EXPORT-01'))
+  assert.ok(!resources.some(resource => resource.kind === 'contract' && (resource.id.startsWith('FLOW-') || resource.id.startsWith('VERIFY-'))))
+  assert.ok(!resources.some(resource => resource.kind === 'path' && ['src', 'tests', '.spec'].includes(resource.path)))
+})
+
+test('精确组合的受控非重叠编辑保真实patch、selection证据与B交付，source/index不变', async t => {
+  const f = await fixture(t), input = await captureInputSnapshot(f.root), selection = f.selection(), original = texts(input).get(path)!
+  const next = original.replace('用户可以提交符合筛选条件的数据导出', '用户可以提交符合筛选条件的数据导出并查看作者请求提示')
+  const request = prepareControlledRequest(input, { path, source: original, next, changed: true, startLine: 1, endLine: 1 }, { kind: 'user_edit', requestId: 'controlled-nonoverlap', nodeId: 'export-contract', intent: '新增作者提示' })
+  assert.ok(request.changed)
+  const result = composeControlledRequest(input, composeInputSnapshots(input, selection, { retainConflicts: true }).composed!, request.requestBlob, { retainConflicts: true })
+  const evidence = readCompositionEvidence(input, result.composed!, selection)
+  assert.equal(evidence.controlledAuthorPatch!.requestBlob.sha256, request.requestBlob.sha256)
+  assert.ok(selectedAuthoredContractChanges(evidence).some(change => change.beforeRaw !== change.afterRaw))
+  const text = readObject(input.source.commonDir, readTree(input.source.commonDir, result.composed!.tree).find(entry => entry.path === path)!.oid).toString('utf8')
+  assert.match(text, /作者请求提示/); assert.match(text, /版本A1/); assert.match(text, /交付B1政策保留/)
+  const after = await captureInputSnapshot(f.root); assert.equal(after.id, input.id); assert.equal(after.indexDigest, input.indexDigest)
+})
+
+test('精确组合的受控重叠编辑继续保真实request三方与ID基线，独审不漏作者patch', async t => {
+  const f = await fixture(t), input = await captureInputSnapshot(f.root), selection = f.selection(), original = texts(input).get(path)!
+  const next = original.replace('成功需非空result、发布一次', '成功需明确作者A2结果政策、发布一次')
+  const request = prepareControlledRequest(input, { path, source: original, next, changed: true, startLine: 1, endLine: 1 }, { kind: 'user_edit', requestId: 'controlled-overlap', nodeId: 'export-contract', intent: '作者A2' })
+  assert.ok(request.changed)
+  const result = composeControlledRequest(input, composeInputSnapshots(input, selection, { retainConflicts: true }).composed!, request.requestBlob, { retainConflicts: true })
+  assert.equal(result.conflicts.length, 1)
+  const evidence = readCompositionEvidence(input, result.composed!, selection)
+  assert.equal(evidence.version, 'selected-composition-v1'); assert.equal(evidence.paths[0].pairId, f.pairB.id)
+  assert.equal(evidence.controlledAuthorPatch!.next.oid, result.conflicts[0].source!.oid)
+  assert.deepEqual(selectedAuthoredContractChanges(evidence).flatMap(change => change.changedIds), [a])
+  const analysis = await analyzeCodeBehavior({ snapshot: input, baseline: null, baselineSelection: selection, composed: result.composed!, readSetDigest: 'test-read', policyDigest: 'test-policy', requestKey: 'controlled-overlap', timeoutMs: 10000, plan: f.plan }, fakeBehavior(f.addB(next), frozen => {
+    assert.deepEqual((frozen.authorChanges as CodeBehaviorAnalysis['authorChanges'])![0].changedIds, [a])
+  }))
+  assert.match(analysis.resolutions[0].content!, /作者A2结果政策/); assert.match(analysis.resolutions[0].content!, /交付B1政策保留/)
+})
+
+test('精确executionPaths不夹带另一节点用户dirty或untracked，完整snapshot仍保真实字节', async t => {
+  const f = await fixture(t)
+  const committed = readFileSync(join(f.root, 'src/export.js'), 'utf8')
+  writeFileSync(join(f.root, 'src/export.js'), 'unrelated author draft\n'); writeFileSync(join(f.root, 'src/unrelated.js'), 'untracked draft\n')
+  const input = await captureInputSnapshot(f.root), composed = composeInputSnapshots(input, f.selection(), { retainConflicts: true, executionPaths: [path] }).composed!
+  const entries = readTree(input.source.commonDir, composed.tree)
+  assert.equal(readObject(input.source.commonDir, entries.find(entry => entry.path === 'src/export.js')!.oid).toString('utf8'), committed)
+  assert.ok(!entries.some(entry => entry.path === 'src/unrelated.js'))
+  assert.equal(texts(input).get('src/export.js'), 'unrelated author draft\n'); assert.equal(texts(input).get('src/unrelated.js'), 'untracked draft\n')
+})
+
+test('P3真实API目录覆盖pair仍可为journal精确文件head作证，不把prefix当exactbinding', async t => {
+  const f = await fixture(t, true, true), input = await captureInputSnapshot(f.root), selection = f.selection()
+  const byte = selection.bindings.find(binding => binding.resource.kind === 'path')
+  assert.ok(byte && 'bytePair' in byte); assert.equal(byte.resource.path, path); assert.deepEqual(byte.bytePair!.coveredScope.paths, ['.spec'])
+  const composed = composeInputSnapshots(input, selection, { retainConflicts: true }).composed!
+  assert.deepEqual(readCompositionEvidence(input, composed, selection).residualPaths, [path])
+})
+
+test('同一input/hash合法的新证据不能伪造无残差或替换真实source OID', async t => {
+  const f = await fixture(t, true), input = await captureInputSnapshot(f.root), selection = f.selection(), composed = composeInputSnapshots(input, selection, { retainConflicts: true }).composed!
+  const original = readCompositionEvidence(input, composed, selection)
+  const removed = structuredClone(original); removed.intents.find(item => item.resource.id === a)!.changed = false; removed.residualPaths = []
+  const fake = { ...composed, compositionEvidenceBlob: writeEvidence(input.source.commonDir, removed) }
+  assert.throws(() => readCompositionEvidence(input, fake, selection), /true intent objects or residual differ/)
+  const wrongSource = structuredClone(original); wrongSource.paths[0].source = wrongSource.paths[0].delivery
+  assert.throws(() => readCompositionEvidence(input, { ...composed, compositionEvidenceBlob: writeEvidence(input.source.commonDir, wrongSource) }, selection), /true byte objects differ/)
+})
+
+test('规划只读实际闭包，宽src/tests授权不把独立节点锁入scope或纳入读取', async t => {
+  const f = await fixture(t)
+  mkdirSync(join(f.root, '.spec/independent'))
+  writeFileSync(join(f.root, '.spec/independent/spec.md'), '---\ntitle: 独立节点\nstatus: active\ncode:\n  - src/independent.js\n---\n## raw source\n\n独立业务。\n\n## expanded spec\n\n独立实现。\n')
+  writeFileSync(join(f.root, 'src/independent.js'), 'export const independent = true\n')
+  writeFileSync(join(f.root, 'tests/independent.test.mjs'), 'independent test bytes\n')
+  writeFileSync(join(f.root, '.spec/spexcode.json'), JSON.stringify({ sync: {
+    version: 'sync-settings-v1', sourcePaths: ['src'], testPaths: ['generated-tests'], readPaths: [],
+    facts: [], mandatoryTests: [{ verificationId: 'VERIFY-EXPORT-01', testPath: 'tests/export.test.mjs', testId: 'AC-EXPORT-01' }], budget: { maxAttempts: 2, maxCalls: 4, maxRepairs: 1, timeoutMs: 30000 },
+    verifications: [{ definition: { id: 'VERIFY-EXPORT-01', command: ['node', '--test', 'tests/export.test.mjs'], cwd: '.', timeoutMs: 1000 }, environment: { version: 'v1', image: `node@sha256:${'a'.repeat(64)}`, platform: 'linux/arm64', memoryBytes: 100000000, cpus: 1, pidsLimit: 64, scratchBytes: 1000000, logBytes: 100000 } }],
+  } }))
+  const input = await captureInputSnapshot(f.root), plan = await buildSyncApplicationPlan(input, 'export-contract', f.selection())
+  assert.ok(plan.writePaths.includes('src')); assert.ok(plan.writePaths.includes('generated-tests')); assert.ok(!plan.writePaths.includes('tests'))
+  assert.ok(!plan.readPaths.includes('src')); assert.ok(!plan.readPaths.includes('tests'))
+  assert.ok(!plan.targets.some(target => target.nodeId === 'independent'))
+  const resources = await deriveSyncBaselineResources(input, plan, f.selection())
+  assert.ok(!resources.some(resource => resource.kind === 'path' && resource.path.includes('independent')))
+  assert.ok(!plan.executionScope.paths.some(path => path.includes('independent')))
+  assert.ok(plan.executionScope.paths.includes('src/export.js'))
+  assert.ok(plan.readPaths.includes('tests/export.test.mjs'))
+  assert.ok(resources.some(resource => resource.kind === 'path' && resource.path === 'tests/export.test.mjs'))
+  assert.ok(!plan.executionScope.paths.includes('tests/export.test.mjs'), 'mandatory oracle must remain readonly even when contractImpact includes it')
+  const evidenceRoot = process.env.SPEX_COMPOSITION_EVIDENCE_DIR
+  if (evidenceRoot) writeFileSync(join(evidenceRoot, 'oracle-scope-after.json'), JSON.stringify({ limitation: '真实Git/store规划；验证fake，非Docker产品证明', input, plan, resources }, null, 2))
+})
+
+
+test('code-only A2夹在B.source但未消费：实际行为分析必须读取并完整整合A2与B1', async t => {
+  const f = await fixture(t, true, false, true), input = await captureInputSnapshot(f.root), selection = f.selection()
+  const composed = composeInputSnapshots(input, selection, { retainConflicts: true }).composed!
+  const analysis = await analyzeCodeBehavior({ snapshot: input, baseline: null, baselineSelection: selection, composed, readSetDigest: 'test-read-code', policyDigest: 'test-policy-code', requestKey: 'code-only-A2', timeoutMs: 10000, plan: f.plan }, fakeBehavior(f.addCodeB(f.codeA2), frozen => {
+    assert.deepEqual(frozen.requiredChangedPaths, [f.codePath])
+    assert.deepEqual(frozen.changedPaths, [f.codePath])
+    assert.deepEqual(frozen.authorChanges, [])
+    const files = frozen.intentArtifactFiles as { path: string; text: string }[]
+    assert.ok(files.some(file => file.path === f.codePath && file.text === f.sourceCode))
+    assert.ok(files.some(file => file.path === f.codePath && file.text === f.codeA2))
+    assert.ok(files.some(file => file.path === f.codePath && file.text === f.addCodeB(f.codeA1)))
+  }, f.codePath))
+  assert.match(analysis.resolutions[0].content!, /resultVersion = 'A2'/)
+  assert.match(analysis.resolutions[0].content!, /deliveryPolicy = 'B1'/)
+  const evidence = readCompositionEvidence(input, composed, selection), artifact = evidence.artifacts.find(item => item.resource.id === a && item.path === f.codePath)!
+  assert.equal(artifact.pairId, f.pairA.id); assert.equal(artifact.changed, true)
+  assert.notEqual(artifact.before?.oid, artifact.source?.oid)
+  assert.equal(evidence.paths.find(item => item.path === f.codePath)!.pairId, f.pairB.id)
+  assert.equal(artifact.source?.oid, evidence.paths.find(item => item.path === f.codePath)!.base?.oid)
+  const forged = structuredClone(evidence); forged.artifacts.find(item => item.resource.id === a && item.path === f.codePath)!.changed = false; forged.residualPaths = []
+  assert.throws(() => readCompositionEvidence(input, { ...composed, compositionEvidenceBlob: writeEvidence(input.source.commonDir, forged) }, selection), /true code\/test objects or residual differ/)
+  const evidenceRoot = process.env.SPEX_COMPOSITION_EVIDENCE_DIR
+  if (evidenceRoot) writeFileSync(join(evidenceRoot, 'code-only-after.json'), JSON.stringify({ scenario: '真实code-only A2尚未消费', limitation: '真实Git/store；验证及行为runner fake', input, selection, artifact, evidence, analysis, files: { source: f.sourceCode, newSource: f.codeA2, delivered: f.addCodeB(f.codeA1) } }, null, 2))
+})
+
+test('code-only完整整合不能删除B1或弱化未选权限，即使fake独审accept', async t => {
+  const f = await fixture(t, true, false, true), input = await captureInputSnapshot(f.root), selection = f.selection(), composed = composeInputSnapshots(input, selection, { retainConflicts: true }).composed!
+  for (const wrong of [f.codeA2, f.addCodeB(f.codeA2).replace("throw new Error('forbidden');", 'return null;')]) {
+    await assert.rejects(analyzeCodeBehavior({ snapshot: input, baseline: null, baselineSelection: selection, composed, readSetDigest: 'test-read-code', policyDigest: 'test-policy-code', requestKey: 'code-reject-B', timeoutMs: 10000, plan: f.plan }, fakeBehavior(wrong, undefined, f.codePath)), /源码整合丢失/)
+  }
+  await assert.rejects(analyzeCodeBehavior({ snapshot: input, baseline: null, baselineSelection: selection, composed, readSetDigest: 'test-read-code', policyDigest: 'test-policy-code', requestKey: 'code-reject-mode', timeoutMs: 10000, plan: f.plan }, fakeBehavior(f.addCodeB(f.codeA2), undefined, f.codePath, '100644')), /源码整合丢失真实三方mode/)
+})
+
+test('code-only真实ff采纳完整byte head后无代码回声，再A3仍进入实际独审必读路径', async t => {
+  const f = await fixture(t, true, false, true)
+  git(f.root, 'restore', f.codePath); git(f.root, 'merge', '--ff-only', f.deliveryB1.headCommit)
+  const selection = f.selection(), accepted = await captureInputSnapshot(f.root), composed = composeInputSnapshots(accepted, selection, { retainConflicts: true }).composed!
+  const evidence = readCompositionEvidence(accepted, composed, selection)
+  assert.deepEqual(evidence.residualPaths, []); assert.ok(evidence.artifacts.every(item => !item.changed))
+  const acceptedA = evidence.artifacts.find(item => item.resource.id === a && item.path === f.codePath)!
+  assert.equal(acceptedA.adoptionPairId, f.pairB.id); assert.equal(acceptedA.adoptionCommit, f.deliveryB1.headCommit)
+  assert.equal(acceptedA.source!.mode, '100755')
+  await analyzeCodeBehavior({ snapshot: accepted, baseline: null, baselineSelection: selection, composed, readSetDigest: 'accepted-read', policyDigest: 'test-policy-code', requestKey: 'code-echo', timeoutMs: 10000, plan: f.plan }, fakeBehavior(undefined, frozen => { assert.deepEqual(frozen.changedPaths, []); assert.deepEqual(frozen.authorChanges, []) }))
+  const codeA3 = f.addCodeB(f.codeA2).replace("'A2'", "'A3'")
+  writeFileSync(join(f.root, f.codePath), codeA3)
+  const next = await captureInputSnapshot(f.root), updated = composeInputSnapshots(next, selection, { retainConflicts: true }).composed!
+  const analysis = await analyzeCodeBehavior({ snapshot: next, baseline: null, baselineSelection: selection, composed: updated, readSetDigest: 'test-read-A3', policyDigest: 'test-policy-code', requestKey: 'code-A3', timeoutMs: 10000, plan: f.plan }, fakeBehavior(codeA3, frozen => { assert.deepEqual(frozen.requiredChangedPaths, [f.codePath]) }, f.codePath))
+  assert.match(analysis.resolutions[0].content!, /resultVersion = 'A3'/); assert.match(analysis.resolutions[0].content!, /deliveryPolicy = 'B1'/)
+})
+
+test('readonly context使用真实dirty config/oracle对象，保持mode/删除且不升写范围', async t => {
+  const f = await fixture(t), configPath = '.spec/spexcode.json', oracle = 'tests/export.test.mjs'
+  writeFileSync(join(f.root, configPath), '{"name":"old readonly context"}\n')
+  git(f.root, 'add', configPath); git(f.root, 'commit', '-m', 'tracked readonly configuration')
+  writeFileSync(join(f.root, configPath), '{"name":"actual dirty readonly context"}\n'); chmodSync(join(f.root, configPath), 0o755)
+  rmSync(join(f.root, oracle))
+  const input = await captureInputSnapshot(f.root), selection = f.selection()
+  const result = composeInputSnapshots(input, selection, { retainConflicts: true, executionPaths: [path], contextPaths: [configPath, oracle] })
+  const entries = readTree(input.source.commonDir, result.composed!.tree), actual = verifySnapshot(input).find(entry => entry.path === configPath)!
+  assert.equal(entries.find(entry => entry.path === configPath)?.oid, actual.oid)
+  assert.equal(entries.find(entry => entry.path === configPath)?.mode, '100755')
+  assert.ok(!entries.some(entry => entry.path === oracle))
+  assert.deepEqual(result.composed!.sourceInputId, input.id)
+  const evidence = readCompositionEvidence(input, result.composed!, selection)
+  assert.deepEqual(evidence.executionPaths, [path]); assert.deepEqual(evidence.contextPaths, [configPath, oracle].sort())
+  const forged = structuredClone(evidence); forged.contextPaths = []
+  assert.throws(() => readCompositionEvidence(input, { ...result.composed!, compositionEvidenceBlob: writeEvidence(input.source.commonDir, forged) }, selection), /true readonly source\/HEAD object differs/)
+  const after = await captureInputSnapshot(f.root); assert.equal(after.id, input.id); assert.equal(after.indexDigest, input.indexDigest)
+})
+
+
+function discoverySettings(root: string): void {
+  writeFileSync(join(root, '.spec/spexcode.json'), JSON.stringify({ sync: {
+    version: 'sync-settings-v1', nodeIds: ['export-contract'], sourcePaths: ['src'], testPaths: ['tests'], readPaths: [], facts: [], mandatoryTests: [],
+    budget: { maxAttempts: 2, maxCalls: 4, maxRepairs: 1, timeoutMs: 30000 },
+    verifications: [{ definition: { id: 'VERIFY-EXPORT-01', command: ['node', '--test', 'tests/export.test.mjs'], cwd: '.', timeoutMs: 1000 }, environment: { version: 'v1', image: `node@sha256:${'a'.repeat(64)}`, platform: 'linux/arm64', memoryBytes: 100000000, cpus: 1, pidsLimit: 64, scratchBytes: 1000000, logBytes: 100000 } }],
+  } }))
+}
+
+test('新module发现：已commit feature及未跟踪helper完整进入实际分析，独立B仍不读取或锁定', async t => {
+  const f = await fixture(t), helper = 'src/new-helper.js', feature = 'src/feature.js'
+  discoverySettings(f.root)
+  mkdirSync(join(f.root, '.spec/independent'))
+  writeFileSync(join(f.root, '.spec/independent/spec.md'), '---\ntitle: 独立B\nstatus: active\ncode:\n  - src/independent.js\n---\n## raw source\n\n独立B功能。\n\n## expanded spec\n\n保留B行为。\n')
+  writeFileSync(join(f.root, 'src/independent.js'), 'export const independent = true\n')
+  writeFileSync(join(f.root, helper), 'export const helper = value => `${value}!`\n')
+  writeFileSync(join(f.root, feature), 'export const feature = value => ({ value })\n')
+  git(f.root, 'add', '.'); git(f.root, 'reset', '--', helper); git(f.root, 'commit', '-m', 'real committed independent B and ungoverned external feature')
+  writeFileSync(join(f.root, 'src/independent.js'), 'export const independent = "unrelated B dirty"\n')
+  writeFileSync(join(f.root, f.codePath), `${f.sourceCode}\nexport const loadHelper = () => import('./new-helper.js')\n`)
+  const input = await captureInputSnapshot(f.root), plan = await buildSyncApplicationPlan(input, 'export-contract', f.selection())
+  const resources = await deriveSyncBaselineResources(input, plan, f.selection()), selected = f.store.readBaselineSelection(input.source, resources)
+  assert.ok('selection' in selected)
+  const selection = selected.selection, composed = composeInputSnapshots(input, selection, { executionPaths: plan.executionScope.paths, contextPaths: plan.readPaths, retainConflicts: true }).composed!
+  const makeRunner = (provideCoverage: boolean): ElaborationRunner => async request => {
+    const result = await fakeBehavior(undefined, frozen => {
+      const changed = frozen.requiredChangedPaths as string[], source = new Map(frozen.newSource as [string, string][])
+      for (const target of [helper, feature]) { assert.ok(changed.includes(target), `actual analyze must require full new module ${target}`); assert.equal(source.get(target), readFileSync(join(f.root, target), 'utf8')) }
+      assert.ok(!source.has('src/independent.js'))
+    })(request)
+    if (request.purpose === 'code_behavior_analyze' && provideCoverage) {
+      const output = result.output as { changes: { kind: string; paths: string[] }[]; newNodes: { codePath: string; parentNodeId: string; basis: string }[] }
+      output.changes = output.changes.map(change => change.paths.includes(feature) ? { ...change, kind: 'coverage_gap' } : change)
+      output.newNodes = [{ codePath: helper, parentNodeId: 'export-contract', basis: '实际上层raw及export源码新增literal动态import，helper实现同一导出职责' }]
+      result.resultDigest = contentHash(JSON.stringify(output))
+    }
+    return result
+  }
+  const args = { snapshot: input, baseline: null, baselineSelection: selection, composed, readSetDigest: 'discovery-read', policyDigest: 'discovery-policy', requestKey: 'discovery', timeoutMs: 10000, plan }
+  const analysis = await analyzeCodeBehavior(args, makeRunner(true))
+  assert.ok(analysis.newNodes.some(node => node.codePath === helper))
+  assert.ok(analysis.findings.some(finding => finding.kind === 'coverage_gap' && finding.paths.includes(feature)))
+  await assert.rejects(analyzeCodeBehavior(args, makeRunner(false)), /无治理代码未创建真实归属或具体GAP/)
+  for (const target of [helper, feature]) { assert.ok(plan.readPaths.includes(target)); assert.ok(resources.some(resource => resource.kind === 'path' && resource.path === target)); assert.ok(!plan.executionScope.paths.includes(target)) }
+  assert.ok(!resources.some(resource => resource.kind === 'path' && resource.path.includes('independent')))
+  assert.ok(!plan.executionScope.paths.some(path => path.includes('independent')))
+  const evidenceRoot = process.env.SPEX_COMPOSITION_EVIDENCE_DIR
+  if (evidenceRoot) writeFileSync(join(evidenceRoot, 'module-discovery-after.json'), JSON.stringify({ limitation: '真实Git/store；行为runner及独审和四层验证fake', input, selection, plan, resources, analysis, files: [helper, feature, f.codePath].map(path => ({ path, entry: verifySnapshot(input).find(entry => entry.path === path), text: texts(input).get(path) })), gitLog: git(f.root, 'log', '--all', '--format=%H %P %s') }, null, 2))
+})
+
+test('新module发现保真实settled治理：来源未ff接受的新leaf/code不被另一节点重复收作无治理', async t => {
+  const f = await fixture(t), helper = 'src/delivered-helper.js', leaf = '.spec/delivered-helper/spec.md'
+  git(f.root, 'merge', '--ff-only', f.deliveryB1.headCommit)
+  discoverySettings(f.root)
+  writeFileSync(join(f.root, helper), 'export const helper = () => "existing delivered feature"\n')
+  const input = await captureInputSnapshot(f.root)
+  mkdirSync(join(f.deliveryRoot, '.spec/delivered-helper'))
+  writeFileSync(join(f.deliveryRoot, leaf), '---\ntitle: 已交付helper\nstatus: active\ncode:\n  - src/delivered-helper.js\n---\n## raw source\n\n独立已交付业务。\n\n## expanded spec\n\n保留helper行为。\n')
+  writeFileSync(join(f.deliveryRoot, helper), readFileSync(join(f.root, helper))); chmodSync(join(f.deliveryRoot, helper), 0o755)
+  writeFileSync(join(f.deliveryRoot, '.spec/spexcode.json'), readFileSync(join(f.root, '.spec/spexcode.json')))
+  git(f.deliveryRoot, 'add', '.'); git(f.deliveryRoot, 'commit', '-m', 'actual settled helper governance not yet adopted by source')
+  const delivery = await captureInputSnapshot(f.deliveryRoot)
+  const leafPair = await f.settle(input, delivery, 'settled-new-leaf', [], [leaf, helper])
+  const selected = f.store.readBaselineSelection(input.source, f.store.listBaselineResources(input.source)); assert.ok('selection' in selected)
+  const plan = await buildSyncApplicationPlan(input, 'export-contract', selected.selection)
+  assert.ok(!texts(input).has(leaf)); assert.ok(texts(delivery).has(leaf))
+  assert.ok(!plan.readPaths.includes(helper), 'actual verified delivery ownership must exclude this helper from ungoverned discovery')
+  assert.ok(!plan.executionScope.paths.includes(helper))
+  const exact = f.store.readBaselineSelection(input.source, await deriveSyncBaselineResources(input, plan, selected.selection)); assert.ok('selection' in exact)
+  assert.ok(!exact.selection.bindings.some(binding => binding.resource.kind === 'path' && binding.resource.path === leaf))
+  const narrowed = await buildSyncApplicationPlan(input, 'export-contract', exact.selection, { discoverySelection: selected.selection })
+  assert.ok(!narrowed.readPaths.includes(helper), 'narrowing business selection must retain actual independent delivery governance')
+  rmSync(join(f.root, helper)); rmSync(join(f.root, '.spec/spexcode.json'))
+  git(f.root, 'merge', '--ff-only', delivery.headCommit)
+  const accepted = await captureInputSnapshot(f.root)
+  rmSync(join(f.deliveryRoot, leaf)); git(f.deliveryRoot, 'add', '.'); git(f.deliveryRoot, 'commit', '-m', 'actual retirement removes governance owner only')
+  const retired = await captureInputSnapshot(f.deliveryRoot)
+  const retiredPair = await f.settle(accepted, retired, 'settled-retired-leaf', [], [leaf])
+  git(f.root, 'merge', '--ff-only', retired.headCommit)
+  const current = await captureInputSnapshot(f.root), heads = f.store.readBaselineSelection(current.source, f.store.listBaselineResources(current.source)); assert.ok('selection' in heads)
+  assert.ok(!texts(current).has(leaf)); assert.ok(texts(delivery).has(leaf))
+  const afterRetirement = await buildSyncApplicationPlan(current, 'export-contract', heads.selection, { discoverySelection: heads.selection })
+  assert.ok(afterRetirement.readPaths.includes(helper), 'old unrelated code head snapshot must not resurrect a retired owner path')
+  const evidenceRoot = process.env.SPEX_COMPOSITION_EVIDENCE_DIR
+  if (evidenceRoot) writeFileSync(join(evidenceRoot, 'module-governance-after.json'), JSON.stringify({ limitation: '真实Git/store结算/ff/退役；验证fake', input, delivery, accepted, retired, current, leafPair, retiredPair, broadSelection: selected.selection, exactSelection: exact.selection, currentHeads: heads.selection, plans: { plan, narrowed, afterRetirement }, ownerTexts: { delivered: texts(delivery).get(leaf), current: texts(current).get(leaf) ?? null }, gitLog: git(f.root, 'log', '--all', '--format=%H %P %s') }, null, 2))
+})

@@ -8,6 +8,7 @@ import { readObject, validateRepositoryPath, verifySnapshot } from './snapshot.j
 
 export type SyncSettings = {
   version: 'sync-settings-v1'
+  nodeIds?: string[]
   sourcePaths: string[]
   testPaths: string[]
   readPaths: string[]
@@ -26,7 +27,7 @@ const validate = new Ajv({ allErrors: true }).compile({
   type: 'object', additionalProperties: false,
   required: ['version', 'sourcePaths', 'testPaths', 'readPaths', 'verifications', 'mandatoryTests', 'facts', 'budget'],
   properties: {
-    version: { const: 'sync-settings-v1' }, sourcePaths: { ...paths, minItems: 1 }, testPaths: { ...paths, minItems: 1 }, readPaths: paths, callTimeoutMs: positive,
+    version: { const: 'sync-settings-v1' }, nodeIds: { ...paths, minItems: 1 }, sourcePaths: { ...paths, minItems: 1 }, testPaths: { ...paths, minItems: 1 }, readPaths: paths, callTimeoutMs: positive,
     facts: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['source', 'text'], properties: { source: { type: 'string', minLength: 1 }, text: { type: 'string', minLength: 1 } } } },
     budget: { type: 'object', additionalProperties: false, required: ['maxAttempts', 'maxCalls', 'maxRepairs', 'timeoutMs'], properties: { maxAttempts: positive, maxCalls: positive, maxRepairs: { type: 'integer', minimum: 0 }, timeoutMs: positive } },
     mandatoryTests: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['verificationId', 'testPath', 'testId'], properties: { verificationId: { type: 'string', minLength: 1 }, testPath: { type: 'string', minLength: 1 }, testId: { type: 'string', pattern: '^\\S+$' } } } },
@@ -53,6 +54,7 @@ export function readSyncSettings(snapshot: InputSnapshot): { settings: SyncSetti
   const config = parsed as { sync?: unknown }
   if (!validate(config.sync)) throw new SyncApplicationError('sync_configuration_invalid', `sync 配置缺口：${new Ajv().errorsText(validate.errors)}`)
   const settings = config.sync as SyncSettings
+  if (settings.nodeIds?.some(id => !id.trim() || id !== id.trim())) throw new SyncApplicationError('sync_configuration_invalid', 'nodeIds 必须为非空精确节点 ID')
   if (settings.callTimeoutMs !== undefined && settings.callTimeoutMs > settings.budget.timeoutMs) throw new SyncApplicationError('sync_configuration_invalid', 'callTimeoutMs 不能超过操作总预算 timeoutMs')
   for (const path of [...settings.sourcePaths, ...settings.testPaths, ...settings.readPaths]) {
     settingsPath(path)

@@ -130,7 +130,14 @@ export async function runGeneration(supplied: GenerationInput, options: Generati
       const before = input.manifest.entries.find(entry => entry.path === spec.path)
       return { path: spec.path, beforeDigest: before?.digest ?? null, beforeMode: before?.mode ?? null, content: spec.source, mode: null }
     })
-    result.candidate = freezeCandidate(input.snapshot, { version: 'sync-files-v1', changes: [...response.changes, ...approvedSpecs] }, input.allowedScope, input.composed)
+    const publicationComposed = await options.beforeFreezeCandidate?.() ?? input.composed
+    if (publicationComposed) {
+      const before = readTree(input.snapshot.source.commonDir, input.composed?.tree ?? input.snapshot.immutableTree), after = readTree(input.snapshot.source.commonDir, publicationComposed.tree)
+      const protectedPaths = [...(options.protectedReadPaths ?? []), ...input.files.keys(), ...input.allowedScope.paths]
+      const protectedEntries = (entries: TreeEntry[]): TreeEntry[] => entries.filter(entry => protectedPaths.some(path => entry.path === path || entry.path.startsWith(`${path}/`)))
+      if (publicationComposed.sourceInputId !== input.snapshot.id || JSON.stringify(protectedEntries(before)) !== JSON.stringify(protectedEntries(after))) throw new Error('可信发布基树改变了原冻结读写闭包或不存在路径')
+    }
+    result.candidate = freezeCandidate(input.snapshot, { version: 'sync-files-v1', changes: [...response.changes, ...approvedSpecs] }, input.allowedScope, publicationComposed)
     const changed = JSON.parse(readEvidence(input.snapshot.source.commonDir, result.candidate.actualDiffBlob).toString()) as { path: string; preDigest: string | null }[]
     if (changed.some(file => isHostPrivatePath(file.path) || file.preDigest !== null && !input.files.has(file.path))) throw new Error('生成候选修改了禁止路径或未完整读取的原文件')
     cancelled()

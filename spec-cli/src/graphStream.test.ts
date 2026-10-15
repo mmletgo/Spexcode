@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, renameSync, symlinkSync, rmSync, writeFileSync } from 'node:fs'
 import { EventEmitter } from 'node:events'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -443,4 +443,14 @@ test('the canonical session database is one non-recursive leaf that delivers onl
   assert.equal(ignore('store.db-wal'), false)
   assert.equal(ignore('store.dbx'), true)
   assert.equal(ignore('other.db'), true)
+})
+
+test('missing worktree aliases share the existing ancestor canonical identity', () => {
+  const fixture = mkdtempSync(join(tmpdir(), 'graph-watch-alias-'))
+  try {
+    const parent = join(fixture, 'real'), alias = join(fixture, 'alias')
+    mkdirSync(parent); symlinkSync(parent, alias)
+    const paths = sessionWorktreeWatchPaths([{ id: 'a', path: join(alias, 'missing', 'tree'), liveness: 'unknown' }, { id: 'b', path: join(parent, 'missing', 'tree'), liveness: 'unknown' }])
+    assert.deepEqual([...paths], [join(realpathSync(parent), 'missing', 'tree')])
+  } finally { rmSync(fixture, { recursive: true, force: true }) }
 })

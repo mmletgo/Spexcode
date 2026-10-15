@@ -18,7 +18,7 @@ code:
 
 operation 保存不可变输入和 previousBaselinePair、generation/revision、根因及接入键、政策/影响/读集合摘要、8.2 全部阶段、控制与预算、真实 paths/contractIds/flowIds 范围、ready/blocked/delivered 范围及交付目标。attempt 独立保存稳定派发与 session 创建键、原生会话引用、完整 manifest 与实际 diff blob 候选、验证、checkpoint blob 与明确失败类型。fence 绑定 operation、attempt、generation、源物理身份与 lease token。
 
-operation 可保存 contractScopeExpansions：每项只含完整 contractIds/flowIds 和可信细化 evidenceRef，供范围扩展幂等、重启/retry 与证据保活；不携正文或路径扩权。旧数据库无此字段表示尚未通过动作门禁扩展。既有初始 payload 身份不因细化新增 ID 改写。
+operation 可保存 contractScopeExpansions：P3每项只含完整 contractIds/flowIds 和可信细化 evidenceRef；P4可增加已审P1发现的精确paths及扩展前后selection摘要，供范围扩展幂等、重启/retry、组合readSet重绑与证据保活，不携正文。旧数据库无此字段表示尚未通过动作门禁扩展。既有初始 payload 身份不因细化新增 ID 改写。
 
 受控编辑或裁决可提供 requestBlob 保存额外用户意图的不可变引用。input 仍表示实际采集的来源字节，不能为了接收 Dashboard 编辑而谎称 main 已改变或先单独提交 Spec；组合输入在已验证原文条件后叠加请求。纯文件观察事件无需 requestBlob。请求引用参与接入幂等摘要、恢复与证据保活。
 
@@ -47,3 +47,9 @@ SyncIngressReceipt 只保存原接入的精确 payload 摘要、operation 引用
 共同BaselinePair和VerificationResultBlob可携retiredIds，旧JSON缺省为空。ComposedInputRef可携compositionEvidenceBlob保留三方文本重叠对象，重叠不是业务冲突结论；独立行为审查之后才形成完整交付候选。
 
 共同BaselinePair与验证结算blob可携decisionRefs，引用不可变用户裁决输入。旧JSON为空；仅receipt结算累积引用，未验证/未应用裁决不会成为后续权威。后续planning据引用重读具体finding及ruleIds形成精确supersession，保留原facts历史全文且不改变未选政策或执行授权。
+
+P4 新接入保存 FrozenBaselineSelection：每个精确 path 恰有 bytePair，每个 contract/flow 恰有 intentPair；没有基线显式 null，禁止整对 latest 回退。选择摘要贯穿 composed/apply CAS。PhysicalScope 只含 repositoryId/canonicalRoot/physicalFingerprint，暂停跨同物理树切分支持久生效，基线仍按完整身份隔离。DispatchAnchor 固定首次真实 protocol enqueue_seq、messageId 及预算族根；当前 dispatchMessageId 与 anchor 分开。观察冻结输入、配置 ref、选择摘要、差异与控制 revision。
+
+P4 selection包含全部精确read/protection及write资源，operation.scope只含实际意图/write范围；readonly资源不进入写租约或交付完成计数。ContractScopeExpansion的可选paths仅由已审P1真实新文件授权，范围与选择同事务扩展。新selection摘要贯穿attempt、composed、verification外层及blob和apply。ClaimQueuedAttemptInput只有显式continuation:true允许安全已ack repair/过期续尝试，failed不自动变queued。SyncIngressReceipt保各alias自己的input、origin、selection和payload引用，原operation冻结输入不改。SyncObserverHealth只记录物理scope、进程/实例和健康事实，online由调用者核实际存活，不以旧watching记录推断。
+
+PublicationBase 可选保存于 attempt，绑定实际 parentCommit/parentTree/parentManifestBlob、publication provenance 和派生 composed；原 attempt.composedInput 不替换。PublicationHeads 仅给可信发布器提供同来源已结算 path 选择及无关 legacy 诊断。candidate.baseTree 为 publicationBase.composed.tree（缺字段的 P3 沿原 composed）；ApplyPlan 可携 publicationBaseRef，精确绑定本轮冻结 provenance，不借继承字节扩大 scope。

@@ -17,7 +17,7 @@ related:
 `spex guide sync` documents the P2 shared [[sync-application]] workflow and versioned
 sync-settings-v1 configuration: directory authorization, exact Docker Node verification registrations,
 protected tests, business facts and budgets. Image placeholders require an actually prepared frozen
-image; the page does not promise external watching.
+image; the page documents explicit enable authorization and service-owned external watching, physical pause/resume, latest-input compensation, and offline diagnostics.
 The workflow teaches explicit `--retry-of`, preserved original body intent and origin,
 read-only retryEligibility and refusal for changed input, unresolved resources or business GAP/conflict.
 An ordinary repeated input does not grant a fresh operation budget.

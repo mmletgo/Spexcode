@@ -67,3 +67,13 @@ P3覆盖retiredIds在receipt前不推进、结算及重启/published pair累积�
 
 
 partial startGeneration登记needs_input后，生成environment失败及后续预算耗尽分别保原业务reason与失败证据，结清attempt/资源后eligibility和实际decision admission通过；仍在generating时同请求被拒。不以数据库伪造状态证明该路径。
+
+P4 针对性回归覆盖精确资源 frontier、物理暂停跨分支/重启、FIFO 收件与领取分离、暂停重叠前序和独立范围、不可变 successor 原位置与预算族、事务 CAS 与旧基线恢复；迁移覆盖在线备份、失败回滚、未知 writer 拒绝及原会话读取。
+
+P4新增定向矩阵使用真实SQLite句柄/事务、online backup及真实Git分支快照：共享byteB与intentA残差、explicit null vs legacy未知、readonly共享并行与read CAS、self future echo与foreign新语义、same selected差异+无关dirty不重开失败、ack提交前rollback/后reopen、原位置successor、全预算族统计、物理pause apply安全结算、旧P3 applying迁移恢复、P1新path/ID选择扩展及readset重组、health实例CAS和失败观测保活。存储文件与adopter-seams为定向套件，不运行完整测试集；完整业务author/raw归属与真实产品Agent闭环由协调/组合/应用验收证明。
+
+补充fail→pass：外repo/branch同名FLOW污染本source退休kind的迁移反例，旧kind缺证明应始终legacy unknown；同source真实前驱正例仍得到准确flow tombstone。P4后续同ID新intent head保selection中的裁决/退役历史，未覆盖历史ID的head/coverage保持不动。
+
+自动预算回归通过真实 observeAndAdmit 验证不可变 successor 继承 FIFO/全族预算/截止时间，包括失败后的新 byte；显式新输入和 P3 无 selection 获独立预算族，旧未 removed 原生资源仍阻止新 claim，清理后才可使用新预算。
+
+P4 裁决复现已结算选择后，另一真实 SQLite journal/receipt 推进相同资源头，同一选择因 selection 变化错误新建操作的失败。修复后运输 alias 与独立 handle 重开均保原 operation/calls/deadline/receipt，保存新 ingress 的实际 selection，同 key 换 choice 拒绝。测试的 Git tree/四层证据明确模拟，只证明事务归并，不冒称产品 Docker 或原生模型执行。

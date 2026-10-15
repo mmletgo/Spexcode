@@ -25,3 +25,5 @@ code:
 oracle 定向回归核 mandatory tuple、固定 verification definition 与完整旧断言进入同一生成/独审输入；调用者后改 testId/command 不改变冻结内容和摘要。未绑定当前真实裁决的 reserved missing_fact/needs_input finding 必须 review_invalid，不自免检。
 
 contract-omission marker回归拒绝错路径、未知existingID与affectedIds未关联；普通contract引用仍返回repair而不获得重细化权。真实候选、独立identity与原schema门禁全部保留。
+
+可信发布 freeze 回调回归证明：响应返回后才调用，闭包外真实继承进入实际候选且原模型提示不变；闭包内 readonly 字节和不存在路径被回调修改均拒绝，模型修改 readonly oracle 仍越界拒绝。

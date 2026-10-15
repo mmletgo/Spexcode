@@ -50,3 +50,31 @@ P3-PARTIAL同时覆盖分行及同行互不重叠的A交付/B裁决，完整原r
 AC-APPLICATION-P3-DELIVERY复用06的真实临时Git、canonical SQLite、compiled CLI与普通hooks，可信预登记VERIFY-DECISION-01。外部源码新增filter超过8字符拒绝，与原RULE-EXPORT-02/AC-EXPORT-02的非空要求形成具体冲突；submit(code)真实分析和独审生成检查点，公共wait读取analysisRef/finding，三choice分别decide→wait→V1–V4/Docker→settled receipt。keep_intent移除上限且raw不变，adopt_behavior明确8上限，new_rule明确128上限；原oracle不改，新generated-tests覆盖8/9、128/129、空、幂等和权限。实际receipt正文、规则及源码符合冻结选择，未选原义务保持，source/index保留、重复裁决不新增call/commit。native输出为确定性替身，不宣称真实模型验收。
 
 AC-APPLICATION-P3-ORACLE-REAL 在 fixture 作者起始可信提交中登记不可改旧 oracle：9/129 长度均接受。公共 submit(code)→decide→wait 三选择执行同一完整 Docker 命令，keep 相容分支真实 receipt；adopt/new_rule 新限额真实 V3 非零、预算耗尽且无 receipt，绝不在裁决后改 oracle。ORACLE-PROTOCOL 用同一精确独审 finding 和冻结输入验证互斥分类由泛 generation_failed 改为 needs_input/oracle_policy_conflict，保具体裁决、定义、旧 oracle 摘要及矛盾反例；终态 wait 重放不新增 call，source/index 保留。本协议 runner 为明确独审接缝，不冒称真实模型判断。
+
+AC-APPLICATION-P4-01 使用真实Git/SQLite和明确故障runner验证无Dashboard持续服务：物理暂停期间保存保持0dispatch，恢复绑定最新snapshot，重复补偿不重开失败调用；02 验证服务offline、停机外部Git提交和启动补偿；03 验证branch切换旧授权失效、物理pause跨branch保持以及显式新授权。
+
+AC-APPLICATION-P4-04 验证nodeIds明确子树、新纯raw后续保存、parent/child不重复注册和越域manual拒绝；05验证省略nodeIds仅从实际受治理授权路径接入、未授权code保持excluded以及纯raw首次需显式注册。
+
+AC-APPLICATION-P4-06 使用真实Git root移动/重建，验证持久健康、实际process在线、最后差异证据、missing query与snapshot保留；新物理root未授权不冻结新snapshot、不派发，stop持久stopped而非旧online。
+
+AC-APPLICATION-P4-07 验证重新授权后旧root确实撤权，已注册root被删除时仍在missing范围且保留真实node_unknown观测，不把它显示为空项目正常。
+
+AC-APPLICATION-P4-08 真实Git/SQLite、正式观察服务、compiled hooks与Docker验证无浏览器保存触发自动交付；native runner是明确确定性替身。原source/index/HEAD保持，交付含真实作者保存与受审生成，补偿及scope外作者编辑不新开回声operation，scope外变化不错误标stale。
+
+AC-APPLICATION-P4-09 真实失败后scope外编辑不改变stale/重试资格，同request重放沿原receipt，新retry绑定原input；相关原始意图变动则stale并拒绝旧输入重试。
+
+AC-APPLICATION-P4-10 在可控native执行期间物理pause，单operation detail独立展示physicalControl=pause，原operation.control保持run且资源在安全边界结算；暂停编辑仍更新latest且无新调用，resume先准入最新input，原active input不被改写。
+
+AC-APPLICATION-P4-11 同一真实Git/SQLite来源两个独立节点分别保存，四轮实际Docker/正常hooks交付（在线两次、停机编辑重启补偿两次）均要求workspace_synced和真实receipt，source/index/HEAD保持；生成与行为runner明确为确定性注释改动替身，不算真实模型验收。
+
+Docker应用夹具可复用SPEX_VERIFICATION_EVIDENCE_DIR保存实际观察/operation/attempt/journal投影、关闭后的真实SQLite与Git对象证据，失败断言含journal与blockedReason；归档不制造基线或修改权威状态。独立节点以首个真实receipt的完成顺序核对另一未消费输入，不能假设独立范围的完成顺序。
+
+纯注释自动场景的确定性行为分析明确返回refactor；只有显式choice冲突夹具返回filter长度冲突，不能把夹具主动冲突误报为产品交付失败。AC-APPLICATION-P4-12验证同request换已授权child拒绝且无新派发，重新enable变更预算后旧请求重放/重试均保配置失效，不能以新配置重用旧政策。
+
+AC-APPLICATION-P4-13以真实Git快照、显式仅投影fixture pair及公共三方getter先复现Spec nullbytehead回声，再验证已消费原样Spec不变、raw编辑/退役ID/owner消失仍有变化；不登记假receipt或改SQLite。真实首receipt只改src的自动回声fail→pass仍由08同场景验收。
+
+AC-APPLICATION-P4-14复现真实source作者注释、delivery等于source、所有bytehead均null而仅intent已消费时的源码回声，再验证统一消费判据；无生成字节差量不强迫模型添加无意义注释。P3公开裁决入口测试通过正式ack/claimQueued领取fresh exact操作，组合与analysis stage绑定真实selection/readset；旧legacy claim不再用于新操作。
+
+P4 partial→decide使用原P3-DELIVERY keep_intent真实链补强：fresh exact source先产生settled partial receipt，断言原selection与真实heads已分离；旧caller准入复现SYNC_BASELINE_STALE。修后新decision保原input/analysis/scope，沿相同资源当前selection经Docker落地，交付后同选择新运输ID仍归原operation/deadline/calls/receipt。确定性冲突仅指真实src的filter边界，其他changed路径逐项refactor覆盖，不能制造无关分歧或漏分析。P3-PARTIAL历史case通过公开无selection legacy准入明确旧身份，保既有历史pair夹具，不用它代替P4真实partial验收。
+
+确定性细化夹具保留表格之间全部业务说明，不按首张表截断。partial裁决整合仅在冻结source与base逐字一致、Spec原raw及全部业务项和说明等价时沿完整真实delivery；双节点停机补偿则逐字核对source仅新增指定作者注释、delivery仅新增受审生成注释，再提交保留两者的完整resolution。两者均经过正式独审与候选门禁，不能以refactor分类代替文本重叠整合。

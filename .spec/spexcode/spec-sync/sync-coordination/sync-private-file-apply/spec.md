@@ -23,3 +23,5 @@ applyJournalFiles 要求调用者以实际所有权记录及执行隔离断言�
 applying 期间的取消继续完成既定短单元，不能开始新阶段。返回真实完整目标 InputSnapshot 与应用证据；完整 tree 必须等于候选，原 target HEAD/index 保留。根协调器另负责可信 Git 提交、ref 发布、receipt 与结算；此节点不标记 synced，不自行提交、合并或公开，不沿用元数据禁 hooks 规则绕过交付门禁。
 
 暂存根必须是 canonical 非 symlink 目录，位于来源/目标之外，且设备一致。每次重入原子创建新的 journal/attempt 摘要前缀与随机 namespace，再以随机文件名 wx 创建；从不采用既存 namespace、链接或重用定名临时文件。0 字节/部分写入及进程中止残片留在已归属 scratch，不污染候选、不阻塞下一次重建；不自动删除不明暂存。暂存区回收由根协调器在实际 receipt 结算后按持久 parent ownership 记录执行。
+
+P4 prepareApplyPlan 同时把 expectedBaselineSelectionDigest 与 publicationBaseRef 纳入稳定 payload/plan。实际 target 的 HEAD、tree、manifest 与 index 必须属于冻结 publication parent；store 再核同一绑定。完整 target→candidate diff 的严格 coveredScope 门禁保持，继承与只读 carry 不能靠扩大 scope 通过。

@@ -14,9 +14,9 @@ code:
 
 ## expanded spec
 
-`spex sync settings|enable|status|run|decide|show|pause|resume|cancel|recover` 通过 clientSyncRequest 调后端 [[sync-application]]，请求携带 cwd 项目的 targetTree，由后端持有 pipeline 生命周期。mutator 复用项目匹配 guard 和显式 API 路由；不可达或 HTTP 拒绝非零退出，不使用 cached/mock fallback。结果输出 JSON，queued、failed、GAP 及原树待落地不能用成功文案掩盖。
+`spex sync settings|enable|status|run|verify|decide|show|pause|resume|cancel|recover` 通过 clientSyncRequest 调后端 [[sync-application]]，请求携带 cwd 项目的 targetTree，由后端持有 pipeline 生命周期。mutator 复用项目匹配 guard 和显式 API 路由；不可达或 HTTP 拒绝非零退出，不使用 cached/mock fallback。结果输出 JSON，queued、failed、GAP 及原树待落地不能用成功文案掩盖。
 
-run 接收 node-id 或 --node，--request-id 提供稳定键，缺省一次 UUID。--patch-file 是 UTF-8 JSON SpecBodyEdit，复用正文校验。status 支持 --node 和 1..200 的 --limit；show/control 需要完整 operation ID。未知 flag/缺值拒绝。enable 可用 --config-digest 检查并发配置变化。help 明确手动 Spec/代码驱动、业务裁决与 Docker Node 验证，后台外部持续监听尚未启用。
+run 接收 node-id 或 --node，--request-id 提供稳定键，缺省一次 UUID。--patch-file 是 UTF-8 JSON SpecBodyEdit，复用正文校验。status 支持 --node 和 1..200 的 --limit；show/cancel/recover 需要完整 operation ID，pause/resume 可省略ID控制物理来源。未知 flag/缺值拒绝。enable 可用 --config-digest 检查并发配置变化。help 明确手动 Spec/代码驱动、业务裁决与 Docker Node 验证，已启用来源由正式后端独立持续观察。
 
 --retry-of 显式引用旧 operation ID，由共享服务检查 retryEligibility 后建立关联的新操作及新预算；不带此参数的重复输入不重置预算。不能与 --patch-file 同用，重试保留旧正文意图和 origin；CLI 不传固定 spec 覆盖旧 initial 来源。同重试 request-id 幂等，服务拒绝未结算资源或已变输入时非零退出。
 
@@ -25,4 +25,8 @@ recover 提交完整旧 operation ID 到同后端清理入口；保持原控制�
 --retry-of 只属于 run；放在 recover 或其它控制命令上明确拒绝，不能静默忽略而混淆清理与新预算。
 
 
-P3增加run --origin spec|initial|code|combined与decide。decide接受完整operation ID、原input-id、可信analysis hash、逗号分隔findings、keep_intent/adopt_behavior/new_rule choice、稳定request-id；new_rule必须带非空rule。裁决选项不能放其它命令，rule不能放其它choice，origin只属run；HTTP共享应用校验具体身份、scope和stale，不由CLI自行授权。help诚实说明手动代码接入和三种裁决已提供，外部watcher尚未启用。
+P3增加run --origin spec|initial|code|combined与decide。decide接受完整operation ID、原input-id、可信analysis hash、逗号分隔findings、keep_intent/adopt_behavior/new_rule choice、稳定request-id；new_rule必须带非空rule。裁决选项不能放其它命令，rule不能放其它choice，origin只属run；HTTP共享应用校验具体身份、scope和stale，不由CLI自行授权。help诚实说明手动代码接入和三种裁决已提供，后台watcher属于后端生命周期。
+
+P4 增加无operation参数的 pause/resume，调用 /automatic/pause|resume 物理输入门禁；带完整ID仍只控制指定操作。verify <node-id> 调 /verify 沿同一真实完整管线，status查询后台实际监听/快照/差异。enable 后服务保存即观察，CLI离线仍非零退出。
+
+--node只用于run/verify/status，不能在pause/resume上静默扩大为整个物理来源；--patch-file只用于run，verify不能默默忽略正文请求。非法组合必须在发送HTTP前明确拒绝。
