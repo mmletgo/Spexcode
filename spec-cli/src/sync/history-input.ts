@@ -1,5 +1,5 @@
 import type { BlobRef, InputSnapshot, WorktreeIdentity } from './operation-types.js'
-import { objectGit, readEvidence, readTree, verifySnapshot, writeEvidence } from './snapshot.js'
+import { objectGit, readEvidence, readTree, verifySnapshot, writeEvidence, writeTree } from './snapshot.js'
 import type { TreeEntry } from './snapshot.js'
 
 export type HistoryChange = { path: string; before: TreeEntry | null; next: TreeEntry | null }
@@ -15,8 +15,12 @@ const same = (left: TreeEntry | undefined, right: TreeEntry | undefined): boolea
 
 /** Git 的反向三方只产生对象；原工作树、index 和共享分支均不写入。 */
 function reverseTree(snapshot: InputSnapshot, featureCommit: string, parentCommit: string): { tree: string; conflicts: string[]; output: string } {
+  try {
+    const drivers = objectGit(snapshot.source.commonDir, ['config', '--name-only', '--get-regexp', '^merge[.].*[.]driver$']).toString().trim()
+    if (drivers) throw new Error('SYNC_HISTORY_MERGE_DRIVER_UNSUPPORTED: 补偿只使用 Git 内置三方，不能执行外部 merge driver')
+  } catch (error) { if ((error as { status?: number }).status !== 1) throw error }
   let output: Buffer, conflicted = false
-  try { output = objectGit(snapshot.source.commonDir, ['merge-tree', '--write-tree', '-z', '--name-only', `--merge-base=${featureCommit}`, snapshot.immutableTree, parentCommit]) }
+  try { output = objectGit(snapshot.source.commonDir, ['-c', 'merge.renormalize=false', '-c', 'merge.default=text', 'merge-tree', '--write-tree', '-z', '--name-only', `--merge-base=${featureCommit}`, snapshot.immutableTree, parentCommit]) }
   catch (error) {
     const failure = error as { status?: number; stdout?: Buffer }
     if (failure.status !== 1 || !Buffer.isBuffer(failure.stdout)) throw error
@@ -37,9 +41,14 @@ function buildHistoryRequest(snapshot: InputSnapshot, input: HistoryRequestInput
   const parents = objectGit(commonDir, ['show', '-s', '--format=%P', input.featureCommit]).toString().trim().split(' ').filter(Boolean)
   if (parents.length !== 1) throw new Error('SYNC_HISTORY_PARENT_UNSUPPORTED: 仅支持有唯一 parent 的真实交付提交')
   const parentCommit = parents[0], result = reverseTree(snapshot, input.featureCommit, parentCommit)
-  const next = readTree(commonDir, result.tree), oldFiles = new Map(before.map(entry => [entry.path, entry])), newFiles = new Map(next.map(entry => [entry.path, entry]))
+  const oldFiles = new Map(before.map(entry => [entry.path, entry])), newFiles = new Map(readTree(commonDir, result.tree).map(entry => [entry.path, entry]))
+  if (result.conflicts.length) {
+    const parentFiles = new Map(readTree(commonDir, objectGit(commonDir, ['rev-parse', `${parentCommit}^{tree}`]).toString().trim()).map(entry => [entry.path, entry]))
+    for (const path of result.conflicts) { const entry = parentFiles.get(path); if (entry) newFiles.set(path, entry); else newFiles.delete(path) }
+  }
+  const requestTree = result.conflicts.length ? writeTree(commonDir, [...newFiles.values()].sort((a, b) => a.path.localeCompare(b.path))) : result.tree
   const changes: HistoryChange[] = [...new Set([...oldFiles.keys(), ...newFiles.keys()])].sort().filter(path => !same(oldFiles.get(path), newFiles.get(path))).map(path => ({ path, before: oldFiles.get(path) ?? null, next: newFiles.get(path) ?? null }))
-  return { schemaVersion: 1, type: 'sync.history', action: 'revert', inputId: snapshot.id, source: snapshot.source, requestId: input.requestId, nodeId: input.nodeId, operationId: input.operationId, receiptId: input.receiptId, featureCommit: input.featureCommit, parentCommit, requestTree: result.tree, changes, conflicts: result.conflicts, mergeOutput: result.output }
+  return { schemaVersion: 1, type: 'sync.history', action: 'revert', inputId: snapshot.id, source: snapshot.source, requestId: input.requestId, nodeId: input.nodeId, operationId: input.operationId, receiptId: input.receiptId, featureCommit: input.featureCommit, parentCommit, requestTree, changes, conflicts: result.conflicts, mergeOutput: result.output }
 }
 
 /** 将完整补偿输入固定为 evidence 并保活其 Git 对象。 */

@@ -6,6 +6,8 @@ import { parseContract, parseParts } from '@spexcode/spec-core/contracts'
 import type { ContractItem } from '@spexcode/spec-core/contracts'
 import { contractBusinessMeaning, contractBusinessProse, sameContractBusinessMeaning } from './contract-evolution.js'
 import { canonicalContractFilterBindings, cleanCanonicalContractText } from '../contract-filter.js'
+import { readHistoryRequest } from './history-input.js'
+import type { HistoryChange } from './history-input.js'
 import type { BaselinePair, BaselineResource, BlobRef, ComposedInputRef, FrozenBaselineSelection, InputSnapshot } from './operation-types.js'
 import { contentHash, objectGit, readEvidence, readObject, readTree, validateRepositoryPath, verifySnapshot, writeEvidence, writeObject, writeTree } from './snapshot.js'
 import type { TreeEntry } from './snapshot.js'
@@ -95,6 +97,7 @@ export type SelectedCompositionEvidence = {
   paths: { path: string; pairId: string | null; base: TreeEntry | null; delivery: TreeEntry | null; source: TreeEntry | null; adopted: boolean }[]
   intents: IntentResidual[]; artifacts: IntentArtifactResidual[]; residualPaths: string[]; conflicts: CompositionConflict[]
   controlledAuthorPatch?: { requestBlob: BlobRef; before: TreeEntry; next: TreeEntry; intents: IntentResidual[] }
+  controlledAuthorGroup?: { requestBlob: BlobRef; changes: HistoryChange[]; intents: IntentResidual[] }
 }
 export type IntentArtifactResidual = {
   resource: IntentResidual['resource']; pairId: string | null; path: string; binding: 'code' | 'test'
@@ -281,7 +284,7 @@ export function readCompositionEvidence(input: InputSnapshot, composed: Composed
   }
   const cache = new Map<string, Map<string, IntentObject>>(), adoption = new Map<string, Set<string>>()
   const objects = (snapshot: InputSnapshot): Map<string, IntentObject> => { let value = cache.get(snapshot.id); if (!value) { value = intentObjects(commonDir, actualEntries(snapshot)); cache.set(snapshot.id, value) }; return value }
-  const current = new Map(objects(input)), patch = evidence.controlledAuthorPatch
+  const current = new Map(objects(input)), patch = evidence.controlledAuthorPatch, group = evidence.controlledAuthorGroup
   const pathBindings = selection.bindings.filter(binding => 'bytePair' in binding)
   if (pathBindings.length !== evidence.paths.length) throw new Error('SYNC_COMPOSITION_BINDING: byte resources differ')
   const canonicalBindings = canonicalContractFilterBindings(input.source.canonicalRoot)
@@ -301,6 +304,17 @@ export function readCompositionEvidence(input: InputSnapshot, composed: Composed
     const delivered = pair ? actualEntries(pair.verifiedDelivery).find(entry => entry.path === path) : undefined
     const source = actualEntries(input).find(entry => entry.path === path)
     if (!claim || claim.pairId !== (pair?.id ?? null) || claim.adopted !== adopted || !sameProjectedEntry(before, claim.base) || !sameProjectedEntry(delivered, claim.delivery) || !sameProjectedEntry(source, claim.source)) throw new Error(`SYNC_COMPOSITION_BINDING: true byte objects differ ${path}`)
+  }
+  if (patch && group) throw new Error('SYNC_COMPOSITION_BINDING: duplicate immutable author request')
+  if (group) {
+    const request = readHistoryRequest(input, group.requestBlob)
+    if (canonical(request.changes) !== canonical(group.changes)) throw new Error('SYNC_COMPOSITION_BINDING: immutable author group')
+    const projected = projectSelectedAuthorGroup(input, { ...evidence, controlledAuthorGroup: undefined }, group.requestBlob, group.changes, selection)
+    if (canonical(projected.controlledAuthorGroup) !== canonical(group)) throw new Error('SYNC_COMPOSITION_BINDING: true immutable author group intent differs')
+    for (const change of group.changes) {
+      for (const [id, item] of current) if (item.path === change.path) current.delete(id)
+      if (change.next) for (const [id, item] of intentObjects(commonDir, [change.next])) current.set(id, item)
+    }
   }
   if (patch) {
     const request = JSON.parse(readEvidence(commonDir, patch.requestBlob).toString('utf8')) as { inputId: string; source: InputSnapshot['source']; before: TreeEntry; next: TreeEntry }
@@ -327,18 +341,48 @@ export function readCompositionEvidence(input: InputSnapshot, composed: Composed
     const byteSource = actualEntries(input).find(entry => entry.path === (source?.path ?? before?.path))
     let acceptedByte = false
     if (bytePair) { let paths = adoption.get(bytePair.id); if (!paths) { paths = adoptedDeliveryPaths(input, bytePair); adoption.set(bytePair.id, paths) }; acceptedByte = paths.has((source?.path ?? before?.path)!) && same(byteSource, byteDelivery) }
-    const broadChange = ((!acceptedByte || !!patch && patch.next.path === source?.path) && (before?.rawSource !== source?.rawSource || before?.businessProse !== source?.businessProse)) || before?.path !== source?.path
+    const controlled = !!patch && patch.next.path === source?.path || !!group?.changes.some(change => change.path === (source?.path ?? before?.path))
+    const broadChange = ((!acceptedByte || controlled) && (before?.rawSource !== source?.rawSource || before?.businessProse !== source?.businessProse)) || before?.path !== source?.path
     expected.push({ resource: binding.resource, pairId: pair?.id ?? null, before, delivery, source, adopted, broadChange, changed: !sameIntent(before, source) || broadChange })
   }
   if (canonical(expected) !== canonical(evidence.intents)) throw new Error('SYNC_COMPOSITION_BINDING: true intent objects or residual differ')
   const adoptedPaths = (pair: BaselinePair): ReadonlySet<string> => { let paths = adoption.get(pair.id); if (!paths) { paths = adoptedDeliveryPaths(input, pair); adoption.set(pair.id, paths) }; return paths }
-  const artifacts = intentArtifactResiduals(input, selection, expected, actualEntries, adoptedPaths)
+  const authorEntries = (snapshot: InputSnapshot): TreeEntry[] => snapshot.id === input.id && group ? applyAuthorChanges(actualEntries(snapshot), group.changes) : actualEntries(snapshot)
+  const artifacts = intentArtifactResiduals(input, selection, expected, authorEntries, adoptedPaths)
   if (canonical(artifacts) !== canonical(evidence.artifacts)) throw new Error('SYNC_COMPOSITION_BINDING: true code/test objects or residual differ')
   const residualPaths = [...new Set(expected.filter(item => item.changed).flatMap(item => [item.before?.path, item.source?.path].filter((path): path is string => !!path)))].sort()
   for (const artifact of artifacts.filter(item => item.changed)) if (!residualPaths.includes(artifact.path)) residualPaths.push(artifact.path)
   if (patch && !same(patch.before, patch.next) && !residualPaths.includes(patch.next.path)) residualPaths.push(patch.next.path)
+  for (const change of group?.changes ?? []) if (!residualPaths.includes(change.path)) residualPaths.push(change.path)
   if (canonical(residualPaths.sort()) !== canonical(evidence.residualPaths)) throw new Error('SYNC_COMPOSITION_BINDING: residual paths differ')
   return evidence
+}
+
+const applyAuthorChanges = (entries: TreeEntry[], changes: readonly HistoryChange[]): TreeEntry[] => {
+  const result = new Map(entries.map(entry => [entry.path, entry]))
+  for (const change of changes) { if (change.next) result.set(change.path, change.next); else result.delete(change.path) }
+  return [...result.values()].sort((left, right) => left.path.localeCompare(right.path))
+}
+
+/** 成组用户补偿保持逐文件真实对象；语义投影仍从同一 Markdown 与精确基线推导。 */
+export function projectSelectedAuthorGroup(input: InputSnapshot, evidence: SelectedCompositionEvidence, requestBlob: BlobRef, changes: HistoryChange[], selection: FrozenBaselineSelection): SelectedCompositionEvidence {
+  const commonDir = input.source.commonDir, incoming = applyAuthorChanges(verifySnapshot(input), changes), current = intentObjects(commonDir, incoming)
+  const intents = evidence.intents.map(residual => {
+    const path = residual.source?.path ?? residual.before?.path ?? residual.delivery?.path
+    if (!changes.some(change => change.path === path)) return residual
+    const source = current.get(residual.resource.id) ?? null
+    const broadChange = residual.before?.rawSource !== source?.rawSource || residual.before?.businessProse !== source?.businessProse || residual.before?.path !== source?.path
+    return { ...residual, source, broadChange, changed: !sameIntent(residual.before, source) || broadChange }
+  })
+  const before = intentObjects(commonDir, changes.flatMap(change => change.before ? [change.before] : [])), next = intentObjects(commonDir, changes.flatMap(change => change.next ? [change.next] : []))
+  const groupIntents: IntentResidual[] = [...new Set([...before.keys(), ...next.keys()])].map(id => {
+    const prior = before.get(id) ?? null, source = next.get(id) ?? null, broadChange = prior?.rawSource !== source?.rawSource || prior?.businessProse !== source?.businessProse
+    return { resource: { kind: 'contract', id }, pairId: null, before: prior, delivery: evidence.intents.find(item => item.resource.id === id)?.delivery ?? null, source, adopted: false, broadChange, changed: !sameIntent(prior, source) || broadChange }
+  })
+  const entries = (snapshot: InputSnapshot): TreeEntry[] => snapshot.id === input.id ? incoming : verifySnapshot(snapshot)
+  const artifacts = intentArtifactResiduals(input, selection, intents, entries, pair => adoptedDeliveryPaths(input, pair))
+  const residualPaths = [...new Set([...intents.filter(item => item.changed).flatMap(item => [item.before?.path, item.source?.path].filter((path): path is string => !!path)), ...artifacts.filter(item => item.changed).map(item => item.path), ...changes.map(change => change.path)])].sort()
+  return { ...evidence, intents, artifacts, residualPaths, controlledAuthorGroup: { requestBlob, changes, intents: groupIntents } }
 }
 
 /** 受控编辑未写source，作者next仍是原请求真实blob；只更新语义投影而不伪造快照。 */

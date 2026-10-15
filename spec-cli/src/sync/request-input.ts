@@ -2,9 +2,11 @@ import { lstatSync } from 'node:fs'
 import { join } from 'node:path'
 import type { CodeBehaviorAnalysis, SyncDecisionInput } from './writeback-types.js'
 import type { PreparedSpecBodyEdit } from '../spec-body-edit.js'
-import { isUtf8Text, mergeText, projectSelectedAuthorPatch } from './composition.js'
+import { isUtf8Text, mergeText, projectSelectedAuthorGroup, projectSelectedAuthorPatch } from './composition.js'
+import { readHistoryRequest } from './history-input.js'
+import type { HistoryChange } from './history-input.js'
 import type { CompositionConflict, SelectedCompositionEvidence } from './composition.js'
-import type { BlobRef, ComposedInputRef, InputSnapshot, WorktreeIdentity } from './operation-types.js'
+import type { BlobRef, ComposedInputRef, FrozenBaselineSelection, InputSnapshot, WorktreeIdentity } from './operation-types.js'
 import { contentHash, identifyWorktree, objectGit, readEvidence, readObject, readTree, validateRepositoryPath, verifySnapshot, writeEvidence, writeObject, writeTree } from './snapshot.js'
 import type { TreeEntry } from './snapshot.js'
 
@@ -39,7 +41,11 @@ export function prepareControlledDecision(snapshot: InputSnapshot, input: SyncDe
 function checkDecision(snapshot: InputSnapshot, request: ControlledDecision): void {
   if (!request || request.schemaVersion !== 1 || request.type !== 'sync.decision' || request.inputId !== snapshot.id || JSON.stringify(request.source) !== JSON.stringify(snapshot.source)) throw new Error('裁决请求 schema/input/来源绑定不一致')
   if (![request.requestId, request.operationId].every(value => typeof value === 'string' && value.trim()) || !/^[a-f0-9]{64}$/.test(request.analysisRef?.sha256 ?? '') || !Array.isArray(request.findingIds) || !request.findingIds.length || !request.findingIds.every(id => typeof id === 'string' && id.trim()) || new Set(request.findingIds).size !== request.findingIds.length) throw new Error('裁决请求缺少有效分析或具体分歧身份')
-  if (request.originalRequestBlob) readControlledRequest(snapshot, request.originalRequestBlob)
+  if (request.originalRequestBlob) {
+    const original = JSON.parse(readEvidence(snapshot.source.commonDir, request.originalRequestBlob).toString('utf8')) as { type?: string }
+    if (original.type === 'sync.decision') throw new Error('裁决原请求来源绑定不能递归指向另一裁决')
+    readControlledChanges(snapshot, request.originalRequestBlob)
+  }
   if (!request.decision || !['keep_intent', 'adopt_behavior', 'new_rule'].includes(request.decision.choice) || request.decision.choice === 'new_rule' && (typeof request.decision.rule !== 'string' || !request.decision.rule.trim())) throw new Error('裁决请求缺少明确选择或新规则')
 }
 /** 读取固定裁决，并核原输入；分析可信归属由应用和协调器从原操作证据核验。 */
@@ -115,6 +121,15 @@ export function validateControlledRequest(snapshot: InputSnapshot, requestBlob: 
   return request
 }
 
+/** 正文编辑与历史补偿共享真实文件差量；裁决沿原不可变请求继承。 */
+export function readControlledChanges(snapshot: InputSnapshot, ref: BlobRef): HistoryChange[] {
+  const kind = JSON.parse(readEvidence(snapshot.source.commonDir, ref).toString('utf8')) as { type?: string }
+  if (kind.type === 'sync.history') return readHistoryRequest(snapshot, ref).changes
+  if (kind.type === 'sync.decision') { const request = readControlledDecision(snapshot, ref); return request.originalRequestBlob ? readControlledChanges(snapshot, request.originalRequestBlob) : [] }
+  const request = readControlledRequest(snapshot, ref)
+  return [{ path: request.path, before: request.before, next: request.next }]
+}
+
 /** 行级合并误报冲突时，仅整合字节含义不重叠的两段真实文本编辑。 */
 function mergeSeparateTextEdits(commonDir: string, baseEntry: TreeEntry, sourceEntry: TreeEntry, deliveryEntry: TreeEntry): Buffer | null {
   const buffers = [baseEntry, sourceEntry, deliveryEntry].map(entry => readObject(commonDir, entry.oid))
@@ -132,11 +147,12 @@ function mergeSeparateTextEdits(commonDir: string, baseEntry: TreeEntry, sourceE
 }
 
 /** 以真实来源为 base 叠加用户差量，保留已组合细化；冲突返回三方 Git 对象证据。 */
-export function composeControlledRequest(snapshot: InputSnapshot, composed: ComposedInputRef, requestBlob: BlobRef, options: { retainConflicts?: boolean } = {}): { composed: ComposedInputRef | null; conflicts: CompositionConflict[] } {
+export function composeControlledRequest(snapshot: InputSnapshot, composed: ComposedInputRef, requestBlob: BlobRef, options: { retainConflicts?: boolean; baselineSelection?: FrozenBaselineSelection } = {}): { composed: ComposedInputRef | null; conflicts: CompositionConflict[] } {
   const commonDir = snapshot.source.commonDir
   const saved = JSON.parse(readEvidence(commonDir, requestBlob).toString('utf8')) as { type?: string }
   const decision = saved.type === 'sync.decision' ? readControlledDecision(snapshot, requestBlob) : null
-  const request = decision ? null : validateControlledRequest(snapshot, requestBlob)
+  const history = saved.type === 'sync.history' ? readHistoryRequest(snapshot, requestBlob) : null
+  const request = decision || history ? null : validateControlledRequest(snapshot, requestBlob)
   if (composed.sourceInputId !== snapshot.id) throw new Error('组合输入与受控请求 input 绑定不一致')
   const entries = readTree(commonDir, composed.tree)
   if (contentHash(JSON.stringify(entries)) !== composed.contentDigest || !readEvidence(commonDir, composed.manifestBlob).equals(Buffer.from(JSON.stringify({ version: 1, entries })))) throw new Error('受控请求组合 manifest/contentDigest 不一致')
@@ -148,6 +164,34 @@ export function composeControlledRequest(snapshot: InputSnapshot, composed: Comp
     if (!decision.originalRequestBlob) return { composed: { ...composed, requestBlob }, conflicts: [] }
     const result = composeControlledRequest(snapshot, composed, decision.originalRequestBlob, options)
     return result.composed ? { composed: { ...result.composed, requestBlob }, conflicts: result.conflicts } : result
+  }
+  if (history) {
+    const result = new Map(entries.map(entry => [entry.path, entry])), conflicts: CompositionConflict[] = []
+    const feature = new Map(readTree(commonDir, objectGit(commonDir, ['rev-parse', `${history.featureCommit}^{tree}`]).toString().trim()).map(entry => [entry.path, entry]))
+    for (const change of history.changes) {
+      const delivery = result.get(change.path), before = change.before ?? undefined, intended = change.next ?? undefined
+      let next = intended, conflict = history.conflicts.includes(change.path)
+      if (!sameOptional(delivery, before) && !sameOptional(delivery, intended)) {
+        const mode = before && delivery && intended && [before, delivery, intended].every(entry => entry.mode !== '120000') ? intended.mode === before.mode ? delivery.mode : delivery.mode === before.mode || delivery.mode === intended.mode ? intended.mode : null : null
+        const merged = mode && before && delivery && intended ? mergeText(commonDir, delivery, before, intended) ?? mergeSeparateTextEdits(commonDir, before, intended, delivery) : null
+        if (merged && mode) next = { path: change.path, mode, oid: writeObject(commonDir, merged), digest: contentHash(merged) }
+        else conflict = true
+      }
+      if (conflict) conflicts.push({ path: change.path, base: history.conflicts.includes(change.path) ? feature.get(change.path) ?? null : change.before, source: intended ?? null, delivery: delivery ?? null })
+      if (next) result.set(change.path, next); else result.delete(change.path)
+    }
+    if (conflicts.length && !options.retainConflicts) return { composed: null, conflicts }
+    const resultEntries = [...result.values()].sort((a, b) => a.path.localeCompare(b.path)), tree = writeTree(commonDir, resultEntries), manifestBlob = writeEvidence(commonDir, { version: 1, entries: resultEntries }), contentDigest = contentHash(JSON.stringify(resultEntries))
+    const prior = composed.compositionEvidenceBlob ? JSON.parse(readEvidence(commonDir, composed.compositionEvidenceBlob).toString('utf8')) as SelectedCompositionEvidence : null
+    let compositionEvidenceBlob = composed.compositionEvidenceBlob
+    if (composed.baselineSelectionDigest) {
+      if (!options.baselineSelection || prior?.version !== 'selected-composition-v1') throw new Error('成组请求缺少精确基线组合证据')
+      const evidence = projectSelectedAuthorGroup(snapshot, prior, requestBlob, history.changes, options.baselineSelection)
+      evidence.conflicts = [...prior.conflicts, ...conflicts]
+      compositionEvidenceBlob = writeEvidence(commonDir, evidence)
+    } else if (conflicts.length) compositionEvidenceBlob = writeEvidence(commonDir, { version: 'composition-overlap-v1', sourceInputId: snapshot.id, baselinePairId: composed.previousBaselinePairId, conflicts: [...prior?.conflicts ?? [], ...conflicts] })
+    objectGit(commonDir, ['update-ref', `refs/spex-sync/compositions/${tree}`, tree])
+    return { composed: { ...composed, tree, manifestBlob, contentDigest, requestBlob, ...(compositionEvidenceBlob ? { compositionEvidenceBlob } : {}) }, conflicts }
   }
   if (!request) throw new Error('受控请求不合法')
   const delivery = entries.find(entry => entry.path === request.path)
@@ -180,3 +224,4 @@ export function composeControlledRequest(snapshot: InputSnapshot, composed: Comp
   }
   return { composed: { ...composed, tree, manifestBlob, contentDigest, requestBlob, ...(authorProjectionBlob ? { authorProjectionBlob } : {}), ...(compositionEvidenceBlob ? { compositionEvidenceBlob } : {}) }, conflicts }
 }
+const sameOptional = (left: TreeEntry | undefined, right: TreeEntry | undefined): boolean => left?.oid === right?.oid && left?.mode === right?.mode

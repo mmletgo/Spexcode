@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { loadSpecs, parseContract, parseParts, processStartToken, repoRoot, runtimeRoot } from '@spexcode/spec-core'
+import { loadSpecs, parseContract, parseParts, processStartToken, readConfig, repoRoot, runtimeRoot } from '@spexcode/spec-core'
 import type { SessionProtocol } from '@spexcode/session-protocol'
 import { configuredSessionApplication } from '../session-application.js'
 import { prepareSpecBodyEdit, readSpecBodyEdit } from '../spec-body-edit.js'
@@ -18,15 +18,19 @@ import { claimFileMutex } from './file-mutex.js'
 import { composeControlledRequest, controlledDecisionIdentity, guardControlledRequestPath, prepareControlledDecision, readControlledDecision, prepareControlledRequest, renderControlledDecisionRaw } from './request-input.js'
 import type { CodeBehaviorAnalysis, SyncDecisionInput } from './writeback-types.js'
 import { freezeDeliveryRuntime } from './runtime-freeze.js'
-import { captureInputSnapshot, contentHash, identifyWorktree, readEvidence, readObject, readPhysicalFingerprint, readTree, verifySnapshot, writeEvidence } from './snapshot.js'
+import { captureInputSnapshot, contentHash, identifyWorktree, objectGit, readEvidence, readObject, readPhysicalFingerprint, readTree, verifySnapshot, writeEvidence } from './snapshot.js'
 import { inspectTrustedRuntime } from './trusted-hooks.js'
 import { coveredPath, readSyncSettings, SyncApplicationError } from './settings.js'
 import { SyncInputObserver, type SyncObserverHealth } from './observer.js'
 import { SyncStore, SyncStoreError } from './store.js'
+import { prepareHistoryRequest, readHistoryRequest } from './history-input.js'
+import { readSyncLandingStatus } from './landing-status.js'
+import { readFrozenContracts } from './frozen-contracts.js'
 
 export type SyncScopeCoverage = { includedNodeIds: string[]; contextNodeIds: string[]; missingNodeIds: string[]; excludedNodeIds: string[]; totalNodeCount: number }
 export type SyncSubmitInput = { nodeId: string; requestId: string; origin?: 'spec' | 'initial' | 'code' | 'combined' | 'decision'; patch?: SpecBodyEdit; retryOf?: string }
-export type SyncOperationDetail = { operation: SyncOperation; physicalControl: PhysicalControl; attempt: ReturnType<SyncStore['readAttempt']> | null; journals: ReturnType<SyncStore['listJournals']>; stale: boolean; sourceSynced: boolean; retryEligibility: ReturnType<SyncStore['readRetryEligibility']>; decisionEligibility: ReturnType<SyncStore['readDecisionEligibility']>; resources: ReturnType<SyncStore['listRecoverableResources']>[number]['resource'][]; decisionContext: { analysisRef: BlobRef; analysis: CodeBehaviorAnalysis } | null; executionAvailability: { status: 'ready' | 'recovery_required'; failure?: { code: string; message: string } } }
+export type SyncRevertEligibility = { eligible: true } | { eligible: false; reason: { code: string; message: string } }
+export type SyncOperationDetail = { operation: SyncOperation; physicalControl: PhysicalControl; attempt: ReturnType<SyncStore['readAttempt']> | null; journals: ReturnType<SyncStore['listJournals']>; stale: boolean; sourceSynced: boolean; canonicalSynced: boolean; revertEligibility: SyncRevertEligibility; retryEligibility: ReturnType<SyncStore['readRetryEligibility']>; decisionEligibility: ReturnType<SyncStore['readDecisionEligibility']>; resources: ReturnType<SyncStore['listRecoverableResources']>[number]['resource'][]; decisionContext: { analysisRef: BlobRef; analysis: CodeBehaviorAnalysis } | null; executionAvailability: { status: 'ready' | 'recovery_required'; failure?: { code: string; message: string } } }
 export type SyncApplicationOptions = Partial<Pick<SyncCoordinatorOptions, 'runner' | 'verificationDriver'>> & {
   protocol: SessionProtocol
   runtimeDirectory?: string
@@ -239,6 +243,16 @@ export class SyncApplication {
     this.observerIdentity = null
     await Promise.all([...this.running.values()].map(flight => flight.finished))
   }
+  /** 版本回退前持久暂停物理来源，停止执行者并保留所有未结算恢复记录。 */
+  async stopWriter(): Promise<{ stopped: true; control: PhysicalControl; operations: SyncOperationDetail[] }> {
+    const source = existsSync(this.root) ? identifyWorktree(this.root) : this.sourceAtCreation, scope = this.physicalScope(source), control = this.store.readPhysicalControl(scope)
+    this.store.requestPhysicalControl(scope, 'pause', control.revision)
+    const owners = [...new Set([this, ...applicationOwners.values()])].filter(owner => owner.root === this.root && owner.repositoryId === this.repositoryId && owner.options.protocol.databasePath === this.options.protocol.databasePath)
+    await Promise.all(owners.map(owner => owner.stopService()))
+    const ids = new Set([...this.store.listRecoverable().filter(item => item.operation.input.source.canonicalRoot === this.root).map(item => item.operation.id), ...this.store.listRecoverableResources().filter(item => item.operation.input.source.canonicalRoot === this.root).map(item => item.operation.id)])
+    const operations = await Promise.all([...ids].map(id => this.readOperation(id)))
+    return { stopped: true, control: this.store.readPhysicalControl(scope), operations }
+  }
   /** 暂停属于物理输入门禁；取消仍只控制指定操作。恢复先补偿最新输入。 */
   async automaticControl(action: 'pause' | 'resume'): Promise<ReturnType<SyncApplication['observationStatus']>> {
     if (action !== 'pause' && action !== 'resume') throw new SyncApplicationError('sync_control_invalid', '自动控制仅接受 pause 或 resume', 400)
@@ -247,6 +261,7 @@ export class SyncApplication {
       this.store.requestPhysicalControl(scope, 'pause', current.revision)
       for (const flight of this.running.values()) flight.controller.abort()
     } else {
+      if (this.stopped) await this.startService()
       await this.observer?.scanNow()
       await Promise.all([...this.running.values()].map(flight => flight.finished))
       await this.observer?.scanNow()
@@ -386,8 +401,24 @@ export class SyncApplication {
     const journals = this.store.listJournals(operation.id), resources = this.store.listRecoverableResources().filter(item => item.operation.id === operation.id).map(item => item.resource)
     const stopped = operation.control !== 'run' || completed.has(operation.phase) || ['paused', 'failed', 'budget_exhausted', 'needs_input', 'conflicted', 'recovery_required'].includes(operation.phase)
     if (executionAvailability.status === 'ready' && stopped && (resources.length || journals.some(journal => journal.status !== 'settled'))) executionAvailability = { status: 'recovery_required', failure: { code: 'sync_resources_unsettled', message: '操作仍有未结算资源或交付日志，请先恢复清理再重试' } }
-    const current = existsSync(this.root) && executionAvailability.status === 'ready' && await isSyncInputCurrent(operation, snapshot, this.operationPlan(operation))
-    return { operation, physicalControl: this.store.readPhysicalControl(this.physicalScope(operation.input.source)), decisionContext: existsSync(operation.input.source.commonDir) ? this.decisionContext(operation) : null, attempt: operation.currentAttemptId ? this.store.readAttempt(operation.currentAttemptId) : null, journals, resources, stale: !current, sourceSynced: existsSync(this.root) && operation.phase === 'canonical_synced' && snapshot.id === operation.input.id, retryEligibility: await this.retryEligibility(operation, snapshot), decisionEligibility: this.store.readDecisionEligibility(operation.id), executionAvailability }
+    const available = existsSync(this.root) && executionAvailability.status === 'ready'
+    const plan = available ? this.operationPlan(operation) : null
+    const landing = available ? readSyncLandingStatus(operation, snapshot, journals, { canonicalBranch: `refs/heads/${readConfig(this.root).mainBranch?.trim() || 'main'}`, readPaths: plan!.readPaths }) : { sourceSynced: false, canonicalSynced: false, phase: operation.phase }
+    const current = available && (landing.sourceSynced || await isSyncInputCurrent(operation, snapshot, plan!))
+    return { operation: landing.phase === operation.phase ? operation : { ...operation, phase: landing.phase }, physicalControl: this.store.readPhysicalControl(this.physicalScope(operation.input.source)), decisionContext: existsSync(operation.input.source.commonDir) ? this.decisionContext(operation) : null, attempt: operation.currentAttemptId ? this.store.readAttempt(operation.currentAttemptId) : null, journals, resources, stale: !current, sourceSynced: landing.sourceSynced, canonicalSynced: landing.canonicalSynced, revertEligibility: await this.revertEligibility(operation, snapshot, journals, resources), retryEligibility: await this.retryEligibility(operation, snapshot), decisionEligibility: this.store.readDecisionEligibility(operation.id), executionAvailability }
+  }
+  private async revertEligibility(operation: SyncOperation, snapshot: InputSnapshot, journals: SyncOperationDetail['journals'], resources: SyncOperationDetail['resources']): Promise<SyncRevertEligibility> {
+    const refused = (code: string, message: string): SyncRevertEligibility => ({ eligible: false, reason: { code, message } })
+    if (resources.length || journals.some(journal => journal.status !== 'settled')) return refused('sync_resources_unsettled', '原交付仍有未结算资源或 journal，请先恢复')
+    try {
+      this.requireEnabled(snapshot)
+      const plan = this.operationPlan(operation)
+      await this.requireNodeAuthorized(snapshot, plan.intentNodeId)
+      const landing = readSyncLandingStatus(operation, snapshot, journals, { canonicalBranch: `refs/heads/${readConfig(this.root).mainBranch?.trim() || 'main'}`, readPaths: plan.readPaths })
+      if (!landing.actualCommit) return refused('sync_revert_not_landed', '只有当前来源已采纳的完整结算交付可撤销')
+      if (objectGit(snapshot.source.commonDir, ['show', '-s', '--format=%P', landing.actualCommit]).toString().trim().split(' ').filter(Boolean).length !== 1) return refused('sync_revert_parent_unsupported', '仅支持唯一 parent 的真实交付提交')
+      return { eligible: true }
+    } catch (error) { return refused(error instanceof SyncApplicationError ? error.code : 'sync_revert_unavailable', error instanceof Error ? error.message : String(error)) }
   }
   /** 只有原操作当前 attempt 的可信分析检查点能成为业务裁决对象。 */
   private decisionContext(operation: SyncOperation): SyncOperationDetail['decisionContext'] {
@@ -508,6 +539,51 @@ export class SyncApplication {
       return { changed: true, operation: this.store.readOperation(operation.id) }
     } finally { mutex.release() }
   }
+  /** 用户撤销真实已采纳交付；完整补偿只作为同一协调器的新受控输入。 */
+  async revert(input: { operationId: string; requestId: string }): Promise<{ changed: boolean; operation: SyncOperation | null }> {
+    if (!input || ![input.operationId, input.requestId].every(value => typeof value === 'string' && value.trim())) throw new SyncApplicationError('sync_revert_invalid', '撤销需要 operationId 与稳定 requestId', 400)
+    const original = this.store.readOperation(input.operationId); this.assertSource(original)
+    const snapshot = await captureInputSnapshot(this.root); this.requireEnabled(snapshot)
+    const nodeId = this.operationPlan(original).intentNodeId
+    await this.requireNodeAuthorized(snapshot, nodeId)
+    const { settings } = readSyncSettings(snapshot), ingressKey = `application:${snapshot.source.repositoryId}:${this.root}:${input.requestId}`
+    const mutex = await this.requestMutex(ingressKey, settings.budget.timeoutMs)
+    try {
+      const prior = this.store.findOperationByIngressKey(ingressKey), ingress = this.store.findIngressReceipt(ingressKey)
+      if (prior) {
+        const ref = (ingress ?? prior).requestBlob
+        if (!ref) throw new SyncStoreError('SYNC_IDEMPOTENCY_CONFLICT', ingressKey)
+        const request = readHistoryRequest((ingress?.input ?? prior.input), ref)
+        if (request.operationId !== original.id || prior.origin !== 'combined') throw new SyncStoreError('SYNC_IDEMPOTENCY_CONFLICT', ingressKey)
+        return { changed: true, operation: prior }
+      }
+      const detail = await this.detail(original, snapshot), journals = this.store.listJournals(original.id)
+      if (!detail.revertEligibility.eligible) throw new SyncApplicationError(detail.revertEligibility.reason.code, detail.revertEligibility.reason.message)
+      const receipt = journals.at(-1)!.receipt!
+      if (!receipt.actualCommit) throw new SyncApplicationError('sync_revert_commit_missing', '交付缺少真实 Git commit，不能推测补偿')
+      const requestBlob = prepareHistoryRequest(snapshot, { ...input, nodeId, receiptId: receipt.id, featureCommit: receipt.actualCommit }), request = readHistoryRequest(snapshot, requestBlob)
+      if (!request.changes.length) return { changed: false, operation: null }
+      const frozen = await this.freezeNodePlan(snapshot, nodeId), plan = frozen.plan
+      for (const change of request.changes) if (!coveredPath(change.path, plan.writePaths) || settings.mandatoryTests.some(test => test.testPath === change.path)) throw new SyncApplicationError('sync_scope_unauthorized', `补偿文件不在当前可信写入授权内：${change.path}`)
+      const beforeFiles = new Map(verifySnapshot(snapshot).filter(entry => entry.path.startsWith('.spec/') && entry.path.endsWith('/spec.md') && entry.mode !== '120000').map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString('utf8')]))
+      const afterFiles = new Map(readTree(snapshot.source.commonDir, request.requestTree).filter(entry => entry.path.startsWith('.spec/') && entry.path.endsWith('/spec.md') && entry.mode !== '120000').map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString('utf8')]))
+      const before = await readFrozenContracts(this.root, beforeFiles), after = await readFrozenContracts(this.root, afterFiles)
+      const paths = [...new Set([...plan.executionScope!.paths, ...request.changes.map(change => change.path)])].sort()
+      plan.executionScope = { ...plan.executionScope!, paths }
+      plan.readPaths = [...new Set([...plan.readPaths, ...paths])].sort()
+      plan.authorizedChanges = [...plan.authorizedChanges ?? [], ...[...before.graph.items.values()].filter(item => request.changes.some(change => change.path === item.path) && !after.graph.items.has(item.id)).map(item => ({ id: item.id, action: 'retire' as const, source: 'user:raw' as const, reason: `用户明确撤销交付 ${original.id} 的提交 ${request.featureCommit}；固定输入 ${snapshot.id} 的成组补偿删除该身份，仍须当前业务独审与完整验证` }))]
+      const resources = new Map(frozen.selection.bindings.map(binding => [JSON.stringify(binding.resource), binding.resource]))
+      for (const path of paths) resources.set(JSON.stringify({ kind: 'path', path }), { kind: 'path', path })
+      for (const item of after.graph.items.values()) if (paths.includes(item.path) && item.kind !== 'VERIFY') { const resource = item.kind === 'FLOW' ? { kind: 'flow' as const, id: item.id } : { kind: 'contract' as const, id: item.id }; resources.set(JSON.stringify(resource), resource) }
+      const selected = this.store.readBaselineSelection(snapshot.source, [...resources.values()])
+      if ('failure' in selected) throw new SyncApplicationError(selected.failure.code, selected.failure.message)
+      const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: original.rootCauseId, origin: 'combined', budget: settings.budget, managedRoot: this.managedRoot, requestBlob, baselineSelection: selected.selection })
+      this.prepareTools(ingressKey, null)
+      const operation = this.store.admitAndEnqueue(admission)
+      this.start(operation.id)
+      return { changed: true, operation: this.store.readOperation(operation.id) }
+    } finally { mutex.release() }
+  }
   private decorateDecisionPlan(plan: SyncCoordinatorPlan, snapshot: InputSnapshot, input: SyncDecisionInput, analysis: CodeBehaviorAnalysis, requestRef: BlobRef, previousBaselinePair: BaselinePair | FrozenBaselineSelection | null): void {
     const findingIds = [...input.findingIds].sort(), decisionId = controlledDecisionIdentity(input)
     const findings = findingIds.map(id => analysis.findings.find(finding => finding.id === id))
@@ -520,7 +596,7 @@ export class SyncApplication {
     plan.facts = [...plan.facts, { source: `decision:${decisionId}`, text: `${boundary}\n${decisionText}` }]
     if (input.decision.choice !== 'keep_intent') {
       const authored = composeAuthoredInput(snapshot, previousBaselinePair ?? undefined, { retainConflicts: true }).composed!
-      const composed = composeControlledRequest(snapshot, authored, requestRef, { retainConflicts: true }).composed!
+      const composed = composeControlledRequest(snapshot, authored, requestRef, { retainConflicts: true, ...(previousBaselinePair && 'version' in previousBaselinePair ? { baselineSelection: previousBaselinePair } : {}) }).composed!
       const entries = readTree(snapshot.source.commonDir, composed.tree)
       const overlaps = composed.compositionEvidenceBlob ? (JSON.parse(readEvidence(snapshot.source.commonDir, composed.compositionEvidenceBlob).toString('utf8')) as { conflicts: { path: string }[] }).conflicts : []
       plan.targets = plan.targets.map(target => {

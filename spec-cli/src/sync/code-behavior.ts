@@ -6,7 +6,7 @@ import { actualTreeDiff, isHostPrivatePath } from './candidate.js'
 import { adoptedDeliveryPaths, isUtf8Text, mergeText, readCompositionEvidence } from './composition.js'
 import { validateRawIntegration } from './raw-integration.js'
 import { decisionScopeIds, sameContractBusinessMeaning } from './contract-evolution.js'
-import { controlledDecisionIdentity, readControlledDecision, readControlledRequest, renderControlledDecisionRaw } from './request-input.js'
+import { controlledDecisionIdentity, readControlledChanges, readControlledDecision, renderControlledDecisionRaw } from './request-input.js'
 import { readFrozenContracts } from './frozen-contracts.js'
 import type { BaselinePair, ComposedInputRef, FrozenBaselineSelection, InputSnapshot } from './operation-types.js'
 import { contentHash, objectGit, readEvidence, readObject, readTree, validateRepositoryPath, verifySnapshot } from './snapshot.js'
@@ -56,7 +56,7 @@ export function authoredContractChanges(beforeFiles: ReadonlyMap<string, string>
 /** 只按真实 ID 对象求作者残差；不会把多个 source 全文拼接成不存在的作者文件。 */
 export function selectedAuthoredContractChanges(evidence: ReturnType<typeof readCompositionEvidence>): NonNullable<CodeBehaviorAnalysis['authorChanges']> {
   const changes = new Map<string, NonNullable<CodeBehaviorAnalysis['authorChanges']>[number]>()
-  for (const residual of [...evidence.intents, ...evidence.controlledAuthorPatch?.intents ?? []].filter(item => item.changed)) {
+  for (const residual of [...evidence.intents, ...evidence.controlledAuthorPatch?.intents ?? [], ...evidence.controlledAuthorGroup?.intents ?? []].filter(item => item.changed)) {
     const owner = residual.source ?? residual.before
     if (!owner) continue
     const existing = changes.get(owner.path)
@@ -65,7 +65,7 @@ export function selectedAuthoredContractChanges(evidence: ReturnType<typeof read
     const changedIds = semanticChanged || rawChanged && owner.item.kind === 'REQ' ? [residual.resource.id] : []
     if (rawChanged && owner.item.kind !== 'REQ') {
       // raw本身的REQ种子必须来自同一真实owner对象，不从上游REQ扩大所有消费者。
-      const peers = [...evidence.intents, ...evidence.controlledAuthorPatch?.intents ?? []].filter(item => (item.source?.path ?? item.before?.path) === owner.path && (item.source?.item.kind ?? item.before?.item.kind) === 'REQ')
+      const peers = [...evidence.intents, ...evidence.controlledAuthorPatch?.intents ?? [], ...evidence.controlledAuthorGroup?.intents ?? []].filter(item => (item.source?.path ?? item.before?.path) === owner.path && (item.source?.item.kind ?? item.before?.item.kind) === 'REQ')
       changedIds.push(...peers.map(item => item.resource.id))
     }
     if (existing) existing.changedIds = sorted([...existing.changedIds, ...changedIds])
@@ -97,11 +97,15 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   const deliveryFiles = new Map(delivery)
   for (const path of adopted) { const text = deliveryFiles.get(path); if (text === undefined) authorBefore.delete(path); else authorBefore.set(path, text) }
   const authorSource = new Map(source)
-  let controlledAuthorBefore: { path: string; text: string } | null = null
+  const controlledAuthorBefore: { path: string; text: string | null }[] = []
   if (input.composed.requestBlob) {
     const rawRequest = JSON.parse(readEvidence(commonDir, input.composed.requestBlob).toString('utf8')) as { type?: string }
     const original = rawRequest.type === 'sync.decision' ? readControlledDecision(input.snapshot, input.composed.requestBlob).originalRequestBlob : input.composed.requestBlob
-    if (original) { const request = readControlledRequest(input.snapshot, original); authorSource.set(request.path, readObject(commonDir, request.next.oid).toString('utf8')); controlledAuthorBefore = { path: request.path, text: readObject(commonDir, request.before.oid).toString('utf8') } }
+    if (original) for (const change of readControlledChanges(input.snapshot, original)) {
+      if (change.next) authorSource.set(change.path, readObject(commonDir, change.next.oid).toString('utf8')); else authorSource.delete(change.path)
+      controlledAuthorBefore.push({ path: change.path, text: change.before ? readObject(commonDir, change.before.oid).toString('utf8') : null })
+    }
+    if (rawRequest.type === 'sync.history' || selectedEvidence?.controlledAuthorGroup) source.splice(0, source.length, ...authorSource)
   }
   const oldFrozen = await readFrozenContracts(input.snapshot.source.canonicalRoot, new Map(delivery)), current = await readFrozenContracts(input.snapshot.source.canonicalRoot, new Map(composed))
   const authorChanges = selectedEvidence ? selectedAuthoredContractChanges(selectedEvidence) : authoredContractChanges(authorBefore, authorSource, new Map(delivery), [...oldFrozen.nodes, ...current.nodes])
@@ -111,7 +115,9 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
     if (bases.size > 1 && new Set([...bases.values()].map(item => item.rawSource)).size > 1) reject(`SYNC_COMPOSITION_BLOCKED: raw归属无法证明共同完整作者基准 ${change.path}`)
     if (broad.length) authorBefore.set(change.path, readObject(commonDir, broad[0].before!.entry.oid).toString('utf8'))
   }
-  if (selectedEvidence && controlledAuthorBefore && !selectedEvidence.intents.some(item => item.pairId && (item.source?.path ?? item.before?.path) === controlledAuthorBefore!.path && item.before?.rawSource !== item.source?.rawSource)) authorBefore.set(controlledAuthorBefore.path, controlledAuthorBefore.text)
+  for (const before of controlledAuthorBefore) if (selectedEvidence && !selectedEvidence.intents.some(item => item.pairId && (item.source?.path ?? item.before?.path) === before.path && item.before?.rawSource !== item.source?.rawSource)) {
+    if (before.text === null) authorBefore.delete(before.path); else authorBefore.set(before.path, before.text)
+  }
   const knownCode = new Set(composed.filter(([path]) => path.startsWith('.spec/') && path.endsWith('/spec.md')).flatMap(([, text]) => { const anchors = parseFrontmatter(text).fm.code; return Array.isArray(anchors) ? anchors.filter((anchor): anchor is string => typeof anchor === 'string').map(anchor => anchor.split('#')[0]) : [] }))
   const ungoverned = source.filter(([path]) => !path.startsWith('.spec/') && /\.(?:[cm]?[jt]sx?|py|go|rs|java|rb)$/.test(path) && !/\.(?:test|spec)\./.test(path) && !knownCode.has(path) && within(path, input.plan.writePaths)).map(([path]) => path)
   const authorEntries = new Map(readTree(commonDir, oldTree).map(entry => [entry.path, entry]))
@@ -260,9 +266,11 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
       const previous = residual.delivery!.item, next = resolved?.items.find(item => item.id === previous.id)
       const wholeNodeDeleted = resolution.content === null && !authorSource.has(resolution.path)
       const authorChanged = authorChanges.some(change => change.path === resolution.path && change.changedIds.includes(previous.id))
-      if ((!authorChanged || previous.kind === 'VERIFY') && (!next || !sameContractBusinessMeaning(previous, next)) || previous.kind === 'AC' && !next && !wholeNodeDeleted) reject(`精确组合破坏未消费之外的交付义务: ${resolution.path} ${previous.id}`)
+      const explicitlyRetired = input.plan.authorizedChanges?.some(change => change.id === previous.id && change.action === 'retire' && change.source === 'user:raw')
+      if (!explicitlyRetired && ((!authorChanged || previous.kind === 'VERIFY') && (!next || !sameContractBusinessMeaning(previous, next)) || previous.kind === 'AC' && !next && !wholeNodeDeleted)) reject(`精确组合破坏未消费之外的交付义务: ${resolution.path} ${previous.id}`)
     }
     for (const policy of oldFrozen.graph.items.values()) if (policy.kind === 'VERIFY' && policy.path === resolution.path) {
+      if (input.plan.authorizedChanges?.some(change => change.id === policy.id && change.action === 'retire' && change.source === 'user:raw')) continue
       const next = resolved?.items.find(item => item.id === policy.id)
       if (!next || !sameContractBusinessMeaning(policy, next)) reject(`精确组合破坏VERIFY执行政策: ${resolution.path} ${policy.id}`)
     }

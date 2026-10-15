@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { captureInputSnapshot } from './snapshot.js'
 import { readSyncLandingStatus } from './landing-status.js'
-import type { ApplyJournal, SyncOperation } from './operation-types.js'
+import type { ApplyJournal } from './operation-types.js'
 
 test('真实FF采纳按当前闭包证明完成，无关提交保有效，feature分支不伪报主分支', async t => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'spex-landing-')))
@@ -17,7 +17,7 @@ test('真实FF采纳按当前闭包证明完成，无关提交保有效，featur
   const input = await captureInputSnapshot(root)
   git('checkout', '-b', 'delivery'); writeFileSync(join(root, 'code.ts'), 'verified\n'); git('add', '.'); git('commit', '-m', 'delivery')
   const delivery = await captureInputSnapshot(root), scope = { paths: ['code.ts'], contractIds: ['REQ'], flowIds: [] }
-  const operation = { input, phase: 'workspace_synced', blockedReason: null, blockedScope: { paths: [], contractIds: [], flowIds: [] }, scope, deliveredScope: scope } as SyncOperation
+  const operation = { input, phase: 'workspace_synced', blockedReason: null, blockedScope: { paths: [], contractIds: [], flowIds: [] }, scope, deliveredScope: scope } satisfies Parameters<typeof readSyncLandingStatus>[0]
   const journals = [{ status: 'settled', receipt: { actualCommit: delivery.headCommit, actualTree: delivery.immutableTree, deliverySnapshot: delivery } }] as ApplyJournal[]
   const options = { canonicalBranch: 'refs/heads/main', readPaths: ['config.json'] }
   assert.deepEqual(readSyncLandingStatus(operation, delivery, journals, options), { sourceSynced: true, canonicalSynced: false, actualCommit: delivery.headCommit, phase: 'workspace_synced' })

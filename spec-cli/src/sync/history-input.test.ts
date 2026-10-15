@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { captureInputSnapshot, readEvidence, readObject, readTree, writeEvidence } from './snapshot.js'
@@ -62,4 +62,13 @@ test('Git原生rename语义保留节点新位置，旧输入及未采纳提交�
   const changed = { ...snapshot, id: 'different' }; assert.throws(() => readHistoryRequest(changed, ref), /SYNC_HISTORY_BINDING/)
   f.git('checkout', '-b', 'other', f.base); writeFileSync(join(f.root, 'other.txt'), 'other'); f.git('add', '.'); f.git('commit', '-m', 'other')
   assert.throws(() => prepareHistoryRequest(snapshot, { ...f.input, featureCommit: f.git('rev-parse', 'HEAD') }))
+})
+
+test('反向三方拒绝外部merge driver，不在宿主执行候选合并命令', async t => {
+  const f = await fixture(t), marker = join(f.root, 'driver-executed')
+  f.git('config', 'merge.unsafe.driver', `touch '${marker}'`)
+  writeFileSync(join(f.root, '.gitattributes'), 'code.ts merge=unsafe\n')
+  const snapshot = await captureInputSnapshot(f.root)
+  assert.throws(() => prepareHistoryRequest(snapshot, f.input), /SYNC_HISTORY_MERGE_DRIVER_UNSUPPORTED/)
+  assert.equal(existsSync(marker), false)
 })

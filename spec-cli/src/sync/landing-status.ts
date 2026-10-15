@@ -7,7 +7,7 @@ const same = (left: TreeEntry | undefined, right: TreeEntry | undefined): boolea
 const covers = (scope: string, path: string): boolean => scope === path || path.startsWith(`${scope}/`)
 
 /** 从已结算交付与当前 Git/工作文件读取采纳事实；不写持久业务阶段。 */
-export function readSyncLandingStatus(operation: SyncOperation, snapshot: InputSnapshot, journals: readonly ApplyJournal[], options: { canonicalBranch: string; readPaths: readonly string[] }): SyncLandingStatus {
+export function readSyncLandingStatus(operation: Pick<SyncOperation, 'input' | 'phase' | 'blockedReason' | 'blockedScope' | 'scope' | 'deliveredScope'>, snapshot: InputSnapshot, journals: readonly ApplyJournal[], options: { canonicalBranch: string; readPaths: readonly string[] }): SyncLandingStatus {
   const empty: SyncLandingStatus = { sourceSynced: false, canonicalSynced: false, actualCommit: null, phase: operation.phase }
   if (operation.blockedReason || operation.blockedScope.paths.length || operation.blockedScope.contractIds.length || operation.blockedScope.flowIds.length || !journals.length || journals.some(journal => journal.status !== 'settled' || !journal.receipt)) return empty
   if (operation.input.source.repositoryId !== snapshot.source.repositoryId || operation.input.source.canonicalRoot !== snapshot.source.canonicalRoot || operation.input.source.physicalFingerprint !== snapshot.source.physicalFingerprint) return empty
