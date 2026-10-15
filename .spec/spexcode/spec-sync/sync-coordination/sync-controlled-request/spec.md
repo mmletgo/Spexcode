@@ -10,7 +10,7 @@ code:
 
 ## raw source
 
-用户通过受控编辑或裁决请求修改 Spec 时，实际来源文件还没有保存。协调器必须保留真实来源身份和先前生成的细化，只应用用户要求的差量。
+用户通过受控编辑、裁决或已落地交付的成组补偿请求修改内容时，实际来源文件还没有保存。协调器必须保留真实来源身份和先前生成的细化，只应用用户要求的差量。
 
 ## expanded spec
 
@@ -25,7 +25,7 @@ composeControlledRequest 不修改 InputSnapshot 或伪造 BaselinePair。它验
 
 裁决使用显式 type=sync.decision 的 schemaVersion=1 不可变请求，prepareControlledDecision/readControlledDecision 绑定原 operationId、inputId、可信 analysisRef、非空且不重复的 findingIds、稳定 requestId、source 与 keep_intent/adopt_behavior/new_rule 选择；new_rule 必须有用户规则正文。保持原需求没有正文差量也保存有效请求。它与正文差量明确区分，composeControlledRequest 仅绑定裁决 requestBlob、保持组合 tree/manifest/contentDigest，实际规则或代码变化由经验证的裁决协调方向生成。请求本身不把任意 analysisRef 升为授权；可信分析的原操作/检查点归属由应用与协调器核验。
 
-裁决原操作有尚未交付的受控正文编辑时，originalRequestBlob 由可信应用从原 operation 继承，调用者不能自行指定；该引用只能是同 input 的有效正文请求，不能递归指向另一裁决。组合先应用原用户正文再绑定新裁决，保持原需求差量、先前生成细化和 source readonly。
+裁决原操作有尚未交付的受控正文编辑时，originalRequestBlob 由可信应用从原 operation 继承，调用者不能自行指定；该引用只能是同 input 的有效正文或成组历史请求，不能递归指向另一裁决。组合先应用原用户正文再绑定新裁决，保持原需求差量、先前生成细化和 source readonly。
 
 controlledDecisionIdentity 从原operation/input/analysis、排序finding IDs与choice/精确rule计算稳定业务摘要，排除运输requestId。同选择换UUID或finding顺序仍为同一业务身份，不应重开operation/预算；改变选择、规则或原分析则是新的业务输入。原requestId仍用于接入收据与同key全payload严格重放。
 
@@ -38,3 +38,5 @@ renderControlledDecisionRaw只向完整受审合成raw程序追加不可变所�
 P4已有selected-composition-v1时，正文overlay保其完整selection digest、逐path byte和逐ID intent证据，合并原冲突与本次受控三方冲突，不降级成只有legacy baselinePairId的overlap证据。作者投影独立保存原requestRef及真实before/next与逐ID差量；来源snapshot/index不变，原patch无论与历史delivery相同与否仍进入分析。受控编辑在旧selection缺少真实组合证据时拒绝，不用fallback掩盖丢失绑定。
 
 受控正文overlay同时保逐intent pair的code/test artifact证明；仅原body patch进入作者raw权限，既有code-only残差不被overlay或row未变化判断吞掉。
+
+成组历史输入由 [[sync-history-input]] 固定完整差量，readControlledChanges 统一展开正文、历史与继承请求。组合逐文件保留真实 before/next、删除及 mode；真正重叠仍保留三方证据供同一行为分析与独审。带 Git 冲突标记的树不成为生成输入：暂选明确反向目标对象只用于分析，未解决冲突不得交付。精确基线时，成组作者语义及 code/test artifact 从同一真实请求重算，不将多个作者文件伪拼为来源快照。

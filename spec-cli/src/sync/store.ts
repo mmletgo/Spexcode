@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { getBlob } from '@spexcode/spec-core'
 import { applyComponentMigrations, type ProtocolTransaction, type SessionProtocol } from '@spexcode/session-protocol'
 import { controlledDecisionIdentity, readControlledDecision, readControlledRequest } from './request-input.js'
+import { readHistoryRequest } from './history-input.js'
 import { verifyPublicationBase } from './publication-base.js'
 import type { PublicationBase, PublicationHeads } from './operation-types.js'
 import { SYNC_COMPONENT, SYNC_MIGRATIONS, syncCoordinatorAddress, syncSemanticDigest } from './migrations.js'
@@ -305,6 +306,10 @@ export class SyncStore {
     if (evidence.type === 'sync.decision') {
       const decision = readControlledDecision(input.input, input.requestBlob)
       return digest({ source: input.input.source, inputId: input.input.id, origin: input.origin, decision: controlledDecisionIdentity(decision), retryOf: input.retryOf ?? null })
+    }
+    if (evidence.type === 'sync.history') {
+      const { requestId: _requestId, ...request } = readHistoryRequest(input.input, input.requestBlob)
+      return digest({ source: input.input.source, inputId: input.input.id, origin: input.origin, history: request, retryOf: input.retryOf ?? null })
     }
     const request = readControlledRequest(input.input, input.requestBlob)
     const { requestId: _requestId, ...origin } = request.origin

@@ -37,3 +37,5 @@ P4按冻结 FrozenBaselineSelection 逐资源组合：path 的 bytePair 只负�
 代码或测试变化不会因Spec行未变而消失。逐真实intent pair根据其ID实际所属owner的code与AC测试绑定，保source/delivery/newsource完整真实Git对象及owner；不从共享REQ扩大无关消费者。artifacts独立记录authorBase与真实采纳pair/commit，code/test差量进入residualPaths，即使path bytePair.source已夹带该差量也不认定已消费。实际HEAD已接受较新byte head的完整提交时，该真实交付对象可作文件作者基准；code回声不制造变化，后续新编辑仍捕获。getter从同一真实pairs、snapshot、治理和测试绑定重算全部artifact对象与残差，不能凭hash正确的新JSON抹去code-only差量。
 
 contextPaths显式冻结只读上下文：执行路径继续按真实byte pair三方组合；选中非执行路径直接保实际source的对象、mode及删除/缺失，不从HEAD取旧配置或旧oracle。未选且非执行路径仍以真实HEAD为基，不能夹带其它作者dirty。有效executionPaths/contextPaths随组合证据保存并重核：context必须等于真实InputSnapshot，其余非执行对象必须等于HEAD；读取上下文不授模型写权、lease或已验证coverage。目录形式的明确额外读取只展开其中真实文件，不把目录当字节资源。
+
+成组受控补偿以单独 controlledAuthorGroup 保留固定请求和完整 nullable before/next 变化；与单正文 patch 互斥，不伪造 InputSnapshot。读取时重做真实 Git 反向三方，核每个请求对象及所有 intent/artifact/residualPath。新增、删除和节点位置变化按完整请求树求语义身份，真实 source/index 的 byte 证据保持原样。

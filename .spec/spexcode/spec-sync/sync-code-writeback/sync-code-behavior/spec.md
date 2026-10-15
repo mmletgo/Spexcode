@@ -41,3 +41,5 @@ P4精确selection存在时，分析/独审输入与输出摘要绑定 baselineSe
 raw/shared prose 的 broad affected closure只保证完整路径进入分析，不冒充每条RULE/TR发生了作者改义。authorChanges.changedIds只列真实逐ID语义变化与同owner的REQ raw种子；不能靠普通raw文案修改自批未选B政策。原真实作者残差与受控patch并存时，raw整合仍以真正未消费的完整作者基准保此前残差，不能用request.before掩盖它。
 
 代码作者残差与Spec作者授权分开：code-only残差不升格user:raw，仍进入requiredChangedPaths与独审。逐真实intent pair的code/test全文按实际path/mode/OID去重进入intentArtifactFiles；旧source字节视图仍保真实byte pair，不拼造跨pair的全局作者文件。完整源码整合逐三方核确定编辑及mode；真实Git重叠行允许独审解决，但其外固定代码行和未选B确定编辑须逐字保留。Unicode重复代码锚点不能误拒真实Git行重叠，也不能用于删除Bpolicy、弱化权限或回退已交付mode。
+
+成组历史请求的真实 Spec、代码与测试差量作为明确作者输入展开；多个真实 before/next 不互相覆盖作者基准。用户明确请求撤销后，可信应用仅从固定成组树实际删除的身份派生既有 user:raw 退役授权；模型不能扩大该集合。当前独审仍检查未选义务、后续编辑及业务冲突；原可信执行命令和独立测试保持门禁，不能借撤销自免验证。
