@@ -8,6 +8,7 @@ import { join } from 'node:path'
 import { processStartToken } from '@spexcode/spec-core'
 import { codexStructuredTurn } from './codex-harness.js'
 import { prepareStructuredRealm, structuredObserverState, StructuredSessionError, StructuredSessionTransportError, type StructuredExecution } from './session-structured-policy.js'
+import { freezeContext, readFrozenRange, type FrozenNativeItem } from './frozen-context.js'
 
 type Rpc = { id?: number; method: string; params: Record<string, unknown> }
 const schema = { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'], additionalProperties: false }
@@ -60,6 +61,87 @@ const safePrelude = (request: Rpc): unknown => {
   return undefined
 }
 const callbacks = { onThread: async (_id: string): Promise<void> => {}, onTurn: async (_id: string): Promise<void> => {} }
+
+function frozenFixture() {
+  const directory = mkdtempSync(join(tmpdir(), 'spex-frozen-rpc-'))
+  const ref = freezeContext({ directory, sourceRoot: process.cwd(), binding: { requestKey: 'request', inputDigest: 'immutable-input' }, entries: [{ id: 'source', label: 'source', kind: 'utf8', bytes: Buffer.from('frozen-tail') }] })
+  const args = { contextDigest: ref.contextDigest, entryId: 'source', startByte: 0, endByte: 11 }
+  const item: FrozenNativeItem = { type: 'dynamicToolCall', id: 'native-call', namespace: null, tool: 'spex_read_frozen', arguments: args, status: 'completed', success: true, contentItems: readFrozenRange(ref, args).response.contentItems }
+  const policy = (extra: Partial<StructuredExecution> = {}) => execution({ version: 2, policy: 'codex-frozen-read-only-v2', frozenContext: ref, ...extra })
+  const turn = (items = [item]) => ({ ...finalTurn(), items: [...items, ...finalTurn().items] })
+  return { ref, args, item, policy, turn, close: () => rmSync(directory, { recursive: true, force: true }) }
+}
+
+test('frozen native dynamic requests persist before replying and cannot collide with a client RPC id', async () => {
+  const data = frozenFixture(), receipts: unknown[] = []
+  const f = await fixture((request, send) => {
+    if (request.method === 'thread/start') {
+      const tools = request.params.dynamicTools as Array<{ type: string; name: string }>
+      assert.deepEqual(tools.map(tool => [tool.type, tool.name]), [['function', 'spex_read_frozen']])
+    }
+    if (request.method === 'turn/start') {
+      send({ id: request.id, method: 'item/tool/call', params: { threadId: 'thread-exact', turnId: 'turn-exact', callId: 'native-call', namespace: null, tool: 'spex_read_frozen', arguments: data.args } })
+      return { turn: { id: 'turn-exact' } }
+    }
+    if (!request.method) {
+      assert.equal(receipts.length, 1, 'durable onFrozenRead completes before reply')
+      send({ method: 'turn/completed', params: { threadId: 'thread-exact', turn: data.turn() } }); return undefined
+    }
+    if (request.method === 'thread/read') return { thread: { id: 'thread-exact', turns: [data.turn()] } }
+    return safePrelude(request)
+  })
+  try {
+    const result = await codexStructuredTurn(f.path, '/fixture', 'pinned prompt', data.policy(), { ...callbacks, onFrozenRead: async receipt => { receipts.push(receipt) } })
+    assert.deepEqual(result.frozenReadProof?.coveredEntryIds, ['source'])
+    assert.equal(result.frozenReadProof?.receipts[0].callId, 'native-call')
+    assert.equal(result.frozenReadProof?.receipts[0].turnId, 'turn-exact')
+  } finally { await f.close(); data.close() }
+})
+
+for (const mode of ['foreign-thread', 'foreign-turn', 'wrong-digest', 'path']) test(`frozen ${mode} request is refused before any successful response`, async () => {
+  const data = frozenFixture()
+  const f = await fixture((request, send) => {
+    if (request.method === 'turn/start') {
+      send({ id: 99, method: 'item/tool/call', params: { threadId: mode === 'foreign-thread' ? 'foreign' : 'thread-exact', turnId: mode === 'foreign-turn' ? 'foreign' : 'turn-exact', callId: 'native-call', tool: 'spex_read_frozen', arguments: { ...data.args, ...(mode === 'wrong-digest' ? { contextDigest: 'wrong' } : {}), ...(mode === 'path' ? { path: '/host/live' } : {}) } } })
+      return { turn: { id: 'turn-exact' } }
+    }
+    return safePrelude(request)
+  })
+  try {
+    await assert.rejects(codexStructuredTurn(f.path, '/fixture', 'pinned prompt', data.policy(), callbacks), (error: unknown) => error instanceof StructuredSessionError && error.code === 'cancellation_pending')
+    assert.equal(f.calls.some(call => !call.method && call.id === 99), false)
+  } finally { await f.close(); data.close() }
+})
+
+test('frozen exact completed history recovers without another tool call, turn/start or reply', async () => {
+  const data = frozenFixture()
+  const f = await fixture(request => request.method === 'thread/resume' || request.method === 'thread/read' ? { thread: { id: 'thread-exact', turns: [data.turn()] } } : safePrelude(request))
+  try {
+    const result = await codexStructuredTurn(f.path, '/fixture', 'pinned prompt', data.policy({ threadId: 'thread-exact', turnId: 'turn-exact' }), { ...callbacks, onFrozenRead: async () => assert.fail('completed history cannot issue a new tool call') })
+    assert.deepEqual(result.frozenReadProof?.coveredEntryIds, ['source'])
+    assert.equal(f.calls.some(call => call.method === 'turn/start' || !call.method), false)
+  } finally { await f.close(); data.close() }
+})
+
+test('frozen pending disconnected turn requires existing cancellation and never fabricates an old RPC response', async () => {
+  const data = frozenFixture()
+  const f = await fixture(request => request.method === 'thread/resume' ? { thread: { id: 'thread-exact', turns: [{ ...data.turn([{ ...data.item, status: 'inProgress', success: null, contentItems: null }]), status: 'inProgress' }] } } : safePrelude(request))
+  try {
+    await assert.rejects(codexStructuredTurn(f.path, '/fixture', 'pinned prompt', data.policy({ threadId: 'thread-exact', turnId: 'turn-exact' }), callbacks), (error: unknown) => error instanceof StructuredSessionError && error.code === 'cancellation_pending')
+    assert.equal(f.calls.some(call => call.method === 'turn/start' || !call.method), false)
+  } finally { await f.close(); data.close() }
+})
+
+test('frozen final answer requires real complete coverage and authentic return bytes in exact history', async () => {
+  for (const mode of ['missing', 'tampered', 'partial']) {
+    const data = frozenFixture()
+    const partial = { ...data.args, endByte: 6 }
+    const items = mode === 'missing' ? [] : mode === 'tampered' ? [{ ...data.item, contentItems: [{ type: 'inputText', text: 'unrelated source bytes' }] }] : [{ ...data.item, arguments: partial, contentItems: readFrozenRange(data.ref, partial).response.contentItems }]
+    const f = await fixture(request => request.method === 'thread/resume' || request.method === 'thread/read' ? { thread: { id: 'thread-exact', turns: [data.turn(items)] } } : safePrelude(request))
+    try { await assert.rejects(codexStructuredTurn(f.path, '/fixture', 'pinned prompt', data.policy({ threadId: 'thread-exact', turnId: 'turn-exact' }), callbacks), /completely read|result bytes/) }
+    finally { await f.close(); data.close() }
+  }
+})
 
 test('structured first-turn subscription captures early completion and never selects foreign or old final answers', async () => {
   const identities: string[] = []

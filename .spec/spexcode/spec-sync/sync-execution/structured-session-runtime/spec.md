@@ -40,3 +40,5 @@ AbortSignal、caller 超时与显式取消使用同一持久取消协议。确�
 精确原生执行与本机结果 observer 的存活分别记录：队列在短 record 事务中以 PID/startToken 领取 observer 身份，正常退出释放为 null；此运行字段不参与固定请求摘要。同键调用看到仍存活的 observer 仅等待原持久结果。observer 已释放、明确死亡或 PID 已被不同启动身份复用时，同键新进程通过原队列恢复同一 thread/turn；缺失或无法验证 owner 的 running 状态不得当作死亡抢占。两个恢复进程只允许一个领取观察，既有 turn 不再发送 turn/start。native 仍运行或已完成都可恢复精确结果，completed 同键回放保持原身份与摘要；恢复不调用普通会话 resume，也不扩大固定只读策略。
 
 结构化创建期间取消或超时、尚未发布会话时，正式创建事务完成清理后保留精确 SessionCreateTermination。错误包含该收据的预期 sessionId；同键重放返回原取消/超时，不进入队列或重新创建。创建事务等待锁时被取消不能生成他人停止证明；清理失败不提供 nativeStopped。上层只能用匹配固定请求的收据结算尚未开始的资源。
+
+提供 frozenContext 时采用 [[structured-readonly-policy]] 的 v2 冻结读取，清单参与固定请求摘要；内部 sessionCreateKey 仅承接已持久 reserveDispatch 的原生创建身份，业务 requestKey/inputDigest 保持清单绑定。真实工具请求与回复证据先持久再发送，最终必须核验精确原生历史及完整覆盖。未答动态请求的恢复不能伪回执，改由既有取消协议确认精确turn停止；确认前不得释放资源。
