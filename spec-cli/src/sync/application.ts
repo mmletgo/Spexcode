@@ -302,6 +302,7 @@ export class SyncApplication {
     const scope = plan.executionScope!
     const owns = (binding: FrozenBaselineSelection['bindings'][number]): boolean => binding.resource.kind === 'path' ? coveredPath(binding.resource.path, scope.paths) : binding.resource.kind === 'contract' ? scope.contractIds.includes(binding.resource.id) : scope.flowIds.includes(binding.resource.id)
     const changedPaths = evidence.paths.filter(path => coveredPath(path.path, scope.paths) && (path.base?.oid !== path.source?.oid || path.base?.mode !== path.source?.mode))
+    const residualPaths = evidence.residualPaths.filter(path => coveredPath(path, scope.paths))
     const intentChanged = evidence.intents.some(intent => (intent.resource.kind === 'contract' ? scope.contractIds : scope.flowIds).includes(intent.resource.id) && intent.changed)
     const readonlyContext = evidence.paths.filter(path => !coveredPath(path.path, scope.paths)).map(path => ({ path: path.path, oid: path.source?.oid ?? null, mode: path.source?.mode ?? null }))
     const pairs = new Map(selection.bindings.filter(owns).flatMap(binding => { const pair = 'bytePair' in binding ? binding.bytePair : binding.intentPair; return pair ? [[pair.id, pair] as const] : [] }))
@@ -310,7 +311,7 @@ export class SyncApplication {
       const prior = new Map(readTree(snapshot.source.commonDir, canonical.tree).map(entry => [entry.path, entry]))
       return readonlyContext.some(entry => entry.oid !== (prior.get(entry.path)?.oid ?? null) || entry.mode !== (prior.get(entry.path)?.mode ?? null))
     })
-    return { changed: changedPaths.length > 0 || intentChanged || contextChanged, specChanged: intentChanged || changedPaths.some(path => path.path.startsWith('.spec/')), codeChanged: contextChanged || changedPaths.some(path => !path.path.startsWith('.spec/')), readonlyContext }
+    return { changed: changedPaths.length > 0 || residualPaths.length > 0 || intentChanged || contextChanged, specChanged: intentChanged || changedPaths.some(path => path.path.startsWith('.spec/')), codeChanged: contextChanged || changedPaths.some(path => !path.path.startsWith('.spec/')) || residualPaths.some(path => !path.startsWith('.spec/')), readonlyContext }
   }
   private async observeNode(snapshot: InputSnapshot, nodeId: string): Promise<void> {
     const { settings, configDigest } = readSyncSettings(snapshot)
@@ -323,7 +324,7 @@ export class SyncApplication {
       const differenceKey = `${snapshot.id}:${selection.digest}:${syncPlanDigest(plan)}`
       let cachedDifference = this.observedDifferences.get(nodeId)
       if (cachedDifference?.key !== differenceKey) {
-        const composed = composeAuthoredInput(snapshot, selection, { retainConflicts: true }).composed!
+        const composed = composeAuthoredInput(snapshot, selection, { retainConflicts: true, executionPaths: plan.executionScope!.paths, contextPaths: plan.readPaths }).composed!
         const evidence = readCompositionEvidence(snapshot, composed, selection)
         const { changed, specChanged, codeChanged, readonlyContext } = this.observationChanges(snapshot, plan, selection, evidence)
         const difference = { nodeId, readonlyContext, selection: selection.digest, configDigest, policyDigest: syncPlanDigest(plan), paths: evidence.paths.map(path => ({ path: path.path, base: path.base?.oid ?? null, baseMode: path.base?.mode ?? null, source: path.source?.oid ?? null, sourceMode: path.source?.mode ?? null })), intents: evidence.intents.map(intent => ({ resource: intent.resource, changed: intent.changed, before: intent.before?.semanticDigest ?? null, source: intent.source?.semanticDigest ?? null })), residualPaths: evidence.residualPaths, conflicts: evidence.conflicts }
