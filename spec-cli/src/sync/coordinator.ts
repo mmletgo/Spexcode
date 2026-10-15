@@ -114,7 +114,7 @@ async function readInput(input: InputSnapshot, plan: SyncCoordinatorPlan, previo
 
 /** 接入之前冻结真实读集合和派生输入，只返回既有协议接入结构，不改 source/index。 */
 export async function prepareSyncAdmission(input: InputSnapshot, supplied: SyncCoordinatorPlan, options: SyncAdmissionOptions): Promise<AdmitSyncInput> {
-  const plan = structuredClone(supplied), executionScope = options.executionScope ?? plan.executionScope
+  const plan = structuredClone(supplied), executionScope = options.executionScope ?? (options.baselineSelection ? plan.executionScope : undefined)
   if (options.baselineSelection && !executionScope) fail('execution_scope_missing', '精确基线接入必须冻结实际目标写入范围')
   const scope = executionScope ?? { paths: unique(plan.writePaths), contractIds: [], flowIds: [] }
   const view = await readInput(input, plan, options.previousBaselinePair, options.requestBlob, options.baselineSelection, executionScope?.paths)
