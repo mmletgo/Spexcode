@@ -304,3 +304,5 @@ The exclusion is scoped to that sweep alone. A live session worktree keeps its o
 at its own path, because there the tree IS the input. And the cut has to be checked from both sides:
 "fewer watches" reads identically whether the useless directories went or the useful ones did, so a
 spec edit inside the served tree must still be observed to fire.
+
+TreeWatcherRegistry 与平台 transport 已下沉到 [[sync-tree-watcher]]，本模块继续 reexport 既有公共接口；SSE 生命周期与调度行为不变。
