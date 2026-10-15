@@ -203,9 +203,7 @@ test('structured live target reaches its own shared-runtime stop guard', { concu
     assert.equal(processStartToken(identity.pid), identity.startToken, 'the shared generation remains alive after the guard refuses')
   } finally {
     if (processStartToken(identity.pid) === identity.startToken) {
-      try { process.kill(identity.pid, 'SIGTERM') } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error
-      }
+      process.kill(identity.pid, 'SIGTERM')
       for (let attempt = 0; attempt < 50 && processStartToken(identity.pid) === identity.startToken; attempt++)
         await new Promise<void>((resolve) => setTimeout(resolve, 20))
     }
