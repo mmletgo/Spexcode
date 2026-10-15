@@ -190,12 +190,15 @@ test('a Command Box @new creates a child under the selected session, optionally 
     const dispatch = async (text: string, token: string) => {
       // The source receives its prompt while @new is still starting the child. Observe that live pane
       // concurrently: the fake harness keeps printing ticks, so waiting for child readiness loses the line.
-      const [result] = await Promise.all([
+      // Settle both branches before reporting capture failure, so the new child is registered for cleanup.
+      const [posted, captured] = await Promise.allSettled([
         request(base, `/api/sessions/${source}/input`, {
           method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ kind: 'command', text }),
         }),
         waitFor(async () => (await request(base, `/api/sessions/${source}/capture`)).text, (pane) => pane.includes(text), 'source prompt'),
       ])
+      if (posted.status === 'rejected') throw posted.reason
+      const result = posted.value
       assert.equal(result.status, 200, result.text)
       const body = result.body as { outcomes?: Array<{ token?: string; result?: string; detail?: string }>; mentionSummary?: string }
       assert.equal(body.outcomes?.length, 1, result.text)
@@ -204,6 +207,7 @@ test('a Command Box @new creates a child under the selected session, optionally 
       const child = body.outcomes?.[0]?.detail
       assert.ok(child, result.text)
       created.push(child)
+      if (captured.status === 'rejected') throw captured.reason
       assert.match(body.mentionSummary || '', new RegExp(`${token}->`))
       const childRecord = await waitFor(async () => (await request(base, `/api/sessions/${child}`)).body as { parent?: string; launcher?: string; liveness?: string },
         (session) => session.parent === source && session.liveness === 'online', `child ${child} under source`)
@@ -216,16 +220,19 @@ test('a Command Box @new creates a child under the selected session, optionally 
     // the Conversation footer is a Command Box on a terminal-free surface: the same kind, plus replyVia:note,
     // spawns the child AND delivers the prompt with the note-reply insert
     const noteText = '@new:fake from the conversation'
-    const [noted] = await Promise.all([
+    const [notePosted, noteCaptured] = await Promise.allSettled([
       request(base, `/api/sessions/${source}/input`, {
         method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ kind: 'command', text: noteText, replyVia: 'note' }),
       }),
       waitFor(async () => (await request(base, `/api/sessions/${source}/capture`)).text, (pane) => pane.includes('SEND FROM NOTE FLOW'), 'the note-reply insert rides the command delivery'),
     ])
+    if (notePosted.status === 'rejected') throw notePosted.reason
+    const noted = notePosted.value
     assert.equal(noted.status, 200, noted.text)
     const notedChild = (noted.body as { outcomes?: Array<{ detail?: string }> }).outcomes?.[0]?.detail
     assert.ok(notedChild, noted.text)
     created.push(notedChild)
+    if (noteCaptured.status === 'rejected') throw noteCaptured.reason
     const timeline = (await request(base, `/api/sessions/${source}/timeline`)).body as { events: Array<{ kind: string; text?: string; replyVia?: string }> }
     const sent = timeline.events.filter((event) => event.kind === 'sent' && event.text === noteText).at(-1)
     assert.match(sent?.text || '', /from the conversation/)
