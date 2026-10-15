@@ -2,7 +2,7 @@
 title: Dashboard、CLI 与同一应用服务
 status: pending
 hue: 175
-desc: 已提供同一服务的保存、运行、差异、重试和恢复入口；裁决与持续运行等完整产品行为仍待完成。
+desc: 同一应用服务已提供保存、运行、差异、裁决、持续观察、停止写入和成组撤销入口；完整产品验收仍须实证。
 related:
   - spec-dashboard/src/SpecView.jsx
   - spec-dashboard/src/ProseActions.jsx
