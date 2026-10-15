@@ -1,9 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { assertFrozenBinding, freezeContext, frozenContextPrompt, persistFrozenRead, prepareFrozenPrompt, proveFrozenReads, readFrozenManifest, readFrozenRange, verifyFrozenReadProof, type FrozenContextInput, type FrozenNativeItem } from './frozen-context.js'
+import { assertFrozenBinding, freezeContext, frozenContextPrompt, persistFrozenRead, prepareFrozenPrompt, proveFrozenReads, readFrozenManifest, readFrozenRange, verifyFrozenReadProof, FROZEN_READ_MAX_BYTES, type FrozenContextInput, type FrozenNativeItem } from './frozen-context.js'
 
 const binding = { requestKey: 'exact-request', inputDigest: 'exact-input' }
 function fixture(entries: FrozenContextInput[] = [{ id: 'a', label: 'frozen source', kind: 'utf8', bytes: Buffer.from('首abc尾') }]) {
@@ -108,5 +109,39 @@ test('large prompt preparation is lossless, stable before hashing and leaves sma
     assert.equal(readFileSync(join(dirname(first.frozenContext.manifestPath), 'bytes', entry.sha256), 'utf8'), request.prompt)
     assert.equal(prepareFrozenPrompt(first, options), first)
     assert.throws(() => prepareFrozenPrompt(first, { ...options, binding: { ...options.binding, attemptId: 'foreign' } }), /attemptId/)
+  } finally { f.close() }
+})
+
+test('one-to-two MiB prompts use lossless reader below native string limit with complete byte coverage', () => {
+  const f = fixture()
+  try {
+    const original = 'x'.repeat(1_369_916) + '义'.repeat(82_260) + '尾部义', bytes = Buffer.from(original, 'utf8')
+    assert.equal(original.length, 1_452_179); assert.equal(bytes.length, 1_616_705)
+    assert.ok(original.length > 1_048_576 && bytes.length < 2 * 1024 * 1024)
+    const prepared = prepareFrozenPrompt({ root: process.cwd(), prompt: original, ...binding }, { directory: f.directory })
+    assert.ok(prepared.frozenContext, '1–2MiB正文必须走reader而不能继续超过原生字符串上限')
+    assert.ok(prepared.prompt.length < 2048)
+    const manifest = readFrozenManifest(prepared.frozenContext), entry = manifest.entries[0]
+    assert.equal(entry.byteLength, bytes.length)
+    assert.equal(entry.sha256, createHash('sha256').update(bytes).digest('hex'))
+    assert.deepEqual(readFileSync(join(dirname(prepared.frozenContext.manifestPath), 'bytes', entry.sha256)), bytes)
+    const items: FrozenNativeItem[] = [], chunks: string[] = []
+    for (let startByte = 0; startByte < bytes.length;) {
+      let endByte = Math.min(bytes.length, startByte + FROZEN_READ_MAX_BYTES)
+      while (endByte < bytes.length && (bytes[endByte] & 0xc0) === 0x80) endByte--
+      const args = { contextDigest: prepared.frozenContext.contextDigest, entryId: entry.id, startByte, endByte }
+      const response = readFrozenRange(prepared.frozenContext, args).response
+      chunks.push((JSON.parse(response.contentItems[0].text) as { text: string }).text)
+      items.push({ type: 'dynamicToolCall', id: `range-${startByte}`, namespace: null, tool: 'spex_read_frozen', arguments: args, status: 'completed', success: true, contentItems: response.contentItems })
+      startByte = endByte
+    }
+    assert.equal(chunks.join(''), original)
+    const proof = proveFrozenReads(prepared.frozenContext, identity, items)
+    assert.deepEqual(proof.coveredEntryIds, [entry.id])
+    verifyFrozenReadProof(prepared.frozenContext, proof, identity)
+    assert.throws(() => proveFrozenReads(prepared.frozenContext!, identity, items.slice(0, -1)), /not completely read/)
+    const boundary = { root: process.cwd(), prompt: 'x'.repeat(512 * 1024), ...binding }
+    assert.equal(prepareFrozenPrompt(boundary, { directory: f.directory }), boundary)
+    assert.ok(prepareFrozenPrompt({ ...boundary, prompt: boundary.prompt + 'x' }, { directory: f.directory }).frozenContext)
   } finally { f.close() }
 })

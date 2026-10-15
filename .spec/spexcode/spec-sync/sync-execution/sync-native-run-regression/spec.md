@@ -29,3 +29,5 @@ code:
 检查后竞争使用真实 Git 命令复现：worktree remove 完成后外部重建同路径内容、分支在删除前前进时均拒绝结算并保留文件或引用；撤去竞争后同键恢复通过，正常 reference-transaction hook 可观察删除。两种拒绝及成功恢复均保留源 checkout/index、其它用户 worktree 与原调用预算。
 
 冻结读取回归另外验证业务requestKey与实际sessionCreateKey分离、真实attempt/policy绑定、派发摘要前自动无损冻结超大prompt、稳定引用同键重入、精确native history proof保存与removed重放核验。此文件使用受控runtime接缝；真正原生大于2MiB读取和能力隔离证据由 [[frozen-context-reader]] 的独立native测试承担，不混称为LLM验收。
+
+1至2MiB旧 inline 资源回归固定完整请求、dispatch及真实SQLite资源后，以已 aborted 的原请求重入，核对只取消原精确会话并推进 removed、无新 run、callsUsed 不增、计划摘要不变。同 key 修改正文仍拒绝，不能借旧资源跳过新请求冻结或摘要核验。该前置资源是明确夹具，不冒称原生模型交付。

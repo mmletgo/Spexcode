@@ -12,7 +12,7 @@ import { sessionIdForCreateKey, readSessionCreateTermination, recoverSessionCrea
 import { cancelStructuredSession, runStructuredSession, StructuredSessionError, type StructuredSessionRequest, type StructuredSessionResult } from '../session-structured.js'
 import { structuredExecutionPolicy } from '../session-structured-policy.js'
 import { freezeContext, proveFrozenReads, readFrozenManifest, readFrozenRange } from '../frozen-context.js'
-import { createAttemptRunner, type AttemptRunnerOptions, type NativeRunCheckpoint, type NativeRunRecord } from './native-run.js'
+import { createAttemptRunner, type AttemptRunnerOptions, type NativeRunCheckpoint, type NativeRunPlan, type NativeRunRecord } from './native-run.js'
 import { migrateSyncStore } from './migrations.js'
 import type { BlobRef } from './operation-types.js'
 import { SyncStore } from './store.js'
@@ -152,6 +152,39 @@ test('large native prompt freezes before reserveDispatch and reuses stable manif
     await assert.rejects(run(request), /controlled unresolved/)
     assert.equal(calls, 2); assert.equal(f.store.readOperation(f.claimed.operation.id).callsUsed, 1)
     assert.equal(f.resource().phase, 'created')
+  } finally { f.cleanup() }
+})
+
+test('exact legacy inline resource recovers after reader threshold change without rewriting its request or dispatch', async () => {
+  const f = await fixture()
+  try {
+    const request = { ...f.request, prompt: 'x'.repeat(1_369_916) + '义'.repeat(82_260) + '尾部义' }, requestDigest = hash(request)
+    assert.equal(request.prompt.length, 1_452_179); assert.equal(Buffer.byteLength(request.prompt), 1_616_705)
+    const dispatch = f.store.reserveDispatch(f.claimed.fence, { key: request.requestKey, purpose: request.purpose, requestDigest })
+    const record = published({ ...request, requestKey: dispatch.sessionCreateKey }), threadId = 'legacy-refused-first-thread'
+    record.status = 'error'; record.harnessSessionId = threadId
+    record.structuredExecution = { ...record.structuredExecution!, state: 'failed', threadId, turnStartRequested: true, error: 'legacy first turn refused' }
+    f.records.set(record.session, record)
+    const identity = { operationId: f.claimed.operation.id, attemptId: f.claimed.attempt.id, inputId: f.claimed.operation.input.id, candidateDigest: null }
+    const plan: NativeRunPlan = { schemaVersion: 1, request, requestDigest, sessionCreateKey: dispatch.sessionCreateKey, expectedSessionId: record.session, ...identity }
+    const checkpoint: NativeRunCheckpoint = { schemaVersion: 1, ...identity, requestDigest, expectedSessionId: record.session, phase: 'planned', nativeCallRequested: true, nativeStarted: false, nativeState: 'failed', session: { sessionId: record.session, threadId, turnId: null } }
+    const put = (value: unknown) => f.blobIO.put(Buffer.from(JSON.stringify(value)))
+    const resource = f.store.planResource(f.claimed.fence, { key: request.requestKey, kind: 'native_session', payloadDigest: requestDigest, inputId: identity.inputId, candidateDigest: null, planBlob: put(plan), checkpointRef: put(checkpoint) })
+    f.store.recordResourceCheckpoint(resource.id, { ...identity, phase: 'created', expectedCheckpointRef: resource.checkpointRef, checkpointRef: put({ ...checkpoint, phase: 'created' }) })
+    let calls = 0, stops = 0
+    const run = f.runner({ readRecord: f.runtimeBase.readRecord, run: async () => { calls++; throw new Error('legacy recovery must not start native work') }, cancel: async id => {
+      stops++; assert.equal(id, record.session)
+      record.structuredExecution = { ...record.structuredExecution!, state: 'cancelled', cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: true, acknowledged: false, nativeStatus: 'generationGone' } }
+      return { sessionId: id, state: 'cancelled', threadId, nativeStopped: true, acknowledged: false, nativeStatus: 'generationGone' }
+    } })
+    const controller = new AbortController(); controller.abort()
+    await assert.rejects(run({ ...request, signal: controller.signal }), /native execution cancelled and exact stop settled/)
+    assert.equal(f.resource().phase, 'removed'); assert.equal(stops, 1); assert.equal(calls, 0)
+    assert.equal(f.store.readOperation(f.claimed.operation.id).callsUsed, 1)
+    assert.equal(f.resource().plan.payloadDigest, requestDigest)
+    assert.deepEqual(JSON.parse(f.blobIO.read(f.resource().plan.planBlob).toString('utf8')), plan)
+    await assert.rejects(run({ ...request, prompt: request.prompt + 'changed', signal: controller.signal }), /key was reused/)
+    assert.equal(stops, 1); assert.equal(calls, 0); assert.equal(f.store.readOperation(f.claimed.operation.id).callsUsed, 1)
   } finally { f.cleanup() }
 })
 

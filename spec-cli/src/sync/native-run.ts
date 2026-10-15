@@ -199,8 +199,10 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
   }
   return async request => {
     const { signal, ...value } = request
-    let frozen: FrozenRequest = prepareFrozenPrompt(copy(value), { directory: join(runtimeRoot(), 'frozen-context-v2'), binding: { attemptId: fence.attemptId, policyDigest: operation.policyDigest } })
-    if (frozen.frozenContext && !options.runtime) frozen = { ...frozen, readerRuntime: await prepareFrozenReaderRuntime(join(runtimeRoot(), 'structured-frozen-read-only-v2')) }
+    const resource = store.findResource(fence.attemptId, value.requestKey)
+    const exactResourceRequest = resource?.plan.payloadDigest === hash(value)
+    let frozen: FrozenRequest = exactResourceRequest ? copy(value) : prepareFrozenPrompt(copy(value), { directory: join(runtimeRoot(), 'frozen-context-v2'), binding: { attemptId: fence.attemptId, policyDigest: operation.policyDigest } })
+    if (!exactResourceRequest && frozen.frozenContext && !options.runtime) frozen = { ...frozen, readerRuntime: await prepareFrozenReaderRuntime(join(runtimeRoot(), 'structured-frozen-read-only-v2')) }
     const requestDigest = hash(frozen)
     let flight = flights.get(frozen.requestKey)
     if (flight && flight.digest !== requestDigest) throw new StructuredSessionError('key_reused', 'native request key was reused with different bytes')

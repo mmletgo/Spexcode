@@ -6,7 +6,7 @@ import { StructuredSessionError } from './session-structured-policy.js'
 export const FROZEN_READER_POLICY = 'codex-frozen-read-only-v2' as const
 export const FROZEN_READ_TOOL = 'spex_read_frozen' as const
 export const FROZEN_READ_MAX_BYTES = 262_144
-export const FROZEN_PROMPT_THRESHOLD_BYTES = 2 * 1024 * 1024
+export const FROZEN_PROMPT_THRESHOLD_BYTES = 512 * 1024
 export type FrozenContextBinding = { requestKey: string; inputDigest: string; policyDigest?: string; attemptId?: string }
 export type FrozenEntry = { id: string; label: string; kind: 'utf8' | 'binary' | 'absent'; sha256: string; byteLength: number; required: boolean }
 export type FrozenContextManifest = { version: 1; binding: FrozenContextBinding; entries: FrozenEntry[] }
