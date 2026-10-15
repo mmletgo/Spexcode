@@ -15,6 +15,8 @@ related:
 
 验证 settled/current receipt 的唯一完成门、stale/failed/needs_input/recovery禁止成功、私有树不可阅读、暂停恢复取消可用状态、重复保存/同步身份稳定、真实结构错误透传、过时读取Abort不重试，以及GAP证据不泄露代理prompt。纯fixture/transport测试不冒充真实HTTP或LLM产品验收。
 
+失败证据回归覆盖生成 validationFindings 的完整定位、细化轮次与独立审查发现可读，同时排除嵌套模型输出、候选正文与 prompt。
+
 候选/交付代码及测试diff保持path、kind和targetTree；超过限额的413保留原错误，不截断或空白伪装为成功。
 
 即使存在已结算receipt，activation invalidated仍拒绝当前同步完成投影。

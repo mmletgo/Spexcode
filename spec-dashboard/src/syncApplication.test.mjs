@@ -104,6 +104,21 @@ test('evidence projection shows gaps, verification and actual file deltas withou
   assert.deepEqual(evidenceProjection([{ path: 'src/result.js', preDigest: 'a', postDigest: 'b', preMode: '100644', postMode: '100644' }]), [{ path: 'src/result.js', preDigest: 'a', postDigest: 'b', preMode: '100644', postMode: '100644' }])
 })
 
+test('failed generation evidence retains actionable validation locations without candidate or prompt bodies', () => {
+  const finding = { severity: 'error', code: 'invalid-source', message: '来源格式不合法', nodeId: 'approval', path: '.spec/approval/spec.md', line: 42, itemId: 'AC-APPROVAL-01', relatedIds: ['RULE-APPROVAL-01'] }
+  const projected = evidenceProjection({ status: 'repair', reviewPassed: false, validationFindings: [finding], output: { changes: [{ content: 'private candidate source' }] }, prompt: 'private prompt' })
+  assert.deepEqual(projected.validationFindings, [finding])
+  assert.equal(JSON.stringify(projected).includes('private'), false)
+})
+
+test('failed elaboration and semantic review evidence retain findings without raw agent output', () => {
+  const finding = { kind: 'repair', code: 'missing-acceptance', message: '缺少验收绑定', affectedIds: ['RULE-APPROVAL-01'], ruleLocation: '.spec/approval/spec.md#RULE-APPROVAL-01', codeLocation: 'src/approval.mjs#applyEvent' }
+  const projected = evidenceProjection({ rounds: [{ number: 1, findings: [finding], output: { tables: 'private model output' }, prompt: 'private prompt' }], review: { verdict: 'repair', findings: [finding], prompt: 'private review prompt' } })
+  assert.deepEqual(projected.rounds, [{ number: 1, findings: [finding] }])
+  assert.deepEqual(projected.review, { verdict: 'repair', findings: [finding] })
+  assert.equal(JSON.stringify(projected).includes('private'), false)
+})
+
 test('transport preserves selected tree, configuration precondition and stable run request identity', async () => {
   const originalFetch = globalThis.fetch
   const requests = []

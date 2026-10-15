@@ -192,13 +192,15 @@ export function syncProjection(detail, activation) {
 export function evidenceProjection(value) {
   if (Array.isArray(value)) return value.map((item) => Object.fromEntries(['path', 'preDigest', 'postDigest', 'preMode', 'postMode'].filter((field) => item[field] != null).map((field) => [field, item[field]])))
   const result = {}
-  for (const key of ['version', 'schemaVersion', 'status', 'verdict', 'structurePassed', 'reviewPassed', 'coveredScope', 'blockedIds', 'readyIds', 'blockedFlows', 'layers', 'readPaths', 'writePaths']) {
+  for (const key of ['version', 'schemaVersion', 'status', 'verdict', 'number', 'structurePassed', 'reviewPassed', 'coveredScope', 'blockedIds', 'readyIds', 'blockedFlows', 'layers', 'readPaths', 'writePaths']) {
     if (value[key] != null) result[key] = value[key]
   }
-  for (const key of ['gaps', 'findings', 'blockedStructureFindings', 'deferredImplementationFindings']) {
+  for (const key of ['gaps', 'findings', 'validationFindings', 'blockedStructureFindings', 'deferredImplementationFindings']) {
     if (Array.isArray(value[key])) result[key] = value[key].map((item) => Object.fromEntries(
-      ['id', 'kind', 'code', 'message', 'unknown', 'evidence', 'decision', 'affectedIds', 'nodeIds', 'paths', 'originalIntent', 'sourceBehavior', 'deliveryBehavior', 'counterexample'].filter((field) => item[field] != null).map((field) => [field, item[field]])))
+      ['id', 'kind', 'severity', 'code', 'message', 'nodeId', 'path', 'line', 'itemId', 'relatedIds', 'ruleLocation', 'codeLocation', 'unknown', 'evidence', 'decision', 'affectedIds', 'nodeIds', 'paths', 'originalIntent', 'sourceBehavior', 'deliveryBehavior', 'counterexample'].filter((field) => item[field] != null).map((field) => [field, item[field]])))
   }
+  if (Array.isArray(value.rounds)) result.rounds = value.rounds.map(evidenceProjection)
+  if (value.review) result.review = evidenceProjection(value.review)
   if (value.plan) result.plan = Object.fromEntries(['readPaths', 'writePaths', 'intentNodeId'].filter((field) => value.plan[field] != null).map((field) => [field, value.plan[field]]))
   if (typeof value.type === 'string') result.type = value.type
   if (value.type === 'sync.decision') { result.decision = value.decision; result.findingIds = value.findingIds; result.operationId = value.operationId }
