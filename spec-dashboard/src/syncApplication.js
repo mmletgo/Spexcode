@@ -200,11 +200,17 @@ export function evidenceProjection(value) {
       ['id', 'kind', 'code', 'message', 'unknown', 'evidence', 'decision', 'affectedIds', 'nodeIds', 'paths', 'originalIntent', 'sourceBehavior', 'deliveryBehavior', 'counterexample'].filter((field) => item[field] != null).map((field) => [field, item[field]])))
   }
   if (value.plan) result.plan = Object.fromEntries(['readPaths', 'writePaths', 'intentNodeId'].filter((field) => value.plan[field] != null).map((field) => [field, value.plan[field]]))
-  if (value.type === 'sync.decision') { result.type = value.type; result.decision = value.decision; result.findingIds = value.findingIds; result.operationId = value.operationId }
+  if (typeof value.type === 'string') result.type = value.type
+  if (value.type === 'sync.decision') { result.decision = value.decision; result.findingIds = value.findingIds; result.operationId = value.operationId }
+  if (value.type === 'sync.history') {
+    for (const key of ['action', 'operationId', 'receiptId', 'featureCommit']) if (value[key] != null) result[key] = value[key]
+    if (Array.isArray(value.changes)) result.changes = value.changes.map(({ path }) => ({ path }))
+    if (Array.isArray(value.conflicts)) result.conflicts = [...value.conflicts]
+  }
   if (value.origin) result.origin = { kind: value.origin.kind, nodeId: value.origin.nodeId, intent: value.origin.intent }
   if (value.path) result.path = value.path
   if (value.failure) result.failure = { code: value.failure.code, message: value.failure.message }
-  if (Array.isArray(value.changes)) result.changes = value.changes.map(({ path, nodeId, contentDigest }) => ({ path, nodeId, contentDigest }))
+  if (Array.isArray(value.changes) && value.type !== 'sync.history') result.changes = value.changes.map(({ path, nodeId, contentDigest }) => ({ path, nodeId, contentDigest }))
   if (Array.isArray(value.entries)) result.entries = value.entries.map(({ path, digest, mode, kind }) => ({ path, digest, mode, kind }))
   if (Array.isArray(value.files)) result.files = value.files.map(({ path, digest, mode, kind }) => ({ path, digest, mode, kind }))
   return result

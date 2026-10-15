@@ -348,6 +348,31 @@ test('pending request evidence preserves user intent and its actual path without
   assert.equal('prompt' in request, false)
 })
 
+test('history request evidence preserves its identity, exact changed paths and conflicts without object internals', () => {
+  const request = evidenceProjection({
+    type: 'sync.history', action: 'revert', operationId: 'original-operation', receiptId: 'original-receipt',
+    featureCommit: 'feature-commit', parentCommit: 'parent-commit', requestTree: 'private-tree',
+    changes: [
+      { path: 'old/name.ts', before: { path: 'old/name.ts', oid: 'before', mode: '100644' }, next: null },
+      { path: 'new/name.ts', before: null, next: { path: 'new/name.ts', oid: 'after', mode: '100644' } },
+    ],
+    conflicts: ['src/conflict.ts'], mergeOutput: 'private-merge-output', prompt: 'private agent prompt',
+  })
+  assert.equal(request.type, 'sync.history')
+  assert.equal(request.operationId, 'original-operation')
+  assert.equal(request.receiptId, 'original-receipt')
+  assert.equal(request.featureCommit, 'feature-commit')
+  assert.deepEqual(request.changes, [{ path: 'old/name.ts' }, { path: 'new/name.ts' }])
+  assert.deepEqual(request.conflicts, ['src/conflict.ts'])
+  assert.equal('requestTree' in request, false)
+  assert.equal('mergeOutput' in request, false)
+  assert.equal(JSON.stringify(request).includes('before'), false)
+  assert.equal(JSON.stringify(request).includes('prompt'), false)
+  const unknown = evidenceProjection({ type: 'sync.future', prompt: 'private agent prompt' })
+  assert.equal(unknown.type, 'sync.future')
+  assert.equal('prompt' in unknown, false)
+})
+
 test('requested body diffs preserve request kind and node path before any candidate exists', async () => {
   const originalFetch = globalThis.fetch
   let requested

@@ -52,4 +52,6 @@ operation Detail 的 `sourceSynced` 与 `canonicalSynced` 是独立事实：来�
 
 已结算交付详情可提供“生成成组撤销”，只在 backend `revertEligibility.eligible` 且执行/恢复资料可用时开放，不因 `stale` 单独禁止；后续编辑由后端冻结为新的受控候选。文案须说明撤销会进入新的业务审查与验证，不会立即改写主分支。失败重试复用同一操作稳定 requestId。
 
+成组撤销产生的 `sync.history` 请求在原操作证据区明确显示原operation、receipt、feature commit、精确变更path和冲突path，并按请求正文展示。每个差异请求只使用对应 `changes[].path`，rename的旧、新path分别读取；不从nodeId推导路径，不把history请求当作普通用户intent。未知请求类型应显示类型诊断，不能回退读取不存在的 `origin.intent`。
+
 物理“停止后台写入”是来源级服务动作，区别于单项取消与暂停自动接入。使用真实 `stop-writer` 返回更新物理控制并刷新完整 status 历史；其 `operations` 只是需要恢复的子集，不能替换用户已加载的操作记录。说明已交付结果及恢复记录会保留、恢复自动接入会重新启动服务，并且停止回执不证明所有原生执行资源已释放。targetTree 仍只读。

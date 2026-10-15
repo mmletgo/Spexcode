@@ -23,6 +23,8 @@ related:
 
 恢复资格须有真实待结算副作用，recover请求不发新预算；请求证据可读用户原意，request diff保实际kind/path，未交付不能画成功。
 
+`sync.history` 证据投影保留原operation/receipt/feature commit、精确path和冲突path，剔除requestTree、Git对象内容、merge输出与prompt；未知类型保持可诊断，不落入普通intent分支。rename的旧、新path分别进入kind=request差异读取。
+
 
 裁决客户端验证原operation/input/analysis/selected findings和稳定请求正文完整透传，与retry/patch明确分离；证据投影保新规则并排除prompt。
 

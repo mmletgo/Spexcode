@@ -24,7 +24,22 @@ function EvidenceRead({ operationId, reference, targetTree, label, request = fal
     <h3>{label}</h3>
     <p className="sync-op-note">{t('syncOperation.requestNote')}</p>
     {held?.error ? <p role="alert">{held.error}</p> : !held ? <p>{t('common.loading')}</p> : <>
-      {held.value.type === 'sync.decision' ? <><p>{t(`syncOperation.decision.${held.value.decision.choice}`)}</p>{held.value.decision.rule && <p>{held.value.decision.rule}</p>}<p>{held.value.findingIds.join(', ')}</p><code>{held.value.operationId}</code>{held.originalRequestBlob && <EvidenceRead operationId={operationId} reference={held.originalRequestBlob} targetTree={targetTree} label={t('syncOperation.originalRequest')} request />}</> : <><p>{held.value.origin.intent}</p><SyncOperationDiff operationId={operationId} files={[{ path: held.value.path }]} targetTree={targetTree} kind="request" /></>}
+      {held.value.type === 'sync.decision'
+        ? <><p>{t(`syncOperation.decision.${held.value.decision.choice}`)}</p>{held.value.decision.rule && <p>{held.value.decision.rule}</p>}<p>{held.value.findingIds.join(', ')}</p><code>{held.value.operationId}</code>{held.originalRequestBlob && <EvidenceRead operationId={operationId} reference={held.originalRequestBlob} targetTree={targetTree} label={t('syncOperation.originalRequest')} request />}</>
+        : held.value.type === 'sync.history'
+          ? <>
+            <dl>
+              <div><dt>{t('syncOperation.historyOperation')}</dt><dd><code>{held.value.operationId}</code></dd></div>
+              <div><dt>{t('syncOperation.historyReceipt')}</dt><dd><code>{held.value.receiptId}</code></dd></div>
+              <div><dt>{t('syncOperation.historyFeatureCommit')}</dt><dd><code>{held.value.featureCommit}</code></dd></div>
+              <div><dt>{t('syncOperation.historyPaths')}</dt><dd>{held.value.changes.length ? <ul>{held.value.changes.map(({ path }) => <li key={path}><code>{path}</code></li>)}</ul> : '—'}</dd></div>
+              <div><dt>{t('syncOperation.historyConflicts')}</dt><dd>{held.value.conflicts.length ? <ul>{held.value.conflicts.map((path) => <li key={path}><code>{path}</code></li>)}</ul> : '—'}</dd></div>
+            </dl>
+            <SyncOperationDiff operationId={operationId} files={held.value.changes.map(({ path }) => ({ path }))} targetTree={targetTree} kind="request" />
+          </>
+          : !held.value.type && held.value.origin?.intent
+            ? <><p>{held.value.origin.intent}</p><SyncOperationDiff operationId={operationId} files={[{ path: held.value.path }]} targetTree={targetTree} kind="request" /></>
+            : <p role="alert">{t('syncOperation.unknownRequestType', { type: held.value.type || 'unknown' })}</p>}
     </>}
   </div>
   return <details className="sync-op-evidence" onToggle={(event) => setOpen(event.currentTarget.open)}>
