@@ -28,4 +28,6 @@ code:
 
 原创建调用已结束或重启后的取消恢复没有本地创建 Promise 时，桥可按冻结计划向 [[session-create-authority]] 请求精确候选清理恢复，再重读 canonical record 与正式终止收据。桥不把 Promise 结束当成证明，不自行删除 Git/FS 资源；正式入口拒绝未知/错配/已发布候选时资源仍保留。清理完成后仍经同一 terminal→removed 与完整收据校验，不增加调用次数；另一个创建者锁内发布的会话转走正式原生取消路径。
 
+恢复参数携带同一次冻结推理的结构化策略，由正式创建入口重建外部runtime候选路径；缺少该策略不得把结构化收据解释为普通主checkout内候选。路径仍由创建事务内部推导，资源桥不接受任意恢复目录。
+
 冻结读取的业务 requestKey 与清单绑定保持不变，内部 sessionCreateKey 承接 reserveDispatch 返回值；实际 attemptId 与 policyDigest 存在时在派发前严格核对，冻结 ref 及读取证明参与计划和原生固定策略摘要。未知工具响应或未证实原生停止继续保留资源，不把本地报错作为释放容量的依据。
