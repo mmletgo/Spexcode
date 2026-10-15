@@ -79,6 +79,9 @@ export async function buildSyncApplicationPlan(snapshot: InputSnapshot, nodeId: 
   const specReadPaths = new Set([...targets.map(target => target.path), ...priorTargets.map(target => target.path)])
   for (const graph of graphs) for (const id of readIds) { const item = graph.items.get(id); if (item) specReadPaths.add(item.path) }
   for (const node of [...nodes, ...oldFrozen.nodes]) if (targets.some(target => target.path.startsWith(`${posix.dirname(node.path)}/`))) specReadPaths.add(node.path)
+  const declaredReadPaths = [...frozen.contracts, ...oldFrozen.contracts, ...protectedGraphs.flatMap(graph => graph.contracts)]
+    .filter(contract => coveredPath(contract.path, [...specReadPaths, ...settings.readPaths]))
+    .flatMap(contract => [...contract.code.map(anchor => anchor.split('#')[0]), ...contract.items.filter(item => item.kind === 'AC').map(item => item.test.split('#')[0])])
   const ownedVerificationIds = new Set(graphs.flatMap(graph => [...graph.items.values()].filter(item => item.kind === 'VERIFY').map(item => item.id)))
   const activeVerificationIds = new Set([...impacts.flatMap(item => item.verifyIds), ...graphs.flatMap(graph => [...graph.items.values()].filter(item => item.kind === 'VERIFY' && (selected.has(item.nodeId) || readIds.has(item.id))).map(item => item.id))])
   const contextVerificationIds = new Set(graphs.flatMap(graph => [...graph.items.values()].filter(item => item.kind === 'VERIFY' && coveredPath(item.path, [...specReadPaths, ...settings.readPaths])).map(item => item.id)))
@@ -95,7 +98,7 @@ export async function buildSyncApplicationPlan(snapshot: InputSnapshot, nodeId: 
   return {
     executionScope,
     version: 'sync-coordinator-v1', intentNodeId: intent.id, targets,
-    readPaths: [...new Set([...specReadPaths, '.spec/spexcode.json', ...settings.readPaths, ...codePaths, ...discoveryPaths, ...impact.testPaths, ...mandatoryTests.map(test => test.testPath)])].sort(),
+    readPaths: [...new Set([...specReadPaths, ...declaredReadPaths, '.spec/spexcode.json', ...settings.readPaths, ...codePaths, ...discoveryPaths, ...impact.testPaths, ...mandatoryTests.map(test => test.testPath)])].sort(),
     writePaths: [...new Set([...targets.map(target => target.path), ...targets.map(target => posix.dirname(target.path)), ...priorTargets.map(target => target.path), ...writable])].sort(),
     facts: [...settings.facts, ...decisionFacts], decisionAuthorities: decisionRefs.map(ref => readDecisionAuthority(snapshot.source.commonDir, ref)), decisionRefs, retiredIds, verifications, mandatoryTests,
   }
