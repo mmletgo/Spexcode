@@ -175,7 +175,9 @@ missing payload leaves the record unchanged and refuses loudly.
 The SpexCode session id is the stable product address; the Codex thread id is a replaceable native
 execution address. Codex TUI rewind/backtrack may fork the current conversation and switch the TUI to a
 new thread whose `forkedFromId` is the previously bound thread. The shared-runtime adapter opens one
-observer for the app-server generation and reports exact `{ previousThreadId, nextThreadId, runtimeKey }`
+observer for the app-server generation. A successful `initialize` response ends its 30-second startup deadline;
+the timeout bounds subscription setup only and must not periodically close an established observer. It reports
+exact `{ previousThreadId, nextThreadId, runtimeKey }`
 successor pairs. The session layer maps the predecessor to its unique SpexCode record, then rebinds the same
 record, runtime binding, and generation ledger entry under the record lock, preserving the generation while
 replacing only the native target. A notification with no exact parent,

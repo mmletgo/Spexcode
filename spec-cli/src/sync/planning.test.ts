@@ -72,6 +72,28 @@ async function context(snapshot: InputSnapshot, paths: readonly string[]) {
   return readFrozenContracts(snapshot.source.canonicalRoot, new Map(verifySnapshot(snapshot).filter(entry => paths.includes(entry.path)).map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString('utf8')])))
 }
 
+test('正式adoption的插件实例不进入业务规划，真实业务子树和验证政策继续纳入', async t => {
+  const f = await fixture(t)
+  cpSync(new URL('../../templates/spec/project/.plugins/', import.meta.url), join(f.root, '.spec/export/export-contract/.plugins'), { recursive: true })
+  const snapshot = await captureInputSnapshot(f.root), plan = await buildSyncApplicationPlan(snapshot, 'export-contract')
+  assert.deepEqual(plan.targets, [{ nodeId: 'export-contract', path: specA }])
+  assert.ok(![...plan.readPaths, ...plan.writePaths, ...plan.executionScope.paths].some(path => path.split('/').includes('.plugins')))
+  assert.ok(plan.readPaths.includes('src/export.js'))
+  assert.deepEqual(plan.verifications.map(item => item.definition.id), ['VERIFY-EXPORT-01'])
+  assert.deepEqual(plan.mandatoryTests, [f.config.mandatoryTests[0]])
+  const pluginScript = verifySnapshot(snapshot).find(entry => entry.path === '.spec/export/export-contract/.plugins/core/session-fail/fail.sh')!
+  assert.throws(() => freezeCandidate(snapshot, { version: 'sync-files-v1', changes: [{ path: pluginScript.path, beforeDigest: pluginScript.digest, beforeMode: pluginScript.mode, content: 'exit 0\n' }] }, plan.executionScope), /越界/)
+  const files = new Map(verifySnapshot(snapshot).filter(entry => entry.path.endsWith('/spec.md')).map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString('utf8')]))
+  assert.ok(!(await readFrozenContracts(f.root, files)).nodes.some(node => node.path.split('/').includes('.plugins')))
+  await assert.rejects(buildSyncApplicationPlan(snapshot, 'session-fail'), /不存在 Spec 节点/)
+  cpSync(new URL('../../templates/spec/project/.plugins/', import.meta.url), join(f.delivery.source.canonicalRoot, '.spec/export/export-contract/.plugins'), { recursive: true })
+  const baseline = await settleBaseline(t, f.parent, snapshot, await captureInputSnapshot(f.delivery.source.canonicalRoot))
+  const protectedPlan = await buildSyncApplicationPlan(snapshot, 'export-contract', baseline)
+  assert.deepEqual(protectedPlan.targets, plan.targets)
+  assert.ok(![...protectedPlan.readPaths, ...protectedPlan.writePaths, ...protectedPlan.executionScope.paths].some(path => path.split('/').includes('.plugins')))
+  assert.deepEqual(protectedPlan.mandatoryTests, plan.mandatoryTests)
+})
+
 test('两节点真实Git规划按意图筛政策，不把独立B oracle或VERIFY送给A候选', async t => {
   const f = await fixture(t), plan = await buildSyncApplicationPlan(f.source, 'export-contract')
   assert.deepEqual(plan.verifications.map(item => item.definition.id), ['VERIFY-EXPORT-01'])

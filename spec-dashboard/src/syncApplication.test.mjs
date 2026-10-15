@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { automaticControl, decideSync, controlSync, enableSync, evidenceProjection, readSyncStatus, readSyncDiff, requestIdentity, revertSync, runSync, stopSyncWriter, syncObserverProjection, syncProjection } from './syncApplication.js'
+import { adoptSync, automaticControl, decideSync, controlSync, enableSync, evidenceProjection, readSyncStatus, readSyncDiff, requestIdentity, revertSync, runSync, stopSyncWriter, syncObserverProjection, syncProjection } from './syncApplication.js'
 import { apiFetch, postSpecBody } from './data.js'
 
 /** @type {import('../../spec-cli/src/sync/operation-types.ts').WorktreeIdentity} */
@@ -12,7 +12,7 @@ const scope = { paths: ['.spec/alpha/spec.md'], contractIds: ['REQ-1'], flowIds:
 const operation = { id: 'op', ingressKey: 'ingress', payloadDigest: 'payload', rootCauseId: 'root', origin: 'spec', generation: 1, revision: 1, phase: 'workspace_synced', control: 'run', input, previousBaselinePair: null, scope, readyScope: scope, blockedScope: { paths: [], contractIds: [], flowIds: [] }, deliveredScope: scope, blockedReason: null, policyDigest: 'policy', impactDigest: 'impact', readSetDigest: 'readset', budget: { maxAttempts: 3, maxCalls: 6, maxRepairs: 2, timeoutMs: 1000 }, callsUsed: 1, deadlineAtMs: 1001, currentAttemptId: 'attempt', dispatchMessageId: 'dispatch', delivery: null, deliveryPlan: { canonicalRoot: '/repo/private', branch: 'delivery', baseCommit: 'head' }, createdAtMs: 1, updatedAtMs: 2 }
 const receipt = { id: 'receipt', deliverySnapshot: { ...input, source: { ...source, canonicalRoot: '/repo/published' } } }
 const settled = { status: 'settled', receipt, generation: 1, attemptId: 'attempt' }
-const detail = { operation, attempt: null, journals: [settled], resources: [], retryEligibility: { eligible: false }, decisionEligibility: { eligible: false }, stale: false, sourceSynced: false, canonicalSynced: false, revertEligibility: { eligible: false, reason: { code: 'SYNC_REVERT_NOT_LANDED', message: 'The delivery has not landed' } }, executionAvailability: { status: 'ready' } }
+const detail = { operation, attempt: null, journals: [settled], resources: [], retryEligibility: { eligible: false }, decisionEligibility: { eligible: false }, stale: false, sourceSynced: false, canonicalSynced: false, adoptionEligibility: { eligible: false, reason: { code: 'SYNC_ADOPTION_BLOCKED', message: 'The source worktree is not ready' } }, revertEligibility: { eligible: false, reason: { code: 'SYNC_REVERT_NOT_LANDED', message: 'The delivery has not landed' } }, executionAvailability: { status: 'ready' } }
 
 test('early conflict evidence does not grant a decision before backend eligibility settles', () => {
   const inFlight = { ...detail, operation: { ...operation, phase: 'elaborating', blockedReason: 'conflicted' }, attempt: { status: 'running' }, journals: [], decisionEligibility: { eligible: false, reason: { code: 'SYNC_DECISION_ACTIVE', message: '当前细化仍在执行' } } }
@@ -45,6 +45,43 @@ test('grouped revert eligibility follows the backend and remains available for l
   assert.equal(syncProjection({ ...eligible, executionAvailability: { status: 'recovery_required' } }, 'enabled').canRevert, false)
   assert.equal(syncProjection(eligible, 'invalidated').canRevert, false)
   assert.equal(syncProjection({ ...detail, revertEligibility: { eligible: false, reason: { code: 'SYNC_REVERT_NOT_LANDED', message: 'Not landed' } } }, 'enabled').canRevert, false)
+})
+
+test('adoption follows the settled receipt and backend eligibility, and disappears after landing', () => {
+  const eligible = syncProjection({ ...detail, adoptionEligibility: { eligible: true } }, 'enabled')
+  assert.equal(eligible.canAdopt, true)
+  assert.equal(eligible.adoptionReason, null)
+
+  const blocked = syncProjection(detail, 'enabled')
+  assert.equal(blocked.canAdopt, false)
+  assert.deepEqual(blocked.adoptionReason, detail.adoptionEligibility.reason)
+
+  const dirtyReason = { code: 'SYNC_SOURCE_DIRTY', message: 'Source worktree has uncommitted changes' }
+  const stale = syncProjection({ ...detail, stale: true, adoptionEligibility: { eligible: false, reason: dirtyReason } }, 'enabled')
+  assert.equal(stale.complete, false)
+  assert.equal(stale.canAdopt, false)
+  assert.deepEqual(stale.adoptionReason, dirtyReason)
+  assert.equal(syncProjection({ ...detail, stale: true, adoptionEligibility: { eligible: true } }, 'enabled').canAdopt, true)
+
+  const invalidatedReason = { code: 'SYNC_ADOPTION_INVALIDATED', message: 'Source authorization has been invalidated' }
+  const invalidated = syncProjection({ ...detail, adoptionEligibility: { eligible: false, reason: invalidatedReason } }, 'invalidated')
+  assert.equal(invalidated.complete, false)
+  assert.equal(invalidated.canAdopt, false)
+  assert.deepEqual(invalidated.adoptionReason, invalidatedReason)
+
+  const adopted = syncProjection({ ...detail, sourceSynced: true }, 'enabled')
+  assert.equal(adopted.canAdopt, false)
+  assert.equal(adopted.adoptionReason, null)
+  const landed = syncProjection({ ...detail, sourceSynced: true, canonicalSynced: true }, 'enabled')
+  assert.equal(landed.canAdopt, false)
+  assert.equal(landed.adoptionReason, null)
+  const canonicalOnly = syncProjection({ ...detail, canonicalSynced: true }, 'enabled')
+  assert.equal(canonicalOnly.canAdopt, false)
+  assert.equal(canonicalOnly.adoptionReason, null)
+
+  const unsettled = syncProjection({ ...detail, journals: [] }, 'enabled')
+  assert.equal(unsettled.canAdopt, false)
+  assert.equal(unsettled.adoptionReason, null)
 })
 
 test('stale, blocked, failed and recovery results never project synchronized', () => {
@@ -102,6 +139,21 @@ test('evidence projection shows gaps, verification and actual file deltas withou
   assert.equal(value.gaps[0].decision, 'Select role')
   assert.equal(JSON.stringify(value).includes('prompt'), false)
   assert.deepEqual(evidenceProjection([{ path: 'src/result.js', preDigest: 'a', postDigest: 'b', preMode: '100644', postMode: '100644' }]), [{ path: 'src/result.js', preDigest: 'a', postDigest: 'b', preMode: '100644', postMode: '100644' }])
+})
+
+test('failed generation evidence retains actionable validation locations without candidate or prompt bodies', () => {
+  const finding = { severity: 'error', code: 'invalid-source', message: '来源格式不合法', nodeId: 'approval', path: '.spec/approval/spec.md', line: 42, itemId: 'AC-APPROVAL-01', relatedIds: ['RULE-APPROVAL-01'] }
+  const projected = evidenceProjection({ status: 'repair', reviewPassed: false, validationFindings: [finding], output: { changes: [{ content: 'private candidate source' }] }, prompt: 'private prompt' })
+  assert.deepEqual(projected.validationFindings, [finding])
+  assert.equal(JSON.stringify(projected).includes('private'), false)
+})
+
+test('failed elaboration and semantic review evidence retain findings without raw agent output', () => {
+  const finding = { kind: 'repair', code: 'missing-acceptance', message: '缺少验收绑定', affectedIds: ['RULE-APPROVAL-01'], ruleLocation: '.spec/approval/spec.md#RULE-APPROVAL-01', codeLocation: 'src/approval.mjs#applyEvent' }
+  const projected = evidenceProjection({ rounds: [{ number: 1, findings: [finding], output: { tables: 'private model output' }, prompt: 'private prompt' }], review: { verdict: 'repair', findings: [finding], prompt: 'private review prompt' } })
+  assert.deepEqual(projected.rounds, [{ number: 1, findings: [finding] }])
+  assert.deepEqual(projected.review, { verdict: 'repair', findings: [finding] })
+  assert.equal(JSON.stringify(projected).includes('private'), false)
 })
 
 test('transport preserves selected tree, configuration precondition and stable run request identity', async () => {
@@ -169,12 +221,52 @@ test('revert and writer-stop transports preserve request identity, source scope,
   } finally { globalThis.fetch = originalFetch }
 })
 
+test('adoption transport posts to the source operation endpoint and preserves server facts and errors', async () => {
+  const originalFetch = globalThis.fetch
+  const requests = []
+  globalThis.fetch = async (url, init) => {
+    requests.push({ url: new URL(url, 'http://test'), init })
+    if (requests.length === 1) return new Response(JSON.stringify({
+      operation: { id: 'operation / one' }, sourceSynced: true, canonicalSynced: false,
+      adoptionEligibility: { eligible: false, reason: { code: 'SYNC_SOURCE_DIRTY', message: 'Source worktree has changes' } },
+    }), { status: 200 })
+    if (requests.length === 2) return new Response(JSON.stringify({ code: 'SYNC_SOURCE_DIVERGED', error: 'Source has diverged' }), { status: 409 })
+    return new Response(JSON.stringify({ operation: { id: 'operation / one' }, sourceSynced: true, canonicalSynced: false }), { status: 200 })
+  }
+  try {
+    const result = await adoptSync('operation / one')
+    assert.equal(result.sourceSynced, true)
+    assert.equal(result.canonicalSynced, false)
+    assert.equal(requests[0].url.pathname, '/api/sync/operations/operation%20%2F%20one/adopt')
+    assert.equal(requests[0].url.searchParams.has('targetTree'), false)
+    assert.deepEqual(JSON.parse(requests[0].init.body), {})
+    await assert.rejects(adoptSync('operation / one'), error => error.code === 'SYNC_SOURCE_DIVERGED' && error.message === 'Source has diverged')
+    await assert.rejects(adoptSync('operation / one'), error => error.code === 'sync_response_invalid')
+  } finally { globalThis.fetch = originalFetch }
+})
+
 test('incomplete status responses become retryable read errors instead of fake offline status', async () => {
   const originalFetch = globalThis.fetch
   globalThis.fetch = async () => new Response(JSON.stringify({ settings: { input: source }, operations: [] }), { status: 200 })
   try {
     await assert.rejects(readSyncStatus('alpha'), error => error.code === 'sync_response_invalid')
     globalThis.fetch = async () => new Response(JSON.stringify({ settings: { input: source }, operations: [{ operation }], observation: {}, sources: [] }), { status: 200 })
+    await assert.rejects(readSyncStatus('alpha'), error => error.code === 'sync_response_invalid')
+  } finally { globalThis.fetch = originalFetch }
+})
+
+test('status requires explicit adoption eligibility and its concrete ineligible reason', async () => {
+  const originalFetch = globalThis.fetch
+  const status = adoptionEligibility => ({
+    settings: { input: { canonicalRoot: '/repo/source' } },
+    operations: [{ ...detail, adoptionEligibility }], observation: {}, sources: [],
+  })
+  globalThis.fetch = async () => new Response(JSON.stringify(status({ eligible: true })), { status: 200 })
+  try {
+    assert.deepEqual((await readSyncStatus('alpha')).operations[0].adoptionEligibility, { eligible: true })
+    globalThis.fetch = async () => new Response(JSON.stringify(status({ eligible: false })), { status: 200 })
+    await assert.rejects(readSyncStatus('alpha'), error => error.code === 'sync_response_invalid')
+    globalThis.fetch = async () => new Response(JSON.stringify(status(undefined)), { status: 200 })
     await assert.rejects(readSyncStatus('alpha'), error => error.code === 'sync_response_invalid')
   } finally { globalThis.fetch = originalFetch }
 })

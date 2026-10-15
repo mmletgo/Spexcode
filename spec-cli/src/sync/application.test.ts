@@ -968,6 +968,7 @@ test('AC-APPLICATION-P4-03 分支切换撤旧授权且物理暂停跨分支保�
 test('AC-APPLICATION-P4-04 nodeIds仅注册明确意图子树，新增raw纳入且无关节点未授权', async () => {
   const f = await fixture()
   try {
+    cpSync(new URL('../../templates/spec/project/.plugins/', import.meta.url), join(f.root, '.spec/demo/.plugins'), { recursive: true })
     mkdirSync(join(f.root, '.spec/demo/child'), { recursive: true }); writeFileSync(join(f.root, '.spec/demo/child/spec.md'), source.replace('Demo', 'Child'))
     mkdirSync(join(f.root, '.spec/other'), { recursive: true }); writeFileSync(join(f.root, '.spec/other/spec.md'), source.replace('Demo', 'Other'))
     await f.application.enable(); await f.application.automaticControl('pause')
@@ -975,7 +976,9 @@ test('AC-APPLICATION-P4-04 nodeIds仅注册明确意图子树，新增raw纳入�
     assert.deepEqual(f.application.observationStatus().registeredNodes, ['demo'])
     assert.deepEqual(f.application.observationStatus().coverage.includedNodeIds.sort(), ['child', 'demo'])
     assert.deepEqual(f.application.observationStatus().coverage.excludedNodeIds, ['other'])
+    assert.equal(f.application.observationStatus().coverage.totalNodeCount, 3)
     await assert.rejects(f.application.submit({ nodeId: 'other', requestId: 'unauthorized' }), /未在 sync.nodeIds 授权/)
+    await assert.rejects(f.application.submit({ nodeId: 'session-fail', requestId: 'plugin-intent' }), /不存在 Spec 节点/)
     mkdirSync(join(f.root, '.spec/demo/new-raw'), { recursive: true }); writeFileSync(join(f.root, '.spec/demo/new-raw/spec.md'), source.replace('Demo', 'New'))
     await observeUntil(() => f.application.observationStatus().coverage.includedNodeIds.includes('new-raw'))
     assert.equal(f.application.observationStatus().registeredNodes.length, 1)
@@ -987,11 +990,13 @@ test('AC-APPLICATION-P4-05 缺省node作用域只含真实治理授权源码，�
   try {
     await assert.rejects(f.application.enable(), /sync.nodeIds 明确登记/)
     writeFileSync(join(f.root, '.spec/demo/spec.md'), source.replace('status: pending', 'status: pending\ncode:\n  - src/demo.mjs'))
+    cpSync(new URL('../../templates/spec/project/.plugins/', import.meta.url), join(f.root, '.spec/demo/.plugins'), { recursive: true })
     mkdirSync(join(f.root, '.spec/other'), { recursive: true }); writeFileSync(join(f.root, '.spec/other/spec.md'), source.replace('status: pending', 'status: pending\ncode:\n  - private/other.mjs'))
     await f.application.enable(); await f.application.automaticControl('pause')
     await f.application.startService({ compensationMs: 10000 })
     assert.deepEqual(f.application.observationStatus().registeredNodes, ['demo'])
     assert.deepEqual(f.application.observationStatus().coverage.excludedNodeIds, ['other'])
+    assert.equal(f.application.observationStatus().coverage.totalNodeCount, 2)
   } finally { await f.application.stopService(); f.cleanup() }
 })
 

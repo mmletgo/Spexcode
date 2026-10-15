@@ -15,6 +15,8 @@ related:
 
 使用现有项目 API 前缀和 targetTree 路由。status/settings/run/control/evidence 直接传递实际应用错误的 code/message；不吞成空操作。相同用户 payload 在失败重试中保留 UUID，新 payload 换 UUID。前端只有一个真实回执投影：stale/失败/缺口/恢复诊断都不能绿色显示已同步，未 settled 的 deliveryPlan 也不能生成文档链接。证据只呈现业务诊断与文件/验证事实，代理 prompt 和输出正文不直接 dump。
 
+失败证据保留生成阶段的 validationFindings、各细化轮次及独立审查的具体发现，包含严重程度、节点、文件行号、业务项和规则/代码位置。不能把候选被拒绝的原因过滤成只有 repair 或 reviewPassed:false；嵌套轮次和审查仍沿同一白名单投影，排除候选正文、模型输出及 prompt。
+
 activation=invalidated 也使旧receipt不能投影为当前已同步，保留可读的历史交付链接但强制真实失效诊断。enabled=false本身不证明可退回Spec-only模式，必须区分disabled与invalidated。
 
 非2xx且非JSON的服务错误显示HTTP状态与最多500字符的服务诊断，不能将JSON解析异常冒充业务失败原因。
@@ -35,5 +37,7 @@ automaticControl(action, targetTree) 只把 pause/resume 发送到既有 `/api/s
 readSyncStatus 要求实际 settings、operations、observation 和 sources 结构；HTTP 成功但缺少同步 UI 必需字段时返回可重试的 sync_response_invalid，不能让缺字段被解释为空覆盖或离线状态。
 
 status operation detail 必须提供 boolean sourceSynced/canonicalSynced、实际 revertEligibility 和 executionAvailability；同步完成投影只用真实 canonicalSynced 区分主分支落地。canRevert 消费 backend eligible 且保留 recovery availability 门禁，不额外排除 stale。
+
+状态 operation detail 与 `POST /api/sync/operations/:id/adopt` 响应都必须提供 `adoptionEligibility`，形状为 `{eligible:true}` 或 `{eligible:false, reason:{code,message}}`；缺少资格字段的成功响应转为可重试的 `sync_response_invalid`，不推断权限。`adoptSync` 将编码后的 operation ID 发送到默认来源路由，不附当前查看的 targetTree，保留服务端 code/message 并返回真实 detail。采纳区域的 pending 状态仅由当前完成阶段、真实 settled receipt 与 sourceSynced/canonicalSynced 未成立决定，独立于 stale、invalidated 或 recovery 对同步 complete 状态的影响，因此这些状态下仍透传后端的具体不合格 reason。`canAdopt` 仅在 pending 且后端 eligible=true 时开放；客户端不另加安全门禁。成功后界面重读状态。客户端只消费资格/状态字段，不序列化或显示原始记录与 `leaseToken`。
 
 revertSync 发送 `POST /api/sync/operations/:id/revert`，body 保留同一操作稳定 requestId 与可选 targetTree；响应必须同时说明 changed 和真实新 operation/null。stopSyncWriter 调用 `POST /api/sync/stop-writer`，校验 stopped/control/恢复子集；调用方消费部分 operations 时不得将其当完整历史。两种 transport 都保留服务端 code/message，成功响应结构不完整时 fail closed。

@@ -19,6 +19,10 @@ const syncRead = async (path, targetTree, init) => {
   return body
 }
 const post = (body) => ({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+const validAdoptionEligibility = (value) => value?.eligible === true
+  || value?.eligible === false
+    && typeof value.reason?.code === 'string'
+    && typeof value.reason?.message === 'string'
 export const readSyncStatus = async (nodeId, targetTree = null, signal) => {
   const value = await syncRead(`status?${new URLSearchParams({ nodeId, limit: '8' })}`, targetTree, { signal, cache: 'no-store' })
   if (!value || typeof value !== 'object' || Array.isArray(value)
@@ -28,6 +32,7 @@ export const readSyncStatus = async (nodeId, targetTree = null, signal) => {
     || !Array.isArray(value.operations) || !value.operations.every(item => item?.operation
       && typeof item.sourceSynced === 'boolean'
       && typeof item.canonicalSynced === 'boolean'
+      && validAdoptionEligibility(item.adoptionEligibility)
       && (item.revertEligibility?.eligible === true
         || item.revertEligibility?.eligible === false
           && typeof item.revertEligibility.reason?.code === 'string'
@@ -47,6 +52,18 @@ export const automaticControl = (action, targetTree = null) => syncRead(`automat
 export const runSync = (nodeId, requestId, targetTree = null, options = {}) => syncRead('run', targetTree, post({ nodeId, requestId, origin: options.origin || 'initial', ...(options.retryOf ? { retryOf: options.retryOf } : {}) }))
 export const decideSync = (id, input, targetTree = null) => syncRead(`operations/${encodeURIComponent(id)}/decide`, targetTree, post(input))
 export const controlSync = (id, action, targetTree = null) => syncRead(`operations/${encodeURIComponent(id)}/${action}`, targetTree, post({}))
+export const adoptSync = async (id) => {
+  const value = await syncRead(`operations/${encodeURIComponent(id)}/adopt`, null, post({}))
+  if (value?.operation?.id !== id
+    || typeof value.sourceSynced !== 'boolean'
+    || typeof value.canonicalSynced !== 'boolean'
+    || !validAdoptionEligibility(value.adoptionEligibility)) {
+    const error = new Error('采纳响应缺少操作状态或资格')
+    error.code = 'sync_response_invalid'
+    throw error
+  }
+  return value
+}
 export const revertSync = async (id, requestId, targetTree = null) => {
   const value = await syncRead(`operations/${encodeURIComponent(id)}/revert`, null, post({ requestId, ...(targetTree ? { targetTree } : {}) }))
   if (typeof value?.changed !== 'boolean'
@@ -165,19 +182,23 @@ export function requestIdentity(previous, payload, makeId = () => crypto.randomU
 const COMPLETED = new Set(['workspace_synced', 'awaiting_landing', 'canonical_synced'])
 const TERMINAL = new Set(['cancelled', 'superseded', 'failed', 'budget_exhausted', ...COMPLETED])
 export function syncProjection(detail, activation) {
-  const { operation, attempt, journals, resources, stale, sourceSynced, canonicalSynced, revertEligibility, executionAvailability } = detail
+  const { operation, attempt, journals, resources, stale, sourceSynced, canonicalSynced, adoptionEligibility, revertEligibility, executionAvailability } = detail
   const settled = journals.findLast((journal) => journal.status === 'settled' && journal.receipt
     && journal.generation === operation.generation && journal.attemptId === operation.currentAttemptId)
   const recovery = executionAvailability.status === 'recovery_required'
-  const complete = !!settled && activation !== 'invalidated' && !stale && !recovery && COMPLETED.has(operation.phase)
+  const settledDelivery = !!settled && COMPLETED.has(operation.phase)
+  const complete = settledDelivery && activation !== 'invalidated' && !stale && !recovery
   const state = recovery ? 'recovery_required' : activation === 'invalidated' ? 'invalidated' : stale ? 'stale'
     : complete ? canonicalSynced ? 'canonical_synced' : sourceSynced ? 'source_synced' : 'workspace_synced'
       : COMPLETED.has(operation.phase) ? 'unsettled' : operation.phase
+  const adoptionPending = settledDelivery && !sourceSynced && !canonicalSynced
   return {
     state, complete, sourceSynced, canonicalSynced, receipt: settled?.receipt || null, settledJournal: settled || null,
     deliveryRoot: settled?.receipt.deliverySnapshot.source.canonicalRoot || null,
     sourceRoot: operation.input.source.canonicalRoot,
     failure: recovery ? executionAvailability.failure : attempt?.failure,
+    canAdopt: adoptionPending && adoptionEligibility?.eligible === true,
+    adoptionReason: adoptionPending && adoptionEligibility?.eligible === false ? adoptionEligibility.reason : null,
     canRetry: !recovery && !stale && activation !== 'invalidated' && detail.retryEligibility?.eligible === true,
     canDecide: !recovery && !stale && activation !== 'invalidated' && detail.decisionEligibility.eligible,
     canRevert: !recovery && activation !== 'invalidated' && revertEligibility?.eligible === true,
@@ -192,13 +213,15 @@ export function syncProjection(detail, activation) {
 export function evidenceProjection(value) {
   if (Array.isArray(value)) return value.map((item) => Object.fromEntries(['path', 'preDigest', 'postDigest', 'preMode', 'postMode'].filter((field) => item[field] != null).map((field) => [field, item[field]])))
   const result = {}
-  for (const key of ['version', 'schemaVersion', 'status', 'verdict', 'structurePassed', 'reviewPassed', 'coveredScope', 'blockedIds', 'readyIds', 'blockedFlows', 'layers', 'readPaths', 'writePaths']) {
+  for (const key of ['version', 'schemaVersion', 'status', 'verdict', 'number', 'structurePassed', 'reviewPassed', 'coveredScope', 'blockedIds', 'readyIds', 'blockedFlows', 'layers', 'readPaths', 'writePaths']) {
     if (value[key] != null) result[key] = value[key]
   }
-  for (const key of ['gaps', 'findings', 'blockedStructureFindings', 'deferredImplementationFindings']) {
+  for (const key of ['gaps', 'findings', 'validationFindings', 'blockedStructureFindings', 'deferredImplementationFindings']) {
     if (Array.isArray(value[key])) result[key] = value[key].map((item) => Object.fromEntries(
-      ['id', 'kind', 'code', 'message', 'unknown', 'evidence', 'decision', 'affectedIds', 'nodeIds', 'paths', 'originalIntent', 'sourceBehavior', 'deliveryBehavior', 'counterexample'].filter((field) => item[field] != null).map((field) => [field, item[field]])))
+      ['id', 'kind', 'severity', 'code', 'message', 'nodeId', 'path', 'line', 'itemId', 'relatedIds', 'ruleLocation', 'codeLocation', 'unknown', 'evidence', 'decision', 'affectedIds', 'nodeIds', 'paths', 'originalIntent', 'sourceBehavior', 'deliveryBehavior', 'counterexample'].filter((field) => item[field] != null).map((field) => [field, item[field]])))
   }
+  if (Array.isArray(value.rounds)) result.rounds = value.rounds.map(evidenceProjection)
+  if (value.review) result.review = evidenceProjection(value.review)
   if (value.plan) result.plan = Object.fromEntries(['readPaths', 'writePaths', 'intentNodeId'].filter((field) => value.plan[field] != null).map((field) => [field, value.plan[field]]))
   if (typeof value.type === 'string') result.type = value.type
   if (value.type === 'sync.decision') { result.decision = value.decision; result.findingIds = value.findingIds; result.operationId = value.operationId }

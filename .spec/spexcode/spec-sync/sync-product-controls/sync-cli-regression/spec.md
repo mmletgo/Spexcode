@@ -24,3 +24,5 @@ P4 客户端运输回归同时核无ID pause/resume 的 /automatic 路由、veri
 AC-SYNC-CLI-01还在HTTP前拒绝pause/resume误带--node与verify误带--patch-file，不能把用户的局部控制或正文编辑静默扩大/丢弃。
 
 成组撤销运输保留指定稳定requestId并发往原操作revert，停止写入只传targetTree；stop-writer误带操作或请求键在HTTP前拒绝。
+
+采纳运输验证 adopt 将完整操作 ID 与 targetTree 发给同一后端 /operations/:id/adopt；缺少操作 ID 在接触后端前拒绝。运输通过不替代 [[sync-source-adoption]] 的真实 Git 门禁验证。

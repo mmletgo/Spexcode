@@ -34,6 +34,8 @@ test('AC-SYNC-CLI-01 sync help说明真实后端与阶段范围，错误flag和�
   assert.equal(misplaced.code, 1); assert.match(misplaced.stderr, /只用于 sync run/)
   const stopId = await cli(['sync', 'stop-writer', '--request-id', 'unneeded'])
   assert.equal(stopId.code, 1); assert.match(stopId.stderr, /stop-writer 不接收/)
+  const missingAdoption = await cli(['sync', 'adopt'])
+  assert.equal(missingAdoption.code, 1); assert.match(missingAdoption.stderr, /adopt 需要完整 operation ID/)
 })
 test('AC-SYNC-CLI-02 CLI run/status/control 走相同持久服务HTTP且保留稳定request ID', async () => {
   const requests: { method: string; url: string; body: unknown }[] = []
@@ -83,6 +85,10 @@ test('AC-SYNC-CLI-02 CLI run/status/control 走相同持久服务HTTP且保留�
     assert.deepEqual(requests[11].body, { targetTree: workspace.replace(/\/$/, '') })
     assert.equal((await cli(['sync', 'verify', 'demo', '--request-id', 'verify-1', '--api', api])).code, 0)
     assert.equal(requests[12].url, '/api/sync/verify')
+
+    const adopted = await cli(['sync', 'adopt', 'op-1', '--api', api])
+    assert.equal(adopted.code, 0, adopted.stderr)
+    assert.deepEqual(requests[13], { method: 'POST', url: '/api/sync/operations/op-1/adopt', body: { targetTree: workspace.replace(/\/$/, '') } })
 
   } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())) }
 })

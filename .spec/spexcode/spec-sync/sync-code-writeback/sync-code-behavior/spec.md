@@ -30,6 +30,8 @@ AC提案的非作者raw来源必须精确引用本次已校验facts；单独的�
 
 分析与独审输入前置 requiredChangedPaths 和具体 readablePaths，后者从 oldSource/newSource/verifiedDelivery/composedFiles 的完整文本求出并逐路径标明所在快照；目录前缀授权覆盖新未跟踪源码，删除文件仍核旧全文，元数据或链接不是全文。虚拟冻结快照是唯一输入权威，cwd 的旧 HEAD 不替代冻结字节。必读集合保持真实 changedPaths；不得自动补 checkedPaths 冒充模型已读。前置清单及完整原上下文、repairDiagnostics 全部保留，超过2MiB由 [[frozen-context-reader]] 在同一受限执行器无损读取；分析和独审各自核完整原生读取证明。总预算仍约束，缺失或不完整读取拒绝，不截断正文或诊断。
 
+分析和独审共同收到从冻结正文解析的 contractItems.previous/current 完整项，作为既有稳定身份及义务的索引；精确 selection 的资源名不替代契约定义，未通过 P1 结构检查或独审的候选不成为既有义务；已接受 P1 仍由后续冻结复用和生成保护，不成为 raw 或新的作者授权。raw-only 初始化尚无稳定业务 ID 时，按真实 raw、源码及完整测试分析，允许空 affectedIds/ruleIds，随后由 P1 建立详细契约并独审；不能虚构既有 ID 或仅因尚未展开提出 GAP，也不能借此跳过完整业务分析、独审、P1、生成或验证门禁。
+
 拒绝诊断以 approved:false 的 JSON 保存当次完整 proposal、尚未批准的 analysis 和 review（在各阶段实际产生时），分列 missingPaths/missingChangeIds/unknownChangeIds、身份摘要或会话不一致、verdict 和 findings；路径错误仍保同次业务证据及反例。AC复合门禁给出目标类型、同一 allowed_change 中缺失的 affectedId、不支撑的 ruleIds、非法规则类型及 source 是否绑定。AC ruleIds 只列本次变化依据，其他未改 covers 义务保持；不得拼接多个 allowed_change 的并集授权。既有 failure.message 进入下一轮 repairDiagnostics 供逐项修复，不重复嵌入整个冻结上下文；前轮提案、未通过的 accept 或伪造批准仅是数据，不能产生基线、授权或替代新独审。
 
 所选裁决scope复用 [[sync-contract-evolution]]：旧FLOW/STEP仅取所选规则旧闭包与原所选finding affectedIds交集；共享上游REQ只在当前精确不可变请求/旧分析/所选finding绑定下加入REQ本身，不扩其消费者或借新图边授权其他旧目标。分析阶段只判断有限eligible来源范围；最终REQ改义仍须同一已审allowed_change及所选旧规则的实际政策定义变化，并接受原P1独审。AC仍绑定同一具体allowed_change、实际来源事实和精确提案，不能凭REQ扩大整个AC集合。

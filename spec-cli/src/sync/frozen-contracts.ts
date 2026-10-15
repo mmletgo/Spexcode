@@ -1,4 +1,4 @@
-import { loadSpecs } from '@spexcode/spec-core'
+import { loadSpecs, PLUGIN_INSTANCE_ROOT } from '@spexcode/spec-core'
 import { buildContractGraph, parseContract, parseParts, projectContractCoverage, validateContractGraph } from '@spexcode/spec-core/contracts'
 import type { Contract, ContractCoverage, ContractFinding, ContractGraph, Verification } from '@spexcode/spec-core/contracts'
 import { sameContractBusinessMeaning, contractBusinessProse } from './contract-evolution.js'
@@ -13,10 +13,13 @@ export type FrozenContracts = {
   findings: ContractFinding[]
 }
 
+/** 插件实例是工具配置，不参与业务意图及契约同步。 */
+export const isSyncSpecPath = (path: string): boolean => path.startsWith('.spec/') && path.endsWith('/spec.md') && !path.split('/').includes(PLUGIN_INSTANCE_ROOT)
+
 /** 使用现有节点身份与契约解析器读取固定文本；root 只表示来源，不读取它的工作文件。 */
 export async function readFrozenContracts(root: string, input: ReadonlyMap<string, string>): Promise<FrozenContracts> {
   const files = new Map(input)
-  const sources = new Map([...files].filter(([path]) => path.startsWith('.spec/') && path.endsWith('/spec.md')))
+  const sources = new Map([...files].filter(([path]) => isSyncSpecPath(path)))
   const nodes = await loadSpecs(root, { history: null, drift: null, snapshot: { tip: 'HEAD', files: sources } })
   const parsed = nodes.map(node => parseContract({ nodeId: node.id, path: node.path, source: sources.get(node.path)! }))
   const contracts = parsed.flatMap(result => result.contract ? [result.contract] : [])

@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+官方 init 的 `.plugins` 实例模板出现在注册根之下时，显式 nodeIds 与缺省治理注册仍只扫描业务节点；覆盖分母及 included/excluded 不含插件，显式提交插件意图在模型调用前拒绝。真实业务子树的新增 raw 与独立未授权节点保持原判据。
+
 AC-APPLICATION-01 验证配置缺口、enable 摘要 CAS 与配置字节保留；02 验证 no-op 不派发、不提交及过期正文拒绝；03 验证 requestBlob 进入 coordinator、请求幂等/键冲突、失败查询及 source/HEAD 保留；04 验证输入过期、旧输入恢复拒绝及配置变化失效；05 验证共享治理叶闭包及宿主命令拒绝。
 
 06 使用真实 Docker、compiled CLI 和正常 Git hooks 交付完整候选，source 不被覆盖，completed 重放沿原共同基线，不重复 native/commit，工具索引丢失只恢复相同 frozen runtime；模型 runner 为确定性替身，不能算真实 LLM 验收。07 验证并发同请求只有一个 runtime/operation且预算不重置；08 验证 queued 资料缺失可查询恢复诊断、原描述恢复成功、已派发操作在原描述丢失后禁止重冻结。

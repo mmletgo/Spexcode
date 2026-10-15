@@ -12,6 +12,8 @@ code:
 
 启用、保存 Spec、显式执行、查询、暂停、恢复和取消必须进入同一真实协调操作。失败或新输入到来后能查询具体结果，不由界面推断完成。
 
+已验证交付通过同一服务采纳到原工作树，资格和执行沿同一后端判据，不由界面复制安全判断。
+
 ## expanded spec
 
 本节点落实 [[sync-product-controls]] 的 P2 应用入口与 P3 手动代码意图/裁决；P4 外部 watcher由本服务实现，完整恢复矩阵与P5最终验收由上层保留。生产 configuredSyncApplication 复用后端同仓库的 canonical session protocol，按已注册 source 工作树实例化，不创建其它数据库或队列，迁移先备份。运行资料及固定 compiled CLI 位于源码外当前用户拥有的独占 0700 runtime。
@@ -63,6 +65,8 @@ P4 的正式服务生命周期持有 [[sync-input-observer]]，不依赖浏览�
 
 注册意图由版本化nodeIds限定，父/子重复登记只扫描一次最外明确意图；其实际子树/影响闭包由既有node与图派生。省略nodeIds仅注册真实治理授权源码/测试的意图，纯raw新功能需明确意图根。status.observation.coverage列included/excluded/total，未知或未授权节点不产生虚假已覆盖结果。
 
+注册、授权检查和覆盖投影共同采用 [[sync-frozen-contracts]] 的业务 Spec 路径判定，`.plugins` 实例配置不成为业务意图或完整业务覆盖分母；显式登记该类节点仍按不存在的业务意图拒绝。插件继续显示于完整项目图，不因此取得业务同步写权。
+
 健康持久记录绑定instanceId/真实PID/startToken，查询重新验证进程身份；旧online字段不能证明服务活着。热重载通过instance CAS接管，旧观察器准入前重核所有权。status.sources列明确enable的物理来源、注册意图、存在性、控制、最近观测及持久健康；缺失来源启动仍保观察职责，周期重试。删除重建改变物理身份先报需重新授权，未授权新物理树不创建快照。最后差异正文保存在同一内容寻址evidence；commonDir被删除/移动导致证据不可读时返回明确unavailable/hash/reason，仍可查询missing健康和最后已捕获snapshot身份。
 
 派发先ack真实protocol消息成为durablequeued，再使用store.nextQueued资格与原anchor FIFO；已开始的安全checkpoint仅按原anchor恢复，失败/预算/冲突不能自动重开。coordinator未领取前的明确unsupported不能触发递归自旋。fresh manual与自动输入统一exactselection规划；P4previousBaselinePair为空，逐资源真实pair不被latest伪拼。旧P3显式retry只沿原冻结pair/plan，P4retry沿原selection。
@@ -90,6 +94,8 @@ revert 接受 operationId 与稳定 requestId，意图节点从原固定计划�
 stopWriter 在版本回退前先持久暂停当前物理来源，停止相同来源本进程执行者和观察服务，等待已开始执行在安全边界结算；剩余 journal/resource 作为可恢复记录与具体诊断返回，不删除表、worktree 或 blob。物理暂停跨服务重启保留，未知新版 schema 继续由 store 每事务 fencing 拒旧 writer。
 
 detail 的原来源采纳与主分支完成由 [[sync-landing-status]] 只读推导。sourceSynced 表示真实原树包含已验证完整交付且当前执行/读取闭包字节一致；canonicalSynced 还要求当前分支是仓库明确 mainBranch。已采纳后快照身份变化不单独制造 stale，无关提交允许保当前证据；相关工作文件、index、HEAD、配置或只读上下文变化仍过期。返回 operation 的 canonical 阶段是当前 Git 事实投影，不写虚构持久完成状态。
+
+adopt(operationId) 依 [[sync-source-adoption]] 采纳实际 settled receipt.actualCommit。detail 必须返回 adoptionEligibility（eligible:true，或包含 code/message 的明确拒因）；执行复用相同判据，锁内再次核来源、启用配置/节点授权和完整交付证据。只有干净原树且 HEAD 可快进到交付时执行普通 hooks 的 fast-forward；重复已采纳请求返回真实当前详情，不另建请求键或业务完成记录。损坏交付证据保留 recovery_required 诊断及拒因，不让状态读取因 receipt 绑定异常失去可查询性。
 
 历史节点路径恢复仅额外接受原完整 settled receipt 的实际 files 中、被本次 Git 反向三方触及的精确 .spec/.../spec.md 路径；当前原冻结意图仍须通过已注册 node 授权。它不扩大源代码、测试目录、配置或整个 .spec 目录的权限。目标 raw 取本次真实请求中同一节点的正文，删除时保留原历史 raw 供退役验证；节点迁移沿既有生命周期检查保持节点及业务 ID。
 

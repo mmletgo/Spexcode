@@ -305,6 +305,65 @@ test('Codex generation observer follows a fork successor without resuming native
   }
 })
 
+test('Codex generation observer clears its subscription deadline after initialize succeeds', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const previousHome = process.env.SPEXCODE_HOME
+  const home = mkdtempSync(join(tmpdir(), 'spex-codex-identity-observer-deadline-'))
+  process.env.SPEXCODE_HOME = home
+  const root = runtimeRoot()
+  const threadId = 'identity-deadline-thread'
+  const socket = join(home, 'identity-deadline.sock')
+  mkdirSync(root, { recursive: true })
+  writeFileSync(join(root, 'codex-app-server-generations.json'), `${JSON.stringify({
+    version: 3, revision: 1, current: 'identity-deadline-generation', pending: null,
+    generations: {
+      'identity-deadline-generation': {
+        state: 'current',
+        endpoint: {
+          id: 'identity-deadline-generation', pidFile: join(root, 'identity-deadline.pid'), receiptFile: join(root, 'identity-deadline.json'),
+          logFile: join(root, 'identity-deadline.log'), socketPath: socket,
+        },
+      },
+    },
+    bindings: { 'identity-deadline-session': { generationId: 'identity-deadline-generation', threadId } },
+  }, null, 2)}\n`)
+  let sendNotification: ((value: unknown) => void) | undefined
+  let resolveInitialized!: (send: (value: unknown) => void) => void
+  const initialized = new Promise<(value: unknown) => void>((resolve) => { resolveInitialized = resolve })
+  const server = codexRpcFixture(() => { throw new Error('generation observer must not issue thread/resume') }, {
+    initialized: (_message, send) => { sendNotification = send; resolveInitialized(send) },
+  })
+  let cleanupObserver: { close(): void; closed: Promise<string | null> } | null = null
+  try {
+    await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(socket, () => resolve()) })
+    const descriptor = codexHarness.sharedRuntimes?.(root)[0]
+    if (!descriptor?.observeNativeIdentity) throw new Error('Codex generation observer is missing from the shared descriptor')
+    let resolveChange!: (value: unknown) => void
+    const change = new Promise<unknown>((resolve) => { resolveChange = resolve })
+    const observer = descriptor.observeNativeIdentity(resolveChange)
+    cleanupObserver = observer
+    assert.ok(observer.ready)
+    assert.equal(await observer.ready, true, 'initialize成功应完成observer订阅')
+    const send = await initialized
+    let closedReason: string | null | undefined
+    void observer.closed.then((reason) => { closedReason = reason })
+
+    t.mock.timers.tick(CODEX_TURN_OBSERVER_SUBSCRIBE_MS + 1)
+    await Promise.resolve()
+    assert.equal(closedReason, undefined, '成功订阅后30秒初始化期限不应销毁observer')
+    assert.equal(sendNotification, send)
+    send({ method: 'thread/started', params: { thread: { id: 'identity-deadline-successor', forkedFromId: threadId } } })
+    assert.deepEqual(await change, { previousThreadId: threadId, nextThreadId: 'identity-deadline-successor', runtimeKey: descriptor.key })
+  } finally {
+    cleanupObserver?.close()
+    await cleanupObserver?.closed
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+    if (previousHome === undefined) delete process.env.SPEXCODE_HOME
+    else process.env.SPEXCODE_HOME = previousHome
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
 test('Codex turn observer reconciles a pre-existing systemError after subscription', async () => {
   const previousHome = process.env.SPEXCODE_HOME
   const previousSocketDir = process.env.SPEXCODE_CODEX_SOCKET_DIR

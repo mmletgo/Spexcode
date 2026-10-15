@@ -20,4 +20,6 @@ A仅引用B规则或显式readonly上下文纳入B Spec时，B整Spec作为reado
 
 没有任何真实owner的预登记定义和mandatory继续保留，供纯raw细化或由严格门禁暴露缺口；坏schema/未支持命令不能被范围筛选吞掉。此回归不运行整个仓库测试或native。
 
+真实 Git 夹具复制官方 init 的 `.plugins` 模板，先复现插件脚本被误纳入业务授权导致规划失败；修后插件实例不进入当前/历史业务图、targets、读取/写入或执行覆盖，显式插件意图拒绝，原业务源码、VERIFY 与不可写 oracle 政策保持。真实插件脚本即使位于业务 Spec 的目录前缀下，仍被候选实际 executionScope 越界门禁拒绝。
+
 真实Git/store旧基线上的子节点移动先复现readonly父契约的code/AC文件未入readPaths；修后同一官方validateContractGraph完整严格检查无error。当前及历史映射变化两个case都读取真实精确声明文件，executionScope和writePaths逐项保持原目标范围，候选硬门禁拒绝覆盖readonly父assets；独立B的Spec/code/test及其资源均未纳入。旧基线仍经现有store动作建立，四层验证明确fake；只证明规划/读取/候选门禁，不宣称native或Docker交付。

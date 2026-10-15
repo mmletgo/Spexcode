@@ -16,3 +16,5 @@ code:
 只读投影复用 [[sync-private-delivery]] 的 settled journal 与 receipt。全部交付范围已覆盖、所有 journal 已结算、没有未决业务范围，receipt 的 actualCommit/tree 与实际交付快照一致时，才检查当前源树是否采纳。目标提交须是当前 HEAD 祖先，当前工作文件、index 与 HEAD 的执行及读取闭包均须等于该已验证交付对象，删除同样比较；无关路径和无关后续提交不使证据失效。
 
 原输入工作树采纳只证明 sourceSynced；当前分支还必须等于已确定的受保护主分支，才投影 canonical_synced。未采纳保留开发交付状态，作用域有新编辑则保留已交付历史但当前结果过期。该读取不伪造新的 journal、receipt 或持久 canonical 完成字段。
+
+实际采纳由 [[sync-source-adoption]] 单独执行；本节点保持只读，不为等待采纳伪报完成，也不因 Git 命令返回错误而猜测 ref 未前进。采纳请求和普通详情最终均读取当前 Git 事实。

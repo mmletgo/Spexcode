@@ -57,6 +57,8 @@ starts an agent; its not_run verification field cannot be interpreted as synchro
 
 The sync HTTP seam forwards an explicit `/operations/:id/revert` request and `/stop-writer` to the shared sync application. It validates request identities and the existing registered project scope; group compensation, eligibility, stopping and journal settlement remain application responsibilities. HTTP acceptance does not claim canonical adoption or complete native resource release.
 
+`POST /api/sync/operations/:id/adopt` forwards explicit adoption to [[sync-source-adoption]] through the same registered targetTree scope. A conflicting body operationId or query/body tree is rejected before mutation; the application owns receipt, authorization, clean-tree and fast-forward checks. The route returns actual landing projections rather than manufacturing a completion state.
+
 A CLI output contract, in the same fail-loud spirit: a verb with unbounded stdout (`issue ls --json`,
 `graph --json`, `session review --json`, `spec search --json`, …) must FULLY reach a pipe. `process.exit()` force-quits
 without draining buffered pipe writes, silently truncating a large dump at the ~64KB pipe buffer, so those

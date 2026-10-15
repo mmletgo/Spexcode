@@ -13,6 +13,7 @@ related:
   - spec-cli/src/sessionSlug.test.ts
   - spec-cli/src/session-create-cli.test.ts
   - spec-cli/src/sessions-hot.test.ts
+  - spec-cli/src/sessions.test.ts
   - packages/spec-core/src/layout.ts
   - spec-cli/src/session-public-projection.api.test.ts
   - spec-cli/src/session-managed-watch-realtime.yatu.test.ts
@@ -198,8 +199,9 @@ lifecycle is [[state]]'s; the prompt seam left but `launcherCmd` stayed, because
 is not what text it is handed. That several features still hold no code of their own is the honest
 signal that the rest of `sessions.ts` remains a monolith outside the record seam.
 
-The shared layer also reconciles each executing governed record (`status: active`) with its adapter's optional
-native turn-failure subscription. Waiting states (`asking`, `awaiting`, and `parked`) have no native turn and do
+The shared layer also reconciles each ordinary executing governed record (`status: active`) with its adapter's optional
+native turn-failure subscription. Structured execution records are excluded because their exact turn/result observer
+and lifecycle belong to the runner in [[structured-session-runtime]]. Waiting states (`asking`, `awaiting`, and `parked`) have no native turn and do
 not hold an observer. It owns subscription lifetime across backend replacement and record stop/archive/retirement,
 admits native subscriptions one at a time during reconciliation so a backend restart cannot fan out expensive
 resume handshakes, with bounded backoff after a transport disconnect. The supervisor performs one full roster

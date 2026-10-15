@@ -24,6 +24,7 @@ An ordinary repeated input does not grant a fresh operation budget.
 It also documents daemon-free `sync check` with explicit immutable base/candidate/trusted policy, protected-target CI execution, exit codes, and uncovered scope. Large context uses the verified frozen reader without truncation; the existing total budget remains binding.
 It distinguishes recover (settle existing side effects without new work), resume and retry,
 and preserves control/input/budget while recovery remains uncertain.
+It teaches explicit `sync adopt` after verified private delivery: the shared application only fast-forwards a clean original worktree to the settled receipt commit, rejects dirty or divergent trees with a concrete reason, and reports original-source and canonical-branch adoption separately.
 
 `spex guide` is SpexCode's **reference surface as a command**, not buried docs. It serves the human and
 the agent from one verb, picked by an optional topic:
@@ -137,4 +138,4 @@ in `guide.ts`. `cli.ts` is the shared command hub every verb routes through, so 
 there is that feature's, not `guide`'s drift.
 
 
-P3 sync guide additionally documents manual code/combined ingestion and bound business decisions via [[sync-cli]]. It explains trusted analysis/finding references and keep/adopt/new-rule choices; ordinary completion needs no extra confirmation, retry does not authorize business changes, and external watcher is still unavailable.
+The sync guide documents manual code/combined ingestion and bound business decisions via [[sync-cli]]. It explains trusted analysis/finding references and keep/adopt/new-rule choices; ordinary completion needs no extra confirmation, retry does not authorize business changes, and enabled sources are watched by the formal backend lifecycle.

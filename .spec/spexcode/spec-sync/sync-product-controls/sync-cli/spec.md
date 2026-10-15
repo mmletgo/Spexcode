@@ -35,4 +35,6 @@ P4 增加无operation参数的 pause/resume，调用 /automatic/pause|resume 物
 
 `spex sync revert <operation-id> [--request-id <id>]` 明确请求撤销已采纳的完整交付，由同一应用资格检查和成组补偿管线建立新操作；稳定请求键幂等，CLI不直接reset、改源文件或假造已落地。`spex sync stop-writer` 不接操作ID或请求键，暂停物理来源、停止新派发并结算或保留实际资源/journal，返回恢复诊断；stopped只指停写入口，不能解释为所有未知原生资源已释放。两者沿既有targetTree/后端路由与拒绝退出码，帮助页说明其语义。
 
+`spex sync adopt <operation-id>` 将已验证且结算的交付交给 [[sync-source-adoption]] 采纳，只传当前 targetTree 和完整操作身份，不由 CLI 执行 Git。无参数或多余操作参数在 HTTP 前拒绝；后端资格不满足时非零退出并保留具体原因。成功输出仍区分 sourceSynced 与 canonicalSynced，不把工作树交付当作主分支完成。
+
 独立check的help与guide说明受信policyCommit中的原意精确登记、null新增删除、移动双登记及失败摘要；外部调用方负责选择受信政策并配置必需检查，授权不豁免独审/VERIFY/oracle。

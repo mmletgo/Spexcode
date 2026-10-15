@@ -438,6 +438,7 @@ consumes the token after it.`,
        spex sync pause|resume
        spex sync verify <node-id> [--request-id <id>]
        spex sync pause|resume|cancel|recover <operation-id>
+       spex sync adopt <operation-id>
        spex sync revert <operation-id> [--request-id <id>]
        spex sync stop-writer
        spex sync check --base <sha> --candidate <sha> [--policy <trusted-sha>] [--repository <path>] [--evidence-directory <existing-directory>]
@@ -455,6 +456,8 @@ resume 继续原操作，--retry-of 建立关联新操作；三个入口各自�
 --retry-of 显式重试可重试的失败操作，保留原正文意图并关联旧结果；不能同时传 --patch-file。
 只有显式重试建立新操作和新预算，普通重复请求继续归并。未结算资源或已变输入拒绝重试。
 show/status 展示真实失败、GAP、过期和交付工作树；workspace_synced 不代表原输入树已落地。
+adopt 显式采纳已验证且结算的交付，只安全快进干净原工作树；未提交改动或分叉明确拒绝并保留交付。
+show/status 的 adoptionEligibility 给出资格与具体原因，sourceSynced 与 canonicalSynced 分别表示原树采纳和主分支同步。
 手动 --origin code|combined 接入外部代码变更并分析业务冲突；来源不构成采用新业务的授权。
 decide 绑定 show 中的原输入、可信分析及具体 finding IDs；保持需求、采用行为或新规则进入新关联操作。
 启用后服务持续观察授权来源；无参数 pause/resume 控制物理输入自动执行，带 operation ID 控制单个操作。暂停仍记录最新输入；服务停止明确离线。所有命令输出 JSON。
