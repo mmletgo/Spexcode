@@ -4,8 +4,11 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { captureInputSnapshot, readEvidence, readObject, readTree, writeEvidence } from './snapshot.js'
+import { captureInputSnapshot, contentHash, readEvidence, readObject, readTree, writeEvidence } from './snapshot.js'
 import { prepareHistoryRequest, readHistoryRequest } from './history-input.js'
+import { composeInputSnapshots, readCompositionEvidence } from './composition.js'
+import { composeControlledRequest } from './request-input.js'
+import type { BaselinePair, FrozenBaselineSelection } from './operation-types.js'
 
 async function fixture(t: test.TestContext) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'spex-history-')))
@@ -71,4 +74,21 @@ test('反向三方拒绝外部merge driver，不在宿主执行候选合并命�
   const snapshot = await captureInputSnapshot(f.root)
   assert.throws(() => prepareHistoryRequest(snapshot, f.input), /SYNC_HISTORY_MERGE_DRIVER_UNSUPPORTED/)
   assert.equal(existsSync(marker), false)
+})
+
+test('成组恢复已采纳tombstone仍核验真实恢复的ID对象，不因历史三方皆空遗漏', async t => {
+  const f = await fixture(t), path = '.spec/feature/spec.md', id = 'REQ-HISTORY-01'
+  writeFileSync(join(f.root, path), `---\ntitle: 历史对象\nstatus: active\ncontract-schema: sync-v1\n---\n## raw source\n\n恢复同一个历史对象。\n\n## expanded spec\n\n### REQ\n\n| id | goal | source | constraints | success | depends-on |\n| --- | --- | --- | --- | --- | --- |\n| ${id} | 保留历史身份 | user:raw | 原业务对象 | 可追溯 | - |\n`)
+  f.git('add', '.'); f.git('commit', '-m', 'identity before retirement')
+  const sourceInput = await captureInputSnapshot(f.root)
+  rmSync(join(f.root, path)); f.git('add', '.'); f.git('commit', '-m', 'retire exact historical identity')
+  const input = await captureInputSnapshot(f.root)
+  const pair: BaselinePair = { id: 'retired-pair', repositoryId: input.source.repositoryId, source: input.source, sourceInput, verifiedDelivery: input, coveredScope: { paths: [path], contractIds: [id], flowIds: [] }, retiredIds: [id], receiptId: 'retired-receipt', settledAtMs: 1 }
+  const body = { version: 'sync-baseline-selection-v1' as const, source: input.source, bindings: [{ resource: { kind: 'path' as const, path }, bytePair: pair }, { resource: { kind: 'contract' as const, id }, intentPair: pair }] }
+  const digest = contentHash(JSON.stringify(body, (_key, value: unknown) => value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value))
+  const selection: FrozenBaselineSelection = { ...body, digest }, base = composeInputSnapshots(input, selection, { executionPaths: [path] }).composed!
+  const request = prepareHistoryRequest(input, { ...f.input, featureCommit: input.headCommit }), composed = composeControlledRequest(input, base, request, { baselineSelection: selection }).composed!
+  const evidence = readCompositionEvidence(input, composed, selection), intent = evidence.intents.find(item => item.resource.id === id)!
+  assert.equal(intent.before, null); assert.equal(intent.delivery, null); assert.equal(intent.source?.item.id, id); assert.equal(intent.changed, true)
+  assert.deepEqual(evidence.residualPaths, [path])
 })

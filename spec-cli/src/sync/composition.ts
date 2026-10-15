@@ -368,7 +368,7 @@ const applyAuthorChanges = (entries: TreeEntry[], changes: readonly HistoryChang
 export function projectSelectedAuthorGroup(input: InputSnapshot, evidence: SelectedCompositionEvidence, requestBlob: BlobRef, changes: HistoryChange[], selection: FrozenBaselineSelection): SelectedCompositionEvidence {
   const commonDir = input.source.commonDir, incoming = applyAuthorChanges(verifySnapshot(input), changes), current = intentObjects(commonDir, incoming)
   const intents = evidence.intents.map(residual => {
-    const path = residual.source?.path ?? residual.before?.path ?? residual.delivery?.path
+    const path = residual.source?.path ?? residual.before?.path ?? residual.delivery?.path ?? current.get(residual.resource.id)?.path
     if (!changes.some(change => change.path === path)) return residual
     const source = current.get(residual.resource.id) ?? null
     const broadChange = residual.before?.rawSource !== source?.rawSource || residual.before?.businessProse !== source?.businessProse || residual.before?.path !== source?.path
