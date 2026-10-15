@@ -219,18 +219,21 @@ test('规划只读实际闭包，宽src/tests授权不把独立节点锁入scope
   writeFileSync(join(f.root, 'src/independent.js'), 'export const independent = true\n')
   writeFileSync(join(f.root, 'tests/independent.test.mjs'), 'independent test bytes\n')
   writeFileSync(join(f.root, '.spec/spexcode.json'), JSON.stringify({ sync: {
-    version: 'sync-settings-v1', sourcePaths: ['src'], testPaths: ['tests'], readPaths: [],
-    facts: [], mandatoryTests: [], budget: { maxAttempts: 2, maxCalls: 4, maxRepairs: 1, timeoutMs: 30000 },
+    version: 'sync-settings-v1', sourcePaths: ['src'], testPaths: ['generated-tests'], readPaths: [],
+    facts: [], mandatoryTests: [{ verificationId: 'VERIFY-EXPORT-01', testPath: 'tests/export.test.mjs', testId: 'AC-EXPORT-01' }], budget: { maxAttempts: 2, maxCalls: 4, maxRepairs: 1, timeoutMs: 30000 },
     verifications: [{ definition: { id: 'VERIFY-EXPORT-01', command: ['node', '--test', 'tests/export.test.mjs'], cwd: '.', timeoutMs: 1000 }, environment: { version: 'v1', image: `node@sha256:${'a'.repeat(64)}`, platform: 'linux/arm64', memoryBytes: 100000000, cpus: 1, pidsLimit: 64, scratchBytes: 1000000, logBytes: 100000 } }],
   } }))
   const input = await captureInputSnapshot(f.root), plan = await buildSyncApplicationPlan(input, 'export-contract', f.selection())
-  assert.ok(plan.writePaths.includes('src')); assert.ok(plan.writePaths.includes('tests'))
+  assert.ok(plan.writePaths.includes('src')); assert.ok(plan.writePaths.includes('generated-tests')); assert.ok(!plan.writePaths.includes('tests'))
   assert.ok(!plan.readPaths.includes('src')); assert.ok(!plan.readPaths.includes('tests'))
   assert.ok(!plan.targets.some(target => target.nodeId === 'independent'))
   const resources = await deriveSyncBaselineResources(input, plan, f.selection())
   assert.ok(!resources.some(resource => resource.kind === 'path' && resource.path.includes('independent')))
   assert.ok(!plan.executionScope.paths.some(path => path.includes('independent')))
   assert.ok(plan.executionScope.paths.includes('src/export.js'))
+  assert.ok(plan.readPaths.includes('tests/export.test.mjs'))
+  assert.ok(resources.some(resource => resource.kind === 'path' && resource.path === 'tests/export.test.mjs'))
+  assert.ok(!plan.executionScope.paths.includes('tests/export.test.mjs'), 'mandatory oracle must remain readonly even when contractImpact includes it')
 })
 
 
