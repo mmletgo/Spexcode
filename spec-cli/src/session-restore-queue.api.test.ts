@@ -66,6 +66,7 @@ test('YATU: archived dirty work restores by native id and corrupt queue rows can
   const home = join(fixture, 'home')
   const database = join(home, 'sessions.sqlite')
   const launcherLog = join(fixture, 'launcher-args.log')
+  const tmuxRecord = join(fixture, 'tmux.jsonl')
   const launcher = join(fixture, 'logging-fake-claude')
   const port = await freePort()
   const tmux = `spex-restore-queue-${process.pid}-${Date.now()}`
@@ -81,6 +82,7 @@ test('YATU: archived dirty work restores by native id and corrupt queue rows can
     SPEXCODE_HOME: home,
     SPEX_SESSION_DATABASE_PATH: database,
     SPEXCODE_TMUX: tmux,
+    SPEXCODE_TMUX_RECORD: tmuxRecord,
     FAKE_HARNESS_INTERVAL_MS: '120',
   }
   for (const key of ['SPEXCODE_API_URL', 'SPEXCODE_SESSION_ID', 'CLAUDE_CODE_SESSION_ID', 'CODEX_THREAD_ID', 'OPENCODE_SESSION_ID', 'PI_SESSION_ID']) delete env[key]
@@ -131,7 +133,7 @@ exec ${JSON.stringify(fakeHarness)} "$@"
       assert.equal(response.status, 200, text)
       return JSON.parse(text) as SessionRow
     }
-    const online = (id: string) => row(id).then((value) => value?.liveness === 'online').catch(() => false)
+    const online = (id: string) => row(id).then((value) => value?.liveness === 'online')
 
     // One real create/close/resume loop proves the archived worktree is the durable source of dirty state.
     const archived = await create('restore-archive', 'archive round trip')
@@ -207,7 +209,21 @@ exec ${JSON.stringify(fakeHarness)} "$@"
     assert.equal(JSON.parse(readFileSync(activeRecord, 'utf8')).launch_readiness_pending, '', 'the existing stop cancels the pending transaction after exact teardown')
     assert.equal((await row(archived.id))?.lifecycle, 'idle', 'cancellation preserves the open canonical declaration')
     const blocker = await create('restore-blocker', 'queue blocker')
-    await waitFor(() => online(blocker.id), 'queue blocker online')
+    try {
+      await waitFor(() => online(blocker.id), 'queue blocker online')
+    } catch (error) {
+      console.error('[restore-queue failure]', error, log)
+      const [archivedRow, blockerRow, archivedRuntime, blockerRuntime, tmuxCallRequests] = await Promise.allSettled([
+        row(archived.id), row(blocker.id),
+        Promise.resolve().then(() => readFileSync(activeRecord, 'utf8')),
+        Promise.resolve().then(() => readFileSync(recordPath(blocker.id), 'utf8')),
+        Promise.resolve().then(() => readFileSync(tmuxRecord, 'utf8')),
+      ])
+      console.error('[restore-queue diagnostic]', JSON.stringify({
+        archivedRow, blockerRow, archivedRuntime, blockerRuntime, tmuxCallRequests,
+      }, (_key, value) => value instanceof Error ? value.stack : value, 2))
+      throw error
+    }
     const corrupt = await create('restore-corrupt', 'corrupt queue row')
     const healthy = await create('restore-healthy', 'healthy queue row')
     await waitFor(async () => (await row(corrupt.id))?.lifecycle === 'queued', 'corrupt row queued')
