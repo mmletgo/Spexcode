@@ -14,7 +14,7 @@ test('palette entries carry executable spec and session addresses', () => {
 })
 
 test('spec prose references are real anchors with the new-tab gesture', () => {
-  assert.match(nodeView, /const href = routeHash\('spec', id\)/)
+  assert.match(nodeView, /const href = routeHash\('spec', id, targetTree \? \{ targetTree \} : null\)/)
   assert.match(nodeView, /<a className="doc-link"[^>]+href=\{href\}[^>]+onClick=\{\(event\) => newTabAnchor\(event, href\)\}/)
 })
 
