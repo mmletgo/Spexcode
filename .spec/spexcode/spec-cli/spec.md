@@ -137,3 +137,5 @@ Evidence bytes ride `/api/evidence` (`POST` = content-addressed put,
 正文保存先读取目标树的同步设置。已启用时要求稳定 idempotency-key，把用户 patch 作为不可变请求送入同一操作，返回 commit:null 和 syncOperation；不先单独提交 Spec。未启用且没有显式 targetTree 时保留 [[spec-body-edit]] 原有提交语义；显式树未启用则拒绝，不能静默写到后台树。应用错误保留具体 code/message 和正确 HTTP 状态，监听失联、未落盘或读取失败不能包装成成功。
 
 正式后端启动恢复本机明确enable的同步来源并持有 [[sync-input-observer]]，与SSE订阅无关。关闭/正常signal先回收同步watcher、timer并安全结算已开始扫描与执行。/api/sync/automatic/pause|resume 是物理输入控制，/verify仍调用 [[sync-application]] 同一完整管线；路由不复制资格判定。
+
+HTTP 入口先确认 Hono listener 已发出真实 `listening` 事件，再安装连接回收器与 WebSocket 升级处理，最后才等待配置同步的启动追赶。这样 `/health` 只在真实绑定后对 supervisor 可用，同时不被同步追赶延迟阻塞。
