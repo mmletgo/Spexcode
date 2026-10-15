@@ -808,6 +808,25 @@ show 的 decisionContext 展示原意、双方行为、规则/路径、反例、
 只裁决选中项，旧原意与分析可追踪，其它GAP仅阻依赖；不通过 retryOf 伪造授权。
 enable 后由正式服务持续观察授权来源，保存即触发；停机后、外部提交及监听故障通过补偿扫描处理。sync pause/resume（无 operation ID）控制物理输入自动执行，暂停仍记录最新输入；恢复先扫描最新版本。sync verify <node-id> 沿同一真实完整验证管线建立操作。
 
+跨机器独立复核不依赖服务、本机数据库或开发机通过记录：
+  spex sync check --base <完整基线SHA> --candidate <完整候选SHA> --policy <已受信政策SHA>
+policy 缺省 base；可信 CI 从受保护目标构建校验器，候选仅作 Git 对象数据读取，不运行候选 workflow 或安装脚本。
+需求raw确有变化时，从受信policyCommit的.spec/sync-intent-authorizations.json读取sync-intent-authorizations-v1登记。
+每项精确绑定path、beforeRawDigest、afterRawDigest及source说明；新增/删除一侧显式null，移动登记两条。
+摘要复用Spec parser规范LF并提取raw后按UTF-8计算SHA256；失败结果intentAuthorization.changes列精确摘要。
+受信维护者登记该差量后自动重验；候选自带登记不能批准自己，SHA/source说明也不是审批身份签名。
+policyCommit必须由受保护目标或等效外部信任确定，不能让候选选择--policy；工作流还须外部设置required check。
+检查覆盖旧新契约、源码与真实断言，并执行独立语义审查和冻结命令；删 schema/AC/test 或自改命令不能免检。
+JSON 分列 coverage 与本次 affected_scope；未配置范围返回 unsupported，已配置且无影响为 not_applicable，均不能冒作全项目已同步。
+退出码0表示 passed 或 not_applicable，1为失败或恢复未完成，2为unsupported。
+完整上下文超过2MiB沿受限冻结读取工具无损接收，生成和独审各自证明实际读取覆盖，仍受既有总预算约束。
+
+撤销已采纳功能：spex sync revert <operation-id> --request-id <稳定键>。
+应用核真实收据和已采纳提交，在当前版本成组补偿Spec、代码、测试及映射，保后续编辑与历史；
+结果是同一完整管线的新操作，冲突仍需具体业务处理，不能把已受理当已落地。
+回退程序版本前：spex sync stop-writer。此动作暂停新写入并结算或保留实际journal/资源；
+先检查返回的恢复诊断，再停服务和回退程序。新增数据库表和证据保留，不做破坏性down migration。
+
 see also: spex help sync`
 
 const TOPICS: Record<string, string> = { spec: SPEC, settings: SETTINGS, footprint: FOOTPRINT, files: FILES, web: WEB, widget: WIDGET, diagram: DIAGRAM, sync: SYNC }

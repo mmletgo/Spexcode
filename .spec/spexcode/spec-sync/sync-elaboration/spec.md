@@ -55,3 +55,5 @@ AC-ELABORATION-38–40 验证空 changes 的完整既有目标、只返回子叶
 
 
 已解决裁决诊断的删除由[[sync-contract-evolution]]从旧图、精确当前独审裁决和实际候选确认。checkCandidate保留此次确证删除的GAP身份；仅在完整P1结构检查与新独审通过后并入既有retiredIds，未批准或仍未解决的候选不记录退役。后续协调验证、receipt和baseline沿原字段累计身份并阻止未来复用，不新增用户业务退役提案。
+
+显式历史补偿的 restore 是既有 authorizedChanges 的精确动作：仅可信 revert 入口从原 settled receipt、真实 parent 和不可变 sync.history 请求导出同一历史对象。程序重核原路径、身份与业务字段；普通 raw、模型分析或伪 source 字符串不能批准恢复。精确恢复仍经过当前结构、独审、代码和运行验证；新业务复用退役身份继续拒绝。

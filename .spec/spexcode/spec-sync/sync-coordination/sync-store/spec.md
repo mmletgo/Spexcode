@@ -106,3 +106,7 @@ bindPublicationBase 消费 [[sync-publication-base]] 实际对象证明，只在
 自动预算继承只适用于 observeAndAdmit 携 P4 selection 的新不可变观察（非 retry），同来源同 scope 的未完成前序含 failed/budget_exhausted 均保持原 FIFO anchor、预算族和 deadline。显式 admitAndEnqueue 新输入是新预算授权，P3 缺 selection 不继承 P4 自动族；同意图精确去重仍复用原 operation，旧未 removed resources/未 settled journals 仍阻止新执行。
 
 同来源持久 publication gate 复用 attempts/resources/journals，不建第二锁表。其它 attempt 已有 publicationBase 且仍运行，或其仍有未 removed resource/未 settled journal（即使 attempt failed/superseded/settled）时，bind/尚未应用的恢复/new beginApply 返回 SYNC_PUBLICATION_BUSY。没有 publicationBase 的独立生成资源不参加该 gate。bind 同 base 重入也复核完整 frozen frontier；assertPublicationBaseCurrent 是只读恢复门禁，事务外核 provenance hash、事务内核当前 attempt/selection/全 path heads，旧 image 不能因重入跳过 CAS。实际 applying/settled 沿原 journal/receipt，不重新选择 heads 或修改 parent。
+
+sync.history 请求采用固定输入、目标真实交付及完整成组差量；规范语义身份仅排除运输 requestId，相同补偿换运输键不重开预算。精确接入收据与原 requestBlob 继续保留每个运输请求，schema generation 使旧 writer 拒绝未知成组授权。
+
+精确 restore 只在完整验证与 receipt 结算后发布该 ID 的新有效 intent head；verification 的 restoredIds 必须精确对应本操作冻结 restore 授权。successor pair 的当前 retiredIds 释放这些已证明恢复的 ID，既有 immutable retirement pair 不修改。旧 path pair 的累计集合不覆盖该 ID 的较新 intent head。此 writer 语义通过 schema generation fence 隔离旧 writer，不新增表。

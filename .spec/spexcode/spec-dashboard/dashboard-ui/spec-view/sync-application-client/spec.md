@@ -23,7 +23,17 @@ activation=invalidated 也使旧receipt不能投影为当前已同步，保留�
 
 资源恢复资格只由真实recovery_required与未结算resources/journals共同决定，发送recover控制不附新请求/预算。请求证据投影保留用户origin.intent与实际path，原Git对象/代理prompt不直接dump；请求diff透传kind=request，不能改成候选或交付读取。
 
+`sync.history` 作为独立请求类型投影原operation、receipt、feature commit、每条变更的精确path和冲突path，不把它当成带 `origin.intent` 的正文编辑。变化对象、request tree、merge输出和prompt不进入摘要；显式未知请求类型保留其类型供界面诊断，不静默吞掉或猜测正文含义。
+
 
 decideSync直接传原operation ID、inputId、analysisRef、选中finding IDs及用户choice/rule到共享decide HTTP入口；保持payload幂等键与原错误code/message，不混成retry或SpecBodyEdit。业务分析证据投影保具体路径、原意、双方行为、反例；裁决投影保选择/新规则/所选项/原operation身份，不泄露prompt。
 
 Detail.decisionEligibility 是服务端始终返回的裁决资格；syncProjection 的 canDecide 仅在该 eligible 为真且非 stale、非 recovery_required、授权未 invalidated 时开放。前端不重算 phase、attempt、资源或 journal 的裁决算法；早期 conflict 证据不代表当前可提交裁决。
+
+automaticControl(action, targetTree) 只把 pause/resume 发送到既有 `/api/sync/automatic/{action}` 物理控制入口，经现有 targetTree URL helper 传递工作树且不附 operation ID；面板仅从 enabled 的默认来源视图调用，所有 targetTree 视图由面板Spec保持只读。返回实际 observation；非成功响应继续透传 code/message。syncObserverProjection 整理 health.watchOnline/status/lastScanAtMs、物理控制、真实 coverage 数组、最近 observation 的 baseline selection 和 status.sources 物理来源摘要供界面显示：persistedHealth 和更新时间不能生成在线或扫描结论，baseline 汇总明确限于 latestDifference.nodeId，不能补造项目级 per-node 结果。来源列表从 source.watchOnline 判断在线，并且只读。
+
+readSyncStatus 要求实际 settings、operations、observation 和 sources 结构；HTTP 成功但缺少同步 UI 必需字段时返回可重试的 sync_response_invalid，不能让缺字段被解释为空覆盖或离线状态。
+
+status operation detail 必须提供 boolean sourceSynced/canonicalSynced、实际 revertEligibility 和 executionAvailability；同步完成投影只用真实 canonicalSynced 区分主分支落地。canRevert 消费 backend eligible 且保留 recovery availability 门禁，不额外排除 stale。
+
+revertSync 发送 `POST /api/sync/operations/:id/revert`，body 保留同一操作稳定 requestId 与可选 targetTree；响应必须同时说明 changed 和真实新 operation/null。stopSyncWriter 调用 `POST /api/sync/stop-writer`，校验 stopped/control/恢复子集；调用方消费部分 operations 时不得将其当完整历史。两种 transport 都保留服务端 code/message，成功响应结构不完整时 fail closed。

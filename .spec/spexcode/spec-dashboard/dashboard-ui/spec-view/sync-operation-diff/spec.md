@@ -16,6 +16,6 @@ related:
 
 读取 `/api/sync/operations/:id/diff?path=...&kind=candidate|delivery`，保持 targetTree。文件展开才请求，离开可见 pane 时中止；HTTP 413 或权限/对象错误显示真实 code/message，不将拒绝当空差异。代码和测试文件都经该操作 diff 授权读取，不伪装源码读取政策。没有 receipt 的私有工作树不开放正文阅读门；候选 diff 可以审查但始终标候选。
 
-kind=request复用同一差异展示，从原input正文到requestBlob的请求正文，仅实际请求path可展开；不要求candidate存在，也不能标成完整交付。
+kind=request复用同一差异展示，从原input正文到requestBlob的请求正文，仅实际请求path可展开；不要求candidate存在，也不能标成完整交付。`sync.history` 请求逐项使用 `changes[].path`，rename旧、新path作为两个精确文件分别读取，不从nodeId或目录推导。
 
 存在实际patch但没有文本hunk时仍原样展示Git差异元数据（如mode或二进制变更），不能因缺少hunk就显示“没有修改”。

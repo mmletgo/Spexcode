@@ -37,3 +37,21 @@ status 定时读取与用户保存refreshKey驱动刷新，不依赖全局graph-
 P3手动“接入代码修改”提交code来源，正常“立即同步”保initial语义；后台外部watcher尚未启用。可信decisionContext由 [[sync-business-decision]] 展示三种业务裁决，无分歧不加确认。操作记录可切换历史原operation查原analysis和请求；裁决请求展示选择、所选finding IDs、用户新rule、原operation与继承原正文diff。新operation可以supersede原冲突但不能丢原始需求链。
 
 裁决按钮复用 syncProjection.canDecide 消费实际 Detail.decisionEligibility；活动 P1 的冲突证据继续可读，尚不可裁决时原三按钮禁用，结算并取得真实资格后开放。global busy、只读树、未启用配置仍额外禁写；两个准入后尚未查询的临时 Detail 明确 eligible=false，不猜执行资格。前端不另建 phase/attempt/resource 判定，既有布局、焦点与 Hooks 顺序保持。
+
+P5 来源树增加项目观察摘要：观察在线必须由 status.observation.health.watchOnline 与真实 health 状态共同证明；persistedHealth 中旧的 watching 记录不能证明进程在线。明确显示 offline、starting、watching、degraded、missing、invalidated、身份未确认与观察读取不可用，并展示 health.lastScanAtMs 的最近完成扫描时间和真实原因；updatedAtMs 不冒称扫描时间。读取错误或缺失 status 的观察/来源字段关闭在线/控制推断，展示原 API code/message（结构不完整使用本地化诊断）并允许重读。
+
+物理自动接入 pause/resume 通过 `/api/sync/automatic/{pause|resume}`，与单 operation 的 pause/resume/cancel/recover 分开。控件只在默认来源视图且 settings.enabled=true 时开放；targetTree 即使指向已登记输入工作树也仍是只读视图。物理暂停仍持续观察并记录差异；按钮文案明确说明它不会自动解除任何单操作暂停。控制失败展示原错误并重试同一控制请求；成功后仍以接口返回和下一次真实 status 为准，不做乐观状态迁移。
+
+项目覆盖展开显示最近一次成功扫描返回的 totalNodeCount 分母及 included、context、missing、excluded 的原始 ID 清单。服务尚无成功扫描时间时，coverage 显示不可用，不把初始化 0/0 当实际结果。明确说明 included 是配置的观察子树，不等于共同基线或同步完成；只读 context 计入 excluded 数量。共同基线只可由最近 observation 的 selection.bindings 汇总，并清楚标出 latestDifference.nodeId；selection 缺失/失败显示未知和真实原因，不推断全项目未建基线。最新观测 outcome/reason可读，摘要不放内容哈希。
+
+来源工作树 root/branch、receipt 中真实交付树 root/branch/actualCommit，以及 workspace_synced、awaiting_landing、source_synced 阶段各自显示，不能凭 main/master 分支名称推断已落地或完成。targetTree 继续只读且不显示它为同步来源。覆盖与观察证据放进原生 details；状态更新不重挂操作区、不抢键盘焦点，窄屏内容可换行。
+
+status.sources 按实际启用的物理来源工作树只读列出 root、branch、存在性、经服务端确认的观察健康、自动接入控制、登记意图与最近输入观测；不在来源列表提供控制按钮。persisted watching 而 watchOnline 不成立时展示身份未确认，不能显示在线。
+
+operation Detail 的 `sourceSynced` 与 `canonicalSynced` 是独立事实：来源已采纳单独标记，只有服务端确认 canonicalSynced=true 才显示“主分支已同步”；不按分支名或 deliveryPlan 推断落地。Run/code 在 canonical_synced 状态仍可作为新输入启动。
+
+已结算交付详情可提供“生成成组撤销”，只在 backend `revertEligibility.eligible` 且执行/恢复资料可用时开放，不因 `stale` 单独禁止；后续编辑由后端冻结为新的受控候选。文案须说明撤销会进入新的业务审查与验证，不会立即改写主分支。失败重试复用同一操作稳定 requestId。
+
+成组撤销产生的 `sync.history` 请求在原操作证据区明确显示原operation、receipt、feature commit、精确变更path和冲突path，并按请求正文展示。每个差异请求只使用对应 `changes[].path`，rename的旧、新path分别读取；不从nodeId推导路径，不把history请求当作普通用户intent。未知请求类型应显示类型诊断，不能回退读取不存在的 `origin.intent`。
+
+物理“停止后台写入”是来源级服务动作，区别于单项取消与暂停自动接入。使用真实 `stop-writer` 返回更新物理控制并刷新完整 status 历史；其 `operations` 只是需要恢复的子集，不能替换用户已加载的操作记录。说明已交付结果及恢复记录会保留、恢复自动接入会重新启动服务，并且停止回执不证明所有原生执行资源已释放。targetTree 仍只读。

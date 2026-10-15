@@ -5,9 +5,10 @@ import { clientSyncRequest } from './client.js'
 import { readSpecBodyEdit } from './spec-body-edit.js'
 import { stripRefSigil } from './mentions.js'
 
-/** CLI 只提交真实后端操作并打印持久结果；操作在服务进程内继续，无 Dashboard 依赖。 */
+/** 同步操作交由真实后端持续执行；独立 check 直接调用同一候选验证能力。 */
 export async function runSyncCli(argv: readonly string[]): Promise<void> {
   const [verb] = argv
+  if (verb === 'check') return (await import('./sync/conformance-cli.js')).runConformanceCli(argv.slice(1))
   const values = new Set(['--node', '--request-id', '--retry-of', '--patch-file', '--limit', '--config-digest', '--api', '--port', '--password', '--origin', '--input-id', '--analysis', '--findings', '--choice', '--rule'])
   const allowed = new Set([...values, '--json', '--insecure'])
   const positional: string[] = []
@@ -53,13 +54,19 @@ export async function runSyncCli(argv: readonly string[]): Promise<void> {
     if (choice !== 'new_rule' && flags.has('--rule')) throw usage('--rule 只用于 new_rule 裁决')
     if (!['keep_intent', 'adopt_behavior', 'new_rule'].includes(choice) || choice === 'new_rule' && !flags.get('--rule')?.trim()) throw usage('裁决需要 keep_intent、adopt_behavior 或带 --rule 的 new_rule')
     result = await clientSyncRequest(`/operations/${encodeURIComponent(positional[0])}/decide`, { targetTree, requestId: flags.get('--request-id') ?? randomUUID(), inputId: flags.get('--input-id'), analysisRef: { sha256: flags.get('--analysis') }, findingIds: flags.get('--findings')!.split(','), decision: { choice, ...(choice === 'new_rule' ? { rule: flags.get('--rule') } : {}) } })
+  } else if (verb === 'revert') {
+    if (positional.length !== 1) throw usage('revert 需要完整 operation ID')
+    result = await clientSyncRequest(`/operations/${encodeURIComponent(positional[0])}/revert`, { targetTree, requestId: flags.get('--request-id') ?? randomUUID() })
+  } else if (verb === 'stop-writer') {
+    if (positional.length || flags.has('--request-id')) throw usage('stop-writer 不接收 operation ID 或 --request-id')
+    result = await clientSyncRequest('/stop-writer', { targetTree })
   } else if ((verb === 'pause' || verb === 'resume') && positional.length === 0) {
     result = await clientSyncRequest(`/automatic/${verb}`, { targetTree })
   } else if (verb === 'show' || ['pause', 'resume', 'cancel', 'recover'].includes(verb ?? '')) {
     if (positional.length !== 1) throw usage(`${verb} 需要完整 operation ID`)
     const path = `/operations/${encodeURIComponent(positional[0])}`
     result = verb === 'show' ? await clientSyncRequest(`${path}?${query}`) : await clientSyncRequest(`${path}/${verb}`, { targetTree })
-  } else throw usage('用法：spex sync settings|enable|status|run|verify|decide|show|pause|resume|cancel|recover（spex help sync）')
+  } else throw usage('用法：spex sync settings|enable|status|run|verify|decide|show|pause|resume|cancel|recover|revert|stop-writer|check（spex help sync）')
   console.log(JSON.stringify(result, null, 2))
 }
 function usage(message: string): Error { const error = new Error(message); error.name = 'UsageError'; return error }

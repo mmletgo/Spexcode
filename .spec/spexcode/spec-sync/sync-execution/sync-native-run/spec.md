@@ -16,6 +16,8 @@ code:
 
 原生执行权威属于 [[structured-session-runtime]]，资源CAS与恢复记录属于 [[sync-store]]。createAttemptRunner复用runStructuredSession/cancelStructuredSession/readRecord、sessionIdForCreateKey和正式创建恢复入口recoverSessionCreateTermination。每个请求保存完整root/base/prompt/schema/input/purpose/timeout/model/effort摘要，reserveDispatch同键同载荷不重复计费；返回sessionCreateKey是唯一原生创建键，不另造会话ID。资源计划在调用前持久固定key、预期sessionId、原source input和当次durable attempt候选摘要；正文只进既有commonDir evidence blob。
 
+传输阈值更新不能改变已登记资源的固定请求。仅当该 attempt/key 已存在 resource，且调用者除 signal 外的完整请求摘要精确等于原 plan.payloadDigest 时，沿原请求恢复，不再转换 prompt 或重新准备 reader runtime。新请求或摘要不匹配仍执行正常冻结、完整绑定和同键异载荷拒绝；不能只凭 key 跳过摘要。旧大 inline 请求可在已 aborted 的正式恢复中只取消并结算到 removed，原计划、会话身份、callsUsed 不变，不重新调用 native；显式新 retry 使用当前 reader 阈值。
+
 只观察精确预期session ID，不扫session树或造第二队列。published record创建载荷和固定结构化策略匹配时资源进入created，即使仍queued、thread/turn未知；nativeStarted仅表示实际turn实锚已出现，不把queued当原生执行。thread/turn出现后同phase CAS保存实锚，只有当前fence可bindSession。错误身份或摘要拒绝，已绑定身份不可退回或替换。
 
 暂停、取消、过期或新attempt替换时Abort精确调用，再通过正式取消入口与持久record核对nativeStopped。回执丢失可使用同精确身份的持久终态证明；普通错误、本地Promise结束或已发送interrupt都不证明停止，未知终态保留资源给恢复。
@@ -29,3 +31,5 @@ code:
 原创建调用已结束或重启后的取消恢复没有本地创建 Promise 时，桥可按冻结计划向 [[session-create-authority]] 请求精确候选清理恢复，再重读 canonical record 与正式终止收据。桥不把 Promise 结束当成证明，不自行删除 Git/FS 资源；正式入口拒绝未知/错配/已发布候选时资源仍保留。清理完成后仍经同一 terminal→removed 与完整收据校验，不增加调用次数；另一个创建者锁内发布的会话转走正式原生取消路径。
 
 恢复参数携带同一次冻结推理的结构化策略，由正式创建入口重建外部runtime候选路径；缺少该策略不得把结构化收据解释为普通主checkout内候选。路径仍由创建事务内部推导，资源桥不接受任意恢复目录。
+
+冻结读取的业务 requestKey 与清单绑定保持不变，内部 sessionCreateKey 承接 reserveDispatch 返回值；实际 attemptId 与 policyDigest 存在时在派发前严格核对，冻结 ref 及读取证明参与计划和原生固定策略摘要。未知工具响应或未证实原生停止继续保留资源，不把本地报错作为释放容量的依据。

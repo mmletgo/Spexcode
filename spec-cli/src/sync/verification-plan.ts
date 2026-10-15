@@ -29,14 +29,30 @@ export function planAcceptanceRuns(graph: ContractGraph, requiredAcceptanceIds: 
     if (hash < 1 || !testId || /\s/.test(testId)) throw new Error(`验收测试绑定不明确: ${id}`)
     const verify = graph.items.get(ac.command), trusted = registered.get(ac.command)
     if (verify?.kind !== 'VERIFY' || !trusted || verify.cwd !== trusted.definition.cwd || verify.timeoutMs !== trusted.definition.timeoutMs || JSON.stringify(verify.command) !== JSON.stringify(trusted.definition.command)) throw new Error(`验收引用未登记或被更改的验证命令: ${id}`)
-    let group = groups.get(verify.id)
-    if (!group) {
-      group = { verificationId: verify.id, bindings: [], policy: { ...trusted.environment, argv: [...trusted.definition.command], cwd: trusted.definition.cwd, timeoutMs: trusted.definition.timeoutMs, expectedTestIds: [] } }
-      groups.set(verify.id, group)
-    }
-    if (group.bindings.some(binding => binding.testId === testId && binding.testPath !== testPath)) throw new Error(`同一验证运行内测试标识有多个文件: ${testId}`)
-    group.bindings.push({ acceptanceId: id, testPath, testId })
-    if (!group.policy.expectedTestIds.includes(testId)) group.policy.expectedTestIds.push(testId)
+    addBinding(groups, trusted, { acceptanceId: id, testPath, testId })
   }
   return [...groups.values()].sort((a, b) => a.verificationId.localeCompare(b.verificationId))
+}
+
+/** 保护 oracle 使用同一分组规则和固定执行政策，不因候选没有 AC 引用而漏跑。 */
+export function planMandatoryRuns(bindings: readonly { verificationId: string; testPath: string; testId: string }[], registrations: readonly RegisteredVerification[]): AcceptanceRun[] {
+  const groups = new Map<string, AcceptanceRun>()
+  for (const binding of bindings) {
+    const registered = registrations.filter(entry => entry.definition.id === binding.verificationId)
+    if (registered.length !== 1 || !binding.testId || /\s/.test(binding.testId)) throw new Error('保护测试必须引用唯一可信验证登记与稳定ID')
+    addBinding(groups, registered[0], { acceptanceId: `oracle:${binding.verificationId}:${binding.testId}`, testPath: validateRepositoryPath(binding.testPath), testId: binding.testId })
+  }
+  return [...groups.values()].sort((a, b) => a.verificationId.localeCompare(b.verificationId))
+}
+
+function addBinding(groups: Map<string, AcceptanceRun>, trusted: RegisteredVerification, binding: AcceptanceRun['bindings'][number]): void {
+  const verify = trusted.definition
+  let group = groups.get(verify.id)
+  if (!group) {
+    group = { verificationId: verify.id, bindings: [], policy: { ...structuredClone(trusted.environment), argv: [...verify.command], cwd: verify.cwd, timeoutMs: verify.timeoutMs, expectedTestIds: [] } }
+    groups.set(verify.id, group)
+  }
+  if (group.bindings.some(existing => existing.testId === binding.testId && existing.testPath !== binding.testPath)) throw new Error(`同一验证运行内测试标识有多个文件: ${binding.testId}`)
+  group.bindings.push(binding)
+  if (!group.policy.expectedTestIds.includes(binding.testId)) group.policy.expectedTestIds.push(binding.testId)
 }

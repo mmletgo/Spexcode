@@ -1,16 +1,17 @@
 import { Ajv } from 'ajv'
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
-import { getBlob, putBlob } from '@spexcode/spec-core'
+import { getBlob, putBlob, runtimeRoot } from '@spexcode/spec-core'
 import { readRecord, type SessRec } from '../session-record.js'
 import { sessionIdForCreateKey, readSessionCreateTermination, recoverSessionCreateTermination, type SessionCreateTermination } from '../sessions.js'
 import { cancelStructuredSession, runStructuredSession, StructuredSessionError, type StructuredCancellationResult } from '../session-structured.js'
-import type { StructuredExecution } from '../session-structured-policy.js'
+import { prepareFrozenReaderRuntime, structuredExecutionPolicy, type FrozenReaderRuntime, type StructuredExecution } from '../session-structured-policy.js'
+import { assertFrozenBinding, prepareFrozenPrompt, verifyFrozenReadProof } from '../frozen-context.js'
 import type { ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult } from './elaboration-types.js'
 import { SyncStoreError, type SyncStore } from './store.js'
 import type { BlobRef, NativeSessionRef, SyncResourcePhase, WriteFence } from './operation-types.js'
 
-type FrozenRequest = Omit<ElaborationSessionRequest, 'signal'>
+type FrozenRequest = Omit<ElaborationSessionRequest, 'signal'> & { readerRuntime?: FrozenReaderRuntime }
 export type NativeRunRecord = Pick<SessRec, 'session' | 'status' | 'harnessSessionId' | 'structuredExecution' | 'createRequestId' | 'createPayloadHash'>
 export type AttemptRunnerOptions = {
   runtime?: { run: typeof runStructuredSession; cancel: typeof cancelStructuredSession; readRecord: (id: string) => NativeRunRecord | null; readCreateTermination?: typeof readSessionCreateTermination; recoverCreateTermination?: typeof recoverSessionCreateTermination }
@@ -52,6 +53,7 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
   const put = (value: unknown): BlobRef => blobs.put(Buffer.from(JSON.stringify(value)))
 
   const execute = async (request: FrozenRequest, requestDigest: string, controller: AbortController): Promise<ElaborationSessionResult> => {
+    if (request.frozenContext) assertFrozenBinding(request.frozenContext, { requestKey: request.requestKey, inputDigest: request.inputDigest, attemptId: fence.attemptId, policyDigest: operation.policyDigest })
     let resource = store.findResource(fence.attemptId, request.requestKey)
     const attempt = store.readAttempt(fence.attemptId)
     let dispatch = attempt.dispatchPlans.find(plan => plan.key === request.requestKey)
@@ -59,7 +61,7 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
     if (!resource) dispatch = store.reserveDispatch(fence, { key: request.requestKey, purpose: request.purpose, requestDigest })
     if (!dispatch) throw new StructuredSessionError('stale_result', 'native resource lost its durable dispatch plan')
     const expectedSessionId = sessionIdForCreateKey(dispatch.sessionCreateKey)
-    const execution: StructuredExecution = { version: 1, policy: 'codex-read-only-v1', schema: request.schema, inputDigest: request.inputDigest, purpose: request.purpose, timeoutMs: request.timeoutMs, ...(request.model ? { model: request.model } : {}), ...(request.effort ? { effort: request.effort } : {}) }
+    const execution = structuredExecutionPolicy(request)
     const expectedCreateHash = hash({ prompt: request.prompt, parent: null, launcher: null, ...(request.base?.trim() ? { base: request.base.trim() } : {}), structuredExecution: execution })
     const validate = new Ajv({ allErrors: true }).compile(request.schema)
     const identity = { operationId: operation.id, attemptId: attempt.id, inputId: operation.input.id, candidateDigest: resource ? resource.plan.candidateDigest : attempt.candidate?.digest ?? null }
@@ -71,6 +73,10 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
     }
     const checkResult = (result: ElaborationSessionResult): void => {
       if (!result || result.sessionId !== expectedSessionId || !result.threadId || !result.turnId || (checkpoint.session.threadId !== null && result.threadId !== checkpoint.session.threadId) || (checkpoint.session.turnId !== null && result.turnId !== checkpoint.session.turnId) || !validate(result.output) || result.resultDigest !== hash(result.output)) throw new StructuredSessionError('stale_result', 'native result identity, schema or hash is invalid')
+      if (request.frozenContext) {
+        if (!result.frozenReadProof) throw new StructuredSessionError('stale_result', 'native frozen result has no real history coverage proof')
+        verifyFrozenReadProof(request.frozenContext, result.frozenReadProof, { threadId: result.threadId, turnId: result.turnId })
+      }
     }
     if (resource) {
       const savedPlan = read<NativeRunPlan>(resource.plan.planBlob)
@@ -99,7 +105,7 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
       const record = runtime.readRecord(expectedSessionId)
       if (!record) return null
       const state = record.structuredExecution
-      if (record.session !== expectedSessionId || !state || record.createRequestId !== sha(dispatch!.sessionCreateKey) || record.createPayloadHash !== expectedCreateHash || hash({ version: state.version, policy: state.policy, schema: state.schema, inputDigest: state.inputDigest, purpose: state.purpose, timeoutMs: state.timeoutMs, ...(state.model ? { model: state.model } : {}), ...(state.effort ? { effort: state.effort } : {}) }) !== hash(execution) || (record.harnessSessionId !== null && record.harnessSessionId !== state.threadId)) throw new StructuredSessionError('stale_result', 'published native record differs from fixed request or policy')
+      if (record.session !== expectedSessionId || !state || record.createRequestId !== sha(dispatch!.sessionCreateKey) || record.createPayloadHash !== expectedCreateHash || hash(structuredExecutionPolicy(state)) !== hash(execution) || state.version !== execution.version || state.policy !== execution.policy || (record.harnessSessionId !== null && record.harnessSessionId !== state.threadId)) throw new StructuredSessionError('stale_result', 'published native record differs from fixed request or policy')
       const session: NativeSessionRef = { sessionId: expectedSessionId, threadId: state.threadId ?? null, turnId: state.turnId ?? null }
       if ((checkpoint.session.threadId && checkpoint.session.threadId !== session.threadId) || (checkpoint.session.turnId && checkpoint.session.turnId !== session.turnId)) throw new StructuredSessionError('stale_result', 'native thread or turn identity was replaced')
       if (resource!.phase === 'planned' || resource!.phase === 'created') {
@@ -170,7 +176,7 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
     }
     if (creationTermination() || controller.signal.aborted || !authority()) return stop()
     save({ ...checkpoint, nativeCallRequested: true })
-    nativePromise = Promise.resolve().then(() => runtime.run({ ...request, requestKey: dispatch!.sessionCreateKey, signal: controller.signal })).then(result => { outcome = { ok: true, result } }, error => { outcome = { ok: false, error } })
+    nativePromise = Promise.resolve().then(() => runtime.run({ ...request, ...(request.frozenContext ? { sessionCreateKey: dispatch!.sessionCreateKey } : { requestKey: dispatch!.sessionCreateKey }), signal: controller.signal })).then(result => { outcome = { ok: true, result } }, error => { outcome = { ok: false, error } })
     for (;;) {
       observe()
       if (controller.signal.aborted || !authority()) return await stop()
@@ -184,6 +190,7 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
         const record = observe(), state = record?.structuredExecution
         checkResult(outcome.result)
         if (state?.state !== 'completed' || state.threadId !== outcome.result.threadId || state.turnId !== outcome.result.turnId || state.resultDigest !== outcome.result.resultDigest || hash(state.output) !== outcome.result.resultDigest) throw new StructuredSessionError('stale_result', 'native result lacks matching durable exact-turn completion')
+        if (request.frozenContext && hash(state.frozenReadProof) !== hash(outcome.result.frozenReadProof)) throw new StructuredSessionError('stale_result', 'native frozen result differs from its durable history proof')
         settle('completed', { result: copy(outcome.result) })
         return copy(outcome.result)
       }
@@ -192,7 +199,11 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
   }
   return async request => {
     const { signal, ...value } = request
-    const frozen = copy(value), requestDigest = hash(frozen)
+    const resource = store.findResource(fence.attemptId, value.requestKey)
+    const exactResourceRequest = resource?.plan.payloadDigest === hash(value)
+    let frozen: FrozenRequest = exactResourceRequest ? copy(value) : prepareFrozenPrompt(copy(value), { directory: join(runtimeRoot(), 'frozen-context-v2'), binding: { attemptId: fence.attemptId, policyDigest: operation.policyDigest } })
+    if (!exactResourceRequest && frozen.frozenContext && !options.runtime) frozen = { ...frozen, readerRuntime: await prepareFrozenReaderRuntime(join(runtimeRoot(), 'structured-frozen-read-only-v2')) }
+    const requestDigest = hash(frozen)
     let flight = flights.get(frozen.requestKey)
     if (flight && flight.digest !== requestDigest) throw new StructuredSessionError('key_reused', 'native request key was reused with different bytes')
     if (!flight) {

@@ -2,8 +2,10 @@ import { createHash } from 'node:crypto'
 import { contractReferences, dependencyClosure, parseParts } from '@spexcode/spec-core/contracts'
 import type { ContractFinding, ContractItem } from '@spexcode/spec-core/contracts'
 import type { AuthorizedContractChange, ElaborationFact } from './elaboration-types.js'
+import type { InputSnapshot } from './operation-types.js'
 import type { FrozenContracts } from './frozen-contracts.js'
 import type { CodeBehaviorAnalysis, CodeBehaviorEvidence, ContractNodeChange, SyncDecisionAuthority } from './writeback-types.js'
+import { readHistoryRestorations } from './history-input.js'
 
 export type ContractEvolutionPolicy = {
   mode: 'preserve_business' | 'reelaborate'
@@ -12,6 +14,7 @@ export type ContractEvolutionPolicy = {
   authorizedChanges: readonly AuthorizedContractChange[]
   nodeChanges: readonly ContractNodeChange[]
   retiredIds: readonly string[]
+  historyInput?: InputSnapshot
   /** 新叶原意及本轮调用者冻结的用户原意；移动节点仍必须沿用原字节。 */
   newNodeRawSources: ReadonlyMap<string, string>
   facts?: readonly ElaborationFact[]
@@ -97,7 +100,7 @@ export function decisionAuthorizationErrors(source: string, ids: readonly string
   return ids.every(id => scope.has(id)) ? [] : ['契约目标或来源规则超出所选裁决作用范围']
 }
 
-type AuthorizationPolicy = Pick<ContractEvolutionPolicy, 'analysis' | 'facts' | 'decisionAuthorities'> & Partial<Pick<ContractEvolutionPolicy, 'newNodeRawSources'>>
+type AuthorizationPolicy = Pick<ContractEvolutionPolicy, 'analysis' | 'facts' | 'decisionAuthorities' | 'historyInput'> & Partial<Pick<ContractEvolutionPolicy, 'newNodeRawSources'>>
 
 function authoredSourceMatches(id: string, before: FrozenContracts, policy: AuthorizationPolicy): boolean {
   const item = before.graph.items.get(id), analysis = policy.analysis?.analysis
@@ -139,6 +142,11 @@ function independentlyAuthoredChange(change: AuthorizedContractChange, before: F
 
 /** 逐项退休有独审来源时核对整个删除证明；直接用户/计划授权仍保持明确来源门禁。 */
 export function contractAuthorizationErrors(change: AuthorizedContractChange, before: FrozenContracts, policy: AuthorizationPolicy): string[] {
+  if (change.action === 'restore') {
+    if (change.source !== 'user:raw' || !change.reason.trim() || !change.history?.inputId || !change.history.requestBlob || change.history.inputId !== policy.historyInput?.id || before.graph.items.has(change.id) || before.nodes.some(node => node.id === change.id)) return ['恢复必须绑定同一历史请求和当前缺失身份']
+    try { return readHistoryRestorations(policy.historyInput!, change.history.requestBlob).some(item => item.id === change.id) ? [] : ['历史请求未恢复同一原路径和业务对象'] }
+    catch (error) { return [`历史恢复请求或真实Git对象绑定无效: ${(error as Error).message}`] }
+  }
   const errors: string[] = change.action === 'update_acceptance' ? acceptanceAuthorizationErrors(change, before, policy) : []
   const analysis = policy.analysis?.analysis
   if (analysis?.decision && !independentlyAuthoredChange(change, before, policy)) {
@@ -251,6 +259,17 @@ export function validateContractEvolution(before: FrozenContracts, after: Frozen
     }
   }
   for (const change of policy.authorizedChanges) {
+    if (change.action === 'restore') {
+      const errors = contractAuthorizationErrors(change, before, policy)
+      for (const error of errors) issue('contract_restoration_untrusted', after.graph.items.get(change.id) ?? after.nodes[0] ?? { path: '.spec', nodeId: change.id }, error, change.id)
+      if (!errors.length) {
+        const restored = readHistoryRestorations(policy.historyInput!, change.history.requestBlob).find(item => item.id === change.id)!, next = after.graph.items.get(change.id)
+        const node = after.nodes.find(node => node.path === restored.path), contract = after.contracts.find(contract => contract.path === restored.path)
+        const identityChanged = restored.item ? !next || next.nodeId !== restored.nodeId || next.path !== restored.path || !sameContractBusinessMeaning(restored.item, next) || restored.item.kind === 'AC' && next.kind === 'AC' && restored.item.test !== next.test : node?.id !== restored.nodeId || node.rawSource !== restored.contract.rawSource
+        if (identityChanged || !node || !contract || !restored.contract.code.every(anchor => contract.code.includes(anchor))) issue('contract_restoration_identity_changed', next ?? { path: restored.path, nodeId: restored.nodeId }, '恢复必须保留同一历史路径、节点、业务字段及代码测试映射', change.id)
+      }
+      continue
+    }
     const item = before.graph.items.get(change.id)
     if (!item || !change.reason.trim() || change.action === 'update_verification' && item.kind !== 'VERIFY' || change.action === 'update_acceptance' && item.kind !== 'AC') {
       issue('contract_authorization_invalid', item ?? before.nodes[0] ?? after.nodes[0] ?? { path: '.spec', nodeId: change.id }, '契约变更必须引用既有身份、适用操作及非空依据', change.id); continue
@@ -286,7 +305,8 @@ export function validateContractEvolution(before: FrozenContracts, after: Frozen
       }
     }
   }
-  const retired = new Set([...resolvedGaps, ...policy.retiredIds, ...policy.authorizedChanges.filter(change => change.action === 'retire').map(change => change.id), ...policy.nodeChanges.filter(change => change.action === 'retire').map(change => change.from.nodeId)])
+  const restored = new Set(policy.authorizedChanges.filter(change => change.action === 'restore' && !contractAuthorizationErrors(change, before, policy).length).map(change => change.id))
+  const retired = new Set([...resolvedGaps, ...policy.retiredIds.filter(id => !restored.has(id)), ...policy.authorizedChanges.filter(change => change.action === 'retire').map(change => change.id), ...policy.nodeChanges.filter(change => change.action === 'retire').map(change => change.from.nodeId)])
   for (const id of retired) if (after.graph.items.has(id) || after.nodes.some(node => node.id === id)) issue('retired_id_reused', after.graph.items.get(id) ?? after.nodes.find(node => node.id === id)!, '不能复用历史退役身份', id)
   for (const item of after.graph.items.values()) {
     for (const reference of contractReferences(item)) if (retired.has(reference.id)) issue('retired_reference_remaining', item, `退役后引用必须清理: ${reference.id}`, item.id)

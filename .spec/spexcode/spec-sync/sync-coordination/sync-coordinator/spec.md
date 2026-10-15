@@ -24,7 +24,7 @@ P1 只把实际目标正文及其已审代码/可写验收路径、业务 ID 加
 
 生成可独立并行；结构化生成响应核验后才取得同来源发布 mutex，冻结 [[sync-publication-base]]，随后独审、真实验证和完整交付针对同一实际组合树。只读上下文保持当前冻结 source 的 bytes/mode/absence，不成为模型写权。闭包外的已结算组件只作可继承交付，不进入本轮业务覆盖；结构检查只重读实际影响闭包与本轮修改，不能把继承节点冒作本轮新增需求。发布父树及 provenance 参与 contextDigest；恢复保原冻结父树与 journal，不读取 latest 换候选。失败或安全边界释放本机 mutex，持久门禁负责跨进程的已冻结发布次序。
 
-复用现有快照、成对 composition、受控 request overlay、P1 elaborate、scope 扩充/租约、generation、真实 V3 resource 执行与 private delivery，不另建消息队列、契约图或事实数据库。原 source/composed/candidate 分开，policy/readset 内容摘要必须绑定 operation。读集合完整保留契约及 source/code/related/AC 测试全文，2MiB 预算失败不截断。host private、越界路径、目录未授权字节拒绝。
+复用现有快照、成对 composition、受控 request overlay、P1 elaborate、scope 扩充/租约、generation、真实 V3 resource 执行与 private delivery，不另建消息队列、契约图或事实数据库。原 source/composed/candidate 分开，policy/readset 内容摘要必须绑定 operation。读集合完整保留契约及 source/code/related/AC 测试全文，不以2MiB内联限制拒绝或截断。超大阶段正文由 [[frozen-context-reader]] 在正式派发摘要前无损冻结，各独立turn核完整读取证明，仍保原input/readSet/policy和总预算。host private、越界路径、目录未授权字节拒绝。
 
 operation 独立本机 kernel mutex 防双 coordinator；紧凑 stage checkpoint 只保存 refs、独立结果及诊断，不复制整张契约图。当前 attempt 在独占证明下重入稳定 requestKey，派发前原子计费、持久资源意图，完整真实结果/hash/独立身份保存后重放。lease heartbeat 贯穿原生长调用，控制/总deadline触发 Abort；旧 generation 只能结算真实资源证据。历史未removed资源精确恢复，未知终态保留 recovery_required，不假释放容量。
 
@@ -78,3 +78,11 @@ code/combined/reconcile及已共同验证基线上的外部代码差量、真实
 
 
 完整独审行为分析通过现有input/baseline/policy/readSet/composed绑定且analysis检查点已持久后，具体conflict立即由当前fence登记blockedReason=conflicted。它独立于后续P1执行结论：非法P1、执行失败或预算耗尽保原phase/failure/预算/evidence，不把候选升为合法义务，不抹去当前已审分歧的裁决资格。未批准分析或无conflict不得登记此原因。
+
+已落地交付的成组补偿与正文编辑统一进入受控输入、精确基线、完整行为分析、P1、生成及四层验证。作者差量逐文件展开，删除不会被单 path/next 假设遗漏。补偿不直接写来源或自行产生完成状态；完整私有新提交、journal 和 receipt 仍是唯一交付结算路径。
+
+成组受控请求发生节点迁移或删除时，明确 bytePair:null 的 Spec 路径用 immutable group.before 作为当前作者真实前置；before:null 的新增目的路径不冒充旧契约。它只补无基线时的生命周期原文，已有非 null 交付头仍保持权威，不创建虚构 BaselinePair、receipt 或已验证声明。固定旧节点全文进入 P1，当前请求中的同节点目标 raw 保持作者原意，身份及退役政策照常验证。
+
+精确历史恢复核原receipt、节点与业务项；node tombstone沿原scope/head结算，生成及独审只检查实际业务readyIds，已审Spec节点身份另由路径和恢复授权保护。
+
+恢复Spec自带VERIFY时，其原技术ID与node tombstone同样纳入已审scope/head覆盖并推进新receipt；generation/review的readyIds仍只业务ID。P1及当前可信verifications的argv/cwd/预算精确登记不变，restore不能批准旧验证命令覆盖新政策。

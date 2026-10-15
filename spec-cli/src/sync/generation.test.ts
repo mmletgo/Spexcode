@@ -14,10 +14,14 @@ import type { GenerationInput, GenerationReview } from './generation-types.js'
 import { captureInputSnapshot, contentHash, readObject, readTree, writeEvidence, writeObject, writeTree } from './snapshot.js'
 
 const contractPath = '.spec/export/export-contract/spec.md'
-async function input(t: test.TestContext): Promise<GenerationInput> {
+async function input(t: test.TestContext, largeContext = false): Promise<GenerationInput> {
   const root = mkdtempSync(join(tmpdir(), 'spex-generation-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
   cpSync(new URL('../../test/fixtures/spec-sync/export-repo/', import.meta.url), root, { recursive: true })
+  if (largeContext) {
+    const path = join(root, 'tests/export.test.mjs')
+    writeFileSync(path, `${readFileSync(path, 'utf8')}\n/* LARGE-CONTEXT-START ${'x'.repeat(2 * 1024 * 1024)} LARGE-CONTEXT-END */\n`)
+  }
   const git = (...args: string[]): void => { execFileSync('git', ['-C', root, ...args], { stdio: 'pipe', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }) }
   git('init', '-b', 'main'); git('config', 'user.email', 'generation@example.invalid'); git('config', 'user.name', 'generation fixture'); git('add', '.'); git('commit', '-m', 'fixture')
   const snapshot = await captureInputSnapshot(root)
@@ -44,6 +48,22 @@ function runner(input: GenerationInput, generation: (request: ElaborationSession
   return { calls, run }
 }
 const valid = async (): Promise<ContractFinding[]> => []
+
+test('超过2MiB的真实冻结测试全文仍到达生成和独审，保留首尾及全部断言', async t => {
+  const source = await input(t, true), assertions = source.files.get('tests/export.test.mjs')!
+  const native = runner(source)
+  const result = await runGeneration(source, { runner: native.run, validateCandidate: valid })
+  assert.equal(result.status, 'reviewed', JSON.stringify(result.failure))
+  assert.equal(native.calls.length, 2)
+  for (const request of native.calls) {
+    assert.ok(Buffer.byteLength(request.prompt) > 2 * 1024 * 1024)
+    assert.ok(request.prompt.includes(JSON.stringify(assertions)), request.purpose)
+    assert.ok(request.prompt.includes('LARGE-CONTEXT-START'))
+    assert.ok(request.prompt.includes('LARGE-CONTEXT-END'))
+  }
+  assert.equal(result.candidateFiles!.get('tests/export.test.mjs'), assertions)
+  assert.notEqual(result.traces[0].threadId, result.traces[1].threadId)
+})
 
 test('原生严格响应schema显式类型和required属性完整，不能仅以本地Ajv接受自证', () => {
   const check = (schema: Record<string, unknown>): void => {

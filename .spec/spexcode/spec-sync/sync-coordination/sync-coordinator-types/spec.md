@@ -31,3 +31,5 @@ SyncCoordinatorOptions.recoveryOnly?:boolean显式请求只结算已有资源或
 可信计划可携已结算decisionRefs，完整参与policyDigest，并以不可变用户裁决及已审finding.ruleIds派生精确业务supersession。模型分析产出的事实及授权通过独立checkpoint绑定，不修改计划或政策摘要。
 
 plan.decisionAuthorities是重读已结算decisionRefs或当前请求及原真实finding形成的结构化scope，完整参与policyDigest；source字符串或facts自然语言不能扩大范围。模型不拥有此结构生成入口，授权不得越过所选ruleIds依赖闭包。
+
+可信 authorizedChanges 可携 restore 动作及固定 history request/input；只有正式 revert 由原 settled receipt 派生，协调器再次核原 operation、journal/receipt、commit 与请求身份。模型分析不能产生此动作，普通任务不能声明恢复。

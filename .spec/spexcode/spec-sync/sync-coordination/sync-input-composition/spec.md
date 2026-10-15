@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+成组历史补偿恢复已退役对象时，某个精确 ID 的已采纳 before、delivery 与当前 source 可以全空；作者请求中恢复的真实 Markdown 仍决定其 source 意图对象，不能因旧对象都空而漏投影。恢复身份是否获准仍由后续契约演化门禁判断。
+
 本节点实现 [[sync-coordination]] 成对基线原语：next = priorVerifiedDelivery + delta(priorSourceInput, newSourceInput)。无基线时从新来源构建派生输入，previousBaselinePairId 为 null，不伪称已验证基线。来源物理身份、分支或仓库不匹配时拒绝；发布交付树成为来源必须使用该真实物理树自己的基线。
 
 ComposedInputRef 独立绑定 sourceInputId、previousBaselinePairId、tree、manifestBlob 和 contentDigest；原 InputSnapshot 的 immutableTree/indexDigest 不改变。成对基线只证明 coveredScope；未覆盖的来源路径直接采用 newSource，即使本轮没有继续编辑也保留前轮未交付的 blocked 输入，不把完整 sourceInput 误作全量已交付基线。原字节和 mode 相同视为未改；新增、删除、移动表现为完整 path/mode/bytes 差量。同文件双方非重叠 UTF-8 文本通过真实三方合并；重叠、删除修改、二进制和 symlink 分歧保存 base/source/delivery 的 Git blob OID 与摘要，返回明确冲突，不产出可自动接受的组合输入。私有 composition ref 保活派生对象，不执行候选代码或提交。
@@ -37,3 +39,7 @@ P4按冻结 FrozenBaselineSelection 逐资源组合：path 的 bytePair 只负�
 代码或测试变化不会因Spec行未变而消失。逐真实intent pair根据其ID实际所属owner的code与AC测试绑定，保source/delivery/newsource完整真实Git对象及owner；不从共享REQ扩大无关消费者。artifacts独立记录authorBase与真实采纳pair/commit，code/test差量进入residualPaths，即使path bytePair.source已夹带该差量也不认定已消费。实际HEAD已接受较新byte head的完整提交时，该真实交付对象可作文件作者基准；code回声不制造变化，后续新编辑仍捕获。getter从同一真实pairs、snapshot、治理和测试绑定重算全部artifact对象与残差，不能凭hash正确的新JSON抹去code-only差量。
 
 contextPaths显式冻结只读上下文：执行路径继续按真实byte pair三方组合；选中非执行路径直接保实际source的对象、mode及删除/缺失，不从HEAD取旧配置或旧oracle。未选且非执行路径仍以真实HEAD为基，不能夹带其它作者dirty。有效executionPaths/contextPaths随组合证据保存并重核：context必须等于真实InputSnapshot，其余非执行对象必须等于HEAD；读取上下文不授模型写权、lease或已验证coverage。目录形式的明确额外读取只展开其中真实文件，不把目录当字节资源。
+
+成组受控补偿以单独 controlledAuthorGroup 保留固定请求和完整 nullable before/next 变化；与单正文 patch 互斥，不伪造 InputSnapshot。读取时重做真实 Git 反向三方，核每个请求对象及所有 intent/artifact/residualPath。新增、删除和节点位置变化按完整请求树求语义身份，真实 source/index 的 byte 证据保持原样。
+
+成组artifact投影仅替换本轮author source，不能按相同snapshot ID把request字节写入真实历史sourceInput/verifiedDelivery视图。单次调用缓存只保存原immutable快照与已核pair采纳集合；source overlay作为单独参数，真实before/delivery的OID、mode和删除仍逐项重核。

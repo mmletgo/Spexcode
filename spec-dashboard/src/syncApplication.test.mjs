@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { decideSync, controlSync, enableSync, evidenceProjection, readSyncStatus, readSyncDiff, requestIdentity, runSync, syncProjection } from './syncApplication.js'
+import { automaticControl, decideSync, controlSync, enableSync, evidenceProjection, readSyncStatus, readSyncDiff, requestIdentity, revertSync, runSync, stopSyncWriter, syncObserverProjection, syncProjection } from './syncApplication.js'
 import { apiFetch, postSpecBody } from './data.js'
 
 /** @type {import('../../spec-cli/src/sync/operation-types.ts').WorktreeIdentity} */
@@ -12,7 +12,7 @@ const scope = { paths: ['.spec/alpha/spec.md'], contractIds: ['REQ-1'], flowIds:
 const operation = { id: 'op', ingressKey: 'ingress', payloadDigest: 'payload', rootCauseId: 'root', origin: 'spec', generation: 1, revision: 1, phase: 'workspace_synced', control: 'run', input, previousBaselinePair: null, scope, readyScope: scope, blockedScope: { paths: [], contractIds: [], flowIds: [] }, deliveredScope: scope, blockedReason: null, policyDigest: 'policy', impactDigest: 'impact', readSetDigest: 'readset', budget: { maxAttempts: 3, maxCalls: 6, maxRepairs: 2, timeoutMs: 1000 }, callsUsed: 1, deadlineAtMs: 1001, currentAttemptId: 'attempt', dispatchMessageId: 'dispatch', delivery: null, deliveryPlan: { canonicalRoot: '/repo/private', branch: 'delivery', baseCommit: 'head' }, createdAtMs: 1, updatedAtMs: 2 }
 const receipt = { id: 'receipt', deliverySnapshot: { ...input, source: { ...source, canonicalRoot: '/repo/published' } } }
 const settled = { status: 'settled', receipt, generation: 1, attemptId: 'attempt' }
-const detail = { operation, attempt: null, journals: [settled], resources: [], retryEligibility: { eligible: false }, decisionEligibility: { eligible: false }, stale: false, sourceSynced: false, executionAvailability: { status: 'ready' } }
+const detail = { operation, attempt: null, journals: [settled], resources: [], retryEligibility: { eligible: false }, decisionEligibility: { eligible: false }, stale: false, sourceSynced: false, canonicalSynced: false, revertEligibility: { eligible: false, reason: { code: 'SYNC_REVERT_NOT_LANDED', message: 'The delivery has not landed' } }, executionAvailability: { status: 'ready' } }
 
 test('early conflict evidence does not grant a decision before backend eligibility settles', () => {
   const inFlight = { ...detail, operation: { ...operation, phase: 'elaborating', blockedReason: 'conflicted' }, attempt: { status: 'running' }, journals: [], decisionEligibility: { eligible: false, reason: { code: 'SYNC_DECISION_ACTIVE', message: '当前细化仍在执行' } } }
@@ -33,6 +33,18 @@ test('only a settled current receipt projects delivery completion and its actual
   assert.equal(view.deliveryRoot, '/repo/published')
   assert.notEqual(view.deliveryRoot, operation.deliveryPlan.canonicalRoot)
   assert.equal(syncProjection({ ...detail, sourceSynced: true }).state, 'source_synced')
+  const canonical = syncProjection({ ...detail, operation: { ...operation, phase: 'canonical_synced' }, sourceSynced: true, canonicalSynced: true })
+  assert.equal(canonical.state, 'canonical_synced')
+  assert.equal(canonical.canonicalSynced, true)
+  assert.equal(canonical.sourceSynced, true)
+})
+
+test('grouped revert eligibility follows the backend and remains available for later source edits', () => {
+  const eligible = { ...detail, stale: true, revertEligibility: { eligible: true } }
+  assert.equal(syncProjection(eligible, 'enabled').canRevert, true)
+  assert.equal(syncProjection({ ...eligible, executionAvailability: { status: 'recovery_required' } }, 'enabled').canRevert, false)
+  assert.equal(syncProjection(eligible, 'invalidated').canRevert, false)
+  assert.equal(syncProjection({ ...detail, revertEligibility: { eligible: false, reason: { code: 'SYNC_REVERT_NOT_LANDED', message: 'Not landed' } } }, 'enabled').canRevert, false)
 })
 
 test('stale, blocked, failed and recovery results never project synchronized', () => {
@@ -97,7 +109,7 @@ test('transport preserves selected tree, configuration precondition and stable r
   const requests = []
   globalThis.fetch = async (url, init) => {
     requests.push({ url: new URL(url, 'http://test'), init })
-    return new Response(JSON.stringify({ operations: [] }), { status: 200 })
+    return new Response(JSON.stringify({ settings: { input: source }, operations: [], observation: {}, sources: [] }), { status: 200 })
   }
   try {
     await readSyncStatus('node & one', '/delivery')
@@ -111,6 +123,132 @@ test('transport preserves selected tree, configuration precondition and stable r
     assert.equal(requests[2].init.body, requests[3].init.body)
     assert.equal(requests[4].url.pathname, '/api/sync/operations/operation%20one/pause')
   } finally { globalThis.fetch = originalFetch }
+})
+
+test('automatic intake controls use the physical pause/resume API and preserve scoped errors', async () => {
+  const originalFetch = globalThis.fetch
+  const requests = []
+  globalThis.fetch = async (url, init) => {
+    requests.push({ url: new URL(url, 'http://test'), init })
+    if (requests.length === 1) return new Response(JSON.stringify({ health: { status: 'watching', watchOnline: true }, control: { control: 'pause' } }), { status: 200 })
+    return new Response(JSON.stringify({ code: 'SYNC_CONTROL_CONFLICT', error: 'Physical control changed' }), { status: 409 })
+  }
+  try {
+    const result = await automaticControl('pause', '/source tree')
+    assert.equal(result.control.control, 'pause')
+    assert.equal(requests[0].url.pathname, '/api/sync/automatic/pause')
+    assert.equal(requests[0].url.searchParams.get('targetTree'), '/source tree')
+    assert.deepEqual(JSON.parse(requests[0].init.body), {})
+    await assert.rejects(automaticControl('resume', '/source tree'), error => error.code === 'SYNC_CONTROL_CONFLICT' && error.message === 'Physical control changed')
+    assert.equal(requests[1].url.pathname, '/api/sync/automatic/resume')
+  } finally { globalThis.fetch = originalFetch }
+})
+
+test('revert and writer-stop transports preserve request identity, source scope, and response facts', async () => {
+  const originalFetch = globalThis.fetch
+  const requests = []
+  globalThis.fetch = async (url, init) => {
+    requests.push({ url: new URL(url, 'http://test'), init })
+    if (requests.length === 1) return new Response(JSON.stringify({ code: 'SYNC_BUSY', error: 'Another request is pending' }), { status: 409 })
+    if (requests.length === 2) return new Response(JSON.stringify({ changed: true, operation: { id: 'revert-op' } }), { status: 200 })
+    return new Response(JSON.stringify({ stopped: true, control: { control: 'pause', revision: 4 }, operations: [detail] }), { status: 200 })
+  }
+  try {
+    await assert.rejects(revertSync('operation one', 'stable-revert-id'), error => error.code === 'SYNC_BUSY')
+    const result = await revertSync('operation one', 'stable-revert-id')
+    assert.equal(result.operation.id, 'revert-op')
+    assert.equal(requests[0].url.pathname, '/api/sync/operations/operation%20one/revert')
+    assert.deepEqual(JSON.parse(requests[0].init.body), { requestId: 'stable-revert-id' })
+    assert.deepEqual(JSON.parse(requests[1].init.body), { requestId: 'stable-revert-id' })
+
+    const stopped = await stopSyncWriter('/source tree')
+    assert.equal(stopped.stopped, true)
+    assert.equal(stopped.control.control, 'pause')
+    assert.equal(requests[2].url.pathname, '/api/sync/stop-writer')
+    assert.deepEqual(JSON.parse(requests[2].init.body), { targetTree: '/source tree' })
+  } finally { globalThis.fetch = originalFetch }
+})
+
+test('incomplete status responses become retryable read errors instead of fake offline status', async () => {
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => new Response(JSON.stringify({ settings: { input: source }, operations: [] }), { status: 200 })
+  try {
+    await assert.rejects(readSyncStatus('alpha'), error => error.code === 'sync_response_invalid')
+    globalThis.fetch = async () => new Response(JSON.stringify({ settings: { input: source }, operations: [{ operation }], observation: {}, sources: [] }), { status: 200 })
+    await assert.rejects(readSyncStatus('alpha'), error => error.code === 'sync_response_invalid')
+  } finally { globalThis.fetch = originalFetch }
+})
+
+test('observer projection distinguishes live health, physical control, project coverage, and the latest node baseline', () => {
+  const sources = [
+    { source: { canonicalRoot: '/repo/source', branch: 'feature' }, exists: true, watchOnline: true, health: { status: 'watching' }, control: { control: 'pause' }, registeredNodeIds: ['alpha'], latest: { observedAtMs: 88, outcome: 'admitted', reason: null } },
+    { source: { canonicalRoot: '/repo/other', branch: 'other' }, exists: true, watchOnline: false, health: { status: 'watching' }, control: { control: 'run' }, registeredNodeIds: ['beta'], latest: null },
+    { source: { canonicalRoot: '/repo/missing', branch: 'gone' }, exists: false, watchOnline: false, health: { status: 'stopped' }, control: { control: 'pause' }, registeredNodeIds: ['gone'], latest: null },
+  ]
+  const observation = {
+    health: { status: 'watching', watchOnline: true, reason: null, lastScanAtMs: 123 },
+    persistedHealth: { status: 'watching', updatedAtMs: 999 },
+    control: { control: 'pause' },
+    registeredNodes: ['alpha'],
+    coverage: { includedNodeIds: ['alpha', 'child'], contextNodeIds: ['parent'], missingNodeIds: ['gone'], excludedNodeIds: ['parent', 'other'], totalNodeCount: 5 },
+    latestDifference: { nodeId: 'alpha' },
+    latest: {
+      outcome: 'blocked', reason: { code: 'BASELINE_REVIEW', message: 'A decision is required' },
+      selection: { bindings: [
+        { resource: { kind: 'path', path: 'src/a.js' }, bytePair: { id: 'pair-a' } },
+        { resource: { kind: 'contract', id: 'REQ-1' }, intentPair: null },
+      ] },
+    },
+  }
+  const projection = syncObserverProjection(observation, sources)
+  assert.equal(projection.healthStatus, 'watching')
+  assert.equal(projection.watchOnline, true)
+  assert.equal(projection.lastScanAtMs, 123)
+  assert.equal(projection.control, 'pause')
+  assert.deepEqual(projection.coverage.includedNodeIds, ['alpha', 'child'])
+  assert.equal(projection.coverage.totalNodeCount, 5)
+  assert.equal(projection.baseline.nodeId, 'alpha')
+  assert.equal(projection.baseline.establishedCount, 1)
+  assert.deepEqual(projection.baseline.missingResources, ['contract:REQ-1'])
+  assert.equal(projection.latest.reason.code, 'BASELINE_REVIEW')
+  assert.equal(projection.sources[0].healthStatus, 'watching')
+  assert.equal(projection.sources[0].control, 'pause')
+  assert.equal(projection.sources[1].healthStatus, 'identity_unconfirmed')
+  assert.equal(projection.sources[2].healthStatus, 'missing')
+  assert.equal(projection.sources[2].exists, false)
+})
+
+test('persisted watching and identity mismatch never project an online observer or a scan timestamp', () => {
+  const projection = syncObserverProjection({
+    health: { status: 'watching', watchOnline: false, reason: null, lastScanAtMs: null },
+    persistedHealth: { status: 'watching', updatedAtMs: 456 },
+    control: { control: 'run' },
+    coverage: { includedNodeIds: [], contextNodeIds: [], missingNodeIds: [], excludedNodeIds: [], totalNodeCount: 0 },
+    latest: { selection: null, reason: { code: 'SYNC_BASELINE_UNKNOWN', message: 'Baseline could not be read' } },
+  })
+  assert.equal(projection.healthStatus, 'identity_unconfirmed')
+  assert.equal(projection.watchOnline, false)
+  assert.equal(projection.lastScanAtMs, null)
+  assert.equal(projection.coverage, null)
+  assert.equal(projection.baseline.status, 'unavailable')
+  assert.equal(projection.baseline.failure.code, 'SYNC_BASELINE_UNKNOWN')
+
+  assert.equal(syncObserverProjection(null).healthStatus, 'unavailable')
+  assert.equal(syncObserverProjection(null).watchOnline, false)
+  assert.equal(syncObserverProjection(null).control, null)
+})
+
+test('observer projection preserves offline, degraded, missing, and invalidated health without marking the watcher online', () => {
+  for (const status of ['offline', 'degraded', 'missing', 'invalidated']) {
+    const projection = syncObserverProjection({
+      health: { status, watchOnline: false, reason: { code: `observer_${status}`, message: 'Observer state is not healthy' }, lastScanAtMs: null },
+    })
+
+    assert.equal(projection.healthStatus, status)
+    assert.equal(projection.watchOnline, false)
+    assert.equal(projection.lastScanAtMs, null)
+    assert.equal(projection.reason.code, `observer_${status}`)
+  }
 })
 
 test('save retries retain their idempotency header and return a sync receipt without fabricating a commit', async () => {
@@ -208,6 +346,31 @@ test('pending request evidence preserves user intent and its actual path without
   assert.equal(request.path, '.spec/alpha/spec.md')
   assert.equal('requestTree' in request, false)
   assert.equal('prompt' in request, false)
+})
+
+test('history request evidence preserves its identity, exact changed paths and conflicts without object internals', () => {
+  const request = evidenceProjection({
+    type: 'sync.history', action: 'revert', operationId: 'original-operation', receiptId: 'original-receipt',
+    featureCommit: 'feature-commit', parentCommit: 'parent-commit', requestTree: 'private-tree',
+    changes: [
+      { path: 'old/name.ts', before: { path: 'old/name.ts', oid: 'before', mode: '100644' }, next: null },
+      { path: 'new/name.ts', before: null, next: { path: 'new/name.ts', oid: 'after', mode: '100644' } },
+    ],
+    conflicts: ['src/conflict.ts'], mergeOutput: 'private-merge-output', prompt: 'private agent prompt',
+  })
+  assert.equal(request.type, 'sync.history')
+  assert.equal(request.operationId, 'original-operation')
+  assert.equal(request.receiptId, 'original-receipt')
+  assert.equal(request.featureCommit, 'feature-commit')
+  assert.deepEqual(request.changes, [{ path: 'old/name.ts' }, { path: 'new/name.ts' }])
+  assert.deepEqual(request.conflicts, ['src/conflict.ts'])
+  assert.equal('requestTree' in request, false)
+  assert.equal('mergeOutput' in request, false)
+  assert.equal(JSON.stringify(request).includes('before'), false)
+  assert.equal(JSON.stringify(request).includes('prompt'), false)
+  const unknown = evidenceProjection({ type: 'sync.future', prompt: 'private agent prompt' })
+  assert.equal(unknown.type, 'sync.future')
+  assert.equal('prompt' in unknown, false)
 })
 
 test('requested body diffs preserve request kind and node path before any candidate exists', async () => {

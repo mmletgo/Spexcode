@@ -11,6 +11,7 @@ export type ProcessAdapter = Readonly<{
   startToken(pid: number): string | null
   processGroupId(pid: number): number | null
   linuxSessionId(pid: number): number | null
+  liveness(pidOrNegativeGroup: number): 'present' | 'absent' | 'unknown'
 }>
 
 export type VerifiedDetachedRuntime = Readonly<ProcessIdentity & {
@@ -88,6 +89,11 @@ export const hostProcessAdapter: ProcessAdapter = Object.freeze({
   startToken: (pid) => processStartToken(pid),
   processGroupId: (pid) => platform() === 'linux' ? procField(pid, 'processGroupId') : psProcessGroupId(pid),
   linuxSessionId: (pid) => platform() === 'linux' ? procField(pid, 'sessionId') : null,
+  liveness: (pidOrNegativeGroup) => {
+    if (platform() === 'win32') return 'unknown'
+    try { process.kill(pidOrNegativeGroup, 0); return 'present' }
+    catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH' ? 'absent' : 'unknown' }
+  },
 })
 
 const exactKeys = (value: Record<string, unknown>, expected: string[]) => {
@@ -156,14 +162,19 @@ export function verifyDetachedRuntime(pid: number, receiptFile: string, adapter:
 // The inverse question of verifyDetachedRuntime: not "is the recorded process running right now" but "is it
 // provably GONE". The two are not complements — a missing receipt, an unreadable identity, or a PID we never
 // recorded answers neither, and a caller that treats "unproven" as "dead" would retire a live runtime it can
-// simply no longer address. Only a recorded start identity that the live PID no longer matches (including a
-// PID that is not running at all) is proof of death.
+// simply no longer address. The original PID must be absent or positively reused, and its whole recorded
+// process group must be absent; a dead group leader alone can leave native workers behind.
 export function detachedRuntimeIsGone(pid: number, receiptFile: string, adapter: ProcessAdapter = hostProcessAdapter): boolean {
+  if (adapter.platform === 'win32') return false
   let receipt: DetachedLaunchReceiptV4 | null
   try { receipt = parseDetachedLaunchReceipt(readFileSync(receiptFile, 'utf8'), adapter.platform) }
   catch { return false }
-  if (!receipt || receipt.pid !== pid) return false
-  return adapter.startToken(pid) !== receipt.startToken
+  if (!receipt || receipt.pid !== pid || receipt.processGroupId !== pid || (adapter.platform === 'linux' && receipt.linuxSessionId !== pid)) return false
+  const start = adapter.startToken(pid)
+  if (start === receipt.startToken) return false
+  const live = adapter.liveness(pid)
+  if (live === 'unknown' || (live === 'present' && !start)) return false
+  return adapter.liveness(-receipt.processGroupId) === 'absent'
 }
 
 // A v3 scope is only a migration witness when every recorded and live Linux identity agrees. Readers never

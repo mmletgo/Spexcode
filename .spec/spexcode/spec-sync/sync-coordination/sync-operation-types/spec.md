@@ -53,3 +53,5 @@ P4 新接入保存 FrozenBaselineSelection：每个精确 path 恰有 bytePair�
 P4 selection包含全部精确read/protection及write资源，operation.scope只含实际意图/write范围；readonly资源不进入写租约或交付完成计数。ContractScopeExpansion的可选paths仅由已审P1真实新文件授权，范围与选择同事务扩展。新selection摘要贯穿attempt、composed、verification外层及blob和apply。ClaimQueuedAttemptInput只有显式continuation:true允许安全已ack repair/过期续尝试，failed不自动变queued。SyncIngressReceipt保各alias自己的input、origin、selection和payload引用，原operation冻结输入不改。SyncObserverHealth只记录物理scope、进程/实例和健康事实，online由调用者核实际存活，不以旧watching记录推断。
 
 PublicationBase 可选保存于 attempt，绑定实际 parentCommit/parentTree/parentManifestBlob、publication provenance 和派生 composed；原 attempt.composedInput 不替换。PublicationHeads 仅给可信发布器提供同来源已结算 path 选择及无关 legacy 诊断。candidate.baseTree 为 publicationBase.composed.tree（缺字段的 P3 沿原 composed）；ApplyPlan 可携 publicationBaseRef，精确绑定本轮冻结 provenance，不借继承字节扩大 scope。
+
+VerificationResultBlob可携restoredIds，精确对应原冻结restore授权；仅完整验证与receipt结算发布当前有效ID head，旧retirement pair不修改。

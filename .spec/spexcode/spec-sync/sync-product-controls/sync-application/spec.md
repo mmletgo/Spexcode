@@ -69,7 +69,7 @@ P4 的正式服务生命周期持有 [[sync-input-observer]]，不依赖浏览�
 
 重新enable与新配置只保当前注册意图，不把旧branch/config下的root继续扫描。已注册意图根删除后保留missingNodeIds与真实planning failure，不能因当前nodes缺失清掉责任；上下文祖先单列contextNodeIds，不把只读上下文冒充完整业务范围已同步。
 
-P4 stale/retry/resume采用协调器唯一isSyncInputCurrent判据，比较真实source身份与读取/写入闭包的working/index/HEAD对象；无关路径或提交不使精确操作过期。retry仍绑定原完整input及原selection；裁决保原完整input/plan/analysis，仅对原最终selection相同资源重读真实heads以纳入已结算partial交付，不能借新snapshot套用旧analysis；当前分析查询复用协调器阶段校验，已审null资源扩展不得隐藏可信分析。相同request重放沿其原接入收据，scope外编辑不重新冻结旧请求。sourceSynced仍仅由实际canonical交付阶段与原树接收事实决定，不能由闭包current推定。
+P4 stale/retry/resume采用协调器唯一isSyncInputCurrent判据，比较真实source身份与读取/写入闭包的working/index/HEAD对象；无关路径或提交不使精确操作过期。retry仍绑定原完整input及原selection；裁决保原完整input/plan/analysis，仅对原最终selection相同资源重读真实heads以纳入已结算partial交付，不能借新snapshot套用旧analysis；当前分析查询复用协调器阶段校验，已审null资源扩展不得隐藏可信分析。相同request重放沿其原接入收据，scope外编辑不重新冻结旧请求。sourceSynced 由真实 settled receipt 提交被原树采纳及当前闭包字节决定，canonicalSynced 另核明确主分支；不能仅由闭包 current 推定。
 
 每个operation detail单独投影其原physical scope的physicalControl；show不依赖另读status即可看见物理暂停，operation.control和phase仍保真实单操作控制与检查点，不伪造阶段。
 
@@ -84,3 +84,13 @@ P4运行时重建固定计划与裁决raw也使用原operation.input/selection�
 交付只推进实际files的bytehead；Spec、源码或测试未实际改写但所含ID/治理artifact已消费时，不能仅因路径bytehead显式null制造回声；合法空生成差量也适用。观察器复用逐intent owner与code/test artifact关联，仅在相关当前/退役intent非空、全部已消费且artifact无残差，各真实intent pair.sourceInput中该路径的oid、mode及存在性均与当前原始snapshot一致时消除该假差异；raw-only编辑、无ID高层原意、新增/退役ID、owner迁移或删除仍保变化，不按inputID猜测已处理。
 
 partial真实receipt推进ready资源heads后，fresh decision须以相同资源的新exact selection准入，并保原已审scope/impact及尚未消费作者raw；不能沿过期selection再领新操作，也不能以latest broad重规划或把其他资源放进授权。相同具体选择的运输alias不因执行selection推进而成为新选择，归并由store controlledDecisionIdentity门禁负责。明确P3历史操作继续用其原固定plan与真实legacy pair恢复，不能将legacy pair伪装为P4heads。
+
+revert 接受 operationId 与稳定 requestId，意图节点从原固定计划派生。仅真实完整 settled 交付、原生资源已结算且 actualCommit 已被当前来源 HEAD 采纳才可撤销；当前相关后续编辑通过 Git 反向三方合成保留。完整补偿路径逐项核当前可信写授权及独立测试边界，精确 before/next 身份删除才能产生既有 user:raw 退役授权。补偿沿 combined 来源建立新的不可变协调操作，真实冲突经同一分析/裁决，成功经同一四层验证与新提交交付；不 reset、不直接改原树。相同请求精确重放，相同补偿不同运输键归并。
+
+stopWriter 在版本回退前先持久暂停当前物理来源，停止相同来源本进程执行者和观察服务，等待已开始执行在安全边界结算；剩余 journal/resource 作为可恢复记录与具体诊断返回，不删除表、worktree 或 blob。物理暂停跨服务重启保留，未知新版 schema 继续由 store 每事务 fencing 拒旧 writer。
+
+detail 的原来源采纳与主分支完成由 [[sync-landing-status]] 只读推导。sourceSynced 表示真实原树包含已验证完整交付且当前执行/读取闭包字节一致；canonicalSynced 还要求当前分支是仓库明确 mainBranch。已采纳后快照身份变化不单独制造 stale，无关提交允许保当前证据；相关工作文件、index、HEAD、配置或只读上下文变化仍过期。返回 operation 的 canonical 阶段是当前 Git 事实投影，不写虚构持久完成状态。
+
+历史节点路径恢复仅额外接受原完整 settled receipt 的实际 files 中、被本次 Git 反向三方触及的精确 .spec/.../spec.md 路径；当前原冻结意图仍须通过已注册 node 授权。它不扩大源代码、测试目录、配置或整个 .spec 目录的权限。目标 raw 取本次真实请求中同一节点的正文，删除时保留原历史 raw 供退役验证；节点迁移沿既有生命周期检查保持节点及业务 ID。
+
+revert 将精确历史恢复 Spec 作为可信目标，保原节点/业务 ID 与原路径；restore 授权只能由原 settled receipt 和固定 history 请求派生。原 retired ledger 保留，新完整交付推进该身份当前有效 head，后续普通操作继续使用该 head。

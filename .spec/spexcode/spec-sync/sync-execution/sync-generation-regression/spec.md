@@ -27,3 +27,5 @@ oracle 定向回归核 mandatory tuple、固定 verification definition 与完�
 contract-omission marker回归拒绝错路径、未知existingID与affectedIds未关联；普通contract引用仍返回repair而不获得重细化权。真实候选、独立identity与原schema门禁全部保留。
 
 可信发布 freeze 回调回归证明：响应返回后才调用，闭包外真实继承进入实际候选且原模型提示不变；闭包内 readonly 字节和不存在路径被回调修改均拒绝，模型修改 readonly oracle 仍越界拒绝。
+
+真实Git冻结的单份测试全文超过2MiB时，生成和独立审查仍逐字收到全部断言及首尾内容，候选保该全文不变且会话保持独立。本文件的runner为受控接缝；原生超大读取与实际覆盖证明由 [[frozen-context-reader]] 单独验收，不能把提示到达当模型已读。

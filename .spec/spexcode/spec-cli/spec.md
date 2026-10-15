@@ -55,6 +55,8 @@ The read-only /api/sync/contracts projection exposes authored sync-v1 contracts,
 coverage and gaps through [[sync-contract-report]]. Reading it never runs verification commands or
 starts an agent; its not_run verification field cannot be interpreted as synchronized behavior.
 
+The sync HTTP seam forwards an explicit `/operations/:id/revert` request and `/stop-writer` to the shared sync application. It validates request identities and the existing registered project scope; group compensation, eligibility, stopping and journal settlement remain application responsibilities. HTTP acceptance does not claim canonical adoption or complete native resource release.
+
 A CLI output contract, in the same fail-loud spirit: a verb with unbounded stdout (`issue ls --json`,
 `graph --json`, `session review --json`, `spec search --json`, …) must FULLY reach a pipe. `process.exit()` force-quits
 without draining buffered pipe writes, silently truncating a large dump at the ~64KB pipe buffer, so those

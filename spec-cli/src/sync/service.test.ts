@@ -88,6 +88,18 @@ test('AC-SYNC-SERVICE-01 真实HTTP/CLI共享物理暂停，无Dashboard保存�
     assert.equal(queued.phase, 'queued'); assert.equal(queued.callsUsed, 0)
     const refused = await cli(root, api, env, ['recover', queued.id]); assert.equal(refused.code, 0, refused.stderr)
     assert.equal(JSON.parse(refused.stdout).operation.callsUsed, 0)
+    for (const body of [{ targetTree: root, requestId: 'revert-1', operationId: 'different-operation' }, { targetTree: root, requestId: ' ' }]) {
+      const response = await fetch(`${api}/api/sync/operations/${queued.id}/revert`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      assert.equal(response.status, 400); assert.equal((await response.json() as { code: string }).code, 'sync_request_invalid')
+    }
+    const unlanded = await cli(root, api, env, ['revert', queued.id, '--request-id', 'revert-unlanded'])
+    assert.equal(unlanded.code, 1); assert.equal(unlanded.stdout, ''); assert.match(unlanded.stderr, /sync_revert_not_landed/)
+    const stopped = await cli(root, api, env, ['stop-writer']); assert.equal(stopped.code, 0, stopped.stderr)
+    const stopResult = JSON.parse(stopped.stdout) as { stopped: boolean; control: { control: string }; operations: unknown[] }
+    assert.equal(stopResult.stopped, true); assert.equal(stopResult.control.control, 'pause'); assert.ok(Array.isArray(stopResult.operations))
+    const retained = await request<Status>(`/status?targetTree=${encodeURIComponent(root)}`)
+    assert.equal(retained.operations.length, 1); assert.equal(retained.operations[0].operation.id, queued.id)
+    assert.equal(retained.operations[0].operation.callsUsed, 0); assert.equal(retained.observation.control.control, 'pause')
   } catch (error) { assert.fail(`${error instanceof Error ? error.stack : String(error)}\n真实产品日志：\n${serverLog}`) }
   finally {
     if (child) await stop(child)

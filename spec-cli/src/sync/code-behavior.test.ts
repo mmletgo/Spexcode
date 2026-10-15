@@ -138,7 +138,14 @@ test('AC复合门禁逐项诊断未变规则与不绑定来源，不把多个all
     proposal.acceptanceChanges = [{ id: 'AC-EXPORT-01', ruleIds: ['RULE-EXPORT-05'], source, reason: '只绑定本次改变的结果规则，保原其他covers义务' }]
   }))
   assert.equal(approved.authorizedChanges[0].id, 'AC-EXPORT-01')
-  await assert.rejects(analyzeCodeBehavior({ ...input, repairDiagnostics: [{ code: 'behavior_review_failed', message: 'x'.repeat(2 * 1024 * 1024) }] }, runner('allowed_change')), /超过2MiB/)
+  const diagnostic = { code: 'behavior_review_failed', message: `完整诊断开始${'x'.repeat(2 * 1024 * 1024)}完整诊断结束` }, calls: string[] = []
+  await analyzeCodeBehavior({ ...input, repairDiagnostics: [diagnostic] }, async request => {
+    calls.push(request.purpose)
+    assert.ok(Buffer.byteLength(request.prompt) > 2 * 1024 * 1024)
+    assert.ok(request.prompt.includes(JSON.stringify(diagnostic)), request.purpose)
+    return runner('allowed_change')(request)
+  })
+  assert.deepEqual(calls, ['code_behavior_analyze', 'code_behavior_review'])
 })
 
 test('真实三方Git对象进入独立行为分析，允许外部行为证据先冻结再派生AC授权', async t => {
@@ -297,6 +304,9 @@ code:
   assert.equal(plan.intentNodeId, 'export-contract'); assert.ok(plan.targets.some(target => target.path === path)); assert.deepEqual(plan.authorizedChanges, undefined)
   analysis = await analyzeCodeBehavior({ snapshot, composed, baseline, plan, readSetDigest: 'readset-retire', policyDigest: 'policy-retire', requestKey: 'public-retire', timeoutMs: 10000 }, runner('allowed_change', proposal => { proposal.resolutions = [{ path, content: null, mode: null }] }))
   assert.equal(analysis.findings.length, 0, JSON.stringify(analysis)); assert.deepEqual(analysis.nodeChanges, [{ action: 'retire', from: { nodeId: 'summary-child', path } }]); assert.deepEqual(analysis.authorizedChanges.map(change => [change.id, change.action, change.source]), [['REQ-SUMMARY-01', 'retire', 'user:raw'], ['AC-SUMMARY-01', 'retire', 'user:raw']])
+  const explicitlyAuthorized = await analyzeCodeBehavior({ snapshot, composed, baseline, plan: { ...plan, authorizedChanges: analysis.authorizedChanges.filter(change => change.action === 'retire') }, readSetDigest: 'readset-explicit-retire', policyDigest: 'policy-explicit-retire', requestKey: 'explicit-retire', timeoutMs: 10000 }, runner('allowed_change', proposal => { proposal.resolutions = [{ path, content: null, mode: null }] }))
+  assert.deepEqual(explicitlyAuthorized.nodeChanges, analysis.nodeChanges)
+  assert.deepEqual(explicitlyAuthorized.authorizedChanges, [], '真实删除仍独审，但原计划已有的精确退役不派生第二份同ID授权')
   const ref = writeEvidence(snapshot.source.commonDir, analysis); assert.ok(deriveBehaviorAuthorization(analysis, ref).every(change => change.analysisRef?.sha256 === ref.sha256))
   assert.ok(analysis.authorChanges!.some(change => change.path === path && change.afterRaw === null))
   const unresolved = await analyzeCodeBehavior({ snapshot, composed, baseline, plan, readSetDigest: 'readset-retire-conflict', policyDigest: 'policy-retire-conflict', requestKey: 'retire-conflict', timeoutMs: 10000 }, runner('refactor'))

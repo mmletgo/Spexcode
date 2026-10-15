@@ -39,3 +39,7 @@ P4 采用第10代增量组件迁移：新增物理控制、资源 frontier、持
 第10代同组件增量表包含observer health，旧实例CAS与观察/头记录不影响原会话读义。升级事务核在途journal的operation/attempt/generation绑定；异常整体回滚并保升级前online backup。缺settled journal的旧coverage记录legacy未知；退役kind只从原coveredScope/operation.scope证明，未知kind明确阻断而不猜contract或flow初始null。实际path头仅来自完整journal.files；path授权目录不伪造成文件头。源同物理发布pair仅凭同receipt且sourceInput=verifiedDelivery的明确发布关系选取，不凭rowid/updatedAt/settledAt猜语义先后。
 
 退役kind证明仅使用当前pair、其settled journal对应operation.scope及明确前驱receipt可证明的同完整source祖先；同receipt发布对应源身份明确匹配才连接祖先。其它repo、branch、物理树的同名ID及未关联queued operation不得给该source制造确定kind。无本source证明仍保两kind legacy unknown。
+
+第11代仅登记成组不可变历史请求的 writer 语义，不修改既有迁移字节、会话或 journal。先在线备份，marker 与升级事务一起结算，旧 writer 拒绝未知授权；版本回退保留新增表和 evidence。
+
+v12标记同一历史身份restore及按当前逐ID head读取退休状态的writer语义；v11及更旧writer必须拒绝新generation，迁移保原表/retirement pair并先一致备份。

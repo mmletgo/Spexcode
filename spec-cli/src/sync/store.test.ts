@@ -32,7 +32,7 @@ async function fixture() {
     if (value.baselineSelection) { const ack = store.ackDispatch(value.input.source.repositoryId, operation.dispatchMessageId); return store.claimQueuedAttempt({ operationId: operation.id, source: value.input.source, scope: value.scope, leaseMs: 1000, expectedRevision: ack.revision }) }
     return store.claimAttempt({ operationId: operation.id, source: value.input.source, scope: value.scope, leaseMs: 1000, expectedMessageId: operation.dispatchMessageId })
   }
-  const ready = (value = admit(), readyScope = value.scope, blockedScope: SyncScope = { paths: [], contractIds: [], flowIds: [] }, blockedReason: 'needs_input' | 'conflicted' | null = null, beforeGeneration?: (claimed: ClaimedAttempt) => void, verificationMetadata: Pick<VerificationResultBlob, 'retiredIds' | 'decisionRefs'> = {}) => {
+  const ready = (value = admit(), readyScope = value.scope, blockedScope: SyncScope = { paths: [], contractIds: [], flowIds: [] }, blockedReason: 'needs_input' | 'conflicted' | null = null, beforeGeneration?: (claimed: ClaimedAttempt) => void, verificationMetadata: Pick<VerificationResultBlob, 'retiredIds' | 'restoredIds' | 'decisionRefs'> = {}) => {
     const claimed = claim(value), target = { ...input(value.deliveryPlan.canonicalRoot === value.input.source.canonicalRoot ? value.input.source : source('delivery'), 'target'), manifestBlob: put({ version: 1, entries: readyScope.paths.map(path => ({ path, mode: '100644', oid: 'a'.repeat(40), digest: '1'.repeat(64) })) }) }
     store.bindDelivery(claimed.fence, target.source)
     store.bindComposedInput(claimed.fence, { sourceInputId: value.input.id, previousBaselinePairId: value.previousBaselinePair?.id ?? null, tree: value.input.immutableTree, manifestBlob: target.manifestBlob, contentDigest: value.input.contentDigest, ...(value.requestBlob ? { requestBlob: value.requestBlob } : {}), ...(value.baselineSelection ? { baselineSelectionDigest: value.baselineSelection.digest } : {}) })
@@ -431,6 +431,19 @@ test('component migration online backup restores old database, failed DDL rolls 
     f.protocol.withTransaction(tx => tx.exec('INSERT INTO schema_migrations(component,version,checksum,applied_at_ms) VALUES(?,?,?,?)', SYNC_COMPONENT, SYNC_MIGRATIONS.length + 1, 'future', 1000))
     await assert.rejects(migrateSyncStore(f.protocol), /SYNC_SCHEMA_UNSUPPORTED/)
     assert.throws(() => f.store.admitAndEnqueue(f.admit()), /SYNC_SCHEMA_UNSUPPORTED/)
+  } finally { f.cleanup() }
+})
+
+test('restored IDs cannot publish a new head without the exact frozen restore authority', async () => {
+  const f = await fixture()
+  try {
+    const r = f.ready(undefined, undefined, undefined, null, undefined, { restoredIds: ['RULE-A'] })
+    const journal = f.store.beginApply(r.fence, r.plan, r.target), receipt = f.receipt(journal.id, r.plan)
+    for (const step of journal.steps) f.store.recordApplyStep(r.fence, journal.id, { ...step, status: 'completed' })
+    f.store.recordReceipt(journal.id, receipt)
+    assert.throws(() => f.store.settleApply(journal.id, receipt.id), /SYNC_RESTORE_BINDING/)
+    assert.equal(f.store.readBaseline(r.operation.input.source), null)
+    assert.equal(f.store.readJournal(journal.id).status, 'completed')
   } finally { f.cleanup() }
 })
 
@@ -1513,7 +1526,7 @@ test('P4 v9 frontier迁移只信明确前驱链与实际files，备份保旧数�
     const b = settle(f.ready({ ...f.admit(source(), 'legacy-B', scope('src/shared.ts', 'RULE-B')) }))
     f.protocol.initialize('original-session')
     f.protocol.enqueue('original-session', { kind: 'user', body: Buffer.from('original session data'), idempotencyKey: 'original-user-message' })
-    f.protocol.withTransaction(tx => { tx.exec('DROP TABLE sync_observations'); tx.exec('DROP TABLE sync_observer_health'); tx.exec('DROP TABLE sync_physical_controls'); tx.exec('DROP TABLE sync_baseline_heads'); tx.exec('DELETE FROM schema_migrations WHERE component=? AND version=10', SYNC_COMPONENT) })
+    f.protocol.withTransaction(tx => { tx.exec('DROP TABLE sync_observations'); tx.exec('DROP TABLE sync_observer_health'); tx.exec('DROP TABLE sync_physical_controls'); tx.exec('DROP TABLE sync_baseline_heads'); tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=10', SYNC_COMPONENT) })
     const backup = join(f.root, 'v9.before-upgrade.backup')
     await migrateSyncStore(f.protocol, { backupPath: backup })
     assert.ok(existsSync(backup))
@@ -1524,7 +1537,7 @@ test('P4 v9 frontier迁移只信明确前驱链与实际files，备份保旧数�
     assert.ok('failure' in unproven); assert.equal(unproven.failure.code, 'SYNC_BASELINE_LEGACY_UNKNOWN')
     const intentA = f.store.readBaselineSelection(source(), [{ kind: 'contract', id: 'RULE-A' }]); assert.ok('selection' in intentA); assert.equal(intentA.selection.bindings.find(binding => 'intentPair' in binding)?.intentPair?.id, a.id)
     const intentB = f.store.readBaselineSelection(source(), [{ kind: 'contract', id: 'RULE-B' }]); assert.ok('selection' in intentB); assert.equal(intentB.selection.bindings.find(binding => 'intentPair' in binding)?.intentPair?.id, b.id)
-    assert.throws(() => applyComponentMigrations(f.protocol, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 9)), /schema generation 10; this build understands 9/)
+    assert.throws(() => applyComponentMigrations(f.protocol, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 9)), new RegExp(`schema generation ${SYNC_MIGRATIONS.length}; this build understands 9`))
     assert.equal(Buffer.from(f.protocol.listPending('original-session')[0].body).toString('utf8'), 'original session data')
     await migrateSyncStore(f.protocol, { backupPath: join(f.root, 'should-not-create.backup') })
     assert.equal(existsSync(join(f.root, 'should-not-create.backup')), false)
@@ -1535,7 +1548,7 @@ test('P4 升级事务失败回滚且旧P3 applying冻结journal升级后可真�
   const f = await fixture()
   try {
     const r = f.ready(), journal = f.store.beginApply(r.fence, r.plan, r.target)
-    f.protocol.withTransaction(tx => { tx.exec('DROP TABLE sync_observations'); tx.exec('DROP TABLE sync_observer_health'); tx.exec('DROP TABLE sync_physical_controls'); tx.exec('DROP TABLE sync_baseline_heads'); tx.exec('DELETE FROM schema_migrations WHERE component=? AND version=10', SYNC_COMPONENT); tx.exec('UPDATE sync_apply_journals SET record_json=? WHERE id=?', JSON.stringify({ ...journal, attemptId: 'missing-frozen-attempt' }), journal.id) })
+    f.protocol.withTransaction(tx => { tx.exec('DROP TABLE sync_observations'); tx.exec('DROP TABLE sync_observer_health'); tx.exec('DROP TABLE sync_physical_controls'); tx.exec('DROP TABLE sync_baseline_heads'); tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=10', SYNC_COMPONENT); tx.exec('UPDATE sync_apply_journals SET record_json=? WHERE id=?', JSON.stringify({ ...journal, attemptId: 'missing-frozen-attempt' }), journal.id) })
     await assert.rejects(() => migrateSyncStore(f.protocol, { backupPath: join(f.root, 'failed-v9.backup') }), /SYNC_MIGRATION_RECOVERY_INVALID/)
     assert.equal(f.protocol.withTransaction(tx => tx.query('SELECT MAX(version) AS version FROM schema_migrations WHERE component=?', SYNC_COMPONENT)[0].version), 9)
     assert.equal(f.protocol.withTransaction(tx => tx.query("SELECT name FROM sqlite_master WHERE name='sync_baseline_heads'").length), 0)
@@ -1597,7 +1610,7 @@ test('P4 已证明前驱链迁移按因果而非rowid/壁钟选头，目录授�
     const first = settle(f.ready(f.admit(source(), 'chain-A')))
     f.tick(-500)
     const last = settle(f.ready({ ...f.admit(source(), 'chain-B'), previousBaselinePair: first }))
-    f.protocol.withTransaction(tx => { const row = tx.query('SELECT record_json FROM sync_baseline_pairs WHERE id=?', first.id)[0]; const record = JSON.parse(String(row.record_json)) as typeof first; record.coveredScope.paths = ['src']; tx.exec('UPDATE sync_baseline_pairs SET record_json=? WHERE id=?', JSON.stringify(record), first.id); tx.exec('DROP TABLE sync_observations'); tx.exec('DROP TABLE sync_observer_health'); tx.exec('DROP TABLE sync_physical_controls'); tx.exec('DROP TABLE sync_baseline_heads'); tx.exec('DELETE FROM schema_migrations WHERE component=? AND version=10', SYNC_COMPONENT) })
+    f.protocol.withTransaction(tx => { const row = tx.query('SELECT record_json FROM sync_baseline_pairs WHERE id=?', first.id)[0]; const record = JSON.parse(String(row.record_json)) as typeof first; record.coveredScope.paths = ['src']; tx.exec('UPDATE sync_baseline_pairs SET record_json=? WHERE id=?', JSON.stringify(record), first.id); tx.exec('DROP TABLE sync_observations'); tx.exec('DROP TABLE sync_observer_health'); tx.exec('DROP TABLE sync_physical_controls'); tx.exec('DROP TABLE sync_baseline_heads'); tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=10', SYNC_COMPONENT) })
     await migrateSyncStore(f.protocol, { backupPath: join(f.root, 'causal-v9.backup') })
     const selected = f.store.readBaselineSelection(source(), [{ kind: 'path', path: 'src/a.ts' }, { kind: 'contract', id: 'RULE-A' }]); assert.ok('selection' in selected); assert.ok(selected.selection.bindings.every(binding => ('bytePair' in binding ? binding.bytePair : binding.intentPair)?.id === last.id))
     const directory = f.store.readBaselineSelection(source(), [{ kind: 'path', path: 'src' }]); assert.ok('selection' in directory); assert.equal(directory.selection.bindings.find(binding => 'bytePair' in binding)?.bytePair, null)
@@ -1832,7 +1845,7 @@ test('P4 迁移退休kind只信同source因果证明，外repo/branch同名ID不
     const foreignRepo = { ...source('foreign-repository'), repositoryId: 'repo-foreign', commonDir: '/foreign/.git', gitDir: '/foreign/.git', canonicalRoot: '/foreign/source' }, foreignBranch = { ...source(), branch: 'foreign-branch' }
     f.store.admitAndEnqueue(f.admit(foreignRepo, 'foreign-repo-flow', { paths: [], contractIds: [], flowIds: ['FLOW-COLLISION', 'FLOW-PROVEN'] }))
     f.store.admitAndEnqueue(f.admit(foreignBranch, 'foreign-branch-flow', { paths: [], contractIds: ['FLOW-PROVEN'], flowIds: ['FLOW-COLLISION'] }))
-    f.protocol.withTransaction(tx => { tx.exec('DROP TABLE sync_observations'); tx.exec('DROP TABLE sync_observer_health'); tx.exec('DROP TABLE sync_physical_controls'); tx.exec('DROP TABLE sync_baseline_heads'); tx.exec('DELETE FROM schema_migrations WHERE component=? AND version=10', SYNC_COMPONENT) })
+    f.protocol.withTransaction(tx => { tx.exec('DROP TABLE sync_observations'); tx.exec('DROP TABLE sync_observer_health'); tx.exec('DROP TABLE sync_physical_controls'); tx.exec('DROP TABLE sync_baseline_heads'); tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=10', SYNC_COMPONENT) })
     await migrateSyncStore(f.protocol, { backupPath: join(f.root, 'kind-proof-v9.backup') })
     for (const kind of ['contract', 'flow'] as const) { const unknown = f.store.readBaselineSelection(source(), [{ kind, id: 'FLOW-COLLISION' }]); assert.ok('failure' in unknown); assert.equal(unknown.failure.code, 'SYNC_BASELINE_LEGACY_UNKNOWN') }
     for (const foreign of [foreignRepo, foreignBranch]) { const fresh = f.store.readBaselineSelection(foreign, [{ kind: 'flow', id: 'FLOW-COLLISION' }]); assert.ok('selection' in fresh); assert.equal(fresh.selection.bindings.find(binding => 'intentPair' in binding)?.intentPair, null) }

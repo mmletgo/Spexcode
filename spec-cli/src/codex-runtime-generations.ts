@@ -797,7 +797,7 @@ export function resolveCodexGenerationForClose(root: string, sessionId: string, 
   if (!binding || binding.threadId !== threadId) return null
   const generation = ledger.generations[binding.generationId]
   if (!generation) return null
-  return { endpoint: generation.endpoint, gone: generation.state === 'reclaimed' }
+  return { endpoint: generation.endpoint, gone: goneGeneration(generation.endpoint) }
 }
 
 export function codexGenerationBindingForSession(root: string, sessionId: string): CodexGenerationBinding | null {
@@ -842,8 +842,8 @@ export async function reclaimDrainingCodexGeneration(
       return { reclaimed: false, reason: 'generation reference census changed during reclaim guard' }
     try { process.kill(identity.pid, 'SIGTERM') }
     catch (error) { return { reclaimed: false, reason: `could not stop exact drained generation: ${(error as Error).message}` } }
-    for (let attempt = 0; attempt < 100 && processStartToken(identity.pid); attempt++) await sleep(20)
-    if (processStartToken(identity.pid)) return { reclaimed: false, reason: 'exact drained generation did not exit after SIGTERM' }
+    for (let attempt = 0; attempt < 100 && !goneGeneration(generation.endpoint); attempt++) await sleep(20)
+    if (!goneGeneration(generation.endpoint)) return { reclaimed: false, reason: 'exact drained generation did not exit after SIGTERM' }
     const generations = { ...previous.generations, [generationId]: { state: 'reclaimed' as const, endpoint: generation.endpoint } }
     writeLedger(root, previous, { current: previous.current, pending: previous.pending, generations, bindings: previous.bindings })
     return { reclaimed: true, reason: 'exact drained generation reclaimed after zero-reference census' }

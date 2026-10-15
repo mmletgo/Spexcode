@@ -21,6 +21,7 @@ image; the page documents explicit enable authorization and service-owned extern
 The workflow teaches explicit `--retry-of`, preserved original body intent and origin,
 read-only retryEligibility and refusal for changed input, unresolved resources or business GAP/conflict.
 An ordinary repeated input does not grant a fresh operation budget.
+It also documents daemon-free `sync check` with explicit immutable base/candidate/trusted policy, protected-target CI execution, exit codes, and uncovered scope. Large context uses the verified frozen reader without truncation; the existing total budget remains binding.
 It distinguishes recover (settle existing side effects without new work), resume and retry,
 and preserves control/input/budget while recovery remains uncertain.
 

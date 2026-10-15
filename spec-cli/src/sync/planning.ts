@@ -3,7 +3,7 @@ import { loadSpecs } from '@spexcode/spec-core'
 import { contractImpact, contractReferences, parseFrontmatter } from '@spexcode/spec-core/contracts'
 import type { SyncCoordinatorPlan } from './coordinator-types.js'
 import type { BaselinePair, BaselineResource, FrozenBaselineSelection, InputSnapshot, SyncScope } from './operation-types.js'
-import { verifyBaselineSelection } from './composition.js'
+import { selectedRetiredIds, verifyBaselineSelection } from './composition.js'
 import { readFrozenContracts } from './frozen-contracts.js'
 import { readEvidence, readObject, readTree, verifySnapshot } from './snapshot.js'
 import { controlledDecisionIdentity } from './request-input.js'
@@ -63,7 +63,7 @@ export async function buildSyncApplicationPlan(snapshot: InputSnapshot, nodeId: 
   const writable = [...settings.sourcePaths, ...settings.testPaths]
   for (const path of [...codePaths, ...impact.testPaths]) if (!coveredPath(path, writable) && !settings.mandatoryTests.some(test => test.testPath === path)) throw new SyncApplicationError('sync_scope_unauthorized', `受影响文件未在可信授权中：${path}`)
   const decisionRefs = [...new Map(pairs.flatMap(pair => pair.decisionRefs ?? []).map(ref => [ref.sha256, ref])).values()]
-  const retiredIds = [...new Set(pairs.flatMap(pair => pair.retiredIds ?? []))]
+  const retiredIds = selection ? selectedRetiredIds(selection) : [...new Set(pairs.flatMap(pair => pair.retiredIds ?? []))]
   const decisionFacts = decisionRefs.map(ref => {
     const request = JSON.parse(readEvidence(snapshot.source.commonDir, ref).toString('utf8')) as SyncDecisionInput & { type: string }
     const analysis = JSON.parse(readEvidence(snapshot.source.commonDir, request.analysisRef).toString('utf8')) as CodeBehaviorAnalysis
@@ -116,8 +116,12 @@ export async function deriveSyncBaselineResources(snapshot: InputSnapshot, plan:
     for (const entry of entries) paths.add(entry.path)
     const files = new Map(entries.filter(entry => entry.mode !== '120000' && entry.path.startsWith('.spec/') && entry.path.endsWith('/spec.md')).map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString('utf8')]))
     const frozen = await readFrozenContracts(snapshot.source.canonicalRoot, files)
+    for (const node of frozen.nodes) if (baseline?.bindings.some(binding => binding.resource.kind === 'contract' && binding.resource.id === node.id && 'intentPair' in binding && binding.intentPair)) resources.set(`contract:${node.id}`, { kind: 'contract', id: node.id })
     for (const item of frozen.graph.items.values()) {
-      if (item.kind === 'VERIFY') continue
+      if (item.kind === 'VERIFY') {
+        if (baseline?.bindings.some(binding => binding.resource.kind === 'contract' && binding.resource.id === item.id && 'intentPair' in binding && binding.intentPair)) resources.set(`contract:${item.id}`, { kind: 'contract', id: item.id })
+        continue
+      }
       if (item.kind === 'FLOW') resources.set(`flow:${item.id}`, { kind: 'flow', id: item.id })
       else resources.set(`contract:${item.id}`, { kind: 'contract', id: item.id })
     }
