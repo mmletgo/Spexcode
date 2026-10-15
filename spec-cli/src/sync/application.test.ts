@@ -16,7 +16,7 @@ import { captureInputSnapshot } from './snapshot.js'
 import { readSyncSettings, SyncApplicationError } from './settings.js'
 import type { SyncSettings } from './settings.js'
 import type { ContractCell, GeneratedTables } from './elaboration-markdown.js'
-import { sameContractBusinessMeaning } from './contract-evolution.js'
+import { contractBusinessProse, sameContractBusinessMeaning } from './contract-evolution.js'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
 import type { ElaborationSessionRequest } from './elaboration-types.js'
 import { sessionIdForCreateKey } from '../sessions.js'
@@ -539,10 +539,32 @@ async function exportApplicationFixture(t: test.TestContext, choice?: 'keep_inte
     const limit = choice === 'keep_intent' ? null : choice === 'adopt_behavior' ? 8 : 128
     let output: unknown
     if (request.purpose === 'code_behavior_analyze') {
-      const frozen = JSON.parse(request.prompt.split('冻结三方输入:\n')[1]) as { changedPaths: string[] }
+      const frozen = JSON.parse(request.prompt.split('冻结三方输入:\n')[1]) as { changedPaths: string[]; oldSource: [string, string][]; newSource: [string, string][]; verifiedDelivery: [string, string][]; compositionEvidence: { conflicts: { path: string; delivery: { mode: '100644' | '100755' } | null }[] } | null }
       const paths = [...new Set([...frozen.changedPaths, ...(decisionFact ? plan.decisionAuthorities.flatMap(authority => authority.paths) : [])])]
       output = { changes: paths.map(changed => changed === codePath ? ({ kind: decisionFact ? 'allowed_change' : 'conflict', paths: [changed], affectedIds: ['RULE-EXPORT-02', 'AC-EXPORT-02'], ruleIds: ['RULE-EXPORT-02'], originalIntent: 'key与非空字符串filter必需，未授权filter长度上限；幂等政策保持', previousBehavior: '9字符非空filter可提交', sourceBehavior: 'filter长度超过8字符拒绝，8字符可提交；原权限与幂等保持', deliveryBehavior: '非空filter无长度上限', evidence: `冻结src/export.js#ExportService.submit 的filter.length > 8与RULE-EXPORT-02、AC-EXPORT-02逐项对照；${decisionFact?.text ?? '无上限授权'}`, counterexample: 'filter=123456789：原意接受但现源码invalid-request' }) : ({ kind: 'refactor', paths: [changed], affectedIds: [], ruleIds: [], originalIntent: '原业务契约与可信测试不变', previousBehavior: '原完整导出行为', sourceBehavior: '治理文本与上下文无新增业务变化', deliveryBehavior: '原业务义务保持', evidence: `已完整读取${changed}，长度边界冲突仅在${codePath}`, counterexample: '固定oracle验证原权限、幂等与状态转换' })), facts: decisionFact ? [decisionFact] : [], acceptanceChanges: decisionFact && choice !== 'keep_intent' ? [{ id: 'AC-EXPORT-02', ruleIds: ['RULE-EXPORT-02'], source: decisionFact.source, reason: `仅按所选裁决增加filter${limit}字符边界，保空输入、权限、幂等与结果义务` }] : [], newNodes: [], resolutions: [] }
       if (independentNode || !choice) output = { changes: paths.map(changed => ({ kind: 'refactor', paths: [changed], affectedIds: [], ruleIds: [], originalIntent: '固定导出规则与验收保持', previousBehavior: '固定ExportService完整行为', sourceBehavior: '仅添加测试指定注释，不改变业务执行', deliveryBehavior: '原完整业务与已生成注释保持', evidence: `真实冻结${changed}的业务语句保持，新增仅注释`, counterexample: '固定可信oracle仍验证权限、幂等和全部状态转换' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+      if (decisionFact) (output as { resolutions: unknown[] }).resolutions = (frozen.compositionEvidence?.conflicts ?? []).map(conflict => {
+        const current = new Map(frozen.newSource).get(conflict.path)!, before = new Map(frozen.oldSource).get(conflict.path)!, delivery = new Map(frozen.verifiedDelivery).get(conflict.path)!
+        assert.equal(current, before, '只有真实冻结作者字节未变才沿用完整partial交付，不能盲选覆盖新作者输入')
+        assert.ok(delivery && conflict.delivery)
+        if (conflict.path.endsWith('/spec.md')) {
+          const sourceContract = parseContract({ nodeId: 'export-contract', path: conflict.path, source: current }).contract!
+          const deliveryContract = parseContract({ nodeId: 'export-contract', path: conflict.path, source: delivery }).contract!
+          assert.equal(parseParts(current)!.rawSource, parseParts(delivery)!.rawSource)
+          assert.equal(contractBusinessProse(sourceContract.expandedSpec), contractBusinessProse(deliveryContract.expandedSpec))
+          assert.deepEqual(sourceContract.items.map(item => item.id).sort(), deliveryContract.items.map(item => item.id).sort())
+          for (const item of sourceContract.items) assert.ok(sameContractBusinessMeaning(item, deliveryContract.items.find(value => value.id === item.id)!))
+        }
+        return { path: conflict.path, content: delivery, mode: conflict.delivery.mode }
+      })
+      if (independentNode) (output as { resolutions: unknown[] }).resolutions = (frozen.compositionEvidence?.conflicts ?? []).map(conflict => {
+        const current = new Map(frozen.newSource).get(conflict.path)!, before = new Map(frozen.oldSource).get(conflict.path)!, delivery = new Map(frozen.verifiedDelivery).get(conflict.path)!
+        assert.equal(conflict.path, codePath)
+        assert.equal(current, `// human offline ${codePath}\n${before}`, '补偿只整合夹具明确新增的作者注释，保留完整原代码')
+        assert.equal(delivery, `${before}\n// application verified delivery\n`, '已交付完整正文只有受审生成注释，不猜测业务整合')
+        assert.ok(conflict.delivery)
+        return { path: conflict.path, content: `${current}\n// application verified delivery\n`, mode: conflict.delivery.mode }
+      })
     } else if (request.purpose === 'code_behavior_review') {
       const frozen = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as { changedPaths: string[] }
       const value = JSON.parse(request.prompt.split('待审分析:\n')[1]) as { analysisDigest: string; analysis: { changes: { id: string; paths: string[] }[] } }
@@ -563,7 +585,7 @@ async function exportApplicationFixture(t: test.TestContext, choice?: 'keep_inte
         tables.AC!.push({ id: 'AC-DECISION-01', covers: ['RULE-EXPORT-01', 'RULE-EXPORT-02'], preconditions: '无任务与成功任务', action: '检验filter边界、空输入、幂等及非所有者下载', assertion: limit === null ? '8、9、128、129字符均接受；空输入拒绝、幂等与权限保持' : `${limit}字符接受，${limit + 1}字符拒绝；空输入拒绝、幂等与权限保持`, test: 'generated-tests/decision.test.mjs#AC-DECISION-01', command: 'VERIFY-DECISION-01', source: 'derived:RULE-EXPORT-02', 'depends-on': ['RULE-EXPORT-01', 'RULE-EXPORT-02'] })
         tables.VERIFY!.push({ id: 'VERIFY-DECISION-01', command: ['node', '--test', 'generated-tests/decision.test.mjs'], cwd: '.', 'timeout-ms': 10000 })
       }
-      output = { version: 'elaboration-rows-v2', changes: [{ nodeId: 'export-contract', path, title: String(parseFrontmatter(original).fm.title), description: '', code: contract.code, related: contract.related, prose: parseParts(original)!.expandedSpec.split(/^### /m)[0], tables, removeIds: [] }], applicability: ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: true, basis: '固定业务政策', affectedIds: ['REQ-EXPORT-01'] })) }
+      output = { version: 'elaboration-rows-v2', changes: [{ nodeId: 'export-contract', path, title: String(parseFrontmatter(original).fm.title), description: '', code: contract.code, related: contract.related, prose: contractBusinessProse(parseParts(original)!.expandedSpec), tables, removeIds: [] }], applicability: ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: true, basis: '固定业务政策', affectedIds: ['REQ-EXPORT-01'] })) }
     } else if (request.purpose === 'elaboration_review') output = { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
     else {
       const frozen = JSON.parse(request.prompt.split(request.purpose === 'code_generate' ? '冻结完整输入:\n' : '冻结原意和基线完整输入:\n')[1].split('\n实际候选身份')[0]) as { files: [string, string][]; readyIds: string[]; elaboratedSpecs: { path: string; source: string }[]; manifest: { entries: { path: string; digest: string; mode: string }[] } }
