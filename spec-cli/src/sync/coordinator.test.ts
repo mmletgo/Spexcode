@@ -309,6 +309,29 @@ test('租约heartbeat贯穿长调用，取消不派发下一阶段，重入不�
 })
 
 const docker = { skip: process.env.SPEX_DOCKER_VERIFICATION_TEST !== '1', timeout: 240000 }
+
+test('P4精确queued经已审null扩展、四层Docker验证与真实receipt保持原始index', docker, async t => {
+  const f = await fixture(t); await f.realTools()
+  const plan = { ...f.plan, readPaths: [contractPath, '.spec/project/spec.md', '.spec/spexcode.json', 'src/export.js', 'tests/export.test.mjs'], executionScope: { paths: [contractPath, 'src/export.js'], contractIds: [], flowIds: [] } }
+  const selected = f.store.readBaselineSelection(f.input.source, plan.readPaths.map(path => ({ kind: 'path', path })))
+  assert.ok('selection' in selected)
+  const operation = f.store.admitAndEnqueue(await prepareSyncAdmission(f.input, plan, { ingressKey: 'p4-docker-ready', rootCauseId: 'p4-docker-ready', origin: 'spec', budget: f.operation.budget, managedRoot: f.managedRoot, baselineSelection: selected.selection }))
+  f.useOperation(operation)
+  const unacknowledged = await runSyncOperation(f.store, operation.id, { ...f.options, plan, readCurrentPlan: () => plan })
+  assert.equal(unacknowledged.status, 'busy'); assert.equal(f.calls.length, 0)
+  for (;;) { const head = f.store.nextDispatch(f.input.source.repositoryId)!; f.store.ackDispatch(f.input.source.repositoryId, head.messageId); if (head.operation.id === operation.id) break }
+  const result = await runSyncOperation(f.store, operation.id, { ...f.options, plan, readCurrentPlan: () => plan })
+  assert.equal(result.status, 'workspace_synced', JSON.stringify({ result, attempts: f.store.listAttempts(operation.id).map(attempt => attempt.failure) }))
+  assert.ok(result.receipt)
+  assert.notEqual(result.operation.baselineSelection!.digest, selected.selection.digest)
+  assert.ok(result.operation.contractScopeExpansions!.some(expansion => expansion.contractIds.includes('AC-EXPORT-03')))
+  const attempt = f.store.readAttempt(result.operation.currentAttemptId!), verification = JSON.parse(readEvidence(f.input.source.commonDir, attempt.verification!.resultBlob).toString())
+  assert.equal(verification.baselineSelectionDigest, result.operation.baselineSelection!.digest)
+  assert.equal(verification.layers.every((layer: { verdict: string }) => layer.verdict === 'pass'), true)
+  assert.equal(f.store.listJournals(operation.id)[0].plan.expectedBaselineSelectionDigest, result.operation.baselineSelection!.digest)
+  assert.equal(result.operation.deliveredScope.paths.includes('tests/export.test.mjs'), false)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+})
 test('取消后的历史native未知创建回执保留资源与recovery_required，不假removed或重派发', async t => {
   const f = await fixture(t)
   const claimed = f.store.claimAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 10000, expectedMessageId: f.operation.dispatchMessageId })

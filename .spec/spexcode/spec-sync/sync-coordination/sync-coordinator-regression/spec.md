@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+P4 精确 queued 场景必须先消费真实 FIFO 并确认；未确认零模型调用。首轮已审 P1 追加未来 null ID 后，重新绑定实际选择/readSet，经过真实 Docker、四层证据、可信 Git hooks 与 receipt；journal 绑定最终 selection，外部 oracle 不进入本轮写入，原 source/index 保持。原生生成与独审可由确定性 runner 控制，此场景不冒充真实模型执行。
+
 P4 精确接入测试使用真实 Git 快照和 SQLite 基线读取：完整读取选择可含只读 oracle，实际写入范围只含目标文件；同一 InputSnapshot 直接进入 admission，不重新捕获或修改作者 index/字节。缺少实际执行范围时拒绝把目录授权自动当成写锁。
 
 当前版本测试用真实无关文件提交改变全局快照 ID，证明精确操作仍有效且查询不写 index；同一 working tree 的相关 staged 对象变化仍使其过期。历史 P3 完整快照判据保持，不能由新 helper 授予旧操作更宽写权。

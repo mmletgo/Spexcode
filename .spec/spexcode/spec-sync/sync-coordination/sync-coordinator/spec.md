@@ -20,6 +20,8 @@ P4 接入在同一真实快照上冻结完整资源基线选择及实际执行�
 
 P4 派发先由应用消费真实 protocol FIFO 头并事务确认到持久 queued，协调器只按已确认记录与 revision 领取；内部有限修复/过期原 attempt 用显式 continuation，同一预算族不重置。未确认、前序或租约冲突返回 busy，不当成永久失败或另造消息。物理暂停由安全边界和 heartbeat 停止新阶段，结算真实资源后返回暂停位置，保持单操作 control 与检查点；全局恢复不能解除用户另行设置的单操作暂停。已登记 applying 继续原短写单元完整性结算。
 
+P1 只把实际目标正文及其已审代码/可写验收路径、业务 ID 加入执行范围；只读上下文的声明不取得覆盖或写锁。新增资源由同一 fence 事务取得精确选择及租约，再从原不可变输入重组并绑定新 readSet。阶段复用保原选择与 readSet 证据：仅追加 null 资源且原绑定不变可沿用已审义务；真实组合字节变化或引入既有非 null 基线时，在原预算内重新分析。V1–V4、验证 blob 与 apply 均绑定最终选择。目标及退役历史按各文件的实际交付头读取，不能借另一个资源的全局最新交付作为作者来源。
+
 复用现有快照、成对 composition、受控 request overlay、P1 elaborate、scope 扩充/租约、generation、真实 V3 resource 执行与 private delivery，不另建消息队列、契约图或事实数据库。原 source/composed/candidate 分开，policy/readset 内容摘要必须绑定 operation。读集合完整保留契约及 source/code/related/AC 测试全文，2MiB 预算失败不截断。host private、越界路径、目录未授权字节拒绝。
 
 operation 独立本机 kernel mutex 防双 coordinator；紧凑 stage checkpoint 只保存 refs、独立结果及诊断，不复制整张契约图。当前 attempt 在独占证明下重入稳定 requestKey，派发前原子计费、持久资源意图，完整真实结果/hash/独立身份保存后重放。lease heartbeat 贯穿原生长调用，控制/总deadline触发 Abort；旧 generation 只能结算真实资源证据。历史未removed资源精确恢复，未知终态保留 recovery_required，不假释放容量。
