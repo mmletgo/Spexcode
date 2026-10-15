@@ -811,6 +811,11 @@ enable 后由正式服务持续观察授权来源，保存即触发；停机后�
 跨机器独立复核不依赖服务、本机数据库或开发机通过记录：
   spex sync check --base <完整基线SHA> --candidate <完整候选SHA> --policy <已受信政策SHA>
 policy 缺省 base；可信 CI 从受保护目标构建校验器，候选仅作 Git 对象数据读取，不运行候选 workflow 或安装脚本。
+需求raw确有变化时，从受信policyCommit的.spec/sync-intent-authorizations.json读取sync-intent-authorizations-v1登记。
+每项精确绑定path、beforeRawDigest、afterRawDigest及source说明；新增/删除一侧显式null，移动登记两条。
+摘要复用Spec parser规范LF并提取raw后按UTF-8计算SHA256；失败结果intentAuthorization.changes列精确摘要。
+受信维护者登记该差量后自动重验；候选自带登记不能批准自己，SHA/source说明也不是审批身份签名。
+policyCommit必须由受保护目标或等效外部信任确定，不能让候选选择--policy；工作流还须外部设置required check。
 检查覆盖旧新契约、源码与真实断言，并执行独立语义审查和冻结命令；删 schema/AC/test 或自改命令不能免检。
 JSON 分列 coverage 与本次 affected_scope；未配置范围返回 unsupported，已配置且无影响为 not_applicable，均不能冒作全项目已同步。
 退出码0表示 passed 或 not_applicable，1为失败或恢复未完成，2为unsupported。

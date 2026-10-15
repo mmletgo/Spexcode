@@ -460,6 +460,7 @@ decide 绑定 show 中的原输入、可信分析及具体 finding IDs；保持�
 启用后服务持续观察授权来源；无参数 pause/resume 控制物理输入自动执行，带 operation ID 控制单个操作。暂停仍记录最新输入；服务停止明确离线。所有命令输出 JSON。
 check 无需后台或本机操作数据库，从真实 Git base/candidate/policy 重算旧新完整影响范围并独审、隔离执行。
 policy 缺省 base，只有可信调用者才能指定已受信政策；候选不能用自己的配置自免检。
+raw变化必须精确匹配受信policyCommit中的.spec/sync-intent-authorizations.json前后摘要登记；格式见spex guide sync。
 退出码：passed 或已配置且无影响的 not_applicable 为0，失败/未完成恢复为1，unsupported为2。
 coverage 明确列未纳入范围；局部检查通过不表示全项目已同步。
 revert 只对已采纳且有完整收据的交付生成新的成组补偿操作，保后续编辑及历史，仍需四层验证和真实落地。

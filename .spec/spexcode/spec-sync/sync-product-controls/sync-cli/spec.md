@@ -34,3 +34,5 @@ P4 增加无operation参数的 pause/resume，调用 /automatic/pause|resume 物
 `spex sync check` 在普通后端命令解析前路由到 [[sync-conformance-cli]]；这是显式基线、候选与可信政策的独立重验，不调用后端或修改同步状态。顶层保留真实检查退出码。
 
 `spex sync revert <operation-id> [--request-id <id>]` 明确请求撤销已采纳的完整交付，由同一应用资格检查和成组补偿管线建立新操作；稳定请求键幂等，CLI不直接reset、改源文件或假造已落地。`spex sync stop-writer` 不接操作ID或请求键，暂停物理来源、停止新派发并结算或保留实际资源/journal，返回恢复诊断；stopped只指停写入口，不能解释为所有未知原生资源已释放。两者沿既有targetTree/后端路由与拒绝退出码，帮助页说明其语义。
+
+独立check的help与guide说明受信policyCommit中的原意精确登记、null新增删除、移动双登记及失败摘要；外部调用方负责选择受信政策并配置必需检查，授权不豁免独审/VERIFY/oracle。
