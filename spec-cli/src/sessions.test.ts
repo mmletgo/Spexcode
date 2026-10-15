@@ -12,7 +12,7 @@ import { codexHarness, codexHeadlessHarness } from './codex-harness.js'
 import { processStartToken } from '@spexcode/spec-core'
 import { jsonMigrationFencePath } from '@spexcode/session-application'
 import { spawnDetachedRuntime } from './runtime-ownership.js'
-import { adapterResidentLiveness, bootstrapMaterialize, canonicalRecordProjection, closeSession, drainQueue, drainSession, existingHarnessLaunchTarget, turnFailureNote, turnFailureRetryDelay, installSessionLeafProcessProbeForTest, launchPreflight, listSessions, markIdle, markState, markTurnFailure, markHeadlessTurnFailure, markInterrupted, stampInterrupt, INTERRUPTED_NOTE, parseSessionLeafReceipt, resumeSession, sendText, sessionCreateRequest, sessionHasPendingDelivery, sessionLeafReceiptCandidate, sessionLeafReceiptIdentityState, spawnerClause, stageHarnessLaunchProof, stopSession } from './sessions.js'
+import { adapterResidentLiveness, bootstrapMaterialize, canonicalRecordProjection, closeSession, drainQueue, drainSession, existingHarnessLaunchTarget, turnFailureNote, turnFailureRetryDelay, installSessionLeafProcessProbeForTest, launchPreflight, listSessions, markIdle, markState, markTurnFailure, markHeadlessTurnFailure, markInterrupted, reconcileTurnFailureObservers, stampInterrupt, INTERRUPTED_NOTE, parseSessionLeafReceipt, resumeSession, sendText, sessionCreateRequest, sessionHasPendingDelivery, sessionLeafReceiptCandidate, sessionLeafReceiptIdentityState, spawnerClause, stageHarnessLaunchProof, stopSession } from './sessions.js'
 import { composeCommandPrompt, launchScript, launchShellCommand, resolveCommandPrompt } from './session-prompt.js'
 import { commitUrlForRemote } from './session-review.js'
 import { OWNED_QUEUE_RAW_STATUS, backendLaunchAuthority, canDrainQueued, fromRaw, rawLifecycleStatus, type SessRec } from './session-record.js'
@@ -2434,6 +2434,63 @@ test('lifecycle hook writers reject self-launched records in the canonical layer
 
 test('turn failure observer retry is bounded exponential backoff', serial, () => {
   assert.deepEqual([1, 2, 3, 4, 5, 6, 20].map(turnFailureRetryDelay), [1000, 2000, 4000, 8000, 16000, 30000, 30000])
+})
+
+test('generic turn-failure census skips structured records but observes ordinary active records', serial, async () => {
+  const prevHome = process.env.SPEXCODE_HOME
+  const prevDatabasePath = process.env.SPEX_SESSION_DATABASE_PATH
+  const home = mkdtempSync(join(tmpdir(), 'spex-turn-observer-census-'))
+  process.env.SPEXCODE_HOME = home
+  process.env.SPEX_SESSION_DATABASE_PATH = join(home, 'sessions.sqlite')
+  const structuredId = `structured-observer-${process.pid}`
+  const ordinaryId = `ordinary-observer-${process.pid}`
+  const observed: string[] = []
+  let structuredCalls: string[] = []
+  let closeCount = 0
+  const priorObserver = codexHarness.observeTurnFailures
+  const structuredExecution = {
+    version: 1, policy: 'codex-read-only-v1', schema: { type: 'object' }, inputDigest: 'a'.repeat(64),
+    purpose: 'fixture', timeoutMs: 1000, state: 'running', threadId: 'structured-thread', turnId: 'structured-turn',
+  }
+  const writeObserverRecord = (id: string, execution?: typeof structuredExecution, stopped = false): void => {
+    mkdirSync(sessionStoreDir(id), { recursive: true })
+    writeFileSync(sessionRecordPath(id), `${JSON.stringify({
+      session_id: id, governed: true, worktree_path: join(home, id), branch: `node/${id}`, title: null, name: null, parent: null,
+      status: 'active', proposal: null, merges: 0, note: null, sortkey: null, createdAt: 1, harness: 'codex',
+      harness_session_id: `thread-${id}`, runtime_start_token: null, stopped, archived: false, closedAt: null,
+      launcher: 'codex', launch_cmd: 'codex', ...(execution ? { structured_execution: execution } : {}),
+    }, null, 2)}\n`)
+  }
+  codexHarness.observeTurnFailures = (rec) => {
+    observed.push(rec.session)
+    let resolveClosed!: (reason: string | null) => void
+    const closed = new Promise<string | null>((resolve) => { resolveClosed = resolve })
+    return { close: () => { closeCount++; resolveClosed(null) }, closed, ready: Promise.resolve(true) }
+  }
+  try {
+    writeObserverRecord(structuredId, structuredExecution)
+    writeObserverRecord(ordinaryId)
+    reconcileTurnFailureObservers([structuredId])
+    await Promise.resolve()
+    structuredCalls = [...observed]
+    reconcileTurnFailureObservers([ordinaryId])
+    await Promise.resolve()
+
+    assert.deepEqual(structuredCalls, [], 'runner-owned structured observer must bypass generic census')
+    assert.deepEqual(observed, [ordinaryId], 'ordinary active record still uses its adapter observer')
+  } finally {
+    writeObserverRecord(structuredId, structuredExecution, true)
+    writeObserverRecord(ordinaryId, undefined, true)
+    reconcileTurnFailureObservers([structuredId, ordinaryId])
+    await Promise.resolve()
+    codexHarness.observeTurnFailures = priorObserver
+    if (prevHome === undefined) delete process.env.SPEXCODE_HOME
+    else process.env.SPEXCODE_HOME = prevHome
+    if (prevDatabasePath === undefined) delete process.env.SPEX_SESSION_DATABASE_PATH
+    else process.env.SPEX_SESSION_DATABASE_PATH = prevDatabasePath
+    rmSync(home, { recursive: true, force: true })
+    assert.equal(closeCount, structuredCalls.length + (observed.includes(ordinaryId) ? 1 : 0), '任何此前打开的adapter observer都已关闭')
+  }
 })
 
 test('owned queues are public-authority leased and raw-state fenced from legacy drainers', serial, () => {

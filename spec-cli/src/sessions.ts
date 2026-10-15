@@ -1681,10 +1681,10 @@ export function reconcileTurnFailureObservers(ids?: readonly string[]): void {
   for (const id of ids ?? listSessionIds()) {
     let rec: SessRec | null = null
     try { rec = readRecord(id) } catch { continue }
-    // Native turn failure observation is for an executing turn, not a durable roster census. Asking, awaiting,
-    // and parked records have no turn to observe; subscribing them creates one expensive app-server resume per
-    // idle record and lets stale observers accumulate after a backend restart.
-    if (!rec?.governed || rec.stopped || rec.archived || rec.status !== 'active' || !rec.harnessSessionId) continue
+    // Native turn failure observation is for an ordinary executing turn, not structured runner-owned turns or
+    // a durable roster census. Waiting records have no turn to observe; subscribing them creates expensive,
+    // stale app-server resumes after a backend restart.
+    if (!rec?.governed || rec.structuredExecution || rec.stopped || rec.archived || rec.status !== 'active' || !rec.harnessSessionId) continue
     const harness = harnessById(rec.harness || defaultHarness.id)
     if (!harness.observeTurnFailures) continue
     wanted.set(id, { rec, harness, fingerprint: `${harness.id}:${rec.harnessSessionId}:${runtimeRoot()}` })

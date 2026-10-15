@@ -519,6 +519,7 @@ export function codexGenerationIdentityObserver(
     try { message = JSON.parse(json) } catch { return }
     if (message.error) return finish(`Codex generation observer request failed: ${message.error.message || JSON.stringify(message.error)}`)
     if (message.id === 1 && message.result) {
+      clearTimeout(timer)
       send({ method: 'initialized', params: {} })
       if (!readySettled) { readySettled = true; resolveReady(true) }
       return
