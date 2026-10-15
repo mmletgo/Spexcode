@@ -1607,7 +1607,10 @@ test('resume admission and interrupted recovery preserve live owners and newer c
     try {
       const admission = outcome === 'open-live' || outcome === 'open-unknown'
       const open = outcome === 'open-gone' || admission
-      writeResumeFixtureRecord(id, process.cwd(), 'true', { status: open ? 'active' : 'archived', stopped: !open || admission, archived: !open, closed_at: open ? undefined : '2026-09-16T00:00:00.000Z' })
+      const project = join(home, 'project'); mkdirSync(project)
+      execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: project })
+      execFileSync('git', ['-c', 'user.name=resume-fixture', '-c', 'user.email=resume@example.test', 'commit', '--allow-empty', '-qm', 'fixture'], { cwd: project })
+      writeResumeFixtureRecord(id, project, 'true', { status: open ? 'active' : 'archived', stopped: !open || admission, archived: !open, closed_at: open ? undefined : '2026-09-16T00:00:00.000Z' })
       const original = JSON.parse(readFileSync(sessionRecordPath(id), 'utf8'))
       if (!admission) writeFileSync(sessionRecordPath(id), `${JSON.stringify({
         ...original, archived: false, stopped: false, closed_at: undefined,
