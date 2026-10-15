@@ -324,6 +324,18 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       throw error
     }
   }
+  const deliver = async (activeFence: WriteFence, recoveryOnly = false): Promise<{ operation: SyncOperation; receipt: ApplyReceipt }> => {
+    for (;;) {
+      const attempt = store.readAttempt(activeFence.attemptId)
+      if (attempt.publicationBase) await acquirePublication(recoveryOnly || attempt.status === 'applying')
+      try { return await deliverVerifiedAttempt(store, activeFence, { managedRoot: options.managedRoot, tools: options.tools, beforeApply: recoveryOnly ? async () => fail('recovery_apply_forbidden', '只恢复已开始journal，禁止新apply') : beforeApply, ...(!recoveryOnly ? options.deliveryHooks : {}) }) }
+      catch (error) {
+        releasePublication()
+        if (!(error instanceof SyncStoreError) || error.code !== 'SYNC_PUBLICATION_BUSY') throw error
+        await waitForPublication(25, undefined, { signal })
+      }
+    }
+  }
   try {
     operation = store.readOperation(operationId)
     let attempt = operation.currentAttemptId ? store.readAttempt(operation.currentAttemptId) : null
@@ -332,8 +344,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       const journals = store.listJournals(operationId).filter(journal => journal.status !== 'settled')
       for (const journal of journals) {
         if (!attempt || journal.attemptId !== attempt.id || !operation.delivery || attempt.status !== 'applying') fail('journal_recovery', '既定journal没有同attempt的已绑定交付写入单元')
-        if (attempt.publicationBase) await acquirePublication(true)
-        const delivered = await deliverVerifiedAttempt(store, fenceFor(operation, attempt), { managedRoot: options.managedRoot, tools: options.tools, beforeApply: async () => fail('recovery_apply_forbidden', '只恢复已开始journal，禁止新apply') })
+        const delivered = await deliver(fenceFor(operation, attempt), true)
         operation = delivered.operation
       }
       return current()
@@ -348,8 +359,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         if (!await recoverResources(store, operation, options, true)) return current('recovery_required')
       } else {
         if (attempt.status === 'verified') timer = setInterval(() => { try { store.renewLease(fence!, leaseMs) } catch (error) { heartbeatFailure = failure('lease_heartbeat', error instanceof Error ? error.message : String(error), 'environment'); controller.abort() } }, heartbeatMs)
-        if (attempt.publicationBase) await acquirePublication(attempt.status === 'applying')
-        const delivered = await deliverVerifiedAttempt(store, fence, { managedRoot: options.managedRoot, tools: options.tools, beforeApply, ...options.deliveryHooks })
+        const delivered = await deliver(fence)
         return { status: delivered.operation.phase, ...delivered }
       }
     }
@@ -706,7 +716,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       const bindings = { inputId: operation.input.id, candidateDigest: candidate.digest, policyDigest: operation.policyDigest, readSetDigest: operation.readSetDigest, ...(operation.baselineSelection ? { baselineSelectionDigest: operation.baselineSelection.digest } : {}), environmentDigest: contentHash(canonical(runs.map(run => run.policy))), contextDigest: contentHash(canonical({ readSetDigest: view.readSetDigest, baselineSelection: operation.baselineSelection ?? null, publicationBase: attempt.publicationBase ?? null, elaboration: p1Evidence, composed: view.composed, analysisRef: analysis?.ref ?? null, decisionRef: decision ? operation.requestBlob : null })) }
       const result: VerificationResultBlob = { schemaVersion: 1, coveredScope: ready, retiredIds: unique(elaboration.retiredIds), decisionRefs: [...options.plan.decisionRefs ?? [], ...(decision && operation.requestBlob ? [operation.requestBlob] : [])], ...bindings, layers: [{ layer: 'V1', verdict: 'pass', evidenceRefs: [v1Ref] }, { layer: 'V2', verdict: 'pass', evidenceRefs: [v2Ref] }, { layer: 'V3', verdict: 'pass', evidenceRefs: v3Refs }, { layer: 'V4', verdict: 'pass', evidenceRefs: [v4Ref] }] }
       store.recordVerification(fence, { ...bindings, passed: true, coveredScope: ready, evidenceRefs: [p1Evidence, v1Ref, v2Ref, ...v3Refs, v4Ref], resultBlob: writeEvidence(operation.input.source.commonDir, result) })
-      const delivered = await deliverVerifiedAttempt(store, fence, { managedRoot: options.managedRoot, tools: options.tools, beforeApply, ...options.deliveryHooks })
+      const delivered = await deliver(fence)
       return { status: delivered.operation.phase, ...delivered }
     }
   } catch (error) {
