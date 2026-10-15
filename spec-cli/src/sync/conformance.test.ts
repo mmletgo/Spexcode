@@ -74,6 +74,25 @@ function reviewer(change?: (review: GenerationReview, value: ReviewContext, requ
 }
 const noDocker = async (): Promise<never> => { throw new Error('fixture: Docker unavailable') }
 
+test('超过2MiB的跨机器候选全文仍进入独审，不以大小绕过或截断旧新断言', async () => {
+  const repo = fixture(), large = `${implementation}\n/* BEGIN-CONTEXT ${'x'.repeat(2 * 1024 * 1024)} END-CONTEXT */\n`
+  put(repo.root, 'src/greet.mjs', large)
+  let checked = false
+  const result = await runConformance(repo.input(save(repo.root)), { testReviewRunner: reviewer((review, value, request) => {
+    checked = true
+    assert.ok(Buffer.byteLength(request.prompt) > 2 * 1024 * 1024)
+    assert.equal(value.readSet.find(file => file.path === 'src/greet.mjs')!.before, implementation)
+    assert.equal(value.readSet.find(file => file.path === 'src/greet.mjs')!.candidate, large)
+    assert.equal(value.readSet.find(file => file.path === 'tests/greet.test.mjs')!.candidate, assertion)
+    review.verdict = 'repair'
+    review.findings = [{ kind: 'repair', affectedIds: ['REQ-GREET-01'], ruleLocation: `${specPath}#REQ-GREET-01`, codeLocation: 'src/greet.mjs#greet', evidence: '完整读集合已交给独立审查；受控接缝明确拒绝', counterexample: '独立审查拒绝不能因上下文过大被跳过', message: '受控拒绝' }]
+  }) })
+  assert.equal(checked, true)
+  assert.equal(result.status, 'failed')
+  assert.equal(result.diagnostics[0].code, 'review_rejected')
+  assert.equal(result.runs.length, 0)
+})
+
 test('AC-CONFORMANCE-01 Spec-only未实现由独审拒绝；完整源码与真实Git身份都进入审查', async () => {
   const repo = fixture(); put(repo.root, specPath, source.replaceAll('hi', 'hello')); const candidate = save(repo.root)
   const result = await runConformance(repo.input(candidate), { testReviewRunner: reviewer((review, value) => {

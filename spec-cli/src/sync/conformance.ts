@@ -233,7 +233,6 @@ export async function runConformance(supplied: ConformanceInput, options: Confor
     const reviewContext = { ...context, inputId: result.inputDigest, candidateDigest }
     const serialized = JSON.stringify(reviewContext)
     writeFileSync(join(evidenceDirectory, 'input.json'), serialized)
-    if (Buffer.byteLength(serialized) > 2 * 1024 * 1024) fail('unsupported_context_budget', `完整候选审查读集合 ${Buffer.byteLength(serialized)} bytes 超过2MiB，不能截断源码或断言`)
     const runner: ElaborationRunner = options.testReviewRunner ?? (async request => (await import('../session-structured.js')).runStructuredSession(request))
     const reviewed = await runCandidateReview({ root, base: base.commit, requestKey: `conformance:${result.inputDigest}:${randomUUID()}`, inputDigest: result.inputDigest, purpose: 'code_review', timeoutMs: trusted.callTimeoutMs ?? trusted.budget.timeoutMs, signal, model: 'gpt-6.1-sol', effort: 'high', schema: GENERATION_REVIEW_SCHEMA,
       prompt: `${CANDIDATE_REVIEW_INSTRUCTIONS}\n这是从真实Git对象重建的独立CI候选检查，没有builder总结或本机passed证据。base∪candidate旧新完整契约和断言同入读集合。candidate raw变化只能是确有业务来源的合法新需求；退役必须由真实raw或上层规则变更支持，旧AC保留原test路径、稳定ID与固定命令，改成验证移除后行为的真实负向断言。逐项核退役来源和负向断言，随意删schema/node/AC/test、弱化raw或断言均repair。新旧所有itemIds均必须checkedIds，retiredIds仍是本次实际待审义务。没有裁决权限，不得用oracle-policy批准命令或oracle更新。缺少调用依赖必须repair。\n冻结完整输入:\n${serialized}` }, runner, { inputId: result.inputDigest, candidateDigest, requiredIds: scope.itemIds, actualIds: scope.itemIds, priorIds: [...before.graph.items.keys()] })

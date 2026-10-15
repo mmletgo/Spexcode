@@ -36,13 +36,13 @@ validateCandidate 是必需可信硬门禁，按实际候选回调；没有回�
 
 取消检查贯穿派发前、登记后、native 输出后和硬门禁后，拒绝继续派发或发布晚结果；unsupported 保留平台原因，不隐式重试。结果保留候选引用、真实结构化输出和 native trace；完整 candidateFiles Map 仅作本地检查，不能写入 store 或外发 JSON。成功仅为 reviewed，始终 runtimeVerification=not_run、delivery=not_applied；上层必须另行完成真实 V3、版本交付门禁和 journal 结算。
 
-模型输入拒绝 [[sync-frozen-candidate]] 定义的宿主凭据和运行文件；业务 src/auth 不因名称被排除。发送的 manifest 只含已读取路径并附完整 manifest 摘要，本地冻结仍使用完整 manifest。生成输入及审查上下文分别执行 2MiB 预算，超过就明确失败，不截断源码或断言。candidateFiles 作为本地投影排除同一凭据路径；审查只发送可信读集合及实际变化的完整文件。原 source 与 candidate 身份不因投影改变。repairContext 仅为既有失败诊断，不是新原意、政策或通过证据。
+模型输入拒绝 [[sync-frozen-candidate]] 定义的宿主凭据和运行文件；业务 src/auth 不因名称被排除。发送的 manifest 只含已读取路径并附完整 manifest 摘要，本地冻结仍使用完整 manifest。生成及审查上下文完整传入既有 runner；超过2MiB时由 [[frozen-context-reader]] 在派发身份冻结前转换为无损按需读取，两次独立turn各自证明完整覆盖。不能截断源码或断言，也不能仅因内联大小拒绝完整义务；总时间、调用次数及资源预算继续约束。candidateFiles 作为本地投影排除同一凭据路径；审查只发送可信读集合及实际变化的完整文件。原 source 与 candidate 身份不因投影改变。repairContext 仅为既有失败诊断，不是新原意、政策或通过证据。
 
 已审三方analysis及明确direction纳入同一冻结输入和独审上下文。合法外部行为及resolutions保持，纯重构业务正文稳定；明确裁决或真实作者raw/规则变更时依对应新原意修实现，其他合法外部行为保持。retiredIds明确负向测试义务，旧binding标识/固定命令仍执行。真正已明确原意的契约遗漏只通过专用contract-omission:path#existingID位置回细化；普通contract:path#id只是规则引用，代码/测试TypeError、错误断言与实现次序缺陷继续generation repair，不自行新增或改已接受业务项。持久Spec不写暂态V3尚未运行/已通过，运行状态只在receipt及证据记录。
 
 采用行为裁决只保所选外部行为，不阻独立作者目标。
 
-外部不可改 mandatoryTests 和可信 verifications 复用冻结计划中的现有类型，登记定义与 oracle 完整正文同入生成/独审输入摘要及 2MiB 门禁。独审仅在当前 adopt_behavior/new_rule 已批准规则与具体不可改旧 oracle 断言互斥时用 needs_input/missing_fact，ruleLocation 为 oracle-policy:decision:<stableDecisionId>，codeLocation 为 <testPath>#<testId>，具体受影响 RULE/TR、AC、旧断言、新规则与同一反例完整保留。程序核唯一当前 requestRef/decision、精确 mandatory tuple 及 verification 登记；错误绑定为 review_invalid。此发现只诊断缺失可信输入，不授予修改 oracle、跳过命令或改回旧意图的权利；普通实现错误继续 repair，managed 业务测试沿现有契约授权演化。
+外部不可改 mandatoryTests 和可信 verifications 复用冻结计划中的现有类型，登记定义与 oracle 完整正文同入生成/独审输入摘要及各自完整冻结读取证明。独审仅在当前 adopt_behavior/new_rule 已批准规则与具体不可改旧 oracle 断言互斥时用 needs_input/missing_fact，ruleLocation 为 oracle-policy:decision:<stableDecisionId>，codeLocation 为 <testPath>#<testId>，具体受影响 RULE/TR、AC、旧断言、新规则与同一反例完整保留。程序核唯一当前 requestRef/decision、精确 mandatory tuple 及 verification 登记；错误绑定为 review_invalid。此发现只诊断缺失可信输入，不授予修改 oracle、跳过命令或改回旧意图的权利；普通实现错误继续 repair，managed 业务测试沿现有契约授权演化。
 
 专用 contract-omission 发现必须为 repair，精确引用已审 contracts 的仓库Spec路径与既有ID，且 affectedIds 包含该ID；错路径、未知/不关联ID或错分类均 review_invalid。它只请求既有受限refinement，不新增授权。普通修复诊断完整保留实际finding的规则/代码位置、证据、反例与信息，仍不作为新需求或批准证据。
 
