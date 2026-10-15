@@ -223,7 +223,7 @@ test('YATU: five real backends observe 24 CLI lifecycle writes without duplicate
     const body = await response.json() as { events: Array<{ kind: string; status?: string; proposal?: string | null; note?: string | null }> }
     const events = body.events.filter((event) => event.kind === 'status')
     assert.deepEqual(events.map((event) => [event.status, event.proposal, event.note]), [
-      ['idle', '', ''],
+      ['idle', null, ''],
       ...moves.map(([status, proposal], index) => [status, proposal ?? null, notes[index]]),
     ])
     assert.equal(existsSync(join(dir, 'timeline')), false, 'canonical SQLite events do not recreate legacy timeline files')
