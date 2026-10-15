@@ -60,7 +60,7 @@ type SessionRow = {
   archived?: boolean
 }
 
-test('YATU: archived dirty work restores by native id and corrupt queue rows cannot block healthy work', { timeout: 180_000 }, async () => {
+for (const delayedReadiness of [false, true]) test(`YATU: archived dirty work restores by native id and corrupt queue rows cannot block healthy work${delayedReadiness ? ' with a delayed prior readiness observer' : ''}`, { timeout: 180_000 }, async () => {
   const fixture = mkdtempSync(join(tmpdir(), 'spex-session-restore-queue-'))
   const project = join(fixture, 'project')
   const home = join(fixture, 'home')
@@ -71,6 +71,10 @@ test('YATU: archived dirty work restores by native id and corrupt queue rows can
   const port = await freePort()
   const tmux = `spex-restore-queue-${process.pid}-${Date.now()}`
   const configPath = join(project, '.spec', 'spexcode.json')
+  const readinessRelease = join(fixture, 'release-readiness')
+  const readinessEntered = join(fixture, 'readiness-entered')
+  const readinessReturned = join(fixture, 'readiness-returned')
+  const bootstrap = join(fixture, 'backend.mts')
   const runtime = join(home, 'projects', project.replace(/[/.]/g, '-'))
   const recordPath = (id: string) => join(runtime, 'sessions', id, 'runtime.json')
   let backend: ChildProcess | null = null
@@ -107,7 +111,23 @@ exec ${JSON.stringify(fakeHarness)} "$@"
     git(project, 'add', '.')
     git(project, 'commit', '-qm', 'fixture')
 
-    backend = spawn(process.execPath, ['--import', import.meta.resolve('tsx'), join(here, 'index.ts')], {
+    // The adapter seam holds only the first create observer after transport became live. Public close,
+    // resume and stop still traverse the real backend and exact native teardown paths while it is pending.
+    writeFileSync(bootstrap, `import {existsSync,writeFileSync} from 'node:fs';
+import {claudeHarness} from ${JSON.stringify(join(here, 'harness.ts'))};
+let first = true;
+if (${delayedReadiness}) claudeHarness.launchReady = async (current) => {
+  if (first) {
+    first = false;
+    writeFileSync(${JSON.stringify(readinessEntered)}, current().session);
+    while (!existsSync(${JSON.stringify(readinessRelease)})) await new Promise(resolve => setTimeout(resolve, 10));
+    writeFileSync(${JSON.stringify(readinessReturned)}, 'returned');
+  }
+  return {proof: {kind: 'fixture-readiness-gate'}, validate: async () => true};
+};
+await import(${JSON.stringify(join(here, 'index.ts'))});
+`)
+    backend = spawn(process.execPath, ['--import', import.meta.resolve('tsx'), bootstrap], {
       cwd: project,
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -139,6 +159,7 @@ exec ${JSON.stringify(fakeHarness)} "$@"
     const archived = await create('restore-archive', 'archive round trip')
     assert.ok(archived.id)
     await waitFor(() => online(archived.id), 'initial session online')
+    if (delayedReadiness) await waitFor(() => existsSync(readinessEntered), 'initial readiness observer gate')
     assert.ok(archived.path)
     writeFileSync(join(archived.path!, 'README.md'), 'dirty tracked\n')
     writeFileSync(join(archived.path!, 'untracked.txt'), 'dirty untracked\n')
@@ -224,6 +245,14 @@ exec ${JSON.stringify(fakeHarness)} "$@"
       }, (_key, value) => value instanceof Error ? value.stack : value, 2))
       throw error
     }
+    if (delayedReadiness) {
+      assert.equal(existsSync(readinessRelease), false, 'a stopped prior observer cannot retain capacity until it returns')
+      assert.equal(JSON.parse(readFileSync(activeRecord, 'utf8')).launch_readiness_started_at, undefined, 'successful stop retires the old durable readiness marker')
+      writeFileSync(readinessRelease, '')
+      await waitFor(() => existsSync(readinessReturned), 'cancelled readiness adapter returns')
+      assert.equal((await row(archived.id))?.lifecycle, 'idle', 'late readiness leaves the latest declaration intact')
+      assert.equal((await row(archived.id))?.liveness, 'offline', 'late readiness cannot revive the stopped runtime')
+    }
     const corrupt = await create('restore-corrupt', 'corrupt queue row')
     const healthy = await create('restore-healthy', 'healthy queue row')
     await waitFor(async () => (await row(corrupt.id))?.lifecycle === 'queued', 'corrupt row queued')
@@ -251,6 +280,7 @@ exec ${JSON.stringify(fakeHarness)} "$@"
     assert.equal(readFileSync(corruptPath, 'utf8'), malformed, 'corrupt record bytes are never rewritten')
     assert.match(log, new RegExp(`launch queue excluded ${corrupt.id}`), 'queue logs the isolated session error')
   } finally {
+    writeFileSync(readinessRelease, '')
     if (backend) await stopChild(backend)
     spawnSync('tmux', ['-L', tmux, 'kill-server'], { stdio: 'ignore' })
     rmSync(fixture, { recursive: true, force: true })

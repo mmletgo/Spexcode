@@ -81,6 +81,9 @@ session becomes stopped/open with its latest declaration preserved; a still-arch
 also complete the ordinary cold proof before its original close metadata can be restored. Only successful
 teardown clears the fence. `close` refuses a pending resume and names resume revalidation or `stop` cancellation,
 so a changed close cannot silently supersede a live candidate or strand it with no legal recovery operation.
+Successful stop also retires any earlier queued-launch readiness marker and observer through the shared exact
+teardown boundary. Its freed capacity is available immediately, and a late observer cannot change that stopped
+record or interfere with a newer launch attempt ([[launch]]).
 
 **The resume guard — restore-on-alive must be impossible.** Relaunch is a *kill-then-respawn*, so it destroys
 a running agent's in-flight work the instant the agent is actually alive. That was the incident's kill-shot:

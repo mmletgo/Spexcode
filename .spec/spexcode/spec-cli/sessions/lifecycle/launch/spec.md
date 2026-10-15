@@ -94,6 +94,10 @@ receipt refusal records the narrow failure and releases the boot slot before ret
 has started, the asynchronous readiness observer catches and records any receipt/readiness rejection and releases
 that slot in all outcomes. Correcting the receipt therefore makes the same queued record retryable, and no
 rejected receipt can permanently consume capacity or escape as an unhandled background rejection.
+Successful exact runtime teardown cancels that attempt's readiness owner and releases its boot slot immediately;
+it does not wait for the observer's deadline. A late success, rejection, timeout, or final cleanup belongs only
+to its original attempt: it cannot publish over a stopped session, consume a later attempt's receipt, or release
+a later attempt's slot. A teardown that refuses or fails retains the owner until its ordinary outcome settles.
 When the bounded readiness window expires **before** the adapter has committed its native identity and first-turn
 receipt, the record is terminalized as `error`/offline with the complete `queued launch readiness failed: ...`
 reason and its normal parent-watch transition. Once that receipt exists, a later liveness timeout is only an

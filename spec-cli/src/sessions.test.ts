@@ -20,6 +20,7 @@ import { mainRoot, runtimeRoot, sessionRecordPath, sessionArtifactPath, sessionS
 import { readTimeline } from './session-timeline.js'
 import { readCodexGenerationLedger } from './codex-runtime-generations.js'
 import { configuredSessionApplication } from './session-application.js'
+import { trySessionRecordLockSync } from './session-record-lock.js'
 
 // Test fixtures write the runtime envelope directly to exercise harness edges. The production contract has
 // no JSON fallback after cutover, so seed the canonical application row only the first time a fixture envelope
@@ -208,6 +209,231 @@ test('late launch readiness diagnostics do not overwrite a later declaration not
     else process.env.SPEX_SESSION_DATABASE_PATH = previousDatabasePath
     rmSync(home, { recursive: true, force: true })
   }
+})
+
+test('cancelled queued readiness cannot publish or release a newer attempt after exact stop', serial, async (t) => {
+  for (const outcome of ['ready', 'timeout', 'thrown'] as const) await t.test(outcome, async () => {
+    const previousCwd = process.cwd()
+    const previousHome = process.env.SPEXCODE_HOME
+    const previousDatabase = process.env.SPEX_SESSION_DATABASE_PATH
+    const previousPath = process.env.PATH
+    const originalReady = claudeHarness.launchReady
+    const originalCleanup = claudeHarness.cleanupRuntime
+    const home = mkdtempSync(join(tmpdir(), 'spex-readiness-attempt-'))
+    const project = join(home, 'project'); mkdirSync(join(project, '.spec'), { recursive: true })
+    writeFileSync(join(project, '.spec', 'spexcode.json'), '{"sessions":{"maxActive":1}}\n')
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: project })
+    execFileSync('git', ['-c', 'user.name=fixture', '-c', 'user.email=fixture@example.test', 'add', '.'], { cwd: project })
+    execFileSync('git', ['-c', 'user.name=fixture', '-c', 'user.email=fixture@example.test', 'commit', '-qm', 'fixture'], { cwd: project })
+    process.chdir(project)
+    process.env.SPEXCODE_HOME = home
+    const id = `readiness-attempt-${process.pid}-${outcome}`
+    assertIsolatedResumeStore(home, id)
+    const bin = join(home, 'bin')
+    writeResumeTmuxFixture(bin, join(home, 'command'), join(home, 'launch.pid'))
+    process.env.PATH = `${bin}:${previousPath}`
+    let releaseOld!: () => void, releaseNew!: () => void
+    const oldGate = new Promise<void>((resolve) => { releaseOld = resolve })
+    const newGate = new Promise<void>((resolve) => { releaseNew = resolve })
+    let calls = 0, staleValidations = 0
+    const deadPid = spawnSync(process.execPath, ['-e', '']).pid
+    assert.equal(processStartToken(deadPid), null, 'the fixture leaf has already exited')
+    const raw = () => JSON.parse(readFileSync(sessionRecordPath(id), 'utf8')) as Record<string, unknown>
+    try {
+      claudeHarness.launchReady = async () => {
+        const attempt = ++calls
+        await (attempt === 1 ? oldGate : newGate)
+        if (attempt === 1 && outcome === 'timeout') return null
+        if (attempt === 1 && outcome === 'thrown') throw new Error('cancelled adapter rejection')
+        return { proof: { kind: 'fixture-attempt', attempt }, validate: async () => {
+          if (attempt === 1) staleValidations++
+          return true
+        } }
+      }
+      writeResumeFixtureRecord(id, project, 'true', {
+        harness: 'claude', harness_session_id: '', stopped: false, note: '',
+        launch_readiness_started_at: Date.now() - 1_000,
+      })
+      writeFileSync(sessionArtifactPath(id, 'agent.pid'), `${deadPid}\n`)
+      await drainQueue()
+      assert.equal(calls, 1)
+      const firstMarker = raw().launch_readiness_started_at
+      claudeHarness.cleanupRuntime = async () => { throw new Error('fixture exact teardown failed') }
+      await assert.rejects(stopSession(id), /fixture exact teardown failed/)
+      await drainQueue()
+      assert.equal(calls, 1, 'failed teardown keeps its original readiness owner')
+      assert.equal(raw().launch_readiness_started_at, firstMarker)
+
+      claudeHarness.cleanupRuntime = originalCleanup
+      writeFileSync(sessionArtifactPath(id, 'agent.pid'), `${deadPid}\n`)
+      assert.equal(await stopSession(id), true)
+      assert.equal(raw().launch_readiness_started_at, undefined)
+      const nextMarker = Date.now()
+      fsWriteFileSync(sessionRecordPath(id), `${JSON.stringify({ ...raw(), stopped: false, launch_readiness_started_at: nextMarker })}\n`)
+      writeFileSync(sessionArtifactPath(id, 'agent.pid'), `${deadPid}\n`)
+      await drainQueue()
+      assert.equal(calls, 2, 'a later attempt owns its own recovery observer')
+      releaseOld()
+      await sleep(0)
+      await drainQueue()
+      assert.equal(calls, 2, 'the old finally cannot release the newer attempt slot')
+      assert.equal(staleValidations, 0, 'the old then cannot validate or publish a newer attempt')
+      assert.equal(raw().launch_readiness_started_at, nextMarker)
+      assert.deepEqual({ status: canonicalState(id).status, note: canonicalState(id).note }, { status: 'active', note: null },
+        'late success, timeout and rejection all leave the new attempt unchanged')
+      releaseNew()
+      await waitUntil(() => raw().launch_readiness_started_at == null, 'new readiness attempt settles')
+    } finally {
+      releaseOld(); releaseNew()
+      await sleep(20)
+      claudeHarness.launchReady = originalReady
+      claudeHarness.cleanupRuntime = originalCleanup
+      process.chdir(previousCwd)
+      if (previousHome === undefined) delete process.env.SPEXCODE_HOME
+      else process.env.SPEXCODE_HOME = previousHome
+      if (previousDatabase === undefined) delete process.env.SPEX_SESSION_DATABASE_PATH
+      else process.env.SPEX_SESSION_DATABASE_PATH = previousDatabase
+      process.env.PATH = previousPath
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+})
+
+test('stopping an identity-stage observer leaves a later attempt receipt unconsumed', serial, async () => {
+  const previousHome = process.env.SPEXCODE_HOME
+  const previousDatabase = process.env.SPEX_SESSION_DATABASE_PATH
+  const previousPath = process.env.PATH
+  const originalReady = codexHarness.launchReady
+  const originalShared = codexHarness.sharedRuntimes
+  const originalCleanup = codexHarness.cleanupRuntime
+  const home = mkdtempSync(join(tmpdir(), 'spex-readiness-identity-cancel-'))
+  const id = `readiness-identity-cancel-${process.pid}`
+  process.env.SPEXCODE_HOME = home
+  assertIsolatedResumeStore(home, id)
+  const bin = join(home, 'bin')
+  writeResumeTmuxFixture(bin, join(home, 'command'), join(home, 'launch.pid'))
+  process.env.PATH = `${bin}:${previousPath}`
+  let livenessChecks = 0
+  try {
+    codexHarness.sharedRuntimes = () => []
+    codexHarness.cleanupRuntime = async () => {}
+    codexHarness.launchReady = async () => {
+      livenessChecks++
+      return { proof: { kind: 'fixture-receipt-ready' }, validate: async () => true }
+    }
+    const deadPid = spawnSync(process.execPath, ['-e', '']).pid
+    assert.equal(processStartToken(deadPid), null)
+    const payload = 'later attempt authoritative launch payload'
+    writeResumeFixtureRecord(id, process.cwd(), 'true', {
+      harness: 'codex', harness_session_id: '', stopped: false, note: '',
+      launch_readiness_started_at: Date.now(),
+    })
+    writeFileSync(sessionArtifactPath(id, 'launch'), payload)
+    writeFileSync(sessionArtifactPath(id, 'agent.pid'), `${deadPid}\n`)
+    await drainQueue()
+    assert.equal(livenessChecks, 0, 'the first observer is waiting for its native identity')
+    assert.equal(await stopSession(id), true)
+    assert.equal(stageHarnessLaunchProof(id, 'thread-later-attempt', payload), true)
+    const receiptPath = sessionArtifactPath(id, 'launch.receipt')
+    const receipt = readFileSync(receiptPath, 'utf8')
+    await sleep(250)
+    assert.equal(readFileSync(receiptPath, 'utf8'), receipt, 'the cancelled observer cannot consume a later receipt')
+    assert.equal(readFileSync(sessionArtifactPath(id, 'launch'), 'utf8'), payload)
+    const stopped = JSON.parse(readFileSync(sessionRecordPath(id), 'utf8'))
+    assert.equal(stopped.harness_session_id, '')
+    assert.equal(stopped.stopped, true)
+    assert.equal(stopped.launch_readiness_started_at, undefined)
+    assert.equal(livenessChecks, 0)
+    assert.deepEqual({ status: canonicalState(id).status, note: canonicalState(id).note }, { status: 'active', note: null })
+  } finally {
+    codexHarness.launchReady = originalReady
+    codexHarness.sharedRuntimes = originalShared
+    codexHarness.cleanupRuntime = originalCleanup
+    if (previousHome === undefined) delete process.env.SPEXCODE_HOME
+    else process.env.SPEXCODE_HOME = previousHome
+    if (previousDatabase === undefined) delete process.env.SPEX_SESSION_DATABASE_PATH
+    else process.env.SPEX_SESSION_DATABASE_PATH = previousDatabase
+    process.env.PATH = previousPath
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('readiness recovery holds one record lock across witness, marker seeding and observer ownership', serial, async (t) => {
+  for (const marker of ['existing', 'legacy'] as const) await t.test(marker, async () => {
+    const previousHome = process.env.SPEXCODE_HOME
+    const previousDatabase = process.env.SPEX_SESSION_DATABASE_PATH
+    const previousPath = process.env.PATH
+    const originalReady = codexHeadlessHarness.launchReady
+    const originalShared = codexHeadlessHarness.sharedRuntimes
+    const originalCleanup = codexHeadlessHarness.cleanupRuntime
+    const originalDescriptorKey = codexHeadlessHarness.targetDescriptorKey
+    const home = mkdtempSync(join(tmpdir(), 'spex-readiness-recovery-stop-'))
+    const id = `readiness-recovery-stop-${process.pid}-${marker}`
+    process.env.SPEXCODE_HOME = home
+    assertIsolatedResumeStore(home, id)
+    const bin = join(home, 'bin')
+    writeResumeTmuxFixture(bin, join(home, 'command'), join(home, 'launch.pid'))
+    process.env.PATH = `${bin}:${previousPath}`
+    let enterWitness!: () => void, releaseWitness!: () => void, releaseReadiness!: () => void
+    const entered = new Promise<void>((resolve) => { enterWitness = resolve })
+    const witnessGate = new Promise<void>((resolve) => { releaseWitness = resolve })
+    const readinessGate = new Promise<void>((resolve) => { releaseReadiness = resolve })
+    let censusReads = 0, readinessCalls = 0
+    let draining: Promise<void> | undefined
+    try {
+      codexHeadlessHarness.targetDescriptorKey = () => 'fixture-recovery'
+      codexHeadlessHarness.sharedRuntimes = () => [{
+        key: 'fixture-recovery', label: 'fixture recovery', pidFile: join(home, 'none.pid'), receiptFile: join(home, 'none.receipt'),
+        probe: async () => ({ healthy: true, references: [] }),
+        residency: async () => {
+          if (++censusReads === 2) { enterWitness(); await witnessGate }
+          return { healthy: true, referenceIds: [], rootAbsent: true }
+        },
+      }]
+      codexHeadlessHarness.cleanupRuntime = async () => {}
+      codexHeadlessHarness.launchReady = async () => {
+        readinessCalls++
+        await readinessGate
+        return { proof: { kind: 'fixture-recovered-ready' }, validate: async () => true }
+      }
+      writeResumeFixtureRecord(id, process.cwd(), 'true', {
+        stopped: false, note: '', ...(marker === 'existing' ? { launch_readiness_started_at: Date.now() } : {}),
+      })
+      if (marker === 'legacy') writeFileSync(sessionArtifactPath(id, 'launch'), 'legacy pending launch')
+      draining = drainQueue()
+      await Promise.race([entered, draining.then(() => { throw new Error(`recovery skipped its witness gate after ${censusReads} census reads`) })])
+      const escapedLock = trySessionRecordLockSync(id)
+      escapedLock?.()
+      assert.equal(escapedLock, null, 'a stop cannot commit between the recovery witness and its marker/owner mutation')
+      const stopping = stopSession(id)
+      releaseWitness()
+      await draining
+      assert.equal(await stopping, true)
+      const callsAtStop = readinessCalls
+      releaseReadiness()
+      await sleep(0)
+      await drainQueue()
+      assert.equal(readinessCalls, callsAtStop, 'recovery cannot create another observer after stop committed')
+      const stopped = JSON.parse(readFileSync(sessionRecordPath(id), 'utf8'))
+      assert.equal(stopped.stopped, true)
+      assert.equal(stopped.launch_readiness_started_at, undefined)
+      assert.deepEqual({ status: canonicalState(id).status, note: canonicalState(id).note }, { status: 'active', note: null })
+    } finally {
+      releaseWitness(); releaseReadiness()
+      await draining
+      await sleep(20)
+      codexHeadlessHarness.launchReady = originalReady
+      codexHeadlessHarness.sharedRuntimes = originalShared
+      codexHeadlessHarness.cleanupRuntime = originalCleanup
+      codexHeadlessHarness.targetDescriptorKey = originalDescriptorKey
+      if (previousHome === undefined) delete process.env.SPEXCODE_HOME
+      else process.env.SPEXCODE_HOME = previousHome
+      if (previousDatabase === undefined) delete process.env.SPEX_SESSION_DATABASE_PATH
+      else process.env.SPEX_SESSION_DATABASE_PATH = previousDatabase
+      process.env.PATH = previousPath
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
 })
 
 test('session diff commit links preserve the full forge repository and commit identity', () => {
@@ -1381,7 +1607,10 @@ test('resume admission and interrupted recovery preserve live owners and newer c
     try {
       const admission = outcome === 'open-live' || outcome === 'open-unknown'
       const open = outcome === 'open-gone' || admission
-      writeResumeFixtureRecord(id, process.cwd(), 'true', { status: open ? 'active' : 'archived', stopped: !open || admission, archived: !open, closed_at: open ? undefined : '2026-09-16T00:00:00.000Z' })
+      const project = join(home, 'project'); mkdirSync(project)
+      execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: project })
+      execFileSync('git', ['-c', 'user.name=resume-fixture', '-c', 'user.email=resume@example.test', 'commit', '--allow-empty', '-qm', 'fixture'], { cwd: project })
+      writeResumeFixtureRecord(id, project, 'true', { status: open ? 'active' : 'archived', stopped: !open || admission, archived: !open, closed_at: open ? undefined : '2026-09-16T00:00:00.000Z' })
       const original = JSON.parse(readFileSync(sessionRecordPath(id), 'utf8'))
       if (!admission) writeFileSync(sessionRecordPath(id), `${JSON.stringify({
         ...original, archived: false, stopped: false, closed_at: undefined,
