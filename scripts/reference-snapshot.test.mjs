@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import test from 'node:test'
@@ -58,6 +58,38 @@ test('Reference snapshot command writes one fresh self-contained payload', () =>
     assert.equal(payload.payloadName, REFERENCE_SNAPSHOT_PAYLOAD_NAME)
     assert.equal(payload.revision, revision)
     assert.throws(() => execFileSync(process.execPath, [renderer, '--out', output, '--revision', revision], { cwd: root, encoding: 'utf8' }), /Command failed/)
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('Reference snapshot skips instruction-file links and refuses linked spec files and directories', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'spex-reference-symlinks-'))
+  const sourceRoot = join(directory, '.spec', 'spexcode')
+  const child = join(sourceRoot, 'child')
+  try {
+    mkdirSync(child, { recursive: true })
+    writeFileSync(join(sourceRoot, 'spec.md'), '---\ntitle: root\n---\n# root\nBody.\n')
+    writeFileSync(join(sourceRoot, 'AGENTS.md'), 'Instructions.\n')
+    symlinkSync('AGENTS.md', join(sourceRoot, 'CLAUDE.md'))
+    writeFileSync(join(child, 'spec.md'), '---\ntitle: child\n---\n# child\nBody.\n')
+    writeFileSync(join(child, 'AGENTS.content'), 'Instructions.\n')
+    symlinkSync('AGENTS.content', join(child, 'AGENTS.md'))
+    symlinkSync('AGENTS.md', join(child, 'CLAUDE.md'))
+
+    const snapshot = createReferenceSnapshot({ root: directory, revision })
+    assert.equal(snapshot.provenance.pageCount, 2)
+    assert.ok(snapshot.pages.every((page) => page.source.path.endsWith('/spec.md')))
+
+    const linkedDirectory = join(sourceRoot, 'linked-directory')
+    symlinkSync('child', linkedDirectory)
+    assert.throws(() => createReferenceSnapshot({ root: directory, revision }), /refusing symbolic link .*linked-directory/)
+    unlinkSync(linkedDirectory)
+
+    const linkedSpecDirectory = join(sourceRoot, 'linked-spec')
+    mkdirSync(linkedSpecDirectory)
+    symlinkSync('../spec.md', join(linkedSpecDirectory, 'spec.md'))
+    assert.throws(() => createReferenceSnapshot({ root: directory, revision }), /refusing symbolic link .*spec\.md/)
   } finally {
     rmSync(directory, { recursive: true, force: true })
   }
