@@ -18,6 +18,8 @@ related:
 
 ## expanded spec
 
+候选 schema、基础校验与任务指令由 [[sync-candidate-review]] 共用；本节点保留所有生成身份隔离及专用业务标记校验。
+
 本节点实现 [[sync-execution]] 的一次生成尝试，依赖 [[sync-input-snapshot]]、[[sync-input-composition]] 与 [[sync-frozen-candidate]]。不单独代表 P2、V3/V4 或完整产品已交付。
 
 `runGeneration(input, { runner, validateCandidate, onDispatch? })` 复用调用者注入的 ElaborationRunner 接缝，不新建会话执行器、持久 store、队列或修复循环。调用者决定 attempt、总预算、恢复和有限重试；一次调用至多生成一次与独立评审一次。模型与 effort 由上层指定为 gpt-6.1-sol/high，不私自切换模型。稳定 requestKey 分出 code_generate/code_review 用途；onDispatch 先完成 durable 登记才进入 native runner，最终 session/thread/turn 的持久绑定由上层 runner 包装负责。
