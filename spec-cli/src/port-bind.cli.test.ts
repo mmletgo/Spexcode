@@ -9,12 +9,13 @@ import { ALL_INTERFACES, listenOrExit, LOOPBACK_HOST, resolveConfiguredHost, res
 const packageRoot = fileURLToPath(new URL('..', import.meta.url))
 const cli = fileURLToPath(new URL('./cli.ts', import.meta.url))
 
-async function occupyPort(host?: string): Promise<{ port: number; close: () => Promise<void> }> {
+async function occupyPort(host = LOOPBACK_HOST): Promise<{ port: number; close: () => Promise<void> }> {
   const server = net.createServer()
   server.listen(0, host)
   await once(server, 'listening')
   const address = server.address()
   assert.ok(address && typeof address === 'object')
+  assert.equal(address.address, host)
   return {
     port: address.port,
     close: async () => {
@@ -23,6 +24,19 @@ async function occupyPort(host?: string): Promise<{ port: number; close: () => P
     },
   }
 }
+
+test('the default occupied-port fixture binds the local loopback interface', async () => {
+  const occupied = await occupyPort()
+  try {
+    const contender = net.createServer()
+    const failure = once(contender, 'error')
+    contender.listen(occupied.port, LOOPBACK_HOST)
+    const [error] = await failure
+    assert.equal((error as NodeJS.ErrnoException).code, 'EADDRINUSE')
+  } finally {
+    await occupied.close()
+  }
+})
 
 type CliProcess = { child: ChildProcess; stdout: () => string; stderr: () => string }
 

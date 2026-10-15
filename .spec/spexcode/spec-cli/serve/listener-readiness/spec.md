@@ -39,6 +39,10 @@ is to be reachable from elsewhere declares the wide face, and its operator can s
 verb therefore accepts the same host option, and a surface that binds wide reports a dialable address rather
 than the wildcard when it publishes where it can be reached.
 
+Bind-collision tests reserve the same explicit host as the local surface under test. A port occupied on an
+IPv6 wildcard is not proof that the service's IPv4 loopback bind collides; on IPv6-only hosts the latter may
+still succeed, so the fixture uses the declared loopback host.
+
 Private children and upstream services may report diagnostics, but they never claim that the public surface
 is serving. Consequently a collision on `spex serve`, `spex serve ui`, or another caller of the same listener
 helper cannot leak a success line from work completed before the public bind, while a successful bind retains
