@@ -25,7 +25,7 @@ import { SyncInputObserver, type SyncObserverHealth } from './observer.js'
 import { SyncStore, SyncStoreError } from './store.js'
 import { prepareHistoryRequest, readHistoryRequest, readReceiptHistoryRestorations } from './history-input.js'
 import { readSyncLandingStatus } from './landing-status.js'
-import { readFrozenContracts } from './frozen-contracts.js'
+import { isSyncSpecPath, readFrozenContracts } from './frozen-contracts.js'
 
 export type SyncScopeCoverage = { includedNodeIds: string[]; contextNodeIds: string[]; missingNodeIds: string[]; excludedNodeIds: string[]; totalNodeCount: number }
 export type SyncSubmitInput = { nodeId: string; requestId: string; origin?: 'spec' | 'initial' | 'code' | 'combined' | 'decision'; patch?: SpecBodyEdit; retryOf?: string }
@@ -149,8 +149,7 @@ export class SyncApplication {
       return { settings: await this.readSettings(), operations, observation: this.observationStatus(), sources: this.registeredSources() }
     }
     const snapshot = await captureInputSnapshot(this.root)
-    const files = new Map(verifySnapshot(snapshot).filter(entry => entry.mode !== '120000' && entry.path.startsWith('.spec/') && entry.path.endsWith('/spec.md')).map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString('utf8')]))
-    const node = options.nodeId ? (await loadSpecs(this.root, { tip: snapshot.headCommit, history: null, drift: null, snapshot: { tip: snapshot.headCommit, files } })).find(node => node.id === options.nodeId) : null
+    const node = options.nodeId ? (await this.frozenNodes(snapshot)).find(node => node.id === options.nodeId) : null
     const operations = await Promise.all(this.store.listOperations(snapshot.source.repositoryId, { sourceRoot: this.root, limit: options.limit ?? 30 })
       .filter(operation => !options.nodeId || operation.scope.contractIds.includes(options.nodeId) || !!node && coveredPath(node.path, operation.scope.paths))
       .map(operation => this.detail(operation, snapshot)))
@@ -163,7 +162,7 @@ export class SyncApplication {
     })
   }
   private async frozenNodes(snapshot: InputSnapshot): Promise<Awaited<ReturnType<typeof loadSpecs>>> {
-    const files = new Map(verifySnapshot(snapshot).filter(entry => entry.mode !== '120000' && entry.path.startsWith('.spec/') && entry.path.endsWith('/spec.md')).map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString('utf8')]))
+    const files = new Map(verifySnapshot(snapshot).filter(entry => entry.mode !== '120000' && isSyncSpecPath(entry.path)).map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString('utf8')]))
     return loadSpecs(this.root, { tip: snapshot.headCommit, history: null, drift: null, snapshot: { tip: snapshot.headCommit, files } })
   }
   private selectRegisteredNodes(nodes: Awaited<ReturnType<typeof loadSpecs>>, settings: ReturnType<typeof readSyncSettings>['settings'], snapshot: InputSnapshot): Awaited<ReturnType<typeof loadSpecs>> {

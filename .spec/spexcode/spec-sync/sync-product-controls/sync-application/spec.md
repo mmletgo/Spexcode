@@ -63,6 +63,8 @@ P4 的正式服务生命周期持有 [[sync-input-observer]]，不依赖浏览�
 
 注册意图由版本化nodeIds限定，父/子重复登记只扫描一次最外明确意图；其实际子树/影响闭包由既有node与图派生。省略nodeIds仅注册真实治理授权源码/测试的意图，纯raw新功能需明确意图根。status.observation.coverage列included/excluded/total，未知或未授权节点不产生虚假已覆盖结果。
 
+注册、授权检查和覆盖投影共同采用 [[sync-frozen-contracts]] 的业务 Spec 路径判定，`.plugins` 实例配置不成为业务意图或完整业务覆盖分母；显式登记该类节点仍按不存在的业务意图拒绝。插件继续显示于完整项目图，不因此取得业务同步写权。
+
 健康持久记录绑定instanceId/真实PID/startToken，查询重新验证进程身份；旧online字段不能证明服务活着。热重载通过instance CAS接管，旧观察器准入前重核所有权。status.sources列明确enable的物理来源、注册意图、存在性、控制、最近观测及持久健康；缺失来源启动仍保观察职责，周期重试。删除重建改变物理身份先报需重新授权，未授权新物理树不创建快照。最后差异正文保存在同一内容寻址evidence；commonDir被删除/移动导致证据不可读时返回明确unavailable/hash/reason，仍可查询missing健康和最后已捕获snapshot身份。
 
 派发先ack真实protocol消息成为durablequeued，再使用store.nextQueued资格与原anchor FIFO；已开始的安全checkpoint仅按原anchor恢复，失败/预算/冲突不能自动重开。coordinator未领取前的明确unsupported不能触发递归自旋。fresh manual与自动输入统一exactselection规划；P4previousBaselinePair为空，逐资源真实pair不被latest伪拼。旧P3显式retry只沿原冻结pair/plan，P4retry沿原selection。

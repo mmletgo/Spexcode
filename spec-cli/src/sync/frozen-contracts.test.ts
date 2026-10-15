@@ -23,6 +23,18 @@ test('冻结输入在不存在的宿主目录仍重建真实契约、源码锚�
   assert.deepEqual(checkGenerationContractIntent(state, state, policy(state)), [])
 })
 
+test('实例插件契约不进入业务图，plugin-system产品规格及普通业务义务保留', async () => {
+  const files = inputs()
+  files.set('.spec/export/.plugins/spec.md', '---\ntitle: 插件实例\n---\n## raw source\n工具配置。\n')
+  files.set('.spec/export/.plugins/instance-contract/spec.md', source.replaceAll('EXPORT', 'INSTANCE'))
+  files.set('.spec/export/plugin-system/spec.md', source.replaceAll('EXPORT', 'SYSTEM'))
+  const frozen = await readFrozenContracts('/frozen', files)
+  assert.deepEqual(frozen.nodes.map(node => node.id).sort(), ['export-contract', 'plugin-system'])
+  assert.ok(![...frozen.graph.items.keys()].some(id => id.includes('INSTANCE')))
+  assert.ok(frozen.graph.items.has('REQ-SYSTEM-01'))
+  assert.ok(frozen.graph.items.has('REQ-EXPORT-01'))
+})
+
 test('删除schema/AC、弱化断言、改raw/命令不能让生成候选免检', async () => {
   const before = await readFrozenContracts('/frozen', inputs())
   const ac = before.contracts[0].items.find(item => item.kind === 'AC')!

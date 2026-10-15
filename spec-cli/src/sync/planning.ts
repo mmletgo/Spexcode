@@ -4,7 +4,7 @@ import { contractImpact, contractReferences, parseFrontmatter } from '@spexcode/
 import type { SyncCoordinatorPlan } from './coordinator-types.js'
 import type { BaselinePair, BaselineResource, FrozenBaselineSelection, InputSnapshot, SyncScope } from './operation-types.js'
 import { selectedRetiredIds, verifyBaselineSelection } from './composition.js'
-import { readFrozenContracts } from './frozen-contracts.js'
+import { isSyncSpecPath, readFrozenContracts } from './frozen-contracts.js'
 import { readEvidence, readObject, readTree, verifySnapshot } from './snapshot.js'
 import { controlledDecisionIdentity } from './request-input.js'
 import { readDecisionAuthority } from './code-behavior.js'
@@ -29,16 +29,16 @@ export async function buildSyncApplicationPlan(snapshot: InputSnapshot, nodeId: 
   const baselinePair = baseline && !('version' in baseline) ? baseline : null
   const pairs = selection ? [...new Map(selection.bindings.flatMap(binding => { const pair = 'bytePair' in binding ? binding.bytePair : binding.intentPair; return pair ? [[pair.id, pair] as const] : [] })).values()] : baselinePair ? [baselinePair] : []
   const { settings } = readSyncSettings(snapshot), entries = verifySnapshot(snapshot)
-  const specEntries = entries.filter(entry => entry.mode !== '120000' && entry.path.startsWith('.spec/') && entry.path.endsWith('/spec.md'))
+  const specEntries = entries.filter(entry => entry.mode !== '120000' && isSyncSpecPath(entry.path))
   const files = new Map(specEntries.map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString('utf8')]))
   const oldEntryMap = new Map((selection ? entries : baselinePair ? readTree(snapshot.source.commonDir, baselinePair.verifiedDelivery.immutableTree) : []).map(entry => [entry.path, entry]))
   for (const binding of selection?.bindings ?? []) if ('bytePair' in binding && binding.bytePair) { const entry = verifySnapshot(binding.bytePair.verifiedDelivery).find(entry => entry.path === binding.resource.path); if (entry) oldEntryMap.set(entry.path, entry); else oldEntryMap.delete(binding.resource.path) }
   const oldEntries = [...oldEntryMap.values()]
-  const oldFiles = new Map(oldEntries.filter(entry => entry.mode !== '120000' && entry.path.startsWith('.spec/') && entry.path.endsWith('/spec.md')).map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString('utf8')]))
+  const oldFiles = new Map(oldEntries.filter(entry => entry.mode !== '120000' && isSyncSpecPath(entry.path)).map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString('utf8')]))
   const oldFrozen = await readFrozenContracts(snapshot.source.canonicalRoot, oldFiles)
-  const protectedGraphs = await Promise.all(pairs.map(pair => readFrozenContracts(snapshot.source.canonicalRoot, new Map(verifySnapshot(pair.verifiedDelivery).filter(entry => entry.mode !== '120000' && entry.path.startsWith('.spec/') && entry.path.endsWith('/spec.md')).map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString('utf8')])))))
+  const protectedGraphs = await Promise.all(pairs.map(pair => readFrozenContracts(snapshot.source.canonicalRoot, new Map(verifySnapshot(pair.verifiedDelivery).filter(entry => entry.mode !== '120000' && isSyncSpecPath(entry.path)).map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString('utf8')])))))
   const frozen = await readFrozenContracts(snapshot.source.canonicalRoot, files)
-  const nodes = await loadSpecs(snapshot.source.canonicalRoot, { tip: snapshot.headCommit, history: null, drift: null, snapshot: { tip: snapshot.headCommit, files: new Map([...files].filter(([path]) => path.startsWith('.spec/') && path.endsWith('/spec.md'))) } })
+  const nodes = await loadSpecs(snapshot.source.canonicalRoot, { tip: snapshot.headCommit, history: null, drift: null, snapshot: { tip: snapshot.headCommit, files } })
   const currentIntent = nodes.find(node => node.id === nodeId)
   const currentIntentIds = new Set(frozen.contracts.find(contract => contract.nodeId === currentIntent?.id)?.items.map(item => item.id) ?? [])
   const previousIntent = oldFrozen.nodes.find(node => node.id === nodeId) ?? oldFrozen.nodes.find(node => oldFrozen.contracts.find(contract => contract.nodeId === node.id)?.items.some(item => currentIntentIds.has(item.id)))
