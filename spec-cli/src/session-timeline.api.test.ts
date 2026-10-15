@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { openProjectSessionApplication } from '@spexcode/session-application'
+import { hostProcessAdapter } from '@spexcode/spec-core'
 import { listenerAt, rvSock } from './harness.js'
 import { piHeadlessSock } from './pi-headless.js'
 
@@ -35,20 +36,68 @@ async function waitFor(check: () => Promise<boolean>, label: string, timeoutMs =
   }
 }
 async function stop(child: ChildProcess): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return
+  const pid = child.pid
+  assert.ok(pid, 'the fixture backend has a process identity')
+  const gone = () => process.platform === 'win32'
+    ? child.exitCode !== null || child.signalCode !== null
+    : hostProcessAdapter.liveness(-pid) === 'absent'
   const signal = (name: NodeJS.Signals) => {
-    if (child.pid && process.platform !== 'win32') {
-      try { process.kill(-child.pid, name); return } catch { /* parent may have already reaped the group */ }
+    if (process.platform !== 'win32') {
+      try { process.kill(-pid, name) }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error }
+    } else if (!gone()) {
+      child.kill(name)
     }
-    child.kill(name)
   }
   signal('SIGTERM')
-  await Promise.race([once(child, 'exit'), new Promise((resolve) => setTimeout(resolve, 3_000))])
-  if (child.exitCode === null && child.signalCode === null) {
+  const deadline = Date.now() + 3_000
+  while (!gone() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25))
+  if (!gone()) {
     signal('SIGKILL')
-    await once(child, 'exit').catch(() => {})
+    await waitFor(async () => gone(), `backend process group ${pid} exit`, 3_000)
   }
 }
+
+test('teardown stops the detached backend group after its leader has exited', { skip: process.platform === 'win32' }, async () => {
+  const fixture = mkdtempSync(join(tmpdir(), 'spex-timeline-teardown-'))
+  const heartbeat = join(fixture, 'heartbeat.json')
+  const writer = `
+    const { renameSync, writeFileSync } = require('node:fs')
+    let count = 0
+    process.on('SIGTERM', () => {})
+    const write = () => {
+      writeFileSync(process.argv[1] + '.tmp', JSON.stringify({ pid: process.pid, count: ++count }))
+      renameSync(process.argv[1] + '.tmp', process.argv[1])
+    }
+    write()
+    setInterval(write, 10)
+  `
+  const leader = spawn(process.execPath, ['-e', `
+    const { spawn } = require('node:child_process')
+    spawn(process.execPath, ['-e', ${JSON.stringify(writer)}, ${JSON.stringify(heartbeat)}], { stdio: 'ignore' }).unref()
+  `], { detached: true, stdio: 'ignore' })
+  const exited = once(leader, 'exit')
+  try {
+    await waitFor(async () => existsSync(heartbeat), 'detached writer ready')
+    await exited
+    assert.ok(leader.pid)
+    const { pid } = JSON.parse(readFileSync(heartbeat, 'utf8')) as { pid: number }
+    assert.equal(hostProcessAdapter.processGroupId(pid), leader.pid, 'the writer still belongs to the exited leader group')
+    assert.equal(hostProcessAdapter.liveness(-leader.pid), 'present')
+    await stop(leader)
+    assert.equal(hostProcessAdapter.liveness(-leader.pid), 'absent', 'teardown must wait for the whole backend group')
+    const settled = readFileSync(heartbeat, 'utf8')
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    assert.equal(readFileSync(heartbeat, 'utf8'), settled, 'no backend writer may outlive teardown')
+  } finally {
+    if (leader.pid) {
+      try { process.kill(-leader.pid, 'SIGKILL') }
+      catch (error) { assert.equal((error as NodeJS.ErrnoException).code, 'ESRCH') }
+      await waitFor(async () => hostProcessAdapter.liveness(-leader.pid!) === 'absent', 'teardown fixture group exit')
+    }
+    rmSync(fixture, { recursive: true, force: true })
+  }
+})
 
 test('YATU: 128 real session inputs rotate timeline files and API returns the cross-segment tail', { timeout: 60_000 }, async () => {
   const fixture = mkdtempSync(join(tmpdir(), 'spex-timeline-api-'))
