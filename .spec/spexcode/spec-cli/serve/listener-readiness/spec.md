@@ -20,6 +20,11 @@ effect and emits the supplied ready lines. Callers provide ready text as data ra
 the bind or maintaining their own timing branch. When a caller requests port `0`, the listener resolves the
 kernel-assigned port from `server.address()` and passes that actual port to ready text and post-bind
 publication callbacks; non-zero requests retain their existing output byte-for-byte.
+
+The backend's Hono listener also binds asynchronously after `serve()` returns. Boot waits for its real
+`listening` event before starting configured synchronization catch-up, then installs connection reaping and
+WebSocket upgrades before catch-up begins. The supervisor's `/health` readiness probe therefore observes a
+bound listener even when initial synchronization work is still running.
 Supervisor port configuration treats an unset, empty, or whitespace-only `PORT` as the default `8787`,
 preserves explicit `0` for kernel allocation, and rejects non-integer or out-of-range values before startup
 with a named non-zero error.

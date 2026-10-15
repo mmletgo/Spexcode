@@ -1,4 +1,5 @@
 import type { Server as HttpServer, ServerResponse as HttpServerResponse } from 'node:http'
+import { once } from 'node:events'
 import { randomUUID } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { Readable } from 'node:stream'
@@ -1221,9 +1222,10 @@ const port = Number(process.env.PORT || 8787)
 // the trust boundary" true — without a hostname Node binds all interfaces and the child is reachable from
 // the LAN with no password, bypassing the gate entirely (measured: eval auth-boundary).
 const server = serve({ fetch: app.fetch, port, hostname: '127.0.0.1' })
-await startConfiguredSyncServices(repoRoot())
+if (!server.listening) await once(server, 'listening')
 installConnectionReaper(server as unknown as HttpServer)
 injectWebSocket(server)
+await startConfiguredSyncServices(repoRoot())
 // Reclaim only stale, draining Codex generations whose exact detached identity and native reference census
 // prove they have no loaded threads. The current generation and any uncertain/shared process remain intact.
 try {
