@@ -8,6 +8,7 @@ code:
   - spec-cli/src/sessions.ts#sessionCandidateTarget
   - spec-cli/src/sessions.ts#recoverSessionCreateTermination
 related:
+  - spec-cli/src/session-create-pretarget-recovery.test.ts
   - spec-cli/src/session-create-cli.test.ts
   - spec-cli/src/session-create-orphan.yatu.test.ts
   - spec-cli/src/client.ts
@@ -114,7 +115,7 @@ This keeps concurrent creates from contending on `.git/config` while Git writes 
 
 受限结构化创建的取消/超时终止事实由原 request-key record 锁内写入私有原子收据，精确绑定 sessionId、requestDigest、payloadHash、phase 与 cleanupComplete/notStarted；仅已取得创建权、未publish、自己拥有的候选资源已清理完毕时写入。等待锁时退出、未知候选或清理残留不产生证明；readSessionCreateTermination 是只读入口。相同结构化键和载荷返回原终态，不重新创建；不同载荷仍 key_reused。收据不保存 prompt 或凭据，普通会话仍沿用原创建重试语义。
 
-取消恢复可经 recoverSessionCreateTermination 重入既有候选清理：先取得原 request-key 锁再取得精确候选资源锁，拒绝已有 canonical 会话（即使运行 envelope 缺失）。私有候选收据须精确匹配请求、载荷和从原 prompt 推导的 root/path/branch；没有收据、路径注册身份未知或分支偏离冻结 fork point 均不得删除或生成 notStarted 证明。已移除候选也必须锁内重读确认 Git registry、目录、分支与 session store 清理完成，退休私有候选收据后才写正式终止收据。首次清理失败或超时保留候选所有权，后续恢复不重建会话、不占新调用预算；清理错误保留 Git 命令阶段、截止事实和 stderr 诊断，不输出环境或凭据。
+取消恢复可经 recoverSessionCreateTermination 重入既有候选清理：先取得原 request-key 锁再取得精确候选资源锁，拒绝已有 canonical 会话（即使运行 envelope 缺失）。私有候选收据须精确匹配请求、载荷和从原 prompt 推导的 root/path/branch；路径注册身份未知或分支偏离冻结 fork point 均不得删除或生成 notStarted 证明。创建在 target-resolution 之前中断而未写候选收据时，只有固定结构化请求重算的 payloadHash 一致、canonical 地址从未初始化、无该 session 的原生 generation 登记、且双锁内真实 Git registry、目标目录、分支与 session store 全部不存在，才能由原创建权写 target-resolution/notStarted 终止收据。canonical 地址在退役后仍保留；此处依据完整发布前置和写前候选拥有权顺序证明从未进入原生队列，不能仅凭 runtime record 缺失或空闲原生 census 推断。未知、占用、载荷错配或检查失败保持原资源且不出具证明。已移除候选也必须锁内重读确认 Git registry、目录、分支与 session store 清理完成，退休私有候选收据后才写正式终止收据。首次清理失败或超时保留候选所有权，后续恢复不重建会话、不占新调用预算；清理错误保留 Git 命令阶段、截止事实和 stderr 诊断，不输出环境或凭据。
 
 候选资源所有权不能证明后来的文件字节仍属于创建事务。恢复须拒绝 tracked/staged/untracked/ignored 的新增或修改内容；只有既有 host-state seed `.spec/spexcode.local.json` 与 source 副本逐字节相同可视作已知可重建内容。恢复使用非 force 的 Git worktree remove，检查后出现未提交或未跟踪编辑仍由 Git 拒绝删除；未知内容不生成终止证明，原资源和预算保留。
 
