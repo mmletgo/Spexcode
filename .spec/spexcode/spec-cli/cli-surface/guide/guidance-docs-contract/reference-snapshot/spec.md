@@ -27,6 +27,8 @@ The same committed tree produces byte-identical output on repeated runs.
 The payload has schema `spexcode.reference-snapshot/v1`, declares its payload name and the exact source revision,
 and carries a canonical bundle digest. It contains every rendered Reference page, a complete derived navigation
 tree, and provenance sufficient to trace each rendered page back to its source spec path and source-byte digest.
+The producer visits only real directories and `spec.md` files. It excludes `AGENTS.md` and `CLAUDE.md` without
+following them, and rejects symbolic links used as a directory or a `spec.md` source.
 Pages use safe, unique relative paths below `docs/reference`; a source directory with a leading dot uses the
 existing public `dot-` spelling (for example `.plugins` becomes `dot-plugins`). Their rendered bytes, titles, and
 source identities are explicit. The navigation is derived from those same pages, not maintained as a second

@@ -94,7 +94,7 @@ export function assertFrozenReaderRuntime(runtime: FrozenReaderRuntime, model?: 
 /** 从独立无turn的清洁原生realm获取provider metadata，只删工具能力并固定摘要。 */
 export async function prepareFrozenReaderRuntime(root: string): Promise<FrozenReaderRuntime> {
   const cliVersion = execFileSync('codex', ['--version'], { encoding: 'utf8' }).trim()
-  if (cliVersion !== 'codex-cli 0.160.0') throw new StructuredSessionError('unsupported', 'this native CLI has no verified frozen-reader host capability proof')
+  if (cliVersion !== 'codex-cli 0.160.0') throw new StructuredSessionError('unsupported', 'this native CLI has no verified frozen-reader host capability evidence')
   const policyRoot = join(root, 'reader-policy', createHash('sha256').update(cliVersion).digest('hex').slice(0, 16))
   const descriptor = join(policyRoot, 'runtime.json')
   if (existsSync(descriptor)) { const runtime = JSON.parse(readFileSync(descriptor, 'utf8')) as FrozenReaderRuntime; assertFrozenReaderRuntime(runtime); return runtime }

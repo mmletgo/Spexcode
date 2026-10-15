@@ -785,7 +785,7 @@ export class SyncStore {
           const keys = [...(operation.scope.flowIds.includes(id) ? [`flow:${id}`] : []), ...(operation.scope.contractIds.includes(id) ? [`contract:${id}`] : [])]
           if (keys.length) return keys
           if (operation.baselineSelection) fail('SYNC_RETIRE_SCOPE', 'retired ID is not in the reviewed frozen resource scope')
-          for (const resourceKey of [`flow:${id}`, `contract:${id}`]) tx.exec('INSERT INTO sync_baseline_heads(source_key,resource_key,pair_id,legacy_reason) VALUES(?,?,NULL,?) ON CONFLICT(source_key,resource_key) DO UPDATE SET legacy_reason=excluded.legacy_reason', identityKey(published.source), resourceKey, 'legacy retirement kind has no reviewed scope proof')
+          for (const resourceKey of [`flow:${id}`, `contract:${id}`]) tx.exec('INSERT INTO sync_baseline_heads(source_key,resource_key,pair_id,legacy_reason) VALUES(?,?,NULL,?) ON CONFLICT(source_key,resource_key) DO UPDATE SET legacy_reason=excluded.legacy_reason', identityKey(published.source), resourceKey, 'legacy retirement kind has no reviewed scope evidence')
           return []
         })
         const resources = [...journal.plan.files.map(file => `path:${file.path}`), ...journal.plan.coveredScope.contractIds.map(id => `contract:${id}`), ...journal.plan.coveredScope.flowIds.map(id => `flow:${id}`), ...retiredKeys]

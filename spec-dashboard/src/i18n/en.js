@@ -90,9 +90,9 @@ export default {
             "invalidated": "Observer authorization invalidated"
         },
         "identityUnconfirmed": "Observer status says watching, but the backend cannot confirm its process identity.",
-        "lastScan": "Last completed scan",
-        "noScan": "No completed scan time recorded",
-        "scanUnavailable": "Scan time unavailable",
+        "lastScan": "Last completed check",
+        "noScan": "No completed check time recorded",
+        "scanUnavailable": "Check time unavailable",
         "diagnosticCode": "Diagnostic code",
         "automaticReady": "Automatic intake is not paused",
         "automaticPaused": "Automatic intake is paused",

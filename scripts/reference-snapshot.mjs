@@ -25,6 +25,7 @@ function walk(directory) {
   const entries = readdirSync(directory, { withFileTypes: true }).sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0)
   const files = []
   for (const entry of entries) {
+    if (entry.name === 'AGENTS.md' || entry.name === 'CLAUDE.md') continue
     const path = join(directory, entry.name)
     const metadata = lstatSync(path)
     if (metadata.isSymbolicLink()) fail(`refusing symbolic link ${path}`)

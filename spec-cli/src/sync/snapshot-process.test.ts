@@ -101,7 +101,7 @@ for (const format of ['sha1', 'sha256'] as const) test(`真实${format}空/二�
   assert.throws(() => readObject(commonDir, '0'.repeat(format === 'sha1' ? 40 : 64)))
   const oid = entries[1].oid, objectPath = join(commonDir, 'objects', oid.slice(0, 2), oid.slice(2))
   chmodSync(objectPath, 0o600); writeFileSync(objectPath, deflateSync(Buffer.from('blob 5\0wrong')))
-  assert.throws(() => readObject(commonDir, oid), /Git blob OID 不匹配/)
+  assert.throws(() => readObject(commonDir, oid), /Git object OID 不匹配/)
 })
 
 for (const failure of ['exit', 'timeout'] as const) test(`外部Git ${failure}错误透传且输入fd和owned临时目录清理`, t => {
