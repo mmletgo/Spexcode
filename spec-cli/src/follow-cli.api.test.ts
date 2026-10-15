@@ -165,14 +165,21 @@ test('managed watch registers once, delivers child states, and cancel stops deli
   const parentEnv = { ...base, SPEXCODE_SESSION_ID: WATCHER }
   const childEnv = { ...base, SPEXCODE_SESSION_ID: ID }
   const backendPort = await refusedPort()
+  let backendLog = ''
   const backend = spawn(process.execPath, [tsxCli, cli, 'serve', '--port', String(backendPort)], {
     cwd: repo,
     env: { ...base, PORT: String(backendPort), SPEXCODE_TMUX: `spex-follow-cli-backend-${backendPort}` },
-    stdio: ['ignore', 'ignore', 'ignore'],
+    stdio: ['ignore', 'pipe', 'pipe'],
   })
+  backend.stdout.on('data', (chunk) => { backendLog += String(chunk) })
+  backend.stderr.on('data', (chunk) => { backendLog += String(chunk) })
 
   try {
-    await waitFor(() => fetch(`http://127.0.0.1:${backendPort}/health`).then((response) => response.ok).catch(() => false), 'watch fixture backend did not become healthy')
+    try {
+      await waitFor(() => fetch(`http://127.0.0.1:${backendPort}/health`).then((response) => response.ok).catch(() => false), 'watch fixture backend did not become healthy', 30_000)
+    } catch (error) {
+      throw new Error(`watch fixture backend startup failed (exit ${backend.exitCode}):\n${backendLog}`, { cause: error })
+    }
     const installed = await runCli(['session', 'watch', ID], parentEnv, repo)
     assert.equal(installed.code, 0, installed.stderr)
     assert.equal(installed.stdout.trim(), `watching ${ID}`)
