@@ -816,6 +816,12 @@ JSON 分列 coverage 与本次 affected_scope；未配置范围返回 unsupporte
 退出码0表示 passed 或 not_applicable，1为失败或恢复未完成，2为unsupported。
 完整上下文超过2MiB沿受限冻结读取工具无损接收，生成和独审各自证明实际读取覆盖，仍受既有总预算约束。
 
+撤销已采纳功能：spex sync revert <operation-id> --request-id <稳定键>。
+应用核真实收据和已采纳提交，在当前版本成组补偿Spec、代码、测试及映射，保后续编辑与历史；
+结果是同一完整管线的新操作，冲突仍需具体业务处理，不能把已受理当已落地。
+回退程序版本前：spex sync stop-writer。此动作暂停新写入并结算或保留实际journal/资源；
+先检查返回的恢复诊断，再停服务和回退程序。新增数据库表和证据保留，不做破坏性down migration。
+
 see also: spex help sync`
 
 const TOPICS: Record<string, string> = { spec: SPEC, settings: SETTINGS, footprint: FOOTPRINT, files: FILES, web: WEB, widget: WIDGET, diagram: DIAGRAM, sync: SYNC }

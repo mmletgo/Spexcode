@@ -438,6 +438,8 @@ consumes the token after it.`,
        spex sync pause|resume
        spex sync verify <node-id> [--request-id <id>]
        spex sync pause|resume|cancel|recover <operation-id>
+       spex sync revert <operation-id> [--request-id <id>]
+       spex sync stop-writer
        spex sync check --base <sha> --candidate <sha> [--policy <trusted-sha>] [--repository <path>] [--evidence-directory <existing-directory>]
 
 在 .spec/spexcode.json 的 sync 字段登记 sync-settings-v1、sourcePaths/testPaths/readPaths、
@@ -460,6 +462,8 @@ check 无需后台或本机操作数据库，从真实 Git base/candidate/policy
 policy 缺省 base，只有可信调用者才能指定已受信政策；候选不能用自己的配置自免检。
 退出码：passed 或已配置且无影响的 not_applicable 为0，失败/未完成恢复为1，unsupported为2。
 coverage 明确列未纳入范围；局部检查通过不表示全项目已同步。
+revert 只对已采纳且有完整收据的交付生成新的成组补偿操作，保后续编辑及历史，仍需四层验证和真实落地。
+stop-writer 为版本回退暂停新写入，并结算或保留未完成资源；检查返回的恢复诊断，不表示未知资源已释放。
 配置示例：spex guide sync。\n\n${ROUTING_NOTE}`,
   },
   spec: {

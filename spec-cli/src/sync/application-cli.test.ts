@@ -32,6 +32,8 @@ test('AC-SYNC-CLI-01 sync help说明真实后端与阶段范围，错误flag和�
   assert.equal(verifyPatch.code, 1); assert.match(verifyPatch.stderr, /只用于 sync run/)
   const misplaced = await cli(['sync', 'recover', 'op-1', '--retry-of', 'op-1'])
   assert.equal(misplaced.code, 1); assert.match(misplaced.stderr, /只用于 sync run/)
+  const stopId = await cli(['sync', 'stop-writer', '--request-id', 'unneeded'])
+  assert.equal(stopId.code, 1); assert.match(stopId.stderr, /stop-writer 不接收/)
 })
 test('AC-SYNC-CLI-02 CLI run/status/control 走相同持久服务HTTP且保留稳定request ID', async () => {
   const requests: { method: string; url: string; body: unknown }[] = []
@@ -73,8 +75,14 @@ test('AC-SYNC-CLI-02 CLI run/status/control 走相同持久服务HTTP且保留�
     assert.equal(requests[8].url, '/api/sync/automatic/pause')
     assert.equal((await cli(['sync', 'resume', '--api', api])).code, 0)
     assert.equal(requests[9].url, '/api/sync/automatic/resume')
+    const revert = await cli(['sync', 'revert', 'op-1', '--request-id', 'revert-1', '--api', api])
+    assert.equal(revert.code, 0, revert.stderr); assert.equal(requests[10].url, '/api/sync/operations/op-1/revert')
+    assert.deepEqual(requests[10].body, { targetTree: workspace.replace(/\/$/, ''), requestId: 'revert-1' })
+    const stop = await cli(['sync', 'stop-writer', '--api', api])
+    assert.equal(stop.code, 0, stop.stderr); assert.equal(requests[11].url, '/api/sync/stop-writer')
+    assert.deepEqual(requests[11].body, { targetTree: workspace.replace(/\/$/, '') })
     assert.equal((await cli(['sync', 'verify', 'demo', '--request-id', 'verify-1', '--api', api])).code, 0)
-    assert.equal(requests[10].url, '/api/sync/verify')
+    assert.equal(requests[12].url, '/api/sync/verify')
 
   } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())) }
 })
