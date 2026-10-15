@@ -755,10 +755,14 @@ test('AC-APPLICATION-P3 code/combined手动接入与可信裁决冻结，旧原�
       assert.equal(code.origin, 'code')
       const first = (await f.application.submit({ nodeId: 'demo', requestId: 'combined-input', origin: 'combined' })).operation!
       assert.equal(first.origin, 'combined')
-      const claimed = f.application.store.claimAttempt({ operationId: first.id, source: first.input.source, scope: first.scope, leaseMs: 60000 })
-      const analysis = { version: 'code-behavior-v1', inputId: first.input.id, baselinePairId: null, composedDigest: 'composed', readSetDigest: first.readSetDigest, policyDigest: first.policyDigest, inputDigest: first.input.contentDigest, reviewPassed: true, changes: [], findings: [{ id: 'conflict-1', kind: 'conflict', ruleIds: ['RULE-DEMO-01'], affectedIds: ['REQ-DEMO-1'], paths: ['src/demo.mjs'], originalIntent: '返回用户指定的文本。', sourceBehavior: '返回大写文本。', deliveryBehavior: '保留原文本。', counterexample: 'a → A', evidence: 'src/demo.mjs', decision: '是否允许改变大小写？' }, { id: 'gap-2', kind: 'coverage_gap', ruleIds: [], affectedIds: ['REQ-OTHER-1'], paths: ['src/other.mjs'], originalIntent: '独立规则', sourceBehavior: '未知规则', deliveryBehavior: '', counterexample: '', evidence: '', decision: '另一项事实' }], facts: [], authorizedChanges: [], nodeChanges: [], newNodes: [], resolutions: [], traces: [] }
+      f.application.store.ackDispatch(first.input.source.repositoryId, code.dispatchMessageId)
+      const acknowledged = f.application.store.ackDispatch(first.input.source.repositoryId, first.dispatchMessageId)
+      const claimed = f.application.store.claimQueuedAttempt({ operationId: first.id, source: first.input.source, scope: first.scope, leaseMs: 60000, expectedRevision: acknowledged.revision })
+      const composed = composeAuthoredInput(first.input, first.baselineSelection!, { executionPaths: first.scope.paths, contextPaths: f.application['operationPlan'](first).readPaths }).composed!
+      f.application.store.bindComposedInput(claimed.fence, composed)
+      const analysis = { version: 'code-behavior-v1', inputId: first.input.id, baselinePairId: null, composedDigest: composed.contentDigest, baselineSelectionDigest: first.baselineSelection!.digest, readSetDigest: first.readSetDigest, policyDigest: first.policyDigest, inputDigest: first.input.contentDigest, reviewPassed: true, changes: [], findings: [{ id: 'conflict-1', kind: 'conflict', ruleIds: ['RULE-DEMO-01'], affectedIds: ['REQ-DEMO-1'], paths: ['src/demo.mjs'], originalIntent: '返回用户指定的文本。', sourceBehavior: '返回大写文本。', deliveryBehavior: '保留原文本。', counterexample: 'a → A', evidence: 'src/demo.mjs', decision: '是否允许改变大小写？' }, { id: 'gap-2', kind: 'coverage_gap', ruleIds: [], affectedIds: ['REQ-OTHER-1'], paths: ['src/other.mjs'], originalIntent: '独立规则', sourceBehavior: '未知规则', deliveryBehavior: '', counterexample: '', evidence: '', decision: '另一项事实' }], facts: [], authorizedChanges: [], nodeChanges: [], newNodes: [], resolutions: [], traces: [] }
       const analysisRef = writeEvidence(first.input.source.commonDir, analysis)
-      const stageRef = writeEvidence(first.input.source.commonDir, { version: 'sync-stage-v1', operationId: first.id, attemptId: claimed.attempt.id, inputId: first.input.id, policyDigest: first.policyDigest, stage: 'analysis', resultRef: analysisRef })
+      const stageRef = writeEvidence(first.input.source.commonDir, { version: 'sync-stage-v1', operationId: first.id, attemptId: claimed.attempt.id, inputId: first.input.id, policyDigest: first.policyDigest, readSetDigest: first.readSetDigest, baselineSelectionRef: writeEvidence(first.input.source.commonDir, first.baselineSelection!), stage: 'analysis', resultRef: analysisRef })
       f.application.store.checkpoint(claimed.fence, analysisRef)
       f.application.store.checkpoint(claimed.fence, stageRef)
       f.application.store.recordFailure(claimed.fence, { code: 'business_conflict', message: '有具体业务分歧', kind: 'conflict', evidenceRefs: [analysisRef] })
@@ -1042,6 +1046,23 @@ test('AC-APPLICATION-P4-09 scope外变化不使查询重放重试过期，相关
   } finally { await f.application.stopService(); f.cleanup() }
 })
 
+
+test('AC-APPLICATION-P4-14 无生成字节差量时真实intent消费源码仍不形成回声', async t => {
+  const f = await exportApplicationFixture(t)
+  writeFileSync(join(f.root, 'src/export.js'), `${f.originalCode}\n// human comment requiring no code generation\n`)
+  const input = await captureInputSnapshot(f.root), frozen = await f.application['freezeNodePlan'](input, 'export-contract')
+  const pair: BaselinePair = { id: 'fixture-empty-generation', source: input.source, repositoryId: input.source.repositoryId, sourceInput: input, verifiedDelivery: input, coveredScope: frozen.plan.executionScope!, receiptId: 'fixture-empty-projection-only', settledAtMs: Date.now() }
+  const { digest: _digest, ...payload } = frozen.selection
+  const selected = { ...payload, bindings: payload.bindings.map(binding => 'intentPair' in binding ? { ...binding, intentPair: pair } : binding) }
+  const selection = { ...selected, digest: contentHash(JSON.stringify(selected, (_key, value: unknown) => value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value)) }
+  assert.equal(selection.bindings.every(binding => !('bytePair' in binding) || binding.bytePair === null), true)
+  const composed = composeAuthoredInput(input, selection, { executionPaths: frozen.plan.executionScope!.paths, contextPaths: frozen.plan.readPaths }).composed!
+  const evidence = readCompositionEvidence(input, composed, selection)
+  assert.equal(evidence.artifacts.every(artifact => !artifact.changed), true)
+  assert.equal(evidence.residualPaths.length, 0)
+  assert.equal(f.application['observationChanges'](input, frozen.plan, selection, evidence).changed, false)
+  assert.equal(f.calls(), 0, '真实Git投影不以假receipt登记权威')
+})
 
 test('AC-APPLICATION-P4-13 Spec无bytehead时按真实intent来源字节识别已消费与新原始意图', async t => {
   const f = await exportApplicationFixture(t)

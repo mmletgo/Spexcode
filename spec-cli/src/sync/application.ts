@@ -306,10 +306,11 @@ export class SyncApplication {
     const actualSource = new Map(readTree(snapshot.source.commonDir, snapshot.immutableTree).map(entry => [entry.path, entry]))
     const intentPairs = new Map(selection.bindings.flatMap(binding => 'intentPair' in binding && binding.intentPair ? [[binding.intentPair.id, binding.intentPair] as const] : []))
     const intentSources = new Map<string, ReturnType<typeof readTree>>()
-    const consumedSpec = (path: SelectedCompositionEvidence['paths'][number]): boolean => {
-      if (path.base || !path.path.startsWith('.spec/')) return false
-      const intents = evidence.intents.filter(intent => intent.before?.path === path.path || intent.source?.path === path.path)
-      if (!intents.length || intents.some(intent => intent.changed || !intent.pairId)) return false
+    const consumedPath = (path: SelectedCompositionEvidence['paths'][number]): boolean => {
+      if (path.base) return false
+      const artifacts = evidence.artifacts.filter(artifact => artifact.path === path.path)
+      const intents = evidence.intents.filter(intent => intent.before?.path === path.path || intent.source?.path === path.path || artifacts.some(artifact => artifact.resource.kind === intent.resource.kind && artifact.resource.id === intent.resource.id))
+      if (!intents.length || intents.some(intent => intent.changed || !intent.pairId) || artifacts.some(artifact => artifact.changed || !artifact.pairId)) return false
       const current = actualSource.get(path.path)
       return intents.every(intent => {
         const pair = intentPairs.get(intent.pairId!)!
@@ -319,7 +320,7 @@ export class SyncApplication {
         return before?.oid === current?.oid && before?.mode === current?.mode
       })
     }
-    const changedPaths = evidence.paths.filter(path => coveredPath(path.path, scope.paths) && (path.base?.oid !== path.source?.oid || path.base?.mode !== path.source?.mode) && !consumedSpec(path))
+    const changedPaths = evidence.paths.filter(path => coveredPath(path.path, scope.paths) && (path.base?.oid !== path.source?.oid || path.base?.mode !== path.source?.mode) && !consumedPath(path))
     const residualPaths = evidence.residualPaths.filter(path => coveredPath(path, scope.paths))
     const intentChanged = evidence.intents.some(intent => (intent.resource.kind === 'contract' ? scope.contractIds : scope.flowIds).includes(intent.resource.id) && intent.changed)
     const readonlyContext = evidence.paths.filter(path => !coveredPath(path.path, scope.paths)).map(path => ({ path: path.path, oid: path.source?.oid ?? null, mode: path.source?.mode ?? null }))
