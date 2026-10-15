@@ -470,7 +470,7 @@ test('AC-APPLICATION-21 recover具体协调失败返回可见409，资源与原�
   } finally { f.cleanup() }
 })
 
-async function exportApplicationFixture(t: test.TestContext, choice?: 'keep_intent' | 'adopt_behavior' | 'new_rule', oraclePolicy: { legacyFilter: boolean; reviewConflict?: boolean } = { legacyFilter: false }) {
+async function exportApplicationFixture(t: test.TestContext, choice?: 'keep_intent' | 'adopt_behavior' | 'new_rule', oraclePolicy: { legacyFilter: boolean; reviewConflict?: boolean } = { legacyFilter: false }, independentNode = false) {
   const temp = mkdtempSync(join(tmpdir(), 'sync-application-delivery-')), root = join(temp, 'source')
   cpSync(new URL('../../test/fixtures/spec-sync/export-repo/', import.meta.url), root, { recursive: true })
   renameSync(join(root, '.spec/export'), join(root, '.spec/project'))
@@ -478,6 +478,19 @@ async function exportApplicationFixture(t: test.TestContext, choice?: 'keep_inte
   const contract = parseContract({ nodeId: 'export-contract', path, source: original }).contract!
   const verify = contract.items.find(item => item.kind === 'VERIFY')!; assert.equal(verify.kind, 'VERIFY')
   const config: SyncSettings = { ...settings, nodeIds: ['export-contract'], sourcePaths: ['src'], testPaths: ['generated-tests'], readPaths: ['tests', 'package.json'], budget: { maxAttempts: 3, maxCalls: 16, maxRepairs: 2, timeoutMs: 300000 }, facts: [{ source: 'decision:EXPORT-POLICY', text: original }], mandatoryTests: [{ verificationId: verify.id, testPath: 'tests/export.test.mjs', testId: 'AC-EXPORT-03' }], verifications: [{ definition: { id: verify.id, command: verify.command, cwd: verify.cwd, timeoutMs: verify.timeoutMs }, environment: { ...settings.verifications[0].environment, image: 'node@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392' } }] }
+  if (independentNode) {
+    const other = original.replaceAll('export-contract', 'other-contract').replaceAll('EXPORT', 'OTHER').replaceAll('src/export.js', 'src/other.js').replaceAll('tests/export.test.mjs', 'tests/other.test.mjs')
+    mkdirSync(join(root, '.spec/project/other-contract'))
+    writeFileSync(join(root, '.spec/project/other-contract/spec.md'), other)
+    cpSync(join(root, 'src/export.js'), join(root, 'src/other.js'))
+    writeFileSync(join(root, 'tests/other.test.mjs'), readFileSync(join(root, 'tests/export.test.mjs'), 'utf8').replaceAll('EXPORT', 'OTHER').replaceAll('../src/export.js', '../src/other.js'))
+    const otherContract = parseContract({ nodeId: 'other-contract', path: '.spec/project/other-contract/spec.md', source: other }).contract!
+    const otherVerify = otherContract.items.find(item => item.kind === 'VERIFY')!; assert.equal(otherVerify.kind, 'VERIFY')
+    config.nodeIds!.push('other-contract')
+    config.facts.push({ source: 'decision:OTHER-POLICY', text: other })
+    config.mandatoryTests.push({ verificationId: otherVerify.id, testPath: 'tests/other.test.mjs', testId: 'AC-OTHER-03' })
+    config.verifications.push({ definition: { id: otherVerify.id, command: otherVerify.command, cwd: otherVerify.cwd, timeoutMs: otherVerify.timeoutMs }, environment: config.verifications[0].environment })
+  }
   if (oraclePolicy.legacyFilter) {
     const oraclePath = join(root, 'tests/export.test.mjs')
     writeFileSync(oraclePath, `${readFileSync(oraclePath, 'utf8')}\ntest('ORACLE-FILTER-LEGACY', () => { const service = new ExportService(); for (const length of [9, 129]) assert.equal(service.submit('owner', 'legacy-' + length, 'x'.repeat(length)).filter.length, length); });\n`)
@@ -498,21 +511,35 @@ async function exportApplicationFixture(t: test.TestContext, choice?: 'keep_inte
   if (choice) writeFileSync(join(root, 'src/export.js'), limitCode(8))
   t.after(async () => {
     await application.stopService()
+    const evidenceRoot = process.env.SPEX_VERIFICATION_EVIDENCE_DIR
+    const evidence = evidenceRoot ? join(evidenceRoot, `application-${contentHash(temp).slice(0, 12)}`) : null
+    if (evidence) {
+      mkdirSync(evidence, { recursive: true, mode: 0o700 })
+      const identity = identifyWorktree(root)
+      const operations = application.store.listOperations(identity.repositoryId, { sourceRoot: identity.canonicalRoot })
+      writeFileSync(join(evidence, 'state.json'), JSON.stringify({ test: t.name, source: identity, observations: application.store.listObservations(identity), operations: operations.map(operation => ({ operation, attempts: application.store.listAttempts(operation.id), journals: application.store.listJournals(operation.id) })) }, null, 2))
+    }
     protocol.close()
+    if (evidence) {
+      cpSync(join(temp, 'canonical.sqlite'), join(evidence, 'canonical.sqlite'))
+      cpSync(join(root, '.git'), join(evidence, 'git'), { recursive: true })
+    }
     const unlock = (directory: string): void => { chmodSync(directory, 0o700); for (const entry of readdirSync(directory, { withFileTypes: true })) if (entry.isDirectory()) unlock(join(directory, entry.name)) }
     unlock(temp); rmSync(temp, { recursive: true, force: true })
   })
   application = await SyncApplication.create(root, { protocol, runtimeDirectory: join(temp, 'runtime'), runner: async request => {
     calls++; nativeRequests.push(request)
-    const operation = application.store.listOperations(identifyWorktree(root).repositoryId, { sourceRoot: identifyWorktree(root).canonicalRoot })[0]
-    const plan = JSON.parse(readEvidence(operation.input.source.commonDir, operation.planBlob!).toString('utf8')) as { facts: { source: string; text: string }[]; decisionAuthorities: { paths: string[] }[] }
-    const decisionFact = plan.facts.find(fact => fact.source.startsWith('decision:') && fact.source !== 'decision:EXPORT-POLICY')
+    const operation = application.store.listOperations(identifyWorktree(root).repositoryId, { sourceRoot: identifyWorktree(root).canonicalRoot }).find(operation => operation.currentAttemptId && application.store.readAttempt(operation.currentAttemptId).dispatchPlans.some(dispatch => dispatch.key === request.requestKey))!
+    const plan = JSON.parse(readEvidence(operation.input.source.commonDir, operation.planBlob!).toString('utf8')) as { intentNodeId: string; facts: { source: string; text: string }[]; decisionAuthorities: { paths: string[] }[] }
+    const otherNode = plan.intentNodeId === 'other-contract', codePath = otherNode ? 'src/other.js' : 'src/export.js'
+    const decisionFact = plan.facts.find(fact => fact.source.startsWith('decision:') && !fact.source.endsWith('-POLICY'))
     const limit = choice === 'keep_intent' ? null : choice === 'adopt_behavior' ? 8 : 128
     let output: unknown
     if (request.purpose === 'code_behavior_analyze') {
       const frozen = JSON.parse(request.prompt.split('冻结三方输入:\n')[1]) as { changedPaths: string[] }
       const paths = [...new Set([...frozen.changedPaths, ...(decisionFact ? plan.decisionAuthorities.flatMap(authority => authority.paths) : [])])]
       output = { changes: paths.map(changed => ({ kind: decisionFact ? 'allowed_change' : 'conflict', paths: [changed], affectedIds: ['RULE-EXPORT-02', 'AC-EXPORT-02'], ruleIds: ['RULE-EXPORT-02'], originalIntent: 'key与非空字符串filter必需，未授权filter长度上限；幂等政策保持', previousBehavior: '9字符非空filter可提交', sourceBehavior: 'filter长度超过8字符拒绝，8字符可提交；原权限与幂等保持', deliveryBehavior: '非空filter无长度上限', evidence: `冻结src/export.js#ExportService.submit 的filter.length > 8与RULE-EXPORT-02、AC-EXPORT-02逐项对照；${decisionFact?.text ?? '无上限授权'}`, counterexample: 'filter=123456789：原意接受但现源码invalid-request' })), facts: decisionFact ? [decisionFact] : [], acceptanceChanges: decisionFact && choice !== 'keep_intent' ? [{ id: 'AC-EXPORT-02', ruleIds: ['RULE-EXPORT-02'], source: decisionFact.source, reason: `仅按所选裁决增加filter${limit}字符边界，保空输入、权限、幂等与结果义务` }] : [], newNodes: [], resolutions: [] }
+      if (independentNode) output = { changes: paths.map(changed => ({ kind: 'refactor', paths: [changed], affectedIds: [], ruleIds: [], originalIntent: '固定导出规则与验收保持', previousBehavior: '固定ExportService完整行为', sourceBehavior: '仅添加测试指定注释，不改变业务执行', deliveryBehavior: '原完整业务与已生成注释保持', evidence: `真实冻结${changed}的业务语句保持，新增仅注释`, counterexample: '固定可信oracle仍验证权限、幂等和全部状态转换' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
     } else if (request.purpose === 'code_behavior_review') {
       const frozen = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as { changedPaths: string[] }
       const value = JSON.parse(request.prompt.split('待审分析:\n')[1]) as { analysisDigest: string; analysis: { changes: { id: string; paths: string[] }[] } }
@@ -539,7 +566,7 @@ async function exportApplicationFixture(t: test.TestContext, choice?: 'keep_inte
       const frozen = JSON.parse(request.prompt.split(request.purpose === 'code_generate' ? '冻结完整输入:\n' : '冻结原意和基线完整输入:\n')[1].split('\n实际候选身份')[0]) as { files: [string, string][]; readyIds: string[]; elaboratedSpecs: { path: string; source: string }[]; manifest: { entries: { path: string; digest: string; mode: string }[] } }
       if (request.purpose === 'code_generate') {
         const change = (path: string, content: string): unknown => { const entry = frozen.manifest.entries.find(entry => entry.path === path); return { path, beforeDigest: entry?.digest ?? null, beforeMode: entry?.mode ?? null, content, mode: null } }
-        output = { version: 'sync-files-v1', changes: [...frozen.elaboratedSpecs.map(spec => change(spec.path, spec.source)), change('src/export.js', choice && decisionFact ? limitCode(limit) : `${new Map(frozen.files).get('src/export.js')}\n// application verified delivery\n`), ...(choice && decisionFact ? [change('generated-tests/decision.test.mjs', `import assert from 'node:assert/strict'; import test from 'node:test'; import { ExportService } from '../src/export.js'; test('AC-DECISION-01', () => { const service = new ExportService(); const limit = ${limit}; for (const length of [8,9,128,129]) { const submit = () => service.submit('owner', 'length-' + length, 'x'.repeat(length)); if (limit !== null && length > limit) assert.throws(submit, /invalid-request/); else assert.equal(submit().filter.length, length); } assert.throws(() => service.submit('owner', 'empty', ''), /invalid-request/); assert.throws(() => service.submit('', 'denied', 'active'), /forbidden/); const job = service.submit('owner', 'same', 'active'); assert.deepEqual(service.submit('owner', 'same', 'active'), job); assert.throws(() => service.submit('owner', 'same', 'all'), /idempotency-conflict/); service.dispatch(job.id, 'START', { attempt: 1 }); service.dispatch(job.id, 'COMPLETE', { attempt: 1, result: 'file.csv' }); assert.throws(() => service.dispatch(job.id, 'DOWNLOAD', { actor: 'other' }), /forbidden/); assert.equal(service.dispatch(job.id, 'DOWNLOAD', { actor: 'owner' }), 'file.csv'); });\n`)] : [])] }
+        output = { version: 'sync-files-v1', changes: [...frozen.elaboratedSpecs.map(spec => change(spec.path, spec.source)), change(codePath, choice && decisionFact ? limitCode(limit) : `${new Map(frozen.files).get(codePath)}\n// application verified delivery\n`), ...(choice && decisionFact ? [change('generated-tests/decision.test.mjs', `import assert from 'node:assert/strict'; import test from 'node:test'; import { ExportService } from '../src/export.js'; test('AC-DECISION-01', () => { const service = new ExportService(); const limit = ${limit}; for (const length of [8,9,128,129]) { const submit = () => service.submit('owner', 'length-' + length, 'x'.repeat(length)); if (limit !== null && length > limit) assert.throws(submit, /invalid-request/); else assert.equal(submit().filter.length, length); } assert.throws(() => service.submit('owner', 'empty', ''), /invalid-request/); assert.throws(() => service.submit('', 'denied', 'active'), /forbidden/); const job = service.submit('owner', 'same', 'active'); assert.deepEqual(service.submit('owner', 'same', 'active'), job); assert.throws(() => service.submit('owner', 'same', 'all'), /idempotency-conflict/); service.dispatch(job.id, 'START', { attempt: 1 }); service.dispatch(job.id, 'COMPLETE', { attempt: 1, result: 'file.csv' }); assert.throws(() => service.dispatch(job.id, 'DOWNLOAD', { actor: 'other' }), /forbidden/); assert.equal(service.dispatch(job.id, 'DOWNLOAD', { actor: 'owner' }), 'file.csv'); });\n`)] : [])] }
       } else {
         const identity = JSON.parse(request.prompt.split('实际候选身份与 manifest:\n')[1].split('\n实际完整候选')[0]) as { inputId: string; candidate: { digest: string } }
         output = oraclePolicy.reviewConflict && decisionFact && choice !== 'keep_intent'
@@ -547,6 +574,7 @@ async function exportApplicationFixture(t: test.TestContext, choice?: 'keep_inte
           : { inputId: identity.inputId, candidateDigest: identity.candidate.digest, verdict: 'accept', checkedIds: frozen.readyIds, findings: [] }
       }
     }
+    if (otherNode && request.purpose === 'elaboration_generate') output = JSON.parse(JSON.stringify(output).replaceAll('EXPORT', 'OTHER').replaceAll('export-contract', 'other-contract').replaceAll('src/export.js', 'src/other.js').replaceAll('tests/export.test.mjs', 'tests/other.test.mjs')) as unknown
     const dispatch = application.store.readAttempt(operation.currentAttemptId!).dispatchPlans.find(plan => plan.key === request.requestKey)!
     return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `independent-${request.requestKey}`, turnId: 'turn-1', output, resultDigest: contentHash(JSON.stringify(output)) }
   } })
@@ -603,7 +631,7 @@ for (const choice of ['keep_intent', 'adopt_behavior', 'new_rule'] as const) tes
     const priorCalls = f.calls()
     const request = { operationId: submitted.operation.id, inputId: submitted.operation.input.id, analysisRef, findingIds: [finding.id], requestId: `decide-${choice}`, decision: choice === 'new_rule' ? { choice, rule: 'filter长度不得超过128字符；非空输入、所有者权限、幂等及其他原需求保持有效。' } : { choice } }
     const decision = await f.application.decide(request), delivered = await f.application.wait(decision.operation.id)
-    assert.equal(delivered.operation.phase, 'workspace_synced', JSON.stringify(delivered.attempt?.failure))
+    assert.equal(delivered.operation.phase, 'workspace_synced', JSON.stringify({ failure: delivered.attempt?.failure, blockedReason: delivered.operation.blockedReason, journals: delivered.journals }))
     assert.equal(delivered.attempt!.verification!.passed, true)
     const proof = JSON.parse(readEvidence(before.source.commonDir, delivered.attempt!.verification!.resultBlob).toString('utf8')) as VerificationResultBlob
     assert.deepEqual(proof.layers.map(layer => [layer.layer, layer.verdict]), [['V1', 'pass'], ['V2', 'pass'], ['V3', 'pass'], ['V4', 'pass']])
@@ -634,7 +662,7 @@ test('AC-APPLICATION-06 应用真实Docker及compiled hooks完整交付，comple
   const before = await captureInputSnapshot(root), request = { nodeId: 'export-contract', requestId: 'complete-replay', origin: 'initial' as const }
   const admitted = await application.submit(request); assert.ok(admitted.operation)
   const delivered = await application.wait(admitted.operation.id)
-  assert.equal(delivered.operation.phase, 'workspace_synced', JSON.stringify(delivered.attempt?.failure))
+  assert.equal(delivered.operation.phase, 'workspace_synced', JSON.stringify({ failure: delivered.attempt?.failure, blockedReason: delivered.operation.blockedReason, journals: delivered.journals }))
   assert.ok(delivered.journals[0]?.receipt)
   assert.equal(delivered.sourceSynced, false); assert.equal(delivered.stale, false)
   assert.match(readFileSync(join(delivered.operation.deliveryPlan.canonicalRoot, 'src/export.js'), 'utf8'), /application verified delivery/)
@@ -975,7 +1003,7 @@ test('AC-APPLICATION-P4-08 无浏览器真实Docker自动交付，补偿及scope
   const admitted = (await f.application.status()).operations[0]?.operation
   assert.ok(admitted, '正式service启动扫描必须建立自动操作')
   const delivered = await f.application.wait(admitted.id)
-  assert.equal(delivered.operation.phase, 'workspace_synced', JSON.stringify(delivered.attempt?.failure))
+  assert.equal(delivered.operation.phase, 'workspace_synced', JSON.stringify({ failure: delivered.attempt?.failure, blockedReason: delivered.operation.blockedReason, journals: delivered.journals }))
   assert.ok(delivered.journals[0]?.receipt)
   assert.match(readFileSync(join(delivered.operation.deliveryPlan.canonicalRoot, 'src/export.js'), 'utf8'), /human save before background startup/)
   assert.match(readFileSync(join(delivered.operation.deliveryPlan.canonicalRoot, 'src/export.js'), 'utf8'), /application verified delivery/)
@@ -1043,4 +1071,50 @@ test('AC-APPLICATION-P4-10 活动native时物理暂停保operation控制，暂�
     assert.equal(f.calls.length, 2)
     assert.equal(f.application.store.readOperation(active.id).input.id, first)
   } finally { await f.application.stopService(); f.cleanup() }
+})
+
+
+test('AC-APPLICATION-P4-11 两个独立节点保存及停机编辑补偿均真实交付，不夹带另一节点未消费输入', { skip: process.env.SPEX_DOCKER_VERIFICATION_TEST !== '1', timeout: 600000 }, async t => {
+  const f = await exportApplicationFixture(t, undefined, undefined, true)
+  const paths = ['src/export.js', 'src/other.js']
+  for (const path of paths) writeFileSync(join(f.root, path), `// human online ${path}\n${readFileSync(join(f.root, path), 'utf8')}`)
+  const before = await captureInputSnapshot(f.root), head = f.git(['rev-parse', 'HEAD']), index = readFileSync(join(f.root, '.git/index'))
+  await f.application.startService({ compensationMs: 10000, debounceMs: 5 })
+  const admitted = (await f.application.status()).operations.map(item => item.operation)
+  assert.equal(admitted.length, 2)
+  const first = await Promise.all(admitted.map(operation => f.application.wait(operation.id)))
+  for (const detail of first) {
+    assert.equal(detail.operation.phase, 'workspace_synced', JSON.stringify({ failure: detail.attempt?.failure, blockedReason: detail.operation.blockedReason, journals: detail.journals }))
+    assert.ok(detail.journals[0]?.receipt)
+    const own = paths.find(path => detail.operation.scope.paths.includes(path))!
+    assert.ok(own, '每个独立节点具有实际代码写范围')
+    assert.match(readFileSync(join(detail.operation.deliveryPlan.canonicalRoot, own), 'utf8'), /human online/)
+    assert.match(readFileSync(join(detail.operation.deliveryPlan.canonicalRoot, own), 'utf8'), /application verified delivery/)
+  }
+  const firstPublication = [...first].sort((a, b) => a.journals[0].receipt!.completedAtMs - b.journals[0].receipt!.completedAtMs)[0]
+  const firstOther = paths.find(path => !firstPublication.operation.scope.paths.includes(path))!
+  assert.doesNotMatch(readFileSync(join(firstPublication.operation.deliveryPlan.canonicalRoot, firstOther), 'utf8'), /human online/)
+  assert.equal((await captureInputSnapshot(f.root)).id, before.id)
+  await f.application.stopService()
+  const count = f.calls()
+  for (const path of paths) writeFileSync(join(f.root, path), `// human offline ${path}\n${readFileSync(join(f.root, path), 'utf8')}`)
+  const latest = await captureInputSnapshot(f.root)
+  assert.equal(f.calls(), count)
+  await f.application.startService({ compensationMs: 10000, debounceMs: 5 })
+  const successors = (await f.application.status()).operations.map(item => item.operation).filter(operation => !admitted.some(prior => prior.id === operation.id))
+  assert.equal(successors.length, 2)
+  const delivered = await Promise.all(successors.map(operation => f.application.wait(operation.id)))
+  for (const detail of delivered) {
+    assert.equal(detail.operation.phase, 'workspace_synced', JSON.stringify({ failure: detail.attempt?.failure, blockedReason: detail.operation.blockedReason, journals: detail.journals }))
+    assert.ok(detail.journals[0]?.receipt)
+    const own = paths.find(path => detail.operation.scope.paths.includes(path))!
+    assert.match(readFileSync(join(detail.operation.deliveryPlan.canonicalRoot, own), 'utf8'), /human offline/)
+    assert.match(readFileSync(join(detail.operation.deliveryPlan.canonicalRoot, own), 'utf8'), /human online/)
+    assert.match(readFileSync(join(detail.operation.deliveryPlan.canonicalRoot, own), 'utf8'), /application verified delivery/)
+  }
+  const firstCompensation = [...delivered].sort((a, b) => a.journals[0].receipt!.completedAtMs - b.journals[0].receipt!.completedAtMs)[0]
+  const unconsumedOther = paths.find(path => !firstCompensation.operation.scope.paths.includes(path))!
+  assert.doesNotMatch(readFileSync(join(firstCompensation.operation.deliveryPlan.canonicalRoot, unconsumedOther), 'utf8'), /human offline/)
+  assert.equal((await captureInputSnapshot(f.root)).id, latest.id)
+  assert.equal(f.git(['rev-parse', 'HEAD']), head); assert.deepEqual(readFileSync(join(f.root, '.git/index')), index)
 })
