@@ -70,3 +70,5 @@ P3生成诊断在真实SQLite/Git复现普通contract引用错误回P1和symbol�
 
 
 应用detail的decisionEligibility投影在活动P1为false、结清的已审冲突failed/budget为true、无合格业务原因的失败为false；它直接复用实际store判断，无额外模型调用。
+
+新增治理叶的真实模块抽取场景沿固定夹具的actor/key逐层Map查询，不复制已发现的JSON组合键碰撞；新的helper仍经过完整源码读取、治理绑定和真实Docker既有八项验收。

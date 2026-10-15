@@ -488,18 +488,18 @@ test('高层raw无未来IDs，目录授权自动新增absent模块与治理叶�
     if (request.purpose !== 'code_generate') return output
     const value = output as { version: string; changes: { path: string; beforeDigest: string | null; beforeMode: string | null; mode: null; content: string }[] }
     const source = value.changes.find(change => change.path === 'src/export.js')!
-    assert.ok(source.content.includes('const identity = JSON.stringify([actor, key]);'))
-    source.content = `import { requestKey } from './request-key.js';\n${source.content.replace('const identity = JSON.stringify([actor, key]);', 'const identity = requestKey(actor, key);')}`
-    value.changes.push({ path: 'src/request-key.js', beforeDigest: null, beforeMode: null, mode: null, content: 'export function requestKey(actor, key) { return JSON.stringify([actor, key]); }\n' })
-    value.changes.push({ path: childPath, beforeDigest: null, beforeMode: null, mode: null, content: `---\ntitle: 导出请求幂等键\nstatus: active\ncode:\n  - src/request-key.js#requestKey\n---\n# 导出请求幂等键\n\n## raw source\n\n${childRaw}\n\n## expanded spec\n\n将actor与key作为JSON数组编码，使每个字符串组合具有无歧义身份。\n` })
+    assert.ok(source.content.includes('const previousId = this.keys.get(actor)?.get(key);'))
+    source.content = `import { requestKey } from './request-key.js';\n${source.content.replace('const previousId = this.keys.get(actor)?.get(key);', 'const previousId = requestKey(this.keys, actor, key);')}`
+    value.changes.push({ path: 'src/request-key.js', beforeDigest: null, beforeMode: null, mode: null, content: 'export function requestKey(keys, actor, key) { return keys.get(actor)?.get(key); }\n' })
+    value.changes.push({ path: childPath, beforeDigest: null, beforeMode: null, mode: null, content: `---\ntitle: 导出请求幂等键\nstatus: active\ncode:\n  - src/request-key.js#requestKey\n---\n# 导出请求幂等键\n\n## raw source\n\n${childRaw}\n\n## expanded spec\n\n按actor与key逐层查询既有任务，不以组合序列化混淆不同已接受输入的身份。\n` })
     return value
   })
   const result = await runSyncOperation(f.store, f.operation.id, f.options)
   assert.equal(result.status, 'workspace_synced', JSON.stringify(result.failure)); assert.ok(result.receipt)
   assert.ok(result.operation.scope.contractIds.includes('REQ-EXPORT-01')); assert.ok(result.operation.scope.contractIds.includes('AC-EXPORT-08')); assert.ok(result.operation.deliveredScope.flowIds.includes('FLOW-EXPORT-02'))
   const delivery = result.operation.deliveryPlan.canonicalRoot
-  assert.ok(readFileSync(join(delivery, 'src/request-key.js'), 'utf8').includes('JSON.stringify'))
-  assert.ok(readFileSync(join(delivery, 'src/export.js'), 'utf8').includes('const identity = requestKey(actor, key);'))
+  assert.ok(readFileSync(join(delivery, 'src/request-key.js'), 'utf8').includes('keys.get(actor)?.get(key)'))
+  assert.ok(readFileSync(join(delivery, 'src/export.js'), 'utf8').includes('const previousId = requestKey(this.keys, actor, key);'))
   assert.equal(parseParts(readFileSync(join(delivery, childPath), 'utf8'))!.rawSource, childRaw)
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.equal((await captureInputSnapshot(f.root)).id, f.input.id)
   assert.equal(f.calls.length, 4); assert.equal(result.operation.planBlob!.sha256, result.operation.policyDigest)
