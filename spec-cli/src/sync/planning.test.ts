@@ -81,6 +81,8 @@ test('正式adoption的插件实例不进入业务规划，真实业务子树和
   assert.ok(plan.readPaths.includes('src/export.js'))
   assert.deepEqual(plan.verifications.map(item => item.definition.id), ['VERIFY-EXPORT-01'])
   assert.deepEqual(plan.mandatoryTests, [f.config.mandatoryTests[0]])
+  const pluginScript = verifySnapshot(snapshot).find(entry => entry.path === '.spec/export/export-contract/.plugins/core/session-fail/fail.sh')!
+  assert.throws(() => freezeCandidate(snapshot, { version: 'sync-files-v1', changes: [{ path: pluginScript.path, beforeDigest: pluginScript.digest, beforeMode: pluginScript.mode, content: 'exit 0\n' }] }, plan.executionScope), /越界/)
   const files = new Map(verifySnapshot(snapshot).filter(entry => entry.path.endsWith('/spec.md')).map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString('utf8')]))
   assert.ok(!(await readFrozenContracts(f.root, files)).nodes.some(node => node.path.split('/').includes('.plugins')))
   await assert.rejects(buildSyncApplicationPlan(snapshot, 'session-fail'), /不存在 Spec 节点/)

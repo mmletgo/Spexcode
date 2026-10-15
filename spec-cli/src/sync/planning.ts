@@ -89,7 +89,7 @@ export async function buildSyncApplicationPlan(snapshot: InputSnapshot, nodeId: 
   const mandatoryTests = settings.mandatoryTests.filter(item => !ownedVerificationIds.has(item.verificationId) || activeVerificationIds.has(item.verificationId))
   if (options.discoverySelection) verifyBaselineSelection(snapshot, options.discoverySelection)
   const discoveryOwnerFiles = (options.discoverySelection?.bindings ?? []).flatMap(binding => {
-    if (!('bytePair' in binding) || !binding.bytePair || !binding.resource.path.startsWith('.spec/') || !binding.resource.path.endsWith('/spec.md')) return []
+    if (!('bytePair' in binding) || !binding.bytePair || !isSyncSpecPath(binding.resource.path)) return []
     const entry = verifySnapshot(binding.bytePair.verifiedDelivery).find(entry => entry.path === binding.resource.path)
     return entry && entry.mode !== '120000' ? [readObject(snapshot.source.commonDir, entry.oid).toString('utf8')] : []
   })
@@ -114,7 +114,7 @@ export async function deriveSyncBaselineResources(snapshot: InputSnapshot, plan:
   for (const input of snapshots) {
     const entries = verifySnapshot(input).filter(entry => readable(entry.path))
     for (const entry of entries) paths.add(entry.path)
-    const files = new Map(entries.filter(entry => entry.mode !== '120000' && entry.path.startsWith('.spec/') && entry.path.endsWith('/spec.md')).map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString('utf8')]))
+    const files = new Map(entries.filter(entry => entry.mode !== '120000' && isSyncSpecPath(entry.path)).map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString('utf8')]))
     const frozen = await readFrozenContracts(snapshot.source.canonicalRoot, files)
     for (const node of frozen.nodes) if (baseline?.bindings.some(binding => binding.resource.kind === 'contract' && binding.resource.id === node.id && 'intentPair' in binding && binding.intentPair)) resources.set(`contract:${node.id}`, { kind: 'contract', id: node.id })
     for (const item of frozen.graph.items.values()) {
