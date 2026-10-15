@@ -16,7 +16,7 @@ code:
 
 [[sync-application]] 从 source snapshot 读取 Spec，复用 loadSpecs、readFrozenContracts 和 contractImpact，不维护第二份业务图。初始上下文仅读 Spec，不把整仓未授权文件或凭据转成字符串。目标包含意图节点、其子节点、图影响节点和共享代码治理闭包；related 不计治理。受影响 code/test 必须在 [[sync-application-settings]] 的授权或独立保护测试登记，否则显示未授权路径。
 
-readPaths 纳入冻结 Spec、版本化配置、授权源码/测试目录、额外 readPaths、影响代码/测试及保护测试；writePaths 只含目标 Spec 精确路径和 source/test 授权目录。目录授权允许新自然语言需求创建实现，不授权任意磁盘或模型创造新 raw 意图。plan 传递 facts、精确 verification 和 mandatoryTests 给 coordinator；全部 source/composed 差量仍经过完整 read/write 检查，不能偷偷交付未验证的其它 dirty 修改。V4 重新构造当前 plan，不能沿用旧影响自证。
+readPaths 纳入冻结 Spec、版本化配置、额外 readPaths、实际影响代码/测试及保护测试；writePaths 只含目标 Spec 精确路径和 source/test 授权目录。目录授权允许新自然语言需求创建实现，不授权任意磁盘或模型创造新 raw 意图。plan 传递 facts、精确 verification 和 mandatoryTests 给 coordinator；全部 source/composed 差量仍经过完整 read/write 检查，不能偷偷交付未验证的其它 dirty 修改。V4 重新构造当前 plan，不能沿用旧影响自证。
 
 可携最近共同BaselinePair，对旧verifiedDelivery及当前source图求影响并集，旧测试/治理路径与移动退役目标仍纳入完整范围，不因删除文件退出验收。从移动后的节点发起同步时，同样依稳定业务ID找到旧节点并读取旧影响闭包；已匹配新位置的旧节点不重复成为生成目标，其旧Spec精确路径仍在写范围中，以便真实删除旧位置。被明确移除的意图定位最近仍存在的上层需求。目标Spec目录受控授权自动新治理叶，但不授权宿主或其它未选节点。
 
@@ -29,3 +29,7 @@ P4规划可读取精确 FrozenBaselineSelection：文件正文以各 path 真 by
 P4的executionScope只含实际目标Spec/治理代码/影响测试路径及目标业务身份。readPaths只含目标、实际引用权威、祖先需求、影响code/test、mandatory测试与明确额外上下文；source/test授权目录保持模型写授权，不能假冒本次完整读取。FLOW只用flow资源，VERIFY保执行政策而不是已消费业务身份；只读与保护资源不等同写lease或验证覆盖。
 
 mandatoryTests即使由contractImpact引用也只读；executionScope仅纳入可信source/test授权内且非保护测试的实际code/test，不把独立oracle晋升为写lease。
+
+已注册上层的源码发现复用冻结snapshot及现有治理元数据：sourcePaths仅作为可信枚举授权，实际未治理功能源码（含已commit与未跟踪新模块）以exact readonly路径进入readPaths/selection及完整行为分析，不能被窄闭包静默遗漏。治理排除取当前source、真实path交付及每个实际path byte头对应的verifiedDelivery owner Spec并集；来源尚未ff接受的已结算新leaf/code亦不重复当无治理。独立已治理B的dirty/commit不进入A读取、executionScope或coverage。发现不是归属批准：沿已有raw提出newNodes，归属不明返回具体coverage_gap；不能仅因sourcePaths发现新模块而自动启用新节点，注册成员仍由应用层可信nodeIds/既有治理范围限定。
+
+业务selection裁到本次真实读取资源后，调用者仍以discoverySelection传已有真实全资源头selection，仅供各真实path头对应的已交付治理元数据排除；程序重核该selection和真实delivery对象。它不作本次byte/intent基准，不加入write/coverage，不恢复global latestpair回退。fresh freeze的各次构建传同一实际发现selection；V4/重放/重试复用冻结plan并复核配置及既有readSet/selection门禁，不能改用最新无关头重新规划policy。不能从其它code头的历史全树复活已退役owner；避免完全独立的已结算新leaf被裁掉后再次误归无治理。

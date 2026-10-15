@@ -1,6 +1,6 @@
 import { posix } from 'node:path'
 import { loadSpecs } from '@spexcode/spec-core'
-import { contractImpact, contractReferences } from '@spexcode/spec-core/contracts'
+import { contractImpact, contractReferences, parseFrontmatter } from '@spexcode/spec-core/contracts'
 import type { SyncCoordinatorPlan } from './coordinator-types.js'
 import type { BaselinePair, BaselineResource, FrozenBaselineSelection, InputSnapshot, SyncScope } from './operation-types.js'
 import { verifyBaselineSelection } from './composition.js'
@@ -11,8 +11,19 @@ import { readDecisionAuthority } from './code-behavior.js'
 import type { CodeBehaviorAnalysis, SyncDecisionInput } from './writeback-types.js'
 import { coveredPath, readSyncSettings, SyncApplicationError } from './settings.js'
 
+/** 授权范围只枚举实际未治理源码；当前及真实交付治理均排除，发现不授予归属或执行范围。 */
+export function discoverSyncSourcePaths(snapshot: InputSnapshot, sourcePaths: readonly string[], governanceFiles: Iterable<string>): string[] {
+  const governed = new Set([...governanceFiles].flatMap(text => {
+    const code = parseFrontmatter(text).fm.code
+    return Array.isArray(code) ? code.filter((anchor): anchor is string => typeof anchor === 'string').map(anchor => posix.normalize(anchor.split('#')[0])) : []
+  }))
+  return verifySnapshot(snapshot).filter(entry => entry.mode !== '120000' && coveredPath(entry.path, sourcePaths) && /\.(?:[cm]?[jt]sx?|py|go|rs|java|rb)$/.test(entry.path) && !/\.(?:test|spec)\./.test(entry.path) && !governed.has(entry.path)).map(entry => entry.path).sort()
+}
+
+export type SyncPlanningOptions = { discoverySelection?: FrozenBaselineSelection }
+
 /** 冻结契约影响与既有节点治理共同决定闭包；目录授权允许新自然语言需求创建实现。 */
-export async function buildSyncApplicationPlan(snapshot: InputSnapshot, nodeId: string, baseline?: BaselinePair | FrozenBaselineSelection | null): Promise<SyncCoordinatorPlan & { executionScope: SyncScope }> {
+export async function buildSyncApplicationPlan(snapshot: InputSnapshot, nodeId: string, baseline?: BaselinePair | FrozenBaselineSelection | null, options: SyncPlanningOptions = {}): Promise<SyncCoordinatorPlan & { executionScope: SyncScope }> {
   const selection = baseline && 'version' in baseline ? baseline : null
   if (selection) verifyBaselineSelection(snapshot, selection)
   const baselinePair = baseline && !('version' in baseline) ? baseline : null
@@ -68,11 +79,18 @@ export async function buildSyncApplicationPlan(snapshot: InputSnapshot, nodeId: 
   const specReadPaths = new Set([...targets.map(target => target.path), ...priorTargets.map(target => target.path)])
   for (const graph of graphs) for (const id of readIds) { const item = graph.items.get(id); if (item) specReadPaths.add(item.path) }
   for (const node of [...nodes, ...oldFrozen.nodes]) if (targets.some(target => target.path.startsWith(`${posix.dirname(node.path)}/`))) specReadPaths.add(node.path)
+  if (options.discoverySelection) verifyBaselineSelection(snapshot, options.discoverySelection)
+  const discoveryOwnerFiles = (options.discoverySelection?.bindings ?? []).flatMap(binding => {
+    if (!('bytePair' in binding) || !binding.bytePair || !binding.resource.path.startsWith('.spec/') || !binding.resource.path.endsWith('/spec.md')) return []
+    const entry = verifySnapshot(binding.bytePair.verifiedDelivery).find(entry => entry.path === binding.resource.path)
+    return entry && entry.mode !== '120000' ? [readObject(snapshot.source.commonDir, entry.oid).toString('utf8')] : []
+  })
+  const discoveryPaths = discoverSyncSourcePaths(snapshot, settings.sourcePaths, [...files.values(), ...oldFiles.values(), ...discoveryOwnerFiles])
   const executionScope: SyncScope = { paths: [...new Set([...targets.map(target => target.path), ...priorTargets.map(target => target.path), ...[...codePaths, ...impact.testPaths].filter(path => coveredPath(path, writable) && !settings.mandatoryTests.some(test => test.testPath === path))])].sort(), contractIds: [...selectedContractIds].filter(id => !graphs.some(graph => graph.items.get(id)?.kind === 'FLOW')).sort(), flowIds: [...selectedContractIds].filter(id => graphs.some(graph => graph.items.get(id)?.kind === 'FLOW')).sort() }
   return {
     executionScope,
     version: 'sync-coordinator-v1', intentNodeId: intent.id, targets,
-    readPaths: [...new Set([...specReadPaths, '.spec/spexcode.json', ...settings.readPaths, ...codePaths, ...impact.testPaths, ...settings.mandatoryTests.map(test => test.testPath)])].sort(),
+    readPaths: [...new Set([...specReadPaths, '.spec/spexcode.json', ...settings.readPaths, ...codePaths, ...discoveryPaths, ...impact.testPaths, ...settings.mandatoryTests.map(test => test.testPath)])].sort(),
     writePaths: [...new Set([...targets.map(target => target.path), ...targets.map(target => posix.dirname(target.path)), ...priorTargets.map(target => target.path), ...writable])].sort(),
     facts: [...settings.facts, ...decisionFacts], decisionAuthorities: decisionRefs.map(ref => readDecisionAuthority(snapshot.source.commonDir, ref)), decisionRefs, retiredIds, verifications: settings.verifications, mandatoryTests: settings.mandatoryTests,
   }
