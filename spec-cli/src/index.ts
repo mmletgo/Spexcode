@@ -155,6 +155,11 @@ app.post('/api/sync/operations/:id/revert', async c => {
   if (typeof body.requestId !== 'string' || !body.requestId.trim()) throw new SyncApplicationError('sync_request_invalid', '撤销需要非空 requestId', 400)
   return c.json(await (await syncApplication(c.req.query('targetTree'), body.targetTree)).revert({ operationId: c.req.param('id'), requestId: body.requestId }))
 })
+app.post('/api/sync/operations/:id/adopt', async c => {
+  const body = await syncRequestBody(c.req)
+  if (body.operationId !== undefined && body.operationId !== c.req.param('id')) throw new SyncApplicationError('sync_request_invalid', '采纳 operation 身份不一致', 400)
+  return c.json(await (await syncApplication(c.req.query('targetTree'), body.targetTree)).adopt(c.req.param('id')))
+})
 for (const action of ['pause', 'resume', 'cancel', 'recover'] as const) app.post(`/api/sync/operations/:id/${action}`, async c => {
   const body = await syncRequestBody(c.req)
   return c.json(await (await syncApplication(c.req.query('targetTree'), body.targetTree)).control(c.req.param('id'), action))

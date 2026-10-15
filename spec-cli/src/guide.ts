@@ -789,6 +789,7 @@ callTimeoutMs 是可选单次模型调用上限，正整数且不超过 budget.t
   spex sync run <node-id> --request-id <一次用户请求的稳定键>
   spex sync status --node <node-id>
   spex sync show <operation-id>
+  spex sync adopt <operation-id>
   spex sync recover <operation-id>
   spex sync run <node-id> --retry-of <失败operation-id> --request-id <重试稳定键>
 
@@ -800,6 +801,9 @@ show/status 的 retryEligibility 给出能否显式重试及具体拒绝原因�
 关联的新操作和新预算，继承原正文保存意图及来源；不能同时 --patch-file。普通重复请求不重置预算，
 同重试请求幂等。输入或配置已变时发起当前输入的新请求；未结算资源、GAP或冲突不能用重试绕过。
 workspace_synced 是交付工作树结果，原输入树待落地单独展示。新输入使旧结果过期，恢复只能用当前输入。
+已结算交付可在 Dashboard 点“采纳到原工作树”，或用 sync adopt <operation-id>。
+服务只把干净原树安全快进到真实收据提交，照常执行项目 hooks；未提交改动或分支分叉时保留交付并明确拒绝。
+adoptionEligibility 给出当前资格，采纳后分别检查 sourceSynced 和 canonicalSynced；开发分支采纳不能当主分支完成。
 手动外部代码接入：spex sync run <node-id> --origin code（正文与代码同时改用 combined）。
 系统按最近共同基线分析业务行为，来源类型本身不授权改变业务规则。正常无冲突无需新确认。
 show 的 decisionContext 展示原意、双方行为、规则/路径、反例、具体 finding IDs 与可信 analysisRef。
