@@ -46,4 +46,6 @@ raw/shared prose 的 broad affected closure只保证完整路径进入分析，�
 
 原可信计划已逐项授权同来源节点退役时，分析仍核实际删除、全部旧义务及独审，但不再派生同 ID 的重复退役授权；避免同一次成组用户请求因重复授权被误拒。
 
+行为分析只能派生本次受审变化对应的验收或退役授权，不能产生恢复退役身份的授权。恢复同一历史对象须由正式撤销入口、固定不可变历史请求及原已结算 receipt 逐项证明；普通作者 raw 或模型声明不能替代该来源链。
+
 成组补偿的新 source 已应用删除或移动时，controlledBeforeFiles 独立保留 immutable group.before 的真实完整文本并纳入独审 readablePaths；该当前作者前置不叫 verifiedDelivery。缺少旧交付基线时，旧 authority 仍能从这一真实 preimage 检查节点迁移及原业务 ID，不能因组后文件消失丢掉必读全文或退役义务。

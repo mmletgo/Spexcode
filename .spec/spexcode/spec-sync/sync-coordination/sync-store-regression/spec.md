@@ -79,3 +79,5 @@ P4新增定向矩阵使用真实SQLite句柄/事务、online backup及真实Git�
 P4 裁决复现已结算选择后，另一真实 SQLite journal/receipt 推进相同资源头，同一选择因 selection 变化错误新建操作的失败。修复后运输 alias 与独立 handle 重开均保原 operation/calls/deadline/receipt，保存新 ingress 的实际 selection，同 key 换 choice 拒绝。测试的 Git tree/四层证据明确模拟，只证明事务归并，不冒称产品 Docker 或原生模型执行。
 
 模拟旧版迁移库时移除目标旧代之后全部 marker，不能留下新增 writer marker 形成不存在的 schema gap；旧 writer 拒绝断言从当前迁移注册推导最高代数。
+
+历史恢复结算仅接受与冻结计划逐项相同的 restoredIds；未获固定历史授权的验证元数据不能发布新资源头或解除退休状态。新 pair 的当前退休集合按真实恢复身份推进，原不可变退休审计保持；新版 writer 语义 marker 必须拒绝旧 writer 和未知未来版本写入。
