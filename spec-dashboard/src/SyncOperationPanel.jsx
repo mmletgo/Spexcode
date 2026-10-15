@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { automaticControl, controlSync, enableSync, evidenceProjection, readSyncEvidence, readSyncStatus, requestIdentity, runSync, syncObserverProjection, syncProjection } from './syncApplication.js'
+import { automaticControl, controlSync, enableSync, evidenceProjection, readSyncEvidence, readSyncStatus, requestIdentity, revertSync, runSync, stopSyncWriter, syncObserverProjection, syncProjection } from './syncApplication.js'
 import { useT } from './i18n/index.jsx'
 import { useBoard, usePaneActive } from './workspace.jsx'
 import { routeHash } from './route.js'
@@ -38,7 +38,7 @@ function observerTime(value) {
   return value == null ? null : new Date(value).toLocaleString()
 }
 
-function OperationEvidence({ detail, model, nodeId, nodePath, targetTree }) {
+function OperationEvidence({ detail, model, nodeId, nodePath, targetTree, canRevert, busy, onRevert }) {
   const t = useT()
   const { operation, attempt, journals } = detail
   const currentHref = model.deliveryRoot && routeHash('spec', nodeId, { targetTree: model.deliveryRoot })
@@ -80,6 +80,12 @@ function OperationEvidence({ detail, model, nodeId, nodePath, targetTree }) {
       {attempt?.checkpointRefs.map((reference, index) => <EvidenceRead key={reference.sha256} operationId={operation.id} reference={reference} targetTree={targetTree} label={t('syncOperation.checkpoint', { n: index + 1 })} />)}
       {model.failure?.evidenceRefs?.map((reference) => <EvidenceRead key={reference.sha256} operationId={operation.id} reference={reference} targetTree={targetTree} label={t('syncOperation.failureEvidence')} />)}
       {journals.map((journal) => <details key={journal.id}><summary>{t('syncOperation.apply')} · {journal.status} · {journal.steps.filter((step) => step.status === 'completed').length}/{journal.steps.length}</summary>{journal.status === 'settled' && journal.receipt ? <SyncOperationDiff operationId={operation.id} files={journal.plan.files} targetTree={targetTree} kind="delivery" /> : <pre>{JSON.stringify(journal.plan.files, null, 2)}</pre>}</details>)}
+      {!targetTree && model.receipt && <div className="sync-op-revert">
+        <p className="sync-op-note">{t('syncOperation.revertNote')}</p>
+        {canRevert
+          ? <button type="button" disabled={busy} onClick={onRevert}>{t('syncOperation.revert')}</button>
+          : detail.revertEligibility?.reason && <p className="sync-op-note"><code>{detail.revertEligibility.reason.code}</code> · {detail.revertEligibility.reason.message}</p>}
+      </div>}
     </details>
   </>
 }
@@ -99,8 +105,11 @@ export default function SyncOperationPanel({ nodeId, nodePath, targetTree = null
   const [busy, setBusy] = useState(null)
   const [refresh, setRefresh] = useState(0)
   const [selectedOperationId, setSelectedOperationId] = useState(null)
+  const [writerStopped, setWriterStopped] = useState(false)
+  const [notice, setNotice] = useState(null)
   const busyRef = useRef(false)
   const runRequest = useRef(null)
+  const revertRequestIds = useRef(new Map())
   const identity = `${targetTree || ''}/${nodeId}`
   useEffect(() => {
     if (!active || !visible || busy) return undefined
@@ -113,6 +122,7 @@ export default function SyncOperationPanel({ nodeId, nodePath, targetTree = null
         const value = await readSyncStatus(nodeId, targetTree, controller.signal)
         if (!live) return
         setHeld({ identity, value }); setError((previous) => previous?.kind === 'action' ? previous : null); onSettings?.(value.settings)
+        if (value.observation.health?.watchOnline === true) setWriterStopped(false)
       } catch (failure) {
         if (live) setError({ identity, kind: 'read', code: failure.code || 'network-error', message: failure.message })
       } finally {
@@ -165,9 +175,50 @@ export default function SyncOperationPanel({ nodeId, nodePath, targetTree = null
           : previous.value.sources
         return { ...previous, value: { ...previous.value, observation, sources } }
       })
+      if (action === 'resume') setWriterStopped(false)
       setRefresh(value => value + 1)
     } catch (failure) {
       setError({ identity, kind: 'action', retry: { kind: 'automatic', action }, code: failure.code || 'network-error', message: failure.message })
+    } finally { busyRef.current = false; setBusy(null) }
+  }
+  const performRevert = async (operationId) => {
+    if (busyRef.current || targetTree || settings?.enabled !== true) return
+    let request = revertRequestIds.current.get(operationId)
+    if (!request) {
+      request = requestIdentity(null, { operationId, nodeId })
+      revertRequestIds.current.set(operationId, request)
+    }
+    busyRef.current = true; setBusy('revert'); setError(null); setNotice(null)
+    try {
+      const result = await revertSync(operationId, request.id)
+      if (result.operation) setSelectedOperationId(result.operation.id)
+      setNotice(result.changed ? 'revertSubmitted' : 'revertNoChanges')
+      setRefresh(value => value + 1)
+    } catch (failure) {
+      setError({ identity, kind: 'action', retry: { kind: 'revert', operationId }, code: failure.code || 'network-error', message: failure.message })
+    } finally { busyRef.current = false; setBusy(null) }
+  }
+  const performStopWriter = async () => {
+    if (busyRef.current || targetTree || settings?.enabled !== true || currentError?.kind === 'read') return
+    busyRef.current = true; setBusy('stop_writer'); setError(null); setNotice(null)
+    try {
+      const result = await stopSyncWriter()
+      setHeld(previous => {
+        if (previous?.identity !== identity) return previous
+        const observation = previous.value.observation
+          ? { ...previous.value.observation, control: result.control }
+          : previous.value.observation
+        const sources = Array.isArray(previous.value.sources)
+          ? previous.value.sources.map(source => source.source?.canonicalRoot === settings.input.canonicalRoot
+            ? { ...source, control: result.control }
+            : source)
+          : previous.value.sources
+        return { ...previous, value: { ...previous.value, observation, sources } }
+      })
+      setWriterStopped(true)
+      setRefresh(value => value + 1)
+    } catch (failure) {
+      setError({ identity, kind: 'action', retry: { kind: 'writer_stop' }, code: failure.code || 'network-error', message: failure.message })
     } finally { busyRef.current = false; setBusy(null) }
   }
   const state = currentError?.kind === 'read' ? 'read_error' : targetTree ? 'readonly' : model?.state || (settings?.activation === 'invalidated' ? 'invalidated' : settings?.enabled ? 'idle' : 'disabled')
@@ -180,8 +231,8 @@ export default function SyncOperationPanel({ nodeId, nodePath, targetTree = null
       <span role="status" className={model?.complete && !currentError ? 'sync-op-complete' : undefined}>{currentError || current || detail ? t(`syncOperation.phase.${state}`) : t('common.loading')}</span>
       <div className="sync-op-actions">
         {settings?.configuration && !settings.enabled && !targetTree && <button type="button" disabled={!!busy} onClick={() => perform('enable')}>{t('syncOperation.enable')}</button>}
-        {settings?.enabled && !targetTree && <button type="button" disabled={!!busy || (model && (retryPhase && !detail.stale ? !model.canRetry : !['idle', 'stale', 'source_synced', 'workspace_synced', 'superseded'].includes(model.state)))} onClick={() => perform('run')}>{t(retryPhase && !detail.stale ? 'syncOperation.retryRun' : 'syncOperation.run')}</button>}
-        {settings?.enabled && !targetTree && <button type="button" disabled={!!busy || (model && !['idle', 'stale', 'source_synced', 'workspace_synced', 'superseded'].includes(model.state))} onClick={() => perform('code')}>{t('syncOperation.runCode')}</button>}
+        {settings?.enabled && !targetTree && <button type="button" disabled={!!busy || (model && (retryPhase && !detail.stale ? !model.canRetry : !['idle', 'stale', 'source_synced', 'workspace_synced', 'canonical_synced', 'superseded'].includes(model.state)))} onClick={() => perform('run')}>{t(retryPhase && !detail.stale ? 'syncOperation.retryRun' : 'syncOperation.run')}</button>}
+        {settings?.enabled && !targetTree && <button type="button" disabled={!!busy || (model && !['idle', 'stale', 'source_synced', 'workspace_synced', 'canonical_synced', 'superseded'].includes(model.state))} onClick={() => perform('code')}>{t('syncOperation.runCode')}</button>}
         {!targetTree && model?.canPause && <button type="button" disabled={!!busy} onClick={() => perform('pause')}>{t('syncOperation.pause')}</button>}
         {!targetTree && model?.canResume && <button type="button" disabled={!!busy} onClick={() => perform('resume')}>{t('syncOperation.resume')}</button>}
         {!targetTree && model?.canCancel && <button type="button" disabled={!!busy} onClick={() => perform('cancel')}>{t('syncOperation.cancel')}</button>}
@@ -190,9 +241,14 @@ export default function SyncOperationPanel({ nodeId, nodePath, targetTree = null
     </div>
     {currentError && <p className="sync-op-error" role="alert"><code>{currentError.code}</code> · {currentErrorMessage} <button type="button" disabled={!!busy} onClick={() => {
       if (currentError.retry?.kind === 'automatic' && !targetTree && settings?.enabled === true) void performAutomatic(currentError.retry.action)
+      else if (currentError.retry?.kind === 'revert' && !targetTree && settings?.enabled === true) void performRevert(currentError.retry.operationId)
+      else if (currentError.retry?.kind === 'writer_stop' && !targetTree && settings?.enabled === true) void performStopWriter()
       else if (currentError.retry?.kind === 'operation') void perform(currentError.retry.action)
       else { setError(null); setRefresh(value => value + 1) }
-    }}>{t(currentError.retry && (currentError.retry.kind !== 'automatic' || (!targetTree && settings?.enabled === true)) ? 'syncOperation.retryAction' : 'syncOperation.retry')}</button></p>}
+    }}>{t(currentError.retry && (currentError.retry.kind === 'operation'
+      || currentError.retry.kind === 'revert' && !targetTree && settings?.enabled === true
+      || currentError.retry.kind === 'writer_stop' && !targetTree && settings?.enabled === true
+      || currentError.retry.kind === 'automatic' && !targetTree && settings?.enabled === true) ? 'syncOperation.retryAction' : 'syncOperation.retry')}</button></p>}
     {settings && <p className="sync-op-source">{t(targetTree ? 'syncOperation.viewedTree' : 'syncOperation.source')} <code>{settings.input.canonicalRoot}</code>{!targetTree && <span> · {t('syncOperation.sourceBranch')} <code>{settings.input.branch}</code></span>}</p>}
     {settings && !targetTree && <p className="sync-op-note">{t('syncOperation.configuredDeliveryRoot')} <code>{settings.deliveryRoot}</code></p>}
     {!targetTree && settings?.configurationError && <p className="sync-op-error" role="alert"><code>{settings.configurationError.code}</code> · {settings.configurationError.message}</p>}
@@ -217,6 +273,13 @@ export default function SyncOperationPanel({ nodeId, nodePath, targetTree = null
           {t(observer.control === 'pause' ? 'syncOperation.observer.resumeAutomatic' : 'syncOperation.observer.pauseAutomatic')}
         </button>
       </div>}
+      {writerStopped && <p role="status" className="sync-op-note">{t('syncOperation.writerStopped')}</p>}
+      {settings?.enabled === true && !writerStopped && observer.healthStatus !== 'offline' && <>
+        <p className="sync-op-note">{t('syncOperation.writerStopNote')}</p>
+        <div className="sync-op-actions">
+          <button type="button" disabled={!!busy || currentError?.kind === 'read'} onClick={performStopWriter}>{t('syncOperation.stopWriter')}</button>
+        </div>
+      </>}
       <details className="sync-op-coverage">
         <summary>{observer.coverage
           ? t('syncOperation.observer.coverageSummary', { included: observer.coverage.includedNodeIds.length, total: observer.coverage.totalNodeCount })
@@ -255,10 +318,12 @@ export default function SyncOperationPanel({ nodeId, nodePath, targetTree = null
         </ul>}
       </details>
     </section>}
-    {current?.operations.length > 1 && <label className="sync-op-history">{t('syncOperation.history')} <select disabled={!!busy} value={detail.operation.id} onChange={event => setSelectedOperationId(event.target.value)}>{current.operations.map(item => <option key={item.operation.id} value={item.operation.id}>{item.operation.origin} · {t(`syncOperation.phase.${item.operation.phase}`)} · {item.operation.id}</option>)}</select></label>}
+    {model?.sourceSynced && model?.canonicalSynced && <p className="sync-op-note">{t('syncOperation.sourceAccepted')}</p>}
+    {current?.operations.length > 1 && <label className="sync-op-history">{t('syncOperation.history')} <select disabled={!!busy} value={detail.operation.id} onChange={event => { setSelectedOperationId(event.target.value); setNotice(null) }}>{current.operations.map(item => <option key={item.operation.id} value={item.operation.id}>{item.operation.origin} · {t(`syncOperation.phase.${item.operation.phase}`)} · {item.operation.id}</option>)}</select></label>}
+    {notice && <p role="status" className="sync-op-note">{t(`syncOperation.${notice}`)}</p>}
     {model?.failure && <p className="sync-op-error" role="alert"><code>{model.failure.code}</code> · {model.failure.message}</p>}
     {retryPhase && !detail.stale && detail.retryEligibility?.reason && <p className="sync-op-note"><code>{detail.retryEligibility.reason.code}</code> · {detail.retryEligibility.reason.message}</p>}
     {detail?.decisionContext && <SyncBusinessDecision key={`decision:${detail.operation.id}`} detail={detail} targetTree={targetTree} disabled={!!busy || !!targetTree || !model.canDecide || !settings?.enabled} onSubmitted={() => setRefresh(value => value + 1)} />}
-    {detail && <OperationEvidence key={`evidence:${detail.operation.id}`} detail={detail} model={model} nodeId={nodeId} nodePath={nodePath} targetTree={targetTree} />}
+    {detail && <OperationEvidence key={`evidence:${detail.operation.id}`} detail={detail} model={model} nodeId={nodeId} nodePath={nodePath} targetTree={targetTree} canRevert={model.canRevert} busy={!!busy} onRevert={() => performRevert(detail.operation.id)} />}
   </section>
 }

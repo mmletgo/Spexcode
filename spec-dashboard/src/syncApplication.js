@@ -25,7 +25,14 @@ export const readSyncStatus = async (nodeId, targetTree = null, signal) => {
     || !value.settings || typeof value.settings !== 'object'
     || !value.settings.input || typeof value.settings.input !== 'object'
     || typeof value.settings.input.canonicalRoot !== 'string'
-    || !Array.isArray(value.operations) || !value.operations.every(item => item?.operation)
+    || !Array.isArray(value.operations) || !value.operations.every(item => item?.operation
+      && typeof item.sourceSynced === 'boolean'
+      && typeof item.canonicalSynced === 'boolean'
+      && (item.revertEligibility?.eligible === true
+        || item.revertEligibility?.eligible === false
+          && typeof item.revertEligibility.reason?.code === 'string'
+          && typeof item.revertEligibility.reason?.message === 'string')
+      && ['ready', 'recovery_required'].includes(item.executionAvailability?.status))
     || !value.observation || typeof value.observation !== 'object'
     || !Array.isArray(value.sources)
     || !value.sources.every(source => source?.source && typeof source.source === 'object')) {
@@ -40,6 +47,27 @@ export const automaticControl = (action, targetTree = null) => syncRead(`automat
 export const runSync = (nodeId, requestId, targetTree = null, options = {}) => syncRead('run', targetTree, post({ nodeId, requestId, origin: options.origin || 'initial', ...(options.retryOf ? { retryOf: options.retryOf } : {}) }))
 export const decideSync = (id, input, targetTree = null) => syncRead(`operations/${encodeURIComponent(id)}/decide`, targetTree, post(input))
 export const controlSync = (id, action, targetTree = null) => syncRead(`operations/${encodeURIComponent(id)}/${action}`, targetTree, post({}))
+export const revertSync = async (id, requestId, targetTree = null) => {
+  const value = await syncRead(`operations/${encodeURIComponent(id)}/revert`, null, post({ requestId, ...(targetTree ? { targetTree } : {}) }))
+  if (typeof value?.changed !== 'boolean'
+    || (value.changed && (!value.operation || typeof value.operation.id !== 'string'))
+    || (!value.changed && value.operation !== null)) {
+    const error = new Error('同步撤销响应缺少操作结果')
+    error.code = 'sync_response_invalid'
+    throw error
+  }
+  return value
+}
+export const stopSyncWriter = async (targetTree = null) => {
+  const value = await syncRead('stop-writer', null, post(targetTree ? { targetTree } : {}))
+  if (value?.stopped !== true || value.control?.control !== 'pause'
+    || !Array.isArray(value.operations) || !value.operations.every(item => typeof item?.operation?.id === 'string')) {
+    const error = new Error('停止写入响应缺少暂停控制或恢复操作')
+    error.code = 'sync_response_invalid'
+    throw error
+  }
+  return value
+}
 export const readSyncDiff = (id, path, kind, targetTree = null, signal) => syncRead(`operations/${encodeURIComponent(id)}/diff?${new URLSearchParams({ path, kind })}`, targetTree, { signal })
 export const readSyncEvidence = (id, hash, targetTree = null, signal) => syncRead(`operations/${encodeURIComponent(id)}/evidence/${encodeURIComponent(hash)}`, targetTree, { signal })
 
@@ -137,21 +165,22 @@ export function requestIdentity(previous, payload, makeId = () => crypto.randomU
 const COMPLETED = new Set(['workspace_synced', 'awaiting_landing', 'canonical_synced'])
 const TERMINAL = new Set(['cancelled', 'superseded', 'failed', 'budget_exhausted', ...COMPLETED])
 export function syncProjection(detail, activation) {
-  const { operation, attempt, journals, resources, stale, sourceSynced, executionAvailability } = detail
+  const { operation, attempt, journals, resources, stale, sourceSynced, canonicalSynced, revertEligibility, executionAvailability } = detail
   const settled = journals.findLast((journal) => journal.status === 'settled' && journal.receipt
     && journal.generation === operation.generation && journal.attemptId === operation.currentAttemptId)
   const recovery = executionAvailability.status === 'recovery_required'
   const complete = !!settled && activation !== 'invalidated' && !stale && !recovery && COMPLETED.has(operation.phase)
   const state = recovery ? 'recovery_required' : activation === 'invalidated' ? 'invalidated' : stale ? 'stale'
-    : complete ? sourceSynced ? 'source_synced' : 'workspace_synced'
+    : complete ? canonicalSynced ? 'canonical_synced' : sourceSynced ? 'source_synced' : 'workspace_synced'
       : COMPLETED.has(operation.phase) ? 'unsettled' : operation.phase
   return {
-    state, complete, receipt: settled?.receipt || null, settledJournal: settled || null,
+    state, complete, sourceSynced, canonicalSynced, receipt: settled?.receipt || null, settledJournal: settled || null,
     deliveryRoot: settled?.receipt.deliverySnapshot.source.canonicalRoot || null,
     sourceRoot: operation.input.source.canonicalRoot,
     failure: recovery ? executionAvailability.failure : attempt?.failure,
     canRetry: !recovery && !stale && activation !== 'invalidated' && detail.retryEligibility?.eligible === true,
     canDecide: !recovery && !stale && activation !== 'invalidated' && detail.decisionEligibility.eligible,
+    canRevert: !recovery && activation !== 'invalidated' && revertEligibility?.eligible === true,
     canRecover: recovery && (resources.length > 0 || journals.some((journal) => journal.status !== 'settled')),
     canPause: !recovery && !TERMINAL.has(operation.phase) && !['paused', 'pausing', 'cancelling'].includes(operation.phase),
     canResume: !recovery && operation.phase === 'paused',

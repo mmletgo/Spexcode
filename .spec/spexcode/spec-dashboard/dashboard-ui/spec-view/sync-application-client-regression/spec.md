@@ -29,3 +29,5 @@ related:
 裁决资格投影回归验证在途 P1 虽有 early conflicted reason，服务端 eligible=false 仍禁写；已结算 failed/budget_exhausted、conflicted、needs_input、superseded 的 eligible=true 可开放。stale、资源恢复或 invalidated 始终覆盖真实资格并禁用，不以 JSX 字串或模拟截图冒充交互验收。
 
 物理自动 pause/resume transport 核对 endpoint、targetTree query 和空请求体，并保留后端控制错误码/消息。HTTP 200 缺少 settings/operations/observation/sources 时 readSyncStatus 返回可重试错误。观察器投影分别覆盖 live online、离线/退化/缺失/失效、持久 watching 但身份未确认、无状态数据、真实补偿扫描时间、项目 coverage 分母与原始节点集合；status.sources 必须按 physical root 对应真实状态，不能把失联的持久 watching 显示为在线，baseline 数只对应最近观测节点，selection 无效时不当作零缺失或全项目结论。
+
+回归覆盖 canonicalSynced/sourceSynced 的分别显示、canonical_synced 仍可作为新输入、source stale 时 backend eligible 仍开放成组撤销但 recovery/invalidated 关闭。Revert transport 失败后稳定 requestId 不变，并校验 response operation；stop-writer transport 保持物理 action scope、pause control 与恢复 operations 子集响应。真实 UI 验收须确认恢复子集不替换历史列表，暂停写入与单项取消文案/行为分离。

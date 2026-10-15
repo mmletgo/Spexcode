@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { automaticControl, decideSync, controlSync, enableSync, evidenceProjection, readSyncStatus, readSyncDiff, requestIdentity, runSync, syncObserverProjection, syncProjection } from './syncApplication.js'
+import { automaticControl, decideSync, controlSync, enableSync, evidenceProjection, readSyncStatus, readSyncDiff, requestIdentity, revertSync, runSync, stopSyncWriter, syncObserverProjection, syncProjection } from './syncApplication.js'
 import { apiFetch, postSpecBody } from './data.js'
 
 /** @type {import('../../spec-cli/src/sync/operation-types.ts').WorktreeIdentity} */
@@ -12,7 +12,7 @@ const scope = { paths: ['.spec/alpha/spec.md'], contractIds: ['REQ-1'], flowIds:
 const operation = { id: 'op', ingressKey: 'ingress', payloadDigest: 'payload', rootCauseId: 'root', origin: 'spec', generation: 1, revision: 1, phase: 'workspace_synced', control: 'run', input, previousBaselinePair: null, scope, readyScope: scope, blockedScope: { paths: [], contractIds: [], flowIds: [] }, deliveredScope: scope, blockedReason: null, policyDigest: 'policy', impactDigest: 'impact', readSetDigest: 'readset', budget: { maxAttempts: 3, maxCalls: 6, maxRepairs: 2, timeoutMs: 1000 }, callsUsed: 1, deadlineAtMs: 1001, currentAttemptId: 'attempt', dispatchMessageId: 'dispatch', delivery: null, deliveryPlan: { canonicalRoot: '/repo/private', branch: 'delivery', baseCommit: 'head' }, createdAtMs: 1, updatedAtMs: 2 }
 const receipt = { id: 'receipt', deliverySnapshot: { ...input, source: { ...source, canonicalRoot: '/repo/published' } } }
 const settled = { status: 'settled', receipt, generation: 1, attemptId: 'attempt' }
-const detail = { operation, attempt: null, journals: [settled], resources: [], retryEligibility: { eligible: false }, decisionEligibility: { eligible: false }, stale: false, sourceSynced: false, executionAvailability: { status: 'ready' } }
+const detail = { operation, attempt: null, journals: [settled], resources: [], retryEligibility: { eligible: false }, decisionEligibility: { eligible: false }, stale: false, sourceSynced: false, canonicalSynced: false, revertEligibility: { eligible: false, reason: { code: 'SYNC_REVERT_NOT_LANDED', message: 'The delivery has not landed' } }, executionAvailability: { status: 'ready' } }
 
 test('early conflict evidence does not grant a decision before backend eligibility settles', () => {
   const inFlight = { ...detail, operation: { ...operation, phase: 'elaborating', blockedReason: 'conflicted' }, attempt: { status: 'running' }, journals: [], decisionEligibility: { eligible: false, reason: { code: 'SYNC_DECISION_ACTIVE', message: '当前细化仍在执行' } } }
@@ -33,6 +33,18 @@ test('only a settled current receipt projects delivery completion and its actual
   assert.equal(view.deliveryRoot, '/repo/published')
   assert.notEqual(view.deliveryRoot, operation.deliveryPlan.canonicalRoot)
   assert.equal(syncProjection({ ...detail, sourceSynced: true }).state, 'source_synced')
+  const canonical = syncProjection({ ...detail, operation: { ...operation, phase: 'canonical_synced' }, sourceSynced: true, canonicalSynced: true })
+  assert.equal(canonical.state, 'canonical_synced')
+  assert.equal(canonical.canonicalSynced, true)
+  assert.equal(canonical.sourceSynced, true)
+})
+
+test('grouped revert eligibility follows the backend and remains available for later source edits', () => {
+  const eligible = { ...detail, stale: true, revertEligibility: { eligible: true } }
+  assert.equal(syncProjection(eligible, 'enabled').canRevert, true)
+  assert.equal(syncProjection({ ...eligible, executionAvailability: { status: 'recovery_required' } }, 'enabled').canRevert, false)
+  assert.equal(syncProjection(eligible, 'invalidated').canRevert, false)
+  assert.equal(syncProjection({ ...detail, revertEligibility: { eligible: false, reason: { code: 'SYNC_REVERT_NOT_LANDED', message: 'Not landed' } } }, 'enabled').canRevert, false)
 })
 
 test('stale, blocked, failed and recovery results never project synchronized', () => {
@@ -132,10 +144,37 @@ test('automatic intake controls use the physical pause/resume API and preserve s
   } finally { globalThis.fetch = originalFetch }
 })
 
+test('revert and writer-stop transports preserve request identity, source scope, and response facts', async () => {
+  const originalFetch = globalThis.fetch
+  const requests = []
+  globalThis.fetch = async (url, init) => {
+    requests.push({ url: new URL(url, 'http://test'), init })
+    if (requests.length === 1) return new Response(JSON.stringify({ code: 'SYNC_BUSY', error: 'Another request is pending' }), { status: 409 })
+    if (requests.length === 2) return new Response(JSON.stringify({ changed: true, operation: { id: 'revert-op' } }), { status: 200 })
+    return new Response(JSON.stringify({ stopped: true, control: { control: 'pause', revision: 4 }, operations: [detail] }), { status: 200 })
+  }
+  try {
+    await assert.rejects(revertSync('operation one', 'stable-revert-id'), error => error.code === 'SYNC_BUSY')
+    const result = await revertSync('operation one', 'stable-revert-id')
+    assert.equal(result.operation.id, 'revert-op')
+    assert.equal(requests[0].url.pathname, '/api/sync/operations/operation%20one/revert')
+    assert.deepEqual(JSON.parse(requests[0].init.body), { requestId: 'stable-revert-id' })
+    assert.deepEqual(JSON.parse(requests[1].init.body), { requestId: 'stable-revert-id' })
+
+    const stopped = await stopSyncWriter('/source tree')
+    assert.equal(stopped.stopped, true)
+    assert.equal(stopped.control.control, 'pause')
+    assert.equal(requests[2].url.pathname, '/api/sync/stop-writer')
+    assert.deepEqual(JSON.parse(requests[2].init.body), { targetTree: '/source tree' })
+  } finally { globalThis.fetch = originalFetch }
+})
+
 test('incomplete status responses become retryable read errors instead of fake offline status', async () => {
   const originalFetch = globalThis.fetch
   globalThis.fetch = async () => new Response(JSON.stringify({ settings: { input: source }, operations: [] }), { status: 200 })
   try {
+    await assert.rejects(readSyncStatus('alpha'), error => error.code === 'sync_response_invalid')
+    globalThis.fetch = async () => new Response(JSON.stringify({ settings: { input: source }, operations: [{ operation }], observation: {}, sources: [] }), { status: 200 })
     await assert.rejects(readSyncStatus('alpha'), error => error.code === 'sync_response_invalid')
   } finally { globalThis.fetch = originalFetch }
 })

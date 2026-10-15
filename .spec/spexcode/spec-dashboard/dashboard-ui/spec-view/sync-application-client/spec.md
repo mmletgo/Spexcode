@@ -31,3 +31,7 @@ Detail.decisionEligibility 是服务端始终返回的裁决资格；syncProject
 automaticControl(action, targetTree) 只把 pause/resume 发送到既有 `/api/sync/automatic/{action}` 物理控制入口，经现有 targetTree URL helper 传递工作树且不附 operation ID；面板仅从 enabled 的默认来源视图调用，所有 targetTree 视图由面板Spec保持只读。返回实际 observation；非成功响应继续透传 code/message。syncObserverProjection 整理 health.watchOnline/status/lastScanAtMs、物理控制、真实 coverage 数组、最近 observation 的 baseline selection 和 status.sources 物理来源摘要供界面显示：persistedHealth 和更新时间不能生成在线或扫描结论，baseline 汇总明确限于 latestDifference.nodeId，不能补造项目级 per-node 结果。来源列表从 source.watchOnline 判断在线，并且只读。
 
 readSyncStatus 要求实际 settings、operations、observation 和 sources 结构；HTTP 成功但缺少同步 UI 必需字段时返回可重试的 sync_response_invalid，不能让缺字段被解释为空覆盖或离线状态。
+
+status operation detail 必须提供 boolean sourceSynced/canonicalSynced、实际 revertEligibility 和 executionAvailability；同步完成投影只用真实 canonicalSynced 区分主分支落地。canRevert 消费 backend eligible 且保留 recovery availability 门禁，不额外排除 stale。
+
+revertSync 发送 `POST /api/sync/operations/:id/revert`，body 保留同一操作稳定 requestId 与可选 targetTree；响应必须同时说明 changed 和真实新 operation/null。stopSyncWriter 调用 `POST /api/sync/stop-writer`，校验 stopped/control/恢复子集；调用方消费部分 operations 时不得将其当完整历史。两种 transport 都保留服务端 code/message，成功响应结构不完整时 fail closed。

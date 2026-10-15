@@ -47,3 +47,9 @@ P5 来源树增加项目观察摘要：观察在线必须由 status.observation.
 来源工作树 root/branch、receipt 中真实交付树 root/branch/actualCommit，以及 workspace_synced、awaiting_landing、source_synced 阶段各自显示，不能凭 main/master 分支名称推断已落地或完成。targetTree 继续只读且不显示它为同步来源。覆盖与观察证据放进原生 details；状态更新不重挂操作区、不抢键盘焦点，窄屏内容可换行。
 
 status.sources 按实际启用的物理来源工作树只读列出 root、branch、存在性、经服务端确认的观察健康、自动接入控制、登记意图与最近输入观测；不在来源列表提供控制按钮。persisted watching 而 watchOnline 不成立时展示身份未确认，不能显示在线。
+
+operation Detail 的 `sourceSynced` 与 `canonicalSynced` 是独立事实：来源已采纳单独标记，只有服务端确认 canonicalSynced=true 才显示“主分支已同步”；不按分支名或 deliveryPlan 推断落地。Run/code 在 canonical_synced 状态仍可作为新输入启动。
+
+已结算交付详情可提供“生成成组撤销”，只在 backend `revertEligibility.eligible` 且执行/恢复资料可用时开放，不因 `stale` 单独禁止；后续编辑由后端冻结为新的受控候选。文案须说明撤销会进入新的业务审查与验证，不会立即改写主分支。失败重试复用同一操作稳定 requestId。
+
+物理“停止后台写入”是来源级服务动作，区别于单项取消与暂停自动接入。使用真实 `stop-writer` 返回更新物理控制并刷新完整 status 历史；其 `operations` 只是需要恢复的子集，不能替换用户已加载的操作记录。说明已交付结果及恢复记录会保留、恢复自动接入会重新启动服务，并且停止回执不证明所有原生执行资源已释放。targetTree 仍只读。
