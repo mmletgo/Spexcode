@@ -2031,7 +2031,7 @@ test('launchPreflight refuses a launch that cannot succeed, naming which fact se
     session: 'preflight-test', governed: true, worktreePath: join(home, 'gone'), branch: null,
     title: null, name: null, parent: null, issues: [], issue: null, status: 'idle', proposal: null, merges: 0, note: null,
     sortKey: null, createdAt: 1, harness: 'claude', harnessSessionId: null, runtimeStartToken: null, stopped: false, archived: false, closedAt: null,
-    launcher: null, launchCmd: '/bin/true', launchOwner: null,
+    launcher: null, launchCmd: process.execPath, launchOwner: null,
   }
   try {
     assert.equal(launchPreflight(base)?.code, 'no-worktree', 'a worktree that is gone settles the launch')
