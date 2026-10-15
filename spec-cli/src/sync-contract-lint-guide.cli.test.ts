@@ -143,6 +143,6 @@ test('AC-SYNC-CONTRACT-GUIDE-01 真实guide输出由核心列派生，明确草�
     const help = repo.run('help', 'spec')
     assert.equal(help.code, 0, help.stderr)
     assert.match(help.stdout, /sync-contract \(sync-v1 draft/)
-    assert.match(help.stdout, /never complete\s+synchronization or execution proof/)
+    assert.match(help.stdout, /never complete\s+synchronization or execution evidence/)
   } finally { rmSync(repo.root, { recursive: true, force: true }) }
 })

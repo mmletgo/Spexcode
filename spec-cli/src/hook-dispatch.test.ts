@@ -673,15 +673,15 @@ test('codex mark-active resolves by payload thread id despite contaminated SPEXC
   // no content-hash pinning needed: the dispatcher never materializes ([[commit-surgery]] — the old gate is
   // retired), so the handcrafted manifest can never be re-materialized away by a dispatch.
   writeFileSync(join(runtime, 'sessions', 'id_A', 'runtime.json'), JSON.stringify({
-    session_id: 'id_A', governed: true, status: 'asking', proposal: 'old', note: 'wrong',
+    session_id: 'id_A', governed: true, status: 'awaiting', proposal: 'merge', note: 'wrong',
   }, null, 2))
   writeFileSync(join(runtime, 'sessions', 'id_B', 'runtime.json'), JSON.stringify({
-    session_id: 'id_B', governed: true, status: 'asking', proposal: 'old', note: 'right',
+    session_id: 'id_B', governed: true, status: 'awaiting', proposal: 'merge', note: 'right',
     harness_session_id: 'thread_B',
   }, null, 2))
   const databasePath = seedCanonicalSessions(home, [
-    { id: 'id_A', status: 'asking', proposal: 'old', note: 'wrong' },
-    { id: 'id_B', status: 'asking', proposal: 'old', note: 'right' },
+    { id: 'id_A', status: 'awaiting', proposal: 'merge', note: 'wrong' },
+    { id: 'id_B', status: 'awaiting', proposal: 'merge', note: 'right' },
   ])
   const r = spawnSync('bash', [dispatch, 'codex', 'PreToolUse'], {
     cwd: dir,
@@ -697,14 +697,18 @@ test('codex mark-active resolves by payload thread id despite contaminated SPEXC
     encoding: 'utf8',
   })
   assert.equal(r.status, 0, r.stderr)
-  assert.match(readFileSync(join(runtime, 'sessions', 'id_A', 'runtime.json'), 'utf8'), /"status": "asking"/)
+  assert.match(readFileSync(join(runtime, 'sessions', 'id_A', 'runtime.json'), 'utf8'), /"status": "awaiting"/)
   const b = readFileSync(join(runtime, 'sessions', 'id_B', 'runtime.json'), 'utf8')
-  assert.match(b, /"status": "asking"/, 'runtime metadata remains a stale envelope, never lifecycle authority')
+  assert.match(b, /"status": "awaiting"/, 'runtime metadata remains a stale envelope, never lifecycle authority')
   const canonical = openProjectSessionApplication({ databasePath, locality: () => {} })
   try {
+    assert.equal(canonical.readState('id_A')?.status, 'awaiting')
+    assert.equal(canonical.readState('id_A')?.proposal, 'merge')
+    assert.equal(canonical.readState('id_A')?.note, 'wrong')
     assert.equal(canonical.readState('id_B')?.status, 'active')
     assert.equal(canonical.readState('id_B')?.proposal, null)
     assert.equal(canonical.readState('id_B')?.note, null)
+    assert.equal(canonical.readState('thread_B'), null, 'a native thread alias must not acquire a lifecycle row')
   } finally { canonical.close() }
 })
 

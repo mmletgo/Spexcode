@@ -174,13 +174,15 @@ test('/api/specs/:id/version and /diff answer only for the node\'s own versions,
     assert.equal((await post('/api/specs/alpha/body', patch)).status, 200, 'ordinary no-op remains available before activation')
     const configPath = join(project, '.spec/spexcode.json'), config = JSON.parse(readFileSync(configPath, 'utf8'))
     const sync = {
-      version: 'sync-settings-v1', sourcePaths: ['src'], testPaths: ['test'], readPaths: ['package.json'], facts: [], mandatoryTests: [],
+      version: 'sync-settings-v1', nodeIds: ['alpha'], sourcePaths: ['src'], testPaths: ['test'], readPaths: ['package.json'], facts: [], mandatoryTests: [],
       budget: { maxAttempts: 2, maxCalls: 6, maxRepairs: 1, timeoutMs: 60000 },
       verifications: [{ definition: { id: 'VERIFY-HTTP-01', command: ['node', '--test', 'test/one.test.mjs'], cwd: '.', timeoutMs: 10000 }, environment: { version: 'docker-node-v1', image: `node@sha256:${'a'.repeat(64)}`, platform: 'linux/arm64', memoryBytes: 268435456, cpus: 1, pidsLimit: 64, scratchBytes: 16777216, logBytes: 1048576 } }],
     }
     writeFileSync(configPath, JSON.stringify({ ...config, sync }))
+    assert.equal((await post('/api/sync/automatic/pause', {})).status, 200)
     const beforeEnable = readFileSync(join(project, '.git/index'))
-    assert.equal((await post('/api/sync/settings', {})).status, 200)
+    const activation = await post('/api/sync/settings', {})
+    assert.equal(activation.status, 200, await activation.text())
     const enabled = await (await fetch(`${base}/api/sync/settings`)).json(); assert.equal(enabled.enabled, true)
     for (const retryOf of [42, '', null]) assert.equal((await post('/api/sync/run', { nodeId: 'alpha', requestId: 'invalid-retry', retryOf })).status, 400)
     const unknownRetry = await post('/api/sync/run', { nodeId: 'alpha', requestId: 'unknown-retry', retryOf: 'unknown' })
