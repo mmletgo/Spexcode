@@ -1,0 +1,46 @@
+name: sync-conformance
+
+# Execute only the protected target's checker. Candidate objects are data until the
+# trusted verifier exports them into the existing credential-free Docker sandbox.
+# This workflow must also be configured as a required check outside the PR.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  sync-conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Install and build protected target checker
+        run: |
+          npm ci --ignore-scripts
+          npm run build
+      - name: Fetch immutable candidate objects without checking them out
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+          TRUSTED_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          test "$PR_NUMBER" -ge 1
+          git -c core.hooksPath=/dev/null -c "http.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 -w0)" fetch --no-tags origin "refs/pull/$PR_NUMBER/merge"
+          CANDIDATE_SHA=$(git rev-parse FETCH_HEAD)
+          test "$(git rev-parse "$CANDIDATE_SHA^1")" = "$TRUSTED_BASE"
+          test "$(git rev-parse "$CANDIDATE_SHA^2")" = "$EXPECTED_HEAD"
+          printf 'CANDIDATE_SHA=%s\n' "$CANDIDATE_SHA" >> "$GITHUB_ENV"
+      - name: Recompute base and candidate conformance using protected policy
+        env:
+          TRUSTED_BASE: ${{ github.event.pull_request.base.sha }}
+        run: node scripts/sync-conformance-ci.mjs "$TRUSTED_BASE" "$CANDIDATE_SHA" "$TRUSTED_BASE"
