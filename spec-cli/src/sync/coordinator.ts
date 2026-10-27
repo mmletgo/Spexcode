@@ -503,6 +503,12 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         if (approved.findings.some(finding => finding.kind === 'conflict')) store.recordReviewedConflict(fence)
       }
       const effectiveFindings = analysis?.analysis.findings ?? []
+      const unboundFindings = effectiveFindings.filter(finding => !finding.affectedIds.length)
+      if (unboundFindings.length) {
+        const issue = failure('unbound_behavior_finding', JSON.stringify({ message: '已审业务发现尚无既有契约ID可关联，需先明确该冲突或缺口', findings: unboundFindings }), effectiveFindings.some(finding => finding.kind === 'conflict') ? 'conflict' : 'missing_input', [analysis!.ref])
+        store.recordFailure(fence, issue)
+        return current(undefined, issue)
+      }
       const deliveredFiles = priorDeliveryFiles(operation, view, [...options.plan.readPaths, ...operation.scope.paths])
       const historyGroup = operation.baselineSelection && operation.requestBlob ? readCompositionEvidence(operation.input, view.composed, operation.baselineSelection).controlledAuthorGroup : undefined
       for (const change of historyGroup?.changes ?? []) {

@@ -14,6 +14,8 @@ code:
 
 真实 Git 回归核对分析与独审均收到冻结契约图的 previous/current 完整项；raw-only 初始化的空图被明确标识，空关联仍须完整分析与独审，不把未通过 P1 结构检查或独审的候选资源名当作既有义务。此接缝只证明上下文与门禁，模型实际展开仍由真实 Dashboard 验收。
 
+真实 raw-only bootstrap 的 conflict 与 coverage_gap 先复现空 affectedIds 被不可能满足的既有 ID 校验拒绝，再确认原分类、路径、证据、反例及空关联完整进入新独审，不产生任何业务变更授权。有成对基线、精确选择中存在真实 pair、任一冻结图有稳定 ID 时空关联仍拒绝；初始化也不豁免越界/未授权路径和虚构未来 ID。
+
 定向回归覆盖接受前次真实delivery不产生作者授权、其后真实raw差量仍可识别，以及retry范围不能借decision或user:raw授权改无关幂等AC。
 
 真实Git新增治理叶的旧source不含叶、delivery包含叶；未ff采纳时缺失保留交付，实际ff后旧nodeId经公开buildSyncApplicationPlan定位移动/删除，程序逐旧身份退役且已有核心AC保持。最后节点缺失仍有旧raw目标，不以404跳过。此定向用fake native独审，整体真实模型/Docker/交付证据另由上层验收。

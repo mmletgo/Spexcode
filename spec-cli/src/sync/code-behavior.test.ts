@@ -10,7 +10,7 @@ import { adoptedDeliveryPaths, composeInputSnapshots } from './composition.js'
 import { buildSyncApplicationPlan } from './planning.js'
 import { readFrozenContracts } from './frozen-contracts.js'
 import type { ElaborationRunner } from './elaboration-types.js'
-import type { BaselinePair } from './operation-types.js'
+import type { BaselinePair, FrozenBaselineSelection } from './operation-types.js'
 import { composeControlledRequest, controlledDecisionIdentity, prepareControlledDecision, prepareControlledRequest, renderControlledDecisionRaw } from './request-input.js'
 import { captureInputSnapshot, contentHash, readEvidence, readObject, readTree, writeEvidence } from './snapshot.js'
 import { validateContractEvolution } from './contract-evolution.js'
@@ -85,6 +85,49 @@ test('分析及独审收到真实契约项正文，raw-only初始化不借未交
     })(request)
   })).reviewPassed, true)
   assert.deepEqual(bootstrapCalls, ['code_behavior_analyze', 'code_behavior_review'])
+})
+
+for (const kind of ['conflict', 'coverage_gap'] as const) test(`raw-only bootstrap 的真实 ${kind} 以空既有ID进入独审并保留完整发现`, async t => {
+  const f = await fixture(t, source => source.split('## expanded spec')[0])
+  writeFileSync(join(f.root, 'src/export.js'), `${f.source}\n// bootstrap behavior\n`)
+  const before = await f.input(), calls: string[] = []
+  const input: CodeBehaviorInput = { ...before, baseline: null, origin: 'initial', composed: composeInputSnapshots(before.snapshot, null).composed!, plan: { ...before.plan, facts: [] } }
+  const analysis = await analyzeCodeBehavior(input, async request => {
+    const context = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as { contractItems: { previous: unknown[]; current: unknown[] } }
+    assert.deepEqual(context.contractItems, { previous: [], current: [] })
+    calls.push(request.purpose)
+    return runner(kind, proposal => { proposal.changes = (proposal.changes as object[]).map(change => ({ ...change, affectedIds: [], ruleIds: [] })) })(request)
+  })
+  assert.deepEqual(calls, ['code_behavior_analyze', 'code_behavior_review'])
+  assert.equal(analysis.reviewPassed, true)
+  assert.ok(analysis.findings.length)
+  assert.ok(analysis.changes.every(change => change.kind === kind && !change.affectedIds.length && !change.ruleIds.length))
+  assert.ok(analysis.findings.every(finding => finding.kind === kind && !finding.affectedIds.length && !finding.ruleIds.length && finding.paths.length && finding.originalIntent && finding.evidence && finding.counterexample))
+  assert.deepEqual(deriveBehaviorAuthorization(analysis, writeEvidence(input.snapshot.source.commonDir, analysis)), [])
+})
+
+test('raw-only空关联不豁免既有基线、稳定ID、非法路径或虚构ID', async t => {
+  const raw = await fixture(t, source => source.split('## expanded spec')[0]), structured = await fixture(t)
+  for (const f of [raw, structured]) writeFileSync(join(f.root, 'src/export.js'), `${f.source}\n// changed behavior\n`)
+  const rawBefore = await raw.input(), structuredBefore = await structured.input()
+  const bootstrap: CodeBehaviorInput = { ...rawBefore, baseline: null, origin: 'initial', composed: composeInputSnapshots(rawBefore.snapshot, null).composed!, plan: { ...rawBefore.plan, facts: [] } }
+  const selectionBody = { version: 'sync-baseline-selection-v1' as const, source: rawBefore.snapshot.source, bindings: [{ resource: { kind: 'path' as const, path: 'src/export.js' }, bytePair: rawBefore.baseline }] }
+  const baselineSelection: FrozenBaselineSelection = { ...selectionBody, digest: contentHash(JSON.stringify(selectionBody, (_key, value: unknown) => value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value)) }
+  const selected: CodeBehaviorInput = { ...bootstrap, baselineSelection, composed: composeInputSnapshots(rawBefore.snapshot, baselineSelection, { retainConflicts: true }).composed! }
+  const emptyBody = { ...selectionBody, bindings: selectionBody.bindings.map(binding => ({ ...binding, bytePair: null })) }
+  const emptySelection: FrozenBaselineSelection = { ...emptyBody, digest: contentHash(JSON.stringify(emptyBody, (_key, value: unknown) => value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value)) }
+  const selectedBootstrap: CodeBehaviorInput = { ...bootstrap, origin: 'reconcile', baselineSelection: emptySelection, composed: composeInputSnapshots(rawBefore.snapshot, emptySelection).composed! }
+  assert.equal((await analyzeCodeBehavior(selectedBootstrap, runner('conflict', proposal => { proposal.changes = (proposal.changes as object[]).map(change => ({ ...change, affectedIds: [], ruleIds: [] })) }))).reviewPassed, true)
+  writeFileSync(join(structured.root, '.spec/export/export-contract/spec.md'), structured.raw.split('## expanded spec')[0])
+  const erased = await structured.input(), oldIdsOnly: CodeBehaviorInput = { ...erased, baseline: null, composed: composeInputSnapshots(erased.snapshot, null).composed! }
+  writeFileSync(join(raw.root, '.spec/export/export-contract/spec.md'), structured.raw)
+  const added = await raw.input(), currentIdsOnly: CodeBehaviorInput = { ...added, baseline: null, composed: composeInputSnapshots(added.snapshot, null).composed! }
+  for (const input of [rawBefore, selected, structuredBefore, oldIdsOnly, currentIdsOnly, { ...structuredBefore, baseline: null, composed: composeInputSnapshots(structuredBefore.snapshot, null).composed! }]) {
+    for (const kind of ['conflict', 'coverage_gap'] as const) await assert.rejects(analyzeCodeBehavior(input, runner(kind, proposal => { proposal.changes = (proposal.changes as object[]).map(change => ({ ...change, affectedIds: [], ruleIds: [] })) })), /必须指明阻塞的既有意图\/规则ID/)
+  }
+  for (const mutation of [{ paths: ['../outside'] }, { paths: ['outside/file.js'] }, { affectedIds: ['RULE-FUTURE-01'] }, { ruleIds: ['RULE-FUTURE-01'] }]) {
+    await assert.rejects(analyzeCodeBehavior(bootstrap, runner('conflict', proposal => { proposal.changes = (proposal.changes as object[]).map(change => ({ ...change, affectedIds: [], ruleIds: [], ...mutation })) })), /不合法仓库路径|未完整读取的路径|不存在的契约ID|必须指明阻塞的既有意图\/规则ID/)
+  }
 })
 
 test('目录授权的新增helper与删除文件前置完整冻结读取清单，metadata和links不冒全文', async t => {

@@ -54,7 +54,9 @@ P4 显式重试按原 operation 已审扩展后的 scope 及最终 selection 重
 
 recoveryOnly在独占mutex后先于普通phase/claim运行：精确终止所有历史未removed资源，再仅恢复当前attempt已存在且绑定delivery的未settled journal。Docker恢复driver拒绝create/start，planned容器不存在保留未知恢复状态，不新建容器补齐。原生资源只以aborted既有请求桥取真实stop证据；无journal即使verified也不进入prepare/apply。错误返回recovery_required及诊断而不自动pause/run、扣budget或新建attempt；已有journal结算可登记真实receipt/原结论。
 
-code/combined/reconcile及已共同验证基线上的外部代码差量、真实作者raw/规则差量、文本重叠进入 [[sync-code-behavior]] analyzing独审；不再以来源标记或Git重叠直接unsupported/conflict。分析完整binding核对后存同attempt checkpoint，派生facts/AC授权/nodeChanges作为执行上下文，不修改冻结plan/policyDigest。真正conflict/GAP仅经既有dependencyClosure阻依赖，完整FLOW受阻但独立ready分支仍生成与四层验证，receipt覆盖不含blocked。
+code/combined/reconcile及已共同验证基线上的外部代码差量、真实作者raw/规则差量、文本重叠进入 [[sync-code-behavior]] analyzing独审；不再以来源标记或Git重叠直接unsupported/conflict。分析完整binding核对后存同attempt checkpoint，派生facts/AC授权/nodeChanges作为执行上下文，不修改冻结plan/policyDigest。具有关联业务ID的真正conflict/GAP经既有dependencyClosure阻依赖，完整FLOW受阻但独立ready分支仍生成与四层验证，receipt覆盖不含blocked。
+
+raw-only 初始化允许的空 affectedIds 不能被解释为没有阻塞。完整分析独审已通过且正式 checkpoint 持久后，若真实 blocking finding 仍未关联既有契约 ID，则在 P1/facts/生成之前按 conflict 或 missing_input 记录明确业务失败，保原 finding 完整正文及 analysis 证据引用；不把它转 allowed_change、补假业务 ID、生成 derived:undefined 或以空 closure 放行。该失败停止自动修复尝试，不增加 P1/生成/验证或 journal。无 blocking finding 的初始化仍正常交 P1；已有 ID 的发现继续使用原依赖闭包与独立 ready 分支机制。
 
 节点移动以旧from正文为细化输入、新to为候选位置，完整规范node universe保持mintIds语义及业务ID连续。明确退役保旧新范围与负向测试义务；没有active AC时只有具体已授权退役AC仍执行固定命令及旧test ID才可推进，不靠空验收通过。retiredIds/decisionRefs仅真实receipt结算累计。
 
