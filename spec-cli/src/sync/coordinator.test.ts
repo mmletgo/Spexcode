@@ -126,6 +126,40 @@ async function fixture(t: test.TestContext, budget = { maxAttempts: 3, maxCalls:
   return { root, parent, managedRoot, artifactRoot, input, index, bytes, store, operation, plan, options, calls, git, priorCommitCount, realTools, closeForRestart: () => { protocol.close(); closed = true }, useStore: (next: SyncStore) => { store = next }, useOperation: (next: typeof operation) => { operation = next }, transform: (fn: typeof transform) => { transform = fn } }
 }
 
+for (const kind of ['conflict', 'coverage_gap'] as const) test(`raw-only已审 ${kind} 无既有ID时明确阻塞，不派P1或消耗新attempt`, async t => {
+  const raw = original.split('## expanded spec')[0]
+  const f = await fixture(t, { maxAttempts: 2, maxCalls: 8, maxRepairs: 1, timeoutMs: 120000 }, false, raw, 'project', raw, {}, undefined, 'code')
+  assert.equal(f.operation.previousBaselinePair, null)
+  assert.deepEqual(f.operation.scope.contractIds, [])
+  f.transform((output, request) => {
+    if (request.purpose === 'code_behavior_analyze') {
+      const value = output as { changes: { kind: string; affectedIds: string[]; ruleIds: string[] }[] }
+      value.changes.forEach(change => { change.kind = kind; change.affectedIds = []; change.ruleIds = [] })
+      return value
+    }
+    if (request.purpose !== 'code_behavior_review') throw Object.assign(new Error('未关联的已审业务发现不得晋级P1/生成'), { code: 'unsupported' })
+    return output
+  })
+  const result = await runSyncOperation(f.store, f.operation.id, f.options)
+  assert.equal(result.status, kind === 'conflict' ? 'conflicted' : 'needs_input')
+  assert.equal(result.failure!.code, 'unbound_behavior_finding')
+  assert.equal(result.failure!.kind, kind === 'conflict' ? 'conflict' : 'missing_input')
+  const findings = JSON.parse(result.failure!.message).findings as { id: string; kind: string; affectedIds: string[]; paths: string[]; evidence: string; counterexample: string }[]
+  assert.ok(findings.length)
+  assert.ok(findings.every(finding => finding.kind === kind && !finding.affectedIds.length && finding.paths.length && finding.evidence && finding.counterexample))
+  const analysis = JSON.parse(readEvidence(f.input.source.commonDir, result.failure!.evidenceRefs[0]).toString()) as { reviewPassed: boolean; findings: unknown[] }
+  assert.equal(analysis.reviewPassed, true)
+  assert.deepEqual(findings, analysis.findings)
+  assert.deepEqual(f.calls.map(call => call.purpose), ['code_behavior_analyze', 'code_behavior_review'])
+  assert.equal(f.store.listAttempts(f.operation.id).length, 1)
+  assert.equal(result.operation.callsUsed, 2)
+  assert.equal(result.receipt, undefined)
+  assert.equal(f.store.listJournals(f.operation.id).length, 0)
+  assert.ok(f.store.listAttempts(f.operation.id).every(attempt => !attempt.candidate && !attempt.verification))
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
+  assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+})
+
 test('可信目录授权/完整readset固定，同source不同policy不混，uncovered dirty和可改oracle拒绝', async t => {
   const f = await fixture(t)
   assert.equal(f.operation.policyDigest, syncPlanDigest(f.plan))

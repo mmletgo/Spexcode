@@ -28,7 +28,9 @@ readPaths 纳入冻结 Spec、版本化配置、额外 readPaths、实际影响�
 
 P4规划可读取精确 FrozenBaselineSelection：文件正文以各 path 真 bytePair 的交付对象恢复保护上下文，逐 ID 不同旧交付图的真实影响保持并集。deriveSyncBaselineResources 从真实当前/既有快照及 plan 的实际读取/保护文件推导 exact path 与既有契约/flow ID；授权目录不是完整范围或已验证覆盖。缺失的精确目标、保护测试、配置与既有 tombstone 仍是资源；未来新业务 ID 由真实细化结果原子扩范围，不猜测。已结算裁决与退役历史按实际选中 pair 去重继承。
 
-P4的executionScope只含实际目标Spec/治理代码/影响测试路径及目标业务身份。readPaths只含目标、实际引用权威、祖先需求、影响code/test、mandatory测试与明确额外上下文；source/test授权目录保持模型写授权，不能假冒本次完整读取。FLOW只用flow资源，VERIFY保执行政策而不是已消费业务身份；只读与保护资源不等同写lease或验证覆盖。
+P4的executionScope只含实际目标Spec/治理代码/影响测试路径及目标业务身份。readPaths包含目标、实际引用权威、祖先需求、影响code/test、mandatory测试、明确额外上下文和已授权settings.testPaths；后者为raw-only冷启动提供现有pytest/npm测试正文，即使尚无AC.test引用也能完整进入冻结行为分析。settings.sourcePaths仍按实际影响与发现逐文件读取，授权目录不是lease；读取testPaths不会扩展executionScope或mandatoryTests。FLOW只用flow资源，VERIFY保执行政策而不是已消费业务身份；只读与保护资源不等同写lease或验证覆盖。
+
+规划同时将 settings.sourcePaths 排序复制为冻结 plan.sourcePaths，独立保留业务源码角色；source/test 的合并可写集合不能替代该角色。行为分析可读取已授权测试正文，但不把未改的纯测试目录当作新增未治理业务源码。角色事实与其余计划一同进入既有 policyDigest；相同 read/write 集合的不同 source/test 划分仍为不同政策，不另建角色配置或摘要机制。
 
 实际纳入完整readonly上下文的契约须同时读取其code治理与AC.test绑定的精确文件路径，包括当前、旧交付和各选中历史pair在同一已读Spec路径的声明并集。移动子节点不能只带父契约全文却漏掉其声明文件，造成严格结构检查误报不存在；此读取闭包不把父契约加入targets、executionScope、writePaths或mandatory执行范围，也不纳入未读取的独立节点。
 

@@ -98,8 +98,9 @@ export async function buildSyncApplicationPlan(snapshot: InputSnapshot, nodeId: 
   return {
     executionScope,
     version: 'sync-coordinator-v1', intentNodeId: intent.id, targets,
-    readPaths: [...new Set([...specReadPaths, ...declaredReadPaths, '.spec/spexcode.json', ...settings.readPaths, ...codePaths, ...discoveryPaths, ...impact.testPaths, ...mandatoryTests.map(test => test.testPath)])].sort(),
+    readPaths: [...new Set([...specReadPaths, ...declaredReadPaths, '.spec/spexcode.json', ...settings.readPaths, ...settings.testPaths, ...codePaths, ...discoveryPaths, ...impact.testPaths, ...mandatoryTests.map(test => test.testPath)])].sort(),
     writePaths: [...new Set([...targets.map(target => target.path), ...targets.map(target => posix.dirname(target.path)), ...priorTargets.map(target => target.path), ...writable])].sort(),
+    sourcePaths: [...settings.sourcePaths].sort(),
     facts: [...settings.facts, ...decisionFacts], decisionAuthorities: decisionRefs.map(ref => readDecisionAuthority(snapshot.source.commonDir, ref)), decisionRefs, retiredIds, verifications, mandatoryTests,
   }
 }
