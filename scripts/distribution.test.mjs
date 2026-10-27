@@ -111,6 +111,35 @@ test('the ZCode workflow\'s lint gate runs as the command line it submits, and r
   }
 })
 
+test('every atlas spec writer receives the plain-language business contract', () => {
+  const preset = readFileSync(join(root, '.spec/spexcode/.plugins/skills/atlas/spec.md'), 'utf8')
+  const paragraph = preset.match(/When writing or revising a spec,[\s\S]*?(?=\n\n1\.)/)?.[0]
+  assert.ok(paragraph, 'the atlas preset defines how raw business intent is written')
+  const normalize = (text) => text.replace(/\s+/g, ' ').trim()
+  const rule = normalize(paragraph)
+  assert.match(rule, /## raw source/)
+  assert.match(rule, /detailed business logic in plain language/)
+  assert.match(rule, /Translate technical source documents/)
+  assert.match(rule, /Preserve every supported business condition, limit and outcome/)
+  assert.match(rule, /do not lift implementation constraints from the expanded section into raw source/)
+  assert.match(rule, /## expanded spec/)
+
+  const prompts = new Map()
+  for (const host of ['claude-code/atlas', 'codex/plugins/atlas', 'zcode/atlas', 'penguin/use-spexcode']) {
+    prompts.set(host, readFileSync(join(root, 'distribution', host, 'skills/atlas/SKILL.md'), 'utf8'))
+  }
+  const gugu = {}
+  new Function('globalThis', readFileSync(join(root, 'distribution/gugu/spexcode-atlas/prompt.js'), 'utf8'))(gugu)
+  prompts.set('gugu', gugu.SpexCodeAtlasPrompt.ATLAS_PROMPT)
+
+  const workflow = readFileSync(join(root, 'distribution/zcode/atlas/skills/atlas/atlas.dwf.ts'), 'utf8')
+  const writer = workflow.slice(workflow.indexOf('const WRITER ='), workflow.indexOf('const CARTOGRAPHER ='))
+  prompts.set('ZCode spec lead, part writers and repairer', new Function('LANGUAGE', `${writer}\nreturn WRITER`)('中文'))
+  for (const [name, prompt] of prompts) {
+    assert.ok(normalize(prompt).includes(rule), `${name} receives the preset's complete business-writing rule`)
+  }
+})
+
 test('the gugu page\'s classic scripts share one global scope without colliding', () => {
   // A classic <script> puts its top-level declarations in the GLOBAL lexical scope, so every script on the page
   // shares one namespace: a helper that leaks `function buildTree` makes the page's own `const { buildTree } = …`

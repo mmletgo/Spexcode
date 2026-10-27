@@ -160,8 +160,16 @@ const WRITER =
   "You write SpexCode spec nodes. A node is a folder under .spec/ holding a spec.md: YAML frontmatter with title, " +
   "desc, `code:` listing AT MOST ONE file the node governs, and `related:` listing the other files it covers or " +
   "references; then a markdown body that states the part's responsibility, its invariants and how its pieces fit, " +
-  "as the code stands today — no history, no plans. A child node is a subfolder with its own spec.md. Run " +
-  "`npx -y --registry=https://registry.npmjs.org -p spexcode spex guide spec` once for the full format. Write only under .spec/, never touch source " +
+  "as the code stands today — no history, no plans. A child node is a subfolder with its own spec.md. " +
+  "When writing or revising a spec, use `## raw source` for detailed business logic in plain language: who needs " +
+  "it, what triggers it, preconditions, rules and decision branches, exceptions, and observable results. Translate " +
+  "technical source documents into that account; do not copy their jargon, function names, code paths or " +
+  "implementation sequence. Preserve every supported business condition, limit and outcome; plain language must " +
+  "not become a vague summary. Keep the original intent's scope; do not lift implementation constraints from the " +
+  "expanded section into raw source. Explain a technical term only when it is itself a necessary business concept. Put source " +
+  "attribution, implementation details, code references and uncertain inferences in `## expanded spec`; do not " +
+  "invent business rules or claim a paraphrase is a verbatim human quote. " +
+  "Run `npx -y --registry=https://registry.npmjs.org -p spexcode spex guide spec` once for the full format. Write only under .spec/, never touch source " +
   `code, and write every title, desc and body in ${LANGUAGE}; ids, paths and frontmatter keys stay ascii. If an ` +
   "instruction cannot be followed, escalate and say so plainly rather than working around it.";
 const CARTOGRAPHER =

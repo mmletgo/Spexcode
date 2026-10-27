@@ -21,7 +21,8 @@ to set the language and the phase names to the user's and change nothing else ([
    has a `.spec/` tree keeps it and skips straight to the gate.
 2. *Write the spec for each part in parallel.* A lead writes `.spec/spexcode.json` (the lint scope the survey
    chose) and the root node; one writer per part writes that part's subtree, every source file ending up in some
-   node's `code:` or `related:`.
+   node's `code:` or `related:`. The lead, part writers and repairer all receive the [[atlas]] plain-language
+   business-writing rule, including the separation of original intent from technical evidence in [[distribution]].
 3. *Check the spec tree and repair it until it passes.* The gate is `spex spec lint`: no errors, and coverage at
    or above the floor. One repairer carries the findings from round to round, for a bounded number of rounds. The
    tree is committed once it passes — `spex diagram scaffold` cites only committed files.

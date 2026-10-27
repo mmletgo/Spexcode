@@ -101,6 +101,14 @@ mirrors, so what adopters install is what the generator writes rather than a sna
 the report: an atlas is read by a human, and one handed over in a language they did not use is a translation
 job left for them.
 
+**The original-source section explains the business in plain language.** Every atlas entry point gives spec
+writers the [[atlas]] writing rule, including [[zcode-atlas-workflow]]'s separate writer instructions. Technical
+source documents are evidence to translate, not text to copy into the human-intent section. The account keeps
+supported business conditions, rules, exceptions and outcomes in detail, within the original intent's scope;
+implementation constraints are not promoted from the expanded section into original intent. Implementation
+evidence and uncertain inferences belong in the expanded section. A paraphrase is not presented as a verbatim
+human quote.
+
 **Generated from one source, written by hand where a person decides.** `npm run build:distribution` writes every
 manifest and every `SKILL.md` from the atlas preset in `.plugins`, read through the same projection that writes
 the init templates, so each package says what adopters are seeded; it adds only the lines a repository without

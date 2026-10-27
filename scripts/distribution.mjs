@@ -23,7 +23,7 @@ const REGISTRY = '--registry=https://registry.npmjs.org'
 const spex = `npx -y ${REGISTRY} -p spexcode${tag} spex`
 const spexWithPage = `npx -y ${REGISTRY} -p spexcode${tag} -p @spexcode/spec-dashboard${tag} spex`
 // A penguin plugin's version is the date of its content, by that host's convention; bump it when the skill changes.
-const PENGUIN_VERSION = '2026.09.10.1'
+const PENGUIN_VERSION = '2026.10.27.1'
 
 const preset = seedFiles().get(join('skills', 'atlas', 'spec.md'))
 if (!preset) throw new Error('.spec/spexcode/.plugins/skills/atlas/spec.md is missing')
@@ -50,7 +50,7 @@ This skill draws with SpexCode's command line and needs nothing installed or con
   name — the checkout directory is often \`repo\` or \`tmp\`, and without a title both the root node and the page
   end up called that. Then rewrite that root to describe THIS project and add
   one folder beside it per part worth a box, each with its own \`spec.md\` — a \`title:\` and a \`code:\` line naming
-  the file it is about in the frontmatter, a sentence or two below. \`spex guide spec\` has the full file format.
+  the file it is about in the frontmatter, detailed business logic below. \`spex guide spec\` has the full file format.
   Use \`--pure\`, not a bare \`spex init\`: a bare one adopts the repository into SpexCode's whole workflow, which is
   not what drawing a picture asks for.
 - \`spex guide diagram\` is the manual for the diagram format and the loop; read it once.
