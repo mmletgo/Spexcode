@@ -91,6 +91,18 @@ function fakeBehavior(resolution?: string, assertInput?: (frozen: Record<string,
   }
 }
 
+test('混合大小写路径的组合证据可从真实 Git 树重读', async t => {
+  const f = await fixture(t), paths = ['src/Z.mjs', 'src/b.mjs']
+  for (const file of paths) writeFileSync(join(f.root, file), `export const name = ${JSON.stringify(file)}\n`)
+  git(f.root, 'add', ...paths); git(f.root, 'commit', '-m', 'mixed-case paths')
+  const input = await captureInputSnapshot(f.root), selection = f.selection()
+  const composed = composeInputSnapshots(input, selection, { retainConflicts: true }).composed!
+  const evidence = readCompositionEvidence(input, composed, selection)
+  assert.equal(evidence.sourceInputId, input.id)
+  const entries = readTree(input.source.commonDir, composed.tree)
+  for (const file of paths) assert.equal(readObject(input.source.commonDir, entries.find(entry => entry.path === file)!.oid).toString(), `export const name = ${JSON.stringify(file)}\n`)
+})
+
 test('真实store partial heads：A作者残差保留B交付，不以不同pairID制造业务冲突', async t => {
   const f = await fixture(t)
   writeFileSync(join(f.root, path), f.nextA)
