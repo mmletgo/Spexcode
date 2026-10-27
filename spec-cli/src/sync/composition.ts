@@ -270,7 +270,7 @@ function composeSelectedInput(input: InputSnapshot, selection: FrozenBaselineSel
     return known.length ? known : [parent]
   }).filter(path => !writable(path)))].sort()
   for (const path of contextPaths) { const entry = physicalSource.get(path); if (entry) result.set(path, entry); else result.delete(path) }
-  const entries = [...result.values()].sort((a, b) => a.path.localeCompare(b.path))
+  const entries = [...result.values()].sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
   for (const entry of entries) if (entries.some(other => entry.path.startsWith(`${other.path}/`)) && !conflicts.some(conflict => conflict.path === entry.path)) conflicts.push({ path: entry.path, base: null, source: next.get(entry.path) ?? null, delivery: result.get(entry.path) ?? null })
   if (conflicts.length && !options.retainConflicts) return { composed: null, conflicts }
   const evidence: SelectedCompositionEvidence = { version: 'selected-composition-v1', sourceInputId: input.id, baselineSelectionDigest: selection.digest, executionPaths, contextPaths, paths, intents, artifacts, residualPaths: [...residualPaths].sort(), conflicts }
