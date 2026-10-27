@@ -12,8 +12,10 @@ import { freezeCandidate } from './candidate.js'
 import { composeInputSnapshots } from './composition.js'
 import { checkGenerationContractIntent, readFrozenContracts } from './frozen-contracts.js'
 import { migrateSyncStore } from './migrations.js'
+import { syncPlanDigest } from './coordinator.js'
+import type { SyncCoordinatorPlan } from './coordinator-types.js'
 import { buildSyncApplicationPlan, deriveSyncBaselineResources } from './planning.js'
-import { captureInputSnapshot, readEvidence, readObject, verifySnapshot, writeEvidence } from './snapshot.js'
+import { captureInputSnapshot, contentHash, readEvidence, readObject, verifySnapshot, writeEvidence } from './snapshot.js'
 import { SyncStore } from './store.js'
 import type { BaselinePair, InputSnapshot, SyncScope, VerificationResultBlob } from './operation-types.js'
 import type { SyncSettings } from './settings.js'
@@ -159,7 +161,7 @@ test('raw-only冷启动读取已授权测试正文且不扩大到其他目录', 
     readSetDigest: 'raw-only-read-set', policyDigest: 'raw-only-policy', requestKey: 'raw-only-readable-tests', timeoutMs: 10000,
     plan: { ...plan, facts: [] },
   }
-  type Frozen = { readablePaths: { path: string; snapshots: string[] }[]; newSource: [string, string][] }
+  type Frozen = { changedPaths: string[]; readablePaths: { path: string; snapshots: string[] }[]; newSource: [string, string][] }
   const captured: { frozen: Frozen | null } = { frozen: null }
   const stopAfterCapture = new Error('captured frozen test read set')
   await assert.rejects(analyzeCodeBehavior(input, async request => {
@@ -177,6 +179,7 @@ test('raw-only冷启动读取已授权测试正文且不扩大到其他目录', 
     unrelatedTestExcluded: verifySnapshot(snapshot).some(entry => entry.path === outsideTestPath) && !plan.readPaths.some(path => path === 'tests' || path.startsWith('tests/')) && !frozen?.readablePaths.some(item => item.path === outsideTestPath),
     unrelatedSourceExcluded: verifySnapshot(snapshot).some(entry => entry.path === 'src/other.js') && !plan.readPaths.includes('src/other.js') && !frozen?.readablePaths.some(item => item.path === 'src/other.js'),
     readOnlyContextOnly: testFiles.every(([path]) => !plan.executionScope.paths.includes(path)) && plan.mandatoryTests.length === 0,
+    businessChangedPaths: frozen?.changedPaths,
   }
   assert.deepEqual(checks, {
     readableTestDirectories: testPaths.sort(),
@@ -185,7 +188,31 @@ test('raw-only冷启动读取已授权测试正文且不扩大到其他目录', 
     unrelatedTestExcluded: true,
     unrelatedSourceExcluded: true,
     readOnlyContextOnly: true,
+    businessChangedPaths: ['src/export.js'],
   })
+})
+
+test('冻结source角色参与政策摘要，旧持久JSON保持原摘要', async t => {
+  const f = await fixture(t)
+  writeFileSync(join(f.root, specA), f.original.split('## expanded spec')[0])
+  f.config.readPaths = ['src', 'generated-tests']
+  f.config.mandatoryTests = []
+  f.configure()
+  const originalSources = [...f.config.sourcePaths]
+  const first = await buildSyncApplicationPlan(await captureInputSnapshot(f.root), 'export-contract')
+  f.config.sourcePaths = ['generated-tests']; f.config.testPaths = ['src']; f.configure()
+  const second = await buildSyncApplicationPlan(await captureInputSnapshot(f.root), 'export-contract')
+  assert.deepEqual(first.readPaths, second.readPaths)
+  assert.deepEqual(first.writePaths, second.writePaths)
+  assert.deepEqual(first.executionScope, second.executionScope)
+  assert.deepEqual({ ...first, sourcePaths: undefined }, { ...second, sourcePaths: undefined })
+  assert.deepEqual(first.sourcePaths, originalSources.sort())
+  assert.deepEqual(second.sourcePaths, [...f.config.sourcePaths].sort())
+  assert.notEqual(syncPlanDigest(first), syncPlanDigest(second))
+  const legacyJson = '{"facts":[],"intentNodeId":"raw","mandatoryTests":[],"readPaths":["src","tests"],"targets":[{"nodeId":"raw","path":".spec/raw/spec.md"}],"verifications":[],"version":"sync-coordinator-v1","writePaths":["src","tests"]}'
+  const legacy = JSON.parse(legacyJson) as SyncCoordinatorPlan
+  assert.equal(syncPlanDigest(legacy), contentHash(legacyJson))
+  assert.equal(syncPlanDigest({ ...legacy, sourcePaths: undefined }), contentHash(legacyJson))
 })
 
 test('真实store旧政策防删owner规避：整个A节点/VERIFY删除后退役仍保原命令和oracle', async t => {

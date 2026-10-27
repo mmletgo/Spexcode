@@ -130,6 +130,44 @@ test('raw-only空关联不豁免既有基线、稳定ID、非法路径或虚构I
   }
 })
 
+test('冻结source角色只发现业务根，纯测试helper可读且旧计划保持writePaths发现语义', async t => {
+  const f = await fixture(t), sourcePath = 'src/test_business.py', tests = ['tests/test_flow.py', 'tests/support.py']
+  for (const path of [sourcePath, ...tests]) writeFileSync(join(f.root, path), 'def value():\n    return 1\n')
+  writeFileSync(join(f.root, 'src/embedded.test.js'), 'export const fixture = 1\n')
+  git(f.root, 'add', sourcePath, ...tests, 'src/embedded.test.js'); git(f.root, 'commit', '-m', 'seed source and pure tests')
+  const before = await f.input(), input: CodeBehaviorInput = { ...before, baseline: null, composed: composeInputSnapshots(before.snapshot, null).composed!, plan: { ...before.plan, sourcePaths: ['src'] } }
+  const analysis = await analyzeCodeBehavior(input, async request => {
+    const context = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as { changedPaths: string[]; newSource: [string, string][] }
+    assert.deepEqual(context.changedPaths, [sourcePath])
+    assert.ok(tests.every(path => new Map(context.newSource).has(path)))
+    return runner('allowed_change', proposal => { proposal.newNodes = [{ codePath: sourcePath, parentNodeId: 'export-contract', basis: '真实业务helper需要归属' }] })(request)
+  })
+  assert.deepEqual(analysis.newNodes.map(node => node.codePath), [sourcePath])
+  await assert.rejects(analyzeCodeBehavior(input, runner('allowed_change', proposal => { proposal.newNodes = [sourcePath, tests[0]].map(codePath => ({ codePath, parentNodeId: 'export-contract', basis: '不能凭测试可写新增业务归属' })) })), /授权业务源码/)
+  const restored = { ...input, plan: JSON.parse(JSON.stringify(before.plan)) as CodeBehaviorInput['plan'] }, stopped = new Error('captured legacy discovery')
+  await assert.rejects(analyzeCodeBehavior(restored, async request => {
+    const context = JSON.parse(request.prompt.split('冻结三方输入:\n')[1]) as { changedPaths: string[] }
+    assert.deepEqual(context.changedPaths, [sourcePath, ...tests].sort())
+    throw stopped
+  }), error => error === stopped)
+})
+
+test('真实测试改动仍经分析和独审，不要求创建业务治理叶', async t => {
+  const f = await fixture(t), path = 'tests/support.py'
+  writeFileSync(join(f.root, path), 'def fixture_value():\n    return 1\n'); git(f.root, 'add', path); git(f.root, 'commit', '-m', 'seed test helper')
+  writeFileSync(join(f.root, path), 'def fixture_value():\n    return 2\n')
+  const before = await f.input(), input: CodeBehaviorInput = { ...before, baseline: null, composed: composeInputSnapshots(before.snapshot, null).composed!, plan: { ...before.plan, sourcePaths: ['src'] } }
+  const analysis = await analyzeCodeBehavior(input, async request => {
+    const context = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as { changedPaths: string[] }
+    assert.deepEqual(context.changedPaths, [path])
+    return runner('allowed_change')(request)
+  })
+  assert.equal(analysis.reviewPassed, true)
+  assert.deepEqual(analysis.newNodes, [])
+  const legacy = { ...input, plan: JSON.parse(JSON.stringify(before.plan)) as CodeBehaviorInput['plan'] }
+  await assert.rejects(analyzeCodeBehavior(legacy, runner('allowed_change')), /无治理代码未创建真实归属/)
+})
+
 test('目录授权的新增helper与删除文件前置完整冻结读取清单，metadata和links不冒全文', async t => {
   const f = await fixture(t), path = 'src/export-summary.js', helper = 'export const resultCount = rows => rows === null ? null : rows.length;\n'
   writeFileSync(join(f.root, path), helper); rmSync(join(f.root, 'tests/export.test.mjs')); symlinkSync('export.js', join(f.root, 'src/link'))

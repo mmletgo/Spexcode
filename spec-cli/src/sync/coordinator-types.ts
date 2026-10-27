@@ -12,6 +12,7 @@ export type SyncCoordinatorPlan = {
   targets: readonly { nodeId: string; path: string; rawSource?: string }[]
   readPaths: readonly string[]
   writePaths: readonly string[]
+  sourcePaths?: readonly string[]
   executionScope?: SyncScope
   facts: readonly ElaborationFact[]
   verifications: readonly RegisteredVerification[]
