@@ -24,7 +24,11 @@ const within = (path: string, paths: readonly string[]): boolean => paths.some(p
 const sorted = (ids: readonly string[]): string[] => [...new Set(ids)].sort()
 const stable = (prefix: string, value: unknown): string => `${prefix}-${contentHash(JSON.stringify(value)).slice(0, 24)}`
 function textTree(input: CodeBehaviorInput, tree: string): [string, string][] {
-  return readTree(input.snapshot.source.commonDir, tree).filter(entry => within(entry.path, input.plan.readPaths) && entry.mode !== '120000' && !isHostPrivatePath(entry.path)).flatMap(entry => { const bytes = readObject(input.snapshot.source.commonDir, entry.oid); return isUtf8Text(bytes) ? [[entry.path, bytes.toString('utf8')] as [string, string]] : [] })
+  const files: [string, string][] = []
+  readTree(input.snapshot.source.commonDir, tree, (entry, bytes) => {
+    if (within(entry.path, input.plan.readPaths) && entry.mode !== '120000' && !isHostPrivatePath(entry.path) && isUtf8Text(bytes)) files.push([entry.path, bytes.toString('utf8')])
+  })
+  return files.sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
 }
 function problem(message: string): never { throw Object.assign(new Error(message), { code: 'behavior_analysis_invalid' }) }
 

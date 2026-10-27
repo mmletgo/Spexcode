@@ -44,7 +44,11 @@ for (const format of ['sha1', 'sha256'] as const) {
     assert.equal(calls.filter(args => args.includes('cat-file')).length, 2)
     assert.ok(calls.filter(args => args.includes('hash-object')).every(args => args.includes('--stdin-paths') && args.includes('--no-filters')))
     assert.deepEqual(readFileSync(join(root, '.git/index')), indexBytes)
-    const entries = readTree(snapshot.source.commonDir, snapshot.immutableTree)
+    const observed = new Map<string, Buffer>()
+    const entries = readTree(snapshot.source.commonDir, snapshot.immutableTree, (entry, bytes) => {
+      assert.equal(entry.digest, contentHash(bytes)); observed.set(entry.path, bytes)
+    })
+    assert.deepEqual(observed, expected)
     assert.deepEqual(entries.map(entry => entry.path), [...expected.keys()].sort())
     for (const entry of entries) {
       assert.equal(entry.oid.length, format === 'sha1' ? 40 : 64)
@@ -59,7 +63,9 @@ for (const format of ['sha1', 'sha256'] as const) {
     const root = repo(t, format), snapshot = await captureInputSnapshot(root), [entry] = readTree(snapshot.source.commonDir, snapshot.immutableTree)
     const path = join(snapshot.source.commonDir, 'objects', entry.oid.slice(0, 2), entry.oid.slice(2)), original = readFileSync(path), altered = Buffer.from('tampered\0\xff')
     chmodSync(path, 0o600); writeFileSync(path, deflateSync(Buffer.concat([Buffer.from(`blob ${altered.length}\0`), altered])))
-    assert.throws(() => readTree(snapshot.source.commonDir, snapshot.immutableTree), /OID 不匹配/)
+    let observed = false
+    assert.throws(() => readTree(snapshot.source.commonDir, snapshot.immutableTree, () => { observed = true }), /OID 不匹配/)
+    assert.equal(observed, false)
     assert.throws(() => readObject(snapshot.source.commonDir, entry.oid), /OID 不匹配/)
     writeFileSync(path, original); assert.deepEqual(readTree(snapshot.source.commonDir, snapshot.immutableTree), [entry])
     rmSync(path)

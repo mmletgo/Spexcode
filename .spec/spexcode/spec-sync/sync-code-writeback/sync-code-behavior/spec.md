@@ -55,3 +55,5 @@ raw/shared prose 的 broad affected closure只保证完整路径进入分析，�
 行为分析只能派生本次受审变化对应的验收或退役授权，不能产生恢复退役身份的授权。恢复同一历史对象须由正式撤销入口、固定不可变历史请求及原已结算 receipt 逐项证明；普通作者 raw 或模型声明不能替代该来源链。
 
 成组补偿的新 source 已应用删除或移动时，controlledBeforeFiles 独立保留 immutable group.before 的真实完整文本并纳入独审 readablePaths；该当前作者前置不叫 verifiedDelivery。缺少旧交付基线时，旧 authority 仍能从这一真实 preimage 检查节点迁移及原业务 ID，不能因组后文件消失丢掉必读全文或退役义务。
+
+冻结文本视图直接消费 [[sync-input-snapshot]] 同次批量读取中已核对 OID 的完整原字节，不在摘要读取后为每个 blob 再启动 Git。输出路径顺序、全文和摘要保持与逐对象读取一致；readPaths、symlink mode、host-private 和 UTF-8/二进制过滤保持原判据，不截断、不跨调用缓存，也不改变后续作者差量或独审语义。
