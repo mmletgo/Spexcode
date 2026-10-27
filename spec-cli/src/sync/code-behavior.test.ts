@@ -53,6 +53,74 @@ function runner(kind: CodeBehaviorKind, patch?: (proposal: Record<string, unknow
   }
 }
 
+function freezeSelection(snapshot: CodeBehaviorInput['snapshot'], bindings: FrozenBaselineSelection['bindings']): FrozenBaselineSelection {
+  const body = { version: 'sync-baseline-selection-v1' as const, source: snapshot.source, bindings }
+  return { ...body, digest: contentHash(JSON.stringify(body, (_key, value: unknown) => value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value)) }
+}
+type NonTextContext = { changedPaths: string[]; oldSource: [string, string][]; verifiedDelivery: [string, string][]; newSource: [string, string][]; readablePaths: { path: string; snapshots: string[] }[]; nonTextFiles: { path: string; mode: string; oid: string; digest: string; kind: string; encoding: string; content: string; snapshots: string[] }[] }
+
+test('精确all-null冷启动的binary和symlink具有完整可读字节，不能仅靠元数据通过独审', async t => {
+  const f = await fixture(t, source => source.split('## expanded spec')[0]), bytes = Buffer.from([137, 80, 78, 71, 0, 255]), target = '../../host-secret.txt'
+  mkdirSync(join(f.root, 'assets')); writeFileSync(join(f.root, 'assets/image.png'), bytes); writeFileSync(join(f.root, 'assets/vendor.whl'), bytes)
+  chmodSync(join(f.root, 'assets/vendor.whl'), 0o755); writeFileSync(join(f.root, 'assets/.env'), 'DO_NOT_EXPOSE_PRIVATE_BYTES')
+  writeFileSync(join(f.root, '../host-secret.txt'), 'DO_NOT_FOLLOW_LINK_TARGET'); symlinkSync(target, join(f.root, 'assets/CLAUDE.md'))
+  assert.equal(readFileSync(join(f.root, 'assets', target), 'utf8'), 'DO_NOT_FOLLOW_LINK_TARGET')
+  git(f.root, 'add', '.'); git(f.root, 'commit', '-m', 'seed nontext bootstrap')
+  const prepared = await f.input(), entries = readTree(prepared.snapshot.source.commonDir, prepared.snapshot.immutableTree)
+  const baselineSelection = freezeSelection(prepared.snapshot, entries.filter(entry => !isHostPrivatePath(entry.path)).map(entry => ({ resource: { kind: 'path', path: entry.path }, bytePair: null })))
+  const input: CodeBehaviorInput = { ...prepared, baseline: null, baselineSelection, composed: composeInputSnapshots(prepared.snapshot, baselineSelection).composed!, plan: { ...prepared.plan, readPaths: [...prepared.plan.readPaths, 'assets'], sourcePaths: ['src'], facts: [] } }
+  const contexts: NonTextContext[] = [], native = runner('refactor', proposal => { proposal.changes = (proposal.changes as object[]).map(change => ({ ...change, affectedIds: [], ruleIds: [] })) })
+  const analysis = await analyzeCodeBehavior(input, async request => {
+    assert.ok(!request.prompt.includes('DO_NOT_EXPOSE_PRIVATE_BYTES') && !request.prompt.includes('DO_NOT_FOLLOW_LINK_TARGET'))
+    const context = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as NonTextContext
+    contexts.push(context)
+    return native(request)
+  })
+  assert.equal(analysis.reviewPassed, true); assert.equal(contexts.length, 2)
+  for (const context of contexts) {
+    assert.deepEqual(context.oldSource, []); assert.deepEqual(context.verifiedDelivery, [])
+    for (const path of ['assets/image.png', 'assets/vendor.whl', 'assets/CLAUDE.md']) {
+      assert.ok(context.changedPaths.includes(path) && context.readablePaths.some(item => item.path === path && item.snapshots.includes('nonTextFiles.newSource')))
+      const file = context.nonTextFiles.find(item => item.path === path)!, entry = entries.find(item => item.path === path)!
+      for (const key of ['mode', 'oid', 'digest'] as const) assert.equal(file[key], entry[key])
+      assert.deepEqual(file.snapshots, ['newSource', 'composedFiles'])
+      assert.equal(file.kind, path.endsWith('CLAUDE.md') ? 'symlink' : 'binary')
+      assert.deepEqual(Buffer.from(file.content, file.encoding === 'base64' ? 'base64' : 'utf8'), path.endsWith('CLAUDE.md') ? Buffer.from(target) : bytes)
+    }
+    assert.ok(!context.newSource.some(([path]) => path.startsWith('assets/')))
+  }
+  await assert.rejects(analyzeCodeBehavior(input, runner('refactor', proposal => { proposal.changes = (proposal.changes as object[]).map(change => ({ ...change, affectedIds: [], ruleIds: [] })) }, review => { review.checkedPaths = (review.checkedPaths as string[]).filter(path => path !== 'assets/image.png') })), /missingPaths.*assets\/image.png/)
+  await assert.rejects(analyzeCodeBehavior(input, runner('refactor', proposal => { proposal.changes = (proposal.changes as object[]).map(change => ({ ...change, affectedIds: [], ruleIds: [] })) }, review => { (review.checkedPaths as string[]).push('assets/.env') })), /未完整读取的路径/)
+})
+
+test('真实非文本变化和删除保持三方与intent artifact字节身份，语义未知仍保留GAP', async t => {
+  const f = await fixture(t, source => source.replace('src/export.js#ExportService', 'assets/image.png')), oldBytes = Buffer.from([0, 1, 255]), newBytes = Buffer.from([0, 2, 255])
+  mkdirSync(join(f.root, 'assets')); writeFileSync(join(f.root, 'assets/image.png'), oldBytes); writeFileSync(join(f.root, 'assets/vendor.whl'), oldBytes); symlinkSync('old-target', join(f.root, 'assets/CLAUDE.md'))
+  git(f.root, 'add', '.'); git(f.root, 'commit', '-m', 'baseline nontext objects')
+  const before = await captureInputSnapshot(f.root)
+  writeFileSync(join(f.root, 'assets/image.png'), newBytes); rmSync(join(f.root, 'assets/vendor.whl')); rmSync(join(f.root, 'assets/CLAUDE.md')); symlinkSync('new-target', join(f.root, 'assets/CLAUDE.md'))
+  const prepared = await f.input(), pair = { ...prepared.baseline!, sourceInput: before, verifiedDelivery: before, coveredScope: { paths: ['.spec', 'src', 'tests', 'assets'], contractIds: ['REQ-EXPORT-01'], flowIds: [] } }
+  const baselineSelection = freezeSelection(prepared.snapshot, [...readTree(before.source.commonDir, before.immutableTree).filter(entry => pair.coveredScope.paths.some(path => entry.path === path || entry.path.startsWith(`${path}/`))).map(entry => ({ resource: { kind: 'path' as const, path: entry.path }, bytePair: pair })), { resource: { kind: 'contract', id: 'REQ-EXPORT-01' }, intentPair: pair }])
+  const input: CodeBehaviorInput = { ...prepared, baseline: null, baselineSelection, composed: composeInputSnapshots(prepared.snapshot, baselineSelection, { retainConflicts: true }).composed!, plan: { ...prepared.plan, readPaths: [...prepared.plan.readPaths, 'assets'], sourcePaths: ['assets'] } }
+  const analysis = await analyzeCodeBehavior(input, async request => {
+    const context = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as NonTextContext
+    assert.deepEqual(context.changedPaths, ['assets/CLAUDE.md', 'assets/image.png', 'assets/vendor.whl'])
+    const images = context.nonTextFiles.filter(file => file.path === 'assets/image.png')
+    assert.equal(images.length, 2)
+    for (const file of images) {
+      const bytes = Buffer.from(file.content, 'base64')
+      assert.equal(file.digest, contentHash(bytes)); assert.ok(file.snapshots.includes('intentArtifactFiles'))
+      assert.ok(file.snapshots.includes(bytes.equals(oldBytes) ? 'oldSource' : 'newSource'))
+    }
+    const removed = context.nonTextFiles.find(file => file.path === 'assets/vendor.whl')!
+    assert.ok(removed.snapshots.includes('oldSource') && !removed.snapshots.includes('newSource') && !removed.snapshots.includes('composedFiles'))
+    assert.ok(![...context.oldSource, ...context.newSource, ...context.verifiedDelivery].some(([path]) => path.startsWith('assets/')))
+    return runner('coverage_gap', proposal => { proposal.changes = (proposal.changes as object[]).map(change => ({ ...change, evidence: '完整对象字节可核对，但raw依赖的图片和wheel含义仍待明确' })) })(request)
+  })
+  assert.equal(analysis.reviewPassed, true); assert.equal(analysis.findings.length, 3); assert.ok(analysis.findings.every(finding => finding.kind === 'coverage_gap'))
+  assert.deepEqual(deriveBehaviorAuthorization(analysis, writeEvidence(input.snapshot.source.commonDir, analysis)), [])
+})
+
 test('较大冻结树全文与逐对象参考逐字相同，行为上下文不逐blob启动Git', async t => {
   const f = await fixture(t), contextRoot = join(f.root, 'context')
   mkdirSync(contextRoot)
@@ -209,23 +277,29 @@ test('真实测试改动仍经分析和独审，不要求创建业务治理叶',
   await assert.rejects(analyzeCodeBehavior(legacy, runner('allowed_change')), /无治理代码未创建真实归属/)
 })
 
-test('目录授权的新增helper与删除文件前置完整冻结读取清单，metadata和links不冒全文', async t => {
+test('目录授权helper与删除文件保完整全文，链接仅声明对象字节且目录metadata不可读', async t => {
   const f = await fixture(t), path = 'src/export-summary.js', helper = 'export const resultCount = rows => rows === null ? null : rows.length;\n'
   writeFileSync(join(f.root, path), helper); rmSync(join(f.root, 'tests/export.test.mjs')); symlinkSync('export.js', join(f.root, 'src/link'))
   const input = await f.input(), fake = runner('allowed_change', proposal => { proposal.newNodes = [{ codePath: path, parentNodeId: 'export-contract', basis: '实际结果反馈需要派生计数' }] })
   const prompts: string[] = []
-  await assert.rejects(analyzeCodeBehavior(input, async request => {
+  assert.equal((await analyzeCodeBehavior(input, async request => {
     prompts.push(request.prompt)
     const manifest = JSON.parse(request.prompt.split('冻结读取清单:\n')[1].split('\n分析要求:')[0]) as { requiredChangedPaths: string[]; readablePaths: { path: string; snapshots: string[] }[] }
     assert.ok(request.prompt.indexOf('冻结读取清单:') < request.prompt.indexOf('分析要求:'))
     assert.deepEqual(manifest.requiredChangedPaths, ['src/export-summary.js', 'src/link', 'tests/export.test.mjs'])
     assert.deepEqual(manifest.readablePaths.find(item => item.path === path)!.snapshots, ['newSource', 'composedFiles'])
     assert.deepEqual(manifest.readablePaths.find(item => item.path === 'tests/export.test.mjs')!.snapshots, ['oldSource', 'verifiedDelivery'])
-    assert.ok(!manifest.readablePaths.some(item => item.path === 'src/link' || item.path === 'src'))
+    assert.ok(!manifest.readablePaths.some(item => item.path === 'src'))
+    assert.ok(manifest.readablePaths.find(item => item.path === 'src/link')!.snapshots.every(snapshot => snapshot.startsWith('nonTextFiles.')))
+    const context = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as NonTextContext
+    const link = context.nonTextFiles.find(file => file.path === 'src/link')!
+    assert.equal(link.kind, 'symlink'); assert.equal(link.mode, '120000'); assert.equal(link.content, 'export.js')
+    assert.ok(!context.newSource.some(([path]) => path === 'src/link'))
     assert.ok(request.prompt.includes(JSON.stringify(helper))); assert.match(request.prompt, /cwd.*不是.*输入/)
     return fake(request)
-  }), /未完整读取的路径/)
+  })).reviewPassed, true)
   assert.equal(prompts.length, 2)
+  await assert.rejects(analyzeCodeBehavior(input, runner('allowed_change', proposal => { proposal.newNodes = [{ codePath: path, parentNodeId: 'export-contract', basis: '实际派生计数' }] }, review => { (review.checkedPaths as string[]).push('src') })), /未完整读取的路径/)
   rmSync(join(f.root, 'src/link'))
   assert.equal((await analyzeCodeBehavior(await f.input(), fake)).reviewPassed, true)
   assert.equal(git(f.root, 'ls-tree', 'HEAD', path), '')

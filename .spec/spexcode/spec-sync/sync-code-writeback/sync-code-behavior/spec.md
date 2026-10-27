@@ -57,3 +57,5 @@ raw/shared prose 的 broad affected closure只保证完整路径进入分析，�
 成组补偿的新 source 已应用删除或移动时，controlledBeforeFiles 独立保留 immutable group.before 的真实完整文本并纳入独审 readablePaths；该当前作者前置不叫 verifiedDelivery。缺少旧交付基线时，旧 authority 仍能从这一真实 preimage 检查节点迁移及原业务 ID，不能因组后文件消失丢掉必读全文或退役义务。
 
 冻结文本视图直接消费 [[sync-input-snapshot]] 同次批量读取中已核对 OID 的完整原字节，不在摘要读取后为每个 blob 再启动 Git。输出路径顺序、全文和摘要保持与逐对象读取一致；readPaths、symlink mode、host-private 和 UTF-8/二进制过滤保持原判据，不截断、不跨调用缓存，也不改变后续作者差量或独审语义。
+
+冻结上下文中的 nonTextFiles 保留授权路径的完整非文本 Git 对象，按 path/mode/OID 去重并列出真实所属快照及 digest、kind、encoding、content；binary 以完整 base64 表示，symlink 仅保存链接 blob 的目标字节（有效 UTF-8 否则 base64），永不跟随宿主目标。精确 selection 的 base/delivery null 同步表示对象缺席，不能借当前 HEAD 伪造旧全文；受控 before/source 及 intent artifact 同样按真实对象投影。readablePaths 的 nonTextFiles.快照名只指向这些完整 payload，元数据和链接目标路径本身仍不能冒充目标正文；真实非文本变化、删除和 requiredChangedPaths/changes/checkedPaths 覆盖保持，不通过过滤非文本消除缺口。所有字节先经原 Git OID 核验，readPaths 与 host-private 边界保持；原文本视图只含真实 UTF-8 普通文件。完整字节可读不等于已理解图片或 wheel 业务含义，raw 真实依赖而不可解释的语义仍须具体 GAP，不自动改成 allowed_change 或产生业务批准。

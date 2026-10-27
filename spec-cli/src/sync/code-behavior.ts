@@ -10,6 +10,7 @@ import { controlledDecisionIdentity, readControlledChanges, readControlledDecisi
 import { readFrozenContracts } from './frozen-contracts.js'
 import type { BaselinePair, ComposedInputRef, FrozenBaselineSelection, InputSnapshot } from './operation-types.js'
 import { contentHash, objectGit, readEvidence, readObject, readTree, validateRepositoryPath, verifySnapshot } from './snapshot.js'
+import type { TreeEntry } from './snapshot.js'
 import type { SyncCoordinatorPlan } from './coordinator-types.js'
 import type { AcceptanceChangeProposal, ContractChangeProposal, CodeBehaviorAnalysis, CodeBehaviorChange, CodeBehaviorEvidence, CodeBehaviorFinding, ContractNodeProposal, SyncDecisionAuthority, SyncDecisionInput } from './writeback-types.js'
 
@@ -23,13 +24,20 @@ type Proposal = { changes: Omit<CodeBehaviorChange, 'id'>[]; facts: CodeBehavior
 const within = (path: string, paths: readonly string[]): boolean => paths.some(parent => path === parent || path.startsWith(`${parent}/`))
 const sorted = (ids: readonly string[]): string[] => [...new Set(ids)].sort()
 const stable = (prefix: string, value: unknown): string => `${prefix}-${contentHash(JSON.stringify(value)).slice(0, 24)}`
-function textTree(input: CodeBehaviorInput, tree: string): [string, string][] {
-  const files: [string, string][] = []
-  readTree(input.snapshot.source.commonDir, tree, (entry, bytes) => {
-    if (within(entry.path, input.plan.readPaths) && entry.mode !== '120000' && !isHostPrivatePath(entry.path) && isUtf8Text(bytes)) files.push([entry.path, bytes.toString('utf8')])
-  })
-  return files.sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+type FrozenFile = TreeEntry & { kind: 'text' | 'binary' | 'symlink'; encoding: 'utf8' | 'base64'; content: string }
+function freezeFile(entry: TreeEntry, bytes: Buffer): FrozenFile {
+  const utf8 = isUtf8Text(bytes)
+  return { ...entry, kind: entry.mode === '120000' ? 'symlink' : utf8 ? 'text' : 'binary', encoding: utf8 ? 'utf8' : 'base64', content: bytes.toString(utf8 ? 'utf8' : 'base64') }
 }
+function fileTree(input: CodeBehaviorInput, tree: string): Map<string, FrozenFile> {
+  const files: FrozenFile[] = []
+  readTree(input.snapshot.source.commonDir, tree, (entry, bytes) => {
+    if (within(entry.path, input.plan.readPaths) && !isHostPrivatePath(entry.path)) files.push(freezeFile(entry, bytes))
+  })
+  return new Map(files.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0).map(file => [file.path, file]))
+}
+const textFiles = (files: ReadonlyMap<string, FrozenFile>): [string, string][] => [...files.values()].filter(file => file.kind === 'text').map(file => [file.path, file.content])
+
 function problem(message: string): never { throw Object.assign(new Error(message), { code: 'behavior_analysis_invalid' }) }
 
 export function readDecisionAuthority(commonDir: string, requestRef: { sha256: string }): SyncDecisionAuthority {
@@ -87,31 +95,33 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   const selectedEvidence = input.baselineSelection ? readCompositionEvidence(input.snapshot, input.composed, input.baselineSelection) : null
   if (input.composed.baselineSelectionDigest && !selectedEvidence) reject('精确基线组合缺少相同selection')
   const oldTree = input.baseline?.sourceInput.immutableTree ?? objectGit(commonDir, ['rev-parse', `${input.snapshot.headCommit}^{tree}`]).toString().trim()
-  const source = textTree(input, input.snapshot.immutableTree), oldSource = textTree(input, oldTree), delivery = textTree(input, input.baseline?.verifiedDelivery.immutableTree ?? oldTree), composed = textTree(input, input.composed.tree)
-  if (selectedEvidence) {
-    const previous = new Map(oldSource), published = new Map(delivery)
-    for (const entry of selectedEvidence.paths) {
-      const before = entry.base, after = entry.delivery
-      if (before && before.mode !== '120000' && within(entry.path, input.plan.readPaths)) previous.set(entry.path, readObject(commonDir, before.oid).toString('utf8')); else previous.delete(entry.path)
-      if (after && after.mode !== '120000' && within(entry.path, input.plan.readPaths)) published.set(entry.path, readObject(commonDir, after.oid).toString('utf8')); else published.delete(entry.path)
-    }
-    oldSource.splice(0, oldSource.length, ...previous); delivery.splice(0, delivery.length, ...published)
+  const fileViews: Record<string, Map<string, FrozenFile>> = { oldSource: fileTree(input, oldTree), newSource: fileTree(input, input.snapshot.immutableTree), verifiedDelivery: fileTree(input, input.baseline?.verifiedDelivery.immutableTree ?? oldTree), composedFiles: fileTree(input, input.composed.tree), controlledBeforeFiles: new Map() }
+  const replaceFile = (files: Map<string, FrozenFile>, path: string, entry: TreeEntry | null): void => {
+    if (entry && within(path, input.plan.readPaths) && !isHostPrivatePath(path)) files.set(path, freezeFile(entry, readObject(commonDir, entry.oid)))
+    else files.delete(path)
   }
+  if (selectedEvidence) for (const entry of selectedEvidence.paths) {
+    replaceFile(fileViews.oldSource, entry.path, entry.base); replaceFile(fileViews.verifiedDelivery, entry.path, entry.delivery)
+  }
+  const source = textFiles(fileViews.newSource), oldSource = textFiles(fileViews.oldSource), delivery = textFiles(fileViews.verifiedDelivery), composed = textFiles(fileViews.composedFiles)
+  fileViews.authorBaseline = new Map(fileViews.oldSource)
   const adopted = adoptedDeliveryPaths(input.snapshot, input.baseline), authorBefore = new Map(oldSource)
   const deliveryFiles = new Map(delivery)
-  for (const path of adopted) { const text = deliveryFiles.get(path); if (text === undefined) authorBefore.delete(path); else authorBefore.set(path, text) }
-  const authorSource = new Map(source)
+  for (const path of adopted) { const text = deliveryFiles.get(path); if (text === undefined) authorBefore.delete(path); else authorBefore.set(path, text); const file = fileViews.verifiedDelivery.get(path); if (file) fileViews.authorBaseline.set(path, file); else fileViews.authorBaseline.delete(path) }
+  const authorSource = new Map(source), authorFiles = new Map(fileViews.newSource)
   const controlledAuthorBefore: { path: string; text: string | null }[] = []
   let historyAuthor = false
   if (input.composed.requestBlob) {
     const rawRequest = JSON.parse(readEvidence(commonDir, input.composed.requestBlob).toString('utf8')) as { type?: string }
     const original = rawRequest.type === 'sync.decision' ? readControlledDecision(input.snapshot, input.composed.requestBlob).originalRequestBlob : input.composed.requestBlob
     if (original) for (const change of readControlledChanges(input.snapshot, original)) {
-      if (change.next) authorSource.set(change.path, readObject(commonDir, change.next.oid).toString('utf8')); else authorSource.delete(change.path)
-      controlledAuthorBefore.push({ path: change.path, text: change.before ? readObject(commonDir, change.before.oid).toString('utf8') : null })
+      replaceFile(authorFiles, change.path, change.next); replaceFile(fileViews.controlledBeforeFiles, change.path, change.before)
+      const next = authorFiles.get(change.path), before = fileViews.controlledBeforeFiles.get(change.path)
+      if (next?.kind === 'text') authorSource.set(change.path, next.content); else authorSource.delete(change.path)
+      controlledAuthorBefore.push({ path: change.path, text: before?.kind === 'text' ? before.content : null })
     }
     historyAuthor = rawRequest.type === 'sync.history' || !!selectedEvidence?.controlledAuthorGroup
-    if (historyAuthor) source.splice(0, source.length, ...authorSource)
+    if (historyAuthor) { source.splice(0, source.length, ...authorSource); fileViews.newSource = authorFiles }
   }
   const controlledBeforeFiles = historyAuthor ? controlledAuthorBefore.filter((item): item is { path: string; text: string } => item.text !== null).map(item => [item.path, item.text] as [string, string]) : []
   const precedingContracts = new Map(delivery)
@@ -126,6 +136,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   }
   for (const before of controlledAuthorBefore) if (selectedEvidence && !selectedEvidence.intents.some(item => item.pairId && (item.source?.path ?? item.before?.path) === before.path && item.before?.rawSource !== item.source?.rawSource)) {
     if (before.text === null) authorBefore.delete(before.path); else authorBefore.set(before.path, before.text)
+    const file = fileViews.controlledBeforeFiles.get(before.path); if (file) fileViews.authorBaseline.set(before.path, file); else fileViews.authorBaseline.delete(before.path)
   }
   const knownCode = new Set(composed.filter(([path]) => path.startsWith('.spec/') && path.endsWith('/spec.md')).flatMap(([, text]) => { const anchors = parseFrontmatter(text).fm.code; return Array.isArray(anchors) ? anchors.filter((anchor): anchor is string => typeof anchor === 'string').map(anchor => anchor.split('#')[0]) : [] }))
   const sourceRole = (path: string): boolean => input.plan.sourcePaths === undefined || within(path, input.plan.sourcePaths)
@@ -138,13 +149,20 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   }
   const changedPaths = sorted([...(selectedEvidence?.residualPaths ?? []), ...ungoverned, ...actualTreeDiff([...authorEntries.values()], verifySnapshot(input.snapshot)).map(file => file.path), ...actualTreeDiff([...deliveryEntries.values()], readTree(commonDir, input.composed.tree)).map(file => file.path)].filter(path => within(path, input.plan.readPaths)))
   const artifactEntries = new Map((selectedEvidence?.artifacts ?? []).flatMap(item => [item.before, item.delivery, item.source, item.authorBase].filter((entry): entry is NonNullable<typeof entry> => !!entry)).map(entry => [`${entry.path}:${entry.mode}:${entry.oid}`, entry]))
-  const intentArtifactFiles = [...artifactEntries.values()].filter(entry => within(entry.path, input.plan.readPaths) && entry.mode !== '120000' && !isHostPrivatePath(entry.path)).flatMap(entry => { const bytes = readObject(commonDir, entry.oid); return isUtf8Text(bytes) ? [{ ...entry, text: bytes.toString('utf8') }] : [] })
+  fileViews.intentArtifactFiles = new Map([...artifactEntries].filter(([, entry]) => within(entry.path, input.plan.readPaths) && !isHostPrivatePath(entry.path)).map(([identity, entry]) => [identity, freezeFile(entry, readObject(commonDir, entry.oid))]))
+  const intentArtifactFiles = [...fileViews.intentArtifactFiles.values()].filter(file => file.kind === 'text').map(({ kind: _kind, encoding: _encoding, content, ...entry }) => ({ ...entry, text: content }))
+  const nonTextObjects = new Map<string, FrozenFile & { snapshots: string[] }>()
+  for (const [snapshot, files] of Object.entries(fileViews)) for (const file of files.values()) if (file.kind !== 'text') {
+    const identity = `${file.path}:${file.mode}:${file.oid}`, existing = nonTextObjects.get(identity)
+    if (existing) existing.snapshots.push(snapshot); else nonTextObjects.set(identity, { ...file, snapshots: [snapshot] })
+  }
+  const nonTextFiles = [...nonTextObjects.values()]
   const snapshots = { oldSource, newSource: source, verifiedDelivery: delivery, composedFiles: composed, controlledBeforeFiles }
   const snapshotPaths = Object.entries(snapshots).map(([name, files]) => [name, new Set(files.map(([path]) => path))] as const)
-  const readablePaths = sorted([...snapshotPaths.flatMap(([, paths]) => [...paths]), ...intentArtifactFiles.map(file => file.path)]).map(path => ({ path, snapshots: [...snapshotPaths.filter(([, paths]) => paths.has(path)).map(([name]) => name), ...intentArtifactFiles.some(file => file.path === path) ? ['intentArtifactFiles'] : []] }))
+  const readablePaths = sorted([...snapshotPaths.flatMap(([, paths]) => [...paths]), ...intentArtifactFiles.map(file => file.path), ...nonTextFiles.map(file => file.path)]).map(path => ({ path, snapshots: [...snapshotPaths.filter(([, paths]) => paths.has(path)).map(([name]) => name), ...intentArtifactFiles.some(file => file.path === path) ? ['intentArtifactFiles'] : [], ...sorted(nonTextFiles.filter(file => file.path === path).flatMap(file => file.snapshots.map(snapshot => `nonTextFiles.${snapshot}`)))] }))
   const readingManifest = JSON.stringify({ requiredChangedPaths: changedPaths, readablePaths })
-  const readingInstructions = `冻结读取清单:\n${readingManifest}\n分析要求:\nrequiredChangedPaths必须逐项覆盖，不得缩小。readablePaths标明该具体文件全文在哪些冻结快照中存在；删除文件仍重读旧全文。plan.readPaths是目录前缀授权而非仅路径字符串相等；manifest/目录/链接只属元数据，不冒充全文。以下虚拟冻结快照是唯一输入权威，cwd的旧HEAD不是本次输入；不要以cwd缺少新增文件忽略已冻结正文。plan.sourcePaths存在时限定业务源码和newNodes角色，不扩展read/write授权；实际测试修改仍完整分析。contractItems.previous/current是从完整冻结正文解析的既有契约项，affectedIds/ruleIds仅引用其中真实稳定ID；baselineSelection的资源名不是契约正文，未通过P1结构检查或独审的候选不成为既有业务义务；已接受P1仍由后续冻结复用和生成保护，不成为raw或新的作者授权。raw-only初始化尚无既有稳定业务ID时，允许affectedIds/ruleIds为空，按真实raw、源码及完整测试分析相容性，随后交P1建立详细契约并独审；不要虚构ID，也不因尚未展开本身提出GAP。该边界不豁免任何真实业务冲突、完整读取、独审或后续生成验证。\n`
-  const frozen = { requiredChangedPaths: changedPaths, readablePaths, contractItems: { previous: [...oldFrozen.graph.items.values()], current: [...current.graph.items.values()] }, origin: input.origin ?? 'code', decision: input.decision ?? null, repairDiagnostics: input.repairDiagnostics ?? [], inputId: input.snapshot.id, baselinePair: input.baseline, baselineSelection: input.baselineSelection ?? null, compositionEvidence: selectedEvidence, intentArtifactFiles, composed: input.composed, readSetDigest: input.readSetDigest, policyDigest: input.policyDigest, plan: input.plan, changedPaths, authorChanges, adoptedDeliveryPaths: sorted([...adopted]), authorBaseline: [...authorBefore], oldSource, verifiedDelivery: delivery, newSource: source, composedFiles: composed, controlledBeforeFiles }
+  const readingInstructions = `冻结读取清单:\n${readingManifest}\n分析要求:\nrequiredChangedPaths必须逐项覆盖，不得缩小。readablePaths标明该具体文件全文在哪些冻结快照中存在；删除文件仍重读旧全文。plan.readPaths是目录前缀授权而非仅路径字符串相等；manifest/目录/链接目标路径只属元数据，不冒充全文。nonTextFiles保留kind/encoding和完整对象content及mode/OID/digest，readablePaths的nonTextFiles.前缀指向其所属快照；binary完整base64可还原原字节，symlink只表示Git链接对象目标字节、不跟随宿主或冒充目标正文。完整字节不等于已理解图片/wheel业务含义，raw真实依赖而不可解释仍提出具体GAP，不自动allowed_change或自批业务。以下虚拟冻结快照是唯一输入权威，cwd的旧HEAD不是本次输入；不要以cwd缺少新增文件忽略已冻结正文。plan.sourcePaths存在时限定业务源码和newNodes角色，不扩展read/write授权；实际测试修改仍完整分析。contractItems.previous/current是从完整冻结正文解析的既有契约项，affectedIds/ruleIds仅引用其中真实稳定ID；baselineSelection的资源名不是契约正文，未通过P1结构检查或独审的候选不成为既有业务义务；已接受P1仍由后续冻结复用和生成保护，不成为raw或新的作者授权。raw-only初始化尚无既有稳定业务ID时，允许affectedIds/ruleIds为空，按真实raw、源码及完整测试分析相容性，随后交P1建立详细契约并独审；不要虚构ID，也不因尚未展开本身提出GAP。该边界不豁免任何真实业务冲突、完整读取、独审或后续生成验证。\n`
+  const frozen = { requiredChangedPaths: changedPaths, readablePaths, contractItems: { previous: [...oldFrozen.graph.items.values()], current: [...current.graph.items.values()] }, origin: input.origin ?? 'code', decision: input.decision ?? null, repairDiagnostics: input.repairDiagnostics ?? [], inputId: input.snapshot.id, baselinePair: input.baseline, baselineSelection: input.baselineSelection ?? null, compositionEvidence: selectedEvidence, intentArtifactFiles, nonTextFiles, composed: input.composed, readSetDigest: input.readSetDigest, policyDigest: input.policyDigest, plan: input.plan, changedPaths, authorChanges, adoptedDeliveryPaths: sorted([...adopted]), authorBaseline: [...authorBefore], oldSource, verifiedDelivery: delivery, newSource: source, composedFiles: composed, controlledBeforeFiles }
   const context = JSON.stringify(frozen)
   const decisionAuthorities = [...input.plan.decisionAuthorities ?? []]
   if (input.decision) {
@@ -302,7 +320,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   const analysis: CodeBehaviorAnalysis = { version: 'code-behavior-v1', inputId: input.snapshot.id, baselinePairId: input.baseline?.id ?? null, ...(input.baselineSelection ? { baselineSelectionDigest: input.baselineSelection.digest } : {}), composedDigest: input.composed.contentDigest, readSetDigest: input.readSetDigest, policyDigest: input.policyDigest, inputDigest, decisionAuthorities, ...(input.decision && input.composed.requestBlob ? { decision: { requestRef: input.composed.requestBlob, analysisRef: input.decision.previous.ref, findingIds: input.decision.request.findingIds } } : {}), authorChanges, rawIntegrations, changes, findings, facts: proposal.facts, authorizedChanges, nodeChanges, newNodes, resolutions: proposal.resolutions, traces: [], reviewPassed: false }
   diagnostic.analysis = analysis
   const analysisDigest = contentHash(JSON.stringify(analysis))
-  const review = await dispatch('code_behavior_review', `${readingInstructions}你是独立代码行为审查者。必须独立重读全部三方源码、调用/测试assertions与raw/显式规则，重走变化路径。核对分类、完整范围、文本相容整合、原意与双方差异/反例、新归属节点与每项AC授权。代码自身错误不能授权弱化AC/REQ/VERIFY，不凭builder总结判通过。覆盖changedPaths和每项change.id；checkedPaths只填实际冻结完整读取且在plan.readPaths内的具体文件路径，baseline/manifest中的路径清单、目录名和符号链接不代表读取全文，不能填入。缺上下文/不相容解决方案/遗漏必要边界返回repair具体证据。真实业务conflict/GAP是被正确识别的输出，可accept分析但不能授予其依赖写权。\n冻结三方输入:\n${context}\n待审分析:\n${JSON.stringify({ analysisDigest, analysis })}`, CODE_BEHAVIOR_REVIEW_SCHEMA) as { inputDigest: string; analysisDigest: string; verdict: string; checkedPaths: string[]; checkedChangeIds: string[]; findings: unknown[] }
+  const review = await dispatch('code_behavior_review', `${readingInstructions}你是独立代码行为审查者。必须独立重读全部三方源码、调用/测试assertions与raw/显式规则，重走变化路径。核对分类、完整范围、文本相容整合、原意与双方差异/反例、新归属节点与每项AC授权。代码自身错误不能授权弱化AC/REQ/VERIFY，不凭builder总结判通过。覆盖changedPaths和每项change.id；checkedPaths只填实际冻结完整读取且在plan.readPaths内的具体文件路径，baseline/manifest中的路径清单、目录名或只有链接目标路径不代表读取全文，不能填入；已完整读取nonTextFiles时可检查该binary或链接对象路径，链接仍不代表其目标文件全文。缺上下文/不相容解决方案/遗漏必要边界返回repair具体证据。真实业务conflict/GAP是被正确识别的输出，可accept分析但不能授予其依赖写权。\n冻结三方输入:\n${context}\n待审分析:\n${JSON.stringify({ analysisDigest, analysis })}`, CODE_BEHAVIOR_REVIEW_SCHEMA) as { inputDigest: string; analysisDigest: string; verdict: string; checkedPaths: string[]; checkedChangeIds: string[]; findings: unknown[] }
   const reviewDetails = {
     missingPaths: changedPaths.filter(path => !review.checkedPaths.includes(path)),
     missingChangeIds: changes.filter(item => !review.checkedChangeIds.includes(item.id)).map(item => item.id),

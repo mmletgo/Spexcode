@@ -38,3 +38,5 @@ code:
 既有可信计划已对整节点逐项授权 user:raw 退役时，真实删除仍完整分析/独审并保 lifecycle，但不派生同 ID 的第二份授权；实际删除路径、原验证命令与退休身份政策保持原门禁。
 
 较大真实 Git 冻结树以旧逐对象读取作为完整正文参考，逐字核对 oldSource/newSource/verifiedDelivery/composedFiles 及分析、独审输入；包含 Unicode/换行路径、CRLF、空文件、可执行 mode、二进制、无效 UTF-8、symlink、host-private 和未授权文件。进程计数要求正文不再单 blob 重读且随冻结视图批次而非文件数增长，耗时只记录不作为固定阈值。
+
+精确 all-null selection 的真实 raw-only Git 回归先复现软链接/二进制属于 requiredChangedPaths 却不在 readablePaths 的独审死锁，再证明完整非文本 payload 与具体读取声明相连：PNG/wheel base64、可执行 mode、symlink 目标 blob 的 mode/OID/digest 和字节准确，旧 source/delivery 仍为空，不跟随宿主链接、不泄露 host-private；漏查图片或检查私密路径仍拒绝。真实三方非文本修改/删除保持前后对象和 intent artifacts 身份及缺席证据，不能混入 UTF-8 文本视图；仅有原字节无法解释业务时保留 coverage_gap，独审接受分析也不派生业务授权。原四文本视图逐字参考和零逐 blob 重读性能断言继续通过。
