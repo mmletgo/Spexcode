@@ -110,3 +110,32 @@ test('AC-VERIFIER-DOCKER-06 按VERIFY的子目录执行，绑定真实稳定用�
   assert.equal(result.status, 'passed', result.reason)
   assert.deepEqual(result.evidence!.tests, [{ testId: 'export.case:1', status: 'passed' }])
 })
+
+test('AC-VERIFIER-DOCKER-07 私有 scratch 默认拒绝执行，可信显式授权后可直接 spawn 755 脚本', { skip: !enabled }, async () => {
+  for (const scratchExecutable of [false, true]) {
+    const request = await input(`scratch-${scratchExecutable ? 'exec' : 'noexec'}`)
+    const source = join(evidenceRoot, request.runId)
+    await mkdir(source, { recursive: true })
+    await writeFile(join(source, 'scratch.test.mjs'), `import test from 'node:test';
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+test('AC-DOCKER-SCRATCH executable policy', () => {
+  const directory = mkdtempSync('/tmp/spex-script-');
+  const script = directory + '/fixture';
+  writeFileSync(script, '#!/bin/sh\\nprintf scratch-executed\\n', { mode: 0o755 });
+  const child = spawnSync(script, [], { encoding: 'utf8', shell: false });
+  ${scratchExecutable ? "assert.ifError(child.error); assert.equal(child.status, 0); assert.equal(child.stdout, 'scratch-executed');" : "assert.equal(child.error?.code, 'EACCES'); assert.equal(child.status, null);"}
+});
+`)
+    request.candidateExportPath = source
+    request.candidateExportDigest = await verificationExportDigest(source)
+    request.policy.image = 'nikolaik/python-nodejs@sha256:34c667b8cf53c5f4bad77573ea01668e717ab70f11e4b0003632a7e5e3808d6d'
+    request.policy.argv = ['node', '--test', 'scratch.test.mjs']
+    request.policy.expectedTestIds = ['AC-DOCKER-SCRATCH']
+    if (scratchExecutable) request.policy.scratchExecutable = true
+    const result = await executeVerification(request, { onCheckpoint: save })
+    assert.equal(result.status, 'passed', result.reason ?? result.evidence?.stdout)
+    assert.deepEqual(result.evidence!.tests, [{ testId: 'AC-DOCKER-SCRATCH', status: 'passed' }])
+  }
+})

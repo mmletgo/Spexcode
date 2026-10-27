@@ -66,6 +66,26 @@ test('AC-APPLICATION-01 缺少可信配置明确拒绝，现有配置启用CAS�
   } finally { f.cleanup() }
 })
 
+test('AC-APPLICATION-SCRATCH 可信版本化环境允许可选布尔 scratchExecutable，拒绝其他类型', async () => {
+  const f = await fixture()
+  try {
+    for (const scratchExecutable of [undefined, false, true]) {
+      const config = structuredClone(settings)
+      if (scratchExecutable !== undefined) config.verifications[0].environment.scratchExecutable = scratchExecutable
+      writeFileSync(join(f.root, '.spec/spexcode.json'), JSON.stringify({ sync: config }))
+      const frozen = await captureInputSnapshot(f.root)
+      assert.deepEqual(readSyncSettings(frozen).settings.verifications[0].environment, config.verifications[0].environment)
+    }
+    for (const scratchExecutable of ['true', 1, null]) {
+      const config = structuredClone(settings)
+      Object.assign(config.verifications[0].environment, { scratchExecutable })
+      writeFileSync(join(f.root, '.spec/spexcode.json'), JSON.stringify({ sync: config }))
+      const frozen = await captureInputSnapshot(f.root)
+      assert.throws(() => readSyncSettings(frozen), /scratchExecutable/)
+    }
+  } finally { f.cleanup() }
+})
+
 test('AC-APPLICATION-02 受控no-op不提交不派发，来源身份与body必须对应冻结输入', async () => {
   const f = await fixture()
   try {
