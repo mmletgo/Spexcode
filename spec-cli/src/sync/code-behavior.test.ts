@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { createRequire, syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { isHostPrivatePath } from './candidate.js'
+import { isUtf8Text } from './composition.js'
 import { analyzeCodeBehavior, deriveBehaviorAuthorization } from './code-behavior.js'
 import type { CodeBehaviorInput } from './code-behavior.js'
 import { adoptedDeliveryPaths, composeInputSnapshots } from './composition.js'
@@ -49,6 +52,44 @@ function runner(kind: CodeBehaviorKind, patch?: (proposal: Record<string, unknow
     return { sessionId: `session-${request.purpose}`, threadId: `thread-${request.purpose}`, turnId: 'turn-1', output, resultDigest: contentHash(JSON.stringify(output)) }
   }
 }
+
+test('较大冻结树全文与逐对象参考逐字相同，行为上下文不逐blob启动Git', async t => {
+  const f = await fixture(t), contextRoot = join(f.root, 'context')
+  mkdirSync(contextRoot)
+  for (let index = 0; index < 256; index++) writeFileSync(join(contextRoot, index === 2 ? '原字节\t换\n行.txt' : `frozen ${index}.txt`), index === 0 ? '' : `冻结正文 ${index}\r\n${'逐字保留'.repeat(100)}\n`)
+  chmodSync(join(contextRoot, 'frozen 1.txt'), 0o755)
+  writeFileSync(join(contextRoot, 'binary'), Buffer.from([0, 10, 255])); writeFileSync(join(contextRoot, 'invalid-utf8'), Buffer.from([255]))
+  writeFileSync(join(contextRoot, '.env'), 'PRIVATE=not-model-context\n'); symlinkSync('frozen 1.txt', join(contextRoot, 'link'))
+  mkdirSync(join(f.root, 'outside')); writeFileSync(join(f.root, 'outside/secret.txt'), 'unauthorized body\n')
+  git(f.root, 'add', '.'); git(f.root, 'commit', '-m', 'seed repeated frozen context')
+  const before = await captureInputSnapshot(f.root)
+  writeFileSync(join(f.root, 'src/export.js'), `${f.source}\n// actual external change\n`)
+  const prepared = await f.input(), baseline = { ...prepared.baseline!, sourceInput: before, verifiedDelivery: before }
+  const input = { ...prepared, baseline, composed: composeInputSnapshots(prepared.snapshot, baseline).composed!, plan: { ...prepared.plan, readPaths: [...prepared.plan.readPaths, 'context'] } }
+  const reference = (tree: string): [string, string][] => readTree(before.source.commonDir, tree).filter(entry => input.plan.readPaths.some(path => entry.path === path || entry.path.startsWith(`${path}/`)) && entry.mode !== '120000' && !isHostPrivatePath(entry.path)).flatMap(entry => {
+    const bytes = readObject(before.source.commonDir, entry.oid)
+    return isUtf8Text(bytes) ? [[entry.path, bytes.toString('utf8')] as [string, string]] : []
+  })
+  const expected = { oldSource: reference(before.immutableTree), newSource: reference(input.snapshot.immutableTree), verifiedDelivery: reference(before.immutableTree), composedFiles: reference(input.composed.tree) }
+  assert.equal(expected.newSource.filter(([path]) => path.startsWith('context/')).length, 256)
+  const cp = createRequire(import.meta.url)('node:child_process') as typeof import('node:child_process'), original = cp.execFileSync, calls: string[][] = []
+  cp.execFileSync = ((...args: Parameters<typeof execFileSync>) => { if (args[0] === 'git') calls.push(args[1] as string[]); return Reflect.apply(original, cp, args) }) as typeof execFileSync
+  syncBuiltinESMExports()
+  const started = performance.now(), purposes: string[] = []
+  try {
+    assert.equal((await analyzeCodeBehavior(input, async request => {
+      const frozen = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as typeof expected
+      for (const key of ['oldSource', 'newSource', 'verifiedDelivery', 'composedFiles'] as const) assert.deepEqual(frozen[key], expected[key])
+      purposes.push(request.purpose)
+      return runner('refactor')(request)
+    })).reviewPassed, true)
+  } finally { cp.execFileSync = original; syncBuiltinESMExports() }
+  assert.deepEqual(purposes, ['code_behavior_analyze', 'code_behavior_review'])
+  const catFile = calls.filter(args => args.includes('cat-file')), single = catFile.filter(args => args.includes('blob'))
+  t.diagnostic(JSON.stringify({ textFilesPerView: expected.newSource.length, textBytesDigest: contentHash(JSON.stringify(expected)), gitProcesses: calls.length, catFileProcesses: catFile.length, singleBlobProcesses: single.length, elapsedMs: Math.round(performance.now() - started) }))
+  assert.equal(single.length, 0, '冻结树已经批量校验过blob，不应再为每篇正文启动单对象读取')
+  assert.ok(catFile.length < 24, 'Git进程次数应随冻结视图批次而非文件数增长')
+})
 
 test('分析及独审收到真实契约项正文，raw-only初始化不借未交付资源名虚构既有义务', async t => {
   const f = await fixture(t)

@@ -62,7 +62,7 @@ export function identifyWorktree(root: string): WorktreeIdentity {
   const branch = sourceGit(canonicalRoot, ['rev-parse', '--symbolic-full-name', 'HEAD']).toString().trim()
   return { repositoryId: contentHash(`${commonDir}:${physicalStat(commonDir)}`), commonDir, canonicalRoot, gitDir, branch, physicalFingerprint: readPhysicalFingerprint(canonicalRoot, gitDir) }
 }
-export function readTree(commonDir: string, tree: string): TreeEntry[] {
+export function readTree(commonDir: string, tree: string, onObject?: (entry: TreeEntry, bytes: Buffer) => void): TreeEntry[] {
   if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(tree)) throw new Error('tree 必须为不可变 Git OID')
   const listing = objectGit(commonDir, ['ls-tree', '-rlz', '--full-tree', tree])
   if (!Buffer.from(listing.toString('utf8')).equals(listing)) throw new Error('仓库路径必须为有效 UTF-8')
@@ -73,15 +73,18 @@ export function readTree(commonDir: string, tree: string): TreeEntry[] {
     if (type !== 'blob' || !['100644', '100755', '120000'].includes(mode)) throw new Error(`不支持的 Git 条目: ${path} (${mode})`) // dead-words-ok: Git ls-tree object type is fixed by the Git object format.
     return { path, mode: mode as TreeEntry['mode'], oid, size: /^\d+$/.test(size) ? Number(size) : NaN }
   })
-  const digests = readObjectDigests(commonDir, entries)
-  return entries.map(({ size: _size, ...entry }, index) => ({ ...entry, digest: digests[index] })).sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
+  const result: TreeEntry[] = []
+  readObjects(commonDir, entries, (bytes, index) => {
+    const { size: _size, ...entry } = entries[index], verified = { ...entry, digest: contentHash(bytes) }
+    result.push(verified); onObject?.(verified, bytes)
+  })
+  return result.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
 }
 function verifyObjectOid(oid: string, bytes: Buffer): void {
   const actualOid = createHash(oid.length === 40 ? 'sha1' : 'sha256').update(`blob ${bytes.byteLength}\0`).update(bytes).digest('hex') // dead-words-ok: Git object hashing requires this exact object header.
   if (actualOid !== oid) throw new Error('Git object OID 不匹配')
 }
-function readObjectDigests(commonDir: string, objects: { oid: string; size: number }[]): string[] {
-  const digests: string[] = []
+function readObjects(commonDir: string, objects: { oid: string; size: number }[], onObject: (bytes: Buffer, index: number) => void): void {
   for (let start = 0; start < objects.length;) {
     let end = start, capacity = 0
     while (end < objects.length) {
@@ -90,11 +93,11 @@ function readObjectDigests(commonDir: string, objects: { oid: string; size: numb
       capacity += framedSize; end++
     }
     // 单个 blob 的原 128 MiB 输出上限不因 batch framing 缩小，也不被聚合放大。
-    if (end === start) { digests.push(contentHash(readObject(commonDir, objects[start].oid))); start++; continue }
+    if (end === start) { onObject(readObject(commonDir, objects[start].oid), start); start++; continue }
     const batch = objects.slice(start, end), output = objectGit(commonDir, ['cat-file', '--batch'], Buffer.from(batch.map(item => `${item.oid}\n`).join('')))
     let offset = 0
-    for (const { oid, size } of batch) {
-      const header = Buffer.from(`${oid} blob ${size}\n`) // dead-words-ok: Git cat-file --batch response framing requires this exact object type.
+    for (let index = 0; index < batch.length; index++) {
+      const { oid, size } = batch[index], header = Buffer.from(`${oid} blob ${size}\n`) // dead-words-ok: Git cat-file --batch response framing requires this exact object type.
       if (!output.subarray(offset, offset + header.length).equals(header)) {
         // missing/type 错误沿用单对象 Git 失败，保留采集端的有界重试分类。
         readObject(commonDir, oid)
@@ -104,12 +107,11 @@ function readObjectDigests(commonDir: string, objects: { oid: string; size: numb
       const bytes = output.subarray(offset, offset + size)
       if (bytes.length !== size || output[offset + size] !== 10) throw new Error('Git batch object 字节不完整')
       verifyObjectOid(oid, bytes)
-      digests.push(contentHash(bytes)); offset += size + 1
+      onObject(bytes, start + index); offset += size + 1
     }
     if (offset !== output.length) throw new Error('Git batch object response 存在额外字节')
     start = end
   }
-  return digests
 }
 export function readObject(commonDir: string, oid: string): Buffer {
   const bytes = objectGit(commonDir, ['cat-file', 'blob', oid]) // dead-words-ok: Git cat-file requires its exact object type argument.
