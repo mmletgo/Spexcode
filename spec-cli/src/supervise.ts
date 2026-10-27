@@ -1,7 +1,6 @@
 // SO_REUSEPORT is ENOTSUP on macOS/Node, so the supervisor owns the public port as a raw-TCP proxy and
 // runs the Hono server as a child on a private port (raw piping carries WS upgrades too).
 import net from 'node:net'
-import http from 'node:http'
 import { randomUUID } from 'node:crypto'
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { existsSync } from 'node:fs'
@@ -18,7 +17,7 @@ import { resolveProjectIdentity } from '@spexcode/spec-core'
 import { startResourceMonitor } from './host-resources.js'
 import { reapOrphanBackendInstances, registerBackendInstance, unregisterBackendInstance } from './runtime-ownership.js'
 import { sessionIdentityEnvVars } from './harness.js'
-import { loopbackHttpAgent } from './loopback-transport.js'
+import { waitHealthy } from './supervisor-readiness.js'
 import { serverEntrypointArgs } from './tsx-bin.js'
 import { anchorServiceCwd, serviceCwdLoss } from './service-cwd.js'
 
@@ -115,24 +114,6 @@ function freePort(): Promise<number> {
   })
 }
 
-// poll GET /health until 200; ~15s budget covers a cold Node + Hono start. False → keep old.
-function waitHealthy(port: number, tries = 150): Promise<boolean> {
-  return new Promise((resolve) => {
-    const retry = (left: number) => { if (left <= 1) resolve(false); else setTimeout(() => attempt(left - 1), 100) }
-    const attempt = (left: number) => {
-      // loopbackHttpAgent: the child's health probe must stay direct under environment proxying — a
-      // proxied probe never reaches the child, so every reload would look unhealthy ([[loopback-transport]]).
-      const req = http.get({ host: '127.0.0.1', port, path: '/health', timeout: 1000, agent: loopbackHttpAgent }, (r) => {
-        r.resume()
-        if (r.statusCode === 200) resolve(true); else retry(left)
-      })
-      req.on('error', () => retry(left))
-      req.on('timeout', () => { req.destroy(); retry(left) })
-    }
-    attempt(tries)
-  })
-}
-
 // boot a fresh backend child on a free internal port and wait until it's serving.
 async function boot(): Promise<Backend | null> {
   const port = await freePort()
@@ -145,7 +126,7 @@ async function boot(): Promise<Backend | null> {
   const child = spawn(process.execPath, entryArgs, { cwd: projectRoot, stdio: 'inherit', env: { ...process.env, PORT: String(port), SPEXCODE_API_URL: childApiBase, SPEXCODE_INSTANCE_ID: instanceId } })
   // if the ACTIVE backend dies unexpectedly (crash, OOM), restart it so the public port keeps serving.
   // Planned retirement sets current to the NEW child first, so the old child's exit fails this identity
-  // check and is ignored. boot()'s ~5s health budget rate-limits any crash loop.
+  // check and is ignored. boot()'s readiness window rate-limits any crash loop.
   child.on('exit', (code, sig) => {
     if (current?.child === child) { console.error(`[supervisor] active backend exited (${code ?? sig}) — restarting`); current = null; void reload('crash') }
   })
