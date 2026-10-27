@@ -2,10 +2,12 @@ import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import test from 'node:test'
 import { openProtocol } from '@spexcode/session-protocol'
 import { parseContract, validateContractGraph } from '@spexcode/spec-core/contracts'
+import { analyzeCodeBehavior } from './code-behavior.js'
+import type { CodeBehaviorInput } from './code-behavior.js'
 import { freezeCandidate } from './candidate.js'
 import { composeInputSnapshots } from './composition.js'
 import { checkGenerationContractIntent, readFrozenContracts } from './frozen-contracts.js'
@@ -129,6 +131,61 @@ for (const mode of ['dependency', 'explicit-read'] as const) test(`readonly ${mo
   const frozen = await context(source, plan.readPaths)
   assert.deepEqual(checkGenerationContractIntent(frozen, frozen, { newNodeRawSources: new Map(), verifications: plan.verifications.map(item => item.definition) }), [])
   assert.ok(!plan.executionScope.paths.includes(specB)); assert.ok(!plan.executionScope.paths.includes('tests/other.test.mjs'))
+})
+
+test('raw-only冷启动读取已授权测试正文且不扩大到其他目录', async t => {
+  const f = await fixture(t), testPaths = ['backend/tests', 'contracts/tests', 'frontend/src', 'qlib-engine/tests', 'runtime-support/tests', 'worker/tests', 'scripts/tests']
+  const testFiles = [
+    ['backend/tests/domain/test_recovery_ports.py', 'def test_recovery_port_contract():\n    assert True\n'],
+    ['worker/tests/test_worker_llm.py', 'def test_worker_llm_contract():\n    assert True\n'],
+    ['scripts/tests/test_sync_verification.py', 'def test_sync_verification_contract():\n    assert True\n'],
+  ] as const
+  const outsideTestPath = 'tests/other.test.mjs'
+  writeFileSync(join(f.root, specA), f.original.split('## expanded spec')[0])
+  f.config.testPaths = testPaths
+  f.config.mandatoryTests = []
+  f.configure()
+  for (const [testPath, testBody] of testFiles) {
+    mkdirSync(dirname(join(f.root, testPath)), { recursive: true })
+    writeFileSync(join(f.root, testPath), testBody)
+  }
+  git(f.root, 'add', specA, '.spec/spexcode.json', ...testFiles.map(([path]) => path))
+  git(f.root, 'commit', '-m', 'seed raw-only intent and authorized tests')
+  writeFileSync(join(f.root, 'src/export.js'), `${readFileSync(join(f.root, 'src/export.js'), 'utf8')}\n// initial behavior change\n`)
+
+  const snapshot = await captureInputSnapshot(f.root), plan = await buildSyncApplicationPlan(snapshot, 'export-contract')
+  const input: CodeBehaviorInput = {
+    snapshot, baseline: null, composed: composeInputSnapshots(snapshot, null).composed!, origin: 'initial',
+    readSetDigest: 'raw-only-read-set', policyDigest: 'raw-only-policy', requestKey: 'raw-only-readable-tests', timeoutMs: 10000,
+    plan: { ...plan, facts: [] },
+  }
+  type Frozen = { readablePaths: { path: string; snapshots: string[] }[]; newSource: [string, string][] }
+  const captured: { frozen: Frozen | null } = { frozen: null }
+  const stopAfterCapture = new Error('captured frozen test read set')
+  await assert.rejects(analyzeCodeBehavior(input, async request => {
+    assert.equal(request.purpose, 'code_behavior_analyze')
+    captured.frozen = JSON.parse(request.prompt.split('冻结三方输入:\n')[1]) as Frozen
+    throw stopAfterCapture
+  }), error => error === stopAfterCapture)
+
+  const frozen = captured.frozen
+  const readableTestFiles = testFiles.filter(([path]) => frozen?.readablePaths.some(item => item.path === path)).map(([path]) => path).sort()
+  const checks = {
+    readableTestDirectories: plan.readPaths.filter(path => testPaths.includes(path)).sort(),
+    readableTestFiles,
+    existingTestBodiesFrozen: testFiles.every(([path, body]) => new Map(frozen?.newSource ?? []).get(path) === body),
+    unrelatedTestExcluded: verifySnapshot(snapshot).some(entry => entry.path === outsideTestPath) && !plan.readPaths.some(path => path === 'tests' || path.startsWith('tests/')) && !frozen?.readablePaths.some(item => item.path === outsideTestPath),
+    unrelatedSourceExcluded: verifySnapshot(snapshot).some(entry => entry.path === 'src/other.js') && !plan.readPaths.includes('src/other.js') && !frozen?.readablePaths.some(item => item.path === 'src/other.js'),
+    readOnlyContextOnly: testFiles.every(([path]) => !plan.executionScope.paths.includes(path)) && plan.mandatoryTests.length === 0,
+  }
+  assert.deepEqual(checks, {
+    readableTestDirectories: testPaths.sort(),
+    readableTestFiles: testFiles.map(([path]) => path).sort(),
+    existingTestBodiesFrozen: true,
+    unrelatedTestExcluded: true,
+    unrelatedSourceExcluded: true,
+    readOnlyContextOnly: true,
+  })
 })
 
 test('真实store旧政策防删owner规避：整个A节点/VERIFY删除后退役仍保原命令和oracle', async t => {
