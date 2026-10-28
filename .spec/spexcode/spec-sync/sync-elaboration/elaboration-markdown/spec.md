@@ -19,7 +19,7 @@ related:
 
 ## expanded spec
 
-[[elaboration-output]] 的临时行通过 schema 检查后，按 `CONTRACT_COLUMNS` 顺序和列名渲染固定标题、表头及相同列数的分隔行。空类型数组不生成空表。引用数组生成逗号集合，布尔保留 true/false，空引用和 null 使用 `-`，VERIFY 命令序列化为 JSON argv。单元格转义反斜杠、反引号和管道，换行使用 `<br>`；argv 不允许 NUL 或换行，转义不改变其解析后参数。
+[[elaboration-output]] 的临时行通过 schema 检查并按冻结目标索引补入节点身份及路径后，交给同一 Markdown 渲染机制，按 `CONTRACT_COLUMNS` 顺序和列名渲染固定标题、表头及相同列数的分隔行。未分段旧正文也沿该机制保留原表和解释，不复制另一套业务渲染规则。空类型数组不生成空表。引用数组生成逗号集合，布尔保留 true/false，空引用和 null 使用 `-`，VERIFY 命令序列化为 JSON argv。单元格转义反斜杠、反引号和管道，换行使用 `<br>`；argv 不允许 NUL 或换行，转义不改变其解析后参数。
 
 程序从冻结目标复制原内容摘要和既有 frontmatter 元数据，原文从冻结 primary intent 或子节点原意/围栏感知 raw 段复制。模型不能生成 raw 或摘要字段；节点、路径越界仍由 [[sync-elaboration]] 拒绝。最终候选包含完整 UTF-8 Markdown，程序计算输入/候选/内容摘要；临时业务行只保留为执行证据，不构成第二份权威契约。
 
