@@ -65,22 +65,29 @@ test('冻结节点身份决定深层canonical路径，模型不再回显可写�
   assert.equal('path' in schema.changes.items.properties, false)
   assert.equal('nodeId' in schema.changes.items.properties, false)
   assert.deepEqual(schema.changes.items.properties.targetIndex, { type: 'integer', minimum: 0, maximum: 1 })
-  assert.equal(schema.changes.minItems, 1)
+  assert.equal(schema.changes.minItems, 0)
   assert.deepEqual(fake.calls.map(call => call.purpose), ['elaboration_generate', 'elaboration_review'])
   assert.equal('path' in (result.rounds[0].output as { changes: Record<string, unknown>[] }).changes[0], false)
 })
 
-test('派发schema按新目标和raw-only目标派生最低覆盖数量，漏目标不得进入独审', async () => {
+test('合法部分输出保留候选并反馈漏目标，schema最低数量不替代逐目标门禁', async () => {
   const frozen = input()
   const rawSource = '另一个由冻结原意指定的验证入口。'
   const source = '# 原始入口\n\n## raw source\n\n' + rawSource + '\n'
   frozen.targets = [...frozen.targets, { nodeId: 'raw-only', path: '.spec/export/raw-only/spec.md', source, sourceDigest: elaborationDigest(source), rawSource }]
   const fake = runner(request => build(request))
   const result = await elaborate(frozen, { runner: fake.run })
-  const schema = fake.calls[0].schema.properties as Record<string, { minItems: number }>
-  assert.equal(schema.changes.minItems, 2)
+  assert.ok(result.rounds[0].candidate)
   assert.equal(result.reviewPassed, false)
-  assert.ok(result.rounds[0].findings.some(finding => finding.code === 'output_schema'))
+  assert.deepEqual(result.rounds[0].findings.filter(finding => finding.code === 'target_not_elaborated').map(finding => finding.message), [
+    '新目标或raw-only目标必须显式完成细化: .spec/export/raw-only/spec.md',
+  ])
+  assert.ok(!result.rounds[0].findings.some(finding => finding.code === 'output_schema'))
+  const schema = fake.calls[0].schema.properties as Record<string, { minItems: number }>
+  assert.equal(schema.changes.minItems, 0)
+  assert.match(fake.calls[0].prompt, /必须显式构建\s*2\s*个目标/)
+  assert.match(fake.calls[0].prompt, /原始 targetIndex：\[1,2\]/)
+  assert.match(fake.calls[0].prompt, /完整、可解析的紧凑JSON对象/)
   assert.deepEqual(fake.calls.map(call => call.purpose), ['elaboration_generate'])
 })
 
@@ -144,7 +151,7 @@ test('retire不压缩原下标，move只绑定冻结目的身份；退役下标�
   assert.throws(() => bindElaborationTargets(frozen, output), /已退役目标/)
 })
 
-test('重复目标不能替代漏项，即使满足schema最低数量也不进入独审', async () => {
+test('重复目标不能替代漏项，即使schema允许该行数也不进入独审', async () => {
   const frozen = input()
   frozen.targets = [...frozen.targets, { nodeId: 'another-leaf', path: '.spec/export/another-leaf/spec.md', source: null, sourceDigest: null, rawSource: '另一个冻结验证入口。' }]
   const fake = runner(request => build(request, [leaf(request), leaf(request)]))

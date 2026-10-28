@@ -5,7 +5,7 @@ import { buildContractGraph, CONTRACT_COLUMNS, parseContract, parseFrontmatter, 
 import { elaborate, elaborationDigest, projectElaborationFlowReadiness } from './elaboration.js'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
 import type { ElaborationInput, ElaborationRepairSeed, ElaborationReview, ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
-import type { ContractCell, GeneratedElaboration, GeneratedTables } from './elaboration-markdown.js'
+import type { ContractCell, GeneratedElaboration, GeneratedTables, GeneratedTargetElaboration } from './elaboration-markdown.js'
 import { renderElaboration } from './elaboration-markdown.js'
 import { ELABORATION_SCHEMA, outputErrors } from './elaboration-schema.js'
 import type { CodeBehaviorEvidence, SyncDecisionAuthority } from './writeback-types.js'
@@ -443,6 +443,82 @@ const rejectedSeed = async (goal?: string): Promise<ElaborationRepairSeed> => {
   return { settled: true, requestKey: 'operation-1', inputDigest: result.inputDigest, candidateDigest: last.candidateDigest!, output: last.output, candidate: last.candidate!, findings: last.findings, review: last.review, traces: last.traces }
 }
 
+test('部分wire候选结算为诊断seed后，本次必需目标重列且完整新输出不继承seed行', async () => {
+  const base = input(true)
+  const newTargetPath = '.spec/export/new-target/spec.md'
+  const legacyPath = '.spec/export/legacy-target/spec.md'
+  const legacySource = '---\ntitle: Legacy target\nstatus: active\n---\n\n# Historical note\nThis source predates sync-v1.\n'
+  const snapshot: ElaborationInput = {
+    ...base,
+    targets: [
+      base.targets[0],
+      { nodeId: 'new-target', path: newTargetPath, source: null, sourceDigest: null, rawSource: '新增叶子目标的冻结原意。' },
+      { nodeId: 'raw-only-target', path: '.spec/export/raw-only-target/spec.md', source: null, sourceDigest: null, rawSource: 'raw-only 目标的冻结原意。' },
+      { nodeId: 'legacy-target', path: legacyPath, source: legacySource, sourceDigest: elaborationDigest(legacySource), rawSource: '旧版且尚未启用sync-v1的目标原意。' },
+    ],
+    maxRepairs: 0,
+  }
+  const output = (indices: number[], verifyIds: Record<number, string>): GeneratedTargetElaboration => ({
+    version: 'elaboration-target-rows-v3',
+    changes: indices.map(targetIndex => {
+      const tables = Object.fromEntries(Object.keys(CONTRACT_COLUMNS).map(kind => [kind, []])) as unknown as GeneratedTables
+      tables.VERIFY = [{ id: verifyIds[targetIndex], command: ['node', '--version'], cwd: '.', 'timeout-ms': 1000 }]
+      return { targetIndex, title: `Target ${targetIndex}`, description: '', code: [], related: [], prose: '按冻结输入登记本叶目标。', removeIds: [], tables }
+    }),
+    applicability: ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: false, basis: '本次冻结目标只登记独立验证入口。', affectedIds: [] })),
+  })
+
+  const partialNative = runner(() => output([1], { 1: 'VERIFY-SEED-ONLY' }))
+  const partial = await elaborate(snapshot, { runner: partialNative.run })
+  assert.equal(partial.status, 'exhausted')
+  assert.ok(partial.rounds[0].candidate)
+  assert.equal(partial.reviewPassed, false)
+  assert.equal(partial.rounds[0].reviewOutput, null)
+  assert.deepEqual(partial.rounds[0].findings.filter(issue => issue.code === 'target_not_elaborated').map(issue => issue.message), [
+    '新目标或raw-only目标必须显式完成细化: .spec/export/raw-only-target/spec.md',
+    `新目标或raw-only目标必须显式完成细化: ${legacyPath}`,
+  ])
+  assert.ok(!partial.rounds[0].findings.some(issue => issue.code === 'output_schema'))
+  assert.match(partialNative.calls[0].prompt, /必须显式构建\s*3\s*个目标/)
+  assert.match(partialNative.calls[0].prompt, /原始 targetIndex：\[1,2,3\]/)
+  assert.match(partialNative.calls[0].prompt, /完整、可解析的紧凑JSON对象/)
+  assert.deepEqual((partialNative.calls[0].schema.properties as Record<string, { minItems?: number }>).changes.minItems, 0)
+  assert.deepEqual((partial.rounds[0].output as GeneratedTargetElaboration).changes.map(change => change.targetIndex), [1])
+
+  const rejected = partial.rounds[0]
+  const seed: ElaborationRepairSeed = {
+    settled: true,
+    requestKey: 'operation-1',
+    inputDigest: partial.inputDigest,
+    candidateDigest: rejected.candidateDigest!,
+    output: rejected.output,
+    candidate: rejected.candidate!,
+    findings: rejected.findings,
+    review: rejected.review,
+    traces: rejected.traces,
+  }
+  const originalSeed = structuredClone(seed)
+  const freshNative = runner(() => output([1, 2, 3], { 1: 'VERIFY-NEW-FRESH', 2: 'VERIFY-RAW-ONLY', 3: 'VERIFY-LEGACY-01' }))
+  const fresh = await elaborate({ ...snapshot, requestKey: 'operation-2' }, { seed, runner: freshNative.run })
+
+  assert.equal(fresh.status, 'complete', JSON.stringify(fresh.rounds[0].findings))
+  assert.equal(fresh.structurePassed, true)
+  assert.equal(fresh.reviewPassed, true)
+  assert.deepEqual(freshNative.calls.map(call => call.purpose), ['elaboration_generate', 'elaboration_review'])
+  assert.notEqual(partialNative.calls[0].inputDigest, freshNative.calls[0].inputDigest)
+  assert.deepEqual((fresh.rounds[0].output as GeneratedTargetElaboration).changes.map(change => change.targetIndex), [1, 2, 3])
+  assert.equal(fresh.changes.length, 4)
+  assert.deepEqual(new Set(fresh.changes.map(change => change.path)), new Set([
+    path,
+    newTargetPath,
+    '.spec/export/raw-only-target/spec.md',
+    legacyPath,
+  ]))
+  assert.ok(!fresh.changes.some(change => change.source.includes('VERIFY-SEED-ONLY')))
+  assert.ok(fresh.graph && !fresh.graph.items.has('VERIFY-SEED-ONLY'))
+  assert.deepEqual(seed, originalSeed)
+})
+
 test('AC-ELABORATION-26 已结算失败种子仅作诊断，旧结果不变，新执行重新独立审查', async () => {
   const seed = await rejectedSeed()
   const original = structuredClone(seed)
@@ -662,7 +738,9 @@ test('AC-ELABORATION-40 省略新目标或raw-only目标不能假细化，不能
     const target = { nodeId: 'export-child', path: '.spec/export/export-child/spec.md', source: targetSource, sourceDigest: targetSource === null ? null : elaborationDigest(targetSource), rawSource: '真实待细化原意。' }
     const result = await elaborate({ ...input(true), targets: [...input(true).targets, target], maxRepairs: 0 }, { runner: fake.run })
     assert.equal(result.status, 'exhausted')
-    assert.ok(result.rounds[0].findings.some(issue => issue.code === 'output_schema' && issue.message.includes('项数不足')))
+    assert.ok(result.rounds[0].candidate)
+    assert.ok(result.rounds[0].findings.some(issue => issue.code === 'target_not_elaborated'))
+    assert.ok(!result.rounds[0].findings.some(issue => issue.code === 'output_schema'))
     assert.deepEqual(fake.calls.map(call => call.purpose), ['elaboration_generate'])
   }
 })

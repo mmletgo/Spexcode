@@ -34,7 +34,6 @@ export function elaborationSchema(input: ElaborationInput): Record<string, unkno
   const targets = elaborationTargetBindings(input)
   const schema = structuredClone(ELABORATION_SCHEMA)
   const changes = (schema.properties as Record<string, Record<string, unknown>>).changes
-  changes.minItems = targets.filter(target => target.required).length
   changes.maxItems = targets.length
   const properties = (changes.items as { properties: Record<string, unknown> }).properties
   properties.targetIndex = { type: 'integer', minimum: 0, maximum: input.targets.length - 1, ...(targets.length > 0 && targets.length < input.targets.length ? { enum: targets.map(target => target.targetIndex) } : {}) }
