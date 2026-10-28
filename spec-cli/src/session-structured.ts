@@ -128,11 +128,11 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
   const validate = new Ajv().compile(request.schema)
   if (request.frozenContext && !request.readerRuntime) request = { ...request, readerRuntime: await prepareFrozenReaderRuntime(join(runtimeRoot(), 'structured-frozen-read-only-v2')) }
   if (request.readerRuntime) assertFrozenReaderRuntime(request.readerRuntime, request.model)
-  const { sessionCreateRequest, requestQueueDrain, queueStructuredRecovery, refreshQueueCandidate } = await import('./sessions.js')
+  const { sessionCreateRequest, sessionCreateTimeoutMs, requestQueueDrain, queueStructuredRecovery, refreshQueueCandidate } = await import('./sessions.js')
   const execution = structuredExecutionPolicy(request)
   prepareStructuredRealm(requiredRealmRoot(execution), request.readerRuntime)
   const created = await sessionCreateRequest({ prompt: request.prompt, ...(request.base ? { base: request.base } : {}) }, {
-    requestKey: request.sessionCreateKey ?? request.requestKey, signal: request.signal, timeoutMs: Math.min(30_000, request.timeoutMs), structuredExecution: execution,
+    requestKey: request.sessionCreateKey ?? request.requestKey, signal: request.signal, timeoutMs: Math.min(sessionCreateTimeoutMs(), request.timeoutMs), structuredExecution: execution,
   })
   if (created.status !== 201) throw new StructuredSessionError(created.code === 'session_create_key_reused' ? 'key_reused' : created.code === 'session_create_cancelled' ? 'cancelled' : created.code === 'session_create_timeout' ? 'timeout' : 'failed', created.error, { sessionId: created.termination?.sessionId })
   const id = created.session.id
