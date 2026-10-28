@@ -241,16 +241,28 @@ test('outer runtime realm permits rollout writes and rejects source/config write
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
-test('structured completed receipts replay one session and bind policy/schema/input in the create key', { skip: process.platform !== 'darwin' }, async () => {
+for (const deadline of [
+  { name: 'default', configured: undefined, requestMs: 90_000, expectedMs: 30_000 },
+  { name: 'configured', configured: '120000', requestMs: 90_000, expectedMs: 90_000 },
+  { name: 'request-bound', configured: '120000', requestMs: 2000, expectedMs: 2000 },
+  { name: 'configured-bound', configured: '500', requestMs: 2000, expectedMs: 500 },
+]) test(`structured completed receipts preserve identity and ${deadline.name} creation deadline`, { skip: process.platform !== 'darwin' }, async t => {
   const { createHash } = await import('node:crypto')
   const { sessionCreateRequest, sessionIdForCreateKey } = await import('./sessions.js')
   const { fromRaw, writeRecord, readRecord } = await import('./session-record.js')
   const { configuredSessionApplication } = await import('./session-application.js')
   const { runStructuredSession } = await import('./session-structured.js')
-  const requestKey = `structured-replay-${process.pid}`
+  const previousTimeout = process.env.SPEXCODE_SESSION_CREATE_TIMEOUT_MS
+  if (deadline.configured === undefined) delete process.env.SPEXCODE_SESSION_CREATE_TIMEOUT_MS
+  else process.env.SPEXCODE_SESSION_CREATE_TIMEOUT_MS = deadline.configured
+  t.after(() => {
+    if (previousTimeout === undefined) delete process.env.SPEXCODE_SESSION_CREATE_TIMEOUT_MS
+    else process.env.SPEXCODE_SESSION_CREATE_TIMEOUT_MS = previousTimeout
+  })
+  const requestKey = `structured-replay-${process.pid}-${deadline.name}`
   const id = sessionIdForCreateKey(requestKey)
   const prompt = 'pinned structured input @parent:must-not-be-a-directive'
-  const policy = execution()
+  const policy = execution({ timeoutMs: deadline.requestMs })
   const output = { answer: 'exact' }
   const sha = (value: string): string => createHash('sha256').update(value).digest('hex')
   configuredSessionApplication().createSession({ sessionId: id, status: 'awaiting', proposal: 'nothing' })
@@ -261,7 +273,9 @@ test('structured completed receipts replay one session and bind policy/schema/in
   rec.structuredExecution = { ...policy, state: 'completed', threadId: 'thread-exact', turnId: 'turn-exact', output, resultDigest: sha(JSON.stringify(output)) }
   rec.harnessSessionId = 'thread-exact'; writeRecord(rec)
   const request = { root: process.cwd(), prompt, schema, requestKey, inputDigest: policy.inputDigest, purpose: policy.purpose, timeoutMs: policy.timeoutMs }
+  const creationTimer = t.mock.method(globalThis, 'setTimeout')
   const first = await runStructuredSession(request)
+  assert.equal(creationTimer.mock.calls[0]?.arguments[1], deadline.expectedMs, 'the real create transaction must use the configured deadline within the caller budget')
   assert.deepEqual(await runStructuredSession(request), first)
   assert.equal(first.sessionId, id)
   assert.equal(readRecord(id)?.structuredExecution?.policy, 'codex-read-only-v1')
