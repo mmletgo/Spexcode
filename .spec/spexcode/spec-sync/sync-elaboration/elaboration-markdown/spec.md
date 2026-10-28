@@ -5,8 +5,11 @@ desc: 原意及绑定由程序复制，临时业务行生成唯一可编辑契�
 code:
   - spec-cli/src/sync/elaboration-markdown.ts#renderElaboration
   - spec-cli/src/sync/elaboration-markdown.ts#elaborationPatchErrors
+  - spec-cli/src/sync/elaboration-markdown.ts#elaborationTargetBindings
+  - spec-cli/src/sync/elaboration-markdown.ts#bindElaborationTargets
 related:
   - spec-cli/src/sync/elaboration-markdown.test.ts
+  - spec-cli/src/sync/elaboration-target-binding.test.ts
 ---
 # 业务行确定性渲染 Markdown
 
@@ -37,3 +40,5 @@ changes 省略已启用 sync-v1 的既有目标时，程序把该冻结文件补
 冻结表头可使用解析器允许的非canonical列顺序。沿用正文保留旧表头时，新增/替换行按现解析器 contractTableCells 读出的旧列序渲染；显式正文替换使用canonical新表头时，所有继承旧行先按已解析字段重建到新列序。两方向均保留原字段语义，不能将目标、来源或验证绑定错列。
 
 raw/expanded 的更新位置来自 [[sync-spec-parts]] 原围栏感知扫描的实际内容行，不用 indexOf 查找整段文本；标题、导言或围栏示例先出现相同文本不会成为替换目标。未变段落保持原字节；重复识别段落仅更新各自真实连续内容区间，不能跨过交错段落。raw 更新与行差量可同时处理，CRLF与原意里的围栏伪标题保持保真。
+
+当前 Native 行输出只选择冻结 nodeId；程序由同一目标及生命周期映射补入 canonical path，原生 output/resultDigest 继续保存实际收到的无路径业务行，绑定不改写原生证据。模型不能通过少一层目录、回显另一节点路径或自报新路径取得写权；已审节点 move/retire 仍仅由冻结 nodeChanges 决定。

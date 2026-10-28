@@ -5,7 +5,28 @@ import type { Applicability, ElaborationCandidate, ElaborationInput } from './el
 export type ContractCell = string | string[] | boolean | number | null
 export type GeneratedTables = Record<ContractKind, Record<string, ContractCell>[]>
 export type GeneratedNode = { nodeId: string; path: string; title: string; description: string; code: string[]; related: string[]; prose: string | null; tables: GeneratedTables; removeIds: string[] }
-export type GeneratedElaboration = { version: 'elaboration-rows-v2'; changes: GeneratedNode[]; applicability: Applicability[] }
+export type GeneratedElaboration = { version: 'elaboration-rows-v2' | 'elaboration-target-rows-v3'; changes: GeneratedNode[]; applicability: Applicability[] }
+export type GeneratedTargetElaboration = { version: 'elaboration-target-rows-v3'; changes: Omit<GeneratedNode, 'path'>[]; applicability: Applicability[] }
+
+/** 可写定位由冻结目标和明确生命周期唯一派生，不由模型重复填写。 */
+export function elaborationTargetBindings(input: ElaborationInput): { nodeId: string; path: string; required: boolean }[] {
+  return input.targets.flatMap(target => {
+    const lifecycle = input.nodeChanges?.find(change => change.from.nodeId === target.nodeId && change.from.path === target.path)
+    if (lifecycle?.action === 'retire') return []
+    const identity = lifecycle?.action === 'move' ? lifecycle.to : target
+    return [{ nodeId: identity.nodeId, path: identity.path, required: !(target.source && parseContract({ ...target, source: target.source }).contract) }]
+  })
+}
+
+/** 只补入程序拥有的路径；原生输出和追踪摘要仍保存原来的业务行对象。 */
+export function bindElaborationTargets(input: ElaborationInput, output: GeneratedTargetElaboration): GeneratedElaboration {
+  const targets = new Map(elaborationTargetBindings(input).map(target => [target.nodeId, target.path]))
+  return { ...output, changes: output.changes.map(node => {
+    const path = targets.get(node.nodeId)
+    if (!path) throw new TypeError('细化输出包含未冻结节点: ' + node.nodeId)
+    return { ...node, path }
+  }) }
+}
 
 const markdownCell = (value: ContractCell, command = false): string => {
   const text = value === null ? '-' : value === '' ? '-' : Array.isArray(value) ? command ? JSON.stringify(value) : value.length ? value.join(',') : '-' : String(value)
