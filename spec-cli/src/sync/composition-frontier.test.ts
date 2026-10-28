@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { openProtocol } from '@spexcode/session-protocol'
 import { parseContract } from '@spexcode/spec-core/contracts'
+import { readFrozenBehaviorContext } from '../../test/frozen-behavior-context.js'
 import { analyzeCodeBehavior, authoredContractChanges, selectedAuthoredContractChanges } from './code-behavior.js'
 import { composeInputSnapshots, readCompositionEvidence } from './composition.js'
 import { buildSyncApplicationPlan, deriveSyncBaselineResources } from './planning.js'
@@ -79,12 +80,12 @@ function fakeBehavior(resolution?: string, assertInput?: (frozen: Record<string,
   return async request => {
     let output: unknown
     if (request.purpose === 'code_behavior_analyze') {
-      const frozen = JSON.parse(request.prompt.split('冻结三方输入:\n')[1]) as { changedPaths: string[] }
+      const frozen = readFrozenBehaviorContext(request.prompt) as { changedPaths: string[] }
       assertInput?.(frozen)
       output = { changes: frozen.changedPaths.map(path => ({ kind: 'allowed_change', paths: [path], affectedIds: [a], ruleIds: [a], originalIntent: '保留作者A与已交付B', previousBehavior: 'A1', sourceBehavior: 'A2', deliveryBehavior: 'A1+B1', evidence: '真实Git对象及逐ID残差', counterexample: '不能把A2隐藏为A1' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: resolution ? [{ path: resolutionPath, content: resolution, mode: resolutionMode }] : [] }
     } else {
       const reviewed = JSON.parse(request.prompt.split('待审分析:\n')[1]) as { analysisDigest: string; analysis: CodeBehaviorAnalysis }
-      const frozen = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as { changedPaths: string[] }
+      const frozen = readFrozenBehaviorContext(request.prompt) as { changedPaths: string[] }
       output = { inputDigest: request.inputDigest, analysisDigest: reviewed.analysisDigest, verdict: 'accept', checkedPaths: frozen.changedPaths, checkedChangeIds: reviewed.analysis.changes.map(change => change.id), findings: [] }
     }
     return { sessionId: `fake-session-${request.purpose}`, threadId: `fake-thread-${request.purpose}`, turnId: 'fake-turn', output, resultDigest: contentHash(JSON.stringify(output)) }
@@ -274,6 +275,40 @@ test('code-only A2夹在B.source但未消费：实际行为分析必须读取并
   assert.throws(() => readCompositionEvidence(input, { ...composed, compositionEvidenceBlob: writeEvidence(input.source.commonDir, forged) }, selection), /true code\/test objects or residual differ/)
   const evidenceRoot = process.env.SPEX_COMPOSITION_EVIDENCE_DIR
   if (evidenceRoot) writeFileSync(join(evidenceRoot, 'code-only-after.json'), JSON.stringify({ scenario: '真实code-only A2尚未消费', limitation: '真实Git/store；验证及行为runner fake', input, selection, artifact, evidence, analysis, files: { source: f.sourceCode, newSource: f.codeA2, delivered: f.addCodeB(f.codeA1) } }, null, 2))
+})
+
+test('broad作者raw baseline与intent artifact对象在共享正文后仍逐字逐对象保留', async t => {
+  const f = await fixture(t, true), authorRaw = f.nextA.replace('## raw source', '## raw source\n\n作者补充一条宏观原意。')
+  writeFileSync(join(f.root, path), authorRaw)
+  const input = await captureInputSnapshot(f.root), selection = f.selection(), composed = composeInputSnapshots(input, selection, { retainConflicts: true }).composed!, evidence = readCompositionEvidence(input, composed, selection)
+  const broadAuthorIntent = evidence.intents.find(item => item.changed && item.broadChange && (item.source?.path ?? item.before?.path) === path)
+  assert.ok(broadAuthorIntent?.before)
+  const expectedAuthorBaseline = readObject(input.source.commonDir, broadAuthorIntent.before.entry.oid).toString('utf8')
+  const expectedArtifacts = new Map(evidence.artifacts.flatMap(item => [item.before, item.delivery, item.source, item.authorBase].filter((entry): entry is NonNullable<typeof entry> => !!entry))
+    .filter(entry => f.plan.readPaths.some(readPath => entry.path === readPath || entry.path.startsWith(`${readPath}/`)))
+    .map(entry => [`${entry.path}:${entry.mode}:${entry.oid}`, entry] as const))
+  const merged = f.addB(authorRaw), behavior = fakeBehavior(merged)
+  const analysis = await analyzeCodeBehavior({ snapshot: input, baseline: null, baselineSelection: selection, composed, readSetDigest: 'dedup-author-read', policyDigest: 'dedup-author-policy', requestKey: 'dedup-author-baseline', timeoutMs: 10000, plan: f.plan }, async request => {
+    const wire = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as { textEncoding: string; textBodies: Record<string, string>; intentArtifactFiles: { path: string; mode: string; oid: string; digest: string; bodyRef: string }[] }
+    assert.equal(wire.textEncoding, 'sha256-body-ref-v1')
+    const frozen = readFrozenBehaviorContext(request.prompt) as { authorBaseline: [string, string][]; oldSource: [string, string][]; newSource: [string, string][]; intentArtifactFiles: { path: string; mode: string; oid: string; digest: string; text: string }[] }
+    assert.equal(new Map(frozen.authorBaseline).get(path), expectedAuthorBaseline)
+    assert.equal(new Map(frozen.newSource).get(path), authorRaw)
+    const expectedMetadata = [...expectedArtifacts.values()].map(({ path, mode, oid, digest }) => ({ path, mode, oid, digest })).sort((left, right) => `${left.path}:${left.mode}:${left.oid}`.localeCompare(`${right.path}:${right.mode}:${right.oid}`))
+    const actualMetadata = frozen.intentArtifactFiles.map(({ text: _text, ...entry }) => entry).sort((left, right) => `${left.path}:${left.mode}:${left.oid}`.localeCompare(`${right.path}:${right.mode}:${right.oid}`))
+    assert.deepEqual(actualMetadata, expectedMetadata)
+    assert.equal(wire.intentArtifactFiles.length, frozen.intentArtifactFiles.length)
+    for (const artifact of wire.intentArtifactFiles) {
+      const restored = frozen.intentArtifactFiles.find(item => item.path === artifact.path && item.mode === artifact.mode && item.oid === artifact.oid)!
+      const bytes = readObject(input.source.commonDir, artifact.oid)
+      assert.equal(artifact.bodyRef, contentHash(bytes))
+      assert.equal(wire.textBodies[artifact.bodyRef], restored.text)
+      assert.equal(restored.text, bytes.toString('utf8'))
+      assert.equal(restored.digest, contentHash(bytes))
+    }
+    return behavior(request)
+  })
+  assert.equal(analysis.reviewPassed, true)
 })
 
 test('code-only完整整合不能删除B1或弱化未选权限，即使fake独审accept', async t => {

@@ -3,6 +3,8 @@ title: 三方行为分析真实Git回归
 status: active
 code:
   - spec-cli/src/sync/code-behavior.test.ts
+related:
+  - spec-cli/test/frozen-behavior-context.ts
 ---
 ## raw source
 
@@ -44,3 +46,5 @@ code:
 精确 all-null selection 的真实 raw-only Git 回归先复现软链接/二进制属于 requiredChangedPaths 却不在 readablePaths 的独审死锁，再证明完整非文本 payload 与具体读取声明相连：PNG/wheel base64、可执行 mode、symlink 目标 blob 的 mode/OID/digest 和字节准确，旧 source/delivery 仍为空，不跟随宿主链接、不泄露 host-private；漏查图片或检查私密路径仍拒绝。真实三方非文本修改/删除保持前后对象和 intent artifacts 身份及缺席证据，不能混入 UTF-8 文本视图；仅有原字节无法解释业务时保留 coverage_gap，独审接受分析也不派生业务授权。原四文本视图逐字参考和零逐 blob 重读性能断言继续通过。
 
 真实 Git 先提交未治理实现与空初始化文件，再修改已治理源码：发送前 unownedSourcePaths/数量只列同一归属门要求的子集，requiredChangedPaths 仍含全部变化，snapshotTree/composed.tree 保真实身份。分析和新独审都收到该子集，原 allowed_change 分组与部分 newNodes 仍拒绝，完整合法 newNodes/具体 GAP 仍沿原门禁；通用指令禁止把手抄或反转义片段推算称为原对象计算证据，不增加计算工具或机械业务批准。
+
+行为分析回归以真实 `analyzeCodeBehavior` runner 输入先证实旧 JSON 在多个视图重复携带相同完整正文，再核 `sha256-body-ref-v1` 的 body table 每个正文只保存一次、视图路径顺序不变，并由共享测试 helper 将 wire context 无损展开为原逻辑字段。覆盖 UTF-8 中文、emoji、BOM、CRLF、空正文、修改/删除、mode-only、controlled before、broad authorBaseline 正文及 intentArtifactFiles 的真实对象元数据；nonTextFiles、输出 schema、required/ownership/checkedPaths 门禁保持原断言。真实canonical filter fixture复用既有作者投影生产路径，并经精确selection/controlled请求wrapper验证 `priorProjection`，证明 raw snapshot 正文不变、before/after OID与clean全文真实对应、readPaths限定的投影进入同一正文表，展示不改index或composed候选。生产路径不增加 unpack API。
