@@ -55,3 +55,5 @@ P4 selection包含全部精确read/protection及write资源，operation.scope只
 PublicationBase 可选保存于 attempt，绑定实际 parentCommit/parentTree/parentManifestBlob、publication provenance 和派生 composed；原 attempt.composedInput 不替换。PublicationHeads 仅给可信发布器提供同来源已结算 path 选择及无关 legacy 诊断。candidate.baseTree 为 publicationBase.composed.tree（缺字段的 P3 沿原 composed）；ApplyPlan 可携 publicationBaseRef，精确绑定本轮冻结 provenance，不借继承字节扩大 scope。
 
 VerificationResultBlob可携restoredIds，精确对应原冻结restore授权；仅完整验证与receipt结算发布当前有效ID head，旧retirement pair不修改。
+
+operation/admission/ingress 可带固定 model，缺省及显式 gpt-6.1-sol 省略字段且保原 payload；非默认模型进入不可变接入身份，遵循 [[sync-model-selection]]。

@@ -137,12 +137,12 @@ app.post('/api/sync/stop-writer', async c => {
 })
 app.post('/api/sync/verify', async c => {
   const body = await syncRequestBody(c.req)
-  return c.json(await (await syncApplication(c.req.query('targetTree'), body.targetTree)).submit({ nodeId: body.nodeId as string, requestId: body.requestId as string, origin: 'combined' }))
+  return c.json(await (await syncApplication(c.req.query('targetTree'), body.targetTree)).submit({ nodeId: body.nodeId as string, requestId: body.requestId as string, origin: 'combined', ...(body.model === undefined ? {} : { model: body.model as string }) }))
 })
 app.get('/api/sync/operations/:id', async c => c.json(await (await syncApplication(c.req.query('targetTree'))).readOperation(c.req.param('id'))))
 app.post('/api/sync/run', async c => {
   const body = await syncRequestBody(c.req), application = await syncApplication(c.req.query('targetTree'), body.targetTree)
-  return c.json(await application.submit({ nodeId: body.nodeId as string, requestId: body.requestId as string, ...(body.origin === undefined ? {} : { origin: body.origin as SyncSubmitInput['origin'] }), ...(body.retryOf === undefined ? {} : { retryOf: body.retryOf as string }), ...(body.patch === undefined ? {} : { patch: readSpecBodyEdit(body.patch) }) }))
+  return c.json(await application.submit({ nodeId: body.nodeId as string, requestId: body.requestId as string, ...(body.origin === undefined ? {} : { origin: body.origin as SyncSubmitInput['origin'] }), ...(body.retryOf === undefined ? {} : { retryOf: body.retryOf as string }), ...(body.model === undefined ? {} : { model: body.model as string }), ...(body.patch === undefined ? {} : { patch: readSpecBodyEdit(body.patch) }) }))
 })
 app.post('/api/sync/operations/:id/decide', async c => {
   const body = await syncRequestBody(c.req)

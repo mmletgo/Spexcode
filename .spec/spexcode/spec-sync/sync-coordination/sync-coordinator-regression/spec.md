@@ -80,3 +80,5 @@ P2 `anchor-dead` 来源修复回归从真实 P1 输出含测试用例 ID 的错�
 公开计划无精确资源选择的生命周期回归保留目录准入范围，真实新增治理叶、移动和退役仍经既有独审与Docker，精确P4范围门禁不被放宽。
 
 真实 Git/SQLite 加明确 native 接缝复现显式 retryOf 丢失旧行为失败诊断：连续两代同绑定重试的分析及独审收到全部原 code/message，完整旧 proposal/review 仍为未批准数据，不派 P1 或产生 receipt。不同 input/policy/readset 的准入继续拒绝，协调器读取旧链时再核读集合；祖先读集合较旧时，新分析/独审继续但不接收该祖先诊断，当前操作的新失败仍完整传给下一次分析和独审。P4 边界通过真实 claim/bind/startElaboration/expandContractScope、同冻结计划重算读集合和 bindComposedInput 重绑，再持久保存 scope_context_expanded；祖先 SQLite 原摘要不动，不模拟 readOperation，下一次协调仍分析和独审。既有 P4 合法作用域扩展回归保持。每个操作仍保正式准入预算、deadline、调用上限和 attempt 数，未修改预算策略；不是实际模型或 Docker 业务通过证明。
+
+固定模型覆盖行为/P1/P2六种实际请求、独立会话创建键与调用计费；SQLite旧版重启后的accepted P1在换模型显式retry仍继承且不再细化原AC。遵循 [[sync-model-selection]]。

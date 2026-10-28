@@ -38,3 +38,5 @@ P4 增加无operation参数的 pause/resume，调用 /automatic/pause|resume 物
 `spex sync adopt <operation-id>` 将已验证且结算的交付交给 [[sync-source-adoption]] 采纳，只传当前 targetTree 和完整操作身份，不由 CLI 执行 Git。无参数或多余操作参数在 HTTP 前拒绝；后端资格不满足时非零退出并保留具体原因。成功输出仍区分 sourceSynced 与 canonicalSynced，不把工作树交付当作主分支完成。
 
 独立check的help与guide说明受信policyCommit中的原意精确登记、null新增删除、移动双登记及失败摘要；外部调用方负责选择受信政策并配置必需检查，授权不豁免独审/VERIFY/oracle。
+
+run/verify 接收 --model 并传给正式 HTTP 应用；控制/恢复命令遇到该 flag 明确拒绝。help/guide说明固定默认、重试继承与显式 retryOf 换模型，遵循 [[sync-model-selection]]。

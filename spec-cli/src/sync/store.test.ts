@@ -90,6 +90,52 @@ test('same stable admission and capture-time replay create one operation and pro
   } finally { f.cleanup() }
 })
 
+test('固定模型v13 marker升级先备份，旧operation/payload/receipt逐字保留且旧writer拒绝', async () => {
+  const f = await fixture()
+  let backup: ReturnType<typeof openProtocol> | undefined
+  try {
+    const r = f.ready(), journal = f.store.beginApply(r.fence, r.plan, r.target)
+    for (const step of journal.steps) f.store.recordApplyStep(r.fence, journal.id, { ...step, status: 'completed' })
+    const receipt = f.receipt(journal.id, r.plan); f.store.recordReceipt(journal.id, receipt)
+    f.store.settleApply(journal.id, receipt.id)
+    // v13 is only a writer marker: its absence is exactly the original v12 schema.
+    f.protocol.withTransaction(tx => tx.exec('DELETE FROM schema_migrations WHERE component=? AND version=13', SYNC_COMPONENT))
+    const records = (protocol: typeof f.protocol) => protocol.withTransaction(tx => Object.fromEntries(['sync_operations', 'sync_attempts', 'sync_ingress_receipts', 'sync_apply_journals', 'sync_baseline_pairs'].map(table => [table, tx.query(`SELECT * FROM ${table}`)])))
+    const before = records(f.protocol), backupPath = join(f.root, 'v12-before-model.backup')
+    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), 13); assert.ok(existsSync(backupPath))
+    assert.deepEqual(records(f.protocol), before)
+    assert.throws(() => applyComponentMigrations(f.protocol, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 12)), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
+    backup = openProtocol(backupPath)
+    assert.equal(backup.withTransaction(tx => tx.query('SELECT MAX(version) AS version FROM schema_migrations WHERE component=?', SYNC_COMPONENT))[0].version, 12)
+    assert.deepEqual(records(backup), before)
+    assert.equal(applyComponentMigrations(backup, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 12)), 12)
+    assert.equal(f.store.readOperation(r.operation.id).payloadDigest, r.operation.payloadDigest)
+    assert.equal(f.store.readOperation(r.operation.id).model, undefined)
+  } finally { backup?.close(); f.cleanup() }
+})
+
+test('模型选择固定payload，普通重复不能换模型刷新预算，显式retry可切换且旧sol不回写', async () => {
+  const f = await fixture()
+  try {
+    const input = f.admit(), original = f.store.admitAndEnqueue(input), before = JSON.stringify(original)
+    assert.throws(() => f.store.admitAndEnqueue({ ...input, model: 'gpt-6.1-terra' }), /SYNC_IDEMPOTENCY_CONFLICT/)
+    assert.throws(() => f.store.admitAndEnqueue({ ...input, ingressKey: 'new-model-event', model: 'gpt-6.1-terra' }), /SYNC_MODEL_RETRY_REQUIRED/)
+    assert.equal(f.store.admitAndEnqueue({ ...input, model: 'gpt-6.1-sol' }).id, original.id)
+    assert.equal(JSON.stringify(f.store.readOperation(original.id)), before)
+    f.store.requestControl(original.id, 'cancel')
+    assert.throws(() => f.store.admitAndEnqueue({ ...input, ingressKey: 'terminal-model-event', model: 'gpt-6.1-terra' }), /SYNC_MODEL_RETRY_REQUIRED/)
+    const retry = f.store.admitAndEnqueue({ ...input, ingressKey: 'chosen-retry', rootCauseId: 'explicit-model-retry', retryOf: original.id, model: 'gpt-6.1-terra' })
+    assert.equal(retry.model, 'gpt-6.1-terra')
+    assert.equal(retry.callsUsed, 0)
+    assert.deepEqual(retry.budget, original.budget)
+    assert.equal(retry.input.id, original.input.id)
+    assert.equal(retry.policyDigest, original.policyDigest)
+    assert.equal(retry.readSetDigest, original.readSetDigest)
+    const other = f.store.admitAndEnqueue({ ...f.admit(source(), 'other-model-input'), model: 'gpt-6-astra' })
+    assert.equal(other.model, 'gpt-6-astra')
+  } finally { f.cleanup() }
+})
+
 test('operation lists include terminal records, isolate repository/root and use insertion order with bounded limit', async () => {
   const f = await fixture()
   try {

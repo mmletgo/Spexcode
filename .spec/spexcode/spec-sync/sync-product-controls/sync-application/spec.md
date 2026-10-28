@@ -100,3 +100,7 @@ adopt(operationId) 依 [[sync-source-adoption]] 采纳实际 settled receipt.act
 历史节点路径恢复仅额外接受原完整 settled receipt 的实际 files 中、被本次 Git 反向三方触及的精确 .spec/.../spec.md 路径；当前原冻结意图仍须通过已注册 node 授权。它不扩大源代码、测试目录、配置或整个 .spec 目录的权限。目标 raw 取本次真实请求中同一节点的正文，删除时保留原历史 raw 供退役验证；节点迁移沿既有生命周期检查保持节点及业务 ID。
 
 revert 将精确历史恢复 Spec 作为可信目标，保原节点/业务 ID 与原路径；restore 授权只能由原 settled receipt 和固定 history 请求派生。原 retired ledger 保留，新完整交付推进该身份当前有效 head，后续普通操作继续使用该 head。
+
+正式 run/verify 可传 model，首次请求默认 sol，同 requestId 省略选择及显式 retry 省略选择均继承已持久模型；改同 requestId 模型拒绝，普通重复换模型不获新预算。非默认新操作保存 sync-tools-v2/model，使旧二进制明确拒绝而不静默用 sol；新执行核运行描述与 operation 精确一致。v1 及缺模型旧 operation 保原 sol/payload/证据，恢复不能换模型。完整合同属于 [[sync-model-selection]]。
+
+已存在或备份固定运行描述先核精确期望模型，再允许admission。未受理请求留下的原描述若与后续选择不符，明确早拒，不新建operation/receipt/FIFO且不静默重建；匹配原描述的合法显式retry或新请求仍沿既有入口。

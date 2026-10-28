@@ -9,7 +9,7 @@ import { stripRefSigil } from './mentions.js'
 export async function runSyncCli(argv: readonly string[]): Promise<void> {
   const [verb] = argv
   if (verb === 'check') return (await import('./sync/conformance-cli.js')).runConformanceCli(argv.slice(1))
-  const values = new Set(['--node', '--request-id', '--retry-of', '--patch-file', '--limit', '--config-digest', '--api', '--port', '--password', '--origin', '--input-id', '--analysis', '--findings', '--choice', '--rule'])
+  const values = new Set(['--node', '--request-id', '--model', '--retry-of', '--patch-file', '--limit', '--config-digest', '--api', '--port', '--password', '--origin', '--input-id', '--analysis', '--findings', '--choice', '--rule'])
   const allowed = new Set([...values, '--json', '--insecure'])
   const positional: string[] = []
   const flags = new Map<string, string>()
@@ -27,6 +27,7 @@ export async function runSyncCli(argv: readonly string[]): Promise<void> {
   if (!['run', 'verify', 'status'].includes(verb ?? '') && flags.has('--node')) throw usage('--node 只用于 sync run、verify 或 status，物理暂停请省略节点选项')
   if (verb !== 'run' && flags.has('--patch-file')) throw usage('--patch-file 只用于 sync run')
   if (verb !== 'run' && flags.has('--origin')) throw usage('--origin 只用于 sync run')
+  if (!['run', 'verify'].includes(verb ?? '') && flags.has('--model')) throw usage('--model 只用于 sync run 或 verify；恢复沿用原操作模型')
   if (verb !== 'run' && flags.has('--retry-of')) throw usage('--retry-of 只用于 sync run')
   const targetTree = repoRoot(), query = new URLSearchParams({ targetTree })
   let result: unknown
@@ -47,7 +48,7 @@ export async function runSyncCli(argv: readonly string[]): Promise<void> {
     const patchFile = flags.get('--patch-file')
     if (retryOf && patchFile) throw usage('--retry-of 沿用原正文意图，不能同时指定 --patch-file')
     const patch = patchFile ? readSpecBodyEdit(JSON.parse(readFileSync(patchFile, 'utf8')) as unknown) : undefined
-    result = await clientSyncRequest(verb === 'verify' ? '/verify' : '/run', { targetTree, nodeId: stripRefSigil(nodeId), requestId: flags.get('--request-id') ?? randomUUID(), ...(retryOf ? { retryOf, ...(flags.has('--origin') ? { origin: flags.get('--origin') } : {}) } : { origin: flags.get('--origin') ?? 'spec' }), ...(patch ? { patch } : {}) })
+    result = await clientSyncRequest(verb === 'verify' ? '/verify' : '/run', { targetTree, nodeId: stripRefSigil(nodeId), requestId: flags.get('--request-id') ?? randomUUID(), ...(retryOf ? { retryOf, ...(flags.has('--origin') ? { origin: flags.get('--origin') } : {}) } : { origin: flags.get('--origin') ?? 'spec' }), ...(flags.has('--model') ? { model: flags.get('--model') } : {}), ...(patch ? { patch } : {}) })
   } else if (verb === 'decide') {
     if (positional.length !== 1 || !['--input-id', '--analysis', '--findings', '--choice'].every(flag => flags.has(flag))) throw usage('decide 需要 operation ID、--input-id、--analysis、--findings 与 --choice')
     const choice = flags.get('--choice')!

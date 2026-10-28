@@ -61,3 +61,5 @@ raw/shared prose 的 broad affected closure只保证完整路径进入分析，�
 冻结上下文中的 nonTextFiles 保留授权路径的完整非文本 Git 对象，按 path/mode/OID 去重并列出真实所属快照及 digest、kind、encoding、content；binary 以完整 base64 表示，symlink 仅保存链接 blob 的目标字节（有效 UTF-8 否则 base64），永不跟随宿主目标。精确 selection 的 base/delivery null 同步表示对象缺席，不能借当前 HEAD 伪造旧全文；受控 before/source 及 intent artifact 同样按真实对象投影。readablePaths 的 nonTextFiles.快照名只指向这些完整 payload，元数据和链接目标路径本身仍不能冒充目标正文；真实非文本变化、删除和 requiredChangedPaths/changes/checkedPaths 覆盖保持，不通过过滤非文本消除缺口。所有字节先经原 Git OID 核验，readPaths 与 host-private 边界保持；原文本视图只含真实 UTF-8 普通文件。完整字节可读不等于已理解图片或 wheel 业务含义，raw 真实依赖而不可解释的语义仍须具体 GAP，不自动改成 allowed_change 或产生业务批准。
 
 冻结输入显式给出真实 snapshotTree，并保留 composed.tree 身份。相同 Git 树只证明对应路径的对象字节及 mode 相同，不证明语义相容或业务通过。分析不得编造输入/工具未提供的 hash、AST 或执行校验证据，不把手工重抄、转义或反转义片段的推算冒称冻结原对象校验；真正不可解释且原意依赖的语义继续保留具体 GAP，完整独审与后续门禁不变。
+
+行为分析与独立评审使用协调器传入的固定操作 model，历史缺省 sol；不把 model 加入业务语义上下文或改写旧证明，实际结构化请求仍绑定模型，遵循 [[sync-model-selection]]。

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { DEFAULT_SYNC_MODEL, syncModel, syncModelBinding } from './model-selection.js'
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { loadSpecs, parseContract, parseParts, processStartToken, readConfig, repoRoot, runtimeRoot } from '@spexcode/spec-core'
@@ -29,7 +30,7 @@ import { isSyncSpecPath, readFrozenContracts } from './frozen-contracts.js'
 import { assertSourceAdoptionComplete, fastForwardSource, prepareSourceAdoption, sourceAdoptionMutexPath, type SourceAdoptionPlan } from './source-adoption.js'
 
 export type SyncScopeCoverage = { includedNodeIds: string[]; contextNodeIds: string[]; missingNodeIds: string[]; excludedNodeIds: string[]; totalNodeCount: number }
-export type SyncSubmitInput = { nodeId: string; requestId: string; origin?: 'spec' | 'initial' | 'code' | 'combined' | 'decision'; patch?: SpecBodyEdit; retryOf?: string }
+export type SyncSubmitInput = { nodeId: string; requestId: string; origin?: 'spec' | 'initial' | 'code' | 'combined' | 'decision'; patch?: SpecBodyEdit; retryOf?: string; model?: string }
 export type SyncRevertEligibility = { eligible: true } | { eligible: false; reason: { code: string; message: string } }
 export type SyncAdoptEligibility = { eligible: true } | { eligible: false; reason: { code: string; message: string } }
 export type SyncOperationDetail = { operation: SyncOperation; physicalControl: PhysicalControl; attempt: ReturnType<SyncStore['readAttempt']> | null; journals: ReturnType<SyncStore['listJournals']>; stale: boolean; sourceSynced: boolean; canonicalSynced: boolean; adoptionEligibility: SyncAdoptEligibility; revertEligibility: SyncRevertEligibility; retryEligibility: ReturnType<SyncStore['readRetryEligibility']>; decisionEligibility: ReturnType<SyncStore['readDecisionEligibility']>; resources: ReturnType<SyncStore['listRecoverableResources']>[number]['resource'][]; decisionContext: { analysisRef: BlobRef; analysis: CodeBehaviorAnalysis } | null; executionAvailability: { status: 'ready' | 'recovery_required'; failure?: { code: string; message: string } } }
@@ -39,7 +40,7 @@ export type SyncApplicationOptions = Partial<Pick<SyncCoordinatorOptions, 'runne
   tools?: SyncCoordinatorOptions['tools']
 }
 type EnabledRecord = { registeredNodeIds?: string[]; version: 1; source: WorktreeIdentity; configDigest: string; enabledAtMs: number }
-type SavedTools = { version: 'sync-tools-v1'; tools: SyncCoordinatorOptions['tools']; runtimeDigest: string | null }
+type SavedTools = { tools: SyncCoordinatorOptions['tools']; runtimeDigest: string | null } & ({ version: 'sync-tools-v1' } | { version: 'sync-tools-v2'; model: string })
 function enabledSources(runtime: string): EnabledRecord[] {
   if (!existsSync(runtime)) return []
   return readdirSync(runtime).filter(name => /^enabled-[a-f0-9]+\.json$/.test(name)).map(name => {
@@ -482,7 +483,7 @@ export class SyncApplication {
   }
   private executionInputs(operation: SyncOperation): { plan: SyncCoordinatorPlan; tools: SyncCoordinatorOptions['tools'] } {
     const plan = this.operationPlan(operation)
-    const { tools } = this.readSavedTools(this.toolsRef(operation.ingressKey))
+    const { tools } = this.readSavedTools(this.toolsRef(operation.ingressKey), syncModel(operation))
     for (const owned of [this.runtime, this.managedRoot, this.artifactRoot]) {
       const stat = lstatSync(owned)
       if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== process.getuid?.() || (stat.mode & 0o077) !== 0) throw new SyncApplicationError('sync_runtime_unsafe', '同步运行目录不再是当前用户独占 0700 目录')
@@ -491,20 +492,21 @@ export class SyncApplication {
   }
   private toolsRef(ingressKey: string): string { return join(this.artifactRoot, `application-runtime-${contentHash(ingressKey)}.json`) }
   private toolsBackup(ingressKey: string): string { return join(this.runtime, 'runtimes', contentHash(ingressKey), 'tools.json') }
-  private readSavedTools(path: string): SavedTools {
+  private readSavedTools(path: string, model: string): SavedTools {
     const saved = JSON.parse(readFileSync(path, 'utf8')) as SavedTools
-    if (saved?.version !== 'sync-tools-v1' || !saved.tools || ![saved.tools.trustedRuntimeRoot, saved.tools.toolEntry, saved.tools.canonicalHooksDir].every(path => typeof path === 'string' && path.startsWith('/'))) throw new SyncApplicationError('sync_execution_metadata_invalid', '固定 runtime 描述不合法')
+    if (!['sync-tools-v1', 'sync-tools-v2'].includes(saved?.version) || saved.version === 'sync-tools-v2' && (typeof saved.model !== 'string' || !saved.model || saved.model !== saved.model.trim()) || !saved.tools || ![saved.tools.trustedRuntimeRoot, saved.tools.toolEntry, saved.tools.canonicalHooksDir].every(path => typeof path === 'string' && path.startsWith('/'))) throw new SyncApplicationError('sync_execution_metadata_invalid', '固定 runtime 描述不合法')
+    if ((saved.version === 'sync-tools-v1' ? DEFAULT_SYNC_MODEL : saved.model) !== model) throw new SyncApplicationError('sync_execution_model_conflict', '固定 runtime 与请求的模型不同，禁止替换原选择')
     if (saved.runtimeDigest === null) {
       if (!this.options.tools) throw new SyncApplicationError('sync_execution_metadata_invalid', '生产固定 runtime 缺少完整 manifest 摘要')
     } else if (!/^[a-f0-9]{64}$/.test(saved.runtimeDigest) || contentHash(JSON.stringify(inspectTrustedRuntime(saved.tools.trustedRuntimeRoot))) !== saved.runtimeDigest) throw new SyncApplicationError('sync_execution_runtime_changed', '固定 runtime 实际 manifest 已变化，禁止沿用旧证据')
     return saved
   }
-  private prepareTools(ingressKey: string, prior: SyncOperation | null): void {
+  private prepareTools(ingressKey: string, prior: SyncOperation | null, model = syncModel(prior ?? {})): void {
     const path = this.toolsRef(ingressKey)
-    if (existsSync(path)) { this.readSavedTools(path); return }
+    if (existsSync(path)) { this.readSavedTools(path, model); return }
     const backup = this.toolsBackup(ingressKey)
     if (existsSync(backup)) {
-      const saved = this.readSavedTools(backup)
+      const saved = this.readSavedTools(backup, model)
       writeFileSync(path, JSON.stringify(saved), { mode: 0o600, flag: 'wx' })
       return
     }
@@ -512,7 +514,7 @@ export class SyncApplication {
     const runtimeParent = join(this.runtime, 'runtimes', contentHash(ingressKey)); mkdirSync(runtimeParent, { recursive: true, mode: 0o700 })
     const slot = mkdtempSync(join(runtimeParent, 'trusted-'))
     const frozen = this.options.tools ? null : freezeDeliveryRuntime(join(slot, 'package'))
-    const saved: SavedTools = { version: 'sync-tools-v1', tools: this.options.tools ?? frozen!, runtimeDigest: frozen?.digest ?? null }
+    const saved: SavedTools = { ...(model === DEFAULT_SYNC_MODEL ? { version: 'sync-tools-v1' as const } : { version: 'sync-tools-v2' as const, model }), tools: this.options.tools ?? frozen!, runtimeDigest: frozen?.digest ?? null }
     const bytes = JSON.stringify(saved)
     writeFileSync(backup, bytes, { mode: 0o600, flag: 'wx' })
     writeFileSync(path, bytes, { mode: 0o600, flag: 'wx' })
@@ -531,6 +533,7 @@ export class SyncApplication {
   /** 用户请求独立保存为不可变差量，no-op 不建操作；其它请求直接进入真实 pipeline。 */
   async submit(input: SyncSubmitInput): Promise<{ changed: boolean; operation: SyncOperation | null }> {
     if (!input || typeof input.nodeId !== 'string' || !input.nodeId.trim() || typeof input.requestId !== 'string' || !input.requestId.trim()) throw new SyncApplicationError('sync_request_invalid', '请求需要 nodeId 与稳定 requestId', 400)
+    if (input.model !== undefined && (typeof input.model !== 'string' || !input.model || input.model !== input.model.trim())) throw new SyncApplicationError('sync_model_invalid', '模型需要非空精确 ID', 400)
     if (input.retryOf !== undefined && (typeof input.retryOf !== 'string' || !input.retryOf.trim())) throw new SyncApplicationError('sync_retry_invalid', '显式重试需要完整旧 operation ID', 400)
     if (input.retryOf && input.patch) throw new SyncApplicationError('sync_retry_changed', '显式重试沿用原正文意图；新的正文修改请发起新请求', 400)
     if (input.origin !== undefined && !['spec', 'initial', 'code', 'combined'].includes(input.origin) && !(input.retryOf && input.origin === 'decision')) throw new SyncApplicationError('sync_origin_unsupported', '输入来源必须为 spec、initial、code 或 combined', 400)
@@ -551,6 +554,7 @@ export class SyncApplication {
     const mutex = await this.requestMutex(ingressKey, settings.budget.timeoutMs)
     try {
       const prior = this.store.findOperationByIngressKey(ingressKey), ingress = this.store.findIngressReceipt(ingressKey)
+      const model = input.model ?? syncModel(prior ?? retry ?? {})
       if (prior?.baselineSelection) {
         this.requireEnabled(snapshot, prior)
         if (!await isSyncInputCurrent(prior, snapshot, this.operationPlan(prior))) throw new SyncStoreError('SYNC_IDEMPOTENCY_CONFLICT', ingressKey)
@@ -571,10 +575,10 @@ export class SyncApplication {
         if (!request.changed) return { changed: false, operation: null }
         requestBlob = request.requestBlob
       }
-      if (prior && ((ingress?.origin ?? prior.origin) !== origin || (prior.retryOf ?? null) !== (retry?.id ?? null) || (ingress?.input ?? prior.input).id !== snapshot.id || JSON.stringify((ingress?.input ?? prior.input).source) !== JSON.stringify(snapshot.source) || prior.policyDigest !== syncPlanDigest(plan) || ((ingress ?? prior).requestBlob?.sha256 ?? null) !== (requestBlob?.sha256 ?? null))) throw new SyncStoreError('SYNC_IDEMPOTENCY_CONFLICT', ingressKey)
-      const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: input.requestId, origin, ...(retry ? { retryOf: retry.id, ...(retry.baselineSelection ? { executionScope: retry.scope, impactDigest: retry.impactDigest } : {}) } : {}), budget: settings.budget, managedRoot: this.managedRoot, ...(requestBlob ? { requestBlob } : {}), previousBaselinePair, ...(frozen ? { baselineSelection: frozen.selection } : {}) })
+      if (prior && (syncModel(prior) !== model || (ingress?.origin ?? prior.origin) !== origin || (prior.retryOf ?? null) !== (retry?.id ?? null) || (ingress?.input ?? prior.input).id !== snapshot.id || JSON.stringify((ingress?.input ?? prior.input).source) !== JSON.stringify(snapshot.source) || prior.policyDigest !== syncPlanDigest(plan) || ((ingress ?? prior).requestBlob?.sha256 ?? null) !== (requestBlob?.sha256 ?? null))) throw new SyncStoreError('SYNC_IDEMPOTENCY_CONFLICT', ingressKey)
+      const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: input.requestId, origin, ...syncModelBinding(model), ...(retry ? { retryOf: retry.id, ...(retry.baselineSelection ? { executionScope: retry.scope, impactDigest: retry.impactDigest } : {}) } : {}), budget: settings.budget, managedRoot: this.managedRoot, ...(requestBlob ? { requestBlob } : {}), previousBaselinePair, ...(frozen ? { baselineSelection: frozen.selection } : {}) })
       if (prior) { admission.deliveryPlan = (ingress ?? prior).deliveryPlan; admission.budget = (ingress ?? prior).budget }
-      this.prepareTools(admission.ingressKey, prior)
+      this.prepareTools(admission.ingressKey, prior, model)
       const operation = this.store.admitAndEnqueue(admission)
       this.start(operation.id)
       return { changed: true, operation: this.store.readOperation(operation.id) }

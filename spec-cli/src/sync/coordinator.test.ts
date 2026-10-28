@@ -67,7 +67,7 @@ function gitReadCounter(directory: string): { reset(): void; entries(): string[]
     },
   }
 }
-async function fixture(t: test.TestContext, budget = { maxAttempts: 3, maxCalls: 16, maxRepairs: 2, timeoutMs: 300_000 }, adopt = false, specSource = original, projectId = 'project', factsSource = specSource, planPatch: Partial<SyncCoordinatorPlan> = {}, controlledEdit?: { original: string; replacement: string; intent: string; testPath: string }, origin: 'spec' | 'code' | 'combined' = 'spec') {
+async function fixture(t: test.TestContext, budget = { maxAttempts: 3, maxCalls: 16, maxRepairs: 2, timeoutMs: 300_000 }, adopt = false, specSource = original, projectId = 'project', factsSource = specSource, planPatch: Partial<SyncCoordinatorPlan> = {}, controlledEdit?: { original: string; replacement: string; intent: string; testPath: string }, origin: 'spec' | 'code' | 'combined' = 'spec', model?: string) {
   const parent = realpathSync(mkdtempSync(join(tmpdir(), 'sync-coordinator-'))), root = join(parent, 'source'), managedRoot = join(parent, 'managed'), artifactRoot = join(parent, 'artifacts')
   mkdirSync(root); mkdirSync(managedRoot, { mode: 0o700 }); mkdirSync(artifactRoot, { mode: 0o700 }); cpSync(fixturePath, root, { recursive: true })
   const targetPath = `.spec/${projectId}/export-contract/spec.md`
@@ -104,7 +104,7 @@ async function fixture(t: test.TestContext, budget = { maxAttempts: 3, maxCalls:
   }
   const protocol = openProtocol(join(parent, 'sync.sqlite')); await migrateSyncStore(protocol, { backupPath: join(parent, 'db-backup') })
   let store = new SyncStore(protocol, { readBlob: ref => readEvidence(input.source.commonDir, ref) })
-  let operation = store.admitAndEnqueue(await prepareSyncAdmission(input, plan, { ingressKey: input.id, rootCauseId: input.id, origin, budget, managedRoot, ...(requestBlob ? { requestBlob } : {}) }))
+  let operation = store.admitAndEnqueue(await prepareSyncAdmission(input, plan, { ingressKey: input.id, rootCauseId: input.id, origin, ...(model ? { model } : {}), budget, managedRoot, ...(requestBlob ? { requestBlob } : {}) }))
   const calls: ElaborationSessionRequest[] = []
   let transform: ((output: unknown, request: ElaborationSessionRequest) => unknown | Promise<unknown>) | undefined
   const run: ElaborationRunner = async request => {
@@ -144,6 +144,22 @@ async function fixture(t: test.TestContext, budget = { maxAttempts: 3, maxCalls:
   t.after(() => { if (!closed) protocol.close(); unlock(parent); rmSync(parent, { recursive: true, force: true }) })
   return { root, parent, managedRoot, artifactRoot, input, index, bytes, store, operation, plan, options, calls, git, priorCommitCount, realTools, closeForRestart: () => { protocol.close(); closed = true }, useStore: (next: SyncStore) => { store = next }, useOperation: (next: typeof operation) => { operation = next }, transform: (fn: typeof transform) => { transform = fn } }
 }
+
+test('固定操作模型到达行为/P1/P2及全部独审，独立会话与调用预算保持', async t => {
+  const f = await fixture(t, { maxAttempts: 1, maxCalls: 8, maxRepairs: 0, timeoutMs: 120000 }, false, original, 'project', original, {}, undefined, 'code', 'gpt-6.1-terra')
+  f.transform((output, request) => {
+    if (request.purpose === 'code_review') throw Object.assign(new Error('本用例在V3前停止'), { code: 'unsupported' })
+    return output
+  })
+  const result = await runSyncOperation(f.store, f.operation.id, f.options)
+  assert.equal(result.operation.phase, 'failed'); assert.equal(result.operation.model, 'gpt-6.1-terra')
+  assert.deepEqual(f.calls.map(call => call.purpose), ['code_behavior_analyze', 'code_behavior_review', 'elaboration_generate', 'elaboration_review', 'code_generate', 'code_review'])
+  assert.ok(f.calls.every(call => call.model === 'gpt-6.1-terra' && call.effort === 'high'))
+  assert.equal(result.operation.callsUsed, 6)
+  const dispatches = f.store.listAttempts(f.operation.id)[0].dispatchPlans
+  assert.equal(new Set(dispatches.map(dispatch => dispatch.sessionCreateKey)).size, 6)
+  assert.equal(f.store.listJournals(f.operation.id).length, 0)
+})
 
 for (const kind of ['conflict', 'coverage_gap'] as const) test(`raw-only已审 ${kind} 无既有ID时明确阻塞，不派P1或消耗新attempt`, async t => {
   const raw = original.split('## expanded spec')[0]
@@ -687,11 +703,12 @@ test('显式retryOf在SQLite重启后继承无未来IDs输入的accepted P1，�
   assert.equal(restarted.admitAndEnqueue(automatic).id, failed.operation.id)
   assert.equal(restarted.readOperation(failed.operation.id).callsUsed, 3)
   assert.equal(restarted.readOperation(failed.operation.id).payloadDigest, failed.operation.payloadDigest)
-  const admission = await prepareSyncAdmission(f.input, f.plan, { ingressKey: 'explicit-user-retry', rootCauseId: 'explicit-user-retry', retryOf: failed.operation.id, origin: failed.operation.origin, budget: failed.operation.budget, managedRoot: f.managedRoot, previousBaselinePair: failed.operation.previousBaselinePair })
+  const admission = await prepareSyncAdmission(f.input, f.plan, { ingressKey: 'explicit-user-retry', rootCauseId: 'explicit-user-retry', retryOf: failed.operation.id, model: 'gpt-6.1-terra', origin: failed.operation.origin, budget: failed.operation.budget, managedRoot: f.managedRoot, previousBaselinePair: failed.operation.previousBaselinePair })
   assert.equal(admission.retryOf, failed.operation.id)
   const retry = restarted.admitAndEnqueue(admission); f.useOperation(retry)
   const repeated = await runSyncOperation(restarted, retry.id, f.options)
   assert.equal(repeated.operation.phase, 'failed'); assert.equal(repeated.operation.callsUsed, 1); assert.equal(p1Calls, 1)
+  assert.equal(repeated.operation.model, 'gpt-6.1-terra'); assert.equal(f.calls.at(-1)!.model, 'gpt-6.1-terra'); assert.equal(f.calls.at(-1)!.purpose, 'code_generate')
   const generation = f.calls.filter(call => call.purpose === 'code_generate').map(promptInput)
   assert.equal(contentHash(JSON.stringify(generation[0].contracts)), contentHash(JSON.stringify(generation[1].contracts)))
   assert.deepEqual(generation[0].elaboratedSpecs, generation[1].elaboratedSpecs)

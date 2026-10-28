@@ -51,3 +51,5 @@ P2 的 V1 检查报告 `anchor-dead` 或来源格式 `invalid-source` 后，下�
 contractOmissionBound为生成独审、协调器live与持久恢复共用的专用marker/path/existingID/affectedIds判断；旧contract:合法诊断仅可校验后撤销重细化权限，不作为新marker别名或授权。
 
 P4 可在模型响应核 schema、计算 approvedSpecs 后调用可信 beforeFreezeCandidate。程序逐 entry 核 protectedReadPaths、原 files 和实际 allowedScope 的完整原字节/mode/OID/absence 未变，随后在发布组合树 freeze 并执行 V1/V2、实际候选独审；模型 prompt、beforeDigest/beforeMode、inputDigest 和行为分析仍绑定 original composed/readSet。闭包外真实已结算继承进入实际 candidate manifest/完整摘要，不能成为模型写权限；readonly 模型修改继续按原 scope 拒绝。
+
+P2 接收操作固定 model 并传给生成与独立评审，effort 仍为 high；实际模型可用性由原生目录及结构化执行校验，遵循 [[sync-model-selection]]，不再将模型固定为全局 sol。

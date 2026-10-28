@@ -29,3 +29,5 @@ retiredIds可由已接受细化携入生成；已明确退役的验收身份保�
 GenerationInput 必填 mandatoryTests 与 verifications 直接复用 SyncCoordinatorPlan 的可信 tuple/definition 类型；两者纳入同一冻结输入，不另建授权配置。reserved oracle-policy:decision:<stableDecisionId> 复用既有 missing_fact finding 与 needs_input verdict，只传具体政策互斥诊断，不增加写入权或新的审查阶段。
 
 GenerationOptions 可选 beforeFreezeCandidate 为可信程序回调，在生成响应 schema 与 approvedSpecs 核验后、freezeCandidate 前取得派生发布组合输入；protectedReadPaths 携完整读闭包（含不存在路径），不进入模型提示或 inputDigest。回调不授予模型选择发布父树的权限。
+
+GenerationInput.model 是由 operation 固定的模型 ID，effort 保持 high；缺省 sol 与显式选择的持久语义属于 [[sync-model-selection]]。

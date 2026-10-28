@@ -791,12 +791,14 @@ callTimeoutMs 是可选单次模型调用上限，正整数且不超过 budget.t
   spex sync show <operation-id>
   spex sync adopt <operation-id>
   spex sync recover <operation-id>
-  spex sync run <node-id> --retry-of <失败operation-id> --request-id <重试稳定键>
+  spex sync run <node-id> --retry-of <失败operation-id> --request-id <重试稳定键> [--model <可用模型ID>]
 
 无需打开 Dashboard。run 返回持久操作，后端继续细化、实现、独立评审、Docker 验证与实际交付。
 受控保存或 --patch-file 的正文差量不先修改/提交原树 Spec；no-op 不派发。同请求键不能改意图。
 executionAvailability 显示 recovery_required 时，可用 recover 精确恢复已有资源及已开始日志，
 不修改原控制、输入或预算，不派发新 attempt、模型、验证，也不开始新的交付。完成后另选 resume 或显式 retry。
+run/verify 的 --model 固定本操作及全部独审模型，默认 gpt-6.1-sol；显式重试省略时继承原模型。普通重复请求不能换模型取得新预算，同 requestId 改模型拒绝；resume/recover 始终沿原选择。模型仍须通过实际 Native/catalog 校验，不自动 fallback。 操作模型采用 sync component v13 writer 语义；回滚旧二进制须先停 writer/结算资源并恢复升级前一致数据库备份，不能让旧 writer 直接读新 generation。
+
 show/status 的 retryEligibility 给出能否显式重试及具体拒绝原因。--retry-of 为可重试的失败或未交付取消建立
 关联的新操作和新预算，继承原正文保存意图及来源；不能同时 --patch-file。普通重复请求不重置预算，
 同重试请求幂等。输入或配置已变时发起当前输入的新请求；未结算资源、GAP或冲突不能用重试绕过。
