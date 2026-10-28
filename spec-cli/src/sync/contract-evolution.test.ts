@@ -12,6 +12,7 @@ import type { ContractCell, GeneratedElaboration, GeneratedTables } from './elab
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
 import type { AuthorizedContractChange, ElaborationInput, ElaborationRunner } from './elaboration-types.js'
 import type { AcceptanceChangeProposal, CodeBehaviorEvidence, ContractNodeChange } from './writeback-types.js'
+import { adaptElaborationNativeOutput } from '../../test/elaboration-native-output.js'
 
 const fixture = resolve('spec-cli/test/fixtures/spec-sync/export-repo')
 const path = '.spec/export/export-contract/spec.md'
@@ -41,7 +42,8 @@ const build = (text: string, nodeId = 'export-contract', nodePath = path): Gener
 const input = (): ElaborationInput => ({ root: '/frozen', requestKey: 'evolution', intent: { nodeId: 'export-contract', rawSource: parseParts(source)!.rawSource }, targets: [{ nodeId: 'export-contract', path, source, sourceDigest: elaborationDigest(source) }], facts: [{ source: 'decision:EXPORT-POLICY', text: '冻结既有业务政策' }], files: files(), maxRepairs: 0 })
 const runner = (output: GeneratedElaboration, prompts: string[] = []): ElaborationRunner => async request => {
   prompts.push(request.prompt)
-  const value = request.purpose === 'elaboration_generate' ? output : { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+  const generated = request.purpose === 'elaboration_generate' ? output : { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+  const value = adaptElaborationNativeOutput(request, generated)
   return { sessionId: `session-${prompts.length}`, threadId: `thread-${prompts.length}`, turnId: 'turn', output: value, resultDigest: elaborationDigest(JSON.stringify(value)) }
 }
 
@@ -481,7 +483,7 @@ test('真实冻结move允许空tables保留RULE稳定ID并程序迁移authority�
   assert.ok(omitted.contracts[0].items.filter(item => item.kind === 'RULE').every(rule => rule.authority === move.to.nodeId))
   const unauthorized = await elaborate(input(), { runner: runner(output) })
   assert.equal(unauthorized.status, 'exhausted')
-  assert.ok(unauthorized.rounds[0].findings.some(issue => issue.code === 'write_scope'))
+  assert.ok(unauthorized.rounds[0].findings.some(issue => issue.code === 'output_schema' && issue.message.includes('targetIndex')))
 })
 
 
@@ -527,7 +529,8 @@ test('共享REQ自然语言扩大未选操作仍由原P1完整候选独审拒绝
   const result = await elaborate({ ...input(), analysis, authorizedChanges: [authorization], facts: [...input().facts!, ...analysis.analysis.facts], decisionAuthorities: [authority] }, { runner: async request => {
     calls++
     if (request.purpose === 'elaboration_review') { assert.ok(request.prompt.includes('非所有者也可下载、取消、重试')); assert.ok(request.prompt.includes(authority.decision.rule)) }
-    const output = request.purpose === 'elaboration_generate' ? build(candidate) : { verdict: 'repair', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [{ code: 'selected-policy-contradiction', kind: 'repair', message: '共享REQ扩大取消与重试，超出明确仅下载的裁决', affectedIds: ['REQ-EXPORT-01', 'RULE-EXPORT-06'], evidence: 'REQ声明非所有者可重试，而原RULE-EXPORT-06仍要求FAILED且所有者', decision: '只同步下载例外，保取消及重试的原所有权约束' }] }
+    const generated = request.purpose === 'elaboration_generate' ? build(candidate) : { verdict: 'repair', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [{ code: 'selected-policy-contradiction', kind: 'repair', message: '共享REQ扩大取消与重试，超出明确仅下载的裁决', affectedIds: ['REQ-EXPORT-01', 'RULE-EXPORT-06'], evidence: 'REQ声明非所有者可重试，而原RULE-EXPORT-06仍要求FAILED且所有者', decision: '只同步下载例外，保取消及重试的原所有权约束' }] }
+    const output = adaptElaborationNativeOutput(request, generated)
     return { sessionId: `semantic-session-${calls}`, threadId: `semantic-thread-${calls}`, turnId: 'turn', output, resultDigest: elaborationDigest(JSON.stringify(output)) }
   } })
   assert.equal(calls, 2); assert.equal(result.structurePassed, true); assert.equal(result.reviewPassed, false); assert.equal(result.failure?.code, 'repair_budget_exhausted')

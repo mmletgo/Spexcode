@@ -22,6 +22,7 @@ import type { ContractCell, GeneratedTables } from './elaboration-markdown.js'
 import type { VerificationResultBlob } from './operation-types.js'
 import type { SyncSettings } from './settings.js'
 import { sessionIdForCreateKey } from '../sessions.js'
+import { adaptElaborationNativeOutput } from '../../test/elaboration-native-output.js'
 
 async function fixture(t: test.TestContext, mode: 'content' | 'move' | 'retire' = 'content') {
   const moveNode = mode === 'move', retireNode = mode === 'retire'
@@ -138,6 +139,7 @@ code:
       const identity = JSON.parse(request.prompt.split('实际候选身份与 manifest:\n')[1].split('\n实际完整候选')[0]) as { inputId: string; candidate: { digest: string } }
       output = { inputId: identity.inputId, candidateDigest: identity.candidate.digest, verdict: 'accept', checkedIds: frozen.readyIds, findings: [] }
     }
+    output = adaptElaborationNativeOutput(request, output)
     const dispatch = application.store.readAttempt(operation.currentAttemptId!).dispatchPlans.find(dispatch => dispatch.key === request.requestKey)!
     return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `history-${request.requestKey}`, turnId: 'turn-1', output, resultDigest: contentHash(JSON.stringify(output)) }
   } })
