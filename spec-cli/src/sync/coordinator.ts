@@ -482,6 +482,8 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       const behaviorOrigin = baselineCodeChanged || authoredContractChanged || ['code', 'combined', 'reconcile'].includes(operation.origin) || Boolean(view.composed.compositionEvidenceBlob) || Boolean(decision)
       if (behaviorOrigin) {
         let previousDecisionAnalysis: CodeBehaviorEvidence | undefined
+        let previousDecisionComposed: ComposedInputRef | undefined
+        let previousDecisionReadPaths: readonly string[] | undefined
         let approved = stage<CodeBehaviorAnalysis>(store, operation, attempt, 'analysis')
         if (!approved) for (const prior of store.listAttempts(operation.id).filter(item => item.number < attempt!.number).reverse()) {
           const previous = stage<CodeBehaviorAnalysis>(store, operation, prior, 'analysis')
@@ -493,9 +495,16 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
             const oldOperation = store.readOperation(decision.operationId)
             const bytes = readEvidence(operation.input.source.commonDir, decision.analysisRef)
             const previous = JSON.parse(bytes.toString('utf8')) as CodeBehaviorAnalysis
-            const belongs = store.listAttempts(oldOperation.id).some(old => old.checkpointRefs.some(ref => { const item = JSON.parse(readEvidence(operation.input.source.commonDir, ref).toString('utf8')) as Partial<Stage>; return item.version === 'sync-stage-v1' && item.operationId === oldOperation.id && item.attemptId === old.id && item.stage === 'analysis' && item.inputId === oldOperation.input.id && item.policyDigest === oldOperation.policyDigest && item.resultRef?.sha256 === decision!.analysisRef.sha256 }))
-            if (!belongs || !analysisStageBinding(store, oldOperation, previous) || previous.policyDigest !== oldOperation.policyDigest || decision.inputId !== operation.input.id || oldOperation.input.id !== operation.input.id || !previous.reviewPassed || decision.findingIds.some(id => !previous.findings.some(finding => finding.id === id))) fail('decision_binding', '业务裁决未绑定真实已审分析及原输入')
+            const binding = analysisStageBinding(store, oldOperation, previous)
+            const originalComposed = binding ? store.readAttempt(binding.attemptId).composedInput : null
+            if (!binding || binding.resultRef.sha256 !== decision.analysisRef.sha256 || previous.policyDigest !== oldOperation.policyDigest || decision.inputId !== operation.input.id || oldOperation.input.id !== operation.input.id || previous.inputId !== operation.input.id || !previous.reviewPassed || decision.findingIds.some(id => !previous.findings.some(finding => finding.id === id)) || !originalComposed || originalComposed.sourceInputId !== previous.inputId || originalComposed.contentDigest !== previous.composedDigest) fail('decision_binding', '业务裁决未绑定真实已审分析、原输入及原组合契约图')
             previousDecisionAnalysis = { ref: decision.analysisRef, analysis: previous }
+            previousDecisionComposed = originalComposed
+            if (!oldOperation.planBlob) fail('decision_binding', '原已审分析缺少冻结计划')
+            const originalPlan = JSON.parse(readEvidence(operation.input.source.commonDir, oldOperation.planBlob).toString('utf8')) as SyncCoordinatorPlan
+            if (syncPlanDigest(originalPlan) !== previous.policyDigest) fail('decision_binding', '原已审分析与冻结计划政策不一致')
+            const originalSelection = binding.baselineSelectionRef ? JSON.parse(readEvidence(operation.input.source.commonDir, binding.baselineSelectionRef).toString('utf8')) as FrozenBaselineSelection : undefined
+            previousDecisionReadPaths = unique([...originalPlan.readPaths, ...originalSelection?.bindings.flatMap(binding => binding.resource.kind === 'path' ? [binding.resource.path] : []) ?? []])
           }
           const diagnosticLineage: SyncOperation[] = []
           let diagnosticOwner: SyncOperation | null = operation
@@ -506,7 +515,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
             diagnosticOwner = diagnosticOwner.retryOf ? store.readOperation(diagnosticOwner.retryOf) : null
           }
           const repairDiagnostics = diagnosticLineage.flatMap(owner => store.listAttempts(owner.id).filter(prior => prior.failure && ['behavior_analysis_invalid', 'behavior_review_failed'].includes(prior.failure.code)).map(prior => ({ code: prior.failure!.code, message: prior.failure!.message })))
-          try { approved = await analyzeCodeBehavior({ model, snapshot: operation.input, baseline: operation.previousBaselinePair, ...(operation.baselineSelection ? { baselineSelection: operation.baselineSelection } : {}), composed: view.composed, readSetDigest: operation.readSetDigest, policyDigest: operation.policyDigest, plan: operation.baselineSelection ? { ...options.plan, readPaths: view.readPaths } : options.plan, requestKey: `sync:${attempt.id}:analysis`, timeoutMs: callTimeoutMs, signal, origin: operation.origin, ...(decision && previousDecisionAnalysis ? { decision: { request: decision, previous: previousDecisionAnalysis } } : {}), repairDiagnostics }, runner) }
+          try { approved = await analyzeCodeBehavior({ model, snapshot: operation.input, baseline: operation.previousBaselinePair, ...(operation.baselineSelection ? { baselineSelection: operation.baselineSelection } : {}), composed: view.composed, readSetDigest: operation.readSetDigest, policyDigest: operation.policyDigest, plan: operation.baselineSelection ? { ...options.plan, readPaths: view.readPaths } : options.plan, requestKey: `sync:${attempt.id}:analysis`, timeoutMs: callTimeoutMs, signal, origin: operation.origin, ...(decision && previousDecisionAnalysis ? { decision: { request: decision, previous: previousDecisionAnalysis, previousComposed: previousDecisionComposed, previousReadPaths: previousDecisionReadPaths } } : {}), repairDiagnostics }, runner) }
           catch (error) {
             const issue = error as { code?: string; message?: string }
             if (!['behavior_analysis_invalid', 'behavior_review_failed'].includes(issue.code ?? '') || signal.aborted) throw error

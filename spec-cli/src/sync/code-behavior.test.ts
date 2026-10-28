@@ -250,6 +250,51 @@ test('真实paired空base仍删除HEAD差量基准，已commit新增测试不能
   assert.equal(analysis.reviewPassed, true)
 })
 
+test('all-null裁决只从原完整独审composed图恢复所选AC范围，当前新连边与历史authority不扩权', async t => {
+  const path = '.spec/export/export-contract/spec.md'
+  const f = await fixture(t, source => source.replace('| AC-EXPORT-02 | RULE-EXPORT-01,RULE-EXPORT-02,RULE-EXPORT-05 |', '| AC-EXPORT-02 | RULE-EXPORT-01,RULE-EXPORT-05 |').replace('| AC-EXPORT-03 | RULE-EXPORT-01 |', '| AC-EXPORT-03 | RULE-EXPORT-01,RULE-EXPORT-02 |'))
+  writeFileSync(join(f.root, 'src/export.js'), `${f.source}\n// external filter boundary difference\n`)
+  const prepared = await f.input(), snapshot = prepared.snapshot, commonDir = snapshot.source.commonDir
+  const baselineSelection = freezeSelection(snapshot, readTree(commonDir, snapshot.immutableTree).map(entry => ({ resource: { kind: 'path', path: entry.path }, bytePair: null })))
+  const baseComposed = composeInputSnapshots(snapshot, baselineSelection).composed!
+  const reviewedSpec = f.raw.replace('| AC-EXPORT-02 | RULE-EXPORT-01,RULE-EXPORT-05 |', '| AC-EXPORT-02 | RULE-EXPORT-01,RULE-EXPORT-02,RULE-EXPORT-05 |').replace('| AC-EXPORT-03 | RULE-EXPORT-01,RULE-EXPORT-02 |', '| AC-EXPORT-03 | RULE-EXPORT-01 |')
+  const edit = prepareControlledRequest(snapshot, { path, source: f.raw, next: reviewedSpec, changed: true, startLine: 1, endLine: 1 }, { kind: 'user_edit', requestId: 'original-reviewed-contract', nodeId: 'export-contract', intent: '原独审读取该完整受控契约' })
+  assert.ok(edit.changed)
+  const previousComposed = composeControlledRequest(snapshot, baseComposed, edit.requestBlob).composed!
+  assert.notEqual(previousComposed.tree, snapshot.immutableTree)
+  const selected = (proposal: Record<string, unknown>): void => { proposal.changes = (proposal.changes as object[]).map(change => ({ ...change, affectedIds: ['RULE-EXPORT-02', 'AC-EXPORT-02'], ruleIds: ['RULE-EXPORT-02'] })) }
+  const input: CodeBehaviorInput = { ...prepared, baseline: null, baselineSelection, composed: previousComposed }
+  const previous = await analyzeCodeBehavior(input, runner('conflict', selected)), ref = writeEvidence(commonDir, previous)
+  const request = { requestId: 'current-null-baseline-decision', operationId: 'original-reviewed-operation', inputId: snapshot.id, analysisRef: ref, findingIds: [previous.findings.find(finding => finding.paths.includes('src/export.js'))!.id], decision: { choice: 'new_rule' as const, rule: 'filter最多128字符，其余政策保持。' } }
+  const requestBlob = prepareControlledDecision(snapshot, request), source = `decision:${controlledDecisionIdentity(request)}`, fact = { source, text: request.decision.rule }
+  const current: CodeBehaviorInput = { ...input, composed: { ...baseComposed, requestBlob }, origin: 'decision', decision: { request, previous: { ref, analysis: previous }, previousComposed, previousReadPaths: input.plan.readPaths }, plan: { ...input.plan, facts: [...input.plan.facts, fact] } }
+  const proposalFor = (id: string, proposalSource = source): ElaborationRunner => runner('allowed_change', proposal => {
+    selected(proposal); proposal.changes = (proposal.changes as object[]).map(change => ({ ...change, affectedIds: ['RULE-EXPORT-02', id] }))
+    proposal.facts = [{ source: proposalSource, text: request.decision.rule }]
+    proposal.acceptanceChanges = [{ id, ruleIds: ['RULE-EXPORT-02'], source: proposalSource, reason: '仅按精确所选filter政策更新验收' }]
+  })
+  const analysis = await analyzeCodeBehavior(current, async dispatch => {
+    const frozen = readFrozenBehaviorContext<{ verifiedDelivery: unknown[]; contractItems: { previous: unknown[]; current: { id: string; covers?: string[] }[] } }>(dispatch.prompt)
+    assert.deepEqual(frozen.verifiedDelivery, []); assert.deepEqual(frozen.contractItems.previous, [])
+    assert.ok(frozen.contractItems.current.find(item => item.id === 'AC-EXPORT-03')!.covers!.includes('RULE-EXPORT-02'))
+    return proposalFor('AC-EXPORT-02')(dispatch)
+  })
+  assert.equal(analysis.reviewPassed, true); assert.deepEqual(analysis.authorizedChanges.map(change => change.id), ['AC-EXPORT-02'])
+  const expandedSelection = freezeSelection(snapshot, [...baselineSelection.bindings, { resource: { kind: 'path', path: 'tests/future.test.mjs' }, bytePair: null }])
+  const expandedComposed = composeControlledRequest(snapshot, composeInputSnapshots(snapshot, expandedSelection).composed!, edit.requestBlob).composed!
+  assert.equal(expandedComposed.contentDigest, previousComposed.contentDigest); assert.notEqual(expandedComposed.baselineSelectionDigest, previousComposed.baselineSelectionDigest)
+  assert.equal((await analyzeCodeBehavior({ ...current, decision: { ...current.decision!, previousComposed: expandedComposed } }, proposalFor('AC-EXPORT-02'))).reviewPassed, true)
+  await assert.rejects(analyzeCodeBehavior(current, proposalFor('AC-EXPORT-03')), /所选裁决范围/)
+  await assert.rejects(analyzeCodeBehavior({ ...current, decision: { ...current.decision!, previousComposed: undefined } }, proposalFor('AC-EXPORT-02')), /所选裁决范围/)
+  await assert.rejects(analyzeCodeBehavior({ ...current, decision: { ...current.decision!, previousReadPaths: undefined } }, proposalFor('AC-EXPORT-02')), /所选裁决范围/)
+  await assert.rejects(analyzeCodeBehavior({ ...current, decision: { ...current.decision!, previousReadPaths: ['src', 'tests'] } }, proposalFor('AC-EXPORT-02')), /所选裁决范围/)
+  for (const previousComposed of [{ ...current.decision!.previousComposed!, sourceInputId: 'foreign-input' }, { ...current.decision!.previousComposed!, contentDigest: contentHash('foreign-analysis') }]) {
+    await assert.rejects(analyzeCodeBehavior({ ...current, decision: { ...current.decision!, previousComposed } }, proposalFor('AC-EXPORT-02')), /原契约图未绑定/)
+  }
+  await assert.rejects(analyzeCodeBehavior({ ...current, decision: undefined, plan: { ...current.plan, decisionAuthorities: analysis.decisionAuthorities } }, proposalFor('AC-EXPORT-02')), /所选裁决范围/)
+  await assert.rejects(analyzeCodeBehavior({ ...current, baseline: prepared.baseline, baselineSelection: undefined, composed: { ...prepared.composed, requestBlob } }, proposalFor('AC-EXPORT-02')), /所选裁决范围/)
+})
+
 test('精确all-null冷启动的binary和symlink具有完整可读字节，不能仅靠元数据通过独审', async t => {
   const f = await fixture(t, source => source.split('## expanded spec')[0]), bytes = Buffer.from([137, 80, 78, 71, 0, 255]), target = '../../host-secret.txt'
   mkdirSync(join(f.root, 'assets')); writeFileSync(join(f.root, 'assets/image.png'), bytes); writeFileSync(join(f.root, 'assets/vendor.whl'), bytes)

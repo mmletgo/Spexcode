@@ -20,7 +20,7 @@ const object = (properties: Record<string, unknown>): Record<string, unknown> =>
 const change = object({ kind: { type: 'string', enum: ['refactor', 'allowed_change', 'coverage_gap', 'conflict'] }, paths: { ...strings, minItems: 1 }, affectedIds: strings, ruleIds: strings, originalIntent: string, previousBehavior: string, sourceBehavior: string, deliveryBehavior: string, evidence: string, counterexample: string })
 export const CODE_BEHAVIOR_SCHEMA = object({ changes: { type: 'array', items: change }, facts: { type: 'array', items: object({ source: string, text: string }) }, acceptanceChanges: { type: 'array', items: object({ id: string, ruleIds: { ...strings, minItems: 1 }, source: string, reason: string }) }, newNodes: { type: 'array', items: object({ codePath: string, parentNodeId: string, basis: string }) }, resolutions: { type: 'array', items: object({ path: string, content: { type: ['string', 'null'] }, mode: { type: ['string', 'null'], enum: ['100644', '100755', '120000', null] } }) } })
 export const CODE_BEHAVIOR_REVIEW_SCHEMA = object({ inputDigest: string, analysisDigest: string, verdict: { type: 'string', enum: ['accept', 'repair'] }, checkedPaths: strings, checkedChangeIds: strings, findings: { type: 'array', items: object({ message: string, evidence: string, counterexample: string }) } })
-export type CodeBehaviorInput = { model?: string; snapshot: InputSnapshot; baseline: BaselinePair | null; baselineSelection?: FrozenBaselineSelection; composed: ComposedInputRef; readSetDigest: string; policyDigest: string; plan: SyncCoordinatorPlan; requestKey: string; timeoutMs: number; signal?: AbortSignal; origin?: 'initial' | 'spec' | 'code' | 'combined' | 'reconcile' | 'decision'; decision?: { request: SyncDecisionInput; previous: CodeBehaviorEvidence }; repairDiagnostics?: readonly { code: string; message: string }[] }
+export type CodeBehaviorInput = { model?: string; snapshot: InputSnapshot; baseline: BaselinePair | null; baselineSelection?: FrozenBaselineSelection; composed: ComposedInputRef; readSetDigest: string; policyDigest: string; plan: SyncCoordinatorPlan; requestKey: string; timeoutMs: number; signal?: AbortSignal; origin?: 'initial' | 'spec' | 'code' | 'combined' | 'reconcile' | 'decision'; decision?: { request: SyncDecisionInput; previous: CodeBehaviorEvidence; previousComposed?: ComposedInputRef; previousReadPaths?: readonly string[] }; repairDiagnostics?: readonly { code: string; message: string }[] }
 type Proposal = { changes: Omit<CodeBehaviorChange, 'id'>[]; facts: CodeBehaviorAnalysis['facts']; acceptanceChanges: Omit<AcceptanceChangeProposal, 'action'>[]; newNodes: { codePath: string; parentNodeId: string; basis: string }[]; resolutions: CodeBehaviorAnalysis['resolutions'] }
 const within = (path: string, paths: readonly string[]): boolean => paths.some(parent => path === parent || path.startsWith(`${parent}/`))
 const sorted = (ids: readonly string[]): string[] => [...new Set(ids)].sort()
@@ -204,6 +204,11 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
     if (trusted && Object.keys(authority).some(key => JSON.stringify(trusted[key as keyof SyncDecisionAuthority]) !== JSON.stringify(authority[key as keyof SyncDecisionAuthority]))) reject('冻结裁决范围与真实所选finding不同')
     if (!trusted) decisionAuthorities.push(authority)
   }
+  const previousComposed = input.decision?.previousComposed
+  if (previousComposed && (previousComposed.sourceInputId !== input.snapshot.id || input.decision!.previous.analysis.inputId !== input.snapshot.id || previousComposed.contentDigest !== input.decision!.previous.analysis.composedDigest)) reject('裁决原契约图未绑定原输入及完整独审组合摘要')
+  const previousReadPaths = input.decision?.previousReadPaths
+  const decisionFrozen = previousComposed && previousReadPaths && input.baseline === null && input.baselineSelection && input.baselineSelection.bindings.every(binding => ('bytePair' in binding ? binding.bytePair : binding.intentPair) === null)
+    ? await readFrozenContracts(input.snapshot.source.canonicalRoot, new Map(textFiles(fileTree(input, previousComposed.tree)).filter(([path]) => within(path, previousReadPaths)))) : null
   const inputDigest = contentHash(context), traces: ElaborationTrace[] = []
   const dispatch = async (purpose: string, prompt: string, schema: Record<string, unknown>): Promise<unknown> => {
     if (signal?.aborted) throw Object.assign(new Error('行为分析已停止'), { code: 'cancelled' })
@@ -246,7 +251,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
     return { ...item, source: item.source as AcceptanceChangeProposal['source'], action: 'update_acceptance' }
   })
   const currentAuthority = input.decision && decisionAuthorities.find(authority => authority.requestRef.sha256 === input.composed.requestBlob?.sha256)
-  const authorityIds = (authority: SyncDecisionAuthority): Set<string> => decisionScopeIds(oldFrozen, authority, input.decision && { requestRef: input.composed.requestBlob!, analysisRef: input.decision.request.analysisRef, findingIds: input.decision.request.findingIds }, current)
+  const authorityIds = (authority: SyncDecisionAuthority): Set<string> => decisionScopeIds(authority === currentAuthority && decisionFrozen ? decisionFrozen : oldFrozen, authority, input.decision && { requestRef: input.composed.requestBlob!, analysisRef: input.decision.request.analysisRef, findingIds: input.decision.request.findingIds }, current)
   for (const authorization of authorizedChanges) {
     const authority = authorization.source.startsWith('decision:') ? decisionAuthorities.find(item => `decision:${item.stableDecisionId}` === authorization.source) : currentAuthority
     if (authorization.source.startsWith('decision:') && !authority) reject(`验收裁决来源没有结构化可信范围: ${authorization.id}`)

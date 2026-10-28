@@ -16,6 +16,8 @@ related:
 
 真实 Git 回归核对分析与独审均收到冻结契约图的 previous/current 完整项；raw-only 初始化的空图被明确标识，空关联仍须完整分析与独审，不把未通过 P1 结构检查或独审的候选资源名当作既有义务。此接缝只证明上下文与门禁，模型实际展开仍由真实 Dashboard 验收。
 
+all-null裁决回归用真实受控正文令原独审composed图不同于source：仅原图的AC02关联所选RULE02时允许精确提案，当前AC03新增covers RULE02仍拒。追加缺席null资源后同完整树/摘要的新selection指针仍可读取该原图，不混用旧selection与新composition证据。缺原图/原读取范围、错input或摘要、历史authority及已有pair均不能借此扩大范围；旧契约和verifiedDelivery视图保持空，不将原独审图冒作交付基线。
+
 真实 raw-only bootstrap 的 conflict 与 coverage_gap 先复现空 affectedIds 被不可能满足的既有 ID 校验拒绝，再确认原分类、路径、证据、反例及空关联完整进入新独审，不产生任何业务变更授权。有成对基线、精确选择中存在真实 pair、任一冻结图有稳定 ID 时空关联仍拒绝；初始化也不豁免越界/未授权路径和虚构未来 ID。
 
 角色回归以真实已提交 Python 测试及 support helper 证明：新冻结 sourcePaths 只发现业务根中的未治理文件，命名为 test_business.py 的业务文件仍被发现，既有 JS 测试过滤保持；纯测试全文可读却不制造业务 changedPaths/newNodes，模型主动为纯测试建业务叶也拒绝。真实测试修改仍进入分析/独审且不要求业务治理叶；旧持久 JSON 缺字段时仍使用原 writePaths 发现和归属语义。
