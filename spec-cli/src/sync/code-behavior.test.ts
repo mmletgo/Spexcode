@@ -59,13 +59,49 @@ function freezeSelection(snapshot: CodeBehaviorInput['snapshot'], bindings: Froz
 }
 type NonTextContext = { changedPaths: string[]; oldSource: [string, string][]; verifiedDelivery: [string, string][]; newSource: [string, string][]; readablePaths: { path: string; snapshots: string[] }[]; nonTextFiles: { path: string; mode: string; oid: string; digest: string; kind: string; encoding: string; content: string; snapshots: string[] }[] }
 
+test('精确all-null选择保留HEAD差量基准，只读上下文不造新增且真实增删改与未治理源码仍完整受审', async t => {
+  const f = await fixture(t), unowned = 'src/view.js', unchanged = ['docs/history/accepted.md', 'package-lock.json']
+  mkdirSync(join(f.root, 'docs/history'), { recursive: true })
+  for (const path of [...unchanged, 'docs/changed.md', 'docs/deleted.md']) writeFileSync(join(f.root, path), `committed ${path}\n`)
+  writeFileSync(join(f.root, unowned), 'export const view = job => ({ id: job.id });\n')
+  git(f.root, 'add', '.'); git(f.root, 'commit', '-m', 'existing readonly context and unowned source')
+  writeFileSync(join(f.root, 'docs/changed.md'), 'real author modification\n'); writeFileSync(join(f.root, 'docs/added.md'), 'real author addition\n'); rmSync(join(f.root, 'docs/deleted.md'))
+  const prepared = await f.input(), commonDir = prepared.snapshot.source.commonDir
+  const paths = [...new Set([...readTree(commonDir, git(f.root, 'rev-parse', 'HEAD^{tree}')), ...readTree(commonDir, prepared.snapshot.immutableTree)].map(entry => entry.path))].sort()
+  const baselineSelection = freezeSelection(prepared.snapshot, paths.map(path => ({ resource: { kind: 'path', path }, bytePair: null })))
+  const input: CodeBehaviorInput = { ...prepared, baseline: null, baselineSelection, composed: composeInputSnapshots(prepared.snapshot, baselineSelection, { executionPaths: paths.filter(path => !path.startsWith('docs/') && path !== 'package-lock.json'), contextPaths: ['docs', 'package-lock.json'] }).composed!, plan: { ...prepared.plan, readPaths: [...prepared.plan.readPaths, 'docs', 'package-lock.json'], sourcePaths: ['src'] } }
+  const changed = ['docs/added.md', 'docs/changed.md', 'docs/deleted.md', unowned], native = runner('allowed_change', proposal => { proposal.newNodes = [{ codePath: unowned, parentNodeId: 'export-contract', basis: '导出任务的可见反馈模块' }] })
+  const analysis = await analyzeCodeBehavior(input, async request => {
+    const context = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as NonTextContext & { requiredChangedPaths: string[]; unownedSourcePaths: string[] }
+    assert.deepEqual(context.changedPaths, changed); assert.deepEqual(context.requiredChangedPaths, changed); assert.deepEqual(context.unownedSourcePaths, [unowned])
+    assert.ok(unchanged.every(path => context.newSource.some(([candidate]) => candidate === path) && !context.changedPaths.includes(path)))
+    assert.equal(new Map(context.oldSource).get('docs/deleted.md'), 'committed docs/deleted.md\n')
+    assert.ok(context.readablePaths.some(item => item.path === 'docs/deleted.md' && item.snapshots.includes('oldSource')))
+    assert.deepEqual(context.verifiedDelivery, [])
+    return native(request)
+  })
+  assert.equal(analysis.reviewPassed, true); assert.deepEqual(analysis.newNodes.map(node => node.codePath), [unowned])
+  await assert.rejects(analyzeCodeBehavior(input, runner('allowed_change')), /无治理代码未创建真实归属或具体GAP: src\/view.js/)
+  const gap = await analyzeCodeBehavior(input, runner('coverage_gap'))
+  assert.equal(gap.reviewPassed, true); assert.deepEqual(gap.newNodes, []); assert.ok(gap.findings.some(finding => finding.paths.includes(unowned)))
+})
+
+test('真实paired空base仍删除HEAD差量基准，已commit新增测试不能被当作无pair跳过', async t => {
+  const f = await fixture(t), path = 'tests/paired-addition.test.js'
+  writeFileSync(join(f.root, path), 'export const pairedAddition = true;\n'); git(f.root, 'add', path); git(f.root, 'commit', '-m', 'new test after verified pair')
+  const prepared = await f.input(), baselineSelection = freezeSelection(prepared.snapshot, [{ resource: { kind: 'path', path }, bytePair: prepared.baseline }])
+  const input: CodeBehaviorInput = { ...prepared, baseline: null, baselineSelection, composed: composeInputSnapshots(prepared.snapshot, baselineSelection).composed! }
+  const analysis = await analyzeCodeBehavior(input, runner('refactor', (_proposal, frozen) => { assert.deepEqual(frozen.changedPaths, [path]) }))
+  assert.equal(analysis.reviewPassed, true)
+})
+
 test('精确all-null冷启动的binary和symlink具有完整可读字节，不能仅靠元数据通过独审', async t => {
   const f = await fixture(t, source => source.split('## expanded spec')[0]), bytes = Buffer.from([137, 80, 78, 71, 0, 255]), target = '../../host-secret.txt'
   mkdirSync(join(f.root, 'assets')); writeFileSync(join(f.root, 'assets/image.png'), bytes); writeFileSync(join(f.root, 'assets/vendor.whl'), bytes)
   chmodSync(join(f.root, 'assets/vendor.whl'), 0o755); writeFileSync(join(f.root, 'assets/.env'), 'DO_NOT_EXPOSE_PRIVATE_BYTES')
   writeFileSync(join(f.root, '../host-secret.txt'), 'DO_NOT_FOLLOW_LINK_TARGET'); symlinkSync(target, join(f.root, 'assets/CLAUDE.md'))
   assert.equal(readFileSync(join(f.root, 'assets', target), 'utf8'), 'DO_NOT_FOLLOW_LINK_TARGET')
-  git(f.root, 'add', '.'); git(f.root, 'commit', '-m', 'seed nontext bootstrap')
+  git(f.root, 'add', 'assets/.env'); git(f.root, 'commit', '-m', 'seed private context only')
   const prepared = await f.input(), entries = readTree(prepared.snapshot.source.commonDir, prepared.snapshot.immutableTree)
   const baselineSelection = freezeSelection(prepared.snapshot, entries.filter(entry => !isHostPrivatePath(entry.path)).map(entry => ({ resource: { kind: 'path', path: entry.path }, bytePair: null })))
   const input: CodeBehaviorInput = { ...prepared, baseline: null, baselineSelection, composed: composeInputSnapshots(prepared.snapshot, baselineSelection).composed!, plan: { ...prepared.plan, readPaths: [...prepared.plan.readPaths, 'assets'], sourcePaths: ['src'], facts: [] } }
@@ -78,7 +114,7 @@ test('精确all-null冷启动的binary和symlink具有完整可读字节，不�
   })
   assert.equal(analysis.reviewPassed, true); assert.equal(contexts.length, 2)
   for (const context of contexts) {
-    assert.deepEqual(context.oldSource, []); assert.deepEqual(context.verifiedDelivery, [])
+    assert.ok(!context.oldSource.some(([path]) => path.startsWith('assets/'))); assert.deepEqual(context.verifiedDelivery, [])
     for (const path of ['assets/image.png', 'assets/vendor.whl', 'assets/CLAUDE.md']) {
       assert.ok(context.changedPaths.includes(path) && context.readablePaths.some(item => item.path === path && item.snapshots.includes('nonTextFiles.newSource')))
       const file = context.nonTextFiles.find(item => item.path === path)!, entry = entries.find(item => item.path === path)!

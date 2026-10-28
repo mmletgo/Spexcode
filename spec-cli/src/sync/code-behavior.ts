@@ -102,7 +102,8 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
     else files.delete(path)
   }
   if (selectedEvidence) for (const entry of selectedEvidence.paths) {
-    replaceFile(fileViews.oldSource, entry.path, entry.base); replaceFile(fileViews.verifiedDelivery, entry.path, entry.delivery)
+    if (entry.pairId !== null) replaceFile(fileViews.oldSource, entry.path, entry.base)
+    replaceFile(fileViews.verifiedDelivery, entry.path, entry.delivery)
   }
   const source = textFiles(fileViews.newSource), oldSource = textFiles(fileViews.oldSource), delivery = textFiles(fileViews.verifiedDelivery), composed = textFiles(fileViews.composedFiles)
   fileViews.authorBaseline = new Map(fileViews.oldSource)
@@ -148,7 +149,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   const deliveryEntries = new Map(readTree(commonDir, input.baseline?.verifiedDelivery.immutableTree ?? oldTree).map(entry => [entry.path, entry]))
   for (const path of adopted) { const entry = deliveryEntries.get(path); if (entry) authorEntries.set(path, entry); else authorEntries.delete(path) }
   if (selectedEvidence) {
-    for (const entry of selectedEvidence.paths) { if (entry.base) authorEntries.set(entry.path, entry.base); else authorEntries.delete(entry.path); if (entry.delivery) deliveryEntries.set(entry.path, entry.delivery); else deliveryEntries.delete(entry.path) }
+    for (const entry of selectedEvidence.paths) if (entry.pairId !== null) { if (entry.base) authorEntries.set(entry.path, entry.base); else authorEntries.delete(entry.path); if (entry.delivery) deliveryEntries.set(entry.path, entry.delivery); else deliveryEntries.delete(entry.path) }
   }
   const changedPaths = sorted([...(selectedEvidence?.residualPaths ?? []), ...ungoverned, ...actualTreeDiff([...authorEntries.values()], verifySnapshot(input.snapshot)).map(file => file.path), ...actualTreeDiff([...deliveryEntries.values()], readTree(commonDir, input.composed.tree)).map(file => file.path)].filter(path => within(path, input.plan.readPaths)))
   const artifactEntries = new Map((selectedEvidence?.artifacts ?? []).flatMap(item => [item.before, item.delivery, item.source, item.authorBase].filter((entry): entry is NonNullable<typeof entry> => !!entry)).map(entry => [`${entry.path}:${entry.mode}:${entry.oid}`, entry]))
