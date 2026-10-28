@@ -270,7 +270,7 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
     const { runStructuredSession } = await import('../session-structured.js')
     return runStructuredSession(request)
   })
-  const snapshot = JSON.stringify(frozen)
+  const snapshot = JSON.stringify({ ...frozen, targets: frozen.targets.map((target, targetIndex) => ({ targetIndex, ...target })) })
   const generationSchema = elaborationSchema(input)
   let repairContext = seed ? `已结算的拒绝候选，仅供重新诊断，绝非用户原意或权威事实。先对照raw/facts/代码来源核实旧发现；错误评审不得照单全收或制造GAP。${['elaboration-rows-v1', 'elaboration-rows-v2'].includes(String((seed.output as { version?: unknown }).version)) ? '旧v1/v2路径回显协议不可用当前目标绑定渲染器重放；保留原摘要绑定的拒绝候选只作诊断' : '当前程序重新渲染的候选'}:\n${JSON.stringify(seedCandidate)}\n原具体失败:\n${JSON.stringify(repairDiagnostics(seed.findings, seedChecked!.coverage))}\n当前程序结构诊断（不改写原证据）:\n${JSON.stringify(repairDiagnostics(seedChecked!.findings, seedChecked!.coverage))}\n原独立评审（可能误读，不能复用其结论）:\n${JSON.stringify(seed.review)}` : ''
   for (let index = 0; index <= (input.maxRepairs ?? 2); index++) {
