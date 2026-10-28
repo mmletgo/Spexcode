@@ -99,6 +99,38 @@ test('raw-only旧节点用同一协议首次建立契约，保留原raw及既有
   assert.ok(rendered.includes('原有不适用依据与业务输入域。'))
 })
 
+test('rawless旧正文完整保留为expanded，非null prose与VERIFY不注入primary raw', () => {
+  const legacyBody = '# 全树验证\n\n旧业务说明完整保留。\n\n## 执行约束\n\n~~~sh\nprintf "保留正文与围栏"\n~~~\n\n后置说明。\n'
+  const legacy = `---\ntitle: 全树验证\n---\n${legacyBody}`
+  const childPath = '.spec/export/full-tree-verification/spec.md'
+  for (const prose of [null, '本次新增的技术验证说明。']) {
+    const output = patch(), child = output.changes[0]
+    child.nodeId = 'full-tree-verification'; child.path = childPath; child.title = '全树验证'; child.prose = prose
+    child.code = []; child.related = []
+    child.tables.VERIFY = [{ id: 'VERIFY-EXPORT-TREE', command: ['node', '--version'], cwd: '.', 'timeout-ms': 1000 }]
+    const rendered = renderElaboration({ ...input, targets: [...input.targets, { nodeId: child.nodeId, path: childPath, source: legacy, sourceDigest: elaborationDigest(legacy) }] }, output, 'input').changes.find(change => change.path === childPath)!.source
+    const parsed = parseContract({ nodeId: child.nodeId, path: childPath, source: rendered })
+    assert.deepEqual(parsed.findings, [])
+    assert.equal(parseParts(rendered)!.rawSource, '')
+    assert.ok(!rendered.includes('## raw source'))
+    assert.ok(!rendered.includes(input.intent.rawSource))
+    assert.ok(rendered.includes(legacyBody))
+    if (prose !== null) assert.ok(rendered.includes(prose))
+    assert.equal(parsed.contract!.items.filter(item => item.kind === 'VERIFY').length, 1)
+  }
+})
+
+test('已启用rawless节点的空差量保留原字节，不把整body提升为raw', () => {
+  const childPath = '.spec/export/full-tree-verification/spec.md'
+  for (const body of ['# 旧正文\n完整保留。\n', '## expanded spec\n完整保留。\n']) {
+    const frozen = `---\ntitle: 全树验证\ncontract-schema: sync-v1\n---\n${body}`.replace(/\n/g, '\r\n')
+    const output = patch(), child = output.changes[0]
+    child.nodeId = 'full-tree-verification'; child.path = childPath; child.title = '全树验证'; child.description = ''; child.code = []; child.related = []
+    const rendered = renderElaboration({ ...input, targets: [...input.targets, { nodeId: child.nodeId, path: childPath, source: frozen, sourceDigest: elaborationDigest(frozen) }] }, output, 'input').changes.find(change => change.path === childPath)!.source
+    assert.equal(rendered, frozen)
+  }
+})
+
 test('无状态N/A正文与普通STATE/EVENT/TR显式转换，不混留旧表或丢不适用依据', () => {
   const output = patch(), node = output.changes[0]
   node.prose = 'N/A：此能力无状态；输入域是记录数组，计数不变量为数组长度，可观察结束为返回计数。'

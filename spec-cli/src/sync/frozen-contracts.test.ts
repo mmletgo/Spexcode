@@ -35,6 +35,17 @@ test('实例插件契约不进入业务图，plugin-system产品规格及普通�
   assert.ok(frozen.graph.items.has('REQ-EXPORT-01'))
 })
 
+test('缺席和空raw统一冻结为null，既有rawless节点不误报生成意图变化', async () => {
+  const childPath = '.spec/export/full-tree-verification/spec.md'
+  for (const body of ['# 旧正文\n完整保留。\n', '## expanded spec\n完整保留。\n', '## raw source\n\n## expanded spec\n完整保留。\n']) {
+    const files = inputs()
+    files.set(childPath, `---\ntitle: 全树验证\n---\n${body}`)
+    const state = await readFrozenContracts('/frozen', files)
+    assert.equal(state.nodes.find(node => node.path === childPath)!.rawSource, null)
+    assert.deepEqual(checkGenerationContractIntent(state, state, policy(state)), [])
+  }
+})
+
 test('删除schema/AC、弱化断言、改raw/命令不能让生成候选免检', async () => {
   const before = await readFrozenContracts('/frozen', inputs())
   const ac = before.contracts[0].items.find(item => item.kind === 'AC')!

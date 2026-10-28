@@ -45,6 +45,20 @@ const runner = (output: GeneratedElaboration, prompts: string[] = []): Elaborati
   return { sessionId: `session-${prompts.length}`, threadId: `thread-${prompts.length}`, turnId: 'turn', output: value, resultDigest: elaborationDigest(JSON.stringify(value)) }
 }
 
+test('rawless旧正文和显式空raw是同一缺席语义，真实非空raw变化仍拒绝', async () => {
+  const childPath = '.spec/export/full-tree-verification/spec.md'
+  const beforeFiles = files()
+  beforeFiles.set(childPath, '---\ntitle: 全树验证\n---\n# 旧业务正文\n原有执行约束。\n')
+  const before = await readFrozenContracts('/frozen', beforeFiles)
+  const afterFiles = new Map(beforeFiles)
+  afterFiles.set(childPath, '---\ntitle: 全树验证\ncontract-schema: sync-v1\n---\n## raw source\n\n## expanded spec\n# 旧业务正文\n原有执行约束。\n')
+  const after = await readFrozenContracts('/frozen', afterFiles)
+  assert.deepEqual(validateContractEvolution(before, after, policy()), [])
+  afterFiles.set(path, source.replace(parseParts(source)!.rawSource, '模型擅自改变真实原意。'))
+  const changed = await readFrozenContracts('/frozen', afterFiles)
+  assert.ok(validateContractEvolution(before, changed, policy()).some(issue => issue.code === 'raw_changed' && issue.path === path))
+})
+
 test('合法独审规则变化自动更新AC，接受后的生成器仍不能改政策', async () => {
   const before = await readFrozenContracts('/frozen', files())
   const analysis = evidence(), nextFiles = files()

@@ -42,3 +42,5 @@ changes 省略已启用 sync-v1 的既有目标时，程序把该冻结文件补
 raw/expanded 的更新位置来自 [[sync-spec-parts]] 原围栏感知扫描的实际内容行，不用 indexOf 查找整段文本；标题、导言或围栏示例先出现相同文本不会成为替换目标。未变段落保持原字节；重复识别段落仅更新各自真实连续内容区间，不能跨过交错段落。raw 更新与行差量可同时处理，CRLF与原意里的围栏伪标题保持保真。
 
 当前 Native 行输出只选择冻结 nodeId；程序由同一目标及生命周期映射补入 canonical path，原生 output/resultDigest 继续保存实际收到的无路径业务行，绑定不改写原生证据。模型不能通过少一层目录、回显另一节点路径或自报新路径取得写权；已审节点 move/retire 仍仅由冻结 nodeChanges 决定。
+
+已有目标不存在 raw/expanded 分段时，程序把完整旧 body 保留为 expanded 正文，再追加模型提供的解释和业务行；prose 非 null 也不能覆盖这份旧正文。缺席 raw 不从 primary intent 回填，也不把旧 body 自动提升为 raw 授权；只需 VERIFY 的旧子节点可以保留 raw 缺席。已有 sync-v1 rawless 目标的空差量仍逐字沿用原文件；未启用 schema 的旧目标必须由模型显式提交细化差量。
