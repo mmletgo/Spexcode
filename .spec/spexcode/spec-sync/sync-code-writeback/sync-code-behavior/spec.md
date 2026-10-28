@@ -28,7 +28,7 @@ changedPaths从已采纳交付的逐路径作者基准与当前source真实差�
 
 AC提案的非作者raw来源必须精确引用本次已校验facts；单独的规则标识不是已绑定事实。独审checkedPaths只声明实际冻结读取且位于授权readPaths内的具体文件，元数据清单、目录名和符号链接不能冒充完整读取。独审路径校验失败时仍携带同次完整审查结果供下一轮诊断，保留业务遗漏和反例；该失败不产生分析批准或新授权。
 
-分析与独审输入前置 requiredChangedPaths 和具体 readablePaths，后者从 oldSource/newSource/verifiedDelivery/composedFiles 的完整文本求出并逐路径标明所在快照；目录前缀授权覆盖新未跟踪源码，删除文件仍核旧全文，元数据或链接不是全文。虚拟冻结快照是唯一输入权威，cwd 的旧 HEAD 不替代冻结字节。必读集合保持真实 changedPaths；不得自动补 checkedPaths 冒充模型已读。前置清单及完整原上下文、repairDiagnostics 全部保留，超过2MiB由 [[frozen-context-reader]] 在同一受限执行器无损读取；分析和独审各自核完整原生读取证明。总预算仍约束，缺失或不完整读取拒绝，不截断正文或诊断。
+分析与独审输入前置 requiredChangedPaths、unownedSourcePaths/unownedSourcePathCount 和具体 readablePaths；未治理源码子集与后置归属门复用同一判据，首次纳管的已存在/已提交实现及空初始化文件均按原角色纳入，不以 allowed_change 分组或旧文件身份替代真实 newNodes/GAP/conflict。newNodes 只绑定已有上层 raw 的对应职责，不产生新业务政策。readablePaths 从 oldSource/newSource/verifiedDelivery/composedFiles 的完整文本求出并逐路径标明所在快照；目录前缀授权覆盖新未跟踪源码，删除文件仍核旧全文，元数据或链接不是全文。虚拟冻结快照是唯一输入权威，cwd 的旧 HEAD 不替代冻结字节。必读集合保持真实 changedPaths；不得自动补 checkedPaths 冒充模型已读。前置清单及完整原上下文、repairDiagnostics 全部保留，超过2MiB由 [[frozen-context-reader]] 在同一受限执行器无损读取；分析和独审各自核完整原生读取证明。总预算仍约束，缺失或不完整读取拒绝，不截断正文或诊断。
 
 分析和独审共同收到从冻结正文解析的 contractItems.previous/current 完整项，作为既有稳定身份及义务的索引；精确 selection 的资源名不替代契约定义，未通过 P1 结构检查或独审的候选不成为既有义务；已接受 P1 仍由后续冻结复用和生成保护，不成为 raw 或新的作者授权。raw-only 初始化尚无稳定业务 ID 时，按真实 raw、源码及完整测试分析，允许空 affectedIds/ruleIds，无阻塞发现时随后由 P1 建立详细契约并独审；不能虚构既有 ID 或仅因尚未展开提出 GAP，也不能借此跳过完整业务分析、独审、P1、生成或验证门禁。
 
@@ -59,3 +59,5 @@ raw/shared prose 的 broad affected closure只保证完整路径进入分析，�
 冻结文本视图直接消费 [[sync-input-snapshot]] 同次批量读取中已核对 OID 的完整原字节，不在摘要读取后为每个 blob 再启动 Git。输出路径顺序、全文和摘要保持与逐对象读取一致；readPaths、symlink mode、host-private 和 UTF-8/二进制过滤保持原判据，不截断、不跨调用缓存，也不改变后续作者差量或独审语义。
 
 冻结上下文中的 nonTextFiles 保留授权路径的完整非文本 Git 对象，按 path/mode/OID 去重并列出真实所属快照及 digest、kind、encoding、content；binary 以完整 base64 表示，symlink 仅保存链接 blob 的目标字节（有效 UTF-8 否则 base64），永不跟随宿主目标。精确 selection 的 base/delivery null 同步表示对象缺席，不能借当前 HEAD 伪造旧全文；受控 before/source 及 intent artifact 同样按真实对象投影。readablePaths 的 nonTextFiles.快照名只指向这些完整 payload，元数据和链接目标路径本身仍不能冒充目标正文；真实非文本变化、删除和 requiredChangedPaths/changes/checkedPaths 覆盖保持，不通过过滤非文本消除缺口。所有字节先经原 Git OID 核验，readPaths 与 host-private 边界保持；原文本视图只含真实 UTF-8 普通文件。完整字节可读不等于已理解图片或 wheel 业务含义，raw 真实依赖而不可解释的语义仍须具体 GAP，不自动改成 allowed_change 或产生业务批准。
+
+冻结输入显式给出真实 snapshotTree，并保留 composed.tree 身份。相同 Git 树只证明对应路径的对象字节及 mode 相同，不证明语义相容或业务通过。分析不得编造输入/工具未提供的 hash、AST 或执行校验证据，不把手工重抄、转义或反转义片段的推算冒称冻结原对象校验；真正不可解释且原意依赖的语义继续保留具体 GAP，完整独审与后续门禁不变。

@@ -26,6 +26,7 @@ import type { NativeRunCheckpoint, NativeRunPlan } from './native-run.js'
 import { SyncStore } from './store.js'
 import { sessionIdForCreateKey } from '../sessions.js'
 import { claimFileMutex } from './file-mutex.js'
+import { composeAuthoredInput } from './author-input.js'
 import { controlledDecisionIdentity, guardControlledRequestPath, prepareControlledDecision, prepareControlledRequest } from './request-input.js'
 import { prepareSpecBodyEdit } from '../spec-body-edit.js'
 
@@ -824,6 +825,96 @@ test('P3未完整独审的行为分析不能晋级细化或写入，具体path�
   const result = await runSyncOperation(f.store, f.operation.id, f.options)
   assert.equal(result.status, 'budget_exhausted'); assert.equal(f.store.listAttempts(f.operation.id)[0].failure?.code, 'behavior_review_failed'); assert.equal(f.calls.length, 2)
   assert.equal(f.calls.some(call => call.purpose === 'elaboration_generate'), false); assert.equal(f.store.listJournals(f.operation.id).length, 0)
+})
+
+for (const rejection of ['behavior_analysis_invalid', 'behavior_review_failed'] as const) test(`显式retryOf把同输入政策读集合的完整${rejection}诊断交新分析与新独审，仅作未批准数据`, async t => {
+  const f = await fixture(t, { maxAttempts: 1, maxCalls: 2, maxRepairs: 0, timeoutMs: 120000 }, false, original, 'project', original, {}, undefined, 'code')
+  f.transform((output, request) => rejection === 'behavior_analysis_invalid'
+    ? request.purpose === 'code_behavior_analyze' ? { ...(output as object), changes: [] } : output
+    : request.purpose === 'code_behavior_review' ? { ...(output as object), checkedPaths: [] } : output)
+  let previous = (await runSyncOperation(f.store, f.operation.id, f.options)).operation
+  const diagnostics = f.store.listAttempts(previous.id).map(attempt => ({ code: attempt.failure!.code, message: attempt.failure!.message }))
+  assert.equal(diagnostics[0].code, rejection)
+  assert.equal(JSON.parse(diagnostics[0].message).approved, false)
+  for (let index = 0; index < 2; index++) {
+    const next = f.store.admitAndEnqueue(await prepareSyncAdmission(f.input, f.plan, { ingressKey: `ownership-diagnostic-retry-${index}`, rootCauseId: `ownership-diagnostic-retry-${index}`, retryOf: previous.id, origin: previous.origin, budget: previous.budget, managedRoot: f.managedRoot }))
+    f.useOperation(next)
+    const received: { purpose: string; repairDiagnostics: { code: string; message: string }[] }[] = []
+    f.transform((output, request) => {
+      if (['code_behavior_analyze', 'code_behavior_review'].includes(request.purpose)) {
+        const context = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as { repairDiagnostics: { code: string; message: string }[] }
+        received.push({ purpose: request.purpose, repairDiagnostics: context.repairDiagnostics })
+      }
+      return index === 0 && request.purpose === 'code_behavior_review' ? { ...(output as object), checkedPaths: [] } : output
+    })
+    const result = await runSyncOperation(f.store, next.id, f.options)
+    assert.equal(result.status, 'budget_exhausted')
+    assert.deepEqual(received.map(item => item.purpose), ['code_behavior_analyze', 'code_behavior_review'])
+    for (const item of received) { assert.equal(item.repairDiagnostics.length, diagnostics.length); assert.deepEqual(item.repairDiagnostics, diagnostics) }
+    assert.deepEqual(result.operation.budget, next.budget)
+    assert.equal(result.operation.deadlineAtMs, next.deadlineAtMs)
+    assert.equal(result.operation.callsUsed, 2)
+    assert.equal(f.store.listAttempts(next.id).length, 1)
+    if (index === 0) { const failure = f.store.listAttempts(next.id)[0].failure!; diagnostics.push({ code: failure.code, message: failure.message }) }
+    previous = result.operation
+  }
+  assert.equal(f.calls.some(call => call.purpose === 'elaboration_generate'), false)
+  assert.equal(f.store.listJournals(previous.id).length, 0)
+})
+
+test('显式retryOf不同input政策readset仍拒准入，合法P4扩scope不借旧诊断也不阻断新分析', async t => {
+  const f = await fixture(t, { maxAttempts: 3, maxCalls: 4, maxRepairs: 2, timeoutMs: 120000 }, false, original, 'project', original, {}, undefined, 'code')
+  const plan = { ...f.plan, readPaths: [contractPath, '.spec/project/spec.md', '.spec/spexcode.json', 'src/export.js', 'tests/export.test.mjs'], executionScope: { paths: [contractPath], contractIds: [], flowIds: [] } }
+  const selected = f.store.readBaselineSelection(f.input.source, plan.readPaths.map(path => ({ kind: 'path', path })))
+  assert.ok('selection' in selected)
+  const ancestor = f.store.admitAndEnqueue(await prepareSyncAdmission(f.input, plan, { ingressKey: 'p4-diagnostic-ancestor', rootCauseId: 'p4-diagnostic-ancestor', origin: 'code', budget: f.operation.budget, managedRoot: f.managedRoot, baselineSelection: selected.selection }))
+  const acknowledge = (id: string) => { for (;;) { const head = f.store.nextDispatch(f.input.source.repositoryId)!; f.store.ackDispatch(f.input.source.repositoryId, head.messageId); if (head.operation.id === id) break } }
+  acknowledge(ancestor.id); f.useOperation(ancestor)
+  const options = { ...f.options, plan, readCurrentPlan: () => plan }
+  f.transform((output, request) => request.purpose === 'code_behavior_review' ? { ...(output as object), checkedPaths: [] } : output)
+  const failed = await runSyncOperation(f.store, ancestor.id, options), beforeCalls = f.calls.length
+  assert.equal(failed.status, 'budget_exhausted')
+  const retryOptions = { ingressKey: 'p4-diagnostic-retry', rootCauseId: 'p4-diagnostic-retry', retryOf: ancestor.id, origin: ancestor.origin, budget: ancestor.budget, managedRoot: f.managedRoot, baselineSelection: failed.operation.baselineSelection!, executionScope: failed.operation.scope, impactDigest: failed.operation.impactDigest }
+  const admission = await prepareSyncAdmission(f.input, plan, retryOptions)
+  const policyAdmission = await prepareSyncAdmission(f.input, { ...plan, facts: [...plan.facts, { source: 'decision:OTHER-POLICY', text: '不同的可信政策' }] }, { ...retryOptions, ingressKey: 'different-policy-retry', rootCauseId: 'different-policy-retry' })
+  for (const candidate of [{ ...admission, input: { ...admission.input, id: contentHash('different-input') } }, policyAdmission, { ...admission, readSetDigest: contentHash('different-readset') }]) {
+    assert.throws(() => f.store.admitAndEnqueue(candidate), (error: Error & { code: string }) => error.code === 'SYNC_RETRY_BINDING')
+  }
+  assert.equal(f.calls.length, beforeCalls)
+  const next = f.store.admitAndEnqueue(admission)
+  f.useOperation(next); acknowledge(next.id)
+  const claimed = f.store.claimQueuedAttempt({ operationId: next.id, source: next.input.source, scope: next.scope, leaseMs: 30000, expectedRevision: f.store.readOperation(next.id).revision })
+  const compose = (operation: typeof next) => composeAuthoredInput(f.input, operation.baselineSelection!, { retainConflicts: true, executionPaths: operation.scope.paths, contextPaths: plan.readPaths }).composed!
+  f.store.bindComposedInput(claimed.fence, compose(next))
+  f.store.startElaboration(claimed.fence)
+  const p1Evidence = writeEvidence(f.input.source.commonDir, { reviewedP1: rows(original, contractPath) })
+  const expanded = f.store.expandContractScope(claimed.fence, { paths: [contractPath, 'src/export.js'], contractIds: ['REQ-EXPORT-01'], flowIds: [] }, p1Evidence)
+  const rebound = await prepareSyncAdmission(f.input, plan, { ...retryOptions, baselineSelection: expanded.baselineSelection!, executionScope: expanded.scope })
+  assert.notEqual(rebound.readSetDigest, next.readSetDigest)
+  f.store.bindComposedInput(claimed.fence, compose(expanded), { readSetDigest: rebound.readSetDigest })
+  f.store.recordFailure(claimed.fence, { code: 'scope_context_expanded', message: '已审作用域引入真实上下文，下一原预算尝试重新分析绑定', kind: 'repairable', evidenceRefs: [p1Evidence] })
+  assert.equal(f.store.readOperation(ancestor.id).readSetDigest, failed.operation.readSetDigest)
+  assert.equal(f.store.readOperation(next.id).readSetDigest, rebound.readSetDigest)
+  const received: { code: string; message: string }[][] = []
+  f.transform((output, request) => {
+    if (['code_behavior_analyze', 'code_behavior_review'].includes(request.purpose)) {
+      const context = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as { repairDiagnostics: { code: string; message: string }[] }
+      received.push(context.repairDiagnostics)
+    }
+    return request.purpose === 'code_behavior_review' ? { ...(output as object), checkedPaths: [] } : output
+  })
+  const result = await runSyncOperation(f.store, next.id, options)
+  assert.equal(result.status, 'budget_exhausted')
+  assert.deepEqual(received.map(items => items.length), [0, 0, 1, 1])
+  const currentFailure = f.store.listAttempts(next.id).find(attempt => attempt.failure?.code === 'behavior_review_failed')!.failure!
+  assert.deepEqual(received[2], [{ code: currentFailure.code, message: currentFailure.message }])
+  assert.deepEqual(received[3], received[2])
+  assert.equal(f.calls.length, beforeCalls + 4)
+  assert.deepEqual(f.store.listAttempts(next.id).map(attempt => attempt.number), [1, 2, 3])
+  assert.deepEqual(result.operation.budget, next.budget)
+  assert.equal(result.operation.deadlineAtMs, next.deadlineAtMs)
+  assert.equal(result.operation.callsUsed, 4)
+  assert.equal(f.calls.some(call => call.purpose === 'elaboration_generate'), false)
 })
 
 test('新decision独审仍有相同稳定冲突ID时完整阻断，不因旧finding被选择而删除发现', async t => {
