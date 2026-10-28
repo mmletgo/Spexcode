@@ -60,19 +60,22 @@ export function renderElaboration(input: ElaborationInput, generated: GeneratedE
     const move = input.nodeChanges?.find(change => change.action === 'move' && change.to.nodeId === node.nodeId && change.to.path === node.path)
     const target = input.targets.find(target => move ? target.nodeId === move.from.nodeId && target.path === move.from.path : target.nodeId === node.nodeId && target.path === node.path)
     const original = target?.source ? parseFrontmatter(target.source).fm : {}
-    const parts = target?.source ? parseParts(target.source) : null
-    const baseline = target?.source ? parseContract({ ...target, source: target.source }).contract : null
-    const raw = (move && target?.source ? parts?.rawSource : node.nodeId === input.intent.nodeId ? input.intent.rawSource : target?.rawSource || parts?.rawSource) || null
-    const legacyBody = target?.source && !parts ? parseFrontmatter(target.source).body : null
+    const originalParts = target?.source ? parseParts(target.source) : null
+    const legacyBody = target?.source && !originalParts ? parseFrontmatter(target.source).body : null
+    const normalizedSource = target?.source?.replace(/\r\n?/g, '\n') ?? null
+    const renderingSource = normalizedSource !== null && legacyBody !== null ? `${normalizedSource.slice(0, normalizedSource.length - legacyBody.length)}## expanded spec\n\n${legacyBody}` : normalizedSource
+    const parts = renderingSource ? parseParts(renderingSource) : null
+    const baseline = target && renderingSource ? parseContract({ ...target, source: renderingSource }).contract : null
+    const raw = (move && target?.source ? originalParts?.rawSource : node.nodeId === input.intent.nodeId ? input.intent.rawSource : target?.rawSource || originalParts?.rawSource) || null
     const fm = input.mode === 'preserve_business' && target?.source ? { ...original, code: node.code, related: node.related } : { ...original, title: node.title, desc: node.description, 'contract-schema': 'sync-v1', ...(!target?.source ? { status: 'pending' } : {}), code: node.code, related: node.related }
     const metadataEqual = Object.entries(fm).every(([key, value]) => JSON.stringify(value) === JSON.stringify((key === 'code' || key === 'related') && typeof original[key] === 'string' ? [original[key]] : original[key]) || Array.isArray(value) && !value.length && !original[key] || value === '' && original[key] === undefined)
     if (baseline && (node.prose === null || input.mode === 'preserve_business') && metadataEqual && raw === (parts?.rawSource || null) && !move && !node.removeIds.length && Object.values(node.tables).every(rows => !rows.length)) return { nodeId: node.nodeId, path: node.path, beforeDigest: target!.sourceDigest, source: target!.source! }
     const metadata = Object.entries(fm).filter(([_key, value]) => !Array.isArray(value) || value.length).map(([key, value]) => Array.isArray(value)
       ? `${key}:\n${value.map(item => `  - ${JSON.stringify(item)}`).join('\n')}`
       : `${key}: ${JSON.stringify(value)}`).join('\n')
-    const sourceLines = target?.source?.replace(/\r\n?/g, '\n').split('\n') ?? []
+    const sourceLines = renderingSource?.split('\n') ?? []
     const removedIds = new Set(node.removeIds)
-    const preserveExpanded = baseline && parts?.expandedSpec && (node.prose === null || input.mode === 'preserve_business')
+    const preserveExpanded = baseline && parts?.expandedSpec && (legacyBody !== null || node.prose === null || input.mode === 'preserve_business')
     const tables = Object.fromEntries(Object.entries(CONTRACT_COLUMNS).map(([kind, columns]) => {
       const updates = new Map(node.tables[kind as ContractKind].map(row => [String(row.id), row]))
       const rows: string[] = []
@@ -114,7 +117,8 @@ export function renderElaboration(input: ElaborationInput, generated: GeneratedE
       })
       const added = (Object.keys(CONTRACT_COLUMNS) as ContractKind[]).filter(kind => !seen.has(kind) && tables[kind].length).map(section)
       if (added.length) expanded += `\n\n${added.join('\n\n')}`
-      const normalized = target!.source!.replace(/\r\n?/g, '\n')
+      if (legacyBody !== null && node.prose && input.mode !== 'preserve_business') expanded += `\n\n${node.prose}`
+      const normalized = renderingSource!
       const originalBody = parseFrontmatter(normalized).body
       const ranges: Record<'rawSource' | 'expandedSpec', { start: number; end: number }[]> = { rawSource: [], expandedSpec: [] }
       parseParts(originalBody, (part, line, offset) => {
@@ -144,7 +148,7 @@ export function renderElaboration(input: ElaborationInput, generated: GeneratedE
       let rendered = normalized.slice(0, normalized.length - originalBody.length) + body
 
       if (!metadataEqual) rendered = `---\n${metadata}\n---\n${parseFrontmatter(rendered).body}`
-      return { nodeId: node.nodeId, path: node.path, beforeDigest: target!.sourceDigest, source: rendered === normalized ? target!.source! : target!.source!.includes('\r\n') ? rendered.replace(/\n/g, '\r\n') : rendered }
+      return { nodeId: node.nodeId, path: node.path, beforeDigest: target!.sourceDigest, source: rendered === normalized && legacyBody === null ? target!.source! : target!.source!.includes('\r\n') ? rendered.replace(/\n/g, '\r\n') : rendered }
     }
     const prose = legacyBody === null ? node.prose ?? parts?.expandedSpec ?? '' : `${legacyBody}\n${node.prose ?? ''}`
     const rendered = `---\n${metadata}\n---\n# ${node.title}\n\n${raw === null ? '' : `## raw source\n\n${raw}\n\n`}## expanded spec\n\n${prose}\n\n${(Object.keys(CONTRACT_COLUMNS) as ContractKind[]).map(section).filter(Boolean).join('\n\n')}\n`

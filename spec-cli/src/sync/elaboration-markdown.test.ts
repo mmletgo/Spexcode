@@ -131,6 +131,46 @@ test('已启用rawless节点的空差量保留原字节，不把整body提升为
   }
 })
 
+test('已启用但未分段的旧VERIFY表按差量更新，metadata及非null prose不复制继承表', () => {
+  const childPath = '.spec/export/full-tree-verification/spec.md'
+  const oldRows = '| VERIFY-EXPORT-TREE | ["node","--version"] | . | 1000 |\n| VERIFY-EXPORT-KEEP | ["node","-p","process.version"] | . | 1000 |'
+  const legacy = `---\ntitle: 全树验证\ncontract-schema: sync-v1\n---\n# 全树验证\n\n前置旧说明。\n\n### VERIFY\n\n| id | command | cwd | timeout-ms |\n| --- | --- | --- | --- |\n${oldRows}\n\n后置旧说明。\n`
+  for (const variant of ['verify', 'metadata', 'prose']) {
+    const output = patch(), child = output.changes[0]
+    child.nodeId = 'full-tree-verification'; child.path = childPath; child.title = '全树验证'; child.description = ''; child.code = []; child.related = []
+    if (variant === 'verify') child.tables.VERIFY = [{ id: 'VERIFY-EXPORT-TREE', command: ['node', '--version'], cwd: '.', 'timeout-ms': 2000 }]
+    if (variant === 'metadata') child.description = '更新后的技术说明。'
+    if (variant === 'prose') child.prose = '追加业务解释，保留旧表。'
+    const rendered = renderElaboration({ ...input, targets: [...input.targets, { nodeId: child.nodeId, path: childPath, source: legacy, sourceDigest: elaborationDigest(legacy) }] }, output, 'input').changes.find(change => change.path === childPath)!.source
+    const parsed = parseContract({ nodeId: child.nodeId, path: childPath, source: rendered })
+    assert.deepEqual(parsed.findings, [], variant)
+    assert.equal(parsed.contract!.items.length, 2, variant)
+    assert.equal(rendered.match(/^### VERIFY$/gm)!.length, 1, variant)
+    const verification = parsed.contract!.items.find(item => item.id === 'VERIFY-EXPORT-TREE')!
+    assert.equal(verification.kind, 'VERIFY')
+    assert.ok(rendered.includes('| VERIFY-EXPORT-KEEP | ["node","-p","process.version"] | . | 1000 |'))
+    assert.ok(rendered.includes('前置旧说明。') && rendered.includes('后置旧说明。'))
+    assert.equal(parseParts(rendered)!.rawSource, '')
+    if (variant === 'verify') assert.equal(verification.timeoutMs, 2000)
+    if (variant === 'prose') assert.ok(rendered.includes(child.prose!))
+  }
+})
+
+test('未分段legacy的CRLF正文携非null prose启用后不产生CRCRLF', () => {
+  const childPath = '.spec/export/full-tree-verification/spec.md'
+  const legacyBody = '# 全树验证\r\n\r\n完整保留的旧说明。\r\n\r\n~~~sh\r\nprintf "旧围栏"\r\n~~~\r\n'
+  const legacy = `---\r\ntitle: 全树验证\r\n---\r\n${legacyBody}`
+  const output = patch(), child = output.changes[0]
+  child.nodeId = 'full-tree-verification'; child.path = childPath; child.title = '全树验证'; child.description = ''; child.code = []; child.related = []; child.prose = '新增技术解释。'
+  child.tables.VERIFY = [{ id: 'VERIFY-EXPORT-TREE', command: ['node', '--version'], cwd: '.', 'timeout-ms': 1000 }]
+  const rendered = renderElaboration({ ...input, targets: [...input.targets, { nodeId: child.nodeId, path: childPath, source: legacy, sourceDigest: elaborationDigest(legacy) }] }, output, 'input').changes.find(change => change.path === childPath)!.source
+  assert.ok(rendered.includes(legacyBody))
+  assert.ok(!rendered.includes('\r\r\n'))
+  assert.ok(!/(?<!\r)\n/.test(rendered))
+  assert.deepEqual(parseContract({ nodeId: child.nodeId, path: childPath, source: rendered }).findings, [])
+  assert.equal(parseParts(rendered)!.rawSource, '')
+})
+
 test('无状态N/A正文与普通STATE/EVENT/TR显式转换，不混留旧表或丢不适用依据', () => {
   const output = patch(), node = output.changes[0]
   node.prose = 'N/A：此能力无状态；输入域是记录数组，计数不变量为数组长度，可观察结束为返回计数。'
