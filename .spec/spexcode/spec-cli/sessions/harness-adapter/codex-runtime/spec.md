@@ -410,3 +410,5 @@ found or changed during the relocation. The same copy-versus-shared-helper wall 
 record-I/O extraction lane and is recorded here as a structural lesson, not a behavior fix.
 
 内部结构化执行的受限分支沿 [[structured-session-runtime]] 与 [[structured-readonly-policy]]，不继承普通项目daemon能力。v2仅登记 [[frozen-context-reader]] 的动态工具，按精确thread/turn/callId服务并持久化真实回复；原生history独立核验完整覆盖。CLI与去工具provider目录构成冻结能力身份，未答请求恢复不伪造RPC回执；普通项目runtime的归属与控制契约保持本节点定义。
+
+结构化结果与同 turn 恢复使用 Codex 原生分页：`thread/resume` 仅恢复 metadata，`thread/turns/list` 的 `notLoaded` 页定位精确 turn，`thread/items/list` 按该 turn 的升序 cursor 读尽原始 item。每页 item 必须属于固定 turn；不再用 `thread/read includeTurns:true` 或 resume 的完整历史 hydration，不以 summary 或归一化 transcript 替代动态工具原文。完成通知丢失且连接仍活时，同一 observer 在原预算内通过轻量 turn metadata 复核终态，等待原工具回复工作完成后才读取并核验结果；首轮已接受但 metadata 暂缺时，仅原 owner 的完成等待继续沿原预算观察；已绑定恢复和最终读取缺失仍拒绝。不新建 turn，不绕过原取消及冻结覆盖证明。
