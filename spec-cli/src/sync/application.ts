@@ -110,9 +110,7 @@ export class SyncApplication {
     if (JSON.stringify(record.source) !== JSON.stringify(snapshot.source)) throw new SyncApplicationError('sync_source_changed', '启用时的输入工作树身份已变化，请重新启用')
     return record
   }
-  async readSettings(): Promise<{ activation: 'disabled' | 'enabled' | 'invalidated'; enabled: boolean; configuration: ReturnType<typeof readSyncSettings>['settings'] | null; configDigest: string | null; input: WorktreeIdentity; deliveryRoot: string; capabilities: { origins: ['spec', 'initial', 'code', 'combined']; externalWatcher: true; verification: 'docker-node-test' }; configurationError: { code: string; message: string } | null }> {
-    if (!existsSync(this.root)) return { activation: existsSync(this.enabledPath) ? 'invalidated' : 'disabled', enabled: false, configuration: null, configDigest: null, input: this.sourceAtCreation, deliveryRoot: this.managedRoot, capabilities: { origins: ['spec', 'initial', 'code', 'combined'], externalWatcher: true, verification: 'docker-node-test' }, configurationError: { code: 'sync_source_missing', message: '已注册输入工作树不存在' } }
-    const snapshot = await captureInputSnapshot(this.root)
+  private settingsFromSnapshot(snapshot: InputSnapshot): Awaited<ReturnType<SyncApplication['readSettings']>> {
     const activated = existsSync(this.enabledPath)
     const base = { input: snapshot.source, deliveryRoot: this.managedRoot, capabilities: { origins: ['spec', 'initial', 'code', 'combined'] as ['spec', 'initial', 'code', 'combined'], externalWatcher: true as const, verification: 'docker-node-test' as const } }
     try {
@@ -123,6 +121,10 @@ export class SyncApplication {
       if (!(error instanceof SyncApplicationError)) throw error
       return { ...base, activation: activated ? 'invalidated' : 'disabled', enabled: false, configuration: null, configDigest: null, configurationError: { code: error.code, message: error.message } }
     }
+  }
+  async readSettings(): Promise<{ activation: 'disabled' | 'enabled' | 'invalidated'; enabled: boolean; configuration: ReturnType<typeof readSyncSettings>['settings'] | null; configDigest: string | null; input: WorktreeIdentity; deliveryRoot: string; capabilities: { origins: ['spec', 'initial', 'code', 'combined']; externalWatcher: true; verification: 'docker-node-test' }; configurationError: { code: string; message: string } | null }> {
+    if (!existsSync(this.root)) return { activation: existsSync(this.enabledPath) ? 'invalidated' : 'disabled', enabled: false, configuration: null, configDigest: null, input: this.sourceAtCreation, deliveryRoot: this.managedRoot, capabilities: { origins: ['spec', 'initial', 'code', 'combined'], externalWatcher: true, verification: 'docker-node-test' }, configurationError: { code: 'sync_source_missing', message: '已注册输入工作树不存在' } }
+    return this.settingsFromSnapshot(await captureInputSnapshot(this.root))
   }
   /** 仅授权当前已版本化配置；可选摘要防止用户阅读后配置已经被另一编辑者改变。 */
   async enable(expectedConfigDigest?: string): ReturnType<SyncApplication['readSettings']> {
@@ -155,7 +157,7 @@ export class SyncApplication {
     const operations = await Promise.all(this.store.listOperations(snapshot.source.repositoryId, { sourceRoot: this.root, limit: options.limit ?? 30 })
       .filter(operation => !options.nodeId || operation.scope.contractIds.includes(options.nodeId) || !!node && coveredPath(node.path, operation.scope.paths))
       .map(operation => this.detail(operation, snapshot)))
-    return { settings: await this.readSettings(), operations, observation: this.observationStatus(), sources: this.registeredSources() }
+    return { settings: this.settingsFromSnapshot(snapshot), operations, observation: this.observationStatus(), sources: this.registeredSources() }
   }
   registeredSources(): { source: WorktreeIdentity; configDigest: string; registeredNodeIds: string[]; exists: boolean; watchOnline: boolean; health: PersistentObserverHealth | null; control: PhysicalControl; latest: SyncObservation | null }[] {
     return enabledSources(this.runtime).filter(record => record.source.repositoryId === this.repositoryId).map(record => {
@@ -383,13 +385,13 @@ export class SyncApplication {
       this.latestObservation = this.store.recordObservation({ input: snapshot, configRef, selection, latestDifferenceDigest: writeEvidence(snapshot.source.commonDir, { nodeId, configDigest, selection: selection?.digest ?? null, failure, content: snapshot.contentDigest }).sha256, failure }, { controlRevision: control.revision, selectionDigest: selection?.digest ?? null })
     }
   }
-  private async retryEligibility(operation: SyncOperation, snapshot: InputSnapshot): Promise<SyncOperationDetail['retryEligibility']> {
+  private async retryEligibility(operation: SyncOperation, snapshot: InputSnapshot, currentness?: boolean): Promise<SyncOperationDetail['retryEligibility']> {
     const eligibility = this.store.readRetryEligibility(operation.id)
     if (!eligibility.eligible) return eligibility
     if (!['spec', 'initial', 'code', 'combined', 'decision'].includes(operation.origin)) return { eligible: false, reason: { code: 'sync_origin_unsupported', message: '当前入口接受 Spec 输入，原操作来源不能在此重试' } }
     try {
       this.requireEnabled(snapshot, operation)
-      if (!await isSyncInputCurrent(operation, snapshot, this.operationPlan(operation))) return { eligible: false, reason: { code: 'sync_retry_stale', message: '原输入已变化，请为当前 Spec 发起新操作' } }
+      if (!(currentness ?? await isSyncInputCurrent(operation, snapshot, this.operationPlan(operation)))) return { eligible: false, reason: { code: 'sync_retry_stale', message: '原输入已变化，请为当前 Spec 发起新操作' } }
     }
     catch (error) { return { eligible: false, reason: { code: error instanceof SyncApplicationError ? error.code : 'sync_retry_plan_unavailable', message: error instanceof Error ? error.message : String(error) } } }
     return eligibility
@@ -406,8 +408,9 @@ export class SyncApplication {
     let landing = { sourceSynced: false, canonicalSynced: false, phase: operation.phase }
     try { if (available) landing = readSyncLandingStatus(operation, snapshot, journals, { canonicalBranch: `refs/heads/${readConfig(this.root).mainBranch?.trim() || 'main'}`, readPaths: plan!.readPaths }) }
     catch (error) { executionAvailability = { status: 'recovery_required', failure: { code: 'sync_delivery_evidence_invalid', message: error instanceof Error ? error.message : String(error) } } }
-    const current = available && (landing.sourceSynced || await isSyncInputCurrent(operation, snapshot, plan!))
-    return { operation: landing.phase === operation.phase ? operation : { ...operation, phase: landing.phase }, physicalControl: this.store.readPhysicalControl(this.physicalScope(operation.input.source)), decisionContext: existsSync(operation.input.source.commonDir) ? this.decisionContext(operation) : null, attempt: operation.currentAttemptId ? this.store.readAttempt(operation.currentAttemptId) : null, journals, resources, stale: !current, sourceSynced: landing.sourceSynced, canonicalSynced: landing.canonicalSynced, adoptionEligibility: await this.adoptionEligibility(operation, snapshot), revertEligibility: await this.revertEligibility(operation, snapshot, journals, resources), retryEligibility: await this.retryEligibility(operation, snapshot), decisionEligibility: this.store.readDecisionEligibility(operation.id), executionAvailability }
+    const currentness = available && !landing.sourceSynced ? await isSyncInputCurrent(operation, snapshot, plan!) : undefined
+    const current = available && (landing.sourceSynced || currentness)
+    return { operation: landing.phase === operation.phase ? operation : { ...operation, phase: landing.phase }, physicalControl: this.store.readPhysicalControl(this.physicalScope(operation.input.source)), decisionContext: existsSync(operation.input.source.commonDir) ? this.decisionContext(operation) : null, attempt: operation.currentAttemptId ? this.store.readAttempt(operation.currentAttemptId) : null, journals, resources, stale: !current, sourceSynced: landing.sourceSynced, canonicalSynced: landing.canonicalSynced, adoptionEligibility: await this.adoptionEligibility(operation, snapshot), revertEligibility: await this.revertEligibility(operation, snapshot, journals, resources), retryEligibility: await this.retryEligibility(operation, snapshot, currentness), decisionEligibility: this.store.readDecisionEligibility(operation.id), executionAvailability }
   }
   private async adoptionPlan(operation: SyncOperation, snapshot: InputSnapshot): Promise<SourceAdoptionPlan> {
     try {

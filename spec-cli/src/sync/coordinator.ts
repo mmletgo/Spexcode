@@ -69,12 +69,19 @@ export async function isSyncInputCurrent(operation: SyncOperation, current: Inpu
   if (canonical(operation.input.source) !== canonical(current.source)) return false
   if (!operation.baselineSelection) return operation.input.id === current.id
   const paths = unique([...plan.readPaths, ...operation.scope.paths])
-  const entries = (input: InputSnapshot, tree: string): string => canonical(readTree(input.source.commonDir, tree).filter(entry => within(entry.path, paths)))
+  const treeCache = new Map<string, ReturnType<typeof readTree>>()
+  const rememberTree = (input: InputSnapshot, entries: ReturnType<typeof readTree>): void => { treeCache.set(`${input.source.commonDir}\0${input.immutableTree}`, entries) }
+  const readEntries = (input: InputSnapshot, tree: string): string => {
+    const key = `${input.source.commonDir}\0${tree}`
+    let entries = treeCache.get(key)
+    if (!entries) { entries = readTree(input.source.commonDir, tree); treeCache.set(key, entries) }
+    return canonical(entries.filter(entry => within(entry.path, paths)))
+  }
   const headTree = (input: InputSnapshot): string => objectGit(input.source.commonDir, ['rev-parse', `${input.headCommit}^{tree}`]).toString().trim()
-  verifySnapshot(operation.input); verifySnapshot(current)
-  return entries(operation.input, operation.input.immutableTree) === entries(current, current.immutableTree)
-    && entries(operation.input, operation.input.indexTree) === entries(current, current.indexTree)
-    && entries(operation.input, headTree(operation.input)) === entries(current, headTree(current))
+  rememberTree(operation.input, verifySnapshot(operation.input)); rememberTree(current, verifySnapshot(current))
+  return readEntries(operation.input, operation.input.immutableTree) === readEntries(current, current.immutableTree)
+    && readEntries(operation.input, operation.input.indexTree) === readEntries(current, current.indexTree)
+    && readEntries(operation.input, headTree(operation.input)) === readEntries(current, headTree(current))
 }
 
 async function readInput(input: InputSnapshot, plan: SyncCoordinatorPlan, previous?: SyncOperation['previousBaselinePair'], requestBlob?: BlobRef, selection?: FrozenBaselineSelection, executionPaths = plan.executionScope?.paths): Promise<InputView> {
