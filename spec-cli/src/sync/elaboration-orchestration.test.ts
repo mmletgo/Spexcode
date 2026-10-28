@@ -446,14 +446,17 @@ const rejectedSeed = async (goal?: string): Promise<ElaborationRepairSeed> => {
 test('部分wire候选结算为诊断seed后，本次必需目标重列且完整新输出不继承seed行', async () => {
   const base = input(true)
   const newTargetPath = '.spec/export/new-target/spec.md'
+  const rawOnlyPath = '.spec/export/raw-only-target/spec.md'
   const legacyPath = '.spec/export/legacy-target/spec.md'
+  const rawOnlyRaw = 'raw-only 目标的冻结原意。'
+  const rawOnlySource = `---\ntitle: Raw-only target\nstatus: active\n---\n\n## raw source\n\n${rawOnlyRaw}\n`
   const legacySource = '---\ntitle: Legacy target\nstatus: active\n---\n\n# Historical note\nThis source predates sync-v1.\n'
   const snapshot: ElaborationInput = {
     ...base,
     targets: [
       base.targets[0],
       { nodeId: 'new-target', path: newTargetPath, source: null, sourceDigest: null, rawSource: '新增叶子目标的冻结原意。' },
-      { nodeId: 'raw-only-target', path: '.spec/export/raw-only-target/spec.md', source: null, sourceDigest: null, rawSource: 'raw-only 目标的冻结原意。' },
+      { nodeId: 'raw-only-target', path: rawOnlyPath, source: rawOnlySource, sourceDigest: elaborationDigest(rawOnlySource), rawSource: rawOnlyRaw },
       { nodeId: 'legacy-target', path: legacyPath, source: legacySource, sourceDigest: elaborationDigest(legacySource), rawSource: '旧版且尚未启用sync-v1的目标原意。' },
     ],
     maxRepairs: 0,
@@ -499,19 +502,26 @@ test('部分wire候选结算为诊断seed后，本次必需目标重列且完整
   }
   const originalSeed = structuredClone(seed)
   const freshNative = runner(() => output([1, 2, 3], { 1: 'VERIFY-NEW-FRESH', 2: 'VERIFY-RAW-ONLY', 3: 'VERIFY-LEGACY-01' }))
-  const fresh = await elaborate({ ...snapshot, requestKey: 'operation-2' }, { seed, runner: freshNative.run })
+  const fresh = await elaborate({ ...snapshot, requestKey: 'operation-2' }, { seed, runner: async request => {
+    const session = await freshNative.run(request)
+    return { ...session, sessionId: `fresh-${session.sessionId}`, threadId: `fresh-${session.threadId}`, turnId: `fresh-${session.turnId}` }
+  } })
 
   assert.equal(fresh.status, 'complete', JSON.stringify(fresh.rounds[0].findings))
   assert.equal(fresh.structurePassed, true)
   assert.equal(fresh.reviewPassed, true)
   assert.deepEqual(freshNative.calls.map(call => call.purpose), ['elaboration_generate', 'elaboration_review'])
+  assert.equal(fresh.inputDigest, partial.inputDigest)
   assert.notEqual(partialNative.calls[0].inputDigest, freshNative.calls[0].inputDigest)
+  for (const trace of fresh.rounds[0].traces) {
+    assert.ok(seed.traces.every(previous => trace.sessionId !== previous.sessionId && trace.threadId !== previous.threadId && trace.turnId !== previous.turnId))
+  }
   assert.deepEqual((fresh.rounds[0].output as GeneratedTargetElaboration).changes.map(change => change.targetIndex), [1, 2, 3])
   assert.equal(fresh.changes.length, 4)
   assert.deepEqual(new Set(fresh.changes.map(change => change.path)), new Set([
     path,
     newTargetPath,
-    '.spec/export/raw-only-target/spec.md',
+    rawOnlyPath,
     legacyPath,
   ]))
   assert.ok(!fresh.changes.some(change => change.source.includes('VERIFY-SEED-ONLY')))
