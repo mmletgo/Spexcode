@@ -34,6 +34,24 @@ const settings: SyncSettings = {
   mandatoryTests: [], facts: [], budget: { maxAttempts: 2, maxCalls: 4, maxRepairs: 1, timeoutMs: 30000 },
 }
 const source = '---\ntitle: Demo\nstatus: pending\n---\n# Demo\n\n## raw source\n\n返回用户指定的文本。\n\n## expanded spec\n\n待细化。\n'
+function gitReadCounter(directory: string): { reset(): void; entries(): string[]; restore(): void } {
+  const bin = join(directory, 'git-read-counter-bin'), log = join(directory, 'git-read-counter.log'), wrapper = join(bin, 'git')
+  const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim()
+  mkdirSync(bin, { mode: 0o700 }); writeFileSync(log, '')
+  writeFileSync(wrapper, '#!/bin/sh\ncase " $* " in\n  *" ls-tree -rlz --full-tree "*) last=""; for arg do last="$arg"; done; printf "tree:%s\\n" "$last" >> "$SPEX_SYNC_TEST_GIT_COUNTER" ;;\n  *" ls-files -z --full-name --cached --others --exclude-standard "*) printf "capture\\n" >> "$SPEX_SYNC_TEST_GIT_COUNTER" ;;\nesac\nexec "$SPEX_SYNC_TEST_REAL_GIT" "$@"\n')
+  chmodSync(wrapper, 0o700)
+  const oldPath = process.env.PATH, oldCounter = process.env.SPEX_SYNC_TEST_GIT_COUNTER, oldRealGit = process.env.SPEX_SYNC_TEST_REAL_GIT
+  process.env.PATH = `${bin}:${oldPath ?? ''}`; process.env.SPEX_SYNC_TEST_GIT_COUNTER = log; process.env.SPEX_SYNC_TEST_REAL_GIT = realGit
+  return {
+    reset: () => writeFileSync(log, ''),
+    entries: () => readFileSync(log, 'utf8').trim().split('\n').filter(Boolean),
+    restore: () => {
+      if (oldPath === undefined) delete process.env.PATH; else process.env.PATH = oldPath
+      if (oldCounter === undefined) delete process.env.SPEX_SYNC_TEST_GIT_COUNTER; else process.env.SPEX_SYNC_TEST_GIT_COUNTER = oldCounter
+      if (oldRealGit === undefined) delete process.env.SPEX_SYNC_TEST_REAL_GIT; else process.env.SPEX_SYNC_TEST_REAL_GIT = oldRealGit
+    },
+  }
+}
 async function fixture(config: unknown = settings, onRun?: (request: ElaborationSessionRequest) => Promise<never>) {
   const temp = mkdtempSync(join(tmpdir(), 'sync-application-')), root = join(temp, 'source')
   mkdirSync(join(root, '.spec', 'demo'), { recursive: true }); mkdirSync(join(root, 'src')); mkdirSync(join(root, 'tests'))
@@ -118,6 +136,26 @@ test('AC-APPLICATION-03 受控编辑成为持久operation，重复幂等且真�
     assert.equal(readFileSync(join(f.root, '.spec', 'demo', 'spec.md'), 'utf8'), source)
     assert.equal(f.git(['rev-parse', 'HEAD']), head)
     await assert.rejects(f.application.submit({ ...request, patch: { ...request.patch, replacement: '另一意图' } }), /SYNC_IDEMPOTENCY_CONFLICT/)
+  } finally { f.cleanup() }
+})
+
+test('status复用本轮快照并让重试资格复用详情的闭包当前性', async () => {
+  const f = await fixture()
+  try {
+    await f.application.enable()
+    const submitted = await f.application.submit({ nodeId: 'demo', requestId: 'status-read-reuse', origin: 'initial' }); assert.ok(submitted.operation)
+    await f.application.wait(submitted.operation.id)
+    const counter = gitReadCounter(f.temp)
+    try {
+      const result = await f.application.status(), detail = result.operations[0]
+      assert.equal(result.operations.length, 1, JSON.stringify(result.operations.map(item => ({ phase: item.operation.phase, stale: item.stale, sourceSynced: item.sourceSynced, retryEligible: item.retryEligibility.eligible }))))
+      assert.ok(detail)
+      assert.equal(detail.stale, false)
+      assert.equal(detail.retryEligibility.eligible, true)
+      const entries = counter.entries()
+      assert.equal(entries.filter(entry => entry === 'capture').length, 2, 'status只采一次快照（双重observe各读取一次索引）')
+      assert.equal(entries.filter(entry => entry.startsWith('tree:')).length, 9, '同一status保留其他证明读取，并仅计算一次闭包当前性')
+    } finally { counter.restore() }
   } finally { f.cleanup() }
 })
 

@@ -48,6 +48,24 @@ function unlock(root: string): void {
   for (const entry of readdirSync(root, { withFileTypes: true })) if (entry.isDirectory()) { chmodSync(join(root, entry.name), 0o700); unlock(join(root, entry.name)) }
   chmodSync(root, 0o700)
 }
+function gitReadCounter(directory: string): { reset(): void; entries(): string[]; restore(): void } {
+  const bin = join(directory, 'git-read-counter-bin'), log = join(directory, 'git-read-counter.log'), wrapper = join(bin, 'git')
+  const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim()
+  mkdirSync(bin, { mode: 0o700 }); writeFileSync(log, '')
+  writeFileSync(wrapper, '#!/bin/sh\ncase " $* " in\n  *" ls-tree -rlz --full-tree "*) last=""; for arg do last="$arg"; done; printf "tree:%s\\n" "$last" >> "$SPEX_SYNC_TEST_GIT_COUNTER" ;;\n  *" ls-files -z --full-name --cached --others --exclude-standard "*) printf "capture\\n" >> "$SPEX_SYNC_TEST_GIT_COUNTER" ;;\nesac\nexec "$SPEX_SYNC_TEST_REAL_GIT" "$@"\n')
+  chmodSync(wrapper, 0o700)
+  const oldPath = process.env.PATH, oldCounter = process.env.SPEX_SYNC_TEST_GIT_COUNTER, oldRealGit = process.env.SPEX_SYNC_TEST_REAL_GIT
+  process.env.PATH = `${bin}:${oldPath ?? ''}`; process.env.SPEX_SYNC_TEST_GIT_COUNTER = log; process.env.SPEX_SYNC_TEST_REAL_GIT = realGit
+  return {
+    reset: () => writeFileSync(log, ''),
+    entries: () => readFileSync(log, 'utf8').trim().split('\n').filter(Boolean),
+    restore: () => {
+      if (oldPath === undefined) delete process.env.PATH; else process.env.PATH = oldPath
+      if (oldCounter === undefined) delete process.env.SPEX_SYNC_TEST_GIT_COUNTER; else process.env.SPEX_SYNC_TEST_GIT_COUNTER = oldCounter
+      if (oldRealGit === undefined) delete process.env.SPEX_SYNC_TEST_REAL_GIT; else process.env.SPEX_SYNC_TEST_REAL_GIT = oldRealGit
+    },
+  }
+}
 async function fixture(t: test.TestContext, budget = { maxAttempts: 3, maxCalls: 16, maxRepairs: 2, timeoutMs: 300_000 }, adopt = false, specSource = original, projectId = 'project', factsSource = specSource, planPatch: Partial<SyncCoordinatorPlan> = {}, controlledEdit?: { original: string; replacement: string; intent: string; testPath: string }, origin: 'spec' | 'code' | 'combined' = 'spec') {
   const parent = realpathSync(mkdtempSync(join(tmpdir(), 'sync-coordinator-'))), root = join(parent, 'source'), managedRoot = join(parent, 'managed'), artifactRoot = join(parent, 'artifacts')
   mkdirSync(root); mkdirSync(managedRoot, { mode: 0o700 }); mkdirSync(artifactRoot, { mode: 0o700 }); cpSync(fixturePath, root, { recursive: true })
@@ -205,6 +223,30 @@ test('P4当前输入只比较实际闭包，保留无关编辑与提交并拒绝
   const staged = await captureInputSnapshot(f.root)
   assert.equal(staged.immutableTree, current.immutableTree)
   assert.equal(await isSyncInputCurrent(operation, staged, plan), false)
+})
+
+test('P4当前性完整复核快照并仅在本次调用内复用同OID树读取', async t => {
+  const f = await fixture(t)
+  const plan = { ...f.plan, readPaths: [contractPath, 'src/export.js', 'tests/export.test.mjs', '.spec/spexcode.json'], executionScope: { paths: [contractPath, 'src/export.js'], contractIds: [], flowIds: [] } }
+  const baseline = f.store.readBaselineSelection(f.input.source, plan.readPaths.map(path => ({ kind: 'path' as const, path })))
+  assert.ok('selection' in baseline)
+  const operation = f.store.admitAndEnqueue(await prepareSyncAdmission(f.input, plan, { ingressKey: 'currentness-read-reuse', rootCauseId: 'currentness-read-reuse', origin: 'spec', budget: f.operation.budget, managedRoot: f.managedRoot, baselineSelection: baseline.selection }))
+  const counter = gitReadCounter(f.parent)
+  try {
+    assert.equal(await isSyncInputCurrent(operation, operation.input, plan), true)
+    const sameTreeReads = counter.entries().filter(entry => entry.startsWith('tree:')).map(entry => entry.slice('tree:'.length))
+
+    writeFileSync(join(f.root, 'scope-external.txt'), '不在闭包中的真实Git字节\n')
+    const changed = await captureInputSnapshot(f.root)
+    assert.notEqual(changed.immutableTree, operation.input.immutableTree)
+    counter.reset()
+    assert.equal(await isSyncInputCurrent(operation, changed, plan), true)
+    const differentTreeReads = counter.entries().filter(entry => entry.startsWith('tree:')).map(entry => entry.slice('tree:'.length))
+    assert.deepEqual([
+      [sameTreeReads.length, sameTreeReads.filter(tree => tree === operation.input.immutableTree).length, new Set(sameTreeReads).size],
+      [differentTreeReads.length, differentTreeReads.filter(tree => tree === operation.input.immutableTree).length, differentTreeReads.filter(tree => tree === changed.immutableTree).length],
+    ], [[4, 2, 3], [4, 1, 1]], '完整验证同OID旧/当前快照；异OID快照各读一次，index/HEAD复用仅限本调用')
+  } finally { counter.restore() }
 })
 
 test('kernel mutex阻止同operation双编排，尚无native派发', async t => {
