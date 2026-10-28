@@ -495,7 +495,16 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
             if (!belongs || !analysisStageBinding(store, oldOperation, previous) || previous.policyDigest !== oldOperation.policyDigest || decision.inputId !== operation.input.id || oldOperation.input.id !== operation.input.id || !previous.reviewPassed || decision.findingIds.some(id => !previous.findings.some(finding => finding.id === id))) fail('decision_binding', '业务裁决未绑定真实已审分析及原输入')
             previousDecisionAnalysis = { ref: decision.analysisRef, analysis: previous }
           }
-          try { approved = await analyzeCodeBehavior({ snapshot: operation.input, baseline: operation.previousBaselinePair, ...(operation.baselineSelection ? { baselineSelection: operation.baselineSelection } : {}), composed: view.composed, readSetDigest: operation.readSetDigest, policyDigest: operation.policyDigest, plan: operation.baselineSelection ? { ...options.plan, readPaths: view.readPaths } : options.plan, requestKey: `sync:${attempt.id}:analysis`, timeoutMs: callTimeoutMs, signal, origin: operation.origin, ...(decision && previousDecisionAnalysis ? { decision: { request: decision, previous: previousDecisionAnalysis } } : {}), repairDiagnostics: store.listAttempts(operation.id).filter(prior => prior.failure && ['behavior_analysis_invalid', 'behavior_review_failed'].includes(prior.failure.code)).map(prior => ({ code: prior.failure!.code, message: prior.failure!.message })) }, runner) }
+          const diagnosticLineage: SyncOperation[] = []
+          let diagnosticOwner: SyncOperation | null = operation
+          while (diagnosticOwner) {
+            if (diagnosticOwner.input.id !== operation.input.id || canonical(diagnosticOwner.input.source) !== canonical(operation.input.source) || diagnosticOwner.policyDigest !== operation.policyDigest || (diagnosticOwner.requestBlob?.sha256 ?? null) !== (operation.requestBlob?.sha256 ?? null) || diagnosticOwner.origin !== operation.origin) fail('retry_provenance_binding', '行为修复诊断重试链不匹配固定来源、输入或政策')
+            if (diagnosticOwner.readSetDigest !== operation.readSetDigest) break
+            diagnosticLineage.unshift(diagnosticOwner)
+            diagnosticOwner = diagnosticOwner.retryOf ? store.readOperation(diagnosticOwner.retryOf) : null
+          }
+          const repairDiagnostics = diagnosticLineage.flatMap(owner => store.listAttempts(owner.id).filter(prior => prior.failure && ['behavior_analysis_invalid', 'behavior_review_failed'].includes(prior.failure.code)).map(prior => ({ code: prior.failure!.code, message: prior.failure!.message })))
+          try { approved = await analyzeCodeBehavior({ snapshot: operation.input, baseline: operation.previousBaselinePair, ...(operation.baselineSelection ? { baselineSelection: operation.baselineSelection } : {}), composed: view.composed, readSetDigest: operation.readSetDigest, policyDigest: operation.policyDigest, plan: operation.baselineSelection ? { ...options.plan, readPaths: view.readPaths } : options.plan, requestKey: `sync:${attempt.id}:analysis`, timeoutMs: callTimeoutMs, signal, origin: operation.origin, ...(decision && previousDecisionAnalysis ? { decision: { request: decision, previous: previousDecisionAnalysis } } : {}), repairDiagnostics }, runner) }
           catch (error) {
             const issue = error as { code?: string; message?: string }
             if (!['behavior_analysis_invalid', 'behavior_review_failed'].includes(issue.code ?? '') || signal.aborted) throw error

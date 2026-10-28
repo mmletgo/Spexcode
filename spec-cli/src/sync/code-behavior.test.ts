@@ -446,6 +446,28 @@ test('独审路径错误仍把同次业务遗漏与反例交给下一轮修复�
   await analyzeCodeBehavior({ ...input, repairDiagnostics: [rejected!] }, async request => { assert.ok(request.prompt.includes(finding.counterexample)); return fake(request) })
 })
 
+test('发送前明确列出已commit未治理源码子集，空初始化文件仍需真实归属', async t => {
+  const f = await fixture(t), paths = ['src/__init__.py', 'src/view.js']
+  writeFileSync(join(f.root, paths[0]), '')
+  writeFileSync(join(f.root, paths[1]), 'export const view = job => ({ id: job.id });\n')
+  git(f.root, 'add', ...paths); git(f.root, 'commit', '-m', 'existing unowned implementation')
+  writeFileSync(join(f.root, 'src/export.js'), `${f.source}\n// authored implementation comment\n`)
+  const before = await f.input(), input: CodeBehaviorInput = { ...before, baseline: null, composed: composeInputSnapshots(before.snapshot, null).composed!, plan: { ...before.plan, sourcePaths: ['src'] } }
+  const captured = new Error('frozen ownership input captured')
+  await assert.rejects(analyzeCodeBehavior(input, async request => {
+    const context = JSON.parse(request.prompt.split('冻结三方输入:\n')[1]) as { requiredChangedPaths: string[]; unownedSourcePaths: string[]; unownedSourcePathCount: number; snapshotTree: string; composed: { tree: string } }
+    assert.deepEqual(context.unownedSourcePaths, paths)
+    assert.equal(context.unownedSourcePathCount, 2)
+    assert.ok(context.requiredChangedPaths.includes('src/export.js'))
+    assert.equal(context.snapshotTree, input.snapshot.immutableTree)
+    assert.equal(context.composed.tree, input.composed.tree)
+    assert.match(request.prompt, /已存在.*已commit.*未治理/)
+    assert.match(request.prompt, /分组allowed_change不是治理/)
+    assert.match(request.prompt, /手工重抄.*反转义/)
+    throw captured
+  }), error => error === captured)
+})
+
 test('归属拒绝一次列全缺失路径和数量，完整newNodes或具体GAP仍沿原门禁', async t => {
   const f = await fixture(t), paths = ['src/__init__.py', 'src/view.js']
   writeFileSync(join(f.root, paths[0]), '')
@@ -469,9 +491,11 @@ test('归属拒绝一次列全缺失路径和数量，完整newNodes或具体GAP
     proposal.newNodes = paths.map(codePath => ({ codePath, parentNodeId: 'export-contract', basis: '真实导出任务的对应模块职责' }))
   })
   const repaired = await analyzeCodeBehavior({ ...input, repairDiagnostics: [rejected!] }, async request => {
-    const context = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as { repairDiagnostics: { code: string; message: string }[]; requiredChangedPaths: string[] }
+    const context = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as { repairDiagnostics: { code: string; message: string }[]; requiredChangedPaths: string[]; unownedSourcePaths: string[]; unownedSourcePathCount: number }
     assert.deepEqual(context.repairDiagnostics, [rejected])
     assert.deepEqual(context.requiredChangedPaths, paths)
+    assert.deepEqual(context.unownedSourcePaths, paths)
+    assert.equal(context.unownedSourcePathCount, paths.length)
     return complete(request)
   })
   assert.equal(repaired.reviewPassed, true)
