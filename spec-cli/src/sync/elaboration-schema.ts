@@ -37,7 +37,7 @@ export function elaborationSchema(input: ElaborationInput): Record<string, unkno
   changes.minItems = targets.filter(target => target.required).length
   changes.maxItems = targets.length
   const properties = (changes.items as { properties: Record<string, unknown> }).properties
-  properties.targetIndex = { type: 'integer', minimum: 0, maximum: input.targets.length - 1 }
+  properties.targetIndex = { type: 'integer', minimum: 0, maximum: input.targets.length - 1, ...(targets.length > 0 && targets.length < input.targets.length ? { enum: targets.map(target => target.targetIndex) } : {}) }
   return schema
 }
 /** 历史路径回显协议只保留为拒绝候选诊断，不用于新生成或路径合成。 */

@@ -155,6 +155,25 @@ test('重复目标不能替代漏项，即使满足schema最低数量也不进�
   assert.deepEqual(fake.calls.map(call => call.purpose), ['elaboration_generate'])
 })
 
+test('退役下标先被拒绝后仍可在既有预算内修复，不提前终止同步', async () => {
+  const frozen = input()
+  const source = '---\ntitle: 退役验证入口\ncontract-schema: sync-v1\n---\n\n## expanded spec\n\n旧技术验证。\n\n### VERIFY\n\n| id | command | cwd | timeout-ms |\n| --- | --- | --- | --- |\n| VERIFY-NESTED-01 | ["node","--version"] | . | 1000 |\n'
+  frozen.targets = [frozen.targets[0], { ...frozen.targets[1], source, sourceDigest: elaborationDigest(source) }]
+  frozen.nodeChanges = [{ action: 'retire', from: { nodeId: 'nested-leaf', path: leafPath }, evidenceRef: { sha256: 'a'.repeat(64) } }]
+  frozen.authorizedChanges = [{ id: 'VERIFY-NESTED-01', action: 'retire', source: 'user:raw', reason: '用户明确取消旧技术验证节点' }]
+  frozen.maxRepairs = 1
+  let generated = 0
+  const fake = runner(request => build(request, generated++ === 0 ? [leaf(request)] : []))
+  const result = await elaborate(frozen, { runner: fake.run })
+  assert.equal(result.status, 'complete', JSON.stringify(result.rounds.map(round => round.findings)))
+  assert.equal(result.rounds.length, 2)
+  assert.equal(result.rounds[0].candidate, null)
+  assert.ok(result.rounds[0].findings.some(finding => finding.code === 'output_schema'))
+  assert.match(fake.calls[1].prompt, /targetIndex/)
+  assert.deepEqual(fake.calls.map(call => call.purpose), ['elaboration_generate', 'elaboration_generate', 'elaboration_review'])
+  assert.equal(result.changes.some(change => change.path === leafPath), false)
+})
+
 test('调用者在await期间重排或改写targets不能改变冻结索引绑定', async () => {
   const frozen = input()
   const fake = runner(request => {
