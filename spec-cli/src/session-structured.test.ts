@@ -24,8 +24,15 @@ async function fixture(handler: (request: Rpc, send: (value: unknown) => void, s
   const server = createServer((socket) => {
     sockets.add(socket); socket.on('close', () => sockets.delete(socket))
     let buffer = Buffer.alloc(0), upgraded = false
+    const nativeTurns = new Map<string, ReturnType<typeof finalTurn>>()
     const send = (value: unknown): void => {
-      const payload = Buffer.from(JSON.stringify(value)); const header = payload.length < 126 ? Buffer.from([0x81, payload.length]) : Buffer.from([0x81, 126, payload.length >> 8, payload.length & 255])
+      const notification = value as { params?: { turn?: ReturnType<typeof finalTurn> } }
+      if (notification.params?.turn?.items) nativeTurns.set(notification.params.turn.id, notification.params.turn)
+      const payload = Buffer.from(JSON.stringify(value))
+      let header: Buffer
+      if (payload.length < 126) header = Buffer.from([0x81, payload.length])
+      else if (payload.length < 65536) header = Buffer.from([0x81, 126, payload.length >> 8, payload.length & 255])
+      else { header = Buffer.alloc(10); header[0] = 0x81; header[1] = 127; header.writeBigUInt64BE(BigInt(payload.length), 2) }
       socket.write(Buffer.concat([header, payload]))
     }
     socket.on('data', (chunk: Buffer) => {
@@ -38,14 +45,22 @@ async function fixture(handler: (request: Rpc, send: (value: unknown) => void, s
       while (buffer.length >= 2) {
         const masked = !!(buffer[1] & 128); let length = buffer[1] & 127, offset = 2
         if (length === 126) { if (buffer.length < 4) return; length = buffer.readUInt16BE(2); offset = 4 }
-        if (length === 127) { if (buffer.length < 10) return; length = Number(buffer.readBigUInt64BE(2)); offset = 10 }
+        else if (length === 127) { if (buffer.length < 10) return; length = Number(buffer.readBigUInt64BE(2)); offset = 10 }
         const start = offset + (masked ? 4 : 0); if (buffer.length < start + length) return
         const payload = Buffer.from(buffer.subarray(start, start + length)); if (masked) for (let index = 0; index < length; index++) payload[index] ^= buffer[offset + index % 4]
         buffer = buffer.subarray(start + length)
         const request = JSON.parse(payload.toString()) as Rpc; calls.push(request)
         if (request.id === undefined) continue
-        const response = handler(request, send, socket)
-        if (response !== undefined) send({ id: request.id, result: response })
+        let response = handler(request, send, socket)
+        if (request.method === 'thread/resume' && response) {
+          const thread = (response as { thread: { turns?: Array<ReturnType<typeof finalTurn>> } }).thread
+          for (const turn of thread.turns ?? []) nativeTurns.set(turn.id, turn)
+          assert.equal(request.params.excludeTurns, true)
+          response = { ...response, thread: { ...thread, turns: [] } }
+        }
+        if (response === undefined && request.method === 'thread/turns/list') response = { data: [...nativeTurns.values()].map(({ id, status }) => ({ id, status })), nextCursor: null }
+        if (response === undefined && request.method === 'thread/items/list') response = { data: (nativeTurns.get(request.params.turnId as string)?.items ?? []).map(item => ({ turnId: request.params.turnId, item })), nextCursor: null }
+        if (response !== undefined && response !== null) send({ id: request.id, result: response })
       }
     })
   })
@@ -71,6 +86,143 @@ function frozenFixture() {
   const turn = (items = [item]) => ({ ...finalTurn(), items: [...items, ...finalTurn().items] })
   return { ref, args, item, policy, turn, close: () => rmSync(directory, { recursive: true, force: true }) }
 }
+
+test('structured settlement pages exact raw items when full history never answers', async () => {
+  const data = frozenFixture()
+  const secondArgs = { ...data.args, startByte: 6 }
+  const items = data.turn([{ ...data.item, arguments: { ...data.args, endByte: 6 }, contentItems: readFrozenRange(data.ref, { ...data.args, endByte: 6 }).response.contentItems },
+    { ...data.item, id: 'native-call-2', arguments: secondArgs, contentItems: readFrozenRange(data.ref, secondArgs).response.contentItems }]).items
+  const finalText = JSON.stringify({ answer: 'x'.repeat(150_000) })
+  items[items.length - 1] = { type: 'agentMessage', phase: 'final_answer', text: finalText }
+  const f = await fixture((request, send) => {
+    if (request.method === 'turn/start') {
+      send({ method: 'turn/completed', params: { threadId: 'thread-exact', turn: { id: 'turn-exact', status: 'completed' } } })
+      return { turn: { id: 'turn-exact' } }
+    }
+    if (request.method === 'thread/turns/list') return { data: [{ id: 'turn-exact', status: 'completed' }], nextCursor: null }
+    if (request.method === 'thread/items/list') {
+      assert.equal(request.params.turnId, 'turn-exact')
+      const offset = Number(request.params.cursor ?? 0)
+      return { data: [{ turnId: 'turn-exact', item: items[offset] }], nextCursor: offset + 1 < items.length ? String(offset + 1) : null }
+    }
+    return safePrelude(request)
+  })
+  try {
+    const result = await codexStructuredTurn(f.path, '/fixture', 'pinned prompt', data.policy({ timeoutMs: 500 }), callbacks)
+    assert.deepEqual(result.frozenReadProof?.coveredEntryIds, ['source'])
+    assert.equal(result.frozenReadProof?.receipts.length, 2)
+    assert.equal(result.text, finalText)
+    assert.equal(f.calls.filter(call => call.method === 'thread/items/list').length, items.length)
+    assert.equal(f.calls.some(call => call.method === 'thread/read'), false)
+  } finally { await f.close(); data.close() }
+})
+
+for (const mode of ['foreign-turn', 'tampered']) test(`structured item pagination rejects ${mode} on a later page`, async () => {
+  const data = frozenFixture(), items = data.turn().items
+  const f = await fixture(request => {
+    if (request.method === 'thread/resume') return { thread: { id: 'thread-exact', turns: [data.turn()] } }
+    if (request.method === 'thread/items/list') {
+      if (!request.params.cursor) return { data: [{ turnId: 'turn-exact', item: items[1] }], nextCursor: 'tools' }
+      const item = mode === 'tampered' ? { ...data.item, contentItems: [{ type: 'inputText', text: 'tampered' }] } : data.item
+      return { data: [{ turnId: mode === 'foreign-turn' ? 'foreign' : 'turn-exact', item }, ...items.slice(2).map(item => ({ turnId: 'turn-exact', item }))], nextCursor: null }
+    }
+    return safePrelude(request)
+  })
+  try {
+    await assert.rejects(codexStructuredTurn(f.path, '/fixture', 'pinned prompt', data.policy({ threadId: 'thread-exact', turnId: 'turn-exact' }), callbacks), /different turn|result bytes/)
+    assert.equal(f.calls.some(call => call.method === 'turn/start' || call.method === 'thread/read'), false)
+  } finally { await f.close(); data.close() }
+})
+
+test('structured recovery finds its exact turn beyond the first metadata page', async () => {
+  const f = await fixture(request => {
+    if (request.method === 'thread/resume') return { thread: { id: 'thread-exact', turns: [] } }
+    if (request.method === 'thread/turns/list') return request.params.cursor
+      ? { data: [{ id: 'turn-exact', status: 'completed' }], nextCursor: null }
+      : { data: [{ id: 'foreign', status: 'completed' }], nextCursor: 'exact' }
+    if (request.method === 'thread/items/list') return { data: finalTurn().items.map(item => ({ turnId: 'turn-exact', item })), nextCursor: null }
+    return safePrelude(request)
+  })
+  try {
+    const result = await codexStructuredTurn(f.path, '/fixture', 'pinned prompt', execution({ threadId: 'thread-exact', turnId: 'turn-exact' }), callbacks)
+    assert.equal(result.turnId, 'turn-exact')
+    assert.equal(f.calls.some(call => call.method === 'turn/start'), false)
+  } finally { await f.close() }
+})
+
+test('structured missing completion notification settles through exact turn metadata without another turn', async () => {
+  const f = await fixture(request => {
+    if (request.method === 'turn/start') return { turn: { id: 'turn-exact' } }
+    if (request.method === 'thread/turns/list') return { data: [{ id: 'turn-exact', status: 'completed' }], nextCursor: null }
+    if (request.method === 'thread/items/list') return { data: finalTurn().items.map(item => ({ turnId: 'turn-exact', item })), nextCursor: null }
+    return safePrelude(request)
+  })
+  try {
+    const result = await codexStructuredTurn(f.path, '/fixture', 'pinned prompt', execution(), callbacks)
+    assert.equal(result.text, '{"answer":"exact"}')
+    assert.equal(f.calls.filter(call => call.method === 'turn/start').length, 1)
+    assert.equal(f.calls.some(call => call.method === 'thread/read'), false)
+  } finally { await f.close() }
+})
+
+test('structured completion polling waits through accepted-turn materialization without starting another turn', async () => {
+  let polls = 0
+  const f = await fixture(request => {
+    if (request.method === 'turn/start') return { turn: { id: 'turn-exact' } }
+    if (request.method === 'thread/turns/list') return { data: ++polls === 1 ? [] : [{ id: 'turn-exact', status: polls === 2 ? 'inProgress' : 'completed' }], nextCursor: null }
+    if (request.method === 'thread/items/list') return { data: finalTurn().items.map(item => ({ turnId: 'turn-exact', item })), nextCursor: null }
+    return safePrelude(request)
+  })
+  try {
+    const result = await codexStructuredTurn(f.path, '/fixture', 'pinned prompt', execution({ timeoutMs: 5000 }), callbacks)
+    assert.equal(result.turnId, 'turn-exact')
+    assert.equal(f.calls.filter(call => call.method === 'turn/start').length, 1)
+    assert.ok(polls >= 3)
+  } finally { await f.close() }
+})
+
+test('structured recovery refuses a missing pinned turn instead of treating it as materializing', async () => {
+  const f = await fixture(request => request.method === 'thread/resume' ? { thread: { id: 'thread-exact', turns: [] } } : safePrelude(request))
+  try {
+    await assert.rejects(codexStructuredTurn(f.path, '/fixture', 'pinned prompt', execution({ threadId: 'thread-exact', turnId: 'turn-exact' }), callbacks), error => error instanceof StructuredSessionError && error.code === 'stale_result')
+    assert.equal(f.calls.some(call => call.method === 'turn/start'), false)
+  } finally { await f.close() }
+})
+
+test('structured completion waits for its original durable frozen tool work before reading result pages', async () => {
+  const data = frozenFixture()
+  let durable = false
+  const f = await fixture((request, send) => {
+    if (request.method === 'turn/start') {
+      send({ id: 99, method: 'item/tool/call', params: { threadId: 'thread-exact', turnId: 'turn-exact', callId: 'native-call', tool: 'spex_read_frozen', arguments: data.args } })
+      send({ method: 'turn/completed', params: { threadId: 'thread-exact', turn: data.turn() } })
+      return { turn: { id: 'turn-exact' } }
+    }
+    if (request.method === 'thread/items/list') assert.equal(durable, true)
+    return safePrelude(request)
+  })
+  try {
+    const result = await codexStructuredTurn(f.path, '/fixture', 'pinned prompt', data.policy(), { ...callbacks, onFrozenRead: async () => { await new Promise(resolve => setTimeout(resolve, 30)); durable = true } })
+    assert.equal(result.frozenReadProof?.receipts.length, 1)
+  } finally { await f.close(); data.close() }
+})
+
+for (const mode of ['cancel', 'timeout']) test(`structured ${mode} while a result page is pending cannot publish output`, async () => {
+  const controller = new AbortController()
+  const f = await fixture(request => {
+    if (request.method === 'thread/resume') return { thread: { id: 'thread-exact', turns: [finalTurn()] } }
+    if (request.method === 'thread/items/list') {
+      if (!request.params.cursor) return { data: [{ turnId: 'turn-exact', item: finalTurn().items[0] }], nextCursor: 'pending' }
+      if (mode === 'cancel') setTimeout(() => controller.abort(), 10)
+      return null
+    }
+    return safePrelude(request)
+  })
+  try {
+    await assert.rejects(codexStructuredTurn(f.path, '/fixture', 'pinned prompt', execution({ threadId: 'thread-exact', turnId: 'turn-exact', timeoutMs: 100 }), { ...callbacks, signal: controller.signal }), error => error instanceof StructuredSessionError && error.code === (mode === 'cancel' ? 'cancelled' : 'timeout'))
+    assert.equal(f.calls.some(call => call.method === 'turn/start' || call.method === 'turn/interrupt'), false)
+  } finally { await f.close() }
+})
 
 test('frozen native dynamic requests persist before replying and cannot collide with a client RPC id', async () => {
   const data = frozenFixture(), receipts: unknown[] = []
