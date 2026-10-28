@@ -25,6 +25,7 @@ import { claimFileMutex } from './file-mutex.js'
 import type { FileMutex } from './file-mutex.js'
 import { composeAuthoredInput } from './author-input.js'
 import { readCompositionEvidence } from './composition.js'
+import { adaptElaborationNativeOutput } from '../../test/elaboration-native-output.js'
 import { readFrozenBehaviorContext } from '../../test/frozen-behavior-context.js'
 import { composeControlledRequest, prepareControlledRequest, renderControlledDecisionRaw } from './request-input.js'
 import type { ApplyJournal, BaselinePair, VerificationResultBlob } from './operation-types.js'
@@ -713,6 +714,7 @@ async function exportApplicationFixture(t: test.TestContext, choice?: 'keep_inte
       }
     }
     if (otherNode && request.purpose === 'elaboration_generate') output = JSON.parse(JSON.stringify(output).replaceAll('EXPORT', 'OTHER').replaceAll('export-contract', 'other-contract').replaceAll('src/export.js', 'src/other.js').replaceAll('tests/export.test.mjs', 'tests/other.test.mjs')) as unknown
+    output = adaptElaborationNativeOutput(request, output)
     const dispatch = application.store.readAttempt(operation.currentAttemptId!).dispatchPlans.find(plan => plan.key === request.requestKey)!
     return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `independent-${request.requestKey}`, turnId: 'turn-1', output, resultDigest: contentHash(JSON.stringify(output)) }
   } })
