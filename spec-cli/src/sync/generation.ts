@@ -95,7 +95,7 @@ export async function runGeneration(supplied: GenerationInput, options: Generati
   try {
     cancelled()
     if (typeof options.validateCandidate !== 'function' || typeof options.runner !== 'function') throw new Error('必须注入 runner 与 candidate 硬门禁')
-    if (!input.requestKey || !input.intent.rawSource.trim() || !input.policy.version || !input.policy.digest || !Number.isInteger(input.timeoutMs) || input.timeoutMs <= 0 || input.model !== 'gpt-6.1-sol' || input.effort !== 'high') throw new Error('冻结原意、政策、稳定请求键、超时或模型配置无效')
+    if (!input.requestKey || !input.intent.rawSource.trim() || !input.policy.version || !input.policy.digest || !Number.isInteger(input.timeoutMs) || input.timeoutMs <= 0 || typeof input.model !== 'string' || !input.model.trim() || input.effort !== 'high') throw new Error('冻结原意、政策、稳定请求键、超时或模型配置无效')
     if (!input.readyIds.length || new Set(input.readyIds).size !== input.readyIds.length || new Set(input.blockedIds).size !== input.blockedIds.length || input.readyIds.some(id => input.blockedIds.includes(id) || !input.contracts.some(contract => contract.items.some(item => item.id === id)) && !input.retiredIds?.includes(id))) throw new Error('预定 readyIds 必须非空、唯一、属于细化契约且不被 blockedIds 阻断')
     for (const spec of input.elaboratedSpecs) if (!validateRepositoryPath(spec.path).startsWith('.spec/') || !spec.path.endsWith('/spec.md') || !spec.source.trim()) throw new Error('细化后的 desired Spec 必须为完整规范正文')
     if (new Set(input.elaboratedSpecs.map(spec => spec.path)).size !== input.elaboratedSpecs.length) throw new Error('desired Spec 路径不能重复')

@@ -81,3 +81,7 @@ P4 裁决复现已结算选择后，另一真实 SQLite journal/receipt 推进�
 模拟旧版迁移库时移除目标旧代之后全部 marker，不能留下新增 writer marker 形成不存在的 schema gap；旧 writer 拒绝断言从当前迁移注册推导最高代数。
 
 历史恢复结算仅接受与冻结计划逐项相同的 restoredIds；未获固定历史授权的验证元数据不能发布新资源头或解除退休状态。新 pair 的当前退休集合按真实恢复身份推进，原不可变退休审计保持；新版 writer 语义 marker 必须拒绝旧 writer 和未知未来版本写入。
+
+固定模型用例先复现旧实现忽略模型，再验证同键冲突、普通重复换模型拒绝、显式retry可换且旧sol记录不改写；预算与原业务绑定保持，遵循 [[sync-model-selection]]。
+
+v12→v13真实SQLite marker升级逐字比较operation、attempt、ingress receipt、journal/receipt及baseline表，核一致备份保原generation且旧migration数组拒读新generation；模型缺字段旧记录保持sol语义，无DDL与payload改写。

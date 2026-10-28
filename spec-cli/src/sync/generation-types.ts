@@ -33,7 +33,7 @@ export type GenerationInput = {
   policy: { version: string; digest: string }
   timeoutMs: number
   signal?: AbortSignal
-  model: 'gpt-6.1-sol'
+  model: string
   effort: 'high'
 }
 /** 独立语义发现均为阻断项；程序硬门禁另用 ContractFinding.severity。 */

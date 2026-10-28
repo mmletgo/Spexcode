@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { syncModel, syncModelBinding } from './model-selection.js'
 import { getBlob } from '@spexcode/spec-core'
 import { applyComponentMigrations, type ProtocolTransaction, type SessionProtocol } from '@spexcode/session-protocol'
 import { controlledDecisionIdentity, readControlledDecision, readControlledRequest } from './request-input.js'
@@ -318,19 +319,22 @@ export class SyncStore {
     return syncSemanticDigest({ ...input, requestBlob: { sha256: digest({ ...request, origin }) } })
   }
   private saveIngressReceipt(tx: ProtocolTransaction, input: AdmitSyncInput, operationId: string, payloadDigest: string): void {
-    const receipt: SyncIngressReceipt = { operationId, payloadDigest, input: clone(input.input), origin: input.origin, ...(input.requestBlob ? { requestBlob: input.requestBlob } : {}), budget: input.budget, deliveryPlan: input.deliveryPlan, previousBaselinePair: input.previousBaselinePair ?? null, ...(input.baselineSelection ? { baselineSelection: clone(input.baselineSelection) } : {}) }
+    const receipt: SyncIngressReceipt = { operationId, payloadDigest, ...syncModelBinding(input.model), input: clone(input.input), origin: input.origin, ...(input.requestBlob ? { requestBlob: input.requestBlob } : {}), budget: input.budget, deliveryPlan: input.deliveryPlan, previousBaselinePair: input.previousBaselinePair ?? null, ...(input.baselineSelection ? { baselineSelection: clone(input.baselineSelection) } : {}) }
     tx.exec('INSERT INTO sync_ingress_receipts(ingress_key,operation_id,payload_digest,record_json) VALUES(?,?,?,?)', input.ingressKey, operationId, payloadDigest, JSON.stringify(receipt))
   }
   /** 稳定接入记录与既有消息派发计划共享一个 SQL 事务。 */
   admitAndEnqueue(input: AdmitSyncInput): SyncOperation { return this.admitWithObservation(input) }
   private admitWithObservation(input: AdmitSyncInput, observation?: SyncObservation): SyncOperation {
     validateScope(input.scope)
+    if (input.model !== undefined && (typeof input.model !== 'string' || !input.model || input.model !== input.model.trim())) fail('SYNC_MODEL_INVALID', '模型需要非空精确 ID')
+    const { model, ...withoutModel } = input
+    input = { ...withoutModel, ...syncModelBinding(model) }
     if (input.retryOf !== undefined && (typeof input.retryOf !== 'string' || !input.retryOf.trim())) fail('SYNC_RETRY_BINDING', '显式重试需要有效的原operation身份')
     this.blob(input.input.manifestBlob)
     if (input.retryOf && (this.readOperation(input.retryOf).requestBlob?.sha256 ?? null) !== (input.requestBlob?.sha256 ?? null)) fail('SYNC_RETRY_BINDING', '显式重试必须继承原始用户请求引用')
     if (input.planBlob) { this.blob(input.planBlob); if (input.planBlob.sha256 !== input.policyDigest) fail('SYNC_PLAN_BINDING', 'plan evidence must have exactly the frozen policy digest') }
     if (input.delivery && (input.delivery.canonicalRoot !== input.deliveryPlan.canonicalRoot || input.delivery.branch !== input.deliveryPlan.branch || input.delivery.repositoryId !== input.input.source.repositoryId)) fail('SYNC_DELIVERY_BINDING', 'bound delivery differs from durable plan')
-    const payload = { input: inputPayload(input.input), ...(input.requestBlob ? { requestBlob: input.requestBlob } : {}), ...(input.planBlob ? { planBlob: input.planBlob } : {}), ...(input.retryOf ? { retryOf: input.retryOf } : {}), scope: canonicalScope(input.scope), policyDigest: input.policyDigest, impactDigest: input.impactDigest, readSetDigest: input.readSetDigest, deliveryPlan: input.deliveryPlan, previousBaselinePairId: input.previousBaselinePair?.id ?? null, ...(input.baselineSelection ? { baselineSelectionDigest: input.baselineSelection.digest } : {}), budget: input.budget }
+    const payload = { input: inputPayload(input.input), ...syncModelBinding(input.model), ...(input.requestBlob ? { requestBlob: input.requestBlob } : {}), ...(input.planBlob ? { planBlob: input.planBlob } : {}), ...(input.retryOf ? { retryOf: input.retryOf } : {}), scope: canonicalScope(input.scope), policyDigest: input.policyDigest, impactDigest: input.impactDigest, readSetDigest: input.readSetDigest, deliveryPlan: input.deliveryPlan, previousBaselinePairId: input.previousBaselinePair?.id ?? null, ...(input.baselineSelection ? { baselineSelectionDigest: input.baselineSelection.digest } : {}), budget: input.budget }
     const legacyPayloadDigest = digest(payload), payloadDigest = digest({ ...payload, origin: input.origin })
     const requestType = input.requestBlob ? JSON.parse(this.blob(input.requestBlob).toString('utf8')) as { type?: string } : null
     const decision = requestType?.type === 'sync.decision' ? readControlledDecision(input.input, input.requestBlob!) : null
@@ -351,6 +355,7 @@ export class SyncStore {
       }
       if (observation && input.baselineSelection) this.assertSelection(tx, input.input.source, input.baselineSelection, scopeResources(input.scope))
       const finish = (operation: SyncOperation, outcome: 'admitted' | 'coalesced' | 'duplicate'): SyncOperation => {
+        if (syncModel(operation) !== syncModel(input)) fail('SYNC_MODEL_RETRY_REQUIRED', '相同业务输入切换模型必须使用正式 retryOf')
         if (observation) { observation.operationId = operation.id; observation.outcome = outcome; this.saveObservation(tx, observation) }
         return operation
       }

@@ -139,3 +139,5 @@ there is that feature's, not `guide`'s drift.
 
 
 The sync guide documents manual code/combined ingestion and bound business decisions via [[sync-cli]]. It explains trusted analysis/finding references and keep/adopt/new-rule choices; ordinary completion needs no extra confirmation, retry does not authorize business changes, and enabled sources are watched by the formal backend lifecycle.
+
+sync guide 说明 run/verify --model 固定全阶段及独审选择，默认 sol，省略 retry 继承；普通重复不刷新预算，恢复不换模型，原生目录仍验证可用性，遵循 [[sync-model-selection]]。

@@ -90,3 +90,5 @@ raw-only 初始化允许的空 affectedIds 不能被解释为没有阻塞。完�
 恢复Spec自带VERIFY时，其原技术ID与node tombstone同样纳入已审scope/head覆盖并推进新receipt；generation/review的readyIds仍只业务ID。P1及当前可信verifications的argv/cwd/预算精确登记不变，restore不能批准旧验证命令覆盖新政策。
 
 显式 retryOf 的行为修复反馈沿真实不可变引用逐代读取，仅在来源物理身份、input.id、policyDigest、readSetDigest、requestBlob 及 origin 与当前操作精确相同时，将各代 behavior_analysis_invalid/behavior_review_failed 的完整 code/message 按原先后交给本次分析和新独审。来源/input/政策/request/origin 结构绑定不符仍拒绝；合法 P1 扩作用域使当前 readSetDigest 不同于祖先时，只停止继承该代及更早诊断，保留本操作反馈并继续新分析，不由可选诊断新增业务阻断。不沿 changed-input successorOf 取反馈。诊断始终是未批准数据，不构成基线、业务批准、权限或可重用分析；现有预算、尝试、deadline 和独审门禁保持。
+
+所有行为分析、细化、生成与各自独立评审使用 operation 的固定有效 model（历史缺省为 gpt-6.1-sol），遵循 [[sync-model-selection]]；恢复沿原结构化请求，模型不改变预算、业务权限或已批准 P1 继承。

@@ -34,7 +34,7 @@ function completed(record: NativeRunRecord): StructuredSessionResult {
   record.structuredExecution = { ...record.structuredExecution!, state: 'completed', threadId, turnId, output, resultDigest: hash(output) }
   return { sessionId: record.session, threadId, turnId, output, resultDigest: hash(output) }
 }
-async function fixture(existingRoot?: string) {
+async function fixture(existingRoot?: string, model?: string) {
   const root = existingRoot ?? mkdtempSync(join(tmpdir(), 'native-run-')), protocol = openProtocol(join(root, 'db.sqlite'))
   const cache = new Map<string, Buffer>()
   const blobIO = { put: (bytes: Buffer): BlobRef => { const sha256 = createHash('sha256').update(bytes).digest('hex'); cache.set(sha256, bytes); return { sha256 } }, read: (ref: BlobRef): Buffer => { const bytes = cache.get(ref.sha256); assert.ok(bytes); return bytes } }
@@ -42,9 +42,9 @@ async function fixture(existingRoot?: string) {
   await migrateSyncStore(protocol)
   const store = new SyncStore(protocol, { readBlob: blobIO.read })
   const source = { repositoryId: 'repo', commonDir: join(root, '.git'), canonicalRoot: root, gitDir: join(root, '.git'), branch: 'source', physicalFingerprint: 'physical-source' }
-  const operation = store.admitAndEnqueue({ ingressKey: 'request', rootCauseId: 'cause', origin: 'spec', input: { id: 'source-input', source, headCommit: 'a'.repeat(40), immutableTree: 'b'.repeat(40), indexTree: 'b'.repeat(40), indexDigest: 'c'.repeat(64), manifestBlob, contentDigest: 'd'.repeat(64), capturedAtMs: Date.now() }, scope: { paths: ['src/a.ts'], contractIds: ['RULE-A'], flowIds: [] }, budget: { maxCalls: 4, maxAttempts: 4, maxRepairs: 2, timeoutMs: 60000 }, policyDigest: 'policy', impactDigest: 'impact', readSetDigest: 'read', delivery: null, deliveryPlan: { canonicalRoot: join(root, 'delivery'), branch: 'delivery', baseCommit: 'a'.repeat(40) } })
+  const operation = store.admitAndEnqueue({ ingressKey: 'request', rootCauseId: 'cause', origin: 'spec', ...(model ? { model } : {}), input: { id: 'source-input', source, headCommit: 'a'.repeat(40), immutableTree: 'b'.repeat(40), indexTree: 'b'.repeat(40), indexDigest: 'c'.repeat(64), manifestBlob, contentDigest: 'd'.repeat(64), capturedAtMs: Date.now() }, scope: { paths: ['src/a.ts'], contractIds: ['RULE-A'], flowIds: [] }, budget: { maxCalls: 4, maxAttempts: 4, maxRepairs: 2, timeoutMs: 60000 }, policyDigest: 'policy', impactDigest: 'impact', readSetDigest: 'read', delivery: null, deliveryPlan: { canonicalRoot: join(root, 'delivery'), branch: 'delivery', baseCommit: 'a'.repeat(40) } })
   const claimed = store.claimAttempt({ operationId: operation.id, source, scope: operation.scope, leaseMs: 30000, expectedMessageId: operation.dispatchMessageId })
-  const request = { root, base: 'a'.repeat(40), prompt: 'Return the frozen answer', schema: { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'], additionalProperties: false }, requestKey: 'generation-1', inputDigest: 'elaboration-input', purpose: 'generation', timeoutMs: 5000 }
+  const request = { root, base: 'a'.repeat(40), prompt: 'Return the frozen answer', schema: { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'], additionalProperties: false }, requestKey: 'generation-1', inputDigest: 'elaboration-input', purpose: 'generation', timeoutMs: 5000, ...(model ? { model, effort: 'high' as const } : {}) }
   const records = new Map<string, NativeRunRecord>()
   const resource = () => store.findResource(claimed.attempt.id, request.requestKey)!
   const checkpoint = (): NativeRunCheckpoint => JSON.parse(blobIO.read(resource().checkpointRef).toString('utf8')) as NativeRunCheckpoint
@@ -109,7 +109,7 @@ test('same key concurrent callers share one run and call budget; changed payload
 })
 
 test('frozen native dispatch preserves business binding, uses actual attempt/policy and verifies proof on removed replay', async () => {
-  const f = await fixture(), directory = mkdtempSync(join(tmpdir(), 'native-run-frozen-'))
+  const f = await fixture(undefined, 'gpt-6.1-terra'), directory = mkdtempSync(join(tmpdir(), 'native-run-frozen-'))
   try {
     const frozenContext = freezeContext({ directory, sourceRoot: f.root, binding: { requestKey: f.request.requestKey, inputDigest: f.request.inputDigest, attemptId: f.claimed.attempt.id, policyDigest: f.claimed.operation.policyDigest }, entries: [{ id: 'task', label: 'task', kind: 'utf8', bytes: Buffer.from('frozen task') }] })
     let calls = 0
@@ -123,6 +123,10 @@ test('frozen native dispatch preserves business binding, uses actual attempt/pol
       return { ...result, frozenReadProof }
     } })
     const request = { ...f.request, frozenContext }, result = await run(request)
+    const plan = JSON.parse(f.blobIO.read(f.resource().plan.planBlob).toString()) as NativeRunPlan
+    assert.equal(plan.request.model, 'gpt-6.1-terra'); assert.equal(plan.request.effort, 'high')
+    assert.equal(plan.requestDigest, hash(plan.request)); assert.equal(f.records.get(result.sessionId)!.structuredExecution!.model, 'gpt-6.1-terra')
+    await assert.rejects(run({ ...request, model: 'gpt-6-astra' }), /key was reused/)
     assert.equal(f.resource().phase, 'removed'); assert.equal(calls, 1)
     assert.deepEqual(await run(request), result); assert.equal(calls, 1)
     const bad = freezeContext({ directory, sourceRoot: f.root, binding: { requestKey: 'foreign', inputDigest: f.request.inputDigest, attemptId: f.claimed.attempt.id, policyDigest: f.claimed.operation.policyDigest }, entries: [] })
@@ -214,12 +218,13 @@ test('transport failure leaves live resource; same-key recovery rejoins existing
 })
 
 test('incorrect native result identity, hash or published request binding is never delivered or marked removed', async () => {
-  for (const defect of ['session', 'thread', 'hash', 'record_payload'] as const) {
+  for (const defect of ['session', 'thread', 'hash', 'record_payload', 'record_model'] as const) {
     const f = await fixture()
     try {
       const run = f.runner({ ...f.runtimeBase, run: async request => {
         const record = published(request), result = completed(record); f.records.set(record.session, record)
         if (defect === 'record_payload') record.createPayloadHash = 'wrong-request-hash'
+        if (defect === 'record_model') record.structuredExecution!.model = 'gpt-6-astra'
         return { ...result, ...(defect === 'session' ? { sessionId: 'wrong-session' } : {}), ...(defect === 'thread' ? { threadId: 'wrong-thread' } : {}), ...(defect === 'hash' ? { resultDigest: 'wrong-output-hash' } : {}) }
       } })
       await assert.rejects(run(f.request), /invalid|differs/)

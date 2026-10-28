@@ -43,3 +43,5 @@ P4 采用第10代增量组件迁移：新增物理控制、资源 frontier、持
 第11代仅登记成组不可变历史请求的 writer 语义，不修改既有迁移字节、会话或 journal。先在线备份，marker 与升级事务一起结算，旧 writer 拒绝未知授权；版本回退保留新增表和 evidence。
 
 v12标记同一历史身份restore及按当前逐ID head读取退休状态的writer语义；v11及更旧writer必须拒绝新generation，迁移保原表/retirement pair并先一致备份。
+
+v13仅以无DDL SELECT 1登记操作固定模型的writer能力，保v1-v12字节/checksum及全部旧operation/payload/receipt/fence记录。先按原流程online backup，旧二进制必须在读取operation或派生retry前因未来generation拒绝；v2运行描述继续核精确操作模型。回滚须先停writer并结算或保留真实资源，按既有恢复流程恢复升级前一致数据库备份及其原evidence，不能让旧writer直接读v13或删marker降级。模型合同属于 [[sync-model-selection]]。

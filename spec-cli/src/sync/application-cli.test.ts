@@ -92,6 +92,25 @@ test('AC-SYNC-CLI-02 CLI run/status/control 走相同持久服务HTTP且保留�
 
   } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())) }
 })
+test('sync run和verify传递--model，resume/recover不接受模型切换', async () => {
+  const requests: { url: string; body: { model?: string } }[] = []
+  const server = createServer(async (request, response) => {
+    const chunks: Buffer[] = []; for await (const bytes of request) chunks.push(bytes as Buffer)
+    requests.push({ url: request.url!, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) })
+    response.writeHead(200, { 'content-type': 'application/json' }); response.end('{}')
+  })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  const api = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+  try {
+    for (const verb of ['run', 'verify']) assert.equal((await cli(['sync', verb, 'demo', '--model', 'gpt-6.1-terra', '--api', api])).code, 0)
+    assert.deepEqual(requests.map(item => [item.url, item.body.model]), [['/api/sync/run', 'gpt-6.1-terra'], ['/api/sync/verify', 'gpt-6.1-terra']])
+    for (const verb of ['resume', 'recover']) {
+      const refused = await cli(['sync', verb, 'op-1', '--model', 'gpt-6-astra', '--api', api])
+      assert.equal(refused.code, 1); assert.equal(requests.length, 2)
+    }
+  } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())) }
+})
+
 test('AC-SYNC-CLI-03 后端离线不回退mock或留下虚假成功输出', async () => {
   const server = createServer()
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))

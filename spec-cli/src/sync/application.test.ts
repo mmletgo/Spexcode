@@ -68,6 +68,60 @@ async function fixture(config: unknown = settings, onRun?: (request: Elaboration
   return { temp, root, git, protocol, application, calls, cleanup: (): void => { protocol.close(); rmSync(temp, { recursive: true, force: true }) } }
 }
 
+test('操作模型经真实Git入口持久化，重启和省略重试继承，普通重复不能刷新预算', async () => {
+  const f = await fixture()
+  try {
+    await f.application.enable()
+    await f.application.automaticControl('pause')
+    const first = (await f.application.submit({ nodeId: 'demo', requestId: 'default-model' })).operation!
+    assert.equal(first.model, undefined)
+    const toolsRef = (operation: typeof first): string => join(f.temp, 'runtime', 'artifacts', `application-runtime-${contentHash(operation.ingressKey)}.json`)
+    const oldTools = readFileSync(toolsRef(first), 'utf8'), oldPayload = first.payloadDigest
+    assert.equal(JSON.parse(oldTools).version, 'sync-tools-v1')
+    await assert.rejects(f.application.submit({ nodeId: 'demo', requestId: 'default-model', model: 'gpt-6.1-terra' }), /SYNC_IDEMPOTENCY_CONFLICT/)
+    await assert.rejects(f.application.submit({ nodeId: 'demo', requestId: 'ordinary-model-change', model: 'gpt-6.1-terra' }), /SYNC_MODEL_RETRY_REQUIRED/)
+    assert.equal((await f.application.status()).operations.length, 1)
+    assert.equal((await f.application.submit({ nodeId: 'demo', requestId: 'default-model', model: 'gpt-6.1-sol' })).operation!.id, first.id)
+    await f.application.control(first.id, 'cancel')
+    const residualKey = `application:${first.input.source.repositoryId}:${first.input.source.canonicalRoot}:ordinary-model-change`
+    const dispatchBefore = f.application.store.nextDispatch(first.input.source.repositoryId)
+    await assert.rejects(f.application.submit({ nodeId: 'demo', requestId: 'ordinary-model-change', retryOf: first.id, model: 'gpt-6-astra' }), /模型不同/)
+    const residualPath = join(f.temp, 'runtime', 'artifacts', `application-runtime-${contentHash(residualKey)}.json`)
+    renameSync(residualPath, `${residualPath}.saved`)
+    try {
+      await assert.rejects(f.application.submit({ nodeId: 'demo', requestId: 'ordinary-model-change', retryOf: first.id, model: 'gpt-6-astra' }), /模型不同/)
+      assert.throws(() => readFileSync(residualPath), /ENOENT/)
+    } finally { renameSync(`${residualPath}.saved`, residualPath) }
+    assert.equal(f.application.store.findOperationByIngressKey(residualKey), null); assert.equal(f.application.store.findIngressReceipt(residualKey), null)
+    assert.deepEqual(f.application.store.nextDispatch(first.input.source.repositoryId), dispatchBefore)
+    assert.equal((await f.application.status()).operations.length, 1)
+    const chosen = (await f.application.submit({ nodeId: 'demo', requestId: 'ordinary-model-change', retryOf: first.id, model: 'gpt-6.1-terra' })).operation!
+    assert.equal(chosen.model, 'gpt-6.1-terra'); assert.equal(chosen.callsUsed, 0)
+    assert.deepEqual(chosen.input, first.input); assert.equal(chosen.policyDigest, first.policyDigest); assert.equal(chosen.readSetDigest, first.readSetDigest)
+    assert.deepEqual(chosen.budget, first.budget)
+    const selectedTools = readFileSync(toolsRef(chosen), 'utf8')
+    assert.equal(JSON.parse(selectedTools).version, 'sync-tools-v2'); assert.equal(JSON.parse(selectedTools).model, chosen.model)
+    await f.application.stopService()
+    const restarted = await SyncApplication.create(f.root, { protocol: f.protocol, runtimeDirectory: join(f.temp, 'runtime'), tools: { trustedRuntimeRoot: '/missing-runtime', toolEntry: '/missing-runtime/cli.js', canonicalHooksDir: '/missing-runtime/hooks' }, runner: async request => { f.calls.push(request); throw Object.assign(new Error('受控原生环境故障'), { code: 'unsupported' }) } })
+    try {
+      const replay = (await restarted.submit({ nodeId: 'demo', requestId: 'ordinary-model-change', retryOf: first.id })).operation!
+      assert.equal(replay.id, chosen.id); assert.equal(replay.model, chosen.model)
+      assert.equal(readFileSync(toolsRef(chosen), 'utf8'), selectedTools)
+      assert.equal(restarted.store.readOperation(first.id).payloadDigest, oldPayload); assert.equal(readFileSync(toolsRef(first), 'utf8'), oldTools)
+      await restarted.control(chosen.id, 'cancel')
+      const inherited = (await restarted.submit({ nodeId: 'demo', requestId: 'inherited-model', retryOf: chosen.id })).operation!
+      assert.equal(inherited.model, chosen.model)
+      await restarted.automaticControl('resume')
+      await restarted.wait(inherited.id)
+      assert.equal(f.calls.length, 1); assert.equal(f.calls[0].model, 'gpt-6.1-terra'); assert.equal(f.calls[0].effort, 'high')
+      const saved = JSON.parse(readFileSync(toolsRef(inherited), 'utf8'))
+      writeFileSync(toolsRef(inherited), JSON.stringify({ ...saved, model: 'gpt-6-astra' }))
+      const availability = (await restarted.readOperation(inherited.id)).executionAvailability
+      assert.equal(availability.status, 'recovery_required'); assert.equal(availability.failure!.code, 'sync_execution_metadata_unavailable'); assert.match(availability.failure!.message, /模型不同/)
+    } finally { await restarted.stopService() }
+  } finally { await f.application.stopService(); f.cleanup() }
+})
+
 test('AC-APPLICATION-01 缺少可信配置明确拒绝，现有配置启用CAS且不修改版本化文件', async () => {
   const f = await fixture(undefined)
   try {

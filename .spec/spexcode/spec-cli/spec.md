@@ -141,3 +141,5 @@ Evidence bytes ride `/api/evidence` (`POST` = content-addressed put,
 正式后端启动恢复本机明确enable的同步来源并持有 [[sync-input-observer]]，与SSE订阅无关。关闭/正常signal先回收同步watcher、timer并安全结算已开始扫描与执行。/api/sync/automatic/pause|resume 是物理输入控制，/verify仍调用 [[sync-application]] 同一完整管线；路由不复制资格判定。
 
 HTTP 入口先确认 Hono listener 已发出真实 `listening` 事件，再安装连接回收器与 WebSocket 升级处理，最后才等待配置同步的启动追赶。这样 `/health` 只在真实绑定后对 supervisor 可用，同时不被同步追赶延迟阻塞。
+
+/api/sync/run 与 /verify 将 model 原样交同一应用边界校验和冻结；不在路由选择全局默认或忽略非字符串，遵循 [[sync-model-selection]]。

@@ -110,3 +110,5 @@ bindPublicationBase 消费 [[sync-publication-base]] 实际对象证明，只在
 sync.history 请求采用固定输入、目标真实交付及完整成组差量；规范语义身份仅排除运输 requestId，相同补偿换运输键不重开预算。精确接入收据与原 requestBlob 继续保留每个运输请求，schema generation 使旧 writer 拒绝未知成组授权。
 
 精确 restore 只在完整验证与 receipt 结算后发布该 ID 的新有效 intent head；verification 的 restoredIds 必须精确对应本操作冻结 restore 授权。successor pair 的当前 retiredIds 释放这些已证明恢复的 ID，既有 immutable retirement pair 不修改。旧 path pair 的累计集合不覆盖该 ID 的较新 intent head。此 writer 语义通过 schema generation fence 隔离旧 writer，不新增表。
+
+模型选择遵循 [[sync-model-selection]]：规范化默认 sol 而不改旧摘要，非默认进入 payload/ingress。业务语义归并仍独立于模型；同 requestId 改模型为幂等冲突，普通重复换模型必须拒绝而不新建预算或归并到旧模型；只有合法 retryOf 可另选模型。

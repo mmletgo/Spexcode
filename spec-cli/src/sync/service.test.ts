@@ -83,9 +83,13 @@ test('AC-SYNC-SERVICE-01 真实HTTP/CLI共享物理暂停，无Dashboard保存�
     const restarted = await request<Status>(`/status?targetTree=${encodeURIComponent(root)}`)
     assert.ok(restarted.observation.latestSnapshot)
     assert.equal(restarted.observation.latestSnapshot.headCommit, git('rev-parse', 'HEAD')); assert.equal(restarted.observation.control.control, 'pause'); assert.equal(restarted.operations.length, 0)
-    const verify = await cli(root, api, env, ['verify', 'demo', '--request-id', 'verify-1']); assert.equal(verify.code, 0, verify.stderr)
+    const verify = await cli(root, api, env, ['verify', 'demo', '--request-id', 'verify-1', '--model', 'gpt-6.1-terra']); assert.equal(verify.code, 0, verify.stderr)
     const queued = JSON.parse(verify.stdout).operation
-    assert.equal(queued.phase, 'queued'); assert.equal(queued.callsUsed, 0)
+    assert.equal(queued.phase, 'queued'); assert.equal(queued.callsUsed, 0); assert.equal(queued.model, 'gpt-6.1-terra')
+    const duplicate = await cli(root, api, env, ['run', 'demo', '--origin', 'combined', '--request-id', 'verify-1'])
+    assert.equal(duplicate.code, 0, duplicate.stderr); assert.equal(JSON.parse(duplicate.stdout).operation.model, 'gpt-6.1-terra')
+    const conflict = await cli(root, api, env, ['run', 'demo', '--origin', 'combined', '--request-id', 'verify-1', '--model', 'gpt-6-astra'])
+    assert.equal(conflict.code, 1); assert.match(conflict.stderr, /SYNC_IDEMPOTENCY_CONFLICT/)
     const refused = await cli(root, api, env, ['recover', queued.id]); assert.equal(refused.code, 0, refused.stderr)
     assert.equal(JSON.parse(refused.stdout).operation.callsUsed, 0)
     for (const body of [{ targetTree: root, requestId: 'revert-1', operationId: 'different-operation' }, { targetTree: root, requestId: ' ' }]) {
@@ -94,11 +98,19 @@ test('AC-SYNC-SERVICE-01 真实HTTP/CLI共享物理暂停，无Dashboard保存�
     }
     const unlanded = await cli(root, api, env, ['revert', queued.id, '--request-id', 'revert-unlanded'])
     assert.equal(unlanded.code, 1); assert.equal(unlanded.stdout, ''); assert.match(unlanded.stderr, /sync_revert_not_landed/)
+    const residual = await cli(root, api, env, ['run', 'demo', '--origin', 'combined', '--request-id', 'residual-model', '--model', 'gpt-6-astra'])
+    assert.equal(residual.code, 1); assert.match(residual.stderr, /SYNC_MODEL_RETRY_REQUIRED/)
+    assert.equal((await cli(root, api, env, ['cancel', queued.id])).code, 0)
+    const mismatched = await cli(root, api, env, ['run', 'demo', '--request-id', 'residual-model', '--retry-of', queued.id, '--model', 'gpt-6.1-terra'])
+    assert.equal(mismatched.code, 1); assert.match(mismatched.stderr, /模型不同/)
+    assert.equal((await request<Status>(`/status?targetTree=${encodeURIComponent(root)}`)).operations.length, 1)
+    const matching = await cli(root, api, env, ['run', 'demo', '--request-id', 'residual-model', '--retry-of', queued.id, '--model', 'gpt-6-astra'])
+    assert.equal(matching.code, 0, matching.stderr); assert.equal(JSON.parse(matching.stdout).operation.model, 'gpt-6-astra')
     const stopped = await cli(root, api, env, ['stop-writer']); assert.equal(stopped.code, 0, stopped.stderr)
     const stopResult = JSON.parse(stopped.stdout) as { stopped: boolean; control: { control: string }; operations: unknown[] }
     assert.equal(stopResult.stopped, true); assert.equal(stopResult.control.control, 'pause'); assert.ok(Array.isArray(stopResult.operations))
     const retained = await request<Status>(`/status?targetTree=${encodeURIComponent(root)}`)
-    assert.equal(retained.operations.length, 1); assert.equal(retained.operations[0].operation.id, queued.id)
+    assert.equal(retained.operations.length, 2); assert.ok(retained.operations.some(detail => detail.operation.id === queued.id))
     assert.equal(retained.operations[0].operation.callsUsed, 0); assert.equal(retained.observation.control.control, 'pause')
   } catch (error) { assert.fail(`${error instanceof Error ? error.stack : String(error)}\n真实产品日志：\n${serverLog}`) }
   finally {

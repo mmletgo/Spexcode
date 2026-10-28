@@ -84,3 +84,7 @@ AC-APPLICATION-P4-15用真实 Git 快照和明确只读投影 pair 复现旧非 
 P4 partial→decide使用原P3-DELIVERY keep_intent真实链补强：fresh exact source先产生settled partial receipt，断言原selection与真实heads已分离；旧caller准入复现SYNC_BASELINE_STALE。修后新decision保原input/analysis/scope，沿相同资源当前selection经Docker落地，交付后同选择新运输ID仍归原operation/deadline/calls/receipt。确定性冲突仅指真实src的filter边界，其他changed路径逐项refactor覆盖，不能制造无关分歧或漏分析。P3-PARTIAL历史case通过公开无selection legacy准入明确旧身份，保既有历史pair夹具，不用它代替P4真实partial验收。
 
 确定性细化夹具保留表格之间全部业务说明，不按首张表截断。partial裁决整合仅在冻结source与base逐字一致、Spec原raw及全部业务项和说明等价时沿完整真实delivery；双节点停机补偿则逐字核对source仅新增指定作者注释、delivery仅新增受审生成注释，再提交保留两者的完整resolution。两者均经过正式独审与候选门禁，不能以refactor分类代替文本重叠整合。
+
+真实 Git/SQLite 用例覆盖默认旧 JSON 与 v1 描述不改、正式另模型 retry、重启省略继承、普通重复换模型拒绝、全阶段请求及描述/operation 模型冲突拒绝；遵循 [[sync-model-selection]]。
+
+已存在或备份固定运行描述先核精确期望模型，再允许admission。未受理请求留下的原描述若与后续选择不符，明确早拒，不新建operation/receipt/FIFO且不静默重建；匹配原描述的合法显式retry或新请求仍沿既有入口。
