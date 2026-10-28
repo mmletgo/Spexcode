@@ -62,10 +62,11 @@ export function renderElaboration(input: ElaborationInput, generated: GeneratedE
     const original = target?.source ? parseFrontmatter(target.source).fm : {}
     const parts = target?.source ? parseParts(target.source) : null
     const baseline = target?.source ? parseContract({ ...target, source: target.source }).contract : null
-    const raw = move && target?.source ? parts?.rawSource : node.nodeId === input.intent.nodeId ? input.intent.rawSource : target?.rawSource ?? parts?.rawSource ?? input.intent.rawSource
+    const raw = (move && target?.source ? parts?.rawSource : node.nodeId === input.intent.nodeId ? input.intent.rawSource : target?.rawSource || parts?.rawSource) || null
+    const legacyBody = target?.source && !parts ? parseFrontmatter(target.source).body : null
     const fm = input.mode === 'preserve_business' && target?.source ? { ...original, code: node.code, related: node.related } : { ...original, title: node.title, desc: node.description, 'contract-schema': 'sync-v1', ...(!target?.source ? { status: 'pending' } : {}), code: node.code, related: node.related }
     const metadataEqual = Object.entries(fm).every(([key, value]) => JSON.stringify(value) === JSON.stringify((key === 'code' || key === 'related') && typeof original[key] === 'string' ? [original[key]] : original[key]) || Array.isArray(value) && !value.length && !original[key] || value === '' && original[key] === undefined)
-    if (baseline && (node.prose === null || input.mode === 'preserve_business') && metadataEqual && raw === parts?.rawSource && !move && !node.removeIds.length && Object.values(node.tables).every(rows => !rows.length)) return { nodeId: node.nodeId, path: node.path, beforeDigest: target!.sourceDigest, source: target!.source! }
+    if (baseline && (node.prose === null || input.mode === 'preserve_business') && metadataEqual && raw === (parts?.rawSource || null) && !move && !node.removeIds.length && Object.values(node.tables).every(rows => !rows.length)) return { nodeId: node.nodeId, path: node.path, beforeDigest: target!.sourceDigest, source: target!.source! }
     const metadata = Object.entries(fm).filter(([_key, value]) => !Array.isArray(value) || value.length).map(([key, value]) => Array.isArray(value)
       ? `${key}:\n${value.map(item => `  - ${JSON.stringify(item)}`).join('\n')}`
       : `${key}: ${JSON.stringify(value)}`).join('\n')
@@ -122,7 +123,7 @@ export function renderElaboration(input: ElaborationInput, generated: GeneratedE
         else ranges[part].push({ start: offset, end: offset + line.length })
       })
       const edits: { start: number; end: number; text: string }[] = []
-      for (const [part, replacement] of [['rawSource', raw!], ['expandedSpec', expanded]] as const) {
+      for (const [part, replacement] of [['rawSource', raw ?? ''], ['expandedSpec', expanded]] as const) {
         if (replacement === parts![part]) continue
         let written = false
         for (const range of ranges[part]) {
@@ -133,7 +134,10 @@ export function renderElaboration(input: ElaborationInput, generated: GeneratedE
           edits.push({ start, end, text: written ? '' : replacement })
           written = true
         }
-        if (!written) edits.push({ start: ranges[part][0].start, end: ranges[part][0].start, text: replacement })
+        if (!written) {
+          if (ranges[part].length) edits.push({ start: ranges[part][0].start, end: ranges[part][0].start, text: replacement })
+          else edits.push({ start: 0, end: 0, text: `## raw source\n\n${replacement}\n\n` })
+        }
       }
       let body = originalBody
       for (const edit of edits.sort((left, right) => right.start - left.start)) body = body.slice(0, edit.start) + edit.text + body.slice(edit.end)
@@ -142,7 +146,9 @@ export function renderElaboration(input: ElaborationInput, generated: GeneratedE
       if (!metadataEqual) rendered = `---\n${metadata}\n---\n${parseFrontmatter(rendered).body}`
       return { nodeId: node.nodeId, path: node.path, beforeDigest: target!.sourceDigest, source: rendered === normalized ? target!.source! : target!.source!.includes('\r\n') ? rendered.replace(/\n/g, '\r\n') : rendered }
     }
-    return { nodeId: node.nodeId, path: node.path, beforeDigest: target?.sourceDigest ?? null, source: `---\n${metadata}\n---\n# ${node.title}\n\n## raw source\n\n${raw}\n\n## expanded spec\n\n${node.prose ?? parts?.expandedSpec ?? ''}\n\n${(Object.keys(CONTRACT_COLUMNS) as ContractKind[]).map(section).filter(Boolean).join('\n\n')}\n` }
+    const prose = legacyBody === null ? node.prose ?? parts?.expandedSpec ?? '' : `${legacyBody}\n${node.prose ?? ''}`
+    const rendered = `---\n${metadata}\n---\n# ${node.title}\n\n${raw === null ? '' : `## raw source\n\n${raw}\n\n`}## expanded spec\n\n${prose}\n\n${(Object.keys(CONTRACT_COLUMNS) as ContractKind[]).map(section).filter(Boolean).join('\n\n')}\n`
+    return { nodeId: node.nodeId, path: node.path, beforeDigest: target?.sourceDigest ?? null, source: target?.source?.includes('\r\n') ? rendered.replace(/\n/g, '\r\n') : rendered }
   })
   return { inputDigest, changes, applicability: generated.applicability, ...(input.nodeChanges?.length ? { nodeChanges: structuredClone([...input.nodeChanges]) } : {}) }
 }

@@ -39,7 +39,7 @@ function frozenState(sources: readonly { nodeId: string; path: string; source: s
   const contracts = sources.flatMap(source => parseContract(source).contract ?? [])
   const graph = buildContractGraph(contracts)
   const identities = mintIds(sources.map(source => source.path.split('/').slice(1, -1)))
-  return { files: files ?? new Map(), nodes: sources.map((source, index) => ({ id: identities[index], path: source.path, rawSource: parseParts(source.source)?.rawSource ?? null })), contracts, graph, coverage: projectContractCoverage(graph), findings: [] }
+  return { files: files ?? new Map(), nodes: sources.map((source, index) => ({ id: identities[index], path: source.path, rawSource: parseParts(source.source)?.rawSource || null })), contracts, graph, coverage: projectContractCoverage(graph), findings: [] }
 }
 const baselineSources = (input: ElaborationInput): { nodeId: string; path: string; source: string }[] => [...input.targets.filter((target): target is typeof target & { source: string } => target.source !== null), ...(input.context ?? [])]
 
@@ -78,7 +78,10 @@ function checkInput(input: ElaborationInput): void {
   for (const change of input.authorizedChanges ?? []) {
     const existing = items.find(item => item.id === change.id)
     if (change.action !== 'restore' && !existing || !change.reason.trim() || authorizations.has(change.id) || !['retire', 'update_verification', 'update_acceptance', 'restore'].includes(change.action) || (change.action === 'update_verification' && existing?.kind !== 'VERIFY') || (change.action === 'update_acceptance' && existing?.kind !== 'AC')) throw new TypeError(`合法契约变更需明确既有身份、操作和依据: ${change.id}`)
-    const errors = contractAuthorizationErrors(change, baseline, { ...input, newNodeRawSources: new Map(input.targets.map(target => [target.path, target.nodeId === input.intent.nodeId ? input.intent.rawSource : target.rawSource ?? parseParts(target.source ?? '')?.rawSource ?? ''])) })
+    const errors = contractAuthorizationErrors(change, baseline, { ...input, newNodeRawSources: new Map(input.targets.flatMap(target => {
+      const raw = target.nodeId === input.intent.nodeId ? input.intent.rawSource : target.rawSource || parseParts(target.source ?? '')?.rawSource
+      return raw?.trim() ? [[target.path, raw]] : []
+    })) })
     if (errors.length) throw new TypeError(`${change.action === 'update_acceptance' ? '验收变更没有可信分析' : '契约变更没有可信来源'}: ${change.id}; ${errors.join('; ')}`)
     authorizations.add(change.id)
   }
@@ -113,8 +116,10 @@ function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate
     if (!parsed.contract) { findings.push(finding(input, 'contract_required', `候选必须启用sync-v1: ${change.path}`)); continue }
     const before = target.source === null ? null : parseContract({ nodeId: target.nodeId, path: target.path, source: target.source }).contract
     for (const anchor of parsed.contract.code) if (!before?.code.includes(anchor) && !input.files?.has(anchor.split('#')[0])) findings.push(finding(input, 'unverified_new_code_anchor', `新治理锚点必须指向冻结上下文的真实代码文件: ${anchor}`))
-    const raw = moved ? before?.rawSource : change.nodeId === input.intent.nodeId ? input.intent.rawSource : target.rawSource ?? before?.rawSource ?? (target.source === null ? undefined : parseParts(target.source)?.rawSource)
-    if (raw === undefined || parsed.contract.rawSource !== raw.trim() || !change.source.includes(raw)) findings.push(finding(input, 'raw_changed', `用户原意必须原样保留: ${change.path}`))
+    const beforeRaw = target.source === null ? null : parseParts(target.source)?.rawSource || null
+    const raw = (moved ? beforeRaw : change.nodeId === input.intent.nodeId ? input.intent.rawSource : target.rawSource || beforeRaw) || null
+    const candidateRaw = parseParts(change.source)?.rawSource || null
+    if (candidateRaw !== (raw?.trim() || null) || raw !== null && !change.source.includes(raw)) findings.push(finding(input, 'raw_changed', `用户原意必须原样保留: ${change.path}`))
     changed.set(change.nodeId, parsed.contract)
   }
   for (const target of input.targets) {
@@ -139,7 +144,10 @@ function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate
   const after = frozenState(nextSources, afterFiles)
   for (const change of candidate.changes) if (!after.nodes.some(node => node.id === change.nodeId && node.path === change.path)) findings.push(finding(input, 'node_identity_invalid', `节点身份必须复用共享 mintIds: ${change.path}`))
   if (JSON.stringify(candidate.nodeChanges ?? []) !== JSON.stringify(input.nodeChanges ?? [])) findings.push(finding(input, 'node_changes_unbound', '节点迁移和退役未绑定冻结输入'))
-  const evolutionPolicy = { mode: input.mode ?? 'reelaborate', preserveAcceptedItems: input.refinement !== undefined, authorizedChanges: input.authorizedChanges ?? [], nodeChanges: input.nodeChanges ?? [], retiredIds: input.retiredIds ?? [], historyInput: input.historyInput, newNodeRawSources: new Map(input.targets.map(target => [target.path, target.nodeId === input.intent.nodeId ? input.intent.rawSource : target.rawSource ?? parseParts(target.source ?? '')?.rawSource ?? ''])), facts: input.facts, analysis: input.analysis, decisionAuthorities: input.decisionAuthorities }
+  const evolutionPolicy = { mode: input.mode ?? 'reelaborate', preserveAcceptedItems: input.refinement !== undefined, authorizedChanges: input.authorizedChanges ?? [], nodeChanges: input.nodeChanges ?? [], retiredIds: input.retiredIds ?? [], historyInput: input.historyInput, newNodeRawSources: new Map(input.targets.flatMap(target => {
+    const raw = target.nodeId === input.intent.nodeId ? input.intent.rawSource : target.rawSource || parseParts(target.source ?? '')?.rawSource
+    return raw?.trim() ? [[target.path, raw]] : []
+  })), facts: input.facts, analysis: input.analysis, decisionAuthorities: input.decisionAuthorities }
   const resolvedGapIds = [...resolvedDecisionGapIds(before, after, evolutionPolicy)]
   findings.push(...validateContractEvolution(before, after, evolutionPolicy))
   if (input.verifications) {

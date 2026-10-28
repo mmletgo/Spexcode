@@ -26,7 +26,7 @@ export async function readFrozenContracts(root: string, input: ReadonlyMap<strin
   const graph = buildContractGraph(contracts)
   const findings = [...parsed.flatMap(result => result.findings), ...validateContractGraph(graph, { mode: 'final', files, nodeIds: new Set(nodes.map(node => node.id)) })]
   findings.push(...(await validateFrozenAnchors(graph, files)).findings)
-  return { files, nodes: nodes.map(node => ({ id: node.id, path: node.path, rawSource: parseParts(sources.get(node.path)!)?.rawSource ?? null })), contracts, graph, coverage: projectContractCoverage(graph), findings }
+  return { files, nodes: nodes.map(node => ({ id: node.id, path: node.path, rawSource: parseParts(sources.get(node.path)!)?.rawSource || null })), contracts, graph, coverage: projectContractCoverage(graph), findings }
 }
 
 export type GenerationContractPolicy = {
