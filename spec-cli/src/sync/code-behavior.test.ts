@@ -446,6 +446,50 @@ test('独审路径错误仍把同次业务遗漏与反例交给下一轮修复�
   await analyzeCodeBehavior({ ...input, repairDiagnostics: [rejected!] }, async request => { assert.ok(request.prompt.includes(finding.counterexample)); return fake(request) })
 })
 
+test('归属拒绝一次列全缺失路径和数量，完整newNodes或具体GAP仍沿原门禁', async t => {
+  const f = await fixture(t), paths = ['src/__init__.py', 'src/view.js']
+  writeFileSync(join(f.root, paths[0]), '')
+  writeFileSync(join(f.root, paths[1]), 'export const view = job => ({ id: job.id });\n')
+  const input = await f.input()
+  let rejected: { code: string; message: string } | undefined
+  await assert.rejects(analyzeCodeBehavior(input, runner('allowed_change', proposal => {
+    proposal.changes = [{ ...(proposal.changes as object[])[0], paths }]
+  })), (error: Error & { code: string }) => {
+    const diagnostic = JSON.parse(error.message) as { approved: boolean; message: string; details: { missingCodePaths: string[]; missingCodePathCount: number }; proposal: { newNodes: object[] } }
+    assert.equal(error.code, 'behavior_analysis_invalid')
+    assert.equal(diagnostic.approved, false)
+    assert.equal(diagnostic.message, `无治理代码未创建真实归属或具体GAP: ${paths[0]}`)
+    assert.deepEqual(diagnostic.details.missingCodePaths, paths)
+    assert.equal(diagnostic.details.missingCodePathCount, paths.length)
+    assert.deepEqual(diagnostic.proposal.newNodes, [])
+    rejected = { code: error.code, message: error.message }
+    return true
+  })
+  const complete = runner('allowed_change', proposal => {
+    proposal.newNodes = paths.map(codePath => ({ codePath, parentNodeId: 'export-contract', basis: '真实导出任务的对应模块职责' }))
+  })
+  const repaired = await analyzeCodeBehavior({ ...input, repairDiagnostics: [rejected!] }, async request => {
+    const context = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as { repairDiagnostics: { code: string; message: string }[]; requiredChangedPaths: string[] }
+    assert.deepEqual(context.repairDiagnostics, [rejected])
+    assert.deepEqual(context.requiredChangedPaths, paths)
+    return complete(request)
+  })
+  assert.equal(repaired.reviewPassed, true)
+  assert.deepEqual(repaired.newNodes.map(node => node.codePath), paths)
+  await assert.rejects(analyzeCodeBehavior(input, runner('allowed_change', proposal => {
+    proposal.newNodes = [{ codePath: paths[1], parentNodeId: 'export-contract', basis: '导出任务可见反馈' }]
+  })), (error: Error) => {
+    const diagnostic = JSON.parse(error.message) as { details: { missingCodePaths: string[]; missingCodePathCount: number } }
+    assert.deepEqual(diagnostic.details.missingCodePaths, [paths[0]])
+    assert.equal(diagnostic.details.missingCodePathCount, 1)
+    return true
+  })
+  const gap = await analyzeCodeBehavior(input, runner('coverage_gap'))
+  assert.equal(gap.reviewPassed, true)
+  assert.deepEqual(gap.newNodes, [])
+  assert.deepEqual(gap.findings.flatMap(item => item.paths).sort(), paths)
+})
+
 test('无治理新增实现自动定位真实上层并生成唯一叶身份；未知上层不能略过', async t => {
   const f = await fixture(t); writeFileSync(join(f.root, 'src/view.js'), 'export const view = job => ({ id: job.id });\n')
   const input = await f.input(), analysis = await analyzeCodeBehavior(input, runner('allowed_change', proposal => { proposal.newNodes = [{ codePath: 'src/view.js', parentNodeId: 'export-contract', basis: '导出任务可见反馈属于明确raw' }] }))

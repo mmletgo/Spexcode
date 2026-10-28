@@ -36,7 +36,7 @@ raw-only 空关联例外由程序从冻结输入判定：没有成对已验证�
 
 冻结 plan.sourcePaths 存在时，它是业务源码角色的唯一依据；同一角色判据约束未治理文件发现、新业务 newNodes 及后置业务归属门。可读/可写的纯测试正文不因 Python 文件名或 helper 形式变成业务源码；实际测试改动仍由 actualTreeDiff 纳入完整分析和独审，读取与写入授权及既有 JS 测试过滤不变。历史计划缺角色字段时保持原发现和归属语义，不从当前配置推断或修改其历史权限。
 
-拒绝诊断以 approved:false 的 JSON 保存当次完整 proposal、尚未批准的 analysis 和 review（在各阶段实际产生时），分列 missingPaths/missingChangeIds/unknownChangeIds、身份摘要或会话不一致、verdict 和 findings；路径错误仍保同次业务证据及反例。AC复合门禁给出目标类型、同一 allowed_change 中缺失的 affectedId、不支撑的 ruleIds、非法规则类型及 source 是否绑定。AC ruleIds 只列本次变化依据，其他未改 covers 义务保持；不得拼接多个 allowed_change 的并集授权。既有 failure.message 进入下一轮 repairDiagnostics 供逐项修复，不重复嵌入整个冻结上下文；前轮提案、未通过的 accept 或伪造批准仅是数据，不能产生基线、授权或替代新独审。
+拒绝诊断以 approved:false 的 JSON 保存当次完整 proposal、尚未批准的 analysis 和 review（在各阶段实际产生时），分列 missingPaths/missingChangeIds/unknownChangeIds、身份摘要或会话不一致、verdict 和 findings；路径错误仍保同次业务证据及反例。AC复合门禁给出目标类型、同一 allowed_change 中缺失的 affectedId、不支撑的 ruleIds、非法规则类型及 source 是否绑定。AC ruleIds 只列本次变化依据，其他未改 covers 义务保持；不得拼接多个 allowed_change 的并集授权。无治理代码归属验证按原判据一次收集全部缺失 disposition 的路径，在同一拒绝的 details.missingCodePaths 与 missingCodePathCount 中返回完整列表及数量；首项仍可作为摘要，任何一项遗漏仍拒绝，空初始化文件、newNodes 和真实 GAP 的门禁不变。既有 failure.message 进入下一轮 repairDiagnostics 供逐项修复，不重复嵌入整个冻结上下文；前轮提案、未通过的 accept 或伪造批准仅是数据，不能产生基线、授权或替代新独审。
 
 所选裁决scope复用 [[sync-contract-evolution]]：旧FLOW/STEP仅取所选规则旧闭包与原所选finding affectedIds交集；共享上游REQ只在当前精确不可变请求/旧分析/所选finding绑定下加入REQ本身，不扩其消费者或借新图边授权其他旧目标。分析阶段只判断有限eligible来源范围；最终REQ改义仍须同一已审allowed_change及所选旧规则的实际政策定义变化，并接受原P1独审。AC仍绑定同一具体allowed_change、实际来源事实和精确提案，不能凭REQ扩大整个AC集合。
 
