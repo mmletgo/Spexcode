@@ -16,6 +16,7 @@ import { syncPlanDigest } from './coordinator.js'
 import type { SyncCoordinatorPlan } from './coordinator-types.js'
 import { buildSyncApplicationPlan, deriveSyncBaselineResources } from './planning.js'
 import { captureInputSnapshot, contentHash, readEvidence, readObject, verifySnapshot, writeEvidence } from './snapshot.js'
+import { readFrozenBehaviorContext } from '../../test/frozen-behavior-context.js'
 import { SyncStore } from './store.js'
 import type { BaselinePair, InputSnapshot, SyncScope, VerificationResultBlob } from './operation-types.js'
 import type { SyncSettings } from './settings.js'
@@ -166,7 +167,7 @@ test('raw-only冷启动读取已授权测试正文且不扩大到其他目录', 
   const stopAfterCapture = new Error('captured frozen test read set')
   await assert.rejects(analyzeCodeBehavior(input, async request => {
     assert.equal(request.purpose, 'code_behavior_analyze')
-    captured.frozen = JSON.parse(request.prompt.split('冻结三方输入:\n')[1]) as Frozen
+    captured.frozen = readFrozenBehaviorContext<Frozen>(request.prompt)
     throw stopAfterCapture
   }), error => error === stopAfterCapture)
 

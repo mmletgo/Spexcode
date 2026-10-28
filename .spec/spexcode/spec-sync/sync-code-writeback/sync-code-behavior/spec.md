@@ -63,3 +63,7 @@ raw/shared prose 的 broad affected closure只保证完整路径进入分析，�
 冻结输入显式给出真实 snapshotTree，并保留 composed.tree 身份。相同 Git 树只证明对应路径的对象字节及 mode 相同，不证明语义相容或业务通过。分析不得编造输入/工具未提供的 hash、AST 或执行校验证据，不把手工重抄、转义或反转义片段的推算冒称冻结原对象校验；真正不可解释且原意依赖的语义继续保留具体 GAP，完整独审与后续门禁不变。
 
 行为分析与独立评审使用协调器传入的固定操作 model，历史缺省 sol；不把 model 加入业务语义上下文或改写旧证明，实际结构化请求仍绑定模型，遵循 [[sync-model-selection]]。
+
+发送给 Native 分析/独审前的最后 JSON 序列化以 `textEncoding: "sha256-body-ref-v1"` 和 `textBodies` 按完整 UTF-8 正文的 SHA-256 共享重复正文。`oldSource`、`newSource`、`authorBaseline`、`verifiedDelivery`、`composedFiles`、`controlledBeforeFiles` 保留原路径顺序与位置，各正文值改为 `{ bodyRef: sha256 }`；`intentArtifactFiles` 保留真实 path/mode/oid/digest，仅将 text 改为 bodyRef。正文仍在同一冻结任务中完整提供，引用只证明字节相同，不表示语义批准。`nonTextFiles`、其余冻结字段、required/ownership/checkedPaths 门禁和序列化前的业务校验对象不变；不递归提取任意 metadata 字符串。
+
+当 `composed.authorProjectionBlob` 直接指向 `canonical-author-projection-v1`，或指向 `selected-author-projection-v1` 且沿其 `priorProjection` 引用链解析到该版本时，冻结上下文额外提供受 `plan.readPaths` 限定且排除 host-private 路径的 `authorByteProjections`，保留每项 snapshotId/path 与原 before/after mode/OID/digest，并读取Git对象中的完整 UTF-8 正文。两端正文使用同一 body table。各文本视图保留其实际来源/派生树字节；compositionEvidence 的 source 可来自 author-clean 投影，需按 `authorByteProjections` 核对对应 snapshotId/path 的投影前后对象，不把此角色差异当数据损坏或新业务政策。非 canonical 语义投影元数据保持原样。
