@@ -29,6 +29,7 @@ import { claimFileMutex } from './file-mutex.js'
 import { composeAuthoredInput } from './author-input.js'
 import { controlledDecisionIdentity, guardControlledRequestPath, prepareControlledDecision, prepareControlledRequest } from './request-input.js'
 import { prepareSpecBodyEdit } from '../spec-body-edit.js'
+import { adaptElaborationNativeOutput } from '../../test/elaboration-native-output.js'
 
 const contractPath = '.spec/project/export-contract/spec.md'
 const fixturePath = new URL('../../test/fixtures/spec-sync/export-repo/', import.meta.url)
@@ -128,6 +129,7 @@ async function fixture(t: test.TestContext, budget = { maxAttempts: 3, maxCalls:
       output = { inputId: identity.inputId, candidateDigest: identity.candidate.digest, verdict: 'accept', checkedIds: promptInput(request).readyIds, findings: [] }
     }
     if (transform) output = await transform(output, request)
+    output = adaptElaborationNativeOutput(request, output)
     const attempt = store.readAttempt(store.readOperation(operation.id).currentAttemptId!)
     const dispatch = attempt.dispatchPlans.find(item => item.key === request.requestKey)!
     return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `independent-thread-${request.requestKey}`, turnId: 'turn-1', output, resultDigest: contentHash(JSON.stringify(output)) }
@@ -325,9 +327,12 @@ for (const mode of ['live', 'restart', 'prior-repair'] as const) test(`P3细化�
   assert.notEqual(fresh.rounds[0].traces[0].sessionId, fresh.rounds[0].traces[1].sessionId)
   assert.notEqual(fresh.rounds[0].traces[0].sessionId, rejected.rounds[0].traces[0].sessionId)
   if (mode === 'live') {
-    const { execution, files, ...frozen } = JSON.parse(f.calls.find(call => call.purpose === 'elaboration_generate')!.prompt.split('冻结业务输入:\n')[1])
+    const { execution, files, ...snapshot } = JSON.parse(f.calls.find(call => call.purpose === 'elaboration_generate')!.prompt.split('冻结业务输入:\n')[1])
+    const { targets, ...frozenFields } = snapshot
+    const frozen = { ...frozenFields, targets: targets.map(({ targetIndex: _targetIndex, ...target }: { targetIndex: number; nodeId: string; path: string; source: string | null; sourceDigest: string | null; rawSource?: string }) => target) }
     const last = rejected.rounds[0]
-    await assert.rejects(elaborate({ ...frozen, ...execution, files: new Map<string, string>(files), requestKey: 'invalid-infrastructure-seed' }, { seed: { settled: true, requestKey: `sync:${attempts[0].id}:elaborate`, inputDigest: rejected.inputDigest, candidateDigest: last.candidateDigest!, candidate: last.candidate!, output: last.output, findings: last.findings, review: last.review, traces: last.traces }, runner: async () => assert.fail('无具体业务拒绝的seed不得派发') }), /续修种子必须保留具体被拒绝发现/)
+    const replayInput = { ...frozen, ...execution, files: new Map<string, string>(files), requestKey: 'invalid-infrastructure-seed' }
+    await assert.rejects(elaborate(replayInput, { seed: { settled: true, requestKey: `sync:${attempts[0].id}:elaborate`, inputDigest: rejected.inputDigest, candidateDigest: last.candidateDigest!, candidate: last.candidate!, output: last.output, findings: last.findings, review: last.review, traces: last.traces }, runner: async () => assert.fail('无具体业务拒绝的seed不得派发') }), /续修种子必须保留具体被拒绝发现/)
   }
   if (mode === 'prior-repair') { assert.equal(elaborations[0].failure?.code, 'repair_budget_exhausted'); assert.ok(rejected.prior); assert.equal(elaborations[0].reviewPassed, false) }
   const beforeReplay = f.calls.length

@@ -9,6 +9,7 @@ import type { ContractCell, GeneratedElaboration, GeneratedTables } from './elab
 import { renderElaboration } from './elaboration-markdown.js'
 import { ELABORATION_SCHEMA, outputErrors } from './elaboration-schema.js'
 import type { CodeBehaviorEvidence, SyncDecisionAuthority } from './writeback-types.js'
+import { adaptElaborationNativeOutput } from '../../test/elaboration-native-output.js'
 
 const fixture = new URL('../../test/fixtures/spec-sync/export-repo/', import.meta.url)
 const path = '.spec/export/export-contract/spec.md'
@@ -34,7 +35,8 @@ const runner = (build: (request: ElaborationSessionRequest, call: number) => unk
   const calls: ElaborationSessionRequest[] = []
   return { calls, run: async request => {
     calls.push(request)
-    const output = request.purpose === 'elaboration_review' ? inspect(request) : build(request, calls.length)
+    const generated = request.purpose === 'elaboration_review' ? inspect(request) : build(request, calls.length)
+    const output = adaptElaborationNativeOutput(request, generated)
     return { sessionId: `session-${calls.length}`, threadId: `thread-${calls.length}`, turnId: 'turn-1', output, resultDigest: elaborationDigest(JSON.stringify(output)) }
   } }
 }
@@ -572,12 +574,12 @@ test('AC-ELABORATION-35 v2小增量独审收到完整Markdown，保留旧义务�
   for (const item of parseContract({ nodeId: 'export-contract', path, source }).contract!.items) assert.ok(fake.calls[1].prompt.includes(item.id), item.id)
   assert.ok(fake.calls[1].prompt.includes(JSON.stringify(result.rounds[0].candidate)))
   assert.ok(fake.calls[0].prompt.includes(JSON.stringify(input(true).facts)))
-  assert.deepEqual((fake.calls[0].schema.properties as Record<string, { enum?: string[] }>).version.enum, ['elaboration-rows-v2'])
+  assert.deepEqual((fake.calls[0].schema.properties as Record<string, { enum?: string[] }>).version.enum, ['elaboration-target-rows-v3'])
 })
 
 test('AC-ELABORATION-36 旧v1失败seed仅按原摘要读诊断，新v1输出拒绝且不继承seed新增政策', async () => {
   const seed = await rejectedSeed()
-  const output = seed.output as GeneratedElaboration
+  const output = candidate({} as ElaborationSessionRequest, source)
   output.changes[0].tables.RULE.push({ id: 'RULE-EXPORT-SEED-ONLY', scope: '导出', constraint: '失败候选自行提出的政策', basis: '拒绝候选', authority: 'export-contract', source: 'user:REQ-EXPORT-01', 'depends-on': ['REQ-EXPORT-01'] })
   seed.candidate = renderElaboration(input(), output, seed.inputDigest)
   const legacy = structuredClone(output) as unknown as { version: string; changes: { removeIds?: string[] }[] }
@@ -598,7 +600,7 @@ test('AC-ELABORATION-36 旧v1失败seed仅按原摘要读诊断，新v1输出拒
   assert.equal(result.prior!.candidateDigest, original.candidateDigest)
   assert.equal(result.prior!.renderedCandidateDigest, original.candidateDigest)
   assert.ok(!result.graph!.items.has('RULE-EXPORT-SEED-ONLY'))
-  assert.match(fresh.calls[0].prompt, /旧v1协议不可用当前行差量渲染器重放/)
+  assert.match(fresh.calls[0].prompt, /旧v1\/v2路径回显协议不可用当前目标绑定渲染器重放/)
   const rejected = await elaborate({ ...input(), maxRepairs: 0 }, { runner: runner(() => legacy).run })
   assert.equal(rejected.status, 'exhausted')
   assert.ok(rejected.rounds[0].findings.some(issue => issue.code === 'output_schema'))
@@ -660,7 +662,7 @@ test('AC-ELABORATION-40 省略新目标或raw-only目标不能假细化，不能
     const target = { nodeId: 'export-child', path: '.spec/export/export-child/spec.md', source: targetSource, sourceDigest: targetSource === null ? null : elaborationDigest(targetSource), rawSource: '真实待细化原意。' }
     const result = await elaborate({ ...input(true), targets: [...input(true).targets, target], maxRepairs: 0 }, { runner: fake.run })
     assert.equal(result.status, 'exhausted')
-    assert.ok(result.rounds[0].findings.some(issue => issue.code === 'target_not_elaborated'))
+    assert.ok(result.rounds[0].findings.some(issue => issue.code === 'output_schema' && issue.message.includes('项数不足')))
     assert.deepEqual(fake.calls.map(call => call.purpose), ['elaboration_generate'])
   }
 })
@@ -706,7 +708,7 @@ test('rawless目标新增user:raw业务行仍被missing-raw-source拒绝，错�
     const fake = runner(() => output)
     const result = await elaborate({ ...input(true), targets: [...input(true).targets, target], maxRepairs: 0 }, { runner: fake.run })
     assert.equal(result.status, 'exhausted')
-    assert.ok(result.rounds[0].findings.some(issue => issue.code === (wrongScope ? 'write_scope' : 'missing-raw-source')), JSON.stringify(result.rounds[0].findings))
+    assert.ok(result.rounds[0].findings.some(issue => issue.code === (wrongScope ? 'output_schema' : 'missing-raw-source') && (!wrongScope || issue.message.includes('targetIndex'))), JSON.stringify(result.rounds[0].findings))
     assert.deepEqual(fake.calls.map(call => call.purpose), ['elaboration_generate'])
   }
 })
