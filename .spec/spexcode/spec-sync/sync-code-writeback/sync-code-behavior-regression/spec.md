@@ -30,6 +30,8 @@ code:
 
 真实 Git 目录授权新增未跟踪 helper 的完整字节及所在快照进入前置必读/全文清单；旧 HEAD 无该文件不影响读取，删除文件保旧全文，目录、元数据和链接不冒全文或缩小必读集合。漏 helper 的 accept 明确给 missingPaths，并携前轮完整 proposal/未批准 analysis/review 进入新分析及独审；missingPath 和业务 findings 共存不丢。AC 混入未变规则、遗漏目标 affectedId 或不绑定来源给具体诊断，多个 allowed_change 并集不能授权。伪造 diagnostic 或旧 accept 不豁免新摘要/身份/范围门禁，readSet/policy/timeout 仍绑定，诊断与清单共同超过2MiB时仍完整送达既有 runner，原生接缝按 [[frozen-context-reader]] 无损读取并证明覆盖，不因内联大小失败或截断。
 
+归属失败以至少两个真实未治理源码（含空初始化文件）复现原诊断只返回首项，再核同一拒绝的 missingCodePaths 与 missingCodePathCount 完整列出缺失处置，并原样进入后续 repairDiagnostics。将路径合并为 allowed_change 不构成归属；只补部分 newNodes 仍拒绝全部剩余缺口，完整合法 newNodes 或具体 GAP 继续走原门禁和新独审，不为机械文件增加豁免。
+
 共享REQ回归以真实Git、canonical不可变裁决和既有全契约图证明：原规则上游REQ可同步具体权限例外，AC精确授权继续有效；source-only、旧/foreign裁决、keep、缺同一allowed_change及未选规则/流程被拒。共享REQ只加入本身，旧FLOW/STEP须为真实affected；不能从父REQ或新连边扩其他需求。自由文本单独扩大未选操作的矛盾由原P1完整候选独审拒绝，明确区分eligible与语义通过，不用关键词模拟通用语义判断。
 
 
