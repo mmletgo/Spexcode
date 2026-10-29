@@ -26,12 +26,24 @@ test('model-visible frozen proof rejects inner-only coverage, cropped or wrapped
     const proof = proveFrozenReads(f.ref, identity, [item], { toolOutputTokenLimit: limit, outputs: [outer] })
     assert.equal(proof.version, 2)
     assert.equal(proof.historyDigest, legacy.historyDigest, 'original native history bytes remain unchanged')
+    const arrayEvidence = readFileSync(join(dirname(f.ref.manifestPath), 'histories', proof.visibilityDigest))
+    const legacyArrayBytes = Buffer.from(JSON.stringify({ ...identity, toolOutputTokenLimit: limit, outputs: [outer] }), 'utf8')
+    assert.deepEqual(arrayEvidence, legacyArrayBytes, 'an existing input_text array proof keeps its original visibility bytes')
+    assert.equal(createHash('sha256').update(arrayEvidence).digest('hex'), proof.visibilityDigest)
     verifyFrozenReadProof(f.ref, proof, identity, limit)
     verifyFrozenReadProof(f.ref, legacy, identity)
     assert.throws(() => verifyFrozenReadProof(f.ref, legacy, identity, limit), /requires.*v2/)
     for (const displayed of [text.slice(0, 60), JSON.stringify(text), 'Read all 9 bytes']) {
       assert.throws(() => proveFrozenReads(f.ref, identity, [item], { toolOutputTokenLimit: limit, outputs: [{ ...outer, output: [{ type: 'input_text', text: displayed }] }] }), /not returned verbatim/)
     }
+    const stringProof = proveFrozenReads(f.ref, identity, [item], { toolOutputTokenLimit: limit, outputs: [{ ...outer, output: text }] })
+    assert.equal(stringProof.version, 2)
+    const stringEvidence = readFileSync(join(dirname(f.ref.manifestPath), 'histories', stringProof.visibilityDigest), 'utf8')
+    assert.deepEqual(JSON.parse(stringEvidence).outputs, [{ ...outer, output: text }], 'a raw text output keeps its native string shape in the visibility CAS')
+    verifyFrozenReadProof(f.ref, stringProof, identity, limit)
+    persistFrozenRead(f.ref, { ...identity, callId: 'local-only-receipt' }, f.args(0, 9))
+    assert.throws(() => proveFrozenReads(f.ref, identity, [item], { toolOutputTokenLimit: limit, outputs: [{ ...outer, output: 'Script running with cell ID cell-1' }] }), /not returned verbatim/, 'a status string and saved local response cannot replace a visible full response')
+    assert.throws(() => proveFrozenReads(f.ref, identity, [item], { toolOutputTokenLimit: limit, outputs: [{ ...outer, output: 'x'.repeat(historyTokenLimit * 4 + 1) }] }), /actual fixed history budget/, 'raw string bytes consume the same outer budget')
     assert.throws(() => proveFrozenReads(f.ref, identity, [item], { toolOutputTokenLimit: limit, outputs: [
       { ...outer, callId: 'large-budget-other-call', historyTokenLimit: historyTokenLimit + 10000, output: [] },
       { ...outer, historyTokenLimit: 1 },
@@ -43,19 +55,45 @@ test('model-visible frozen proof rejects inner-only coverage, cropped or wrapped
   } finally { f.close() }
 })
 
-test('visible exec history pairs exact call outputs within explicit native turn boundaries', () => {
+test('visible exec and wait history pairs exact call outputs within explicit native turn boundaries', () => {
   const record = (type: string, payload: unknown, metadata?: unknown) => JSON.stringify({ type, payload, ...(metadata ? { metadata } : {}) }) + '\n'
   const call = (id: string) => record('response_item', { type: 'custom_tool_call', name: 'exec', call_id: id })
+  const waitCall = (id: string) => record('response_item', { type: 'function_call', name: 'wait', call_id: id })
   const output = (id: string, text: string, limit = 12000) => record('response_item', { type: 'custom_tool_call_output', call_id: id, output: [{ type: 'input_text', text }] }, { fallback_token_limit_override: limit })
+  const stringOutput = (id: string, text: string, limit = 12000) => record('response_item', { type: 'custom_tool_call_output', call_id: id, output: text }, { fallback_token_limit_override: limit })
+  const waitOutput = (id: string, text: string, limit = 12000) => record('response_item', { type: 'function_call_output', call_id: id, output: text }, { fallback_token_limit_override: limit })
   const start = (id: string) => record('turn_context', { turn_id: id })
   const done = (id: string) => record('event_msg', { type: 'task_complete', turn_id: id })
-  const native = start('other') + call('foreign') + output('foreign', 'foreign-full-body') + done('other') + start('target') + call('owned') + output('owned', 'actual-body') + done('target')
-  assert.deepEqual(frozenVisibleOutputs(native, 'target'), [{ callId: 'owned', output: [{ type: 'input_text', text: 'actual-body' }], historyTokenLimit: 12000 }])
-  assert.throws(() => frozenVisibleOutputs(start('target') + output('foreign', 'body') + done('target'), 'target'), /exact exec call/)
+  const native = start('other') + call('foreign') + output('foreign', 'foreign-full-body') + done('other') + start('target') + call('owned') + stringOutput('owned', 'Script running with cell ID cell-1') + done('target')
+  assert.deepEqual(frozenVisibleOutputs(native, 'target'), [{ callId: 'owned', output: 'Script running with cell ID cell-1', historyTokenLimit: 12000 }])
+  assert.deepEqual(frozenVisibleOutputs(start('target') + waitCall('waiting') + waitOutput('waiting', 'resumed output') + done('target'), 'target'), [{ callId: 'waiting', output: 'resumed output', historyTokenLimit: 12000 }])
+  assert.deepEqual(frozenVisibleOutputs(start('target') + call('owned') + output('owned', 'actual-body') + done('target'), 'target'), [{ callId: 'owned', output: [{ type: 'input_text', text: 'actual-body' }], historyTokenLimit: 12000 }])
+  assert.throws(() => frozenVisibleOutputs(start('target') + output('foreign', 'body') + done('target'), 'target'), /exact exec\/wait call/)
   assert.throws(() => frozenVisibleOutputs(start('target') + call('owned') + done('target'), 'target'), /without its output/)
-  assert.throws(() => frozenVisibleOutputs(start('target') + call('owned') + output('owned', 'body') + output('owned', 'body') + done('target'), 'target'), /exact exec call/)
-  assert.throws(() => frozenVisibleOutputs(start('target') + call('owned') + record('response_item', { type: 'custom_tool_call_output', call_id: 'owned', output: [{ type: 'image', data: 'hidden' }] }, { fallback_token_limit_override: 12000 }) + done('target'), 'target'), /exact exec call/)
+  assert.throws(() => frozenVisibleOutputs(start('target') + call('owned') + output('owned', 'body') + output('owned', 'body') + done('target'), 'target'), /exact exec\/wait call/)
+  assert.throws(() => frozenVisibleOutputs(start('target') + call('owned') + waitOutput('owned', 'body') + done('target'), 'target'), /exact exec\/wait call/)
+  assert.throws(() => frozenVisibleOutputs(start('target') + record('response_item', { type: 'function_call', name: 'foreign', call_id: 'foreign' }) + waitOutput('foreign', 'body') + done('target'), 'target'), /invalid or repeated host call/)
+  assert.throws(() => frozenVisibleOutputs(start('target') + call('owned') + record('response_item', { type: 'custom_tool_call_output', call_id: 'owned', output: [{ type: 'image', data: 'hidden' }] }, { fallback_token_limit_override: 12000 }) + done('target'), 'target'), /exact exec\/wait call/)
+  assert.throws(() => frozenVisibleOutputs(start('target') + call('owned') + record('response_item', { type: 'custom_tool_call_output', call_id: 'owned', output: [{ type: 'unknown', text: 'hidden' }] }, { fallback_token_limit_override: 12000 }) + done('target'), 'target'), /exact exec\/wait call/)
   assert.throws(() => frozenVisibleOutputs(start('target') + call('owned') + output('owned', 'body'), 'target'), /not persisted.*completed/)
+})
+
+test('a foreign turn string cannot lend a frozen response to a visible running-cell marker', () => {
+  const f = fixture()
+  try {
+    const args = f.args(0, 9), item = f.item(0, 9, 'inner')
+    const sourceText = readFrozenRange(f.ref, args).response.contentItems[0].text
+    const record = (type: string, payload: unknown, metadata?: unknown) => JSON.stringify({ type, payload, ...(metadata ? { metadata } : {}) }) + '\n'
+    const call = (id: string) => record('response_item', { type: 'custom_tool_call', name: 'exec', call_id: id })
+    const output = (id: string, text: string) => record('response_item', { type: 'custom_tool_call_output', call_id: id, output: text }, { fallback_token_limit_override: 12_000 })
+    const start = (turnId: string) => record('turn_context', { turn_id: turnId })
+    const done = (turnId: string) => record('event_msg', { type: 'task_complete', turn_id: turnId })
+    const rollout = start('foreign-turn') + call('foreign-call') + output('foreign-call', sourceText) + done('foreign-turn')
+      + start(identity.turnId) + call('exact-call') + output('exact-call', 'Script running with cell ID cell-1') + done(identity.turnId)
+    const outputs = frozenVisibleOutputs(rollout, identity.turnId)
+    assert.deepEqual(outputs.map(outer => outer.output), ['Script running with cell ID cell-1'])
+    assert.throws(() => proveFrozenReads(f.ref, identity, [item], { toolOutputTokenLimit: frozenReadOutputTokenLimit(f.ref), outputs }), /not returned verbatim/)
+  } finally { f.close() }
 })
 
 test('frozen manifest binds request and immutable bytes without exposing control paths to the model', () => {
@@ -66,6 +104,10 @@ test('frozen manifest binds request and immutable bytes without exposing control
     assert.throws(() => assertFrozenBinding(f.ref, { ...binding, inputDigest: 'foreign' }), /inputDigest/)
     assert.throws(() => assertFrozenBinding(f.ref, { ...binding, attemptId: 'invented' }), /attemptId/)
     assert.equal(frozenContextPrompt(f.ref).includes(f.directory), false)
+    const index = JSON.parse(frozenContextPrompt(f.ref)) as { toolOutputTokenLimit: number; execMaxOutputTokens: number; readBatches: { entryId: string; ranges: { startByte: number; endByte: number }[] }[] }
+    assert.equal(index.toolOutputTokenLimit, frozenReadOutputTokenLimit(f.ref))
+    assert.equal(index.execMaxOutputTokens, Math.ceil(index.toolOutputTokenLimit * 1.2))
+    assert.deepEqual(index.readBatches, [{ entryId: 'a', ranges: [{ startByte: 0, endByte: 9 }] }])
     const read = readFrozenRange(f.ref, f.args(0, 3))
     assert.equal(JSON.parse(read.response.contentItems[0].text).text, '首')
     const persisted = persistFrozenRead(f.ref, { ...identity, callId: 'native-call' }, f.args(0, 9))
@@ -147,6 +189,58 @@ test('frozen output budget contains worst JSON escapes, expanded UTF8, binary an
     const short = fixture([{ id: 'task', label: 'short', kind: 'utf8', bytes: Buffer.from('short') }])
     try { assert.ok(frozenReadOutputTokenLimit(short.ref) < limit, 'the budget follows actual frozen metadata instead of an arbitrary identity cap') }
     finally { short.close() }
+  } finally { f.close() }
+})
+
+test('frozen read batches pair only within the unchanged history budget and preserve unique required coverage', () => {
+  const bytes = Buffer.from('x'.repeat(FROZEN_READ_MAX_BYTES * 2 + 13))
+  const f = fixture([
+    { id: 'required', label: 'large required source', kind: 'utf8', bytes },
+    { id: 'required-alias', label: 'same required bytes', kind: 'utf8', bytes },
+    { id: 'optional', label: 'optional source', kind: 'utf8', bytes: Buffer.from('optional bytes'), required: false },
+    { id: 'absent', label: 'absent source', kind: 'absent' },
+  ])
+  try {
+    const index = JSON.parse(frozenContextPrompt(f.ref)) as { toolOutputTokenLimit: number; execMaxOutputTokens: number; readBatches: { entryId: string; ranges: { startByte: number; endByte: number }[] }[] }
+    assert.equal(index.toolOutputTokenLimit, frozenReadOutputTokenLimit(f.ref))
+    assert.equal(index.execMaxOutputTokens, Math.ceil(index.toolOutputTokenLimit * 1.2))
+    assert.deepEqual(index.readBatches.map(batch => batch.entryId), ['required', 'required', 'absent'])
+    assert.deepEqual(index.readBatches.map(batch => batch.ranges.length), [2, 1, 1])
+    let call = 0
+    const items: FrozenNativeItem[] = []
+    for (const batch of index.readBatches) {
+      assert.ok(batch.ranges.length <= 2)
+      let cost = 0
+      for (let index = 0; index < batch.ranges.length; index++) {
+        const range = batch.ranges[index]!
+        const text = readFrozenRange(f.ref, f.args(range.startByte, range.endByte, batch.entryId)).response.contentItems[0].text
+        cost += Math.ceil(Buffer.byteLength(text, 'utf8') / 4)
+        items.push(f.item(range.startByte, range.endByte, `planned-${call++}`, batch.entryId))
+        if (index > 0) assert.equal(batch.ranges[index - 1]!.endByte, range.startByte, 'paired requested ranges are adjacent')
+        assert.ok(range.endByte - range.startByte <= FROZEN_READ_MAX_BYTES)
+      }
+      assert.ok(cost <= index.toolOutputTokenLimit)
+    }
+    assert.equal(JSON.parse(readFrozenRange(f.ref, f.args(0, 1, 'optional')).response.contentItems[0].text).text, 'o', 'optional entries remain readable on demand')
+    const proof = proveFrozenReads(f.ref, identity, items)
+    assert.deepEqual(proof.coveredEntryIds, ['required', 'required-alias', 'absent'])
+    verifyFrozenReadProof(f.ref, proof, identity)
+  } finally { f.close() }
+})
+
+test('frozen read plan falls back to a single range when paired actual replies exceed the current budget', () => {
+  const entryId = 'i'.repeat(FROZEN_READ_MAX_BYTES * 4 + 4096)
+  const f = fixture([{ id: entryId, label: 'large identity', kind: 'utf8', bytes: Buffer.alloc(FROZEN_READ_MAX_BYTES * 2, 0x78) }])
+  try {
+    const index = JSON.parse(frozenContextPrompt(f.ref)) as { toolOutputTokenLimit: number; readBatches: { entryId: string; ranges: { startByte: number; endByte: number }[] }[] }
+    assert.equal(index.readBatches.length, 2)
+    assert.deepEqual(index.readBatches.map(batch => batch.ranges.length), [1, 1])
+    const pairCost = index.readBatches.reduce((sum, batch) => {
+      const range = batch.ranges[0]!
+      const text = readFrozenRange(f.ref, f.args(range.startByte, range.endByte, batch.entryId)).response.contentItems[0].text
+      return sum + Math.ceil(Buffer.byteLength(text, 'utf8') / 4)
+    }, 0)
+    assert.ok(pairCost > index.toolOutputTokenLimit, 'the two actual serialized responses cannot share one batch')
   } finally { f.close() }
 })
 
