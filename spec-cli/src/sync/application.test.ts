@@ -129,6 +129,64 @@ test('操作模型经真实Git入口持久化，重启和省略重试继承，�
   } finally { await f.application.stopService(); f.cleanup() }
 })
 
+test('新手动操作采用各项目版本化默认模型，显式模型优先且省略retry沿用原选择', async () => {
+  const firstProject = await fixture({ ...settings, model: 'claude:MiniMax-M3' })
+  const secondProject = await fixture({ ...settings, model: 'gpt-6.1-astra' })
+  try {
+    await firstProject.application.enable(); await secondProject.application.enable()
+    const first = (await firstProject.application.submit({ nodeId: 'demo', requestId: 'project-default-A' })).operation!
+    const second = (await secondProject.application.submit({ nodeId: 'demo', requestId: 'project-default-B' })).operation!
+    await firstProject.application.wait(first.id); await secondProject.application.wait(second.id)
+    assert.equal(first.model, 'claude:MiniMax-M3')
+    assert.equal(second.model, 'gpt-6.1-astra')
+
+    const override = (await firstProject.application.submit({ nodeId: 'demo', requestId: 'manual-model-override', retryOf: first.id, model: 'gpt-6.1-terra' })).operation!
+    assert.equal(override.model, 'gpt-6.1-terra')
+    await firstProject.application.wait(override.id)
+    const inherited = (await firstProject.application.submit({ nodeId: 'demo', requestId: 'retry-model-inherited', retryOf: override.id })).operation!
+    assert.equal(inherited.model, 'gpt-6.1-terra')
+    await firstProject.application.wait(inherited.id)
+    assert.deepEqual(firstProject.calls.map(request => request.model), ['claude:MiniMax-M3', 'gpt-6.1-terra', 'gpt-6.1-terra'])
+    assert.deepEqual(secondProject.calls.map(request => request.model), ['gpt-6.1-astra'])
+
+    writeFileSync(join(firstProject.root, '.spec/spexcode.json'), JSON.stringify({ sync: { ...settings, model: 'gpt-6.1-astra' } }))
+    assert.equal((await firstProject.application.readSettings()).activation, 'invalidated')
+    await assert.rejects(firstProject.application.submit({ nodeId: 'demo', requestId: 'model-config-change' }), /配置已变化/)
+    assert.equal(firstProject.application.store.readOperation(first.id).model, 'claude:MiniMax-M3')
+    assert.deepEqual(firstProject.application.store.readOperation(first.id).budget, first.budget)
+    await firstProject.application.enable()
+    const explicit = (await firstProject.application.submit({ nodeId: 'demo', requestId: 'fresh-explicit-override', model: 'gpt-6.1-terra' })).operation!
+    assert.equal(explicit.model, 'gpt-6.1-terra')
+    await firstProject.application.wait(explicit.id)
+    assert.equal(firstProject.calls.at(-1)!.model, 'gpt-6.1-terra')
+  } finally {
+    await firstProject.application.stopService(); firstProject.cleanup()
+    await secondProject.application.stopService(); secondProject.cleanup()
+  }
+})
+
+test('自动观察准入、固定工具描述和真实runner请求使用同一项目model', async () => {
+  const model = 'claude:MiniMax-M3', f = await fixture({ ...settings, model })
+  try {
+    await f.application.enable(); await f.application.automaticControl('pause')
+    await f.application.startService({ compensationMs: 40, debounceMs: 5 })
+    const initial = f.application.observationStatus().latestSnapshot!.id
+    writeFileSync(join(f.root, 'src/demo.mjs'), 'export const demo = text => `automatic:${text}`\n')
+    await observeUntil(() => f.application.observationStatus().latestSnapshot?.id !== initial)
+    await f.application.automaticControl('resume')
+    await observeUntil(() => f.calls.length === 1)
+    const operations = (await f.application.status()).operations
+    assert.equal(operations.length, 1)
+    const detail = await f.application.wait(operations[0].operation.id)
+    assert.equal(detail.operation.model, model)
+    assert.equal(f.calls[0].model, model)
+    const toolsRef = join(f.temp, 'runtime', 'artifacts', `application-runtime-${contentHash(detail.operation.ingressKey)}.json`)
+    const saved = JSON.parse(readFileSync(toolsRef, 'utf8'))
+    assert.equal(saved.version, 'sync-tools-v2')
+    assert.equal(saved.model, model)
+  } finally { await f.application.stopService(); f.cleanup() }
+})
+
 test('AC-APPLICATION-01 缺少可信配置明确拒绝，现有配置启用CAS且不修改版本化文件', async () => {
   const f = await fixture(undefined)
   try {
@@ -142,6 +200,19 @@ test('AC-APPLICATION-01 缺少可信配置明确拒绝，现有配置启用CAS�
     assert.equal((await f.application.enable(state.configDigest!)).enabled, true)
     assert.deepEqual(readFileSync(join(f.root, '.spec', 'spexcode.json')), bytes)
     assert.equal(f.git(['rev-parse', 'HEAD']), before)
+  } finally { f.cleanup() }
+})
+
+test('版本化sync.model接受精确字符串并拒绝空值或首尾空格', async () => {
+  const f = await fixture()
+  try {
+    writeFileSync(join(f.root, '.spec/spexcode.json'), JSON.stringify({ sync: { ...settings, model: 'claude:MiniMax-M3' } }))
+    assert.equal(readSyncSettings(await captureInputSnapshot(f.root)).settings.model, 'claude:MiniMax-M3')
+    for (const model of ['', ' claude:MiniMax-M3', 'claude:MiniMax-M3 ']) {
+      writeFileSync(join(f.root, '.spec/spexcode.json'), JSON.stringify({ sync: { ...settings, model } }))
+      const snapshot = await captureInputSnapshot(f.root)
+      assert.throws(() => readSyncSettings(snapshot), /model|模型/)
+    }
   } finally { f.cleanup() }
 })
 
@@ -950,15 +1021,17 @@ test('AC-APPLICATION-23 正式v6结构旧patch重开后换requestId及alias重�
 
 test('AC-APPLICATION-P3 code/combined手动接入与可信裁决冻结，旧原意和冲突保留且重复至多一次', async () => {
   for (const choice of ['keep_intent', 'adopt_behavior', 'new_rule'] as const) {
-    const f = await fixture()
+    const model = 'gpt-6.1-astra', f = await fixture({ ...settings, model })
     try {
       await f.application.enable()
       const starts: string[] = []
       f.application.start = id => { starts.push(id) }
       const code = (await f.application.submit({ nodeId: 'demo', requestId: 'code-input', origin: 'code' })).operation!
       assert.equal(code.origin, 'code')
+      assert.equal(code.model, model)
       const first = (await f.application.submit({ nodeId: 'demo', requestId: 'combined-input', origin: 'combined' })).operation!
       assert.equal(first.origin, 'combined')
+      assert.equal(first.model, model)
       f.application.store.ackDispatch(first.input.source.repositoryId, code.dispatchMessageId)
       const acknowledged = f.application.store.ackDispatch(first.input.source.repositoryId, first.dispatchMessageId)
       const claimed = f.application.store.claimQueuedAttempt({ operationId: first.id, source: first.input.source, scope: first.scope, leaseMs: 60000, expectedRevision: acknowledged.revision })
@@ -988,6 +1061,7 @@ test('AC-APPLICATION-P3 code/combined手动接入与可信裁决冻结，旧原�
 
 
       assert.equal(keep.operation.origin, 'decision')
+      assert.equal(keep.operation.model, model)
       assert.equal(keep.operation.rootCauseId, first.rootCauseId)
       assert.ok(keep.operation.requestBlob)
       assert.equal(starts.filter(id => id === keep.operation.id).length, 1)

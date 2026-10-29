@@ -104,3 +104,5 @@ revert 将精确历史恢复 Spec 作为可信目标，保原节点/业务 ID �
 正式 run/verify 可传 model，首次请求默认 sol，同 requestId 省略选择及显式 retry 省略选择均继承已持久模型；改同 requestId 模型拒绝，普通重复换模型不获新预算。非默认新操作保存 sync-tools-v2/model，使旧二进制明确拒绝而不静默用 sol；新执行核运行描述与 operation 精确一致。v1 及缺模型旧 operation 保原 sol/payload/证据，恢复不能换模型。完整合同属于 [[sync-model-selection]]。
 
 已存在或备份固定运行描述先核精确期望模型，再允许admission。未受理请求留下的原描述若与后续选择不符，明确早拒，不新建operation/receipt/FIFO且不静默重建；匹配原描述的合法显式retry或新请求仍沿既有入口。
+
+新手动 run/verify operation 可显式选择模型以覆盖项目默认；省略模型时，同 request 的 prior 或显式 retry 的原模型优先于当前版本化配置 `sync.model`，无 prior/retry 才使用项目值或历史默认 sol。同 request 改模型拒绝，普通重复不能用模型变化重置预算。自动观察、decide 与 revert 新 operation 从同一快照配置绑定模型，admission、固定运行描述与真实 runner request 使用相同精确值。配置变化继续由授权/configDigest/currentness 门禁处理，不重开旧操作或重置预算。

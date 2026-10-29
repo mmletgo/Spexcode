@@ -5,6 +5,8 @@ hue: 175
 desc: 无浏览器提交与控制真实后端操作，离线明确失败。
 code:
   - spec-cli/src/sync-cli.ts
+related:
+  - spec-cli/src/help.ts
 ---
 # 同步 CLI
 
@@ -39,4 +41,4 @@ P4 增加无operation参数的 pause/resume，调用 /automatic/pause|resume 物
 
 独立check的help与guide说明受信policyCommit中的原意精确登记、null新增删除、移动双登记及失败摘要；外部调用方负责选择受信政策并配置必需检查，授权不豁免独审/VERIFY/oracle。
 
-run/verify 接收 --model 并传给正式 HTTP 应用；控制/恢复命令遇到该 flag 明确拒绝。help/guide说明固定默认、重试继承与显式 retryOf 换模型，遵循 [[sync-model-selection]]。
+run/verify 接收 --model 并传给正式 HTTP 应用；控制/恢复命令遇到该 flag 明确拒绝。help/guide说明新业务操作显式模型覆盖版本化 `sync.model`，无 prior/retry 时以项目值或 sol 为默认；同 request ID 保持原模型，换模型必须使用 retryOf，合法省略 retry 继承原选择，遵循 [[sync-model-selection]]。

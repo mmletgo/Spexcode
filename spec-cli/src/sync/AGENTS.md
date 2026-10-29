@@ -17,4 +17,4 @@
 - P2 快照/候选仅操作明确 commonDir 的 Git 对象及私有保活 refs，禁用元数据 fsmonitor/reference hooks；开发/交付提交不可照搬禁 hooks。原输入与 ComposedInputRef 分开；实际模型 diff 和最终 apply diff 分开。
 - 快照/候选针对验证：`npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/sync/snapshot-candidate.test.ts`；build 后 `npm run typecheck`、`npx eslint spec-cli/src/sync/{snapshot,composition,candidate,snapshot-candidate.test}.ts`。
 
-- 模型选择冻结于 operation：默认缺字段固定 sol，换模型只经显式 retryOf；非默认运行描述用 sync-tools-v2，v13组件marker使旧writer在所有入口拒绝；回滚须停writer/结算资源并恢复升级前DB备份，不能删marker或只改工具描述，resume/recover不换模型。
+- 模型选择冻结于 operation：新操作缺少显式选择或既有绑定时取版本化 `sync.model`，再缺省 sol；旧 operation 缺字段仍固定 sol。换模型只经显式 retryOf；非默认运行描述用 sync-tools-v2，v13组件marker使旧writer在所有入口拒绝；回滚须停writer/结算资源并恢复升级前DB备份，不能删marker或只改工具描述，resume/recover不换模型。
