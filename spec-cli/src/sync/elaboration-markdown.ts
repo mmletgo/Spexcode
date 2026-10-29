@@ -138,7 +138,7 @@ export function renderElaboration(input: ElaborationInput, generated: GeneratedE
       })
       const added = (Object.keys(CONTRACT_COLUMNS) as ContractKind[]).filter(kind => !seen.has(kind) && tables[kind].length).map(section)
       if (added.length) expanded += `\n\n${added.join('\n\n')}`
-      if (legacyBody !== null && node.prose && input.mode !== 'preserve_business') expanded += `\n\n${node.prose}`
+      if (node.prose && (!baseline && !parts!.expandedSpec.includes(node.prose.trim()) || legacyBody !== null && input.mode !== 'preserve_business')) expanded += `\n\n${node.prose}`
       const normalized = renderingSource!
       const originalBody = parseFrontmatter(normalized).body
       const ranges: Record<'rawSource' | 'expandedSpec', { start: number; end: number }[]> = { rawSource: [], expandedSpec: [] }

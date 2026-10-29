@@ -29,7 +29,7 @@ related:
 
 首次细化已有 raw-only 或未启用 schema 的旧目标时，模型仍须显式提交完整行；程序装配候选时始终登记 `contract-schema: sync-v1`。该程序拥有的契约标记不因 preserve_business 保留人工标题、说明和原意而被省略，不能要求各项目手工预填标记才能建立首份契约。
 
-该首次装配也复用原正文分段位置：preserve_business 保留人工正文标题、导言和已有 expanded 解释，不因尚无已解析旧行而用模型 prose 覆盖它们。expanded 为空或缺席时，在原正文末尾建立正确 expanded 段并追加首份契约表，不能误写为第二份 raw 段。
+该首次装配也复用原正文分段位置：preserve_business 保留人工正文标题、导言和已有 expanded 解释，不因尚无已解析旧行而用模型 prose 覆盖它们。未启用 sync-v1 的首次装配把模型明确提供的解释追加至原 expanded，保留流程无状态依据等必要细化，并接受完整结构和独立语义审查；已启用契约的纯重构仍忽略模型 prose。expanded 为空或缺席时，在原正文末尾建立正确 expanded 段并追加首份契约表及解释，不能误写为第二份 raw 段。
 
 授权补建缺失 raw 段时，由分段扫描器识别的真实 expanded 内容起点定位其标题，在该 expanded 段之前插入；标题、导言与围栏伪标题保留，不把 raw 追加到 expanded 末尾。
 

@@ -102,7 +102,7 @@ test('raw-only旧节点用同一协议首次建立契约，保留原raw及既有
 test('preserve_business首次细化raw-only节点仍启用契约，保留人工元数据和原意', () => {
   const rawOnly = '---\ntitle: 人工标题\ndesc: 人工说明\nstatus: pending\n---\n# 人工正文标题\n\n## raw source\n\n真实旧原意。\n\n## expanded spec\n\n原有业务说明。\n'
   const output = patch()
-  output.changes[0].prose = '模型不能覆盖已有人工业务解释。'
+  output.changes[0].prose = '首次契约的无状态依据：同步返回结果，不存在持久业务状态。'
   output.changes[0].tables.REQ = [{ id: 'REQ-EXPORT-01', goal: '导出', source: 'user:raw', constraints: '-', success: '返回数据', 'depends-on': [] }]
   const snapshot: ElaborationInput = { ...input, mode: 'preserve_business', intent: { ...input.intent, rawSource: '真实旧原意。' }, targets: [{ ...input.targets[0], source: rawOnly, sourceDigest: elaborationDigest(rawOnly) }] }
   const rendered = renderElaboration(snapshot, output, 'input').changes[0].source
@@ -115,15 +115,22 @@ test('preserve_business首次细化raw-only节点仍启用契约，保留人工�
   assert.equal(parseFrontmatter(rendered).fm.desc, '人工说明')
   assert.ok(rendered.includes('原有业务说明。'))
   assert.ok(rendered.includes('# 人工正文标题'))
-  assert.ok(!rendered.includes('模型不能覆盖已有人工业务解释。'))
+  assert.ok(rendered.includes(output.changes[0].prose))
   for (const expanded of ['## expanded spec\n\n', '']) {
     const empty = rawOnly.replace('## expanded spec\n\n原有业务说明。\n', expanded)
     const fresh = renderElaboration({ ...snapshot, targets: [{ ...snapshot.targets[0], source: empty, sourceDigest: elaborationDigest(empty) }] }, output, 'input').changes[0].source
     assert.equal(parseContract({ nodeId: 'export-contract', path, source: fresh }).contract!.items.length, 1)
     assert.equal(parseParts(fresh)!.rawSource, '真实旧原意。')
     assert.ok(fresh.includes('# 人工正文标题'))
+    assert.ok(fresh.includes(output.changes[0].prose))
     assert.equal((fresh.match(/^## raw source$/gm) ?? []).length, 1)
   }
+})
+
+test('preserve_business已有契约忽略模型prose，纯重构不追加或覆盖正文', () => {
+  const output = patch()
+  output.changes[0].prose = '不能借纯重构追加的新业务解释。'
+  assert.equal(renderElaboration({ ...input, mode: 'preserve_business' }, output, 'input').changes[0].source, source)
 })
 
 test('补建缺失raw段位于真实expanded之前，保留标题及围栏中的伪标题', () => {
