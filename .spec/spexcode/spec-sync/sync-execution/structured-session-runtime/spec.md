@@ -37,7 +37,7 @@ related:
 
 精确 session/thread 与 generation binding 一致时，取消复用 [[shared-runtime-generation-rotation]] 的只读 close 解析。原 detached 进程组已由 [[detached-runtime-identity]] 正面证明消失，即使 ledger 尚未 reclaimed，也可持久结算 nativeStopped/generationGone；不发送 RPC、不启动或恢复 native、不替换绑定。原失败首轮只有 thread 而没有 turnId 也适用。缺失或不匹配绑定、错 receipt、PID 查询未知、仅 socket 消失或残留进程组仍保持 pending，不能从错误字符串或原生缺行推断停止。
 
-结构化 record 的固定 policy 唯一决定其 Codex control realm：v1 使用 `structured-read-only-v1/control`；v2 使用 `structured-frozen-read-only-v2/<readerRuntime.catalogDigest>/control`。创建登记、恢复、取消以及后续 close 都解析同一 realm，并继续核对精确 session/thread/generation binding；另一个 realm 中看似匹配的 binding 不能替代。
+结构化 record 的固定 policy 唯一决定其 Codex control realm：v1 使用 `structured-read-only-v1/control`；v2 的旧 readerRuntime 版本1使用 `structured-frozen-read-only-v2/<readerRuntime.catalogDigest>/control`，新版本2在同一目录下以 `output-<toolOutputTokenLimit>/control` 隔离传输额度能力。创建登记、恢复、取消以及后续 close 都解析同一 realm，并继续核对精确 session/thread/generation binding；另一个 realm 中看似匹配的 binding 不能替代。
 
 AbortSignal、caller 超时与显式取消使用同一持久取消协议。确认停止后 cancelled/timeout 为 offline 并允许下一请求使用容量；拒绝控制、连接中断、generation 身份失效或 ACK 后仍 active 时，保持 cancelling/unknown 和原容量保留，返回 cancellation_pending。调用方可以重试取消取得真实结算证据；不得 kill 共享 realm，不能仅凭已发送 frame、RPC ACK 或 caller 截止宣称模型停止。断连 running 的原恢复语义不变。
 
@@ -50,3 +50,5 @@ AbortSignal、caller 超时与显式取消使用同一持久取消协议。确�
 结构化创建期间取消或超时、尚未发布会话时，正式创建事务完成清理后保留精确 SessionCreateTermination。错误包含该收据的预期 sessionId；同键重放返回原取消/超时，不进入队列或重新创建。创建事务等待锁时被取消不能生成他人停止证明；清理失败不提供 nativeStopped。上层只能用匹配固定请求的收据结算尚未开始的资源。
 
 提供 frozenContext 时采用 [[structured-readonly-policy]] 的 v2 冻结读取，清单参与固定请求摘要；内部 sessionCreateKey 仅承接已持久 reserveDispatch 的原生创建身份，业务 requestKey/inputDigest 保持清单绑定。真实工具请求与回复证据先持久再发送，最终必须核验精确原生历史及完整覆盖。未答动态请求的恢复不能伪回执，改由既有取消协议确认精确turn停止；确认前不得释放资源。
+
+readerRuntime版本2在新结果发布、completed精确恢复和同步资源结果读取中均要求[[frozen-context-reader]]的版本2模型可见证明及固定额度，不能携旧coverage证明降级。旧runtime只恢复已有turn；保留唯一原turn加精确prompt的丢ack识别，但不得发送thread/start或turn/start。旧字段和摘要保持原样。

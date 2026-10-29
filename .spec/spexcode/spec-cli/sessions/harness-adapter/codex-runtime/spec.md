@@ -55,8 +55,9 @@ after an atomic replacement. No ledger content or cache survives the process, so
 derived from the current runtime files.
 
 Structured execution records select their own Codex control root from the persisted fixed policy: v1 uses
-`structured-read-only-v1/control`, while v2 uses
-`structured-frozen-read-only-v2/<readerRuntime.catalogDigest>/control`. Ordinary Codex records continue to use
+`structured-read-only-v1/control`, while v2 with legacy readerRuntime version 1 uses
+`structured-frozen-read-only-v2/<readerRuntime.catalogDigest>/control`; readerRuntime version 2 adds
+`output-<toolOutputTokenLimit>/control` below that catalog directory, as specified by [[structured-readonly-policy]]. Ordinary Codex records continue to use
 the project root. Descriptor selection, turn control, retirement, close, and compensation derive that same root
 from the record and still require its exact session/thread generation binding; an empty structured ledger never
 falls through to the project's legacy endpoint. The close contract is [[archive]], and structured execution owns

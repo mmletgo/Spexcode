@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { assertFrozenBinding, freezeContext, frozenContextPrompt, persistFrozenRead, prepareFrozenPrompt, proveFrozenReads, readFrozenManifest, readFrozenRange, verifyFrozenReadProof, FROZEN_READ_MAX_BYTES, type FrozenContextInput, type FrozenNativeItem } from './frozen-context.js'
+import { assertFrozenBinding, freezeContext, frozenContextPrompt, frozenReadOutputTokenLimit, frozenReadTool, frozenVisibleOutputs, persistFrozenRead, prepareFrozenPrompt, proveFrozenReads, readFrozenManifest, readFrozenRange, verifyFrozenReadProof, FROZEN_READ_MAX_BYTES, type FrozenContextInput, type FrozenNativeItem, type FrozenVisibleOutput } from './frozen-context.js'
 
 const binding = { requestKey: 'exact-request', inputDigest: 'exact-input' }
 function fixture(entries: FrozenContextInput[] = [{ id: 'a', label: 'frozen source', kind: 'utf8', bytes: Buffer.from('首abc尾') }]) {
@@ -15,6 +15,48 @@ function fixture(entries: FrozenContextInput[] = [{ id: 'a', label: 'frozen sour
   return { ref, directory, args, item, close: () => rmSync(directory, { recursive: true, force: true }) }
 }
 const identity = { threadId: 'exact-thread', turnId: 'exact-turn' }
+
+test('model-visible frozen proof rejects inner-only coverage, cropped or wrapped replies and history budget borrowing', () => {
+  const f = fixture()
+  try {
+    const item = f.item(0, 9, 'inner'), text = readFrozenRange(f.ref, f.args(0, 9)).response.contentItems[0].text
+    const limit = frozenReadOutputTokenLimit(f.ref), historyTokenLimit = Math.ceil(limit * 1.2)
+    const outer: FrozenVisibleOutput = { callId: 'outer', output: [{ type: 'input_text', text: 'Script completed' }, { type: 'input_text', text }], historyTokenLimit }
+    const legacy = proveFrozenReads(f.ref, identity, [item])
+    const proof = proveFrozenReads(f.ref, identity, [item], { toolOutputTokenLimit: limit, outputs: [outer] })
+    assert.equal(proof.version, 2)
+    assert.equal(proof.historyDigest, legacy.historyDigest, 'original native history bytes remain unchanged')
+    verifyFrozenReadProof(f.ref, proof, identity, limit)
+    verifyFrozenReadProof(f.ref, legacy, identity)
+    assert.throws(() => verifyFrozenReadProof(f.ref, legacy, identity, limit), /requires.*v2/)
+    for (const displayed of [text.slice(0, 60), JSON.stringify(text), 'Read all 9 bytes']) {
+      assert.throws(() => proveFrozenReads(f.ref, identity, [item], { toolOutputTokenLimit: limit, outputs: [{ ...outer, output: [{ type: 'input_text', text: displayed }] }] }), /not returned verbatim/)
+    }
+    assert.throws(() => proveFrozenReads(f.ref, identity, [item], { toolOutputTokenLimit: limit, outputs: [
+      { ...outer, callId: 'large-budget-other-call', historyTokenLimit: historyTokenLimit + 10000, output: [] },
+      { ...outer, historyTokenLimit: 1 },
+    ] }), /actual fixed history budget/)
+    assert.throws(() => proveFrozenReads(f.ref, identity, [item], { toolOutputTokenLimit: limit, outputs: [{ ...outer, output: [{ type: 'input_text', text: 'x'.repeat(historyTokenLimit * 4) }, { type: 'input_text', text }] }] }), /actual fixed history budget/, 'headers and every other outer item consume the same budget')
+    const restored = JSON.parse(JSON.stringify(proof))
+    restored.version = undefined
+    assert.throws(() => verifyFrozenReadProof(f.ref, restored, identity, limit), /requires.*v2/)
+  } finally { f.close() }
+})
+
+test('visible exec history pairs exact call outputs within explicit native turn boundaries', () => {
+  const record = (type: string, payload: unknown, metadata?: unknown) => JSON.stringify({ type, payload, ...(metadata ? { metadata } : {}) }) + '\n'
+  const call = (id: string) => record('response_item', { type: 'custom_tool_call', name: 'exec', call_id: id })
+  const output = (id: string, text: string, limit = 12000) => record('response_item', { type: 'custom_tool_call_output', call_id: id, output: [{ type: 'input_text', text }] }, { fallback_token_limit_override: limit })
+  const start = (id: string) => record('turn_context', { turn_id: id })
+  const done = (id: string) => record('event_msg', { type: 'task_complete', turn_id: id })
+  const native = start('other') + call('foreign') + output('foreign', 'foreign-full-body') + done('other') + start('target') + call('owned') + output('owned', 'actual-body') + done('target')
+  assert.deepEqual(frozenVisibleOutputs(native, 'target'), [{ callId: 'owned', output: [{ type: 'input_text', text: 'actual-body' }], historyTokenLimit: 12000 }])
+  assert.throws(() => frozenVisibleOutputs(start('target') + output('foreign', 'body') + done('target'), 'target'), /exact exec call/)
+  assert.throws(() => frozenVisibleOutputs(start('target') + call('owned') + done('target'), 'target'), /without its output/)
+  assert.throws(() => frozenVisibleOutputs(start('target') + call('owned') + output('owned', 'body') + output('owned', 'body') + done('target'), 'target'), /exact exec call/)
+  assert.throws(() => frozenVisibleOutputs(start('target') + call('owned') + record('response_item', { type: 'custom_tool_call_output', call_id: 'owned', output: [{ type: 'image', data: 'hidden' }] }, { fallback_token_limit_override: 12000 }) + done('target'), 'target'), /exact exec call/)
+  assert.throws(() => frozenVisibleOutputs(start('target') + call('owned') + output('owned', 'body'), 'target'), /not persisted.*completed/)
+})
 
 test('frozen manifest binds request and immutable bytes without exposing control paths to the model', () => {
   const f = fixture()
@@ -88,6 +130,59 @@ test('expanded UTF8 reads retain BOM codepoints while aligned legacy decoding st
   } finally { f.close() }
 })
 
+test('frozen output budget contains worst JSON escapes, expanded UTF8, binary and actual long entry identities', () => {
+  const longId = '"\\\u0000🙂'.repeat(20_000)
+  const f = fixture([
+    { id: longId, label: 'escaped controls', kind: 'utf8', bytes: Buffer.alloc(FROZEN_READ_MAX_BYTES + 6) },
+    { id: 'utf8', label: 'expanded characters', kind: 'utf8', bytes: Buffer.from('🙂'.repeat(FROZEN_READ_MAX_BYTES / 4 + 2)) },
+    { id: 'binary', label: 'binary', kind: 'binary', bytes: Buffer.alloc(FROZEN_READ_MAX_BYTES + 1, 0xff) },
+    { id: 'absent', label: 'absent', kind: 'absent' },
+  ])
+  try {
+    const limit = frozenReadOutputTokenLimit(f.ref)
+    for (const [entryId, start, end] of [[longId, 0, FROZEN_READ_MAX_BYTES], ['utf8', 1, FROZEN_READ_MAX_BYTES + 1], ['binary', 0, FROZEN_READ_MAX_BYTES], ['absent', 0, 0]] as const) {
+      const text = readFrozenRange(f.ref, f.args(start, end, entryId)).response.contentItems[0].text
+      assert.ok(Math.ceil(Buffer.byteLength(text) / 4) <= limit, 'Codex must retain every complete inputText before its additional allowance')
+    }
+    const short = fixture([{ id: 'task', label: 'short', kind: 'utf8', bytes: Buffer.from('short') }])
+    try { assert.ok(frozenReadOutputTokenLimit(short.ref) < limit, 'the budget follows actual frozen metadata instead of an arbitrary identity cap') }
+    finally { short.close() }
+  } finally { f.close() }
+})
+
+test('UTF8 display end is never the next requested cursor at the real one-MiB cut', () => {
+  const bytes = Buffer.from('x'.repeat(1_048_575) + '’尾')
+  const f = fixture([{ id: 'a', label: 'cursor regression', kind: 'utf8', bytes }])
+  try {
+    const prefix = [0, 262_144, 524_288, 786_432].map(start => f.item(start, start + FROZEN_READ_MAX_BYTES, `prefix-${start}`))
+    const reply = JSON.parse((prefix.at(-1)!.contentItems as { text: string }[])[0].text) as { endByte: number; decodedEndByte: number }
+    assert.equal(reply.endByte, 1_048_576); assert.equal(reply.decodedEndByte, 1_048_578)
+    assert.throws(() => proveFrozenReads(f.ref, identity, [...prefix, f.item(reply.decodedEndByte, bytes.length, 'wrong-cursor')]), /not completely read/)
+    assert.deepEqual(proveFrozenReads(f.ref, identity, [...prefix, f.item(reply.endByte, bytes.length, 'original-cursor')]).coveredEntryIds, ['a'])
+    assert.match(frozenReadTool.description, /original endByte/)
+    assert.match(frozenReadTool.description, /never cursors/)
+  } finally { f.close() }
+})
+
+test('literal truncation warnings remain source data and saved visible proof tampering is rejected', () => {
+  const f = fixture([{ id: 'a', label: 'literal warning text', kind: 'utf8', bytes: Buffer.from('Warning: truncated output is a literal source sentence.') }])
+  try {
+    const length = readFrozenManifest(f.ref).entries[0].byteLength, item = f.item(0, length, 'read')
+    const text = (item.contentItems as { text: string }[])[0].text, toolOutputTokenLimit = frozenReadOutputTokenLimit(f.ref)
+    const outer: FrozenVisibleOutput = { callId: 'exec', historyTokenLimit: Math.ceil(toolOutputTokenLimit * 1.2), output: [{ type: 'input_text', text: 'Script completed\nOutput:\n' }, { type: 'input_text', text }] }
+    const legacy = proveFrozenReads(f.ref, identity, [item]), legacyBytes = JSON.stringify(legacy)
+    const proof = proveFrozenReads(f.ref, identity, [item], { toolOutputTokenLimit, outputs: [outer] })
+    assert.equal(proof.version, 2)
+    verifyFrozenReadProof(f.ref, proof, identity)
+    assert.equal(JSON.stringify(proveFrozenReads(f.ref, identity, [item])), legacyBytes)
+    assert.equal(proof.version, 2)
+    if (proof.version !== 2) assert.fail('visible proof must carry its version')
+    const path = join(dirname(f.ref.manifestPath), 'histories', proof.visibilityDigest)
+    chmodSync(path, 0o600); writeFileSync(path, 'tampered public output')
+    assert.throws(() => verifyFrozenReadProof(f.ref, proof, identity), /visible.*digest/)
+  } finally { f.close() }
+})
+
 test('coverage merges duplicate and out-of-order intervals but refuses gaps, false results and duplicate call identities', () => {
   const f = fixture()
   try {
@@ -155,6 +250,7 @@ test('large prompt preparation is lossless, stable before hashing and leaves sma
     assert.equal(first.requestKey, request.requestKey)
     assert.ok(first.frozenContext)
     assert.ok(first.prompt.length < 2048)
+    assert.match(first.prompt, /original endByte, never decodedEndByte/)
     assert.equal(first.prompt.includes(f.directory), false)
     const entry = readFrozenManifest(first.frozenContext).entries[0]
     assert.equal(entry.byteLength, Buffer.byteLength(request.prompt))

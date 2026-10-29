@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
-import { StructuredSessionError } from './session-structured-policy.js'
+import { StructuredSessionError, StructuredSessionTransportError } from './session-structured-policy.js'
 
 export const FROZEN_READER_POLICY = 'codex-frozen-read-only-v2' as const
 export const FROZEN_READ_TOOL = 'spex_read_frozen' as const
@@ -15,7 +15,10 @@ export type FrozenContextRef = { version: 1; contextDigest: string; manifestPath
 export type FrozenContextInput = { id: string; label: string; required?: boolean } & ({ kind: 'utf8' | 'binary'; bytes: Buffer } | { kind: 'absent' })
 export type FrozenReadArguments = { contextDigest: string; entryId: string; startByte: number; endByte: number }
 export type FrozenReadReceipt = { threadId: string; turnId: string; callId: string; arguments: FrozenReadArguments; responseDigest: string }
-export type FrozenReadProof = { contextDigest: string; threadId: string; turnId: string; receipts: FrozenReadReceipt[]; coveredEntryIds: string[]; historyDigest: string }
+type FrozenCoverageProof = { contextDigest: string; threadId: string; turnId: string; receipts: FrozenReadReceipt[]; coveredEntryIds: string[]; historyDigest: string }
+export type FrozenReadProof = FrozenCoverageProof & ({ version?: never } | { version: 2; visibilityDigest: string; toolOutputTokenLimit: number })
+export type FrozenVisibleOutput = { callId: string; output: { type: 'input_text'; text: string }[]; historyTokenLimit: number }
+type FrozenVisibility = { toolOutputTokenLimit: number; outputs: FrozenVisibleOutput[] }
 export type FrozenNativeItem = { type: string; id?: string; namespace?: string | null; tool?: string; arguments?: unknown; status?: string; success?: boolean | null; contentItems?: unknown }
 export type FrozenToolResponse = { contentItems: { type: 'inputText'; text: string }[]; success: true }
 const sha = (bytes: Buffer | string): string => createHash('sha256').update(bytes).digest('hex')
@@ -61,7 +64,7 @@ export function prepareFrozenPrompt<T extends { root: string; prompt: string; re
   if (Buffer.byteLength(request.prompt, 'utf8') <= FROZEN_PROMPT_THRESHOLD_BYTES) return request
   const frozenContext = freezeContext({ directory: options.directory, sourceRoot: request.root, binding,
     entries: [{ id: 'task', label: 'Complete original task and frozen context', kind: 'utf8', bytes: Buffer.from(request.prompt, 'utf8') }] })
-  const prompt = `The complete original task, instructions, and context are frozen without truncation in entry task. Read its entire required content using ${FROZEN_READ_TOOL}, then follow that original task and return its requested structured final answer. Byte offsets are end-exclusive. No shell, paths or live data are available.\n${frozenContextPrompt(frozenContext)}`
+  const prompt = `The complete original task, instructions, and context are frozen without truncation in entry task. Read its entire required content using ${FROZEN_READ_TOOL}, then follow that original task and return its requested structured final answer. Byte offsets are end-exclusive; continue from the response's original endByte, never decodedEndByte. No shell, paths or live data are available.\n${frozenContextPrompt(frozenContext)}`
   return { ...request, prompt, frozenContext }
 }
 
@@ -87,12 +90,29 @@ export function assertFrozenBinding(ref: FrozenContextRef, expected: FrozenConte
 /** 模型索引只有逻辑条目、内容身份和字节长度，不泄露控制面路径。 */
 export function frozenContextPrompt(ref: FrozenContextRef): string {
   const manifest = readFrozenManifest(ref)
-  return JSON.stringify({ tool: FROZEN_READ_TOOL, contextDigest: ref.contextDigest, maxReadBytes: FROZEN_READ_MAX_BYTES, entries: manifest.entries })
+  return JSON.stringify({ tool: FROZEN_READ_TOOL, contextDigest: ref.contextDigest, maxReadBytes: FROZEN_READ_MAX_BYTES, execMaxOutputTokens: frozenReadOutputTokenLimit(ref), entries: manifest.entries })
+}
+
+/** 按冻结清单的真实元数据和最坏 JSON 转义，界定单个模型可见 inputText 的固定预算。 */
+export function frozenReadOutputTokenLimit(ref: FrozenContextRef): number {
+  let maximumBytes = 1
+  for (const entry of readFrozenManifest(ref).entries) {
+    const args = { contextDigest: ref.contextDigest, entryId: entry.id, startByte: entry.byteLength, endByte: entry.byteLength }
+    const metadata = { ...args, kind: entry.kind, sha256: entry.sha256, byteLength: entry.byteLength, rangeSha256: entry.sha256 }
+    const rangeBytes = Math.min(entry.byteLength, FROZEN_READ_MAX_BYTES)
+    const bytes = entry.kind === 'utf8'
+      ? encode({ ...metadata, text: '', decodedStartByte: entry.byteLength, decodedEndByte: entry.byteLength }).length + 6 * (rangeBytes + 6)
+      : entry.kind === 'binary' ? encode({ ...metadata, base64: '' }).length + 4 * Math.ceil(rangeBytes / 3)
+        : encode({ ...metadata, absent: true }).length
+    maximumBytes = Math.max(maximumBytes, bytes)
+  }
+  // Codex 0.160.0 charges ceil(inputText UTF-8 bytes / 4). Its host default also covers small-output headers.
+  return Math.max(10_000, Math.ceil(maximumBytes / 4))
 }
 
 export const frozenReadTool = {
   type: 'function', name: FROZEN_READ_TOOL,
-  description: 'Read immutable frozen context only. Read every required unique content fully before the final answer. Byte ranges are end-exclusive and must preserve UTF-8 boundaries. No paths, live files, shell, or network are available.',
+  description: 'Read immutable frozen context only. Read every required unique content fully before the final answer. Through exec, make one read per execution, set its first-line // @exec: {"max_output_tokens": N} with N = execMaxOutputTokens from the context index, and print the returned string verbatim using text(await tools.spex_read_frozen(...)). Byte ranges are end-exclusive. Continue with startByte equal to the response original endByte; decodedStartByte/decodedEndByte only describe UTF-8 display expansion and are never cursors. No paths, live files, shell, or network are available.',
   inputSchema: { type: 'object', properties: { contextDigest: { type: 'string' }, entryId: { type: 'string' }, startByte: { type: 'integer', minimum: 0 }, endByte: { type: 'integer', minimum: 0 } }, required: ['contextDigest', 'entryId', 'startByte', 'endByte'], additionalProperties: false },
 } as const
 
@@ -130,9 +150,57 @@ export function persistFrozenRead(ref: FrozenContextRef, identity: { threadId: s
   return { receipt: { ...identity, arguments: args, responseDigest }, response }
 }
 
+/** 仅提取精确 turn 的公开 exec 回复；不把完整 rollout 等同于模型实际可见的 history。 */
+export function frozenVisibleOutputs(rollout: string, turnId: string): FrozenVisibleOutput[] {
+  if (!rollout.endsWith('\n')) throw new StructuredSessionTransportError('exact frozen visible rollout has not flushed its final record yet')
+  let currentTurn: string | undefined, completed = false
+  const calls = new Set<string>(), outputs: FrozenVisibleOutput[] = [], returned = new Set<string>()
+  for (const line of rollout.split('\n')) {
+    if (!line.trim()) continue
+    const record = JSON.parse(line) as { type?: string; payload?: { type?: string; turn_id?: string; call_id?: string; name?: string; output?: unknown }; metadata?: { fallback_token_limit_override?: number } }
+    const payload = record.payload
+    if (record.type === 'turn_context' || record.type === 'event_msg' && payload?.type === 'task_started') currentTurn = payload?.turn_id
+    if (record.type === 'event_msg' && payload?.type === 'task_complete' && payload.turn_id === turnId) {
+      if (currentTurn !== turnId) stale('frozen visible completion does not belong to the active exact turn')
+      completed = true; currentTurn = undefined
+    }
+    if (currentTurn !== turnId || record.type !== 'response_item') continue
+    if (payload?.type === 'custom_tool_call') {
+      if (!payload.name || !payload.call_id || calls.has(payload.call_id)) stale('frozen visible history contains an invalid or repeated host call')
+      calls.add(payload.call_id)
+    } else if (payload?.type === 'custom_tool_call_output') {
+      if (!payload.call_id || !calls.has(payload.call_id) || returned.has(payload.call_id) || !Array.isArray(payload.output)
+        || payload.output.some(item => !item || item.type !== 'input_text' || typeof item.text !== 'string')
+        || !Number.isSafeInteger(record.metadata?.fallback_token_limit_override) || record.metadata!.fallback_token_limit_override! <= 0)
+        stale('frozen visible output is not bound to its exact exec call and history budget')
+      returned.add(payload.call_id)
+      outputs.push({ callId: payload.call_id, output: payload.output, historyTokenLimit: record.metadata!.fallback_token_limit_override! })
+    }
+  }
+  if (!completed) throw new StructuredSessionTransportError('exact frozen visible rollout has not persisted its completed turn yet')
+  if (returned.size !== calls.size) stale('frozen visible history contains an exec call without its output')
+  return outputs
+}
+
+/** 校验所有外层文本的真实预算，并逐项证明内层冻结正文原样进入模型可见回复。 */
+function checkFrozenVisibility(ref: FrozenContextRef, visibility: FrozenVisibility, responses: string[]): void {
+  if (visibility.toolOutputTokenLimit !== frozenReadOutputTokenLimit(ref)) stale('frozen visible proof differs from the fixed response budget')
+  const callIds = new Set<string>(), texts = new Set<string>()
+  for (const outer of visibility.outputs) {
+    if (!outer.callId || callIds.has(outer.callId) || !Array.isArray(outer.output) || outer.output.some(item => item.type !== 'input_text' || typeof item.text !== 'string')
+      || outer.historyTokenLimit !== Math.ceil(visibility.toolOutputTokenLimit * 1.2)
+      || outer.output.reduce((cost, item) => cost + Math.ceil(Buffer.byteLength(item.text, 'utf8') / 4), 0) > outer.historyTokenLimit)
+      stale('frozen outer output exceeds or differs from its actual fixed history budget')
+    callIds.add(outer.callId)
+    for (const item of outer.output) texts.add(item.text)
+  }
+  if (responses.some(text => !texts.has(text))) stale('frozen response was not returned verbatim in the exact model-visible exec output')
+}
+
 /** 以精确原生turn的真实arguments和result重建coverage；不信模型声明或本地回执。 */
-export function proveFrozenReads(ref: FrozenContextRef, identity: { threadId: string; turnId: string }, items: readonly FrozenNativeItem[]): FrozenReadProof {
+export function proveFrozenReads(ref: FrozenContextRef, identity: { threadId: string; turnId: string }, items: readonly FrozenNativeItem[], visibility?: FrozenVisibility): FrozenReadProof {
   const receipts: FrozenReadReceipt[] = [], ranges = new Map<string, [number, number][]>(), ids = new Set<string>()
+  const responses: string[] = []
   const manifest = readFrozenManifest(ref)
   for (const item of items) {
     if (item.type !== 'dynamicToolCall') continue
@@ -140,6 +208,7 @@ export function proveFrozenReads(ref: FrozenContextRef, identity: { threadId: st
     ids.add(item.id)
     const { arguments: args, response } = readFrozenRange(ref, item.arguments)
     if (JSON.stringify(item.contentItems) !== JSON.stringify(response.contentItems)) stale('native frozen read result bytes differ from the immutable entry')
+    responses.push(response.contentItems[0].text)
     const { receipt } = persistFrozenRead(ref, { ...identity, callId: item.id }, args)
     receipts.push(receipt)
     const entry = manifest.entries.find(entry => entry.id === args.entryId)!
@@ -157,14 +226,30 @@ export function proveFrozenReads(ref: FrozenContextRef, identity: { threadId: st
   const history = encode(items), historyDigest = sha(history), historyPath = join(dirname(ref.manifestPath), 'histories', historyDigest)
   if (!existsSync(historyPath)) writeFileSync(historyPath, history, { mode: 0o400 })
   else if (sha(readFileSync(historyPath)) !== historyDigest) stale('persisted native frozen history was modified')
-  return { contextDigest: ref.contextDigest, ...identity, receipts, coveredEntryIds, historyDigest }
+  const proof = { contextDigest: ref.contextDigest, ...identity, receipts, coveredEntryIds, historyDigest }
+  if (!visibility) return proof
+  checkFrozenVisibility(ref, visibility, responses)
+  const visible = encode({ ...identity, ...visibility }), visibilityDigest = sha(visible), visiblePath = join(dirname(ref.manifestPath), 'histories', visibilityDigest)
+  if (!existsSync(visiblePath)) writeFileSync(visiblePath, visible, { mode: 0o400 })
+  else if (sha(readFileSync(visiblePath)) !== visibilityDigest) stale('persisted frozen visible history was modified')
+  return { ...proof, version: 2, visibilityDigest, toolOutputTokenLimit: visibility.toolOutputTokenLimit }
 }
 
 /** 已结算资源重放核验保存的原生历史全文和同一逻辑覆盖，不再派发工具。 */
-export function verifyFrozenReadProof(ref: FrozenContextRef, proof: FrozenReadProof, identity: { threadId: string; turnId: string }): void {
+export function verifyFrozenReadProof(ref: FrozenContextRef, proof: FrozenReadProof, identity: { threadId: string; turnId: string }, toolOutputTokenLimit?: number): void {
   if (proof.contextDigest !== ref.contextDigest || proof.threadId !== identity.threadId || proof.turnId !== identity.turnId || !/^[a-f0-9]{64}$/.test(proof.historyDigest)) stale('frozen coverage evidence differs from its exact context/thread/turn')
+  if (toolOutputTokenLimit !== undefined && (proof.version !== 2 || proof.toolOutputTokenLimit !== toolOutputTokenLimit)) stale('current frozen runtime requires its exact v2 model-visible proof')
   const history = readFileSync(join(dirname(ref.manifestPath), 'histories', proof.historyDigest))
   if (sha(history) !== proof.historyDigest) stale('saved native frozen history digest differs')
-  const actual = proveFrozenReads(ref, identity, JSON.parse(history.toString('utf8')) as FrozenNativeItem[])
+  let visibility: FrozenVisibility | undefined
+  if (proof.version === 2) {
+    if (!/^[a-f0-9]{64}$/.test(proof.visibilityDigest)) stale('frozen visible history digest is invalid')
+    const bytes = readFileSync(join(dirname(ref.manifestPath), 'histories', proof.visibilityDigest))
+    if (sha(bytes) !== proof.visibilityDigest) stale('saved frozen visible history digest differs')
+    const saved = JSON.parse(bytes.toString('utf8')) as FrozenVisibility & { threadId: string; turnId: string }
+    if (saved.threadId !== identity.threadId || saved.turnId !== identity.turnId || saved.toolOutputTokenLimit !== proof.toolOutputTokenLimit) stale('saved frozen visible history names a different runtime or turn')
+    visibility = { toolOutputTokenLimit: saved.toolOutputTokenLimit, outputs: saved.outputs }
+  }
+  const actual = proveFrozenReads(ref, identity, JSON.parse(history.toString('utf8')) as FrozenNativeItem[], visibility)
   if (!encode(actual).equals(encode(proof))) stale('frozen read coverage differs from its saved exact native history')
 }

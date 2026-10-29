@@ -11,7 +11,7 @@ import { detachedRuntimeGenerationToken, migrateLegacyDetachedRuntimeReceipt, pr
 import { codexGenerationEndpoints, codexGenerationSocketPath, currentCodexGeneration, legacyCodexGenerationEndpoint, readCodexGenerationLedger, prepareCodexGenerationClose, resolveCodexGenerationForClose, resolveCodexGenerationForResume, resolveCodexGenerationForSession, rebindCodexGeneration, type CodexGenerationEndpoint } from './codex-runtime-generations.js'
 import { spawnDetachedRuntime } from './runtime-ownership.js'
 import { assertFrozenReaderRuntime, frozenReaderDisabledFeatures, StructuredSessionError, StructuredSessionTransportError, structuredRealmRoot, type StructuredExecution } from './session-structured-policy.js'
-import { FROZEN_READ_TOOL, frozenReadTool, persistFrozenRead, proveFrozenReads, type FrozenNativeItem, type FrozenReadProof, type FrozenReadReceipt } from './frozen-context.js'
+import { FROZEN_READ_TOOL, frozenReadOutputTokenLimit, frozenReadTool, frozenVisibleOutputs, persistFrozenRead, proveFrozenReads, type FrozenNativeItem, type FrozenReadProof, type FrozenReadReceipt } from './frozen-context.js'
 import { codexRolloutPath, codexTranscript } from '@spexcode/transcript'
 import { shQuote } from './sh.js'
 import { writeFileIfChanged } from './file-write.js'
@@ -1957,8 +1957,8 @@ const codexRolloutParented = (witness: CodexRolloutWitness): witness is CodexRol
   witness.ok && !!witness.parentThreadId && !!witness.cwd
 const CODEX_ROLLOUT_HEADER_CHUNK_BYTES = 64 * 1024
 const CODEX_ROLLOUT_HEADER_MAX_BYTES = 4 * 1024 * 1024
-function codexRolloutWitness(threadId: string, root?: string): CodexRolloutWitness {
-  const path = codexRolloutPath(threadId, root)
+function codexRolloutWitness(threadId: string, root?: string, exactPath?: string): CodexRolloutWitness {
+  const path = exactPath ?? codexRolloutPath(threadId, root)
   if (!path) return { ok: false, reason: 'rollout is missing' }
   let fd: number | null = null
   try {
@@ -2682,7 +2682,7 @@ export async function codexStructuredTurn(sock: string, cwd: string, prompt: str
   const frozen = execution.frozenContext
   if (frozen ? execution.version !== 2 || execution.policy !== 'codex-frozen-read-only-v2' : execution.version !== 1 || execution.policy !== 'codex-read-only-v1')
     throw new StructuredSessionError('unsupported', 'frozen reader requires its exact fixed v2 policy')
-  if (execution.readerRuntime) assertFrozenReaderRuntime(execution.readerRuntime, execution.model)
+  if (execution.readerRuntime) assertFrozenReaderRuntime(execution.readerRuntime, execution.model, execution.frozenContext ? frozenReadOutputTokenLimit(execution.frozenContext) : undefined)
   const conn = createConnection(sock)
   const frames: FrameState = { buf: Buffer.alloc(0), fragOp: 0, fragBuf: Buffer.alloc(0) }
   let upgraded = false, requestId = 0
@@ -2819,7 +2819,8 @@ export async function codexStructuredTurn(sock: string, cwd: string, prompt: str
     const mcp = config.config?.mcp_servers as Record<string, unknown> | undefined
     if (!config.config || config.config.sandbox_mode !== 'read-only' || config.config.approval_policy !== 'never'
       || features?.apps !== false || features?.plugins !== false || features?.hooks !== false || features?.shell_tool !== false || features?.code_mode !== false || features?.code_mode_host !== !!execution.readerRuntime || (mcp && Object.keys(mcp).length)
-      || (execution.readerRuntime && (config.config.model_catalog_json !== execution.readerRuntime.catalogPath || frozenReaderDisabledFeatures.some(feature => features?.[feature] !== false))))
+      || (execution.readerRuntime && (config.config.model_catalog_json !== execution.readerRuntime.catalogPath || frozenReaderDisabledFeatures.some(feature => features?.[feature] !== false)
+        || (execution.readerRuntime.version === 2 && config.config.tool_output_token_limit !== execution.readerRuntime.toolOutputTokenLimit))))
       throw new StructuredSessionError('unsupported', 'effective Codex config cannot prove the fixed read-only policy and zero external tools')
     const hooks = await request('hooks/list', { cwds: [cwd] }) as { data?: Array<{ hooks?: unknown[]; errors?: unknown[] }> }
     if (!Array.isArray(hooks.data) || hooks.data.some((entry) => !Array.isArray(entry.hooks) || entry.hooks.length || entry.errors?.length))
@@ -2832,6 +2833,7 @@ export async function codexStructuredTurn(sock: string, cwd: string, prompt: str
       const resumed = await request('thread/resume', { threadId, cwd, approvalPolicy: 'never', sandbox: 'read-only', excludeTurns: true }) as { thread: typeof thread }
       thread = resumed.thread
     } else {
+      if (execution.readerRuntime?.version === 1) throw new StructuredSessionError('unsupported', 'legacy frozen runtime can only recover an existing exact native turn')
       const started = await request('thread/start', { cwd, approvalPolicy: 'never', sandbox: 'read-only', ...(frozen ? { dynamicTools: [frozenReadTool] } : {}), ...(execution.model ? { model: execution.model } : {}) }) as { thread: typeof thread }
       thread = started.thread
       if (!thread?.id) throw new StructuredSessionError('failed', 'Codex returned no structured thread identity')
@@ -2848,6 +2850,7 @@ export async function codexStructuredTurn(sock: string, cwd: string, prompt: str
       await callbacks.onTurn(turnId)
     }
     if (!turnId) {
+      if (execution.readerRuntime?.version === 1) throw new StructuredSessionError('unsupported', 'legacy frozen runtime cannot start a new native turn')
       await callbacks.onTurnStarting?.()
       const accepted = await request('turn/start', { threadId, input: codexTextInput(prompt), cwd, approvalPolicy: 'never', sandboxPolicy: { type: 'readOnly' },
         outputSchema: execution.schema, ...(execution.model ? { model: execution.model } : {}), ...(execution.effort ? { effort: execution.effort } : {}) }) as { turn?: { id?: string } }
@@ -2878,7 +2881,15 @@ export async function codexStructuredTurn(sock: string, cwd: string, prompt: str
     const items = await readItems(turnId)
     const final = items.filter((item) => item.type === 'agentMessage' && item.phase === 'final_answer')
     if (final.length !== 1 || !final[0].text) throw new StructuredSessionError('failed', 'exact structured turn did not return one final answer')
-    const frozenReadProof = frozen ? proveFrozenReads(frozen, { threadId, turnId }, items) : undefined
+    let visibility: { toolOutputTokenLimit: number; outputs: ReturnType<typeof frozenVisibleOutputs> } | undefined
+    if (frozen && execution.readerRuntime?.version === 2) {
+      const result = await request('thread/read', { threadId, includeTurns: false }) as { thread?: { id?: string; path?: string | null } }
+      if (result.thread?.id !== threadId || !result.thread.path) throw new StructuredSessionTransportError('exact frozen rollout path is not materialized yet')
+      const witness = codexRolloutWitness(threadId, undefined, result.thread.path)
+      if (!witness.ok || witness.cwd !== cwd) throw new StructuredSessionError('stale_result', 'frozen visible rollout does not witness the exact thread and working directory')
+      visibility = { toolOutputTokenLimit: execution.readerRuntime.toolOutputTokenLimit, outputs: frozenVisibleOutputs(readFileSync(result.thread.path, 'utf8'), turnId) }
+    }
+    const frozenReadProof = frozen ? proveFrozenReads(frozen, { threadId, turnId }, items, visibility) : undefined
     return { threadId, turnId, text: final[0].text, ...(frozenReadProof ? { frozenReadProof } : {}) }
   } finally {
     releaseIdentity()
