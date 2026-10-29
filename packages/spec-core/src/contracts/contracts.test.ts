@@ -316,6 +316,29 @@ test('封闭const数据及for-of绑定组成的真实测试标题可静态归因
   }
 })
 
+test('optional成员调用及赋值或解构别名的可见写入使标题失效', () => {
+  const graph = buildContractGraph([parse()])
+  const sources = [
+    "const IDS = ['AC-EXPORT-01']; IDS?.pop(); test(`${IDS[0]} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; IDS.pop?.(); test(`${IDS[0]} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; IDS?.pop?.(); test(`${IDS[0]} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; IDS?.['pop'](); test(`${IDS[0]} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; let alias; alias = IDS; alias[0] = 'other'; test(`${IDS[0]} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; const [alias] = [IDS]; alias[0] = 'other'; test(`${IDS[0]} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; const { ids: alias } = { ids: IDS }; alias[0] = 'other'; test(`${IDS[0]} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; let alias; [alias] = [IDS]; alias[0] = 'other'; test(`${IDS[0]} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; let alias; ({ ids: alias } = { ids: IDS }); alias[0] = 'other'; test(`${IDS[0]} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; const [alias = IDS] = []; alias[0] = 'other'; test(`${IDS[0]} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; const alias = ({ ids: IDS } as const); alias.ids[0] = 'other'; test(`${IDS[0]} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; let alias; [alias = IDS] = []; alias[0] = 'other'; test(`${IDS[0]} candidate`, () => {});",
+  ]
+  const declared = sources.map((source) => {
+    const fake = new Map(files).set('tests/export.test.mjs', source)
+    return !validateContractGraph(graph, { files: fake }).some((finding) => finding.code === 'missing-test-case' && finding.itemId === 'AC-EXPORT-01')
+  })
+  assert.deepEqual(declared, sources.map(() => false))
+})
+
 test('动态或错绑定标题、未使用ID及作用域阴影不计测试声明', () => {
   const graph = buildContractGraph([parse()])
   const fake = new Map(files)

@@ -65,7 +65,7 @@ function testCaseTitles(source: string): string[] {
   const mutated = new Set<Binding>(), origins = new Map<Binding, Set<Binding>>()
   const rootBinding = (node: Syntax | undefined): Binding | undefined => {
     if (!node) return undefined
-    if (node.type === 'MemberExpression') return rootBinding(node.object)
+    if (['MemberExpression', 'OptionalMemberExpression'].includes(node.type)) return rootBinding(node.object)
     if (['TSAsExpression', 'TSTypeAssertion', 'TSSatisfiesExpression', 'TSNonNullExpression', 'ParenthesizedExpression'].includes(node.type)) return rootBinding(node.expression)
     return node.type === 'Identifier' ? lookup(scopes.get(node)!, node.name) : undefined
   }
@@ -73,6 +73,7 @@ function testCaseTitles(source: string): string[] {
     if (!node) return []
     const root = rootBinding(node)
     if (root) return [root]
+    if (['TSAsExpression', 'TSTypeAssertion', 'TSSatisfiesExpression', 'TSNonNullExpression', 'ParenthesizedExpression'].includes(node.type)) return references(node.expression)
     if (node.type === 'ObjectProperty') return [...references(node.value), ...(node.computed ? references(node.key) : [])]
     return ['ArrayExpression', 'ObjectExpression'].includes(node.type) ? children(node).flatMap(references) : []
   }
@@ -81,22 +82,28 @@ function testCaseTitles(source: string): string[] {
     const root = rootBinding(node)
     if (root) return [root]
     if (node.type === 'ObjectProperty') return writes(node.value)
-    return ['ArrayPattern', 'ObjectPattern', 'RestElement', 'AssignmentPattern'].includes(node.type) ? children(node).flatMap(writes) : []
+    if (node.type === 'AssignmentPattern') return writes(node.left)
+    return ['ArrayPattern', 'ObjectPattern', 'RestElement'].includes(node.type) ? children(node).flatMap(writes) : []
+  }
+  const defaults = (node: Syntax): Binding[] => node.type === 'AssignmentPattern'
+    ? [...references(node.right), ...defaults(node.left)] : children(node).flatMap(defaults)
+  const alias = (target: Syntax, source: Syntax | undefined): void => {
+    const sources = [...references(source), ...defaults(target)]
+    for (const binding of writes(target)) {
+      const previous = origins.get(binding) ?? new Set<Binding>()
+      for (const source of sources) previous.add(source)
+      origins.set(binding, previous)
+    }
   }
   for (const node of all) {
-    if (node.type === 'VariableDeclarator' && node.id.type === 'Identifier') {
-      const binding = lookup(scopes.get(node)!, node.id.name)!
-      origins.set(binding, new Set(references(node.init)))
-    }
-    if (node.type === 'ForOfStatement' && node.left.type === 'VariableDeclaration' && node.left.declarations[0].id.type === 'Identifier') {
-      const origin = rootBinding(node.right), binding = lookup(scopes.get(node)!, node.left.declarations[0].id.name)!
-      if (origin) origins.set(binding, new Set([origin]))
-    }
+    if (node.type === 'VariableDeclarator') alias(node.id, node.init)
+    if (node.type === 'AssignmentExpression' && ['=', '&&=', '||=', '??='].includes(node.operator)) alias(node.left, node.right)
+    if (node.type === 'ForOfStatement') alias(node.left.type === 'VariableDeclaration' ? node.left.declarations[0].id : node.left, node.right)
     const target = node.type === 'AssignmentExpression' ? node.left : node.type === 'UpdateExpression' || node.type === 'UnaryExpression' && node.operator === 'delete' ? node.argument
-      : node.type === 'CallExpression' && node.callee.type === 'MemberExpression' ? node.callee.object
+      : ['CallExpression', 'OptionalCallExpression'].includes(node.type) && ['MemberExpression', 'OptionalMemberExpression'].includes(node.callee.type) ? node.callee.object
         : ['ForOfStatement', 'ForInStatement'].includes(node.type) && node.left.type !== 'VariableDeclaration' ? node.left : undefined
     for (const binding of writes(target)) {
-      const testModifier = node.type === 'CallExpression' && binding.test && ['only', 'skip', 'todo'].includes(node.callee.property?.name)
+      const testModifier = ['CallExpression', 'OptionalCallExpression'].includes(node.type) && binding.test && ['only', 'skip', 'todo'].includes(node.callee.property?.name)
       if (!testModifier) mutated.add(binding)
     }
   }
