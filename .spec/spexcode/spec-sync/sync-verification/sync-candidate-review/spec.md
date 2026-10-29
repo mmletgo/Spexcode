@@ -18,4 +18,6 @@ related:
 
 从 [[sync-generation]] 原封提取候选 review schema、基础完整性校验与审查任务指令。接受结论必须精确绑定 inputId/candidateDigest，checkedIds 唯一且覆盖预定完整集合，不含未知项；发现 affectedIds 唯一且属于候选或旧契约，非接受 verdict 必须有对应类型、位置、证据与反例，accept 不能有发现。既有生成流程继续校验构建与评审 session/thread 不同，contract-omission 与 oracle-policy 等专用语义门禁保持原样。
 
+每次派发从基础 schema 复制原生输出约束：inputId/candidateDigest 为当前冻结身份的单值枚举，checkedIds 只允许真实候选及本轮退役项，最小数量为预定完整集合大小，最大数量为实际候选集合大小，并明确列出必须独审的项。程序不填充或修正模型回执；未知、重复、遗漏及不诚实的覆盖仍由消费者和独立语义审查拒绝，共享基础 schema 不随请求改变。
+
 调用既有 runner，核 native session/thread/turn 非空及实际输出摘要；不自行调用模型 SDK、不新建队列或信任本地 passed 标记。完整输入由调用者从不可变对象构造，返回原结构化 review 与真实 trace，不能等同于真实运行或交付完成。

@@ -23,6 +23,17 @@ export type CandidateReviewBinding = {
   priorIds: readonly string[]
 }
 
+/** 原生输出面使用同一冻结身份及可审项；实际覆盖和语义仍由独审与消费者核验。 */
+export function candidateReviewSchema(binding: CandidateReviewBinding): Record<string, unknown> {
+  const schema = structuredClone(GENERATION_REVIEW_SCHEMA)
+  const properties = schema.properties as Record<string, unknown>
+  const ids = [...new Set(binding.actualIds)]
+  properties.inputId = { type: 'string', enum: [binding.inputId] }
+  properties.candidateDigest = { type: 'string', enum: [binding.candidateDigest] }
+  properties.checkedIds = { type: 'array', items: ids.length ? { type: 'string', enum: ids } : { ...string }, minItems: binding.requiredIds.length, maxItems: ids.length, description: `独立检查实际候选项，必须覆盖全部预定项：${JSON.stringify(binding.requiredIds)}；不能列测试用例标签或其它不存在的项。` }
+  return schema
+}
+
 /** 生成和跨机器检查共用同一结构与完成语义；调用者继续核验专用业务标记。 */
 export function candidateReviewError(output: unknown, binding: CandidateReviewBinding): string | null {
   if (!validateReview(output)) return `评审 schema 不合法: ${JSON.stringify(validateReview.errors)}`
@@ -41,7 +52,7 @@ export function candidateReviewError(output: unknown, binding: CandidateReviewBi
 
 /** 只读独立审查经既有 runner 派发，绑定完整输入和真实 native 身份。 */
 export async function runCandidateReview(request: ElaborationSessionRequest, runner: ElaborationRunner, binding: CandidateReviewBinding): Promise<{ review: GenerationReview; trace: ElaborationTrace }> {
-  const native = await runner(request), output: unknown = structuredClone(native.output)
+  const native = await runner({ ...request, schema: candidateReviewSchema(binding) }), output: unknown = structuredClone(native.output)
   if (!native.sessionId || !native.threadId || !native.turnId || native.resultDigest !== contentHash(JSON.stringify(output))) throw new Error('native 身份或输出摘要不匹配')
   const error = candidateReviewError(output, binding)
   if (error) throw new Error(error)
