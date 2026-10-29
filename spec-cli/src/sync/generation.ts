@@ -1,5 +1,6 @@
 import { Ajv } from 'ajv'
-import { candidateReviewError, CANDIDATE_REVIEW_INSTRUCTIONS, GENERATION_REVIEW_SCHEMA } from './candidate-review.js'
+import { candidateReviewError, candidateReviewSchema, CANDIDATE_REVIEW_INSTRUCTIONS } from './candidate-review.js'
+import type { CandidateReviewBinding } from './candidate-review.js'
 export { GENERATION_REVIEW_SCHEMA } from './candidate-review.js'
 import type { Contract } from '@spexcode/spec-core/contracts'
 import { parseContract } from '@spexcode/spec-core/contracts'
@@ -53,9 +54,8 @@ export function contractOmissionBound(finding: GenerationFinding, contracts: rea
   return finding.kind === 'repair' && finding.ruleLocation.startsWith('contract-omission:') && extra === undefined && finding.affectedIds.includes(id) && contracts.some(contract => contract.path === path && contract.items.some(item => item.id === id))
 }
 
-function reviewError(input: GenerationInput, review: GenerationReview, candidateDigest: string, files: ReadonlyMap<string, string>): string | null {
-  const actualIds = new Set([...(input.retiredIds ?? []), ...[...files].filter(([path]) => path.startsWith('.spec/') && path.endsWith('/spec.md')).flatMap(([path, source]) => parseContract({ nodeId: path.split('/').at(-2)!, path, source }).contract?.items.map(item => item.id) ?? [])])
-  const commonError = candidateReviewError(review, { inputId: input.snapshot.id, candidateDigest, requiredIds: input.readyIds, actualIds: [...actualIds], priorIds: input.contracts.flatMap(contract => contract.items.map(item => item.id)) })
+function reviewError(input: GenerationInput, review: GenerationReview, binding: CandidateReviewBinding): string | null {
+  const commonError = candidateReviewError(review, binding)
   if (commonError) return commonError
   for (const finding of review.findings.filter(finding => finding.ruleLocation.startsWith('contract-omission:'))) {
     if (review.verdict !== 'repair' || !contractOmissionBound(finding, input.contracts)) return '契约遗漏必须以contract-omission精确绑定已审Spec路径、关联既有ID及affectedIds，并仅用于repair'
@@ -135,14 +135,15 @@ export async function runGeneration(supplied: GenerationInput, options: Generati
     const reviewPaths = new Set([...input.files.keys(), ...changed.map(file => file.path)])
     const reviewFiles = [...result.candidateFiles].filter(([path]) => reviewPaths.has(path))
     const reviewManifest = candidateEntries.filter(entry => reviewPaths.has(entry.path))
+    const reviewBinding: CandidateReviewBinding = { inputId: input.snapshot.id, candidateDigest: result.candidate.digest, requiredIds: input.readyIds, actualIds: [...new Set([...(input.retiredIds ?? []), ...[...result.candidateFiles].filter(([path]) => path.startsWith('.spec/') && path.endsWith('/spec.md')).flatMap(([path, source]) => parseContract({ nodeId: path.split('/').at(-2)!, path, source }).contract?.items.map(item => item.id) ?? [])])], priorIds: input.contracts.flatMap(contract => contract.items.map(item => item.id)) }
     stage = 'review_failed'
-    const reviewOutput = await dispatch('code_review', `${CANDIDATE_REVIEW_INSTRUCTIONS}\n冻结原意和基线完整输入:\n${context}\n实际候选身份与 manifest:\n${JSON.stringify({ inputId: input.snapshot.id, candidate: result.candidate, manifest: { version: 1, entries: reviewManifest }, completeManifestDigest: contentHash(JSON.stringify({ version: 1, entries: candidateEntries })) })}\n实际完整候选 Spec/源码/测试（包含闭包未修改文件和全部 assertions）:\n${JSON.stringify(reviewFiles)}`, GENERATION_REVIEW_SCHEMA)
+    const reviewOutput = await dispatch('code_review', `${CANDIDATE_REVIEW_INSTRUCTIONS}\n冻结原意和基线完整输入:\n${context}\n实际候选身份与 manifest:\n${JSON.stringify({ inputId: input.snapshot.id, candidate: result.candidate, manifest: { version: 1, entries: reviewManifest }, completeManifestDigest: contentHash(JSON.stringify({ version: 1, entries: candidateEntries })) })}\n实际完整候选 Spec/源码/测试（包含闭包未修改文件和全部 assertions）:\n${JSON.stringify(reviewFiles)}`, candidateReviewSchema(reviewBinding))
     const generate = result.traces[0], reviewTrace = result.traces[1]
     if (generate.sessionId === reviewTrace.sessionId || generate.threadId === reviewTrace.threadId) throw Object.assign(new Error('评审必须使用与构建者不同的会话及线程'), { code: 'review_not_independent' })
     const commonReviewError = candidateReviewError(reviewOutput, { inputId: input.snapshot.id, candidateDigest: result.candidate.digest, requiredIds: [], actualIds: [], priorIds: [] })
     if (commonReviewError?.startsWith('评审 schema')) throw Object.assign(new Error(commonReviewError), { code: 'review_schema' })
     const review = reviewOutput as GenerationReview
-    const error = reviewError(input, review, result.candidate.digest, result.candidateFiles)
+    const error = reviewError(input, review, reviewBinding)
     if (error) throw Object.assign(new Error(error), { code: 'review_invalid' })
     result.review = review
     result.reviewPassed = review.verdict === 'accept'

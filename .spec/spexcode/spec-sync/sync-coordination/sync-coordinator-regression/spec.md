@@ -14,6 +14,10 @@ code:
 
 ## expanded spec
 
+固定模型的分阶段派发回归同时核 P1 生成和独审收到由冻结计划派生的完整写路径集合及真实非空只读 oracle 文件清单，不能遗漏技术权限后让 P1 批准要求 P2 越权修改的测试绑定。
+
+完整候选的不存在 related 路径由 V1 与严格 lint 同源拒绝，断言不进入 code_review、V3 或 journal。历史合成 created 记录若被原生创建层的精确 notStarted、cleanupComplete 与 nativeStopped 回执消歧，应安全标记 removed，不能把合成 phase 当作真实已派发证明；真正未知创建继续由 [[sync-native-run]] 的未决事务回归证明保留资源。
+
 P4 精确 queued 场景必须先消费真实 FIFO 并确认；未确认零模型调用。首轮已审 P1 追加未来 null ID 后，重新绑定实际选择/readSet，经过真实 Docker、四层证据、可信 Git hooks 与 receipt；journal 绑定最终 selection，外部 oracle 不进入本轮写入，原 source/index 保持。原生生成与独审可由确定性 runner 控制，此场景不冒充真实模型执行。
 
 P4 精确接入测试使用真实 Git 快照和 SQLite 基线读取：完整读取选择可含只读 oracle，实际写入范围只含目标文件；同一 InputSnapshot 直接进入 admission，不重新捕获或修改作者 index/字节。缺少实际执行范围时拒绝把目录授权自动当成写锁。

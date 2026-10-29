@@ -19,6 +19,8 @@ related:
 
 ## expanded spec
 
+明确命名空间 `claude:<exact-native-model-id>` 选择 [[claude-structured-runtime]]，继续复用同一创建、排队、预算和结果接缝；无前缀或缺省 model 完全保持既有 Codex 策略、请求摘要和历史恢复。Claude 使用版本3 `claude-frozen-read-only-v1`，不进入 Codex generation ledger，不借用其 turn 或版本2证明。已冻结 operation 不能热切 provider，切换仅属于新 operation 或合法 retry 的新固定请求。
+
 `runStructuredSession` 接收冻结 prompt、object JSON schema、输入摘要、用途、请求键、超时和可选 model/effort，返回 sessionId、threadId、turnId、output 与结果摘要。输入树必须属于当前 backend 项目，可指定 base commit。生成和审查分别使用不同请求键与原生上下文；安全约束见 [[structured-readonly-policy]]。
 
 结构化调用仍使用原会话创建事务的 `SPEXCODE_SESSION_CREATE_TIMEOUT_MS` 配置与限幅（默认 30 秒），实际创建期限取该值与本次请求预算的较小者。不能用另一处固定 30 秒覆盖已配置的创建期限；取消、清理证明及原生执行预算仍沿原协议。
@@ -52,3 +54,5 @@ AbortSignal、caller 超时与显式取消使用同一持久取消协议。确�
 尚无 frozenContext 时，runStructuredSession 先调用 prepareFrozenPrompt：普通小 prompt 保持 v1；带纯 JSON frozenEntries 或超阈值正文才生成 ref，且不编造 attempt/policy。提供 frozenContext 时采用 [[structured-readonly-policy]] 的 v2 冻结读取，清单参与固定请求摘要；内部 sessionCreateKey 仅承接已持久 reserveDispatch 的原生创建身份，业务 requestKey/inputDigest 保持清单绑定。已有 ref 与旧证明按原字段恢复。真实工具请求与回复证据先持久再发送，最终必须核验精确原生历史及完整覆盖。未答动态请求的恢复不能伪回执，改由既有取消协议确认精确turn停止；确认前不得释放资源。
 
 readerRuntime版本2在新结果发布、completed精确恢复和同步资源结果读取中均要求[[frozen-context-reader]]的版本2模型可见证明及固定额度，不能携旧coverage证明降级。旧runtime只恢复已有turn；保留唯一原turn加精确prompt的丢ack识别，但不得发送thread/start或turn/start。旧字段和摘要保持原样。
+
+Claude 新请求在首次冻结时把完整 task 和条目生成最多65536字节的直接 MCP 计划，现有 ref/prompt 原样恢复。其 threadId 是真实原生 session UUID，turnId 是经回显、history 与 result.user_message_uuid(s) 三方确认的原始 user UUID，promptId 另外持久绑定。result.uuid 只是结果事件身份。success、structured_output、当前 schema、原生完整读取证明和整个 CLI/MCP 进程组停止缺一不可。先持久完整原生终态/证明，再发布 completed；同键 completed 仅重读原证据，零新 CLI/API。未知 in-progress 保留 cancelling/recovery_required，禁止用 resume 追加 prompt 冒充同轮恢复；精确停止后由既有新 attempt 协议重试。

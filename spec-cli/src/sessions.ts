@@ -2655,10 +2655,12 @@ async function prepareSession(prompt: string, parentage: CreateParentage, launch
         try {
           const lname = context.structuredExecution ? 'structured-read-only' : launcher ?? defaultLauncher(mainRoot())
           chosen = context.structuredExecution
-            ? { name: 'structured-read-only', harness: 'codex-headless', cmd: 'codex', headless: true, configDir: null }
+            ? context.structuredExecution.policy === 'claude-frozen-read-only-v1'
+              ? { name: 'structured-read-only', harness: 'claude-headless', cmd: 'claude', headless: true, configDir: null }
+              : { name: 'structured-read-only', harness: 'codex-headless', cmd: 'codex', headless: true, configDir: null }
             : resolveLauncher(lname)
           h = harnessById(chosen.harness)
-          pinned = context.structuredExecution ? 'codex' : h.baseCmd(chosen.cmd)
+          pinned = context.structuredExecution ? chosen.cmd : h.baseCmd(chosen.cmd)
           if (h.ownsRendezvous) assertRvSockPath(id)
         } catch (error) {
           throw new SessionCreateError('session_create_failed', phase, error instanceof Error ? error.message : String(error), 400)

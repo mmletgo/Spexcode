@@ -88,7 +88,7 @@ export function renderElaboration(input: ElaborationInput, generated: GeneratedE
     const parts = renderingSource ? parseParts(renderingSource) : null
     const baseline = target && renderingSource ? parseContract({ ...target, source: renderingSource }).contract : null
     const raw = (move && target?.source ? originalParts?.rawSource : node.nodeId === input.intent.nodeId ? input.intent.rawSource : target?.rawSource || originalParts?.rawSource) || null
-    const fm = input.mode === 'preserve_business' && target?.source ? { ...original, code: node.code, related: node.related } : { ...original, title: node.title, desc: node.description, 'contract-schema': 'sync-v1', ...(!target?.source ? { status: 'pending' } : {}), code: node.code, related: node.related }
+    const fm = input.mode === 'preserve_business' && target?.source ? { ...original, 'contract-schema': 'sync-v1', code: node.code, related: node.related } : { ...original, title: node.title, desc: node.description, 'contract-schema': 'sync-v1', ...(!target?.source ? { status: 'pending' } : {}), code: node.code, related: node.related }
     const metadataEqual = Object.entries(fm).every(([key, value]) => JSON.stringify(value) === JSON.stringify((key === 'code' || key === 'related') && typeof original[key] === 'string' ? [original[key]] : original[key]) || Array.isArray(value) && !value.length && !original[key] || value === '' && original[key] === undefined)
     if (baseline && (node.prose === null || input.mode === 'preserve_business') && metadataEqual && raw === (parts?.rawSource || null) && !move && !node.removeIds.length && Object.values(node.tables).every(rows => !rows.length)) return { nodeId: node.nodeId, path: node.path, beforeDigest: target!.sourceDigest, source: target!.source! }
     const metadata = Object.entries(fm).filter(([_key, value]) => !Array.isArray(value) || value.length).map(([key, value]) => Array.isArray(value)
@@ -96,7 +96,7 @@ export function renderElaboration(input: ElaborationInput, generated: GeneratedE
       : `${key}: ${JSON.stringify(value)}`).join('\n')
     const sourceLines = renderingSource?.split('\n') ?? []
     const removedIds = new Set(node.removeIds)
-    const preserveExpanded = baseline && parts?.expandedSpec && (legacyBody !== null || node.prose === null || input.mode === 'preserve_business')
+    const preserveExpanded = parts !== null && (legacyBody !== null || node.prose === null || input.mode === 'preserve_business')
     const tables = Object.fromEntries(Object.entries(CONTRACT_COLUMNS).map(([kind, columns]) => {
       const updates = new Map(node.tables[kind as ContractKind].map(row => [String(row.id), row]))
       const rows: string[] = []
@@ -138,7 +138,7 @@ export function renderElaboration(input: ElaborationInput, generated: GeneratedE
       })
       const added = (Object.keys(CONTRACT_COLUMNS) as ContractKind[]).filter(kind => !seen.has(kind) && tables[kind].length).map(section)
       if (added.length) expanded += `\n\n${added.join('\n\n')}`
-      if (legacyBody !== null && node.prose && input.mode !== 'preserve_business') expanded += `\n\n${node.prose}`
+      if (node.prose && (!baseline && !parts!.expandedSpec.includes(node.prose.trim()) || legacyBody !== null && input.mode !== 'preserve_business')) expanded += `\n\n${node.prose}`
       const normalized = renderingSource!
       const originalBody = parseFrontmatter(normalized).body
       const ranges: Record<'rawSource' | 'expandedSpec', { start: number; end: number }[]> = { rawSource: [], expandedSpec: [] }
@@ -161,7 +161,11 @@ export function renderElaboration(input: ElaborationInput, generated: GeneratedE
         }
         if (!written) {
           if (ranges[part].length) edits.push({ start: ranges[part][0].start, end: ranges[part][0].start, text: replacement })
-          else edits.push({ start: 0, end: 0, text: `## raw source\n\n${replacement}\n\n` })
+          else {
+            const expandedStart = ranges.expandedSpec[0]?.start
+            const start = part === 'rawSource' ? expandedStart === undefined ? 0 : originalBody.lastIndexOf('\n', expandedStart - 2) + 1 : originalBody.length
+            edits.push({ start, end: start, text: `${part === 'rawSource' ? '' : '\n\n'}## ${part === 'rawSource' ? 'raw source' : 'expanded spec'}\n\n${replacement}\n\n` })
+          }
         }
       }
       let body = originalBody

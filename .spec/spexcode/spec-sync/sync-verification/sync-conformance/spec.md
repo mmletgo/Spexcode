@@ -16,6 +16,8 @@ CI 不能依赖开发机数据库或候选自行提交的通过记录，也不�
 
 ## expanded spec
 
+旧新 Git 对象提供各自完整 entry 路径清单，[[sync-frozen-contracts]] 据此复用 [[spec-lint]] 关系完整性检查；不存在的 code/related、关系格式和 one-govern 错误同样阻止独审与运行，不能用部分正文读集合判断文件缺失。
+
 实现 [[sync-verification]] 的可携带检查入口。调用者明确提供真实 baseCommit、candidateCommit 与受信 policyCommit 的不可变提交 SHA；policy 默认受保护基线，外部 CI 才能指定其他已受信政策版本。候选配置不能选择自己的 runner 或政策。读取真实 Git 对象；原工作文件、index、HEAD 与本机数据库不参与结论、不被修改。临时 Git evidence 只保存本次检查材料，不复用开发机 receipt。
 
 影响范围使用 base 与 candidate 契约图及真实变化路径并集，复用 parser、contractImpact、coverage 和完整冻结锚点校验。删除 schema、节点、AC、测试、修改 VERIFY 或同步配置仍进入旧范围。命令及 mandatory oracle 从新旧真实 owner 和影响闭包选择；删除 owner 仍受基线归属约束，无 owner 的外部保护登记继续严格保留。oracle 自身变更按旧新归属进入影响范围，不能因没有 AC 引用略过。无关路径不强制全仓验证，结果列明未治理路径；局部 passed 不能宣称全项目覆盖。结果独立列 coverage.mapping、governed/uncovered NodeIds 和 Paths，verificationExtent 固定为 affected_scope。无可信sync配置或共同基线时 unsupported，不因空scope给passed；已配置且纯无关变化为 not_applicable，不运行模型或容器，也不计作passed。已有非sync-v1节点始终列入未纳入，不能进最终全项目完成分子。候选不能在保留节点时去除 schema。合法 raw/规则演化和新增验收交由同一独立候选审查核实来源；退役的旧 AC 保留旧 test 路径、稳定 ID 与固定命令，必须有变化后的真实负向断言，完整旧新源码和断言一起独审。

@@ -34,6 +34,8 @@ validateCandidate 是必需可信硬门禁，按实际候选回调；没有回�
 
 评审重新接收冻结原意/基线、实际候选 manifest、影响闭包内完整候选 Spec、源码与测试断言，包括未修改文件；不接收构建者总结作为可信证据。审查主流程/状态、遗漏边界、权限/副作用/顺序、弱化验收、空或假断言、跳过与自免检。review 严格 schema 绑定 inputId/candidateDigest，checkedIds 必须唯一、属于实际候选项并覆盖全部预定 readyIds。会话和线程都必须独立于生成。accept 必须无发现；其余 verdict 必须有对应 repair/missing_fact/conflict 的具体 affectedIds、规则位置、代码位置、证据、反例和信息。发现均为阻断项，不能以未知事实为理由编造政策。
 
+原生 review 输出约束通过 [[sync-candidate-review]] 从当前实际候选身份、真实项和预定 readyIds 派生；消费者复用同一冻结绑定继续核验完整覆盖，不依赖模型自行抄写摘要或猜测项集合，不回填缺失 checkedIds。
+
 取消检查贯穿派发前、登记后、native 输出后和硬门禁后，拒绝继续派发或发布晚结果；unsupported 保留平台原因，不隐式重试。结果保留候选引用、真实结构化输出和 native trace；完整 candidateFiles Map 仅作本地检查，不能写入 store 或外发 JSON。成功仅为 reviewed，始终 runtimeVerification=not_run、delivery=not_applied；上层必须另行完成真实 V3、版本交付门禁和 journal 结算。
 
 模型输入拒绝 [[sync-frozen-candidate]] 定义的宿主凭据和运行文件；业务 src/auth 不因名称被排除。发送的 manifest 只含已读取路径并附完整 manifest 摘要，本地冻结仍使用完整 manifest。生成及审查上下文完整传入既有 runner；超过2MiB时由 [[frozen-context-reader]] 在派发身份冻结前转换为无损按需读取，两次独立turn各自证明完整覆盖。不能截断源码或断言，也不能仅因内联大小拒绝完整义务；总时间、调用次数及资源预算继续约束。candidateFiles 作为本地投影排除同一凭据路径；审查只发送可信读集合及实际变化的完整文件。原 source 与 candidate 身份不因投影改变。repairContext 仅为既有失败诊断，不是新原意、政策或通过证据。

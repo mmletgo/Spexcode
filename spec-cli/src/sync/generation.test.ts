@@ -10,6 +10,7 @@ import { CANDIDATE_RESPONSE_SCHEMA, verifyCandidate } from './candidate.js'
 import type { CandidateChanges } from './candidate.js'
 import type { ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
 import { GENERATION_REVIEW_SCHEMA, runGeneration } from './generation.js'
+import { candidateReviewSchema } from './candidate-review.js'
 import type { GenerationInput, GenerationReview } from './generation-types.js'
 import { captureInputSnapshot, contentHash, readObject, readTree, writeEvidence, writeObject, writeTree } from './snapshot.js'
 
@@ -48,6 +49,14 @@ function runner(input: GenerationInput, generation: (request: ElaborationSession
   return { calls, run }
 }
 const valid = async (): Promise<ContractFinding[]> => []
+
+test('空候选项输出面也不与共享schema复用可变属性', () => {
+  const schema = candidateReviewSchema({ inputId: 'input', candidateDigest: 'candidate', requiredIds: [], actualIds: [], priorIds: [] })
+  const items = (schema.properties as { checkedIds: { items: Record<string, unknown> } }).checkedIds.items
+  const before = JSON.stringify(GENERATION_REVIEW_SCHEMA)
+  items.minLength = 99
+  assert.equal(JSON.stringify(GENERATION_REVIEW_SCHEMA), before)
+})
 
 test('超过2MiB的真实冻结测试全文仍到达生成和独审，保留首尾及全部断言', async t => {
   const source = await input(t, true), assertions = source.files.get('tests/export.test.mjs')!
@@ -89,6 +98,12 @@ test('生成复用唯一文件 schema/CAS/scope，评审独立读取完整候选
   assert.equal(result.status, 'reviewed'); assert.equal(result.reviewPassed, true); assert.equal(result.candidateValidated, true)
   assert.equal(result.runtimeVerification, 'not_run'); assert.equal(result.delivery, 'not_applied')
   assert.deepEqual(native.calls[0].schema, CANDIDATE_RESPONSE_SCHEMA)
+  const properties = native.calls[1].schema.properties as Record<string, { enum?: string[]; items?: { enum: string[] }; minItems?: number }>
+  assert.deepEqual(properties.inputId.enum, [source.snapshot.id])
+  assert.deepEqual(properties.candidateDigest.enum, [result.candidate!.digest])
+  assert.deepEqual(new Set(properties.checkedIds.items!.enum), new Set(source.contracts.flatMap(contract => contract.items.map(item => item.id))))
+  assert.equal(properties.checkedIds.minItems, source.readyIds.length)
+  assert.equal(JSON.stringify(GENERATION_REVIEW_SCHEMA).includes(source.snapshot.id), false, '请求专属约束不能污染共享schema')
   assert.deepEqual(events, ['planned:code_generate', 'hard-gate', 'planned:code_review'])
   assert.deepEqual(native.calls.map(call => call.requestKey), ['operation-1:attempt-1:code_generate', 'operation-1:attempt-1:code_review'])
   assert.notEqual(result.traces[0].sessionId, result.traces[1].sessionId); assert.notEqual(result.traces[0].threadId, result.traces[1].threadId)

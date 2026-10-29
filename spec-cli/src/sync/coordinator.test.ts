@@ -148,8 +148,14 @@ async function fixture(t: test.TestContext, budget = { maxAttempts: 3, maxCalls:
 }
 
 test('固定操作模型到达行为/P1/P2及全部独审，独立会话与调用预算保持', async t => {
-  const f = await fixture(t, { maxAttempts: 1, maxCalls: 8, maxRepairs: 0, timeoutMs: 120000 }, false, original, 'project', original, {}, undefined, 'code', 'gpt-6.1-terra')
+  const oracle = parseContract({ nodeId: 'export-contract', path: contractPath, source: original }).contract!.items.find(item => item.kind === 'AC')!
+  const [testPath, testId] = oracle.test.split('#')
+  const f = await fixture(t, { maxAttempts: 1, maxCalls: 8, maxRepairs: 0, timeoutMs: 120000 }, false, original, 'project', original, { mandatoryTests: [{ verificationId: oracle.command, testPath, testId }] }, undefined, 'code', 'gpt-6.1-terra')
+  const contexts: { implementationWritePaths: string[]; readonlyTestPaths: string[] }[] = []
   f.transform((output, request) => {
+    if (['elaboration_generate', 'elaboration_review'].includes(request.purpose)) {
+      contexts.push(JSON.parse(request.prompt.split('冻结业务输入:\n')[1].split('\n')[0]))
+    }
     if (request.purpose === 'code_review') throw Object.assign(new Error('本用例在V3前停止'), { code: 'unsupported' })
     return output
   })
@@ -161,6 +167,11 @@ test('固定操作模型到达行为/P1/P2及全部独审，独立会话与调�
   const dispatches = f.store.listAttempts(f.operation.id)[0].dispatchPlans
   assert.equal(new Set(dispatches.map(dispatch => dispatch.sessionCreateKey)).size, 6)
   assert.equal(f.store.listJournals(f.operation.id).length, 0)
+  assert.equal(contexts.length, 2)
+  for (const context of contexts) {
+    assert.deepEqual(context.implementationWritePaths, [...new Set(f.options.plan.writePaths)].sort())
+    assert.deepEqual(context.readonlyTestPaths, [...new Set(f.options.plan.mandatoryTests.map(test => test.testPath))].sort())
+  }
 })
 
 for (const kind of ['conflict', 'coverage_gap'] as const) test(`raw-only已审 ${kind} 无既有ID时明确阻塞，不派P1或消耗新attempt`, async t => {
@@ -366,21 +377,21 @@ test('缺planBlob的旧queued操作持久unsupported，不借当前计划猜恢�
   assert.equal(f.store.readAttempt(result.operation.currentAttemptId!).failure!.code, 'plan_missing'); assert.equal(f.calls.length, 0)
 })
 
-test('真实V1/意图门禁拒绝弱化AC与命令，有限预算，不进入review/V3或业务交付', async t => {
-  for (const mutation of ['assertion', 'command']) await t.test(mutation, async t => {
+test('真实V1/意图门禁拒绝弱化AC、命令及错误关系，有限预算，不进入review/V3或业务交付', async t => {
+  for (const mutation of ['assertion', 'command', 'related']) await t.test(mutation, async t => {
     const f = await fixture(t, { maxAttempts: 2, maxCalls: 8, maxRepairs: 0, timeoutMs: 120000 })
     f.transform((output, request) => {
       if (request.purpose !== 'code_generate') return output
       const value = output as { changes: { path: string; content: string }[] }
       const spec = value.changes.find(change => change.path === contractPath)!
-      spec.content = mutation === 'assertion' ? spec.content.replace('全部拒绝，原结果可由所有者下载', '无条件允许，结果无需权限') : spec.content.replace('["node","--test","tests/export.test.mjs"]', '["node","-e","true"]')
+      spec.content = mutation === 'assertion' ? spec.content.replace('全部拒绝，原结果可由所有者下载', '无条件允许，结果无需权限') : mutation === 'command' ? spec.content.replace('["node","--test","tests/export.test.mjs"]', '["node","-e","true"]') : spec.content.replace('code:\n', 'related:\n  - REQ-EXPORT-01\ncode:\n')
       return value
     })
     const result = await runSyncOperation(f.store, f.operation.id, f.options)
     assert.equal(result.status, 'budget_exhausted', JSON.stringify(result.failure))
     assert.equal(f.calls.filter(call => call.purpose === 'code_review').length, 0)
     for (const plan of f.store.readAttempt(result.operation.currentAttemptId!).dispatchPlans) if (plan.session) assert.deepEqual(Object.keys(plan.session).sort(), ['sessionId', 'threadId', 'turnId'])
-    assert.ok(f.store.readAttempt(result.operation.currentAttemptId!).checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).some(value => value.validationFindings?.some((item: { code: string }) => item.code === 'generation-protected-meaning-changed' || item.code === 'generation-verification-unregistered')))
+    assert.ok(f.store.readAttempt(result.operation.currentAttemptId!).checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).some(value => value.validationFindings?.some((item: { code: string }) => mutation === 'related' ? item.code === 'integrity' : item.code === 'generation-protected-meaning-changed' || item.code === 'generation-verification-unregistered')))
     assert.equal(f.store.listJournals(f.operation.id).length, 0)
     assert.ok(f.store.pinnedBlobRefs().length > 3)
     assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
@@ -431,7 +442,7 @@ test('P4精确queued经已审null扩展、四层Docker验证与真实receipt保�
   assert.equal(result.operation.deliveredScope.paths.includes('tests/export.test.mjs'), false)
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
 })
-test('取消后的历史native未知创建回执保留资源与recovery_required，不假removed或重派发', async t => {
+test('历史合成created资源经原生精确notStarted回执安全回收，不重派发', async t => {
   const f = await fixture(t)
   const claimed = f.store.claimAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 10000, expectedMessageId: f.operation.dispatchMessageId })
   const request = { root: f.root, base: f.input.headCommit, prompt: '固定资源恢复请求', schema: { type: 'object' }, requestKey: 'pending-created-native', inputDigest: contentHash('fixed-input'), purpose: 'elaboration_generate', timeoutMs: 10000 }
@@ -446,12 +457,17 @@ test('取消后的历史native未知创建回执保留资源与recovery_required
   f.store.requestControl(f.operation.id, 'cancel')
   const before = f.store.readOperation(f.operation.id)
   const cleanupOnly = await runSyncOperation(f.store, f.operation.id, { ...f.options, recoveryOnly: true })
-  assert.equal(cleanupOnly.status, 'recovery_required'); assert.deepEqual(cleanupOnly.operation, before)
-  assert.ok(cleanupOnly.failure?.message.includes('creation may be in progress'))
+  assert.equal(cleanupOnly.status, 'cancelled'); assert.deepEqual(cleanupOnly.operation, before)
+  const removed = f.store.findResource(claimed.attempt.id, request.requestKey)!
+  const proof = JSON.parse(readEvidence(f.input.source.commonDir, removed.checkpointRef).toString()) as NativeRunCheckpoint
+  assert.equal(proof.creationTermination?.nativeStatus, 'notStarted')
+  assert.equal(proof.creationTermination?.cleanupComplete, true)
+  assert.equal(proof.creationTermination?.nativeStopped, true)
+  assert.equal(proof.creationTermination?.sessionId, expectedSessionId)
   const result = await runSyncOperation(f.store, f.operation.id, f.options)
-  assert.equal(result.status, 'recovery_required'); assert.equal(result.operation.phase, 'cancelled')
-  assert.equal(f.store.findResource(claimed.attempt.id, request.requestKey)!.phase, 'created')
-  assert.equal(f.store.listRecoverableResources().length, 1); assert.equal(f.calls.length, 0)
+  assert.equal(result.status, 'cancelled'); assert.equal(result.operation.phase, 'cancelled')
+  assert.equal(f.store.findResource(claimed.attempt.id, request.requestKey)!.phase, 'removed')
+  assert.equal(f.store.listRecoverableResources().length, 0); assert.equal(f.calls.length, 0)
 })
 
 test('真实Docker→真实固定CLI hooks→私有完整交付，source/index保留，receipt重入不重复native/commit', docker, async t => {

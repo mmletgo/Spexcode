@@ -7,6 +7,18 @@ import { DEFAULT_TEST_GLOBS, isSourcePath, sourcePolicyDescription, trackedSourc
 import { buildContractGraph, parseContract, validateContractGraph } from '@spexcode/spec-core/contracts'
 
 export type Finding = { level: 'error' | 'warn'; rule: string; spec?: string; file?: string; msg: string }
+
+/** 工作树 lint、冻结候选 V1 共用关系完整性；路径存在性由各自不可变清单或工作树提供。 */
+export function specRelationFindings(specs: readonly Pick<Awaited<ReturnType<typeof loadSpecs>>[number], 'id' | 'code' | 'related' | 'relationProblems'>[], existsPath: (path: string) => boolean): Finding[] {
+  const findings: Finding[] = []
+  for (const spec of specs) {
+    for (const problem of spec.relationProblems) findings.push({ level: 'error', rule: 'integrity', spec: spec.id, msg: `'${spec.id}' ${problem}` })
+    for (const file of spec.code) if (!existsPath(file)) findings.push({ level: 'error', rule: 'integrity', spec: spec.id, file, msg: `spec '${spec.id}' lists a missing file: ${file}` })
+    if (spec.code.length > 1) findings.push({ level: 'error', rule: 'one-govern', spec: spec.id, msg: `'${spec.id}' governs ${spec.code.length} files [${spec.code.join(', ')}] — a node is source of truth for at most ONE. Keep the true subject in code:, move the rest to related:` })
+  }
+  for (const spec of specs) for (const file of spec.related) if (!existsPath(file)) findings.push({ level: 'error', rule: 'integrity', spec: spec.id, file, msg: `spec '${spec.id}' lists a missing related file: ${file}` })
+  return findings
+}
 export const SPEC_LINT_REPORT_PROJECTION = 'spex.spec-lint.report'
 export const SPEC_LINT_REPORT_SCHEMA_VERSION = 1
 export type SpecLintReport = {
@@ -248,32 +260,21 @@ async function specLintInLedger(root: string, regs: ReturnType<typeof extractors
   const owners = new Map<string, string[]>()
   const claimed = new Set<string>()
   const governedClaims = new Set<string>()
+  out.push(...specRelationFindings(specs, existsAtTip))
   for (const s of specs) {
-    for (const p of s.relationProblems)
-      out.push({ level: 'error', rule: 'integrity', spec: s.id, msg: `'${s.id}' ${p}` })
     const scopedPaths = new Set(s.codeScoped.map((e) => e.path))
     for (const f of s.code) {
-      if (!existsAtTip(f))
-        out.push({ level: 'error', rule: 'integrity', spec: s.id, file: f, msg: `spec '${s.id}' lists a missing file: ${f}` })
       claimed.add(f)
       governedClaims.add(f)
       // a selector-SCOPED entry claims named units, not the whole file, so it stays out of the owners
       // bound below ([[code-anchor]]) — `spex spec owner` still displays it as a (scoped) governor.
       if (!scopedPaths.has(f)) owners.set(f, [...(owners.get(f) ?? []), s.id])
     }
-    // one-govern: a node is source of truth for at most ONE file — DISTINCT base paths; several
-    // `path#symbol` selectors on the same file are one subject — so drift and acknowledgements have a single
-    // unambiguous subject (see [[governed-related]]). >1 is a defect — pick the true subject, demote the
-    // rest to related. ERROR (the node-side twin of too-many-owners' file-side bound). 0 is fine.
-    if (s.code.length > 1)
-      out.push({ level: 'error', rule: 'one-govern', spec: s.id, msg: `'${s.id}' governs ${s.code.length} files [${s.code.join(', ')}] — a node is source of truth for at most ONE. Keep the true subject in code:, move the rest to related:` })
   }
   // a file is COVERED if any node GOVERNS (code:) or merely REFERENCES (related:) it; integrity covers both.
   // `related:` is the coverage net: govern is a sharp ideally-one-file pointer, so most files are reached by
   // related, not govern (see [[governed-related]]). It carries coverage but never drift.
   for (const s of specs) for (const f of s.related) {
-    if (!existsAtTip(f))
-      out.push({ level: 'error', rule: 'integrity', spec: s.id, file: f, msg: `spec '${s.id}' lists a missing related file: ${f}` })
     claimed.add(f)
   }
 

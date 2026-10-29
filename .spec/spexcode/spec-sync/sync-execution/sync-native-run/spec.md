@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+执行器选择只由已冻结 model 命名空间进入 [[structured-session-runtime]]；Claude 版本3结果还核对明确 provider/model 的原生 proof，不准备 Codex reader catalog。共享资源计划、checkpoint、完整 terminal→removed、预算、sessionCreateKey 及恢复门禁保持同一份，旧已持久 Codex 请求和 proof 原样重放。
+
 原生执行权威属于 [[structured-session-runtime]]，资源CAS与恢复记录属于 [[sync-store]]。createAttemptRunner复用runStructuredSession/cancelStructuredSession/readRecord、sessionIdForCreateKey和正式创建恢复入口recoverSessionCreateTermination。每个请求保存完整root/base/prompt/schema/input/purpose/timeout/model/effort摘要，reserveDispatch同键同载荷不重复计费；返回sessionCreateKey是唯一原生创建键，不另造会话ID。资源计划在调用前持久固定key、预期sessionId、原source input和当次durable attempt候选摘要；正文只进既有commonDir evidence blob。
 
 传输阈值更新不能改变已登记资源的固定请求。仅当该 attempt/key 已存在 resource，且调用者除 signal 外的完整请求摘要精确等于原 plan.payloadDigest 时，沿原请求恢复，不再转换 prompt 或重新准备 reader runtime。新请求或摘要不匹配仍执行正常冻结、完整绑定和同键异载荷拒绝；不能只凭 key 跳过摘要。旧大 inline 请求可在已 aborted 的正式恢复中只取消并结算到 removed，原计划、会话身份、callsUsed 不变，不重新调用 native；显式新 retry 使用当前 reader 阈值。
