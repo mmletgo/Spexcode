@@ -26,6 +26,8 @@ Claude 采用显式500000字符和500000 MCP token上限，并核实际序列化
 
 实际 API 工具面之外的名字只能保留为原生明确未派发的拒绝事件：唯一 callId、session/user/prompt 与 parent/source assistant 完整配对，`is_error:true` 且公开回复逐字等于固定 CLI 的 `<tool_use_error>Error: No such tool available: 名字</tool_use_error>`；全文还须进入后续真实 API 并由 assistant 消费。专属 MCP 实际派发名与见证一致且只含唯一 reader，存在外部派发或日志矛盾即拒绝。拒绝事件保留原名及全文，不改名、不产生 reader receipt、不贡献任何覆盖；缺读取仍失败。普通工具错误、权限错误、未知回复、未配对结果、实际工具面扩张和 DeferredToolPlaceholder 调用继续拒绝。其后正确读取、完整覆盖、StructuredOutput 与停止证明仍须分别通过。
 
+reader 的非法范围仍在读取正文前即时拒绝。同一原生轮中，只有独立重算同一冻结上下文/参数确实在范围边界抛出精确错误、公开 `is_error:true` 回复逐字匹配该错误、专属 MCP 无外部派发且后续 API 已消费错误时，才将它保留为无读取覆盖的参数拒绝事件，允许随后自行纠正。原意/entry 身份错误、正文摘要损坏、权限错误及未知错误不享有此例外；不能把失败请求算作已读。读取指引要求逐项照用计划 endByte，65536 只是最大跨度，不是短 entry 的结束位置。
+
 [[structured-readonly-policy]] 的v2仍保留既有只读隔离，仅增加spex_read_frozen。源码树外0700目录存储内容寻址字节与清单；contextDigest绑定logicalentry、类型、SHA256、字节长度、required及业务requestKey/inputDigest。真实attempt/policy存在时额外严格绑定，普通结构化调用不编造身份。相同bytes去重，logical身份仍保留。
 
 工具参数仅contextDigest/entryId/startByte/endByte，区间end-exclusive、每次请求不超过262144字节；binary base64、absence均显式处理。UTF8完整entry在冻结时严格校验；合法请求切入多字节码点时，解码区间向外扩至完整码点边界，两端最多各多3字节，包含全部请求字节，只允许重叠、不截断或替换字符。arguments、startByte/endByte与rangeSha256仍绑定原请求；仅确实扩展时，文本额外列decodedStartByte/decodedEndByte。原对齐响应的全文、字段顺序与摘要保持不变，binary行为不变。

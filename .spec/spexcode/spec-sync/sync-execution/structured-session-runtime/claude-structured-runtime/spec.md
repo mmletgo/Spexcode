@@ -30,6 +30,8 @@ related:
 
 模型请求不存在的工具后，只有固定 CLI 的精确未派发拒绝、实际 API 工具面及专属 MCP 派发记录共同满足 [[frozen-context-reader]] 时，才允许同轮自行纠正；不增加工具权限或读取覆盖。原失败操作不改成成功，修复后的正式新尝试仍使用原有重试入口。
 
+同一轮的 reader 范围参数拒绝只按 [[frozen-context-reader]] 的读取前精确重算、公开错误与后续 API 可见性规则保留为零覆盖事件；后续完整正确读取仍独立证明，不能因模型纠错授予新范围或放过上下文、正文摘要与权限错误。
+
 完整 result、公开 witness、proof 和整个 CLI/MCP 进程组停止先持久，再发布 completed。completed 重放验证原请求、schema、proof、原 Native history 和停止证据，零新 CLI/API；完整原生 result 已落盘而 completed 尚未写入的窗口可以离线补证。已有只读 partial witness 必须逐字匹配后复用，不能重写后报 EACCES。缺完整终态的 in-progress 只能保留 recovery_required，不能使用 resume 新 prompt 冒充旧轮恢复。
 
 私有 completed JSON 不是另一份结果权威：其 witness 摘要必须等于 proof 的内容寻址 historyDigest，且 session/user/prompt/model/CLI 与固定 plan 一致。最终 text/output 必须等于该权威见证的原生 structured_output；另一个 schema 合法结果也不能替换。同步资源重放与会话完成重放使用相同 output 绑定。

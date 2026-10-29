@@ -142,6 +142,21 @@ test('controlled Claude witness proves parallel replies and rejects completed-ca
     noReadBlob.message!.content = [rejection.content[0]]; noReadBlob.hash = claudeMessageDigest(noReadBlob.message)
     noRead.history.find(row => row.id === 'request-2')!.tail = [noReadBlob.hash]
     assert.throws(() => proveClaudeFrozenReads(ref, noRead), /not completely read/)
+    const rangeRejected = structuredClone(rejected), rangeError = 'frozen reader range is invalid or exceeds its bounded response'
+    const rangeCall = rangeRejected.history.find(row => row.uuid === 'unavailable-call')!.message!.content[0]
+    rangeCall.name = 'mcp__frozen__spex_read_frozen'; rangeCall.input = { ...input, endByte: 65536 }
+    const rangeReply = rangeRejected.history.find(row => row.uuid === 'unavailable-reply')!.message!
+    rangeReply.content[0].content = rangeError
+    rangeRejected.history.find(row => row.id === 'request-rejected')!.tail = [claudeMessageDigest(rangeReply)]
+    assert.equal(proveClaudeFrozenReads(ref, rangeRejected).receipts.length, 2)
+    for (const mutate of [
+      (value: ClaudeFrozenWitness) => { value.history.find(row => row.uuid === 'unavailable-reply')!.message!.content[0].is_error = false },
+      (value: ClaudeFrozenWitness) => { value.history.find(row => row.uuid === 'unavailable-reply')!.message!.content[0].content = 'Permission denied' },
+      (value: ClaudeFrozenWitness) => { value.history.find(row => row.uuid === 'unavailable-call')!.message!.content[0].input = input },
+      (value: ClaudeFrozenWitness) => { value.history.find(row => row.uuid === 'unavailable-call')!.message!.content[0].input = { ...input, contextDigest: 'foreign', endByte: 65536 } },
+      (value: ClaudeFrozenWitness) => { value.history.find(row => row.id === 'request-rejected')!.tail = [] },
+      (value: ClaudeFrozenWitness) => { delete value.mcpHistory },
+    ]) { const bad = structuredClone(rangeRejected); mutate(bad); assert.throws(() => proveClaudeFrozenReads(ref, bad)) }
     const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], { detached: true, stdio: 'ignore' })
     assert(child.pid)
     const exited = new Promise<void>(resolve => child.once('close', () => resolve()))

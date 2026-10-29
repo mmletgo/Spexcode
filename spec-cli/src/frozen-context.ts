@@ -205,6 +205,7 @@ export function frozenContextPrompt(ref: FrozenContextRef): string {
 export function claudeFrozenContextPrompt(ref: FrozenContextRef): string {
   const manifest = readFrozenManifest(ref)
   return JSON.stringify({ tool: 'mcp__frozen__spex_read_frozen', contextDigest: ref.contextDigest, maxReadBytes: 65536, maxResultSizeChars: 500000,
+    rangeRule: 'Copy each planned startByte/endByte exactly. 65536 is only a maximum span, never the end of a shorter entry. Never exceed entry.byteLength.',
     entries: manifest.entries, readBatches: frozenReadBatches(ref, manifest.entries, 0, 65536) })
 }
 
@@ -439,7 +440,14 @@ export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFro
           rejectedCalls.push(block.tool_use_id!); continue
         }
         if (call.block.name === 'StructuredOutput') { if (!block.is_error && claudeMessageDigest(call.block.input) === claudeMessageDigest(result.structured_output)) acceptedOutput = true; continue }
-        const { arguments: args, response } = readFrozenRange(ref, call.block.input)
+        let read: ReturnType<typeof readFrozenRange>
+        try { read = readFrozenRange(ref, call.block.input) }
+        catch (error) {
+          if (!(error instanceof StructuredSessionError) || error.code !== 'stale_result' || error.message !== 'frozen reader range is invalid or exceeds its bounded response'
+            || !witness.mcpHistory || block.is_error !== true || block.content !== error.message) throw error
+          rejectedCalls.push(block.tool_use_id!); continue
+        }
+        const { arguments: args, response } = read
         if (args.endByte - args.startByte > 65536 || block.is_error || !Array.isArray(block.content)
           || JSON.stringify(block.content) !== JSON.stringify(response.contentItems.map(item => ({ type: 'text', text: item.text }))) || response.contentItems[0].text.length > 500000) stale('Claude public tool_result is truncated, substituted or differs from immutable bytes')
         const { receipt } = persistFrozenRead(ref, { threadId: sessionId, turnId: userUuid, callId: call.block.id! }, args)
