@@ -4,6 +4,7 @@ import { createServer, type Socket } from 'node:net'
 import { chmodSync, mkdtempSync, rmSync, readFileSync, writeFileSync, realpathSync, mkdirSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
+import { performance } from 'node:perf_hooks'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { processStartToken } from '@spexcode/spec-core'
@@ -86,6 +87,20 @@ function frozenFixture() {
   const policy = (extra: Partial<StructuredExecution> = {}) => execution({ version: 2, policy: 'codex-frozen-read-only-v2', frozenContext: ref, ...extra })
   const turn = (items = [item]) => ({ ...finalTurn(), items: [...items, ...finalTurn().items] })
   return { ref, directory, args, item, policy, turn, close: () => rmSync(directory, { recursive: true, force: true }) }
+}
+
+function frozenCallFixture(data: ReturnType<typeof frozenFixture>) {
+  return fixture((request, send) => {
+    if (request.method === 'turn/start') {
+      send({ id: 99, method: 'item/tool/call', params: { threadId: 'thread-exact', turnId: 'turn-exact', callId: 'native-call', namespace: null, tool: 'spex_read_frozen', arguments: data.args } })
+      return { turn: { id: 'turn-exact' } }
+    }
+    if (!request.method) {
+      send({ method: 'turn/completed', params: { threadId: 'thread-exact', turn: data.turn() } })
+      return undefined
+    }
+    return safePrelude(request)
+  })
 }
 
 test('structured settlement pages exact raw items when full history never answers', async () => {
@@ -249,6 +264,87 @@ test('frozen native dynamic requests persist before replying and cannot collide 
     assert.equal(result.frozenReadProof?.receipts[0].callId, 'native-call')
     assert.equal(result.frozenReadProof?.receipts[0].turnId, 'turn-exact')
   } finally { await f.close(); data.close() }
+})
+
+test('frozen-read timing diagnostics stay silent when disabled', async () => {
+  const data = frozenFixture(), f = await frozenCallFixture(data)
+  const oldSwitch = process.env.SPEXCODE_FROZEN_READ_TIMING, originalError = console.error, logs: string[] = []
+  delete process.env.SPEXCODE_FROZEN_READ_TIMING
+  console.error = (...args: unknown[]) => { logs.push(args.map(String).join(' ')) }
+  try {
+    const result = await codexStructuredTurn(f.path, '/fixture', 'pinned prompt', data.policy(), {
+      ...callbacks,
+      sessionId: '12345678-session',
+      onFrozenRead: async (_receipt, timing) => assert.equal(timing, undefined),
+    })
+    assert.equal(result.frozenReadProof?.receipts[0].callId, 'native-call')
+    assert.deepEqual(logs, [])
+  } finally {
+    console.error = originalError
+    if (oldSwitch === undefined) delete process.env.SPEXCODE_FROZEN_READ_TIMING
+    else process.env.SPEXCODE_FROZEN_READ_TIMING = oldSwitch
+    await f.close(); data.close()
+  }
+})
+
+test('frozen-read timing diagnostics emit one safe monotonic record and preserve callback failures', async () => {
+  const data = frozenFixture(), f = await frozenCallFixture(data)
+  const oldSwitch = process.env.SPEXCODE_FROZEN_READ_TIMING, originalError = console.error, originalNow = performance.now
+  const logs: string[] = []
+  let clock = 0
+  process.env.SPEXCODE_FROZEN_READ_TIMING = '1'
+  performance.now = () => clock += 0.25
+  console.error = (...args: unknown[]) => { logs.push(args.map(String).join(' ')) }
+  try {
+    const result = await codexStructuredTurn(f.path, '/fixture', 'pinned prompt', data.policy(), {
+      ...callbacks,
+      sessionId: '12345678-session',
+      onFrozenRead: async (_receipt, timing) => {
+        assert.ok(timing)
+        timing.acquireWallMs = 4.5
+        timing.readRecordMs = 1.25
+        timing.writeRecordMs = 2.5
+      },
+    })
+    assert.equal(result.frozenReadProof?.receipts[0].callId, 'native-call')
+    assert.equal(logs.length, 1)
+    const prefix = '[spex frozen-read-timing] '
+    assert.ok(logs[0].startsWith(prefix))
+    const stat = JSON.parse(logs[0].slice(prefix.length)) as Record<string, unknown>
+    assert.deepEqual(stat, {
+      sessionId: '12345678', callId: 'native-call', rangeCasMs: 0.25, requestedByteCount: 11,
+      acquireWallMs: 4.5, readRecordMs: 1.25, writeRecordMs: 2.5,
+      persistToEnqueueWallMs: 0.25, rpcEnqueueSyncMs: 0.25,
+    })
+    assert.equal(logs[0].includes('pinned prompt'), false)
+    assert.equal(logs[0].includes('frozen-tail'), false)
+    assert.equal(logs[0].includes('immutable-input'), false)
+    logs.length = 0
+    const failureData = frozenFixture(), failureFixture = await frozenCallFixture(failureData)
+    try {
+      await assert.rejects(codexStructuredTurn(failureFixture.path, '/fixture', 'pinned prompt', failureData.policy(), {
+        ...callbacks,
+        sessionId: '87654321-session',
+        onFrozenRead: async (_receipt, timing) => {
+          assert.ok(timing)
+          timing.acquireWallMs = 3.5
+          throw new Error('record commit rejected')
+        },
+      }), error => error instanceof StructuredSessionError && error.code === 'cancellation_pending' && error.message.includes('record commit rejected'))
+      assert.equal(logs.length, 1)
+      const failedStat = JSON.parse(logs[0].slice(prefix.length)) as Record<string, unknown>
+      assert.equal(failedStat.callId, 'native-call')
+      assert.equal(failedStat.acquireWallMs, 3.5)
+      assert.equal(failedStat.rpcEnqueueSyncMs, undefined)
+      assert.equal(logs[0].includes('record commit rejected'), false)
+    } finally { await failureFixture.close(); failureData.close() }
+  } finally {
+    console.error = originalError
+    performance.now = originalNow
+    if (oldSwitch === undefined) delete process.env.SPEXCODE_FROZEN_READ_TIMING
+    else process.env.SPEXCODE_FROZEN_READ_TIMING = oldSwitch
+    await f.close(); data.close()
+  }
 })
 
 test('frozen runtime audits the effective output budget while legacy exact-history recovery keeps its old policy', async () => {
