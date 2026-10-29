@@ -1,50 +1,197 @@
+import { parse } from '@babel/parser'
 import { contractReferences } from './graph.js'
 import { projectContractCoverage } from './coverage.js'
 import { isRepositoryPath } from './parser.js'
 import type { ContractFinding, ContractGraph, ContractItem, ContractValidationContext, State, Transition } from './types.js'
 
 // This is a declaration check, not proof that a test ran or that its assertion enforces the rule.
-function declaresTestCase(source: string, caseId: string): boolean {
-  const escaped = caseId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const id = new RegExp(`(?:^|[^A-Z0-9-])${escaped}(?![A-Z0-9-])`)
-  const testNames = new Set(['test', 'it'])
-  const declarations: { name: string; title: string }[] = []
-  for (let at = 0; at < source.length;) {
-    if (source.startsWith('//', at)) { const end = source.indexOf('\n', at + 2); at = end < 0 ? source.length : end + 1; continue }
-    if (source.startsWith('/*', at)) { const end = source.indexOf('*/', at + 2); at = end < 0 ? source.length : end + 2; continue }
-    const boundary = !/[\w$]/.test(source[at - 1] ?? '')
-    const imported = boundary && source.slice(at).match(/^import\s+([^;'"]+?)\s+from\s*(['"])(node:test|vitest|@jest\/globals|bun:test)\2/)
-    if (imported) {
-      const bindings = imported[1].replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, '').trim()
-      const defaultName = bindings.match(/^([A-Za-z_$][\w$]*)(?:\s*,|$)/)
-      if (imported[3] === 'node:test' && defaultName) testNames.add(defaultName[1])
-      for (const entry of bindings.match(/\{([^}]+)\}/)?.[1].split(',') ?? []) {
-        const alias = entry.trim().match(/^(?:test|it)\s+as\s+([A-Za-z_$][\w$]*)$/)
-        if (alias) testNames.add(alias[1])
-      }
-      at += imported[0].length
-      continue
-    }
-    const call = boundary && source.slice(at).match(/^([A-Za-z_$][\w$]*)(?:\.(?:only|skip|todo))?\s*\(\s*(['"`])/)
-    const quote = call ? call[2] : source[at]
-    if (quote === "'" || quote === '"' || quote === '`') {
-      at += call ? call[0].length : 1
-      let title = ''
-      while (at < source.length && source[at] !== quote) {
-        if (source[at] === '\\' && at + 1 < source.length) at++
-        title += source[at++]
-      }
-      at++
-      if (call) declarations.push({ name: call[1], title })
-      continue
-    }
-    at++
+// The parser owns JS/TS/JSX syntax; only the closed literal subset below has a static value.
+type Syntax = { type: string; start: number; [field: string]: any }
+type Scope = { parent?: Scope; function: boolean; bindings: Map<string, Binding> }
+type Binding = { start: number; init?: Syntax; test?: boolean }
+type StaticValue = string | number | boolean | null | StaticValue[] | Map<string, StaticValue>
+const unknownValue = Symbol('unknown test title')
+type Value = StaticValue | typeof unknownValue
+const children = (node: Syntax): Syntax[] => Object.values(node).flatMap((value) =>
+  (Array.isArray(value) ? value : [value]).filter((child): child is Syntax => child && typeof child.type === 'string'))
+
+function testCaseTitles(source: string): string[] {
+  let tree: Syntax | undefined
+  for (const plugins of [['typescript', 'jsx'], ['typescript']] as const) {
+    try { tree = parse(source, { sourceType: 'unambiguous', plugins: [...plugins] }) as unknown as Syntax; break }
+    catch (error) { if (!(error instanceof SyntaxError)) throw error }
   }
-  return declarations.some(({ name, title }) => testNames.has(name) && id.test(title))
+  if (!tree) return []
+  const scopes = new Map<Syntax, Scope>(), all: Syntax[] = []
+  const lookup = (scope: Scope, name: string): Binding | undefined => scope.bindings.get(name) ?? (scope.parent && lookup(scope.parent, name))
+  const bind = (pattern: Syntax, scope: Scope, data: Partial<Binding> = {}): void => {
+    if (pattern.type === 'Identifier') scope.bindings.set(pattern.name, { start: pattern.start, ...data })
+    else if (pattern.type === 'RestElement') bind(pattern.argument, scope)
+    else if (pattern.type === 'AssignmentPattern') bind(pattern.left, scope)
+    else if (pattern.type === 'TSParameterProperty') bind(pattern.parameter, scope)
+    else if (pattern.type === 'ArrayPattern') for (const entry of pattern.elements) { if (entry) bind(entry, scope) }
+    else if (pattern.type === 'ObjectPattern') for (const entry of pattern.properties) bind(entry.type === 'RestElement' ? entry.argument : entry.value, scope)
+  }
+  const scan = (node: Syntax, outer?: Scope): void => {
+    if (['FunctionDeclaration', 'ClassDeclaration', 'TSEnumDeclaration', 'TSModuleDeclaration', 'TSDeclareFunction', 'TSImportEqualsDeclaration'].includes(node.type)) {
+      if (node.id) bind(node.id, outer!)
+    }
+    const fn = /^(?:Function|ArrowFunction|ObjectMethod|ClassMethod|ClassPrivateMethod)/.test(node.type)
+    const scoped = fn || ['Program', 'BlockStatement', 'StaticBlock', 'SwitchStatement', 'ForStatement', 'ForInStatement', 'ForOfStatement', 'CatchClause', 'ClassDeclaration', 'ClassExpression', 'TSModuleDeclaration', 'TSModuleBlock'].includes(node.type)
+    const scope = scoped ? { parent: outer, function: fn || node.type === 'Program', bindings: new Map<string, Binding>() } : outer!
+    scopes.set(node, scope); all.push(node)
+    if (fn) {
+      if (node.id) bind(node.id, scope)
+      for (const param of node.params) bind(param, scope)
+    }
+    if (node.type === 'CatchClause' && node.param) bind(node.param, scope)
+    if (node.type === 'ClassExpression' && node.id) bind(node.id, scope)
+    if (node.type === 'VariableDeclaration') {
+      let target = scope
+      if (node.kind === 'var') while (!target.function) target = target.parent!
+      for (const entry of node.declarations) bind(entry.id, target, node.kind === 'const' && entry.id.type === 'Identifier' ? { init: entry.init } : {})
+    }
+    if (node.type === 'ImportDeclaration') for (const entry of node.specifiers) {
+      const api = ['node:test', 'vitest', '@jest/globals', 'bun:test'].includes(node.source.value)
+      const test = api && node.importKind !== 'type' && entry.importKind !== 'type' &&
+        (entry.type === 'ImportDefaultSpecifier' ? node.source.value === 'node:test' : ['test', 'it'].includes(entry.imported?.name ?? entry.imported?.value))
+      bind(entry.local, scope, { test })
+    }
+    for (const child of children(node)) scan(child, scope)
+  }
+  const globals: Scope = { function: true, bindings: new Map() }
+  for (const name of ['test', 'it']) globals.bindings.set(name, { start: 0, test: true })
+  scan(tree, globals)
+  const mutated = new Set<Binding>(), origins = new Map<Binding, Set<Binding>>()
+  const rootBinding = (node: Syntax | undefined): Binding | undefined => {
+    if (!node) return undefined
+    if (['MemberExpression', 'OptionalMemberExpression'].includes(node.type)) return rootBinding(node.object)
+    if (['TSAsExpression', 'TSTypeAssertion', 'TSSatisfiesExpression', 'TSNonNullExpression', 'ParenthesizedExpression'].includes(node.type)) return rootBinding(node.expression)
+    return node.type === 'Identifier' ? lookup(scopes.get(node)!, node.name) : undefined
+  }
+  const references = (node: Syntax | undefined): Binding[] => {
+    if (!node) return []
+    const root = rootBinding(node)
+    if (root) return [root]
+    // Calls and function bodies do not prove which references their result retains.
+    if (['CallExpression', 'OptionalCallExpression', 'NewExpression', 'TaggedTemplateExpression', 'ImportExpression'].includes(node.type) || /^(?:Function|ArrowFunction|ObjectMethod|ClassMethod|ClassPrivateMethod)/.test(node.type)) return []
+    if (node.type.startsWith('TS')) return node.expression ? references(node.expression) : []
+    if (['MemberExpression', 'OptionalMemberExpression'].includes(node.type)) return [...references(node.object), ...(node.computed ? references(node.property) : [])]
+    if (node.type === 'ObjectProperty') return [...references(node.value), ...(node.computed ? references(node.key) : [])]
+    return children(node).flatMap(references)
+  }
+  const writes = (node: Syntax | undefined): Binding[] => {
+    if (!node) return []
+    const root = rootBinding(node)
+    if (root) return [root]
+    if (node.type === 'ObjectProperty') return writes(node.value)
+    if (node.type === 'AssignmentPattern') return writes(node.left)
+    return ['ArrayPattern', 'ObjectPattern', 'RestElement'].includes(node.type) ? children(node).flatMap(writes) : []
+  }
+  const defaults = (node: Syntax): Binding[] => node.type === 'AssignmentPattern'
+    ? [...references(node.right), ...defaults(node.left)] : children(node).flatMap(defaults)
+  const alias = (target: Syntax, source: Syntax | undefined): void => {
+    const sources = [...references(source), ...defaults(target)]
+    for (const binding of writes(target)) {
+      const previous = origins.get(binding) ?? new Set<Binding>()
+      for (const source of sources) previous.add(source)
+      origins.set(binding, previous)
+    }
+  }
+  for (const node of all) {
+    if (node.type === 'VariableDeclarator') alias(node.id, node.init)
+    if (node.type === 'AssignmentExpression' && ['=', '&&=', '||=', '??='].includes(node.operator)) alias(node.left, node.right)
+    if (node.type === 'ForOfStatement') alias(node.left.type === 'VariableDeclaration' ? node.left.declarations[0].id : node.left, node.right)
+    const target = node.type === 'AssignmentExpression' ? node.left : node.type === 'UpdateExpression' || node.type === 'UnaryExpression' && node.operator === 'delete' ? node.argument
+      : ['CallExpression', 'OptionalCallExpression'].includes(node.type) && ['MemberExpression', 'OptionalMemberExpression'].includes(node.callee.type) ? node.callee.object
+        : ['ForOfStatement', 'ForInStatement'].includes(node.type) && node.left.type !== 'VariableDeclaration' ? node.left : undefined
+    for (const binding of writes(target)) {
+      const testModifier = ['CallExpression', 'OptionalCallExpression'].includes(node.type) && binding.test && ['only', 'skip', 'todo'].includes(node.callee.property?.name)
+      if (!testModifier) mutated.add(binding)
+    }
+  }
+  const invalidate = (binding: Binding): void => {
+    for (const origin of origins.get(binding) ?? []) if (!mutated.has(origin)) { mutated.add(origin); invalidate(origin) }
+  }
+  for (const binding of mutated) invalidate(binding)
+  const value = (node: Syntax | undefined, overrides: Map<Binding, Value>, at: number, resolving = new Set<Binding>()): Value => {
+    if (!node) return unknownValue
+    const scope = scopes.get(node)!
+    if (['StringLiteral', 'NumericLiteral', 'BooleanLiteral'].includes(node.type)) return node.value
+    if (node.type === 'NullLiteral') return null
+    if (['TSAsExpression', 'TSTypeAssertion', 'TSSatisfiesExpression', 'TSNonNullExpression', 'ParenthesizedExpression'].includes(node.type)) return value(node.expression, overrides, at, resolving)
+    if (node.type === 'Identifier') {
+      const binding = lookup(scope, node.name)
+      if (!binding || mutated.has(binding) || resolving.has(binding)) return unknownValue
+      if (overrides.has(binding)) return overrides.get(binding)!
+      if (!binding.init || binding.start > at) return unknownValue
+      return value(binding.init, overrides, binding.start, new Set([...resolving, binding]))
+    }
+    if (node.type === 'ArrayExpression') {
+      const entries = node.elements.map((entry: Syntax) => value(entry, overrides, at, resolving)) as Value[]
+      return entries.includes(unknownValue) ? unknownValue : entries as StaticValue[]
+    }
+    if (node.type === 'ObjectExpression') {
+      const entries = new Map<string, StaticValue>()
+      for (const entry of node.properties) {
+        if (entry.type !== 'ObjectProperty' || entry.method) return unknownValue
+        const key = entry.computed ? value(entry.key, overrides, at, resolving) : entry.key.name ?? entry.key.value
+        const field = value(entry.value, overrides, at, resolving)
+        if (!['string', 'number'].includes(typeof key) || key === '__proto__' || field === unknownValue) return unknownValue
+        entries.set(String(key), field)
+      }
+      return entries
+    }
+    if (node.type === 'MemberExpression') {
+      const object = value(node.object, overrides, at, resolving)
+      const key = node.computed ? value(node.property, overrides, at, resolving) : node.property.name
+      if (typeof key !== 'string' && typeof key !== 'number') return unknownValue
+      if (object instanceof Map && object.has(String(key))) return object.get(String(key))!
+      if (Array.isArray(object) && /^(0|[1-9][0-9]*)$/.test(String(key)) && Object.hasOwn(object, key)) return object[Number(key)]
+      return unknownValue
+    }
+    if (node.type === 'TemplateLiteral') {
+      let title = node.quasis[0].value.cooked
+      if (title === null) return unknownValue
+      for (let i = 0; i < node.expressions.length; i++) {
+        const part = value(node.expressions[i], overrides, at, resolving), tail = node.quasis[i + 1].value.cooked
+        if (part === unknownValue || typeof part === 'object' && part !== null || tail === null) return unknownValue
+        title += String(part) + tail
+      }
+      return title
+    }
+    return unknownValue
+  }
+  const titles = new Set<string>()
+  const collect = (node: Syntax, overrides: Map<Binding, Value>): void => {
+    if (node.type === 'WithStatement') return
+    if (node.type === 'ForOfStatement' && node.left.type === 'VariableDeclaration' && node.left.kind === 'const' && node.left.declarations[0].id.type === 'Identifier') {
+      const entries = value(node.right, overrides, node.start)
+      if (Array.isArray(entries)) {
+        const binding = lookup(scopes.get(node)!, node.left.declarations[0].id.name)!
+        for (const entry of entries) collect(node.body, new Map([...overrides, [binding, entry]]))
+        return
+      }
+    }
+    if (node.type === 'CallExpression') {
+      const callee = node.callee.type === 'MemberExpression' && !node.callee.computed && ['only', 'skip', 'todo'].includes(node.callee.property.name) ? node.callee.object : node.callee
+      if (callee.type === 'Identifier') {
+        const binding = lookup(scopes.get(callee)!, callee.name)
+        if (binding?.test && !mutated.has(binding)) {
+          const title = value(node.arguments[0], overrides, node.start)
+          if (typeof title === 'string') titles.add(title)
+        }
+      }
+    }
+    for (const child of children(node)) collect(child, overrides)
+  }
+  collect(tree, new Map())
+  return [...titles]
 }
 
 export function validateContractGraph(graph: ContractGraph, context: ContractValidationContext = {}): ContractFinding[] {
   const findings = [...graph.findings]
+  const titlesByFile = new Map<string, string[]>()
   const final = context.mode !== 'draft'
   const report = (code: string, message: string, item: ContractItem | undefined, relatedIds?: string[], severity: 'error' | 'warning' = 'error'): void => {
     const owner = item ? graph.owners.get(item.id) : graph.contracts[0]
@@ -116,7 +263,11 @@ export function validateContractGraph(graph: ContractGraph, context: ContractVal
     const source = context.files.get(testPath)
     if (source === undefined) report('missing-test-file', `${ac.id} 测试文件不存在：${testPath}`, ac)
     else {
-      if (!declaresTestCase(source, caseId)) report('missing-test-case', `${ac.id} 测试标题未声明稳定用例 ${caseId}`, ac)
+      const titles = titlesByFile.get(testPath) ?? testCaseTitles(source)
+      titlesByFile.set(testPath, titles)
+      const escaped = caseId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      const id = new RegExp(`(?:^|[^A-Z0-9-])${escaped}(?![A-Z0-9-])`)
+      if (!titles.some((title) => id.test(title))) report('missing-test-case', `${ac.id} 测试标题未声明稳定用例 ${caseId}`, ac)
     }
     if (command?.kind === 'VERIFY') {
       const resolves = (arg: string): string => `${command.cwd === '.' ? '' : `${command.cwd}/`}${arg.replace(/^\.\//, '')}`

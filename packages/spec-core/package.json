@@ -20,6 +20,7 @@
     "node": ">=22"
   },
   "dependencies": {
+    "@babel/parser": "7.29.8",
     "@vscode/tree-sitter-wasm": "0.3.1"
   },
   "publishConfig": {
