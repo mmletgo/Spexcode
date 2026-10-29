@@ -322,6 +322,29 @@ test('封闭const数据及for-of绑定组成的真实测试标题可静态归因
   }
 })
 
+test('Vitest each注册不抹去同一TSX文件中的直接it标题', () => {
+  const graph = buildContractGraph([parse()])
+  const fake = new Map(files)
+  fake.set('tests/export.test.mjs', `
+    import { describe, it } from 'vitest'
+    import type { ReactNode } from 'react'
+    const panel: ReactNode = <NodeDetailPanel />
+    describe('NodeDetailPanel', () => {
+      it.each(['source_failed', 'evidence_pending'] as const)('等待时禁止 %s finalize', (status) => { render(panel) })
+      it('AC-EXPORT-01 已剪枝时拒绝恢复', () => { render(<NodeDetailPanel />) })
+      it.each(['failed', 'cancelled'] as const)('%s 不显示取消入口', (status) => {})
+    })
+  `)
+  assert.ok(!validateContractGraph(graph, { files: fake }).some((finding) => finding.code === 'missing-test-case' && finding.itemId === 'AC-EXPORT-01'))
+  for (const source of [
+    "import { it } from 'vitest'; it.each([1])('AC-EXPORT-01 row %s', () => {});",
+    "const IDS = ['AC-EXPORT-01']; IDS.each(() => {}); test(`${IDS[0]} candidate`, () => {});",
+  ]) {
+    fake.set('tests/export.test.mjs', source)
+    assert.ok(validateContractGraph(graph, { files: fake }).some((finding) => finding.code === 'missing-test-case' && finding.itemId === 'AC-EXPORT-01'), source)
+  }
+})
+
 test('optional成员调用及赋值或解构别名的可见写入使标题失效', () => {
   const graph = buildContractGraph([parse()])
   const sources = [
