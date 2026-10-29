@@ -90,3 +90,5 @@ P4 partial→decide使用原P3-DELIVERY keep_intent真实链补强：fresh exact
 真实 Git/SQLite 用例覆盖默认旧 JSON 与 v1 描述不改、正式另模型 retry、重启省略继承、普通重复换模型拒绝、全阶段请求及描述/operation 模型冲突拒绝；遵循 [[sync-model-selection]]。
 
 已存在或备份固定运行描述先核精确期望模型，再允许admission。未受理请求留下的原描述若与后续选择不符，明确早拒，不新建operation/receipt/FIFO且不静默重建；匹配原描述的合法显式retry或新请求仍沿既有入口。
+
+行为分析测试接缝从完整runner request还原body-entry-v2正文，保留真实冻结视图的逐字校验；模型接缝的确定性输出仍不能充当真实Native读取或业务同步完成证明。

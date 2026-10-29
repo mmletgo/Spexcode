@@ -37,3 +37,5 @@ retiredIds同时承载逐项合法业务退役与经当前精确裁决确证结�
 结构化runner请求可携 [[frozen-context-reader]] 的不可变frozenContext引用；结果可携精确thread/turn的frozenReadProof，包含真实原生history摘要与完整required内容覆盖。它仅是输入读取证据，不替代业务结果、独立审查、运行验证或落盘证明；inputDigest保持业务输入语义。
 
 authorizedChanges 的 restore 动作保存原固定历史请求及 input 引用，仅表达同一历史业务身份恢复；调用者在原协调器核原 settled receipt，细化再核真实 Git parent、原路径与旧业务字段。候选不能用普通 user:raw 或模型文字自授恢复。恢复的当前 ID 不继续列为禁用 retiredIds，原历史退役 pair 与审计证据不修改。
+
+结构化runner请求也可携通用纯JSON frozenEntries（UTF8 text、binary base64或absent）；它在真实attempt/policy绑定后转换为frozenContext，持久计划不携条目正文。该传输字段不新增调用、业务授权或完成语义，旧固定ref/请求原样恢复。
