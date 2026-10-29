@@ -60,6 +60,27 @@ function runner(kind: CodeBehaviorKind, patch?: (proposal: Record<string, unknow
   }
 }
 
+test('独审schema冻结正确摘要并明确accept不携带问题条目', async t => {
+  const f = await fixture(t)
+  writeFileSync(join(f.root, 'src/export.js'), f.source + '\n// unchanged behavior\n')
+  const delegated = runner('refactor')
+  let reviewed = false
+  const result = await analyzeCodeBehavior(await f.input(), async request => {
+    if (request.purpose === 'code_behavior_review') {
+      reviewed = true
+      const value = JSON.parse(request.prompt.split('待审分析:\n')[1]) as { analysisDigest: string }
+      const properties = request.schema.properties as Record<string, { enum?: string[]; description?: string }>
+      assert.deepEqual(properties.inputDigest.enum, [request.inputDigest])
+      assert.deepEqual(properties.analysisDigest.enum, [value.analysisDigest])
+      assert.match(properties.findings.description!, /accept.*空数组/)
+      assert.match(request.prompt, /accept.*findings.*空数组/)
+    }
+    return delegated(request)
+  })
+  assert.equal(reviewed, true)
+  assert.equal(result.reviewPassed, true)
+})
+
 test('未改可读正文不能因整体打包变为必读，仍按冻结原字节可选读取', async t => {
   const f = await fixture(t)
   const optional = '\uFEFFUNRELATED-FROZEN-BODY\n' + '不相关只读正文🙂\n'.repeat(60000)
@@ -248,8 +269,19 @@ test('真实runner的冻结三方JSON共享正文引用且逐字段还原旧输�
     })
   const expectedOld = expectedTextView(baseline.sourceInput.immutableTree), expectedNew = expectedTextView(input.snapshot.immutableTree)
   const expectedDelivery = expectedTextView(baseline.verifiedDelivery.immutableTree), expectedComposed = expectedTextView(input.composed.tree)
+  const globalReviewSchema = structuredClone(CODE_BEHAVIOR_REVIEW_SCHEMA)
   await analyzeCodeBehavior(input, async request => {
-    assert.deepEqual(request.schema, request.purpose === 'code_behavior_analyze' ? CODE_BEHAVIOR_SCHEMA : CODE_BEHAVIOR_REVIEW_SCHEMA)
+    if (request.purpose === 'code_behavior_analyze') assert.deepEqual(request.schema, CODE_BEHAVIOR_SCHEMA)
+    else {
+      const reviewed = JSON.parse(request.prompt.split('待审分析:\n')[1]) as { analysisDigest: string }
+      const expected = structuredClone(globalReviewSchema)
+      const properties = expected.properties as Record<string, unknown>
+      properties.inputDigest = { type: 'string', minLength: 1, enum: [request.inputDigest] }
+      properties.analysisDigest = { type: 'string', minLength: 1, enum: [reviewed.analysisDigest] }
+      assert.notEqual(request.schema, CODE_BEHAVIOR_REVIEW_SCHEMA)
+      assert.deepEqual(request.schema, expected)
+      assert.deepEqual(CODE_BEHAVIOR_REVIEW_SCHEMA, globalReviewSchema)
+    }
     if (request.purpose === 'code_behavior_analyze') {
       const frozen = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as {
         textEncoding: string
