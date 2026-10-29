@@ -290,7 +290,7 @@ test('broad作者raw baseline与intent artifact对象在共享正文后仍逐字
   const merged = f.addB(authorRaw), behavior = fakeBehavior(merged)
   const analysis = await analyzeCodeBehavior({ snapshot: input, baseline: null, baselineSelection: selection, composed, readSetDigest: 'dedup-author-read', policyDigest: 'dedup-author-policy', requestKey: 'dedup-author-baseline', timeoutMs: 10000, plan: f.plan }, async request => {
     const wire = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as { textEncoding: string; bodyIndex: Record<string, { required: boolean }>; intentArtifactFiles: { path: string; mode: string; oid: string; digest: string; bodyRef: string }[] }
-    assert.equal(wire.textEncoding, 'sha256-body-ref-v1')
+    assert.equal(wire.textEncoding, 'sha256-body-entry-v2')
     const frozen = readFrozenBehaviorContext(request) as { authorBaseline: [string, string][]; oldSource: [string, string][]; newSource: [string, string][]; intentArtifactFiles: { path: string; mode: string; oid: string; digest: string; text: string }[] }
     assert.equal(new Map(frozen.authorBaseline).get(path), expectedAuthorBaseline)
     assert.equal(new Map(frozen.newSource).get(path), authorRaw)
