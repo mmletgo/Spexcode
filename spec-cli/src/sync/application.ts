@@ -352,6 +352,7 @@ export class SyncApplication {
   }
   private async observeNode(snapshot: InputSnapshot, nodeId: string): Promise<void> {
     const { settings, configDigest } = readSyncSettings(snapshot)
+    const model = syncModel(settings)
     const configRef = writeEvidence(snapshot.source.commonDir, { version: 'sync-observed-configuration-v1', configDigest, settings })
     const control = this.store.readPhysicalControl(this.physicalScope(snapshot.source))
     let selection: FrozenBaselineSelection | null = null
@@ -375,9 +376,9 @@ export class SyncApplication {
         this.latestObservation = this.store.recordObservation(observation, { controlRevision: control.revision, selectionDigest: selection.digest }); return
       }
       const ingressKey = `observation:${snapshot.source.repositoryId}:${snapshot.id}:${nodeId}:${latestDifferenceDigest}`
-      const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: ingressKey, origin: !selection.bindings.some(binding => ('bytePair' in binding ? binding.bytePair : binding.intentPair)) ? 'initial' : specChanged && codeChanged ? 'combined' : codeChanged ? 'code' : 'spec', budget: settings.budget, managedRoot: this.managedRoot, baselineSelection: selection })
+      const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: ingressKey, origin: !selection.bindings.some(binding => ('bytePair' in binding ? binding.bytePair : binding.intentPair)) ? 'initial' : specChanged && codeChanged ? 'combined' : codeChanged ? 'code' : 'spec', ...syncModelBinding(model), budget: settings.budget, managedRoot: this.managedRoot, baselineSelection: selection })
       if (!this.ownsObservation()) return
-      this.prepareTools(ingressKey, this.store.findOperationByIngressKey(ingressKey))
+      this.prepareTools(ingressKey, this.store.findOperationByIngressKey(ingressKey), model)
       const result = this.store.observeAndAdmit(observation, admission, { controlRevision: control.revision, selectionDigest: selection.digest })
       this.latestObservation = result.observation
       if (result.outcome !== 'blocked') this.start(result.operation.id)
@@ -554,7 +555,7 @@ export class SyncApplication {
     const mutex = await this.requestMutex(ingressKey, settings.budget.timeoutMs)
     try {
       const prior = this.store.findOperationByIngressKey(ingressKey), ingress = this.store.findIngressReceipt(ingressKey)
-      const model = input.model ?? syncModel(prior ?? retry ?? {})
+      const model = input.model ?? syncModel(prior ?? retry ?? settings)
       if (prior?.baselineSelection) {
         this.requireEnabled(snapshot, prior)
         if (!await isSyncInputCurrent(prior, snapshot, this.operationPlan(prior))) throw new SyncStoreError('SYNC_IDEMPOTENCY_CONFLICT', ingressKey)
@@ -591,7 +592,7 @@ export class SyncApplication {
     const snapshot = await captureInputSnapshot(this.root); this.requireEnabled(snapshot)
     const nodeId = this.operationPlan(original).intentNodeId
     await this.requireNodeAuthorized(snapshot, nodeId)
-    const { settings } = readSyncSettings(snapshot), ingressKey = `application:${snapshot.source.repositoryId}:${this.root}:${input.requestId}`
+    const { settings } = readSyncSettings(snapshot), model = syncModel(settings), ingressKey = `application:${snapshot.source.repositoryId}:${this.root}:${input.requestId}`
     const mutex = await this.requestMutex(ingressKey, settings.budget.timeoutMs)
     try {
       const prior = this.store.findOperationByIngressKey(ingressKey), ingress = this.store.findIngressReceipt(ingressKey)
@@ -639,8 +640,8 @@ export class SyncApplication {
       for (const item of after.graph.items.values()) if (paths.includes(item.path) && item.kind !== 'VERIFY') { const resource = item.kind === 'FLOW' ? { kind: 'flow' as const, id: item.id } : { kind: 'contract' as const, id: item.id }; resources.set(JSON.stringify(resource), resource) }
       const selected = this.store.readBaselineSelection(snapshot.source, [...resources.values()])
       if ('failure' in selected) throw new SyncApplicationError(selected.failure.code, selected.failure.message)
-      const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: original.rootCauseId, origin: 'combined', budget: settings.budget, managedRoot: this.managedRoot, requestBlob, baselineSelection: selected.selection })
-      this.prepareTools(ingressKey, null)
+      const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: original.rootCauseId, origin: 'combined', ...syncModelBinding(model), budget: settings.budget, managedRoot: this.managedRoot, requestBlob, baselineSelection: selected.selection })
+      this.prepareTools(ingressKey, null, model)
       const operation = this.store.admitAndEnqueue(admission)
       this.start(operation.id)
       return { changed: true, operation: this.store.readOperation(operation.id) }
@@ -697,7 +698,7 @@ export class SyncApplication {
     const findings = input.findingIds.map(id => context.analysis.findings.find(finding => finding.id === id))
     if (findings.some(finding => !finding)) throw new SyncApplicationError('sync_decision_finding', '裁决只能选择分析中真实存在的分歧', 400)
     const ingressKey = `application:${snapshot.source.repositoryId}:${this.root}:${input.requestId}`
-    const { settings } = readSyncSettings(snapshot)
+    const { settings } = readSyncSettings(snapshot), model = syncModel(settings)
     const mutex = await this.requestMutex(ingressKey, settings.budget.timeoutMs)
     try {
       const prior = this.store.findOperationByIngressKey(ingressKey), ingress = this.store.findIngressReceipt(ingressKey)
@@ -714,8 +715,8 @@ export class SyncApplication {
       if (selected && 'failure' in selected) throw Object.assign(new SyncApplicationError(selected.failure.code, selected.failure.message), { syncFailure: selected.failure })
       const selection = selected?.selection, plan = this.operationPlan(original)
       this.decorateDecisionPlan(plan, snapshot, input, context.analysis, requestBlob, selection ?? previousBaselinePair)
-      const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: original.rootCauseId, origin: 'decision', budget: settings.budget, managedRoot: this.managedRoot, requestBlob, previousBaselinePair, ...(selection ? { baselineSelection: selection, executionScope: original.scope, impactDigest: original.impactDigest } : {}) })
-      this.prepareTools(ingressKey, null)
+      const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: original.rootCauseId, origin: 'decision', ...syncModelBinding(model), budget: settings.budget, managedRoot: this.managedRoot, requestBlob, previousBaselinePair, ...(selection ? { baselineSelection: selection, executionScope: original.scope, impactDigest: original.impactDigest } : {}) })
+      this.prepareTools(ingressKey, null, model)
       const operation = this.store.admitAndEnqueue(admission)
       if (operation.ingressKey === ingressKey) this.start(operation.id)
       return { changed: true, operation: this.store.readOperation(operation.id) }

@@ -445,6 +445,7 @@ consumes the token after it.`,
 
 在 .spec/spexcode.json 的 sync 字段登记 sync-settings-v1、sourcePaths/testPaths/readPaths、
 verifications、mandatoryTests、facts 与 budget，再启用当前输入工作树的授权。
+可选 sync.model 为本项目新 operation 固定精确默认模型；配置变化仍需重新启用。
 nodeIds 可明确限定意图根；新纯raw需求须登记根节点，status显示实际纳入与未纳入范围。
 支持已登记的 Docker Node --test；缺少可信镜像、命令或预算明确拒绝。
 可配置有限 callTimeoutMs；缺省单次最多 120000ms，旧操作沿用自身冻结配置和总期限。
@@ -453,7 +454,7 @@ run 返回持久 operation，后端继续实际细化、生成、验证与受管
 直接进入完整操作，不先单独提交 Spec。重复 --request-id 幂等；不同内容不能复用同一键。
 recover 只核对并结算已有资源或已开始的交付日志，保持原控制、输入及预算，不派发新模型任务。
 resume 继续原操作，--retry-of 建立关联新操作；三个入口各自有明确门禁。
---model 固定本操作及独审模型，默认 gpt-6.1-sol；重试省略则继承。相同输入换模型须用 --retry-of，resume/recover 不换模型。
+新业务操作的手动 --model 优先于项目 sync.model；显式 --retry-of 可用 --model 选择新模型。相同 request ID 仍固定原模型，换模型必须使用 --retry-of；省略模型时，同 request/retry 继承原选择，新操作再取项目配置或 gpt-6.1-sol。自动观察也使用项目值；旧操作缺模型仍固定 gpt-6.1-sol。模型固定于 operation 与独审请求，resume/recover 不换模型。
 --retry-of 显式重试可重试的失败操作，保留原正文意图并关联旧结果；不能同时传 --patch-file。
 只有显式重试建立新操作和新预算，普通重复请求继续归并。未结算资源或已变输入拒绝重试。
 show/status 展示真实失败、GAP、过期和交付工作树；workspace_synced 不代表原输入树已落地。
