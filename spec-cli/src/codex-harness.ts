@@ -3,7 +3,6 @@ import { basename, dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import { createHash, randomBytes } from 'node:crypto'
 import { createConnection, type Socket } from 'node:net'
-import { performance } from 'node:perf_hooks'
 import { execFileSync } from 'node:child_process'
 import { parse as parseToml } from 'smol-toml'
 import { codexSlashCommands } from './slash-commands.js'
@@ -2669,15 +2668,6 @@ export const codexHeadlessHarness: Harness = {
 
 type StructuredNativeItem = FrozenNativeItem & { phase?: string; text?: string; content?: Array<{ type: string; text?: string }> }
 type StructuredNativeTurn = { id: string; status: string; error?: { message?: string } }
-type FrozenReadTiming = {
-  rangeCasMs?: number // Full persistFrozenRead wall time: validation, byte/digest checks, and response CAS file access.
-  requestedByteCount?: number
-  acquireWallMs?: number // withRecordLock call through callback entry, including lock setup/retries and event-loop stalls.
-  readRecordMs?: number // Full readRecord projection, including runtime-envelope access and canonical state lookup.
-  writeRecordMs?: number // Full writeRecord call, including its internal reread and runtime-file replacement.
-  persistToEnqueueWallMs?: number // From persistFrozenRead completion to send, including callback wall/continuation; not pure scheduling time.
-  rpcEnqueueSyncMs?: number // Synchronous JSON/frame serialization and conn.write call only.
-}
 
 // Subscribe before the first turn on this connection. Reconnect reads only the exact durable turn, or the
 // sole first turn whose user input equals the pinned prompt when its acceptance reply was lost.
@@ -2686,8 +2676,7 @@ export async function codexStructuredTurn(sock: string, cwd: string, prompt: str
   onTurn(turnId: string): Promise<void>
   onTurnStarting?(): Promise<void>
   onTimeout?(): Promise<void>
-  onFrozenRead?(receipt: FrozenReadReceipt, timing?: FrozenReadTiming): Promise<void>
-  sessionId?: string
+  onFrozenRead?(receipt: FrozenReadReceipt): Promise<void>
   signal?: AbortSignal
 }): Promise<{ threadId: string; turnId: string; text: string; frozenReadProof?: FrozenReadProof }> {
   const frozen = execution.frozenContext
@@ -2716,34 +2705,10 @@ export async function codexStructuredTurn(sock: string, cwd: string, prompt: str
     const params = message.params as { threadId?: string; turnId?: string; callId?: string; namespace?: string | null; tool?: string; arguments?: unknown }
     if (!frozen || params.threadId !== threadId || params.turnId !== turnId || !params.callId || params.namespace != null || params.tool !== FROZEN_READ_TOOL)
       throw new StructuredSessionError('stale_result', 'dynamic frozen request differs from the exact thread/turn/tool identity')
-    const timing = process.env.SPEXCODE_FROZEN_READ_TIMING === '1' ? {} as FrozenReadTiming : undefined
-    let persistToEnqueueStartedAt: number | undefined
-    try {
-      let persisted: ReturnType<typeof persistFrozenRead>
-      const rangeStartedAt = timing ? performance.now() : 0
-      try {
-        persisted = persistFrozenRead(frozen, { threadId: threadId!, turnId: turnId!, callId: params.callId }, params.arguments)
-      } finally {
-        if (timing) timing.rangeCasMs = performance.now() - rangeStartedAt
-      }
-      const { receipt, response } = persisted
-      if (timing) {
-        timing.requestedByteCount = receipt.arguments.endByte - receipt.arguments.startByte
-        persistToEnqueueStartedAt = performance.now()
-      }
-      await callbacks.onFrozenRead?.(receipt, timing)
-      if (timing) timing.persistToEnqueueWallMs = performance.now() - persistToEnqueueStartedAt!
-      if (failure) throw failure
-      const enqueueStartedAt = timing ? performance.now() : 0
-      try { send({ id: message.id, result: response }) }
-      finally { if (timing) timing.rpcEnqueueSyncMs = performance.now() - enqueueStartedAt }
-    } finally {
-      if (timing) {
-        if (persistToEnqueueStartedAt !== undefined && timing.persistToEnqueueWallMs === undefined)
-          timing.persistToEnqueueWallMs = performance.now() - persistToEnqueueStartedAt
-        console.error(`[spex frozen-read-timing] ${JSON.stringify({ ...(callbacks.sessionId ? { sessionId: callbacks.sessionId.slice(0, 8) } : {}), callId: params.callId, ...timing })}`)
-      }
-    }
+    const { receipt, response } = persistFrozenRead(frozen, { threadId: threadId!, turnId: turnId!, callId: params.callId }, params.arguments)
+    await callbacks.onFrozenRead?.(receipt)
+    if (failure) throw failure
+    send({ id: message.id, result: response })
   }
   const earlyTurns = new Map<string, StructuredNativeTurn>()
   const fail = (error: Error): void => {

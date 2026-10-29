@@ -1,7 +1,6 @@
 import { Ajv } from 'ajv'
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
-import { performance } from 'node:perf_hooks'
 import { join, resolve } from 'node:path'
 import { mainRoot, runtimeRoot, sessionArtifactPath } from '@spexcode/spec-core'
 import { readRecord, withRecordLock, writeRecord } from './session-record.js'
@@ -71,7 +70,6 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
     await update({ state: 'running' })
     const { endpoint, runtimeDir } = await structuredGeneration(requiredRealmRoot(execution), execution.readerRuntime)
     const result = await codexStructuredTurn(endpoint.socketPath, rec.worktreePath, readFileSync(sessionArtifactPath(id, 'launch'), 'utf8'), execution, {
-      sessionId: id,
       signal: controller.signal,
       onTimeout: async () => { await cancelStructuredSession(id, { reason: 'timeout' }) },
       onTurnStarting: async () => update({ turnStartRequested: true }),
@@ -86,24 +84,14 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
         commitCodexGenerationRegistration(runtimeDir, id, threadId, endpoint.id)
       },
       onTurn: async (turnId) => update({ turnId }),
-      onFrozenRead: async (receipt, timing) => {
-        const acquireStartedAt = timing ? performance.now() : 0
+      onFrozenRead: async (receipt) => {
         await withRecordLock(id, async () => {
-          if (timing) timing.acquireWallMs = performance.now() - acquireStartedAt
-          let current: NonNullable<ReturnType<typeof readRecord>>
-          const recordReadStartedAt = timing ? performance.now() : 0
-          try { current = readRecord(id)! }
-          finally { if (timing) timing.readRecordMs = performance.now() - recordReadStartedAt }
-          const state = current.structuredExecution!
+          const current = readRecord(id)!, state = current.structuredExecution!
           if (state.state !== 'running' || state.threadId !== receipt.threadId || state.turnId !== receipt.turnId)
             throw new StructuredSessionError('stale_result', 'frozen read cannot publish outside its active exact native turn')
           const receipts = state.frozenReads ?? [], previous = receipts.find(item => item.callId === receipt.callId)
           if (previous && digest(previous) !== digest(receipt)) throw new StructuredSessionError('stale_result', 'frozen native call identity was reused with different bytes')
-          if (!previous) {
-            const recordWriteStartedAt = timing ? performance.now() : 0
-            try { writeRecord({ ...current, structuredExecution: { ...state, frozenReads: [...receipts, receipt] } }) }
-            finally { if (timing) timing.writeRecordMs = performance.now() - recordWriteStartedAt }
-          }
+          if (!previous) writeRecord({ ...current, structuredExecution: { ...state, frozenReads: [...receipts, receipt] } })
         })
       },
     })
