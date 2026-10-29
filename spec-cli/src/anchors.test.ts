@@ -169,6 +169,57 @@ test('the Tree-sitter registry extracts the shared declaration vocabulary for ev
   assert.deepEqual(resolveAnchor(units, 'Command.run'), { ambiguous: 2 })
 })
 
+test('Python anchors resolve module assignments without claiming imports or scoped assignments', async () => {
+  const python = extractorFor(extractors(ROOT), 'py')!
+  const source = [
+    'from framework import Base',
+    'from framework import Existing as ImportedAlias',
+    'app = create_app()',
+    'PROTO: int = 2',
+    'DECLARED_ONLY: int',
+    '__all__ = ["app"]',
+    'MIGRATIONS = ("001", "002")',
+    'FIRST = SECOND = 2',
+    'LEFT, (RIGHT, *REST) = (1, (2, 3, 4))',
+    'if feature_enabled:',
+    '    CONDITIONAL: bool = True',
+    'try:',
+    '    TRY_SETTING = 1',
+    'except Exception:',
+    '    pass',
+    'with manager():',
+    '    WITH_SETTING = 1',
+    'class Container:',
+    '    class_attr = 1',
+    '    def build(self):',
+    '        method_local = 2',
+    'def factory():',
+    '    function_local: int = 3',
+  ].join('\n') + '\n'
+
+  const units = await python.extract(source, 'example.py')
+  assert.deepEqual(units, [
+    { name: 'app', kind: 'const-data', start: 3, end: 3 },
+    { name: 'PROTO', kind: 'const-data', start: 4, end: 4 },
+    { name: '__all__', kind: 'const-data', start: 6, end: 6 },
+    { name: 'MIGRATIONS', kind: 'const-data', start: 7, end: 7 },
+    { name: 'FIRST', kind: 'const-data', start: 8, end: 8 },
+    { name: 'SECOND', kind: 'const-data', start: 8, end: 8 },
+    { name: 'LEFT', kind: 'const-data', start: 9, end: 9 },
+    { name: 'RIGHT', kind: 'const-data', start: 9, end: 9 },
+    { name: 'REST', kind: 'const-data', start: 9, end: 9 },
+    { name: 'CONDITIONAL', kind: 'const-data', start: 11, end: 11 },
+    { name: 'TRY_SETTING', kind: 'const-data', start: 13, end: 13 },
+    { name: 'WITH_SETTING', kind: 'const-data', start: 17, end: 17 },
+    { name: 'Container', kind: 'class', start: 18, end: 21 },
+    { name: 'Container.build', kind: 'method', start: 20, end: 21 },
+    { name: 'factory', kind: 'function', start: 22, end: 23 },
+  ])
+  for (const selector of ['Base', 'ImportedAlias', 'DECLARED_ONLY', 'class_attr', 'method_local', 'function_local']) {
+    assert.deepEqual(resolveAnchor(units, selector), { dead: true }, selector)
+  }
+})
+
 test('Tree-sitter extractors reject syntax recovery instead of returning partial anchors', async () => {
   const regs = extractors(ROOT)
   const malformed: Array<[string, string]> = [
