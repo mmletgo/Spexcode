@@ -294,6 +294,69 @@ test('真实Node测试导入别名保留静态标题，注释和字符串不能�
   }
 })
 
+test('封闭const数据及for-of绑定组成的真实测试标题可静态归因', () => {
+  const graph = buildContractGraph([parse()])
+  const fake = new Map(files)
+  for (const source of [
+    "const IDS = ['AC-EXPORT-01']; test(`${IDS[0]} candidate`, () => {});",
+    "const ID = 'AC-EXPORT-01'; test(`${ID} candidate`, () => {});",
+    "const SUITES = [{ id: 'AC-EXPORT-01', module: 'backend' }]; for (const suite of SUITES) test(`${suite.id} ${suite.module} existing CI pytest targets`, () => {});",
+    "import { test as check } from 'node:test'; const SUITES = [{ id: 'AC-EXPORT-01' }]; for (const suite of SUITES) { check(`${suite['id']} candidate`, () => {}); }",
+    "const IDS: readonly string[] = ['AC-EXPORT-01']; test(`${IDS[0]} candidate`, () => {});",
+    "const ID = 'AC-EXPORT-01' as const; const view = <span>preview</span>; test(`${ID} candidate`, () => {});",
+    "const ID = <string>'AC-EXPORT-01'; test(`${ID} candidate`, () => {});",
+    "import { test as check } from 'node:test'; check.only('AC-EXPORT-01 candidate', () => {});",
+    "const IDS = ['AC-EXPORT-01']; for (const id of IDS) { const title = `${id} candidate`; test(title, () => {}); }",
+    "const ID = 'AC-EXPORT-01'; { const ID = 'other'; } test(`${ID} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; function registered(id) { const ids = new Set(IDS); return ids.has(id); } test(`${IDS[0]} candidate`, () => {});",
+    "const SUITE = { id: 'AC-EXPORT-01', optional: null }; test(`${SUITE.id} ${SUITE.optional} candidate`, () => {});",
+  ]) {
+    fake.set('tests/export.test.mjs', source)
+    assert.ok(!validateContractGraph(graph, { files: fake }).some((finding) => finding.code === 'missing-test-case' && finding.itemId === 'AC-EXPORT-01'), source)
+  }
+})
+
+test('动态或错绑定标题、未使用ID及作用域阴影不计测试声明', () => {
+  const graph = buildContractGraph([parse()])
+  const fake = new Map(files)
+  for (const source of [
+    "const ID = 'AC-EXPORT-01'; test('unrelated title', () => {});",
+    "const ID = 'AC-EXPORT-01'; const example = `test('${ID}', () => {})`;",
+    "// const ID = 'AC-EXPORT-01';\ntest(`${ID} candidate`, () => {});",
+    "const ID = makeId('AC-EXPORT-01'); test(`${ID} candidate`, () => {});",
+    "const ID = 'AC-EXPORT-01'; test(`${ID} ${dynamic()} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; test(`${IDS[missing]} candidate`, () => {});",
+    "const SUITES = [{ id: 'AC-EXPORT-01' }]; for (const other of SUITES) test(`${suite.id} candidate`, () => {});",
+    "const ID = 'AC-EXPORT-01'; { const ID = dynamic(); test(`${ID} candidate`, () => {}); }",
+    "const ID = 'AC-EXPORT-01'; function nested(ID) { test(`${ID} candidate`, () => {}); }",
+    "import { test as check } from 'node:test'; function nested(check) { check('AC-EXPORT-01 candidate', () => {}); }",
+    "const test = unrelated; test('AC-EXPORT-01 candidate', () => {});",
+    "const IDS = ['AC-EXPORT-01']; IDS[0] = 'other'; test(`${IDS[0]} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; const alias = IDS; alias[0] = 'other'; test(`${IDS[0]} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; const alias = IDS as string[]; alias[0] = 'other'; test(`${IDS[0]} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; const alias = { ids: IDS }; alias.ids[0] = 'other'; test(`${IDS[0]} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; [IDS[0]] = ['other']; test(`${IDS[0]} candidate`, () => {});",
+    "const SUITE = { id: 'AC-EXPORT-01' }; ({ id: SUITE.id } = { id: 'other' }); test(`${SUITE.id} candidate`, () => {});",
+    "const SUITES = [{ id: 'AC-EXPORT-01' }]; for (const suite of SUITES) { suite.id = 'other'; test(`${suite.id} candidate`, () => {}); }",
+    "const IDS = ['AC-EXPORT-01']; IDS.pop(); test(`${IDS[0]} candidate`, () => {});",
+    "const ID = 'AC-EXPORT-01'; { test(`${ID} candidate`, () => {}); const ID = dynamic(); }",
+    "const ID = 'AC-EXPORT-01'; const nested = ({ ID }) => test(`${ID} candidate`, () => {});",
+    "const ID = 'AC-EXPORT-01'; try {} catch (ID) { test(`${ID} candidate`, () => {}); }",
+    "const ID = 'AC-EXPORT-01'; function nested() { test(`${ID} candidate`, () => {}); var ID; }",
+    "import { test as check } from 'unrelated-library'; check('AC-EXPORT-01 candidate', () => {});",
+    "const example = /test\\('AC-EXPORT-01',/;",
+    "test = unrelated; test('AC-EXPORT-01 candidate', () => {});",
+    "import { test as check } from 'node:test'; function nested(check: Function) { check('AC-EXPORT-01 candidate', () => {}); }",
+    "with ({ test: unrelated }) { test('AC-EXPORT-01 candidate', () => {}); }",
+    "test('AC-EXPORT-01 candidate', () => {}); const = ;",
+    "enum test { unrelated }; test('AC-EXPORT-01 candidate', () => {});",
+    "declare function test(title: string, run: Function): void; test('AC-EXPORT-01 candidate', () => {});",
+  ]) {
+    fake.set('tests/export.test.mjs', source)
+    assert.ok(validateContractGraph(graph, { files: fake }).some((finding) => finding.code === 'missing-test-case' && finding.itemId === 'AC-EXPORT-01'), source)
+  }
+})
+
  test('非终态无出口、不可达状态、跨对象事件和未解释无状态分支被拒绝', () => {
   const contract = parse()
   const changed = structuredClone(contract)
