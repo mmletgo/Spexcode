@@ -96,6 +96,42 @@ test('发布范围不复制源码/home/凭据，payload越界与断链symlink明
   assert.equal(existsSync(join(root, 'invalid-export')), false)
 })
 
+test('缺失的可选files候选可跳过，真实入口和依赖加载仍闭合', t => {
+  const root = temporary(t), cli = cliFixture(root), metadata = JSON.parse(readFileSync(join(cli, 'package.json'), 'utf8'))
+  json(cli, { ...metadata, dependencies: { 'candidate-dep': '1' } })
+  const dependency = join(cli, 'node_modules', 'candidate-dep')
+  json(dependency, { name: 'candidate-dep', version: '1', files: ['index.js', 'index.cjs', 'optional/index.js'], main: 'index.js', exports: { '.': { types: './index.d.ts', 'types@>=5.0': './index-v5.d.ts', require: './index.js', default: './index.js' } } })
+  put(dependency, 'index.js', 'module.exports = "candidate-dep-loaded"\n')
+  put(cli, 'dist/cli.js', 'import {createRequire} from "node:module"; const require=createRequire(import.meta.url); console.log(require("candidate-dep"));\n')
+
+  const runtime = freezeDeliveryRuntime(join(root, 'runtime'), cli)
+  const dependencyPackage = runtime.packages.find(pkg => pkg.source.name === 'candidate-dep')
+  assert.ok(dependencyPackage)
+  const frozenPackage = join(runtime.trustedRuntimeRoot, 'packages', dependencyPackage.id)
+  assert.equal(existsSync(join(frozenPackage, 'index.cjs')), false)
+  assert.equal(existsSync(join(frozenPackage, 'optional/index.js')), false)
+  assert.equal(execFileSync(process.execPath, [runtime.toolEntry], { encoding: 'utf8' }).trim(), 'candidate-dep-loaded')
+
+  json(dependency, { name: 'candidate-dep', version: '1', files: ['index.js', 'index.cjs'], main: 'missing.js' })
+  rejection(() => freezeDeliveryRuntime(join(root, 'missing-main'), cli))
+  assert.equal(existsSync(join(root, 'missing-main')), false)
+  json(dependency, { name: 'candidate-dep', version: '1', files: ['index.js', 'index.cjs'], main: 'index.js', exports: { '.': './missing-export.js' } })
+  rejection(() => freezeDeliveryRuntime(join(root, 'missing-export'), cli))
+  assert.equal(existsSync(join(root, 'missing-export')), false)
+  json(dependency, { name: 'candidate-dep', version: '1', files: ['index.js', 'index.cjs'], main: 'index.js', exports: { '.': { types: './index.d.ts', default: './missing-default.js' } } })
+  rejection(() => freezeDeliveryRuntime(join(root, 'missing-default'), cli))
+  assert.equal(existsSync(join(root, 'missing-default')), false)
+  json(dependency, { name: 'candidate-dep', version: '1', files: ['index.js', 'index.cjs'], main: 'index.js', exports: { '.': { types: './index.d.ts', require: './missing-require.js', default: './index.js' } } })
+  rejection(() => freezeDeliveryRuntime(join(root, 'missing-require'), cli))
+  assert.equal(existsSync(join(root, 'missing-require')), false)
+  json(dependency, { name: 'candidate-dep', version: '1', files: ['index.js', 'index.cjs'], main: 'index.js', exports: { '.': { types: './index.d.ts', require: './index.js', default: './index.js' }, './types': './missing-types.js' } })
+  rejection(() => freezeDeliveryRuntime(join(root, 'missing-types-subpath'), cli))
+  assert.equal(existsSync(join(root, 'missing-types-subpath')), false)
+  json(dependency, { name: 'candidate-dep', version: '1', files: ['index.js', '../outside'], main: 'index.js' })
+  rejection(() => freezeDeliveryRuntime(join(root, 'unsafe-files'), cli))
+  assert.equal(existsSync(join(root, 'unsafe-files')), false)
+})
+
 test('缺编译入口/模板/依赖及未知workspace发布/exports拒绝，不留已发布目录', t => {
   const root = temporary(t), cli = cliFixture(root), metadata = JSON.parse(readFileSync(join(cli, 'package.json'), 'utf8'))
   for (const broken of [{ ...metadata, files: undefined }, { ...metadata, files: ['**/*.js'] }, { ...metadata, dependencies: { 'missing-runtime-package': '1' } }, { ...metadata, dependencies: { '..': '1' } }, { ...metadata, bin: { spex: 'bin/missing.mjs' } }, { ...metadata, exports: 'outside.js' }]) {
