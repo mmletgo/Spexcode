@@ -66,6 +66,10 @@ test('frozen manifest binds request and immutable bytes without exposing control
     assert.throws(() => assertFrozenBinding(f.ref, { ...binding, inputDigest: 'foreign' }), /inputDigest/)
     assert.throws(() => assertFrozenBinding(f.ref, { ...binding, attemptId: 'invented' }), /attemptId/)
     assert.equal(frozenContextPrompt(f.ref).includes(f.directory), false)
+    const index = JSON.parse(frozenContextPrompt(f.ref)) as { toolOutputTokenLimit: number; execMaxOutputTokens: number; readBatches: { entryId: string; ranges: { startByte: number; endByte: number }[] }[] }
+    assert.equal(index.toolOutputTokenLimit, frozenReadOutputTokenLimit(f.ref))
+    assert.equal(index.execMaxOutputTokens, Math.ceil(index.toolOutputTokenLimit * 1.2))
+    assert.deepEqual(index.readBatches, [{ entryId: 'a', ranges: [{ startByte: 0, endByte: 9 }] }])
     const read = readFrozenRange(f.ref, f.args(0, 3))
     assert.equal(JSON.parse(read.response.contentItems[0].text).text, '首')
     const persisted = persistFrozenRead(f.ref, { ...identity, callId: 'native-call' }, f.args(0, 9))
@@ -147,6 +151,58 @@ test('frozen output budget contains worst JSON escapes, expanded UTF8, binary an
     const short = fixture([{ id: 'task', label: 'short', kind: 'utf8', bytes: Buffer.from('short') }])
     try { assert.ok(frozenReadOutputTokenLimit(short.ref) < limit, 'the budget follows actual frozen metadata instead of an arbitrary identity cap') }
     finally { short.close() }
+  } finally { f.close() }
+})
+
+test('frozen read batches pair only within the unchanged history budget and preserve unique required coverage', () => {
+  const bytes = Buffer.from('x'.repeat(FROZEN_READ_MAX_BYTES * 2 + 13))
+  const f = fixture([
+    { id: 'required', label: 'large required source', kind: 'utf8', bytes },
+    { id: 'required-alias', label: 'same required bytes', kind: 'utf8', bytes },
+    { id: 'optional', label: 'optional source', kind: 'utf8', bytes: Buffer.from('optional bytes'), required: false },
+    { id: 'absent', label: 'absent source', kind: 'absent' },
+  ])
+  try {
+    const index = JSON.parse(frozenContextPrompt(f.ref)) as { toolOutputTokenLimit: number; execMaxOutputTokens: number; readBatches: { entryId: string; ranges: { startByte: number; endByte: number }[] }[] }
+    assert.equal(index.toolOutputTokenLimit, frozenReadOutputTokenLimit(f.ref))
+    assert.equal(index.execMaxOutputTokens, Math.ceil(index.toolOutputTokenLimit * 1.2))
+    assert.deepEqual(index.readBatches.map(batch => batch.entryId), ['required', 'required', 'absent'])
+    assert.deepEqual(index.readBatches.map(batch => batch.ranges.length), [2, 1, 1])
+    let call = 0
+    const items: FrozenNativeItem[] = []
+    for (const batch of index.readBatches) {
+      assert.ok(batch.ranges.length <= 2)
+      let cost = 0
+      for (let index = 0; index < batch.ranges.length; index++) {
+        const range = batch.ranges[index]!
+        const text = readFrozenRange(f.ref, f.args(range.startByte, range.endByte, batch.entryId)).response.contentItems[0].text
+        cost += Math.ceil(Buffer.byteLength(text, 'utf8') / 4)
+        items.push(f.item(range.startByte, range.endByte, `planned-${call++}`, batch.entryId))
+        if (index > 0) assert.equal(batch.ranges[index - 1]!.endByte, range.startByte, 'paired requested ranges are adjacent')
+        assert.ok(range.endByte - range.startByte <= FROZEN_READ_MAX_BYTES)
+      }
+      assert.ok(cost <= index.toolOutputTokenLimit)
+    }
+    assert.equal(JSON.parse(readFrozenRange(f.ref, f.args(0, 1, 'optional')).response.contentItems[0].text).text, 'o', 'optional entries remain readable on demand')
+    const proof = proveFrozenReads(f.ref, identity, items)
+    assert.deepEqual(proof.coveredEntryIds, ['required', 'required-alias', 'absent'])
+    verifyFrozenReadProof(f.ref, proof, identity)
+  } finally { f.close() }
+})
+
+test('frozen read plan falls back to a single range when paired actual replies exceed the current budget', () => {
+  const entryId = 'i'.repeat(FROZEN_READ_MAX_BYTES * 4 + 4096)
+  const f = fixture([{ id: entryId, label: 'large identity', kind: 'utf8', bytes: Buffer.alloc(FROZEN_READ_MAX_BYTES * 2, 0x78) }])
+  try {
+    const index = JSON.parse(frozenContextPrompt(f.ref)) as { toolOutputTokenLimit: number; readBatches: { entryId: string; ranges: { startByte: number; endByte: number }[] }[] }
+    assert.equal(index.readBatches.length, 2)
+    assert.deepEqual(index.readBatches.map(batch => batch.ranges.length), [1, 1])
+    const pairCost = index.readBatches.reduce((sum, batch) => {
+      const range = batch.ranges[0]!
+      const text = readFrozenRange(f.ref, f.args(range.startByte, range.endByte, batch.entryId)).response.contentItems[0].text
+      return sum + Math.ceil(Buffer.byteLength(text, 'utf8') / 4)
+    }, 0)
+    assert.ok(pairCost > index.toolOutputTokenLimit, 'the two actual serialized responses cannot share one batch')
   } finally { f.close() }
 })
 

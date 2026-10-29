@@ -87,16 +87,27 @@ export function assertFrozenBinding(ref: FrozenContextRef, expected: FrozenConte
     if (binding[key] !== expected[key]) stale(`frozen context ${key} differs from its exact request binding`)
 }
 
-/** 模型索引只有逻辑条目、内容身份和字节长度，不泄露控制面路径。 */
-export function frozenContextPrompt(ref: FrozenContextRef): string {
-  const manifest = readFrozenManifest(ref)
-  return JSON.stringify({ tool: FROZEN_READ_TOOL, contextDigest: ref.contextDigest, maxReadBytes: FROZEN_READ_MAX_BYTES, execMaxOutputTokens: frozenReadOutputTokenLimit(ref), entries: manifest.entries })
+type FrozenReadPlanRange = { startByte: number; endByte: number }
+type FrozenReadBatch = { entryId: string; ranges: FrozenReadPlanRange[] }
+
+function serializeFrozenRange(entry: FrozenEntry, args: FrozenReadArguments, bytes: Buffer): { arguments: FrozenReadArguments; response: FrozenToolResponse } {
+  const range = bytes.subarray(args.startByte, args.endByte)
+  let decodedStartByte = args.startByte, decodedEndByte = args.endByte
+  if (entry.kind === 'utf8') {
+    while (decodedStartByte > 0 && (bytes[decodedStartByte] & 0xc0) === 0x80) decodedStartByte--
+    while (decodedEndByte < bytes.length && (bytes[decodedEndByte] & 0xc0) === 0x80) decodedEndByte++
+  }
+  const expanded = decodedStartByte !== args.startByte || decodedEndByte !== args.endByte
+  const content = entry.kind === 'utf8' ? { text: new TextDecoder('utf-8', { fatal: true, ignoreBOM: expanded }).decode(bytes.subarray(decodedStartByte, decodedEndByte)),
+    ...(expanded ? { decodedStartByte, decodedEndByte } : {}) }
+    : entry.kind === 'binary' ? { base64: range.toString('base64') } : { absent: true }
+  const text = JSON.stringify({ ...args, kind: entry.kind, sha256: entry.sha256, byteLength: entry.byteLength, rangeSha256: sha(range), ...content })
+  return { arguments: { ...args }, response: { contentItems: [{ type: 'inputText', text }], success: true } }
 }
 
-/** 按冻结清单的真实元数据和最坏 JSON 转义，界定单个模型可见 inputText 的固定预算。 */
-export function frozenReadOutputTokenLimit(ref: FrozenContextRef): number {
+function frozenReadOutputTokenLimitForEntries(ref: FrozenContextRef, entries: readonly FrozenEntry[]): number {
   let maximumBytes = 1
-  for (const entry of readFrozenManifest(ref).entries) {
+  for (const entry of entries) {
     const args = { contextDigest: ref.contextDigest, entryId: entry.id, startByte: entry.byteLength, endByte: entry.byteLength }
     const metadata = { ...args, kind: entry.kind, sha256: entry.sha256, byteLength: entry.byteLength, rangeSha256: entry.sha256 }
     const rangeBytes = Math.min(entry.byteLength, FROZEN_READ_MAX_BYTES)
@@ -106,13 +117,61 @@ export function frozenReadOutputTokenLimit(ref: FrozenContextRef): number {
         : encode({ ...metadata, absent: true }).length
     maximumBytes = Math.max(maximumBytes, bytes)
   }
-  // Codex 0.160.0 charges ceil(inputText UTF-8 bytes / 4). Its host default also covers small-output headers.
   return Math.max(10_000, Math.ceil(maximumBytes / 4))
+}
+
+function frozenReadBatches(ref: FrozenContextRef, entries: readonly FrozenEntry[], tokenLimit: number): FrozenReadBatch[] {
+  const verifiedBytes = new Map<string, Buffer>(), plannedContent = new Set<string>(), batches: FrozenReadBatch[] = []
+  for (const entry of entries) {
+    if (!entry.required) continue
+    const contentKey = `${entry.kind}:${entry.sha256}:${entry.byteLength}`
+    if (plannedContent.has(contentKey)) continue
+    plannedContent.add(contentKey)
+    let bytes = verifiedBytes.get(entry.sha256)
+    if (!bytes) {
+      bytes = readFileSync(bytesPath(ref, entry.sha256))
+      if (bytes.length !== entry.byteLength || sha(bytes) !== entry.sha256) stale('frozen entry bytes differ from their immutable digest')
+      verifiedBytes.set(entry.sha256, bytes)
+    }
+    if (bytes.length !== entry.byteLength) stale('frozen entry bytes differ from their immutable digest')
+    const ranges: FrozenReadPlanRange[] = [], costs: number[] = []
+    for (let startByte = 0; entry.byteLength === 0 ? startByte === 0 : startByte < entry.byteLength;) {
+      const endByte = Math.min(entry.byteLength, startByte + FROZEN_READ_MAX_BYTES)
+      const args = { contextDigest: ref.contextDigest, entryId: entry.id, startByte, endByte }
+      const response = serializeFrozenRange(entry, args, bytes).response.contentItems[0].text
+      ranges.push({ startByte, endByte })
+      costs.push(Math.ceil(Buffer.byteLength(response, 'utf8') / 4))
+      if (entry.byteLength === 0) break
+      startByte = endByte
+    }
+    for (let index = 0; index < ranges.length;) {
+      const paired = ranges[index + 1] !== undefined && costs[index] + costs[index + 1] <= tokenLimit
+      batches.push({ entryId: entry.id, ranges: paired ? [ranges[index], ranges[index + 1]!] : [ranges[index]] })
+      index += paired ? 2 : 1
+    }
+  }
+  return batches
+}
+
+/** 模型索引只含冻结条目元数据与由冻结正文派生的有界读取计划，不泄露控制面路径。 */
+export function frozenContextPrompt(ref: FrozenContextRef): string {
+  const manifest = readFrozenManifest(ref)
+  const toolOutputTokenLimit = frozenReadOutputTokenLimitForEntries(ref, manifest.entries)
+  return JSON.stringify({ tool: FROZEN_READ_TOOL, contextDigest: ref.contextDigest, maxReadBytes: FROZEN_READ_MAX_BYTES,
+    toolOutputTokenLimit, execMaxOutputTokens: Math.ceil(toolOutputTokenLimit * 1.2), entries: manifest.entries,
+    readBatches: frozenReadBatches(ref, manifest.entries, toolOutputTokenLimit) })
+}
+
+/** 按冻结清单的真实元数据和最坏 JSON 转义，界定单个模型可见 inputText 的固定预算。 */
+export function frozenReadOutputTokenLimit(ref: FrozenContextRef): number {
+  const manifest = readFrozenManifest(ref)
+  // Codex 0.160.0 charges ceil(inputText UTF-8 bytes / 4); the exec allowance adds its existing 20% margin.
+  return frozenReadOutputTokenLimitForEntries(ref, manifest.entries)
 }
 
 export const frozenReadTool = {
   type: 'function', name: FROZEN_READ_TOOL,
-  description: 'Read immutable frozen context only. Read every required unique content fully before the final answer. Through exec, make one read per execution, set its first-line // @exec: {"max_output_tokens": N} with N = execMaxOutputTokens from the context index, and print the returned string verbatim using text(await tools.spex_read_frozen(...)). Byte ranges are end-exclusive. Continue with startByte equal to the response original endByte; decodedStartByte/decodedEndByte only describe UTF-8 display expansion and are never cursors. No paths, live files, shell, or network are available.',
+  description: 'Read immutable frozen context only. The index readBatches are a plan, not extra authorization: read every required unique content fully, using one exec per planned batch and at most its two listed adjacent ranges. Set each exec first-line // @exec: {"max_output_tokens": H} with H = execMaxOutputTokens from the index; call each listed read in order and print every returned string verbatim with its own text(await tools.spex_read_frozen(...)) call. Never join, wrap, summarize, or re-encode replies. Optional entries remain available for reads as needed. Byte ranges are end-exclusive. Continue with startByte equal to the response original endByte; decodedStartByte/decodedEndByte only describe UTF-8 display expansion and are never cursors. No paths, live files, shell, or network are available.',
   inputSchema: { type: 'object', properties: { contextDigest: { type: 'string' }, entryId: { type: 'string' }, startByte: { type: 'integer', minimum: 0 }, endByte: { type: 'integer', minimum: 0 } }, required: ['contextDigest', 'entryId', 'startByte', 'endByte'], additionalProperties: false },
 } as const
 
@@ -126,18 +185,7 @@ export function readFrozenRange(ref: FrozenContextRef, value: unknown): { argume
   if (!Number.isSafeInteger(args.startByte) || !Number.isSafeInteger(args.endByte) || args.startByte < 0 || args.endByte < args.startByte || args.endByte > entry.byteLength || args.endByte - args.startByte > FROZEN_READ_MAX_BYTES || (entry.byteLength > 0 && args.endByte === args.startByte)) stale('frozen reader range is invalid or exceeds its bounded response')
   const bytes = readFileSync(bytesPath(ref, entry.sha256))
   if (bytes.length !== entry.byteLength || sha(bytes) !== entry.sha256) stale('frozen entry bytes differ from their immutable digest')
-  const range = bytes.subarray(args.startByte, args.endByte)
-  let decodedStartByte = args.startByte, decodedEndByte = args.endByte
-  if (entry.kind === 'utf8') {
-    while (decodedStartByte > 0 && (bytes[decodedStartByte] & 0xc0) === 0x80) decodedStartByte--
-    while (decodedEndByte < bytes.length && (bytes[decodedEndByte] & 0xc0) === 0x80) decodedEndByte++
-  }
-  const expanded = decodedStartByte !== args.startByte || decodedEndByte !== args.endByte
-  const content = entry.kind === 'utf8' ? { text: new TextDecoder('utf-8', { fatal: true, ignoreBOM: expanded }).decode(bytes.subarray(decodedStartByte, decodedEndByte)),
-    ...(expanded ? { decodedStartByte, decodedEndByte } : {}) }
-    : entry.kind === 'binary' ? { base64: range.toString('base64') } : { absent: true }
-  const text = JSON.stringify({ ...args, kind: entry.kind, sha256: entry.sha256, byteLength: entry.byteLength, rangeSha256: sha(range), ...content })
-  return { arguments: { ...args }, response: { contentItems: [{ type: 'inputText', text }], success: true } }
+  return serializeFrozenRange(entry, args, bytes)
 }
 
 /** 在发送RPC回复前持久保存真实返回字节；RPC id不作为可恢复的调用身份。 */
