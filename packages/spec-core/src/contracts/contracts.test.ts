@@ -339,6 +339,7 @@ test('Vitest each注册不抹去同一TSX文件中的直接it标题', () => {
   for (const source of [
     "import { it } from 'vitest'; it.each([1])('AC-EXPORT-01 row %s', () => {});",
     "const IDS = ['AC-EXPORT-01']; IDS.each(() => {}); test(`${IDS[0]} candidate`, () => {});",
+    "import { it } from 'vitest'; const each = 'unrelated'; it[each](); it('AC-EXPORT-01 direct', () => {});",
   ]) {
     fake.set('tests/export.test.mjs', source)
     assert.ok(validateContractGraph(graph, { files: fake }).some((finding) => finding.code === 'missing-test-case' && finding.itemId === 'AC-EXPORT-01'), source)

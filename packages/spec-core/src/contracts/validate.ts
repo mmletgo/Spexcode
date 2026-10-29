@@ -106,7 +106,7 @@ function testCaseTitles(source: string): string[] {
       : ['CallExpression', 'OptionalCallExpression'].includes(node.type) && ['MemberExpression', 'OptionalMemberExpression'].includes(node.callee.type) ? node.callee.object
         : ['ForOfStatement', 'ForInStatement'].includes(node.type) && node.left.type !== 'VariableDeclaration' ? node.left : undefined
     for (const binding of writes(target)) {
-      const testModifier = ['CallExpression', 'OptionalCallExpression'].includes(node.type) && binding.test && ['only', 'skip', 'todo', 'each'].includes(node.callee.property?.name)
+      const testModifier = ['CallExpression', 'OptionalCallExpression'].includes(node.type) && binding.test && !node.callee.computed && ['only', 'skip', 'todo', 'each'].includes(node.callee.property?.name)
       if (!testModifier) mutated.add(binding)
     }
   }
