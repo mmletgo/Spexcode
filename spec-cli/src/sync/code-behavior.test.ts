@@ -22,9 +22,10 @@ import { parseParts } from '@spexcode/spec-core/contracts'
 import { canonicalContractFilterBindings, plantContractFilter } from '../contract-filter.js'
 import { writeManagedBlock } from '../harness-shim.js'
 import { composeAuthoredInput } from './author-input.js'
-import { readFrozenBehaviorContext } from '../../test/frozen-behavior-context.js'
+import { frozenBodyText, readFrozenBehaviorContext } from '../../test/frozen-behavior-context.js'
 import type { BodyReference } from '../../test/frozen-behavior-context.js'
 import type { CodeBehaviorAnalysis, CodeBehaviorKind } from './writeback-types.js'
+import { FROZEN_READ_MAX_BYTES, prepareFrozenPrompt, readFrozenManifest, readFrozenRange } from '../frozen-context.js'
 
 const fixturePath = new URL('../../test/fixtures/spec-sync/export-repo/', import.meta.url)
 const git = (root: string, ...args: string[]): string => execFileSync('/usr/bin/git', ['-C', root, ...args], { encoding: 'utf8', stdio: 'pipe', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }).trim()
@@ -46,18 +47,178 @@ function runner(kind: CodeBehaviorKind, patch?: (proposal: Record<string, unknow
   return async request => {
     let output: unknown
     if (request.purpose === 'code_behavior_analyze') {
-      const frozen = readFrozenBehaviorContext<{ changedPaths: string[] }>(request.prompt)
+      const frozen = readFrozenBehaviorContext<{ changedPaths: string[] }>(request)
       const proposal = { changes: frozen.changedPaths.map(path => ({ kind, paths: [path], affectedIds: ['RULE-EXPORT-05', 'AC-EXPORT-01'], ruleIds: ['RULE-EXPORT-05'], originalIntent: '成功返回非空结果并发布一次', previousBehavior: '完成任务返回副本', sourceBehavior: '完成任务返回副本与可观察扩展信息', deliveryBehavior: '前次交付保留副本与明确原意', evidence: `完整冻结源码/调用测试 ${path}`, counterexample: '完成同一任务两次不得发布两次' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
       patch?.(proposal, frozen); output = proposal
     } else {
       const reviewed = JSON.parse(request.prompt.split('待审分析:\n')[1]) as { analysisDigest: string; analysis: CodeBehaviorAnalysis }
-      const frozen = readFrozenBehaviorContext<{ changedPaths: string[] }>(request.prompt)
+      const frozen = readFrozenBehaviorContext<{ changedPaths: string[] }>(request)
       const review = { inputDigest: request.inputDigest, analysisDigest: reviewed.analysisDigest, verdict: 'accept', checkedPaths: frozen.changedPaths, checkedChangeIds: reviewed.analysis.changes.map(item => item.id), findings: [] }
       reviewPatch?.(review); output = review
     }
     return { sessionId: `session-${request.purpose}`, threadId: `thread-${request.purpose}`, turnId: 'turn-1', output, resultDigest: contentHash(JSON.stringify(output)) }
   }
 }
+
+test('未改可读正文不能因整体打包变为必读，仍按冻结原字节可选读取', async t => {
+  const f = await fixture(t)
+  const optional = '\uFEFFUNRELATED-FROZEN-BODY\n' + '不相关只读正文🙂\n'.repeat(60000)
+  for (const root of [f.root, f.delivery]) {
+    mkdirSync(join(root, 'docs'))
+    writeFileSync(join(root, 'docs/unrelated.txt'), optional)
+    git(root, 'add', 'docs'); git(root, 'commit', '-m', 'seed unchanged readable context')
+  }
+  const before = await captureInputSnapshot(f.root), delivered = await captureInputSnapshot(f.delivery)
+  const changedSource = f.source + '\n// changed-code-required\n'
+  writeFileSync(join(f.root, 'src/export.js'), changedSource)
+  const initial = await f.input(), baseline = { ...initial.baseline!, sourceInput: before, verifiedDelivery: delivered }
+  const input = { ...initial, baseline, composed: composeInputSnapshots(initial.snapshot, baseline, { retainConflicts: true }).composed!, plan: { ...initial.plan, readPaths: [...initial.plan.readPaths, 'docs'] } }
+  let captured = false
+  await assert.rejects(analyzeCodeBehavior(input, async request => {
+    captured = true
+    const prepared = prepareFrozenPrompt(request, { directory: join(f.root, '..', 'frozen-demand'), binding: { attemptId: 'demand-probe', policyDigest: input.policyDigest } })
+    assert.ok(prepared.frozenContext)
+    const ref = prepared.frozenContext, manifest = readFrozenManifest(ref)
+    const requiredText: string[] = []
+    for (const entry of manifest.entries.filter(entry => entry.required && entry.kind === 'utf8')) {
+      for (let startByte = 0; startByte < entry.byteLength; startByte += FROZEN_READ_MAX_BYTES) {
+        const result = readFrozenRange(ref, { contextDigest: ref.contextDigest, entryId: entry.id, startByte, endByte: Math.min(startByte + FROZEN_READ_MAX_BYTES, entry.byteLength) })
+        requiredText.push((JSON.parse(result.response.contentItems[0].text) as { text: string }).text)
+      }
+    }
+    assert.equal(requiredText.some(text => text.includes('UNRELATED-FROZEN-BODY')), false, '未改且未被契约引用的可读正文不应进入必读内容')
+    assert.ok(requiredText.some(text => text.includes('changed-code-required')), '真实变更源码必须完整保留在必读内容')
+    const optionalEntry = manifest.entries.find(entry => entry.id === contentHash(Buffer.from(optional, 'utf8')))
+    assert.ok(optionalEntry, '可选正文必须仍完整存在于同一冻结清单')
+    assert.equal(optionalEntry.required, false)
+    writeFileSync(join(f.root, 'docs/unrelated.txt'), 'live bytes must not replace frozen data')
+    const first = readFrozenRange(ref, { contextDigest: ref.contextDigest, entryId: optionalEntry.id, startByte: 0, endByte: Math.min(FROZEN_READ_MAX_BYTES, optionalEntry.byteLength) })
+    assert.ok((JSON.parse(first.response.contentItems[0].text) as { text: string }).text.includes('UNRELATED-FROZEN-BODY'))
+    throw new Error('frozen-demand-probe-complete')
+  }), /frozen-demand-probe-complete/)
+  assert.equal(captured, true)
+})
+
+test('第二份独立Git仓库按同一角色冻结删除、前后版本、中文BOM与同字节多角色', async t => {
+  const parent = mkdtempSync(join(tmpdir(), 'sync-behavior-role-')), root = join(parent, 'repo'), delivery = join(parent, 'delivery')
+  mkdirSync(root); cpSync(fixturePath, root, { recursive: true })
+  const deleted = '\uFEFF删除前的中文🙂\r\n', shared = 'shared-role-bytes\n', orphan = 'orphan unchanged test\n', changed = '\n// SECOND-REPO-CHANGED\n'
+  const boundaryBOM = 'a'.repeat(FROZEN_READ_MAX_BYTES - 1) + '\uFEFF正文\r\n'
+  mkdirSync(join(root, 'docs')); mkdirSync(join(root, 'extra'))
+  writeFileSync(join(root, 'docs/removed.txt'), deleted)
+  writeFileSync(join(root, 'docs/boundary-bom.txt'), boundaryBOM)
+  writeFileSync(join(root, 'docs/role-a.txt'), shared); writeFileSync(join(root, 'extra/role-b.txt'), shared)
+  writeFileSync(join(root, 'tests/orphan.test.mjs'), orphan)
+  git(root, 'init', '-b', 'main'); git(root, 'config', 'user.name', 'role fixture'); git(root, 'config', 'user.email', 'role@example.invalid'); git(root, 'add', '.'); git(root, 'commit', '-m', 'second repo base')
+  git(root, 'switch', '-c', 'source'); git(root, 'worktree', 'add', '-b', 'delivery', delivery, 'HEAD')
+  t.after(() => rmSync(parent, { recursive: true, force: true }))
+  const before = await captureInputSnapshot(root), delivered = await captureInputSnapshot(delivery)
+  const source = readFileSync(join(root, 'src/export.js'), 'utf8')
+  writeFileSync(join(root, 'src/export.js'), source + changed); rmSync(join(root, 'docs/removed.txt'))
+  const raw = readFileSync(join(root, '.spec/export/export-contract/spec.md'), 'utf8')
+  const snapshot = await captureInputSnapshot(root)
+  const baseline: BaselinePair = { id: 'pair-second', repositoryId: snapshot.source.repositoryId, source: before.source, sourceInput: before, verifiedDelivery: delivered, coveredScope: { paths: ['src', '.spec', 'tests', 'docs', 'extra'], contractIds: [], flowIds: [] }, receiptId: 'receipt-second', settledAtMs: 1 }
+  const composed = composeInputSnapshots(snapshot, baseline, { retainConflicts: true }).composed!
+  const plan = { version: 'sync-coordinator-v1' as const, intentNodeId: 'export-contract', targets: [{ nodeId: 'export-contract', path: '.spec/export/export-contract/spec.md' }], readPaths: ['src', '.spec', 'tests', 'docs', 'extra'], writePaths: ['src', '.spec', 'tests', 'docs', 'extra'], facts: [{ source: 'decision:EXPORT-POLICY', text: raw }], verifications: [], mandatoryTests: [{ verificationId: 'VERIFY-EXPORT-01', testPath: 'tests/export.test.mjs', testId: 'AC-EXPORT-01' }] }
+  const input: CodeBehaviorInput = { snapshot, baseline, composed, readSetDigest: 'readset-second', policyDigest: 'policy-second', requestKey: 'behavior-second', timeoutMs: 10000, plan }
+  const referenced = readFileSync(join(root, 'tests/export.test.mjs'), 'utf8')
+  await assert.rejects(analyzeCodeBehavior(input, async request => {
+    const prepared = prepareFrozenPrompt(request, { directory: join(parent, 'frozen'), binding: { attemptId: 'second-attempt', policyDigest: input.policyDigest } })
+    const manifest = readFrozenManifest(prepared.frozenContext!)
+    const wire = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as { bodyIndex: Record<string, { required: boolean; entryId: string }>; oldSource: [string, BodyReference][]; newSource: [string, BodyReference][] }
+    const entryFor = (text: string) => manifest.entries.find(entry => entry.id === wire.bodyIndex[contentHash(Buffer.from(text, 'utf8'))].entryId)
+    const required = entryFor(source + changed), previous = entryFor(source), removed = entryFor(deleted), optional = entryFor(shared), unused = entryFor(orphan), testEntry = entryFor(referenced)
+    assert.equal(required?.required, true); assert.equal(previous?.required, true)
+    assert.notEqual(new Map(wire.newSource).get('src/export.js')?.bodyRef, new Map(wire.oldSource).get('src/export.js')?.bodyRef)
+    assert.equal(removed?.required, true); assert.equal(removed!.label.includes('删除前的中文'), false)
+    assert.equal(optional?.required, false); assert.equal(manifest.entries.filter(entry => entry.sha256 === optional!.sha256).length, 1)
+    assert.equal(unused?.required, false); assert.equal(testEntry?.required, true)
+    const oldShared = wire.oldSource.filter(([path]) => path === 'docs/role-a.txt' || path === 'extra/role-b.txt')
+    assert.equal(oldShared.length, 2); assert.equal(oldShared[0][1].bodyRef, oldShared[1][1].bodyRef); assert.equal(wire.bodyIndex[oldShared[0][1].bodyRef].required, false)
+    const deletedRef = contentHash(Buffer.from(deleted, 'utf8'))
+    assert.equal(new Map(wire.oldSource).get('docs/removed.txt')?.bodyRef, deletedRef)
+    assert.equal(wire.newSource.some(([path]) => path === 'docs/removed.txt'), false)
+    assert.equal(frozenBodyText(request, deletedRef), deleted)
+    const response = readFrozenRange(prepared.frozenContext!, { contextDigest: prepared.frozenContext!.contextDigest, entryId: removed!.id, startByte: 0, endByte: removed!.byteLength }).response
+    assert.equal((JSON.parse((JSON.parse(response.contentItems[0].text) as { text: string }).text) as Record<string, string>)[deletedRef], deleted, '真实工具回包解码仍保留BOM与CRLF')
+    const boundary = entryFor(boundaryBOM)!, chunks: string[] = []
+    for (let startByte = 0; startByte < boundary.byteLength; startByte += FROZEN_READ_MAX_BYTES) chunks.push((JSON.parse(readFrozenRange(prepared.frozenContext!, { contextDigest: prepared.frozenContext!.contextDigest, entryId: boundary.id, startByte, endByte: Math.min(startByte + FROZEN_READ_MAX_BYTES, boundary.byteLength) }).response.contentItems[0].text) as { text: string }).text)
+    assert.equal(JSON.parse(chunks.join('')), boundaryBOM, '每个对齐分段开头的BOM也须完整还原')
+    assert.equal(request.prompt.includes(deleted), false); assert.equal(request.prompt.includes('SECOND-REPO-CHANGED'), false)
+    assert.equal(prepared.frozenContext!.contextDigest.length, 64)
+    throw new Error('second-repo-role-probe-complete')
+  }), /second-repo-role-probe-complete/)
+})
+
+test('raw-only规格的精确、目录和glob引用保持必读，未改二进制按需保留完整对象', async t => {
+  const f = await fixture(t), specPath = '.spec/export/linked-raw/spec.md'
+  const raw = '---\ntitle: 原始引用\nstatus: active\ncode:\n  - docs/exact.txt#claim\nrelated:\n  - tests/stable/\n  - docs/glob/*.txt\n---\n# 原始引用\n\n## raw source\n\n保持引用的真实行为与测试。\n'
+  const scalar = '---\ntitle: 标量引用\nstatus: active\ncode: docs/scalar.txt#claim\nrelated: tests/scalar/\n---\n# 标量引用\n\n## raw source\n\n保持标量路径引用。\n'
+  const referenced = { 'docs/exact.txt': 'exact-reference\n', 'tests/stable/unchanged.test.mjs': 'directory-reference\n', 'docs/glob/readme.txt': 'glob-reference\n', 'docs/scalar.txt': 'scalar-code-reference\n', 'tests/scalar/unchanged.test.mjs': 'scalar-related-reference\n' }
+  const binary = Buffer.alloc(600000, 0xff)
+  for (const root of [f.root, f.delivery]) {
+    mkdirSync(join(root, '.spec/export/linked-raw'), { recursive: true }); writeFileSync(join(root, specPath), raw)
+    mkdirSync(join(root, '.spec/export/scalar-raw'), { recursive: true }); writeFileSync(join(root, '.spec/export/scalar-raw/spec.md'), scalar)
+    for (const [path, text] of Object.entries(referenced)) { mkdirSync(join(root, path, '..'), { recursive: true }); writeFileSync(join(root, path), text) }
+    mkdirSync(join(root, 'assets')); writeFileSync(join(root, 'assets/unrelated.bin'), binary)
+    git(root, 'add', '.'); git(root, 'commit', '-m', 'raw-only references and optional binary')
+  }
+  const before = await captureInputSnapshot(f.root), delivered = await captureInputSnapshot(f.delivery)
+  writeFileSync(join(f.root, 'src/export.js'), f.source + '\n// raw-only demand probe\n')
+  const initial = await f.input(), baseline = { ...initial.baseline!, sourceInput: before, verifiedDelivery: delivered }
+  const input = { ...initial, baseline, composed: composeInputSnapshots(initial.snapshot, baseline, { retainConflicts: true }).composed!, plan: { ...initial.plan, readPaths: [...initial.plan.readPaths, 'docs', 'assets'] } }
+  await assert.rejects(analyzeCodeBehavior(input, async request => {
+    const prepared = prepareFrozenPrompt(request, { directory: join(f.root, '..', 'frozen-raw-only'), binding: { attemptId: 'raw-only-probe', policyDigest: input.policyDigest } })
+    const ref = prepared.frozenContext!, manifest = readFrozenManifest(ref)
+    const wire = JSON.parse(request.prompt.split('冻结三方输入:\n')[1]) as { bodyIndex: Record<string, { entryId: string }>; nonTextFiles: { path: string; bodyRef: string; content?: string; encoding: string }[] }
+    for (const text of [raw, scalar, ...Object.values(referenced)]) assert.equal(manifest.entries.find(entry => entry.id === wire.bodyIndex[contentHash(Buffer.from(text))].entryId)?.required, true, 'raw-only和其真实引用全文必读')
+    assert.equal(new Set([raw, scalar, ...Object.values(referenced)].map(text => wire.bodyIndex[contentHash(Buffer.from(text))].entryId)).size, 1, '必读小正文共享一个运输entry，避免逐文件Native往返')
+    const file = wire.nonTextFiles.find(file => file.path === 'assets/unrelated.bin')!
+    assert.equal(file.encoding, 'base64'); assert.equal(file.content, undefined)
+    const entry = manifest.entries.find(entry => entry.id === file.bodyRef)!
+    assert.equal(entry.required, false)
+    assert.ok(Buffer.byteLength(request.prompt) < binary.length, '未改二进制不能继续把必读元数据撑大')
+    const chunks: string[] = []
+    for (let startByte = 0; startByte < entry.byteLength; startByte += FROZEN_READ_MAX_BYTES) chunks.push((JSON.parse(readFrozenRange(ref, { contextDigest: ref.contextDigest, entryId: entry.id, startByte, endByte: Math.min(startByte + FROZEN_READ_MAX_BYTES, entry.byteLength) }).response.contentItems[0].text) as { text: string }).text)
+    assert.deepEqual(Buffer.from(JSON.parse(chunks.join('')) as string, 'base64'), binary, '真实冻结工具完整还原非文本原字节')
+    throw new Error('raw-only-demand-probe-complete')
+  }), /raw-only-demand-probe-complete/)
+})
+
+test('未读可选正文被事实或checkedPaths引用时拒绝，完整读取后可通过', async t => {
+  const f = await fixture(t), path = 'docs/optional.txt', optional = 'OPTIONAL-UNREAD-BODY\n'
+  for (const root of [f.root, f.delivery]) {
+    mkdirSync(join(root, 'docs')); writeFileSync(join(root, path), optional)
+    git(root, 'add', 'docs'); git(root, 'commit', '-m', 'optional readable body')
+  }
+  writeFileSync(join(f.root, 'src/export.js'), `${f.source}\n// optional-read-probe\n`)
+  const before = await captureInputSnapshot(f.root), delivered = await captureInputSnapshot(f.delivery)
+  const initial = await f.input(), baseline = { ...initial.baseline!, sourceInput: before, verifiedDelivery: delivered }
+  const input = { ...initial, baseline, composed: composeInputSnapshots(initial.snapshot, baseline, { retainConflicts: true }).composed!, plan: { ...initial.plan, readPaths: [...initial.plan.readPaths, 'docs'] } }
+  const entryId = contentHash(Buffer.from(optional, 'utf8'))
+  const proofFor = (purpose: string, covered: string[]) => ({ contextDigest: 'a'.repeat(64), threadId: `thread-${purpose}`, turnId: 'turn-1', receipts: [], coveredEntryIds: covered, historyDigest: 'b'.repeat(64) })
+  const fact = { source: `code:${path}#note`, text: '可选正文事实' }
+  await assert.rejects(analyzeCodeBehavior(input, request => runner('refactor', proposal => { proposal.facts = [fact] })(request)), /可选正文未在该精确turn完整读取: docs\/optional\.txt/)
+  await assert.rejects(analyzeCodeBehavior(input, request => runner('refactor', undefined, review => { review.checkedPaths = [...review.checkedPaths as string[], path] })(request)), /可选正文未在该精确turn完整读取: docs\/optional\.txt/)
+  await assert.rejects(analyzeCodeBehavior(input, async request => {
+    const result = await runner('refactor', undefined, review => { review.checkedPaths = [...review.checkedPaths as string[], path] })(request)
+    return { ...result, frozenReadProof: proofFor('other-purpose', [entryId]) }
+  }), /可选正文未在该精确turn完整读取: docs\/optional\.txt/)
+  await assert.rejects(analyzeCodeBehavior(input, async request => {
+    const result = await runner('refactor', proposal => { proposal.facts = [fact] })(request)
+    return { ...result, frozenReadProof: proofFor(request.purpose, request.purpose === 'code_behavior_analyze' ? [entryId] : []) }
+  }), /可选正文未在该精确turn完整读取: docs\/optional\.txt/, '分析已读不能代替独审重读其所批准事实')
+  await assert.rejects(analyzeCodeBehavior(input, async request => {
+    const result = await runner('refactor', undefined, review => { review.checkedPaths = [...review.checkedPaths as string[], path] })(request)
+    return { ...result, frozenReadProof: proofFor(request.purpose, []) }
+  }), /可选正文未在该精确turn完整读取: docs\/optional\.txt/)
+  const accepted = await analyzeCodeBehavior(input, async request => {
+    const result = await runner('refactor', proposal => { proposal.facts = [fact] }, review => { review.checkedPaths = [...new Set([...(review.checkedPaths as string[]), path])] })(request)
+    return { ...result, frozenReadProof: proofFor(request.purpose, [entryId]) }
+  })
+  assert.equal(accepted.reviewPassed, true)
+  assert.equal(accepted.facts.some(item => item.source === fact.source && item.text === fact.text), true)
+})
 
 function freezeSelection(snapshot: CodeBehaviorInput['snapshot'], bindings: FrozenBaselineSelection['bindings']): FrozenBaselineSelection {
   const body = { version: 'sync-baseline-selection-v1' as const, source: snapshot.source, bindings }
@@ -92,7 +253,7 @@ test('真实runner的冻结三方JSON共享正文引用且逐字段还原旧输�
     if (request.purpose === 'code_behavior_analyze') {
       const frozen = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as {
         textEncoding: string
-        textBodies: Record<string, string>
+        bodyIndex: Record<string, { entryId: string; kind: string; sha256: string; byteLength: number; contentByteLength: number; required: boolean }>
         intentArtifactFiles: { bodyRef: string; path: string; mode: string; oid: string; digest: string }[]
         oldSource: [string, BodyReference][]
         newSource: [string, BodyReference][]
@@ -101,19 +262,30 @@ test('真实runner的冻结三方JSON共享正文引用且逐字段还原旧输�
         composedFiles: [string, BodyReference][]
         controlledBeforeFiles: [string, BodyReference][]
       }
-      assert.equal(frozen.textEncoding, 'sha256-body-ref-v1')
+      assert.equal(frozen.textEncoding, 'sha256-body-entry-v2')
       const encodedViews = ['oldSource', 'newSource', 'authorBaseline', 'verifiedDelivery', 'composedFiles', 'controlledBeforeFiles'].flatMap(key => frozen[key as keyof typeof frozen] as [string, BodyReference][])
       const bodyRefs = encodedViews.map(([, value]) => value.bodyRef)
-      const duplicateBytes = [...new Set(bodyRefs)].reduce((total, bodyRef) => total + Math.max(0, bodyRefs.filter(candidate => candidate === bodyRef).length - 1) * Buffer.byteLength(frozen.textBodies[bodyRef]), 0)
-      const expandedViews = ['oldSource', 'newSource', 'authorBaseline', 'verifiedDelivery', 'composedFiles', 'controlledBeforeFiles'].map(key => [key, (frozen[key as keyof typeof frozen] as [string, BodyReference][]).map(([path, ref]) => [path, frozen.textBodies[ref.bodyRef]])])
-      const wireTextBytes = Buffer.byteLength(JSON.stringify({ views: encodedViews, textBodies: frozen.textBodies, intentArtifactFiles: frozen.intentArtifactFiles }))
+      const duplicateBytes = [...new Set(bodyRefs)].reduce((total, bodyRef) => total + Math.max(0, bodyRefs.filter(candidate => candidate === bodyRef).length - 1) * Buffer.byteLength(frozenBodyText(request, bodyRef)), 0)
+      const expandedViews = ['oldSource', 'newSource', 'authorBaseline', 'verifiedDelivery', 'composedFiles', 'controlledBeforeFiles'].map(key => [key, (frozen[key as keyof typeof frozen] as [string, BodyReference][]).map(([path, ref]) => [path, frozenBodyText(request, ref.bodyRef)])])
+      const wireTextBytes = Buffer.byteLength(JSON.stringify({ views: encodedViews, bodyIndex: frozen.bodyIndex, intentArtifactFiles: frozen.intentArtifactFiles }))
       const logicalTextBytes = Buffer.byteLength(JSON.stringify({ views: expandedViews, intentArtifactFiles: [] }))
-      t.diagnostic(JSON.stringify({ nativePurpose: request.purpose, textEncoding: frozen.textEncoding, viewEntries: bodyRefs.length, distinctBodies: new Set(bodyRefs).size, uniqueBodyBytes: Object.values(frozen.textBodies).reduce((sum, text) => sum + Buffer.byteLength(text), 0), duplicateBytes, wireTextBytes, logicalTextBytes }))
-      assert.deepEqual(Object.keys(frozen.textBodies).sort(), [...new Set(bodyRefs)].sort())
+      t.diagnostic(JSON.stringify({ nativePurpose: request.purpose, textEncoding: frozen.textEncoding, viewEntries: bodyRefs.length, distinctBodies: new Set(bodyRefs).size, uniqueBodyBytes: Object.values(frozen.bodyIndex).reduce((sum, locator) => sum + locator.contentByteLength, 0), duplicateBytes, wireTextBytes, logicalTextBytes }))
+      assert.deepEqual(Object.keys(frozen.bodyIndex).sort(), [...new Set(bodyRefs)].sort())
       assert.ok(wireTextBytes < logicalTextBytes, '文本wire体积应随唯一正文数量增长，而非随视图重复次数增长')
-      for (const [bodyRef, text] of Object.entries(frozen.textBodies)) assert.equal(contentHash(Buffer.from(text, 'utf8')), bodyRef)
+      for (const [bodyRef, locator] of Object.entries(frozen.bodyIndex)) {
+        const text = frozenBodyText(request, bodyRef)
+        assert.equal(contentHash(Buffer.from(text, 'utf8')), bodyRef)
+        const entry = request.frozenEntries!.find(entry => entry.id === locator.entryId)!
+        assert.equal(entry.kind, 'utf8')
+        if (entry.kind !== 'utf8') assert.fail('正文运输entry必须是UTF8')
+        assert.equal(locator.kind, 'utf8')
+        assert.equal(locator.sha256, contentHash(Buffer.from(entry.text)))
+        assert.equal(locator.byteLength, Buffer.byteLength(entry.text))
+        assert.equal(locator.contentByteLength, Buffer.byteLength(text))
+        if (locator.contentByteLength > 24) assert.equal(request.prompt.includes(text), false)
+      }
       assert.equal(frozen.intentArtifactFiles.length, 0)
-      const expanded = readFrozenBehaviorContext<Record<string, unknown> & { changedPaths: string[]; oldSource: [string, string][]; newSource: [string, string][]; authorBaseline: [string, string][]; verifiedDelivery: [string, string][]; composedFiles: [string, string][]; controlledBeforeFiles: [string, string][]; intentArtifactFiles: { path: string; mode: string; oid: string; digest: string; text: string }[] }>(request.prompt)
+      const expanded = readFrozenBehaviorContext<Record<string, unknown> & { changedPaths: string[]; oldSource: [string, string][]; newSource: [string, string][]; authorBaseline: [string, string][]; verifiedDelivery: [string, string][]; composedFiles: [string, string][]; controlledBeforeFiles: [string, string][]; intentArtifactFiles: { path: string; mode: string; oid: string; digest: string; text: string }[] }>(request)
       assert.deepEqual(expanded.oldSource, expectedOld)
       assert.deepEqual(expanded.newSource, expectedNew)
       assert.deepEqual(expanded.authorBaseline, expectedOld)
@@ -144,9 +316,9 @@ test('history受控before正文引用可还原且authorBaseline保留原冻结�
   const composed = composeControlledRequest(snapshot, composeInputSnapshots(snapshot, null).composed!, requestBlob).composed!
   const prepared = await f.input(), input: CodeBehaviorInput = { ...prepared, snapshot, baseline: null, composed }
   const analysis = await analyzeCodeBehavior(input, async request => {
-    const wire = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as { textEncoding: string; textBodies: Record<string, string>; controlledBeforeFiles: [string, BodyReference][] }
-    assert.equal(wire.textEncoding, 'sha256-body-ref-v1')
-    const context = readFrozenBehaviorContext<{ changedPaths: string[]; authorBaseline: [string, string][]; oldSource: [string, string][]; newSource: [string, string][]; verifiedDelivery: [string, string][]; controlledBeforeFiles: [string, string][] }>(request.prompt)
+    const wire = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as { textEncoding: string; bodyIndex: Record<string, { required: boolean }>; controlledBeforeFiles: [string, BodyReference][] }
+    assert.equal(wire.textEncoding, 'sha256-body-entry-v2')
+    const context = readFrozenBehaviorContext<{ changedPaths: string[]; authorBaseline: [string, string][]; oldSource: [string, string][]; newSource: [string, string][]; verifiedDelivery: [string, string][]; controlledBeforeFiles: [string, string][] }>(request)
     assert.ok(context.changedPaths.includes(path))
     assert.equal(new Map(context.controlledBeforeFiles).get(path), controlledBefore)
     assert.equal(new Map(context.authorBaseline).get(path), controlledBefore)
@@ -154,7 +326,8 @@ test('history受控before正文引用可还原且authorBaseline保留原冻结�
     assert.equal(new Map(context.verifiedDelivery).get(path), controlledBefore)
     assert.equal(new Map(context.newSource).get(path), before)
     const beforeRef = wire.controlledBeforeFiles.find(([candidate]) => candidate === path)![1].bodyRef
-    assert.equal(wire.textBodies[beforeRef], controlledBefore)
+    assert.equal(frozenBodyText(request, beforeRef), controlledBefore)
+    assert.equal(wire.bodyIndex[beforeRef].required, true)
     return runner('refactor')(request)
   })
   assert.equal(analysis.reviewPassed, true)
@@ -183,8 +356,8 @@ test('canonical author-clean projection补足原始快照与clean OID全文关�
   const plan: CodeBehaviorInput['plan'] = { version: 'sync-coordinator-v1', intentNodeId: 'export-contract', targets: [{ nodeId: 'export-contract', path: specPath }], readPaths: [path, specPath], writePaths: [path, specPath], facts: [], verifications: [], mandatoryTests: [] }
   const input: CodeBehaviorInput = { snapshot, baseline: null, baselineSelection: selection, composed, readSetDigest: 'canonical-projection-read', policyDigest: 'canonical-projection-policy', requestKey: 'canonical-projection-dedup', timeoutMs: 10000, plan }
   const analysis = await analyzeCodeBehavior(input, async request => {
-    const wire = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as { textBodies: Record<string, string>; authorByteProjections: { snapshotId: string; path: string; before: { path: string; mode: string; oid: string; digest: string; bodyRef: string }; after: { path: string; mode: string; oid: string; digest: string; bodyRef: string } }[] }
-    const frozen = readFrozenBehaviorContext<{ newSource: [string, string][]; composedFiles: [string, string][]; compositionEvidence: { paths: { path: string; source: { oid: string } | null }[] }; authorByteProjections: { snapshotId: string; path: string; before: { path: string; mode: string; oid: string; digest: string; text: string }; after: { path: string; mode: string; oid: string; digest: string; text: string } }[] }>(request.prompt)
+    const wire = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as { bodyIndex: Record<string, { byteLength: number }>; authorByteProjections: { snapshotId: string; path: string; before: { path: string; mode: string; oid: string; digest: string; bodyRef: string }; after: { path: string; mode: string; oid: string; digest: string; bodyRef: string } }[] }
+    const frozen = readFrozenBehaviorContext<{ newSource: [string, string][]; composedFiles: [string, string][]; compositionEvidence: { paths: { path: string; source: { oid: string } | null }[] }; authorByteProjections: { snapshotId: string; path: string; before: { path: string; mode: string; oid: string; digest: string; text: string }; after: { path: string; mode: string; oid: string; digest: string; text: string } }[] }>(request)
     assert.equal(new Map(frozen.newSource).get(path), rawText)
     assert.equal(new Map(frozen.composedFiles).get(path), cleanText)
     assert.equal(frozen.compositionEvidence.paths.find(item => item.path === path)!.source!.oid, projection.after.oid)
@@ -192,14 +365,14 @@ test('canonical author-clean projection补足原始快照与clean OID全文关�
     const projected = wire.authorByteProjections.find(item => item.snapshotId === snapshot.id && item.path === path)!
     for (const [wireEntry, expected] of [[projected.before, projection.before], [projected.after, projection.after]] as const) {
       assert.equal(wireEntry.bodyRef, contentHash(Buffer.from(expected.oid === projection.before.oid ? rawText : cleanText, 'utf8')))
-      assert.equal(wire.textBodies[wireEntry.bodyRef], expected.oid === projection.before.oid ? rawText : cleanText)
+      assert.equal(frozenBodyText(request, wireEntry.bodyRef), expected.oid === projection.before.oid ? rawText : cleanText)
       for (const key of ['path', 'mode', 'oid', 'digest'] as const) assert.equal(wireEntry[key], expected[key])
     }
     return runner('refactor', proposal => { proposal.changes = (proposal.changes as { affectedIds: string[]; ruleIds: string[] }[]).map(change => ({ ...change, affectedIds: [], ruleIds: [] })) })(request)
   })
   assert.equal(analysis.reviewPassed, true)
   const excludedAnalysis = await analyzeCodeBehavior({ ...input, plan: { ...plan, readPaths: [specPath] } }, async request => {
-    const frozen = readFrozenBehaviorContext<{ readablePaths: { path: string; snapshots: string[] }[]; newSource: [string, string][]; composedFiles: [string, string][]; authorByteProjections: unknown[] }>(request.prompt)
+    const frozen = readFrozenBehaviorContext<{ readablePaths: { path: string; snapshots: string[] }[]; newSource: [string, string][]; composedFiles: [string, string][]; authorByteProjections: unknown[] }>(request)
     assert.deepEqual(frozen.authorByteProjections, [])
     assert.ok(!frozen.readablePaths.some(item => item.path === path), 'readPaths排除AGENTS时不能增加该路径的正文读取授权')
     assert.ok(!frozen.newSource.some(([candidate]) => candidate === path))
@@ -227,7 +400,7 @@ test('精确all-null选择保留HEAD差量基准，只读上下文不造新增�
   const input: CodeBehaviorInput = { ...prepared, baseline: null, baselineSelection, composed: composeInputSnapshots(prepared.snapshot, baselineSelection, { executionPaths: paths.filter(path => !path.startsWith('docs/') && path !== 'package-lock.json'), contextPaths: ['docs', 'package-lock.json'] }).composed!, plan: { ...prepared.plan, readPaths: [...prepared.plan.readPaths, 'docs', 'package-lock.json'], sourcePaths: ['src'] } }
   const changed = ['docs/added.md', 'docs/changed.md', 'docs/deleted.md', unowned], native = runner('allowed_change', proposal => { proposal.newNodes = [{ codePath: unowned, parentNodeId: 'export-contract', basis: '导出任务的可见反馈模块' }] })
   const analysis = await analyzeCodeBehavior(input, async request => {
-    const context = readFrozenBehaviorContext<NonTextContext & { requiredChangedPaths: string[]; unownedSourcePaths: string[] }>(request.prompt)
+    const context = readFrozenBehaviorContext<NonTextContext & { requiredChangedPaths: string[]; unownedSourcePaths: string[] }>(request)
     assert.deepEqual(context.changedPaths, changed); assert.deepEqual(context.requiredChangedPaths, changed); assert.deepEqual(context.unownedSourcePaths, [unowned])
     assert.ok(unchanged.every(path => context.newSource.some(([candidate]) => candidate === path) && !context.changedPaths.includes(path)))
     assert.equal(new Map(context.oldSource).get('docs/deleted.md'), 'committed docs/deleted.md\n')
@@ -274,7 +447,7 @@ test('all-null裁决只从原完整独审composed图恢复所选AC范围，当�
     proposal.acceptanceChanges = [{ id, ruleIds: ['RULE-EXPORT-02'], source: proposalSource, reason: '仅按精确所选filter政策更新验收' }]
   })
   const analysis = await analyzeCodeBehavior(current, async dispatch => {
-    const frozen = readFrozenBehaviorContext<{ verifiedDelivery: unknown[]; contractItems: { previous: unknown[]; current: { id: string; covers?: string[] }[] } }>(dispatch.prompt)
+    const frozen = readFrozenBehaviorContext<{ verifiedDelivery: unknown[]; contractItems: { previous: unknown[]; current: { id: string; covers?: string[] }[] } }>(dispatch)
     assert.deepEqual(frozen.verifiedDelivery, []); assert.deepEqual(frozen.contractItems.previous, [])
     assert.ok(frozen.contractItems.current.find(item => item.id === 'AC-EXPORT-03')!.covers!.includes('RULE-EXPORT-02'))
     return proposalFor('AC-EXPORT-02')(dispatch)
@@ -308,7 +481,7 @@ test('精确all-null冷启动的binary和symlink具有完整可读字节，不�
   const contexts: NonTextContext[] = [], native = runner('refactor', proposal => { proposal.changes = (proposal.changes as object[]).map(change => ({ ...change, affectedIds: [], ruleIds: [] })) })
   const analysis = await analyzeCodeBehavior(input, async request => {
     assert.ok(!request.prompt.includes('DO_NOT_EXPOSE_PRIVATE_BYTES') && !request.prompt.includes('DO_NOT_FOLLOW_LINK_TARGET'))
-    const context = readFrozenBehaviorContext<NonTextContext>(request.prompt)
+    const context = readFrozenBehaviorContext<NonTextContext>(request)
     contexts.push(context)
     return native(request)
   })
@@ -340,9 +513,9 @@ test('真实非文本变化和删除保持三方与intent artifact字节身份�
   const input: CodeBehaviorInput = { ...prepared, baseline: null, baselineSelection, composed: composeInputSnapshots(prepared.snapshot, baselineSelection, { retainConflicts: true }).composed!, plan: { ...prepared.plan, readPaths: [...prepared.plan.readPaths, 'assets'], sourcePaths: ['assets'] } }
   const evidence = readCompositionEvidence(input.snapshot, input.composed, input.baselineSelection!)
   const analysis = await analyzeCodeBehavior(input, async request => {
-    const wire = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as { textEncoding: string; textBodies: Record<string, string>; intentArtifactFiles: { path: string; mode: string; oid: string; digest: string; bodyRef: string }[] }
-    assert.equal(wire.textEncoding, 'sha256-body-ref-v1')
-    const context = readFrozenBehaviorContext<NonTextContext & { intentArtifactFiles: { path: string; mode: string; oid: string; digest: string; text: string }[] }>(request.prompt)
+    const wire = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as { textEncoding: string; bodyIndex: Record<string, { required: boolean }>; intentArtifactFiles: { path: string; mode: string; oid: string; digest: string; bodyRef: string }[] }
+    assert.equal(wire.textEncoding, 'sha256-body-entry-v2')
+    const context = readFrozenBehaviorContext<NonTextContext & { intentArtifactFiles: { path: string; mode: string; oid: string; digest: string; text: string }[] }>(request)
     assert.deepEqual(context.changedPaths, ['assets/CLAUDE.md', 'assets/image.png', 'assets/vendor.whl'])
     const expectedArtifacts = new Map((evidence.artifacts ?? []).flatMap(item => [item.before, item.delivery, item.source, item.authorBase].filter((entry): entry is NonNullable<typeof entry> => !!entry))
       .filter(entry => input.plan.readPaths.some(path => entry.path === path || entry.path.startsWith(`${path}/`)) && !isHostPrivatePath(entry.path))
@@ -357,7 +530,8 @@ test('真实非文本变化和删除保持三方与intent artifact字节身份�
     for (const file of wire.intentArtifactFiles) {
       const expanded = context.intentArtifactFiles.find(item => item.path === file.path && item.mode === file.mode && item.oid === file.oid)!
       assert.equal(file.bodyRef, contentHash(Buffer.from(expanded.text, 'utf8')))
-      assert.equal(wire.textBodies[file.bodyRef], expanded.text)
+      assert.equal(frozenBodyText(request, file.bodyRef), expanded.text)
+      assert.equal(wire.bodyIndex[file.bodyRef].required, true)
       assert.equal(expanded.digest, contentHash(Buffer.from(expanded.text, 'utf8')))
     }
     const images = context.nonTextFiles.filter(file => file.path === 'assets/image.png')
@@ -401,7 +575,7 @@ test('较大冻结树全文与逐对象参考逐字相同，行为上下文不�
   const started = performance.now(), purposes: string[] = []
   try {
     assert.equal((await analyzeCodeBehavior(input, async request => {
-      const frozen = readFrozenBehaviorContext<typeof expected>(request.prompt)
+      const frozen = readFrozenBehaviorContext<typeof expected>(request)
       for (const key of ['oldSource', 'newSource', 'verifiedDelivery', 'composedFiles'] as const) assert.deepEqual(frozen[key], expected[key])
       purposes.push(request.purpose)
       return runner('refactor')(request)
@@ -421,7 +595,7 @@ test('分析及独审收到真实契约项正文，raw-only初始化不借未交
     ['.spec/export/export-contract/spec.md', f.raw],
   ])), calls: string[] = []
   const check: ElaborationRunner = async request => {
-    const frozen = readFrozenBehaviorContext<{ contractItems: { previous: unknown[]; current: unknown[] } }>(request.prompt)
+    const frozen = readFrozenBehaviorContext<{ contractItems: { previous: unknown[]; current: unknown[] } }>(request)
     assert.deepEqual(frozen.contractItems.previous, [...expected.graph.items.values()])
     assert.deepEqual(frozen.contractItems.current, [...expected.graph.items.values()])
     calls.push(request.purpose)
@@ -439,7 +613,7 @@ test('分析及独审收到真实契约项正文，raw-only初始化不借未交
   }
   const bootstrapCalls: string[] = []
   assert.equal((await analyzeCodeBehavior(initial, async request => {
-    const frozen = readFrozenBehaviorContext<{ contractItems: { previous: unknown[]; current: unknown[] } }>(request.prompt)
+    const frozen = readFrozenBehaviorContext<{ contractItems: { previous: unknown[]; current: unknown[] } }>(request)
     assert.deepEqual(frozen.contractItems, { previous: [], current: [] })
     assert.match(request.prompt, /raw-only.*尚无.*稳定.*ID/)
     assert.match(request.prompt, /未通过P1结构检查或独审.*候选.*不.*既有.*义务/)
@@ -457,7 +631,7 @@ for (const kind of ['conflict', 'coverage_gap'] as const) test(`raw-only bootstr
   const before = await f.input(), calls: string[] = []
   const input: CodeBehaviorInput = { ...before, baseline: null, origin: 'initial', composed: composeInputSnapshots(before.snapshot, null).composed!, plan: { ...before.plan, facts: [] } }
   const analysis = await analyzeCodeBehavior(input, async request => {
-    const context = readFrozenBehaviorContext<{ contractItems: { previous: unknown[]; current: unknown[] } }>(request.prompt)
+    const context = readFrozenBehaviorContext<{ contractItems: { previous: unknown[]; current: unknown[] } }>(request)
     assert.deepEqual(context.contractItems, { previous: [], current: [] })
     calls.push(request.purpose)
     return runner(kind, proposal => { proposal.changes = (proposal.changes as object[]).map(change => ({ ...change, affectedIds: [], ruleIds: [] })) })(request)
@@ -501,7 +675,7 @@ test('冻结source角色只发现业务根，纯测试helper可读且旧计划�
   git(f.root, 'add', sourcePath, ...tests, 'src/embedded.test.js'); git(f.root, 'commit', '-m', 'seed source and pure tests')
   const before = await f.input(), input: CodeBehaviorInput = { ...before, baseline: null, composed: composeInputSnapshots(before.snapshot, null).composed!, plan: { ...before.plan, sourcePaths: ['src'] } }
   const analysis = await analyzeCodeBehavior(input, async request => {
-    const context = readFrozenBehaviorContext<{ changedPaths: string[]; newSource: [string, string][] }>(request.prompt)
+    const context = readFrozenBehaviorContext<{ changedPaths: string[]; newSource: [string, string][] }>(request)
     assert.deepEqual(context.changedPaths, [sourcePath])
     assert.ok(tests.every(path => new Map(context.newSource).has(path)))
     return runner('allowed_change', proposal => { proposal.newNodes = [{ codePath: sourcePath, parentNodeId: 'export-contract', basis: '真实业务helper需要归属' }] })(request)
@@ -510,7 +684,7 @@ test('冻结source角色只发现业务根，纯测试helper可读且旧计划�
   await assert.rejects(analyzeCodeBehavior(input, runner('allowed_change', proposal => { proposal.newNodes = [sourcePath, tests[0]].map(codePath => ({ codePath, parentNodeId: 'export-contract', basis: '不能凭测试可写新增业务归属' })) })), /授权业务源码/)
   const restored = { ...input, plan: JSON.parse(JSON.stringify(before.plan)) as CodeBehaviorInput['plan'] }, stopped = new Error('captured legacy discovery')
   await assert.rejects(analyzeCodeBehavior(restored, async request => {
-    const context = readFrozenBehaviorContext<{ changedPaths: string[] }>(request.prompt)
+    const context = readFrozenBehaviorContext<{ changedPaths: string[] }>(request)
     assert.deepEqual(context.changedPaths, [sourcePath, ...tests].sort())
     throw stopped
   }), error => error === stopped)
@@ -522,7 +696,7 @@ test('真实测试改动仍经分析和独审，不要求创建业务治理叶',
   writeFileSync(join(f.root, path), 'def fixture_value():\n    return 2\n')
   const before = await f.input(), input: CodeBehaviorInput = { ...before, baseline: null, composed: composeInputSnapshots(before.snapshot, null).composed!, plan: { ...before.plan, sourcePaths: ['src'] } }
   const analysis = await analyzeCodeBehavior(input, async request => {
-    const context = readFrozenBehaviorContext<{ changedPaths: string[] }>(request.prompt)
+    const context = readFrozenBehaviorContext<{ changedPaths: string[] }>(request)
     assert.deepEqual(context.changedPaths, [path])
     return runner('allowed_change')(request)
   })
@@ -546,11 +720,13 @@ test('目录授权helper与删除文件保完整全文，链接仅声明对象�
     assert.deepEqual(manifest.readablePaths.find(item => item.path === 'tests/export.test.mjs')!.snapshots, ['oldSource', 'verifiedDelivery'])
     assert.ok(!manifest.readablePaths.some(item => item.path === 'src'))
     assert.ok(manifest.readablePaths.find(item => item.path === 'src/link')!.snapshots.every(snapshot => snapshot.startsWith('nonTextFiles.')))
-    const context = readFrozenBehaviorContext<NonTextContext>(request.prompt)
+    const context = readFrozenBehaviorContext<NonTextContext>(request)
     const link = context.nonTextFiles.find(file => file.path === 'src/link')!
     assert.equal(link.kind, 'symlink'); assert.equal(link.mode, '120000'); assert.equal(link.content, 'export.js')
     assert.ok(!context.newSource.some(([path]) => path === 'src/link'))
-    assert.ok(request.prompt.includes(JSON.stringify(helper))); assert.match(request.prompt, /cwd.*不是.*输入/)
+    assert.equal(new Map(context.newSource).get(path), helper)
+    assert.equal(request.prompt.includes(helper), false)
+    assert.match(request.prompt, /cwd.*不是.*输入/)
     return fake(request)
   })).reviewPassed, true)
   assert.equal(prompts.length, 2)
@@ -640,10 +816,19 @@ test('真实三方Git对象进入独立行为分析，允许外部行为证据�
   const f = await fixture(t)
   writeFileSync(join(f.root, 'src/export.js'), f.source.replace('return { ...job };', 'return { ...job, observable: true };'))
   const input = await f.input(), calls: string[] = [], fake = runner('allowed_change', proposal => { proposal.facts = [{ source: 'code:src/export.js#ExportService.dispatch', text: '完成视图保留结果并附加observable:true' }]; proposal.acceptanceChanges = [{ id: 'AC-EXPORT-01', ruleIds: ['RULE-EXPORT-05'], source: 'code:src/export.js#ExportService.dispatch', reason: '更新已允许输出的可观察细节，不删旧断言' }] })
-  const analysis = await analyzeCodeBehavior(input, async request => { calls.push(request.prompt); return fake(request) })
+  const analysis = await analyzeCodeBehavior(input, async request => {
+    calls.push(request.prompt)
+    const frozen = readFrozenBehaviorContext<{ oldSource: [string, string][]; newSource: [string, string][]; verifiedDelivery: [string, string][] }>(request)
+    assert.equal(new Map(frozen.oldSource).get('src/export.js'), f.source)
+    assert.match(new Map(frozen.newSource).get('src/export.js') ?? '', /observable: true/)
+    assert.ok(request.prompt.includes('verifiedDelivery'))
+    assert.ok(frozen.verifiedDelivery.some(([, text]) => text.includes('assert')))
+    assert.equal(request.prompt.includes(f.source), false)
+    return fake(request)
+  })
   assert.equal(analysis.reviewPassed, true); assert.equal(analysis.baselinePairId, 'pair-verified')
   assert.equal(analysis.traces.length, 2); assert.notEqual(analysis.traces[0].sessionId, analysis.traces[1].sessionId)
-  assert.ok(calls.every(prompt => prompt.includes(JSON.stringify(f.source)) && prompt.includes('observable: true') && prompt.includes('verifiedDelivery') && prompt.includes('assert')))
+  assert.equal(calls.length, 2)
   const ref = writeEvidence(input.snapshot.source.commonDir, analysis), auth = deriveBehaviorAuthorization(analysis, ref)
   assert.equal(auth[0].action, 'update_acceptance'); assert.deepEqual(auth[0].action === 'update_acceptance' && auth[0].analysisRef, ref)
   assert.deepEqual(JSON.parse(readEvidence(input.snapshot.source.commonDir, ref).toString()), analysis)
@@ -710,7 +895,7 @@ test('发送前明确列出已commit未治理源码子集，空初始化文件�
   const before = await f.input(), input: CodeBehaviorInput = { ...before, baseline: null, composed: composeInputSnapshots(before.snapshot, null).composed!, plan: { ...before.plan, sourcePaths: ['src'] } }
   const captured = new Error('frozen ownership input captured')
   await assert.rejects(analyzeCodeBehavior(input, async request => {
-    const context = readFrozenBehaviorContext<{ requiredChangedPaths: string[]; unownedSourcePaths: string[]; unownedSourcePathCount: number; snapshotTree: string; composed: { tree: string } }>(request.prompt)
+    const context = readFrozenBehaviorContext<{ requiredChangedPaths: string[]; unownedSourcePaths: string[]; unownedSourcePathCount: number; snapshotTree: string; composed: { tree: string } }>(request)
     assert.deepEqual(context.unownedSourcePaths, paths)
     assert.equal(context.unownedSourcePathCount, 2)
     assert.ok(context.requiredChangedPaths.includes('src/export.js'))
@@ -746,7 +931,7 @@ test('归属拒绝一次列全缺失路径和数量，完整newNodes或具体GAP
     proposal.newNodes = paths.map(codePath => ({ codePath, parentNodeId: 'export-contract', basis: '真实导出任务的对应模块职责' }))
   })
   const repaired = await analyzeCodeBehavior({ ...input, repairDiagnostics: [rejected!] }, async request => {
-    const context = readFrozenBehaviorContext<{ repairDiagnostics: { code: string; message: string }[]; requiredChangedPaths: string[]; unownedSourcePaths: string[]; unownedSourcePathCount: number }>(request.prompt)
+    const context = readFrozenBehaviorContext<{ repairDiagnostics: { code: string; message: string }[]; requiredChangedPaths: string[]; unownedSourcePaths: string[]; unownedSourcePathCount: number }>(request)
     assert.deepEqual(context.repairDiagnostics, [rejected])
     assert.deepEqual(context.requiredChangedPaths, paths)
     assert.deepEqual(context.unownedSourcePaths, paths)

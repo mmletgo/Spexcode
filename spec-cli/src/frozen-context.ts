@@ -13,6 +13,8 @@ export type FrozenContextManifest = { version: 1; binding: FrozenContextBinding;
 /** 路径仅供可信控制面使用，不能进入模型 prompt 或工具参数。 */
 export type FrozenContextRef = { version: 1; contextDigest: string; manifestPath: string }
 export type FrozenContextInput = { id: string; label: string; required?: boolean } & ({ kind: 'utf8' | 'binary'; bytes: Buffer } | { kind: 'absent' })
+/** 可经 JSON 拷贝的通用冻结条目；字节在冻结时才物化，避免 Buffer 被拷贝成普通对象。 */
+export type FrozenEntryJson = { id: string; label: string; required?: boolean } & ({ kind: 'utf8'; text: string } | { kind: 'binary'; base64: string } | { kind: 'absent' })
 export type FrozenReadArguments = { contextDigest: string; entryId: string; startByte: number; endByte: number }
 export type FrozenReadReceipt = { threadId: string; turnId: string; callId: string; arguments: FrozenReadArguments; responseDigest: string }
 type FrozenCoverageProof = { contextDigest: string; threadId: string; turnId: string; receipts: FrozenReadReceipt[]; coveredEntryIds: string[]; historyDigest: string }
@@ -66,15 +68,39 @@ export function freezeContext(input: { directory: string; sourceRoot: string; bi
   return { version: 1, contextDigest, manifestPath: join(destination, 'manifest.json') }
 }
 
-/** 在任何派发摘要之前冻结超大正文；同键同内容返回同一个稳定引用。 */
-export function prepareFrozenPrompt<T extends { root: string; prompt: string; requestKey: string; inputDigest: string; frozenContext?: FrozenContextRef }>(request: T, options: { directory: string; binding?: Pick<FrozenContextBinding, 'policyDigest' | 'attemptId'> }): T & { frozenContext?: FrozenContextRef } {
+function frozenEntryInputs(entries: readonly FrozenEntryJson[]): FrozenContextInput[] {
+  return entries.map(entry => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) stale('frozen entry must be pure JSON')
+    if (entry.kind === 'utf8') {
+      if (typeof entry.text !== 'string') stale('utf8 frozen entry requires text')
+      return { id: entry.id, label: entry.label, required: entry.required, kind: 'utf8', bytes: Buffer.from(entry.text, 'utf8') }
+    }
+    if (entry.kind === 'binary') {
+      if (typeof entry.base64 !== 'string' || entry.base64.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(entry.base64)) stale('binary frozen entry requires canonical base64')
+      const bytes = Buffer.from(entry.base64, 'base64')
+      if (bytes.toString('base64') !== entry.base64) stale('binary frozen entry requires canonical base64')
+      return { id: entry.id, label: entry.label, required: entry.required, kind: 'binary', bytes }
+    }
+    if (entry.kind === 'absent') return { id: entry.id, label: entry.label, required: entry.required, kind: 'absent' }
+    stale('frozen entry kind is invalid')
+  })
+}
+
+/** 在任何派发摘要之前冻结超大正文或调用者给出的纯 JSON 条目；同键同内容返回同一个稳定引用。已有 ref 原样返回。 */
+export function prepareFrozenPrompt<T extends { root: string; prompt: string; requestKey: string; inputDigest: string; frozenContext?: FrozenContextRef; frozenEntries?: readonly FrozenEntryJson[] }>(request: T, options: { directory: string; binding?: Pick<FrozenContextBinding, 'policyDigest' | 'attemptId'> }): Omit<T, 'frozenEntries'> & { frozenContext?: FrozenContextRef } {
   const binding = { requestKey: request.requestKey, inputDigest: request.inputDigest, ...options.binding }
   if (request.frozenContext) { assertFrozenBinding(request.frozenContext, binding); return request }
-  if (Buffer.byteLength(request.prompt, 'utf8') <= FROZEN_PROMPT_THRESHOLD_BYTES) return request
-  const frozenContext = freezeContext({ directory: options.directory, sourceRoot: request.root, binding,
-    entries: [{ id: 'task', label: 'Complete original task and frozen context', kind: 'utf8', bytes: Buffer.from(request.prompt, 'utf8') }] })
-  const prompt = `The complete original task, instructions, and context are frozen without truncation in entry task. Read its entire required content using ${FROZEN_READ_TOOL}, then follow that original task and return its requested structured final answer. Byte offsets are end-exclusive; continue from the response's original endByte, never decodedEndByte. No shell, paths or live data are available.\n${frozenContextPrompt(frozenContext)}`
-  return { ...request, prompt, frozenContext }
+  const declared = request.frozenEntries ?? []
+  const promptBytes = Buffer.byteLength(request.prompt, 'utf8')
+  if (declared.length === 0 && promptBytes <= FROZEN_PROMPT_THRESHOLD_BYTES) return request
+  const entries = frozenEntryInputs(declared)
+  if (promptBytes > FROZEN_PROMPT_THRESHOLD_BYTES) entries.unshift({ id: 'task', label: 'Complete original task and frozen context', kind: 'utf8', bytes: Buffer.from(request.prompt, 'utf8'), required: true })
+  const frozenContext = freezeContext({ directory: options.directory, sourceRoot: request.root, binding, entries })
+  const prompt = promptBytes > FROZEN_PROMPT_THRESHOLD_BYTES
+    ? `The complete original task, instructions, and context are frozen without truncation in entry task. Read its entire required content using ${FROZEN_READ_TOOL}, then follow that original task and return its requested structured final answer. Byte offsets are end-exclusive; continue from the response's original endByte, never decodedEndByte. No shell, paths or live data are available.\n${frozenContextPrompt(frozenContext)}`
+    : `${request.prompt}\n${frozenContextPrompt(frozenContext)}`
+  const { frozenEntries: _entries, ...rest } = request
+  return { ...rest, prompt, frozenContext }
 }
 
 /** 只从内容摘要已锚定的清单恢复条目，不读取 live source 或模型提供的路径。 */

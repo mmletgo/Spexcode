@@ -32,4 +32,4 @@ code:
 
 恢复参数携带同一次冻结推理的结构化策略，由正式创建入口重建外部runtime候选路径；缺少该策略不得把结构化收据解释为普通主checkout内候选。路径仍由创建事务内部推导，资源桥不接受任意恢复目录。
 
-冻结读取的业务 requestKey 与清单绑定保持不变，内部 sessionCreateKey 承接 reserveDispatch 返回值；实际 attemptId 与 policyDigest 存在时在派发前严格核对，冻结 ref 及读取证明参与计划和原生固定策略摘要。未知工具响应或未证实原生停止继续保留资源，不把本地报错作为释放容量的依据。
+冻结读取的业务 requestKey 与清单绑定保持不变，内部 sessionCreateKey 承接 reserveDispatch 返回值；实际 attemptId 与 policyDigest 存在时在派发前严格核对，冻结 ref 及读取证明参与计划和原生固定策略摘要。调用者携带的纯 JSON frozenEntries 由 prepareFrozenPrompt 在 reserveDispatch 与计划摘要之前、用本次真实 attempt/policy 冻结；这里不解析行为 JSON，也不按 code-behavior 写分支。持久 plan 只保存去掉条目载荷后的最终 ref。调用者除 signal 外的请求摘要与原 payloadDigest 精确相等时，沿原 prompt、hash 和策略恢复，不重新准备、不重写旧证明。未知工具响应或未证实原生停止继续保留资源，不把本地报错作为释放容量的依据。

@@ -1,6 +1,6 @@
 import type { CodeBehaviorEvidence, ContractNodeChange, SyncDecisionAuthority } from './writeback-types.js'
 import type { BlobRef, InputSnapshot } from './operation-types.js'
-import type { FrozenContextRef, FrozenReadProof } from '../frozen-context.js'
+import type { FrozenContextRef, FrozenEntryJson, FrozenReadProof } from '../frozen-context.js'
 import type { Contract, ContractCoverage, ContractFinding, ContractGraph, Gap, ParseContractInput, Verification } from '@spexcode/spec-core/contracts'
 
 export const ELABORATION_BOUNDARIES = ['permissions', 'mutation', 'async', 'network', 'concurrency', 'callbacks', 'retries', 'cancellation', 'idempotency', 'external_side_effects'] as const
@@ -83,6 +83,8 @@ export type ElaborationResult = {
 export type ElaborationSessionRequest = {
   root: string; base?: string; prompt: string; schema: Record<string, unknown>; requestKey: string; inputDigest: string; purpose: string; timeoutMs: number; signal?: AbortSignal; model?: string; effort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
   frozenContext?: FrozenContextRef
+  /** 派发前由 prepareFrozenPrompt 冻结的纯 JSON 条目；持久计划只保留最终 ref。 */
+  frozenEntries?: readonly FrozenEntryJson[]
 }
 export type ElaborationSessionResult = { sessionId: string; threadId: string; turnId: string; output: unknown; resultDigest: string; frozenReadProof?: FrozenReadProof }
 export type ElaborationRunner = (request: ElaborationSessionRequest) => Promise<ElaborationSessionResult>
