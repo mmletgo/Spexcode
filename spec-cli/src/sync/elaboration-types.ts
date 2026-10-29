@@ -19,6 +19,9 @@ export type ElaborationInput = {
   facts?: readonly ElaborationFact[]
   /** 可信执行器登记属于技术编排，不是待裁决的业务事实或变更授权。 */
   verifications?: readonly Pick<Verification, 'id' | 'command' | 'cwd' | 'timeoutMs'>[]
+  /** 冻结计划的技术写范围与不可修改的外部验收文件，不授予新的业务权限。 */
+  implementationWritePaths?: readonly string[]
+  readonlyTestPaths?: readonly string[]
   authorizedChanges?: readonly AuthorizedContractChange[]
   /** 协调器保存的稳定 ID 退役记录，新候选不可复用。 */
   retiredIds?: readonly string[]

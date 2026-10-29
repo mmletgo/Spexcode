@@ -18,6 +18,8 @@ related:
 
 ## expanded spec
 
+生成与独审共同读取冻结技术写范围及只读测试清单。既有只读 oracle 继续执行；需要新增断言时，P1 先把 AC.test 绑定到原授权可写测试路径，不能把修改只读 oracle 的要求延后交给 P2。候选业务正文的待办/进度问题也须在 P1 普通 repair 修正。implementation-review 仅用于可在原授权实现/测试范围完成且无需改业务正文的实现修复；含此发现的原生 verdict 同样须为 repair，accept 仍严格要求无发现。
+
 范围映射：REQ-SYNC-03、04；P1；AC-SYNC-01、02、03、08、14、25。实施依据为 `docs/spec-code-continuous-sync-plan.md`。本节点交付需求细化、声明追踪及独立语义审查；完整代码、运行验收和落盘由 [[sync-execution]] 与 [[sync-verification]] 继续完成，不能把细化通过作为已同步证明。
 
 构建者产出 REQ→FLOW/STEP→RULE/TR→code→AC，独立审查者从原意重新走路径。每个适用状态×事件必须明确转移、拒绝、幂等或有依据的不适用。覆盖权限、边界、竞争顺序与副作用。图和覆盖投影只能派生自 [[sync-contract-schema]]；无状态能力须说明输入域、不变量和不适用依据。

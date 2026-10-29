@@ -148,8 +148,14 @@ async function fixture(t: test.TestContext, budget = { maxAttempts: 3, maxCalls:
 }
 
 test('固定操作模型到达行为/P1/P2及全部独审，独立会话与调用预算保持', async t => {
-  const f = await fixture(t, { maxAttempts: 1, maxCalls: 8, maxRepairs: 0, timeoutMs: 120000 }, false, original, 'project', original, {}, undefined, 'code', 'gpt-6.1-terra')
+  const oracle = parseContract({ nodeId: 'export-contract', path: contractPath, source: original }).contract!.items.find(item => item.kind === 'AC')!
+  const [testPath, testId] = oracle.test.split('#')
+  const f = await fixture(t, { maxAttempts: 1, maxCalls: 8, maxRepairs: 0, timeoutMs: 120000 }, false, original, 'project', original, { mandatoryTests: [{ verificationId: oracle.command, testPath, testId }] }, undefined, 'code', 'gpt-6.1-terra')
+  const contexts: { implementationWritePaths: string[]; readonlyTestPaths: string[] }[] = []
   f.transform((output, request) => {
+    if (['elaboration_generate', 'elaboration_review'].includes(request.purpose)) {
+      contexts.push(JSON.parse(request.prompt.split('冻结业务输入:\n')[1].split('\n')[0]))
+    }
     if (request.purpose === 'code_review') throw Object.assign(new Error('本用例在V3前停止'), { code: 'unsupported' })
     return output
   })
@@ -161,6 +167,11 @@ test('固定操作模型到达行为/P1/P2及全部独审，独立会话与调�
   const dispatches = f.store.listAttempts(f.operation.id)[0].dispatchPlans
   assert.equal(new Set(dispatches.map(dispatch => dispatch.sessionCreateKey)).size, 6)
   assert.equal(f.store.listJournals(f.operation.id).length, 0)
+  assert.equal(contexts.length, 2)
+  for (const context of contexts) {
+    assert.deepEqual(context.implementationWritePaths, [...new Set(f.options.plan.writePaths)].sort())
+    assert.deepEqual(context.readonlyTestPaths, [...new Set(f.options.plan.mandatoryTests.map(test => test.testPath))].sort())
+  }
 })
 
 for (const kind of ['conflict', 'coverage_gap'] as const) test(`raw-only已审 ${kind} 无既有ID时明确阻塞，不派P1或消耗新attempt`, async t => {

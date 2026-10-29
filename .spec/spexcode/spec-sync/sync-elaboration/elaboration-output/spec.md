@@ -15,6 +15,8 @@ code:
 
 原生 code/related 字段说明明确沿用仓库文件关系语义：code 最多治理一个源文件基路径，related 是补充文件/目录关系，节点或 REQ/FLOW/RULE/VERIFY 等业务 ID 不是文件路径。完整候选仍经 [[spec-lint]] 同源关系完整性门禁，不把字段说明当作验证证据。
 
+review verdict 的原生说明明确 accept 仅可搭配空 findings；implementation-review 等待修发现也使用 repair，再由现有分类门禁转交对应阶段，不把矛盾回执自动改成通过。
+
 模型临时输出 `elaboration-target-rows-v3`：冻结目标的输入内 targetIndex、标题和说明、真实代码/相关绑定、业务解释（null 表示沿用）、显式 removeIds、各类型新增或替换的完整业务行，以及每个适用性边界的依据和影响 ID。模型不返回 nodeId/path；wire 为每个冻结目标附原数组下标 targetIndex，程序从同一冻结目标及显式 nodeChanges 唯一绑定节点、可写路径、原意和源摘要。全部类型数组均存在，空数组表示无该表；行对象的列直接派生自解析器 `CONTRACT_COLUMNS`，不复制另一份列定义。严格 schema 约束稳定 ID、单一来源、引用数组、布尔值、VERIFY argv 和正整数超时；`STEP.next` 的 END 单值不能混入 ID 列表。有状态流程引用 STATE 结果，不能把同步动作当成无状态能力。
 
 `RULE.authority` 的生成请求 schema 仅接受本轮冻结可写 target 的 canonical `nodeId`，不能接受 REQ/RULE 业务 ID。合法 move 中，冻结旧节点已有 `authority` 等于其 `from.nodeId` 的 RULE 时，schema 还保留该旧 `nodeId`，供 renderer 按真实 `nodeChanges` 归一到目的身份；最终 owner 仍由现有逐项校验确认，enum 不授予跨叶归属。没有可写 target 时不产生空 enum。
