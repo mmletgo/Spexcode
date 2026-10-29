@@ -126,8 +126,8 @@ export async function runConformance(supplied: ConformanceInput, options: Confor
     const baseEntries = readTree(commonDir, base.tree), candidateEntries = candidate.tree === base.tree ? baseEntries : readTree(commonDir, candidate.tree)
     const policyEntries = policy.tree === base.tree ? baseEntries : policy.tree === candidate.tree ? candidateEntries : readTree(commonDir, policy.tree)
     result.identities = { baseCommit: base.commit, candidateCommit: candidate.commit, policyCommit: policy.commit, baseTree: base.tree, candidateTree: candidate.tree, policyTree: policy.tree }
-    const before = await readFrozenContracts(root, files(commonDir, baseEntries))
-    const after = candidate.tree === base.tree ? before : await readFrozenContracts(root, files(commonDir, candidateEntries))
+    const before = await readFrozenContracts(root, files(commonDir, baseEntries), new Set(baseEntries.map(entry => entry.path)))
+    const after = candidate.tree === base.tree ? before : await readFrozenContracts(root, files(commonDir, candidateEntries), new Set(candidateEntries.map(entry => entry.path)))
     result.coverage.governedNodeIds = sorted(after.contracts.map(contract => contract.nodeId))
     result.coverage.uncoveredNodeIds = sorted(after.nodes.filter(node => !after.contracts.some(contract => contract.path === node.path)).map(node => node.id))
     result.coverage.governedPaths = sorted(after.contracts.flatMap(contract => [...contract.code.map(pathOf), ...contract.items.flatMap(item => item.kind === 'AC' ? [pathOf(item.test)] : [])]))

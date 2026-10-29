@@ -11,6 +11,20 @@ const source = readFileSync(resolve(fixture, spec), 'utf8')
 const inputs = (): Map<string, string> => new Map([spec, 'src/export.js', 'tests/export.test.mjs'].map(path => [path, readFileSync(resolve(fixture, path), 'utf8')]))
 const policy = (state: FrozenContracts): GenerationContractPolicy => ({ newNodeRawSources: new Map(), verifications: state.contracts.flatMap(contract => contract.items.filter(item => item.kind === 'VERIFY')) })
 
+test('完整候选路径清单让V1拒绝不存在的related身份，保留真实未读取文件和目录', async () => {
+  const files = inputs()
+  const invalid = ['export-contract', 'REQ-EXPORT-01', 'FLOW-EXPORT-01', 'RULE-EXPORT-01', 'VERIFY-EXPORT-01']
+  files.set(spec, source.replace('code:\n', `related:\n${invalid.map(value => `  - ${value}`).join('\n')}\ncode:\n`))
+  const paths = new Set([...files.keys(), 'docs/reference.png'])
+  const inventory = new Set(paths), pending = readFrozenContracts('/frozen', files, inventory)
+  for (const value of invalid) inventory.add(value)
+  const rejected = await pending
+  assert.equal(rejected.findings.filter(finding => finding.code === 'integrity' && finding.message.includes('missing related file')).length, invalid.length)
+  files.set(spec, source.replace('code:\n', 'related:\n  - docs/reference.png\n  - docs/\ncode:\n'))
+  const accepted = await readFrozenContracts('/frozen', files, paths)
+  assert.deepEqual(accepted.findings.filter(finding => finding.code === 'integrity'), [])
+})
+
 test('冻结输入在不存在的宿主目录仍重建真实契约、源码锚点与验收', async () => {
   const files = inputs()
   const promise = readFrozenContracts('/no-such-frozen-input', files)

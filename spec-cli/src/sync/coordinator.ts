@@ -237,7 +237,7 @@ async function candidateContext(operation: SyncOperation, candidate: CandidateRe
       if (entry.mode !== '120000' && isUtf8Text(bytes)) files.set(file.path, bytes.toString('utf8'))
     }
   }
-  return readFrozenContracts(operation.input.source.canonicalRoot, files)
+  return readFrozenContracts(operation.input.source.canonicalRoot, files, new Set(entries.map(entry => entry.path)))
 }
 function acceptanceRuns(frozen: FrozenContracts, ready: SyncScope, plan: SyncCoordinatorPlan, retirement?: { before: FrozenContracts; ids: string[] }): AcceptanceRun[] {
   const acIds = ready.contractIds.filter(id => frozen.graph.items.get(id)?.kind === 'AC')

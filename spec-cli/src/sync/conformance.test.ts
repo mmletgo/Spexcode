@@ -256,13 +256,14 @@ test('AC-CONFORMANCE-01 Spec-only未实现由独审拒绝；完整源码与真�
 })
 
 test('AC-CONFORMANCE-02 删除schema/整个node/AC/test或放宽命令仍进入旧治理闭包且失败', async () => {
-  for (const variant of ['schema', 'node', 'ac', 'test', 'command'] as const) {
+  for (const variant of ['schema', 'node', 'ac', 'test', 'command', 'related'] as const) {
     const repo = fixture()
     if (variant === 'schema') put(repo.root, specPath, source.replace('contract-schema: sync-v1\n', ''))
     if (variant === 'node') rmSync(join(repo.root, specPath))
     if (variant === 'ac') put(repo.root, specPath, source.replace(/^\| AC-GREET-01 .*\n/m, ''))
     if (variant === 'test') rmSync(join(repo.root, 'tests/greet.test.mjs'))
     if (variant === 'command') put(repo.root, specPath, source.replace('"tests/greet.test.mjs"', '"tests/empty.test.mjs"'))
+    if (variant === 'related') put(repo.root, specPath, source.replace('code:\n', 'related:\n  - REQ-GREET-01\ncode:\n'))
     const result = await runConformance(repo.input(save(repo.root)), { testReviewRunner: reviewer(), testVerificationDriver: noDocker })
     assert.equal(result.status, 'failed', `${variant}: ${JSON.stringify(result.diagnostics)}`)
     assert.ok(result.scope.nodeIds.includes('greeting')); assert.ok(result.scope.itemIds.includes('AC-GREET-01')); assert.equal(result.runs.length, 0)

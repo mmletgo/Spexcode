@@ -8,6 +8,7 @@ code:
   - spec-cli/src/lint.ts#specLint
   - spec-cli/src/lint.ts#specLintReport
   - spec-cli/src/lint.ts#loadConfig
+  - spec-cli/src/lint.ts#specRelationFindings
 related:
   - .spec/spexcode.json
   - spec-cli/templates/hooks/commit-msg
@@ -27,6 +28,8 @@ gate. The graph's NAMES are part of its honesty too: an id is an unambiguous coo
 must resolve, and a retired vocabulary must stay retired.
 
 ## expanded spec
+
+工作树与 pending lint 的前元数据关系检查由 `specRelationFindings` 统一执行：关系格式、code/related 路径存在性与 one-govern。[[sync-frozen-contracts]] 的完整候选 V1 复用该纯检查，路径存在性取候选完整不可变清单；不因模型阶段不同维护第二份关系政策。
 
 `spex spec lint` (`cli.ts` → `lint.ts`, over `loadSpecs()` from `specs.ts`) checks the graph and
 deterministically verifiable contract structure. Errors block; warnings advise. The full registry (every
