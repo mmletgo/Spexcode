@@ -21,7 +21,7 @@ type FrozenCoverageProof = { contextDigest: string; threadId: string; turnId: st
 export type FrozenReadProof = FrozenCoverageProof & ({ version?: never } | { version: 2; visibilityDigest: string; toolOutputTokenLimit: number } | { version: 3; provider: 'claude-code'; promptId: string; model: string; cliVersion: string; maxReadBytes: 65536; maxResultSizeChars: 500000 })
 export type ClaudePublicMessage = { role: string; content: Array<{ type: string; id?: string; name?: string; input?: unknown; tool_use_id?: string; content?: string | Array<{ type: string; text: string }>; text?: string; is_error?: boolean }> }
 export type ClaudePublicRecord = { type: string; sessionId: string; uuid?: string; parentUuid?: string | null; promptId?: string; requestRef?: string; sourceToolAssistantUUID?: string; message?: ClaudePublicMessage; id?: string; hash?: string; shapeHash?: string; base?: string; keep?: number; tail?: string[]; model?: string; toolNames?: string[]; placeholderValid?: boolean }
-export type ClaudeFrozenWitness = { version: 1; provider: 'claude-code'; cliVersion: string; model: string; sessionId: string; userUuid: string; promptId: string; prompt: string; nativeHistoryPath: string; history: ClaudePublicRecord[]; echo: { uuid: string; session_id: string; message: ClaudePublicMessage }; result: { type: string; subtype: string; is_error: boolean; session_id: string; uuid: string; user_message_uuid: string; user_message_uuids: string[]; structured_output: unknown }; initTools: string[] }
+export type ClaudeFrozenWitness = { version: 1; provider: 'claude-code'; cliVersion: string; model: string; sessionId: string; userUuid: string; promptId: string; prompt: string; nativeHistoryPath: string; history: ClaudePublicRecord[]; mcpHistory?: { path: string; toolNames: string[] }; echo: { uuid: string; session_id: string; message: ClaudePublicMessage }; result: { type: string; subtype: string; is_error: boolean; session_id: string; uuid: string; user_message_uuid: string; user_message_uuids: string[]; structured_output: unknown }; initTools: string[] }
 export type FrozenVisibleOutput = { callId: string; output: string | { type: 'input_text'; text: string }[]; historyTokenLimit: number }
 type FrozenVisibility = { toolOutputTokenLimit: number; outputs: FrozenVisibleOutput[] }
 export type FrozenNativeItem = { type: string; id?: string; namespace?: string | null; tool?: string; arguments?: unknown; status?: string; success?: boolean | null; contentItems?: unknown }
@@ -370,6 +370,16 @@ export function readClaudePublicHistory(path: string, sessionId: string): Claude
   return records
 }
 
+/** 只读取专属 MCP 的实际派发名；原生不可用工具回复不能掩盖服务端派发的矛盾证据。 */
+export function readClaudeMcpToolNames(path: string): string[] {
+  return readFileSync(path, 'utf8').split('\n').filter(Boolean).flatMap(line => {
+    const row = JSON.parse(line) as { type: string; request?: { method: string; params?: { name?: string } } }
+    if (row.type !== 'request' || row.request?.method !== 'tools/call') return []
+    if (typeof row.request.params?.name !== 'string') stale('Claude MCP call has no exact tool identity')
+    return [row.request.params.name]
+  })
+}
+
 /** Claude用原生user UUID/promptId、配对公开消息及真实API请求索引证明可见性，绝不冒充Codex动态工具。 */
 export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFrozenWitness): FrozenReadProof {
   const { sessionId, userUuid, promptId, model, result, echo, history } = witness
@@ -382,7 +392,8 @@ export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFro
   if (!original || original.parentUuid !== null || original.promptId !== promptId || JSON.stringify(original.message) !== JSON.stringify(echo.message)
     || JSON.stringify(original.message) !== JSON.stringify({ role: 'user', content: [{ type: 'text', text: witness.prompt }] })) stale('Claude original user echo/history/prompt identity differs')
   const seen = new Set<string>(), requests = new Map<string, string[]>(), shapes = new Set<string>(), calls = new Map<string, { row: ClaudePublicRecord; block: ClaudePublicMessage['content'][number] }>()
-  const receipts: FrozenReadReceipt[] = [], responseMessages = new Map<string, string>(), responseBlocks = new Map<string, ClaudePublicMessage['content'][number]>(), requestRefs = new Set<string>()
+  const receipts: FrozenReadReceipt[] = [], rejectedCalls: string[] = [], responseMessages = new Map<string, string>(), responseBlocks = new Map<string, ClaudePublicMessage['content'][number]>(), requestRefs = new Set<string>()
+  if (witness.mcpHistory && (JSON.stringify(readClaudeMcpToolNames(witness.mcpHistory.path)) !== JSON.stringify(witness.mcpHistory.toolNames) || witness.mcpHistory.toolNames.some(name => name !== 'spex_read_frozen'))) stale('Claude MCP dispatched a foreign tool or its actual history changed')
   let acceptedOutput = false
   for (const row of history) {
     if (row.sessionId !== sessionId) stale('Claude native history changed its session identity')
@@ -412,7 +423,7 @@ export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFro
       if (!row.requestRef || !requests.has(row.requestRef)) stale('Claude assistant lacks an exact actual API request reference')
       requestRefs.add(row.requestRef)
       for (const block of row.message!.content) {
-        if (!block.id || calls.has(block.id) || !allowed.includes(block.name!)) stale('Claude called a forbidden, placeholder or repeated tool')
+        if (!block.id || calls.has(block.id) || !block.name || block.name === 'DeferredToolPlaceholder') stale('Claude called a forbidden, placeholder or repeated tool')
         calls.set(block.id, { row, block })
       }
     }
@@ -423,6 +434,10 @@ export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFro
         if (!call || responseMessages.has(block.tool_use_id!) || row.sourceToolAssistantUUID !== call.row.uuid || row.parentUuid !== call.row.uuid) stale('Claude tool result is not paired with its exact native call')
         responseMessages.set(block.tool_use_id!, claudeMessageDigest(row.message))
         responseBlocks.set(block.tool_use_id!, block)
+        if (!allowed.includes(call.block.name!)) {
+          if (!witness.mcpHistory || block.is_error !== true || block.content !== `<tool_use_error>Error: No such tool available: ${call.block.name}</tool_use_error>`) stale('Claude foreign tool call has no exact native non-dispatch rejection')
+          rejectedCalls.push(block.tool_use_id!); continue
+        }
         if (call.block.name === 'StructuredOutput') { if (!block.is_error && claudeMessageDigest(call.block.input) === claudeMessageDigest(result.structured_output)) acceptedOutput = true; continue }
         const { arguments: args, response } = readFrozenRange(ref, call.block.input)
         if (args.endByte - args.startByte > 65536 || block.is_error || !Array.isArray(block.content)
@@ -433,8 +448,8 @@ export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFro
     }
   }
   if (!acceptedOutput || [...calls].some(([id]) => !responseMessages.has(id))) stale('Claude result has no matching accepted schema tool output or has unanswered calls')
-  for (const receipt of receipts) {
-    const messageHash = responseMessages.get(receipt.callId)!
+  for (const callId of [...receipts.map(receipt => receipt.callId), ...rejectedCalls]) {
+    const messageHash = responseMessages.get(callId)!
     if (![...requests].some(([id, hashes]) => hashes.includes(messageHash) && requestRefs.has(id))) stale('Claude reader result was not present in a subsequent actual model API request')
   }
   const coveredEntryIds = frozenReadCoverage(ref, receipts), historyBytes = encode(witness), historyDigest = sha(historyBytes)

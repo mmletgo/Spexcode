@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createInterface } from 'node:readline'
 import { detachedRuntimeIsGone, processStartToken, verifyDetachedRuntime, writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
-import { proveClaudeFrozenReads, readClaudePublicHistory, verifyFrozenReadProof, type ClaudeFrozenWitness, type ClaudePublicMessage, type FrozenReadProof } from './frozen-context.js'
+import { proveClaudeFrozenReads, readClaudeMcpToolNames, readClaudePublicHistory, verifyFrozenReadProof, type ClaudeFrozenWitness, type ClaudePublicMessage, type FrozenReadProof } from './frozen-context.js'
 import { StructuredSessionError, structuredExecutionPolicy, structuredSeatbeltProfile, type StructuredExecution } from './session-structured-policy.js'
 
 const CLI_VERSION = '2.1.309 (Claude Code)'
@@ -139,7 +139,8 @@ function settleClaudeResult(plan: NativePlan, prompt: string, execution: Structu
   plan = { ...plan, historyPath }; writeFileSync(join(root, 'plan.json'), JSON.stringify(plan), { mode: 0o600 })
   const history = readClaudePublicHistory(historyPath, plan.sessionId), original = history.find(row => row.type === 'user' && row.uuid === plan.userUuid)
   if (!original?.promptId) throw new StructuredSessionError('stale_result', 'Claude original native promptId is missing')
-  const witness: ClaudeFrozenWitness = { version: 1, provider: 'claude-code', cliVersion: CLI_VERSION, model, sessionId: plan.sessionId, userUuid: plan.userUuid, promptId: original.promptId, prompt, nativeHistoryPath: historyPath, history, echo, result, initTools: init.tools }
+  const mcpPath = join(root, 'mcp-public.jsonl')
+  const witness: ClaudeFrozenWitness = { version: 1, provider: 'claude-code', cliVersion: CLI_VERSION, model, sessionId: plan.sessionId, userUuid: plan.userUuid, promptId: original.promptId, prompt, nativeHistoryPath: historyPath, history, mcpHistory: { path: mcpPath, toolNames: readClaudeMcpToolNames(mcpPath) }, echo, result, initTools: init.tools }
   const validate = new Ajv({ allErrors: true }).compile(execution.schema)
   if (!validate(result.structured_output)) throw new StructuredSessionError('failed', 'Claude structured_output does not match the pinned JSON schema')
   persistCompletionJson(join(root, 'witness.json'), witness)

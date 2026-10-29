@@ -90,6 +90,58 @@ test('controlled Claude witness proves parallel replies and rejects completed-ca
       value => { value.prompt = 'replacement'; value.echo.message.content[0].text = 'replacement'; value.history[0].message!.content[0].text = 'replacement' },
     ]
     for (const mutate of cases) { const bad = structuredClone(witness); mutate(bad); assert.throws(() => proveClaudeFrozenReads(ref, bad)) }
+    const rejected = structuredClone(witness), unavailable = 'mcp__frozen__spez_read_frozen'
+    const rejection = { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'unavailable', is_error: true, content: `<tool_use_error>Error: No such tool available: ${unavailable}</tool_use_error>` }] }
+    const mcpPath = join(directory, 'controlled-mcp.jsonl')
+    writeFileSync(mcpPath, JSON.stringify({ type: 'request', request: { method: 'tools/call', params: { name: 'spex_read_frozen' } } }) + '\n')
+    rejected.mcpHistory = { path: mcpPath, toolNames: ['spex_read_frozen'] }
+    rejected.history.splice(3, 0,
+      { type: 'assistant', sessionId: 'session', uuid: 'unavailable-call', parentUuid: 'user', requestRef: 'request-1', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'unavailable', name: unavailable, input }] } },
+      { type: 'user', sessionId: 'session', uuid: 'unavailable-reply', parentUuid: 'unavailable-call', promptId: 'prompt', sourceToolAssistantUUID: 'unavailable-call', message: rejection },
+      { type: 'api-request', sessionId: 'session', shapeHash: 'a'.repeat(64), id: 'request-rejected', base: 'request-1', keep: 1, tail: [claudeMessageDigest(rejection)], model: 'MiniMax-M3' })
+    rejected.history.find(row => row.uuid === 'assistant')!.parentUuid = 'unavailable-reply'
+    rejected.history.find(row => row.uuid === 'assistant')!.requestRef = 'request-rejected'
+    const rejectedProof = proveClaudeFrozenReads(ref, rejected)
+    assert.deepEqual(rejectedProof.coveredEntryIds, proof.coveredEntryIds)
+    assert.equal(rejectedProof.receipts.length, 2, '原生拒绝事件不能作为读取覆盖')
+    const rejectedCases: Array<(value: ClaudeFrozenWitness) => void> = [
+      value => { value.history.find(row => row.uuid === 'unavailable-reply')!.message!.content[0].is_error = false },
+      value => { value.history.find(row => row.uuid === 'unavailable-reply')!.message!.content[0].content = 'Permission denied' },
+      value => { value.history.find(row => row.uuid === 'unavailable-reply')!.message!.content[0].content = 'No such tool available: another-tool' },
+      value => { value.history.find(row => row.uuid === 'unavailable-reply')!.sourceToolAssistantUUID = 'foreign' },
+      value => { value.history.find(row => row.uuid === 'unavailable-call')!.message!.content[0].name = 'DeferredToolPlaceholder' },
+      value => { value.history.find(row => row.type === 'api-request-shape')!.toolNames!.push(unavailable) },
+      value => { value.history.find(row => row.id === 'request-rejected')!.tail = [] },
+      value => { value.history.find(row => row.uuid === 'unavailable-call')!.message!.content[0].name = 'mcp__frozen__spex_read_frozen' },
+      value => { delete value.mcpHistory },
+      value => { value.mcpHistory!.toolNames.push('spez_read_frozen') },
+    ]
+    for (const mutate of rejectedCases) { const bad = structuredClone(rejected); mutate(bad); assert.throws(() => proveClaudeFrozenReads(ref, bad)) }
+    const otherSpelling = structuredClone(rejected), otherName = 'mcp__frozen__srozen__spex_read_frozen'
+    otherSpelling.history.find(row => row.uuid === 'unavailable-call')!.message!.content[0].name = otherName
+    const otherReply = otherSpelling.history.find(row => row.uuid === 'unavailable-reply')!.message!
+    otherReply.content[0].content = `<tool_use_error>Error: No such tool available: ${otherName}</tool_use_error>`
+    otherSpelling.history.find(row => row.id === 'request-rejected')!.tail = [claudeMessageDigest(otherReply)]
+    assert.equal(proveClaudeFrozenReads(ref, otherSpelling).receipts.length, 2)
+    writeFileSync(mcpPath, JSON.stringify({ type: 'request', request: { method: 'tools/call', params: { name: 'spez_read_frozen' } } }) + '\n')
+    assert.throws(() => proveClaudeFrozenReads(ref, rejected), /MCP/)
+    writeFileSync(mcpPath, JSON.stringify({ type: 'request', request: { method: 'tools/call', params: { name: 'spex_read_frozen' } } }) + '\n')
+    const parallelRejection = structuredClone(witness)
+    parallelRejection.mcpHistory = rejected.mcpHistory
+    parallelRejection.history[3].message!.content.push({ type: 'tool_use', id: 'unavailable', name: unavailable, input })
+    parallelRejection.history.splice(6, 0, { type: 'user', sessionId: 'session', uuid: 'unavailable-reply', parentUuid: 'assistant', promptId: 'prompt', sourceToolAssistantUUID: 'assistant', message: rejection })
+    const merged = parallelRejection.history.find(row => row.type === 'api-request-blob')!
+    merged.message!.content.push(rejection.content[0]); merged.hash = claudeMessageDigest(merged.message)
+    parallelRejection.history.find(row => row.id === 'request-2')!.tail = [merged.hash]
+    assert.equal(proveClaudeFrozenReads(ref, parallelRejection).receipts.length, 2)
+    const noRead = structuredClone(parallelRejection)
+    noRead.history[3].message!.content = noRead.history[3].message!.content.filter(block => block.id === 'unavailable')
+    noRead.history = noRead.history.filter(row => !['reply', 'reply-2'].includes(row.uuid ?? ''))
+    noRead.history.find(row => row.uuid === 'final')!.parentUuid = 'unavailable-reply'
+    const noReadBlob = noRead.history.find(row => row.type === 'api-request-blob')!
+    noReadBlob.message!.content = [rejection.content[0]]; noReadBlob.hash = claudeMessageDigest(noReadBlob.message)
+    noRead.history.find(row => row.id === 'request-2')!.tail = [noReadBlob.hash]
+    assert.throws(() => proveClaudeFrozenReads(ref, noRead), /not completely read/)
     const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], { detached: true, stdio: 'ignore' })
     assert(child.pid)
     const exited = new Promise<void>(resolve => child.once('close', () => resolve()))

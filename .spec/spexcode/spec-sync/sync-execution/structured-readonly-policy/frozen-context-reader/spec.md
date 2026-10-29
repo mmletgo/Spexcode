@@ -24,6 +24,8 @@ related:
 
 Claude 采用显式500000字符和500000 MCP token上限，并核实际序列化文本长度；UTF8最坏JSON转义及两端边界扩展在保守段内保留。版本3 proof 明确 provider=claude-code，保存经精确原生 user UUID/promptId 主链配对的公开 tool_use/tool_result、当前 CLI/model 身份和 actual API request 索引。每个实际 API 请求必须关联本轮已核工具面的 shapeHash；首轮 tail 必须包含原 user canonical SHA，不能只比对 prompt/echo/history 三份副本。每条真实 response 必须逐字等于同一 readFrozenRange 的结果；原生并行调用若合并为 API user blob，先逐项核其公开 tool_result，再核递归键排序 canonical message SHA 与 request.tail/base/keep 边界及后续 assistant.requestRef。文件引用、截断、错误或只在服务端发送成功均不能作为可见性证明。仅排除真实私密 thinking 内容块及元数据，公开 tool_use.input 中名为 signature/thinking 的合法业务字段完整保留；不按全局键名删除。completed 重放以内容寻址原生见证绑定最终 output，并核原专属 history，不能发新 turn 或伪装 Codex dynamicToolCall/H。
 
+实际 API 工具面之外的名字只能保留为原生明确未派发的拒绝事件：唯一 callId、session/user/prompt 与 parent/source assistant 完整配对，`is_error:true` 且公开回复逐字等于固定 CLI 的 `<tool_use_error>Error: No such tool available: 名字</tool_use_error>`；全文还须进入后续真实 API 并由 assistant 消费。专属 MCP 实际派发名与见证一致且只含唯一 reader，存在外部派发或日志矛盾即拒绝。拒绝事件保留原名及全文，不改名、不产生 reader receipt、不贡献任何覆盖；缺读取仍失败。普通工具错误、权限错误、未知回复、未配对结果、实际工具面扩张和 DeferredToolPlaceholder 调用继续拒绝。其后正确读取、完整覆盖、StructuredOutput 与停止证明仍须分别通过。
+
 [[structured-readonly-policy]] 的v2仍保留既有只读隔离，仅增加spex_read_frozen。源码树外0700目录存储内容寻址字节与清单；contextDigest绑定logicalentry、类型、SHA256、字节长度、required及业务requestKey/inputDigest。真实attempt/policy存在时额外严格绑定，普通结构化调用不编造身份。相同bytes去重，logical身份仍保留。
 
 工具参数仅contextDigest/entryId/startByte/endByte，区间end-exclusive、每次请求不超过262144字节；binary base64、absence均显式处理。UTF8完整entry在冻结时严格校验；合法请求切入多字节码点时，解码区间向外扩至完整码点边界，两端最多各多3字节，包含全部请求字节，只允许重叠、不截断或替换字符。arguments、startByte/endByte与rangeSha256仍绑定原请求；仅确实扩展时，文本额外列decodedStartByte/decodedEndByte。原对齐响应的全文、字段顺序与摘要保持不变，binary行为不变。
