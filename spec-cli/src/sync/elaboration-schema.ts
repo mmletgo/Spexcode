@@ -29,8 +29,8 @@ export const ELABORATION_SCHEMA = object({
   changes: { type: 'array', minItems: 0, items: object({ targetIndex: { type: 'integer', minimum: 0 }, title: { ...string, pattern: '^[^\\r\\n]+$' }, description: { type: 'string' }, code: strings, related: strings, prose: { type: ['string', 'null'] }, removeIds: { type: 'array', items: { type: 'string', pattern: '^(REQ|FLOW|STEP|STATE|EVENT|TR|RULE|AC|GAP|VERIFY)-[A-Z0-9]+(?:-[A-Z0-9]+)+$' } }, tables: object(Object.fromEntries(Object.entries(CONTRACT_COLUMNS).map(([kind, columns]) => [kind, { type: 'array', items: object(Object.fromEntries(columns.map(column => [column, rowProperty(kind, column)]))) }]))) }) },
   applicability: { type: 'array', minItems: ELABORATION_BOUNDARIES.length, items: object({ boundary: { enum: ELABORATION_BOUNDARIES }, applies: { type: 'boolean' }, basis: string, affectedIds: strings }) },
 })
-/** 生成边界仅接收冻结节点；完整覆盖继续由候选门禁逐项核对。 */
-export function elaborationSchema(input: ElaborationInput): Record<string, unknown> {
+/** 生成边界限制 authority；诊断边界保留原字符串，后续候选校验仍核对实际 owner。 */
+export function elaborationSchema(input: ElaborationInput, options: { purpose?: 'generation' | 'diagnostic' } = {}): Record<string, unknown> {
   const targets = elaborationTargetBindings(input)
   const schema = structuredClone(ELABORATION_SCHEMA)
   const changes = (schema.properties as Record<string, Record<string, unknown>>).changes
@@ -51,8 +51,10 @@ export function elaborationSchema(input: ElaborationInput): Record<string, unkno
   }
   tables.properties.RULE.items.properties.authority = {
     ...authority,
-    description: 'RULE.authority必须是当前可写target的canonical nodeId，不是REQ/RULE业务ID；冻结move的旧canonical owner可保留，由renderer按真实move归一化，最终owner仍由原有全图校验核对。',
-    ...(owners.size ? { enum: [...owners] } : {}),
+    description: options.purpose === 'diagnostic'
+      ? '诊断seed保留原始authority字符串，不代表授权；当前候选全图校验仍要求规则归属其canonical nodeId。'
+      : 'RULE.authority必须是当前可写target的canonical nodeId，不是REQ/RULE业务ID；冻结move的旧canonical owner可保留，由renderer按真实move归一化，最终owner仍由原有全图校验核对。',
+    ...(options.purpose !== 'diagnostic' && owners.size ? { enum: [...owners] } : {}),
   }
   return schema
 }
@@ -128,5 +130,5 @@ FLOW.req引用REQ，FLOW.steps引用STEP；STEP.flow是单FLOW，STEP.next为STE
 状态派发STEP必须以next、depends-on或source显式引用实际执行或选择的TR，并在depends-on或source声明对应EVENT。TR集合须忠实覆盖该步骤input/action/output声明的对象、状态域和条件分支；不能只列已确定TR掩盖同一步里的未决TR，也不反推与步骤无关的全事件所有状态。纯参数校验、提交和导航步骤不强求TR。next→TR是业务依赖；next→STEP/STATE、FLOW.steps仍仅导航，不扩大GAP闭包。独立审查必须重走派发步骤，对照TR集合核实声明范围与受阻处置的真实依赖；正文提到GAP或对应TR不能替代结构引用，不能把含未知派发的父FLOW列为完整可交付。
 STATE/EVENT/TR.object为稳定对象名。每个适用对象全部可达状态×事件必须有TR，disposition为transition/reject/idempotent/not_applicable；reject/idempotent.to等于from；not_applicable.to为-且reason必填。condition成立、不成立、边界、失败/恢复、取消、重试、重复回调、竞争的必要到达顺序、副作用均覆盖。不能用“其他忽略”缩减范围。
 主动从场景发现响应丢失后的重复请求、异步任务失联、失败后恢复、取消与完成的两种顺序、回调身份过期、操作时权限变化及外部结果不可用；不能把“用户没写”当作这些相关边界不适用的依据。未知是否允许取消/重试及失联恢复政策须保留具体GAP和受阻分支，不能通过删去事件或宣布不适用让覆盖变绿。
-RULE.authority必须是该RULE所在当前target的canonical nodeId，不是REQ-ID或RULE-ID；冻结move中原RULE的旧nodeId由renderer按nodeChanges归一，最终owner仍由原有全图校验核对。其他节点引用RULE，不复制政策。AC.covers引用REQ/RULE/TR，AC.test是测试相对路径#稳定用例ID；source=code必须引用冻结源码中真实声明符号的相对路径#symbol，测试用例ID只能用于AC.test，不能充当代码符号。AC.command引用VERIFY-ID；VERIFY.command是JSON argv数组文本，cwd相对根，timeout-ms正整数。叶节点code最多一个真实代码文件，related不计实现覆盖。不存在的代码/测试只作为待实现绑定，绝不声称运行已过。
+每个业务REQ至少由一个主FLOW.req直接覆盖。验证配置、写路径授权、执行器/schema和本轮元数据属于执行边界，不另造业务REQ或测试执行FLOW；仍须遵守这些边界，测试和验证绑定在业务AC/可信VERIFY中，不能借此省略raw里的业务需求。RULE.authority必须是该RULE所在当前target的canonical nodeId，不是REQ-ID或RULE-ID；冻结move中原RULE的旧nodeId由renderer按nodeChanges归一，最终owner仍由原有全图校验核对。其他节点引用RULE，不复制政策。AC.covers引用REQ/RULE/TR，AC.test是测试相对路径#稳定用例ID；source=code必须引用冻结源码中真实声明符号的相对路径#symbol，测试用例ID只能用于AC.test，不能充当代码符号。AC.command引用VERIFY-ID；VERIFY.command是JSON argv数组文本，cwd相对根，timeout-ms正整数。叶节点code最多一个真实代码文件，related不计实现覆盖。不存在的代码/测试只作为待实现绑定，绝不声称运行已过。
 未知重大业务政策必须写GAP，kind为missing_fact/conflict，unknown/affects/evidence/decision具体明确；只阻塞依赖项，独立分支继续完善。不可发明权限、保留时间、超时或竞争政策。业务项在旧新全图按稳定ID核对，跨叶移动不当作删除。节点move/retire只从冻结nodeChanges复制，不能模型自批；移动raw原样保留，canonical身份与规则authority按旧新定位迁移。preserve_business只更新必要的实现和测试符号绑定，逐字沿用业务正文。未经冻结update_acceptance绑定真实独审行为分析和变化ruleIds（REQ/RULE/TR来源闭包），已有AC语义不得改变；原意允许的新代码行为可经合法规则变化和独审自动授权更新AC，模型自身失败不构成新意图。未获冻结authorizedChanges提供具体用户原意或可信裁决的依据时，保留REQ/AC/VERIFY及验证政策；明确已决定的退役或验证政策变更可按依据执行，无需再批准，但独立审查须核对与raw/facts相符且未缩减未授权范围。retiredIds中的历史稳定ID不能复用。不能弱化验收断言或改写raw让结果变绿。无GAP省略表，不输出空表。`

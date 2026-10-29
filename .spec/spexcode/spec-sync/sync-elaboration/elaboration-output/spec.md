@@ -17,6 +17,8 @@ code:
 
 `RULE.authority` 的生成请求 schema 仅接受本轮冻结可写 target 的 canonical `nodeId`，不能接受 REQ/RULE 业务 ID。合法 move 中，冻结旧节点已有 `authority` 等于其 `from.nodeId` 的 RULE 时，schema 还保留该旧 `nodeId`，供 renderer 按真实 `nodeChanges` 归一到目的身份；最终 owner 仍由现有逐项校验确认，enum 不授予跨叶归属。没有可写 target 时不产生空 enum。
 
+生成指令要求每个业务 REQ 至少由一个主 FLOW.req 覆盖。验证配置、写路径授权、执行器/schema 和本轮元数据属于执行边界，不另造业务 REQ 或测试执行 FLOW；这些边界仍须遵守，测试和验证绑定在业务 AC/可信 VERIFY 中，不能因此省略 raw 里的业务需求。
+
 状态派发 STEP 须以 next、depends-on 或 source 显式关联实际执行或选择的 TR，并声明对应 EVENT；集合须忠实覆盖该步骤声明的对象、状态域和条件分支，不能只列已确定处置掩盖同一步里的未决处置。纯参数校验、提交和导航步骤不强求 TR；不反推无关事件的全部状态。next→TR 是业务依赖；next→STEP/STATE 和 FLOW.steps 仍为导航。独立审查核对派发表与步骤声明的范围，不能因正文提到 GAP 就跳过结构依赖，或把含未知派发的父 FLOW 当作完整可交付。
 
 [[elaboration-markdown]] 从这些临时行确定性渲染唯一可编辑的 [[sync-contract-schema]] Markdown。原文、源摘要、输入和候选摘要由程序复制绑定，不交由模型填写。生成行只是一次执行的受检中间产物，不能持久化为第二份权威业务 JSON。返回候选仍为完整 UTF-8 Markdown 文件变更。

@@ -234,7 +234,7 @@ function validateRepairSeed(input: ElaborationInput, seed: ElaborationRepairSeed
   if (digest(seed.candidate) !== seed.candidateDigest) throw new TypeError('续修种子原候选摘要不符')
   const version = (seed.output as { version?: unknown })?.version
   const legacy = version === 'elaboration-rows-v1' || version === 'elaboration-rows-v2'
-  const schema = version === 'elaboration-rows-v1' ? LEGACY_ELABORATION_DIAGNOSTIC_SCHEMA : version === 'elaboration-rows-v2' ? LEGACY_ELABORATION_V2_DIAGNOSTIC_SCHEMA : elaborationSchema(input)
+  const schema = version === 'elaboration-rows-v1' ? LEGACY_ELABORATION_DIAGNOSTIC_SCHEMA : version === 'elaboration-rows-v2' ? LEGACY_ELABORATION_V2_DIAGNOSTIC_SCHEMA : elaborationSchema(input, { purpose: 'diagnostic' })
   if (outputErrors(seed.output, schema).length) throw new TypeError('续修种子不符合业务行诊断schema')
   const generated = legacy ? null : bindElaborationTargets(input, seed.output as GeneratedTargetElaboration)
   if (generated && elaborationPatchErrors(input, generated).length) throw new TypeError('续修种子的行差量不合法')

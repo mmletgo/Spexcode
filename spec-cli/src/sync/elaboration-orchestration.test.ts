@@ -6,7 +6,7 @@ import { elaborate, elaborationDigest, projectElaborationFlowReadiness } from '.
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
 import type { ElaborationInput, ElaborationRepairSeed, ElaborationReview, ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
 import type { ContractCell, GeneratedElaboration, GeneratedTables, GeneratedTargetElaboration } from './elaboration-markdown.js'
-import { renderElaboration } from './elaboration-markdown.js'
+import { bindElaborationTargets, renderElaboration } from './elaboration-markdown.js'
 import { ELABORATION_SCHEMA, outputErrors } from './elaboration-schema.js'
 import type { CodeBehaviorEvidence, SyncDecisionAuthority } from './writeback-types.js'
 import { adaptElaborationNativeOutput } from '../../test/elaboration-native-output.js'
@@ -546,6 +546,56 @@ test('AC-ELABORATION-26 已结算失败种子仅作诊断，旧结果不变，�
   assert.match(fresh.calls[0].prompt, /绝非用户原意或权威事实/)
   assert.match(fresh.calls[0].prompt, /可观察本身不等于重大业务政策/)
   assert.ok(fresh.calls.every(call => call.requestKey.startsWith('operation-2:')))
+})
+
+test('v3失败seed中的错误RULE.authority仍进入候选诊断和新的受限生成', async () => {
+  const seed = await rejectedSeed(), snapshot = input()
+  const previous = candidate({} as ElaborationSessionRequest, source)
+  previous.changes[0].tables.RULE.find(row => row.id === 'RULE-EXPORT-01')!.authority = 'REQ-EXPORT-01'
+  const output: GeneratedTargetElaboration = {
+    version: 'elaboration-target-rows-v3',
+    changes: [{
+      targetIndex: 0, title: previous.changes[0].title, description: previous.changes[0].description,
+      code: previous.changes[0].code, related: previous.changes[0].related, prose: previous.changes[0].prose,
+      removeIds: previous.changes[0].removeIds, tables: previous.changes[0].tables,
+    }],
+    applicability: previous.applicability,
+  }
+  seed.output = output
+  seed.candidate = renderElaboration(snapshot, bindElaborationTargets(snapshot, output), seed.inputDigest)
+  seed.candidateDigest = elaborationDigest(JSON.stringify(seed.candidate))
+  seed.findings = [{ code: 'rule-authority', severity: 'error', nodeId: 'export-contract', path, itemId: 'RULE-EXPORT-01', message: 'RULE-EXPORT-01 权威定义必须归属当前节点 export-contract' }]
+  seed.review = null
+  seed.traces = seed.traces.filter(trace => trace.purpose === 'elaboration_generate')
+  seed.traces[0].resultDigest = elaborationDigest(JSON.stringify(output))
+  const original = structuredClone(seed)
+
+  const fresh = runner(request => candidate(request, source))
+  const result = await elaborate({ ...snapshot, requestKey: 'operation-2' }, { seed, runner: fresh.run })
+  assert.equal(result.status, 'complete', JSON.stringify(result.rounds.flatMap(round => round.findings)))
+  assert.ok(fresh.calls[0].prompt.includes('rule-authority'))
+  assert.ok(fresh.calls[0].prompt.includes('权威定义必须归属当前节点 export-contract'))
+  assert.deepEqual(fresh.calls.map(call => call.purpose), ['elaboration_generate', 'elaboration_review'])
+  assert.deepEqual(seed, original)
+
+  const rejectInvalidDiagnosticSeed = async (invalidSeed: ElaborationRepairSeed): Promise<void> => {
+    invalidSeed.traces[0].resultDigest = elaborationDigest(JSON.stringify(invalidSeed.output))
+    const invalidRunner = runner(() => assert.fail('结构无效的诊断seed不得调用Native'))
+    await assert.rejects(() => elaborate({ ...snapshot, requestKey: 'operation-3' }, { seed: invalidSeed, runner: invalidRunner.run }), /续修种子不符合业务行诊断schema/)
+    assert.deepEqual(invalidRunner.calls, [])
+  }
+  const invalidIndex = structuredClone(original)
+  const invalidIndexOutput = invalidIndex.output as GeneratedTargetElaboration
+  invalidIndexOutput.changes[0].targetIndex = 1
+  await rejectInvalidDiagnosticSeed(invalidIndex)
+  const invalidType = structuredClone(original)
+  const invalidTypeOutput = invalidType.output as unknown as { changes: Record<string, unknown>[] }
+  invalidTypeOutput.changes[0].code = '不是数组'
+  await rejectInvalidDiagnosticSeed(invalidType)
+  const invalidIdentity = structuredClone(original)
+  const invalidIdentityOutput = invalidIdentity.output as unknown as { changes: Record<string, unknown>[] }
+  invalidIdentityOutput.changes[0].path = path
+  await rejectInvalidDiagnosticSeed(invalidIdentity)
 })
 
 test('AC-ELABORATION-27 输入改变、未结算、摘要/评审身份伪造不能恢复种子', async () => {
