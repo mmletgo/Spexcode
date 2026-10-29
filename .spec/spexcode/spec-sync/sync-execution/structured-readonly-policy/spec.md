@@ -2,7 +2,7 @@
 title: 结构化推理固定只读策略
 status: active
 hue: 175
-desc: 独立清洁 Codex 配置及经过探针验证的外层隔离，禁止继承宽松 launcher、shell、MCP、apps 与 hooks。
+desc: 按执行器固定清洁配置及经探针验证的外层隔离，禁止宽松 launcher 和未授权宿主能力。
 code:
   - spec-cli/src/session-structured-policy.ts
 related:
@@ -17,6 +17,12 @@ related:
 生成和独立审查只能读取协调器提供的冻结上下文并返回 JSON。Agent 不能修改源码、交付树或用户配置；没有安全能力时明确失败，不能退回宽松执行。
 
 ## expanded spec
+
+以下 v1/v2 为原有 Codex 策略；明确 Claude 命名空间另使用 [[claude-structured-runtime]] 的版本3固定策略，不能自动 fallback。其空执行 cwd、私有 CLAUDE_CONFIG_DIR 和同一 macOS Seatbelt 写入边界只允许专属 runtime 写入。官方 restricted、空 built-in tools、独占 MCP、空 settings sources、关闭 hooks/记忆/普通指令文件和 slash commands 共同限制能力；仅 reader 与 StructuredOutput 可实际调用。CLI 2.1.309 的固定不可调用 DeferredToolPlaceholder schema 可以存在，实际调用拒绝。
+
+Claude 透明沿用实际 CLI 的既有认证机制与 API 路由，包括安全环境、正常 keychain 或现有 wrapper；不读取或复制凭据文件，不保存/打印 token，不改变付费路径。不能仅凭父进程缺少环境变量判定未认证；同一 CLI 在同一私有配置目录、restricted 与外层隔离中运行只读 auth status，仅保存 loggedIn/authMethod/apiProvider，实际确认不可用才 unsupported。未知 CLI 版本或未证明 managed policy/provider 同样拒绝。服务启动环境缺变量不能从交互终端偷取或写入全局配置。完整工具 surface 和实际 API model 必须再次由原生 init/history 核实，不能只相信 flags。
+
+已有原生用户 settings.json.env 的认证来源按 [[claude-structured-runtime]] 只在内存投影四个允许键；任一显式进程键优先整组。其它用户 settings 仍由 restricted 和空配置来源排除，不能以复用认证为由继承权限、hooks 或 MCP。
 
 内部固定策略为 codex-read-only-v1。独立 CODEX_HOME 仅包含可信配置及既有认证文件的只读安全引用；不读取、复制或打印认证字节，不继承用户 config 或 launcher 的 yolo/bypass 权限。配置关闭 shell、code mode、多 Agent、MCP、apps、plugins、hooks 和 web search；在模型 turn 前检查有效只读/never 策略、禁用特性以及零 MCP/hook 工具。
 

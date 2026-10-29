@@ -7,9 +7,10 @@ import { readRecord, withRecordLock, writeRecord } from './session-record.js'
 import { codexStructuredTurn, codexStopStructuredTurn } from './codex-harness.js'
 import { commitCodexGenerationRegistration, prepareCodexGenerationRegistration, readCodexGenerationLedger, resolveCodexGenerationForClose } from './codex-runtime-generations.js'
 import { structuredGeneration, prepareStructuredRealm, prepareFrozenReaderRuntime, assertFrozenReaderRuntime, StructuredSessionError, StructuredSessionTransportError, structuredObserverState, structuredExecutionPolicy, structuredRealmRoot, type StructuredExecution, type FrozenReaderRuntime } from './session-structured-policy.js'
-import { assertFrozenBinding, prepareFrozenPrompt, readFrozenManifest, verifyFrozenReadProof, type FrozenContextRef, type FrozenEntryJson, type FrozenReadProof } from './frozen-context.js'
+import { assertFrozenBinding, prepareFrozenPrompt, readFrozenManifest, verifyFrozenReadProof, type FrozenContextRef, type FrozenEntryJson, type FrozenReadProof, type FrozenReadReceipt } from './frozen-context.js'
 import { configuredSessionApplication } from './session-application.js'
 import { withDeliveryLocks } from './delivery-lock.js'
+import { claudeNativeModel, claudeStructuredTurn, stopClaudeStructuredTurn } from './claude-structured.js'
 export { StructuredSessionError } from './session-structured-policy.js'
 
 export type StructuredSessionRequest = {
@@ -47,7 +48,8 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
   if (!rec?.structuredExecution) throw new StructuredSessionError('failed', 'queued structured session lost its execution policy')
   if (rec.structuredExecution.state && rec.structuredExecution.state !== 'running') return rec.structuredExecution.state
   const execution = rec.structuredExecution
-  if (digest(structuredExecutionPolicy(execution)) !== digest({ ...execution, threadId: undefined, turnId: undefined, state: undefined, observer: undefined, cancellation: undefined, turnStartRequested: undefined, output: undefined, resultDigest: undefined, error: undefined, frozenReads: undefined, frozenReadProof: undefined }) || rec.harness !== 'codex-headless' || rec.launchCmd !== 'codex')
+  const claude = execution.version === 3 && execution.policy === 'claude-frozen-read-only-v1'
+  if (digest(structuredExecutionPolicy(execution)) !== digest({ ...execution, threadId: undefined, turnId: undefined, state: undefined, observer: undefined, cancellation: undefined, turnStartRequested: undefined, output: undefined, resultDigest: undefined, error: undefined, frozenReads: undefined, frozenReadProof: undefined, claudeNative: undefined }) || rec.harness !== (claude ? 'claude-headless' : 'codex-headless') || rec.launchCmd !== (claude ? 'claude' : 'codex'))
     throw new StructuredSessionError('unsupported', 'structured session no longer has the trusted fixed executor policy')
   const controller = new AbortController(); activeControllers.set(id, controller)
   let finish: () => void = () => {}
@@ -70,23 +72,24 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
   }
   try {
     await update({ state: 'running' })
-    const { endpoint, runtimeDir } = await structuredGeneration(requiredRealmRoot(execution), execution.readerRuntime)
-    const result = await codexStructuredTurn(endpoint.socketPath, rec.worktreePath, readFileSync(sessionArtifactPath(id, 'launch'), 'utf8'), execution, {
+    const generation = claude ? undefined : await structuredGeneration(requiredRealmRoot(execution), execution.readerRuntime)
+    const callbacks = {
       signal: controller.signal,
       onTimeout: async () => { await cancelStructuredSession(id, { reason: 'timeout' }) },
       onTurnStarting: async () => update({ turnStartRequested: true }),
-      onThread: async (threadId) => {
+      onNative: async (native: NonNullable<StructuredExecution['claudeNative']>) => update({ claudeNative: native }),
+      onThread: async (threadId: string) => {
         await withRecordLock(id, async () => {
           const current = readRecord(id)!
           if ((current.structuredExecution?.threadId && current.structuredExecution.threadId !== threadId) || (current.harnessSessionId && current.harnessSessionId !== threadId))
             throw new StructuredSessionError('stale_result', 'structured thread cannot replace its pinned identity')
-          prepareCodexGenerationRegistration(runtimeDir, id, threadId, endpoint.id)
+          if (generation) prepareCodexGenerationRegistration(generation.runtimeDir, id, threadId, generation.endpoint.id)
           writeRecord({ ...current, harnessSessionId: threadId, structuredExecution: { ...current.structuredExecution!, threadId, turnStartRequested: current.structuredExecution!.turnStartRequested ?? false } })
         })
-        commitCodexGenerationRegistration(runtimeDir, id, threadId, endpoint.id)
+        if (generation) commitCodexGenerationRegistration(generation.runtimeDir, id, threadId, generation.endpoint.id)
       },
-      onTurn: async (turnId) => update({ turnId }),
-      onFrozenRead: async (receipt) => {
+      onTurn: async (turnId: string) => update({ turnId }),
+      onFrozenRead: async (receipt: FrozenReadReceipt) => {
         await withRecordLock(id, async () => {
           const current = readRecord(id)!, state = current.structuredExecution!
           if (state.state !== 'running' || state.threadId !== receipt.threadId || state.turnId !== receipt.turnId)
@@ -96,7 +99,11 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
           if (!previous) writeRecord({ ...current, structuredExecution: { ...state, frozenReads: [...receipts, receipt] } })
         })
       },
-    })
+    }
+    const result = claude
+      ? await claudeStructuredTurn(requiredRealmRoot(execution), id, readFileSync(sessionArtifactPath(id, 'launch'), 'utf8'), execution, callbacks)
+      : await codexStructuredTurn(generation!.endpoint.socketPath, rec.worktreePath, readFileSync(sessionArtifactPath(id, 'launch'), 'utf8'), execution, callbacks)
+    if (claude && (result.frozenReadProof?.version !== 3 || result.frozenReadProof.model !== claudeNativeModel(execution.model))) throw new StructuredSessionError('stale_result', 'Claude result has no exact native provider/model witness')
     if (execution.readerRuntime?.version === 2 && result.frozenReadProof?.version !== 2)
       throw new StructuredSessionError('stale_result', 'current frozen execution cannot publish legacy coverage as model-visible proof')
     const output: unknown = JSON.parse(result.text)
@@ -126,15 +133,17 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
   if (!request.prompt.trim() || !request.inputDigest || !request.purpose || !Number.isFinite(request.timeoutMs) || request.timeoutMs <= 0
     || !request.schema || request.schema.type !== 'object')
     throw new StructuredSessionError('failed', 'structured execution requires a prompt, input digest, purpose, bounded timeout and object JSON schema')
+  const claude = request.model?.startsWith('claude:') === true
+  if (claude) claudeNativeModel(request.model)
   if (!request.frozenContext) request = prepareFrozenPrompt(request, { directory: join(runtimeRoot(), 'frozen-context-v2') })
   const deadline = Date.now() + request.timeoutMs
   if (request.frozenContext) assertFrozenBinding(request.frozenContext, { ...readFrozenManifest(request.frozenContext).binding, requestKey: request.requestKey, inputDigest: request.inputDigest })
   const validate = new Ajv().compile(request.schema)
-  if (request.frozenContext && !request.readerRuntime) request = { ...request, readerRuntime: await prepareFrozenReaderRuntime(join(runtimeRoot(), 'structured-frozen-read-only-v2'), request.frozenContext) }
+  if (!claude && request.frozenContext && !request.readerRuntime) request = { ...request, readerRuntime: await prepareFrozenReaderRuntime(join(runtimeRoot(), 'structured-frozen-read-only-v2'), request.frozenContext) }
   if (request.readerRuntime) assertFrozenReaderRuntime(request.readerRuntime, request.model)
   const { sessionCreateRequest, sessionCreateTimeoutMs, requestQueueDrain, queueStructuredRecovery, refreshQueueCandidate } = await import('./sessions.js')
   const execution = structuredExecutionPolicy(request)
-  prepareStructuredRealm(requiredRealmRoot(execution), request.readerRuntime)
+  if (!claude) prepareStructuredRealm(requiredRealmRoot(execution), request.readerRuntime)
   const created = await sessionCreateRequest({ prompt: request.prompt, ...(request.base ? { base: request.base } : {}) }, {
     requestKey: request.sessionCreateKey ?? request.requestKey, signal: request.signal, timeoutMs: Math.min(sessionCreateTimeoutMs(), request.timeoutMs), structuredExecution: execution,
   })
@@ -171,18 +180,23 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
         if (state.frozenContext && (!state.frozenReadProof || state.frozenReadProof.contextDigest !== state.frozenContext.contextDigest || state.frozenReadProof.threadId !== state.threadId || state.frozenReadProof.turnId !== state.turnId))
           throw new StructuredSessionError('stale_result', 'structured frozen result lacks exact native history coverage evidence')
         if (state.frozenContext) {
-          verifyFrozenReadProof(state.frozenContext, state.frozenReadProof!, { threadId: state.threadId, turnId: state.turnId }, state.readerRuntime?.version === 2 ? state.readerRuntime.toolOutputTokenLimit : undefined)
-          const runtimeDir = join(requiredRealmRoot(state), 'control'), ledger = readCodexGenerationLedger(runtimeDir)
-          const binding = ledger.bindings[id], generation = binding && ledger.generations[binding.generationId]
-          if (!generation || generation.state === 'reclaimed' || binding.threadId !== state.threadId || rec.harnessSessionId !== state.threadId)
-            throw new StructuredSessionError('stale_result', 'frozen completed result lost its exact native generation binding')
-          const recovered = await codexStructuredTurn(generation.endpoint.socketPath, rec.worktreePath, request.prompt, { ...state, timeoutMs: Math.max(1, deadline - Date.now()) }, {
-            signal: request.signal, onThread: async () => { throw new StructuredSessionError('stale_result', 'completed recovery cannot create a new thread') },
-            onTurn: async (turnId) => { if (turnId !== state.turnId) throw new StructuredSessionError('stale_result', 'completed recovery cannot replace its exact turn') },
-            onFrozenRead: async () => { throw new StructuredSessionError('stale_result', 'completed recovery cannot reply to a new dynamic call') },
-          })
-          if (digest(JSON.parse(recovered.text)) !== state.resultDigest || digest(recovered.frozenReadProof) !== digest(state.frozenReadProof))
-            throw new StructuredSessionError('stale_result', 'completed frozen result differs from exact native history')
+          verifyFrozenReadProof(state.frozenContext, state.frozenReadProof!, { threadId: state.threadId, turnId: state.turnId }, state.readerRuntime?.version === 2 ? state.readerRuntime.toolOutputTokenLimit : undefined, { output: state.output })
+          if (state.version === 3) {
+            const recovered = await claudeStructuredTurn(requiredRealmRoot(state), id, request.prompt, state, { onThread: async () => { throw new StructuredSessionError('stale_result', 'completed Claude replay cannot create a session') }, onTurn: async () => { throw new StructuredSessionError('stale_result', 'completed Claude replay cannot create a user turn') }, onNative: async () => { throw new StructuredSessionError('stale_result', 'completed Claude replay cannot dispatch') } })
+            if (digest(JSON.parse(recovered.text)) !== state.resultDigest || digest(recovered.frozenReadProof) !== digest(state.frozenReadProof)) throw new StructuredSessionError('stale_result', 'completed Claude result differs from original native witness')
+          } else {
+            const runtimeDir = join(requiredRealmRoot(state), 'control'), ledger = readCodexGenerationLedger(runtimeDir)
+            const binding = ledger.bindings[id], generation = binding && ledger.generations[binding.generationId]
+            if (!generation || generation.state === 'reclaimed' || binding.threadId !== state.threadId || rec.harnessSessionId !== state.threadId)
+              throw new StructuredSessionError('stale_result', 'frozen completed result lost its exact native generation binding')
+            const recovered = await codexStructuredTurn(generation.endpoint.socketPath, rec.worktreePath, request.prompt, { ...state, timeoutMs: Math.max(1, deadline - Date.now()) }, {
+              signal: request.signal, onThread: async () => { throw new StructuredSessionError('stale_result', 'completed recovery cannot create a new thread') },
+              onTurn: async (turnId) => { if (turnId !== state.turnId) throw new StructuredSessionError('stale_result', 'completed recovery cannot replace its exact turn') },
+              onFrozenRead: async () => { throw new StructuredSessionError('stale_result', 'completed recovery cannot reply to a new dynamic call') },
+            })
+            if (digest(JSON.parse(recovered.text)) !== state.resultDigest || digest(recovered.frozenReadProof) !== digest(state.frozenReadProof))
+              throw new StructuredSessionError('stale_result', 'completed frozen result differs from exact native history')
+          }
         }
         return { sessionId: id, threadId: state.threadId, turnId: state.turnId, output: state.output, resultDigest: state.resultDigest, ...(state.frozenReadProof ? { frozenReadProof: state.frozenReadProof } : {}) }
       }
@@ -262,7 +276,8 @@ export async function cancelStructuredSession(id: string, options: { reason?: 'c
     if (finished && (execution.turnStartRequested || execution.turnId)) await finished
     const current = readRecord(id)!, state = current.structuredExecution!
     let stop: { nativeStopped: boolean; acknowledged: boolean; turnId?: string; nativeStatus?: string; error?: string }
-    if ((!state.threadId || state.turnStartRequested === false) && !state.turnId) stop = { nativeStopped: true, acknowledged: false, nativeStatus: 'notStarted' }
+    if (state.version === 3) stop = await stopClaudeStructuredTurn(state, options.timeoutMs ?? 15_000)
+    else if ((!state.threadId || state.turnStartRequested === false) && !state.turnId) stop = { nativeStopped: true, acknowledged: false, nativeStatus: 'notStarted' }
     else {
       const runtimeDir = join(requiredRealmRoot(state), 'control')
       const binding = state.threadId && current.harnessSessionId === state.threadId ? resolveCodexGenerationForClose(runtimeDir, id, state.threadId) : null

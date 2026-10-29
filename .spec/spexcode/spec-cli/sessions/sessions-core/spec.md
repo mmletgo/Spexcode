@@ -33,6 +33,8 @@ foundation owner: the features govern their own surfaces and REFERENCE this modu
 
 ## expanded spec
 
+受限结构化创建的内部可信 policy 决定固定 launcher：既有 Codex policy 保留 codex-headless/codex，明确 Claude policy 使用 claude-headless/claude；公开 create 对象不能注入该 policy。两者复用原创建事务和队列，普通人工 launcher 选择不受影响；精确结构化运行/恢复由 [[structured-session-runtime]] 负责。
+
 sessions-core owns `sessions.ts` — the common session layer around the global per-session runtime/worktree envelope;
 `session-record.ts` owns that envelope's typed read/write and quarantine controls, while lifecycle, proposal, note, event,
 queue, and topology facts live only in the canonical session application. The common layer owns session↔worktree↔node resolution, the launch-script

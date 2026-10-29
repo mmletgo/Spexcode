@@ -12,8 +12,8 @@ import { withDeliveryLocks } from './delivery-lock.js'
 export type FrozenReaderRuntime = { cliVersion: string; catalogDigest: string; catalogPath: string } & ({ version: 1 } | { version: 2; toolOutputTokenLimit: number })
 
 export type StructuredExecution = {
-  version: 1 | 2
-  policy: 'codex-read-only-v1' | 'codex-frozen-read-only-v2'
+  version: 1 | 2 | 3
+  policy: 'codex-read-only-v1' | 'codex-frozen-read-only-v2' | 'claude-frozen-read-only-v1'
   schema: Record<string, unknown>
   inputDigest: string
   purpose: string
@@ -33,12 +33,15 @@ export type StructuredExecution = {
   frozenReads?: FrozenReadReceipt[]
   frozenReadProof?: FrozenReadProof
   readerRuntime?: FrozenReaderRuntime
+  claudeNative?: { version: 1; root: string; sessionId: string; userUuid: string; pid?: number; receiptFile?: string; promptId?: string }
 }
 
 /** 从持久化策略推导结构化 realm；无效或不完整策略不获得控制根。 */
 export function structuredRealmRoot(execution: unknown, root = runtimeRoot()): string | null {
   if (!execution || typeof execution !== 'object') return null
   const state = execution as Partial<StructuredExecution>
+  if (state.version === 3 && state.policy === 'claude-frozen-read-only-v1' && state.frozenContext?.version === 1 && state.model?.startsWith('claude:') && !state.readerRuntime)
+    return join(root, 'structured-claude-read-only-v1')
   if (state.version === 1 && state.policy === 'codex-read-only-v1' && state.readerRuntime === undefined && state.frozenContext === undefined)
     return join(root, 'structured-read-only-v1')
   const readerRuntime = state.readerRuntime
@@ -54,7 +57,8 @@ export function structuredRealmRoot(execution: unknown, root = runtimeRoot()): s
 
 /** 固定策略只有一份构造，运行观测与冻结读取证明不参与创建载荷。 */
 export function structuredExecutionPolicy(request: Pick<StructuredExecution, 'schema' | 'inputDigest' | 'purpose' | 'timeoutMs' | 'model' | 'effort' | 'frozenContext' | 'readerRuntime'>): StructuredExecution {
-  return { version: request.frozenContext ? 2 : 1, policy: request.frozenContext ? 'codex-frozen-read-only-v2' : 'codex-read-only-v1',
+  const claude = request.model?.startsWith('claude:') === true
+  return { version: claude ? 3 : request.frozenContext ? 2 : 1, policy: claude ? 'claude-frozen-read-only-v1' : request.frozenContext ? 'codex-frozen-read-only-v2' : 'codex-read-only-v1',
     schema: request.schema, inputDigest: request.inputDigest, purpose: request.purpose, timeoutMs: request.timeoutMs,
     ...(request.model ? { model: request.model } : {}), ...(request.effort ? { effort: request.effort } : {}), ...(request.frozenContext ? { frozenContext: request.frozenContext } : {}), ...(request.readerRuntime ? { readerRuntime: request.readerRuntime } : {}) }
 }

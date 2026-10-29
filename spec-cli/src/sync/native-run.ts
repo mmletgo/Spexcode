@@ -75,7 +75,8 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
       if (!result || result.sessionId !== expectedSessionId || !result.threadId || !result.turnId || (checkpoint.session.threadId !== null && result.threadId !== checkpoint.session.threadId) || (checkpoint.session.turnId !== null && result.turnId !== checkpoint.session.turnId) || !validate(result.output) || result.resultDigest !== hash(result.output)) throw new StructuredSessionError('stale_result', 'native result identity, schema or hash is invalid')
       if (request.frozenContext) {
         if (!result.frozenReadProof) throw new StructuredSessionError('stale_result', 'native frozen result has no real history coverage evidence')
-        verifyFrozenReadProof(request.frozenContext, result.frozenReadProof, { threadId: result.threadId, turnId: result.turnId }, request.readerRuntime?.version === 2 ? request.readerRuntime.toolOutputTokenLimit : undefined)
+        if (execution.version === 3 && (result.frozenReadProof.version !== 3 || result.frozenReadProof.model !== request.model?.slice(7))) throw new StructuredSessionError('stale_result', 'Claude result lacks its exact native provider/model proof')
+        verifyFrozenReadProof(request.frozenContext, result.frozenReadProof, { threadId: result.threadId, turnId: result.turnId }, request.readerRuntime?.version === 2 ? request.readerRuntime.toolOutputTokenLimit : undefined, { output: result.output })
       }
     }
     if (resource) {
@@ -202,7 +203,7 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
     const resource = store.findResource(fence.attemptId, value.requestKey)
     const exactResourceRequest = resource?.plan.payloadDigest === hash(value)
     let frozen: FrozenRequest = exactResourceRequest ? copy(value) : prepareFrozenPrompt(copy(value), { directory: join(runtimeRoot(), 'frozen-context-v2'), binding: { attemptId: fence.attemptId, policyDigest: operation.policyDigest } })
-    if (!exactResourceRequest && frozen.frozenContext && !options.runtime) frozen = { ...frozen, readerRuntime: await prepareFrozenReaderRuntime(join(runtimeRoot(), 'structured-frozen-read-only-v2'), frozen.frozenContext) }
+    if (!exactResourceRequest && frozen.frozenContext && !options.runtime && !frozen.model?.startsWith('claude:')) frozen = { ...frozen, readerRuntime: await prepareFrozenReaderRuntime(join(runtimeRoot(), 'structured-frozen-read-only-v2'), frozen.frozenContext) }
     const requestDigest = hash(frozen)
     let flight = flights.get(frozen.requestKey)
     if (flight && flight.digest !== requestDigest) throw new StructuredSessionError('key_reused', 'native request key was reused with different bytes')
