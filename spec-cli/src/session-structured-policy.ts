@@ -9,7 +9,7 @@ import { ensureCodexCurrentGeneration, type CodexGenerationEndpoint } from './co
 import type { FrozenContextRef, FrozenReadProof, FrozenReadReceipt } from './frozen-context.js'
 import { withDeliveryLocks } from './delivery-lock.js'
 
-export type FrozenReaderRuntime = { version: 1; cliVersion: string; catalogDigest: string; catalogPath: string }
+export type FrozenReaderRuntime = { cliVersion: string; catalogDigest: string; catalogPath: string } & ({ version: 1 } | { version: 2; toolOutputTokenLimit: number })
 
 export type StructuredExecution = {
   version: 1 | 2
@@ -42,9 +42,13 @@ export function structuredRealmRoot(execution: unknown, root = runtimeRoot()): s
   if (state.version === 1 && state.policy === 'codex-read-only-v1' && state.readerRuntime === undefined && state.frozenContext === undefined)
     return join(root, 'structured-read-only-v1')
   const readerRuntime = state.readerRuntime
-  if (state.version === 2 && state.policy === 'codex-frozen-read-only-v2' && state.frozenContext?.version === 1 && readerRuntime?.version === 1
-    && /^[a-f0-9]{64}$/.test(readerRuntime.catalogDigest))
-    return join(root, 'structured-frozen-read-only-v2', readerRuntime.catalogDigest)
+  if (state.version === 2 && state.policy === 'codex-frozen-read-only-v2' && state.frozenContext?.version === 1 && readerRuntime
+    && /^[a-f0-9]{64}$/.test(readerRuntime.catalogDigest)) {
+    const realm = join(root, 'structured-frozen-read-only-v2', readerRuntime.catalogDigest)
+    if (readerRuntime.version === 1) return realm
+    if (readerRuntime.version === 2 && Number.isSafeInteger(readerRuntime.toolOutputTokenLimit) && readerRuntime.toolOutputTokenLimit > 0)
+      return join(realm, `output-${readerRuntime.toolOutputTokenLimit}`)
+  }
   return null
 }
 
@@ -92,9 +96,11 @@ export const frozenReaderDisabledFeatures = ['goals', 'view_image', 'image_gener
 const readerFlights = new Map<string, Promise<FrozenReaderRuntime>>()
 
 /** 固定原生版本和去工具目录共同构成v2的能力身份，不读取用户模型缓存。 */
-export function assertFrozenReaderRuntime(runtime: FrozenReaderRuntime, model?: string): void {
+export function assertFrozenReaderRuntime(runtime: FrozenReaderRuntime, model?: string, toolOutputTokenLimit?: number): void {
   const cliVersion = execFileSync('codex', ['--version'], { encoding: 'utf8' }).trim()
-  if (runtime.version !== 1 || cliVersion !== 'codex-cli 0.160.0' || runtime.cliVersion !== cliVersion || !/^[a-f0-9]{64}$/.test(runtime.catalogDigest)
+  if ((runtime.version !== 1 && runtime.version !== 2) || (runtime.version === 2 && (!Number.isSafeInteger(runtime.toolOutputTokenLimit) || runtime.toolOutputTokenLimit <= 0
+    || (toolOutputTokenLimit !== undefined && runtime.toolOutputTokenLimit !== toolOutputTokenLimit)))
+    || cliVersion !== 'codex-cli 0.160.0' || runtime.cliVersion !== cliVersion || !/^[a-f0-9]{64}$/.test(runtime.catalogDigest)
     || createHash('sha256').update(readFileSync(runtime.catalogPath)).digest('hex') !== runtime.catalogDigest)
     throw new StructuredSessionError('unsupported', 'frozen reader CLI version or immutable tool catalog identity differs')
   const catalog = JSON.parse(readFileSync(runtime.catalogPath, 'utf8')) as { models?: Array<{ slug?: string; apply_patch_tool_type?: unknown; experimental_supported_tools?: unknown[] }> }
@@ -105,16 +111,18 @@ export function assertFrozenReaderRuntime(runtime: FrozenReaderRuntime, model?: 
 }
 
 /** 从独立无turn的清洁原生realm获取provider metadata，只删工具能力并固定摘要。 */
-export async function prepareFrozenReaderRuntime(root: string): Promise<FrozenReaderRuntime> {
+export async function prepareFrozenReaderRuntime(root: string, frozenContext: FrozenContextRef): Promise<FrozenReaderRuntime> {
   const cliVersion = execFileSync('codex', ['--version'], { encoding: 'utf8' }).trim()
   if (cliVersion !== 'codex-cli 0.160.0') throw new StructuredSessionError('unsupported', 'this native CLI has no verified frozen-reader host capability evidence')
-  const policyRoot = join(root, 'reader-policy', createHash('sha256').update(cliVersion).digest('hex').slice(0, 16))
+  const { frozenReadOutputTokenLimit } = await import('./frozen-context.js')
+  const toolOutputTokenLimit = frozenReadOutputTokenLimit(frozenContext)
+  const policyRoot = join(root, 'reader-policy', createHash('sha256').update(JSON.stringify({ cliVersion, toolOutputTokenLimit })).digest('hex').slice(0, 16))
   const descriptor = join(policyRoot, 'runtime.json')
-  if (existsSync(descriptor)) { const runtime = JSON.parse(readFileSync(descriptor, 'utf8')) as FrozenReaderRuntime; assertFrozenReaderRuntime(runtime); return runtime }
+  if (existsSync(descriptor)) { const runtime = JSON.parse(readFileSync(descriptor, 'utf8')) as FrozenReaderRuntime; assertFrozenReaderRuntime(runtime, undefined, toolOutputTokenLimit); return runtime }
   let flight = readerFlights.get(policyRoot)
   if (!flight) {
     flight = withDeliveryLocks([`frozen-reader-policy-${createHash('sha256').update(policyRoot).digest('hex')}`], async () => {
-      if (existsSync(descriptor)) { const runtime = JSON.parse(readFileSync(descriptor, 'utf8')) as FrozenReaderRuntime; assertFrozenReaderRuntime(runtime); return runtime }
+      if (existsSync(descriptor)) { const runtime = JSON.parse(readFileSync(descriptor, 'utf8')) as FrozenReaderRuntime; assertFrozenReaderRuntime(runtime, undefined, toolOutputTokenLimit); return runtime }
       mkdirSync(policyRoot, { recursive: true, mode: 0o700 })
       const metadataRoot = join(policyRoot, 'metadata'), { endpoint } = await structuredGeneration(metadataRoot)
       const { codexLoadedReferenceIds, codexRefreshStructuredModels } = await import('./codex-harness.js')
@@ -125,8 +133,8 @@ export async function prepareFrozenReaderRuntime(root: string): Promise<FrozenRe
       const catalog = Buffer.from(JSON.stringify({ models: provider.models.map(model => ({ ...model, apply_patch_tool_type: null, experimental_supported_tools: [] })) }))
       const catalogDigest = createHash('sha256').update(catalog).digest('hex'), catalogPath = join(policyRoot, `${catalogDigest}.json`)
       if (!existsSync(catalogPath)) writeFileSync(catalogPath, catalog, { mode: 0o400 })
-      const runtime: FrozenReaderRuntime = { version: 1, cliVersion, catalogDigest, catalogPath }
-      assertFrozenReaderRuntime(runtime)
+      const runtime: FrozenReaderRuntime = { version: 2, cliVersion, catalogDigest, catalogPath, toolOutputTokenLimit }
+      assertFrozenReaderRuntime(runtime, undefined, toolOutputTokenLimit)
       const references = await codexLoadedReferenceIds(endpoint.socketPath), pid = Number(readFileSync(endpoint.pidFile, 'utf8').trim()), proof = verifyDetachedRuntime(pid, endpoint.receiptFile)
       if (!references.ok || references.referenceIds.length || !proof.ok)
         throw new StructuredSessionError('unsupported', 'isolated metadata realm cannot prove zero threads and its exact process identity')
@@ -157,7 +165,7 @@ export function prepareStructuredRealm(root: string, readerRuntime?: FrozenReade
   const home = join(root, 'config'); mkdirSync(home, { recursive: true, mode: 0o700 })
   const config = join(home, 'config.toml')
   if (readerRuntime) assertFrozenReaderRuntime(readerRuntime)
-  const trustedConfig = readerRuntime ? `model_catalog_json = ${JSON.stringify(readerRuntime.catalogPath)}\n` + configText.replace('code_mode_host = false', 'code_mode_host = true').replace('[features]', '[features]\n' + frozenReaderDisabledFeatures.map(feature => `${feature} = false`).join('\n')) : configText
+  const trustedConfig = readerRuntime ? `model_catalog_json = ${JSON.stringify(readerRuntime.catalogPath)}\n` + (readerRuntime.version === 2 ? `tool_output_token_limit = ${readerRuntime.toolOutputTokenLimit}\n` : '') + configText.replace('code_mode_host = false', 'code_mode_host = true').replace('[features]', '[features]\n' + frozenReaderDisabledFeatures.map(feature => `${feature} = false`).join('\n')) : configText
   if (existsSync(config) && readFileSync(config, 'utf8') !== trustedConfig)
     throw new StructuredSessionError('unsupported', 'structured runtime configuration differs from the trusted fixed policy')
   writeFileSync(config, trustedConfig, { mode: 0o600 })

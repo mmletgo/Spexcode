@@ -84,9 +84,9 @@ try{
  }
  else if(scenario==='sequential'){for(const answer of ['first','second'])results.push(await runStructuredSession(request(answer,'queue-'+answer)));}
  else{
-  const id=sessionIdForCreateKey('queue-active');const controller=new AbortController();const active=runStructuredSession({...request('hold '+scenario,'queue-active',scenario==='timeout'?1200:5000),...(scenario==='abort'?{signal:controller.signal}:{})}).then(result=>({result}),e=>({error:{code:e.code,message:e.message}}));
+  const id=sessionIdForCreateKey('queue-active');const controller=new AbortController();const active=runStructuredSession({...request('hold '+scenario,'queue-active',5000),...(scenario==='abort'?{signal:controller.signal}:{})}).then(result=>({result}),e=>({error:{code:e.code,message:e.message}}));
   await wait(()=>!!readRecord(id)?.structuredExecution?.turnId);
-  const running=(await listSessions()).find(s=>s.id===id);if(readRecord(id).status!=='active'||running.lifecycle!=='active'||running.status!=='working'||running.liveness!=='unknown')throw new Error('accepted native turn still projects queued or fails to reserve capacity');
+  const running=(await listSessions()).find(s=>s.id===id),accepted=readRecord(id);if(accepted.status!=='active'||running.lifecycle!=='active'||running.status!=='working'||running.liveness!=='unknown')throw new Error('accepted native turn is no longer active: '+JSON.stringify({recordStatus:accepted.status,executionState:accepted.structuredExecution.state,lifecycle:running.lifecycle,status:running.status,liveness:running.liveness}));
   if(scenario==='running-restart'){
    const inspect=join(${JSON.stringify(root)},'inspect.mts');writeFileSync(inspect,'import {runStructuredSession} from '+JSON.stringify(${JSON.stringify(source)})+';import {readRecord} from '+JSON.stringify(${JSON.stringify(records)})+';import {listSessions} from '+JSON.stringify(${JSON.stringify(sessions)})+';import {writeFileSync} from "node:fs";const id='+JSON.stringify(id)+';const before=readRecord(id);const row=(await listSessions()).find(s=>s.id===id);if(before.status!=="active"||row.lifecycle!=="active"||row.status!=="working"||row.liveness!=="unknown")throw new Error("fresh process lost exact accepted execution phase");let failure;try{await runStructuredSession('+JSON.stringify(request('second','queue-while-running',300))+');throw new Error("fresh process overlaunched while native task occupies capacity");}catch(error){if(error.code!=="timeout")throw error;failure=error.code;}writeFileSync('+JSON.stringify(${JSON.stringify(join(root,'inspect.json'))})+',JSON.stringify({row:{lifecycle:row.lifecycle,status:row.status,liveness:row.liveness},failure}));process.exit();');
    const inspected=spawnSync(process.execPath,['--import',${JSON.stringify(createRequire(import.meta.url).resolve('tsx/esm'))},inspect],{encoding:'utf8',timeout:5000});if(inspected.status!==0)throw new Error('new embedded process failed active/capacity observation: '+inspected.stderr);
@@ -112,8 +112,8 @@ try{
   }
   if(scenario!=='cross-process'){
    if(scenario==='timeout'||scenario==='abort'){results.push(await active);cancellation=readRecord(id).structuredExecution.cancellation;}
-   // Positive paths prove the public cancellation contract; only refusal/unknown probes impose short deadlines.
-   else{cancellation=await cancelStructuredSession(id,scenario==='refused'||scenario==='ack-active'||scenario==='settled-read-pending'?{timeoutMs:300}:undefined);results.push(await active);}
+   // The ACK-preservation case first allows a normal control handshake, then separately probes its short retry refusal.
+   else{cancellation=await cancelStructuredSession(id,scenario==='ack-active'?{timeoutMs:5000}:scenario==='refused'||scenario==='settled-read-pending'?{timeoutMs:300}:undefined);results.push(await active);}
   }
   if(scenario==='settled-read-pending'){
    const home=join(runtimeRoot(),'structured-read-only-v1/data/codex-home'),proof=JSON.parse(readFileSync(join(home,'pending-settlement-read.json'),'utf8')),before=readRecord(id).structuredExecution.cancellation;

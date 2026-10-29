@@ -1,14 +1,15 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer, type Socket } from 'node:net'
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, realpathSync, mkdirSync } from 'node:fs'
+import { chmodSync, mkdtempSync, rmSync, readFileSync, writeFileSync, realpathSync, mkdirSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { processStartToken } from '@spexcode/spec-core'
 import { codexStructuredTurn } from './codex-harness.js'
-import { prepareStructuredRealm, structuredObserverState, StructuredSessionError, StructuredSessionTransportError, type StructuredExecution } from './session-structured-policy.js'
-import { freezeContext, readFrozenRange, type FrozenNativeItem } from './frozen-context.js'
+import { frozenReaderDisabledFeatures, prepareStructuredRealm, structuredObserverState, StructuredSessionError, StructuredSessionTransportError, type StructuredExecution, type FrozenReaderRuntime } from './session-structured-policy.js'
+import { freezeContext, frozenReadOutputTokenLimit, readFrozenRange, type FrozenNativeItem } from './frozen-context.js'
 
 type Rpc = { id?: number; method: string; params: Record<string, unknown> }
 const schema = { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'], additionalProperties: false }
@@ -84,7 +85,7 @@ function frozenFixture() {
   const item: FrozenNativeItem = { type: 'dynamicToolCall', id: 'native-call', namespace: null, tool: 'spex_read_frozen', arguments: args, status: 'completed', success: true, contentItems: readFrozenRange(ref, args).response.contentItems }
   const policy = (extra: Partial<StructuredExecution> = {}) => execution({ version: 2, policy: 'codex-frozen-read-only-v2', frozenContext: ref, ...extra })
   const turn = (items = [item]) => ({ ...finalTurn(), items: [...items, ...finalTurn().items] })
-  return { ref, args, item, policy, turn, close: () => rmSync(directory, { recursive: true, force: true }) }
+  return { ref, directory, args, item, policy, turn, close: () => rmSync(directory, { recursive: true, force: true }) }
 }
 
 test('structured settlement pages exact raw items when full history never answers', async () => {
@@ -248,6 +249,48 @@ test('frozen native dynamic requests persist before replying and cannot collide 
     assert.equal(result.frozenReadProof?.receipts[0].callId, 'native-call')
     assert.equal(result.frozenReadProof?.receipts[0].turnId, 'turn-exact')
   } finally { await f.close(); data.close() }
+})
+
+test('frozen runtime audits the effective output budget while legacy exact-history recovery keeps its old policy', async () => {
+  const data = frozenFixture(), previousPath = process.env.PATH
+  const bin = join(data.directory, 'bin'); mkdirSync(bin)
+  writeFileSync(join(bin, 'codex'), `#!${process.execPath}\nconsole.log('codex-cli 0.160.0')\n`); chmodSync(join(bin, 'codex'), 0o700)
+  process.env.PATH = `${bin}:${previousPath}`
+  const catalogPath = join(data.directory, 'catalog.json'), catalog = JSON.stringify({ models: [{ slug: 'gpt-6.1-sol', apply_patch_tool_type: null, experimental_supported_tools: [] }] })
+  writeFileSync(catalogPath, catalog)
+  const base = { cliVersion: 'codex-cli 0.160.0', catalogDigest: createHash('sha256').update(catalog).digest('hex'), catalogPath }
+  const toolOutputTokenLimit = frozenReadOutputTokenLimit(data.ref)
+  const rolloutPath = join(data.directory, 'visible-rollout.jsonl')
+  writeFileSync(rolloutPath, [
+    { type: 'session_meta', payload: { id: 'thread-exact', cwd: '/fixture' } },
+    { type: 'turn_context', payload: { turn_id: 'turn-exact' } },
+    { type: 'response_item', payload: { type: 'custom_tool_call', name: 'exec', call_id: 'outer-exec' } },
+    { type: 'response_item', payload: { type: 'custom_tool_call_output', call_id: 'outer-exec', output: [{ type: 'input_text', text: readFrozenRange(data.ref, data.args).response.contentItems[0].text }] }, metadata: { fallback_token_limit_override: Math.ceil(toolOutputTokenLimit * 1.2) } },
+    { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-exact' } },
+  ].map(record => JSON.stringify(record)).join('\n') + '\n')
+  try {
+    for (const mode of ['legacy', 'legacy-unacknowledged', 'legacy-new-thread', 'legacy-new-turn', 'exact', 'missing', 'changed'] as const) {
+      const readerRuntime: FrozenReaderRuntime = mode.startsWith('legacy') ? { ...base, version: 1 } : { ...base, version: 2, toolOutputTokenLimit }
+      const f = await fixture(request => {
+        if (request.method === 'config/read') return { config: { sandbox_mode: 'read-only', approval_policy: 'never', model_catalog_json: catalogPath,
+          ...(mode === 'exact' ? { tool_output_token_limit: toolOutputTokenLimit } : mode === 'changed' ? { tool_output_token_limit: toolOutputTokenLimit - 1 } : {}),
+          features: { apps: false, plugins: false, hooks: false, shell_tool: false, code_mode: false, code_mode_host: true, ...Object.fromEntries(frozenReaderDisabledFeatures.map(feature => [feature, false])) }, mcp_servers: {} } }
+        if (request.method === 'thread/resume') return { thread: { id: 'thread-exact', turns: mode === 'legacy-new-turn' ? [] : [data.turn()] } }
+        if (request.method === 'thread/read') {
+          assert.equal(request.params.includeTurns, false)
+          return { thread: { id: 'thread-exact', path: rolloutPath } }
+        }
+        return safePrelude(request)
+      })
+      try {
+        const refs = mode === 'legacy-new-thread' ? {} : mode === 'legacy-unacknowledged' || mode === 'legacy-new-turn' ? { threadId: 'thread-exact' } : { threadId: 'thread-exact', turnId: 'turn-exact' }
+        const result = codexStructuredTurn(f.path, '/fixture', 'pinned prompt', data.policy({ readerRuntime, ...refs }), callbacks)
+        if (mode === 'missing' || mode === 'changed' || mode === 'legacy-new-thread' || mode === 'legacy-new-turn') await assert.rejects(result, error => error instanceof StructuredSessionError && error.code === 'unsupported')
+        else assert.equal((await result).text, '{"answer":"exact"}')
+        assert.equal(f.calls.some(call => call.method === 'turn/start' || call.method === 'thread/start'), false)
+      } finally { await f.close() }
+    }
+  } finally { process.env.PATH = previousPath; data.close() }
 })
 
 for (const mode of ['foreign-thread', 'foreign-turn', 'wrong-digest', 'path']) test(`frozen ${mode} request is refused before any successful response`, async () => {
