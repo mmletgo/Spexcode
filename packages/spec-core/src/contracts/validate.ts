@@ -73,9 +73,12 @@ function testCaseTitles(source: string): string[] {
     if (!node) return []
     const root = rootBinding(node)
     if (root) return [root]
-    if (['TSAsExpression', 'TSTypeAssertion', 'TSSatisfiesExpression', 'TSNonNullExpression', 'ParenthesizedExpression'].includes(node.type)) return references(node.expression)
+    // Calls and function bodies do not prove which references their result retains.
+    if (['CallExpression', 'OptionalCallExpression', 'NewExpression', 'TaggedTemplateExpression', 'ImportExpression'].includes(node.type) || /^(?:Function|ArrowFunction|ObjectMethod|ClassMethod|ClassPrivateMethod)/.test(node.type)) return []
+    if (node.type.startsWith('TS')) return node.expression ? references(node.expression) : []
+    if (['MemberExpression', 'OptionalMemberExpression'].includes(node.type)) return [...references(node.object), ...(node.computed ? references(node.property) : [])]
     if (node.type === 'ObjectProperty') return [...references(node.value), ...(node.computed ? references(node.key) : [])]
-    return ['ArrayExpression', 'ObjectExpression'].includes(node.type) ? children(node).flatMap(references) : []
+    return children(node).flatMap(references)
   }
   const writes = (node: Syntax | undefined): Binding[] => {
     if (!node) return []
