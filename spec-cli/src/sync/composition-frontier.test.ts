@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { openProtocol } from '@spexcode/session-protocol'
 import { parseContract } from '@spexcode/spec-core/contracts'
-import { readFrozenBehaviorContext } from '../../test/frozen-behavior-context.js'
+import { frozenBodyText, readFrozenBehaviorContext } from '../../test/frozen-behavior-context.js'
 import { analyzeCodeBehavior, authoredContractChanges, selectedAuthoredContractChanges } from './code-behavior.js'
 import { composeInputSnapshots, readCompositionEvidence } from './composition.js'
 import { buildSyncApplicationPlan, deriveSyncBaselineResources } from './planning.js'
@@ -80,12 +80,12 @@ function fakeBehavior(resolution?: string, assertInput?: (frozen: Record<string,
   return async request => {
     let output: unknown
     if (request.purpose === 'code_behavior_analyze') {
-      const frozen = readFrozenBehaviorContext(request.prompt) as { changedPaths: string[] }
+      const frozen = readFrozenBehaviorContext(request) as { changedPaths: string[] }
       assertInput?.(frozen)
       output = { changes: frozen.changedPaths.map(path => ({ kind: 'allowed_change', paths: [path], affectedIds: [a], ruleIds: [a], originalIntent: '保留作者A与已交付B', previousBehavior: 'A1', sourceBehavior: 'A2', deliveryBehavior: 'A1+B1', evidence: '真实Git对象及逐ID残差', counterexample: '不能把A2隐藏为A1' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: resolution ? [{ path: resolutionPath, content: resolution, mode: resolutionMode }] : [] }
     } else {
       const reviewed = JSON.parse(request.prompt.split('待审分析:\n')[1]) as { analysisDigest: string; analysis: CodeBehaviorAnalysis }
-      const frozen = readFrozenBehaviorContext(request.prompt) as { changedPaths: string[] }
+      const frozen = readFrozenBehaviorContext(request) as { changedPaths: string[] }
       output = { inputDigest: request.inputDigest, analysisDigest: reviewed.analysisDigest, verdict: 'accept', checkedPaths: frozen.changedPaths, checkedChangeIds: reviewed.analysis.changes.map(change => change.id), findings: [] }
     }
     return { sessionId: `fake-session-${request.purpose}`, threadId: `fake-thread-${request.purpose}`, turnId: 'fake-turn', output, resultDigest: contentHash(JSON.stringify(output)) }
@@ -289,9 +289,9 @@ test('broad作者raw baseline与intent artifact对象在共享正文后仍逐字
     .map(entry => [`${entry.path}:${entry.mode}:${entry.oid}`, entry] as const))
   const merged = f.addB(authorRaw), behavior = fakeBehavior(merged)
   const analysis = await analyzeCodeBehavior({ snapshot: input, baseline: null, baselineSelection: selection, composed, readSetDigest: 'dedup-author-read', policyDigest: 'dedup-author-policy', requestKey: 'dedup-author-baseline', timeoutMs: 10000, plan: f.plan }, async request => {
-    const wire = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as { textEncoding: string; textBodies: Record<string, string>; intentArtifactFiles: { path: string; mode: string; oid: string; digest: string; bodyRef: string }[] }
-    assert.equal(wire.textEncoding, 'sha256-body-ref-v1')
-    const frozen = readFrozenBehaviorContext(request.prompt) as { authorBaseline: [string, string][]; oldSource: [string, string][]; newSource: [string, string][]; intentArtifactFiles: { path: string; mode: string; oid: string; digest: string; text: string }[] }
+    const wire = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as { textEncoding: string; bodyIndex: Record<string, { required: boolean }>; intentArtifactFiles: { path: string; mode: string; oid: string; digest: string; bodyRef: string }[] }
+    assert.equal(wire.textEncoding, 'sha256-body-entry-v2')
+    const frozen = readFrozenBehaviorContext(request) as { authorBaseline: [string, string][]; oldSource: [string, string][]; newSource: [string, string][]; intentArtifactFiles: { path: string; mode: string; oid: string; digest: string; text: string }[] }
     assert.equal(new Map(frozen.authorBaseline).get(path), expectedAuthorBaseline)
     assert.equal(new Map(frozen.newSource).get(path), authorRaw)
     const expectedMetadata = [...expectedArtifacts.values()].map(({ path, mode, oid, digest }) => ({ path, mode, oid, digest })).sort((left, right) => `${left.path}:${left.mode}:${left.oid}`.localeCompare(`${right.path}:${right.mode}:${right.oid}`))
@@ -302,7 +302,8 @@ test('broad作者raw baseline与intent artifact对象在共享正文后仍逐字
       const restored = frozen.intentArtifactFiles.find(item => item.path === artifact.path && item.mode === artifact.mode && item.oid === artifact.oid)!
       const bytes = readObject(input.source.commonDir, artifact.oid)
       assert.equal(artifact.bodyRef, contentHash(bytes))
-      assert.equal(wire.textBodies[artifact.bodyRef], restored.text)
+      assert.equal(frozenBodyText(request, artifact.bodyRef), restored.text)
+      assert.equal(wire.bodyIndex[artifact.bodyRef].required, true)
       assert.equal(restored.text, bytes.toString('utf8'))
       assert.equal(restored.digest, contentHash(bytes))
     }

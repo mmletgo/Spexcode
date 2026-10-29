@@ -7,11 +7,66 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { processStartToken, verifyDetachedRuntime } from '@spexcode/spec-core'
 import { codexStructuredTurn } from './codex-harness.js'
-import { freezeContext, frozenContextPrompt, frozenReadOutputTokenLimit, readFrozenRange, verifyFrozenReadProof, FROZEN_READ_MAX_BYTES, type FrozenReadReceipt } from './frozen-context.js'
+import { freezeContext, frozenContextPrompt, frozenReadOutputTokenLimit, prepareFrozenPrompt, readFrozenRange, verifyFrozenReadProof, FROZEN_READ_MAX_BYTES, type FrozenReadReceipt } from './frozen-context.js'
 import { assertFrozenReaderRuntime, prepareFrozenReaderRuntime, structuredGeneration, structuredExecutionPolicy, structuredRealmRoot, prepareStructuredRealm } from './session-structured-policy.js'
 
 const nativeEvidence = process.env.SPEX_FROZEN_NATIVE_TEST === '1'
   ? realpathSync(process.env.SPEX_FROZEN_EVIDENCE_DIR ?? mkdtempSync(join(tmpdir(), 'spex-frozen-native-'))) : undefined
+
+test('actual native multi-entry preparation reads required and requested optional bytes with BOM and exact recovery', { skip: process.env.SPEX_FROZEN_NATIVE_TEST !== '1', timeout: 300_000 }, async () => {
+  const evidence = join(nativeEvidence!, 'multi-entry'); mkdirSync(evidence, { recursive: true, mode: 0o700 })
+  const source = join(evidence, 'source'); mkdirSync(source, { recursive: true, mode: 0o700 })
+  execFileSync('git', ['init', '-q', source])
+  const required = `REQUIRED_${randomUUID()}`, optional = `OPTIONAL_${randomUUID()}`
+  const middle = `MIDDLE_${randomUUID()}`, last = `LAST_${randomUUID()}`
+  const repeated = Buffer.from('Immutable required source observation.\n'.repeat(60000)).subarray(0, 2 * 1024 * 1024)
+  repeated.write(middle, 1024 * 1024 + randomInt(90000, 170000))
+  const requiredGroup = JSON.stringify({ 'required-source': required, 'large-mandatory-source': repeated.toString('utf8'), 'last-required-source': last })
+  const expected = { required, optional, bom: true, middle, last }
+  const request = { root: source, requestKey: 'native-multi-entry', inputDigest: 'native-multi-entry-input',
+    prompt: 'Read every required entry by the index readBatches. Also read entry optional-used completely. Do not read optional-unused. Entry required is one JSON object grouping mandatory source strings by bodyRef; optional-used is a JSON-encoded string. Decode once, preserving BOM. Return the REQUIRED_ marker under required-source as required, OPTIONAL_ marker as optional, MIDDLE_ random marker inside large-mandatory-source as middle, LAST_ marker as last, and bom=true only if optional-used starts with U+FEFF. Use one exec per read batch, each tool result printed verbatim in a separate text item, and execMaxOutputTokens from the index for exec/wait. No shell or live files. Return only the structured JSON.',
+    frozenEntries: [
+      { id: 'required', label: 'changed source group', required: true, kind: 'utf8' as const, text: requiredGroup },
+      { id: 'optional-used', label: 'requested related data', required: false, kind: 'utf8' as const, text: JSON.stringify(`\uFEFF中文🙂\r\n${optional}`).replace(/\uFEFF/g, '\\uFEFF') },
+      { id: 'optional-unused', label: 'unrelated authorized data', required: false, kind: 'utf8' as const, text: JSON.stringify('UNUSED_MUST_NOT_BE_REQUIRED\n'.repeat(80000)) },
+    ] }
+  const prepared = prepareFrozenPrompt(request, { directory: join(evidence, 'frozen'), binding: { policyDigest: 'native-multi-entry-policy', attemptId: 'native-multi-entry-attempt' } })
+  assert.equal('frozenEntries' in prepared, false)
+  const ref = prepared.frozenContext!, readerRuntime = await prepareFrozenReaderRuntime(join(evidence, 'reader-policy'), ref)
+  const schema = { type: 'object', properties: { required: { type: 'string' }, optional: { type: 'string' }, bom: { type: 'boolean' }, middle: { type: 'string' }, last: { type: 'string' } }, required: ['required', 'optional', 'bom', 'middle', 'last'], additionalProperties: false }
+  const execution = structuredExecutionPolicy({ schema, inputDigest: request.inputDigest, purpose: 'actual-native-multi-entry', timeoutMs: 240_000, effort: 'low', model: process.env.SPEX_FROZEN_NATIVE_MODEL ?? 'gpt-6.1-sol', frozenContext: ref, readerRuntime })
+  const realm = structuredRealmRoot(execution, join(evidence, 'realm'))!, { endpoint } = await structuredGeneration(realm, readerRuntime)
+  writeFileSync(join(evidence, 'request.json'), JSON.stringify({ source, expected, frozenContext: ref, prompt: prepared.prompt, execution }, null, 2))
+  writeFileSync(join(source, 'optional-used.txt'), 'CONTRADICTORY_LIVE_BYTES')
+  let threadId = '', turnId = ''
+  const receipts: FrozenReadReceipt[] = []
+  try {
+    const result = await codexStructuredTurn(endpoint.socketPath, source, prepared.prompt, execution, {
+      onThread: async id => { threadId = id }, onTurn: async id => { turnId = id }, onFrozenRead: async receipt => { receipts.push(receipt) },
+    })
+    writeFileSync(join(evidence, 'result.json'), JSON.stringify(result, null, 2))
+    assert.deepEqual(JSON.parse(result.text), expected)
+    const proof = result.frozenReadProof!
+    assert.equal(proof.version, 2)
+    assert.deepEqual(proof.coveredEntryIds, ['required', 'optional-used'])
+    verifyFrozenReadProof(ref, proof, { threadId, turnId }, readerRuntime.version === 2 ? readerRuntime.toolOutputTokenLimit : undefined)
+    assert.equal(receipts.length, Math.ceil(Buffer.byteLength(requiredGroup) / FROZEN_READ_MAX_BYTES) + 1)
+    assert.equal(receipts.some(receipt => receipt.arguments.entryId === 'optional-unused'), false)
+    const recovered = await codexStructuredTurn(endpoint.socketPath, source, prepared.prompt, { ...execution, threadId, turnId }, {
+      onThread: async () => assert.fail('recovery must not create another thread'), onTurn: async id => assert.equal(id, turnId), onFrozenRead: async () => assert.fail('recovery must not repeat reads'),
+    })
+    assert.deepEqual(recovered, result)
+    writeFileSync(join(evidence, 'verified.json'), JSON.stringify({ expected, result, receipts, requiredEntries: ['required'], requiredGroupBytes: Buffer.byteLength(requiredGroup), unusedOptionalBytes: Buffer.byteLength(request.frozenEntries[2].text), exactRecovery: true, additionalCalls: 0 }, null, 2))
+  } catch (error) {
+    writeFileSync(join(evidence, 'failure.json'), JSON.stringify({ message: error instanceof Error ? error.message : String(error), threadId, turnId }, null, 2))
+    throw error
+  } finally {
+    const pid = Number(readFileSync(endpoint.pidFile, 'utf8').trim()), receipt = verifyDetachedRuntime(pid, endpoint.receiptFile)
+    assert.ok(receipt.ok, 'isolated test daemon identity must be proven before cleanup')
+    assert.equal(processStartToken(pid), receipt.identity.startToken)
+    process.kill(pid, 'SIGTERM')
+  }
+})
 
 for (const byteLength of [FROZEN_READ_MAX_BYTES, 2 * FROZEN_READ_MAX_BYTES, 2 * 1024 * 1024 + 113]) test(`actual native Codex sees random interior content across ${byteLength} nonempty frozen bytes and recovers exact history`, { skip: process.env.SPEX_FROZEN_NATIVE_TEST !== '1', timeout: 300_000 }, async () => {
   const forceYield = byteLength === 2 * FROZEN_READ_MAX_BYTES

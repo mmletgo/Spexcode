@@ -159,6 +159,44 @@ test('large native prompt freezes before reserveDispatch and reuses stable manif
   } finally { f.cleanup() }
 })
 
+test('pure JSON frozen entries bind the real attempt before dispatch and terminal replay does not call native again', async () => {
+  const f = await fixture()
+  try {
+    const text = '\uFEFF原生计划正文'
+    let calls = 0, preparedPrompt = ''
+    const run = f.runner({ ...f.runtimeBase, run: async request => {
+      calls++
+      preparedPrompt = request.prompt
+      assert.equal(request.frozenEntries, undefined)
+      assert.ok(request.frozenContext)
+      const manifest = readFrozenManifest(request.frozenContext)
+      assert.equal(manifest.binding.attemptId, f.claimed.attempt.id)
+      assert.equal(manifest.binding.policyDigest, f.claimed.operation.policyDigest)
+      assert.equal(manifest.binding.requestKey, f.request.requestKey)
+      assert.equal(manifest.binding.inputDigest, f.request.inputDigest)
+      const entry = manifest.entries.find(item => item.sha256 === createHash('sha256').update(Buffer.from(text, 'utf8')).digest('hex'))
+      assert.equal(entry?.required, false)
+      assert.equal(request.prompt.includes(text), false)
+      const record = published(request); f.records.set(record.session, record)
+      const result = completed(record)
+      const frozenReadProof = proveFrozenReads(request.frozenContext, { threadId: result.threadId, turnId: result.turnId }, [])
+      record.structuredExecution!.frozenReadProof = frozenReadProof
+      return { ...result, frozenReadProof }
+    } })
+    const request = { ...f.request, frozenEntries: [{ id: 'note', label: 'optional note', required: false, kind: 'utf8' as const, text }] }
+    const result = await run(request)
+    const plan = JSON.parse(f.blobIO.read(f.resource().plan.planBlob).toString()) as NativeRunPlan
+    assert.equal(plan.request.frozenEntries, undefined)
+    assert.equal(JSON.stringify(plan.request).includes(text), false)
+    assert.equal(plan.request.prompt, preparedPrompt)
+    assert.equal(plan.requestDigest, hash(plan.request))
+    assert.equal(f.resource().phase, 'removed'); assert.equal(calls, 1)
+    assert.deepEqual(await run(request), result); assert.equal(calls, 1)
+    assert.deepEqual(await run(plan.request), result); assert.equal(calls, 1)
+    assert.equal(f.store.readOperation(f.claimed.operation.id).callsUsed, 1)
+  } finally { f.cleanup() }
+})
+
 test('exact legacy inline resource recovers after reader threshold change without rewriting its request or dispatch', async () => {
   const f = await fixture()
   try {

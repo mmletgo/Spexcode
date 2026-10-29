@@ -30,7 +30,7 @@ related:
 
 路径、URL、额外参数、错摘要、篡改、非法区间立即拒绝。模型索引不含控制路径。真实请求与回复全文及摘要先持久后回RPC；精确turn的真实native history再次核验arguments、completed/success、contentItems全文和required完整coverage，相同kind/SHA/长度可共享覆盖。coverage只累计原requested区间，不用扩展解码字节豁免缺口；精确响应仍由同一解码规则重建。生成/审查各自在自己turn取得完整证明。直接回归覆盖中文和emoji每个字节切点、相邻片段、完整coverage与隐藏缺口，以及旧对齐响应的全文和hash兼容。
 
-prepareFrozenPrompt在创建或新资源计划摘要前将超过512KiB的完整正文转换为单个required UTF8 entry和短读取指令，保原inputDigest；较小正文保持v1。该保守阈值只选择无损传输，不截断或拒绝业务输入，避免1至2MiB正文仍超过原生RPC字符串上限。相同绑定/内容返回稳定ref，重试不因随机路径改变幂等哈希。createAttemptRunner附加真实policy/attempt并保持业务requestKey，sessionCreateKey另承接正式派发键。provided ref在派发前严格校验绑定。
+prepareFrozenPrompt在创建或新资源计划摘要前将超过512KiB的完整正文转换为单个required UTF8 entry和短读取指令，保原inputDigest；较小且没有条目的正文保持v1。该保守阈值只选择无损传输，不截断或拒绝业务输入，避免1至2MiB正文仍超过原生RPC字符串上限。调用者也可给出通用纯 JSON `frozenEntries`：utf8 用 text、binary 用规范 base64、absent 无字节，不把 Buffer 放进会被 JSON 拷贝的请求。这些条目在同一 freezeContext 中按原 id/label/required 冻结；超阈值 prompt 仍另成 required `task`，条目正文不写入该 task。返回值和持久计划只留最终 ref，去掉条目载荷。已有 ref 原样返回，不重写 prompt、证明或绑定。相同绑定/内容返回稳定ref，重试不因随机路径改变幂等哈希。createAttemptRunner附加真实policy/attempt并保持业务requestKey，sessionCreateKey另承接正式派发键。provided ref在派发前严格校验绑定。普通结构化调用不编造 attempt/policy。
 
 completed恢复读取精确native history不新起turn或重调用工具，已结算资源核保存history全文/hash和覆盖。断连inProgress的v2不重发旧RPC id，不造完成回执；沿既有cancelling/unknown保留容量，只有正式精确停止证明才允许新attempt。独立actualnative测试必须在专用realm完整覆盖大于2MiB的真实工具返回，并核首中尾内容、原生历史和无新调用恢复，不能把controlled RPC测试冒充实际模型证明。
 

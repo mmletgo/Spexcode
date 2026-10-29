@@ -53,17 +53,26 @@ function packagePath(path: string): string {
   if (!clean || isAbsolute(clean) || clean.includes('\\') || clean.split('/').some(part => !part || part === '..' || part === '.') || /[\0{}[\]!]/.test(clean)) unsupported('未知或越界发布路径')
   return clean
 }
-function safeParents(root: string, path: string): void {
+function safeParents(root: string, path: string, allowMissing = false): boolean {
   const parts = path.split('/')
-  for (let count = 1; count < parts.length; count++) if (!lstatSync(join(root, ...parts.slice(0, count))).isDirectory()) unsupported(`发布路径父目录不能为 symlink: ${path}`)
+  for (let count = 1; count < parts.length; count++) {
+    const parent = join(root, ...parts.slice(0, count))
+    const stat = allowMissing ? lstatSync(parent, { throwIfNoEntry: false }) : lstatSync(parent)
+    if (!stat) return false
+    if (!stat.isDirectory()) unsupported(`发布路径父目录不能为 symlink: ${path}`)
+  }
+  return true
 }
 /** 只展开已声明的精确路径或末段 * / ?，不扫描 workspace 的其它目录。 */
-function publishedPaths(root: string, declaration: string): string[] {
+function publishedPaths(root: string, declaration: string, allowMissing = false): string[] {
   const path = packagePath(declaration), parent = dirname(path), name = basename(path)
   if (/[*?]/.test(parent)) unsupported(`未支持的发布 glob: ${path}`)
-  safeParents(root, path)
+  if (!safeParents(root, path, allowMissing)) return []
   if (!/[*?]/.test(name)) {
-    if (!lstatSync(join(root, path), { throwIfNoEntry: false })) unsupported(`发布文件缺失: ${path}`)
+    if (!lstatSync(join(root, path), { throwIfNoEntry: false })) {
+      if (allowMissing) return []
+      unsupported(`发布文件缺失: ${path}`)
+    }
     return [path]
   }
   const pattern = new RegExp(`^${name.replace(/[.+^$()|\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`)
@@ -77,7 +86,9 @@ function exportPaths(value: unknown): string[] {
     return [value]
   }
   if (typeof value !== 'object') unsupported('未知 package exports 声明')
-  return Object.values(value).flatMap(exportPaths)
+  const entries = Object.entries(value), subpathMap = entries.some(([key]) => key.startsWith('.'))
+  // Type-system conditions do not participate in Node's runtime package resolution.
+  return entries.flatMap(([key, target]) => !subpathMap && (key === 'types' || key.startsWith('types@')) ? [] : exportPaths(target))
 }
 
 /** 冻结可信已编译工具和生产闭包；该发布快照不代表 private delivery 已完成。 */
@@ -131,7 +142,11 @@ export function freezeDeliveryRuntime(ownedDestination: string, trustedCliPackag
       const declarations = item.json.files ?? readdirSync(item.root).sort()
       const bins = typeof item.json.bin === 'string' ? [item.json.bin] : Object.values(item.json.bin ?? {})
       const mandatory = ['package.json', ...(item.json.main ? [item.json.main] : []), ...bins, ...readdirSync(item.root).filter(name => /^(?:readme|licen[cs]e|copying|notice)(?:\.|$)/i.test(name))]
-      for (const declaration of [...declarations, ...mandatory]) {
+      for (const declaration of declarations) {
+        if (privateMetadata(declaration)) { excluded.push({ packageId: item.id, path: declaration, reason: 'private_metadata' }); continue }
+        for (const path of publishedPaths(item.root, declaration, item.json.files !== undefined)) copy(path)
+      }
+      for (const declaration of mandatory) {
         if (privateMetadata(declaration)) { excluded.push({ packageId: item.id, path: declaration, reason: 'private_metadata' }); continue }
         for (const path of publishedPaths(item.root, declaration)) copy(path)
       }

@@ -33,3 +33,5 @@ code:
 1至2MiB旧 inline 资源回归固定完整请求、dispatch及真实SQLite资源后，以已 aborted 的原请求重入，核对只取消原精确会话并推进 removed、无新 run、callsUsed 不增、计划摘要不变。同 key 修改正文仍拒绝，不能借旧资源跳过新请求冻结或摘要核验。该前置资源是明确夹具，不冒称原生模型交付。
 
 固定非默认 terra/high 运行通过原完整 frozenReadProof 接缝，plan/requestDigest及实际结构化记录均保精确模型；同key换模型或published record模型错配拒绝。此为受控runtime协议证明，不冒称实时容量或真实LLM完成；操作选择属于 [[sync-model-selection]]。
+
+纯JSON frozenEntries经真实资源桥绑定当前attempt/policy，派发前转换为不可变ref，保存计划不含正文载荷；重启与terminal重放继续使用原请求/证明，不增加调用或预算。小prompt也可有显式冻结条目，旧已有ref及旧inline恢复不被新传输重写。

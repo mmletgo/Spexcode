@@ -69,6 +69,11 @@ async function fixture(config: unknown = settings, onRun?: (request: Elaboration
   const application = await SyncApplication.create(root, { protocol, runtimeDirectory: join(temp, 'runtime'), tools: { trustedRuntimeRoot: '/missing-runtime', toolEntry: '/missing-runtime/cli.js', canonicalHooksDir: '/missing-runtime/hooks' }, runner: async request => { calls.push(request); if (onRun) return onRun(request); throw Object.assign(new Error('受控生成环境故障'), { code: 'unsupported' }) } })
   return { temp, root, git, protocol, application, calls, cleanup: (): void => { protocol.close(); rmSync(temp, { recursive: true, force: true }) } }
 }
+function governDemoCode(f: Awaited<ReturnType<typeof fixture>>): void {
+  writeFileSync(join(f.root, '.spec/demo/spec.md'), source.replace('status: pending', 'status: pending\ncode:\n  - src/demo.mjs'))
+  f.git(['add', '.spec/demo/spec.md'])
+  f.git(['commit', '-qm', 'fixture: govern demo implementation'])
+}
 
 test('操作模型经真实Git入口持久化，重启和省略重试继承，普通重复不能刷新预算', async () => {
   const f = await fixture()
@@ -300,20 +305,36 @@ test('AC-APPLICATION-08 queued资料损坏有恢复诊断，同请求只恢复�
 })
 
 test('AC-APPLICATION-09 显式单次调用上限来自operation冻结配置，live修改不改旧请求与总预算', async () => {
-  const f = await fixture({ ...settings, callTimeoutMs: 10000 })
+  let holdFirstCall = true
+  const f = await fixture({ ...settings, callTimeoutMs: 10000 }, async request => {
+    if (holdFirstCall) {
+      holdFirstCall = false
+      await new Promise<never>((_resolve, reject) => request.signal!.addEventListener('abort', () => reject(new Error('受控调用响应暂停')), { once: true }))
+    }
+    throw Object.assign(new Error('受控生成环境故障'), { code: 'unsupported' })
+  })
   try {
+    governDemoCode(f)
     await f.application.enable()
     const result = await f.application.submit({ nodeId: 'demo', requestId: 'call-timeout' }); assert.ok(result.operation)
-    const first = await f.application.wait(result.operation.id)
+    await observeUntil(() => f.calls.length === 1, 30000)
     assert.equal(f.calls[0].timeoutMs, 10000)
-    writeFileSync(join(f.root, '.spec/spexcode.json'), JSON.stringify({ sync: { ...settings, callTimeoutMs: 20000 } }))
-    assert.equal(readSyncSettings(first.operation.input).settings.callTimeoutMs, 10000)
-    f.application.store.requestControl(first.operation.id, 'pause'); f.application.store.requestControl(first.operation.id, 'run')
-    f.application.start(first.operation.id)
-    const second = await f.application.wait(first.operation.id)
+    const paused = await f.application.control(result.operation.id, 'pause')
+    assert.equal(paused.operation.phase, 'paused')
+    const first = await f.application.wait(result.operation.id)
+    assert.equal(first.operation.phase, 'paused'); assert.equal(first.operation.callsUsed, 1)
+    await f.application.control(result.operation.id, 'resume')
+    const second = await f.application.wait(result.operation.id)
+    assert.equal(second.operation.phase, 'failed')
+    assert.equal(f.calls.length, 2)
     assert.equal(f.calls[1].timeoutMs, 10000)
+    writeFileSync(join(f.root, '.spec/spexcode.json'), JSON.stringify({ sync: { ...settings, callTimeoutMs: 20000 } }))
+    assert.equal(readSyncSettings(second.operation.input).settings.callTimeoutMs, 10000)
     assert.equal(second.operation.deadlineAtMs, first.operation.deadlineAtMs)
     assert.equal(second.operation.budget.timeoutMs, first.operation.budget.timeoutMs)
+    assert.equal(second.operation.budget.maxCalls, first.operation.budget.maxCalls)
+    await assert.rejects(f.application.submit({ nodeId: 'demo', requestId: 'call-timeout' }), /配置已变化/)
+    assert.equal(f.calls.length, 2, '失败的精确请求不能因配置变化再次派发')
   } finally { f.cleanup() }
 })
 
@@ -337,7 +358,7 @@ test('AC-APPLICATION-10 已启用后删除或损坏配置保持invalidated，不
   } finally { f.cleanup() }
 })
 
-test('AC-APPLICATION-11 initial来源真实入账并执行Spec业务管线，同键不同来源拒绝', async () => {
+test('AC-APPLICATION-11 raw-only initial先行为分析并真实入账，失败不重派且同键不同来源拒绝', async () => {
   const f = await fixture()
   try {
     await f.application.enable()
@@ -345,17 +366,19 @@ test('AC-APPLICATION-11 initial来源真实入账并执行Spec业务管线，同
     const submitted = await f.application.submit(request); assert.ok(submitted.operation)
     const detail = await f.application.wait(submitted.operation.id)
     assert.equal(detail.operation.origin, 'initial')
-    assert.equal(f.calls[0]?.purpose, 'elaboration_generate')
+    assert.equal(detail.operation.phase, 'failed')
+    assert.equal(f.calls[0]?.purpose, 'code_behavior_analyze')
     assert.equal((await f.application.submit(request)).operation?.id, submitted.operation.id)
     await f.application.wait(submitted.operation.id)
+    assert.equal(f.calls.length, 1, '同键重放不得再次派发失败的分析请求')
     await assert.rejects(f.application.submit({ ...request, origin: 'spec' }), /SYNC_IDEMPOTENCY_CONFLICT/)
   } finally { f.cleanup() }
 })
 
-async function linkedApplication(f: Awaited<ReturnType<typeof fixture>>, directory: string) {
+async function linkedApplication(f: Awaited<ReturnType<typeof fixture>>, directory: string, onRun?: (request: ElaborationSessionRequest) => Promise<never>) {
   const root = join(f.temp, directory), calls: ElaborationSessionRequest[] = []
   f.git(['worktree', 'add', '-b', `node/${directory}`, root, 'HEAD'])
-  const application = await SyncApplication.create(root, { protocol: f.protocol, runtimeDirectory: join(f.temp, `${directory}-runtime`), tools: { trustedRuntimeRoot: '/missing-runtime', toolEntry: '/missing-runtime/cli.js', canonicalHooksDir: '/missing-runtime/hooks' }, runner: async request => { calls.push(request); throw Object.assign(new Error('受控环境故障'), { code: 'unsupported' }) } })
+  const application = await SyncApplication.create(root, { protocol: f.protocol, runtimeDirectory: join(f.temp, `${directory}-runtime`), tools: { trustedRuntimeRoot: '/missing-runtime', toolEntry: '/missing-runtime/cli.js', canonicalHooksDir: '/missing-runtime/hooks' }, runner: async request => { calls.push(request); if (onRun) return onRun(request); throw Object.assign(new Error('受控环境故障'), { code: 'unsupported' }) } })
   await application.enable()
   return { application, calls }
 }
@@ -374,6 +397,7 @@ function holdNextAdmission(f: Awaited<ReturnType<typeof fixture>>) {
 
 test('AC-APPLICATION-12 同仓库两个工作树沿真实FIFO，busy不自旋，结束自动接续另一来源', async () => {
   const first = await fixture({ ...settings, budget: { ...settings.budget, timeoutMs: 120000 } })
+  governDemoCode(first)
   const later = await linkedApplication(first, 'later-source'), held = holdNextAdmission(first)
   const repositoryId = identifyWorktree(first.root).repositoryId
   try {
@@ -382,46 +406,58 @@ test('AC-APPLICATION-12 同仓库两个工作树沿真实FIFO，busy不自旋，
     await first.application.wait(earlier.operation.id)
     const queued = await later.application.submit({ nodeId: 'demo', requestId: 'fifo-later' }); assert.ok(queued.operation)
     await first.application.wait(earlier.operation.id)
-    assert.equal(first.application.store.nextDispatch(repositoryId)?.operation.id, earlier.operation.id)
+    assert.equal(first.application.store.nextQueued(repositoryId)?.id, earlier.operation.id)
     assert.equal(first.calls.length, 0); assert.equal(later.calls.length, 0)
     assert.equal((await later.application.wait(queued.operation.id)).operation.phase, 'queued')
     held.mutex!.release(); held.mutex = null
     first.application.start(earlier.operation.id)
     await later.application.wait(queued.operation.id)
     assert.equal(first.calls.length, 1); assert.equal(later.calls.length, 1)
-    assert.equal(first.application.store.nextDispatch(repositoryId), null)
+    assert.equal(first.application.store.nextQueued(repositoryId), null)
     assert.equal((await later.application.readOperation(queued.operation.id)).operation.phase, 'failed')
   } finally { held.mutex?.release(); first.cleanup() }
 })
 
 test('AC-APPLICATION-13 已出队暂停恢复先等有效FIFO，前序完成后自动恢复且wait等待真实执行', async () => {
   const first = await fixture({ ...settings, budget: { ...settings.budget, timeoutMs: 120000 } })
-  const later = await linkedApplication(first, 'resume-source')
+  governDemoCode(first)
+  let holdFirstCall = true
+  const later = await linkedApplication(first, 'resume-source', async request => {
+    if (holdFirstCall) {
+      holdFirstCall = false
+      await new Promise<never>((_resolve, reject) => request.signal!.addEventListener('abort', () => reject(new Error('受控调用响应暂停')), { once: true }))
+    }
+    throw Object.assign(new Error('受控环境故障'), { code: 'unsupported' })
+  })
   const repositoryId = identifyWorktree(first.root).repositoryId
   const held = holdNextAdmission(first)
   try {
     await first.application.enable()
     const submitted = await later.application.submit({ nodeId: 'demo', requestId: 'resume-first' }); assert.ok(submitted.operation)
-    const failed = await later.application.wait(submitted.operation.id)
-    assert.equal(failed.operation.phase, 'failed'); assert.equal(later.calls.length, 1)
-    await later.application.control(submitted.operation.id, 'pause')
+    await observeUntil(() => later.calls.length === 1, 30000)
+    const paused = await later.application.control(submitted.operation.id, 'pause')
+    assert.equal(paused.operation.phase, 'paused')
+    const firstAttempt = await later.application.wait(submitted.operation.id)
+    assert.equal(firstAttempt.operation.phase, 'paused'); assert.equal(firstAttempt.attempt?.number, 1)
+    assert.equal(later.calls.length, 1)
     const earlier = await first.application.submit({ nodeId: 'demo', requestId: 'pending-before-resume' }); assert.ok(earlier.operation)
     await first.application.wait(earlier.operation.id)
     const resumed = await later.application.control(submitted.operation.id, 'resume')
     assert.equal(resumed.operation.phase, 'queued'); assert.equal(later.calls.length, 1)
-    assert.equal(first.application.store.nextDispatch(repositoryId)?.operation.id, earlier.operation.id)
+    assert.equal(first.application.store.nextQueued(repositoryId)?.id, earlier.operation.id)
     held.mutex!.release(); held.mutex = null
     first.application.start(earlier.operation.id)
     const restored = await later.application.wait(submitted.operation.id)
     assert.equal(restored.operation.phase, 'failed'); assert.equal(restored.attempt?.number, 2)
     assert.equal(first.calls.length, 1); assert.equal(later.calls.length, 2)
-    assert.equal(restored.operation.deadlineAtMs, failed.operation.deadlineAtMs)
-    assert.equal(first.application.store.nextDispatch(repositoryId), null)
+    assert.equal(restored.operation.deadlineAtMs, firstAttempt.operation.deadlineAtMs)
+    assert.equal(first.application.store.nextQueued(repositoryId), null)
   } finally { held.mutex?.release(); first.cleanup() }
 })
 
 test('AC-APPLICATION-14 不同仓库共享canonicalDB时分别派发，不执行另一仓库的FIFO头', async () => {
   const first = await fixture({ ...settings, budget: { ...settings.budget, timeoutMs: 120000 } }), second = await fixture()
+  governDemoCode(first); governDemoCode(second)
   const held = holdNextAdmission(first), calls: ElaborationSessionRequest[] = []
   const other = await SyncApplication.create(second.root, { protocol: first.protocol, runtimeDirectory: join(second.temp, 'shared-runtime'), tools: { trustedRuntimeRoot: '/missing-runtime', toolEntry: '/missing-runtime/cli.js', canonicalHooksDir: '/missing-runtime/hooks' }, runner: async request => { calls.push(request); throw Object.assign(new Error('另一仓库受控故障'), { code: 'unsupported' }) } })
   try {
@@ -431,8 +467,8 @@ test('AC-APPLICATION-14 不同仓库共享canonicalDB时分别派发，不执行
     const submitted = await other.submit({ nodeId: 'demo', requestId: 'independent-repository' }); assert.ok(submitted.operation)
     assert.equal((await other.wait(submitted.operation.id)).operation.phase, 'failed')
     assert.equal(first.calls.length, 0); assert.equal(calls.length, 1)
-    assert.equal(first.application.store.nextDispatch(identifyWorktree(first.root).repositoryId)?.operation.id, blocked.operation.id)
-    assert.equal(first.application.store.nextDispatch(identifyWorktree(second.root).repositoryId), null)
+    assert.equal(first.application.store.nextQueued(identifyWorktree(first.root).repositoryId)?.id, blocked.operation.id)
+    assert.equal(first.application.store.nextQueued(identifyWorktree(second.root).repositoryId), null)
     held.mutex!.release(); held.mutex = null
     first.application.start(blocked.operation.id); await first.application.wait(blocked.operation.id)
   } finally { held.mutex?.release(); second.cleanup(); first.cleanup() }
@@ -478,7 +514,8 @@ test('AC-APPLICATION-16 重试完整继承未落地正文意图，不能混入�
     const result = await f.application.wait(retried.operation.id)
     assert.deepEqual(result.operation.requestBlob, original.operation.requestBlob)
     assert.deepEqual(result.operation.previousBaselinePair, original.operation.previousBaselinePair)
-    assert.match(f.calls[1].prompt, /尚未落地的新正文/)
+    const frozen = readFrozenBehaviorContext<{ composedFiles: [string, string][] }>(f.calls[1])
+    assert.match(new Map(frozen.composedFiles).get('.spec/demo/spec.md')!, /尚未落地的新正文/)
     assert.equal(readFileSync(join(f.root, '.spec/demo/spec.md'), 'utf8'), source)
     writeFileSync(join(f.root, 'src/demo.mjs'), 'export const demo = text => `${text}!`\n')
     const stale = await f.application.readOperation(original.operation.id)
@@ -506,6 +543,7 @@ test('AC-APPLICATION-17 queued不可借retry重置预算，无交付cancelled可
 
 async function resourceFixture(options: { conflict?: boolean; callRequested?: boolean; invalidPlan?: boolean } = {}) {
   const f = await fixture()
+  governDemoCode(f)
   let calls = 0
   const application = await SyncApplication.create(f.root, { protocol: f.protocol, runtimeDirectory: join(f.temp, 'runtime'), tools: { trustedRuntimeRoot: '/missing-runtime', toolEntry: '/missing-runtime/cli.js', canonicalHooksDir: '/missing-runtime/hooks' }, runner: async request => {
     calls++
@@ -539,8 +577,10 @@ test('AC-APPLICATION-18 已停止操作仍有未结算资源时不能展示ready
   } finally { f.cleanup() }
 })
 
-test('AC-APPLICATION-19 recover不派发queued任务，不改control/预算/输入或出队有效消息', async () => {
-  const f = await fixture(), held = holdNextAdmission(f)
+test('AC-APPLICATION-19 recover不派发queued任务，不改control/预算/输入或有效FIFO位置', async () => {
+  const f = await fixture()
+  governDemoCode(f)
+  const held = holdNextAdmission(f)
   try {
     await f.application.enable()
     const submitted = await f.application.submit({ nodeId: 'demo', requestId: 'recover-only-queued' }); assert.ok(submitted.operation)
@@ -550,7 +590,7 @@ test('AC-APPLICATION-19 recover不派发queued任务，不改control/预算/输�
     const after = await f.application.wait(before.operation.id)
     assert.deepEqual(after.operation, before.operation)
     assert.equal(after.operation.phase, 'queued'); assert.equal(after.attempt, null); assert.equal(f.calls.length, 0)
-    assert.equal(f.application.store.nextDispatch(identifyWorktree(f.root).repositoryId)?.operation.id, before.operation.id)
+    assert.equal(f.application.store.nextQueued(identifyWorktree(f.root).repositoryId)?.id, before.operation.id)
   } finally { held.mutex?.release(); f.cleanup() }
 })
 
@@ -567,7 +607,9 @@ test('AC-APPLICATION-20 conflicted仍有资源不能ready；recover只结算已�
     await f.application.control(before.operation.id, 'recover')
     const after = await f.application.wait(before.operation.id)
     assert.deepEqual(after.operation, before.operation); assert.equal(after.operation.phase, 'conflicted')
-    assert.equal(after.resources.length, 0); assert.equal(after.executionAvailability.status, 'ready')
+    assert.equal(after.resources.length, 0)
+    assert.equal(after.executionAvailability.status, 'recovery_required')
+    assert.equal(after.executionAvailability.failure?.code, 'sync_delivery_evidence_invalid', '资源已清理，但无效配置使当前delivery证据不可判定')
     assert.equal(f.modelCalls(), 1); assert.equal(f.application.store.listAttempts(before.operation.id).length, 1)
     assert.equal((await f.application.readSettings()).activation, 'invalidated')
   } finally { f.cleanup() }
@@ -653,7 +695,7 @@ async function exportApplicationFixture(t: test.TestContext, choice?: 'keep_inte
     const limit = choice === 'keep_intent' ? null : choice === 'adopt_behavior' ? 8 : 128
     let output: unknown
     if (request.purpose === 'code_behavior_analyze') {
-      const frozen = readFrozenBehaviorContext<{ changedPaths: string[]; oldSource: [string, string][]; newSource: [string, string][]; verifiedDelivery: [string, string][]; compositionEvidence: { conflicts: { path: string; delivery: { mode: '100644' | '100755' } | null }[] } | null }>(request.prompt)
+      const frozen = readFrozenBehaviorContext<{ changedPaths: string[]; oldSource: [string, string][]; newSource: [string, string][]; verifiedDelivery: [string, string][]; compositionEvidence: { conflicts: { path: string; delivery: { mode: '100644' | '100755' } | null }[] } | null }>(request)
       const paths = [...new Set([...frozen.changedPaths, ...(decisionFact ? plan.decisionAuthorities.flatMap(authority => authority.paths) : [])])]
       output = { changes: paths.map(changed => changed === codePath ? ({ kind: decisionFact ? 'allowed_change' : 'conflict', paths: [changed], affectedIds: ['RULE-EXPORT-02', 'AC-EXPORT-02'], ruleIds: ['RULE-EXPORT-02'], originalIntent: 'key与非空字符串filter必需，未授权filter长度上限；幂等政策保持', previousBehavior: '9字符非空filter可提交', sourceBehavior: 'filter长度超过8字符拒绝，8字符可提交；原权限与幂等保持', deliveryBehavior: '非空filter无长度上限', evidence: `冻结src/export.js#ExportService.submit 的filter.length > 8与RULE-EXPORT-02、AC-EXPORT-02逐项对照；${decisionFact?.text ?? '无上限授权'}`, counterexample: 'filter=123456789：原意接受但现源码invalid-request' }) : ({ kind: 'refactor', paths: [changed], affectedIds: [], ruleIds: [], originalIntent: '原业务契约与可信测试不变', previousBehavior: '原完整导出行为', sourceBehavior: '治理文本与上下文无新增业务变化', deliveryBehavior: '原业务义务保持', evidence: `已完整读取${changed}，长度边界冲突仅在${codePath}`, counterexample: '固定oracle验证原权限、幂等与状态转换' })), facts: decisionFact ? [decisionFact] : [], acceptanceChanges: decisionFact && choice !== 'keep_intent' ? [{ id: 'AC-EXPORT-02', ruleIds: ['RULE-EXPORT-02'], source: decisionFact.source, reason: `仅按所选裁决增加filter${limit}字符边界，保空输入、权限、幂等与结果义务` }] : [], newNodes: [], resolutions: [] }
       if (independentNode || !choice) output = { changes: paths.map(changed => ({ kind: 'refactor', paths: [changed], affectedIds: [], ruleIds: [], originalIntent: '固定导出规则与验收保持', previousBehavior: '固定ExportService完整行为', sourceBehavior: '仅添加测试指定注释，不改变业务执行', deliveryBehavior: '原完整业务与已生成注释保持', evidence: `真实冻结${changed}的业务语句保持，新增仅注释`, counterexample: '固定可信oracle仍验证权限、幂等和全部状态转换' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
@@ -752,7 +794,7 @@ for (const choice of ['adopt_behavior', 'new_rule'] as const) test(`AC-APPLICATI
   const behaviorRequests = f.nativeRequests.filter(request => ['code_behavior_analyze', 'code_behavior_review'].includes(request.purpose) && request.prompt.includes('"origin":"decision"'))
   assert.equal(behaviorRequests.length, 2)
   for (const dispatch of behaviorRequests) {
-    const frozen = readFrozenBehaviorContext<{ decision: { previousComposed: unknown }; verifiedDelivery: unknown[] }>(dispatch.prompt)
+    const frozen = readFrozenBehaviorContext<{ decision: { previousComposed: unknown }; verifiedDelivery: unknown[] }>(dispatch)
     assert.deepEqual(frozen.decision.previousComposed, first.attempt!.composedInput)
     assert.deepEqual(frozen.verifiedDelivery, [])
   }

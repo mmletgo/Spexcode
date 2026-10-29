@@ -27,3 +27,5 @@ raw-only冷启动即使没有AC.test，也把settings.testPaths内的现有pytes
 真实 Git 夹具复制官方 init 的 `.plugins` 模板，先复现插件脚本被误纳入业务授权导致规划失败；修后插件实例不进入当前/历史业务图、targets、读取/写入或执行覆盖，显式插件意图拒绝，原业务源码、VERIFY 与不可写 oracle 政策保持。真实插件脚本即使位于业务 Spec 的目录前缀下，仍被候选实际 executionScope 越界门禁拒绝。
 
 真实Git/store旧基线上的子节点移动先复现readonly父契约的code/AC文件未入readPaths；修后同一官方validateContractGraph完整严格检查无error。当前及历史映射变化两个case都读取真实精确声明文件，executionScope和writePaths逐项保持原目标范围，候选硬门禁拒绝覆盖readonly父assets；独立B的Spec/code/test及其资源均未纳入。旧基线仍经现有store动作建立，四层验证明确fake；只证明规划/读取/候选门禁，不宣称native或Docker交付。
+
+行为输入接缝从完整runner request还原body-entry-v2正文，正文可位于独立或必读共享entry；规划输出、原授权范围、requiredChangedPaths与完整引用字节继续逐项核对，不用运输元数据替代业务覆盖。

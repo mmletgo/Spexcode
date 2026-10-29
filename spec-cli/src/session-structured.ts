@@ -7,7 +7,7 @@ import { readRecord, withRecordLock, writeRecord } from './session-record.js'
 import { codexStructuredTurn, codexStopStructuredTurn } from './codex-harness.js'
 import { commitCodexGenerationRegistration, prepareCodexGenerationRegistration, readCodexGenerationLedger, resolveCodexGenerationForClose } from './codex-runtime-generations.js'
 import { structuredGeneration, prepareStructuredRealm, prepareFrozenReaderRuntime, assertFrozenReaderRuntime, StructuredSessionError, StructuredSessionTransportError, structuredObserverState, structuredExecutionPolicy, structuredRealmRoot, type StructuredExecution, type FrozenReaderRuntime } from './session-structured-policy.js'
-import { assertFrozenBinding, prepareFrozenPrompt, readFrozenManifest, verifyFrozenReadProof, type FrozenContextRef, type FrozenReadProof } from './frozen-context.js'
+import { assertFrozenBinding, prepareFrozenPrompt, readFrozenManifest, verifyFrozenReadProof, type FrozenContextRef, type FrozenEntryJson, type FrozenReadProof } from './frozen-context.js'
 import { configuredSessionApplication } from './session-application.js'
 import { withDeliveryLocks } from './delivery-lock.js'
 export { StructuredSessionError } from './session-structured-policy.js'
@@ -25,6 +25,8 @@ export type StructuredSessionRequest = {
   model?: string
   effort?: StructuredExecution['effort']
   frozenContext?: FrozenContextRef
+  /** 通用纯 JSON 冻结条目；prepareFrozenPrompt 在派发前物化并从持久请求中去掉载荷。 */
+  frozenEntries?: readonly FrozenEntryJson[]
   /** 只有已登记reserveDispatch的内部资源桥设置；业务requestKey保持冻结清单绑定。 */
   sessionCreateKey?: string
   readerRuntime?: FrozenReaderRuntime

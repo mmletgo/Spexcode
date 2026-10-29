@@ -387,3 +387,35 @@ test('one-to-two MiB prompts use lossless reader below native string limit with 
     assert.ok(prepareFrozenPrompt({ ...boundary, prompt: boundary.prompt + 'x' }, { directory: f.directory }).frozenContext)
   } finally { f.close() }
 })
+
+test('pure JSON frozen entries survive a JSON copy, keep roles, and do not rewrite an existing ref', () => {
+  const f = fixture([])
+  try {
+    const small = { root: process.cwd(), prompt: 'small task', ...binding }
+    assert.equal(prepareFrozenPrompt(small, { directory: f.directory }), small)
+    const text = '\uFEFF中文条目', binary = Buffer.from([0xff, 0x00, 0xfe])
+    const request = { ...small, frozenEntries: [
+      { id: 'text', label: 'text role', required: true, kind: 'utf8' as const, text },
+      { id: 'bin', label: 'binary role', required: false, kind: 'binary' as const, base64: binary.toString('base64') },
+      { id: 'gone', label: 'absent role', required: false, kind: 'absent' as const },
+    ] }
+    const copied = JSON.parse(JSON.stringify(request)) as typeof request
+    const options = { directory: f.directory, binding: { attemptId: 'real-attempt', policyDigest: 'real-policy' } }
+    const prepared = prepareFrozenPrompt(copied, options)
+    assert.equal('frozenEntries' in prepared, false)
+    assert.equal(prepared.inputDigest, request.inputDigest)
+    assert.equal(prepared.requestKey, request.requestKey)
+    assert.equal(prepared.prompt.includes(text), false)
+    const manifest = readFrozenManifest(prepared.frozenContext!)
+    assert.equal(manifest.binding.attemptId, 'real-attempt')
+    assert.equal(manifest.binding.policyDigest, 'real-policy')
+    const utf8 = manifest.entries.find(entry => entry.id === 'text')!, bin = manifest.entries.find(entry => entry.id === 'bin')!, absent = manifest.entries.find(entry => entry.id === 'gone')!
+    assert.equal(utf8.required, true); assert.equal(bin.required, false); assert.equal(absent.required, false)
+    assert.equal(readFileSync(join(dirname(prepared.frozenContext!.manifestPath), 'bytes', utf8.sha256), 'utf8'), text)
+    assert.deepEqual(readFileSync(join(dirname(prepared.frozenContext!.manifestPath), 'bytes', bin.sha256)), binary)
+    assert.equal(prepareFrozenPrompt(prepared, options), prepared)
+    const reused = prepareFrozenPrompt({ ...prepared, prompt: 'rewritten' }, options)
+    assert.equal(reused.frozenContext!.contextDigest, prepared.frozenContext!.contextDigest)
+    assert.equal(readFileSync(join(dirname(prepared.frozenContext!.manifestPath), 'bytes', utf8.sha256), 'utf8'), text)
+  } finally { f.close() }
+})

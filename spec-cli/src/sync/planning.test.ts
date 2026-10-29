@@ -167,7 +167,7 @@ test('raw-only冷启动读取已授权测试正文且不扩大到其他目录', 
   const stopAfterCapture = new Error('captured frozen test read set')
   await assert.rejects(analyzeCodeBehavior(input, async request => {
     assert.equal(request.purpose, 'code_behavior_analyze')
-    captured.frozen = readFrozenBehaviorContext<Frozen>(request.prompt)
+    captured.frozen = readFrozenBehaviorContext<Frozen>(request)
     throw stopAfterCapture
   }), error => error === stopAfterCapture)
 
