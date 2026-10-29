@@ -99,6 +99,22 @@ test('raw-only旧节点用同一协议首次建立契约，保留原raw及既有
   assert.ok(rendered.includes('原有不适用依据与业务输入域。'))
 })
 
+test('preserve_business首次细化raw-only节点仍启用契约，保留人工元数据和原意', () => {
+  const rawOnly = '---\ntitle: 人工标题\ndesc: 人工说明\nstatus: pending\n---\n## raw source\n\n真实旧原意。\n\n## expanded spec\n\n原有业务说明。\n'
+  const output = patch()
+  output.changes[0].tables.REQ = [{ id: 'REQ-EXPORT-01', goal: '导出', source: 'user:raw', constraints: '-', success: '返回数据', 'depends-on': [] }]
+  const snapshot: ElaborationInput = { ...input, mode: 'preserve_business', intent: { ...input.intent, rawSource: '真实旧原意。' }, targets: [{ ...input.targets[0], source: rawOnly, sourceDigest: elaborationDigest(rawOnly) }] }
+  const rendered = renderElaboration(snapshot, output, 'input').changes[0].source
+  const parsed = parseContract({ nodeId: 'export-contract', path, source: rendered })
+  assert.ok(parsed.contract, '首次细化的确定性装配必须启用 sync-v1')
+  assert.deepEqual(parsed.findings, [])
+  assert.equal(parsed.contract.items.length, 1)
+  assert.equal(parsed.contract.rawSource, '真实旧原意。')
+  assert.equal(parseFrontmatter(rendered).fm.title, '人工标题')
+  assert.equal(parseFrontmatter(rendered).fm.desc, '人工说明')
+  assert.ok(rendered.includes('原有业务说明。'))
+})
+
 test('rawless旧正文完整保留为expanded，非null prose与VERIFY不注入primary raw', () => {
   const legacyBody = '# 全树验证\n\n旧业务说明完整保留。\n\n## 执行约束\n\n~~~sh\nprintf "保留正文与围栏"\n~~~\n\n后置说明。\n'
   const legacy = `---\ntitle: 全树验证\n---\n${legacyBody}`
