@@ -15,6 +15,8 @@ code:
 
 模型临时输出 `elaboration-target-rows-v3`：冻结目标的输入内 targetIndex、标题和说明、真实代码/相关绑定、业务解释（null 表示沿用）、显式 removeIds、各类型新增或替换的完整业务行，以及每个适用性边界的依据和影响 ID。模型不返回 nodeId/path；wire 为每个冻结目标附原数组下标 targetIndex，程序从同一冻结目标及显式 nodeChanges 唯一绑定节点、可写路径、原意和源摘要。全部类型数组均存在，空数组表示无该表；行对象的列直接派生自解析器 `CONTRACT_COLUMNS`，不复制另一份列定义。严格 schema 约束稳定 ID、单一来源、引用数组、布尔值、VERIFY argv 和正整数超时；`STEP.next` 的 END 单值不能混入 ID 列表。有状态流程引用 STATE 结果，不能把同步动作当成无状态能力。
 
+`RULE.authority` 的生成请求 schema 仅接受本轮冻结可写 target 的 canonical `nodeId`，不能接受 REQ/RULE 业务 ID。合法 move 中，冻结旧节点已有 `authority` 等于其 `from.nodeId` 的 RULE 时，schema 还保留该旧 `nodeId`，供 renderer 按真实 `nodeChanges` 归一到目的身份；最终 owner 仍由现有逐项校验确认，enum 不授予跨叶归属。没有可写 target 时不产生空 enum。
+
 状态派发 STEP 须以 next、depends-on 或 source 显式关联实际执行或选择的 TR，并声明对应 EVENT；集合须忠实覆盖该步骤声明的对象、状态域和条件分支，不能只列已确定处置掩盖同一步里的未决处置。纯参数校验、提交和导航步骤不强求 TR；不反推无关事件的全部状态。next→TR 是业务依赖；next→STEP/STATE 和 FLOW.steps 仍为导航。独立审查核对派发表与步骤声明的范围，不能因正文提到 GAP 就跳过结构依赖，或把含未知派发的父 FLOW 当作完整可交付。
 
 [[elaboration-markdown]] 从这些临时行确定性渲染唯一可编辑的 [[sync-contract-schema]] Markdown。原文、源摘要、输入和候选摘要由程序复制绑定，不交由模型填写。生成行只是一次执行的受检中间产物，不能持久化为第二份权威业务 JSON。返回候选仍为完整 UTF-8 Markdown 文件变更。

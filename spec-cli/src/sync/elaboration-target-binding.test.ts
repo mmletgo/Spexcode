@@ -3,7 +3,8 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { CONTRACT_COLUMNS, parseContract } from '@spexcode/spec-core/contracts'
 import { elaborate, elaborationDigest } from './elaboration.js'
-import { bindElaborationTargets, elaborationTargetBindings } from './elaboration-markdown.js'
+import { elaborationSchema, outputErrors } from './elaboration-schema.js'
+import { bindElaborationTargets, elaborationTargetBindings, renderElaboration } from './elaboration-markdown.js'
 import type { GeneratedTargetElaboration } from './elaboration-markdown.js'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
 import type { ElaborationInput, ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
@@ -27,6 +28,24 @@ const input = (): ElaborationInput => ({
   maxRepairs: 0,
 })
 const version = (request: ElaborationSessionRequest): string => (request.schema.properties as Record<string, { enum: string[] }>).version.enum[0]
+type RuleAuthoritySchemaView = {
+  changes: {
+    items: {
+      properties: {
+        tables: {
+          properties: {
+            RULE: { items: { properties: Record<string, Record<string, unknown>> } }
+          }
+        }
+      }
+    }
+  }
+}
+const ruleAuthoritySchema = (request: ElaborationInput): Record<string, unknown> => {
+  const schema = elaborationSchema(request)
+  const properties = schema.properties as RuleAuthoritySchemaView
+  return properties.changes.items.properties.tables.properties.RULE.items.properties.authority
+}
 const leaf = (request: ElaborationSessionRequest): Record<string, unknown> => ({
   ...(version(request) === 'elaboration-rows-v2' ? { nodeId: 'nested-leaf', path: '.spec/export/research/nested-leaf/spec.md' } : { targetIndex: 1 }),
   title: '受信验证登记',
@@ -68,6 +87,42 @@ test('冻结节点身份决定深层canonical路径，模型不再回显可写�
   assert.equal(schema.changes.minItems, 0)
   assert.deepEqual(fake.calls.map(call => call.purpose), ['elaboration_generate', 'elaboration_review'])
   assert.equal('path' in (result.rounds[0].output as { changes: Record<string, unknown>[] }).changes[0], false)
+})
+
+test('RULE.authority schema限制为冻结canonical nodeId，move兼容旧owner且无目标不生成空enum', () => {
+  const multiple = input(), multipleAuthority = ruleAuthoritySchema(multiple)
+  assert.deepEqual(outputErrors('REQ-EXPORT-01', multipleAuthority), ['$: 未满足枚举'])
+  assert.deepEqual([...(multipleAuthority.enum as string[])].sort(), ['export-contract', 'nested-leaf'])
+
+  const single = input(); single.targets = [single.targets[0]]
+  const singleAuthority = ruleAuthoritySchema(single)
+  assert.deepEqual(singleAuthority.enum, ['export-contract'])
+  assert.deepEqual(outputErrors('export-contract', singleAuthority), [])
+  assert.ok(outputErrors('RULE-EXPORT-01', singleAuthority).length)
+
+  const moved = input(); moved.targets = [moved.targets[0]]
+  moved.nodeChanges = [{ action: 'move', from: { nodeId: 'export-contract', path: primaryPath }, to: { nodeId: 'moved-export', path: '.spec/export/moved-export/spec.md' }, evidenceRef: { sha256: 'a'.repeat(64) } }]
+  const movedAuthority = ruleAuthoritySchema(moved)
+  assert.deepEqual([...(movedAuthority.enum as string[])].sort(), ['export-contract', 'moved-export'])
+  assert.deepEqual(outputErrors('export-contract', movedAuthority), [])
+  assert.deepEqual(outputErrors('moved-export', movedAuthority), [])
+  const rule = primary.items.find(item => item.kind === 'RULE')!
+  const tables = Object.fromEntries(Object.keys(CONTRACT_COLUMNS).map(kind => [kind, []])) as unknown as GeneratedTargetElaboration['changes'][number]['tables']
+  tables.RULE = [{ id: rule.id, scope: rule.scope, constraint: rule.constraint, basis: rule.basis, authority: rule.authority, source: `${rule.source.kind}:${rule.source.ref}`, 'depends-on': rule.dependsOn }]
+  const output: GeneratedTargetElaboration = {
+    version: 'elaboration-target-rows-v3',
+    changes: [{ targetIndex: 0, title: '导出事件服务契约', description: '', code: primary.code, related: primary.related, prose: null, tables, removeIds: [] }],
+    applicability: ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: false, basis: '冻结原意', affectedIds: [] })),
+  }
+  const bound = bindElaborationTargets(moved, output)
+  const rendered = renderElaboration(moved, bound, elaborationDigest('move authority'))
+  const movedContract = parseContract({ nodeId: 'moved-export', path: '.spec/export/moved-export/spec.md', source: rendered.changes[0].source }).contract!
+  assert.ok(movedContract.items.some(item => item.kind === 'RULE' && item.id === rule.id && item.authority === 'moved-export'))
+
+  const retired = input()
+  retired.nodeChanges = retired.targets.map(target => ({ action: 'retire', from: { nodeId: target.nodeId, path: target.path }, evidenceRef: { sha256: 'b'.repeat(64) } }))
+  const retiredAuthority = ruleAuthoritySchema(retired)
+  assert.equal('enum' in retiredAuthority, false)
 })
 
 test('合法部分输出保留候选并反馈漏目标，schema最低数量不替代逐目标门禁', async () => {
