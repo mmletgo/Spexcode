@@ -96,7 +96,7 @@ export function renderElaboration(input: ElaborationInput, generated: GeneratedE
       : `${key}: ${JSON.stringify(value)}`).join('\n')
     const sourceLines = renderingSource?.split('\n') ?? []
     const removedIds = new Set(node.removeIds)
-    const preserveExpanded = baseline && parts?.expandedSpec && (legacyBody !== null || node.prose === null || input.mode === 'preserve_business')
+    const preserveExpanded = parts !== null && (legacyBody !== null || node.prose === null || input.mode === 'preserve_business')
     const tables = Object.fromEntries(Object.entries(CONTRACT_COLUMNS).map(([kind, columns]) => {
       const updates = new Map(node.tables[kind as ContractKind].map(row => [String(row.id), row]))
       const rows: string[] = []
@@ -161,7 +161,11 @@ export function renderElaboration(input: ElaborationInput, generated: GeneratedE
         }
         if (!written) {
           if (ranges[part].length) edits.push({ start: ranges[part][0].start, end: ranges[part][0].start, text: replacement })
-          else edits.push({ start: 0, end: 0, text: `## raw source\n\n${replacement}\n\n` })
+          else {
+            const expandedStart = ranges.expandedSpec[0]?.start
+            const start = part === 'rawSource' ? expandedStart === undefined ? 0 : originalBody.lastIndexOf('\n', expandedStart - 2) + 1 : originalBody.length
+            edits.push({ start, end: start, text: `${part === 'rawSource' ? '' : '\n\n'}## ${part === 'rawSource' ? 'raw source' : 'expanded spec'}\n\n${replacement}\n\n` })
+          }
         }
       }
       let body = originalBody
