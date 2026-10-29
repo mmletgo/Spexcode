@@ -60,7 +60,10 @@ each node's own selector set and emits findings in declaration order.
 
 The Tree-sitter rows preserve one shared declaration vocabulary. TypeScript/TSX expose top-level functions,
 classes and class methods, simple variable declarations, enums, interfaces, and type aliases; Python
-exposes `def`, `async def`, and classes with lexical qualification; Go exposes constants, types, functions,
+exposes module-scope assignments that bind a value (including annotated, chained, and destructuring targets,
+also when nested in module control-flow blocks), `def`, `async def`, and classes with lexical qualification;
+imported names and function/class-local assignments remain outside the capability; Go exposes constants,
+types, functions,
 and receiver methods (`Command.SetArgs`); Rust exposes constants, structs, enums, traits, functions, and
 impl methods (`Command.set_args`); Java exposes classes, final fields, constructors as `Class.constructor`,
 and methods (so overloads remain ambiguous); and Ruby exposes constants, methods, singleton methods,

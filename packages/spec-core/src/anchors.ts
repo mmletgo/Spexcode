@@ -488,6 +488,33 @@ function tsTreeUnits(root: TreeSitterNode): Unit[] {
 
 function pythonTreeUnits(root: TreeSitterNode): Unit[] {
   const units: Unit[] = []
+  const addAssignmentTarget = (target: TreeSitterNode | null, statement: TreeSitterNode): void => {
+    if (!target) return
+    if (target.type === 'identifier') {
+      units.push({ name: nodeText(target), kind: 'const-data', ...nodeLineRange(statement) })
+      return
+    }
+    if (['pattern_list', 'tuple_pattern', 'list_pattern', 'list_splat_pattern', 'tuple_splat_pattern'].includes(target.type)) {
+      for (const child of nodeChildren(target)) addAssignmentTarget(child, statement)
+    }
+  }
+  const addAssignmentTargets = (assignment: TreeSitterNode, statement: TreeSitterNode): void => {
+    const right = nodeField(assignment, 'right')
+    if (!right) return
+    addAssignmentTarget(nodeField(assignment, 'left'), statement)
+    if (right.type === 'assignment') addAssignmentTargets(right, statement)
+  }
+  const visitModuleScope = (node: TreeSitterNode): void => {
+    if (['function_definition', 'class_definition', 'lambda'].includes(node.type)) return
+    if (node.type === 'expression_statement') {
+      for (const assignment of nodeChildren(node).filter((child) => child.type === 'assignment')) {
+        addAssignmentTargets(assignment, node)
+      }
+    }
+    for (const child of nodeChildren(node)) visitModuleScope(child)
+  }
+  visitModuleScope(root)
+
   type Scope = { name: string; classLike: boolean }
   const definition = (node: TreeSitterNode): TreeSitterNode | null => node.type === 'decorated_definition'
     ? nodeChildren(node).find((child) => child.type === 'function_definition' || child.type === 'class_definition') ?? null
