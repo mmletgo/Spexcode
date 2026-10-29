@@ -148,6 +148,61 @@ test('纯重构保留业务正文和字段，仅实现测试符号可改变', as
   assert.ok(validateContractEvolution(before, await readFrozenContracts('/frozen', new Map([...files()].map(([file, text]) => [file, file === path ? updatedSource(text) : text]))), policy({ mode: 'preserve_business' })).some(issue => issue.code === 'refactor_business_meaning_changed'))
 })
 
+test('preserve_business允许精确冻结raw-only旧节点首次建契约，且不放开其他新增项', async () => {
+  const rawOnlySource = `${source.split('\n### REQ\n')[0].replace('contract-schema: sync-v1\n', '')}\n`
+  const raw = parseParts(rawOnlySource)!.rawSource
+  const beforeFiles = files(); beforeFiles.set(path, rawOnlySource)
+  const before = await readFrozenContracts('/frozen', beforeFiles)
+  assert.deepEqual(before.contracts, [])
+  assert.deepEqual(before.nodes, [{ id: 'export-contract', path, rawSource: raw }])
+  const snapshot: ElaborationInput = {
+    ...input(), mode: 'preserve_business', intent: { nodeId: 'export-contract', rawSource: raw },
+    targets: [{ nodeId: 'export-contract', path, source: rawOnlySource, sourceDigest: elaborationDigest(rawOnlySource) }], files: beforeFiles,
+  }
+  const result = await elaborate(snapshot, { runner: runner(build(source)) })
+  assert.equal(result.status, 'complete', JSON.stringify(result.rounds[0].findings.map(issue => issue.code)))
+  const firstContract = result.contracts.find(contract => contract.path === path)!
+  assert.equal(firstContract.rawSource, raw)
+  assert.equal(contractBusinessProse(firstContract.expandedSpec), contractBusinessProse(parseParts(rawOnlySource)!.expandedSpec))
+  assert.deepEqual([...new Set([...result.graph!.items.values()].map(item => item.kind))].sort(), ['AC', 'EVENT', 'FLOW', 'REQ', 'RULE', 'STATE', 'STEP', 'TR', 'VERIFY'])
+
+  const synchronized = await readFrozenContracts('/frozen', files())
+  const addedRow = source.replace(/^\| REQ-EXPORT-01 .*$/m, row => `${row}\n| REQ-EXPORT-NEW | 新导出需求 | user:raw | - | 返回新结果 | - |`)
+  const synchronizedFiles = files(); synchronizedFiles.set(path, addedRow)
+  const addedToExisting = validateContractEvolution(synchronized, await readFrozenContracts('/frozen', synchronizedFiles), policy({ mode: 'preserve_business' }))
+  assert.ok(addedToExisting.some(issue => issue.code === 'refactor_business_item_added' && issue.itemId === 'REQ-EXPORT-NEW'))
+
+  const rawChanged = '用户可以提交不同筛选条件的数据导出并下载结果。'
+  const changedFiles = files(); changedFiles.set(path, source.replace(raw, rawChanged))
+  const changed = await readFrozenContracts('/frozen', changedFiles)
+  const changedIssues = validateContractEvolution(before, changed, policy({ mode: 'preserve_business', newNodeRawSources: new Map([[path, raw]]) }))
+  assert.ok(changedIssues.some(issue => issue.code === 'raw_changed' && issue.path === path))
+  assert.ok(changedIssues.some(issue => issue.code === 'refactor_business_item_added'))
+
+  const renamedPath = '.spec/export/renamed-contract/spec.md'
+  const renamedFiles = files(); renamedFiles.set(path, rawOnlySource); renamedFiles.set(renamedPath, source)
+  const renamed = await readFrozenContracts('/frozen', renamedFiles)
+  const wrongPathIssues = validateContractEvolution(before, renamed, policy({ mode: 'preserve_business', newNodeRawSources: new Map([[renamedPath, raw]]) }))
+  assert.ok(wrongPathIssues.some(issue => issue.code === 'refactor_business_item_added'))
+
+  const wrongIdentityFiles = new Map(beforeFiles); wrongIdentityFiles.set(path, source)
+  const wrongIdentity = await readFrozenContracts('/frozen', wrongIdentityFiles)
+  wrongIdentity.nodes.find(node => node.path === path)!.id = 'wrong-identity'
+  assert.ok(validateContractEvolution(before, wrongIdentity, policy({ mode: 'preserve_business', newNodeRawSources: new Map([[path, raw]]) })).some(issue => issue.code === 'refactor_business_item_added'))
+
+  const missingFreezeFiles = new Map(beforeFiles); missingFreezeFiles.set(path, source)
+  const missingFreeze = validateContractEvolution(before, await readFrozenContracts('/frozen', missingFreezeFiles), policy({ mode: 'preserve_business' }))
+  assert.ok(missingFreeze.some(issue => issue.code === 'refactor_business_item_added'))
+
+  const rawlessSource = rawOnlySource.replace(/## raw source[\s\S]*?(?=## expanded spec)/, '')
+  const rawlessFiles = files(); rawlessFiles.set(path, rawlessSource)
+  const rawlessBefore = await readFrozenContracts('/frozen', rawlessFiles)
+  assert.equal(rawlessBefore.nodes.find(node => node.path === path)!.rawSource, null)
+  const rawlessAfterFiles = new Map(rawlessFiles); rawlessAfterFiles.set(path, source)
+  const rawlessAfter = await readFrozenContracts('/frozen', rawlessAfterFiles)
+  assert.ok(validateContractEvolution(rawlessBefore, rawlessAfter, policy({ mode: 'preserve_business', newNodeRawSources: new Map([[path, raw]]) })).some(issue => issue.code === 'refactor_business_item_added'))
+})
+
 test('用户明确raw变化的简单REQ来源能授权AC更新，不要求虚构中间RULE', async () => {
   const before = await readFrozenContracts('/frozen', files()), analysis = evidence()
   analysis.analysis.authorizedChanges = [{ ...proposal, source: 'user:raw', ruleIds: ['REQ-EXPORT-01'], reason: '用户原意明确要求同键结果包含当前状态' }]

@@ -277,7 +277,14 @@ export function validateContractEvolution(before: FrozenContracts, after: Frozen
     for (const error of contractAuthorizationErrors(change, before, policy)) issue(change.action === 'update_acceptance' ? 'acceptance_update_unauthorized' : 'contract_authorization_untrusted', item, error, item.id)
     if (change.action === 'retire' && after.graph.items.has(change.id)) issue('retirement_not_applied', item, '已决定退役的身份仍存在', item.id)
   }
-  if (policy.mode === 'preserve_business') for (const item of after.graph.items.values()) if (!before.graph.items.has(item.id)) issue('refactor_business_item_added', item, '纯重构不能新增业务契约项', item.id)
+  const frozenRawOnlyNodes = new Map(before.nodes.flatMap(node => {
+    const next = after.nodes.find(candidate => candidate.path === node.path)
+    const eligible = node.rawSource !== null && !before.contracts.some(contract => contract.path === node.path) && next?.id === node.id && next.rawSource === node.rawSource && policy.newNodeRawSources.get(node.path) === node.rawSource
+    return eligible ? [[node.path, node.id] as const] : []
+  }))
+  if (policy.mode === 'preserve_business') for (const item of after.graph.items.values()) {
+    if (!before.graph.items.has(item.id) && frozenRawOnlyNodes.get(item.path) !== item.nodeId) issue('refactor_business_item_added', item, '纯重构不能新增业务契约项', item.id)
+  }
   for (const item of before.graph.items.values()) {
     const next = after.graph.items.get(item.id)
     const authorization = authorizations.get(item.id)
