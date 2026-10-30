@@ -26,3 +26,6 @@ P1新增AC.test的writer仅落本区并与原写授权求交：授权generated�
 
 
 两区争用同一新增测试文件时，生成返回规划repair、candidate为空且Native调用为0；既有布局冲突和全局越权/只读oracle反例保持。
+
+
+夹具与真实规划器一样分别保存readPaths/writePaths数组，给分区增加只读上下文不能通过共享数组悄悄扩大写范围；只读Spec反例显式越界补丁仍必须在scope门禁拒绝。

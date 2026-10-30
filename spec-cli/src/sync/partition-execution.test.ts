@@ -34,7 +34,7 @@ async function fixture(t: test.TestContext): Promise<{ input: GenerationInput; p
   const contracts: Contract[] = ['export', 'import', 'archive'].map(domain => { const path = `.spec/export/${domain}-contract/spec.md`; return parseContract({ nodeId: `${domain}-contract`, path, source: files.get(path)! }).contract! })
   const plan: SyncPartitionPlan = { version: 'sync-partitions-v1', digest: 'frozen-plan', expectedPaths: contracts.map(contract => contract.code[0].split('#')[0]), dependencies: [{ from: 'part-export', to: 'part-import', contractIds: ['REQ-EXPORT-01', 'REQ-IMPORT-01'], paths: ['src/export.js', 'src/import.js'] }], partitions: contracts.map(contract => {
     const domain = contract.nodeId.split('-')[0], source = `src/${domain}.js`, paths = [contract.path, source, `tests/${domain}.test.mjs`]
-    return { id: `part-${domain}`, intentNodeId: 'export-contract', targets: [{ nodeId: contract.nodeId, path: contract.path }], readPaths: paths, writePaths: paths, sourcePaths: [source], changedPaths: [source], contextNodeIds: [], contractIds: [], flowIds: [], readBytes: 100, readLimitBytes: 524288, oversizedReads: [] }
+    return { id: `part-${domain}`, intentNodeId: 'export-contract', targets: [{ nodeId: contract.nodeId, path: contract.path }], readPaths: [...paths], writePaths: [...paths], sourcePaths: [source], changedPaths: [source], contextNodeIds: [], contractIds: [], flowIds: [], readBytes: 100, readLimitBytes: 524288, oversizedReads: [] }
   }) }
   const readyIds = contracts.flatMap(contract => [`REQ-${contract.nodeId.split('-')[0].toUpperCase()}-01`, `AC-${contract.nodeId.split('-')[0].toUpperCase()}-03`])
   const input: GenerationInput = { root, snapshot, requestKey: 'operation:attempt:generation', manifest: { version: 1, entries }, files, contracts, elaboratedSpecs: contracts.map(contract => ({ path: contract.path, source: files.get(contract.path)! })), readyIds, blockedIds: [], intent: { nodeId: 'export-contract', rawSource: contracts[0].rawSource }, facts: [], existingAcceptance: contracts.flatMap(contract => contract.items.filter((item): item is Acceptance => item.kind === 'AC')), mandatoryTests: [], verifications: [], allowedScope: { paths: plan.partitions.flatMap(partition => partition.writePaths), contractIds: readyIds, flowIds: [] }, policy: { version: 'sync-coordinator-v2', digest: 'policy' }, timeoutMs: 30000, model: 'gpt-6.1-sol', effort: 'high' }
@@ -49,11 +49,11 @@ function native(delayReverse = false): { runner: ElaborationRunner; calls: Elabo
   const runner: ElaborationRunner = async request => {
     const ordinal = calls.push(request)
     active++; peak = Math.max(peak, active)
-    const context = JSON.parse(request.prompt.split('冻结完整输入:\n')[1]?.split('\n实际候选身份')[0] ?? request.prompt.split('冻结原意和基线完整输入:\n')[1].split('\n实际候选身份')[0]) as { files: [string, string][]; manifest: { entries: { path: string; digest: string; mode: string }[] } }
+    const context = JSON.parse(request.prompt.split('冻结完整输入:\n')[1]?.split('\n实际候选身份')[0] ?? request.prompt.split('冻结原意和基线完整输入:\n')[1].split('\n实际候选身份')[0]) as { files: [string, string][]; allowedScope: { paths: string[] }; manifest: { entries: { path: string; digest: string; mode: string }[] } }
     await new Promise(resolve => setTimeout(resolve, delayReverse ? (4 - ordinal % 4) * 10 : ordinal % 4 * 10))
     let output: unknown
     if (request.purpose === 'code_generate') {
-      const file = context.manifest.entries.find(entry => entry.path.startsWith('src/'))!
+      const file = context.manifest.entries.find(entry => entry.path.startsWith('src/') && context.allowedScope.paths.some(path => entry.path === path || entry.path.startsWith(`${path}/`)))!
       const source = new Map(context.files).get(file.path)!
       output = { version: 'sync-files-v1', changes: [{ path: file.path, beforeDigest: file.digest, beforeMode: file.mode, content: `${source}\n// partition implementation\n`, mode: null }] }
     } else {
@@ -166,7 +166,8 @@ test('未读取/只读root Spec和独立oracle不能因全局scope可写而被�
     output.changes.push({ path, beforeDigest: before.digest, beforeMode: before.mode, content: `${first.input.files.get(path)}\n越界root编辑\n`, mode: null })
     return { ...result, output, resultDigest: contentHash(JSON.stringify(output)) }
   }
-  await assert.rejects(generateSyncPartitions(first.input, first.plan, 2, false, { runner, validateCandidate: async () => [] }, first.checkpoints), /只读Spec/)
+  await assert.rejects(generateSyncPartitions(first.input, first.plan, 2, false, { runner, validateCandidate: async () => [] }, first.checkpoints), /分区补丁越过读取\/写入范围: \.spec\/export\/export-contract\/spec\.md/)
+  assert.ok(runtime.calls.every(call => call.purpose === 'code_generate'))
   const second = await fixture(t), oracleRuntime = native()
   second.input.mandatoryTests = [{ verificationId: 'VERIFY-EXPORT-01', testPath: 'tests/export.test.mjs', testId: 'AC-EXPORT-03' }]
   const oracleRunner: ElaborationRunner = async request => {
@@ -184,7 +185,11 @@ test('分区响应不能以完成顺序覆盖同文件writer，过期beforeDiges
   const first = await fixture(t), runtime = native()
   first.plan.partitions[1].readPaths.push('src/export.js')
   first.plan.partitions[1].writePaths.push('src/export.js')
-  await assert.rejects(generateSyncPartitions(first.input, first.plan, 2, false, { runner: runtime.runner, validateCandidate: async () => [] }, first.checkpoints), /多个写者/)
+  const conflict = await generateSyncPartitions(first.input, first.plan, 2, false, { runner: runtime.runner, validateCandidate: async () => [] }, first.checkpoints)
+  assert.equal(conflict.status, 'repair')
+  assert.equal(conflict.failure?.code, 'implementation_plan_conflict')
+  assert.equal(conflict.candidate, null)
+  assert.equal(runtime.calls.length, 0)
   const second = await fixture(t), invalid = native()
   const runner: ElaborationRunner = async request => {
     const result = await invalid.runner(request)
