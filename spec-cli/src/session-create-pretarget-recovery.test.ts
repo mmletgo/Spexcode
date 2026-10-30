@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-for (const scenario of ['absent', 'path', 'branch', 'store', 'invalid-receipt', 'wrong-payload', 'canonical-address', 'candidate-lock'] as const) {
+for (const scenario of ['absent', 'path', 'branch', 'store', 'invalid-receipt', 'wrong-payload', 'canonical-address', 'candidate-lock', 'legacy-receipt', 'legacy-modified', 'legacy-forged-path', 'legacy-identity', 'legacy-path', 'legacy-branch'] as const) {
   test(`pretarget creation recovery ${scenario} preserves exact publication authority`, { timeout: 30000 }, () => {
     const temp = mkdtempSync(join(tmpdir(), 'spex-pretarget-recovery-')), root = join(temp, 'source'), home = join(temp, 'runtime')
     try {
@@ -39,18 +39,28 @@ if(process.argv[2]==='crash'){
 const application=configuredSessionApplication();
 assert.equal(application.readAddress(id),null);
 assert.equal(readSessionCreateTermination(key),null);
-const slug=slugify(nodeFromPrompt(prompt)||titleFromPrompt(prompt))+'-'+id.slice(0,4);
+const scenario=${JSON.stringify(scenario)};
+const slug=slugify(nodeFromPrompt(prompt)||titleFromPrompt(prompt))+'-'+(scenario.startsWith('legacy-')?id.slice(0,4):id);
 const path=join(realpathSync(runtimeRoot()),'structured-worktrees',slug),branch='node/'+slug;
 const receiptDir=join(runtimeRoot(),'.session-create-candidates'),receiptPath=join(receiptDir,id+'.json');
 assert.equal(existsSync(receiptPath),false);
 assert.equal(existsSync(sessionStoreDir(id)),false);
 const before={head:base,index:readFileSync(git('rev-parse','--git-path','index')),status:git('status','--porcelain=v1'),worktrees:git('worktree','list','--porcelain')};
-const scenario=${JSON.stringify(scenario)};
-if(scenario==='path'){mkdirSync(path,{recursive:true});writeFileSync(join(path,'user-data'),'keep user data');}
-if(scenario==='branch')git('branch',branch);
+if(scenario==='path'||scenario==='legacy-path'){mkdirSync(path,{recursive:true});writeFileSync(join(path,'user-data'),'keep user data');}
+if(scenario==='branch'||scenario==='legacy-branch')git('branch',branch);
 if(scenario==='store'){mkdirSync(sessionStoreDir(id),{recursive:true});writeFileSync(join(sessionStoreDir(id),'user-data'),'keep user data');}
 if(scenario==='invalid-receipt'){mkdirSync(receiptDir,{recursive:true});writeFileSync(receiptPath,'{}');}
 if(scenario==='canonical-address')application.protocol.withTransaction(tx=>tx.initialize(id));
+// Synthetic old-writer receipt with real isolated Git resources; no production receipt is accessed.
+if(['legacy-receipt','legacy-modified','legacy-forged-path','legacy-identity'].includes(scenario)){
+ mkdirSync(join(realpathSync(runtimeRoot()),'structured-worktrees'),{recursive:true});
+ git('worktree','add','--no-track','-b',branch,path,base);
+ mkdirSync(receiptDir,{recursive:true});
+ writeFileSync(receiptPath,JSON.stringify({version:1,requestDigest:digest(key),payloadHash,root:git('rev-parse','--show-toplevel'),path:scenario==='legacy-forged-path'?path+'-foreign':path,branch,prestate:{store:false,path:false,worktree:false,branch:false},stage:'git-created'}));
+ if(scenario==='legacy-modified')writeFileSync(join(path,'user-data'),'keep user data');
+ if(scenario==='legacy-identity')execFileSync('git',['-C',path,'checkout','--detach'],{stdio:'ignore'});
+}
+const registeredBeforeRecovery=git('worktree','list','--porcelain');
 const options={prompt,payloadHash,base,signal:AbortSignal.timeout(5000),structuredExecution:policy};
 if(scenario==='wrong-payload')options.payloadHash='0'.repeat(64);
 let pending,unlock,held;
@@ -60,17 +70,17 @@ if(scenario==='candidate-lock'){
  await admitted;
 }
 let result;
-if(scenario==='invalid-receipt'||scenario==='wrong-payload')await assert.rejects(recoverSessionCreateTermination(key,options),/invalid private candidate receipt|payload|does not match/);
+if(['invalid-receipt','wrong-payload','legacy-modified','legacy-forged-path','legacy-identity'].includes(scenario))await assert.rejects(recoverSessionCreateTermination(key,options),/invalid private candidate receipt|payload|does not match|identity mismatch|new or modified/);
 else if(scenario==='candidate-lock'){
  let settled=false;
  const recovering=recoverSessionCreateTermination(key,options).then(value=>{settled=true;return value;});
  await new Promise(resolve=>setTimeout(resolve,25));assert.equal(settled,false,'recovery must hold the same exact candidate lock');
  unlock();await pending;result=await recovering;assert.equal(result,null);
 }else result=await recoverSessionCreateTermination(key,options);
-if(scenario==='absent'){
+if(scenario==='absent'||scenario==='legacy-receipt'){
  assert.ok(result,'crashed admitted create before ownership must obtain a real bounded termination proof');
  assert.equal(result.sessionId,id);assert.equal(result.requestDigest,digest(key));assert.equal(result.payloadHash,payloadHash);
- assert.equal(result.phase,'target-resolution');assert.equal(result.nativeStatus,'notStarted');assert.equal(result.cleanupComplete,true);
+ assert.equal(result.phase,scenario==='absent'?'target-resolution':'cleanup');assert.equal(result.nativeStatus,'notStarted');assert.equal(result.cleanupComplete,true);
  assert.deepEqual(readSessionCreateTermination(key),result);
  const retry=await sessionCreateRequest({prompt,base},{requestKey:key,structuredExecution:policy});
  assert.equal(retry.status,408);assert.equal(retry.code,'session_create_cancelled');
@@ -79,13 +89,14 @@ if(scenario==='absent'){
  assert.equal(existsSync(path),false);assert.equal(existsSync(sessionStoreDir(id)),false);assert.equal(existsSync(receiptPath),false);
 }else{
  assert.equal(readSessionCreateTermination(key),null,'unknown/occupied/canonical/payload evidence must remain unproven');
- if(scenario==='path'||scenario==='candidate-lock')assert.equal(readFileSync(join(path,'user-data'),'utf8'),scenario==='path'?'keep user data':'concurrent target');
+ if(['path','legacy-path','legacy-modified','candidate-lock'].includes(scenario))assert.equal(readFileSync(join(path,'user-data'),'utf8'),scenario==='candidate-lock'?'concurrent target':'keep user data');
  if(scenario==='store')assert.equal(readFileSync(join(sessionStoreDir(id),'user-data'),'utf8'),'keep user data');
- if(scenario==='branch')assert.equal(git('rev-parse','refs/heads/'+branch),base);
+ if(scenario==='branch'||scenario==='legacy-branch')assert.equal(git('rev-parse','refs/heads/'+branch),base);
+ if(scenario.startsWith('legacy-')&&scenario!=='legacy-path'&&scenario!=='legacy-branch')assert.ok(existsSync(receiptPath),'refused legacy recovery preserves ownership receipt');
  if(scenario==='invalid-receipt')assert.equal(readFileSync(receiptPath,'utf8'),'{}');
  if(scenario==='canonical-address')assert.ok(application.readAddress(id));
 }
-assert.equal(git('rev-parse','HEAD'),before.head);assert.deepEqual(readFileSync(git('rev-parse','--git-path','index')),before.index);assert.equal(git('status','--porcelain=v1'),before.status);assert.equal(git('worktree','list','--porcelain'),before.worktrees);
+assert.equal(git('rev-parse','HEAD'),before.head);assert.deepEqual(readFileSync(git('rev-parse','--git-path','index')),before.index);assert.equal(git('status','--porcelain=v1'),before.status);assert.equal(git('worktree','list','--porcelain'),scenario==='legacy-receipt'?before.worktrees:registeredBeforeRecovery);
 console.log(JSON.stringify({scenario,termination:result?.nativeStatus??null,canonicalAddress:application.readAddress(id),completedRecovery:true}));process.exit();
 `)
       const env = { ...process.env, NODE_TEST_CONTEXT: undefined, SPEXCODE_HOME: home, SPEX_SESSION_DATABASE_PATH: join(home, 'sessions.sqlite'), SPEX_SESSION_ID: undefined }

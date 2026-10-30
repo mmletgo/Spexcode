@@ -2392,9 +2392,9 @@ type SessionCandidateReceiptRead =
 const sessionCandidateReceiptDir = () => join(runtimeRoot(), '.session-create-candidates')
 const sessionCandidateReceiptPath = (id: string) => join(sessionCandidateReceiptDir(), `${id}.json`)
 const sessionCandidateLockId = (path: string, branch: string) => `create-resource-${digest(`${path}\0${branch}`)}`
-function sessionCandidateTarget(prompt: string, id: string, structured: boolean): { root: string; path: string; branch: string; ref: string | null; title: string | null } {
+function sessionCandidateTarget(prompt: string, id: string, structured: boolean): { root: string; path: string; branch: string; ref: string | null; title: string | null; legacy: { path: string; branch: string } } {
   const ref = nodeFromPrompt(prompt), title = titleFromPrompt(prompt)
-  const slug = `${slugify(ref || title)}-${id.slice(0, 4)}`, root = mainRoot()
+  const name = slugify(ref || title), slug = `${name}-${id}`, root = mainRoot()
   let parent = join(root, '.worktrees')
   if (structured) {
     parent = join(realpathSync(runtimeRoot()), 'structured-worktrees')
@@ -2407,7 +2407,12 @@ function sessionCandidateTarget(prompt: string, id: string, structured: boolean)
     mkdirSync(parent, { recursive: true, mode: 0o700 })
     chmodSync(parent, 0o700)
   }
-  return { root, path: join(parent, slug), branch: `${readConfig(dirname(gitCommonDir())).branchPrefix ?? 'node/'}${slug}`, ref, title }
+  const prefix = readConfig(dirname(gitCommonDir())).branchPrefix ?? 'node/'
+  const legacy = { path: join(parent, `${name}-${id.slice(0, 4)}`), branch: `${prefix}${name}-${id.slice(0, 4)}` }
+  const durable = readSessionCandidateReceipt(id)
+  const target = durable.kind === 'valid' && durable.receipt.root === root && durable.receipt.path === legacy.path && durable.receipt.branch === legacy.branch
+    ? legacy : { path: join(parent, slug), branch: `${prefix}${slug}` }
+  return { root, ...target, ref, title, legacy }
 }
 
 /** 在拥有权锁与 registry fence 内核验精确创建，再登记正式终止证明。 */
@@ -2417,7 +2422,7 @@ export async function recoverSessionCreateTermination(requestKey: string, option
     const termination = readSessionCreateTerminationById(id, requestDigest)
     if (termination) return termination
     if (readRecord(id)) return null
-    const { root, path, branch } = sessionCandidateTarget(options.prompt, id, !!options.structuredExecution)
+    const { root, path, branch, legacy } = sessionCandidateTarget(options.prompt, id, !!options.structuredExecution)
     return withRecordLock(sessionCandidateLockId(path, branch), () => withWorktreeRegistryLock(async () => {
       const durable = readSessionCandidateReceipt(id)
       if (durable.kind === 'absent') {
@@ -2425,9 +2430,10 @@ export async function recoverSessionCreateTermination(requestKey: string, option
         const payloadHash = digest(JSON.stringify({ prompt: options.prompt, parent: null, launcher: null, ...(options.base?.trim() ? { base: options.base.trim() } : {}), structuredExecution: options.structuredExecution }))
         if (payloadHash !== options.payloadHash) throw new SessionCreateError('session_create_failed', 'target-resolution', 'structured recovery payload does not match fixed create request', 409)
         const state = await sessionCandidateState(root, path, branch, options.signal)
+        const legacyState = await sessionCandidateState(root, legacy.path, legacy.branch, options.signal)
         const application = configuredSessionApplication()
         // @@@ canonical address survives retirement; native dispatch is impossible before its publication.
-        if (application.readAddress(id) || readRecord(id) || existsSync(sessionStoreDir(id)) || state.path || state.worktree || state.branch
+        if (application.readAddress(id) || readRecord(id) || existsSync(sessionStoreDir(id)) || state.path || state.worktree || state.branch || legacyState.path || legacyState.worktree || legacyState.branch
           || codexGenerationBindingForSession(join(runtimeRoot(), 'structured-read-only-v1', 'control'), id)) return null
         throwIfCreateAborted(options.signal, 'target-resolution')
         const recovered: SessionCreateTermination = { version: 1, sessionId: id, requestDigest, payloadHash, code: 'session_create_cancelled', phase: 'target-resolution', nativeStopped: true, nativeStatus: 'notStarted', cleanupComplete: true }
