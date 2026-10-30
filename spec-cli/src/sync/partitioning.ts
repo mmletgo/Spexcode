@@ -41,6 +41,8 @@ export type PlanSyncPartitionsInput = {
   files: ReadonlyMap<string, string>
   contracts: readonly Contract[]
   nodes?: readonly { id: string; path: string; rawSource?: string | null }[]
+  /** 仅提供 current files 缺失 Spec 路径的旧治理正文；不得并入当前读取视图。 */
+  governanceSources?: ReadonlyMap<string, string>
   changedPaths: readonly string[]
   maxReadBytes?: number
   /** 按 path 提供 composed files 外、已由调用方去重的真实版本正文总字节估计。 */
@@ -48,7 +50,7 @@ export type PlanSyncPartitionsInput = {
 }
 
 type Claim = { path: string }
-type GovernanceNode = { id: string; path: string; rawSource: string | null; code: RelationEntry[]; related: RelationEntry[] }
+type GovernanceNode = { id: string; path: string; rawSource: string | null; code: RelationEntry[]; related: RelationEntry[]; current: boolean; sourceDigest: string | null }
 type Draft = { targetNodeIds: string[]; changedPaths: string[]; discoveryNodeIds: string[]; packingKey: string }
 type Context = { readPaths: string[]; contextNodeIds: string[]; contractIds: string[]; flowIds: string[] }
 
@@ -63,33 +65,46 @@ function parseNodeRelation(path: string, entries: string[], relation: 'code' | '
   return parsed.entries
 }
 
+function governanceNodeKey(id: string, path: string): string { return `${id}\0${path}` }
+
+function governanceNodeAtPath(nodes: ReadonlyMap<string, GovernanceNode>, path: string): GovernanceNode | undefined {
+  return [...nodes.values()].find(node => node.path === path)
+}
+
+function governanceNodesForId(nodes: ReadonlyMap<string, GovernanceNode>, id: string): GovernanceNode[] {
+  return [...nodes.values()].filter(node => node.id === id).sort((a, b) => compare(a.path, b.path))
+}
+
 function governanceNodesForInput(input: PlanSyncPartitionsInput, contracts: readonly Contract[]): Map<string, GovernanceNode> {
   const identities = new Map<string, { id: string; path: string; rawSource?: string | null }>()
   const addIdentity = (identity: { id: string; path: string; rawSource?: string | null }): void => {
-    const prior = identities.get(identity.id)
-    if (!prior) identities.set(identity.id, identity)
-    else if (prior.rawSource === undefined && identity.rawSource !== undefined) identities.set(identity.id, { ...prior, rawSource: identity.rawSource })
+    const key = governanceNodeKey(identity.id, identity.path), prior = identities.get(key)
+    if (!prior) identities.set(key, identity)
+    else if (prior.rawSource === undefined && identity.rawSource !== undefined) identities.set(key, { ...prior, rawSource: identity.rawSource })
   }
   for (const node of [...(input.nodes ?? [])].sort((a, b) => compare(a.id, b.id) || compare(a.path, b.path))) addIdentity(node)
   for (const target of [...input.plan.targets].sort((a, b) => compare(a.nodeId, b.nodeId) || compare(a.path, b.path))) addIdentity({ id: target.nodeId, path: target.path, rawSource: target.rawSource })
   for (const contract of [...contracts].sort((a, b) => compare(a.nodeId, b.nodeId) || compare(a.path, b.path))) addIdentity({ id: contract.nodeId, path: contract.path, rawSource: contract.rawSource })
 
-  const contractByNode = new Map<string, Contract>()
-  for (const contract of contracts) if (!contractByNode.has(contract.nodeId)) contractByNode.set(contract.nodeId, contract)
+  const contractByPath = new Map(contracts.map(contract => [governanceNodeKey(contract.nodeId, contract.path), contract]))
   const nodes = new Map<string, GovernanceNode>()
   for (const identity of identities.values()) {
-    const source = input.files.get(identity.path)
-    const contract = contractByNode.get(identity.id)
+    const currentSource = input.files.get(identity.path)
+    const historicalSource = currentSource === undefined ? input.governanceSources?.get(identity.path) : undefined
+    const source = currentSource ?? historicalSource
+    const contract = contractByPath.get(governanceNodeKey(identity.id, identity.path))
     const fm = source === undefined ? undefined : parseFrontmatter(source).fm
     const code = fm?.code === undefined ? contract?.code ?? [] : frontmatterPaths(fm.code)
     const related = fm?.related === undefined ? contract?.related ?? [] : frontmatterPaths(fm.related)
     const rawSource = source === undefined ? identity.rawSource ?? contract?.rawSource ?? null : parseParts(source)?.rawSource || null
-    nodes.set(identity.id, {
+    nodes.set(governanceNodeKey(identity.id, identity.path), {
       id: identity.id,
       path: identity.path,
       rawSource,
       code: parseNodeRelation(identity.path, code, 'code'),
       related: parseNodeRelation(identity.path, related, 'related'),
+      current: currentSource !== undefined,
+      sourceDigest: historicalSource === undefined ? null : contentHash(Buffer.from(historicalSource, 'utf8')),
     })
   }
   return nodes
@@ -98,7 +113,7 @@ function governanceNodesForInput(input: PlanSyncPartitionsInput, contracts: read
 function rawIntentSeedNodes(input: PlanSyncPartitionsInput, contracts: readonly Contract[], governanceNodes: ReadonlyMap<string, GovernanceNode>): Set<string> {
   const contractedNodeIds = new Set(contracts.map(contract => contract.nodeId))
   return new Set(input.plan.targets.filter(target => target.nodeId === input.plan.intentNodeId && !contractedNodeIds.has(target.nodeId))
-    .filter(target => !!governanceNodes.get(target.nodeId)?.rawSource?.trim()).map(target => target.nodeId))
+    .filter(target => !!(governanceNodeAtPath(governanceNodes, target.path)?.rawSource ?? target.rawSource)?.trim()).map(target => target.nodeId))
 }
 
 function targetWritePaths(input: PlanSyncPartitionsInput, nodeId: string, governanceNodes: ReadonlyMap<string, GovernanceNode>, specOnly = false): string[] {
@@ -107,7 +122,7 @@ function targetWritePaths(input: PlanSyncPartitionsInput, nodeId: string, govern
     && (!input.plan.executionScope || coveredPath(target.path, input.plan.executionScope.paths)) ? [target.path] : []
   const paths = new Set<string>([target.path])
   const claims: Claim[] = []
-  for (const entry of governanceNodes.get(nodeId)?.code ?? []) claims.push({ path: entry.path })
+  for (const node of governanceNodesForId(governanceNodes, nodeId)) for (const entry of node.code) claims.push({ path: entry.path })
   for (const contract of input.contracts.filter(contract => contract.nodeId === nodeId)) {
     for (const item of contract.items) if (item.kind === 'AC') claims.push({ path: parseCodeEntry(item.test).path })
   }
@@ -130,7 +145,7 @@ function canonical(value: unknown): string {
 
 function ownerNodesForPath(path: string, contracts: readonly Contract[], governanceNodes: ReadonlyMap<string, GovernanceNode>): Set<string> {
   const owners = new Set<string>()
-  for (const node of governanceNodes.values()) if (node.code.some(entry => relationClaimsPath(entry.path, path))) owners.add(node.id)
+  for (const node of governanceNodes.values()) if (node.path === path || node.code.some(entry => relationClaimsPath(entry.path, path))) owners.add(node.id)
   for (const contract of contracts) {
     for (const item of contract.items) {
       if (item.kind === 'VERIFY') continue
@@ -216,8 +231,10 @@ function contextFor(
     }
   }
 
-  const intent = governanceNodes.get(input.plan.intentNodeId)
-    ?? input.plan.targets.find(target => target.nodeId === input.plan.intentNodeId)
+  const intentTarget = input.plan.targets.find(target => target.nodeId === input.plan.intentNodeId)
+  const intent = (intentTarget && governanceNodeAtPath(governanceNodes, intentTarget.path))
+    ?? governanceNodesForId(governanceNodes, input.plan.intentNodeId).find(node => node.current)
+    ?? intentTarget
   if (intent) {
     const intentPath = intent.path
     rawContextPaths.add(intentPath)
@@ -482,7 +499,9 @@ export function planSyncPartitions(input: PlanSyncPartitionsInput): SyncPartitio
   const expectedPaths = uniqueSorted(input.changedPaths)
   const dependencies = dependencyEdges(partitions, graph)
   const content = uniqueSorted(partitions.flatMap(partition => partition.readPaths)).map(path => ({ path, sha256: input.files.has(path) ? contentHash(Buffer.from(input.files.get(path)!, 'utf8')) : null, estimatedBytes: input.readByteSizes?.get(path) ?? null }))
-  const digestShape = { version: 'sync-partitions-v1', plan: planFingerprint(input.plan), partitions, dependencies, expectedPaths, content }
+  const governance = [...governanceNodes.values()].filter(node => node.sourceDigest)
+    .map(node => ({ id: node.id, path: node.path, sha256: node.sourceDigest! })).sort((a, b) => compare(a.id, b.id) || compare(a.path, b.path))
+  const digestShape = { version: 'sync-partitions-v1', plan: planFingerprint(input.plan), partitions, dependencies, expectedPaths, content, governance }
   return { version: 'sync-partitions-v1', partitions, dependencies, expectedPaths, digest: contentHash(canonical(digestShape)) }
 }
 
