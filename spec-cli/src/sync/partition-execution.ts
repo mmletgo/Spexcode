@@ -114,7 +114,7 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
       facts: [...input.facts ?? []].filter(fact => !fact.source.startsWith('code:') || within(fact.source.slice(5).split('#')[0], readPaths)),
       nodeChanges: input.nodeChanges?.filter(change => targets.some(target => target.path === change.from.path)),
       authorizedChanges: [...(input.authorizedChanges ?? []).filter(change => !analysis?.analysis.authorizedChanges.some(local => local.id === change.id) && (change.action === 'restore' || ids.has(change.id))), ...(analysis ? deriveBehaviorAuthorization(analysis.analysis, analysis.ref) : [])],
-      implementationWritePaths: partition.writePaths, readonlyTestPaths: input.readonlyTestPaths?.filter(path => within(path, readPaths)),
+      implementationWritePaths: input.implementationWritePaths?.length === 0 ? [] : partition.writePaths, readonlyTestPaths: input.readonlyTestPaths?.filter(path => within(path, readPaths)),
     }
     const result = await elaborate(localInput, { runner })
     const { contracts: _contracts, graph: _graph, coverage: _coverage, ...compact } = result

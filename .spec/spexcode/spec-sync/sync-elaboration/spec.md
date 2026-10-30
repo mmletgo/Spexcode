@@ -67,3 +67,6 @@ AC-ELABORATION-38–40 验证空 changes 的完整既有目标、只返回子叶
 
 
 分区输入的intent允许属于冻结只读context而不属于targets；该上层原意全文仍必须存在，raw不改变。本区targets非空且身份、路径、摘要及原有授权检查保持；只读原意节点不要求出现在本区changes，也不获得写权。可信验证登记的纯技术校验可取本区首个目标作临时渲染，不改变实际契约writer。
+
+
+显式空 implementationWritePaths 表示本轮只观察既有实现（code→spec）。生成和独审均不得将缺代码、测试文件或用例延后交给 P2；这些缺口保留为具体 readonly_implementation_gap 并阻止细化通过，不能虚构新测试、编造业务GAP或弱化验收。已有完整实现/测试仍按原结构与独审门禁通过。

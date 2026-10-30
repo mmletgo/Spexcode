@@ -1614,6 +1614,11 @@ test('v2 code→Spec协调器保留分区证据并跳过代码生成，最终候
   const f = await fixture(t, { maxAttempts: 1, maxCalls: 5, maxRepairs: 0, timeoutMs: 120000 }, false, original, 'project', original, { version: 'sync-coordinator-v2', direction: 'code_to_spec', partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 2 }, sourcePaths: ['src'], commitTrigger: { before: null, paths: ['src/export.js'] } }, undefined, 'code')
   let candidateSeen = false
   f.transform((output, request) => {
+    if (request.purpose === 'elaboration_generate' || request.purpose === 'elaboration_review') {
+      const frozen = JSON.parse(request.prompt.split('冻结业务输入:\n')[1].split('\n')[0]) as { implementationWritePaths: string[]; readonlyTestPaths: string[] }
+      assert.deepEqual(frozen.implementationWritePaths, [])
+      assert.ok(frozen.readonlyTestPaths.includes('tests/export.test.mjs'))
+    }
     if (request.purpose === 'code_generate') assert.fail('代码提交不得调用可写代码生成器')
     if (request.purpose === 'code_review') {
       const frozen = promptInput(request)

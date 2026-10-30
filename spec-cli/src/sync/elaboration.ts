@@ -161,7 +161,7 @@ function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate
   }
   for (const id of input.retiredIds ?? []) if (graph.items.has(id) && !input.authorizedChanges?.some(change => change.action === 'restore' && change.id === id && !contractAuthorizationErrors(change, before, evolutionPolicy).length)) findings.push(finding(input, 'retired_id_reused', `不能复用退役稳定身份: ${id}`, id))
   for (const change of input.authorizedChanges ?? []) if (change.action === 'retire' && graph.items.has(change.id)) findings.push(finding(input, 'retirement_not_applied', `用户已决定退役的身份仍存在: ${change.id}`, change.id))
-  findings.push(...validateContractGraph(graph, { mode: 'final', files: input.files, nodeIds: new Set(after.nodes.map(source => source.id)) }))
+  findings.push(...validateContractGraph(graph, { mode: 'final', files: input.files, nodeIds: new Set(after.nodes.map(source => source.id)) }).map(issue => input.implementationWritePaths?.length === 0 && implementationFinding(issue) ? { ...issue, code: 'readonly_implementation_gap', message: `本轮实现只读，不能延后补写代码或测试；${issue.message}` } : issue))
   const baseline = [...input.targets.filter(target => target.source !== null), ...(input.context ?? [])].flatMap(source => parseContract({ nodeId: source.nodeId, path: source.path, source: source.source! }).contract?.items ?? [])
   const decisions = new Set([...(input.facts ?? []).filter(fact => fact.source.startsWith('decision:')).map(fact => fact.source), ...baseline.flatMap(item => item.kind !== 'VERIFY' && item.source.kind === 'decision' ? [`decision:${item.source.ref}`] : [])])
   for (const contract of changed.values()) for (const item of contract.items) {
@@ -205,7 +205,7 @@ function reviewErrors(input: ElaborationInput, review: ElaborationReview, inputD
         const owners = issue.affectedIds.map(id => graph.owners.get(id))
         const paths = owners.flatMap(owner => owner ? [...owner.code, ...owner.items.filter(item => item.kind === 'AC').map(item => item.test)].map(anchor => anchor.split('#')[0]) : [])
         const bound = issue.affectedIds.length > 0 && owners.every(Boolean) && paths.some(path => input.files?.has(path) && new RegExp(`(?:^|[^A-Za-z0-9_./-])${path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:#[^\\s；，。]+|:[1-9]\\d*)(?=$|[^A-Za-z0-9_./-])`).test(issue.evidence))
-        findings.push({ ...finding(input, bound ? issue.code : 'review_implementation_binding', bound ? message : `待实现发现必须关联当前契约ID和冻结治理文件的具体符号或行号；${message}`), relatedIds: [...issue.affectedIds] })
+        findings.push({ ...finding(input, bound ? input.implementationWritePaths?.length === 0 ? 'readonly_implementation_gap' : issue.code : 'review_implementation_binding', bound ? message : `待实现发现必须关联当前契约ID和冻结治理文件的具体符号或行号；${message}`), relatedIds: [...issue.affectedIds] })
       } else findings.push({ ...finding(input, issue.code, message), relatedIds: [...issue.affectedIds] })
     }
     else {
