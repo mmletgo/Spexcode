@@ -13,11 +13,13 @@ import { elaborate, elaborationDigest, sealPartitionedElaboration } from './elab
 import { elaborationSchema } from './elaboration-schema.js'
 import type { ElaborationInput, ElaborationResult } from './elaboration-types.js'
 import { CONTRACT_COLUMNS, parseParts } from '@spexcode/spec-core/contracts'
-import type { GeneratedTables } from './elaboration-markdown.js'
+import type { GeneratedTables, GeneratedTargetElaboration } from './elaboration-markdown.js'
 import type { GenerationInput } from './generation-types.js'
 import { analyzeSyncPartitions, completeSyncPartitionPlan, elaborateSyncPartitions, generateSyncPartitions, implementationPartitionSelection, mapSyncPartitions } from './partition-execution.js'
 import type { PartitionCheckpoints } from './partition-execution.js'
+import { planSyncPartitions } from './partitioning.js'
 import type { SyncPartitionPlan } from './partitioning.js'
+import type { SyncCoordinatorPlan } from './coordinator-types.js'
 import type { CodeBehaviorInput } from './code-behavior.js'
 import type { CodeBehaviorAnalysis } from './writeback-types.js'
 import { composeInputSnapshots } from './composition.js'
@@ -606,6 +608,7 @@ test('多层raw-only父逐级结算真实接口后两叶并行，并只从严格
         { id: 'REQ-NESTED-ALPHA', goal: '保留既有标签规范化行为', source: 'user:raw', constraints: '不扩展需求', success: '规范化结果不变', 'depends-on': [] },
         { id: 'REQ-NESTED-GAMMA', goal: '保留gamma子能力的现存行为', source: 'user:raw', constraints: '不扩展需求', success: 'gamma结果不变', 'depends-on': [] },
       ]
+      tables.RULE = [{ id: 'RULE-NESTED-ALPHA-POLICY', scope: '标签规范化', constraint: '保持既有标签规范化结果。', basis: '父raw要求保留当前行为。', source: 'derived:REQ-NESTED-ALPHA', authority: nodes.root, 'depends-on': ['REQ-NESTED-ALPHA'] }]
     } else if (nodeId === nodes.middle) {
       tables.REQ = [{ id: 'REQ-NESTED-MIDDLE', goal: '只整理既有大写转换', source: 'user:raw', constraints: '不新增转换规则', success: '现有字符串大写结果不变', 'depends-on': ['REQ-NESTED-GAMMA'] }]
     } else {
@@ -615,8 +618,8 @@ test('多层raw-only父逐级结算真实接口后两叶并行，并只从严格
       tables.REQ = [{ id: req, goal: `记录${symbol}现有行为`, source: `derived:${ancestors.at(-1)}`, constraints: '只描述冻结实现', success: '输出符合既有oracle', 'depends-on': ancestors }]
       tables.RULE = [{ id: rule, scope: sourcePath, constraint: '只接受字符串输入，返回冻结实现定义的转换结果，保持当前不变量。', basis: '现有源码和只读oracle', source: `derived:${req}`, authority: nodeId, 'depends-on': [req] }]
       tables.FLOW = [{ id: flow, req: [...ancestors, req], actors: '调用方', entry: `调用${symbol}`, preconditions: '输入字符串', steps: [step], terminal: 'END', source: `derived:${req}`, 'depends-on': [...ancestors, req] }]
-      tables.STEP = [{ id: step, flow, action: `同步调用${symbol}`, input: '字符串', output: '转换结果', rules: [rule], next: 'END', source: `derived:${req}`, 'depends-on': [req] }]
-      tables.AC = [{ id: `AC-${domain}-NESTED`, source: `derived:${req}`, 'depends-on': [req], covers: [...ancestors, req, rule], preconditions: 'oracle输入', action: `调用${symbol}`, assertion: '既有结果不变', test: `${paths.oracle}#NESTED-INTERFACE-ORACLE-01`, command: `VERIFY-${domain}-NESTED` }]
+      tables.STEP = [{ id: step, flow, action: `同步调用${symbol}`, input: '字符串', output: '转换结果', rules: alpha ? [rule, 'RULE-NESTED-ALPHA-POLICY'] : [rule], next: 'END', source: `derived:${req}`, 'depends-on': [req] }]
+      tables.AC = [{ id: `AC-${domain}-NESTED`, source: `derived:${req}`, 'depends-on': [req], covers: [...ancestors, req, rule, ...alpha ? ['RULE-NESTED-ALPHA-POLICY'] : []], preconditions: 'oracle输入', action: `调用${symbol}`, assertion: '既有结果不变', test: `${paths.oracle}#NESTED-INTERFACE-ORACLE-01`, command: `VERIFY-${domain}-NESTED` }]
       tables.VERIFY = [{ id: `VERIFY-${domain}-NESTED`, command: ['node', '--test', paths.oracle], cwd: '.', 'timeout-ms': 30000 }]
       code = [`${sourcePath}#${symbol}`]
       prose = '这是无状态同步纯函数，状态不适用，输出只由输入决定。'
@@ -671,6 +674,8 @@ test('多层raw-only父逐级结算真实接口后两叶并行，并只从严格
   const gamma = result.contracts.find(contract => contract.nodeId === nodes.gamma)!
   assert.ok(gamma.items.some(item => item.kind === 'FLOW' && item.req.includes('REQ-NESTED-GAMMA') && item.req.includes('REQ-NESTED-MIDDLE')))
   assert.ok(gamma.items.some(item => item.kind === 'AC' && item.covers.includes('REQ-NESTED-GAMMA') && item.covers.includes('REQ-NESTED-MIDDLE')))
+  assert.ok(!gamma.items.some(item => item.kind === 'AC' && item.covers.includes('RULE-NESTED-ALPHA-POLICY')), 'gamma不强制承接兄弟alpha规则')
+  assert.ok(calls.filter(request => request.purpose === 'elaboration_generate' && /:partition:(alpha|gamma):/.test(request.requestKey)).every(request => request.prompt.includes('本叶实际执行的祖先RULE') && request.prompt.includes('TR.rules')))
   const missingAncestor = result.partitionSeal!.changes.map(change => ({ ...change, source: change.path === paths.gamma ? change.source.replaceAll('REQ-NESTED-GAMMA,', '') : change.source }))
   const rejected = sealPartitionedElaboration(input, missingAncestor, result.partitionSeal!.applicability)
   assert.equal(rejected.seal.passed, false, '漏祖先直接承接仍由全局final拒绝')
@@ -758,6 +763,78 @@ test('多层raw-only父逐级结算真实接口后两叶并行，并只从严格
     analysis.reviewPassed = false
     discovered.input.analysis = { analysis, ref: writeEvidence(snapshot.source.commonDir, analysis) }
     await assert.rejects(elaborateSyncPartitions(discovered.input, discovered.plan, 2, discovered.checkpoints, runner), /独审分析绑定/)
+  })
+  for (const appendRaw of [false, true]) await t.test(appendRaw ? '已有纯接口父raw追加后真实spec→code重新细化' : '已完成四节点树再次全量同步保留全部接口义务', async subtest => {
+    const repeated = await nestedInterfaceFixture(subtest)
+    for (const change of result.changes) writeFileSync(join(repeated.input.root, change.path), change.source)
+    const nextRaw = appendRaw ? `${raw.root} 补充说明：后续同步继续保持现有两个字符串能力的结果。` : raw.root
+    if (appendRaw) writeFileSync(join(repeated.input.root, paths.root), readFileSync(join(repeated.input.root, paths.root), 'utf8').replace(raw.root, nextRaw))
+    execFileSync('git', ['-C', repeated.input.root, 'add', '.'], { stdio: 'pipe' })
+    execFileSync('git', ['-C', repeated.input.root, 'commit', '-m', appendRaw ? 'save completed parent raw' : 'settle complete nested tree'], { stdio: 'pipe' })
+    const snapshot = await captureInputSnapshot(repeated.input.root)
+    const files = new Map(readTree(snapshot.source.commonDir, snapshot.immutableTree).map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString('utf8')]))
+    const targets = repeated.input.targets.map(target => ({ ...target, source: files.get(target.path)!, sourceDigest: elaborationDigest(files.get(target.path)!), ...(target.nodeId === nodes.root ? { rawSource: nextRaw } : {}) }))
+    const repeatInput: ElaborationInput = { ...repeated.input, base: snapshot.headCommit, requestKey: `nested-interface:repeat:${appendRaw}`, intent: { nodeId: nodes.root, rawSource: nextRaw }, historyInput: snapshot, files, targets, implementationWritePaths: appendRaw ? [paths.alphaSource, paths.gammaSource] : [] }
+    const contracts = targets.map(target => parseContract({ ...target, source: target.source }).contract!)
+    const coordinatorPlan: SyncCoordinatorPlan = { version: 'sync-coordinator-v1', intentNodeId: nodes.root, targets: targets.map(({ nodeId, path }) => ({ nodeId, path })),
+      readPaths: ['.spec', 'src', 'tests'], writePaths: ['.spec', 'src'], sourcePaths: ['src'], facts: [], verifications: [], mandatoryTests: [] }
+    const repeatPlan = planSyncPartitions({ plan: coordinatorPlan, files, contracts, nodes: targets.map(target => ({ id: target.nodeId, path: target.path, rawSource: parseParts(target.source)!.rawSource })), changedPaths: targets.map(target => target.path) })
+    const unchanged = targets.map(target => ({ nodeId: target.nodeId, path: target.path, beforeDigest: target.sourceDigest, source: target.source }))
+    const baselineSeal = sealPartitionedElaboration(repeatInput, unchanged, applicability)
+    assert.equal(baselineSeal.seal.passed, true, JSON.stringify(baselineSeal.seal.findings))
+    const rootTarget = targets.find(target => target.nodeId === nodes.root)!
+    const localInput: ElaborationInput = { ...repeatInput, targets: [rootTarget], context: [], files: new Map([[paths.root, rootTarget.source]]), validationScope: 'partition_local' }
+    let localCalls = 0
+    const localRunner = (output: GeneratedTargetElaboration): ElaborationRunner => async request => {
+      const ordinal = ++localCalls
+      const response = request.purpose === 'elaboration_generate' ? output : { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+      return { sessionId: `existing-interface-session-${ordinal}`, threadId: `existing-interface-thread-${ordinal}`, turnId: 'turn', output: response, resultDigest: contentHash(JSON.stringify(response)) }
+    }
+    const ordinary = await elaborate(localInput, { runner: localRunner(rows(nodes.root) as unknown as GeneratedTargetElaboration) })
+    assert.equal(ordinary.structurePassed, false, '相同的合法全图不能令缺子实现正文的局部普通P1冒称完整')
+    assert.ok(ordinary.rounds.flatMap(round => round.findings).some(finding => finding.code === 'missing-requirement-flow'))
+    settled.clear()
+    const rerun = await elaborateSyncPartitions(repeatInput, repeatPlan, 2, repeated.checkpoints, runner)
+    assert.equal(rerun.structurePassed, true, JSON.stringify({ failure: rerun.failure, findings: rerun.rounds.flatMap(round => round.findings).map(({ code, itemId }) => ({ code, itemId })), seal: rerun.partitionSeal?.findings }))
+    assert.equal(rerun.partitionSeal?.passed, true)
+    assert.equal(rerun.reviewPassed, true)
+    assert.deepEqual(rerun.contracts.flatMap(contract => contract.items.map(item => item.id)).sort(), contracts.flatMap(contract => contract.items.map(item => item.id)).sort())
+    assert.equal(parseParts(rerun.changes.find(change => change.path === paths.root)!.source)!.rawSource, nextRaw)
+    for (const path of [paths.alphaSource, paths.gammaSource, paths.oracle]) assert.equal(readFileSync(join(repeatInput.root, path), 'utf8'), files.get(path))
+    if (appendRaw) return
+    const seedInput: ElaborationInput = { ...localInput, phase: 'interface_seed' }
+    const retained = await elaborate(seedInput, { runner: localRunner({ version: 'elaboration-target-rows-v3', changes: [], applicability }) })
+    assert.equal(retained.reviewPassed, true, '空行差量保留既有全部父REQ/RULE')
+    assert.deepEqual(retained.contracts[0].items.map(item => item.id), contracts.find(contract => contract.nodeId === nodes.root)!.items.map(item => item.id))
+    for (const defect of ['reference', 'authority', 'remove', 'source-scope'] as const) {
+      const output = rows(nodes.root) as unknown as GeneratedTargetElaboration
+      if (defect === 'reference') output.changes[0].tables.REQ[0]['depends-on'] = ['REQ-NONEXISTENT-PARENT']
+      if (defect === 'authority') output.changes[0].tables.RULE[0].authority = nodes.middle
+      if (defect === 'remove') output.changes[0].removeIds = ['REQ-NESTED-ALPHA']
+      if (defect === 'source-scope') output.changes[0].code = [paths.alphaSource]
+      const rejected = await elaborate(seedInput, { runner: localRunner(output) })
+      assert.equal(rejected.structurePassed, false, defect)
+      assert.equal(rejected.reviewPassed, false, defect)
+      assert.ok(rejected.rounds.flatMap(round => round.findings).some(finding => finding.code === (defect === 'reference' ? 'dangling-reference' : 'output_schema')), defect)
+    }
+    const removedWithoutAuthority = unchanged.map(change => ({ ...change, source: change.path === paths.root ? change.source.split('\n').filter(line => !line.startsWith('| RULE-NESTED-ALPHA-POLICY |')).join('\n') : change.source }))
+    const rejectedRemoval = sealPartitionedElaboration(repeatInput, removedWithoutAuthority, applicability)
+    assert.equal(rejectedRemoval.seal.passed, false)
+    assert.ok(rejectedRemoval.seal.findings.some(finding => finding.code === 'protected_item_removed' && finding.itemId === 'RULE-NESTED-ALPHA-POLICY'))
+    const retiredInput: ElaborationInput = { ...seedInput, intent: { ...seedInput.intent, rawSource: `${nextRaw} 明确取消重复的RULE-NESTED-ALPHA-POLICY接口条目，其余义务保持。` },
+      authorizedChanges: [{ id: 'RULE-NESTED-ALPHA-POLICY', action: 'retire', source: 'user:raw', reason: '用户明确取消该重复接口条目' }] }
+    const retireSchema = elaborationSchema(retiredInput, { purpose: 'interface_seed' })
+    const removeSchema = (retireSchema.properties as { changes: { items: { properties: { removeIds: { maxItems: number; items: { enum: string[] } } } } } }).changes.items.properties.removeIds
+    assert.deepEqual(removeSchema.items.enum, ['RULE-NESTED-ALPHA-POLICY'])
+    assert.equal(removeSchema.maxItems, 1)
+    const retiredOutput = rows(nodes.root) as unknown as GeneratedTargetElaboration
+    retiredOutput.changes[0].tables.RULE = []
+    retiredOutput.changes[0].removeIds = ['RULE-NESTED-ALPHA-POLICY']
+    const retired = await elaborate(retiredInput, { runner: localRunner(retiredOutput) })
+    assert.equal(retired.reviewPassed, true, JSON.stringify(retired.rounds.flatMap(round => round.findings)))
+    assert.deepEqual(retired.retiredIds, ['RULE-NESTED-ALPHA-POLICY'])
+    assert.ok(retired.contracts[0].items.every(item => item.id !== 'RULE-NESTED-ALPHA-POLICY'))
+    await assert.rejects(elaborate({ ...retiredInput, authorizedChanges: [{ id: 'RULE-NESTED-ALPHA-POLICY', action: 'retire', source: 'decision:UNTRUSTED', reason: '伪造来源不能获得退役授权' }] }, { runner: localRunner(retiredOutput) }), /没有可信来源/)
   })
   const completed = completeSyncPartitionPlan(plan, result.contracts, input.files!, { writePaths: [], readonlyPaths: [paths.oracle] })
   const generationInput: GenerationInput = {
