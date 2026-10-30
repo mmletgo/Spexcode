@@ -50,3 +50,6 @@ RULE 独立跨叶搬迁时，旧定义与新定义的 authority 均须等于各�
 当前精确request/旧analysis/所选finding绑定且已独审通过的裁决，可结清候选实际删除的旧派生诊断GAP：来源须为所选旧RULE/TR，依赖仅限这些旧规则与原affected需求，affects仅原affected STEP/AC及这些STEP所属FLOW，所有旧消费者也须在此有限范围且只以depends-on引用。当前相关finding未解决、同一allowed_change未明确支持来源规则及受影响义务或缺真实evidence，均不授权清除；不按GAP名称或文字推断。删除GAP与仅移除这些诊断dependsOn且其余canonical业务意义完全相同的项，属于诊断结清而非业务retire；父FLOW不因此获得改义权限。keep仍禁止raw、政策、AC及VERIFY变化；preserve_business或已接受refinement不享有清理豁免。
 
 退役身份不能用于新业务对象。显式 revert 恢复同一历史对象是精确 restore 授权：只接受不可变历史请求证明在原提交 parent 已存在、原交付确实删除、当前来源仍缺失，并按同路径/节点/业务字段与原代码测试绑定恢复的 ID。候选再次核相同身份；假来源、错误对象/路径或无该请求的普通新节点复用继续拒绝。
+
+
+分区聚合分析不受旧单体恰一对trace假设限制：partitionCoverage冻结计划摘要、全部区身份和真实changedPaths；partitionEvidence携每区真实完整原件及analysisRef。程序逐原件沿原严格hash/批准/独立会话检查，额外核同input/baseline/composed/readSet/policy及精确trace.inputDigest、唯一完整区/路径覆盖、事实/发现/授权/归属/resolution等并集与全部原生trace一致。缺区、重复区、错原件摘要/输入、假批准或聚合增删授权均拒绝，不制造单体trace或删掉真实extra native证据。旧无partitionEvidence的历史单体规则逐字保持。

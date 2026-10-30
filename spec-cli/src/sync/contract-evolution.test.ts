@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import test from 'node:test'
 import { CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
-import { contractBusinessMeaning, contractBusinessProse, decisionScopeIds, resolvedDecisionGapIds, validateContractEvolution } from './contract-evolution.js'
+import { acceptanceAuthorizationErrors, contractBusinessMeaning, contractBusinessProse, decisionScopeIds, resolvedDecisionGapIds, validateContractEvolution } from './contract-evolution.js'
 import type { ContractEvolutionPolicy } from './contract-evolution.js'
 import { checkGenerationContractIntent, readFrozenContracts } from './frozen-contracts.js'
 import { elaborate, elaborationDigest } from './elaboration.js'
@@ -652,4 +652,36 @@ test('已审精确裁决仅删除所选旧诊断GAP与依赖，独审后记录�
   assert.equal(rejected.reviewPassed, false); assert.deepEqual(rejected.retiredIds, [])
   const reused = await elaborate({ ...input(), retiredIds: accepted.retiredIds }, { runner: runner(build(previousSource)) })
   assert.ok(reused.rounds[0].findings.some(issue => issue.code === 'retired_id_reused' && issue.itemId === gapId))
+})
+
+
+test('分区授权只接受完整独审原件并集，错SHA/少区/重复区/错输入/假批准均拒绝', async () => {
+  const before = await readFrozenContracts('/frozen', files())
+  const aggregate = (): CodeBehaviorEvidence => {
+    const a = evidence(), b = evidence()
+    b.analysis.changes = [{ ...b.analysis.changes[0], id: 'change-2', kind: 'refactor', paths: ['src/other.js'], affectedIds: [], ruleIds: [] }]
+    b.analysis.facts = []; b.analysis.authorizedChanges = []
+    b.analysis.traces = b.analysis.traces.map(trace => ({ ...trace, sessionId: `other-${trace.sessionId}`, threadId: `other-${trace.threadId}` }))
+    b.ref.sha256 = elaborationDigest(JSON.stringify(b.analysis))
+    const analysis: CodeBehaviorEvidence['analysis'] = { ...a.analysis, changes: [...a.analysis.changes, ...b.analysis.changes], traces: [...a.analysis.traces, ...b.analysis.traces], partitionCoverage: { planDigest: sha, partitionIds: ['a', 'b'], changedPaths: ['src/export.js', 'src/other.js'] }, partitionEvidence: [{ partitionId: 'a', changedPaths: ['src/export.js'], analysisRef: a.ref, analysis: a.analysis }, { partitionId: 'b', changedPaths: ['src/other.js'], analysisRef: b.ref, analysis: b.analysis }] }
+    return { analysis, ref: { sha256: elaborationDigest(JSON.stringify(analysis)) } }
+  }
+  const accepted = aggregate()
+  assert.deepEqual(acceptanceAuthorizationErrors(authorization(accepted) as Extract<AuthorizedContractChange, { action: 'update_acceptance' }>, before, policy({ analysis: accepted })), [])
+  const mutations: ((value: CodeBehaviorEvidence) => void)[] = [
+    value => { value.analysis.partitionEvidence![0].analysisRef.sha256 = sha },
+    value => { value.analysis.partitionEvidence!.pop() },
+    value => { value.analysis.partitionEvidence![1].partitionId = 'a' },
+    value => { const part = value.analysis.partitionEvidence![1]; part.analysis.inputId = 'another-input'; part.analysisRef.sha256 = elaborationDigest(JSON.stringify(part.analysis)) },
+    value => { const part = value.analysis.partitionEvidence![1]; part.analysis.reviewPassed = false; part.analysisRef.sha256 = elaborationDigest(JSON.stringify(part.analysis)) },
+    value => { value.analysis.authorizedChanges = [] },
+    value => { value.analysis.partitionCoverage!.changedPaths.pop() },
+    value => { value.analysis.traces = value.analysis.traces.slice(0, 2) },
+  ]
+  for (const mutate of mutations) {
+    const forged = aggregate(); mutate(forged); forged.ref.sha256 = elaborationDigest(JSON.stringify(forged.analysis))
+    assert.ok(acceptanceAuthorizationErrors(authorization(forged) as Extract<AuthorizedContractChange, { action: 'update_acceptance' }>, before, policy({ analysis: forged })).length)
+  }
+  const old = evidence(); old.analysis.traces.push({ ...old.analysis.traces[0], sessionId: 'extra', threadId: 'extra' }); old.ref.sha256 = elaborationDigest(JSON.stringify(old.analysis))
+  assert.ok(acceptanceAuthorizationErrors(authorization(old) as Extract<AuthorizedContractChange, { action: 'update_acceptance' }>, before, policy({ analysis: old })).length, '旧单体恰一对独审规则保持')
 })

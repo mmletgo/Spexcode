@@ -41,3 +41,6 @@ retiredIds同时承载逐项合法业务退役与经当前精确裁决确证结�
 authorizedChanges 的 restore 动作保存原固定历史请求及 input 引用，仅表达同一历史业务身份恢复；调用者在原协调器核原 settled receipt，细化再核真实 Git parent、原路径与旧业务字段。候选不能用普通 user:raw 或模型文字自授恢复。恢复的当前 ID 不继续列为禁用 retiredIds，原历史退役 pair 与审计证据不修改。
 
 结构化runner请求也可携通用纯JSON frozenEntries（UTF8 text、binary base64或absent）；它在真实attempt/policy绑定后转换为frozenContext，持久计划不携条目正文。该传输字段不新增调用、业务授权或完成语义，旧固定ref/请求原样恢复。
+
+
+分区聚合结果可携partitionEvidence:{partitionId,resultRef}[]，每份ref保存独立局部结构和原生审查原件。合并结果不能冒充一次全仓审查，P2仍须核唯一目标writer、全局契约关系及最终candidate。intent可来自只读context，只有targets可写。
