@@ -295,7 +295,10 @@ test('controlled Claude compact boundaries preserve one original turn without gr
       { type: 'attachment', sessionId: 'session', uuid: 'retry-attachment', parentUuid: 'reply-0' },
       { type: 'system', subtype: 'api_error', sessionId: 'session', isSidechain: false, uuid: 'retry-1', parentUuid: 'retry-attachment', source: 'request_retry', level: 'error', retryInMs: 523, retryAttempt: 1, maxRetries: 10, error: { message: 'read ECONNRESET', formatted: 'SYNTHETIC_PRIVATE_ERROR', error: null } },
       { type: 'system', subtype: 'api_error', sessionId: 'session', isSidechain: false, uuid: 'retry-2', parentUuid: 'retry-1', source: 'request_retry', level: 'error', retryInMs: 1000, retryAttempt: 2, maxRetries: 10, error: { message: 'network retry', formatted: 'SYNTHETIC_PRIVATE_ERROR', error: null } })
+    const retryBase = row(retried, 'request-2')
+    retried.splice(retried.findIndex(item => item.uuid === 'consumed-1'), 0, { ...request('request-2-retry', [], 'request-2'), keep: (retryBase.keep as number) + (retryBase.tail as string[]).length })
     row(retried, 'consumed-1').parentUuid = 'retry-2'
+    row(retried, 'consumed-1').requestRef = 'request-2-retry'
     const retryWitness = witness(retried), retryProof = proveClaudeFrozenReads(ref, retryWitness)
     assert.deepEqual(retryProof.coveredEntryIds, proof.coveredEntryIds)
     assert.deepEqual(retryProof.receipts, proof.receipts, 'native retry telemetry grants no read receipts or coverage')
@@ -332,7 +335,8 @@ test('controlled Claude compact boundaries preserve one original turn without gr
     }
     const sourcePrefix = retried.slice(0, retried.findIndex(item => item.uuid === 'compact-1'))
     witness(sourcePrefix)
-    assert(readClaudeApiSourceMetadata(path, 'session', 'MiniMax-M3').has('request-2'), 'failure-only source indexing keeps the same retry chain')
+    const retrySources = readClaudeApiSourceMetadata(path, 'session', 'MiniMax-M3')
+    assert.deepEqual([...retrySources.get('request-2-retry')!.messages], [...retrySources.get('request-2')!.messages], 'the retried API request consumes the exact complete prior input without a new tail')
     assert.deepEqual(proveClaudeFrozenReads(ref, witness()), proof, 'histories without retries keep the original proof bytes')
     for (const content of ['Your response above was cut off mid-stream. Resume directly from where it stops — no apology, no recap. If none of it survived, answer the request from the start.', '']) {
       const extra = structuredClone(raw)
