@@ -10,6 +10,11 @@ import { prepareFrozenPrompt, readFrozenManifest, claudeFrozenContextPrompt, fre
 import { structuredExecutionPolicy, structuredRealmRoot } from './session-structured-policy.js'
 import { claudeNativeModel, claudeStructuredArgs, claudeStructuredTurn, prepareClaudeAuthenticationEnvironment } from './claude-structured.js'
 
+const contentBlocks = (message: ClaudePublicMessage): Exclude<ClaudePublicMessage['content'], string> => {
+  assert(Array.isArray(message.content))
+  return message.content
+}
+
 test('Claude namespace creates its own fixed policy and bounded frozen prompt while legacy Codex stays byte-compatible', () => {
   const directory = mkdtempSync(join(tmpdir(), 'spex-claude-policy-'))
   const input = { schema: { type: 'object' }, inputDigest: 'input', purpose: 'test', timeoutMs: 1000 }
@@ -88,8 +93,36 @@ test('controlled Claude compact boundaries preserve one original turn without gr
     assert.deepEqual(proof.coveredEntryIds, ['task'])
     assert.equal(proof.receipts.length, 2)
     verifyFrozenReadProof(ref, proof, { threadId: 'session', turnId: 'user' }, undefined, { output: { answer: 'public' } })
-    const row = (rows: typeof raw, uuid: string) => rows.find(item => item.uuid === uuid)!
+    const row = (rows: typeof raw, id: string) => rows.find(item => item.uuid === id || item.id === id)!
     const metadata = (rows: typeof raw, uuid = 'compact-1') => row(rows, uuid).compactMetadata as { runningTurnSends: { uuids: string[]; openerUuid: string }; preservedMessages: { anchorUuid: string; uuids: string[]; allUuids: string[] } }
+    for (const content of ['Your response above was cut off mid-stream. Resume directly from where it stops — no apology, no recap. If none of it survived, answer the request from the start.', '']) {
+      const extra = structuredClone(raw)
+      extra.splice(9, 0, { type: 'user', sessionId: 'session', uuid: 'another-user', parentUuid: 'summary-1', promptId: 'prompt', isMeta: true, turnCompanion: true, message: { role: 'user', content } })
+      assert.throws(() => proveClaudeFrozenReads(ref, witness(extra)), { code: 'stale_result' }, 'a continuation string outside an exact assistant boundary remains a rejected extra user turn')
+    }
+    const stringOriginal = structuredClone(raw), stringMessage = { role: 'user', content: 'public prompt' }
+    stringOriginal[0].message = stringMessage
+    stringOriginal.find(item => item.id === 'request-1')!.tail = [claudeMessageDigest(stringMessage)]
+    const stringWitness = witness(stringOriginal)
+    stringWitness.echo.message = stringWitness.history[0].message!
+    const stringProof = proveClaudeFrozenReads(ref, stringWitness)
+    assert.deepEqual(stringProof.coveredEntryIds, proof.coveredEntryIds)
+    assert.equal(stringWitness.history[0].message!.content, 'public prompt', 'the original string message must not be rewritten to an array')
+    assert.notEqual(claudeMessageDigest(stringMessage), claudeMessageDigest(original), 'the actual request binds the original wire shape')
+    verifyFrozenReadProof(ref, stringProof, { threadId: 'session', turnId: 'user' })
+    const wrongStringHash = structuredClone(stringWitness)
+    wrongStringHash.history.find(item => item.id === 'request-1')!.tail = [claudeMessageDigest(original)]
+    assert.throws(() => proveClaudeFrozenReads(ref, wrongStringHash), /original user prompt was not in the actual first API request/)
+    const wrongStringPrompt = structuredClone(stringWitness)
+    wrongStringPrompt.prompt = 'replacement'
+    assert.throws(() => proveClaudeFrozenReads(ref, wrongStringPrompt), /original user echo\/history\/prompt identity differs/)
+    const wrongStringEcho = structuredClone(stringWitness)
+    wrongStringEcho.echo.message = original
+    assert.throws(() => proveClaudeFrozenReads(ref, wrongStringEcho), /original user echo\/history\/prompt identity differs/)
+    const rawStringBlob = structuredClone(stringWitness), rawBlob = rawStringBlob.history.find(item => item.type === 'api-request-blob')!
+    rawBlob.message = stringMessage
+    rawBlob.hash = claudeMessageDigest(stringMessage)
+    assert.throws(() => proveClaudeFrozenReads(ref, rawStringBlob), { code: 'stale_result', message: 'Claude public API message blob has invalid bytes or type' }, 'raw API strings cannot bypass the observed compact-summary binding')
     const cases: Array<[string, (rows: typeof raw) => void]> = [
       ['foreign session', rows => { row(rows, 'compact-1').sessionId = 'foreign' }],
       ['sidechain', rows => { row(rows, 'compact-1').isSidechain = true }],
@@ -127,13 +160,51 @@ test('controlled Claude compact boundaries preserve one original turn without gr
     assert.throws(() => proveClaudeFrozenReads(ref, forgedWitness), /Claude API string message is not an observed same-turn compact summary/)
     const partial = structuredClone(raw), partialInput = { ...inputs[1], endByte: 17 }
     const partialCall = row(partial, 'read-call-1').message as ClaudePublicMessage
-    partialCall.content[0].input = partialInput
+    contentBlocks(partialCall)[0].input = partialInput
     const partialReply = { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'read-1', content: readFrozenRange(ref, partialInput).response.contentItems.map(item => ({ type: 'text', text: item.text })) }] }
     row(partial, 'reply-1').message = partialReply
     partial.find(item => item.id === 'request-4')!.tail = [claudeMessageDigest(partialReply)]
     assert.throws(() => proveClaudeFrozenReads(ref, witness(partial)), /not completely read/, 'compact summary assertions do not grant an unread byte')
     witness()
     verifyFrozenReadProof(ref, proof, { threadId: 'session', turnId: 'user' })
+    const compactRecovery = structuredClone(raw)
+    const recoveryText = 'Your response above was cut off mid-stream. Resume directly from where it stops — no apology, no recap. If none of it survived, answer the request from the start.'
+    const recoveryHash = claudeMessageDigest({ role: 'user', content: [{ type: 'text', text: recoveryText }] })
+    compactRecovery.splice(compactRecovery.findIndex(item => item.uuid === 'compact-1'), 0,
+      { type: 'user', sessionId: 'session', uuid: 'recovery-before-compact', parentUuid: 'consumed-1', promptId: 'prompt', isMeta: true, turnCompanion: true, message: { role: 'user', content: recoveryText } },
+      request('recovery-request', [recoveryHash], 'request-2'),
+      assistant('recovery-consumed', 'recovery-before-compact', 'recovery-request'))
+    row(compactRecovery, 'compact-1').logicalParentUuid = 'recovery-consumed'
+    row(compactRecovery, 'request-4').keep = 1
+    const compactRecoveryWitness = witness(compactRecovery), compactRecoveryProof = proveClaudeFrozenReads(ref, compactRecoveryWitness)
+    assert.deepEqual(compactRecoveryProof.coveredEntryIds, proof.coveredEntryIds, 'a consumed companion survives strict same-turn compaction without summary coverage')
+    assert.equal(compactRecoveryProof.receipts.length, proof.receipts.length)
+    verifyFrozenReadProof(ref, compactRecoveryProof, { threadId: 'session', turnId: 'user' })
+    const unconsumedCompact = structuredClone(compactRecovery)
+    unconsumedCompact.splice(unconsumedCompact.findIndex(item => item.id === 'recovery-request'), 2)
+    row(unconsumedCompact, 'compact-1').logicalParentUuid = 'recovery-before-compact'
+    assert.throws(() => proveClaudeFrozenReads(ref, witness(unconsumedCompact)), 'a compact summary cannot replace an unconsumed companion API request')
+    const droppedSummary = structuredClone(compactRecovery); row(droppedSummary, 'request-4').keep = 0
+    assert.throws(() => proveClaudeFrozenReads(ref, witness(droppedSummary)), /no new exact actual API consumer/, 'inheriting requests must retain the validated summary alias')
+    for (const mutate of [
+      (rows: typeof raw) => { metadata(rows).runningTurnSends.openerUuid = 'foreign' },
+      (rows: typeof raw) => { metadata(rows, 'compact-2').preservedMessages.anchorUuid = 'foreign' },
+      (rows: typeof raw) => { row(rows, 'summary-1').promptId = 'foreign' },
+    ]) { const bad = structuredClone(compactRecovery); mutate(bad); assert.throws(() => proveClaudeFrozenReads(ref, witness(bad)), /compact/) }
+    const compactPartial = structuredClone(compactRecovery)
+    contentBlocks(row(compactPartial, 'read-call-1').message as ClaudePublicMessage)[0].input = partialInput
+    row(compactPartial, 'reply-1').message = partialReply; row(compactPartial, 'request-4').tail = [claudeMessageDigest(partialReply)]
+    assert.throws(() => proveClaudeFrozenReads(ref, witness(compactPartial)), /not completely read/, 'a summary alias cannot grant an unread frozen byte')
+    const borrowedSummary = structuredClone(compactRecovery)
+    borrowedSummary.splice(borrowedSummary.findIndex(item => item.uuid === 'read-call-1'), 0,
+      { type: 'user', sessionId: 'session', uuid: 'recovery-after-summary', parentUuid: 'preserved-head', promptId: 'prompt', isMeta: true, turnCompanion: true, message: { role: 'user', content: recoveryText } },
+      request('borrowed-summary-request', [summaryBlob.hash], 'request-3'))
+    row(borrowedSummary, 'read-call-1').parentUuid = 'recovery-after-summary'; row(borrowedSummary, 'read-call-1').requestRef = 'borrowed-summary-request'
+    assert.throws(() => proveClaudeFrozenReads(ref, witness(borrowedSummary)), /no new exact actual API consumer/, 'a new companion cannot inherit an earlier generation summary alias')
+    const wrongSummary = structuredClone(compactRecovery), wrongSummaryBlob = wrongSummary.find(item => item.type === 'api-request-blob')!
+    wrongSummaryBlob.hash = 'f'.repeat(64); row(wrongSummary, 'request-3').tail = [wrongSummaryBlob.hash]
+    assert.throws(() => proveClaudeFrozenReads(ref, witness(wrongSummary)), /invalid bytes or type/)
+    witness()
     const legacy = structuredClone(raw).filter(item => item.type !== 'system' && item.isCompactSummary !== true && item.type !== 'api-request-blob' && item.uuid !== 'compact-attachment')
     row(legacy, 'preserved-head').parentUuid = 'consumed-1'; row(legacy, 'final').parentUuid = 'consumed-2'
     for (const id of ['request-3', 'request-5']) legacy.find(item => item.id === id)!.tail = []
@@ -142,6 +213,146 @@ test('controlled Claude compact boundaries preserve one original turn without gr
     const savedHistory = join(directory, ref.contextDigest, 'histories', legacyProof.historyDigest), beforeReplay = readFileSync(savedHistory)
     verifyFrozenReadProof(ref, legacyProof, { threadId: 'session', turnId: 'user' })
     assert.deepEqual(readFileSync(savedHistory), beforeReplay, 'legacy witness replay must not rewrite its original JSON bytes')
+  } finally { rmSync(directory, { recursive: true, force: true }) }
+})
+
+test('Claude internal truncated-response companions require native flags and a new exact API consumer', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'spex-claude-recovery-'))
+  try {
+    const prompt = 'public prompt', recoveryText = 'Your response above was cut off mid-stream. Resume directly from where it stops — no apology, no recap. If none of it survived, answer the request from the start.'
+    const ref = freezeContext({ directory, sourceRoot: process.cwd(), binding: { requestKey: 'recovery', inputDigest: 'input' }, entries: [{ id: 'task', label: 'task', kind: 'utf8', bytes: Buffer.from('public frozen task') }] })
+    const input = { contextDigest: ref.contextDigest, entryId: 'task', startByte: 0, endByte: 18 }
+    const original = { role: 'user', content: [{ type: 'text', text: prompt }] }, recoveryMessage = { role: 'user', content: recoveryText }
+    const apiRecovery = { role: 'user', content: [{ type: 'text', text: recoveryText }] }, recoveryHash = claudeMessageDigest(apiRecovery)
+    const reply = { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'read', content: readFrozenRange(ref, input).response.contentItems.map(item => ({ type: 'text', text: item.text })) }] }
+    const request = (id: string, tail: string[], base?: string, keep = 0) => ({ type: 'api-request', sessionId: 'session', id, shapeHash: 'a'.repeat(64), keep, ...(base ? { base } : {}), tail, params: { model: 'MiniMax-M3' } })
+    const assistant = (uuid: string, parentUuid: string, requestRef: string, content: unknown[] = []) => ({ type: 'assistant', sessionId: 'session', uuid, parentUuid, requestRef, message: { role: 'assistant', content } })
+    const companion = (uuid: string, parentUuid: string) => ({ type: 'user', sessionId: 'session', uuid, parentUuid, promptId: 'prompt', isMeta: true, turnCompanion: true, message: recoveryMessage })
+    const raw: Record<string, unknown>[] = [
+      { type: 'user', sessionId: 'session', uuid: 'user', parentUuid: null, promptId: 'prompt', message: original },
+      { type: 'api-request-shape', sessionId: 'session', shapeHash: 'a'.repeat(64), shape: { tools: ['StructuredOutput', 'mcp__frozen__spex_read_frozen'].map(name => ({ name })) } },
+      request('request-1', [claudeMessageDigest(original)]), assistant('interrupted', 'user', 'request-1'), companion('recovery-1', 'interrupted'),
+      { type: 'api-request-blob', sessionId: 'session', message: apiRecovery, hash: recoveryHash },
+      request('request-2', [recoveryHash], 'request-1', 1),
+      assistant('read-call', 'recovery-1', 'request-2', [{ type: 'tool_use', id: 'read', name: 'mcp__frozen__spex_read_frozen', input }]),
+      { type: 'user', sessionId: 'session', uuid: 'read-reply', parentUuid: 'read-call', promptId: 'prompt', sourceToolAssistantUUID: 'read-call', message: reply },
+      request('request-3', [claudeMessageDigest(reply)], 'request-2', 2),
+      assistant('schema-call', 'read-reply', 'request-3', [{ type: 'tool_use', id: 'schema', name: 'StructuredOutput', input: { answer: 'public' } }]),
+      { type: 'user', sessionId: 'session', uuid: 'schema-reply', parentUuid: 'schema-call', promptId: 'prompt', sourceToolAssistantUUID: 'schema-call', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'schema', content: 'Structured output provided successfully' }] } },
+    ]
+    const nativePath = join(directory, 'native.jsonl')
+    const witness = (rows = raw): ClaudeFrozenWitness => {
+      writeFileSync(nativePath, rows.map(row => JSON.stringify(row)).join('\n') + '\n')
+      return { version: 1, provider: 'claude-code', cliVersion: '2.1.309 (Claude Code)', model: 'MiniMax-M3', sessionId: 'session', userUuid: 'user', promptId: 'prompt', prompt, nativeHistoryPath: nativePath, history: readClaudePublicHistory(nativePath, 'session'), echo: { uuid: 'user', session_id: 'session', message: original }, result: { type: 'result', subtype: 'success', is_error: false, session_id: 'session', uuid: 'result', user_message_uuid: 'user', user_message_uuids: ['user'], structured_output: { answer: 'public' } }, initTools: ['StructuredOutput', 'mcp__frozen__spex_read_frozen'] }
+    }
+    const valid = witness(), proof = proveClaudeFrozenReads(ref, valid)
+    assert.equal(proof.receipts.length, 1)
+    assert.deepEqual(proof.coveredEntryIds, ['task'])
+    assert.equal(valid.history.find(row => row.uuid === 'recovery-1')!.message!.content, recoveryText)
+    assert.equal(valid.history.find(row => row.uuid === 'recovery-1')!.isMeta, true)
+    assert.equal(valid.history.find(row => row.uuid === 'recovery-1')!.turnCompanion, true)
+    verifyFrozenReadProof(ref, proof, { threadId: 'session', turnId: 'user' })
+    const row = (rows: typeof raw, id: string) => rows.find(item => item.uuid === id || item.id === id)!
+    const unknownMessage = { role: 'user', content: [{ type: 'text', text: 'UNKNOWN EXTRA USER INSTRUCTION' }] }, unknownHash = claudeMessageDigest(unknownMessage)
+    for (const position of ['before-meta', 'after-meta', 'after-request', 'after-assistant']) {
+      const bad = structuredClone(raw)
+      const insertion = position === 'before-meta' ? bad.findIndex(item => item.uuid === 'recovery-1') : position === 'after-meta' ? bad.findIndex(item => item.uuid === 'recovery-1') + 1 : position === 'after-request' ? bad.findIndex(item => item.id === 'request-2') + 1 : bad.length
+      bad.splice(insertion, 0, { type: 'api-request-blob', sessionId: 'session', message: unknownMessage, hash: unknownHash })
+      row(bad, 'request-2').tail = [recoveryHash, unknownHash]; row(bad, 'request-3').keep = 3
+      assert.throws(() => proveClaudeFrozenReads(ref, witness(bad)), /unobserved text/, `unknown user API text cannot enter a recovery request via ${position} declaration`)
+    }
+    const noRecovery = structuredClone(raw).filter(item => item.uuid !== 'recovery-1' && item.type !== 'api-request-blob')
+    noRecovery.splice(noRecovery.findIndex(item => item.id === 'request-2'), 0, { type: 'api-request-blob', sessionId: 'session', message: unknownMessage, hash: unknownHash })
+    row(noRecovery, 'read-call').parentUuid = 'interrupted'; row(noRecovery, 'request-2').tail = [unknownHash]
+    assert.throws(() => proveClaudeFrozenReads(ref, witness(noRecovery)), /unobserved text/, 'the fixed single-turn input also rejects unknown API text when no recovery occurs')
+    const consumedBeforeRecovery = structuredClone(raw)
+    consumedBeforeRecovery.splice(consumedBeforeRecovery.findIndex(item => item.id === 'request-1'), 0, { type: 'api-request-blob', sessionId: 'session', message: unknownMessage, hash: unknownHash })
+    row(consumedBeforeRecovery, 'request-1').tail = [claudeMessageDigest(original), unknownHash]
+    assert.throws(() => proveClaudeFrozenReads(ref, witness(consumedBeforeRecovery)), /unobserved text/, 'discarding an unknown instruction after its first consumer does not undo exposure')
+    for (const message of [original, apiRecovery]) {
+      const predeclared = structuredClone(raw)
+      predeclared.splice(predeclared.findIndex(item => item.uuid === 'recovery-1'), 0, { type: 'api-request-blob', sessionId: 'session', message, hash: claudeMessageDigest(message) })
+      assert.deepEqual(proveClaudeFrozenReads(ref, witness(predeclared)).coveredEntryIds, ['task'], 'a known prompt or companion CAS blob may be declared before the companion and reused later')
+    }
+    for (const afterMeta of [false, true]) {
+      const unused = structuredClone(raw)
+      unused.splice(unused.findIndex(item => item.uuid === 'recovery-1') + Number(afterMeta), 0, { type: 'api-request-blob', sessionId: 'session', message: unknownMessage, hash: unknownHash })
+      assert.deepEqual(proveClaudeFrozenReads(ref, witness(unused)).coveredEntryIds, ['task'], 'an unused valid CAS declaration never grants model-input authority')
+    }
+    const inheritedUnknown = structuredClone(raw)
+    inheritedUnknown.splice(inheritedUnknown.findIndex(item => item.id === 'request-1'), 0, { type: 'api-request-blob', sessionId: 'session', message: unknownMessage, hash: unknownHash })
+    row(inheritedUnknown, 'request-1').tail = [claudeMessageDigest(original), unknownHash]
+    row(inheritedUnknown, 'request-2').keep = 2; row(inheritedUnknown, 'request-3').keep = 3
+    assert.throws(() => proveClaudeFrozenReads(ref, witness(inheritedUnknown)), /unobserved text/, 'base/keep cannot carry a pre-recovery unknown user blob into a recovery request')
+    const cases: Array<[string, (rows: typeof raw) => void]> = [
+      ['missing meta flag', rows => { delete row(rows, 'recovery-1').isMeta }],
+      ['missing companion flag', rows => { delete row(rows, 'recovery-1').turnCompanion }],
+      ['false flag', rows => { row(rows, 'recovery-1').isMeta = false }],
+      ['string flag', rows => { row(rows, 'recovery-1').turnCompanion = 'true' }],
+      ['wrong prompt', rows => { row(rows, 'recovery-1').promptId = 'foreign' }],
+      ['wrong session', rows => { row(rows, 'recovery-1').sessionId = 'foreign' }],
+      ['earlier parent', rows => { row(rows, 'recovery-1').parentUuid = 'user' }],
+      ['tool-result identity', rows => { row(rows, 'recovery-1').sourceToolAssistantUUID = 'interrupted' }],
+      ['unknown text', rows => { row(rows, 'recovery-1').message = { role: 'user', content: 'continue with different business instructions' } }],
+      ['suffix', rows => { row(rows, 'recovery-1').message = { role: 'user', content: recoveryText + '\n' } }],
+      ['array companion', rows => { row(rows, 'recovery-1').message = apiRecovery }],
+      ['message extra field', rows => { row(rows, 'recovery-1').message = { ...recoveryMessage, unknown: 'new semantics' } }],
+      ['raw API string is not a compact summary', rows => { const blob = rows.find(item => item.type === 'api-request-blob')!; blob.message = recoveryMessage; blob.hash = claudeMessageDigest(apiRecovery) }],
+      ['API message extra field', rows => { const blob = rows.find(item => item.type === 'api-request-blob')!; blob.message = { ...apiRecovery, unknown: 'new semantics' }; blob.hash = claudeMessageDigest(blob.message); row(rows, 'request-2').tail = [blob.hash] }],
+      ['no API consumption', rows => { row(rows, 'request-2').tail = [] }],
+      ['old API consumer', rows => { row(rows, 'read-call').requestRef = 'request-1' }],
+      ['schema uses pre-companion API', rows => { row(rows, 'schema-call').requestRef = 'request-1' }],
+      ['no original prompt', rows => { row(rows, 'request-1').tail = [] }],
+      ['compaction confusion', rows => { Object.assign(row(rows, 'recovery-1'), { isCompactSummary: true, isVisibleInTranscriptOnly: true, summarizedTurnPromptUuids: ['user'] }) }],
+      ['no later schema output', rows => { rows.splice(rows.findIndex(item => item.uuid === 'schema-call')) }],
+    ]
+    for (const [name, mutate] of cases) { const bad = structuredClone(raw); mutate(bad); assert.throws(() => proveClaudeFrozenReads(ref, witness(bad)), name) }
+    for (const content of [
+      [{ type: 'text', text: recoveryText + 'extra' }],
+      [{ type: 'text', text: 'extra' }, ...apiRecovery.content],
+      [...apiRecovery.content, { type: 'text', text: 'extra' }],
+      [{ type: 'text', text: JSON.stringify(reply.content[0]) }, ...apiRecovery.content],
+    ]) {
+      const bad = structuredClone(raw), blob = bad.find(item => item.type === 'api-request-blob')!
+      blob.message = { role: 'user', content }; blob.hash = claudeMessageDigest(blob.message)
+      row(bad, 'request-2').tail = [blob.hash]
+      assert.throws(() => proveClaudeFrozenReads(ref, witness(bad)), 'unknown API text cannot hide beside a valid companion')
+    }
+    const badHash = structuredClone(raw); badHash.find(item => item.type === 'api-request-blob')!.hash = 'f'.repeat(64)
+    assert.throws(() => proveClaudeFrozenReads(ref, witness(badHash)), /invalid bytes or type/)
+    const partial = structuredClone(raw), partialInput = { ...input, endByte: 17 }
+    const partialCall = row(partial, 'read-call').message as ClaudePublicMessage
+    contentBlocks(partialCall)[0].input = partialInput
+    const partialReply = { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'read', content: readFrozenRange(ref, partialInput).response.contentItems.map(item => ({ type: 'text', text: item.text })) }] }
+    row(partial, 'read-reply').message = partialReply; row(partial, 'request-3').tail = [claudeMessageDigest(partialReply)]
+    assert.throws(() => proveClaudeFrozenReads(ref, witness(partial)), /not completely read/)
+    const merged = structuredClone(raw), mergedBlob = merged.find(item => item.type === 'api-request-blob')!
+    mergedBlob.message = { role: 'user', content: [{ type: 'text', text: prompt + '\n' }, ...apiRecovery.content] }
+    mergedBlob.hash = claudeMessageDigest(mergedBlob.message); row(merged, 'request-2').tail = [mergedBlob.hash]; row(merged, 'request-2').keep = 0; row(merged, 'request-3').keep = 1
+    assert.deepEqual(proveClaudeFrozenReads(ref, witness(merged)).coveredEntryIds, ['task'])
+    const predeclaredMerged = structuredClone(merged), predeclaredBlob = predeclaredMerged.splice(predeclaredMerged.findIndex(item => item.type === 'api-request-blob'), 1)[0]
+    predeclaredMerged.splice(predeclaredMerged.findIndex(item => item.uuid === 'recovery-1'), 0, predeclaredBlob)
+    assert.deepEqual(proveClaudeFrozenReads(ref, witness(predeclaredMerged)).coveredEntryIds, ['task'], 'exact LF coalescing is checked at its new API consumer even when the CAS blob was declared earlier')
+
+    const repeated = structuredClone(raw)
+    repeated.splice(repeated.findIndex(item => item.uuid === 'read-call'), 0, assistant('interrupted-2', 'recovery-1', 'request-2'), companion('recovery-2', 'interrupted-2'), request('request-2b', [recoveryHash], 'request-2', 1))
+    row(repeated, 'read-call').parentUuid = 'recovery-2'; row(repeated, 'read-call').requestRef = 'request-2b'; row(repeated, 'request-3').base = 'request-2b'
+    assert.deepEqual(proveClaudeFrozenReads(ref, witness(repeated)).coveredEntryIds, ['task'])
+    const borrowed = structuredClone(repeated); borrowed.splice(borrowed.findIndex(item => item.id === 'request-2b'), 1); row(borrowed, 'read-call').requestRef = 'request-2'; row(borrowed, 'request-3').base = 'request-2'
+    assert.throws(() => proveClaudeFrozenReads(ref, witness(borrowed)), 'the second identical companion cannot borrow the first API consumer')
+    const secondOldSchema = structuredClone(repeated); row(secondOldSchema, 'schema-call').requestRef = 'request-2'
+    assert.throws(() => proveClaudeFrozenReads(ref, witness(secondOldSchema)), 'schema after the second companion cannot borrow the first recovery request')
+    const oldOutput = structuredClone(raw)
+    oldOutput.splice(oldOutput.findIndex(item => item.uuid === 'schema-reply'), 0, companion('recovery-after-schema', 'schema-call'), request('request-4', [recoveryHash], 'request-3', 3), assistant('after-schema', 'recovery-after-schema', 'request-4'))
+    assert.throws(() => proveClaudeFrozenReads(ref, witness(oldOutput)), 'a pre-companion schema call cannot complete after its companion')
+    witness()
+    const forgedWitness = structuredClone(valid); delete forgedWitness.history.find(item => item.uuid === 'recovery-1')!.isMeta
+    const forgedBytes = JSON.stringify(forgedWitness), forgedDigest = createHash('sha256').update(forgedBytes).digest('hex')
+    writeFileSync(join(directory, ref.contextDigest, 'histories', forgedDigest), forgedBytes)
+    assert.throws(() => verifyFrozenReadProof(ref, { ...proof, historyDigest: forgedDigest }, { threadId: 'session', turnId: 'user' }), /saved public witness differs/)
+    const tamperedRaw = structuredClone(raw); delete row(tamperedRaw, 'recovery-1').turnCompanion
+    witness(tamperedRaw)
+    assert.throws(() => verifyFrozenReadProof(ref, proof, { threadId: 'session', turnId: 'user' }), /saved public witness differs/)
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })
 
@@ -183,15 +394,15 @@ test('controlled Claude witness proves parallel replies and rejects completed-ca
       value => { value.history.find(row => row.id === 'request-2')!.tail = [] },
       value => { value.history.find(row => row.uuid === 'final')!.requestRef = 'foreign' },
       value => { value.history.find(row => row.id === 'request-2')!.model = 'different-model' },
-      value => { value.history[3].message!.content[0].name = 'DeferredToolPlaceholder' },
+      value => { contentBlocks(value.history[3].message!)[0].name = 'DeferredToolPlaceholder' },
       value => { value.history[1].placeholderValid = false },
-      value => { value.history.find(row => row.type === 'api-request-blob')!.message!.content[0].content = 'Output has been saved to a file' },
-      value => { value.history[4].message!.content[0].content = 'Output has been saved to a file' },
+      value => { contentBlocks(value.history.find(row => row.type === 'api-request-blob')!.message!)[0].content = 'Output has been saved to a file' },
+      value => { contentBlocks(value.history[4].message!)[0].content = 'Output has been saved to a file' },
       value => { value.history[4].promptId = 'next-user-turn' },
       value => { value.history[3].parentUuid = 'missing-parent' },
       value => { value.history = value.history.filter(row => row.type !== 'api-request-shape') },
       value => { value.history.find(row => row.id === 'request-2')!.shapeHash = 'b'.repeat(64) },
-      value => { value.prompt = 'replacement'; value.echo.message.content[0].text = 'replacement'; value.history[0].message!.content[0].text = 'replacement' },
+      value => { value.prompt = 'replacement'; contentBlocks(value.echo.message)[0].text = 'replacement'; contentBlocks(value.history[0].message!)[0].text = 'replacement' },
     ]
     for (const mutate of cases) { const bad = structuredClone(witness); mutate(bad); assert.throws(() => proveClaudeFrozenReads(ref, bad)) }
     const rejected = structuredClone(witness), unavailable = 'mcp__frozen__spez_read_frozen'
@@ -209,22 +420,22 @@ test('controlled Claude witness proves parallel replies and rejects completed-ca
     assert.deepEqual(rejectedProof.coveredEntryIds, proof.coveredEntryIds)
     assert.equal(rejectedProof.receipts.length, 2, '原生拒绝事件不能作为读取覆盖')
     const rejectedCases: Array<(value: ClaudeFrozenWitness) => void> = [
-      value => { value.history.find(row => row.uuid === 'unavailable-reply')!.message!.content[0].is_error = false },
-      value => { value.history.find(row => row.uuid === 'unavailable-reply')!.message!.content[0].content = 'Permission denied' },
-      value => { value.history.find(row => row.uuid === 'unavailable-reply')!.message!.content[0].content = 'No such tool available: another-tool' },
+      value => { contentBlocks(value.history.find(row => row.uuid === 'unavailable-reply')!.message!)[0].is_error = false },
+      value => { contentBlocks(value.history.find(row => row.uuid === 'unavailable-reply')!.message!)[0].content = 'Permission denied' },
+      value => { contentBlocks(value.history.find(row => row.uuid === 'unavailable-reply')!.message!)[0].content = 'No such tool available: another-tool' },
       value => { value.history.find(row => row.uuid === 'unavailable-reply')!.sourceToolAssistantUUID = 'foreign' },
-      value => { value.history.find(row => row.uuid === 'unavailable-call')!.message!.content[0].name = 'DeferredToolPlaceholder' },
+      value => { contentBlocks(value.history.find(row => row.uuid === 'unavailable-call')!.message!)[0].name = 'DeferredToolPlaceholder' },
       value => { value.history.find(row => row.type === 'api-request-shape')!.toolNames!.push(unavailable) },
       value => { value.history.find(row => row.id === 'request-rejected')!.tail = [] },
-      value => { value.history.find(row => row.uuid === 'unavailable-call')!.message!.content[0].name = 'mcp__frozen__spex_read_frozen' },
+      value => { contentBlocks(value.history.find(row => row.uuid === 'unavailable-call')!.message!)[0].name = 'mcp__frozen__spex_read_frozen' },
       value => { delete value.mcpHistory },
       value => { value.mcpHistory!.toolNames.push('spez_read_frozen') },
     ]
     for (const mutate of rejectedCases) { const bad = structuredClone(rejected); mutate(bad); assert.throws(() => proveClaudeFrozenReads(ref, bad)) }
     const otherSpelling = structuredClone(rejected), otherName = 'mcp__frozen__srozen__spex_read_frozen'
-    otherSpelling.history.find(row => row.uuid === 'unavailable-call')!.message!.content[0].name = otherName
+    contentBlocks(otherSpelling.history.find(row => row.uuid === 'unavailable-call')!.message!)[0].name = otherName
     const otherReply = otherSpelling.history.find(row => row.uuid === 'unavailable-reply')!.message!
-    otherReply.content[0].content = `<tool_use_error>Error: No such tool available: ${otherName}</tool_use_error>`
+    contentBlocks(otherReply)[0].content = `<tool_use_error>Error: No such tool available: ${otherName}</tool_use_error>`
     otherSpelling.history.find(row => row.id === 'request-rejected')!.tail = [claudeMessageDigest(otherReply)]
     assert.equal(proveClaudeFrozenReads(ref, otherSpelling).receipts.length, 2)
     writeFileSync(mcpPath, JSON.stringify({ type: 'request', request: { method: 'tools/call', params: { name: 'spez_read_frozen' } } }) + '\n')
@@ -232,32 +443,32 @@ test('controlled Claude witness proves parallel replies and rejects completed-ca
     writeFileSync(mcpPath, JSON.stringify({ type: 'request', request: { method: 'tools/call', params: { name: 'spex_read_frozen' } } }) + '\n')
     const parallelRejection = structuredClone(witness)
     parallelRejection.mcpHistory = rejected.mcpHistory
-    parallelRejection.history[3].message!.content.push({ type: 'tool_use', id: 'unavailable', name: unavailable, input })
+    contentBlocks(parallelRejection.history[3].message!).push({ type: 'tool_use', id: 'unavailable', name: unavailable, input })
     parallelRejection.history.splice(6, 0, { type: 'user', sessionId: 'session', uuid: 'unavailable-reply', parentUuid: 'assistant', promptId: 'prompt', sourceToolAssistantUUID: 'assistant', message: rejection })
     const merged = parallelRejection.history.find(row => row.type === 'api-request-blob')!
-    merged.message!.content.push(rejection.content[0]); merged.hash = claudeMessageDigest(merged.message)
+    contentBlocks(merged.message!).push(contentBlocks(rejection)[0]); merged.hash = claudeMessageDigest(merged.message)
     parallelRejection.history.find(row => row.id === 'request-2')!.tail = [merged.hash]
     assert.equal(proveClaudeFrozenReads(ref, parallelRejection).receipts.length, 2)
     const noRead = structuredClone(parallelRejection)
-    noRead.history[3].message!.content = noRead.history[3].message!.content.filter(block => block.id === 'unavailable')
+    noRead.history[3].message!.content = contentBlocks(noRead.history[3].message!).filter(block => block.id === 'unavailable')
     noRead.history = noRead.history.filter(row => !['reply', 'reply-2'].includes(row.uuid ?? ''))
     noRead.history.find(row => row.uuid === 'final')!.parentUuid = 'unavailable-reply'
     const noReadBlob = noRead.history.find(row => row.type === 'api-request-blob')!
-    noReadBlob.message!.content = [rejection.content[0]]; noReadBlob.hash = claudeMessageDigest(noReadBlob.message)
+    noReadBlob.message!.content = [contentBlocks(rejection)[0]]; noReadBlob.hash = claudeMessageDigest(noReadBlob.message)
     noRead.history.find(row => row.id === 'request-2')!.tail = [noReadBlob.hash]
     assert.throws(() => proveClaudeFrozenReads(ref, noRead), /not completely read/)
     const rangeRejected = structuredClone(rejected), rangeError = 'frozen reader range is invalid or exceeds its bounded response'
-    const rangeCall = rangeRejected.history.find(row => row.uuid === 'unavailable-call')!.message!.content[0]
+    const rangeCall = contentBlocks(rangeRejected.history.find(row => row.uuid === 'unavailable-call')!.message!)[0]
     rangeCall.name = 'mcp__frozen__spex_read_frozen'; rangeCall.input = { ...input, endByte: 65536 }
     const rangeReply = rangeRejected.history.find(row => row.uuid === 'unavailable-reply')!.message!
-    rangeReply.content[0].content = rangeError
+    contentBlocks(rangeReply)[0].content = rangeError
     rangeRejected.history.find(row => row.id === 'request-rejected')!.tail = [claudeMessageDigest(rangeReply)]
     assert.equal(proveClaudeFrozenReads(ref, rangeRejected).receipts.length, 2)
     for (const mutate of [
-      (value: ClaudeFrozenWitness) => { value.history.find(row => row.uuid === 'unavailable-reply')!.message!.content[0].is_error = false },
-      (value: ClaudeFrozenWitness) => { value.history.find(row => row.uuid === 'unavailable-reply')!.message!.content[0].content = 'Permission denied' },
-      (value: ClaudeFrozenWitness) => { value.history.find(row => row.uuid === 'unavailable-call')!.message!.content[0].input = input },
-      (value: ClaudeFrozenWitness) => { value.history.find(row => row.uuid === 'unavailable-call')!.message!.content[0].input = { ...input, contextDigest: 'foreign', endByte: 65536 } },
+      (value: ClaudeFrozenWitness) => { contentBlocks(value.history.find(row => row.uuid === 'unavailable-reply')!.message!)[0].is_error = false },
+      (value: ClaudeFrozenWitness) => { contentBlocks(value.history.find(row => row.uuid === 'unavailable-reply')!.message!)[0].content = 'Permission denied' },
+      (value: ClaudeFrozenWitness) => { contentBlocks(value.history.find(row => row.uuid === 'unavailable-call')!.message!)[0].input = input },
+      (value: ClaudeFrozenWitness) => { contentBlocks(value.history.find(row => row.uuid === 'unavailable-call')!.message!)[0].input = { ...input, contextDigest: 'foreign', endByte: 65536 } },
       (value: ClaudeFrozenWitness) => { value.history.find(row => row.id === 'request-rejected')!.tail = [] },
       (value: ClaudeFrozenWitness) => { delete value.mcpHistory },
     ]) { const bad = structuredClone(rangeRejected); mutate(bad); assert.throws(() => proveClaudeFrozenReads(ref, bad)) }
@@ -300,8 +511,10 @@ test('public tool inputs keep business signature/thinking keys while actual synt
     const input = { signature: 'business-signature', thinking: { nested: 'business-thinking' } }, path = join(directory, 'public.jsonl')
     writeFileSync(path, JSON.stringify({ type: 'assistant', sessionId: 'session', uuid: 'assistant', parentUuid: 'user', requestRef: 'request', message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'SYNTHETIC_PRIVATE_THINKING', signature: 'SYNTHETIC_PRIVATE_SIGNATURE' }, { type: 'tool_use', id: 'schema', name: 'StructuredOutput', input }] } }) + '\n')
     const records = readClaudePublicHistory(path, 'session')
-    assert.deepEqual(records[0].message!.content[0].input, input)
+    assert.deepEqual(contentBlocks(records[0].message!)[0].input, input)
     assert(!JSON.stringify(records).includes('SYNTHETIC_PRIVATE'))
+    writeFileSync(path, JSON.stringify({ type: 'assistant', sessionId: 'session', uuid: 'assistant-text', message: { role: 'assistant', content: 'public assistant text' } }) + '\n')
+    assert.deepEqual(readClaudePublicHistory(path, 'session')[0].message, { role: 'assistant', content: [] })
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })
 
