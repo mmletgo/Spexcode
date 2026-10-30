@@ -389,6 +389,58 @@ test('AC-ELABORATION-22 程序复制原文和绑定，保留元数据，正确�
   assert.ok(!rendered.changes[0].source.includes('### GAP'))
 })
 
+test('AC-ELABORATION-45 独审取得同一候选解析业务值，转义不增改字符且不重复只读上下文', async () => {
+  const goal = '正则 `^\\d{1,4}(?:\\.\\d{1,2})?$`，管道 a|b，路径 C:\\temp，``双反引号``。'
+  const snapshot = input()
+  snapshot.intent.rawSource = goal
+  snapshot.validationScope = 'partition_local'
+  const contextPath = '.spec/export/review-context/spec.md'
+  const contextSource = '---\ntitle: 只读接口\ncontract-schema: sync-v1\n---\n## raw source\n\n只读需求。\n\n## expanded spec\n\n### REQ\n\n| id | goal | source | constraints | success | depends-on |\n| --- | --- | --- | --- | --- | --- |\n| REQ-CONTEXT-01 | 只读需求 | user:raw | 原义务 | 保留 | - |\n'
+  snapshot.context = [{ nodeId: 'review-context', path: contextPath, source: contextSource }]
+  const fake = runner(request => {
+    const output = candidate(request, source)
+    output.changes[0].tables.REQ[0].goal = goal
+    return output
+  })
+  const result = await elaborate(snapshot, { runner: fake.run })
+  assert.equal(result.status, 'complete', JSON.stringify(result.rounds[0].findings))
+  assert.ok(result.contracts.some(contract => contract.nodeId === 'review-context'))
+  const prompt = fake.calls[1].prompt
+  const marker = '\n程序解析的候选业务行:\n'
+  assert.ok(prompt.includes(marker), '独审只有序列化Markdown，缺少可直接还原业务值的解析视图')
+  const rows = JSON.parse(prompt.slice(prompt.indexOf(marker) + marker.length))
+  const contract = parseContract({ nodeId: 'export-contract', path, source: result.changes[0].source }).contract!
+  assert.deepEqual(rows, contract.items.filter(item => item.kind !== 'VERIFY'))
+  assert.equal(contract.rawSource, goal)
+  const requirement = rows.find(row => row.id === 'REQ-EXPORT-01')
+  assert.ok(requirement?.kind === 'REQ')
+  assert.equal(requirement.goal, goal)
+  assert.ok(rows.every((row: { nodeId: string; path: string }) => row.nodeId === 'export-contract' && row.path === path))
+  assert.ok(!rows.some((row: { id: string }) => row.id === 'REQ-CONTEXT-01'))
+  assert.ok(prompt.includes(JSON.stringify(result.rounds[0].candidate)), '完整Markdown仍交给独审')
+  assert.ok(prompt.includes(JSON.stringify(snapshot.intent)), '原始意图仍交给独审')
+})
+
+test('AC-ELABORATION-46 引用说明和解析视图不豁免错误rules类型、悬空VERIFY或无REQ追溯', async () => {
+  const variants: { code: string; edit: (tables: GeneratedTables) => void }[] = [
+    { code: 'reference-kind', edit: tables => { tables.STEP[0].rules = ['REQ-EXPORT-01'] } },
+    { code: 'dangling-reference', edit: tables => { tables.VERIFY = [] } },
+    { code: 'untraceable_intent', edit: tables => { tables.RULE[0].source = 'user:raw'; tables.RULE[0]['depends-on'] = [] } },
+  ]
+  for (const { code, edit } of variants) {
+    const fake = runner(request => {
+      const output = candidate(request, source)
+      edit(output.changes[0].tables)
+      return output
+    })
+    const result = await elaborate({ ...input(), verifications: [registeredVerification], maxRepairs: 0 }, { runner: fake.run })
+    assert.equal(result.status, 'exhausted', code)
+    assert.ok(result.rounds[0].findings.some(issue => issue.code === code), JSON.stringify(result.rounds[0].findings))
+    assert.equal(result.reviewPassed, false)
+    assert.deepEqual(fake.calls.map(call => call.purpose), ['elaboration_generate'])
+  }
+})
+
 test('AC-ELABORATION-23 总预算耗尽但原生停止未证实时保留pending身份，不派后续会话', async () => {
   let calls = 0
   const result = await elaborate({ ...input(), totalTimeoutMs: 10 }, { runner: async () => {
@@ -708,6 +760,8 @@ test('AC-ELABORATION-35 v2小增量独审收到完整Markdown，保留旧义务�
   assert.equal(Object.values(output.changes[0].tables).flat().length, 2)
   assert.equal(result.contracts[0].items.length, parseContract({ nodeId: 'export-contract', path, source }).contract!.items.length + 2)
   for (const item of parseContract({ nodeId: 'export-contract', path, source }).contract!.items) assert.ok(fake.calls[1].prompt.includes(item.id), item.id)
+  const parsedRows = JSON.parse(fake.calls[1].prompt.split('\n程序解析的候选业务行:\n')[1])
+  assert.deepEqual(parsedRows, result.contracts[0].items.filter(item => item.kind !== 'VERIFY'))
   assert.ok(fake.calls[1].prompt.includes(JSON.stringify(result.rounds[0].candidate)))
   assert.ok(fake.calls[0].prompt.includes(JSON.stringify(input(true).facts)))
   assert.deepEqual((fake.calls[0].schema.properties as Record<string, { enum?: string[] }>).version.enum, ['elaboration-target-rows-v3'])
