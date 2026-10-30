@@ -93,7 +93,7 @@ test('controlled Claude compact boundaries preserve one original turn without gr
     assert.deepEqual(proof.coveredEntryIds, ['task'])
     assert.equal(proof.receipts.length, 2)
     verifyFrozenReadProof(ref, proof, { threadId: 'session', turnId: 'user' }, undefined, { output: { answer: 'public' } })
-    const row = (rows: typeof raw, uuid: string) => rows.find(item => item.uuid === uuid)!
+    const row = (rows: typeof raw, id: string) => rows.find(item => item.uuid === id || item.id === id)!
     const metadata = (rows: typeof raw, uuid = 'compact-1') => row(rows, uuid).compactMetadata as { runningTurnSends: { uuids: string[]; openerUuid: string }; preservedMessages: { anchorUuid: string; uuids: string[]; allUuids: string[] } }
     for (const content of ['Your response above was cut off mid-stream. Resume directly from where it stops — no apology, no recap. If none of it survived, answer the request from the start.', '']) {
       const extra = structuredClone(raw)
@@ -167,6 +167,44 @@ test('controlled Claude compact boundaries preserve one original turn without gr
     assert.throws(() => proveClaudeFrozenReads(ref, witness(partial)), /not completely read/, 'compact summary assertions do not grant an unread byte')
     witness()
     verifyFrozenReadProof(ref, proof, { threadId: 'session', turnId: 'user' })
+    const compactRecovery = structuredClone(raw)
+    const recoveryText = 'Your response above was cut off mid-stream. Resume directly from where it stops — no apology, no recap. If none of it survived, answer the request from the start.'
+    const recoveryHash = claudeMessageDigest({ role: 'user', content: [{ type: 'text', text: recoveryText }] })
+    compactRecovery.splice(compactRecovery.findIndex(item => item.uuid === 'compact-1'), 0,
+      { type: 'user', sessionId: 'session', uuid: 'recovery-before-compact', parentUuid: 'consumed-1', promptId: 'prompt', isMeta: true, turnCompanion: true, message: { role: 'user', content: recoveryText } },
+      request('recovery-request', [recoveryHash], 'request-2'),
+      assistant('recovery-consumed', 'recovery-before-compact', 'recovery-request'))
+    row(compactRecovery, 'compact-1').logicalParentUuid = 'recovery-consumed'
+    row(compactRecovery, 'request-4').keep = 1
+    const compactRecoveryWitness = witness(compactRecovery), compactRecoveryProof = proveClaudeFrozenReads(ref, compactRecoveryWitness)
+    assert.deepEqual(compactRecoveryProof.coveredEntryIds, proof.coveredEntryIds, 'a consumed companion survives strict same-turn compaction without summary coverage')
+    assert.equal(compactRecoveryProof.receipts.length, proof.receipts.length)
+    verifyFrozenReadProof(ref, compactRecoveryProof, { threadId: 'session', turnId: 'user' })
+    const unconsumedCompact = structuredClone(compactRecovery)
+    unconsumedCompact.splice(unconsumedCompact.findIndex(item => item.id === 'recovery-request'), 2)
+    row(unconsumedCompact, 'compact-1').logicalParentUuid = 'recovery-before-compact'
+    assert.throws(() => proveClaudeFrozenReads(ref, witness(unconsumedCompact)), 'a compact summary cannot replace an unconsumed companion API request')
+    const droppedSummary = structuredClone(compactRecovery); row(droppedSummary, 'request-4').keep = 0
+    assert.throws(() => proveClaudeFrozenReads(ref, witness(droppedSummary)), /no new exact actual API consumer/, 'inheriting requests must retain the validated summary alias')
+    for (const mutate of [
+      (rows: typeof raw) => { metadata(rows).runningTurnSends.openerUuid = 'foreign' },
+      (rows: typeof raw) => { metadata(rows, 'compact-2').preservedMessages.anchorUuid = 'foreign' },
+      (rows: typeof raw) => { row(rows, 'summary-1').promptId = 'foreign' },
+    ]) { const bad = structuredClone(compactRecovery); mutate(bad); assert.throws(() => proveClaudeFrozenReads(ref, witness(bad)), /compact/) }
+    const compactPartial = structuredClone(compactRecovery)
+    contentBlocks(row(compactPartial, 'read-call-1').message as ClaudePublicMessage)[0].input = partialInput
+    row(compactPartial, 'reply-1').message = partialReply; row(compactPartial, 'request-4').tail = [claudeMessageDigest(partialReply)]
+    assert.throws(() => proveClaudeFrozenReads(ref, witness(compactPartial)), /not completely read/, 'a summary alias cannot grant an unread frozen byte')
+    const borrowedSummary = structuredClone(compactRecovery)
+    borrowedSummary.splice(borrowedSummary.findIndex(item => item.uuid === 'read-call-1'), 0,
+      { type: 'user', sessionId: 'session', uuid: 'recovery-after-summary', parentUuid: 'preserved-head', promptId: 'prompt', isMeta: true, turnCompanion: true, message: { role: 'user', content: recoveryText } },
+      request('borrowed-summary-request', [summaryBlob.hash], 'request-3'))
+    row(borrowedSummary, 'read-call-1').parentUuid = 'recovery-after-summary'; row(borrowedSummary, 'read-call-1').requestRef = 'borrowed-summary-request'
+    assert.throws(() => proveClaudeFrozenReads(ref, witness(borrowedSummary)), /no new exact actual API consumer/, 'a new companion cannot inherit an earlier generation summary alias')
+    const wrongSummary = structuredClone(compactRecovery), wrongSummaryBlob = wrongSummary.find(item => item.type === 'api-request-blob')!
+    wrongSummaryBlob.hash = 'f'.repeat(64); row(wrongSummary, 'request-3').tail = [wrongSummaryBlob.hash]
+    assert.throws(() => proveClaudeFrozenReads(ref, witness(wrongSummary)), /invalid bytes or type/)
+    witness()
     const legacy = structuredClone(raw).filter(item => item.type !== 'system' && item.isCompactSummary !== true && item.type !== 'api-request-blob' && item.uuid !== 'compact-attachment')
     row(legacy, 'preserved-head').parentUuid = 'consumed-1'; row(legacy, 'final').parentUuid = 'consumed-2'
     for (const id of ['request-3', 'request-5']) legacy.find(item => item.id === id)!.tail = []

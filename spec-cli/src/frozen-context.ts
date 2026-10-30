@@ -424,7 +424,7 @@ export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFro
   let latestMessage: string | undefined, compaction: { ancestors: Set<string>; anchor?: string } | undefined
   const receipts: FrozenReadReceipt[] = [], rejectedCalls: string[] = [], responseMessages = new Map<string, string>(), responseBlocks = new Map<string, ClaudePublicContentBlock>(), requestRefs = new Set<string>()
   if (witness.mcpHistory && (JSON.stringify(readClaudeMcpToolNames(witness.mcpHistory.path)) !== JSON.stringify(witness.mcpHistory.toolNames) || witness.mcpHistory.toolNames.some(name => name !== 'spex_read_frozen'))) stale('Claude MCP dispatched a foreign tool or its actual history changed')
-  const recoveries: Array<{ hashes: Set<string>; requests: Set<string>; consumed: boolean }> = []
+  const recoveries: Array<{ hashes: Set<string>; summaries: Set<string>; requests: Set<string>; consumed: boolean }> = []
   let latestAssistant: string | undefined, acceptedOutput = false
   for (const row of history) {
     if (row.sessionId !== sessionId) stale('Claude native history changed its session identity')
@@ -459,6 +459,7 @@ export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFro
         || row.promptId !== promptId || row.sourceToolAssistantUUID !== undefined || !summary.transcriptOnly || !summary.textOnly
         || !/^[a-f0-9]{64}$/.test(summary.messageDigest) || JSON.stringify(summary.promptUuids) !== JSON.stringify([userUuid])) stale('Claude compact summary is not the exact original turn metadata')
       compactSummaries.add(summary.messageDigest)
+      for (const recovery of recoveries) if (recovery.consumed) { recovery.summaries.add(summary.messageDigest); recovery.hashes.add(summary.messageDigest) }
       compaction = undefined; latestMessage = row.uuid
       continue
     }
@@ -468,9 +469,10 @@ export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFro
       shapes.add(row.shapeHash)
     }
     if (row.type === 'api-request-blob') {
-      if (row.compactSummaryDigest && recoveries.some(recovery => recovery.hashes.has(row.compactSummaryDigest!))) stale('Claude recovery API message cannot masquerade as a compact summary')
+      if (row.compactSummaryDigest && recoveries.length && row.compactSummaryDigest === claudeMessageDigest({ role: 'user', content: CLAUDE_TRUNCATED_RECOVERY_TEXT })) stale('Claude recovery API message cannot masquerade as a compact summary')
       if (row.compactSummaryDigest && !compactSummaries.has(row.compactSummaryDigest)) stale('Claude API string message is not an observed same-turn compact summary')
       if (!row.message || row.message.role !== 'user' || !Array.isArray(row.message.content) || row.hash !== claudeMessageDigest(row.message) || row.message.content.some(block => !['tool_result', 'text'].includes(block.type))) stale('Claude public API message blob has invalid bytes or type')
+      for (const recovery of recoveries) if (row.compactSummaryDigest && recovery.summaries.has(row.compactSummaryDigest)) recovery.hashes.add(row.hash)
       if (recoveries.length && row.message.content.some(block => block.type === 'text') && !row.compactSummaryDigest && !compactSummaries.has(row.hash)) {
         const texts = row.message.content.filter(block => block.type === 'text')
         const recoveryText = { type: 'text', text: CLAUDE_TRUNCATED_RECOVERY_TEXT }
@@ -511,7 +513,7 @@ export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFro
     if (row.type === 'user' && row.uuid !== userUuid) {
       if (row.isMeta === true && row.turnCompanion === true && row.message?.role === 'user' && claudeMessageDigest(row.message) === claudeMessageDigest({ role: 'user', content: CLAUDE_TRUNCATED_RECOVERY_TEXT })) {
         if (!row.uuid || row.promptId !== promptId || row.sourceToolAssistantUUID !== undefined || row.parentUuid !== latestMessage || row.parentUuid !== latestAssistant) stale('Claude recovery companion lost its exact native assistant or original prompt')
-        recoveries.push({ hashes: new Set([claudeMessageDigest(row.message), claudeMessageDigest({ role: 'user', content: claudeMessageBlocks(row.message) })]), requests: new Set(), consumed: false })
+        recoveries.push({ hashes: new Set([claudeMessageDigest(row.message), claudeMessageDigest({ role: 'user', content: claudeMessageBlocks(row.message) })]), summaries: new Set(), requests: new Set(), consumed: false })
         acceptedOutput = false; latestMessage = row.uuid
         continue
       }
