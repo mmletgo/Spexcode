@@ -1415,14 +1415,18 @@ test('AC-APPLICATION-P4-08 无浏览器真实Docker自动交付，补偿及scope
   writeFileSync(join(f.root, 'src/export.js'), `${f.originalCode}\n// human save before background startup\n`)
   f.git(['add', '.']); f.git(['commit', '-qm', 'external committed implementation'])
   const source = await captureInputSnapshot(f.root), index = readFileSync(join(f.root, '.git/index')), head = f.git(['rev-parse', 'HEAD'])
+  const readonlyEntries = readTree(source.source.commonDir, source.immutableTree).filter(entry => !entry.path.startsWith('.spec/'))
   await f.application.startService({ compensationMs: 10000, debounceMs: 5 })
   const admitted = (await f.application.status()).operations[0]?.operation
   assert.ok(admitted, '正式service启动扫描必须建立自动操作')
   const delivered = await f.application.wait(admitted.id)
   assert.equal(delivered.operation.phase, 'workspace_synced', JSON.stringify({ failure: delivered.attempt?.failure, blockedReason: delivered.operation.blockedReason, journals: delivered.journals }))
   assert.ok(delivered.journals[0]?.receipt)
+  assert.equal(delivered.operation.input.captureKind, 'commit')
   assert.match(readFileSync(join(delivered.operation.deliveryPlan.canonicalRoot, 'src/export.js'), 'utf8'), /human save before background startup/)
-  assert.match(readFileSync(join(delivered.operation.deliveryPlan.canonicalRoot, 'src/export.js'), 'utf8'), /application verified delivery/)
+  assert.deepEqual(readTree(source.source.commonDir, delivered.journals[0].receipt.actualTree).filter(entry => !entry.path.startsWith('.spec/')), readonlyEntries)
+  assert.equal(f.nativeRequests.some(request => request.purpose === 'code_generate'), false)
+  assert.deepEqual(delivered.resources, [])
   assert.equal((await captureInputSnapshot(f.root)).id, source.id)
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), index); assert.equal(f.git(['rev-parse', 'HEAD']), head)
   const count = f.calls()
@@ -1628,9 +1632,11 @@ test('AC-APPLICATION-P4-11 两个独立节点保存及停机编辑补偿均真�
     assert.equal(detail.operation.phase, 'workspace_synced', JSON.stringify({ failure: detail.attempt?.failure, blockedReason: detail.operation.blockedReason, journals: detail.journals }))
     assert.ok(detail.journals[0]?.receipt)
     const own = paths.find(path => detail.operation.scope.paths.includes(path))!
-    assert.ok(own, '每个独立节点具有实际代码写范围')
+    assert.ok(own, '每个独立节点具有其实际授权源码范围')
+    assert.equal(detail.operation.input.captureKind, 'commit')
     assert.match(readFileSync(join(detail.operation.deliveryPlan.canonicalRoot, own), 'utf8'), /human online/)
-    assert.match(readFileSync(join(detail.operation.deliveryPlan.canonicalRoot, own), 'utf8'), /application verified delivery/)
+    assert.equal(readFileSync(join(detail.operation.deliveryPlan.canonicalRoot, own), 'utf8'), readFileSync(join(f.root, own), 'utf8'))
+    assert.deepEqual(readTree(before.source.commonDir, detail.journals[0].receipt.actualTree).filter(entry => !entry.path.startsWith('.spec/')), readTree(before.source.commonDir, detail.attempt!.composedInput!.tree).filter(entry => !entry.path.startsWith('.spec/')))
   }
   const firstPublication = [...first].sort((a, b) => a.journals[0].receipt!.completedAtMs - b.journals[0].receipt!.completedAtMs)[0]
   const firstOther = paths.find(path => !firstPublication.operation.scope.paths.includes(path))!
@@ -1652,11 +1658,13 @@ test('AC-APPLICATION-P4-11 两个独立节点保存及停机编辑补偿均真�
     const own = paths.find(path => detail.operation.scope.paths.includes(path))!
     assert.match(readFileSync(join(detail.operation.deliveryPlan.canonicalRoot, own), 'utf8'), /human offline/)
     assert.match(readFileSync(join(detail.operation.deliveryPlan.canonicalRoot, own), 'utf8'), /human online/)
-    assert.match(readFileSync(join(detail.operation.deliveryPlan.canonicalRoot, own), 'utf8'), /application verified delivery/)
+    assert.equal(readFileSync(join(detail.operation.deliveryPlan.canonicalRoot, own), 'utf8'), readFileSync(join(f.root, own), 'utf8'))
+    assert.deepEqual(readTree(before.source.commonDir, detail.journals[0].receipt.actualTree).filter(entry => !entry.path.startsWith('.spec/')), readTree(before.source.commonDir, detail.attempt!.composedInput!.tree).filter(entry => !entry.path.startsWith('.spec/')))
   }
   const firstCompensation = [...delivered].sort((a, b) => a.journals[0].receipt!.completedAtMs - b.journals[0].receipt!.completedAtMs)[0]
   const unconsumedOther = paths.find(path => !firstCompensation.operation.scope.paths.includes(path))!
   assert.doesNotMatch(readObject(before.source.commonDir, readTree(before.source.commonDir, firstCompensation.journals[0].receipt!.actualTree).find(entry => entry.path === unconsumedOther)!.oid).toString('utf8'), /human offline/)
   assert.equal((await captureInputSnapshot(f.root)).id, latest.id)
+  assert.equal(f.nativeRequests.some(request => request.purpose === 'code_generate'), false)
   assert.notEqual(f.git(['rev-parse', 'HEAD']), head); assert.notDeepEqual(readFileSync(join(f.root, '.git/index')), index)
 })
