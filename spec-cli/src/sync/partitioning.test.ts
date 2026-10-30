@@ -243,12 +243,11 @@ test('raw-only Spec governance assigns leaf writers and keeps raw ancestors read
     { id: 'raw-beta', path: rawBetaPath },
   ]
   const files = new Map<string, string>([
-    [rawRootPath, rawSpec('raw-root', [], ['src/shared/root-context.ts'])],
+    [rawRootPath, rawSpec('raw-root', [])],
     [rawAlphaPath, rawSpec('raw-alpha', ['src/raw/alpha.ts'], ['src/shared/common.ts'])],
     [rawBetaPath, rawSpec('raw-beta', ['src/raw/beta.ts'], ['src/shared/common.ts'])],
     ['src/raw/alpha.ts', 'export const alpha = true'], ['src/raw/beta.ts', 'export const beta = true'],
     ['src/raw/orphan.ts', 'export const orphan = true'], ['src/shared/common.ts', 'export const common = true'],
-    ['src/shared/root-context.ts', 'export const rootContext = true'],
     ['src/unrelated/global.ts', 'export const unrelated = true'], ['tests/oracle.test.ts', 'test oracle'],
   ])
   const globalPlan: SyncCoordinatorPlan = {
@@ -260,19 +259,20 @@ test('raw-only Spec governance assigns leaf writers and keeps raw ancestors read
     mandatoryTests: [{ verificationId: 'VERIFY-RAW', testPath: 'tests/oracle.test.ts', testId: 'ORACLE-1' }],
   }
   const result = planSyncPartitions({ plan: globalPlan, files, contracts: [], nodes, changedPaths: [rawAlphaPath] })
+  const root = result.partitions.find(partition => partition.targets.some(target => target.nodeId === 'raw-root'))!
   const alpha = result.partitions.find(partition => partition.targets.some(target => target.nodeId === 'raw-alpha'))!
   const beta = result.partitions.find(partition => partition.targets.some(target => target.nodeId === 'raw-beta'))!
+  assert.deepEqual(root.writePaths, [rawRootPath])
+  assert.deepEqual(root.readPaths, [rawRootPath])
   assert.ok(alpha.writePaths.includes('src/raw/alpha.ts'))
   assert.ok(alpha.readPaths.includes('src/raw/alpha.ts'))
   assert.ok(alpha.readPaths.includes('src/shared/common.ts'))
-  assert.ok(alpha.readPaths.includes('src/shared/root-context.ts'), 'raw ancestor related is read-only context')
   assert.ok(!alpha.readPaths.includes('src/raw/beta.ts'))
   assert.ok(!alpha.readPaths.includes('src/unrelated/global.ts'))
   assert.ok(alpha.contextNodeIds.includes('raw-root'))
   assert.ok(beta.writePaths.includes('src/raw/beta.ts'))
   assert.ok(!beta.writePaths.includes('src/raw/alpha.ts'))
   assert.ok(beta.contextNodeIds.includes('raw-root'))
-  assert.ok(!result.partitions.some(partition => partition.targets.some(target => target.nodeId === 'raw-root')))
   assert.deepEqual(result.expectedPaths, [rawAlphaPath])
 })
 
@@ -286,11 +286,11 @@ test('raw-only unowned sources discover the nearest provided node identity inste
     { id: 'raw-beta', path: rawBetaPath },
   ]
   const files = new Map<string, string>([
-    [rawRootPath, rawSpec('raw-root', [], ['src/shared/root-context.ts'])],
+    [rawRootPath, rawSpec('raw-root', [])],
     [rawAlphaPath, rawSpec('raw-alpha', ['src/raw/alpha.ts'], ['src/shared/common.ts'])],
     [rawBetaPath, rawSpec('raw-beta', ['src/raw/beta.ts'], ['src/shared/common.ts'])],
     ['src/raw/alpha.ts', 'alpha'], ['src/raw/beta.ts', 'beta'],
-    ['src/raw/orphan.ts', 'orphan'], ['src/shared/common.ts', 'shared'], ['src/shared/root-context.ts', 'root context'],
+    ['src/raw/orphan.ts', 'orphan'], ['src/shared/common.ts', 'shared'],
   ])
   const input = {
     plan: { ...plan(), intentNodeId: 'raw-root', targets: nodes.map(node => ({ nodeId: node.id, path: node.path })), readPaths: ['.spec', 'src'], writePaths: ['.spec/raw-project', 'src'], sourcePaths: ['src'], executionScope: undefined, mandatoryTests: [] },
@@ -310,9 +310,91 @@ test('target frontmatter is recovered from files even when callers omit nodes an
   const path = '.spec/raw-project/leaf/spec.md'
   const files = new Map([[path, rawSpec('raw-leaf', ['src/raw/leaf.ts'])], ['src/raw/leaf.ts', 'export const leaf = true']])
   const result = planSyncPartitions({
-    plan: { ...plan(), intentNodeId: 'raw-leaf', targets: [{ nodeId: 'raw-leaf', path }], readPaths: ['.spec', 'src'], writePaths: ['.spec/raw-project', 'src'], sourcePaths: ['src'], executionScope: undefined, mandatoryTests: [] },
+    plan: { ...plan(), intentNodeId: 'upstream-intent', targets: [{ nodeId: 'raw-leaf', path }], readPaths: ['.spec', 'src'], writePaths: ['.spec/raw-project', 'src'], sourcePaths: ['src'], executionScope: undefined, mandatoryTests: [] },
     files, contracts: [], changedPaths: [path],
   })
   assert.ok(result.partitions[0].writePaths.includes('src/raw/leaf.ts'))
   assert.ok(result.partitions[0].readPaths.includes('src/raw/leaf.ts'))
+})
+
+test('ordinary contract dependencies retain spec and ID context but defer implementation reads to cross-edge review', () => {
+  const root = contract('root', rootPath, [], [requirement('REQ-ROOT', 'root', rootPath, ['REQ-LEAF-A', 'REQ-LEAF-B'])])
+  const leafA = contract('leaf-a', alphaPath, ['src/leaf-a.ts'], [requirement('REQ-LEAF-A', 'leaf-a', alphaPath), acceptance('AC-LEAF-A', 'leaf-a', alphaPath, 'tests/leaf-a.test.ts#A-1')])
+  const leafB = contract('leaf-b', betaPath, ['src/leaf-b.ts'], [requirement('REQ-LEAF-B', 'leaf-b', betaPath), acceptance('AC-LEAF-B', 'leaf-b', betaPath, 'tests/leaf-b.test.ts#B-1')])
+  const files = new Map<string, string>([
+    [rootPath, 'root spec'], [alphaPath, 'leaf a spec'], [betaPath, 'leaf b spec'],
+    ['src/leaf-a.ts', 'leaf a implementation'], ['src/leaf-b.ts', 'leaf b implementation'],
+    ['tests/leaf-a.test.ts', 'leaf a oracle'], ['tests/leaf-b.test.ts', 'leaf b oracle'],
+  ])
+  const inputPlan: SyncCoordinatorPlan = {
+    ...plan(), intentNodeId: 'root', targets: [root, leafA, leafB].map(item => ({ nodeId: item.nodeId, path: item.path })),
+    readPaths: ['.spec', 'src', 'tests'], writePaths: ['.spec/project', 'src', 'tests'], sourcePaths: ['src'],
+    executionScope: { paths: ['.spec/project', 'src', 'tests'], contractIds: ['REQ-ROOT', 'REQ-LEAF-A', 'AC-LEAF-A', 'REQ-LEAF-B', 'AC-LEAF-B'], flowIds: [] },
+    mandatoryTests: [
+      { verificationId: 'VERIFY-A', testPath: 'tests/leaf-a.test.ts', testId: 'A-1' },
+      { verificationId: 'VERIFY-B', testPath: 'tests/leaf-b.test.ts', testId: 'B-1' },
+    ],
+  }
+  const result = planSyncPartitions({ plan: inputPlan, files, contracts: [root, leafA, leafB], changedPaths: [rootPath] })
+  const rootPartition = result.partitions.find(partition => partition.targets.some(target => target.nodeId === 'root'))!
+  const leafAPartition = result.partitions.find(partition => partition.targets.some(target => target.nodeId === 'leaf-a'))!
+  const leafBPartition = result.partitions.find(partition => partition.targets.some(target => target.nodeId === 'leaf-b'))!
+  assert.ok(rootPartition.readPaths.includes(alphaPath) && rootPartition.readPaths.includes(betaPath), 'dependency Specs provide the read-only ID interface')
+  assert.ok(!rootPartition.readPaths.includes('src/leaf-a.ts') && !rootPartition.readPaths.includes('src/leaf-b.ts'))
+  assert.ok(!rootPartition.readPaths.includes('tests/leaf-a.test.ts') && !rootPartition.readPaths.includes('tests/leaf-b.test.ts'))
+  assert.ok(leafAPartition.readPaths.includes('src/leaf-a.ts') && !leafAPartition.readPaths.includes('src/leaf-b.ts'))
+  assert.ok(leafBPartition.readPaths.includes('src/leaf-b.ts') && !leafBPartition.readPaths.includes('src/leaf-a.ts'))
+  assert.ok(result.dependencies.some(edge => edge.from === rootPartition.id && edge.to === leafAPartition.id && edge.paths.includes('src/leaf-a.ts')))
+  assert.ok(result.dependencies.some(edge => edge.from === rootPartition.id && edge.to === leafBPartition.id && edge.paths.includes('src/leaf-b.ts')))
+  const detailedNoop = planSyncPartitions({ plan: inputPlan, files, contracts: [root, leafA, leafB], changedPaths: [] })
+  assert.ok(!detailedNoop.partitions.some(partition => partition.targets.some(target => target.nodeId === 'root')), 'an unchanged Contract-backed intent is not repeated as a seed')
+})
+
+test('a raw intent target gets one Spec-only seed partition before raw-only leaf work', () => {
+  const rawRootPath = '.spec/raw-seed/spec.md'
+  const rawAlphaPath = '.spec/raw-seed/alpha/spec.md'
+  const rawBetaPath = '.spec/raw-seed/beta/spec.md'
+  const nodes = [
+    { id: 'seed-root', path: rawRootPath },
+    { id: 'seed-alpha', path: rawAlphaPath },
+    { id: 'seed-beta', path: rawBetaPath },
+  ]
+  const files = new Map<string, string>([
+    [rawRootPath, rawSpec('seed-root', [], ['src/leaf-alpha.ts', 'src/leaf-beta.ts'])],
+    [rawAlphaPath, rawSpec('seed-alpha', ['src/leaf-alpha.ts'])],
+    [rawBetaPath, rawSpec('seed-beta', ['src/leaf-beta.ts'])],
+    ['src/leaf-alpha.ts', 'alpha implementation'], ['src/leaf-beta.ts', 'beta implementation'],
+  ])
+  const result = planSyncPartitions({
+    plan: {
+      ...plan(), intentNodeId: 'seed-root', targets: nodes.map(node => ({ nodeId: node.id, path: node.path })),
+      readPaths: ['.spec', 'src'], writePaths: ['.spec/raw-seed', 'src'], sourcePaths: ['src'],
+      executionScope: { paths: ['.spec/raw-seed', 'src'], contractIds: [], flowIds: [] }, mandatoryTests: [],
+    },
+    files, contracts: [], nodes, changedPaths: [],
+  })
+  const rootPartitions = result.partitions.filter(partition => partition.targets.some(target => target.nodeId === 'seed-root'))
+  const alpha = result.partitions.find(partition => partition.targets.some(target => target.nodeId === 'seed-alpha'))!
+  const beta = result.partitions.find(partition => partition.targets.some(target => target.nodeId === 'seed-beta'))!
+  assert.equal(rootPartitions.length, 1)
+  assert.deepEqual(rootPartitions[0].writePaths, [rawRootPath])
+  assert.deepEqual(rootPartitions[0].readPaths, [rawRootPath])
+  assert.ok(alpha.writePaths.includes('src/leaf-alpha.ts') && alpha.readPaths.includes('src/leaf-alpha.ts'))
+  assert.ok(!alpha.writePaths.includes('src/leaf-beta.ts') && !alpha.readPaths.includes('src/leaf-beta.ts'))
+  assert.ok(beta.writePaths.includes('src/leaf-beta.ts') && beta.readPaths.includes('src/leaf-beta.ts'))
+  assert.ok(!beta.writePaths.includes('src/leaf-alpha.ts') && !beta.readPaths.includes('src/leaf-alpha.ts'))
+})
+
+test('raw intent seed detection accepts frozen node and target rawSource fields when Markdown is absent', () => {
+  const path = '.spec/raw-source/spec.md'
+  const buildPlan = (rawSource?: string): SyncCoordinatorPlan => ({
+    ...plan(), intentNodeId: 'raw-source', targets: [{ nodeId: 'raw-source', path, ...(rawSource === undefined ? {} : { rawSource }) }],
+    readPaths: ['.spec'], writePaths: ['.spec/raw-source'], executionScope: undefined, mandatoryTests: [],
+  })
+  const byTarget = planSyncPartitions({ plan: buildPlan('target-authored raw'), files: new Map(), contracts: [], changedPaths: [] })
+  assert.deepEqual(byTarget.partitions.map(partition => partition.writePaths), [[path]])
+  const byNode = planSyncPartitions({
+    plan: buildPlan(), files: new Map(), contracts: [], nodes: [{ id: 'raw-source', path, rawSource: 'frozen-node raw' }], changedPaths: [],
+  })
+  assert.deepEqual(byNode.partitions.map(partition => partition.writePaths), [[path]])
 })

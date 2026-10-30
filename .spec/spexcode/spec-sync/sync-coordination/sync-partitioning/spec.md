@@ -18,7 +18,9 @@ related:
 
 规划覆盖真实影响目标，不以目标文件本身出现在diff为前提。Spec保存后，已治理实现虽尚未变化也纳入本区原授权写集合；所有潜在实现/非只读测试writer重叠的目标先合区。上层纯原意节点仍只作上下文，除非本次自身变化或实际持有实现写职责。mandatory oracle与只读依赖永不升格writer，目录级执行授权收窄到本区实际文件；不相关code来源事实不进入本区。
 
-规划只接受调用方冻结的 `SyncCoordinatorPlan`、文件正文、已解析 `Contract` 集合、可选的真实节点身份清单和精确 `changedPaths`，不读取实时工作树、不发起模型调用，也不修改输入。契约引用与反向关系只复用 `spec-core/contracts` 图；即使 Spec 尚无 `contract-schema`，仍从冻结正文的 frontmatter 及节点身份读取真实 `code:`/`related:` 治理。raw-only 节点只决定文件所有权、上下文及局部潜在 writer，不伪造成业务契约、依赖或批准身份。Spec 的 `code:`、`related:` 锚点、selector、目录与 glob 匹配复用现有 relation parser 和 matcher。
+普通契约依赖只把前置项的完整 Spec、上层原意与业务 ID 接口带入本区，不继承其全部源码、related 文件或验收实现；两端真实 code 路径随跨区依赖边返回，供上层最终独立交叉审查。显式目标 intent 若有真实 rawSource 且尚无任何 sync-v1 Contract，则规划唯一纯 Spec 写者的根种子区，之后实现叶仍各持本区源码。种子区不取得根的 code/related 或后代实现写权；已结构化的 intent 不重复成为只读目标，不在 targets 的节点不得提权。
+
+规划只接受调用方冻结的 `SyncCoordinatorPlan`、文件正文、已解析 `Contract` 集合、可选的真实节点身份清单和精确 `changedPaths`，不读取实时工作树、不发起模型调用，也不修改输入。契约引用与反向关系只复用 `spec-core/contracts` 图；即使 Spec 尚无 `contract-schema`，仍从冻结正文的 frontmatter 及节点身份读取真实 `code:`/`related:` 治理。raw-only 节点只决定文件所有权、上下文及局部潜在 writer，不伪造成业务契约、依赖或批准身份。Spec 的 `code:`、`related:` 锚点、selector、目录与 glob 匹配复用现有 relation parser 和 matcher。根 seed 只在显式 target 无真实 Contract 且其实际 `rawSource` 非空时产生；存在性取冻结节点/target 的 rawSource 或 `parseParts` 对应正文结果。
 
 每个 `changedPath` 在 `expectedPaths` 与恰好一个分区中出现。目标 Spec 路径按节点归属；代码与验收文件按其真实声明者归区。多个目标声明同一实际写文件时必须合区，任何分区路径不得被另一区重复写入。没有当前治理所有者的变更也必须归入按目录和最近已知治理邻域组织的发现组；该组应保留近邻 Spec 作为只读背景，不得因此把变更解释为已有合法归属。独立发现路径可按真实上下文字节预算拆组，之后发现的新治理叶由上层流程取得局部写权。
 
