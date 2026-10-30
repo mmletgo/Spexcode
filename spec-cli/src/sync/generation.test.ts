@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -437,4 +437,42 @@ test('删除后的旧Spec与已不在current的源码以source_before进入生�
   const rejected = await runGeneration(mismatched, { runner: runner(mismatched).run, validateCandidate: valid })
   assert.equal(rejected.status, 'failed')
   assert.match(rejected.failure!.message, /历史正文与真实旧快照不匹配/)
+})
+
+test('旧related glob匹配到历史根层helper正文缺失时在Native前拒绝', async t => {
+  const source = await input(t)
+  const helperPath = 'src/helpers/format.js'
+  const helper = 'export function format(value) { return String(value) }\n// helper tail marker\n'
+  const oldSpec = source.files.get(contractPath)!.replace('  - src/export.js#ExportService\n', '  - src/export.js#ExportService\nrelated:\n  - src/helpers/**/*.js\n')
+  writeFileSync(join(source.root, contractPath), oldSpec)
+  mkdirSync(join(source.root, 'src/helpers'), { recursive: true })
+  writeFileSync(join(source.root, helperPath), helper)
+  const git = (...args: string[]): void => { execFileSync('git', ['-C', source.root, ...args], { stdio: 'pipe', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }) }
+  git('add', '-A'); git('commit', '-m', 'record related helper obligation')
+  const before = await captureInputSnapshot(source.root, { committed: true })
+  const beforeEntries = readTree(before.source.commonDir, before.immutableTree)
+  const beforeFiles = new Map(beforeEntries.map(entry => [entry.path, readObject(before.source.commonDir, entry.oid).toString()]))
+  git('rm', contractPath, helperPath); git('commit', '-m', 'delete spec and related helper')
+  const snapshot = await captureInputSnapshot(source.root, { committed: true })
+  const entries = readTree(snapshot.source.commonDir, snapshot.immutableTree)
+  const files = new Map(entries.map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString()]))
+  const oldContract = parseContract({ nodeId: 'export-contract', path: contractPath, source: oldSpec }).contract!
+  const historicalPaths = [contractPath, 'src/export.js', 'tests/export.test.mjs', helperPath]
+  const prior: NonNullable<GenerationInput['priorContext']>[number] = {
+    role: 'source_before', snapshot: before,
+    entries: beforeEntries.filter(entry => historicalPaths.includes(entry.path)),
+    files: new Map(historicalPaths.filter(path => path !== helperPath).map(path => [path, beforeFiles.get(path)!])),
+    objects: [],
+  }
+  const deleted: GenerationInput = {
+    ...source, snapshot, manifest: { version: 1, entries }, files, contracts: [], elaboratedSpecs: [],
+    readyIds: oldContract.items.map(item => item.id), retiredIds: oldContract.items.map(item => item.id),
+    retiredOwners: oldContract.items.map(item => ({ id: item.id, path: contractPath })),
+    priorContext: [prior], policy: { ...source.policy, version: 'sync-coordinator-v2' },
+  }
+  const native = runner(deleted)
+  const result = await runGeneration(deleted, { runner: native.run, validateCandidate: valid })
+  assert.equal(result.status, 'failed')
+  assert.equal(native.calls.length, 0, '历史义务缺少正文须在任何Native派发前拒绝')
+  assert.ok(result.failure!.message.includes(helperPath))
 })

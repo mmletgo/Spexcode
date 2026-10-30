@@ -18,3 +18,5 @@ code:
 
 
 只读接口回归让A仅借读B完整Spec而不含B源码，核A checkedIds没有B业务项；最终A/B cross-edge同时完整读取两端源码，不能保留readonly skip或以局部checkedIds冒充跨边实现覆盖。
+
+旧生命周期Spec的`related: [src/helpers/**/*.js]`在真实删除提交中命中根层`src/helpers/format.js`；生成和最终独立审查都收到同一旧快照里的helper完整首尾字节，且不把它伪装为current files。

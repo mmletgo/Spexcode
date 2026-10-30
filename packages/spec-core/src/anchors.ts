@@ -79,7 +79,20 @@ export function relationClaimsPath(claim: string, file: string): boolean {
   if (claim === file) return true
   if (file.startsWith(claim.replace(/\/+$/, '') + '/')) return true
   if (!claim.includes('*')) return false
-  const pattern = claim.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')
+  let pattern = ''
+  for (let index = 0; index < claim.length; index++) {
+    if (claim[index] !== '*') {
+      pattern += claim[index].replace(/[.+?^${}()|[\]\\]/g, '\\$&')
+      continue
+    }
+    if (claim[index + 1] === '*') {
+      index++
+      if (claim[index + 1] === '/') {
+        pattern += '(?:[^/]+/)*'
+        index++
+      } else pattern += '.*'
+    } else pattern += '[^/]*'
+  }
   return new RegExp(`^${pattern}$`).test(file)
 }
 export function parseRelation(raws: string[], relation: 'code' | 'related'): RelationParse {

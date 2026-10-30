@@ -3,6 +3,7 @@ import { setImmediate as yieldToControl, setTimeout as waitForPublication } from
 import { existsSync, lstatSync, mkdirSync, realpathSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import { dependencyClosure, parseContract, parseParts } from '@spexcode/spec-core/contracts'
+import { relationClaimsPath } from '@spexcode/spec-core'
 import type { ContractFinding } from '@spexcode/spec-core/contracts'
 import { actualTreeDiff, exportCandidate, isHostPrivatePath, verifyCandidate } from './candidate.js'
 import { analyzeCodeBehavior, authoredContractChanges, deriveBehaviorAuthorization } from './code-behavior.js'
@@ -750,7 +751,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
             const files = new Map<string, string>(), entries: SnapshotManifest['entries'] = [], objects: NonNullable<import('./generation-types.js').GenerationInput['priorContext']>[number]['objects'][number][] = []
             readTree(operation.input.source.commonDir, context.snapshot.immutableTree, (entry, bytes) => {
               if (isHostPrivatePath(entry.path)) return
-              if (obligations.includes(entry.path) && !within(entry.path, view.readPaths)) fail('historical_context_binding', `历史义务超出全局读取授权: ${entry.path}`)
+              if (obligations.some(claim => relationClaimsPath(claim, entry.path)) && !within(entry.path, view.readPaths)) fail('historical_context_binding', `历史义务超出全局读取授权: ${entry.path}`)
               if (!within(entry.path, view.readPaths)) return
               entries.push(entry)
               if (entry.mode === '120000' || !isUtf8Text(bytes)) objects.push({ entry, kind: entry.mode === '120000' ? 'symlink' : 'binary', encoding: 'base64', content: bytes.toString('base64') })

@@ -4,6 +4,7 @@ import type { CandidateReviewBinding } from './candidate-review.js'
 export { GENERATION_REVIEW_SCHEMA } from './candidate-review.js'
 import type { Contract } from '@spexcode/spec-core/contracts'
 import { parseContract } from '@spexcode/spec-core/contracts'
+import { relationClaimsPath } from '@spexcode/spec-core'
 import { CANDIDATE_RESPONSE_SCHEMA, freezeCandidate, isHostPrivatePath, verifyCandidate } from './candidate.js'
 import type { CandidateChanges } from './candidate.js'
 import { isUtf8Text } from './composition.js'
@@ -51,8 +52,8 @@ function frozenEntries(input: GenerationInput): TreeEntry[] {
     if (!views.length) throw new Error(`节点生命周期缺少完整真实旧Spec: ${path}`)
     for (const view of views) {
       const contract = parseContract({ nodeId: path.split('/').at(-2)!, path, source: view.supplied.get(path)! }).contract
-      const paths = contract ? [...contract.code, ...contract.related, ...contract.items.flatMap(item => [...item.kind === 'AC' ? [item.test] : [], ...item.kind !== 'VERIFY' && item.source.kind === 'code' ? [item.source.ref] : []])].map(anchor => anchor.split('#')[0]) : []
-      for (const required of paths) if (view.actualPaths.has(required) && !view.supplied.has(required) && !view.objectPaths.has(required)) throw new Error(`节点生命周期缺少完整旧源码/验收正文: ${required}`)
+      const claims = contract ? [...contract.code, ...contract.related, ...contract.items.flatMap(item => [...item.kind === 'AC' ? [item.test] : [], ...item.kind !== 'VERIFY' && item.source.kind === 'code' ? [item.source.ref] : []])].map(anchor => anchor.split('#')[0]) : []
+      for (const actualPath of view.actualPaths) if (claims.some(claim => relationClaimsPath(claim, actualPath)) && !view.supplied.has(actualPath) && !view.objectPaths.has(actualPath)) throw new Error(`节点生命周期缺少完整旧源码/验收正文: ${actualPath}`)
     }
   }
   const required = new Set(input.elaboratedSpecs.map(spec => spec.path))
