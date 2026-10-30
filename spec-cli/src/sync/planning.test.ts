@@ -15,10 +15,11 @@ import { migrateSyncStore } from './migrations.js'
 import { syncPlanDigest } from './coordinator.js'
 import type { SyncCoordinatorPlan } from './coordinator-types.js'
 import { buildSyncApplicationPlan, deriveSyncBaselineResources } from './planning.js'
+import { planSyncPartitions, projectSyncPartition } from './partitioning.js'
 import { captureInputSnapshot, contentHash, readEvidence, readObject, verifySnapshot, writeEvidence } from './snapshot.js'
 import { readFrozenBehaviorContext } from '../../test/frozen-behavior-context.js'
 import { SyncStore } from './store.js'
-import type { BaselinePair, InputSnapshot, SyncScope, VerificationResultBlob } from './operation-types.js'
+import type { BaselinePair, BaselineResource, FrozenBaselineSelection, InputSnapshot, SyncScope, VerificationResultBlob } from './operation-types.js'
 import type { SyncSettings } from './settings.js'
 
 const specA = '.spec/export/export-contract/spec.md', specB = '.spec/other/other-contract/spec.md'
@@ -317,4 +318,172 @@ test('v2无验证基线的真实提交删除仍读取before原意与旧身份，
   const resources = await deriveSyncBaselineResources(snapshot, plan)
   assert.ok(resources.some(resource => resource.kind === 'path' && resource.path === specA))
   assert.ok(resources.some(resource => resource.kind === 'contract' && resource.id === 'REQ-EXPORT-01'))
+})
+
+
+/** 只投影已结算基线的输入形状；不伪造 store receipt，也不声称 Native/Docker 已验证。 */
+function projectedSelection(pair: BaselinePair, resources: BaselineResource[]): FrozenBaselineSelection {
+  const bindings: FrozenBaselineSelection['bindings'] = resources.map(resource => resource.kind === 'path'
+    ? { resource, bytePair: pair.coveredScope.paths.includes(resource.path) ? pair : null }
+    : { resource, intentPair: (resource.kind === 'flow' ? pair.coveredScope.flowIds : pair.coveredScope.contractIds).includes(resource.id) ? pair : null })
+  const value = { version: 'sync-baseline-selection-v1' as const, source: pair.source, bindings }
+  return { ...value, digest: contentHash(JSON.stringify(value, (_key, item: unknown) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b))) : item)) }
+}
+
+async function incrementalFixture(t: test.TestContext, mode: 'independent' | 'shared' | 'dependency' = 'independent') {
+  const f = await fixture(t), rootSpec = '.spec/project/spec.md'
+  const paths = [specA, specB, '.spec/third/third-contract/spec.md'].map(path => path.replace('.spec/', '.spec/project/'))
+  mkdirSync(join(f.root, paths[2], '..'), { recursive: true })
+  writeFileSync(join(f.root, paths[2]), f.original.replaceAll('EXPORT', 'THIRD').replaceAll('export-contract', 'third-contract').replaceAll('export.js', 'third.js').replaceAll('export.test.mjs', 'third.test.mjs'))
+  for (const [index, old] of [specA, specB].entries()) { mkdirSync(join(f.root, paths[index], '..'), { recursive: true }); renameSync(join(f.root, old), join(f.root, paths[index])) }
+  writeFileSync(join(f.root, rootSpec), '---\ntitle: 项目原意\nstatus: active\n---\n## raw source\n\n三个独立服务均完整同步。\n')
+  cpSync(join(f.root, 'src/export.js'), join(f.root, 'src/third.js')); cpSync(join(f.root, 'tests/export.test.mjs'), join(f.root, 'tests/third.test.mjs'))
+  if (mode === 'shared') writeFileSync(join(f.root, paths[1]), f.other.replace('src/other.js#ExportService', 'src/export.js#ExportService'))
+  if (mode === 'dependency') writeFileSync(join(f.root, paths[1]), f.other.replace('REQ-OTHER-01 |\n', 'REQ-EXPORT-01 |\n'))
+  const third = parseContract({ nodeId: 'third-contract', path: paths[2], source: readFileSync(join(f.root, paths[2]), 'utf8') }).contract!.items.find(item => item.kind === 'VERIFY')!
+  assert.equal(third.kind, 'VERIFY')
+  f.config.nodeIds = ['project']
+  f.config.verifications.push({ ...f.config.verifications[0], definition: { id: third.id, command: third.command, cwd: third.cwd, timeoutMs: third.timeoutMs } })
+  f.config.mandatoryTests.push({ verificationId: third.id, testPath: 'tests/third.test.mjs', testId: 'AC-THIRD-03' }); f.configure()
+  git(f.root, 'add', '.'); git(f.root, 'commit', '-m', 'three complete specification leaves below registered intent')
+  git(f.delivery.source.canonicalRoot, 'reset', '--hard', 'main')
+  const before = await captureInputSnapshot(f.root, { committed: true }), delivery = await captureInputSnapshot(f.delivery.source.canonicalRoot, { committed: true })
+  const fullPlan = await buildSyncApplicationPlan(before, 'project')
+  const baseline: BaselinePair = { id: 'fixture-projected-settled-baseline', repositoryId: before.source.repositoryId, source: before.source, sourceInput: before, verifiedDelivery: delivery, coveredScope: fullPlan.executionScope, receiptId: 'fixture-projection-no-store-receipt', settledAtMs: 1 }
+  const heads = projectedSelection(baseline, await deriveSyncBaselineResources(before, fullPlan))
+  return { ...f, rootSpec, paths, before, fullPlan, baseline, heads }
+}
+
+test('已采纳基线的单叶源码commit只规划owner并保持三轮selection收敛，分区派发不含无关叶', async t => {
+  const f = await incrementalFixture(t)
+  writeFileSync(join(f.root, 'src/export.js'), `${readFileSync(join(f.root, 'src/export.js'), 'utf8')}\nexport const incremental = 1;\n`)
+  git(f.root, 'add', 'src/export.js'); git(f.root, 'commit', '-m', 'change only the owned export source')
+  const snapshot = await captureInputSnapshot(f.root, { committed: true })
+  const changedPaths = git(f.root, 'diff', '--name-only', f.before.headCommit, snapshot.headCommit).split('\n')
+  assert.deepEqual(changedPaths, ['src/export.js'])
+  const rounds = [], options = { direction: 'code_to_spec' as const, commitTrigger: { before: f.before, paths: changedPaths }, discoverySelection: f.heads }
+  let selection = f.heads
+  for (let round = 0; round < 3; round++) {
+    const plan = await buildSyncApplicationPlan(snapshot, 'project', selection, options)
+    rounds.push(plan)
+    selection = projectedSelection(f.baseline, await deriveSyncBaselineResources(snapshot, plan, selection))
+  }
+  const plan = rounds[2], frozen = await context(snapshot, verifySnapshot(snapshot).map(entry => entry.path))
+  const partitions = planSyncPartitions({ plan, files: frozen.files, contracts: frozen.contracts, nodes: frozen.nodes, changedPaths })
+  const dispatch = partitions.partitions.map(partition => projectSyncPartition(plan, partition))
+  const evidence = { limitation: '真实 Git before/after、snapshot/planner/partition projection；settled baseline为明确fixture投影，未调用Native/Docker或伪造store receipt', before: f.before, snapshot, changedPaths, rounds, partitions, dispatch }
+  if (process.env.SPEX_INCREMENTAL_EVIDENCE_DIR) writeFileSync(join(process.env.SPEX_INCREMENTAL_EVIDENCE_DIR, 'single-leaf-plan.json'), JSON.stringify(evidence, null, 2))
+  for (const round of rounds) assert.deepEqual(round.targets.map(target => target.nodeId), ['export-contract'])
+  assert.deepEqual(dispatch.flatMap(local => local.targets.map(target => target.nodeId)), ['export-contract'])
+  assert.deepEqual(partitions.expectedPaths, changedPaths)
+  for (const nodeId of ['other-contract', 'third-contract']) {
+    assert.ok(!plan.executionScope.contractIds.some(id => id.includes(nodeId === 'other-contract' ? 'OTHER' : 'THIRD')))
+    assert.ok(!dispatch.some(local => local.targets.some(target => target.nodeId === nodeId)))
+  }
+  for (const path of [f.paths[1], f.paths[2], 'src/other.js', 'src/third.js', 'tests/other.test.mjs', 'tests/third.test.mjs']) {
+    assert.ok(!plan.executionScope.paths.includes(path))
+    assert.ok(!dispatch.some(local => local.readPaths.includes(path) || local.writePaths.includes(path)))
+    const old = verifySnapshot(f.before).find(entry => entry.path === path), next = verifySnapshot(snapshot).find(entry => entry.path === path)
+    assert.deepEqual(next, old)
+  }
+})
+
+
+for (const mode of ['shared', 'dependency'] as const) test(`已采纳基线源码commit保留真实${mode} owner与影响，独立第三叶不派发`, async t => {
+  const f = await incrementalFixture(t, mode)
+  writeFileSync(join(f.root, 'src/export.js'), `${readFileSync(join(f.root, 'src/export.js'), 'utf8')}\nexport const incremental = 1;\n`)
+  git(f.root, 'add', 'src/export.js'); git(f.root, 'commit', '-m', `change with ${mode} impact`)
+  const snapshot = await captureInputSnapshot(f.root, { committed: true })
+  const plan = await buildSyncApplicationPlan(snapshot, 'project', f.heads, { discoverySelection: f.heads, direction: 'code_to_spec', commitTrigger: { before: f.before, paths: ['src/export.js'] } })
+  assert.deepEqual(plan.targets.map(target => target.nodeId), ['export-contract', 'other-contract'])
+  const frozen = await context(snapshot, verifySnapshot(snapshot).map(entry => entry.path))
+  const partitions = planSyncPartitions({ plan, files: frozen.files, contracts: frozen.contracts, nodes: frozen.nodes, changedPaths: ['src/export.js'] })
+  assert.deepEqual(partitions.partitions.flatMap(partition => partition.targets.map(target => target.nodeId)).sort(), ['export-contract', 'other-contract'])
+  assert.ok(!partitions.partitions.some(partition => partition.readPaths.includes(f.paths[2]) || partition.readPaths.includes('src/third.js')))
+  if (mode === 'shared') assert.equal(partitions.partitions.length, 1)
+  else assert.ok(partitions.dependencies.some(edge => edge.paths.includes(f.paths[0]) && edge.paths.includes(f.paths[1])))
+})
+
+test('首次与未完成基线保持全树bootstrap，before或失败admission本身不能证明已完成，显式根Spec仍全树', async t => {
+  const f = await incrementalFixture(t)
+  writeFileSync(join(f.root, 'src/export.js'), `${readFileSync(join(f.root, 'src/export.js'), 'utf8')}\nexport const incremental = 1;\n`)
+  git(f.root, 'add', 'src/export.js'); git(f.root, 'commit', '-m', 'source after initial input')
+  const snapshot = await captureInputSnapshot(f.root, { committed: true }), complete = f.fullPlan.targets.map(target => target.nodeId)
+  const incomplete = projectedSelection({ ...f.baseline, coveredScope: { ...f.baseline.coveredScope, paths: f.baseline.coveredScope.paths.filter(path => path !== f.paths[2]) } }, f.heads.bindings.map(binding => binding.resource))
+  for (const [baseline, before] of [[null, null], [f.heads, null], [null, f.before], [incomplete, f.before]] as const) {
+    const plan = await buildSyncApplicationPlan(snapshot, 'project', baseline, { direction: 'code_to_spec', commitTrigger: { before, paths: ['src/export.js'] } })
+    assert.deepEqual(plan.targets.map(target => target.nodeId), complete)
+    const frozen = await context(snapshot, verifySnapshot(snapshot).map(entry => entry.path))
+    const partitions = planSyncPartitions({ plan, files: frozen.files, contracts: frozen.contracts, nodes: frozen.nodes, changedPaths: before ? ['src/export.js'] : verifySnapshot(snapshot).map(entry => entry.path) })
+    assert.deepEqual(partitions.partitions.flatMap(partition => partition.targets.map(target => target.nodeId)).sort(), [...complete].sort())
+  }
+  writeFileSync(join(f.root, f.rootSpec), `${readFileSync(join(f.root, f.rootSpec), 'utf8')}\n新增共同需求。\n`)
+  git(f.root, 'add', f.rootSpec); git(f.root, 'commit', '-m', 'new explicit root intent')
+  const explicit = await buildSyncApplicationPlan(await captureInputSnapshot(f.root, { committed: true }), 'project', f.heads, { commitTrigger: { before: f.before, paths: ['src/export.js', f.rootSpec] } })
+  assert.deepEqual(explicit.targets.map(target => target.nodeId), complete)
+  const manual = await buildSyncApplicationPlan(snapshot, 'project', f.heads)
+  assert.deepEqual(manual.targets.map(target => target.nodeId), complete)
+})
+
+test('已结算交付尚未被来源Git采纳时仍按完整bootstrap，不以相同旧HEAD冒充采纳', async t => {
+  const f = await incrementalFixture(t), deliveryRoot = f.delivery.source.canonicalRoot
+  writeFileSync(join(deliveryRoot, f.paths[2]), `${readFileSync(join(deliveryRoot, f.paths[2]), 'utf8')}\n交付分支新增约束。\n`)
+  git(deliveryRoot, 'add', '.'); git(deliveryRoot, 'commit', '-m', 'settled delivery that source has not adopted')
+  const unadopted = { ...f.baseline, verifiedDelivery: await captureInputSnapshot(deliveryRoot, { committed: true }) }
+  writeFileSync(join(f.root, 'src/export.js'), `${readFileSync(join(f.root, 'src/export.js'), 'utf8')}\nexport const incremental = 1;\n`)
+  git(f.root, 'add', '.'); git(f.root, 'commit', '-m', 'source without adopting delivery')
+  const plan = await buildSyncApplicationPlan(await captureInputSnapshot(f.root, { committed: true }), 'project', unadopted, { commitTrigger: { before: f.before, paths: ['src/export.js'] } })
+  assert.deepEqual(plan.targets.map(target => target.nodeId), f.fullPlan.targets.map(target => target.nodeId))
+})
+
+test('发现selection缺少精确bootstrap path binding时不借完整BaselinePair冒充已覆盖', async t => {
+  const f = await incrementalFixture(t)
+  writeFileSync(join(f.root, 'src/export.js'), `${readFileSync(join(f.root, 'src/export.js'), 'utf8')}\nexport const incremental = 1;\n`)
+  git(f.root, 'add', 'src/export.js'); git(f.root, 'commit', '-m', 'change one source with an incomplete discovery selection')
+  const snapshot = await captureInputSnapshot(f.root, { committed: true })
+  const resources = f.heads.bindings.filter(binding => binding.resource.kind !== 'path' || binding.resource.path !== f.paths[2]).map(binding => binding.resource)
+  const incompleteHeads = projectedSelection(f.baseline, resources)
+  const plan = await buildSyncApplicationPlan(snapshot, 'project', f.baseline, { discoverySelection: incompleteHeads, direction: 'code_to_spec', commitTrigger: { before: f.before, paths: ['src/export.js'] } })
+  assert.deepEqual(plan.targets.map(target => target.nodeId).sort(), f.fullPlan.targets.map(target => target.nodeId).sort())
+})
+
+test('裸BaselinePair只提供历史基线，不能替代完整discoverySelection证明bootstrap', async t => {
+  const f = await incrementalFixture(t)
+  writeFileSync(join(f.root, 'src/export.js'), `${readFileSync(join(f.root, 'src/export.js'), 'utf8')}\nexport const incremental = 1;\n`)
+  git(f.root, 'add', 'src/export.js'); git(f.root, 'commit', '-m', 'change one source without discovery heads')
+  const snapshot = await captureInputSnapshot(f.root, { committed: true })
+  const plan = await buildSyncApplicationPlan(snapshot, 'project', f.baseline, { direction: 'code_to_spec', commitTrigger: { before: f.before, paths: ['src/export.js'] } })
+  assert.deepEqual(plan.targets.map(target => target.nodeId).sort(), f.fullPlan.targets.map(target => target.nodeId).sort())
+})
+
+for (const action of ['move', 'delete'] as const) test(`已采纳基线${action}保留真实before owner、旧原意与验证政策，不派无关叶`, async t => {
+  const f = await incrementalFixture(t), moved = f.paths[0].replace('export-contract', 'moved-contract')
+  if (action === 'move') renameSync(join(f.root, f.paths[0], '..'), join(f.root, moved, '..'))
+  else rmSync(join(f.root, f.paths[0]))
+  git(f.root, 'add', '.'); git(f.root, 'commit', '-m', `${action} the export specification`)
+  const snapshot = await captureInputSnapshot(f.root, { committed: true }), changedPaths = git(f.root, 'diff', '--no-renames', '--name-only', f.before.headCommit, snapshot.headCommit).split('\n')
+  const plan = await buildSyncApplicationPlan(snapshot, 'project', f.heads, { discoverySelection: f.heads, direction: 'combined', commitTrigger: { before: f.before, paths: changedPaths } })
+  assert.deepEqual(plan.targets.map(target => target.nodeId), [action === 'move' ? 'moved-contract' : 'export-contract'])
+  assert.ok(plan.readPaths.includes(f.paths[0])); assert.ok(plan.executionScope.paths.includes(f.paths[0]))
+  assert.ok(plan.readPaths.includes('src/export.js')); assert.ok(plan.readPaths.includes('tests/export.test.mjs'))
+  assert.deepEqual(plan.mandatoryTests.map(item => item.verificationId), ['VERIFY-EXPORT-01'])
+  assert.ok(!plan.executionScope.paths.includes('tests/export.test.mjs'))
+  if (action === 'delete') assert.ok(plan.targets[0].rawSource)
+  else assert.ok(plan.executionScope.paths.includes(moved))
+  assert.ok(!plan.targets.some(target => ['other-contract', 'third-contract'].includes(target.nodeId)))
+})
+
+test('未治理新源码commit仍完整发现纳管，不因增量owner集合为空丢失任务', async t => {
+  const f = await incrementalFixture(t), path = 'src/new-module.js'
+  writeFileSync(join(f.root, path), 'export const discovered = true;\n')
+  git(f.root, 'add', path); git(f.root, 'commit', '-m', 'new unowned source')
+  const snapshot = await captureInputSnapshot(f.root, { committed: true })
+  const plan = await buildSyncApplicationPlan(snapshot, 'project', f.heads, { discoverySelection: f.heads, direction: 'code_to_spec', commitTrigger: { before: f.before, paths: [path] } })
+  assert.ok(plan.readPaths.includes(path)); assert.ok(plan.targets.length)
+  const frozen = await context(snapshot, verifySnapshot(snapshot).map(entry => entry.path))
+  const partitions = planSyncPartitions({ plan, files: frozen.files, contracts: frozen.contracts, nodes: frozen.nodes, changedPaths: [path] })
+  assert.deepEqual(partitions.expectedPaths, [path])
+  const discovered = partitions.partitions.filter(partition => partition.changedPaths.includes(path))
+  assert.equal(discovered.length, 1); assert.deepEqual(discovered[0].targets, [])
+  assert.ok(discovered[0].readPaths.includes(path)); assert.ok(discovered[0].contextNodeIds.length)
 })

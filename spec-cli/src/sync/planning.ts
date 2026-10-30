@@ -1,15 +1,16 @@
 import { posix } from 'node:path'
-import { loadSpecs } from '@spexcode/spec-core'
+import { loadSpecs, parseCodeEntry, parseRelation, relationClaimsPath } from '@spexcode/spec-core'
 import { contractImpact, contractReferences, parseFrontmatter } from '@spexcode/spec-core/contracts'
 import type { SyncCoordinatorPlan, SyncDirection } from './coordinator-types.js'
 import type { BaselinePair, BaselineResource, FrozenBaselineSelection, InputSnapshot, SyncScope } from './operation-types.js'
-import { selectedRetiredIds, verifyBaselineSelection } from './composition.js'
+import { adoptedDeliveryPaths, selectedRetiredIds, verifyBaselineSelection } from './composition.js'
 import { isSyncSpecPath, readFrozenContracts } from './frozen-contracts.js'
 import { readEvidence, readObject, readTree, verifySnapshot } from './snapshot.js'
 import { controlledDecisionIdentity } from './request-input.js'
 import { readDecisionAuthority } from './code-behavior.js'
 import type { CodeBehaviorAnalysis, SyncDecisionInput } from './writeback-types.js'
 import { coveredPath, readSyncSettings, SyncApplicationError } from './settings.js'
+import { ownerNodesForPath } from './partitioning.js'
 
 /** 授权范围只枚举实际未治理源码；当前及真实交付治理均排除，发现不授予归属或执行范围。 */
 export function discoverSyncSourcePaths(snapshot: InputSnapshot, sourcePaths: readonly string[], governanceFiles: Iterable<string>): string[] {
@@ -24,6 +25,7 @@ export type SyncPlanningOptions = { discoverySelection?: FrozenBaselineSelection
 
 /** 冻结契约影响与既有节点治理共同决定闭包；目录授权允许新自然语言需求创建实现。 */
 export async function buildSyncApplicationPlan(snapshot: InputSnapshot, nodeId: string, baseline?: BaselinePair | FrozenBaselineSelection | null, options: SyncPlanningOptions = {}): Promise<SyncCoordinatorPlan & { executionScope: SyncScope }> {
+  if (options.discoverySelection) verifyBaselineSelection(snapshot, options.discoverySelection)
   const selection = baseline && 'version' in baseline ? baseline : null
   if (selection) verifyBaselineSelection(snapshot, selection)
   const baselinePair = baseline && !('version' in baseline) ? baseline : null
@@ -48,10 +50,37 @@ export async function buildSyncApplicationPlan(snapshot: InputSnapshot, nodeId: 
   const previousIntent = oldFrozen.nodes.find(node => node.id === nodeId) ?? oldFrozen.nodes.find(node => oldFrozen.contracts.find(contract => contract.nodeId === node.id)?.items.some(item => currentIntentIds.has(item.id)))
   const intent = currentIntent ?? nodes.find(node => previousIntent && (oldFrozen.contracts.find(contract => contract.nodeId === previousIntent.id)?.items.some(item => frozen.contracts.find(contract => contract.nodeId === node.id)?.items.some(next => next.id === item.id)) || previousIntent.rawSource === node.parts?.rawSource)) ?? nodes.filter(node => previousIntent && previousIntent.path.startsWith(`${posix.dirname(node.path)}/`) && node.parts?.rawSource).sort((a, b) => b.path.length - a.path.length)[0] ?? previousIntent
   if (!intent) throw new SyncApplicationError('sync_node_unknown', `不存在 Spec 节点 ${nodeId}`, 404)
-  const currentImpact = contractImpact(frozen.graph, [nodeId, intent.id]), priorImpact = contractImpact(oldFrozen.graph, [nodeId, ...(previousIntent ? [previousIntent.id] : [])])
-  const impacts = [currentImpact, priorImpact, ...protectedGraphs.map(previous => contractImpact(previous.graph, [nodeId, intent.id]))]
+  const views = [frozen, oldFrozen, ...protectedGraphs]
+  const governanceNodes = views.flatMap(view => view.nodes.map(node => {
+    const code = parseFrontmatter(view.files.get(node.path)!).fm.code
+    return { ...node, code: parseRelation(Array.isArray(code) ? code.filter((entry): entry is string => typeof entry === 'string') : [], 'code').entries }
+  }))
+  const before = options.commitTrigger?.before
+  const readinessSelection = options.discoverySelection
+  const readinessPairs = new Map((readinessSelection?.bindings ?? []).flatMap(binding => { const pair = 'bytePair' in binding ? binding.bytePair : binding.intentPair; return pair ? [[pair.id, pair] as const] : [] }))
+  const adopted = new Map([...readinessPairs.values()].map(pair => [pair.id, before ? adoptedDeliveryPaths(before, pair) : new Set<string>()]))
+  const beforePaths = new Set(before ? verifySnapshot(before).map(entry => entry.path) : [])
+  const bootstrapNodes = oldFrozen.nodes.filter(node => beforePaths.has(node.path) && coveredPath(node.path, [posix.dirname(previousIntent?.path ?? intent.path)]))
+  const bootstrapPaths = new Set(bootstrapNodes.map(node => node.path))
+  const bootstrapItems = oldFrozen.contracts.filter(contract => bootstrapPaths.has(contract.path)).flatMap(contract => contract.items.filter(item => item.kind !== 'VERIFY'))
+  const claims = [...governanceNodes.filter(node => bootstrapPaths.has(node.path)).flatMap(node => node.code.map(entry => entry.path)), ...bootstrapItems.filter(item => item.kind === 'AC').map(item => parseCodeEntry(item.test).path)]
+  for (const path of beforePaths) if (coveredPath(path, [...settings.sourcePaths, ...settings.testPaths]) && !settings.mandatoryTests.some(test => test.testPath === path) && claims.some(claim => relationClaimsPath(claim, path))) bootstrapPaths.add(path)
+  const settledResource = (resource: BaselineResource, path: string): boolean => {
+    const binding = readinessSelection?.bindings.find(binding => resource.kind === 'path' ? binding.resource.kind === 'path' && binding.resource.path === resource.path : binding.resource.kind === resource.kind && binding.resource.id === resource.id)
+    const pair = binding ? 'bytePair' in binding ? binding.bytePair : binding.intentPair : null
+    return !!pair && (resource.kind === 'path' ? pair.coveredScope.paths.some(scope => coveredPath(resource.path, [scope])) : (resource.kind === 'flow' ? pair.coveredScope.flowIds : pair.coveredScope.contractIds).includes(resource.id)) && !!adopted.get(pair.id)?.has(path)
+  }
+  const subtreeIds = new Set([...nodes, ...oldFrozen.nodes].filter(node => coveredPath(node.path, [posix.dirname(intent.path), ...previousIntent ? [posix.dirname(previousIntent.path)] : []])).map(node => node.id))
+  const changedOwners = (options.commitTrigger?.paths ?? []).map(path => ({ path, ids: [...ownerNodesForPath(path, views.flatMap(view => view.contracts), governanceNodes)].filter(id => subtreeIds.has(id)) }))
+  const incremental = !!before && !!readinessSelection && bootstrapNodes.length > 0
+    && [...bootstrapPaths].every(path => settledResource({ kind: 'path', path }, path))
+    && bootstrapItems.every(item => settledResource({ kind: item.kind === 'FLOW' ? 'flow' : 'contract', id: item.id }, item.path))
+    && !options.commitTrigger!.paths.includes(intent.path) && !options.commitTrigger!.paths.includes('.spec/spexcode.json')
+    && changedOwners.some(change => change.ids.length) && changedOwners.every(change => change.ids.length || !coveredPath(change.path, [...settings.sourcePaths, ...settings.testPaths]))
+  const seedIds = incremental ? [...new Set(changedOwners.flatMap(change => change.ids))] : [nodeId, intent.id]
+  const impacts = views.map((view, index) => contractImpact(view.graph, !incremental && index === 1 ? [nodeId, ...previousIntent ? [previousIntent.id] : []] : seedIds))
   const impact = { nodeIds: [...new Set(impacts.flatMap(item => item.nodeIds))], codePaths: [...new Set(impacts.flatMap(item => item.codePaths))], testPaths: [...new Set(impacts.flatMap(item => item.testPaths))] }
-  const selected = new Set([nodeId, intent.id, ...impact.nodeIds, ...nodes.filter(node => node.path.startsWith(intent.path.slice(0, -'spec.md'.length))).map(node => node.id)])
+  const selected = new Set([...seedIds, ...impact.nodeIds, ...incremental ? [] : nodes.filter(node => node.path.startsWith(intent.path.slice(0, -'spec.md'.length))).map(node => node.id)])
   // 普通旧节点尚无 sync-v1 契约时仍按共同治理文件纳入其它权威叶。
   let changed = true
   while (changed) {
@@ -80,7 +109,7 @@ export async function buildSyncApplicationPlan(snapshot: InputSnapshot, nodeId: 
   const graphs = [frozen.graph, oldFrozen.graph, ...protectedGraphs.map(graph => graph.graph)]
   let expanded = true
   while (expanded) { expanded = false; for (const graph of graphs) for (const id of [...readIds]) { const item = graph.items.get(id); if (!item) continue; for (const ref of contractReferences(item)) if (graph.items.has(ref.id) && !readIds.has(ref.id)) { readIds.add(ref.id); expanded = true } } }
-  const specReadPaths = new Set([...targets.map(target => target.path), ...priorTargets.map(target => target.path)])
+  const specReadPaths = new Set([intent.path, ...previousIntent ? [previousIntent.path] : [], ...targets.map(target => target.path), ...priorTargets.map(target => target.path)])
   for (const graph of graphs) for (const id of readIds) { const item = graph.items.get(id); if (item) specReadPaths.add(item.path) }
   for (const node of [...nodes, ...oldFrozen.nodes]) if (targets.some(target => target.path.startsWith(`${posix.dirname(node.path)}/`))) specReadPaths.add(node.path)
   const declaredReadPaths = [...frozen.contracts, ...oldFrozen.contracts, ...protectedGraphs.flatMap(graph => graph.contracts)]
@@ -91,7 +120,6 @@ export async function buildSyncApplicationPlan(snapshot: InputSnapshot, nodeId: 
   const contextVerificationIds = new Set(graphs.flatMap(graph => [...graph.items.values()].filter(item => item.kind === 'VERIFY' && coveredPath(item.path, [...specReadPaths, ...settings.readPaths])).map(item => item.id)))
   const verifications = settings.verifications.filter(item => !ownedVerificationIds.has(item.definition.id) || activeVerificationIds.has(item.definition.id) || contextVerificationIds.has(item.definition.id))
   const mandatoryTests = settings.mandatoryTests.filter(item => !ownedVerificationIds.has(item.verificationId) || activeVerificationIds.has(item.verificationId))
-  if (options.discoverySelection) verifyBaselineSelection(snapshot, options.discoverySelection)
   const discoveryOwnerFiles = (options.discoverySelection?.bindings ?? []).flatMap(binding => {
     if (!('bytePair' in binding) || !binding.bytePair || !isSyncSpecPath(binding.resource.path)) return []
     const entry = verifySnapshot(binding.bytePair.verifiedDelivery).find(entry => entry.path === binding.resource.path)

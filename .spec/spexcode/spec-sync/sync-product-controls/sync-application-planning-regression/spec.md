@@ -29,3 +29,5 @@ raw-only冷启动即使没有AC.test，也把settings.testPaths内的现有pytes
 真实Git/store旧基线上的子节点移动先复现readonly父契约的code/AC文件未入readPaths；修后同一官方validateContractGraph完整严格检查无error。当前及历史映射变化两个case都读取真实精确声明文件，executionScope和writePaths逐项保持原目标范围，候选硬门禁拒绝覆盖readonly父assets；独立B的Spec/code/test及其资源均未纳入。旧基线仍经现有store动作建立，四层验证明确fake；只证明规划/读取/候选门禁，不宣称native或Docker交付。
 
 行为输入接缝从完整runner request还原body-entry-v2正文，正文可位于独立或必读共享entry；规划输出、原授权范围、requiredChangedPaths与完整引用字节继续逐项核对，不用运输元数据替代业务覆盖。
+
+真实Git提交回归证明，只有完整 settled baseline 的真实delivery已由 before HEAD 采纳、且完整 discovery selection 为相关 bootstrap Spec、治理路径和业务ID提供精确头时，单叶源码提交才能只规划其真实owners及共享/contract依赖影响闭包。三轮 freeze 保留同一完整 discovery selection；即使完整 BaselinePair 存在，只要 discovery selection 缺少某一精确 resource binding 仍须回到全树。首次、before缺失、未完成/未采纳基线、根意图变更和未治理源码提交保持完整纳管；move/delete 使用真实 before owner 与旧原意，不能漏差量或把失败 admission 当成已消费。

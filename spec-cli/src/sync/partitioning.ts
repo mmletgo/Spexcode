@@ -13,6 +13,7 @@ const uniqueSorted = (values: Iterable<string>): string[] => [...new Set(values)
 
 export type SyncPartition = {
   id: string
+  phase?: 'interface_seed'
   intentNodeId: string
   targets: SyncCoordinatorPlan['targets']
   readPaths: string[]
@@ -49,9 +50,32 @@ export type PlanSyncPartitionsInput = {
   readByteSizes?: ReadonlyMap<string, number>
 }
 
+/** 纯父判定只需调用方冻结的节点、Spec正文、契约与本地target；不依赖完整协调plan。 */
+export type RawOnlyInterfaceSeedInput = {
+  files: ReadonlyMap<string, string>
+  contracts: readonly Contract[]
+  nodes?: readonly { id: string; path: string; rawSource?: string | null }[]
+  governanceSources?: ReadonlyMap<string, string>
+  targets: readonly SyncCoordinatorPlan['targets'][number][]
+}
+
+export type RawOnlyInterfaceSeedDescendant = {
+  nodeId: string
+  path: string
+  codePath: string
+  sourcePartitionId: string
+  sourcePaths: readonly string[]
+}
+export type RawOnlyInterfaceSeedEvidence = {
+  phase: 'interface_seed'
+  parentNodeId: string
+  parentPath: string
+  descendants: { nodeId: string; path: string; codePaths: string[]; sourcePartitionId?: string }[]
+}
+
 type Claim = { path: string }
 type GovernanceNode = { id: string; path: string; rawSource: string | null; code: RelationEntry[]; related: RelationEntry[]; current: boolean; sourceDigest: string | null }
-type Draft = { targetNodeIds: string[]; changedPaths: string[]; discoveryNodeIds: string[]; packingKey: string }
+type Draft = { targetNodeIds: string[]; changedPaths: string[]; discoveryNodeIds: string[]; packingKey: string; phase?: 'interface_seed' }
 type Context = { readPaths: string[]; contextNodeIds: string[]; contractIds: string[]; flowIds: string[] }
 
 function frontmatterPaths(value: unknown): string[] {
@@ -75,7 +99,7 @@ function governanceNodesForId(nodes: ReadonlyMap<string, GovernanceNode>, id: st
   return [...nodes.values()].filter(node => node.id === id).sort((a, b) => compare(a.path, b.path))
 }
 
-function governanceNodesForInput(input: PlanSyncPartitionsInput, contracts: readonly Contract[]): Map<string, GovernanceNode> {
+function governanceNodesForInput(input: RawOnlyInterfaceSeedInput, contracts: readonly Contract[]): Map<string, GovernanceNode> {
   const identities = new Map<string, { id: string; path: string; rawSource?: string | null }>()
   const addIdentity = (identity: { id: string; path: string; rawSource?: string | null }): void => {
     const key = governanceNodeKey(identity.id, identity.path), prior = identities.get(key)
@@ -83,7 +107,7 @@ function governanceNodesForInput(input: PlanSyncPartitionsInput, contracts: read
     else if (prior.rawSource === undefined && identity.rawSource !== undefined) identities.set(key, { ...prior, rawSource: identity.rawSource })
   }
   for (const node of [...(input.nodes ?? [])].sort((a, b) => compare(a.id, b.id) || compare(a.path, b.path))) addIdentity(node)
-  for (const target of [...input.plan.targets].sort((a, b) => compare(a.nodeId, b.nodeId) || compare(a.path, b.path))) addIdentity({ id: target.nodeId, path: target.path, rawSource: target.rawSource })
+  for (const target of [...input.targets].sort((a, b) => compare(a.nodeId, b.nodeId) || compare(a.path, b.path))) addIdentity({ id: target.nodeId, path: target.path, rawSource: target.rawSource })
   for (const contract of [...contracts].sort((a, b) => compare(a.nodeId, b.nodeId) || compare(a.path, b.path))) addIdentity({ id: contract.nodeId, path: contract.path, rawSource: contract.rawSource })
 
   const contractByPath = new Map(contracts.map(contract => [governanceNodeKey(contract.nodeId, contract.path), contract]))
@@ -116,6 +140,71 @@ function rawIntentSeedNodes(input: PlanSyncPartitionsInput, contracts: readonly 
     .filter(target => !!(governanceNodeAtPath(governanceNodes, target.path)?.rawSource ?? target.rawSource)?.trim()).map(target => target.nodeId))
 }
 
+function rawOnlyInterfaceSeedEvidenceFrom(
+  input: RawOnlyInterfaceSeedInput,
+  target: SyncCoordinatorPlan['targets'][number],
+  governanceNodes: ReadonlyMap<string, GovernanceNode>,
+  additionalCodeBearingDescendants: readonly RawOnlyInterfaceSeedDescendant[],
+): RawOnlyInterfaceSeedEvidence | null {
+  if (!input.targets.some(candidate => candidate.nodeId === target.nodeId && candidate.path === target.path)) return null
+  if (input.contracts.some(contract => contract.nodeId === target.nodeId)) return null
+  const parent = governanceNodeAtPath(governanceNodes, target.path)
+  if (!parent || parent.code.length) return null
+  const rawSource = parent.current ? parent.rawSource : parent.rawSource ?? target.rawSource ?? null
+  if (!rawSource?.trim()) return null
+
+  const parentDirectory = posix.dirname(target.path)
+  const isDescendant = (path: string): boolean => path !== target.path && path.startsWith(`${parentDirectory}/`)
+  const descendants = new Map<string, RawOnlyInterfaceSeedEvidence['descendants'][number]>()
+  for (const candidate of input.targets) {
+    if (candidate.nodeId === target.nodeId || !isDescendant(candidate.path)) continue
+    const node = governanceNodeAtPath(governanceNodes, candidate.path)
+    if (!node?.code.length) continue
+    const codePaths = uniqueSorted(node.code.flatMap(entry => [...input.files.keys()].filter(path => relationClaimsPath(entry.path, path))))
+    if (codePaths.length) descendants.set(`${candidate.nodeId}\0${candidate.path}`, { nodeId: candidate.nodeId, path: candidate.path, codePaths })
+  }
+  const sourcePartitionOwners = new Map<string, Set<string>>()
+  for (const candidate of additionalCodeBearingDescendants) {
+    if (!isDescendant(candidate.path) || !candidate.nodeId || !candidate.codePath || !candidate.sourcePartitionId
+      || !candidate.sourcePaths.includes(candidate.codePath)
+      || !input.targets.some(target => target.nodeId === candidate.nodeId && target.path === candidate.path)) continue
+    const owners = sourcePartitionOwners.get(candidate.codePath) ?? new Set<string>()
+    owners.add(candidate.sourcePartitionId)
+    sourcePartitionOwners.set(candidate.codePath, owners)
+  }
+  for (const candidate of additionalCodeBearingDescendants) {
+    if (!isDescendant(candidate.path) || !candidate.nodeId || !candidate.codePath || !candidate.sourcePartitionId
+      || !candidate.sourcePaths.includes(candidate.codePath)
+      || sourcePartitionOwners.get(candidate.codePath)?.size !== 1
+      || !input.targets.some(target => target.nodeId === candidate.nodeId && target.path === candidate.path)) continue
+    const key = `${candidate.nodeId}\0${candidate.path}`
+    const prior = descendants.get(key)
+    descendants.set(key, {
+      nodeId: candidate.nodeId,
+      path: candidate.path,
+      codePaths: uniqueSorted([...(prior?.codePaths ?? []), candidate.codePath]),
+      sourcePartitionId: candidate.sourcePartitionId,
+    })
+  }
+  if (!descendants.size) return null
+  return {
+    phase: 'interface_seed',
+    parentNodeId: target.nodeId,
+    parentPath: target.path,
+    descendants: [...descendants.values()].sort((a, b) => compare(a.path, b.path) || compare(a.nodeId, b.nodeId)),
+  }
+}
+
+/** 唯一判定无契约 raw-only 父节点；当前后代取冻结文件中的真实 code 绑定，新增后代由调用方提供经分区 sourcePaths 校验的证据。 */
+export function rawOnlyInterfaceSeedEvidence(
+  input: RawOnlyInterfaceSeedInput,
+  target: SyncCoordinatorPlan['targets'][number],
+  additionalCodeBearingDescendants: readonly RawOnlyInterfaceSeedDescendant[] = [],
+): RawOnlyInterfaceSeedEvidence | null {
+  const contracts = [...input.contracts].sort((a, b) => compare(a.nodeId, b.nodeId) || compare(a.path, b.path))
+  return rawOnlyInterfaceSeedEvidenceFrom(input, target, governanceNodesForInput(input, contracts), additionalCodeBearingDescendants)
+}
+
 function targetWritePaths(input: PlanSyncPartitionsInput, nodeId: string, governanceNodes: ReadonlyMap<string, GovernanceNode>, specOnly = false): string[] {
   const target = input.plan.targets.find(target => target.nodeId === nodeId)!
   if (specOnly) return coveredPath(target.path, input.plan.writePaths)
@@ -143,9 +232,10 @@ function canonical(value: unknown): string {
   return JSON.stringify(value) ?? 'null'
 }
 
-function ownerNodesForPath(path: string, contracts: readonly Contract[], governanceNodes: ReadonlyMap<string, GovernanceNode>): Set<string> {
+/** 当前及历史冻结治理共用同一 owner 判定，related 不授予归属。 */
+export function ownerNodesForPath(path: string, contracts: readonly Contract[], governanceNodes: Iterable<Pick<GovernanceNode, 'id' | 'path' | 'code'>>): Set<string> {
   const owners = new Set<string>()
-  for (const node of governanceNodes.values()) if (node.path === path || node.code.some(entry => relationClaimsPath(entry.path, path))) owners.add(node.id)
+  for (const node of governanceNodes) if (node.path === path || node.code.some(entry => relationClaimsPath(entry.path, path))) owners.add(node.id)
   for (const contract of contracts) {
     for (const item of contract.items) {
       if (item.kind === 'VERIFY') continue
@@ -323,7 +413,7 @@ function contextBytes(input: PlanSyncPartitionsInput, graph: ContractGraph, cont
   return readFootprint(context.readPaths, input.files, input.readByteSizes, limitBytes).readBytes
 }
 
-function partitionDrafts(input: PlanSyncPartitionsInput, contracts: readonly Contract[], governanceNodes: ReadonlyMap<string, GovernanceNode>, specOnlyNodeIds: ReadonlySet<string>, graph: ContractGraph, limitBytes: number): Draft[] {
+function partitionDrafts(input: PlanSyncPartitionsInput, contracts: readonly Contract[], governanceNodes: ReadonlyMap<string, GovernanceNode>, specOnlyNodeIds: ReadonlySet<string>, interfaceSeedNodeIds: ReadonlySet<string>, graph: ContractGraph, limitBytes: number): Draft[] {
   const targets = [...input.plan.targets].sort((a, b) => compare(a.path, b.path) || compare(a.nodeId, b.nodeId))
   const targetByNode = new Map(targets.map(target => [target.nodeId, target]))
   const parent = new Map<string, string>(targets.map(target => [target.nodeId, target.nodeId]))
@@ -350,7 +440,7 @@ function partitionDrafts(input: PlanSyncPartitionsInput, contracts: readonly Con
   const discoveries = new Map<string, Draft[]>()
   const preferred = new Set(targetByNode.keys())
   for (const path of changedPaths) {
-    const owners = ownerNodesForPath(path, contracts, governanceNodes)
+    const owners = ownerNodesForPath(path, contracts, governanceNodes.values())
     for (const target of targets) if (target.path === path) owners.add(target.nodeId)
     const writableOwners = [...owners].filter(nodeId => targetByNode.has(nodeId)
       && (!specOnlyNodeIds.has(nodeId) || targetByNode.get(nodeId)!.path === path)).sort(compare)
@@ -384,8 +474,14 @@ function partitionDrafts(input: PlanSyncPartitionsInput, contracts: readonly Con
   for (const draft of byRoot.values()) {
     draft.targetNodeIds = uniqueSorted(draft.targetNodeIds)
     draft.changedPaths = uniqueSorted(draft.changedPaths)
-    const targetModules = uniqueSorted(draft.targetNodeIds.map(nodeId => specModuleDirectory(targetByNode.get(nodeId)!.path)))
-    draft.packingKey = targetModules.length === 1 ? `targets:${targetModules[0]}` : `shared:${draft.targetNodeIds.join(',')}`
+    const interfaceParent = draft.targetNodeIds.length === 1 && interfaceSeedNodeIds.has(draft.targetNodeIds[0]) ? draft.targetNodeIds[0] : null
+    if (interfaceParent) {
+      draft.phase = 'interface_seed'
+      draft.packingKey = `interface-seed:${interfaceParent}`
+    } else {
+      const targetModules = uniqueSorted(draft.targetNodeIds.map(nodeId => specModuleDirectory(targetByNode.get(nodeId)!.path)))
+      draft.packingKey = targetModules.length === 1 ? `targets:${targetModules[0]}` : `shared:${draft.targetNodeIds.join(',')}`
+    }
   }
 
   const contractsByNode = new Map<string, Contract[]>()
@@ -437,6 +533,7 @@ function projectedPartition(input: PlanSyncPartitionsInput, draft: Draft, contex
   const id = `partition-${contentHash(canonical(identity)).slice(0, 16)}`
   return {
     id,
+    ...(draft.phase ? { phase: draft.phase } : {}),
     intentNodeId: input.plan.intentNodeId,
     targets,
     readPaths,
@@ -500,15 +597,19 @@ export function planSyncPartitions(input: PlanSyncPartitionsInput): SyncPartitio
   if (!Number.isSafeInteger(limitBytes) || limitBytes <= 0) throw new Error('maxReadBytes 必须为正安全整数')
   const contracts = [...input.contracts].sort((a, b) => compare(a.nodeId, b.nodeId) || compare(a.path, b.path))
   const graph = buildContractGraph(contracts)
-  const governanceNodes = governanceNodesForInput(input, contracts)
-  const specOnlyNodeIds = rawIntentSeedNodes(input, contracts, governanceNodes)
+  const frozenInput: RawOnlyInterfaceSeedInput = {
+    files: input.files, contracts, nodes: input.nodes, governanceSources: input.governanceSources, targets: input.plan.targets,
+  }
+  const governanceNodes = governanceNodesForInput(frozenInput, contracts)
+  const interfaceSeedNodeIds = new Set(input.plan.targets.flatMap(target => rawOnlyInterfaceSeedEvidenceFrom(frozenInput, target, governanceNodes, []) ? [target.nodeId] : []))
+  const specOnlyNodeIds = new Set([...rawIntentSeedNodes(input, contracts, governanceNodes), ...interfaceSeedNodeIds])
   const contractsByNode = new Map<string, Contract[]>()
   for (const contract of contracts) {
     const nodeContracts = contractsByNode.get(contract.nodeId) ?? []
     nodeContracts.push(contract)
     contractsByNode.set(contract.nodeId, nodeContracts)
   }
-  const drafts = partitionDrafts(input, contracts, governanceNodes, specOnlyNodeIds, graph, limitBytes)
+  const drafts = partitionDrafts(input, contracts, governanceNodes, specOnlyNodeIds, interfaceSeedNodeIds, graph, limitBytes)
   const partitions = drafts.map(draft => projectedPartition(input, draft, contextFor(input, graph, contractsByNode, governanceNodes, specOnlyNodeIds, draft), governanceNodes, specOnlyNodeIds, limitBytes))
     .sort((a, b) => compare(a.id, b.id))
   const expectedPaths = uniqueSorted(input.changedPaths)
