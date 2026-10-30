@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createInterface } from 'node:readline'
 import { detachedRuntimeIsGone, processStartToken, verifyDetachedRuntime, writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
-import { proveClaudeFrozenReads, readClaudeMcpToolNames, readClaudePublicHistory, verifyFrozenReadProof, type ClaudeFrozenWitness, type ClaudePublicMessage, type FrozenReadProof } from './frozen-context.js'
+import { claudeApiRequestHashes, claudeApiSourceDigest, claudeApiToolResultIds, claudeMessageDigest, proveClaudeFrozenReads, readClaudeApiMessageBlobs, readClaudeApiSourceMetadata, readClaudeMcpToolNames, readClaudePublicHistory, verifyFrozenReadProof, type ClaudeFrozenWitness, type ClaudePublicMessage, type ClaudePublicRecord, type FrozenReadProof } from './frozen-context.js'
 import { StructuredSessionError, structuredExecutionPolicy, structuredSeatbeltProfile, type StructuredExecution } from './session-structured-policy.js'
 
 const CLI_VERSION = '2.1.309 (Claude Code)'
@@ -106,7 +106,7 @@ function completedResult(root: string, prompt: string, execution: StructuredExec
     if (!plan.pid || !detachedRuntimeIsGone(plan.pid, plan.receiptFile) || !claudeMcpStopped(root)) return null
     if (!['result.json', 'init.json', 'user-echo.json'].every(name => existsSync(join(root, name)))) return null
     const result = JSON.parse(readFileSync(join(root, 'result.json'), 'utf8')) as ClaudeFrozenWitness['result']
-    if (result.subtype !== 'success' || result.is_error || result.structured_output === undefined) return null
+    if (result.subtype !== 'error_max_structured_output_retries' && (result.subtype !== 'success' || result.is_error || result.structured_output === undefined)) return null
     return settleClaudeResult(plan, prompt, execution)
   }
   const saved = JSON.parse(readFileSync(path, 'utf8')) as Completed
@@ -136,10 +136,75 @@ function settleClaudeResult(plan: NativePlan, prompt: string, execution: Structu
   if (!plan.pid || !detachedRuntimeIsGone(plan.pid, plan.receiptFile) || !claudeMcpStopped(root) || plan.cliVersion !== CLI_VERSION || init.model !== model || init.session_id !== plan.sessionId) throw new StructuredSessionError('stale_result', 'Claude complete native result lost its version, model or process-stop identity')
   const historyPath = nativeHistoryPath(root, plan.sessionId)
   if (plan.historyPath && plan.historyPath !== historyPath) throw new StructuredSessionError('stale_result', 'Claude pinned native history path differs')
-  plan = { ...plan, historyPath }; writeFileSync(join(root, 'plan.json'), JSON.stringify(plan), { mode: 0o600 })
   const history = readClaudePublicHistory(historyPath, plan.sessionId), original = history.find(row => row.type === 'user' && row.uuid === plan.userUuid)
   if (!original?.promptId) throw new StructuredSessionError('stale_result', 'Claude original native promptId is missing')
   const mcpPath = join(root, 'mcp-public.jsonl')
+  if (result.subtype === 'error_max_structured_output_retries') {
+    const exit = JSON.parse(readFileSync(join(root, 'exit.json'), 'utf8')) as { code: number | null; signal: string | null; stopped: boolean }
+    const requests = history.filter(row => row.type === 'api-request'), shapes = history.filter(row => row.type === 'api-request-shape')
+    const unknownUser = history.some(row => {
+      if (row.type !== 'user' || row.uuid === plan.userUuid) return false
+      if (row.promptId !== original.promptId || !row.sourceToolAssistantUUID || row.parentUuid !== row.sourceToolAssistantUUID || row.message?.role !== 'user' || !Array.isArray(row.message.content) || !row.message.content.length) return true
+      const assistant = history.find(assistant => assistant.type === 'assistant' && assistant.uuid === row.sourceToolAssistantUUID)
+      return row.message.content.some(block => block.type !== 'tool_result' || !Array.isArray(assistant?.message?.content) || !assistant.message.content.some(call => call.type === 'tool_use' && call.id === block.tool_use_id))
+    })
+    if (exit.code !== 1 || exit.signal !== null || exit.stopped !== true || result.type !== 'result' || result.is_error !== true
+      || plan.policyDigest !== hash(structuredExecutionPolicy(execution)) || execution.claudeNative && (execution.claudeNative.pid !== plan.pid || execution.claudeNative.receiptFile !== plan.receiptFile)
+      || result.session_id !== plan.sessionId || result.user_message_uuid !== plan.userUuid || JSON.stringify(result.user_message_uuids) !== JSON.stringify([plan.userUuid])
+      || echo.uuid !== plan.userUuid || echo.session_id !== plan.sessionId || original.parentUuid !== null
+      || JSON.stringify(original.message) !== JSON.stringify(echo.message) || JSON.stringify(original.message) !== JSON.stringify({ role: 'user', content: [{ type: 'text', text: prompt }] })
+      || JSON.stringify([...init.tools].sort()) !== JSON.stringify([...toolNames].sort()) || readClaudeMcpToolNames(mcpPath).some(name => name !== 'spex_read_frozen')
+      || !requests.length || requests[0].keep !== 0 || requests[0].base || !requests[0].tail?.includes(claudeMessageDigest(original.message))
+      || requests.some(row => row.model !== model || !shapes.some(shape => shape.shapeHash === row.shapeHash && shape.placeholderValid && shape.toolNames && toolNames.every(name => shape.toolNames!.includes(name)) && shape.toolNames.every(name => [...toolNames, 'DeferredToolPlaceholder'].includes(name))))
+      || new Set(history.filter(row => row.uuid).map(row => row.uuid)).size !== history.filter(row => row.uuid).length
+      || unknownUser || history.some(row => row.sessionId !== plan.sessionId || row.type === 'assistant' && Array.isArray(row.message?.content) && row.message.content.some(block => !block.name || !toolNames.includes(block.name))))
+      throw new StructuredSessionError('stale_result', 'Claude schema retry exhaustion lost its exact terminal, API, original user or isolated capability identity')
+    const blobs = readClaudeApiMessageBlobs(history), metadata = readClaudeApiSourceMetadata(historyPath, plan.sessionId, model), api = new Map<string, string[]>(), observedShapes = new Set<string>(), assistants = new Set<string>()
+    const users = new Map<string, ClaudePublicMessage>(), calls = new Map<string, ClaudePublicRecord>(), responses = new Map<string, Exclude<ClaudePublicMessage['content'], string>[number]>()
+    const originalHash = claudeMessageDigest(original.message)
+    for (const row of history) {
+      if (row.type === 'system' || row.compactSummary || row.turnCompanion) throw new StructuredSessionError('stale_result', 'Claude schema retry exhaustion cannot classify compact or recovery user inputs')
+      if (row.type === 'api-request-shape') observedShapes.add(row.shapeHash!)
+      if (row.type === 'assistant') {
+        if (!row.requestRef || !api.has(row.requestRef)) throw new StructuredSessionError('stale_result', 'Claude assistant has no preceding actual API request')
+        assistants.add(row.uuid!)
+        for (const block of row.message!.content as Exclude<ClaudePublicMessage['content'], string>) {
+          if (!block.id || calls.has(block.id)) throw new StructuredSessionError('stale_result', 'Claude schema failure reused a native tool call identity')
+          calls.set(block.id, row)
+        }
+      }
+      if (row.type === 'user') {
+        if (row.uuid !== plan.userUuid) for (const block of row.message!.content as Exclude<ClaudePublicMessage['content'], string>) {
+          const call = calls.get(block.tool_use_id!)
+          if (!call || responses.has(block.tool_use_id!) || call.uuid !== row.sourceToolAssistantUUID || call.uuid !== row.parentUuid) throw new StructuredSessionError('stale_result', 'Claude schema failure tool reply has no preceding exact native call')
+          responses.set(block.tool_use_id!, block)
+        }
+        users.set(row.uuid!, row.message!)
+      }
+      if (row.type === 'api-request') {
+        const hashes = claudeApiRequestHashes(row, api, observedShapes, model)
+        const requestSources = metadata.get(row.id!)
+        for (const digest of hashes) {
+          const source = requestSources?.messages.get(digest)
+          if (!requestSources || !source || source.ordinal >= requestSources.ordinal) throw new StructuredSessionError('stale_result', 'Claude actual API input has no prior exact role source')
+          if (source.role !== 'user') {
+            if (source.kind === 'transcript-prefix' && source.sourceUuids.some(uuid => !assistants.has(uuid))) throw new StructuredSessionError('stale_result', 'Claude assistant source has no preceding public native identity')
+            continue
+          }
+          const blob = blobs.get(digest), userSources = source.sourceUuids.map(uuid => users.get(uuid))
+          if (source.kind === 'transcript-prefix' && userSources.some(message => !message || !Array.isArray(message.content))) throw new StructuredSessionError('stale_result', 'Claude user source UUID has no preceding authenticated public content')
+          const content = source.kind === 'transcript-prefix' ? userSources.flatMap(message => message!.content as Exclude<ClaudePublicMessage['content'], string>) : blob?.content
+          if (!users.has(plan.userUuid) || !Array.isArray(content) || !content.length
+            || claudeApiSourceDigest({ role: 'user', content }) !== digest || source.kind === 'cas' && blob && (!blob.canonical || blob.summaries.size)
+            || content.some(block => block.type === 'text') && digest !== originalHash) throw new StructuredSessionError('stale_result', 'Claude actual API user message has no observed original prompt or exact tool reply source')
+          claudeApiToolResultIds(content, responses)
+        }
+        api.set(row.id!, hashes)
+      }
+    }
+    throw new StructuredSessionError('structured_output_retries_exhausted', 'Claude error_max_structured_output_retries rejected the structured output; original native result and schema errors remain in its history', { threadId: plan.sessionId, turnId: plan.userUuid })
+  }
+  plan = { ...plan, historyPath }; writeFileSync(join(root, 'plan.json'), JSON.stringify(plan), { mode: 0o600 })
   const witness: ClaudeFrozenWitness = { version: 1, provider: 'claude-code', cliVersion: CLI_VERSION, model, sessionId: plan.sessionId, userUuid: plan.userUuid, promptId: original.promptId, prompt, nativeHistoryPath: historyPath, history, mcpHistory: { path: mcpPath, toolNames: readClaudeMcpToolNames(mcpPath) }, echo, result, initTools: init.tools }
   const validate = new Ajv({ allErrors: true }).compile(execution.schema)
   if (!validate(result.structured_output)) throw new StructuredSessionError('failed', 'Claude structured_output does not match the pinned JSON schema')
@@ -303,7 +368,7 @@ export async function claudeStructuredTurn(realm: string, id: string, prompt: st
     if (!stopped) throw new StructuredSessionError('cancellation_pending', 'Claude or MCP descendant process group remains unproven')
     if (aborted) throw new StructuredSessionError(timedOut ? 'timeout' : 'cancelled', 'Claude exact process group stopped after cancellation')
     if (failure) throw failure
-    if (exit.code !== 0 || !init || !echo || !result) throw new StructuredSessionError('failed', 'Claude execution ended without a complete native result and user echo')
+    if (!init || !echo || !result || exit.code !== 0 && result.subtype !== 'error_max_structured_output_retries') throw new StructuredSessionError('failed', 'Claude execution ended without a complete native result and user echo')
     const history = readClaudePublicHistory(nativeHistoryPath(root, native.sessionId), native.sessionId), original = history.find(row => row.type === 'user' && row.uuid === native.userUuid)
     if (!original?.promptId) throw new StructuredSessionError('stale_result', 'Claude original native promptId is missing')
     await callbacks.onNative({ ...native, pid: child.pid, receiptFile: plan.receiptFile, promptId: original.promptId })

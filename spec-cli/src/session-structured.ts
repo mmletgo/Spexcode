@@ -49,7 +49,7 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
   if (rec.structuredExecution.state && rec.structuredExecution.state !== 'running') return rec.structuredExecution.state
   const execution = rec.structuredExecution
   const claude = execution.version === 3 && execution.policy === 'claude-frozen-read-only-v1'
-  if (digest(structuredExecutionPolicy(execution)) !== digest({ ...execution, threadId: undefined, turnId: undefined, state: undefined, observer: undefined, cancellation: undefined, turnStartRequested: undefined, output: undefined, resultDigest: undefined, error: undefined, frozenReads: undefined, frozenReadProof: undefined, claudeNative: undefined }) || rec.harness !== (claude ? 'claude-headless' : 'codex-headless') || rec.launchCmd !== (claude ? 'claude' : 'codex'))
+  if (digest(structuredExecutionPolicy(execution)) !== digest({ ...execution, threadId: undefined, turnId: undefined, state: undefined, observer: undefined, cancellation: undefined, turnStartRequested: undefined, output: undefined, resultDigest: undefined, error: undefined, errorCode: undefined, frozenReads: undefined, frozenReadProof: undefined, claudeNative: undefined }) || rec.harness !== (claude ? 'claude-headless' : 'codex-headless') || rec.launchCmd !== (claude ? 'claude' : 'codex'))
     throw new StructuredSessionError('unsupported', 'structured session no longer has the trusted fixed executor policy')
   const controller = new AbortController(); activeControllers.set(id, controller)
   let finish: () => void = () => {}
@@ -122,7 +122,7 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
       return 'cancelling'
     }
     const state = error instanceof StructuredSessionError && (error.code === 'cancelled' || error.code === 'timeout') ? error.code : 'failed'
-    await update({ state, error: error instanceof Error ? error.message : String(error) })
+    await update({ state, error: error instanceof Error ? error.message : String(error), ...(error instanceof StructuredSessionError && error.code === 'structured_output_retries_exhausted' ? { errorCode: error.code } : {}) })
     return state
   } finally { activeControllers.delete(id); activeFinished.delete(id); finish() }
 }
@@ -210,7 +210,7 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
         throw new StructuredSessionError(stopped.nativeStopped ? state.state : 'cancellation_pending', stopped.error || 'structured cancellation settlement recovered')
       }
       if (state.state === 'failed')
-        throw new StructuredSessionError('failed', state.error || 'structured execution failed')
+        throw new StructuredSessionError(state.errorCode ?? 'failed', state.error || 'structured execution failed')
       if (state.state === 'running' && !recoveryRequested && structuredObserverState(state) === 'gone')
         recoveryRequested = await queueStructuredRecovery(id)
       if (Date.now() >= deadline) {
