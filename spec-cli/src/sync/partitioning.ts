@@ -1,6 +1,7 @@
 import { posix } from 'node:path'
 import { parseCodeEntry, parseRelation, relationClaimsPath } from '@spexcode/spec-core'
-import { buildContractGraph, contractReferences } from '@spexcode/spec-core/contracts'
+import type { RelationEntry } from '@spexcode/spec-core'
+import { buildContractGraph, contractReferences, parseFrontmatter } from '@spexcode/spec-core/contracts'
 import type { Contract, ContractGraph } from '@spexcode/spec-core/contracts'
 import { contentHash } from './snapshot.js'
 import type { SyncCoordinatorPlan } from './coordinator-types.js'
@@ -39,23 +40,64 @@ export type PlanSyncPartitionsInput = {
   plan: SyncCoordinatorPlan
   files: ReadonlyMap<string, string>
   contracts: readonly Contract[]
+  nodes?: readonly { id: string; path: string; rawSource?: string | null }[]
   changedPaths: readonly string[]
   maxReadBytes?: number
   /** 按 path 提供 composed files 外、已由调用方去重的真实版本正文总字节估计。 */
   readByteSizes?: ReadonlyMap<string, number>
 }
 
-type Claim = { path: string; contract: Contract }
+type Claim = { path: string }
+type GovernanceNode = { id: string; path: string; code: RelationEntry[]; related: RelationEntry[] }
 type Draft = { targetNodeIds: string[]; changedPaths: string[]; discoveryNodeIds: string[]; packingKey: string }
 type Context = { readPaths: string[]; contextNodeIds: string[]; contractIds: string[]; flowIds: string[] }
 
-function targetWritePaths(input: PlanSyncPartitionsInput, nodeId: string): string[] {
+function frontmatterPaths(value: unknown): string[] {
+  if (typeof value === 'string') return value ? [value] : []
+  return Array.isArray(value) ? value.filter((path): path is string => typeof path === 'string') : []
+}
+
+function parseNodeRelation(path: string, entries: string[], relation: 'code' | 'related'): RelationEntry[] {
+  const parsed = parseRelation(entries, relation)
+  if (parsed.problems.length) throw new Error(`${path} 的 ${relation} 声明无效: ${parsed.problems.join('; ')}`)
+  return parsed.entries
+}
+
+function governanceNodesForInput(input: PlanSyncPartitionsInput, contracts: readonly Contract[]): Map<string, GovernanceNode> {
+  const identities = new Map<string, { id: string; path: string }>()
+  const addIdentity = (identity: { id: string; path: string }): void => {
+    if (!identities.has(identity.id)) identities.set(identity.id, identity)
+  }
+  for (const node of [...(input.nodes ?? [])].sort((a, b) => compare(a.id, b.id) || compare(a.path, b.path))) addIdentity(node)
+  for (const target of [...input.plan.targets].sort((a, b) => compare(a.nodeId, b.nodeId) || compare(a.path, b.path))) addIdentity({ id: target.nodeId, path: target.path })
+  for (const contract of [...contracts].sort((a, b) => compare(a.nodeId, b.nodeId) || compare(a.path, b.path))) addIdentity({ id: contract.nodeId, path: contract.path })
+
+  const contractByNode = new Map<string, Contract>()
+  for (const contract of contracts) if (!contractByNode.has(contract.nodeId)) contractByNode.set(contract.nodeId, contract)
+  const nodes = new Map<string, GovernanceNode>()
+  for (const identity of identities.values()) {
+    const source = input.files.get(identity.path)
+    const contract = contractByNode.get(identity.id)
+    const fm = source === undefined ? undefined : parseFrontmatter(source).fm
+    const code = fm?.code === undefined ? contract?.code ?? [] : frontmatterPaths(fm.code)
+    const related = fm?.related === undefined ? contract?.related ?? [] : frontmatterPaths(fm.related)
+    nodes.set(identity.id, {
+      id: identity.id,
+      path: identity.path,
+      code: parseNodeRelation(identity.path, code, 'code'),
+      related: parseNodeRelation(identity.path, related, 'related'),
+    })
+  }
+  return nodes
+}
+
+function targetWritePaths(input: PlanSyncPartitionsInput, nodeId: string, governanceNodes: ReadonlyMap<string, GovernanceNode>): string[] {
   const target = input.plan.targets.find(target => target.nodeId === nodeId)!
   const paths = new Set<string>([target.path])
   const claims: Claim[] = []
+  for (const entry of governanceNodes.get(nodeId)?.code ?? []) claims.push({ path: entry.path })
   for (const contract of input.contracts.filter(contract => contract.nodeId === nodeId)) {
-    for (const entry of parseRelation(contract.code, 'code').entries) claims.push({ path: entry.path, contract })
-    for (const item of contract.items) if (item.kind === 'AC') claims.push({ path: parseCodeEntry(item.test).path, contract })
+    for (const item of contract.items) if (item.kind === 'AC') claims.push({ path: parseCodeEntry(item.test).path })
   }
   addContractClaims(paths, claims, input.files, new Set(input.changedPaths))
   const knownPaths = [...input.files.keys(), ...input.changedPaths]
@@ -74,10 +116,10 @@ function canonical(value: unknown): string {
   return JSON.stringify(value) ?? 'null'
 }
 
-function ownerNodesForPath(path: string, contracts: readonly Contract[]): Set<string> {
+function ownerNodesForPath(path: string, contracts: readonly Contract[], governanceNodes: ReadonlyMap<string, GovernanceNode>): Set<string> {
   const owners = new Set<string>()
+  for (const node of governanceNodes.values()) if (node.code.some(entry => relationClaimsPath(entry.path, path))) owners.add(node.id)
   for (const contract of contracts) {
-    if (parseRelation(contract.code, 'code').entries.some(entry => relationClaimsPath(entry.path, path))) owners.add(contract.nodeId)
     for (const item of contract.items) {
       if (item.kind === 'VERIFY') continue
       if (item.source.kind === 'code' && relationClaimsPath(parseCodeEntry(item.source.ref).path, path)) owners.add(contract.nodeId)
@@ -87,14 +129,14 @@ function ownerNodesForPath(path: string, contracts: readonly Contract[]): Set<st
   return owners
 }
 
-function closestNode(path: string, contracts: readonly Contract[], preferred: ReadonlySet<string>): string | undefined {
+function closestNode(path: string, governanceNodes: ReadonlyMap<string, GovernanceNode>, preferred: ReadonlySet<string>): string | undefined {
   const targetParts = posix.dirname(path).split('/').filter(Boolean)
-  const candidates = contracts.flatMap(contract => parseRelation(contract.code, 'code').entries.map(entry => {
+  const candidates = [...governanceNodes.values()].flatMap(node => [...node.code, ...node.related].map(entry => {
     const parts = posix.dirname(entry.path).split('/').filter(Boolean)
     let shared = 0
     while (shared < targetParts.length && shared < parts.length && targetParts[shared] === parts[shared]) shared++
-    const preference = preferred.has(contract.nodeId) ? 1 : 0
-    return { nodeId: contract.nodeId, shared, preference, distance: targetParts.length + parts.length - shared * 2 }
+    const preference = preferred.has(node.id) ? 1 : 0
+    return { nodeId: node.id, shared, preference, distance: targetParts.length + parts.length - shared * 2 }
   })).sort((a, b) => b.preference - a.preference || b.shared - a.shared || a.distance - b.distance || compare(a.nodeId, b.nodeId))
   return candidates[0]?.nodeId
 }
@@ -111,7 +153,7 @@ function contextFor(
   input: PlanSyncPartitionsInput,
   graph: ContractGraph,
   contractsByNode: ReadonlyMap<string, Contract[]>,
-  contractsByPath: ReadonlyMap<string, Contract>,
+  governanceNodes: ReadonlyMap<string, GovernanceNode>,
   draft: Draft,
 ): Context {
   const writeNodeIds = new Set(draft.targetNodeIds)
@@ -142,16 +184,18 @@ function contextFor(
     if (item) localPaths.add(item.path)
   }
 
-  const pathContracts = new Map<string, Contract>()
-  for (const contract of graph.contracts) if (relevantNodes.has(contract.nodeId)) pathContracts.set(contract.path, contract)
+  const nodesByPath = new Map([...governanceNodes.values()].map(node => [node.path, node]))
+  const pathNodes = new Map<string, GovernanceNode>()
+  for (const node of governanceNodes.values()) if (relevantNodes.has(node.id)) pathNodes.set(node.path, node)
   const rawContextPaths = new Set<string>(localPaths)
   const contextNodes = new Set<string>(relevantNodes)
-  for (const contract of pathContracts.values()) {
-    let directory = posix.dirname(contract.path)
+  for (const node of pathNodes.values()) {
+    rawContextPaths.add(node.path)
+    let directory = posix.dirname(node.path)
     while (directory !== '.' && directory !== '/') {
       const ancestorPath = posix.join(directory, 'spec.md')
-      const ancestor = contractsByPath.get(ancestorPath)
-      if (ancestor) contextNodes.add(ancestor.nodeId)
+      const ancestor = nodesByPath.get(ancestorPath)
+      if (ancestor) contextNodes.add(ancestor.id)
       if (ancestor || input.files.has(ancestorPath)) rawContextPaths.add(ancestorPath)
       const parent = posix.dirname(directory)
       if (parent === directory) break
@@ -159,7 +203,7 @@ function contextFor(
     }
   }
 
-  const intent = (contractsByNode.get(input.plan.intentNodeId) ?? [])[0]
+  const intent = governanceNodes.get(input.plan.intentNodeId)
     ?? input.plan.targets.find(target => target.nodeId === input.plan.intentNodeId)
   if (intent) {
     const intentPath = intent.path
@@ -167,9 +211,9 @@ function contextFor(
     if (!writeNodeIds.has(input.plan.intentNodeId)) contextNodes.add(input.plan.intentNodeId)
     let directory = posix.dirname(intentPath)
     while (directory !== '.' && directory !== '/') {
-      const ancestor = contractsByPath.get(posix.join(directory, 'spec.md'))
       const ancestorPath = posix.join(directory, 'spec.md')
-      if (ancestor) contextNodes.add(ancestor.nodeId)
+      const ancestor = nodesByPath.get(ancestorPath)
+      if (ancestor) contextNodes.add(ancestor.id)
       if (ancestor || input.files.has(ancestorPath)) rawContextPaths.add(ancestorPath)
       const parent = posix.dirname(directory)
       if (parent === directory) break
@@ -178,12 +222,15 @@ function contextFor(
   }
 
   const claims: Claim[] = []
+  const contextRelatedNodeIds = contextNodes
+  for (const node of governanceNodes.values()) {
+    if (claimNodeIds.has(node.id)) for (const entry of node.code) claims.push({ path: entry.path })
+    if (contextRelatedNodeIds.has(node.id)) for (const entry of node.related) claims.push({ path: entry.path })
+  }
   for (const nodeId of claimNodeIds) for (const contract of contractsByNode.get(nodeId) ?? []) {
-    for (const entry of parseRelation(contract.code, 'code').entries) claims.push({ path: entry.path, contract })
-    for (const entry of parseRelation(contract.related, 'related').entries) claims.push({ path: entry.path, contract })
     for (const item of contract.items) if (item.kind !== 'VERIFY') {
-      if (item.source.kind === 'code') claims.push({ path: parseCodeEntry(item.source.ref).path, contract })
-      if (item.kind === 'AC') claims.push({ path: parseCodeEntry(item.test).path, contract })
+      if (item.source.kind === 'code') claims.push({ path: parseCodeEntry(item.source.ref).path })
+      if (item.kind === 'AC') claims.push({ path: parseCodeEntry(item.test).path })
     }
   }
   addContractClaims(rawContextPaths, claims, input.files, new Set(draft.changedPaths))
@@ -226,12 +273,12 @@ function readFootprint(paths: readonly string[], files: ReadonlyMap<string, stri
   return { readBytes, readLimitBytes: limitBytes, oversizedReads }
 }
 
-function contextBytes(input: PlanSyncPartitionsInput, graph: ContractGraph, contractsByNode: ReadonlyMap<string, Contract[]>, contractsByPath: ReadonlyMap<string, Contract>, draft: Draft, limitBytes: number): number {
-  const context = contextFor(input, graph, contractsByNode, contractsByPath, draft)
+function contextBytes(input: PlanSyncPartitionsInput, graph: ContractGraph, contractsByNode: ReadonlyMap<string, Contract[]>, governanceNodes: ReadonlyMap<string, GovernanceNode>, draft: Draft, limitBytes: number): number {
+  const context = contextFor(input, graph, contractsByNode, governanceNodes, draft)
   return readFootprint(context.readPaths, input.files, input.readByteSizes, limitBytes).readBytes
 }
 
-function partitionDrafts(input: PlanSyncPartitionsInput, contracts: readonly Contract[], graph: ContractGraph, limitBytes: number): Draft[] {
+function partitionDrafts(input: PlanSyncPartitionsInput, contracts: readonly Contract[], governanceNodes: ReadonlyMap<string, GovernanceNode>, graph: ContractGraph, limitBytes: number): Draft[] {
   const targets = [...input.plan.targets].sort((a, b) => compare(a.path, b.path) || compare(a.nodeId, b.nodeId))
   const targetByNode = new Map(targets.map(target => [target.nodeId, target]))
   const parent = new Map<string, string>(targets.map(target => [target.nodeId, target.nodeId]))
@@ -245,7 +292,7 @@ function partitionDrafts(input: PlanSyncPartitionsInput, contracts: readonly Con
     if (a !== b) parent.set(compare(a, b) <= 0 ? b : a, compare(a, b) <= 0 ? a : b)
   }
   const changedPaths = uniqueSorted(input.changedPaths)
-  const writers = new Map(targets.map(target => [target.nodeId, targetWritePaths(input, target.nodeId)]))
+  const writers = new Map(targets.map(target => [target.nodeId, targetWritePaths(input, target.nodeId, governanceNodes)]))
   const activeTargets = targets.filter(target => target.nodeId !== input.plan.intentNodeId || changedPaths.includes(target.path)
     || writers.get(target.nodeId)!.some(path => path !== target.path))
   const writerByPath = new Map<string, string>()
@@ -258,7 +305,7 @@ function partitionDrafts(input: PlanSyncPartitionsInput, contracts: readonly Con
   const discoveries = new Map<string, Draft[]>()
   const preferred = new Set(targetByNode.keys())
   for (const path of changedPaths) {
-    const owners = ownerNodesForPath(path, contracts)
+    const owners = ownerNodesForPath(path, contracts, governanceNodes)
     for (const target of targets) if (target.path === path) owners.add(target.nodeId)
     const writableOwners = [...owners].filter(nodeId => targetByNode.has(nodeId)).sort(compare)
     if (writableOwners.length) {
@@ -266,7 +313,7 @@ function partitionDrafts(input: PlanSyncPartitionsInput, contracts: readonly Con
       assigned.set(path, writableOwners)
       continue
     }
-    const nearest = closestNode(path, contracts, preferred) ?? input.plan.intentNodeId
+    const nearest = closestNode(path, governanceNodes, preferred) ?? input.plan.intentNodeId
     const directory = posix.dirname(path)
     const key = `${directory}\0${nearest}`
     const groups = discoveries.get(key) ?? []
@@ -296,18 +343,16 @@ function partitionDrafts(input: PlanSyncPartitionsInput, contracts: readonly Con
   }
 
   const contractsByNode = new Map<string, Contract[]>()
-  const contractsByPath = new Map<string, Contract>()
   for (const contract of contracts) {
     const items = contractsByNode.get(contract.nodeId) ?? []
     items.push(contract)
     contractsByNode.set(contract.nodeId, items)
-    contractsByPath.set(contract.path, contract)
   }
   const orderedDrafts = [...byRoot.values(), ...[...discoveries.values()].flat()].sort((a, b) => compare(a.packingKey, b.packingKey) || compare(a.changedPaths[0] ?? '', b.changedPaths[0] ?? ''))
   const packed: Draft[] = []
   const lastByKey = new Map<string, number>()
   for (const draft of orderedDrafts) {
-    const currentBytes = contextBytes(input, graph, contractsByNode, contractsByPath, draft, limitBytes)
+    const currentBytes = contextBytes(input, graph, contractsByNode, governanceNodes, draft, limitBytes)
     const previousIndex = lastByKey.get(draft.packingKey)
     const packable = draft.packingKey.startsWith('targets:') || draft.packingKey.startsWith('discovery:')
     if (packable && previousIndex !== undefined && currentBytes <= limitBytes) {
@@ -318,7 +363,7 @@ function partitionDrafts(input: PlanSyncPartitionsInput, contracts: readonly Con
         discoveryNodeIds: uniqueSorted([...previous.discoveryNodeIds, ...draft.discoveryNodeIds]),
         packingKey: draft.packingKey,
       }
-      if (contextBytes(input, graph, contractsByNode, contractsByPath, combined, limitBytes) <= limitBytes) {
+      if (contextBytes(input, graph, contractsByNode, governanceNodes, combined, limitBytes) <= limitBytes) {
         packed[previousIndex] = combined
         continue
       }
@@ -330,13 +375,13 @@ function partitionDrafts(input: PlanSyncPartitionsInput, contracts: readonly Con
   return packed
 }
 
-function projectedPartition(input: PlanSyncPartitionsInput, draft: Draft, context: Context, limitBytes: number): SyncPartition {
+function projectedPartition(input: PlanSyncPartitionsInput, draft: Draft, context: Context, governanceNodes: ReadonlyMap<string, GovernanceNode>, limitBytes: number): SyncPartition {
   const targets = input.plan.targets.filter(target => draft.targetNodeIds.includes(target.nodeId)).sort((a, b) => compare(a.path, b.path) || compare(a.nodeId, b.nodeId))
   const writePaths = uniqueSorted([
     ...draft.changedPaths.filter(path => coveredPath(path, input.plan.writePaths)
       && (!input.plan.executionScope || coveredPath(path, input.plan.executionScope.paths))
       && !input.plan.mandatoryTests.some(test => coveredPath(test.testPath, [path]) || coveredPath(path, [test.testPath]))),
-    ...targets.flatMap(target => targetWritePaths(input, target.nodeId)),
+    ...targets.flatMap(target => targetWritePaths(input, target.nodeId, governanceNodes)),
   ])
   const sourcePaths = uniqueSorted([...draft.changedPaths, ...writePaths].filter(path => coveredPath(path, input.plan.sourcePaths ?? [])))
   const contextNodes = new Set([...context.contextNodeIds, ...draft.discoveryNodeIds])
@@ -409,15 +454,15 @@ export function planSyncPartitions(input: PlanSyncPartitionsInput): SyncPartitio
   if (!Number.isSafeInteger(limitBytes) || limitBytes <= 0) throw new Error('maxReadBytes 必须为正安全整数')
   const contracts = [...input.contracts].sort((a, b) => compare(a.nodeId, b.nodeId) || compare(a.path, b.path))
   const graph = buildContractGraph(contracts)
-  const contractsByNode = new Map<string, Contract[]>(), contractsByPath = new Map<string, Contract>()
+  const governanceNodes = governanceNodesForInput(input, contracts)
+  const contractsByNode = new Map<string, Contract[]>()
   for (const contract of contracts) {
     const nodeContracts = contractsByNode.get(contract.nodeId) ?? []
     nodeContracts.push(contract)
     contractsByNode.set(contract.nodeId, nodeContracts)
-    contractsByPath.set(contract.path, contract)
   }
-  const drafts = partitionDrafts(input, contracts, graph, limitBytes)
-  const partitions = drafts.map(draft => projectedPartition(input, draft, contextFor(input, graph, contractsByNode, contractsByPath, draft), limitBytes))
+  const drafts = partitionDrafts(input, contracts, governanceNodes, graph, limitBytes)
+  const partitions = drafts.map(draft => projectedPartition(input, draft, contextFor(input, graph, contractsByNode, governanceNodes, draft), governanceNodes, limitBytes))
     .sort((a, b) => compare(a.id, b.id))
   const expectedPaths = uniqueSorted(input.changedPaths)
   const dependencies = dependencyEdges(partitions, graph)
