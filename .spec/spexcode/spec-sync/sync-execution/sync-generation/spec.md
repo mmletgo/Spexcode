@@ -24,7 +24,7 @@ related:
 
 `runGeneration(input, { runner, validateCandidate, onDispatch? })` 复用调用者注入的 ElaborationRunner 接缝，不新建会话执行器、持久 store、队列或修复循环。调用者决定 attempt、总预算、恢复和有限重试；一次调用至多生成一次与独立评审一次。模型与 effort 由上层指定为 gpt-6.1-sol/high，不私自切换模型。稳定 requestKey 分出 code_generate/code_review 用途；onDispatch 先完成 durable 登记才进入 native runner，最终 session/thread/turn 的持久绑定由上层 runner 包装负责。
 
-第一个异步等待前复制 manifest、original composed 的受影响文本读集合、细化契约、待交付 elaboratedSpecs 全文、ready/blocked ID、原始需求/事实/既有验收、允许范围和政策；只保留原 AbortSignal 身份。先验证 snapshot manifest，组合输入则核对 sourceInputId、composed.tree、manifest evidence 和内容摘要。传入 manifest 必须精确对应实际 tree；读集合各完整正文必须逐字匹配实际 Git 对象中的 UTF-8 普通文件，不混用后续磁盘字节。所给契约的 code/related/source 引用、现存 AC 测试及细化 Spec 必须完整进入读集合，不能省略未改断言。协调器另外负责完整依赖影响闭包；独立评审发现缺少依赖上下文时必须要求修复。既有文件未进入读集合时不能修改，新增文件和所有实际变化必须进入候选审查。完整二进制与链接身份仍保留于 manifest，不把它们伪装成文本。
+第一个异步等待前复制 manifest、original composed 的受影响文本读集合、细化契约、待交付 elaboratedSpecs 全文、ready/blocked ID、原始需求/事实/既有验收、允许范围和政策；只保留原 AbortSignal 身份。先验证 snapshot manifest，组合输入则核对 sourceInputId、composed.tree、manifest evidence 和内容摘要。传入 manifest 必须精确对应实际 tree；读集合各完整正文必须逐字匹配实际 Git 对象中的 UTF-8 普通文件，不混用后续磁盘字节。所给契约的 code/related/source 引用、现存 AC 测试及细化 Spec 必须完整进入读集合，不能省略未改断言。生命周期旧Spec的精确code、related目录或glob义务按[[code-anchor]]共享路径匹配器展开到真实旧snapshot entries；每个命中正文或binary/symlink对象都必须完整提供，否则在Native派发前拒绝。协调器另外负责完整依赖影响闭包；独立评审发现缺少依赖上下文时必须要求修复。既有文件未进入读集合时不能修改，新增文件和所有实际变化必须进入候选审查。完整二进制与链接身份仍保留于 manifest，不把它们伪装成文本。
 
 P1 通过后的 elaboratedSpecs 是需实现和交付的目标正文，contracts 可以来自该细化结果；它们不替换 original composed tree，不制造细化中间 tree/commit。程序把未由生成器显式修改的已审正文直接加入最终候选，避免模型重复抄写完整契约；未变字节不产生额外修改。生成器只需返回实际实现、测试和必要映射修改，确需调整 Spec anchors 时可以显式返回完整 Spec，仍受同一硬门禁约束，不能用程序默认正文掩盖模型的越权改写。所有 beforeDigest/beforeMode 仍对应 original composed，程序加入的 Spec 同样经过 CAS、范围、完整 diff 及独立审查。原始模型输出和 trace 摘要保持原样，候选同时绑定冻结的已审正文。
 
@@ -58,3 +58,6 @@ P2 接收操作固定 model 并传给生成与独立评审，effort 仍为 high�
 
 
 分区主干复用同一生成实现的两个明确接缝：prepareOnly只返回已核schema的结构化preparedChanges，不冻结、不独审、不表示实现完成；reviewCandidate只审调用者已冻结的同一候选，读取本区完整正文及实际修改并对全部builder身份核独立。freezeGenerationCandidate统一执行原发布基树闭包保护、scope与CAS，不因分区另开写入路径。局部及跨边review的checkedIds只属于该真实读取范围，仍须完整覆盖预定业务ID。
+
+
+显式v2局部输入可声明readonlyContractPaths：这些依赖仍完整读取Spec/raw/稳定ID接口，程序不为局部分析自动拉取其全部实现、related及AC测试正文；本区targets及mandatory/source/test的完整读取门保持。局部checkedIds仅枚举真实owner候选项，不能把借读接口列成实现已审。最终cross-edge将两端同时作为实现targets，不能保留readonly skip，两端完整源码/测试及新增文件仍绑定同一最终candidateDigest独审。旧v1没有该字段时原完整读取判据不变，v1显式提供该语义被拒绝。

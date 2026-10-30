@@ -32,6 +32,10 @@ export async function buildSyncApplicationPlan(snapshot: InputSnapshot, nodeId: 
   const specEntries = entries.filter(entry => entry.mode !== '120000' && isSyncSpecPath(entry.path))
   const files = new Map(specEntries.map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString('utf8')]))
   const oldEntryMap = new Map((selection ? entries : baselinePair ? readTree(snapshot.source.commonDir, baselinePair.verifiedDelivery.immutableTree) : []).map(entry => [entry.path, entry]))
+  if (options.commitTrigger?.before) {
+    verifySnapshot(options.commitTrigger.before)
+    for (const entry of readTree(snapshot.source.commonDir, options.commitTrigger.before.immutableTree)) if (isSyncSpecPath(entry.path)) oldEntryMap.set(entry.path, entry)
+  }
   for (const binding of selection?.bindings ?? []) if ('bytePair' in binding && binding.bytePair) { const entry = verifySnapshot(binding.bytePair.verifiedDelivery).find(entry => entry.path === binding.resource.path); if (entry) oldEntryMap.set(entry.path, entry); else oldEntryMap.delete(binding.resource.path) }
   const oldEntries = [...oldEntryMap.values()]
   const oldFiles = new Map(oldEntries.filter(entry => entry.mode !== '120000' && isSyncSpecPath(entry.path)).map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString('utf8')]))
@@ -108,7 +112,7 @@ export async function buildSyncApplicationPlan(snapshot: InputSnapshot, nodeId: 
 /** 语义读取与保护对象按实际快照枚举；授权目录不是 lease，也不是已验证覆盖。 */
 export async function deriveSyncBaselineResources(snapshot: InputSnapshot, plan: SyncCoordinatorPlan, baseline?: FrozenBaselineSelection | null): Promise<BaselineResource[]> {
   if (baseline) verifyBaselineSelection(snapshot, baseline)
-  const snapshots = [snapshot, ...new Map((baseline?.bindings ?? []).flatMap(binding => { const pair = 'bytePair' in binding ? binding.bytePair : binding.intentPair; return pair ? [[pair.sourceInput.id, pair.sourceInput] as const, [pair.verifiedDelivery.id, pair.verifiedDelivery] as const] : [] })).values()]
+  const snapshots = [snapshot, ...(plan.version === 'sync-coordinator-v2' && plan.commitTrigger?.before ? [plan.commitTrigger.before] : []), ...new Map((baseline?.bindings ?? []).flatMap(binding => { const pair = 'bytePair' in binding ? binding.bytePair : binding.intentPair; return pair ? [[pair.sourceInput.id, pair.sourceInput] as const, [pair.verifiedDelivery.id, pair.verifiedDelivery] as const] : [] })).values()]
   const paths = new Set<string>(['.spec/spexcode.json', ...plan.targets.map(target => target.path), ...plan.mandatoryTests.map(test => test.testPath)])
   const resources = new Map<string, BaselineResource>()
   const readable = (path: string): boolean => plan.readPaths.some(parent => path === parent || path.startsWith(`${parent}/`))

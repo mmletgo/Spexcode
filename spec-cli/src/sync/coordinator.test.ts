@@ -43,7 +43,7 @@ function rows(source: string, path = contractPath): GeneratedElaboration {
   })))])) as GeneratedTables
   return { version: 'elaboration-rows-v2', changes: [{ nodeId: 'export-contract', path, title: String(parseFrontmatter(source).fm.title), description: '', code: contract.code, related: contract.related, prose: parseParts(source)!.expandedSpec.split(/^### /m)[0], tables, removeIds: [] }], applicability: ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: true, basis: '固定演示夹具的显式业务政策和原始范围', affectedIds: ['REQ-EXPORT-01'] })) }
 }
-type FrozenGenerationPrompt = { contracts: unknown[]; readyIds: string[]; elaboratedSpecs: { path: string; source: string }[]; manifest: { entries: { path: string; digest: string; mode: string }[] }; files: [string, string][] }
+type FrozenGenerationPrompt = { contracts: unknown[]; readyIds: string[]; elaboratedSpecs: { path: string; source: string }[]; manifest: { entries: { path: string; digest: string; mode: string }[] }; files: [string, string][]; priorContext?: { role: 'source_before' | 'verified_delivery'; pairId?: string; snapshot: { id: string; immutableTree: string }; entries: { path: string; mode: string; digest: string }[]; files: [string, string][] }[] }
 const promptInput = (request: ElaborationSessionRequest): FrozenGenerationPrompt => JSON.parse(request.prompt.split(request.purpose === 'code_generate' ? '冻结完整输入:\n' : '冻结原意和基线完整输入:\n')[1].split('\n实际候选身份')[0]) as FrozenGenerationPrompt
 function unlock(root: string): void {
   if (!existsSync(root)) return
@@ -68,7 +68,7 @@ function gitReadCounter(directory: string): { reset(): void; entries(): string[]
     },
   }
 }
-async function fixture(t: test.TestContext, budget = { maxAttempts: 3, maxCalls: 16, maxRepairs: 2, timeoutMs: 300_000 }, adopt = false, specSource = original, projectId = 'project', factsSource = specSource, planPatch: Partial<SyncCoordinatorPlan> = {}, controlledEdit?: { original: string; replacement: string; intent: string; testPath: string }, origin: 'spec' | 'code' | 'combined' = 'spec', model?: string) {
+async function fixture(t: test.TestContext, budget = { maxAttempts: 3, maxCalls: 16, maxRepairs: 2, timeoutMs: 300_000 }, adopt = false, specSource = original, projectId = 'project', factsSource = specSource, planPatch: Partial<SyncCoordinatorPlan> = {}, controlledEdit?: { original: string; replacement: string; intent: string; testPath: string }, origin: 'spec' | 'code' | 'combined' = 'spec', model?: string, precise = false) {
   const parent = realpathSync(mkdtempSync(join(tmpdir(), 'sync-coordinator-'))), root = join(parent, 'source'), managedRoot = join(parent, 'managed'), artifactRoot = join(parent, 'artifacts')
   mkdirSync(root); mkdirSync(managedRoot, { mode: 0o700 }); mkdirSync(artifactRoot, { mode: 0o700 }); cpSync(fixturePath, root, { recursive: true })
   const targetPath = `.spec/${projectId}/export-contract/spec.md`
@@ -105,7 +105,11 @@ async function fixture(t: test.TestContext, budget = { maxAttempts: 3, maxCalls:
   }
   const protocol = openProtocol(join(parent, 'sync.sqlite')); await migrateSyncStore(protocol, { backupPath: join(parent, 'db-backup') })
   let store = new SyncStore(protocol, { readBlob: ref => readEvidence(input.source.commonDir, ref) })
-  let operation = store.admitAndEnqueue(await prepareSyncAdmission(input, plan, { ingressKey: input.id, rootCauseId: input.id, origin, ...(model ? { model } : {}), budget, managedRoot, ...(requestBlob ? { requestBlob } : {}) }))
+  const exactScope = { paths: plan.targets.map(target => target.path), contractIds: [] as string[], flowIds: [] as string[] }
+  const selected = precise ? store.readBaselineSelection(input.source, readTree(input.source.commonDir, input.immutableTree).map(entry => ({ kind: 'path' as const, path: entry.path }))) : null
+  if (selected && !('selection' in selected)) throw new Error(selected.failure.message)
+  let operation = store.admitAndEnqueue(await prepareSyncAdmission(input, plan, { ingressKey: input.id, rootCauseId: input.id, origin, ...(model ? { model } : {}), budget, managedRoot, ...(selected && 'selection' in selected ? { baselineSelection: selected.selection, executionScope: exactScope } : {}), ...(requestBlob ? { requestBlob } : {}) }))
+  if (precise) operation = store.ackDispatch(input.source.repositoryId, operation.dispatchMessageId)
   const calls: ElaborationSessionRequest[] = []
   let transform: ((output: unknown, request: ElaborationSessionRequest) => unknown | Promise<unknown>) | undefined
   const run: ElaborationRunner = async request => {
@@ -120,6 +124,7 @@ async function fixture(t: test.TestContext, budget = { maxAttempts: 3, maxCalls:
       output = { inputDigest: request.inputDigest, analysisDigest: value.analysisDigest, verdict: 'accept', checkedPaths: context.changedPaths, checkedChangeIds: value.analysis.changes.map(item => item.id), findings: [] }
     } else if (request.purpose === 'elaboration_generate') output = rows(original, targetPath)
     else if (request.purpose === 'elaboration_review') output = { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+    else if (request.purpose === 'implementation_plan') output = { version: 'sync-implementation-plan-v1', paths: ['src/planned-new.js'] }
     else if (request.purpose === 'code_generate') {
       const frozen = promptInput(request), source = new Map(frozen.files).get('src/export.js')!
       const change = (path: string, content: string) => { const entry = frozen.manifest.entries.find(item => item.path === path)!; return { path, beforeDigest: entry?.digest ?? null, beforeMode: entry?.mode ?? null, mode: entry ? null : '100644', content } }
@@ -1651,4 +1656,186 @@ test('v2分区完整最少调用超过原预算时启动前诊断，不调模型
   assert.equal(result.operation.callsUsed, 0)
   assert.equal(f.calls.length, 0)
   assert.equal(f.store.listJournals(f.operation.id).length, 0)
+})
+
+
+test('v2新功能的精确文件计划先取得真实P4租约及readSet，再生成同最终候选独审', async t => {
+  const raw = original.split('## expanded spec')[0].replace(/^code:\n(?:  -.*\n)+/m, '').replace('contract-schema: sync-v1\n', '')
+  const f = await fixture(t, { maxAttempts: 1, maxCalls: 10, maxRepairs: 0, timeoutMs: 120000 }, false, raw, 'project', original, { version: 'sync-coordinator-v2', direction: 'spec_to_code', partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 2 }, sourcePaths: ['src'], commitTrigger: { before: null, paths: [contractPath] } }, undefined, 'spec', undefined, true)
+  let finalReview = false
+  f.transform((output, request) => {
+    if (request.purpose === 'code_behavior_analyze') {
+      const value = output as { changes: { affectedIds: string[]; ruleIds: string[] }[] }
+      for (const change of value.changes) { change.affectedIds = []; change.ruleIds = [] }
+    }
+    if (request.purpose === 'elaboration_generate') {
+      const value = output as GeneratedElaboration
+      for (const change of value.changes) { change.code = []; for (const rows of Object.values(change.tables)) for (const row of rows) if (typeof row.source === 'string' && row.source.startsWith('code:')) row.source = 'derived:REQ-EXPORT-01' }
+    }
+    if (request.purpose === 'code_generate') {
+      const frozen = promptInput(request), spec = frozen.elaboratedSpecs[0]
+      assert.ok(frozen.manifest.entries.every(entry => entry.path !== 'src/planned-new.js'))
+      const text = spec.source.replace(/^code:.*\n(?:  -.*\n)*/m, '').replace(/^contract-schema:.*$/m, 'contract-schema: sync-v1\ncode:\n  - src/planned-new.js#ExportService')
+      const before = frozen.manifest.entries.find(entry => entry.path === spec.path)!
+      return { version: 'sync-files-v1', changes: [{ path: 'src/planned-new.js', beforeDigest: null, beforeMode: null, mode: '100644', content: readFileSync(join(f.root, 'src/export.js'), 'utf8') }, { path: spec.path, beforeDigest: before.digest, beforeMode: before.mode, mode: null, content: text }] }
+    }
+    if (request.purpose === 'code_review') { finalReview = true; throw Object.assign(new Error('在真实Docker之前停止测试'), { code: 'unsupported' }) }
+    return output
+  })
+  const result = await runSyncOperation(f.store, f.operation.id, f.options)
+  assert.equal(finalReview, true, JSON.stringify({ status: result.status, failure: result.failure, phase: result.operation.phase, generation: result.operation.currentAttemptId ? f.store.readAttempt(result.operation.currentAttemptId).checkpointRefs.flatMap(ref => { const value = JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()) as { candidateValidated?: boolean; status?: string; failure?: unknown; validationFindings?: unknown[] }; return value.candidateValidated !== undefined ? [{ status: value.status, failure: value.failure, validationFindings: value.validationFindings?.slice(0, 4) }] : [] }) : [], findings: result.operation.currentAttemptId ? f.store.readAttempt(result.operation.currentAttemptId).checkpointRefs.flatMap(ref => { const value = JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()) as { rounds?: { findings: { severity: string; code: string; message: string }[] }[] }; return value.rounds?.flatMap(round => round.findings.filter(finding => finding.severity === 'error').slice(0, 4)) ?? [] }) : [], calls: f.calls.map(call => call.purpose), attempt: result.operation.currentAttemptId ? f.store.readAttempt(result.operation.currentAttemptId).failure : null }))
+  assert.ok(f.calls.some(call => call.purpose === 'implementation_plan'))
+  assert.ok(result.operation.scope.paths.includes('src/planned-new.js'))
+  assert.ok(result.operation.baselineSelection!.bindings.some(binding => binding.resource.kind === 'path' && binding.resource.path === 'src/planned-new.js' && 'bytePair' in binding && binding.bytePair === null))
+  assert.ok(result.operation.contractScopeExpansions!.some(expansion => expansion.paths?.includes('src/planned-new.js')))
+  assert.equal(existsSync(join(f.root, 'src/planned-new.js')), false)
+  assert.equal(f.store.listJournals(f.operation.id).length, 0)
+})
+
+
+test('v2有限修复复用已审分区分析/P1时，最低调用不再次索要已完成阶段预算', async t => {
+  const f = await fixture(t, { maxAttempts: 2, maxCalls: 6, maxRepairs: 1, timeoutMs: 120000 }, false, original, 'project', original, { version: 'sync-coordinator-v2', direction: 'code_to_spec', partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 2 }, sourcePaths: ['src'], commitTrigger: { before: null, paths: ['src/export.js'] } }, undefined, 'code')
+  let reviews = 0
+  f.transform((output, request) => {
+    if (request.purpose !== 'code_review') return output
+    if (++reviews === 2) throw Object.assign(new Error('已证明第二次独审到达，在Docker前停止'), { code: 'unsupported' })
+    const value = output as { verdict: string; findings: unknown[] }
+    value.verdict = 'repair'; value.findings = [{ kind: 'repair', affectedIds: ['AC-EXPORT-03'], ruleLocation: `${contractPath}#AC-EXPORT-03`, codeLocation: 'src/export.js#ExportService', evidence: '第一次独审具体核验未完成', counterexample: '需要重走下载分支', message: '保原已审Spec/代码字节并重查' }]
+    return value
+  })
+  const result = await runSyncOperation(f.store, f.operation.id, f.options)
+  assert.equal(reviews, 2, JSON.stringify(result.failure))
+  assert.equal(result.operation.callsUsed, 6)
+  assert.equal(f.calls.filter(call => call.purpose === 'code_behavior_analyze').length, 1)
+  assert.equal(f.calls.filter(call => call.purpose === 'elaboration_generate').length, 1)
+  assert.equal(f.calls.filter(call => call.purpose === 'code_generate').length, 0)
+})
+
+test('v2无验证基线的提交删除把真实before正文作为source_before送入最终生成和独审', async t => {
+  const f = await fixture(t, { maxAttempts: 1, maxCalls: 16, maxRepairs: 0, timeoutMs: 120000 })
+  f.git('reset', '--hard', 'HEAD')
+  const parentPath = join(f.root, '.spec/project/spec.md'), parent = readFileSync(parentPath, 'utf8')
+  assert.ok(parent.includes('[[export-contract]]'))
+  writeFileSync(parentPath, parent.replaceAll('[[export-contract]]', '导出契约'))
+  f.git('add', '.spec/project/spec.md'); f.git('commit', '-m', 'isolate lifecycle fixture from parent navigation')
+  const before = await captureInputSnapshot(f.root, { committed: true })
+  const beforeEntries = readTree(before.source.commonDir, before.immutableTree)
+  const oldSpec = readObject(before.source.commonDir, beforeEntries.find(entry => entry.path === contractPath)!.oid).toString('utf8')
+  const oldCode = readObject(before.source.commonDir, beforeEntries.find(entry => entry.path === 'src/export.js')!.oid).toString('utf8')
+  const oldTest = readObject(before.source.commonDir, beforeEntries.find(entry => entry.path === 'tests/export.test.mjs')!.oid).toString('utf8')
+  f.git('rm', contractPath)
+  f.git('commit', '-m', 'remove exported specification')
+  const snapshot = await captureInputSnapshot(f.root, { committed: true })
+  const removed = readFileSync(join(f.root, 'src/export.js'))
+  const contract = parseContract({ nodeId: 'export-contract', path: contractPath, source: original }).contract!
+  const affectedIds = contract.items.map(item => item.id)
+  const ruleIds = affectedIds.filter(id => /^(REQ|RULE|TR)-/.test(id))
+  const rawSource = parseParts(original)?.rawSource
+  assert.ok(rawSource)
+  const plan: SyncCoordinatorPlan = { ...f.plan, version: 'sync-coordinator-v2', direction: 'spec_to_code', partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 2 }, sourcePaths: ['src'], commitTrigger: { before, paths: [contractPath] }, targets: [{ nodeId: 'export-contract', path: contractPath, rawSource }] }
+  const admitted = f.store.admitAndEnqueue(await prepareSyncAdmission(snapshot, plan, { ingressKey: snapshot.id, rootCauseId: snapshot.id, origin: 'combined', budget: { maxAttempts: 1, maxCalls: 16, maxRepairs: 0, timeoutMs: 120000 }, managedRoot: f.managedRoot }))
+  f.useOperation(admitted)
+  f.options.plan = plan
+  f.options.readCurrentPlan = () => plan
+  let sawGenerate = false, sawReview = false
+  f.transform((output, request) => {
+    if (request.purpose === 'code_behavior_analyze') {
+      const context = JSON.parse(request.prompt.split('冻结三方输入:\n')[1]) as { changedPaths: string[] }
+      assert.ok(context.changedPaths.includes(contractPath), JSON.stringify(context.changedPaths))
+      return { changes: context.changedPaths.map(path => ({ kind: path === contractPath ? 'allowed_change' : 'refactor', paths: [path], affectedIds: path === contractPath ? affectedIds : ['RULE-EXPORT-05'], ruleIds, originalIntent: '导出契约由这次提交删除', previousBehavior: '提交前Spec保留完整义务', sourceBehavior: '当前提交不再包含该Spec', deliveryBehavior: '没有已验证交付', evidence: `真实树差 ${path}`, counterexample: '旧AC不能再从当前Spec读到' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: context.changedPaths.includes(contractPath) ? [{ path: contractPath, content: null, mode: null }] : [] }
+    }
+    if (request.purpose === 'elaboration_generate') {
+      const frozen = JSON.parse(request.prompt.split('冻结业务输入:\n')[1].split('\n')[0]) as { nodeChanges?: { action: string }[] }
+      if (frozen.nodeChanges?.some(change => change.action === 'retire')) return { version: 'elaboration-rows-v2', changes: [], applicability: ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: false, basis: '旧节点已由真实提交删除并逐项退役，候选无剩余业务对象', affectedIds: [] })) }
+    }
+    if (request.purpose === 'code_generate' || request.purpose === 'code_review') {
+      const frozen = promptInput(request)
+      const prior = frozen.priorContext?.find(item => item.role === 'source_before')
+      assert.ok(prior, request.purpose)
+      assert.equal(prior.pairId, undefined)
+      assert.equal(prior.snapshot.id, before.id)
+      assert.equal(prior.snapshot.immutableTree, before.immutableTree)
+      const bodies = new Map(prior.files)
+      assert.equal(bodies.get(contractPath), oldSpec)
+      assert.equal(bodies.get('src/export.js'), oldCode)
+      assert.equal(bodies.get('tests/export.test.mjs'), oldTest)
+      const currentEntry = prior.entries.find(entry => entry.path === contractPath)
+      const actualEntry = beforeEntries.find(entry => entry.path === contractPath)!
+      assert.equal(currentEntry?.mode, actualEntry.mode)
+      assert.equal(currentEntry?.digest, actualEntry.digest)
+      assert.equal(new Map(frozen.files).has(contractPath), false)
+      assert.equal(frozen.priorContext!.some(item => item.role === 'verified_delivery'), false)
+      assert.ok(request.prompt.includes('role为source_before时明确不是verifiedDelivery'))
+      assert.ok(frozen.readyIds.includes('AC-EXPORT-03'))
+      if (request.purpose === 'code_generate') { sawGenerate = true; return { version: 'sync-files-v1', changes: [] } }
+      sawReview = true
+      throw Object.assign(new Error('在真实Docker之前停止测试'), { code: 'unsupported' })
+    }
+    return output
+  })
+  const result = await runSyncOperation(f.store, admitted.id, f.options)
+  const debugStage = f.store.listAttempts(admitted.id).flatMap(attempt => attempt.checkpointRefs).map(ref => JSON.parse(readEvidence(snapshot.source.commonDir, ref).toString())).find(stage => stage.stage === 'elaboration')
+  const debugElaboration = debugStage ? JSON.parse(readEvidence(snapshot.source.commonDir, debugStage.resultRef).toString()) : null
+  assert.equal(sawGenerate, true, JSON.stringify({ elaboration: debugElaboration?.rounds?.map((round: { findings: unknown[] }) => round.findings), phase: result.status, failure: result.failure, attempts: f.store.listAttempts(admitted.id).map(attempt => ({ status: attempt.status, failure: attempt.failure })) }))
+  assert.equal(sawReview, true, JSON.stringify(result.failure))
+  assert.equal(result.failure?.code, 'unsupported')
+  assert.equal(f.store.listJournals(admitted.id).length, 0)
+  assert.equal(existsSync(join(f.root, contractPath)), false)
+  assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), removed)
+})
+
+test('协调器拒绝related glob命中超出全局readPaths的旧helper', async t => {
+  const relatedSpec = original.replace('  - src/export.js#ExportService\n', '  - src/export.js#ExportService\nrelated:\n  - src/helpers/**/*.js\n')
+  const budget = { maxAttempts: 1, maxCalls: 16, maxRepairs: 0, timeoutMs: 120_000 }
+  const f = await fixture(t, budget, false, relatedSpec, 'project', relatedSpec)
+  f.git('reset', '--hard', 'HEAD')
+  const parentPath = join(f.root, '.spec/project/spec.md'), parent = readFileSync(parentPath, 'utf8')
+  writeFileSync(parentPath, parent.replaceAll('[[export-contract]]', '导出契约'))
+  const helperPath = 'src/helpers/format.js'
+  mkdirSync(join(f.root, 'src/helpers'), { recursive: true })
+  writeFileSync(join(f.root, helperPath), '// coordinator helper\nexport function format(value) { return String(value) }\n')
+  f.git('add', '-A'); f.git('commit', '-m', 'isolate lifecycle fixture and add related helper')
+  const before = await captureInputSnapshot(f.root, { committed: true })
+  const beforeEntries = readTree(before.source.commonDir, before.immutableTree)
+  const oldSpec = readObject(before.source.commonDir, beforeEntries.find(entry => entry.path === contractPath)!.oid).toString('utf8')
+  const contract = parseContract({ nodeId: 'export-contract', path: contractPath, source: oldSpec }).contract!
+  f.git('rm', contractPath); f.git('commit', '-m', 'remove spec while retaining related helper')
+  const snapshot = await captureInputSnapshot(f.root, { committed: true })
+  const rawSource = parseParts(oldSpec)?.rawSource
+  assert.ok(rawSource)
+  const plan: SyncCoordinatorPlan = {
+    ...f.plan,
+    version: 'sync-coordinator-v2', direction: 'spec_to_code',
+    partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524_288, maxParallel: 2 },
+    readPaths: ['.spec', 'src/export.js', 'tests'], sourcePaths: ['src/export.js'],
+    commitTrigger: { before, paths: [contractPath] },
+    targets: [{ nodeId: 'export-contract', path: contractPath, rawSource }],
+  }
+  const admitted = f.store.admitAndEnqueue(await prepareSyncAdmission(snapshot, plan, {
+    ingressKey: snapshot.id, rootCauseId: snapshot.id, origin: 'combined', budget, managedRoot: f.managedRoot,
+  }))
+  f.useOperation(admitted)
+  f.options.plan = plan
+  f.options.readCurrentPlan = () => plan
+  const affectedIds = contract.items.map(item => item.id)
+  const ruleIds = affectedIds.filter(id => /^(REQ|RULE|TR)-/.test(id))
+  f.transform((output, request) => {
+    if (request.purpose === 'code_behavior_analyze') {
+      const context = JSON.parse(request.prompt.split('冻结三方输入:\n')[1]) as { changedPaths: string[] }
+      return {
+        changes: context.changedPaths.map(path => ({ kind: path === contractPath ? 'allowed_change' : 'refactor', paths: [path], affectedIds: path === contractPath ? affectedIds : ['RULE-EXPORT-05'], ruleIds, originalIntent: '导出契约由这次提交删除', previousBehavior: '提交前Spec保留完整义务', sourceBehavior: '当前提交不再包含该Spec', deliveryBehavior: '没有已验证交付', evidence: `真实树差 ${path}`, counterexample: '旧AC不能再从当前Spec读到' })),
+        facts: [], acceptanceChanges: [], newNodes: [],
+        resolutions: context.changedPaths.includes(contractPath) ? [{ path: contractPath, content: null, mode: null }] : [],
+      }
+    }
+    if (request.purpose === 'elaboration_generate') {
+      const frozen = JSON.parse(request.prompt.split('冻结业务输入:\n')[1].split('\n')[0]) as { nodeChanges?: { action: string }[] }
+      if (frozen.nodeChanges?.some(change => change.action === 'retire')) return { version: 'elaboration-rows-v2', changes: [], applicability: ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: false, basis: '旧节点已由真实提交删除并逐项退役，候选无剩余业务对象', affectedIds: [] })) }
+    }
+    return output
+  })
+  const result = await runSyncOperation(f.store, admitted.id, f.options)
+  assert.equal(result.failure?.code, 'historical_context_binding', JSON.stringify({ status: result.status, failure: result.failure, calls: f.calls.map(call => call.purpose) }))
+  assert.ok(f.calls.some(call => call.purpose === 'elaboration_generate'))
+  assert.equal(f.calls.some(call => call.purpose === 'code_generate' || call.purpose === 'code_review'), false)
 })

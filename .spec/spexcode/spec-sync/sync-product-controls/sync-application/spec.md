@@ -116,3 +116,6 @@ Dashboard 的受控正文保存继续直接 submit，requestBlob 即时触发 sp
 自动 operation 的 detail 当前性、retry、decide、resume 与运行前可信配置复核均按其 input.captureKind 采集同模式当前输入；旧无标记工作区操作保持原判据。status 的原树落地投影与 adoptionEligibility/adopt 仍读取真实工作文件及 index，未提交编辑不能因 commit snapshot 而获得覆盖或采纳资格。
 
 最近已消费提交边界由既有持久 observations 和自动 operation.input 推导：真实 admitted/coalesced/duplicate 接入，或 observationChanges 已判断 changed=false 且 exact selection 含真实非 null 基线的提交快照，均可作为下一次 before。后者仅在既有差异 evidence 写 consumption=baseline，保同一 selection/receipt 证明；旧 evidence 无字段不猜已消费，暂停且 changed=true 的新作者提交不标记。同步生成 Spec 的 receipt 被正式采纳并去回声后，该完整已提交快照仍推进消费边界，后续 code-only commit 的 origin 与 commitTrigger.paths 不夹带先前已消费的生成 Spec。服务重启及停机补偿复用同一持久事实，不新建可变游标、DB 表或作者启发式。
+
+
+用户通过正式decide明确选择保持原意、采用行为或新规则时，受控原意与所选代码分歧共同进入v2 combined新操作；仍只沿原作用域、真实authority、预算、独审及不可改oracle。原code提交操作保持code_to_spec只读，不把自动提交事件本身当作写代码授权。

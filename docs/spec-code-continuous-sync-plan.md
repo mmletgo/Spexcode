@@ -535,3 +535,6 @@ CLI 入口包含 spex sync enable、status、run、pause、resume、verify、dec
 技术复核结论：上述技术阻断及补充均已关闭，未发现残留可实施性阻断。
 
 文档检查覆盖 UTF-8 读取、9 项需求到阶段和验收的映射、28 个唯一验收编号、Markdown 围栏及全部本地引用。此结论属于方案审查；第 15 节的真实 Agent、产品流程和故障注入验收必须在实施阶段执行，不能由文档通过替代。
+
+
+显式用户裁决复用既有受控原意入口：所选原意和代码分歧以combined新操作处理，只沿原授权与精确decision authority；代码提交自动形成的code_to_spec操作本身继续保持源码及全部测试只读。不可改oracle与新裁决互斥时保留具体needs_input，不修改oracle、弱化需求或重置预算绕过。

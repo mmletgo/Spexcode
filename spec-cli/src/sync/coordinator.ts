@@ -3,6 +3,7 @@ import { setImmediate as yieldToControl, setTimeout as waitForPublication } from
 import { existsSync, lstatSync, mkdirSync, realpathSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import { dependencyClosure, parseContract, parseParts } from '@spexcode/spec-core/contracts'
+import { relationClaimsPath } from '@spexcode/spec-core'
 import type { ContractFinding } from '@spexcode/spec-core/contracts'
 import { actualTreeDiff, exportCandidate, isHostPrivatePath, verifyCandidate } from './candidate.js'
 import { analyzeCodeBehavior, authoredContractChanges, deriveBehaviorAuthorization } from './code-behavior.js'
@@ -17,7 +18,7 @@ import type { FileMutex } from './file-mutex.js'
 import { checkGenerationContractIntent, readFrozenContracts } from './frozen-contracts.js'
 import { decisionAuthorizationErrors, sameContractBusinessMeaning } from './contract-evolution.js'
 import type { FrozenContracts } from './frozen-contracts.js'
-import { completeSyncPartitionPlan, analyzeSyncPartitions, elaborateSyncPartitions, generateSyncPartitions } from './partition-execution.js'
+import { implementationPlanningPartitions, completeSyncPartitionPlan, analyzeSyncPartitions, elaborateSyncPartitions, generateSyncPartitions } from './partition-execution.js'
 import type { PartitionCheckpoints } from './partition-execution.js'
 import { planSyncPartitions } from './partitioning.js'
 import type { SyncPartitionPlan } from './partitioning.js'
@@ -55,16 +56,20 @@ const fenceFor = (operation: SyncOperation, attempt: SyncAttempt): WriteFence =>
 type InputView = { composed: ComposedInputRef; manifest: SnapshotManifest; files: Map<string, string>; readPaths: readonly string[]; readSetDigest: string; frozen: FrozenContracts }
 
 /** 退役与目标历史只读取各文件真实交付头，不把另一资源的整树作为作者基线。 */
-function priorDeliveryFiles(operation: SyncOperation, view: InputView, readPaths: readonly string[]): Map<string, string> {
-  if (!operation.baselineSelection) return operation.previousBaselinePair
+function priorDeliveryFiles(operation: SyncOperation, view: InputView, readPaths: readonly string[], plan: SyncCoordinatorPlan): Map<string, string> {
+  if (!operation.baselineSelection && !(plan.version === 'sync-coordinator-v2' && plan.commitTrigger?.before && !operation.previousBaselinePair)) return operation.previousBaselinePair
     ? new Map(readTree(operation.input.source.commonDir, operation.previousBaselinePair.verifiedDelivery.immutableTree).filter(entry => within(entry.path, readPaths) && entry.mode !== '120000').flatMap(entry => { const bytes = readObject(operation.input.source.commonDir, entry.oid); return isUtf8Text(bytes) ? [[entry.path, bytes.toString('utf8')] as [string, string]] : [] }))
     : new Map(view.files)
   const files = new Map(view.files)
-  for (const binding of operation.baselineSelection.bindings) {
+  for (const binding of operation.baselineSelection?.bindings ?? []) {
     if (!('bytePair' in binding) || !binding.bytePair || !binding.resource.path.startsWith('.spec/') || !binding.resource.path.endsWith('/spec.md')) continue
     const path = binding.resource.path, entry = readTree(operation.input.source.commonDir, binding.bytePair.verifiedDelivery.immutableTree).find(entry => entry.path === path)
     if (!entry) files.delete(path)
     else if (entry.mode !== '120000') files.set(path, readObject(operation.input.source.commonDir, entry.oid).toString('utf8'))
+  }
+  if (plan.version === 'sync-coordinator-v2' && plan.commitTrigger?.before) {
+    verifySnapshot(plan.commitTrigger.before)
+    for (const entry of readTree(operation.input.source.commonDir, plan.commitTrigger.before.immutableTree)) if (!files.has(entry.path) && within(entry.path, readPaths) && entry.path.startsWith('.spec/') && entry.path.endsWith('/spec.md') && entry.mode !== '120000' && !operation.baselineSelection?.bindings.some(binding => binding.resource.kind === 'path' && binding.resource.path === entry.path && 'bytePair' in binding && binding.bytePair)) files.set(entry.path, readObject(operation.input.source.commonDir, entry.oid).toString('utf8'))
   }
   return files
 }
@@ -96,6 +101,15 @@ async function readInput(input: InputSnapshot, plan: SyncCoordinatorPlan, previo
     if (isHostPrivatePath(path)) fail('private_context', `可信读写集合包含宿主运行资料: ${path}`)
   }
   verifySnapshot(input)
+  if (plan.version === 'sync-coordinator-v2' && plan.commitTrigger) {
+    for (const path of plan.commitTrigger.paths) validateRepositoryPath(path)
+    if (plan.commitTrigger.before) {
+      const before = plan.commitTrigger.before
+      if (canonical(before.source) !== canonical(input.source)) fail('commit_trigger_binding', '提交前态不属于同一真实物理来源')
+      const changed = actualTreeDiff(verifySnapshot(before), verifySnapshot(input)).map(change => change.path)
+      if (canonical(unique(changed)) !== canonical(unique(plan.commitTrigger.paths))) fail('commit_trigger_binding', '累计提交路径与真实前后快照不一致')
+    }
+  }
   const readPaths = selection ? unique([...plan.readPaths, ...executionPaths ?? []]) : plan.readPaths
   let composition = composeAuthoredInput(input, selection ?? previous ?? undefined, { retainConflicts: true, ...(selection ? { executionPaths, contextPaths: readPaths } : {}) })
   if (!composition.composed) fail('composition_conflict', '人类输入与前次交付存在重叠冲突', [writeEvidence(input.source.commonDir, composition.conflicts)])
@@ -498,13 +512,23 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           const initialSources = operation.origin === 'initial' || plan.commitTrigger?.before === null ? sourceEntries.filter(entry => within(entry.path, plan.sourcePaths ?? [])).map(entry => entry.path) : []
           let changedPaths = unique([...(plan.commitTrigger?.before === null ? [] : plan.commitTrigger?.paths ?? []), ...residuals, ...initialSources, ...(operation.origin === 'initial' ? plan.targets.map(target => target.path) : []), ...actualTreeDiff(before, sourceEntries).map(file => file.path), ...actualTreeDiff(delivery, view.manifest.entries).map(file => file.path), ...(operation.requestBlob && !decision ? readControlledChanges(operation.input, operation.requestBlob).map(change => change.path) : [])]).filter(path => within(path, view.readPaths))
           if (plan.direction === 'spec_to_code') changedPaths = changedPaths.filter(path => path.startsWith('.spec/'))
+          const historicalSnapshots = [...new Map([...(operation.baselineSelection?.bindings.flatMap(binding => { const pair = 'bytePair' in binding ? binding.bytePair : binding.intentPair; return pair ? [pair.verifiedDelivery, pair.sourceInput] : [] }) ?? []), ...operation.previousBaselinePair ? [operation.previousBaselinePair.verifiedDelivery, operation.previousBaselinePair.sourceInput] : [], ...plan.commitTrigger?.before ? [plan.commitTrigger.before] : []].map(snapshot => [snapshot.immutableTree, snapshot])).values()]
+          const governanceSources = new Map<string, string>(), governanceNodes = [...view.frozen.nodes]
+          for (const snapshot of historicalSnapshots) {
+            verifySnapshot(snapshot)
+            const sources = new Map(readTree(operation.input.source.commonDir, snapshot.immutableTree).filter(entry => within(entry.path, view.readPaths) && entry.path.startsWith('.spec/') && entry.path.endsWith('/spec.md') && entry.mode !== '120000').map(entry => [entry.path, readObject(operation.input.source.commonDir, entry.oid).toString('utf8')]))
+            const historical = await readFrozenContracts(operation.input.source.canonicalRoot, sources)
+            governanceNodes.push(...historical.nodes)
+            for (const [path, text] of sources) if (!view.files.has(path) && !governanceSources.has(path)) governanceSources.set(path, text)
+          }
           const byteVersions = new Map<string, Map<string, number>>()
-          const trees = unique([operation.input.immutableTree, view.composed.tree, ...operation.previousBaselinePair ? [operation.previousBaselinePair.sourceInput.immutableTree, operation.previousBaselinePair.verifiedDelivery.immutableTree] : [], ...plan.commitTrigger?.before ? [plan.commitTrigger.before.immutableTree] : []])
+          const trees = unique([operation.input.immutableTree, view.composed.tree, ...operation.previousBaselinePair ? [operation.previousBaselinePair.sourceInput.immutableTree, operation.previousBaselinePair.verifiedDelivery.immutableTree] : [], ...historicalSnapshots.map(snapshot => snapshot.immutableTree)])
           for (const tree of trees) readTree(operation.input.source.commonDir, tree, (entry, bytes) => { if (within(entry.path, view.readPaths)) { const versions = byteVersions.get(entry.path) ?? new Map<string, number>(); versions.set(entry.digest, bytes.length); byteVersions.set(entry.path, versions) } })
           for (const artifact of compositionEvidence?.artifacts ?? []) for (const entry of [artifact.before, artifact.delivery, artifact.source, artifact.authorBase]) if (entry && within(entry.path, view.readPaths)) { const versions = byteVersions.get(entry.path) ?? new Map<string, number>(); if (!versions.has(entry.digest)) versions.set(entry.digest, readObject(operation.input.source.commonDir, entry.oid).length); byteVersions.set(entry.path, versions) }
-          partitions = planSyncPartitions({ plan, files: view.files, contracts: view.frozen.contracts, changedPaths, maxReadBytes: plan.partitionPolicy.maxReadBytes, readByteSizes: new Map([...byteVersions].map(([path, versions]) => [path, [...versions.values()].reduce((sum, size) => sum + size, 0)])) })
+          partitions = planSyncPartitions({ plan, files: view.files, contracts: view.frozen.contracts, nodes: governanceNodes, governanceSources, changedPaths, maxReadBytes: plan.partitionPolicy.maxReadBytes, readByteSizes: new Map([...byteVersions].map(([path, versions]) => [path, [...versions.values()].reduce((sum, size) => sum + size, 0)])) })
           partitionCheckpoints.save('partition-plan', partitions)
-          const minimumCalls = partitions.partitions.length * ((behaviorOrigin ? 2 : 0) + 2 + (plan.direction === 'code_to_spec' ? 1 : 2)) + partitions.dependencies.length
+          const hasPriorWork = Boolean(operation.retryOf) || store.listAttempts(operation.id).some(prior => prior.id !== attempt!.id)
+          const minimumCalls = partitions.partitions.length * ((hasPriorWork ? 0 : (behaviorOrigin ? 2 : 0) + 2) + (plan.direction === 'code_to_spec' ? 1 : 2)) + partitions.dependencies.length
           const remainingCalls = operation.budget.maxCalls - store.readBudgetUsage(operation.id).callsUsed
           partitionCheckpoints.save('partition-budget', { minimumCalls, remainingCalls, partitionCount: partitions.partitions.length, dependencyCount: partitions.dependencies.length, direction: plan.direction })
           if (remainingCalls < minimumCalls) fail('partition_budget_insufficient', `完整分区执行至少需要 ${minimumCalls} 次调用，剩余 ${remainingCalls} 次；保持原预算，需明确调整后新接入`, [writeEvidence(operation.input.source.commonDir, { partitionPlan: partitions, minimumCalls, remainingCalls })])
@@ -566,7 +590,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         store.recordFailure(fence, issue)
         return current(undefined, issue)
       }
-      const deliveredFiles = priorDeliveryFiles(operation, view, [...options.plan.readPaths, ...operation.scope.paths])
+      const deliveredFiles = priorDeliveryFiles(operation, view, [...options.plan.readPaths, ...operation.scope.paths], options.plan)
       const historyGroup = operation.baselineSelection && operation.requestBlob ? readCompositionEvidence(operation.input, view.composed, operation.baselineSelection).controlledAuthorGroup : undefined
       for (const change of historyGroup?.changes ?? []) {
         if (!change.path.startsWith('.spec/') || !change.path.endsWith('/spec.md')) continue
@@ -655,7 +679,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       const accepted = await readFrozenContracts(operation.input.source.canonicalRoot, acceptedFiles)
       if (partitions) {
         const saved = partitionCheckpoints.load<SyncPartitionPlan>('candidate-partition-plan')
-        partitions = saved ?? completeSyncPartitionPlan(partitions, accepted.contracts, acceptedFiles, analysis)
+        partitions = saved ?? completeSyncPartitionPlan(partitions, accepted.contracts, acceptedFiles, { writePaths: options.plan.version === 'sync-coordinator-v2' && options.plan.direction === 'code_to_spec' ? [] : options.plan.writePaths, readonlyPaths: options.plan.mandatoryTests.map(test => test.testPath) }, analysis)
         if (!saved) partitionCheckpoints.save('candidate-partition-plan', partitions)
       }
       const retiredIds = unique(elaboration.retiredIds.filter(id => !historicalRetiredIds.includes(id)))
@@ -699,9 +723,58 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       if (!generated) {
         store.renewLease(fence, leaseMs); await yieldToControl(); store.renewLease(fence, leaseMs)
         if (attempt.candidate) fail('candidate_stage_missing', '已有冻结候选没有完整独立生成证据，不能覆盖或重新生成')
-        store.startGeneration(fence, { readyScope: ready, blockedScope: blocked, blockedReason })
+        if (!partitions) store.startGeneration(fence, { readyScope: ready, blockedScope: blocked, blockedReason })
         const allowedGap = new Set([...elaboration.blockedStructureFindings, ...elaboration.rounds.flatMap(round => round.findings.filter(issue => ['unresolved-gap', 'unresolved-conflict'].includes(issue.code) && issue.itemId && accepted.graph.items.get(issue.itemId)?.kind === 'GAP'))].map(findingKey))
-        const generationInput: import('./generation-types.js').GenerationInput = { root: operation.input.source.canonicalRoot, requestKey: `sync:${attempt.id}:generation`, snapshot: operation.input, composed: view.composed, manifest: view.manifest, files: view.files, contracts: accepted.contracts, elaboratedSpecs: elaboration.changes.map(change => ({ path: change.path, source: change.source })), readyIds: [...ready.contractIds, ...ready.flowIds].filter(id => !restoredResourceIds.includes(id)), blockedIds: [...blocked.contractIds, ...blocked.flowIds], retiredIds, intent: { nodeId: options.plan.intentNodeId, rawSource: (accepted.nodes.find(node => node.id === options.plan.intentNodeId) ?? retirementBefore.nodes.find(node => node.id === options.plan.intentNodeId))!.rawSource! }, facts: behaviorFacts, analysis, nodeChanges: elaboration.nodeChanges ?? nodeChanges, direction: decision && decision.decision.choice !== 'adopt_behavior' ? 'repair_to_intent' : preserveBusiness ? 'preserve_business' : analysis?.analysis.authorChanges?.length && !decision ? 'repair_to_intent' : analysis ? 'preserve_observed_behavior' : undefined, existingAcceptance: retirementBefore.contracts.flatMap(contract => contract.items.filter(item => item.kind === 'AC')), mandatoryTests: options.plan.mandatoryTests, verifications: options.plan.verifications.map(item => item.definition), repairContext, allowedScope: ready, policy: { version: options.plan.version, digest: operation.policyDigest }, timeoutMs: callTimeoutMs, signal, model, effort: 'high' as const }; const generationOptions: import('./generation-types.js').GenerationOptions = { runner, protectedReadPaths: view.readPaths, ...(operation.baselineSelection ? { beforeFreezeCandidate: async () => {
+        if (partitions && options.plan.version === 'sync-coordinator-v2') {
+          const activePartitions = partitions.partitions.filter(partition => retiredIds.some(id => { const item = retirementBefore.graph.items.get(id); return item && partition.targets.some(target => target.path === item.path) }) || accepted.contracts.some(contract => partition.targets.some(target => target.path === contract.path) && contract.items.some(item => ready.contractIds.includes(item.id) || ready.flowIds.includes(item.id))))
+          const key = `sync:${attempt.id}:generation`, specOnly = options.plan.direction === 'code_to_spec'
+          const activeIds = new Set(activePartitions.map(partition => partition.id)), planningIds = implementationPlanningPartitions(partitions.partitions, accepted.contracts, elaboration.nodeChanges ?? nodeChanges).filter(id => activeIds.has(id))
+          const requiredKeys = [
+            ...specOnly ? [] : activePartitions.map(partition => `${key}:partition:${partition.id}:code_generate`),
+            ...specOnly ? [] : planningIds.map(id => `${key}:partition:${id}:implementation_plan`),
+            ...activePartitions.map(partition => `${key}:final:${partition.id}:code_review`),
+            ...partitions.dependencies.filter(edge => activeIds.has(edge.from) || activeIds.has(edge.to)).map(edge => `${key}:final:edge:${edge.from}:${edge.to}:code_review`),
+          ]
+          const dispatched = new Set(store.readAttempt(attempt.id).dispatchPlans.map(dispatch => dispatch.key))
+          const minimumCalls = requiredKeys.filter(key => !dispatched.has(key)).length, remainingCalls = operation.budget.maxCalls - store.readBudgetUsage(operation.id).callsUsed
+          partitionCheckpoints.save('partition-generation-budget', { minimumCalls, remainingCalls, implementationPlanningPartitions: specOnly ? [] : planningIds, requiredKeys })
+          if (minimumCalls > remainingCalls) fail('partition_budget_insufficient', `最终分区及精确文件规划至少还需要 ${minimumCalls} 次调用，剩余 ${remainingCalls} 次；保持原共享预算`, [writeEvidence(operation.input.source.commonDir, { minimumCalls, remainingCalls, requiredKeys })])
+        }
+        const priorContext: NonNullable<import('./generation-types.js').GenerationInput['priorContext']>[number][] = []
+        if (partitions && (retiredIds.length || (elaboration.nodeChanges ?? nodeChanges).length)) {
+          const pairs = [...new Map([...(operation.baselineSelection?.bindings.flatMap(binding => { const pair = 'bytePair' in binding ? binding.bytePair : binding.intentPair; return pair ? [pair] : [] }) ?? []), ...operation.previousBaselinePair ? [operation.previousBaselinePair] : []].map(pair => [pair.id, pair])).values()]
+          const snapshots = [...new Map([...pairs.flatMap(pair => [{ snapshot: pair.sourceInput, role: 'source_before' as const, pairId: pair.id }, { snapshot: pair.verifiedDelivery, role: 'verified_delivery' as const, pairId: pair.id }]), ...options.plan.version === 'sync-coordinator-v2' && options.plan.commitTrigger?.before ? [{ snapshot: options.plan.commitTrigger.before, role: 'source_before' as const }] : []].map(context => [`${context.role}:${context.snapshot.id}`, context])).values()]
+          const obligations = unique(retirementBefore.contracts.filter(contract => retiredIds.some(id => contract.items.some(item => item.id === id)) || (elaboration.nodeChanges ?? nodeChanges).some(change => change.from.path === contract.path)).flatMap(contract => [contract.path, ...contract.code.map(anchor => anchor.split('#')[0]), ...contract.related.map(anchor => anchor.split('#')[0]), ...contract.items.filter(item => item.kind === 'AC').map(item => item.test.split('#')[0]), ...contract.items.flatMap(item => item.kind !== 'VERIFY' && item.source.kind === 'code' ? [item.source.ref.split('#')[0]] : [])]))
+          for (const context of snapshots) {
+            verifySnapshot(context.snapshot)
+            if (context.snapshot.source.commonDir !== operation.input.source.commonDir || context.role === 'source_before' && canonical(context.snapshot.source) !== canonical(operation.input.source)) fail('historical_context_binding', '历史来源不属于同一真实source/commonDir')
+            const files = new Map<string, string>(), entries: SnapshotManifest['entries'] = [], objects: NonNullable<import('./generation-types.js').GenerationInput['priorContext']>[number]['objects'][number][] = []
+            readTree(operation.input.source.commonDir, context.snapshot.immutableTree, (entry, bytes) => {
+              if (isHostPrivatePath(entry.path)) return
+              if (obligations.some(claim => relationClaimsPath(claim, entry.path)) && !within(entry.path, view.readPaths)) fail('historical_context_binding', `历史义务超出全局读取授权: ${entry.path}`)
+              if (!within(entry.path, view.readPaths)) return
+              entries.push(entry)
+              if (entry.mode === '120000' || !isUtf8Text(bytes)) objects.push({ entry, kind: entry.mode === '120000' ? 'symlink' : 'binary', encoding: 'base64', content: bytes.toString('base64') })
+              else files.set(entry.path, bytes.toString('utf8'))
+            })
+            priorContext.push({ ...context, entries, files, objects })
+          }
+        }
+        const generationInput: import('./generation-types.js').GenerationInput = { root: operation.input.source.canonicalRoot, requestKey: `sync:${attempt.id}:generation`, snapshot: operation.input, composed: view.composed, manifest: view.manifest, files: view.files, contracts: accepted.contracts, elaboratedSpecs: elaboration.changes.map(change => ({ path: change.path, source: change.source })), readyIds: [...ready.contractIds, ...ready.flowIds].filter(id => !restoredResourceIds.includes(id)), blockedIds: [...blocked.contractIds, ...blocked.flowIds], retiredIds, ...(partitions ? { priorContext, retiredOwners: retiredIds.flatMap(id => { const item = retirementBefore.graph.items.get(id); return item ? [{ id, path: item.path }] : [] }) } : {}), intent: { nodeId: options.plan.intentNodeId, rawSource: (accepted.nodes.find(node => node.id === options.plan.intentNodeId) ?? retirementBefore.nodes.find(node => node.id === options.plan.intentNodeId))!.rawSource! }, facts: behaviorFacts, analysis, nodeChanges: elaboration.nodeChanges ?? nodeChanges, direction: decision && decision.decision.choice !== 'adopt_behavior' ? 'repair_to_intent' : preserveBusiness ? 'preserve_business' : analysis?.analysis.authorChanges?.length && !decision ? 'repair_to_intent' : analysis ? 'preserve_observed_behavior' : undefined, existingAcceptance: retirementBefore.contracts.flatMap(contract => contract.items.filter(item => item.kind === 'AC')), mandatoryTests: options.plan.mandatoryTests, verifications: options.plan.verifications.map(item => item.definition), repairContext, allowedScope: ready, policy: { version: options.plan.version, digest: operation.policyDigest }, timeoutMs: callTimeoutMs, signal, model, effort: 'high' as const }; const generationOptions: import('./generation-types.js').GenerationOptions = { runner, protectedReadPaths: view.readPaths, ...(partitions ? { implementationPolicy: { writePaths: options.plan.writePaths, sourcePaths: options.plan.sourcePaths ?? [] }, beforePartitionGeneration: async (paths: readonly string[], evidenceRef: BlobRef) => {
+          if (paths.some(path => !within(path, options.plan.writePaths) || options.plan.mandatoryTests.some(test => overlap(path, test.testPath)))) fail('implementation_plan_scope', '明确实现文件计划越过冻结授权或独立oracle')
+          const additions = paths.filter(path => !within(path, operation.scope.paths))
+          if (additions.length) {
+            operation = store.expandContractScope(fence!, { paths: unique([...operation.scope.paths, ...additions]), contractIds: operation.scope.contractIds, flowIds: operation.scope.flowIds }, evidenceRef)
+            const previousView = view
+            view = await readInput(operation.input, options.plan, operation.previousBaselinePair, operation.requestBlob, operation.baselineSelection, operation.scope.paths)
+            if (view.composed.contentDigest !== previousView.composed.contentDigest) fail('implementation_plan_context_changed', '实现文件规划引入了尚未独审的真实上下文')
+            store.bindComposedInput(fence!, view.composed, { readSetDigest: view.readSetDigest })
+            operation = store.readOperation(operation.id)
+          }
+          ready.paths = [...operation.scope.paths]
+          if (store.readOperation(operation.id).phase !== 'generating') store.startGeneration(fence!, { readyScope: ready, blockedScope: blocked, blockedReason })
+          return { scope: ready, composed: view.composed }
+        } } : {}), ...(operation.baselineSelection ? { beforeFreezeCandidate: async () => {
           for (;;) {
             await acquirePublication()
             try {
@@ -803,7 +876,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         if (options.plan.version === 'sync-coordinator-v2' && options.plan.direction === 'code_to_spec') return current(undefined, issue)
         repairContext = { previousOutput: generated.output, diagnostics: [{ code: issue.code, message: `${issue.message}\n${canonical(failedV3.evidence ?? {})}` }] }; continue
       }
-      const v4Ref = await v4(), v1Ref = writeEvidence(operation.input.source.commonDir, { candidateDigest: candidate.digest, findings: generated.validationFindings, candidateValidated: generated.candidateValidated }), v2Ref = writeEvidence(operation.input.source.commonDir, { candidateDigest: candidate.digest, review: generated.review, traces: generated.traces, ...(generated.partitionEvidence ? { partitionEvidence: generated.partitionEvidence, partitionPlanDigest: partitions?.digest, partitionCoverage: partitions?.partitions.map(partition => partition.id), dependencyCoverage: partitions?.dependencies } : {}) }), v3Refs = v3Results.map(result => writeEvidence(operation.input.source.commonDir, result))
+      const v4Ref = await v4(), v1Ref = writeEvidence(operation.input.source.commonDir, { candidateDigest: candidate.digest, findings: generated.validationFindings, candidateValidated: generated.candidateValidated }), v2Ref = writeEvidence(operation.input.source.commonDir, { candidateDigest: candidate.digest, review: generated.review, traces: generated.traces, ...(generated.partitionEvidence ? { partitionEvidence: generated.partitionEvidence, fileWriterPlanRef: generated.fileWriterPlanRef, partitionPlanDigest: partitions?.digest, partitionCoverage: generated.partitionEvidence.filter(item => !item.partitionId.startsWith('edge:')).map(item => item.partitionId), dependencyCoverage: partitions?.dependencies.filter(edge => generated.partitionEvidence?.some(item => item.partitionId === `edge:${edge.from}:${edge.to}`)) } : {}) }), v3Refs = v3Results.map(result => writeEvidence(operation.input.source.commonDir, result))
       const bindings = { inputId: operation.input.id, candidateDigest: candidate.digest, policyDigest: operation.policyDigest, readSetDigest: operation.readSetDigest, ...(operation.baselineSelection ? { baselineSelectionDigest: operation.baselineSelection.digest } : {}), environmentDigest: contentHash(canonical(runs.map(run => run.policy))), contextDigest: contentHash(canonical({ readSetDigest: view.readSetDigest, baselineSelection: operation.baselineSelection ?? null, publicationBase: attempt.publicationBase ?? null, elaboration: p1Evidence, composed: view.composed, analysisRef: analysis?.ref ?? null, decisionRef: decision ? operation.requestBlob : null })) }
       const result: VerificationResultBlob = { schemaVersion: 1, coveredScope: ready, retiredIds: unique(elaboration.retiredIds), restoredIds: restorations.map(change => change.id).sort(), decisionRefs: [...options.plan.decisionRefs ?? [], ...(decision && operation.requestBlob ? [operation.requestBlob] : [])], ...bindings, layers: [{ layer: 'V1', verdict: 'pass', evidenceRefs: [v1Ref] }, { layer: 'V2', verdict: 'pass', evidenceRefs: [v2Ref] }, { layer: 'V3', verdict: 'pass', evidenceRefs: v3Refs }, { layer: 'V4', verdict: 'pass', evidenceRefs: [v4Ref] }] }
       store.recordVerification(fence, { ...bindings, passed: true, coveredScope: ready, evidenceRefs: [p1Evidence, v1Ref, v2Ref, ...v3Refs, v4Ref], resultBlob: writeEvidence(operation.input.source.commonDir, result) })

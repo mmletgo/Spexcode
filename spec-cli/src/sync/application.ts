@@ -680,6 +680,7 @@ export class SyncApplication {
     const selectedRules = [...new Set(findings.flatMap(finding => finding!.ruleIds))].sort()
     const affectedIds = new Set(findings.flatMap(finding => [...finding!.ruleIds, ...finding!.affectedIds]))
     const authority = readDecisionAuthority(snapshot.source.commonDir, requestRef)
+    if (plan.version === 'sync-coordinator-v2') plan.direction = 'combined'
     plan.decisionAuthorities = [...(plan.decisionAuthorities ?? []).filter(prior => prior.stableDecisionId !== decisionId), authority]
     const boundary = `本次裁决仅适用于分歧 ${findingIds.join(', ')}，业务规则 ${selectedRules.join(', ') || '该分歧明确指出的未覆盖行为'}；未选中的原需求、其他规则与全部验证政策保持有效。`
     const decisionText = input.decision.choice === 'new_rule' ? input.decision.rule : input.decision.choice === 'keep_intent' ? findings.map(finding => `保持需求：${finding!.originalIntent}；修复与需求不符的代码：${finding!.sourceBehavior}`).join('\n') : findings.map(finding => `采用当前行为并更新需求：${finding!.sourceBehavior}；原需求：${finding!.originalIntent}`).join('\n')
