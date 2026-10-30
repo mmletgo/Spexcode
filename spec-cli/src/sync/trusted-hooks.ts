@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync } from 'node:fs'
+import { setImmediate as yieldEventLoop } from 'node:timers/promises'
 import { canonicalContractFilterBindings, describeCanonicalContractFilter } from '../contract-filter.js'
 import { runtimeRoot } from '@spexcode/spec-core'
 import { readFootprintConfiguration, snapshotFootprintFile, snapshotFilterPayloads, footprintDigest, type FrozenFootprintPolicy } from './trusted-footprint.js'
@@ -28,21 +29,34 @@ const hash = (bytes: Buffer | string): string => createHash('sha256').update(byt
 const inside = (root: string, path: string): boolean => path === root || path.startsWith(`${root}${sep}`)
 const fileDigest = (path: string): string => hash(readFileSync(path))
 
-/** 完整发布 runtime 的字节/模式/内部链接身份；不执行任何入口或候选脚本。 */
-export function inspectTrustedRuntime(root: string): TrustedRuntimeEntry[] {
-  const entries: TrustedRuntimeEntry[] = []
-  const visit = (directory: string): void => {
+/** 完整发布 runtime 的唯一递归 visitor；同步与异步 consumer 共用同一身份规则。 */
+function* trustedRuntimeEntries(root: string): Generator<TrustedRuntimeEntry> {
+  const visit = function* (directory: string): Generator<TrustedRuntimeEntry> {
     for (const name of readdirSync(directory).sort()) {
       const path = join(directory, name), stat = lstatSync(path), local = relative(root, path).split(sep).join('/')
       if (stat.isSymbolicLink()) {
         if (!inside(root, realpathSync(path))) throw new Error(`runtime 外部链接无法绑定: ${local}`)
-        entries.push({ path: local, kind: 'symlink', mode: stat.mode & 0o777, target: readlinkSync(path) })
-      } else if (stat.isDirectory()) { entries.push({ path: local, kind: 'directory', mode: stat.mode & 0o777 }); visit(path) }
-      else if (stat.isFile()) entries.push({ path: local, kind: 'file', mode: stat.mode & 0o777, digest: fileDigest(path) })
+        yield { path: local, kind: 'symlink', mode: stat.mode & 0o777, target: readlinkSync(path) }
+      } else if (stat.isDirectory()) { yield { path: local, kind: 'directory', mode: stat.mode & 0o777 }; yield* visit(path) }
+      else if (stat.isFile()) yield { path: local, kind: 'file', mode: stat.mode & 0o777, digest: fileDigest(path) }
       else throw new Error(`runtime 特殊文件无法绑定: ${local}`)
     }
   }
-  visit(root)
+  yield* visit(root)
+}
+
+/** 完整发布 runtime 的字节/模式/内部链接身份；不执行任何入口或候选脚本。 */
+export function inspectTrustedRuntime(root: string): TrustedRuntimeEntry[] {
+  return [...trustedRuntimeEntries(root)]
+}
+
+/** 与同步检查共享完整 visitor，并每32个条目让出事件循环以推进其他 I/O。 */
+export async function inspectTrustedRuntimeAsync(root: string): Promise<TrustedRuntimeEntry[]> {
+  const entries: TrustedRuntimeEntry[] = []
+  for (const entry of trustedRuntimeEntries(root)) {
+    entries.push(entry)
+    if (entries.length % 32 === 0) await yieldEventLoop()
+  }
   return entries
 }
 
