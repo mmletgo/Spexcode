@@ -146,12 +146,12 @@ test('P1后的真实新跨区依赖进入冻结覆盖集合，业务ID多writer�
   const next = structuredClone(input.contracts)
   const item = next[1].items.find(item => item.kind === 'REQ')!
   item.dependsOn.push('RULE-EXPORT-01')
-  const completed = completeSyncPartitionPlan(plan, next, input.files)
+  const completed = completeSyncPartitionPlan(plan, next, input.files, { writePaths: input.allowedScope.paths, readonlyPaths: input.mandatoryTests.map(test => test.testPath) })
   assert.ok(completed.dependencies.some(edge => edge.from === 'part-import' && edge.to === 'part-export' && edge.contractIds.includes('RULE-EXPORT-01')))
   assert.notEqual(completed.digest, plan.digest)
   assert.ok(completed.partitions[1].readPaths.includes(next[0].path))
   const duplicated = { ...plan, partitions: [...plan.partitions, { ...plan.partitions[0], id: 'duplicate-writer' }] }
-  assert.throws(() => completeSyncPartitionPlan(duplicated, next, input.files), /多个分区writer/)
+  assert.throws(() => completeSyncPartitionPlan(duplicated, next, input.files, { writePaths: input.allowedScope.paths, readonlyPaths: input.mandatoryTests.map(test => test.testPath) }), /多个分区writer/)
 })
 
 test('未读取/只读root Spec和独立oracle不能因全局scope可写而被分区补丁改写', async t => {
@@ -425,4 +425,36 @@ test('移动后的旧Spec正文仍属于新路径分区，并保留旧ready退�
   assert.equal(sawReview, true)
   assert.equal(result.status, 'reviewed', JSON.stringify(result.failure))
   assert.ok(result.partitionEvidence!.find(item => item.partitionId === 'part-export')!.review.checkedIds.includes('AC-EXPORT-03'))
+})
+
+
+test('P1新测试写者只继承原全局授权交集，其他区和只读oracle不获写权', async t => {
+  const { input, plan } = await fixture(t)
+  const next = structuredClone(input.contracts)
+  const owner = next[0], ac = owner.items.find(item => item.kind === 'AC')!
+  assert.equal(ac.kind, 'AC')
+  ac.test = 'generated-tests/approved.test.mjs#AC-EXPORT-03'
+  const authorization = { writePaths: [...input.allowedScope.paths, 'generated-tests'], readonlyPaths: input.mandatoryTests.map(test => test.testPath) }
+  const completed = completeSyncPartitionPlan(plan, next, input.files, authorization)
+  assert.ok(completed.partitions.find(partition => partition.targets.some(target => target.path === owner.path))!.writePaths.includes('generated-tests/approved.test.mjs'))
+  assert.equal(completed.partitions.filter(partition => partition.writePaths.includes('generated-tests/approved.test.mjs')).length, 1)
+  const refused = completeSyncPartitionPlan(plan, next, input.files, { ...authorization, readonlyPaths: ['generated-tests/approved.test.mjs'] })
+  assert.ok(refused.partitions.every(partition => !partition.writePaths.includes('generated-tests/approved.test.mjs')))
+  ac.test = 'outside/unauthorized.test.mjs#AC-EXPORT-03'
+  const outside = completeSyncPartitionPlan(plan, next, input.files, authorization)
+  assert.ok(outside.partitions.every(partition => !partition.writePaths.includes('outside/unauthorized.test.mjs')))
+})
+
+
+test('P1跨区共享新测试writer在任何代码生成前给出规划repair', async t => {
+  const { input, plan, checkpoints } = await fixture(t)
+  const path = 'generated-tests/shared.test.mjs'
+  for (const partition of plan.partitions.slice(0, 2)) partition.writePaths.push(path)
+  input.allowedScope.paths.push(path)
+  let calls = 0
+  const result = await generateSyncPartitions(input, plan, 2, false, { runner: async () => { calls++; throw new Error('重复writer不得派发代码生成') }, validateCandidate: async () => [] }, checkpoints)
+  assert.equal(result.status, 'repair')
+  assert.equal(result.failure?.code, 'implementation_plan_conflict')
+  assert.ok(result.failure!.message.includes(path))
+  assert.equal(calls, 0)
 })

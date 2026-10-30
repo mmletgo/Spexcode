@@ -160,11 +160,12 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
 }
 
 /** P1新身份与实际依赖完成后冻结候选审查覆盖；沿用原分区身份及原独审原件。 */
-export function completeSyncPartitionPlan(plan: SyncPartitionPlan, contracts: readonly Contract[], files: ReadonlyMap<string, string>, analysis?: CodeBehaviorEvidence): SyncPartitionPlan {
+export function completeSyncPartitionPlan(plan: SyncPartitionPlan, contracts: readonly Contract[], files: ReadonlyMap<string, string>, authorization: { writePaths: readonly string[]; readonlyPaths: readonly string[] }, analysis?: CodeBehaviorEvidence): SyncPartitionPlan {
   const partitions = plan.partitions.map(partition => {
     const added = analysis?.analysis.newNodes.filter(node => within(node.codePath, partition.sourcePaths)).map(node => ({ nodeId: node.nodeId, path: node.path, rawSource: node.rawSource })) ?? []
     const targets = [...partition.targets, ...added]
     const owned = contracts.filter(contract => targets.some(target => target.path === contract.path))
+    const approvedWrites = owned.flatMap(contract => [...contract.code, ...contract.items.flatMap(item => item.kind === 'AC' ? [item.test] : [])]).map(anchor => anchor.split('#')[0]).filter(path => within(path, authorization.writePaths) && !authorization.readonlyPaths.some(oracle => within(path, [oracle]) || within(oracle, [path])))
     const readPaths = new Set([...partition.readPaths, ...targets.map(target => target.path)])
     for (const contract of owned) {
       for (const anchor of [...contract.code, ...contract.related]) readPaths.add(anchor.split('#')[0])
@@ -178,7 +179,7 @@ export function completeSyncPartitionPlan(plan: SyncPartitionPlan, contracts: re
     } }
     const bodies = new Map<string, number>()
     for (const [path, source] of files) if (within(path, [...readPaths])) bodies.set(contentHash(source), Buffer.byteLength(source))
-    return { ...partition, targets, readPaths: [...readPaths].sort(), writePaths: unique([...partition.writePaths, ...added.map(target => target.path)]), readBytes: [...bodies.values()].reduce((sum, size) => sum + size, 0) }
+    return { ...partition, targets, readPaths: [...readPaths].sort(), writePaths: unique([...partition.writePaths, ...added.map(target => target.path), ...approvedWrites]), readBytes: [...bodies.values()].reduce((sum, size) => sum + size, 0) }
   })
   const owner = new Map<string, string>()
   for (const partition of partitions) for (const contract of contracts.filter(contract => partition.targets.some(target => target.path === contract.path))) for (const item of contract.items) {
@@ -239,6 +240,11 @@ export function implementationPlanningPartitions(partitions: readonly SyncPartit
 }
 
 async function implementationFileWriters(input: GenerationInput, locals: readonly LocalGeneration[], plan: SyncPartitionPlan, maxParallel: number, options: GenerationOptions, checkpoints: PartitionCheckpoints): Promise<FileWriterPlan> {
+  const owner = new Map<string, string>()
+  for (const local of locals) for (const path of local.input.allowedScope.paths) {
+    if ([...owner].some(([owned, id]) => id !== local.partition.id && (within(path, [owned]) || within(owned, [path])))) throw Object.assign(new Error(`P1分区争用实现writer: ${path}; 需要互不重叠的文件规划`), { code: 'implementation_plan_conflict' })
+    owner.set(path, local.partition.id)
+  }
   const saved = checkpoints.load<FileWriterPlan>('file-writer-plan')
   if (saved) return saved
   const needs = new Set(implementationPlanningPartitions(plan.partitions, input.contracts, input.nodeChanges))
@@ -268,8 +274,6 @@ async function implementationFileWriters(input: GenerationInput, locals: readonl
     checkpoints.save(key, result)
     return { partitionId: local.partition.id, ...result }
   })
-  const owner = new Map<string, string>()
-  for (const local of locals) for (const path of local.partition.writePaths) owner.set(path, local.partition.id)
   for (const proposal of proposed) for (const path of proposal.paths) {
     if ([...owner].some(([owned, id]) => id !== proposal.partitionId && (within(path, [owned]) || within(owned, [path])))) throw Object.assign(new Error(`多个分区提出同一实现writer: ${path}; 请在原预算内规划互不重叠的对应模块文件`), { code: 'implementation_plan_conflict' })
     owner.set(path, proposal.partitionId)

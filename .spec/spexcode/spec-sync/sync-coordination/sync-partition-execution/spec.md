@@ -27,3 +27,9 @@ code_to_spec 的 P1 实现写范围显式为空；分区投影保留该只读约
 
 
 完成依赖闭包仅增加完整契约接口上下文，不把只读dependency owner的全部code/test再次复制进每区。本区owner的完整源码/测试保持；跨边审查显式以两端为实现目标，最终V2以真实owner与边原件分别证明覆盖。
+
+
+P1新批准的code/AC.test路径在最终分区中只交给真实owner，且必须与原全局写授权相交并排除只读oracle；related仍只读。操作P1 scope扩充实际取得租约后，生成输入再与真实readyScope求交，不因详细Spec提及路径而产生新全局写权。
+
+
+P1后新增路径若令两个生成区争用同一文件或父子路径，在文件布局/代码生成的任何模型派发之前返回implementation_plan_conflict规划repair；不默许最后写者覆盖，也不等双补丁生成后才归终态unsupported。code_to_spec不追加实现写路径。共享新增文件需要先形成唯一文件writer规划，冲突状态不能被列为已同步。

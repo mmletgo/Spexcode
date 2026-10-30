@@ -20,3 +20,9 @@ code:
 只读接口回归让A仅借读B完整Spec而不含B源码，核A checkedIds没有B业务项；最终A/B cross-edge同时完整读取两端源码，不能保留readonly skip或以局部checkedIds冒充跨边实现覆盖。
 
 旧生命周期Spec的`related: [src/helpers/**/*.js]`在真实删除提交中命中根层`src/helpers/format.js`；生成和最终独立审查都收到同一旧快照里的helper完整首尾字节，且不把它伪装为current files。
+
+
+P1新增AC.test的writer仅落本区并与原写授权求交：授权generated测试可继续实现，只读oracle及outside路径不获权；真实应用裁决沿原oracle政策互斥门禁继续验收。
+
+
+两区争用同一新增测试文件时，生成返回规划repair、candidate为空且Native调用为0；既有布局冲突和全局越权/只读oracle反例保持。

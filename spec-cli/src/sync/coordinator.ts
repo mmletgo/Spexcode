@@ -679,7 +679,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       const accepted = await readFrozenContracts(operation.input.source.canonicalRoot, acceptedFiles)
       if (partitions) {
         const saved = partitionCheckpoints.load<SyncPartitionPlan>('candidate-partition-plan')
-        partitions = saved ?? completeSyncPartitionPlan(partitions, accepted.contracts, acceptedFiles, analysis)
+        partitions = saved ?? completeSyncPartitionPlan(partitions, accepted.contracts, acceptedFiles, { writePaths: options.plan.version === 'sync-coordinator-v2' && options.plan.direction === 'code_to_spec' ? [] : options.plan.writePaths, readonlyPaths: options.plan.mandatoryTests.map(test => test.testPath) }, analysis)
         if (!saved) partitionCheckpoints.save('candidate-partition-plan', partitions)
       }
       const retiredIds = unique(elaboration.retiredIds.filter(id => !historicalRetiredIds.includes(id)))
