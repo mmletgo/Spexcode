@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { Contract } from '@spexcode/spec-core/contracts'
 import type { SyncCoordinatorPlan } from './coordinator-types.js'
-import { planSyncPartitions, projectSyncPartition } from './partitioning.js'
+import { planSyncPartitions, projectSyncPartition, rawOnlyInterfaceSeedEvidence } from './partitioning.js'
 
 const rootPath = '.spec/project/spec.md'
 const alphaPath = '.spec/project/services/alpha/spec.md'
@@ -384,6 +384,143 @@ test('a raw intent target gets one Spec-only seed partition before raw-only leaf
   assert.ok(!alpha.writePaths.includes('src/leaf-beta.ts') && !alpha.readPaths.includes('src/leaf-beta.ts'))
   assert.ok(beta.writePaths.includes('src/leaf-beta.ts') && beta.readPaths.includes('src/leaf-beta.ts'))
   assert.ok(!beta.writePaths.includes('src/leaf-alpha.ts') && !beta.readPaths.includes('src/leaf-alpha.ts'))
+})
+
+test('nested raw-only parents get isolated interface seeds while same-bucket childless concepts still batch', () => {
+  const rootPath = '.spec/interface-project/spec.md'
+  const parentPath = '.spec/interface-project/controller/spec.md'
+  const sourcedLeafPath = '.spec/interface-project/controller/device/spec.md'
+  const childlessPaths = ['.spec/interface-project/device/spec.md', '.spec/interface-project/web/spec.md']
+  const nodes = [
+    { id: 'interface-project', path: rootPath }, { id: 'controller', path: parentPath },
+    { id: 'controller-device', path: sourcedLeafPath }, ...childlessPaths.map((path, index) => ({ id: index ? 'web' : 'device', path })),
+  ]
+  const targets = nodes.map(node => ({ nodeId: node.id, path: node.path, rawSource: '' }))
+  const files = new Map<string, string>([
+    [rootPath, rawSpec('interface-project', [])], [parentPath, rawSpec('controller', [])],
+    [sourcedLeafPath, rawSpec('controller-device', ['src/controller/device.ts'])],
+    [childlessPaths[0], rawSpec('device', [])], [childlessPaths[1], rawSpec('web', [])],
+    ['src/controller/device.ts', 'export const device = true'],
+  ])
+  const inputPlan: SyncCoordinatorPlan = {
+    ...plan(), intentNodeId: 'interface-project', targets, readPaths: ['.spec', 'src'],
+    writePaths: ['.spec/interface-project', 'src'], sourcePaths: ['src'], executionScope: undefined, mandatoryTests: [],
+  }
+  const result = planSyncPartitions({ plan: inputPlan, files, contracts: [], nodes, changedPaths: [] })
+  const partitionFor = (nodeId: string) => result.partitions.find(partition => partition.targets.some(target => target.nodeId === nodeId))!
+  const root = partitionFor('interface-project'), parent = partitionFor('controller'), leaf = partitionFor('controller-device')
+  const childless = result.partitions.find(partition => childlessPaths.every(path => partition.targets.some(target => target.path === path)))!
+  for (const [partition, id, path] of [[root, 'interface-project', rootPath], [parent, 'controller', parentPath]] as const) {
+    assert.equal(partition.phase, 'interface_seed')
+    assert.deepEqual(partition.targets.map(target => target.nodeId), [id])
+    assert.deepEqual(partition.writePaths, [path])
+    assert.deepEqual(partition.sourcePaths, [])
+  }
+  assert.equal(leaf.phase, undefined)
+  assert.ok(leaf.writePaths.includes('src/controller/device.ts'))
+  assert.equal(childless.phase, undefined)
+  assert.deepEqual(childless.targets.map(target => target.nodeId), ['device', 'web'])
+})
+
+test('nested interface parent rawSource falls back to frozen node identity when its Spec body is unavailable', () => {
+  const rootPath = '.spec/interface-fallback/spec.md'
+  const parentPath = '.spec/interface-fallback/controller/spec.md'
+  const leafPath = '.spec/interface-fallback/controller/device/spec.md'
+  const targets = [
+    { nodeId: 'interface-fallback', path: rootPath }, { nodeId: 'controller', path: parentPath, rawSource: '' }, { nodeId: 'controller-device', path: leafPath },
+  ]
+  const files = new Map<string, string>([
+    [rootPath, rawSpec('interface-fallback', [])], [leafPath, rawSpec('controller-device', ['src/controller/device.ts'])],
+    ['src/controller/device.ts', 'export const device = true'],
+  ])
+  const inputPlan: SyncCoordinatorPlan = {
+    ...plan(), intentNodeId: 'interface-fallback', targets, readPaths: ['.spec', 'src'],
+    writePaths: ['.spec/interface-fallback', 'src'], sourcePaths: ['src'], executionScope: undefined, mandatoryTests: [],
+  }
+  const result = planSyncPartitions({
+    plan: inputPlan, files, contracts: [], nodes: [
+      { id: 'interface-fallback', path: rootPath }, { id: 'controller', path: parentPath, rawSource: 'frozen controller request' },
+      { id: 'controller-device', path: leafPath },
+    ], changedPaths: [],
+  })
+  const parent = result.partitions.find(partition => partition.targets.some(target => target.nodeId === 'controller'))!
+  assert.equal(parent.phase, 'interface_seed')
+  assert.deepEqual(parent.writePaths, [parentPath])
+  assert.deepEqual(parent.sourcePaths, [])
+})
+
+test('analysis descendant evidence must be a target below the parent and bound to its real source partition', () => {
+  const rootPath = '.spec/interface-analysis/spec.md'
+  const parentPath = '.spec/interface-analysis/controller/spec.md'
+  const newLeafPath = '.spec/interface-analysis/controller/new-device/spec.md'
+  const root = { nodeId: 'interface-analysis', path: rootPath }, parent = { nodeId: 'controller', path: parentPath }
+  const newLeaf = { nodeId: 'new-device', path: newLeafPath, rawSource: 'new device behavior' }
+  const input = {
+    files: new Map([[rootPath, rawSpec(root.nodeId, [])], [parentPath, rawSpec(parent.nodeId, [])]]),
+    contracts: [], nodes: [root, parent].map(target => ({ id: target.nodeId, path: target.path })), targets: [root, parent, newLeaf],
+  }
+  const accepted = {
+    nodeId: newLeaf.nodeId, path: newLeaf.path, codePath: 'src/new-device.ts',
+    sourcePartitionId: 'partition-source-new-device', sourcePaths: ['src/new-device.ts'],
+  }
+  const evidence = rawOnlyInterfaceSeedEvidence(input, parent, [accepted])
+  assert.equal(evidence?.phase, 'interface_seed')
+  assert.equal(evidence?.parentNodeId, 'controller')
+  assert.deepEqual(evidence?.descendants, [{ nodeId: 'new-device', path: newLeafPath, codePaths: ['src/new-device.ts'], sourcePartitionId: 'partition-source-new-device' }])
+  assert.equal(rawOnlyInterfaceSeedEvidence(input, parent, [{ ...accepted, sourcePaths: ['src/unrelated.ts'] }]), null)
+  assert.equal(rawOnlyInterfaceSeedEvidence(input, parent, [{ ...accepted, path: '.spec/unrelated/new-device/spec.md' }]), null)
+  assert.equal(rawOnlyInterfaceSeedEvidence(input, parent, [accepted, { ...accepted, sourcePartitionId: 'another-owner' }]), null)
+})
+
+test('an existing Contract, own code binding, absent source file, or unrelated source cannot create a pure-parent phase', () => {
+  const rootPath = '.spec/interface-guards/spec.md'
+  const contractParentPath = '.spec/interface-guards/contract-parent/spec.md'
+  const contractLeafPath = '.spec/interface-guards/contract-parent/leaf/spec.md'
+  const codedParentPath = '.spec/interface-guards/coded-parent/spec.md'
+  const codedLeafPath = '.spec/interface-guards/coded-parent/leaf/spec.md'
+  const missingParentPath = '.spec/interface-guards/missing-parent/spec.md'
+  const missingLeafPath = '.spec/interface-guards/missing-parent/leaf/spec.md'
+  const unrelatedPath = '.spec/elsewhere/leaf/spec.md'
+  const targets = [rootPath, contractParentPath, contractLeafPath, codedParentPath, codedLeafPath, missingParentPath, missingLeafPath, unrelatedPath]
+    .map((path, index) => ({ nodeId: ['interface-guards', 'contract-parent', 'contract-leaf', 'coded-parent', 'coded-leaf', 'missing-parent', 'missing-leaf', 'elsewhere-leaf'][index], path }))
+  const files = new Map<string, string>([
+    [rootPath, rawSpec('interface-guards', [])],
+    [contractParentPath, rawSpec('contract-parent', [])], [contractLeafPath, rawSpec('contract-leaf', ['src/contract/leaf.ts'])],
+    [codedParentPath, rawSpec('coded-parent', ['src/coded/parent.ts'])], [codedLeafPath, rawSpec('coded-leaf', ['src/coded/leaf.ts'])],
+    [missingParentPath, rawSpec('missing-parent', [])], [missingLeafPath, rawSpec('missing-leaf', ['src/missing/leaf.ts'])],
+    [unrelatedPath, rawSpec('elsewhere-leaf', ['src/elsewhere/leaf.ts'])],
+    ['src/contract/leaf.ts', 'contract child'], ['src/coded/parent.ts', 'parent implementation'], ['src/coded/leaf.ts', 'coded child'],
+    ['src/elsewhere/leaf.ts', 'unrelated implementation'],
+  ])
+  const inputPlan: SyncCoordinatorPlan = {
+    ...plan(), intentNodeId: 'interface-guards', targets, readPaths: ['.spec', 'src'],
+    writePaths: ['.spec/interface-guards', '.spec/elsewhere', 'src'], sourcePaths: ['src'], executionScope: undefined, mandatoryTests: [],
+  }
+  const result = planSyncPartitions({
+    plan: inputPlan, files, contracts: [contract('contract-parent', contractParentPath, [])], nodes: targets.map(target => ({ id: target.nodeId, path: target.path })), changedPaths: [],
+  })
+  const partitionFor = (nodeId: string) => result.partitions.find(partition => partition.targets.some(target => target.nodeId === nodeId))!
+  assert.equal(partitionFor('contract-parent').phase, undefined)
+  assert.equal(partitionFor('coded-parent').phase, undefined)
+  assert.equal(partitionFor('missing-parent').phase, undefined)
+  assert.equal(partitionFor('interface-guards').phase, 'interface_seed')
+})
+
+test('a raw global intent with no actual child keeps its legacy Spec-only seed without interface phase', () => {
+  const rootPath = '.spec/interface-no-child/spec.md', unrelatedPath = '.spec/unrelated/leaf/spec.md'
+  const targets = [{ nodeId: 'interface-no-child', path: rootPath }, { nodeId: 'unrelated-leaf', path: unrelatedPath }]
+  const files = new Map<string, string>([
+    [rootPath, rawSpec('interface-no-child', [])], [unrelatedPath, rawSpec('unrelated-leaf', ['src/unrelated/leaf.ts'])],
+    ['src/unrelated/leaf.ts', 'unrelated source'],
+  ])
+  const result = planSyncPartitions({
+    plan: { ...plan(), intentNodeId: 'interface-no-child', targets, readPaths: ['.spec', 'src'], writePaths: ['.spec/interface-no-child', '.spec/unrelated', 'src'], sourcePaths: ['src'], executionScope: undefined, mandatoryTests: [] },
+    files, contracts: [], nodes: targets.map(target => ({ id: target.nodeId, path: target.path })), changedPaths: [],
+  })
+  const root = result.partitions.find(partition => partition.targets.some(target => target.nodeId === 'interface-no-child'))!
+  assert.equal(root.phase, undefined)
+  assert.deepEqual(root.writePaths, [rootPath])
+  assert.deepEqual(root.sourcePaths, [])
 })
 
 test('raw intent seed detection accepts frozen node and target rawSource fields when Markdown is absent', () => {
