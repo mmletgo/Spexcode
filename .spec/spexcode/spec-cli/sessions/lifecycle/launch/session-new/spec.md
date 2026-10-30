@@ -98,6 +98,11 @@ entry with zero old OID. The oldest surviving commit entry is insufficient: miss
 a moved symbolic base, an authored HEAD, tracked/untracked/ignored WIP, or an unknown registration preserves
 the resources and receipt and refuses recovery. Only the existing byte-identical host-state seed exception remains.
 
+Recovery also refuses resources claimed by another canonically published session in the same project, including
+stopped and archived owners. Saved path identity (including a physical alias) and same-repository branch ownership
+both fence deletion; another repository's same-named branch does not. A valid old receipt for one complete UUID
+cannot delete another published UUID's resources even when their former four-character suffix and fork coincide.
+
 Record publication itself fences any receipt that could not be retired: while that public record exists,
 create returns it and never enters candidate cleanup. Before terminal close may remove that fence, close holds
 the same session-id and exact `{branch,path}` resource locks, retires a valid matching candidate receipt, and

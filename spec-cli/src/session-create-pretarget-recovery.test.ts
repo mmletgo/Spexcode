@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-for (const scenario of ['absent', 'path', 'branch', 'store', 'invalid-receipt', 'wrong-payload', 'canonical-address', 'candidate-lock', 'legacy-receipt', 'legacy-modified', 'legacy-forged-path', 'legacy-identity', 'legacy-path', 'legacy-branch'] as const) {
+for (const scenario of ['absent', 'path', 'branch', 'store', 'invalid-receipt', 'wrong-payload', 'canonical-address', 'candidate-lock', 'current-receipt', 'legacy-receipt', 'legacy-modified', 'legacy-forged-path', 'legacy-identity', 'legacy-path', 'legacy-branch', 'legacy-published-owner', 'legacy-archived-owner', 'legacy-archived-branch-owner', 'legacy-path-owner', 'legacy-alias-owner', 'legacy-foreign-branch'] as const) {
   test(`pretarget creation recovery ${scenario} preserves exact publication authority`, { timeout: 30000 }, () => {
     const temp = mkdtempSync(join(tmpdir(), 'spex-pretarget-recovery-')), root = join(temp, 'source'), home = join(temp, 'runtime')
     try {
@@ -18,14 +18,16 @@ for (const scenario of ['absent', 'path', 'branch', 'store', 'invalid-receipt', 
       const runner = join(temp, 'run.mts')
       writeFileSync(runner, `import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
-import {existsSync,mkdirSync,readFileSync,realpathSync,writeFileSync} from 'node:fs';
+import {existsSync,mkdirSync,readFileSync,realpathSync,symlinkSync,writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {digest,recoverSessionCreateTermination,readSessionCreateTermination,sessionCreateRequest,sessionIdForCreateKey} from ${JSON.stringify(fileURLToPath(new URL('./sessions.ts', import.meta.url)))};
 import {configuredSessionApplication} from ${JSON.stringify(fileURLToPath(new URL('./session-application.ts', import.meta.url)))};
+import {fromRaw,writeRecord} from ${JSON.stringify(fileURLToPath(new URL('./session-record.ts', import.meta.url)))};
 import {withRecordLock} from ${JSON.stringify(fileURLToPath(new URL('./session-record.ts', import.meta.url)))};
 import {nodeFromPrompt,slugify,titleFromPrompt} from ${JSON.stringify(fileURLToPath(new URL('./session-prompt.ts', import.meta.url)))};
 import {runtimeRoot,sessionStoreDir} from ${JSON.stringify(fileURLToPath(new URL('../../packages/spec-core/src/index.ts', import.meta.url)))};
-const key='pretarget-create-proof',prompt='pretarget recovery',id=sessionIdForCreateKey(key);
+const scenario=${JSON.stringify(scenario)};
+const key=scenario.includes('owner')||scenario==='legacy-foreign-branch'?'crash-3':'pretarget-create-proof',prompt='pretarget recovery',id=sessionIdForCreateKey(key);
 const git=(...args)=>execFileSync('git',['-C',process.cwd(),...args],{encoding:'utf8'}).trim();
 const base=git('rev-parse','HEAD');
 const policy={version:1,policy:'codex-read-only-v1',schema:{type:'object'},inputDigest:'frozen-input',purpose:'pretarget-recovery',timeoutMs:10000};
@@ -39,7 +41,6 @@ if(process.argv[2]==='crash'){
 const application=configuredSessionApplication();
 assert.equal(application.readAddress(id),null);
 assert.equal(readSessionCreateTermination(key),null);
-const scenario=${JSON.stringify(scenario)};
 const slug=slugify(nodeFromPrompt(prompt)||titleFromPrompt(prompt))+'-'+(scenario.startsWith('legacy-')?id.slice(0,4):id);
 const path=join(realpathSync(runtimeRoot()),'structured-worktrees',slug),branch='node/'+slug;
 const receiptDir=join(runtimeRoot(),'.session-create-candidates'),receiptPath=join(receiptDir,id+'.json');
@@ -52,13 +53,30 @@ if(scenario==='store'){mkdirSync(sessionStoreDir(id),{recursive:true});writeFile
 if(scenario==='invalid-receipt'){mkdirSync(receiptDir,{recursive:true});writeFileSync(receiptPath,'{}');}
 if(scenario==='canonical-address')application.protocol.withTransaction(tx=>tx.initialize(id));
 // Synthetic old-writer receipt with real isolated Git resources; no production receipt is accessed.
-if(['legacy-receipt','legacy-modified','legacy-forged-path','legacy-identity'].includes(scenario)){
+if(['current-receipt','legacy-receipt','legacy-modified','legacy-forged-path','legacy-identity','legacy-published-owner','legacy-archived-owner','legacy-archived-branch-owner','legacy-path-owner','legacy-alias-owner','legacy-foreign-branch'].includes(scenario)){
  mkdirSync(join(realpathSync(runtimeRoot()),'structured-worktrees'),{recursive:true});
  git('worktree','add','--no-track','-b',branch,path,base);
  mkdirSync(receiptDir,{recursive:true});
  writeFileSync(receiptPath,JSON.stringify({version:1,requestDigest:digest(key),payloadHash,root:git('rev-parse','--show-toplevel'),path:scenario==='legacy-forged-path'?path+'-foreign':path,branch,prestate:{store:false,path:false,worktree:false,branch:false},stage:'git-created'}));
  if(scenario==='legacy-modified')writeFileSync(join(path,'user-data'),'keep user data');
  if(scenario==='legacy-identity')execFileSync('git',['-C',path,'checkout','--detach'],{stdio:'ignore'});
+}
+let ownerId,ownerBefore,ownerRecordBefore;
+if(scenario.includes('owner')||scenario==='legacy-foreign-branch'){
+ ownerId=sessionIdForCreateKey('crash-157');assert.equal(ownerId.slice(0,4),id.slice(0,4));assert.notEqual(ownerId,id);
+ let ownerPath=path,ownerBranch=branch;
+ if(scenario==='legacy-path-owner')ownerBranch='node/other-published-branch';
+ if(scenario==='legacy-alias-owner'){ownerPath=join(process.cwd(),'..','owner-alias');symlinkSync(path,ownerPath,'dir');ownerBranch='node/alias-published-branch';}
+ if(scenario==='legacy-archived-branch-owner')ownerPath=join(realpathSync(runtimeRoot()),'structured-worktrees','archived-owner');
+ if(scenario==='legacy-foreign-branch'){
+  ownerPath=join(process.cwd(),'..','foreign');mkdirSync(ownerPath);
+  const foreign=(...args)=>execFileSync('git',['-C',ownerPath,...args],{encoding:'utf8'}).trim();
+  foreign('init','-q','-b',branch);foreign('-c','user.name=fixture','-c','user.email=fixture@example.test','commit','--allow-empty','-qm','foreign owner');
+ }
+ application.createSession({sessionId:ownerId,status:'idle',proposal:null,note:null,parentSessionId:null});
+ writeRecord(fromRaw({session_id:ownerId,governed:true,worktree_path:ownerPath,branch:ownerBranch,status:'idle',stopped:true,archived:scenario.startsWith('legacy-archived-')}));
+ ownerBefore={state:application.readState(ownerId),address:application.readAddress(ownerId)};
+ ownerRecordBefore=readFileSync(join(sessionStoreDir(ownerId),'runtime.json'),'utf8');
 }
 const registeredBeforeRecovery=git('worktree','list','--porcelain');
 const options={prompt,payloadHash,base,signal:AbortSignal.timeout(5000),structuredExecution:policy};
@@ -70,14 +88,14 @@ if(scenario==='candidate-lock'){
  await admitted;
 }
 let result;
-if(['invalid-receipt','wrong-payload','legacy-modified','legacy-forged-path','legacy-identity'].includes(scenario))await assert.rejects(recoverSessionCreateTermination(key,options),/invalid private candidate receipt|payload|does not match|identity mismatch|new or modified/);
+if(['invalid-receipt','wrong-payload','legacy-modified','legacy-forged-path','legacy-identity','legacy-published-owner','legacy-archived-owner','legacy-archived-branch-owner','legacy-path-owner','legacy-alias-owner'].includes(scenario))await assert.rejects(recoverSessionCreateTermination(key,options),/invalid private candidate receipt|payload|does not match|identity mismatch|new or modified|published session/);
 else if(scenario==='candidate-lock'){
  let settled=false;
  const recovering=recoverSessionCreateTermination(key,options).then(value=>{settled=true;return value;});
  await new Promise(resolve=>setTimeout(resolve,25));assert.equal(settled,false,'recovery must hold the same exact candidate lock');
  unlock();await pending;result=await recovering;assert.equal(result,null);
 }else result=await recoverSessionCreateTermination(key,options);
-if(scenario==='absent'||scenario==='legacy-receipt'){
+if(scenario==='absent'||scenario==='current-receipt'||scenario==='legacy-receipt'||scenario==='legacy-foreign-branch'){
  assert.ok(result,'crashed admitted create before ownership must obtain a real bounded termination proof');
  assert.equal(result.sessionId,id);assert.equal(result.requestDigest,digest(key));assert.equal(result.payloadHash,payloadHash);
  assert.equal(result.phase,scenario==='absent'?'target-resolution':'cleanup');assert.equal(result.nativeStatus,'notStarted');assert.equal(result.cleanupComplete,true);
@@ -96,7 +114,8 @@ if(scenario==='absent'||scenario==='legacy-receipt'){
  if(scenario==='invalid-receipt')assert.equal(readFileSync(receiptPath,'utf8'),'{}');
  if(scenario==='canonical-address')assert.ok(application.readAddress(id));
 }
-assert.equal(git('rev-parse','HEAD'),before.head);assert.deepEqual(readFileSync(git('rev-parse','--git-path','index')),before.index);assert.equal(git('status','--porcelain=v1'),before.status);assert.equal(git('worktree','list','--porcelain'),scenario==='legacy-receipt'?before.worktrees:registeredBeforeRecovery);
+if(ownerId){assert.deepEqual({state:application.readState(ownerId),address:application.readAddress(ownerId)},ownerBefore);assert.equal(readFileSync(join(sessionStoreDir(ownerId),'runtime.json'),'utf8'),ownerRecordBefore);}
+assert.equal(git('rev-parse','HEAD'),before.head);assert.deepEqual(readFileSync(git('rev-parse','--git-path','index')),before.index);assert.equal(git('status','--porcelain=v1'),before.status);assert.equal(git('worktree','list','--porcelain'),scenario==='current-receipt'||scenario==='legacy-receipt'||scenario==='legacy-foreign-branch'?before.worktrees:registeredBeforeRecovery);
 console.log(JSON.stringify({scenario,termination:result?.nativeStatus??null,canonicalAddress:application.readAddress(id),completedRecovery:true}));process.exit();
 `)
       const env = { ...process.env, NODE_TEST_CONTEXT: undefined, SPEXCODE_HOME: home, SPEX_SESSION_DATABASE_PATH: join(home, 'sessions.sqlite'), SPEX_SESSION_ID: undefined }

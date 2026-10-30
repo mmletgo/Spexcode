@@ -2626,9 +2626,27 @@ async function proveSessionCandidate(root: string, path: string, branch: string,
 }
 
 async function proveSessionCandidateRecovery(root: string, id: string, path: string, branch: string, state: SessionCandidateState, base: string | null | undefined, signal: AbortSignal): Promise<string | undefined> {
-  if (readRecord(id) || configuredSessionApplication().readAddress(id)
+  const application = configuredSessionApplication()
+  if (readRecord(id) || application.readAddress(id)
     || codexGenerationBindingForSession(join(runtimeRoot(), 'structured-read-only-v1', 'control'), id))
     throw new SessionCreateError('session_create_failed', 'cleanup', 'candidate publication or native ownership is not cold; preserving resources', 409)
+  for (const ownerId of listSessionIds()) {
+    if (ownerId === id || !application.readAddress(ownerId)) continue
+    const owner = readRecord(ownerId)
+    if (!owner) continue
+    const samePath = !!owner.worktreePath && (resolve(owner.worktreePath) === resolve(path)
+      || existsSync(owner.worktreePath) && existsSync(path) && realpathSync(owner.worktreePath) === realpathSync(path))
+    if (!samePath && owner.branch !== branch) continue
+    if (!samePath && owner.worktreePath && existsSync(owner.worktreePath)) {
+      const [expected, actual] = await withGitAbortSignal(signal, () => Promise.all([
+        gitTry(['-C', root, 'rev-parse', '--path-format=absolute', '--git-common-dir']),
+        gitTry(['-C', owner.worktreePath, 'rev-parse', '--path-format=absolute', '--git-common-dir']),
+      ]))
+      if (!expected.ok || !actual.ok) throw new SessionCreateError('session_create_failed', 'cleanup', `cannot prove published session ${ownerId} resource repository; preserving resources`, 409)
+      if (realpathSync(expected.stdout.trim()) !== realpathSync(actual.stdout.trim())) continue
+    }
+    throw new SessionCreateError('session_create_failed', 'cleanup', `candidate resource belongs to published session ${ownerId}; preserving resources`, 409)
+  }
   if (state.path && !state.worktree) throw new SessionCreateError('session_create_failed', 'cleanup', 'candidate path has no matching Git registration; preserving unknown contents', 409)
   if (state.worktree) {
     const mismatch = await proveSessionCandidate(root, path, branch, signal)

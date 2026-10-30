@@ -219,15 +219,26 @@ esac
     await waitForHealth()
 
   }
+  const publishedOwner = (id: string, path: string, branch: string, publish: boolean) => {
+    const script = `import {configuredSessionApplication} from ${JSON.stringify(join(src, 'session-application.ts'))};
+import {fromRaw,writeRecord} from ${JSON.stringify(join(src, 'session-record.ts'))};
+const app=configuredSessionApplication(),id=${JSON.stringify(id)};
+if(${publish}){app.createSession({sessionId:id,status:'idle',proposal:null,note:null,parentSessionId:null});writeRecord(fromRaw({session_id:id,governed:true,status:'idle',stopped:true,worktree_path:${JSON.stringify(path)},branch:${JSON.stringify(branch)}}));}
+console.log(JSON.stringify({address:app.readAddress(id),state:app.readState(id)}));`
+    return execFileSync(process.execPath, ['--import', createRequire(import.meta.url).resolve('tsx/esm'), '--input-type=module', '-e', script], {
+      cwd: project, encoding: 'utf8', env: { ...process.env, SPEXCODE_HOME: home, SPEX_SESSION_DATABASE_PATH: join(home, 'sessions.sqlite'), SPEX_SESSION_ID: undefined, SPEXCODE_SESSION_ID: undefined },
+    }).trim()
+  }
 
   try {
     await waitForHealth()
     if (registryMode === 'recovery-safety') {
       unlinkSync(stallGit)
-      for (const layout of ['current', 'legacy']) for (const mutation of ['wip', 'ignored', 'fork', 'expired-reflog', 'missing-reflog', 'symbolic-base', 'clean']) {
-        const key = `retry-${layout}-${mutation}`, prompt = `${layout} retry safety ${mutation}`
+      for (const layout of ['current', 'legacy']) for (const mutation of ['wip', 'ignored', 'fork', 'expired-reflog', 'missing-reflog', 'symbolic-base', 'published-owner', 'clean']) {
+        const key = mutation === 'published-owner' ? layout === 'legacy' ? 'crash-3' : 'collision-112' : `retry-${layout}-${mutation}`, prompt = `${layout} retry safety ${mutation}`
         const pinnedBase = mutation === 'symbolic-base' ? 'staging' : undefined, sourceFork = git(project, 'rev-parse', 'staging')
         let receiptPath = '', receipt: any
+        let ownerId = '', ownerBefore = '', ownerRecordBefore = ''
         await crashBackend(killAfterGit, key, prompt, () => {
           receiptPath = candidateReceipts().find(path => path.endsWith(`${sessionIdForCreateKey(key)}.json`))!
           receipt = JSON.parse(readFileSync(receiptPath, 'utf8'))
@@ -244,6 +255,12 @@ esac
           }
           if (mutation === 'fork' || mutation === 'expired-reflog' || mutation === 'symbolic-base') git(receipt.path, '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.test', 'commit', '--allow-empty', '-qm', 'candidate authored commit')
           if (mutation === 'symbolic-base') git(project, 'update-ref', 'refs/heads/staging', git(receipt.path, 'rev-parse', 'HEAD'))
+          if (mutation === 'published-owner') {
+            ownerId = sessionIdForCreateKey(layout === 'legacy' ? 'crash-157' : 'collision-117')
+            assert.equal(ownerId.slice(0, 4), sessionIdForCreateKey(key).slice(0, 4))
+            ownerBefore = publishedOwner(ownerId, receipt.path, receipt.branch, true)
+            ownerRecordBefore = readFileSync(recordPath(ownerId), 'utf8')
+          }
           const reflog = git(project, 'rev-parse', '--path-format=absolute', '--git-path', `logs/refs/heads/${receipt.branch}`)
           if (mutation === 'expired-reflog') writeFileSync(reflog, readFileSync(reflog, 'utf8').split('\n').slice(1).join('\n'))
           if (mutation === 'missing-reflog') unlinkSync(reflog)
@@ -258,6 +275,10 @@ esac
           if (mutation === 'wip' || mutation === 'ignored') assert.equal(readFileSync(join(receipt.path, mutation === 'ignored' ? 'ignored-wip' : 'user-data'), 'utf8'), 'preserve candidate edits')
         }
         if (mutation === 'symbolic-base') git(project, 'update-ref', 'refs/heads/staging', sourceFork)
+        if (mutation === 'published-owner') {
+          assert.equal(readFileSync(recordPath(ownerId), 'utf8'), ownerRecordBefore)
+          assert.equal(publishedOwner(ownerId, receipt.path, receipt.branch, false), ownerBefore)
+        }
       }
       return
     }
