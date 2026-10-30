@@ -1188,10 +1188,18 @@ test('提交门禁：code、Spec、混合commit按已提交差量分类，同com
   try {
     governDemoCode(f)
     f.application.start = () => {}
+    const boundaries = new Map<string, { before: Awaited<ReturnType<typeof captureInputSnapshot>> | null; paths: readonly string[] }>()
+    const freeze = f.application['freezeNodePlan'].bind(f.application)
+    f.application['freezeNodePlan'] = async (snapshot, nodeId, reuse, direction, trigger) => {
+      if (trigger) boundaries.set(snapshot.id, trigger)
+      return freeze(snapshot, nodeId, reuse, direction, trigger)
+    }
     await f.application.enable()
     await f.application.startService({ compensationMs: 10000, debounceMs: 5 })
     const initial = f.application.store.listOperations(identifyWorktree(f.root).repositoryId)[0]
     assert.equal(initial.origin, 'initial'); assert.equal(initial.input.captureKind, 'commit')
+    assert.equal(boundaries.get(initial.input.id)!.before, null)
+    let previous = initial.input
     for (const [origin, message] of [['code', 'code only'], ['spec', 'spec only'], ['combined', 'both']] as const) {
       if (origin !== 'spec') writeFileSync(join(f.root, 'src/demo.mjs'), `export const demo = text => text // ${message}\n`)
       if (origin !== 'code') writeFileSync(join(f.root, '.spec/demo/spec.md'), readFileSync(join(f.root, '.spec/demo/spec.md'), 'utf8').replace('返回用户指定的文本。', `返回用户指定的文本。${message}`))
@@ -1201,20 +1209,27 @@ test('提交门禁：code、Spec、混合commit按已提交差量分类，同com
       const head = f.git(['rev-parse', 'HEAD']).trim(), operation = f.application.store.listOperations(initial.input.source.repositoryId).find(item => item.input.headCommit === head)!
       assert.ok(operation, JSON.stringify(f.application.observationStatus().latest))
       assert.equal(operation.origin, origin)
+      assert.equal(boundaries.get(operation.input.id)!.before!.id, previous.id, '边界沿上次真实接入快照')
       assert.equal((await f.application.readOperation(operation.id)).stale, false, '后来的dirty编辑不改变commit操作当前性')
       const count = f.application.store.listOperations(initial.input.source.repositoryId).length
       await f.application['scanObservedInput'](); assert.equal(f.application.store.listOperations(initial.input.source.repositoryId).length, count)
       f.git(['restore', 'src/demo.mjs'])
+      previous = operation.input
     }
     const count = f.application.store.listOperations(initial.input.source.repositoryId).length
     await f.application.stopService(); await f.application.startService({ compensationMs: 10000, debounceMs: 5 })
     assert.equal(f.application.store.listOperations(initial.input.source.repositoryId).length, count)
     await f.application.stopService()
+    writeFileSync(join(f.root, '.spec/demo/spec.md'), readFileSync(join(f.root, '.spec/demo/spec.md'), 'utf8') + '\n停机期间提交原意。\n')
+    f.git(['add', '.']); f.git(['commit', '-qm', 'offline spec commit'])
     writeFileSync(join(f.root, 'src/demo.mjs'), 'export const demo = text => `offline:${text}`\n'); f.git(['add', '.']); f.git(['commit', '-qm', 'offline code commit'])
     writeFileSync(join(f.root, '.spec/demo/spec.md'), readFileSync(join(f.root, '.spec/demo/spec.md'), 'utf8') + '\n未提交保存不进入补偿。\n')
     await f.application.startService({ compensationMs: 10000, debounceMs: 5 })
     const compensated = f.application.store.listOperations(initial.input.source.repositoryId)[0]
-    assert.equal(compensated.origin, 'code'); assert.equal(compensated.input.headCommit, f.git(['rev-parse', 'HEAD']).trim())
+    assert.equal(compensated.origin, 'combined'); assert.equal(compensated.input.headCommit, f.git(['rev-parse', 'HEAD']).trim())
+    assert.equal(boundaries.get(compensated.input.id)!.before!.id, previous.id)
+    assert.deepEqual(boundaries.get(compensated.input.id)!.paths, ['.spec/demo/spec.md', 'src/demo.mjs'])
+    assert.notEqual(previous.immutableTree, f.git(['rev-parse', 'HEAD^' + '^{tree}']).trim(), '不能把累计边界猜成HEAD parent')
     assert.equal(f.calls.length, 0)
   } finally { await f.application.stopService(); f.cleanup() }
 })
@@ -1238,6 +1253,7 @@ test('AC-APPLICATION-P4-01 无浏览器暂停仍记录提交，恢复最新输�
     assert.equal(operations.length, 1)
     const detail = await f.application.wait(operations[0].operation.id)
     assert.equal(detail.operation.input.id, f.application.observationStatus().latestSnapshot!.id)
+    assert.equal(detail.operation.origin, 'initial', '从未接入的暂停观察不消费首次纳管边界')
     await new Promise(resolve => setTimeout(resolve, 100))
     assert.equal(f.calls.length, 1)
     assert.equal((await f.application.status()).operations.length, 1)
