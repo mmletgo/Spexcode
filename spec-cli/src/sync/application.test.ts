@@ -176,12 +176,14 @@ test('自动观察准入、固定工具描述和真实runner请求使用同一�
     f.git(['add', '.']); f.git(['commit', '-qm', 'automatic model input'])
     await observeUntil(() => f.application.observationStatus().latestSnapshot?.id !== initial)
     await f.application.automaticControl('resume')
-    await observeUntil(() => f.calls.length === 1)
+    await observeUntil(() => f.calls.length > 0)
     const operations = (await f.application.status()).operations
     assert.equal(operations.length, 1)
     const detail = await f.application.wait(operations[0].operation.id)
     assert.equal(detail.operation.model, model)
-    assert.equal(f.calls[0].model, model)
+    assert.ok(f.calls.length > 0)
+    assert.equal(new Set(f.calls.map(call => call.requestKey)).size, f.calls.length)
+    assert.ok(f.calls.every(call => call.model === detail.operation.model))
     const toolsRef = join(f.temp, 'runtime', 'artifacts', `application-runtime-${contentHash(detail.operation.ingressKey)}.json`)
     const saved = JSON.parse(readFileSync(toolsRef, 'utf8'))
     assert.equal(saved.version, 'sync-tools-v2')
@@ -567,19 +569,32 @@ test('AC-APPLICATION-15 仅显式retry建立关联新操作与新预算，普通
     const repeated = await f.application.submit(repeatedRequest)
     assert.equal(repeated.operation?.id, original.operation.id)
     await f.application.wait(original.operation.id)
+    const firstCallCount = f.calls.length
+    const firstRequestKeys = new Set(f.calls.map(call => call.requestKey))
+    assert.ok(firstCallCount > 0)
+    assert.equal(firstRequestKeys.size, firstCallCount)
+    assert.equal(original.operation.callsUsed, firstCallCount)
     assert.equal((await f.application.submit(repeatedRequest)).operation?.id, original.operation.id)
     await f.application.wait(original.operation.id)
+    assert.equal(f.calls.length, firstCallCount, '普通重复不得新增分区调用')
+    assert.deepEqual(new Set(f.calls.map(call => call.requestKey)), firstRequestKeys)
     const request = { nodeId: 'demo', requestId: 'explicit-retry', retryOf: original.operation.id }
     const retried = await f.application.submit(request); assert.ok(retried.operation)
     assert.notEqual(retried.operation.id, original.operation.id)
     const result = await f.application.wait(retried.operation.id)
     assert.equal(result.operation.retryOf, original.operation.id); assert.equal(result.operation.origin, 'initial')
-    assert.equal(result.operation.callsUsed, 1); assert.deepEqual(result.operation.budget, original.operation.budget)
+    const retryRequests = f.calls.slice(firstCallCount)
+    const retryRequestKeys = new Set(retryRequests.map(call => call.requestKey))
+    assert.ok(retryRequests.length > 0)
+    assert.equal(retryRequestKeys.size, retryRequests.length)
+    assert.equal(result.operation.callsUsed, retryRequests.length); assert.deepEqual(result.operation.budget, original.operation.budget)
     assert.ok(result.operation.deadlineAtMs > original.operation.deadlineAtMs)
-    assert.equal((await f.application.readOperation(original.operation.id)).operation.callsUsed, 1)
+    assert.equal((await f.application.readOperation(original.operation.id)).operation.callsUsed, firstCallCount)
     assert.equal((await f.application.submit(request)).operation?.id, result.operation.id)
     await f.application.wait(result.operation.id)
-    assert.equal(f.calls.length, 2); assert.equal((await f.application.status()).operations.length, 2)
+    assert.equal(f.calls.length, firstCallCount + retryRequests.length, '精确retry重放不得新增分区调用')
+    assert.equal(new Set(f.calls.map(call => call.requestKey)).size, f.calls.length)
+    assert.equal((await f.application.status()).operations.length, 2)
   } finally { f.cleanup() }
 })
 
@@ -1194,7 +1209,7 @@ test('提交门禁：code、Spec、混合commit按已提交差量分类，同com
   const f = await fixture()
   try {
     governDemoCode(f)
-    f.application.start = () => {}
+    f.application['launch'] = () => {}
     const boundaries = new Map<string, { before: Awaited<ReturnType<typeof captureInputSnapshot>> | null; paths: readonly string[] }>()
     const freeze = f.application['freezeNodePlan'].bind(f.application)
     f.application['freezeNodePlan'] = async (snapshot, nodeId, reuse, direction, trigger) => {
