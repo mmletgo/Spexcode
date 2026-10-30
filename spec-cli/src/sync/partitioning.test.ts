@@ -398,3 +398,41 @@ test('raw intent seed detection accepts frozen node and target rawSource fields 
   })
   assert.deepEqual(byNode.partitions.map(partition => partition.writePaths), [[path]])
 })
+
+test('moved raw Spec keeps its old code writer metadata without overriding current Markdown', () => {
+  const oldPath = '.spec/moved/old/spec.md', currentPath = '.spec/moved/current/spec.md'
+  const currentSpec = rawSpec('moving-node', ['src/current.ts'])
+  const oldSpec = rawSpec('moving-node', ['src/old.ts'])
+  const staleAtCurrentPath = rawSpec('moving-node', ['src/stale.ts'])
+  const files = new Map<string, string>([
+    [currentPath, currentSpec], ['src/current.ts', 'current source'],
+  ])
+  const governanceSources = new Map([[oldPath, oldSpec], [currentPath, staleAtCurrentPath]])
+  const movePlan: SyncCoordinatorPlan = {
+    ...plan(), intentNodeId: 'request-root',
+    targets: [{ nodeId: 'moving-node', path: currentPath }],
+    readPaths: ['.spec', 'src'], writePaths: ['.spec/moved', 'src'], sourcePaths: ['src'],
+    executionScope: { paths: ['.spec/moved', 'src'], contractIds: [], flowIds: [] }, mandatoryTests: [],
+  }
+  const nodes = [
+    { id: 'moving-node', path: oldPath, rawSource: 'old request' },
+    { id: 'moving-node', path: currentPath, rawSource: 'current request' },
+  ]
+  const changedPaths = [oldPath, 'src/old.ts']
+  const inputFiles = [...files]
+  const result = planSyncPartitions({
+    plan: movePlan, files, contracts: [], nodes, governanceSources, changedPaths,
+    readByteSizes: new Map([[oldPath, 80], ['src/old.ts', 120]]),
+  })
+  const partition = result.partitions.find(candidate => candidate.targets.some(target => target.nodeId === 'moving-node'))!
+  assert.deepEqual(partition.changedPaths, [oldPath, 'src/old.ts'])
+  assert.ok(partition.writePaths.includes(oldPath) && partition.writePaths.includes('src/old.ts'))
+  assert.ok(partition.writePaths.includes('src/current.ts'))
+  assert.ok(!partition.writePaths.includes('src/stale.ts'))
+  assert.ok(partition.readPaths.includes(oldPath) && partition.readPaths.includes(currentPath))
+  assert.ok(!partition.readPaths.includes('src/stale.ts'))
+  assert.deepEqual(partition.targets.map(target => target.path), [currentPath])
+  assert.equal(files.has(oldPath), false, 'historical governance source never enters the current body map')
+  assert.deepEqual([...files], inputFiles)
+  assert.equal(result.expectedPaths.includes(oldPath), true)
+})
