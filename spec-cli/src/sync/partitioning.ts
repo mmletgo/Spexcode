@@ -53,6 +53,7 @@ export type PlanSyncPartitionsInput = {
 /** 纯父判定只需调用方冻结的节点、Spec正文、契约与本地target；不依赖完整协调plan。 */
 export type RawOnlyInterfaceSeedInput = {
   files: ReadonlyMap<string, string>
+  sourcePaths: readonly string[]
   contracts: readonly Contract[]
   nodes?: readonly { id: string; path: string; rawSource?: string | null }[]
   governanceSources?: ReadonlyMap<string, string>
@@ -160,7 +161,8 @@ function rawOnlyInterfaceSeedEvidenceFrom(
     if (candidate.nodeId === target.nodeId || !isDescendant(candidate.path)) continue
     const node = governanceNodeAtPath(governanceNodes, candidate.path)
     if (!node?.code.length) continue
-    const codePaths = uniqueSorted(node.code.flatMap(entry => [...input.files.keys()].filter(path => relationClaimsPath(entry.path, path))))
+    const codePaths = uniqueSorted(node.code.flatMap(entry => [...input.files.keys()].filter(path =>
+      coveredPath(path, input.sourcePaths) && relationClaimsPath(entry.path, path))))
     if (codePaths.length) descendants.set(`${candidate.nodeId}\0${candidate.path}`, { nodeId: candidate.nodeId, path: candidate.path, codePaths })
   }
   const sourcePartitionOwners = new Map<string, Set<string>>()
@@ -598,7 +600,7 @@ export function planSyncPartitions(input: PlanSyncPartitionsInput): SyncPartitio
   const contracts = [...input.contracts].sort((a, b) => compare(a.nodeId, b.nodeId) || compare(a.path, b.path))
   const graph = buildContractGraph(contracts)
   const frozenInput: RawOnlyInterfaceSeedInput = {
-    files: input.files, contracts, nodes: input.nodes, governanceSources: input.governanceSources, targets: input.plan.targets,
+    files: input.files, sourcePaths: input.plan.sourcePaths ?? [], contracts, nodes: input.nodes, governanceSources: input.governanceSources, targets: input.plan.targets,
   }
   const governanceNodes = governanceNodesForInput(frozenInput, contracts)
   const interfaceSeedNodeIds = new Set(input.plan.targets.flatMap(target => rawOnlyInterfaceSeedEvidenceFrom(frozenInput, target, governanceNodes, []) ? [target.nodeId] : []))
