@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { parseContract } from '@spexcode/spec-core/contracts'
 import type { Contract } from '@spexcode/spec-core/contracts'
 import type { SyncCoordinatorPlan } from './coordinator-types.js'
 import { planSyncPartitions, projectSyncPartition, rawOnlyInterfaceSeedEvidence } from './partitioning.js'
@@ -471,6 +472,159 @@ test('analysis descendant evidence must be a target below the parent and bound t
   assert.equal(rawOnlyInterfaceSeedEvidence(input, parent, [{ ...accepted, sourcePaths: ['src/unrelated.ts'] }]), null)
   assert.equal(rawOnlyInterfaceSeedEvidence(input, parent, [{ ...accepted, path: '.spec/unrelated/new-device/spec.md' }]), null)
   assert.equal(rawOnlyInterfaceSeedEvidence(input, parent, [accepted, { ...accepted, sourcePartitionId: 'another-owner' }]), null)
+})
+
+test('a parsed REQ RULE GAP interface parent with a complete sourced child qualifies for a seed', () => {
+  const parentPath = '.spec/interface-sync/controller/spec.md'
+  const leafPath = '.spec/interface-sync/controller/leaf/spec.md'
+  const parentSource = `---
+title: controller
+contract-schema: sync-v1
+code:
+related:
+---
+## raw source
+保留控制器接口。
+
+## expanded spec
+维持稳定的子节点职责边界。
+
+### REQ
+| id | goal | source | constraints | success | depends-on |
+| --- | --- | --- | --- | --- | --- |
+| REQ-CONTROLLER-01 | 保留控制器接口 | user:raw | - | 接口保持兼容 | - |
+
+### RULE
+| id | scope | constraint | basis | authority | source | depends-on |
+| --- | --- | --- | --- | --- | --- | --- |
+| RULE-CONTROLLER-01 | 控制器 | 保留既有接口语义 | 当前契约 | controller | user:raw | REQ-CONTROLLER-01 |
+
+### GAP
+| id | kind | unknown | affects | evidence | decision | source | depends-on |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| GAP-CONTROLLER-01 | missing_fact | 子节点的扩展细节待确认 | REQ-CONTROLLER-01 | 原始需求未说明 | 暂不扩大父职责 | user:raw | REQ-CONTROLLER-01 |
+`
+  const leafSource = `---
+title: leaf
+contract-schema: sync-v1
+code:
+  - src/controller/leaf.ts
+related: []
+---
+## raw source
+提供叶节点行为。
+
+## expanded spec
+叶节点独立实现并验证自己的行为。
+
+### REQ
+| id | goal | source | constraints | success | depends-on |
+| --- | --- | --- | --- | --- | --- |
+| REQ-LEAF-01 | 执行叶节点行为 | user:raw | - | 行为按契约完成 | - |
+
+### FLOW
+| id | req | actors | entry | preconditions | steps | terminal | source | depends-on |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| FLOW-LEAF-01 | REQ-LEAF-01 | 调用者 | 执行叶节点 | 输入有效 | STEP-LEAF-01 | END | derived:REQ-LEAF-01 | REQ-LEAF-01 |
+
+### STEP
+| id | flow | action | input | output | rules | next | source | depends-on |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| STEP-LEAF-01 | FLOW-LEAF-01 | 执行行为 | request | response | - | END | derived:FLOW-LEAF-01 | FLOW-LEAF-01 |
+
+### AC
+| id | covers | preconditions | action | assertion | test | command | source | depends-on |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| AC-LEAF-01 | REQ-LEAF-01 | 输入有效 | 执行叶节点 | 返回正确结果 | tests/leaf.test.ts#LEAF-01 | VERIFY-LEAF-01 | derived:REQ-LEAF-01 | REQ-LEAF-01 |
+
+### VERIFY
+| id | command | cwd | timeout-ms |
+| --- | --- | --- | --- |
+| VERIFY-LEAF-01 | ["node","--test","tests/leaf.test.ts"] | . | 1000 |
+`
+  const parentParsed = parseContract({ nodeId: 'controller', path: parentPath, source: parentSource })
+  const leafParsed = parseContract({ nodeId: 'leaf', path: leafPath, source: leafSource })
+  assert.deepEqual(parentParsed.findings, [])
+  assert.deepEqual(leafParsed.findings, [])
+  assert.ok(parentParsed.contract)
+  assert.ok(leafParsed.contract)
+  assert.deepEqual(parentParsed.contract.code, [])
+  assert.deepEqual(parentParsed.contract.items.map(item => item.kind), ['REQ', 'RULE', 'GAP'])
+  assert.deepEqual(leafParsed.contract.code, ['src/controller/leaf.ts'])
+  const parent = { nodeId: 'controller', path: parentPath }
+  const leaf = { nodeId: 'leaf', path: leafPath }
+  const evidence = rawOnlyInterfaceSeedEvidence({
+    sourcePaths: ['src'], files: new Map([
+      [parentPath, parentSource], [leafPath, leafSource], ['src/controller/leaf.ts', 'export const leaf = true'],
+      ['tests/leaf.test.ts', 'test leaf'],
+    ]), contracts: [parentParsed.contract, leafParsed.contract],
+    nodes: [parent, leaf].map(target => ({ id: target.nodeId, path: target.path })), targets: [parent, leaf],
+  }, parent)
+
+  assert.equal(evidence?.phase, 'interface_seed')
+  assert.deepEqual(evidence?.descendants, [{ nodeId: 'leaf', path: leafPath, codePaths: ['src/controller/leaf.ts'] }])
+  assert.equal(rawOnlyInterfaceSeedEvidence({
+    sourcePaths: ['src'], files: new Map([
+      [parentPath, parentSource], [leafPath, leafSource], ['src/controller/leaf.ts', 'export const leaf = true'],
+    ]), contracts: [{ ...parentParsed.contract, path: '.spec/interface-sync/old-controller/spec.md' }, leafParsed.contract],
+    nodes: [parent, leaf].map(target => ({ id: target.nodeId, path: target.path })), targets: [parent, leaf],
+  }, parent), null, 'an old path with the same node ID cannot impersonate the current parent contract')
+
+  const expectedParentIds = ['GAP-CONTROLLER-01', 'REQ-CONTROLLER-01', 'RULE-CONTROLLER-01']
+  const rawRounds = [
+    '保留控制器接口。',
+    '保留控制器接口。追加：保留现有REQ与RULE ID。',
+    '保留控制器接口。追加：保留现有REQ与RULE ID。再追加：新需求由后代承担。',
+  ]
+  for (const [round, rawSource] of rawRounds.entries()) {
+    const roundParentSource = parentSource.replace('保留控制器接口。', rawSource)
+    const roundParentParsed = parseContract({ nodeId: 'controller', path: parentPath, source: roundParentSource })
+    assert.deepEqual(roundParentParsed.findings, [])
+    assert.ok(roundParentParsed.contract)
+    assert.equal(roundParentParsed.contract.rawSource, rawSource)
+    const originalItems = structuredClone(roundParentParsed.contract.items)
+    const inputPlan: SyncCoordinatorPlan = {
+      ...plan(), intentNodeId: 'controller', targets: [parent, leaf],
+      readPaths: ['.spec', 'src', 'tests'], writePaths: ['.spec/interface-sync', 'src'], sourcePaths: ['src'],
+      executionScope: {
+        paths: ['.spec/interface-sync', 'src', 'tests'],
+        contractIds: [...expectedParentIds, 'REQ-LEAF-01', 'STEP-LEAF-01', 'AC-LEAF-01'],
+        flowIds: ['FLOW-LEAF-01'],
+      },
+      mandatoryTests: [{ verificationId: 'VERIFY-LEAF-01', testPath: 'tests/leaf.test.ts', testId: 'LEAF-01' }],
+    }
+    const result = planSyncPartitions({
+      plan: inputPlan,
+      files: new Map([
+        [parentPath, roundParentSource], [leafPath, leafSource], ['src/controller/leaf.ts', 'export const leaf = true'],
+        ['tests/leaf.test.ts', 'test leaf'],
+      ]),
+      contracts: [roundParentParsed.contract, leafParsed.contract],
+      changedPaths: round === 0 ? [] : [parentPath],
+    })
+    const parentPartition = result.partitions.find(partition => partition.targets.some(target => target.nodeId === 'controller'))
+    assert.ok(parentPartition, `round ${round + 1} retains the existing parent target`)
+    assert.equal(parentPartition.phase, 'interface_seed', `round ${round + 1} keeps the parent isolated`)
+    assert.deepEqual(parentPartition.contractIds, expectedParentIds, `round ${round + 1} keeps existing contract IDs`)
+    assert.deepEqual(roundParentParsed.contract.items, originalItems, `round ${round + 1} does not clear existing contract items`)
+  }
+
+  const richParentSource = `${parentSource.replace(
+    '| REQ-CONTROLLER-01 | 保留控制器接口 | user:raw | - | 接口保持兼容 | - |',
+    '| REQ-CONTROLLER-01 | 保留控制器接口 | user:raw | - | 接口保持兼容 | - |\n| REQ-PARENT-EXTRA-01 | 完成父节点流程 | user:raw | - | 父流程可执行 | - |',
+  )}\n${leafSource.slice(leafSource.indexOf('\n### FLOW')).replaceAll('LEAF', 'PARENT-EXTRA')}`
+  const richParentParsed = parseContract({ nodeId: 'controller', path: parentPath, source: richParentSource })
+  assert.deepEqual(richParentParsed.findings, [])
+  assert.ok(richParentParsed.contract)
+  assert.equal(richParentParsed.contract.code.length, 0)
+  assert.ok(richParentParsed.contract.items.some(item => ['FLOW', 'STEP', 'AC', 'VERIFY'].includes(item.kind)))
+  assert.equal(rawOnlyInterfaceSeedEvidence({
+    sourcePaths: ['src'], files: new Map([
+      [parentPath, richParentSource], [leafPath, leafSource], ['src/controller/leaf.ts', 'export const leaf = true'],
+      ['tests/leaf.test.ts', 'test leaf'],
+    ]), contracts: [richParentParsed.contract, leafParsed.contract],
+    nodes: [parent, leaf].map(target => ({ id: target.nodeId, path: target.path })), targets: [parent, leaf],
+  }, parent), null, 'a parent with workflow, acceptance, step, or verification rows stays modeled')
 })
 
 test('a test-only descendant is not a frozen source implementation descendant', () => {
