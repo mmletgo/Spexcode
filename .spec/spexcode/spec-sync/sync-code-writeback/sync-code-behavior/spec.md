@@ -90,3 +90,5 @@ v2 分区执行携带显式 partition.id/changedPaths；分析及独审仅对本
 读取完整性由真实工具和程序记录，业务evidence引用真实路径、符号或测试断言，不手工复述task/body entry的hash、长度或读取区间；原完整读取证明、独审核对及禁止编造工具未提供hash的门禁保持，不能以减少业务证据元数据复述豁免实际读取。
 
 只读 v2 `code_to_spec` 的新治理父身份必须可消歧：程序从最终授权父路径投影当前冻结契约图中具有非空 raw 的节点，以 `{nodeId, path}` 同时提供真实身份和定位信息，并将同一列表冻结给分析与独审。仅该分支的 `newNodes.parentNodeId` schema 使用此列表里的精确 nodeId enum；提示要求填写 nodeId，path 只用于定位。所有有效父节点都可选且不设默认。没有有效父节点或没有本区源码候选时 `maxItems` 为 0，不生成空 enum。模型返回的 `parentNodeId` 仍按当前节点 ID 查找，父目录授权、源码归属及完整读取门禁继续有效；路径值不得自动转换为 ID。v1 和非 `code_to_spec` 方向保持原 schema 与校验语义。
+
+行为分析提案的 `newNodes` 在Native阶段保持schema定义的 `{codePath, parentNodeId, basis}`；通过身份、摘要和schema校验后，程序解析为持久 `analysis.newNodes` 的 `{nodeId, path, codePath, rawSource}`，不改变持久格式或 `analysisDigest`。独审请求同时携带本次原 `newNodeProposals` 与该解析结果。独审按codePath一一核父ID、basis、授权且真实读取的父raw、叶path目录和raw引用，并继续独立核代码与业务职责；不要求解析结果复现parentNodeId/basis，也不因程序解析而跳过语义审查。`repairDiagnostics`保留为历史失败数据，不能替代或补写本次提案，也不成为当前政策。

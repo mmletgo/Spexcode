@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process'
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { createRequire, syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, posix } from 'node:path'
 import test from 'node:test'
 import { isHostPrivatePath } from './candidate.js'
 import { isUtf8Text } from './composition.js'
@@ -1073,7 +1073,13 @@ test('raw-only v2 code_to_spec只读源码可声明新叶，但Spec写入仍限�
       assert.deepEqual(newNodes.items.properties.parentNodeId.enum, ['export-contract'])
     } else if (request.purpose === 'code_behavior_review') {
       reviewParents = readFrozenBehaviorContext<{ newNodeParents?: { nodeId: string; path: string }[] }>(request).newNodeParents
-      assert.match(request.prompt, /parentNodeId必须填写nodeId/)
+      const stageInstructions = request.prompt.slice(0, request.prompt.indexOf('冻结三方输入:\n'))
+      assert.match(stageInstructions, /newNodeProposals/)
+      assert.match(stageInstructions, /analysis\.newNodes.*四字段/)
+      assert.doesNotMatch(stageInstructions, /newNodes\.parentNodeId必须填写nodeId/)
+      const payload = JSON.parse(request.prompt.split('待审分析:\n')[1]) as { analysis: CodeBehaviorAnalysis; newNodeProposals: { codePath: string; parentNodeId: string; basis: string }[] }
+      assert.deepEqual(payload.newNodeProposals, [{ codePath: sourcePath, parentNodeId: 'export-contract', basis: '真实已读业务模块需要由原意根下唯一治理叶承接' }])
+      assert.deepEqual(Object.keys(payload.analysis.newNodes[0]).sort(), ['codePath', 'nodeId', 'path', 'rawSource'])
     }
     return propose(sourcePath)(request)
   })
@@ -1133,6 +1139,126 @@ test('raw-only v2 code_to_spec只读源码可声明新叶，但Spec写入仍限�
     }
     return propose(sourcePath)(request)
   }), /newNodes/)
+})
+
+test('raw-only v2独审对照当前原newNodeProposals与四字段解析叶，历史父失败不冒充本次提案', async t => {
+  const f = await fixture(t), sourcePath = 'src/export-view.js', parentPath = '.spec/export/export-contract/spec.md'
+  writeFileSync(join(f.root, sourcePath), 'export const exportView = rows => rows.filter(Boolean)\n')
+  git(f.root, 'add', sourcePath); git(f.root, 'commit', '-m', 'seed unowned export view')
+  const prepared = await f.input(), basis = '用户可以提交符合筛选条件的数据导出，任务完成后下载结果。'
+  assert.ok(f.raw.includes(basis))
+  const oldFailure = { code: 'behavior_analysis_invalid', message: JSON.stringify({ approved: false, message: '新无治理文件没有真实上层需求/授权业务源码', proposal: { newNodes: [{ codePath: 'src/old-export.js', parentNodeId: parentPath, basis: '旧尝试错误地把父路径当作nodeId' }] } }) }
+  const plan: CodeBehaviorInput['plan'] = {
+    ...prepared.plan, version: 'sync-coordinator-v2', direction: 'code_to_spec', intentNodeId: 'export-contract', targets: [],
+    readPaths: ['.spec', 'src', 'tests'], writePaths: [], sourcePaths: ['src'], executionScope: { paths: [parentPath], contractIds: [], flowIds: [] },
+    commitTrigger: { before: null, paths: [sourcePath] }, partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 1000000, maxParallel: 1 }, facts: [],
+  }
+  const partition: NonNullable<CodeBehaviorInput['partition']> = { id: 'review-stage-contract', changedPaths: [sourcePath], factSourcePaths: [sourcePath], authorizedParentSpecPaths: [parentPath] }
+  const input: CodeBehaviorInput = {
+    ...prepared, baseline: null, baselineSelection: undefined, composed: composeInputSnapshots(prepared.snapshot, null).composed!, plan, origin: 'initial', partition,
+    repairDiagnostics: [oldFailure],
+  }
+  type ProposalNode = { codePath: string; parentNodeId: string; basis: string }
+  type ReviewContext = {
+    changedPaths: string[]; newSource: [string, string][]; oldSource: [string, string][]; composedFiles: [string, string][]
+    readablePaths: { path: string; snapshots: string[] }[]; newNodeParents?: { nodeId: string; path: string }[]
+    repairDiagnostics: { code: string; message: string }[]
+  }
+  type ReviewPayload = { analysisDigest: string; analysis: CodeBehaviorAnalysis; newNodeProposals?: ProposalNode[] }
+  type ReviewOutput = { inputDigest: string; analysisDigest: string; verdict: 'accept' | 'repair'; checkedPaths: string[]; checkedChangeIds: string[]; findings: { message: string; evidence: string; counterexample: string }[] }
+  const assessReviewStage = (request: Parameters<ElaborationRunner>[0], prefix: string, context: ReviewContext, payload: ReviewPayload): ReviewOutput => {
+    const issues: string[] = []
+    if (!prefix.includes('newNodeProposals') || !prefix.includes('analysis.newNodes')) issues.push('独审阶段输入缺少原提案与解析结果的阶段说明')
+    if (prefix.includes('newNodes.parentNodeId必须填写nodeId')) issues.push('独审把提案字段误要求到解析后的analysis.newNodes')
+    const proposals = payload.newNodeProposals
+    if (!proposals) issues.push('独审未收到本次原proposal.newNodes')
+    const proposalByCode = new Map((proposals ?? []).map(node => [node.codePath, node]))
+    const resolvedByCode = new Map(payload.analysis.newNodes.map(node => [node.codePath, node]))
+    if (proposalByCode.size !== resolvedByCode.size || proposalByCode.size !== (proposals?.length ?? 0)) issues.push('原提案与解析叶的codePath集合不唯一或不相等')
+    const parents = context.newNodeParents ?? []
+    for (const proposal of proposals ?? []) {
+      const parent = parents.find(node => node.nodeId === proposal.parentNodeId)
+      const resolved = resolvedByCode.get(proposal.codePath)
+      if (!parent || !resolved) { issues.push(`未能绑定已授权父节点与解析叶: ${proposal.codePath}`); continue }
+      const sources = [context.newSource, context.oldSource, context.composedFiles]
+      const parentRaw = sources.flatMap(files => files.filter(([path]) => path === parent.path).map(([, text]) => text))[0]
+      const code = sources.flatMap(files => files.filter(([path]) => path === proposal.codePath).map(([, text]) => text))[0]
+      if (!parentRaw || !context.readablePaths.some(item => item.path === parent.path)) issues.push(`父节点raw未在授权读取范围内: ${parent.path}`)
+      if (!code || !context.readablePaths.some(item => item.path === proposal.codePath)) issues.push(`源码全文未在授权读取范围内: ${proposal.codePath}`)
+      if (parentRaw && !parentRaw.includes(proposal.basis)) issues.push(`原提案basis不受父raw支持: ${proposal.codePath}`)
+      if (resolved.path !== `${posix.dirname(parent.path)}/${resolved.nodeId}/spec.md`) issues.push(`解析叶路径不在真实父目录下: ${resolved.path}`)
+      if (resolved.rawSource !== `遵循 [[${parent.nodeId}]] 的原始需求，治理 ${proposal.codePath} 的对应职责；已有上层业务原意及未选义务继续有效。`) issues.push(`解析叶raw未引用同一父节点和源码职责: ${proposal.codePath}`)
+      if (Object.keys(resolved).some(key => key === 'parentNodeId' || key === 'basis')) issues.push('持久解析叶错误携带了原提案字段')
+    }
+    if (context.repairDiagnostics.some(item => item.code === oldFailure.code && item.message === oldFailure.message) && proposals?.some(node => node.codePath === 'src/old-export.js')) issues.push('把repairDiagnostics里的旧提案误当成当前提案')
+    const checkedPaths = [...new Set([...context.changedPaths, parentPath])]
+    return {
+      inputDigest: request.inputDigest, analysisDigest: payload.analysisDigest, verdict: issues.length ? 'repair' : 'accept',
+      checkedPaths, checkedChangeIds: payload.analysis.changes.map(change => change.id),
+      findings: issues.map(message => ({ message, evidence: '逐项检查当前newNodeProposals、冻结newNodeParents与持久解析叶字段', counterexample: '改变parentNodeId、codePath、叶路径或raw引用后不能保持同一授权父子关系' })),
+    }
+  }
+  const dispatchWithReview = (proposalRunner: ElaborationRunner, reviewPrefixOverride?: string): { runner: ElaborationRunner; lastReview: () => { request: Parameters<ElaborationRunner>[0]; output: ReviewOutput } | undefined } => {
+    let lastReview: { request: Parameters<ElaborationRunner>[0]; output: ReviewOutput } | undefined
+    const run: ElaborationRunner = async request => {
+      if (request.purpose === 'code_behavior_analyze') return proposalRunner(request)
+      const boundary = request.prompt.indexOf('冻结三方输入:\n')
+      const prefix = reviewPrefixOverride ?? request.prompt.slice(0, boundary)
+      const context = readFrozenBehaviorContext<ReviewContext>(request)
+      const payload = JSON.parse(request.prompt.split('待审分析:\n')[1]) as ReviewPayload
+      const output = assessReviewStage(request, prefix, context, payload)
+      lastReview = { request, output }
+      return { sessionId: 'session-review-stage-contract', threadId: 'thread-review-stage-contract', turnId: 'turn-review', output, resultDigest: contentHash(JSON.stringify(output)) }
+    }
+    return { runner: run, lastReview: () => lastReview }
+  }
+  const propose = (newBasis: string) => runner('refactor', proposal => { proposal.newNodes = [{ codePath: sourcePath, parentNodeId: 'export-contract', basis: newBasis }] })
+  const positive = dispatchWithReview(propose(basis))
+  const analysis = await analyzeCodeBehavior(input, positive.runner)
+  assert.equal(analysis.reviewPassed, true)
+  assert.deepEqual(analysis.newNodes.map(node => node.codePath), [sourcePath])
+  assert.deepEqual(Object.keys(analysis.newNodes[0]).sort(), ['codePath', 'nodeId', 'path', 'rawSource'])
+  const acceptedReview = positive.lastReview()!
+  assert.equal(acceptedReview.output.verdict, 'accept')
+  assert.deepEqual(acceptedReview.output.checkedPaths.sort(), [parentPath, sourcePath])
+  const currentPayload = JSON.parse(acceptedReview.request.prompt.split('待审分析:\n')[1]) as ReviewPayload
+  assert.deepEqual(currentPayload.newNodeProposals, [{ codePath: sourcePath, parentNodeId: 'export-contract', basis }])
+  assert.deepEqual(currentPayload.analysis.newNodes, analysis.newNodes)
+  const stale = JSON.parse(input.repairDiagnostics![0].message) as { proposal: { newNodes: ProposalNode[] } }
+  assert.equal(stale.proposal.newNodes[0].parentNodeId, parentPath)
+  assert.notDeepEqual(currentPayload.newNodeProposals, stale.proposal.newNodes)
+  const acceptedContext = readFrozenBehaviorContext<ReviewContext>(acceptedReview.request)
+  assert.equal(acceptedContext.repairDiagnostics[0].message, oldFailure.message, '历史失败必须保留为数据，但独审只核本次原proposal')
+  const prefix = acceptedReview.request.prompt.slice(0, acceptedReview.request.prompt.indexOf('冻结三方输入:\n'))
+  assert.match(prefix, /newNodeProposals/)
+  assert.doesNotMatch(prefix, /newNodes\.parentNodeId必须填写nodeId/)
+
+  const legacyPayload = { ...currentPayload, newNodeProposals: undefined }
+  const legacyReview = assessReviewStage(acceptedReview.request, '', acceptedContext, legacyPayload)
+  assert.equal(legacyReview.verdict, 'repair', '缺原proposal或阶段指引必须形成具体repair，不能默认accept')
+  assert.match(legacyReview.findings[0].message, /阶段输入缺少|未收到本次原proposal/)
+  const mismatchedResolved = { ...currentPayload, analysis: { ...currentPayload.analysis, newNodes: [{ ...currentPayload.analysis.newNodes[0], path: '.spec/other/forged/spec.md' }] } }
+  const ownershipRepair = assessReviewStage(acceptedReview.request, prefix, acceptedContext, mismatchedResolved)
+  assert.equal(ownershipRepair.verdict, 'repair', '不能把builder的path解析结果当成免审证据')
+  assert.match(ownershipRepair.findings[0].message, /解析叶路径/)
+
+  const invalidCalls: string[] = []
+  const invalidParentRunner = runner('refactor', proposal => { proposal.newNodes = [{ codePath: sourcePath, parentNodeId: parentPath, basis }] })
+  await assert.rejects(analyzeCodeBehavior(input, async request => {
+    invalidCalls.push(request.purpose)
+    return invalidParentRunner(request)
+  }), error => (error as Error & { code?: string }).code === 'behavior_analysis_invalid')
+  assert.deepEqual(invalidCalls, ['code_behavior_analyze'], '非法父ID在独审派发前拒绝')
+
+  const badBasis = '原始raw允许任何用户下载任意任务结果并跳过所有权检查。'
+  const repair = dispatchWithReview(propose(badBasis))
+  let failedMessage = ''
+  await assert.rejects(analyzeCodeBehavior(input, repair.runner), error => {
+    failedMessage = (error as Error).message
+    return (error as Error & { code?: string }).code === 'behavior_review_failed'
+  })
+  assert.match(failedMessage, /basis不受父raw支持/)
+  assert.equal(repair.lastReview()!.output.verdict, 'repair', '独审发现basis越权仍拒绝整份分析')
 })
 
 test('冻结source角色只发现业务根，纯测试helper可读且旧计划保持writePaths发现语义', async t => {
