@@ -22,6 +22,8 @@ related:
 
 明确 Claude provider 的读取使用 [[claude-frozen-mcp]]，原不可变 manifest/readFrozenRange 响应及 requested coverage 共用，单段保守最多65536原字节。首次 prompt 准备即生成该计划，不能先产生 Codex 的262144字节 exec 计划再由 MCP 拒绝。原 Codex 索引、response、history 与旧 hash 不改。
 
+固定 Claude CLI 的 `system/api_error` 仅在原生 `request_retry`、error 级别、合法重试计数/延迟及原错误摘要完整时作为链节点保留；同 session、非 sidechain/agent、唯一 UUID 且直接衔接实际链尾（含附件与连续重试）。成功证明和失败专用来源索引共用该投影，错误正文不进入模型输入、receipt、coverage 或输出资格；未知来源、断链、fork 与新用户轮继续拒绝。没有此事件的既有公开历史及成功 proof 字节不变。
+
 Claude 采用显式500000字符和500000 MCP token上限，并核实际序列化文本长度；UTF8最坏JSON转义及两端边界扩展在保守段内保留。版本3 proof 明确 provider=claude-code，保存经精确原生 user UUID/promptId 主链配对的公开 tool_use/tool_result、当前 CLI/model 身份和 actual API request 索引。每个实际 API 请求必须关联本轮已核工具面的 shapeHash；首轮 tail 必须包含原 user canonical SHA，不能只比对 prompt/echo/history 三份副本。每条真实 response 必须逐字等于同一 readFrozenRange 的结果；原生并行调用若合并为 API user blob，先逐项核其公开 tool_result，再核递归键排序 canonical message SHA 与 request.tail/base/keep 边界及后续 assistant.requestRef。文件引用、截断、错误或只在服务端发送成功均不能作为可见性证明。仅排除真实私密 thinking 内容块及元数据，公开 tool_use.input 中名为 signature/thinking 的合法业务字段完整保留；不按全局键名删除。completed 重放以内容寻址原生见证绑定最终 output，并核原专属 history，不能发新 turn 或伪装 Codex dynamicToolCall/H。
 
 同一原生轮的压缩只接受专属主链中的 system/compact_boundary：logicalParentUuid 必须是已观察的最近对话节点，runningTurnSends 的唯一 UUID 及 openerUuid 均精确等于原 user UUID。后续只读摘要须从该边界或其附件链连接，保持原 promptId，明确 transcript-only 且仅总结原 user UUID；保留段存在时，其两份完整 UUID 列表、首尾及摘要 anchor 必须一致，并对应压缩前已观察的连续父链。未知保留段形式、外来会话/sidechain、错 opener/parent/anchor、新用户轮均拒绝。摘要记录只保留公开消息摘要及身份标志；原生 API 若用 string 存储该同一摘要，仅按实际 API 的单个 text block 规范化并逐字核 canonical SHA。摘要不成为源码、工具回复、receipt 或读取覆盖；每次真实 reader 回复仍须有后续实际 API 消费，required 全文及 StructuredOutput 门槛不变。没有压缩事件的旧公开历史和 proof 保持原字段与摘要。

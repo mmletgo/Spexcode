@@ -23,8 +23,10 @@ type ClaudePublicContentBlock = { type: string; id?: string; name?: string; inpu
 export type ClaudePublicMessage = { role: string; content: string | ClaudePublicContentBlock[] }
 const CLAUDE_TRUNCATED_RECOVERY_TEXT = 'Your response above was cut off mid-stream. Resume directly from where it stops — no apology, no recap. If none of it survived, answer the request from the start.'
 type ClaudeCompaction = { runningTurnSends: { uuids: string[]; openerUuid: string }; preservedSegment?: { headUuid: string; anchorUuid: string; tailUuid: string }; preservedMessages?: { anchorUuid: string; uuids: string[]; allUuids: string[] } }
+type ClaudeRequestRetry = { source: string; level: string; retryInMs: number; retryAttempt: number; maxRetries: number; errorDigest: string }
 export type ClaudePublicRecord = { type: string; sessionId: string; uuid?: string; parentUuid?: string | null; promptId?: string; requestRef?: string; sourceToolAssistantUUID?: string; isMeta?: boolean; turnCompanion?: boolean; message?: ClaudePublicMessage; id?: string; hash?: string; shapeHash?: string; base?: string; keep?: number; tail?: string[]; model?: string; toolNames?: string[]; placeholderValid?: boolean
   subtype?: string; logicalParentUuid?: string; compactMetadata?: ClaudeCompaction
+  requestRetry?: ClaudeRequestRetry
   compactSummary?: { transcriptOnly: boolean; promptUuids?: string[]; messageDigest: string; textOnly: boolean }
   compactSummaryDigest?: string
 }
@@ -357,6 +359,25 @@ function claudeMessageBlocks(message: ClaudePublicMessage): ClaudePublicContentB
   return typeof message.content === 'string' ? [{ type: 'text', text: message.content }] : message.content
 }
 
+function checkClaudeRequestRetry(retry: ClaudeRequestRetry | undefined): void {
+  if (!retry || retry.source !== 'request_retry' || retry.level !== 'error'
+    || !Number.isSafeInteger(retry.retryInMs) || retry.retryInMs < 0
+    || !Number.isSafeInteger(retry.retryAttempt) || retry.retryAttempt < 1
+    || !Number.isSafeInteger(retry.maxRetries) || retry.maxRetries < retry.retryAttempt
+    || !/^[a-f0-9]{64}$/.test(retry.errorDigest)) stale('Claude API error is not an exact native request retry')
+}
+
+/** 原生重试只保留链节点与诊断摘要，错误正文不成为模型输入或读取证据。 */
+function claudeRequestRetry(row: Record<string, unknown>): ClaudeRequestRetry {
+  const error = row.error as Record<string, unknown> | undefined
+  if (typeof row.uuid !== 'string' || !row.uuid || typeof row.parentUuid !== 'string' || !row.parentUuid
+    || row.agentId !== undefined || !error || typeof error !== 'object' || Array.isArray(error)
+    || typeof error.message !== 'string' || typeof error.formatted !== 'string') stale('Claude request retry has an unknown native error shape')
+  const retry = { source: row.source as string, level: row.level as string, retryInMs: row.retryInMs as number, retryAttempt: row.retryAttempt as number, maxRetries: row.maxRetries as number, errorDigest: claudeMessageDigest(error) }
+  checkClaudeRequestRetry(retry)
+  return retry
+}
+
 /** 只提取本专属session的公开调用、回复、主链身份和实际API索引；推理正文与签名不进入证据。 */
 export function readClaudePublicHistory(path: string, sessionId: string): ClaudePublicRecord[] {
   const source = readFileSync(path, 'utf8')
@@ -365,10 +386,12 @@ export function readClaudePublicHistory(path: string, sessionId: string): Claude
   for (const line of source.split('\n').filter(Boolean)) {
     const row = JSON.parse(line) as Record<string, unknown> & { message?: ClaudePublicMessage; shape?: { tools: { name: string; description?: string; input_schema?: unknown; defer_loading?: boolean }[] }; params?: { model: string } }
     const compact = row.type === 'system' && row.subtype === 'compact_boundary'
-    if (!compact && !['user', 'assistant', 'attachment', 'api-request', 'api-request-shape', 'api-request-blob'].includes(String(row.type))) continue
+    const retry = row.type === 'system' && row.subtype === 'api_error'
+    if (!compact && !retry && !['user', 'assistant', 'attachment', 'api-request', 'api-request-shape', 'api-request-blob'].includes(String(row.type))) continue
     if (row.type === 'api-request-blob' && row.message?.role !== 'user') continue
     if (row.sessionId !== sessionId || row.isSidechain === true) stale('Claude history contains a foreign session or sidechain')
     const record = Object.fromEntries(['type', 'sessionId', 'uuid', 'parentUuid', 'promptId', 'requestRef', 'sourceToolAssistantUUID', 'isMeta', 'turnCompanion'].filter(key => key in row).map(key => [key, row[key]])) as ClaudePublicRecord
+    if (retry) Object.assign(record, { subtype: 'api_error', requestRetry: claudeRequestRetry(row) })
     if (compact) {
       const metadata = row.compactMetadata as ClaudeCompaction | undefined
       Object.assign(record, { subtype: row.subtype, logicalParentUuid: row.logicalParentUuid, compactMetadata: metadata && { runningTurnSends: metadata.runningTurnSends, ...(metadata.preservedSegment !== undefined ? { preservedSegment: metadata.preservedSegment } : {}), ...(metadata.preservedMessages !== undefined ? { preservedMessages: metadata.preservedMessages } : {}) } })
@@ -413,17 +436,23 @@ export function readClaudeApiSourceMetadata(path: string, sessionId: string, mod
   if (!bytes.endsWith('\n')) throw new StructuredSessionTransportError('Claude native source history has not flushed its final record')
   const sources = new Map<string, ClaudeApiSourceMetadata>(), snapshots = new Map<string, ClaudeApiRequestSourceMetadata>()
   const requests = new Map<string, string[]>(), shapes = new Set<string>(), seen = new Set<string>()
+  let latestChainNode: string | undefined
   let run: { role: 'user' | 'assistant'; messageId?: string; blocks: ClaudePublicContentBlock[]; uuids: string[] } | undefined
   for (const [ordinal, line] of bytes.split('\n').filter(Boolean).entries()) {
     const row = JSON.parse(line) as Record<string, unknown> & { message?: ClaudePublicMessage & { id?: string }; params?: { model?: string } }
     if (row.type === 'fork-context-ref' || row.type === 'system' && row.subtype === 'compact_boundary' || row.isCompactSummary || row.turnCompanion)
       stale('Claude failed source index cannot interpret fork, compact or recovery inputs')
-    if (!['user', 'assistant', 'attachment', 'api-request-blob', 'api-request', 'api-request-shape'].includes(String(row.type))) continue
+    const retry = row.type === 'system' && row.subtype === 'api_error'
+    if (!retry && !['user', 'assistant', 'attachment', 'api-request-blob', 'api-request', 'api-request-shape'].includes(String(row.type))) continue
     if (row.sessionId !== sessionId || row.isSidechain === true || row.agentId !== undefined) stale('Claude failed source index contains a foreign session or sidechain')
-    if (['user', 'assistant', 'attachment'].includes(String(row.type)) && row.uuid !== undefined) {
+    if (retry) {
+      claudeRequestRetry(row)
+      if (!row.uuid || row.parentUuid !== latestChainNode) stale('Claude request retry does not extend its exact native chain')
+    }
+    if ((retry || ['user', 'assistant', 'attachment'].includes(String(row.type))) && row.uuid !== undefined) {
       if (typeof row.uuid !== 'string' || seen.has(row.uuid) || row.parentUuid === null && (row.type !== 'user' || seen.size !== 0)
         || row.parentUuid !== null && (typeof row.parentUuid !== 'string' || !seen.has(row.parentUuid))) stale('Claude failed source index lost its original main chain')
-      seen.add(row.uuid)
+      seen.add(row.uuid); latestChainNode = row.uuid
     }
     if (row.type === 'api-request-shape') {
       if (typeof row.shapeHash !== 'string') stale('Claude failed source index has no shape identity')
@@ -506,7 +535,7 @@ export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFro
   const seen = new Set<string>(), requests = new Map<string, string[]>(), shapes = new Set<string>(), calls = new Map<string, { row: ClaudePublicRecord; block: ClaudePublicContentBlock; recovery: number }>()
   const parents = new Map<string, string | null>()
   const compactSummaries = new Set<string>()
-  let latestMessage: string | undefined, compaction: { ancestors: Set<string>; anchor?: string } | undefined
+  let latestMessage: string | undefined, latestChainNode: string | undefined, compaction: { ancestors: Set<string>; anchor?: string } | undefined
   const receipts: FrozenReadReceipt[] = [], rejectedCalls: string[] = [], responseMessages = new Map<string, string>(), responseBlocks = new Map<string, ClaudePublicContentBlock>(), requestRefs = new Set<string>()
   if (witness.mcpHistory && (JSON.stringify(readClaudeMcpToolNames(witness.mcpHistory.path)) !== JSON.stringify(witness.mcpHistory.toolNames) || witness.mcpHistory.toolNames.some(name => name !== 'spex_read_frozen'))) stale('Claude MCP dispatched a foreign tool or its actual history changed')
   const apiMessages = readClaudeApiMessageBlobs(history)
@@ -515,7 +544,12 @@ export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFro
   for (const row of history) {
     if (row.sessionId !== sessionId) stale('Claude native history changed its session identity')
     const compact = row.type === 'system' && row.subtype === 'compact_boundary'
-    if (row.type === 'system' && !compact) stale('Claude public system event is not a supported compact boundary')
+    const retry = row.type === 'system' && row.subtype === 'api_error'
+    if (row.type === 'system' && !compact && !retry) stale('Claude public system event is not a supported compact boundary')
+    if (retry) {
+      checkClaudeRequestRetry(row.requestRetry)
+      if (typeof row.uuid !== 'string' || !row.uuid || typeof row.parentUuid !== 'string' || !row.parentUuid || row.parentUuid !== latestChainNode || compaction) stale('Claude request retry does not extend its exact native chain')
+    }
     if (compact) {
       const metadata = row.compactMetadata, segment = metadata?.preservedSegment, preserved = metadata?.preservedMessages
       if (!row.uuid || seen.has(row.uuid) || row.parentUuid !== null || !row.logicalParentUuid || row.logicalParentUuid !== latestMessage || !seen.has(row.logicalParentUuid) || compaction
@@ -528,13 +562,14 @@ export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFro
           || ids.some((id, index) => !seen.has(id) || index > 0 && parents.get(id) !== ids[index - 1])) stale('Claude compact preserved segment is not the exact observed chain')
       }
       compaction = { ancestors: new Set([row.uuid]), ...(segment ? { anchor: segment.anchorUuid } : {}) }
-      parents.set(row.uuid, row.logicalParentUuid); seen.add(row.uuid)
+      parents.set(row.uuid, row.logicalParentUuid); seen.add(row.uuid); latestChainNode = row.uuid
       continue
     }
     if (row.uuid) {
       if (seen.has(row.uuid) || row.uuid !== userUuid && (!row.parentUuid || !seen.has(row.parentUuid))) stale('Claude public history is not the exact original main chain')
-      seen.add(row.uuid); parents.set(row.uuid, row.parentUuid ?? null)
+      seen.add(row.uuid); parents.set(row.uuid, row.parentUuid ?? null); latestChainNode = row.uuid
     }
+    if (retry) { latestMessage = row.uuid; continue }
     if (compaction && row.type === 'attachment') {
       if (!row.uuid || !row.parentUuid || !compaction.ancestors.has(row.parentUuid)) stale('Claude compact attachment is outside its exact boundary')
       compaction.ancestors.add(row.uuid)

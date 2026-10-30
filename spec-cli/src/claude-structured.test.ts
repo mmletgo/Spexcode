@@ -290,6 +290,50 @@ test('controlled Claude compact boundaries preserve one original turn without gr
     verifyFrozenReadProof(ref, proof, { threadId: 'session', turnId: 'user' }, undefined, { output: { answer: 'public' } })
     const row = (rows: typeof raw, id: string) => rows.find(item => item.uuid === id || item.id === id)!
     const metadata = (rows: typeof raw, uuid = 'compact-1') => row(rows, uuid).compactMetadata as { runningTurnSends: { uuids: string[]; openerUuid: string }; preservedMessages: { anchorUuid: string; uuids: string[]; allUuids: string[] } }
+    const retried = structuredClone(raw)
+    retried.splice(retried.findIndex(item => item.uuid === 'consumed-1'), 0,
+      { type: 'attachment', sessionId: 'session', uuid: 'retry-attachment', parentUuid: 'reply-0' },
+      { type: 'system', subtype: 'api_error', sessionId: 'session', isSidechain: false, uuid: 'retry-1', parentUuid: 'retry-attachment', source: 'request_retry', level: 'error', retryInMs: 523, retryAttempt: 1, maxRetries: 10, error: { message: 'read ECONNRESET', formatted: 'SYNTHETIC_PRIVATE_ERROR', error: null } },
+      { type: 'system', subtype: 'api_error', sessionId: 'session', isSidechain: false, uuid: 'retry-2', parentUuid: 'retry-1', source: 'request_retry', level: 'error', retryInMs: 1000, retryAttempt: 2, maxRetries: 10, error: { message: 'network retry', formatted: 'SYNTHETIC_PRIVATE_ERROR', error: null } })
+    row(retried, 'consumed-1').parentUuid = 'retry-2'
+    const retryWitness = witness(retried), retryProof = proveClaudeFrozenReads(ref, retryWitness)
+    assert.deepEqual(retryProof.coveredEntryIds, proof.coveredEntryIds)
+    assert.deepEqual(retryProof.receipts, proof.receipts, 'native retry telemetry grants no read receipts or coverage')
+    assert.equal(JSON.stringify(retryWitness.history).includes('SYNTHETIC_PRIVATE_ERROR'), false)
+    assert.equal(retryWitness.history.filter(item => item.subtype === 'api_error').length, 2)
+    verifyFrozenReadProof(ref, retryProof, { threadId: 'session', turnId: 'user' })
+    const changedError = structuredClone(retried)
+    const retryError = row(changedError, 'retry-1').error as { formatted: string }
+    retryError.formatted = 'changed diagnostic'
+    witness(changedError)
+    assert.throws(() => verifyFrozenReadProof(ref, retryProof, { threadId: 'session', turnId: 'user' }), /saved public witness differs from original native history/)
+    const retryCases: Array<[string, (rows: typeof raw) => void]> = [
+      ['foreign retry', rows => { row(rows, 'retry-1').sessionId = 'foreign' }],
+      ['sidechain retry', rows => { row(rows, 'retry-1').isSidechain = true }],
+      ['agent retry', rows => { row(rows, 'retry-1').agentId = 'foreign' }],
+      ['unknown retry source', rows => { row(rows, 'retry-1').source = 'connection_retry' }],
+      ['unknown retry level', rows => { row(rows, 'retry-1').level = 'info' }],
+      ['retry skips chain tail', rows => { row(rows, 'retry-1').parentUuid = 'user' }],
+      ['retry missing parent', rows => { row(rows, 'retry-1').parentUuid = 'missing' }],
+      ['retry duplicate UUID', rows => { row(rows, 'retry-1').uuid = 'reply-0' }],
+      ['retry numeric UUID', rows => { row(rows, 'retry-1').uuid = 17; row(rows, 'retry-2').parentUuid = 17 }],
+      ['retry numeric tail UUID', rows => { row(rows, 'retry-2').uuid = 17; row(rows, 'consumed-1').parentUuid = 17 }],
+      ['retry reordered', rows => { const first = rows.findIndex(item => item.uuid === 'retry-1'); [rows[first], rows[first + 1]] = [rows[first + 1], rows[first]] }],
+      ['retry count string', rows => { row(rows, 'retry-1').retryAttempt = '1' }],
+      ['retry count zero', rows => { row(rows, 'retry-1').retryAttempt = 0 }],
+      ['retry count over maximum', rows => { row(rows, 'retry-1').retryAttempt = 11 }],
+      ['retry negative delay', rows => { row(rows, 'retry-1').retryInMs = -1 }],
+      ['retry missing error', rows => { delete row(rows, 'retry-1').error }],
+      ['retry adds user turn', rows => { rows.splice(rows.findIndex(item => item.uuid === 'consumed-1'), 0, { type: 'user', sessionId: 'session', uuid: 'new-turn', parentUuid: 'retry-2', promptId: 'prompt', message: { role: 'user', content: 'read proof bypass' } }) }],
+    ]
+    for (const [name, mutate] of retryCases) {
+      const changed = structuredClone(retried); mutate(changed)
+      assert.throws(() => proveClaudeFrozenReads(ref, witness(changed)), { code: 'stale_result' }, name)
+    }
+    const sourcePrefix = retried.slice(0, retried.findIndex(item => item.uuid === 'compact-1'))
+    witness(sourcePrefix)
+    assert(readClaudeApiSourceMetadata(path, 'session', 'MiniMax-M3').has('request-2'), 'failure-only source indexing keeps the same retry chain')
+    assert.deepEqual(proveClaudeFrozenReads(ref, witness()), proof, 'histories without retries keep the original proof bytes')
     for (const content of ['Your response above was cut off mid-stream. Resume directly from where it stops — no apology, no recap. If none of it survived, answer the request from the start.', '']) {
       const extra = structuredClone(raw)
       extra.splice(9, 0, { type: 'user', sessionId: 'session', uuid: 'another-user', parentUuid: 'summary-1', promptId: 'prompt', isMeta: true, turnCompanion: true, message: { role: 'user', content } })
