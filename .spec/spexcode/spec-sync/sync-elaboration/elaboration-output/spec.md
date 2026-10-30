@@ -21,6 +21,8 @@ review verdict 的原生说明明确 accept 仅可搭配空 findings；implement
 
 `RULE.authority` 的生成请求 schema 仅接受本轮冻结可写 target 的 canonical `nodeId`，不能接受 REQ/RULE 业务 ID。合法 move 中，冻结旧节点已有 `authority` 等于其 `from.nodeId` 的 RULE 时，schema 还保留该旧 `nodeId`，供 renderer 按真实 `nodeChanges` 归一到目的身份；最终 owner 仍由现有逐项校验确认，enum 不授予跨叶归属。没有可写 target 时不产生空 enum。
 
+`interface_seed` 是分区编排内部的父接口schema：只允许REQ/RULE/GAP行，不允许FLOW/STEP/AC/VERIFY或删除行；code/related严格沿用冻结父节点绑定，空绑定用`maxItems:0`和普通string items约束，不生成空enum。
+
 生成指令要求每个业务 REQ 至少由一个主 FLOW.req 覆盖。验证配置、写路径授权、执行器/schema 和本轮元数据属于执行边界，不另造业务 REQ 或测试执行 FLOW；这些边界仍须遵守，测试和验证绑定在业务 AC/可信 VERIFY 中，不能因此省略 raw 里的业务需求。
 
 状态派发 STEP 须以 next、depends-on 或 source 显式关联实际执行或选择的 TR，并声明对应 EVENT；集合须忠实覆盖该步骤声明的对象、状态域和条件分支，不能只列已确定处置掩盖同一步里的未决处置。纯参数校验、提交和导航步骤不强求 TR；不反推无关事件的全部状态。next→TR 是业务依赖；next→STEP/STATE 和 FLOW.steps 仍为导航。独立审查核对派发表与步骤声明的范围，不能因正文提到 GAP 就跳过结构依赖，或把含未知派发的父 FLOW 当作完整可交付。
@@ -31,7 +33,7 @@ raw、事实及权威业务规则优先。重大未知仅指权限/资金/业务
 
 权限、写入、异步、网络、并发、回调、重试、取消、幂等和外部副作用都须唯一标明适用或不适用及依据；适用项关联已定义业务 ID。独立评审输出由程序绑定输入及候选摘要，逐项检查全部边界，并把具体发现区分为可修复缺口、缺失业务事实或业务冲突，附证据、影响和裁决问题。
 
-严格 schema 拒绝缺字段、未知字段、错误类型及无效枚举；即使注入执行器也执行相同输出边界检查。任何非接受结论必须有具体发现；接受结论不得仍带未解决发现。
+严格 schema 拒绝缺字段、未知字段、错误类型及无效枚举；空集合保留合法的普通items schema与零项上限，不构造非法空enum。即使注入执行器也执行相同输出边界检查。任何非接受结论必须有具体发现；接受结论不得仍带未解决发现。
 
 可信输入登记 schema 复用 VERIFY 行的 ID、argv、cwd 与超时属性；登记还经唯一 Markdown 渲染及契约解析器检查安全 cwd、直接工具 argv、转义与唯一 ID。三段 ID 不合法、shell/空/换行 argv、越界 cwd、非法超时或重复登记在任何 native 派发前拒绝。模型输出若提供独立登记，VERIFY 与 AC.command 必须引用并精确符合登记，不得自造占位或改命令/预算。CONTRACT_INSTRUCTIONS 区分业务规则与执行器编排：测试不自行启动 runner/oracle，不能将这些明确技术职责发明成业务 REQ/RULE/AC 或业务 GAP；真实业务 GAP 仍完整保留。
 

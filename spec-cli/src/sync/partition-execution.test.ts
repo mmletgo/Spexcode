@@ -4,10 +4,16 @@ import { execFileSync } from 'node:child_process'
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { mintIds } from '@spexcode/spec-core'
 import { parseContract } from '@spexcode/spec-core/contracts'
 import type { Acceptance, Contract } from '@spexcode/spec-core/contracts'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
 import type { ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
+import { elaborate, elaborationDigest, sealPartitionedElaboration } from './elaboration.js'
+import { elaborationSchema } from './elaboration-schema.js'
+import type { ElaborationInput, ElaborationResult } from './elaboration-types.js'
+import { CONTRACT_COLUMNS, parseParts } from '@spexcode/spec-core/contracts'
+import type { GeneratedTables } from './elaboration-markdown.js'
 import type { GenerationInput } from './generation-types.js'
 import { analyzeSyncPartitions, completeSyncPartitionPlan, elaborateSyncPartitions, generateSyncPartitions, mapSyncPartitions } from './partition-execution.js'
 import type { PartitionCheckpoints } from './partition-execution.js'
@@ -15,7 +21,7 @@ import type { SyncPartitionPlan } from './partitioning.js'
 import type { CodeBehaviorInput } from './code-behavior.js'
 import type { CodeBehaviorAnalysis } from './writeback-types.js'
 import { composeInputSnapshots } from './composition.js'
-import { captureInputSnapshot, contentHash, readObject, readTree, writeEvidence } from './snapshot.js'
+import { captureInputSnapshot, contentHash, readEvidence, readObject, readTree, writeEvidence } from './snapshot.js'
 import { verifyCandidate } from './candidate.js'
 import { readFrozenBehaviorContext } from '../../test/frozen-behavior-context.js'
 
@@ -68,6 +74,62 @@ function native(delayReverse = false): { runner: ElaborationRunner; calls: Elabo
     return { sessionId: `session-${ordinal}`, threadId: `thread-${ordinal}`, turnId: `turn-${ordinal}`, output, resultDigest: contentHash(JSON.stringify(output)) }
   }
   return { runner, calls, peak: () => peak }
+}
+
+async function rawParentInterfaceFixture(t: test.TestContext): Promise<{
+  input: ElaborationInput
+  plan: SyncPartitionPlan
+  checkpoints: PartitionCheckpoints
+  paths: { root: string; alpha: string; beta: string; alphaSource: string; betaSource: string; oracle: string; unrelated: string; unrelatedSource: string }
+}> {
+  const root = mkdtempSync(join(tmpdir(), 'spex-parent-interface-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const paths = {
+    root: '.spec/root/spec.md', alpha: '.spec/root/alpha/normalize-tag/spec.md', beta: '.spec/root/beta/join-caption/spec.md',
+    alphaSource: 'src/alpha/a.mjs', betaSource: 'src/beta/b.mjs', oracle: 'tests/oracle.test.mjs', unrelated: '.spec/unrelated/spec.md', unrelatedSource: 'src/unrelated/c.mjs',
+  }
+  const rootRaw = '请把仓库中现有的两个同步纯函数整理为独立、可审查的Spec；只保留当前行为，不增加规则。'
+  const rootSource = `---\ntitle: Existing text tools\nstatus: pending\nrelated:\n  - ${paths.oracle}\n  - package.json\n---\n\n## raw source\n\n${rootRaw}\n`
+  const alphaSourceSpec = `---\ntitle: Normalize tag\nstatus: pending\ncode:\n  - ${paths.alphaSource}\nrelated:\n  - ${paths.oracle}\n---\n\n此叶属于root原意，记录现有标签规范化函数。\n`
+  const betaSourceSpec = `---\ntitle: Join caption\nstatus: pending\ncode:\n  - ${paths.betaSource}\nrelated:\n  - ${paths.oracle}\n---\n\n此叶属于root原意，记录现有标题组合函数。\n`
+  for (const path of [paths.root, paths.alpha, paths.beta, paths.alphaSource, paths.betaSource, paths.oracle, paths.unrelated, paths.unrelatedSource, 'package.json']) mkdirSync(join(root, dirname(path)), { recursive: true })
+  writeFileSync(join(root, paths.root), rootSource)
+  writeFileSync(join(root, paths.alpha), alphaSourceSpec)
+  writeFileSync(join(root, paths.beta), betaSourceSpec)
+  writeFileSync(join(root, paths.unrelated), `---\ntitle: Unrelated utility\nstatus: pending\ncode:\n  - ${paths.unrelatedSource}\n---\n\n独立工具实现目标。\n`)
+  writeFileSync(join(root, paths.alphaSource), `export function normalizeTag(value) {\n  return value.trim().toLowerCase().replace(/\\s+/g, '-')\n}\n`)
+  writeFileSync(join(root, paths.betaSource), `export function joinCaption(prefix, caption) {\n  return \`${'${prefix.trim()}'}: ${'${caption.trim()}'}\`\n}\n`)
+  writeFileSync(join(root, paths.unrelatedSource), 'export function unrelatedUtility(value) { return value }\n')
+  writeFileSync(join(root, paths.oracle), `import test from 'node:test'\nimport assert from 'node:assert/strict'\nimport { normalizeTag } from '../src/alpha/a.mjs'\nimport { joinCaption } from '../src/beta/b.mjs'\n\ntest('ORACLE-LIVE-PARTITION-V2-01', () => {\n  assert.equal(normalizeTag('  Mixed   CASE  '), 'mixed-case')\n  assert.equal(normalizeTag('a/b + c'), 'a/b-+-c')\n  assert.equal(joinCaption('  Product ', ' Update  '), 'Product: Update')\n  assert.equal(joinCaption('', ''), ': ')\n})\n`)
+  writeFileSync(join(root, 'package.json'), '{"type":"module","scripts":{"test":"node --test tests/oracle.test.mjs"}}\n')
+  const git = (...args: string[]): void => { execFileSync('git', ['-C', root, ...args], { stdio: 'pipe' }) }
+  git('init', '-b', 'main'); git('config', 'user.email', 'interface@example.invalid'); git('config', 'user.name', 'interface fixture'); git('add', '.'); git('commit', '-m', 'three-node raw-only parent fixture')
+  const snapshot = await captureInputSnapshot(root), files = new Map(readTree(snapshot.source.commonDir, snapshot.immutableTree).map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString('utf8')]))
+  const [rootNodeId, alphaNodeId, betaNodeId] = mintIds([paths.root, paths.alpha, paths.beta].map(path => path.split('/').slice(1, -1)))
+  const targets = [
+    { nodeId: rootNodeId, path: paths.root, source: rootSource, sourceDigest: elaborationDigest(rootSource), rawSource: parseParts(rootSource)!.rawSource! },
+    { nodeId: alphaNodeId, path: paths.alpha, source: alphaSourceSpec, sourceDigest: elaborationDigest(alphaSourceSpec) },
+    { nodeId: betaNodeId, path: paths.beta, source: betaSourceSpec, sourceDigest: elaborationDigest(betaSourceSpec) },
+  ]
+  const verification = (suffix: string) => ({ id: `VERIFY-${suffix}-ORACLE`, command: ['node', '--test', paths.oracle], cwd: '.', timeoutMs: 30000 })
+  const input: ElaborationInput = {
+    root, base: snapshot.headCommit, requestKey: 'parent-interface:p1', intent: { nodeId: rootNodeId, rawSource: parseParts(rootSource)!.rawSource! }, targets,
+    files, facts: [], verifications: [verification('ALPHA'), verification('BETA'), verification('ROOT')], implementationWritePaths: [],
+    readonlyTestPaths: [paths.oracle], historyInput: snapshot, maxRepairs: 0, maxCalls: 2, timeoutMs: 30000,
+  }
+  const partitions = [
+    { id: 'parent', intentNodeId: rootNodeId, targets: [{ nodeId: rootNodeId, path: paths.root }], readPaths: [paths.root], writePaths: [paths.root], sourcePaths: [], changedPaths: [paths.root], contextNodeIds: [], contractIds: [], flowIds: [], readBytes: Buffer.byteLength(rootSource), readLimitBytes: 524288, oversizedReads: [] },
+    { id: 'alpha', intentNodeId: rootNodeId, targets: [{ nodeId: alphaNodeId, path: paths.alpha }], readPaths: [paths.root, paths.alpha, paths.alphaSource, paths.oracle], writePaths: [paths.alpha], sourcePaths: [paths.alphaSource], changedPaths: [paths.alpha], contextNodeIds: [rootNodeId], contractIds: [], flowIds: [], readBytes: 3000, readLimitBytes: 524288, oversizedReads: [] },
+    { id: 'beta', intentNodeId: rootNodeId, targets: [{ nodeId: betaNodeId, path: paths.beta }], readPaths: [paths.root, paths.beta, paths.betaSource, paths.oracle], writePaths: [paths.beta], sourcePaths: [paths.betaSource], changedPaths: [paths.beta], contextNodeIds: [rootNodeId], contractIds: [], flowIds: [], readBytes: 3000, readLimitBytes: 524288, oversizedReads: [] },
+  ]
+  const plan: SyncPartitionPlan = { version: 'sync-partitions-v1', partitions, dependencies: [], expectedPaths: [paths.root, paths.alpha, paths.beta], digest: contentHash('three-node-parent-interface-plan') }
+  const values = new Map<string, unknown>()
+  const checkpoints: PartitionCheckpoints = { load: <T>(key: string) => values.has(key) ? structuredClone(values.get(key)) as T : null, save: (key, value) => { values.set(key, structuredClone(value)); return writeEvidence(snapshot.source.commonDir, value) } }
+  return { input, plan, checkpoints, paths }
+}
+
+function emptyElaborationTables(): GeneratedTables {
+  return Object.fromEntries(Object.keys(CONTRACT_COLUMNS).map(kind => [kind, []])) as unknown as GeneratedTables
 }
 
 test('分区分析以独占文件限定事实来源，共享oracle仍逐区全文读取且不制造同源事实冲突', async t => {
@@ -188,6 +250,263 @@ test('分区P1原意根作为其他区只读上下文，独审原件与可写目
   assert.equal(result.partitionEvidence!.length, 3)
   assert.equal(result.changes.filter(change => change.path === rootContract.path).length, 1)
   assert.equal(calls.length, 6)
+})
+
+test('raw-only parent和两个源码叶先审接口再局部细化，完整全局seal后才可推进', async t => {
+  const { input, plan, checkpoints, paths } = await rawParentInterfaceFixture(t), calls: ElaborationSessionRequest[] = []
+  const rootId = input.intent.nodeId, alphaId = plan.partitions[1].targets[0].nodeId, betaId = plan.partitions[2].targets[0].nodeId
+  let childDefect: 'missing-flow' | 'missing-acceptance' | 'missing-code' | 'missing-test' | null = null
+  const applicability = () => ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: false, basis: '两个现有纯函数无状态且无外部作用，此边界不适用。', affectedIds: [] }))
+  const rootRows = (full: boolean): Record<string, unknown> => {
+    const tables = emptyElaborationTables()
+    tables.REQ = [
+      { id: 'REQ-PARENT-ALPHA-01', goal: '准确说明现有标签规范化函数的可观察行为', source: 'user:raw', constraints: '只整理该函数的已存在行为，不扩展需求。', success: 'normalizeTag的输出保留当前行为。', 'depends-on': [] },
+      { id: 'REQ-PARENT-BETA-01', goal: '准确说明现有标题组合函数的可观察行为', source: 'user:raw', constraints: '只整理该函数的已存在行为，不扩展需求。', success: 'joinCaption的输出保留当前行为。', 'depends-on': [] },
+    ]
+    if (full) {
+      tables.AC = [{ id: 'AC-TOOLS-ORACLE', source: 'user:raw', 'depends-on': ['REQ-PARENT-ALPHA-01', 'REQ-PARENT-BETA-01'], covers: ['REQ-PARENT-ALPHA-01', 'REQ-PARENT-BETA-01'], preconditions: '-', action: '运行只读oracle', assertion: '两个现有函数满足原有输出', test: `${paths.oracle}#ORACLE-LIVE-PARTITION-V2-01`, command: 'VERIFY-ROOT-ORACLE' }]
+      tables.VERIFY = [{ id: 'VERIFY-ROOT-ORACLE', command: ['node', '--test', paths.oracle], cwd: '.', 'timeout-ms': 30000 }]
+    }
+    return {
+      version: 'elaboration-target-rows-v3',
+      changes: [{ targetIndex: 0, title: 'Existing text tools', description: '', code: [], related: [paths.oracle, 'package.json'], prose: null, removeIds: [], tables }],
+      applicability: applicability(),
+    }
+  }
+  const childRows = (domain: 'alpha' | 'beta', nodeId: string, targetPath: string, sourcePath: string): Record<string, unknown> => {
+    const upper = domain.toUpperCase(), ownReq = `REQ-${upper}-01`, ownRule = `RULE-${upper}-01`, flow = `FLOW-${upper}-01`, step = `STEP-${upper}-01`, ac = `AC-${upper}-ORACLE`, verify = `VERIFY-${upper}-ORACLE`
+    const parentReq = `REQ-PARENT-${upper}-01`
+    const symbol = domain === 'alpha' ? 'normalizeTag' : 'joinCaption'
+    const tables = emptyElaborationTables()
+    tables.REQ = [{ id: ownReq, goal: `记录${symbol}现存输出行为`, source: `derived:${parentReq}`, constraints: '只描述当前纯函数行为。', success: `${symbol}输出符合只读oracle。`, 'depends-on': [parentReq] }]
+    tables.RULE = [{ id: ownRule, scope: `src/${domain}`, constraint: '保持当前字符串转换结果。', basis: `冻结源码${sourcePath}及oracle断言。`, source: `derived:${ownReq}`, authority: nodeId, 'depends-on': [ownReq] }]
+    tables.FLOW = [{ id: flow, req: [parentReq, ownReq], actors: '调用方', entry: `调用${symbol}`, preconditions: '输入为字符串。', steps: [step], terminal: 'END', source: `derived:${ownReq}`, 'depends-on': [parentReq, ownReq] }]
+    tables.STEP = [{ id: step, flow, action: `同步调用${symbol}`, input: '字符串输入', output: '转换后的字符串', rules: [ownRule], next: 'END', source: `derived:${ownReq}`, 'depends-on': [parentReq, ownReq] }]
+    tables.AC = [{ id: ac, source: `derived:${ownReq}`, 'depends-on': [ownReq], covers: [parentReq, ownReq, ownRule], preconditions: '输入符合oracle用例。', action: `调用${symbol}`, assertion: `结果精确符合${symbol}既有行为`, test: `${paths.oracle}#ORACLE-LIVE-PARTITION-V2-01`, command: verify }]
+    tables.VERIFY = [{ id: verify, command: ['node', '--test', paths.oracle], cwd: '.', 'timeout-ms': 30000 }]
+    if (domain === 'alpha') {
+      if (childDefect === 'missing-flow') tables.FLOW = []
+      if (childDefect === 'missing-acceptance') tables.AC = []
+      if (childDefect === 'missing-test') tables.AC[0].test = 'tests/missing-oracle.test.mjs#ORACLE-LIVE-PARTITION-V2-01'
+    }
+    const code = childDefect === 'missing-code' && domain === 'alpha' ? [] : [`${sourcePath}#${symbol}`]
+    return {
+      version: 'elaboration-target-rows-v3',
+      changes: [{ targetIndex: 0, title: domain === 'alpha' ? 'Normalize tag' : 'Join caption', description: '', code, related: [paths.oracle], prose: '这是无状态同步纯函数：状态不适用，没有外部副作用，结果只依赖输入。', removeIds: [], tables }],
+      applicability: applicability(),
+    }
+  }
+  const runner: ElaborationRunner = async request => {
+    calls.push(request)
+    const encoded = request.prompt.split('冻结业务输入:\n')[1]?.split('\n')[0]
+    const context = encoded ? JSON.parse(encoded) as { phase?: string; targets: { nodeId: string; path: string }[]; context?: { nodeId: string; path: string; source: string }[]; files: [string, string][] } : null
+    let output: unknown
+    if (request.purpose === 'elaboration_generate') {
+      if (context?.targets[0]?.nodeId === rootId) output = rootRows(context.phase !== 'interface_seed')
+      else {
+        const target = context?.targets[0]
+        assert.ok(target)
+        const alpha = target.nodeId === alphaId
+        output = childRows(alpha ? 'alpha' : 'beta', target.nodeId, target.path, alpha ? paths.alphaSource : paths.betaSource)
+      }
+    } else output = { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+    return { sessionId: `interface-session-${calls.length}`, threadId: `interface-thread-${calls.length}`, turnId: `interface-turn-${calls.length}`, output, resultDigest: contentHash(JSON.stringify(output)) }
+  }
+  const result = await elaborateSyncPartitions(input, plan, 2, checkpoints, runner)
+  const rootRef = result.partitionEvidence?.find(item => item.partitionId === 'parent')?.resultRef
+  const failedRootEvidence = rootRef ? JSON.parse(readEvidence(input.historyInput!.source.commonDir, rootRef).toString('utf8')) as ElaborationResult : null
+  assert.equal(result.structurePassed, true, JSON.stringify({ failure: result.failure, rootFindings: failedRootEvidence?.rounds.flatMap(round => round.findings).map(({ code, itemId, message }) => ({ code, itemId, message })), sealFindings: result.partitionSeal?.findings.map(({ code, itemId, message }) => ({ code, itemId, message })), partitions: result.partitionEvidence?.map(item => { const evidence = JSON.parse(readEvidence(input.historyInput!.source.commonDir, item.resultRef).toString('utf8')) as ElaborationResult; return { partitionId: item.partitionId, status: evidence.status, phase: evidence.phase, structurePassed: evidence.structurePassed, reviewPassed: evidence.reviewPassed, failure: evidence.failure, findings: evidence.rounds.flatMap(round => round.findings).map(({ code, itemId, message }) => ({ code, itemId, message })) } }) }))
+  assert.equal(result.reviewPassed, true)
+  assert.equal(result.status, 'complete')
+  assert.equal(result.implementationReady, false)
+  assert.equal(result.contracts.length, 3)
+  const root = result.contracts.find(contract => contract.nodeId === rootId)!
+  assert.deepEqual(root.code, [], '接口父节点不能取得源码治理锚点')
+  const alphaRootCoverage = result.coverage!.items.find(item => item.id === 'REQ-PARENT-ALPHA-01')!
+  const betaRootCoverage = result.coverage!.items.find(item => item.id === 'REQ-PARENT-BETA-01')!
+  assert.equal(alphaRootCoverage.status, 'bound')
+  assert.deepEqual(alphaRootCoverage.acceptanceIds, ['AC-ALPHA-ORACLE'])
+  assert.deepEqual(alphaRootCoverage.code, [`${paths.alphaSource}#normalizeTag`])
+  assert.equal(betaRootCoverage.status, 'bound')
+  assert.deepEqual(betaRootCoverage.acceptanceIds, ['AC-BETA-ORACLE'])
+  assert.deepEqual(betaRootCoverage.code, [`${paths.betaSource}#joinCaption`])
+  assert.equal(result.phase, 'partitioned_final')
+  assert.equal(result.partitionSeal?.passed, true)
+  assert.ok(result.partitionSeal?.candidateDigest)
+  assert.equal(result.partitionSeal?.candidateDigest, elaborationDigest(JSON.stringify({ inputDigest: result.partitionSeal!.inputDigest, changes: result.changes.map(({ contentDigest: _contentDigest, ...change }) => change), applicability: result.partitionSeal!.applicability, nodeChanges: [] })))
+  const rootRequest = calls.find(request => request.requestKey.includes(':partition:parent:') && request.purpose === 'elaboration_generate')!
+  const rootContext = JSON.parse(rootRequest.prompt.split('冻结业务输入:\n')[1].split('\n')[0]) as { files: [string, string][]; phase: string }
+  assert.equal(rootContext.phase, 'interface_seed')
+  assert.deepEqual(rootContext.files.map(([path]) => path), [paths.root])
+  const rootChangeSchema = (rootRequest.schema.properties as { changes: { items: { properties: Record<string, { items?: Record<string, unknown> }> } } }).changes.items.properties
+  assert.equal('enum' in rootChangeSchema.code.items!, false, '空code锚点不生成非法空enum')
+  const emptyRelationsSource = `---\ntitle: Raw parent\nstatus: pending\n---\n\n## raw source\n\n${input.intent.rawSource}\n`
+  const noRelationSchema = elaborationSchema({ ...input, targets: [{ ...input.targets[0], source: emptyRelationsSource, sourceDigest: elaborationDigest(emptyRelationsSource) }] }, { purpose: 'interface_seed' })
+  const noRelationProperties = (noRelationSchema.properties as { changes: { items: { properties: Record<string, { items?: Record<string, unknown> }> } } }).changes.items.properties
+  assert.equal('enum' in noRelationProperties.related.items!, false, '空related路径不生成非法空enum')
+  assert.ok(!rootRequest.prompt.includes(paths.alphaSource) && !rootRequest.prompt.includes(paths.betaSource) && !rootRequest.prompt.includes('return value.trim()') && !rootRequest.prompt.includes("assert.equal(normalizeTag("), '父接口不读取子源码或oracle正文')
+  const rootEvidenceRef = result.partitionEvidence!.find(item => item.partitionId === 'parent')!.resultRef
+  const rootEvidence = JSON.parse(readEvidence(input.historyInput!.source.commonDir, rootEvidenceRef).toString('utf8')) as { phase?: string; status: string; readyIds: string[]; readyFlowIds: string[]; implementationReady: false; reviewPassed: boolean; changes: { nodeId: string; path: string; source: string }[] }
+  assert.equal(rootEvidence.phase, 'interface_seed')
+  assert.equal(rootEvidence.status, 'interface_seed')
+  assert.deepEqual(rootEvidence.readyIds, [])
+  assert.deepEqual(rootEvidence.readyFlowIds, [])
+  assert.equal(rootEvidence.implementationReady, false)
+  assert.equal(rootEvidence.reviewPassed, true, '接口本身经过独立语义审查，不能冒称全图评审')
+  assert.deepEqual(parseContract({ nodeId: rootId, path: paths.root, source: rootEvidence.changes[0].source }).contract!.code, [])
+  assert.equal(calls.filter(request => request.purpose === 'elaboration_generate').length, 3)
+  assert.equal(calls.filter(request => request.purpose === 'elaboration_review').length, 3)
+  assert.ok(calls.filter(request => request.requestKey.includes(':partition:alpha:')).every(request => request.prompt.includes('REQ-PARENT-ALPHA-01')))
+  assert.ok(calls.filter(request => request.requestKey.includes(':partition:beta:')).every(request => request.prompt.includes('REQ-PARENT-BETA-01')))
+  const alphaContract = result.contracts.find(contract => contract.nodeId === alphaId)!
+  const betaContract = result.contracts.find(contract => contract.nodeId === betaId)!
+  assert.ok(alphaContract.items.some(item => item.kind === 'FLOW' && item.req.includes('REQ-PARENT-ALPHA-01')))
+  assert.ok(alphaContract.items.some(item => item.kind === 'AC' && item.covers.includes('REQ-PARENT-ALPHA-01')))
+  assert.ok(!alphaContract.items.some(item => item.kind === 'FLOW' && item.req.includes('REQ-PARENT-BETA-01')))
+  assert.ok(!alphaContract.items.some(item => item.kind === 'AC' && item.covers.includes('REQ-PARENT-BETA-01')))
+  assert.ok(betaContract.items.some(item => item.kind === 'FLOW' && item.req.includes('REQ-PARENT-BETA-01')))
+  assert.ok(betaContract.items.some(item => item.kind === 'AC' && item.covers.includes('REQ-PARENT-BETA-01')))
+  assert.ok(!betaContract.items.some(item => item.kind === 'FLOW' && item.req.includes('REQ-PARENT-ALPHA-01')))
+  assert.ok(!betaContract.items.some(item => item.kind === 'AC' && item.covers.includes('REQ-PARENT-ALPHA-01')))
+  const completed = completeSyncPartitionPlan(plan, result.contracts, input.files!, { writePaths: [], readonlyPaths: [paths.oracle] })
+  const alphaEdge = completed.dependencies.find(edge => edge.from === 'alpha' && edge.to === 'parent')!
+  const betaEdge = completed.dependencies.find(edge => edge.from === 'beta' && edge.to === 'parent')!
+  assert.ok(alphaEdge.contractIds.includes('REQ-PARENT-ALPHA-01'))
+  assert.ok(!alphaEdge.contractIds.includes('REQ-PARENT-BETA-01'))
+  assert.ok(betaEdge.contractIds.includes('REQ-PARENT-BETA-01'))
+  assert.ok(!betaEdge.contractIds.includes('REQ-PARENT-ALPHA-01'))
+  const generationInput: GenerationInput = {
+    root: input.root, requestKey: 'parent-interface:p2', snapshot: input.historyInput!,
+    manifest: { version: 1, entries: readTree(input.historyInput!.source.commonDir, input.historyInput!.immutableTree) },
+    files: input.files!, contracts: result.contracts,
+    elaboratedSpecs: result.changes.map(change => ({ path: change.path, source: change.source })),
+    readyIds: result.readyIds, blockedIds: result.blockedIds, intent: input.intent, facts: [],
+    existingAcceptance: result.contracts.flatMap(contract => contract.items.filter((item): item is Acceptance => item.kind === 'AC')),
+    mandatoryTests: [], verifications: input.verifications!,
+    allowedScope: { paths: completed.partitions.flatMap(partition => partition.writePaths), contractIds: result.readyIds, flowIds: result.readyFlowIds },
+    policy: { version: 'sync-coordinator-v2', digest: 'parent-interface-p2-policy' }, timeoutMs: 30000,
+    model: 'gpt-6.1-sol', effort: 'high',
+  }
+  const reviewCalls: ElaborationSessionRequest[] = []
+  const reviewed = await generateSyncPartitions(generationInput, completed, 2, true, { runner: async request => {
+    const ordinal = reviewCalls.push(request)
+    const properties = request.schema.properties as { inputId: { enum: string[] }; candidateDigest: { enum: string[] }; checkedIds: { items: { enum: string[] }; description: string } }
+    const requiredIds = JSON.parse(properties.checkedIds.description.match(/全部预定项：(.*)；/)![1]) as string[]
+    const output = { inputId: properties.inputId.enum[0], candidateDigest: properties.candidateDigest.enum[0], verdict: 'accept', checkedIds: requiredIds, findings: [] }
+    return { sessionId: `parent-p2-session-${ordinal}`, threadId: `parent-p2-thread-${ordinal}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)) }
+  }, validateCandidate: async () => [] }, checkpoints)
+  assert.equal(reviewed.status, 'reviewed', JSON.stringify(reviewed.failure))
+  assert.equal(reviewCalls.length, 4, '纯接口父节点跳过本地P2 review，仅两个子owner和两条跨边参与')
+  assert.ok(reviewCalls.every(request => !request.requestKey.includes(':final:parent')))
+  const alphaEdgeReview = reviewCalls.find(request => request.requestKey.includes(':final:edge:alpha:parent'))!
+  assert.ok(!alphaEdgeReview.prompt.includes('export function joinCaption(prefix, caption)'), 'alpha跨边独审只读取共享oracle中的beta断言，不读取beta实现')
+  const alphaEdgeBinding = (alphaEdgeReview.schema.properties as { checkedIds: { description: string } }).checkedIds.description.match(/全部预定项：(.*)；/)![1]
+  const alphaEdgeRequired = JSON.parse(alphaEdgeBinding) as string[]
+  assert.ok(alphaEdgeRequired.includes('REQ-PARENT-ALPHA-01'))
+  assert.ok(!alphaEdgeRequired.includes('REQ-PARENT-BETA-01'))
+  const betaEdgeReview = reviewCalls.find(request => request.requestKey.includes(':final:edge:beta:parent'))!
+  assert.ok(!betaEdgeReview.prompt.includes('export function normalizeTag(value)'), 'beta跨边独审只读取共享oracle中的alpha断言，不读取alpha实现')
+  const betaEdgeBinding = (betaEdgeReview.schema.properties as { checkedIds: { description: string } }).checkedIds.description.match(/全部预定项：(.*)；/)![1]
+  const betaEdgeRequired = JSON.parse(betaEdgeBinding) as string[]
+  assert.ok(betaEdgeRequired.includes('REQ-PARENT-BETA-01'))
+  assert.ok(!betaEdgeRequired.includes('REQ-PARENT-ALPHA-01'))
+
+  const codePlan = structuredClone(completed)
+  codePlan.partitions.find(partition => partition.id === 'alpha')!.writePaths.push(paths.alphaSource)
+  codePlan.partitions.find(partition => partition.id === 'beta')!.writePaths.push(paths.betaSource)
+  const codeInput: GenerationInput = { ...generationInput, requestKey: 'parent-interface:p2-code', allowedScope: { ...generationInput.allowedScope, paths: codePlan.partitions.flatMap(partition => partition.writePaths) } }
+  const codeRuntime = native()
+  const codeCheckpoints: PartitionCheckpoints = { load: () => null, save: (_key, value) => writeEvidence(input.historyInput!.source.commonDir, value) }
+  const codeGenerated = await generateSyncPartitions(codeInput, codePlan, 2, false, { runner: codeRuntime.runner, validateCandidate: async () => [] }, codeCheckpoints)
+  assert.equal(codeGenerated.status, 'reviewed', JSON.stringify(codeGenerated.failure))
+  assert.equal(codeRuntime.calls.filter(request => request.purpose === 'code_generate').length, 2, 'spec→code只派两位真实源码owner，不派纯接口父writer')
+  const candidateEntries = verifyCandidate(input.historyInput!.source.commonDir, codeGenerated.candidate!)
+  const parentEntry = candidateEntries.find(entry => entry.path === paths.root)!
+  assert.equal(readObject(input.historyInput!.source.commonDir, parentEntry.oid).toString('utf8'), result.changes.find(change => change.path === paths.root)!.source, 'P2必须保留并装配已审父接口Spec')
+  for (const sourcePath of [paths.alphaSource, paths.betaSource]) {
+    const sourceEntry = candidateEntries.find(entry => entry.path === sourcePath)!
+    assert.match(readObject(input.historyInput!.source.commonDir, sourceEntry.oid).toString('utf8'), /partition implementation/)
+  }
+
+  const importPath = '.spec/root/import-contract/spec.md'
+  const importSource = result.changes.find(change => change.nodeId === alphaId)!.source
+    .replaceAll('Normalize tag', 'External import')
+    .replaceAll(paths.alphaSource, 'src/import.js')
+    .replaceAll(paths.oracle, 'tests/import.test.mjs')
+    .replaceAll('REQ-ALPHA-01', 'REQ-IMPORT-01')
+    .replaceAll('RULE-ALPHA-01', 'RULE-IMPORT-01')
+    .replaceAll('FLOW-ALPHA-01', 'FLOW-IMPORT-01')
+    .replaceAll('STEP-ALPHA-01', 'STEP-IMPORT-01')
+    .replaceAll('AC-ALPHA-ORACLE', 'AC-IMPORT-ORACLE')
+    .replaceAll('VERIFY-ALPHA-ORACLE', 'VERIFY-IMPORT-ORACLE')
+    .replaceAll(alphaId, 'import-contract')
+  const importContext = { nodeId: 'import-contract', path: importPath, source: importSource }
+  const importVerification = { id: 'VERIFY-IMPORT-ORACLE', command: ['node', '--test', 'tests/import.test.mjs'], cwd: '.', timeoutMs: 30000 }
+  const readonlyContextFiles = new Map(input.files!)
+  const withMissingReadonlyContext: ElaborationInput = { ...input, requestKey: 'parent-interface:context-files', context: [importContext], files: readonlyContextFiles, verifications: [...input.verifications!, importVerification] }
+  const alphaTarget = input.targets.find(target => target.nodeId === alphaId)!
+  const parentContext = { nodeId: rootId, path: paths.root, source: result.changes.find(change => change.nodeId === rootId)!.source }
+  const missingContextSeal = sealPartitionedElaboration(withMissingReadonlyContext, result.partitionSeal!.changes, result.partitionSeal!.applicability)
+  const completeContextFiles = new Map(readonlyContextFiles)
+  completeContextFiles.set('src/import.js', "export function normalizeTag(value) { return value.trim().toLowerCase().replace(/\\s+/g, '-') }\n")
+  completeContextFiles.set('tests/import.test.mjs', "import test from 'node:test'\ntest('ORACLE-LIVE-PARTITION-V2-01', () => {})\n")
+  const completeContextSeal = sealPartitionedElaboration({ ...withMissingReadonlyContext, files: completeContextFiles }, result.partitionSeal!.changes, result.partitionSeal!.applicability)
+  await t.test('局部只读context可以延后，但非分区P1和全局seal严格拒绝缺源/测试', async () => {
+    const localContextInput = { ...withMissingReadonlyContext, requestKey: 'parent-interface:local-context', targets: [alphaTarget], context: [parentContext, importContext], validationScope: 'partition_local' as const }
+    const localContextP1 = await elaborate(localContextInput, { runner })
+    assert.equal(localContextP1.structurePassed, true, '局部P1保留只读context缺项延后到全局seal检查')
+    const ordinaryContextP1 = await elaborate({ ...withMissingReadonlyContext, requestKey: 'parent-interface:ordinary-context', targets: [alphaTarget], context: [parentContext, importContext] }, { runner })
+    assert.equal(ordinaryContextP1.structurePassed, false, '非分区完整P1必须直接严格检查冻结context')
+    assert.ok(ordinaryContextP1.rounds.flatMap(round => round.findings).some(issue => issue.code === 'readonly_implementation_gap'))
+    assert.notEqual(localContextP1.inputDigest, ordinaryContextP1.inputDigest, '局部校验范围必须绑定输入与调用摘要')
+    assert.equal(missingContextSeal.seal.passed, false, '全局final seal必须检查完整只读context')
+    assert.ok(missingContextSeal.seal.findings.some(issue => issue.code === 'readonly_implementation_gap'))
+    assert.equal(completeContextSeal.seal.passed, true, JSON.stringify(completeContextSeal.seal.findings.map(({ code, itemId }) => ({ code, itemId }))))
+  })
+
+  for (const [defect, expectedCode] of [
+    ['missing-flow', 'missing-requirement-flow'],
+    ['missing-acceptance', 'missing-acceptance'],
+    ['missing-code', 'readonly_implementation_gap'],
+    ['missing-test', 'readonly_implementation_gap'],
+  ] as const) {
+    await t.test(`全局seal拒绝子区缺${defect}`, async subtest => {
+      childDefect = defect
+      try {
+        const failed = await rawParentInterfaceFixture(subtest)
+        const rejected = await elaborateSyncPartitions(failed.input, failed.plan, 2, failed.checkpoints, runner)
+        assert.equal(rejected.structurePassed, false, `${defect}: ${JSON.stringify(rejected.partitionSeal?.findings.map(({ code, itemId }) => ({ code, itemId })))}`)
+        assert.equal(rejected.partitionSeal?.passed, false)
+        assert.ok(rejected.partitionSeal?.findings.some(issue => issue.code === expectedCode), `${defect} 未由全局seal保留: ${JSON.stringify(rejected.partitionSeal?.findings.map(({ code, itemId }) => ({ code, itemId })))}`)
+      } finally { childDefect = null }
+    })
+  }
+
+  await t.test('无子源码target的raw-only叶仍硬拒', async subtest => {
+    const leaf = await rawParentInterfaceFixture(subtest)
+    leaf.input.targets = [leaf.input.targets[0]!]
+    leaf.plan.partitions = [leaf.plan.partitions[0]!]
+    leaf.plan.expectedPaths = [paths.root]
+    const readonlyLeaf = await elaborateSyncPartitions(leaf.input, leaf.plan, 1, leaf.checkpoints, runner)
+    assert.equal(readonlyLeaf.structurePassed, false, '没有活跃子源码目标的raw-only叶不能借接口seed通过只读实现缺口')
+    assert.ok(readonlyLeaf.partitionSeal?.findings.some(issue => issue.code === 'readonly_implementation_gap'))
+  })
+
+  await t.test('目录外的active source target不构成raw-only父的子实现', async subtest => {
+    const unrelated = await rawParentInterfaceFixture(subtest)
+    const unrelatedId = mintIds([paths.unrelated.split('/').slice(1, -1)])[0]!
+    const unrelatedSource = unrelated.input.files!.get(paths.unrelated)!
+    unrelated.input.targets = [unrelated.input.targets.find(target => target.nodeId === rootId)!, { nodeId: unrelatedId, path: paths.unrelated, source: unrelatedSource, sourceDigest: elaborationDigest(unrelatedSource) }]
+    const parentPartition = unrelated.plan.partitions[0]!
+    unrelated.plan.partitions = [parentPartition, { id: 'unrelated', intentNodeId: rootId, targets: [{ nodeId: unrelatedId, path: paths.unrelated }], readPaths: [paths.root, paths.unrelated, paths.unrelatedSource, paths.oracle], writePaths: [paths.unrelated], sourcePaths: [paths.unrelatedSource], changedPaths: [paths.unrelated], contextNodeIds: [rootId], contractIds: [], flowIds: [], readBytes: 3000, readLimitBytes: 524288, oversizedReads: [] }]
+    unrelated.plan.expectedPaths = [paths.root, paths.unrelated]
+    unrelated.input.requestKey = 'parent-interface:unrelated-target'
+    const unrelatedResult = await elaborateSyncPartitions(unrelated.input, unrelated.plan, 1, unrelated.checkpoints, runner)
+    const unrelatedRootRequest = calls.find(request => request.requestKey.startsWith('parent-interface:unrelated-target:partition:parent:') && request.purpose === 'elaboration_generate')!
+    const unrelatedRootContext = JSON.parse(unrelatedRootRequest.prompt.split('冻结业务输入:\n')[1].split('\n')[0]) as { phase?: string }
+    assert.equal(unrelatedRootContext.phase, undefined, '无关路径下的活跃源码分区不能让root逃过完整只读P1')
+    assert.equal(unrelatedResult.structurePassed, false)
+  })
 })
 
 test('P1后的真实新跨区依赖进入冻结覆盖集合，业务ID多writer被拒绝', async t => {
