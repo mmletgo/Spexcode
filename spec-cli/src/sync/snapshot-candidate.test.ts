@@ -7,7 +7,7 @@ import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readF
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import { withWorktreeRegistryLock } from '../session-record-lock.js'
-import { captureInputSnapshot, contentHash, identifyWorktree, readEvidence, readObject, readTree, UnstableSnapshotError, verifySnapshot, writeObject, writeTree } from './snapshot.js'
+import { captureInputSnapshot, contentHash, identifyWorktree, readEvidence, readObject, readTree, UnstableSnapshotError, verifySnapshot, withReadonlySnapshotQuery, writeObject, writeTree } from './snapshot.js'
 import { composeInputSnapshots } from './composition.js'
 import { exportCandidate, freezeCandidate, verifyCandidate } from './candidate.js'
 import type { BaselinePair, InputSnapshot, SyncScope } from './operation-types.js'
@@ -73,6 +73,86 @@ for (const format of ['sha1', 'sha256'] as const) {
     assert.throws(() => readTree(snapshot.source.commonDir, snapshot.immutableTree), (error: unknown) => typeof (error as { status?: unknown }).status === 'number')
   })
 }
+
+test('只读查询仅按物理commonDir与完整tree OID复用成功读树结果', async t => {
+  const root = repo(t), otherRoot = repo(t), snapshot = await captureInputSnapshot(root, { committed: true }), other = await captureInputSnapshot(otherRoot, { committed: true })
+  assert.equal(snapshot.immutableTree, other.immutableTree)
+  const otherBytes = Buffer.from('different immutable tree\n'), otherEntry = { path: 'other.ts', mode: '100644' as const, oid: writeObject(snapshot.source.commonDir, otherBytes), digest: contentHash(otherBytes) }, otherTree = writeTree(snapshot.source.commonDir, [otherEntry])
+  assert.notEqual(otherTree, snapshot.immutableTree)
+
+  const childProcess = createRequire(import.meta.url)('node:child_process') as typeof import('node:child_process'), original = childProcess.execFileSync, batches: string[][] = []
+  childProcess.execFileSync = ((...args: Parameters<typeof execFileSync>) => { if (args[0] === 'git' && (args[1] as string[]).includes('--batch')) batches.push(args[1] as string[]); return Reflect.apply(original, childProcess, args) }) as typeof execFileSync
+  syncBuiltinESMExports()
+  try {
+    await withReadonlySnapshotQuery(() => {
+      const entries = readTree(snapshot.source.commonDir, snapshot.immutableTree)
+      assert.deepEqual(readTree(snapshot.source.commonDir, snapshot.immutableTree), entries)
+      assert.deepEqual(readTree(other.source.commonDir, other.immutableTree), entries)
+      assert.deepEqual(readTree(snapshot.source.commonDir, otherTree), [otherEntry])
+    })
+  } finally { childProcess.execFileSync = original; syncBuiltinESMExports() }
+  assert.equal(batches.length, 3)
+})
+
+test('只读查询返回独立TreeEntry副本，调用者修改不能污染同scope命中值', async t => {
+  const root = repo(t), snapshot = await captureInputSnapshot(root, { committed: true }), expected = readTree(snapshot.source.commonDir, snapshot.immutableTree)
+  await withReadonlySnapshotQuery(() => {
+    const first = readTree(snapshot.source.commonDir, snapshot.immutableTree)
+    first[0].digest = '0'.repeat(64); first.push({ ...first[0], path: 'caller-pollution.ts' })
+    assert.deepEqual(readTree(snapshot.source.commonDir, snapshot.immutableTree), expected)
+  })
+})
+
+test('缓存读树条目时verifySnapshot仍逐次拒绝坏manifest、contentDigest和id', async t => {
+  const root = repo(t), snapshot = await captureInputSnapshot(root, { committed: true })
+  await withReadonlySnapshotQuery(() => {
+    assert.doesNotThrow(() => verifySnapshot(snapshot))
+    assert.throws(() => verifySnapshot({ ...snapshot, manifestBlob: { sha256: 'f'.repeat(64) } }), /缺失证据/)
+    assert.throws(() => verifySnapshot({ ...snapshot, contentDigest: '0'.repeat(64) }), /快照 manifest\/contentDigest 不匹配/)
+    assert.throws(() => verifySnapshot({ ...snapshot, id: '0'.repeat(64) }), /快照身份摘要不匹配/)
+  })
+})
+
+test('onObject总是逐字节回调，失败后同scope没有成功缓存残留', async t => {
+  const root = repo(t), snapshot = await captureInputSnapshot(root, { committed: true })
+  const childProcess = createRequire(import.meta.url)('node:child_process') as typeof import('node:child_process'), original = childProcess.execFileSync, batches: string[][] = []
+  childProcess.execFileSync = ((...args: Parameters<typeof execFileSync>) => { if (args[0] === 'git' && (args[1] as string[]).includes('--batch')) batches.push(args[1] as string[]); return Reflect.apply(original, childProcess, args) }) as typeof execFileSync
+  syncBuiltinESMExports()
+  try {
+    await withReadonlySnapshotQuery(() => {
+      const entries = readTree(snapshot.source.commonDir, snapshot.immutableTree), observed: string[] = []
+      assert.deepEqual(readTree(snapshot.source.commonDir, snapshot.immutableTree, (entry, bytes) => { assert.equal(entry.digest, contentHash(bytes)); observed.push(entry.path) }), entries)
+      assert.deepEqual(observed, entries.map(entry => entry.path))
+      assert.throws(() => readTree(snapshot.source.commonDir, snapshot.immutableTree, () => { throw new Error('callback failed') }), /callback failed/)
+      assert.deepEqual(readTree(snapshot.source.commonDir, snapshot.immutableTree), entries)
+    })
+  } finally { childProcess.execFileSync = original; syncBuiltinESMExports() }
+  assert.equal(batches.length, 4)
+})
+
+test('scope结束或抛错后，普通读取与继承的异步任务都必须重读坏对象', async t => {
+  const root = repo(t), snapshot = await captureInputSnapshot(root, { committed: true }), [entry] = readTree(snapshot.source.commonDir, snapshot.immutableTree)
+  const objectPath = join(snapshot.source.commonDir, 'objects', entry.oid.slice(0, 2), entry.oid.slice(2))
+  const original = readFileSync(objectPath), altered = Buffer.from('changed object bytes\n'), broken = deflateSync(Buffer.concat([Buffer.from(`blob ${altered.length}\0`), altered]))
+  await withReadonlySnapshotQuery(() => readTree(snapshot.source.commonDir, snapshot.immutableTree))
+  chmodSync(objectPath, 0o600); writeFileSync(objectPath, broken)
+  assert.throws(() => readTree(snapshot.source.commonDir, snapshot.immutableTree), /OID 不匹配/)
+  writeFileSync(objectPath, original)
+
+  let lateRead!: Promise<{ error?: unknown }>
+  await assert.rejects(withReadonlySnapshotQuery(() => {
+    readTree(snapshot.source.commonDir, snapshot.immutableTree)
+    lateRead = new Promise(resolve => setImmediate(() => {
+      try { readTree(snapshot.source.commonDir, snapshot.immutableTree); resolve({}) }
+      catch (error) { resolve({ error }) }
+    }))
+    throw new Error('query failed')
+  }), /query failed/)
+  writeFileSync(objectPath, broken)
+  const late = await lateRead
+  assert.ok(late.error instanceof Error)
+  assert.match(late.error.message, /OID 不匹配/)
+})
 
 test('无关worktree半登记commondir为空不影响来源身份和已提交快照', async t => {
   const root = repo(t), linked = join(root, 'linked')

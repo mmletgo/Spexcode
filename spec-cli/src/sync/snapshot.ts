@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { closeSync, existsSync, lstatSync, mkdtempSync, openSync, readFileSync, readlinkSync, realpathSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
@@ -9,6 +10,19 @@ import type { BlobRef, InputSnapshot, WorktreeIdentity } from './operation-types
 
 export type TreeEntry = { path: string; mode: '100644' | '100755' | '120000'; oid: string; digest: string }
 export type SnapshotManifest = { version: 1; entries: TreeEntry[] }
+type ReadonlySnapshotQuery = { active: boolean; trees: Map<string, TreeEntry[]> }
+const readonlySnapshotQuery = new AsyncLocalStorage<ReadonlySnapshotQuery>()
+
+/** 为一次只读查询建立短命的完整 tree 校验结果作用域。 */
+export async function withReadonlySnapshotQuery<T>(read: () => T | Promise<T>): Promise<T> {
+  const query: ReadonlySnapshotQuery = { active: true, trees: new Map() }
+  return readonlySnapshotQuery.run(query, async () => {
+    try { return await read() }
+    finally { query.active = false; query.trees.clear() }
+  })
+}
+
+const copyTreeEntries = (entries: TreeEntry[]): TreeEntry[] => entries.map(entry => ({ ...entry }))
 export class UnstableSnapshotError extends Error { override name = 'UnstableSnapshotError' }
 export const contentHash = (bytes: Buffer | string): string => createHash('sha256').update(bytes).digest('hex')
 const evidenceDir = (commonDir: string): string => join(commonDir, 'spexcode', 'evidence')
@@ -50,6 +64,10 @@ const physicalStat = (path: string): string => {
   const stat = lstatSync(path, { bigint: true })
   return `${stat.dev}:${stat.ino}:${stat.birthtimeNs}`
 }
+const readonlyTreeKey = (commonDir: string, tree: string): string => {
+  const canonicalCommonDir = realpathSync(commonDir)
+  return JSON.stringify([canonicalCommonDir, physicalStat(canonicalCommonDir), tree])
+}
 /** 已授权路径可在 HEAD 不可读前核对物理替换，不为缺失来源伪造快照。 */
 export const readPhysicalFingerprint = (canonicalRoot: string, gitDir: string): string => contentHash(`${physicalStat(canonicalRoot)}:${physicalStat(gitDir)}`)
 const registeredWorktreeRoots = (commonDir: string): string[] => objectGit(commonDir, ['worktree', 'list', '--porcelain', '-z']).toString().split('\0').filter(line => line.startsWith('worktree ')).map(line => resolve(line.slice(9)))
@@ -70,6 +88,14 @@ export function identifyWorktree(root: string): WorktreeIdentity {
 }
 export function readTree(commonDir: string, tree: string, onObject?: (entry: TreeEntry, bytes: Buffer) => void): TreeEntry[] {
   if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(tree)) throw new Error('tree 必须为不可变 Git OID')
+  const query = readonlySnapshotQuery.getStore(), cacheKey = query?.active ? readonlyTreeKey(commonDir, tree) : undefined
+  if (cacheKey && query) {
+    if (onObject) query.trees.delete(cacheKey)
+    else {
+      const cached = query.trees.get(cacheKey)
+      if (cached) return copyTreeEntries(cached)
+    }
+  }
   const listing = objectGit(commonDir, ['ls-tree', '-rlz', '--full-tree', tree])
   if (!Buffer.from(listing.toString('utf8')).equals(listing)) throw new Error('仓库路径必须为有效 UTF-8')
   const records = listing.toString().split('\0').filter(Boolean)
@@ -84,7 +110,9 @@ export function readTree(commonDir: string, tree: string, onObject?: (entry: Tre
     const { size: _size, ...entry } = entries[index], verified = { ...entry, digest: contentHash(bytes) }
     result.push(verified); onObject?.(verified, bytes)
   })
-  return result.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
+  const sortedEntries = result.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
+  if (cacheKey && query?.active && !onObject) query.trees.set(cacheKey, copyTreeEntries(sortedEntries))
+  return sortedEntries
 }
 function verifyObjectOid(oid: string, bytes: Buffer): void {
   const actualOid = createHash(oid.length === 40 ? 'sha1' : 'sha256').update(`blob ${bytes.byteLength}\0`).update(bytes).digest('hex') // dead-words-ok: Git object hashing requires this exact object header.
