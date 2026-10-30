@@ -13,9 +13,10 @@ import { elaborate, elaborationDigest, sealPartitionedElaboration } from './elab
 import { elaborationSchema } from './elaboration-schema.js'
 import type { ElaborationInput, ElaborationResult } from './elaboration-types.js'
 import { CONTRACT_COLUMNS, parseParts } from '@spexcode/spec-core/contracts'
+import { withoutVerificationTables } from './elaboration-markdown.js'
 import type { GeneratedTables, GeneratedTargetElaboration } from './elaboration-markdown.js'
 import type { GenerationInput } from './generation-types.js'
-import { analyzeSyncPartitions, completeSyncPartitionPlan, elaborateSyncPartitions, generateSyncPartitions, implementationGenerationDispatch, implementationPartitionSelection, mapSyncPartitions } from './partition-execution.js'
+import { analyzeSyncPartitions, completeSyncPartitionPlan, elaborateSyncPartitions, generateSyncPartitions, implementationGenerationDispatch, implementationPartitionSelection, mapSyncPartitions, projectPartitionVerificationOwnership } from './partition-execution.js'
 import type { PartitionCheckpoints } from './partition-execution.js'
 import { planSyncPartitions } from './partitioning.js'
 import type { SyncPartitionPlan } from './partitioning.js'
@@ -172,10 +173,10 @@ async function nestedInterfaceFixture(t: test.TestContext, discoverGamma = false
     { nodeId: alphaId!, path: paths.alpha, source: alphaSourceSpec, sourceDigest: elaborationDigest(alphaSourceSpec) },
     { nodeId: gammaId!, path: paths.gamma, source: discoverGamma ? null : gammaSourceSpec, sourceDigest: discoverGamma ? null : elaborationDigest(gammaSourceSpec), ...(discoverGamma ? { rawSource: '遵循gamma上层原意，治理现有upperTag字符串转换。' } : {}) },
   ]
-  const verify = (domain: 'ALPHA' | 'GAMMA') => ({ id: `VERIFY-${domain}-NESTED`, command: ['node', '--test', paths.oracle], cwd: '.', timeoutMs: 30000 })
+  const verify = { id: 'VERIFY-NESTED-ORACLE', command: ['node', '--test', paths.oracle], cwd: '.', timeoutMs: 30000 }
   const input: ElaborationInput = {
     root, base: snapshot.headCommit, requestKey: 'nested-interface:p1', intent: { nodeId: rootId!, rawSource: raw.root }, targets,
-    files, facts: [], verifications: [verify('ALPHA'), verify('GAMMA')], implementationWritePaths: [], readonlyTestPaths: [paths.oracle],
+    files, facts: [], verifications: [verify], implementationWritePaths: [], readonlyTestPaths: [paths.oracle],
     historyInput: snapshot, maxRepairs: 0, maxCalls: 2, timeoutMs: 30000,
   }
   const partitions: SyncPartitionPlan['partitions'] = [
@@ -449,6 +450,9 @@ test('raw-only parent和两个源码叶先审接口再局部细化，完整全�
   assert.equal(calls.filter(request => request.purpose === 'elaboration_review').length, 3)
   assert.ok(calls.filter(request => request.requestKey.includes(':partition:alpha:')).every(request => request.prompt.includes('REQ-PARENT-ALPHA-01')))
   assert.ok(calls.filter(request => request.requestKey.includes(':partition:beta:')).every(request => request.prompt.includes('REQ-PARENT-BETA-01')))
+  const uniqueProof = JSON.parse(readEvidence(input.historyInput!.source.commonDir, result.verificationProjectionRef!).toString('utf8')) as import('./elaboration-types.js').VerificationOwnershipProjection
+  assert.deepEqual(uniqueProof.owners, [], '不同ID同命令且各有唯一owner时不投影或迁移')
+  assert.ok(uniqueProof.sources.every(source => source.beforeDigest === source.afterDigest))
   const alphaContract = result.contracts.find(contract => contract.nodeId === alphaId)!
   const betaContract = result.contracts.find(contract => contract.nodeId === betaId)!
   assert.ok(alphaContract.items.some(item => item.kind === 'FLOW' && item.req.includes('REQ-PARENT-ALPHA-01')))
@@ -643,8 +647,8 @@ test('多层raw-only父逐级结算真实接口后两叶并行，并只从严格
       tables.RULE = [{ id: rule, scope: sourcePath, constraint: '只接受字符串输入，返回冻结实现定义的转换结果，保持当前不变量。', basis: '现有源码和只读oracle', source: `derived:${req}`, authority: nodeId, 'depends-on': [req] }]
       tables.FLOW = [{ id: flow, req: [...ancestors, req], actors: '调用方', entry: `调用${symbol}`, preconditions: '输入字符串', steps: [step], terminal: 'END', source: `derived:${req}`, 'depends-on': [...ancestors, req] }]
       tables.STEP = [{ id: step, flow, action: `同步调用${symbol}`, input: '字符串', output: '转换结果', rules: alpha ? [rule, 'RULE-NESTED-ALPHA-POLICY'] : [rule], next: 'END', source: `derived:${req}`, 'depends-on': [req] }]
-      tables.AC = [{ id: `AC-${domain}-NESTED`, source: `derived:${req}`, 'depends-on': [req], covers: [...ancestors, req, rule, ...alpha ? ['RULE-NESTED-ALPHA-POLICY'] : []], preconditions: 'oracle输入', action: `调用${symbol}`, assertion: '既有结果不变', test: `${paths.oracle}#NESTED-INTERFACE-ORACLE-01`, command: `VERIFY-${domain}-NESTED` }]
-      tables.VERIFY = [{ id: `VERIFY-${domain}-NESTED`, command: ['node', '--test', paths.oracle], cwd: '.', 'timeout-ms': 30000 }]
+      tables.AC = [{ id: `AC-${domain}-NESTED`, source: `derived:${req}`, 'depends-on': [req], covers: [...ancestors, req, rule, ...alpha ? ['RULE-NESTED-ALPHA-POLICY'] : []], preconditions: 'oracle输入', action: `调用${symbol}`, assertion: '既有结果不变', test: `${paths.oracle}#NESTED-INTERFACE-ORACLE-01`, command: 'VERIFY-NESTED-ORACLE' }]
+      tables.VERIFY = [{ id: 'VERIFY-NESTED-ORACLE', command: ['node', '--test', paths.oracle], cwd: '.', 'timeout-ms': 30000 }]
       code = [`${sourcePath}#${symbol}`]
       prose = '这是无状态同步纯函数，状态不适用，输出只由输入决定。'
     }
@@ -670,7 +674,11 @@ test('多层raw-only父逐级结算真实接口后两叶并行，并只从严格
         leafInFlight--
       }
     } else if (seed) settled.add(nodeId)
-    const output = request.purpose === 'elaboration_generate' ? rows(nodeId) : { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+    const output = request.purpose === 'elaboration_generate' ? rows(nodeId) as unknown as GeneratedTargetElaboration : { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+    if ('changes' in output) {
+      const readonlyIds = new Set(frozen.context.flatMap(source => parseContract({ ...source, nodeId: 'readonly' }).contract?.items.filter(item => item.kind === 'VERIFY').map(item => item.id) ?? []))
+      for (const change of output.changes) change.tables.VERIFY = change.tables.VERIFY.filter(row => !readonlyIds.has(String(row.id)))
+    }
     return { sessionId: `nested-session-${ordinal}`, threadId: `nested-thread-${ordinal}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)) }
   }
   const result = await elaborateSyncPartitions(input, plan, 2, checkpoints, runner)
@@ -691,8 +699,75 @@ test('多层raw-only父逐级结算真实接口后两叶并行，并只从严格
     frozen.targets = frozen.targets.map(({ targetIndex: _targetIndex, ...target }) => target)
     assert.equal(contentHash(JSON.stringify(frozen)), local.inputDigest, '分区计划与分类证据参与真实局部inputDigest')
   }
+  const originalChanges = result.partitionEvidence!.flatMap(evidence => {
+    const local = JSON.parse(readEvidence(input.historyInput!.source.commonDir, evidence.resultRef).toString('utf8')) as ElaborationResult
+    assert.equal(local.structurePassed, true)
+    assert.equal(local.reviewPassed, true)
+    return local.changes
+  })
+  const beforeProjection = sealPartitionedElaboration(input, originalChanges, result.partitionSeal!.applicability)
+  assert.equal(beforeProjection.seal.passed, false, '相同两个已审叶的原件严格封口必须复现共享VERIFY重复')
+  assert.ok(beforeProjection.seal.findings.some(issue => issue.code === 'duplicate-id' && issue.itemId === 'VERIFY-NESTED-ORACLE'))
+  assert.equal(result.contracts.filter(contract => contract.items.some(item => item.id === 'VERIFY-NESTED-ORACLE')).length, 1)
+  assert.equal(result.graph!.owners.get('VERIFY-NESTED-ORACLE')!.path, paths.root, '新共享登记归本轮可写intent，不制造业务节点')
+  for (const change of result.changes) {
+    const reviewed = originalChanges.find(original => original.path === change.path)!
+    assert.equal(withoutVerificationTables(change.source), withoutVerificationTables(reviewed.source), '全部非VERIFY源码逐字不变')
+  }
+  const proof = JSON.parse(readEvidence(input.historyInput!.source.commonDir, result.verificationProjectionRef!).toString('utf8')) as import('./elaboration-types.js').VerificationOwnershipProjection & { partitionEvidence: ElaborationResult['partitionEvidence'] }
+  assert.deepEqual(proof.partitionEvidence, result.partitionEvidence)
+  assert.deepEqual(proof.owners.map(owner => ({ id: owner.id, owner: owner.ownerPath })), [{ id: 'VERIFY-NESTED-ORACLE', owner: paths.root }])
+  const recomputed = projectPartitionVerificationOwnership(input, originalChanges, plan.partitions.flatMap(partition => partition.targets.map(target => target.path)))
+  assert.deepEqual(recomputed.changes, result.partitionSeal!.changes, '只凭冻结policy及局部原件可独立重算投影')
+  assert.equal(proof.registrationDigest, recomputed.evidence.registrationDigest)
+  assert.deepEqual(proof.sources, recomputed.evidence.sources)
+  for (const path of [paths.alphaSource, paths.gammaSource, paths.oracle]) assert.equal(readFileSync(join(input.root, path), 'utf8'), input.files!.get(path))
+  await t.test('技术投影保留只读既有owner、拒绝越权和非精确登记，业务重复仍由strict seal拒绝', async () => {
+    const rootChange = result.changes.find(change => change.path === paths.root)!
+    const childChanges = originalChanges.filter(change => change.path !== paths.root)
+    const readonlyInput: ElaborationInput = { ...input, targets: input.targets.filter(target => target.path !== paths.root), context: [{ nodeId: nodes.root, path: paths.root, source: rootChange.source }] }
+    const writable = childChanges.map(change => change.path)
+    const retained = projectPartitionVerificationOwnership(readonlyInput, childChanges, writable)
+    assert.equal(retained.evidence.owners[0].priorOwnerPath, paths.root)
+    assert.equal(retained.evidence.owners[0].ownerPath, paths.root)
+    assert.equal(sealPartitionedElaboration(readonlyInput, retained.changes, applicability).seal.passed, true)
+    assert.equal(readonlyInput.context![0].source, rootChange.source)
+    const readonlyNewInput = { ...readonlyInput, context: [{ nodeId: nodes.root, path: paths.root, source: originalChanges.find(change => change.path === paths.root)!.source }] }
+    const fallback = projectPartitionVerificationOwnership(readonlyNewInput, childChanges, writable)
+    assert.equal(fallback.evidence.owners[0].ownerPath, paths.alpha, '新owner缺少可写intent时取确定性真实可写target')
+    assert.deepEqual(projectPartitionVerificationOwnership(readonlyNewInput, [...childChanges].reverse(), writable).changes, fallback.changes, '异步完成序不改变归属')
+    assert.throws(() => projectPartitionVerificationOwnership(input, originalChanges, writable), /真实可写目标/)
+    assert.throws(() => projectPartitionVerificationOwnership({ ...input, verifications: [] }, originalChanges, originalChanges.map(change => change.path)), /精确可信登记/)
+    for (const defect of ['command', 'cwd', 'timeout'] as const) {
+      const invalid = originalChanges.map(change => ({ ...change, source: change.path === paths.gamma ? change.source.replace(defect === 'command' ? '["node","--test"' : defect === 'cwd' ? '| . | 30000 |' : '30000 |', defect === 'command' ? '["node","--check"' : defect === 'cwd' ? '| tests | 30000 |' : '30001 |') : change.source }))
+      assert.throws(() => projectPartitionVerificationOwnership(input, invalid, originalChanges.map(change => change.path)), /精确可信登记/, defect)
+    }
+    const oldOwner = { ...input.targets.find(target => target.path === paths.root)!, source: rootChange.source, sourceDigest: contentHash(rootChange.source) }
+    const movedPath = '.spec/moved/spec.md'
+    const movingInput: ElaborationInput = { ...input, targets: [oldOwner, ...input.targets.filter(target => target.path !== paths.root)], nodeChanges: [{ action: 'move', from: { nodeId: nodes.root, path: paths.root }, to: { nodeId: 'moved', path: movedPath }, evidenceRef: { sha256: contentHash('approved-move') } }] }
+    const movedChanges = originalChanges.map(change => change.path === paths.root ? { ...change, nodeId: 'moved', path: movedPath, source: rootChange.source.replaceAll(`| ${nodes.root} |`, '| moved |') } : change)
+    const movedProjection = projectPartitionVerificationOwnership(movingInput, movedChanges, movedChanges.map(change => change.path))
+    assert.equal(movedProjection.evidence.owners[0].priorOwnerPath, paths.root)
+    assert.equal(movedProjection.evidence.owners[0].ownerPath, movedPath, '只沿冻结move归一化既有owner，仍保存原path')
+    assert.ok(movedProjection.changes.find(change => change.path === movedPath)!.source.includes('| VERIFY-NESTED-ORACLE |'))
+    assert.throws(() => projectPartitionVerificationOwnership({ ...movingInput, nodeChanges: [] }, movedChanges, movedChanges.map(change => change.path)), /真实可写目标/)
+    const retiredInput: ElaborationInput = { ...movingInput, nodeChanges: [{ action: 'retire', from: { nodeId: nodes.root, path: paths.root }, evidenceRef: { sha256: contentHash('approved-retire') } }] }
+    assert.throws(() => projectPartitionVerificationOwnership(retiredInput, childChanges, writable), /不能迁移既有physical owner/)
+    const duplicatedBaseline = { ...input, targets: input.targets.map(target => {
+      const change = originalChanges.find(change => change.path === target.path)!
+      return { ...target, source: change.source, sourceDigest: contentHash(change.source) }
+    }) }
+    assert.throws(() => projectPartitionVerificationOwnership(duplicatedBaseline, originalChanges, originalChanges.map(change => change.path)), /原始VERIFY已有多个physical owner/)
+    const duplicateReq = originalChanges.find(change => change.path === paths.root)!.source.split('\n').find(line => line.startsWith('| REQ-NESTED-ALPHA |'))!
+    const businessDuplicate = originalChanges.map(change => ({ ...change, source: change.path === paths.gamma ? change.source.replace(/^(\| REQ-GAMMA-NESTED[^\n]*\n)/m, `$1${duplicateReq}\n`) : change.source }))
+    const unmodifiedBusiness = projectPartitionVerificationOwnership(input, businessDuplicate, originalChanges.map(change => change.path))
+    const rejected = sealPartitionedElaboration(input, unmodifiedBusiness.changes, applicability)
+    assert.equal(rejected.seal.passed, false)
+    assert.ok(rejected.seal.findings.some(issue => issue.code === 'duplicate-id' && issue.itemId === 'REQ-NESTED-ALPHA'))
+  })
   const replay = await elaborateSyncPartitions(input, plan, 2, checkpoints, async () => { throw new Error('相同绑定checkpoint不应重派模型') })
   assert.equal(replay.partitionSeal?.candidateDigest, result.partitionSeal?.candidateDigest)
+  assert.deepEqual(replay.verificationProjectionRef, result.verificationProjectionRef, '重入投影及持久证明稳定')
   await assert.rejects(elaborateSyncPartitions(input, { ...plan, digest: contentHash('another-nested-plan') }, 2, checkpoints, runner), /局部细化原件没有绑定当前分区分类/)
   await assert.rejects(elaborateSyncPartitions({ ...input, targets: [input.targets[0]] }, { ...plan, partitions: [plan.partitions[0]] }, 2, checkpoints, runner), /冻结父接口分区缺少真实纯父证据/)
   const gamma = result.contracts.find(contract => contract.nodeId === nodes.gamma)!
@@ -827,6 +902,36 @@ test('多层raw-only父逐级结算真实接口后两叶并行，并只从严格
     for (const path of [paths.alphaSource, paths.gammaSource, paths.oracle]) assert.equal(readFileSync(join(repeatInput.root, path), 'utf8'), files.get(path))
     if (appendRaw) return
     const seedInput: ElaborationInput = { ...localInput, phase: 'interface_seed' }
+    await assert.rejects(elaborate({ ...seedInput, verifications: [] }, { runner: localRunner({ version: 'elaboration-target-rows-v3', changes: [], applicability }) }), /精确可信VERIFY/)
+    assert.equal(seedInput.targets[0].source!.includes('VERIFY-NESTED-ORACLE'), true)
+    const policyRaw = `${nextRaw} 将VERIFY-NESTED-ORACLE验证超时明确调整为30001毫秒，其它行为不变。`
+    const policyInput: ElaborationInput = { ...seedInput, intent: { ...seedInput.intent, rawSource: policyRaw }, verifications: seedInput.verifications!.map(row => ({ ...row, timeoutMs: 30001 })),
+      authorizedChanges: [{ id: 'VERIFY-NESTED-ORACLE', action: 'update_verification', source: 'user:raw', reason: '父raw明确把验证超时调整为30001毫秒' }] }
+    const policyUpdate = await elaborate(policyInput, { runner: localRunner({ version: 'elaboration-target-rows-v3', changes: [], applicability }) })
+    assert.equal(policyUpdate.status, 'interface_seed', JSON.stringify({ failure: policyUpdate.failure, findings: policyUpdate.rounds.flatMap(round => round.findings) }))
+    assert.equal(policyUpdate.reviewPassed, true)
+    const updatedVerification = policyUpdate.contracts[0].items.find(item => item.kind === 'VERIFY')!
+    assert.equal(updatedVerification.kind, 'VERIFY')
+    assert.equal(updatedVerification.timeoutMs, 30001, '合法本target更新由程序从冻结登记精确提供')
+    assert.equal(withoutVerificationTables(policyUpdate.changes[0].source).replace(policyRaw, nextRaw), withoutVerificationTables(rootTarget.source), '除明确授权raw和VERIFY政策外业务正文逐字保持')
+    const savedPolicySource = rootTarget.source.replace(nextRaw, policyRaw)
+    const savedPolicyInput: ElaborationInput = { ...policyInput, targets: [{ ...rootTarget, source: savedPolicySource, sourceDigest: contentHash(savedPolicySource) }], files: new Map([[paths.root, savedPolicySource]]) }
+    for (const changes of [[], [{ targetIndex: 0, title: 'root', description: '', code: [], related: [paths.oracle], prose: null, removeIds: [], tables: emptyElaborationTables() }]]) {
+      const applied = await elaborate(savedPolicyInput, { runner: localRunner({ version: 'elaboration-target-rows-v3', changes, applicability }) })
+      assert.equal(applied.status, 'interface_seed', JSON.stringify(applied.rounds.flatMap(round => round.findings)))
+      assert.equal(applied.reviewPassed, true, 'raw已保存且无模型行差量仍必须应用已授权技术政策，不能被空差量fast path吞掉')
+      assert.ok(applied.contracts[0].items.some(item => item.kind === 'VERIFY' && item.timeoutMs === 30001))
+      assert.equal(withoutVerificationTables(applied.changes[0].source), withoutVerificationTables(savedPolicySource))
+    }
+    const policyCalls = localCalls
+    await assert.rejects(elaborate({ ...policyInput, authorizedChanges: [] }, { runner: localRunner({ version: 'elaboration-target-rows-v3', changes: [], applicability }) }), /精确可信VERIFY/)
+    await assert.rejects(elaborate({ ...policyInput, authorizedChanges: [{ id: 'VERIFY-NESTED-ORACLE', action: 'update_verification', source: 'decision:UNTRUSTED-POLICY', reason: '没有可信裁决事实' }] }, { runner: localRunner({ version: 'elaboration-target-rows-v3', changes: [], applicability }) }), /可信来源/)
+    assert.equal(localCalls, policyCalls, '无授权和伪授权在任何模型派发前拒绝')
+    const forbiddenPolicyRows: GeneratedTargetElaboration = { version: 'elaboration-target-rows-v3', changes: [{ targetIndex: 0, title: 'root', description: '', code: [], related: [paths.oracle], prose: null, removeIds: [], tables: { ...emptyElaborationTables(), VERIFY: [{ id: 'VERIFY-NESTED-ORACLE', command: ['node', '--test', paths.oracle], cwd: '.', 'timeout-ms': 30002 }] } }], applicability }
+    const forbiddenPolicy = await elaborate(policyInput, { runner: localRunner(forbiddenPolicyRows) })
+    assert.equal(forbiddenPolicy.structurePassed, false)
+    assert.equal(forbiddenPolicy.reviewPassed, false)
+    assert.ok(forbiddenPolicy.rounds[0].findings.some(issue => issue.code === 'output_schema'), '模型不能选择授权ID的另一新定义')
     const retained = await elaborate(seedInput, { runner: localRunner({ version: 'elaboration-target-rows-v3', changes: [], applicability }) })
     assert.equal(retained.reviewPassed, true, '空行差量保留既有全部父REQ/RULE')
     assert.deepEqual(retained.contracts[0].items.map(item => item.id), contracts.find(contract => contract.nodeId === nodes.root)!.items.map(item => item.id))

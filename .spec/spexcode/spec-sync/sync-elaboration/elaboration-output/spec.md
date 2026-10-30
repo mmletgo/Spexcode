@@ -21,7 +21,7 @@ review verdict 的原生说明明确 accept 仅可搭配空 findings；implement
 
 `RULE.authority` 的生成请求 schema 仅接受本轮冻结可写 target 的 canonical `nodeId`，不能接受 REQ/RULE 业务 ID。合法 move 中，冻结旧节点已有 `authority` 等于其 `from.nodeId` 的 RULE 时，schema 还保留该旧 `nodeId`，供 renderer 按真实 `nodeChanges` 归一到目的身份；最终 owner 仍由现有逐项校验确认，enum 不授予跨叶归属。没有可写 target 时不产生空 enum。
 
-`interface_seed` 是分区编排内部的父接口schema：只允许REQ/RULE/GAP行，不允许FLOW/STEP/AC/VERIFY；首次raw-only或既有纯接口均沿用同一行差量和旧新演进门禁。既有条目默认保留，removeIds仅可取本目标已有且经输入门禁核验的显式retire授权ID，schema以精确enum和数量限域；无合法退役授权时仍为零项且不产生空enum。code/related严格沿用冻结父节点绑定，空绑定用`maxItems:0`和普通string items约束，不生成空enum。
+`interface_seed` 是分区编排内部的父接口schema：只允许REQ/RULE/GAP行，不允许新增FLOW/STEP/AC/VERIFY；既有精确匹配冻结登记的技术VERIFY由程序沿用而非模型重选；首次raw-only或既有纯接口均沿用同一行差量和旧新演进门禁。既有条目默认保留，removeIds仅可取本目标已有且经输入门禁核验的显式retire授权ID，schema以精确enum和数量限域；无合法退役授权时仍为零项且不产生空enum。code/related严格沿用冻结父节点绑定，空绑定用`maxItems:0`和普通string items约束，不生成空enum。
 
 生成指令要求每个业务 REQ 至少由一个主 FLOW.req 覆盖。验证配置、写路径授权、执行器/schema 和本轮元数据属于执行边界，不另造业务 REQ 或测试执行 FLOW；这些边界仍须遵守，测试和验证绑定在业务 AC/可信 VERIFY 中，不能因此省略 raw 里的业务需求。
 
@@ -51,3 +51,7 @@ P1 的 prose 和持久契约只写业务约定；V3 尚未运行、通过或失�
 
 
 implementationWritePaths 显式为空时，生成与独审说明本轮源码及全部测试只读。AC.test 只能绑定冻结上下文中真实文件和用例，不把新测试或实现修复留给 P2；技术缺证不改写业务原意。
+
+提供冻结verifications且只读context已有技术登记时，生成VERIFY.id只可取当前登记且未在只读context中定义的ID；全部已在context时VERIFY差量为零项，AC.command直接引用已有技术定义，不复制只读owner。不同分区首次各自声明同一精确登记不改变业务授权，全部局部独审后由[[sync-partition-execution]]确定唯一owner；非精确登记、命令漂移和重复业务ID仍受原硬门禁。
+
+纯父既有VERIFY与本轮新登记不同，但本target拥有经过原输入授权核验的合法update_verification时，可保留旧定义进入同一接口更新；无授权或伪造授权仍拒绝。seed模型schema仍禁止所有VERIFY差量，程序只对该target已有且合法授权的ID，从精确冻结登记补入更新行，独立审查看到完整新候选。既有验证政策的完整演进与registration检查仍要求授权和新定义精确匹配，不开放任意技术行选择。
