@@ -34,7 +34,7 @@ async function waitFor(check: () => boolean | Promise<boolean>, label: string, t
 }
 const git = (project: string, ...args: string[]) => execFileSync('git', ['-C', project, ...args], { encoding: 'utf8' }).trim()
 
-async function publicCreateFixture(signal: AbortSignal, registryMode: 'create' | 'close' | 'rollback' | 'names' | null = null): Promise<void> {
+async function publicCreateFixture(signal: AbortSignal, registryMode: 'create' | 'close' | 'rollback' | 'names' | 'recovery-safety' | null = null): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), 'spex-session-create-'))
   const projectPath = join(root, 'project'); mkdirSync(projectPath)
   const project = realpathSync(projectPath)
@@ -208,19 +208,59 @@ esac
     const ps = execFileSync('ps', ['-eo', 'args='], { encoding: 'utf8' })
     assert.ok(!ps.includes(gitWrapper), 'stalled Git process is physically gone')
   }
-  const crashBackend = async (marker: string, key: string, prompt: string, beforeRestart?: () => void) => {
+  const crashBackend = async (marker: string, key: string, prompt: string, beforeRestart?: () => void, pinnedBase?: string) => {
     writeFileSync(marker, 'kill\n')
     const crashed = child
-    await assert.rejects(post(key, prompt), 'process death closes the admitted request without a response')
+    await assert.rejects(post(key, prompt, undefined, undefined, pinnedBase), 'process death closes the admitted request without a response')
     await waitFor(() => crashed.exitCode !== null || crashed.signalCode !== null, 'crashed backend exit')
     rmSync(marker, { force: true })
     beforeRestart?.()
     child = startBackend()
     await waitForHealth()
+
   }
 
   try {
     await waitForHealth()
+    if (registryMode === 'recovery-safety') {
+      unlinkSync(stallGit)
+      for (const layout of ['current', 'legacy']) for (const mutation of ['wip', 'ignored', 'fork', 'expired-reflog', 'missing-reflog', 'symbolic-base', 'clean']) {
+        const key = `retry-${layout}-${mutation}`, prompt = `${layout} retry safety ${mutation}`
+        const pinnedBase = mutation === 'symbolic-base' ? 'staging' : undefined, sourceFork = git(project, 'rev-parse', 'staging')
+        let receiptPath = '', receipt: any
+        await crashBackend(killAfterGit, key, prompt, () => {
+          receiptPath = candidateReceipts().find(path => path.endsWith(`${sessionIdForCreateKey(key)}.json`))!
+          receipt = JSON.parse(readFileSync(receiptPath, 'utf8'))
+          if (layout === 'legacy') {
+            const id = sessionIdForCreateKey(key), path = receipt.path.slice(0, -id.length) + id.slice(0, 4), branch = receipt.branch.slice(0, -id.length) + id.slice(0, 4)
+            git(project, 'worktree', 'move', receipt.path, path)
+            git(path, 'branch', '-m', branch)
+            receipt = { ...receipt, path, branch }
+            writeFileSync(receiptPath, JSON.stringify(receipt))
+          }
+          if (mutation === 'wip' || mutation === 'ignored') {
+            if (mutation === 'ignored') writeFileSync(join(project, '.git/info/exclude'), 'ignored-wip\n', { flag: 'a' })
+            writeFileSync(join(receipt.path, mutation === 'ignored' ? 'ignored-wip' : 'user-data'), 'preserve candidate edits')
+          }
+          if (mutation === 'fork' || mutation === 'expired-reflog' || mutation === 'symbolic-base') git(receipt.path, '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.test', 'commit', '--allow-empty', '-qm', 'candidate authored commit')
+          if (mutation === 'symbolic-base') git(project, 'update-ref', 'refs/heads/staging', git(receipt.path, 'rev-parse', 'HEAD'))
+          const reflog = git(project, 'rev-parse', '--path-format=absolute', '--git-path', `logs/refs/heads/${receipt.branch}`)
+          if (mutation === 'expired-reflog') writeFileSync(reflog, readFileSync(reflog, 'utf8').split('\n').slice(1).join('\n'))
+          if (mutation === 'missing-reflog') unlinkSync(reflog)
+        }, pinnedBase)
+        const head = git(receipt.path, 'rev-parse', 'HEAD'), beforeReceipt = readFileSync(receiptPath, 'utf8')
+        const retry = await post(key, prompt, undefined, undefined, pinnedBase), body = await retry.json() as any
+        assert.equal(retry.status, mutation === 'clean' ? 201 : 409, `${layout} ${mutation}: ${JSON.stringify(body)}`)
+        if (mutation === 'clean') assert.equal(existsSync(receiptPath), false)
+        else {
+          assert.equal(readFileSync(receiptPath, 'utf8'), beforeReceipt)
+          assert.equal(git(receipt.path, 'rev-parse', 'HEAD'), head)
+          if (mutation === 'wip' || mutation === 'ignored') assert.equal(readFileSync(join(receipt.path, mutation === 'ignored' ? 'ignored-wip' : 'user-data'), 'utf8'), 'preserve candidate edits')
+        }
+        if (mutation === 'symbolic-base') git(project, 'update-ref', 'refs/heads/staging', sourceFork)
+      }
+      return
+    }
     if (registryMode === 'names') {
       unlinkSync(stallGit)
       const responses = await Promise.all([post('collision-112'), post('collision-117')])
@@ -596,3 +636,4 @@ test('public session registry serializes distinct candidates and close during ad
 test('public session close keeps rename and prune outside a sibling add', { timeout: 30_000 }, t => publicCreateFixture(t.signal, 'close'))
 test('public session failed add keeps rollback outside a sibling add', { timeout: 30_000 }, t => publicCreateFixture(t.signal, 'rollback'))
 test('public same-prefix UUIDs own distinct resources while occupied complete targets remain protected', { timeout: 30_000 }, t => publicCreateFixture(t.signal, 'names'))
+test('public matching receipt retries preserve current and legacy WIP and forked heads', { timeout: 60_000 }, t => publicCreateFixture(t.signal, 'recovery-safety'))

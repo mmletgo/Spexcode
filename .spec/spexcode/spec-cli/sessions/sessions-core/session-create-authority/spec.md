@@ -7,6 +7,7 @@ code:
   - spec-cli/src/sessions.ts#sessionCreateRequest
   - spec-cli/src/sessions.ts#sessionCandidateTarget
   - spec-cli/src/sessions.ts#recoverSessionCreateTermination
+  - spec-cli/src/sessions.ts#proveSessionCandidateRecovery
 related:
   - spec-cli/src/session-create-pretarget-recovery.test.ts
   - spec-cli/src/session-create-cli.test.ts
@@ -126,3 +127,5 @@ This keeps concurrent creates from contending on `.git/config` while Git writes 
 候选身份核验显式绑定原 root 的物理 commonDir，并要求 target 实际 gitDir 为该 commonDir/worktrees 下的直接 linked 登记、其 gitdir 回链精确指向 target/.git。registry 同路径、同名 branch 或相同 base 不能替代自身登记证明；foreign commonDir、借用同仓另一 admin、错误回链和 primary 目标均拒绝，物理 alias 与相对自身回链保持可用。发布、未发布清理恢复和归档恢复共享此证明，不从同步模块另引身份或 footprint 副作用。
 
 恢复在上述 session-id、精确候选双锁之后取得 [[record-lock]] 的物理 commonDir registry fence；首次 registry 检查、拥有权核验、remove 和最终缺失证明处于同一临界段，不与其他候选的 add、close prune 或归档恢复 add 重叠。普通创建的 add 成功后释放 registry fence，随后 seed/materialize 和模型队列保持并行；后续失败重新取得 fence 再清理，若等待 fence 的清理截止到期则报告 cleanup_failed 并保留候选收据与实际资源，不能生成 cleanupComplete。
+
+普通 matching-receipt 创建重试与取消终止恢复在原锁内共用严格冷态、物理 Git 身份、未知内容和原 fork 检查，不重新进入会加锁的公共恢复函数。已存在 canonical 发布地址、运行记录或原生 generation 登记时拒绝清理。未知 tracked/staged/untracked/ignored 内容继续保留，仅沿用已有逐字节相同 host-state seed 例外；移除 worktree 不使用 force，分支按已核实 commit 做条件删除。已 pin 的不可变 commit 精确核对；未 pin 或 symbolic base 还须有真实 branch 创建 reflog 首项（零 old OID、创建记录及有效新 OID），当前 HEAD 必须仍为原 fork，symbolic base 当前解析也须一致。最早尚存普通 commit 条目不能替代创建证明；creation 已过期、日志缺失或不明、分支已 authored 或 base 已移动均拒绝且保留 receipt/资源。

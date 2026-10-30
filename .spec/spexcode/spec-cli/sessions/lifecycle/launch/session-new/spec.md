@@ -90,6 +90,14 @@ mandatory under the same locks. A missing receipt never authorizes claiming or d
 fixture proves equal-prefix creates both return 201, while genuinely occupied complete targets and unknown
 contents still refuse creation; isolated synthetic old receipts exercise recovery without changing live evidence.
 
+Matching receipts permit recovery only while the candidate is unpublished and cold. Ordinary create retries
+and cancellation recovery use the same physical Git identity, unknown-content and original-fork checks under
+the existing locks, then remove without force and delete a branch only at its proved commit. A pinned immutable
+commit supplies the fork; an unpinned or symbolic-base candidate also needs its actual branch-creation reflog
+entry with zero old OID. The oldest surviving commit entry is insufficient: missing or expired creation evidence,
+a moved symbolic base, an authored HEAD, tracked/untracked/ignored WIP, or an unknown registration preserves
+the resources and receipt and refuses recovery. Only the existing byte-identical host-state seed exception remains.
+
 Record publication itself fences any receipt that could not be retired: while that public record exists,
 create returns it and never enters candidate cleanup. Before terminal close may remove that fence, close holds
 the same session-id and exact `{branch,path}` resource locks, retires a valid matching candidate receipt, and
