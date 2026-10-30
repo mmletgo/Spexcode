@@ -19,7 +19,8 @@ export type FrozenReadArguments = { contextDigest: string; entryId: string; star
 export type FrozenReadReceipt = { threadId: string; turnId: string; callId: string; arguments: FrozenReadArguments; responseDigest: string }
 type FrozenCoverageProof = { contextDigest: string; threadId: string; turnId: string; receipts: FrozenReadReceipt[]; coveredEntryIds: string[]; historyDigest: string }
 export type FrozenReadProof = FrozenCoverageProof & ({ version?: never } | { version: 2; visibilityDigest: string; toolOutputTokenLimit: number } | { version: 3; provider: 'claude-code'; promptId: string; model: string; cliVersion: string; maxReadBytes: 65536; maxResultSizeChars: 500000 })
-export type ClaudePublicMessage = { role: string; content: Array<{ type: string; id?: string; name?: string; input?: unknown; tool_use_id?: string; content?: string | Array<{ type: string; text: string }>; text?: string; is_error?: boolean }> }
+type ClaudePublicContentBlock = { type: string; id?: string; name?: string; input?: unknown; tool_use_id?: string; content?: string | Array<{ type: string; text: string }>; text?: string; is_error?: boolean }
+export type ClaudePublicMessage = { role: string; content: string | ClaudePublicContentBlock[] }
 type ClaudeCompaction = { runningTurnSends: { uuids: string[]; openerUuid: string }; preservedSegment?: { headUuid: string; anchorUuid: string; tailUuid: string }; preservedMessages?: { anchorUuid: string; uuids: string[]; allUuids: string[] } }
 export type ClaudePublicRecord = { type: string; sessionId: string; uuid?: string; parentUuid?: string | null; promptId?: string; requestRef?: string; sourceToolAssistantUUID?: string; message?: ClaudePublicMessage; id?: string; hash?: string; shapeHash?: string; base?: string; keep?: number; tail?: string[]; model?: string; toolNames?: string[]; placeholderValid?: boolean
   subtype?: string; logicalParentUuid?: string; compactMetadata?: ClaudeCompaction
@@ -351,6 +352,10 @@ export function claudeMessageDigest(value: unknown): string {
   return sha(encode(sorted(value)))
 }
 
+function claudeMessageBlocks(message: ClaudePublicMessage): ClaudePublicContentBlock[] {
+  return typeof message.content === 'string' ? [{ type: 'text', text: message.content }] : message.content
+}
+
 /** 只提取本专属session的公开调用、回复、主链身份和实际API索引；推理正文与签名不进入证据。 */
 export function readClaudePublicHistory(path: string, sessionId: string): ClaudePublicRecord[] {
   const source = readFileSync(path, 'utf8')
@@ -375,11 +380,11 @@ export function readClaudePublicHistory(path: string, sessionId: string): Claude
     }
     if (row.type === 'api-request-blob') {
       const content: unknown = row.message!.content
-      record.message = typeof content === 'string' ? { ...row.message!, content: [{ type: 'text', text: content }] } : row.message
+      record.message = typeof content === 'string' ? { ...row.message!, content: claudeMessageBlocks(row.message!) } : row.message
       if (typeof content === 'string') record.compactSummaryDigest = claudeMessageDigest(row.message)
       record.hash = String(row.hash)
     }
-    if (row.type === 'assistant') record.message = { role: 'assistant', content: row.message!.content.filter(block => block.type === 'tool_use') }
+    if (row.type === 'assistant') record.message = { role: 'assistant', content: claudeMessageBlocks(row.message!).filter(block => block.type === 'tool_use') }
     if (row.type === 'api-request') Object.assign(record, { id: row.id, shapeHash: row.shapeHash, base: row.base, keep: row.keep, tail: row.tail, model: row.params!.model })
     if (row.type === 'api-request-shape') {
       record.shapeHash = String(row.shapeHash)
@@ -411,12 +416,12 @@ export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFro
     || echo.uuid !== userUuid || echo.session_id !== sessionId || JSON.stringify([...witness.initTools].sort()) !== JSON.stringify([...allowed].sort())) stale('Claude completion lacks exact native identity or isolated capabilities')
   const original = history.find(row => row.type === 'user' && row.uuid === userUuid)
   if (!original || original.parentUuid !== null || original.promptId !== promptId || JSON.stringify(original.message) !== JSON.stringify(echo.message)
-    || JSON.stringify(original.message) !== JSON.stringify({ role: 'user', content: [{ type: 'text', text: witness.prompt }] })) stale('Claude original user echo/history/prompt identity differs')
-  const seen = new Set<string>(), requests = new Map<string, string[]>(), shapes = new Set<string>(), calls = new Map<string, { row: ClaudePublicRecord; block: ClaudePublicMessage['content'][number] }>()
+    || !original.message || JSON.stringify({ ...original.message, content: claudeMessageBlocks(original.message) }) !== JSON.stringify({ role: 'user', content: [{ type: 'text', text: witness.prompt }] })) stale('Claude original user echo/history/prompt identity differs')
+  const seen = new Set<string>(), requests = new Map<string, string[]>(), shapes = new Set<string>(), calls = new Map<string, { row: ClaudePublicRecord; block: ClaudePublicContentBlock }>()
   const parents = new Map<string, string | null>()
   const compactSummaries = new Set<string>()
   let latestMessage: string | undefined, compaction: { ancestors: Set<string>; anchor?: string } | undefined
-  const receipts: FrozenReadReceipt[] = [], rejectedCalls: string[] = [], responseMessages = new Map<string, string>(), responseBlocks = new Map<string, ClaudePublicMessage['content'][number]>(), requestRefs = new Set<string>()
+  const receipts: FrozenReadReceipt[] = [], rejectedCalls: string[] = [], responseMessages = new Map<string, string>(), responseBlocks = new Map<string, ClaudePublicContentBlock>(), requestRefs = new Set<string>()
   if (witness.mcpHistory && (JSON.stringify(readClaudeMcpToolNames(witness.mcpHistory.path)) !== JSON.stringify(witness.mcpHistory.toolNames) || witness.mcpHistory.toolNames.some(name => name !== 'spex_read_frozen'))) stale('Claude MCP dispatched a foreign tool or its actual history changed')
   let acceptedOutput = false
   for (const row of history) {
@@ -462,7 +467,7 @@ export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFro
     }
     if (row.type === 'api-request-blob') {
       if (row.compactSummaryDigest && !compactSummaries.has(row.compactSummaryDigest)) stale('Claude API string message is not an observed same-turn compact summary')
-      if (!row.message || row.hash !== claudeMessageDigest(row.message) || row.message.content.some(block => !['tool_result', 'text'].includes(block.type))) stale('Claude public API message blob has invalid bytes or type')
+      if (!row.message || !Array.isArray(row.message.content) || row.hash !== claudeMessageDigest(row.message) || row.message.content.some(block => !['tool_result', 'text'].includes(block.type))) stale('Claude public API message blob has invalid bytes or type')
       for (const block of row.message.content.filter(block => block.type === 'tool_result')) {
         const originalBlock = responseBlocks.get(block.tool_use_id!)
         if (!originalBlock || claudeMessageDigest(originalBlock) !== claudeMessageDigest(block)) stale('Claude merged API tool result differs from its exact native public reply')
@@ -479,14 +484,14 @@ export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFro
       latestMessage = row.uuid
       if (!row.requestRef || !requests.has(row.requestRef)) stale('Claude assistant lacks an exact actual API request reference')
       requestRefs.add(row.requestRef)
-      for (const block of row.message!.content) {
+      for (const block of claudeMessageBlocks(row.message!)) {
         if (!block.id || calls.has(block.id) || !block.name || block.name === 'DeferredToolPlaceholder') stale('Claude called a forbidden, placeholder or repeated tool')
         calls.set(block.id, { row, block })
       }
     }
     if (row.type === 'user' && row.uuid !== userUuid) {
       latestMessage = row.uuid
-      if (row.promptId !== promptId || !row.message?.content.length || row.message.content.some(block => block.type !== 'tool_result')) stale('Claude history appended another user turn')
+      if (row.promptId !== promptId || !row.message || !Array.isArray(row.message.content) || !row.message.content.length || row.message.content.some(block => block.type !== 'tool_result')) stale('Claude history appended another user turn')
       for (const block of row.message.content) {
         const call = calls.get(block.tool_use_id!)
         if (!call || responseMessages.has(block.tool_use_id!) || row.sourceToolAssistantUUID !== call.row.uuid || row.parentUuid !== call.row.uuid) stale('Claude tool result is not paired with its exact native call')

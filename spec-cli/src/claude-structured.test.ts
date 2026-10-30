@@ -10,6 +10,11 @@ import { prepareFrozenPrompt, readFrozenManifest, claudeFrozenContextPrompt, fre
 import { structuredExecutionPolicy, structuredRealmRoot } from './session-structured-policy.js'
 import { claudeNativeModel, claudeStructuredArgs, claudeStructuredTurn, prepareClaudeAuthenticationEnvironment } from './claude-structured.js'
 
+const contentBlocks = (message: ClaudePublicMessage): Exclude<ClaudePublicMessage['content'], string> => {
+  assert(Array.isArray(message.content))
+  return message.content
+}
+
 test('Claude namespace creates its own fixed policy and bounded frozen prompt while legacy Codex stays byte-compatible', () => {
   const directory = mkdtempSync(join(tmpdir(), 'spex-claude-policy-'))
   const input = { schema: { type: 'object' }, inputDigest: 'input', purpose: 'test', timeoutMs: 1000 }
@@ -90,6 +95,34 @@ test('controlled Claude compact boundaries preserve one original turn without gr
     verifyFrozenReadProof(ref, proof, { threadId: 'session', turnId: 'user' }, undefined, { output: { answer: 'public' } })
     const row = (rows: typeof raw, uuid: string) => rows.find(item => item.uuid === uuid)!
     const metadata = (rows: typeof raw, uuid = 'compact-1') => row(rows, uuid).compactMetadata as { runningTurnSends: { uuids: string[]; openerUuid: string }; preservedMessages: { anchorUuid: string; uuids: string[]; allUuids: string[] } }
+    for (const content of ['Your response above was cut off mid-stream. Resume directly from where it stops — no apology, no recap. If none of it survived, answer the request from the start.', '']) {
+      const extra = structuredClone(raw)
+      extra.splice(9, 0, { type: 'user', sessionId: 'session', uuid: 'another-user', parentUuid: 'summary-1', promptId: 'prompt', isMeta: true, turnCompanion: true, message: { role: 'user', content } })
+      assert.throws(() => proveClaudeFrozenReads(ref, witness(extra)), { code: 'stale_result', message: 'Claude history appended another user turn' }, 'a native continuation string remains a rejected extra user turn')
+    }
+    const stringOriginal = structuredClone(raw), stringMessage = { role: 'user', content: 'public prompt' }
+    stringOriginal[0].message = stringMessage
+    stringOriginal.find(item => item.id === 'request-1')!.tail = [claudeMessageDigest(stringMessage)]
+    const stringWitness = witness(stringOriginal)
+    stringWitness.echo.message = stringWitness.history[0].message!
+    const stringProof = proveClaudeFrozenReads(ref, stringWitness)
+    assert.deepEqual(stringProof.coveredEntryIds, proof.coveredEntryIds)
+    assert.equal(stringWitness.history[0].message!.content, 'public prompt', 'the original string message must not be rewritten to an array')
+    assert.notEqual(claudeMessageDigest(stringMessage), claudeMessageDigest(original), 'the actual request binds the original wire shape')
+    verifyFrozenReadProof(ref, stringProof, { threadId: 'session', turnId: 'user' })
+    const wrongStringHash = structuredClone(stringWitness)
+    wrongStringHash.history.find(item => item.id === 'request-1')!.tail = [claudeMessageDigest(original)]
+    assert.throws(() => proveClaudeFrozenReads(ref, wrongStringHash), /original user prompt was not in the actual first API request/)
+    const wrongStringPrompt = structuredClone(stringWitness)
+    wrongStringPrompt.prompt = 'replacement'
+    assert.throws(() => proveClaudeFrozenReads(ref, wrongStringPrompt), /original user echo\/history\/prompt identity differs/)
+    const wrongStringEcho = structuredClone(stringWitness)
+    wrongStringEcho.echo.message = original
+    assert.throws(() => proveClaudeFrozenReads(ref, wrongStringEcho), /original user echo\/history\/prompt identity differs/)
+    const rawStringBlob = structuredClone(stringWitness), rawBlob = rawStringBlob.history.find(item => item.type === 'api-request-blob')!
+    rawBlob.message = stringMessage
+    rawBlob.hash = claudeMessageDigest(stringMessage)
+    assert.throws(() => proveClaudeFrozenReads(ref, rawStringBlob), { code: 'stale_result', message: 'Claude public API message blob has invalid bytes or type' }, 'raw API strings cannot bypass the observed compact-summary binding')
     const cases: Array<[string, (rows: typeof raw) => void]> = [
       ['foreign session', rows => { row(rows, 'compact-1').sessionId = 'foreign' }],
       ['sidechain', rows => { row(rows, 'compact-1').isSidechain = true }],
@@ -127,7 +160,7 @@ test('controlled Claude compact boundaries preserve one original turn without gr
     assert.throws(() => proveClaudeFrozenReads(ref, forgedWitness), /Claude API string message is not an observed same-turn compact summary/)
     const partial = structuredClone(raw), partialInput = { ...inputs[1], endByte: 17 }
     const partialCall = row(partial, 'read-call-1').message as ClaudePublicMessage
-    partialCall.content[0].input = partialInput
+    contentBlocks(partialCall)[0].input = partialInput
     const partialReply = { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'read-1', content: readFrozenRange(ref, partialInput).response.contentItems.map(item => ({ type: 'text', text: item.text })) }] }
     row(partial, 'reply-1').message = partialReply
     partial.find(item => item.id === 'request-4')!.tail = [claudeMessageDigest(partialReply)]
@@ -183,15 +216,15 @@ test('controlled Claude witness proves parallel replies and rejects completed-ca
       value => { value.history.find(row => row.id === 'request-2')!.tail = [] },
       value => { value.history.find(row => row.uuid === 'final')!.requestRef = 'foreign' },
       value => { value.history.find(row => row.id === 'request-2')!.model = 'different-model' },
-      value => { value.history[3].message!.content[0].name = 'DeferredToolPlaceholder' },
+      value => { contentBlocks(value.history[3].message!)[0].name = 'DeferredToolPlaceholder' },
       value => { value.history[1].placeholderValid = false },
-      value => { value.history.find(row => row.type === 'api-request-blob')!.message!.content[0].content = 'Output has been saved to a file' },
-      value => { value.history[4].message!.content[0].content = 'Output has been saved to a file' },
+      value => { contentBlocks(value.history.find(row => row.type === 'api-request-blob')!.message!)[0].content = 'Output has been saved to a file' },
+      value => { contentBlocks(value.history[4].message!)[0].content = 'Output has been saved to a file' },
       value => { value.history[4].promptId = 'next-user-turn' },
       value => { value.history[3].parentUuid = 'missing-parent' },
       value => { value.history = value.history.filter(row => row.type !== 'api-request-shape') },
       value => { value.history.find(row => row.id === 'request-2')!.shapeHash = 'b'.repeat(64) },
-      value => { value.prompt = 'replacement'; value.echo.message.content[0].text = 'replacement'; value.history[0].message!.content[0].text = 'replacement' },
+      value => { value.prompt = 'replacement'; contentBlocks(value.echo.message)[0].text = 'replacement'; contentBlocks(value.history[0].message!)[0].text = 'replacement' },
     ]
     for (const mutate of cases) { const bad = structuredClone(witness); mutate(bad); assert.throws(() => proveClaudeFrozenReads(ref, bad)) }
     const rejected = structuredClone(witness), unavailable = 'mcp__frozen__spez_read_frozen'
@@ -209,22 +242,22 @@ test('controlled Claude witness proves parallel replies and rejects completed-ca
     assert.deepEqual(rejectedProof.coveredEntryIds, proof.coveredEntryIds)
     assert.equal(rejectedProof.receipts.length, 2, '原生拒绝事件不能作为读取覆盖')
     const rejectedCases: Array<(value: ClaudeFrozenWitness) => void> = [
-      value => { value.history.find(row => row.uuid === 'unavailable-reply')!.message!.content[0].is_error = false },
-      value => { value.history.find(row => row.uuid === 'unavailable-reply')!.message!.content[0].content = 'Permission denied' },
-      value => { value.history.find(row => row.uuid === 'unavailable-reply')!.message!.content[0].content = 'No such tool available: another-tool' },
+      value => { contentBlocks(value.history.find(row => row.uuid === 'unavailable-reply')!.message!)[0].is_error = false },
+      value => { contentBlocks(value.history.find(row => row.uuid === 'unavailable-reply')!.message!)[0].content = 'Permission denied' },
+      value => { contentBlocks(value.history.find(row => row.uuid === 'unavailable-reply')!.message!)[0].content = 'No such tool available: another-tool' },
       value => { value.history.find(row => row.uuid === 'unavailable-reply')!.sourceToolAssistantUUID = 'foreign' },
-      value => { value.history.find(row => row.uuid === 'unavailable-call')!.message!.content[0].name = 'DeferredToolPlaceholder' },
+      value => { contentBlocks(value.history.find(row => row.uuid === 'unavailable-call')!.message!)[0].name = 'DeferredToolPlaceholder' },
       value => { value.history.find(row => row.type === 'api-request-shape')!.toolNames!.push(unavailable) },
       value => { value.history.find(row => row.id === 'request-rejected')!.tail = [] },
-      value => { value.history.find(row => row.uuid === 'unavailable-call')!.message!.content[0].name = 'mcp__frozen__spex_read_frozen' },
+      value => { contentBlocks(value.history.find(row => row.uuid === 'unavailable-call')!.message!)[0].name = 'mcp__frozen__spex_read_frozen' },
       value => { delete value.mcpHistory },
       value => { value.mcpHistory!.toolNames.push('spez_read_frozen') },
     ]
     for (const mutate of rejectedCases) { const bad = structuredClone(rejected); mutate(bad); assert.throws(() => proveClaudeFrozenReads(ref, bad)) }
     const otherSpelling = structuredClone(rejected), otherName = 'mcp__frozen__srozen__spex_read_frozen'
-    otherSpelling.history.find(row => row.uuid === 'unavailable-call')!.message!.content[0].name = otherName
+    contentBlocks(otherSpelling.history.find(row => row.uuid === 'unavailable-call')!.message!)[0].name = otherName
     const otherReply = otherSpelling.history.find(row => row.uuid === 'unavailable-reply')!.message!
-    otherReply.content[0].content = `<tool_use_error>Error: No such tool available: ${otherName}</tool_use_error>`
+    contentBlocks(otherReply)[0].content = `<tool_use_error>Error: No such tool available: ${otherName}</tool_use_error>`
     otherSpelling.history.find(row => row.id === 'request-rejected')!.tail = [claudeMessageDigest(otherReply)]
     assert.equal(proveClaudeFrozenReads(ref, otherSpelling).receipts.length, 2)
     writeFileSync(mcpPath, JSON.stringify({ type: 'request', request: { method: 'tools/call', params: { name: 'spez_read_frozen' } } }) + '\n')
@@ -232,32 +265,32 @@ test('controlled Claude witness proves parallel replies and rejects completed-ca
     writeFileSync(mcpPath, JSON.stringify({ type: 'request', request: { method: 'tools/call', params: { name: 'spex_read_frozen' } } }) + '\n')
     const parallelRejection = structuredClone(witness)
     parallelRejection.mcpHistory = rejected.mcpHistory
-    parallelRejection.history[3].message!.content.push({ type: 'tool_use', id: 'unavailable', name: unavailable, input })
+    contentBlocks(parallelRejection.history[3].message!).push({ type: 'tool_use', id: 'unavailable', name: unavailable, input })
     parallelRejection.history.splice(6, 0, { type: 'user', sessionId: 'session', uuid: 'unavailable-reply', parentUuid: 'assistant', promptId: 'prompt', sourceToolAssistantUUID: 'assistant', message: rejection })
     const merged = parallelRejection.history.find(row => row.type === 'api-request-blob')!
-    merged.message!.content.push(rejection.content[0]); merged.hash = claudeMessageDigest(merged.message)
+    contentBlocks(merged.message!).push(contentBlocks(rejection)[0]); merged.hash = claudeMessageDigest(merged.message)
     parallelRejection.history.find(row => row.id === 'request-2')!.tail = [merged.hash]
     assert.equal(proveClaudeFrozenReads(ref, parallelRejection).receipts.length, 2)
     const noRead = structuredClone(parallelRejection)
-    noRead.history[3].message!.content = noRead.history[3].message!.content.filter(block => block.id === 'unavailable')
+    noRead.history[3].message!.content = contentBlocks(noRead.history[3].message!).filter(block => block.id === 'unavailable')
     noRead.history = noRead.history.filter(row => !['reply', 'reply-2'].includes(row.uuid ?? ''))
     noRead.history.find(row => row.uuid === 'final')!.parentUuid = 'unavailable-reply'
     const noReadBlob = noRead.history.find(row => row.type === 'api-request-blob')!
-    noReadBlob.message!.content = [rejection.content[0]]; noReadBlob.hash = claudeMessageDigest(noReadBlob.message)
+    noReadBlob.message!.content = [contentBlocks(rejection)[0]]; noReadBlob.hash = claudeMessageDigest(noReadBlob.message)
     noRead.history.find(row => row.id === 'request-2')!.tail = [noReadBlob.hash]
     assert.throws(() => proveClaudeFrozenReads(ref, noRead), /not completely read/)
     const rangeRejected = structuredClone(rejected), rangeError = 'frozen reader range is invalid or exceeds its bounded response'
-    const rangeCall = rangeRejected.history.find(row => row.uuid === 'unavailable-call')!.message!.content[0]
+    const rangeCall = contentBlocks(rangeRejected.history.find(row => row.uuid === 'unavailable-call')!.message!)[0]
     rangeCall.name = 'mcp__frozen__spex_read_frozen'; rangeCall.input = { ...input, endByte: 65536 }
     const rangeReply = rangeRejected.history.find(row => row.uuid === 'unavailable-reply')!.message!
-    rangeReply.content[0].content = rangeError
+    contentBlocks(rangeReply)[0].content = rangeError
     rangeRejected.history.find(row => row.id === 'request-rejected')!.tail = [claudeMessageDigest(rangeReply)]
     assert.equal(proveClaudeFrozenReads(ref, rangeRejected).receipts.length, 2)
     for (const mutate of [
-      (value: ClaudeFrozenWitness) => { value.history.find(row => row.uuid === 'unavailable-reply')!.message!.content[0].is_error = false },
-      (value: ClaudeFrozenWitness) => { value.history.find(row => row.uuid === 'unavailable-reply')!.message!.content[0].content = 'Permission denied' },
-      (value: ClaudeFrozenWitness) => { value.history.find(row => row.uuid === 'unavailable-call')!.message!.content[0].input = input },
-      (value: ClaudeFrozenWitness) => { value.history.find(row => row.uuid === 'unavailable-call')!.message!.content[0].input = { ...input, contextDigest: 'foreign', endByte: 65536 } },
+      (value: ClaudeFrozenWitness) => { contentBlocks(value.history.find(row => row.uuid === 'unavailable-reply')!.message!)[0].is_error = false },
+      (value: ClaudeFrozenWitness) => { contentBlocks(value.history.find(row => row.uuid === 'unavailable-reply')!.message!)[0].content = 'Permission denied' },
+      (value: ClaudeFrozenWitness) => { contentBlocks(value.history.find(row => row.uuid === 'unavailable-call')!.message!)[0].input = input },
+      (value: ClaudeFrozenWitness) => { contentBlocks(value.history.find(row => row.uuid === 'unavailable-call')!.message!)[0].input = { ...input, contextDigest: 'foreign', endByte: 65536 } },
       (value: ClaudeFrozenWitness) => { value.history.find(row => row.id === 'request-rejected')!.tail = [] },
       (value: ClaudeFrozenWitness) => { delete value.mcpHistory },
     ]) { const bad = structuredClone(rangeRejected); mutate(bad); assert.throws(() => proveClaudeFrozenReads(ref, bad)) }
@@ -300,8 +333,10 @@ test('public tool inputs keep business signature/thinking keys while actual synt
     const input = { signature: 'business-signature', thinking: { nested: 'business-thinking' } }, path = join(directory, 'public.jsonl')
     writeFileSync(path, JSON.stringify({ type: 'assistant', sessionId: 'session', uuid: 'assistant', parentUuid: 'user', requestRef: 'request', message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'SYNTHETIC_PRIVATE_THINKING', signature: 'SYNTHETIC_PRIVATE_SIGNATURE' }, { type: 'tool_use', id: 'schema', name: 'StructuredOutput', input }] } }) + '\n')
     const records = readClaudePublicHistory(path, 'session')
-    assert.deepEqual(records[0].message!.content[0].input, input)
+    assert.deepEqual(contentBlocks(records[0].message!)[0].input, input)
     assert(!JSON.stringify(records).includes('SYNTHETIC_PRIVATE'))
+    writeFileSync(path, JSON.stringify({ type: 'assistant', sessionId: 'session', uuid: 'assistant-text', message: { role: 'assistant', content: 'public assistant text' } }) + '\n')
+    assert.deepEqual(readClaudePublicHistory(path, 'session')[0].message, { role: 'assistant', content: [] })
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })
 

@@ -26,6 +26,8 @@ Claude 采用显式500000字符和500000 MCP token上限，并核实际序列化
 
 同一原生轮的压缩只接受专属主链中的 system/compact_boundary：logicalParentUuid 必须是已观察的最近对话节点，runningTurnSends 的唯一 UUID 及 openerUuid 均精确等于原 user UUID。后续只读摘要须从该边界或其附件链连接，保持原 promptId，明确 transcript-only 且仅总结原 user UUID；保留段存在时，其两份完整 UUID 列表、首尾及摘要 anchor 必须一致，并对应压缩前已观察的连续父链。未知保留段形式、外来会话/sidechain、错 opener/parent/anchor、新用户轮均拒绝。摘要记录只保留公开消息摘要及身份标志；原生 API 若用 string 存储该同一摘要，仅按实际 API 的单个 text block 规范化并逐字核 canonical SHA。摘要不成为源码、工具回复、receipt 或读取覆盖；每次真实 reader 回复仍须有后续实际 API 消费，required 全文及 StructuredOutput 门槛不变。没有压缩事件的旧公开历史和 proof 保持原字段与摘要。
 
+公开 Claude content 按原生 string 或 block 数组读取。原始用户正文为 string 时，仍要求 echo/history 原消息完全一致、正文逐字等于固定 prompt，实际首个 API 请求绑定该原消息的 canonical SHA；内容视图不能改写保存的 message、历史摘要或用数组 SHA 替代 string SHA。额外用户记录中的 string（包括 CLI 的 isMeta/turnCompanion 续接指令）仍是新增正文，以明确 stale_result 拒绝，不能因同 promptId、固定文案或 CLI success 获得新轮豁免。tool_result 只接受原数组并继续核精确调用、全文及后续 API 可见性；未通过原生读取器摘要绑定的原始 string API blob 不可绕过审核。
+
 实际 API 工具面之外的名字只能保留为原生明确未派发的拒绝事件：唯一 callId、session/user/prompt 与 parent/source assistant 完整配对，`is_error:true` 且公开回复逐字等于固定 CLI 的 `<tool_use_error>Error: No such tool available: 名字</tool_use_error>`；全文还须进入后续真实 API 并由 assistant 消费。专属 MCP 实际派发名与见证一致且只含唯一 reader，存在外部派发或日志矛盾即拒绝。拒绝事件保留原名及全文，不改名、不产生 reader receipt、不贡献任何覆盖；缺读取仍失败。普通工具错误、权限错误、未知回复、未配对结果、实际工具面扩张和 DeferredToolPlaceholder 调用继续拒绝。其后正确读取、完整覆盖、StructuredOutput 与停止证明仍须分别通过。
 
 reader 的非法范围仍在读取正文前即时拒绝。同一原生轮中，只有独立重算同一冻结上下文/参数确实在范围边界抛出精确错误、公开 `is_error:true` 回复逐字匹配该错误、专属 MCP 无外部派发且后续 API 已消费错误时，才将它保留为无读取覆盖的参数拒绝事件，允许随后自行纠正。原意/entry 身份错误、正文摘要损坏、权限错误及未知错误不享有此例外；不能把失败请求算作已读。读取指引要求逐项照用计划 endByte，65536 只是最大跨度，不是短 entry 的结束位置。
