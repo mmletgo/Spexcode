@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process'
 import { writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { prepareFrozenPrompt, readFrozenManifest, claudeFrozenContextPrompt, freezeContext, readFrozenRange, proveClaudeFrozenReads, verifyFrozenReadProof, claudeMessageDigest, readClaudePublicHistory, type ClaudeFrozenWitness, type ClaudePublicMessage, type ClaudePublicRecord } from './frozen-context.js'
+import { prepareFrozenPrompt, readFrozenManifest, claudeFrozenContextPrompt, freezeContext, readFrozenRange, proveClaudeFrozenReads, verifyFrozenReadProof, claudeMessageDigest, readClaudeApiSourceMetadata, readClaudePublicHistory, type ClaudeFrozenWitness, type ClaudePublicMessage, type ClaudePublicRecord } from './frozen-context.js'
 import { structuredExecutionPolicy, structuredRealmRoot } from './session-structured-policy.js'
 import { claudeNativeModel, claudeStructuredArgs, claudeStructuredTurn, prepareClaudeAuthenticationEnvironment } from './claude-structured.js'
 
@@ -58,6 +58,55 @@ test('stopped exact Claude schema retry exhaustion remains a rejected output wit
     assert.deepEqual(readFileSync(join(root, 'result.json')), failureBytes)
     assert.deepEqual(readFileSync(historyPath), historyBytes)
     for (const name of ['completed.json', 'witness.json']) assert.equal(existsSync(join(root, name)), false)
+    const privateFragment = { type: 'thinking', thinking: 'SYNTHETIC_PRIVATE_FRAGMENT', signature: 'SYNTHETIC_SIGNATURE', cache_control: { type: 'ephemeral' } }
+    const schemaBlock = contentBlocks(history[3].message!)[0]
+    const fragmentedHash = claudeMessageDigest({ role: 'assistant', content: [{ type: 'thinking', thinking: 'SYNTHETIC_PRIVATE_FRAGMENT', signature: 'SYNTHETIC_SIGNATURE' }, schemaBlock] })
+    const fragments = [
+      ...history.slice(0, 3),
+      { type: 'assistant', sessionId: 'session', uuid: 'fragment-1', parentUuid: 'user', requestRef: 'request', message: { id: 'same-native-message', role: 'assistant', content: [privateFragment] } },
+      { ...history[3], parentUuid: 'fragment-1', message: { ...history[3].message!, id: 'same-native-message' } },
+      history[4],
+      { ...history[2], id: 'request-fragments', base: 'request', keep: 1, tail: [fragmentedHash, claudeMessageDigest(history[4].message)] },
+    ]
+    writeFileSync(historyPath, fragments.map(row => JSON.stringify(row)).join('\n') + '\n')
+    await assert.rejects(claudeStructuredTurn(realm, 'native', prompt, execution, callbacks), error => {
+      assert.equal((error as { code: string }).code, 'structured_output_retries_exhausted', 'same-id native assistant prefix needs no CAS and must bind both prior UUIDs')
+      return true
+    })
+    const sourceMetadata = readClaudeApiSourceMetadata(historyPath, 'session', 'MiniMax-M3.1-Flash')
+    assert.deepEqual(sourceMetadata.get('request-fragments')!.messages.get(fragmentedHash)!.sourceUuids, ['fragment-1', 'schema-call'])
+    assert(!JSON.stringify([...sourceMetadata].map(([id, value]) => [id, { ...value, messages: [...value.messages] }])).includes('SYNTHETIC_'), 'metadata must never expose private message blocks')
+    const systemMessage = { role: 'system', content: 'public fixed system input' }, systemHash = claudeMessageDigest({ role: 'system', content: [{ type: 'text', text: systemMessage.content }] })
+    const systemCas = { type: 'api-request-blob', sessionId: 'session', hash: systemHash, message: systemMessage }
+    const withSystem = [original, history[1], systemCas, { ...history[2], tail: [claudeMessageDigest(message), systemHash] }, ...history.slice(3)]
+    const secondSchemaBlock = { ...schemaBlock, id: 'schema-2' }, firstErrorBlock = contentBlocks(history[4].message!)[0], secondErrorBlock = { ...firstErrorBlock, tool_use_id: 'schema-2' }
+    const parallelAssistant = { ...history[3], message: { role: 'assistant', content: [schemaBlock, secondSchemaBlock] } }
+    const secondError = { ...history[4], uuid: 'schema-error-2', message: { role: 'user', content: [secondErrorBlock] } }
+    const mergedReplies = { role: 'user', content: [firstErrorBlock, secondErrorBlock] }, mergedReplyHash = claudeMessageDigest(mergedReplies)
+    const parallelReplies = [...history.slice(0, 3), parallelAssistant, history[4], secondError, { ...history[2], id: 'request-parallel', base: 'request', keep: 1, tail: [claudeMessageDigest(parallelAssistant.message), mergedReplyHash] }]
+    for (const rows of [withSystem, parallelReplies]) {
+      writeFileSync(historyPath, rows.map(row => JSON.stringify(row)).join('\n') + '\n')
+      await assert.rejects(claudeStructuredTurn(realm, 'native', prompt, execution, callbacks), error => (error as { code: string }).code === 'structured_output_retries_exhausted')
+    }
+    assert.deepEqual(readClaudeApiSourceMetadata(historyPath, 'session', 'MiniMax-M3.1-Flash').get('request-parallel')!.messages.get(mergedReplyHash)!.sourceUuids, ['schema-error', 'schema-error-2'])
+    for (const [name, rows] of [
+      ['future assistant prefix', fragments.map(row => 'id' in row && row.id === 'request' ? { ...row, tail: [claudeMessageDigest(message), fragmentedHash] } : row)],
+      ['private body tamper', fragments.map(row => row.uuid === 'fragment-1' ? { ...row, message: { id: 'same-native-message', role: 'assistant', content: [{ ...privateFragment, thinking: 'TAMPERED_PRIVATE_FRAGMENT' }] } } : row)],
+      ['different native message id', fragments.map(row => row.uuid === 'schema-call' ? { ...row, message: { ...history[3].message!, id: 'different-message-id' } } : row)],
+      ['cross-role transcript', fragments.map(row => row.uuid === 'fragment-1' ? { ...row, message: { id: 'same-native-message', role: 'user', content: [privateFragment] } } : row)],
+      ['future system CAS', [original, history[1], { ...history[2], tail: [claudeMessageDigest(message), systemHash] }, ...history.slice(3), systemCas]],
+      ['wrong CAS role hash', withSystem.map(row => row === systemCas ? { ...systemCas, message: { ...systemMessage, role: 'assistant' } } : row)],
+      ['CAS body tamper', withSystem.map(row => row === systemCas ? { ...systemCas, message: { ...systemMessage, content: 'tampered system input' } } : row)],
+      ['fork source', [...fragments, { type: 'fork-context-ref', sessionId: 'session' }]],
+      ['unknown user merged into a known reply', [...parallelReplies.slice(0, -1), { ...original, uuid: 'unknown-user', parentUuid: 'schema-error-2', message: { role: 'user', content: [{ type: 'text', text: 'UNOBSERVED EXTRA USER INTENT' }] } }, parallelReplies.at(-1)!]],
+    ] as Array<[string, Array<Record<string, unknown>>]>) {
+      writeFileSync(historyPath, rows.map(row => JSON.stringify(row)).join('\n') + '\n')
+      await assert.rejects(claudeStructuredTurn(realm, 'native', prompt, execution, callbacks), error => {
+        assert.equal((error as { code: string }).code, 'stale_result', name)
+        return true
+      })
+    }
+    writeFileSync(historyPath, historyBytes)
     const extraMessage = { role: 'user', content: [{ type: 'text', text: 'UNOBSERVED EXTRA USER INTENT' }] }
     const extraBlob = { type: 'api-request-blob', sessionId: 'session', hash: claudeMessageDigest(extraMessage), message: extraMessage }
     const replyMessage = history[4].message!, replyBlob = { type: 'api-request-blob', sessionId: 'session', hash: claudeMessageDigest(replyMessage), message: replyMessage }

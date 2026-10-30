@@ -397,6 +397,63 @@ export function readClaudePublicHistory(path: string, sessionId: string): Claude
   return records
 }
 
+export type ClaudeApiSourceMetadata = { digest: string; role: 'user' | 'assistant' | 'system'; kind: 'cas' | 'transcript-prefix'; sourceUuids: string[]; ordinal: number }
+export type ClaudeApiRequestSourceMetadata = { ordinal: number; messages: ReadonlyMap<string, ClaudeApiSourceMetadata> }
+
+/** 固定原生 producer 的消息摘要：string 转 text 块，递归省略 cache_control；不改成功 proof 的摘要。 */
+export function claudeApiSourceDigest(message: ClaudePublicMessage): string {
+  const withoutCacheControl = (value: unknown): unknown => Array.isArray(value) ? value.map(withoutCacheControl) : value !== null && typeof value === 'object'
+    ? Object.fromEntries(Object.entries(value).filter(([key, item]) => key !== 'cache_control' && item !== undefined).map(([key, item]) => [key, withoutCacheControl(item)])) : value
+  return claudeMessageDigest(withoutCacheControl({ ...message, content: claudeMessageBlocks(message) }))
+}
+
+/** 只为已停失败分类重建 U5 来源；返回消费点角色/UUID/顺序，不返回或持久化正文与私密块。 */
+export function readClaudeApiSourceMetadata(path: string, sessionId: string, model: string): Map<string, ClaudeApiRequestSourceMetadata> {
+  const bytes = readFileSync(path, 'utf8')
+  if (!bytes.endsWith('\n')) throw new StructuredSessionTransportError('Claude native source history has not flushed its final record')
+  const sources = new Map<string, ClaudeApiSourceMetadata>(), snapshots = new Map<string, ClaudeApiRequestSourceMetadata>()
+  const requests = new Map<string, string[]>(), shapes = new Set<string>(), seen = new Set<string>()
+  let run: { role: 'user' | 'assistant'; messageId?: string; blocks: ClaudePublicContentBlock[]; uuids: string[] } | undefined
+  for (const [ordinal, line] of bytes.split('\n').filter(Boolean).entries()) {
+    const row = JSON.parse(line) as Record<string, unknown> & { message?: ClaudePublicMessage & { id?: string }; params?: { model?: string } }
+    if (row.type === 'fork-context-ref' || row.type === 'system' && row.subtype === 'compact_boundary' || row.isCompactSummary || row.turnCompanion)
+      stale('Claude failed source index cannot interpret fork, compact or recovery inputs')
+    if (!['user', 'assistant', 'attachment', 'api-request-blob', 'api-request', 'api-request-shape'].includes(String(row.type))) continue
+    if (row.sessionId !== sessionId || row.isSidechain === true || row.agentId !== undefined) stale('Claude failed source index contains a foreign session or sidechain')
+    if (['user', 'assistant', 'attachment'].includes(String(row.type)) && row.uuid !== undefined) {
+      if (typeof row.uuid !== 'string' || seen.has(row.uuid) || row.parentUuid === null && (row.type !== 'user' || seen.size !== 0)
+        || row.parentUuid !== null && (typeof row.parentUuid !== 'string' || !seen.has(row.parentUuid))) stale('Claude failed source index lost its original main chain')
+      seen.add(row.uuid)
+    }
+    if (row.type === 'api-request-shape') {
+      if (typeof row.shapeHash !== 'string') stale('Claude failed source index has no shape identity')
+      shapes.add(row.shapeHash)
+    }
+    if (row.type === 'api-request-blob') {
+      if (!row.message || !['user', 'assistant', 'system'].includes(row.message.role) || typeof row.message.content !== 'string' && !Array.isArray(row.message.content)) stale('Claude failed source CAS has an unknown message role or shape')
+      const digest = claudeApiSourceDigest(row.message)
+      if (row.hash !== digest) stale('Claude failed source CAS differs from its canonical digest')
+      if (sources.get(digest)?.kind !== 'transcript-prefix') sources.set(digest, { digest, role: row.message.role as ClaudeApiSourceMetadata['role'], kind: 'cas', sourceUuids: [], ordinal })
+    }
+    if (row.type === 'user' || row.type === 'assistant') {
+      const message = row.message
+      if (!message || message.role !== row.type || typeof row.uuid !== 'string' || typeof message.content !== 'string' && !Array.isArray(message.content)) stale('Claude failed source transcript has a mismatched role or message identity')
+      if (!run || run.role !== message.role || message.role !== 'user' && !(typeof message.id === 'string' && run.messageId === message.id))
+        run = { role: row.type, ...(typeof message.id === 'string' ? { messageId: message.id } : {}), blocks: [], uuids: [] }
+      run.blocks.push(...claudeMessageBlocks(message)); run.uuids.push(row.uuid)
+      const digest = claudeApiSourceDigest({ role: run.role, content: run.blocks })
+      sources.set(digest, { digest, role: run.role, kind: 'transcript-prefix', sourceUuids: [...run.uuids], ordinal })
+    }
+    if (row.type === 'api-request') {
+      if (typeof row.id !== 'string') stale('Claude failed source request has no exact identity')
+      const hashes = claudeApiRequestHashes({ ...row, model: row.params?.model } as ClaudePublicRecord, requests, shapes, model)
+      snapshots.set(row.id, { ordinal, messages: new Map(hashes.flatMap(digest => sources.has(digest) ? [[digest, sources.get(digest)!] as const] : [])) })
+      requests.set(row.id, hashes)
+    }
+  }
+  return snapshots
+}
+
 /** 只读取专属 MCP 的实际派发名；原生不可用工具回复不能掩盖服务端派发的矛盾证据。 */
 export function readClaudeMcpToolNames(path: string): string[] {
   return readFileSync(path, 'utf8').split('\n').filter(Boolean).flatMap(line => {

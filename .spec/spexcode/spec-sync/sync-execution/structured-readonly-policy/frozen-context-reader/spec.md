@@ -36,6 +36,10 @@ Claude 采用显式500000字符和500000 MCP token上限，并核实际序列化
 
 公开 CAS 字节索引、actual API base/keep/tail 重建与原 tool_result 来源检查由成功证明和 [[claude-structured-runtime]] 的失败分类共用同一窄校验原语。失败分类不能以 schema 拒绝或 CLI 已停绕过实际输入来源；共享原语不提供跳过完整结果、读取覆盖或成功验收的开关，成功 proof 的字段、摘要和验收含义保持。
 
+失败专用只读来源元数据依据固定 Claude 2.1.309 producer 的 `U5.noteLine`、`MRt`、`ORt`、`gue/NRt` 与 replay writer 静态核对（artifact SHA256 `5eadc0009cdcdbc0d06e58110d7b2baf88ced6088b1c33a60a21217fe410619c`）：string content 转单 text 块，消息摘要递归排序并省略 cache_control；连续 user 块累计，assistant 仅同明确 message.id 连续累计，每个已观察前缀登记 hash。writer 只在既有 transcript/CAS 索引未命中时写 CAS，不能要求每个消息必有独立 CAS，也不能把无 CAS 自动视为非 USER。
+
+该索引仅返回每条实际 API 消费点之前的 digest、role、源 UUID、ordinal 和来源种类。非 USER 只接受明确 canonical CAS 或已观察 assistant 前缀；USER 前缀须按每个源 UUID 回到当时已认证的公开原 prompt/配对 tool_result 正文重组并重算摘要，opaque USER hash 不授予输入权。跨角色、未知来源、未来来源、错 hash/base/keep、foreign/sidechain、新 turn、fork、compact/recovery 继续拒绝；元数据不输出或持久化原始消息、thinking 或签名，不贡献读取覆盖、witness、completed 或业务成功。原公开读取器、成功 witness/historyDigest 与完整 proof 验收保持不变。
+
 实际 API 工具面之外的名字只能保留为原生明确未派发的拒绝事件：唯一 callId、session/user/prompt 与 parent/source assistant 完整配对，`is_error:true` 且公开回复逐字等于固定 CLI 的 `<tool_use_error>Error: No such tool available: 名字</tool_use_error>`；全文还须进入后续真实 API 并由 assistant 消费。专属 MCP 实际派发名与见证一致且只含唯一 reader，存在外部派发或日志矛盾即拒绝。拒绝事件保留原名及全文，不改名、不产生 reader receipt、不贡献任何覆盖；缺读取仍失败。普通工具错误、权限错误、未知回复、未配对结果、实际工具面扩张和 DeferredToolPlaceholder 调用继续拒绝。其后正确读取、完整覆盖、StructuredOutput 与停止证明仍须分别通过。
 
 reader 的非法范围仍在读取正文前即时拒绝。同一原生轮中，只有独立重算同一冻结上下文/参数确实在范围边界抛出精确错误、公开 `is_error:true` 回复逐字匹配该错误、专属 MCP 无外部派发且后续 API 已消费错误时，才将它保留为无读取覆盖的参数拒绝事件，允许随后自行纠正。原意/entry 身份错误、正文摘要损坏、权限错误及未知错误不享有此例外；不能把失败请求算作已读。读取指引要求逐项照用计划 endByte，65536 只是最大跨度，不是短 entry 的结束位置。
