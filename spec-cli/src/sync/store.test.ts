@@ -90,7 +90,7 @@ test('same stable admission and capture-time replay create one operation and pro
   } finally { f.cleanup() }
 })
 
-test('固定模型v13 marker升级先备份，旧operation/payload/receipt逐字保留且旧writer拒绝', async () => {
+test('固定模型marker升级先备份，旧operation/payload/receipt逐字保留且旧writer拒绝', async () => {
   const f = await fixture()
   let backup: ReturnType<typeof openProtocol> | undefined
   try {
@@ -98,11 +98,11 @@ test('固定模型v13 marker升级先备份，旧operation/payload/receipt逐字
     for (const step of journal.steps) f.store.recordApplyStep(r.fence, journal.id, { ...step, status: 'completed' })
     const receipt = f.receipt(journal.id, r.plan); f.store.recordReceipt(journal.id, receipt)
     f.store.settleApply(journal.id, receipt.id)
-    // v13 is only a writer marker: its absence is exactly the original v12 schema.
-    f.protocol.withTransaction(tx => tx.exec('DELETE FROM schema_migrations WHERE component=? AND version=13', SYNC_COMPONENT))
+    // Marker-only upgrades preserve the original v12 schema and business rows.
+    f.protocol.withTransaction(tx => tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=13', SYNC_COMPONENT))
     const records = (protocol: typeof f.protocol) => protocol.withTransaction(tx => Object.fromEntries(['sync_operations', 'sync_attempts', 'sync_ingress_receipts', 'sync_apply_journals', 'sync_baseline_pairs'].map(table => [table, tx.query(`SELECT * FROM ${table}`)])))
     const before = records(f.protocol), backupPath = join(f.root, 'v12-before-model.backup')
-    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), 13); assert.ok(existsSync(backupPath))
+    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), SYNC_MIGRATIONS.length); assert.ok(existsSync(backupPath))
     assert.deepEqual(records(f.protocol), before)
     assert.throws(() => applyComponentMigrations(f.protocol, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 12)), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
     backup = openProtocol(backupPath)
@@ -111,6 +111,27 @@ test('固定模型v13 marker升级先备份，旧operation/payload/receipt逐字
     assert.equal(applyComponentMigrations(backup, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 12)), 12)
     assert.equal(f.store.readOperation(r.operation.id).payloadDigest, r.operation.payloadDigest)
     assert.equal(f.store.readOperation(r.operation.id).model, undefined)
+  } finally { backup?.close(); f.cleanup() }
+})
+
+test('分区与提交快照v14 marker保留旧记录及资源，备份可供旧writer回滚', async () => {
+  const f = await fixture()
+  let backup: ReturnType<typeof openProtocol> | undefined
+  try {
+    const claimed = f.claim()
+    f.store.checkpoint(claimed.fence, f.put({ oldSingleTask: true }))
+    f.protocol.withTransaction(tx => tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=14', SYNC_COMPONENT))
+    const records = (protocol: typeof f.protocol) => protocol.withTransaction(tx => Object.fromEntries(['sync_operations', 'sync_attempts', 'sync_resources', 'sync_ingress_receipts', 'sync_apply_journals', 'sync_baseline_pairs'].map(table => [table, tx.query(`SELECT * FROM ${table}`)])))
+    const before = records(f.protocol), backupPath = join(f.root, 'v13-before-partitions.backup')
+    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), 14)
+    assert.deepEqual(records(f.protocol), before)
+    assert.throws(() => applyComponentMigrations(f.protocol, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 13)), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
+    backup = openProtocol(backupPath)
+    assert.equal(backup.withTransaction(tx => tx.query('SELECT MAX(version) AS version FROM schema_migrations WHERE component=?', SYNC_COMPONENT))[0].version, 13)
+    assert.deepEqual(records(backup), before)
+    assert.equal(applyComponentMigrations(backup, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 13)), 13)
+    assert.equal(Object.hasOwn(f.store.readOperation(claimed.operation.id).input, 'captureKind'), false)
+    assert.equal(f.store.readOperation(claimed.operation.id).payloadDigest, claimed.operation.payloadDigest)
   } finally { backup?.close(); f.cleanup() }
 })
 

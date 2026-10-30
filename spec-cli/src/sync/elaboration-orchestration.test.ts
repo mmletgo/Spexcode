@@ -958,3 +958,33 @@ test('AC-ELABORATION-44 当前裁决REQ来源指令同入生成与独审，受�
     assert.deepEqual(rejected.calls.map(call => call.purpose), ['elaboration_generate'])
   }
 })
+
+
+test('只读实现模式仅接受现存测试，不把缺文件或用例延后给代码生成', async () => {
+  const complete = runner(request => candidate(request, source))
+  const accepted = await elaborate({ ...input(), implementationWritePaths: [], maxRepairs: 0 }, { runner: complete.run })
+  assert.equal(accepted.status, 'complete')
+  for (const testSource of [null, "import test from 'node:test'\n"]) {
+    const readonlyFiles = new Map(files)
+    if (testSource === null) readonlyFiles.delete('tests/export.test.mjs')
+    else readonlyFiles.set('tests/export.test.mjs', testSource)
+    const fake = runner(request => candidate(request, source))
+    const result = await elaborate({ ...input(), files: readonlyFiles, implementationWritePaths: [], maxRepairs: 0 }, { runner: fake.run })
+    assert.equal(result.structurePassed, false)
+    assert.equal(result.reviewPassed, false)
+    assert.equal(result.deferredImplementationFindings.length, 0)
+    assert.ok(result.rounds[0].findings.some(issue => issue.code === 'readonly_implementation_gap'))
+    assert.deepEqual(fake.calls.map(call => call.purpose), ['elaboration_generate'])
+  }
+})
+
+
+test('只读实现模式的独审实现缺陷保留为阻断而非待生成任务', async () => {
+  const defect = { code: 'implementation-review', kind: 'repair' as const, message: '测试断言需要改写', affectedIds: ['AC-EXPORT-03'], evidence: 'tests/export.test.mjs#AC-EXPORT-03：现存断言与已确定契约不一致。', decision: '只修测试。' }
+  const fake = runner(request => candidate(request, source), request => ({ ...review(request), verdict: 'repair', findings: [defect] }))
+  const result = await elaborate({ ...input(), implementationWritePaths: [], maxRepairs: 0 }, { runner: fake.run })
+  assert.equal(result.reviewPassed, false)
+  assert.equal(result.deferredImplementationFindings.length, 0)
+  assert.ok(result.rounds[0].findings.some(issue => issue.code === 'readonly_implementation_gap'))
+  assert.deepEqual(result.rounds[0].review!.findings, [defect])
+})

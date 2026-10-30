@@ -1,6 +1,9 @@
 # 持续同步编排
 
 - 本目录复用 session 受限结构化执行与 spec-core/contracts；不自行维护第二份契约图或会话执行器。
+- Dashboard 保存 Spec 立即进入 spec→code；外部文件保存/index变化只观察，Git 提交冻结 HEAD 后才派发。已采纳的真实同步发布先消费为基线，避免回声或污染下次提交方向。
+- code→spec 只装配已审 Spec，source/test 的 Git path、mode、OID 与 absence 必须不变；不能调用代码生成器修绿验收。
+- 大输入复用 partitioning/partition-execution 的唯一计划，以局部正文并集证明完整性；分区共用 operation、fence、预算与最终 candidate/journal/receipt，不把规划字节估算当 Native 读取证明。
 - 模型临时业务行由 `CONTRACT_COLUMNS` 渲染唯一 Markdown；raw/摘要由程序复制，JSON 仅是执行证据。
 - 生成和独立评审使用不同会话。输入、候选和检查结果均按内容摘要绑定；未决 GAP 只阻塞依赖闭包。
 - 状态派发 STEP 显式关联实际 TR；next→TR 是依赖，next→STEP/STATE 仍为导航，独立审查核对派发集合与步骤声明范围。

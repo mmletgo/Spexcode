@@ -31,3 +31,6 @@ GenerationInput 必填 mandatoryTests 与 verifications 直接复用 SyncCoordin
 GenerationOptions 可选 beforeFreezeCandidate 为可信程序回调，在生成响应 schema 与 approvedSpecs 核验后、freezeCandidate 前取得派生发布组合输入；protectedReadPaths 携完整读闭包（含不存在路径），不进入模型提示或 inputDigest。回调不授予模型选择发布父树的权限。
 
 GenerationInput.model 是由 operation 固定的模型 ID，effort 保持 high；缺省 sol 与显式选择的持久语义属于 [[sync-model-selection]]。
+
+
+GenerationOptions新增prepareOnly、reviewCandidate与builderTraces，分别用于结构化补丁准备和统一冻结候选的独立审查；原runGeneration默认行为保持。GenerationResult可返回prepared及preparedChanges，此状态没有候选验证或review通过含义。partitionEvidence保存每个真实分区/跨边review、同candidateDigest及trace；聚合review留null，不捏造全仓模型accept。跨边analysisEvidence携对应端点的真实独审原件用于提示，原业务授权核验仍沿不可变analysis。

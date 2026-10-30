@@ -31,7 +31,7 @@ function repairDiagnostics(findings: readonly ContractFinding[], coverage: Contr
 }
 
 function finding(input: ElaborationInput, code: string, message: string, itemId?: string): ContractFinding {
-  const target = input.targets.find(target => target.nodeId === input.intent.nodeId)!
+  const target = input.targets.find(target => target.nodeId === input.intent.nodeId) ?? input.targets[0]
   return { code, severity: 'error', nodeId: target.nodeId, path: target.path, message, ...(itemId ? { itemId } : {}) }
 }
 
@@ -46,7 +46,7 @@ const baselineSources = (input: ElaborationInput): { nodeId: string; path: strin
 function checkInput(input: ElaborationInput): void {
   if (input.refinement && (!/^[a-f0-9]{64}$/.test(input.refinement.candidateDigest) || !input.refinement.diagnostics.length || input.refinement.diagnostics.some(issue => !issue.code.trim() || !issue.message.trim()))) throw new TypeError('再细化诊断必须绑定已接受候选及具体失败')
   if (!input.intent.rawSource.trim() || !input.requestKey) throw new TypeError('业务原意与请求键不能为空')
-  if (!input.targets.some(target => target.nodeId === input.intent.nodeId)) throw new TypeError('用户原意节点必须属于目标范围')
+  if (!input.targets.length || ![...input.targets, ...(input.context ?? [])].some(target => target.nodeId === input.intent.nodeId)) throw new TypeError('用户原意节点必须属于冻结目标或只读上下文')
   const paths = new Set<string>(), nodes = new Set<string>()
   for (const target of [...input.targets, ...(input.context ?? [])]) {
     if (!target.nodeId || !specPath(target.path) || paths.has(target.path) || nodes.has(target.nodeId)) throw new TypeError(`目标身份或路径不合法/重复: ${target.path}`)
@@ -67,7 +67,7 @@ function checkInput(input: ElaborationInput): void {
     // 复用唯一 Markdown 渲染及契约解析器检查 cwd、shell argv 和转义边界。
     const tables = Object.fromEntries(Object.keys(CONTRACT_COLUMNS).map(kind => [kind, []])) as unknown as GeneratedTables
     tables.VERIFY = input.verifications.map(verification => ({ id: verification.id, command: verification.command, cwd: verification.cwd, 'timeout-ms': verification.timeoutMs }))
-    const target = input.targets.find(item => item.nodeId === input.intent.nodeId)!
+    const target = input.targets.find(item => item.nodeId === input.intent.nodeId) ?? input.targets[0]
     const rendered = renderElaboration({ ...input, targets: [{ ...target, source: null, sourceDigest: null }], mode: 'reelaborate', nodeChanges: [], refinement: undefined }, { version: 'elaboration-rows-v2', changes: [{ nodeId: target.nodeId, path: target.path, title: '可信验证登记', description: '', code: [], related: [], prose: '', removeIds: [], tables }], applicability: [] }, 'registration-validation').changes[0]
     const errors = parseContract({ nodeId: target.nodeId, path: target.path, source: rendered.source }).findings.filter(issue => issue.severity === 'error')
     if (errors.length) throw new TypeError(`可信验证登记不合法: ${errors.map(issue => `${issue.code}: ${issue.message}`).join('; ')}`)
@@ -128,7 +128,7 @@ function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate
     const identity = lifecycle?.action === 'move' ? lifecycle.to : target
     if (!changed.has(identity.nodeId)) findings.push(finding(input, 'target_not_elaborated', `新目标或raw-only目标必须显式完成细化: ${identity.path}`))
   }
-  if (!nodes.has(input.intent.nodeId) && !input.nodeChanges?.some(change => change.from.nodeId === input.intent.nodeId && (change.action === 'retire' || nodes.has(change.to.nodeId)))) findings.push(finding(input, 'intent_not_elaborated', '候选必须包含用户原意节点'))
+  if (input.targets.some(target => target.nodeId === input.intent.nodeId) && !nodes.has(input.intent.nodeId) && !input.nodeChanges?.some(change => change.from.nodeId === input.intent.nodeId && (change.action === 'retire' || nodes.has(change.to.nodeId)))) findings.push(finding(input, 'intent_not_elaborated', '候选必须包含用户原意节点'))
   const contracts = [...changed.values()]
   for (const source of [...input.targets.filter(target => !changed.has(target.nodeId) && target.source !== null && !input.nodeChanges?.some(change => change.from.path === target.path)), ...(input.context ?? [])]) {
     const parsed = parseContract({ nodeId: source.nodeId, path: source.path, source: source.source! })
@@ -161,7 +161,7 @@ function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate
   }
   for (const id of input.retiredIds ?? []) if (graph.items.has(id) && !input.authorizedChanges?.some(change => change.action === 'restore' && change.id === id && !contractAuthorizationErrors(change, before, evolutionPolicy).length)) findings.push(finding(input, 'retired_id_reused', `不能复用退役稳定身份: ${id}`, id))
   for (const change of input.authorizedChanges ?? []) if (change.action === 'retire' && graph.items.has(change.id)) findings.push(finding(input, 'retirement_not_applied', `用户已决定退役的身份仍存在: ${change.id}`, change.id))
-  findings.push(...validateContractGraph(graph, { mode: 'final', files: input.files, nodeIds: new Set(after.nodes.map(source => source.id)) }))
+  findings.push(...validateContractGraph(graph, { mode: 'final', files: input.files, nodeIds: new Set(after.nodes.map(source => source.id)) }).map(issue => input.implementationWritePaths?.length === 0 && implementationFinding(issue) ? { ...issue, code: 'readonly_implementation_gap', message: `本轮实现只读，不能延后补写代码或测试；${issue.message}` } : issue))
   const baseline = [...input.targets.filter(target => target.source !== null), ...(input.context ?? [])].flatMap(source => parseContract({ nodeId: source.nodeId, path: source.path, source: source.source! }).contract?.items ?? [])
   const decisions = new Set([...(input.facts ?? []).filter(fact => fact.source.startsWith('decision:')).map(fact => fact.source), ...baseline.flatMap(item => item.kind !== 'VERIFY' && item.source.kind === 'decision' ? [`decision:${item.source.ref}`] : [])])
   for (const contract of changed.values()) for (const item of contract.items) {
@@ -205,7 +205,7 @@ function reviewErrors(input: ElaborationInput, review: ElaborationReview, inputD
         const owners = issue.affectedIds.map(id => graph.owners.get(id))
         const paths = owners.flatMap(owner => owner ? [...owner.code, ...owner.items.filter(item => item.kind === 'AC').map(item => item.test)].map(anchor => anchor.split('#')[0]) : [])
         const bound = issue.affectedIds.length > 0 && owners.every(Boolean) && paths.some(path => input.files?.has(path) && new RegExp(`(?:^|[^A-Za-z0-9_./-])${path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:#[^\\s；，。]+|:[1-9]\\d*)(?=$|[^A-Za-z0-9_./-])`).test(issue.evidence))
-        findings.push({ ...finding(input, bound ? issue.code : 'review_implementation_binding', bound ? message : `待实现发现必须关联当前契约ID和冻结治理文件的具体符号或行号；${message}`), relatedIds: [...issue.affectedIds] })
+        findings.push({ ...finding(input, bound ? input.implementationWritePaths?.length === 0 ? 'readonly_implementation_gap' : issue.code : 'review_implementation_binding', bound ? message : `待实现发现必须关联当前契约ID和冻结治理文件的具体符号或行号；${message}`), relatedIds: [...issue.affectedIds] })
       } else findings.push({ ...finding(input, issue.code, message), relatedIds: [...issue.affectedIds] })
     }
     else {

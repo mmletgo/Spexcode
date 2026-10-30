@@ -85,3 +85,5 @@ P4 裁决复现已结算选择后，另一真实 SQLite journal/receipt 推进�
 固定模型用例先复现旧实现忽略模型，再验证同键冲突、普通重复换模型拒绝、显式retry可换且旧sol记录不改写；预算与原业务绑定保持，遵循 [[sync-model-selection]]。
 
 v12→v13真实SQLite marker升级逐字比较operation、attempt、ingress receipt、journal/receipt及baseline表，核一致备份保原generation且旧migration数组拒读新generation；模型缺字段旧记录保持sol语义，无DDL与payload改写。
+
+v13→v14提交快照/分区语义marker回归逐字比较旧operation、attempt、resource、ingress、journal与baseline记录；旧输入不添加captureKind、不改payload，升级前online backup保v13供停writer后的正式回退，旧13代writer必须拒绝14代。

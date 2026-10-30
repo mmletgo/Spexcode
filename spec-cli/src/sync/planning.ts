@@ -1,7 +1,7 @@
 import { posix } from 'node:path'
 import { loadSpecs } from '@spexcode/spec-core'
 import { contractImpact, contractReferences, parseFrontmatter } from '@spexcode/spec-core/contracts'
-import type { SyncCoordinatorPlan } from './coordinator-types.js'
+import type { SyncCoordinatorPlan, SyncDirection } from './coordinator-types.js'
 import type { BaselinePair, BaselineResource, FrozenBaselineSelection, InputSnapshot, SyncScope } from './operation-types.js'
 import { selectedRetiredIds, verifyBaselineSelection } from './composition.js'
 import { isSyncSpecPath, readFrozenContracts } from './frozen-contracts.js'
@@ -20,7 +20,7 @@ export function discoverSyncSourcePaths(snapshot: InputSnapshot, sourcePaths: re
   return verifySnapshot(snapshot).filter(entry => entry.mode !== '120000' && coveredPath(entry.path, sourcePaths) && /\.(?:[cm]?[jt]sx?|py|go|rs|java|rb)$/.test(entry.path) && !/\.(?:test|spec)\./.test(entry.path) && !governed.has(entry.path)).map(entry => entry.path).sort()
 }
 
-export type SyncPlanningOptions = { discoverySelection?: FrozenBaselineSelection }
+export type SyncPlanningOptions = { discoverySelection?: FrozenBaselineSelection; direction?: SyncDirection; commitTrigger?: { before: InputSnapshot | null; paths: readonly string[] } }
 
 /** 冻结契约影响与既有节点治理共同决定闭包；目录授权允许新自然语言需求创建实现。 */
 export async function buildSyncApplicationPlan(snapshot: InputSnapshot, nodeId: string, baseline?: BaselinePair | FrozenBaselineSelection | null, options: SyncPlanningOptions = {}): Promise<SyncCoordinatorPlan & { executionScope: SyncScope }> {
@@ -93,11 +93,11 @@ export async function buildSyncApplicationPlan(snapshot: InputSnapshot, nodeId: 
     const entry = verifySnapshot(binding.bytePair.verifiedDelivery).find(entry => entry.path === binding.resource.path)
     return entry && entry.mode !== '120000' ? [readObject(snapshot.source.commonDir, entry.oid).toString('utf8')] : []
   })
-  const discoveryPaths = discoverSyncSourcePaths(snapshot, settings.sourcePaths, [...files.values(), ...oldFiles.values(), ...discoveryOwnerFiles])
+  const discoveryPaths = discoverSyncSourcePaths(snapshot, settings.sourcePaths, [...files.values(), ...oldFiles.values(), ...discoveryOwnerFiles]).filter(path => !options.commitTrigger?.before || options.commitTrigger.paths.includes(path))
   const executionScope: SyncScope = { paths: [...new Set([...targets.map(target => target.path), ...priorTargets.map(target => target.path), ...[...codePaths, ...impact.testPaths].filter(path => coveredPath(path, writable) && !settings.mandatoryTests.some(test => test.testPath === path))])].sort(), contractIds: [...selectedContractIds].filter(id => !graphs.some(graph => graph.items.get(id)?.kind === 'FLOW')).sort(), flowIds: [...selectedContractIds].filter(id => graphs.some(graph => graph.items.get(id)?.kind === 'FLOW')).sort() }
   return {
     executionScope,
-    version: 'sync-coordinator-v1', intentNodeId: intent.id, targets,
+    version: 'sync-coordinator-v2', direction: options.direction ?? 'spec_to_code', ...(options.commitTrigger ? { commitTrigger: options.commitTrigger } : {}), partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 512 * 1024, maxParallel: 4 }, intentNodeId: intent.id, targets,
     readPaths: [...new Set([...specReadPaths, ...declaredReadPaths, '.spec/spexcode.json', ...settings.readPaths, ...settings.testPaths, ...codePaths, ...discoveryPaths, ...impact.testPaths, ...mandatoryTests.map(test => test.testPath)])].sort(),
     writePaths: [...new Set([...targets.map(target => target.path), ...targets.map(target => posix.dirname(target.path)), ...priorTargets.map(target => target.path), ...writable])].sort(),
     sourcePaths: [...settings.sourcePaths].sort(),

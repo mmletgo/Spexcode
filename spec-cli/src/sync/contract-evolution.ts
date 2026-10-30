@@ -45,6 +45,24 @@ export function sameContractBusinessMeaning(before: ContractItem, after: Contrac
 function reviewedAnalysisErrors(evidence: CodeBehaviorEvidence | undefined, expectedHash: string): string[] {
   if (!evidence || expectedHash !== evidence.ref.sha256 || hash(evidence.analysis) !== evidence.ref.sha256) return ['契约变更未绑定真实冻结分析']
   const analysis = evidence.analysis
+  if (analysis.partitionEvidence) {
+    const parts = analysis.partitionEvidence, coverage = analysis.partitionCoverage
+    if (!analysis.reviewPassed || !parts.length || !coverage || !/^[0-9a-f]{64}$/.test(coverage.planDigest) || new Set(parts.map(part => part.partitionId)).size !== parts.length || new Set(coverage.partitionIds).size !== coverage.partitionIds.length || !same([...coverage.partitionIds].sort(), parts.map(part => part.partitionId).sort())) return ['分区分析缺少完整唯一计划覆盖']
+    const paths = parts.flatMap(part => part.changedPaths)
+    if (new Set(paths).size !== paths.length || new Set(coverage.changedPaths).size !== coverage.changedPaths.length || !same([...paths].sort(), [...coverage.changedPaths].sort())) return ['分区分析变更路径并集不完整或重复']
+    for (const part of parts) {
+      if (part.analysis.partitionEvidence || part.analysis.traces.some(trace => trace.inputDigest !== part.analysis.inputDigest) || reviewedAnalysisErrors({ ref: part.analysisRef, analysis: part.analysis }, part.analysisRef.sha256).length) return ['分区分析原件缺少真实独立审查或摘要绑定']
+      if (['inputId', 'baselinePairId', 'baselineSelectionDigest', 'composedDigest', 'readSetDigest', 'policyDigest'].some(key => !same(part.analysis[key as keyof CodeBehaviorAnalysis], analysis[key as keyof CodeBehaviorAnalysis]))) return ['分区分析原件输入/政策/读取身份不一致']
+      if (part.changedPaths.some(path => !part.analysis.changes.some(change => change.paths.includes(path))) || part.analysis.changes.some(change => change.paths.some(path => !part.changedPaths.includes(path)))) return ['分区分析原件没有完整覆盖本区实际变化']
+    }
+    const union = (values: readonly unknown[]): string[] => [...new Set(values.map(value => JSON.stringify(value)))].sort()
+    for (const field of ['changes', 'findings', 'facts', 'authorizedChanges', 'nodeChanges', 'newNodes', 'resolutions', 'authorChanges', 'rawIntegrations', 'decisionAuthorities'] as const) {
+      if (!same(union(parts.flatMap<unknown>(part => part.analysis[field] ?? [])), union(analysis[field] ?? []))) return ['分区分析聚合授权或业务原件并集不一致']
+    }
+    const traces = parts.flatMap(part => part.analysis.traces)
+    if (!same(traces, analysis.traces) || new Set(traces.map(trace => trace.sessionId)).size !== traces.length || new Set(traces.map(trace => trace.threadId)).size !== traces.length) return ['分区分析聚合不能伪造或复用原生会话证据']
+    return []
+  }
   const builds = analysis.traces.filter(trace => trace.purpose === 'code_behavior_analyze')
   const reviews = analysis.traces.filter(trace => trace.purpose === 'code_behavior_review')
   if (!analysis.reviewPassed || builds.length !== 1 || reviews.length !== 1 || builds[0].sessionId === reviews[0].sessionId || builds[0].threadId === reviews[0].threadId || [...builds, ...reviews].some(trace => !trace.sessionId || !trace.threadId || !trace.turnId || !/^[a-f0-9]{64}$/.test(trace.resultDigest) || !/^[a-f0-9]{64}$/.test(trace.inputDigest)) || !analysis.inputDigest || !analysis.composedDigest || !analysis.readSetDigest || !analysis.policyDigest) return ['契约变更缺少独立审查和冻结输入绑定']

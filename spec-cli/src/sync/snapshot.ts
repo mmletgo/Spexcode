@@ -52,6 +52,8 @@ const physicalStat = (path: string): string => {
 /** 已授权路径可在 HEAD 不可读前核对物理替换，不为缺失来源伪造快照。 */
 export const readPhysicalFingerprint = (canonicalRoot: string, gitDir: string): string => contentHash(`${physicalStat(canonicalRoot)}:${physicalStat(gitDir)}`)
 const registeredWorktreeRoots = (root: string): string[] => sourceGit(root, ['worktree', 'list', '--porcelain', '-z']).toString().split('\0').filter(line => line.startsWith('worktree ')).map(line => resolve(line.slice(9)))
+/** 固定沿用采集来源的历史字段顺序；规范JSON排序不能改变快照身份。 */
+export const canonicalSnapshotSource = (source: WorktreeIdentity): WorktreeIdentity => ({ repositoryId: source.repositoryId, commonDir: source.commonDir, canonicalRoot: source.canonicalRoot, gitDir: source.gitDir, branch: source.branch, physicalFingerprint: source.physicalFingerprint })
 export function identifyWorktree(root: string): WorktreeIdentity {
   const canonicalRoot = realpathSync(root)
   if (realpathSync(sourceGit(canonicalRoot, ['rev-parse', '--show-toplevel']).toString().trim()) !== canonicalRoot) throw new Error('输入必须为工作树根目录')
@@ -139,7 +141,7 @@ function snapshotFromTree(source: InputSnapshot, tree: string): InputSnapshot {
   const entries = readTree(source.source.commonDir, tree), contentDigest = contentHash(JSON.stringify(entries))
   const manifestBlob = writeEvidence(source.source.commonDir, { version: 1, entries } satisfies SnapshotManifest)
   const snapshot = { ...source, immutableTree: tree, contentDigest, manifestBlob }
-  snapshot.id = contentHash(JSON.stringify({ ...(snapshot.captureKind ? { captureKind: snapshot.captureKind } : {}), source: snapshot.source, headCommit: snapshot.headCommit, indexTree: snapshot.indexTree, indexDigest: snapshot.indexDigest, tree, contentDigest }))
+  snapshot.id = contentHash(JSON.stringify({ ...(snapshot.captureKind ? { captureKind: snapshot.captureKind } : {}), source: canonicalSnapshotSource(snapshot.source), headCommit: snapshot.headCommit, indexTree: snapshot.indexTree, indexDigest: snapshot.indexDigest, tree, contentDigest }))
   pinSnapshot(snapshot)
   return snapshot
 }
@@ -234,7 +236,7 @@ export function verifySnapshot(snapshot: InputSnapshot): TreeEntry[] {
   const entries = readTree(snapshot.source.commonDir, snapshot.immutableTree)
   const actual = JSON.stringify({ version: 1, entries } satisfies SnapshotManifest)
   if (readEvidence(snapshot.source.commonDir, snapshot.manifestBlob).toString() !== actual || contentHash(JSON.stringify(entries)) !== snapshot.contentDigest) throw new Error('快照 manifest/contentDigest 不匹配 Git 对象')
-  const expectedId = contentHash(JSON.stringify({ ...(snapshot.captureKind ? { captureKind: snapshot.captureKind } : {}), source: snapshot.source, headCommit: snapshot.headCommit, indexTree: snapshot.indexTree, indexDigest: snapshot.indexDigest, tree: snapshot.immutableTree, contentDigest: snapshot.contentDigest }))
+  const expectedId = contentHash(JSON.stringify({ ...(snapshot.captureKind ? { captureKind: snapshot.captureKind } : {}), source: canonicalSnapshotSource(snapshot.source), headCommit: snapshot.headCommit, indexTree: snapshot.indexTree, indexDigest: snapshot.indexDigest, tree: snapshot.immutableTree, contentDigest: snapshot.contentDigest }))
   if (snapshot.id !== expectedId) throw new Error('快照身份摘要不匹配')
   return entries
 }

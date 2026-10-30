@@ -31,3 +31,6 @@ code:
 读树调用者可同时接收同次批量校验后的条目和完整原始 bytes，复用已经读取的正文，避免摘要之后再逐对象启动 Git。回调只在该对象 framing、完整字节与 OID 核对成功后交出字节，返回的 TreeEntry 顺序、digest 和全部快照身份计算保持不变；仍逐调用重读，不保存全局对象缓存。
 
 自动提交输入使用同一 captureInputSnapshot 的 committed 模式：前后核对物理来源、分支、HEAD 与其不可变 tree，仅从 Git 对象读取条目和原字节。它不读取工作文件、用户 index 或 untracked 字节；同期保存、暂存和冲突 index 不影响该输入，HEAD 变化仍有限重试。InputSnapshot.captureKind=commit 参与新身份摘要，immutableTree/indexTree 均等于已冻结 HEAD tree，indexDigest 是该 tree OID 的 SHA256，不伪称保存了用户 index。读回同时验证 HEAD/tree/index 绑定。缺 captureKind 的历史记录及默认显式工作区采集保原摘要算法、index 与完整工作字节语义，不能升级重写历史快照身份。
+
+
+物理source的身份字段按既有固定顺序参与SHA，JSON键排序不是身份变化。固定计划规范序列化后的历史before快照仍可验证；字段值、树、mode、摘要篡改继续拒绝，不重写历史快照或接收另一来源。

@@ -1609,3 +1609,46 @@ for (const scenario of ['failed', 'budget', 'unreviewed', 'no-conflict', 'active
     assert.equal(application.store.readOperation(operation.id).deadlineAtMs, operation.deadlineAtMs); assert.equal(application.store.listJournals(operation.id).length, 0)
   } finally { application.start = start }
 })
+
+test('v2 code→Spec协调器保留分区证据并跳过代码生成，最终候选独审仍走原预算身份', async t => {
+  const f = await fixture(t, { maxAttempts: 1, maxCalls: 5, maxRepairs: 0, timeoutMs: 120000 }, false, original, 'project', original, { version: 'sync-coordinator-v2', direction: 'code_to_spec', partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 2 }, sourcePaths: ['src'], commitTrigger: { before: null, paths: ['src/export.js', 'tests/export.test.mjs', 'package.json'] } }, undefined, 'code')
+  let candidateSeen = false
+  f.transform((output, request) => {
+    if (request.purpose === 'elaboration_generate' || request.purpose === 'elaboration_review') {
+      const frozen = JSON.parse(request.prompt.split('冻结业务输入:\n')[1].split('\n')[0]) as { implementationWritePaths: string[]; readonlyTestPaths: string[] }
+      assert.deepEqual(frozen.implementationWritePaths, [])
+      assert.ok(frozen.readonlyTestPaths.includes('tests/export.test.mjs'))
+    }
+    if (request.purpose === 'code_generate') assert.fail('代码提交不得调用可写代码生成器')
+    if (request.purpose === 'code_review') {
+      const frozen = promptInput(request)
+      assert.equal(new Map(frozen.files).get('src/export.js'), f.bytes.toString())
+      candidateSeen = true
+      throw Object.assign(new Error('在真实Docker之前停止测试'), { code: 'unsupported' })
+    }
+    return output
+  })
+  const result = await runSyncOperation(f.store, f.operation.id, f.options)
+  assert.equal(candidateSeen, true, JSON.stringify(result.failure))
+  assert.deepEqual(f.calls.map(call => call.purpose), ['code_behavior_analyze', 'code_behavior_review', 'elaboration_generate', 'elaboration_review', 'code_review'])
+  assert.equal(result.operation.callsUsed, 5)
+  const checkpoints = f.store.listAttempts(f.operation.id)[0].checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())) as { stage?: string }[]
+  assert.ok(checkpoints.some(checkpoint => checkpoint.stage === 'partition-plan'))
+  const partitionStage = f.store.listAttempts(f.operation.id)[0].checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(value => value.stage === 'partition-plan')
+  const partitionPlan = JSON.parse(readEvidence(f.input.source.commonDir, partitionStage.resultRef).toString()) as { expectedPaths: string[] }
+  assert.ok(!partitionPlan.expectedPaths.includes('package.json') && !partitionPlan.expectedPaths.includes('tests/export.test.mjs'), '首次接入的未变上下文不是业务变更或发现writer')
+  assert.ok(checkpoints.some(checkpoint => checkpoint.stage === 'candidate-partition-plan'))
+  assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
+  assert.equal(f.store.listJournals(f.operation.id).length, 0)
+})
+
+test('v2分区完整最少调用超过原预算时启动前诊断，不调模型或超扣', async t => {
+  const f = await fixture(t, { maxAttempts: 1, maxCalls: 4, maxRepairs: 0, timeoutMs: 120000 }, false, original, 'project', original, { version: 'sync-coordinator-v2', direction: 'code_to_spec', partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 2 }, sourcePaths: ['src'], commitTrigger: { before: null, paths: ['src/export.js'] } }, undefined, 'code')
+  const result = await runSyncOperation(f.store, f.operation.id, f.options)
+  assert.equal(result.failure!.code, 'partition_budget_insufficient')
+  assert.match(result.failure!.message, /至少需要 5 次调用，剩余 4 次/)
+  assert.equal(result.operation.callsUsed, 0)
+  assert.equal(f.calls.length, 0)
+  assert.equal(f.store.listJournals(f.operation.id).length, 0)
+})

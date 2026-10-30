@@ -17,6 +17,10 @@ import type { FileMutex } from './file-mutex.js'
 import { checkGenerationContractIntent, readFrozenContracts } from './frozen-contracts.js'
 import { decisionAuthorizationErrors, sameContractBusinessMeaning } from './contract-evolution.js'
 import type { FrozenContracts } from './frozen-contracts.js'
+import { completeSyncPartitionPlan, analyzeSyncPartitions, elaborateSyncPartitions, generateSyncPartitions } from './partition-execution.js'
+import type { PartitionCheckpoints } from './partition-execution.js'
+import { planSyncPartitions } from './partitioning.js'
+import type { SyncPartitionPlan } from './partitioning.js'
 import { contractOmissionBound, runGeneration } from './generation.js'
 import type { GenerationFinding, GenerationResult } from './generation-types.js'
 import { createAttemptRunner } from './native-run.js'
@@ -86,7 +90,7 @@ export async function isSyncInputCurrent(operation: SyncOperation, current: Inpu
 }
 
 async function readInput(input: InputSnapshot, plan: SyncCoordinatorPlan, previous?: SyncOperation['previousBaselinePair'], requestBlob?: BlobRef, selection?: FrozenBaselineSelection, executionPaths = plan.executionScope?.paths): Promise<InputView> {
-  if (plan.version !== 'sync-coordinator-v1' || !plan.targets.length || !plan.writePaths.length) fail('invalid_plan', '可信计划缺少版本、目标或写范围')
+  if (!['sync-coordinator-v1', 'sync-coordinator-v2'].includes(plan.version) || !plan.targets.length || !plan.writePaths.length) fail('invalid_plan', '可信计划缺少版本、目标或写范围')
   for (const path of [...plan.readPaths, ...plan.writePaths, ...plan.targets.map(item => item.path), ...(plan.newNodeRawSources ?? []).map(item => item.path)]) {
     validateRepositoryPath(path)
     if (isHostPrivatePath(path)) fail('private_context', `可信读写集合包含宿主运行资料: ${path}`)
@@ -314,7 +318,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
   }
   const v4 = async (): Promise<BlobRef> => {
     mutex.assertHeld()
-    const snapshot = await captureInputSnapshot(operation.input.source.canonicalRoot)
+    const snapshot = await captureInputSnapshot(operation.input.source.canonicalRoot, operation.input.captureKind === 'commit' ? { committed: true } : undefined)
     if (!await isSyncInputCurrent(operation, snapshot, options.plan)) fail('input_changed', '来源相关内容/index/HEAD或物理身份已改变', [writeEvidence(operation.input.source.commonDir, { expected: operation.input, actual: snapshot })])
     const plan = await options.readCurrentPlan()
     if (syncPlanDigest(plan) !== operation.policyDigest) fail('policy_changed', '当前可信政策与冻结操作不同')
@@ -416,7 +420,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           throw error
         }
       } else fence = fenceFor(operation, attempt!)
-      if (operation.baselineSelection && !await isSyncInputCurrent(operation, await captureInputSnapshot(operation.input.source.canonicalRoot), options.plan)) fail('input_changed', '派发前来源相关输入已改变')
+      if (operation.baselineSelection && !await isSyncInputCurrent(operation, await captureInputSnapshot(operation.input.source.canonicalRoot, operation.input.captureKind === 'commit' ? { committed: true } : undefined), options.plan)) fail('input_changed', '派发前来源相关输入已改变')
       if (timer) clearInterval(timer)
       timer = setInterval(() => {
         try {
@@ -460,6 +464,8 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       store.bindComposedInput(fence, view.composed)
       const callTimeoutMs = options.callTimeoutMs ?? Math.min(120_000, operation.budget.timeoutMs)
       const runner = options.runner ? injectedRunner(store, fence, options.runner) : createAttemptRunner(store, fence)
+      const partitionCheckpoints: PartitionCheckpoints = { load: <T>(key: string) => stage<T>(store, operation, store.readAttempt(attempt!.id), key), save: (key, value) => saveStage(store, fence!, key, value) }
+      let partitions: SyncPartitionPlan | null = null
       let analysis: CodeBehaviorEvidence | undefined
       let decision: SyncDecisionInput | undefined
       if (operation.origin === 'decision' && operation.requestBlob) {
@@ -479,7 +485,31 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         ? readCompositionEvidence(operation.input, view.composed, operation.baselineSelection)?.intents.some(intent => intent.changed) ?? false
         : authoredContractChanges(authorFiles, authorNewFiles, deliveredAuthorFiles, view.frozen.nodes).some(change => options.plan.targets.some(target => target.path === change.path))
       const baselineCodeChanged = Boolean(operation.previousBaselinePair && actualTreeDiff(readTree(operation.input.source.commonDir, authorTree), verifySnapshot(operation.input)).some(file => !file.path.startsWith('.spec/') && within(file.path, options.plan.writePaths)))
-      const behaviorOrigin = baselineCodeChanged || authoredContractChanged || ['code', 'combined', 'reconcile'].includes(operation.origin) || Boolean(view.composed.compositionEvidenceBlob) || Boolean(decision)
+      const behaviorOrigin = options.plan.version === 'sync-coordinator-v2' && options.plan.direction === 'code_to_spec' || baselineCodeChanged || authoredContractChanged || ['code', 'combined', 'reconcile'].includes(operation.origin) || Boolean(view.composed.compositionEvidenceBlob) || Boolean(decision)
+      if (options.plan.version === 'sync-coordinator-v2') {
+        const plan = options.plan
+        partitions = partitionCheckpoints.load<SyncPartitionPlan>('partition-plan')
+        if (!partitions) {
+          const sourceEntries = verifySnapshot(operation.input)
+          const before = readTree(operation.input.source.commonDir, operation.previousBaselinePair?.sourceInput.immutableTree ?? plan.commitTrigger?.before?.immutableTree ?? operation.input.immutableTree)
+          const delivery = readTree(operation.input.source.commonDir, operation.previousBaselinePair?.verifiedDelivery.immutableTree ?? operation.input.immutableTree)
+          const compositionEvidence = operation.baselineSelection ? readCompositionEvidence(operation.input, view.composed, operation.baselineSelection) : null
+          const residuals = compositionEvidence?.residualPaths ?? []
+          const initialSources = operation.origin === 'initial' || plan.commitTrigger?.before === null ? sourceEntries.filter(entry => within(entry.path, plan.sourcePaths ?? [])).map(entry => entry.path) : []
+          let changedPaths = unique([...(plan.commitTrigger?.before === null ? [] : plan.commitTrigger?.paths ?? []), ...residuals, ...initialSources, ...(operation.origin === 'initial' ? plan.targets.map(target => target.path) : []), ...actualTreeDiff(before, sourceEntries).map(file => file.path), ...actualTreeDiff(delivery, view.manifest.entries).map(file => file.path), ...(operation.requestBlob && !decision ? readControlledChanges(operation.input, operation.requestBlob).map(change => change.path) : [])]).filter(path => within(path, view.readPaths))
+          if (plan.direction === 'spec_to_code') changedPaths = changedPaths.filter(path => path.startsWith('.spec/'))
+          const byteVersions = new Map<string, Map<string, number>>()
+          const trees = unique([operation.input.immutableTree, view.composed.tree, ...operation.previousBaselinePair ? [operation.previousBaselinePair.sourceInput.immutableTree, operation.previousBaselinePair.verifiedDelivery.immutableTree] : [], ...plan.commitTrigger?.before ? [plan.commitTrigger.before.immutableTree] : []])
+          for (const tree of trees) readTree(operation.input.source.commonDir, tree, (entry, bytes) => { if (within(entry.path, view.readPaths)) { const versions = byteVersions.get(entry.path) ?? new Map<string, number>(); versions.set(entry.digest, bytes.length); byteVersions.set(entry.path, versions) } })
+          for (const artifact of compositionEvidence?.artifacts ?? []) for (const entry of [artifact.before, artifact.delivery, artifact.source, artifact.authorBase]) if (entry && within(entry.path, view.readPaths)) { const versions = byteVersions.get(entry.path) ?? new Map<string, number>(); if (!versions.has(entry.digest)) versions.set(entry.digest, readObject(operation.input.source.commonDir, entry.oid).length); byteVersions.set(entry.path, versions) }
+          partitions = planSyncPartitions({ plan, files: view.files, contracts: view.frozen.contracts, changedPaths, maxReadBytes: plan.partitionPolicy.maxReadBytes, readByteSizes: new Map([...byteVersions].map(([path, versions]) => [path, [...versions.values()].reduce((sum, size) => sum + size, 0)])) })
+          partitionCheckpoints.save('partition-plan', partitions)
+          const minimumCalls = partitions.partitions.length * ((behaviorOrigin ? 2 : 0) + 2 + (plan.direction === 'code_to_spec' ? 1 : 2)) + partitions.dependencies.length
+          const remainingCalls = operation.budget.maxCalls - store.readBudgetUsage(operation.id).callsUsed
+          partitionCheckpoints.save('partition-budget', { minimumCalls, remainingCalls, partitionCount: partitions.partitions.length, dependencyCount: partitions.dependencies.length, direction: plan.direction })
+          if (remainingCalls < minimumCalls) fail('partition_budget_insufficient', `完整分区执行至少需要 ${minimumCalls} 次调用，剩余 ${remainingCalls} 次；保持原预算，需明确调整后新接入`, [writeEvidence(operation.input.source.commonDir, { partitionPlan: partitions, minimumCalls, remainingCalls })])
+        }
+      }
       if (behaviorOrigin) {
         let previousDecisionAnalysis: CodeBehaviorEvidence | undefined
         let previousDecisionComposed: ComposedInputRef | undefined
@@ -515,7 +545,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
             diagnosticOwner = diagnosticOwner.retryOf ? store.readOperation(diagnosticOwner.retryOf) : null
           }
           const repairDiagnostics = diagnosticLineage.flatMap(owner => store.listAttempts(owner.id).filter(prior => prior.failure && ['behavior_analysis_invalid', 'behavior_review_failed'].includes(prior.failure.code)).map(prior => ({ code: prior.failure!.code, message: prior.failure!.message })))
-          try { approved = await analyzeCodeBehavior({ model, snapshot: operation.input, baseline: operation.previousBaselinePair, ...(operation.baselineSelection ? { baselineSelection: operation.baselineSelection } : {}), composed: view.composed, readSetDigest: operation.readSetDigest, policyDigest: operation.policyDigest, plan: operation.baselineSelection ? { ...options.plan, readPaths: view.readPaths } : options.plan, requestKey: `sync:${attempt.id}:analysis`, timeoutMs: callTimeoutMs, signal, origin: operation.origin, ...(decision && previousDecisionAnalysis ? { decision: { request: decision, previous: previousDecisionAnalysis, previousComposed: previousDecisionComposed, previousReadPaths: previousDecisionReadPaths } } : {}), repairDiagnostics }, runner) }
+          try { const analysisInput: import('./code-behavior.js').CodeBehaviorInput = { model, snapshot: operation.input, baseline: operation.previousBaselinePair, ...(operation.baselineSelection ? { baselineSelection: operation.baselineSelection } : {}), composed: view.composed, readSetDigest: operation.readSetDigest, policyDigest: operation.policyDigest, plan: operation.baselineSelection ? { ...options.plan, readPaths: view.readPaths } : options.plan, requestKey: `sync:${attempt.id}:analysis`, timeoutMs: callTimeoutMs, signal, origin: operation.origin, ...(decision && previousDecisionAnalysis ? { decision: { request: decision, previous: previousDecisionAnalysis, previousComposed: previousDecisionComposed, previousReadPaths: previousDecisionReadPaths } } : {}), repairDiagnostics }; approved = partitions ? await analyzeSyncPartitions(analysisInput, partitions, options.plan.version === 'sync-coordinator-v2' ? options.plan.partitionPolicy.maxParallel : 1, runner, partitionCheckpoints) : await analyzeCodeBehavior(analysisInput, runner) }
           catch (error) {
             const issue = error as { code?: string; message?: string }
             if (!['behavior_analysis_invalid', 'behavior_review_failed'].includes(issue.code ?? '') || signal.aborted) throw error
@@ -602,7 +632,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           targets = targets.map(target => { const source = priorFiles.get(target.path) ?? target.source; return { ...target, source, sourceDigest: source === null ? null : contentHash(source) } })
           refinementFiles = new Map(readTree(operation.input.source.commonDir, refinement.candidate.tree).filter(entry => within(entry.path, options.plan.readPaths) && entry.mode !== '120000').flatMap(entry => { const bytes = readObject(operation.input.source.commonDir, entry.oid); return isUtf8Text(bytes) ? [[entry.path, bytes.toString('utf8')] as [string, string]] : [] }))
         }
-        const result = await elaborate({ root: operation.input.source.canonicalRoot, base: operation.input.headCommit, requestKey: `sync:${attempt.id}:elaborate`, intent: { nodeId: effectiveIntentNodeId, rawSource }, targets, context: view.frozen.nodes.filter(node => !targets.some(target => target.path === node.path) && !moved.some(change => change.to.path === node.path)).map(node => ({ nodeId: node.id, path: node.path, source: view.files.get(node.path)! })), files: refinementFiles, facts: behaviorFacts, analysis, decisionAuthorities: analysis?.analysis.decisionAuthorities ?? options.plan.decisionAuthorities,  ...(refinement ? { refinement: { candidateDigest: refinement.candidateDigest, diagnostics: refinement.diagnostics } } : {}), mode: preserveBusiness ? 'preserve_business' : 'reelaborate', nodeChanges, verifications: options.plan.verifications.map(item => item.definition), implementationWritePaths: unique(options.plan.writePaths), readonlyTestPaths: unique(options.plan.mandatoryTests.map(test => test.testPath)), authorizedChanges: behaviorAuthorization, historyInput: operation.input, retiredIds: unique([...(options.plan.retiredIds ?? []), ...historicalRetiredIds]), maxRepairs: 0, maxCalls: 2, totalTimeoutMs: operation.deadlineAtMs - Date.now(), timeoutMs: callTimeoutMs, signal, model, effort: 'high' }, { runner, seed })
+        const elaborationInput: import('./elaboration-types.js').ElaborationInput = { root: operation.input.source.canonicalRoot, base: operation.input.headCommit, requestKey: `sync:${attempt.id}:elaborate`, intent: { nodeId: effectiveIntentNodeId, rawSource }, targets, context: view.frozen.nodes.filter(node => !targets.some(target => target.path === node.path) && !moved.some(change => change.to.path === node.path)).map(node => ({ nodeId: node.id, path: node.path, source: view.files.get(node.path)! })), files: refinementFiles, facts: behaviorFacts, analysis, decisionAuthorities: analysis?.analysis.decisionAuthorities ?? options.plan.decisionAuthorities,  ...(refinement ? { refinement: { candidateDigest: refinement.candidateDigest, diagnostics: refinement.diagnostics } } : {}), mode: preserveBusiness ? 'preserve_business' : 'reelaborate', nodeChanges, verifications: options.plan.verifications.map(item => item.definition), implementationWritePaths: options.plan.version === 'sync-coordinator-v2' && options.plan.direction === 'code_to_spec' ? [] : unique(options.plan.writePaths), readonlyTestPaths: unique(options.plan.mandatoryTests.map(test => test.testPath)), authorizedChanges: behaviorAuthorization, historyInput: operation.input, retiredIds: unique([...(options.plan.retiredIds ?? []), ...historicalRetiredIds]), maxRepairs: 0, maxCalls: 2, totalTimeoutMs: operation.deadlineAtMs - Date.now(), timeoutMs: callTimeoutMs, signal, model, effort: 'high' as const }; const result = partitions ? await elaborateSyncPartitions(elaborationInput, partitions, options.plan.version === 'sync-coordinator-v2' ? options.plan.partitionPolicy.maxParallel : 1, partitionCheckpoints, runner) : await elaborate(elaborationInput, { runner, seed })
         const { contracts: _contracts, graph: _graph, coverage: _coverage, ...compact } = result
         elaboration = compact; saveStage(store, fence, 'elaboration', compact)
       }
@@ -623,6 +653,11 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       for (const change of elaboration.nodeChanges ?? []) if (change.action === 'retire' || change.from.path !== change.to.path) acceptedFiles.delete(change.from.path)
       for (const change of elaboration.changes) acceptedFiles.set(change.path, change.source)
       const accepted = await readFrozenContracts(operation.input.source.canonicalRoot, acceptedFiles)
+      if (partitions) {
+        const saved = partitionCheckpoints.load<SyncPartitionPlan>('candidate-partition-plan')
+        partitions = saved ?? completeSyncPartitionPlan(partitions, accepted.contracts, acceptedFiles, analysis)
+        if (!saved) partitionCheckpoints.save('candidate-partition-plan', partitions)
+      }
       const retiredIds = unique(elaboration.retiredIds.filter(id => !historicalRetiredIds.includes(id)))
       const retirementBefore = await readFrozenContracts(operation.input.source.canonicalRoot, deliveredFiles)
       const changedContractPaths = new Set(elaboration.changes.map(change => change.path))
@@ -666,7 +701,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         if (attempt.candidate) fail('candidate_stage_missing', '已有冻结候选没有完整独立生成证据，不能覆盖或重新生成')
         store.startGeneration(fence, { readyScope: ready, blockedScope: blocked, blockedReason })
         const allowedGap = new Set([...elaboration.blockedStructureFindings, ...elaboration.rounds.flatMap(round => round.findings.filter(issue => ['unresolved-gap', 'unresolved-conflict'].includes(issue.code) && issue.itemId && accepted.graph.items.get(issue.itemId)?.kind === 'GAP'))].map(findingKey))
-        const result = await runGeneration({ root: operation.input.source.canonicalRoot, requestKey: `sync:${attempt.id}:generation`, snapshot: operation.input, composed: view.composed, manifest: view.manifest, files: view.files, contracts: accepted.contracts, elaboratedSpecs: elaboration.changes.map(change => ({ path: change.path, source: change.source })), readyIds: [...ready.contractIds, ...ready.flowIds].filter(id => !restoredResourceIds.includes(id)), blockedIds: [...blocked.contractIds, ...blocked.flowIds], retiredIds, intent: { nodeId: options.plan.intentNodeId, rawSource: (accepted.nodes.find(node => node.id === options.plan.intentNodeId) ?? retirementBefore.nodes.find(node => node.id === options.plan.intentNodeId))!.rawSource! }, facts: behaviorFacts, analysis, nodeChanges: elaboration.nodeChanges ?? nodeChanges, direction: decision && decision.decision.choice !== 'adopt_behavior' ? 'repair_to_intent' : preserveBusiness ? 'preserve_business' : analysis?.analysis.authorChanges?.length && !decision ? 'repair_to_intent' : analysis ? 'preserve_observed_behavior' : undefined, existingAcceptance: retirementBefore.contracts.flatMap(contract => contract.items.filter(item => item.kind === 'AC')), mandatoryTests: options.plan.mandatoryTests, verifications: options.plan.verifications.map(item => item.definition), repairContext, allowedScope: ready, policy: { version: options.plan.version, digest: operation.policyDigest }, timeoutMs: callTimeoutMs, signal, model, effort: 'high' }, { runner, protectedReadPaths: view.readPaths, ...(operation.baselineSelection ? { beforeFreezeCandidate: async () => {
+        const generationInput: import('./generation-types.js').GenerationInput = { root: operation.input.source.canonicalRoot, requestKey: `sync:${attempt.id}:generation`, snapshot: operation.input, composed: view.composed, manifest: view.manifest, files: view.files, contracts: accepted.contracts, elaboratedSpecs: elaboration.changes.map(change => ({ path: change.path, source: change.source })), readyIds: [...ready.contractIds, ...ready.flowIds].filter(id => !restoredResourceIds.includes(id)), blockedIds: [...blocked.contractIds, ...blocked.flowIds], retiredIds, intent: { nodeId: options.plan.intentNodeId, rawSource: (accepted.nodes.find(node => node.id === options.plan.intentNodeId) ?? retirementBefore.nodes.find(node => node.id === options.plan.intentNodeId))!.rawSource! }, facts: behaviorFacts, analysis, nodeChanges: elaboration.nodeChanges ?? nodeChanges, direction: decision && decision.decision.choice !== 'adopt_behavior' ? 'repair_to_intent' : preserveBusiness ? 'preserve_business' : analysis?.analysis.authorChanges?.length && !decision ? 'repair_to_intent' : analysis ? 'preserve_observed_behavior' : undefined, existingAcceptance: retirementBefore.contracts.flatMap(contract => contract.items.filter(item => item.kind === 'AC')), mandatoryTests: options.plan.mandatoryTests, verifications: options.plan.verifications.map(item => item.definition), repairContext, allowedScope: ready, policy: { version: options.plan.version, digest: operation.policyDigest }, timeoutMs: callTimeoutMs, signal, model, effort: 'high' as const }; const generationOptions: import('./generation-types.js').GenerationOptions = { runner, protectedReadPaths: view.readPaths, ...(operation.baselineSelection ? { beforeFreezeCandidate: async () => {
           for (;;) {
             await acquirePublication()
             try {
@@ -692,7 +727,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           findings.push(...checkGenerationContractIntent(accepted, frozen, { newNodeRawSources: new Map([...(options.plan.newNodeRawSources ?? []), ...(analysis?.analysis.newNodes ?? [])].map(item => [item.path, item.rawSource])), verifications: options.plan.verifications.map(item => item.definition) }))
           for (const oracle of options.plan.mandatoryTests) if (frozen.files.get(oracle.testPath) !== view.files.get(oracle.testPath)) findings.push({ code: 'oracle_changed', severity: 'error', path: oracle.testPath, nodeId: options.plan.intentNodeId, message: '独立测试义务不得由模型改写' })
           return findings
-        } })
+        } }; const result = partitions ? await generateSyncPartitions(generationInput, partitions, options.plan.version === 'sync-coordinator-v2' ? options.plan.partitionPolicy.maxParallel : 1, options.plan.version === 'sync-coordinator-v2' && options.plan.direction === 'code_to_spec', generationOptions, partitionCheckpoints) : await runGeneration(generationInput, generationOptions)
         const { candidateFiles: _files, ...compact } = result
         generated = compact; saveStage(store, fence, 'generation', compact)
       }
@@ -765,9 +800,10 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         const issue = failure(`verification_${failedV3.status}`, failedV3.reason ?? '真实隔离验收未通过', kind, [ref])
         store.recordFailure(fence, issue)
         if (kind === 'unsupported') return current('unsupported', issue)
+        if (options.plan.version === 'sync-coordinator-v2' && options.plan.direction === 'code_to_spec') return current(undefined, issue)
         repairContext = { previousOutput: generated.output, diagnostics: [{ code: issue.code, message: `${issue.message}\n${canonical(failedV3.evidence ?? {})}` }] }; continue
       }
-      const v4Ref = await v4(), v1Ref = writeEvidence(operation.input.source.commonDir, { candidateDigest: candidate.digest, findings: generated.validationFindings, candidateValidated: generated.candidateValidated }), v2Ref = writeEvidence(operation.input.source.commonDir, { candidateDigest: candidate.digest, review: generated.review, traces: generated.traces }), v3Refs = v3Results.map(result => writeEvidence(operation.input.source.commonDir, result))
+      const v4Ref = await v4(), v1Ref = writeEvidence(operation.input.source.commonDir, { candidateDigest: candidate.digest, findings: generated.validationFindings, candidateValidated: generated.candidateValidated }), v2Ref = writeEvidence(operation.input.source.commonDir, { candidateDigest: candidate.digest, review: generated.review, traces: generated.traces, ...(generated.partitionEvidence ? { partitionEvidence: generated.partitionEvidence, partitionPlanDigest: partitions?.digest, partitionCoverage: partitions?.partitions.map(partition => partition.id), dependencyCoverage: partitions?.dependencies } : {}) }), v3Refs = v3Results.map(result => writeEvidence(operation.input.source.commonDir, result))
       const bindings = { inputId: operation.input.id, candidateDigest: candidate.digest, policyDigest: operation.policyDigest, readSetDigest: operation.readSetDigest, ...(operation.baselineSelection ? { baselineSelectionDigest: operation.baselineSelection.digest } : {}), environmentDigest: contentHash(canonical(runs.map(run => run.policy))), contextDigest: contentHash(canonical({ readSetDigest: view.readSetDigest, baselineSelection: operation.baselineSelection ?? null, publicationBase: attempt.publicationBase ?? null, elaboration: p1Evidence, composed: view.composed, analysisRef: analysis?.ref ?? null, decisionRef: decision ? operation.requestBlob : null })) }
       const result: VerificationResultBlob = { schemaVersion: 1, coveredScope: ready, retiredIds: unique(elaboration.retiredIds), restoredIds: restorations.map(change => change.id).sort(), decisionRefs: [...options.plan.decisionRefs ?? [], ...(decision && operation.requestBlob ? [operation.requestBlob] : [])], ...bindings, layers: [{ layer: 'V1', verdict: 'pass', evidenceRefs: [v1Ref] }, { layer: 'V2', verdict: 'pass', evidenceRefs: [v2Ref] }, { layer: 'V3', verdict: 'pass', evidenceRefs: v3Refs }, { layer: 'V4', verdict: 'pass', evidenceRefs: [v4Ref] }] }
       store.recordVerification(fence, { ...bindings, passed: true, coveredScope: ready, evidenceRefs: [p1Evidence, v1Ref, v2Ref, ...v3Refs, v4Ref], resultBlob: writeEvidence(operation.input.source.commonDir, result) })

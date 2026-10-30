@@ -20,7 +20,12 @@ export type FrozenReadReceipt = { threadId: string; turnId: string; callId: stri
 type FrozenCoverageProof = { contextDigest: string; threadId: string; turnId: string; receipts: FrozenReadReceipt[]; coveredEntryIds: string[]; historyDigest: string }
 export type FrozenReadProof = FrozenCoverageProof & ({ version?: never } | { version: 2; visibilityDigest: string; toolOutputTokenLimit: number } | { version: 3; provider: 'claude-code'; promptId: string; model: string; cliVersion: string; maxReadBytes: 65536; maxResultSizeChars: 500000 })
 export type ClaudePublicMessage = { role: string; content: Array<{ type: string; id?: string; name?: string; input?: unknown; tool_use_id?: string; content?: string | Array<{ type: string; text: string }>; text?: string; is_error?: boolean }> }
-export type ClaudePublicRecord = { type: string; sessionId: string; uuid?: string; parentUuid?: string | null; promptId?: string; requestRef?: string; sourceToolAssistantUUID?: string; message?: ClaudePublicMessage; id?: string; hash?: string; shapeHash?: string; base?: string; keep?: number; tail?: string[]; model?: string; toolNames?: string[]; placeholderValid?: boolean }
+type ClaudeCompaction = { runningTurnSends: { uuids: string[]; openerUuid: string }; preservedSegment?: { headUuid: string; anchorUuid: string; tailUuid: string }; preservedMessages?: { anchorUuid: string; uuids: string[]; allUuids: string[] } }
+export type ClaudePublicRecord = { type: string; sessionId: string; uuid?: string; parentUuid?: string | null; promptId?: string; requestRef?: string; sourceToolAssistantUUID?: string; message?: ClaudePublicMessage; id?: string; hash?: string; shapeHash?: string; base?: string; keep?: number; tail?: string[]; model?: string; toolNames?: string[]; placeholderValid?: boolean
+  subtype?: string; logicalParentUuid?: string; compactMetadata?: ClaudeCompaction
+  compactSummary?: { transcriptOnly: boolean; promptUuids?: string[]; messageDigest: string; textOnly: boolean }
+  compactSummaryDigest?: string
+}
 export type ClaudeFrozenWitness = { version: 1; provider: 'claude-code'; cliVersion: string; model: string; sessionId: string; userUuid: string; promptId: string; prompt: string; nativeHistoryPath: string; history: ClaudePublicRecord[]; mcpHistory?: { path: string; toolNames: string[] }; echo: { uuid: string; session_id: string; message: ClaudePublicMessage }; result: { type: string; subtype: string; is_error: boolean; session_id: string; uuid: string; user_message_uuid: string; user_message_uuids: string[]; structured_output: unknown }; initTools: string[] }
 export type FrozenVisibleOutput = { callId: string; output: string | { type: 'input_text'; text: string }[]; historyTokenLimit: number }
 type FrozenVisibility = { toolOutputTokenLimit: number; outputs: FrozenVisibleOutput[] }
@@ -353,12 +358,27 @@ export function readClaudePublicHistory(path: string, sessionId: string): Claude
   const records: ClaudePublicRecord[] = []
   for (const line of source.split('\n').filter(Boolean)) {
     const row = JSON.parse(line) as Record<string, unknown> & { message?: ClaudePublicMessage; shape?: { tools: { name: string; description?: string; input_schema?: unknown; defer_loading?: boolean }[] }; params?: { model: string } }
-    if (!['user', 'assistant', 'attachment', 'api-request', 'api-request-shape', 'api-request-blob'].includes(String(row.type))) continue
+    const compact = row.type === 'system' && row.subtype === 'compact_boundary'
+    if (!compact && !['user', 'assistant', 'attachment', 'api-request', 'api-request-shape', 'api-request-blob'].includes(String(row.type))) continue
     if (row.type === 'api-request-blob' && row.message?.role !== 'user') continue
     if (row.sessionId !== sessionId || row.isSidechain === true) stale('Claude history contains a foreign session or sidechain')
     const record = Object.fromEntries(['type', 'sessionId', 'uuid', 'parentUuid', 'promptId', 'requestRef', 'sourceToolAssistantUUID'].filter(key => key in row).map(key => [key, row[key]])) as ClaudePublicRecord
-    if (row.type === 'user') record.message = row.message
-    if (row.type === 'api-request-blob') { record.message = row.message; record.hash = String(row.hash) }
+    if (compact) {
+      const metadata = row.compactMetadata as ClaudeCompaction | undefined
+      Object.assign(record, { subtype: row.subtype, logicalParentUuid: row.logicalParentUuid, compactMetadata: metadata && { runningTurnSends: metadata.runningTurnSends, ...(metadata.preservedSegment !== undefined ? { preservedSegment: metadata.preservedSegment } : {}), ...(metadata.preservedMessages !== undefined ? { preservedMessages: metadata.preservedMessages } : {}) } })
+    }
+    if (row.type === 'user') {
+      if (row.isCompactSummary === true) {
+        const content: unknown = row.message?.content
+        record.compactSummary = { transcriptOnly: row.isVisibleInTranscriptOnly === true, promptUuids: row.summarizedTurnPromptUuids as string[] | undefined, messageDigest: claudeMessageDigest(row.message), textOnly: row.message?.role === 'user' && (typeof content === 'string' ? content.length > 0 : Array.isArray(content) && content.length > 0 && content.every(block => block?.type === 'text' && typeof block.text === 'string')) }
+      } else record.message = row.message
+    }
+    if (row.type === 'api-request-blob') {
+      const content: unknown = row.message!.content
+      record.message = typeof content === 'string' ? { ...row.message!, content: [{ type: 'text', text: content }] } : row.message
+      if (typeof content === 'string') record.compactSummaryDigest = claudeMessageDigest(row.message)
+      record.hash = String(row.hash)
+    }
     if (row.type === 'assistant') record.message = { role: 'assistant', content: row.message!.content.filter(block => block.type === 'tool_use') }
     if (row.type === 'api-request') Object.assign(record, { id: row.id, shapeHash: row.shapeHash, base: row.base, keep: row.keep, tail: row.tail, model: row.params!.model })
     if (row.type === 'api-request-shape') {
@@ -393,20 +413,55 @@ export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFro
   if (!original || original.parentUuid !== null || original.promptId !== promptId || JSON.stringify(original.message) !== JSON.stringify(echo.message)
     || JSON.stringify(original.message) !== JSON.stringify({ role: 'user', content: [{ type: 'text', text: witness.prompt }] })) stale('Claude original user echo/history/prompt identity differs')
   const seen = new Set<string>(), requests = new Map<string, string[]>(), shapes = new Set<string>(), calls = new Map<string, { row: ClaudePublicRecord; block: ClaudePublicMessage['content'][number] }>()
+  const parents = new Map<string, string | null>()
+  const compactSummaries = new Set<string>()
+  let latestMessage: string | undefined, compaction: { ancestors: Set<string>; anchor?: string } | undefined
   const receipts: FrozenReadReceipt[] = [], rejectedCalls: string[] = [], responseMessages = new Map<string, string>(), responseBlocks = new Map<string, ClaudePublicMessage['content'][number]>(), requestRefs = new Set<string>()
   if (witness.mcpHistory && (JSON.stringify(readClaudeMcpToolNames(witness.mcpHistory.path)) !== JSON.stringify(witness.mcpHistory.toolNames) || witness.mcpHistory.toolNames.some(name => name !== 'spex_read_frozen'))) stale('Claude MCP dispatched a foreign tool or its actual history changed')
   let acceptedOutput = false
   for (const row of history) {
     if (row.sessionId !== sessionId) stale('Claude native history changed its session identity')
+    const compact = row.type === 'system' && row.subtype === 'compact_boundary'
+    if (row.type === 'system' && !compact) stale('Claude public system event is not a supported compact boundary')
+    if (compact) {
+      const metadata = row.compactMetadata, segment = metadata?.preservedSegment, preserved = metadata?.preservedMessages
+      if (!row.uuid || seen.has(row.uuid) || row.parentUuid !== null || !row.logicalParentUuid || row.logicalParentUuid !== latestMessage || !seen.has(row.logicalParentUuid) || compaction
+        || metadata?.runningTurnSends?.openerUuid !== userUuid || JSON.stringify(metadata.runningTurnSends.uuids) !== JSON.stringify([userUuid])) stale('Claude compact boundary lost its exact running turn or logical parent')
+      if (segment !== undefined || preserved !== undefined) {
+        const ids = preserved?.allUuids
+        if (!segment || !preserved || !Array.isArray(ids) || !ids.length || new Set(ids).size !== ids.length || JSON.stringify(preserved.uuids) !== JSON.stringify(ids)
+          || segment.headUuid !== ids[0] || segment.tailUuid !== ids.at(-1) || segment.tailUuid !== row.logicalParentUuid
+          || !segment.anchorUuid || segment.anchorUuid !== preserved.anchorUuid || seen.has(segment.anchorUuid)
+          || ids.some((id, index) => !seen.has(id) || index > 0 && parents.get(id) !== ids[index - 1])) stale('Claude compact preserved segment is not the exact observed chain')
+      }
+      compaction = { ancestors: new Set([row.uuid]), ...(segment ? { anchor: segment.anchorUuid } : {}) }
+      parents.set(row.uuid, row.logicalParentUuid); seen.add(row.uuid)
+      continue
+    }
     if (row.uuid) {
       if (seen.has(row.uuid) || row.uuid !== userUuid && (!row.parentUuid || !seen.has(row.parentUuid))) stale('Claude public history is not the exact original main chain')
-      seen.add(row.uuid)
+      seen.add(row.uuid); parents.set(row.uuid, row.parentUuid ?? null)
     }
+    if (compaction && row.type === 'attachment') {
+      if (!row.uuid || !row.parentUuid || !compaction.ancestors.has(row.parentUuid)) stale('Claude compact attachment is outside its exact boundary')
+      compaction.ancestors.add(row.uuid)
+    }
+    if (row.compactSummary) {
+      const summary = row.compactSummary
+      if (row.type !== 'user' || !row.uuid || !row.parentUuid || !compaction?.ancestors.has(row.parentUuid) || compaction.anchor && compaction.anchor !== row.uuid
+        || row.promptId !== promptId || row.sourceToolAssistantUUID !== undefined || !summary.transcriptOnly || !summary.textOnly
+        || !/^[a-f0-9]{64}$/.test(summary.messageDigest) || JSON.stringify(summary.promptUuids) !== JSON.stringify([userUuid])) stale('Claude compact summary is not the exact original turn metadata')
+      compactSummaries.add(summary.messageDigest)
+      compaction = undefined; latestMessage = row.uuid
+      continue
+    }
+    if (compaction && ['user', 'assistant', 'api-request'].includes(row.type)) stale('Claude compact boundary has no exact same-turn summary')
     if (row.type === 'api-request-shape') {
       if (!row.shapeHash || !/^[a-f0-9]{64}$/.test(row.shapeHash) || !row.toolNames || allowed.some(name => !row.toolNames!.includes(name)) || row.toolNames.some(name => ![...allowed, 'DeferredToolPlaceholder'].includes(name)) || !row.placeholderValid) stale('Claude API exposes a foreign or discoverable tool or has no shape identity')
       shapes.add(row.shapeHash)
     }
     if (row.type === 'api-request-blob') {
+      if (row.compactSummaryDigest && !compactSummaries.has(row.compactSummaryDigest)) stale('Claude API string message is not an observed same-turn compact summary')
       if (!row.message || row.hash !== claudeMessageDigest(row.message) || row.message.content.some(block => !['tool_result', 'text'].includes(block.type))) stale('Claude public API message blob has invalid bytes or type')
       for (const block of row.message.content.filter(block => block.type === 'tool_result')) {
         const originalBlock = responseBlocks.get(block.tool_use_id!)
@@ -421,6 +476,7 @@ export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFro
       requests.set(row.id, [...base.slice(0, row.keep), ...row.tail])
     }
     if (row.type === 'assistant') {
+      latestMessage = row.uuid
       if (!row.requestRef || !requests.has(row.requestRef)) stale('Claude assistant lacks an exact actual API request reference')
       requestRefs.add(row.requestRef)
       for (const block of row.message!.content) {
@@ -429,6 +485,7 @@ export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFro
       }
     }
     if (row.type === 'user' && row.uuid !== userUuid) {
+      latestMessage = row.uuid
       if (row.promptId !== promptId || !row.message?.content.length || row.message.content.some(block => block.type !== 'tool_result')) stale('Claude history appended another user turn')
       for (const block of row.message.content) {
         const call = calls.get(block.tool_use_id!)
@@ -454,13 +511,16 @@ export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFro
         receipts.push(receipt)
       }
     }
+    if (row.uuid === userUuid) latestMessage = row.uuid
   }
+  if (compaction) stale('Claude compact boundary has no exact same-turn summary')
   if (!acceptedOutput || [...calls].some(([id]) => !responseMessages.has(id))) stale('Claude result has no matching accepted schema tool output or has unanswered calls')
+  const coveredEntryIds = frozenReadCoverage(ref, receipts)
   for (const callId of [...receipts.map(receipt => receipt.callId), ...rejectedCalls]) {
     const messageHash = responseMessages.get(callId)!
     if (![...requests].some(([id, hashes]) => hashes.includes(messageHash) && requestRefs.has(id))) stale('Claude reader result was not present in a subsequent actual model API request')
   }
-  const coveredEntryIds = frozenReadCoverage(ref, receipts), historyBytes = encode(witness), historyDigest = sha(historyBytes)
+  const historyBytes = encode(witness), historyDigest = sha(historyBytes)
   const path = join(dirname(ref.manifestPath), 'histories', historyDigest)
   if (!existsSync(path)) writeFileSync(path, historyBytes, { mode: 0o400 })
   else if (sha(readFileSync(path)) !== historyDigest) stale('Claude public witness content was modified')

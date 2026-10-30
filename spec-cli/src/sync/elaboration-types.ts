@@ -74,6 +74,7 @@ export type ElaborationResult = {
   blockedFlows: BlockedElaborationFlow[]
   retiredIds: string[]
   nodeChanges?: ContractNodeChange[]
+  partitionEvidence?: { partitionId: string; resultRef: BlobRef }[]
   structurePassed: boolean
   reviewPassed: boolean
   runtimeVerification: 'not_run'

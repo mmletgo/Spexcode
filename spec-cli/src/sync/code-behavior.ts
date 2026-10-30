@@ -11,7 +11,7 @@ import { decisionScopeIds, sameContractBusinessMeaning } from './contract-evolut
 import { controlledDecisionIdentity, readControlledChanges, readControlledDecision, renderControlledDecisionRaw } from './request-input.js'
 import { isSyncSpecPath, readFrozenContracts } from './frozen-contracts.js'
 import type { BaselinePair, ComposedInputRef, FrozenBaselineSelection, InputSnapshot } from './operation-types.js'
-import { contentHash, objectGit, readEvidence, readObject, readTree, validateRepositoryPath, verifySnapshot } from './snapshot.js'
+import { canonicalSnapshotSource, contentHash, objectGit, readEvidence, readObject, readTree, validateRepositoryPath, verifySnapshot } from './snapshot.js'
 import type { TreeEntry } from './snapshot.js'
 import type { SyncCoordinatorPlan } from './coordinator-types.js'
 import type { FrozenEntryJson, FrozenReadProof } from '../frozen-context.js'
@@ -22,7 +22,7 @@ const object = (properties: Record<string, unknown>): Record<string, unknown> =>
 const change = object({ kind: { type: 'string', enum: ['refactor', 'allowed_change', 'coverage_gap', 'conflict'] }, paths: { ...strings, minItems: 1 }, affectedIds: strings, ruleIds: strings, originalIntent: string, previousBehavior: string, sourceBehavior: string, deliveryBehavior: string, evidence: string, counterexample: string })
 export const CODE_BEHAVIOR_SCHEMA = object({ changes: { type: 'array', items: change }, facts: { type: 'array', items: object({ source: string, text: string }) }, acceptanceChanges: { type: 'array', items: object({ id: string, ruleIds: { ...strings, minItems: 1 }, source: string, reason: string }) }, newNodes: { type: 'array', items: object({ codePath: string, parentNodeId: string, basis: string }) }, resolutions: { type: 'array', items: object({ path: string, content: { type: ['string', 'null'] }, mode: { type: ['string', 'null'], enum: ['100644', '100755', '120000', null] } }) } })
 export const CODE_BEHAVIOR_REVIEW_SCHEMA = object({ inputDigest: string, analysisDigest: string, verdict: { type: 'string', enum: ['accept', 'repair'] }, checkedPaths: strings, checkedChangeIds: strings, findings: { type: 'array', description: '仅列需要修正的问题；verdict=accept时必须为空数组，不写通过说明或肯定评价。', items: object({ message: string, evidence: string, counterexample: string }) } })
-export type CodeBehaviorInput = { model?: string; snapshot: InputSnapshot; baseline: BaselinePair | null; baselineSelection?: FrozenBaselineSelection; composed: ComposedInputRef; readSetDigest: string; policyDigest: string; plan: SyncCoordinatorPlan; requestKey: string; timeoutMs: number; signal?: AbortSignal; origin?: 'initial' | 'spec' | 'code' | 'combined' | 'reconcile' | 'decision'; decision?: { request: SyncDecisionInput; previous: CodeBehaviorEvidence; previousComposed?: ComposedInputRef; previousReadPaths?: readonly string[] }; repairDiagnostics?: readonly { code: string; message: string }[] }
+export type CodeBehaviorInput = { partition?: { id: string; changedPaths: readonly string[] }; model?: string; snapshot: InputSnapshot; baseline: BaselinePair | null; baselineSelection?: FrozenBaselineSelection; composed: ComposedInputRef; readSetDigest: string; policyDigest: string; plan: SyncCoordinatorPlan; requestKey: string; timeoutMs: number; signal?: AbortSignal; origin?: 'initial' | 'spec' | 'code' | 'combined' | 'reconcile' | 'decision'; decision?: { request: SyncDecisionInput; previous: CodeBehaviorEvidence; previousComposed?: ComposedInputRef; previousReadPaths?: readonly string[] }; repairDiagnostics?: readonly { code: string; message: string }[] }
 type Proposal = { changes: Omit<CodeBehaviorChange, 'id'>[]; facts: CodeBehaviorAnalysis['facts']; acceptanceChanges: Omit<AcceptanceChangeProposal, 'action'>[]; newNodes: { codePath: string; parentNodeId: string; basis: string }[]; resolutions: CodeBehaviorAnalysis['resolutions'] }
 const within = (path: string, paths: readonly string[]): boolean => paths.some(parent => path === parent || path.startsWith(`${parent}/`))
 const sorted = (ids: readonly string[]): string[] => [...new Set(ids)].sort()
@@ -101,8 +101,10 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   while (authorProjection?.version === 'selected-author-projection-v1' && authorProjection.priorProjection) authorProjection = JSON.parse(readEvidence(input.snapshot.source.commonDir, authorProjection.priorProjection).toString('utf8')) as { version?: string; priorProjection?: { sha256: string } | null }
   const canonicalProjection = authorProjection?.version === 'canonical-author-projection-v1' ? authorProjection as { version: 'canonical-author-projection-v1'; projections: { snapshotId: string; changes: { path: string; before: TreeEntry; after: TreeEntry }[] }[] } : null
   const authorByteProjections = canonicalProjection?.projections.flatMap(({ snapshotId, changes }) => changes.filter(change => within(change.path, input.plan.readPaths) && !isHostPrivatePath(change.path)).map(change => ({ snapshotId, path: change.path, before: { ...change.before, text: readObject(input.snapshot.source.commonDir, change.before.oid).toString('utf8') }, after: { ...change.after, text: readObject(input.snapshot.source.commonDir, change.after.oid).toString('utf8') } }))) ?? []
-  const oldTree = input.baseline?.sourceInput.immutableTree ?? objectGit(commonDir, ['rev-parse', `${input.snapshot.headCommit}^{tree}`]).toString().trim()
-  const fileViews: Record<string, Map<string, FrozenFile>> = { oldSource: fileTree(input, oldTree), newSource: fileTree(input, input.snapshot.immutableTree), verifiedDelivery: fileTree(input, input.baseline?.verifiedDelivery.immutableTree ?? oldTree), composedFiles: fileTree(input, input.composed.tree), controlledBeforeFiles: new Map() }
+  const triggerBefore = input.plan.version === 'sync-coordinator-v2' ? input.plan.commitTrigger?.before : undefined
+  if (triggerBefore) { verifySnapshot(triggerBefore); if (JSON.stringify(canonicalSnapshotSource(triggerBefore.source)) !== JSON.stringify(canonicalSnapshotSource(input.snapshot.source))) reject('提交触发前态不属于同一物理来源') }
+  const oldTree = input.baseline?.sourceInput.immutableTree ?? triggerBefore?.immutableTree ?? objectGit(commonDir, ['rev-parse', `${input.snapshot.headCommit}^{tree}`]).toString().trim()
+  const fileViews: Record<string, Map<string, FrozenFile>> = { oldSource: fileTree(input, oldTree), newSource: fileTree(input, input.snapshot.immutableTree), verifiedDelivery: input.plan.version === 'sync-coordinator-v2' && !input.baseline ? new Map() : fileTree(input, input.baseline?.verifiedDelivery.immutableTree ?? oldTree), composedFiles: fileTree(input, input.composed.tree), controlledBeforeFiles: new Map() }
   const replaceFile = (files: Map<string, FrozenFile>, path: string, entry: TreeEntry | null): void => {
     if (entry && within(path, input.plan.readPaths) && !isHostPrivatePath(path)) files.set(path, freezeFile(entry, readObject(commonDir, entry.oid)))
     else files.delete(path)
@@ -122,7 +124,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   if (input.composed.requestBlob) {
     const rawRequest = JSON.parse(readEvidence(commonDir, input.composed.requestBlob).toString('utf8')) as { type?: string }
     const original = rawRequest.type === 'sync.decision' ? readControlledDecision(input.snapshot, input.composed.requestBlob).originalRequestBlob : input.composed.requestBlob
-    if (original) for (const change of readControlledChanges(input.snapshot, original)) {
+    if (original) for (const change of readControlledChanges(input.snapshot, original).filter(change => within(change.path, input.plan.readPaths))) {
       replaceFile(authorFiles, change.path, change.next); replaceFile(fileViews.controlledBeforeFiles, change.path, change.before)
       const next = authorFiles.get(change.path), before = fileViews.controlledBeforeFiles.get(change.path)
       if (next?.kind === 'text') authorSource.set(change.path, next.content); else authorSource.delete(change.path)
@@ -132,10 +134,10 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
     if (historyAuthor) { source.splice(0, source.length, ...authorSource); fileViews.newSource = authorFiles }
   }
   const controlledBeforeFiles = historyAuthor ? controlledAuthorBefore.filter((item): item is { path: string; text: string } => item.text !== null).map(item => [item.path, item.text] as [string, string]) : []
-  const precedingContracts = new Map(delivery)
+  const precedingContracts = new Map(input.plan.version === 'sync-coordinator-v2' && !input.baseline ? oldSource : delivery)
   for (const [path, text] of controlledBeforeFiles) if (path.startsWith('.spec/') && path.endsWith('/spec.md')) precedingContracts.set(path, text)
   const oldFrozen = await readFrozenContracts(input.snapshot.source.canonicalRoot, precedingContracts), current = await readFrozenContracts(input.snapshot.source.canonicalRoot, new Map(composed))
-  const authorChanges = selectedEvidence ? selectedAuthoredContractChanges(selectedEvidence) : authoredContractChanges(authorBefore, authorSource, new Map(delivery), [...oldFrozen.nodes, ...current.nodes])
+  const authorChanges = selectedEvidence ? selectedAuthoredContractChanges(selectedEvidence).filter(change => within(change.path, input.plan.readPaths)) : authoredContractChanges(authorBefore, authorSource, new Map(delivery), [...oldFrozen.nodes, ...current.nodes])
   if (selectedEvidence) for (const change of authorChanges) {
     const broad = selectedEvidence.intents.filter(item => item.changed && item.broadChange && (item.source?.path ?? item.before?.path) === change.path && item.before)
     const bases = new Map(broad.map(item => [item.before!.entry.oid, item.before!]))
@@ -150,14 +152,14 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   const sourceRole = (path: string): boolean => input.plan.sourcePaths === undefined || within(path, input.plan.sourcePaths)
   const sourceMap = new Map(source)
   const requiresOwnership = (path: string): boolean => !path.startsWith('.spec/') && sourceMap.has(path) && /\.(?:[cm]?[jt]sx?|py|go|rs|java|rb)$/.test(path) && !/\.(?:test|spec)\./.test(path) && sourceRole(path) && !knownCode.has(path)
-  const ungoverned = source.filter(([path]) => requiresOwnership(path) && within(path, input.plan.writePaths)).map(([path]) => path)
+  const ungoverned = source.filter(([path]) => requiresOwnership(path) && within(path, input.plan.writePaths) && (!input.partition || input.partition.changedPaths.includes(path))).map(([path]) => path)
   const authorEntries = new Map(readTree(commonDir, oldTree).map(entry => [entry.path, entry]))
   const deliveryEntries = new Map(readTree(commonDir, input.baseline?.verifiedDelivery.immutableTree ?? oldTree).map(entry => [entry.path, entry]))
   for (const path of adopted) { const entry = deliveryEntries.get(path); if (entry) authorEntries.set(path, entry); else authorEntries.delete(path) }
   if (selectedEvidence) {
     for (const entry of selectedEvidence.paths) if (entry.pairId !== null) { if (entry.base) authorEntries.set(entry.path, entry.base); else authorEntries.delete(entry.path); if (entry.delivery) deliveryEntries.set(entry.path, entry.delivery); else deliveryEntries.delete(entry.path) }
   }
-  const changedPaths = sorted([...(selectedEvidence?.residualPaths ?? []), ...ungoverned, ...actualTreeDiff([...authorEntries.values()], verifySnapshot(input.snapshot)).map(file => file.path), ...actualTreeDiff([...deliveryEntries.values()], readTree(commonDir, input.composed.tree)).map(file => file.path)].filter(path => within(path, input.plan.readPaths)))
+  const changedPaths = input.partition ? sorted(input.partition.changedPaths.filter(path => within(path, input.plan.readPaths))) : sorted([...(selectedEvidence?.residualPaths ?? []), ...ungoverned, ...actualTreeDiff([...authorEntries.values()], verifySnapshot(input.snapshot)).map(file => file.path), ...actualTreeDiff([...deliveryEntries.values()], readTree(commonDir, input.composed.tree)).map(file => file.path)].filter(path => within(path, input.plan.readPaths)))
   const artifactEntries = new Map((selectedEvidence?.artifacts ?? []).flatMap(item => [item.before, item.delivery, item.source, item.authorBase].filter((entry): entry is NonNullable<typeof entry> => !!entry)).map(entry => [`${entry.path}:${entry.mode}:${entry.oid}`, entry]))
   fileViews.intentArtifactFiles = new Map([...artifactEntries].filter(([, entry]) => within(entry.path, input.plan.readPaths) && !isHostPrivatePath(entry.path)).map(([identity, entry]) => [identity, freezeFile(entry, readObject(commonDir, entry.oid))]))
   const intentArtifactFiles = [...fileViews.intentArtifactFiles.values()].filter(file => file.kind === 'text').map(({ kind: _kind, encoding: _encoding, content, ...entry }) => ({ ...entry, text: content }))
@@ -173,7 +175,40 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   const unownedSourcePaths = changedPaths.filter(requiresOwnership)
   const readingManifest = JSON.stringify({ requiredChangedPaths: changedPaths, unownedSourcePaths, unownedSourcePathCount: unownedSourcePaths.length, readablePaths })
   const readingInstructions = `冻结读取清单:\n${readingManifest}\n分析要求:\n六个文本视图、intentArtifactFiles与authorByteProjections.before/after正文使用sha256-body-entry-v2；bodyRef是原content字符串的SHA256。bodyIndex给出entryId、kind、encoding、sha256、byteLength、contentByteLength和required；optional entry是json-string-v1完整字符串；required正文按bodyRef排序合为一个json-object-v1对象entry，完整读取后JSON.parse(entry)[bodyRef]恢复该原字符串（包含BOM/CRLF），entry的sha256/byteLength绑定编码后的运输字节。nonTextFiles同样用bodyRef替换content，其encoding仍声明原content为utf8或完整base64。spex_read_frozen按entry读取全文，正文不在这份JSON里。引用只表示字节相同，不代表语义批准。required正文必须读完；optional只有该精确turn的coveredEntryIds包含其完整entry才算已读，bodyRef、目录或部分区间都不是全文。各文本视图保留其实际来源/派生树字节；compositionEvidence.source可来自author-clean投影，需按authorByteProjections核对该snapshot/path的投影前后对象，不把此角色差异当数据损坏或新业务政策。requiredChangedPaths必须逐项覆盖，不得缩小。unownedSourcePaths是按后置归属门同一判据求出的未治理业务源码子集，数量为unownedSourcePathCount；首次纳管时已存在、已commit的未治理实现也须逐codePath在真实上层raw下提出newNodes治理叶或具体coverage_gap/conflict，分组allowed_change不是治理，不能凭旧文件或空初始化文件跳过。newNodes只绑定既有意图对应的治理职责，不授予新业务或新政策。readablePaths标明该具体文件全文在哪些冻结快照中存在；删除文件仍重读旧全文。plan.readPaths是目录前缀授权而非仅路径字符串相等；manifest/目录/链接目标路径只属元数据，不冒充全文。nonTextFiles保留kind/encoding和完整对象content及mode/OID/digest，readablePaths的nonTextFiles.前缀指向其所属快照；binary完整base64可还原原字节，symlink只表示Git链接对象目标字节、不跟随宿主或冒充目标正文。完整字节不等于已理解图片/wheel业务含义，raw真实依赖而不可解释仍提出具体GAP，不自动allowed_change或自批业务。snapshotTree与composed.tree是真实冻结Git树身份，相同树表示同一路径的对象字节与mode相同，不代表语义或业务通过；不得编造工具未提供的hash/AST计算证据，也不得把手工重抄、转义或反转义片段的推算冒称冻结源对象校验。以下虚拟冻结快照是唯一输入权威，cwd的旧HEAD不是本次输入；不要以cwd缺少新增文件忽略已冻结正文。plan.sourcePaths存在时限定业务源码和newNodes角色，不扩展read/write授权；实际测试修改仍完整分析。contractItems.previous/current是从完整冻结正文解析的既有契约项，affectedIds/ruleIds仅引用其中真实稳定ID；baselineSelection的资源名不是契约正文，未通过P1结构检查或独审的候选不成为既有业务义务；已接受P1仍由后续冻结复用和生成保护，不成为raw或新的作者授权。raw-only初始化尚无既有稳定业务ID时，允许affectedIds/ruleIds为空，按真实raw、源码及完整测试分析相容性，随后交P1建立详细契约并独审；不要虚构ID，也不因尚未展开本身提出GAP。该边界不豁免任何真实业务冲突、完整读取、独审或后续生成验证。\n`
-  const frozen = { requiredChangedPaths: changedPaths, unownedSourcePaths, unownedSourcePathCount: unownedSourcePaths.length, snapshotTree: input.snapshot.immutableTree, readablePaths, contractItems: { previous: [...oldFrozen.graph.items.values()], current: [...current.graph.items.values()] }, origin: input.origin ?? 'code', decision: input.decision ?? null, repairDiagnostics: input.repairDiagnostics ?? [], inputId: input.snapshot.id, baselinePair: input.baseline, baselineSelection: input.baselineSelection ?? null, compositionEvidence: selectedEvidence, authorByteProjections, intentArtifactFiles, nonTextFiles, composed: input.composed, readSetDigest: input.readSetDigest, policyDigest: input.policyDigest, plan: input.plan, changedPaths, authorChanges, adoptedDeliveryPaths: sorted([...adopted]), authorBaseline: [...authorBefore], oldSource, verifiedDelivery: delivery, newSource: source, composedFiles: composed, controlledBeforeFiles }
+  const promptIds = new Set([...oldFrozen.graph.items.keys(), ...current.graph.items.keys()])
+  const localPath = (path: string): boolean => within(path, input.plan.readPaths)
+  const localIntent = (item: NonNullable<typeof selectedEvidence>['intents'][number]): boolean => localPath((item.source ?? item.before ?? item.delivery)!.path)
+  const promptComposition = input.partition && selectedEvidence ? {
+    ...selectedEvidence, executionPaths: selectedEvidence.executionPaths.filter(localPath), contextPaths: selectedEvidence.contextPaths.filter(localPath),
+    paths: selectedEvidence.paths.filter(item => localPath(item.path)), residualPaths: selectedEvidence.residualPaths.filter(localPath),
+    conflicts: selectedEvidence.conflicts.filter(item => localPath(item.path)), artifacts: selectedEvidence.artifacts.filter(item => localPath(item.path)), intents: selectedEvidence.intents.filter(localIntent),
+    controlledAuthorPatch: selectedEvidence.controlledAuthorPatch && localPath(selectedEvidence.controlledAuthorPatch.next.path) ? { ...selectedEvidence.controlledAuthorPatch, intents: selectedEvidence.controlledAuthorPatch.intents.filter(localIntent) } : undefined,
+    controlledAuthorGroup: selectedEvidence.controlledAuthorGroup ? { ...selectedEvidence.controlledAuthorGroup, changes: selectedEvidence.controlledAuthorGroup.changes.filter(change => localPath(change.path)), intents: selectedEvidence.controlledAuthorGroup.intents.filter(localIntent) } : undefined,
+  } : selectedEvidence
+  const promptSelection = input.partition && input.baselineSelection ? {
+    version: input.baselineSelection.version, digest: input.baselineSelection.digest,
+    bindings: input.baselineSelection.bindings.filter(binding => binding.resource.kind === 'path' ? localPath(binding.resource.path) : promptIds.has(binding.resource.id)).map(binding => {
+      const pair = 'bytePair' in binding ? binding.bytePair : binding.intentPair
+      const projected = pair ? { ...pair, coveredScope: { paths: pair.coveredScope.paths.filter(localPath), contractIds: pair.coveredScope.contractIds.filter(id => promptIds.has(id)), flowIds: pair.coveredScope.flowIds.filter(id => promptIds.has(id)) } } : null
+      return 'bytePair' in binding ? { ...binding, bytePair: projected } : { ...binding, intentPair: projected }
+    }),
+  } : input.baselineSelection ?? null
+  const promptDecision = input.partition && input.decision ? { request: input.decision.request, previous: { ref: input.decision.previous.ref, analysis: {
+    ...input.decision.previous.analysis, changes: input.decision.previous.analysis.changes.filter(item => item.paths.some(localPath)), findings: input.decision.previous.analysis.findings.filter(item => item.paths.some(localPath)),
+    resolutions: input.decision.previous.analysis.resolutions.filter(item => localPath(item.path)), newNodes: input.decision.previous.analysis.newNodes.filter(item => localPath(item.codePath)),
+    authorChanges: input.decision.previous.analysis.authorChanges?.filter(item => localPath(item.path)), rawIntegrations: input.decision.previous.analysis.rawIntegrations?.filter(item => localPath(item.path)),
+    nodeChanges: input.decision.previous.analysis.nodeChanges.filter(item => localPath(item.from.path)), authorizedChanges: input.decision.previous.analysis.authorizedChanges.filter(item => promptIds.has(item.id)),
+    facts: input.decision.previous.analysis.facts.filter(fact => !fact.source.startsWith('code:') || localPath(fact.source.slice(5).split('#')[0])),
+    partitionEvidence: undefined, partitionCoverage: undefined,
+  } } } : input.decision ?? null
+  const promptPlan = input.partition && input.plan.version === 'sync-coordinator-v2' && input.plan.commitTrigger ? { ...input.plan, commitTrigger: { ...input.plan.commitTrigger, paths: input.plan.commitTrigger.paths.filter(localPath) } } : input.plan
+  const frozen = {
+    requiredChangedPaths: changedPaths, unownedSourcePaths, unownedSourcePathCount: unownedSourcePaths.length, snapshotTree: input.snapshot.immutableTree, readablePaths,
+    contractItems: { previous: [...oldFrozen.graph.items.values()], current: [...current.graph.items.values()] }, origin: input.origin ?? 'code', decision: promptDecision, repairDiagnostics: input.repairDiagnostics ?? [], inputId: input.snapshot.id,
+    baselinePair: input.partition && input.baseline ? { id: input.baseline.id, sourceInput: { id: input.baseline.sourceInput.id, immutableTree: input.baseline.sourceInput.immutableTree }, verifiedDelivery: { id: input.baseline.verifiedDelivery.id, immutableTree: input.baseline.verifiedDelivery.immutableTree }, coveredScope: { paths: input.baseline.coveredScope.paths.filter(localPath), contractIds: input.baseline.coveredScope.contractIds.filter(id => promptIds.has(id)), flowIds: input.baseline.coveredScope.flowIds.filter(id => promptIds.has(id)) } } : input.baseline,
+    baselineSelection: promptSelection, compositionEvidence: promptComposition, authorByteProjections, intentArtifactFiles, nonTextFiles, composed: input.composed,
+    readSetDigest: input.readSetDigest, policyDigest: input.policyDigest, plan: promptPlan, changedPaths, authorChanges, adoptedDeliveryPaths: sorted([...adopted].filter(path => !input.partition || localPath(path))), authorBaseline: [...authorBefore], oldSource, verifiedDelivery: delivery, newSource: source, composedFiles: composed, controlledBeforeFiles,
+  }
   const anchorPath = (value: string): string => value.split('#')[0]
   const requiredPaths = new Set<string>(changedPaths)
   const requiredClaims = new Set<string>()

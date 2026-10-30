@@ -41,3 +41,5 @@ related:
 取消先沿公共结构化协议撤销发布权，再向专属 stdin 发精确 interrupt，核 request/session/user 对应 ACK；ACK 本身不证明停止。冷取消仅以相同固定 policy 和 PID/startToken/receipt 对专属进程组操作。全部 CLI/MCP 后代消失才 nativeStopped；只 leader 退出、缺receipt、发布/控制失败或进程组未知均保留容量。spawn之后任何所有权持久化失败都进入 cancellation_pending，不从本地异常推断释放。
 
 验收使用外部公开随机 fixture，保留默认大于50K替换负证据、cap后的逐字正证据、64KiB以内全控制字符最坏转义、completed跨调用零新turn重放和真实取消。测试使用隔离数据库，不操作其它会话或服务。
+
+压缩预检单独显式启用：使用约720KiB公开 filler 和不在 prompt 泄露的随机末尾标记，要求本轮全部读取、实际 compact_boundary、原生完整 proof 与 completed 零新调用重放。子进程整组移除四个认证/路由环境键后沿既有 native-user-settings 投影，不保存凭据或修改用户配置。一次预检最多一轮、五分钟；未发生压缩、读取不全或失去实际 API 可见性均不能声明压缩正例。

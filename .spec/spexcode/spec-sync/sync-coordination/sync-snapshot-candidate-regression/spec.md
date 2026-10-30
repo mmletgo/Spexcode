@@ -21,3 +21,6 @@ code:
 同次读树交出的原始 bytes 与逐对象读取在真实 SHA-1/SHA-256 树逐字一致，条目 digest 对应这些完整字节，空文件、二进制、mode/symlink 和特殊路径不变；篡改 OID 在交出坏对象前明确失败，仍保留原批次聚合、单对象容量及缺失对象回归。
 
 已提交模式以真实 Git 验证默认工作区快照身份保持、captureKind 参与新身份、staged/unstaged/untracked 与采集中保存/暂存均不污染 HEAD 输入，HEAD 变化重试后只返回同一已提交树；indexTree/indexDigest 绑定 HEAD tree，旧无标记快照仍验证成功。
+
+
+真实快照经固定计划同源的JSON递归键排序后，working-tree与commit身份均保持可验证；改变source分支仍因身份摘要拒绝。

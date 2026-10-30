@@ -55,3 +55,6 @@ contractOmissionBound为生成独审、协调器live与持久恢复共用的专�
 P4 可在模型响应核 schema、计算 approvedSpecs 后调用可信 beforeFreezeCandidate。程序逐 entry 核 protectedReadPaths、原 files 和实际 allowedScope 的完整原字节/mode/OID/absence 未变，随后在发布组合树 freeze 并执行 V1/V2、实际候选独审；模型 prompt、beforeDigest/beforeMode、inputDigest 和行为分析仍绑定 original composed/readSet。闭包外真实已结算继承进入实际 candidate manifest/完整摘要，不能成为模型写权限；readonly 模型修改继续按原 scope 拒绝。
 
 P2 接收操作固定 model 并传给生成与独立评审，effort 仍为 high；实际模型可用性由原生目录及结构化执行校验，遵循 [[sync-model-selection]]，不再将模型固定为全局 sol。
+
+
+分区主干复用同一生成实现的两个明确接缝：prepareOnly只返回已核schema的结构化preparedChanges，不冻结、不独审、不表示实现完成；reviewCandidate只审调用者已冻结的同一候选，读取本区完整正文及实际修改并对全部builder身份核独立。freezeGenerationCandidate统一执行原发布基树闭包保护、scope与CAS，不因分区另开写入路径。局部及跨边review的checkedIds只属于该真实读取范围，仍须完整覆盖预定业务ID。
