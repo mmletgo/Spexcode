@@ -2,7 +2,7 @@
 title: 不可变外部输入快照
 status: active
 hue: 175
-desc: 前后核对物理身份、HEAD、index和完整字节，形成可恢复Git对象输入。
+desc: 区分已提交HEAD输入与显式工作区输入，双重核对身份并保留可恢复Git对象。
 code:
   - spec-cli/src/sync/snapshot.ts
 ---
@@ -29,3 +29,5 @@ code:
 同一轮观察把已读取的原字节写入 owned 私有普通文件，使用 Git `hash-object --stdin-paths --no-filters` 一次写入，仍逐文件保留 mode、摘要及前后观察。读树由 Git 长列表取得对象大小，按原 128 MiB 输出容量分组使用 `cat-file --batch`；每个对象按 framing、完整原字节与 OID 核对，不共享跨调用缓存。聚合字节不能收紧或放宽单对象容量：framing 超过批次容量的单对象沿用原 `cat-file blob` 路径。空树、缺失 index、二进制、有效 UTF-8 路径及 symlink 语义保持不变，真实 Git 失败继续透传。
 
 读树调用者可同时接收同次批量校验后的条目和完整原始 bytes，复用已经读取的正文，避免摘要之后再逐对象启动 Git。回调只在该对象 framing、完整字节与 OID 核对成功后交出字节，返回的 TreeEntry 顺序、digest 和全部快照身份计算保持不变；仍逐调用重读，不保存全局对象缓存。
+
+自动提交输入使用同一 captureInputSnapshot 的 committed 模式：前后核对物理来源、分支、HEAD 与其不可变 tree，仅从 Git 对象读取条目和原字节。它不读取工作文件、用户 index 或 untracked 字节；同期保存、暂存和冲突 index 不影响该输入，HEAD 变化仍有限重试。InputSnapshot.captureKind=commit 参与新身份摘要，immutableTree/indexTree 均等于已冻结 HEAD tree，indexDigest 是该 tree OID 的 SHA256，不伪称保存了用户 index。读回同时验证 HEAD/tree/index 绑定。缺 captureKind 的历史记录及默认显式工作区采集保原摘要算法、index 与完整工作字节语义，不能升级重写历史快照身份。

@@ -57,21 +57,21 @@ AC-APPLICATION-P3-ORACLE-REAL 在 fixture 作者起始可信提交中登记不�
 
 ORACLE-PROTOCOL的adopt_behavior/new_rule使用无已验证pair的精确all-null选择，先复现AC02被空旧图误拒至预算耗尽，再核原analysis所属attempt的composedInput精确绑定并进入新分析与独审；两者均以6次调用到达原政策互斥needs_input，verifiedDelivery仍为空，无verification/receipt/source/index变更。
 
-AC-APPLICATION-P4-01 使用真实Git/SQLite和明确故障runner验证无Dashboard持续服务：物理暂停期间保存保持0dispatch，恢复绑定最新snapshot，重复补偿不重开失败调用；02 验证服务offline、停机外部Git提交和启动补偿；03 验证branch切换旧授权失效、物理pause跨branch保持以及显式新授权。
+AC-APPLICATION-P4-01 使用真实Git/SQLite和明确故障runner验证无Dashboard持续服务：物理暂停期间提交保持0dispatch，恢复绑定最新snapshot，重复补偿不重开失败调用；02 验证服务offline、停机外部Git提交和启动补偿；03 验证branch切换旧授权失效、物理pause跨branch保持以及显式新授权。
 
-AC-APPLICATION-P4-04 验证nodeIds明确子树、新纯raw后续保存、parent/child不重复注册和越域manual拒绝；05验证省略nodeIds仅从实际受治理授权路径接入、未授权code保持excluded以及纯raw首次需显式注册。
+AC-APPLICATION-P4-04 验证nodeIds明确子树、新纯raw后续提交、parent/child不重复注册和越域manual拒绝；05验证省略nodeIds仅从实际受治理授权路径接入、未授权code保持excluded以及纯raw首次需显式注册。
 
 AC-APPLICATION-P4-06 使用真实Git root移动/重建，验证持久健康、实际process在线、最后差异证据、missing query与snapshot保留；新物理root未授权不冻结新snapshot、不派发，stop持久stopped而非旧online。
 
 AC-APPLICATION-P4-07 验证重新授权后旧root确实撤权，已注册root被删除时仍在missing范围且保留真实node_unknown观测，不把它显示为空项目正常。
 
-AC-APPLICATION-P4-08 真实Git/SQLite、正式观察服务、compiled hooks与Docker验证无浏览器保存触发自动交付；native runner是明确确定性替身。原source/index/HEAD保持，交付含真实作者保存与受审生成，补偿及scope外作者编辑不新开回声operation，scope外变化不错误标stale。
+AC-APPLICATION-P4-08 真实Git/SQLite、正式观察服务、compiled hooks与Docker验证无浏览器提交触发自动交付；native runner是明确确定性替身。原source/index/HEAD保持，交付含真实作者保存与受审生成，补偿及scope外作者编辑不新开回声operation，scope外变化不错误标stale。
 
 AC-APPLICATION-P4-09 真实失败后scope外编辑不改变stale/重试资格，同request重放沿原receipt，新retry绑定原input；相关原始意图变动则stale并拒绝旧输入重试。
 
-AC-APPLICATION-P4-10 在可控native执行期间物理pause，单operation detail独立展示physicalControl=pause，原operation.control保持run且资源在安全边界结算；暂停编辑仍更新latest且无新调用，resume先准入最新input，原active input不被改写。
+AC-APPLICATION-P4-10 在可控native执行期间物理pause，单operation detail独立展示physicalControl=pause，原operation.control保持run且资源在安全边界结算；暂停提交仍更新latest且无新调用，resume先准入最新input，原active input不被改写。
 
-AC-APPLICATION-P4-11 同一真实Git/SQLite来源两个独立节点分别保存，四轮实际Docker/正常hooks交付（在线两次、停机编辑重启补偿两次）均要求workspace_synced和真实receipt，source/index/HEAD保持；生成与行为runner明确为确定性注释改动替身，不算真实模型验收。
+AC-APPLICATION-P4-11 同一真实Git/SQLite来源两个独立节点分别提交，四轮实际Docker/正常hooks交付（在线两次、停机编辑重启补偿两次）均要求workspace_synced和真实receipt，source/index/HEAD保持；生成与行为runner明确为确定性注释改动替身，不算真实模型验收。
 
 Docker应用夹具可复用SPEX_VERIFICATION_EVIDENCE_DIR保存实际观察/operation/attempt/journal投影、关闭后的真实SQLite与Git对象证据，失败断言含journal与blockedReason；归档不制造基线或修改权威状态。独立节点以首个真实receipt的完成顺序核对另一未消费输入，不能假设独立范围的完成顺序。
 
@@ -94,3 +94,5 @@ P4 partial→decide使用原P3-DELIVERY keep_intent真实链补强：fresh exact
 行为分析测试接缝从完整runner request还原body-entry-v2正文，保留真实冻结视图的逐字校验；模型接缝的确定性输出仍不能充当真实Native读取或业务同步完成证明。
 
 暂停/恢复夹具必须使用真实在途可取消调用，验证两次attempt均沿原operation的callTimeoutMs与总deadline；已失败的精确请求重放不能制造额外调用。raw-only initial先行为分析；FIFO/资源专属夹具则以真实已提交code映射隔离未治理启动分支，使用持久nextQueued核队列位置。recover后资源清空不等于坏配置恢复有效，仍应保留conflicted、原attempt/预算及sync_delivery_evidence_invalid诊断。
+
+提交门禁回归先以旧实现证明未提交 Spec/代码保存错误改变自动输入，再验证保存、git add、提交后立即出现的新 dirty 字节均不混入自动输入。真实 Git code-only/spec-only/mixed commit 分别形成 code/spec/combined；同 commit 重扫、服务重启不重派，停机 commit 启动补偿保持分类与已提交字节。Dashboard 受控 patch 仍由03的即时 submit、不先提交原树证明。enable 配置和注册树夹具必须明确先 commit，未提交配置不成为自动授权。
