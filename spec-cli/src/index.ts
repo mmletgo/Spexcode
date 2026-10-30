@@ -52,6 +52,7 @@ import { SESSION_CHANGE } from '@spexcode/session-application'
 import { editSpecBody, readSpecBodyEdit, SpecBodyEditError } from './spec-body-edit.js'
 import { ContractReportScopeError, readProjectContractReport, resolveProjectReadRoot } from './sync/contract-report.js'
 import { configuredSyncApplication, startConfiguredSyncServices, closeConfiguredSyncServices, type SyncSubmitInput } from './sync/application.js'
+import { withReadonlySnapshotQuery } from './sync/snapshot.js'
 import type { SyncDecisionInput } from './sync/writeback-types.js'
 import { SyncApplicationError } from './sync/settings.js'
 import { SyncStoreError } from './sync/store.js'
@@ -125,7 +126,8 @@ app.post('/api/sync/settings', async c => {
 app.get('/api/sync/status', async c => {
   const rawLimit = c.req.query('limit'), limit = rawLimit === undefined ? undefined : Number(rawLimit)
   if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1 || limit > 200)) throw new SyncApplicationError('sync_request_invalid', 'limit 必须为 1 至 200 的整数', 400)
-  return c.json(await (await syncApplication(c.req.query('targetTree'))).status({ nodeId: c.req.query('nodeId'), limit }))
+  const application = await syncApplication(c.req.query('targetTree'))
+  return c.json(await withReadonlySnapshotQuery(() => application.status({ nodeId: c.req.query('nodeId'), limit })))
 })
 for (const action of ['pause', 'resume'] as const) app.post(`/api/sync/automatic/${action}`, async c => {
   const body = await syncRequestBody(c.req)
@@ -139,7 +141,10 @@ app.post('/api/sync/verify', async c => {
   const body = await syncRequestBody(c.req)
   return c.json(await (await syncApplication(c.req.query('targetTree'), body.targetTree)).submit({ nodeId: body.nodeId as string, requestId: body.requestId as string, origin: 'combined', ...(body.model === undefined ? {} : { model: body.model as string }) }))
 })
-app.get('/api/sync/operations/:id', async c => c.json(await (await syncApplication(c.req.query('targetTree'))).readOperation(c.req.param('id'))))
+app.get('/api/sync/operations/:id', async c => {
+  const application = await syncApplication(c.req.query('targetTree'))
+  return c.json(await withReadonlySnapshotQuery(() => application.readOperation(c.req.param('id'))))
+})
 app.post('/api/sync/run', async c => {
   const body = await syncRequestBody(c.req), application = await syncApplication(c.req.query('targetTree'), body.targetTree)
   return c.json(await application.submit({ nodeId: body.nodeId as string, requestId: body.requestId as string, ...(body.origin === undefined ? {} : { origin: body.origin as SyncSubmitInput['origin'] }), ...(body.retryOf === undefined ? {} : { retryOf: body.retryOf as string }), ...(body.model === undefined ? {} : { model: body.model as string }), ...(body.patch === undefined ? {} : { patch: readSpecBodyEdit(body.patch) }) }))

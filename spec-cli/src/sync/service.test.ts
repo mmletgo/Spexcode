@@ -38,7 +38,7 @@ function cli(root: string, api: string, env: NodeJS.ProcessEnv, args: string[]):
     child.on('error', reject); child.on('close', code => resolve({ code, stdout, stderr }))
   })
 }
-test('AC-SYNC-SERVICE-01 真实HTTP/CLI共享物理暂停，无Dashboard保存与停机重启持续补偿', async () => {
+test('AC-SYNC-SERVICE-01 真实HTTP/CLI共享物理暂停，保存和暂存不改输入，停机提交后重启补偿', async () => {
   const temp = mkdtempSync(join(tmpdir(), 'sync-service-')), source = join(temp, 'source'), home = join(temp, 'home')
   mkdirSync(join(source, '.spec/demo'), { recursive: true }); mkdirSync(join(source, 'src')); mkdirSync(join(source, 'tests')); mkdirSync(home)
   const settings = { version: 'sync-settings-v1', nodeIds: ['demo'], sourcePaths: ['src'], testPaths: ['tests'], readPaths: [], facts: [], mandatoryTests: [], budget: { maxAttempts: 1, maxCalls: 2, maxRepairs: 0, timeoutMs: 10000 }, verifications: [{ definition: { id: 'VERIFY-DEMO-01', command: ['node', '--test', 'tests/demo.test.mjs'], cwd: '.', timeoutMs: 1000 }, environment: { version: 'v1', image: `node@sha256:${'a'.repeat(64)}`, platform: 'linux/arm64', memoryBytes: 100000000, cpus: 1, pidsLimit: 64, scratchBytes: 1000000, logBytes: 100000 } }] }
@@ -70,10 +70,16 @@ test('AC-SYNC-SERVICE-01 真实HTTP/CLI共享物理暂停，无Dashboard保存�
     const initialInputId = initial.observation.latestSnapshot.id
     assert.equal(initial.observation.control.control, 'pause'); assert.equal(initial.observation.health.watchOnline, true); assert.equal(initial.operations.length, 0)
     writeFileSync(join(root, 'src/demo.mjs'), 'export const demo = text => `saved:${text}`\n')
-    await until(async () => { const snapshot = (await request<Status>(`/status?targetTree=${encodeURIComponent(root)}`)).observation.latestSnapshot; return !!snapshot && snapshot.id !== initialInputId })
+    assert.equal((await cli(root, api, env, ['enable'])).code, 0)
+    const saved = await request<Status>(`/status?targetTree=${encodeURIComponent(root)}`)
+    assert.equal(saved.observation.latestSnapshot?.id, initialInputId, '正式补偿扫描也不能将文件保存作为提交输入')
+    assert.equal(saved.operations.length, 0)
+    git('add', 'src/demo.mjs')
+    assert.equal((await cli(root, api, env, ['enable'])).code, 0)
     const paused = await cli(root, api, env, ['status']); assert.equal(paused.code, 0, paused.stderr)
     assert.equal(JSON.parse(paused.stdout).operations.length, 0)
     const observed = JSON.parse(paused.stdout).observation.latestSnapshot.id
+    assert.equal(observed, initialInputId, 'git add之后的正式补偿扫描仍只能接受已提交HEAD')
     await stop(child); child = null
     writeFileSync(join(root, 'src/demo.mjs'), 'export const demo = text => `offline:${text}`\n'); git('add', 'src/demo.mjs'); git('commit', '-qm', 'external offline commit')
     const offline = await cli(root, api, env, ['status']); assert.equal(offline.code, 1); assert.equal(offline.stdout, '')
