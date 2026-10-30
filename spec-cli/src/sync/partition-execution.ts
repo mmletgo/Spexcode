@@ -1,3 +1,4 @@
+import { posix } from 'node:path'
 import { contractReferences, parseContract, parseParts } from '@spexcode/spec-core/contracts'
 import { analyzeCodeBehavior, deriveBehaviorAuthorization } from './code-behavior.js'
 import type { CodeBehaviorInput } from './code-behavior.js'
@@ -125,7 +126,15 @@ export async function analyzeSyncPartitions(input: CodeBehaviorInput, plan: Sync
     const key = `partition:${partition.id}:analysis`
     const saved = checkpoints.load<CodeBehaviorAnalysis>(key)
     if (saved) return saved
-    const local = await analyzeCodeBehavior({ ...input, requestKey: `${input.requestKey}:partition:${partition.id}`, plan: projectSyncPartition(input.plan, partition), partition: { id: partition.id, changedPaths: partition.changedPaths, factSourcePaths: unique(partition.writePaths.filter(path => !path.startsWith('.spec/'))) } }, runner)
+    // 只把全局授权、处于本区targets/只读上下文且正文可读的父Spec投影给新叶门禁，不扩充局部writePaths。
+    const authorizedParentSpecPaths = input.plan.version === 'sync-coordinator-v2' && input.plan.direction === 'code_to_spec' && input.plan.sourcePaths !== undefined
+      ? input.plan.targets.filter(target => (partition.contextNodeIds.includes(target.nodeId) || partition.targets.some(local => local.nodeId === target.nodeId && local.path === target.path))
+        && within(target.path, partition.readPaths) && within(posix.dirname(target.path), input.plan.writePaths)).map(target => target.path).sort()
+      : undefined
+    const factSourcePaths = input.plan.sourcePaths === undefined
+      ? unique(partition.writePaths.filter(path => !path.startsWith('.spec/')))
+      : unique(partition.sourcePaths.filter(path => !path.startsWith('.spec/')))
+    const local = await analyzeCodeBehavior({ ...input, requestKey: `${input.requestKey}:partition:${partition.id}`, plan: projectSyncPartition(input.plan, partition), partition: { id: partition.id, changedPaths: partition.changedPaths, factSourcePaths, ...(authorizedParentSpecPaths !== undefined ? { authorizedParentSpecPaths } : {}) } }, runner)
     if (local.changes.some(change => change.paths.some(path => !partition.changedPaths.includes(path)))) reject(`分析超出本区真实变更集合: ${partition.id}`)
     checkpoints.save(key, local)
     return local
