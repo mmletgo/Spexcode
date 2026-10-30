@@ -24,6 +24,10 @@ planPrivateDelivery 从受管根、实际 source 身份和稳定 ingressKey 得�
 
 创建 fresh worktree 使用 prepare 模式的真实 Git/hooks；失败后检查实际 registered worktree/ref，不以退出码推测无副作用。关联物理 delivery 后，由 [[sync-private-file-apply]] 的真实 journal 逐文件写入，staging 在树外且同 filesystem。暂停或取消前未进入 applying 时不写业务文件；applying 中结算既定完整单元后再停。
 
+Git prepare 的路径/ref 检查和 worktree add 复用 [[record-lock]] 的物理 commonDir registry fence，和普通会话创建、回收、关闭及恢复互斥。此 fence 以输入登记的 commonDir 为准，不取协调进程的 cwd 或运行时 home；add 仍运行严格 hooks，成功后立即释放，再绑定交付、写候选或提交。私有交付独占锁仍先于 registry fence，registry fence 本身不授予交付或删除资源的权限。
+
+取得 registry fence 后，prepare 在任何 Git 副作用前通过 [[sync-store]] 的 assertWriteFence 读取当前完整写权，再核当前 attempt 仍 verified 与 publication base/frontier；等待期间取消、失效/释放 lease、物理暂停、超时或发布权变化均不得新增 branch/worktree。门槛检查至同步 Git add 之间无 await；publication BUSY/stale 原样返回，不把等待发布权登记成环境失败。
+
 完整文件通过复核后，先持久 commit intent（journal/effectKey、固定 tree/parent/ref、消息及工具绑定），再以 read-tree 精确建立私有 index，不执行 git add 或候选过滤脚本。普通 git commit 仍执行严格 canonical hooks。提交返回任何退出码都核真实 raw commit/tree/单parent/分支和 effectKey；满足 intent 的已提交结果补 receipt，不盲重提、不回滚共享历史。无提交且失败保留恢复证据；实际 index/worktree/HEAD 不属于计划的前后状态则拒绝覆盖。
 
 receipt 使用真实最终 InputSnapshot，要求 tree/manifest 完全等于冻结候选且 index tree 等于 commit tree；所有文件步骤已完成后才能 recordReceipt/settleApply。已结算的重入只核对并返回原结果。结算前 owner 保持私有；结算后标记 published 并返回实际交付身份、commit 与 receipt，主分支合并由上层另行治理。此节点不宣称原 source 或主分支已经同步，不自动删除未知残片或用户产物。

@@ -279,6 +279,9 @@ export class SyncStore {
     if (!finishing && operation.baselineSelection) this.assertSelection(tx, operation.input.source, operation.baselineSelection, scopeResources(operation.scope))
     return { operation, attempt }
   }
+  assertWriteFence(fence: WriteFence): { operation: SyncOperation; attempt: SyncAttempt } {
+    return this.write(tx => this.checkFence(tx, fence))
+  }
   private blob(ref: BlobRef): Buffer {
     const bytes = this.readBlob(ref)
     if (createHash('sha256').update(bytes).digest('hex') !== ref.sha256) fail('SYNC_BLOB_DIGEST_MISMATCH', ref.sha256)

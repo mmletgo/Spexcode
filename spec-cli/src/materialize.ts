@@ -12,6 +12,7 @@ import { resolveHarnessTargets, partitionHarnesses } from './harness-select.js'
 import { emitPlugin, cleanPlugin, pluginBundleDir, pluginVersion } from './plugin-harness.js'
 import { canonicalContractFilterBindings, clearContractFilterPayload, contractFilterPlanted, plantContractFilter, removeContractFilter, settleIndexStat, type ContractFilterBinding, type ContractFilterPayload } from './contract-filter.js'
 import { writeFileIfChanged } from './file-write.js'
+import { withWorktreeRegistryLock } from './session-record-lock.js'
 
 export type MaterializedArtifact = {
   kind: 'hook manifest' | 'contract' | 'shim' | 'skill' | 'agent' | 'plugin bundle' | 'trust'
@@ -365,7 +366,7 @@ function materializeFrozenDelivery(proj: string): MaterializeResult {
 
 // the whole pay-per-change materialize. proj defaults to cwd. Its receipt is populated at each successful
 // write so callers report the actual selected footprint instead of maintaining a second artifact inventory.
-export function materialize(proj = process.cwd()): MaterializeResult {
+export async function materialize(proj = process.cwd()): Promise<MaterializeResult> {
   if (process.env.SPEXCODE_SYNC_HOOK_MODE) {
     if (process.env.SPEXCODE_SYNC_HOOK_MODE !== 'trusted-v1') throw new Error('未支持的冻结交付 footprint 模式')
     return materializeFrozenDelivery(proj)
@@ -628,7 +629,9 @@ export function materialize(proj = process.cwd()): MaterializeResult {
   if (ignoreTracked || ignoreHost.trim()) payloads.push({ file: '.gitignore', content: ignoreBody })
   const bindings: ContractFilterBinding[] = canonicalContractFilterBindings(proj)
   if (payloads.length) plantContractFilter(proj, payloads, bindings, [...changedMaterialized])
-  else if (contractFilterPlanted(proj)) removeContractFilter(proj, [...HARNESSES.flatMap((h) => h.contractFiles(proj)), join(proj, '.gitignore')])
+  else if (contractFilterPlanted(proj)) await withWorktreeRegistryLock(async () => {
+    removeContractFilter(proj, [...HARNESSES.flatMap((h) => h.contractFiles(proj)), join(proj, '.gitignore')])
+  }, undefined, gitCommonDirOf(proj))
   // (5) finish diagnostics, then atomically publish the allowlist LAST. Dispatch consumes only that
   // final receipt; a killed writer leaves the preceding successful selection intact.
   const h = contentHash(proj)

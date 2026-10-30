@@ -59,6 +59,15 @@ one ownership receipt and removes only resources this transaction proved it crea
 the candidate name into authority to delete. A colliding request therefore cannot damage an already-published
 receipt, while a transaction that owns its candidate still removes exactly that candidate on abort.
 
+Different candidates also share the physical Git common directory's cross-process registry fence
+([[record-lock]]). Candidate inspection, matching orphan cleanup, and the following `git worktree add` form
+one registry critical section; an add failure retains that fence through ownership inspection and rollback.
+After successful add, creation releases the registry fence before host seeding, child-process materialization,
+record publication, queue admission, or model execution. A later preparation failure reacquires the fence for
+cleanup inspection, remove, and final verification. Close pruning and archived restore use this same fence,
+so one session cannot scan a sibling's half-written worktree registration. Different repositories and the
+sessions' actual model turns remain parallel.
+
 Worktree registry checks recognize a configured path alias and Git's canonical path as the same existing
 directory only after resolving their filesystem identities. Recovery still requires the exact matching
 candidate receipt; recognizing an alias never grants ownership over an unrelated registered worktree.
@@ -133,6 +142,10 @@ the synchronous atomic record replace and re-proves that the candidate path is t
 checked out on the recorded branch, and that exact branch ref exists. JavaScript cannot interleave an abort
 between the final check and replace. A `201` may therefore never name a detached, switched, deleted, or
 rolled-back Git candidate.
+That identity proof uses the explicit source root and the candidate's own Git metadata: their physical common
+directories must match, and the candidate's direct linked admin must backlink to its own `.git`. A copied
+gitfile or matching top-level/branch name in another registry cannot be published as this candidate. The same
+proof protects matching orphan recovery and archived restore; aliases resolve by physical filesystem identity.
 Once the record exists, a lost connection is a lost response, not a failed create: the same idempotency key
 recovers the receipt. The published record is already a normal durable `queued` session with its prompt and
 launch payload present, so backend restart and the ordinary queue supervisor can recover it. Queue draining is
