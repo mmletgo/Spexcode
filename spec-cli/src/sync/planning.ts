@@ -56,9 +56,8 @@ export async function buildSyncApplicationPlan(snapshot: InputSnapshot, nodeId: 
     return { ...node, code: parseRelation(Array.isArray(code) ? code.filter((entry): entry is string => typeof entry === 'string') : [], 'code').entries }
   }))
   const before = options.commitTrigger?.before
-  const heads = options.discoverySelection ?? selection
-  const readinessPairs = new Map((heads?.bindings ?? []).flatMap(binding => { const pair = 'bytePair' in binding ? binding.bytePair : binding.intentPair; return pair ? [[pair.id, pair] as const] : [] }))
-  if (baselinePair && !heads) readinessPairs.set(baselinePair.id, baselinePair)
+  const readinessSelection = options.discoverySelection
+  const readinessPairs = new Map((readinessSelection?.bindings ?? []).flatMap(binding => { const pair = 'bytePair' in binding ? binding.bytePair : binding.intentPair; return pair ? [[pair.id, pair] as const] : [] }))
   const adopted = new Map([...readinessPairs.values()].map(pair => [pair.id, before ? adoptedDeliveryPaths(before, pair) : new Set<string>()]))
   const beforePaths = new Set(before ? verifySnapshot(before).map(entry => entry.path) : [])
   const bootstrapNodes = oldFrozen.nodes.filter(node => beforePaths.has(node.path) && coveredPath(node.path, [posix.dirname(previousIntent?.path ?? intent.path)]))
@@ -67,13 +66,13 @@ export async function buildSyncApplicationPlan(snapshot: InputSnapshot, nodeId: 
   const claims = [...governanceNodes.filter(node => bootstrapPaths.has(node.path)).flatMap(node => node.code.map(entry => entry.path)), ...bootstrapItems.filter(item => item.kind === 'AC').map(item => parseCodeEntry(item.test).path)]
   for (const path of beforePaths) if (coveredPath(path, [...settings.sourcePaths, ...settings.testPaths]) && !settings.mandatoryTests.some(test => test.testPath === path) && claims.some(claim => relationClaimsPath(claim, path))) bootstrapPaths.add(path)
   const settledResource = (resource: BaselineResource, path: string): boolean => {
-    const binding = heads?.bindings.find(binding => resource.kind === 'path' ? binding.resource.kind === 'path' && binding.resource.path === resource.path : binding.resource.kind === resource.kind && binding.resource.id === resource.id)
-    const pair = binding ? 'bytePair' in binding ? binding.bytePair : binding.intentPair : heads ? null : baselinePair
+    const binding = readinessSelection?.bindings.find(binding => resource.kind === 'path' ? binding.resource.kind === 'path' && binding.resource.path === resource.path : binding.resource.kind === resource.kind && binding.resource.id === resource.id)
+    const pair = binding ? 'bytePair' in binding ? binding.bytePair : binding.intentPair : null
     return !!pair && (resource.kind === 'path' ? pair.coveredScope.paths.some(scope => coveredPath(resource.path, [scope])) : (resource.kind === 'flow' ? pair.coveredScope.flowIds : pair.coveredScope.contractIds).includes(resource.id)) && !!adopted.get(pair.id)?.has(path)
   }
   const subtreeIds = new Set([...nodes, ...oldFrozen.nodes].filter(node => coveredPath(node.path, [posix.dirname(intent.path), ...previousIntent ? [posix.dirname(previousIntent.path)] : []])).map(node => node.id))
   const changedOwners = (options.commitTrigger?.paths ?? []).map(path => ({ path, ids: [...ownerNodesForPath(path, views.flatMap(view => view.contracts), governanceNodes)].filter(id => subtreeIds.has(id)) }))
-  const incremental = !!before && bootstrapNodes.length > 0
+  const incremental = !!before && !!readinessSelection && bootstrapNodes.length > 0
     && [...bootstrapPaths].every(path => settledResource({ kind: 'path', path }, path))
     && bootstrapItems.every(item => settledResource({ kind: item.kind === 'FLOW' ? 'flow' : 'contract', id: item.id }, item.path))
     && !options.commitTrigger!.paths.includes(intent.path) && !options.commitTrigger!.paths.includes('.spec/spexcode.json')

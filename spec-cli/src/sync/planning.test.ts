@@ -447,6 +447,15 @@ test('发现selection缺少精确bootstrap path binding时不借完整BaselinePa
   assert.deepEqual(plan.targets.map(target => target.nodeId).sort(), f.fullPlan.targets.map(target => target.nodeId).sort())
 })
 
+test('裸BaselinePair只提供历史基线，不能替代完整discoverySelection证明bootstrap', async t => {
+  const f = await incrementalFixture(t)
+  writeFileSync(join(f.root, 'src/export.js'), `${readFileSync(join(f.root, 'src/export.js'), 'utf8')}\nexport const incremental = 1;\n`)
+  git(f.root, 'add', 'src/export.js'); git(f.root, 'commit', '-m', 'change one source without discovery heads')
+  const snapshot = await captureInputSnapshot(f.root, { committed: true })
+  const plan = await buildSyncApplicationPlan(snapshot, 'project', f.baseline, { direction: 'code_to_spec', commitTrigger: { before: f.before, paths: ['src/export.js'] } })
+  assert.deepEqual(plan.targets.map(target => target.nodeId).sort(), f.fullPlan.targets.map(target => target.nodeId).sort())
+})
+
 for (const action of ['move', 'delete'] as const) test(`已采纳基线${action}保留真实before owner、旧原意与验证政策，不派无关叶`, async t => {
   const f = await incrementalFixture(t), moved = f.paths[0].replace('export-contract', 'moved-contract')
   if (action === 'move') renameSync(join(f.root, f.paths[0], '..'), join(f.root, moved, '..'))
