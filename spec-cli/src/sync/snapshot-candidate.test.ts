@@ -3,9 +3,10 @@ import test from 'node:test'
 import { execFileSync } from 'node:child_process'
 import { createRequire, syncBuiltinESMExports } from 'node:module'
 import { deflateSync } from 'node:zlib'
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
+import { withWorktreeRegistryLock } from '../session-record-lock.js'
 import { captureInputSnapshot, contentHash, identifyWorktree, readEvidence, readObject, readTree, UnstableSnapshotError, verifySnapshot, writeObject, writeTree } from './snapshot.js'
 import { composeInputSnapshots } from './composition.js'
 import { exportCandidate, freezeCandidate, verifyCandidate } from './candidate.js'
@@ -72,6 +73,97 @@ for (const format of ['sha1', 'sha256'] as const) {
     assert.throws(() => readTree(snapshot.source.commonDir, snapshot.immutableTree), (error: unknown) => typeof (error as { status?: unknown }).status === 'number')
   })
 }
+
+test('无关worktree半登记commondir为空不影响来源身份和已提交快照', async t => {
+  const root = repo(t), linked = join(root, 'linked')
+  git(root, 'worktree', 'add', '--detach', linked, 'HEAD')
+  const sources = [root, linked].map(path => identifyWorktree(path))
+  const snapshots = await Promise.all([root, linked].map(path => captureInputSnapshot(path, { committed: true })))
+  const incomplete = join(sources[0].commonDir, 'worktrees/creating')
+  cpSync(sources[1].gitDir, incomplete, { recursive: true }); writeFileSync(join(incomplete, 'commondir'), '')
+  assert.throws(() => git(root, 'worktree', 'list', '--porcelain'), (error: unknown) => (error as { status?: number }).status === 128)
+  for (const [index, path] of [root, linked].entries()) {
+    assert.deepEqual(identifyWorktree(path), sources[index])
+    assert.equal((await captureInputSnapshot(path, { committed: true })).id, snapshots[index].id)
+  }
+})
+
+test('显式工作区采集等待同commonDir登记事务结束再读取嵌套边界，文件扫描不持锁', async t => {
+  const root = repo(t), linked = join(root, 'linked')
+  git(root, 'worktree', 'add', '--detach', linked, 'HEAD')
+  const source = identifyWorktree(root), linkedSource = identifyWorktree(linked), before = await captureInputSnapshot(root)
+  const incomplete = join(source.commonDir, 'worktrees/creating')
+  let release!: () => void, entered!: () => void
+  const ready = new Promise<void>(done => { entered = done })
+  const owner = withWorktreeRegistryLock(async () => {
+    cpSync(linkedSource.gitDir, incomplete, { recursive: true }); writeFileSync(join(incomplete, 'commondir'), '')
+    entered(); await new Promise<void>(done => { release = done }); rmSync(incomplete, { recursive: true })
+  }, undefined, source.commonDir)
+  await ready
+  let settled = false
+  const capture = captureInputSnapshot(root).then(value => { settled = true; return { value } }, error => { settled = true; return { error } })
+  try { await new Promise<void>(done => setImmediate(done)); assert.equal(settled, false) }
+  finally { release(); await owner }
+  const result = await capture
+  if ('error' in result) throw result.error
+  assert.equal(result.value.id, before.id)
+  await captureInputSnapshot(root, { onObservation: async () => {
+    await withWorktreeRegistryLock(async () => {}, undefined, source.commonDir)
+  } })
+})
+
+test('来源登记保留normal、linked、bare-linked、相对backlink及路径alias身份', t => {
+  const root = repo(t), linked = join(root, 'linked')
+  git(root, 'worktree', 'add', '--detach', linked, 'HEAD')
+  for (const path of [root, linked]) {
+    const identity = identifyWorktree(path), alias = `${path}-alias`
+    symlinkSync(path, alias); t.after(() => rmSync(alias, { force: true }))
+    assert.deepEqual(identifyWorktree(alias), identity)
+    assert.equal(identity.canonicalRoot, realpathSync(path))
+  }
+  const identity = identifyWorktree(linked)
+  writeFileSync(join(identity.gitDir, 'gitdir'), `${relative(identity.gitDir, join(realpathSync(linked), '.git'))}\n`)
+  assert.deepEqual(identifyWorktree(linked), identity)
+  const bare = join(root, 'bare.git'), bareLinked = join(root, 'bare-linked')
+  git(root, 'clone', '--bare', root, bare); git(bare, 'worktree', 'add', '--detach', bareLinked, 'HEAD')
+  assert.equal(identifyWorktree(bareLinked).commonDir, realpathSync(bare))
+  const separate = repo(t), metadata = join(separate, 'metadata'), separateLinked = join(separate, 'linked')
+  git(separate, 'init', '--separate-git-dir', metadata)
+  assert.throws(() => identifyWorktree(separate), /registered worktree/)
+  git(separate, 'worktree', 'add', '--detach', separateLinked, 'HEAD')
+  assert.equal(identifyWorktree(separateLinked).commonDir, realpathSync(metadata))
+})
+
+test('复制gitfile、丢登记、错backlink和foreign commonDir不能冒充registered来源', t => {
+  const root = repo(t), linked = join(root, 'linked'), copy = join(root, 'copy'), orphan = join(root, 'orphan-admin')
+  git(root, 'worktree', 'add', '--detach', linked, 'HEAD')
+  const identity = identifyWorktree(linked), gitfile = readFileSync(join(linked, '.git')), backlink = readFileSync(join(identity.gitDir, 'gitdir')), commondir = readFileSync(join(identity.gitDir, 'commondir'))
+  cpSync(linked, copy, { recursive: true })
+  assert.throws(() => identifyWorktree(copy), /registered worktree/)
+  writeFileSync(join(identity.gitDir, 'gitdir'), `${join(copy, '.git')}\n`)
+  assert.throws(() => identifyWorktree(linked), /registered worktree/)
+  writeFileSync(join(identity.gitDir, 'gitdir'), backlink)
+  renameSync(identity.gitDir, orphan); writeFileSync(join(orphan, 'commondir'), `${identity.commonDir}\n`); writeFileSync(join(linked, '.git'), `gitdir: ${orphan}\n`)
+  assert.throws(() => identifyWorktree(linked), /registered worktree/)
+  renameSync(orphan, identity.gitDir); writeFileSync(join(identity.gitDir, 'commondir'), commondir); writeFileSync(join(linked, '.git'), gitfile)
+  const foreign = repo(t)
+  writeFileSync(join(identity.gitDir, 'commondir'), `${join(foreign, '.git')}\n`)
+  assert.throws(() => identifyWorktree(linked), /registered worktree/)
+  writeFileSync(join(identity.gitDir, 'commondir'), commondir)
+  assert.deepEqual(identifyWorktree(linked), identity)
+})
+
+test('来源自己的admin目录被替换仍撤销既有物理身份', async t => {
+  const root = repo(t), linked = join(root, 'linked')
+  git(root, 'worktree', 'add', '--detach', linked, 'HEAD')
+  const identity = identifyWorktree(linked), replacement = join(root, 'replacement-admin')
+  await assert.rejects(captureInputSnapshot(linked, { committed: true, maxAttempts: 1, onObservation: () => {
+    cpSync(identity.gitDir, replacement, { recursive: true }); rmSync(identity.gitDir, { recursive: true }); renameSync(replacement, identity.gitDir)
+  } }), UnstableSnapshotError)
+  const next = identifyWorktree(linked)
+  assert.equal(next.repositoryId, identity.repositoryId)
+  assert.notEqual(next.physicalFingerprint, identity.physicalFingerprint)
+})
 
 test('已提交快照只读HEAD tree且身份不受未提交、暂存或并发保存影响，历史快照身份仍可验证', async t => {
   const root = repo(t), clean = await captureInputSnapshot(root), committed = await captureInputSnapshot(root, { committed: true })

@@ -24,3 +24,5 @@ code:
 
 
 真实快照经固定计划同源的JSON递归键排序后，working-tree与commit身份均保持可验证；改变source分支仍因身份摘要拒绝。
+
+无关 worktree 登记的 commondir 真实为 0 字节且 Git 全局枚举退出 128 时，normal/linked 来源身份及已提交快照不变；显式工作区采集等待同 commonDir 的登记事务完成再读取完整嵌套边界，观察回调可再次取得该锁。真实 Git 矩阵覆盖 normal、linked、bare+linked、separate-git-dir 的 linked、路径 alias、相对回链；separate primary 保留既有拒绝。复制 gitfile、丢登记、错回链、foreign commonDir 继续拒绝，自身 admin 物理替换仍使前后观察失败并撤销旧 fingerprint。
