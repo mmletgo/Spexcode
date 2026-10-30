@@ -143,9 +143,10 @@ function canonical(value: unknown): string {
   return JSON.stringify(value) ?? 'null'
 }
 
-function ownerNodesForPath(path: string, contracts: readonly Contract[], governanceNodes: ReadonlyMap<string, GovernanceNode>): Set<string> {
+/** 当前及历史冻结治理共用同一 owner 判定，related 不授予归属。 */
+export function ownerNodesForPath(path: string, contracts: readonly Contract[], governanceNodes: Iterable<Pick<GovernanceNode, 'id' | 'path' | 'code'>>): Set<string> {
   const owners = new Set<string>()
-  for (const node of governanceNodes.values()) if (node.path === path || node.code.some(entry => relationClaimsPath(entry.path, path))) owners.add(node.id)
+  for (const node of governanceNodes) if (node.path === path || node.code.some(entry => relationClaimsPath(entry.path, path))) owners.add(node.id)
   for (const contract of contracts) {
     for (const item of contract.items) {
       if (item.kind === 'VERIFY') continue
@@ -350,7 +351,7 @@ function partitionDrafts(input: PlanSyncPartitionsInput, contracts: readonly Con
   const discoveries = new Map<string, Draft[]>()
   const preferred = new Set(targetByNode.keys())
   for (const path of changedPaths) {
-    const owners = ownerNodesForPath(path, contracts, governanceNodes)
+    const owners = ownerNodesForPath(path, contracts, governanceNodes.values())
     for (const target of targets) if (target.path === path) owners.add(target.nodeId)
     const writableOwners = [...owners].filter(nodeId => targetByNode.has(nodeId)
       && (!specOnlyNodeIds.has(nodeId) || targetByNode.get(nodeId)!.path === path)).sort(compare)
