@@ -22,9 +22,10 @@ const freePort = () => new Promise<number>((resolve, reject) => {
     server.close(() => typeof address === 'object' && address ? resolve(address.port) : reject(new Error('no test port')))
   })
 })
-async function waitFor(check: () => boolean | Promise<boolean>, label: string, timeoutMs = 5_000): Promise<void> {
+async function waitFor(check: () => boolean | Promise<boolean>, label: string, timeoutMs = 5_000, signal?: AbortSignal): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
+    signal?.throwIfAborted()
     if (await check()) return
     await sleep(25)
   }
@@ -32,7 +33,7 @@ async function waitFor(check: () => boolean | Promise<boolean>, label: string, t
 }
 const git = (project: string, ...args: string[]) => execFileSync('git', ['-C', project, ...args], { encoding: 'utf8' }).trim()
 
-async function publicCreateFixture(registryMode: 'create' | 'close' | 'rollback' | null = null): Promise<void> {
+async function publicCreateFixture(signal: AbortSignal, registryMode: 'create' | 'close' | 'rollback' | null = null): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), 'spex-session-create-'))
   const projectPath = join(root, 'project'); mkdirSync(projectPath)
   const project = realpathSync(projectPath)
@@ -362,7 +363,14 @@ esac
     assert.ok(git(project, 'show-ref', '--verify', `refs/heads/${a.branch}`), 'collision preserves the published ref')
     assert.equal(worktrees(), 3)
 
-    await waitFor(() => existsSync(trace) && (readFileSync(trace, 'utf8').match(/ launcher /g)?.length ?? 0) === 1, 'one launcher attempt')
+    // The HTTP receipt is already bounded above; queue admission and shell startup use the fixture's deadline.
+    await waitFor(() => existsSync(trace) && (readFileSync(trace, 'utf8').match(/ launcher /g)?.length ?? 0) > 0, 'first launcher attempt', Infinity, signal).catch(error => {
+      const capturedTrace = existsSync(trace) ? readFileSync(trace, 'utf8') : ''
+      throw new Error(`${error instanceof Error ? error.message : error}\n${JSON.stringify({
+        launcherAttempts: capturedTrace.match(/ launcher /g)?.length ?? 0, trace: capturedTrace, serverLogs: logs,
+      }, null, 2)}`, { cause: error })
+    })
+    assert.equal(readFileSync(trace, 'utf8').match(/ launcher /g)?.length ?? 0, 1, 'same-key creation dispatches exactly one initial launcher')
     const phases = logs.split('\n').filter((line) => line.startsWith('spex session-create ')).map((line) => JSON.parse(line.slice('spex session-create '.length)))
     const published = phases.findIndex((row) => row.session === a.id && row.phase === 'record-write' && row.event === 'publish')
     const queued = phases.findIndex((row) => row.session === a.id && row.phase === 'launcher-queue' && row.event === 'start')
@@ -537,7 +545,7 @@ esac
   }
 }
 
-test('public session create is bounded, rollback-clean, idempotent, and publishes exact Git state', { timeout: 70_000 }, () => publicCreateFixture())
-test('public session registry serializes distinct candidates and close during add', { timeout: 30_000 }, () => publicCreateFixture('create'))
-test('public session close keeps rename and prune outside a sibling add', { timeout: 30_000 }, () => publicCreateFixture('close'))
-test('public session failed add keeps rollback outside a sibling add', { timeout: 30_000 }, () => publicCreateFixture('rollback'))
+test('public session create is bounded, rollback-clean, idempotent, and publishes exact Git state', { timeout: 70_000 }, t => publicCreateFixture(t.signal))
+test('public session registry serializes distinct candidates and close during add', { timeout: 30_000 }, t => publicCreateFixture(t.signal, 'create'))
+test('public session close keeps rename and prune outside a sibling add', { timeout: 30_000 }, t => publicCreateFixture(t.signal, 'close'))
+test('public session failed add keeps rollback outside a sibling add', { timeout: 30_000 }, t => publicCreateFixture(t.signal, 'rollback'))
