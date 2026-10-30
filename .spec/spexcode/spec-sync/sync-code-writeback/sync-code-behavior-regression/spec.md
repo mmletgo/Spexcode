@@ -68,4 +68,6 @@ raw-only v2 code_to_spec回归以local writePaths=[]和真实只读业务源码�
 
 只读 v2 `code_to_spec` 的真实 Git 回归核对：多个授权 raw 父节点全部以 `{nodeId, path}` 冻结给分析和独审；`parentNodeId` enum 与真实有效 ID 集合完全一致，输出必须使用 ID。路径冒充 ID、未知 ID、未授权 ID 和没有 raw 的父节点均拒绝；无有效父或源码候选时 `maxItems=0` 且 schema 不含空 enum。仍核对新叶目录来自原全局父目录授权、源码来自本区精确候选、review 获得相同冻结映射，并确认 v1 与非 `code_to_spec` 的旧 schema 行为不变。
 
+真实Git raw-only v2 `targets=[]` 的独审阶段回归保留旧父绑定失败于 `repairDiagnostics`，但独审仅以当前校验后的原proposal `newNodeProposals` 为提案，逐个核对analysis里的四字段解析叶、授权 `newNodeParents`/非空raw、源码、叶目录与raw引用；不从历史诊断拼当前父ID或basis，不删历史诊断，也不要求持久解析叶额外携带提案字段。缺原proposal或阶段说明的review输入必须给具体repair；错误父ID仍在review派发前拒绝且review计数为零；basis与raw矛盾或伪造解析叶path得到review repair，并由 `behavior_review_failed` 保持阻断。虚拟review只把实际全文读取过的源码和父raw列为checkedPaths，不能借此伪造Native成功证据。
+
 单次冻结输入复用回归使用真实Git计数：raw-only v2、baseline与selection缺席且old/source/composed同tree时，在首个Native请求处捕获完整冻结输入并抛诊断停止，不构造模型结果；真实文本视图逐角色对照独立Git字节参考，验证原 `verifySnapshot` 仍执行而重复tree读取减少。不同完整tree OID仍逐角色绑定独立参考正文；精确selection/受控替换只更新目标角色，不污染共享tree的其它Map或条目副本。第一次分析结束后移除其OID对象，下一次同输入必须在snapshot/OID校验失败且Native调用数为零，证明局部缓存不跨调用存活。
