@@ -66,6 +66,15 @@ test('async runtime inspection逐次反映文件字节、模式和内部链接�
   assert.equal(link.target, 'target.txt')
 })
 
+test('async runtime inspection让出期间修改尚未读取的文件不会沿用旧manifest', async t => {
+  const { root } = runtimeFixture(t)
+  const before = inspectTrustedRuntime(root)
+  setImmediate(() => writeFileSync(join(root, 'target.txt'), 'changed during the first yield\n'))
+  const after = await inspectTrustedRuntimeAsync(root)
+  assert.notDeepEqual(after, before)
+  assert.deepEqual(after, inspectTrustedRuntime(root))
+})
+
 test('sync與async runtime inspection都拒絕外部symlink', async t => {
   const { root, outside } = runtimeFixture(t)
   writeFileSync(outside, 'outside bytes\n')

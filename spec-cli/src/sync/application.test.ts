@@ -28,6 +28,7 @@ import { readCompositionEvidence } from './composition.js'
 import { adaptElaborationNativeOutput } from '../../test/elaboration-native-output.js'
 import { readFrozenBehaviorContext } from '../../test/frozen-behavior-context.js'
 import { composeControlledRequest, prepareControlledRequest, renderControlledDecisionRaw } from './request-input.js'
+import { inspectTrustedRuntime } from './trusted-hooks.js'
 import type { ApplyJournal, BaselinePair, VerificationResultBlob } from './operation-types.js'
 
 const settings: SyncSettings = {
@@ -379,6 +380,28 @@ test('AC-APPLICATION-08 queued资料损坏有恢复诊断，同请求只恢复�
     assert.equal((await f.application.readOperation(submitted.operation.id)).executionAvailability.status, 'recovery_required')
     assert.equal(readdirSync(join(f.temp, 'runtime/runtimes', key), { withFileTypes: true }).filter(entry => entry.isDirectory()).length, 1)
   } finally { f.cleanup() }
+})
+
+test('状态完整重读固定runtime，文件改变仍拒绝ready且不派发模型', async () => {
+  const f = await fixture()
+  try {
+    await f.application.enable(); await f.application.automaticControl('pause')
+    const operation = (await f.application.submit({ nodeId: 'demo', requestId: 'runtime-read-status' })).operation!
+    const trustedRoot = join(f.temp, 'trusted-runtime'); mkdirSync(trustedRoot)
+    for (let index = 0; index < 80; index++) writeFileSync(join(trustedRoot, `module-${index}.js`), `export const value = ${index}\n`)
+    const path = join(f.temp, 'runtime/artifacts', `application-runtime-${contentHash(operation.ingressKey)}.json`)
+    const saved = JSON.parse(readFileSync(path, 'utf8'))
+    saved.tools = { trustedRuntimeRoot: trustedRoot, toolEntry: join(trustedRoot, 'module-0.js'), canonicalHooksDir: trustedRoot }
+    saved.runtimeDigest = contentHash(JSON.stringify(inspectTrustedRuntime(trustedRoot)))
+    writeFileSync(path, JSON.stringify(saved))
+    assert.equal((await f.application.status()).operations[0].executionAvailability.status, 'ready')
+    writeFileSync(join(trustedRoot, 'module-79.js'), 'changed after the previous complete read\n')
+    const changed = (await f.application.status()).operations[0]
+    assert.equal(changed.executionAvailability.status, 'recovery_required')
+    assert.match(changed.executionAvailability.failure!.message, /manifest 已变化/)
+    await assert.rejects(f.application.automaticControl('resume'), /manifest 已变化/, 'dispatch retains the same fresh complete runtime gate')
+    assert.equal(f.calls.length, 0)
+  } finally { await f.application.stopService(); f.cleanup() }
 })
 
 test('AC-APPLICATION-09 显式单次调用上限来自operation冻结配置，live修改不改旧请求与总预算', async () => {

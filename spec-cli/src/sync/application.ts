@@ -20,7 +20,8 @@ import { composeControlledRequest, controlledDecisionIdentity, guardControlledRe
 import type { CodeBehaviorAnalysis, SyncDecisionInput } from './writeback-types.js'
 import { freezeDeliveryRuntime } from './runtime-freeze.js'
 import { captureInputSnapshot, contentHash, identifyWorktree, objectGit, readEvidence, readObject, readPhysicalFingerprint, readTree, verifySnapshot, writeEvidence } from './snapshot.js'
-import { inspectTrustedRuntime } from './trusted-hooks.js'
+import { inspectTrustedRuntime, inspectTrustedRuntimeAsync } from './trusted-hooks.js'
+import type { TrustedRuntimeEntry } from './trusted-hooks.js'
 import { coveredPath, readSyncSettings, SyncApplicationError } from './settings.js'
 import { SyncInputObserver, type SyncObserverHealth } from './observer.js'
 import { SyncStore, SyncStoreError } from './store.js'
@@ -41,6 +42,7 @@ export type SyncApplicationOptions = Partial<Pick<SyncCoordinatorOptions, 'runne
 }
 type EnabledRecord = { registeredNodeIds?: string[]; version: 1; source: WorktreeIdentity; configDigest: string; enabledAtMs: number }
 type SavedTools = { tools: SyncCoordinatorOptions['tools']; runtimeDigest: string | null } & ({ version: 'sync-tools-v1' } | { version: 'sync-tools-v2'; model: string })
+type ExecutionInputs = { plan: SyncCoordinatorPlan; tools: SyncCoordinatorOptions['tools'] }
 function enabledSources(runtime: string): EnabledRecord[] {
   if (!existsSync(runtime)) return []
   return readdirSync(runtime).filter(name => /^enabled-[a-f0-9]+\.json$/.test(name)).map(name => {
@@ -425,7 +427,8 @@ export class SyncApplication {
     const currentSnapshot = operation.input.captureKind === 'commit' && snapshot.captureKind !== 'commit' && existsSync(this.root) ? committedSnapshot ?? await captureInputSnapshot(this.root, { committed: true }) : snapshot
     const sourceSnapshot = snapshot.captureKind === 'commit' && existsSync(this.root) ? await captureInputSnapshot(this.root) : snapshot
     let executionAvailability: SyncOperationDetail['executionAvailability']
-    try { this.executionInputs(operation); executionAvailability = { status: 'ready' } }
+    let execution: ExecutionInputs | undefined
+    try { execution = await this.executionInputsAsync(operation); executionAvailability = { status: 'ready' } }
     catch (error) { executionAvailability = { status: 'recovery_required', failure: { code: 'sync_execution_metadata_unavailable', message: error instanceof Error ? error.message : String(error) } } }
     const journals = this.store.listJournals(operation.id), resources = this.store.listRecoverableResources().filter(item => item.operation.id === operation.id).map(item => item.resource)
     const stopped = operation.control !== 'run' || completed.has(operation.phase) || ['paused', 'failed', 'budget_exhausted', 'needs_input', 'conflicted', 'recovery_required'].includes(operation.phase)
@@ -437,14 +440,14 @@ export class SyncApplication {
     catch (error) { executionAvailability = { status: 'recovery_required', failure: { code: 'sync_delivery_evidence_invalid', message: error instanceof Error ? error.message : String(error) } } }
     const currentness = available && !landing.sourceSynced ? await isSyncInputCurrent(operation, currentSnapshot, plan!) : undefined
     const current = available && (landing.sourceSynced || currentness)
-    return { operation: landing.phase === operation.phase ? operation : { ...operation, phase: landing.phase }, physicalControl: this.store.readPhysicalControl(this.physicalScope(operation.input.source)), decisionContext: existsSync(operation.input.source.commonDir) ? this.decisionContext(operation) : null, attempt: operation.currentAttemptId ? this.store.readAttempt(operation.currentAttemptId) : null, journals, resources, stale: !current, sourceSynced: landing.sourceSynced, canonicalSynced: landing.canonicalSynced, adoptionEligibility: await this.adoptionEligibility(operation, sourceSnapshot), revertEligibility: await this.revertEligibility(operation, sourceSnapshot, journals, resources), retryEligibility: await this.retryEligibility(operation, currentSnapshot, currentness), decisionEligibility: this.store.readDecisionEligibility(operation.id), executionAvailability }
+    return { operation: landing.phase === operation.phase ? operation : { ...operation, phase: landing.phase }, physicalControl: this.store.readPhysicalControl(this.physicalScope(operation.input.source)), decisionContext: existsSync(operation.input.source.commonDir) ? this.decisionContext(operation) : null, attempt: operation.currentAttemptId ? this.store.readAttempt(operation.currentAttemptId) : null, journals, resources, stale: !current, sourceSynced: landing.sourceSynced, canonicalSynced: landing.canonicalSynced, adoptionEligibility: await this.adoptionEligibility(operation, sourceSnapshot, execution), revertEligibility: await this.revertEligibility(operation, sourceSnapshot, journals, resources), retryEligibility: await this.retryEligibility(operation, currentSnapshot, currentness), decisionEligibility: this.store.readDecisionEligibility(operation.id), executionAvailability }
   }
-  private async adoptionPlan(operation: SyncOperation, snapshot: InputSnapshot): Promise<SourceAdoptionPlan> {
+  private async adoptionPlan(operation: SyncOperation, snapshot: InputSnapshot, checkedInputs?: ExecutionInputs): Promise<SourceAdoptionPlan> {
     try {
       assertSourceAdoptionComplete(operation)
       this.assertSource(operation)
       this.requireEnabled(snapshot, operation)
-      const { plan, tools } = this.executionInputs(operation)
+      const { plan, tools } = checkedInputs ?? this.executionInputs(operation)
       await this.requireNodeAuthorized(snapshot, plan.intentNodeId)
       return prepareSourceAdoption(this.store, operation, snapshot, { tools, canonicalBranch: `refs/heads/${readConfig(this.root).mainBranch?.trim() || 'main'}`, readPaths: plan.readPaths })
     } catch (error) {
@@ -452,8 +455,12 @@ export class SyncApplication {
       throw new SyncApplicationError('sync_adoption_evidence_invalid', error instanceof Error ? error.message : String(error))
     }
   }
-  private async adoptionEligibility(operation: SyncOperation, snapshot: InputSnapshot): Promise<SyncAdoptEligibility> {
-    try { await this.adoptionPlan(operation, snapshot); return { eligible: true } }
+  private async adoptionEligibility(operation: SyncOperation, snapshot: InputSnapshot, checkedInputs?: ExecutionInputs): Promise<SyncAdoptEligibility> {
+    try {
+      assertSourceAdoptionComplete(operation)
+      await this.adoptionPlan(operation, snapshot, checkedInputs ?? await this.executionInputsAsync(operation))
+      return { eligible: true }
+    }
     catch (error) { return { eligible: false, reason: { code: error instanceof SyncApplicationError ? error.code : 'sync_adoption_evidence_invalid', message: error instanceof Error ? error.message : String(error) } } }
   }
   /** 只采纳完整已验证提交；资格与详情共用，来源发布锁内再次核实真实 Git 状态。 */
@@ -507,24 +514,46 @@ export class SyncApplication {
     if (syncPlanDigest(plan) !== operation.policyDigest) throw new SyncApplicationError('sync_plan_conflict', '持久应用计划摘要不符')
     return plan
   }
-  private executionInputs(operation: SyncOperation): { plan: SyncCoordinatorPlan; tools: SyncCoordinatorOptions['tools'] } {
+  private executionInputs(operation: SyncOperation): ExecutionInputs {
     const plan = this.operationPlan(operation)
     const { tools } = this.readSavedTools(this.toolsRef(operation.ingressKey), syncModel(operation))
+    this.checkRuntimeDirectories()
+    return { plan, tools }
+  }
+  private async executionInputsAsync(operation: SyncOperation): Promise<ExecutionInputs> {
+    const plan = this.operationPlan(operation)
+    const { tools } = await this.readSavedToolsAsync(this.toolsRef(operation.ingressKey), syncModel(operation))
+    this.checkRuntimeDirectories()
+    return { plan, tools }
+  }
+  private checkRuntimeDirectories(): void {
     for (const owned of [this.runtime, this.managedRoot, this.artifactRoot]) {
       const stat = lstatSync(owned)
       if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== process.getuid?.() || (stat.mode & 0o077) !== 0) throw new SyncApplicationError('sync_runtime_unsafe', '同步运行目录不再是当前用户独占 0700 目录')
     }
-    return { plan, tools }
   }
   private toolsRef(ingressKey: string): string { return join(this.artifactRoot, `application-runtime-${contentHash(ingressKey)}.json`) }
   private toolsBackup(ingressKey: string): string { return join(this.runtime, 'runtimes', contentHash(ingressKey), 'tools.json') }
-  private readSavedTools(path: string, model: string): SavedTools {
+  private readSavedToolsMetadata(path: string, model: string): SavedTools {
     const saved = JSON.parse(readFileSync(path, 'utf8')) as SavedTools
     if (!['sync-tools-v1', 'sync-tools-v2'].includes(saved?.version) || saved.version === 'sync-tools-v2' && (typeof saved.model !== 'string' || !saved.model || saved.model !== saved.model.trim()) || !saved.tools || ![saved.tools.trustedRuntimeRoot, saved.tools.toolEntry, saved.tools.canonicalHooksDir].every(path => typeof path === 'string' && path.startsWith('/'))) throw new SyncApplicationError('sync_execution_metadata_invalid', '固定 runtime 描述不合法')
     if ((saved.version === 'sync-tools-v1' ? DEFAULT_SYNC_MODEL : saved.model) !== model) throw new SyncApplicationError('sync_execution_model_conflict', '固定 runtime 与请求的模型不同，禁止替换原选择')
     if (saved.runtimeDigest === null) {
       if (!this.options.tools) throw new SyncApplicationError('sync_execution_metadata_invalid', '生产固定 runtime 缺少完整 manifest 摘要')
-    } else if (!/^[a-f0-9]{64}$/.test(saved.runtimeDigest) || contentHash(JSON.stringify(inspectTrustedRuntime(saved.tools.trustedRuntimeRoot))) !== saved.runtimeDigest) throw new SyncApplicationError('sync_execution_runtime_changed', '固定 runtime 实际 manifest 已变化，禁止沿用旧证据')
+    } else if (!/^[a-f0-9]{64}$/.test(saved.runtimeDigest)) throw new SyncApplicationError('sync_execution_runtime_changed', '固定 runtime 实际 manifest 已变化，禁止沿用旧证据')
+    return saved
+  }
+  private checkSavedRuntime(saved: SavedTools, manifest: TrustedRuntimeEntry[]): void {
+    if (contentHash(JSON.stringify(manifest)) !== saved.runtimeDigest) throw new SyncApplicationError('sync_execution_runtime_changed', '固定 runtime 实际 manifest 已变化，禁止沿用旧证据')
+  }
+  private readSavedTools(path: string, model: string): SavedTools {
+    const saved = this.readSavedToolsMetadata(path, model)
+    if (saved.runtimeDigest !== null) this.checkSavedRuntime(saved, inspectTrustedRuntime(saved.tools.trustedRuntimeRoot))
+    return saved
+  }
+  private async readSavedToolsAsync(path: string, model: string): Promise<SavedTools> {
+    const saved = this.readSavedToolsMetadata(path, model)
+    if (saved.runtimeDigest !== null) this.checkSavedRuntime(saved, await inspectTrustedRuntimeAsync(saved.tools.trustedRuntimeRoot))
     return saved
   }
   private prepareTools(ingressKey: string, prior: SyncOperation | null, model = syncModel(prior ?? {})): void {

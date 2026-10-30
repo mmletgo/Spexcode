@@ -16,6 +16,8 @@ code:
 
 官方 init 的 `.plugins` 实例模板出现在注册根之下时，显式 nodeIds 与缺省治理注册仍只扫描业务节点；覆盖分母及 included/excluded 不含插件，显式提交插件意图在模型调用前拒绝。真实业务子树的新增 raw 与独立未授权节点保持原判据。
 
+状态查询对超过单批的真实固定 runtime 仍完整核对 manifest；前次查询通过后修改任一文件，下一次必须显示恢复诊断且零模型派发，真正执行入口同样重新拒绝。异步检查只改变事件循环公平性，不产生可绕过完整读取的缓存或 ready 捷径。
+
 AC-APPLICATION-01 验证配置缺口、enable 摘要 CAS 与配置字节保留；02 验证 no-op 不派发、不提交及过期正文拒绝；03 验证 requestBlob 进入 coordinator、请求幂等/键冲突、失败查询及 source/HEAD 保留；04 验证输入过期、旧输入恢复拒绝及配置变化失效；05 验证共享治理叶闭包及宿主命令拒绝。
 
 AC-APPLICATION-SCRATCH 从真实 Git 冻结配置读取 environment 的可选布尔 scratchExecutable，省略/false/true 原样进入受信环境，字符串、数字和 null 明确拒绝。
