@@ -7,6 +7,8 @@ code:
   - spec-cli/src/sync/elaboration-markdown.ts#elaborationPatchErrors
   - spec-cli/src/sync/elaboration-markdown.ts#elaborationTargetBindings
   - spec-cli/src/sync/elaboration-markdown.ts#bindElaborationTargets
+  - spec-cli/src/sync/elaboration-markdown.ts#projectVerificationTable
+  - spec-cli/src/sync/elaboration-markdown.ts#withoutVerificationTables
 related:
   - spec-cli/src/sync/elaboration-markdown.test.ts
   - spec-cli/src/sync/elaboration-target-binding.test.ts
@@ -52,3 +54,7 @@ raw/expanded 的更新位置来自 [[sync-spec-parts]] 原围栏感知扫描的�
 已有目标不存在 raw/expanded 分段时，程序把完整旧 body 保留为 expanded 正文，再追加模型提供的解释和业务行；prose 非 null 也不能覆盖这份旧正文。缺席 raw 不从 primary intent 回填，也不把旧 body 自动提升为 raw 授权；只需 VERIFY 的旧子节点可以保留 raw 缺席。已有 sync-v1 rawless 目标的空差量仍逐字沿用原文件；未启用 schema 的旧目标必须由模型显式提交细化差量。
 
 已启用 sync-v1 但未分段的旧 body 若包含契约表，显式细化时沿用同一表差量替换与未列旧行保留规则，不能在保留的旧表后再复制一份继承表；metadata 或非空 prose 更新同样保持单表和唯一行身份。旧 CRLF 正文启用后保持原换行形式，不能重复转换成 CRCRLF。
+
+[[sync-partition-execution]] 的程序技术投影复用同一围栏感知真实表扫描及单元格渲染，只替换真实expanded中的VERIFY技术表。raw与围栏示例不进入投影，业务行、说明、frontmatter及绑定不重渲染；去除且仅去除真实VERIFY表后的源码必须逐字一致，LF/CRLF保持。混合换行等无法证明非技术字节不变的输入拒绝，不能用规范化掩盖改变。技术定义仍须由冻结可信登记核验，渲染器不自造验证命令。
+
+interface_seed中，已核验本target的update_verification由程序从本轮冻结可信登记补入该target已有ID的精确更新行，模型VERIFY差量保持禁止。旧定义可在合法授权后进入演进检查；raw、业务行和正文仍沿原差量及授权机制处理，不能借技术归属投影自授验证政策变更。

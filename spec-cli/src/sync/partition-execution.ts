@@ -3,9 +3,10 @@ import { analyzeCodeBehavior, deriveBehaviorAuthorization } from './code-behavio
 import type { CodeBehaviorInput } from './code-behavior.js'
 import { outputErrors } from './elaboration-schema.js'
 import { elaborate, projectElaborationFlowReadiness, sealPartitionedElaboration } from './elaboration.js'
-import type { Contract } from '@spexcode/spec-core/contracts'
+import type { Contract, Verification } from '@spexcode/spec-core/contracts'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
-import type { Applicability, ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationTrace, ElaborationSessionRequest } from './elaboration-types.js'
+import type { Applicability, ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationTrace, ElaborationSessionRequest, ElaborationChange, VerificationOwnershipProjection } from './elaboration-types.js'
+import { elaborationTargetBindings, projectVerificationTable, withoutVerificationTables } from './elaboration-markdown.js'
 import { actualTreeDiff, verifyCandidate } from './candidate.js'
 import type { CandidateChanges } from './candidate.js'
 import { freezeGenerationCandidate, runGeneration } from './generation.js'
@@ -59,7 +60,7 @@ function interfaceOnlyParentPartitions(partitions: readonly SyncPartition[], con
   const sourceOwners = new Set(partitions.filter(partition => contracts.some(contract => contract.code.length && partition.targets.some(target => target.path === contract.path))).map(partition => partition.id))
   return new Set(partitions.filter(parent => {
     const owned = contracts.filter(contract => parent.targets.some(target => target.path === contract.path))
-    if (!owned.length || owned.some(contract => contract.code.length || contract.items.some(item => !['REQ', 'RULE', 'GAP'].includes(item.kind)))) return false
+    if (!owned.length || owned.some(contract => contract.code.length || !contract.items.some(item => ['REQ', 'RULE', 'GAP'].includes(item.kind)) || contract.items.some(item => !['REQ', 'RULE', 'GAP', 'VERIFY'].includes(item.kind)))) return false
     return parent.targets.some(target => {
       const prefix = target.path.slice(0, -'spec.md'.length)
       return partitions.some(child => child.id !== parent.id && sourceOwners.has(child.id) && child.targets.some(childTarget => childTarget.path.startsWith(prefix)))
@@ -152,6 +153,65 @@ export async function analyzeSyncPartitions(input: CodeBehaviorInput, plan: Sync
   return merged
 }
 
+/** 只投影跨owner重复的冻结技术登记，保留所有局部独审原件及非VERIFY源码字节。 */
+export function projectPartitionVerificationOwnership(input: ElaborationInput, changes: readonly ElaborationChange[], writablePaths: readonly string[]): { changes: ElaborationChange[]; evidence: VerificationOwnershipProjection } {
+  changes = changes.map(({ nodeId, path, beforeDigest, source }) => ({ nodeId, path, beforeDigest, source })).sort((a, b) => a.path.localeCompare(b.path))
+  const registrations = [...input.verifications ?? []].sort((a, b) => a.id.localeCompare(b.id))
+  const registered = new Map(registrations.map(row => [row.id, row]))
+  const bindings = elaborationTargetBindings(input)
+  for (const change of changes) if (!bindings.some(target => target.nodeId === change.nodeId && target.path === change.path) || !writablePaths.includes(change.path)) reject(`VERIFY投影目标不是本轮真实可写目标: ${change.path}`)
+  const beforeSources = [...input.targets.filter((target): target is typeof target & { source: string } => target.source !== null), ...input.context ?? []]
+  const rows = (source: { nodeId: string; path: string; source: string }): Verification[] => {
+    const parsed = parseContract(source)
+    if (parsed.findings.some(finding => finding.severity === 'error')) reject(`VERIFY投影不能修复非法契约正文: ${source.path}`)
+    return parsed.contract?.items.filter((item): item is Verification => item.kind === 'VERIFY') ?? []
+  }
+  const definition = (row: Pick<Verification, 'id' | 'command' | 'cwd' | 'timeoutMs'>) => ({ id: row.id, command: row.command, cwd: row.cwd, timeoutMs: row.timeoutMs })
+  const original = new Map<string, string>()
+  for (const source of beforeSources) for (const row of rows(source)) {
+    if (original.has(row.id)) reject(`原始VERIFY已有多个physical owner，不能静默修复: ${row.id}`)
+    original.set(row.id, source.path)
+  }
+  const effective = [...changes, ...beforeSources.filter(source => !changes.some(change => change.path === source.path) && !input.nodeChanges?.some(change => change.from.path === source.path))]
+  const byId = new Map<string, string[]>(), byPath = new Map<string, Pick<Verification, 'id' | 'command' | 'cwd' | 'timeoutMs'>[]>()
+  for (const source of effective) {
+    const items = rows(source)
+    byPath.set(source.path, items)
+    for (const row of items) {
+      const policy = registered.get(row.id)
+      if (!policy || JSON.stringify(definition(row)) !== JSON.stringify(definition(policy))) reject(`VERIFY投影仅接受精确可信登记: ${row.id}`)
+      byId.set(row.id, [...byId.get(row.id) ?? [], source.path])
+    }
+  }
+  const owners: VerificationOwnershipProjection['owners'] = []
+  for (const [id, paths] of [...byId].sort(([a], [b]) => a.localeCompare(b))) {
+    const priorOwnerPath = original.get(id) ?? null
+    const move = priorOwnerPath ? input.nodeChanges?.find(change => change.action === 'move' && change.from.path === priorOwnerPath && beforeSources.some(source => source.path === priorOwnerPath && source.nodeId === change.from.nodeId)) : undefined
+    const effectivePriorOwnerPath = move?.action === 'move' ? move.to.path : priorOwnerPath
+    if (effectivePriorOwnerPath && !paths.includes(effectivePriorOwnerPath)) reject(`VERIFY投影不能迁移既有physical owner: ${id}`)
+    if (paths.length < 2) continue
+    const ownerPath = effectivePriorOwnerPath ?? changes.find(change => change.nodeId === input.intent.nodeId)?.path ?? changes[0]?.path
+    if (!ownerPath) reject(`VERIFY投影缺少真实可写owner: ${id}`)
+    const policy = registered.get(id)!
+    for (const path of paths) if (path !== ownerPath) {
+      if (!changes.some(change => change.path === path)) reject(`VERIFY投影不能改写只读owner: ${path}`)
+      byPath.set(path, byPath.get(path)!.filter(row => row.id !== id))
+    }
+    if (!byPath.get(ownerPath)?.some(row => row.id === id)) byPath.set(ownerPath, [...byPath.get(ownerPath) ?? [], policy])
+    owners.push({ id, definitionDigest: contentHash(JSON.stringify(definition(policy))), priorOwnerPath, reviewedOwnerPaths: [...paths].sort(), ownerPath })
+  }
+  const projected = changes.map(change => {
+    const expected = byPath.get(change.path) ?? []
+    const current = rows(change)
+    const source = JSON.stringify(current.map(definition)) === JSON.stringify(expected.map(definition)) ? change.source : projectVerificationTable(change.source, expected)
+    if (withoutVerificationTables(change.source) !== withoutVerificationTables(source)) reject(`VERIFY投影改变了业务源码: ${change.path}`)
+    return { ...change, source }
+  })
+  return { changes: projected, evidence: { version: 'verification-ownership-v1', registrationDigest: contentHash(JSON.stringify(registrations.map(definition))), owners,
+    sources: changes.map((change, index) => ({ path: change.path, beforeDigest: contentHash(change.source), afterDigest: contentHash(projected[index].source), nonVerificationDigest: contentHash(withoutVerificationTables(change.source)) })),
+  } }
+}
+
 /** 纯父按祖先层级先审自身原意接口；叶继承只读接口，新归属按真实 codePath 唯一分区。 */
 export async function elaborateSyncPartitions(input: ElaborationInput, plan: SyncPartitionPlan, maxParallel: number, checkpoints: PartitionCheckpoints, runner: ElaborationRunner): Promise<ElaborationResult> {
   const { signal, ...data } = input
@@ -212,8 +272,13 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
   const first = results[0]
   if (!first) reject('分区细化结果为空')
   independentTraces(results.flatMap(result => result.rounds.flatMap(round => round.traces)))
-  const changes = distinct(results.flatMap(result => result.changes), change => change.path, 'target')
-  const candidateChanges = changes.map(({ contentDigest: _contentDigest, ...change }) => change)
+  const reviewedChanges = distinct(results.flatMap(result => result.changes), change => change.path, 'target')
+  const partitionEvidence = results.map((result, index) => ({ partitionId: plan.partitions[index].id, resultRef: writeEvidence(commonDir, result) }))
+  const projection = input.verifications && results.every(result => result.structurePassed && result.reviewPassed)
+    ? projectPartitionVerificationOwnership(input, reviewedChanges, elaborationTargetBindings(input).filter(binding => plan.partitions.some(partition => partition.targets.some(target => target.path === input.targets[binding.targetIndex].path)) || descendants.some(node => node.path === binding.path)).map(binding => binding.path)) : null
+  const verificationProjectionRef = projection ? checkpoints.save('partition:verification-ownership', { ...projection.evidence, partitionPlanDigest: plan.digest, partitionEvidence }) : undefined
+  const candidateChanges = (projection?.changes ?? reviewedChanges).map(({ nodeId, path, beforeDigest, source }) => ({ nodeId, path, beforeDigest, source }))
+  const changes = candidateChanges.map(change => ({ ...change, contentDigest: contentHash(change.source) }))
   const applicability = partitionApplicability(results)
   const seal = sealPartitionedElaboration(input, candidateChanges, applicability)
   const readiness = seal.seal.passed ? projectElaborationFlowReadiness(seal.graph, seal.coverage) : { readyFlowIds: [], blockedFlows: [] }
@@ -233,7 +298,7 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
     deferredImplementationFindings: results.flatMap(result => result.deferredImplementationFindings), blockedStructureFindings: results.flatMap(result => result.blockedStructureFindings),
     structurePassed, reviewPassed, status, failure,
     contracts: seal.contracts, graph: seal.graph, coverage: seal.coverage, partitionSeal: seal.seal,
-    partitionEvidence: results.map((result, index) => ({ partitionId: plan.partitions[index].id, resultRef: writeEvidence(commonDir, result) })),
+    partitionEvidence, ...(verificationProjectionRef ? { verificationProjectionRef } : {}),
   }
   return compact
 }

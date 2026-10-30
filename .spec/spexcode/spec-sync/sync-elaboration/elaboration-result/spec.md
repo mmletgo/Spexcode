@@ -19,7 +19,7 @@ code:
 
 结果返回候选正文及内容摘要、解析图与覆盖投影、具体 GAP、受阻依赖 ID 和无直接 GAP 阻塞的声明项 `readyIds`、实际退役 ID、结构与独立审查结论。`readyIds` 不代表整条所属流程可交付。`readyFlowIds` 仅包含 FLOW 自身及全部声明 steps 均无 GAP 阻塞的流程；`blockedFlows` 返回 flowId、blockedStepIds 和 gapIds。聚合只向父流程形成结果，不回传父阻塞到无关子项，因此未知完成/取消权限不阻断创建/查看。可推进/退役结论仅在当前结构和独立审查通过后输出。每轮保留生成输出、审查输出、失败发现和 session/thread/turn/result 摘要，不能只保留最后“成功”声明。调用期间外部继续编辑不改变冻结输入。
 
-`interface_seed`结果显式返回phase/status，并保持`implementationReady:false`、`readyIds:[]`和`readyFlowIds:[]`；其独立审查只证明父接口阶段，不代表全图P1；首次raw-only与已有纯REQ/RULE/GAP接口的后续同步使用同一阶段标记，不因历史已完成而跳过本轮独审或丢失旧义务。完成分区后，aggregate以`phase:partitioned_final`标记，并保存`partitionSeal`的完整规范材料：全局`inputDigest`、候选摘要、规范changes、合并applicability、冻结nodeChanges、全部final findings及passed。候选摘要由`{inputDigest,changes,applicability,nodeChanges}`确定；最终ready/blocked投影只能来自完整seal。子分区局部checkpoint可省略图与coverage对象，但必须保留自身phase/status、规范changes和原始round/trace。
+`interface_seed`结果显式返回phase/status，并保持`implementationReady:false`、`readyIds:[]`和`readyFlowIds:[]`；其独立审查只证明父接口阶段，不代表全图P1；首次raw-only与已有业务限REQ/RULE/GAP且可附精确可信VERIFY的纯接口的后续同步使用同一阶段标记，不因历史已完成而跳过本轮独审或丢失旧义务。完成分区后，aggregate以`phase:partitioned_final`标记，并保存`partitionSeal`的完整规范材料：全局`inputDigest`、候选摘要、规范changes、合并applicability、冻结nodeChanges、全部final findings及passed。候选摘要由`{inputDigest,changes,applicability,nodeChanges}`确定；最终ready/blocked投影只能来自完整seal。子分区局部checkpoint可省略图与coverage对象，但必须保留自身phase/status、规范changes和原始round/trace。
 
 局部输入与结果的`partitionBinding`保留原planDigest、partitionId，以及可选的独审analysisRef和唯一interfaceSeed分类证据；这些字段在模型派发前冻结并参与inputDigest。后验新增叶的分类证明保留真实后代路径、codePath与唯一sourcePartitionId；结果不能以另一plan或分类复用旧checkpoint。聚合结果保留各局部原件引用，不继承首区的局部partitionBinding。
 
@@ -50,3 +50,5 @@ authorizedChanges 的 restore 动作保存原固定历史请求及 input 引用�
 
 
 分区聚合结果可携partitionEvidence:{partitionId,resultRef}[]，每份ref保存独立局部结构和原生审查原件。合并结果不能冒充一次全仓审查，P2仍须核唯一目标writer、全局契约关系及最终candidate。intent可来自只读context，只有targets可写。
+
+分区aggregate可携verificationProjectionRef，指向[[sync-partition-execution]]的唯一技术归属投影证据，包含冻结登记digest、真实owner决策、受审原件refs和每候选before/after及非VERIFY字节摘要。局部changes、rounds、review及其摘要保留原件；aggregate changes及partitionSeal绑定投影后规范正文。该ref只证明冻结技术policy的可重算投影，不代替新业务独审、全局严格封口或真实运行验证。

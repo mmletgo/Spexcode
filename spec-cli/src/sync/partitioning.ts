@@ -149,11 +149,14 @@ function rawOnlyInterfaceSeedEvidenceFrom(
 ): RawOnlyInterfaceSeedEvidence | null {
   if (!input.targets.some(candidate => candidate.nodeId === target.nodeId && candidate.path === target.path)) return null
   const parentContracts = input.contracts.filter(contract => contract.nodeId === target.nodeId)
-  if (parentContracts.length && (parentContracts.length !== 1
-    || parentContracts[0].path !== target.path
-    || parentContracts[0].code.length !== 0
-    || parentContracts[0].items.length === 0
-    || parentContracts[0].items.some(item => !['REQ', 'RULE', 'GAP'].includes(item.kind)))) return null
+  if (parentContracts.length) {
+    if (parentContracts.length !== 1) return null
+    const parentContract = parentContracts[0]
+    // VERIFY 只供父项分类；命令的精确登记匹配仍由上游硬门禁负责。
+    if (parentContract.path !== target.path || parentContract.code.length !== 0
+      || !parentContract.items.some(item => item.kind === 'REQ' || item.kind === 'RULE' || item.kind === 'GAP')
+      || parentContract.items.some(item => item.kind !== 'REQ' && item.kind !== 'RULE' && item.kind !== 'GAP' && item.kind !== 'VERIFY')) return null
+  }
   const parent = governanceNodeAtPath(governanceNodes, target.path)
   if (!parent || parent.code.length) return null
   const rawSource = parent.current ? parent.rawSource : parent.rawSource ?? target.rawSource ?? null

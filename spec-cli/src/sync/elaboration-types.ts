@@ -55,6 +55,12 @@ export type Applicability = { boundary: ElaborationBoundary; applies: boolean; b
 export type ElaborationChange = { nodeId: string; path: string; beforeDigest: string | null; source: string }
 export type ElaborationCandidate = { inputDigest: string; changes: ElaborationChange[]; applicability: Applicability[]; nodeChanges?: ContractNodeChange[] }
 export type ElaborationPartitionSeal = { inputDigest: string; candidateDigest: string; changes: ElaborationChange[]; applicability: Applicability[]; nodeChanges: ContractNodeChange[]; findings: ContractFinding[]; passed: boolean }
+export type VerificationOwnershipProjection = {
+  version: 'verification-ownership-v1'
+  registrationDigest: string
+  owners: { id: string; definitionDigest: string; priorOwnerPath: string | null; reviewedOwnerPaths: string[]; ownerPath: string }[]
+  sources: { path: string; beforeDigest: string; afterDigest: string; nonVerificationDigest: string }[]
+}
 export type ElaborationReviewFinding = { code: string; kind: 'repair' | 'missing_fact' | 'conflict'; message: string; affectedIds: string[]; evidence: string; decision: string }
 export type ElaborationReview = { inputDigest: string; candidateDigest: string; verdict: 'accept' | 'repair' | 'needs_input' | 'conflict'; checkedBoundaries: ElaborationBoundary[]; findings: ElaborationReviewFinding[] }
 export type ElaborationTrace = { purpose: string; sessionId: string; threadId: string; turnId: string; resultDigest: string; inputDigest: string }
@@ -89,6 +95,7 @@ export type ElaborationResult = {
   nodeChanges?: ContractNodeChange[]
   partitionEvidence?: { partitionId: string; resultRef: BlobRef }[]
   partitionSeal?: ElaborationPartitionSeal
+  verificationProjectionRef?: BlobRef
   structurePassed: boolean
   reviewPassed: boolean
   runtimeVerification: 'not_run'

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
-import { elaborationPatchErrors, renderElaboration } from './elaboration-markdown.js'
+import { elaborationPatchErrors, projectVerificationTable, renderElaboration, withoutVerificationTables } from './elaboration-markdown.js'
 import type { GeneratedElaboration, GeneratedTables } from './elaboration-markdown.js'
 import { elaborationDigest } from './elaboration.js'
 import type { ElaborationInput } from './elaboration-types.js'
@@ -332,4 +332,27 @@ test('重复识别段落的位置不跨过另一业务段，raw更新保留交�
   assert.ok(parsed.contract!.items.some(item => item.id === 'RULE-EXPORT-SPAN-DELTA'))
   assert.equal(parsed.contract!.items.length, baseline.items.length + 1)
   assert.ok(parseParts(bothChanged)!.expandedSpec.includes('首段正文。'))
+})
+
+
+test('VERIFY技术投影只触碰真实expanded技术表，原意/围栏/业务行及CRLF逐字不变', () => {
+  const verify = baseline.items.find(item => item.kind === 'VERIFY')!
+  assert.equal(verify.kind, 'VERIFY')
+  assert.throws(() => projectVerificationTable(source.replace('## expanded spec', '## expanded spec\r'), []), /混合换行/)
+  const example = '\n~~~markdown\n### VERIFY\n| id | command | cwd | timeout-ms |\n| --- | --- | --- | --- |\n| VERIFY-EXAMPLE-01 | ["example"] | . | 1 |\n~~~\n'
+  const rich = source.replace('## expanded spec', `${example}\n## expanded spec\n${example}`) + '\n业务后记必须保持。\n'
+  for (const frozen of [rich, rich.replace(/\n/g, '\r\n')]) {
+    const removed = projectVerificationTable(frozen, [])
+    assert.equal(withoutVerificationTables(removed), withoutVerificationTables(frozen))
+    assert.equal(parseParts(removed)!.rawSource, parseParts(frozen)!.rawSource)
+    assert.ok(removed.includes('VERIFY-EXAMPLE-01'))
+    assert.equal(parseContract({ nodeId: 'export-contract', path, source: removed }).contract!.items.some(item => item.kind === 'VERIFY'), false)
+    const restored = projectVerificationTable(removed, [verify])
+    assert.equal(withoutVerificationTables(restored), withoutVerificationTables(frozen))
+    const actual = parseContract({ nodeId: 'export-contract', path, source: restored }).contract!.items.find(item => item.kind === 'VERIFY')!
+    assert.equal(actual.kind, 'VERIFY')
+    assert.deepEqual(actual.command, verify.command)
+    assert.equal(actual.cwd, verify.cwd)
+    assert.equal(actual.timeoutMs, verify.timeoutMs)
+  }
 })
