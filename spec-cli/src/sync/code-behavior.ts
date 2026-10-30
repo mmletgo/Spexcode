@@ -137,7 +137,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   const precedingContracts = new Map(input.plan.version === 'sync-coordinator-v2' && !input.baseline ? oldSource : delivery)
   for (const [path, text] of controlledBeforeFiles) if (path.startsWith('.spec/') && path.endsWith('/spec.md')) precedingContracts.set(path, text)
   const oldFrozen = await readFrozenContracts(input.snapshot.source.canonicalRoot, precedingContracts), current = await readFrozenContracts(input.snapshot.source.canonicalRoot, new Map(composed))
-  const authorChanges = selectedEvidence ? selectedAuthoredContractChanges(selectedEvidence).filter(change => within(change.path, input.plan.readPaths)) : authoredContractChanges(authorBefore, authorSource, new Map(delivery), [...oldFrozen.nodes, ...current.nodes])
+  const authorChanges = selectedEvidence ? selectedAuthoredContractChanges(selectedEvidence).filter(change => within(change.path, input.plan.readPaths)) : authoredContractChanges(authorBefore, authorSource, new Map(input.plan.version === 'sync-coordinator-v2' && !input.baseline ? oldSource : delivery), [...oldFrozen.nodes, ...current.nodes])
   if (selectedEvidence) for (const change of authorChanges) {
     const broad = selectedEvidence.intents.filter(item => item.changed && item.broadChange && (item.source?.path ?? item.before?.path) === change.path && item.before)
     const bases = new Map(broad.map(item => [item.before!.entry.oid, item.before!]))
@@ -201,7 +201,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
     facts: input.decision.previous.analysis.facts.filter(fact => !fact.source.startsWith('code:') || localPath(fact.source.slice(5).split('#')[0])),
     partitionEvidence: undefined, partitionCoverage: undefined,
   } } } : input.decision ?? null
-  const promptPlan = input.partition && input.plan.version === 'sync-coordinator-v2' && input.plan.commitTrigger ? { ...input.plan, commitTrigger: { ...input.plan.commitTrigger, paths: input.plan.commitTrigger.paths.filter(localPath) } } : input.plan
+  const promptPlan = input.partition ? { ...input.plan, decisionAuthorities: input.plan.decisionAuthorities?.filter(authority => authority.paths.some(localPath) || authority.affectedIds.some(id => promptIds.has(id))), authorizedChanges: input.plan.authorizedChanges?.filter(change => promptIds.has(change.id)), ...(input.plan.version === 'sync-coordinator-v2' && input.plan.commitTrigger ? { commitTrigger: { ...input.plan.commitTrigger, paths: input.plan.commitTrigger.paths.filter(localPath) } } : {}) } : input.plan
   const frozen = {
     requiredChangedPaths: changedPaths, unownedSourcePaths, unownedSourcePathCount: unownedSourcePaths.length, snapshotTree: input.snapshot.immutableTree, readablePaths,
     contractItems: { previous: [...oldFrozen.graph.items.values()], current: [...current.graph.items.values()] }, origin: input.origin ?? 'code', decision: promptDecision, repairDiagnostics: input.repairDiagnostics ?? [], inputId: input.snapshot.id,

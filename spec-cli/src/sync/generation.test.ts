@@ -378,3 +378,63 @@ test('可信publication回调仍不能改变readonly或缺失路径；模型改r
   const result = await runGeneration(source, { runner: native.run, validateCandidate: valid })
   assert.equal(result.status, 'repair'); assert.match(result.failure!.message, /越界/); assert.equal(result.candidate, null)
 })
+
+test('旧v1请求没有priorContext时冻结JSON与提示保持原样', async t => {
+  const source = await input(t)
+  const native = runner(source)
+  const result = await runGeneration(source, { runner: native.run, validateCandidate: valid })
+  assert.equal(result.status, 'reviewed', JSON.stringify(result.failure))
+  const omitted = await runGeneration({ ...source, priorContext: undefined }, { runner: runner(source).run, validateCandidate: valid })
+  assert.equal(omitted.inputDigest, result.inputDigest)
+  for (const request of native.calls) {
+    assert.equal(request.prompt.includes('priorContext'), false)
+    assert.equal(request.prompt.includes('独立旧来源角色'), false)
+  }
+})
+
+test('删除后的旧Spec与已不在current的源码以source_before进入生成和独审', async t => {
+  const source = await input(t)
+  const beforeSnapshot = source.snapshot
+  const spec = source.files.get(contractPath)!
+  const code = source.files.get('src/export.js')!
+  const testSource = source.files.get('tests/export.test.mjs')!
+  const historicalPaths = [contractPath, 'src/export.js', 'tests/export.test.mjs']
+  rmSync(join(source.root, contractPath))
+  rmSync(join(source.root, 'src/export.js'))
+  const git = (...args: string[]): void => { execFileSync('git', ['-C', source.root, ...args], { stdio: 'pipe', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }) }
+  git('add', '-A'); git('commit', '-m', 'remove specification and implementation')
+  const snapshot = await captureInputSnapshot(source.root)
+  const entries = readTree(snapshot.source.commonDir, snapshot.immutableTree)
+  const files = new Map(entries.map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString()]))
+  const prior = { role: 'source_before' as const, snapshot: beforeSnapshot, entries: source.manifest.entries.filter(entry => historicalPaths.includes(entry.path)), files: new Map(historicalPaths.map(path => [path, source.files.get(path)!])), objects: [] }
+  const deleted: GenerationInput = { ...source, snapshot, manifest: { version: 1, entries }, files, elaboratedSpecs: [], readyIds: ['AC-EXPORT-03'], retiredIds: ['AC-EXPORT-03'], retiredOwners: [{ id: 'AC-EXPORT-03', path: contractPath }], priorContext: [prior], policy: { ...source.policy, version: 'sync-coordinator-v2' } }
+  assert.equal(deleted.files.has(contractPath), false)
+  assert.equal(deleted.files.has('src/export.js'), false)
+  const accept = (request: ElaborationSessionRequest): GenerationReview => {
+    const properties = request.schema.properties as { inputId: { enum: string[] }; candidateDigest: { enum: string[] }; checkedIds: { items: { enum: string[] } } }
+    return { inputId: properties.inputId.enum[0], candidateDigest: properties.candidateDigest.enum[0], verdict: 'accept', checkedIds: properties.checkedIds.items.enum, findings: [] }
+  }
+  const native = runner(deleted, () => ({ version: 'sync-files-v1', changes: [] }), accept)
+  const result = await runGeneration(deleted, { runner: native.run, validateCandidate: valid })
+  assert.equal(result.status, 'reviewed', JSON.stringify(result.failure))
+  assert.equal(native.calls.length, 2)
+  for (const request of native.calls) {
+    const context = JSON.parse(request.prompt.split(request.purpose === 'code_generate' ? '冻结完整输入:\n' : '冻结原意和基线完整输入:\n')[1].split('\n实际候选身份')[0]) as { files: [string, string][]; priorContext: { role: string; pairId?: string; files: [string, string][] }[]; readyIds: string[] }
+    const bodies = new Map(context.priorContext[0].files)
+    assert.equal(context.priorContext.length, 1)
+    assert.equal(context.priorContext[0].role, 'source_before')
+    assert.equal(context.priorContext[0].pairId, undefined)
+    assert.equal(bodies.get(contractPath), spec)
+    assert.equal(bodies.get('src/export.js'), code)
+    assert.equal(bodies.get('tests/export.test.mjs'), testSource)
+    assert.equal(context.files.some(([path]) => path === contractPath || path === 'src/export.js'), false)
+    assert.ok(context.readyIds.includes('AC-EXPORT-03'))
+    assert.ok(request.prompt.includes('role为source_before时明确不是verifiedDelivery'))
+    assert.equal(context.priorContext.some(item => item.role === 'verified_delivery'), false)
+  }
+  assert.ok(result.review!.checkedIds.includes('AC-EXPORT-03'))
+  const mismatched = { ...deleted, priorContext: [{ ...prior, files: new Map([...prior.files].map(([path, body]) => [path, path === 'src/export.js' ? `${body}\n` : body])) }] }
+  const rejected = await runGeneration(mismatched, { runner: runner(mismatched).run, validateCandidate: valid })
+  assert.equal(rejected.status, 'failed')
+  assert.match(rejected.failure!.message, /历史正文与真实旧快照不匹配/)
+})

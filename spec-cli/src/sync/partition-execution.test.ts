@@ -15,7 +15,7 @@ import type { SyncPartitionPlan } from './partitioning.js'
 import { captureInputSnapshot, contentHash, readObject, readTree, writeEvidence } from './snapshot.js'
 import { verifyCandidate } from './candidate.js'
 
-async function fixture(t: test.TestContext): Promise<{ input: GenerationInput; plan: SyncPartitionPlan; checkpoints: PartitionCheckpoints }> {
+async function fixture(t: test.TestContext): Promise<{ input: GenerationInput; plan: SyncPartitionPlan; checkpoints: PartitionCheckpoints; root: string }> {
   const root = mkdtempSync(join(tmpdir(), 'spex-partition-execution-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
   cpSync(new URL('../../test/fixtures/spec-sync/export-repo/', import.meta.url), root, { recursive: true })
@@ -40,7 +40,7 @@ async function fixture(t: test.TestContext): Promise<{ input: GenerationInput; p
   const input: GenerationInput = { root, snapshot, requestKey: 'operation:attempt:generation', manifest: { version: 1, entries }, files, contracts, elaboratedSpecs: contracts.map(contract => ({ path: contract.path, source: files.get(contract.path)! })), readyIds, blockedIds: [], intent: { nodeId: 'export-contract', rawSource: contracts[0].rawSource }, facts: [], existingAcceptance: contracts.flatMap(contract => contract.items.filter((item): item is Acceptance => item.kind === 'AC')), mandatoryTests: [], verifications: [], allowedScope: { paths: plan.partitions.flatMap(partition => partition.writePaths), contractIds: readyIds, flowIds: [] }, policy: { version: 'sync-coordinator-v2', digest: 'policy' }, timeoutMs: 30000, model: 'gpt-6.1-sol', effort: 'high' }
   const values = new Map<string, unknown>()
   const checkpoints: PartitionCheckpoints = { load: <T>(key: string) => values.has(key) ? structuredClone(values.get(key)) as T : null, save: (key, value) => { values.set(key, structuredClone(value)); return writeEvidence(snapshot.source.commonDir, value) } }
-  return { input, plan, checkpoints }
+  return { input, plan, checkpoints, root }
 }
 
 function native(delayReverse = false): { runner: ElaborationRunner; calls: ElaborationSessionRequest[]; peak: () => number } {
@@ -195,4 +195,219 @@ test('分区响应不能以完成顺序覆盖同文件writer，过期beforeDiges
   }
   await assert.rejects(generateSyncPartitions(second.input, second.plan, 2, false, { runner, validateCandidate: async () => [] }, second.checkpoints))
   assert.ok(invalid.calls.every(call => call.purpose === 'code_generate'))
+})
+
+test('多节点新功能先规划互斥精确文件，再只向对应writer授予新增路径', async t => {
+  const { input, plan, checkpoints } = await fixture(t), calls: ElaborationSessionRequest[] = []
+  for (const contract of input.contracts) contract.code = []
+  for (const partition of plan.partitions) partition.writePaths = partition.writePaths.filter(path => !path.startsWith('src/'))
+  input.allowedScope.paths = input.allowedScope.paths.filter(path => !path.startsWith('src/'))
+  const runner: ElaborationRunner = async request => {
+    const ordinal = calls.push(request)
+    const domain = /part-(export|import|archive)/.exec(request.requestKey)?.[1]
+    let output: unknown
+    if (request.purpose === 'implementation_plan') output = { version: 'sync-implementation-plan-v1', paths: [`src/new-${domain}.js`] }
+    else if (request.purpose === 'code_generate') {
+      const context = JSON.parse(request.prompt.split('冻结完整输入:\n')[1]) as { allowedScope: { paths: string[] } }
+      assert.ok(context.allowedScope.paths.includes(`src/new-${domain}.js`))
+      assert.ok(!context.allowedScope.paths.includes('src'))
+      assert.equal(context.allowedScope.paths.filter(path => path.startsWith('src/new-')).length, 1)
+      output = { version: 'sync-files-v1', changes: [{ path: `src/new-${domain}.js`, beforeDigest: null, beforeMode: null, mode: '100644', content: `export const value = '${domain}'\n` }] }
+    } else {
+      const properties = request.schema.properties as { inputId: { enum: string[] }; candidateDigest: { enum: string[] }; checkedIds: { items: { enum: string[] } } }
+      output = { inputId: properties.inputId.enum[0], candidateDigest: properties.candidateDigest.enum[0], verdict: 'accept', checkedIds: properties.checkedIds.items.enum, findings: [] }
+    }
+    return { sessionId: `layout-session-${ordinal}`, threadId: `layout-thread-${ordinal}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)) }
+  }
+  let acquired: readonly string[] = []
+  const result = await generateSyncPartitions(input, plan, 2, false, { runner, implementationPolicy: { writePaths: ['src', 'tests', '.spec'], sourcePaths: ['src'] }, beforePartitionGeneration: async paths => { acquired = paths; return { scope: { ...input.allowedScope, paths: [...input.allowedScope.paths, ...paths] } } }, validateCandidate: async () => [] }, checkpoints)
+  assert.equal(result.status, 'reviewed', JSON.stringify(result.failure))
+  assert.deepEqual(acquired, ['src/new-archive.js', 'src/new-export.js', 'src/new-import.js'])
+  assert.equal(calls.filter(call => call.purpose === 'implementation_plan').length, 3)
+  assert.equal(calls.filter(call => call.purpose === 'code_generate').length, 3)
+  const entries = verifyCandidate(input.snapshot.source.commonDir, result.candidate!)
+  for (const path of acquired) assert.ok(entries.some(entry => entry.path === path))
+})
+
+test('新功能布局冲突进入原有限修复结果，不向任何区复制共享目录或派代码生成', async t => {
+  const { input, plan, checkpoints } = await fixture(t), calls: ElaborationSessionRequest[] = []
+  for (const contract of input.contracts) contract.code = []
+  const runner: ElaborationRunner = async request => {
+    const ordinal = calls.push(request), output = { version: 'sync-implementation-plan-v1', paths: ['src/shared.js'] }
+    return { sessionId: `conflict-session-${ordinal}`, threadId: `conflict-thread-${ordinal}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)) }
+  }
+  const result = await generateSyncPartitions(input, plan, 2, false, { runner, implementationPolicy: { writePaths: ['src', 'tests'], sourcePaths: ['src'] }, validateCandidate: async () => [] }, checkpoints)
+  assert.equal(result.status, 'repair')
+  assert.equal(result.failure!.code, 'implementation_plan_conflict')
+  assert.ok(calls.every(call => call.purpose === 'implementation_plan'))
+  assert.equal(result.candidate, null)
+})
+
+test('局部只借读依赖Spec接口，checkedIds不冒充其实现；最终跨边仍完整重读双端源码', async t => {
+  const { input, plan, checkpoints } = await fixture(t), runtime = native()
+  plan.partitions[1].readPaths.push(input.contracts[0].path)
+  let localChecks = 0, edgeChecks = 0
+  const runner: ElaborationRunner = async request => {
+    if (request.purpose === 'code_review') {
+      const context = JSON.parse(request.prompt.split('冻结原意和基线完整输入:\n')[1].split('\n实际候选身份')[0]) as { files: [string, string][]; readonlyContractPaths?: string[] }
+      const checked = (request.schema.properties as { checkedIds: { items: { enum: string[] } } }).checkedIds.items.enum
+      if (request.requestKey.includes('final:part-import')) {
+        localChecks++
+        assert.ok(context.readonlyContractPaths!.includes(input.contracts[0].path))
+        assert.ok(context.files.some(([path]) => path === input.contracts[0].path))
+        assert.ok(!context.files.some(([path]) => path === 'src/export.js'))
+        assert.ok(checked.every(id => !id.includes('-EXPORT-')))
+      }
+      if (request.requestKey.includes('final:edge:')) {
+        edgeChecks++
+        assert.ok(context.files.some(([path]) => path === 'src/export.js'))
+        assert.ok(context.files.some(([path]) => path === 'src/import.js'))
+        assert.ok(!context.readonlyContractPaths?.includes(input.contracts[0].path))
+        assert.ok(!context.readonlyContractPaths?.includes(input.contracts[1].path))
+      }
+    }
+    return runtime.runner(request)
+  }
+  const result = await generateSyncPartitions(input, plan, 2, false, { runner, validateCandidate: async () => [] }, checkpoints)
+  assert.equal(result.status, 'reviewed', JSON.stringify(result.failure))
+  assert.equal(localChecks, 1); assert.equal(edgeChecks, 1)
+})
+
+test('已退役旧ID仍按真实owner保留局部ready及负向验收输入，不触发新文件规划', async t => {
+  const { input, plan, checkpoints } = await fixture(t), runtime = native(), retired = input.contracts[0]
+  input.contracts = input.contracts.slice(1)
+  input.elaboratedSpecs = input.elaboratedSpecs.filter(spec => spec.path !== retired.path)
+  input.retiredIds = input.readyIds.filter(id => id.includes('-EXPORT-'))
+  input.retiredOwners = input.retiredIds.map(id => ({ id, path: retired.path }))
+  input.nodeChanges = [{ action: 'retire', from: { nodeId: retired.nodeId, path: retired.path }, evidenceRef: writeEvidence(input.snapshot.source.commonDir, { explicit: 'fixture retirement authorization' }) }]
+  let generatedRetirement = false
+  const runner: ElaborationRunner = async request => {
+    if (request.purpose === 'implementation_plan') assert.fail('退役writer不能规划新实现文件')
+    if (request.purpose === 'code_generate' && request.requestKey.includes('part-export')) {
+      const context = JSON.parse(request.prompt.split('冻结完整输入:\n')[1]) as { readyIds: string[]; existingAcceptance: { id: string }[] }
+      assert.ok(context.readyIds.includes('AC-EXPORT-03'))
+      assert.ok(context.existingAcceptance.some(item => item.id === 'AC-EXPORT-03'))
+      const before = input.manifest.entries.find(entry => entry.path === retired.path)!
+      const output = { version: 'sync-files-v1', changes: [{ path: retired.path, beforeDigest: before.digest, beforeMode: before.mode, content: null, mode: null }] }
+      generatedRetirement = true
+      return { sessionId: 'retirement-builder', threadId: 'retirement-builder', turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)) }
+    }
+    return runtime.runner(request)
+  }
+  const result = await generateSyncPartitions(input, plan, 2, false, { runner, validateCandidate: async () => [] }, checkpoints)
+  assert.equal(generatedRetirement, true)
+  assert.equal(result.status, 'reviewed', JSON.stringify(result.failure))
+  assert.ok(result.partitionEvidence!.find(item => item.partitionId === 'part-export')!.review.checkedIds.includes('AC-EXPORT-03'))
+})
+
+function priorFrom(snapshot: GenerationInput['snapshot'], entries: GenerationInput['manifest']['entries'], files: ReadonlyMap<string, string>, paths: readonly string[]): NonNullable<GenerationInput['priorContext']>[number] {
+  return { role: 'source_before', snapshot, entries: entries.filter(entry => paths.includes(entry.path)), files: new Map(paths.map(path => [path, files.get(path)!])), objects: [] }
+}
+
+test('删除后本区仍把旧Spec和已不在current的源码完整送入最终独审', async t => {
+  const { input, plan, checkpoints, root } = await fixture(t)
+  const oldSpec = input.files.get(input.contracts[0].path)!
+  const oldCode = input.files.get('src/export.js')!
+  const before = input.snapshot
+  const beforeEntries = input.manifest.entries
+  const beforeFiles = new Map(input.files)
+  rmSync(join(root, input.contracts[0].path))
+  rmSync(join(root, 'src/export.js'))
+  execFileSync('git', ['-C', root, 'add', '-A'], { stdio: 'pipe' })
+  execFileSync('git', ['-C', root, 'commit', '-m', 'delete export specification and source'], { stdio: 'pipe' })
+  const snapshot = await captureInputSnapshot(root)
+  const entries = readTree(snapshot.source.commonDir, snapshot.immutableTree)
+  input.snapshot = snapshot
+  input.manifest = { version: 1, entries }
+  input.files = new Map(entries.map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString('utf8')]))
+  const retired = input.contracts[0]
+  input.contracts = input.contracts.slice(1)
+  input.elaboratedSpecs = input.elaboratedSpecs.filter(spec => spec.path !== retired.path)
+  input.retiredIds = retired.items.map(item => item.id)
+  input.retiredOwners = input.retiredIds.map(id => ({ id, path: retired.path }))
+  input.nodeChanges = [{ action: 'retire', from: { nodeId: retired.nodeId, path: retired.path }, evidenceRef: writeEvidence(snapshot.source.commonDir, { explicit: 'deleted specification' }) }]
+  input.priorContext = [priorFrom(before, beforeEntries, beforeFiles, [retired.path, 'src/export.js', 'tests/export.test.mjs'])]
+  const exportPartition = plan.partitions.find(partition => partition.id === 'part-export')!
+  exportPartition.readPaths = exportPartition.readPaths.filter(path => path !== 'src/export.js')
+  exportPartition.writePaths = exportPartition.writePaths.filter(path => path !== 'src/export.js')
+  let sawReview = false
+  const runtime = native()
+  const runner: ElaborationRunner = async request => {
+    if (request.purpose === 'code_generate' && request.requestKey.includes('part-export')) {
+      const context = JSON.parse(request.prompt.split('冻结完整输入:\n')[1]) as { files: [string, string][]; priorContext?: { role: string; files: [string, string][] }[]; readyIds: string[] }
+      const bodies = new Map(context.priorContext?.[0]?.files ?? [])
+      assert.equal(context.priorContext?.[0]?.role, 'source_before')
+      assert.equal(bodies.get(retired.path), oldSpec)
+      assert.equal(bodies.get('src/export.js'), oldCode)
+      assert.equal(context.files.some(([path]) => path === retired.path || path === 'src/export.js'), false)
+      assert.ok(context.readyIds.includes('AC-EXPORT-03'))
+      assert.ok(request.prompt.includes('不是verifiedDelivery'))
+      return { sessionId: 'deleted-builder', threadId: 'deleted-builder', turnId: 'turn', output: { version: 'sync-files-v1', changes: [] }, resultDigest: contentHash(JSON.stringify({ version: 'sync-files-v1', changes: [] })) }
+    }
+    if (request.purpose === 'code_review' && request.requestKey.includes('final:part-export')) {
+      const context = JSON.parse(request.prompt.split('冻结原意和基线完整输入:\n')[1].split('\n实际候选身份')[0]) as { files: [string, string][]; priorContext?: { role: string; files: [string, string][] }[] }
+      const bodies = new Map(context.priorContext?.[0]?.files ?? [])
+      assert.equal(bodies.get('src/export.js'), oldCode)
+      assert.equal(context.files.some(([path]) => path === 'src/export.js'), false)
+      assert.equal(context.priorContext?.some(item => item.role === 'verified_delivery'), false)
+      sawReview = true
+    }
+    if (request.purpose === 'code_review' && request.requestKey.includes('final:part-import')) {
+      const context = JSON.parse(request.prompt.split('冻结原意和基线完整输入:\n')[1].split('\n实际候选身份')[0]) as { priorContext?: { files: [string, string][] }[] }
+      assert.equal(context.priorContext?.some(item => item.files.some(([, source]) => source === oldSpec)) ?? false, false)
+    }
+    return runtime.runner(request)
+  }
+  const result = await generateSyncPartitions(input, plan, 2, false, { runner, validateCandidate: async () => [] }, checkpoints)
+  assert.equal(sawReview, true)
+  assert.equal(result.status, 'reviewed', JSON.stringify(result.failure))
+  assert.ok(result.partitionEvidence!.find(item => item.partitionId === 'part-export')!.review.checkedIds.includes('AC-EXPORT-03'))
+})
+
+test('移动后的旧Spec正文仍属于新路径分区，并保留旧ready退役ID', async t => {
+  const { input, plan, checkpoints, root } = await fixture(t)
+  const oldPath = input.contracts[0].path
+  const movedPath = '.spec/export/moved-export/spec.md'
+  const oldSpec = input.files.get(oldPath)!
+  const before = input.snapshot
+  const beforeEntries = input.manifest.entries
+  const beforeFiles = new Map(input.files)
+  mkdirSync(join(root, '.spec/export/moved-export'), { recursive: true })
+  execFileSync('git', ['-C', root, 'mv', oldPath, movedPath], { stdio: 'pipe' })
+  execFileSync('git', ['-C', root, 'commit', '-m', 'move export specification'], { stdio: 'pipe' })
+  const snapshot = await captureInputSnapshot(root)
+  const entries = readTree(snapshot.source.commonDir, snapshot.immutableTree)
+  input.snapshot = snapshot
+  input.manifest = { version: 1, entries }
+  input.files = new Map(entries.map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString('utf8')]))
+  input.contracts = input.contracts.map(contract => contract.path === oldPath ? { ...contract, path: movedPath } : contract)
+  input.elaboratedSpecs = input.elaboratedSpecs.map(spec => spec.path === oldPath ? { path: movedPath, source: spec.source } : spec)
+  input.retiredIds = ['AC-EXPORT-03']
+  input.retiredOwners = [{ id: 'AC-EXPORT-03', path: oldPath }]
+  input.nodeChanges = [{ action: 'move', from: { nodeId: 'export-contract', path: oldPath }, to: { nodeId: 'moved-export', path: movedPath }, evidenceRef: writeEvidence(snapshot.source.commonDir, { explicit: 'moved specification' }) }]
+  input.priorContext = [priorFrom(before, beforeEntries, beforeFiles, [oldPath, 'src/export.js', 'tests/export.test.mjs'])]
+  const exportPartition = plan.partitions.find(partition => partition.id === 'part-export')!
+  exportPartition.targets = [{ nodeId: 'moved-export', path: movedPath }]
+  exportPartition.readPaths = [movedPath, 'src/export.js', 'tests/export.test.mjs']
+  exportPartition.writePaths = [...exportPartition.readPaths]
+  let sawReview = false
+  const runtime = native()
+  const runner: ElaborationRunner = async request => {
+    if (request.requestKey.includes('part-export') && (request.purpose === 'code_generate' || request.purpose === 'code_review')) {
+      const marker = request.purpose === 'code_generate' ? '冻结完整输入:\n' : '冻结原意和基线完整输入:\n'
+      const context = JSON.parse(request.prompt.split(marker)[1].split('\n实际候选身份')[0]) as { files: [string, string][]; priorContext?: { role: string; pairId?: string; files: [string, string][] }[]; readyIds: string[] }
+      const bodies = new Map(context.priorContext?.[0]?.files ?? [])
+      assert.equal(context.priorContext?.[0]?.role, 'source_before')
+      assert.equal(context.priorContext?.[0]?.pairId, undefined)
+      assert.equal(bodies.get(oldPath), oldSpec)
+      assert.equal(context.files.some(([path]) => path === oldPath), false)
+      assert.ok(context.readyIds.includes('AC-EXPORT-03'))
+      if (request.purpose === 'code_review') sawReview = true
+    }
+    return runtime.runner(request)
+  }
+  const result = await generateSyncPartitions(input, plan, 2, false, { runner, validateCandidate: async () => [] }, checkpoints)
+  assert.equal(sawReview, true)
+  assert.equal(result.status, 'reviewed', JSON.stringify(result.failure))
+  assert.ok(result.partitionEvidence!.find(item => item.partitionId === 'part-export')!.review.checkedIds.includes('AC-EXPORT-03'))
 })
