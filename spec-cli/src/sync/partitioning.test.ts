@@ -474,7 +474,7 @@ test('analysis descendant evidence must be a target below the parent and bound t
   assert.equal(rawOnlyInterfaceSeedEvidence(input, parent, [accepted, { ...accepted, sourcePartitionId: 'another-owner' }]), null)
 })
 
-test('a parsed REQ RULE GAP interface parent with a complete sourced child qualifies for a seed', () => {
+test('a parsed REQ RULE GAP parent with registered VERIFY and a complete sourced child qualifies for a seed', () => {
   const parentPath = '.spec/interface-sync/controller/spec.md'
   const leafPath = '.spec/interface-sync/controller/leaf/spec.md'
   const parentSource = `---
@@ -503,6 +503,11 @@ related:
 | id | kind | unknown | affects | evidence | decision | source | depends-on |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | GAP-CONTROLLER-01 | missing_fact | 子节点的扩展细节待确认 | REQ-CONTROLLER-01 | 原始需求未说明 | 暂不扩大父职责 | user:raw | REQ-CONTROLLER-01 |
+
+### VERIFY
+| id | command | cwd | timeout-ms |
+| --- | --- | --- | --- |
+| VERIFY-CONTROLLER-01 | ["node","--test","tests/controller.test.ts"] | . | 1000 |
 `
   const leafSource = `---
 title: leaf
@@ -549,10 +554,15 @@ related: []
   assert.ok(parentParsed.contract)
   assert.ok(leafParsed.contract)
   assert.deepEqual(parentParsed.contract.code, [])
-  assert.deepEqual(parentParsed.contract.items.map(item => item.kind), ['REQ', 'RULE', 'GAP'])
+  assert.deepEqual(parentParsed.contract.items.map(item => item.kind), ['REQ', 'RULE', 'GAP', 'VERIFY'])
   assert.deepEqual(leafParsed.contract.code, ['src/controller/leaf.ts'])
   const parent = { nodeId: 'controller', path: parentPath }
   const leaf = { nodeId: 'leaf', path: leafPath }
+  const trustedEnvironment = {
+    version: 'trusted-test-v1', image: 'node@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392',
+    platform: 'linux/arm64' as const, memoryBytes: 128 * 1024 * 1024, cpus: 1, pidsLimit: 64,
+    scratchBytes: 16 * 1024 * 1024, logBytes: 128 * 1024,
+  }
   const evidence = rawOnlyInterfaceSeedEvidence({
     sourcePaths: ['src'], files: new Map([
       [parentPath, parentSource], [leafPath, leafSource], ['src/controller/leaf.ts', 'export const leaf = true'],
@@ -586,6 +596,13 @@ related: []
     const inputPlan: SyncCoordinatorPlan = {
       ...plan(), intentNodeId: 'controller', targets: [parent, leaf],
       readPaths: ['.spec', 'src', 'tests'], writePaths: ['.spec/interface-sync', 'src'], sourcePaths: ['src'],
+      verifications: [{
+        definition: { id: 'VERIFY-CONTROLLER-01', command: ['node', '--test', 'tests/controller.test.ts'], cwd: '.', timeoutMs: 1000 },
+        environment: trustedEnvironment,
+      }, {
+        definition: { id: 'VERIFY-LEAF-01', command: ['node', '--test', 'tests/leaf.test.ts'], cwd: '.', timeoutMs: 1000 },
+        environment: trustedEnvironment,
+      }],
       executionScope: {
         paths: ['.spec/interface-sync', 'src', 'tests'],
         contractIds: [...expectedParentIds, 'REQ-LEAF-01', 'STEP-LEAF-01', 'AC-LEAF-01'],
@@ -597,7 +614,7 @@ related: []
       plan: inputPlan,
       files: new Map([
         [parentPath, roundParentSource], [leafPath, leafSource], ['src/controller/leaf.ts', 'export const leaf = true'],
-        ['tests/leaf.test.ts', 'test leaf'],
+        ['tests/controller.test.ts', 'test controller'], ['tests/leaf.test.ts', 'test leaf'],
       ]),
       contracts: [roundParentParsed.contract, leafParsed.contract],
       changedPaths: round === 0 ? [] : [parentPath],
@@ -607,12 +624,25 @@ related: []
     assert.equal(parentPartition.phase, 'interface_seed', `round ${round + 1} keeps the parent isolated`)
     assert.deepEqual(parentPartition.contractIds, expectedParentIds, `round ${round + 1} keeps existing contract IDs`)
     assert.deepEqual(roundParentParsed.contract.items, originalItems, `round ${round + 1} does not clear existing contract items`)
+    if (round === 0) assert.deepEqual(projectSyncPartition(inputPlan, parentPartition).verifications, inputPlan.verifications, 'classification does not add verification commands')
   }
+
+  const verifyOnlySource = `${parentSource.slice(0, parentSource.indexOf('### REQ'))}${parentSource.slice(parentSource.indexOf('### VERIFY'))}`
+  const verifyOnlyParsed = parseContract({ nodeId: 'controller', path: parentPath, source: verifyOnlySource })
+  assert.deepEqual(verifyOnlyParsed.findings, [])
+  assert.ok(verifyOnlyParsed.contract)
+  assert.deepEqual(verifyOnlyParsed.contract.items.map(item => item.kind), ['VERIFY'])
+  assert.equal(rawOnlyInterfaceSeedEvidence({
+    sourcePaths: ['src'], files: new Map([
+      [parentPath, verifyOnlySource], [leafPath, leafSource], ['src/controller/leaf.ts', 'export const leaf = true'],
+    ]), contracts: [verifyOnlyParsed.contract, leafParsed.contract],
+    nodes: [parent, leaf].map(target => ({ id: target.nodeId, path: target.path })), targets: [parent, leaf],
+  }, parent), null, 'VERIFY without an existing business row cannot make the parent interface-only')
 
   const richParentSource = `${parentSource.replace(
     '| REQ-CONTROLLER-01 | 保留控制器接口 | user:raw | - | 接口保持兼容 | - |',
     '| REQ-CONTROLLER-01 | 保留控制器接口 | user:raw | - | 接口保持兼容 | - |\n| REQ-PARENT-EXTRA-01 | 完成父节点流程 | user:raw | - | 父流程可执行 | - |',
-  )}\n${leafSource.slice(leafSource.indexOf('\n### FLOW')).replaceAll('LEAF', 'PARENT-EXTRA')}`
+  )}\n${leafSource.slice(leafSource.indexOf('\n### FLOW'), leafSource.indexOf('\n### VERIFY')).replaceAll('LEAF', 'PARENT-EXTRA')}`
   const richParentParsed = parseContract({ nodeId: 'controller', path: parentPath, source: richParentSource })
   assert.deepEqual(richParentParsed.findings, [])
   assert.ok(richParentParsed.contract)
