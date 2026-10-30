@@ -121,4 +121,6 @@ This keeps concurrent creates from contending on `.git/config` while Git writes 
 
 恢复清理仅由非 force 的 Git worktree remove 删除目录；命令完成后同路径出现的未知残留或外部重建内容保持原样并阻止终止证明，不能用递归 FS 删除兜底。恢复分支删除使用已解析的真实冻结 fork commit 作为 Git expected-old CAS，正常 reference-transaction hooks 继续执行；检查后分支前进则保留引用与残留，不生成 notStarted 收据。Git registry 尚未移除候选时不删除恢复分支。
 
+候选身份核验显式绑定原 root 的物理 commonDir，并要求 target 实际 gitDir 为该 commonDir/worktrees 下的直接 linked 登记、其 gitdir 回链精确指向 target/.git。registry 同路径、同名 branch 或相同 base 不能替代自身登记证明；foreign commonDir、借用同仓另一 admin、错误回链和 primary 目标均拒绝，物理 alias 与相对自身回链保持可用。发布、未发布清理恢复和归档恢复共享此证明，不从同步模块另引身份或 footprint 副作用。
+
 恢复在上述 session-id、精确候选双锁之后取得 [[record-lock]] 的物理 commonDir registry fence；首次 registry 检查、拥有权核验、remove 和最终缺失证明处于同一临界段，不与其他候选的 add、close prune 或归档恢复 add 重叠。普通创建的 add 成功后释放 registry fence，随后 seed/materialize 和模型队列保持并行；后续失败重新取得 fence 再清理，若等待 fence 的清理截止到期则报告 cleanup_failed 并保留候选收据与实际资源，不能生成 cleanupComplete。

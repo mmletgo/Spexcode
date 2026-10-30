@@ -68,6 +68,12 @@ match the archived record. Restore checks the archive delta even when the direct
 If neither check matches, restore reports a resource conflict and preserves existing WIP. A materialize failure still attempts
 this safe replay, retains the archived record, and refuses launch; replay failure reports both causes when
 applicable. Every retry repeats those checks, with no force deletion or new persisted restore stage.
+Existing-tree identity also binds the target's physical Git common directory to the explicit source root,
+requires its actual Git directory to be a direct linked registration under that common directory's
+`worktrees`, and checks that admin's own `gitdir` backlink names this exact tree's `.git`. A stale matching
+path in the root registry, same branch/base in another repository, or another admin in the same repository
+grants no materialize/replay authority. Physical common-directory aliases and relative own backlinks remain
+valid; a primary repository cannot impersonate a session's linked candidate.
 The branch and the global session store remain. The record is retained with `archived: true`,
 `stopped: true`, a cold proof, and the same close transaction's ISO `closedAt`; list projection omits it from the
 working board while id-addressed record, timeline, transcript, and conversation reads remain available. A record

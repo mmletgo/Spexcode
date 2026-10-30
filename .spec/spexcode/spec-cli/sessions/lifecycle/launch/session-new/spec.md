@@ -142,6 +142,10 @@ the synchronous atomic record replace and re-proves that the candidate path is t
 checked out on the recorded branch, and that exact branch ref exists. JavaScript cannot interleave an abort
 between the final check and replace. A `201` may therefore never name a detached, switched, deleted, or
 rolled-back Git candidate.
+That identity proof uses the explicit source root and the candidate's own Git metadata: their physical common
+directories must match, and the candidate's direct linked admin must backlink to its own `.git`. A copied
+gitfile or matching top-level/branch name in another registry cannot be published as this candidate. The same
+proof protects matching orphan recovery and archived restore; aliases resolve by physical filesystem identity.
 Once the record exists, a lost connection is a lost response, not a failed create: the same idempotency key
 recovers the receipt. The published record is already a normal durable `queued` session with its prompt and
 launch payload present, so backend restart and the ordinary queue supervisor can recover it. Queue draining is

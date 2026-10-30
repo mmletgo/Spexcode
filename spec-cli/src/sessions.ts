@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process'
 import { createConnection } from 'node:net'
 import { createHash, randomUUID } from 'node:crypto'
 import { readFileSync, writeFileSync, existsSync, renameSync, linkSync, mkdirSync, chmodSync, rmSync, readdirSync, realpathSync, statSync, unlinkSync, type Dirent } from 'node:fs'
-import { join, dirname, isAbsolute, relative, resolve, sep } from 'node:path'
+import { basename, join, dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { rm as rmAsync, readdir as readdirAsync } from 'node:fs/promises'
 import { seedWorktreeHostState } from './worktree-sources.js'
@@ -2441,7 +2441,7 @@ export async function recoverSessionCreateTermination(requestKey: string, option
       const state = await sessionCandidateState(root, path, branch, options.signal)
       if (state.path && !state.worktree) throw new SessionCreateError('session_create_failed', 'cleanup', 'candidate path has no matching Git registration; preserving unknown contents', 409)
       if (state.worktree) {
-        const mismatch = await proveSessionCandidate(path, branch, options.signal)
+        const mismatch = await proveSessionCandidate(root, path, branch, options.signal)
         if (mismatch) throw new SessionCreateError('session_create_failed', 'cleanup', `candidate recovery identity mismatch: ${mismatch}`, 409)
         const status = await withGitAbortSignal(options.signal, () => gitTry(['-C', path, 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored']))
         if (!status.ok) throw new SessionCreateError('session_create_failed', 'cleanup', `cannot inspect candidate contents: ${status.stderr.trim() || status.failure}`, 409)
@@ -2613,18 +2613,28 @@ function existingCreateReceipt(rec: SessRec): Session {
   return toSession(rec, status, rec.stopped ? 'offline' : h.headless ? 'online' : 'starting')
 }
 
-async function proveSessionCandidate(path: string, branch: string, signal: AbortSignal): Promise<string | null> {
-  const [top, checkedOut, ref] = await withGitAbortSignal(signal, () => Promise.all([
+async function proveSessionCandidate(root: string, path: string, branch: string, signal: AbortSignal): Promise<string | null> {
+  const [top, checkedOut, ref, common, expectedCommon, administrative] = await withGitAbortSignal(signal, () => Promise.all([
     gitTry(['-C', path, 'rev-parse', '--show-toplevel']),
     gitTry(['-C', path, 'symbolic-ref', '--quiet', '--short', 'HEAD']),
-    gitTry(['-C', mainRoot(), 'show-ref', '--verify', '--quiet', `refs/heads/${branch}`]),
+    gitTry(['-C', root, 'show-ref', '--verify', '--quiet', `refs/heads/${branch}`]),
+    gitTry(['-C', path, 'rev-parse', '--path-format=absolute', '--git-common-dir']),
+    gitTry(['-C', root, 'rev-parse', '--path-format=absolute', '--git-common-dir']),
+    gitTry(['-C', path, 'rev-parse', '--absolute-git-dir']),
   ]))
-  if (!top.ok || !checkedOut.ok || !ref.ok) return [top.stderr, checkedOut.stderr, ref.stderr].map((value) => value.trim()).filter(Boolean).join('; ') || 'Git identity validation failed'
+  if (!top.ok || !checkedOut.ok || !ref.ok || !common.ok || !expectedCommon.ok || !administrative.ok)
+    return [top.stderr, checkedOut.stderr, ref.stderr, common.stderr, expectedCommon.stderr, administrative.stderr].map((value) => value.trim()).filter(Boolean).join('; ') || 'Git identity validation failed'
   let actualTop = top.stdout.trim()
   try { actualTop = realpathSync(actualTop) } catch { /* missing path is reported by the comparison */ }
   let expectedTop = path
   try { expectedTop = realpathSync(path) } catch { /* missing path is reported by the comparison */ }
   if (actualTop !== expectedTop) return `worktree top-level is ${actualTop}, expected ${expectedTop}`
+  const actualCommon = realpathSync(common.stdout.trim()), rootCommon = realpathSync(expectedCommon.stdout.trim()), gitDir = realpathSync(administrative.stdout.trim())
+  if (actualCommon !== rootCommon) return `worktree common directory is ${actualCommon}, expected ${rootCommon}`
+  if (dirname(gitDir) !== join(rootCommon, 'worktrees')) return `worktree Git directory is not a direct linked registration in ${rootCommon}`
+  const backlink = resolve(gitDir, readFileSync(join(gitDir, 'gitdir'), 'utf8').trimEnd())
+  if (basename(backlink) !== '.git' || realpathSync(dirname(backlink)) !== expectedTop)
+    return `worktree registration backlink is ${backlink}, expected ${join(expectedTop, '.git')}`
   if (checkedOut.stdout.trim() !== branch) return `worktree checked out ${checkedOut.stdout.trim() || '(detached)'}, expected ${branch}`
   return null
 }
@@ -2834,7 +2844,7 @@ async function prepareSession(prompt: string, parentage: CreateParentage, launch
             phase = 'record-write'
             traceSessionCreate(id, requestDigest, phase, 'start')
             throwIfCreateAborted(signal, phase)
-            const gitMismatch = await proveSessionCandidate(path, branch, signal)
+            const gitMismatch = await proveSessionCandidate(root, path, branch, signal)
             if (gitMismatch) throw new SessionCreateError('session_create_failed', phase, `refusing session publication: ${gitMismatch}`, 500)
             throwIfCreateAborted(signal, phase)
             publishCanonicalLifecycle(rec, rec.status, rec.proposal, rec.note)
@@ -2992,7 +3002,7 @@ async function restoreArchivedWorktree(id: string, rec: SessRec): Promise<void> 
     const state = await sessionCandidateState(root, rec.worktreePath, branch, signal)
     if (state.path) {
       if (!state.worktree || !state.branch) throw new ResourceConflict(`session ${id} existing restore path has no matching Git ownership`)
-      const mismatch = await proveSessionCandidate(rec.worktreePath, branch, signal)
+      const mismatch = await proveSessionCandidate(root, rec.worktreePath, branch, signal)
       if (mismatch) throw new ResourceConflict(`session ${id} existing restore identity mismatch: ${mismatch}`)
     } else {
       const result = await gitTry(['-C', root, 'worktree', 'add', rec.worktreePath, branch], { extraEnv: DEFER_FOOTPRINT_REFRESH })

@@ -3,10 +3,10 @@ import assert from 'node:assert/strict'
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { once } from 'node:events'
-import { chmodSync, copyFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync as fsWriteFileSync, existsSync, rmSync } from 'node:fs'
+import { chmodSync, copyFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync as fsWriteFileSync, existsSync, rmSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { claudeHarness, sessionIdentityEnvVars, stampRvSock, type SharedRuntimeProbe } from './harness.js'
 import { codexHarness, codexHeadlessHarness } from './codex-harness.js'
@@ -2298,7 +2298,7 @@ test('one-shot headless launch does not retry a successful fast exit', serial, (
   }
 })
 
-async function archivedRestoreFixture(mode: 'normal' | 'materialize-failure' | 'conflict'): Promise<void> {
+async function archivedRestoreFixture(mode: 'normal' | 'materialize-failure' | 'conflict' | 'foreign-common' | 'common-alias' | 'borrowed-admin' | 'wrong-backlink' | 'relative-backlink' | 'primary-gitdir'): Promise<void> {
   const previousHome = process.env.SPEXCODE_HOME, previousDatabase = process.env.SPEX_SESSION_DATABASE_PATH, previousCwd = process.cwd()
   const fixture = mkdtempSync(join(tmpdir(), 'spex-restore-registry-')), project = join(fixture, 'project'), path = join(fixture, 'restored'), bin = join(fixture, 'bin'), trace = join(fixture, 'trace')
   mkdirSync(project); mkdirSync(bin); mkdirSync(join(project, '.spec'))
@@ -2316,11 +2316,40 @@ async function archivedRestoreFixture(mode: 'normal' | 'materialize-failure' | '
     fsWriteFileSync(join(path, 'dirty.txt'), 'archived user edit\n')
     assert.equal(await closeSession(id), true)
     assert.equal(existsSync(path), false)
-    if (mode === 'conflict') {
+    let foreignCommon: string | null = null, foreignConfig: Buffer | null = null, foreignIndex: Buffer | null = null
+    if (mode === 'conflict' || mode === 'foreign-common' || mode === 'common-alias' || mode === 'borrowed-admin' || mode === 'wrong-backlink' || mode === 'relative-backlink' || mode === 'primary-gitdir') {
       g('worktree', 'add', '-q', path, 'restore-branch')
-      fsWriteFileSync(join(path, 'dirty.txt'), 'new user WIP\n')
+      if (mode === 'conflict') fsWriteFileSync(join(path, 'dirty.txt'), 'new user WIP\n')
+      if (mode === 'foreign-common') {
+        const foreign = join(fixture, 'foreign')
+        execFileSync('git', ['clone', '-q', '--no-hardlinks', project, foreign])
+        execFileSync('git', ['-C', foreign, 'checkout', '-qb', 'restore-branch', g('rev-parse', 'restore-branch').trim()])
+        foreignCommon = join(foreign, '.git')
+        execFileSync('git', ['-C', foreign, 'config', 'filter.spexcode.clean', 'cat'])
+        foreignConfig = readFileSync(join(foreignCommon, 'config')); foreignIndex = readFileSync(join(foreignCommon, 'index'))
+        fsWriteFileSync(join(path, '.git'), `gitdir: ${foreignCommon}\n`)
+      }
+      if (mode === 'common-alias') {
+        const alias = join(fixture, 'common-alias'), admin = readFileSync(join(path, '.git'), 'utf8').replace('gitdir: ', '').trim()
+        symlinkSync(join(project, '.git'), alias, 'dir')
+        fsWriteFileSync(join(path, '.git'), `gitdir: ${join(alias, 'worktrees', basename(admin))}\n`)
+      }
+      if (mode === 'borrowed-admin') {
+        const borrowed = join(fixture, 'borrowed')
+        g('worktree', 'add', '-q', '--force', borrowed, 'restore-branch')
+        fsWriteFileSync(join(path, '.git'), readFileSync(join(borrowed, '.git')))
+      }
+      if (mode === 'wrong-backlink' || mode === 'relative-backlink') {
+        const admin = readFileSync(join(path, '.git'), 'utf8').replace('gitdir: ', '').trim()
+        fsWriteFileSync(join(admin, 'gitdir'), `${mode === 'wrong-backlink' ? join(path, '.wrong-gitfile') : relative(admin, join(path, '.git'))}\n`)
+      }
+      if (mode === 'primary-gitdir') {
+        g('symbolic-ref', 'HEAD', 'refs/heads/restore-branch')
+        fsWriteFileSync(join(path, '.git'), `gitdir: ${join(project, '.git')}\n`)
+      }
     }
     g('config', 'filter.spexcode.clean', 'cat')
+    const sourceConfig = readFileSync(join(project, '.git/config'))
     const hook = join(project, '.git/hooks/post-checkout')
     const standard = readFileSync(new URL('../templates/hooks/post-checkout', import.meta.url), 'utf8')
     fsWriteFileSync(hook, standard.replace('# spexcode-managed-hook-v1', '# spexcode-managed-hook-v1\nprintf "checkout\\n" >> "$SPEX_RESTORE_TRACE"'))
@@ -2329,7 +2358,7 @@ async function archivedRestoreFixture(mode: 'normal' | 'materialize-failure' | '
     fsWriteFileSync(fakeSpex, `#!/bin/sh\nprintf 'callback %s\\n' "$*" >> "$SPEX_RESTORE_TRACE"\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(tsx)} ${JSON.stringify(cli)} "$@"\n`)
     chmodSync(fakeSpex, 0o755)
     const failure = join(fixture, 'materialize-failure'), gitWrapper = join(bin, 'git'), realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim()
-    if (mode !== 'normal') fsWriteFileSync(failure, 'fail explicit materialize\n')
+    if (mode === 'materialize-failure' || mode === 'conflict') fsWriteFileSync(failure, 'fail explicit materialize\n')
     fsWriteFileSync(gitWrapper, `#!/bin/sh
 case " $* " in *" worktree list --porcelain -z "*)
   if [ -e "$SPEX_RESTORE_FAILURE" ]; then
@@ -2349,6 +2378,21 @@ exec ${JSON.stringify(realGit)} "$@"
       return JSON.parse(result.stdout.trim().split('\n').at(-1)!) as { ok: boolean; error: string }
     }
     let resumed = resume()
+    if (mode === 'foreign-common') {
+      assert.match(resumed.error, /common directory/, JSON.stringify({ resumed, foreignConfigChanged: !readFileSync(join(foreignCommon!, 'config')).equals(foreignConfig!), archiveApplied: existsSync(join(path, 'dirty.txt')) }))
+      assert.deepEqual(readFileSync(join(foreignCommon!, 'config')), foreignConfig, 'foreign shared config is untouched before any materialize')
+      assert.deepEqual(readFileSync(join(foreignCommon!, 'index')), foreignIndex)
+      assert.equal(existsSync(join(path, 'dirty.txt')), false, 'archive bytes are never applied through a foreign Git identity')
+      assert.equal(JSON.parse(readFileSync(sessionRecordPath(id), 'utf8')).archived, true)
+      return
+    }
+    if (mode === 'borrowed-admin' || mode === 'wrong-backlink' || mode === 'primary-gitdir') {
+      assert.match(resumed.error, /registration backlink|no matching Git ownership|not a direct linked registration/, JSON.stringify({ resumed, sourceConfigChanged: !readFileSync(join(project, '.git/config')).equals(sourceConfig), archiveApplied: existsSync(join(path, 'dirty.txt')) }))
+      assert.deepEqual(readFileSync(join(project, '.git/config')), sourceConfig)
+      assert.equal(existsSync(join(path, 'dirty.txt')), false, 'a mismatched admin never receives archive replay')
+      assert.equal(JSON.parse(readFileSync(sessionRecordPath(id), 'utf8')).archived, true)
+      return
+    }
     if (mode === 'conflict') {
       assert.match(resumed.error, /materialize failed:[\s\S]*injected restore materialize failure[\s\S]*archived changes could not be restored/)
       assert.equal(readFileSync(join(path, 'dirty.txt'), 'utf8'), 'new user WIP\n')
@@ -2369,7 +2413,7 @@ exec ${JSON.stringify(realGit)} "$@"
     assert.equal(resumed.ok, false, 'the fixture refuses at the missing launcher without starting any Native runtime')
     assert.match(resumed.error, /pinned launcher command.*not on this machine/)
     assert.equal(readFileSync(join(path, 'dirty.txt'), 'utf8'), 'archived user edit\n')
-    assert.equal(readFileSync(trace, 'utf8'), 'checkout\n', 'the standard hook ran and honored defer without reentering materialize while its parent held the fence')
+    if (mode === 'normal' || mode === 'materialize-failure') assert.equal(readFileSync(trace, 'utf8'), 'checkout\n', 'the standard hook ran and honored defer without reentering materialize while its parent held the fence')
     assert.throws(() => g('config', 'filter.spexcode.clean'), 'explicit post-add materialize completed unused filter cleanup')
     assert.equal(JSON.parse(readFileSync(sessionRecordPath(id), 'utf8')).archived, true)
   } finally {
@@ -2383,6 +2427,12 @@ exec ${JSON.stringify(realGit)} "$@"
 test('archived restore defers the standard checkout hook until registry release then materializes before dirty replay', { ...serial, timeout: 20_000 }, () => archivedRestoreFixture('normal'))
 test('archived restore replays dirty bytes after materialize failure and retries an existing owned tree', { ...serial, timeout: 20_000 }, () => archivedRestoreFixture('materialize-failure'))
 test('archived restore preserves incompatible existing work and reports both materialize and replay failures', { ...serial, timeout: 20_000 }, () => archivedRestoreFixture('conflict'))
+test('archived restore rejects foreign commonDir behind the same registered path, branch and base', { ...serial, timeout: 20_000 }, () => archivedRestoreFixture('foreign-common'))
+test('archived restore accepts a commonDir symlink alias belonging to the same repository', { ...serial, timeout: 20_000 }, () => archivedRestoreFixture('common-alias'))
+test('archived restore rejects another admin in the same commonDir behind its registered path', { ...serial, timeout: 20_000 }, () => archivedRestoreFixture('borrowed-admin'))
+test('archived restore rejects an own admin whose backlink names a different gitfile', { ...serial, timeout: 20_000 }, () => archivedRestoreFixture('wrong-backlink'))
+test('archived restore accepts its own relative administrative backlink', { ...serial, timeout: 20_000 }, () => archivedRestoreFixture('relative-backlink'))
+test('archived restore rejects a primary gitDir impersonating its linked candidate', { ...serial, timeout: 20_000 }, () => archivedRestoreFixture('primary-gitdir'))
 
 test('a failed creation-time materialize is reported loud and stamped on the record note', serial, async () => {
   const prevHome = process.env.SPEXCODE_HOME
