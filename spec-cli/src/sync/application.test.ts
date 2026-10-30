@@ -1640,7 +1640,9 @@ test('AC-APPLICATION-P4-11 两个独立节点保存及停机编辑补偿均真�
   }
   const firstPublication = [...first].sort((a, b) => a.journals[0].receipt!.completedAtMs - b.journals[0].receipt!.completedAtMs)[0]
   const firstOther = paths.find(path => !firstPublication.operation.scope.paths.includes(path))!
-  assert.doesNotMatch(readObject(before.source.commonDir, readTree(before.source.commonDir, firstPublication.journals[0].receipt!.actualTree).find(entry => entry.path === firstOther)!.oid).toString('utf8'), /human online/)
+  const firstOtherSpec = firstOther === 'src/export.js' ? f.path : '.spec/project/other-contract/spec.md'
+  assert.deepEqual(readTree(before.source.commonDir, firstPublication.journals[0].receipt!.actualTree).find(entry => entry.path === firstOtherSpec), readTree(before.source.commonDir, before.immutableTree).find(entry => entry.path === firstOtherSpec))
+  assert.equal(firstPublication.operation.deliveredScope.paths.includes(firstOtherSpec), false)
   assert.equal((await captureInputSnapshot(f.root)).id, before.id)
   await f.application.stopService()
   const count = f.calls()
@@ -1663,7 +1665,10 @@ test('AC-APPLICATION-P4-11 两个独立节点保存及停机编辑补偿均真�
   }
   const firstCompensation = [...delivered].sort((a, b) => a.journals[0].receipt!.completedAtMs - b.journals[0].receipt!.completedAtMs)[0]
   const unconsumedOther = paths.find(path => !firstCompensation.operation.scope.paths.includes(path))!
-  assert.doesNotMatch(readObject(before.source.commonDir, readTree(before.source.commonDir, firstCompensation.journals[0].receipt!.actualTree).find(entry => entry.path === unconsumedOther)!.oid).toString('utf8'), /human offline/)
+  const unconsumedOtherSpec = unconsumedOther === 'src/export.js' ? f.path : '.spec/project/other-contract/spec.md'
+  const previousCanonical = [...first].sort((a, b) => b.journals[0].receipt!.completedAtMs - a.journals[0].receipt!.completedAtMs)[0].journals[0].receipt!.actualTree
+  assert.deepEqual(readTree(before.source.commonDir, firstCompensation.journals[0].receipt!.actualTree).find(entry => entry.path === unconsumedOtherSpec), readTree(before.source.commonDir, previousCanonical).find(entry => entry.path === unconsumedOtherSpec))
+  assert.equal(firstCompensation.operation.deliveredScope.paths.includes(unconsumedOtherSpec), false)
   assert.equal((await captureInputSnapshot(f.root)).id, latest.id)
   assert.equal(f.nativeRequests.some(request => request.purpose === 'code_generate'), false)
   assert.notEqual(f.git(['rev-parse', 'HEAD']), head); assert.notDeepEqual(readFileSync(join(f.root, '.git/index')), index)
