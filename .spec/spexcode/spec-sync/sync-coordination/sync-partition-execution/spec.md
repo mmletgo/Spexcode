@@ -15,6 +15,8 @@ code:
 
 分区analyze/P1保存原件；聚合拒重复变更ID、目标路径、新归属和resolution写者及冲突事实来源。真实changedPaths必须由分区唯一覆盖。上层raw作为只读context，首次raw-only根先完成一次独审，其他区随后并行；新叶只按真实codePath归属。P1后沿真实契约引用完成最终分区依赖覆盖，保持原partition身份和原分析引用。
 
+分区分析的新增事实归属复用唯一writer计划：factSourcePaths精确取本区非Spec writePaths，不受code_to_spec的实现只读模式清空。共享只读oracle与依赖继续全文读取并在change.evidence举证，不由多个分区各造同source异文的typed fact；既有可信事实仍按原source/text核验。聚合的同来源冲突拒绝保持，不拼接、改名或丢弃事实来制造通过。
+
 生成区只返回本区完整文件补丁，核实际读取、scope、局部Spec目标和独立oracle后统一确定序装配。生命周期历史正文按本区旧owner投影；其精确code、related目录或glob通过[[code-anchor]]共享路径匹配器在各自旧manifest entry上展开，不复制未命中的全仓文件。唯一publication/CAS接缝只冻结一棵candidate。每个局部/跨边独审重新读取对应完整最终正文，全部绑定同一candidateDigest并与全部builder身份独立；聚合保存原review，不生成全仓模型accept。code_to_spec仅装配已审Spec，核source/tests Git对象逐字、mode及absence不变，不运行可写代码生成器。V1–V4及单journal/receipt仍由 [[sync-coordinator]] 完成。
 
 所有局部阶段键含partitionId，完成后持久refs，重入复用真实已完成结果。异步完成顺序不影响最终树；相同文件多writer或业务ID冲突拒绝，不按最后完成者覆盖。

@@ -29,3 +29,5 @@ P1新增AC.test的writer仅落本区并与原写授权求交：授权generated�
 
 
 夹具与真实规划器一样分别保存readPaths/writePaths数组，给分区增加只读上下文不能通过共享数组悄悄扩大写范围；只读Spec反例显式越界补丁仍必须在scope门禁拒绝。
+
+三个分析分区共同读取同一真实oracle全文，Native输入精确冻结各自非Spec writer作为factSourcePaths，共享oracle不获事实归属。各区只提交自身源码事实并独审后，程序聚合保留三个不同来源原件，不触发共享测试的同源异文冲突；factSourcePaths不等于实现写权限。

@@ -9,11 +9,15 @@ import type { Acceptance, Contract } from '@spexcode/spec-core/contracts'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
 import type { ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
 import type { GenerationInput } from './generation-types.js'
-import { completeSyncPartitionPlan, elaborateSyncPartitions, generateSyncPartitions, mapSyncPartitions } from './partition-execution.js'
+import { analyzeSyncPartitions, completeSyncPartitionPlan, elaborateSyncPartitions, generateSyncPartitions, mapSyncPartitions } from './partition-execution.js'
 import type { PartitionCheckpoints } from './partition-execution.js'
 import type { SyncPartitionPlan } from './partitioning.js'
+import type { CodeBehaviorInput } from './code-behavior.js'
+import type { CodeBehaviorAnalysis } from './writeback-types.js'
+import { composeInputSnapshots } from './composition.js'
 import { captureInputSnapshot, contentHash, readObject, readTree, writeEvidence } from './snapshot.js'
 import { verifyCandidate } from './candidate.js'
+import { readFrozenBehaviorContext } from '../../test/frozen-behavior-context.js'
 
 async function fixture(t: test.TestContext): Promise<{ input: GenerationInput; plan: SyncPartitionPlan; checkpoints: PartitionCheckpoints; root: string }> {
   const root = mkdtempSync(join(tmpdir(), 'spex-partition-execution-'))
@@ -65,6 +69,52 @@ function native(delayReverse = false): { runner: ElaborationRunner; calls: Elabo
   }
   return { runner, calls, peak: () => peak }
 }
+
+test('分区分析以独占文件限定事实来源，共享oracle仍逐区全文读取且不制造同源事实冲突', async t => {
+  const { input, plan, checkpoints } = await fixture(t), oracle = 'tests/export.test.mjs'
+  for (const partition of plan.partitions) {
+    partition.readPaths = [...new Set([...partition.readPaths, oracle])]
+    partition.writePaths = partition.writePaths.filter(path => path !== oracle)
+  }
+  const analysisInput: CodeBehaviorInput = {
+    snapshot: input.snapshot, baseline: null, composed: composeInputSnapshots(input.snapshot, null).composed!,
+    readSetDigest: 'facts-readset', policyDigest: 'facts-policy', requestKey: 'facts-analysis', timeoutMs: 30000, origin: 'initial',
+    plan: { version: 'sync-coordinator-v2', direction: 'code_to_spec', intentNodeId: 'export-contract',
+      targets: plan.partitions.flatMap(partition => partition.targets), sourcePaths: ['src'], readPaths: ['.spec', 'src', 'tests'],
+      writePaths: plan.partitions.flatMap(partition => partition.writePaths), facts: [], verifications: [],
+      mandatoryTests: [{ verificationId: 'VERIFY-EXPORT-01', testPath: oracle, testId: 'AC-EXPORT-03' }],
+      partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 2 },
+    },
+  }
+  const calls: ElaborationSessionRequest[] = []
+  const result = await analyzeSyncPartitions(analysisInput, plan, 2, async request => {
+    const ordinal = calls.push(request)
+    const frozen = readFrozenBehaviorContext<{ partition: { id: string; factSourcePaths: string[] }; changedPaths: string[]; newSource: [string, string][] }>(request)
+    const owner = plan.partitions.find(partition => partition.id === frozen.partition?.id)
+    assert.ok(owner, '每个真实分区请求必须冻结其事实归属')
+    assert.deepEqual(frozen.partition.factSourcePaths, owner.writePaths.filter(path => !path.startsWith('.spec/')).sort())
+    assert.equal(frozen.partition.factSourcePaths.includes(oracle), false)
+    assert.equal(new Map(frozen.newSource).get(oracle), input.files.get(oracle), '只读oracle不能因事实归属而漏读或截断')
+    let output: unknown
+    if (request.purpose === 'code_behavior_analyze') {
+      const source = owner.sourcePaths[0]
+      output = { changes: frozen.changedPaths.map(path => ({ kind: 'refactor', paths: [path], affectedIds: [], ruleIds: [],
+        originalIntent: '保留当前模块真实行为', previousBehavior: 'ExportService管理任务状态', sourceBehavior: '当前模块行为不变',
+        deliveryBehavior: '首次纳管且没有既有交付', evidence: `完整读取${source}及共享${oracle}的真实断言`, counterexample: '模块断言变化仍需被独审核出',
+      })), facts: [{ source: `code:${source}#ExportService`, text: `${source}中的ExportService保留现存任务状态行为。` }], acceptanceChanges: [], newNodes: [], resolutions: [] }
+    } else {
+      const reviewed = JSON.parse(request.prompt.split('待审分析:\n')[1]) as { analysisDigest: string; analysis: CodeBehaviorAnalysis }
+      output = { inputDigest: request.inputDigest, analysisDigest: reviewed.analysisDigest, verdict: 'accept', checkedPaths: frozen.newSource.map(([path]) => path), checkedChangeIds: reviewed.analysis.changes.map(change => change.id), findings: [] }
+    }
+    return { sessionId: `facts-session-${ordinal}`, threadId: `facts-thread-${ordinal}`, turnId: `facts-turn-${ordinal}`, output, resultDigest: contentHash(JSON.stringify(output)) }
+  }, checkpoints)
+  assert.equal(result.reviewPassed, true)
+  assert.equal(result.facts.length, 3)
+  assert.equal(new Set(result.facts.map(fact => fact.source)).size, 3)
+  assert.equal(result.partitionEvidence!.length, 3)
+  assert.equal(calls.filter(call => call.purpose === 'code_behavior_analyze').length, 3)
+  assert.equal(calls.filter(call => call.purpose === 'code_behavior_review').length, 3)
+})
 
 test('分区生成同时在途，每区只收到本区完整正文；分区和跨边独审绑定唯一最终candidate', async t => {
   const { input, plan, checkpoints } = await fixture(t), runtime = native()

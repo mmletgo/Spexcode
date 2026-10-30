@@ -70,7 +70,7 @@ export async function analyzeSyncPartitions(input: CodeBehaviorInput, plan: Sync
     const key = `partition:${partition.id}:analysis`
     const saved = checkpoints.load<CodeBehaviorAnalysis>(key)
     if (saved) return saved
-    const local = await analyzeCodeBehavior({ ...input, requestKey: `${input.requestKey}:partition:${partition.id}`, plan: projectSyncPartition(input.plan, partition), partition: { id: partition.id, changedPaths: partition.changedPaths } }, runner)
+    const local = await analyzeCodeBehavior({ ...input, requestKey: `${input.requestKey}:partition:${partition.id}`, plan: projectSyncPartition(input.plan, partition), partition: { id: partition.id, changedPaths: partition.changedPaths, factSourcePaths: unique(partition.writePaths.filter(path => !path.startsWith('.spec/'))) } }, runner)
     if (local.changes.some(change => change.paths.some(path => !partition.changedPaths.includes(path)))) reject(`分析超出本区真实变更集合: ${partition.id}`)
     checkpoints.save(key, local)
     return local
