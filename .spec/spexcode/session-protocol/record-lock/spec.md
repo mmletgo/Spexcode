@@ -8,6 +8,7 @@ code:
 related:
   - spec-cli/src/sessions.ts
   - spec-cli/src/session-record.ts
+  - spec-cli/src/session-lock.test.ts
 ---
 # record-lock
 
@@ -16,3 +17,9 @@ may remove the record while still fencing stale writers. Creation uses exclusive
 owner PID, reclaims a dead owner, and bounds waits for a live owner. Async acquisition honors cancellation;
 synchronous lifecycle writers share the same bytes. The nonblocking synchronous form exists only for product
 input paths that must refuse instead of waiting behind an in-process transition.
+
+Git worktree registry operations reuse this same filesystem acquisition mechanism. Their fence lives in the
+physical, realpath-resolved Git common directory, so different session ids, linked checkouts, path aliases,
+and SpexCode homes share it; unrelated repositories do not. Registry acquisition retains the same bounded wait,
+cancellation, exception-safe release, and dead-owner recovery. The lock order is session id, exact candidate
+resource pair when needed, then registry. A registry callback never reacquires its own fence.

@@ -231,6 +231,11 @@ the branch, worktree slug, and stored prompt title retain their own responsibili
 takes it — a backend is the convenient owner of the launch environment and a shared cache, not the holder
 of the invariant, and a read that takes no lock needs no permission from anyone. That is what lets this
 layer be a brick an external system can drive rather than a service it must be granted access to.
+The same lock primitive also fences shared Git worktree registry mutations and their candidate inspections,
+keyed by the physical common directory rather than a session id or runtime home ([[record-lock]]).
+Create releases this short registry fence before materialization or model admission; close holds it only for
+the rename/prune boundary, and archived restore only for its add. The candidate ownership receipt remains the
+authority to remove resources; holding the registry fence alone conveys no ownership.
 
 A text send delegates its record-locked append-plus-queue acceptance to the canonical application and the local record lock; an
 agent-attributed send also fences its named sender in sorted order. Before a new append, sessions-core asks the resolved adapter's optional

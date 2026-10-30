@@ -20,4 +20,6 @@ code:
 
 受控 prepare 失败保留真实 stderr 检查点，提交结果按独立种类读取，避免将成功准备的退出码误认成最终提交结果。
 
+同进程在 input.commonDir 持有真实 registry fence 时，交付必须停在实际 Git add 之前，即使调用者 cwd 属于另一仓库。释放 fence 后仍须通过完整真实 hooks、candidate/receipt 与 source index 保留断言；此场景先在未接 fence 的交付入口复现越锁创建，再验证等待和完整交付，不能只检查锁文件是否存在。
+
 先复现V4 callback已recordFailure(conflict)后catch二次使用旧fence，原错误被FENCE_EXPIRED遮蔽；修复证明真实Git已准备但无业务journal，保留原typed input_changed/conflicted及原错误，私有文件仍base、source/index未改。

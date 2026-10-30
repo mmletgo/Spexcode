@@ -32,7 +32,7 @@ async function waitFor(check: () => boolean | Promise<boolean>, label: string, t
 }
 const git = (project: string, ...args: string[]) => execFileSync('git', ['-C', project, ...args], { encoding: 'utf8' }).trim()
 
-test('public session create is bounded, rollback-clean, idempotent, and publishes exact Git state', { timeout: 70_000 }, async () => {
+async function publicCreateFixture(registryMode: 'create' | 'close' | 'rollback' | null = null): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), 'spex-session-create-'))
   const projectPath = join(root, 'project'); mkdirSync(projectPath)
   const project = realpathSync(projectPath)
@@ -42,6 +42,8 @@ test('public session create is bounded, rollback-clean, idempotent, and publishe
   const killAfterGit = join(root, 'kill-after-git'), killAfterStore = join(root, 'kill-after-store')
   const blockReceiptRetire = join(root, 'block-receipt-retire')
   const materializeFailure = join(root, 'materialize-failure')
+  const registryGuard = join(root, 'registry-guard'), registryBusy = join(root, 'registry-busy')
+  const registryFailAdd = join(root, 'registry-fail-add')
   const launcher = join(root, 'stall-launcher'), gitWrapper = join(fakeBin, 'git'), fakeSpex = join(fakeBin, 'spex')
   const candidateDir = join(home, 'projects', project.replace(/[/.]/g, '-'), '.session-create-candidates')
   const tmux = `spex-create-${process.pid}-${Date.now()}`, port = await freePort(), base = `http://127.0.0.1:${port}`
@@ -60,6 +62,28 @@ test('public session create is bounded, rollback-clean, idempotent, and publishe
   writeFileSync(launcher, '#!/bin/sh\nprintf "%s launcher pid=%s\\n" "$(date -Iseconds)" "$$" >> "$SPEX_CREATE_TRACE"\nsleep 30\n')
   writeFileSync(fakeSpex, '#!/bin/sh\nprintf "%s hook-spex args=%s\\n" "$(date -Iseconds)" "$*" >> "$SPEX_CREATE_TRACE"\n')
   writeFileSync(gitWrapper, `#!/bin/sh
+if [ -e "$SPEX_CREATE_REGISTRY_GUARD" ]; then
+  case " $* " in *" worktree add "*|*" worktree remove "*|*" worktree prune "*)
+    if ! mkdir "$SPEX_CREATE_REGISTRY_BUSY" 2>/dev/null; then
+      printf 'registry-overlap %s\\n' "$*" >> "$SPEX_CREATE_TRACE"
+      echo 'fatal: concurrent worktree registry mutation' >&2
+      exit 75
+    fi
+    trap 'rmdir "$SPEX_CREATE_REGISTRY_BUSY"' EXIT
+    printf 'registry-enter %s\\n' "$*" >> "$SPEX_CREATE_TRACE"
+    sleep 0.3
+    ${JSON.stringify(execFileSync('which', ['git'], { encoding: 'utf8' }).trim())} "$@"
+    result=$?
+    case " $* " in *" worktree add "*)
+      if [ -e "$SPEX_CREATE_REGISTRY_FAIL_ADD" ]; then
+        rm "$SPEX_CREATE_REGISTRY_FAIL_ADD"
+        result=75
+      fi ;;
+    esac
+    printf 'registry-leave %s\\n' "$*" >> "$SPEX_CREATE_TRACE"
+    exit "$result" ;;
+  esac
+fi
 case " $* " in
   *" worktree add "*)
     printf '%s git-start pid=%s defer=%s args=%s\\n' "$(date -Iseconds)" "$$" "\${SPEXCODE_DEFER_FOOTPRINT_REFRESH:-}" "$*" >> "$SPEX_CREATE_TRACE"
@@ -118,6 +142,7 @@ esac
         PATH: `${fakeBin}:${process.env.PATH}`,
         PORT: String(port),
         SPEXCODE_HOME: home,
+        SPEX_SESSION_DATABASE_PATH: join(home, 'sessions.sqlite'),
         SPEXCODE_TMUX: tmux,
         SPEXCODE_GIT_TIMEOUT_MS: '10000',
         SPEXCODE_SESSION_CREATE_TIMEOUT_MS: '5000',
@@ -128,6 +153,9 @@ esac
         SPEX_CREATE_KILL_AFTER_STORE: killAfterStore,
         SPEX_CREATE_BLOCK_RECEIPT_RETIRE: blockReceiptRetire,
         SPEX_CREATE_MATERIALIZE_FAILURE: materializeFailure,
+        SPEX_CREATE_REGISTRY_GUARD: registryGuard,
+        SPEX_CREATE_REGISTRY_BUSY: registryBusy,
+        SPEX_CREATE_REGISTRY_FAIL_ADD: registryFailAdd,
         SPEX_CREATE_CANDIDATE_DIR: candidateDir,
         // The create route's explicit sessions nudge must be the only graph signal in this control;
         // otherwise a filesystem watcher could make the regression pass without testing the route.
@@ -191,6 +219,40 @@ esac
 
   try {
     await waitForHealth()
+    if (registryMode) {
+      unlinkSync(stallGit)
+      writeFileSync(registryGuard, 'guard\n')
+      if (registryMode === 'rollback') writeFileSync(registryFailAdd, 'fail after real Git add\n')
+      const creates = registryMode === 'create' || registryMode === 'rollback'
+        ? await Promise.all([post('registry-left'), post('registry-right')])
+        : [await post('registry-left'), await post('registry-right')]
+      const created = await Promise.all(creates.map(response => response.json() as Promise<any>))
+      if (registryMode === 'rollback') {
+        assert.deepEqual(creates.map(response => response.status).sort(), [201, 500])
+        const successful = created.find(session => session.id)
+        assert.deepEqual((await rows()).map(row => row.id), [successful.id])
+        assert.deepEqual(candidateReceipts(), [], 'failed add rollback retires its ownership receipt')
+        assert.equal(worktrees(), 3, 'rollback removes only the failed candidate')
+        assert.equal(git(successful.path, 'symbolic-ref', '--short', 'HEAD'), successful.branch)
+        const events = readFileSync(trace, 'utf8')
+        assert.match(events, /registry-enter .*worktree remove/)
+        assert.ok(!events.includes('registry-overlap'), 'the failed add retains its registry fence through rollback')
+        return
+      }
+      assert.deepEqual(creates.map(response => response.status), [201, 201], `different candidates share the Git registry fence: ${JSON.stringify(created)}`)
+      assert.ok(created.every(session => git(session.path, 'symbolic-ref', '--short', 'HEAD') === session.branch))
+      await waitFor(async () => (await rows()).some(row => row.id === created[0].id && row.lifecycle === 'active'), 'the fake shell launcher reserves the only runtime slot')
+      const addStarted = (readFileSync(trace, 'utf8').match(/registry-enter .*worktree add/g) ?? []).length
+      const adding = post('registry-during-close')
+      await waitFor(() => (readFileSync(trace, 'utf8').match(/registry-enter .*worktree add/g) ?? []).length > addStarted, 'concurrent add registry entry')
+      const [added, closedDuringAdd] = await Promise.all([adding, close(created[1].id)])
+      assert.equal(added.status, 201)
+      assert.equal(closedDuringAdd.status, 200, JSON.stringify(await closedDuringAdd.json()))
+      assert.ok(!readFileSync(trace, 'utf8').includes('registry-overlap'), 'add, rollback removal, and close prune never overlap for distinct candidates')
+      assert.equal(existsSync(created[1].path), false, 'the fenced close still removes its own worktree')
+      assert.equal(git(created[0].path, 'symbolic-ref', '--short', 'HEAD'), created[0].branch, 'close preserves the sibling candidate')
+      return
+    }
 
     const timeoutStarted = Date.now()
     const timedOut = await post('timeout-key')
@@ -461,6 +523,10 @@ esac
     assert.deepEqual({ code: unknownBaseBody.code, phase: unknownBaseBody.phase }, { code: 'session_create_failed', phase: 'target-resolution' })
     assert.deepEqual(baseState(), beforeUnknownBase, 'a refused base mutates nothing — no worktree, no branch, no store, no candidate receipt')
 
+
+  } catch (error) {
+    console.error(logs)
+    throw error
   } finally {
     graphAbort.abort()
     await graphRead?.catch(() => {})
@@ -469,4 +535,9 @@ esac
     if (child.exitCode === null && child.signalCode === null) await new Promise<void>((resolve) => child.once('close', () => resolve()))
     rmSync(root, { recursive: true, force: true })
   }
-})
+}
+
+test('public session create is bounded, rollback-clean, idempotent, and publishes exact Git state', { timeout: 70_000 }, () => publicCreateFixture())
+test('public session registry serializes distinct candidates and close during add', { timeout: 30_000 }, () => publicCreateFixture('create'))
+test('public session close keeps rename and prune outside a sibling add', { timeout: 30_000 }, () => publicCreateFixture('close'))
+test('public session failed add keeps rollback outside a sibling add', { timeout: 30_000 }, () => publicCreateFixture('rollback'))

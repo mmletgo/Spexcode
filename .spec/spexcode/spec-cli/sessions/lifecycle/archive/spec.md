@@ -55,6 +55,9 @@ same volume from `.worktrees/<name>` to `.worktrees/.trash/wt-<epoch>-<nonce>`, 
 invalidate Git's old registration, and enqueue the renamed tree for serial asynchronous deletion. The close
 request never recursively removes the worktree; a backend-start scan resumes `.trash/` leftovers, and every
 deletion failure is logged and left for the next startup retry. The materialize slot is removed after enqueueing.
+The rename and registry prune share [[record-lock]]'s physical Git common-directory fence with create rollback
+and worktree add, including archived restore. The fence ends before asynchronous trash deletion and never spans
+adapter/model execution. Restore releases it after `worktree add` before applying the archived dirty delta.
 The branch and the global session store remain. The record is retained with `archived: true`,
 `stopped: true`, a cold proof, and the same close transaction's ISO `closedAt`; list projection omits it from the
 working board while id-addressed record, timeline, transcript, and conversation reads remain available. A record

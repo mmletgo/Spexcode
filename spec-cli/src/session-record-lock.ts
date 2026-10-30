@@ -1,18 +1,19 @@
-import { closeSync, mkdirSync, openSync, readFileSync, unlinkSync, writeSync } from 'node:fs'
-import { join } from 'node:path'
-import { runtimeRoot } from '@spexcode/spec-core'
+import { closeSync, mkdirSync, openSync, readFileSync, realpathSync, unlinkSync, writeSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { gitCommonDir, runtimeRoot } from '@spexcode/spec-core'
 
 const root = (): string => join(runtimeRoot(), '.session-record-locks')
 const pathFor = (id: string): string => join(root(), `${id}.lock`)
 const pause = (signal?: AbortSignal): Promise<void> => new Promise((resolve, reject) => {
   if (signal?.aborted) { reject(Object.assign(new Error('The operation was aborted'), { name: 'AbortError', code: 'ABORT_ERR' })); return }
-  const timer = setTimeout(resolve, 10)
-  if (signal) signal.addEventListener('abort', () => { clearTimeout(timer); reject(Object.assign(new Error('The operation was aborted'), { name: 'AbortError', code: 'ABORT_ERR' })) }, { once: true })
+  const abort = () => { clearTimeout(timer); reject(Object.assign(new Error('The operation was aborted'), { name: 'AbortError', code: 'ABORT_ERR' })) }
+  const timer = setTimeout(() => { signal?.removeEventListener('abort', abort); resolve() }, 10)
+  signal?.addEventListener('abort', abort, { once: true })
 })
 
-async function acquire(id: string, timeoutMs = 30_000, signal?: AbortSignal): Promise<() => void> {
-  mkdirSync(root(), { recursive: true })
-  const path = pathFor(id), deadline = Date.now() + timeoutMs
+async function acquire(path: string, label: string, signal?: AbortSignal): Promise<() => void> {
+  mkdirSync(dirname(path), { recursive: true })
+  const deadline = Date.now() + 30_000
   for (;;) {
     if (signal?.aborted) throw Object.assign(new Error('The operation was aborted'), { name: 'AbortError', code: 'ABORT_ERR' })
     try {
@@ -27,14 +28,20 @@ async function acquire(id: string, timeoutMs = 30_000, signal?: AbortSignal): Pr
       if (owner && owner !== process.pid) {
         try { process.kill(owner, 0) } catch { try { unlinkSync(path) } catch { /* race */ }; continue }
       }
-      if (Date.now() >= deadline) throw new Error(`session record ${id}: timed out waiting for transaction lock`)
+      if (Date.now() >= deadline) throw new Error(`${label}: timed out waiting for transaction lock`)
       await pause(signal)
     }
   }
 }
 
 export async function withSessionRecordLock<T>(id: string, body: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-  const release = await acquire(id, 30_000, signal)
+  const release = await acquire(pathFor(id), `session record ${id}`, signal)
+  try { return await body() } finally { release() }
+}
+
+export async function withWorktreeRegistryLock<T>(body: () => Promise<T>, signal?: AbortSignal, commonDir = gitCommonDir()): Promise<T> {
+  const path = join(realpathSync(commonDir), 'spex-worktree-registry.lock')
+  const release = await acquire(path, 'Git worktree registry', signal)
   try { return await body() } finally { release() }
 }
 

@@ -14,6 +14,7 @@ import { captureInputSnapshot, readEvidence, verifySnapshot, writeEvidence } fro
 import { composeInputSnapshots } from './composition.js'
 import { freezeCandidate } from './candidate.js'
 import type { VerificationResultBlob } from './operation-types.js'
+import { withWorktreeRegistryLock } from '../session-record-lock.js'
 
 async function fixture(t: test.TestContext, unchanged = false) {
   const parent = realpathSync(mkdtempSync(join(tmpdir(), 'spex-private-delivery-'))), root = join(parent, 'source'), managed = join(parent, 'managed'), runtime = join(parent, 'runtime')
@@ -57,6 +58,23 @@ test('真实Git完整落盘和receipt，source/index保留，重入无重复提�
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.equal((await captureInputSnapshot(f.root)).id, f.input.id)
   const replay = await deliverVerifiedAttempt(f.store, f.fence, f.options)
   assert.deepEqual(replay.receipt, delivered.receipt); assert.equal(f.git('rev-list', '--count', f.operation.deliveryPlan.branch), '2')
+})
+
+test('private delivery waits for the input common-directory registry fence before real Git add', { timeout: 30000 }, async t => {
+  const f = await fixture(t)
+  let delivery: ReturnType<typeof deliverVerifiedAttempt> | undefined
+  try {
+    await withWorktreeRegistryLock(async () => {
+      delivery = deliverVerifiedAttempt(f.store, f.fence, f.options)
+      await new Promise(resolve => setTimeout(resolve, 50))
+      assert.equal(existsSync(join(f.operation.deliveryPlan.canonicalRoot, '.git')), false, 'a holder in the input repository fences delivery even while the caller cwd belongs to another repository')
+    }, undefined, f.input.source.commonDir)
+  } finally {
+    if (delivery) await delivery
+  }
+  assert.equal(f.store.readOperation(f.operation.id).phase, 'workspace_synced')
+  assert.equal(readFileSync(join(f.operation.deliveryPlan.canonicalRoot, 'a.txt'), 'utf8'), 'verified-a.txt\n')
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
 })
 
 test('V4 guard already recorded typed conflict is preserved before journal, without a second stale-fence failure', { timeout: 30000 }, async t => {
