@@ -204,14 +204,14 @@ test('分区分析以独占文件限定事实来源，共享oracle仍逐区全�
   const { input, plan, checkpoints } = await fixture(t), oracle = 'tests/export.test.mjs'
   for (const partition of plan.partitions) {
     partition.readPaths = [...new Set([...partition.readPaths, oracle])]
-    partition.writePaths = partition.writePaths.filter(path => path !== oracle)
+    partition.writePaths = []
   }
   const analysisInput: CodeBehaviorInput = {
     snapshot: input.snapshot, baseline: null, composed: composeInputSnapshots(input.snapshot, null).composed!,
     readSetDigest: 'facts-readset', policyDigest: 'facts-policy', requestKey: 'facts-analysis', timeoutMs: 30000, origin: 'initial',
     plan: { version: 'sync-coordinator-v2', direction: 'code_to_spec', intentNodeId: 'export-contract',
       targets: plan.partitions.flatMap(partition => partition.targets), sourcePaths: ['src'], readPaths: ['.spec', 'src', 'tests'],
-      writePaths: plan.partitions.flatMap(partition => partition.writePaths), facts: [], verifications: [],
+      writePaths: ['.spec/export'], facts: [], verifications: [],
       mandatoryTests: [{ verificationId: 'VERIFY-EXPORT-01', testPath: oracle, testId: 'AC-EXPORT-03' }],
       partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 2 },
     },
@@ -219,10 +219,12 @@ test('分区分析以独占文件限定事实来源，共享oracle仍逐区全�
   const calls: ElaborationSessionRequest[] = []
   const result = await analyzeSyncPartitions(analysisInput, plan, 2, async request => {
     const ordinal = calls.push(request)
-    const frozen = readFrozenBehaviorContext<{ partition: { id: string; factSourcePaths: string[] }; changedPaths: string[]; newSource: [string, string][] }>(request)
+    const frozen = readFrozenBehaviorContext<{ partition: { id: string; factSourcePaths: string[]; authorizedParentSpecPaths?: string[] }; changedPaths: string[]; newSource: [string, string][]; plan: { writePaths: string[] } }>(request)
     const owner = plan.partitions.find(partition => partition.id === frozen.partition?.id)
     assert.ok(owner, '每个真实分区请求必须冻结其事实归属')
-    assert.deepEqual(frozen.partition.factSourcePaths, owner.writePaths.filter(path => !path.startsWith('.spec/')).sort())
+    assert.deepEqual(frozen.partition.factSourcePaths, owner.sourcePaths.filter(path => !path.startsWith('.spec/')).sort())
+    assert.deepEqual(frozen.plan.writePaths, [], '只读源码不能回填为本区写权限')
+    assert.deepEqual(frozen.partition.authorizedParentSpecPaths, owner.targets.map(target => target.path), '只投影原global授权覆盖的本区父Spec target')
     assert.equal(frozen.partition.factSourcePaths.includes(oracle), false)
     assert.equal(new Map(frozen.newSource).get(oracle), input.files.get(oracle), '只读oracle不能因事实归属而漏读或截断')
     let output: unknown
@@ -244,6 +246,61 @@ test('分区分析以独占文件限定事实来源，共享oracle仍逐区全�
   assert.equal(result.partitionEvidence!.length, 3)
   assert.equal(calls.filter(call => call.purpose === 'code_behavior_analyze').length, 3)
   assert.equal(calls.filter(call => call.purpose === 'code_behavior_review').length, 3)
+})
+
+test('source-only分区targets为空时只读root raw仍授权本区源码新叶且不扩local writes', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'spex-readonly-source-partition-')), parentPath = '.spec/project/spec.md', sourcePath = 'src/summary.js'
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  mkdirSync(join(root, '.spec/project'), { recursive: true }); mkdirSync(join(root, 'src'), { recursive: true })
+  writeFileSync(join(root, parentPath), '---\ntitle: Project raw\nstatus: pending\n---\n\n## raw source\n\n保留现有导出职责并创建具体实现治理叶。\n')
+  writeFileSync(join(root, sourcePath), 'export const summarize = rows => rows.length;\n')
+  const git = (...args: string[]): void => { execFileSync('/usr/bin/git', ['-C', root, ...args], { stdio: 'pipe', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }) }
+  git('init', '-b', 'main'); git('config', 'user.name', 'readonly source fixture'); git('config', 'user.email', 'readonly@example.invalid'); git('add', '.'); git('commit', '-m', 'raw-only source base')
+  const snapshot = await captureInputSnapshot(root), plan: CodeBehaviorInput['plan'] = {
+    version: 'sync-coordinator-v2', direction: 'code_to_spec', intentNodeId: 'project', targets: [{ nodeId: 'project', path: parentPath },
+    ], readPaths: [parentPath, 'src'], writePaths: ['.spec/project'], sourcePaths: ['src'], facts: [], verifications: [], mandatoryTests: [],
+    executionScope: { paths: [parentPath], contractIds: [], flowIds: [] },
+    partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 },
+  }
+  const input: CodeBehaviorInput = { snapshot, baseline: null, composed: composeInputSnapshots(snapshot, null).composed!, readSetDigest: 'readonly-readset', policyDigest: 'readonly-policy', requestKey: 'readonly-source-analysis', timeoutMs: 30000, origin: 'initial', plan }
+  const partitionPlan: SyncPartitionPlan = { version: 'sync-partitions-v1', partitions: [{
+    id: 'source-only', intentNodeId: 'project', targets: [], readPaths: [parentPath, sourcePath], writePaths: [], sourcePaths: [sourcePath], changedPaths: [sourcePath],
+    contextNodeIds: ['project'], contractIds: [], flowIds: [], readBytes: 1000, readLimitBytes: 524288, oversizedReads: [],
+  }], dependencies: [], expectedPaths: [sourcePath], digest: contentHash('source-only-readonly-partition') }
+  const persisted = new Map<string, unknown>(), checkpoints: PartitionCheckpoints = {
+    load: <T>(key: string) => persisted.has(key) ? structuredClone(persisted.get(key)) as T : null,
+    save: (key, value) => { persisted.set(key, structuredClone(value)); return writeEvidence(snapshot.source.commonDir, value) },
+  }
+  const calls: string[] = []
+  const analysis = await analyzeSyncPartitions(input, partitionPlan, 1, async request => {
+    calls.push(request.purpose)
+    const frozen = readFrozenBehaviorContext<{ partition: { id: string; changedPaths: string[]; factSourcePaths: string[]; authorizedParentSpecPaths?: string[] }; unownedSourcePaths: string[]; changedPaths: string[]; plan: { targets: { nodeId: string; path: string }[]; writePaths: string[]; executionScope?: { paths: string[] } } }>(request)
+    assert.deepEqual(frozen.plan.targets, [], '父raw必须只作为本区只读上下文，不能冒充local target')
+    assert.deepEqual(frozen.plan.writePaths, [], '不把global的父Spec目录回填为local writePaths')
+    assert.deepEqual(frozen.plan.executionScope?.paths, [], '当前scope只有父spec.md本身，不能冒充未来新叶写入租约')
+    if (request.purpose === 'code_behavior_analyze') {
+      const schema = (request.schema.properties as { newNodes: { maxItems: number; items: { properties: { codePath: { enum: string[] } } } } }).newNodes
+      assert.equal(schema.maxItems, 1)
+      assert.deepEqual(schema.items.properties.codePath.enum, [sourcePath])
+    }
+    assert.deepEqual(frozen.partition.changedPaths, [sourcePath])
+    assert.deepEqual(frozen.partition.factSourcePaths, [sourcePath])
+    assert.deepEqual(frozen.partition.authorizedParentSpecPaths, [parentPath], '只投影全局已授权且本区确实读取的root raw')
+    assert.deepEqual(frozen.unownedSourcePaths, [sourcePath])
+    let output: unknown
+    if (request.purpose === 'code_behavior_analyze') {
+      output = { changes: [{ kind: 'refactor', paths: [sourcePath], affectedIds: [], ruleIds: [], originalIntent: '保留真实raw职责', previousBehavior: '新增模块尚未纳管', sourceBehavior: '实现summary职责', deliveryBehavior: '无已验证交付基线', evidence: '完整冻结源码及raw说明', counterexample: '缺少治理叶时业务意图不可追溯' }],
+        facts: [{ source: `code:${sourcePath}#summarize`, text: 'summarize返回输入行数。' }], acceptanceChanges: [], newNodes: [{ codePath: sourcePath, parentNodeId: 'project', basis: '真实源码实现需要治理叶' }], resolutions: [] }
+    } else {
+      const reviewed = JSON.parse(request.prompt.split('待审分析:\n')[1]) as { analysisDigest: string; analysis: CodeBehaviorAnalysis }
+      output = { inputDigest: request.inputDigest, analysisDigest: reviewed.analysisDigest, verdict: 'accept', checkedPaths: [sourcePath], checkedChangeIds: reviewed.analysis.changes.map(change => change.id), findings: [] }
+    }
+    return { sessionId: `readonly-${request.purpose}`, threadId: `readonly-${request.purpose}`, turnId: 'turn-1', output, resultDigest: contentHash(JSON.stringify(output)) }
+  }, checkpoints)
+  assert.equal(analysis.reviewPassed, true)
+  assert.deepEqual(analysis.newNodes.map(node => node.codePath), [sourcePath])
+  assert.equal(analysis.newNodes[0].path, `.spec/project/${analysis.newNodes[0].nodeId}/spec.md`)
+  assert.deepEqual(calls, ['code_behavior_analyze', 'code_behavior_review'])
 })
 
 test('分区生成同时在途，每区只收到本区完整正文；分区和跨边独审绑定唯一最终candidate', async t => {

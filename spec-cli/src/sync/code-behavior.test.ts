@@ -931,6 +931,67 @@ test('纯父局部视图缺席不等于全树缺席，空业务源码候选禁�
   })), /未完整读取的路径/, '局部schema限制不能放宽原读取门禁')
 })
 
+test('raw-only v2 code_to_spec只读源码可声明新叶，但Spec写入仍限原父目录和本分区候选', async t => {
+  const f = await fixture(t), sourcePath = 'src/summary.js', otherSourcePath = 'src/other-partition.js', testPath = 'tests/summary.test.js', outsideSourcePath = 'vendor/summary.js'
+  const parentPath = '.spec/export/export-contract/spec.md', otherParentPath = '.spec/export/unselected/spec.md'
+  for (const [path, source] of [[sourcePath, 'export const summarize = rows => rows.length;\n'], [otherSourcePath, 'export const other = true;\n'], [testPath, 'assert.equal(1, 1);\n'], [outsideSourcePath, 'export const outside = true;\n']] as const) {
+    mkdirSync(join(f.root, path, '..'), { recursive: true }); writeFileSync(join(f.root, path), source)
+  }
+  mkdirSync(join(f.root, otherParentPath, '..'), { recursive: true })
+  writeFileSync(join(f.root, otherParentPath), '---\ntitle: 未选父节点\nstatus: pending\n---\n\n## raw source\n\n保留一个无关的真实上层意图。\n')
+  git(f.root, 'add', sourcePath, otherSourcePath, testPath, outsideSourcePath, otherParentPath); git(f.root, 'commit', '-m', 'seed raw-only code behavior')
+  const before = await f.input(), plan: CodeBehaviorInput['plan'] = {
+    ...before.plan, version: 'sync-coordinator-v2', direction: 'code_to_spec', intentNodeId: 'export-contract',
+    targets: [], readPaths: ['.spec', 'src', 'tests', 'vendor'], writePaths: [], sourcePaths: ['src'], executionScope: { paths: [parentPath], contractIds: [], flowIds: [] },
+    commitTrigger: { before: null, paths: [sourcePath, testPath] }, partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 1000000, maxParallel: 1 }, facts: [],
+  }
+  const partition: NonNullable<CodeBehaviorInput['partition']> = { id: 'raw-only-summary', changedPaths: [sourcePath, testPath], factSourcePaths: [sourcePath], authorizedParentSpecPaths: [parentPath] }
+  const input: CodeBehaviorInput = { ...before, baseline: null, composed: composeInputSnapshots(before.snapshot, null).composed!, plan, origin: 'initial', partition }
+  const propose = (codePath: string, parentNodeId = 'export-contract', resolutionPath?: string) => runner('refactor', proposal => {
+    proposal.newNodes = [{ codePath, parentNodeId, basis: '真实已读业务模块需要由原意根下唯一治理叶承接' }]
+    if (resolutionPath) proposal.resolutions = [{ path: resolutionPath, content: 'must remain read only\n', mode: '100644' }]
+  })
+  let projectedSchema: unknown
+  const accepted = await analyzeCodeBehavior(input, async request => {
+    if (request.purpose === 'code_behavior_analyze') {
+      const newNodes = (request.schema.properties as Record<string, { maxItems: number; items: { properties: { codePath: { enum: string[] } } } }>).newNodes
+      projectedSchema = structuredClone(newNodes)
+      assert.equal(newNodes.maxItems, 1)
+      assert.deepEqual(newNodes.items.properties.codePath.enum, [sourcePath])
+    }
+    return propose(sourcePath)(request)
+  })
+  assert.equal(accepted.reviewPassed, true)
+  assert.deepEqual(accepted.newNodes.map(node => node.codePath), [sourcePath])
+  assert.ok(accepted.newNodes[0].path.startsWith('.spec/export/export-contract/'))
+  assert.deepEqual((projectedSchema as { items: { properties: { codePath: { enum: string[] } } } }).items.properties.codePath.enum, [sourcePath])
+
+  const unpartitionedInput: CodeBehaviorInput = { ...input, partition: undefined, plan: { ...plan, targets: [{ nodeId: 'export-contract', path: parentPath }], sourcePaths: [sourcePath], writePaths: ['.spec/export'] } }
+  const unpartitioned = await analyzeCodeBehavior(unpartitionedInput, async request => {
+    if (request.purpose === 'code_behavior_analyze') {
+      const frozen = readFrozenBehaviorContext<{ requiredChangedPaths: string[]; unownedSourcePaths: string[] }>(request)
+      const newNodes = (request.schema.properties as Record<string, { maxItems: number; items: { properties: { codePath: { enum: string[] } } } }>).newNodes
+      assert.deepEqual(frozen.requiredChangedPaths, [sourcePath], 'unpartitioned raw-only discovery must not depend on source write permission')
+      assert.deepEqual(frozen.unownedSourcePaths, [sourcePath])
+      assert.equal(newNodes.maxItems, 1)
+      assert.deepEqual(newNodes.items.properties.codePath.enum, [sourcePath])
+    }
+    return propose(sourcePath)(request)
+  })
+  assert.equal(unpartitioned.reviewPassed, true)
+  assert.deepEqual(unpartitioned.newNodes.map(node => node.codePath), [sourcePath])
+
+  for (const [codePath, parentNodeId] of [
+    [otherSourcePath, 'export-contract'], [outsideSourcePath, 'export-contract'], [testPath, 'export-contract'], ['src/export.js', 'export-contract'],
+    [sourcePath, 'unknown-parent'], [sourcePath, 'unselected'],
+  ] as const) {
+    await assert.rejects(analyzeCodeBehavior(input, propose(codePath, parentNodeId)), /newNodes|上层需求|授权父Spec/)
+  }
+  await assert.rejects(analyzeCodeBehavior(input, propose(sourcePath, 'export-contract', sourcePath)), /整合解决方案/)
+  await assert.rejects(analyzeCodeBehavior(input, propose(sourcePath, 'export-contract', testPath)), /整合解决方案/)
+  await assert.rejects(analyzeCodeBehavior({ ...input, partition: { ...partition, authorizedParentSpecPaths: [] } }, propose(sourcePath)), /newNodes/)
+})
+
 test('冻结source角色只发现业务根，纯测试helper可读且旧计划保持writePaths发现语义', async t => {
   const f = await fixture(t), sourcePath = 'src/test_business.py', tests = ['tests/test_flow.py', 'tests/support.py']
   for (const path of [sourcePath, ...tests]) writeFileSync(join(f.root, path), 'def value():\n    return 1\n')
