@@ -77,3 +77,6 @@ v2 分区执行携带显式 partition.id/changedPaths；分析及独审仅对本
 
 
 无验证基线的v2提交前态可证明真实作者删除：作者差量对照真实oldSource，不把不存在的delivery当作已经消费了删除。冻结verifiedDelivery角色仍为空，不能冒称验证交付；退役逐项授权和独审继续要求真实before→source删除、原义务ID及null resolution。
+
+
+分区裁决仍向生成和独审保留原previousComposed不可变引用及previousReadPaths元数据，证明原完整独审契约图的真实身份与范围；只投影previous.analysis的本区事实及变更，不能丢失原组合身份。原范围元数据不是本区未提供正文的已读证明，也不扩充本区写权限或伪造verifiedDelivery角色。

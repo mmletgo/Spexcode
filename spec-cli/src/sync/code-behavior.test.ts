@@ -485,6 +485,15 @@ test('all-null裁决只从原完整独审composed图恢复所选AC范围，当�
     return proposalFor('AC-EXPORT-02')(dispatch)
   })
   assert.equal(analysis.reviewPassed, true); assert.deepEqual(analysis.authorizedChanges.map(change => change.id), ['AC-EXPORT-02'])
+  const projected = await analyzeCodeBehavior({ ...current, partition: { id: 'decision-local', changedPaths: analysis.changes.flatMap(change => change.paths) } }, async dispatch => {
+    const frozen = readFrozenBehaviorContext<{ decision: { previousComposed?: unknown; previousReadPaths?: string[] }; verifiedDelivery: unknown[] }>(dispatch)
+    assert.deepEqual(frozen.decision.previousComposed, previousComposed)
+    assert.deepEqual(frozen.decision.previousReadPaths, current.decision!.previousReadPaths)
+    assert.deepEqual(frozen.verifiedDelivery, [])
+    return proposalFor('AC-EXPORT-02')(dispatch)
+  })
+  assert.equal(projected.reviewPassed, true)
+
   const expandedSelection = freezeSelection(snapshot, [...baselineSelection.bindings, { resource: { kind: 'path', path: 'tests/future.test.mjs' }, bytePair: null }])
   const expandedComposed = composeControlledRequest(snapshot, composeInputSnapshots(snapshot, expandedSelection).composed!, edit.requestBlob).composed!
   assert.equal(expandedComposed.contentDigest, previousComposed.contentDigest); assert.notEqual(expandedComposed.baselineSelectionDigest, previousComposed.baselineSelectionDigest)

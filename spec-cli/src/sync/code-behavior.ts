@@ -193,7 +193,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
       return 'bytePair' in binding ? { ...binding, bytePair: projected } : { ...binding, intentPair: projected }
     }),
   } : input.baselineSelection ?? null
-  const promptDecision = input.partition && input.decision ? { request: input.decision.request, previous: { ref: input.decision.previous.ref, analysis: {
+  const promptDecision = input.partition && input.decision ? { ...input.decision, previous: { ref: input.decision.previous.ref, analysis: {
     ...input.decision.previous.analysis, changes: input.decision.previous.analysis.changes.filter(item => item.paths.some(localPath)), findings: input.decision.previous.analysis.findings.filter(item => item.paths.some(localPath)),
     resolutions: input.decision.previous.analysis.resolutions.filter(item => localPath(item.path)), newNodes: input.decision.previous.analysis.newNodes.filter(item => localPath(item.codePath)),
     authorChanges: input.decision.previous.analysis.authorChanges?.filter(item => localPath(item.path)), rawIntegrations: input.decision.previous.analysis.rawIntegrations?.filter(item => localPath(item.path)),
