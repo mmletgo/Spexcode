@@ -74,3 +74,9 @@ raw/shared prose 的 broad affected closure只保证完整路径进入分析，�
 
 
 v2 分区执行携带显式 partition.id/changedPaths；分析及独审仅对本区真实差量负责，不把其它未治理文件重新并入普通事件。原 v1 没有该字段时保留历史发现语义。plan.commitTrigger.before 可在没有共同验证基线时提供真实旧来源，verifiedDelivery 仍为空，不冒充已验证交付。前态必须同物理来源且完整snapshot验证通过。分区 native 输入按本区读取闭包投影来源、正文索引、语义残差、裁决及路径元数据；程序仍用原完整不可变对象核授权。聚合仅保独立原件引用与唯一变更并集，不伪造一次全局模型独审。
+
+
+无验证基线的v2提交前态可证明真实作者删除：作者差量对照真实oldSource，不把不存在的delivery当作已经消费了删除。冻结verifiedDelivery角色仍为空，不能冒称验证交付；退役逐项授权和独审继续要求真实before→source删除、原义务ID及null resolution。
+
+
+分区裁决仍向生成和独审保留原previousComposed不可变引用及previousReadPaths元数据，证明原完整独审契约图的真实身份与范围；只投影previous.analysis的本区事实及变更，不能丢失原组合身份。原范围元数据不是本区未提供正文的已读证明，也不扩充本区写权限或伪造verifiedDelivery角色。
