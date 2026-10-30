@@ -18,7 +18,7 @@ import type { FileMutex } from './file-mutex.js'
 import { checkGenerationContractIntent, readFrozenContracts } from './frozen-contracts.js'
 import { decisionAuthorizationErrors, sameContractBusinessMeaning } from './contract-evolution.js'
 import type { FrozenContracts } from './frozen-contracts.js'
-import { implementationPlanningPartitions, completeSyncPartitionPlan, analyzeSyncPartitions, elaborateSyncPartitions, generateSyncPartitions } from './partition-execution.js'
+import { implementationPartitionSelection, implementationPlanningPartitions, completeSyncPartitionPlan, analyzeSyncPartitions, elaborateSyncPartitions, generateSyncPartitions } from './partition-execution.js'
 import type { PartitionCheckpoints } from './partition-execution.js'
 import { planSyncPartitions } from './partitioning.js'
 import type { SyncPartitionPlan } from './partitioning.js'
@@ -727,13 +727,17 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         const allowedGap = new Set([...elaboration.blockedStructureFindings, ...elaboration.rounds.flatMap(round => round.findings.filter(issue => ['unresolved-gap', 'unresolved-conflict'].includes(issue.code) && issue.itemId && accepted.graph.items.get(issue.itemId)?.kind === 'GAP'))].map(findingKey))
         if (partitions && options.plan.version === 'sync-coordinator-v2') {
           const activePartitions = partitions.partitions.filter(partition => retiredIds.some(id => { const item = retirementBefore.graph.items.get(id); return item && partition.targets.some(target => target.path === item.path) }) || accepted.contracts.some(contract => partition.targets.some(target => target.path === contract.path) && contract.items.some(item => ready.contractIds.includes(item.id) || ready.flowIds.includes(item.id))))
+          const implementation = implementationPartitionSelection(partitions, accepted.contracts)
+          const implementationIds = new Set(implementation.partitions.map(partition => partition.id))
+          const implementationActive = activePartitions.filter(partition => implementationIds.has(partition.id))
           const key = `sync:${attempt.id}:generation`, specOnly = options.plan.direction === 'code_to_spec'
-          const activeIds = new Set(activePartitions.map(partition => partition.id)), planningIds = implementationPlanningPartitions(partitions.partitions, accepted.contracts, elaboration.nodeChanges ?? nodeChanges).filter(id => activeIds.has(id))
+          const activeIds = new Set(activePartitions.map(partition => partition.id)), implementationActiveIds = new Set(implementationActive.map(partition => partition.id))
+          const planningIds = implementationPlanningPartitions(partitions.partitions, accepted.contracts, elaboration.nodeChanges ?? nodeChanges).filter(id => implementationActiveIds.has(id))
           const requiredKeys = [
-            ...specOnly ? [] : activePartitions.map(partition => `${key}:partition:${partition.id}:code_generate`),
+            ...specOnly ? [] : implementationActive.map(partition => `${key}:partition:${partition.id}:code_generate`),
             ...specOnly ? [] : planningIds.map(id => `${key}:partition:${id}:implementation_plan`),
-            ...activePartitions.map(partition => `${key}:final:${partition.id}:code_review`),
-            ...partitions.dependencies.filter(edge => activeIds.has(edge.from) || activeIds.has(edge.to)).map(edge => `${key}:final:edge:${edge.from}:${edge.to}:code_review`),
+            ...implementationActive.map(partition => `${key}:final:${partition.id}:code_review`),
+            ...implementation.dependencies.filter(edge => activeIds.has(edge.from) || activeIds.has(edge.to)).map(edge => `${key}:final:edge:${edge.from}:${edge.to}:code_review`),
           ]
           const dispatched = new Set(store.readAttempt(attempt.id).dispatchPlans.map(dispatch => dispatch.key))
           const minimumCalls = requiredKeys.filter(key => !dispatched.has(key)).length, remainingCalls = operation.budget.maxCalls - store.readBudgetUsage(operation.id).callsUsed

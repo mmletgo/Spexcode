@@ -91,3 +91,5 @@ P2 `anchor-dead` 来源修复回归从真实 P1 输出含测试用例 ID 的错�
 v2定向回归在真实Git/SQLite证明code_to_spec只有行为分析/独审、P1/独审及最终候选独审，无可写code_generate；完整最低5调用而原预算4时零模型派发、零超扣。新功能精确scope场景从raw-only细化无code锚点起，经implementation_plan提出此前absent文件、真实P4 scope/lease/null基线和readSet重绑、生成新增模块及映射，V1通过到最终候选独审；测试明确在Docker之前停止，无source/index写入及journal，不冒充完整产品交付。
 
 v2生命周期集成回归让旧Spec的`related: [src/helpers/**/*.js]`命中全局`readPaths`之外、但真实before tree中存在的helper；协调器须以`historical_context_binding`拒绝构造局部历史上下文，不能让分区投影绕过全局read授权。
+
+纯父接口与真实源码叶的Git/SQLite回归检查最终预算键与实际生成、文件规划及独立审查请求集合相等，不列已跳过父接口的虚构工作。全局目录授权与局部精确文件范围求交后，合法目标Spec仍可由程序装配，只读上游不取得写权；测试在Docker前明确终止，原source/index与零journal保持。

@@ -293,6 +293,7 @@ function localGeneration(input: GenerationInput, partition: SyncPartition, commo
   const contracts = input.contracts.filter(contract => within(contract.path, readPaths))
   const owned = new Set([...partition.contractIds, ...partition.flowIds, ...contracts.filter(contract => partition.targets.some(target => target.path === contract.path) || input.analysis?.analysis.newNodes.some(node => node.path === contract.path && partition.sourcePaths.includes(node.codePath))).flatMap(contract => contract.items.map(item => item.id)), ...historicalRetiredIds(input, partition.targets)])
   const ownedSpecPaths = new Set([...partition.targets.map(target => target.path), ...input.nodeChanges?.filter(change => lifecyclePaths.includes(change.from.path)).flatMap(change => change.action === 'move' ? [change.from.path, change.to.path] : [change.from.path]) ?? [], ...input.elaboratedSpecs.filter(spec => input.analysis?.analysis.newNodes.some(node => node.path === spec.path && partition.sourcePaths.includes(node.codePath))).map(spec => spec.path)])
+  const writablePaths = unique([...partition.writePaths.filter(path => within(path, input.allowedScope.paths)), ...input.allowedScope.paths.filter(path => within(path, partition.writePaths))])
   return { ...input, requestKey: `${input.requestKey}:partition:${partition.id}`, files, contracts, priorContext: projectPriorContext(input.priorContext, [...priorPaths]), readonlyContractPaths: contracts.filter(contract => !partition.targets.some(target => target.path === contract.path)).map(contract => contract.path),
     readyIds: input.readyIds.filter(id => owned.has(id)), blockedIds: input.blockedIds.filter(id => owned.has(id)),
     retiredIds: input.retiredIds?.filter(id => owned.has(id)), retiredOwners: input.retiredOwners?.filter(item => owned.has(item.id)),
@@ -302,7 +303,7 @@ function localGeneration(input: GenerationInput, partition: SyncPartition, commo
     existingAcceptance: input.existingAcceptance.filter(item => within(item.path, readPaths)),
     mandatoryTests: input.mandatoryTests.filter(test => within(test.testPath, readPaths)),
     nodeChanges: input.nodeChanges?.filter(change => partition.targets.some(target => target.path === change.from.path || change.action === 'move' && target.path === change.to.path)),
-    allowedScope: { paths: input.allowedScope.paths.filter(path => within(path, partition.writePaths) && (path !== '.spec' && !path.startsWith('.spec/') || ownedSpecPaths.has(path))), contractIds: input.allowedScope.contractIds.filter(id => owned.has(id)), flowIds: input.allowedScope.flowIds.filter(id => owned.has(id)) },
+    allowedScope: { paths: writablePaths.filter(path => path !== '.spec' && !path.startsWith('.spec/') || ownedSpecPaths.has(path)), contractIds: input.allowedScope.contractIds.filter(id => owned.has(id)), flowIds: input.allowedScope.flowIds.filter(id => owned.has(id)) },
   }
 }
 
