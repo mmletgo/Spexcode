@@ -171,7 +171,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
     if (!changedPaths.includes(node.path) || decisionScopePaths.has(node.path) || input.plan.newNodeRawSources?.some(item => item.path === node.path)) return false
     const sourceText = authorSource.get(node.path), baseText = authorBefore.get(node.path), composedText = composedByPath.get(node.path), deliveryText = deliveryByPath.get(node.path)
     if (sourceText === undefined || baseText !== sourceText || composedText !== sourceText || deliveryText !== undefined && deliveryText !== sourceText || input.baseline && deliveryText === undefined) return false
-    if ([sourceText, baseText, composedText, deliveryText].some(text => text !== undefined && parseParts(text)?.rawSource != null)) return false
+    if ([sourceText, baseText, composedText, deliveryText].some(text => text !== undefined && !!parseParts(text)?.rawSource)) return false
     const itemIds = [...oldFrozen.graph.items.values(), ...current.graph.items.values()].filter(item => item.path === node.path).map(item => item.id)
     if (itemIds.some(id => authorizedNodeIds.has(id))) return false
     return true

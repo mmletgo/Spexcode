@@ -335,7 +335,8 @@ test('真实runner的冻结三方JSON共享正文引用且逐字段还原旧输�
       assert.equal(readTree(input.snapshot.source.commonDir, before.immutableTree).find(entry => entry.path === modePath)!.mode, '100644')
       assert.equal(readTree(input.snapshot.source.commonDir, input.snapshot.immutableTree).find(entry => entry.path === modePath)!.mode, '100755')
       assert.ok(duplicateBytes > 0, '同一正文在多个视图仍应只存一份并由多处引用')
-      assert.deepEqual(Object.keys(expanded).sort(), ['requiredChangedPaths', 'unownedSourcePaths', 'unownedSourcePathCount', 'snapshotTree', 'readablePaths', 'contractItems', 'origin', 'decision', 'repairDiagnostics', 'inputId', 'baselinePair', 'baselineSelection', 'compositionEvidence', 'authorByteProjections', 'intentArtifactFiles', 'nonTextFiles', 'composed', 'readSetDigest', 'policyDigest', 'plan', 'changedPaths', 'authorChanges', 'adoptedDeliveryPaths', 'authorBaseline', 'oldSource', 'verifiedDelivery', 'newSource', 'composedFiles', 'controlledBeforeFiles'].sort())
+      assert.deepEqual(expanded.rawlessSpecPaths, [])
+      assert.deepEqual(Object.keys(expanded).sort(), ['requiredChangedPaths', 'unownedSourcePaths', 'unownedSourcePathCount', 'rawlessSpecPaths', 'snapshotTree', 'readablePaths', 'contractItems', 'origin', 'decision', 'repairDiagnostics', 'inputId', 'baselinePair', 'baselineSelection', 'compositionEvidence', 'authorByteProjections', 'intentArtifactFiles', 'nonTextFiles', 'composed', 'readSetDigest', 'policyDigest', 'plan', 'changedPaths', 'authorChanges', 'adoptedDeliveryPaths', 'authorBaseline', 'oldSource', 'verifiedDelivery', 'newSource', 'composedFiles', 'controlledBeforeFiles'].sort())
     }
     return runner('refactor')(request)
   })
@@ -711,15 +712,26 @@ test('raw-only空关联不豁免既有基线、稳定ID、非法路径或虚构I
 
 test('无raw的既有叶只保留原stub并将行为事实交给P1初始化', async t => {
   const f = await fixture(t), leafPath = '.spec/export/export-contract/legacy/spec.md', secondLeafPath = '.spec/export/export-contract/legacy-next/spec.md'
+  const expandedOnlyLeafPath = '.spec/export/export-contract/legacy-expanded/spec.md', emptyRawLeafPath = '.spec/export/export-contract/legacy-empty-raw/spec.md'
   const legacyBody = '负责保留该叶的既有正文，后续细化时不复制上游raw。\n'
   const stubFrontmatter = '---\ntitle: Legacy leaf\nstatus: pending\ncode:\n  - src/export.js\n---\n'
   const stub = `${stubFrontmatter}${legacyBody}`
+  const expandedOnlyStub = `${stubFrontmatter}## expanded spec\n\n${legacyBody}`
+  const emptyRawStub = `${stubFrontmatter}## raw source\n\n## expanded spec\n\n${legacyBody}`
+  const leafBodies = new Map([[leafPath, stub], [secondLeafPath, stub], [expandedOnlyLeafPath, expandedOnlyStub], [emptyRawLeafPath, emptyRawStub]])
+  const leafPaths = [...leafBodies.keys()]
+  const leafTargets = [
+    { nodeId: 'legacy', path: leafPath },
+    { nodeId: 'legacy-next', path: secondLeafPath },
+    { nodeId: 'legacy-expanded', path: expandedOnlyLeafPath },
+    { nodeId: 'legacy-empty-raw', path: emptyRawLeafPath },
+  ]
   for (const root of [f.root, f.delivery]) {
-    for (const path of [leafPath, secondLeafPath]) {
+    for (const [path, body] of leafBodies) {
       mkdirSync(join(root, path.split('/').slice(0, -1).join('/')), { recursive: true })
-      writeFileSync(join(root, path), stub)
+      writeFileSync(join(root, path), body)
     }
-    git(root, 'add', leafPath, secondLeafPath); git(root, 'commit', '-m', 'seed rawless legacy leaves')
+    git(root, 'add', ...leafPaths); git(root, 'commit', '-m', 'seed rawless legacy leaves')
   }
   const before = await captureInputSnapshot(f.root), delivered = await captureInputSnapshot(f.delivery)
   writeFileSync(join(f.root, 'src/export.js'), `${f.source}\n// code behavior trigger\n`)
@@ -733,14 +745,14 @@ test('无raw的既有叶只保留原stub并将行为事实交给P1初始化', as
   }
   const plan: CodeBehaviorInput['plan'] = {
     ...seed.plan, version: 'sync-coordinator-v2', direction: 'code_to_spec', sourcePaths: ['src'],
-    targets: [...seed.plan.targets, { nodeId: 'legacy', path: leafPath }, { nodeId: 'legacy-next', path: secondLeafPath }],
-    commitTrigger: { before, paths: [leafPath, secondLeafPath, 'src/export.js'] },
+    targets: [...seed.plan.targets, ...leafTargets],
+    commitTrigger: { before, paths: [...leafPaths, 'src/export.js'] },
     partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 1000000, maxParallel: 1 },
   }
   const input: CodeBehaviorInput = {
     ...seed, snapshot, baseline,
     composed: composeInputSnapshots(snapshot, baseline, { retainConflicts: true }).composed!,
-    plan, origin: 'code', partition: { id: 'legacy-leaf', changedPaths: [leafPath, secondLeafPath, 'src/export.js'] },
+    plan, origin: 'code', partition: { id: 'legacy-leaf', changedPaths: [...leafPaths, 'src/export.js'] },
   }
   const parentRaw = parseParts(f.raw)!.rawSource!
   const copiedParentRaw = `${stubFrontmatter}## raw source\n\n${parentRaw}\n\n## expanded spec\n\n${legacyBody}`
@@ -760,7 +772,7 @@ test('无raw的既有叶只保留原stub并将行为事实交给P1初始化', as
   const accepted = await analyzeCodeBehavior(input, async request => {
     if (request.purpose === 'code_behavior_analyze') {
       const frozen = readFrozenBehaviorContext<{ rawlessSpecPaths: string[]; changedPaths: string[] }>(request)
-      assert.deepEqual(frozen.rawlessSpecPaths, [leafPath, secondLeafPath].sort())
+      assert.deepEqual(frozen.rawlessSpecPaths, leafPaths.sort())
       return runner('refactor', (proposal, context) => completeProposal(proposal, context.changedPaths))(request)
     }
     return runner('refactor')(request)
@@ -769,24 +781,26 @@ test('无raw的既有叶只保留原stub并将行为事实交给P1初始化', as
   assert.equal(accepted.resolutions.length, 0)
   assert.deepEqual(accepted.newNodes, [])
   assert.equal(accepted.facts[0].source, 'code:src/export.js#ExportService')
-  assert.deepEqual(readFileSync(join(f.root, leafPath)), Buffer.from(stub))
-  assert.deepEqual(readFileSync(join(f.root, secondLeafPath)), Buffer.from(stub))
-  assert.deepEqual(readFileSync(join(f.delivery, leafPath)), Buffer.from(stub))
-  assert.deepEqual(readFileSync(join(f.delivery, secondLeafPath)), Buffer.from(stub))
+  for (const [path, body] of leafBodies) {
+    assert.deepEqual(readFileSync(join(f.root, path)), Buffer.from(body))
+    assert.deepEqual(readFileSync(join(f.delivery, path)), Buffer.from(body))
+  }
   assert.equal(parseParts(stub)?.rawSource ?? null, null)
+  assert.equal(parseParts(expandedOnlyStub)?.rawSource, '')
+  assert.equal(parseParts(emptyRawStub)?.rawSource, '')
 
   const initialPlan: CodeBehaviorInput['plan'] = {
-    ...plan, intentNodeId: 'legacy', targets: [{ nodeId: 'legacy', path: leafPath }, { nodeId: 'legacy-next', path: secondLeafPath }],
-    commitTrigger: { before: null, paths: [leafPath, secondLeafPath, 'src/export.js'] },
+    ...plan, intentNodeId: 'legacy', targets: leafTargets,
+    commitTrigger: { before: null, paths: [...leafPaths, 'src/export.js'] },
   }
   const initialInput: CodeBehaviorInput = {
     ...input, baseline: null, origin: 'initial', composed: composeInputSnapshots(snapshot, null).composed!, plan: initialPlan,
-    partition: { id: 'first-rawless-leaves', changedPaths: [leafPath, secondLeafPath, 'src/export.js'] },
+    partition: { id: 'first-rawless-leaves', changedPaths: [...leafPaths, 'src/export.js'] },
   }
   const initial = await analyzeCodeBehavior(initialInput, async request => {
     if (request.purpose === 'code_behavior_analyze') {
       const frozen = readFrozenBehaviorContext<{ rawlessSpecPaths: string[]; changedPaths: string[] }>(request)
-      assert.deepEqual(frozen.rawlessSpecPaths, [leafPath, secondLeafPath].sort())
+      assert.deepEqual(frozen.rawlessSpecPaths, leafPaths.sort())
       const currentIntentPath = initialInput.plan.targets.find(target => target.nodeId === initialInput.plan.intentNodeId)?.path
       assert.ok(currentIntentPath && frozen.rawlessSpecPaths.includes(currentIntentPath))
       return runner('refactor', (proposal, context) => completeProposal(proposal, context.changedPaths))(request)
