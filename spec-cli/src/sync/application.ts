@@ -353,7 +353,13 @@ export class SyncApplication {
   }
   private committedTrigger(snapshot: InputSnapshot, nodeId: string, plan: SyncCoordinatorPlan): { origin: SyncOperation['origin'] | null; commitTrigger: { before: InputSnapshot | null; paths: string[] } } {
     const operations = this.store.listOperations(snapshot.source.repositoryId, { sourceRoot: this.root, limit: 500 }).filter(operation => operation.input.captureKind === 'commit' && JSON.stringify(operation.input.source) === JSON.stringify(snapshot.source) && operation.ingressKey.startsWith('observation:') && this.operationPlan(operation).intentNodeId === nodeId)
-    const accepted = operations.find(operation => operation.input.id === snapshot.id), before = operations.find(operation => operation.input.id !== snapshot.id)?.input ?? null
+    const consumed = this.store.listObservations(snapshot.source, 500).find(observation => {
+      if (observation.input.captureKind !== 'commit' || observation.input.id === snapshot.id || observation.failure) return false
+      const difference = JSON.parse(readEvidence(snapshot.source.commonDir, { sha256: observation.latestDifferenceDigest }).toString('utf8')) as { nodeId: string; consumption?: string }
+      if (difference.nodeId !== nodeId) return false
+      return !!observation.operationId && ['admitted', 'coalesced', 'duplicate'].includes(observation.outcome) || difference.consumption === 'baseline' && !!observation.selection?.bindings.some(binding => 'bytePair' in binding ? binding.bytePair : binding.intentPair)
+    })
+    const accepted = operations.find(operation => operation.input.id === snapshot.id), before = consumed?.input ?? operations.find(operation => operation.input.id !== snapshot.id)?.input ?? null
     const paths = before ? objectGit(snapshot.source.commonDir, ['diff', '--name-only', '-z', '--no-renames', before.immutableTree, snapshot.immutableTree]).toString('utf8').split('\0').filter(Boolean) : verifySnapshot(snapshot).map(entry => entry.path)
     const relevant = paths.filter(path => coveredPath(path, [...plan.executionScope!.paths, ...plan.readPaths]))
     const spec = relevant.some(isSyncSpecPath), code = relevant.some(path => !path.startsWith('.spec/'))
@@ -381,7 +387,7 @@ export class SyncApplication {
         const composed = composeAuthoredInput(snapshot, selection, { retainConflicts: true, executionPaths: plan.executionScope!.paths, contextPaths: plan.readPaths }).composed!
         const evidence = readCompositionEvidence(snapshot, composed, selection)
         const { changed, specChanged, codeChanged, readonlyContext } = this.observationChanges(snapshot, plan, selection, evidence)
-        const difference = { nodeId, readonlyContext, selection: selection.digest, configDigest, policyDigest: syncPlanDigest(plan), paths: evidence.paths.map(path => ({ path: path.path, base: path.base?.oid ?? null, baseMode: path.base?.mode ?? null, source: path.source?.oid ?? null, sourceMode: path.source?.mode ?? null })), intents: evidence.intents.map(intent => ({ resource: intent.resource, changed: intent.changed, before: intent.before?.semanticDigest ?? null, source: intent.source?.semanticDigest ?? null })), residualPaths: evidence.residualPaths, conflicts: evidence.conflicts }
+        const difference = { nodeId, ...(!changed && selection.bindings.some(binding => 'bytePair' in binding ? binding.bytePair : binding.intentPair) ? { consumption: 'baseline' } : {}), readonlyContext, selection: selection.digest, configDigest, policyDigest: syncPlanDigest(plan), paths: evidence.paths.map(path => ({ path: path.path, base: path.base?.oid ?? null, baseMode: path.base?.mode ?? null, source: path.source?.oid ?? null, sourceMode: path.source?.mode ?? null })), intents: evidence.intents.map(intent => ({ resource: intent.resource, changed: intent.changed, before: intent.before?.semanticDigest ?? null, source: intent.source?.semanticDigest ?? null })), residualPaths: evidence.residualPaths, conflicts: evidence.conflicts }
         cachedDifference = { key: differenceKey, changed, specChanged, codeChanged, latestDifferenceDigest: writeEvidence(snapshot.source.commonDir, difference).sha256 }
         this.observedDifferences.set(nodeId, cachedDifference)
       }
