@@ -183,3 +183,44 @@ test('an indivisible shared target remains combined when its total context excee
   assert.equal(result.partitions[0].readBytes, Buffer.byteLength('spec', 'utf8') + 8)
   assert.ok(result.partitions[0].readBytes > result.partitions[0].readLimitBytes)
 })
+
+test('a Spec-only save retains source write authority and all affected downstream targets', () => {
+  const input = fixture()
+  const result = planSyncPartitions({ ...input, changedPaths: [alphaPath] })
+  assert.deepEqual(result.partitions.flatMap(partition => partition.targets.map(target => target.nodeId)).sort(), ['alpha', 'beta', 'gamma'])
+  const alpha = result.partitions.find(partition => partition.targets.some(target => target.nodeId === 'alpha'))!
+  assert.ok(alpha.writePaths.includes('src/services/new.ts'))
+  assert.ok(alpha.targets.some(target => target.nodeId === 'beta'), 'two potential writers of unchanged source must share one partition')
+  const gamma = result.partitions.find(partition => partition.targets.some(target => target.nodeId === 'gamma'))!
+  assert.ok(gamma.writePaths.includes('src/api/gamma.ts'))
+  assert.ok(!gamma.writePaths.includes('tests/gamma.test.ts'), 'mandatory oracle stays read-only even in broad global test scope')
+})
+
+test('directory execution authority narrows to concrete local files instead of disappearing', () => {
+  const input = fixture()
+  input.plan.executionScope!.paths = ['.spec/project', 'src']
+  const result = planSyncPartitions({ ...input, changedPaths: [gammaPath] })
+  const gamma = result.partitions.find(partition => partition.targets.some(target => target.nodeId === 'gamma'))!
+  const projected = projectSyncPartition(input.plan, gamma)
+  assert.deepEqual(projected.executionScope!.paths, [gammaPath, 'src/api/gamma.ts'])
+  assert.ok(!projected.executionScope!.paths.includes('src'))
+})
+
+test('unrelated code facts are excluded while literal shared intent remains', () => {
+  const input = fixture()
+  input.files.set('src/ignored/unused.ts', 'export const unused = true')
+  input.plan.facts = [...input.plan.facts, { source: 'code:src/ignored/unused.ts#unused', text: 'unrelated implementation fact' }]
+  const result = planSyncPartitions(input)
+  const gamma = result.partitions.find(partition => partition.targets.some(target => target.nodeId === 'gamma'))!
+  assert.deepEqual(projectSyncPartition(input.plan, gamma).facts, [{ source: 'user:raw', text: '保留用户原意' }])
+})
+
+test('identical current bytes do not collapse distinct per-path historical estimates', () => {
+  const pathA = 'src/a.ts', pathB = 'src/b.ts', node = contract('both', alphaPath, [pathA, pathB])
+  const result = planSyncPartitions({
+    plan: { ...plan(), intentNodeId: 'both', targets: [{ nodeId: 'both', path: alphaPath }], executionScope: undefined, mandatoryTests: [] },
+    files: new Map([[alphaPath, 'spec'], [pathA, 'same'], [pathB, 'same']]), contracts: [node], changedPaths: [pathA, pathB],
+    readByteSizes: new Map([[pathA, 12], [pathB, 24]]),
+  })
+  assert.equal(result.partitions[0].readBytes, Buffer.byteLength('spec') + 12 + 24)
+})

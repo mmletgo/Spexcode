@@ -49,6 +49,23 @@ type Claim = { path: string; contract: Contract }
 type Draft = { targetNodeIds: string[]; changedPaths: string[]; discoveryNodeIds: string[]; packingKey: string }
 type Context = { readPaths: string[]; contextNodeIds: string[]; contractIds: string[]; flowIds: string[] }
 
+function targetWritePaths(input: PlanSyncPartitionsInput, nodeId: string): string[] {
+  const target = input.plan.targets.find(target => target.nodeId === nodeId)!
+  const paths = new Set<string>([target.path])
+  const claims: Claim[] = []
+  for (const contract of input.contracts.filter(contract => contract.nodeId === nodeId)) {
+    for (const entry of parseRelation(contract.code, 'code').entries) claims.push({ path: entry.path, contract })
+    for (const item of contract.items) if (item.kind === 'AC') claims.push({ path: parseCodeEntry(item.test).path, contract })
+  }
+  addContractClaims(paths, claims, input.files, new Set(input.changedPaths))
+  const knownPaths = [...input.files.keys(), ...input.changedPaths]
+  return uniqueSorted([...paths].filter(path =>
+    coveredPath(path, input.plan.writePaths)
+    && (!input.plan.executionScope || coveredPath(path, input.plan.executionScope.paths))
+    && !input.plan.mandatoryTests.some(test => coveredPath(test.testPath, [path]) || coveredPath(path, [test.testPath]))
+    && (input.files.has(path) || !knownPaths.some(known => known.startsWith(`${path}/`)))))
+}
+
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).sort(compare).join(',')}]`
   if (value && typeof value === 'object') {
@@ -197,7 +214,8 @@ function readFootprint(paths: readonly string[], files: ReadonlyMap<string, stri
     const estimatedBytes = estimates?.get(path)
     if (estimatedBytes !== undefined && (!Number.isSafeInteger(estimatedBytes) || estimatedBytes < 0)) throw new Error(`readByteSizes 中的字节估算无效: ${path}`)
     if (body === undefined && estimatedBytes === undefined) continue
-    const hash = body === undefined ? `missing:${path}` : contentHash(Buffer.from(body, 'utf8'))
+    // A per-path estimate can include different historical versions behind identical current bytes.
+    const hash = estimatedBytes !== undefined ? `estimated:${path}` : body === undefined ? `missing:${path}` : contentHash(Buffer.from(body, 'utf8'))
     const bytes = Math.max(body === undefined ? 0 : Buffer.byteLength(body, 'utf8'), estimatedBytes ?? 0)
     const prior = bodies.get(hash)
     if (prior) { prior.bytes = Math.max(prior.bytes, bytes); prior.paths.push(path) }
@@ -227,6 +245,15 @@ function partitionDrafts(input: PlanSyncPartitionsInput, contracts: readonly Con
     if (a !== b) parent.set(compare(a, b) <= 0 ? b : a, compare(a, b) <= 0 ? a : b)
   }
   const changedPaths = uniqueSorted(input.changedPaths)
+  const writers = new Map(targets.map(target => [target.nodeId, targetWritePaths(input, target.nodeId)]))
+  const activeTargets = targets.filter(target => target.nodeId !== input.plan.intentNodeId || changedPaths.includes(target.path)
+    || writers.get(target.nodeId)!.some(path => path !== target.path))
+  const writerByPath = new Map<string, string>()
+  for (const target of activeTargets) for (const path of writers.get(target.nodeId)!) {
+    const prior = writerByPath.get(path)
+    if (prior) union(prior, target.nodeId)
+    else writerByPath.set(path, target.nodeId)
+  }
   const assigned = new Map<string, string[]>()
   const discoveries = new Map<string, Draft[]>()
   const preferred = new Set(targetByNode.keys())
@@ -248,6 +275,12 @@ function partitionDrafts(input: PlanSyncPartitionsInput, contracts: readonly Con
   }
 
   const byRoot = new Map<string, Draft>()
+  for (const target of activeTargets) {
+    const root = find(target.nodeId)
+    const draft = byRoot.get(root) ?? { targetNodeIds: [], changedPaths: [], discoveryNodeIds: [], packingKey: '' }
+    draft.targetNodeIds.push(target.nodeId)
+    byRoot.set(root, draft)
+  }
   for (const path of changedPaths) for (const nodeId of assigned.get(path) ?? []) {
     const root = find(nodeId)
     const draft = byRoot.get(root) ?? { targetNodeIds: [], changedPaths: [], discoveryNodeIds: [], packingKey: '' }
@@ -300,10 +333,12 @@ function partitionDrafts(input: PlanSyncPartitionsInput, contracts: readonly Con
 function projectedPartition(input: PlanSyncPartitionsInput, draft: Draft, context: Context, limitBytes: number): SyncPartition {
   const targets = input.plan.targets.filter(target => draft.targetNodeIds.includes(target.nodeId)).sort((a, b) => compare(a.path, b.path) || compare(a.nodeId, b.nodeId))
   const writePaths = uniqueSorted([
-    ...draft.changedPaths.filter(path => coveredPath(path, input.plan.writePaths)),
-    ...targets.map(target => target.path),
+    ...draft.changedPaths.filter(path => coveredPath(path, input.plan.writePaths)
+      && (!input.plan.executionScope || coveredPath(path, input.plan.executionScope.paths))
+      && !input.plan.mandatoryTests.some(test => coveredPath(test.testPath, [path]) || coveredPath(path, [test.testPath]))),
+    ...targets.flatMap(target => targetWritePaths(input, target.nodeId)),
   ])
-  const sourcePaths = uniqueSorted(draft.changedPaths.filter(path => coveredPath(path, input.plan.sourcePaths ?? [])))
+  const sourcePaths = uniqueSorted([...draft.changedPaths, ...writePaths].filter(path => coveredPath(path, input.plan.sourcePaths ?? [])))
   const contextNodes = new Set([...context.contextNodeIds, ...draft.discoveryNodeIds])
   const readPaths = uniqueSorted(context.readPaths)
   const read = readFootprint(readPaths, input.files, input.readByteSizes, limitBytes)
@@ -412,12 +447,14 @@ export function projectSyncPartition(plan: SyncCoordinatorPlan, partition: SyncP
     writePaths,
     sourcePaths,
     mandatoryTests,
+    facts: plan.facts.filter(fact => !fact.source.startsWith('code:')
+      || readPaths.some(path => relationClaimsPath(parseCodeEntry(fact.source.slice('code:'.length)).path, path))),
     authorizedChanges: plan.authorizedChanges?.filter(change => partition.contractIds.includes(change.id)),
     retiredIds: plan.retiredIds?.filter(id => localIds.has(id)),
     decisionAuthorities,
     decisionRefs: (plan.decisionRefs ?? []).filter(ref => decisionRefs.has(ref.sha256)),
     executionScope: plan.executionScope ? {
-      paths: uniqueSorted(plan.executionScope.paths.filter(path => writePaths.includes(path))),
+      paths: uniqueSorted(writePaths.filter(path => coveredPath(path, plan.executionScope!.paths))),
       contractIds: uniqueSorted(partition.contractIds.filter(id => plan.executionScope!.contractIds.includes(id))),
       flowIds: uniqueSorted(partition.flowIds.filter(id => plan.executionScope!.flowIds.includes(id))),
     } : undefined,
