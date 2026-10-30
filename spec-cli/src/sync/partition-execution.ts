@@ -320,7 +320,29 @@ export function implementationPlanningPartitions(partitions: readonly SyncPartit
   }).map(partition => partition.id)
 }
 
-async function implementationFileWriters(input: GenerationInput, locals: readonly LocalGeneration[], plan: SyncPartitionPlan, maxParallel: number, options: GenerationOptions, checkpoints: PartitionCheckpoints): Promise<FileWriterPlan> {
+/** 从真实局部/跨边输入投影尚需派发的阶段，预算和最终独审共用同一业务集合。 */
+export function implementationGenerationDispatch(input: GenerationInput, plan: SyncPartitionPlan, specOnly: boolean): { interfaceParents: Set<string>; locals: LocalGeneration[]; reviews: { id: string; input: GenerationInput }[]; planningIds: string[]; requiredKeys: string[] } {
+  const commonDir = input.snapshot.source.commonDir
+  const selection = implementationPartitionSelection(plan, input.contracts)
+  const locals = selection.partitions.map(partition => ({ partition, input: localGeneration(input, partition, commonDir) })).filter(local => local.input.readyIds.length)
+  const reviews = [...locals.map(local => ({ id: local.partition.id, input: local.input })), ...selection.dependencies.map((edge, index) => {
+    const endpoints = plan.partitions.filter(partition => [edge.from, edge.to].includes(partition.id))
+    const paths = unique(endpoints.flatMap(partition => partition.readPaths)), targets = endpoints.flatMap(partition => partition.targets)
+    const combined = { ...endpoints[0], id: `edge-${index}`, readPaths: paths, writePaths: unique(endpoints.flatMap(partition => partition.writePaths)), sourcePaths: unique(endpoints.flatMap(partition => partition.sourcePaths)), targets }
+    const projected = { ...localGeneration(input, combined, commonDir), analysisEvidence: endpoints.flatMap(partition => { const evidence = partitionAnalysisEvidence(commonDir, input.analysis, partition.id); return evidence ? [evidence] : [] }) }
+    return { id: `edge:${edge.from}:${edge.to}`, input: { ...projected, readyIds: input.readyIds.filter(id => edge.contractIds.includes(id) || projected.retiredIds?.includes(id)) } }
+  })].filter(local => local.input.readyIds.length)
+  const activeIds = new Set(locals.map(local => local.partition.id))
+  const planningIds = specOnly ? [] : implementationPlanningPartitions(plan.partitions, input.contracts, input.nodeChanges).filter(id => activeIds.has(id))
+  const requiredKeys = [
+    ...specOnly ? [] : locals.map(local => `${input.requestKey}:partition:${local.partition.id}:code_generate`),
+    ...planningIds.map(id => `${input.requestKey}:partition:${id}:implementation_plan`),
+    ...reviews.map(local => `${input.requestKey}:final:${local.id}:code_review`),
+  ]
+  return { interfaceParents: selection.interfaceParents, locals, reviews, planningIds, requiredKeys }
+}
+
+async function implementationFileWriters(input: GenerationInput, locals: readonly LocalGeneration[], planningIds: readonly string[], maxParallel: number, options: GenerationOptions, checkpoints: PartitionCheckpoints): Promise<FileWriterPlan> {
   const owner = new Map<string, string>()
   for (const local of locals) for (const path of local.input.allowedScope.paths) {
     if ([...owner].some(([owned, id]) => id !== local.partition.id && (within(path, [owned]) || within(owned, [path])))) throw Object.assign(new Error(`P1分区争用实现writer: ${path}; 需要互不重叠的文件规划`), { code: 'implementation_plan_conflict' })
@@ -328,7 +350,7 @@ async function implementationFileWriters(input: GenerationInput, locals: readonl
   }
   const saved = checkpoints.load<FileWriterPlan>('file-writer-plan')
   if (saved) return saved
-  const needs = new Set(implementationPlanningPartitions(plan.partitions, input.contracts, input.nodeChanges))
+  const needs = new Set(planningIds)
   const proposed = await mapSyncPartitions(locals.filter(local => needs.has(local.partition.id)), maxParallel, input.signal, async local => {
     const key = `partition:${local.partition.id}:implementation-plan`, prior = checkpoints.load<{ paths: string[]; trace: ElaborationTrace }>(key)
     if (prior) return { partitionId: local.partition.id, ...prior }
@@ -370,18 +392,18 @@ export async function generateSyncPartitions(input: GenerationInput, plan: SyncP
   input = { ...structuredClone(data), signal }; plan = structuredClone(plan)
   const commonDir = input.snapshot.source.commonDir
   let generationPartitions = [...plan.partitions]
-  let selection = implementationPartitionSelection(plan, input.contracts)
-  const interfaceParents = selection.interfaceParents
-  let locals = selection.partitions.map(partition => ({ partition, input: localGeneration(input, partition, commonDir) })).filter(local => local.input.readyIds.length)
+  let dispatch = implementationGenerationDispatch(input, plan, specOnly)
+  const interfaceParents = dispatch.interfaceParents
+  let locals = dispatch.locals
   let planned: FileWriterPlan = { version: 'sync-file-writers-v1', writers: [], traces: [] }
   try {
-    if (!specOnly) planned = await implementationFileWriters(input, locals, plan, maxParallel, options, checkpoints)
+    if (!specOnly) planned = await implementationFileWriters(input, locals, dispatch.planningIds, maxParallel, options, checkpoints)
     const plannedPaths = unique(planned.writers.flatMap(writer => writer.paths))
     const authorization = await options.beforePartitionGeneration?.(plannedPaths, writeEvidence(commonDir, planned))
     if (authorization) { input = { ...input, allowedScope: authorization.scope, composed: authorization.composed ?? input.composed } }
-    generationPartitions = generationPartitions.map(partition => { const paths = planned.writers.find(writer => writer.partitionId === partition.id)?.paths ?? []; return { ...partition, readPaths: unique([...partition.readPaths, ...paths]), writePaths: unique([...partition.writePaths, ...paths]), sourcePaths: unique([...partition.sourcePaths, ...paths.filter(path => within(path, options.implementationPolicy?.sourcePaths ?? []))]) } })
-    selection = implementationPartitionSelection({ ...plan, partitions: generationPartitions }, input.contracts)
-    locals = selection.partitions.map(partition => ({ partition, input: localGeneration(input, partition, commonDir) })).filter(local => local.input.readyIds.length)
+    generationPartitions = generationPartitions.map(partition => { const paths = planned.writers.find(writer => writer.partitionId === partition.id)?.paths ?? []; return { ...partition, readPaths: unique([...partition.readPaths, ...paths]), writePaths: unique([...partition.writePaths, ...paths]) } })
+    dispatch = implementationGenerationDispatch(input, { ...plan, partitions: generationPartitions }, specOnly)
+    locals = dispatch.locals
   } catch (error) {
     const cause = error as { code?: string; message?: string }
     return { status: input.signal?.aborted ? 'cancelled' : 'repair', inputId: input.snapshot.id, inputDigest: '', candidate: null, candidateFiles: null, output: planned, reviewOutput: null, review: null, validationFindings: [], traces: planned.traces, candidateValidated: false, reviewPassed: false, runtimeVerification: 'not_run', delivery: 'not_applied', failure: { code: cause.code ?? 'implementation_plan_invalid', message: cause.message ?? String(error) } }
@@ -422,13 +444,7 @@ export async function generateSyncPartitions(input: GenerationInput, plan: SyncP
   const base: GenerationResult = { fileWriterPlanRef: writeEvidence(commonDir, planned), status: 'repair', inputId: input.snapshot.id, inputDigest: contentHash(JSON.stringify({ partitionPlanDigest: plan.digest, candidateDigest: candidate.digest })), candidate, candidateFiles: null, output: { version: 'sync-files-v1', changes }, reviewOutput: null, review: null, validationFindings, traces: builders, candidateValidated: false, reviewPassed: false, runtimeVerification: 'not_run', delivery: 'not_applied', failure: null }
   if (validationFindings.some(finding => finding.severity === 'error')) return base
   base.candidateValidated = true
-  const reviews = [...locals.map(local => ({ id: local.partition.id, input: local.input })), ...selection.dependencies.map((edge, index) => {
-    const endpoints = generationPartitions.filter(partition => [edge.from, edge.to].includes(partition.id))
-    const paths = unique(endpoints.flatMap(partition => partition.readPaths)), targets = endpoints.flatMap(partition => partition.targets)
-    const combined = { ...endpoints[0], id: `edge-${index}`, readPaths: paths, writePaths: unique(endpoints.flatMap(partition => partition.writePaths)), sourcePaths: unique(endpoints.flatMap(partition => partition.sourcePaths)), targets }
-    const projected = { ...localGeneration(input, combined, commonDir), analysisEvidence: endpoints.flatMap(partition => { const evidence = partitionAnalysisEvidence(commonDir, input.analysis, partition.id); return evidence ? [evidence] : [] }) }
-    return { id: `edge:${edge.from}:${edge.to}`, input: { ...projected, readyIds: input.readyIds.filter(id => edge.contractIds.includes(id) || projected.retiredIds?.includes(id)) } }
-  })].filter(local => local.input.readyIds.length)
+  const reviews = dispatch.reviews
   const checked = await mapSyncPartitions(reviews, maxParallel, input.signal, async local => {
     const key = `partition:${local.id}:candidate-review`, saved = checkpoints.load<GenerationResult>(key)
     if (saved) { if (saved.candidate?.digest !== candidate.digest) reject('分区独审绑定了另一候选'); return saved }

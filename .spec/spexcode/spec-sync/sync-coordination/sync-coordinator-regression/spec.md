@@ -93,3 +93,5 @@ v2定向回归在真实Git/SQLite证明code_to_spec只有行为分析/独审、P
 v2生命周期集成回归让旧Spec的`related: [src/helpers/**/*.js]`命中全局`readPaths`之外、但真实before tree中存在的helper；协调器须以`historical_context_binding`拒绝构造局部历史上下文，不能让分区投影绕过全局read授权。
 
 纯父接口与真实源码叶的Git/SQLite回归检查最终预算键与实际生成、文件规划及独立审查请求集合相等，不列已跳过父接口的虚构工作。全局目录授权与局部精确文件范围求交后，合法目标Spec仍可由程序装配，只读上游不取得写权；测试在Docker前明确终止，原source/index与零journal保持。
+
+两区均有独立ready分支、跨边重试义务被真实GAP完全阻断时，在真实Git/SQLite复现最终误计6调用而仅余4调用的失败；同一冻结8调用预算修复后完成4次P1及实际4次P2派发，两区均到达最终独审。预算requiredKeys与实际dispatch记录精确相等，完整契约边仍保留；明确native接缝在Docker前停止，预算/deadline/source/index不变且无journal，不声称真实模型、V3或交付通过。

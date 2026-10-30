@@ -15,7 +15,7 @@ import type { ElaborationInput, ElaborationResult } from './elaboration-types.js
 import { CONTRACT_COLUMNS, parseParts } from '@spexcode/spec-core/contracts'
 import type { GeneratedTables } from './elaboration-markdown.js'
 import type { GenerationInput } from './generation-types.js'
-import { analyzeSyncPartitions, completeSyncPartitionPlan, elaborateSyncPartitions, generateSyncPartitions, implementationPartitionSelection, mapSyncPartitions } from './partition-execution.js'
+import { analyzeSyncPartitions, completeSyncPartitionPlan, elaborateSyncPartitions, generateSyncPartitions, implementationGenerationDispatch, implementationPartitionSelection, mapSyncPartitions } from './partition-execution.js'
 import type { PartitionCheckpoints } from './partition-execution.js'
 import type { SyncPartitionPlan } from './partitioning.js'
 import type { CodeBehaviorInput } from './code-behavior.js'
@@ -264,6 +264,30 @@ test('分区生成同时在途，每区只收到本区完整正文；分区和�
   const resumed = await generateSyncPartitions(input, plan, 2, false, { runner: runtime.runner, validateCandidate: async () => [] }, checkpoints)
   assert.equal(resumed.candidate!.digest, result.candidate!.digest)
   assert.equal(runtime.calls.length, callsBeforeResume, '恢复不得重复完成阶段的真实模型调用')
+})
+
+for (const specOnly of [false, true]) test(`最终派发投影只按真实ready筛选受阻跨边和恢复技术scope：specOnly=${specOnly}`, async t => {
+  const { input, plan, checkpoints } = await fixture(t), runtime = native()
+  input.readyIds = ['AC-EXPORT-03', 'AC-IMPORT-03']
+  input.blockedIds = ['REQ-EXPORT-01', 'REQ-IMPORT-01']
+  input.allowedScope.contractIds.push('archive-contract', 'VERIFY-ARCHIVE-01')
+  const dispatch = implementationGenerationDispatch(input, plan, specOnly)
+  assert.deepEqual(dispatch.locals.map(local => local.partition.id), ['part-export', 'part-import'])
+  assert.deepEqual(dispatch.reviews.map(local => local.id), ['part-export', 'part-import'])
+  assert.deepEqual(dispatch.planningIds, [])
+  assert.equal(dispatch.requiredKeys.length, specOnly ? 2 : 4)
+  assert.equal(plan.dependencies.length, 1, '受阻边仍保留于原计划，不冒充实际实施独审')
+  const runner: ElaborationRunner = async request => {
+    const result = await runtime.runner(request)
+    if (request.purpose !== 'code_review') return result
+    const context = JSON.parse(request.prompt.split('冻结原意和基线完整输入:\n')[1].split('\n实际候选身份')[0]) as { readyIds: string[] }
+    const output = { ...result.output as object, checkedIds: context.readyIds }
+    return { ...result, output, resultDigest: contentHash(JSON.stringify(output)) }
+  }
+  const result = await generateSyncPartitions(input, plan, 2, specOnly, { runner, validateCandidate: async () => [] }, checkpoints)
+  assert.equal(result.status, 'reviewed', JSON.stringify(result.failure))
+  assert.deepEqual([...dispatch.requiredKeys].sort(), runtime.calls.map(call => call.requestKey).sort())
+  assert.deepEqual(result.partitionEvidence!.flatMap(item => item.review.checkedIds).sort(), [...input.readyIds].sort())
 })
 
 test('异步完成顺序不改变确定序装配的候选树', async t => {
@@ -870,6 +894,7 @@ test('多节点新功能先规划互斥精确文件，再只向对应writer授�
   for (const contract of input.contracts) contract.code = []
   for (const partition of plan.partitions) partition.writePaths = partition.writePaths.filter(path => !path.startsWith('src/'))
   input.allowedScope.paths = input.allowedScope.paths.filter(path => !path.startsWith('src/'))
+  const dispatch = implementationGenerationDispatch(input, plan, false)
   const runner: ElaborationRunner = async request => {
     const ordinal = calls.push(request)
     const domain = /part-(export|import|archive)/.exec(request.requestKey)?.[1]
@@ -893,6 +918,7 @@ test('多节点新功能先规划互斥精确文件，再只向对应writer授�
   assert.deepEqual(acquired, ['src/new-archive.js', 'src/new-export.js', 'src/new-import.js'])
   assert.equal(calls.filter(call => call.purpose === 'implementation_plan').length, 3)
   assert.equal(calls.filter(call => call.purpose === 'code_generate').length, 3)
+  assert.deepEqual([...dispatch.requiredKeys].sort(), calls.map(call => call.requestKey).sort(), '文件writer扩充只增加读取/写路径，不改变真实派发业务集合')
   const entries = verifyCandidate(input.snapshot.source.commonDir, result.candidate!)
   for (const path of acquired) assert.ok(entries.some(entry => entry.path === path))
 })
@@ -948,6 +974,10 @@ test('已退役旧ID仍按真实owner保留局部ready及负向验收输入，�
   input.retiredIds = input.readyIds.filter(id => id.includes('-EXPORT-'))
   input.retiredOwners = input.retiredIds.map(id => ({ id, path: retired.path }))
   input.nodeChanges = [{ action: 'retire', from: { nodeId: retired.nodeId, path: retired.path }, evidenceRef: writeEvidence(input.snapshot.source.commonDir, { explicit: 'fixture retirement authorization' }) }]
+  const dispatch = implementationGenerationDispatch(input, plan, false)
+  assert.ok(dispatch.locals.find(local => local.partition.id === 'part-export')!.input.readyIds.includes('AC-EXPORT-03'))
+  assert.ok(dispatch.reviews.find(local => local.id.startsWith('edge:'))!.input.readyIds.includes('AC-EXPORT-03'), '历史退役义务仍由同一真实owner投影进入跨边独审及预算')
+  assert.deepEqual(dispatch.planningIds, [])
   let generatedRetirement = false
   const runner: ElaborationRunner = async request => {
     if (request.purpose === 'implementation_plan') assert.fail('退役writer不能规划新实现文件')
