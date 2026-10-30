@@ -30,6 +30,8 @@ related:
 
 每轮先验证 [[elaboration-output]] 的结构，再调用 [[sync-contract-schema]] 解析与引用、完整性和状态矩阵检查；raw 段使用解析器的围栏感知结果，原文里的示例标题不成为正文分界。独立审查使用另一会话及线程，从原意、冻结事实、全部适用性和候选重新走路径。程序或审查的具体缺口触发有限修复；重要未知事实或业务冲突须先形成准确 GAP，不能自动编造政策消除错误。GAP 仅阻塞来源、规则和验收依赖闭包；确实位于同一 GAP 闭包中的未知状态事件处置和业务完整性发现保留为 `blockedStructureFindings`，独立流程仍由审查确认后输出可推进项。重复 ID、悬空引用、非法来源等全域结构错误不能借 GAP 豁免。
 
+独审在完整冻结输入、raw 和候选 Markdown 之外，同时取得同一轮候选检查已解析的业务行视图：仅包含本轮 changes 的精确 nodeId/path 对应契约内全部业务行及其原解析字段，不重复未变更或只读上下文契约，不以生成器差量或自述代替候选。JSON 和 Markdown 的转义是展示编码，审查须以解码后的解析字段值对照原意和事实，不能仅凭序列化反斜杠数量断言业务字面值改变。视图不提供通过结论，不替代原 Markdown、全图验证或独立语义审查。AC-ELABORATION-45 以真实渲染和解析核对正则、反斜杠、管道与反引号逐字一致及只读上下文隔离；AC-ELABORATION-35 保留完整旧行，AC-ELABORATION-46 保持错误引用类型、悬空 VERIFY 和无需求追溯在独审前拒绝。注入 runner 的这些回归不代表真实 Agent 验收通过。
+
 [[elaboration-result]] 保存各轮完整候选、生成与审查原始输出、具体发现、会话追踪及摘要。业务结构与独立审查通过后，根据 GAP 返回 `complete`、`needs_input` 或 `conflict`；安全能力不足为 `unsupported`，执行失败为 `failed`，取消为 `cancelled`，未消除失败且预算耗尽为 `exhausted`。总预算到期但原生停止未证实时，保留 `cancellation_pending` 原始错误和精确会话身份，结果为 failed；不得用 exhausted 掩盖未停稳或派发新原生会话。确认取消后，总预算才归为 exhausted。
 
 这些均是细化阶段结果；`runtimeVerification: not_run`、`implementationReady: false` 不能作为已同步证据。尚无实现锚点或测试的具体缺口保留给 P2，不制造虚构 `code:` 或运行通过结论。
