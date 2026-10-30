@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve, sep } from 'node:path'
 import type { ApplyJournal, ApplyReceipt, BlobRef, DeliveryPlan, InputSnapshot, SyncOperation, WriteFence } from './operation-types.js'
-import type { SyncStore } from './store.js'
+import { SyncStoreError, type SyncStore } from './store.js'
 import { applyJournalFiles, prepareApplyPlan } from './apply-files.js'
 import { claimFileMutex } from './file-mutex.js'
 import { captureInputSnapshot, contentHash, identifyWorktree, objectGit, readEvidence, writeEvidence } from './snapshot.js'
@@ -117,6 +117,10 @@ export async function deliverVerifiedAttempt(store: SyncStore, fence: WriteFence
       const baseTree = objectGit(commonDir, ['rev-parse', `${deliveryPlan.baseCommit}^{tree}`]).toString().trim()
       const binding = trusted(operation.input.source.canonicalRoot, 'prepare', baseTree)
       await withWorktreeRegistryLock(async () => {
+        const current = store.assertWriteFence(fence)
+        operation = current.operation
+        if (current.attempt.status !== 'verified') fail('SYNC_DELIVERY_NOT_VERIFIED', '等待Git registry后尝试已不处于verified准备阶段')
+        store.assertPublicationBaseCurrent(operation.id, current.attempt.id)
         if (!existsSync(join(root, '.git'))) {
           assertOwner()
           const ref = spawnSync(binding.gitPath, ['--no-replace-objects', '-C', operation.input.source.canonicalRoot, 'show-ref', '--verify', '--quiet', deliveryPlan.branch], { env: makeTrustedHookEnv(binding) })
@@ -190,6 +194,7 @@ export async function deliverVerifiedAttempt(store: SyncStore, fence: WriteFence
     owner = { ...owner, published: true }; writeOwner(ownerPath, owner)
     return { operation: settled, receipt }
   } catch (error) {
+    if (error instanceof SyncStoreError && ['SYNC_PUBLICATION_BUSY', 'SYNC_PUBLICATION_BASE_STALE'].includes(error.code)) throw error
     const current = store.readAttempt(attempt.id)
     if (!['settled', 'failed', 'superseded'].includes(current.status) && (current.status === 'applying' || current.expiresAtMs > Date.now())) {
       const evidence = writeEvidence(commonDir, { version: 1, kind: 'private-delivery-failure', operationId: operation.id, attemptId: attempt.id, journalId: journal?.id ?? null, message: error instanceof Error ? error.message : String(error) })
