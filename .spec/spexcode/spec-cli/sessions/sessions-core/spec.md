@@ -226,6 +226,10 @@ The record's existing `name` is the one human display override: CLI creation may
 rename later replaces or clears that same field. It affects only the shared label/title projection;
 the branch, worktree slug, and stored prompt title retain their own responsibilities.
 
+New session branch and worktree storage names append the complete session UUID to their prompt/spec slug.
+The visible short ID, selector grammar, labels and titles keep their existing semantics. Published records
+continue to address their stored branch and worktreePath; no path or record migration is inferred from a label.
+
 **Exclusion lives in the lock, never in a privileged process.** The per-session record lock implementation lives at
 `spec-cli/src/session-record-lock.ts`: a filesystem lock with a PID liveness check, held across processes, so a session operation may run in whatever process
 takes it — a backend is the convenient owner of the launch environment and a shared cache, not the holder

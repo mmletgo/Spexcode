@@ -8,6 +8,7 @@ import { dirname, join } from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { createServer } from 'node:net'
+import { sessionIdForCreateKey } from './sessions.js'
 
 const src = dirname(fileURLToPath(import.meta.url))
 const pkg = join(src, '..')
@@ -33,7 +34,7 @@ async function waitFor(check: () => boolean | Promise<boolean>, label: string, t
 }
 const git = (project: string, ...args: string[]) => execFileSync('git', ['-C', project, ...args], { encoding: 'utf8' }).trim()
 
-async function publicCreateFixture(signal: AbortSignal, registryMode: 'create' | 'close' | 'rollback' | null = null): Promise<void> {
+async function publicCreateFixture(signal: AbortSignal, registryMode: 'create' | 'close' | 'rollback' | 'names' | 'recovery-safety' | null = null): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), 'spex-session-create-'))
   const projectPath = join(root, 'project'); mkdirSync(projectPath)
   const project = realpathSync(projectPath)
@@ -207,19 +208,112 @@ esac
     const ps = execFileSync('ps', ['-eo', 'args='], { encoding: 'utf8' })
     assert.ok(!ps.includes(gitWrapper), 'stalled Git process is physically gone')
   }
-  const crashBackend = async (marker: string, key: string, prompt: string, beforeRestart?: () => void) => {
+  const crashBackend = async (marker: string, key: string, prompt: string, beforeRestart?: () => void, pinnedBase?: string) => {
     writeFileSync(marker, 'kill\n')
     const crashed = child
-    await assert.rejects(post(key, prompt), 'process death closes the admitted request without a response')
+    await assert.rejects(post(key, prompt, undefined, undefined, pinnedBase), 'process death closes the admitted request without a response')
     await waitFor(() => crashed.exitCode !== null || crashed.signalCode !== null, 'crashed backend exit')
     rmSync(marker, { force: true })
     beforeRestart?.()
     child = startBackend()
     await waitForHealth()
+
+  }
+  const publishedOwner = (id: string, path: string, branch: string, publish: boolean) => {
+    const script = `import {configuredSessionApplication} from ${JSON.stringify(join(src, 'session-application.ts'))};
+import {fromRaw,writeRecord} from ${JSON.stringify(join(src, 'session-record.ts'))};
+const app=configuredSessionApplication(),id=${JSON.stringify(id)};
+if(${publish}){app.createSession({sessionId:id,status:'idle',proposal:null,note:null,parentSessionId:null});writeRecord(fromRaw({session_id:id,governed:true,status:'idle',stopped:true,worktree_path:${JSON.stringify(path)},branch:${JSON.stringify(branch)}}));}
+console.log(JSON.stringify({address:app.readAddress(id),state:app.readState(id)}));`
+    return execFileSync(process.execPath, ['--import', createRequire(import.meta.url).resolve('tsx/esm'), '--input-type=module', '-e', script], {
+      cwd: project, encoding: 'utf8', env: { ...process.env, SPEXCODE_HOME: home, SPEX_SESSION_DATABASE_PATH: join(home, 'sessions.sqlite'), SPEX_SESSION_ID: undefined, SPEXCODE_SESSION_ID: undefined },
+    }).trim()
   }
 
   try {
     await waitForHealth()
+    if (registryMode === 'recovery-safety') {
+      unlinkSync(stallGit)
+      for (const layout of ['current', 'legacy']) for (const mutation of ['wip', 'ignored', 'fork', 'expired-reflog', 'missing-reflog', 'symbolic-base', 'published-owner', 'clean']) {
+        const key = mutation === 'published-owner' ? layout === 'legacy' ? 'crash-3' : 'collision-112' : `retry-${layout}-${mutation}`, prompt = `${layout} retry safety ${mutation}`
+        const pinnedBase = mutation === 'symbolic-base' ? 'staging' : undefined, sourceFork = git(project, 'rev-parse', 'staging')
+        let receiptPath = '', receipt: any
+        let ownerId = '', ownerBefore = '', ownerRecordBefore = ''
+        await crashBackend(killAfterGit, key, prompt, () => {
+          receiptPath = candidateReceipts().find(path => path.endsWith(`${sessionIdForCreateKey(key)}.json`))!
+          receipt = JSON.parse(readFileSync(receiptPath, 'utf8'))
+          if (layout === 'legacy') {
+            const id = sessionIdForCreateKey(key), path = receipt.path.slice(0, -id.length) + id.slice(0, 4), branch = receipt.branch.slice(0, -id.length) + id.slice(0, 4)
+            git(project, 'worktree', 'move', receipt.path, path)
+            git(path, 'branch', '-m', branch)
+            receipt = { ...receipt, path, branch }
+            writeFileSync(receiptPath, JSON.stringify(receipt))
+          }
+          if (mutation === 'wip' || mutation === 'ignored') {
+            if (mutation === 'ignored') writeFileSync(join(project, '.git/info/exclude'), 'ignored-wip\n', { flag: 'a' })
+            writeFileSync(join(receipt.path, mutation === 'ignored' ? 'ignored-wip' : 'user-data'), 'preserve candidate edits')
+          }
+          if (mutation === 'fork' || mutation === 'expired-reflog' || mutation === 'symbolic-base') git(receipt.path, '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.test', 'commit', '--allow-empty', '-qm', 'candidate authored commit')
+          if (mutation === 'symbolic-base') git(project, 'update-ref', 'refs/heads/staging', git(receipt.path, 'rev-parse', 'HEAD'))
+          if (mutation === 'published-owner') {
+            ownerId = sessionIdForCreateKey(layout === 'legacy' ? 'crash-157' : 'collision-117')
+            assert.equal(ownerId.slice(0, 4), sessionIdForCreateKey(key).slice(0, 4))
+            ownerBefore = publishedOwner(ownerId, receipt.path, receipt.branch, true)
+            ownerRecordBefore = readFileSync(recordPath(ownerId), 'utf8')
+          }
+          const reflog = git(project, 'rev-parse', '--path-format=absolute', '--git-path', `logs/refs/heads/${receipt.branch}`)
+          if (mutation === 'expired-reflog') writeFileSync(reflog, readFileSync(reflog, 'utf8').split('\n').slice(1).join('\n'))
+          if (mutation === 'missing-reflog') unlinkSync(reflog)
+        }, pinnedBase)
+        const head = git(receipt.path, 'rev-parse', 'HEAD'), beforeReceipt = readFileSync(receiptPath, 'utf8')
+        const retry = await post(key, prompt, undefined, undefined, pinnedBase), body = await retry.json() as any
+        assert.equal(retry.status, mutation === 'clean' ? 201 : 409, `${layout} ${mutation}: ${JSON.stringify(body)}`)
+        if (mutation === 'clean') assert.equal(existsSync(receiptPath), false)
+        else {
+          assert.equal(readFileSync(receiptPath, 'utf8'), beforeReceipt)
+          assert.equal(git(receipt.path, 'rev-parse', 'HEAD'), head)
+          if (mutation === 'wip' || mutation === 'ignored') assert.equal(readFileSync(join(receipt.path, mutation === 'ignored' ? 'ignored-wip' : 'user-data'), 'utf8'), 'preserve candidate edits')
+        }
+        if (mutation === 'symbolic-base') git(project, 'update-ref', 'refs/heads/staging', sourceFork)
+        if (mutation === 'published-owner') {
+          assert.equal(readFileSync(recordPath(ownerId), 'utf8'), ownerRecordBefore)
+          assert.equal(publishedOwner(ownerId, receipt.path, receipt.branch, false), ownerBefore)
+        }
+      }
+      return
+    }
+    if (registryMode === 'names') {
+      unlinkSync(stallGit)
+      const responses = await Promise.all([post('collision-112'), post('collision-117')])
+      const created = await Promise.all(responses.map(response => response.json() as Promise<any>))
+      assert.deepEqual(responses.map(response => response.status), [201, 201], `same short prefix must not collide: ${JSON.stringify(created)}`)
+      assert.equal(created[0].id.slice(0, 4), created[1].id.slice(0, 4))
+      assert.notEqual(created[0].id, created[1].id)
+      assert.notEqual(created[0].path, created[1].path)
+      assert.notEqual(created[0].branch, created[1].branch)
+      for (const session of created) {
+        assert.ok(session.path.endsWith(session.id) && session.branch.endsWith(session.id))
+        assert.equal(realpathSync(git(session.path, 'rev-parse', '--show-toplevel')), realpathSync(session.path))
+        assert.equal(git(session.path, 'symbolic-ref', '--short', 'HEAD'), session.branch)
+        assert.equal(realpathSync(git(session.path, 'rev-parse', '--path-format=absolute', '--git-common-dir')), realpathSync(join(project, '.git')))
+        const admin = git(session.path, 'rev-parse', '--absolute-git-dir')
+        assert.equal(realpathSync(dirname(admin)), realpathSync(join(project, '.git/worktrees')))
+        assert.equal(realpathSync(readFileSync(join(admin, 'gitdir'), 'utf8').trim()), realpathSync(join(session.path, '.git')))
+      }
+      for (const kind of ['branch', 'path']) {
+        const key = `occupied-full-${kind}`, id = sessionIdForCreateKey(key)
+        const branch = `task/target-${id}`, path = join(configuredMain, '.worktrees', `target-${id}`)
+        if (kind === 'branch') git(project, 'branch', branch, 'staging')
+        else { mkdirSync(path); writeFileSync(join(path, 'user-data'), 'preserve unknown contents') }
+        const refused = await post(key)
+        assert.equal(refused.status, 409, 'a genuinely occupied complete target still refuses creation')
+        if (kind === 'branch') assert.equal(git(project, 'rev-parse', `refs/heads/${branch}`), git(project, 'rev-parse', 'staging'))
+        else assert.equal(readFileSync(join(path, 'user-data'), 'utf8'), 'preserve unknown contents')
+      }
+      assert.deepEqual(candidateReceipts(), [])
+      assert.deepEqual((await rows()).map(row => row.id).sort(), created.map(row => row.id).sort())
+      return
+    }
     if (registryMode) {
       unlinkSync(stallGit)
       writeFileSync(registryGuard, 'guard\n')
@@ -354,14 +448,16 @@ esac
 
     const colliding = await post('collision-117')
     const collidingBody = await colliding.json() as any
-    assert.equal(colliding.status, 409, 'a different key with the same id4 cannot publish over the first receipt')
-    assert.deepEqual({ code: collidingBody.code, phase: collidingBody.phase }, { code: 'session_create_failed', phase: 'git-worktree' })
-    assert.deepEqual((await rows()).map((row) => row.id), [a.id])
-    assert.deepEqual(sessionDirs(), [a.id])
+    assert.equal(colliding.status, 201, 'distinct complete UUIDs sharing id4 own separate resources')
+    assert.equal(collidingBody.id.slice(0, 4), a.id.slice(0, 4))
+    assert.notEqual(collidingBody.path, a.path)
+    assert.notEqual(collidingBody.branch, a.branch)
+    assert.deepEqual((await rows()).map((row) => row.id).sort(), [a.id, collidingBody.id].sort())
+    assert.deepEqual(sessionDirs().sort(), [a.id, collidingBody.id].sort())
     assert.equal(realpathSync(git(a.path, 'rev-parse', '--show-toplevel')), realpathSync(a.path), 'collision preserves the published worktree')
     assert.equal(git(a.path, 'symbolic-ref', '--short', 'HEAD'), a.branch, 'collision preserves the published checkout')
     assert.ok(git(project, 'show-ref', '--verify', `refs/heads/${a.branch}`), 'collision preserves the published ref')
-    assert.equal(worktrees(), 3)
+    assert.equal(worktrees(), 4)
 
     // The HTTP receipt is already bounded above; queue admission and shell startup use the fixture's deadline.
     await waitFor(() => existsSync(trace) && (readFileSync(trace, 'utf8').match(/ launcher /g)?.length ?? 0) > 0, 'first launcher attempt', Infinity, signal).catch(error => {
@@ -427,7 +523,16 @@ esac
     const id4 = (key: string) => createHash('sha256').update(`spexcode-session-create\0${key}`).digest('hex').slice(0, 4)
     assert.equal(id4('crash-3'), id4('crash-157'), 'different crash keys deterministically share one resource suffix')
     const beforeGitCrash = { refs: nodeRefs(), worktrees: worktrees(), stores: sessionDirs() }
-    await crashBackend(killAfterGit, 'crash-3', crashPrompt)
+    await crashBackend(killAfterGit, 'crash-3', crashPrompt, () => {
+      // Synthetic old-writer layout over this fixture's real, unpublished Git candidate only.
+      const receiptPath = candidateReceipts()[0], receipt = JSON.parse(readFileSync(receiptPath, 'utf8'))
+      const id = sessionIdForCreateKey('crash-3')
+      const legacyPath = receipt.path.slice(0, -id.length) + id.slice(0, 4)
+      const legacyBranch = receipt.branch.slice(0, -id.length) + id.slice(0, 4)
+      git(project, 'worktree', 'move', receipt.path, legacyPath)
+      git(legacyPath, 'branch', '-m', legacyBranch)
+      writeFileSync(receiptPath, JSON.stringify({ ...receipt, path: legacyPath, branch: legacyBranch }))
+    })
     assert.equal(worktrees(), beforeGitCrash.worktrees + 1, 'real Git candidate survives backend process death before publication')
     assert.deepEqual(sessionDirs(), beforeGitCrash.stores, 'Git-stage death precedes candidate store creation')
     assert.equal(candidateReceipts().length, 1, 'an atomic private receipt precedes the first Git mutation')
@@ -436,9 +541,11 @@ esac
 
     const foreignRetry = await post('crash-157', crashPrompt)
     const foreignBody = await foreignRetry.json() as any
-    assert.equal(foreignRetry.status, 409, 'a different key cannot consume the crashed candidate receipt')
-    assert.deepEqual({ code: foreignBody.code, phase: foreignBody.phase }, { code: 'session_create_failed', phase: 'git-worktree' })
-    assert.deepEqual({ refs: nodeRefs(), worktrees: worktrees(), stores: sessionDirs() }, crashedGitState, 'foreign retry preserves every crashed resource')
+    assert.equal(foreignRetry.status, 201, 'a different complete UUID does not collide with the crashed candidate')
+    assert.equal(worktrees(), crashedGitState.worktrees + 1)
+    assert.equal(candidateReceipts().length, 1, 'the other key cannot consume the crashed ownership receipt')
+    assert.ok(crashedGitState.refs.split('\n').every(ref => nodeRefs().split('\n').includes(ref)), 'all crashed refs remain present')
+    assert.equal(git(foreignBody.path, 'symbolic-ref', '--short', 'HEAD'), foreignBody.branch)
 
     const gitRetry = await post('crash-3', crashPrompt)
     const gitRetryBody = await gitRetry.json() as any
@@ -549,3 +656,5 @@ test('public session create is bounded, rollback-clean, idempotent, and publishe
 test('public session registry serializes distinct candidates and close during add', { timeout: 30_000 }, t => publicCreateFixture(t.signal, 'create'))
 test('public session close keeps rename and prune outside a sibling add', { timeout: 30_000 }, t => publicCreateFixture(t.signal, 'close'))
 test('public session failed add keeps rollback outside a sibling add', { timeout: 30_000 }, t => publicCreateFixture(t.signal, 'rollback'))
+test('public same-prefix UUIDs own distinct resources while occupied complete targets remain protected', { timeout: 30_000 }, t => publicCreateFixture(t.signal, 'names'))
+test('public matching receipt retries preserve current and legacy WIP and forked heads', { timeout: 60_000 }, t => publicCreateFixture(t.signal, 'recovery-safety'))

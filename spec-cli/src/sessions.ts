@@ -2,7 +2,7 @@ import { structuredObserverState, type StructuredExecution } from './session-str
 import { spawn } from 'node:child_process'
 import { createConnection } from 'node:net'
 import { createHash, randomUUID } from 'node:crypto'
-import { readFileSync, writeFileSync, existsSync, renameSync, linkSync, mkdirSync, chmodSync, rmSync, readdirSync, realpathSync, statSync, unlinkSync, type Dirent } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, renameSync, linkSync, mkdirSync, chmodSync, rmSync, readdirSync, realpathSync, statSync, lstatSync, unlinkSync, type Dirent } from 'node:fs'
 import { basename, join, dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { rm as rmAsync, readdir as readdirAsync } from 'node:fs/promises'
@@ -2392,9 +2392,9 @@ type SessionCandidateReceiptRead =
 const sessionCandidateReceiptDir = () => join(runtimeRoot(), '.session-create-candidates')
 const sessionCandidateReceiptPath = (id: string) => join(sessionCandidateReceiptDir(), `${id}.json`)
 const sessionCandidateLockId = (path: string, branch: string) => `create-resource-${digest(`${path}\0${branch}`)}`
-function sessionCandidateTarget(prompt: string, id: string, structured: boolean): { root: string; path: string; branch: string; ref: string | null; title: string | null } {
+function sessionCandidateTarget(prompt: string, id: string, structured: boolean): { root: string; path: string; branch: string; ref: string | null; title: string | null; legacy: { path: string; branch: string } } {
   const ref = nodeFromPrompt(prompt), title = titleFromPrompt(prompt)
-  const slug = `${slugify(ref || title)}-${id.slice(0, 4)}`, root = mainRoot()
+  const name = slugify(ref || title), slug = `${name}-${id}`, root = mainRoot()
   let parent = join(root, '.worktrees')
   if (structured) {
     parent = join(realpathSync(runtimeRoot()), 'structured-worktrees')
@@ -2407,7 +2407,12 @@ function sessionCandidateTarget(prompt: string, id: string, structured: boolean)
     mkdirSync(parent, { recursive: true, mode: 0o700 })
     chmodSync(parent, 0o700)
   }
-  return { root, path: join(parent, slug), branch: `${readConfig(dirname(gitCommonDir())).branchPrefix ?? 'node/'}${slug}`, ref, title }
+  const prefix = readConfig(dirname(gitCommonDir())).branchPrefix ?? 'node/'
+  const legacy = { path: join(parent, `${name}-${id.slice(0, 4)}`), branch: `${prefix}${name}-${id.slice(0, 4)}` }
+  const durable = readSessionCandidateReceipt(id)
+  const target = durable.kind === 'valid' && durable.receipt.root === root && durable.receipt.path === legacy.path && durable.receipt.branch === legacy.branch
+    ? legacy : { path: join(parent, slug), branch: `${prefix}${slug}` }
+  return { root, ...target, ref, title, legacy }
 }
 
 /** 在拥有权锁与 registry fence 内核验精确创建，再登记正式终止证明。 */
@@ -2417,7 +2422,7 @@ export async function recoverSessionCreateTermination(requestKey: string, option
     const termination = readSessionCreateTerminationById(id, requestDigest)
     if (termination) return termination
     if (readRecord(id)) return null
-    const { root, path, branch } = sessionCandidateTarget(options.prompt, id, !!options.structuredExecution)
+    const { root, path, branch, legacy } = sessionCandidateTarget(options.prompt, id, !!options.structuredExecution)
     return withRecordLock(sessionCandidateLockId(path, branch), () => withWorktreeRegistryLock(async () => {
       const durable = readSessionCandidateReceipt(id)
       if (durable.kind === 'absent') {
@@ -2425,9 +2430,10 @@ export async function recoverSessionCreateTermination(requestKey: string, option
         const payloadHash = digest(JSON.stringify({ prompt: options.prompt, parent: null, launcher: null, ...(options.base?.trim() ? { base: options.base.trim() } : {}), structuredExecution: options.structuredExecution }))
         if (payloadHash !== options.payloadHash) throw new SessionCreateError('session_create_failed', 'target-resolution', 'structured recovery payload does not match fixed create request', 409)
         const state = await sessionCandidateState(root, path, branch, options.signal)
+        const legacyState = await sessionCandidateState(root, legacy.path, legacy.branch, options.signal)
         const application = configuredSessionApplication()
         // @@@ canonical address survives retirement; native dispatch is impossible before its publication.
-        if (application.readAddress(id) || readRecord(id) || existsSync(sessionStoreDir(id)) || state.path || state.worktree || state.branch
+        if (application.readAddress(id) || readRecord(id) || existsSync(sessionStoreDir(id)) || state.path || state.worktree || state.branch || legacyState.path || legacyState.worktree || legacyState.branch
           || codexGenerationBindingForSession(join(runtimeRoot(), 'structured-read-only-v1', 'control'), id)) return null
         throwIfCreateAborted(options.signal, 'target-resolution')
         const recovered: SessionCreateTermination = { version: 1, sessionId: id, requestDigest, payloadHash, code: 'session_create_cancelled', phase: 'target-resolution', nativeStopped: true, nativeStatus: 'notStarted', cleanupComplete: true }
@@ -2439,27 +2445,7 @@ export async function recoverSessionCreateTermination(requestKey: string, option
       if (receipt.requestDigest !== requestDigest || receipt.payloadHash !== options.payloadHash || receipt.root !== root || receipt.path !== path || receipt.branch !== branch)
         throw new SessionCreateError('session_create_failed', 'cleanup', 'private candidate receipt does not match cancelled create request; preserving candidate resources', 409)
       const state = await sessionCandidateState(root, path, branch, options.signal)
-      if (state.path && !state.worktree) throw new SessionCreateError('session_create_failed', 'cleanup', 'candidate path has no matching Git registration; preserving unknown contents', 409)
-      if (state.worktree) {
-        const mismatch = await proveSessionCandidate(root, path, branch, options.signal)
-        if (mismatch) throw new SessionCreateError('session_create_failed', 'cleanup', `candidate recovery identity mismatch: ${mismatch}`, 409)
-        const status = await withGitAbortSignal(options.signal, () => gitTry(['-C', path, 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored']))
-        if (!status.ok) throw new SessionCreateError('session_create_failed', 'cleanup', `cannot inspect candidate contents: ${status.stderr.trim() || status.failure}`, 409)
-        const seeded = '.spec/spexcode.local.json'
-        const unknown = status.stdout.split('\0').filter(Boolean).some(entry => entry !== `!! ${seeded}`
-          || !existsSync(join(root, seeded)) || !readFileSync(join(root, seeded)).equals(readFileSync(join(path, seeded))))
-        if (unknown) throw new SessionCreateError('session_create_failed', 'cleanup', 'candidate contains new or modified contents; preserving user edits', 409)
-      }
-      let recoveryBranchCommit: string | undefined
-      if (state.branch) {
-        if (!options.base) throw new SessionCreateError('session_create_failed', 'cleanup', 'candidate recovery has no frozen fork point; preserving branch', 409)
-        const [expected, actual] = await withGitAbortSignal(options.signal, () => Promise.all([
-          gitTry(['-C', root, 'rev-parse', '--verify', `${options.base}^{commit}`]),
-          gitTry(['-C', root, 'rev-parse', '--verify', `refs/heads/${branch}^{commit}`]),
-        ]))
-        if (!expected.ok || !actual.ok || expected.stdout.trim() !== actual.stdout.trim()) throw new SessionCreateError('session_create_failed', 'cleanup', 'candidate branch differs from frozen fork point; preserving branch', 409)
-        recoveryBranchCommit = expected.stdout.trim()
-      }
+      const recoveryBranchCommit = await proveSessionCandidateRecovery(root, id, path, branch, state, options.base, options.signal)
       const residues = await cleanupSessionCandidateUnlocked(root, id, path, branch, { ...state, store: existsSync(sessionStoreDir(id)) }, false, recoveryBranchCommit)
       if (!residues.length && !retireSessionCandidateReceipt(id)) residues.push(`private candidate receipt remains at ${sessionCandidateReceiptPath(id)}`)
       if (residues.length) throw new SessionCreateError('session_create_cleanup_failed', 'cleanup', `matching candidate recovery left residue: ${residues.join('; ')}`, 500)
@@ -2639,6 +2625,65 @@ async function proveSessionCandidate(root: string, path: string, branch: string,
   return null
 }
 
+async function proveSessionCandidateRecovery(root: string, id: string, path: string, branch: string, state: SessionCandidateState, base: string | null | undefined, signal: AbortSignal): Promise<string | undefined> {
+  const application = configuredSessionApplication()
+  if (readRecord(id) || application.readAddress(id)
+    || codexGenerationBindingForSession(join(runtimeRoot(), 'structured-read-only-v1', 'control'), id))
+    throw new SessionCreateError('session_create_failed', 'cleanup', 'candidate publication or native ownership is not cold; preserving resources', 409)
+  for (const ownerId of listSessionIds()) {
+    if (ownerId === id || !application.readAddress(ownerId)) continue
+    const owner = readRecord(ownerId)
+    if (!owner) continue
+    const samePath = !!owner.worktreePath && (resolve(owner.worktreePath) === resolve(path)
+      || existsSync(owner.worktreePath) && existsSync(path) && realpathSync(owner.worktreePath) === realpathSync(path))
+    if (!samePath && owner.branch !== branch) continue
+    if (!samePath && owner.worktreePath && existsSync(owner.worktreePath)) {
+      const [expected, actual] = await withGitAbortSignal(signal, () => Promise.all([
+        gitTry(['-C', root, 'rev-parse', '--path-format=absolute', '--git-common-dir']),
+        gitTry(['-C', owner.worktreePath, 'rev-parse', '--path-format=absolute', '--git-common-dir']),
+      ]))
+      if (!expected.ok || !actual.ok) throw new SessionCreateError('session_create_failed', 'cleanup', `cannot prove published session ${ownerId} resource repository; preserving resources`, 409)
+      if (realpathSync(expected.stdout.trim()) !== realpathSync(actual.stdout.trim())) continue
+    }
+    throw new SessionCreateError('session_create_failed', 'cleanup', `candidate resource belongs to published session ${ownerId}; preserving resources`, 409)
+  }
+  if (state.path && !state.worktree) throw new SessionCreateError('session_create_failed', 'cleanup', 'candidate path has no matching Git registration; preserving unknown contents', 409)
+  if (state.worktree) {
+    const mismatch = await proveSessionCandidate(root, path, branch, signal)
+    if (mismatch) throw new SessionCreateError('session_create_failed', 'cleanup', `candidate recovery identity mismatch: ${mismatch}`, 409)
+    const status = await withGitAbortSignal(signal, () => gitTry(['-C', path, 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored']))
+    if (!status.ok) throw new SessionCreateError('session_create_failed', 'cleanup', `cannot inspect candidate contents: ${status.stderr.trim() || status.failure}`, 409)
+    const seeded = '.spec/spexcode.local.json'
+    const unknown = status.stdout.split('\0').filter(Boolean).some(entry => entry !== `!! ${seeded}`
+      || !existsSync(join(root, seeded)) || !readFileSync(join(root, seeded)).equals(readFileSync(join(path, seeded))))
+    if (unknown) throw new SessionCreateError('session_create_failed', 'cleanup', 'candidate contains new or modified contents; preserving user edits', 409)
+  }
+  let recoveryBranchCommit: string | undefined
+  if (state.branch) {
+    const actual = await withGitAbortSignal(signal, () => gitTry(['-C', root, 'rev-parse', '--verify', `refs/heads/${branch}^{commit}`]))
+    let expected: string | undefined
+    if (base) {
+      const resolved = await withGitAbortSignal(signal, () => gitTry(['-C', root, 'rev-parse', '--verify', `${base}^{commit}`]))
+      if (resolved.ok) expected = resolved.stdout.trim()
+    }
+    if (!base || !isGitObjectId(root, base)) {
+      const pinned = expected
+      expected = undefined
+      const log = await withGitAbortSignal(signal, () => gitTry(['-C', root, 'rev-parse', '--git-path', `logs/refs/heads/${branch}`]))
+      const logPath = log.ok ? resolve(root, log.stdout.trim()) : null
+      if (logPath && existsSync(logPath) && lstatSync(logPath).isFile() && !lstatSync(logPath).isSymbolicLink()) {
+        const creation = /^(0+) ([a-f0-9]+) [^\n]*\tbranch: Created from [^\n]+$/.exec(readFileSync(logPath, 'utf8').split('\n')[0])
+        const original = creation && creation[1].length === creation[2].length && isGitObjectId(root, creation[2]) ? creation[2] : undefined
+        expected = !base || pinned === original ? original : undefined
+      }
+    }
+    if (!expected) throw new SessionCreateError('session_create_failed', 'cleanup', 'candidate recovery has no proven original fork point; preserving branch', 409)
+    if (!actual.ok || expected !== actual.stdout.trim()) throw new SessionCreateError('session_create_failed', 'cleanup', 'candidate branch differs from frozen fork point; preserving branch', 409)
+    recoveryBranchCommit = expected
+  }
+  return recoveryBranchCommit
+}
+
 async function prepareSession(prompt: string, parentage: CreateParentage, launcher: string | undefined, name: string | null, context: SessionCreateContext): Promise<Session> {
   const { id, requestDigest, payloadHash, base, issue, signal } = context
   const parent = parentage.id
@@ -2773,9 +2818,10 @@ async function prepareSession(prompt: string, parentage: CreateParentage, launch
               phase = 'cleanup'
               traceSessionCreate(id, requestDigest, phase, 'start', `recover-${durable.receipt.stage}`)
               cleanupComplete = false
+              const recoveryBranchCommit = await proveSessionCandidateRecovery(root, id, path, branch, before, base, signal)
               const recovered = await cleanupSessionCandidateUnlocked(root, id, path, branch, {
                 store: storePresent, path: before.path, worktree: before.worktree, branch: before.branch,
-              })
+              }, false, recoveryBranchCommit)
               traceSessionCreate(id, requestDigest, phase, recovered.length ? 'abort' : 'finish', recovered.join('; ') || undefined)
               if (recovered.length) throw new SessionCreateError('session_create_cleanup_failed', phase, `matching candidate recovery left residue: ${recovered.join('; ')}`, 500)
               cleanupComplete = true
