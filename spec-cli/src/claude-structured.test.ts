@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdtempSync, rmSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
@@ -14,6 +14,106 @@ const contentBlocks = (message: ClaudePublicMessage): Exclude<ClaudePublicMessag
   assert(Array.isArray(message.content))
   return message.content
 }
+
+test('stopped exact Claude schema retry exhaustion remains a rejected output with no completion or new native turn', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'spex-claude-schema-exhaustion-'))
+  let runtimeFixture: string | undefined
+  try {
+    const realm = join(directory, 'realm'), root = join(realm, 'native'), projects = join(root, 'claude-home/projects/fixture')
+    mkdirSync(projects, { recursive: true })
+    const ref = freezeContext({ directory, sourceRoot: process.cwd(), binding: { requestKey: 'schema-exhaustion', inputDigest: 'input' }, entries: [{ id: 'task', label: 'task', kind: 'utf8', bytes: Buffer.from('original public task') }] })
+    const prompt = 'fixed original public prompt', message = { role: 'user', content: [{ type: 'text', text: prompt }] }
+    const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], { detached: true, stdio: 'ignore' })
+    assert(child.pid)
+    const exited = new Promise<void>(resolve => child.once('close', () => resolve()))
+    const receiptFile = join(root, 'process.json'), identity = writeDetachedRuntimeReceipt(child.pid, receiptFile)
+    process.kill(-child.pid, 'SIGTERM'); await exited
+    writeFileSync(join(root, 'mcp-public.jsonl'), JSON.stringify({ type: 'process', pid: child.pid, startToken: identity.startToken }) + '\n')
+    const execution = { ...structuredExecutionPolicy({ schema: { type: 'object', properties: { newNodes: { type: 'array', maxItems: 0 } }, required: ['newNodes'], additionalProperties: false }, model: 'claude:MiniMax-M3.1-Flash', frozenContext: ref, inputDigest: 'input', purpose: 'schema-exhaustion', timeoutMs: 1000 }), claudeNative: { version: 1 as const, root, sessionId: 'session', userUuid: 'user', pid: child.pid, receiptFile } }
+    const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
+    const plan = { version: 1, root, sessionId: 'session', userUuid: 'user', pid: child.pid, receiptFile, cliVersion: '2.1.309 (Claude Code)', requestDigest: digest({ prompt, policy: structuredExecutionPolicy(execution) }), policyDigest: digest(structuredExecutionPolicy(execution)) }
+    const result = { type: 'result', subtype: 'error_max_structured_output_retries', is_error: true, session_id: 'session', uuid: 'result', user_message_uuid: 'user', user_message_uuids: ['user'] }
+    const init = { session_id: 'session', model: 'MiniMax-M3.1-Flash', tools: ['StructuredOutput', 'mcp__frozen__spex_read_frozen'] }
+    const original = { type: 'user', sessionId: 'session', uuid: 'user', parentUuid: null, promptId: 'prompt', message }
+    writeFileSync(join(root, 'plan.json'), JSON.stringify(plan))
+    writeFileSync(join(root, 'init.json'), JSON.stringify(init))
+    writeFileSync(join(root, 'user-echo.json'), JSON.stringify({ uuid: 'user', session_id: 'session', message }))
+    writeFileSync(join(root, 'result.json'), JSON.stringify(result))
+    writeFileSync(join(root, 'exit.json'), JSON.stringify({ code: 1, signal: null, stopped: true }))
+    const historyPath = join(projects, 'session.jsonl')
+    const history = [original,
+      { type: 'api-request-shape', sessionId: 'session', shapeHash: 'a'.repeat(64), shape: { tools: [...init.tools.map(name => ({ name })), { name: 'DeferredToolPlaceholder', description: 'Reserved placeholder that keeps deferred tool loading active; never call this tool.', defer_loading: true, input_schema: { type: 'object', properties: {} } }] } },
+      { type: 'api-request', sessionId: 'session', shapeHash: 'a'.repeat(64), id: 'request', keep: 0, tail: [claudeMessageDigest(message)], params: { model: 'MiniMax-M3.1-Flash' } },
+      { type: 'assistant', sessionId: 'session', uuid: 'schema-call', parentUuid: 'user', requestRef: 'request', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'schema', name: 'StructuredOutput', input: { newNodes: {} } }] } },
+      { type: 'user', sessionId: 'session', uuid: 'schema-error', parentUuid: 'schema-call', promptId: 'prompt', sourceToolAssistantUUID: 'schema-call', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'schema', is_error: true, content: 'newNodes must be an array' }] } },
+    ]
+    writeFileSync(historyPath, history.map(row => JSON.stringify(row)).join('\n') + '\n')
+    const callbacks = { onThread: async () => assert.fail('no new native session'), onTurn: async () => assert.fail('no new user'), onNative: async () => assert.fail('no new CLI') }
+    const failureBytes = readFileSync(join(root, 'result.json')), historyBytes = readFileSync(historyPath)
+    for (let replay = 0; replay < 2; replay++) await assert.rejects(claudeStructuredTurn(realm, 'native', prompt, execution, callbacks), error => {
+      assert.equal((error as { code: string }).code, 'structured_output_retries_exhausted')
+      assert.match(String(error), /error_max_structured_output_retries/)
+      return true
+    })
+    assert.deepEqual(readFileSync(join(root, 'result.json')), failureBytes)
+    assert.deepEqual(readFileSync(historyPath), historyBytes)
+    for (const name of ['completed.json', 'witness.json']) assert.equal(existsSync(join(root, name)), false)
+    for (const invalid of [
+      { result: { ...result, subtype: 'error_during_execution' } },
+      { result: { ...result, is_error: false } },
+      { result: { ...result, session_id: 'foreign' } },
+      { result: { ...result, user_message_uuid: 'foreign' } },
+      { result: { ...result, user_message_uuids: ['user', 'foreign'] } },
+      { echo: { uuid: 'foreign', session_id: 'session', message } },
+      { echo: { uuid: 'user', session_id: 'foreign', message } },
+      { init: { ...init, model: 'foreign' } },
+      { init: { ...init, tools: [...init.tools, 'Bash'] } },
+      { plan: { ...plan, policyDigest: 'foreign' } },
+      { exit: { code: 1, signal: null, stopped: false } },
+      { history: history.map(row => row.type === 'api-request' ? { ...row, params: { model: 'foreign' } } : row) },
+      { original: { ...original, promptId: undefined } },
+      { original: { ...original, message: { role: 'user', content: [{ type: 'text', text: 'replacement prompt' }] } } },
+      { extra: { ...original, uuid: 'foreign-user', parentUuid: 'schema-error', message: { role: 'user', content: [{ type: 'text', text: 'a new user prompt' }] } } },
+    ]) {
+      writeFileSync(join(root, 'result.json'), JSON.stringify(invalid.result ?? result))
+      writeFileSync(join(root, 'init.json'), JSON.stringify(invalid.init ?? init))
+      writeFileSync(join(root, 'plan.json'), JSON.stringify(invalid.plan ?? plan))
+      writeFileSync(join(root, 'exit.json'), JSON.stringify(invalid.exit ?? { code: 1, signal: null, stopped: true }))
+      writeFileSync(join(root, 'user-echo.json'), JSON.stringify(invalid.echo ?? { uuid: 'user', session_id: 'session', message }))
+      writeFileSync(historyPath, (invalid.history ?? [invalid.original ?? original, ...history.slice(1), ...(invalid.extra ? [invalid.extra] : [])]).map(row => JSON.stringify(row)).join('\n') + '\n')
+      await assert.rejects(claudeStructuredTurn(realm, 'native', prompt, execution, callbacks), error => (error as { code: string }).code !== 'structured_output_retries_exhausted')
+    }
+    writeFileSync(join(root, 'result.json'), failureBytes); writeFileSync(join(root, 'init.json'), JSON.stringify(init)); writeFileSync(historyPath, historyBytes)
+    writeFileSync(join(root, 'mcp-public.jsonl'), JSON.stringify({ type: 'process', pid: process.pid, startToken: null }) + '\n')
+    await assert.rejects(claudeStructuredTurn(realm, 'native', prompt, execution, callbacks), error => (error as { code: string }).code === 'cancellation_pending')
+    writeFileSync(join(root, 'mcp-public.jsonl'), JSON.stringify({ type: 'process', pid: child.pid, startToken: identity.startToken }) + '\n')
+    const { runtimeRoot, sessionArtifactPath } = await import('@spexcode/spec-core')
+    const { sessionIdForCreateKey } = await import('./sessions.js')
+    const { fromRaw, writeRecord, readRecord } = await import('./session-record.js')
+    const { configuredSessionApplication } = await import('./session-application.js')
+    const { executeQueuedStructuredSession, runStructuredSession } = await import('./session-structured.js')
+    const requestKey = 'schema-exhaustion', id = sessionIdForCreateKey(requestKey), policy = structuredExecutionPolicy(execution)
+    runtimeFixture = join(runtimeRoot(), 'structured-claude-read-only-v1', id)
+    cpSync(root, runtimeFixture, { recursive: true }); writeFileSync(join(runtimeFixture, 'plan.json'), JSON.stringify({ ...plan, root: runtimeFixture }))
+    configuredSessionApplication().createSession({ sessionId: id, status: 'awaiting', proposal: 'nothing' })
+    const record = fromRaw({ session_id: id, governed: true, worktree_path: process.cwd(), branch: null, title: null, name: null, status: 'awaiting', proposal: 'nothing', merges: 0, note: null, sortkey: null, createdAt: 1, stopped: false, archived: false, harness: 'claude-headless', launch_cmd: 'claude', create_request_id: createHash('sha256').update(requestKey).digest('hex'), create_payload_hash: digest({ prompt, parent: null, launcher: null, structuredExecution: policy }) })
+    record.structuredExecution = { ...execution, state: 'running', threadId: 'session', turnId: 'user', claudeNative: { ...execution.claudeNative, root: runtimeFixture } }
+    record.harnessSessionId = 'session'; writeRecord(record)
+    const launch = sessionArtifactPath(id, 'launch'); mkdirSync(join(launch, '..'), { recursive: true }); writeFileSync(launch, prompt)
+    assert.equal(await executeQueuedStructuredSession(id), 'failed')
+    assert.equal(readRecord(id)?.structuredExecution?.errorCode, 'structured_output_retries_exhausted')
+    const request = { root: process.cwd(), prompt, requestKey, ...policy }
+    for (let replay = 0; replay < 2; replay++) await assert.rejects(runStructuredSession(request), error => {
+      const cause = error as { code: string; sessionId: string; threadId: string; turnId: string }
+      assert.equal(cause.code, 'structured_output_retries_exhausted'); assert.equal(cause.sessionId, id); assert.equal(cause.threadId, 'session'); assert.equal(cause.turnId, 'user')
+      return true
+    })
+    const failed = readRecord(id)!
+    writeRecord({ ...failed, structuredExecution: { ...failed.structuredExecution!, errorCode: undefined } })
+    await assert.rejects(runStructuredSession(request), error => (error as { code: string }).code === 'failed')
+    assert.equal(existsSync(join(runtimeFixture, 'completed.json')), false)
+  } finally { if (runtimeFixture) rmSync(runtimeFixture, { recursive: true, force: true }); rmSync(directory, { recursive: true, force: true }) }
+})
 
 test('Claude namespace creates its own fixed policy and bounded frozen prompt while legacy Codex stays byte-compatible', () => {
   const directory = mkdtempSync(join(tmpdir(), 'spex-claude-policy-'))

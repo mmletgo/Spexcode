@@ -20,6 +20,8 @@ related:
 
 以下 v1/v2 为原有 Codex 策略；明确 Claude 命名空间另使用 [[claude-structured-runtime]] 的版本3固定策略，不能自动 fallback。其空执行 cwd、私有 CLAUDE_CONFIG_DIR 和同一 macOS Seatbelt 写入边界只允许专属 runtime 写入。官方 restricted、空 built-in tools、独占 MCP、空 settings sources、关闭 hooks/记忆/普通指令文件和 slash commands 共同限制能力；仅 reader 与 StructuredOutput 可实际调用。CLI 2.1.309 的固定不可调用 DeferredToolPlaceholder schema 可以存在，实际调用拒绝。
 
+结构化执行的可选精确失败码属于 [[structured-session-runtime]] 的终态观测，不授予新工具、模型或读取能力，不改变固定策略摘要与成功的完整读取证明要求。
+
 Claude 透明沿用实际 CLI 的既有认证机制与 API 路由，包括安全环境、正常 keychain 或现有 wrapper；不读取或复制凭据文件，不保存/打印 token，不改变付费路径。不能仅凭父进程缺少环境变量判定未认证；同一 CLI 在同一私有配置目录、restricted 与外层隔离中运行只读 auth status，仅保存 loggedIn/authMethod/apiProvider，实际确认不可用才 unsupported。未知 CLI 版本或未证明 managed policy/provider 同样拒绝。服务启动环境缺变量不能从交互终端偷取或写入全局配置。完整工具 surface 和实际 API model 必须再次由原生 init/history 核实，不能只相信 flags。
 
 已有原生用户 settings.json.env 的认证来源按 [[claude-structured-runtime]] 只在内存投影四个允许键；任一显式进程键优先整组。其它用户 settings 仍由 restricted 和空配置来源排除，不能以复用认证为由继承权限、hooks 或 MCP。

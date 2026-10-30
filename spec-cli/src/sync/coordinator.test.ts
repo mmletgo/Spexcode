@@ -30,6 +30,8 @@ import { composeAuthoredInput } from './author-input.js'
 import { controlledDecisionIdentity, guardControlledRequestPath, prepareControlledDecision, prepareControlledRequest } from './request-input.js'
 import { prepareSpecBodyEdit } from '../spec-body-edit.js'
 import { adaptElaborationNativeOutput } from '../../test/elaboration-native-output.js'
+import { StructuredSessionError, structuredExecutionPolicy } from '../session-structured-policy.js'
+import { freezeContext } from '../frozen-context.js'
 
 const contractPath = '.spec/project/export-contract/spec.md'
 const fixturePath = new URL('../../test/fixtures/spec-sync/export-repo/', import.meta.url)
@@ -869,6 +871,68 @@ test('P3未完整独审的行为分析不能晋级细化或写入，具体path�
   const result = await runSyncOperation(f.store, f.operation.id, f.options)
   assert.equal(result.status, 'budget_exhausted'); assert.equal(f.store.listAttempts(f.operation.id)[0].failure?.code, 'behavior_review_failed'); assert.equal(f.calls.length, 2)
   assert.equal(f.calls.some(call => call.purpose === 'elaboration_generate'), false); assert.equal(f.store.listJournals(f.operation.id).length, 0)
+})
+
+test('精确Claude结构输出耗尽在同一冻结预算内使用三个独立attempt，失败不产出已审分析或交付', async t => {
+  const f = await fixture(t, { maxAttempts: 3, maxCalls: 3, maxRepairs: 2, timeoutMs: 120000 }, false, original, 'project', original, {}, undefined, 'code', 'claude:MiniMax-M3.1-Flash')
+  f.transform((_output, request) => {
+    assert.equal(request.purpose, 'code_behavior_analyze')
+    throw new StructuredSessionError('structured_output_retries_exhausted', 'Claude error_max_structured_output_retries rejected output', { sessionId: `failed-${request.requestKey}`, threadId: 'original-session', turnId: 'original-user' })
+  })
+  const result = await runSyncOperation(f.store, f.operation.id, f.options), attempts = f.store.listAttempts(f.operation.id)
+  assert.equal(result.status, 'budget_exhausted')
+  assert.equal(attempts.length, 3); assert.equal(result.operation.callsUsed, 3)
+  assert.equal(f.store.readBudgetUsage(f.operation.id).repairFailures, 3)
+  assert.deepEqual(result.operation.budget, f.operation.budget); assert.equal(result.operation.deadlineAtMs, f.operation.deadlineAtMs)
+  assert.equal(new Set(f.calls.map(call => call.requestKey)).size, 3)
+  for (const attempt of attempts) {
+    assert.equal(attempt.failure?.kind, 'repairable'); assert.equal(attempt.failure?.code, 'structured_output_retries_exhausted')
+    assert.equal(attempt.candidate, null)
+    const stages = attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
+    assert.equal(stages.some(stage => stage.stage === 'analysis' || stage.stage === 'elaboration'), false)
+  }
+  assert.equal(f.store.listJournals(f.operation.id).length, 0); assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
+})
+
+test('精确结构输出失败的旧native资源尚未removed时协调器保留recovery_required且不派发下一attempt', async t => {
+  const f = await fixture(t, { maxAttempts: 3, maxCalls: 6, maxRepairs: 2, timeoutMs: 120000 }, false, original, 'project', original, {}, undefined, 'code', 'claude:MiniMax-M3.1-Flash')
+  const { fromRaw, writeRecord } = await import('../session-record.js')
+  const { configuredSessionApplication } = await import('../session-application.js')
+  f.transform(() => {
+    const operation = f.store.readOperation(f.operation.id), attempt = f.store.readAttempt(operation.currentAttemptId!)
+    const fence = { operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: operation.input.source.physicalFingerprint }
+    const requestKey = `schema-held:${attempt.id}`, inputDigest = contentHash('held-input')
+    const frozenContext = freezeContext({ directory: f.parent, sourceRoot: f.root, binding: { requestKey, inputDigest }, entries: [{ id: 'task', label: 'task', kind: 'utf8', bytes: Buffer.from('held original task') }] })
+    const request = { root: f.root, prompt: 'held original prompt', schema: { type: 'object' }, requestKey, inputDigest, purpose: 'code_behavior_analyze', timeoutMs: 1000, model: 'claude:MiniMax-M3.1-Flash', frozenContext }
+    const requestDigest = contentHash(JSON.stringify(request)), dispatch = f.store.reserveDispatch(fence, { key: requestKey, purpose: request.purpose, requestDigest }), expectedSessionId = sessionIdForCreateKey(dispatch.sessionCreateKey)
+    const identity = { operationId: operation.id, attemptId: attempt.id, inputId: f.input.id, candidateDigest: null }
+    const plan: NativeRunPlan = { schemaVersion: 1, request, requestDigest, sessionCreateKey: dispatch.sessionCreateKey, expectedSessionId, ...identity }
+    const checkpoint: NativeRunCheckpoint = { schemaVersion: 1, ...identity, requestDigest, expectedSessionId, phase: 'planned', nativeCallRequested: true, nativeStarted: true, nativeState: 'failed', session: { sessionId: expectedSessionId, threadId: 'original-thread', turnId: 'original-user' } }
+    const resource = f.store.planResource(fence, { key: requestKey, kind: 'native_session', payloadDigest: requestDigest, inputId: f.input.id, candidateDigest: null, planBlob: writeEvidence(f.input.source.commonDir, plan), checkpointRef: writeEvidence(f.input.source.commonDir, checkpoint) })
+    f.store.recordResourceCheckpoint(resource.id, { ...identity, phase: 'created', expectedCheckpointRef: resource.checkpointRef, checkpointRef: writeEvidence(f.input.source.commonDir, { ...checkpoint, phase: 'created' }) })
+    const policy = structuredExecutionPolicy(request)
+    configuredSessionApplication().createSession({ sessionId: expectedSessionId, status: 'awaiting', proposal: 'nothing' })
+    const record = fromRaw({ session_id: expectedSessionId, governed: true, worktree_path: f.root, branch: null, title: null, name: null, status: 'awaiting', proposal: 'nothing', merges: 0, note: null, sortkey: null, createdAt: 1, stopped: false, archived: false, harness: 'claude-headless', launch_cmd: 'claude', harness_session_id: 'original-thread', create_request_id: contentHash(dispatch.sessionCreateKey), create_payload_hash: contentHash(JSON.stringify({ prompt: request.prompt, parent: null, launcher: null, structuredExecution: policy })) })
+    record.structuredExecution = { ...policy, state: 'failed', error: 'original schema error', errorCode: 'structured_output_retries_exhausted', turnStartRequested: true, threadId: 'original-thread', turnId: 'original-user', claudeNative: { version: 1, root: join(f.parent, 'unproven-native'), sessionId: 'original-thread', userUuid: 'original-user' } }
+    writeRecord(record)
+    throw new StructuredSessionError('structured_output_retries_exhausted', 'original schema error', { sessionId: expectedSessionId, threadId: 'original-thread', turnId: 'original-user' })
+  })
+  const result = await runSyncOperation(f.store, f.operation.id, f.options)
+  assert.equal(result.status, 'recovery_required'); assert.equal(f.calls.length, 1); assert.equal(f.store.listAttempts(f.operation.id).length, 1)
+  const resource = f.store.listRecoverableResources().find(item => item.operation.id === f.operation.id)!
+  assert.equal(resource.resource.phase, 'created'); assert.equal(resource.attempt.failure?.kind, 'repairable')
+  assert.equal(f.store.listJournals(f.operation.id).length, 0); assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
+})
+
+test('普通unsupported或failed与未停的cancellation_pending不取得结构输出耗尽的自动修复分类', async t => {
+  for (const code of ['unsupported', 'failed', 'cancellation_pending'] as const) {
+    const f = await fixture(t, { maxAttempts: 3, maxCalls: 3, maxRepairs: 2, timeoutMs: 120000 }, false, original, 'project', original, {}, undefined, 'code')
+    f.transform(() => { throw new StructuredSessionError(code, 'preserved native rejection') })
+    const result = await runSyncOperation(f.store, f.operation.id, f.options)
+    assert.equal(result.status, code === 'cancellation_pending' ? 'recovery_required' : 'unsupported')
+    assert.equal(f.calls.length, 1); assert.equal(f.store.listAttempts(f.operation.id).length, 1)
+    assert.equal(f.store.listJournals(f.operation.id).length, 0)
+  }
 })
 
 for (const rejection of ['behavior_analysis_invalid', 'behavior_review_failed'] as const) test(`显式retryOf把同输入政策读集合的完整${rejection}诊断交新分析与新独审，仅作未批准数据`, async t => {

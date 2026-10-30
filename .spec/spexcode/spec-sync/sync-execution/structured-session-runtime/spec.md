@@ -27,6 +27,8 @@ related:
 
 策略/schema/输入/预算参与幂等哈希，公开会话创建对象不能注入安全策略。相同载荷复用同一结果，不同载荷拒绝。同一连接在初轮前订阅，原生 thread 与 turn 接受后立即持久化；只读取精确 turn 的 completed 与 final_answer。失败、取消、超时、缺失结果、非法 JSON 或 schema 不符不算成功，创建后失败包含已知的会话和原生身份。
 
+[[claude-structured-runtime]] 已确证的结构输出重试耗尽在 failed 运行元数据中保留可选 `errorCode: structured_output_retries_exhausted`；调用与同键重放保留该精确码、原错误及已知 session/thread/user 身份。此观测字段不参与固定策略或创建摘要，不改变存储 schema；旧 failed 没有此字段仍返回 failed，不按错误文本猜分类。
+
 传输断连保留 running 身份；重试通过原启动队列恢复该 thread/turn。丢失 turn 接受回复时，只有唯一初轮且用户输入匹配冻结 prompt 才可恢复。不得从历史最后一条 assistant 消息猜测结果。读取持久结果再次检查输入/schema/策略、精确身份及结果摘要，拒绝旧输入或损坏结果。取消先持久化 `cancelling` 撤销结果发布，再中断原生 turn，禁止迟到结果改写终态。
 
 精确结果读取沿 [[codex-runtime]] 的原生 turn/item 分页，不依赖整段 history hydration；每页核固定 turn 身份并保留全部原始工具 arguments/result，再执行既有 final_answer、JSON/schema 和冻结覆盖校验。原 owner 在预算内用轻量 metadata 补证丢失的完成通知，仍等待原工具工作完成；恢复只沿已有 thread/turn，不额外派发。
