@@ -349,3 +349,14 @@ test('真实gitlink即使工作目录缺失仍明确拒绝，不能误当普通�
   git(root, 'update-index', '--add', '--cacheinfo', `160000,${head},submodule`)
   await assert.rejects(captureInputSnapshot(root), /submodule|gitlink/)
 })
+
+
+test('快照经固定计划的规范JSON键排序后保持真实历史身份', async t => {
+  const root = repo(t)
+  for (const snapshot of [await captureInputSnapshot(root), await captureInputSnapshot(root, { committed: true })]) {
+    const sorted = JSON.parse(JSON.stringify(snapshot, (_key, value: unknown) => value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value)) as InputSnapshot
+    assert.equal(sorted.id, snapshot.id)
+    assert.deepEqual(verifySnapshot(sorted), verifySnapshot(snapshot))
+    assert.throws(() => verifySnapshot({ ...sorted, source: { ...sorted.source, branch: 'refs/heads/forged' } }), /身份摘要不匹配/)
+  }
+})

@@ -33,7 +33,7 @@ import type { ApplyJournal, BaselinePair, VerificationResultBlob } from './opera
 const settings: SyncSettings = {
   version: 'sync-settings-v1', nodeIds: ['demo'], sourcePaths: ['src'], testPaths: ['tests'], readPaths: ['package.json'],
   verifications: [{ definition: { id: 'VERIFY-DEMO-01', command: ['node', '--test', 'tests/demo.test.mjs'], cwd: '.', timeoutMs: 1000 }, environment: { version: 'v1', image: `node@sha256:${'a'.repeat(64)}`, platform: 'linux/arm64', memoryBytes: 100000000, cpus: 1, pidsLimit: 64, scratchBytes: 1000000, logBytes: 100000 } }],
-  mandatoryTests: [], facts: [], budget: { maxAttempts: 2, maxCalls: 4, maxRepairs: 1, timeoutMs: 30000 },
+  mandatoryTests: [], facts: [], budget: { maxAttempts: 2, maxCalls: 16, maxRepairs: 1, timeoutMs: 30000 },
 }
 const source = '---\ntitle: Demo\nstatus: pending\n---\n# Demo\n\n## raw source\n\n返回用户指定的文本。\n\n## expanded spec\n\n待细化。\n'
 function gitReadCounter(directory: string): { reset(): void; entries(): string[]; restore(): void } {
@@ -442,10 +442,13 @@ test('AC-APPLICATION-11 raw-only initial先行为分析并真实入账，失败�
     const detail = await f.application.wait(submitted.operation.id)
     assert.equal(detail.operation.origin, 'initial')
     assert.equal(detail.operation.phase, 'failed')
-    assert.equal(f.calls[0]?.purpose, 'code_behavior_analyze')
+    assert.ok(f.calls.length > 0)
+    assert.ok(f.calls.every(call => call.purpose === 'code_behavior_analyze'))
+    const firstCalls = f.calls.length
+    assert.equal(new Set(f.calls.map(call => call.requestKey)).size, firstCalls)
     assert.equal((await f.application.submit(request)).operation?.id, submitted.operation.id)
     await f.application.wait(submitted.operation.id)
-    assert.equal(f.calls.length, 1, '同键重放不得再次派发失败的分析请求')
+    assert.equal(f.calls.length, firstCalls, '同键重放不得再次派发失败的分区分析请求')
     await assert.rejects(f.application.submit({ ...request, origin: 'spec' }), /SYNC_IDEMPOTENCY_CONFLICT/)
   } finally { f.cleanup() }
 })
@@ -509,7 +512,11 @@ test('AC-APPLICATION-13 已出队暂停恢复先等有效FIFO，前序完成后�
   try {
     await first.application.enable()
     const submitted = await later.application.submit({ nodeId: 'demo', requestId: 'resume-first' }); assert.ok(submitted.operation)
-    await observeUntil(() => later.calls.length === 1, 30000)
+    await observeUntil(() => {
+      const operation = later.application.store.readOperation(submitted.operation!.id)
+      assert.notEqual(operation.phase, 'failed', JSON.stringify(later.application.store.listAttempts(operation.id).map(attempt => attempt.failure)))
+      return later.calls.length === 1
+    }, 30000)
     const paused = await later.application.control(submitted.operation.id, 'pause')
     assert.equal(paused.operation.phase, 'paused')
     const firstAttempt = await later.application.wait(submitted.operation.id)
@@ -1248,14 +1255,22 @@ test('AC-APPLICATION-P4-01 无浏览器暂停仍记录提交，恢复最新输�
     assert.equal(f.application.observationStatus().control.control, 'pause')
     assert.equal(f.application.observationStatus().latest?.operationId, null)
     await f.application.automaticControl('resume')
-    await observeUntil(() => f.calls.length === 1)
+    await observeUntil(() => {
+      if (f.calls.length > 0) return true
+      const operations = f.application.store.listOperations(identifyWorktree(f.root).repositoryId)
+      for (const operation of operations) assert.notEqual(operation.phase, 'failed', JSON.stringify(f.application.store.listAttempts(operation.id).map(attempt => attempt.failure)))
+      return false
+    }, 30000)
     const operations = (await f.application.status()).operations
     assert.equal(operations.length, 1)
     const detail = await f.application.wait(operations[0].operation.id)
     assert.equal(detail.operation.input.id, f.application.observationStatus().latestSnapshot!.id)
     assert.equal(detail.operation.origin, 'initial', '从未接入的暂停观察不消费首次纳管边界')
+    const firstCalls = f.calls.length
+    assert.ok(firstCalls > 0)
+    assert.equal(new Set(f.calls.map(call => call.requestKey)).size, firstCalls)
     await new Promise(resolve => setTimeout(resolve, 100))
-    assert.equal(f.calls.length, 1)
+    assert.equal(f.calls.length, firstCalls)
     assert.equal((await f.application.status()).operations.length, 1)
   } finally { await f.application.stopService(); f.cleanup() }
 })
@@ -1525,6 +1540,8 @@ test('AC-APPLICATION-P4-12 同request不能换授权子节点，重新授权配�
     const admitted = await f.application.submit(request); assert.ok(admitted.operation)
     const original = await f.application.wait(admitted.operation.id)
     assert.equal(original.operation.phase, 'failed')
+    const firstCalls = f.calls.length
+    assert.ok(firstCalls > 0)
     await assert.rejects(f.application.submit({ ...request, nodeId: 'child' }), /SYNC_IDEMPOTENCY_CONFLICT/)
     assert.equal((await f.application.status()).operations.length, 1)
     writeFileSync(join(f.root, '.spec/spexcode.json'), JSON.stringify({ sync: { ...settings, budget: { ...settings.budget, maxCalls: 6 } } }))
@@ -1535,7 +1552,7 @@ test('AC-APPLICATION-P4-12 同request不能换授权子节点，重新授权配�
     assert.equal(detail.retryEligibility.reason?.code, 'sync_configuration_changed')
     await assert.rejects(f.application.submit(request), /原操作的可信配置已变化/)
     await assert.rejects(f.application.submit({ nodeId: 'demo', requestId: 'new-budget', retryOf: original.operation.id }), /原操作的可信配置已变化/)
-    assert.equal(f.calls.length, 1)
+    assert.equal(f.calls.length, firstCalls)
   } finally { await f.application.stopService(); f.cleanup() }
 })
 
@@ -1550,23 +1567,33 @@ test('AC-APPLICATION-P4-10 活动native时物理暂停保operation控制，暂�
   })
   try {
     await f.application.enable(); await f.application.startService({ compensationMs: 10000, debounceMs: 5 })
-    await observeUntil(() => f.calls.length === 1, 30000)
+    await observeUntil(() => {
+      if (f.calls.length > 0) return true
+      const operations = f.application.store.listOperations(identifyWorktree(f.root).repositoryId)
+      for (const operation of operations) assert.notEqual(operation.phase, 'failed', JSON.stringify(f.application.store.listAttempts(operation.id).map(attempt => attempt.failure)))
+      return false
+    }, 30000)
     const active = (await f.application.status()).operations[0].operation
     await f.application.automaticControl('pause')
     await f.application.wait(active.id)
     assert.equal(f.application.store.readOperation(active.id).control, 'run')
     assert.equal((await f.application.readOperation(active.id)).physicalControl.control, 'pause')
-    const first = f.application.observationStatus().latestSnapshot!.id
+    const first = f.application.observationStatus().latestSnapshot!.id, firstCalls = f.calls.length
+    assert.equal(new Set(f.calls.map(call => call.requestKey)).size, firstCalls)
     writeFileSync(join(f.root, '.spec/demo/spec.md'), source.replace('返回用户指定的文本。', '返回用户指定的文本并记录确认。'))
     f.git(['add', '.']); f.git(['commit', '-qm', 'paused changed intent'])
     await observeUntil(() => f.application.observationStatus().latestSnapshot?.id !== first)
     const latest = f.application.observationStatus().latestSnapshot!.id
-    assert.equal(f.calls.length, 1)
+    assert.equal(f.calls.length, firstCalls)
     await f.application.automaticControl('resume')
     const newest = (await f.application.status()).operations.find(item => item.operation.input.id === latest)?.operation
     assert.ok(newest, '恢复应先准入最新冻结输入')
     await f.application.wait(newest.id)
-    assert.equal(f.calls.length, 2)
+    assert.ok(f.calls.length > firstCalls, JSON.stringify(f.application.store.listAttempts(newest.id).map(attempt => attempt.failure)))
+    const resumedCalls = f.calls.length
+    assert.equal(new Set(f.calls.map(call => call.requestKey)).size, resumedCalls)
+    await f.application.wait(newest.id)
+    assert.equal(f.calls.length, resumedCalls, '已失败的最新分区集合重放不重复派发')
     assert.equal(f.application.store.readOperation(active.id).input.id, first)
   } finally { await f.application.stopService(); f.cleanup() }
 })

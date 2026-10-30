@@ -11,7 +11,7 @@ import { decisionScopeIds, sameContractBusinessMeaning } from './contract-evolut
 import { controlledDecisionIdentity, readControlledChanges, readControlledDecision, renderControlledDecisionRaw } from './request-input.js'
 import { isSyncSpecPath, readFrozenContracts } from './frozen-contracts.js'
 import type { BaselinePair, ComposedInputRef, FrozenBaselineSelection, InputSnapshot } from './operation-types.js'
-import { contentHash, objectGit, readEvidence, readObject, readTree, validateRepositoryPath, verifySnapshot } from './snapshot.js'
+import { canonicalSnapshotSource, contentHash, objectGit, readEvidence, readObject, readTree, validateRepositoryPath, verifySnapshot } from './snapshot.js'
 import type { TreeEntry } from './snapshot.js'
 import type { SyncCoordinatorPlan } from './coordinator-types.js'
 import type { FrozenEntryJson, FrozenReadProof } from '../frozen-context.js'
@@ -102,7 +102,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   const canonicalProjection = authorProjection?.version === 'canonical-author-projection-v1' ? authorProjection as { version: 'canonical-author-projection-v1'; projections: { snapshotId: string; changes: { path: string; before: TreeEntry; after: TreeEntry }[] }[] } : null
   const authorByteProjections = canonicalProjection?.projections.flatMap(({ snapshotId, changes }) => changes.filter(change => within(change.path, input.plan.readPaths) && !isHostPrivatePath(change.path)).map(change => ({ snapshotId, path: change.path, before: { ...change.before, text: readObject(input.snapshot.source.commonDir, change.before.oid).toString('utf8') }, after: { ...change.after, text: readObject(input.snapshot.source.commonDir, change.after.oid).toString('utf8') } }))) ?? []
   const triggerBefore = input.plan.version === 'sync-coordinator-v2' ? input.plan.commitTrigger?.before : undefined
-  if (triggerBefore) { verifySnapshot(triggerBefore); if (JSON.stringify(triggerBefore.source) !== JSON.stringify(input.snapshot.source)) reject('提交触发前态不属于同一物理来源') }
+  if (triggerBefore) { verifySnapshot(triggerBefore); if (JSON.stringify(canonicalSnapshotSource(triggerBefore.source)) !== JSON.stringify(canonicalSnapshotSource(input.snapshot.source))) reject('提交触发前态不属于同一物理来源') }
   const oldTree = input.baseline?.sourceInput.immutableTree ?? triggerBefore?.immutableTree ?? objectGit(commonDir, ['rev-parse', `${input.snapshot.headCommit}^{tree}`]).toString().trim()
   const fileViews: Record<string, Map<string, FrozenFile>> = { oldSource: fileTree(input, oldTree), newSource: fileTree(input, input.snapshot.immutableTree), verifiedDelivery: input.plan.version === 'sync-coordinator-v2' && !input.baseline ? new Map() : fileTree(input, input.baseline?.verifiedDelivery.immutableTree ?? oldTree), composedFiles: fileTree(input, input.composed.tree), controlledBeforeFiles: new Map() }
   const replaceFile = (files: Map<string, FrozenFile>, path: string, entry: TreeEntry | null): void => {

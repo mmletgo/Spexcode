@@ -98,3 +98,6 @@ P4 partial→decide使用原P3-DELIVERY keep_intent真实链补强：fresh exact
 提交门禁回归先以旧实现证明未提交 Spec/代码保存错误改变自动输入，再验证保存、git add、提交后立即出现的新 dirty 字节均不混入自动输入。真实 Git code-only/spec-only/mixed commit 分别形成 code/spec/combined；同 commit 重扫、服务重启不重派，停机 commit 启动补偿保持分类与已提交字节。Dashboard 受控 patch 仍由03的即时 submit、不先提交原树证明。enable 配置和注册树夹具必须明确先 commit，未提交配置不成为自动授权。
 
 累计提交边界由应用传给规划器的 commitTrigger 验证：initial.before 为 null，后续 before 精确复用上次自动接入 InputSnapshot；停机先提交 Spec 再提交代码仍为 combined，paths 同时含两次真实 tree 差量，before 不是 HEAD parent。暂停期间仅观测的快照不能消费首次 initial 边界。
+
+
+分区故障回归允许单操作的不同分区同时在途，按实际唯一 requestKey 集合核对首次派发与重放/暂停期间的零新增；不把整操作固定成一个模型调用。应用夹具提供足够通过真实分区预检的测试预算，预算不足零调用的产品门禁仍由协调器专门用例验证；不调整实际项目预算。

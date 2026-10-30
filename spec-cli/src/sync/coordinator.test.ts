@@ -1611,7 +1611,7 @@ for (const scenario of ['failed', 'budget', 'unreviewed', 'no-conflict', 'active
 })
 
 test('v2 code→Spec协调器保留分区证据并跳过代码生成，最终候选独审仍走原预算身份', async t => {
-  const f = await fixture(t, { maxAttempts: 1, maxCalls: 5, maxRepairs: 0, timeoutMs: 120000 }, false, original, 'project', original, { version: 'sync-coordinator-v2', direction: 'code_to_spec', partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 2 }, sourcePaths: ['src'], commitTrigger: { before: null, paths: ['src/export.js'] } }, undefined, 'code')
+  const f = await fixture(t, { maxAttempts: 1, maxCalls: 5, maxRepairs: 0, timeoutMs: 120000 }, false, original, 'project', original, { version: 'sync-coordinator-v2', direction: 'code_to_spec', partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 2 }, sourcePaths: ['src'], commitTrigger: { before: null, paths: ['src/export.js', 'tests/export.test.mjs', 'package.json'] } }, undefined, 'code')
   let candidateSeen = false
   f.transform((output, request) => {
     if (request.purpose === 'elaboration_generate' || request.purpose === 'elaboration_review') {
@@ -1634,6 +1634,9 @@ test('v2 code→Spec协调器保留分区证据并跳过代码生成，最终候
   assert.equal(result.operation.callsUsed, 5)
   const checkpoints = f.store.listAttempts(f.operation.id)[0].checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())) as { stage?: string }[]
   assert.ok(checkpoints.some(checkpoint => checkpoint.stage === 'partition-plan'))
+  const partitionStage = f.store.listAttempts(f.operation.id)[0].checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(value => value.stage === 'partition-plan')
+  const partitionPlan = JSON.parse(readEvidence(f.input.source.commonDir, partitionStage.resultRef).toString()) as { expectedPaths: string[] }
+  assert.ok(!partitionPlan.expectedPaths.includes('package.json') && !partitionPlan.expectedPaths.includes('tests/export.test.mjs'), '首次接入的未变上下文不是业务变更或发现writer')
   assert.ok(checkpoints.some(checkpoint => checkpoint.stage === 'candidate-partition-plan'))
   assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
