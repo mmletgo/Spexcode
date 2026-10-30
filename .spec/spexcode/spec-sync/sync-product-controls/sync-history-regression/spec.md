@@ -28,3 +28,5 @@ stopWriter 验证物理暂停先持久化，当前观察/执行者停止，recei
 完整恢复回归包含child自身VERIFY及种子前明确可信固定命令登记；正式恢复后直接读取node/VERIFY和业务head，必须绑定新receipt，再验证普通后继修改。
 
 明确 fixture 建立真实 Git 已结算 receipt 并采纳到原来源后，正式 commit-only 观察沿既有 baseline 消除回声：重复扫描无新 operation、无派发和模型调用；该种子不充当真实模型或 Docker 验收。writer-fencing 的旧 reader 拒绝断言跟随当前实际迁移代数，不固定过时的未来版本号。
+
+receipt 消费边界回归复用明确受控四层种子及真实 Git journal：C0 作者 code 输入形成仅写 Spec 的已结算交付，公开 adopt 正式采纳 D；在线观察或停机采纳后启动补偿均对 D 零派发并保存 baseline 消费证据。重建应用实例后 C1 仅提交代码，origin 必须为 code，before 精确等于 D，paths 不包含生成 Spec。先复现旧 before 跨过 D 导致 combined，再证明修复；暂停期间新的 Spec/code 提交保持未消费，恢复时累计两者并沿真实前态。种子不是实际模型或 Docker 语义验收，测试禁止模型调用。
