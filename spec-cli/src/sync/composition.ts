@@ -7,9 +7,10 @@ import type { ContractItem } from '@spexcode/spec-core/contracts'
 import { contractBusinessMeaning, contractBusinessProse, sameContractBusinessMeaning } from './contract-evolution.js'
 import { canonicalContractFilterBindings, cleanCanonicalContractText } from '../contract-filter.js'
 import { readHistoryRequest } from './history-input.js'
+import { isSyncSpecPath } from './frozen-contracts.js'
 import type { HistoryChange } from './history-input.js'
 import type { BaselinePair, BaselineResource, BlobRef, ComposedInputRef, FrozenBaselineSelection, InputSnapshot } from './operation-types.js'
-import { contentHash, objectGit, readEvidence, readObject, readTree, validateRepositoryPath, verifySnapshot, writeEvidence, writeObject, writeTree } from './snapshot.js'
+import { contentHash, objectGit, readEvidence, readObject, readObjectBatch, readTree, validateRepositoryPath, verifySnapshot, writeEvidence, writeObject, writeTree } from './snapshot.js'
 import type { TreeEntry } from './snapshot.js'
 
 export type CompositionConflict = { path: string; base: TreeEntry | null; source: TreeEntry | null; delivery: TreeEntry | null }
@@ -137,9 +138,10 @@ export function selectedRetiredIds(selection: FrozenBaselineSelection): string[]
 }
 
 function intentObjects(commonDir: string, entries: readonly TreeEntry[]): Map<string, IntentObject> {
-  const objects = new Map<string, IntentObject>()
-  for (const entry of entries.filter(entry => entry.mode !== '120000' && entry.path.startsWith('.spec/') && entry.path.endsWith('/spec.md'))) {
-    const bytes = readObject(commonDir, entry.oid)
+  const objects = new Map<string, IntentObject>(), specs = entries.filter(entry => entry.mode !== '120000' && isSyncSpecPath(entry.path))
+  const contents = readObjectBatch(commonDir, specs.map(entry => entry.oid))
+  for (const entry of specs) {
+    const bytes = contents.get(entry.oid)!
     if (!isUtf8Text(bytes)) throw new Error(`SYNC_COMPOSITION_BLOCKED: non UTF-8 contract ${entry.path}`)
     const text = bytes.toString('utf8'), contract = parseContract({ nodeId: entry.path.split('/').at(-2)!, path: entry.path, source: text }).contract
     for (const item of contract?.items ?? []) {

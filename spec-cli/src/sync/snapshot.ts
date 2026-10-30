@@ -152,6 +152,27 @@ export function readObject(commonDir: string, oid: string): Buffer {
   verifyObjectOid(oid, bytes)
   return bytes
 }
+/** 批读一组明确的 blob OID，沿用读树的容量分组、原字节及完整 OID 校验。 */
+export function readObjectBatch(commonDir: string, oids: readonly string[]): Map<string, Buffer> {
+  const unique = [...new Set(oids)], result = new Map<string, Buffer>()
+  if (unique.some(oid => !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(oid))) throw new Error('blob 必须为不可变 Git OID')
+  if (unique.length === 0) return result
+  if (unique.length === 1) return new Map([[unique[0], readObject(commonDir, unique[0])]])
+  const metadata = objectGit(commonDir, ['cat-file', '--batch-check'], Buffer.from(unique.map(oid => `${oid}\n`).join('')))
+  const lines = metadata.toString('ascii').split('\n')
+  if (lines.pop() !== '' || lines.length !== unique.length) throw new Error('Git batch object metadata 不匹配')
+  const objects = unique.map((oid, index) => {
+    const match = /^(?:[0-9a-f]{40}|[0-9a-f]{64}) blob (\d+)$/.exec(lines[index]) // dead-words-ok: Git batch metadata uses this exact object type.
+    const size = match ? Number(match[1]) : NaN
+    if (!match || lines[index] !== `${oid} blob ${size}` || !Number.isSafeInteger(size)) { // dead-words-ok: Git batch metadata uses this exact object type.
+      readObject(commonDir, oid)
+      throw new Error('Git batch object metadata 不匹配')
+    }
+    return { oid, size }
+  })
+  readObjects(commonDir, objects, (bytes, index) => result.set(unique[index], bytes))
+  return result
+}
 export function writeObject(commonDir: string, bytes: Buffer): string { return objectGit(commonDir, ['hash-object', '-w', '--stdin'], bytes).toString().trim() }
 export function writeTree(commonDir: string, entries: TreeEntry[]): string {
   const temp = mkdtempSync(join(tmpdir(), 'spex-sync-index-')), index = join(temp, 'index')

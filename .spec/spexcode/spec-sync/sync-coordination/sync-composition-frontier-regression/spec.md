@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+真实 Git 空基线夹具包含多个独立业务 Spec 和非 UTF-8 工具插件实例：组合及证据重读只投影真实业务契约，逐 ID 核对 owner、原始需求和完整对象；插件原字节与用户 index 保持。业务正文经批量对象通道读取，不逐 Spec 启动单 blob 进程；真正业务 Spec 的非 UTF-8 内容仍拒绝。此夹具不创建验证或 receipt，不代表原生产品验收。
+
 回归 [[sync-input-composition]]、[[sync-code-behavior]]、[[sync-controlled-request]] 及 [[sync-application-planning]] 的精确资源行为。夹具保存真实 source/交付 worktree、Git提交/blob/mode，成对基线经真实store admission→generation→verification→journal→receipt→settlement动作建立，禁止手写SQLite伪造权威。验证四层和行为分析runner明确fake，不把这些单测称为真实native产品验收。
 
 大小写混合路径的真实 Git 树经组合后，必须能够重读并核对 manifest/contentDigest，且保留各文件的原始字节。
