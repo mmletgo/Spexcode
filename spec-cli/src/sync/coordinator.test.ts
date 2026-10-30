@@ -68,12 +68,13 @@ function gitReadCounter(directory: string): { reset(): void; entries(): string[]
     },
   }
 }
-async function fixture(t: test.TestContext, budget = { maxAttempts: 3, maxCalls: 16, maxRepairs: 2, timeoutMs: 300_000 }, adopt = false, specSource = original, projectId = 'project', factsSource = specSource, planPatch: Partial<SyncCoordinatorPlan> = {}, controlledEdit?: { original: string; replacement: string; intent: string; testPath: string }, origin: 'spec' | 'code' | 'combined' = 'spec', model?: string, precise = false) {
+async function fixture(t: test.TestContext, budget = { maxAttempts: 3, maxCalls: 16, maxRepairs: 2, timeoutMs: 300_000 }, adopt = false, specSource = original, projectId = 'project', factsSource = specSource, planPatch: Partial<SyncCoordinatorPlan> = {}, controlledEdit?: { original: string; replacement: string; intent: string; testPath: string }, origin: 'spec' | 'code' | 'combined' = 'spec', model?: string, precise = false, extraSpecs: Readonly<Record<string, string>> = {}) {
   const parent = realpathSync(mkdtempSync(join(tmpdir(), 'sync-coordinator-'))), root = join(parent, 'source'), managedRoot = join(parent, 'managed'), artifactRoot = join(parent, 'artifacts')
   mkdirSync(root); mkdirSync(managedRoot, { mode: 0o700 }); mkdirSync(artifactRoot, { mode: 0o700 }); cpSync(fixturePath, root, { recursive: true })
   const targetPath = `.spec/${projectId}/export-contract/spec.md`
   if (projectId !== 'export') renameSync(join(root, '.spec/export'), join(root, `.spec/${projectId}`))
   writeFileSync(join(root, targetPath), specSource)
+  for (const [path, source] of Object.entries(extraSpecs)) { mkdirSync(join(root, path, '..'), { recursive: true }); writeFileSync(join(root, path), source) }
   writeFileSync(join(root, '.spec/spexcode.json'), JSON.stringify({ mainBranch: 'main', harnesses: [] }))
   const git = (...args: string[]) => execFileSync('/usr/bin/git', ['-C', root, ...args], { encoding: 'utf8', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' }, stdio: ['ignore', 'pipe', 'pipe'] }).trim()
   git('init', '-b', 'main'); git('config', 'user.name', 'coordinator fixture'); git('config', 'user.email', 'coordinator@example.invalid'); git('add', '.'); git('commit', '-m', 'fixture')
@@ -1646,6 +1647,101 @@ test('v2 code→Spec协调器保留分区证据并跳过代码生成，最终候
   assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
   assert.equal(f.store.listJournals(f.operation.id).length, 0)
+})
+
+test('v2最终预算只列真实实现派发，纯父接口不产生虚构生成或独审键', async t => {
+  const parentPath = '.spec/project/spec.md', parentId = 'REQ-PARENT-01'
+  const raw = '保留当前导出契约，由现有导出服务完成请求及结果下载。'
+  const parentBefore = `---\ntitle: 导出上层接口\nstatus: pending\n---\n## raw source\n\n${raw}\n`
+  const leafBefore = original.slice(0, original.indexOf('## expanded spec')).replace('contract-schema: sync-v1\n', '')
+  const parentSource = `---\ntitle: 导出上层接口\nstatus: active\ncontract-schema: sync-v1\n---\n## raw source\n\n${raw}\n\n## expanded spec\n\n父层声明原意，由现有服务承接。\n\n### REQ\n\n| id | goal | source | constraints | success | depends-on |\n| --- | --- | --- | --- | --- | --- |\n| ${parentId} | 保留现有导出行为 | user:raw | 不改变原政策 | 既有导出流程及验收完成 | - |\n`
+  const f = await fixture(t, { maxAttempts: 1, maxCalls: 16, maxRepairs: 0, timeoutMs: 120000 }, false, leafBefore, 'project', original, {
+    version: 'sync-coordinator-v2', direction: 'spec_to_code', intentNodeId: 'project',
+    targets: [{ nodeId: 'project', path: parentPath, rawSource: raw }, { nodeId: 'export-contract', path: contractPath }],
+    partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 2 }, sourcePaths: ['src'],
+  }, undefined, 'spec', undefined, false, { [parentPath]: parentBefore })
+  f.transform((output, request) => {
+    if (request.purpose === 'elaboration_generate') {
+      const frozen = JSON.parse(request.prompt.split('冻结业务输入:\n')[1].split('\n')[0]) as { targets: { path: string }[] }
+      if (frozen.targets[0].path === parentPath) {
+        const parent = rows(parentSource, parentPath)
+        parent.changes[0].nodeId = 'project'
+        parent.applicability = ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: false, basis: '父接口不执行实现，各边界保留在现有服务契约中', affectedIds: [parentId] }))
+        return parent
+      }
+      const child = rows(original)
+      for (const row of child.changes[0].tables.FLOW) { assert.ok(Array.isArray(row.req)); row.req = [...row.req, parentId] }
+      for (const row of child.changes[0].tables.AC) { assert.ok(Array.isArray(row.covers)); row.covers = [...row.covers, parentId] }
+      return child
+    }
+    if (request.purpose === 'code_generate') return { version: 'sync-files-v1', changes: [] }
+    if (request.purpose === 'code_review') throw Object.assign(new Error('本回归在真实Docker之前停止'), { code: 'unsupported' })
+    return output
+  })
+  const result = await runSyncOperation(f.store, f.operation.id, f.options)
+  assert.ok(f.calls.some(call => call.purpose === 'code_review'), JSON.stringify({ status: result.status, phase: result.operation.phase, failure: result.failure, calls: f.calls.map(call => call.purpose) }))
+  const attempt = f.store.listAttempts(f.operation.id)[0]
+  const stages = attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())) as { stage?: string; resultRef?: { sha256: string } }[]
+  const planRef = stages.find(stage => stage.stage === 'candidate-partition-plan')!.resultRef!
+  const plan = JSON.parse(readEvidence(f.input.source.commonDir, planRef).toString()) as { partitions: { id: string; targets: { path: string }[] }[] }
+  const parent = plan.partitions.find(partition => partition.targets.some(target => target.path === parentPath))!
+  const budgetRef = stages.find(stage => stage.stage === 'partition-generation-budget')!.resultRef!
+  const budget = JSON.parse(readEvidence(f.input.source.commonDir, budgetRef).toString()) as { requiredKeys: string[] }
+  assert.ok(budget.requiredKeys.length > 0)
+  assert.ok(!budget.requiredKeys.some(key => key.endsWith(`:partition:${parent.id}:code_generate`) || key.endsWith(`:final:${parent.id}:code_review`)), '预算不能声称未派发的父接口生成或实现独审')
+  const dispatched = attempt.dispatchPlans.filter(dispatch => ['code_generate', 'implementation_plan', 'code_review'].includes(dispatch.purpose)).map(dispatch => dispatch.key).sort()
+  assert.deepEqual([...budget.requiredKeys].sort(), dispatched, '预算派发集合与实际结构化请求必须相等')
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
+  assert.equal(f.store.listJournals(f.operation.id).length, 0)
+})
+
+test('v2最终预算按真实ready投影跳过GAP跨边，两端独立分支用恰好预算推进', async t => {
+  const localPath = '.spec/alpha/export-contract/spec.md', otherPath = '.spec/beta/import-contract/spec.md'
+  const local = original.replace('code:\n', `related:\n  - ${otherPath}\ncode:\n`)
+  const other = original.replaceAll('export-job', 'import-job').replaceAll('EXPORT', 'IMPORT').replaceAll('export-contract', 'import-contract').replaceAll('src/export.js', 'src/import.js').replaceAll('tests/export.test.mjs', 'tests/import.test.mjs').replaceAll('decision:IMPORT-POLICY', 'decision:EXPORT-POLICY').replace('code:\n', `related:\n  - ${localPath}\ncode:\n`)
+  const environment = { version: 'trusted-test-v1' as const, image: 'node@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392', platform: 'linux/arm64' as const, memoryBytes: 128 * 1024 * 1024, cpus: 1, pidsLimit: 64, scratchBytes: 16 * 1024 * 1024, logBytes: 128 * 1024 }
+  const verifications = [original, other].map(source => { const item = parseContract({ nodeId: 'fixture', path: localPath, source }).contract!.items.find(item => item.kind === 'VERIFY')!; assert.equal(item.kind, 'VERIFY'); return { definition: { id: item.id, command: item.command, cwd: item.cwd, timeoutMs: item.timeoutMs }, environment } })
+  const gapId = 'GAP-EXPORT-CROSS-RETRY'
+  const withGap = `${local}\n### GAP\n\n| id | kind | unknown | affects | evidence | decision | source | depends-on |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| ${gapId} | missing_fact | 两个模块重试如何关联 | RULE-EXPORT-06,RULE-IMPORT-06 | 原意未定义跨模块重试 | 明确跨模块重试政策 | user:raw | REQ-EXPORT-01 |\n`
+  const retry = other.split('\n').find(line => line.startsWith('| RULE-IMPORT-06 '))!
+  const linked = other.replace(retry, retry.replace(/ \|$/, ',RULE-EXPORT-06 |'))
+  const f = await fixture(t, { maxAttempts: 1, maxCalls: 8, maxRepairs: 0, timeoutMs: 120000 }, false, local, 'alpha', original, {
+    version: 'sync-coordinator-v2', direction: 'spec_to_code', targets: [{ nodeId: 'export-contract', path: localPath }, { nodeId: 'import-contract', path: otherPath }],
+    partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 2 }, sourcePaths: ['src'], verifications,
+  }, undefined, 'spec', undefined, false, { [otherPath]: other, 'src/import.js': readFileSync(new URL('src/export.js', fixturePath), 'utf8'), 'tests/import.test.mjs': readFileSync(new URL('tests/export.test.mjs', fixturePath), 'utf8').replaceAll('EXPORT', 'IMPORT').replaceAll('src/export.js', 'src/import.js') })
+  let reviews = 0
+  f.transform((output, request) => {
+    if (request.purpose === 'elaboration_generate') {
+      const frozen = JSON.parse(request.prompt.split('冻结业务输入:\n')[1].split('\n')[0]) as { targets: { path: string }[] }
+      const path = frozen.targets[0].path, generated = rows(path === localPath ? withGap : linked, path)
+      generated.changes[0].nodeId = path === localPath ? 'export-contract' : 'import-contract'
+      return generated
+    }
+    if (request.purpose === 'code_generate') {
+      const frozen = promptInput(request)
+      return { version: 'sync-files-v1', changes: frozen.elaboratedSpecs.map(spec => { const entry = frozen.manifest.entries.find(entry => entry.path === spec.path)!; return { path: spec.path, beforeDigest: entry.digest, beforeMode: entry.mode, mode: null, content: spec.source } }) }
+    }
+    if (request.purpose === 'code_review') {
+      assert.ok(!request.requestKey.includes(':final:edge:'), '受GAP阻断的跨边没有实际ready义务')
+      const frozen = promptInput(request)
+      assert.ok(frozen.readyIds.length > 0)
+      assert.ok(!frozen.readyIds.some(id => [gapId, 'RULE-EXPORT-06', 'RULE-IMPORT-06'].includes(id)))
+      if (++reviews === 2) throw Object.assign(new Error('已证明精确预算到达全部最终独审，在真实Docker前停止'), { code: 'unsupported' })
+    }
+    return output
+  })
+  const result = await runSyncOperation(f.store, f.operation.id, f.options)
+  assert.equal(reviews, 2, JSON.stringify({ status: result.status, failure: result.failure, calls: f.calls.map(call => call.purpose) }))
+  assert.equal(result.operation.callsUsed, 8)
+  const attempt = f.store.listAttempts(f.operation.id)[0]
+  const stages = attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())) as { stage?: string; resultRef?: { sha256: string } }[]
+  const plan = JSON.parse(readEvidence(f.input.source.commonDir, stages.find(stage => stage.stage === 'candidate-partition-plan')!.resultRef!).toString()) as { dependencies: unknown[] }
+  assert.ok(plan.dependencies.length > 0, '真实跨边仍保留在完整契约计划')
+  const budget = JSON.parse(readEvidence(f.input.source.commonDir, stages.find(stage => stage.stage === 'partition-generation-budget')!.resultRef!).toString()) as { minimumCalls: number; remainingCalls: number; requiredKeys: string[] }
+  assert.equal(budget.minimumCalls, 4); assert.equal(budget.remainingCalls, 4)
+  assert.deepEqual([...budget.requiredKeys].sort(), attempt.dispatchPlans.filter(dispatch => ['code_generate', 'implementation_plan', 'code_review'].includes(dispatch.purpose)).map(dispatch => dispatch.key).sort())
+  assert.deepEqual(result.operation.budget, f.operation.budget); assert.equal(result.operation.deadlineAtMs, f.operation.deadlineAtMs)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.equal(f.store.listJournals(f.operation.id).length, 0)
 })
 
 test('v2分区完整最少调用超过原预算时启动前诊断，不调模型或超扣', async t => {

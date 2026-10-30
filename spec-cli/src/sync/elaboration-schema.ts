@@ -1,4 +1,4 @@
-import { CONTRACT_COLUMNS, parseContract } from '@spexcode/spec-core/contracts'
+import { CONTRACT_COLUMNS, parseContract, parseFrontmatter } from '@spexcode/spec-core/contracts'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
 import type { ElaborationInput } from './elaboration-types.js'
 import { elaborationTargetBindings } from './elaboration-markdown.js'
@@ -30,7 +30,7 @@ export const ELABORATION_SCHEMA = object({
   applicability: { type: 'array', minItems: ELABORATION_BOUNDARIES.length, items: object({ boundary: { enum: ELABORATION_BOUNDARIES }, applies: { type: 'boolean' }, basis: string, affectedIds: strings }) },
 })
 /** 生成边界限制 authority；诊断边界保留原字符串，后续候选校验仍核对实际 owner。 */
-export function elaborationSchema(input: ElaborationInput, options: { purpose?: 'generation' | 'diagnostic' } = {}): Record<string, unknown> {
+export function elaborationSchema(input: ElaborationInput, options: { purpose?: 'generation' | 'diagnostic' | 'interface_seed' } = {}): Record<string, unknown> {
   const targets = elaborationTargetBindings(input)
   const schema = structuredClone(ELABORATION_SCHEMA)
   const changes = (schema.properties as Record<string, Record<string, unknown>>).changes
@@ -55,6 +55,19 @@ export function elaborationSchema(input: ElaborationInput, options: { purpose?: 
       ? '诊断seed保留原始authority字符串，不代表授权；当前候选全图校验仍要求规则归属其canonical nodeId。'
       : 'RULE.authority必须是当前可写target的canonical nodeId，不是REQ/RULE业务ID；冻结move的旧canonical owner可保留，由renderer按真实move归一化，最终owner仍由原有全图校验核对。',
     ...(options.purpose !== 'diagnostic' && owners.size ? { enum: [...owners] } : {}),
+  }
+  if (options.purpose === 'interface_seed') {
+    const target = input.targets[0]
+    const frontmatter = target?.source ? parseFrontmatter(target.source).fm : {}
+    const entries = (value: unknown): string[] => typeof value === 'string' ? [value] : Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
+    const rowTables = properties.tables as { properties: Record<string, Record<string, unknown>> }
+    for (const [kind, schema] of Object.entries(rowTables.properties)) if (!['REQ', 'RULE', 'GAP'].includes(kind)) schema.maxItems = 0
+    const code = entries(frontmatter.code), related = entries(frontmatter.related)
+    properties.code = { type: 'array', maxItems: code.length, items: { ...string, ...(code.length ? { enum: code } : {}) } }
+    properties.related = { type: 'array', maxItems: related.length, items: { ...string, ...(related.length ? { enum: related } : {}) } }
+    const contract = target?.source ? parseContract({ ...target, source: target.source }).contract : null
+    const removableIds = contract?.items.filter(item => input.authorizedChanges?.some(change => change.action === 'retire' && change.id === item.id)).map(item => item.id) ?? []
+    properties.removeIds = { type: 'array', maxItems: removableIds.length, items: { type: 'string', ...(removableIds.length ? { enum: removableIds } : {}) } }
   }
   return schema
 }

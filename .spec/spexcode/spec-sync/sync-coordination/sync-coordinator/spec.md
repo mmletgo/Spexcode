@@ -108,7 +108,7 @@ raw-only 初始化允许的空 affectedIds 不能被解释为没有阻塞。完�
 
 spec_to_code/combined 各区并行产出结构化补丁，程序核本区读取、scope、Spec目标、不可改oracle及唯一文件writer，沿原 publication-base 保护与 CAS 确定序冻结一棵候选。所有局部及跨区边独审绑定同一最终 candidateDigest，V2 明示各原始独审及覆盖集合，不合成不存在的全仓模型review。code_to_spec 不派 code_generate，只装配 P1 已审Spec；程序核最终source/tests对象与真实输入逐字/mode/absence一致，发生代码组合差异就停止，不能反向改代码或测试。代码方向 V3 失败不进入可写实现自修复循环。
 
-启动前保存完整最少调用估计与原预算族剩余量，所需分析、P1及最终分区/跨边独审超预算时明确拒绝，不少算或免计调用。全局 V1、真实隔离 V3、V4、正常 hooks 和单 receipt 仍是完成门槛，局部结果不构成全产品完成。
+启动前保存完整最少调用估计与原预算族剩余量，所需分析、P1及最终分区/跨边独审超预算时明确拒绝，不少算或免计调用。最终派发预算在真实GenerationInput构造后、任何文件规划/代码生成/最终独审派发前，与runner复用同一局部及跨边输入投影，精确列requiredKeys和planningIds；按实际readyIds和历史owner退役义务计数，不凭边端点活跃或scope中的恢复node/VERIFY技术ID增加虚构调用。两端各有独立ready分支、跨边义务全被GAP阻断时，保留真实契约边但不列未派发的边独审。已审纯父接口不列虚构的本地代码生成或实现独审，纯接口双端边仍保留在契约图及P1证据，不冒称实施审查；普通新叶、真实实施边和全部ready义务仍受原门禁。全局 V1、真实隔离 V3、V4、正常 hooks 和单 receipt 仍是完成门槛，局部结果不构成全产品完成。
 
 
 code_to_spec 在 P1 即传递空实现写范围，保持所有源码与测试只读；不能将新的测试绑定延后给不运行的代码生成阶段。

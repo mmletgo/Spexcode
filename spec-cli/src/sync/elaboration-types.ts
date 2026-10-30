@@ -1,4 +1,5 @@
 import type { CodeBehaviorEvidence, ContractNodeChange, SyncDecisionAuthority } from './writeback-types.js'
+import type { RawOnlyInterfaceSeedEvidence } from './partitioning.js'
 import type { BlobRef, InputSnapshot } from './operation-types.js'
 import type { FrozenContextRef, FrozenEntryJson, FrozenReadProof } from '../frozen-context.js'
 import type { Contract, ContractCoverage, ContractFinding, ContractGraph, Gap, ParseContractInput, Verification } from '@spexcode/spec-core/contracts'
@@ -7,11 +8,19 @@ export const ELABORATION_BOUNDARIES = ['permissions', 'mutation', 'async', 'netw
 export type ElaborationBoundary = typeof ELABORATION_BOUNDARIES[number]
 export type ElaborationTarget = { nodeId: string; path: string; source: string | null; sourceDigest: string | null; rawSource?: string }
 export type ElaborationFact = { source: string; text: string }
+export type ElaborationPhase = 'interface_seed' | 'partitioned_final'
+export type ElaborationPartitionBinding = { planDigest: string; partitionId: string; analysisRef?: BlobRef; interfaceSeed?: RawOnlyInterfaceSeedEvidence }
 /** 调用者已确认的用户原意或裁决变更；不是 Agent 自己生成的批准请求。 */
 export type AuthorizedContractChange = { id: string; action: 'retire' | 'update_verification'; source: 'user:raw' | `decision:${string}`; reason: string; analysisRef?: BlobRef } | { id: string; action: 'update_acceptance'; source: 'user:raw' | `decision:${string}` | `code:${string}`; reason: string; ruleIds: string[]; analysisRef: BlobRef } | { id: string; action: 'restore'; source: 'user:raw'; reason: string; history: { inputId: string; requestBlob: BlobRef } }
 export type ElaborationInput = {
   root: string
   base?: string
+  /** 仅由分区执行器用于无源码writer的初始或既有纯父接口；结果不是完整P1或实现就绪。 */
+  phase?: 'interface_seed'
+  /** 原分区计划及后验纯父分类证据，只绑定本区来源，不授予写权限或完成度。 */
+  partitionBinding?: ElaborationPartitionBinding
+  /** 分区局部候选允许把只读context覆盖留给合并后的严格全图seal。 */
+  validationScope?: 'partition_local'
   requestKey: string
   intent: { nodeId: string; rawSource: string }
   targets: readonly ElaborationTarget[]
@@ -45,6 +54,7 @@ export type ElaborationInput = {
 export type Applicability = { boundary: ElaborationBoundary; applies: boolean; basis: string; affectedIds: string[] }
 export type ElaborationChange = { nodeId: string; path: string; beforeDigest: string | null; source: string }
 export type ElaborationCandidate = { inputDigest: string; changes: ElaborationChange[]; applicability: Applicability[]; nodeChanges?: ContractNodeChange[] }
+export type ElaborationPartitionSeal = { inputDigest: string; candidateDigest: string; changes: ElaborationChange[]; applicability: Applicability[]; nodeChanges: ContractNodeChange[]; findings: ContractFinding[]; passed: boolean }
 export type ElaborationReviewFinding = { code: string; kind: 'repair' | 'missing_fact' | 'conflict'; message: string; affectedIds: string[]; evidence: string; decision: string }
 export type ElaborationReview = { inputDigest: string; candidateDigest: string; verdict: 'accept' | 'repair' | 'needs_input' | 'conflict'; checkedBoundaries: ElaborationBoundary[]; findings: ElaborationReviewFinding[] }
 export type ElaborationTrace = { purpose: string; sessionId: string; threadId: string; turnId: string; resultDigest: string; inputDigest: string }
@@ -58,7 +68,10 @@ export type ElaborationRepairSeed = {
 }
 export type ElaborationPriorReference = { requestKey: string; inputDigest: string; candidateDigest: string; renderedCandidateDigest: string; traces: ElaborationTrace[] }
 export type ElaborationResult = {
-  status: 'complete' | 'needs_input' | 'conflict' | 'unsupported' | 'failed' | 'cancelled' | 'exhausted'
+  status: 'complete' | 'needs_input' | 'conflict' | 'unsupported' | 'failed' | 'cancelled' | 'exhausted' | 'interface_seed'
+  /** 局部interface seed与全局分区seal均显式标记，不能误读为独立完整P1。 */
+  phase?: ElaborationPhase
+  partitionBinding?: ElaborationPartitionBinding
   inputDigest: string
   candidateDigest: string | null
   prior: ElaborationPriorReference | null
@@ -75,6 +88,7 @@ export type ElaborationResult = {
   retiredIds: string[]
   nodeChanges?: ContractNodeChange[]
   partitionEvidence?: { partitionId: string; resultRef: BlobRef }[]
+  partitionSeal?: ElaborationPartitionSeal
   structurePassed: boolean
   reviewPassed: boolean
   runtimeVerification: 'not_run'
