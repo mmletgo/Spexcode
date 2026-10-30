@@ -7,6 +7,7 @@ import { chmodSync, copyFileSync, mkdtempSync, mkdirSync, readFileSync, readdirS
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { claudeHarness, sessionIdentityEnvVars, stampRvSock, type SharedRuntimeProbe } from './harness.js'
 import { codexHarness, codexHeadlessHarness } from './codex-harness.js'
 import { processStartToken } from '@spexcode/spec-core'
@@ -2297,7 +2298,93 @@ test('one-shot headless launch does not retry a successful fast exit', serial, (
   }
 })
 
-test('a failed creation-time materialize is reported loud and stamped on the record note', serial, () => {
+async function archivedRestoreFixture(mode: 'normal' | 'materialize-failure' | 'conflict'): Promise<void> {
+  const previousHome = process.env.SPEXCODE_HOME, previousDatabase = process.env.SPEX_SESSION_DATABASE_PATH, previousCwd = process.cwd()
+  const fixture = mkdtempSync(join(tmpdir(), 'spex-restore-registry-')), project = join(fixture, 'project'), path = join(fixture, 'restored'), bin = join(fixture, 'bin'), trace = join(fixture, 'trace')
+  mkdirSync(project); mkdirSync(bin); mkdirSync(join(project, '.spec'))
+  fsWriteFileSync(join(project, '.spec/spexcode.json'), JSON.stringify({ harnesses: [], mainBranch: 'main' }))
+  const g = (...args: string[]) => execFileSync('git', ['-C', project, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+  g('init', '-q', '-b', 'main'); g('config', 'user.name', 'restore-fixture'); g('config', 'user.email', 'restore@example.test')
+  g('add', '.'); g('commit', '-qm', 'fixture')
+  g('worktree', 'add', '-qb', 'restore-branch', path, 'main')
+  const id = `restore-registry-${process.pid}`
+  process.chdir(project); process.env.SPEXCODE_HOME = join(fixture, 'home'); process.env.SPEX_SESSION_DATABASE_PATH = join(fixture, 'sessions.sqlite')
+  try {
+    writeResumeFixtureRecord(id, path, '/spex-fixture-missing-restore-launcher', {
+      branch: 'restore-branch', status: OWNED_QUEUE_RAW_STATUS, harness: 'codex', harness_session_id: '', stopped: false, launch_owner: 'restore-fixture',
+    })
+    fsWriteFileSync(join(path, 'dirty.txt'), 'archived user edit\n')
+    assert.equal(await closeSession(id), true)
+    assert.equal(existsSync(path), false)
+    if (mode === 'conflict') {
+      g('worktree', 'add', '-q', path, 'restore-branch')
+      fsWriteFileSync(join(path, 'dirty.txt'), 'new user WIP\n')
+    }
+    g('config', 'filter.spexcode.clean', 'cat')
+    const hook = join(project, '.git/hooks/post-checkout')
+    const standard = readFileSync(new URL('../templates/hooks/post-checkout', import.meta.url), 'utf8')
+    fsWriteFileSync(hook, standard.replace('# spexcode-managed-hook-v1', '# spexcode-managed-hook-v1\nprintf "checkout\\n" >> "$SPEX_RESTORE_TRACE"'))
+    chmodSync(hook, 0o755)
+    const tsx = fileURLToPath(import.meta.resolve('tsx/cli')), cli = fileURLToPath(new URL('./cli.ts', import.meta.url)), fakeSpex = join(bin, 'spex')
+    fsWriteFileSync(fakeSpex, `#!/bin/sh\nprintf 'callback %s\\n' "$*" >> "$SPEX_RESTORE_TRACE"\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(tsx)} ${JSON.stringify(cli)} "$@"\n`)
+    chmodSync(fakeSpex, 0o755)
+    const failure = join(fixture, 'materialize-failure'), gitWrapper = join(bin, 'git'), realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim()
+    if (mode !== 'normal') fsWriteFileSync(failure, 'fail explicit materialize\n')
+    fsWriteFileSync(gitWrapper, `#!/bin/sh
+case " $* " in *" worktree list --porcelain -z "*)
+  if [ -e "$SPEX_RESTORE_FAILURE" ]; then
+    parent_cmd=$(ps -ww -o args= -p "$PPID")
+    case "$parent_cmd" in *"cli.ts materialize"*|*"cli.js materialize"*) echo 'injected restore materialize failure' >&2; exit 75 ;; esac
+  fi ;;
+esac
+exec ${JSON.stringify(realGit)} "$@"
+`)
+    chmodSync(gitWrapper, 0o755)
+    const script = `import {resumeSession} from ${JSON.stringify(new URL('./sessions.ts', import.meta.url).href)}; console.log(JSON.stringify(await resumeSession(${JSON.stringify(id)})));`
+    const resume = () => {
+      const result = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), '--input-type=module', '-e', script], {
+        cwd: project, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, SPEXCODE_GIT_TIMEOUT_MS: '2000', SPEX_RESTORE_TRACE: trace, SPEX_RESTORE_FAILURE: failure }, encoding: 'utf8', timeout: 12_000,
+      })
+      assert.equal(result.status, 0, `${result.stdout}${result.stderr}`)
+      return JSON.parse(result.stdout.trim().split('\n').at(-1)!) as { ok: boolean; error: string }
+    }
+    let resumed = resume()
+    if (mode === 'conflict') {
+      assert.match(resumed.error, /materialize failed:[\s\S]*injected restore materialize failure[\s\S]*archived changes could not be restored/)
+      assert.equal(readFileSync(join(path, 'dirty.txt'), 'utf8'), 'new user WIP\n')
+      rmSync(failure)
+      resumed = resume()
+      assert.match(resumed.error, /archive delta is neither pending nor already restored/)
+      assert.equal(readFileSync(join(path, 'dirty.txt'), 'utf8'), 'new user WIP\n', 'retry preserves incompatible existing work')
+      assert.equal(JSON.parse(readFileSync(sessionRecordPath(id), 'utf8')).archived, true)
+      return
+    }
+    if (mode === 'materialize-failure') {
+      assert.match(resumed.error, /injected restore materialize failure/)
+      assert.equal(readFileSync(join(path, 'dirty.txt'), 'utf8'), 'archived user edit\n', 'archive bytes are restored even though materialize refused the launch')
+      assert.equal(JSON.parse(readFileSync(sessionRecordPath(id), 'utf8')).archived, true)
+      rmSync(failure)
+      resumed = resume()
+    }
+    assert.equal(resumed.ok, false, 'the fixture refuses at the missing launcher without starting any Native runtime')
+    assert.match(resumed.error, /pinned launcher command.*not on this machine/)
+    assert.equal(readFileSync(join(path, 'dirty.txt'), 'utf8'), 'archived user edit\n')
+    assert.equal(readFileSync(trace, 'utf8'), 'checkout\n', 'the standard hook ran and honored defer without reentering materialize while its parent held the fence')
+    assert.throws(() => g('config', 'filter.spexcode.clean'), 'explicit post-add materialize completed unused filter cleanup')
+    assert.equal(JSON.parse(readFileSync(sessionRecordPath(id), 'utf8')).archived, true)
+  } finally {
+    process.chdir(previousCwd)
+    if (previousHome === undefined) delete process.env.SPEXCODE_HOME; else process.env.SPEXCODE_HOME = previousHome
+    if (previousDatabase === undefined) delete process.env.SPEX_SESSION_DATABASE_PATH; else process.env.SPEX_SESSION_DATABASE_PATH = previousDatabase
+    rmSync(fixture, { recursive: true, force: true })
+  }
+}
+
+test('archived restore defers the standard checkout hook until registry release then materializes before dirty replay', { ...serial, timeout: 20_000 }, () => archivedRestoreFixture('normal'))
+test('archived restore replays dirty bytes after materialize failure and retries an existing owned tree', { ...serial, timeout: 20_000 }, () => archivedRestoreFixture('materialize-failure'))
+test('archived restore preserves incompatible existing work and reports both materialize and replay failures', { ...serial, timeout: 20_000 }, () => archivedRestoreFixture('conflict'))
+
+test('a failed creation-time materialize is reported loud and stamped on the record note', serial, async () => {
   const prevHome = process.env.SPEXCODE_HOME
   const home = mkdtempSync(join(tmpdir(), 'spex-materialize-fail-'))
   process.env.SPEXCODE_HOME = home
@@ -2312,7 +2399,7 @@ test('a failed creation-time materialize is reported loud and stamped on the rec
       harness: 'claude', harnessSessionId: null, runtimeStartToken: null, stopped: false, archived: false, closedAt: null,
       launcher: 'reclaude', launchCmd: 'claude', launchOwner: null,
     }
-    bootstrapMaterialize(rec, () => { throw new Error('materialize exploded') })
+    await bootstrapMaterialize(rec, async () => { throw new Error('materialize exploded') })
 
     const logged = errors.join('\n')
     assert.match(logged, /materialize failed/)

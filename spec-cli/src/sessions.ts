@@ -1,5 +1,5 @@
 import { structuredObserverState, type StructuredExecution } from './session-structured-policy.js'
-import { execFileSync, spawn } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { createConnection } from 'node:net'
 import { createHash, randomUUID } from 'node:crypto'
 import { readFileSync, writeFileSync, existsSync, renameSync, linkSync, mkdirSync, chmodSync, rmSync, readdirSync, realpathSync, statSync, unlinkSync, type Dirent } from 'node:fs'
@@ -2322,41 +2322,46 @@ async function resetFailedMaterializeCandidate(rec: SessRec, signal: AbortSignal
     `materialize failed and its prepared worktree could not be restored: ${detail}`, 500)
 }
 
+async function materializeSessionWorktree(path: string, signal: AbortSignal): Promise<void> {
+  signal.throwIfAborted()
+  await new Promise<void>((resolvePromise, reject) => {
+    const child = spawn(process.execPath, [...cliEntrypointArgs(pkgRoot(), dirname(fileURLToPath(import.meta.url))), 'materialize'], {
+      cwd: path,
+      env: process.env,
+      detached: true,
+      stdio: ['ignore', 'ignore', 'pipe'],
+    })
+    let stderr = '', settled = false
+    const killTree = () => {
+      if (!child.pid) return
+      try { process.kill(-child.pid, 'SIGKILL') } catch { /* process group already gone */ }
+      try { child.kill('SIGKILL') } catch { /* child already gone */ }
+    }
+    const abort = () => killTree()
+    signal.addEventListener('abort', abort, { once: true })
+    child.stderr.setEncoding('utf8').on('data', (chunk) => { if (stderr.length < 64 * 1024) stderr += chunk })
+    child.once('error', (error) => {
+      if (settled) return
+      settled = true
+      signal.removeEventListener('abort', abort)
+      reject(error)
+    })
+    child.once('close', (code, childSignal) => {
+      if (settled) return
+      settled = true
+      signal.removeEventListener('abort', abort)
+      if (signal.aborted) { reject(signal.reason); return }
+      if (code === 0) { resolvePromise(); return }
+      reject(new Error(`materialize exited ${childSignal || code}${stderr.trim() ? `: ${stderr.trim()}` : ''}`))
+    })
+    if (signal.aborted) abort()
+  })
+}
+
 async function materializeSessionCandidate(rec: SessRec, signal: AbortSignal): Promise<SessRec> {
   throwIfCreateAborted(signal, 'materialize')
   try {
-    await new Promise<void>((resolvePromise, reject) => {
-      const child = spawn(process.execPath, [...cliEntrypointArgs(pkgRoot(), dirname(fileURLToPath(import.meta.url))), 'materialize'], {
-        cwd: rec.worktreePath,
-        env: process.env,
-        detached: true,
-        stdio: ['ignore', 'ignore', 'pipe'],
-      })
-      let stderr = '', settled = false
-      const killTree = () => {
-        if (!child.pid) return
-        try { process.kill(-child.pid, 'SIGKILL') } catch { /* process group already gone */ }
-        try { child.kill('SIGKILL') } catch { /* child already gone */ }
-      }
-      const abort = () => killTree()
-      signal.addEventListener('abort', abort, { once: true })
-      child.stderr.setEncoding('utf8').on('data', (chunk) => { if (stderr.length < 64 * 1024) stderr += chunk })
-      child.once('error', (error) => {
-        if (settled) return
-        settled = true
-        signal.removeEventListener('abort', abort)
-        reject(error)
-      })
-      child.once('close', (code, childSignal) => {
-        if (settled) return
-        settled = true
-        signal.removeEventListener('abort', abort)
-        if (signal.aborted) { reject(createAbortError(signal, 'materialize')); return }
-        if (code === 0) { resolvePromise(); return }
-        reject(new Error(`materialize exited ${childSignal || code}${stderr.trim() ? `: ${stderr.trim()}` : ''}`))
-      })
-      if (signal.aborted) abort()
-    })
+    await materializeSessionWorktree(rec.worktreePath, signal)
     return rec
   } catch (error) {
     if (signal.aborted || error instanceof SessionCreateError) throw createAbortError(signal, 'materialize')
@@ -2880,9 +2885,9 @@ async function prepareSession(prompt: string, parentage: CreateParentage, launch
   }
 }
 
-export function bootstrapMaterialize(rec: SessRec, doMaterialize: (proj: string) => unknown = materialize): void {
+export async function bootstrapMaterialize(rec: SessRec, doMaterialize: (proj: string) => unknown = materialize): Promise<void> {
   try {
-    doMaterialize(rec.worktreePath)
+    await doMaterialize(rec.worktreePath)
   } catch (e) {
     writeRecord(sessionCreateFailureRecord(rec, e))
   }
@@ -2974,24 +2979,49 @@ function archiveWorktreeState(id: string, path: string): string {
 }
 
 async function restoreArchivedWorktree(id: string, rec: SessRec): Promise<void> {
-  if (existsSync(rec.worktreePath)) return
   if (!rec.branch) throw new ResourceConflict(`session ${id} has no branch to restore its archived worktree`)
-  const branch = rec.branch
-  const ref = archiveRef(id)
-  const archive = await gitTry(['-C', mainRoot(), 'rev-parse', '--verify', `${ref}^{commit}`])
-  const start = await gitTry(['-C', mainRoot(), 'rev-parse', '--verify', `refs/heads/${rec.branch}^{commit}`])
-  if (!start.ok) throw new ResourceConflict(`session ${id} branch ${rec.branch} is missing`)
-  await withWorktreeRegistryLock(() => gitTry(['-C', mainRoot(), 'worktree', 'add', rec.worktreePath, branch]).then((result) => {
-    if (!result.ok) throw new ResourceConflict(`git worktree add failed: ${result.stderr.trim() || result.failure}`)
-  }))
-  if (!archive.ok) return
-  const patch = git(['-C', mainRoot(), 'diff', '--binary', `${rec.branch}..${ref}`])
-  if (!patch) return
-  try {
-    execFileSync('git', ['-C', rec.worktreePath, 'apply', '--binary', '-'], { input: patch, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] })
-  } catch (error) {
-    throw new ResourceConflict(`session ${id} archived changes could not be restored: ${error instanceof Error ? error.message : String(error)}`)
+  const root = mainRoot(), branch = rec.branch, ref = archiveRef(id)
+  const archive = await gitTry(['-C', root, 'rev-parse', '--verify', `${ref}^{commit}`])
+  const start = await gitTry(['-C', root, 'rev-parse', '--verify', `refs/heads/${branch}^{commit}`])
+  if (!start.ok) throw new ResourceConflict(`session ${id} branch ${branch} is missing`)
+  await withWorktreeRegistryLock(async () => {
+    const current = readRecord(id)
+    if (!current?.archived || current.worktreePath !== rec.worktreePath || current.branch !== branch || current.closedAt !== rec.closedAt)
+      throw new ResourceConflict(`session ${id} archived restore ownership changed while waiting for the Git registry`)
+    const signal = AbortSignal.timeout(30_000)
+    const state = await sessionCandidateState(root, rec.worktreePath, branch, signal)
+    if (state.path) {
+      if (!state.worktree || !state.branch) throw new ResourceConflict(`session ${id} existing restore path has no matching Git ownership`)
+      const mismatch = await proveSessionCandidate(rec.worktreePath, branch, signal)
+      if (mismatch) throw new ResourceConflict(`session ${id} existing restore identity mismatch: ${mismatch}`)
+    } else {
+      const result = await gitTry(['-C', root, 'worktree', 'add', rec.worktreePath, branch], { extraEnv: DEFER_FOOTPRINT_REFRESH })
+      if (!result.ok) throw new ResourceConflict(`git worktree add failed: ${result.stderr.trim() || result.failure}`)
+    }
+  })
+  let materializeFailure: Error | null = null
+  if (!rec.structuredExecution) {
+    try { await materializeSessionWorktree(rec.worktreePath, AbortSignal.timeout(30_000)) }
+    catch (error) { materializeFailure = error instanceof Error ? error : new Error(String(error)) }
   }
+  try {
+    if (archive.ok) {
+      const patch = git(['-C', root, 'diff', '--binary', `${branch}..${ref}`])
+      if (patch) {
+        const reversed = await gitTry(['-C', rec.worktreePath, 'apply', '--reverse', '--check', '--binary', '-'], { input: patch })
+        if (!reversed.ok) {
+          if (reversed.failure !== 'exit') throw new Error(reversed.stderr.trim() || reversed.failure)
+          const checked = await gitTry(['-C', rec.worktreePath, 'apply', '--check', '--binary', '-'], { input: patch })
+          if (!checked.ok) throw new Error(`archive delta is neither pending nor already restored: ${checked.stderr.trim() || checked.failure}`)
+          const applied = await gitTry(['-C', rec.worktreePath, 'apply', '--binary', '-'], { input: patch })
+          if (!applied.ok) throw new Error(applied.stderr.trim() || applied.failure)
+        }
+      }
+    }
+  } catch (error) {
+    throw new ResourceConflict(`session ${id} ${materializeFailure ? `materialize failed: ${materializeFailure.message}; ` : ''}archived changes could not be restored: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  if (materializeFailure) throw materializeFailure
 }
 
 type ResumeResult = { ok: boolean; error?: string; refused?: boolean; info?: string }
@@ -3070,7 +3100,7 @@ async function resumeSessionUnlocked(id: string, opts: ResumeOptions = {}): Prom
   catch (e) { if (e instanceof SessionRecordUnusable) return { ok: false, refused: true, error: e.message }; throw e }
   if (!wt) return { ok: false, error: `no such session ${id}` }
   if (wt.rec.launchReadinessPending) return recoverPendingResumeUnlocked(id, wt.rec)
-  if (wt.rec.archived && retirementReason(wt.rec)) {
+  if (wt.rec.archived) {
     try {
       await restoreArchivedWorktree(id, wt.rec)
       wt = await findWorktree(id)

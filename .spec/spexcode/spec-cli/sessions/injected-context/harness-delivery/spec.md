@@ -10,6 +10,7 @@ code:
 related:
   - spec-cli/src/init.ts
   - spec-cli/src/file-write.ts
+  - spec-cli/src/materialize.test.ts
 ---
 
 # harness-delivery
@@ -178,8 +179,8 @@ hash remains global and project-scoped, and is removed by project-wide demateria
 sibling's selection change.
 
 Materialize reads and writes only the current tree slot and current per-tree filter payload. It does not import
-pre-slot ledgers, common ignore projections, or other retired-format receipts, and a normal pass never enumerates
-registered sibling worktrees. That boundary has a visible consequence and it is the intended one: on a repo whose
+pre-slot ledgers, common ignore projections, other retired-format receipts, or a sibling's projection from a
+registry enumeration. That boundary has a visible consequence and it is the intended one: on a repo whose
 common exclude still carries a retired projection, the first tree to materialize replaces that block with the
 checkout-invariant residue alone, so a sibling that has not materialized yet shows its own generated files as
 untracked until it does. The repair is that tree's own materialize — which its git hooks already run at the next
@@ -187,6 +188,18 @@ commit, checkout, or merge — never a cross-tree import, because reconstructing
 file is the ledger this design refuses to keep. Shared filter transport is refreshed in place; project-wide teardown may still inspect
 registered trees when it is explicitly removing that shared transport. Older runtime state is not a supported
 materialize input and must be removed through an explicit reinstall/uninstall operation.
+
+When an ordinary pass removes its last local filter payload, the registered-tree payload check and shared
+filter unregistration hold [[record-lock]]'s physical Git common-directory registry fence together. The pass
+asynchronously waits for an in-flight worktree add/remove/prune to finish, then completes that short cleanup
+before returning its receipt. Other materialize work and model execution hold no registry fence. The existing
+identity-only legacy Codex anchor migration remains best-effort. CLI materialize/refresh, init, commit surgery,
+and the bootstrap caller await the result; an asynchronous failure retains their existing loud/advisory policy.
+Archived restore uses the same checkout defer handoff: its ordinary explicit child runs after add releases the
+registry fence and before archive-delta replay, under a bounded wall. It never waits inside the Git parent lock.
+If that child fails, restore still safely checks/restores the archived bytes, keeps the record archived, and
+refuses launch. Retrying an existing owned tree rechecks the archive delta instead of treating directory
+presence as proof that the earlier restore completed.
 
 The net ideal path: `npm install spexcode` → `spex init` → the user launches their own `claude`/`codex`, zero
 further operation, no global pollution beyond the scoped Codex trust. The contract files are SpexCode-owned

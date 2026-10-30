@@ -23,7 +23,7 @@ const policy={version:'frozen-delivery-footprint-v1',privateDirectory:{path:fs.r
 process.env.SPEXCODE_SYNC_FOOTPRINT_POLICY=JSON.stringify(policy);process.env.SPEXCODE_SYNC_FOOTPRINT_SHA256=footprintDigest(JSON.stringify(policy));
 const method=strict?'writeFileSync':'mkdirSync',original=fs[method], error=Object.assign(new Error('injected materialize EACCES'),{code:'EACCES'});
 fs[method]=()=>{throw error}; syncBuiltinESMExports();
-try { commitSurgery(); } catch(actual) { if(actual!==error) throw actual; console.error('strict original EACCES propagated'); process.exitCode=23; }
+try { await commitSurgery(); } catch(actual) { if(actual!==error) throw actual; console.error('strict original EACCES propagated'); process.exitCode=23; }
 finally {fs[method]=original;syncBuiltinESMExports();}`
   for (const strict of [false, true]) {
     const env = { ...process.env }
