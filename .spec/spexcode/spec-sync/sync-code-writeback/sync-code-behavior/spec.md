@@ -88,3 +88,5 @@ v2 分区执行携带显式 partition.id/changedPaths；分析及独审仅对本
 分区任务的六个文本视图、readablePaths、contractItems及plan均是本区读取闭包的局部投影，局部缺席不证明全树不存在；其它分区的既有叶不在本区重新创建。snapshotTree及composed.tree仍是真实冻结全树身份，不把其身份当额外读取授权，也不补造全仓inventory或扩大正文。显式sourcePaths的v2 code_to_spec分析schema逐请求克隆，将本区changedPaths/readablePaths中按sourcePaths和未治理判据得到的真实业务源码作为精确newNodes.codePath候选，即使本区writePaths不含只读源码也可提出治理叶。新Spec叶的写入另须从原全局writePaths中证明父Spec目录已授权；分区仅投影本区targets或contextNodeIds中、且在本区readPaths内可读的原global target父Spec，不把全局目录复制进本区writePaths。候选非空使用精确enum和数量上限，空候选或没有授权父Spec时用maxItems:0且不产生空enum。Spec、测试或已治理路径不能从局部缺席推成新业务源码；原上层raw、读取、父Spec写授权、事实归属、后置newNodes及全局并集门禁继续核验，schema限域不成为新授权。
 
 读取完整性由真实工具和程序记录，业务evidence引用真实路径、符号或测试断言，不手工复述task/body entry的hash、长度或读取区间；原完整读取证明、独审核对及禁止编造工具未提供hash的门禁保持，不能以减少业务证据元数据复述豁免实际读取。
+
+只读 v2 `code_to_spec` 的新治理父身份必须可消歧：程序从最终授权父路径投影当前冻结契约图中具有非空 raw 的节点，以 `{nodeId, path}` 同时提供真实身份和定位信息，并将同一列表冻结给分析与独审。仅该分支的 `newNodes.parentNodeId` schema 使用此列表里的精确 nodeId enum；提示要求填写 nodeId，path 只用于定位。所有有效父节点都可选且不设默认。没有有效父节点或没有本区源码候选时 `maxItems` 为 0，不生成空 enum。模型返回的 `parentNodeId` 仍按当前节点 ID 查找，父目录授权、源码归属及完整读取门禁继续有效；路径值不得自动转换为 ID。v1 和非 `code_to_spec` 方向保持原 schema 与校验语义。
