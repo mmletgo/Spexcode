@@ -67,3 +67,5 @@ raw-only v2 code_to_spec回归以local writePaths=[]和真实只读业务源码�
 局部输入的分析和独审均提示读取完整性由工具/程序记录，业务evidence只引用真实路径、符号与断言，避免手抄task/body entry的hash、长度或读取区间；完整读取证明及真实独审核对门禁原样保持。
 
 只读 v2 `code_to_spec` 的真实 Git 回归核对：多个授权 raw 父节点全部以 `{nodeId, path}` 冻结给分析和独审；`parentNodeId` enum 与真实有效 ID 集合完全一致，输出必须使用 ID。路径冒充 ID、未知 ID、未授权 ID 和没有 raw 的父节点均拒绝；无有效父或源码候选时 `maxItems=0` 且 schema 不含空 enum。仍核对新叶目录来自原全局父目录授权、源码来自本区精确候选、review 获得相同冻结映射，并确认 v1 与非 `code_to_spec` 的旧 schema 行为不变。
+
+单次冻结输入复用回归使用真实Git计数：raw-only v2、baseline与selection缺席且old/source/composed同tree时，在首个Native请求处捕获完整冻结输入并抛诊断停止，不构造模型结果；真实文本视图逐角色对照独立Git字节参考，验证原 `verifySnapshot` 仍执行而重复tree读取减少。不同完整tree OID仍逐角色绑定独立参考正文；精确selection/受控替换只更新目标角色，不污染共享tree的其它Map或条目副本。第一次分析结束后移除其OID对象，下一次同输入必须在snapshot/OID校验失败且Native调用数为零，证明局部缓存不跨调用存活。

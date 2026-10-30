@@ -32,13 +32,20 @@ function freezeFile(entry: TreeEntry, bytes: Buffer): FrozenFile {
   const utf8 = isUtf8Text(bytes)
   return { ...entry, kind: entry.mode === '120000' ? 'symlink' : utf8 ? 'text' : 'binary', encoding: utf8 ? 'utf8' : 'base64', content: bytes.toString(utf8 ? 'utf8' : 'base64') }
 }
-function fileTree(input: CodeBehaviorInput, tree: string): Map<string, FrozenFile> {
+type FrozenTreeRead = { entries: TreeEntry[]; files: Map<string, FrozenFile> }
+function frozenTreeRead(input: CodeBehaviorInput, tree: string, reads: Map<string, FrozenTreeRead>): FrozenTreeRead {
+  const commonDir = input.snapshot.source.commonDir, key = JSON.stringify([commonDir, tree]), existing = reads.get(key)
+  if (existing) return existing
   const files: FrozenFile[] = []
-  readTree(input.snapshot.source.commonDir, tree, (entry, bytes) => {
+  const entries = readTree(commonDir, tree, (entry, bytes) => {
     if (within(entry.path, input.plan.readPaths) && !isHostPrivatePath(entry.path)) files.push(freezeFile(entry, bytes))
   })
-  return new Map(files.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0).map(file => [file.path, file]))
+  const read = { entries, files: new Map(files.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0).map(file => [file.path, file])) }
+  reads.set(key, read)
+  return read
 }
+const copyFrozenFileMap = (files: ReadonlyMap<string, FrozenFile>): Map<string, FrozenFile> => new Map([...files].map(([path, file]) => [path, { ...file }]))
+const fileTree = (input: CodeBehaviorInput, tree: string, reads: Map<string, FrozenTreeRead>): Map<string, FrozenFile> => copyFrozenFileMap(frozenTreeRead(input, tree, reads).files)
 const textFiles = (files: ReadonlyMap<string, FrozenFile>): [string, string][] => [...files.values()].filter(file => file.kind === 'text').map(file => [file.path, file.content])
 
 function problem(message: string): never { throw Object.assign(new Error(message), { code: 'behavior_analysis_invalid' }) }
@@ -94,6 +101,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   const diagnostic: { proposal?: unknown; analysis?: CodeBehaviorAnalysis; review?: unknown } = {}
   function reject(message: string, details: Record<string, unknown> = {}, code = 'behavior_analysis_invalid'): never { throw Object.assign(new Error(JSON.stringify({ approved: false, message, details, ...diagnostic })), { code }) }
   const commonDir = input.snapshot.source.commonDir
+  const frozenTreeReads = new Map<string, FrozenTreeRead>()
   verifySnapshot(input.snapshot)
   const selectedEvidence = input.baselineSelection ? readCompositionEvidence(input.snapshot, input.composed, input.baselineSelection) : null
   if (input.composed.baselineSelectionDigest && !selectedEvidence) reject('精确基线组合缺少相同selection')
@@ -104,7 +112,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   const triggerBefore = input.plan.version === 'sync-coordinator-v2' ? input.plan.commitTrigger?.before : undefined
   if (triggerBefore) { verifySnapshot(triggerBefore); if (JSON.stringify(canonicalSnapshotSource(triggerBefore.source)) !== JSON.stringify(canonicalSnapshotSource(input.snapshot.source))) reject('提交触发前态不属于同一物理来源') }
   const oldTree = input.baseline?.sourceInput.immutableTree ?? triggerBefore?.immutableTree ?? objectGit(commonDir, ['rev-parse', `${input.snapshot.headCommit}^{tree}`]).toString().trim()
-  const fileViews: Record<string, Map<string, FrozenFile>> = { oldSource: fileTree(input, oldTree), newSource: fileTree(input, input.snapshot.immutableTree), verifiedDelivery: input.plan.version === 'sync-coordinator-v2' && !input.baseline ? new Map() : fileTree(input, input.baseline?.verifiedDelivery.immutableTree ?? oldTree), composedFiles: fileTree(input, input.composed.tree), controlledBeforeFiles: new Map() }
+  const fileViews: Record<string, Map<string, FrozenFile>> = { oldSource: fileTree(input, oldTree, frozenTreeReads), newSource: fileTree(input, input.snapshot.immutableTree, frozenTreeReads), verifiedDelivery: input.plan.version === 'sync-coordinator-v2' && !input.baseline ? new Map() : fileTree(input, input.baseline?.verifiedDelivery.immutableTree ?? oldTree, frozenTreeReads), composedFiles: fileTree(input, input.composed.tree, frozenTreeReads), controlledBeforeFiles: new Map() }
   const replaceFile = (files: Map<string, FrozenFile>, path: string, entry: TreeEntry | null): void => {
     if (entry && within(path, input.plan.readPaths) && !isHostPrivatePath(path)) files.set(path, freezeFile(entry, readObject(commonDir, entry.oid)))
     else files.delete(path)
@@ -114,11 +122,11 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
     replaceFile(fileViews.verifiedDelivery, entry.path, entry.delivery)
   }
   const source = textFiles(fileViews.newSource), oldSource = textFiles(fileViews.oldSource), delivery = textFiles(fileViews.verifiedDelivery), composed = textFiles(fileViews.composedFiles)
-  fileViews.authorBaseline = new Map(fileViews.oldSource)
+  fileViews.authorBaseline = copyFrozenFileMap(fileViews.oldSource)
   const adopted = adoptedDeliveryPaths(input.snapshot, input.baseline), authorBefore = new Map(oldSource)
   const deliveryFiles = new Map(delivery)
-  for (const path of adopted) { const text = deliveryFiles.get(path); if (text === undefined) authorBefore.delete(path); else authorBefore.set(path, text); const file = fileViews.verifiedDelivery.get(path); if (file) fileViews.authorBaseline.set(path, file); else fileViews.authorBaseline.delete(path) }
-  const authorSource = new Map(source), authorFiles = new Map(fileViews.newSource)
+  for (const path of adopted) { const text = deliveryFiles.get(path); if (text === undefined) authorBefore.delete(path); else authorBefore.set(path, text); const file = fileViews.verifiedDelivery.get(path); if (file) fileViews.authorBaseline.set(path, { ...file }); else fileViews.authorBaseline.delete(path) }
+  const authorSource = new Map(source), authorFiles = copyFrozenFileMap(fileViews.newSource)
   const controlledAuthorBefore: { path: string; text: string | null }[] = []
   let historyAuthor = false
   if (input.composed.requestBlob) {
@@ -146,7 +154,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   }
   for (const before of controlledAuthorBefore) if (selectedEvidence && !selectedEvidence.intents.some(item => item.pairId && (item.source?.path ?? item.before?.path) === before.path && item.before?.rawSource !== item.source?.rawSource)) {
     if (before.text === null) authorBefore.delete(before.path); else authorBefore.set(before.path, before.text)
-    const file = fileViews.controlledBeforeFiles.get(before.path); if (file) fileViews.authorBaseline.set(before.path, file); else fileViews.authorBaseline.delete(before.path)
+    const file = fileViews.controlledBeforeFiles.get(before.path); if (file) fileViews.authorBaseline.set(before.path, { ...file }); else fileViews.authorBaseline.delete(before.path)
   }
   const knownCode = new Set(composed.filter(([path]) => path.startsWith('.spec/') && path.endsWith('/spec.md')).flatMap(([, text]) => { const anchors = parseFrontmatter(text).fm.code; return Array.isArray(anchors) ? anchors.filter((anchor): anchor is string => typeof anchor === 'string').map(anchor => anchor.split('#')[0]) : [] }))
   const readonlyCodeToSpec = input.plan.version === 'sync-coordinator-v2' && input.plan.direction === 'code_to_spec' && input.plan.sourcePaths !== undefined
@@ -154,13 +162,15 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   const sourceMap = new Map(source)
   const requiresOwnership = (path: string): boolean => !path.startsWith('.spec/') && sourceMap.has(path) && /\.(?:[cm]?[jt]sx?|py|go|rs|java|rb)$/.test(path) && !/\.(?:test|spec)\./.test(path) && sourceRole(path) && !knownCode.has(path)
   const ungoverned = source.filter(([path]) => requiresOwnership(path) && (readonlyCodeToSpec || within(path, input.plan.writePaths)) && (!input.partition || input.partition.changedPaths.includes(path))).map(([path]) => path)
-  const authorEntries = new Map(readTree(commonDir, oldTree).map(entry => [entry.path, entry]))
-  const deliveryEntries = new Map(readTree(commonDir, input.baseline?.verifiedDelivery.immutableTree ?? oldTree).map(entry => [entry.path, entry]))
+  const authorEntries = new Map(frozenTreeRead(input, oldTree, frozenTreeReads).entries.map(entry => [entry.path, { ...entry }]))
+  const deliveryTree = input.baseline?.verifiedDelivery.immutableTree ?? oldTree
+  const deliveryEntries = new Map(frozenTreeRead(input, deliveryTree, frozenTreeReads).entries.map(entry => [entry.path, { ...entry }]))
   for (const path of adopted) { const entry = deliveryEntries.get(path); if (entry) authorEntries.set(path, entry); else authorEntries.delete(path) }
   if (selectedEvidence) {
     for (const entry of selectedEvidence.paths) if (entry.pairId !== null) { if (entry.base) authorEntries.set(entry.path, entry.base); else authorEntries.delete(entry.path); if (entry.delivery) deliveryEntries.set(entry.path, entry.delivery); else deliveryEntries.delete(entry.path) }
   }
-  const changedPaths = input.partition ? sorted(input.partition.changedPaths.filter(path => within(path, input.plan.readPaths))) : sorted([...(selectedEvidence?.residualPaths ?? []), ...ungoverned, ...actualTreeDiff([...authorEntries.values()], verifySnapshot(input.snapshot)).map(file => file.path), ...actualTreeDiff([...deliveryEntries.values()], readTree(commonDir, input.composed.tree)).map(file => file.path)].filter(path => within(path, input.plan.readPaths)))
+  const changedPaths = input.partition ? sorted(input.partition.changedPaths.filter(path => within(path, input.plan.readPaths))) : sorted([...(selectedEvidence?.residualPaths ?? []), ...ungoverned, ...actualTreeDiff([...authorEntries.values()], verifySnapshot(input.snapshot)).map(file => file.path), ...actualTreeDiff([...deliveryEntries.values()], frozenTreeRead(input, input.composed.tree, frozenTreeReads).entries.map(entry => ({ ...entry }))).map(file => file.path)].filter(path => within(path, input.plan.readPaths)))
+  authorEntries.clear(); deliveryEntries.clear()
   const decisionScopePaths = new Set([
     ...input.plan.decisionAuthorities?.flatMap(authority => authority.paths) ?? [],
     ...input.decision?.previous.analysis.findings.filter(finding => input.decision!.request.findingIds.includes(finding.id)).flatMap(finding => finding.paths) ?? [],
@@ -337,7 +347,8 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   if (previousComposed && (previousComposed.sourceInputId !== input.snapshot.id || input.decision!.previous.analysis.inputId !== input.snapshot.id || previousComposed.contentDigest !== input.decision!.previous.analysis.composedDigest)) reject('裁决原契约图未绑定原输入及完整独审组合摘要')
   const previousReadPaths = input.decision?.previousReadPaths
   const decisionFrozen = previousComposed && previousReadPaths && input.baseline === null && input.baselineSelection && input.baselineSelection.bindings.every(binding => ('bytePair' in binding ? binding.bytePair : binding.intentPair) === null)
-    ? await readFrozenContracts(input.snapshot.source.canonicalRoot, new Map(textFiles(fileTree(input, previousComposed.tree)).filter(([path]) => within(path, previousReadPaths)))) : null
+    ? await readFrozenContracts(input.snapshot.source.canonicalRoot, new Map(textFiles(fileTree(input, previousComposed.tree, frozenTreeReads)).filter(([path]) => within(path, previousReadPaths)))) : null
+  frozenTreeReads.clear()
   const inputDigest = contentHash(context), traces: ElaborationTrace[] = []
   const dispatch = async (purpose: string, prompt: string, schema: Record<string, unknown>): Promise<unknown> => {
     if (signal?.aborted) throw Object.assign(new Error('行为分析已停止'), { code: 'cancelled' })
