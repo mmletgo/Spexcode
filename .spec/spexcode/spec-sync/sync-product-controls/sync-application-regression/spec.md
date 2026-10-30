@@ -65,13 +65,13 @@ AC-APPLICATION-P4-06 使用真实Git root移动/重建，验证持久健康、�
 
 AC-APPLICATION-P4-07 验证重新授权后旧root确实撤权，已注册root被删除时仍在missing范围且保留真实node_unknown观测，不把它显示为空项目正常。
 
-AC-APPLICATION-P4-08 真实Git/SQLite、正式观察服务、compiled hooks与Docker验证无浏览器提交触发自动交付；native runner是明确确定性替身。原source/index/HEAD保持，交付含真实作者保存与受审生成，补偿及scope外作者编辑不新开回声operation，scope外变化不错误标stale。
+AC-APPLICATION-P4-08 真实Git/SQLite、正式观察服务、compiled hooks与Docker验证无浏览器提交触发自动交付；native runner是明确确定性替身。输入冻结commit，代码提交只更新已审Spec、不派code_generate，交付的全部非Spec Git对象与提交输入保持一致；未采纳前原source/index/HEAD保持，补偿及scope外作者编辑不新开回声operation，scope外变化不错误标stale。
 
 AC-APPLICATION-P4-09 真实失败后scope外编辑不改变stale/重试资格，同request重放沿原receipt，新retry绑定原input；相关原始意图变动则stale并拒绝旧输入重试。
 
 AC-APPLICATION-P4-10 在可控native执行期间物理pause，单operation detail独立展示physicalControl=pause，原operation.control保持run且资源在安全边界结算；暂停提交仍更新latest且无新调用，resume先准入最新input，原active input不被改写。
 
-AC-APPLICATION-P4-11 同一真实Git/SQLite来源两个独立节点分别提交，四轮实际Docker/正常hooks交付（在线两次、停机编辑重启补偿两次）均要求workspace_synced和真实receipt，source/index/HEAD保持；生成与行为runner明确为确定性注释改动替身，不算真实模型验收。
+AC-APPLICATION-P4-11 同一真实Git/SQLite来源两个独立节点分别提交，四轮实际Docker/正常hooks交付（在线两次、停机编辑重启补偿两次）均要求workspace_synced和真实receipt，source/index/HEAD保持；实际作者源码完整保留，每轮全部非Spec Git对象与该轮真实composed树一致，不派code_generate。同一HEAD内已提交源码作为原样基底保留，独立节点隔离核对另一Spec的Git对象保持原值、且未列入本轮deliveredScope；行为runner明确为确定性替身，不算真实模型验收。
 
 Docker应用夹具可复用SPEX_VERIFICATION_EVIDENCE_DIR保存实际观察/operation/attempt/journal投影、关闭后的真实SQLite与Git对象证据，失败断言含journal与blockedReason；归档不制造基线或修改权威状态。独立节点以首个真实receipt的完成顺序核对另一未消费输入，不能假设独立范围的完成顺序。
 
