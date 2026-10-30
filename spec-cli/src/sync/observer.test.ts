@@ -18,12 +18,16 @@ function fixture() {
   writeFileSync(join(root, 'input.txt'), 'one')
   return { temp, root, git }
 }
-test('AC-OBSERVER-01 无浏览器保存与原子替换触发，停止后恢复扫描发现停机变化', async () => {
+test('AC-OBSERVER-01 仅提交引用事件触发扫描，保存与暂存不触发，重启发现停机提交', async () => {
   const f = fixture(), inputs: string[] = [], health: SyncObserverHealth[] = []
-  const observer = new SyncInputObserver({ root: f.root, gitDir: f.git, commonDir: f.git, scan: async () => { inputs.push(readFileSync(join(f.root, 'input.txt'), 'utf8')) }, health: value => health.push(value), debounceMs: 5, compensationMs: 40 })
+  const observer = new SyncInputObserver({ root: f.root, gitDir: f.git, commonDir: f.git, scan: async () => { inputs.push(readFileSync(join(f.root, 'input.txt'), 'utf8')) }, health: value => health.push(value), debounceMs: 5, compensationMs: 10000 })
   try {
     await observer.start(); assert.equal(inputs.at(-1), 'one')
+    const initialCount = inputs.length
     writeFileSync(join(f.root, 'replacement'), 'two'); renameSync(join(f.root, 'replacement'), join(f.root, 'input.txt'))
+    writeFileSync(join(f.git, 'index'), 'staged bytes')
+    await new Promise(resolve => setTimeout(resolve, 60)); assert.equal(inputs.length, initialCount)
+    writeFileSync(join(f.git, 'refs/heads/main'), 'online-commit')
     await until(() => inputs.includes('two'))
     await observer.stop(); assert.equal(health.at(-1)?.watchOnline, false)
     const count = inputs.length
@@ -34,7 +38,7 @@ test('AC-OBSERVER-01 无浏览器保存与原子替换触发，停止后恢复�
     await until(() => inputs.length > count + 1)
   } finally { await observer.stop(); rmSync(f.temp, { recursive: true, force: true }) }
 })
-test('AC-OBSERVER-02 扫描中多次保存不会丢最后输入', async () => {
+test('AC-OBSERVER-02 扫描中多次提交引用事件不会丢最后输入', async () => {
   const f = fixture(), inputs: string[] = []
   let release: (() => void) | null = null, scanning = false
   const observer = new SyncInputObserver({ root: f.root, gitDir: f.git, commonDir: f.git, debounceMs: 5, compensationMs: 10000, health: () => {}, scan: async () => {
@@ -43,8 +47,8 @@ test('AC-OBSERVER-02 扫描中多次保存不会丢最后输入', async () => {
   } })
   try {
     await observer.start(); scanning = true
-    writeFileSync(join(f.root, 'input.txt'), 'two'); await until(() => release !== null)
-    writeFileSync(join(f.root, 'input.txt'), 'three'); await new Promise(resolve => setTimeout(resolve, 30))
+    writeFileSync(join(f.root, 'input.txt'), 'two'); writeFileSync(join(f.git, 'refs/heads/main'), 'two'); await until(() => release !== null)
+    writeFileSync(join(f.root, 'input.txt'), 'three'); writeFileSync(join(f.git, 'refs/heads/main'), 'three'); await new Promise(resolve => setTimeout(resolve, 30))
     scanning = false; release!(); await until(() => inputs.includes('three'))
   } finally { (release as (() => void) | null)?.(); await observer.stop(); rmSync(f.temp, { recursive: true, force: true }) }
 })

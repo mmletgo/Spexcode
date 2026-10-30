@@ -305,13 +305,27 @@ test('AC-SYNC-24 正式revert恢复同一已退役对象的Spec代码测试与�
   assert.ok('intentPair' in retiredPair && retiredPair.intentPair?.retiredIds?.includes('AC-SUMMARY-01'), '旧immutable retirement审计不修改')
 })
 
+test('已结算交付被原来源采纳后，提交观察沿真实receipt/baseline消除回声', { timeout: 120000 }, async t => {
+  const f = await fixture(t)
+  f.git('switch', 'node/source'); await f.application.enable()
+  const before = f.application.store.listOperations(identifyWorktree(f.root).repositoryId).length
+  let dispatched = 0
+  f.application.start = () => { dispatched++ }
+  await f.application.startService({ compensationMs: 10000, debounceMs: 5 })
+  await f.application['scanObservedInput']()
+  assert.equal(f.application.observationStatus().latestSnapshot!.captureKind, 'commit')
+  assert.equal(f.application.store.listOperations(identifyWorktree(f.root).repositoryId).length, before)
+  assert.equal(dispatched, 0); assert.equal(f.calls.length, 0)
+  assert.ok(f.application.store.listJournals(f.original.id)[0].receipt)
+})
+
 test('版本writer fencing：旧schema升级备份、future版本拒写且原会话数据保留', async t => {
   const temp = realpathSync(mkdtempSync(join(tmpdir(), 'sync-history-schema-'))), path = join(temp, 'session.sqlite'), protocol = openProtocol(path)
   t.after(() => { protocol.close(); rmSync(temp, { recursive: true, force: true }) })
   applyComponentMigrations(protocol, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 10))
   protocol.withTransaction(tx => tx.initialize('old-session'))
   const backupPath = join(temp, 'v10.backup'); await migrateSyncStore(protocol, { backupPath }); assert.ok(existsSync(backupPath))
-  assert.throws(() => applyComponentMigrations(protocol, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 11)), /schema generation 12; this build understands 11/)
+  assert.throws(() => applyComponentMigrations(protocol, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 11)), new RegExp(`schema generation ${SYNC_MIGRATIONS.length}; this build understands 11`))
   const store = new SyncStore(protocol)
   applyComponentMigrations(protocol, SYNC_COMPONENT, [...SYNC_MIGRATIONS, { version: SYNC_MIGRATIONS.length + 1, sql: 'SELECT 1;' }])
   assert.throws(() => store.listOperations('repo'), /SYNC_SCHEMA_UNSUPPORTED/)

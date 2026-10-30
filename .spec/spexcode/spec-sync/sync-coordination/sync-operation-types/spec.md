@@ -57,3 +57,5 @@ PublicationBase 可选保存于 attempt，绑定实际 parentCommit/parentTree/p
 VerificationResultBlob可携restoredIds，精确对应原冻结restore授权；仅完整验证与receipt结算发布当前有效ID head，旧retirement pair不修改。
 
 operation/admission/ingress 可带固定 model，缺省及显式 gpt-6.1-sol 省略字段且保原 payload；非默认模型进入不可变接入身份，遵循 [[sync-model-selection]]。
+
+InputSnapshot 的可选 captureKind=commit 表示自动输入绑定已提交 HEAD tree；缺字段仍表示历史工作区采集。新标记参与快照身份与持久 operation，恢复、当前性检查、可信配置复核和显式重试均沿冻结采集模式，不由当前工作区状态猜测。实际原树采纳、落地状态及 dirty 覆盖保护仍检查独立采集的真实工作区/index。

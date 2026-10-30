@@ -139,7 +139,7 @@ function snapshotFromTree(source: InputSnapshot, tree: string): InputSnapshot {
   const entries = readTree(source.source.commonDir, tree), contentDigest = contentHash(JSON.stringify(entries))
   const manifestBlob = writeEvidence(source.source.commonDir, { version: 1, entries } satisfies SnapshotManifest)
   const snapshot = { ...source, immutableTree: tree, contentDigest, manifestBlob }
-  snapshot.id = contentHash(JSON.stringify({ source: snapshot.source, headCommit: snapshot.headCommit, indexTree: snapshot.indexTree, indexDigest: snapshot.indexDigest, tree, contentDigest }))
+  snapshot.id = contentHash(JSON.stringify({ ...(snapshot.captureKind ? { captureKind: snapshot.captureKind } : {}), source: snapshot.source, headCommit: snapshot.headCommit, indexTree: snapshot.indexTree, indexDigest: snapshot.indexDigest, tree, contentDigest }))
   pinSnapshot(snapshot)
   return snapshot
 }
@@ -202,19 +202,25 @@ function observe(root: string): Observation {
   } finally { rmSync(objects, { recursive: true, force: true }) }
   return { source, head, indexTree, sharedIndexDigest: contentHash(JSON.stringify(sharedDigests)), indexDigest: contentHash(indexBytes ?? Buffer.alloc(0)), entries, fileStamp: contentHash(JSON.stringify(stamps)) }
 }
+function observeCommitted(root: string): Observation {
+  const source = identifyWorktree(root), head = sourceGit(root, ['rev-parse', 'HEAD']).toString().trim()
+  const tree = objectGit(source.commonDir, ['rev-parse', `${head}^{tree}`]).toString().trim()
+  return { source, head, indexTree: tree, indexDigest: contentHash(tree), sharedIndexDigest: '', entries: readTree(source.commonDir, tree), fileStamp: '' }
+}
 const observationKey = (item: Observation): string => JSON.stringify({ source: item.source, head: item.head, indexDigest: item.indexDigest, indexTree: item.indexTree, sharedIndexDigest: item.sharedIndexDigest, entries: item.entries, fileStamp: item.fileStamp })
-/** 双重采集完整文件清单、原字节、HEAD、index 与物理身份，不接受保存/切分支中的混合版本。 */
-export async function captureInputSnapshot(root: string, options: { maxAttempts?: number; onObservation?: (attempt: number) => void | Promise<void> } = {}): Promise<InputSnapshot> {
+/** 双重核对来源身份；自动输入只读 HEAD tree，显式工作区输入保完整原字节及 index。 */
+export async function captureInputSnapshot(root: string, options: { committed?: boolean; maxAttempts?: number; onObservation?: (attempt: number) => void | Promise<void> } = {}): Promise<InputSnapshot> {
   let readFailure: unknown
   for (let attempt = 1; attempt <= (options.maxAttempts ?? 3); attempt++) {
     try {
-      const first = observe(realpathSync(root))
-      const tree = writeTree(first.source.commonDir, first.entries)
+      const observeInput = options.committed ? observeCommitted : observe
+      const first = observeInput(realpathSync(root))
+      const tree = options.committed ? first.indexTree : writeTree(first.source.commonDir, first.entries)
       await options.onObservation?.(attempt)
       await new Promise<void>(done => setImmediate(done))
-      const second = observe(realpathSync(root))
+      const second = observeInput(realpathSync(root))
       if (observationKey(first) !== observationKey(second)) continue
-      return snapshotFromTree({ id: '', source: first.source, headCommit: first.head, immutableTree: tree, indexTree: first.indexTree, indexDigest: first.indexDigest, manifestBlob: { sha256: '' }, contentDigest: '', capturedAtMs: Date.now() }, tree)
+      return snapshotFromTree({ id: '', ...(options.committed ? { captureKind: 'commit' as const } : {}), source: first.source, headCommit: first.head, immutableTree: tree, indexTree: first.indexTree, indexDigest: first.indexDigest, manifestBlob: { sha256: '' }, contentDigest: '', capturedAtMs: Date.now() }, tree)
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT' && typeof (error as { status?: unknown }).status !== 'number') throw error
       readFailure = error
@@ -224,10 +230,11 @@ export async function captureInputSnapshot(root: string, options: { maxAttempts?
 }
 /** 只验证 tree 与 evidence；不读取可能继续被 Agent 写入的旧 attempt。 */
 export function verifySnapshot(snapshot: InputSnapshot): TreeEntry[] {
+  if (snapshot.captureKind === 'commit' && (snapshot.immutableTree !== objectGit(snapshot.source.commonDir, ['rev-parse', `${snapshot.headCommit}^{tree}`]).toString().trim() || snapshot.indexTree !== snapshot.immutableTree || snapshot.indexDigest !== contentHash(snapshot.indexTree))) throw new Error('提交快照必须绑定同一 HEAD tree')
   const entries = readTree(snapshot.source.commonDir, snapshot.immutableTree)
   const actual = JSON.stringify({ version: 1, entries } satisfies SnapshotManifest)
   if (readEvidence(snapshot.source.commonDir, snapshot.manifestBlob).toString() !== actual || contentHash(JSON.stringify(entries)) !== snapshot.contentDigest) throw new Error('快照 manifest/contentDigest 不匹配 Git 对象')
-  const expectedId = contentHash(JSON.stringify({ source: snapshot.source, headCommit: snapshot.headCommit, indexTree: snapshot.indexTree, indexDigest: snapshot.indexDigest, tree: snapshot.immutableTree, contentDigest: snapshot.contentDigest }))
+  const expectedId = contentHash(JSON.stringify({ ...(snapshot.captureKind ? { captureKind: snapshot.captureKind } : {}), source: snapshot.source, headCommit: snapshot.headCommit, indexTree: snapshot.indexTree, indexDigest: snapshot.indexDigest, tree: snapshot.immutableTree, contentDigest: snapshot.contentDigest }))
   if (snapshot.id !== expectedId) throw new Error('快照身份摘要不匹配')
   return entries
 }
