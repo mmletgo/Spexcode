@@ -64,3 +64,6 @@ AC-ELABORATION-38–40 验证空 changes 的完整既有目标、只返回子叶
 冻结目标或上下文没有真实非空 raw 段时，缺席保持 null；本轮 raw 政策只登记调用者冻结的非空原意，不用空字符串授权或把解析器的整段 body fallback 当作原意。候选对照真实分段 raw：未变 rawless 节点不得误报 raw_changed，真实非空 raw 仍须原字节保留。无 schema 的旧节点仍必须显式细化；rawless 节点新增 user:raw 业务行继续由 missing-raw-source 拒绝，不能借沿用旧正文扩张业务来源授权。
 
 目标绑定 v3 的 targetIndex 只引用本次冻结 targets 的原数组位置，wire 显式附该下标；完整业务 inputDigest 保持原冻结结构，实际 prompt/schema 继续由 requestDigest 绑定。生成 prompt 列出本轮须显式构建的目标数量和原数组下标；输出必须是完整、可解析的结构化对象，但 changes 的 schema 最低数量为零，使合法部分输出也能形成诊断候选。输出不回显 nodeId/path，程序沿同一目标和明确生命周期补入身份；retire 留洞、move 绑定新定位。程序继续逐项检查目标覆盖，遗漏新目标、raw-only 目标或无 sync-v1 契约的目标产生 `target_not_elaborated` 并阻止独审及交付；数量、索引范围和已结算 seed 均不豁免该门禁。
+
+
+分区输入的intent允许属于冻结只读context而不属于targets；该上层原意全文仍必须存在，raw不改变。本区targets非空且身份、路径、摘要及原有授权检查保持；只读原意节点不要求出现在本区changes，也不获得写权。可信验证登记的纯技术校验可取本区首个目标作临时渲染，不改变实际契约writer。

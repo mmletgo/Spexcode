@@ -31,7 +31,7 @@ function repairDiagnostics(findings: readonly ContractFinding[], coverage: Contr
 }
 
 function finding(input: ElaborationInput, code: string, message: string, itemId?: string): ContractFinding {
-  const target = input.targets.find(target => target.nodeId === input.intent.nodeId)!
+  const target = input.targets.find(target => target.nodeId === input.intent.nodeId) ?? input.targets[0]
   return { code, severity: 'error', nodeId: target.nodeId, path: target.path, message, ...(itemId ? { itemId } : {}) }
 }
 
@@ -46,7 +46,7 @@ const baselineSources = (input: ElaborationInput): { nodeId: string; path: strin
 function checkInput(input: ElaborationInput): void {
   if (input.refinement && (!/^[a-f0-9]{64}$/.test(input.refinement.candidateDigest) || !input.refinement.diagnostics.length || input.refinement.diagnostics.some(issue => !issue.code.trim() || !issue.message.trim()))) throw new TypeError('再细化诊断必须绑定已接受候选及具体失败')
   if (!input.intent.rawSource.trim() || !input.requestKey) throw new TypeError('业务原意与请求键不能为空')
-  if (!input.targets.some(target => target.nodeId === input.intent.nodeId)) throw new TypeError('用户原意节点必须属于目标范围')
+  if (!input.targets.length || ![...input.targets, ...(input.context ?? [])].some(target => target.nodeId === input.intent.nodeId)) throw new TypeError('用户原意节点必须属于冻结目标或只读上下文')
   const paths = new Set<string>(), nodes = new Set<string>()
   for (const target of [...input.targets, ...(input.context ?? [])]) {
     if (!target.nodeId || !specPath(target.path) || paths.has(target.path) || nodes.has(target.nodeId)) throw new TypeError(`目标身份或路径不合法/重复: ${target.path}`)
@@ -67,7 +67,7 @@ function checkInput(input: ElaborationInput): void {
     // 复用唯一 Markdown 渲染及契约解析器检查 cwd、shell argv 和转义边界。
     const tables = Object.fromEntries(Object.keys(CONTRACT_COLUMNS).map(kind => [kind, []])) as unknown as GeneratedTables
     tables.VERIFY = input.verifications.map(verification => ({ id: verification.id, command: verification.command, cwd: verification.cwd, 'timeout-ms': verification.timeoutMs }))
-    const target = input.targets.find(item => item.nodeId === input.intent.nodeId)!
+    const target = input.targets.find(item => item.nodeId === input.intent.nodeId) ?? input.targets[0]
     const rendered = renderElaboration({ ...input, targets: [{ ...target, source: null, sourceDigest: null }], mode: 'reelaborate', nodeChanges: [], refinement: undefined }, { version: 'elaboration-rows-v2', changes: [{ nodeId: target.nodeId, path: target.path, title: '可信验证登记', description: '', code: [], related: [], prose: '', removeIds: [], tables }], applicability: [] }, 'registration-validation').changes[0]
     const errors = parseContract({ nodeId: target.nodeId, path: target.path, source: rendered.source }).findings.filter(issue => issue.severity === 'error')
     if (errors.length) throw new TypeError(`可信验证登记不合法: ${errors.map(issue => `${issue.code}: ${issue.message}`).join('; ')}`)
@@ -128,7 +128,7 @@ function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate
     const identity = lifecycle?.action === 'move' ? lifecycle.to : target
     if (!changed.has(identity.nodeId)) findings.push(finding(input, 'target_not_elaborated', `新目标或raw-only目标必须显式完成细化: ${identity.path}`))
   }
-  if (!nodes.has(input.intent.nodeId) && !input.nodeChanges?.some(change => change.from.nodeId === input.intent.nodeId && (change.action === 'retire' || nodes.has(change.to.nodeId)))) findings.push(finding(input, 'intent_not_elaborated', '候选必须包含用户原意节点'))
+  if (input.targets.some(target => target.nodeId === input.intent.nodeId) && !nodes.has(input.intent.nodeId) && !input.nodeChanges?.some(change => change.from.nodeId === input.intent.nodeId && (change.action === 'retire' || nodes.has(change.to.nodeId)))) findings.push(finding(input, 'intent_not_elaborated', '候选必须包含用户原意节点'))
   const contracts = [...changed.values()]
   for (const source of [...input.targets.filter(target => !changed.has(target.nodeId) && target.source !== null && !input.nodeChanges?.some(change => change.from.path === target.path)), ...(input.context ?? [])]) {
     const parsed = parseContract({ nodeId: source.nodeId, path: source.path, source: source.source! })

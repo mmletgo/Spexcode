@@ -47,3 +47,6 @@ mandatoryTests即使由contractImpact引用也只读；executionScope仅纳入�
 已存在的node tombstone沿原contract资源head保存；当前精确规划保留实际读取节点的已知该head，不造新node资源协议。已审恢复的node身份由原Spec路径与scope覆盖；generation/review readyIds仍只包含实际契约图业务ID，不伪标恢复node为退役业务义务。
 
 当前Spec自身VERIFY若已有精确head，规划保留该已知head的只读绑定，使已恢复验证登记不被旧path累计退休误导；不把读取登记转成模型或执行政策授权。
+
+
+新正式构建返回 sync-coordinator-v2；可信入口显式冻结 direction 与 commitTrigger，直接 Spec 保存默认 spec_to_code。分区策略默认512KiB完整正文工作集及最多4个本操作同时任务，原生session容量仍另行约束。普通提交有真实before时，未治理源码发现只纳入其累计paths；首次before:null才全量发现。旧已持久计划不通过此构建器升级；重试/恢复沿原计划与摘要。

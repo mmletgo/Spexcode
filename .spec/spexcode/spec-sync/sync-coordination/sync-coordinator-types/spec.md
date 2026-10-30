@@ -37,3 +37,6 @@ plan.decisionAuthorities是重读已结算decisionRefs或当前请求及原真�
 可信 authorizedChanges 可携 restore 动作及固定 history request/input；只有正式 revert 由原 settled receipt 派生，协调器再次核原 operation、journal/receipt、commit 与请求身份。模型分析不能产生此动作，普通任务不能声明恢复。
 
 接入选项可携 model，规范化后写入共享 operation 身份；模型选择与预算、可信计划及业务授权分离，遵循 [[sync-model-selection]]。
+
+
+计划类型为显式 v1/v2 联合：v1 保留原 JSON 形状；v2 必填 direction（spec_to_code/code_to_spec/combined）及 partitionPolicy（sync-partition-policy-v1、maxReadBytes、maxParallel），可携 commitTrigger:{before:InputSnapshot|null,paths}。它们完整参与 canonical policyDigest。before 只是同物理来源的真实已提交前态，after 唯一使用 operation.input，不能伪造共同验证基线。默认小批并行不改变 session 容量或调用计费。阶段分区及最终覆盖证据复用 BlobRef，不新增数据库任务身份。

@@ -2,6 +2,7 @@ import type { CodeBehaviorEvidence, ContractNodeChange, GenerationDirection } fr
 import type { Acceptance, Contract, ContractFinding } from '@spexcode/spec-core/contracts'
 import type { ElaborationFact, ElaborationRunner, ElaborationSessionRequest, ElaborationTrace } from './elaboration-types.js'
 import type { CandidateRef, ComposedInputRef, InputSnapshot, SyncScope } from './operation-types.js'
+import type { CandidateChanges } from './candidate.js'
 import type { SnapshotManifest } from './snapshot.js'
 import type { SyncCoordinatorPlan } from './coordinator-types.js'
 
@@ -27,6 +28,7 @@ export type GenerationInput = {
   /** 已结算失败产物和诊断；修复上下文不是新的业务事实或通过证据。 */
   repairContext?: { previousOutput: unknown; diagnostics: readonly { code: string; message: string }[] }
   analysis?: CodeBehaviorEvidence
+  analysisEvidence?: readonly CodeBehaviorEvidence[]
   direction?: GenerationDirection
   nodeChanges?: readonly ContractNodeChange[]
   allowedScope: SyncScope
@@ -55,6 +57,9 @@ export type GenerationReview = {
 }
 export type GenerationOptions = {
   runner: ElaborationRunner
+  prepareOnly?: boolean
+  reviewCandidate?: CandidateRef
+  builderTraces?: readonly ElaborationTrace[]
   validateCandidate: (candidate: CandidateRef) => Promise<readonly ContractFinding[]>
   /** 必须在 native 派发前完成持久登记；native 身份绑定由 runner 包装者负责。 */
   onDispatch?: (request: ElaborationSessionRequest) => Promise<void>
@@ -64,12 +69,14 @@ export type GenerationOptions = {
   protectedReadPaths?: readonly string[]
 }
 export type GenerationResult = {
-  status: 'reviewed' | 'repair' | 'needs_input' | 'conflict' | 'failed' | 'cancelled' | 'unsupported'
+  status: 'prepared' | 'reviewed' | 'repair' | 'needs_input' | 'conflict' | 'failed' | 'cancelled' | 'unsupported'
   inputId: string
   inputDigest: string
   candidate: CandidateRef | null
   /** 仅本地使用的完整候选文本，不序列化进 store/外发 JSON。 */
   candidateFiles: ReadonlyMap<string, string> | null
+  preparedChanges?: CandidateChanges
+  partitionEvidence?: { partitionId: string; candidateDigest: string; review: GenerationReview; traces: ElaborationTrace[] }[]
   output: unknown
   reviewOutput: unknown
   review: GenerationReview | null

@@ -98,3 +98,14 @@ raw-only 初始化允许的空 affectedIds 不能被解释为没有阻塞。完�
 显式 retryOf 的行为修复反馈沿真实不可变引用逐代读取，仅在来源物理身份、input.id、policyDigest、readSetDigest、requestBlob 及 origin 与当前操作精确相同时，将各代 behavior_analysis_invalid/behavior_review_failed 的完整 code/message 按原先后交给本次分析和新独审。来源/input/政策/request/origin 结构绑定不符仍拒绝；合法 P1 扩作用域使当前 readSetDigest 不同于祖先时，只停止继承该代及更早诊断，保留本操作反馈并继续新分析，不由可选诊断新增业务阻断。不沿 changed-input successorOf 取反馈。诊断始终是未批准数据，不构成基线、业务批准、权限或可重用分析；现有预算、尝试、deadline 和独审门禁保持。
 
 所有行为分析、细化、生成与各自独立评审使用 operation 的固定有效 model（历史缺省为 gpt-6.1-sol），遵循 [[sync-model-selection]]；恢复沿原结构化请求，模型不改变预算、业务权限或已批准 P1 继承。
+
+
+新正式计划使用 sync-coordinator-v2，冻结 spec_to_code、code_to_spec 或 combined 方向及分区字节/批并行策略；旧 v1 持久计划、请求和摘要按原路径恢复，不补写新字段。[[sync-partitioning]] 在同一 operation/attempt/fence 内冻结工作分区，[[sync-partition-execution]] 复用原原子派发计费、原生容量、deadline、有限修复、checkpoint 和单交付 journal/receipt。每区稳定阶段键含 partitionId，完整原始结果持久后恢复不重复模型调用。
+
+提交触发前态使用 plan.commitTrigger.before 的真实 InputSnapshot，after 为 operation.input；paths 是真实累计提交差量，首次全量建档 before:null。没有共同验证基线时，该前态只是旧来源，不冒充 verifiedDelivery。普通提交只分析实际路径残差，首次建档才纳入全部授权实现；直接受控 Spec 保存只把真实 Spec 差量当新意图，现存代码仍是只读实现上下文。V4 和派发前复采沿 input.captureKind 选择同一 commit 或工作区模式，提交操作不受未提交 WIP 变化误伤。
+
+分区分析及独审只接本区完整三方来源、必要只读 raw/契约/代码/测试，不接全仓正文索引。程序核分区并集唯一覆盖实际 changedPaths，合并已审事实、授权、归属和原始证据引用，拒绝重复身份和写者冲突。P1 上层原意可在只读 context，只有局部 targets 获得写权；raw-only 根首次先细化并独审一次，再成为其他区的只读上下文。新叶按真实 codePath 唯一归区，P1 完成后另冻结新增业务依赖及最终审查覆盖，不改变原分析原件。
+
+spec_to_code/combined 各区并行产出结构化补丁，程序核本区读取、scope、Spec目标、不可改oracle及唯一文件writer，沿原 publication-base 保护与 CAS 确定序冻结一棵候选。所有局部及跨区边独审绑定同一最终 candidateDigest，V2 明示各原始独审及覆盖集合，不合成不存在的全仓模型review。code_to_spec 不派 code_generate，只装配 P1 已审Spec；程序核最终source/tests对象与真实输入逐字/mode/absence一致，发生代码组合差异就停止，不能反向改代码或测试。代码方向 V3 失败不进入可写实现自修复循环。
+
+启动前保存完整最少调用估计与原预算族剩余量，所需分析、P1及最终分区/跨边独审超预算时明确拒绝，不少算或免计调用。全局 V1、真实隔离 V3、V4、正常 hooks 和单 receipt 仍是完成门槛，局部结果不构成全产品完成。
