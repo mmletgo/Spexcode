@@ -58,6 +58,52 @@ test('stopped exact Claude schema retry exhaustion remains a rejected output wit
     assert.deepEqual(readFileSync(join(root, 'result.json')), failureBytes)
     assert.deepEqual(readFileSync(historyPath), historyBytes)
     for (const name of ['completed.json', 'witness.json']) assert.equal(existsSync(join(root, name)), false)
+    const extraMessage = { role: 'user', content: [{ type: 'text', text: 'UNOBSERVED EXTRA USER INTENT' }] }
+    const extraBlob = { type: 'api-request-blob', sessionId: 'session', hash: claudeMessageDigest(extraMessage), message: extraMessage }
+    const replyMessage = history[4].message!, replyBlob = { type: 'api-request-blob', sessionId: 'session', hash: claudeMessageDigest(replyMessage), message: replyMessage }
+    const apiSourceCases = [
+      { name: 'canonical unknown user blob declared before consumption', blob: extraBlob, at: 2, hash: extraBlob.hash },
+      { name: 'canonical unknown user blob declared after consumption', blob: extraBlob, at: history.length, hash: extraBlob.hash },
+      { name: 'unknown request hash has no CAS blob', hash: extraBlob.hash },
+      { name: 'user blob carries a wrong content hash', blob: { ...extraBlob, hash: 'b'.repeat(64) }, at: 2, hash: 'b'.repeat(64) },
+      { name: 'request has an unobserved base', base: 'unknown-request' },
+      { name: 'request keep exceeds its actual base', keep: 1 },
+      { name: 'exact future tool result declared before its native reply', blob: replyBlob, at: 2, hash: replyBlob.hash },
+      { name: 'exact future tool result declared after its native reply', blob: replyBlob, at: history.length, hash: replyBlob.hash },
+    ]
+    for (const invalid of apiSourceCases) {
+      const rows: Array<Record<string, unknown>> = structuredClone(history)
+      rows[2] = { ...rows[2], ...(invalid.base ? { base: invalid.base } : {}), ...(invalid.keep ? { keep: invalid.keep } : {}), tail: [claudeMessageDigest(message), ...(invalid.hash ? [invalid.hash] : [])] }
+      if (invalid.blob) rows.splice(invalid.at!, 0, invalid.blob)
+      writeFileSync(historyPath, rows.map(row => JSON.stringify(row)).join('\n') + '\n')
+      await assert.rejects(claudeStructuredTurn(realm, 'native', prompt, execution, callbacks), error => {
+        assert.equal((error as { code: string }).code, 'stale_result', invalid.name)
+        return true
+      })
+      assert.equal(existsSync(join(root, 'completed.json')), false, invalid.name)
+      assert.equal(existsSync(join(root, 'witness.json')), false, invalid.name)
+    }
+    const consumedReply = { ...history[2], id: 'request-2', base: 'request', keep: 1, tail: [replyBlob.hash] }
+    const forgedReplyMessage = { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'schema', is_error: true, content: 'different schema error' }] }
+    const forgedReplyBlob = { ...replyBlob, message: forgedReplyMessage, hash: claudeMessageDigest(forgedReplyMessage) }
+    for (const rows of [
+      [...history.slice(0, 2), replyBlob, ...history.slice(2), consumedReply],
+      [...history, consumedReply, replyBlob],
+      [...history, extraBlob],
+    ]) {
+      writeFileSync(historyPath, rows.map(row => JSON.stringify(row)).join('\n') + '\n')
+      await assert.rejects(claudeStructuredTurn(realm, 'native', prompt, execution, callbacks), error => (error as { code: string }).code === 'structured_output_retries_exhausted')
+    }
+    for (const rows of [
+      [...history, { ...consumedReply, base: 'unobserved-request' }],
+      [...history, { ...consumedReply, keep: 2 }],
+      [...history, forgedReplyBlob, { ...consumedReply, tail: [forgedReplyBlob.hash] }],
+      [...history, extraBlob, { ...consumedReply, tail: [replyBlob.hash, extraBlob.hash] }, { ...consumedReply, id: 'request-3', base: 'request-2', keep: 1, tail: [] }],
+    ]) {
+      writeFileSync(historyPath, rows.map(row => JSON.stringify(row)).join('\n') + '\n')
+      await assert.rejects(claudeStructuredTurn(realm, 'native', prompt, execution, callbacks), error => (error as { code: string }).code === 'stale_result')
+    }
+    writeFileSync(historyPath, historyBytes)
     for (const invalid of [
       { result: { ...result, subtype: 'error_during_execution' } },
       { result: { ...result, is_error: false } },

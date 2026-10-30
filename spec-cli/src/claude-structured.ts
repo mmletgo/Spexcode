@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createInterface } from 'node:readline'
 import { detachedRuntimeIsGone, processStartToken, verifyDetachedRuntime, writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
-import { claudeMessageDigest, proveClaudeFrozenReads, readClaudeMcpToolNames, readClaudePublicHistory, verifyFrozenReadProof, type ClaudeFrozenWitness, type ClaudePublicMessage, type FrozenReadProof } from './frozen-context.js'
+import { claudeApiRequestHashes, claudeApiToolResultIds, claudeMessageDigest, proveClaudeFrozenReads, readClaudeApiMessageBlobs, readClaudeMcpToolNames, readClaudePublicHistory, verifyFrozenReadProof, type ClaudeFrozenWitness, type ClaudePublicMessage, type ClaudePublicRecord, type FrozenReadProof } from './frozen-context.js'
 import { StructuredSessionError, structuredExecutionPolicy, structuredSeatbeltProfile, type StructuredExecution } from './session-structured-policy.js'
 
 const CLI_VERSION = '2.1.309 (Claude Code)'
@@ -159,6 +159,38 @@ function settleClaudeResult(plan: NativePlan, prompt: string, execution: Structu
       || new Set(history.filter(row => row.uuid).map(row => row.uuid)).size !== history.filter(row => row.uuid).length
       || unknownUser || history.some(row => row.sessionId !== plan.sessionId || row.type === 'assistant' && Array.isArray(row.message?.content) && row.message.content.some(block => !block.name || !toolNames.includes(block.name))))
       throw new StructuredSessionError('stale_result', 'Claude schema retry exhaustion lost its exact terminal, API, original user or isolated capability identity')
+    const blobs = readClaudeApiMessageBlobs(history), api = new Map<string, string[]>(), observedShapes = new Set<string>()
+    const users = new Map<string, ClaudePublicMessage>(), calls = new Map<string, ClaudePublicRecord>(), responses = new Map<string, Exclude<ClaudePublicMessage['content'], string>[number]>()
+    const originalHash = claudeMessageDigest(original.message)
+    for (const row of history) {
+      if (row.type === 'system' || row.compactSummary || row.turnCompanion) throw new StructuredSessionError('stale_result', 'Claude schema retry exhaustion cannot classify compact or recovery user inputs')
+      if (row.type === 'api-request-shape') observedShapes.add(row.shapeHash!)
+      if (row.type === 'assistant') {
+        if (!row.requestRef || !api.has(row.requestRef)) throw new StructuredSessionError('stale_result', 'Claude assistant has no preceding actual API request')
+        for (const block of row.message!.content as Exclude<ClaudePublicMessage['content'], string>) {
+          if (!block.id || calls.has(block.id)) throw new StructuredSessionError('stale_result', 'Claude schema failure reused a native tool call identity')
+          calls.set(block.id, row)
+        }
+      }
+      if (row.type === 'user') {
+        if (row.uuid !== plan.userUuid) for (const block of row.message!.content as Exclude<ClaudePublicMessage['content'], string>) {
+          const call = calls.get(block.tool_use_id!)
+          if (!call || responses.has(block.tool_use_id!) || call.uuid !== row.sourceToolAssistantUUID || call.uuid !== row.parentUuid) throw new StructuredSessionError('stale_result', 'Claude schema failure tool reply has no preceding exact native call')
+          responses.set(block.tool_use_id!, block)
+        }
+        users.set(claudeMessageDigest(row.message), row.message!)
+      }
+      if (row.type === 'api-request') {
+        const hashes = claudeApiRequestHashes(row, api, observedShapes, model)
+        for (const digest of hashes) {
+          const blob = blobs.get(digest), source = users.get(digest), content = blob?.content ?? source?.content
+          if (!users.has(originalHash) || !Array.isArray(content) || !content.length || blob && (!blob.canonical || blob.summaries.size)
+            || content.some(block => block.type === 'text') && digest !== originalHash) throw new StructuredSessionError('stale_result', 'Claude actual API user message has no observed original prompt or exact tool reply source')
+          claudeApiToolResultIds(content, responses)
+        }
+        api.set(row.id!, hashes)
+      }
+    }
     throw new StructuredSessionError('structured_output_retries_exhausted', 'Claude error_max_structured_output_retries rejected the structured output; original native result and schema errors remain in its history', { threadId: plan.sessionId, turnId: plan.userUuid })
   }
   plan = { ...plan, historyPath }; writeFileSync(join(root, 'plan.json'), JSON.stringify(plan), { mode: 0o600 })

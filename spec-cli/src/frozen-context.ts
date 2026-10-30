@@ -407,6 +407,34 @@ export function readClaudeMcpToolNames(path: string): string[] {
   })
 }
 
+/** CAS 只登记公开消息字节；来源和消费时点仍须由实际请求逐次核对。 */
+export function readClaudeApiMessageBlobs(history: readonly ClaudePublicRecord[]): Map<string, { content: ClaudePublicContentBlock[]; canonical: boolean; summaries: Set<string> }> {
+  const messages = new Map<string, { content: ClaudePublicContentBlock[]; canonical: boolean; summaries: Set<string> }>()
+  for (const row of history) if (row.type === 'api-request-blob') {
+    if (!row.message || row.message.role !== 'user' || !Array.isArray(row.message.content) || row.hash !== claudeMessageDigest(row.message) || row.message.content.some(block => !['tool_result', 'text'].includes(block.type))) stale('Claude public API message blob has invalid bytes or type')
+    const blob = messages.get(row.hash) ?? { content: row.message.content, canonical: row.hash === claudeMessageDigest({ role: 'user', content: row.message.content }), summaries: new Set<string>() }
+    if (row.compactSummaryDigest) blob.summaries.add(row.compactSummaryDigest)
+    messages.set(row.hash, blob)
+  }
+  return messages
+}
+
+/** 按已观察请求重建完整实际 API 输入，不以 tail 片段或未知 base 代替。 */
+export function claudeApiRequestHashes(row: ClaudePublicRecord, requests: ReadonlyMap<string, string[]>, shapes: ReadonlySet<string>, model: string): string[] {
+  const base = row.base ? requests.get(row.base) : []
+  if (!row.id || requests.has(row.id) || !row.shapeHash || !shapes.has(row.shapeHash) || !base || !Number.isSafeInteger(row.keep) || row.keep! < 0 || row.keep! > base.length || !Array.isArray(row.tail) || row.model !== model) stale('Claude API model, tools shape or request history boundary differs')
+  return [...base.slice(0, row.keep), ...row.tail]
+}
+
+/** actual API 的每个工具回复只能引用此前已配对观察到的原公开回复。 */
+export function claudeApiToolResultIds(content: readonly ClaudePublicContentBlock[], responseBlocks: ReadonlyMap<string, ClaudePublicContentBlock>): string[] {
+  return content.filter(block => block.type === 'tool_result').map(block => {
+    const originalBlock = responseBlocks.get(block.tool_use_id!)
+    if (!originalBlock || claudeMessageDigest(originalBlock) !== claudeMessageDigest(block)) stale('Claude merged API tool result differs from its exact native public reply')
+    return block.tool_use_id!
+  })
+}
+
 /** Claude用原生user UUID/promptId、配对公开消息及真实API请求索引证明可见性，绝不冒充Codex动态工具。 */
 export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFrozenWitness): FrozenReadProof {
   const { sessionId, userUuid, promptId, model, result, echo, history } = witness
@@ -424,18 +452,7 @@ export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFro
   let latestMessage: string | undefined, compaction: { ancestors: Set<string>; anchor?: string } | undefined
   const receipts: FrozenReadReceipt[] = [], rejectedCalls: string[] = [], responseMessages = new Map<string, string>(), responseBlocks = new Map<string, ClaudePublicContentBlock>(), requestRefs = new Set<string>()
   if (witness.mcpHistory && (JSON.stringify(readClaudeMcpToolNames(witness.mcpHistory.path)) !== JSON.stringify(witness.mcpHistory.toolNames) || witness.mcpHistory.toolNames.some(name => name !== 'spex_read_frozen'))) stale('Claude MCP dispatched a foreign tool or its actual history changed')
-  const apiMessages = new Map<string, { content: ClaudePublicContentBlock[]; canonical: boolean; summaries: Set<string> }>()
-  for (const row of history) if (row.type === 'api-request-blob') {
-    if (!row.message || row.message.role !== 'user' || !Array.isArray(row.message.content) || row.hash !== claudeMessageDigest(row.message) || row.message.content.some(block => !['tool_result', 'text'].includes(block.type))) stale('Claude public API message blob has invalid bytes or type')
-    const blob = apiMessages.get(row.hash) ?? { content: row.message.content, canonical: row.hash === claudeMessageDigest({ role: 'user', content: row.message.content }), summaries: new Set<string>() }
-    if (row.compactSummaryDigest) blob.summaries.add(row.compactSummaryDigest)
-    apiMessages.set(row.hash, blob)
-  }
-  const apiToolResultIds = (content: readonly ClaudePublicContentBlock[]): string[] => content.filter(block => block.type === 'tool_result').map(block => {
-    const originalBlock = responseBlocks.get(block.tool_use_id!)
-    if (!originalBlock || claudeMessageDigest(originalBlock) !== claudeMessageDigest(block)) stale('Claude merged API tool result differs from its exact native public reply')
-    return block.tool_use_id!
-  })
+  const apiMessages = readClaudeApiMessageBlobs(history)
   const recoveries: Array<{ hashes: Set<string>; summaries: Set<string>; requests: Set<string>; consumed: boolean }> = []
   let latestAssistant: string | undefined, acceptedOutput = false
   for (const row of history) {
@@ -483,17 +500,15 @@ export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFro
     if (row.type === 'api-request-blob') {
       if (row.compactSummaryDigest && recoveries.length && row.compactSummaryDigest === claudeMessageDigest({ role: 'user', content: CLAUDE_TRUNCATED_RECOVERY_TEXT })) stale('Claude recovery API message cannot masquerade as a compact summary')
       if (row.compactSummaryDigest && !compactSummaries.has(row.compactSummaryDigest)) stale('Claude API string message is not an observed same-turn compact summary')
-      apiToolResultIds(apiMessages.get(row.hash!)!.content)
+      claudeApiToolResultIds(apiMessages.get(row.hash!)!.content, responseBlocks)
     }
     if (row.type === 'api-request') {
-      const base = row.base ? requests.get(row.base) : []
-      if (!row.id || requests.has(row.id) || !row.shapeHash || !shapes.has(row.shapeHash) || !base || !Number.isSafeInteger(row.keep) || row.keep! < 0 || row.keep! > base.length || !Array.isArray(row.tail) || row.model !== model) stale('Claude API model, tools shape or request history boundary differs')
-      if (!requests.size && (!row.tail.includes(claudeMessageDigest(original.message)) || row.keep !== 0 || row.base)) stale('Claude original user prompt was not in the actual first API request')
-      const hashes = [...base.slice(0, row.keep), ...row.tail]
+      const hashes = claudeApiRequestHashes(row, requests, shapes, model)
+      if (!requests.size && (!row.tail!.includes(claudeMessageDigest(original.message)) || row.keep !== 0 || row.base)) stale('Claude original user prompt was not in the actual first API request')
       for (const hash of hashes) {
         const blob = apiMessages.get(hash)
         if (!blob) continue
-        for (const callId of apiToolResultIds(blob.content)) responseMessages.set(callId, hash)
+        for (const callId of claudeApiToolResultIds(blob.content, responseBlocks)) responseMessages.set(callId, hash)
         const summaries = [...blob.summaries].filter(digest => compactSummaries.has(digest))
         if (compactSummaries.has(hash) || summaries.length) {
           for (const recovery of recoveries) if (recovery.summaries.has(hash) || summaries.some(digest => recovery.summaries.has(digest))) recovery.hashes.add(hash)
@@ -507,9 +522,9 @@ export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFro
         if (!blob.canonical || !originalInput && !plain && !merged) stale('Claude API user message contains unobserved text or a different coalescing shape')
         if (plain || merged) for (const recovery of recoveries) recovery.hashes.add(hash)
       }
-      requests.set(row.id, hashes)
+      requests.set(row.id!, hashes)
       for (const recovery of recoveries) {
-        if (row.tail.some(hash => recovery.hashes.has(hash)) || row.base && recovery.requests.has(row.base) && hashes.some(hash => recovery.hashes.has(hash))) recovery.requests.add(row.id)
+        if (row.tail!.some(hash => recovery.hashes.has(hash)) || row.base && recovery.requests.has(row.base) && hashes.some(hash => recovery.hashes.has(hash))) recovery.requests.add(row.id!)
       }
     }
     if (row.type === 'assistant') {

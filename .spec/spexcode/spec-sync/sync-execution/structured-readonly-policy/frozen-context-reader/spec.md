@@ -34,6 +34,8 @@ Claude 采用显式500000字符和500000 MCP token上限，并核实际序列化
 
 公开 API user blob 的 CAS 声明不授予额外输入权。先按原字节、类型与 canonical SHA 登记内容，再对每条实际 API 请求按 base/keep/tail 重建的完整输入统一核来源，不依赖 blob 在续接之前或之后出现，也不依赖是否发生续接。user text 只能精确对应原 prompt、该时点已严格验证的同轮摘要、已观察合法续接及上述固定合并形态；tool_result 在声明与实际请求处复用同一原公开回复配对检查，可见性消息 SHA 只随实际请求消费绑定。未知正文即使在续接前已被请求消费、随后从输入删除，仍拒绝；不得过滤其 hash 后继续证明。合法 CAS 重复、提前声明原 prompt 或续接内容不等于提前消费，续接仍须由其后新请求独立使用。未被请求引用的合法字节声明可以保留，但不成为模型输入、receipt、读取覆盖或新业务授权。
 
+公开 CAS 字节索引、actual API base/keep/tail 重建与原 tool_result 来源检查由成功证明和 [[claude-structured-runtime]] 的失败分类共用同一窄校验原语。失败分类不能以 schema 拒绝或 CLI 已停绕过实际输入来源；共享原语不提供跳过完整结果、读取覆盖或成功验收的开关，成功 proof 的字段、摘要和验收含义保持。
+
 实际 API 工具面之外的名字只能保留为原生明确未派发的拒绝事件：唯一 callId、session/user/prompt 与 parent/source assistant 完整配对，`is_error:true` 且公开回复逐字等于固定 CLI 的 `<tool_use_error>Error: No such tool available: 名字</tool_use_error>`；全文还须进入后续真实 API 并由 assistant 消费。专属 MCP 实际派发名与见证一致且只含唯一 reader，存在外部派发或日志矛盾即拒绝。拒绝事件保留原名及全文，不改名、不产生 reader receipt、不贡献任何覆盖；缺读取仍失败。普通工具错误、权限错误、未知回复、未配对结果、实际工具面扩张和 DeferredToolPlaceholder 调用继续拒绝。其后正确读取、完整覆盖、StructuredOutput 与停止证明仍须分别通过。
 
 reader 的非法范围仍在读取正文前即时拒绝。同一原生轮中，只有独立重算同一冻结上下文/参数确实在范围边界抛出精确错误、公开 `is_error:true` 回复逐字匹配该错误、专属 MCP 无外部派发且后续 API 已消费错误时，才将它保留为无读取覆盖的参数拒绝事件，允许随后自行纠正。原意/entry 身份错误、正文摘要损坏、权限错误及未知错误不享有此例外；不能把失败请求算作已读。读取指引要求逐项照用计划 endByte，65536 只是最大跨度，不是短 entry 的结束位置。
