@@ -50,7 +50,7 @@ export type PlanSyncPartitionsInput = {
   readByteSizes?: ReadonlyMap<string, number>
 }
 
-/** 纯父判定只需调用方冻结的节点、Spec正文、契约与本地target；不依赖完整协调plan。 */
+/** 纯接口父判定只需调用方冻结的节点、Spec正文、契约、源码角色与本地target；不依赖完整协调plan。 */
 export type RawOnlyInterfaceSeedInput = {
   files: ReadonlyMap<string, string>
   sourcePaths: readonly string[]
@@ -148,7 +148,12 @@ function rawOnlyInterfaceSeedEvidenceFrom(
   additionalCodeBearingDescendants: readonly RawOnlyInterfaceSeedDescendant[],
 ): RawOnlyInterfaceSeedEvidence | null {
   if (!input.targets.some(candidate => candidate.nodeId === target.nodeId && candidate.path === target.path)) return null
-  if (input.contracts.some(contract => contract.nodeId === target.nodeId)) return null
+  const parentContracts = input.contracts.filter(contract => contract.nodeId === target.nodeId)
+  if (parentContracts.length && (parentContracts.length !== 1
+    || parentContracts[0].path !== target.path
+    || parentContracts[0].code.length !== 0
+    || parentContracts[0].items.length === 0
+    || parentContracts[0].items.some(item => !['REQ', 'RULE', 'GAP'].includes(item.kind)))) return null
   const parent = governanceNodeAtPath(governanceNodes, target.path)
   if (!parent || parent.code.length) return null
   const rawSource = parent.current ? parent.rawSource : parent.rawSource ?? target.rawSource ?? null
@@ -197,7 +202,7 @@ function rawOnlyInterfaceSeedEvidenceFrom(
   }
 }
 
-/** 唯一判定无契约 raw-only 父节点；当前后代取冻结文件中的真实 code 绑定，新增后代由调用方提供经分区 sourcePaths 校验的证据。 */
+/** 唯一判定 raw-only 或仅含 REQ/RULE/GAP 的纯接口父节点；后代来源须受冻结分区 sourcePaths 约束。 */
 export function rawOnlyInterfaceSeedEvidence(
   input: RawOnlyInterfaceSeedInput,
   target: SyncCoordinatorPlan['targets'][number],
