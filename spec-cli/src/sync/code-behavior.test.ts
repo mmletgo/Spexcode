@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { createRequire, syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -685,6 +685,108 @@ test('较大冻结树全文与逐对象参考逐字相同，行为上下文不�
   t.diagnostic(JSON.stringify({ textFilesPerView: expected.newSource.length, textBytesDigest: contentHash(JSON.stringify(expected)), gitProcesses: calls.length, catFileProcesses: catFile.length, singleBlobProcesses: single.length, elapsedMs: Math.round(performance.now() - started) }))
   assert.equal(single.length, 0, '冻结树已经批量校验过blob，不应再为每篇正文启动单对象读取')
   assert.ok(catFile.length < 24, 'Git进程次数应随冻结视图批次而非文件数增长')
+})
+
+test('raw-only v2同tree冻结角色共享单次完整读取且保留verifySnapshot校验', async t => {
+  const f = await fixture(t), prepared = await f.input(), composed = composeInputSnapshots(prepared.snapshot, null).composed!
+  const input: CodeBehaviorInput = {
+    ...prepared, baseline: null, baselineSelection: undefined, composed, origin: 'initial',
+    plan: { ...prepared.plan, version: 'sync-coordinator-v2', direction: 'code_to_spec', commitTrigger: { before: null, paths: [] }, partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 1000000, maxParallel: 1 }, facts: [] },
+  }
+  const headTree = git(f.root, 'rev-parse', 'HEAD^{tree}')
+  assert.equal(input.snapshot.immutableTree, headTree)
+  assert.equal(input.snapshot.immutableTree, input.composed.tree)
+  assert.equal(input.baseline, null)
+  assert.equal(input.baselineSelection, undefined)
+  const expected = readTree(input.snapshot.source.commonDir, input.snapshot.immutableTree)
+    .filter(entry => input.plan.readPaths.some(path => entry.path === path || entry.path.startsWith(`${path}/`)) && !isHostPrivatePath(entry.path) && entry.mode !== '120000')
+    .flatMap(entry => {
+      const bytes = readObject(input.snapshot.source.commonDir, entry.oid)
+      return isUtf8Text(bytes) ? [[entry.path, bytes.toString('utf8')] as [string, string]] : []
+    })
+  const cp = createRequire(import.meta.url)('node:child_process') as typeof import('node:child_process'), original = cp.execFileSync, calls: string[][] = [], purposes: string[] = []
+  const stop = new Error('stopped at first Native dispatch')
+  cp.execFileSync = ((...args: Parameters<typeof execFileSync>) => { if (args[0] === 'git') calls.push(args[1] as string[]); return Reflect.apply(original, cp, args) }) as typeof execFileSync
+  syncBuiltinESMExports()
+  try {
+    await assert.rejects(analyzeCodeBehavior(input, async request => {
+      purposes.push(request.purpose)
+      assert.equal(request.purpose, 'code_behavior_analyze')
+      const frozen = readFrozenBehaviorContext<{ oldSource: [string, string][]; newSource: [string, string][]; authorBaseline: [string, string][]; verifiedDelivery: [string, string][]; composedFiles: [string, string][]; controlledBeforeFiles: [string, string][] }>(request)
+      assert.deepEqual(frozen.oldSource, expected)
+      assert.deepEqual(frozen.newSource, expected)
+      assert.deepEqual(frozen.authorBaseline, expected)
+      assert.deepEqual(frozen.composedFiles, expected)
+      assert.deepEqual(frozen.verifiedDelivery, [])
+      assert.deepEqual(frozen.controlledBeforeFiles, [])
+      throw stop
+    }), error => error === stop)
+  } finally { cp.execFileSync = original; syncBuiltinESMExports() }
+  assert.deepEqual(purposes, ['code_behavior_analyze'], '在首个Native请求处停止，不构造伪分析结果')
+  const treeReads = calls.filter(args => args.includes('ls-tree'))
+  const objectBatches = calls.filter(args => args.includes('cat-file') && args.includes('--batch')).length
+  t.diagnostic(JSON.stringify({ treeReads: treeReads.length, objectBatches }))
+  assert.equal(treeReads.length, 3, '原有两次verifySnapshot各自完整校验，六个角色的相同树只再完整读取一次')
+  assert.equal(objectBatches, 3, '相同tree的完整blob校验与读取仍只通过原batch机制执行')
+})
+
+test('行为分析按完整tree OID隔离角色并保留旧、新、交付及组合字节', async t => {
+  const f = await fixture(t)
+  writeFileSync(join(f.root, 'src/export.js'), `${f.source}\n// distinct frozen source tree\n`)
+  const input = await f.input(), baseline = input.baseline!
+  const trees = [baseline.sourceInput.immutableTree, input.snapshot.immutableTree, baseline.verifiedDelivery.immutableTree, input.composed.tree]
+  assert.notEqual(trees[0], trees[1])
+  const expected = (tree: string): [string, string][] => readTree(input.snapshot.source.commonDir, tree)
+    .filter(entry => input.plan.readPaths.some(path => entry.path === path || entry.path.startsWith(`${path}/`)) && !isHostPrivatePath(entry.path) && entry.mode !== '120000')
+    .flatMap(entry => {
+      const bytes = readObject(input.snapshot.source.commonDir, entry.oid)
+      return isUtf8Text(bytes) ? [[entry.path, bytes.toString('utf8')] as [string, string]] : []
+    })
+  const expectedViews = { oldSource: expected(trees[0]), newSource: expected(trees[1]), verifiedDelivery: expected(trees[2]), composedFiles: expected(trees[3]) }
+  const stop = new Error('stopped at first Native dispatch')
+  await assert.rejects(analyzeCodeBehavior(input, async request => {
+    assert.equal(request.purpose, 'code_behavior_analyze')
+    const frozen = readFrozenBehaviorContext<typeof expectedViews>(request)
+    for (const key of Object.keys(expectedViews) as (keyof typeof expectedViews)[]) assert.deepEqual(frozen[key], expectedViews[key])
+    throw stop
+  }), error => error === stop)
+})
+
+test('分析调用结束后缺失的同OID对象仍在下一次校验前失败且不派发Native', async t => {
+  const f = await fixture(t), prepared = await f.input(), composed = composeInputSnapshots(prepared.snapshot, null).composed!
+  const input: CodeBehaviorInput = { ...prepared, baseline: null, baselineSelection: undefined, composed, origin: 'initial' }
+  let firstDispatches = 0
+  const stop = new Error('stopped at first Native dispatch')
+  await assert.rejects(analyzeCodeBehavior(input, async () => { firstDispatches++; throw stop }), error => error === stop)
+  assert.equal(firstDispatches, 1)
+  const oid = readTree(input.snapshot.source.commonDir, input.snapshot.immutableTree).find(entry => entry.path === 'src/export.js')!.oid
+  const objectPath = join(input.snapshot.source.commonDir, 'objects', oid.slice(0, 2), oid.slice(2))
+  assert.ok(existsSync(objectPath), 'fixture blob应为可移除的loose object')
+  rmSync(objectPath)
+  let nextDispatches = 0
+  await assert.rejects(analyzeCodeBehavior(input, async () => { nextDispatches++; throw new Error('must not dispatch') }))
+  assert.equal(nextDispatches, 0, '下一次调用必须重新执行原始snapshot/OID校验')
+})
+
+test('selection替换只改变对应冻结角色，不污染共享同tree的其他角色', async t => {
+  const f = await fixture(t), path = 'src/export.js'
+  writeFileSync(join(f.root, path), `${f.source}\n// committed source version\n`)
+  git(f.root, 'add', path); git(f.root, 'commit', '-m', 'advance source after baseline')
+  const prepared = await f.input(), selection = freezeSelection(prepared.snapshot, [{ resource: { kind: 'path', path }, bytePair: prepared.baseline }])
+  const composed = composeInputSnapshots(prepared.snapshot, selection).composed!
+  const input: CodeBehaviorInput = { ...prepared, baseline: null, baselineSelection: selection, composed, origin: 'initial' }
+  assert.equal(input.snapshot.immutableTree, git(f.root, 'rev-parse', 'HEAD^{tree}'))
+  assert.equal(input.snapshot.immutableTree, input.composed.tree)
+  const stop = new Error('stopped at first Native dispatch')
+  await assert.rejects(analyzeCodeBehavior(input, async request => {
+    assert.equal(request.purpose, 'code_behavior_analyze')
+    const frozen = readFrozenBehaviorContext<{ oldSource: [string, string][]; newSource: [string, string][]; verifiedDelivery: [string, string][]; composedFiles: [string, string][] }>(request)
+    assert.equal(new Map(frozen.oldSource).get(path), f.source, 'selection的base只替换oldSource角色')
+    assert.equal(new Map(frozen.newSource).get(path), `${f.source}\n// committed source version\n`)
+    assert.equal(new Map(frozen.composedFiles).get(path), `${f.source}\n// committed source version\n`)
+    assert.equal(new Map(frozen.verifiedDelivery).get(path), f.source, 'verifiedDelivery仍使用其真实pair字节')
+    throw stop
+  }), error => error === stop)
 })
 
 test('分析及独审收到真实契约项正文，raw-only初始化不借未交付资源名虚构既有义务', async t => {
