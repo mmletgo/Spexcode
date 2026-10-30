@@ -103,7 +103,6 @@ test('controlled Claude compact boundaries preserve one original turn without gr
       ['visible new user', rows => { row(rows, 'summary-1').isVisibleInTranscriptOnly = false }],
       ['summary of another turn', rows => { row(rows, 'summary-1').summarizedTurnPromptUuids = ['foreign'] }],
       ['summary tool-result spoof', rows => { row(rows, 'summary-1').message = { role: 'user', content: replies[0].content } }],
-      ['substituted summary API blob', rows => { rows.find(item => item.type === 'api-request-blob')!.message = { role: 'user', content: 'another summary' } }],
       ['second real user', rows => { rows.splice(9, 0, { type: 'user', sessionId: 'session', uuid: 'another-user', parentUuid: 'summary-1', promptId: 'prompt', message: { role: 'user', content: [{ type: 'text', text: 'a new user instruction' }] } }) }],
       ['foreign preserved anchor', rows => { metadata(rows, 'compact-2').preservedMessages.anchorUuid = 'foreign' }],
       ['unknown preserved UUID', rows => { metadata(rows, 'compact-2').preservedMessages.allUuids[0] = 'foreign' }],
@@ -117,6 +116,15 @@ test('controlled Claude compact boundaries preserve one original turn without gr
       const bad = structuredClone(raw); mutate(bad)
       assert.throws(() => proveClaudeFrozenReads(ref, witness(bad)), name)
     }
+    const forged = structuredClone(raw), forgedBlob = forged.find(item => item.type === 'api-request-blob')!
+    forgedBlob.message = { role: 'user', content: 'another summary' }
+    forgedBlob.hash = claudeMessageDigest({ role: 'user', content: [{ type: 'text', text: 'another summary' }] })
+    forged.find(item => item.id === 'request-3')!.tail = [forgedBlob.hash]
+    const forgedWitness = witness(forged), parsedBlob = forgedWitness.history.find(item => item.type === 'api-request-blob')!
+    assert.equal(parsedBlob.hash, claudeMessageDigest(parsedBlob.message), 'the forged API blob has a valid recomputed canonical SHA')
+    assert.deepEqual(forgedWitness.history.find(item => item.id === 'request-3')!.tail, [parsedBlob.hash])
+    assert.equal(forgedWitness.history.find(item => item.uuid === 'preserved-head')!.requestRef, 'request-3')
+    assert.throws(() => proveClaudeFrozenReads(ref, forgedWitness), /Claude API string message is not an observed same-turn compact summary/)
     const partial = structuredClone(raw), partialInput = { ...inputs[1], endByte: 17 }
     const partialCall = row(partial, 'read-call-1').message as ClaudePublicMessage
     partialCall.content[0].input = partialInput
