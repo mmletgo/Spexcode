@@ -36,6 +36,8 @@ AC提案的非作者raw来源必须精确引用本次已校验facts；单独的�
 
 raw-only 空关联例外由程序从冻结输入判定：没有成对已验证基线，精确 selection 也没有任何非 null bytePair/intentPair，且旧/当前契约图均无稳定业务 ID。该情形真实 conflict/coverage_gap 同样允许空 affectedIds/ruleIds，保原分类、路径、证据、反例及程序生成的 finding 身份进入独审；批准分析不等于批准业务完成，由 [[sync-coordinator]] 显式阻塞尚无契约关联的已审发现。存在任一已验证基线或任一图有稳定 ID 时仍要求非空 affectedIds；未知 ID、非法 ruleId、路径和完整独审门禁保持。
 
+rawlessSpecPaths仅列出本轮changedPaths中的既有Spec节点：作者基准、当前source与composed必须逐字相同；有已验证基线时，verifiedDelivery也必须存在且逐字相同；无基线时delivery角色可以缺席。这些角色均不得含该节点raw，且不得存在当前裁决或生命周期写授权。对这些路径，分析只用facts/changes完整覆盖业务行为并交 [[sync-elaboration]] 初始化，必须保留原Spec字节且不产生任何resolution（包括content:null）；根/上游raw只作为只读上下文，不能填成该叶raw。真实作者/交付正文或raw差异、缺失的基准字节及显式裁决/生命周期授权不进入该列表，继续沿原相容整合、raw保真和逐项删除门禁处理。
+
 冻结 plan.sourcePaths 存在时，它是业务源码角色的唯一依据；同一角色判据约束未治理文件发现、新业务 newNodes 及后置业务归属门。可读/可写的纯测试正文不因 Python 文件名或 helper 形式变成业务源码；实际测试改动仍由 actualTreeDiff 纳入完整分析和独审，读取与写入授权及既有 JS 测试过滤不变。历史计划缺角色字段时保持原发现和归属语义，不从当前配置推断或修改其历史权限。
 
 拒绝诊断以 approved:false 的 JSON 保存当次完整 proposal、尚未批准的 analysis 和 review（在各阶段实际产生时），分列 missingPaths/missingChangeIds/unknownChangeIds、身份摘要或会话不一致、verdict 和 findings；路径错误仍保同次业务证据及反例。AC复合门禁给出目标类型、同一 allowed_change 中缺失的 affectedId、不支撑的 ruleIds、非法规则类型及 source 是否绑定。AC ruleIds 只列本次变化依据，其他未改 covers 义务保持；不得拼接多个 allowed_change 的并集授权。无治理代码归属验证按原判据一次收集全部缺失 disposition 的路径，在同一拒绝的 details.missingCodePaths 与 missingCodePathCount 中返回完整列表及数量；首项仍可作为摘要，任何一项遗漏仍拒绝，空初始化文件、newNodes 和真实 GAP 的门禁不变。既有 failure.message 进入下一轮 repairDiagnostics 供逐项修复，不重复嵌入整个冻结上下文；前轮提案、未通过的 accept 或伪造批准仅是数据，不能产生基线、授权或替代新独审。
