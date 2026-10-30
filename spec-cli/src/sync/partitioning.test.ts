@@ -456,6 +456,7 @@ test('analysis descendant evidence must be a target below the parent and bound t
   const root = { nodeId: 'interface-analysis', path: rootPath }, parent = { nodeId: 'controller', path: parentPath }
   const newLeaf = { nodeId: 'new-device', path: newLeafPath, rawSource: 'new device behavior' }
   const input = {
+    sourcePaths: ['src'],
     files: new Map([[rootPath, rawSpec(root.nodeId, [])], [parentPath, rawSpec(parent.nodeId, [])]]),
     contracts: [], nodes: [root, parent].map(target => ({ id: target.nodeId, path: target.path })), targets: [root, parent, newLeaf],
   }
@@ -470,6 +471,44 @@ test('analysis descendant evidence must be a target below the parent and bound t
   assert.equal(rawOnlyInterfaceSeedEvidence(input, parent, [{ ...accepted, sourcePaths: ['src/unrelated.ts'] }]), null)
   assert.equal(rawOnlyInterfaceSeedEvidence(input, parent, [{ ...accepted, path: '.spec/unrelated/new-device/spec.md' }]), null)
   assert.equal(rawOnlyInterfaceSeedEvidence(input, parent, [accepted, { ...accepted, sourcePartitionId: 'another-owner' }]), null)
+})
+
+test('a test-only descendant is not a frozen source implementation descendant', () => {
+  const rootPath = '.spec/interface-test-only/spec.md'
+  const parentPath = '.spec/interface-test-only/controller/spec.md'
+  const leafPath = '.spec/interface-test-only/controller/leaf/spec.md'
+  const root = { nodeId: 'interface-test-only', path: rootPath }
+  const parent = { nodeId: 'controller', path: parentPath }
+  const leaf = { nodeId: 'leaf', path: leafPath }
+  const input = {
+    sourcePaths: ['src'],
+    files: new Map([
+      [rootPath, rawSpec(root.nodeId, [])], [parentPath, rawSpec(parent.nodeId, [])],
+      [leafPath, rawSpec(leaf.nodeId, ['tests/leaf.test.ts'])], ['tests/leaf.test.ts', 'test leaf'],
+    ]),
+    contracts: [], nodes: [root, parent, leaf].map(target => ({ id: target.nodeId, path: target.path })),
+    targets: [root, parent, leaf],
+  }
+
+  assert.equal(rawOnlyInterfaceSeedEvidence(input, parent), null)
+
+  const relatedOnlyInput = {
+    ...input,
+    files: new Map(input.files),
+  }
+  relatedOnlyInput.files.set(leafPath, rawSpec(leaf.nodeId, [], ['src/leaf.ts']))
+  relatedOnlyInput.files.set('src/leaf.ts', 'related source context')
+  assert.equal(rawOnlyInterfaceSeedEvidence(relatedOnlyInput, parent), null)
+
+  const sourceInput = {
+    ...input,
+    files: new Map(input.files),
+  }
+  sourceInput.files.set(leafPath, rawSpec(leaf.nodeId, ['src/leaf.ts']))
+  sourceInput.files.set('src/leaf.ts', 'source implementation')
+  assert.deepEqual(rawOnlyInterfaceSeedEvidence(sourceInput, parent)?.descendants, [
+    { nodeId: leaf.nodeId, path: leafPath, codePaths: ['src/leaf.ts'] },
+  ])
 })
 
 test('an existing Contract, own code binding, absent source file, or unrelated source cannot create a pure-parent phase', () => {
