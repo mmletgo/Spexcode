@@ -26,3 +26,5 @@ stopWriter 验证物理暂停先持久化，当前观察/执行者停止，recei
 历史child种子在交付前由现有完整冻结契约检查断言零error，涵盖无状态FLOW/STEP/RULE及真实代码测试绑定。原node tombstone与REQ/FLOW/STEP/RULE/AC均进入真实已结算head；精确恢复后再运行普通源码编辑，检查旧退休pair不改且较新node/业务ID head保持可推进。错误receipt/operation、错误ID/路径及仅伪source均不授恢复权。
 
 完整恢复回归包含child自身VERIFY及种子前明确可信固定命令登记；正式恢复后直接读取node/VERIFY和业务head，必须绑定新receipt，再验证普通后继修改。
+
+明确 fixture 建立真实 Git 已结算 receipt 并采纳到原来源后，正式 commit-only 观察沿既有 baseline 消除回声：重复扫描无新 operation、无派发和模型调用；该种子不充当真实模型或 Docker 验收。writer-fencing 的旧 reader 拒绝断言跟随当前实际迁移代数，不固定过时的未来版本号。

@@ -39,7 +39,7 @@ export type SyncApplicationOptions = Partial<Pick<SyncCoordinatorOptions, 'runne
   runtimeDirectory?: string
   tools?: SyncCoordinatorOptions['tools']
 }
-type EnabledRecord = { registeredNodeIds?: string[]; version: 1; source: WorktreeIdentity; configDigest: string; enabledAtMs: number }
+type EnabledRecord = { registeredNodeIds?: string[]; version: 1; source: WorktreeIdentity; headCommit?: string; configDigest: string; enabledAtMs: number }
 type SavedTools = { tools: SyncCoordinatorOptions['tools']; runtimeDigest: string | null } & ({ version: 'sync-tools-v1' } | { version: 'sync-tools-v2'; model: string })
 function enabledSources(runtime: string): EnabledRecord[] {
   if (!existsSync(runtime)) return []
@@ -73,7 +73,7 @@ export class SyncApplication {
   private latestSnapshot: InputSnapshot | null = null
   private scopeCoverage = { includedNodeIds: [] as string[], contextNodeIds: [] as string[], missingNodeIds: [] as string[], excludedNodeIds: [] as string[], totalNodeCount: 0 }
   private readonly registeredNodes = new Set<string>()
-  private readonly observedPlans = new Map<string, { inputId: string; headsDigest: string; plan: SyncCoordinatorPlan; selection: FrozenBaselineSelection }>()
+  private readonly observedPlans = new Map<string, { direction: 'spec_to_code' | 'code_to_spec' | 'combined'; inputId: string; headsDigest: string; plan: SyncCoordinatorPlan; selection: FrozenBaselineSelection }>()
   private readonly observedDifferences = new Map<string, { key: string; changed: boolean; specChanged: boolean; codeChanged: boolean; latestDifferenceDigest: string }>()
   private routing: Promise<void> | null = null
   private readonly running = new Map<string, { controller: AbortController; finished: Promise<SyncCoordinatorResult> }>()
@@ -129,12 +129,12 @@ export class SyncApplication {
   }
   /** 仅授权当前已版本化配置；可选摘要防止用户阅读后配置已经被另一编辑者改变。 */
   async enable(expectedConfigDigest?: string): ReturnType<SyncApplication['readSettings']> {
-    const snapshot = await captureInputSnapshot(this.root), { configDigest, settings } = readSyncSettings(snapshot)
+    const snapshot = await captureInputSnapshot(this.root, { committed: true }), { configDigest, settings } = readSyncSettings(snapshot)
     if (expectedConfigDigest && expectedConfigDigest !== configDigest) throw new SyncApplicationError('sync_configuration_changed', '启用请求的配置摘要已过期')
     const nodes = await this.frozenNodes(snapshot)
     const roots = this.selectRegisteredNodes(nodes, settings, snapshot)
     if (!roots.length) throw new SyncApplicationError('sync_scope_unregistered', '没有受授权源码/测试治理的节点；新需求请在 sync.nodeIds 明确登记意图节点')
-    const record: EnabledRecord = { version: 1, source: snapshot.source, configDigest, enabledAtMs: Date.now(), registeredNodeIds: roots.map(node => node.id) }
+    const record: EnabledRecord = { version: 1, source: snapshot.source, headCommit: snapshot.headCommit, configDigest, enabledAtMs: Date.now(), registeredNodeIds: roots.map(node => node.id) }
     const temp = `${this.enabledPath}.${randomUUID()}`
     writeFileSync(temp, `${JSON.stringify(record)}\n`, { mode: 0o600, flag: 'wx' }); renameSync(temp, this.enabledPath)
     if (this.observerIdentity && this.observerIdentity.source.physicalFingerprint !== snapshot.source.physicalFingerprint) await this.stopService()
@@ -155,9 +155,10 @@ export class SyncApplication {
     }
     const snapshot = await captureInputSnapshot(this.root)
     const node = options.nodeId ? (await this.frozenNodes(snapshot)).find(node => node.id === options.nodeId) : null
-    const operations = await Promise.all(this.store.listOperations(snapshot.source.repositoryId, { sourceRoot: this.root, limit: options.limit ?? 30 })
+    const listed = this.store.listOperations(snapshot.source.repositoryId, { sourceRoot: this.root, limit: options.limit ?? 30 })
       .filter(operation => !options.nodeId || operation.scope.contractIds.includes(options.nodeId) || !!node && coveredPath(node.path, operation.scope.paths))
-      .map(operation => this.detail(operation, snapshot)))
+    const committed = listed.some(operation => operation.input.captureKind === 'commit') ? await captureInputSnapshot(this.root, { committed: true }) : null
+    const operations = await Promise.all(listed.map(operation => this.detail(operation, snapshot, committed ?? undefined)))
     return { settings: this.settingsFromSnapshot(snapshot), operations, observation: this.observationStatus(), sources: this.registeredSources() }
   }
   registeredSources(): { source: WorktreeIdentity; configDigest: string; registeredNodeIds: string[]; exists: boolean; watchOnline: boolean; health: PersistentObserverHealth | null; control: PhysicalControl; latest: SyncObservation | null }[] {
@@ -269,7 +270,7 @@ export class SyncApplication {
       await this.observer?.scanNow()
       await Promise.all([...this.running.values()].map(flight => flight.finished))
       await this.observer?.scanNow()
-      this.requireEnabled(await captureInputSnapshot(this.root))
+      this.requireEnabled(await captureInputSnapshot(this.root, { committed: true }))
       this.store.requestPhysicalControl(scope, 'run', current.revision)
       await this.observer?.scanNow()
       this.startNextDispatch()
@@ -280,7 +281,7 @@ export class SyncApplication {
     if (!this.ownsObservation()) return
     const registered = JSON.parse(readFileSync(this.enabledPath, 'utf8')) as EnabledRecord
     if (readPhysicalFingerprint(this.root, registered.source.gitDir) !== registered.source.physicalFingerprint) throw new SyncApplicationError('sync_source_changed', '输入工作树被删除重建或仓库身份变化，请明确重新启用')
-    const snapshot = await captureInputSnapshot(this.root)
+    const snapshot = await captureInputSnapshot(this.root, { committed: true })
     this.latestSnapshot = snapshot
     this.latestObservation = this.store.readLatestObservation(snapshot.source)
     if (!existsSync(this.enabledPath)) return
@@ -296,7 +297,7 @@ export class SyncApplication {
     for (const rootId of rootIds) this.registeredNodes.add(rootId)
     for (const nodeId of this.registeredNodes) await this.observeNode(snapshot, nodeId)
   }
-  private async freezeNodePlan(snapshot: InputSnapshot, nodeId: string, reuseObserved = false): Promise<{ plan: SyncCoordinatorPlan; selection: FrozenBaselineSelection }> {
+  private async freezeNodePlan(snapshot: InputSnapshot, nodeId: string, reuseObserved = false, direction: 'spec_to_code' | 'code_to_spec' | 'combined' = 'spec_to_code'): Promise<{ plan: SyncCoordinatorPlan; selection: FrozenBaselineSelection }> {
     const resourcesInStore = this.store.listBaselineResources(snapshot.source)
     let heads = this.store.readBaselineSelection(snapshot.source, resourcesInStore)
     if ('failure' in heads && heads.failure.code === 'SYNC_BASELINE_LEGACY_UNKNOWN') {
@@ -305,18 +306,18 @@ export class SyncApplication {
     }
     if ('failure' in heads) throw Object.assign(new SyncApplicationError(heads.failure.code, heads.failure.message), { syncFailure: heads.failure })
     const headsDigest = contentHash(JSON.stringify({ resources: resourcesInStore, selection: heads.selection.digest }))
-    const cached = reuseObserved ? this.observedPlans.get(nodeId) : null
-    if (cached?.inputId === snapshot.id && cached.headsDigest === headsDigest) return { plan: structuredClone(cached.plan), selection: cached.selection }
-    const discoverySelection = heads.selection
-    const provisional = await buildSyncApplicationPlan(snapshot, nodeId, heads.selection, { discoverySelection })
+    const cacheKey = `${nodeId}:${direction}`, cached = reuseObserved ? this.observedPlans.get(cacheKey) : null
+    if (cached?.inputId === snapshot.id && cached.headsDigest === headsDigest && cached.direction === direction) return { plan: structuredClone(cached.plan), selection: cached.selection }
+    const discoverySelection = heads.selection, planningOptions = { discoverySelection, direction }
+    const provisional = await buildSyncApplicationPlan(snapshot, nodeId, heads.selection, planningOptions)
     const resources = await deriveSyncBaselineResources(snapshot, provisional, heads.selection)
     const selected = this.store.readBaselineSelection(snapshot.source, resources)
     if ('failure' in selected) throw Object.assign(new SyncApplicationError(selected.failure.code, selected.failure.message), { syncFailure: selected.failure })
-    const selectedPlan = await buildSyncApplicationPlan(snapshot, nodeId, selected.selection, { discoverySelection })
+    const selectedPlan = await buildSyncApplicationPlan(snapshot, nodeId, selected.selection, planningOptions)
     const exact = this.store.readBaselineSelection(snapshot.source, await deriveSyncBaselineResources(snapshot, selectedPlan, selected.selection))
     if ('failure' in exact) throw Object.assign(new SyncApplicationError(exact.failure.code, exact.failure.message), { syncFailure: exact.failure })
-    const plan = await buildSyncApplicationPlan(snapshot, nodeId, exact.selection, { discoverySelection })
-    if (reuseObserved) this.observedPlans.set(nodeId, { inputId: snapshot.id, headsDigest, plan: structuredClone(plan), selection: exact.selection })
+    const plan = await buildSyncApplicationPlan(snapshot, nodeId, exact.selection, planningOptions)
+    if (reuseObserved) this.observedPlans.set(cacheKey, { direction, inputId: snapshot.id, headsDigest, plan: structuredClone(plan), selection: exact.selection })
     return { plan, selection: exact.selection }
   }
   private observationChanges(snapshot: InputSnapshot, plan: SyncCoordinatorPlan, selection: FrozenBaselineSelection, evidence: SelectedCompositionEvidence): { changed: boolean; specChanged: boolean; codeChanged: boolean; readonlyContext: { path: string; oid: string | null; mode: string | null }[] } {
@@ -350,6 +351,15 @@ export class SyncApplication {
     })
     return { changed: changedPaths.length > 0 || residualPaths.length > 0 || intentChanged || contextChanged, specChanged: intentChanged || changedPaths.some(path => path.path.startsWith('.spec/')), codeChanged: contextChanged || changedPaths.some(path => !path.path.startsWith('.spec/')) || residualPaths.some(path => !path.startsWith('.spec/')), readonlyContext }
   }
+  private committedOrigin(snapshot: InputSnapshot, nodeId: string, plan: SyncCoordinatorPlan): SyncOperation['origin'] | null {
+    const prior = this.store.listOperations(snapshot.source.repositoryId, { sourceRoot: this.root, limit: 500 }).find(operation => operation.input.captureKind === 'commit' && JSON.stringify(operation.input.source) === JSON.stringify(snapshot.source) && operation.ingressKey.startsWith('observation:') && this.operationPlan(operation).intentNodeId === nodeId)
+    if (prior?.input.headCommit === snapshot.headCommit) return prior.origin
+    const base = prior?.input.headCommit ?? this.enabled(snapshot)?.headCommit ?? snapshot.headCommit
+    if (!prior && base === snapshot.headCommit) return 'initial'
+    const paths = objectGit(snapshot.source.commonDir, ['diff', '--name-only', '-z', '--no-renames', base, snapshot.headCommit]).toString('utf8').split('\0').filter(Boolean).filter(path => coveredPath(path, [...plan.executionScope!.paths, ...plan.readPaths]))
+    const spec = paths.some(isSyncSpecPath), code = paths.some(path => !path.startsWith('.spec/'))
+    return spec && code ? 'combined' : code ? 'code' : spec ? 'spec' : null
+  }
   private async observeNode(snapshot: InputSnapshot, nodeId: string): Promise<void> {
     const { settings, configDigest } = readSyncSettings(snapshot)
     const model = syncModel(settings)
@@ -357,7 +367,12 @@ export class SyncApplication {
     const control = this.store.readPhysicalControl(this.physicalScope(snapshot.source))
     let selection: FrozenBaselineSelection | null = null
     try {
-      const frozen = await this.freezeNodePlan(snapshot, nodeId, true), plan = frozen.plan
+      let frozen = await this.freezeNodePlan(snapshot, nodeId, true)
+      const origin = snapshot.captureKind === 'commit' ? this.committedOrigin(snapshot, nodeId, frozen.plan) : null
+      const hasImplementation = verifySnapshot(snapshot).some(entry => entry.mode !== '120000' && coveredPath(entry.path, settings.sourcePaths) && coveredPath(entry.path, frozen.plan.readPaths))
+      const direction = origin === 'combined' ? 'combined' : origin === 'code' || origin === 'initial' && hasImplementation ? 'code_to_spec' : 'spec_to_code'
+      if (direction !== 'spec_to_code') frozen = await this.freezeNodePlan(snapshot, nodeId, true, direction)
+      const plan = frozen.plan
       selection = frozen.selection
       const differenceKey = `${snapshot.id}:${selection.digest}:${syncPlanDigest(plan)}`
       let cachedDifference = this.observedDifferences.get(nodeId)
@@ -372,11 +387,12 @@ export class SyncApplication {
       const { changed, specChanged, codeChanged, latestDifferenceDigest } = cachedDifference
       const observation = { input: snapshot, configRef, selection, latestDifferenceDigest }
       const previouslyAdmitted = this.store.listObservations(snapshot.source).some(prior => prior.operationId && ['admitted', 'coalesced', 'duplicate'].includes(prior.outcome) && prior.configRef.sha256 === configRef.sha256 && prior.latestDifferenceDigest === latestDifferenceDigest)
-      if (!changed || control.control === 'pause' || previouslyAdmitted) {
+      const ingressKey = snapshot.captureKind === 'commit' ? `observation:${snapshot.source.repositoryId}:${snapshot.id}:${nodeId}` : `observation:${snapshot.source.repositoryId}:${snapshot.id}:${nodeId}:${latestDifferenceDigest}`
+      const observedOrigin = snapshot.captureKind === 'commit' ? origin : !selection.bindings.some(binding => ('bytePair' in binding ? binding.bytePair : binding.intentPair)) ? 'initial' : specChanged && codeChanged ? 'combined' : codeChanged ? 'code' : 'spec'
+      if (!changed || !observedOrigin || control.control === 'pause' || previouslyAdmitted || this.store.findOperationByIngressKey(ingressKey)) {
         this.latestObservation = this.store.recordObservation(observation, { controlRevision: control.revision, selectionDigest: selection.digest }); return
       }
-      const ingressKey = `observation:${snapshot.source.repositoryId}:${snapshot.id}:${nodeId}:${latestDifferenceDigest}`
-      const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: ingressKey, origin: !selection.bindings.some(binding => ('bytePair' in binding ? binding.bytePair : binding.intentPair)) ? 'initial' : specChanged && codeChanged ? 'combined' : codeChanged ? 'code' : 'spec', ...syncModelBinding(model), budget: settings.budget, managedRoot: this.managedRoot, baselineSelection: selection })
+      const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: ingressKey, origin: observedOrigin, ...syncModelBinding(model), budget: settings.budget, managedRoot: this.managedRoot, baselineSelection: selection })
       if (!this.ownsObservation()) return
       this.prepareTools(ingressKey, this.store.findOperationByIngressKey(ingressKey), model)
       const result = this.store.observeAndAdmit(observation, admission, { controlRevision: control.revision, selectionDigest: selection.digest })
@@ -398,7 +414,9 @@ export class SyncApplication {
     catch (error) { return { eligible: false, reason: { code: error instanceof SyncApplicationError ? error.code : 'sync_retry_plan_unavailable', message: error instanceof Error ? error.message : String(error) } } }
     return eligibility
   }
-  private async detail(operation: SyncOperation, snapshot: InputSnapshot): Promise<SyncOperationDetail> {
+  private async detail(operation: SyncOperation, snapshot: InputSnapshot, committedSnapshot?: InputSnapshot): Promise<SyncOperationDetail> {
+    const currentSnapshot = operation.input.captureKind === 'commit' && snapshot.captureKind !== 'commit' && existsSync(this.root) ? committedSnapshot ?? await captureInputSnapshot(this.root, { committed: true }) : snapshot
+    const sourceSnapshot = snapshot.captureKind === 'commit' && existsSync(this.root) ? await captureInputSnapshot(this.root) : snapshot
     let executionAvailability: SyncOperationDetail['executionAvailability']
     try { this.executionInputs(operation); executionAvailability = { status: 'ready' } }
     catch (error) { executionAvailability = { status: 'recovery_required', failure: { code: 'sync_execution_metadata_unavailable', message: error instanceof Error ? error.message : String(error) } } }
@@ -408,11 +426,11 @@ export class SyncApplication {
     const available = existsSync(this.root) && executionAvailability.status === 'ready'
     const plan = available ? this.operationPlan(operation) : null
     let landing = { sourceSynced: false, canonicalSynced: false, phase: operation.phase }
-    try { if (available) landing = readSyncLandingStatus(operation, snapshot, journals, { canonicalBranch: `refs/heads/${readConfig(this.root).mainBranch?.trim() || 'main'}`, readPaths: plan!.readPaths }) }
+    try { if (available) landing = readSyncLandingStatus(operation, sourceSnapshot, journals, { canonicalBranch: `refs/heads/${readConfig(this.root).mainBranch?.trim() || 'main'}`, readPaths: plan!.readPaths }) }
     catch (error) { executionAvailability = { status: 'recovery_required', failure: { code: 'sync_delivery_evidence_invalid', message: error instanceof Error ? error.message : String(error) } } }
-    const currentness = available && !landing.sourceSynced ? await isSyncInputCurrent(operation, snapshot, plan!) : undefined
+    const currentness = available && !landing.sourceSynced ? await isSyncInputCurrent(operation, currentSnapshot, plan!) : undefined
     const current = available && (landing.sourceSynced || currentness)
-    return { operation: landing.phase === operation.phase ? operation : { ...operation, phase: landing.phase }, physicalControl: this.store.readPhysicalControl(this.physicalScope(operation.input.source)), decisionContext: existsSync(operation.input.source.commonDir) ? this.decisionContext(operation) : null, attempt: operation.currentAttemptId ? this.store.readAttempt(operation.currentAttemptId) : null, journals, resources, stale: !current, sourceSynced: landing.sourceSynced, canonicalSynced: landing.canonicalSynced, adoptionEligibility: await this.adoptionEligibility(operation, snapshot), revertEligibility: await this.revertEligibility(operation, snapshot, journals, resources), retryEligibility: await this.retryEligibility(operation, snapshot, currentness), decisionEligibility: this.store.readDecisionEligibility(operation.id), executionAvailability }
+    return { operation: landing.phase === operation.phase ? operation : { ...operation, phase: landing.phase }, physicalControl: this.store.readPhysicalControl(this.physicalScope(operation.input.source)), decisionContext: existsSync(operation.input.source.commonDir) ? this.decisionContext(operation) : null, attempt: operation.currentAttemptId ? this.store.readAttempt(operation.currentAttemptId) : null, journals, resources, stale: !current, sourceSynced: landing.sourceSynced, canonicalSynced: landing.canonicalSynced, adoptionEligibility: await this.adoptionEligibility(operation, sourceSnapshot), revertEligibility: await this.revertEligibility(operation, sourceSnapshot, journals, resources), retryEligibility: await this.retryEligibility(operation, currentSnapshot, currentness), decisionEligibility: this.store.readDecisionEligibility(operation.id), executionAvailability }
   }
   private async adoptionPlan(operation: SyncOperation, snapshot: InputSnapshot): Promise<SourceAdoptionPlan> {
     try {
@@ -538,10 +556,10 @@ export class SyncApplication {
     if (input.retryOf !== undefined && (typeof input.retryOf !== 'string' || !input.retryOf.trim())) throw new SyncApplicationError('sync_retry_invalid', '显式重试需要完整旧 operation ID', 400)
     if (input.retryOf && input.patch) throw new SyncApplicationError('sync_retry_changed', '显式重试沿用原正文意图；新的正文修改请发起新请求', 400)
     if (input.origin !== undefined && !['spec', 'initial', 'code', 'combined'].includes(input.origin) && !(input.retryOf && input.origin === 'decision')) throw new SyncApplicationError('sync_origin_unsupported', '输入来源必须为 spec、initial、code 或 combined', 400)
-    let snapshot = await captureInputSnapshot(this.root)
+    const retry = input.retryOf ? this.store.readOperation(input.retryOf) : null
+    let snapshot = await captureInputSnapshot(this.root, { committed: retry?.input.captureKind === 'commit' })
     this.requireEnabled(snapshot)
     await this.requireNodeAuthorized(snapshot, input.nodeId)
-    const retry = input.retryOf ? this.store.readOperation(input.retryOf) : null
     if (retry) {
       this.assertSource(retry)
       const eligibility = await this.retryEligibility(retry, snapshot)
@@ -557,13 +575,15 @@ export class SyncApplication {
       const prior = this.store.findOperationByIngressKey(ingressKey), ingress = this.store.findIngressReceipt(ingressKey)
       const model = input.model ?? syncModel(prior ?? retry ?? settings)
       if (prior?.baselineSelection) {
+        if (prior.input.captureKind === 'commit' && snapshot.captureKind !== 'commit') snapshot = await captureInputSnapshot(this.root, { committed: true })
         this.requireEnabled(snapshot, prior)
         if (!await isSyncInputCurrent(prior, snapshot, this.operationPlan(prior))) throw new SyncStoreError('SYNC_IDEMPOTENCY_CONFLICT', ingressKey)
         snapshot = ingress?.input ?? prior.input
       }
       const previousBaselinePair = prior ? (ingress ?? prior).previousBaselinePair : retry ? retry.previousBaselinePair : null
       const oldSelection = (ingress ?? prior)?.baselineSelection ?? retry?.baselineSelection
-      const frozen = oldSelection ? { plan: this.operationPlan(prior ?? retry!), selection: oldSelection } : prior || retry ? null : await this.freezeNodePlan(snapshot, input.nodeId)
+      const direction = origin === 'combined' ? 'combined' : origin === 'code' || origin === 'initial' && verifySnapshot(snapshot).some(entry => entry.mode !== '120000' && coveredPath(entry.path, settings.sourcePaths)) ? 'code_to_spec' : 'spec_to_code'
+      const frozen = oldSelection ? { plan: this.operationPlan(prior ?? retry!), selection: oldSelection } : prior || retry ? null : await this.freezeNodePlan(snapshot, input.nodeId, false, direction)
       const plan = frozen?.plan ?? this.operationPlan((prior ?? retry)!)
       if (prior && input.nodeId !== plan.intentNodeId) throw new SyncStoreError('SYNC_IDEMPOTENCY_CONFLICT', ingressKey)
       if (retry && (origin !== retry.origin || syncPlanDigest(plan) !== retry.policyDigest)) throw new SyncApplicationError('sync_retry_changed', '显式重试必须沿用原来源和授权计划；新的输入请发起新请求')
@@ -680,7 +700,7 @@ export class SyncApplication {
   async decide(input: SyncDecisionInput): Promise<{ changed: true; operation: SyncOperation }> {
     if (!input || typeof input.operationId !== 'string') throw new SyncApplicationError('sync_decision_invalid', '裁决需要原 operation ID', 400)
     const original = this.store.readOperation(input.operationId); this.assertSource(original)
-    const current = await captureInputSnapshot(this.root); this.requireEnabled(current, original)
+    const current = await captureInputSnapshot(this.root, { committed: original.input.captureKind === 'commit' }); this.requireEnabled(current, original)
     if (!await isSyncInputCurrent(original, current, this.operationPlan(original)) || input.inputId !== original.input.id) throw new SyncApplicationError('sync_decision_stale', '原输入已变化，不能对旧分歧裁决')
     const snapshot = original.baselineSelection ? original.input : current
     const context = this.decisionContext(original)
@@ -760,7 +780,7 @@ export class SyncApplication {
     const { settings } = readSyncSettings(operation.input)
     let advance = false
     const finished = runSyncOperation(this.store, id, { plan, ...(recoveryOnly ? { recoveryOnly: true } : {}), readCurrentPlan: async () => {
-      const current = await captureInputSnapshot(this.root); this.requireEnabled(current, operation)
+      const current = await captureInputSnapshot(this.root, { committed: operation.input.captureKind === 'commit' }); this.requireEnabled(current, operation)
       return plan
     }, managedRoot: this.managedRoot, artifactRoot: this.artifactRoot, tools, runner: this.options.runner, verificationDriver: this.options.verificationDriver, signal: controller.signal, callTimeoutMs: settings.callTimeoutMs }).then(result => { advance = !recoveryOnly && result.status !== 'busy' && result.operation.phase !== 'queued'; return result }).finally(() => {
       this.running.delete(id)
@@ -798,7 +818,7 @@ export class SyncApplication {
       if (result.status === 'recovery_required') throw new SyncApplicationError('sync_resources_unsettled', '已有资源或交付日志尚未确认结算，请查询实际记录后继续恢复')
     } else if (action === 'resume') {
       await this.running.get(id)?.finished
-      const current = await captureInputSnapshot(this.root); this.requireEnabled(current, operation)
+      const current = await captureInputSnapshot(this.root, { committed: operation.input.captureKind === 'commit' }); this.requireEnabled(current, operation)
       if (!await isSyncInputCurrent(operation, current, this.operationPlan(operation))) throw new SyncApplicationError('sync_input_stale', '恢复输入已变化，请为最新 Spec 发起新操作')
       this.store.requestControl(id, 'run')
       this.start(id)

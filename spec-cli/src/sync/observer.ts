@@ -20,7 +20,7 @@ export type SyncObserverOptions = {
   watchFactory?: TreeWatcherOptions['watchFactory']
 }
 
-/** 服务持有观察器；事件合并只减少突发扫描，不丢扫描期间的最后一次保存。 */
+/** 服务持有观察器；仅 Git 提交引用事件加速扫描，不丢扫描期间的最后一次提交。 */
 export class SyncInputObserver {
   private rootFingerprint: string | null = null
   private watchers: TreeWatcherRegistry[] = []
@@ -44,13 +44,13 @@ export class SyncInputObserver {
     if (!existsSync(this.options.root)) { this.report('missing', { code: 'sync_source_missing', message: '已注册输入工作树不存在，等待补偿扫描确认恢复' }); return }
     const stat = statSync(this.options.root)
     this.rootFingerprint = `${stat.dev}:${stat.ino}`
-    const paths = [...new Set([this.options.root, this.options.gitDir, this.options.commonDir, join(this.options.commonDir, 'refs')])]
+    const paths = [...new Set([this.options.gitDir, this.options.commonDir, join(this.options.commonDir, 'refs')])]
     for (const root of paths) {
-      const sourceTree = root === this.options.root, refsTree = root === join(this.options.commonDir, 'refs')
+      const refsTree = root === join(this.options.commonDir, 'refs')
       if (refsTree && !existsSync(root)) continue
       const watcher = new TreeWatcherRegistry({
-        root, source: `sync:${root}`, scope: 'full', recursive: sourceTree || refsTree,
-        ignore: path => sourceTree ? path.split(/[\\/]/).some(part => ['.git', 'node_modules', '.worktrees', '.codex', '.claude'].includes(part)) : refsTree ? path === 'spex-sync' || path.startsWith('spex-sync/') : !['HEAD', 'index', 'packed-refs', 'config'].includes(path),
+        root, source: `sync:${root}`, scope: 'full', recursive: refsTree,
+        ignore: path => refsTree ? path === 'spex-sync' || path.startsWith('spex-sync/') : !['HEAD', 'packed-refs', 'config'].includes(path),
         watchFactory: this.options.watchFactory,
         onInput: () => this.schedule(),
         onFailure: error => { this.watchFailure = error; this.report('degraded', { code: 'sync_watch_failed', message: error.message }); this.schedule() },

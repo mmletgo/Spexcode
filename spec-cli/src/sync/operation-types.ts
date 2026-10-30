@@ -15,6 +15,8 @@ export type InputSnapshot = {
   /** 内容与物理身份形成稳定 ID；采集时间不参与。 */
   id: string
   source: WorktreeIdentity
+  /** 缺字段为历史工作区采集；commit 固定已提交 HEAD tree。 */
+  captureKind?: 'commit'
   headCommit: string
   immutableTree: string
   indexTree: string

@@ -18,7 +18,7 @@ code:
 
 本节点落实 [[sync-product-controls]] 的 P2 应用入口与 P3 手动代码意图/裁决；P4 外部 watcher由本服务实现，完整恢复矩阵与P5最终验收由上层保留。生产 configuredSyncApplication 复用后端同仓库的 canonical session protocol，按已注册 source 工作树实例化，不创建其它数据库或队列，迁移先备份。运行资料及固定 compiled CLI 位于源码外当前用户拥有的独占 0700 runtime。
 
-enable 读取 [[sync-application-settings]]，可用预期配置摘要检查并发变化；只原子保存本机授权记录，不改版本化配置。配置或 source 物理身份改变拒旧授权；重新启用是本阶段的授权入口。启用展示输入身份、交付根、授权范围、预算及 Spec/initial/code/combined、Docker Node test 能力，后台外部监听由正式service lifecycle启动。
+enable 从已提交 HEAD 读取 [[sync-application-settings]]，可用预期配置摘要检查并发变化；只原子保存本机授权记录，不改版本化配置。配置或 source 物理身份改变拒旧授权；重新启用是本阶段的授权入口。启用展示输入身份、交付根、授权范围、预算及 Spec/initial/code/combined、Docker Node test 能力，后台外部监听由正式service lifecycle启动。
 
 readSettings.activation 区分 disabled、enabled 与 invalidated：未有本机启用记录是 disabled；记录存在且当前身份/配置摘要一致是 enabled；已启用后配置删除、坏格式、越界授权、身份或摘要失配是 invalidated，并保留具体 configurationError。enabled:false 不等于用户关闭同步，invalidated 正文保存必须拒绝，不能降级为普通 Spec 独立提交。
 
@@ -61,7 +61,7 @@ adopt_behavior/new_rule由用户选择冻结新facts与intent raw，保留旧raw
 
 detail始终提供required decisionEligibility查询投影，直接读取store同一资格判定，供UI/CLI与decide/admission共用阶段、attempt及资源结算事实；它不替代current input、analysis/finding、固定runtime与stale护栏，不是新的持久或模型协议事实。partial ready生成失败或预算耗尽后，原needs_input业务原因继续保留事实裁决入口；活动P1/生成/写入仍不能由early reason取得裁决权。
 
-P4 的正式服务生命周期持有 [[sync-input-observer]]，不依赖浏览器/SSE。enable 继续绑定明确 config 摘要与完整 source 身份；服务启动仅恢复已有 enable 记录，不通过发现新目录或分支授予权限。HTTP/CLI automatic pause/resume 按 repositoryId/canonicalRoot/physicalFingerprint 的物理控制管理，跨branch暂停保留；operation pause/cancel/recover保持独立语义。暂停仍采集不可变 snapshot 和逐资源差异，恢复先扫描最新输入再开放准入，旧候选不能继续覆盖新输入。自动接入在事务外对同一个snapshot构造plan、exactbaseline selection及作者差量，在store同一事务绑定control revision/selection/input；planning失败也记录真实观测，不假造完成。配置/branch身份变化使观察诊断可见，不自动重新enable。status.observation返回实际服务健康、物理控制、latestsnapshot/差异及registeredNodes，offline不能由旧记录冒充online。服务关停回收自身watcher和timer，并在安全边界结算已开始执行。
+P4 的正式服务生命周期持有 [[sync-input-observer]]，不依赖浏览器/SSE。enable 继续绑定明确 config 摘要与完整 source 身份；服务启动仅恢复已有 enable 记录，不通过发现新目录或分支授予权限。HTTP/CLI automatic pause/resume 按 repositoryId/canonicalRoot/physicalFingerprint 的物理控制管理，跨branch暂停保留；operation pause/cancel/recover保持独立语义。暂停仍采集已提交 HEAD 的不可变 snapshot 和逐资源差异，恢复先扫描最新输入再开放准入，旧候选不能继续覆盖新输入。自动接入在事务外对同一个snapshot构造plan、exactbaseline selection及作者差量，在store同一事务绑定control revision/selection/input；planning失败也记录真实观测，不假造完成。配置/branch身份变化使观察诊断可见，不自动重新enable。status.observation返回实际服务健康、物理控制、latestsnapshot/差异及registeredNodes，offline不能由旧记录冒充online。服务关停回收自身watcher和timer，并在安全边界结算已开始执行。
 
 注册意图由版本化nodeIds限定，父/子重复登记只扫描一次最外明确意图；其实际子树/影响闭包由既有node与图派生。省略nodeIds仅注册真实治理授权源码/测试的意图，纯raw新功能需明确意图根。status.observation.coverage列included/excluded/total，未知或未授权节点不产生虚假已覆盖结果。
 
@@ -106,3 +106,11 @@ revert 将精确历史恢复 Spec 作为可信目标，保原节点/业务 ID �
 已存在或备份固定运行描述先核精确期望模型，再允许admission。未受理请求留下的原描述若与后续选择不符，明确早拒，不新建operation/receipt/FIFO且不静默重建；匹配原描述的合法显式retry或新请求仍沿既有入口。
 
 新手动 run/verify operation 可显式选择模型以覆盖项目默认；省略模型时，同 request 的 prior 或显式 retry 的原模型优先于当前版本化配置 `sync.model`，无 prior/retry 才使用项目值或历史默认 sol。同 request 改模型拒绝，普通重复不能用模型变化重置预算。自动观察、decide 与 revert 新 operation 从同一快照配置绑定模型，admission、固定运行描述与真实 runner request 使用相同精确值。配置变化继续由授权/configDigest/currentness 门禁处理，不重开旧操作或重置预算。
+
+Dashboard 的受控正文保存继续直接 submit，requestBlob 即时触发 spec→code，不等待 Git 提交。外部编辑器的 Spec/代码保存、原子替换与 git add 均不启动自动模型；自动观察只接受已提交 HEAD tree，首次显式 enable 可从既有 committed HEAD 发起 initial，同期未提交或未暂存的新编辑不混入。enable 仅授权已提交配置及意图，记录可选 headCommit 作为首次纳管的提交基点。
+
+后续自动输入依据该节点最近自动接入的 committed HEAD（首次未接入时为 enable 基点）到当前 HEAD 的真实相关提交差量区分 spec/code/combined；停机多次提交仍按累计已提交差量分类。仅提交无关路径或空提交不启动模型。code 冻结 code_to_spec、combined 冻结 combined；initial 有已提交授权实现时冻结 code_to_spec，否则与 Spec 保存相同冻结 spec_to_code。沿同一 plan/selection 规划，不复制执行器或分区政策。
+
+自动 ingress 固定到提交快照与节点，同一 commit 重放不因 baseline 或差异证据推进而重新派发；已结算 receipt/baseline 继续按真实意图消费和采纳证明消除同步自身交付/采纳提交的回声，不按 Git author 或 session trailer 猜测作者。停机提交在 service 启动及周期补偿中继续发现。新 commit 沿既有作用域、物理控制和预算族门禁，不新增触发配置开关。
+
+自动 operation 的 detail 当前性、retry、decide、resume 与运行前可信配置复核均按其 input.captureKind 采集同模式当前输入；旧无标记工作区操作保持原判据。status 的原树落地投影与 adoptionEligibility/adopt 仍读取真实工作文件及 index，未提交编辑不能因 commit snapshot 而获得覆盖或采纳资格。

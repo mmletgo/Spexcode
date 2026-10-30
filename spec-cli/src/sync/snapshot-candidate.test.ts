@@ -73,6 +73,39 @@ for (const format of ['sha1', 'sha256'] as const) {
   })
 }
 
+test('已提交快照只读HEAD tree且身份不受未提交、暂存或并发保存影响，历史快照身份仍可验证', async t => {
+  const root = repo(t), clean = await captureInputSnapshot(root), committed = await captureInputSnapshot(root, { committed: true })
+  assert.equal(committed.captureKind, 'commit')
+  assert.notEqual(committed.id, clean.id, '采集语义必须参与身份')
+  assert.equal(committed.immutableTree, git(root, 'rev-parse', 'HEAD^{tree}'))
+  assert.equal(committed.indexTree, committed.immutableTree)
+  assert.equal(committed.indexDigest, contentHash(committed.indexTree))
+  writeFileSync(join(root, 'file.ts'), 'staged author bytes\n'); git(root, 'add', 'file.ts')
+  writeFileSync(join(root, 'file.ts'), 'unstaged author bytes\n'); writeFileSync(join(root, 'new.ts'), 'untracked author bytes\n')
+  const index = readFileSync(join(root, '.git/index'))
+  let observations = 0
+  const same = await captureInputSnapshot(root, { committed: true, onObservation: () => { observations++; writeFileSync(join(root, 'file.ts'), `concurrent ${observations}\n`); git(root, 'add', 'new.ts') } })
+  assert.equal(observations, 1); assert.equal(same.id, committed.id)
+  assert.equal(files(same).get('file.ts'), files(clean).get('file.ts')); assert.equal(files(same).has('new.ts'), false)
+  assert.notDeepEqual(readFileSync(join(root, '.git/index')), index, '只有夹具主动stage改变了用户index')
+  assert.doesNotThrow(() => verifySnapshot(clean)); assert.doesNotThrow(() => verifySnapshot(same))
+  assert.throws(() => verifySnapshot({ ...same, captureKind: undefined }), /身份摘要/)
+  git(root, 'commit', '-m', 'committed input')
+  const next = await captureInputSnapshot(root, { committed: true })
+  assert.notEqual(next.id, committed.id); assert.equal(files(next).get('file.ts'), 'staged author bytes\n')
+  assert.equal(files(next).get('new.ts'), 'untracked author bytes\n')
+  assert.equal(readFileSync(join(root, 'file.ts'), 'utf8'), 'concurrent 1\n')
+})
+
+test('已提交快照在HEAD切换期间重试，未提交index冲突不进入提交输入', async t => {
+  const root = repo(t), old = git(root, 'rev-parse', 'HEAD')
+  writeFileSync(join(root, 'file.ts'), 'next commit\n'); git(root, 'add', '.'); git(root, 'commit', '-m', 'next')
+  const next = git(root, 'rev-parse', 'HEAD'); git(root, 'reset', '--soft', old)
+  let attempts = 0
+  const input = await captureInputSnapshot(root, { committed: true, onObservation: () => { if (++attempts === 1) git(root, 'update-ref', 'refs/heads/main', next) } })
+  assert.equal(attempts, 2); assert.equal(input.headCommit, next); assert.equal(files(input).get('file.ts'), 'next commit\n')
+})
+
 test('缺失用户index和空树仍真实采集，批处理不创建用户index', async t => {
   const root = repo(t), index = join(root, '.git/index')
   rmSync(index)

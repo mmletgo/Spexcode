@@ -154,6 +154,7 @@ test('新手动操作采用各项目版本化默认模型，显式模型优先�
     await assert.rejects(firstProject.application.submit({ nodeId: 'demo', requestId: 'model-config-change' }), /配置已变化/)
     assert.equal(firstProject.application.store.readOperation(first.id).model, 'claude:MiniMax-M3')
     assert.deepEqual(firstProject.application.store.readOperation(first.id).budget, first.budget)
+    firstProject.git(['add', '.spec/spexcode.json']); firstProject.git(['commit', '-qm', 'authorize model configuration'])
     await firstProject.application.enable()
     const explicit = (await firstProject.application.submit({ nodeId: 'demo', requestId: 'fresh-explicit-override', model: 'gpt-6.1-terra' })).operation!
     assert.equal(explicit.model, 'gpt-6.1-terra')
@@ -172,6 +173,7 @@ test('自动观察准入、固定工具描述和真实runner请求使用同一�
     await f.application.startService({ compensationMs: 40, debounceMs: 5 })
     const initial = f.application.observationStatus().latestSnapshot!.id
     writeFileSync(join(f.root, 'src/demo.mjs'), 'export const demo = text => `automatic:${text}`\n')
+    f.git(['add', '.']); f.git(['commit', '-qm', 'automatic model input'])
     await observeUntil(() => f.application.observationStatus().latestSnapshot?.id !== initial)
     await f.application.automaticControl('resume')
     await observeUntil(() => f.calls.length === 1)
@@ -192,8 +194,10 @@ test('AC-APPLICATION-01 缺少可信配置明确拒绝，现有配置启用CAS�
   try {
     writeFileSync(join(f.root, '.spec', 'spexcode.json'), '{}')
     assert.equal((await f.application.readSettings()).configurationError?.code, 'sync_configuration_invalid')
+    f.git(['add', '.spec/spexcode.json']); f.git(['commit', '-qm', 'invalid committed configuration'])
     await assert.rejects(f.application.enable(), /配置缺口/)
     writeFileSync(join(f.root, '.spec', 'spexcode.json'), JSON.stringify({ sync: settings }))
+    f.git(['add', '.spec/spexcode.json']); f.git(['commit', '-qm', 'trusted committed configuration'])
     const before = f.git(['rev-parse', 'HEAD']), bytes = readFileSync(join(f.root, '.spec', 'spexcode.json'))
     const state = await f.application.readSettings()
     await assert.rejects(f.application.enable('b'.repeat(64)), /摘要已过期/)
@@ -1151,7 +1155,71 @@ async function observeUntil(predicate: () => boolean, timeoutMs = 5000): Promise
   const deadline = Date.now() + timeoutMs
   while (!predicate()) { assert.ok(Date.now() < deadline, '后台同步观察超时'); await new Promise(resolve => setTimeout(resolve, 10)) }
 }
-test('AC-APPLICATION-P4-01 无浏览器暂停仍记录保存，恢复最新输入且重复失败不重开调用', async () => {
+test('提交门禁：外部Spec/代码保存与git add不改变自动输入，提交后才观察HEAD字节', async () => {
+  const f = await fixture()
+  try {
+    writeFileSync(join(f.root, 'src/demo.mjs'), 'export const demo = text => `unsaved before enable:${text}`\n')
+    writeFileSync(join(f.root, '.spec/demo/spec.md'), source.replace('返回用户指定的文本。', '未提交初始原意。'))
+    await f.application.enable(); await f.application.automaticControl('pause')
+    await f.application.startService({ compensationMs: 40, debounceMs: 5 })
+    const initial = f.application.observationStatus().latestSnapshot!
+    assert.equal(initial.immutableTree, f.git(['rev-parse', 'HEAD^{tree}']).trim(), '首次纳管不读取已有未提交编辑')
+    writeFileSync(join(f.root, 'src/demo.mjs'), 'export const demo = text => `committed:${text}`\n')
+    writeFileSync(join(f.root, '.spec/demo/spec.md'), source.replace('返回用户指定的文本。', '返回提交后的文本。'))
+    await f.application['scanObservedInput']()
+    assert.equal(f.application.observationStatus().latestSnapshot!.id, initial.id, '未提交保存不能成为自动输入')
+    f.git(['add', '.'])
+    await f.application['scanObservedInput']()
+    assert.equal(f.application.observationStatus().latestSnapshot!.id, initial.id, 'git add不能成为自动输入')
+    f.git(['commit', '-qm', 'external combined input'])
+    writeFileSync(join(f.root, 'src/demo.mjs'), 'export const demo = text => `dirty:${text}`\n')
+    await f.application['scanObservedInput']()
+    const committed = f.application.observationStatus().latestSnapshot!
+    assert.notEqual(committed.id, initial.id)
+    assert.equal(committed.captureKind, 'commit')
+    const entries = readTree(committed.source.commonDir, committed.immutableTree)
+    assert.match(readObject(committed.source.commonDir, entries.find(entry => entry.path === 'src/demo.mjs')!.oid).toString(), /committed:/)
+    assert.equal(f.calls.length, 0)
+  } finally { await f.application.stopService(); f.cleanup() }
+})
+
+test('提交门禁：code、Spec、混合commit按已提交差量分类，同commit及重启不重复派发', async () => {
+  const f = await fixture()
+  try {
+    governDemoCode(f)
+    f.application.start = () => {}
+    await f.application.enable()
+    await f.application.startService({ compensationMs: 10000, debounceMs: 5 })
+    const initial = f.application.store.listOperations(identifyWorktree(f.root).repositoryId)[0]
+    assert.equal(initial.origin, 'initial'); assert.equal(initial.input.captureKind, 'commit')
+    for (const [origin, message] of [['code', 'code only'], ['spec', 'spec only'], ['combined', 'both']] as const) {
+      if (origin !== 'spec') writeFileSync(join(f.root, 'src/demo.mjs'), `export const demo = text => text // ${message}\n`)
+      if (origin !== 'code') writeFileSync(join(f.root, '.spec/demo/spec.md'), readFileSync(join(f.root, '.spec/demo/spec.md'), 'utf8').replace('返回用户指定的文本。', `返回用户指定的文本。${message}`))
+      f.git(['add', '.']); f.git(['commit', '-qm', message])
+      writeFileSync(join(f.root, 'src/demo.mjs'), `export const demo = text => text // uncommitted after ${message}\n`)
+      await f.application['scanObservedInput']()
+      const head = f.git(['rev-parse', 'HEAD']).trim(), operation = f.application.store.listOperations(initial.input.source.repositoryId).find(item => item.input.headCommit === head)!
+      assert.ok(operation, JSON.stringify(f.application.observationStatus().latest))
+      assert.equal(operation.origin, origin)
+      assert.equal((await f.application.readOperation(operation.id)).stale, false, '后来的dirty编辑不改变commit操作当前性')
+      const count = f.application.store.listOperations(initial.input.source.repositoryId).length
+      await f.application['scanObservedInput'](); assert.equal(f.application.store.listOperations(initial.input.source.repositoryId).length, count)
+      f.git(['restore', 'src/demo.mjs'])
+    }
+    const count = f.application.store.listOperations(initial.input.source.repositoryId).length
+    await f.application.stopService(); await f.application.startService({ compensationMs: 10000, debounceMs: 5 })
+    assert.equal(f.application.store.listOperations(initial.input.source.repositoryId).length, count)
+    await f.application.stopService()
+    writeFileSync(join(f.root, 'src/demo.mjs'), 'export const demo = text => `offline:${text}`\n'); f.git(['add', '.']); f.git(['commit', '-qm', 'offline code commit'])
+    writeFileSync(join(f.root, '.spec/demo/spec.md'), readFileSync(join(f.root, '.spec/demo/spec.md'), 'utf8') + '\n未提交保存不进入补偿。\n')
+    await f.application.startService({ compensationMs: 10000, debounceMs: 5 })
+    const compensated = f.application.store.listOperations(initial.input.source.repositoryId)[0]
+    assert.equal(compensated.origin, 'code'); assert.equal(compensated.input.headCommit, f.git(['rev-parse', 'HEAD']).trim())
+    assert.equal(f.calls.length, 0)
+  } finally { await f.application.stopService(); f.cleanup() }
+})
+
+test('AC-APPLICATION-P4-01 无浏览器暂停仍记录提交，恢复最新输入且重复失败不重开调用', async () => {
   const f = await fixture()
   try {
     await f.application.enable()
@@ -1159,6 +1227,7 @@ test('AC-APPLICATION-P4-01 无浏览器暂停仍记录保存，恢复最新输�
     await f.application.startService({ compensationMs: 40, debounceMs: 5 })
     const initial = f.application.observationStatus().latestSnapshot!.id
     writeFileSync(join(f.root, 'src/demo.mjs'), 'export const demo = text => `${text}!`\n')
+    f.git(['add', '.']); f.git(['commit', '-qm', 'paused external code commit'])
     await observeUntil(() => f.application.observationStatus().latestSnapshot?.id !== initial)
     assert.equal(f.calls.length, 0)
     assert.equal(f.application.observationStatus().control.control, 'pause')
@@ -1213,6 +1282,7 @@ test('AC-APPLICATION-P4-04 nodeIds仅注册明确意图子树，新增raw纳入�
     cpSync(new URL('../../templates/spec/project/.plugins/', import.meta.url), join(f.root, '.spec/demo/.plugins'), { recursive: true })
     mkdirSync(join(f.root, '.spec/demo/child'), { recursive: true }); writeFileSync(join(f.root, '.spec/demo/child/spec.md'), source.replace('Demo', 'Child'))
     mkdirSync(join(f.root, '.spec/other'), { recursive: true }); writeFileSync(join(f.root, '.spec/other/spec.md'), source.replace('Demo', 'Other'))
+    f.git(['add', '.']); f.git(['commit', '-qm', 'register committed intent tree'])
     await f.application.enable(); await f.application.automaticControl('pause')
     await f.application.startService({ compensationMs: 10000, debounceMs: 5 })
     assert.deepEqual(f.application.observationStatus().registeredNodes, ['demo'])
@@ -1222,6 +1292,7 @@ test('AC-APPLICATION-P4-04 nodeIds仅注册明确意图子树，新增raw纳入�
     await assert.rejects(f.application.submit({ nodeId: 'other', requestId: 'unauthorized' }), /未在 sync.nodeIds 授权/)
     await assert.rejects(f.application.submit({ nodeId: 'session-fail', requestId: 'plugin-intent' }), /不存在 Spec 节点/)
     mkdirSync(join(f.root, '.spec/demo/new-raw'), { recursive: true }); writeFileSync(join(f.root, '.spec/demo/new-raw/spec.md'), source.replace('Demo', 'New'))
+    f.git(['add', '.']); f.git(['commit', '-qm', 'new committed raw intent'])
     await observeUntil(() => f.application.observationStatus().coverage.includedNodeIds.includes('new-raw'))
     assert.equal(f.application.observationStatus().registeredNodes.length, 1)
     assert.equal(f.calls.length, 0)
@@ -1234,6 +1305,7 @@ test('AC-APPLICATION-P4-05 缺省node作用域只含真实治理授权源码，�
     writeFileSync(join(f.root, '.spec/demo/spec.md'), source.replace('status: pending', 'status: pending\ncode:\n  - src/demo.mjs'))
     cpSync(new URL('../../templates/spec/project/.plugins/', import.meta.url), join(f.root, '.spec/demo/.plugins'), { recursive: true })
     mkdirSync(join(f.root, '.spec/other'), { recursive: true }); writeFileSync(join(f.root, '.spec/other/spec.md'), source.replace('status: pending', 'status: pending\ncode:\n  - private/other.mjs'))
+    f.git(['add', '.']); f.git(['commit', '-qm', 'committed governed scope'])
     await f.application.enable(); await f.application.automaticControl('pause')
     await f.application.startService({ compensationMs: 10000 })
     assert.deepEqual(f.application.observationStatus().registeredNodes, ['demo'])
@@ -1272,14 +1344,17 @@ test('AC-APPLICATION-P4-07 重新授权撤销旧意图，删除已注册根保�
   const f = await fixture()
   try {
     mkdirSync(join(f.root, '.spec/other'), { recursive: true }); writeFileSync(join(f.root, '.spec/other/spec.md'), source.replace('Demo', 'Other'))
+    f.git(['add', '.']); f.git(['commit', '-qm', 'register committed intent tree'])
     await f.application.enable(); await f.application.automaticControl('pause')
     await f.application.startService({ compensationMs: 10000, debounceMs: 5 })
     assert.deepEqual(f.application.observationStatus().registeredNodes, ['demo'])
     writeFileSync(join(f.root, '.spec/spexcode.json'), JSON.stringify({ sync: { ...settings, nodeIds: ['other'] } }))
+    f.git(['add', '.']); f.git(['commit', '-qm', 'authorize other committed intent'])
     await f.application.enable()
     assert.deepEqual(f.application.observationStatus().registeredNodes, ['other'])
     await assert.rejects(f.application.submit({ nodeId: 'demo', requestId: 'revoked' }), /未在 sync.nodeIds 授权/)
     rmSync(join(f.root, '.spec/other/spec.md'))
+    f.git(['add', '.']); f.git(['commit', '-qm', 'remove registered intent'])
     await observeUntil(() => f.application.observationStatus().coverage.missingNodeIds.includes('other'))
     await observeUntil(() => f.application.observationStatus().latest?.failure?.code === 'sync_node_unknown')
     assert.deepEqual(f.application.observationStatus().registeredNodes, ['other'])
@@ -1292,6 +1367,7 @@ test('AC-APPLICATION-P4-08 无浏览器真实Docker自动交付，补偿及scope
   const f = await exportApplicationFixture(t)
   t.after(() => f.application.stopService())
   writeFileSync(join(f.root, 'src/export.js'), `${f.originalCode}\n// human save before background startup\n`)
+  f.git(['add', '.']); f.git(['commit', '-qm', 'external committed implementation'])
   const source = await captureInputSnapshot(f.root), index = readFileSync(join(f.root, '.git/index')), head = f.git(['rev-parse', 'HEAD'])
   await f.application.startService({ compensationMs: 10000, debounceMs: 5 })
   const admitted = (await f.application.status()).operations[0]?.operation
@@ -1305,7 +1381,9 @@ test('AC-APPLICATION-P4-08 无浏览器真实Docker自动交付，补偿及scope
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), index); assert.equal(f.git(['rev-parse', 'HEAD']), head)
   const count = f.calls()
   writeFileSync(join(f.root, 'unrelated.txt'), 'scope外真实作者编辑\n')
-  await observeUntil(() => f.application.observationStatus().latestSnapshot?.id !== source.id, 30000)
+  f.git(['add', '.']); f.git(['commit', '-qm', 'unrelated committed edit'])
+  const observedHead = f.git(['rev-parse', 'HEAD']).trim()
+  await observeUntil(() => f.application.observationStatus().latestSnapshot?.headCommit === observedHead, 30000)
   assert.equal((await f.application.readOperation(admitted.id)).stale, false)
   await new Promise(resolve => setTimeout(resolve, 300))
   assert.equal(f.calls(), count)
@@ -1434,6 +1512,7 @@ test('AC-APPLICATION-P4-12 同request不能换授权子节点，重新授权配�
     await assert.rejects(f.application.submit({ ...request, nodeId: 'child' }), /SYNC_IDEMPOTENCY_CONFLICT/)
     assert.equal((await f.application.status()).operations.length, 1)
     writeFileSync(join(f.root, '.spec/spexcode.json'), JSON.stringify({ sync: { ...settings, budget: { ...settings.budget, maxCalls: 6 } } }))
+    f.git(['add', '.']); f.git(['commit', '-qm', 'authorize committed budget'])
     await f.application.enable()
     const detail = await f.application.readOperation(original.operation.id)
     assert.equal(detail.retryEligibility.eligible, false)
@@ -1463,6 +1542,7 @@ test('AC-APPLICATION-P4-10 活动native时物理暂停保operation控制，暂�
     assert.equal((await f.application.readOperation(active.id)).physicalControl.control, 'pause')
     const first = f.application.observationStatus().latestSnapshot!.id
     writeFileSync(join(f.root, '.spec/demo/spec.md'), source.replace('返回用户指定的文本。', '返回用户指定的文本并记录确认。'))
+    f.git(['add', '.']); f.git(['commit', '-qm', 'paused changed intent'])
     await observeUntil(() => f.application.observationStatus().latestSnapshot?.id !== first)
     const latest = f.application.observationStatus().latestSnapshot!.id
     assert.equal(f.calls.length, 1)
@@ -1480,6 +1560,7 @@ test('AC-APPLICATION-P4-11 两个独立节点保存及停机编辑补偿均真�
   const f = await exportApplicationFixture(t, undefined, undefined, true)
   const paths = ['src/export.js', 'src/other.js']
   for (const path of paths) writeFileSync(join(f.root, path), `// human online ${path}\n${readFileSync(join(f.root, path), 'utf8')}`)
+  f.git(['add', '.']); f.git(['commit', '-qm', 'online author inputs'])
   const before = await captureInputSnapshot(f.root), head = f.git(['rev-parse', 'HEAD']), index = readFileSync(join(f.root, '.git/index'))
   await f.application.startService({ compensationMs: 10000, debounceMs: 5 })
   const admitted = (await f.application.status()).operations.map(item => item.operation)
@@ -1500,6 +1581,7 @@ test('AC-APPLICATION-P4-11 两个独立节点保存及停机编辑补偿均真�
   await f.application.stopService()
   const count = f.calls()
   for (const path of paths) writeFileSync(join(f.root, path), `// human offline ${path}\n${readFileSync(join(f.root, path), 'utf8')}`)
+  f.git(['add', '.']); f.git(['commit', '-qm', 'offline author inputs'])
   const latest = await captureInputSnapshot(f.root)
   assert.equal(f.calls(), count)
   await f.application.startService({ compensationMs: 10000, debounceMs: 5 })
@@ -1518,5 +1600,5 @@ test('AC-APPLICATION-P4-11 两个独立节点保存及停机编辑补偿均真�
   const unconsumedOther = paths.find(path => !firstCompensation.operation.scope.paths.includes(path))!
   assert.doesNotMatch(readObject(before.source.commonDir, readTree(before.source.commonDir, firstCompensation.journals[0].receipt!.actualTree).find(entry => entry.path === unconsumedOther)!.oid).toString('utf8'), /human offline/)
   assert.equal((await captureInputSnapshot(f.root)).id, latest.id)
-  assert.equal(f.git(['rev-parse', 'HEAD']), head); assert.deepEqual(readFileSync(join(f.root, '.git/index')), index)
+  assert.notEqual(f.git(['rev-parse', 'HEAD']), head); assert.notDeepEqual(readFileSync(join(f.root, '.git/index')), index)
 })
