@@ -65,7 +65,9 @@ export function elaborationSchema(input: ElaborationInput, options: { purpose?: 
     const code = entries(frontmatter.code), related = entries(frontmatter.related)
     properties.code = { type: 'array', maxItems: code.length, items: { ...string, ...(code.length ? { enum: code } : {}) } }
     properties.related = { type: 'array', maxItems: related.length, items: { ...string, ...(related.length ? { enum: related } : {}) } }
-    properties.removeIds = { type: 'array', maxItems: 0, items: { type: 'string' } }
+    const contract = target?.source ? parseContract({ ...target, source: target.source }).contract : null
+    const removableIds = contract?.items.filter(item => input.authorizedChanges?.some(change => change.action === 'retire' && change.id === item.id)).map(item => item.id) ?? []
+    properties.removeIds = { type: 'array', maxItems: removableIds.length, items: { type: 'string', ...(removableIds.length ? { enum: removableIds } : {}) } }
   }
   return schema
 }

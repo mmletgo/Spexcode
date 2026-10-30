@@ -15,7 +15,7 @@ export type AuthorizedContractChange = { id: string; action: 'retire' | 'update_
 export type ElaborationInput = {
   root: string
   base?: string
-  /** 仅由分区执行器用于无源码writer的raw-only上层目标；结果不是完整P1或实现就绪。 */
+  /** 仅由分区执行器用于无源码writer的初始或既有纯父接口；结果不是完整P1或实现就绪。 */
   phase?: 'interface_seed'
   /** 原分区计划及后验纯父分类证据，只绑定本区来源，不授予写权限或完成度。 */
   partitionBinding?: ElaborationPartitionBinding

@@ -21,7 +21,7 @@ review verdict 的原生说明明确 accept 仅可搭配空 findings；implement
 
 `RULE.authority` 的生成请求 schema 仅接受本轮冻结可写 target 的 canonical `nodeId`，不能接受 REQ/RULE 业务 ID。合法 move 中，冻结旧节点已有 `authority` 等于其 `from.nodeId` 的 RULE 时，schema 还保留该旧 `nodeId`，供 renderer 按真实 `nodeChanges` 归一到目的身份；最终 owner 仍由现有逐项校验确认，enum 不授予跨叶归属。没有可写 target 时不产生空 enum。
 
-`interface_seed` 是分区编排内部的父接口schema：只允许REQ/RULE/GAP行，不允许FLOW/STEP/AC/VERIFY或删除行；code/related严格沿用冻结父节点绑定，空绑定用`maxItems:0`和普通string items约束，不生成空enum。
+`interface_seed` 是分区编排内部的父接口schema：只允许REQ/RULE/GAP行，不允许FLOW/STEP/AC/VERIFY；首次raw-only或既有纯接口均沿用同一行差量和旧新演进门禁。既有条目默认保留，removeIds仅可取本目标已有且经输入门禁核验的显式retire授权ID，schema以精确enum和数量限域；无合法退役授权时仍为零项且不产生空enum。code/related严格沿用冻结父节点绑定，空绑定用`maxItems:0`和普通string items约束，不生成空enum。
 
 生成指令要求每个业务 REQ 至少由一个主 FLOW.req 覆盖。验证配置、写路径授权、执行器/schema 和本轮元数据属于执行边界，不另造业务 REQ 或测试执行 FLOW；这些边界仍须遵守，测试和验证绑定在业务 AC/可信 VERIFY 中，不能因此省略 raw 里的业务需求。
 
