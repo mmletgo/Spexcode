@@ -1,4 +1,5 @@
 import { parseContract } from '@spexcode/spec-core/contracts'
+import { relationClaimsPath } from '@spexcode/spec-core'
 import type { GenerationInput } from './generation-types.js'
 import type { ContractNodeChange } from './writeback-types.js'
 import type { WorktreeIdentity } from './operation-types.js'
@@ -43,16 +44,20 @@ export function historicalRetiredIds(input: Pick<GenerationInput, 'nodeChanges' 
   return [...new Set(ids)].sort()
 }
 
-/** 从旧 Spec 正文投影其 code/related/测试/源码锚点；解析失败时至少保留 Spec 自身。 */
-export function obligationPaths(source: string, path: string): string[] {
+/** 从旧 Spec 正文展开实际快照中的 code/related/测试/源码义务；解析失败时只保留真实存在的Spec自身。 */
+export function obligationPaths(source: string, path: string, actualPaths: readonly string[]): string[] {
   const contract = parseContract({ nodeId: path.split('/').at(-2) ?? path, path, source }).contract
-  const paths = new Set<string>([path])
-  if (!contract) return [...paths]
-  for (const anchor of [...contract.code, ...contract.related]) paths.add(anchor.split('#')[0])
-  for (const item of contract.items) {
-    if (item.kind === 'AC') paths.add(item.test.split('#')[0])
-    if (item.kind !== 'VERIFY' && item.source.kind === 'code') paths.add(item.source.ref.split('#')[0])
+  const claims = new Set<string>([path])
+  if (contract) {
+    for (const anchor of [...contract.code, ...contract.related]) claims.add(anchor.split('#')[0])
+    for (const item of contract.items) {
+      if (item.kind === 'AC') claims.add(item.test.split('#')[0])
+      if (item.kind !== 'VERIFY' && item.source.kind === 'code') claims.add(item.source.ref.split('#')[0])
+    }
   }
+  const claimList = [...claims]
+  const paths = new Set<string>()
+  for (const actualPath of actualPaths) if (claimList.some(claim => relationClaimsPath(claim, actualPath))) paths.add(actualPath)
   return [...paths]
 }
 

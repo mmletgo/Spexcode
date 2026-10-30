@@ -304,17 +304,30 @@ function priorFrom(snapshot: GenerationInput['snapshot'], entries: GenerationInp
   return { role: 'source_before', snapshot, entries: entries.filter(entry => paths.includes(entry.path)), files: new Map(paths.map(path => [path, files.get(path)!])), objects: [] }
 }
 
-test('删除后本区仍把旧Spec和已不在current的源码完整送入最终独审', async t => {
+test('删除后本区按related glob把旧Spec和已不在current的helper完整送入生成及独审', async t => {
   const { input, plan, checkpoints, root } = await fixture(t)
-  const oldSpec = input.files.get(input.contracts[0].path)!
-  const oldCode = input.files.get('src/export.js')!
-  const before = input.snapshot
-  const beforeEntries = input.manifest.entries
-  const beforeFiles = new Map(input.files)
+  const retiredPath = input.contracts[0].path
+  const helperPath = 'src/helpers/format.js'
+  const helper = '// helper first marker\nexport function format(value) { return String(value) }\n// helper tail marker\n'
+  const oldSpec = input.files.get(retiredPath)!.replace('  - src/export.js#ExportService\n', '  - src/export.js#ExportService\nrelated:\n  - src/helpers/**/*.js\n')
+  writeFileSync(join(root, retiredPath), oldSpec)
+  mkdirSync(join(root, 'src/helpers'), { recursive: true })
+  writeFileSync(join(root, helperPath), helper)
+  const git = (...args: string[]): void => { execFileSync('git', ['-C', root, ...args], { stdio: 'pipe' }) }
+  git('add', '-A'); git('commit', '-m', 'declare related helper glob')
+  const before = await captureInputSnapshot(root, { committed: true })
+  const beforeEntries = readTree(before.source.commonDir, before.immutableTree)
+  const beforeFiles = new Map(beforeEntries.map(entry => [entry.path, readObject(before.source.commonDir, entry.oid).toString('utf8')]))
+  const oldCode = beforeFiles.get('src/export.js')!
+  input.snapshot = before
+  input.manifest = { version: 1, entries: beforeEntries }
+  input.files = beforeFiles
+  input.contracts = input.contracts.map(contract => contract.path === retiredPath ? parseContract({ nodeId: contract.nodeId, path: retiredPath, source: oldSpec }).contract! : contract)
+  input.elaboratedSpecs = input.elaboratedSpecs.map(spec => spec.path === retiredPath ? { path: retiredPath, source: oldSpec } : spec)
   rmSync(join(root, input.contracts[0].path))
   rmSync(join(root, 'src/export.js'))
-  execFileSync('git', ['-C', root, 'add', '-A'], { stdio: 'pipe' })
-  execFileSync('git', ['-C', root, 'commit', '-m', 'delete export specification and source'], { stdio: 'pipe' })
+  rmSync(join(root, helperPath))
+  git('add', '-A'); git('commit', '-m', 'delete specification, source, and related helper')
   const snapshot = await captureInputSnapshot(root)
   const entries = readTree(snapshot.source.commonDir, snapshot.immutableTree)
   input.snapshot = snapshot
@@ -326,7 +339,7 @@ test('删除后本区仍把旧Spec和已不在current的源码完整送入最终
   input.retiredIds = retired.items.map(item => item.id)
   input.retiredOwners = input.retiredIds.map(id => ({ id, path: retired.path }))
   input.nodeChanges = [{ action: 'retire', from: { nodeId: retired.nodeId, path: retired.path }, evidenceRef: writeEvidence(snapshot.source.commonDir, { explicit: 'deleted specification' }) }]
-  input.priorContext = [priorFrom(before, beforeEntries, beforeFiles, [retired.path, 'src/export.js', 'tests/export.test.mjs'])]
+  input.priorContext = [priorFrom(before, beforeEntries, beforeFiles, [retired.path, 'src/export.js', 'tests/export.test.mjs', helperPath])]
   const exportPartition = plan.partitions.find(partition => partition.id === 'part-export')!
   exportPartition.readPaths = exportPartition.readPaths.filter(path => path !== 'src/export.js')
   exportPartition.writePaths = exportPartition.writePaths.filter(path => path !== 'src/export.js')
@@ -339,6 +352,7 @@ test('删除后本区仍把旧Spec和已不在current的源码完整送入最终
       assert.equal(context.priorContext?.[0]?.role, 'source_before')
       assert.equal(bodies.get(retired.path), oldSpec)
       assert.equal(bodies.get('src/export.js'), oldCode)
+      assert.equal(bodies.get(helperPath), helper)
       assert.equal(context.files.some(([path]) => path === retired.path || path === 'src/export.js'), false)
       assert.ok(context.readyIds.includes('AC-EXPORT-03'))
       assert.ok(request.prompt.includes('不是verifiedDelivery'))
@@ -348,6 +362,7 @@ test('删除后本区仍把旧Spec和已不在current的源码完整送入最终
       const context = JSON.parse(request.prompt.split('冻结原意和基线完整输入:\n')[1].split('\n实际候选身份')[0]) as { files: [string, string][]; priorContext?: { role: string; files: [string, string][] }[] }
       const bodies = new Map(context.priorContext?.[0]?.files ?? [])
       assert.equal(bodies.get('src/export.js'), oldCode)
+      assert.equal(bodies.get(helperPath), helper)
       assert.equal(context.files.some(([path]) => path === 'src/export.js'), false)
       assert.equal(context.priorContext?.some(item => item.role === 'verified_delivery'), false)
       sawReview = true

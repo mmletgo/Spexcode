@@ -206,7 +206,8 @@ function localGeneration(input: GenerationInput, partition: SyncPartition, commo
   for (const prior of input.priorContext ?? []) for (const ownerPath of ownerPaths) {
     const source = prior.files.get(ownerPath)
     if (!source) continue
-    for (const path of obligationPaths(source, ownerPath)) if (prior.entries.some(entry => entry.path === path) || prior.objects.some(object => object.entry.path === path)) priorPaths.add(path)
+    const actualPaths = [...prior.entries.map(entry => entry.path), ...prior.objects.map(object => object.entry.path)]
+    for (const path of obligationPaths(source, ownerPath, actualPaths)) priorPaths.add(path)
   }
   const files = new Map([...input.files].filter(([path]) => within(path, readPaths)))
   const contracts = input.contracts.filter(contract => within(contract.path, readPaths))

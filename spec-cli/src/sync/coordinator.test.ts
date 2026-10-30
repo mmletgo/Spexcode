@@ -1783,3 +1783,59 @@ test('v2无验证基线的提交删除把真实before正文作为source_before�
   assert.equal(existsSync(join(f.root, contractPath)), false)
   assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), removed)
 })
+
+test('协调器拒绝related glob命中超出全局readPaths的旧helper', async t => {
+  const relatedSpec = original.replace('  - src/export.js#ExportService\n', '  - src/export.js#ExportService\nrelated:\n  - src/helpers/**/*.js\n')
+  const budget = { maxAttempts: 1, maxCalls: 16, maxRepairs: 0, timeoutMs: 120_000 }
+  const f = await fixture(t, budget, false, relatedSpec, 'project', relatedSpec)
+  f.git('reset', '--hard', 'HEAD')
+  const parentPath = join(f.root, '.spec/project/spec.md'), parent = readFileSync(parentPath, 'utf8')
+  writeFileSync(parentPath, parent.replaceAll('[[export-contract]]', '导出契约'))
+  const helperPath = 'src/helpers/format.js'
+  mkdirSync(join(f.root, 'src/helpers'), { recursive: true })
+  writeFileSync(join(f.root, helperPath), '// coordinator helper\nexport function format(value) { return String(value) }\n')
+  f.git('add', '-A'); f.git('commit', '-m', 'isolate lifecycle fixture and add related helper')
+  const before = await captureInputSnapshot(f.root, { committed: true })
+  const beforeEntries = readTree(before.source.commonDir, before.immutableTree)
+  const oldSpec = readObject(before.source.commonDir, beforeEntries.find(entry => entry.path === contractPath)!.oid).toString('utf8')
+  const contract = parseContract({ nodeId: 'export-contract', path: contractPath, source: oldSpec }).contract!
+  f.git('rm', contractPath); f.git('commit', '-m', 'remove spec while retaining related helper')
+  const snapshot = await captureInputSnapshot(f.root, { committed: true })
+  const rawSource = parseParts(oldSpec)?.rawSource
+  assert.ok(rawSource)
+  const plan: SyncCoordinatorPlan = {
+    ...f.plan,
+    version: 'sync-coordinator-v2', direction: 'spec_to_code',
+    partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524_288, maxParallel: 2 },
+    readPaths: ['.spec', 'src/export.js', 'tests'], sourcePaths: ['src/export.js'],
+    commitTrigger: { before, paths: [contractPath] },
+    targets: [{ nodeId: 'export-contract', path: contractPath, rawSource }],
+  }
+  const admitted = f.store.admitAndEnqueue(await prepareSyncAdmission(snapshot, plan, {
+    ingressKey: snapshot.id, rootCauseId: snapshot.id, origin: 'combined', budget, managedRoot: f.managedRoot,
+  }))
+  f.useOperation(admitted)
+  f.options.plan = plan
+  f.options.readCurrentPlan = () => plan
+  const affectedIds = contract.items.map(item => item.id)
+  const ruleIds = affectedIds.filter(id => /^(REQ|RULE|TR)-/.test(id))
+  f.transform((output, request) => {
+    if (request.purpose === 'code_behavior_analyze') {
+      const context = JSON.parse(request.prompt.split('冻结三方输入:\n')[1]) as { changedPaths: string[] }
+      return {
+        changes: context.changedPaths.map(path => ({ kind: path === contractPath ? 'allowed_change' : 'refactor', paths: [path], affectedIds: path === contractPath ? affectedIds : ['RULE-EXPORT-05'], ruleIds, originalIntent: '导出契约由这次提交删除', previousBehavior: '提交前Spec保留完整义务', sourceBehavior: '当前提交不再包含该Spec', deliveryBehavior: '没有已验证交付', evidence: `真实树差 ${path}`, counterexample: '旧AC不能再从当前Spec读到' })),
+        facts: [], acceptanceChanges: [], newNodes: [],
+        resolutions: context.changedPaths.includes(contractPath) ? [{ path: contractPath, content: null, mode: null }] : [],
+      }
+    }
+    if (request.purpose === 'elaboration_generate') {
+      const frozen = JSON.parse(request.prompt.split('冻结业务输入:\n')[1].split('\n')[0]) as { nodeChanges?: { action: string }[] }
+      if (frozen.nodeChanges?.some(change => change.action === 'retire')) return { version: 'elaboration-rows-v2', changes: [], applicability: ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: false, basis: '旧节点已由真实提交删除并逐项退役，候选无剩余业务对象', affectedIds: [] })) }
+    }
+    return output
+  })
+  const result = await runSyncOperation(f.store, admitted.id, f.options)
+  assert.equal(result.failure?.code, 'historical_context_binding', JSON.stringify({ status: result.status, failure: result.failure, calls: f.calls.map(call => call.purpose) }))
+  assert.ok(f.calls.some(call => call.purpose === 'elaboration_generate'))
+  assert.equal(f.calls.some(call => call.purpose === 'code_generate' || call.purpose === 'code_review'), false)
+})
