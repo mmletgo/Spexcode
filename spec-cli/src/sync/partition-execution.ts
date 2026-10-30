@@ -1,4 +1,4 @@
-import { contractReferences, parseContract, parseFrontmatter } from '@spexcode/spec-core/contracts'
+import { contractReferences, parseContract, parseParts } from '@spexcode/spec-core/contracts'
 import { analyzeCodeBehavior, deriveBehaviorAuthorization } from './code-behavior.js'
 import type { CodeBehaviorInput } from './code-behavior.js'
 import { outputErrors } from './elaboration-schema.js'
@@ -12,9 +12,9 @@ import { freezeGenerationCandidate, runGeneration } from './generation.js'
 import type { GenerationInput, GenerationOptions, GenerationResult } from './generation-types.js'
 import type { BlobRef } from './operation-types.js'
 import { contentHash, readEvidence, validateRepositoryPath, verifySnapshot, writeEvidence } from './snapshot.js'
-import { projectSyncPartition } from './partitioning.js'
+import { projectSyncPartition, rawOnlyInterfaceSeedEvidence } from './partitioning.js'
 import { historicalOwnerPaths, historicalRetiredIds, obligationPaths, projectPriorContext } from './prior-context.js'
-import type { SyncPartition, SyncPartitionPlan } from './partitioning.js'
+import type { RawOnlyInterfaceSeedDescendant, RawOnlyInterfaceSeedEvidence, SyncPartition, SyncPartitionPlan } from './partitioning.js'
 import type { CodeBehaviorAnalysis, CodeBehaviorEvidence } from './writeback-types.js'
 
 export type PartitionCheckpoints = { load<T>(key: string): T | null; save(key: string, value: unknown): BlobRef }
@@ -22,23 +22,29 @@ const within = (path: string, paths: readonly string[]): boolean => paths.some(p
 const unique = (values: readonly string[]): string[] => [...new Set(values)].sort()
 const reject = (message: string): never => { throw Object.assign(new Error(message), { code: 'partition_binding' }) }
 
-function rawInterfaceParentPartition(input: ElaborationInput, plan: SyncPartitionPlan): SyncPartition | undefined {
-  const root = input.targets.find(target => target.nodeId === input.intent.nodeId)
-  if (!root || root.source && parseContract({ nodeId: root.nodeId, path: root.path, source: root.source }).contract) return undefined
-  const parent = plan.partitions.find(partition => partition.targets.some(target => target.nodeId === root.nodeId && target.path === root.path))
-  if (!parent || parent.sourcePaths.length) return undefined
-  const parentPrefix = root.path.slice(0, -'spec.md'.length)
-  const frontmatter = root.source ? parseFrontmatter(root.source).fm : {}
-  const codeEntries = typeof frontmatter.code === 'string' ? [frontmatter.code] : Array.isArray(frontmatter.code) ? frontmatter.code : []
-  if (codeEntries.length) return undefined
-  const newNodeTargets = new Map((input.analysis?.analysis.newNodes ?? []).map(node => [`${node.nodeId}\0${node.path}`, node.codePath]))
-  const hasActiveChild = plan.partitions.some(partition => partition.id !== parent.id && partition.targets.some(target => {
-    if (target.nodeId === root.nodeId || !target.path.startsWith(parentPrefix)) return false
-    const codePath = newNodeTargets.get(`${target.nodeId}\0${target.path}`)
-    if (codePath && partition.sourcePaths.includes(codePath)) return true
-    return partition.sourcePaths.some(path => input.files?.has(path))
-  }))
-  return hasActiveChild ? parent : undefined
+function interfaceSeedPartitions(input: ElaborationInput, plan: SyncPartitionPlan): { seeds: Map<string, RawOnlyInterfaceSeedEvidence>; descendants: RawOnlyInterfaceSeedDescendant[] } {
+  const sources = [...input.targets.filter((target): target is typeof target & { source: string } => target.source !== null), ...(input.context ?? [])]
+  const files = new Map(input.files)
+  for (const source of sources) files.set(source.path, source.source)
+  const classificationInput = { files, sourcePaths: unique(plan.partitions.flatMap(partition => partition.sourcePaths)),
+    contracts: sources.flatMap(source => parseContract(source).contract ?? []), targets: input.targets,
+    nodes: sources.map(source => ({ id: source.nodeId, path: source.path, rawSource: parseParts(source.source)?.rawSource })),
+  }
+  const descendants = (input.analysis?.analysis.newNodes ?? []).flatMap(node => {
+    const owners = plan.partitions.filter(partition => partition.sourcePaths.includes(node.codePath))
+    if (!input.targets.some(target => target.nodeId === node.nodeId && target.path === node.path)) return []
+    if (owners.length !== 1) reject(`新增归属必须精确属于唯一source partition: ${node.codePath}`)
+    if (!input.analysis!.analysis.reviewPassed || contentHash(JSON.stringify(input.analysis!.analysis)) !== input.analysis!.ref.sha256) reject('新增后代接口分类缺少完整独审分析绑定')
+    return [{ ...node, sourcePartitionId: owners[0].id, sourcePaths: owners[0].sourcePaths }]
+  })
+  const seeds = new Map<string, RawOnlyInterfaceSeedEvidence>()
+  for (const partition of plan.partitions) {
+    const target = partition.targets.length === 1 ? input.targets.find(target => target.nodeId === partition.targets[0].nodeId && target.path === partition.targets[0].path) : undefined
+    const evidence = target && !partition.sourcePaths.length ? rawOnlyInterfaceSeedEvidence(classificationInput, target, descendants) : null
+    if (partition.phase === 'interface_seed' && !evidence) reject(`冻结父接口分区缺少真实纯父证据: ${partition.id}`)
+    if (evidence) seeds.set(partition.id, evidence)
+  }
+  return { seeds, descendants }
 }
 
 function partitionApplicability(results: readonly Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>[]): Applicability[] {
@@ -59,6 +65,14 @@ function interfaceOnlyParentPartitions(partitions: readonly SyncPartition[], con
       return partitions.some(child => child.id !== parent.id && sourceOwners.has(child.id) && child.targets.some(childTarget => childTarget.path.startsWith(prefix)))
     })
   }).map(partition => partition.id))
+}
+
+/** 预算与执行共享真实实施集合；纯接口父由P1及真实子owner/边证明，不派无源码的实现独审。 */
+export function implementationPartitionSelection(plan: SyncPartitionPlan, contracts: readonly Contract[]): { interfaceParents: Set<string>; partitions: SyncPartition[]; dependencies: SyncPartitionPlan['dependencies'] } {
+  const interfaceParents = interfaceOnlyParentPartitions(plan.partitions, contracts)
+  return { interfaceParents, partitions: plan.partitions.filter(partition => !interfaceParents.has(partition.id)),
+    dependencies: plan.dependencies.filter(edge => !interfaceParents.has(edge.from) || !interfaceParents.has(edge.to)),
+  }
 }
 
 /** 小批调度只限制当前操作在途量；真实容量及原子预算仍由既有 runner/store 控制。 */
@@ -138,28 +152,34 @@ export async function analyzeSyncPartitions(input: CodeBehaviorInput, plan: Sync
   return merged
 }
 
-/** 局部写目标继承同一冻结原意；新归属叶按其真实 codePath 唯一加入所属分区。 */
+/** 纯父按祖先层级先审自身原意接口；叶继承只读接口，新归属按真实 codePath 唯一分区。 */
 export async function elaborateSyncPartitions(input: ElaborationInput, plan: SyncPartitionPlan, maxParallel: number, checkpoints: PartitionCheckpoints, runner: ElaborationRunner): Promise<ElaborationResult> {
   const { signal, ...data } = input
   input = { ...structuredClone(data), signal }; plan = structuredClone(plan)
   const commonDir = input.historyInput!.source.commonDir
-  const interfaceParent = rawInterfaceParentPartition(input, plan)
+  const { seeds, descendants } = interfaceSeedPartitions(input, plan)
   const settledSources = new Map<string, string>()
   const run = async (partition: SyncPartition): Promise<Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>> => {
+    const interfaceSeed = seeds.get(partition.id)
+    const partitionBinding = { planDigest: plan.digest, partitionId: partition.id, ...(input.analysis ? { analysisRef: input.analysis.ref } : {}), ...(interfaceSeed ? { interfaceSeed } : {}) }
     const key = `partition:${partition.id}:elaboration`, saved = checkpoints.load<Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>>(key)
-    if (saved) return saved
+    if (saved) {
+      if (JSON.stringify(saved.partitionBinding) !== JSON.stringify(partitionBinding)) reject(`局部细化原件没有绑定当前分区分类: ${partition.id}`)
+      return saved
+    }
     const analysis = partitionAnalysisEvidence(commonDir, input.analysis, partition.id)
-    const newPaths = analysis?.analysis.newNodes.map(node => node.path) ?? []
+    const newPaths = descendants.filter(node => node.sourcePartitionId === partition.id).map(node => node.path)
     const targets = input.targets.filter(target => partition.targets.some(local => local.path === target.path || input.nodeChanges?.some(change => change.action === 'move' && change.from.path === target.path && change.to.path === local.path)) || newPaths.includes(target.path))
     if (!targets.length) reject(`分区缺少可写细化目标: ${partition.id}`)
     const readPaths = unique([...partition.readPaths, ...targets.map(target => target.path)])
     const sources = [...input.targets.filter((target): target is typeof target & { source: string } => target.source !== null), ...(input.context ?? [])].map(source => ({ ...source, source: settledSources.get(source.path) ?? source.source }))
     const context = sources.filter(source => within(source.path, readPaths) && !targets.some(target => target.path === source.path))
     const ids = new Set([...targets, ...context].flatMap(source => source.source ? parseContract({ nodeId: source.nodeId, path: source.path, source: source.source }).contract?.items.map(item => item.id) ?? [] : []))
-    const interfaceSeed = interfaceParent?.id === partition.id
-    const localInput: ElaborationInput = { ...input, requestKey: `${input.requestKey}:partition:${partition.id}`, targets, context,
+    const seedTarget = interfaceSeed ? targets[0] : undefined
+    const intent = seedTarget && seedTarget.nodeId !== input.intent.nodeId ? { nodeId: seedTarget.nodeId, rawSource: parseParts(seedTarget.source ?? '')?.rawSource ?? seedTarget.rawSource! } : input.intent
+    const localInput: ElaborationInput = { ...input, requestKey: `${input.requestKey}:partition:${partition.id}`, intent, targets, context,
+      partitionBinding,
       files: new Map([...input.files ?? []].filter(([path]) => within(path, readPaths)).map(([path, source]) => [path, settledSources.get(path) ?? source])), analysis,
-      verifications: interfaceSeed ? [] : input.verifications,
       validationScope: 'partition_local',
       facts: [...input.facts ?? []].filter(fact => (!fact.source.startsWith('code:') || within(fact.source.slice(5).split('#')[0], readPaths)) && (!fact.source.startsWith('derived:') || ids.has(fact.source.slice(8)))),
       nodeChanges: input.nodeChanges?.filter(change => targets.some(target => target.path === change.from.path)),
@@ -172,13 +192,18 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
     checkpoints.save(key, compact)
     return compact
   }
-  const initial = interfaceParent ? [interfaceParent] : []
   const byPartition = new Map<string, Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>>()
-  for (const partition of initial) {
-    const result = await run(partition)
-    byPartition.set(partition.id, result)
-    if (!result.structurePassed || !result.reviewPassed) return { ...result, contracts: [], graph: null, coverage: null, partitionEvidence: [{ partitionId: partition.id, resultRef: writeEvidence(commonDir, result) }] }
-    for (const change of result.changes) settledSources.set(change.path, change.source)
+  let pending = plan.partitions.filter(partition => seeds.has(partition.id))
+  while (pending.length) {
+    const layer = pending.filter(partition => !pending.some(ancestor => ancestor.id !== partition.id && seeds.get(partition.id)!.parentPath.startsWith(seeds.get(ancestor.id)!.parentPath.slice(0, -'spec.md'.length))))
+    const results = await mapSyncPartitions(layer, maxParallel, input.signal, run)
+    for (let index = 0; index < layer.length; index++) {
+      const partition = layer[index], result = results[index]
+      byPartition.set(partition.id, result)
+      if (!result.structurePassed || !result.reviewPassed) return { ...result, contracts: [], graph: null, coverage: null, partitionEvidence: [{ partitionId: partition.id, resultRef: writeEvidence(commonDir, result) }] }
+      for (const change of result.changes) settledSources.set(change.path, change.source)
+    }
+    pending = pending.filter(partition => !byPartition.has(partition.id))
   }
   const remaining = plan.partitions.filter(partition => !byPartition.has(partition.id))
   const parallel = await mapSyncPartitions(remaining, maxParallel, input.signal, run)
@@ -200,7 +225,7 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
     ? results.find(result => !result.structurePassed || !result.reviewPassed)?.status ?? 'failed'
     : gaps.some(gap => gap.gapKind === 'conflict') ? 'conflict' : gaps.length ? 'needs_input' : 'complete'
   const failure = results.find(result => result.failure)?.failure ?? (!seal.seal.passed ? { code: 'partition_final_seal_failed', message: JSON.stringify(seal.seal.findings.map(({ code, itemId, message }) => ({ code, itemId, message }))) } : null)
-  const compact = { ...first, phase: 'partitioned_final' as const, inputDigest: contentHash(JSON.stringify({ partitionPlanDigest: plan.digest, inputs: results.map(result => result.inputDigest) })), candidateDigest: seal.seal.candidateDigest, changes,
+  const compact = { ...first, partitionBinding: undefined, phase: 'partitioned_final' as const, inputDigest: contentHash(JSON.stringify({ partitionPlanDigest: plan.digest, inputs: results.map(result => result.inputDigest) })), candidateDigest: seal.seal.candidateDigest, changes,
     readyIds: structurePassed ? seal.coverage.items.filter(item => item.blockedBy.length === 0 && item.kind !== 'GAP').map(item => item.id) : [], readyFlowIds: readiness.readyFlowIds,
     blockedIds: seal.coverage.items.filter(item => item.blockedBy.length > 0).map(item => item.id), blockedFlows: readiness.blockedFlows,
     retiredIds: unique([...results.flatMap(result => result.retiredIds), ...seal.resolvedGapIds]), nodeChanges: [...input.nodeChanges ?? []],
@@ -344,8 +369,9 @@ export async function generateSyncPartitions(input: GenerationInput, plan: SyncP
   input = { ...structuredClone(data), signal }; plan = structuredClone(plan)
   const commonDir = input.snapshot.source.commonDir
   let generationPartitions = [...plan.partitions]
-  const interfaceParents = interfaceOnlyParentPartitions(generationPartitions, input.contracts)
-  let locals = generationPartitions.filter(partition => !interfaceParents.has(partition.id)).map(partition => ({ partition, input: localGeneration(input, partition, commonDir) })).filter(local => local.input.readyIds.length)
+  let selection = implementationPartitionSelection(plan, input.contracts)
+  const interfaceParents = selection.interfaceParents
+  let locals = selection.partitions.map(partition => ({ partition, input: localGeneration(input, partition, commonDir) })).filter(local => local.input.readyIds.length)
   let planned: FileWriterPlan = { version: 'sync-file-writers-v1', writers: [], traces: [] }
   try {
     if (!specOnly) planned = await implementationFileWriters(input, locals, plan, maxParallel, options, checkpoints)
@@ -353,7 +379,8 @@ export async function generateSyncPartitions(input: GenerationInput, plan: SyncP
     const authorization = await options.beforePartitionGeneration?.(plannedPaths, writeEvidence(commonDir, planned))
     if (authorization) { input = { ...input, allowedScope: authorization.scope, composed: authorization.composed ?? input.composed } }
     generationPartitions = generationPartitions.map(partition => { const paths = planned.writers.find(writer => writer.partitionId === partition.id)?.paths ?? []; return { ...partition, readPaths: unique([...partition.readPaths, ...paths]), writePaths: unique([...partition.writePaths, ...paths]), sourcePaths: unique([...partition.sourcePaths, ...paths.filter(path => within(path, options.implementationPolicy?.sourcePaths ?? []))]) } })
-    locals = generationPartitions.filter(partition => !interfaceParents.has(partition.id)).map(partition => ({ partition, input: localGeneration(input, partition, commonDir) })).filter(local => local.input.readyIds.length)
+    selection = implementationPartitionSelection({ ...plan, partitions: generationPartitions }, input.contracts)
+    locals = selection.partitions.map(partition => ({ partition, input: localGeneration(input, partition, commonDir) })).filter(local => local.input.readyIds.length)
   } catch (error) {
     const cause = error as { code?: string; message?: string }
     return { status: input.signal?.aborted ? 'cancelled' : 'repair', inputId: input.snapshot.id, inputDigest: '', candidate: null, candidateFiles: null, output: planned, reviewOutput: null, review: null, validationFindings: [], traces: planned.traces, candidateValidated: false, reviewPassed: false, runtimeVerification: 'not_run', delivery: 'not_applied', failure: { code: cause.code ?? 'implementation_plan_invalid', message: cause.message ?? String(error) } }
@@ -394,7 +421,7 @@ export async function generateSyncPartitions(input: GenerationInput, plan: SyncP
   const base: GenerationResult = { fileWriterPlanRef: writeEvidence(commonDir, planned), status: 'repair', inputId: input.snapshot.id, inputDigest: contentHash(JSON.stringify({ partitionPlanDigest: plan.digest, candidateDigest: candidate.digest })), candidate, candidateFiles: null, output: { version: 'sync-files-v1', changes }, reviewOutput: null, review: null, validationFindings, traces: builders, candidateValidated: false, reviewPassed: false, runtimeVerification: 'not_run', delivery: 'not_applied', failure: null }
   if (validationFindings.some(finding => finding.severity === 'error')) return base
   base.candidateValidated = true
-  const reviews = [...locals.map(local => ({ id: local.partition.id, input: local.input })), ...plan.dependencies.map((edge, index) => {
+  const reviews = [...locals.map(local => ({ id: local.partition.id, input: local.input })), ...selection.dependencies.map((edge, index) => {
     const endpoints = generationPartitions.filter(partition => [edge.from, edge.to].includes(partition.id))
     const paths = unique(endpoints.flatMap(partition => partition.readPaths)), targets = endpoints.flatMap(partition => partition.targets)
     const combined = { ...endpoints[0], id: `edge-${index}`, readPaths: paths, writePaths: unique(endpoints.flatMap(partition => partition.writePaths)), sourcePaths: unique(endpoints.flatMap(partition => partition.sourcePaths)), targets }
