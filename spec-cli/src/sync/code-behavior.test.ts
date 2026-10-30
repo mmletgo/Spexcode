@@ -322,7 +322,13 @@ test('真实runner的冻结三方JSON共享正文引用且逐字段还原旧输�
   const expectedDelivery = expectedTextView(baseline.verifiedDelivery.immutableTree), expectedComposed = expectedTextView(input.composed.tree)
   const globalReviewSchema = structuredClone(CODE_BEHAVIOR_REVIEW_SCHEMA)
   await analyzeCodeBehavior(input, async request => {
-    if (request.purpose === 'code_behavior_analyze') assert.deepEqual(request.schema, CODE_BEHAVIOR_SCHEMA)
+    if (request.purpose === 'code_behavior_analyze') {
+      const expected = structuredClone(CODE_BEHAVIOR_SCHEMA)
+      ;(expected.properties as Record<string, Record<string, unknown>>).newNodes.maxItems = 0
+      assert.deepEqual(request.schema, expected)
+      assert.notEqual(request.schema, CODE_BEHAVIOR_SCHEMA)
+      assert.equal((CODE_BEHAVIOR_SCHEMA.properties as Record<string, Record<string, unknown>>).newNodes.maxItems, undefined)
+    }
     else {
       const reviewed = JSON.parse(request.prompt.split('待审分析:\n')[1]) as { analysisDigest: string }
       const expected = structuredClone(globalReviewSchema)
@@ -875,6 +881,56 @@ test('无raw的既有叶只保留原stub并将行为事实交给P1初始化', as
   })
 })
 
+test('纯父局部视图缺席不等于全树缺席，空业务源码候选禁止newNodes', async t => {
+  const f = await fixture(t), parentPath = '.spec/export/spec.md', existingLeaf = '.spec/export/export-contract/spec.md'
+  writeFileSync(join(f.root, parentPath), '---\ntitle: 导出上层原意\nstatus: pending\n---\n\n## raw source\n\n保持当前导出能力，由既有子叶承接具体业务。\n')
+  git(f.root, 'add', parentPath); git(f.root, 'commit', '-m', 'seed pure parent intent')
+  const before = await f.input(), input: CodeBehaviorInput = { ...before, baseline: null, composed: composeInputSnapshots(before.snapshot, null).composed!, origin: 'initial',
+    partition: { id: 'pure-parent', changedPaths: [parentPath], factSourcePaths: [] },
+    plan: { ...before.plan, intentNodeId: 'export', targets: [{ nodeId: 'export', path: parentPath }], readPaths: [parentPath, 'package.json'], writePaths: [parentPath], sourcePaths: [], facts: [] },
+  }
+  assert.ok(readTree(input.snapshot.source.commonDir, input.snapshot.immutableTree).some(entry => entry.path === existingLeaf), '完整冻结Git树中真实子叶已存在')
+  const calls: string[] = []
+  const localRunner = (newCodePath?: string): ElaborationRunner => async request => {
+    calls.push(request.purpose)
+    const context = readFrozenBehaviorContext<{ partition: { id: string }; unownedSourcePaths: string[]; readablePaths: { path: string }[]; newSource: [string, string][]; plan: { sourcePaths: string[] }; contractItems: { previous: unknown[]; current: unknown[] } }>(request)
+    assert.deepEqual(context.unownedSourcePaths, [])
+    assert.deepEqual(context.plan.sourcePaths, [])
+    assert.ok(!context.readablePaths.some(entry => entry.path === existingLeaf))
+    assert.ok(!new Map(context.newSource).has(existingLeaf))
+    assert.deepEqual(context.contractItems, { previous: [], current: [] })
+    assert.match(request.prompt, /局部投影/)
+    assert.match(request.prompt, /缺席.*不.*全树不存在/)
+    assert.match(request.prompt, /读取完整性由工具\/程序记录/)
+    assert.match(request.prompt, /不手工复述task\/body entry的hash、长度或读取区间/)
+    if (request.purpose === 'code_behavior_analyze') {
+      const newNodes = (request.schema.properties as Record<string, Record<string, unknown>>).newNodes
+      assert.equal(newNodes.maxItems, 0, '纯父没有真实未治理业务源码，Native schema必须禁止新建叶')
+      assert.ok(!JSON.stringify(newNodes).includes('"enum":[]'))
+    }
+    return runner('refactor', proposal => {
+      proposal.changes = (proposal.changes as Record<string, unknown>[]).map(change => ({ ...change, affectedIds: [], ruleIds: [] }))
+      proposal.newNodes = newCodePath ? [{ codePath: newCodePath, parentNodeId: 'export', basis: '不能从局部缺席推断全树没有该叶' }] : []
+    })(request)
+  }
+  const accepted = await analyzeCodeBehavior(input, localRunner())
+  assert.equal(accepted.reviewPassed, true)
+  assert.deepEqual(accepted.newNodes, [])
+  assert.deepEqual(calls, ['code_behavior_analyze', 'code_behavior_review'])
+  for (const path of [existingLeaf, 'src/export.js', 'tests/export.test.mjs', parentPath]) {
+    calls.length = 0
+    await assert.rejects(analyzeCodeBehavior(input, localRunner(path)), (error: Error & { code: string }) => {
+      assert.equal(error.code, 'behavior_analysis_invalid')
+      assert.match(error.message, /newNodes/)
+      return true
+    })
+    assert.deepEqual(calls, ['code_behavior_analyze'], '非法新归属在独审前拒绝')
+  }
+  await assert.rejects(analyzeCodeBehavior(input, runner('refactor', proposal => {
+    proposal.changes = [{ ...(proposal.changes as object[])[0], paths: ['src/export.js'], affectedIds: [], ruleIds: [] }]
+  })), /未完整读取的路径/, '局部schema限制不能放宽原读取门禁')
+})
+
 test('冻结source角色只发现业务根，纯测试helper可读且旧计划保持writePaths发现语义', async t => {
   const f = await fixture(t), sourcePath = 'src/test_business.py', tests = ['tests/test_flow.py', 'tests/support.py']
   for (const path of [sourcePath, ...tests]) writeFileSync(join(f.root, path), 'def value():\n    return 1\n')
@@ -884,11 +940,16 @@ test('冻结source角色只发现业务根，纯测试helper可读且旧计划�
   const analysis = await analyzeCodeBehavior(input, async request => {
     const context = readFrozenBehaviorContext<{ changedPaths: string[]; newSource: [string, string][] }>(request)
     assert.deepEqual(context.changedPaths, [sourcePath])
+    if (request.purpose === 'code_behavior_analyze') {
+      const schema = (request.schema.properties as { newNodes: { maxItems: number; items: { properties: { codePath: { enum: string[] } } } } }).newNodes
+      assert.equal(schema.maxItems, 1)
+      assert.deepEqual(schema.items.properties.codePath.enum, [sourcePath], '不含Spec、纯测试和已治理src/export.js')
+    }
     assert.ok(tests.every(path => new Map(context.newSource).has(path)))
     return runner('allowed_change', proposal => { proposal.newNodes = [{ codePath: sourcePath, parentNodeId: 'export-contract', basis: '真实业务helper需要归属' }] })(request)
   })
   assert.deepEqual(analysis.newNodes.map(node => node.codePath), [sourcePath])
-  await assert.rejects(analyzeCodeBehavior(input, runner('allowed_change', proposal => { proposal.newNodes = [sourcePath, tests[0]].map(codePath => ({ codePath, parentNodeId: 'export-contract', basis: '不能凭测试可写新增业务归属' })) })), /授权业务源码/)
+  await assert.rejects(analyzeCodeBehavior(input, runner('allowed_change', proposal => { proposal.newNodes = [sourcePath, tests[0]].map(codePath => ({ codePath, parentNodeId: 'export-contract', basis: '不能凭测试可写新增业务归属' })) })), /newNodes/)
   const restored = { ...input, plan: JSON.parse(JSON.stringify(before.plan)) as CodeBehaviorInput['plan'] }, stopped = new Error('captured legacy discovery')
   await assert.rejects(analyzeCodeBehavior(restored, async request => {
     const context = readFrozenBehaviorContext<{ changedPaths: string[] }>(request)
