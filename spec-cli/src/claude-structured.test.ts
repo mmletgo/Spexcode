@@ -98,7 +98,7 @@ test('controlled Claude compact boundaries preserve one original turn without gr
     for (const content of ['Your response above was cut off mid-stream. Resume directly from where it stops — no apology, no recap. If none of it survived, answer the request from the start.', '']) {
       const extra = structuredClone(raw)
       extra.splice(9, 0, { type: 'user', sessionId: 'session', uuid: 'another-user', parentUuid: 'summary-1', promptId: 'prompt', isMeta: true, turnCompanion: true, message: { role: 'user', content } })
-      assert.throws(() => proveClaudeFrozenReads(ref, witness(extra)), { code: 'stale_result', message: 'Claude history appended another user turn' }, 'a native continuation string remains a rejected extra user turn')
+      assert.throws(() => proveClaudeFrozenReads(ref, witness(extra)), { code: 'stale_result' }, 'a continuation string outside an exact assistant boundary remains a rejected extra user turn')
     }
     const stringOriginal = structuredClone(raw), stringMessage = { role: 'user', content: 'public prompt' }
     stringOriginal[0].message = stringMessage
@@ -175,6 +175,111 @@ test('controlled Claude compact boundaries preserve one original turn without gr
     const savedHistory = join(directory, ref.contextDigest, 'histories', legacyProof.historyDigest), beforeReplay = readFileSync(savedHistory)
     verifyFrozenReadProof(ref, legacyProof, { threadId: 'session', turnId: 'user' })
     assert.deepEqual(readFileSync(savedHistory), beforeReplay, 'legacy witness replay must not rewrite its original JSON bytes')
+  } finally { rmSync(directory, { recursive: true, force: true }) }
+})
+
+test('Claude internal truncated-response companions require native flags and a new exact API consumer', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'spex-claude-recovery-'))
+  try {
+    const prompt = 'public prompt', recoveryText = 'Your response above was cut off mid-stream. Resume directly from where it stops — no apology, no recap. If none of it survived, answer the request from the start.'
+    const ref = freezeContext({ directory, sourceRoot: process.cwd(), binding: { requestKey: 'recovery', inputDigest: 'input' }, entries: [{ id: 'task', label: 'task', kind: 'utf8', bytes: Buffer.from('public frozen task') }] })
+    const input = { contextDigest: ref.contextDigest, entryId: 'task', startByte: 0, endByte: 18 }
+    const original = { role: 'user', content: [{ type: 'text', text: prompt }] }, recoveryMessage = { role: 'user', content: recoveryText }
+    const apiRecovery = { role: 'user', content: [{ type: 'text', text: recoveryText }] }, recoveryHash = claudeMessageDigest(apiRecovery)
+    const reply = { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'read', content: readFrozenRange(ref, input).response.contentItems.map(item => ({ type: 'text', text: item.text })) }] }
+    const request = (id: string, tail: string[], base?: string, keep = 0) => ({ type: 'api-request', sessionId: 'session', id, shapeHash: 'a'.repeat(64), keep, ...(base ? { base } : {}), tail, params: { model: 'MiniMax-M3' } })
+    const assistant = (uuid: string, parentUuid: string, requestRef: string, content: unknown[] = []) => ({ type: 'assistant', sessionId: 'session', uuid, parentUuid, requestRef, message: { role: 'assistant', content } })
+    const companion = (uuid: string, parentUuid: string) => ({ type: 'user', sessionId: 'session', uuid, parentUuid, promptId: 'prompt', isMeta: true, turnCompanion: true, message: recoveryMessage })
+    const raw: Record<string, unknown>[] = [
+      { type: 'user', sessionId: 'session', uuid: 'user', parentUuid: null, promptId: 'prompt', message: original },
+      { type: 'api-request-shape', sessionId: 'session', shapeHash: 'a'.repeat(64), shape: { tools: ['StructuredOutput', 'mcp__frozen__spex_read_frozen'].map(name => ({ name })) } },
+      request('request-1', [claudeMessageDigest(original)]), assistant('interrupted', 'user', 'request-1'), companion('recovery-1', 'interrupted'),
+      { type: 'api-request-blob', sessionId: 'session', message: apiRecovery, hash: recoveryHash },
+      request('request-2', [recoveryHash], 'request-1', 1),
+      assistant('read-call', 'recovery-1', 'request-2', [{ type: 'tool_use', id: 'read', name: 'mcp__frozen__spex_read_frozen', input }]),
+      { type: 'user', sessionId: 'session', uuid: 'read-reply', parentUuid: 'read-call', promptId: 'prompt', sourceToolAssistantUUID: 'read-call', message: reply },
+      request('request-3', [claudeMessageDigest(reply)], 'request-2', 2),
+      assistant('schema-call', 'read-reply', 'request-3', [{ type: 'tool_use', id: 'schema', name: 'StructuredOutput', input: { answer: 'public' } }]),
+      { type: 'user', sessionId: 'session', uuid: 'schema-reply', parentUuid: 'schema-call', promptId: 'prompt', sourceToolAssistantUUID: 'schema-call', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'schema', content: 'Structured output provided successfully' }] } },
+    ]
+    const nativePath = join(directory, 'native.jsonl')
+    const witness = (rows = raw): ClaudeFrozenWitness => {
+      writeFileSync(nativePath, rows.map(row => JSON.stringify(row)).join('\n') + '\n')
+      return { version: 1, provider: 'claude-code', cliVersion: '2.1.309 (Claude Code)', model: 'MiniMax-M3', sessionId: 'session', userUuid: 'user', promptId: 'prompt', prompt, nativeHistoryPath: nativePath, history: readClaudePublicHistory(nativePath, 'session'), echo: { uuid: 'user', session_id: 'session', message: original }, result: { type: 'result', subtype: 'success', is_error: false, session_id: 'session', uuid: 'result', user_message_uuid: 'user', user_message_uuids: ['user'], structured_output: { answer: 'public' } }, initTools: ['StructuredOutput', 'mcp__frozen__spex_read_frozen'] }
+    }
+    const valid = witness(), proof = proveClaudeFrozenReads(ref, valid)
+    assert.equal(proof.receipts.length, 1)
+    assert.deepEqual(proof.coveredEntryIds, ['task'])
+    assert.equal(valid.history.find(row => row.uuid === 'recovery-1')!.message!.content, recoveryText)
+    assert.equal(valid.history.find(row => row.uuid === 'recovery-1')!.isMeta, true)
+    assert.equal(valid.history.find(row => row.uuid === 'recovery-1')!.turnCompanion, true)
+    verifyFrozenReadProof(ref, proof, { threadId: 'session', turnId: 'user' })
+    const row = (rows: typeof raw, id: string) => rows.find(item => item.uuid === id || item.id === id)!
+    const cases: Array<[string, (rows: typeof raw) => void]> = [
+      ['missing meta flag', rows => { delete row(rows, 'recovery-1').isMeta }],
+      ['missing companion flag', rows => { delete row(rows, 'recovery-1').turnCompanion }],
+      ['false flag', rows => { row(rows, 'recovery-1').isMeta = false }],
+      ['string flag', rows => { row(rows, 'recovery-1').turnCompanion = 'true' }],
+      ['wrong prompt', rows => { row(rows, 'recovery-1').promptId = 'foreign' }],
+      ['wrong session', rows => { row(rows, 'recovery-1').sessionId = 'foreign' }],
+      ['earlier parent', rows => { row(rows, 'recovery-1').parentUuid = 'user' }],
+      ['tool-result identity', rows => { row(rows, 'recovery-1').sourceToolAssistantUUID = 'interrupted' }],
+      ['unknown text', rows => { row(rows, 'recovery-1').message = { role: 'user', content: 'continue with different business instructions' } }],
+      ['suffix', rows => { row(rows, 'recovery-1').message = { role: 'user', content: recoveryText + '\n' } }],
+      ['array companion', rows => { row(rows, 'recovery-1').message = apiRecovery }],
+      ['message extra field', rows => { row(rows, 'recovery-1').message = { ...recoveryMessage, unknown: 'new semantics' } }],
+      ['raw API string is not a compact summary', rows => { const blob = rows.find(item => item.type === 'api-request-blob')!; blob.message = recoveryMessage; blob.hash = claudeMessageDigest(apiRecovery) }],
+      ['API message extra field', rows => { const blob = rows.find(item => item.type === 'api-request-blob')!; blob.message = { ...apiRecovery, unknown: 'new semantics' }; blob.hash = claudeMessageDigest(blob.message); row(rows, 'request-2').tail = [blob.hash] }],
+      ['no API consumption', rows => { row(rows, 'request-2').tail = [] }],
+      ['old API consumer', rows => { row(rows, 'read-call').requestRef = 'request-1' }],
+      ['schema uses pre-companion API', rows => { row(rows, 'schema-call').requestRef = 'request-1' }],
+      ['no original prompt', rows => { row(rows, 'request-1').tail = [] }],
+      ['compaction confusion', rows => { Object.assign(row(rows, 'recovery-1'), { isCompactSummary: true, isVisibleInTranscriptOnly: true, summarizedTurnPromptUuids: ['user'] }) }],
+      ['no later schema output', rows => { rows.splice(rows.findIndex(item => item.uuid === 'schema-call')) }],
+    ]
+    for (const [name, mutate] of cases) { const bad = structuredClone(raw); mutate(bad); assert.throws(() => proveClaudeFrozenReads(ref, witness(bad)), name) }
+    for (const content of [
+      [{ type: 'text', text: recoveryText + 'extra' }],
+      [{ type: 'text', text: 'extra' }, ...apiRecovery.content],
+      [...apiRecovery.content, { type: 'text', text: 'extra' }],
+      [{ type: 'text', text: JSON.stringify(reply.content[0]) }, ...apiRecovery.content],
+    ]) {
+      const bad = structuredClone(raw), blob = bad.find(item => item.type === 'api-request-blob')!
+      blob.message = { role: 'user', content }; blob.hash = claudeMessageDigest(blob.message)
+      row(bad, 'request-2').tail = [blob.hash]
+      assert.throws(() => proveClaudeFrozenReads(ref, witness(bad)), 'unknown API text cannot hide beside a valid companion')
+    }
+    const badHash = structuredClone(raw); badHash.find(item => item.type === 'api-request-blob')!.hash = 'f'.repeat(64)
+    assert.throws(() => proveClaudeFrozenReads(ref, witness(badHash)), /invalid bytes or type/)
+    const partial = structuredClone(raw), partialInput = { ...input, endByte: 17 }
+    const partialCall = row(partial, 'read-call').message as ClaudePublicMessage
+    contentBlocks(partialCall)[0].input = partialInput
+    const partialReply = { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'read', content: readFrozenRange(ref, partialInput).response.contentItems.map(item => ({ type: 'text', text: item.text })) }] }
+    row(partial, 'read-reply').message = partialReply; row(partial, 'request-3').tail = [claudeMessageDigest(partialReply)]
+    assert.throws(() => proveClaudeFrozenReads(ref, witness(partial)), /not completely read/)
+    const merged = structuredClone(raw), mergedBlob = merged.find(item => item.type === 'api-request-blob')!
+    mergedBlob.message = { role: 'user', content: [{ type: 'text', text: prompt + '\n' }, ...apiRecovery.content] }
+    mergedBlob.hash = claudeMessageDigest(mergedBlob.message); row(merged, 'request-2').tail = [mergedBlob.hash]; row(merged, 'request-2').keep = 0; row(merged, 'request-3').keep = 1
+    assert.deepEqual(proveClaudeFrozenReads(ref, witness(merged)).coveredEntryIds, ['task'])
+    const repeated = structuredClone(raw)
+    repeated.splice(repeated.findIndex(item => item.uuid === 'read-call'), 0, assistant('interrupted-2', 'recovery-1', 'request-2'), companion('recovery-2', 'interrupted-2'), request('request-2b', [recoveryHash], 'request-2', 1))
+    row(repeated, 'read-call').parentUuid = 'recovery-2'; row(repeated, 'read-call').requestRef = 'request-2b'; row(repeated, 'request-3').base = 'request-2b'
+    assert.deepEqual(proveClaudeFrozenReads(ref, witness(repeated)).coveredEntryIds, ['task'])
+    const borrowed = structuredClone(repeated); borrowed.splice(borrowed.findIndex(item => item.id === 'request-2b'), 1); row(borrowed, 'read-call').requestRef = 'request-2'; row(borrowed, 'request-3').base = 'request-2'
+    assert.throws(() => proveClaudeFrozenReads(ref, witness(borrowed)), 'the second identical companion cannot borrow the first API consumer')
+    const secondOldSchema = structuredClone(repeated); row(secondOldSchema, 'schema-call').requestRef = 'request-2'
+    assert.throws(() => proveClaudeFrozenReads(ref, witness(secondOldSchema)), 'schema after the second companion cannot borrow the first recovery request')
+    const oldOutput = structuredClone(raw)
+    oldOutput.splice(oldOutput.findIndex(item => item.uuid === 'schema-reply'), 0, companion('recovery-after-schema', 'schema-call'), request('request-4', [recoveryHash], 'request-3', 3), assistant('after-schema', 'recovery-after-schema', 'request-4'))
+    assert.throws(() => proveClaudeFrozenReads(ref, witness(oldOutput)), 'a pre-companion schema call cannot complete after its companion')
+    witness()
+    const forgedWitness = structuredClone(valid); delete forgedWitness.history.find(item => item.uuid === 'recovery-1')!.isMeta
+    const forgedBytes = JSON.stringify(forgedWitness), forgedDigest = createHash('sha256').update(forgedBytes).digest('hex')
+    writeFileSync(join(directory, ref.contextDigest, 'histories', forgedDigest), forgedBytes)
+    assert.throws(() => verifyFrozenReadProof(ref, { ...proof, historyDigest: forgedDigest }, { threadId: 'session', turnId: 'user' }), /saved public witness differs/)
+    const tamperedRaw = structuredClone(raw); delete row(tamperedRaw, 'recovery-1').turnCompanion
+    witness(tamperedRaw)
+    assert.throws(() => verifyFrozenReadProof(ref, proof, { threadId: 'session', turnId: 'user' }), /saved public witness differs/)
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })
 
