@@ -241,6 +241,57 @@ test('未读可选正文被事实或checkedPaths引用时拒绝，完整读取�
   assert.equal(accepted.facts.some(item => item.source === fact.source && item.text === fact.text), true)
 })
 
+test('分区新增Code事实仅引用本区精确owner路径，共享只读测试留在change evidence', async t => {
+  const f = await fixture(t), codePath = 'src/export.js', readonlyTestPath = 'tests/export.test.mjs'
+  writeFileSync(join(f.root, codePath), `${f.source}\n// partition owner fact probe\n`)
+  const prepared = await f.input(), factSourcePaths = [codePath]
+  const input: CodeBehaviorInput = { ...prepared, partition: { id: 'owned-facts', changedPaths: [codePath], factSourcePaths } }
+  const sharedTestFact = { source: `code:${readonlyTestPath}#fixture`, text: '共享只读测试中的fixture说明了所有状态路径。' }
+  await assert.rejects(analyzeCodeBehavior(input, runner('refactor', proposal => { proposal.facts = [sharedTestFact] })), (error: unknown) => {
+    assert.ok(error instanceof Error)
+    assert.equal((error as Error & { code?: string }).code, 'behavior_analysis_invalid')
+    const diagnostic = JSON.parse(error.message) as { details: { paths: string[]; factSourcePaths: string[] } }
+    assert.deepEqual(diagnostic.details.paths, [readonlyTestPath])
+    assert.deepEqual(diagnostic.details.factSourcePaths, factSourcePaths)
+    return true
+  })
+
+  const ownerFact = { source: `code:${codePath}#ExportService`, text: '本区ExportService对导出任务执行幂等提交。' }
+  const owner = await analyzeCodeBehavior(input, async request => {
+    const context = readFrozenBehaviorContext<{ partition: { id: string; changedPaths: string[]; factSourcePaths: string[] } }>(request)
+    assert.deepEqual(context.partition, { id: 'owned-facts', changedPaths: [codePath], factSourcePaths })
+    return runner('refactor', (proposal, frozen) => {
+      proposal.facts = [ownerFact]
+      proposal.changes = (proposal.changes as Record<string, unknown>[]).map(change => ({
+        ...change,
+        evidence: `${String(change.evidence)}; 完整只读测试 ${readonlyTestPath}#AC-EXPORT-01 的断言作为调用边界证据。`,
+      }))
+      assert.ok(frozen.changedPaths.includes(codePath))
+    })(request)
+  })
+  assert.equal(owner.reviewPassed, true)
+  assert.deepEqual(owner.facts, [ownerFact])
+  assert.match(owner.changes[0].evidence, new RegExp(`${readonlyTestPath}#AC-EXPORT-01`))
+
+  await assert.rejects(analyzeCodeBehavior(input, runner('refactor', proposal => {
+    proposal.facts = [ownerFact, { ...ownerFact, text: '同一anchor不能在本区声明另一份不同事实。' }]
+  })), (error: unknown) => {
+    assert.ok(error instanceof Error)
+    assert.equal((error as Error & { code?: string }).code, 'behavior_analysis_invalid')
+    const diagnostic = JSON.parse(error.message) as { message: string; details: { paths: string[]; factSourcePaths: string[] } }
+    assert.match(diagnostic.message, /同一source不能提供不同text/)
+    assert.deepEqual(diagnostic.details.paths, [codePath])
+    assert.deepEqual(diagnostic.details.factSourcePaths, factSourcePaths)
+    return true
+  })
+
+  const trustedFact = { source: sharedTestFact.source, text: '已有可信测试事实由原计划逐字提供。' }
+  const trustedInput: CodeBehaviorInput = { ...input, plan: { ...input.plan, facts: [...input.plan.facts, trustedFact] } }
+  const trusted = await analyzeCodeBehavior(trustedInput, runner('refactor', proposal => { proposal.facts = [trustedFact] }))
+  assert.equal(trusted.reviewPassed, true)
+  assert.deepEqual(trusted.facts, [trustedFact])
+})
+
 function freezeSelection(snapshot: CodeBehaviorInput['snapshot'], bindings: FrozenBaselineSelection['bindings']): FrozenBaselineSelection {
   const body = { version: 'sync-baseline-selection-v1' as const, source: snapshot.source, bindings }
   return { ...body, digest: contentHash(JSON.stringify(body, (_key, value: unknown) => value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value)) }
@@ -486,7 +537,7 @@ test('all-null裁决只从原完整独审composed图恢复所选AC范围，当�
     return proposalFor('AC-EXPORT-02')(dispatch)
   })
   assert.equal(analysis.reviewPassed, true); assert.deepEqual(analysis.authorizedChanges.map(change => change.id), ['AC-EXPORT-02'])
-  const projected = await analyzeCodeBehavior({ ...current, partition: { id: 'decision-local', changedPaths: analysis.changes.flatMap(change => change.paths) } }, async dispatch => {
+  const projected = await analyzeCodeBehavior({ ...current, partition: { id: 'decision-local', changedPaths: analysis.changes.flatMap(change => change.paths), factSourcePaths: ['src/export.js'] } }, async dispatch => {
     const frozen = readFrozenBehaviorContext<{ decision: { previousComposed?: unknown; previousReadPaths?: string[] }; verifiedDelivery: unknown[] }>(dispatch)
     assert.deepEqual(frozen.decision.previousComposed, previousComposed)
     assert.deepEqual(frozen.decision.previousReadPaths, current.decision!.previousReadPaths)
@@ -752,7 +803,7 @@ test('无raw的既有叶只保留原stub并将行为事实交给P1初始化', as
   const input: CodeBehaviorInput = {
     ...seed, snapshot, baseline,
     composed: composeInputSnapshots(snapshot, baseline, { retainConflicts: true }).composed!,
-    plan, origin: 'code', partition: { id: 'legacy-leaf', changedPaths: [...leafPaths, 'src/export.js'] },
+    plan, origin: 'code', partition: { id: 'legacy-leaf', changedPaths: [...leafPaths, 'src/export.js'], factSourcePaths: ['src/export.js'] },
   }
   const parentRaw = parseParts(f.raw)!.rawSource!
   const copiedParentRaw = `${stubFrontmatter}## raw source\n\n${parentRaw}\n\n## expanded spec\n\n${legacyBody}`
@@ -795,7 +846,7 @@ test('无raw的既有叶只保留原stub并将行为事实交给P1初始化', as
   }
   const initialInput: CodeBehaviorInput = {
     ...input, baseline: null, origin: 'initial', composed: composeInputSnapshots(snapshot, null).composed!, plan: initialPlan,
-    partition: { id: 'first-rawless-leaves', changedPaths: [...leafPaths, 'src/export.js'] },
+    partition: { id: 'first-rawless-leaves', changedPaths: [...leafPaths, 'src/export.js'], factSourcePaths: ['src/export.js'] },
   }
   const initial = await analyzeCodeBehavior(initialInput, async request => {
     if (request.purpose === 'code_behavior_analyze') {
