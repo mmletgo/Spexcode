@@ -156,16 +156,31 @@ function ownerNodesForPath(path: string, contracts: readonly Contract[], governa
   return owners
 }
 
-function closestNode(path: string, governanceNodes: ReadonlyMap<string, GovernanceNode>, preferred: ReadonlySet<string>): string | undefined {
+function closestNode(path: string, governanceNodes: ReadonlyMap<string, GovernanceNode>, preferred: ReadonlySet<string>): GovernanceNode | undefined {
   const targetParts = posix.dirname(path).split('/').filter(Boolean)
   const candidates = [...governanceNodes.values()].flatMap(node => [...node.code, ...node.related].map(entry => {
     const parts = posix.dirname(entry.path).split('/').filter(Boolean)
     let shared = 0
     while (shared < targetParts.length && shared < parts.length && targetParts[shared] === parts[shared]) shared++
     const preference = preferred.has(node.id) ? 1 : 0
-    return { nodeId: node.id, shared, preference, distance: targetParts.length + parts.length - shared * 2 }
-  })).sort((a, b) => b.preference - a.preference || b.shared - a.shared || a.distance - b.distance || compare(a.nodeId, b.nodeId))
-  return candidates[0]?.nodeId
+    return { node, shared, preference, distance: targetParts.length + parts.length - shared * 2 }
+  })).filter(candidate => candidate.shared > 0)
+    .sort((a, b) => b.shared - a.shared || a.distance - b.distance || b.preference - a.preference || compare(a.node.id, b.node.id) || compare(a.node.path, b.node.path))
+  return candidates[0]?.node
+}
+
+function specModuleDirectory(specPath: string): string {
+  return posix.dirname(posix.dirname(specPath))
+}
+
+function sourceModuleDirectory(path: string, sourcePaths: readonly string[]): string {
+  const root = [...sourcePaths].filter(source => coveredPath(path, [source])).sort((a, b) => b.length - a.length || compare(a, b))[0]
+  if (!root) return posix.dirname(path)
+  const normalizedRoot = root.replace(/\/+$/, '')
+  const relative = path === normalizedRoot ? '' : path.slice(normalizedRoot.length).replace(/^\/+/, '')
+  const segments = relative.split('/').filter(Boolean)
+  const topModule = segments.length > 1 ? segments[0] : undefined
+  return topModule ? posix.join(normalizedRoot, topModule) : normalizedRoot
 }
 
 function addContractClaims(paths: Set<string>, claims: readonly Claim[], files: ReadonlyMap<string, string>, changed: ReadonlySet<string>): void {
@@ -344,11 +359,11 @@ function partitionDrafts(input: PlanSyncPartitionsInput, contracts: readonly Con
       assigned.set(path, writableOwners)
       continue
     }
-    const nearest = closestNode(path, governanceNodes, preferred) ?? input.plan.intentNodeId
-    const directory = posix.dirname(path)
-    const key = `${directory}\0${nearest}`
+    const nearest = closestNode(path, governanceNodes, preferred)
+    const module = nearest ? specModuleDirectory(nearest.path) : sourceModuleDirectory(path, input.plan.sourcePaths ?? [])
+    const key = nearest ? `discovery:${module}` : `discovery-source:${module}`
     const groups = discoveries.get(key) ?? []
-    groups.push({ targetNodeIds: [], changedPaths: [path], discoveryNodeIds: [nearest], packingKey: `discovery:${key}` })
+    groups.push({ targetNodeIds: [], changedPaths: [path], discoveryNodeIds: nearest ? [nearest.id] : [], packingKey: key })
     discoveries.set(key, groups)
   }
 
@@ -369,8 +384,8 @@ function partitionDrafts(input: PlanSyncPartitionsInput, contracts: readonly Con
   for (const draft of byRoot.values()) {
     draft.targetNodeIds = uniqueSorted(draft.targetNodeIds)
     draft.changedPaths = uniqueSorted(draft.changedPaths)
-    const targetDirs = uniqueSorted(draft.targetNodeIds.map(nodeId => posix.dirname(targetByNode.get(nodeId)!.path)))
-    draft.packingKey = targetDirs.length === 1 ? `targets:${targetDirs[0]}` : `shared:${draft.targetNodeIds.join(',')}`
+    const targetModules = uniqueSorted(draft.targetNodeIds.map(nodeId => specModuleDirectory(targetByNode.get(nodeId)!.path)))
+    draft.packingKey = targetModules.length === 1 ? `targets:${targetModules[0]}` : `shared:${draft.targetNodeIds.join(',')}`
   }
 
   const contractsByNode = new Map<string, Contract[]>()
@@ -385,7 +400,7 @@ function partitionDrafts(input: PlanSyncPartitionsInput, contracts: readonly Con
   for (const draft of orderedDrafts) {
     const currentBytes = contextBytes(input, graph, contractsByNode, governanceNodes, specOnlyNodeIds, draft, limitBytes)
     const previousIndex = lastByKey.get(draft.packingKey)
-    const packable = draft.packingKey.startsWith('targets:') || draft.packingKey.startsWith('discovery:')
+    const packable = draft.packingKey.startsWith('targets:') || draft.packingKey.startsWith('discovery:') || draft.packingKey.startsWith('discovery-source:')
     if (packable && previousIndex !== undefined && currentBytes <= limitBytes) {
       const previous = packed[previousIndex]
       const combined: Draft = {

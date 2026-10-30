@@ -235,8 +235,8 @@ test('identical current bytes do not collapse distinct per-path historical estim
 
 test('raw-only Spec governance assigns leaf writers and keeps raw ancestors read-only', () => {
   const rawRootPath = '.spec/raw-project/spec.md'
-  const rawAlphaPath = '.spec/raw-project/alpha/spec.md'
-  const rawBetaPath = '.spec/raw-project/beta/spec.md'
+  const rawAlphaPath = '.spec/raw-project/module-alpha/alpha/spec.md'
+  const rawBetaPath = '.spec/raw-project/module-beta/beta/spec.md'
   const nodes = [
     { id: 'raw-root', path: rawRootPath },
     { id: 'raw-alpha', path: rawAlphaPath },
@@ -278,8 +278,8 @@ test('raw-only Spec governance assigns leaf writers and keeps raw ancestors read
 
 test('raw-only unowned sources discover the nearest provided node identity instead of defaulting to root', () => {
   const rawRootPath = '.spec/raw-project/spec.md'
-  const rawAlphaPath = '.spec/raw-project/alpha/spec.md'
-  const rawBetaPath = '.spec/raw-project/beta/spec.md'
+  const rawAlphaPath = '.spec/raw-project/module-alpha/alpha/spec.md'
+  const rawBetaPath = '.spec/raw-project/module-beta/beta/spec.md'
   const nodes = [
     { id: 'raw-root', path: rawRootPath },
     { id: 'raw-alpha', path: rawAlphaPath },
@@ -319,10 +319,11 @@ test('target frontmatter is recovered from files even when callers omit nodes an
 
 test('ordinary contract dependencies retain spec and ID context but defer implementation reads to cross-edge review', () => {
   const root = contract('root', rootPath, [], [requirement('REQ-ROOT', 'root', rootPath, ['REQ-LEAF-A', 'REQ-LEAF-B'])])
-  const leafA = contract('leaf-a', alphaPath, ['src/leaf-a.ts'], [requirement('REQ-LEAF-A', 'leaf-a', alphaPath), acceptance('AC-LEAF-A', 'leaf-a', alphaPath, 'tests/leaf-a.test.ts#A-1')])
-  const leafB = contract('leaf-b', betaPath, ['src/leaf-b.ts'], [requirement('REQ-LEAF-B', 'leaf-b', betaPath), acceptance('AC-LEAF-B', 'leaf-b', betaPath, 'tests/leaf-b.test.ts#B-1')])
+  const leafAPath = '.spec/project/services/leaf-a/spec.md', leafBPath = '.spec/project/api/leaf-b/spec.md'
+  const leafA = contract('leaf-a', leafAPath, ['src/leaf-a.ts'], [requirement('REQ-LEAF-A', 'leaf-a', leafAPath), acceptance('AC-LEAF-A', 'leaf-a', leafAPath, 'tests/leaf-a.test.ts#A-1')])
+  const leafB = contract('leaf-b', leafBPath, ['src/leaf-b.ts'], [requirement('REQ-LEAF-B', 'leaf-b', leafBPath), acceptance('AC-LEAF-B', 'leaf-b', leafBPath, 'tests/leaf-b.test.ts#B-1')])
   const files = new Map<string, string>([
-    [rootPath, 'root spec'], [alphaPath, 'leaf a spec'], [betaPath, 'leaf b spec'],
+    [rootPath, 'root spec'], [leafAPath, 'leaf a spec'], [leafBPath, 'leaf b spec'],
     ['src/leaf-a.ts', 'leaf a implementation'], ['src/leaf-b.ts', 'leaf b implementation'],
     ['tests/leaf-a.test.ts', 'leaf a oracle'], ['tests/leaf-b.test.ts', 'leaf b oracle'],
   ])
@@ -339,7 +340,7 @@ test('ordinary contract dependencies retain spec and ID context but defer implem
   const rootPartition = result.partitions.find(partition => partition.targets.some(target => target.nodeId === 'root'))!
   const leafAPartition = result.partitions.find(partition => partition.targets.some(target => target.nodeId === 'leaf-a'))!
   const leafBPartition = result.partitions.find(partition => partition.targets.some(target => target.nodeId === 'leaf-b'))!
-  assert.ok(rootPartition.readPaths.includes(alphaPath) && rootPartition.readPaths.includes(betaPath), 'dependency Specs provide the read-only ID interface')
+  assert.ok(rootPartition.readPaths.includes(leafAPath) && rootPartition.readPaths.includes(leafBPath), 'dependency Specs provide the read-only ID interface')
   assert.ok(!rootPartition.readPaths.includes('src/leaf-a.ts') && !rootPartition.readPaths.includes('src/leaf-b.ts'))
   assert.ok(!rootPartition.readPaths.includes('tests/leaf-a.test.ts') && !rootPartition.readPaths.includes('tests/leaf-b.test.ts'))
   assert.ok(leafAPartition.readPaths.includes('src/leaf-a.ts') && !leafAPartition.readPaths.includes('src/leaf-b.ts'))
@@ -352,8 +353,8 @@ test('ordinary contract dependencies retain spec and ID context but defer implem
 
 test('a raw intent target gets one Spec-only seed partition before raw-only leaf work', () => {
   const rawRootPath = '.spec/raw-seed/spec.md'
-  const rawAlphaPath = '.spec/raw-seed/alpha/spec.md'
-  const rawBetaPath = '.spec/raw-seed/beta/spec.md'
+  const rawAlphaPath = '.spec/raw-seed/module-alpha/alpha/spec.md'
+  const rawBetaPath = '.spec/raw-seed/module-beta/beta/spec.md'
   const nodes = [
     { id: 'seed-root', path: rawRootPath },
     { id: 'seed-alpha', path: rawAlphaPath },
@@ -435,4 +436,71 @@ test('moved raw Spec keeps its old code writer metadata without overriding curre
   assert.equal(files.has(oldPath), false, 'historical governance source never enters the current body map')
   assert.deepEqual([...files], inputFiles)
   assert.equal(result.expectedPaths.includes(oldPath), true)
+})
+
+test('non-overlapping target writers under one Spec module batch within the byte budget', () => {
+  const pathA = '.spec/packing/services/alpha/spec.md', pathB = '.spec/packing/services/beta/spec.md'
+  const a = contract('pack-a', pathA, ['src/services/alpha.ts'])
+  const b = contract('pack-b', pathB, ['src/services/beta.ts'])
+  const result = planSyncPartitions({
+    plan: { ...plan(), intentNodeId: 'upper', targets: [a, b].map(node => ({ nodeId: node.nodeId, path: node.path })), readPaths: ['.spec', 'src'], writePaths: ['.spec/packing', 'src'], sourcePaths: ['src'], executionScope: undefined, mandatoryTests: [] },
+    files: new Map([[pathA, 'alpha spec'], [pathB, 'beta spec'], ['src/services/alpha.ts', 'alpha code'], ['src/services/beta.ts', 'beta code']]),
+    contracts: [a, b], changedPaths: [],
+  })
+  assert.equal(result.partitions.length, 1)
+  assert.deepEqual(result.partitions[0].targets.map(target => target.nodeId), ['pack-a', 'pack-b'])
+  assert.ok(result.partitions[0].writePaths.includes('src/services/alpha.ts'))
+  assert.ok(result.partitions[0].writePaths.includes('src/services/beta.ts'))
+})
+
+test('target writers in different parent Spec modules remain separate', () => {
+  const pathA = '.spec/packing/module-a/alpha/spec.md', pathB = '.spec/packing/module-b/beta/spec.md'
+  const a = contract('module-a', pathA, ['src/module-a.ts'])
+  const b = contract('module-b', pathB, ['src/module-b.ts'])
+  const result = planSyncPartitions({
+    plan: { ...plan(), intentNodeId: 'upper', targets: [a, b].map(node => ({ nodeId: node.nodeId, path: node.path })), readPaths: ['.spec', 'src'], writePaths: ['.spec/packing', 'src'], sourcePaths: ['src'], executionScope: undefined, mandatoryTests: [] },
+    files: new Map([[pathA, 'module a'], [pathB, 'module b'], ['src/module-a.ts', 'a code'], ['src/module-b.ts', 'b code']]),
+    contracts: [a, b], changedPaths: [],
+  })
+  assert.equal(result.partitions.length, 2)
+  assert.ok(result.partitions.every(partition => partition.targets.length === 1))
+})
+
+test('a shared writer across parent modules remains in one partition', () => {
+  const pathA = '.spec/writers/module-a/alpha/spec.md', pathB = '.spec/writers/module-b/beta/spec.md'
+  const sharedPath = 'src/shared/writer.ts'
+  const a = contract('writer-a', pathA, [sharedPath]), b = contract('writer-b', pathB, [sharedPath])
+  const result = planSyncPartitions({
+    plan: { ...plan(), intentNodeId: 'upper', targets: [a, b].map(node => ({ nodeId: node.nodeId, path: node.path })), readPaths: ['.spec', 'src'], writePaths: ['.spec/writers', 'src'], sourcePaths: ['src'], executionScope: undefined, mandatoryTests: [] },
+    files: new Map([[pathA, 'alpha spec'], [pathB, 'beta spec'], [sharedPath, 'shared implementation']]),
+    contracts: [a, b], changedPaths: [sharedPath],
+  })
+  assert.equal(result.partitions.length, 1)
+  assert.deepEqual(result.partitions[0].targets.map(target => target.nodeId), ['writer-a', 'writer-b'])
+  assert.equal(result.partitions[0].writePaths.filter(path => path === sharedPath).length, 1)
+})
+
+test('unowned paths in different source directories batch by their nearest Spec module', () => {
+  const nearestPath = '.spec/discovery/module/nearest/spec.md'
+  const files = new Map([
+    [nearestPath, rawSpec('nearest', ['src/catalog/existing.ts'])],
+    ['src/catalog/existing.ts', 'existing code'], ['src/new-a/one.ts', 'one'], ['src/new-b/two.ts', 'two'],
+  ])
+  const result = planSyncPartitions({
+    plan: { ...plan(), intentNodeId: 'upper', targets: [], readPaths: ['.spec', 'src'], writePaths: ['src'], sourcePaths: ['src'], executionScope: undefined, mandatoryTests: [] },
+    files, contracts: [], nodes: [{ id: 'nearest', path: nearestPath }], changedPaths: ['src/new-a/one.ts', 'src/new-b/two.ts'],
+  })
+  assert.equal(result.partitions.length, 1)
+  assert.deepEqual(result.partitions[0].changedPaths, ['src/new-a/one.ts', 'src/new-b/two.ts'])
+  assert.deepEqual(result.partitions[0].contextNodeIds, ['nearest'])
+})
+
+test('unowned paths without a nearby node retain their source top-module boundary', () => {
+  const result = planSyncPartitions({
+    plan: { ...plan(), intentNodeId: 'upper', targets: [], readPaths: ['src'], writePaths: ['src'], sourcePaths: ['src'], executionScope: undefined, mandatoryTests: [] },
+    files: new Map([['src/module-a/one.ts', 'one'], ['src/module-b/two.ts', 'two']]),
+    contracts: [], changedPaths: ['src/module-a/one.ts', 'src/module-b/two.ts'],
+  })
+  assert.equal(result.partitions.length, 2)
+  assert.deepEqual(new Set(result.partitions.map(partition => partition.changedPaths[0])), new Set(['src/module-a/one.ts', 'src/module-b/two.ts']))
 })
