@@ -303,3 +303,18 @@ code:
   assert.ok(resources.some(resource => resource.kind === 'path' && resource.path === 'src/export.js'))
   assert.ok(!resources.some(resource => resource.kind === 'path' && resource.path.includes('other')))
 })
+
+test('v2无验证基线的真实提交删除仍读取before原意与旧身份，不把before冒作交付', async t => {
+  const f = await fixture(t), before = await captureInputSnapshot(f.root, { committed: true })
+  rmSync(join(f.root, specA)); git(f.root, 'add', '.'); git(f.root, 'commit', '-m', 'author removes the specification')
+  const snapshot = await captureInputSnapshot(f.root, { committed: true })
+  const plan = await buildSyncApplicationPlan(snapshot, 'export-contract', null, { direction: 'combined', commitTrigger: { before, paths: [specA] } })
+  assert.equal(plan.version, 'sync-coordinator-v2')
+  assert.ok(plan.targets.some(target => target.nodeId === 'export-contract' && target.path === specA && target.rawSource))
+  assert.ok(plan.readPaths.includes(specA))
+  assert.ok(plan.readPaths.includes('src/export.js'))
+  assert.ok(plan.executionScope.contractIds.includes('REQ-EXPORT-01'))
+  const resources = await deriveSyncBaselineResources(snapshot, plan)
+  assert.ok(resources.some(resource => resource.kind === 'path' && resource.path === specA))
+  assert.ok(resources.some(resource => resource.kind === 'contract' && resource.id === 'REQ-EXPORT-01'))
+})

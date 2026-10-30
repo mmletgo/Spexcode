@@ -58,3 +58,6 @@ P2 接收操作固定 model 并传给生成与独立评审，effort 仍为 high�
 
 
 分区主干复用同一生成实现的两个明确接缝：prepareOnly只返回已核schema的结构化preparedChanges，不冻结、不独审、不表示实现完成；reviewCandidate只审调用者已冻结的同一候选，读取本区完整正文及实际修改并对全部builder身份核独立。freezeGenerationCandidate统一执行原发布基树闭包保护、scope与CAS，不因分区另开写入路径。局部及跨边review的checkedIds只属于该真实读取范围，仍须完整覆盖预定业务ID。
+
+
+显式v2局部输入可声明readonlyContractPaths：这些依赖仍完整读取Spec/raw/稳定ID接口，程序不为局部分析自动拉取其全部实现、related及AC测试正文；本区targets及mandatory/source/test的完整读取门保持。局部checkedIds仅枚举真实owner候选项，不能把借读接口列成实现已审。最终cross-edge将两端同时作为实现targets，不能保留readonly skip，两端完整源码/测试及新增文件仍绑定同一最终candidateDigest独审。旧v1没有该字段时原完整读取判据不变，v1显式提供该语义被拒绝。

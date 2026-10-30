@@ -86,3 +86,6 @@ P2 `anchor-dead` 来源修复回归从真实 P1 输出含测试用例 ID 的错�
 真实 Git/SQLite 加明确 native 接缝复现显式 retryOf 丢失旧行为失败诊断：连续两代同绑定重试的分析及独审收到全部原 code/message，完整旧 proposal/review 仍为未批准数据，不派 P1 或产生 receipt。不同 input/policy/readset 的准入继续拒绝，协调器读取旧链时再核读集合；祖先读集合较旧时，新分析/独审继续但不接收该祖先诊断，当前操作的新失败仍完整传给下一次分析和独审。P4 边界通过真实 claim/bind/startElaboration/expandContractScope、同冻结计划重算读集合和 bindComposedInput 重绑，再持久保存 scope_context_expanded；祖先 SQLite 原摘要不动，不模拟 readOperation，下一次协调仍分析和独审。既有 P4 合法作用域扩展回归保持。每个操作仍保正式准入预算、deadline、调用上限和 attempt 数，未修改预算策略；不是实际模型或 Docker 业务通过证明。
 
 固定模型覆盖行为/P1/P2六种实际请求、独立会话创建键与调用计费；SQLite旧版重启后的accepted P1在换模型显式retry仍继承且不再细化原AC。遵循 [[sync-model-selection]]。
+
+
+v2定向回归在真实Git/SQLite证明code_to_spec只有行为分析/独审、P1/独审及最终候选独审，无可写code_generate；完整最低5调用而原预算4时零模型派发、零超扣。新功能精确scope场景从raw-only细化无code锚点起，经implementation_plan提出此前absent文件、真实P4 scope/lease/null基线和readSet重绑、生成新增模块及映射，V1通过到最终候选独审；测试明确在Docker之前停止，无source/index写入及journal，不冒充完整产品交付。

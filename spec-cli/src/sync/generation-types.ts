@@ -3,7 +3,7 @@ import type { Acceptance, Contract, ContractFinding } from '@spexcode/spec-core/
 import type { ElaborationFact, ElaborationRunner, ElaborationSessionRequest, ElaborationTrace } from './elaboration-types.js'
 import type { CandidateRef, ComposedInputRef, InputSnapshot, SyncScope } from './operation-types.js'
 import type { CandidateChanges } from './candidate.js'
-import type { SnapshotManifest } from './snapshot.js'
+import type { SnapshotManifest, TreeEntry } from './snapshot.js'
 import type { SyncCoordinatorPlan } from './coordinator-types.js'
 
 /** 一次生成尝试的全部可信输入；调用者管理预算、attempt 和持久状态。 */
@@ -15,11 +15,14 @@ export type GenerationInput = {
   manifest: SnapshotManifest
   files: ReadonlyMap<string, string>
   contracts: readonly Contract[]
+  readonlyContractPaths?: readonly string[]
+  priorContext?: readonly { role: 'source_before' | 'verified_delivery'; pairId?: string; snapshot: InputSnapshot; entries: readonly TreeEntry[]; files: ReadonlyMap<string, string>; objects: readonly { entry: TreeEntry; kind: 'binary' | 'symlink'; encoding: 'base64'; content: string }[] }[]
   /** P1 通过后的待交付详细 Spec；不替换 original composed 基线。 */
   elaboratedSpecs: readonly { path: string; source: string }[]
   readyIds: readonly string[]
   blockedIds: readonly string[]
   retiredIds?: readonly string[]
+  retiredOwners?: readonly { id: string; path: string }[]
   intent: { nodeId: string; rawSource: string }
   facts: readonly ElaborationFact[]
   existingAcceptance: readonly Acceptance[]
@@ -60,6 +63,8 @@ export type GenerationOptions = {
   prepareOnly?: boolean
   reviewCandidate?: CandidateRef
   builderTraces?: readonly ElaborationTrace[]
+  implementationPolicy?: { writePaths: readonly string[]; sourcePaths: readonly string[] }
+  beforePartitionGeneration?: (paths: readonly string[], evidenceRef: import('./operation-types.js').BlobRef) => Promise<{ scope: SyncScope; composed?: ComposedInputRef }> 
   validateCandidate: (candidate: CandidateRef) => Promise<readonly ContractFinding[]>
   /** 必须在 native 派发前完成持久登记；native 身份绑定由 runner 包装者负责。 */
   onDispatch?: (request: ElaborationSessionRequest) => Promise<void>
@@ -75,6 +80,7 @@ export type GenerationResult = {
   candidate: CandidateRef | null
   /** 仅本地使用的完整候选文本，不序列化进 store/外发 JSON。 */
   candidateFiles: ReadonlyMap<string, string> | null
+  fileWriterPlanRef?: import('./operation-types.js').BlobRef
   preparedChanges?: CandidateChanges
   partitionEvidence?: { partitionId: string; candidateDigest: string; review: GenerationReview; traces: ElaborationTrace[] }[]
   output: unknown
