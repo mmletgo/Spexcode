@@ -15,7 +15,7 @@ import type { ElaborationInput, ElaborationResult } from './elaboration-types.js
 import { CONTRACT_COLUMNS, parseParts } from '@spexcode/spec-core/contracts'
 import type { GeneratedTables } from './elaboration-markdown.js'
 import type { GenerationInput } from './generation-types.js'
-import { analyzeSyncPartitions, completeSyncPartitionPlan, elaborateSyncPartitions, generateSyncPartitions, mapSyncPartitions } from './partition-execution.js'
+import { analyzeSyncPartitions, completeSyncPartitionPlan, elaborateSyncPartitions, generateSyncPartitions, implementationPartitionSelection, mapSyncPartitions } from './partition-execution.js'
 import type { PartitionCheckpoints } from './partition-execution.js'
 import type { SyncPartitionPlan } from './partitioning.js'
 import type { CodeBehaviorInput } from './code-behavior.js'
@@ -126,6 +126,71 @@ async function rawParentInterfaceFixture(t: test.TestContext): Promise<{
   const values = new Map<string, unknown>()
   const checkpoints: PartitionCheckpoints = { load: <T>(key: string) => values.has(key) ? structuredClone(values.get(key)) as T : null, save: (key, value) => { values.set(key, structuredClone(value)); return writeEvidence(snapshot.source.commonDir, value) } }
   return { input, plan, checkpoints, paths }
+}
+
+async function nestedInterfaceFixture(t: test.TestContext, discoverGamma = false): Promise<{
+  input: ElaborationInput
+  plan: SyncPartitionPlan
+  checkpoints: PartitionCheckpoints
+  paths: { root: string; middle: string; alpha: string; gamma: string; alphaSource: string; gammaSource: string; oracle: string }
+  nodes: { root: string; middle: string; alpha: string; gamma: string }
+  raw: { root: string; middle: string }
+}> {
+  const root = mkdtempSync(join(tmpdir(), 'spex-nested-interface-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const paths = {
+    root: '.spec/root/spec.md', middle: '.spec/root/gamma/spec.md', alpha: '.spec/root/alpha/normalize-tag/spec.md', gamma: '.spec/root/gamma/leaf/upper-tag/spec.md',
+    alphaSource: 'src/alpha/normalize.mjs', gammaSource: 'src/gamma/upper.mjs', oracle: 'tests/nested.test.mjs',
+  }
+  const raw = {
+    root: '请分别整理现有标签规范化和gamma子能力，并保持当前行为。',
+    middle: 'gamma子能力只整理现有字符串大写转换，不增加其它规则。',
+  }
+  const source = (title: string, body: string): string => `---\ntitle: ${title}\nstatus: pending\nrelated:\n  - ${paths.oracle}\n---\n\n## raw source\n\n${body}\n`
+  const rootSource = source('Text operations', raw.root)
+  const middleSource = source('Gamma operations', raw.middle)
+  const alphaSourceSpec = `---\ntitle: Normalize tag\nstatus: pending\ncode:\n  - ${paths.alphaSource}\nrelated:\n  - ${paths.oracle}\n---\n\nroot意图中的独立标签能力。\n`
+  const gammaSourceSpec = `---\ntitle: Upper tag\nstatus: pending\ncode:\n  - ${paths.gammaSource}\nrelated:\n  - ${paths.oracle}\n---\n\n中间gamma意图下的字符串转换叶能力。\n`
+  for (const path of [paths.root, paths.middle, paths.alpha, paths.gamma, paths.alphaSource, paths.gammaSource, paths.oracle, 'package.json']) mkdirSync(join(root, dirname(path)), { recursive: true })
+  writeFileSync(join(root, paths.root), rootSource)
+  writeFileSync(join(root, paths.middle), middleSource)
+  writeFileSync(join(root, paths.alpha), alphaSourceSpec)
+  if (!discoverGamma) writeFileSync(join(root, paths.gamma), gammaSourceSpec)
+  writeFileSync(join(root, paths.alphaSource), 'export function normalizeTag(value) { return value.trim().toLowerCase() }\n')
+  writeFileSync(join(root, paths.gammaSource), 'export function upperTag(value) { return value.toUpperCase() }\n')
+  writeFileSync(join(root, paths.oracle), `import test from 'node:test'\nimport assert from 'node:assert/strict'\nimport { normalizeTag } from '../src/alpha/normalize.mjs'\nimport { upperTag } from '../src/gamma/upper.mjs'\ntest('NESTED-INTERFACE-ORACLE-01', () => { assert.equal(normalizeTag(' Mix '), 'mix'); assert.equal(upperTag('gamma'), 'GAMMA') })\n`)
+  writeFileSync(join(root, 'package.json'), '{"type":"module"}\n')
+  const git = (...args: string[]): void => { execFileSync('git', ['-C', root, ...args], { stdio: 'pipe' }) }
+  git('init', '-b', 'main'); git('config', 'user.email', 'nested-interface@example.invalid'); git('config', 'user.name', 'nested interface fixture'); git('add', '.'); git('commit', '-m', 'nested raw parent fixture')
+  const snapshot = await captureInputSnapshot(root), files = new Map(readTree(snapshot.source.commonDir, snapshot.immutableTree).map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString('utf8')]))
+  const [rootId, middleId, alphaId, gammaId] = mintIds([paths.root, paths.middle, paths.alpha, paths.gamma].map(path => path.split('/').slice(1, -1)))
+  const targets = [
+    { nodeId: rootId!, path: paths.root, source: rootSource, sourceDigest: elaborationDigest(rootSource), rawSource: parseParts(rootSource)!.rawSource! },
+    { nodeId: middleId!, path: paths.middle, source: middleSource, sourceDigest: elaborationDigest(middleSource), rawSource: parseParts(middleSource)!.rawSource! },
+    { nodeId: alphaId!, path: paths.alpha, source: alphaSourceSpec, sourceDigest: elaborationDigest(alphaSourceSpec) },
+    { nodeId: gammaId!, path: paths.gamma, source: discoverGamma ? null : gammaSourceSpec, sourceDigest: discoverGamma ? null : elaborationDigest(gammaSourceSpec), ...(discoverGamma ? { rawSource: '遵循gamma上层原意，治理现有upperTag字符串转换。' } : {}) },
+  ]
+  const verify = (domain: 'ALPHA' | 'GAMMA') => ({ id: `VERIFY-${domain}-NESTED`, command: ['node', '--test', paths.oracle], cwd: '.', timeoutMs: 30000 })
+  const input: ElaborationInput = {
+    root, base: snapshot.headCommit, requestKey: 'nested-interface:p1', intent: { nodeId: rootId!, rawSource: raw.root }, targets,
+    files, facts: [], verifications: [verify('ALPHA'), verify('GAMMA')], implementationWritePaths: [], readonlyTestPaths: [paths.oracle],
+    historyInput: snapshot, maxRepairs: 0, maxCalls: 2, timeoutMs: 30000,
+  }
+  const partitions: SyncPartitionPlan['partitions'] = [
+    { id: 'root', phase: 'interface_seed', intentNodeId: rootId!, targets: [{ nodeId: rootId!, path: paths.root }], readPaths: [paths.root], writePaths: [paths.root], sourcePaths: [], changedPaths: [paths.root], contextNodeIds: [], contractIds: [], flowIds: [], readBytes: Buffer.byteLength(rootSource), readLimitBytes: 524288, oversizedReads: [] },
+    { id: 'middle', phase: 'interface_seed', intentNodeId: rootId!, targets: [{ nodeId: middleId!, path: paths.middle }], readPaths: [paths.root, paths.middle], writePaths: [paths.middle], sourcePaths: [], changedPaths: [paths.middle], contextNodeIds: [rootId!], contractIds: [], flowIds: [], readBytes: 3000, readLimitBytes: 524288, oversizedReads: [] },
+    { id: 'alpha', intentNodeId: rootId!, targets: [{ nodeId: alphaId!, path: paths.alpha }], readPaths: [paths.root, paths.alpha, paths.alphaSource, paths.oracle], writePaths: [paths.alpha], sourcePaths: [paths.alphaSource], changedPaths: [paths.alpha], contextNodeIds: [rootId!], contractIds: [], flowIds: [], readBytes: 3000, readLimitBytes: 524288, oversizedReads: [] },
+    { id: 'gamma', intentNodeId: rootId!, targets: [{ nodeId: gammaId!, path: paths.gamma }], readPaths: [paths.root, paths.middle, paths.gamma, paths.gammaSource, paths.oracle], writePaths: [paths.gamma], sourcePaths: [paths.gammaSource], changedPaths: [paths.gamma], contextNodeIds: [rootId!, middleId!], contractIds: [], flowIds: [], readBytes: 3000, readLimitBytes: 524288, oversizedReads: [] },
+  ]
+  if (discoverGamma) {
+    delete partitions[1].phase
+    partitions[3].targets = []
+    partitions[3].changedPaths = [paths.gammaSource]
+  }
+  const plan: SyncPartitionPlan = { version: 'sync-partitions-v1', partitions, dependencies: [], expectedPaths: [paths.root, paths.middle, paths.alpha, discoverGamma ? paths.gammaSource : paths.gamma], digest: contentHash(`nested-interface-plan:${discoverGamma}`) }
+  const values = new Map<string, unknown>()
+  const checkpoints: PartitionCheckpoints = { load: <T>(key: string) => values.has(key) ? structuredClone(values.get(key)) as T : null, save: (key, value) => { values.set(key, structuredClone(value)); return writeEvidence(snapshot.source.commonDir, value) } }
+  return { input, plan, checkpoints, paths, nodes: { root: rootId!, middle: middleId!, alpha: alphaId!, gamma: gammaId! }, raw }
 }
 
 function emptyElaborationTables(): GeneratedTables {
@@ -344,7 +409,7 @@ test('raw-only parent和两个源码叶先审接口再局部细化，完整全�
   const noRelationSchema = elaborationSchema({ ...input, targets: [{ ...input.targets[0], source: emptyRelationsSource, sourceDigest: elaborationDigest(emptyRelationsSource) }] }, { purpose: 'interface_seed' })
   const noRelationProperties = (noRelationSchema.properties as { changes: { items: { properties: Record<string, { items?: Record<string, unknown> }> } } }).changes.items.properties
   assert.equal('enum' in noRelationProperties.related.items!, false, '空related路径不生成非法空enum')
-  assert.ok(!rootRequest.prompt.includes(paths.alphaSource) && !rootRequest.prompt.includes(paths.betaSource) && !rootRequest.prompt.includes('return value.trim()') && !rootRequest.prompt.includes("assert.equal(normalizeTag("), '父接口不读取子源码或oracle正文')
+  assert.ok(!rootRequest.prompt.includes('return value.trim()') && !rootRequest.prompt.includes("assert.equal(normalizeTag("), '父接口只持分类路径证据，不读取子源码或oracle正文')
   const rootEvidenceRef = result.partitionEvidence!.find(item => item.partitionId === 'parent')!.resultRef
   const rootEvidence = JSON.parse(readEvidence(input.historyInput!.source.commonDir, rootEvidenceRef).toString('utf8')) as { phase?: string; status: string; readyIds: string[]; readyFlowIds: string[]; implementationReady: false; reviewPassed: boolean; changes: { nodeId: string; path: string; source: string }[] }
   assert.equal(rootEvidence.phase, 'interface_seed')
@@ -492,6 +557,23 @@ test('raw-only parent和两个源码叶先审接口再局部细化，完整全�
     assert.ok(readonlyLeaf.partitionSeal?.findings.some(issue => issue.code === 'readonly_implementation_gap'))
   })
 
+  await t.test('只有测试治理的后代不能借无关sourcePaths把父判成seed', async subtest => {
+    const testOnly = await rawParentInterfaceFixture(subtest)
+    testOnly.input.requestKey = 'parent-interface:test-only'
+    testOnly.input.targets = testOnly.input.targets.map(target => {
+      if (target.nodeId === rootId) return target
+      const source = target.source!.replaceAll(target.nodeId === alphaId ? paths.alphaSource : paths.betaSource, paths.oracle)
+      return { ...target, source, sourceDigest: elaborationDigest(source) }
+    })
+    const files = new Map(testOnly.input.files)
+    for (const target of testOnly.input.targets) files.set(target.path, target.source!)
+    testOnly.input.files = files
+    const rejected = await elaborateSyncPartitions(testOnly.input, testOnly.plan, 2, testOnly.checkpoints, runner)
+    const rootCall = calls.find(request => request.requestKey.startsWith('parent-interface:test-only:partition:parent:') && request.purpose === 'elaboration_generate')!
+    const frozen = JSON.parse(rootCall.prompt.split('冻结业务输入:\n')[1].split('\n')[0]) as { phase?: string }
+    assert.equal(frozen.phase, undefined)
+    assert.equal(rejected.structurePassed, false)
+  })
   await t.test('目录外的active source target不构成raw-only父的子实现', async subtest => {
     const unrelated = await rawParentInterfaceFixture(subtest)
     const unrelatedId = mintIds([paths.unrelated.split('/').slice(1, -1)])[0]!
@@ -507,6 +589,218 @@ test('raw-only parent和两个源码叶先审接口再局部细化，完整全�
     assert.equal(unrelatedRootContext.phase, undefined, '无关路径下的活跃源码分区不能让root逃过完整只读P1')
     assert.equal(unrelatedResult.structurePassed, false)
   })
+})
+
+test('多层raw-only父逐级结算真实接口后两叶并行，并只从严格全局seal推进', async t => {
+  const { input, plan, checkpoints, paths, nodes, raw } = await nestedInterfaceFixture(t)
+  const calls: ElaborationSessionRequest[] = [], settled = new Set<string>()
+  let leafInFlight = 0, maxLeafInFlight = 0
+  let releaseLeaves!: () => void
+  const bothLeaves = new Promise<void>(resolve => { releaseLeaves = resolve })
+  const applicability = ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: false, basis: '现有字符串纯函数没有状态与外部副作用。', affectedIds: [] }))
+  const rows = (nodeId: string): Record<string, unknown> => {
+    const tables = emptyElaborationTables()
+    let code: string[] = [], prose: string | null = null
+    if (nodeId === nodes.root) {
+      tables.REQ = [
+        { id: 'REQ-NESTED-ALPHA', goal: '保留既有标签规范化行为', source: 'user:raw', constraints: '不扩展需求', success: '规范化结果不变', 'depends-on': [] },
+        { id: 'REQ-NESTED-GAMMA', goal: '保留gamma子能力的现存行为', source: 'user:raw', constraints: '不扩展需求', success: 'gamma结果不变', 'depends-on': [] },
+      ]
+    } else if (nodeId === nodes.middle) {
+      tables.REQ = [{ id: 'REQ-NESTED-MIDDLE', goal: '只整理既有大写转换', source: 'user:raw', constraints: '不新增转换规则', success: '现有字符串大写结果不变', 'depends-on': ['REQ-NESTED-GAMMA'] }]
+    } else {
+      const alpha = nodeId === nodes.alpha, domain = alpha ? 'ALPHA' : 'GAMMA', symbol = alpha ? 'normalizeTag' : 'upperTag'
+      const sourcePath = alpha ? paths.alphaSource : paths.gammaSource, ancestors = alpha ? ['REQ-NESTED-ALPHA'] : ['REQ-NESTED-GAMMA', 'REQ-NESTED-MIDDLE']
+      const req = `REQ-${domain}-NESTED`, flow = `FLOW-${domain}-NESTED`, step = `STEP-${domain}-NESTED`, rule = `RULE-${domain}-NESTED`
+      tables.REQ = [{ id: req, goal: `记录${symbol}现有行为`, source: `derived:${ancestors.at(-1)}`, constraints: '只描述冻结实现', success: '输出符合既有oracle', 'depends-on': ancestors }]
+      tables.RULE = [{ id: rule, scope: sourcePath, constraint: '只接受字符串输入，返回冻结实现定义的转换结果，保持当前不变量。', basis: '现有源码和只读oracle', source: `derived:${req}`, authority: nodeId, 'depends-on': [req] }]
+      tables.FLOW = [{ id: flow, req: [...ancestors, req], actors: '调用方', entry: `调用${symbol}`, preconditions: '输入字符串', steps: [step], terminal: 'END', source: `derived:${req}`, 'depends-on': [...ancestors, req] }]
+      tables.STEP = [{ id: step, flow, action: `同步调用${symbol}`, input: '字符串', output: '转换结果', rules: [rule], next: 'END', source: `derived:${req}`, 'depends-on': [req] }]
+      tables.AC = [{ id: `AC-${domain}-NESTED`, source: `derived:${req}`, 'depends-on': [req], covers: [...ancestors, req, rule], preconditions: 'oracle输入', action: `调用${symbol}`, assertion: '既有结果不变', test: `${paths.oracle}#NESTED-INTERFACE-ORACLE-01`, command: `VERIFY-${domain}-NESTED` }]
+      tables.VERIFY = [{ id: `VERIFY-${domain}-NESTED`, command: ['node', '--test', paths.oracle], cwd: '.', 'timeout-ms': 30000 }]
+      code = [`${sourcePath}#${symbol}`]
+      prose = '这是无状态同步纯函数，状态不适用，输出只由输入决定。'
+    }
+    return { version: 'elaboration-target-rows-v3', changes: [{ targetIndex: 0, title: nodeId, description: '', code, related: [paths.oracle], prose, removeIds: [], tables }], applicability }
+  }
+  const runner: ElaborationRunner = async request => {
+    const ordinal = calls.push(request)
+    const frozen = JSON.parse(request.prompt.split('冻结业务输入:\n')[1].split('\n')[0]) as { intent: { nodeId: string; rawSource: string }; phase?: string; targets: { nodeId: string }[]; context: { path: string; source: string }[] }
+    const nodeId = frozen.targets[0].nodeId, seed = nodeId === nodes.root || nodeId === nodes.middle
+    if (request.purpose === 'elaboration_generate') {
+      assert.equal(frozen.phase, seed ? 'interface_seed' : undefined)
+      if (nodeId === nodes.middle) {
+        assert.equal(frozen.intent.nodeId, nodes.middle)
+        assert.equal(frozen.intent.rawSource, raw.middle)
+        assert.ok(settled.has(nodes.root), '中间父必须等待祖先独审结算')
+        assert.ok(frozen.context.find(context => context.path === paths.root)?.source.includes('REQ-NESTED-GAMMA'))
+      }
+      if (!seed) {
+        assert.deepEqual([...settled].sort(), [nodes.root, nodes.middle].sort(), '叶派发前全部祖先seed已审')
+        leafInFlight++; maxLeafInFlight = Math.max(maxLeafInFlight, leafInFlight)
+        if (leafInFlight === 2) releaseLeaves()
+        await bothLeaves
+        leafInFlight--
+      }
+    } else if (seed) settled.add(nodeId)
+    const output = request.purpose === 'elaboration_generate' ? rows(nodeId) : { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+    return { sessionId: `nested-session-${ordinal}`, threadId: `nested-thread-${ordinal}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)) }
+  }
+  const result = await elaborateSyncPartitions(input, plan, 2, checkpoints, runner)
+  assert.equal(result.structurePassed, true, JSON.stringify({ failure: result.failure, findings: result.rounds.flatMap(round => round.findings).map(({ code, message }) => ({ code, message })), seal: result.partitionSeal?.findings }))
+  assert.equal(result.reviewPassed, true)
+  assert.equal(result.partitionSeal?.passed, true)
+  assert.equal(maxLeafInFlight, 2)
+  assert.equal(calls.length, 8, '四位构建者与四位独审，无全图模型调用')
+  for (const path of [paths.root, paths.middle]) assert.equal(parseParts(result.changes.find(change => change.path === path)!.source)!.rawSource, parseParts(input.files!.get(path)!)!.rawSource)
+  for (const req of ['REQ-NESTED-ALPHA', 'REQ-NESTED-GAMMA', 'REQ-NESTED-MIDDLE']) assert.equal(result.coverage!.items.find(item => item.id === req)?.status, 'bound')
+  for (const evidence of result.partitionEvidence!) {
+    const local = JSON.parse(readEvidence(input.historyInput!.source.commonDir, evidence.resultRef).toString('utf8')) as ElaborationResult
+    assert.equal(local.partitionBinding?.planDigest, plan.digest)
+    assert.equal(local.partitionBinding?.partitionId, evidence.partitionId)
+    const request = calls.find(call => call.requestKey.includes(`:partition:${evidence.partitionId}:`) && call.purpose === 'elaboration_generate')!
+    const frozen = JSON.parse(request.prompt.split('冻结业务输入:\n')[1].split('\n')[0]) as { targets: { targetIndex?: number }[]; partitionBinding: unknown }
+    assert.deepEqual(local.partitionBinding, frozen.partitionBinding)
+    frozen.targets = frozen.targets.map(({ targetIndex: _targetIndex, ...target }) => target)
+    assert.equal(contentHash(JSON.stringify(frozen)), local.inputDigest, '分区计划与分类证据参与真实局部inputDigest')
+  }
+  const replay = await elaborateSyncPartitions(input, plan, 2, checkpoints, async () => { throw new Error('相同绑定checkpoint不应重派模型') })
+  assert.equal(replay.partitionSeal?.candidateDigest, result.partitionSeal?.candidateDigest)
+  await assert.rejects(elaborateSyncPartitions(input, { ...plan, digest: contentHash('another-nested-plan') }, 2, checkpoints, runner), /局部细化原件没有绑定当前分区分类/)
+  await assert.rejects(elaborateSyncPartitions({ ...input, targets: [input.targets[0]] }, { ...plan, partitions: [plan.partitions[0]] }, 2, checkpoints, runner), /冻结父接口分区缺少真实纯父证据/)
+  const gamma = result.contracts.find(contract => contract.nodeId === nodes.gamma)!
+  assert.ok(gamma.items.some(item => item.kind === 'FLOW' && item.req.includes('REQ-NESTED-GAMMA') && item.req.includes('REQ-NESTED-MIDDLE')))
+  assert.ok(gamma.items.some(item => item.kind === 'AC' && item.covers.includes('REQ-NESTED-GAMMA') && item.covers.includes('REQ-NESTED-MIDDLE')))
+  const missingAncestor = result.partitionSeal!.changes.map(change => ({ ...change, source: change.path === paths.gamma ? change.source.replaceAll('REQ-NESTED-GAMMA,', '') : change.source }))
+  const rejected = sealPartitionedElaboration(input, missingAncestor, result.partitionSeal!.applicability)
+  assert.equal(rejected.seal.passed, false, '漏祖先直接承接仍由全局final拒绝')
+  assert.ok(rejected.seal.findings.some(finding => finding.code === 'missing-requirement-flow' && finding.itemId === 'REQ-NESTED-GAMMA'))
+  for (const file of [paths.gammaSource, paths.oracle]) {
+    const files = new Map(input.files!)
+    files.delete(file)
+    assert.equal(sealPartitionedElaboration({ ...input, files }, result.partitionSeal!.changes, result.partitionSeal!.applicability).seal.passed, false, `${file}缺失仍拒绝`)
+  }
+  for (const [path, source] of input.files!) assert.equal(readFileSync(join(input.root, path), 'utf8'), source, `${path}原bytes保持`)
+  execFileSync(process.execPath, ['--test', paths.oracle], { cwd: input.root, stdio: 'pipe' })
+  await t.test('完整sync-v1祖先的可信VERIFY登记在中间seed仍保留', async subtest => {
+    const mixed = await nestedInterfaceFixture(subtest), complete = await fixture(subtest)
+    const ancestor = complete.input.contracts[0], ancestorSource = complete.input.files.get(ancestor.path)!.replaceAll(ancestor.nodeId, nodes.root)
+    writeFileSync(join(mixed.input.root, paths.root), ancestorSource)
+    const ancestorFiles = [paths.root, ...complete.plan.partitions[0].readPaths.filter(path => !path.startsWith('.spec/'))]
+    for (const path of ancestorFiles.filter(path => path !== paths.root)) {
+      mkdirSync(join(mixed.input.root, dirname(path)), { recursive: true })
+      writeFileSync(join(mixed.input.root, path), complete.input.files.get(path)!)
+    }
+    execFileSync('git', ['-C', mixed.input.root, 'add', '.'], { stdio: 'pipe' })
+    execFileSync('git', ['-C', mixed.input.root, 'commit', '-m', 'complete ancestor with raw middle'], { stdio: 'pipe' })
+    mixed.input.historyInput = await captureInputSnapshot(mixed.input.root)
+    mixed.input.base = mixed.input.historyInput.headCommit
+    mixed.input.files = new Map(readTree(mixed.input.historyInput.source.commonDir, mixed.input.historyInput.immutableTree).map(entry => [entry.path, readObject(mixed.input.historyInput!.source.commonDir, entry.oid).toString('utf8')]))
+    mixed.input.targets = mixed.input.targets.filter(target => [nodes.middle, nodes.gamma].includes(target.nodeId))
+    mixed.input.context = [{ nodeId: nodes.root, path: paths.root, source: ancestorSource }]
+    mixed.input.intent = { nodeId: nodes.root, rawSource: parseParts(ancestorSource)!.rawSource! }
+    mixed.input.verifications = [...mixed.input.verifications!, ...ancestor.items.filter(item => item.kind === 'VERIFY').map(({ id, command, cwd, timeoutMs }) => ({ id, command, cwd, timeoutMs }))]
+    mixed.plan.partitions = mixed.plan.partitions.filter(partition => ['middle', 'gamma'].includes(partition.id))
+    for (const partition of mixed.plan.partitions) partition.readPaths.push(...ancestorFiles)
+    mixed.plan.expectedPaths = [paths.middle, paths.gamma]
+    mixed.plan.digest = contentHash('nested-complete-ancestor-plan')
+    const fresh: PartitionCheckpoints = { load: () => null, save: (_key, value) => writeEvidence(mixed.input.historyInput!.source.commonDir, value) }
+    const requests: ElaborationSessionRequest[] = []
+    const result = await elaborateSyncPartitions(mixed.input, mixed.plan, 2, fresh, async request => {
+      const ordinal = requests.push(request)
+      const frozen = JSON.parse(request.prompt.split('冻结业务输入:\n')[1].split('\n')[0]) as { targets: { nodeId: string }[] }
+      const nodeId = frozen.targets[0].nodeId
+      const output = request.purpose === 'elaboration_generate' ? JSON.parse(JSON.stringify(rows(nodeId)).replaceAll('REQ-NESTED-GAMMA', 'REQ-EXPORT-01')) as unknown : { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+      return { sessionId: `complete-ancestor-session-${ordinal}`, threadId: `complete-ancestor-thread-${ordinal}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)) }
+    })
+    assert.equal(result.structurePassed, true, JSON.stringify({ failure: result.failure, findings: result.rounds.flatMap(round => round.findings).map(({ code, itemId }) => ({ code, itemId })), seal: result.partitionSeal?.findings }))
+    assert.equal(result.reviewPassed, true)
+    assert.equal(requests.length, 4)
+    assert.equal(result.partitionSeal?.passed, true)
+    const seed = requests.find(request => request.requestKey.includes(':partition:middle:') && request.purpose === 'elaboration_generate')!
+    const frozen = JSON.parse(seed.prompt.split('冻结业务输入:\n')[1].split('\n')[0]) as { verifications: { id: string }[] }
+    assert.ok(frozen.verifications.some(verification => verification.id === 'VERIFY-EXPORT-01'))
+    const changeSchema = (seed.schema.properties as { changes: { items: { properties: { tables: { properties: { VERIFY: { maxItems: number } } } } } } }).changes.items.properties
+    assert.equal(changeSchema.tables.properties.VERIFY.maxItems, 0, '保留祖先可信登记不授予seed新增VERIFY权')
+  })
+  await t.test('已独审newNodes为没有冻结seed的中间父提供唯一真实源码后代', async subtest => {
+    const discovered = await nestedInterfaceFixture(subtest, true), snapshot = discovered.input.historyInput!
+    const digest = contentHash('nested-reviewed-analysis')
+    const analysis: CodeBehaviorAnalysis = {
+      version: 'code-behavior-v1', inputId: snapshot.id, baselinePairId: null, composedDigest: digest, readSetDigest: digest, policyDigest: digest, inputDigest: digest,
+      changes: [], findings: [], facts: [], authorizedChanges: [], nodeChanges: [], resolutions: [],
+      newNodes: [{ nodeId: nodes.gamma, path: paths.gamma, rawSource: discovered.input.targets[3].rawSource!, codePath: paths.gammaSource }],
+      traces: ['code_behavior_analyze', 'code_behavior_review'].map(purpose => ({ purpose, sessionId: `nested-${purpose}`, threadId: `nested-${purpose}`, turnId: 'turn', resultDigest: digest, inputDigest: digest })), reviewPassed: true,
+    }
+    discovered.input.analysis = { analysis, ref: writeEvidence(snapshot.source.commonDir, analysis) }
+    settled.clear()
+    const added = await elaborateSyncPartitions(discovered.input, discovered.plan, 2, discovered.checkpoints, runner)
+    assert.equal(added.partitionSeal?.passed, true, JSON.stringify(added.failure))
+    assert.equal(added.changes.filter(change => change.path === paths.gamma).length, 1)
+    const local = JSON.parse(readEvidence(snapshot.source.commonDir, added.partitionEvidence!.find(evidence => evidence.partitionId === 'middle')!.resultRef).toString('utf8')) as ElaborationResult
+    assert.equal(local.phase, 'interface_seed')
+    assert.equal(local.partitionBinding?.planDigest, discovered.plan.digest)
+    assert.equal(local.partitionBinding?.partitionId, 'middle')
+    assert.deepEqual(local.partitionBinding?.analysisRef, discovered.input.analysis.ref)
+    assert.deepEqual(local.partitionBinding?.interfaceSeed?.descendants, [{ nodeId: nodes.gamma, path: paths.gamma, codePaths: [paths.gammaSource], sourcePartitionId: 'gamma' }])
+    const owner = JSON.parse(readEvidence(snapshot.source.commonDir, added.partitionEvidence!.find(evidence => evidence.partitionId === 'gamma')!.resultRef).toString('utf8')) as ElaborationResult
+    assert.deepEqual(owner.changes.map(change => change.path), [paths.gamma], '真实newNode只属于唯一source partition')
+    for (const evidence of added.partitionEvidence!.filter(evidence => evidence.partitionId !== 'gamma')) {
+      const other = JSON.parse(readEvidence(snapshot.source.commonDir, evidence.resultRef).toString('utf8')) as ElaborationResult
+      assert.ok(other.changes.every(change => change.path !== paths.gamma))
+    }
+    const duplicate = structuredClone(discovered.plan)
+    duplicate.partitions.find(partition => partition.id === 'alpha')!.sourcePaths.push(paths.gammaSource)
+    await assert.rejects(elaborateSyncPartitions(discovered.input, duplicate, 2, discovered.checkpoints, runner), /精确属于唯一source partition/)
+    const absent = structuredClone(discovered.plan)
+    absent.partitions.find(partition => partition.id === 'gamma')!.sourcePaths = []
+    await assert.rejects(elaborateSyncPartitions(discovered.input, absent, 2, discovered.checkpoints, runner), /精确属于唯一source partition/)
+    analysis.reviewPassed = false
+    discovered.input.analysis = { analysis, ref: writeEvidence(snapshot.source.commonDir, analysis) }
+    await assert.rejects(elaborateSyncPartitions(discovered.input, discovered.plan, 2, discovered.checkpoints, runner), /独审分析绑定/)
+  })
+  const completed = completeSyncPartitionPlan(plan, result.contracts, input.files!, { writePaths: [], readonlyPaths: [paths.oracle] })
+  const generationInput: GenerationInput = {
+    root: input.root, requestKey: 'nested-interface:p2', snapshot: input.historyInput!,
+    manifest: { version: 1, entries: readTree(input.historyInput!.source.commonDir, input.historyInput!.immutableTree) }, files: input.files!, contracts: result.contracts,
+    elaboratedSpecs: result.changes.map(change => ({ path: change.path, source: change.source })), readyIds: result.readyIds, blockedIds: result.blockedIds, intent: input.intent, facts: [],
+    existingAcceptance: result.contracts.flatMap(contract => contract.items.filter((item): item is Acceptance => item.kind === 'AC')), mandatoryTests: [], verifications: input.verifications!,
+    allowedScope: { paths: completed.partitions.flatMap(partition => partition.writePaths), contractIds: result.readyIds, flowIds: result.readyFlowIds },
+    policy: { version: 'sync-coordinator-v2', digest: 'nested-interface-p2-policy' }, timeoutMs: 30000, model: 'gpt-6.1-sol', effort: 'high',
+  }
+  for (const specOnly of [true, false]) {
+    const nextPlan = structuredClone(completed), runtime = native()
+    if (!specOnly) for (const partition of nextPlan.partitions) partition.writePaths.push(...partition.sourcePaths)
+    const nextInput = { ...generationInput, requestKey: `nested-interface:p2:${specOnly}`, allowedScope: { ...generationInput.allowedScope, paths: nextPlan.partitions.flatMap(partition => partition.writePaths) } }
+    const fresh: PartitionCheckpoints = { load: () => null, save: (_key, value) => writeEvidence(input.historyInput!.source.commonDir, value) }
+    const implementationRunner: ElaborationRunner = async request => {
+      if (request.purpose === 'code_review') {
+        const frozen = JSON.parse(request.prompt.split('冻结原意和基线完整输入:\n')[1].split('\n实际候选身份')[0]) as { files: [string, string][] }
+        assert.ok(frozen.files.some(([path]) => path.startsWith('src/')), '实现独审必须读取真实叶源码，不能派给只有父接口的双端')
+      }
+      return runtime.runner(request)
+    }
+    const generated = await generateSyncPartitions(nextInput, nextPlan, 2, specOnly, { runner: implementationRunner, validateCandidate: async () => [] }, fresh)
+    assert.equal(generated.status, 'reviewed', JSON.stringify(generated.failure))
+    assert.equal(runtime.calls.filter(call => call.purpose === 'code_generate').length, specOnly ? 0 : 2, '仅真实子owner可写实现')
+    const reviews = runtime.calls.filter(call => call.purpose === 'code_review')
+    const selected = implementationPartitionSelection(nextPlan, result.contracts)
+    assert.deepEqual([...selected.interfaceParents].sort(), ['middle', 'root'])
+    assert.deepEqual(selected.partitions.map(partition => partition.id).sort(), ['alpha', 'gamma'])
+    assert.ok(completed.dependencies.some(edge => edge.from === 'middle' && edge.to === 'root'), '纯父接口依赖继续留在真实计划')
+    assert.ok(selected.dependencies.every(edge => edge.from !== 'middle' || edge.to !== 'root'), '纯接口依赖不冒称实施边')
+    assert.equal(reviews.length, 2 + selected.dependencies.length, '两个真实子owner与全部真实实施边独审')
+    assert.deepEqual(generated.partitionEvidence!.filter(evidence => evidence.partitionId.startsWith('edge:')).map(evidence => evidence.partitionId).sort(), selected.dependencies.map(edge => `edge:${edge.from}:${edge.to}`).sort())
+    const checkedIds = new Set(generated.partitionEvidence!.flatMap(evidence => evidence.review.checkedIds))
+    assert.ok(result.readyIds.every(id => checkedIds.has(id)), '跳过纯接口实施审查后，真实独审并集仍完整承接所有ready ID')
+    const pendingCode = result.contracts.map(contract => ({ ...contract, code: contract.nodeId === nodes.gamma ? [] : contract.code }))
+    assert.ok(implementationPartitionSelection(nextPlan, pendingCode).partitions.some(partition => partition.id === 'gamma'), '没有当前code但具完整业务流程的新叶仍需真实文件规划与实施')
+    assert.ok(reviews.every(call => !/:final:(root|middle)$/.test(call.requestKey)))
+    assert.equal(new Set(generated.partitionEvidence!.map(evidence => evidence.candidateDigest)).size, 1)
+    const entries = verifyCandidate(input.historyInput!.source.commonDir, generated.candidate!)
+    for (const path of [paths.root, paths.middle]) assert.equal(readObject(input.historyInput!.source.commonDir, entries.find(entry => entry.path === path)!.oid).toString('utf8'), result.changes.find(change => change.path === path)!.source, '双向P2均原文装配两级已审父接口')
+    if (specOnly) for (const path of [paths.alphaSource, paths.gammaSource, paths.oracle]) assert.equal(entries.find(entry => entry.path === path)!.oid, generationInput.manifest.entries.find(entry => entry.path === path)!.oid, 'code→spec的source/test Git对象不变')
+  }
 })
 
 test('P1后的真实新跨区依赖进入冻结覆盖集合，业务ID多writer被拒绝', async t => {

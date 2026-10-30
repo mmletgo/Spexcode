@@ -1,4 +1,5 @@
 import type { CodeBehaviorEvidence, ContractNodeChange, SyncDecisionAuthority } from './writeback-types.js'
+import type { RawOnlyInterfaceSeedEvidence } from './partitioning.js'
 import type { BlobRef, InputSnapshot } from './operation-types.js'
 import type { FrozenContextRef, FrozenEntryJson, FrozenReadProof } from '../frozen-context.js'
 import type { Contract, ContractCoverage, ContractFinding, ContractGraph, Gap, ParseContractInput, Verification } from '@spexcode/spec-core/contracts'
@@ -8,6 +9,7 @@ export type ElaborationBoundary = typeof ELABORATION_BOUNDARIES[number]
 export type ElaborationTarget = { nodeId: string; path: string; source: string | null; sourceDigest: string | null; rawSource?: string }
 export type ElaborationFact = { source: string; text: string }
 export type ElaborationPhase = 'interface_seed' | 'partitioned_final'
+export type ElaborationPartitionBinding = { planDigest: string; partitionId: string; analysisRef?: BlobRef; interfaceSeed?: RawOnlyInterfaceSeedEvidence }
 /** 调用者已确认的用户原意或裁决变更；不是 Agent 自己生成的批准请求。 */
 export type AuthorizedContractChange = { id: string; action: 'retire' | 'update_verification'; source: 'user:raw' | `decision:${string}`; reason: string; analysisRef?: BlobRef } | { id: string; action: 'update_acceptance'; source: 'user:raw' | `decision:${string}` | `code:${string}`; reason: string; ruleIds: string[]; analysisRef: BlobRef } | { id: string; action: 'restore'; source: 'user:raw'; reason: string; history: { inputId: string; requestBlob: BlobRef } }
 export type ElaborationInput = {
@@ -15,6 +17,8 @@ export type ElaborationInput = {
   base?: string
   /** 仅由分区执行器用于无源码writer的raw-only上层目标；结果不是完整P1或实现就绪。 */
   phase?: 'interface_seed'
+  /** 原分区计划及后验纯父分类证据，只绑定本区来源，不授予写权限或完成度。 */
+  partitionBinding?: ElaborationPartitionBinding
   /** 分区局部候选允许把只读context覆盖留给合并后的严格全图seal。 */
   validationScope?: 'partition_local'
   requestKey: string
@@ -67,6 +71,7 @@ export type ElaborationResult = {
   status: 'complete' | 'needs_input' | 'conflict' | 'unsupported' | 'failed' | 'cancelled' | 'exhausted' | 'interface_seed'
   /** 局部interface seed与全局分区seal均显式标记，不能误读为独立完整P1。 */
   phase?: ElaborationPhase
+  partitionBinding?: ElaborationPartitionBinding
   inputDigest: string
   candidateDigest: string | null
   prior: ElaborationPriorReference | null
