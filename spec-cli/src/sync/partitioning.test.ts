@@ -21,6 +21,14 @@ function acceptance(id: string, nodeId: string, path: string, test: string): Con
   return { kind: 'AC', id, nodeId, path, line: 2, source: { kind: 'user', ref: 'raw' }, dependsOn: [], covers: [], preconditions: '', action: 'run', assertion: 'passes', test, command: 'VERIFY-LOCAL' }
 }
 
+function rawSpec(id: string, code: string[], related: string[] = []): string {
+  const rows = (name: string, values: string[]): string[] => [name + ':', ...values.map(value => `  - ${value}`)]
+  return [
+    '---', `title: ${id}`, 'status: active', ...rows('code', code), ...rows('related', related), '---',
+    `# ${id}`, '', '## raw source', '', `${id} 的原始需求。`,
+  ].join('\n')
+}
+
 function plan(): SyncCoordinatorPlan {
   return {
     version: 'sync-coordinator-v1', intentNodeId: 'root',
@@ -223,4 +231,88 @@ test('identical current bytes do not collapse distinct per-path historical estim
     readByteSizes: new Map([[pathA, 12], [pathB, 24]]),
   })
   assert.equal(result.partitions[0].readBytes, Buffer.byteLength('spec') + 12 + 24)
+})
+
+test('raw-only Spec governance assigns leaf writers and keeps raw ancestors read-only', () => {
+  const rawRootPath = '.spec/raw-project/spec.md'
+  const rawAlphaPath = '.spec/raw-project/alpha/spec.md'
+  const rawBetaPath = '.spec/raw-project/beta/spec.md'
+  const nodes = [
+    { id: 'raw-root', path: rawRootPath },
+    { id: 'raw-alpha', path: rawAlphaPath },
+    { id: 'raw-beta', path: rawBetaPath },
+  ]
+  const files = new Map<string, string>([
+    [rawRootPath, rawSpec('raw-root', [], ['src/shared/root-context.ts'])],
+    [rawAlphaPath, rawSpec('raw-alpha', ['src/raw/alpha.ts'], ['src/shared/common.ts'])],
+    [rawBetaPath, rawSpec('raw-beta', ['src/raw/beta.ts'], ['src/shared/common.ts'])],
+    ['src/raw/alpha.ts', 'export const alpha = true'], ['src/raw/beta.ts', 'export const beta = true'],
+    ['src/raw/orphan.ts', 'export const orphan = true'], ['src/shared/common.ts', 'export const common = true'],
+    ['src/shared/root-context.ts', 'export const rootContext = true'],
+    ['src/unrelated/global.ts', 'export const unrelated = true'], ['tests/oracle.test.ts', 'test oracle'],
+  ])
+  const globalPlan: SyncCoordinatorPlan = {
+    version: 'sync-coordinator-v1', intentNodeId: 'raw-root',
+    targets: nodes.map(node => ({ nodeId: node.id, path: node.path })),
+    readPaths: ['.spec', 'src', 'tests'], writePaths: ['.spec/raw-project', 'src', 'tests'], sourcePaths: ['src'],
+    executionScope: { paths: ['.spec/raw-project', 'src', 'tests'], contractIds: [], flowIds: [] },
+    facts: [{ source: 'user:raw', text: '根原意保持只读' }], verifications: [],
+    mandatoryTests: [{ verificationId: 'VERIFY-RAW', testPath: 'tests/oracle.test.ts', testId: 'ORACLE-1' }],
+  }
+  const result = planSyncPartitions({ plan: globalPlan, files, contracts: [], nodes, changedPaths: [rawAlphaPath] })
+  const alpha = result.partitions.find(partition => partition.targets.some(target => target.nodeId === 'raw-alpha'))!
+  const beta = result.partitions.find(partition => partition.targets.some(target => target.nodeId === 'raw-beta'))!
+  assert.ok(alpha.writePaths.includes('src/raw/alpha.ts'))
+  assert.ok(alpha.readPaths.includes('src/raw/alpha.ts'))
+  assert.ok(alpha.readPaths.includes('src/shared/common.ts'))
+  assert.ok(alpha.readPaths.includes('src/shared/root-context.ts'), 'raw ancestor related is read-only context')
+  assert.ok(!alpha.readPaths.includes('src/raw/beta.ts'))
+  assert.ok(!alpha.readPaths.includes('src/unrelated/global.ts'))
+  assert.ok(alpha.contextNodeIds.includes('raw-root'))
+  assert.ok(beta.writePaths.includes('src/raw/beta.ts'))
+  assert.ok(!beta.writePaths.includes('src/raw/alpha.ts'))
+  assert.ok(beta.contextNodeIds.includes('raw-root'))
+  assert.ok(!result.partitions.some(partition => partition.targets.some(target => target.nodeId === 'raw-root')))
+  assert.deepEqual(result.expectedPaths, [rawAlphaPath])
+})
+
+test('raw-only unowned sources discover the nearest provided node identity instead of defaulting to root', () => {
+  const rawRootPath = '.spec/raw-project/spec.md'
+  const rawAlphaPath = '.spec/raw-project/alpha/spec.md'
+  const rawBetaPath = '.spec/raw-project/beta/spec.md'
+  const nodes = [
+    { id: 'raw-root', path: rawRootPath },
+    { id: 'raw-alpha', path: rawAlphaPath },
+    { id: 'raw-beta', path: rawBetaPath },
+  ]
+  const files = new Map<string, string>([
+    [rawRootPath, rawSpec('raw-root', [], ['src/shared/root-context.ts'])],
+    [rawAlphaPath, rawSpec('raw-alpha', ['src/raw/alpha.ts'], ['src/shared/common.ts'])],
+    [rawBetaPath, rawSpec('raw-beta', ['src/raw/beta.ts'], ['src/shared/common.ts'])],
+    ['src/raw/alpha.ts', 'alpha'], ['src/raw/beta.ts', 'beta'],
+    ['src/raw/orphan.ts', 'orphan'], ['src/shared/common.ts', 'shared'], ['src/shared/root-context.ts', 'root context'],
+  ])
+  const input = {
+    plan: { ...plan(), intentNodeId: 'raw-root', targets: nodes.map(node => ({ nodeId: node.id, path: node.path })), readPaths: ['.spec', 'src'], writePaths: ['.spec/raw-project', 'src'], sourcePaths: ['src'], executionScope: undefined, mandatoryTests: [] },
+    files, contracts: [], nodes, changedPaths: ['src/raw/orphan.ts'],
+  }
+  const result = planSyncPartitions(input)
+  const discovery = result.partitions.find(partition => partition.changedPaths.includes('src/raw/orphan.ts'))!
+  assert.deepEqual(discovery.targets, [])
+  assert.ok(discovery.contextNodeIds.includes('raw-alpha'))
+  assert.ok(discovery.contextNodeIds.includes('raw-root'))
+  assert.ok(!discovery.contextNodeIds.includes('raw-beta'))
+  assert.ok(discovery.readPaths.includes('src/shared/common.ts'))
+  assert.ok(!discovery.readPaths.includes('src/raw/beta.ts'))
+})
+
+test('target frontmatter is recovered from files even when callers omit nodes and contracts', () => {
+  const path = '.spec/raw-project/leaf/spec.md'
+  const files = new Map([[path, rawSpec('raw-leaf', ['src/raw/leaf.ts'])], ['src/raw/leaf.ts', 'export const leaf = true']])
+  const result = planSyncPartitions({
+    plan: { ...plan(), intentNodeId: 'raw-leaf', targets: [{ nodeId: 'raw-leaf', path }], readPaths: ['.spec', 'src'], writePaths: ['.spec/raw-project', 'src'], sourcePaths: ['src'], executionScope: undefined, mandatoryTests: [] },
+    files, contracts: [], changedPaths: [path],
+  })
+  assert.ok(result.partitions[0].writePaths.includes('src/raw/leaf.ts'))
+  assert.ok(result.partitions[0].readPaths.includes('src/raw/leaf.ts'))
 })
