@@ -96,3 +96,5 @@ P4 partial→decide使用原P3-DELIVERY keep_intent真实链补强：fresh exact
 暂停/恢复夹具必须使用真实在途可取消调用，验证两次attempt均沿原operation的callTimeoutMs与总deadline；已失败的精确请求重放不能制造额外调用。raw-only initial先行为分析；FIFO/资源专属夹具则以真实已提交code映射隔离未治理启动分支，使用持久nextQueued核队列位置。recover后资源清空不等于坏配置恢复有效，仍应保留conflicted、原attempt/预算及sync_delivery_evidence_invalid诊断。
 
 提交门禁回归先以旧实现证明未提交 Spec/代码保存错误改变自动输入，再验证保存、git add、提交后立即出现的新 dirty 字节均不混入自动输入。真实 Git code-only/spec-only/mixed commit 分别形成 code/spec/combined；同 commit 重扫、服务重启不重派，停机 commit 启动补偿保持分类与已提交字节。Dashboard 受控 patch 仍由03的即时 submit、不先提交原树证明。enable 配置和注册树夹具必须明确先 commit，未提交配置不成为自动授权。
+
+累计提交边界由应用传给规划器的 commitTrigger 验证：initial.before 为 null，后续 before 精确复用上次自动接入 InputSnapshot；停机先提交 Spec 再提交代码仍为 combined，paths 同时含两次真实 tree 差量，before 不是 HEAD parent。暂停期间仅观测的快照不能消费首次 initial 边界。

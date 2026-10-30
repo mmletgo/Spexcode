@@ -39,7 +39,7 @@ export type SyncApplicationOptions = Partial<Pick<SyncCoordinatorOptions, 'runne
   runtimeDirectory?: string
   tools?: SyncCoordinatorOptions['tools']
 }
-type EnabledRecord = { registeredNodeIds?: string[]; version: 1; source: WorktreeIdentity; headCommit?: string; configDigest: string; enabledAtMs: number }
+type EnabledRecord = { registeredNodeIds?: string[]; version: 1; source: WorktreeIdentity; configDigest: string; enabledAtMs: number }
 type SavedTools = { tools: SyncCoordinatorOptions['tools']; runtimeDigest: string | null } & ({ version: 'sync-tools-v1' } | { version: 'sync-tools-v2'; model: string })
 function enabledSources(runtime: string): EnabledRecord[] {
   if (!existsSync(runtime)) return []
@@ -134,7 +134,7 @@ export class SyncApplication {
     const nodes = await this.frozenNodes(snapshot)
     const roots = this.selectRegisteredNodes(nodes, settings, snapshot)
     if (!roots.length) throw new SyncApplicationError('sync_scope_unregistered', '没有受授权源码/测试治理的节点；新需求请在 sync.nodeIds 明确登记意图节点')
-    const record: EnabledRecord = { version: 1, source: snapshot.source, headCommit: snapshot.headCommit, configDigest, enabledAtMs: Date.now(), registeredNodeIds: roots.map(node => node.id) }
+    const record: EnabledRecord = { version: 1, source: snapshot.source, configDigest, enabledAtMs: Date.now(), registeredNodeIds: roots.map(node => node.id) }
     const temp = `${this.enabledPath}.${randomUUID()}`
     writeFileSync(temp, `${JSON.stringify(record)}\n`, { mode: 0o600, flag: 'wx' }); renameSync(temp, this.enabledPath)
     if (this.observerIdentity && this.observerIdentity.source.physicalFingerprint !== snapshot.source.physicalFingerprint) await this.stopService()
@@ -297,7 +297,7 @@ export class SyncApplication {
     for (const rootId of rootIds) this.registeredNodes.add(rootId)
     for (const nodeId of this.registeredNodes) await this.observeNode(snapshot, nodeId)
   }
-  private async freezeNodePlan(snapshot: InputSnapshot, nodeId: string, reuseObserved = false, direction: 'spec_to_code' | 'code_to_spec' | 'combined' = 'spec_to_code'): Promise<{ plan: SyncCoordinatorPlan; selection: FrozenBaselineSelection }> {
+  private async freezeNodePlan(snapshot: InputSnapshot, nodeId: string, reuseObserved = false, direction: 'spec_to_code' | 'code_to_spec' | 'combined' = 'spec_to_code', commitTrigger?: { before: InputSnapshot | null; paths: readonly string[] }): Promise<{ plan: SyncCoordinatorPlan; selection: FrozenBaselineSelection }> {
     const resourcesInStore = this.store.listBaselineResources(snapshot.source)
     let heads = this.store.readBaselineSelection(snapshot.source, resourcesInStore)
     if ('failure' in heads && heads.failure.code === 'SYNC_BASELINE_LEGACY_UNKNOWN') {
@@ -306,9 +306,9 @@ export class SyncApplication {
     }
     if ('failure' in heads) throw Object.assign(new SyncApplicationError(heads.failure.code, heads.failure.message), { syncFailure: heads.failure })
     const headsDigest = contentHash(JSON.stringify({ resources: resourcesInStore, selection: heads.selection.digest }))
-    const cacheKey = `${nodeId}:${direction}`, cached = reuseObserved ? this.observedPlans.get(cacheKey) : null
+    const cacheKey = `${nodeId}:${direction}:${commitTrigger ? contentHash(JSON.stringify({ before: commitTrigger.before?.id ?? null, paths: commitTrigger.paths })) : ''}`, cached = reuseObserved ? this.observedPlans.get(cacheKey) : null
     if (cached?.inputId === snapshot.id && cached.headsDigest === headsDigest && cached.direction === direction) return { plan: structuredClone(cached.plan), selection: cached.selection }
-    const discoverySelection = heads.selection, planningOptions = { discoverySelection, direction }
+    const discoverySelection = heads.selection, planningOptions = { discoverySelection, direction, ...(commitTrigger ? { commitTrigger } : {}) }
     const provisional = await buildSyncApplicationPlan(snapshot, nodeId, heads.selection, planningOptions)
     const resources = await deriveSyncBaselineResources(snapshot, provisional, heads.selection)
     const selected = this.store.readBaselineSelection(snapshot.source, resources)
@@ -351,14 +351,14 @@ export class SyncApplication {
     })
     return { changed: changedPaths.length > 0 || residualPaths.length > 0 || intentChanged || contextChanged, specChanged: intentChanged || changedPaths.some(path => path.path.startsWith('.spec/')), codeChanged: contextChanged || changedPaths.some(path => !path.path.startsWith('.spec/')) || residualPaths.some(path => !path.startsWith('.spec/')), readonlyContext }
   }
-  private committedOrigin(snapshot: InputSnapshot, nodeId: string, plan: SyncCoordinatorPlan): SyncOperation['origin'] | null {
-    const prior = this.store.listOperations(snapshot.source.repositoryId, { sourceRoot: this.root, limit: 500 }).find(operation => operation.input.captureKind === 'commit' && JSON.stringify(operation.input.source) === JSON.stringify(snapshot.source) && operation.ingressKey.startsWith('observation:') && this.operationPlan(operation).intentNodeId === nodeId)
-    if (prior?.input.headCommit === snapshot.headCommit) return prior.origin
-    const base = prior?.input.headCommit ?? this.enabled(snapshot)?.headCommit ?? snapshot.headCommit
-    if (!prior && base === snapshot.headCommit) return 'initial'
-    const paths = objectGit(snapshot.source.commonDir, ['diff', '--name-only', '-z', '--no-renames', base, snapshot.headCommit]).toString('utf8').split('\0').filter(Boolean).filter(path => coveredPath(path, [...plan.executionScope!.paths, ...plan.readPaths]))
-    const spec = paths.some(isSyncSpecPath), code = paths.some(path => !path.startsWith('.spec/'))
-    return spec && code ? 'combined' : code ? 'code' : spec ? 'spec' : null
+  private committedTrigger(snapshot: InputSnapshot, nodeId: string, plan: SyncCoordinatorPlan): { origin: SyncOperation['origin'] | null; commitTrigger: { before: InputSnapshot | null; paths: string[] } } {
+    const operations = this.store.listOperations(snapshot.source.repositoryId, { sourceRoot: this.root, limit: 500 }).filter(operation => operation.input.captureKind === 'commit' && JSON.stringify(operation.input.source) === JSON.stringify(snapshot.source) && operation.ingressKey.startsWith('observation:') && this.operationPlan(operation).intentNodeId === nodeId)
+    const accepted = operations.find(operation => operation.input.id === snapshot.id), before = operations.find(operation => operation.input.id !== snapshot.id)?.input ?? null
+    const paths = before ? objectGit(snapshot.source.commonDir, ['diff', '--name-only', '-z', '--no-renames', before.immutableTree, snapshot.immutableTree]).toString('utf8').split('\0').filter(Boolean) : verifySnapshot(snapshot).map(entry => entry.path)
+    const relevant = paths.filter(path => coveredPath(path, [...plan.executionScope!.paths, ...plan.readPaths]))
+    const spec = relevant.some(isSyncSpecPath), code = relevant.some(path => !path.startsWith('.spec/'))
+    const origin = accepted?.origin ?? (!before ? 'initial' : spec && code ? 'combined' : code ? 'code' : spec ? 'spec' : null)
+    return { origin, commitTrigger: { before, paths } }
   }
   private async observeNode(snapshot: InputSnapshot, nodeId: string): Promise<void> {
     const { settings, configDigest } = readSyncSettings(snapshot)
@@ -368,10 +368,11 @@ export class SyncApplication {
     let selection: FrozenBaselineSelection | null = null
     try {
       let frozen = await this.freezeNodePlan(snapshot, nodeId, true)
-      const origin = snapshot.captureKind === 'commit' ? this.committedOrigin(snapshot, nodeId, frozen.plan) : null
+      const trigger = snapshot.captureKind === 'commit' ? this.committedTrigger(snapshot, nodeId, frozen.plan) : null
+      const origin = trigger?.origin ?? null
       const hasImplementation = verifySnapshot(snapshot).some(entry => entry.mode !== '120000' && coveredPath(entry.path, settings.sourcePaths) && coveredPath(entry.path, frozen.plan.readPaths))
       const direction = origin === 'combined' ? 'combined' : origin === 'code' || origin === 'initial' && hasImplementation ? 'code_to_spec' : 'spec_to_code'
-      if (direction !== 'spec_to_code') frozen = await this.freezeNodePlan(snapshot, nodeId, true, direction)
+      if (trigger || direction !== 'spec_to_code') frozen = await this.freezeNodePlan(snapshot, nodeId, true, direction, trigger?.commitTrigger)
       const plan = frozen.plan
       selection = frozen.selection
       const differenceKey = `${snapshot.id}:${selection.digest}:${syncPlanDigest(plan)}`

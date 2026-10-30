@@ -107,9 +107,9 @@ revert 将精确历史恢复 Spec 作为可信目标，保原节点/业务 ID �
 
 新手动 run/verify operation 可显式选择模型以覆盖项目默认；省略模型时，同 request 的 prior 或显式 retry 的原模型优先于当前版本化配置 `sync.model`，无 prior/retry 才使用项目值或历史默认 sol。同 request 改模型拒绝，普通重复不能用模型变化重置预算。自动观察、decide 与 revert 新 operation 从同一快照配置绑定模型，admission、固定运行描述与真实 runner request 使用相同精确值。配置变化继续由授权/configDigest/currentness 门禁处理，不重开旧操作或重置预算。
 
-Dashboard 的受控正文保存继续直接 submit，requestBlob 即时触发 spec→code，不等待 Git 提交。外部编辑器的 Spec/代码保存、原子替换与 git add 均不启动自动模型；自动观察只接受已提交 HEAD tree，首次显式 enable 可从既有 committed HEAD 发起 initial，同期未提交或未暂存的新编辑不混入。enable 仅授权已提交配置及意图，记录可选 headCommit 作为首次纳管的提交基点。
+Dashboard 的受控正文保存继续直接 submit，requestBlob 即时触发 spec→code，不等待 Git 提交。外部编辑器的 Spec/代码保存、原子替换与 git add 均不启动自动模型；自动观察只接受已提交 HEAD tree，首次显式 enable 可从既有 committed HEAD 发起 initial，同期未提交或未暂存的新编辑不混入。enable 仅授权已提交配置及意图，不从未提交内容建立初始输入。
 
-后续自动输入依据该节点最近自动接入的 committed HEAD（首次未接入时为 enable 基点）到当前 HEAD 的真实相关提交差量区分 spec/code/combined；停机多次提交仍按累计已提交差量分类。仅提交无关路径或空提交不启动模型。code 冻结 code_to_spec、combined 冻结 combined；initial 有已提交授权实现时冻结 code_to_spec，否则与 Spec 保存相同冻结 spec_to_code。沿同一 plan/selection 规划，不复制执行器或分区政策。
+首次无已证明自动接入快照时以 initial 纳管当前已提交树；旧无 captureKind 的操作不能被猜作 committed 前态。后续自动输入依据该节点最近自动接入的真实 commit 快照到当前输入的 tree 差量区分 spec/code/combined；停机多次提交仍按累计已提交差量分类，paused 只观察而不消费边界。v2 plan 的 commitTrigger 冻结该 before 快照（首次 initial 为 null）及真实累计 paths，after 仍为 operation.input。它是作者提交前态而非已验证交付，不替代 receipt/baseline，也不按 HEAD^ 猜测或只保存可能被 GC 的 OID。仅提交无关路径或空提交不启动模型。code 冻结 code_to_spec、combined 冻结 combined；initial 有已提交授权实现时冻结 code_to_spec，否则与 Spec 保存相同冻结 spec_to_code。沿同一 plan/selection 规划，不复制执行器或分区政策。
 
 自动 ingress 固定到提交快照与节点，同一 commit 重放不因 baseline 或差异证据推进而重新派发；已结算 receipt/baseline 继续按真实意图消费和采纳证明消除同步自身交付/采纳提交的回声，不按 Git author 或 session trailer 猜测作者。停机提交在 service 启动及周期补偿中继续发现。新 commit 沿既有作用域、物理控制和预算族门禁，不新增触发配置开关。
 
