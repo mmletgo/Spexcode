@@ -16,6 +16,8 @@ related:
 
 ## expanded spec
 
+规划覆盖真实影响目标，不以目标文件本身出现在diff为前提。Spec保存后，已治理实现虽尚未变化也纳入本区原授权写集合；所有潜在实现/非只读测试writer重叠的目标先合区。上层纯原意节点仍只作上下文，除非本次自身变化或实际持有实现写职责。mandatory oracle与只读依赖永不升格writer，目录级执行授权收窄到本区实际文件；不相关code来源事实不进入本区。
+
 规划只接受调用方冻结的 `SyncCoordinatorPlan`、文件正文、已解析 `Contract` 集合和精确 `changedPaths`，不读取实时工作树、不发起模型调用，也不修改输入。契约引用与反向关系复用 `spec-core/contracts` 图；Spec 的 `code:`、`related:` 锚点、selector、目录与 glob 匹配复用现有 relation parser 和 matcher。
 
 每个 `changedPath` 在 `expectedPaths` 与恰好一个分区中出现。目标 Spec 路径按节点归属；代码与验收文件按其真实声明者归区。多个目标声明同一实际写文件时必须合区，任何分区路径不得被另一区重复写入。没有当前治理所有者的变更也必须归入按目录和最近已知治理邻域组织的发现组；该组应保留近邻 Spec 作为只读背景，不得因此把变更解释为已有合法归属。独立发现路径可按真实上下文字节预算拆组，之后发现的新治理叶由上层流程取得局部写权。
