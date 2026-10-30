@@ -4,6 +4,7 @@ import { closeSync, existsSync, lstatSync, mkdtempSync, openSync, readFileSync, 
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
 import { putBlob, readBlobByHash } from '@spexcode/spec-core'
+import { withWorktreeRegistryLock } from '../session-record-lock.js'
 import type { BlobRef, InputSnapshot, WorktreeIdentity } from './operation-types.js'
 
 export type TreeEntry = { path: string; mode: '100644' | '100755' | '120000'; oid: string; digest: string }
@@ -51,7 +52,7 @@ const physicalStat = (path: string): string => {
 }
 /** 已授权路径可在 HEAD 不可读前核对物理替换，不为缺失来源伪造快照。 */
 export const readPhysicalFingerprint = (canonicalRoot: string, gitDir: string): string => contentHash(`${physicalStat(canonicalRoot)}:${physicalStat(gitDir)}`)
-const registeredWorktreeRoots = (root: string): string[] => sourceGit(root, ['worktree', 'list', '--porcelain', '-z']).toString().split('\0').filter(line => line.startsWith('worktree ')).map(line => resolve(line.slice(9)))
+const registeredWorktreeRoots = (commonDir: string): string[] => objectGit(commonDir, ['worktree', 'list', '--porcelain', '-z']).toString().split('\0').filter(line => line.startsWith('worktree ')).map(line => resolve(line.slice(9)))
 /** 固定沿用采集来源的历史字段顺序；规范JSON排序不能改变快照身份。 */
 export const canonicalSnapshotSource = (source: WorktreeIdentity): WorktreeIdentity => ({ repositoryId: source.repositoryId, commonDir: source.commonDir, canonicalRoot: source.canonicalRoot, gitDir: source.gitDir, branch: source.branch, physicalFingerprint: source.physicalFingerprint })
 export function identifyWorktree(root: string): WorktreeIdentity {
@@ -59,8 +60,11 @@ export function identifyWorktree(root: string): WorktreeIdentity {
   if (realpathSync(sourceGit(canonicalRoot, ['rev-parse', '--show-toplevel']).toString().trim()) !== canonicalRoot) throw new Error('输入必须为工作树根目录')
   const commonDir = realpathSync(sourceGit(canonicalRoot, ['rev-parse', '--path-format=absolute', '--git-common-dir']).toString().trim())
   const gitDir = realpathSync(sourceGit(canonicalRoot, ['rev-parse', '--absolute-git-dir']).toString().trim())
-  const registered = registeredWorktreeRoots(canonicalRoot)
-  if (!registered.includes(canonicalRoot)) throw new Error('输入不是 registered worktree')
+  // Git 的 primary 路径由 commonDir 去掉 /.git 得到；linked 只核对自身登记及回链。
+  const registered = gitDir === commonDir
+    ? canonicalRoot === (commonDir.endsWith(`${sep}.git`) ? dirname(commonDir) : commonDir)
+    : dirname(gitDir) === join(commonDir, 'worktrees') && resolve(gitDir, readFileSync(join(gitDir, 'gitdir'), 'utf8').trimEnd()) === join(canonicalRoot, '.git')
+  if (!registered) throw new Error('输入不是 registered worktree')
   const branch = sourceGit(canonicalRoot, ['rev-parse', '--symbolic-full-name', 'HEAD']).toString().trim()
   return { repositoryId: contentHash(`${commonDir}:${physicalStat(commonDir)}`), commonDir, canonicalRoot, gitDir, branch, physicalFingerprint: readPhysicalFingerprint(canonicalRoot, gitDir) }
 }
@@ -153,7 +157,7 @@ function checkParents(root: string, path: string): void {
   }
 }
 type Observation = { source: WorktreeIdentity; head: string; indexTree: string; indexDigest: string; sharedIndexDigest: string; entries: TreeEntry[]; fileStamp: string }
-function observe(root: string): Observation {
+async function observe(root: string): Promise<Observation> {
   const source = identifyWorktree(root), head = sourceGit(root, ['rev-parse', 'HEAD']).toString().trim()
   const indexPath = sourceGit(root, ['rev-parse', '--path-format=absolute', '--git-path', 'index']).toString().trim()
   const indexBytes = existsSync(indexPath) ? readFileSync(indexPath) : null
@@ -177,7 +181,7 @@ function observe(root: string): Observation {
   const cachedRecords = objectGit(source.commonDir, ['ls-tree', '-rz', '--full-tree', indexTree]).toString().split('\0').filter(Boolean)
   if (cachedRecords.some(record => record.startsWith('160000 commit '))) throw new Error('不支持真实 gitlink/submodule 条目')
   const cachedPaths = new Set(cachedRecords.map(record => record.slice(record.indexOf('\t') + 1)))
-  const nestedWorktrees = registeredWorktreeRoots(root).filter(path => path.startsWith(`${root}${sep}`))
+  const nestedWorktrees = await withWorktreeRegistryLock(async () => registeredWorktreeRoots(source.commonDir).filter(path => path.startsWith(`${root}${sep}`)), undefined, source.commonDir)
   const stamps: string[] = [], entries: TreeEntry[] = [], objects = mkdtempSync(join(tmpdir(), 'spex-sync-objects-'))
   try {
     for (const path of paths) {
@@ -216,11 +220,11 @@ export async function captureInputSnapshot(root: string, options: { committed?: 
   for (let attempt = 1; attempt <= (options.maxAttempts ?? 3); attempt++) {
     try {
       const observeInput = options.committed ? observeCommitted : observe
-      const first = observeInput(realpathSync(root))
+      const first = await observeInput(realpathSync(root))
       const tree = options.committed ? first.indexTree : writeTree(first.source.commonDir, first.entries)
       await options.onObservation?.(attempt)
       await new Promise<void>(done => setImmediate(done))
-      const second = observeInput(realpathSync(root))
+      const second = await observeInput(realpathSync(root))
       if (observationKey(first) !== observationKey(second)) continue
       return snapshotFromTree({ id: '', ...(options.committed ? { captureKind: 'commit' as const } : {}), source: first.source, headCommit: first.head, immutableTree: tree, indexTree: first.indexTree, indexDigest: first.indexDigest, manifestBlob: { sha256: '' }, contentDigest: '', capturedAtMs: Date.now() }, tree)
     } catch (error) {
