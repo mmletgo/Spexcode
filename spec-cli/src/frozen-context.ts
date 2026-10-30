@@ -424,6 +424,18 @@ export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFro
   let latestMessage: string | undefined, compaction: { ancestors: Set<string>; anchor?: string } | undefined
   const receipts: FrozenReadReceipt[] = [], rejectedCalls: string[] = [], responseMessages = new Map<string, string>(), responseBlocks = new Map<string, ClaudePublicContentBlock>(), requestRefs = new Set<string>()
   if (witness.mcpHistory && (JSON.stringify(readClaudeMcpToolNames(witness.mcpHistory.path)) !== JSON.stringify(witness.mcpHistory.toolNames) || witness.mcpHistory.toolNames.some(name => name !== 'spex_read_frozen'))) stale('Claude MCP dispatched a foreign tool or its actual history changed')
+  const apiMessages = new Map<string, { content: ClaudePublicContentBlock[]; canonical: boolean; summaries: Set<string> }>()
+  for (const row of history) if (row.type === 'api-request-blob') {
+    if (!row.message || row.message.role !== 'user' || !Array.isArray(row.message.content) || row.hash !== claudeMessageDigest(row.message) || row.message.content.some(block => !['tool_result', 'text'].includes(block.type))) stale('Claude public API message blob has invalid bytes or type')
+    const blob = apiMessages.get(row.hash) ?? { content: row.message.content, canonical: row.hash === claudeMessageDigest({ role: 'user', content: row.message.content }), summaries: new Set<string>() }
+    if (row.compactSummaryDigest) blob.summaries.add(row.compactSummaryDigest)
+    apiMessages.set(row.hash, blob)
+  }
+  const apiToolResultIds = (content: readonly ClaudePublicContentBlock[]): string[] => content.filter(block => block.type === 'tool_result').map(block => {
+    const originalBlock = responseBlocks.get(block.tool_use_id!)
+    if (!originalBlock || claudeMessageDigest(originalBlock) !== claudeMessageDigest(block)) stale('Claude merged API tool result differs from its exact native public reply')
+    return block.tool_use_id!
+  })
   const recoveries: Array<{ hashes: Set<string>; summaries: Set<string>; requests: Set<string>; consumed: boolean }> = []
   let latestAssistant: string | undefined, acceptedOutput = false
   for (const row of history) {
@@ -471,27 +483,30 @@ export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFro
     if (row.type === 'api-request-blob') {
       if (row.compactSummaryDigest && recoveries.length && row.compactSummaryDigest === claudeMessageDigest({ role: 'user', content: CLAUDE_TRUNCATED_RECOVERY_TEXT })) stale('Claude recovery API message cannot masquerade as a compact summary')
       if (row.compactSummaryDigest && !compactSummaries.has(row.compactSummaryDigest)) stale('Claude API string message is not an observed same-turn compact summary')
-      if (!row.message || row.message.role !== 'user' || !Array.isArray(row.message.content) || row.hash !== claudeMessageDigest(row.message) || row.message.content.some(block => !['tool_result', 'text'].includes(block.type))) stale('Claude public API message blob has invalid bytes or type')
-      for (const recovery of recoveries) if (row.compactSummaryDigest && recovery.summaries.has(row.compactSummaryDigest)) recovery.hashes.add(row.hash)
-      if (recoveries.length && row.message.content.some(block => block.type === 'text') && !row.compactSummaryDigest && !compactSummaries.has(row.hash)) {
-        const texts = row.message.content.filter(block => block.type === 'text')
-        const recoveryText = { type: 'text', text: CLAUDE_TRUNCATED_RECOVERY_TEXT }
-        const plain = JSON.stringify(texts) === JSON.stringify([recoveryText])
-        const merged = JSON.stringify(row.message.content) === JSON.stringify([{ type: 'text', text: witness.prompt + '\n' }, recoveryText])
-        if ((!plain && !merged) || row.hash !== claudeMessageDigest({ role: 'user', content: row.message.content })) stale('Claude recovery API message contains unobserved text or a different coalescing shape')
-        for (const recovery of recoveries) recovery.hashes.add(row.hash)
-      }
-      for (const block of row.message.content.filter(block => block.type === 'tool_result')) {
-        const originalBlock = responseBlocks.get(block.tool_use_id!)
-        if (!originalBlock || claudeMessageDigest(originalBlock) !== claudeMessageDigest(block)) stale('Claude merged API tool result differs from its exact native public reply')
-        responseMessages.set(block.tool_use_id!, row.hash)
-      }
+      apiToolResultIds(apiMessages.get(row.hash!)!.content)
     }
     if (row.type === 'api-request') {
       const base = row.base ? requests.get(row.base) : []
       if (!row.id || requests.has(row.id) || !row.shapeHash || !shapes.has(row.shapeHash) || !base || !Number.isSafeInteger(row.keep) || row.keep! < 0 || row.keep! > base.length || !Array.isArray(row.tail) || row.model !== model) stale('Claude API model, tools shape or request history boundary differs')
       if (!requests.size && (!row.tail.includes(claudeMessageDigest(original.message)) || row.keep !== 0 || row.base)) stale('Claude original user prompt was not in the actual first API request')
       const hashes = [...base.slice(0, row.keep), ...row.tail]
+      for (const hash of hashes) {
+        const blob = apiMessages.get(hash)
+        if (!blob) continue
+        for (const callId of apiToolResultIds(blob.content)) responseMessages.set(callId, hash)
+        const summaries = [...blob.summaries].filter(digest => compactSummaries.has(digest))
+        if (compactSummaries.has(hash) || summaries.length) {
+          for (const recovery of recoveries) if (recovery.summaries.has(hash) || summaries.some(digest => recovery.summaries.has(digest))) recovery.hashes.add(hash)
+          continue
+        }
+        if (!blob.content.some(block => block.type === 'text')) continue
+        const texts = blob.content.filter(block => block.type === 'text'), recoveryText = { type: 'text', text: CLAUDE_TRUNCATED_RECOVERY_TEXT }
+        const plain = recoveries.length > 0 && JSON.stringify(texts) === JSON.stringify([recoveryText])
+        const merged = recoveries.length > 0 && JSON.stringify(blob.content) === JSON.stringify([{ type: 'text', text: witness.prompt + '\n' }, recoveryText])
+        const originalInput = hash === claudeMessageDigest(original.message) || hash === claudeMessageDigest({ role: 'user', content: claudeMessageBlocks(original.message) })
+        if (!blob.canonical || !originalInput && !plain && !merged) stale('Claude API user message contains unobserved text or a different coalescing shape')
+        if (plain || merged) for (const recovery of recoveries) recovery.hashes.add(hash)
+      }
       requests.set(row.id, hashes)
       for (const recovery of recoveries) {
         if (row.tail.some(hash => recovery.hashes.has(hash)) || row.base && recovery.requests.has(row.base) && hashes.some(hash => recovery.hashes.has(hash))) recovery.requests.add(row.id)

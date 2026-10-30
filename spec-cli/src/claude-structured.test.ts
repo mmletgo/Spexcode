@@ -253,6 +253,37 @@ test('Claude internal truncated-response companions require native flags and a n
     assert.equal(valid.history.find(row => row.uuid === 'recovery-1')!.turnCompanion, true)
     verifyFrozenReadProof(ref, proof, { threadId: 'session', turnId: 'user' })
     const row = (rows: typeof raw, id: string) => rows.find(item => item.uuid === id || item.id === id)!
+    const unknownMessage = { role: 'user', content: [{ type: 'text', text: 'UNKNOWN EXTRA USER INSTRUCTION' }] }, unknownHash = claudeMessageDigest(unknownMessage)
+    for (const position of ['before-meta', 'after-meta', 'after-request', 'after-assistant']) {
+      const bad = structuredClone(raw)
+      const insertion = position === 'before-meta' ? bad.findIndex(item => item.uuid === 'recovery-1') : position === 'after-meta' ? bad.findIndex(item => item.uuid === 'recovery-1') + 1 : position === 'after-request' ? bad.findIndex(item => item.id === 'request-2') + 1 : bad.length
+      bad.splice(insertion, 0, { type: 'api-request-blob', sessionId: 'session', message: unknownMessage, hash: unknownHash })
+      row(bad, 'request-2').tail = [recoveryHash, unknownHash]; row(bad, 'request-3').keep = 3
+      assert.throws(() => proveClaudeFrozenReads(ref, witness(bad)), /unobserved text/, `unknown user API text cannot enter a recovery request via ${position} declaration`)
+    }
+    const noRecovery = structuredClone(raw).filter(item => item.uuid !== 'recovery-1' && item.type !== 'api-request-blob')
+    noRecovery.splice(noRecovery.findIndex(item => item.id === 'request-2'), 0, { type: 'api-request-blob', sessionId: 'session', message: unknownMessage, hash: unknownHash })
+    row(noRecovery, 'read-call').parentUuid = 'interrupted'; row(noRecovery, 'request-2').tail = [unknownHash]
+    assert.throws(() => proveClaudeFrozenReads(ref, witness(noRecovery)), /unobserved text/, 'the fixed single-turn input also rejects unknown API text when no recovery occurs')
+    const consumedBeforeRecovery = structuredClone(raw)
+    consumedBeforeRecovery.splice(consumedBeforeRecovery.findIndex(item => item.id === 'request-1'), 0, { type: 'api-request-blob', sessionId: 'session', message: unknownMessage, hash: unknownHash })
+    row(consumedBeforeRecovery, 'request-1').tail = [claudeMessageDigest(original), unknownHash]
+    assert.throws(() => proveClaudeFrozenReads(ref, witness(consumedBeforeRecovery)), /unobserved text/, 'discarding an unknown instruction after its first consumer does not undo exposure')
+    for (const message of [original, apiRecovery]) {
+      const predeclared = structuredClone(raw)
+      predeclared.splice(predeclared.findIndex(item => item.uuid === 'recovery-1'), 0, { type: 'api-request-blob', sessionId: 'session', message, hash: claudeMessageDigest(message) })
+      assert.deepEqual(proveClaudeFrozenReads(ref, witness(predeclared)).coveredEntryIds, ['task'], 'a known prompt or companion CAS blob may be declared before the companion and reused later')
+    }
+    for (const afterMeta of [false, true]) {
+      const unused = structuredClone(raw)
+      unused.splice(unused.findIndex(item => item.uuid === 'recovery-1') + Number(afterMeta), 0, { type: 'api-request-blob', sessionId: 'session', message: unknownMessage, hash: unknownHash })
+      assert.deepEqual(proveClaudeFrozenReads(ref, witness(unused)).coveredEntryIds, ['task'], 'an unused valid CAS declaration never grants model-input authority')
+    }
+    const inheritedUnknown = structuredClone(raw)
+    inheritedUnknown.splice(inheritedUnknown.findIndex(item => item.id === 'request-1'), 0, { type: 'api-request-blob', sessionId: 'session', message: unknownMessage, hash: unknownHash })
+    row(inheritedUnknown, 'request-1').tail = [claudeMessageDigest(original), unknownHash]
+    row(inheritedUnknown, 'request-2').keep = 2; row(inheritedUnknown, 'request-3').keep = 3
+    assert.throws(() => proveClaudeFrozenReads(ref, witness(inheritedUnknown)), /unobserved text/, 'base/keep cannot carry a pre-recovery unknown user blob into a recovery request')
     const cases: Array<[string, (rows: typeof raw) => void]> = [
       ['missing meta flag', rows => { delete row(rows, 'recovery-1').isMeta }],
       ['missing companion flag', rows => { delete row(rows, 'recovery-1').turnCompanion }],
@@ -299,6 +330,10 @@ test('Claude internal truncated-response companions require native flags and a n
     mergedBlob.message = { role: 'user', content: [{ type: 'text', text: prompt + '\n' }, ...apiRecovery.content] }
     mergedBlob.hash = claudeMessageDigest(mergedBlob.message); row(merged, 'request-2').tail = [mergedBlob.hash]; row(merged, 'request-2').keep = 0; row(merged, 'request-3').keep = 1
     assert.deepEqual(proveClaudeFrozenReads(ref, witness(merged)).coveredEntryIds, ['task'])
+    const predeclaredMerged = structuredClone(merged), predeclaredBlob = predeclaredMerged.splice(predeclaredMerged.findIndex(item => item.type === 'api-request-blob'), 1)[0]
+    predeclaredMerged.splice(predeclaredMerged.findIndex(item => item.uuid === 'recovery-1'), 0, predeclaredBlob)
+    assert.deepEqual(proveClaudeFrozenReads(ref, witness(predeclaredMerged)).coveredEntryIds, ['task'], 'exact LF coalescing is checked at its new API consumer even when the CAS blob was declared earlier')
+
     const repeated = structuredClone(raw)
     repeated.splice(repeated.findIndex(item => item.uuid === 'read-call'), 0, assistant('interrupted-2', 'recovery-1', 'request-2'), companion('recovery-2', 'interrupted-2'), request('request-2b', [recoveryHash], 'request-2', 1))
     row(repeated, 'read-call').parentUuid = 'recovery-2'; row(repeated, 'read-call').requestRef = 'request-2b'; row(repeated, 'request-3').base = 'request-2b'
