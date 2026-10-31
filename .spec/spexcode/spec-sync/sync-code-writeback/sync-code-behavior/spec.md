@@ -96,3 +96,7 @@ v2 分区执行携带显式 partition.id/changedPaths；分析及独审仅对本
 只读 v2 `code_to_spec` 的新治理父身份必须可消歧：程序从最终授权父路径投影当前冻结契约图中具有非空 raw 的节点，以 `{nodeId, path}` 同时提供真实身份和定位信息，并将同一列表冻结给分析与独审。仅该分支的 `newNodes.parentNodeId` schema 使用此列表里的精确 nodeId enum；提示要求填写 nodeId，path 只用于定位。所有有效父节点都可选且不设默认。没有有效父节点或没有本区源码候选时 `maxItems` 为 0，不生成空 enum。模型返回的 `parentNodeId` 仍按当前节点 ID 查找，父目录授权、源码归属及完整读取门禁继续有效；路径值不得自动转换为 ID。v1 和非 `code_to_spec` 方向保持原 schema 与校验语义。
 
 行为分析提案的 `newNodes` 在Native阶段保持schema定义的 `{codePath, parentNodeId, basis}`；通过身份、摘要和schema校验后，程序解析为持久 `analysis.newNodes` 的 `{nodeId, path, codePath, rawSource}`，不改变持久格式或 `analysisDigest`。独审请求同时携带本次原 `newNodeProposals` 与该解析结果。独审按codePath一一核父ID、basis、授权且真实读取的父raw、叶path目录和raw引用，并继续独立核代码与业务职责；不要求解析结果复现parentNodeId/basis，也不因程序解析而跳过语义审查。`repairDiagnostics`保留为历史失败数据，不能替代或补写本次提案，也不成为当前政策。
+
+首次纳管或changedPaths/requiredChangedPaths纳入仅表示覆盖任务，不意味着Spec作者原意已变或必须返回全文。逐路径核作者基准、oldSource/newSource/composed及真实verifiedDelivery；当Spec正文同字节、交付缺席或同字节、authorChanges无该路径且没有未消费语义残差、overlap.conflict或明确受控裁决/生命周期授权时，分析返回空resolutions，不重抄、格式化或转义Spec，也不在分析阶段扩规格。详细契约交P1，renderer复制冻结raw。独审同样不把该空输出判为遗漏；真实差量、相容重叠、逐ID语义残差及明确裁决仍要求精确完整整合并按原raw字节来源、独审与权限门禁验证。
+
+行为指导合同以guidanceContractVersion显式进入同一冻结context及唯一inputDigest；指导职责变化使旧无该版本的已审analysis不匹配，必须重新分析与独审，不改source input/policy或旧ref/findings。首次尚无规格叶、稳定ID、FLOW/AC或覆盖映射属于待生成工作：raw、冻结源码与完整测试已给出可核行为时，以真实分类、newNodes与有来源facts交P1，不仅因尚无Spec报coverage_gap。真正coverage_gap须指出仍缺的重大业务事实/政策及可观察后果，conflict须给出真实互斥；独审对仅以待生成工作升格未知的分析返回具体repair，不能为推进而清除或降格真实发现。

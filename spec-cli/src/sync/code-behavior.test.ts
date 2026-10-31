@@ -399,7 +399,7 @@ test('真实runner的冻结三方JSON共享正文引用且逐字段还原旧输�
       assert.equal(readTree(input.snapshot.source.commonDir, input.snapshot.immutableTree).find(entry => entry.path === modePath)!.mode, '100755')
       assert.ok(duplicateBytes > 0, '同一正文在多个视图仍应只存一份并由多处引用')
       assert.deepEqual(expanded.rawlessSpecPaths, [])
-      assert.deepEqual(Object.keys(expanded).sort(), ['requiredChangedPaths', 'unownedSourcePaths', 'unownedSourcePathCount', 'rawlessSpecPaths', 'snapshotTree', 'readablePaths', 'contractItems', 'origin', 'decision', 'repairDiagnostics', 'inputId', 'baselinePair', 'baselineSelection', 'compositionEvidence', 'authorByteProjections', 'intentArtifactFiles', 'nonTextFiles', 'composed', 'readSetDigest', 'policyDigest', 'plan', 'changedPaths', 'authorChanges', 'adoptedDeliveryPaths', 'authorBaseline', 'oldSource', 'verifiedDelivery', 'newSource', 'composedFiles', 'controlledBeforeFiles'].sort())
+      assert.deepEqual(Object.keys(expanded).sort(), ['guidanceContractVersion', 'requiredChangedPaths', 'unownedSourcePaths', 'unownedSourcePathCount', 'rawlessSpecPaths', 'snapshotTree', 'readablePaths', 'contractItems', 'origin', 'decision', 'repairDiagnostics', 'inputId', 'baselinePair', 'baselineSelection', 'compositionEvidence', 'authorByteProjections', 'intentArtifactFiles', 'nonTextFiles', 'composed', 'readSetDigest', 'policyDigest', 'plan', 'changedPaths', 'authorChanges', 'adoptedDeliveryPaths', 'authorBaseline', 'oldSource', 'verifiedDelivery', 'newSource', 'composedFiles', 'controlledBeforeFiles'].sort())
     }
     return runner('refactor')(request)
   })
@@ -1056,6 +1056,113 @@ test('无raw的既有叶只保留原stub并将行为事实交给P1初始化', as
     assert.match(error.message, /rawlessSpecPaths/)
     return true
   })
+})
+
+async function initialDiscovery(t: test.TestContext, raw: string) {
+  const parentPath = '.spec/export/export-contract/spec.md', sourcePath = 'src/summary.js', testPath = 'tests/summary.test.mjs'
+  const f = await fixture(t, () => `---\ntitle: 统计原意\nstatus: pending\n---\n\n## raw source\n\n${raw}\n`)
+  writeFileSync(join(f.root, sourcePath), 'export const summarize = rows => rows.length;\n')
+  writeFileSync(join(f.root, testPath), 'import test from "node:test"; import assert from "node:assert/strict"; import {summarize} from "../src/summary.js"; test("summary counts rows", () => assert.equal(summarize([{owner:"A"},{owner:"B"}]), 2));\n')
+  git(f.root, 'add', sourcePath, testPath); git(f.root, 'commit', '-m', 'seed discovery behavior and complete test')
+  const before = await f.input()
+  const input: CodeBehaviorInput = { ...before, baseline: null, origin: 'initial', composed: composeInputSnapshots(before.snapshot, null).composed!,
+    partition: { id: 'summary-discovery', changedPaths: [sourcePath, testPath], factSourcePaths: [sourcePath], authorizedParentSpecPaths: [parentPath] },
+    plan: { ...before.plan, version: 'sync-coordinator-v2', direction: 'code_to_spec', partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 }, intentNodeId: 'export-contract', targets: [{ nodeId: 'export-contract', path: parentPath }], readPaths: [parentPath, sourcePath, testPath], writePaths: ['.spec/export/export-contract'], sourcePaths: ['src'], facts: [] },
+  }
+  const model = (kind: CodeBehaviorKind): ElaborationRunner => runner(kind, proposal => {
+    proposal.changes = (proposal.changes as { paths: string[] }[]).map(change => ({ ...change, kind: change.paths.includes(sourcePath) ? kind : 'refactor', affectedIds: [], ruleIds: [], originalIntent: raw, previousBehavior: '当前已有模块但尚未生成规格叶', sourceBehavior: 'summarize返回传入列表长度，不改变列表', deliveryBehavior: '无已验证交付', evidence: `${sourcePath}#summarize与${testPath}完整断言；当前尚无规格叶`, counterexample: kind === 'refactor' ? '列表含两项时返回2' : kind === 'conflict' ? '当前账号A收到A/B两项时仍统计2，违反只统计本账号的原意' : '跨账号计数的可见性政策未确定，决定A能否观测B的任务数量' }))
+    proposal.newNodes = [{ codePath: sourcePath, parentNodeId: 'export-contract', basis: '已有统计行为由原始需求下的治理叶承接' }]
+    proposal.facts = [{ source: `code:${sourcePath}#summarize`, text: '返回传入数组长度，不改变数组。' }]
+  })
+  return { f, input, model }
+}
+
+test('指导合同版本进入唯一摘要，旧accept的待生成false gap不得被缓存承接', async t => {
+  const { f, input, model } = await initialDiscovery(t, '统计传入列表的条目数量，不修改列表；从现有模块生成治理叶及规格。')
+  let context = ''
+  const first = await analyzeCodeBehavior({ ...input, requestKey: 'old-guidance' }, async request => {
+    if (request.purpose === 'code_behavior_analyze') context = request.prompt.split('冻结三方输入:\n')[1]
+    return model('coverage_gap')(request)
+  })
+  assert.equal(first.reviewPassed, true); assert.ok(first.findings.length)
+  const legacyContext = JSON.parse(context) as Record<string, unknown>
+  delete legacyContext.guidanceContractVersion
+  const legacy = { ...first, inputDigest: contentHash(JSON.stringify(legacyContext)) }
+  const ref = writeEvidence(input.snapshot.source.commonDir, legacy), before = readEvidence(input.snapshot.source.commonDir, ref)
+  const calls: string[] = []
+  const fresh = await analyzeCodeBehavior({ ...input, requestKey: 'new-guidance' }, async request => {
+    calls.push(request.purpose)
+    if (process.env.SPEX_RAW_RESOLUTION_EVIDENCE_DIR) writeFileSync(join(process.env.SPEX_RAW_RESOLUTION_EVIDENCE_DIR, `guidance-current-${request.purpose}.prompt.txt`), request.prompt)
+    const frozen = readFrozenBehaviorContext<{ guidanceContractVersion: string }>(request)
+    assert.equal(frozen.guidanceContractVersion, 'code-behavior-guidance-v1')
+    const instructions = request.prompt.slice(0, request.prompt.indexOf('冻结三方输入:\n'))
+    assert.match(instructions, /尚未生成.*治理叶.*待生成工作/)
+    assert.match(instructions, /coverage_gap.*重大业务事实.*可观察后果/)
+    return model('refactor')(request)
+  }, digest => digest === legacy.inputDigest ? legacy : null)
+  assert.deepEqual(calls, ['code_behavior_analyze', 'code_behavior_review'], '新指导必须实际重新生成并独审，不能复用旧accept false gap')
+  assert.notEqual(fresh.inputDigest, legacy.inputDigest); assert.equal(fresh.reviewPassed, true); assert.deepEqual(fresh.findings, [])
+  assert.equal(fresh.newNodes.length, 1); assert.equal(fresh.facts.length, 1)
+  assert.equal(fresh.inputId, legacy.inputId); assert.equal(fresh.policyDigest, legacy.policyDigest); assert.equal(fresh.readSetDigest, legacy.readSetDigest)
+  assert.deepEqual(readEvidence(input.snapshot.source.commonDir, ref), before, '旧finding/ref字节不能被改写或清除')
+  if (process.env.SPEX_RAW_RESOLUTION_EVIDENCE_DIR) {
+    writeFileSync(join(process.env.SPEX_RAW_RESOLUTION_EVIDENCE_DIR, 'guidance-versionless-context.json'), JSON.stringify(legacyContext))
+    writeFileSync(join(process.env.SPEX_RAW_RESOLUTION_EVIDENCE_DIR, 'guidance-legacy-checkpoint-fixture.json'), before)
+    writeFileSync(join(process.env.SPEX_RAW_RESOLUTION_EVIDENCE_DIR, 'guidance-current-analysis.json'), JSON.stringify(fresh))
+  }
+  const reused = await analyzeCodeBehavior(input, async () => assert.fail('同新指导摘要仍可沿既有accepted接缝承接'), digest => digest === fresh.inputDigest ? fresh : null)
+  assert.deepEqual(reused, fresh); assert.equal((await captureInputSnapshot(f.root)).id, input.snapshot.id)
+})
+
+for (const kind of ['coverage_gap', 'conflict'] as const) test(`初始化指导保留真正${kind}，不能把业务发现清空为生成任务`, async t => {
+  const raw = kind === 'coverage_gap' ? '给多账号统计任务数量，但跨账号可见性政策尚未确定。' : '统计时必须只返回当前账号自己的任务数量，不得暴露其他账号的任务数量。'
+  const { input, model } = await initialDiscovery(t, raw)
+  const analysis = await analyzeCodeBehavior(input, model(kind))
+  assert.equal(analysis.reviewPassed, true)
+  assert.ok(analysis.findings.some(finding => finding.kind === kind && !finding.affectedIds.length && finding.evidence && finding.counterexample.includes('账号')))
+  assert.deepEqual(deriveBehaviorAuthorization(analysis, writeEvidence(input.snapshot.source.commonDir, analysis)), [])
+})
+
+for (const mode of ['empty', 'raw-suffix', 'raw-wording', 'raw-escape'] as const) test(`首次同字节raw父分区 ${mode} 不因覆盖任务重抄Spec且保原字节门禁`, async t => {
+  const f = await fixture(t), path = '.spec/export/spec.md'
+  const raw = '保持父命令接口和当前导出能力，输入路径如 C:\\data\\export，由既有子叶承接具体业务。'
+  const source = `---\ntitle: 导出上层原意\nstatus: pending\n---\n\n## raw source\n\n${raw}\n`
+  writeFileSync(join(f.root, path), source); git(f.root, 'add', path); git(f.root, 'commit', '-m', 'seed unchanged raw parent')
+  const prepared = await f.input(), input: CodeBehaviorInput = { ...prepared, baseline: null, origin: 'initial', composed: composeInputSnapshots(prepared.snapshot, null).composed!,
+    partition: { id: 'initial-raw-parent', changedPaths: [path], factSourcePaths: [] },
+    plan: { ...prepared.plan, version: 'sync-coordinator-v2', direction: 'code_to_spec', partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 }, intentNodeId: 'export', targets: [{ nodeId: 'export', path }], readPaths: [path, 'package.json'], writePaths: [path], sourcePaths: [], facts: [] },
+  }
+  const calls: { purpose: string; prompt: string }[] = []
+  const run: ElaborationRunner = async request => {
+    calls.push({ purpose: request.purpose, prompt: request.prompt })
+    if (process.env.SPEX_RAW_RESOLUTION_EVIDENCE_DIR) writeFileSync(join(process.env.SPEX_RAW_RESOLUTION_EVIDENCE_DIR, `${mode}-${request.purpose}.prompt.txt`), request.prompt)
+    const frozen = readFrozenBehaviorContext<{ baselinePair: unknown; authorChanges: unknown[]; compositionEvidence?: { conflicts: unknown[] }; authorBaseline: [string, string][]; oldSource: [string, string][]; newSource: [string, string][]; composedFiles: [string, string][]; verifiedDelivery: [string, string][] }>(request)
+    assert.equal(frozen.baselinePair, null); assert.deepEqual(frozen.authorChanges, []); assert.equal(frozen.compositionEvidence?.conflicts.length ?? 0, 0)
+    for (const view of [frozen.authorBaseline, frozen.oldSource, frozen.newSource, frozen.composedFiles]) assert.equal(new Map(view).get(path), source)
+    assert.deepEqual(frozen.verifiedDelivery, [])
+    return runner('refactor', proposal => {
+      proposal.changes = (proposal.changes as object[]).map(change => ({ ...change, affectedIds: [], ruleIds: [] }))
+      if (mode !== 'empty') proposal.resolutions = [{ path, mode: '100644', content: mode === 'raw-suffix' ? `${source}\n规格总览：现在展开全部业务。\n` : mode === 'raw-wording' ? source.replace('父命令接口', '父命令父接口') : source.replace('C:\\data', 'C:\\\\data') }]
+    })(request)
+  }
+  if (mode === 'empty') {
+    const analysis = await analyzeCodeBehavior(input, run)
+    assert.equal(analysis.reviewPassed, true); assert.deepEqual(analysis.resolutions, []); assert.deepEqual(analysis.rawIntegrations, [])
+    assert.deepEqual(calls.map(call => call.purpose), ['code_behavior_analyze', 'code_behavior_review'])
+    for (const call of calls) {
+      const instructions = call.prompt.slice(0, call.prompt.indexOf('冻结三方输入:\n'))
+      assert.ok(!instructions.includes('双方相容时resolutions给完整整合正文'), '同字节首次纳管仍收到泛化的全文重抄任务')
+      assert.match(instructions, /首次纳管.*覆盖任务/)
+      assert.match(instructions, /resolutions:\[\]/)
+      assert.match(instructions, /P1.*renderer.*raw/)
+    }
+    assert.equal(analysis.inputId, input.snapshot.id)
+  } else {
+    await assert.rejects(analyzeCodeBehavior(input, run), /raw整合越过实际作者\/交付编辑范围.*新增作者raw必须保持真实source原字节/)
+    assert.deepEqual(calls.map(call => call.purpose), ['code_behavior_analyze'], '原raw误改仍须在独审前拒绝')
+  }
+  assert.equal(contentHash(parseParts(source)!.rawSource), contentHash(parseParts(readFileSync(join(f.root, path), 'utf8'))!.rawSource))
+  assert.equal((await captureInputSnapshot(f.root)).id, input.snapshot.id)
 })
 
 test('纯父局部视图缺席不等于全树缺席，空业务源码候选禁止newNodes', async t => {

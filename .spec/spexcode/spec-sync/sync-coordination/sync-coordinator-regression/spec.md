@@ -109,3 +109,5 @@ v2生命周期集成回归让旧Spec的`related: [src/helpers/**/*.js]`命中全
 局部生成未产出任何输出的failed checkpoint以真实Git/SQLite四attempt回归：A1/A2各有具体独审拒绝，A3仅一个空round，A4及SQLite重启后须收到最近A2的原候选与完整独审诊断，保原ref/traces/fromAttempt，不退回A1或把A3失败当seed。A3局部input/readSet/partitionBinding变化、有候选的review容量失败及needs_input/conflict均停止回溯；既有无局部stage的租约失败与容量清seed断言保持，原预算/deadline及最终strict seal仍核验。
 
 unlimited回归用确定性独立模型接缝完成三attempt P1独审及v2两处调用预检，再经真实Docker、正常固定CLI hooks/Git交付；真实commit后结算中断，SQLite重启沿原journal恢复同receipt，无额外模型或commit，期限保持null、用量/source/index与最终验证保持。有限完整交付对照仍核精确alias自己的admission重放，不把原operation预算替换为alias请求身份。该证据不冒充真实Native语义通过。
+
+A7形状的真实Git/SQLite回归先保存独审accept但含无IDcoverage_gap的aggregate，经正式pause/resume后证明当前/历史aggregate和当前local旧指导checkpoint不能直接复用，必须实际新分析+独审后进入P1，旧failure/ref/输入/预算与失效fence保持。同指导已审aggregate/local仍可零额外Native承接；真正未知继续阻塞。完整applying/receipt恢复不因自动分析指导更新重做生成，旧不可变decision来源仍沿原ref验证。

@@ -73,3 +73,7 @@ raw-only v2 code_to_spec回归以local writePaths=[]和真实只读业务源码�
 真实Git raw-only v2 `targets=[]` 的独审阶段回归保留旧父绑定失败于 `repairDiagnostics`，但独审仅以当前校验后的原proposal `newNodeProposals` 为提案，逐个核对analysis里的四字段解析叶、授权 `newNodeParents`/非空raw、源码、叶目录与raw引用；不从历史诊断拼当前父ID或basis，不删历史诊断，也不要求持久解析叶额外携带提案字段。缺原proposal或阶段说明的review输入必须给具体repair；错误父ID仍在review派发前拒绝且review计数为零；basis与raw矛盾或伪造解析叶path得到review repair，并由 `behavior_review_failed` 保持阻断。虚拟review只把实际全文读取过的源码和父raw列为checkedPaths，不能借此伪造Native成功证据。
 
 单次冻结输入复用回归使用真实Git计数：raw-only v2、baseline与selection缺席且old/source/composed同tree时，在首个Native请求处捕获完整冻结输入并抛诊断停止，不构造模型结果；真实文本视图逐角色对照独立Git字节参考，验证原 `verifySnapshot` 仍执行而重复tree读取减少。不同完整tree OID仍逐角色绑定独立参考正文；精确selection/受控替换只更新目标角色，不污染共享tree的其它Map或条目副本。第一次分析结束后移除其OID对象，下一次同输入必须在snapshot/OID校验失败且Native调用数为零，证明局部缓存不跨调用存活。
+
+真实Git的raw-only、v2 code_to_spec纯父分区以无基线/无delivery、四角色同字节、authorChanges为空且无重叠证明：空resolutions仍经分析和独审完整覆盖，原snapshot/raw摘要不变，实际提示没有无条件重抄全文命令。追加总览、改写原词或额外转义原raw仍被原byte guard在独审前拒绝；真正三方相容整合与明确裁决的既有回归继续保持。fake模型接缝只证明输入职责及门禁，不声称真实Native收敛或完整初始化通过。
+
+真实raw-only/code_to_spec发现回归保留旧指导下已accept的完整coverage_gap原件，以现有accepted回调比较旧无指导版本context摘要；新guidanceContractVersion须改变唯一inputDigest并实际重新生成、独审，不能复用旧false gap；同新指导摘要仍可沿原回调承接。原input/policy/readSet及旧findings/ref字节保持。真实缺失跨账号可见性政策及raw/实现互斥的反例仍保coverage_gap/conflict和具体后果，不由程序清除；协调器既有无ID发现阻塞回归继续保持。

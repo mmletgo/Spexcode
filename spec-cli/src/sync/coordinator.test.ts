@@ -15,7 +15,7 @@ import { checkGenerationContractIntent, readFrozenContracts } from './frozen-con
 import type { ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
 import { buildSyncApplicationPlan } from './planning.js'
 import { SyncApplication } from './application.js'
-import { isSyncInputCurrent, prepareSyncAdmission, runSyncOperation, syncPlanDigest } from './coordinator.js'
+import { isSyncInputCurrent, prepareSyncAdmission, readCurrentSyncAnalysis, runSyncOperation, syncPlanDigest } from './coordinator.js'
 import type { SyncCoordinatorOptions, SyncCoordinatorPlan } from './coordinator-types.js'
 import { migrateSyncStore, SYNC_COMPONENT, SYNC_MIGRATIONS, syncCoordinatorAddress } from './migrations.js'
 import { dockerVerificationDriver } from './verification-executor.js'
@@ -563,6 +563,27 @@ test('V4复采发现输入中途变化，无业务journal/commit，原staged ind
   const result = await runSyncOperation(f.store, f.operation.id, f.options)
   assert.equal(result.status, 'conflicted', JSON.stringify(result.failure)); assert.equal(result.failure?.code, 'input_changed')
   assert.equal(f.store.listJournals(f.operation.id).length, 0); assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
+})
+
+test('指导更新不重做旧analysis已验证的applying交付，真实Git与SQLite恢复仍沿原receipt', docker, async t => {
+  const f = await fixture(t, undefined, true, original, 'project', original, {}, undefined, 'code'); await f.realTools()
+  const checkpoint = f.store.checkpoint.bind(f.store)
+  f.store.checkpoint = (fence, ref) => {
+    const value = JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())
+    if (value.stage === 'analysis') { delete value.guidanceContractVersion; ref = writeEvidence(f.input.source.commonDir, value) }
+    return checkpoint(fence, ref)
+  }
+  const failed = await runSyncOperation(f.store, f.operation.id, { ...f.options, deliveryHooks: { afterCommit: () => { throw new Error('实际commit后中断结算') } } })
+  assert.equal(failed.status, 'recovery_required', JSON.stringify(failed.failure))
+  const commit = f.git('rev-parse', failed.operation.deliveryPlan.branch), calls = f.calls.length
+  assert.ok(f.store.readAttempt(failed.operation.currentAttemptId!).checkpointRefs.some(ref => { const value = JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()); return value.stage === 'analysis' && !value.guidanceContractVersion }))
+  f.closeForRestart(); const protocol = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => protocol.close())
+  const store = new SyncStore(protocol, { readBlob: ref => readEvidence(f.input.source.commonDir, ref) }); f.useStore(store)
+  const recovered = await runSyncOperation(store, f.operation.id, f.options)
+  assert.equal(recovered.status, 'workspace_synced', JSON.stringify(recovered.failure)); assert.equal(recovered.receipt!.actualCommit, commit)
+  assert.equal(f.calls.length, calls); assert.equal(recovered.operation.callsUsed, failed.operation.callsUsed)
+  assert.deepEqual(recovered.operation.budget, failed.operation.budget); assert.equal(recovered.operation.deadlineAtMs, failed.operation.deadlineAtMs)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.equal((await captureInputSnapshot(f.root)).id, f.input.id)
 })
 
 test('真实commit后DB未settle中断，恢复既有journal不重复生成/提交', docker, async t => {
@@ -1791,6 +1812,61 @@ test('v2最终预算只列真实实现派发，纯父接口不产生虚构生成
   assert.equal(f.store.listJournals(f.operation.id).length, 0)
 })
 
+for (const mode of ['historical-aggregate', 'current-aggregate', 'current-local', 'same-guidance', 'same-guidance-local'] as const) test(`v2指导缓存 ${mode} 正式pause恢复不把旧accept无ID gap直接复用`, async t => {
+  const rawOnly = original.slice(0, original.indexOf('## expanded spec')).replace('contract-schema: sync-v1\n', '')
+  const f = await fixture(t, { maxAttempts: 3, maxCalls: 20, maxRepairs: 2, timeoutMs: 120000 }, false, rawOnly, 'project', original, { version: 'sync-coordinator-v2', direction: 'code_to_spec', partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 }, sourcePaths: ['src'], commitTrigger: { before: null, paths: ['src/export.js'] } }, undefined, 'code')
+  const same = mode.startsWith('same-guidance'), checkpoint = f.store.checkpoint.bind(f.store)
+  f.store.checkpoint = (fence, ref) => {
+    const value = JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())
+    if (f.store.readAttempt(fence.attemptId).number === 1 && value.version === 'sync-stage-v1' && (value.stage === 'analysis' || value.stage?.endsWith(':analysis'))) {
+      if (mode === 'same-guidance' || mode === 'same-guidance-local' && value.stage !== 'analysis') value.guidanceContractVersion = 'code-behavior-guidance-v1'
+      else delete value.guidanceContractVersion
+      ref = writeEvidence(f.input.source.commonDir, value)
+    }
+    return checkpoint(fence, ref)
+  }
+  f.transform((output, request) => {
+    if (request.purpose === 'code_behavior_analyze') {
+      const attempt = f.store.readAttempt(f.store.readOperation(f.operation.id).currentAttemptId!)
+      return { ...(output as object), changes: (output as { changes: { paths: string[] }[] }).changes.map(change => ({ ...change, kind: attempt.number === 1 && change.paths.some(path => path.startsWith('src/')) ? 'coverage_gap' : 'refactor', affectedIds: [], ruleIds: [], evidence: '实现与原意相符，仅尚无待生成的规格叶', counterexample: '未生成规格叶不应成为业务事实未知' })) }
+    }
+    if (request.purpose === 'elaboration_generate') throw Object.assign(new Error('新指导已进入P1，机制回归在细化正文前停止'), { code: 'unsupported' })
+    return output
+  })
+  const first = await runSyncOperation(f.store, f.operation.id, f.options)
+  assert.equal(first.status, 'needs_input', JSON.stringify(f.store.listAttempts(f.operation.id).map(attempt => attempt.failure))); assert.equal(first.failure!.code, 'unbound_behavior_finding')
+  assert.deepEqual(readCurrentSyncAnalysis(f.store, first.operation)!.ref, first.failure!.evidenceRefs[0], '旧指导已审原件仍可显示并作为明确choice来源，不能当自动cache')
+  const old = f.store.readAttempt(first.operation.currentAttemptId!), oldRefs = structuredClone(old.checkpointRefs), oldFailure = structuredClone(old.failure)
+  const stages = old.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
+  const calls = f.calls.length
+  f.store.requestControl(f.operation.id, 'pause'); f.store.requestControl(f.operation.id, 'run')
+  assert.throws(() => f.store.checkpoint({ operationId: f.operation.id, attemptId: old.id, generation: old.generation, leaseToken: old.leaseToken, sourceFingerprint: f.input.source.physicalFingerprint }, writeEvidence(f.input.source.commonDir, { stale: true })), /SYNC_FENCE_EXPIRED/)
+  if (mode === 'current-aggregate' || mode === 'current-local' || mode === 'same-guidance-local') {
+    const claimed = f.store.claimAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 30000 })
+    f.store.bindComposedInput(claimed.fence, old.composedInput!)
+    const source = stages.find(stage => stage.version === 'sync-stage-v1' && (mode === 'current-aggregate' ? stage.stage === 'analysis' : stage.stage?.startsWith('partition:') && stage.stage.endsWith(':analysis')))
+    assert.ok(source)
+    f.store.checkpoint(claimed.fence, source.resultRef)
+    f.store.checkpoint(claimed.fence, writeEvidence(f.input.source.commonDir, { ...source, attemptId: claimed.attempt.id }))
+  }
+  const result = await runSyncOperation(f.store, f.operation.id, f.options)
+  const latestStages = f.store.readAttempt(result.operation.currentAttemptId!).checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
+  const latestAnalysis = new Map(latestStages.filter(stage => stage.stage === 'analysis' || stage.stage?.endsWith(':analysis')).map(stage => [stage.stage, stage]))
+  assert.ok(latestAnalysis.size > 0 && [...latestAnalysis.values()].every(stage => stage.guidanceContractVersion === 'code-behavior-guidance-v1'), '仅最新的新指导已审或同指导已校验复制登记marker；旧wrapper保持原件')
+  if (mode === 'same-guidance-local') assert.ok(!latestStages.some(stage => stage.stage === 'analysis-provenance'), '旧aggregate拒绝后由同指导local重组，不能直接复制旧aggregate')
+  const nextAnalysisCalls = f.calls.slice(calls).filter(call => call.purpose.startsWith('code_behavior_')).map(call => call.purpose)
+  if (same) { assert.deepEqual(nextAnalysisCalls, []); assert.equal(result.status, 'needs_input'); assert.equal(result.failure!.code, 'unbound_behavior_finding') }
+  else {
+    assert.deepEqual(nextAnalysisCalls, f.calls.slice(0, calls).filter(call => call.purpose.startsWith('code_behavior_')).map(call => call.purpose), '旧指导aggregate/current local的全部分区必须实际重新生成并独审')
+    assert.ok(nextAnalysisCalls.includes('code_behavior_analyze') && nextAnalysisCalls.includes('code_behavior_review'))
+    assert.ok(f.calls.slice(calls).some(call => call.purpose === 'elaboration_generate'), JSON.stringify(result.failure))
+  }
+  assert.deepEqual(f.store.readAttempt(old.id).checkpointRefs, oldRefs); assert.deepEqual(f.store.readAttempt(old.id).failure, oldFailure)
+  assert.deepEqual(result.operation.input, first.operation.input); assert.deepEqual(result.operation.budget, first.operation.budget); assert.equal(result.operation.deadlineAtMs, first.operation.deadlineAtMs)
+  assert.equal(result.operation.callsUsed, f.calls.length); assert.equal(f.store.listJournals(f.operation.id).length, 0)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+})
+
 test('v2已审局部进度 正式pause恢复保留旧unsupported timeout历史与全局预算', async t => {
   const f = await fixture(t, { maxAttempts: 2, maxCalls: 16, maxRepairs: 1, timeoutMs: 180000 }, false, original, 'project', original, { version: 'sync-coordinator-v2', direction: 'code_to_spec', partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 2 }, sourcePaths: ['src'] }, undefined, 'code')
   f.transform(() => { throw new StructuredSessionError('timeout', '原创建timeout已结算；普通错误仍按unsupported停止', {}) })
@@ -1940,7 +2016,9 @@ for (const mode of ['analysis-live', 'analysis-two-accepted', 'analysis-restart'
     const provenance = stages[1].find(stage => stage.stage === `${prior.stage}:provenance`)
     assert.deepEqual(JSON.parse(readEvidence(f.input.source.commonDir, provenance.resultRef).toString()), { fromOperationId: f.operation.id, fromAttemptId: store.listAttempts(f.operation.id)[0].id, resultRef: prior.resultRef })
   } else assert.equal(calls.filter(call => call.attempt === 2 && call.partition === 'export').length, 2)
-  assert.ok(calls.filter(call => call.attempt === 2 && call.partition === 'import').every(call => call.diagnostics.length > 0), '原具体失败仅送失败分区')
+  const resumedDiagnostics = calls.filter(call => call.attempt === 2 && call.partition === 'import')
+  if (mode === 'analysis-settled-timeout') assert.ok(resumedDiagnostics.every(call => call.diagnostics.length === 0), '已结算基础设施timeout不能充当模型业务诊断')
+  else assert.ok(resumedDiagnostics.every(call => call.diagnostics.length > 0), '原具体业务失败仅送失败分区')
   assert.deepEqual(result.operation.budget, f.operation.budget); assert.equal(result.operation.deadlineAtMs, f.operation.deadlineAtMs)
   assert.equal(result.operation.callsUsed, f.calls.length); assert.equal(store.listJournals(f.operation.id).length, 0)
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
