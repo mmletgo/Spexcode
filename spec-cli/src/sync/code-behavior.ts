@@ -217,6 +217,11 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
     properties.codePath = { ...string, enum: newNodeCodePaths }
     if (readonlyCodeToSpec) properties.parentNodeId = { ...string, enum: newNodeParents.map(parent => parent.nodeId) }
   }
+  const acceptanceChangesSchema = (analysisSchema.properties as Record<string, Record<string, unknown>>).acceptanceChanges
+  const existingAcceptanceIds = sorted([...oldFrozen.graph.items.values(), ...current.graph.items.values()].filter(item => item.kind === 'AC').map(item => item.id))
+  if (existingAcceptanceIds.length) {
+    (acceptanceChangesSchema.items as { properties: Record<string, unknown> }).properties.id = { ...string, enum: existingAcceptanceIds }
+  } else acceptanceChangesSchema.maxItems = 0
   const analysisNewNodeInstructions = readonlyCodeToSpec
     ? '只读sync-coordinator-v2 code_to_spec的新治理父节点以newNodeParents列表为准；每项提供真实nodeId和path，newNodes.parentNodeId必须填写nodeId，path仅用于定位，绝不能把path填入parentNodeId。该集合仅含已授权且位于本区可读范围的非空raw父Spec。'
     : ''

@@ -16,6 +16,8 @@ related:
 
 真实 Git 回归核对分析与独审均收到冻结契约图的 previous/current 完整项；raw-only 初始化的空图被明确标识，空关联仍须完整分析与独审，不把未通过 P1 结构检查或独审的候选资源名当作既有义务。此接缝只证明上下文与门禁，模型实际展开仍由真实 Dashboard 验收。
 
+验收提案schema的真实Git回归覆盖`oldFrozen`与`current`中的既有AC并集：previous-only和current-only身份均可通过结构校验，未知/未来AC由派发schema及同一`outputErrors`门禁拒绝。空AC域使用`maxItems: 0`且不产生空enum；合法既有AC进入enum仍不能绕过已审规则变化、affectedIds和真实来源链的运行时授权检查。此fake runner回归不代表真实Native执行。
+
 all-null裁决回归用真实受控正文令原独审composed图不同于source：仅原图的AC02关联所选RULE02时允许精确提案，当前AC03新增covers RULE02仍拒。追加缺席null资源后同完整树/摘要的新selection指针仍可读取该原图，不混用旧selection与新composition证据。缺原图/原读取范围、错input或摘要、历史authority及已有pair均不能借此扩大范围；旧契约和verifiedDelivery视图保持空，不将原独审图冒作交付基线。
 
 真实 raw-only bootstrap 的 conflict 与 coverage_gap 先复现空 affectedIds 被不可能满足的既有 ID 校验拒绝，再确认原分类、路径、证据、反例及空关联完整进入新独审，不产生任何业务变更授权。有成对基线、精确选择中存在真实 pair、任一冻结图有稳定 ID 时空关联仍拒绝；初始化也不豁免越界/未授权路径和虚构未来 ID。
