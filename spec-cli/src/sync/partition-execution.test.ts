@@ -16,6 +16,7 @@ import { CONTRACT_COLUMNS, parseParts } from '@spexcode/spec-core/contracts'
 import { withoutVerificationTables } from './elaboration-markdown.js'
 import type { GeneratedTables, GeneratedTargetElaboration } from './elaboration-markdown.js'
 import type { GenerationInput } from './generation-types.js'
+import { freezeGenerationInput, generationReviewRequest, restoreGenerationInput } from './generation.js'
 import { analyzeSyncPartitions, completeSyncPartitionPlan, elaborateSyncPartitions, generateSyncPartitions, implementationGenerationDispatch, implementationPartitionSelection, mapSyncPartitions, projectPartitionVerificationOwnership } from './partition-execution.js'
 import type { PartitionCheckpoints } from './partition-execution.js'
 import { planSyncPartitions } from './partitioning.js'
@@ -643,6 +644,42 @@ test('code→Spec只装配已审Spec，不调用code_generate，源码和测试�
   const before = input.manifest.entries.filter(entry => !entry.path.startsWith('.spec/'))
   const after = verifyCandidate(input.snapshot.source.commonDir, result.candidate!).filter(entry => !entry.path.startsWith('.spec/'))
   assert.deepEqual(after, before)
+})
+
+test('历史accepted审查不覆盖当前repair，跨边保原件且取消后不再读取缓存或派发', async t => {
+  const { input, plan, checkpoints } = await fixture(t), runtime = native()
+  const failedKey = 'partition:part-export:candidate-review'
+  let gates = 0
+  const first = await generateSyncPartitions(input, plan, 1, true, { runner: async request => {
+    const native = await runtime.runner(request)
+    if (!request.requestKey.includes(':final:part-export:')) return native
+    const output = { ...native.output as object, verdict: 'repair', findings: [{ kind: 'repair', affectedIds: ['AC-EXPORT-03'], ruleLocation: 'contract:.spec/export/export-contract/spec.md#AC-EXPORT-03', codeLocation: 'src/export.js', evidence: '具体复核诊断', counterexample: '保当前repair原件', message: '旧accept不能覆盖' }] }
+    return { ...native, output, resultDigest: contentHash(JSON.stringify(output)) }
+  }, validateCandidate: async () => { gates++; return [] } }, checkpoints)
+  assert.equal(first.status, 'repair')
+  const projected = implementationGenerationDispatch(input, plan, true).reviews.find(review => review.id.startsWith('edge:'))!.input
+  const digest = contentHash('serialization-fixture-analysis')
+  const analysis: CodeBehaviorAnalysis = { version: 'code-behavior-v1', inputId: input.snapshot.id, baselinePairId: null, composedDigest: digest, readSetDigest: digest, policyDigest: input.policy.digest, inputDigest: digest, changes: [], findings: [], facts: [], authorizedChanges: [], nodeChanges: [], newNodes: [], resolutions: [], traces: [], reviewPassed: false }
+  const { analysis: _analysis, ...edgeInput } = projected
+  const edge: GenerationInput = { analysis: undefined, ...edgeInput, analysisEvidence: [{ ref: writeEvidence(input.snapshot.source.commonDir, analysis), analysis }], priorContext: [{ role: 'source_before', snapshot: input.snapshot, entries: input.manifest.entries, files: new Map(input.files), objects: [] }] }
+  const frozen = freezeGenerationInput(edge)
+  const restored = restoreGenerationInput(JSON.parse(JSON.stringify(frozen.inputEvidence)))
+  assert.equal(freezeGenerationInput(restored).inputDigest, frozen.inputDigest, '真实edge形状的undefined槽和priorContext Maps经JSON往返不改变旧hash')
+  assert.deepEqual(generationReviewRequest(restored, first.candidate!).request, generationReviewRequest(edge, first.candidate!).request, '冷态请求及task全文逐字相同')
+  const current = new Map<string, unknown>([[failedKey, checkpoints.load(failedKey)]]), accepted: string[] = []
+  const resumed: PartitionCheckpoints = {
+    load: <T>(key: string) => current.get(key) as T ?? null,
+    save: (key, value) => { current.set(key, value); return writeEvidence(input.snapshot.source.commonDir, value) },
+    loadAcceptedCandidateReview: key => { assert.notEqual(key, failedKey); accepted.push(key); return checkpoints.load(key) },
+  }
+  const calls = runtime.calls.length
+  const result = await generateSyncPartitions({ ...input, requestKey: 'next-attempt' }, plan, 1, true, { runner: async () => assert.fail('current repair与其它accepted原件均已结算'), validateCandidate: async () => { gates++; return [] } }, resumed)
+  assert.equal(result.status, 'repair'); assert.equal(gates, 2, '每轮完整V1仍重做')
+  assert.equal(accepted.length, 3); assert.ok(accepted.some(key => key.includes(':edge:')), '跨边与局部审查使用同一接缝')
+  assert.equal(runtime.calls.length, calls); assert.ok(runtime.calls.every(call => call.purpose === 'code_review'))
+  assert.deepEqual(result.partitionEvidence, first.partitionEvidence)
+  await assert.rejects(generateSyncPartitions({ ...input, signal: AbortSignal.abort() }, plan, 1, true, { runner: async () => assert.fail('取消后不派发'), validateCandidate: async () => [] }, resumed), /取消/)
+  assert.equal(accepted.length, 3)
 })
 
 test('取消停止小批后续派发，已在途任务先结算；失败亦不再派新工作', async () => {

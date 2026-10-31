@@ -23,15 +23,16 @@ import { implementationGenerationDispatch, completeSyncPartitionPlan, analyzeSyn
 import type { PartitionCheckpoints, PartitionAnalysisFailure, PartitionAnalysisFailures } from './partition-execution.js'
 import { planSyncPartitions } from './partitioning.js'
 import type { SyncPartitionPlan } from './partitioning.js'
-import { contractOmissionBound, runGeneration } from './generation.js'
-import type { GenerationFinding, GenerationResult } from './generation-types.js'
+import { contractOmissionBound, freezeGenerationInput, generationReviewRequest, restoreGenerationInput, reviewError, runGeneration } from './generation.js'
+import type { GenerationFinding, GenerationInput, GenerationResult } from './generation-types.js'
 import { createAttemptRunner } from './native-run.js'
-import type { NativeRunPlan } from './native-run.js'
+import type { NativeRunCheckpoint, NativeRunPlan } from './native-run.js'
 import type { AdmitSyncInput, ApplyReceipt, BlobRef, CandidateRef, ComposedInputRef, FrozenBaselineSelection, InputSnapshot, SyncAttempt, SyncFailure, SyncOperation, SyncScope, VerificationResultBlob, WriteFence } from './operation-types.js'
 import { deliverVerifiedAttempt, planPrivateDelivery } from './private-delivery.js'
 import { assemblePublicationBase } from './publication-base.js'
 import { composeControlledRequest, readControlledChanges, readControlledDecision } from './request-input.js'
 import { sessionIdForCreateKey } from '../sessions.js'
+import { assertFrozenBinding, readFrozenManifest, readFrozenRange } from '../frozen-context.js'
 import { StructuredSessionError } from '../session-structured-policy.js'
 import { SettledSessionCreateTimeoutError } from '../session-structured.js'
 import { captureInputSnapshot, contentHash, objectGit, readEvidence, readObject, readTree, validateRepositoryPath, verifySnapshot, writeEvidence } from './snapshot.js'
@@ -248,6 +249,66 @@ function readonlyReviewFindings(result: SavedGeneration, changes: SavedElaborati
   })
 }
 
+type AcceptedReviewProvenance = { fromOperationId: string; fromAttemptId: string; resultRef: BlobRef; inputRef: BlobRef }
+function acceptedReviewInput(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, key: string, resultRef: BlobRef): GenerationInput | null {
+  const provenance = partitionStage<AcceptedReviewProvenance>(store, operation, attempt, `${key}:provenance`)?.result
+  if (provenance?.fromOperationId !== operation.id || provenance.resultRef.sha256 !== resultRef.sha256 || !provenance.inputRef) return null
+  const value = JSON.parse(readEvidence(operation.input.source.commonDir, provenance.inputRef).toString()) as ReturnType<typeof freezeGenerationInput>['inputEvidence']
+  const requestKey = `sync:${attempt.id}:generation:final:${key.slice('partition:'.length, -':candidate-review'.length)}`
+  if (value.requestKey !== requestKey || value.snapshot.id !== operation.input.id || value.policy.digest !== operation.policyDigest) return null
+  return restoreGenerationInput(value)
+}
+
+/** 沿原检查点追到真正派发的accept；拷贝不创造新会话或修改旧摘要。 */
+export function acceptedCandidateReviewSource(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, key: string, candidate: CandidateRef, plan: SyncPartitionPlan, input: GenerationInput): { result: SavedGeneration; resultRef: BlobRef; attempt: SyncAttempt } | null {
+  const commonDir = operation.input.source.commonDir
+  let origin = attempt, source = partitionStage<SavedGeneration>(store, operation, origin, key)
+  while (source) {
+    const result = source.result, trace = result.traces[0]
+    if (origin.operationId !== operation.id || !['failed', 'superseded', 'settled'].includes(origin.status) || result.status !== 'reviewed' || !result.candidateValidated || !result.reviewPassed || result.failure || result.validationFindings.some(finding => finding.severity === 'error') || result.inputId !== operation.input.id || canonical(result.candidate) !== canonical(candidate) || result.review?.verdict !== 'accept' || result.review.findings.length || canonical(result.reviewOutput) !== canonical(result.review) || result.review.inputId !== operation.input.id || result.review.candidateDigest !== candidate.digest || result.traces.length !== 1 || trace.purpose !== 'code_review' || trace.inputDigest !== result.inputDigest || trace.resultDigest !== contentHash(JSON.stringify(result.reviewOutput))) return null
+    const oldKey = `sync:${origin.id}:generation:final:${key.slice('partition:'.length, -':candidate-review'.length)}:code_review`
+    const dispatch = origin.dispatchPlans.find(dispatch => dispatch.key === oldKey && dispatch.purpose === 'code_review' && dispatch.session?.sessionId === trace.sessionId && dispatch.session.threadId === trace.threadId && dispatch.session.turnId === trace.turnId)
+    if (!dispatch) {
+      const provenance = partitionStage<AcceptedReviewProvenance>(store, operation, origin, `${key}:provenance`)?.result
+      const carried = acceptedReviewInput(store, operation, origin, key, source.resultRef)
+      if (!provenance || !carried || freezeGenerationInput({ ...carried, requestKey: input.requestKey }).inputDigest !== freezeGenerationInput(input).inputDigest) return null
+      const prior = store.readAttempt(provenance.fromAttemptId)
+      if (prior.operationId !== operation.id || prior.number >= origin.number) return null
+      origin = prior
+      const previous = partitionStage<SavedGeneration>(store, operation, origin, key)
+      if (previous?.resultRef.sha256 !== source.resultRef.sha256) return null
+      source = previous; continue
+    }
+    if (trace.sessionId !== sessionIdForCreateKey(dispatch.sessionCreateKey) || !trace.threadId || !trace.turnId || canonical(partitionStage<SyncPartitionPlan>(store, operation, origin, 'candidate-partition-plan')?.result) !== canonical(plan)) return null
+    const sourceInput = { ...input, requestKey: oldKey.slice(0, -':code_review'.length) }
+    const expected = generationReviewRequest(sourceInput, candidate)
+    if (expected.request.inputDigest !== result.inputDigest || reviewError(sourceInput, result.review, expected.binding)) return null
+    const { signal: _signal, ...payload } = expected.request
+    const resource = store.findResource(origin.id, oldKey)
+    if (resource) {
+      const native = JSON.parse(readEvidence(commonDir, resource.plan.planBlob).toString()) as NativeRunPlan
+      const checkpoint = JSON.parse(readEvidence(commonDir, resource.checkpointRef).toString()) as NativeRunCheckpoint
+      if (resource.operationId !== operation.id || resource.attemptId !== origin.id || resource.plan.kind !== 'native_session' || resource.plan.key !== oldKey || resource.plan.inputId !== operation.input.id || resource.phase !== 'removed' || native.schemaVersion !== 1 || native.operationId !== operation.id || native.attemptId !== origin.id || native.inputId !== operation.input.id || native.candidateDigest !== resource.plan.candidateDigest || native.candidateDigest !== null && native.candidateDigest !== candidate.digest || checkpoint.operationId !== operation.id || checkpoint.attemptId !== origin.id || checkpoint.inputId !== operation.input.id || checkpoint.candidateDigest !== native.candidateDigest || checkpoint.expectedSessionId !== trace.sessionId || canonical(checkpoint.session) !== canonical(dispatch.session) || native.requestDigest !== dispatch.requestDigest || resource.plan.payloadDigest !== dispatch.requestDigest || contentHash(JSON.stringify(native.request)) !== dispatch.requestDigest || native.sessionCreateKey !== dispatch.sessionCreateKey || native.expectedSessionId !== trace.sessionId || native.request.requestKey !== oldKey || native.request.inputDigest !== result.inputDigest || native.request.purpose !== 'code_review' || checkpoint.status !== 'completed' || checkpoint.phase !== 'removed' || checkpoint.requestDigest !== dispatch.requestDigest || checkpoint.result?.resultDigest !== trace.resultDigest || checkpoint.result.sessionId !== trace.sessionId || checkpoint.result.threadId !== trace.threadId || checkpoint.result.turnId !== trace.turnId || canonical(checkpoint.result.output) !== canonical(result.reviewOutput)) return null
+      {
+        if (native.request.frozenContext) {
+          assertFrozenBinding(native.request.frozenContext, { requestKey: oldKey, inputDigest: result.inputDigest, attemptId: origin.id, policyDigest: operation.policyDigest })
+          const manifest = readFrozenManifest(native.request.frozenContext), task = manifest.entries[0]
+          if (manifest.entries.length !== 1 || task.id !== 'task' || task.kind !== 'utf8' || !task.required || task.sha256 !== contentHash(payload.prompt!) || task.byteLength !== Buffer.byteLength(payload.prompt!)) return null
+          readFrozenRange(native.request.frozenContext, { contextDigest: native.request.frozenContext.contextDigest, entryId: 'task', startByte: 0, endByte: 1 })
+          const { frozenContext: _context, readerRuntime: _runtime, prompt: _prompt, ...transport } = native.request
+          const { prompt: _expectedPrompt, ...parameters } = payload
+          if (canonical(transport) !== canonical(parameters)) return null
+        } else if (canonical(native.request) !== canonical(payload)) return null
+      }
+    } else {
+      const injected = stage<{ requestDigest: string; result: ElaborationSessionResult }>(store, operation, origin, `injected:${oldKey}`)
+      if (!injected || injected.requestDigest !== dispatch.requestDigest || contentHash(JSON.stringify(payload)) !== dispatch.requestDigest || injected.result.sessionId !== trace.sessionId || injected.result.threadId !== trace.threadId || injected.result.turnId !== trace.turnId || injected.result.resultDigest !== trace.resultDigest || canonical(injected.result.output) !== canonical(result.reviewOutput)) return null
+    }
+    return { ...source, attempt: origin }
+  }
+  return null
+}
+
 /** 真实只读候选失败回到原P1写者；独审诊断不成为refinement或业务授权。 */
 function readonlyRepairFromAttempt(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt): ReadonlyOwnerRepair | null {
   const saved = stage<SavedGeneration>(store, operation, attempt, 'generation')
@@ -283,7 +344,11 @@ function readonlyRepairFromAttempt(store: SyncStore, operation: SyncOperation, a
     for (const evidence of generation.result.partitionEvidence!) {
       const saved = partitionStage<SavedGeneration>(store, operation, attempt, `partition:${evidence.partitionId}:candidate-review`)
       const result = saved?.result, trace = result?.traces.find(trace => trace.purpose === 'code_review')
-      if (!result || result.failure || !result.candidateValidated || canonical(result.candidate) !== canonical(candidate) || canonical(result.review) !== canonical(evidence.review) || canonical(result.traces) !== canonical(evidence.traces) || !trace || trace.resultDigest !== contentHash(JSON.stringify(result.reviewOutput)) || canonical(result.reviewOutput) !== canonical(result.review) || trace.inputDigest !== result.inputDigest || !attempt.dispatchPlans.some(dispatch => dispatch.purpose === 'code_review' && dispatch.session?.sessionId === trace.sessionId && dispatch.session.threadId === trace.threadId && dispatch.session.turnId === trace.turnId) || !['accept', 'repair'].includes(evidence.review.verdict) || evidence.review.inputId !== operation.input.id || evidence.review.candidateDigest !== candidate.digest) fail('readonly_spec_repair_binding', '只读独审诊断缺少真实normalized review、完整候选及原dispatch绑定')
+      const currentDispatch = trace && attempt.dispatchPlans.some(dispatch => dispatch.purpose === 'code_review' && dispatch.session?.sessionId === trace.sessionId && dispatch.session.threadId === trace.threadId && dispatch.session.turnId === trace.turnId)
+      const reviewPlan = evidence.review.verdict === 'accept' && !currentDispatch ? partitionStage<SyncPartitionPlan>(store, operation, attempt, 'candidate-partition-plan') : null
+      const acceptedInput = saved && reviewPlan ? acceptedReviewInput(store, operation, attempt, `partition:${evidence.partitionId}:candidate-review`, saved.resultRef) : null
+      const acceptedSource = reviewPlan && acceptedInput && acceptedCandidateReviewSource(store, operation, attempt, `partition:${evidence.partitionId}:candidate-review`, candidate, reviewPlan.result, acceptedInput)
+      if (!result || result.failure || !result.candidateValidated || canonical(result.candidate) !== canonical(candidate) || canonical(result.review) !== canonical(evidence.review) || canonical(result.traces) !== canonical(evidence.traces) || !trace || trace.resultDigest !== contentHash(JSON.stringify(result.reviewOutput)) || canonical(result.reviewOutput) !== canonical(result.review) || trace.inputDigest !== result.inputDigest || !currentDispatch && !acceptedSource || !['accept', 'repair'].includes(evidence.review.verdict) || evidence.review.inputId !== operation.input.id || evidence.review.candidateDigest !== candidate.digest) fail('readonly_spec_repair_binding', '只读独审诊断缺少真实normalized review、完整候选及原dispatch绑定')
       if (evidence.review.verdict !== 'repair') continue
       reviewEvidence.push({ partitionId: evidence.partitionId, resultRef: saved.resultRef })
     }
@@ -738,6 +803,32 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       }
       const partitionCheckpoints: PartitionCheckpoints = {
         load: <T>(key: string) => stage<T>(store, operation, store.readAttempt(attempt!.id), key),
+        loadAcceptedCandidateReview: (key, plan, input, candidate, builders, current) => {
+          if (signal.aborted) return null
+          verifyCandidate(operation.input.source.commonDir, candidate)
+          const currentAttempt = store.readAttempt(attempt!.id)
+          const provenance = current ? stage<AcceptedReviewProvenance>(store, operation, currentAttempt, `${key}:provenance`) : null
+          if (current) {
+            if (!provenance) {
+              if (current.traces.every(trace => currentAttempt.dispatchPlans.some(dispatch => dispatch.purpose === trace.purpose && dispatch.session?.sessionId === trace.sessionId && dispatch.session.threadId === trace.threadId && dispatch.session.turnId === trace.turnId))) return current
+              fail('accepted_review_binding', '历史独审拷贝缺少完整当前输入及来源证明')
+            }
+            const local = partitionStage<SavedGeneration>(store, operation, currentAttempt, key)
+            const carried = local && acceptedReviewInput(store, operation, currentAttempt, key, local.resultRef)
+            const origin = store.readAttempt(provenance.fromAttemptId)
+            const source = carried && origin.number < currentAttempt.number && acceptedCandidateReviewSource(store, operation, origin, key, candidate, plan, input)
+            if (!carried || freezeGenerationInput(carried).inputDigest !== freezeGenerationInput(input).inputDigest || !source || source.resultRef.sha256 !== provenance.resultRef.sha256 || canonical(source.result) !== canonical(current) || source.result.traces.some(trace => builders.some(builder => builder.sessionId === trace.sessionId || builder.threadId === trace.threadId))) fail('accepted_review_binding', '缓存独审原件缺少精确当前输入或原始请求/来源证明')
+            return source.result
+          }
+          for (const prior of store.listAttempts(operation.id).filter(prior => prior.number < attempt!.number && ['failed', 'superseded', 'settled'].includes(prior.status)).reverse()) {
+            const source = acceptedCandidateReviewSource(store, operation, prior, key, candidate, plan, input)
+            if (!source || source.result.traces.some(trace => builders.some(builder => builder.sessionId === trace.sessionId || builder.threadId === trace.threadId))) continue
+            saveStage(store, fence!, `${key}:provenance`, { fromOperationId: operation.id, fromAttemptId: source.attempt.id, resultRef: source.resultRef, inputRef: writeEvidence(operation.input.source.commonDir, freezeGenerationInput(input).inputEvidence) })
+            partitionCheckpoints.save(key, source.result)
+            return source.result
+          }
+          return null
+        },
         loadAcceptedAnalysis: (key, planDigest, inputDigest) => {
           for (const prior of store.listAttempts(operation.id).filter(item => item.number < attempt!.number && ['failed', 'superseded', 'settled'].includes(item.status))) {
             const source = partitionStage<CodeBehaviorAnalysis>(store, operation, prior, key)

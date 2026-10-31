@@ -125,3 +125,5 @@ A7形状的真实Git/SQLite回归先保存独审accept但含无IDcoverage_gap的
 部分P2组合回归先产生真实候选、一分区原生失败且review=null、另一分区三条独审repair，aggregate实际status=failed/failure保留；先复现旧semantic guard丢失三条诊断，再证明下一attempt仅受影响owner新生成与独审，其余原ref/raw/facts/授权/source/tests不变且code_generate为零。原失败partition仍无review，不冒充accept；完整候选及全部P2继续新审，旧generation/failure/ref保持。
 
 普通RULE anchor不在affectedIds的真实形状回归在已验证部分P2失败组合中，保三条规范repair及原JSON，先复现误判unsupported，再证明只对anchor owner新P1生成/独审；affectedIds不补假RULE。空/重复/候选外ID及外来anchor仍拒绝，prose同owner限制与contract-omission特殊成员门不变。
+
+真实Git/SQLite的P2跨轮回归保留已审及失败分区原件；无诊断首轮与带诊断后轮不能误复用，精确同冻结输入后只重跑失败审查，原accept ref/traces及源/tests不变。历史accept与本轮repair共存时仍精确反馈owner，不把失败或旧dispatch伪造成当前调用。
