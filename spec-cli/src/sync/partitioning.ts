@@ -379,8 +379,14 @@ function contextFor(
     }
   }
   addContractClaims(rawContextPaths, claims, input.files, new Set(draft.changedPaths))
+  const needsInitialMandatoryTests = draft.targetNodeIds.some(nodeId => {
+    const sourceWriter = targetWritePaths(input, nodeId, governanceNodes, specOnlyNodeIds.has(nodeId))
+      .some(path => coveredPath(path, input.plan.sourcePaths ?? []))
+    const hasAcceptance = (contractsByNode.get(nodeId) ?? []).some(contract => contract.items.some(item => item.kind === 'AC'))
+    return sourceWriter && !hasAcceptance
+  })
   for (const mandatory of input.plan.mandatoryTests) {
-    if (draft.changedPaths.includes(mandatory.testPath) || claims.some(claim => relationClaimsPath(claim.path, mandatory.testPath))) rawContextPaths.add(mandatory.testPath)
+    if (needsInitialMandatoryTests || draft.changedPaths.includes(mandatory.testPath) || claims.some(claim => relationClaimsPath(claim.path, mandatory.testPath))) rawContextPaths.add(mandatory.testPath)
   }
   if (input.files.has('.spec/spexcode.json') && coveredPath('.spec/spexcode.json', input.plan.readPaths)) rawContextPaths.add('.spec/spexcode.json')
 

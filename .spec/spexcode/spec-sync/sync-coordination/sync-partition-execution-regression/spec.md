@@ -24,6 +24,8 @@ code:
 
 P1新增AC.test的writer仅落本区并与原写授权求交：授权generated测试可继续实现，只读oracle及outside路径不获权；真实应用裁决沿原oracle政策互斥门禁继续验收。
 
+raw-only首次纳管的源码目标在AC生成前必须通过真实planner取得全局授权的精确mandatory test正文与绑定；P1 Native输入冻结完整正文，已存在时只读AC通过存在性门。正文缺失或测试不在局部授权视图时仍拒绝为 `readonly_implementation_gap`，只读测试不获得事实来源、源码或写入授权。
+
 
 两区争用同一新增测试文件时，生成返回规划repair、candidate为空且Native调用为0；既有布局冲突和全局越权/只读oracle反例保持。
 

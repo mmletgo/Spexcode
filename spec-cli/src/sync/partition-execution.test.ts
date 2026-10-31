@@ -79,7 +79,7 @@ function native(delayReverse = false): { runner: ElaborationRunner; calls: Elabo
   return { runner, calls, peak: () => peak }
 }
 
-async function rawParentInterfaceFixture(t: test.TestContext): Promise<{
+async function rawParentInterfaceFixture(t: test.TestContext, includeOracleRelations = true): Promise<{
   input: ElaborationInput
   plan: SyncPartitionPlan
   checkpoints: PartitionCheckpoints
@@ -92,9 +92,12 @@ async function rawParentInterfaceFixture(t: test.TestContext): Promise<{
     alphaSource: 'src/alpha/a.mjs', betaSource: 'src/beta/b.mjs', oracle: 'tests/oracle.test.mjs', unrelated: '.spec/unrelated/spec.md', unrelatedSource: 'src/unrelated/c.mjs',
   }
   const rootRaw = '请把仓库中现有的两个同步纯函数整理为独立、可审查的Spec；只保留当前行为，不增加规则。'
-  const rootSource = `---\ntitle: Existing text tools\nstatus: pending\nrelated:\n  - ${paths.oracle}\n  - package.json\n---\n\n## raw source\n\n${rootRaw}\n`
-  const alphaSourceSpec = `---\ntitle: Normalize tag\nstatus: pending\ncode:\n  - ${paths.alphaSource}\nrelated:\n  - ${paths.oracle}\n---\n\n此叶属于root原意，记录现有标签规范化函数。\n`
-  const betaSourceSpec = `---\ntitle: Join caption\nstatus: pending\ncode:\n  - ${paths.betaSource}\nrelated:\n  - ${paths.oracle}\n---\n\n此叶属于root原意，记录现有标题组合函数。\n`
+  const rootRelated = includeOracleRelations ? `related:\n  - ${paths.oracle}\n  - package.json\n` : ''
+  const alphaRelated = includeOracleRelations ? `related:\n  - ${paths.oracle}\n` : ''
+  const alphaBody = includeOracleRelations ? '此叶属于root原意，记录现有标签规范化函数。' : '## raw source\n\n记录现有标签规范化函数的原始业务意图。'
+  const rootSource = `---\ntitle: Existing text tools\nstatus: pending\n${rootRelated}---\n\n## raw source\n\n${rootRaw}\n`
+  const alphaSourceSpec = `---\ntitle: Normalize tag\nstatus: pending\ncode:\n  - ${paths.alphaSource}\n${alphaRelated}---\n\n${alphaBody}\n`
+  const betaSourceSpec = `---\ntitle: Join caption\nstatus: pending\ncode:\n  - ${paths.betaSource}\n${alphaRelated}---\n\n此叶属于root原意，记录现有标题组合函数。\n`
   for (const path of [paths.root, paths.alpha, paths.beta, paths.alphaSource, paths.betaSource, paths.oracle, paths.unrelated, paths.unrelatedSource, 'package.json']) mkdirSync(join(root, dirname(path)), { recursive: true })
   writeFileSync(join(root, paths.root), rootSource)
   writeFileSync(join(root, paths.alpha), alphaSourceSpec)
@@ -199,6 +202,81 @@ async function nestedInterfaceFixture(t: test.TestContext, discoverGamma = false
 function emptyElaborationTables(): GeneratedTables {
   return Object.fromEntries(Object.keys(CONTRACT_COLUMNS).map(kind => [kind, []])) as unknown as GeneratedTables
 }
+
+test('真实planner把mandatory oracle冻结进raw-only源码目标P1，缺少正文仍拒绝只读AC', async t => {
+  const verifyId = 'VERIFY-ALPHA-ORACLE', testId = 'ORACLE-LIVE-PARTITION-V2-01'
+  const run = async (context: test.TestContext, includeOracleBody: boolean, authorizeOracle = true): Promise<ElaborationResult> => {
+    const { input: fixtureInput, checkpoints, paths } = await rawParentInterfaceFixture(context, false)
+    const alpha = fixtureInput.targets.find(target => target.path === paths.alpha)!
+    const root = fixtureInput.targets.find(target => target.path === paths.root)!
+    const frozenFiles = new Map(fixtureInput.files ?? [])
+    if (!includeOracleBody) frozenFiles.delete(paths.oracle)
+    const input: ElaborationInput = {
+      ...fixtureInput, files: frozenFiles, targets: [alpha], readonlyTestPaths: [paths.oracle],
+      context: [{ nodeId: root.nodeId, path: root.path, source: root.source! }],
+    }
+    const coordinatorPlan: SyncCoordinatorPlan = {
+      version: 'sync-coordinator-v1', intentNodeId: fixtureInput.intent.nodeId,
+      targets: [{ nodeId: alpha.nodeId, path: alpha.path }],
+      readPaths: authorizeOracle ? ['.spec', 'src', 'tests'] : ['.spec', 'src'], writePaths: ['.spec', 'src'], sourcePaths: ['src'],
+      executionScope: { paths: [paths.alpha, paths.alphaSource], contractIds: [], flowIds: [] },
+      facts: [], verifications: [],
+      mandatoryTests: [{ verificationId: verifyId, testPath: paths.oracle, testId }],
+    }
+    const plan = planSyncPartitions({
+      plan: coordinatorPlan, files: frozenFiles, contracts: [],
+      nodes: fixtureInput.targets.map(target => ({ id: target.nodeId, path: target.path, rawSource: target.rawSource })),
+      changedPaths: [paths.alpha],
+    })
+    const partition = plan.partitions.find(candidate => candidate.targets.some(target => target.nodeId === alpha.nodeId))!
+    assert.ok(partition.sourcePaths.includes(paths.alphaSource), '实际规划必须形成源码P1分区')
+    assert.equal(partition.readPaths.includes(paths.oracle), authorizeOracle, 'oracle正文只在全局readPaths授权时进入局部读取范围')
+    assert.ok(!partition.writePaths.includes(paths.oracle))
+    assert.ok(!partition.sourcePaths.includes(paths.oracle))
+    const calls: ElaborationSessionRequest[] = []
+    const runner: ElaborationRunner = async request => {
+      calls.push(request)
+      if (request.purpose === 'elaboration_generate') {
+        const encoded = request.prompt.split('冻结业务输入:\n')[1]?.split('\n')[0]
+        const frozen = encoded ? JSON.parse(encoded) as { files: [string, string][] } : null
+        const localFiles = new Map(frozen?.files ?? [])
+        assert.equal(localFiles.get(paths.oracle), authorizeOracle && includeOracleBody ? fixtureInput.files!.get(paths.oracle) : undefined)
+        const tables = emptyElaborationTables()
+        const req = 'REQ-ALPHA-ORACLE', rule = 'RULE-ALPHA-ORACLE', flow = 'FLOW-ALPHA-ORACLE', step = 'STEP-ALPHA-ORACLE', ac = 'AC-ALPHA-ORACLE'
+        tables.REQ = [{ id: req, goal: '记录normalizeTag现有输出', source: 'user:raw', constraints: '只描述冻结实现。', success: '输出保持已观察行为。', 'depends-on': [] }]
+        tables.RULE = [{ id: rule, scope: paths.alphaSource, constraint: '保持当前规范化结果。', basis: '冻结源码与只读oracle。', source: `derived:${req}`, authority: alpha.nodeId, 'depends-on': [req] }]
+        tables.FLOW = [{ id: flow, req: [req], actors: '调用方', entry: '调用normalizeTag', preconditions: '输入为字符串。', steps: [step], terminal: 'END', source: `derived:${req}`, 'depends-on': [req] }]
+        tables.STEP = [{ id: step, flow, action: '同步调用normalizeTag', input: '字符串', output: '规范化字符串', rules: [rule], next: 'END', source: `derived:${req}`, 'depends-on': [req] }]
+        tables.AC = [{ id: ac, source: `derived:${req}`, 'depends-on': [req], covers: [req, rule], preconditions: '输入符合oracle用例。', action: '调用normalizeTag', assertion: '结果符合既有断言。', test: `${paths.oracle}#${testId}`, command: verifyId }]
+        tables.VERIFY = [{ id: verifyId, command: ['node', '--test', paths.oracle], cwd: '.', 'timeout-ms': 30000 }]
+        return { sessionId: 'readonly-oracle-generate', threadId: 'readonly-oracle-thread', turnId: 'turn', output: {
+          version: 'elaboration-target-rows-v3', changes: [{ targetIndex: 0, title: 'Normalize tag', description: '', code: [`${paths.alphaSource}#normalizeTag`], related: [], prose: '记录现有无状态标签规范化行为。', removeIds: [], tables }],
+          applicability: ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: false, basis: '此纯函数没有相关副作用。', affectedIds: [] })),
+        }, resultDigest: contentHash('readonly-oracle-generate') }
+      }
+      return { sessionId: 'readonly-oracle-review', threadId: 'readonly-oracle-review-thread', turnId: 'turn', output: { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }, resultDigest: contentHash('readonly-oracle-review') }
+    }
+    const result = await elaborateSyncPartitions(input, plan, 1, checkpoints, runner)
+    assert.ok(calls.some(call => call.purpose === 'elaboration_generate'))
+    return result
+  }
+
+  await t.test('正文进入P1 Native输入且mandatory AC通过存在性门', async context => {
+    const result = await run(context, true)
+    assert.equal(result.structurePassed, true, JSON.stringify(result.rounds.flatMap(round => round.findings)))
+    assert.equal(result.reviewPassed, true)
+  })
+  await t.test('冻结计划缺少oracle正文时仍以readonly_implementation_gap拒绝', async context => {
+    const result = await run(context, false)
+    assert.equal(result.structurePassed, false)
+    assert.ok(result.rounds.flatMap(round => round.findings).some(issue => issue.code === 'readonly_implementation_gap'))
+  })
+  await t.test('全局readPaths未授权的oracle不会进入Native输入且仍被拒绝', async context => {
+    const result = await run(context, true, false)
+    assert.equal(result.structurePassed, false)
+    assert.ok(result.rounds.flatMap(round => round.findings).some(issue => issue.code === 'readonly_implementation_gap'))
+  })
+})
 
 test('分区分析以独占文件限定事实来源，共享oracle仍逐区全文读取且不制造同源事实冲突', async t => {
   const { input, plan, checkpoints } = await fixture(t), oracle = 'tests/export.test.mjs'

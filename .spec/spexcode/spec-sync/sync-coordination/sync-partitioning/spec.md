@@ -30,6 +30,8 @@ related:
 
 局部分区只读取目标正文、关联验收与源码、上游契约引用、必要的祖先 Spec 原文、近邻发现上下文和本组变更路径。旧治理可由调用方传入 `governanceSources` 供缺失路径的 frontmatter 解析；它只用于元数据，不加入当前正文视图，当前存在的 Spec 始终优先。同一 node ID 可对应冻结输入中的多个旧/新 path 身份，旧路径只补真实影响归属，实际写权仍受当前 plan 的精确 scope 限制。契约依赖边方向为 `from` 消费方到 `to` 前置依赖方；只读依赖进入上下文，不成为 `targets`、`executionScope` 身份或写授权。全局 intent 保留为只读输入；分区投影只带本区 `targets`、精确写路径、本区 source 路径、本地 executionScope 身份与实际相关 `mandatoryTests`，不把全局读/源路径目录或全部测试路径复制给每组。
 
+当本区目标拥有落在全局 `sourcePaths` 内的源码写者、且该目标尚无既有 AC 时，AC 生成前的局部只读闭包必须纳入全局 `mandatoryTests` 中仍受全局 `readPaths` 授权的精确测试路径及原绑定。存在的测试正文按完整正文进入本区读取预算与摘要；正文缺失时仍保留绑定以便只读 AC 校验拒绝。该只读依赖不扩张 `writePaths`、`sourcePaths`、`executionScope`，也不成为业务事实来源；未获全局读取授权的路径不进入局部正文视图。
+
 每区默认上下文预算为 512 KiB 完整 UTF-8 正文，按 SHA-256 相同正文去重后累计；内容不得截断。单个完整正文超过预算时独立成区，并通过 `oversizedReads` 报告路径、实际估算字节和预算。不可拆共享写者或强依赖组因合计正文超过预算时保持合区，`readBytes` 与 `readLimitBytes` 如实暴露超额；规划层报告是工作集估算，不替代原生执行器对真实读取和历史 before/after 内容的证明。调用方可用 `readByteSizes` 补充 `files` 未含的真实版本字节估算。
 
 分区顺序、路径顺序和摘要不受输入 Map/列表顺序影响。摘要使用现有 `snapshot.contentHash`，绑定冻结计划、分区与跨区边、变更路径及投影正文摘要。`projectSyncPartition` 只从全局可信授权取交集：全局 intent 可读，分区 targets 与写路径仅限本地；不得通过只读依赖取得 writer 身份。
