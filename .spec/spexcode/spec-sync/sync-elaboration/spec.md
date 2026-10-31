@@ -5,6 +5,7 @@ hue: 175
 desc: 从高层原意生成可追踪的主流程与状态处置，经独立审查和有限修复，精确保留未知政策。
 code:
   - spec-cli/src/sync/elaboration.ts#elaborate
+  - spec-cli/src/sync/elaboration.ts#freezeElaborationInput
   - spec-cli/src/sync/elaboration.ts#projectElaborationFlowReadiness
 related:
   - spec-cli/src/sync/elaboration-orchestration.test.ts
@@ -78,3 +79,5 @@ AC-ELABORATION-38–40 验证空 changes 的完整既有目标、只返回子叶
 显式空 implementationWritePaths 表示本轮只观察既有实现（code→spec）。生成和独审均不得将缺代码、测试文件或用例延后交给 P2；这些缺口保留为具体 readonly_implementation_gap 并阻止细化通过，不能虚构新测试、编造业务GAP或弱化验收。已有完整实现/测试仍按原结构与独审门禁通过。
 
 纯父已有VERIFY可在本target合法update_verification经原checkInput授权门禁核验后进入接口更新，即使旧定义不同于本轮新登记。程序只从冻结登记补入该已有ID的精确新技术行，模型仍不得选择VERIFY；原候选演进、登记一致性与独审完整执行，无授权或伪授权漂移拒绝。已保存raw与空行差量不吞掉技术更新，也不允许通过技术投影改变业务或用户原意。
+
+freezeElaborationInput为生成、独审及同operation局部interface_seed承接共享的唯一完整输入冻结与摘要接缝；requestKey和执行预算不改变业务摘要，原意/目标/上下文/文件/授权/技术政策/分析及完整分区绑定均参与。承接不能另造摘要算法或改写旧inputDigest。

@@ -34,6 +34,8 @@ operation 独立本机 kernel mutex 防双 coordinator；紧凑 stage checkpoint
 
 P1 已审结构结果登记所有未来业务 ID，包括 GAP/partial FLOW；ready/blocked 分区只隔离业务 ID，共享 paths 留 ready。无可执行 ready AC 不生成或写半成品；V1 仅容许已审 GAP 精确解释的缺口。generation 硬门禁保护 raw/全局REQ/AC/VERIFY、实际diff与独立oracle，V2使用不同会话；V3仅执行 ready AC 和 mandatoryTests 的固定命令/镜像；V4复采完整source、当前可信plan/readset与物理身份，一致才可交付，并于 beginApply 前再核。完整V1–V4 pass才 recordVerification(pass)，范围精确ready声明/完整FLOW，不包含blocked。
 
+同一operation的局部纯父接口已通过结构校验及独立accept时，后代失败的新attempt只可承接较早已终结attempt的该interface_seed原件。原stage读取仍严格绑定所属attempt；专用承接须核同operation/input/policy、精确readSet/基线选择、完整partitionBinding及当前局部输入的唯一freezeElaborationInput摘要全部相同，且seed无failure、phase/status正确并保有独审accept。新interface_seed checkpoint即使没有基线选择也记录真实readSetDigest；缺失该绑定的旧局部原件不能跨attempt承接。失败/未审seed、旧全局seal及其他operation不取得局部承接权；在当前fence登记原resultRef及fromAttempt provenance，原review/traces不改写。所有子区继续读取已审接口，最终strict全局seal及V1–V4仍重做；局部证据不是raw、作者事实或全局批准。
+
 失败通过新attempt有限修复，冻结预算、deadline及政策不重置，诊断不能升格为事实；环境unsupported、真正业务 GAP/conflict、未知资源恢复停止自动重跑。候选冻结后不覆盖；applying/receipt恢复优先既定交付，真实Git commit及DB未结算不会再生成或重复提交。仅receipt结算可推进成对baseline和deliveredScope，根有blockedReason保持needs_input/conflicted。
 
 行为分析仅将 [[claude-structured-runtime]] 已核终态的精确 `structured_output_retries_exhausted` 作为可有限修复的输出失败，保留原 session/thread/user 诊断证据；不把普通 failed、unsupported 或错误文本广泛改类。新 attempt 前仍先结算旧 native 资源，未 removed 保持 recovery_required；全部独立派发消耗原 attempts/calls/repairs/deadline，不复用无效输出、旧分析或旧独审。

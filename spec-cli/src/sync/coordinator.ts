@@ -479,7 +479,25 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       store.bindComposedInput(fence, view.composed)
       const callTimeoutMs = options.callTimeoutMs ?? Math.min(120_000, operation.budget.timeoutMs)
       const runner = options.runner ? injectedRunner(store, fence, options.runner) : createAttemptRunner(store, fence)
-      const partitionCheckpoints: PartitionCheckpoints = { load: <T>(key: string) => stage<T>(store, operation, store.readAttempt(attempt!.id), key), save: (key, value) => saveStage(store, fence!, key, value) }
+      const partitionCheckpoints: PartitionCheckpoints = {
+        load: <T>(key: string) => stage<T>(store, operation, store.readAttempt(attempt!.id), key),
+        loadAcceptedInterfaceSeed: (key, binding, inputDigest) => {
+          for (const prior of store.listAttempts(operation.id).filter(item => item.number < attempt!.number && ['failed', 'superseded', 'settled'].includes(item.status))) {
+            const saved = stage<SavedElaboration>(store, operation, prior, key)
+            if (!saved?.structurePassed || !saved.reviewPassed || saved.failure || saved.phase !== 'interface_seed' || !['interface_seed', 'needs_input', 'conflict'].includes(saved.status)
+              || saved.rounds.at(-1)?.review?.verdict !== 'accept' || saved.inputDigest !== inputDigest || canonical(saved.partitionBinding) !== canonical(binding)) continue
+            const resultRef = writeEvidence(operation.input.source.commonDir, saved)
+            const original = [...prior.checkpointRefs].reverse().map(ref => JSON.parse(readEvidence(operation.input.source.commonDir, ref).toString('utf8')) as Partial<Stage>)
+              .find(value => value.version === 'sync-stage-v1' && value.stage === key && value.operationId === operation.id && value.attemptId === prior.id && value.inputId === operation.input.id && value.policyDigest === operation.policyDigest && value.resultRef?.sha256 === resultRef.sha256)
+            if (original?.readSetDigest !== operation.readSetDigest || operation.baselineSelection && original.baselineSelectionRef?.sha256 !== writeEvidence(operation.input.source.commonDir, operation.baselineSelection).sha256) continue
+            saveStage(store, fence!, `${key}:provenance`, { fromOperationId: operation.id, fromAttemptId: prior.id, resultRef })
+            partitionCheckpoints.save(key, saved)
+            return saved
+          }
+          return null
+        },
+        save: (key, value) => saveStage(store, fence!, key, value, !operation.baselineSelection && (value as Partial<SavedElaboration>).phase === 'interface_seed' ? { readSetDigest: operation.readSetDigest } : undefined),
+      }
       let partitions: SyncPartitionPlan | null = null
       let analysis: CodeBehaviorEvidence | undefined
       let decision: SyncDecisionInput | undefined
