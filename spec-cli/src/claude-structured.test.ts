@@ -380,7 +380,7 @@ test('controlled Claude compact boundaries preserve one original turn without gr
       ['foreign retry', rows => { row(rows, 'retry-1').sessionId = 'foreign' }],
       ['sidechain retry', rows => { row(rows, 'retry-1').isSidechain = true }],
       ['agent retry', rows => { row(rows, 'retry-1').agentId = 'foreign' }],
-      ['unknown retry source', rows => { row(rows, 'retry-1').source = 'connection_retry' }],
+      ['unknown retry source', rows => { row(rows, 'retry-1').source = 'unknown_retry' }],
       ['unknown retry level', rows => { row(rows, 'retry-1').level = 'info' }],
       ['retry skips chain tail', rows => { row(rows, 'retry-1').parentUuid = 'user' }],
       ['retry missing parent', rows => { row(rows, 'retry-1').parentUuid = 'missing' }],
@@ -403,6 +403,50 @@ test('controlled Claude compact boundaries preserve one original turn without gr
     witness(sourcePrefix)
     const retrySources = readClaudeApiSourceMetadata(path, 'session', 'MiniMax-M3')
     assert.deepEqual([...retrySources.get('request-2-retry')!.messages], [...retrySources.get('request-2')!.messages], 'the retried API request consumes the exact complete prior input without a new tail')
+    const connected = structuredClone(retried)
+    row(connected, 'retry-1').source = 'connection_retry'
+    row(connected, 'retry-2').source = 'connection_retry'
+    const connectionWitness = witness(connected), connectionProof = proveClaudeFrozenReads(ref, connectionWitness)
+    assert.deepEqual(connectionProof.receipts, proof.receipts)
+    assert.deepEqual(connectionProof.coveredEntryIds, proof.coveredEntryIds)
+    verifyFrozenReadProof(ref, connectionProof, { threadId: 'session', turnId: 'user' })
+    const connectedPrefix = connected.slice(0, connected.findIndex(item => item.uuid === 'compact-1'))
+    witness(connectedPrefix)
+    const connectionSources = readClaudeApiSourceMetadata(path, 'session', 'MiniMax-M3')
+    assert.deepEqual([...connectionSources.get('request-2-retry')!.messages], [...connectionSources.get('request-2')!.messages])
+    const mixedRetry = structuredClone(connected)
+    row(mixedRetry, 'retry-2').source = 'request_retry'
+    assert.deepEqual(proveClaudeFrozenReads(ref, witness(mixedRetry)).receipts, proof.receipts)
+    const connectionCases: Array<[string, (rows: typeof raw) => void]> = [
+      ['connection retry without preceding API', rows => { rows.splice(0, rows.length, ...rows.filter(item => item.type !== 'api-request')) }],
+      ['connection retry changed complete params', rows => { (row(rows, 'request-2-retry').params as Record<string, unknown>).max_tokens = 8192 }],
+      ['connection retry changed full input', rows => { row(rows, 'request-2-retry').tail = [claudeMessageDigest(original)] }],
+      ['connection retry changed shape', rows => {
+        const shape = structuredClone(rows.find(item => item.type === 'api-request-shape')!)
+        shape.shapeHash = 'b'.repeat(64)
+        rows.splice(rows.findIndex(item => item.id === 'request-2-retry'), 0, shape)
+        row(rows, 'request-2-retry').shapeHash = shape.shapeHash
+      }],
+      ['connection retry old request consumption', rows => { row(rows, 'consumed-1').requestRef = 'request-2' }],
+      ['connection retry future API consumption', rows => {
+        const index = rows.findIndex(item => item.id === 'request-2-retry'), [api] = rows.splice(index, 1)
+        rows.splice(rows.findIndex(item => item.uuid === 'consumed-1') + 1, 0, api)
+      }],
+      ['connection retry unconsumed', rows => { rows.splice(rows.findIndex(item => item.uuid === 'consumed-1')) }],
+      ['connection retry no new API', rows => { rows.splice(rows.findIndex(item => item.id === 'request-2-retry'), 1) }],
+      ['connection retry foreign parent', rows => { row(rows, 'retry-1').parentUuid = 'user' }],
+      ['connection retry sidechain', rows => { row(rows, 'retry-1').isSidechain = true }],
+      ['connection retry foreign session', rows => { row(rows, 'retry-1').sessionId = 'foreign' }],
+      ['connection retry new user', rows => { rows.splice(rows.findIndex(item => item.id === 'request-2-retry'), 0, { type: 'user', sessionId: 'session', uuid: 'injected', parentUuid: 'retry-2', promptId: 'prompt', message: original }) }],
+    ]
+    for (const [name, mutate] of connectionCases) {
+      const changed = structuredClone(connected); mutate(changed)
+      assert.throws(() => witness(changed), { code: 'stale_result' }, name)
+    }
+    const alteredParams = structuredClone(connected)
+    ;(row(alteredParams, 'request-2-retry').params as Record<string, unknown>).max_tokens = 8192
+    writeFileSync(path, alteredParams.map(item => JSON.stringify(item)).join('\n') + '\n')
+    assert.throws(() => proveClaudeFrozenReads(ref, connectionWitness), { code: 'stale_result' }, 'handmade witness cannot bypass raw connection retry payload validation')
     assert.deepEqual(proveClaudeFrozenReads(ref, witness()), proof, 'histories without retries keep the original proof bytes')
     for (const content of ['Your response above was cut off mid-stream. Resume directly from where it stops — no apology, no recap. If none of it survived, answer the request from the start.', '']) {
       const extra = structuredClone(raw)
