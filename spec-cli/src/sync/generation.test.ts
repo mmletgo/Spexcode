@@ -110,6 +110,10 @@ test('生成复用唯一文件 schema/CAS/scope，评审独立读取完整候选
   assert.ok(native.calls[1].prompt.includes('actual candidate implementation'))
   assert.ok(native.calls[1].prompt.includes(JSON.stringify(source.files.get('tests/export.test.mjs')!)))
   assert.ok(native.calls[1].prompt.includes(JSON.stringify(source.files.get(contractPath)!)))
+  for (const marker of ['冻结原意和基线完整输入:\n', '实际候选身份与 manifest:\n']) {
+    const view = JSON.parse(native.calls[1].prompt.split(marker)[1].split('\n')[0]) as { manifest: { entries: unknown[] }; manifestProjection: unknown }
+    assert.deepEqual(view.manifestProjection, { scope: 'local-read-set', includedEntryCount: view.manifest.entries.length, completeEntryCount: source.manifest.entries.length, complete: true })
+  }
   assert.ok(result.candidateFiles!.get('tests/export.test.mjs')!.includes('assert.'))
   assert.equal(result.candidate!.baseTree, source.snapshot.immutableTree)
   assert.deepEqual(readFileSync(join(source.root, '.git/index')), index)
@@ -349,7 +353,9 @@ test('contract-omission必须精确绑定已审Spec路径和关联existingID，�
 })
 
 test('可信freeze回调发生在生成返回后，实际候选继承闭包外字节且原模型输入/readonly保持原绑定', async t => {
-  const source = await input(t), native = runner(source), originalManifest = structuredClone(source.manifest)
+  const initial = await input(t), source = { ...initial, files: new Map(initial.files) }
+  source.files.delete('package.json')
+  const native = runner(source), originalManifest = structuredClone(source.manifest)
   source.allowedScope.paths = ['src/export.js']
   const inherited = Buffer.from('settled independent delivery\n'), entries = [...source.manifest.entries, { path: 'unselected.txt', mode: '100644' as const, oid: writeObject(source.snapshot.source.commonDir, inherited), digest: contentHash(inherited) }]
   const tree = writeTree(source.snapshot.source.commonDir, entries), actual = readTree(source.snapshot.source.commonDir, tree)
@@ -372,10 +378,17 @@ test('可信freeze回调发生在生成返回后，实际候选继承闭包外�
   assert.ok(!prompt.includes('实际完整候选'))
   assert.ok(prompt.includes('不能仅据本投影未提供文件就宣称完整候选缺文件'))
   assert.ok(prompt.includes('具体义务确需未提供证据时仍返回repair'))
-  const identity = JSON.parse(prompt.split('实际候选身份与 manifest:\n')[1].split('\n')[0]) as { manifest: { entries: { path: string }[] }; completeManifestDigest: string }
+  type ManifestView = { manifest: { entries: { path: string }[] }; manifestProjection: { scope: string; includedEntryCount: number; completeEntryCount: number; complete: boolean }; completeManifestDigest: string }
+  const identity = JSON.parse(prompt.split('实际候选身份与 manifest:\n')[1].split('\n')[0]) as ManifestView
+  const baseline = JSON.parse(prompt.split('冻结原意和基线完整输入:\n')[1].split('\n实际候选身份')[0]) as ManifestView
+  assert.deepEqual(baseline.manifestProjection, { scope: 'local-read-set', includedEntryCount: baseline.manifest.entries.length, completeEntryCount: source.manifest.entries.length, complete: false })
+  assert.equal(baseline.completeManifestDigest, contentHash(JSON.stringify(source.manifest)))
+  assert.equal(baseline.manifest.entries.some(entry => entry.path === 'package.json'), false)
+  assert.deepEqual(identity.manifestProjection, { scope: 'local-read-set', includedEntryCount: identity.manifest.entries.length, completeEntryCount: verifyCandidate(source.snapshot.source.commonDir, result.candidate!).length, complete: false })
   assert.equal(identity.manifest.entries.some(entry => entry.path === 'unselected.txt'), false)
   assert.equal(identity.completeManifestDigest, contentHash(JSON.stringify({ version: 1, entries: verifyCandidate(source.snapshot.source.commonDir, result.candidate!) })))
   assert.ok(!prompt.includes(JSON.stringify(inherited.toString())), '不为更正caption扩大本地读取范围')
+  assert.ok(!prompt.includes(JSON.stringify(initial.files.get('package.json')!)), '未额外发送源manifest闭包外正文')
 })
 
 test('可信publication回调仍不能改变readonly或缺失路径；模型改readonly也硬拒绝', async t => {
