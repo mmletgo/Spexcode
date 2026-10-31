@@ -298,7 +298,13 @@ function readonlyRepairFromAttempt(store: SyncStore, operation: SyncOperation, a
 
 function validateReadonlyRepair(store: SyncStore, operation: SyncOperation, repair: ReadonlyOwnerRepair): void {
   const source = store.readAttempt(repair.fromAttemptId)
-  if (source.operationId !== operation.id || canonical(readonlyRepairFromAttempt(store, operation, source)) !== canonical(repair)) fail('readonly_spec_repair_binding', '只读V1续修来源、owner或原件绑定失配')
+  let context = operation
+  if (operation.baselineSelection) {
+    const basis = [...source.checkpointRefs].reverse().map(ref => JSON.parse(readEvidence(operation.input.source.commonDir, ref).toString('utf8')) as Stage).find(saved => saved.version === 'sync-stage-v1' && saved.stage === 'generation' && saved.operationId === operation.id && saved.attemptId === source.id && saved.inputId === operation.input.id && saved.policyDigest === operation.policyDigest && saved.resultRef?.sha256 === repair.generationRef.sha256)
+    if (!basis?.readSetDigest || !basis.baselineSelectionRef || !stageSelectionMatches(operation, basis)) fail('readonly_spec_repair_binding', '只读续修原generation绑定不属于当前合法null资源扩展')
+    context = { ...operation, readSetDigest: basis.readSetDigest, baselineSelection: JSON.parse(readEvidence(operation.input.source.commonDir, basis.baselineSelectionRef).toString('utf8')) as FrozenBaselineSelection }
+  }
+  if (source.operationId !== operation.id || canonical(readonlyRepairFromAttempt(store, context, source)) !== canonical(repair)) fail('readonly_spec_repair_binding', '只读V1续修来源、owner或原件绑定失配')
 }
 
 function refinementGeneration(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, refinement: Refinement): SavedGeneration {
