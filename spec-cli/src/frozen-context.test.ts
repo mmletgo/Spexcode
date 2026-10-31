@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { assertFrozenBinding, freezeContext, frozenContextPrompt, frozenReadOutputTokenLimit, frozenReadTool, frozenVisibleOutputs, persistFrozenRead, prepareFrozenPrompt, proveFrozenReads, readFrozenManifest, readFrozenRange, verifyFrozenReadProof, FROZEN_READ_MAX_BYTES, type FrozenContextInput, type FrozenNativeItem, type FrozenVisibleOutput } from './frozen-context.js'
+import { assertFrozenBinding, freezeContext, frozenContextPrompt, frozenReadOutputTokenLimit, frozenReadTool, frozenVisibleOutputs, persistFrozenRead, prepareFrozenPrompt, proveFrozenReads, readFrozenManifest, readFrozenRange, verifyFrozenReadProof, claudeMessageDigest, readClaudePublicHistory, readClaudeApiSourceMetadata, FROZEN_READ_MAX_BYTES, type FrozenContextInput, type FrozenNativeItem, type FrozenVisibleOutput } from './frozen-context.js'
 
 const binding = { requestKey: 'exact-request', inputDigest: 'exact-input' }
 function fixture(entries: FrozenContextInput[] = [{ id: 'a', label: 'frozen source', kind: 'utf8', bytes: Buffer.from('首abc尾') }]) {
@@ -15,6 +15,32 @@ function fixture(entries: FrozenContextInput[] = [{ id: 'a', label: 'frozen sour
   return { ref, directory, args, item, close: () => rmSync(directory, { recursive: true, force: true }) }
 }
 const identity = { threadId: 'exact-thread', turnId: 'exact-turn' }
+
+test('已停source索引只重建精确输出上限续行，原公开投影与hash不变', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'spex-claude-source-recovery-'))
+  try {
+    const text = 'Output token limit hit. Resume directly — no apology, no recap of what you were doing. Pick up mid-thought if that is where the cut happened. Break remaining work into smaller pieces.'
+    const original = { role: 'user', content: [{ type: 'text', text: 'original' }] }, recovery = { role: 'user', content: text }, normalized = { role: 'user', content: [{ type: 'text', text }] }
+    const rows = [
+      { type: 'user', sessionId: 'session', uuid: 'user', parentUuid: null, promptId: 'prompt', message: original },
+      { type: 'api-request-shape', sessionId: 'session', shapeHash: 'a'.repeat(64), shape: { tools: [] } },
+      { type: 'api-request', sessionId: 'session', id: 'request', shapeHash: 'a'.repeat(64), keep: 0, tail: [claudeMessageDigest(original)], params: { model: 'model' } },
+      { type: 'assistant', sessionId: 'session', uuid: 'interrupted', parentUuid: 'user', requestRef: 'request', message: { role: 'assistant', content: [], stop_reason: 'max_tokens' } },
+      { type: 'user', sessionId: 'session', uuid: 'recovery', parentUuid: 'interrupted', promptId: 'prompt', isMeta: true, turnCompanion: true, message: recovery },
+      { type: 'api-request', sessionId: 'session', id: 'next', shapeHash: 'a'.repeat(64), base: 'request', keep: 1, tail: [claudeMessageDigest(normalized)], params: { model: 'model' } },
+    ]
+    const path = join(directory, 'history.jsonl'), bytes = rows.map(row => JSON.stringify(row)).join('\n') + '\n'
+    writeFileSync(path, bytes)
+    const before = JSON.stringify(readClaudePublicHistory(path, 'session'))
+    assert.deepEqual(readClaudeApiSourceMetadata(path, 'session', 'model').get('next')!.messages.get(claudeMessageDigest(normalized))!.sourceUuids, ['recovery'])
+    assert.equal(JSON.stringify(readClaudePublicHistory(path, 'session')), before)
+    assert.equal(readFileSync(path, 'utf8'), bytes)
+    for (const invalid of [{ ...rows[4], promptId: 'foreign' }, { ...rows[4], message: { role: 'user', content: text + ' ' } }, { ...rows[4], sourceToolAssistantUUID: 'interrupted' }]) {
+      writeFileSync(path, [...rows.slice(0, 4), invalid, rows[5]].map(row => JSON.stringify(row)).join('\n') + '\n')
+      assert.throws(() => readClaudeApiSourceMetadata(path, 'session', 'model'), { code: 'stale_result' })
+    }
+  } finally { rmSync(directory, { recursive: true, force: true }) }
+})
 
 test('model-visible frozen proof rejects inner-only coverage, cropped or wrapped replies and history budget borrowing', () => {
   const f = fixture()
