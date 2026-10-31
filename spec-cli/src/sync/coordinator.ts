@@ -7,7 +7,7 @@ import { dependencyClosure, parseContract, parseParts } from '@spexcode/spec-cor
 import { relationClaimsPath } from '@spexcode/spec-core'
 import type { ContractFinding } from '@spexcode/spec-core/contracts'
 import { actualTreeDiff, exportCandidate, isHostPrivatePath, verifyCandidate } from './candidate.js'
-import { analyzeCodeBehavior, authoredContractChanges, deriveBehaviorAuthorization } from './code-behavior.js'
+import { analyzeCodeBehavior, authoredContractChanges, CODE_BEHAVIOR_GUIDANCE_VERSION, deriveBehaviorAuthorization } from './code-behavior.js'
 import type { CodeBehaviorAnalysis, CodeBehaviorEvidence, SyncDecisionInput } from './writeback-types.js'
 import { adoptedDeliveryPaths, isUtf8Text, readCompositionEvidence, selectedRetiredIds, verifyBaselineSelection } from './composition.js'
 import { readHistoryRequest, readReceiptHistoryRestorations } from './history-input.js'
@@ -151,7 +151,8 @@ export async function prepareSyncAdmission(input: InputSnapshot, supplied: SyncC
   return { ...syncModelBinding(options.model), ingressKey: options.ingressKey, rootCauseId: options.rootCauseId, origin: options.origin, budget: options.budget, input, ...(options.requestBlob ? { requestBlob: options.requestBlob } : {}), ...(options.retryOf ? { retryOf: options.retryOf } : {}), ...(options.baselineSelection ? { baselineSelection: options.baselineSelection } : {}), planBlob: freezeSyncPlanEvidence(input.source.commonDir, plan), scope, policyDigest: syncPlanDigest(plan), impactDigest: options.impactDigest ?? contentHash(canonical({ targets: plan.targets, ...(plan.executionScope ? { scope } : {}), writePaths: unique(plan.writePaths), readSetDigest: view.readSetDigest })), readSetDigest: view.readSetDigest, delivery: null, deliveryPlan: planPrivateDelivery(input, options.managedRoot, options.ingressKey), previousBaselinePair: options.previousBaselinePair ?? null }
 }
 
-type Stage = { version: 'sync-stage-v1'; operationId: string; attemptId: string; inputId: string; policyDigest: string; readSetDigest?: string; baselineSelectionRef?: BlobRef; stage: string; resultRef: BlobRef }
+type Stage = { version: 'sync-stage-v1'; operationId: string; attemptId: string; inputId: string; policyDigest: string; readSetDigest?: string; baselineSelectionRef?: BlobRef; guidanceContractVersion?: string; stage: string; resultRef: BlobRef }
+const behaviorAnalysisStage = (name: string): boolean => name === 'analysis' || name.startsWith('partition:') && name.endsWith(':analysis')
 type SavedElaboration = Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>
 type SavedGeneration = Omit<GenerationResult, 'candidateFiles'>
 const baselineResourceKey = (binding: FrozenBaselineSelection['bindings'][number]): string => binding.resource.kind === 'path' ? `path:${binding.resource.path}` : `${binding.resource.kind}:${binding.resource.id}`
@@ -173,12 +174,13 @@ function generationRepairInput(previous: SavedGeneration, issue?: SyncFailure): 
   return { previousOutput: previous.output, diagnostics: [...(issue ? [{ code: issue.code, message: issue.message }] : []), ...previous.validationFindings.map(item => ({ code: item.code, message: item.message })), ...(previous.review?.findings.map(item => ({ code: item.kind, message: JSON.stringify(item) })) ?? [])] }
 }
 type Refinement = { prior: SavedElaboration; candidate: CandidateRef; candidateDigest: string; diagnostics: { code: string; message: string }[] }
-function stage<T>(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, name: string): T | null {
+function stage<T>(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, name: string, usage: 'automatic' | 'evidence' = 'automatic'): T | null {
   for (const ref of [...attempt.checkpointRefs].reverse()) {
     const value = JSON.parse(readEvidence(operation.input.source.commonDir, ref).toString('utf8')) as Partial<Stage>
     if (value.version !== 'sync-stage-v1' || value.stage !== name) continue
     if (value.operationId !== operation.id || value.attemptId !== attempt.id || value.inputId !== operation.input.id || value.policyDigest !== operation.policyDigest || !value.resultRef) fail('stage_binding', '持久阶段身份不一致')
     if (!stageSelectionMatches(operation, value as Stage)) continue
+    if (usage === 'automatic' && behaviorAnalysisStage(name) && value.guidanceContractVersion !== CODE_BEHAVIOR_GUIDANCE_VERSION) return null
     return JSON.parse(readEvidence(operation.input.source.commonDir, value.resultRef).toString('utf8')) as T
   }
   return null
@@ -221,9 +223,10 @@ function saveStage(store: SyncStore, fence: WriteFence, name: string, value: unk
   }
   visit(value)
   const bindings = basis ? { readSetDigest: basis.readSetDigest, baselineSelectionRef: basis.baselineSelectionRef } : operation.baselineSelection ? { readSetDigest: operation.readSetDigest, baselineSelectionRef: writeEvidence(commonDir, operation.baselineSelection) } : {}
+  const guidance = behaviorAnalysisStage(name) && (value as CodeBehaviorAnalysis).reviewPassed === true ? { guidanceContractVersion: CODE_BEHAVIOR_GUIDANCE_VERSION } : {}
   if (bindings.baselineSelectionRef) refs.set(bindings.baselineSelectionRef.sha256, bindings.baselineSelectionRef)
   for (const ref of refs.values()) store.checkpoint(fence, ref)
-  store.checkpoint(fence, writeEvidence(commonDir, { version: 'sync-stage-v1', operationId: operation.id, attemptId: fence.attemptId, inputId: operation.input.id, policyDigest: operation.policyDigest, ...bindings, stage: name, resultRef } satisfies Stage))
+  store.checkpoint(fence, writeEvidence(commonDir, { version: 'sync-stage-v1', operationId: operation.id, attemptId: fence.attemptId, inputId: operation.input.id, policyDigest: operation.policyDigest, ...bindings, ...guidance, stage: name, resultRef } satisfies Stage))
   return resultRef
 }
 function analysisStageBinding(store: SyncStore, operation: SyncOperation, analysis: CodeBehaviorAnalysis): Stage | null {
@@ -241,7 +244,7 @@ function analysisStageBinding(store: SyncStore, operation: SyncOperation, analys
 /** 查询与裁决复用同一真实阶段绑定，已审未来 null 资源扩展不篡改原分析原件。 */
 export function readCurrentSyncAnalysis(store: SyncStore, operation: SyncOperation): CodeBehaviorEvidence | null {
   if (!operation.currentAttemptId) return null
-  const attempt = store.readAttempt(operation.currentAttemptId), analysis = stage<CodeBehaviorAnalysis>(store, operation, attempt, 'analysis')
+  const attempt = store.readAttempt(operation.currentAttemptId), analysis = stage<CodeBehaviorAnalysis>(store, operation, attempt, 'analysis', 'evidence')
   if (!analysis?.reviewPassed || analysis.inputId !== operation.input.id || analysis.policyDigest !== operation.policyDigest || analysis.composedDigest !== attempt.composedInput?.contentDigest) return null
   const saved = analysisStageBinding(store, operation, analysis)
   return saved ? { ref: saved.resultRef, analysis } : null
