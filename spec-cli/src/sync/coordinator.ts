@@ -19,7 +19,7 @@ import { checkGenerationContractIntent, readFrozenContracts } from './frozen-con
 import { decisionAuthorizationErrors, sameContractBusinessMeaning } from './contract-evolution.js'
 import type { FrozenContracts } from './frozen-contracts.js'
 import { implementationGenerationDispatch, completeSyncPartitionPlan, analyzeSyncPartitions, elaborateSyncPartitions, generateSyncPartitions } from './partition-execution.js'
-import type { PartitionCheckpoints } from './partition-execution.js'
+import type { PartitionCheckpoints, PartitionAnalysisFailure, PartitionAnalysisFailures } from './partition-execution.js'
 import { planSyncPartitions } from './partitioning.js'
 import type { SyncPartitionPlan } from './partitioning.js'
 import { contractOmissionBound, runGeneration } from './generation.js'
@@ -32,6 +32,7 @@ import { assemblePublicationBase } from './publication-base.js'
 import { composeControlledRequest, readControlledChanges, readControlledDecision } from './request-input.js'
 import { sessionIdForCreateKey } from '../sessions.js'
 import { StructuredSessionError } from '../session-structured-policy.js'
+import { SettledSessionCreateTimeoutError } from '../session-structured.js'
 import { captureInputSnapshot, contentHash, objectGit, readEvidence, readObject, readTree, validateRepositoryPath, verifySnapshot, writeEvidence } from './snapshot.js'
 import type { SnapshotManifest } from './snapshot.js'
 import { SyncStoreError } from './store.js'
@@ -187,14 +188,18 @@ function elaborationRepairSeed(result: SavedElaboration | null, requestKey: stri
     ? { settled: true, requestKey, inputDigest: result.inputDigest, candidateDigest: last.candidateDigest, output: last.output, candidate: last.candidate, findings: last.findings, review: last.review, traces: last.traces } : undefined
 }
 
-function partitionElaborationStage(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, key: string, binding: NonNullable<ElaborationResult['partitionBinding']>, inputDigest: string): { result: SavedElaboration; resultRef: BlobRef } | null {
-  const result = stage<SavedElaboration>(store, operation, attempt, key)
-  if (!result || result.inputDigest !== inputDigest || canonical(result.partitionBinding) !== canonical(binding)) return null
+function partitionStage<T>(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, key: string): { result: T; resultRef: BlobRef } | null {
+  const result = stage<T>(store, operation, attempt, key)
+  if (!result) return null
   const resultRef = writeEvidence(operation.input.source.commonDir, result)
   const original = [...attempt.checkpointRefs].reverse().map(ref => JSON.parse(readEvidence(operation.input.source.commonDir, ref).toString('utf8')) as Partial<Stage>)
     .find(value => value.version === 'sync-stage-v1' && value.stage === key && value.operationId === operation.id && value.attemptId === attempt.id && value.inputId === operation.input.id && value.policyDigest === operation.policyDigest && value.resultRef?.sha256 === resultRef.sha256)
   if (original?.readSetDigest !== operation.readSetDigest || operation.baselineSelection && original.baselineSelectionRef?.sha256 !== writeEvidence(operation.input.source.commonDir, operation.baselineSelection).sha256) return null
   return { result, resultRef }
+}
+function partitionElaborationStage(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, key: string, binding: NonNullable<ElaborationResult['partitionBinding']>, inputDigest: string): { result: SavedElaboration; resultRef: BlobRef } | null {
+  const source = partitionStage<SavedElaboration>(store, operation, attempt, key)
+  return source && source.result.inputDigest === inputDigest && canonical(source.result.partitionBinding) === canonical(binding) ? source : null
 }
 
 function refinementGeneration(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, refinement: Refinement): SavedGeneration {
@@ -497,6 +502,28 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       const runner = options.runner ? injectedRunner(store, fence, options.runner) : createAttemptRunner(store, fence)
       const partitionCheckpoints: PartitionCheckpoints = {
         load: <T>(key: string) => stage<T>(store, operation, store.readAttempt(attempt!.id), key),
+        loadAcceptedAnalysis: (key, planDigest, inputDigest) => {
+          for (const prior of store.listAttempts(operation.id).filter(item => item.number < attempt!.number && ['failed', 'superseded', 'settled'].includes(item.status))) {
+            const source = partitionStage<CodeBehaviorAnalysis>(store, operation, prior, key)
+            const priorPlan = source ? partitionStage<SyncPartitionPlan>(store, operation, prior, 'partition-plan') : null
+            if (!source || priorPlan?.result.digest !== planDigest || !source.result.reviewPassed || source.result.inputDigest !== inputDigest || source.result.inputId !== operation.input.id || source.result.policyDigest !== operation.policyDigest || source.result.readSetDigest !== operation.readSetDigest || source.result.composedDigest !== view.composed.contentDigest) continue
+            if (source.result.traces.length !== 2 || !source.result.traces.every(trace => prior.dispatchPlans.some(dispatch => dispatch.purpose === trace.purpose && dispatch.session?.sessionId === trace.sessionId && dispatch.session.threadId === trace.threadId && dispatch.session.turnId === trace.turnId))) continue
+            saveStage(store, fence!, `${key}:provenance`, { fromOperationId: operation.id, fromAttemptId: prior.id, resultRef: source.resultRef })
+            partitionCheckpoints.save(key, source.result)
+            return source.result
+          }
+          return null
+        },
+        loadAcceptedElaboration: (key, binding, inputDigest) => {
+          for (const prior of store.listAttempts(operation.id).filter(item => item.number < attempt!.number && ['failed', 'superseded', 'settled'].includes(item.status))) {
+            const source = partitionElaborationStage(store, operation, prior, key, binding, inputDigest)
+            if (!source || !source.result.structurePassed || !source.result.reviewPassed || source.result.failure || source.result.phase !== undefined || !['complete', 'needs_input', 'conflict'].includes(source.result.status) || source.result.rounds.at(-1)?.review?.verdict !== 'accept') continue
+            saveStage(store, fence!, `${key}:provenance`, { fromOperationId: operation.id, fromAttemptId: prior.id, resultRef: source.resultRef })
+            partitionCheckpoints.save(key, source.result)
+            return source.result
+          }
+          return null
+        },
         loadAcceptedInterfaceSeed: (key, binding, inputDigest) => {
           for (const prior of store.listAttempts(operation.id).filter(item => item.number < attempt!.number && ['failed', 'superseded', 'settled'].includes(item.status))) {
             const source = partitionElaborationStage(store, operation, prior, key, binding, inputDigest)
@@ -520,7 +547,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           saveStage(store, fence!, `${key}:repair-provenance`, { fromOperationId: operation.id, fromAttemptId: prior.id, resultRef: source.resultRef, candidateDigest: seed.candidateDigest })
           return seed
         },
-        save: (key, value) => saveStage(store, fence!, key, value, !operation.baselineSelection && key.startsWith('partition:') && key.endsWith(':elaboration') ? { readSetDigest: operation.readSetDigest } : undefined),
+        save: (key, value) => saveStage(store, fence!, key, value, !operation.baselineSelection && (key.startsWith('partition:') || key === 'partition-plan') ? { readSetDigest: operation.readSetDigest } : undefined),
       }
       let partitions: SyncPartitionPlan | null = null
       let analysis: CodeBehaviorEvidence | undefined
@@ -611,12 +638,22 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
             diagnosticLineage.unshift(diagnosticOwner)
             diagnosticOwner = diagnosticOwner.retryOf ? store.readOperation(diagnosticOwner.retryOf) : null
           }
-          const repairDiagnostics = diagnosticLineage.flatMap(owner => store.listAttempts(owner.id).filter(prior => prior.failure && ['behavior_analysis_invalid', 'behavior_review_failed'].includes(prior.failure.code)).map(prior => ({ code: prior.failure!.code, message: prior.failure!.message })))
+          const repairDiagnostics = diagnosticLineage.flatMap(owner => store.listAttempts(owner.id).filter(prior => (!partitions || owner.id === operation.id && prior.number < attempt!.number) && ['failed', 'superseded', 'settled'].includes(prior.status) && prior.failure?.kind === 'repairable').flatMap(prior => {
+            if (partitions) {
+              if (owner.id !== operation.id) return []
+              const saved = partitionStage<PartitionAnalysisFailures>(store, operation, prior, 'partition:analysis-failures')
+              return saved?.result.planDigest === partitions.digest ? saved.result.failures.map(({ partitionId, code, message }) => ({ partitionId, code, message })) : []
+            }
+            return ['behavior_analysis_invalid', 'behavior_review_failed'].includes(prior.failure!.code) ? [{ code: prior.failure!.code, message: prior.failure!.message }] : []
+          }))
           try { const analysisInput: import('./code-behavior.js').CodeBehaviorInput = { model, snapshot: operation.input, baseline: operation.previousBaselinePair, ...(operation.baselineSelection ? { baselineSelection: operation.baselineSelection } : {}), composed: view.composed, readSetDigest: operation.readSetDigest, policyDigest: operation.policyDigest, plan: operation.baselineSelection ? { ...options.plan, readPaths: view.readPaths } : options.plan, requestKey: `sync:${attempt.id}:analysis`, timeoutMs: callTimeoutMs, signal, origin: operation.origin, ...(decision && previousDecisionAnalysis ? { decision: { request: decision, previous: previousDecisionAnalysis, previousComposed: previousDecisionComposed, previousReadPaths: previousDecisionReadPaths } } : {}), repairDiagnostics }; approved = partitions ? await analyzeSyncPartitions(analysisInput, partitions, options.plan.version === 'sync-coordinator-v2' ? options.plan.partitionPolicy.maxParallel : 1, runner, partitionCheckpoints) : await analyzeCodeBehavior(analysisInput, runner) }
           catch (error) {
             const issue = error as { code?: string; message?: string }
-            if ((!['behavior_analysis_invalid', 'behavior_review_failed'].includes(issue.code ?? '') && !(error instanceof StructuredSessionError && error.code === 'structured_output_retries_exhausted')) || signal.aborted) throw error
-            const rejected = failure(issue.code!, issue.message ?? String(error), 'repairable', [writeEvidence(operation.input.source.commonDir, { code: issue.code, message: issue.message, ...(error instanceof StructuredSessionError ? { sessionId: error.sessionId, threadId: error.threadId, turnId: error.turnId } : {}) })])
+            const partitionFailures = (error as { partitionFailures?: PartitionAnalysisFailure[] }).partitionFailures
+            const errors = [error, ...partitionFailures?.map(item => item.error) ?? []]
+            const blocked = errors.find(item => !(['behavior_analysis_invalid', 'behavior_review_failed'].includes((item as { code?: string }).code ?? '') || item instanceof StructuredSessionError && item.code === 'structured_output_retries_exhausted' || item instanceof SettledSessionCreateTimeoutError))
+            if (blocked || signal.aborted) throw blocked ?? error
+            const rejected = failure(issue.code!, issue.message ?? String(error), 'repairable', [writeEvidence(operation.input.source.commonDir, { code: issue.code, message: issue.message, ...(partitionFailures ? { partitionFailures: partitionFailures.map(({ error: _error, ...item }) => item) } : {}), ...(error instanceof StructuredSessionError ? { sessionId: error.sessionId, threadId: error.threadId, turnId: error.turnId } : {}) })])
             store.recordFailure(fence, rejected); continue
           }
           saveStage(store, fence, 'analysis', approved)

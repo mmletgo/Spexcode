@@ -279,6 +279,43 @@ test('真实planner把mandatory oracle冻结进raw-only源码目标P1，缺少�
   })
 })
 
+test('分区checkpoint绑定错误也保留primary来源，不能以空分区错误列表获修复权', async t => {
+  const { input, plan, checkpoints } = await fixture(t)
+  const fault = Object.assign(new Error('原checkpoint绑定损坏'), { code: 'partition_binding' })
+  checkpoints.load = () => { throw fault }
+  const analysisInput: CodeBehaviorInput = { snapshot: input.snapshot, baseline: null, composed: composeInputSnapshots(input.snapshot, null).composed!, readSetDigest: 'readset', policyDigest: 'policy', requestKey: 'broken-checkpoint', timeoutMs: 30000, plan: { version: 'sync-coordinator-v1', intentNodeId: 'export-contract', targets: [], readPaths: [], writePaths: [], facts: [], verifications: [], mandatoryTests: [] } }
+  await assert.rejects(analyzeSyncPartitions(analysisInput, plan, 1, async () => { throw new Error('损坏checkpoint不得派发') }, checkpoints), (error: unknown) => {
+    assert.equal(error, fault)
+    const failures = (error as unknown as { partitionFailures: { error: unknown }[] }).partitionFailures
+    assert.equal(failures.length, 1); assert.equal(failures[0].error, fault)
+    return true
+  })
+})
+
+test('分区分析保留全部在途失败及各自完整诊断，不让首错遮蔽未知资源', async t => {
+  const { input, plan, checkpoints } = await fixture(t)
+  const analysisInput: CodeBehaviorInput = { snapshot: input.snapshot, baseline: null, composed: composeInputSnapshots(input.snapshot, null).composed!, readSetDigest: 'failure-readset', policyDigest: 'failure-policy', requestKey: 'all-failures', timeoutMs: 30000, origin: 'initial', plan: { version: 'sync-coordinator-v2', direction: 'code_to_spec', intentNodeId: 'export-contract', targets: plan.partitions.flatMap(partition => partition.targets), sourcePaths: ['src'], readPaths: ['.spec', 'src', 'tests'], writePaths: ['.spec'], facts: [], verifications: [], mandatoryTests: [], partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 3 } } }
+  let release!: () => void
+  const started = new Promise<void>(resolve => { release = resolve }), seen: string[] = []
+  const actual: Error[] = []
+  await assert.rejects(analyzeSyncPartitions(analysisInput, plan, 3, async request => {
+    const context = readFrozenBehaviorContext<{ partition: { id: string } }>(request)
+    const ordinal = seen.push(context.partition.id)
+    if (ordinal === plan.partitions.length) release()
+    await started
+    const error = Object.assign(new Error(JSON.stringify({ proposal: `candidate-${context.partition.id}`, review: `review-${context.partition.id}` })), { code: ordinal === 1 ? 'behavior_review_failed' : 'cancellation_pending' })
+    actual.push(error); throw error
+  }, checkpoints), (error: unknown) => {
+    const failures = (error as { partitionFailures: { partitionId: string; message: string; error: unknown }[] }).partitionFailures
+    assert.equal(failures.length, plan.partitions.length)
+    assert.ok(failures.every(failure => failure.message.includes(`candidate-${failure.partitionId}`) && failure.message.includes(`review-${failure.partitionId}`) && actual.includes(failure.error as Error)))
+    return true
+  })
+  const saved = checkpoints.load<{ planDigest: string; failures: { partitionId: string; code: string }[] }>('partition:analysis-failures')!
+  assert.equal(saved.planDigest, plan.digest); assert.equal(saved.failures.length, plan.partitions.length)
+  assert.ok(saved.failures.some(failure => failure.code === 'cancellation_pending'))
+})
+
 test('分区分析以独占文件限定事实来源，共享oracle仍逐区全文读取且不制造同源事实冲突', async t => {
   const { input, plan, checkpoints } = await fixture(t), oracle = 'tests/export.test.mjs'
   for (const partition of plan.partitions) {

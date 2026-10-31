@@ -96,7 +96,7 @@ export function selectedAuthoredContractChanges(evidence: ReturnType<typeof read
   return [...changes.values()].sort((a, b) => a.path.localeCompare(b.path))
 }
 
-export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: ElaborationRunner): Promise<CodeBehaviorAnalysis> {
+export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: ElaborationRunner, accepted?: (inputDigest: string) => CodeBehaviorAnalysis | null): Promise<CodeBehaviorAnalysis> {
   const { signal, ...data } = supplied, input: CodeBehaviorInput = { ...structuredClone(data), signal }
   const diagnostic: { proposal?: unknown; analysis?: CodeBehaviorAnalysis; review?: unknown } = {}
   function reject(message: string, details: Record<string, unknown> = {}, code = 'behavior_analysis_invalid'): never { throw Object.assign(new Error(JSON.stringify({ approved: false, message, details, ...diagnostic })), { code }) }
@@ -356,6 +356,8 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
     ? await readFrozenContracts(input.snapshot.source.canonicalRoot, new Map(textFiles(fileTree(input, previousComposed.tree, frozenTreeReads)).filter(([path]) => within(path, previousReadPaths)))) : null
   frozenTreeReads.clear()
   const inputDigest = contentHash(context), traces: ElaborationTrace[] = []
+  const previous = accepted?.(inputDigest)
+  if (previous) return previous
   const dispatch = async (purpose: string, prompt: string, schema: Record<string, unknown>): Promise<unknown> => {
     if (signal?.aborted) throw Object.assign(new Error('行为分析已停止'), { code: 'cancelled' })
     const result = await runner({ root: input.snapshot.source.canonicalRoot, base: input.snapshot.headCommit, requestKey: `${input.requestKey}:${purpose}`, inputDigest, purpose, prompt, schema, timeoutMs: input.timeoutMs, signal, model: syncModel(input), effort: 'high', ...(frozenEntries.length ? { frozenEntries } : {}) })
