@@ -243,7 +243,7 @@ function readonlyReviewFindings(result: SavedGeneration, changes: SavedElaborati
     }
     const [path, id, extra] = location.split('#'), matches = items.filter(item => item.path === path && item.id === id)
     if (within(path, writable)) return []
-    if (finding.kind !== 'repair' || extra !== undefined || matches.length !== 1 || !finding.affectedIds.includes(id) || finding.affectedIds.some(id => !items.some(item => item.id === id))) fail('readonly_spec_repair_binding', '只读独审诊断必须以实际候选路径/ID及affectedIds绑定唯一契约')
+    if (finding.kind !== 'repair' || extra !== undefined || matches.length !== 1 || !finding.affectedIds.length || new Set(finding.affectedIds).size !== finding.affectedIds.length || finding.affectedIds.some(id => items.filter(item => item.id === id).length !== 1)) fail('readonly_spec_repair_binding', '只读独审诊断必须以实际候选路径/ID及affectedIds绑定唯一契约')
     return [{ code: 'candidate-review-repair', severity: 'error', nodeId: matches[0].nodeId, path, itemId: id, message: JSON.stringify(finding) }]
   })
 }
