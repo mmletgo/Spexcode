@@ -266,7 +266,9 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
   writeJson(join(root, 'plan.json'), plan)
   const native = (): ZCodeNativeState => ({ version: 1, root, sessionId: plan.sessionId, inputId: plan.inputId, ...(plan.pid ? { pid: plan.pid, receiptFile: plan.receiptFile } : {}), ...(plan.turnId ? { turnId: plan.turnId } : {}) })
   await callbacks.onNative(native()); await callbacks.onTurnStarting?.()
+  let launchFailure: Error | undefined
   const child: ChildProcessWithoutNullStreams = spawn('/usr/bin/sandbox-exec', ['-f', profile, cliPath, 'app-server', '--cwd', workspace], { cwd: workspace, env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] })
+  child.once('error', () => { launchFailure = new StructuredSessionError('cancellation_pending', 'ZCode native process failed during launch') })
   if (!child.pid) throw new StructuredSessionError('failed', 'ZCode isolated process could not start')
   let exited = false
   const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => child.once('close', (code, signal) => { exited = true; resolve({ code, signal }) }))
@@ -278,7 +280,7 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
     child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy(); child.unref()
     throw new StructuredSessionError('cancellation_pending', 'ZCode spawned ownership could not be durably published; exact stop is required')
   }
-  let nextId = 0, protocolError: Error | undefined, abortRequested = false, timedOut = false, acknowledged = false, sessionCreated = false, sent = false, closeAcknowledged = false, idle = false
+  let nextId = 0, protocolError: Error | undefined = launchFailure, abortRequested = false, timedOut = false, acknowledged = false, sessionCreated = false, sent = false, closeAcknowledged = false, idle = false
   const pending = new Map<number, { resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>()
   const request = (method: string, params: Record<string, unknown>): Promise<unknown> => new Promise((resolve, reject) => {
     if (exited || !child.stdin.writable) { reject(new StructuredSessionError('cancellation_pending', 'ZCode native transport ended before exact settlement')); return }
