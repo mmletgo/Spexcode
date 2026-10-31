@@ -30,7 +30,9 @@ related:
 
 固定 CLI 的 `error_max_structured_output_retries` 只在 exit1、精确原生 result/session/user 回显、原根 user/promptId/prompt、固定 policy/model/API 工具面与整个 CLI/MCP 进程组停止均已核对时，保留为 `structured_output_retries_exhausted` 输出失败。公开 history 的额外未知 user、工具或身份差异不取得此分类；未知 subtype、缺失事件及未停稳仍沿原拒绝/恢复入口。该失败及其原 schema 工具错误不改写、不补数组、不产生 witness/completed/读取 proof；新尝试只能沿原协调预算入口重新派发。完整的同轮失败文件可以离线重新确认此失败，不新建 CLI 或追加 prompt。
 
-失败分类还须逐条按实际 API 的完整 base/keep/tail 重建输入，在每次消费时核每个消息摘要的来源。user 只能是当时已观察的原 prompt 或已严格配对的原 tool_result；CAS 的前置或后置声明、合法 canonical SHA、后续删除或原生 schema 错误都不授予额外正文权限。未知 hash、缺失内容来源、未来回复、错误 base/keep 与新 turn 保守 stale_result，不按位置猜测缺失消息的角色。此分支仍拒绝 compact/recovery 用户伴随输入，成功路径的完整证明含义不变。
+已停耗尽路径与成功路径共用精确输出上限续行身份及实际API消费规则：仅已核183字符max_output_tokens_recovery、原promptId、meta/turnCompanion、直接最近max_tokens assistant及无外来source标志可参与来源重建；每条续行须在出现后由新API及其assistant实际消费。普通额外user、113字符structured-output-enforce、伪压缩、未消费或借用旧请求仍拒绝。该兼容只把已核真的终态归为结构输出耗尽，不能产生成功proof或业务通过，也不采集跨attempt字段诊断。
+
+失败分类还须逐条按实际 API 的完整 base/keep/tail 重建输入，在每次消费时核每个消息摘要的来源。user 只能是当时已观察的原 prompt、已严格配对的原 tool_result或上述严格核真的输出上限续行；CAS 的前置或后置声明、合法 canonical SHA、后续删除或原生 schema 错误都不授予额外正文权限。未知 hash、缺失内容来源、未来回复、错误 base/keep 与新 turn 保守 stale_result，不按位置猜测缺失消息的角色。此分支仍拒绝compact及未经上述严格证明的recovery用户伴随输入，成功路径的完整证明含义不变。
 
 仅在此已停失败分支使用 [[frozen-context-reader]] 的只读来源元数据解释明确非 USER CAS 与已观察的原生 assistant 分片前缀；源 UUID、角色和消费顺序必须分别绑定。并行 tool_result 合并仍逐个以当时已配对的公开 USER 正文验证后才接受前缀摘要。可修复错误码只说明该失败拥有完整原输入来源与停止证明，不代表业务、读取覆盖或输出 schema 通过；元数据不进入成功 witness 或 proof，也不改原失败文件。
 

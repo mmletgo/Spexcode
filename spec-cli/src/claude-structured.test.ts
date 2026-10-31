@@ -5,15 +5,39 @@ import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { prepareFrozenPrompt, readFrozenManifest, claudeFrozenContextPrompt, freezeContext, readFrozenRange, proveClaudeFrozenReads, verifyFrozenReadProof, claudeMessageDigest, readClaudeApiSourceMetadata, readClaudePublicHistory, type ClaudeFrozenWitness, type ClaudePublicMessage, type ClaudePublicRecord } from './frozen-context.js'
-import { structuredExecutionPolicy, structuredRealmRoot } from './session-structured-policy.js'
+import { structuredExecutionPolicy, structuredRealmRoot, type StructuredExecution } from './session-structured-policy.js'
 import { claudeNativeModel, claudeStructuredArgs, claudeStructuredTurn, prepareClaudeAuthenticationEnvironment } from './claude-structured.js'
 
 const contentBlocks = (message: ClaudePublicMessage): Exclude<ClaudePublicMessage['content'], string> => {
   assert(Array.isArray(message.content))
   return message.content
 }
+
+const continuationFixture = process.env.SPEX_CLAUDE_CONTINUATION_FIXTURE
+const continuationCases = continuationFixture ? (JSON.parse(readFileSync(continuationFixture, 'utf8')) as { cases: { sessionId: string; expectedCode: string; execution: StructuredExecution; files: { path: string; bytes: number; sha256: string }[] }[] }).cases : []
+for (const fixture of continuationCases) test(`真实终态续行离线重放 ${fixture.sessionId} 保留失败及全部原件`, async () => {
+  const root = fixture.execution.claudeNative!.root
+  const original = fixture.files.map(file => {
+    const bytes = readFileSync(file.path)
+    assert.equal(bytes.length, file.bytes)
+    assert.equal(createHash('sha256').update(bytes).digest('hex'), file.sha256)
+    return bytes
+  })
+  const echo = JSON.parse(readFileSync(join(root, 'user-echo.json'), 'utf8')) as { message: ClaudePublicMessage }
+  const blocks = contentBlocks(echo.message)
+  assert.equal(blocks.length, 1); assert.equal(blocks[0].type, 'text')
+  let observed: { code: string; message: string } | undefined
+  try {
+    await claudeStructuredTurn(dirname(root), basename(root), blocks[0].text!, fixture.execution, { onThread: async () => assert.fail('离线重放不得启动线程'), onTurn: async () => assert.fail('离线重放不得启动turn'), onNative: async () => assert.fail('离线重放不得启动Native') })
+    assert.fail('终态耗尽不能变业务成功')
+  } catch (error) { observed = { code: (error as { code: string }).code, message: (error as Error).message } }
+  for (let index = 0; index < fixture.files.length; index++) assert.deepEqual(readFileSync(fixture.files[index].path), original[index])
+  for (const name of ['completed.json', 'witness.json']) assert.equal(existsSync(join(root, name)), false)
+  if (process.env.SPEX_CLAUDE_CONTINUATION_EVIDENCE_DIR) writeFileSync(join(process.env.SPEX_CLAUDE_CONTINUATION_EVIDENCE_DIR, `${fixture.sessionId}.json`), JSON.stringify({ sessionId: fixture.sessionId, observed, expectedCode: fixture.expectedCode, originalFilesUnchanged: true, nativeCalls: 0 }, null, 2))
+  assert.equal(observed.code, fixture.expectedCode)
+})
 
 test('stopped exact Claude schema retry exhaustion remains a rejected output with no completion or new native turn', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'spex-claude-schema-exhaustion-'))
@@ -57,6 +81,48 @@ test('stopped exact Claude schema retry exhaustion remains a rejected output wit
     })
     assert.deepEqual(readFileSync(join(root, 'result.json')), failureBytes)
     assert.deepEqual(readFileSync(historyPath), historyBytes)
+    for (const name of ['completed.json', 'witness.json']) assert.equal(existsSync(join(root, name)), false)
+    const limitText = 'Output token limit hit. Resume directly — no apology, no recap of what you were doing. Pick up mid-thought if that is where the cut happened. Break remaining work into smaller pieces.'
+    const limitMessage = { role: 'user', content: [{ type: 'text', text: limitText }] }, limitHash = claudeMessageDigest(limitMessage)
+    const interrupted = { type: 'assistant', sessionId: 'session', uuid: 'interrupted', parentUuid: 'user', requestRef: 'request', message: { role: 'assistant', content: [], stop_reason: 'max_tokens' } }
+    const companion = { type: 'user', sessionId: 'session', uuid: 'companion', parentUuid: 'interrupted', promptId: 'prompt', isMeta: true, turnCompanion: true, message: { role: 'user', content: limitText } }
+    const nextRequest = { ...history[2], id: 'request-recovery', base: 'request', keep: 1, tail: [limitHash] }
+    const recoveryRows: Array<Record<string, unknown>> = [...history.slice(0, 3), interrupted, companion, nextRequest, { ...history[3], parentUuid: 'companion', requestRef: 'request-recovery' }, history[4]]
+    const merged = { role: 'user', content: [{ type: 'text', text: prompt + '\n' }, { type: 'text', text: limitText }] }
+    const mergedHash = claudeMessageDigest(merged)
+    for (const rows of [recoveryRows, [...recoveryRows.slice(0, 5), { type: 'api-request-blob', sessionId: 'session', message: merged, hash: mergedHash }, { ...nextRequest, tail: [mergedHash] }, ...recoveryRows.slice(6)]]) {
+      writeFileSync(historyPath, rows.map(row => JSON.stringify(row)).join('\n') + '\n')
+      await assert.rejects(claudeStructuredTurn(realm, 'native', prompt, execution, callbacks), { code: 'structured_output_retries_exhausted' })
+    }
+    const row = (rows: Array<Record<string, unknown>>, id: string) => rows.find(row => row.uuid === id || row.id === id)!
+    const recoveryNegatives: Array<[string, (rows: Array<Record<string, unknown>>) => void]> = [
+      ['missing meta', rows => { delete row(rows, 'companion').isMeta }],
+      ['false meta', rows => { row(rows, 'companion').isMeta = false }],
+      ['missing companion', rows => { delete row(rows, 'companion').turnCompanion }],
+      ['foreign prompt', rows => { row(rows, 'companion').promptId = 'foreign' }],
+      ['foreign session', rows => { row(rows, 'companion').sessionId = 'foreign' }],
+      ['source assistant', rows => { row(rows, 'companion').sourceToolAssistantUUID = 'interrupted' }],
+      ['earlier parent', rows => { row(rows, 'companion').parentUuid = 'user' }],
+      ['non-max_tokens parent', rows => { (row(rows, 'interrupted').message as Record<string, unknown>).stop_reason = 'end_turn' }],
+      ['array companion', rows => { row(rows, 'companion').message = limitMessage }],
+      ['extra whitespace', rows => { row(rows, 'companion').message = { role: 'user', content: limitText + ' ' } }],
+      ['unproved 113-character producer', rows => { row(rows, 'companion').message = { role: 'user', content: '[structured-output-enforce] You MUST call the StructuredOutput tool to complete this request. Call this tool now.' }; delete row(rows, 'companion').turnCompanion }],
+      ['fake compact', rows => { row(rows, 'companion').isCompactSummary = true }],
+      ['old request consumer', rows => { row(rows, 'schema-call').requestRef = 'request' }],
+      ['unconsumed', rows => { rows.splice(5) }],
+      ['future request', rows => { const request = rows.splice(5, 1)[0]; rows.splice(4, 0, request) }],
+      ['different API text', rows => { const message = { role: 'user', content: [{ type: 'text', text: limitText + ' extra' }] }; rows.splice(5, 0, { type: 'api-request-blob', sessionId: 'session', message, hash: claudeMessageDigest(message) }); row(rows, 'request-recovery').tail = [claudeMessageDigest(message)] }],
+      ['borrowed repeated companion', rows => { rows.push({ ...interrupted, uuid: 'interrupted-2', parentUuid: 'schema-error', requestRef: 'request-recovery' }, { ...companion, uuid: 'companion-2', parentUuid: 'interrupted-2' }, { ...interrupted, uuid: 'old-consumer', parentUuid: 'companion-2', requestRef: 'request-recovery' }) }],
+    ]
+    for (const [name, mutate] of recoveryNegatives) {
+      const rows = structuredClone(recoveryRows); mutate(rows)
+      writeFileSync(historyPath, rows.map(row => JSON.stringify(row)).join('\n') + '\n')
+      await assert.rejects(claudeStructuredTurn(realm, 'native', prompt, execution, callbacks), error => {
+        assert.equal((error as { code: string }).code, 'stale_result', name)
+        return true
+      })
+    }
+    assert.deepEqual(readFileSync(join(root, 'result.json')), failureBytes)
     for (const name of ['completed.json', 'witness.json']) assert.equal(existsSync(join(root, name)), false)
     const privateFragment = { type: 'thinking', thinking: 'SYNTHETIC_PRIVATE_FRAGMENT', signature: 'SYNTHETIC_SIGNATURE', cache_control: { type: 'ephemeral' } }
     const schemaBlock = contentBlocks(history[3].message!)[0]

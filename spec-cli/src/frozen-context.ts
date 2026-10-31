@@ -357,7 +357,7 @@ export function claudeMessageDigest(value: unknown): string {
   return sha(encode(sorted(value)))
 }
 
-function claudeMessageBlocks(message: ClaudePublicMessage): ClaudePublicContentBlock[] {
+export function claudeMessageBlocks(message: ClaudePublicMessage): ClaudePublicContentBlock[] {
   return typeof message.content === 'string' ? [{ type: 'text', text: message.content }] : message.content
 }
 
@@ -444,11 +444,13 @@ export function readClaudeApiSourceMetadata(path: string, sessionId: string, mod
   if (!bytes.endsWith('\n')) throw new StructuredSessionTransportError('Claude native source history has not flushed its final record')
   const sources = new Map<string, ClaudeApiSourceMetadata>(), snapshots = new Map<string, ClaudeApiRequestSourceMetadata>()
   const requests = new Map<string, string[]>(), shapes = new Set<string>(), seen = new Set<string>()
+  const history = readClaudePublicHistory(path, sessionId), original = history.find(row => row.type === 'user' && row.parentUuid === null)
+  const companions = claudeOutputLimitCompanions(history, original)
   let latestChainNode: string | undefined
   let run: { role: 'user' | 'assistant'; messageId?: string; blocks: ClaudePublicContentBlock[]; uuids: string[] } | undefined
   for (const [ordinal, line] of bytes.split('\n').filter(Boolean).entries()) {
     const row = JSON.parse(line) as Record<string, unknown> & { message?: ClaudePublicMessage & { id?: string }; params?: { model?: string } }
-    if (row.type === 'fork-context-ref' || row.type === 'system' && row.subtype === 'compact_boundary' || row.isCompactSummary || row.turnCompanion)
+    if (row.type === 'fork-context-ref' || row.type === 'system' && row.subtype === 'compact_boundary' || row.isCompactSummary || row.turnCompanion && !companions.has(String(row.uuid)))
       stale('Claude failed source index cannot interpret fork, compact or recovery inputs')
     const retry = row.type === 'system' && row.subtype === 'api_error'
     if (!retry && !['user', 'assistant', 'attachment', 'api-request-blob', 'api-request', 'api-request-shape'].includes(String(row.type))) continue
@@ -529,6 +531,52 @@ export function claudeApiToolResultIds(content: readonly ClaudePublicContentBloc
   })
 }
 
+export type ClaudeRecovery = { text: string; hashes: Set<string>; summaries: Set<string>; requests: Set<string>; consumed: boolean }
+/** 只识别原生已观察的续行；输出上限的raw max_tokens父链仍由唯一公开读取器核验。 */
+function claudeRecoveryCompanion(row: ClaudePublicRecord, promptId: string | undefined, latestMessage: string | undefined, latestAssistant: string | undefined, outputLimitOnly = false): ClaudeRecovery | null {
+  const text = row.isMeta === true && row.turnCompanion === true && row.message?.role === 'user'
+    ? (outputLimitOnly ? [CLAUDE_OUTPUT_LIMIT_RECOVERY_TEXT] : CLAUDE_RECOVERY_TEXTS).find(text => claudeMessageDigest(row.message) === claudeMessageDigest({ role: 'user', content: text })) : undefined
+  if (text === undefined) return null
+  if (!row.uuid || !promptId || row.promptId !== promptId || row.sourceToolAssistantUUID !== undefined || row.parentUuid !== latestMessage || row.parentUuid !== latestAssistant) stale('Claude recovery companion lost its exact native assistant or original prompt')
+  return { text, hashes: new Set([claudeMessageDigest(row.message), claudeMessageDigest({ role: 'user', content: claudeMessageBlocks(row.message!) })]), summaries: new Set(), requests: new Set(), consumed: false }
+}
+
+/** 已停失败只接纳已支持的输出上限事件，不接纳其它内部提示或压缩。 */
+export function claudeOutputLimitCompanions(history: readonly ClaudePublicRecord[], original: ClaudePublicRecord | undefined): Map<string, ClaudeRecovery> {
+  const companions = new Map<string, ClaudeRecovery>()
+  let latestMessage: string | undefined, latestAssistant: string | undefined
+  for (const row of history) {
+    if (row.type === 'user' && row.uuid !== original?.uuid) {
+      const recovery = claudeRecoveryCompanion(row, original?.promptId, latestMessage, latestAssistant, true)
+      if (recovery) companions.set(row.uuid!, recovery)
+    }
+    if (row.type === 'assistant') latestAssistant = row.uuid
+    if (row.type === 'user' || row.type === 'assistant' || row.type === 'system' && row.subtype === 'api_error') latestMessage = row.uuid
+  }
+  return companions
+}
+
+/** plain或merged API只能包含这条已观察续行的精确文本形态。 */
+export function matchingClaudeRecoveries(recoveries: readonly ClaudeRecovery[], content: readonly ClaudePublicContentBlock[], prompt: string): ClaudeRecovery[] {
+  const texts = content.filter(block => block.type === 'text')
+  return recoveries.filter(recovery => {
+    const text = { type: 'text', text: recovery.text }
+    return JSON.stringify(texts) === JSON.stringify([text]) || JSON.stringify(content) === JSON.stringify([{ type: 'text', text: prompt + '\n' }, text])
+  })
+}
+
+/** 每代续行只能继承其出现后已含精确正文的API请求。 */
+export function recordClaudeRecoveryRequest(recoveries: readonly ClaudeRecovery[], row: ClaudePublicRecord, hashes: readonly string[]): void {
+  for (const recovery of recoveries) if (row.tail!.some(hash => recovery.hashes.has(hash)) || row.base && recovery.requests.has(row.base) && hashes.some(hash => recovery.hashes.has(hash))) recovery.requests.add(row.id!)
+}
+
+/** 请求存在还不够，后续实际assistant必须消费本代精确续行。 */
+export function consumeClaudeRecoveryRequest(recoveries: readonly ClaudeRecovery[], requestRef: string): void {
+  const recovery = recoveries.at(-1)
+  if (recovery && !recovery.requests.has(requestRef)) stale('Claude recovery companion has no new exact actual API consumer')
+  for (const item of recoveries) if (item.requests.has(requestRef)) item.consumed = true
+}
+
 /** Claude用原生user UUID/promptId、配对公开消息及真实API请求索引证明可见性，绝不冒充Codex动态工具。 */
 export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFrozenWitness): FrozenReadProof {
   const { sessionId, userUuid, promptId, model, result, echo, history } = witness
@@ -549,7 +597,7 @@ export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFro
   const receipts: FrozenReadReceipt[] = [], rejectedCalls: string[] = [], responseMessages = new Map<string, string>(), responseBlocks = new Map<string, ClaudePublicContentBlock>(), requestRefs = new Set<string>()
   if (witness.mcpHistory && (JSON.stringify(readClaudeMcpToolNames(witness.mcpHistory.path)) !== JSON.stringify(witness.mcpHistory.toolNames) || witness.mcpHistory.toolNames.some(name => name !== 'spex_read_frozen'))) stale('Claude MCP dispatched a foreign tool or its actual history changed')
   const apiMessages = readClaudeApiMessageBlobs(history)
-  const recoveries: Array<{ text: string; hashes: Set<string>; summaries: Set<string>; requests: Set<string>; consumed: boolean }> = []
+  const recoveries: ClaudeRecovery[] = []
   let latestAssistant: string | undefined, acceptedOutput = false
   for (const row of history) {
     if (row.sessionId !== sessionId) stale('Claude native history changed its session identity')
@@ -617,26 +665,18 @@ export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFro
           continue
         }
         if (!blob.content.some(block => block.type === 'text')) continue
-        const texts = blob.content.filter(block => block.type === 'text')
-        const matchingRecoveries = recoveries.filter(recovery => {
-          const recoveryText = { type: 'text', text: recovery.text }
-          return JSON.stringify(texts) === JSON.stringify([recoveryText]) || JSON.stringify(blob.content) === JSON.stringify([{ type: 'text', text: witness.prompt + '\n' }, recoveryText])
-        })
+        const matchingRecoveries = matchingClaudeRecoveries(recoveries, blob.content, witness.prompt)
         const originalInput = hash === claudeMessageDigest(original.message) || hash === claudeMessageDigest({ role: 'user', content: claudeMessageBlocks(original.message) })
         if (!blob.canonical || !originalInput && !matchingRecoveries.length) stale('Claude API user message contains unobserved text or a different coalescing shape')
         for (const recovery of matchingRecoveries) recovery.hashes.add(hash)
       }
       requests.set(row.id!, hashes)
-      for (const recovery of recoveries) {
-        if (row.tail!.some(hash => recovery.hashes.has(hash)) || row.base && recovery.requests.has(row.base) && hashes.some(hash => recovery.hashes.has(hash))) recovery.requests.add(row.id!)
-      }
+      recordClaudeRecoveryRequest(recoveries, row, hashes)
     }
     if (row.type === 'assistant') {
       latestMessage = row.uuid
       if (!row.requestRef || !requests.has(row.requestRef)) stale('Claude assistant lacks an exact actual API request reference')
-      const recovery = recoveries.at(-1)
-      if (recovery && !recovery.requests.has(row.requestRef)) stale('Claude recovery companion has no new exact actual API consumer')
-      for (const item of recoveries) if (item.requests.has(row.requestRef)) item.consumed = true
+      consumeClaudeRecoveryRequest(recoveries, row.requestRef)
       latestAssistant = row.uuid
       requestRefs.add(row.requestRef)
       for (const block of claudeMessageBlocks(row.message!)) {
@@ -645,11 +685,9 @@ export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFro
       }
     }
     if (row.type === 'user' && row.uuid !== userUuid) {
-      const recoveryText = row.isMeta === true && row.turnCompanion === true && row.message?.role === 'user'
-        ? CLAUDE_RECOVERY_TEXTS.find(text => claudeMessageDigest(row.message) === claudeMessageDigest({ role: 'user', content: text })) : undefined
-      if (recoveryText !== undefined) {
-        if (!row.uuid || row.promptId !== promptId || row.sourceToolAssistantUUID !== undefined || row.parentUuid !== latestMessage || row.parentUuid !== latestAssistant) stale('Claude recovery companion lost its exact native assistant or original prompt')
-        recoveries.push({ text: recoveryText, hashes: new Set([claudeMessageDigest(row.message), claudeMessageDigest({ role: 'user', content: claudeMessageBlocks(row.message!) })]), summaries: new Set(), requests: new Set(), consumed: false })
+      const recovery = claudeRecoveryCompanion(row, promptId, latestMessage, latestAssistant)
+      if (recovery) {
+        recoveries.push(recovery)
         acceptedOutput = false; latestMessage = row.uuid
         continue
       }
