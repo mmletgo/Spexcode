@@ -21,6 +21,7 @@ import type { CodeBehaviorAnalysis, CodeBehaviorEvidence } from './writeback-typ
 
 export type PartitionCheckpoints = {
   load<T>(key: string): T | null
+  loadAcceptedCandidateReview?(key: string, plan: SyncPartitionPlan, input: GenerationInput, candidate: NonNullable<GenerationResult['candidate']>, builders: readonly ElaborationTrace[], current?: Omit<GenerationResult, 'candidateFiles'>): Omit<GenerationResult, 'candidateFiles'> | null
   loadAcceptedAnalysis?(key: string, planDigest: string, inputDigest: string): CodeBehaviorAnalysis | null
   loadAcceptedElaboration?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'> | null
   loadAcceptedInterfaceSeed?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'> | null
@@ -569,11 +570,20 @@ export async function generateSyncPartitions(input: GenerationInput, plan: SyncP
   if (validationFindings.some(finding => finding.severity === 'error')) return base
   base.candidateValidated = true
   const reviews = dispatch.reviews
+  const settledReviewTraces = [...builders]
   const checked = await mapSyncPartitions(reviews, maxParallel, input.signal, async local => {
     const key = `partition:${local.id}:candidate-review`, saved = checkpoints.load<GenerationResult>(key)
-    if (saved) { if (saved.candidate?.digest !== candidate.digest) reject('分区独审绑定了另一候选'); return saved }
-    const result = await runGeneration({ ...local.input, requestKey: `${input.requestKey}:final:${local.id}` }, { ...options, beforeFreezeCandidate: undefined, reviewCandidate: candidate, builderTraces: builders, validateCandidate: async () => validationFindings })
+    const reviewInput = { ...local.input, requestKey: `${input.requestKey}:final:${local.id}` }
+    if (saved) {
+      if (JSON.stringify(saved.candidate) !== JSON.stringify(candidate)) reject('分区独审绑定了另一候选')
+      const current = saved.reviewPassed ? checkpoints.loadAcceptedCandidateReview?.(key, plan, reviewInput, candidate, settledReviewTraces, saved) ?? saved : saved
+      settledReviewTraces.push(...current.traces); return current
+    }
+    const accepted = checkpoints.loadAcceptedCandidateReview?.(key, plan, reviewInput, candidate, settledReviewTraces)
+    if (accepted) { settledReviewTraces.push(...accepted.traces); return accepted }
+    const result = await runGeneration(reviewInput, { ...options, beforeFreezeCandidate: undefined, reviewCandidate: candidate, builderTraces: builders, validateCandidate: async () => validationFindings })
     const { candidateFiles: _files, ...compact } = result
+    settledReviewTraces.push(...compact.traces)
     checkpoints.save(key, compact)
     return compact
   })
