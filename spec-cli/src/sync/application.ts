@@ -811,7 +811,7 @@ export class SyncApplication {
   private ownerKey(root: string): string { return `${this.options.protocol.databasePath}\0${this.repositoryId}\0${root}` }
   private launch(id: string, recoveryOnly = false): void {
     const operation = this.store.readOperation(id); this.assertSource(operation)
-    if (this.stopped || this.running.has(id) || !recoveryOnly && (completed.has(operation.phase) || ['failed', 'budget_exhausted', 'conflicted', 'needs_input', 'recovery_required', 'paused'].includes(operation.phase) || operation.control !== 'run' || this.store.readPhysicalControl(this.physicalScope(operation.input.source)).control === 'pause')) return
+    if (this.running.has(id) || !recoveryOnly && (this.stopped || completed.has(operation.phase) || ['failed', 'budget_exhausted', 'conflicted', 'needs_input', 'recovery_required', 'paused'].includes(operation.phase) || operation.control !== 'run' || this.store.readPhysicalControl(this.physicalScope(operation.input.source)).control === 'pause')) return
     const controller = new AbortController()
     const { plan, tools } = this.executionInputs(operation)
     const { settings } = readSyncSettings(operation.input)

@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+AC-APPLICATION-STOPPED-01/02/03用真实Git/SQLite和正式stopWriter→control(recover)入口先复现stopped门禁使finished缺席的TypeError，再证明只清理原planned且明确未派发的资源；六次真实store预算预留（模型runner一次）及原operation/失败/refs/deadline保持，observer/FIFO和物理控制不恢复。queued无资源仍零模型/attempt；stopService且物理control仍run的对照在recover后显式start仍不派发，不能靠物理pause掩盖stopped门禁。错误plan仍以resource_recovery 409保留planned及原业务失败，不以空值fallback或假removed绕过。夹具仅证明编排与原清理机制，不作为真实Native调用/清理的产品验收。
+
 官方 init 的 `.plugins` 实例模板出现在注册根之下时，显式 nodeIds 与缺省治理注册仍只扫描业务节点；覆盖分母及 included/excluded 不含插件，显式提交插件意图在模型调用前拒绝。真实业务子树的新增 raw 与独立未授权节点保持原判据。
 
 状态查询对超过单批的真实固定 runtime 仍完整核对 manifest；前次查询通过后修改任一文件，下一次必须显示恢复诊断且零模型派发，真正执行入口同样重新拒绝。异步检查只改变事件循环公平性，不产生可绕过完整读取的缓存或 ready 捷径。
