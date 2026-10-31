@@ -362,7 +362,7 @@ export function claudeMessageBlocks(message: ClaudePublicMessage): ClaudePublicC
 }
 
 function checkClaudeRequestRetry(retry: ClaudeRequestRetry | undefined): void {
-  if (!retry || retry.source !== 'request_retry' || retry.level !== 'error'
+  if (!retry || !['request_retry', 'connection_retry'].includes(retry.source) || retry.level !== 'error'
     || !Number.isSafeInteger(retry.retryInMs) || retry.retryInMs < 0
     || !Number.isSafeInteger(retry.retryAttempt) || retry.retryAttempt < 1
     || !Number.isSafeInteger(retry.maxRetries) || retry.maxRetries < retry.retryAttempt
@@ -380,11 +380,46 @@ function claudeRequestRetry(row: Record<string, unknown>): ClaudeRequestRetry {
   return retry
 }
 
+/** 连接重试须重发原完整输入，并由其后真实assistant消费；不增加公开投影字段。 */
+function checkClaudeConnectionRetries(history: readonly ClaudePublicRecord[], paramsDigests: ReadonlyMap<string, string>): void {
+  if (!history.some(row => row.requestRetry?.source === 'connection_retry')) return
+  const model = history.find(row => row.type === 'api-request')?.model
+  if (!model) stale('Claude connection retry has no preceding actual API model')
+  const requests = new Map<string, string[]>(), shapes = new Set<string>()
+  let latestChainNode: string | undefined
+  let current: { id: string; shapeHash: string; paramsDigest: string; hashes: string[] } | undefined
+  let pending: typeof current, retriedRequest: string | undefined
+  for (const row of history) {
+    if (row.type === 'api-request-shape') shapes.add(row.shapeHash!)
+    if (row.type === 'api-request') {
+      const hashes = claudeApiRequestHashes(row, requests, shapes, model)
+      requests.set(row.id!, hashes)
+      current = { id: row.id!, shapeHash: row.shapeHash!, paramsDigest: paramsDigests.get(row.id!)!, hashes }
+      if (pending) {
+        if (current.shapeHash !== pending.shapeHash || current.paramsDigest !== pending.paramsDigest || JSON.stringify(hashes) !== JSON.stringify(pending.hashes)) stale('Claude connection retry changed its exact API payload')
+        retriedRequest = current.id
+      }
+    }
+    if (row.requestRetry?.source === 'connection_retry') {
+      if (!current || row.parentUuid !== latestChainNode) stale('Claude connection retry lost its preceding request or exact chain tail')
+      pending = current; retriedRequest = undefined
+    }
+    if (pending && (row.type === 'user' || row.subtype === 'compact_boundary')) stale('Claude connection retry inserted a new user or compact boundary before consumption')
+    if (pending && row.type === 'assistant') {
+      if (!retriedRequest || row.requestRef !== retriedRequest || row.parentUuid !== latestChainNode) stale('Claude connection retry lacks exact subsequent API and assistant consumption')
+      pending = undefined
+    }
+    if (row.uuid) latestChainNode = row.uuid
+  }
+  if (pending) stale('Claude connection retry has no subsequent API and assistant consumption')
+}
+
 /** 只提取本专属session的公开调用、回复、主链身份和实际API索引；推理正文与签名不进入证据。 */
 export function readClaudePublicHistory(path: string, sessionId: string): ClaudePublicRecord[] {
   const source = readFileSync(path, 'utf8')
   if (!source.endsWith('\n')) throw new StructuredSessionTransportError('Claude native history has not flushed its final record')
   const records: ClaudePublicRecord[] = []
+  const paramsDigests = new Map<string, string>()
   let latestAssistant: { uuid: unknown; stopReason: unknown } | undefined
   for (const line of source.split('\n').filter(Boolean)) {
     const row = JSON.parse(line) as Record<string, unknown> & { message?: ClaudePublicMessage & { stop_reason?: unknown }; shape?: { tools: { name: string; description?: string; input_schema?: unknown; defer_loading?: boolean }[] }; params?: { model: string } }
@@ -417,7 +452,10 @@ export function readClaudePublicHistory(path: string, sessionId: string): Claude
       record.message = { role: 'assistant', content: claudeMessageBlocks(row.message!).filter(block => block.type === 'tool_use') }
       latestAssistant = { uuid: row.uuid, stopReason: row.message?.stop_reason }
     }
-    if (row.type === 'api-request') Object.assign(record, { id: row.id, shapeHash: row.shapeHash, base: row.base, keep: row.keep, tail: row.tail, model: row.params!.model })
+    if (row.type === 'api-request') {
+      Object.assign(record, { id: row.id, shapeHash: row.shapeHash, base: row.base, keep: row.keep, tail: row.tail, model: row.params!.model })
+      paramsDigests.set(record.id!, claudeMessageDigest(row.params))
+    }
     if (row.type === 'api-request-shape') {
       record.shapeHash = String(row.shapeHash)
       record.toolNames = row.shape!.tools.map(tool => tool.name)
@@ -425,6 +463,7 @@ export function readClaudePublicHistory(path: string, sessionId: string): Claude
     }
     records.push(record)
   }
+  checkClaudeConnectionRetries(records, paramsDigests)
   return records
 }
 
@@ -590,6 +629,8 @@ export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFro
     || !original.message || JSON.stringify({ ...original.message, content: claudeMessageBlocks(original.message) }) !== JSON.stringify({ role: 'user', content: [{ type: 'text', text: witness.prompt }] })) stale('Claude original user echo/history/prompt identity differs')
   if (history.some(row => row.type === 'user' && row.isMeta === true && row.turnCompanion === true && row.message?.role === 'user' && row.message.content === CLAUDE_OUTPUT_LIMIT_RECOVERY_TEXT)
     && JSON.stringify(readClaudePublicHistory(witness.nativeHistoryPath, sessionId)) !== JSON.stringify(history)) stale('Claude output-limit witness differs from its original native history')
+  if (history.some(row => row.requestRetry?.source === 'connection_retry')
+    && JSON.stringify(readClaudePublicHistory(witness.nativeHistoryPath, sessionId)) !== JSON.stringify(history)) stale('Claude connection retry witness differs from its original native history')
   const seen = new Set<string>(), requests = new Map<string, string[]>(), shapes = new Set<string>(), calls = new Map<string, { row: ClaudePublicRecord; block: ClaudePublicContentBlock; recovery: number }>()
   const parents = new Map<string, string | null>()
   const compactSummaries = new Set<string>()
