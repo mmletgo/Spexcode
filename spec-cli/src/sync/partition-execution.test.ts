@@ -25,6 +25,7 @@ import type { CodeBehaviorInput } from './code-behavior.js'
 import type { CodeBehaviorAnalysis } from './writeback-types.js'
 import { composeInputSnapshots } from './composition.js'
 import { captureInputSnapshot, contentHash, readEvidence, readObject, readTree, writeEvidence } from './snapshot.js'
+import { buildSyncApplicationPlan } from './planning.js'
 import { verifyCandidate } from './candidate.js'
 import { readFrozenBehaviorContext } from '../../test/frozen-behavior-context.js'
 
@@ -324,6 +325,148 @@ test('分区分析以独占文件限定事实来源，共享oracle仍逐区全�
   assert.equal(result.partitionEvidence!.length, 3)
   assert.equal(calls.filter(call => call.purpose === 'code_behavior_analyze').length, 3)
   assert.equal(calls.filter(call => call.purpose === 'code_behavior_review').length, 3)
+})
+
+test('真实v2 raw-only root的只读source discovery分区读取精确mandatory oracle', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'spex-raw-source-oracle-plan-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const paths = { root: '.spec/project/spec.md', source: 'src/unowned.mjs', oracle: 'tests/oracle.test.mjs' }
+  mkdirSync(join(root, dirname(paths.root)), { recursive: true })
+  mkdirSync(join(root, 'src'), { recursive: true })
+  mkdirSync(join(root, 'tests'), { recursive: true })
+  writeFileSync(join(root, paths.root), '---\ntitle: Project\nstatus: pending\n---\n\n## raw source\n\n保留现有模块行为并为未治理源码建立归属。\n')
+  writeFileSync(join(root, paths.source), 'export const currentValue = 1\n')
+  writeFileSync(join(root, paths.oracle), "import test from 'node:test'\ntest('ORACLE-RAW-01', () => {})\n")
+  const [rootNodeId] = mintIds([paths.root.split('/').slice(1, -1)])
+  const verification = { id: 'VERIFY-RAW-ORACLE', command: ['node', '--test', paths.oracle], cwd: '.', timeoutMs: 30000 }
+  writeFileSync(join(root, '.spec/spexcode.json'), JSON.stringify({ sync: {
+    version: 'sync-settings-v1', nodeIds: [rootNodeId], sourcePaths: ['src'], testPaths: ['generated-tests'], readPaths: [], facts: [],
+    budget: { maxAttempts: 2, maxCalls: 4, maxRepairs: 1, timeoutMs: 30000 },
+    verifications: [{ definition: verification, environment: { version: 'v1', image: `node@sha256:${'a'.repeat(64)}`, platform: 'linux/arm64', memoryBytes: 100000000, cpus: 1, pidsLimit: 64, scratchBytes: 1000000, logBytes: 100000 } }],
+    mandatoryTests: [{ verificationId: verification.id, testPath: paths.oracle, testId: 'ORACLE-RAW-01' }],
+  } }))
+  const git = (...args: string[]): void => { execFileSync('/usr/bin/git', ['-C', root, ...args], { stdio: 'pipe', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }) }
+  git('init', '-b', 'main'); git('config', 'user.name', 'raw source oracle fixture'); git('config', 'user.email', 'raw-source-oracle@example.invalid'); git('add', '.'); git('commit', '-m', 'raw-only source discovery with mandatory oracle')
+  const snapshot = await captureInputSnapshot(root)
+  const files = new Map(readTree(snapshot.source.commonDir, snapshot.immutableTree).map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString('utf8')]))
+  const plan = await buildSyncApplicationPlan(snapshot, rootNodeId!, null, { direction: 'code_to_spec' })
+  assert.equal(plan.version, 'sync-coordinator-v2')
+  assert.deepEqual(plan.targets.map(target => target.path), [paths.root], '真实规划只能把raw-only root列为target')
+  assert.deepEqual(plan.executionScope.paths, [paths.root], '源码目录授权不扩成source execution lease')
+  assert.ok(plan.readPaths.includes(paths.oracle), '真实全局规划按mandatory登记授权精确测试路径')
+  const partitionPlan = planSyncPartitions({ plan, files, contracts: [], changedPaths: [paths.source] })
+  const sourcePartition = partitionPlan.partitions.find(partition => partition.changedPaths.includes(paths.source))!
+  assert.equal(sourcePartition.targets.length, 0, '未治理源码发现区在首次规划时没有alpha target')
+  assert.deepEqual(sourcePartition.changedPaths, [paths.source])
+  assert.equal(sourcePartition.writePaths.length, 0, 'Spec-only executionScope不把只读源码变成writer')
+  assert.deepEqual(sourcePartition.sourcePaths, [paths.source])
+  assert.ok(sourcePartition.readPaths.includes(paths.oracle), 'targets为空的source discovery仍须冻结mandatory oracle')
+  assert.ok(!sourcePartition.writePaths.includes(paths.oracle))
+  assert.ok(!sourcePartition.sourcePaths.includes(paths.oracle))
+
+  const analysisInput: CodeBehaviorInput = {
+    snapshot, baseline: null, composed: composeInputSnapshots(snapshot, null).composed!,
+    readSetDigest: 'raw-source-oracle-readset', policyDigest: 'raw-source-oracle-policy', requestKey: 'raw-source-oracle-analysis',
+    timeoutMs: 30000, origin: 'initial', plan,
+  }
+  const persisted = new Map<string, unknown>()
+  const checkpoints: PartitionCheckpoints = {
+    load: <T>(key: string) => persisted.has(key) ? structuredClone(persisted.get(key)) as T : null,
+    save: (key, value) => { persisted.set(key, structuredClone(value)); return writeEvidence(snapshot.source.commonDir, value) },
+  }
+  const analysisRunner: ElaborationRunner = async request => {
+    const threadId = `raw-source-${request.purpose}-${contentHash(request.requestKey).slice(0, 16)}`, turnId = 'turn-1'
+    const result = (output: unknown): Awaited<ReturnType<ElaborationRunner>> => ({
+      sessionId: `raw-source-session-${request.purpose}-${contentHash(request.requestKey).slice(0, 16)}`, threadId, turnId, output,
+      resultDigest: contentHash(JSON.stringify(output)),
+      frozenReadProof: { contextDigest: 'a'.repeat(64), threadId, turnId, receipts: [], coveredEntryIds: (request.frozenEntries ?? []).map(entry => entry.id), historyDigest: 'b'.repeat(64) },
+    })
+    const frozen = readFrozenBehaviorContext<{
+      partition: { id: string; changedPaths: string[]; factSourcePaths: string[] }
+      newSource: [string, string][]
+      plan: { targets: { nodeId: string; path: string }[]; writePaths: string[]; executionScope?: { paths: string[] } }
+    }>(request)
+    const sourceChange = frozen.partition.changedPaths.includes(paths.source)
+    if (sourceChange) {
+      assert.deepEqual(frozen.plan.targets, [])
+      assert.deepEqual(frozen.plan.writePaths, [])
+      assert.deepEqual(frozen.plan.executionScope?.paths, [])
+      assert.deepEqual(frozen.partition.factSourcePaths, [paths.source])
+      assert.equal(new Map(frozen.newSource).get(paths.oracle), files.get(paths.oracle), 'code_behavior P1完整冻结只读oracle正文')
+      assert.ok(!frozen.partition.factSourcePaths.includes(paths.oracle), 'oracle不得成为source事实')
+    }
+    if (request.purpose === 'code_behavior_analyze') {
+      const changes = sourceChange ? [{ kind: 'refactor', paths: [paths.source], affectedIds: [], ruleIds: [],
+        originalIntent: '保持root raw中的现有行为', previousBehavior: '源码尚未纳入同步契约', sourceBehavior: '当前源码输出不变',
+        deliveryBehavior: '没有已验证交付基线', evidence: '完整读取源码与全局mandatory oracle断言', counterexample: '缺少局部断言时不能确认源码语义',
+      }] : []
+      const output = {
+        changes, facts: [], acceptanceChanges: [],
+        newNodes: sourceChange ? [{ codePath: paths.source, parentNodeId: rootNodeId, basis: '未治理源码需要原意根下的专属Spec叶。' }] : [],
+        resolutions: [],
+      }
+      return result(output)
+    }
+    const reviewed = JSON.parse(request.prompt.split('待审分析:\n')[1]) as { analysisDigest: string; analysis: CodeBehaviorAnalysis }
+    const output = {
+      inputDigest: request.inputDigest, analysisDigest: reviewed.analysisDigest, verdict: 'accept',
+      checkedPaths: frozen.newSource.map(([path]) => path), checkedChangeIds: reviewed.analysis.changes.map(change => change.id), findings: [],
+    }
+    return result(output)
+  }
+  const analysis = await analyzeSyncPartitions(analysisInput, partitionPlan, 1, analysisRunner, checkpoints)
+  assert.equal(analysis.reviewPassed, true)
+  assert.deepEqual(analysis.newNodes.map(node => node.codePath), [paths.source], 'P1沿实际source discovery分区提出新叶')
+  const analysisRef = writeEvidence(snapshot.source.commonDir, analysis)
+  const analysisEvidence = { ref: analysisRef, analysis }
+  const completed = completeSyncPartitionPlan(partitionPlan, [], files, { writePaths: plan.writePaths, readonlyPaths: [paths.oracle] }, analysisEvidence)
+  const completedSourcePartition = completed.partitions.find(partition => partition.id === sourcePartition.id)!
+  const newNode = analysis.newNodes[0]
+  assert.ok(newNode)
+  assert.deepEqual(completedSourcePartition.targets, [{ nodeId: newNode.nodeId, path: newNode.path, rawSource: newNode.rawSource }])
+  const p1Plan: SyncPartitionPlan = {
+    ...completed, partitions: [completedSourcePartition],
+    digest: contentHash(JSON.stringify({ parentPlanDigest: completed.digest, partitions: [completedSourcePartition] })),
+  }
+  const p1Input: ElaborationInput = {
+    root, base: snapshot.headCommit, requestKey: 'raw-source-oracle-elaboration',
+    intent: { nodeId: rootNodeId!, rawSource: '保留现有模块行为并为未治理源码建立归属。' },
+    targets: [{ nodeId: newNode.nodeId, path: newNode.path, source: null, sourceDigest: null, rawSource: newNode.rawSource }],
+    context: [{ nodeId: rootNodeId!, path: paths.root, source: files.get(paths.root)! }],
+    files, facts: [], verifications: [{ id: verification.id, command: verification.command, cwd: verification.cwd, timeoutMs: verification.timeoutMs }],
+    implementationWritePaths: [], readonlyTestPaths: [paths.oracle], historyInput: snapshot, analysis: analysisEvidence,
+    maxRepairs: 0, maxCalls: 2, timeoutMs: 30000,
+  }
+  const p1CheckpointsValues = new Map<string, unknown>()
+  const p1Checkpoints: PartitionCheckpoints = {
+    load: <T>(key: string) => p1CheckpointsValues.has(key) ? structuredClone(p1CheckpointsValues.get(key)) as T : null,
+    save: (key, value) => { p1CheckpointsValues.set(key, structuredClone(value)); return writeEvidence(snapshot.source.commonDir, value) },
+  }
+  const p1Runner: ElaborationRunner = async request => {
+    if (request.purpose === 'elaboration_generate') {
+      const encoded = request.prompt.split('冻结业务输入:\n')[1]?.split('\n')[0]
+      const frozen = encoded ? JSON.parse(encoded) as { files: [string, string][] } : null
+      assert.equal(new Map(frozen?.files ?? []).get(paths.oracle), files.get(paths.oracle), '新叶P1 Native输入必须有完整mandatory oracle正文')
+      const tables = emptyElaborationTables()
+      const req = 'REQ-RAW-ORACLE-01', rule = 'RULE-RAW-ORACLE-01', flow = 'FLOW-RAW-ORACLE-01', step = 'STEP-RAW-ORACLE-01', ac = 'AC-RAW-ORACLE-01'
+      tables.REQ = [{ id: req, goal: '记录currentValue的现有返回行为', source: 'user:raw', constraints: '只描述冻结实现。', success: '返回值保持已观察行为。', 'depends-on': [] }]
+      tables.RULE = [{ id: rule, scope: paths.source, constraint: 'currentValue返回1。', basis: '冻结源码与只读oracle。', source: `derived:${req}`, authority: newNode.nodeId, 'depends-on': [req] }]
+      tables.FLOW = [{ id: flow, req: [req], actors: '调用方', entry: '读取currentValue', preconditions: '无。', steps: [step], terminal: 'END', source: `derived:${req}`, 'depends-on': [req] }]
+      tables.STEP = [{ id: step, flow, action: '调用currentValue', input: '无', output: '数字1', rules: [rule], next: 'END', source: `derived:${req}`, 'depends-on': [req] }]
+      tables.AC = [{ id: ac, source: `derived:${req}`, 'depends-on': [req], covers: [req, rule], preconditions: '无。', action: '调用currentValue', assertion: '返回数字1。', test: `${paths.oracle}#ORACLE-RAW-01`, command: verification.id }]
+      tables.VERIFY = [{ id: verification.id, command: verification.command, cwd: verification.cwd, 'timeout-ms': verification.timeoutMs }]
+      const output = {
+        version: 'elaboration-target-rows-v3', changes: [{ targetIndex: 0, title: 'Current value', description: '', code: [`${paths.source}#currentValue`], related: [], prose: '无状态返回现有常量值。', removeIds: [], tables }],
+        applicability: ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: false, basis: '常量读取没有相关副作用。', affectedIds: [] })),
+      }
+      return { sessionId: 'raw-source-p1-generate', threadId: 'raw-source-p1-generate-thread', turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)) }
+    }
+    const output = { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+    return { sessionId: 'raw-source-p1-review', threadId: 'raw-source-p1-review-thread', turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)) }
+  }
+  const p1Result = await elaborateSyncPartitions(p1Input, p1Plan, 1, p1Checkpoints, p1Runner)
+  assert.equal(p1Result.structurePassed, true, JSON.stringify(p1Result.rounds.flatMap(round => round.findings)))
+  assert.equal(p1Result.reviewPassed, true)
 })
 
 test('source-only分区targets为空时只读root raw仍授权本区源码新叶且不扩local writes', async t => {
