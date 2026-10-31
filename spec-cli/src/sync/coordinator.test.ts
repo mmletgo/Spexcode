@@ -1782,15 +1782,15 @@ test('v2已审局部进度 正式pause恢复保留旧unsupported timeout历史�
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
 })
 
-for (const mode of ['analysis-live', 'analysis-two-accepted', 'analysis-restart', 'analysis-pause', 'analysis-settled-timeout', 'analysis-mixed', 'analysis-ref', 'analysis-plan', 'analysis-selection', 'analysis-readset', 'analysis-input', 'analysis-unreviewed', 'analysis-foreign'] as const) test(`v2已审局部进度 ${mode} 只重跑失败分析区`, async t => {
+for (const mode of ['analysis-live', 'analysis-two-accepted', 'analysis-restart', 'analysis-pause', 'analysis-settled-timeout', 'analysis-mixed', 'analysis-mixed-unsupported', 'analysis-mixed-pause', 'analysis-ref', 'analysis-plan', 'analysis-selection', 'analysis-readset', 'analysis-input', 'analysis-unreviewed', 'analysis-foreign'] as const) test(`v2已审局部进度 ${mode} 只重跑失败分析区`, async t => {
   const otherPath = '.spec/project/beta/import-contract/spec.md'
   const other = original.replaceAll('export-job', 'import-job').replaceAll('EXPORT', 'IMPORT').replaceAll('export-contract', 'import-contract').replaceAll('src/export.js', 'src/beta/import.js').replaceAll('tests/export.test.mjs', 'tests/import.test.mjs').replaceAll('decision:IMPORT-POLICY', 'decision:EXPORT-POLICY')
   const thirdPath = '.spec/project/gamma/archive-contract/spec.md'
   const third = original.replaceAll('export-job', 'archive-job').replaceAll('EXPORT', 'ARCHIVE').replaceAll('export-contract', 'archive-contract').replaceAll('src/export.js', 'src/gamma/archive.js').replaceAll('tests/export.test.mjs', 'tests/archive.test.mjs').replaceAll('decision:ARCHIVE-POLICY', 'decision:EXPORT-POLICY')
-  const thirdFiles: Record<string, string> = mode === 'analysis-two-accepted' ? { [thirdPath]: third, 'src/gamma/archive.js': readFileSync(new URL('src/export.js', fixturePath), 'utf8'), 'tests/archive.test.mjs': readFileSync(new URL('tests/export.test.mjs', fixturePath), 'utf8').replaceAll('EXPORT', 'ARCHIVE').replaceAll('src/export.js', 'src/gamma/archive.js') } : {}
+  const thirdFiles: Record<string, string> = ['analysis-two-accepted', 'analysis-mixed-pause'].includes(mode) ? { [thirdPath]: third, 'src/gamma/archive.js': readFileSync(new URL('src/export.js', fixturePath), 'utf8'), 'tests/archive.test.mjs': readFileSync(new URL('tests/export.test.mjs', fixturePath), 'utf8').replaceAll('EXPORT', 'ARCHIVE').replaceAll('src/export.js', 'src/gamma/archive.js') } : {}
   const f = await fixture(t, { maxAttempts: 2, maxCalls: 24, maxRepairs: 1, timeoutMs: 180000 }, false, original, 'project', original, {
-    version: 'sync-coordinator-v2', direction: 'code_to_spec', targets: [{ nodeId: 'export-contract', path: contractPath }, { nodeId: 'import-contract', path: otherPath }, ...(mode === 'analysis-two-accepted' ? [{ nodeId: 'archive-contract', path: thirdPath }] : [])],
-    partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: mode === 'analysis-two-accepted' ? 3 : 2 }, sourcePaths: ['src'], commitTrigger: { before: null, paths: ['src/export.js', 'src/beta/import.js'] },
+    version: 'sync-coordinator-v2', direction: 'code_to_spec', targets: [{ nodeId: 'export-contract', path: contractPath }, { nodeId: 'import-contract', path: otherPath }, ...(['analysis-two-accepted', 'analysis-mixed-pause'].includes(mode) ? [{ nodeId: 'archive-contract', path: thirdPath }] : [])],
+    partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: ['analysis-two-accepted', 'analysis-mixed-pause'].includes(mode) ? 3 : 2 }, sourcePaths: ['src'], commitTrigger: { before: null, paths: ['src/export.js', 'src/beta/import.js'] },
   }, undefined, 'code', undefined, mode === 'analysis-selection', { ...thirdFiles, [otherPath]: other, 'src/beta/import.js': readFileSync(new URL('src/export.js', fixturePath), 'utf8'), 'tests/import.test.mjs': readFileSync(new URL('tests/export.test.mjs', fixturePath), 'utf8').replaceAll('EXPORT', 'IMPORT').replaceAll('src/export.js', 'src/beta/import.js') })
   let store = f.store
   const calls: { attempt: number; partition: string; purpose: string; diagnostics: unknown[] }[] = []
@@ -1798,11 +1798,14 @@ for (const mode of ['analysis-live', 'analysis-two-accepted', 'analysis-restart'
     const attempt = store.readAttempt(store.readOperation(f.operation.id).currentAttemptId!)
     if (request.purpose.startsWith('code_behavior_')) {
       const context = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as { partition: { id: string }; changedPaths: string[]; repairDiagnostics: { message: string }[] }
-      const imported = context.changedPaths.includes('src/beta/import.js'), rule = imported ? 'RULE-IMPORT-05' : context.changedPaths.includes('src/gamma/archive.js') ? 'RULE-ARCHIVE-05' : 'RULE-EXPORT-05'
-      calls.push({ attempt: attempt.number, partition: imported ? 'import' : 'export', purpose: request.purpose, diagnostics: context.repairDiagnostics })
+      const imported = context.changedPaths.includes('src/beta/import.js'), archived = context.changedPaths.includes('src/gamma/archive.js'), rule = imported ? 'RULE-IMPORT-05' : archived ? 'RULE-ARCHIVE-05' : 'RULE-EXPORT-05'
+      calls.push({ attempt: attempt.number, partition: archived ? 'archive' : imported ? 'import' : 'export', purpose: request.purpose, diagnostics: context.repairDiagnostics })
       if (attempt.number === 2 && !imported && ['analysis-live', 'analysis-two-accepted', 'analysis-restart', 'analysis-pause', 'analysis-settled-timeout'].includes(mode)) assert.fail('已accept分析区不得重新派发')
+      if (attempt.number === 2 && archived && mode === 'analysis-mixed-pause') assert.fail('已accept分析区不得重新派发')
       if (mode === 'analysis-settled-timeout' && attempt.number === 1 && imported && request.purpose === 'code_behavior_analyze') throw new SettledSessionCreateTimeoutError({ version: 1, sessionId: 'settled-fixture-session', requestDigest: contentHash(request.requestKey), payloadHash: contentHash(request.prompt), code: 'session_create_timeout', phase: 'record-write', nativeStopped: true, nativeStatus: 'notStarted', cleanupComplete: true })
       if (mode === 'analysis-mixed' && !imported && request.purpose === 'code_behavior_review') { await new Promise(resolve => setTimeout(resolve, 15)); throw Object.assign(new Error('未知资源不能被兄弟业务repair遮蔽'), { code: 'cancellation_pending' }) }
+      if (mode === 'analysis-mixed-unsupported' && !imported && request.purpose === 'code_behavior_review') throw Object.assign(new Error('unsupported不能被兄弟业务repair遮蔽'), { code: 'unsupported' })
+      if (mode === 'analysis-mixed-pause' && !imported && !archived && request.purpose === 'code_behavior_review') throw Object.assign(new Error('unsupported不能被兄弟业务repair遮蔽'), { code: 'unsupported' })
       if (request.purpose === 'code_behavior_analyze') return { ...(output as object), changes: (output as { changes: { paths: string[] }[] }).changes.map(change => ({ ...change, affectedIds: [rule], ruleIds: [rule] })) }
       if (attempt.number === 1 && imported) return { ...(output as object), checkedPaths: [] }
     }
@@ -1813,7 +1816,7 @@ for (const mode of ['analysis-live', 'analysis-two-accepted', 'analysis-restart'
   store.recordFailure = (fence, issue) => {
     if (store.readAttempt(fence.attemptId).number === 1) {
       const local = store.readAttempt(fence.attemptId).checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(value => value.stage?.startsWith('partition:') && value.stage.endsWith(':analysis'))
-      if (mode === 'analysis-mixed') return recordFailure(fence, issue)
+      if (['analysis-mixed', 'analysis-mixed-unsupported'].includes(mode)) return recordFailure(fence, issue)
       assert.ok(local)
       const accepted = JSON.parse(readEvidence(f.input.source.commonDir, local.resultRef).toString())
       assert.equal(accepted.reviewPassed, true)
@@ -1831,7 +1834,7 @@ for (const mode of ['analysis-live', 'analysis-two-accepted', 'analysis-restart'
       if (mode === 'analysis-ref') accepted.traces[0].sessionId = 'foreign-session'
       if (mode === 'analysis-input') accepted.inputDigest = contentHash('changed-local-input')
       if (mode === 'analysis-unreviewed') accepted.reviewPassed = false
-      if (!['analysis-live', 'analysis-two-accepted', 'analysis-restart', 'analysis-pause', 'analysis-settled-timeout'].includes(mode)) { local.resultRef = writeEvidence(f.input.source.commonDir, accepted); store.checkpoint(fence, local.resultRef); store.checkpoint(fence, writeEvidence(f.input.source.commonDir, local)) }
+      if (!['analysis-live', 'analysis-two-accepted', 'analysis-restart', 'analysis-pause', 'analysis-settled-timeout', 'analysis-mixed-pause'].includes(mode)) { local.resultRef = writeEvidence(f.input.source.commonDir, accepted); store.checkpoint(fence, local.resultRef); store.checkpoint(fence, writeEvidence(f.input.source.commonDir, local)) }
       const result = recordFailure(fence, issue)
       if (mode === 'analysis-pause') {
         store.requestControl(f.operation.id, 'pause'); store.requestControl(f.operation.id, 'run')
@@ -1848,10 +1851,48 @@ for (const mode of ['analysis-live', 'analysis-two-accepted', 'analysis-restart'
     store = new SyncStore(protocol, { readBlob: ref => readEvidence(f.input.source.commonDir, ref) }); f.useStore(store)
     result = await runSyncOperation(store, f.operation.id, f.options)
   }
-  if (mode === 'analysis-mixed') {
-    assert.equal(store.listAttempts(f.operation.id).length, 1); assert.equal(result.failure?.code, 'cancellation_pending')
+  if (mode === 'analysis-mixed' || mode === 'analysis-mixed-unsupported') {
+    assert.equal(store.listAttempts(f.operation.id).length, 1); assert.equal(result.failure?.code, mode === 'analysis-mixed' ? 'cancellation_pending' : 'unsupported')
     const saved = store.listAttempts(f.operation.id)[0].checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(stage => stage.stage === 'partition:analysis-failures')
-    assert.equal(JSON.parse(readEvidence(f.input.source.commonDir, saved.resultRef).toString()).failures.length, 2)
+    const failures = JSON.parse(readEvidence(f.input.source.commonDir, saved.resultRef).toString()).failures as { code: string }[]
+    assert.equal(failures.length, 2)
+    if (mode === 'analysis-mixed-unsupported') {
+      assert.equal(store.readAttempt(result.operation.currentAttemptId!).failure?.kind, 'unsupported')
+      assert.ok(failures.some(failure => failure.code === 'behavior_analysis_invalid' || failure.code === 'behavior_review_failed'))
+      assert.ok(failures.some(failure => failure.code === 'unsupported'))
+    }
+    return
+  }
+  if (mode === 'analysis-mixed-pause') {
+    assert.equal(result.status, 'unsupported'); assert.equal(store.listAttempts(f.operation.id).length, 1)
+    const first = store.listAttempts(f.operation.id)[0]
+    assert.equal(first.failure?.kind, 'unsupported'); assert.deepEqual(store.listRecoverableResources(), [])
+    const firstStages = first.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
+    const partitionPlanStage = firstStages.find(stage => stage.stage === 'partition-plan')!
+    const partitionPlan = JSON.parse(readEvidence(f.input.source.commonDir, partitionPlanStage.resultRef).toString()) as { partitions: { id: string; changedPaths: string[] }[] }
+    const archivePartitionId = partitionPlan.partitions.find(partition => partition.changedPaths.includes('src/gamma/archive.js'))!.id
+    const accepted = firstStages.find(stage => stage.stage === `partition:${archivePartitionId}:analysis`)!
+    const failureStage = firstStages.find(stage => stage.stage === 'partition:analysis-failures')!
+    const failures = JSON.parse(readEvidence(f.input.source.commonDir, failureStage.resultRef).toString()).failures as { partitionId: string; code: string; message: string }[]
+    const businessFailure = failures.find(failure => ['behavior_analysis_invalid', 'behavior_review_failed'].includes(failure.code))!
+    assert.ok(businessFailure, JSON.stringify({ failures, calls: calls.map(({ attempt, partition, purpose, diagnostics }) => ({ attempt, partition, purpose, diagnostics })) }))
+    const callsBeforeResume = calls.length
+    store.requestControl(f.operation.id, 'pause'); store.requestControl(f.operation.id, 'run')
+    result = await runSyncOperation(store, f.operation.id, f.options)
+    assert.equal(store.listAttempts(f.operation.id).length, 2)
+    assert.equal(store.listRecoverableResources().length, 0)
+    assert.equal(calls.length, callsBeforeResume + 4, 'A2仅分析export/import，P1停止点另由runner记录')
+    assert.equal(calls.filter(call => call.attempt === 2 && call.partition === 'archive').length, 0)
+    const importCalls = calls.filter(call => call.attempt === 2 && call.partition === 'import')
+    const exportCalls = calls.filter(call => call.attempt === 2 && call.partition === 'export')
+    assert.ok(importCalls.length > 0)
+    assert.ok(importCalls.every(call => JSON.stringify(call.diagnostics) === JSON.stringify([businessFailure])))
+    assert.ok(exportCalls.length > 0); assert.ok(exportCalls.every(call => call.diagnostics.length === 0))
+    const secondStages = store.listAttempts(f.operation.id)[1].checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
+    assert.deepEqual(secondStages.find(stage => stage.stage === accepted.stage).resultRef, accepted.resultRef)
+    assert.ok(secondStages.some(stage => stage.stage === `${accepted.stage}:provenance`))
+    assert.equal(result.operation.callsUsed, f.calls.length); assert.equal(store.listJournals(f.operation.id).length, 0)
+    assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
     return
   }
   if (mode === 'analysis-foreign') { assert.equal(result.failure?.code, 'stage_binding'); return }
