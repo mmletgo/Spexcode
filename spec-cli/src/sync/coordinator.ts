@@ -255,7 +255,7 @@ function readonlyRepairFromAttempt(store: SyncStore, operation: SyncOperation, a
   operation = readonlyRepairContext(store, operation, attempt, writeEvidence(operation.input.source.commonDir, saved))
   const generation = partitionStage<SavedGeneration>(store, operation, attempt, 'generation')
   let allFindings = generation?.result.validationFindings.filter(item => item.severity === 'error') ?? []
-  const semantic = generation?.result.candidateValidated === true && generation.result.status === 'repair' && !generation.result.failure && !generation.result.reviewPassed && generation.result.partitionEvidence?.some(item => item.review.verdict === 'repair')
+  const semantic = generation?.result.candidateValidated === true && ['repair', 'failed'].includes(generation.result.status) && !generation.result.reviewPassed && generation.result.partitionEvidence?.some(item => item.review.verdict === 'repair')
   if (!generation?.result.candidate || !semantic && (generation.result.candidateValidated || !allFindings.length || allFindings.some(item => item.code !== 'anchor-dead'))) return null
   const plan = operation.planBlob ? JSON.parse(readEvidence(operation.input.source.commonDir, operation.planBlob).toString('utf8')) as SyncCoordinatorPlan : null
   if (plan?.version !== 'sync-coordinator-v2') return null
