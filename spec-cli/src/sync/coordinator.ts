@@ -638,11 +638,11 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
             diagnosticLineage.unshift(diagnosticOwner)
             diagnosticOwner = diagnosticOwner.retryOf ? store.readOperation(diagnosticOwner.retryOf) : null
           }
-          const repairDiagnostics = diagnosticLineage.flatMap(owner => store.listAttempts(owner.id).filter(prior => (!partitions || owner.id === operation.id && prior.number < attempt!.number) && ['failed', 'superseded', 'settled'].includes(prior.status) && prior.failure?.kind === 'repairable').flatMap(prior => {
+          const repairDiagnostics = diagnosticLineage.flatMap(owner => store.listAttempts(owner.id).filter(prior => (!partitions || owner.id === operation.id && prior.number < attempt!.number) && ['failed', 'superseded', 'settled'].includes(prior.status) && (partitions !== null || prior.failure?.kind === 'repairable')).flatMap(prior => {
             if (partitions) {
               if (owner.id !== operation.id) return []
               const saved = partitionStage<PartitionAnalysisFailures>(store, operation, prior, 'partition:analysis-failures')
-              return saved?.result.planDigest === partitions.digest ? saved.result.failures.map(({ partitionId, code, message }) => ({ partitionId, code, message })) : []
+              return saved?.result.planDigest === partitions.digest ? saved.result.failures.filter(({ code }) => ['behavior_analysis_invalid', 'behavior_review_failed'].includes(code)).map(({ partitionId, code, message }) => ({ partitionId, code, message })) : []
             }
             return ['behavior_analysis_invalid', 'behavior_review_failed'].includes(prior.failure!.code) ? [{ code: prior.failure!.code, message: prior.failure!.message }] : []
           }))
