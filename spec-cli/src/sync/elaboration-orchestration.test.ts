@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import test from 'node:test'
 import { buildContractGraph, CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts, projectContractCoverage } from '@spexcode/spec-core/contracts'
 import { elaborate, elaborationDigest, projectElaborationFlowReadiness } from './elaboration.js'
@@ -629,6 +630,42 @@ test('部分wire候选结算为诊断seed后，本次必需目标重列且完整
   assert.ok(!fresh.changes.some(change => change.source.includes('VERIFY-SEED-ONLY')))
   assert.ok(fresh.graph && !fresh.graph.items.has('VERIFY-SEED-ONLY'))
   assert.deepEqual(seed, originalSeed)
+})
+
+for (const mode of ['review', 'nullable'] as const) test(`跨attempt续修原JSON ${mode} 保留null与数组而Markdown仅作渲染对照`, async () => {
+  let seed: ElaborationRepairSeed
+  if (mode === 'review') seed = await rejectedSeed()
+  else {
+    const rejected = runner(request => {
+      const output = candidate(request, source)
+      output.changes[0].tables.TR[0].to = null
+      output.changes[0].tables.TR[0].disposition = 'not_applicable'
+      return output
+    }, request => ({ ...review(request), verdict: 'repair', findings: [{ code: 'nullable-source-check', kind: 'repair', message: '按原意核对不适用分支', affectedIds: ['RULE-EXPORT-01'], evidence: '完整原始需求与状态派发', decision: '保留JSON真实类型并修正确有问题的分支' }] }))
+    const first = await elaborate({ ...input(), maxRepairs: 0 }, { runner: rejected.run })
+    assert.equal(first.status, 'exhausted')
+    const last = first.rounds[0]
+    seed = { settled: true, requestKey: 'operation-1', inputDigest: first.inputDigest, candidateDigest: last.candidateDigest!, output: last.output, candidate: last.candidate!, findings: last.findings, review: last.review, traces: last.traces }
+  }
+  const original = structuredClone(seed), fresh = runner(request => candidate(request, source))
+  const result = await elaborate({ ...input(), requestKey: 'json-repair-attempt' }, { seed, runner: async request => {
+    if (process.env.SPEX_REPAIR_JSON_EVIDENCE_DIR) writeFileSync(join(process.env.SPEX_REPAIR_JSON_EVIDENCE_DIR, `${mode}-${request.purpose}.prompt.txt`), request.prompt)
+    const session = await fresh.run(request)
+    return { ...session, sessionId: `fresh-${session.sessionId}`, threadId: `fresh-${session.threadId}` }
+  } })
+  assert.equal(result.status, 'complete')
+  const prompt = fresh.calls[0].prompt
+  assert.ok(prompt.includes(JSON.stringify(seed.output)), '跨attempt提示缺少已validateRepairSeed核真的原始结构化JSON')
+  const raw = JSON.parse(prompt.split('原始结构化拒绝输出JSON（仅格式骨架/诊断，以当前schema为准，非事实或授权）:\n')[1].split('\n')[0]) as GeneratedTargetElaboration
+  assert.deepEqual(raw, seed.output)
+  assert.ok(raw.changes[0].tables.FLOW.some(row => Array.isArray(row.terminal)))
+  assert.ok(raw.changes[0].tables.STEP.some(row => Array.isArray(row.next)))
+  if (mode === 'nullable') assert.equal(raw.changes[0].tables.TR[0].to, null)
+  assert.match(prompt, /Markdown渲染视图.*不能将表格占位符复制到JSON/)
+  assert.match(prompt, /原具体失败/); assert.match(prompt, /当前程序结构诊断/)
+  assert.ok(prompt.includes(JSON.stringify(seed.review)))
+  assert.deepEqual(seed, original); assert.deepEqual(result.prior!.traces, original.traces)
+  assert.deepEqual(fresh.calls.map(call => call.purpose), ['elaboration_generate', 'elaboration_review'])
 })
 
 test('AC-ELABORATION-26 已结算失败种子仅作诊断，旧结果不变，新执行重新独立审查', async () => {
