@@ -8,8 +8,8 @@ export const ELABORATION_BOUNDARIES = ['permissions', 'mutation', 'async', 'netw
 export type ElaborationBoundary = typeof ELABORATION_BOUNDARIES[number]
 export type ElaborationTarget = { nodeId: string; path: string; source: string | null; sourceDigest: string | null; rawSource?: string }
 export type ElaborationFact = { source: string; text: string }
-/** 真实只读全候选V1失败；历史已审候选仅作技术定位诊断，不是业务拒绝seed或新授权。 */
-export type ReadonlySpecRepair = { baseInputDigest: string; candidateDigest: string; generationRef: BlobRef; acceptedRef: BlobRef; changes: ElaborationResult['changes']; output: unknown; review: ElaborationReview | null; findings: ContractFinding[] }
+/** 真实只读全候选V1或独审失败；历史已审候选仅作诊断，不是业务拒绝seed或新授权。 */
+export type ReadonlySpecRepair = { kind?: 'candidate_review'; reviewEvidence?: { partitionId: string; resultRef: BlobRef }[]; baseInputDigest: string; candidateDigest: string; generationRef: BlobRef; acceptedRef: BlobRef; changes: ElaborationResult['changes']; output: unknown; review: ElaborationReview | null; findings: ContractFinding[] }
 export type ElaborationPhase = 'interface_seed' | 'partitioned_final'
 export type ElaborationPartitionBinding = { planDigest: string; partitionId: string; analysisRef?: BlobRef; interfaceSeed?: RawOnlyInterfaceSeedEvidence }
 /** 调用者已确认的用户原意或裁决变更；不是 Agent 自己生成的批准请求。 */

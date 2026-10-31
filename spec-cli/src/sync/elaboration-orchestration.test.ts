@@ -1129,3 +1129,24 @@ test('只读实现模式的独审实现缺陷保留为阻断而非待生成任�
   assert.ok(result.rounds[0].findings.some(issue => issue.code === 'readonly_implementation_gap'))
   assert.deepEqual(result.rounds[0].review!.findings, [defect])
 })
+
+for (const scenario of ['author-ac', 'missing-oracle', 'stable-id'] as const) test(`candidate_review诊断不授权降低已有义务 ${scenario}`, async () => {
+  const built = await elaborate(input(), { runner: runner(request => candidate(request, source)).run })
+  assert.equal(built.reviewPassed, true)
+  const snapshot = input(scenario === 'author-ac')
+  const repair: NonNullable<ElaborationInput['readonlySpecRepair']> = { kind: 'candidate_review', reviewEvidence: [{ partitionId: 'owner', resultRef: { sha256: 'a'.repeat(64) } }], baseInputDigest: 'b'.repeat(64), candidateDigest: built.candidateDigest!, generationRef: { sha256: 'c'.repeat(64) }, acceptedRef: { sha256: 'd'.repeat(64) }, changes: built.changes, output: built.rounds.at(-1)!.output, review: built.rounds.at(-1)!.review, findings: [{ code: 'candidate-review-repair', severity: 'error', nodeId: 'export-contract', path, itemId: 'AC-EXPORT-01', message: 'critic要求迎合现有实现或测试覆盖' }] }
+  const fake = runner(request => {
+    const generated = candidate(request, source)
+    if (scenario === 'author-ac') generated.changes[0].tables.AC[0].assertion = '只需返回任意结果，降低原完整结果义务'
+    if (scenario === 'stable-id') generated.changes[0].tables.AC[0].id = 'AC-EXPORT-REPLACED'
+    return generated
+  })
+  const context = new Map(files)
+  if (scenario === 'missing-oracle') context.delete('tests/export.test.mjs')
+  const result = await elaborate({ ...snapshot, readonlySpecRepair: repair, implementationWritePaths: [], readonlyTestPaths: ['tests/export.test.mjs'], files: context, maxRepairs: 0 }, { runner: fake.run })
+  assert.equal(result.reviewPassed, false)
+  const code = scenario === 'author-ac' ? 'acceptance_update_unauthorized' : scenario === 'stable-id' ? 'readonly_repair_id_removed' : 'readonly_implementation_gap'
+  assert.ok(result.rounds.flatMap(round => round.findings).some(finding => finding.code === code), JSON.stringify(result.rounds.map(round => round.findings)))
+  assert.equal(fake.calls.some(call => call.purpose === 'elaboration_review'), false, '原硬门失败不得靠新独审自批')
+  assert.equal(snapshot.intent.rawSource, rawSource)
+})

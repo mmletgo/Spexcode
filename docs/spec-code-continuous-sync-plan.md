@@ -295,7 +295,7 @@ Dashboard 的同步模式不能继续“先把新 Spec 独立提交到 main，�
 
 相同冻结绑定的局部生成若在任何输出前失败并保存空轮原件，下一轮可承接最近更早的具体业务拒绝诊断；缺局部检查点、绑定改变或已有候选的基础设施失败仍停止回溯，不改变重试资格、独审或最终验证门槛。
 
-P2实际无该Spec写权的只读装配late V1锚点失败按真实候选和node/path回到唯一P1 owner，新生成和独审仅修该区，其他已审区及源码/tests保持；最终全图seal/V1重做。相同input/candidate/findings且无对应owner新agent派发时停止零调用热循环，真实多轮修订仍沿原无限预算继续。
+P2实际无该Spec写权的只读装配late V1锚点失败按真实候选和node/path回到唯一P1 owner，新生成和独审仅修该区，其他已审区及源码/tests保持；V1有效但全候选独审要求修订的只读Spec也沿真实ruleLocation/affectedIds回到唯一P1 owner，完整review只作诊断，原作者契约授权门及raw义务保持；最终全图seal/V1重做。相同input/candidate/findings且无对应owner新agent派发时停止零调用热循环，真实多轮修订仍沿原无限预算继续。
 
 原生输出上限的精确同轮续行在成功和已停结构输出耗尽中使用同一身份、实际API字节及后续assistant消费证明；合法续行不能误判为新用户轮，未知内部提示仍拒绝。耗尽仍是失败，不产生业务通过或交付证明。
 
