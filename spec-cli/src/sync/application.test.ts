@@ -661,7 +661,7 @@ test('AC-APPLICATION-17 queued不可借retry重置预算，无交付cancelled可
   } finally { held.mutex?.release(); f.cleanup() }
 })
 
-async function resourceFixture(options: { conflict?: boolean; callRequested?: boolean; invalidPlan?: boolean } = {}) {
+async function resourceFixture(options: { conflict?: boolean; callRequested?: boolean; invalidPlan?: boolean; priorReservedCalls?: number } = {}) {
   const f = await fixture()
   governDemoCode(f)
   let calls = 0
@@ -675,12 +675,71 @@ async function resourceFixture(options: { conflict?: boolean; callRequested?: bo
     const plan = { schemaVersion: 1, request: frozen, requestDigest, sessionCreateKey: dispatch.sessionCreateKey, expectedSessionId: options.invalidPlan ? 'invalid-owned-session' : expectedSessionId, ...identity }
     const checkpoint = { schemaVersion: 1, ...identity, requestDigest, expectedSessionId, phase: 'planned', nativeCallRequested: options.callRequested ?? true, nativeStarted: false, nativeState: 'unpublished', session: { sessionId: expectedSessionId, threadId: null, turnId: null } }
     const fence = { operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: operation.input.source.physicalFingerprint }
+    for (let index = 0; index < (options.priorReservedCalls ?? 0); index++) f.application.store.reserveDispatch(fence, { key: `${request.requestKey}:prior-reservation:${index}`, purpose: request.purpose, requestDigest: contentHash(`prior-reservation-${index}`) })
     f.application.store.planResource(fence, { key: request.requestKey, kind: 'native_session', payloadDigest: requestDigest, inputId: operation.input.id, candidateDigest: null, planBlob: writeEvidence(operation.input.source.commonDir, plan), checkpointRef: writeEvidence(operation.input.source.commonDir, checkpoint) })
     if (options.conflict) f.application.store.recordFailure(fence, { code: 'input_changed', message: '受控来源冲突故障', kind: 'conflict', evidenceRefs: [] })
     throw Object.assign(new Error('受控创建结果未知'), { code: 'unsupported' })
   } })
   return { ...f, application, modelCalls: (): number => calls }
 }
+
+test('AC-APPLICATION-STOPPED-01 stopWriter后recover仍仅结算原planned资源并保留六次预算预留与失败证据', async () => {
+  const f = await resourceFixture({ callRequested: false, priorReservedCalls: 5 })
+  try {
+    await f.application.enable()
+    const submitted = await f.application.submit({ nodeId: 'demo', requestId: 'stopped-resource-recovery' }); assert.ok(submitted.operation)
+    const before = await f.application.wait(submitted.operation.id)
+    assert.equal(before.operation.callsUsed, 6); assert.equal(before.resources.length, 1); assert.equal(before.resources[0].phase, 'planned')
+    const attempt = f.application.store.readAttempt(before.operation.currentAttemptId!), refs = structuredClone(attempt.checkpointRefs), failure = structuredClone(attempt.failure)
+    const stopped = await f.application.stopWriter()
+    assert.equal(stopped.control.control, 'pause')
+    const recovered = await f.application.control(before.operation.id, 'recover')
+    assert.deepEqual(recovered.operation, before.operation)
+    assert.deepEqual(recovered.physicalControl, stopped.control)
+    assert.equal(recovered.resources.length, 0); assert.equal(recovered.journals.length, 0)
+    assert.equal(f.application.store.findResource(attempt.id, before.resources[0].plan.key)?.phase, 'removed')
+    assert.deepEqual(f.application.store.readAttempt(attempt.id).failure, failure)
+    assert.deepEqual(f.application.store.readAttempt(attempt.id).checkpointRefs, refs)
+    assert.equal(f.application.store.listAttempts(before.operation.id).length, 1)
+    f.application.start(before.operation.id)
+    assert.equal(f.modelCalls(), 1, '六次为真实store预算预留；清理不能新增模型派发')
+    assert.equal(f.application.observationStatus().health.watchOnline, false)
+  } finally { f.cleanup() }
+})
+
+for (const stop of ['stopWriter', 'stopService'] as const) test(`AC-APPLICATION-STOPPED-02 ${stop}后queued无资源recover不能派发或恢复物理控制`, async () => {
+  const f = await fixture(), held = holdNextAdmission(f)
+  try {
+    governDemoCode(f); await f.application.enable()
+    const submitted = await f.application.submit({ nodeId: 'demo', requestId: 'stopped-queued-recovery' }); assert.ok(submitted.operation)
+    const before = await f.application.wait(submitted.operation.id)
+    held.mutex!.release(); held.mutex = null
+    if (stop === 'stopWriter') await f.application.stopWriter()
+    else await f.application.stopService()
+    const stoppedControl = (await f.application.readOperation(before.operation.id)).physicalControl
+    assert.equal(stoppedControl.control, stop === 'stopWriter' ? 'pause' : 'run')
+    const recovered = await f.application.control(before.operation.id, 'recover')
+    assert.deepEqual(recovered.operation, before.operation); assert.deepEqual(recovered.physicalControl, stoppedControl)
+    assert.equal(recovered.operation.phase, 'queued'); assert.equal(recovered.attempt, null); assert.equal(f.calls.length, 0)
+    f.application.start(before.operation.id)
+    const afterStart = await f.application.wait(before.operation.id)
+    assert.deepEqual(afterStart.operation, recovered.operation)
+    assert.equal(afterStart.attempt, null); assert.equal(f.calls.length, 0); assert.equal(f.application.observationStatus().health.watchOnline, false)
+  } finally { held.mutex?.release(); f.cleanup() }
+})
+
+test('AC-APPLICATION-STOPPED-03 stopped恢复仍拒错plan并保留planned与原业务失败', async () => {
+  const f = await resourceFixture({ invalidPlan: true, callRequested: false })
+  try {
+    await f.application.enable()
+    const submitted = await f.application.submit({ nodeId: 'demo', requestId: 'stopped-invalid-resource' }); assert.ok(submitted.operation)
+    const before = await f.application.wait(submitted.operation.id), stopped = await f.application.stopWriter()
+    await assert.rejects(f.application.control(before.operation.id, 'recover'), (error: unknown) => error instanceof SyncApplicationError && error.status === 409 && error.code === 'resource_recovery' && /native resource plan differs/.test(error.message))
+    const after = await f.application.readOperation(before.operation.id)
+    assert.deepEqual(after.operation, before.operation); assert.deepEqual(after.physicalControl, stopped.control)
+    assert.equal(after.resources.length, 1); assert.equal(after.resources[0].phase, 'planned'); assert.equal(f.modelCalls(), 1)
+  } finally { f.cleanup() }
+})
 
 test('AC-APPLICATION-18 已停止操作仍有未结算资源时不能展示ready或借retry新预算', async () => {
   const f = await resourceFixture()
