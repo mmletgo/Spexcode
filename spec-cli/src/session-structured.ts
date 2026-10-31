@@ -11,7 +11,15 @@ import { assertFrozenBinding, prepareFrozenPrompt, readFrozenManifest, verifyFro
 import { configuredSessionApplication } from './session-application.js'
 import { withDeliveryLocks } from './delivery-lock.js'
 import { claudeNativeModel, claudeStructuredTurn, stopClaudeStructuredTurn } from './claude-structured.js'
+import type { SessionCreateTermination } from './sessions.js'
 export { StructuredSessionError } from './session-structured-policy.js'
+
+export class SettledSessionCreateTimeoutError extends StructuredSessionError {
+  constructor(readonly termination: SessionCreateTermination) {
+    super('timeout', 'native creation timed out and exact cleanup settled', { sessionId: termination.sessionId })
+    this.name = 'SettledSessionCreateTimeoutError'
+  }
+}
 
 export type StructuredSessionRequest = {
   root: string

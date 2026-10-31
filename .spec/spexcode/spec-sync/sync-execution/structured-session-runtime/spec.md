@@ -53,6 +53,8 @@ AbortSignal、caller 超时与显式取消使用同一持久取消协议。确�
 
 结构化创建期间取消或超时、尚未发布会话时，正式创建事务完成清理后保留精确 SessionCreateTermination。错误包含该收据的预期 sessionId；同键重放返回原取消/超时，不进入队列或重新创建。创建事务等待锁时被取消不能生成他人停止证明；清理失败不提供 nativeStopped。上层只能用匹配固定请求的收据结算尚未开始的资源。
 
+Native资源桥仅在精确绑定的`session_create_timeout` receipt通过sessionId/requestDigest/payloadHash、nativeStopped/notStarted/cleanupComplete与未启动身份检查，且资源`terminal→removed`已持久化后，抛出携带原receipt的`SettledSessionCreateTimeoutError`。此子类的`code`仍为`timeout`，其独立类型只标识可由上层消耗现有预算重试的已清理创建超时；caller取消、普通timeout、receipt缺失/错配、清理未证实或已有thread/turn均不能构造该类型。
+
 尚无 frozenContext 时，runStructuredSession 先调用 prepareFrozenPrompt：普通小 prompt 保持 v1；带纯 JSON frozenEntries 或超阈值正文才生成 ref，且不编造 attempt/policy。提供 frozenContext 时采用 [[structured-readonly-policy]] 的 v2 冻结读取，清单参与固定请求摘要；内部 sessionCreateKey 仅承接已持久 reserveDispatch 的原生创建身份，业务 requestKey/inputDigest 保持清单绑定。已有 ref 与旧证明按原字段恢复。真实工具请求与回复证据先持久再发送，最终必须核验精确原生历史及完整覆盖。未答动态请求的恢复不能伪回执，改由既有取消协议确认精确turn停止；确认前不得释放资源。
 
 readerRuntime版本2在新结果发布、completed精确恢复和同步资源结果读取中均要求[[frozen-context-reader]]的版本2模型可见证明及固定额度，不能携旧coverage证明降级。旧runtime只恢复已有turn；保留唯一原turn加精确prompt的丢ack识别，但不得发送thread/start或turn/start。旧字段和摘要保持原样。
