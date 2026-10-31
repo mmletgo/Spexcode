@@ -1759,6 +1759,161 @@ test('v2最终预算只列真实实现派发，纯父接口不产生虚构生成
   assert.equal(f.store.listJournals(f.operation.id).length, 0)
 })
 
+for (const mode of ['parent-structure', 'parent-review', 'parent-restart', 'parent-capacity-clear', 'parent-lease-clear', 'leaves', 'leaves-restart', 'input', 'ancestor', 'readset', 'selection', 'foreign', 'policy', 'unsettled', 'aggregate'] as const) test(`v2局部分区续修 ${mode} 绑定原候选诊断而不串区`, async t => {
+  const parentPath = '.spec/project/spec.md', parentId = 'REQ-PARENT-01', otherPath = '.spec/project/beta/import-contract/spec.md'
+  const threeAttempts = mode.endsWith('-clear')
+  const raw = '保留现有导出与导入服务行为，分别完整记录两个模块。'
+  const parentBefore = `---\ntitle: 上层接口\nstatus: pending\n---\n## raw source\n\n${raw}\n`
+  const parentSource = `---\ntitle: 上层接口\nstatus: active\ncontract-schema: sync-v1\n---\n## raw source\n\n${raw}\n\n## expanded spec\n\n本层保留原意，两个模块分别承接。\n\n### REQ\n\n| id | goal | source | constraints | success | depends-on |\n| --- | --- | --- | --- | --- | --- |\n| ${parentId} | 保留两个模块行为 | user:raw | 不改变原政策 | 现有模块及验收完成 | - |\n`
+  const other = original.replaceAll('export-job', 'import-job').replaceAll('EXPORT', 'IMPORT').replaceAll('export-contract', 'import-contract').replaceAll('src/export.js', 'src/beta/import.js').replaceAll('tests/export.test.mjs', 'tests/import.test.mjs').replaceAll('decision:IMPORT-POLICY', 'decision:EXPORT-POLICY')
+  const rawOnly = (source: string) => source.slice(0, source.indexOf('## expanded spec')).replace('contract-schema: sync-v1\n', '')
+  const environment = { version: 'trusted-test-v1' as const, image: 'node@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392', platform: 'linux/arm64' as const, memoryBytes: 128 * 1024 * 1024, cpus: 1, pidsLimit: 64, scratchBytes: 16 * 1024 * 1024, logBytes: 128 * 1024 }
+  const verifications = [original, other].map(source => { const definition = parseContract({ nodeId: 'fixture', path: contractPath, source }).contract!.items.find(item => item.kind === 'VERIFY')!; assert.equal(definition.kind, 'VERIFY'); return { definition: { id: definition.id, command: definition.command, cwd: definition.cwd, timeoutMs: definition.timeoutMs }, environment } })
+  const mandatoryTests = [original, other].map(source => { const acceptance = parseContract({ nodeId: 'fixture', path: contractPath, source }).contract!.items.find(item => item.kind === 'AC')!; assert.equal(acceptance.kind, 'AC'); const [testPath, testId] = acceptance.test.split('#'); return { verificationId: acceptance.command, testPath, testId } })
+  const f = await fixture(t, { maxAttempts: threeAttempts ? 3 : 2, maxCalls: 32, maxRepairs: threeAttempts ? 2 : 1, timeoutMs: 180000 }, false, rawOnly(original), 'project', original, {
+    version: 'sync-coordinator-v2', direction: 'spec_to_code', intentNodeId: 'project',
+    targets: [{ nodeId: 'project', path: parentPath, rawSource: raw }, { nodeId: 'export-contract', path: contractPath }, { nodeId: 'import-contract', path: otherPath }],
+    partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 2 }, sourcePaths: ['src'], verifications, mandatoryTests,
+  }, undefined, 'spec', undefined, mode === 'selection', { [parentPath]: parentBefore, [otherPath]: rawOnly(other), 'src/beta/import.js': readFileSync(new URL('src/export.js', fixturePath), 'utf8'), 'tests/import.test.mjs': readFileSync(new URL('tests/export.test.mjs', fixturePath), 'utf8').replaceAll('EXPORT', 'IMPORT').replaceAll('src/export.js', 'src/beta/import.js') })
+  const admitted = f.operation
+  let store = f.store
+  const parentFailure = mode.startsWith('parent-'), restart = mode.endsWith('restart')
+  const calls: { attempt: number; nodeId: string; purpose: string; prompt: string }[] = []
+  f.transform((output, request) => {
+    const attempt = store.readAttempt(store.readOperation(admitted.id).currentAttemptId!)
+    if (request.purpose.startsWith('elaboration_')) {
+      const local = JSON.parse(request.prompt.split('冻结业务输入:\n')[1].split('\n')[0]) as { targets: { nodeId: string; path: string }[] }
+      const { nodeId, path } = local.targets[0], parent = path === parentPath
+      calls.push({ attempt: attempt.number, nodeId, purpose: request.purpose, prompt: request.prompt })
+      if (request.purpose === 'elaboration_generate') {
+        if (threeAttempts && attempt.number === 3) assert.ok(!request.prompt.includes('已结算的拒绝候选'), '较新基础设施失败必须清seed，不复活更早业务拒绝')
+        const shouldRepair = attempt.number === 2 && (parentFailure ? parent : !parent)
+        const denied = ['input', 'readset', 'selection', 'aggregate'].includes(mode) && nodeId === 'export-contract' || ['ancestor', 'unsettled'].includes(mode)
+        if (shouldRepair && !denied) {
+          assert.ok(request.prompt.includes('已结算的拒绝候选'), `下一attempt ${nodeId}必须收到原局部候选`)
+          assert.ok(request.prompt.includes(`候选-${nodeId}-A1`), '必须收到原完整候选正文')
+          assert.ok(request.prompt.includes(parentFailure && mode === 'parent-structure' ? 'dependency-cycle' : `repair-${nodeId}`), '必须保留原结构或独审具体诊断')
+          if (!parent) assert.ok(!request.prompt.includes(`repair-${nodeId === 'export-contract' ? 'import-contract' : 'export-contract'}`), '两个叶的失败诊断不能串区')
+        }
+        if (shouldRepair && denied) assert.ok(!request.prompt.includes('已结算的拒绝候选'), '绑定变化或聚合结果不能作为本叶续修seed')
+        if (parent) {
+          if (attempt.number === 2 && !parentFailure && !['ancestor', 'unsettled'].includes(mode)) assert.fail('已accept父接口不应重新生成')
+          const value = rows(parentSource, parentPath); value.changes[0].nodeId = 'project'
+          value.applicability = ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: false, basis: '父接口由两个模块承接', affectedIds: [parentId] }))
+          if (attempt.number === 1 && parentFailure) value.changes[0].prose += ` 候选-${nodeId}-A1`
+          if (attempt.number === 1 && mode === 'parent-structure') value.changes[0].tables.REQ[0]['depends-on'] = [parentId]
+          if (attempt.number === 2 && mode === 'ancestor') value.changes[0].prose += ' 本轮祖先上下文不同。'
+          return value
+        }
+        const value = rows(nodeId === 'export-contract' ? original : other, path); value.changes[0].nodeId = nodeId
+        value.applicability = value.applicability.map(entry => ({ ...entry, affectedIds: [nodeId === 'export-contract' ? 'REQ-EXPORT-01' : 'REQ-IMPORT-01'] }))
+        if (!parentFailure) value.changes[0].prose += attempt.number === 1 ? ` 候选-${nodeId}-A1` : ' 本轮已明确补充边界说明。'
+        for (const row of value.changes[0].tables.FLOW) { assert.ok(Array.isArray(row.req)); row.req = [...row.req, parentId] }
+        for (const row of value.changes[0].tables.AC) { assert.ok(Array.isArray(row.covers)); row.covers = [...row.covers, parentId] }
+        return value
+      }
+      if (mode === 'parent-capacity-clear' && attempt.number === 2 && request.purpose === 'elaboration_review') throw Object.assign(new Error('fixture独审容量失败'), { code: 'failed' })
+      if (attempt.number === 1 && (parentFailure ? parent : !parent)) return { verdict: 'repair', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [{ code: `repair-${nodeId}`, kind: 'repair', message: `repair-${nodeId}`, affectedIds: [parent ? parentId : nodeId === 'export-contract' ? 'REQ-EXPORT-01' : 'REQ-IMPORT-01'], evidence: `原局部候选诊断-${nodeId}`, decision: '在原意内修正这项具体业务说明' }] }
+    }
+    if (request.purpose === 'code_generate') return { version: 'sync-files-v1', changes: [] }
+    if (request.purpose === 'code_review') throw Object.assign(new Error('定向机制用例在V3前停止'), { code: 'unsupported' })
+    return output
+  })
+  if (mode === 'parent-lease-clear') {
+    const claim = store.claimAttempt.bind(store)
+    store.claimAttempt = input => {
+      const second = store.listAttempts(input.operationId).length === 1
+      const claimed = claim({ ...input, leaseMs: second ? 1 : input.leaseMs })
+      if (second) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)
+      return claimed
+    }
+  }
+  const checkpoint = store.checkpoint.bind(store)
+  store.checkpoint = (fence, ref) => {
+    const value = JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())
+    if (store.readAttempt(fence.attemptId).number === 1 && value.stage?.startsWith('partition:') && value.stage.endsWith(':elaboration') && JSON.parse(readEvidence(f.input.source.commonDir, value.resultRef).toString()).changes.some((change: { path: string }) => change.path === contractPath)) {
+      if (mode === 'readset') value.readSetDigest = contentHash('不同读集合')
+      if (mode === 'foreign') value.operationId = 'foreign-operation'
+      if (mode === 'policy') value.policyDigest = contentHash('不同政策')
+      if (mode === 'selection') {
+        const selection = store.readBaselineSelection(f.input.source, [admitted.baselineSelection!.bindings[0].resource])
+        if (!('selection' in selection)) throw new Error(selection.failure.message)
+        value.baselineSelectionRef = writeEvidence(f.input.source.commonDir, selection.selection)
+      }
+      ref = writeEvidence(f.input.source.commonDir, value)
+    }
+    return checkpoint(fence, ref)
+  }
+  const recordFailure = store.recordFailure.bind(store)
+  store.recordFailure = (fence, issue) => {
+    if (store.readAttempt(fence.attemptId).number === 1) {
+      const stages = store.readAttempt(fence.attemptId).checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
+      const target = mode === 'ancestor' ? parentPath : contractPath
+      const local = stages.find(stage => stage.stage?.startsWith('partition:') && stage.stage.endsWith(':elaboration') && JSON.parse(readEvidence(f.input.source.commonDir, stage.resultRef).toString()).changes.some((change: { path: string }) => change.path === target))
+      if (['input', 'ancestor', 'aggregate'].includes(mode)) {
+        assert.ok(local)
+        const prior = JSON.parse(readEvidence(f.input.source.commonDir, local.resultRef).toString()) as ElaborationResult
+        if (mode === 'input') prior.inputDigest = contentHash('不同局部冻结输入')
+        if (mode === 'ancestor') prior.structurePassed = false
+        const resultRef = mode === 'aggregate' ? stages.find(stage => stage.stage === 'elaboration').resultRef : writeEvidence(f.input.source.commonDir, prior)
+        store.checkpoint(fence, resultRef); store.checkpoint(fence, writeEvidence(f.input.source.commonDir, { ...local, resultRef }))
+      }
+      const failed = recordFailure(fence, issue)
+      if (restart) throw new Error('fixture在已持久失败之后模拟进程退出')
+      return failed
+    }
+    return recordFailure(fence, issue)
+  }
+  if (mode === 'unsettled') {
+    const attempts = store.listAttempts.bind(store)
+    store.listAttempts = id => attempts(id).map(attempt => attempt.number === 1 && store.readOperation(id).currentAttemptId !== attempt.id ? { ...attempt, status: 'running' as const } : attempt)
+  }
+  let result = await runSyncOperation(store, admitted.id, f.options)
+  if (mode === 'parent-lease-clear') {
+    assert.equal(result.status, 'recovery_required')
+    const leaseAttempt = store.readAttempt(result.operation.currentAttemptId!)
+    assert.equal(leaseAttempt.number, 2); assert.equal(leaseAttempt.failure, null)
+    assert.equal(leaseAttempt.checkpointRefs.some(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()).stage?.startsWith('partition:')), false, '过期真实claim没有执行任何local P1')
+    result = await runSyncOperation(store, admitted.id, f.options)
+  }
+  if (restart) {
+    assert.equal(store.listAttempts(admitted.id).length, 1)
+    f.closeForRestart()
+    const protocol = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => protocol.close())
+    store = new SyncStore(protocol, { readBlob: ref => readEvidence(f.input.source.commonDir, ref) }); f.useStore(store)
+    result = await runSyncOperation(store, admitted.id, f.options)
+  }
+  if (mode === 'foreign' || mode === 'policy') {
+    assert.equal(result.failure!.code, 'stage_binding')
+    assert.equal(calls.filter(call => call.attempt === 2 && call.nodeId === 'export-contract').length, 0)
+    assert.equal(store.listJournals(admitted.id).length, 0)
+    return
+  }
+
+  assert.ok(f.calls.some(call => call.purpose === 'code_review'), JSON.stringify({ status: result.status, failure: result.failure, attempts: store.listAttempts(admitted.id).map(attempt => ({ failure: attempt.failure, findings: attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).filter(stage => stage.stage === 'elaboration').map(stage => JSON.parse(readEvidence(f.input.source.commonDir, stage.resultRef).toString()).rounds.flatMap((round: { findings: { code: string; message: string }[] }) => round.findings.map(({ code, message }) => ({ code, message })))) })), calls: calls.map(({ prompt: _prompt, ...call }) => call) }))
+  const attempts = store.listAttempts(admitted.id)
+  assert.equal(attempts.length, threeAttempts ? 3 : 2)
+  const stages = attempts.map(attempt => attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())))
+  const localStages = stages[1].filter(stage => stage.stage?.startsWith('partition:') && stage.stage.endsWith(':elaboration'))
+  for (const current of localStages) {
+    const value = JSON.parse(readEvidence(f.input.source.commonDir, current.resultRef).toString()) as ElaborationResult
+    if (!value.prior) continue
+    const source = stages[0].find(stage => stage.stage === current.stage)
+    const previous = JSON.parse(readEvidence(f.input.source.commonDir, source.resultRef).toString()) as ElaborationResult
+    assert.deepEqual(value.prior.traces, previous.rounds.at(-1)!.traces)
+    assert.equal(value.prior.candidateDigest, previous.rounds.at(-1)!.candidateDigest)
+    const provenance = stages[1].find(stage => stage.stage === `${current.stage}:repair-provenance`)
+    assert.deepEqual(JSON.parse(readEvidence(f.input.source.commonDir, provenance.resultRef).toString()), { fromOperationId: admitted.id, fromAttemptId: attempts[0].id, resultRef: source.resultRef, candidateDigest: value.prior.candidateDigest })
+    if (!threeAttempts) assert.equal(value.rounds.at(-1)!.review!.verdict, 'accept', '续修后仍须重新独审')
+  }
+  const final = JSON.parse(readEvidence(f.input.source.commonDir, stages.at(-1)!.find(stage => stage.stage === 'elaboration').resultRef).toString()) as ElaborationResult
+  assert.equal(final.phase, 'partitioned_final'); assert.equal(final.partitionSeal!.passed, true)
+  assert.equal(result.operation.callsUsed, f.calls.length); assert.deepEqual(result.operation.budget, admitted.budget); assert.equal(result.operation.deadlineAtMs, admitted.deadlineAtMs)
+  assert.deepEqual(store.listRecoverableResources(), [])
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+  assert.equal(store.listJournals(admitted.id).length, 0)
+})
+
 for (const mode of ['live', 'restart', 'precise', 'readset', 'missing-readset', 'selection', 'foreign-operation', 'foreign-provenance', 'raw', 'context', 'authorization', 'policy', 'plan', 'analysis', 'descendants', 'failed', 'unreviewed', 'global-seal'] as const) test(`v2跨attempt承接 ${mode} 已接受父接口的严格边界`, async t => {
   const parentPath = '.spec/project/spec.md', parentId = 'REQ-PARENT-01'
   const raw = '保留当前导出契约，由现有导出服务完成请求及结果下载。'
