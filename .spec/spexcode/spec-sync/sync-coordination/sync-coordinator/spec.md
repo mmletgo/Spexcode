@@ -16,6 +16,8 @@ code:
 
 同一operation的分区多轮承接已通过的局部analysis及普通叶P1：只读较早已终结attempt的原stage，严格核原operation/input/policy、精确readSet/selection、完整plan/分区归属及当前真实局部输入的原唯一冻结摘要。analysis承接在code-behavior现有context摘要生成后、任何模型派发前进行，并核原独立dispatch身份；叶P1沿freezeElaborationInput及完整partitionBinding，仅结构与独审accept且无failure的局部原件可承接。当前fence保存原resultRef/fromAttempt provenance，review/traces及输入摘要不改写；未审、错误绑定及聚合全局结果不能成为局部成功。局部并集仍重新执行严格全图seal，实际candidate改变后P2独审及V1–V4全部照常，不提前交付。
 
+只读候选续修来源的资格重验以原generation wrapper保存的readSet/selection恢复原冻结语境，再沿既有仅追加null资源的选择桥核当前合法性；后续已审P1新增ID不能让先前真实诊断失去资格，也不能重写旧wrapper/hash。真实原绑定改值、删除、非null扩展、source/input/policy不符继续拒绝；通用partition loader仍要求当前精确绑定。新whole候选的P2原生失败或再次语义repair都保留最新合法已审owner链，继续最终独审与V1–V4，不回退旧候选。
+
 并行分析异常保留全部已在途分区的完整原错误，按partitionId保存原proposal/程序校验/review诊断，并等待在途结算；主错误不能遮蔽其它未知资源或不可修复错误。只有全部错误均属于原允许的业务/结构修复，或原生接缝已精确确认notStarted且terminal→removed的SettledSessionCreateTimeoutError时，才进入原attempt/calls/repairs及绝对deadline内的有限自动修复。普通timeout、未知/未结算资源、绑定及保存错误不因此取得自动续修权。相同operation经明确pause→resume启动的新attempt时，仍可从该operation、同摘要的分区失败stage恢复 `behavior_analysis_invalid` / `behavior_review_failed` 原件，只按partitionId投影到对应分区；不把unsupported或其他基础设施错误作为模型诊断，不取得自动重试资格。下一attempt仅向对应失败分区重送该区历史诊断，已accept区不被兄弟诊断改变摘要；失败原件不是事实或批准。
 
 P2 的 V1 把实际验证 candidate tree 的完整 entry 路径清单交给 [[sync-frozen-contracts]]，与冻结正文共同核前元数据关系完整性。模型可读正文子集不能被当作完整存在性清单；错误 related/code/one-govern 在生成修复阶段拒绝，不推进 V2、V3 或 apply journal。

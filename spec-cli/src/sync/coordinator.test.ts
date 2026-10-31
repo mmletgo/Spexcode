@@ -1781,10 +1781,11 @@ test('readonly-owner零派发guard只阻相同候选诊断，真实owner新派�
   assert.equal(readonlySpecRepairStalled(repair, 'same', [{ ...findings[0], message: '另一真实错误' }], attempt), false)
 })
 
-for (const mode of ['existing', 'new-leaf', 'aggregate-only', 'review', 'review-multi', 'review-p1-fail', 'review-resume', 'review-location', 'review-ref', 'wrong-ref', 'unaffected-ref', 'readset', 'selection', 'non-null-selection', 'input-digest', 'foreign', 'policy', 'candidate', 'missing-owner'] as const) test(`readonly-owner late V1 ${mode} 只返修精确owner`, async t => {
+for (const mode of ['existing', 'new-leaf', 'aggregate-only', 'review', 'review-multi', 'review-p1-fail', 'review-rebind', 'review-rebind-native', 'review-resume', 'review-location', 'review-ref', 'wrong-ref', 'unaffected-ref', 'readset', 'selection', 'selection-deleted', 'selection-source', 'non-null-selection', 'input-digest', 'foreign', 'policy', 'candidate', 'missing-owner'] as const) test(`readonly-owner late V1 ${mode} 只返修精确owner`, async t => {
+  const rebinding = mode === 'review-rebind' || mode === 'review-rebind-native'
   const semantic = mode.startsWith('review'), multi = mode === 'review-multi' || mode === 'review-p1-fail'
   const newLeaf = semantic || mode === 'new-leaf' || mode === 'aggregate-only', aggregateOnly = mode === 'aggregate-only'
-  const negative = !['existing', 'new-leaf', 'aggregate-only', 'review', 'review-multi', 'review-p1-fail', 'review-resume'].includes(mode)
+  const negative = !['existing', 'new-leaf', 'aggregate-only', 'review', 'review-multi', 'review-p1-fail', 'review-rebind', 'review-rebind-native', 'review-resume'].includes(mode)
   const baseSpec = original.split('\n').map(line => line.startsWith('| AC-EXPORT-') ? line.replace(' | derived:REQ-EXPORT-01 | REQ-EXPORT-01 |', ' | code:src/export.js#ExportService | REQ-EXPORT-01 |') : line).join('\n')
   const definitions = [
     { nodeId: 'export-contract', path: contractPath, sourcePath: 'src/export.js', testPath: 'tests/export.test.mjs', word: 'export', upper: 'EXPORT' },
@@ -1825,6 +1826,7 @@ for (const mode of ['existing', 'new-leaf', 'aggregate-only', 'review', 'review-
         if (semantic) {
           const number = (generatedPerOwner.get(definition.nodeId) ?? 0) + 1; generatedPerOwner.set(definition.nodeId, number)
           if (badOwners.includes(definition) && number < (mode === 'review-p1-fail' && definition !== badOwner ? 2 : 3)) generated.changes[0].tables.AC[0].assertion += '（错误地声称oracle还检查了父目录absence）'
+          if (rebinding && definition === badOwner && number >= 2) generated.changes[0].tables.AC.push({ ...generated.changes[0].tables.AC[0], id: `AC-${definition.upper}-ADDED-REVIEW` })
           if (attempt.number > 1) {
             const repair = context.readonlySpecRepair as { kind: string; reviewEvidence: unknown[] }
             assert.equal(repair.kind, 'candidate_review'); assert.ok(repair.reviewEvidence.length)
@@ -1841,8 +1843,9 @@ for (const mode of ['existing', 'new-leaf', 'aggregate-only', 'review', 'review-
           const definition = badOwners.find(owner => owner.path === spec.path), id = definition && `AC-${definition.upper}-01`
           return id && frozen.readyIds.includes(id) && spec.source.includes('错误地声称oracle') ? [{ kind: 'repair', affectedIds: [id], ruleLocation: `${mode === 'review-location' ? '.spec/foreign/spec.md' : `${multi ? 'contract:' : ''}${spec.path}`}#${id}`, codeLocation: 'tests/export.test.mjs#AC-EXPORT-01', evidence: '完整测试只断言文件absence，没有断言父目录absence', counterexample: '父目录存在但文件缺失仍满足原oracle', message: '保留raw要求，准确表述当前AC证据覆盖，不宣称未测断言' }] : []
         })
+        if (mode === 'review-rebind-native' && attempt.number === 2 && issues.length) throw Object.assign(new Error('fixture实际P2原生失败；不得当作语义repair'), { code: 'failed' })
         if (issues.length) return { ...(output as object), verdict: 'repair', findings: issues }
-        if (attempt.number < (mode === 'review-resume' ? 4 : 3)) return output
+        if (attempt.number < (mode === 'review-resume' || mode === 'review-rebind-native' ? 4 : 3)) return output
       }
       finalReview = true; throw Object.assign(new Error('fixture在全候选真实V1通过后、Docker之前停止'), { code: 'unsupported' })
     }
@@ -1863,8 +1866,14 @@ for (const mode of ['existing', 'new-leaf', 'aggregate-only', 'review', 'review-
     if (before.number === 1 && issue.code === 'generation_failed' && negative && !semantic) {
       const wrappers = before.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
       const local = wrappers.find(value => value.stage?.startsWith('partition:') && value.stage.endsWith(':elaboration') && JSON.parse(readEvidence(f.input.source.commonDir, value.resultRef).toString()).changes.some((change: { nodeId: string }) => change.nodeId === badOwner.nodeId))
-      if (['readset', 'selection', 'non-null-selection', 'foreign', 'policy'].includes(mode)) {
+      if (['readset', 'selection', 'selection-deleted', 'selection-source', 'non-null-selection', 'foreign', 'policy'].includes(mode)) {
         let selection = { ...f.operation.baselineSelection!, digest: contentHash('wrong selection') }
+        if (mode === 'selection-deleted' || mode === 'selection-source') {
+          selection = structuredClone(f.operation.baselineSelection!)
+          if (mode === 'selection-deleted') selection.bindings = selection.bindings.slice(1)
+          else selection.source.branch = 'foreign-selection-branch'
+          selection.digest = contentHash(JSON.stringify({ version: selection.version, source: selection.source, bindings: selection.bindings }, (_key, value: unknown) => value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value))
+        }
         if (mode === 'non-null-selection') {
           selection = structuredClone(f.operation.baselineSelection!)
           const first = selection.bindings[0]; assert.equal(first.resource.kind, 'path'); assert.ok('bytePair' in first)
@@ -1917,18 +1926,23 @@ for (const mode of ['existing', 'new-leaf', 'aggregate-only', 'review', 'review-
     }
     return failed
   }
-  f.store.claimQueuedAttempt = input => { if (f.store.listAttempts(f.operation.id).length >= (aggregateOnly || mode === 'review-resume' ? 4 : 3)) throw new Error('fixture仅阻止旧实现无限零调用热循环'); return claim(input) }
+  f.store.claimQueuedAttempt = input => { if (f.store.listAttempts(f.operation.id).length >= (aggregateOnly || mode === 'review-resume' || mode === 'review-rebind-native' ? 4 : 3)) throw new Error('fixture仅阻止旧实现无限零调用热循环'); return claim(input) }
   const result = await runSyncOperation(f.store, f.operation.id, f.options)
   if (negative) { assert.equal(finalReview, false); assert.equal(f.store.listAttempts(f.operation.id).length, 2); assert.equal(ownerCalls.filter(call => call.attempt > 1).length, 0); assert.notEqual(result.failure?.kind, 'repairable', JSON.stringify(result.failure)); assert.ok(['failed', 'unsupported'].includes(result.status), JSON.stringify(result.failure)); return }
   assert.ok(finalReview, JSON.stringify({ failure: result.failure, calls: ownerCalls, failures: f.store.listAttempts(f.operation.id).map(attempt => attempt.failure) }))
   const second = aggregateOnly || mode === 'review-resume' ? 3 : 2
-  for (const owner of badOwners) assert.deepEqual(ownerCalls.filter(call => call.attempt > 1 && call.nodeId === owner.nodeId).map(({ attempt, purpose }) => [attempt, purpose]), mode === 'review-p1-fail' && owner !== badOwner ? [[second, 'elaboration_generate'], [second, 'elaboration_review']] : [[second, 'elaboration_generate'], [second, 'elaboration_review'], [second + 1, 'elaboration_generate'], [second + 1, 'elaboration_review']])
+  for (const owner of badOwners) assert.deepEqual(ownerCalls.filter(call => call.attempt > 1 && call.nodeId === owner.nodeId).map(({ attempt, purpose }) => [attempt, purpose]), mode === 'review-p1-fail' && owner !== badOwner ? [[second, 'elaboration_generate'], [second, 'elaboration_review']] : [[second, 'elaboration_generate'], [second, 'elaboration_review'], [mode === 'review-rebind-native' ? 4 : second + 1, 'elaboration_generate'], [mode === 'review-rebind-native' ? 4 : second + 1, 'elaboration_review']])
   const attempts = f.store.listAttempts(f.operation.id)
   const stages = attempts.map(attempt => attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())))
   for (const source of stages[0].filter(stage => stage.stage?.startsWith('partition:') && stage.stage.endsWith(':elaboration'))) {
     const prior = JSON.parse(readEvidence(f.input.source.commonDir, source.resultRef).toString()) as ElaborationResult
     if (prior.changes.some(change => badOwners.some(owner => owner.nodeId === change.nodeId))) continue
-    for (const current of stages.slice(second - 1)) assert.deepEqual(current.find(stage => stage.stage === source.stage).resultRef, source.resultRef)
+    for (const current of stages.slice(second - 1)) {
+      const local = current.find(stage => stage.stage === source.stage)
+      const aggregate = current.find(stage => stage.stage === 'elaboration')
+      const owner = aggregate && (JSON.parse(readEvidence(f.input.source.commonDir, aggregate.resultRef).toString()) as ElaborationResult).partitionEvidence?.find(owner => source.stage === `partition:${owner.partitionId}:elaboration`)
+      assert.deepEqual(local?.resultRef ?? owner?.resultRef, source.resultRef)
+    }
   }
   if (mode === 'review-p1-fail') {
     const owner = stages[1].find(stage => stage.stage?.startsWith('partition:') && stage.stage.endsWith(':elaboration') && JSON.parse(readEvidence(f.input.source.commonDir, stage.resultRef).toString()).changes.some((change: { nodeId: string }) => change.nodeId === badOwners[0].nodeId))
@@ -1938,10 +1952,18 @@ for (const mode of ['existing', 'new-leaf', 'aggregate-only', 'review', 'review-
   const generations = stages.map(values => { const saved = values.find(stage => stage.stage === 'generation'); return saved ? JSON.parse(readEvidence(f.input.source.commonDir, saved.resultRef).toString()) : null })
   assert.ok(generations.filter(Boolean).every(value => Array.isArray(value.p2SpecWritePaths) && value.p2SpecWritePaths.length === 0), 'Spec-only权限由宿主dispatch投影为空，不能借用P2 writer')
   if (semantic) {
-    for (const generated of [generations[0], generations[second - 1]].filter(Boolean)) { assert.equal(generated.candidateValidated, true); assert.ok(generated.partitionEvidence.some((evidence: { review: { verdict: string } }) => evidence.review.verdict === 'repair')) }
+    for (const generated of [generations[0], mode === 'review-rebind-native' ? generations[2] : generations[second - 1]].filter(Boolean)) { assert.equal(generated.candidateValidated, true); assert.ok(generated.partitionEvidence.some((evidence: { review: { verdict: string } }) => evidence.review.verdict === 'repair')) }
   } else {
     assert.ok(generations[0].validationFindings.some((finding: { code: string }) => finding.code === 'anchor-dead'))
     assert.ok(generations[second - 1].validationFindings.some((finding: { code: string }) => finding.code === 'anchor-dead'), 'agent实际修过但未修好仍可下一轮')
+  }
+  if (rebinding) {
+    assert.notEqual(stages[0].find(stage => stage.stage === 'generation').readSetDigest, stages[1].find(stage => stage.stage === 'generation').readSetDigest, '本轮新合法AC通过正式scope扩充改变readSet')
+    assert.notEqual(stages[0].find(stage => stage.stage === 'generation').baselineSelectionRef.sha256, stages[1].find(stage => stage.stage === 'generation').baselineSelectionRef.sha256)
+    if (mode === 'review-rebind-native') {
+      assert.equal(generations[1].status, 'failed'); assert.equal(ownerCalls.some(call => call.attempt === 3), false, 'P2原生失败后新accepted whole仍需承接，不回旧P1')
+      assert.deepEqual(stages[2].find(stage => stage.stage === 'elaboration').resultRef, stages[1].find(stage => stage.stage === 'elaboration').resultRef, 'P2原生失败后复用最新whole，不回旧owner refs')
+    }
   }
   assert.equal(generations.at(-1).candidateValidated, true, '完整候选真实V1重跑通过')
   assert.deepEqual(readTree(f.input.source.commonDir, generations.at(-1).candidate.tree).filter(entry => !entry.path.startsWith('.spec/')), snapshotObjects)
