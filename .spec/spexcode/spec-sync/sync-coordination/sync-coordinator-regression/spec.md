@@ -123,3 +123,5 @@ A7形状的真实Git/SQLite回归先保存独审accept但含无IDcoverage_gap的
 同candidate A/B source交叉响应负例让旧A被遗漏而新owner只响应B，必须在新dispatch前明确拒绝；缺失待处理owner同样拒绝。正例连续同正文O0→O1响应A→O2响应B，经合法whole lineage及两份after-source真实gen/review证据结算，current只携B也不能使A复活。来源与装配base分别绑定、其他owner最新ref不回退；lineage仅运行内派生。
 
 部分P2组合回归先产生真实候选、一分区原生失败且review=null、另一分区三条独审repair，aggregate实际status=failed/failure保留；先复现旧semantic guard丢失三条诊断，再证明下一attempt仅受影响owner新生成与独审，其余原ref/raw/facts/授权/source/tests不变且code_generate为零。原失败partition仍无review，不冒充accept；完整候选及全部P2继续新审，旧generation/failure/ref保持。
+
+普通RULE anchor不在affectedIds的真实形状回归在已验证部分P2失败组合中，保三条规范repair及原JSON，先复现误判unsupported，再证明只对anchor owner新P1生成/独审；affectedIds不补假RULE。空/重复/候选外ID及外来anchor仍拒绝，prose同owner限制与contract-omission特殊成员门不变。

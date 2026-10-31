@@ -134,7 +134,7 @@ async function fixture(t: test.TestContext, budget: import('./operation-types.js
       const change = (path: string, content: string) => { const entry = frozen.manifest.entries.find(item => item.path === path)!; return { path, beforeDigest: entry?.digest ?? null, beforeMode: entry?.mode ?? null, mode: entry ? null : '100644', content } }
       output = { version: 'sync-files-v1', changes: [...frozen.elaboratedSpecs.map(spec => change(spec.path, spec.source)), change('src/export.js', `${source}\n// independently reviewed generated implementation\n`)] }
     } else {
-      const identity = JSON.parse(request.prompt.split('实际候选身份与 manifest:\n')[1].split('\n实际完整候选')[0]) as { inputId: string; candidate: { digest: string } }
+      const identity = JSON.parse(request.prompt.split('实际候选身份与 manifest:\n')[1].split('\n')[0]) as { inputId: string; candidate: { digest: string } }
       output = { inputId: identity.inputId, candidateDigest: identity.candidate.digest, verdict: 'accept', checkedIds: promptInput(request).readyIds, findings: [] }
     }
     if (transform) output = await transform(output, request)
@@ -1781,15 +1781,16 @@ test('readonly-owner零派发guard只阻相同候选诊断，真实owner新派�
   assert.equal(readonlySpecRepairStalled(repair, 'same', [{ ...findings[0], message: '另一真实错误' }], attempt), false)
 })
 
-for (const mode of ['existing', 'new-leaf', 'aggregate-only', 'review', 'review-partial', 'review-pending', 'review-pending-unchanged', 'review-pending-sibling', 'review-pending-cross-source', 'review-pending-missing-owner', 'review-pending-lineage', 'review-pending-foreign-base', 'review-pending-unreviewed-base', 'review-prose', 'review-prose-cross-owner', 'review-prose-unknown', 'review-prose-path', 'review-prose-empty', 'review-multi', 'review-p1-fail', 'review-rebind', 'review-rebind-native', 'review-resume', 'review-location', 'review-ref', 'wrong-ref', 'unaffected-ref', 'readset', 'selection', 'selection-deleted', 'selection-source', 'non-null-selection', 'input-digest', 'foreign', 'policy', 'candidate', 'missing-owner'] as const) test(`readonly-owner late V1 ${mode} 只返修精确owner`, async t => {
-  const partial = mode === 'review-partial'
+for (const mode of ['existing', 'new-leaf', 'aggregate-only', 'review', 'review-anchor-reference', 'review-partial', 'review-pending', 'review-pending-unchanged', 'review-pending-sibling', 'review-pending-cross-source', 'review-pending-missing-owner', 'review-pending-lineage', 'review-pending-foreign-base', 'review-pending-unreviewed-base', 'review-prose', 'review-prose-cross-owner', 'review-prose-unknown', 'review-prose-path', 'review-prose-empty', 'review-multi', 'review-p1-fail', 'review-rebind', 'review-rebind-native', 'review-resume', 'review-location', 'review-ref', 'wrong-ref', 'unaffected-ref', 'readset', 'selection', 'selection-deleted', 'selection-source', 'non-null-selection', 'input-digest', 'foreign', 'policy', 'candidate', 'missing-owner'] as const) test(`readonly-owner late V1 ${mode} 只返修精确owner`, async t => {
+  const ordinaryAnchor = mode === 'review-anchor-reference'
+  const partial = mode === 'review-partial' || ordinaryAnchor
   const rebinding = mode === 'review-rebind' || mode === 'review-rebind-native'
   const crossSource = mode === 'review-pending-cross-source', missingOwner = mode === 'review-pending-missing-owner', lineage = mode === 'review-pending-lineage'
   const pending = mode.startsWith('review-pending'), unchanged = mode === 'review-pending-unchanged', sibling = mode === 'review-pending-sibling' || crossSource || missingOwner, invalidBase = mode === 'review-pending-foreign-base' || mode === 'review-pending-unreviewed-base'
   const prose = mode.startsWith('review-prose') || pending
   const semantic = mode.startsWith('review'), multi = mode === 'review-multi' || mode === 'review-p1-fail'
   const newLeaf = semantic && !partial || mode === 'new-leaf' || mode === 'aggregate-only', aggregateOnly = mode === 'aggregate-only'
-  const negative = !['existing', 'new-leaf', 'aggregate-only', 'review', 'review-partial', 'review-pending', 'review-pending-unchanged', 'review-pending-sibling', 'review-pending-lineage', 'review-prose', 'review-multi', 'review-p1-fail', 'review-rebind', 'review-rebind-native', 'review-resume'].includes(mode)
+  const negative = !['existing', 'new-leaf', 'aggregate-only', 'review', 'review-anchor-reference', 'review-partial', 'review-pending', 'review-pending-unchanged', 'review-pending-sibling', 'review-pending-lineage', 'review-prose', 'review-multi', 'review-p1-fail', 'review-rebind', 'review-rebind-native', 'review-resume'].includes(mode)
   const baseSpec = original.split('\n').map(line => line.startsWith('| AC-EXPORT-') ? line.replace(' | derived:REQ-EXPORT-01 | REQ-EXPORT-01 |', ' | code:src/export.js#ExportService | REQ-EXPORT-01 |') : line).join('\n')
   const definitions = [
     { nodeId: 'export-contract', path: contractPath, sourcePath: 'src/export.js', testPath: 'tests/export.test.mjs', word: 'export', upper: 'EXPORT' },
@@ -1881,7 +1882,7 @@ for (const mode of ['existing', 'new-leaf', 'aggregate-only', 'review', 'review-
           if (attempt.number > 1) { finalReview = true; throw Object.assign(new Error('partial诊断已由fresh P1处理；完整P2重审在Docker前停止'), { code: 'unsupported' }) }
           if (!partialFailed && !frozen.elaboratedSpecs.some(spec => spec.path === badOwner.path)) { partialFailed = true; throw Object.assign(new Error('fixture其它分区真实Native失败，review保持null'), { code: 'failed' }) }
           const ids = [`AC-${badOwner.upper}-01`, `RULE-${badOwner.upper}-05`, `FLOW-${badOwner.upper}-01`]
-          return { ...(output as object), verdict: frozen.readyIds.includes(ids[0]) ? 'repair' : 'accept', findings: frozen.readyIds.includes(ids[0]) ? ids.map(id => ({ kind: 'repair', affectedIds: [id], ruleLocation: `contract:${badOwner.path}#${id}`, codeLocation: `${badOwner.sourcePath}#ExportService`, evidence: '独立评审要求核对候选表述和现有实现，P1可复核误读而保持正文', counterexample: '空复审不能代替owner回应先前3条发现', message: '按原raw/source复核，不改源码或授权' })) : [] }
+          return { ...(output as object), verdict: frozen.readyIds.includes(ids[0]) ? 'repair' : 'accept', findings: frozen.readyIds.includes(ids[0]) ? ids.map((id, index) => ({ kind: 'repair', affectedIds: ordinaryAnchor && index === 1 ? [`AC-${badOwner.upper}-01`, `AC-${badOwner.upper}-02`, `REQ-${badOwner.upper}-01`] : ordinaryAnchor && index === 2 ? ['AC-EXPORT-01'] : [id], ruleLocation: `contract:${badOwner.path}#${id}`, codeLocation: `${badOwner.sourcePath}#ExportService`, evidence: '独立评审要求核对候选表述和现有实现，P1可复核误读而保持正文', counterexample: '空复审不能代替owner回应先前3条发现', message: '按原raw/source复核，不改源码或授权' })) : [] }
         }
         const issues = frozen.elaboratedSpecs.flatMap(spec => {
           const definition = badOwners.find(owner => owner.path === spec.path), id = definition && `AC-${definition.upper}-01`
@@ -1914,6 +1915,10 @@ for (const mode of ['existing', 'new-leaf', 'aggregate-only', 'review', 'review-
       const generated = JSON.parse(readEvidence(f.input.source.commonDir, wrapper.resultRef).toString())
       assert.equal(generated.status, 'failed'); assert.ok(generated.failure); assert.equal(generated.review, null)
       assert.equal(generated.partitionEvidence.flatMap((part: { review: { findings: unknown[] } }) => part.review.findings).length, 3, '真正失败组合必须保存3条有效局部repair')
+      if (ordinaryAnchor) {
+        const finding = generated.partitionEvidence.flatMap((part: { review: { findings: { ruleLocation: string; affectedIds: string[] }[] } }) => part.review.findings).find((finding: { ruleLocation: string }) => finding.ruleLocation.endsWith(`#RULE-${badOwner.upper}-05`))!
+        assert.equal(finding.affectedIds.includes(`RULE-${badOwner.upper}-05`), false, '合法普通RULE引用不要求anchor在受影响ID中')
+      }
     }
     if (sibling && before.number === 1) {
       // 只对读取视图模拟旧版忽略早期generation；原SQLite/CAS与全部P1原件保持。

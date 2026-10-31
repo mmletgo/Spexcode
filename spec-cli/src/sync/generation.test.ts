@@ -36,7 +36,7 @@ function changes(input: GenerationInput): unknown {
   return { version: 'sync-files-v1', changes: [{ path: entry.path, beforeDigest: entry.digest, beforeMode: entry.mode, mode: null, content: `${input.files.get(entry.path)}\n// actual candidate implementation\n` }] }
 }
 function review(request: ElaborationSessionRequest): GenerationReview {
-  const identity = JSON.parse(request.prompt.split('实际候选身份与 manifest:\n')[1].split('\n实际完整候选')[0]) as { inputId: string; candidate: { digest: string } }
+  const identity = JSON.parse(request.prompt.split('实际候选身份与 manifest:\n')[1].split('\n')[0]) as { inputId: string; candidate: { digest: string } }
   return { inputId: identity.inputId, candidateDigest: identity.candidate.digest, verdict: 'accept', checkedIds: ['REQ-EXPORT-01', 'AC-EXPORT-03'], findings: [] }
 }
 function runner(input: GenerationInput, generation: (request: ElaborationSessionRequest) => unknown = () => changes(input), inspect: (request: ElaborationSessionRequest) => unknown = review) {
@@ -363,6 +363,19 @@ test('可信freeze回调发生在生成返回后，实际候选继承闭包外�
   assert.ok(!native.calls[0].prompt.includes(inherited.toString().trim()))
   assert.ok(native.calls[1].prompt.includes(result.candidate!.digest))
   assert.equal(result.candidateFiles?.get('tests/export.test.mjs'), source.files.get('tests/export.test.mjs'))
+  const projected = runner(source, () => assert.fail('已冻结候选仅独审，不重新生成'), request => ({ ...review(request), verdict: 'repair', findings: [{ kind: 'repair', affectedIds: ['AC-EXPORT-03'], ruleLocation: `contract:${contractPath}#AC-EXPORT-03`, codeLocation: 'unselected.txt', evidence: '分派义务所需的具体实现证据未提供', counterexample: '当前投影不足以判断该义务', message: '需要该义务的具体证据，不推断完整候选缺文件' }] }))
+  const checked = await runGeneration(source, { runner: projected.run, reviewCandidate: result.candidate!, validateCandidate: valid })
+  assert.equal(checked.status, 'repair'); assert.equal(projected.calls.length, 1)
+  assert.equal(checked.review!.findings[0].codeLocation, 'unselected.txt', '具体证据不足仍可要求repair')
+  const prompt = projected.calls[0].prompt
+  assert.ok(prompt.includes('本地审查投影'))
+  assert.ok(!prompt.includes('实际完整候选'))
+  assert.ok(prompt.includes('不能仅据本投影未提供文件就宣称完整候选缺文件'))
+  assert.ok(prompt.includes('具体义务确需未提供证据时仍返回repair'))
+  const identity = JSON.parse(prompt.split('实际候选身份与 manifest:\n')[1].split('\n')[0]) as { manifest: { entries: { path: string }[] }; completeManifestDigest: string }
+  assert.equal(identity.manifest.entries.some(entry => entry.path === 'unselected.txt'), false)
+  assert.equal(identity.completeManifestDigest, contentHash(JSON.stringify({ version: 1, entries: verifyCandidate(source.snapshot.source.commonDir, result.candidate!) })))
+  assert.ok(!prompt.includes(JSON.stringify(inherited.toString())), '不为更正caption扩大本地读取范围')
 })
 
 test('可信publication回调仍不能改变readonly或缺失路径；模型改readonly也硬拒绝', async t => {
