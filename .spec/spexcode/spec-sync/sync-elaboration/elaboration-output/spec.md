@@ -19,6 +19,8 @@ review verdict 的原生说明明确 accept 仅可搭配空 findings；implement
 
 模型临时输出 `elaboration-target-rows-v3`：冻结目标的输入内 targetIndex、标题和说明、真实代码/相关绑定、业务解释（null 表示沿用）、显式 removeIds、各类型新增或替换的完整业务行，以及每个适用性边界的依据和影响 ID。模型不返回 nodeId/path；wire 为每个冻结目标附原数组下标 targetIndex，程序从同一冻结目标及显式 nodeChanges 唯一绑定节点、可写路径、原意和源摘要。全部类型数组均存在，空数组表示无该表；行对象的列直接派生自解析器 `CONTRACT_COLUMNS`，不复制另一份列定义。严格 schema 约束稳定 ID、单一来源、引用数组、布尔值、VERIFY argv 和正整数超时；`STEP.next` 的 END 单值不能混入 ID 列表。有状态流程引用 STATE 结果，不能把同步动作当成无状态能力。
 
+生成与独审指令明确区分临时 JSON 行和最终 Markdown：模型提供所有 schema 必填列，引用集合使用 JSON 数组，布尔使用 boolean，schema 允许 null 的列使用 null 表达空值；不适用的 `TR.to` 明确为 null，不能省略或填空字符串、字符串 `-`。表头、Markdown 空值 `-` 与逗号分隔引用由程序渲染，不能将最终文件语法作为模型 JSON 的值约定。严格 schema 接受范围及完整候选、全图和独审门槛不变。 AC-ELABORATION-21 先以当前 v3 wire 校验合法基线，再核字段负例确实在业务行内被拒绝；不适用 TR 的 null 经绑定、渲染及契约解析后仍为 null，不能以旧协议版本错误冒充字段校验覆盖。
+
 `RULE.authority` 的生成请求 schema 仅接受本轮冻结可写 target 的 canonical `nodeId`，不能接受 REQ/RULE 业务 ID。合法 move 中，冻结旧节点已有 `authority` 等于其 `from.nodeId` 的 RULE 时，schema 还保留该旧 `nodeId`，供 renderer 按真实 `nodeChanges` 归一到目的身份；最终 owner 仍由现有逐项校验确认，enum 不授予跨叶归属。没有可写 target 时不产生空 enum。
 
 `interface_seed` 是分区编排内部的父接口schema：只允许REQ/RULE/GAP行，不允许新增FLOW/STEP/AC/VERIFY；既有精确匹配冻结登记的技术VERIFY由程序沿用而非模型重选；首次raw-only或既有纯接口均沿用同一行差量和旧新演进门禁。既有条目默认保留，removeIds仅可取本目标已有且经输入门禁核验的显式retire授权ID，schema以精确enum和数量限域；无合法退役授权时仍为零项且不产生空enum。code/related严格沿用冻结父节点绑定，空绑定用`maxItems:0`和普通string items约束，不生成空enum。

@@ -355,19 +355,34 @@ test('AC-ELABORATION-20 固定调用身份不包含剩余预算，重放相同�
 })
 
 test('AC-ELABORATION-21 行schema在模型边界拒绝拼接来源、错误引用/布尔/argv', () => {
-  const request = { purpose: 'elaboration_generate' } as ElaborationSessionRequest
+  const request = { purpose: 'elaboration_generate', prompt: `冻结业务输入:\n${JSON.stringify({ targets: input().targets })}\n` } as ElaborationSessionRequest
+  assert.deepEqual(outputErrors(adaptElaborationNativeOutput(request, candidate(request, source)), ELABORATION_SCHEMA), [])
   for (const edit of [
     (rows: GeneratedTables) => { rows.RULE[0].source = 'decision:EXPORT-POLICY,user:raw' },
     (rows: GeneratedTables) => { rows.STATE[0].initial = 'true' },
     (rows: GeneratedTables) => { rows.FLOW[0].req = ['不是稳定ID'] },
+    (rows: GeneratedTables) => { delete rows.TR[0].to },
+    (rows: GeneratedTables) => { rows.TR[0].to = '' },
+    (rows: GeneratedTables) => { rows.TR[0].to = '-' },
     (rows: GeneratedTables) => { rows.VERIFY[0].command = '["node"]' },
     (rows: GeneratedTables) => { rows.VERIFY[0].command = ['node', '非法\n参数'] },
     (rows: GeneratedTables) => { rows.VERIFY[0]['timeout-ms'] = 0 },
   ]) {
     const output = candidate(request, source)
     edit(output.changes[0].tables)
-    assert.ok(outputErrors(output, ELABORATION_SCHEMA).length)
+    const errors = outputErrors(adaptElaborationNativeOutput(request, output), ELABORATION_SCHEMA)
+    assert.ok(errors.some(error => error.startsWith('$.changes[0].tables.')), JSON.stringify(errors))
   }
+  const nullable = candidate(request, source)
+  nullable.changes[0].tables.TR[0].to = null
+  nullable.changes[0].tables.TR[0].disposition = 'not_applicable'
+  const wireNullable = adaptElaborationNativeOutput(request, nullable) as GeneratedTargetElaboration
+  assert.deepEqual(outputErrors(wireNullable, ELABORATION_SCHEMA), [])
+  const snapshot = input(true)
+  const rendered = renderElaboration(snapshot, bindElaborationTargets(snapshot, wireNullable), 'nullable-json-input')
+  const parsed = parseContract({ nodeId: 'export-contract', path, source: rendered.changes[0].source })
+  assert.deepEqual(parsed.findings, [])
+  assert.equal(parsed.contract!.items.find(item => item.kind === 'TR')!.to, null)
 })
 
 test('AC-ELABORATION-22 程序复制原文和绑定，保留元数据，正确渲染转义及argv', () => {
