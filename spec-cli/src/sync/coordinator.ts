@@ -229,8 +229,19 @@ function readonlyLocalSource(store: SyncStore, operation: SyncOperation, attempt
 
 function readonlyReviewFindings(result: SavedGeneration, changes: SavedElaboration['changes'], writable: readonly string[]): ContractFinding[] {
   const items = changes.flatMap(change => parseContract({ nodeId: change.nodeId, path: change.path, source: change.source }).contract?.items ?? [])
-  return (result.partitionEvidence ?? []).filter(evidence => evidence.review.verdict === 'repair').flatMap(evidence => evidence.review.findings).flatMap(finding => {
-    const [path, id, extra] = finding.ruleLocation.replace(/^contract:/, '').split('#'), matches = items.filter(item => item.path === path && item.id === id)
+  return (result.partitionEvidence ?? []).filter(evidence => evidence.review.verdict === 'repair').flatMap(evidence => evidence.review.findings).flatMap<ContractFinding>(finding => {
+    const location = finding.ruleLocation.replace(/^contract:/, '')
+    const prose = changes.filter(change => location.startsWith(`${change.path} — expanded spec `) && location.slice(`${change.path} — expanded spec `.length).trim())
+    if (prose.length) {
+      const target = prose[0]
+      if (within(target.path, writable)) return []
+      if (finding.kind !== 'repair' || prose.length !== 1 || !finding.affectedIds.length || finding.affectedIds.some(id => {
+        const matches = items.filter(item => item.id === id)
+        return matches.length !== 1 || matches[0].nodeId !== target.nodeId || matches[0].path !== target.path
+      })) fail('readonly_spec_repair_binding', '只读正文诊断必须以实际候选路径及全部唯一同owner affectedIds绑定')
+      return [{ code: 'candidate-review-repair', severity: 'error', nodeId: target.nodeId, path: target.path, relatedIds: finding.affectedIds, message: JSON.stringify(finding) }]
+    }
+    const [path, id, extra] = location.split('#'), matches = items.filter(item => item.path === path && item.id === id)
     if (within(path, writable)) return []
     if (finding.kind !== 'repair' || extra !== undefined || matches.length !== 1 || !finding.affectedIds.includes(id) || finding.affectedIds.some(id => !items.some(item => item.id === id))) fail('readonly_spec_repair_binding', '只读独审诊断必须以实际候选路径/ID及affectedIds绑定唯一契约')
     return [{ code: 'candidate-review-repair', severity: 'error', nodeId: matches[0].nodeId, path, itemId: id, message: JSON.stringify(finding) }]
