@@ -8,6 +8,8 @@ export const ELABORATION_BOUNDARIES = ['permissions', 'mutation', 'async', 'netw
 export type ElaborationBoundary = typeof ELABORATION_BOUNDARIES[number]
 export type ElaborationTarget = { nodeId: string; path: string; source: string | null; sourceDigest: string | null; rawSource?: string }
 export type ElaborationFact = { source: string; text: string }
+/** 真实只读全候选V1失败；历史已审候选仅作技术定位诊断，不是业务拒绝seed或新授权。 */
+export type ReadonlySpecRepair = { baseInputDigest: string; candidateDigest: string; generationRef: BlobRef; acceptedRef: BlobRef; changes: ElaborationResult['changes']; output: unknown; review: ElaborationReview | null; findings: ContractFinding[] }
 export type ElaborationPhase = 'interface_seed' | 'partitioned_final'
 export type ElaborationPartitionBinding = { planDigest: string; partitionId: string; analysisRef?: BlobRef; interfaceSeed?: RawOnlyInterfaceSeedEvidence }
 /** 调用者已确认的用户原意或裁决变更；不是 Agent 自己生成的批准请求。 */
@@ -41,6 +43,7 @@ export type ElaborationInput = {
   analysis?: CodeBehaviorEvidence
   decisionAuthorities?: readonly SyncDecisionAuthority[]
   refinement?: { candidateDigest: string; diagnostics: readonly { code: string; message: string }[] }
+  readonlySpecRepair?: ReadonlySpecRepair
   /** 冻结上下文中的源码/测试字节；存在时验证契约绑定指向真实文件。 */
   files?: ReadonlyMap<string, string>
   maxRepairs?: number
@@ -78,6 +81,7 @@ export type ElaborationResult = {
   /** 局部interface seed与全局分区seal均显式标记，不能误读为独立完整P1。 */
   phase?: ElaborationPhase
   partitionBinding?: ElaborationPartitionBinding
+  readonlySpecRepair?: ReadonlySpecRepair
   inputDigest: string
   candidateDigest: string | null
   prior: ElaborationPriorReference | null

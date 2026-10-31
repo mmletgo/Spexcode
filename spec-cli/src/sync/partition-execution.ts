@@ -6,7 +6,7 @@ import { outputErrors } from './elaboration-schema.js'
 import { elaborate, freezeElaborationInput, projectElaborationFlowReadiness, sealPartitionedElaboration } from './elaboration.js'
 import type { Contract, Verification } from '@spexcode/spec-core/contracts'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
-import type { Applicability, ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationTrace, ElaborationSessionRequest, ElaborationChange, ElaborationRepairSeed, VerificationOwnershipProjection } from './elaboration-types.js'
+import type { Applicability, ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationTrace, ElaborationSessionRequest, ElaborationChange, ElaborationRepairSeed, ReadonlySpecRepair, VerificationOwnershipProjection } from './elaboration-types.js'
 import { elaborationTargetBindings, projectVerificationTable, withoutVerificationTables } from './elaboration-markdown.js'
 import { actualTreeDiff, verifyCandidate } from './candidate.js'
 import type { CandidateChanges } from './candidate.js'
@@ -25,6 +25,7 @@ export type PartitionCheckpoints = {
   loadAcceptedElaboration?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'> | null
   loadAcceptedInterfaceSeed?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'> | null
   loadElaborationRepairSeed?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): ElaborationRepairSeed | null
+  loadReadonlySpecRepair?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): { prior: Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>; repair: ReadonlySpecRepair } | null
   save(key: string, value: unknown): BlobRef
 }
 export type PartitionAnalysisFailure = { partitionId: string; code: string; message: string; error?: unknown }
@@ -32,6 +33,11 @@ export type PartitionAnalysisFailures = { planDigest: string; failures: Partitio
 const within = (path: string, paths: readonly string[]): boolean => paths.some(parent => path === parent || path.startsWith(`${parent}/`))
 const unique = (values: readonly string[]): string[] => [...new Set(values)].sort()
 const reject = (message: string): never => { throw Object.assign(new Error(message), { code: 'partition_binding' }) }
+function readonlyRepairInput(input: ElaborationInput, repair: ReadonlySpecRepair): ElaborationInput {
+  const sources = new Map(repair.changes.map(change => [change.path, change]))
+  if (repair.changes.some(change => !input.targets.some(target => target.nodeId === change.nodeId && target.path === change.path))) reject('只读V1修复不能取得其它owner目标')
+  return { ...input, implementationWritePaths: [], readonlySpecRepair: repair, targets: input.targets.map(target => { const source = sources.get(target.path)?.source ?? target.source; return { ...target, source, sourceDigest: source === null ? null : contentHash(source) } }), files: new Map([...input.files ?? [], ...repair.changes.map(change => [change.path, change.source] as const)]) }
+}
 
 function interfaceSeedPartitions(input: ElaborationInput, plan: SyncPartitionPlan): { seeds: Map<string, RawOnlyInterfaceSeedEvidence>; descendants: RawOnlyInterfaceSeedDescendant[] } {
   const sources = [...input.targets.filter((target): target is typeof target & { source: string } => target.source !== null), ...(input.context ?? [])]
@@ -252,10 +258,7 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
     const interfaceSeed = seeds.get(partition.id)
     const partitionBinding = { planDigest: plan.digest, partitionId: partition.id, ...(input.analysis ? { analysisRef: input.analysis.ref } : {}), ...(interfaceSeed ? { interfaceSeed } : {}) }
     const key = `partition:${partition.id}:elaboration`, saved = checkpoints.load<Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>>(key)
-    if (saved) {
-      if (JSON.stringify(saved.partitionBinding) !== JSON.stringify(partitionBinding)) reject(`局部细化原件没有绑定当前分区分类: ${partition.id}`)
-      return saved
-    }
+    if (saved && JSON.stringify(saved.partitionBinding) !== JSON.stringify(partitionBinding)) reject(`局部细化原件没有绑定当前分区分类: ${partition.id}`)
     const analysis = partitionAnalysisEvidence(commonDir, input.analysis, partition.id)
     const newPaths = descendants.filter(node => node.sourcePartitionId === partition.id).map(node => node.path)
     const targets = input.targets.filter(target => partition.targets.some(local => local.path === target.path || input.nodeChanges?.some(change => change.action === 'move' && change.from.path === target.path && change.to.path === local.path)) || newPaths.includes(target.path))
@@ -277,8 +280,24 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
       phase: interfaceSeed ? 'interface_seed' : undefined,
     }
     const inputDigest = freezeElaborationInput(localInput).inputDigest
+    const readonlyRepair = checkpoints.loadReadonlySpecRepair?.(key, partitionBinding, inputDigest)
+    if (readonlyRepair) {
+      const priorInput = readonlyRepair.prior.readonlySpecRepair ? readonlyRepairInput(localInput, readonlyRepair.prior.readonlySpecRepair) : localInput
+      if (freezeElaborationInput(priorInput).inputDigest !== readonlyRepair.prior.inputDigest) reject('只读V1修复的已审owner不匹配当前完整局部输入')
+      const repairedInput = readonlyRepairInput(localInput, readonlyRepair.repair)
+      if (saved && saved.inputDigest === freezeElaborationInput(repairedInput).inputDigest && JSON.stringify(saved.readonlySpecRepair) === JSON.stringify(readonlyRepair.repair)) return saved
+      if (saved && contentHash(JSON.stringify(saved)) !== readonlyRepair.repair.acceptedRef.sha256) reject('只读V1修复不能绕过另一份当前局部原件')
+      const seed = checkpoints.loadElaborationRepairSeed?.(key, partitionBinding, freezeElaborationInput(repairedInput).inputDigest) ?? undefined
+      const { contracts: _contracts, graph: _graph, coverage: _coverage, ...compact } = await elaborate(repairedInput, { runner, seed })
+      checkpoints.save(key, compact)
+      return compact
+    }
+    if (saved) return saved
     const accepted = interfaceSeed ? checkpoints.loadAcceptedInterfaceSeed?.(key, partitionBinding, inputDigest) : checkpoints.loadAcceptedElaboration?.(key, partitionBinding, inputDigest)
-    if (accepted) return accepted
+    if (accepted) {
+      if (accepted.readonlySpecRepair && freezeElaborationInput(readonlyRepairInput(localInput, accepted.readonlySpecRepair)).inputDigest !== accepted.inputDigest) reject('已审只读owner续修原件不匹配当前唯一冻结摘要')
+      return accepted
+    }
     const seed = checkpoints.loadElaborationRepairSeed?.(key, partitionBinding, inputDigest) ?? undefined
     const result = await elaborate(localInput, { runner, seed })
     const { contracts: _contracts, graph: _graph, coverage: _coverage, ...compact } = result
@@ -305,7 +324,7 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
   const first = results[0]
   if (!first) reject('分区细化结果为空')
   independentTraces(results.flatMap(result => result.rounds.flatMap(round => round.traces)))
-  const reviewedChanges = distinct(results.flatMap(result => result.changes), change => change.path, 'target')
+  const reviewedChanges = distinct(results.flatMap(result => result.changes.map(change => result.readonlySpecRepair ? { ...change, beforeDigest: input.targets.find(target => target.nodeId === change.nodeId && target.path === change.path)!.sourceDigest } : change)), change => change.path, 'target')
   const partitionEvidence = results.map((result, index) => ({ partitionId: plan.partitions[index].id, resultRef: writeEvidence(commonDir, result) }))
   const projection = input.verifications && results.every(result => result.structurePassed && result.reviewPassed)
     ? projectPartitionVerificationOwnership(input, reviewedChanges, elaborationTargetBindings(input).filter(binding => plan.partitions.some(partition => partition.targets.some(target => target.path === input.targets[binding.targetIndex].path)) || descendants.some(node => node.path === binding.path)).map(binding => binding.path)) : null
@@ -323,7 +342,7 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
     ? results.find(result => !result.structurePassed || !result.reviewPassed)?.status ?? 'failed'
     : gaps.some(gap => gap.gapKind === 'conflict') ? 'conflict' : gaps.length ? 'needs_input' : 'complete'
   const failure = results.find(result => result.failure)?.failure ?? (!seal.seal.passed ? { code: 'partition_final_seal_failed', message: JSON.stringify(seal.seal.findings.map(({ code, itemId, message }) => ({ code, itemId, message }))) } : null)
-  const compact = { ...first, partitionBinding: undefined, phase: 'partitioned_final' as const, inputDigest: contentHash(JSON.stringify({ partitionPlanDigest: plan.digest, inputs: results.map(result => result.inputDigest) })), candidateDigest: seal.seal.candidateDigest, changes,
+  const compact = { ...first, partitionBinding: undefined, readonlySpecRepair: undefined, phase: 'partitioned_final' as const, inputDigest: contentHash(JSON.stringify({ partitionPlanDigest: plan.digest, inputs: results.map(result => result.inputDigest) })), candidateDigest: seal.seal.candidateDigest, changes,
     readyIds: structurePassed ? seal.coverage.items.filter(item => item.blockedBy.length === 0 && item.kind !== 'GAP').map(item => item.id) : [], readyFlowIds: readiness.readyFlowIds,
     blockedIds: seal.coverage.items.filter(item => item.blockedBy.length > 0).map(item => item.id), blockedFlows: readiness.blockedFlows,
     retiredIds: unique([...results.flatMap(result => result.retiredIds), ...seal.resolvedGapIds]), nodeChanges: [...input.nodeChanges ?? []],
@@ -419,7 +438,7 @@ export function implementationPlanningPartitions(partitions: readonly SyncPartit
 }
 
 /** 从真实局部/跨边输入投影尚需派发的阶段，预算和最终独审共用同一业务集合。 */
-export function implementationGenerationDispatch(input: GenerationInput, plan: SyncPartitionPlan, specOnly: boolean): { interfaceParents: Set<string>; locals: LocalGeneration[]; reviews: { id: string; input: GenerationInput }[]; planningIds: string[]; requiredKeys: string[] } {
+export function implementationGenerationDispatch(input: GenerationInput, plan: SyncPartitionPlan, specOnly: boolean): { interfaceParents: Set<string>; locals: LocalGeneration[]; reviews: { id: string; input: GenerationInput }[]; planningIds: string[]; requiredKeys: string[]; specWritePaths: string[] } {
   const commonDir = input.snapshot.source.commonDir
   const selection = implementationPartitionSelection(plan, input.contracts)
   const locals = selection.partitions.map(partition => ({ partition, input: localGeneration(input, partition, commonDir) })).filter(local => local.input.readyIds.length)
@@ -437,7 +456,8 @@ export function implementationGenerationDispatch(input: GenerationInput, plan: S
     ...planningIds.map(id => `${input.requestKey}:partition:${id}:implementation_plan`),
     ...reviews.map(local => `${input.requestKey}:final:${local.id}:code_review`),
   ]
-  return { interfaceParents: selection.interfaceParents, locals, reviews, planningIds, requiredKeys }
+  const specWritePaths = specOnly ? [] : input.elaboratedSpecs.filter(spec => locals.some(local => within(spec.path, local.input.allowedScope.paths) && !local.input.readonlyContractPaths?.includes(spec.path))).map(spec => spec.path)
+  return { interfaceParents: selection.interfaceParents, locals, reviews, planningIds, requiredKeys, specWritePaths: unique(specWritePaths) }
 }
 
 async function implementationFileWriters(input: GenerationInput, locals: readonly LocalGeneration[], planningIds: readonly string[], maxParallel: number, options: GenerationOptions, checkpoints: PartitionCheckpoints): Promise<FileWriterPlan> {

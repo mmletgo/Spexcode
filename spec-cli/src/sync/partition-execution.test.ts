@@ -561,6 +561,22 @@ test('source-only分区targets为空时只读root raw仍授权本区源码新叶
   assert.deepEqual(calls, ['code_behavior_analyze', 'code_behavior_review'])
 })
 
+test('mixed只读owner权限投影沿真实P2 dispatch，纯父只读而三个leaf仍可写Spec', async t => {
+  const { input, plan } = await fixture(t)
+  const path = '.spec/export/spec.md', source = '---\ntitle: Parent interface\ncontract-schema: sync-v1\n---\n## raw source\n保留三个独立服务接口。\n## expanded spec\n### REQ\n| id | goal | source | constraints | success | depends-on |\n| --- | --- | --- | --- | --- | --- |\n| REQ-PARENT-01 | 保留服务接口 | user:raw | 既有业务不变 | 子实现继续完成原业务 | - |\n'
+  const parent = parseContract({ nodeId: 'export', path, source }).contract!
+  assert.ok(parent); assert.deepEqual(parent.code, [])
+  const mixedInput = { ...input, contracts: [...input.contracts, parent], files: new Map([...input.files, [path, source]]), elaboratedSpecs: [...input.elaboratedSpecs, { path, source }], readyIds: [...input.readyIds, 'REQ-PARENT-01'], allowedScope: { ...input.allowedScope, paths: [...input.allowedScope.paths, path], contractIds: [...input.allowedScope.contractIds, 'REQ-PARENT-01'] } }
+  const mixedPlan = { ...plan, partitions: [...plan.partitions, { ...plan.partitions[0], id: 'parent-readonly', targets: [{ nodeId: 'export', path }], readPaths: [path], writePaths: [path], sourcePaths: [], changedPaths: [path], contractIds: ['REQ-PARENT-01'] }] }
+  const policyBefore = structuredClone({ plan: mixedPlan, scope: mixedInput.allowedScope })
+  const dispatch = implementationGenerationDispatch(mixedInput, mixedPlan, false)
+  assert.ok(dispatch.interfaceParents.has('parent-readonly'))
+  assert.ok(!dispatch.locals.some(local => local.input.allowedScope.paths.includes(path)))
+  assert.deepEqual(dispatch.specWritePaths, input.elaboratedSpecs.map(spec => spec.path).sort())
+  assert.deepEqual(implementationGenerationDispatch(mixedInput, mixedPlan, true).specWritePaths, [])
+  assert.deepEqual({ plan: mixedPlan, scope: mixedInput.allowedScope }, policyBefore, '权限投影不改变原dispatch授权')
+})
+
 test('分区生成同时在途，每区只收到本区完整正文；分区和跨边独审绑定唯一最终candidate', async t => {
   const { input, plan, checkpoints } = await fixture(t), runtime = native()
   const result = await generateSyncPartitions(input, plan, 2, false, { runner: runtime.runner, validateCandidate: async () => [] }, checkpoints)

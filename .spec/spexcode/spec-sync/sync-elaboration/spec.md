@@ -84,6 +84,8 @@ AC-ELABORATION-38–40 验证空 changes 的完整既有目标、只返回子叶
 
 freezeElaborationInput为生成、独审及同operation局部interface_seed承接共享的唯一完整输入冻结与摘要接缝；requestKey和执行预算不改变业务摘要，原意/目标/上下文/文件/授权/技术政策/分析及完整分区绑定均参与。承接不能另造摘要算法或改写旧inputDigest。
 
+readonlySpecRepair独立于P2独审refinement，绑定真实全候选V1错误及已接受局部原件；只作为技术锚点失败诊断进入对应owner冻结输入。历史JSON/review不是新事实或授权，raw、业务义务及稳定ID保持，允许修正实际冻结代码的定位选择器，不能修改只读代码或测试。新候选继续结构校验、全量独审及最终seal/V1；历史accepted结果不会被改成失败seed。
+
 totalTimeoutMs显式null表示本次P1没有总时间期限，省略仍沿既有有限默认；每次调用timeoutMs仍为有限正整数。无总deadline不创建总期计时器，不将null参与减法；每attempt原maxCalls/maxRepairs机制及生成/独审角色保持，取消与未停稳原生资源仍按原失败门禁。
 
 跨attempt的P1续修在validateRepairSeed核对原结构化输出schema、候选/生成/独审摘要及traces之后，将seed.output原始JSON逐字序列化投影到repairContext，明确仅作拒绝候选的格式骨架/诊断、以当前schema为准而非事实或授权。seedCandidate保留为Markdown渲染视图作业务对照，不得把表格占位符当JSON值；null、数组等按当前schema的真实JSON类型修复，旧协议字段不取得新生成权限。原结构与独审诊断、review、来源及原件不改，仍须新独审与全部验收门槛；不涉及Native schema错误采集或分类。
