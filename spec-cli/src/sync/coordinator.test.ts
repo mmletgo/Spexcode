@@ -1915,6 +1915,89 @@ for (const mode of ['analysis-live', 'analysis-two-accepted', 'analysis-restart'
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
 })
 
+for (const mode of ['live', 'restart', 'input', 'readset', 'partition', 'review-capacity', 'needs_input', 'conflict'] as const) test(`v2局部空生成失败续修 ${mode} 只越过严格同绑定空round并优先最近业务拒绝`, async t => {
+  const f = await fixture(t, { maxAttempts: 4, maxCalls: 16, maxRepairs: 3, timeoutMs: 180000 }, false, original, 'project', original, {
+    version: 'sync-coordinator-v2', direction: 'spec_to_code', partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 }, sourcePaths: ['src'],
+  })
+  let store = f.store
+  let fourthPrompt = ''
+  const denied = !['live', 'restart'].includes(mode)
+  f.transform((output, request) => {
+    const attempt = store.readAttempt(store.readOperation(f.operation.id).currentAttemptId!)
+    if (request.purpose === 'elaboration_generate') {
+      if (attempt.number === 4) fourthPrompt = request.prompt
+      if (attempt.number === 3 && mode !== 'review-capacity') throw new StructuredSessionError('failed', 'Native生成未产出schema结果', { sessionId: 'failed-native', threadId: 'failed-thread', turnId: 'failed-turn' })
+      const value = rows(original)
+      value.changes[0].prose += ` 候选-A${attempt.number}`
+      return value
+    }
+    if (request.purpose === 'elaboration_review') {
+      if (attempt.number <= 2) return { verdict: 'repair', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [{ code: `repair-A${attempt.number}`, kind: 'repair', message: `原诊断-A${attempt.number}`, affectedIds: ['REQ-EXPORT-01'], evidence: `原证据-A${attempt.number}`, decision: `原修复决定-A${attempt.number}` }] }
+      if (attempt.number === 3) throw Object.assign(new Error('有合法候选但独审容量失败'), { code: 'failed' })
+    }
+    if (request.purpose === 'code_generate') return { version: 'sync-files-v1', changes: [] }
+    if (request.purpose === 'code_review') throw Object.assign(new Error('机制回归在V3前停止'), { code: 'unsupported' })
+    return output
+  })
+  const checkpoint = store.checkpoint.bind(store)
+  store.checkpoint = (fence, ref) => {
+    const value = JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())
+    if (store.readAttempt(fence.attemptId).number === 3 && value.stage?.startsWith('partition:') && value.stage.endsWith(':elaboration')) {
+      const saved = JSON.parse(readEvidence(f.input.source.commonDir, value.resultRef).toString()) as ElaborationResult
+      if (mode === 'input') saved.inputDigest = contentHash('不同局部输入')
+      if (mode === 'readset') value.readSetDigest = contentHash('不同读集合')
+      if (mode === 'partition') saved.partitionBinding!.planDigest = contentHash('不同完整分区绑定')
+      if (mode === 'needs_input' || mode === 'conflict') saved.status = mode
+      value.resultRef = writeEvidence(f.input.source.commonDir, saved)
+      ref = writeEvidence(f.input.source.commonDir, value)
+    }
+    return checkpoint(fence, ref)
+  }
+  const recordFailure = store.recordFailure.bind(store)
+  store.recordFailure = (fence, issue) => {
+    const failed = recordFailure(fence, issue)
+    if (mode === 'restart' && store.readAttempt(fence.attemptId).number === 3) throw new Error('fixture在A3失败持久后模拟进程退出')
+    return failed
+  }
+  let result = await runSyncOperation(store, f.operation.id, f.options)
+  if (mode === 'restart') {
+    assert.equal(store.listAttempts(f.operation.id).length, 3)
+    f.closeForRestart()
+    const protocol = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => protocol.close())
+    store = new SyncStore(protocol, { readBlob: ref => readEvidence(f.input.source.commonDir, ref) }); f.useStore(store)
+    result = await runSyncOperation(store, f.operation.id, f.options)
+  }
+  const attempts = store.listAttempts(f.operation.id)
+  assert.equal(attempts.length, 4)
+  if (denied) assert.doesNotMatch(fourthPrompt, /已结算的拒绝候选/, '绑定失配或非空失败仍清seed')
+  else {
+    assert.ok(fourthPrompt.includes('候选-A2'), 'A3空生成失败不能遮蔽A2候选')
+    assert.match(fourthPrompt, /repair-A2/); assert.match(fourthPrompt, /原证据-A2/); assert.match(fourthPrompt, /原修复决定-A2/)
+    assert.doesNotMatch(fourthPrompt, /候选-A1|repair-A1/, '最近A2可用时不得回退A1')
+  }
+  assert.ok(f.calls.some(call => call.purpose === 'code_review'), JSON.stringify(result.failure))
+  const stages = attempts.map(attempt => attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())))
+  const source = stages[1].find(stage => stage.stage?.startsWith('partition:') && stage.stage.endsWith(':elaboration'))
+  const failed = JSON.parse(readEvidence(f.input.source.commonDir, stages[2].find(stage => stage.stage === source.stage).resultRef).toString()) as ElaborationResult
+  if (mode !== 'review-capacity') assert.deepEqual(failed.rounds, [{ index: 0, output: null, candidate: null, candidateDigest: null, findings: [], reviewOutput: null, review: null, traces: [] }])
+  const current = JSON.parse(readEvidence(f.input.source.commonDir, stages[3].find(stage => stage.stage === source.stage).resultRef).toString()) as ElaborationResult
+  const provenance = stages[3].find(stage => stage.stage === `${source.stage}:repair-provenance`)
+  if (denied) { assert.equal(current.prior, null); assert.equal(provenance, undefined) }
+  else {
+    const prior = JSON.parse(readEvidence(f.input.source.commonDir, source.resultRef).toString()) as ElaborationResult
+    assert.ok(fourthPrompt.includes(JSON.stringify(prior.rounds.at(-1)!.candidate)), '完整原候选必须进入新prompt')
+    assert.ok(fourthPrompt.includes(JSON.stringify(prior.rounds.at(-1)!.review)), '完整原独审发现与决定必须进入新prompt')
+    assert.equal(current.prior!.requestKey, `sync:${attempts[1].id}:elaborate:partition:${prior.partitionBinding!.partitionId}`)
+    assert.equal(current.prior!.candidateDigest, prior.candidateDigest); assert.deepEqual(current.prior!.traces, prior.rounds.at(-1)!.traces)
+    assert.deepEqual(JSON.parse(readEvidence(f.input.source.commonDir, provenance.resultRef).toString()), { fromOperationId: f.operation.id, fromAttemptId: attempts[1].id, resultRef: source.resultRef, candidateDigest: prior.candidateDigest })
+  }
+  const final = JSON.parse(readEvidence(f.input.source.commonDir, stages[3].find(stage => stage.stage === 'elaboration').resultRef).toString()) as ElaborationResult
+  assert.equal(current.reviewPassed, true); assert.equal(final.partitionSeal!.passed, true)
+  assert.equal(result.operation.callsUsed, f.calls.length); assert.deepEqual(result.operation.budget, f.operation.budget); assert.equal(result.operation.deadlineAtMs, f.operation.deadlineAtMs)
+  assert.deepEqual(store.listRecoverableResources(), []); assert.equal(store.listJournals(f.operation.id).length, 0)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+})
+
 for (const mode of ['parent-structure', 'parent-review', 'parent-restart', 'parent-capacity-clear', 'parent-lease-clear', 'accepted-leaf', 'accepted-leaf-restart', 'accepted-leaf-readset', 'accepted-leaf-input', 'accepted-leaf-unreviewed', 'leaves', 'leaves-restart', 'input', 'ancestor', 'readset', 'selection', 'foreign', 'policy', 'unsettled', 'aggregate'] as const) test(`v2局部分区续修 ${mode} 绑定原候选诊断而不串区`, async t => {
   const parentPath = '.spec/project/spec.md', parentId = 'REQ-PARENT-01', otherPath = '.spec/project/beta/import-contract/spec.md'
   const threeAttempts = mode.endsWith('-clear')
