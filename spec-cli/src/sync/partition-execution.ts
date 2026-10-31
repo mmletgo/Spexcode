@@ -21,10 +21,14 @@ import type { CodeBehaviorAnalysis, CodeBehaviorEvidence } from './writeback-typ
 
 export type PartitionCheckpoints = {
   load<T>(key: string): T | null
+  loadAcceptedAnalysis?(key: string, planDigest: string, inputDigest: string): CodeBehaviorAnalysis | null
+  loadAcceptedElaboration?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'> | null
   loadAcceptedInterfaceSeed?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'> | null
   loadElaborationRepairSeed?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): ElaborationRepairSeed | null
   save(key: string, value: unknown): BlobRef
 }
+export type PartitionAnalysisFailure = { partitionId: string; code: string; message: string; error?: unknown }
+export type PartitionAnalysisFailures = { planDigest: string; failures: PartitionAnalysisFailure[] }
 const within = (path: string, paths: readonly string[]): boolean => paths.some(parent => path === parent || path.startsWith(`${parent}/`))
 const unique = (values: readonly string[]): string[] => [...new Set(values)].sort()
 const reject = (message: string): never => { throw Object.assign(new Error(message), { code: 'partition_binding' }) }
@@ -127,23 +131,34 @@ export function partitionAnalysisEvidence(commonDir: string, analysis: CodeBehav
 export async function analyzeSyncPartitions(input: CodeBehaviorInput, plan: SyncPartitionPlan, maxParallel: number, runner: ElaborationRunner, checkpoints: PartitionCheckpoints): Promise<CodeBehaviorAnalysis> {
   const { signal, ...data } = input
   input = { ...structuredClone(data), signal }; plan = structuredClone(plan)
-  const analyses = await mapSyncPartitions(plan.partitions, maxParallel, input.signal, async partition => {
-    const key = `partition:${partition.id}:analysis`
-    const saved = checkpoints.load<CodeBehaviorAnalysis>(key)
-    if (saved) return saved
-    // 只把全局授权、处于本区targets/只读上下文且正文可读的父Spec投影给新叶门禁，不扩充局部writePaths。
-    const authorizedParentSpecPaths = input.plan.version === 'sync-coordinator-v2' && input.plan.direction === 'code_to_spec' && input.plan.sourcePaths !== undefined
-      ? input.plan.targets.filter(target => (partition.contextNodeIds.includes(target.nodeId) || partition.targets.some(local => local.nodeId === target.nodeId && local.path === target.path))
-        && within(target.path, partition.readPaths) && within(posix.dirname(target.path), input.plan.writePaths)).map(target => target.path).sort()
-      : undefined
-    const factSourcePaths = input.plan.sourcePaths === undefined
-      ? unique(partition.writePaths.filter(path => !path.startsWith('.spec/')))
-      : unique(partition.sourcePaths.filter(path => !path.startsWith('.spec/')))
-    const local = await analyzeCodeBehavior({ ...input, requestKey: `${input.requestKey}:partition:${partition.id}`, plan: projectSyncPartition(input.plan, partition), partition: { id: partition.id, changedPaths: partition.changedPaths, factSourcePaths, ...(authorizedParentSpecPaths !== undefined ? { authorizedParentSpecPaths } : {}) } }, runner)
-    if (local.changes.some(change => change.paths.some(path => !partition.changedPaths.includes(path)))) reject(`分析超出本区真实变更集合: ${partition.id}`)
-    checkpoints.save(key, local)
-    return local
-  })
+  const failures: PartitionAnalysisFailure[] = []
+  let analyses: CodeBehaviorAnalysis[]
+  try { analyses = await mapSyncPartitions(plan.partitions, maxParallel, input.signal, async partition => {
+    try {
+      const key = `partition:${partition.id}:analysis`
+      const saved = checkpoints.load<CodeBehaviorAnalysis>(key)
+      if (saved) return saved
+      // 只把全局授权、处于本区targets/只读上下文且正文可读的父Spec投影给新叶门禁，不扩充局部writePaths。
+      const authorizedParentSpecPaths = input.plan.version === 'sync-coordinator-v2' && input.plan.direction === 'code_to_spec' && input.plan.sourcePaths !== undefined
+        ? input.plan.targets.filter(target => (partition.contextNodeIds.includes(target.nodeId) || partition.targets.some(local => local.nodeId === target.nodeId && local.path === target.path))
+          && within(target.path, partition.readPaths) && within(posix.dirname(target.path), input.plan.writePaths)).map(target => target.path).sort()
+        : undefined
+      const factSourcePaths = input.plan.sourcePaths === undefined
+        ? unique(partition.writePaths.filter(path => !path.startsWith('.spec/')))
+        : unique(partition.sourcePaths.filter(path => !path.startsWith('.spec/')))
+      const local = await analyzeCodeBehavior({ ...input, repairDiagnostics: input.repairDiagnostics?.filter(diagnostic => 'partitionId' in diagnostic && diagnostic.partitionId === partition.id), requestKey: `${input.requestKey}:partition:${partition.id}`, plan: projectSyncPartition(input.plan, partition), partition: { id: partition.id, changedPaths: partition.changedPaths, factSourcePaths, ...(authorizedParentSpecPaths !== undefined ? { authorizedParentSpecPaths } : {}) } }, runner, inputDigest => checkpoints.loadAcceptedAnalysis?.(key, plan.digest, inputDigest) ?? null)
+      if (local.changes.some(change => change.paths.some(path => !partition.changedPaths.includes(path)))) reject(`分析超出本区真实变更集合: ${partition.id}`)
+      checkpoints.save(key, local)
+      return local
+    } catch (error) {
+      const issue = error as { code?: string; message?: string }
+      failures.push({ partitionId: partition.id, code: issue.code ?? 'behavior_analysis_failed', message: issue.message ?? String(error), error })
+      throw error
+    }
+  }) } catch (error) {
+    checkpoints.save('partition:analysis-failures', { planDigest: plan.digest, failures: failures.map(({ error: _error, ...failure }) => failure) } satisfies PartitionAnalysisFailures)
+    throw Object.assign(error instanceof Error ? error : new Error(String(error)), { partitionFailures: failures })
+  }
   if (plan.expectedPaths.some(path => plan.partitions.filter(partition => partition.changedPaths.includes(path)).length !== 1) || analyses.some(analysis => !analysis.reviewPassed)) reject('分区并集未唯一覆盖完整变更集合或缺少独审')
   independentTraces(analyses.flatMap(analysis => analysis.traces))
   const first = analyses[0]
@@ -262,7 +277,7 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
       phase: interfaceSeed ? 'interface_seed' : undefined,
     }
     const inputDigest = freezeElaborationInput(localInput).inputDigest
-    const accepted = interfaceSeed ? checkpoints.loadAcceptedInterfaceSeed?.(key, partitionBinding, inputDigest) : null
+    const accepted = interfaceSeed ? checkpoints.loadAcceptedInterfaceSeed?.(key, partitionBinding, inputDigest) : checkpoints.loadAcceptedElaboration?.(key, partitionBinding, inputDigest)
     if (accepted) return accepted
     const seed = checkpoints.loadElaborationRepairSeed?.(key, partitionBinding, inputDigest) ?? undefined
     const result = await elaborate(localInput, { runner, seed })

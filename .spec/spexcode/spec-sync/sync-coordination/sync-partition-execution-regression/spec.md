@@ -11,6 +11,8 @@ code:
 
 ## expanded spec
 
+并行分析用三个实际分区的冻结输入证明全部在途失败保留partitionId与原完整proposal/review诊断，原主错误及其它unknown错误身份均不丢失；checkpoint读取绑定错误在模型派发前拒绝，也必须进入真实失败集合，不能用空集合绕过协调器有限修复名单。测试只验证执行/持久机制，不冒充Native或Docker产品通过。
+
 定向测试覆盖局部完整源码/测试正文、同时在途上限、分区和跨边同candidateDigest、独审原件集合而非虚构全局review、已完成检查点重入不重调、异步完成序相同树、code_to_spec无code_generate且source/tests对象不变、取消停止后续派发、只读原意P1及唯一根writer、新依赖冻结和重复业务writer拒绝。协调器的最少调用不足零模型派发/零超扣及v1恢复回归保留在 [[sync-coordinator-regression]]。注入runner不代替真实native读取、Docker及正常hooks验收。
 
 

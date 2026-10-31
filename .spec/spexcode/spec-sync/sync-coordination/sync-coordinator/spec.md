@@ -14,6 +14,10 @@ code:
 
 ## expanded spec
 
+同一operation的分区多轮承接已通过的局部analysis及普通叶P1：只读较早已终结attempt的原stage，严格核原operation/input/policy、精确readSet/selection、完整plan/分区归属及当前真实局部输入的原唯一冻结摘要。analysis承接在code-behavior现有context摘要生成后、任何模型派发前进行，并核原独立dispatch身份；叶P1沿freezeElaborationInput及完整partitionBinding，仅结构与独审accept且无failure的局部原件可承接。当前fence保存原resultRef/fromAttempt provenance，review/traces及输入摘要不改写；未审、错误绑定及聚合全局结果不能成为局部成功。局部并集仍重新执行严格全图seal，实际candidate改变后P2独审及V1–V4全部照常，不提前交付。
+
+并行分析异常保留全部已在途分区的完整原错误，按partitionId保存原proposal/程序校验/review诊断，并等待在途结算；主错误不能遮蔽其它未知资源或不可修复错误。只有全部错误均属于原允许的业务/结构修复，或原生接缝已精确确认notStarted且terminal→removed的SettledSessionCreateTimeoutError时，才进入原attempt/calls/repairs及绝对deadline内的有限修复。普通timeout、未知/未结算资源、绑定及保存错误不因此取得续修权。下一attempt仅向对应失败分区重送该区历史诊断，已accept区不被兄弟诊断改变摘要；失败原件不是事实或批准。
+
 P2 的 V1 把实际验证 candidate tree 的完整 entry 路径清单交给 [[sync-frozen-contracts]]，与冻结正文共同核前元数据关系完整性。模型可读正文子集不能被当作完整存在性清单；错误 related/code/one-govern 在生成修复阶段拒绝，不推进 V2、V3 或 apply journal。
 
 派发 P1 时由同一冻结 plan.writePaths 和 mandatoryTests 派生显式技术写范围与只读测试文件清单，供生成及独审正确绑定新增测试；不改变原写授权、实际 scope、只读 oracle 或预算。

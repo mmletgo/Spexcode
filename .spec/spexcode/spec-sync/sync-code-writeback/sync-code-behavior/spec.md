@@ -10,6 +10,8 @@ code:
 
 ## expanded spec
 
+分区协调可在既有完整冻结context生成唯一inputDigest后、任何Native派发前消费严格匹配的已审analysis checkpoint；此接缝不另算业务摘要，不改变原检查范围、checkedPaths/checkedChangeIds、独立session/thread或完整输入验证。原分析/ref/traces保持，来源与当前fence的承接证明由协调器保存；失败或未审原件不返回为已审结果，修复诊断仍只作当前失败分区的数据。
+
 [[sync-code-writeback]] 的行为分析复用独立受限native会话及既有budget/checkpoint。完整旧source、已验证delivery/newsource、共同coveredScope和冻结raw/规则/调用/测试字节进入分析，原意与真实外部差量分别保留；未读取上下文或超预算拒绝，不截断断言。构建与审查session/thread独立，输出及完整readSet/policy/composed/input绑定；审查重新检查每个变化和实际影响路径。
 
 分类为refactor、allowed_change、coverage_gap或conflict。重构不授权业务正文漂移；合法变化保外部行为、沿明确原意补齐必要状态边界及验收。过窄测试不能把允许行为反改成旧代码。每项发现含原意、原/新及双方行为、影响路径与ID、实际证据、具体反例和所需裁决，程序形成稳定ID。
