@@ -323,11 +323,17 @@ test('真实runner的冻结三方JSON共享正文引用且逐字段还原旧输�
   const globalReviewSchema = structuredClone(CODE_BEHAVIOR_REVIEW_SCHEMA)
   await analyzeCodeBehavior(input, async request => {
     if (request.purpose === 'code_behavior_analyze') {
-      const expected = structuredClone(CODE_BEHAVIOR_SCHEMA)
-      ;(expected.properties as Record<string, Record<string, unknown>>).newNodes.maxItems = 0
-      assert.deepEqual(request.schema, expected)
+      const frozen = readFrozenBehaviorContext<{ contractItems: { previous: { id: string; kind: string }[]; current: { id: string; kind: string }[] } }>(request)
+      const expectedAcceptanceIds = [...new Set([...frozen.contractItems.previous, ...frozen.contractItems.current].filter(item => item.kind === 'AC').map(item => item.id))].sort()
+      const properties = request.schema.properties as Record<string, { maxItems?: number; items?: { properties: Record<string, { enum?: string[] }> } }>
+      const acceptanceChanges = properties.acceptanceChanges
+      assert.deepEqual(acceptanceChanges.items!.properties.id.enum, expectedAcceptanceIds)
+      assert.equal(acceptanceChanges.maxItems, undefined)
+      assert.equal(properties.newNodes.maxItems, 0)
       assert.notEqual(request.schema, CODE_BEHAVIOR_SCHEMA)
-      assert.equal((CODE_BEHAVIOR_SCHEMA.properties as Record<string, Record<string, unknown>>).newNodes.maxItems, undefined)
+      const sharedProperties = CODE_BEHAVIOR_SCHEMA.properties as Record<string, { maxItems?: number; items?: { properties: Record<string, { enum?: string[] }> } }>
+      assert.equal(sharedProperties.newNodes.maxItems, undefined)
+      assert.equal(sharedProperties.acceptanceChanges.items!.properties.id.enum, undefined)
     }
     else {
       const reviewed = JSON.parse(request.prompt.split('待审分析:\n')[1]) as { analysisDigest: string }
@@ -396,6 +402,75 @@ test('真实runner的冻结三方JSON共享正文引用且逐字段还原旧输�
       assert.deepEqual(Object.keys(expanded).sort(), ['requiredChangedPaths', 'unownedSourcePaths', 'unownedSourcePathCount', 'rawlessSpecPaths', 'snapshotTree', 'readablePaths', 'contractItems', 'origin', 'decision', 'repairDiagnostics', 'inputId', 'baselinePair', 'baselineSelection', 'compositionEvidence', 'authorByteProjections', 'intentArtifactFiles', 'nonTextFiles', 'composed', 'readSetDigest', 'policyDigest', 'plan', 'changedPaths', 'authorChanges', 'adoptedDeliveryPaths', 'authorBaseline', 'oldSource', 'verifiedDelivery', 'newSource', 'composedFiles', 'controlledBeforeFiles'].sort())
     }
     return runner('refactor')(request)
+  })
+})
+
+test('没有既有AC时schema不返回空enum，并从派发schema拒绝AC提案', async t => {
+  const f = await fixture(t, source => {
+    const start = source.indexOf('### AC\n')
+    const end = source.indexOf('\n### VERIFY', start)
+    assert.notEqual(start, -1)
+    assert.notEqual(end, -1)
+    return `${source.slice(0, start)}### AC\n${source.slice(end)}`
+  })
+  writeFileSync(join(f.root, 'src/export.js'), `${f.source}\n// empty acceptance target schema probe\n`)
+  let analysisCalls = 0
+  let reviewCalls = 0
+  await assert.rejects(analyzeCodeBehavior(await f.input(), async request => {
+    if (request.purpose === 'code_behavior_analyze') {
+      analysisCalls += 1
+      const frozen = readFrozenBehaviorContext<{ contractItems: { previous: { id: string; kind: string }[]; current: { id: string; kind: string }[] } }>(request)
+      assert.deepEqual([...frozen.contractItems.previous, ...frozen.contractItems.current].filter(item => item.kind === 'AC'), [])
+      const properties = request.schema.properties as Record<string, { maxItems?: number; items: { properties: Record<string, { enum?: string[] }> } }>
+      assert.equal(properties.acceptanceChanges.maxItems, 0)
+      assert.equal(properties.acceptanceChanges.items.properties.id.enum, undefined)
+      const output = {
+        changes: [], facts: [],
+        acceptanceChanges: [{ id: 'AC-VERIFY-TODO-01-LOAD/SAVE', ruleIds: ['RULE-EXPORT-05'], source: 'user:raw', reason: 'raw-only输入中捏造未来验收目标' }],
+        newNodes: [], resolutions: [],
+      }
+      return { sessionId: 'schema-analysis', threadId: 'schema-analysis-thread', turnId: 'turn-1', output, resultDigest: contentHash(JSON.stringify(output)) }
+    }
+    reviewCalls += 1
+    assert.fail('schema拒绝的proposal不能进入独审')
+  }), (error: Error & { code?: string }) => {
+    assert.equal(error.code, 'behavior_analysis_invalid')
+    assert.match(error.message, /acceptanceChanges: 项数超过冻结目标数量/)
+    return true
+  })
+  assert.equal(analysisCalls, 1)
+  assert.equal(reviewCalls, 0)
+})
+
+test('验收目标schema包含previous-only与current-only的既有AC并集', async t => {
+  const f = await fixture(t)
+  const contractPath = '.spec/export/export-contract/spec.md'
+  const currentContract = readFileSync(join(f.root, contractPath), 'utf8')
+    .replace(/^\| AC-EXPORT-08 \|.*\n/m, '')
+    .replace(/\n\n### VERIFY/, '\n| AC-EXPORT-09 | RULE-EXPORT-06 | FAILED | 重试结果 | ID保持 | tests/export.test.mjs#AC-EXPORT-09 | VERIFY-EXPORT-01 | derived:REQ-EXPORT-01 | REQ-EXPORT-01 |\n\n### VERIFY')
+  writeFileSync(join(f.root, contractPath), currentContract)
+  writeFileSync(join(f.root, 'src/export.js'), `${f.source}\n// previous/current acceptance target probe\n`)
+  await assert.rejects(analyzeCodeBehavior(await f.input(), async request => {
+    assert.equal(request.purpose, 'code_behavior_analyze')
+    const frozen = readFrozenBehaviorContext<{ contractItems: { previous: { id: string; kind: string }[]; current: { id: string; kind: string }[] } }>(request)
+    const previousAcceptanceIds = frozen.contractItems.previous.filter(item => item.kind === 'AC').map(item => item.id)
+    const currentAcceptanceIds = frozen.contractItems.current.filter(item => item.kind === 'AC').map(item => item.id)
+    assert.ok(previousAcceptanceIds.includes('AC-EXPORT-08'))
+    assert.ok(!currentAcceptanceIds.includes('AC-EXPORT-08'))
+    assert.ok(currentAcceptanceIds.includes('AC-EXPORT-09'))
+    assert.ok(!previousAcceptanceIds.includes('AC-EXPORT-09'))
+    const properties = request.schema.properties as Record<string, { items: { properties: Record<string, { enum?: string[] }> } }>
+    assert.deepEqual(properties.acceptanceChanges.items.properties.id.enum, [...new Set([...previousAcceptanceIds, ...currentAcceptanceIds])].sort())
+    const output = {
+      changes: [], facts: [],
+      acceptanceChanges: [{ id: 'AC-VERIFY-TODO-01-LOAD/SAVE', ruleIds: ['RULE-EXPORT-05'], source: 'user:raw', reason: '测试schema只接受实际既有AC身份' }],
+      newNodes: [], resolutions: [],
+    }
+    return { sessionId: 'schema-analysis', threadId: 'schema-analysis-thread', turnId: 'turn-1', output, resultDigest: contentHash(JSON.stringify(output)) }
+  }), (error: Error & { code?: string }) => {
+    assert.equal(error.code, 'behavior_analysis_invalid', error.message)
+    assert.match(error.message, /acceptanceChanges\[0\]\.id: 未满足枚举/)
+    return true
   })
 })
 
@@ -1372,15 +1447,24 @@ test('漏helper的accept具体拒绝并携完整前轮proposal与未批准analys
 test('AC复合门禁逐项诊断未变规则与不绑定来源，不把多个allowed_change并集授权', async t => {
   const f = await fixture(t); writeFileSync(join(f.root, 'src/export.js'), `${f.source}\n// result count extension\n`)
   const input = await f.input(), source = 'code:src/export.js#ExportService.dispatch'
-  await assert.rejects(analyzeCodeBehavior(input, runner('allowed_change', proposal => {
+  let dispatchedAcceptanceIds: string[] = []
+  const unsupportedProposal = runner('allowed_change', proposal => {
     proposal.facts = [{ source, text: '只新增结果派生计数，不更改权限' }]
     proposal.acceptanceChanges = [{ id: 'AC-EXPORT-01', ruleIds: ['RULE-EXPORT-05', 'RULE-EXPORT-01'], source, reason: '原AC同时覆盖权限但本次权限未改变' }]
-  })), (error: Error) => {
+  })
+  await assert.rejects(analyzeCodeBehavior(input, async request => {
+    if (request.purpose === 'code_behavior_analyze') {
+      const properties = request.schema.properties as Record<string, { items: { properties: Record<string, { enum?: string[] }> } }>
+      dispatchedAcceptanceIds = properties.acceptanceChanges.items.properties.id.enum ?? []
+    }
+    return unsupportedProposal(request)
+  }), (error: Error) => {
     const diagnostic = JSON.parse(error.message)
     assert.equal(diagnostic.details.targetKind, 'AC'); assert.equal(diagnostic.details.sourceBound, true)
     assert.deepEqual(diagnostic.details.allowedChanges[0].unsupportedRuleIds, ['RULE-EXPORT-01']); assert.equal(diagnostic.details.allowedChanges[0].missingAffectedId, null)
     assert.ok(diagnostic.proposal.acceptanceChanges); return true
   })
+  assert.ok(dispatchedAcceptanceIds.includes('AC-EXPORT-01'), '合法既有目标进入schema，但运行时仍需完整规则授权')
   await assert.rejects(analyzeCodeBehavior(input, runner('allowed_change', proposal => {
     const changes = proposal.changes as Record<string, unknown>[]
     proposal.changes = [changes[0], { ...changes[0], ruleIds: ['RULE-EXPORT-01'], evidence: '独立权限变化' }]
