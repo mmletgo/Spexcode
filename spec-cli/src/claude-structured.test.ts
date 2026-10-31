@@ -459,17 +459,21 @@ test('controlled Claude compact boundaries preserve one original turn without gr
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })
 
-test('Claude internal truncated-response companions require native flags and a new exact API consumer', () => {
+const recoveryVariants = [
+  ['truncated-response', 'Your response above was cut off mid-stream. Resume directly from where it stops — no apology, no recap. If none of it survived, answer the request from the start.'],
+  ['output-token-limit', 'Output token limit hit. Resume directly — no apology, no recap of what you were doing. Pick up mid-thought if that is where the cut happened. Break remaining work into smaller pieces.'],
+] as const
+for (const [variant, recoveryText] of recoveryVariants) test(`Claude internal ${variant} companions require native flags and a new exact API consumer`, () => {
   const directory = mkdtempSync(join(tmpdir(), 'spex-claude-recovery-'))
   try {
-    const prompt = 'public prompt', recoveryText = 'Your response above was cut off mid-stream. Resume directly from where it stops — no apology, no recap. If none of it survived, answer the request from the start.'
+    const prompt = 'public prompt'
     const ref = freezeContext({ directory, sourceRoot: process.cwd(), binding: { requestKey: 'recovery', inputDigest: 'input' }, entries: [{ id: 'task', label: 'task', kind: 'utf8', bytes: Buffer.from('public frozen task') }] })
     const input = { contextDigest: ref.contextDigest, entryId: 'task', startByte: 0, endByte: 18 }
     const original = { role: 'user', content: [{ type: 'text', text: prompt }] }, recoveryMessage = { role: 'user', content: recoveryText }
     const apiRecovery = { role: 'user', content: [{ type: 'text', text: recoveryText }] }, recoveryHash = claudeMessageDigest(apiRecovery)
     const reply = { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'read', content: readFrozenRange(ref, input).response.contentItems.map(item => ({ type: 'text', text: item.text })) }] }
     const request = (id: string, tail: string[], base?: string, keep = 0) => ({ type: 'api-request', sessionId: 'session', id, shapeHash: 'a'.repeat(64), keep, ...(base ? { base } : {}), tail, params: { model: 'MiniMax-M3' } })
-    const assistant = (uuid: string, parentUuid: string, requestRef: string, content: unknown[] = []) => ({ type: 'assistant', sessionId: 'session', uuid, parentUuid, requestRef, message: { role: 'assistant', content } })
+    const assistant = (uuid: string, parentUuid: string, requestRef: string, content: unknown[] = []) => ({ type: 'assistant', sessionId: 'session', uuid, parentUuid, requestRef, message: { role: 'assistant', content, stop_reason: 'max_tokens' } })
     const companion = (uuid: string, parentUuid: string) => ({ type: 'user', sessionId: 'session', uuid, parentUuid, promptId: 'prompt', isMeta: true, turnCompanion: true, message: recoveryMessage })
     const raw: Record<string, unknown>[] = [
       { type: 'user', sessionId: 'session', uuid: 'user', parentUuid: null, promptId: 'prompt', message: original },
@@ -531,13 +535,17 @@ test('Claude internal truncated-response companions require native flags and a n
       ['missing meta flag', rows => { delete row(rows, 'recovery-1').isMeta }],
       ['missing companion flag', rows => { delete row(rows, 'recovery-1').turnCompanion }],
       ['false flag', rows => { row(rows, 'recovery-1').isMeta = false }],
+      ['false companion flag', rows => { row(rows, 'recovery-1').turnCompanion = false }],
+      ['string meta flag', rows => { row(rows, 'recovery-1').isMeta = 'true' }],
       ['string flag', rows => { row(rows, 'recovery-1').turnCompanion = 'true' }],
       ['wrong prompt', rows => { row(rows, 'recovery-1').promptId = 'foreign' }],
       ['wrong session', rows => { row(rows, 'recovery-1').sessionId = 'foreign' }],
+      ['sidechain', rows => { row(rows, 'recovery-1').isSidechain = true }],
       ['earlier parent', rows => { row(rows, 'recovery-1').parentUuid = 'user' }],
       ['tool-result identity', rows => { row(rows, 'recovery-1').sourceToolAssistantUUID = 'interrupted' }],
       ['unknown text', rows => { row(rows, 'recovery-1').message = { role: 'user', content: 'continue with different business instructions' } }],
       ['suffix', rows => { row(rows, 'recovery-1').message = { role: 'user', content: recoveryText + '\n' } }],
+      ['changed whitespace', rows => { row(rows, 'recovery-1').message = { role: 'user', content: recoveryText.replace('Resume directly', 'Resume  directly') } }],
       ['array companion', rows => { row(rows, 'recovery-1').message = apiRecovery }],
       ['message extra field', rows => { row(rows, 'recovery-1').message = { ...recoveryMessage, unknown: 'new semantics' } }],
       ['raw API string is not a compact summary', rows => { const blob = rows.find(item => item.type === 'api-request-blob')!; blob.message = recoveryMessage; blob.hash = claudeMessageDigest(apiRecovery) }],
@@ -549,7 +557,18 @@ test('Claude internal truncated-response companions require native flags and a n
       ['compaction confusion', rows => { Object.assign(row(rows, 'recovery-1'), { isCompactSummary: true, isVisibleInTranscriptOnly: true, summarizedTurnPromptUuids: ['user'] }) }],
       ['no later schema output', rows => { rows.splice(rows.findIndex(item => item.uuid === 'schema-call')) }],
     ]
+    if (variant === 'output-token-limit') cases.push(
+      ['missing max_tokens', rows => { delete (row(rows, 'interrupted').message as Record<string, unknown>).stop_reason }],
+      ['different stop reason', rows => { (row(rows, 'interrupted').message as Record<string, unknown>).stop_reason = 'end_turn' }],
+      ['earlier max_tokens cannot authorize a nonmax parent', rows => {
+        rows.splice(rows.findIndex(item => item.uuid === 'interrupted'), 0, assistant('earlier-limit', 'user', 'request-1'))
+        row(rows, 'interrupted').parentUuid = 'earlier-limit'; (row(rows, 'interrupted').message as Record<string, unknown>).stop_reason = 'end_turn'
+      }],
+    )
     for (const [name, mutate] of cases) { const bad = structuredClone(raw); mutate(bad); assert.throws(() => proveClaudeFrozenReads(ref, witness(bad)), name) }
+    const human = structuredClone(raw)
+    human.push({ type: 'user', sessionId: 'session', uuid: 'human', parentUuid: 'schema-reply', promptId: 'prompt', message: { role: 'user', content: 'another human request' } })
+    assert.throws(() => proveClaudeFrozenReads(ref, witness(human)), /another user turn/)
     for (const content of [
       [{ type: 'text', text: recoveryText + 'extra' }],
       [{ type: 'text', text: 'extra' }, ...apiRecovery.content],
@@ -585,6 +604,22 @@ test('Claude internal truncated-response companions require native flags and a n
     assert.throws(() => proveClaudeFrozenReads(ref, witness(borrowed)), 'the second identical companion cannot borrow the first API consumer')
     const secondOldSchema = structuredClone(repeated); row(secondOldSchema, 'schema-call').requestRef = 'request-2'
     assert.throws(() => proveClaudeFrozenReads(ref, witness(secondOldSchema)), 'schema after the second companion cannot borrow the first recovery request')
+    const otherText = recoveryVariants.find(([name]) => name !== variant)![1]
+    const otherApi = { role: 'user', content: [{ type: 'text', text: otherText }] }, otherHash = claudeMessageDigest(otherApi)
+    for (const content of [otherApi.content, [{ type: 'text', text: prompt + '\n' }, ...otherApi.content]]) {
+      const swapped = structuredClone(raw), blob = swapped.find(item => item.type === 'api-request-blob')!
+      blob.message = { role: 'user', content }; blob.hash = claudeMessageDigest(blob.message); row(swapped, 'request-2').tail = [blob.hash]
+      assert.throws(() => proveClaudeFrozenReads(ref, witness(swapped)), /unobserved text/, 'an allowed but unobserved variant cannot substitute the actual companion text')
+    }
+    const mixed = structuredClone(raw)
+    mixed.splice(mixed.findIndex(item => item.uuid === 'read-call'), 0,
+      assistant('interrupted-2', 'recovery-1', 'request-2'),
+      { ...companion('recovery-2', 'interrupted-2'), message: { role: 'user', content: otherText } },
+      { type: 'api-request-blob', sessionId: 'session', message: otherApi, hash: otherHash }, request('request-2b', [otherHash], 'request-2', 1))
+    row(mixed, 'read-call').parentUuid = 'recovery-2'; row(mixed, 'read-call').requestRef = 'request-2b'; row(mixed, 'request-3').base = 'request-2b'
+    assert.deepEqual(proveClaudeFrozenReads(ref, witness(mixed)).coveredEntryIds, ['task'])
+    const mixedBorrowed = structuredClone(mixed); row(mixedBorrowed, 'request-2b').tail = [recoveryHash]
+    assert.throws(() => proveClaudeFrozenReads(ref, witness(mixedBorrowed)), /no new exact actual API consumer/, 'a different later variant cannot inherit the earlier variant API hash')
     const oldOutput = structuredClone(raw)
     oldOutput.splice(oldOutput.findIndex(item => item.uuid === 'schema-reply'), 0, companion('recovery-after-schema', 'schema-call'), request('request-4', [recoveryHash], 'request-3', 3), assistant('after-schema', 'recovery-after-schema', 'request-4'))
     assert.throws(() => proveClaudeFrozenReads(ref, witness(oldOutput)), 'a pre-companion schema call cannot complete after its companion')
@@ -596,6 +631,11 @@ test('Claude internal truncated-response companions require native flags and a n
     const tamperedRaw = structuredClone(raw); delete row(tamperedRaw, 'recovery-1').turnCompanion
     witness(tamperedRaw)
     assert.throws(() => verifyFrozenReadProof(ref, proof, { threadId: 'session', turnId: 'user' }), /saved public witness differs/)
+    if (variant === 'output-token-limit') {
+      const nonmax = structuredClone(raw); (row(nonmax, 'interrupted').message as Record<string, unknown>).stop_reason = 'end_turn'
+      writeFileSync(nativePath, nonmax.map(item => JSON.stringify(item)).join('\n') + '\n')
+      assert.throws(() => proveClaudeFrozenReads(ref, valid), /preceding max_tokens/, 'a directly supplied witness cannot hide a nonmax raw parent omitted from the public projection')
+    }
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })
 
