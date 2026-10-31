@@ -22,6 +22,8 @@ export type FrozenReadProof = FrozenCoverageProof & ({ version?: never } | { ver
 type ClaudePublicContentBlock = { type: string; id?: string; name?: string; input?: unknown; tool_use_id?: string; content?: string | Array<{ type: string; text: string }>; text?: string; is_error?: boolean }
 export type ClaudePublicMessage = { role: string; content: string | ClaudePublicContentBlock[] }
 const CLAUDE_TRUNCATED_RECOVERY_TEXT = 'Your response above was cut off mid-stream. Resume directly from where it stops — no apology, no recap. If none of it survived, answer the request from the start.'
+const CLAUDE_OUTPUT_LIMIT_RECOVERY_TEXT = 'Output token limit hit. Resume directly — no apology, no recap of what you were doing. Pick up mid-thought if that is where the cut happened. Break remaining work into smaller pieces.'
+const CLAUDE_RECOVERY_TEXTS = [CLAUDE_TRUNCATED_RECOVERY_TEXT, CLAUDE_OUTPUT_LIMIT_RECOVERY_TEXT]
 type ClaudeCompaction = { runningTurnSends: { uuids: string[]; openerUuid: string }; preservedSegment?: { headUuid: string; anchorUuid: string; tailUuid: string }; preservedMessages?: { anchorUuid: string; uuids: string[]; allUuids: string[] } }
 type ClaudeRequestRetry = { source: string; level: string; retryInMs: number; retryAttempt: number; maxRetries: number; errorDigest: string }
 export type ClaudePublicRecord = { type: string; sessionId: string; uuid?: string; parentUuid?: string | null; promptId?: string; requestRef?: string; sourceToolAssistantUUID?: string; isMeta?: boolean; turnCompanion?: boolean; message?: ClaudePublicMessage; id?: string; hash?: string; shapeHash?: string; base?: string; keep?: number; tail?: string[]; model?: string; toolNames?: string[]; placeholderValid?: boolean
@@ -383,13 +385,16 @@ export function readClaudePublicHistory(path: string, sessionId: string): Claude
   const source = readFileSync(path, 'utf8')
   if (!source.endsWith('\n')) throw new StructuredSessionTransportError('Claude native history has not flushed its final record')
   const records: ClaudePublicRecord[] = []
+  let latestAssistant: { uuid: unknown; stopReason: unknown } | undefined
   for (const line of source.split('\n').filter(Boolean)) {
-    const row = JSON.parse(line) as Record<string, unknown> & { message?: ClaudePublicMessage; shape?: { tools: { name: string; description?: string; input_schema?: unknown; defer_loading?: boolean }[] }; params?: { model: string } }
+    const row = JSON.parse(line) as Record<string, unknown> & { message?: ClaudePublicMessage & { stop_reason?: unknown }; shape?: { tools: { name: string; description?: string; input_schema?: unknown; defer_loading?: boolean }[] }; params?: { model: string } }
     const compact = row.type === 'system' && row.subtype === 'compact_boundary'
     const retry = row.type === 'system' && row.subtype === 'api_error'
     if (!compact && !retry && !['user', 'assistant', 'attachment', 'api-request', 'api-request-shape', 'api-request-blob'].includes(String(row.type))) continue
     if (row.type === 'api-request-blob' && row.message?.role !== 'user') continue
     if (row.sessionId !== sessionId || row.isSidechain === true) stale('Claude history contains a foreign session or sidechain')
+    if (row.type === 'user' && row.isMeta === true && row.turnCompanion === true && row.message?.role === 'user' && row.message.content === CLAUDE_OUTPUT_LIMIT_RECOVERY_TEXT
+      && (!row.parentUuid || row.parentUuid !== latestAssistant?.uuid || latestAssistant.stopReason !== 'max_tokens')) stale('Claude output-limit companion has no exact preceding max_tokens assistant')
     const record = Object.fromEntries(['type', 'sessionId', 'uuid', 'parentUuid', 'promptId', 'requestRef', 'sourceToolAssistantUUID', 'isMeta', 'turnCompanion'].filter(key => key in row).map(key => [key, row[key]])) as ClaudePublicRecord
     if (retry) Object.assign(record, { subtype: 'api_error', requestRetry: claudeRequestRetry(row) })
     if (compact) {
@@ -408,7 +413,10 @@ export function readClaudePublicHistory(path: string, sessionId: string): Claude
       if (typeof content === 'string') record.compactSummaryDigest = claudeMessageDigest(row.message)
       record.hash = String(row.hash)
     }
-    if (row.type === 'assistant') record.message = { role: 'assistant', content: claudeMessageBlocks(row.message!).filter(block => block.type === 'tool_use') }
+    if (row.type === 'assistant') {
+      record.message = { role: 'assistant', content: claudeMessageBlocks(row.message!).filter(block => block.type === 'tool_use') }
+      latestAssistant = { uuid: row.uuid, stopReason: row.message?.stop_reason }
+    }
     if (row.type === 'api-request') Object.assign(record, { id: row.id, shapeHash: row.shapeHash, base: row.base, keep: row.keep, tail: row.tail, model: row.params!.model })
     if (row.type === 'api-request-shape') {
       record.shapeHash = String(row.shapeHash)
@@ -532,6 +540,8 @@ export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFro
   const original = history.find(row => row.type === 'user' && row.uuid === userUuid)
   if (!original || original.parentUuid !== null || original.promptId !== promptId || JSON.stringify(original.message) !== JSON.stringify(echo.message)
     || !original.message || JSON.stringify({ ...original.message, content: claudeMessageBlocks(original.message) }) !== JSON.stringify({ role: 'user', content: [{ type: 'text', text: witness.prompt }] })) stale('Claude original user echo/history/prompt identity differs')
+  if (history.some(row => row.type === 'user' && row.isMeta === true && row.turnCompanion === true && row.message?.role === 'user' && row.message.content === CLAUDE_OUTPUT_LIMIT_RECOVERY_TEXT)
+    && JSON.stringify(readClaudePublicHistory(witness.nativeHistoryPath, sessionId)) !== JSON.stringify(history)) stale('Claude output-limit witness differs from its original native history')
   const seen = new Set<string>(), requests = new Map<string, string[]>(), shapes = new Set<string>(), calls = new Map<string, { row: ClaudePublicRecord; block: ClaudePublicContentBlock; recovery: number }>()
   const parents = new Map<string, string | null>()
   const compactSummaries = new Set<string>()
@@ -539,7 +549,7 @@ export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFro
   const receipts: FrozenReadReceipt[] = [], rejectedCalls: string[] = [], responseMessages = new Map<string, string>(), responseBlocks = new Map<string, ClaudePublicContentBlock>(), requestRefs = new Set<string>()
   if (witness.mcpHistory && (JSON.stringify(readClaudeMcpToolNames(witness.mcpHistory.path)) !== JSON.stringify(witness.mcpHistory.toolNames) || witness.mcpHistory.toolNames.some(name => name !== 'spex_read_frozen'))) stale('Claude MCP dispatched a foreign tool or its actual history changed')
   const apiMessages = readClaudeApiMessageBlobs(history)
-  const recoveries: Array<{ hashes: Set<string>; summaries: Set<string>; requests: Set<string>; consumed: boolean }> = []
+  const recoveries: Array<{ text: string; hashes: Set<string>; summaries: Set<string>; requests: Set<string>; consumed: boolean }> = []
   let latestAssistant: string | undefined, acceptedOutput = false
   for (const row of history) {
     if (row.sessionId !== sessionId) stale('Claude native history changed its session identity')
@@ -590,7 +600,7 @@ export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFro
       shapes.add(row.shapeHash)
     }
     if (row.type === 'api-request-blob') {
-      if (row.compactSummaryDigest && recoveries.length && row.compactSummaryDigest === claudeMessageDigest({ role: 'user', content: CLAUDE_TRUNCATED_RECOVERY_TEXT })) stale('Claude recovery API message cannot masquerade as a compact summary')
+      if (row.compactSummaryDigest && recoveries.length && CLAUDE_RECOVERY_TEXTS.some(text => row.compactSummaryDigest === claudeMessageDigest({ role: 'user', content: text }))) stale('Claude recovery API message cannot masquerade as a compact summary')
       if (row.compactSummaryDigest && !compactSummaries.has(row.compactSummaryDigest)) stale('Claude API string message is not an observed same-turn compact summary')
       claudeApiToolResultIds(apiMessages.get(row.hash!)!.content, responseBlocks)
     }
@@ -607,12 +617,14 @@ export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFro
           continue
         }
         if (!blob.content.some(block => block.type === 'text')) continue
-        const texts = blob.content.filter(block => block.type === 'text'), recoveryText = { type: 'text', text: CLAUDE_TRUNCATED_RECOVERY_TEXT }
-        const plain = recoveries.length > 0 && JSON.stringify(texts) === JSON.stringify([recoveryText])
-        const merged = recoveries.length > 0 && JSON.stringify(blob.content) === JSON.stringify([{ type: 'text', text: witness.prompt + '\n' }, recoveryText])
+        const texts = blob.content.filter(block => block.type === 'text')
+        const matchingRecoveries = recoveries.filter(recovery => {
+          const recoveryText = { type: 'text', text: recovery.text }
+          return JSON.stringify(texts) === JSON.stringify([recoveryText]) || JSON.stringify(blob.content) === JSON.stringify([{ type: 'text', text: witness.prompt + '\n' }, recoveryText])
+        })
         const originalInput = hash === claudeMessageDigest(original.message) || hash === claudeMessageDigest({ role: 'user', content: claudeMessageBlocks(original.message) })
-        if (!blob.canonical || !originalInput && !plain && !merged) stale('Claude API user message contains unobserved text or a different coalescing shape')
-        if (plain || merged) for (const recovery of recoveries) recovery.hashes.add(hash)
+        if (!blob.canonical || !originalInput && !matchingRecoveries.length) stale('Claude API user message contains unobserved text or a different coalescing shape')
+        for (const recovery of matchingRecoveries) recovery.hashes.add(hash)
       }
       requests.set(row.id!, hashes)
       for (const recovery of recoveries) {
@@ -633,9 +645,11 @@ export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFro
       }
     }
     if (row.type === 'user' && row.uuid !== userUuid) {
-      if (row.isMeta === true && row.turnCompanion === true && row.message?.role === 'user' && claudeMessageDigest(row.message) === claudeMessageDigest({ role: 'user', content: CLAUDE_TRUNCATED_RECOVERY_TEXT })) {
+      const recoveryText = row.isMeta === true && row.turnCompanion === true && row.message?.role === 'user'
+        ? CLAUDE_RECOVERY_TEXTS.find(text => claudeMessageDigest(row.message) === claudeMessageDigest({ role: 'user', content: text })) : undefined
+      if (recoveryText !== undefined) {
         if (!row.uuid || row.promptId !== promptId || row.sourceToolAssistantUUID !== undefined || row.parentUuid !== latestMessage || row.parentUuid !== latestAssistant) stale('Claude recovery companion lost its exact native assistant or original prompt')
-        recoveries.push({ hashes: new Set([claudeMessageDigest(row.message), claudeMessageDigest({ role: 'user', content: claudeMessageBlocks(row.message) })]), summaries: new Set(), requests: new Set(), consumed: false })
+        recoveries.push({ text: recoveryText, hashes: new Set([claudeMessageDigest(row.message), claudeMessageDigest({ role: 'user', content: claudeMessageBlocks(row.message!) })]), summaries: new Set(), requests: new Set(), consumed: false })
         acceptedOutput = false; latestMessage = row.uuid
         continue
       }
