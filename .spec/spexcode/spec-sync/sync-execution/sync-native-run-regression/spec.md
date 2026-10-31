@@ -22,6 +22,8 @@ code:
 
 创建阶段覆盖真实 Git target-resolution 与 worktree-add 后被取消：锁等待者取消不能替已取得创建权的事务写收据，worktree/branch 清理完成后方可结算资源。新进程同键重放取消收据且不同载荷拒绝；取消资源恢复不重派发、不增预算。未证实停止继续保留容量，收据版本、session、request、payload、清理与 nativeStopped 任一错配都拒绝。真实 Git fail→pass 验证仍不代表真实模型已经执行。
 
+结构化创建timeout回归使用受控runtime证明：精确`session_create_timeout` receipt通过现有身份、清理和notStarted门后，只有`terminal→removed`提交完成才发出`SettledSessionCreateTimeoutError`，错误携原receipt且同键dispatch/callsUsed不重复。removed重放和terminal→removed恢复重新核验canonical receipt后保持子类；receipt缺失、字段/cleanup错配或Native thread/turn已出现时不产生该类型，资源保持原未结算/已启动阶段。
+
 真实 Git 清理失败和 10 秒截止中断后重入正式恢复：已有精确候选收据才可继续，已移除候选重读确认后结算；调用次数与预算均不增加。源 checkout 的 staged/unstaged 内容、index 以及另一个用户 worktree 逐字节保留。候选后来出现 unstaged/staged/untracked/ignored 内容时恢复拒绝并保留原文件；撤去测试新增内容后原候选可正常清理。并发 canonical publication 持有同 request-key 锁时恢复不得抢先，发布后即使 envelope 缺失仍拒绝 notStarted 清理。
 
 所有真实结构化创建取消/重启恢复都携带原冻结策略，核对同一外部runtime候选收据；不能以普通checkout内目标冒充原候选。

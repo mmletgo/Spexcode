@@ -9,7 +9,7 @@ import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 import { openProtocol } from '@spexcode/session-protocol'
 import { sessionIdForCreateKey, readSessionCreateTermination, recoverSessionCreateTermination, type SessionCreateTermination } from '../sessions.js'
-import { cancelStructuredSession, runStructuredSession, StructuredSessionError, type StructuredSessionRequest, type StructuredSessionResult } from '../session-structured.js'
+import { cancelStructuredSession, runStructuredSession, SettledSessionCreateTimeoutError, StructuredSessionError, type StructuredSessionRequest, type StructuredSessionResult } from '../session-structured.js'
 import { structuredExecutionPolicy } from '../session-structured-policy.js'
 import { freezeContext, proveFrozenReads, readFrozenManifest, readFrozenRange } from '../frozen-context.js'
 import { createAttemptRunner, type AttemptRunnerOptions, type NativeRunCheckpoint, type NativeRunPlan, type NativeRunRecord } from './native-run.js'
@@ -651,10 +651,66 @@ test('restart with an exact creation termination settles held resource without c
     await assert.rejects(f.runner(runtime)(f.request), /transport lost/)
     const key = f.store.readAttempt(f.claimed.attempt.id).dispatchPlans[0].sessionCreateKey, record = published({ ...f.request, requestKey: key })
     const receipt: SessionCreateTermination = { version: 1, sessionId: record.session, requestDigest: record.createRequestId!, payloadHash: record.createPayloadHash!, code: 'session_create_timeout', phase: 'target-resolution', nativeStopped: true, nativeStatus: 'notStarted', cleanupComplete: true }
-    await assert.rejects(f.runner({ ...runtime, readCreateTermination: () => receipt })(f.request), error => error instanceof StructuredSessionError && error.code === 'timeout')
+    const settledRunner = f.runner({ ...runtime, readCreateTermination: () => receipt })
+    const assertSettledTimeout = (error: unknown): boolean => {
+      assert.ok(error instanceof SettledSessionCreateTimeoutError)
+      assert.equal(error.code, 'timeout')
+      assert.deepEqual(error.termination, receipt)
+      return true
+    }
+    await assert.rejects(settledRunner(f.request), assertSettledTimeout)
+    await assert.rejects(settledRunner(f.request), assertSettledTimeout, 'removed replay retains the exact settled creation timeout subtype')
     assert.equal(calls, 1)
     assert.equal(f.resource().phase, 'removed')
     assert.equal(f.checkpoint().creationTermination?.code, 'session_create_timeout')
+    assert.equal(f.store.readOperation(f.claimed.operation.id).callsUsed, 1)
+  } finally { f.cleanup() }
+})
+
+test('timeout without an exact creation termination receipt is not classified as a settled retry', async () => {
+  const f = await fixture()
+  try {
+    let calls = 0
+    const runtime = { ...f.runtimeBase, run: async () => { calls++; throw new StructuredSessionError('timeout', 'creation observer timed out without a termination receipt') } }
+    await assert.rejects(f.runner(runtime)(f.request), error => {
+      assert.ok(error instanceof StructuredSessionError)
+      assert.equal(error.code, 'timeout')
+      assert.equal(error instanceof SettledSessionCreateTimeoutError, false)
+      return true
+    })
+    assert.equal(calls, 1)
+    assert.equal(f.resource().phase, 'planned')
+    assert.equal(f.checkpoint().nativeCallRequested, true)
+    assert.equal(f.store.readOperation(f.claimed.operation.id).callsUsed, 1)
+  } finally { f.cleanup() }
+})
+
+test('terminal create timeout checkpoint resumes terminal-to-removed with its exact subtype', async () => {
+  const f = await fixture()
+  try {
+    let calls = 0
+    const runtime = { ...f.runtimeBase, run: async () => { calls++; throw new Error('creation observer transport lost') } }
+    await assert.rejects(f.runner(runtime)(f.request), /transport lost/)
+    const key = f.store.readAttempt(f.claimed.attempt.id).dispatchPlans[0].sessionCreateKey, record = published({ ...f.request, requestKey: key })
+    const receipt: SessionCreateTermination = { version: 1, sessionId: record.session, requestDigest: record.createRequestId!, payloadHash: record.createPayloadHash!, code: 'session_create_timeout', phase: 'record-write', nativeStopped: true, nativeStatus: 'notStarted', cleanupComplete: true }
+    const resource = f.resource(), checkpoint = f.checkpoint(), terminal: NativeRunCheckpoint = {
+      ...checkpoint,
+      phase: 'terminal',
+      status: 'timeout',
+      creationTermination: receipt,
+      stop: { sessionId: record.session, state: 'timeout', nativeStopped: true, acknowledged: false, nativeStatus: 'notStarted' },
+    }
+    f.store.recordResourceCheckpoint(resource.id, {
+      operationId: checkpoint.operationId, attemptId: checkpoint.attemptId, inputId: checkpoint.inputId, candidateDigest: checkpoint.candidateDigest,
+      phase: 'terminal', expectedCheckpointRef: resource.checkpointRef, checkpointRef: f.blobIO.put(Buffer.from(JSON.stringify(terminal))),
+    })
+    await assert.rejects(f.runner({ ...runtime, readCreateTermination: () => receipt })(f.request), error => {
+      assert.ok(error instanceof SettledSessionCreateTimeoutError)
+      assert.deepEqual(error.termination, receipt)
+      return true
+    })
+    assert.equal(calls, 1)
+    assert.equal(f.resource().phase, 'removed')
     assert.equal(f.store.readOperation(f.claimed.operation.id).callsUsed, 1)
   } finally { f.cleanup() }
 })
@@ -673,9 +729,43 @@ for (const defect of ['session', 'request', 'payload', 'cleanup', 'native', 'sch
     if (defect === 'cleanup') Object.assign(receipt, { cleanupComplete: false })
     if (defect === 'native') Object.assign(receipt, { nativeStopped: false })
     if (defect === 'schema') receipt.version = 2 as 1
-    await assert.rejects(f.runner({ ...runtime, readCreateTermination: () => receipt })(f.request), /termination differs/)
+    await assert.rejects(f.runner({ ...runtime, readCreateTermination: () => receipt })(f.request), error => {
+      assert.ok(error instanceof StructuredSessionError)
+      assert.equal(error instanceof SettledSessionCreateTimeoutError, false)
+      assert.match(error.message, /termination differs/)
+      return true
+    })
     assert.equal(f.resource().phase, 'planned')
     assert.equal(calls, 1)
+    assert.equal(f.store.readOperation(f.claimed.operation.id).callsUsed, 1)
+  } finally { f.cleanup() }
+})
+
+test('exact creation timeout cannot be retried as settled after native thread and turn have started', async () => {
+  const f = await fixture()
+  try {
+    let calls = 0
+    const runtime = { ...f.runtimeBase, run: async (request: StructuredSessionRequest) => {
+      calls++
+      const record = published(request)
+      record.status = 'active'
+      record.harnessSessionId = 'thread-started'
+      record.structuredExecution = { ...record.structuredExecution!, state: 'running', threadId: 'thread-started', turnId: 'turn-started', turnStartRequested: true }
+      f.records.set(record.session, record)
+      throw new Error('native transport lost after start')
+    } }
+    await assert.rejects(f.runner(runtime)(f.request), /native transport lost after start/)
+    const record = [...f.records.values()][0]
+    const receipt: SessionCreateTermination = { version: 1, sessionId: record.session, requestDigest: record.createRequestId!, payloadHash: record.createPayloadHash!, code: 'session_create_timeout', phase: 'record-write', nativeStopped: true, nativeStatus: 'notStarted', cleanupComplete: true }
+    await assert.rejects(f.runner({ ...runtime, readCreateTermination: () => receipt })(f.request), error => {
+      assert.ok(error instanceof StructuredSessionError)
+      assert.equal(error.code, 'stale_result')
+      assert.equal(error instanceof SettledSessionCreateTimeoutError, false)
+      return true
+    })
+    assert.equal(calls, 1)
+    assert.equal(f.resource().phase, 'created')
+    assert.equal(f.checkpoint().nativeStarted, true)
     assert.equal(f.store.readOperation(f.claimed.operation.id).callsUsed, 1)
   } finally { f.cleanup() }
 })
