@@ -7,7 +7,7 @@ import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
 import type { ElaborationInput, ElaborationRepairSeed, ElaborationReview, ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
 import type { ContractCell, GeneratedElaboration, GeneratedTables, GeneratedTargetElaboration } from './elaboration-markdown.js'
 import { bindElaborationTargets, renderElaboration } from './elaboration-markdown.js'
-import { ELABORATION_SCHEMA, outputErrors } from './elaboration-schema.js'
+import { CONTRACT_INSTRUCTIONS, ELABORATION_SCHEMA, outputErrors } from './elaboration-schema.js'
 import type { CodeBehaviorEvidence, SyncDecisionAuthority } from './writeback-types.js'
 import { adaptElaborationNativeOutput } from '../../test/elaboration-native-output.js'
 
@@ -46,6 +46,33 @@ const registeredVerification = (() => {
   assert.equal(item.kind, 'VERIFY')
   return { id: item.id, command: [...item.command], cwd: item.cwd, timeoutMs: item.timeoutMs }
 })()
+
+test('父接口实际生成和独审请求只承担必要共享接口，不混入完整P1覆盖任务', async () => {
+  const raw = '保留导出任务的明确原意，由子实现承接完整流程与验收。'
+  const before = `---\ntitle: 导出接口\nstatus: pending\n---\n## raw source\n\n${raw}\n`
+  const parent = `---\ntitle: 导出接口\nstatus: active\ncontract-schema: sync-v1\n---\n## raw source\n\n${raw}\n\n## expanded spec\n\n父层保留必要共享接口。\n\n### REQ\n\n| id | goal | source | constraints | success | depends-on |\n| --- | --- | --- | --- | --- | --- |\n| REQ-EXPORT-01 | 保留导出任务原意 | user:raw | 由子实现承接流程与验收 | 子实现完整保持原意 | - |\n`
+  const fake = runner(request => candidate(request, parent))
+  const result = await elaborate({ ...input(), phase: 'interface_seed', intent: { nodeId: 'export-contract', rawSource: raw }, targets: [{ nodeId: 'export-contract', path, source: before, sourceDigest: elaborationDigest(before) }], facts: [], maxRepairs: 0 }, { runner: fake.run })
+  assert.equal(result.status, 'interface_seed', JSON.stringify(result.rounds.flatMap(round => round.findings)))
+  assert.deepEqual(fake.calls.map(call => call.purpose), ['elaboration_generate', 'elaboration_review'])
+  for (const request of fake.calls) {
+    assert.doesNotMatch(request.prompt, /逐项展开可完成主流程、状态处置和AC|每个业务REQ至少由一个主FLOW.req直接覆盖|每个适用对象全部可达状态×事件必须有TR|主动从场景发现响应丢失后的重复请求|若遗漏对象\/事件\/场景/)
+    assert.match(request.prompt, /REQ\/RULE\/GAP/)
+    assert.match(request.prompt, /schema允许null的列用JSON null/)
+    assert.match(request.prompt, /source必须是唯一单值/)
+    assert.match(request.prompt, /description.*prose.*稳定.*业务/)
+    assert.match(request.prompt, /不能弱化.*raw|不能.*改写raw/)
+  }
+})
+
+test('非父完整细化的共同指令逐字保留完整P1覆盖与独审任务', async () => {
+  assert.equal(elaborationDigest(CONTRACT_INSTRUCTIONS), '7e418e1affc50540c7dfe1da0855268faf1dc44854457ce93e428e6af0500ad1')
+  const fake = runner(request => candidate(request, source))
+  await elaborate(input(), { runner: fake.run })
+  for (const request of fake.calls) assert.ok(request.prompt.includes(CONTRACT_INSTRUCTIONS))
+  assert.match(fake.calls[0].prompt, /逐项展开可完成主流程、状态处置和AC/)
+  assert.match(fake.calls[1].prompt, /重新从用户原意和冻结事实走正常、失败、边界、重试、取消、重复及必要竞争顺序/)
+})
 
 test('AC-ELABORATION-32 不合法可信登记在任何native前拒绝，复用schema与parser', async () => {
   for (const verifications of [
