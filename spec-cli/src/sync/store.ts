@@ -1,3 +1,4 @@
+import { finiteSyncBudget, syncDeadlineExpired } from './budget.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { syncModel, syncModelBinding } from './model-selection.js'
 import { getBlob } from '@spexcode/spec-core'
@@ -272,7 +273,7 @@ export class SyncStore {
     if (operation.baselineSelection && attempt.baselineSelectionDigest !== operation.baselineSelection.digest) fail('SYNC_FENCE_EXPIRED', 'attempt baseline selection changed')
     if (operation.currentAttemptId !== attempt.id || operation.generation !== fence.generation || attempt.generation !== fence.generation || attempt.operationId !== operation.id || operation.input.source.physicalFingerprint !== fence.sourceFingerprint || attempt.leaseToken !== fence.leaseToken || attempt.status === 'superseded' || attempt.status === 'settled' || attempt.status === 'failed') fail('SYNC_FENCE_EXPIRED', 'operation, attempt, generation or physical source changed')
     const applying = ['applying', 'cancelling', 'pausing', 'recovery_required'].includes(operation.phase)
-    if ((!finishing && this.now() >= operation.deadlineAtMs) || operation.phase === 'superseded' || (!finishing && (operation.control !== 'run' || this.physicalControl(tx, physicalScope(operation.input.source)).control !== 'run')) || (attempt.expiresAtMs <= this.now() && !(finishing && applying))) fail('SYNC_FENCE_EXPIRED', 'write authority is expired or controlled')
+    if ((!finishing && syncDeadlineExpired(operation.deadlineAtMs, this.now())) || operation.phase === 'superseded' || (!finishing && (operation.control !== 'run' || this.physicalControl(tx, physicalScope(operation.input.source)).control !== 'run')) || (attempt.expiresAtMs <= this.now() && !(finishing && applying))) fail('SYNC_FENCE_EXPIRED', 'write authority is expired or controlled')
     const rows = tx.query('SELECT resource_key,token,attempt_id FROM sync_leases WHERE token=?', fence.leaseToken)
     const required = this.leaseKeys(operation, scopeKeys(operation.readyScope))
     if (!required.every(key => rows.some(row => row.resource_key === key && row.attempt_id === attempt.id))) fail('SYNC_FENCE_EXPIRED', 'a resource lease was released or replaced')
@@ -417,7 +418,8 @@ export class SyncStore {
       const address = syncCoordinatorAddress(input.input.source.repositoryId)
       tx.initialize(address)
       const message = tx.enqueue(address, { kind: SYNC_DISPATCH_KIND, body: Buffer.from(JSON.stringify(envelope)), idempotencyKey: dispatchKey })
-      const operation: SyncOperation = { ...clone(input), scope: canonicalScope(input.scope), id, payloadDigest, generation, revision: 1, phase: 'queued', control: 'run', previousBaselinePair: clone(input.previousBaselinePair ?? null), ...(predecessor ? { successorOf: predecessor.id, ...(inheritedAnchor ? { dispatchAnchor: clone(inheritedAnchor) } : {}), budget: clone(predecessor.budget) } : {}), readyScope: canonicalScope(input.scope), blockedScope: emptyScope(), deliveredScope: emptyScope(), blockedReason: null, callsUsed: 0, deadlineAtMs: predecessor?.deadlineAtMs ?? this.now() + input.budget.timeoutMs, currentAttemptId: null, dispatchMessageId: message.messageId, createdAtMs: this.now(), updatedAtMs: this.now() }
+      const budget = finiteSyncBudget(input.budget)
+      const operation: SyncOperation = { ...clone(input), scope: canonicalScope(input.scope), id, payloadDigest, generation, revision: 1, phase: 'queued', control: 'run', previousBaselinePair: clone(input.previousBaselinePair ?? null), ...(predecessor ? { successorOf: predecessor.id, ...(inheritedAnchor ? { dispatchAnchor: clone(inheritedAnchor) } : {}), budget: clone(predecessor.budget) } : {}), readyScope: canonicalScope(input.scope), blockedScope: emptyScope(), deliveredScope: emptyScope(), blockedReason: null, callsUsed: 0, deadlineAtMs: predecessor ? predecessor.deadlineAtMs : budget ? this.now() + budget.timeoutMs : null, currentAttemptId: null, dispatchMessageId: message.messageId, createdAtMs: this.now(), updatedAtMs: this.now() }
       tx.exec('INSERT INTO sync_operations(id,ingress_key,payload_digest,semantic_digest,normalized_semantic_digest,repository_id,source_key,source_root,generation,phase,control,current_attempt_id,updated_at_ms,record_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)', id, input.ingressKey, payloadDigest, syncSemanticDigest(input), semanticDigest, input.input.source.repositoryId, identityKey(input.input.source), input.input.source.canonicalRoot, generation, operation.phase, operation.control, null, operation.updatedAtMs, JSON.stringify(operation))
       operation.dispatchAnchor ??= { scope: physicalScope(operation.input.source), firstMessageId: message.messageId, firstEnqueueSeq: Number(tx.query('SELECT enqueue_seq FROM protocol_messages WHERE message_id=?', message.messageId)[0].enqueue_seq), budgetRootOperationId: operation.id }
       tx.exec('UPDATE sync_operations SET record_json=? WHERE id=?', JSON.stringify(operation), operation.id)
@@ -488,8 +490,9 @@ export class SyncStore {
       const number = Number(tx.query('SELECT MAX(number) AS number FROM sync_attempts WHERE operation_id=?', operation.id)[0].number ?? 0) + 1
       const family = this.family(tx, operation)
       const repairFailures = family.attempts.filter(attempt => attempt.verification?.passed === false || attempt.failure?.kind === 'repairable').length
-      if (this.now() >= operation.deadlineAtMs || family.calls >= operation.budget.maxCalls || repairFailures > operation.budget.maxRepairs) fail('SYNC_BUDGET_EXHAUSTED', 'deadline or repair budget exhausted')
-      if (family.attempts.length >= operation.budget.maxAttempts) fail('SYNC_BUDGET_EXHAUSTED', 'attempt budget exhausted')
+      const budget = finiteSyncBudget(operation.budget)
+      if (syncDeadlineExpired(operation.deadlineAtMs, this.now()) || budget && (family.calls >= budget.maxCalls || repairFailures > budget.maxRepairs)) fail('SYNC_BUDGET_EXHAUSTED', 'deadline or repair budget exhausted')
+      if (budget && family.attempts.length >= budget.maxAttempts) fail('SYNC_BUDGET_EXHAUSTED', 'attempt budget exhausted')
       const resources = scopeKeys(input.scope)
       const id = randomUUID(), token = randomUUID(), expiresAtMs = this.now() + input.leaseMs
       const attempt: SyncAttempt = { id, operationId: operation.id, number, generation: operation.generation, ...(operation.baselineSelection ? { baselineSelectionDigest: operation.baselineSelection.digest } : {}), dispatchKey: `sync-attempt-${operation.id}-${number}`, sessionCreateKey: `sync-session-${operation.id}-${number}`, status: 'claimed', currentSession: null, dispatchPlans: [], composedInput: null, candidate: null, verification: null, checkpointRefs: [], failure: null, leaseToken: token, expiresAtMs }
@@ -568,7 +571,8 @@ export class SyncStore {
       const { operation, attempt } = this.checkFence(tx, fence)
       const prior = attempt.dispatchPlans.find(plan => plan.key === input.key)
       if (prior) { if (prior.purpose !== input.purpose || prior.requestDigest !== input.requestDigest) fail('SYNC_DISPATCH_CONFLICT', input.key); return prior }
-      if (this.family(tx, operation).calls >= operation.budget.maxCalls || this.now() >= operation.deadlineAtMs) fail('SYNC_BUDGET_EXHAUSTED', 'native call budget or deadline exhausted')
+      const budget = finiteSyncBudget(operation.budget)
+      if (budget && this.family(tx, operation).calls >= budget.maxCalls || syncDeadlineExpired(operation.deadlineAtMs, this.now())) fail('SYNC_BUDGET_EXHAUSTED', 'native call budget or deadline exhausted')
       const plan: DispatchPlan = { ...clone(input), sessionCreateKey: `sync-call-${digest({ attemptId: attempt.id, key: input.key })}`, session: null }
       attempt.dispatchPlans.push(plan); operation.callsUsed++; this.saveAttempt(tx, attempt); this.saveOperation(tx, operation); return plan
     })
@@ -836,7 +840,8 @@ export class SyncStore {
       const operation = this.operation(tx, operationId)
       const family = this.family(tx, operation), attempts = family.attempts
       const repairs = attempts.filter(attempt => attempt.verification?.passed === false || attempt.failure?.kind === 'repairable').length
-      if (this.now() < operation.deadlineAtMs && family.calls < operation.budget.maxCalls && attempts.length < operation.budget.maxAttempts && repairs <= operation.budget.maxRepairs) fail('SYNC_BUDGET_NOT_EXHAUSTED', 'budget remains available')
+      const budget = finiteSyncBudget(operation.budget)
+      if (!syncDeadlineExpired(operation.deadlineAtMs, this.now()) && (!budget || family.calls < budget.maxCalls && attempts.length < budget.maxAttempts && repairs <= budget.maxRepairs)) fail('SYNC_BUDGET_NOT_EXHAUSTED', 'budget remains available')
       if (TERMINAL.has(operation.phase)) return operation
       const attempt = operation.currentAttemptId ? this.attempt(tx, operation.currentAttemptId) : null
       if (attempt) {

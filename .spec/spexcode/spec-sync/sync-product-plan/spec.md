@@ -29,3 +29,5 @@ P0至P5按完整需求交付，不以阶段演示、局部测试或可修改的�
 方案保留九项REQ和二十八项AC及阶段依赖；产品实施状态由 [[spec-sync]] 与各权威子节点、实际当前版本证据决定。跨机器原意授权由 [[sync-intent-authorization]] 定义，可信CI从受保护目标提供policyCommit；普通候选不能选择自身政策来授予自己权限。撤销和版本回退分别复用 [[sync-history-input]] 与 [[sync-application]] 的新成组补偿及停止写入动作，真实来源采纳和主分支同步按 [[sync-landing-status]] 区分。大上下文通过 [[frozen-context-reader]] 完整读取，不改变原预算或降低审查义务。
 
 已结算交付的显式来源采纳由 [[sync-source-adoption]] 处理，只快进干净原树至真实收据提交；Dashboard 和 CLI 共用门禁，保留未提交内容及分叉历史，不自动代替另行授权的分支合并。
+
+用户可用精确budget.mode=unlimited解除同operation总调用、attempt、修复次数和总期限，持续保存真实用量且deadline显式null；有限预算原语义保持，单次Native超时回收、验证timeout、租约/取消、全部独审和完整交付验收不变。

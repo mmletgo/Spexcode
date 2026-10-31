@@ -83,3 +83,5 @@ AC-ELABORATION-38–40 验证空 changes 的完整既有目标、只返回子叶
 纯父已有VERIFY可在本target合法update_verification经原checkInput授权门禁核验后进入接口更新，即使旧定义不同于本轮新登记。程序只从冻结登记补入该已有ID的精确新技术行，模型仍不得选择VERIFY；原候选演进、登记一致性与独审完整执行，无授权或伪授权漂移拒绝。已保存raw与空行差量不吞掉技术更新，也不允许通过技术投影改变业务或用户原意。
 
 freezeElaborationInput为生成、独审及同operation局部interface_seed承接共享的唯一完整输入冻结与摘要接缝；requestKey和执行预算不改变业务摘要，原意/目标/上下文/文件/授权/技术政策/分析及完整分区绑定均参与。承接不能另造摘要算法或改写旧inputDigest。
+
+totalTimeoutMs显式null表示本次P1没有总时间期限，省略仍沿既有有限默认；每次调用timeoutMs仍为有限正整数。无总deadline不创建总期计时器，不将null参与减法；每attempt原maxCalls/maxRepairs机制及生成/独审角色保持，取消与未停稳原生资源仍按原失败门禁。

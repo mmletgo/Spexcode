@@ -31,11 +31,11 @@ import { composeControlledRequest, prepareControlledRequest, renderControlledDec
 import { inspectTrustedRuntime } from './trusted-hooks.js'
 import type { ApplyJournal, BaselinePair, VerificationResultBlob } from './operation-types.js'
 
-const settings: SyncSettings = {
+const settings = {
   version: 'sync-settings-v1', nodeIds: ['demo'], sourcePaths: ['src'], testPaths: ['tests'], readPaths: ['package.json'],
   verifications: [{ definition: { id: 'VERIFY-DEMO-01', command: ['node', '--test', 'tests/demo.test.mjs'], cwd: '.', timeoutMs: 1000 }, environment: { version: 'v1', image: `node@sha256:${'a'.repeat(64)}`, platform: 'linux/arm64', memoryBytes: 100000000, cpus: 1, pidsLimit: 64, scratchBytes: 1000000, logBytes: 100000 } }],
   mandatoryTests: [], facts: [], budget: { maxAttempts: 2, maxCalls: 16, maxRepairs: 1, timeoutMs: 30000 },
-}
+} satisfies SyncSettings
 const source = '---\ntitle: Demo\nstatus: pending\n---\n# Demo\n\n## raw source\n\n返回用户指定的文本。\n\n## expanded spec\n\n待细化。\n'
 function gitReadCounter(directory: string): { reset(): void; entries(): string[]; restore(): void } {
   const bin = join(directory, 'git-read-counter-bin'), log = join(directory, 'git-read-counter.log'), wrapper = join(bin, 'git')
@@ -227,7 +227,7 @@ test('AC-APPLICATION-SCRATCH 可信版本化环境允许可选布尔 scratchExec
   const f = await fixture()
   try {
     for (const scratchExecutable of [undefined, false, true]) {
-      const config = structuredClone(settings)
+      const config: SyncSettings = structuredClone(settings)
       if (scratchExecutable !== undefined) config.verifications[0].environment.scratchExecutable = scratchExecutable
       writeFileSync(join(f.root, '.spec/spexcode.json'), JSON.stringify({ sync: config }))
       const frozen = await captureInputSnapshot(f.root)
@@ -335,6 +335,28 @@ test('AC-APPLICATION-05 图影响和旧节点治理纳入共享叶，配置不�
   } finally { f.cleanup() }
 })
 
+test('unlimited配置精确接受无总cap，单次timeout独立且拒混合或无效形状', async () => {
+  const f = await fixture()
+  try {
+    const config = (budget: unknown, callTimeoutMs?: number) => writeFileSync(join(f.root, '.spec/spexcode.json'), JSON.stringify({ sync: { ...settings, budget, ...(callTimeoutMs === undefined ? {} : { callTimeoutMs }) } }))
+    config({ mode: 'unlimited' }, 1200000)
+    assert.deepEqual(readSyncSettings(await captureInputSnapshot(f.root)).settings.budget, { mode: 'unlimited' })
+    assert.equal(readSyncSettings(await captureInputSnapshot(f.root)).settings.callTimeoutMs, 1200000)
+    for (const budget of [{ mode: 'unlimited', maxCalls: 64 }, { mode: 'unlimited', timeoutMs: 1 }, { mode: 'unlimited', ...settings.budget }, {}, { mode: 'other' }, { mode: null }]) {
+      config(budget)
+      const snapshot = await captureInputSnapshot(f.root)
+      assert.throws(() => readSyncSettings(snapshot), /sync 配置缺口/)
+    }
+    for (const timeout of [0, -1, 1.5]) {
+      config({ mode: 'unlimited' }, timeout)
+      const snapshot = await captureInputSnapshot(f.root)
+      assert.throws(() => readSyncSettings(snapshot), /sync 配置缺口/)
+    }
+    config(settings.budget)
+    assert.deepEqual(readSyncSettings(await captureInputSnapshot(f.root)).settings.budget, settings.budget)
+  } finally { f.cleanup() }
+})
+
 test('AC-APPLICATION-07 两个并发相同请求归并同一操作和runtime，不重置预算或重复native', async () => {
   const f = await fixture()
   try {
@@ -431,8 +453,7 @@ test('AC-APPLICATION-09 显式单次调用上限来自operation冻结配置，li
     writeFileSync(join(f.root, '.spec/spexcode.json'), JSON.stringify({ sync: { ...settings, callTimeoutMs: 20000 } }))
     assert.equal(readSyncSettings(second.operation.input).settings.callTimeoutMs, 10000)
     assert.equal(second.operation.deadlineAtMs, first.operation.deadlineAtMs)
-    assert.equal(second.operation.budget.timeoutMs, first.operation.budget.timeoutMs)
-    assert.equal(second.operation.budget.maxCalls, first.operation.budget.maxCalls)
+    assert.deepEqual(second.operation.budget, first.operation.budget)
     await assert.rejects(f.application.submit({ nodeId: 'demo', requestId: 'call-timeout' }), /配置已变化/)
     assert.equal(f.calls.length, 2, '失败的精确请求不能因配置变化再次派发')
   } finally { f.cleanup() }
@@ -611,7 +632,7 @@ test('AC-APPLICATION-15 仅显式retry建立关联新操作与新预算，普通
     assert.ok(retryRequests.length > 0)
     assert.equal(retryRequestKeys.size, retryRequests.length)
     assert.equal(result.operation.callsUsed, retryRequests.length); assert.deepEqual(result.operation.budget, original.operation.budget)
-    assert.ok(result.operation.deadlineAtMs > original.operation.deadlineAtMs)
+    assert.ok(result.operation.deadlineAtMs !== null && original.operation.deadlineAtMs !== null && result.operation.deadlineAtMs > original.operation.deadlineAtMs)
     assert.equal((await f.application.readOperation(original.operation.id)).operation.callsUsed, firstCallCount)
     assert.equal((await f.application.submit(request)).operation?.id, result.operation.id)
     await f.application.wait(result.operation.id)

@@ -52,3 +52,5 @@ authorizedChanges 的 restore 动作保存原固定历史请求及 input 引用�
 分区聚合结果可携partitionEvidence:{partitionId,resultRef}[]，每份ref保存独立局部结构和原生审查原件。合并结果不能冒充一次全仓审查，P2仍须核唯一目标writer、全局契约关系及最终candidate。intent可来自只读context，只有targets可写。
 
 分区aggregate可携verificationProjectionRef，指向[[sync-partition-execution]]的唯一技术归属投影证据，包含冻结登记digest、真实owner决策、受审原件refs和每候选before/after及非VERIFY字节摘要。局部changes、rounds、review及其摘要保留原件；aggregate changes及partitionSeal绑定投影后规范正文。该ref只证明冻结技术policy的可重算投影，不代替新业务独审、全局严格封口或真实运行验证。
+
+ElaborationInput.totalTimeoutMs可显式null表示无总期限；省略及正整数继续原语义，单次timeoutMs仍有限且独立。该执行预算不进入业务输入摘要，也不授予未审候选通过或写入权。

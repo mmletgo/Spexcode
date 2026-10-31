@@ -71,6 +71,96 @@ async function fixture() {
   return { root, path, protocol, store, options, put, input, admit, claim, ready, receipt, controlled, blobs, tick: (ms: number) => { time += ms }, cleanup: () => { protocol.close(); rmSync(root, { recursive: true, force: true }) } }
 }
 
+for (const cap of ['calls', 'attempts', 'repairs', 'time'] as const) test(`unlimited对照旧有限${cap}预算仍严格拒绝`, async () => {
+  const f = await fixture()
+  try {
+    const admission = { ...f.admit(), budget: { maxAttempts: cap === 'attempts' ? 1 : 4, maxCalls: cap === 'calls' ? 1 : 4, maxRepairs: cap === 'repairs' ? 0 : 2, timeoutMs: 100 } }
+    const first = f.claim(admission)
+    assert.equal(first.operation.deadlineAtMs, 1100); assert.deepEqual(first.operation.budget, admission.budget)
+    if (cap === 'time') { f.tick(101); assert.throws(() => f.store.reserveDispatch(first.fence, { key: 'expired', purpose: 'generate', requestDigest: 'expired' }), /SYNC_FENCE_EXPIRED/); assert.equal(f.store.recordBudgetExhaustion(first.operation.id).phase, 'budget_exhausted') }
+    else {
+      f.store.reserveDispatch(first.fence, { key: 'one', purpose: 'generate', requestDigest: 'one' })
+      if (cap === 'calls') assert.throws(() => f.store.reserveDispatch(first.fence, { key: 'two', purpose: 'generate', requestDigest: 'two' }), /SYNC_BUDGET_EXHAUSTED/)
+      f.store.recordFailure(first.fence, { code: 'fixture', message: 'repair', kind: 'repairable', evidenceRefs: [] })
+      assert.throws(() => f.claim(admission), /SYNC_BUDGET_EXHAUSTED/)
+      assert.equal(f.store.readOperation(first.operation.id).callsUsed, 1)
+    }
+  } finally { f.cleanup() }
+})
+
+test('unlimited真实store越过旧总计数与时间仍记账，控制和租约不放宽', async () => {
+  const f = await fixture()
+  try {
+    const admission = { ...f.admit(), budget: { mode: 'unlimited' } as const }
+    const operation = f.store.admitAndEnqueue(admission)
+    assert.equal(operation.deadlineAtMs, null)
+    f.tick(90 * 60 * 1000 + 1)
+    let last = f.claim(admission)
+    for (let attempt = 0; attempt < 10; attempt++) {
+      if (attempt) last = f.claim(admission)
+      for (let call = 0; call < 7; call++) f.store.reserveDispatch(last.fence, { key: `call-${call}`, purpose: 'generate', requestDigest: `request-${attempt}-${call}` })
+      f.store.recordFailure(last.fence, { code: 'fixture-repair', message: '明确业务修复', kind: 'repairable', evidenceRefs: [] })
+    }
+    assert.deepEqual(f.store.readBudgetUsage(operation.id), { budgetRootOperationId: operation.id, callsUsed: 70, attemptsUsed: 10, repairFailures: 10 })
+    assert.throws(() => f.store.recordBudgetExhaustion(operation.id), /SYNC_BUDGET_NOT_EXHAUSTED/)
+    assert.throws(() => f.store.checkpoint(last.fence, f.put({ stale: true })), /SYNC_FENCE_EXPIRED/)
+    f.store.requestControl(operation.id, 'pause')
+    assert.throws(() => f.claim(admission), /SYNC_CLAIM_REFUSED/)
+    f.store.requestControl(operation.id, 'run')
+    const active = f.claim(admission); f.tick(1001)
+    assert.throws(() => f.store.reserveDispatch(active.fence, { key: 'expired', purpose: 'generate', requestDigest: 'expired' }), /SYNC_FENCE_EXPIRED/)
+    const before = f.store.readOperation(operation.id)
+    f.store.requestControl(operation.id, 'cancel')
+    assert.throws(() => f.claim(admission), /SYNC_CLAIM_REFUSED/)
+    const cancelled = f.store.readOperation(operation.id)
+    assert.equal(cancelled.callsUsed, 70); assert.equal(cancelled.deadlineAtMs, null); assert.deepEqual(cancelled.budget, before.budget)
+    assert.equal(f.store.admitAndEnqueue({ ...admission, ingressKey: 'same-input-new-key' }).id, operation.id)
+  } finally { f.cleanup() }
+})
+
+test('unlimited自动前驱继承显式null，不被新有限配置重开期限或预算', async () => {
+  const f = await fixture()
+  try {
+    const selected = f.store.readBaselineSelection(source(), [{ kind: 'path', path: 'src/a.ts' }, { kind: 'contract', id: 'RULE-A' }]); assert.ok('selection' in selected)
+    const automatic = (input: AdmitSyncInput) => {
+      const admission = { ...input, baselineSelection: selected.selection }
+      const result = f.store.observeAndAdmit({ input: admission.input, configRef: f.put({ config: 'automatic' }), selection: selected.selection, latestDifferenceDigest: admission.input.id }, admission, { controlRevision: f.store.readPhysicalControl(source()).revision, selectionDigest: selected.selection.digest })
+      assert.ok('operation' in result); return result.operation
+    }
+    const first = automatic({ ...f.admit(), budget: { mode: 'unlimited' } })
+    f.tick(90 * 60 * 1000 + 1)
+    const successor = automatic(f.admit(source(), 'new-input'))
+    assert.equal(successor.successorOf, first.id); assert.equal(successor.deadlineAtMs, null)
+    assert.deepEqual(successor.budget, { mode: 'unlimited' }); assert.deepEqual(successor.dispatchAnchor, first.dispatchAnchor)
+    const before = f.store.readOperation(successor.id)
+    f.store.requestPhysicalControl(source(), 'pause', 0); f.store.requestPhysicalControl(source(), 'run', 1)
+    assert.equal(f.store.readOperation(successor.id).deadlineAtMs, null); assert.deepEqual(f.store.readOperation(successor.id).budget, before.budget)
+    assert.equal(automatic({ ...f.admit(source(), 'new-input'), ingressKey: 'echo' }).id, successor.id)
+  } finally { f.cleanup() }
+})
+
+test('unlimited v15 marker先online备份且旧writer拒绝，历史记录和v1-v14 checksum保持', async () => {
+  const f = await fixture()
+  let backup: ReturnType<typeof openProtocol> | undefined
+  try {
+    const ready = f.ready(), journal = f.store.beginApply(ready.fence, ready.plan, ready.target)
+    for (const step of journal.steps) f.store.recordApplyStep(ready.fence, journal.id, { ...step, status: 'completed' })
+    const receipt = f.receipt(journal.id, ready.plan); f.store.recordReceipt(journal.id, receipt); f.store.settleApply(journal.id, receipt.id)
+    f.protocol.withTransaction(tx => tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=15', SYNC_COMPONENT))
+    const rows = (protocol: typeof f.protocol) => protocol.withTransaction(tx => Object.fromEntries(['sync_operations', 'sync_attempts', 'sync_resources', 'sync_ingress_receipts', 'sync_apply_journals', 'sync_baseline_pairs'].map(table => [table, tx.query(`SELECT * FROM ${table}`)])))
+    const before = rows(f.protocol), checksums = f.protocol.withTransaction(tx => tx.query('SELECT version,checksum FROM schema_migrations WHERE component=? ORDER BY version', SYNC_COMPONENT))
+    const backupPath = join(f.root, 'v14-before-unlimited.backup')
+    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), 15)
+    assert.deepEqual(rows(f.protocol), before)
+    assert.deepEqual(f.protocol.withTransaction(tx => tx.query('SELECT version,checksum FROM schema_migrations WHERE component=? AND version<=14 ORDER BY version', SYNC_COMPONENT)), checksums)
+    assert.throws(() => applyComponentMigrations(f.protocol, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 14)), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
+    backup = openProtocol(backupPath)
+    assert.equal(applyComponentMigrations(backup, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 14)), 14)
+    assert.deepEqual(rows(backup), before)
+    assert.equal(await migrateSyncStore(f.protocol), 15)
+  } finally { backup?.close(); f.cleanup() }
+})
+
 test('same stable admission and capture-time replay create one operation and protocol message; conflict rolls back', async () => {
   const f = await fixture()
   try {
@@ -123,7 +213,7 @@ test('分区与提交快照v14 marker保留旧记录及资源，备份可供旧w
     f.protocol.withTransaction(tx => tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=14', SYNC_COMPONENT))
     const records = (protocol: typeof f.protocol) => protocol.withTransaction(tx => Object.fromEntries(['sync_operations', 'sync_attempts', 'sync_resources', 'sync_ingress_receipts', 'sync_apply_journals', 'sync_baseline_pairs'].map(table => [table, tx.query(`SELECT * FROM ${table}`)])))
     const before = records(f.protocol), backupPath = join(f.root, 'v13-before-partitions.backup')
-    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), 14)
+    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), SYNC_MIGRATIONS.length)
     assert.deepEqual(records(f.protocol), before)
     assert.throws(() => applyComponentMigrations(f.protocol, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 13)), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
     backup = openProtocol(backupPath)
@@ -1090,7 +1180,7 @@ test('explicit user retry receives a fresh operation and budget while automatic 
     const retryInput = { ...input, retryOf: previous.id, ingressKey: 'user-retry-1', rootCauseId: 'user-retry-1', budget: { ...input.budget, maxCalls: 20 }, deliveryPlan: { ...input.deliveryPlan, canonicalRoot: '/repo/retry-delivery', branch: 'retry-delivery' } }
     const retry = f.store.admitAndEnqueue(retryInput)
     assert.notEqual(retry.id, previous.id); assert.equal(retry.retryOf, previous.id); assert.equal(retry.callsUsed, 0)
-    assert.equal(retry.budget.maxCalls, 20); assert.equal(f.store.readOperation(previous.id).phase, 'failed')
+    assert.deepEqual(retry.budget, retryInput.budget); assert.equal(f.store.readOperation(previous.id).phase, 'failed')
     assert.deepEqual(f.store.readOperation(previous.id), previous)
     assert.equal(f.store.admitAndEnqueue(retryInput).id, retry.id)
     assert.throws(() => f.store.admitAndEnqueue({ ...retryInput, budget: { ...retryInput.budget, maxCalls: 21 } }), /SYNC_IDEMPOTENCY_CONFLICT/)
@@ -1122,6 +1212,7 @@ test('budget-exhausted pending FIFO can yield to explicit retry; cancelled witho
   const f = await fixture()
   try {
     const input = f.admit(), old = f.store.admitAndEnqueue(input)
+    assert.ok('timeoutMs' in input.budget)
     f.tick(input.budget.timeoutMs + 1); f.store.recordBudgetExhaustion(old.id)
     const retry = f.store.admitAndEnqueue({ ...input, retryOf: old.id, ingressKey: 'budget-retry', rootCauseId: 'budget-retry' })
     assert.equal(f.store.nextDispatch('repo')!.operation.id, old.id)

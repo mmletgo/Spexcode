@@ -45,7 +45,7 @@ export type ElaborationInput = {
   files?: ReadonlyMap<string, string>
   maxRepairs?: number
   maxCalls?: number
-  totalTimeoutMs?: number
+  totalTimeoutMs?: number | null
   timeoutMs?: number
   signal?: AbortSignal
   model?: string

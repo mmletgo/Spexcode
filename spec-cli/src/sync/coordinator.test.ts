@@ -71,7 +71,7 @@ function gitReadCounter(directory: string): { reset(): void; entries(): string[]
     },
   }
 }
-async function fixture(t: test.TestContext, budget = { maxAttempts: 3, maxCalls: 16, maxRepairs: 2, timeoutMs: 300_000 }, adopt = false, specSource = original, projectId = 'project', factsSource = specSource, planPatch: Partial<SyncCoordinatorPlan> = {}, controlledEdit?: { original: string; replacement: string; intent: string; testPath: string }, origin: 'spec' | 'code' | 'combined' = 'spec', model?: string, precise = false, extraSpecs: Readonly<Record<string, string>> = {}) {
+async function fixture(t: test.TestContext, budget: import('./operation-types.js').SyncBudget = { maxAttempts: 3, maxCalls: 16, maxRepairs: 2, timeoutMs: 300_000 }, adopt = false, specSource = original, projectId = 'project', factsSource = specSource, planPatch: Partial<SyncCoordinatorPlan> = {}, controlledEdit?: { original: string; replacement: string; intent: string; testPath: string }, origin: 'spec' | 'code' | 'combined' = 'spec', model?: string, precise = false, extraSpecs: Readonly<Record<string, string>> = {}) {
   const parent = realpathSync(mkdtempSync(join(tmpdir(), 'sync-coordinator-'))), root = join(parent, 'source'), managedRoot = join(parent, 'managed'), artifactRoot = join(parent, 'artifacts')
   mkdirSync(root); mkdirSync(managedRoot, { mode: 0o700 }); mkdirSync(artifactRoot, { mode: 0o700 }); cpSync(fixturePath, root, { recursive: true })
   const targetPath = `.spec/${projectId}/export-contract/spec.md`
@@ -479,6 +479,37 @@ test('历史合成created资源经原生精确notStarted回执安全回收，不
   assert.equal(f.store.listRecoverableResources().length, 0); assert.equal(f.calls.length, 0)
 })
 
+test('unlimited多轮P1独审及v2预算预检后真实Docker交付，重启恢复原receipt且无总deadline', docker, async t => {
+  const f = await fixture(t, { mode: 'unlimited' }, true, original, 'project', original, { version: 'sync-coordinator-v2', direction: 'spec_to_code', partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 }, sourcePaths: ['src'] })
+  await f.realTools()
+  f.options.callTimeoutMs = 1200000
+  let store = f.store
+  f.transform((output, request) => {
+    const attempt = store.readAttempt(store.readOperation(f.operation.id).currentAttemptId!)
+    if (request.purpose === 'elaboration_review' && attempt.number <= 2) return { verdict: 'repair', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [{ code: 'fixture-repair', kind: 'repair', message: '同原意内修正当前说明', affectedIds: ['REQ-EXPORT-01'], evidence: '确定性独审发现', decision: '修正后重新独审' }] }
+    return output
+  })
+  const first = await runSyncOperation(store, f.operation.id, { ...f.options, deliveryHooks: { afterCommit: () => { throw new Error('fixture真实commit后结算中断') } } })
+  assert.equal(first.status, 'recovery_required', JSON.stringify(first.failure)); assert.equal(first.operation.deadlineAtMs, null)
+  assert.equal(store.listAttempts(f.operation.id).length, 3)
+  assert.equal(f.calls.filter(call => call.purpose === 'elaboration_review').length, 3)
+  assert.ok(f.calls.every(call => call.timeoutMs === 1200000))
+  const callCount = f.calls.length, commit = f.git('rev-parse', first.operation.deliveryPlan.branch)
+  const stages = store.readAttempt(first.operation.currentAttemptId!).checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
+  const generationBudget = stages.find(stage => stage.stage === 'partition-generation-budget')
+  assert.equal(JSON.parse(readEvidence(f.input.source.commonDir, generationBudget.resultRef).toString()).remainingCalls, null)
+  const originalBudget = structuredClone(first.operation.budget)
+  f.closeForRestart(); const protocol = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => protocol.close())
+  store = new SyncStore(protocol, { readBlob: ref => readEvidence(f.input.source.commonDir, ref) }); f.useStore(store)
+  const recovered = await runSyncOperation(store, f.operation.id, f.options)
+  assert.equal(recovered.status, 'workspace_synced', JSON.stringify(recovered.failure)); assert.equal(recovered.receipt!.actualCommit, commit)
+  assert.equal(recovered.operation.deadlineAtMs, null); assert.deepEqual(recovered.operation.budget, originalBudget)
+  assert.equal(f.calls.length, callCount); assert.equal(recovered.operation.callsUsed, callCount)
+  assert.equal(store.listJournals(f.operation.id).length, 1); assert.equal(store.listRecoverableResources().length, 0)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.equal((await captureInputSnapshot(f.root)).id, f.input.id)
+  assert.deepEqual((await runSyncOperation(store, f.operation.id, f.options)).receipt, recovered.receipt); assert.equal(f.calls.length, callCount)
+})
+
 test('真实Docker→真实固定CLI hooks→私有完整交付，source/index保留，receipt重入不重复native/commit', docker, async t => {
   const f = await fixture(t, undefined, true); await f.realTools()
   const result = await runSyncOperation(f.store, f.operation.id, f.options)
@@ -494,9 +525,9 @@ test('真实Docker→真实固定CLI hooks→私有完整交付，source/index�
   assert.notDeepEqual(automatic.deliveryPlan, result.operation.deliveryPlan)
   assert.notEqual(automatic.readSetDigest, result.operation.readSetDigest, '真实交付细化进入新composed读集合，但source未变')
   const unchanged = f.store.admitAndEnqueue(automatic)
-  assert.equal(unchanged.id, result.operation.id); assert.equal(unchanged.callsUsed, 4); assert.equal(unchanged.budget.maxCalls, result.operation.budget.maxCalls)
-  const aliasReplay = await prepareSyncAdmission(f.input, f.plan, { ingressKey: automatic.ingressKey, rootCauseId: automatic.rootCauseId, origin: unchanged.origin, budget: unchanged.budget, managedRoot: f.managedRoot, previousBaselinePair: unchanged.previousBaselinePair })
-  assert.equal(f.store.admitAndEnqueue({ ...aliasReplay, deliveryPlan: unchanged.deliveryPlan }).id, unchanged.id)
+  assert.equal(unchanged.id, result.operation.id); assert.equal(unchanged.callsUsed, 4); assert.deepEqual(unchanged.budget, result.operation.budget)
+  const aliasReplay = await prepareSyncAdmission(f.input, f.plan, { ingressKey: automatic.ingressKey, rootCauseId: automatic.rootCauseId, origin: automatic.origin, budget: automatic.budget, managedRoot: f.managedRoot, previousBaselinePair: automatic.previousBaselinePair })
+  assert.equal(f.store.admitAndEnqueue({ ...aliasReplay, deliveryPlan: automatic.deliveryPlan }).id, unchanged.id)
   assert.equal(f.store.listOperations(f.input.source.repositoryId).length, 1); assert.equal(f.store.nextDispatch(f.input.source.repositoryId), null)
 })
 

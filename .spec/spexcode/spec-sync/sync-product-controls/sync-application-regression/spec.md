@@ -107,3 +107,5 @@ P4 partial→decide使用原P3-DELIVERY keep_intent真实链补强：fresh exact
 分区故障回归允许单操作的不同分区同时在途，按实际唯一 requestKey 集合核对首次派发与重放/暂停期间的零新增；不把整操作固定成一个模型调用。应用夹具提供足够通过真实分区预检的测试预算，预算不足零调用的产品门禁仍由协调器专门用例验证；不调整实际项目预算。
 
 自动观察模型绑定与retry幂等回归按每个operation首次真实runner请求集合核对 `callsUsed` 和唯一 `requestKey`；同请求或retry重放不能扩大该集合。提交分类夹具可拦截执行入口以隔离 `code`/`spec`/`combined` 准入与commitTrigger分类，但必须保留operation准入，不把初始分区派发假设成固定一次或零次。
+
+配置回归精确接受原有限budget及仅mode=unlimited，拒混合、空或无效mode，单次callTimeoutMs仍有限正整数；无限总期允许独立20分钟调用设置，旧有限调用不得超过总期的断言保持。
