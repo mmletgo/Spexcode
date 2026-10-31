@@ -10,9 +10,9 @@ import { CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@
 import type { ContractCell, GeneratedElaboration, GeneratedTables } from './elaboration-markdown.js'
 import { sameContractBusinessMeaning } from './contract-evolution.js'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
-import { elaborate } from './elaboration.js'
+import { elaborate, freezeElaborationInput } from './elaboration.js'
 import { checkGenerationContractIntent, readFrozenContracts } from './frozen-contracts.js'
-import type { ElaborationResult, ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
+import type { ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
 import { buildSyncApplicationPlan } from './planning.js'
 import { SyncApplication } from './application.js'
 import { isSyncInputCurrent, prepareSyncAdmission, runSyncOperation, syncPlanDigest } from './coordinator.js'
@@ -1757,6 +1757,152 @@ test('v2最终预算只列真实实现派发，纯父接口不产生虚构生成
   assert.deepEqual([...budget.requiredKeys].sort(), dispatched, '预算派发集合与实际结构化请求必须相等')
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
   assert.equal(f.store.listJournals(f.operation.id).length, 0)
+})
+
+for (const mode of ['live', 'restart', 'precise', 'readset', 'missing-readset', 'selection', 'foreign-operation', 'foreign-provenance', 'raw', 'context', 'authorization', 'policy', 'plan', 'analysis', 'descendants', 'failed', 'unreviewed', 'global-seal'] as const) test(`v2跨attempt承接 ${mode} 已接受父接口的严格边界`, async t => {
+  const parentPath = '.spec/project/spec.md', parentId = 'REQ-PARENT-01'
+  const raw = '保留当前导出契约，由现有导出服务完成请求及结果下载。'
+  const parentBefore = `---\ntitle: 导出上层接口\nstatus: pending\n---\n## raw source\n\n${raw}\n`
+  const leafBefore = original.slice(0, original.indexOf('## expanded spec')).replace('contract-schema: sync-v1\n', '')
+  const parentSource = `---\ntitle: 导出上层接口\nstatus: active\ncontract-schema: sync-v1\n---\n## raw source\n\n${raw}\n\n## expanded spec\n\n父层声明原意，由现有服务承接。\n\n### REQ\n\n| id | goal | source | constraints | success | depends-on |\n| --- | --- | --- | --- | --- | --- |\n| ${parentId} | 保留现有导出行为 | user:raw | 不改变原政策 | 既有导出流程及验收完成 | - |\n`
+  const f = await fixture(t, { maxAttempts: 2, maxCalls: 16, maxRepairs: 1, timeoutMs: 120000 }, false, leafBefore, 'project', original, {
+    version: 'sync-coordinator-v2', direction: 'spec_to_code', intentNodeId: 'project',
+    targets: [{ nodeId: 'project', path: parentPath, rawSource: raw }, { nodeId: 'export-contract', path: contractPath }],
+    partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 2 }, sourcePaths: ['src'],
+  }, undefined, 'spec', undefined, ['precise', 'readset', 'selection', 'foreign-provenance'].includes(mode), { [parentPath]: parentBefore })
+  let store = f.store
+  const shouldReuse = ['live', 'restart', 'precise'].includes(mode)
+  let firstParentInput: ElaborationInput | undefined
+  const calls: { attempt: number; purpose: string; parent: boolean }[] = []
+  f.transform((output, request) => {
+    const attempt = store.readAttempt(store.readOperation(f.operation.id).currentAttemptId!)
+    if (request.purpose.startsWith('elaboration_')) {
+      const frozen = JSON.parse(request.prompt.split('冻结业务输入:\n')[1].split('\n')[0]) as { targets: { path: string }[]; context: { path: string; source: string }[] }
+      const parent = frozen.targets[0].path === parentPath
+      calls.push({ attempt: attempt.number, purpose: request.purpose, parent })
+      if (parent && attempt.number > 1 && shouldReuse) throw Object.assign(new Error('已接受父接口不得在叶修复attempt重新生成或独审'), { code: 'unsupported' })
+      if (request.purpose === 'elaboration_generate') {
+        if (parent) {
+          if (attempt.number === 1) {
+            const frozen = JSON.parse(request.prompt.split('冻结业务输入:\n')[1].split('\n')[0]) as Omit<ElaborationInput, 'root' | 'base' | 'files' | 'targets'> & { execution: { root: string; base: string }; files: [string, string][]; targets: (ElaborationInput['targets'][number] & { targetIndex: number })[] }
+            firstParentInput = { ...frozen, ...frozen.execution, targets: frozen.targets.map(({ targetIndex: _targetIndex, ...target }) => target), files: new Map(frozen.files), requestKey: request.requestKey }
+          }
+          const value = rows(parentSource, parentPath)
+          value.changes[0].nodeId = 'project'
+          value.applicability = ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: false, basis: '父接口由叶实现各边界', affectedIds: [parentId] }))
+          return value
+        }
+        assert.ok(frozen.context.find(source => source.path === parentPath)?.source.includes(parentId), '叶必须读取已独审父接口全文')
+        const child = rows(original)
+        for (const row of child.changes[0].tables.FLOW) { assert.ok(Array.isArray(row.req)); row.req = [...row.req, parentId] }
+        for (const row of child.changes[0].tables.AC) { assert.ok(Array.isArray(row.covers)); row.covers = [...row.covers, parentId] }
+        if (attempt.number === 1) child.applicability.pop()
+        return child
+      }
+    }
+    if (request.purpose === 'code_generate') return { version: 'sync-files-v1', changes: [] }
+    if (request.purpose === 'code_review') throw Object.assign(new Error('机制回归在Docker前停止'), { code: 'unsupported' })
+    return output
+  })
+  const checkpoint = store.checkpoint.bind(store)
+  store.checkpoint = (fence, ref) => {
+    const value = JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())
+    if (['readset', 'missing-readset', 'selection', 'foreign-operation', 'foreign-provenance'].includes(mode) && store.readAttempt(fence.attemptId).number === 1
+      && value.stage?.startsWith('partition:') && value.stage.endsWith(':elaboration') && JSON.parse(readEvidence(f.input.source.commonDir, value.resultRef).toString()).phase === 'interface_seed') {
+      if (mode === 'readset') value.readSetDigest = contentHash('另一个读集合')
+      if (mode === 'missing-readset') delete value.readSetDigest
+      if (mode === 'foreign-provenance') checkpoint(fence, writeEvidence(f.input.source.commonDir, { ...value, operationId: 'another-operation' }))
+      if (mode === 'selection' || mode === 'foreign-provenance') {
+        const selected = store.readBaselineSelection(f.input.source, [f.operation.baselineSelection!.bindings[0].resource])
+        if (!('selection' in selected)) throw new Error(selected.failure.message)
+        value.baselineSelectionRef = writeEvidence(f.input.source.commonDir, selected.selection)
+      }
+      if (mode === 'foreign-operation') value.operationId = 'another-operation'
+      ref = writeEvidence(f.input.source.commonDir, value)
+    }
+    return checkpoint(fence, ref)
+  }
+  const recordFailure = store.recordFailure.bind(store)
+  store.recordFailure = (fence, issue) => {
+    if (store.readAttempt(fence.attemptId).number === 1) {
+      const stages = store.readAttempt(fence.attemptId).checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
+      const parent = stages.find(stage => stage.stage?.startsWith('partition:') && stage.stage.endsWith(':elaboration') && JSON.parse(readEvidence(f.input.source.commonDir, stage.resultRef).toString()).phase === 'interface_seed')
+      assert.ok(parent, JSON.stringify(issue))
+      const prior = JSON.parse(readEvidence(f.input.source.commonDir, parent.resultRef).toString()) as ElaborationResult
+      assert.equal(prior.structurePassed, true); assert.equal(prior.reviewPassed, true)
+      assert.equal(freezeElaborationInput(firstParentInput!).inputDigest, prior.inputDigest)
+      if (!shouldReuse && !['readset', 'missing-readset', 'selection', 'foreign-operation', 'foreign-provenance'].includes(mode)) {
+        const changed = structuredClone(firstParentInput!)
+        if (mode === 'raw') changed.intent.rawSource += ' 本轮原意变化'
+        if (mode === 'context') changed.context = [{ nodeId: 'ancestor', path: '.spec/ancestor/spec.md', source: '真实祖先上下文已变化' }]
+        if (mode === 'authorization') changed.authorizedChanges = [{ id: parentId, action: 'retire', source: 'user:raw', reason: '本轮授权不同' }]
+        if (mode === 'policy') changed.verifications = [{ ...changed.verifications![0], timeoutMs: changed.verifications![0].timeoutMs + 1 }]
+        if (['raw', 'context', 'authorization', 'policy'].includes(mode)) {
+          prior.inputDigest = freezeElaborationInput(changed).inputDigest
+          assert.notEqual(prior.inputDigest, freezeElaborationInput(firstParentInput!).inputDigest)
+        }
+        if (mode === 'plan') prior.partitionBinding!.planDigest = contentHash('另一个计划')
+        if (mode === 'analysis') prior.partitionBinding!.analysisRef = { sha256: contentHash('另一个独审分析') }
+        if (mode === 'descendants') prior.partitionBinding!.interfaceSeed!.descendants = []
+        if (mode === 'failed') prior.failure = { code: 'fixture_failure', message: '失败seed不能复用' }
+        if (mode === 'unreviewed') { prior.reviewPassed = false; prior.rounds.at(-1)!.review = null }
+        if (mode === 'global-seal') { prior.phase = 'partitioned_final'; prior.status = 'complete' }
+        const resultRef = writeEvidence(f.input.source.commonDir, prior)
+        store.checkpoint(fence, resultRef)
+        store.checkpoint(fence, writeEvidence(f.input.source.commonDir, { ...parent, resultRef }))
+      }
+      const failed = recordFailure(fence, issue)
+      if (mode === 'restart') throw new Error('fixture SQLite边界：首attempt已持久结算')
+      return failed
+    }
+    return recordFailure(fence, issue)
+  }
+  let result = await runSyncOperation(store, f.operation.id, f.options)
+  if (mode === 'restart') {
+    assert.equal(store.listAttempts(f.operation.id).length, 1)
+    f.closeForRestart()
+    const reopened = openProtocol(join(f.parent, 'sync.sqlite'))
+    t.after(() => reopened.close())
+    store = new SyncStore(reopened, { readBlob: ref => readEvidence(f.input.source.commonDir, ref) })
+    f.useStore(store)
+    result = await runSyncOperation(store, f.operation.id, f.options)
+  }
+  const attempts = store.listAttempts(f.operation.id)
+  assert.equal(attempts.length, 2)
+  if (mode === 'foreign-operation') {
+    assert.equal(result.failure!.code, 'stage_binding')
+    assert.deepEqual(calls.filter(call => call.parent).map(call => call.attempt), [1, 1])
+    assert.equal(store.listJournals(f.operation.id).length, 0)
+    return
+  }
+  assert.ok(f.calls.some(call => call.purpose === 'code_review'), JSON.stringify({ status: result.status, failure: result.failure, calls }))
+  assert.deepEqual(calls.filter(call => call.parent).map(call => [call.attempt, call.purpose]), shouldReuse
+    ? [[1, 'elaboration_generate'], [1, 'elaboration_review']]
+    : [[1, 'elaboration_generate'], [1, 'elaboration_review'], [2, 'elaboration_generate'], [2, 'elaboration_review']])
+  assert.deepEqual(calls.filter(call => !call.parent).map(call => [call.attempt, call.purpose]), [[1, 'elaboration_generate'], [2, 'elaboration_generate'], [2, 'elaboration_review']])
+  const stages = attempts.map(attempt => attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())))
+  const parentStage = stages[0].find(stage => stage.stage?.startsWith('partition:') && stage.stage.endsWith(':elaboration') && JSON.parse(readEvidence(f.input.source.commonDir, stage.resultRef).toString()).phase === 'interface_seed')
+  assert.ok(parentStage)
+  const prior = JSON.parse(readEvidence(f.input.source.commonDir, parentStage.resultRef).toString()) as ElaborationResult
+  assert.equal(prior.structurePassed, true); assert.equal(prior.reviewPassed, true)
+  assert.equal(prior.rounds.at(-1)!.review!.verdict, 'accept')
+  if (shouldReuse) assert.deepEqual(stages[1].find(stage => stage.stage === parentStage.stage).resultRef, parentStage.resultRef, '原父resultRef/review/traces逐字保持')
+  const provenanceStage = stages[1].find(stage => stage.stage === `${parentStage.stage}:provenance`)
+  if (shouldReuse) {
+    assert.ok(provenanceStage)
+    assert.deepEqual(JSON.parse(readEvidence(f.input.source.commonDir, provenanceStage.resultRef).toString()), { fromOperationId: f.operation.id, fromAttemptId: attempts[0].id, resultRef: parentStage.resultRef })
+  } else assert.equal(provenanceStage, undefined, '不同绑定或未接受结果不能生成复用provenance')
+  const final = JSON.parse(readEvidence(f.input.source.commonDir, stages[1].find(stage => stage.stage === 'elaboration').resultRef).toString()) as ElaborationResult
+  assert.equal(final.phase, 'partitioned_final'); assert.equal(final.partitionSeal!.passed, true)
+  if (shouldReuse) assert.deepEqual(final.partitionEvidence!.find(item => item.resultRef.sha256 === parentStage.resultRef.sha256)?.resultRef, parentStage.resultRef)
+  const failed = JSON.parse(readEvidence(f.input.source.commonDir, stages[0].find(stage => stage.stage === 'elaboration').resultRef).toString()) as ElaborationResult
+  assert.equal(failed.partitionSeal!.passed, false, '首轮全局失败不能被当作已审seal复用')
+  assert.notEqual(final.candidateDigest, failed.candidateDigest)
+  assert.equal(result.operation.callsUsed, f.calls.length)
+  assert.deepEqual(result.operation.budget, f.operation.budget); assert.equal(result.operation.deadlineAtMs, f.operation.deadlineAtMs)
+  assert.deepEqual(store.listRecoverableResources(), [])
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+  assert.equal(store.listJournals(f.operation.id).length, 0)
 })
 
 test('v2最终预算按真实ready投影跳过GAP跨边，两端独立分支用恰好预算推进', async t => {

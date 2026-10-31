@@ -3,7 +3,7 @@ import { contractReferences, parseContract, parseParts } from '@spexcode/spec-co
 import { analyzeCodeBehavior, deriveBehaviorAuthorization } from './code-behavior.js'
 import type { CodeBehaviorInput } from './code-behavior.js'
 import { outputErrors } from './elaboration-schema.js'
-import { elaborate, projectElaborationFlowReadiness, sealPartitionedElaboration } from './elaboration.js'
+import { elaborate, freezeElaborationInput, projectElaborationFlowReadiness, sealPartitionedElaboration } from './elaboration.js'
 import type { Contract, Verification } from '@spexcode/spec-core/contracts'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
 import type { Applicability, ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationTrace, ElaborationSessionRequest, ElaborationChange, VerificationOwnershipProjection } from './elaboration-types.js'
@@ -19,7 +19,11 @@ import { historicalOwnerPaths, historicalRetiredIds, obligationPaths, projectPri
 import type { RawOnlyInterfaceSeedDescendant, RawOnlyInterfaceSeedEvidence, SyncPartition, SyncPartitionPlan } from './partitioning.js'
 import type { CodeBehaviorAnalysis, CodeBehaviorEvidence } from './writeback-types.js'
 
-export type PartitionCheckpoints = { load<T>(key: string): T | null; save(key: string, value: unknown): BlobRef }
+export type PartitionCheckpoints = {
+  load<T>(key: string): T | null
+  loadAcceptedInterfaceSeed?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'> | null
+  save(key: string, value: unknown): BlobRef
+}
 const within = (path: string, paths: readonly string[]): boolean => paths.some(parent => path === parent || path.startsWith(`${parent}/`))
 const unique = (values: readonly string[]): string[] => [...new Set(values)].sort()
 const reject = (message: string): never => { throw Object.assign(new Error(message), { code: 'partition_binding' }) }
@@ -256,6 +260,8 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
       implementationWritePaths: input.implementationWritePaths?.length === 0 ? [] : partition.writePaths, readonlyTestPaths: input.readonlyTestPaths?.filter(path => within(path, readPaths)),
       phase: interfaceSeed ? 'interface_seed' : undefined,
     }
+    const accepted = interfaceSeed ? checkpoints.loadAcceptedInterfaceSeed?.(key, partitionBinding, freezeElaborationInput(localInput).inputDigest) : null
+    if (accepted) return accepted
     const result = await elaborate(localInput, { runner })
     const { contracts: _contracts, graph: _graph, coverage: _coverage, ...compact } = result
     checkpoints.save(key, compact)

@@ -21,7 +21,7 @@ v2 code_to_spec新增治理叶的父Spec目录授权仅从原全局writePaths与
 
 生成区只返回本区完整文件补丁，核实际读取、scope、局部Spec目标和独立oracle后统一确定序装配。生命周期历史正文按本区旧owner投影；其精确code、related目录或glob通过[[code-anchor]]共享路径匹配器在各自旧manifest entry上展开，不复制未命中的全仓文件。唯一publication/CAS接缝只冻结一棵candidate。每个局部/跨边独审重新读取对应完整最终正文，全部绑定同一candidateDigest并与全部builder身份独立；聚合保存原review，不生成全仓模型accept。code_to_spec仅装配已审Spec，核source/tests Git对象逐字、mode及absence不变，不运行可写代码生成器。V1–V4及单journal/receipt仍由 [[sync-coordinator]] 完成。
 
-所有局部阶段键含partitionId，完成后持久refs，重入复用真实已完成结果。异步完成顺序不影响最终树；相同文件多writer或业务ID冲突拒绝，不按最后完成者覆盖。
+所有局部阶段键含partitionId，完成后持久refs，重入复用真实已完成结果。跨attempt只允许已接受的interface_seed经协调器专用checkpoint入口承接：先用本轮targets、已审祖先context、files、授权、技术政策及完整partitionBinding构造真实localInput，复用elaboration唯一freezeElaborationInput接缝比较完整inputDigest；plan、analysisRef、descendants或任一输入不同均重新生成和独审。已接受原件进入本轮settledSources，原resultRef/review/traces保持；叶局部结果与全局seal不由该入口复用，最终完整全图seal每轮重新执行。异步完成顺序不影响最终树；相同文件多writer或业务ID冲突拒绝，不按最后完成者覆盖。
 
 
 code_to_spec 的 P1 实现写范围显式为空；分区投影保留该只读约束，不把各区代码 writer 误传成允许补写源码或测试的权限。

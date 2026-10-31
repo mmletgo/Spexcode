@@ -97,3 +97,5 @@ v2生命周期集成回归让旧Spec的`related: [src/helpers/**/*.js]`命中全
 纯父接口与真实源码叶的Git/SQLite回归检查最终预算键与实际生成、文件规划及独立审查请求集合相等，不列已跳过父接口的虚构工作。全局目录授权与局部精确文件范围求交后，合法目标Spec仍可由程序装配，只读上游不取得写权；测试在Docker前明确终止，原source/index与零journal保持。
 
 两区均有独立ready分支、跨边重试义务被真实GAP完全阻断时，在真实Git/SQLite复现最终误计6调用而仅余4调用的失败；同一冻结8调用预算修复后完成4次P1及实际4次P2派发，两区均到达最终独审。预算requiredKeys与实际dispatch记录精确相等，完整契约边仍保留；明确native接缝在Docker前停止，预算/deadline/source/index不变且无journal，不声称真实模型、V3或交付通过。
+
+同operation跨attempt父接口承接使用真实Git/SQLite/fence和确定性独立模型接缝：第一轮父接口经真实结构校验与独审accept，单叶故意遗漏applicability后结构repair，下一轮父生成/独审若再派发即失败；live、精确基线选择及SQLite重启均只修叶，保原父resultRef/review/traces及fromAttempt provenance，重新通过完整strict全局seal。raw、祖先context、授权/技术政策摘要、plan/analysisRef/descendants绑定改变，失败/未审seed、全局结果、缺失/不同readSet、不同基线选择或外operation stage均不得承接。原预算/deadline/source/index与零journal保持；机制测试在Docker前停止，不作为真实Native或小项目产品通过证据。
