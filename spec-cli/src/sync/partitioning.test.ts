@@ -118,6 +118,90 @@ test('projection keeps the root intent read-only and narrows targets, writes, so
   assert.ok(!projected.readPaths.includes('docs/unrelated.md'))
 })
 
+test('raw-only源码分区在生成AC前冻结全局精确mandatory oracle正文和绑定', () => {
+  const sourcePath = 'src/services/alpha.ts', oraclePath = 'tests/oracle.test.ts', unrelatedTestPath = 'tests/all.test.ts'
+  const root = rawSpec('root', []), alpha = rawSpec('alpha', [sourcePath])
+  const files = new Map<string, string>([
+    [rootPath, root], [alphaPath, alpha], [sourcePath, 'export const alpha = 1'],
+    [oraclePath, 'test(\'ORACLE-ALPHA-01\', () => {})'], [unrelatedTestPath, 'test(\'ALL-01\', () => {})'],
+  ])
+  const coordinatorPlan: SyncCoordinatorPlan = {
+    ...plan(), intentNodeId: 'root',
+    targets: [{ nodeId: 'root', path: rootPath }, { nodeId: 'alpha', path: alphaPath }],
+    readPaths: ['.spec', 'src', 'tests'], writePaths: ['.spec/project', 'src'], sourcePaths: ['src'],
+    executionScope: { paths: [rootPath, alphaPath, sourcePath], contractIds: [], flowIds: [] },
+    mandatoryTests: [{ verificationId: 'VERIFY-ORACLE', testPath: oraclePath, testId: 'ORACLE-ALPHA-01' }],
+  }
+  const result = planSyncPartitions({
+    plan: coordinatorPlan,
+    files,
+    contracts: [],
+    nodes: [
+      { id: 'root', path: rootPath, rawSource: '整理当前业务意图。' },
+      { id: 'alpha', path: alphaPath, rawSource: '记录现有alpha源码行为。' },
+    ],
+    changedPaths: [rootPath, alphaPath],
+  })
+  const partition = result.partitions.find(candidate => candidate.targets.some(target => target.nodeId === 'alpha'))!
+  const projected = projectSyncPartition(coordinatorPlan, partition)
+
+  assert.ok(partition.sourcePaths.includes(sourcePath))
+  assert.ok(partition.readPaths.includes(oraclePath), '本区尚无AC时也必须读取精确mandatory oracle')
+  assert.ok(!partition.readPaths.includes(unrelatedTestPath), '全局可读但未登记为mandatory的测试不进入本区')
+  const expectedReadBytes = [...new Set(partition.readPaths.map(path => files.get(path)).filter((body): body is string => body !== undefined))]
+    .reduce((sum, body) => sum + Buffer.byteLength(body, 'utf8'), 0)
+  assert.equal(partition.readBytes, expectedReadBytes, '完整oracle正文计入本区读取预算')
+  assert.deepEqual(projected.mandatoryTests, coordinatorPlan.mandatoryTests)
+  assert.ok(!partition.writePaths.includes(oraclePath))
+  assert.ok(!partition.sourcePaths.includes(oraclePath))
+  assert.ok(!projected.executionScope?.paths.includes(oraclePath))
+})
+
+test('已有AC的源码分区不因此读取未关联的新mandatory测试', () => {
+  const input = fixture(), nextOracle = 'tests/next.test.ts'
+  input.files.set(nextOracle, 'test(\'NEXT-01\', () => {})')
+  const result = planSyncPartitions({ ...input, plan: { ...input.plan, mandatoryTests: [...input.plan.mandatoryTests, { verificationId: 'VERIFY-NEXT', testPath: nextOracle, testId: 'NEXT-01' }] } })
+  const gamma = result.partitions.find(partition => partition.targets.some(target => target.nodeId === 'gamma'))!
+
+  assert.ok(gamma.sourcePaths.includes('src/api/gamma.ts'))
+  assert.ok(!gamma.readPaths.includes(nextOracle))
+})
+
+test('已有code绑定但源码只读的无AC目标仍读取mandatory oracle', () => {
+  const root = '.spec/project/spec.md', sourcePath = 'src/services/alpha.ts', oraclePath = 'tests/oracle.test.ts'
+  const sourceSpec = `---\ntitle: Alpha\nstatus: pending\ncode:\n  - ${sourcePath}\n---\n\n## raw source\n\n记录现有alpha源码行为。\n`
+  const files = new Map<string, string>([
+    [root, 'root raw'], [alphaPath, sourceSpec], [sourcePath, 'export const alpha = 1'], [oraclePath, "test('ORACLE-ALPHA-01', () => {})"],
+  ])
+  const coordinatorPlan: SyncCoordinatorPlan = {
+    ...plan(), version: 'sync-coordinator-v2', direction: 'code_to_spec',
+    partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 },
+    intentNodeId: 'root', targets: [{ nodeId: 'alpha', path: alphaPath }],
+    readPaths: ['.spec', 'src', 'tests'], writePaths: ['.spec/project'], sourcePaths: ['src'],
+    executionScope: { paths: [alphaPath], contractIds: [], flowIds: [] },
+    mandatoryTests: [{ verificationId: 'VERIFY-ORACLE', testPath: oraclePath, testId: 'ORACLE-ALPHA-01' }],
+  }
+  const result = planSyncPartitions({
+    plan: coordinatorPlan, files, contracts: [],
+    nodes: [
+      { id: 'root', path: root, rawSource: '整理alpha源码的现有行为。' },
+      { id: 'alpha', path: alphaPath, rawSource: '记录现有alpha源码行为。' },
+    ],
+    changedPaths: [alphaPath],
+  })
+  const partition = result.partitions.find(candidate => candidate.targets.some(target => target.nodeId === 'alpha'))!
+  const projected = projectSyncPartition(coordinatorPlan, partition)
+
+  assert.ok(partition.readPaths.includes(sourcePath), 'code绑定继续带入只读源码正文')
+  assert.ok(partition.readPaths.includes(oraclePath), 'source role不以本区获得源码写权为条件')
+  assert.deepEqual(projected.mandatoryTests, coordinatorPlan.mandatoryTests)
+  assert.deepEqual(partition.writePaths, [alphaPath])
+  assert.ok(!partition.sourcePaths.includes(sourcePath))
+  assert.ok(!partition.writePaths.includes(oraclePath))
+  assert.ok(!partition.sourcePaths.includes(oraclePath))
+  assert.deepEqual(projected.executionScope?.paths, [alphaPath])
+})
+
 test('input ordering does not affect digest', () => {
   const input = fixture()
   const normal = planSyncPartitions(input)

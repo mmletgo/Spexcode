@@ -379,8 +379,17 @@ function contextFor(
     }
   }
   addContractClaims(rawContextPaths, claims, input.files, new Set(draft.changedPaths))
+  const localContracts = [...contractsByNode.values()].flat()
+  const localSourcePaths = uniqueSorted([
+    ...draft.changedPaths,
+    ...draft.targetNodeIds.flatMap(nodeId => governanceNodesForId(governanceNodes, nodeId).flatMap(node => node.code.map(entry => entry.path))),
+  ].filter(path => coveredPath(path, input.plan.sourcePaths ?? [])))
+  const needsInitialMandatoryTests = localSourcePaths.some(path => {
+    const owners = ownerNodesForPath(path, localContracts, governanceNodes.values())
+    return ![...owners].some(nodeId => (contractsByNode.get(nodeId) ?? []).some(contract => contract.items.some(item => item.kind === 'AC')))
+  })
   for (const mandatory of input.plan.mandatoryTests) {
-    if (draft.changedPaths.includes(mandatory.testPath) || claims.some(claim => relationClaimsPath(claim.path, mandatory.testPath))) rawContextPaths.add(mandatory.testPath)
+    if (needsInitialMandatoryTests || draft.changedPaths.includes(mandatory.testPath) || claims.some(claim => relationClaimsPath(claim.path, mandatory.testPath))) rawContextPaths.add(mandatory.testPath)
   }
   if (input.files.has('.spec/spexcode.json') && coveredPath('.spec/spexcode.json', input.plan.readPaths)) rawContextPaths.add('.spec/spexcode.json')
 
