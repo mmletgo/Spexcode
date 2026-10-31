@@ -780,8 +780,10 @@ facts 仅放有来源的业务事实，执行环境、token 和本机路径不�
 当前仅支持 Docker Node --test；export 不带宿主 node_modules，不猜 npm script。
 nodeIds 可登记明确意图根与其子树。省略时只纳入真实治理已授权源码/测试的节点；新纯raw需求须先明确 nodeIds。
 status.observation.coverage 展示纳入与未纳入范围，分模块启用不能冒称全项目已同步。
-callTimeoutMs 是可选单次模型调用上限，正整数且不超过 budget.timeoutMs；缺省最多 120000ms，
-同时受操作总期限限制。复杂完整流程可在新操作的可信配置中明确设置更长有限值，不能扩大旧操作预算。
+budget 也可仅设为 { "mode": "unlimited" }，解除总调用、尝试、修复次数和总期限；真实用量仍记录。
+callTimeoutMs 是可选的有限正整数单次模型调用上限；有限预算时不能超过 budget.timeoutMs，
+缺省最多 120000ms。无限总预算不取消单次超时回收、验证 timeout、lease/fence 或独审与交付门槛；
+复杂完整流程可在新操作的可信配置中明确设置更长有限值，不能改写旧操作预算。
 
 启动本项目 spex serve 后执行：
   spex sync settings

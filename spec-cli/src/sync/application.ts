@@ -1,3 +1,4 @@
+import { finiteSyncBudget } from './budget.js'
 import { randomUUID } from 'node:crypto'
 import { DEFAULT_SYNC_MODEL, syncModel, syncModelBinding } from './model-selection.js'
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
@@ -606,7 +607,7 @@ export class SyncApplication {
     const origin = input.origin ?? retry?.origin ?? 'spec'
     const { settings } = readSyncSettings(snapshot)
     const ingressKey = `application:${snapshot.source.repositoryId}:${this.root}:${input.requestId}`
-    const mutex = await this.requestMutex(ingressKey, settings.budget.timeoutMs)
+    const mutex = await this.requestMutex(ingressKey, finiteSyncBudget(settings.budget)?.timeoutMs ?? 30000)
     try {
       const prior = this.store.findOperationByIngressKey(ingressKey), ingress = this.store.findIngressReceipt(ingressKey)
       const model = input.model ?? syncModel(prior ?? retry ?? settings)
@@ -649,7 +650,7 @@ export class SyncApplication {
     const nodeId = this.operationPlan(original).intentNodeId
     await this.requireNodeAuthorized(snapshot, nodeId)
     const { settings } = readSyncSettings(snapshot), model = syncModel(settings), ingressKey = `application:${snapshot.source.repositoryId}:${this.root}:${input.requestId}`
-    const mutex = await this.requestMutex(ingressKey, settings.budget.timeoutMs)
+    const mutex = await this.requestMutex(ingressKey, finiteSyncBudget(settings.budget)?.timeoutMs ?? 30000)
     try {
       const prior = this.store.findOperationByIngressKey(ingressKey), ingress = this.store.findIngressReceipt(ingressKey)
       if (prior) {
@@ -756,7 +757,7 @@ export class SyncApplication {
     if (findings.some(finding => !finding)) throw new SyncApplicationError('sync_decision_finding', '裁决只能选择分析中真实存在的分歧', 400)
     const ingressKey = `application:${snapshot.source.repositoryId}:${this.root}:${input.requestId}`
     const { settings } = readSyncSettings(snapshot), model = syncModel(settings)
-    const mutex = await this.requestMutex(ingressKey, settings.budget.timeoutMs)
+    const mutex = await this.requestMutex(ingressKey, finiteSyncBudget(settings.budget)?.timeoutMs ?? 30000)
     try {
       const prior = this.store.findOperationByIngressKey(ingressKey), ingress = this.store.findIngressReceipt(ingressKey)
       if (prior) {

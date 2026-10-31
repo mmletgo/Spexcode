@@ -1,3 +1,4 @@
+import { finiteSyncBudget, syncDeadlineExpired } from './budget.js'
 import { syncModel, syncModelBinding } from './model-selection.js'
 import { setImmediate as yieldToControl, setTimeout as waitForPublication } from 'node:timers/promises'
 import { existsSync, lstatSync, mkdirSync, realpathSync } from 'node:fs'
@@ -346,7 +347,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
     mkdirSync(directory, { recursive: true, mode: 0o700 }); safeArtifactRoot(directory, operation)
     while (!publicationMutex) {
       if (!finishing && (signal.aborted || physicallyPaused())) fail('controlled', '发布阶段已暂停或取消')
-      if (!finishing && operation.deadlineAtMs <= Date.now()) throw new SyncStoreError('SYNC_BUDGET_EXHAUSTED', '等待发布超过原总预算')
+      if (!finishing && syncDeadlineExpired(operation.deadlineAtMs)) throw new SyncStoreError('SYNC_BUDGET_EXHAUSTED', '等待发布超过原总预算')
       publicationMutex = claimFileMutex(join(directory, `${contentHash(canonical(operation.input.source))}.sqlite`))
       if (!publicationMutex) await waitForPublication(25, undefined, finishing ? {} : { signal })
     }
@@ -361,7 +362,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
     const view = await readInput(operation.baselineSelection ? operation.input : snapshot, plan, operation.previousBaselinePair, operation.requestBlob, operation.baselineSelection, operation.scope.paths)
     if (view.readSetDigest !== operation.readSetDigest) fail('readset_changed', '当前完整读取上下文已改变')
     const now = store.readOperation(operation.id), attempt = store.readAttempt(fence!.attemptId)
-    if (now.control !== 'run' || physicallyPaused() || now.currentAttemptId !== attempt.id || attempt.expiresAtMs <= Date.now() || now.deadlineAtMs <= Date.now() || signal.aborted) fail('controlled', '交付门禁已停止或过期')
+    if (now.control !== 'run' || physicallyPaused() || now.currentAttemptId !== attempt.id || attempt.expiresAtMs <= Date.now() || syncDeadlineExpired(now.deadlineAtMs) || signal.aborted) fail('controlled', '交付门禁已停止或过期')
     return writeEvidence(operation.input.source.commonDir, { version: 1, layer: 'V4', inputId: snapshot.id, source: snapshot.source, policyDigest: now.policyDigest, readSetDigest: view.readSetDigest, checkedAtMs: Date.now() })
   }
   const beforeApply = async (): Promise<void> => {
@@ -369,7 +370,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
     catch (error) {
       const currentOperation = store.readOperation(operationId), attempt = store.readAttempt(fence!.attemptId)
       if (currentOperation.control === 'run' && currentOperation.currentAttemptId === attempt.id && attempt.status === 'verified' && attempt.expiresAtMs > Date.now()) {
-        if (currentOperation.deadlineAtMs <= Date.now()) store.recordBudgetExhaustion(operationId)
+        if (syncDeadlineExpired(currentOperation.deadlineAtMs)) store.recordBudgetExhaustion(operationId)
         else if (error instanceof SyncCoordinatorError && ['input_changed', 'policy_changed', 'readset_changed'].includes(error.code)) store.recordFailure(fence!, failure(error.code, error.message, 'conflict', error.evidenceRefs))
       }
       throw error
@@ -406,7 +407,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
     }
     if (attempt?.status === 'applying' || attempt?.status === 'verified') {
       fence = fenceFor(operation, attempt)
-      if (attempt.status === 'verified' && (operation.control !== 'run' || attempt.expiresAtMs <= Date.now() || operation.deadlineAtMs <= Date.now())) {
+      if (attempt.status === 'verified' && (operation.control !== 'run' || attempt.expiresAtMs <= Date.now() || syncDeadlineExpired(operation.deadlineAtMs))) {
         if (!await recoverResources(store, operation, options, true)) return current('recovery_required')
       } else {
         if (attempt.status === 'verified') timer = setInterval(() => { try { store.renewLease(fence!, leaseMs) } catch (error) { heartbeatFailure = failure('lease_heartbeat', error instanceof Error ? error.message : String(error), 'environment'); controller.abort() } }, heartbeatMs)
@@ -462,7 +463,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         try {
           mutex.assertHeld()
           const now = store.readOperation(operationId)
-          if (now.control !== 'run' || physicallyPaused() || now.currentAttemptId !== fence!.attemptId || now.deadlineAtMs <= Date.now()) controller.abort()
+          if (now.control !== 'run' || physicallyPaused() || now.currentAttemptId !== fence!.attemptId || syncDeadlineExpired(now.deadlineAtMs)) controller.abort()
           else store.renewLease(fence!, leaseMs)
         } catch (error) { heartbeatFailure = failure('lease_heartbeat', error instanceof Error ? error.message : String(error), 'environment'); controller.abort() }
       }, heartbeatMs)
@@ -498,7 +499,8 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       if (signal.aborted) fail('cancelled', '协调执行已停止')
       store.renewLease(fence, leaseMs); await yieldToControl(); store.renewLease(fence, leaseMs)
       store.bindComposedInput(fence, view.composed)
-      const callTimeoutMs = options.callTimeoutMs ?? Math.min(120_000, operation.budget.timeoutMs)
+      const budget = finiteSyncBudget(operation.budget)
+      const callTimeoutMs = options.callTimeoutMs ?? Math.min(120_000, budget?.timeoutMs ?? 120_000)
       const runner = options.runner ? injectedRunner(store, fence, options.runner) : createAttemptRunner(store, fence)
       const partitionCheckpoints: PartitionCheckpoints = {
         load: <T>(key: string) => stage<T>(store, operation, store.readAttempt(attempt!.id), key),
@@ -605,9 +607,9 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           partitionCheckpoints.save('partition-plan', partitions)
           const hasPriorWork = Boolean(operation.retryOf) || store.listAttempts(operation.id).some(prior => prior.id !== attempt!.id)
           const minimumCalls = partitions.partitions.length * ((hasPriorWork ? 0 : (behaviorOrigin ? 2 : 0) + 2) + (plan.direction === 'code_to_spec' ? 1 : 2)) + partitions.dependencies.length
-          const remainingCalls = operation.budget.maxCalls - store.readBudgetUsage(operation.id).callsUsed
+          const remainingCalls = budget ? budget.maxCalls - store.readBudgetUsage(operation.id).callsUsed : null
           partitionCheckpoints.save('partition-budget', { minimumCalls, remainingCalls, partitionCount: partitions.partitions.length, dependencyCount: partitions.dependencies.length, direction: plan.direction })
-          if (remainingCalls < minimumCalls) fail('partition_budget_insufficient', `完整分区执行至少需要 ${minimumCalls} 次调用，剩余 ${remainingCalls} 次；保持原预算，需明确调整后新接入`, [writeEvidence(operation.input.source.commonDir, { partitionPlan: partitions, minimumCalls, remainingCalls })])
+          if (remainingCalls !== null && remainingCalls < minimumCalls) fail('partition_budget_insufficient', `完整分区执行至少需要 ${minimumCalls} 次调用，剩余 ${remainingCalls} 次；保持原预算，需明确调整后新接入`, [writeEvidence(operation.input.source.commonDir, { partitionPlan: partitions, minimumCalls, remainingCalls })])
         }
       }
       if (behaviorOrigin) {
@@ -742,7 +744,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           targets = targets.map(target => { const source = priorFiles.get(target.path) ?? target.source; return { ...target, source, sourceDigest: source === null ? null : contentHash(source) } })
           refinementFiles = new Map(readTree(operation.input.source.commonDir, refinement.candidate.tree).filter(entry => within(entry.path, options.plan.readPaths) && entry.mode !== '120000').flatMap(entry => { const bytes = readObject(operation.input.source.commonDir, entry.oid); return isUtf8Text(bytes) ? [[entry.path, bytes.toString('utf8')] as [string, string]] : [] }))
         }
-        const elaborationInput: import('./elaboration-types.js').ElaborationInput = { root: operation.input.source.canonicalRoot, base: operation.input.headCommit, requestKey: `sync:${attempt.id}:elaborate`, intent: { nodeId: effectiveIntentNodeId, rawSource }, targets, context: view.frozen.nodes.filter(node => !targets.some(target => target.path === node.path) && !moved.some(change => change.to.path === node.path)).map(node => ({ nodeId: node.id, path: node.path, source: view.files.get(node.path)! })), files: refinementFiles, facts: behaviorFacts, analysis, decisionAuthorities: analysis?.analysis.decisionAuthorities ?? options.plan.decisionAuthorities,  ...(refinement ? { refinement: { candidateDigest: refinement.candidateDigest, diagnostics: refinement.diagnostics } } : {}), mode: preserveBusiness ? 'preserve_business' : 'reelaborate', nodeChanges, verifications: options.plan.verifications.map(item => item.definition), implementationWritePaths: options.plan.version === 'sync-coordinator-v2' && options.plan.direction === 'code_to_spec' ? [] : unique(options.plan.writePaths), readonlyTestPaths: unique(options.plan.mandatoryTests.map(test => test.testPath)), authorizedChanges: behaviorAuthorization, historyInput: operation.input, retiredIds: unique([...(options.plan.retiredIds ?? []), ...historicalRetiredIds]), maxRepairs: 0, maxCalls: 2, totalTimeoutMs: operation.deadlineAtMs - Date.now(), timeoutMs: callTimeoutMs, signal, model, effort: 'high' as const }; const result = partitions ? await elaborateSyncPartitions(elaborationInput, partitions, options.plan.version === 'sync-coordinator-v2' ? options.plan.partitionPolicy.maxParallel : 1, partitionCheckpoints, runner) : await elaborate(elaborationInput, { runner, seed })
+        const elaborationInput: import('./elaboration-types.js').ElaborationInput = { root: operation.input.source.canonicalRoot, base: operation.input.headCommit, requestKey: `sync:${attempt.id}:elaborate`, intent: { nodeId: effectiveIntentNodeId, rawSource }, targets, context: view.frozen.nodes.filter(node => !targets.some(target => target.path === node.path) && !moved.some(change => change.to.path === node.path)).map(node => ({ nodeId: node.id, path: node.path, source: view.files.get(node.path)! })), files: refinementFiles, facts: behaviorFacts, analysis, decisionAuthorities: analysis?.analysis.decisionAuthorities ?? options.plan.decisionAuthorities,  ...(refinement ? { refinement: { candidateDigest: refinement.candidateDigest, diagnostics: refinement.diagnostics } } : {}), mode: preserveBusiness ? 'preserve_business' : 'reelaborate', nodeChanges, verifications: options.plan.verifications.map(item => item.definition), implementationWritePaths: options.plan.version === 'sync-coordinator-v2' && options.plan.direction === 'code_to_spec' ? [] : unique(options.plan.writePaths), readonlyTestPaths: unique(options.plan.mandatoryTests.map(test => test.testPath)), authorizedChanges: behaviorAuthorization, historyInput: operation.input, retiredIds: unique([...(options.plan.retiredIds ?? []), ...historicalRetiredIds]), maxRepairs: 0, maxCalls: 2, totalTimeoutMs: operation.deadlineAtMs === null ? null : operation.deadlineAtMs - Date.now(), timeoutMs: callTimeoutMs, signal, model, effort: 'high' as const }; const result = partitions ? await elaborateSyncPartitions(elaborationInput, partitions, options.plan.version === 'sync-coordinator-v2' ? options.plan.partitionPolicy.maxParallel : 1, partitionCheckpoints, runner) : await elaborate(elaborationInput, { runner, seed })
         const { contracts: _contracts, graph: _graph, coverage: _coverage, ...compact } = result
         elaboration = compact; saveStage(store, fence, 'elaboration', compact)
       }
@@ -834,9 +836,9 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         if (partitions && options.plan.version === 'sync-coordinator-v2') {
           const { requiredKeys, planningIds } = implementationGenerationDispatch(generationInput, partitions, options.plan.direction === 'code_to_spec')
           const dispatched = new Set(store.readAttempt(attempt.id).dispatchPlans.map(dispatch => dispatch.key))
-          const minimumCalls = requiredKeys.filter(key => !dispatched.has(key)).length, remainingCalls = operation.budget.maxCalls - store.readBudgetUsage(operation.id).callsUsed
+          const minimumCalls = requiredKeys.filter(key => !dispatched.has(key)).length, remainingCalls = budget ? budget.maxCalls - store.readBudgetUsage(operation.id).callsUsed : null
           partitionCheckpoints.save('partition-generation-budget', { minimumCalls, remainingCalls, implementationPlanningPartitions: planningIds, requiredKeys })
-          if (minimumCalls > remainingCalls) fail('partition_budget_insufficient', `最终分区及精确文件规划至少还需要 ${minimumCalls} 次调用，剩余 ${remainingCalls} 次；保持原共享预算`, [writeEvidence(operation.input.source.commonDir, { minimumCalls, remainingCalls, requiredKeys })])
+          if (remainingCalls !== null && minimumCalls > remainingCalls) fail('partition_budget_insufficient', `最终分区及精确文件规划至少还需要 ${minimumCalls} 次调用，剩余 ${remainingCalls} 次；保持原共享预算`, [writeEvidence(operation.input.source.commonDir, { minimumCalls, remainingCalls, requiredKeys })])
         }
         const generationOptions: import('./generation-types.js').GenerationOptions = { runner, protectedReadPaths: view.readPaths, ...(partitions ? { implementationPolicy: { writePaths: options.plan.writePaths, sourcePaths: options.plan.sourcePaths ?? [] }, beforePartitionGeneration: async (paths: readonly string[], evidenceRef: BlobRef) => {
           if (paths.some(path => !within(path, options.plan.writePaths) || options.plan.mandatoryTests.some(test => overlap(path, test.testPath)))) fail('implementation_plan_scope', '明确实现文件计划越过冻结授权或独立oracle')
@@ -974,7 +976,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
     if (operation.control !== 'run' || signal.aborted) {
       if (!await recoverResources(store, operation, options, true)) return current('recovery_required')
       if (heartbeatFailure && operation.control === 'run') return current('recovery_required', heartbeatFailure)
-      if (operation.control === 'run' && operation.deadlineAtMs <= Date.now()) { store.recordBudgetExhaustion(operationId); return current() }
+      if (operation.control === 'run' && syncDeadlineExpired(operation.deadlineAtMs)) { store.recordBudgetExhaustion(operationId); return current() }
       if (operation.control === 'run') store.requestControl(operation.id, 'pause')
       return current()
     }

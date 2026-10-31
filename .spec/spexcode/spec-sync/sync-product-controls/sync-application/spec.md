@@ -123,3 +123,5 @@ Dashboard 的受控正文保存继续直接 submit，requestBlob 即时触发 sp
 
 
 用户通过正式decide明确选择保持原意、采用行为或新规则时，受控原意与所选代码分歧共同进入v2 combined新操作；仍只沿原作用域、真实authority、预算、独审及不可改oracle。原code提交操作保持code_to_spec只读，不把自动提交事件本身当作写代码授权。
+
+可信配置可显式选择unlimited总预算；新operation保存null期限，自动前驱原样继承，重复事件和暂停恢复不改预算。接入互斥继续有限等待，单次Native默认120000ms或冻结配置的有限正数；不因总预算无限恢复普通stopped派发或跳过资源结算。

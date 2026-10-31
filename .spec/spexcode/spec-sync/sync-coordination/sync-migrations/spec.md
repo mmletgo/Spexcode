@@ -47,3 +47,5 @@ v12标记同一历史身份restore及按当前逐ID head读取退休状态的wri
 v13仅以无DDL SELECT 1登记操作固定模型的writer能力，保v1-v12字节/checksum及全部旧operation/payload/receipt/fence记录。先按原流程online backup，旧二进制必须在读取operation或派生retry前因未来generation拒绝；v2运行描述继续核精确操作模型。回滚须先停writer并结算或保留真实资源，按既有恢复流程恢复升级前一致数据库备份及其原evidence，不能让旧writer直接读v13或删marker降级。模型合同属于 [[sync-model-selection]]。
 
 v14仅登记提交边界快照、分区计划与分布式审查的 writer 语义，沿现有流程先在线一致备份，再在组件事务中增加 marker。旧 operation、输入/请求摘要、分区前历史与 receipt 字节不变，旧版写方不能忽略新语义而继续派发。分区运行记录复用既有 attempt/checkpoint/resource，不另建任务数据库或队列。回退须停 writer、保留或结算资源并恢复升级前备份及原 evidence，不能删 marker 或把新计划伪装成旧单任务。
+
+v15以无DDL SELECT 1登记显式unlimited预算与nullable operation期限的writer语义；保持v1–v14迁移字节/checksum及全部旧record/payload/receipt。须先停writer并结算或保留真实资源，再沿online backup和组件事务升级；旧writer因v15拒写。回滚恢复升级前一致数据库备份及其evidence，不删marker、不手改旧记录或重置预算。

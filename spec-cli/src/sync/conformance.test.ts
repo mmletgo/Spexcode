@@ -89,6 +89,19 @@ function reviewer(change?: (review: GenerationReview, value: ReviewContext, requ
 const noDocker = async (): Promise<never> => { throw new Error('fixture: Docker unavailable') }
 const evidence = (name: string): Pick<ConformanceInput, 'evidenceDirectory'> => process.env.SPEX_VERIFICATION_EVIDENCE_DIR ? { evidenceDirectory: mkdtempSync(join(process.env.SPEX_VERIFICATION_EVIDENCE_DIR, `${name}-`)) } : {}
 
+for (const mode of ['finite', 'unlimited', 'configured'] as const) test(`unlimited CI独审单次timeout ${mode} 保持有限且不依赖总cap`, async () => {
+  const repo = fixture()
+  put(repo.root, '.spec/spexcode.json', JSON.stringify({ sync: { ...settings, budget: mode === 'finite' ? settings.budget : { mode: 'unlimited' }, ...(mode === 'configured' ? { callTimeoutMs: 1200000 } : {}) } }))
+  const policy = mode === 'finite' ? repo.base : save(repo.root)
+  put(repo.root, 'src/greet.mjs', `${implementation}\n// same business behavior\n`)
+  let seen = false
+  const result = await runConformance({ repository: repo.root, baseCommit: policy, policyCommit: policy, candidateCommit: save(repo.root) }, { testReviewRunner: reviewer((_review, _context, request) => {
+    seen = true; assert.equal(request.timeoutMs, mode === 'finite' ? 60000 : mode === 'configured' ? 1200000 : 120000)
+  }), testVerificationDriver: noDocker })
+  assert.equal(seen, true, JSON.stringify(result.diagnostics)); assert.equal(result.review!.verdict, 'accept')
+  assert.notEqual(result.status, 'passed', '注入Docker不可用不能被无限预算绕过')
+})
+
 test('受信政策未登记精确raw差量时，程序门禁拒绝并保留前后摘要', async () => {
   const repo = fixture()
   put(repo.root, specPath, source.replaceAll('hi', 'hello'))

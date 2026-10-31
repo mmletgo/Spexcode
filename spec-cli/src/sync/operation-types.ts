@@ -30,7 +30,7 @@ export type ContractScopeExpansion = Pick<SyncScope, 'contractIds' | 'flowIds'> 
 export const SYNC_PHASES = ['detected', 'queued', 'analyzing', 'elaborating', 'generating', 'verifying', 'repairing', 'needs_input', 'conflicted', 'ready_to_apply', 'applying', 'workspace_synced', 'awaiting_landing', 'canonical_synced', 'superseded', 'pausing', 'paused', 'cancelling', 'cancelled', 'failed', 'budget_exhausted', 'recovering', 'recovery_required'] as const
 export type SyncPhase = typeof SYNC_PHASES[number]
 export type SyncControl = 'run' | 'pause' | 'cancel'
-export type SyncBudget = { maxAttempts: number; maxCalls: number; maxRepairs: number; timeoutMs: number }
+export type SyncBudget = { maxAttempts: number; maxCalls: number; maxRepairs: number; timeoutMs: number } | { mode: 'unlimited' }
 export type SyncFailure = { code: string; message: string; kind: 'repairable' | 'environment' | 'conflict' | 'missing_input' | 'unsupported' | 'budget'; evidenceRefs: BlobRef[] }
 export type BaselinePair = {
   id: string
@@ -69,7 +69,7 @@ export type SyncOperation = {
   contractScopeExpansions?: ContractScopeExpansion[]
   blockedReason: 'needs_input' | 'conflicted' | null
   policyDigest: string; impactDigest: string; readSetDigest: string
-  budget: SyncBudget; callsUsed: number; deadlineAtMs: number; currentAttemptId: string | null
+  budget: SyncBudget; callsUsed: number; deadlineAtMs: number | null; currentAttemptId: string | null
   dispatchMessageId: string; delivery: WorktreeIdentity | null; deliveryPlan: DeliveryPlan; createdAtMs: number; updatedAtMs: number
 }
 export type DeliveryPlan = { canonicalRoot: string; branch: string; baseCommit: string }

@@ -27,3 +27,5 @@ callTimeoutMs 可显式给出有限单次 native 调用上限，必须为正整�
 nodeIds 可选，登记本次允许的 Spec 意图根节点；真实子树和影响闭包复用当前图，配置摘要同样绑定授权。省略时只从受授权 source/test 路径的真实治理绑定推导注册意图，未治理/越界节点不伪装成已纳入。无实现绑定的新纯raw意图须显式nodeIds，已注册意图子树内的新raw自动纳入。手動直接请求越nodeIds范围明确拒绝；coverage报告纳入/未纳入节点，分模块接入不能宣称全项目同步。
 
 `model` 可选，保存该项目同步新操作的精确模型 ID，不做供应商白名单；非空且不得带首尾空格。配置摘要与原有授权、currentness 门禁共同绑定模型默认值；配置变化仍须明确重新启用，不能改写已准入 operation 或其预算。
+
+budget唯一schema精确接受原四numeric字段或仅含mode=unlimited的对象，拒混合、缺失或无效形状；旧有限对象不补mode、不改摘要。unlimited没有任何四种总cap，callTimeoutMs仍须为有限正整数，缺省120000ms；仅有限预算要求其不超过总timeoutMs。无界总期不取消验证timeout、租约、取消或资源回收。
