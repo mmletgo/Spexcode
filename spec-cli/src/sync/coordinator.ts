@@ -181,6 +181,22 @@ function stage<T>(store: SyncStore, operation: SyncOperation, attempt: SyncAttem
   }
   return null
 }
+function elaborationRepairSeed(result: SavedElaboration | null, requestKey: string): ElaborationRepairSeed | undefined {
+  const last = result?.rounds.at(-1)
+  return result?.failure?.code === 'repair_budget_exhausted' && last?.candidate && last.candidateDigest
+    ? { settled: true, requestKey, inputDigest: result.inputDigest, candidateDigest: last.candidateDigest, output: last.output, candidate: last.candidate, findings: last.findings, review: last.review, traces: last.traces } : undefined
+}
+
+function partitionElaborationStage(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, key: string, binding: NonNullable<ElaborationResult['partitionBinding']>, inputDigest: string): { result: SavedElaboration; resultRef: BlobRef } | null {
+  const result = stage<SavedElaboration>(store, operation, attempt, key)
+  if (!result || result.inputDigest !== inputDigest || canonical(result.partitionBinding) !== canonical(binding)) return null
+  const resultRef = writeEvidence(operation.input.source.commonDir, result)
+  const original = [...attempt.checkpointRefs].reverse().map(ref => JSON.parse(readEvidence(operation.input.source.commonDir, ref).toString('utf8')) as Partial<Stage>)
+    .find(value => value.version === 'sync-stage-v1' && value.stage === key && value.operationId === operation.id && value.attemptId === attempt.id && value.inputId === operation.input.id && value.policyDigest === operation.policyDigest && value.resultRef?.sha256 === resultRef.sha256)
+  if (original?.readSetDigest !== operation.readSetDigest || operation.baselineSelection && original.baselineSelectionRef?.sha256 !== writeEvidence(operation.input.source.commonDir, operation.baselineSelection).sha256) return null
+  return { result, resultRef }
+}
+
 function refinementGeneration(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, refinement: Refinement): SavedGeneration {
   const previous = store.listAttempts(operation.id).filter(prior => prior.number < attempt.number).reverse().map(prior => stage<SavedGeneration>(store, operation, prior, 'generation')).find(value => value?.candidate?.digest === refinement.candidateDigest)
   const findings = refinement.diagnostics.map(item => JSON.parse(item.message) as GenerationFinding)
@@ -417,8 +433,8 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           const previous = stage<SavedGeneration>(store, operation, attempt, 'generation')
           if (previous) repairContext = generationRepairInput(previous, attempt.failure)
           else {
-            const elaboration = stage<SavedElaboration>(store, operation, attempt, 'elaboration'), last = elaboration?.rounds.at(-1)
-            seed = elaboration?.failure?.code === 'repair_budget_exhausted' && last?.candidate && last.candidateDigest ? { settled: true, requestKey: `sync:${attempt.id}:elaborate`, inputDigest: elaboration.inputDigest, candidateDigest: last.candidateDigest, output: last.output, candidate: last.candidate, findings: last.findings, review: last.review, traces: last.traces } : undefined
+            const elaboration = stage<SavedElaboration>(store, operation, attempt, 'elaboration')
+            seed = elaborationRepairSeed(elaboration, `sync:${attempt.id}:elaborate`)
           }
         }
         try {
@@ -483,20 +499,28 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         load: <T>(key: string) => stage<T>(store, operation, store.readAttempt(attempt!.id), key),
         loadAcceptedInterfaceSeed: (key, binding, inputDigest) => {
           for (const prior of store.listAttempts(operation.id).filter(item => item.number < attempt!.number && ['failed', 'superseded', 'settled'].includes(item.status))) {
-            const saved = stage<SavedElaboration>(store, operation, prior, key)
-            if (!saved?.structurePassed || !saved.reviewPassed || saved.failure || saved.phase !== 'interface_seed' || !['interface_seed', 'needs_input', 'conflict'].includes(saved.status)
-              || saved.rounds.at(-1)?.review?.verdict !== 'accept' || saved.inputDigest !== inputDigest || canonical(saved.partitionBinding) !== canonical(binding)) continue
-            const resultRef = writeEvidence(operation.input.source.commonDir, saved)
-            const original = [...prior.checkpointRefs].reverse().map(ref => JSON.parse(readEvidence(operation.input.source.commonDir, ref).toString('utf8')) as Partial<Stage>)
-              .find(value => value.version === 'sync-stage-v1' && value.stage === key && value.operationId === operation.id && value.attemptId === prior.id && value.inputId === operation.input.id && value.policyDigest === operation.policyDigest && value.resultRef?.sha256 === resultRef.sha256)
-            if (original?.readSetDigest !== operation.readSetDigest || operation.baselineSelection && original.baselineSelectionRef?.sha256 !== writeEvidence(operation.input.source.commonDir, operation.baselineSelection).sha256) continue
+            const source = partitionElaborationStage(store, operation, prior, key, binding, inputDigest)
+            if (!source) continue
+            const { result: saved, resultRef } = source
+            if (!saved.structurePassed || !saved.reviewPassed || saved.failure || saved.phase !== 'interface_seed' || !['interface_seed', 'needs_input', 'conflict'].includes(saved.status)
+              || saved.rounds.at(-1)?.review?.verdict !== 'accept') continue
             saveStage(store, fence!, `${key}:provenance`, { fromOperationId: operation.id, fromAttemptId: prior.id, resultRef })
             partitionCheckpoints.save(key, saved)
             return saved
           }
           return null
         },
-        save: (key, value) => saveStage(store, fence!, key, value, !operation.baselineSelection && (value as Partial<SavedElaboration>).phase === 'interface_seed' ? { readSetDigest: operation.readSetDigest } : undefined),
+        loadElaborationRepairSeed: (key, binding, inputDigest) => {
+          const prior = store.listAttempts(operation.id).filter(item => item.number < attempt!.number).at(-1)
+          if (!prior || !['failed', 'superseded', 'settled'].includes(prior.status) || prior.failure?.kind !== 'repairable') return null
+          const source = partitionElaborationStage(store, operation, prior, key, binding, inputDigest)
+          if (!source || source.result.phase === 'partitioned_final' || source.result.status !== 'exhausted' || source.result.reviewPassed) return null
+          const seed = elaborationRepairSeed(source.result, `sync:${prior.id}:elaborate:partition:${binding.partitionId}`)
+          if (!seed) return null
+          saveStage(store, fence!, `${key}:repair-provenance`, { fromOperationId: operation.id, fromAttemptId: prior.id, resultRef: source.resultRef, candidateDigest: seed.candidateDigest })
+          return seed
+        },
+        save: (key, value) => saveStage(store, fence!, key, value, !operation.baselineSelection && key.startsWith('partition:') && key.endsWith(':elaboration') ? { readSetDigest: operation.readSetDigest } : undefined),
       }
       let partitions: SyncPartitionPlan | null = null
       let analysis: CodeBehaviorEvidence | undefined
@@ -681,14 +705,13 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       }
       if (!elaboration.structurePassed || !elaboration.reviewPassed) {
         if (['SYNC_BUDGET_EXHAUSTED', 'budget_exhausted'].includes(elaboration.failure?.code ?? '')) throw new SyncStoreError('SYNC_BUDGET_EXHAUSTED', elaboration.failure!.message)
-        const last = elaboration.rounds.at(-1)
         const unsupported = elaboration.status === 'unsupported', stopped = elaboration.status === 'cancelled' || signal.aborted
         const kind: SyncFailure['kind'] = unsupported ? 'unsupported' : elaboration.status === 'conflict' ? 'conflict' : elaboration.status === 'needs_input' ? 'missing_input' : 'repairable'
         const issue = failure(elaboration.failure?.code ?? 'elaboration_failed', elaboration.failure?.message ?? '细化结构或独立评审未通过', kind, [writeEvidence(operation.input.source.commonDir, elaboration)])
         if (stopped) fail('cancelled', issue.message, issue.evidenceRefs)
         store.recordFailure(fence, issue)
         if (kind !== 'repairable') return current(unsupported ? 'unsupported' : undefined, issue)
-        seed = elaboration.failure?.code === 'repair_budget_exhausted' && last?.candidate && last.candidateDigest ? { settled: true, requestKey: `sync:${attempt.id}:elaborate`, inputDigest: elaboration.inputDigest, candidateDigest: last.candidateDigest, output: last.output, candidate: last.candidate, findings: last.findings, review: last.review, traces: last.traces } : undefined
+        seed = elaborationRepairSeed(elaboration, `sync:${attempt.id}:elaborate`)
         continue
       }
       const acceptedFiles = new Map(view.files)

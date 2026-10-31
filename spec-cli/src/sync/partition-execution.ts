@@ -6,7 +6,7 @@ import { outputErrors } from './elaboration-schema.js'
 import { elaborate, freezeElaborationInput, projectElaborationFlowReadiness, sealPartitionedElaboration } from './elaboration.js'
 import type { Contract, Verification } from '@spexcode/spec-core/contracts'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
-import type { Applicability, ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationTrace, ElaborationSessionRequest, ElaborationChange, VerificationOwnershipProjection } from './elaboration-types.js'
+import type { Applicability, ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationTrace, ElaborationSessionRequest, ElaborationChange, ElaborationRepairSeed, VerificationOwnershipProjection } from './elaboration-types.js'
 import { elaborationTargetBindings, projectVerificationTable, withoutVerificationTables } from './elaboration-markdown.js'
 import { actualTreeDiff, verifyCandidate } from './candidate.js'
 import type { CandidateChanges } from './candidate.js'
@@ -22,6 +22,7 @@ import type { CodeBehaviorAnalysis, CodeBehaviorEvidence } from './writeback-typ
 export type PartitionCheckpoints = {
   load<T>(key: string): T | null
   loadAcceptedInterfaceSeed?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'> | null
+  loadElaborationRepairSeed?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): ElaborationRepairSeed | null
   save(key: string, value: unknown): BlobRef
 }
 const within = (path: string, paths: readonly string[]): boolean => paths.some(parent => path === parent || path.startsWith(`${parent}/`))
@@ -260,9 +261,11 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
       implementationWritePaths: input.implementationWritePaths?.length === 0 ? [] : partition.writePaths, readonlyTestPaths: input.readonlyTestPaths?.filter(path => within(path, readPaths)),
       phase: interfaceSeed ? 'interface_seed' : undefined,
     }
-    const accepted = interfaceSeed ? checkpoints.loadAcceptedInterfaceSeed?.(key, partitionBinding, freezeElaborationInput(localInput).inputDigest) : null
+    const inputDigest = freezeElaborationInput(localInput).inputDigest
+    const accepted = interfaceSeed ? checkpoints.loadAcceptedInterfaceSeed?.(key, partitionBinding, inputDigest) : null
     if (accepted) return accepted
-    const result = await elaborate(localInput, { runner })
+    const seed = checkpoints.loadElaborationRepairSeed?.(key, partitionBinding, inputDigest) ?? undefined
+    const result = await elaborate(localInput, { runner, seed })
     const { contracts: _contracts, graph: _graph, coverage: _coverage, ...compact } = result
     checkpoints.save(key, compact)
     return compact
