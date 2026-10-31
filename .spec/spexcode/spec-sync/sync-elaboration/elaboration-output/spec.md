@@ -25,7 +25,7 @@ review verdict 的原生说明明确 accept 仅可搭配空 findings；implement
 
 `interface_seed` 是分区编排内部的父接口schema：只允许REQ/RULE/GAP行，不允许新增FLOW/STEP/AC/VERIFY；既有精确匹配冻结登记的技术VERIFY由程序沿用而非模型重选；首次raw-only或既有纯接口均沿用同一行差量和旧新演进门禁。既有条目默认保留，removeIds仅可取本目标已有且经输入门禁核验的显式retire授权ID，schema以精确enum和数量限域；无合法退役授权时仍为零项且不产生空enum。code/related严格沿用冻结父节点绑定，空绑定用`maxItems:0`和普通string items约束，不生成空enum。
 
-生成指令要求每个业务 REQ 至少由一个主 FLOW.req 覆盖。验证配置、写路径授权、执行器/schema 和本轮元数据属于执行边界，不另造业务 REQ 或测试执行 FLOW；这些边界仍须遵守，测试和验证绑定在业务 AC/可信 VERIFY 中，不能因此省略 raw 里的业务需求。
+完整P1生成指令要求每个业务 REQ 至少由一个主 FLOW.req 覆盖；interface_seed只生成必要共享REQ/RULE/GAP，不向生成或独审下发完整FLOW/状态矩阵/AC展开任务，其覆盖仍由后续子区和严格全局seal证明。共用行差量、列/null、来源、授权及原意保护规则复用同一指令段；父接口不新增VERIFY/AC，精确可信技术行由程序保留。description/prose同样只保存稳定业务说明，不写本轮修复或候选changelog。阶段分离不允许父条款错误、矛盾或无来源通过。验证配置、写路径授权、执行器/schema 和本轮元数据属于执行边界，不另造业务 REQ 或测试执行 FLOW；这些边界仍须遵守，测试和验证绑定在业务 AC/可信 VERIFY 中，不能因此省略 raw 里的业务需求。
 
 状态派发 STEP 须以 next、depends-on 或 source 显式关联实际执行或选择的 TR，并声明对应 EVENT；集合须忠实覆盖该步骤声明的对象、状态域和条件分支，不能只列已确定处置掩盖同一步里的未决处置。纯参数校验、提交和导航步骤不强求 TR；不反推无关事件的全部状态。next→TR 是业务依赖；next→STEP/STATE 和 FLOW.steps 仍为导航。独立审查核对派发表与步骤声明的范围，不能因正文提到 GAP 就跳过结构依赖，或把含未知派发的父 FLOW 当作完整可交付。
 
