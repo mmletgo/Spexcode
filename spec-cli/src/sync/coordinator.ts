@@ -174,7 +174,7 @@ function generationRepairInput(previous: SavedGeneration, issue?: SyncFailure): 
   return { previousOutput: previous.output, diagnostics: [...(issue ? [{ code: issue.code, message: issue.message }] : []), ...previous.validationFindings.map(item => ({ code: item.code, message: item.message })), ...(previous.review?.findings.map(item => ({ code: item.kind, message: JSON.stringify(item) })) ?? [])] }
 }
 type Refinement = { prior: SavedElaboration; candidate: CandidateRef; candidateDigest: string; diagnostics: { code: string; message: string }[] }
-type ReadonlyOwnerRepair = { fromAttemptId: string; generationRef: BlobRef; priorRef: BlobRef; planAttemptId: string; planRef: BlobRef; candidateDigest: string; findings: ContractFinding[]; allFindings: ContractFinding[]; owners: { key: string; partitionId: string; fromAttemptId: string; resultRef: BlobRef }[] }
+type ReadonlyOwnerRepair = { kind?: 'candidate_review'; reviewEvidence?: { partitionId: string; resultRef: BlobRef }[]; fromAttemptId: string; generationRef: BlobRef; priorRef: BlobRef; planAttemptId: string; planRef: BlobRef; candidateDigest: string; findings: ContractFinding[]; allFindings: ContractFinding[]; owners: { key: string; partitionId: string; fromAttemptId: string; resultRef: BlobRef }[] }
 /** 只阻止没有对应owner派发的同产物热循环；真实Agent尝试次数不受此门限制。 */
 export function readonlySpecRepairStalled(repair: Pick<ReadonlyOwnerRepair, 'candidateDigest' | 'findings' | 'owners'>, candidateDigest: string | undefined, findings: readonly ContractFinding[], attempt: Pick<SyncAttempt, 'id' | 'dispatchPlans'>): boolean {
   return candidateDigest === repair.candidateDigest && canonical(findings.filter(item => item.severity === 'error')) === canonical(repair.findings) && !attempt.dispatchPlans.some(dispatch => dispatch.purpose.startsWith('elaboration_') && repair.owners.some(owner => dispatch.key.startsWith(`sync:${attempt.id}:elaborate:partition:${owner.partitionId}:`)))
@@ -227,17 +227,27 @@ function readonlyLocalSource(store: SyncStore, operation: SyncOperation, attempt
   return { result, resultRef }
 }
 
-/** 只从真实只读装配失败回到原P1写者；该来源不是P2独审refinement。 */
+function readonlyReviewFindings(result: SavedGeneration, changes: SavedElaboration['changes'], writable: readonly string[]): ContractFinding[] {
+  const items = changes.flatMap(change => parseContract({ nodeId: change.nodeId, path: change.path, source: change.source }).contract?.items ?? [])
+  return (result.partitionEvidence ?? []).filter(evidence => evidence.review.verdict === 'repair').flatMap(evidence => evidence.review.findings).flatMap(finding => {
+    const [path, id, extra] = finding.ruleLocation.replace(/^contract:/, '').split('#'), matches = items.filter(item => item.path === path && item.id === id)
+    if (within(path, writable)) return []
+    if (finding.kind !== 'repair' || extra !== undefined || matches.length !== 1 || !finding.affectedIds.includes(id) || finding.affectedIds.some(id => !items.some(item => item.id === id))) fail('readonly_spec_repair_binding', '只读独审诊断必须以实际候选路径/ID及affectedIds绑定唯一契约')
+    return [{ code: 'candidate-review-repair', severity: 'error', nodeId: matches[0].nodeId, path, itemId: id, message: JSON.stringify(finding) }]
+  })
+}
+
+/** 真实只读候选失败回到原P1写者；独审诊断不成为refinement或业务授权。 */
 function readonlyRepairFromAttempt(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt): ReadonlyOwnerRepair | null {
   const generation = partitionStage<SavedGeneration>(store, operation, attempt, 'generation')
-  const allFindings = generation?.result.validationFindings.filter(item => item.severity === 'error') ?? []
-  if (!generation?.result.candidate || generation.result.candidateValidated || !allFindings.length || allFindings.some(item => item.code !== 'anchor-dead')) return null
+  let allFindings = generation?.result.validationFindings.filter(item => item.severity === 'error') ?? []
+  const semantic = generation?.result.candidateValidated === true && generation.result.status === 'repair' && !generation.result.failure && !generation.result.reviewPassed && generation.result.partitionEvidence?.some(item => item.review.verdict === 'repair')
+  if (!generation?.result.candidate || !semantic && (generation.result.candidateValidated || !allFindings.length || allFindings.some(item => item.code !== 'anchor-dead'))) return null
   const plan = operation.planBlob ? JSON.parse(readEvidence(operation.input.source.commonDir, operation.planBlob).toString('utf8')) as SyncCoordinatorPlan : null
   if (plan?.version !== 'sync-coordinator-v2') return null
   const writable = generation.result.p2SpecWritePaths ?? (plan.direction === 'code_to_spec' ? [] : null)
   if (!writable) fail('readonly_spec_repair_permissions_unknown', '旧mixed候选没有真实P2 Spec写权限投影，停止而不猜owner权限', [generation.resultRef])
-  const findings = allFindings.filter(finding => !within(finding.path, writable))
-  if (!findings.length) return null
+  if (!semantic && allFindings.every(finding => within(finding.path, writable))) return null
   const approved = stage<SavedElaboration>(store, operation, attempt, 'elaboration')
   const prior = approved ? { result: approved, resultRef: writeEvidence(operation.input.source.commonDir, approved) } : null
   if (!prior?.result.structurePassed || !prior.result.reviewPassed || prior.result.failure || !prior.result.partitionEvidence?.length || !['failed', 'superseded', 'settled'].includes(attempt.status) || attempt.failure?.kind !== 'repairable') fail('readonly_spec_repair_binding', '只读V1诊断缺少同输入已审P1及已结算失败')
@@ -252,6 +262,20 @@ function readonlyRepairFromAttempt(store: SyncStore, operation: SyncOperation, a
   const candidate = generation.result.candidate, commonDir = operation.input.source.commonDir
   if (candidate.sourceInputId !== operation.input.id) fail('readonly_spec_repair_binding', '只读V1诊断候选属于另一输入')
   const entries = new Map(verifyCandidate(commonDir, candidate).map(entry => [entry.path, entry]))
+  if (semantic && (prior.result.changes.every(change => within(change.path, writable)) || generation.result.partitionEvidence!.some(evidence => evidence.review.findings.some(finding => finding.ruleLocation.startsWith('contract-omission:'))))) return null
+  const reviewEvidence: NonNullable<ReadonlyOwnerRepair['reviewEvidence']> = []
+  if (semantic) {
+    allFindings = readonlyReviewFindings(generation.result, prior.result.changes, writable)
+    for (const evidence of generation.result.partitionEvidence!) {
+      const saved = partitionStage<SavedGeneration>(store, operation, attempt, `partition:${evidence.partitionId}:candidate-review`)
+      const result = saved?.result, trace = result?.traces.find(trace => trace.purpose === 'code_review')
+      if (!result || result.failure || !result.candidateValidated || canonical(result.candidate) !== canonical(candidate) || canonical(result.review) !== canonical(evidence.review) || canonical(result.traces) !== canonical(evidence.traces) || !trace || trace.resultDigest !== contentHash(JSON.stringify(result.reviewOutput)) || canonical(result.reviewOutput) !== canonical(result.review) || trace.inputDigest !== result.inputDigest || !attempt.dispatchPlans.some(dispatch => dispatch.purpose === 'code_review' && dispatch.session?.sessionId === trace.sessionId && dispatch.session.threadId === trace.threadId && dispatch.session.turnId === trace.turnId) || !['accept', 'repair'].includes(evidence.review.verdict) || evidence.review.inputId !== operation.input.id || evidence.review.candidateDigest !== candidate.digest) fail('readonly_spec_repair_binding', '只读独审诊断缺少真实normalized review、完整候选及原dispatch绑定')
+      if (evidence.review.verdict !== 'repair') continue
+      reviewEvidence.push({ partitionId: evidence.partitionId, resultRef: saved.resultRef })
+    }
+  }
+  const findings = allFindings.filter(finding => !within(finding.path, writable))
+  if (!findings.length) return null
   const sources = prior.result.partitionEvidence.flatMap(owner => {
     const key = `partition:${owner.partitionId}:elaboration`
     for (const origin of origins.filter(item => ['failed', 'superseded', 'settled'].includes(item.status))) {
@@ -269,7 +293,7 @@ function readonlyRepairFromAttempt(store: SyncStore, operation: SyncOperation, a
     if (matches.length !== 1) fail('readonly_spec_repair_binding', '只读V1诊断没有唯一已授权P1 owner')
     owners.set(matches[0].owner.key, matches[0].owner)
   }
-  return { fromAttemptId: attempt.id, generationRef: generation.resultRef, priorRef: prior.resultRef, planAttemptId: planSource.attemptId, planRef: planSource.ref, candidateDigest: candidate.digest, findings, allFindings, owners: [...owners.values()] }
+  return { ...(semantic ? { kind: 'candidate_review' as const, reviewEvidence } : {}), fromAttemptId: attempt.id, generationRef: generation.resultRef, priorRef: prior.resultRef, planAttemptId: planSource.attemptId, planRef: planSource.ref, candidateDigest: candidate.digest, findings, allFindings, owners: [...owners.values()] }
 }
 
 function validateReadonlyRepair(store: SyncStore, operation: SyncOperation, repair: ReadonlyOwnerRepair): void {
@@ -550,6 +574,15 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       operation = store.readOperation(operationId); attempt = store.readAttempt(fence.attemptId)
       if (!operation.planBlob) fail('plan_missing', '旧操作没有完整可信计划证据，不能猜测或借用另一份政策恢复')
       const savedRepair = stage<{ repairContext?: typeof repairContext; seed?: ElaborationRepairSeed; refinement?: Refinement; readonlyOwnerRepair?: ReadonlyOwnerRepair }>(store, operation, attempt, 'repair-input')
+      if (!savedRepair && !readonlyRepairAttempt && options.plan.version === 'sync-coordinator-v2') {
+        const history = store.listAttempts(operation.id).filter(prior => prior.number < attempt!.number).reverse(), stopped = history[0]
+        const carried = stopped && stopped.status === 'superseded' && !stopped.failure && !stage<SavedGeneration>(store, operation, stopped, 'generation') ? stage<{ repairContext?: typeof repairContext }>(store, operation, stopped, 'repair-input')?.repairContext : undefined
+        if (carried) {
+          const source = history.slice(1).find(prior => stage<SavedGeneration>(store, operation, prior, 'generation'))
+          const previous = source && stage<SavedGeneration>(store, operation, source, 'generation')
+          if (previous && source?.failure?.kind === 'repairable' && canonical(carried) === canonical(generationRepairInput(previous, source.failure))) readonlyRepairAttempt = source
+        }
+      }
       if (!savedRepair && readonlyRepairAttempt) readonlyOwnerRepair = readonlyRepairFromAttempt(store, operation, readonlyRepairAttempt) ?? undefined
       readonlyRepairAttempt = undefined
       if (savedRepair) { repairContext = savedRepair.repairContext; seed = savedRepair.seed; refinement = savedRepair.refinement; readonlyOwnerRepair = savedRepair.readonlyOwnerRepair }
@@ -639,7 +672,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           const findings = readonlyOwnerRepair!.findings.filter(finding => prior.changes.some(change => change.nodeId === finding.nodeId && change.path === finding.path))
           if (prior.changes.some(change => !within(change.path, options.plan.writePaths) || options.plan.mandatoryTests.some(test => overlap(change.path, test.testPath)))) fail('readonly_spec_repair_binding', '只读V1 owner目标越过冻结授权')
           saveStage(store, fence!, `${key}:readonly-repair-provenance`, { fromAttemptId: sourceAttempt.id, resultRef: owner.resultRef, generationRef: readonlyOwnerRepair!.generationRef })
-          return { prior, repair: { baseInputDigest: inputDigest, candidateDigest: readonlyOwnerRepair!.candidateDigest, generationRef: readonlyOwnerRepair!.generationRef, acceptedRef: owner.resultRef, changes: prior.changes, output: round.output, review: round.review, findings } }
+          return { prior, repair: { ...(readonlyOwnerRepair!.kind ? { kind: readonlyOwnerRepair!.kind, reviewEvidence: readonlyOwnerRepair!.reviewEvidence } : {}), baseInputDigest: inputDigest, candidateDigest: readonlyOwnerRepair!.candidateDigest, generationRef: readonlyOwnerRepair!.generationRef, acceptedRef: owner.resultRef, changes: prior.changes, output: round.output, review: round.review, findings } }
         },
         loadAcceptedInterfaceSeed: (key, binding, inputDigest) => {
           const readonly = readonlyAccepted(key, binding, inputDigest)
@@ -1013,7 +1046,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         generated = { ...compact, ...(partitions ? { p2SpecWritePaths: implementationGenerationDispatch(generationInput, partitions, options.plan.version === 'sync-coordinator-v2' && options.plan.direction === 'code_to_spec').specWritePaths } : {}) }; saveStage(store, fence, 'generation', generated)
       }
       if (generated.status !== 'reviewed' || !generated.candidate || !generated.candidateValidated || !generated.reviewPassed) {
-        if (readonlyOwnerRepair && readonlySpecRepairStalled({ ...readonlyOwnerRepair, findings: readonlyOwnerRepair.allFindings }, generated.candidate?.digest, generated.validationFindings, store.readAttempt(attempt.id))) fail('readonly_spec_repair_stalled', '相同只读候选及V1失败没有对应owner的新Agent派发，停止零调用热重试', [readonlyOwnerRepair.generationRef])
+        if (readonlyOwnerRepair && readonlySpecRepairStalled({ ...readonlyOwnerRepair, findings: readonlyOwnerRepair.allFindings }, generated.candidate?.digest, readonlyOwnerRepair.kind === 'candidate_review' && generated.status === 'repair' && generated.candidateValidated && !generated.failure ? readonlyReviewFindings(generated, elaboration.changes, generated.p2SpecWritePaths ?? []) : generated.validationFindings, store.readAttempt(attempt.id))) fail('readonly_spec_repair_stalled', '相同只读候选及V1失败没有对应owner的新Agent派发，停止零调用热重试', [readonlyOwnerRepair.generationRef])
         if (generated.failure?.code === 'SYNC_BUDGET_EXHAUSTED') throw new SyncStoreError('SYNC_BUDGET_EXHAUSTED', generated.failure.message)
         const oracleFindings = generated.review?.findings.filter(finding => finding.ruleLocation.startsWith('oracle-policy:')) ?? []
         const oracleErrors: string[] = [], oracleConflicts: unknown[] = []

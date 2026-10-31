@@ -1781,18 +1781,20 @@ test('readonly-owner零派发guard只阻相同候选诊断，真实owner新派�
   assert.equal(readonlySpecRepairStalled(repair, 'same', [{ ...findings[0], message: '另一真实错误' }], attempt), false)
 })
 
-for (const mode of ['existing', 'new-leaf', 'aggregate-only', 'wrong-ref', 'unaffected-ref', 'readset', 'selection', 'non-null-selection', 'input-digest', 'foreign', 'policy', 'candidate', 'missing-owner'] as const) test(`readonly-owner late V1 ${mode} 只返修精确owner`, async t => {
-  const newLeaf = mode === 'new-leaf' || mode === 'aggregate-only', aggregateOnly = mode === 'aggregate-only'
-  const negative = !['existing', 'new-leaf', 'aggregate-only'].includes(mode)
+for (const mode of ['existing', 'new-leaf', 'aggregate-only', 'review', 'review-multi', 'review-p1-fail', 'review-resume', 'review-location', 'review-ref', 'wrong-ref', 'unaffected-ref', 'readset', 'selection', 'non-null-selection', 'input-digest', 'foreign', 'policy', 'candidate', 'missing-owner'] as const) test(`readonly-owner late V1 ${mode} 只返修精确owner`, async t => {
+  const semantic = mode.startsWith('review'), multi = mode === 'review-multi' || mode === 'review-p1-fail'
+  const newLeaf = semantic || mode === 'new-leaf' || mode === 'aggregate-only', aggregateOnly = mode === 'aggregate-only'
+  const negative = !['existing', 'new-leaf', 'aggregate-only', 'review', 'review-multi', 'review-p1-fail', 'review-resume'].includes(mode)
   const baseSpec = original.split('\n').map(line => line.startsWith('| AC-EXPORT-') ? line.replace(' | derived:REQ-EXPORT-01 | REQ-EXPORT-01 |', ' | code:src/export.js#ExportService | REQ-EXPORT-01 |') : line).join('\n')
   const definitions = [
     { nodeId: 'export-contract', path: contractPath, sourcePath: 'src/export.js', testPath: 'tests/export.test.mjs', word: 'export', upper: 'EXPORT' },
     ...['import', 'archive', 'report'].map(word => ({ nodeId: `${word}-contract`, path: `.spec/project/${word}/${word}-contract/spec.md`, sourcePath: `src/${word}/${word}.js`, testPath: `tests/${word}.test.mjs`, word, upper: word.toUpperCase() })),
   ]
-  if (newLeaf) { const added = definitions[3]; added.nodeId = `sync-code-${contentHash(added.sourcePath).slice(0, 16)}`; added.path = `.spec/project/export-contract/${added.nodeId}/spec.md` }
+  if (newLeaf) for (const added of definitions.slice(3)) { added.nodeId = `sync-code-${contentHash(added.sourcePath).slice(0, 16)}`; added.path = `.spec/project/export-contract/${added.nodeId}/spec.md` }
   const badOwner = newLeaf ? definitions[3] : definitions[0]
+  const badOwners = multi ? [definitions[2], badOwner] : [badOwner]
   const sources = new Map(definitions.map(definition => [definition.nodeId, baseSpec.replaceAll('export-job', `${definition.word}-job`).replaceAll('EXPORT', definition.upper).replaceAll('export-contract', definition.nodeId).replaceAll('src/export.js', definition.sourcePath).replaceAll('tests/export.test.mjs', definition.testPath).replaceAll(`decision:${definition.upper}-POLICY`, 'decision:EXPORT-POLICY')]))
-  const extras = Object.fromEntries(definitions.slice(1).flatMap(definition => [[definition.path, sources.get(definition.nodeId)!], [definition.sourcePath, readFileSync(new URL('src/export.js', fixturePath), 'utf8')], [definition.testPath, readFileSync(new URL('tests/export.test.mjs', fixturePath), 'utf8').replaceAll('EXPORT', definition.upper).replaceAll('src/export.js', definition.sourcePath)]]).filter(([path]) => !newLeaf || path !== badOwner.path))
+  const extras = Object.fromEntries(definitions.slice(1).flatMap(definition => [[definition.path, multi && definition === definitions[2] ? sources.get(definition.nodeId)!.slice(0, sources.get(definition.nodeId)!.indexOf('## expanded spec')).replace('contract-schema: sync-v1\n', '') : sources.get(definition.nodeId)!], [definition.sourcePath, readFileSync(new URL('src/export.js', fixturePath), 'utf8')], [definition.testPath, readFileSync(new URL('tests/export.test.mjs', fixturePath), 'utf8').replaceAll('EXPORT', definition.upper).replaceAll('src/export.js', definition.sourcePath)]]).filter(([path]) => !newLeaf || path !== badOwner.path))
   const verifications = definitions.map(definition => { const item = parseContract({ nodeId: definition.nodeId, path: definition.path, source: sources.get(definition.nodeId)! }).contract!.items.find(item => item.kind === 'VERIFY')!; assert.equal(item.kind, 'VERIFY'); return { definition: { id: item.id, command: item.command, cwd: item.cwd, timeoutMs: item.timeoutMs }, environment: { version: 'trusted-test-v1' as const, image: 'node@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392', platform: 'linux/arm64' as const, memoryBytes: 128 * 1024 * 1024, cpus: 1, pidsLimit: 64, scratchBytes: 16 * 1024 * 1024, logBytes: 128 * 1024 } } })
   const mandatoryTests = definitions.map(definition => ({ verificationId: `VERIFY-${definition.upper}-01`, testPath: definition.testPath, testId: `AC-${definition.upper}-01` }))
   const f = await fixture(t, { mode: 'unlimited' }, false, baseSpec, 'project', baseSpec, { version: 'sync-coordinator-v2', direction: 'code_to_spec', targets: definitions.filter(item => !newLeaf || item !== badOwner).map(({ nodeId, path }) => ({ nodeId, path })), sourcePaths: ['src'], writePaths: ['.spec'], verifications, mandatoryTests, partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 }, commitTrigger: { before: null, paths: definitions.map(item => item.sourcePath) } }, undefined, 'code', undefined, true, extras)
@@ -1800,30 +1802,50 @@ for (const mode of ['existing', 'new-leaf', 'aggregate-only', 'wrong-ref', 'unaf
   const snapshotObjects = readTree(f.input.source.commonDir, f.input.immutableTree).filter(entry => !entry.path.startsWith('.spec/'))
   const ownerCalls: { attempt: number; nodeId: string; purpose: string }[] = []
   let finalReview = false, badGenerations = 0
+  const generatedPerOwner = new Map<string, number>()
   f.transform((output, request) => {
     const attempt = f.store.readAttempt(f.store.readOperation(f.operation.id).currentAttemptId!)
     if (request.purpose.startsWith('code_behavior_')) {
       const context = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as { changedPaths: string[] }
       const definition = definitions.find(item => context.changedPaths.includes(item.sourcePath))!
-      if (request.purpose === 'code_behavior_analyze') return { ...(output as object), changes: (output as { changes: object[] }).changes.map(change => ({ ...change, ...(newLeaf && definition === badOwner ? { kind: 'allowed_change', affectedIds: [], ruleIds: [] } : { affectedIds: [`RULE-${definition.upper}-05`], ruleIds: [`RULE-${definition.upper}-05`] }) })), newNodes: newLeaf && definition === badOwner ? [{ codePath: definition.sourcePath, parentNodeId: 'export-contract', basis: '真实新增无治理模块具有父raw对应的服务职责' }] : [] }
+      if (request.purpose === 'code_behavior_analyze') return { ...(output as object), changes: (output as { changes: object[] }).changes.map(change => ({ ...change, ...(newLeaf && badOwners.includes(definition) ? { kind: 'allowed_change', affectedIds: [], ruleIds: [] } : { affectedIds: [`RULE-${definition.upper}-05`], ruleIds: [`RULE-${definition.upper}-05`] }) })), newNodes: newLeaf && definition === badOwner ? [{ codePath: definition.sourcePath, parentNodeId: 'export-contract', basis: '真实新增无治理模块具有父raw对应的服务职责' }] : [] }
     }
     if (request.purpose.startsWith('elaboration_')) {
       const context = JSON.parse(request.prompt.split('冻结业务输入:\n')[1].split('\n')[0]) as { targets: { nodeId: string; path: string }[]; readonlySpecRepair?: unknown }
       const definition = definitions.find(item => item.nodeId === context.targets[0].nodeId)!
       ownerCalls.push({ attempt: attempt.number, nodeId: definition.nodeId, purpose: request.purpose })
       if (attempt.number > 1) {
-        assert.equal(definition.nodeId, badOwner.nodeId, '其它三个owner不得因兄弟late V1失败再派发')
+        assert.ok(badOwners.includes(definition), '其它owner不得因兄弟失败再派发')
         assert.ok(context.readonlySpecRepair, '真实late V1原件诊断必须进入owner冻结输入')
       }
+      if (mode === 'review-p1-fail' && attempt.number === 2 && definition === badOwner && request.purpose === 'elaboration_review') return { verdict: 'repair', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [{ code: 'oracle-evidence', kind: 'repair', affectedIds: [`AC-${definition.upper}-01`], evidence: '候选仍过度声称父目录断言', decision: '准确保持raw并修正证据表述', message: 'oracle只测文件absence，当前候选声明过度' }] }
       if (request.purpose === 'elaboration_generate') {
         const generated = rows(sources.get(definition.nodeId)!, definition.path)
         generated.changes[0].nodeId = definition.nodeId
-        if (definition.nodeId === badOwner.nodeId && ++badGenerations < 3) for (const [index, acceptance] of generated.changes[0].tables.AC.entries()) acceptance.source = `code:${definition.sourcePath}#${index % 2 ? 'options' : 'process.stdout.write'}`
+        if (semantic) {
+          const number = (generatedPerOwner.get(definition.nodeId) ?? 0) + 1; generatedPerOwner.set(definition.nodeId, number)
+          if (badOwners.includes(definition) && number < (mode === 'review-p1-fail' && definition !== badOwner ? 2 : 3)) generated.changes[0].tables.AC[0].assertion += '（错误地声称oracle还检查了父目录absence）'
+          if (attempt.number > 1) {
+            const repair = context.readonlySpecRepair as { kind: string; reviewEvidence: unknown[] }
+            assert.equal(repair.kind, 'candidate_review'); assert.ok(repair.reviewEvidence.length)
+            assert.ok(request.prompt.includes('不是新的业务事实或授权'))
+          }
+        } else if (definition.nodeId === badOwner.nodeId && ++badGenerations < 3) for (const [index, acceptance] of generated.changes[0].tables.AC.entries()) acceptance.source = `code:${definition.sourcePath}#${index % 2 ? 'options' : 'process.stdout.write'}`
         return generated
       }
     }
     assert.notEqual(request.purpose, 'code_generate', '只读方向不得调用代码生成器')
-    if (request.purpose === 'code_review') { finalReview = true; throw Object.assign(new Error('fixture在全候选真实V1通过后、Docker之前停止'), { code: 'unsupported' }) }
+    if (request.purpose === 'code_review') {
+      if (semantic) {
+        const frozen = promptInput(request), issues = frozen.elaboratedSpecs.flatMap(spec => {
+          const definition = badOwners.find(owner => owner.path === spec.path), id = definition && `AC-${definition.upper}-01`
+          return id && frozen.readyIds.includes(id) && spec.source.includes('错误地声称oracle') ? [{ kind: 'repair', affectedIds: [id], ruleLocation: `${mode === 'review-location' ? '.spec/foreign/spec.md' : `${multi ? 'contract:' : ''}${spec.path}`}#${id}`, codeLocation: 'tests/export.test.mjs#AC-EXPORT-01', evidence: '完整测试只断言文件absence，没有断言父目录absence', counterexample: '父目录存在但文件缺失仍满足原oracle', message: '保留raw要求，准确表述当前AC证据覆盖，不宣称未测断言' }] : []
+        })
+        if (issues.length) return { ...(output as object), verdict: 'repair', findings: issues }
+        if (attempt.number < (mode === 'review-resume' ? 4 : 3)) return output
+      }
+      finalReview = true; throw Object.assign(new Error('fixture在全候选真实V1通过后、Docker之前停止'), { code: 'unsupported' })
+    }
     return output
   })
   const claim = f.store.claimQueuedAttempt.bind(f.store)
@@ -1831,7 +1853,14 @@ for (const mode of ['existing', 'new-leaf', 'aggregate-only', 'wrong-ref', 'unaf
   let immutable: { refs: import('./operation-types.js').BlobRef[]; failure: unknown } | undefined
   f.store.recordFailure = (fence, issue) => {
     const before = f.store.readAttempt(fence.attemptId)
-    if (before.number === 1 && issue.code === 'generation_failed' && negative) {
+    if (before.number === 1 && issue.code === 'generation_failed' && mode === 'review-ref') {
+      const wrapper = before.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(value => value.stage === 'generation')
+      const generated = JSON.parse(readEvidence(f.input.source.commonDir, wrapper.resultRef).toString())
+      const review = generated.partitionEvidence.find((evidence: { review: { verdict: string } }) => evidence.review.verdict === 'repair')
+      review.review.findings[0].message += '外来改写'
+      const resultRef = writeEvidence(f.input.source.commonDir, generated); f.store.checkpoint(fence, resultRef); f.store.checkpoint(fence, writeEvidence(f.input.source.commonDir, { ...wrapper, resultRef }))
+    }
+    if (before.number === 1 && issue.code === 'generation_failed' && negative && !semantic) {
       const wrappers = before.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
       const local = wrappers.find(value => value.stage?.startsWith('partition:') && value.stage.endsWith(':elaboration') && JSON.parse(readEvidence(f.input.source.commonDir, value.resultRef).toString()).changes.some((change: { nodeId: string }) => change.nodeId === badOwner.nodeId))
       if (['readset', 'selection', 'non-null-selection', 'foreign', 'policy'].includes(mode)) {
@@ -1865,6 +1894,16 @@ for (const mode of ['existing', 'new-leaf', 'aggregate-only', 'wrong-ref', 'unaf
     const failed = recordFailure(fence, issue)
     if (before.number === 1) {
       const saved = f.store.readAttempt(fence.attemptId); immutable = { refs: saved.checkpointRefs, failure: saved.failure }
+      if (mode === 'review-resume' && issue.code === 'generation_failed') {
+        const operation = f.store.readOperation(f.operation.id), cloned = claim({ operationId: operation.id, source: operation.input.source, scope: operation.scope, leaseMs: 30000, expectedRevision: operation.revision, continuation: true })
+        const wrapper = before.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(value => value.stage === 'generation')
+        const generated = JSON.parse(readEvidence(f.input.source.commonDir, wrapper.resultRef).toString())
+        const repair = { repairContext: { previousOutput: generated.output, diagnostics: [{ code: issue.code, message: issue.message }, ...generated.validationFindings.map((item: { code: string; message: string }) => ({ code: item.code, message: item.message })), ...generated.review.findings.map((item: { kind: string }) => ({ code: item.kind, message: JSON.stringify(item) }))] } }
+        const resultRef = writeEvidence(f.input.source.commonDir, repair); f.store.checkpoint(cloned.fence, resultRef)
+        f.store.checkpoint(cloned.fence, writeEvidence(f.input.source.commonDir, { ...wrapper, attemptId: cloned.attempt.id, stage: 'repair-input', resultRef }))
+        f.store.requestControl(operation.id, 'pause')
+        f.store.requestControl(operation.id, 'run')
+      }
       if (aggregateOnly && issue.code === 'generation_failed') {
         const operation = f.store.readOperation(f.operation.id), cloned = claim({ operationId: operation.id, source: operation.input.source, scope: operation.scope, leaseMs: 30000, expectedRevision: operation.revision, continuation: true })
         const wrappers = before.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
@@ -1878,28 +1917,37 @@ for (const mode of ['existing', 'new-leaf', 'aggregate-only', 'wrong-ref', 'unaf
     }
     return failed
   }
-  f.store.claimQueuedAttempt = input => { if (f.store.listAttempts(f.operation.id).length >= (aggregateOnly ? 4 : 3)) throw new Error('fixture仅阻止旧实现无限零调用热循环'); return claim(input) }
+  f.store.claimQueuedAttempt = input => { if (f.store.listAttempts(f.operation.id).length >= (aggregateOnly || mode === 'review-resume' ? 4 : 3)) throw new Error('fixture仅阻止旧实现无限零调用热循环'); return claim(input) }
   const result = await runSyncOperation(f.store, f.operation.id, f.options)
   if (negative) { assert.equal(finalReview, false); assert.equal(f.store.listAttempts(f.operation.id).length, 2); assert.equal(ownerCalls.filter(call => call.attempt > 1).length, 0); assert.notEqual(result.failure?.kind, 'repairable', JSON.stringify(result.failure)); assert.ok(['failed', 'unsupported'].includes(result.status), JSON.stringify(result.failure)); return }
   assert.ok(finalReview, JSON.stringify({ failure: result.failure, calls: ownerCalls, failures: f.store.listAttempts(f.operation.id).map(attempt => attempt.failure) }))
-  const second = aggregateOnly ? 3 : 2
-  assert.deepEqual(ownerCalls.filter(call => call.attempt > 1).map(({ attempt, purpose }) => [attempt, purpose]), [[second, 'elaboration_generate'], [second, 'elaboration_review'], [second + 1, 'elaboration_generate'], [second + 1, 'elaboration_review']])
+  const second = aggregateOnly || mode === 'review-resume' ? 3 : 2
+  for (const owner of badOwners) assert.deepEqual(ownerCalls.filter(call => call.attempt > 1 && call.nodeId === owner.nodeId).map(({ attempt, purpose }) => [attempt, purpose]), mode === 'review-p1-fail' && owner !== badOwner ? [[second, 'elaboration_generate'], [second, 'elaboration_review']] : [[second, 'elaboration_generate'], [second, 'elaboration_review'], [second + 1, 'elaboration_generate'], [second + 1, 'elaboration_review']])
   const attempts = f.store.listAttempts(f.operation.id)
   const stages = attempts.map(attempt => attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())))
   for (const source of stages[0].filter(stage => stage.stage?.startsWith('partition:') && stage.stage.endsWith(':elaboration'))) {
     const prior = JSON.parse(readEvidence(f.input.source.commonDir, source.resultRef).toString()) as ElaborationResult
-    if (prior.changes.some(change => change.nodeId === badOwner.nodeId)) continue
+    if (prior.changes.some(change => badOwners.some(owner => owner.nodeId === change.nodeId))) continue
     for (const current of stages.slice(second - 1)) assert.deepEqual(current.find(stage => stage.stage === source.stage).resultRef, source.resultRef)
   }
-  const generations = stages.map(values => JSON.parse(readEvidence(f.input.source.commonDir, values.find(stage => stage.stage === 'generation').resultRef).toString()))
-  assert.ok(generations.every(value => Array.isArray(value.p2SpecWritePaths) && value.p2SpecWritePaths.length === 0), 'Spec-only权限由宿主dispatch投影为空，不能借用P2 writer')
-  assert.ok(generations[0].validationFindings.some((finding: { code: string }) => finding.code === 'anchor-dead'))
-  assert.ok(generations[second - 1].validationFindings.some((finding: { code: string }) => finding.code === 'anchor-dead'), 'agent实际修过但未修好仍可下一轮')
+  if (mode === 'review-p1-fail') {
+    const owner = stages[1].find(stage => stage.stage?.startsWith('partition:') && stage.stage.endsWith(':elaboration') && JSON.parse(readEvidence(f.input.source.commonDir, stage.resultRef).toString()).changes.some((change: { nodeId: string }) => change.nodeId === badOwners[0].nodeId))
+    assert.ok(owner)
+    assert.deepEqual(stages[2].find(stage => stage.stage === owner.stage).resultRef, owner.resultRef, '兄弟P1失败不丢弃本轮已新独审owner')
+  }
+  const generations = stages.map(values => { const saved = values.find(stage => stage.stage === 'generation'); return saved ? JSON.parse(readEvidence(f.input.source.commonDir, saved.resultRef).toString()) : null })
+  assert.ok(generations.filter(Boolean).every(value => Array.isArray(value.p2SpecWritePaths) && value.p2SpecWritePaths.length === 0), 'Spec-only权限由宿主dispatch投影为空，不能借用P2 writer')
+  if (semantic) {
+    for (const generated of [generations[0], generations[second - 1]].filter(Boolean)) { assert.equal(generated.candidateValidated, true); assert.ok(generated.partitionEvidence.some((evidence: { review: { verdict: string } }) => evidence.review.verdict === 'repair')) }
+  } else {
+    assert.ok(generations[0].validationFindings.some((finding: { code: string }) => finding.code === 'anchor-dead'))
+    assert.ok(generations[second - 1].validationFindings.some((finding: { code: string }) => finding.code === 'anchor-dead'), 'agent实际修过但未修好仍可下一轮')
+  }
   assert.equal(generations.at(-1).candidateValidated, true, '完整候选真实V1重跑通过')
   assert.deepEqual(readTree(f.input.source.commonDir, generations.at(-1).candidate.tree).filter(entry => !entry.path.startsWith('.spec/')), snapshotObjects)
   assert.deepEqual(f.store.readAttempt(attempts[0].id).checkpointRefs, immutable!.refs); assert.deepEqual(f.store.readAttempt(attempts[0].id).failure, immutable!.failure)
   assert.ok(result.operation.baselineSelection!.bindings.length > f.operation.baselineSelection!.bindings.length, '覆盖P1 expandContractScope的null资源扩展')
-  if (aggregateOnly) { assert.equal(attempts[1].dispatchPlans.length, 0); assert.equal(stages[1].some(stage => stage.stage?.startsWith('partition:') && stage.stage.endsWith(':elaboration')), false, '历史attempt只有aggregate引用') }
+  if (aggregateOnly || mode === 'review-resume') { assert.equal(attempts[1].dispatchPlans.length, 0); assert.equal(stages[1].some(stage => stage.stage?.startsWith('partition:') && stage.stage.endsWith(':elaboration')), false, '历史attempt只有aggregate引用') }
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
   assert.equal(result.operation.deadlineAtMs, null); assert.deepEqual(result.operation.budget, { mode: 'unlimited' })
   assert.equal(f.store.listJournals(f.operation.id).length, 0)
