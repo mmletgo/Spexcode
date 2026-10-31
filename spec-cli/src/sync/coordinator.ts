@@ -538,14 +538,20 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           return null
         },
         loadElaborationRepairSeed: (key, binding, inputDigest) => {
-          const prior = store.listAttempts(operation.id).filter(item => item.number < attempt!.number).at(-1)
-          if (!prior || !['failed', 'superseded', 'settled'].includes(prior.status) || prior.failure?.kind !== 'repairable') return null
-          const source = partitionElaborationStage(store, operation, prior, key, binding, inputDigest)
-          if (!source || source.result.phase === 'partitioned_final' || source.result.status !== 'exhausted' || source.result.reviewPassed) return null
-          const seed = elaborationRepairSeed(source.result, `sync:${prior.id}:elaborate:partition:${binding.partitionId}`)
-          if (!seed) return null
-          saveStage(store, fence!, `${key}:repair-provenance`, { fromOperationId: operation.id, fromAttemptId: prior.id, resultRef: source.resultRef, candidateDigest: seed.candidateDigest })
-          return seed
+          for (const prior of store.listAttempts(operation.id).filter(item => item.number < attempt!.number).reverse()) {
+            if (!['failed', 'superseded', 'settled'].includes(prior.status) || prior.failure?.kind !== 'repairable') return null
+            const source = partitionElaborationStage(store, operation, prior, key, binding, inputDigest)
+            if (!source || source.result.phase === 'partitioned_final' || source.result.reviewPassed) return null
+            const saved = source.result
+            if (saved.status === 'failed' && saved.candidateDigest === null && saved.rounds.length === 1
+              && saved.rounds.every(round => round.output === null && round.candidate === null && round.candidateDigest === null && !round.findings.length && round.reviewOutput === null && round.review === null && !round.traces.length)) continue
+            if (saved.status !== 'exhausted') return null
+            const seed = elaborationRepairSeed(saved, `sync:${prior.id}:elaborate:partition:${binding.partitionId}`)
+            if (!seed) return null
+            saveStage(store, fence!, `${key}:repair-provenance`, { fromOperationId: operation.id, fromAttemptId: prior.id, resultRef: source.resultRef, candidateDigest: seed.candidateDigest })
+            return seed
+          }
+          return null
         },
         save: (key, value) => saveStage(store, fence!, key, value, !operation.baselineSelection && (key.startsWith('partition:') || key === 'partition-plan') ? { readSetDigest: operation.readSetDigest } : undefined),
       }
