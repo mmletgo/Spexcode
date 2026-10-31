@@ -25,6 +25,8 @@ related:
 
 使用现有只读 reader 的 legacy MCP，唯一 allowlist 为 `mcp__frozen__spex_read_frozen`。create 显式绑定 workspace、provider/model、immediate persistence 和关闭标题生成；runtime preferences 全关闭。仅一次 send，固定 session/input/query 身份；ACK 不是 turn 终态。每次实际 ModelRequest 必须精确 provider/model、toolCount1。未知或认证 server request 一律拒绝，不读取其参数或保存传输头。
 
+固定公开 builtin 中 GLM-5.3-Flash 继承 `low/high/max`；只对 `bigmodel-api/GLM-5.3-Flash` 接受显式 high。create 同时固定 `model.options.reasoningLevel: high` 与顶层 `thoughtLevel: high`；原生 provider 映射为 `thinking.type: enabled`、`output_config.effort: high`。原生 selection 进入 plan 与固定请求摘要。send 前用真实 session/read 核 `settings.model.current.options.reasoningLevel`、`settings.thoughtLevel.current` 都为 high，且 available 的 value 包含 high；session.model 只用于基础 provider/model 身份，不能假定它回显 options。已确认同 session 创建后立即持久身份，模型不符仍走该 session 的正式 close，不发送。其它 effort 或未证模型组合明确 unsupported，不忽略、不换模型。
+
 原始 session/messages 的 core info 与 parts、原始 turn lifecycle / tool.updated / 含 toolCount 的 ModelRequest 安全事件构成原生见证；不以 ledger 补写 native arguments。transport 及未知事件只保存类型计数，不保存 payload 或 headers。原生工具、消息、输入、模型和 MCP ledger 必须由专用证明模块严格绑定。
 
 终态仅接受本轮 success，响应可以是直接 JSON 或一个完整、精确的外层 `json` Markdown fence。decoder 只移除该单一外壳，正文仍使用 JSON.parse 和原 Ajv schema；不得修补 JSON、接受解释文字或多段输出。规范 JSON 结果绑定原始终态响应与完整见证。

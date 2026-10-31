@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { processStartToken, writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
 import { freezeContext } from './frozen-context.js'
 import { structuredExecutionPolicy } from './session-structured-policy.js'
-import { decodeZCodeStructuredText, stopZCodeStructuredTurn, zcodeCapability, zcodeNativeModel, zcodeProofEvent, zcodeRuntimeConfiguration, zcodeStructuredTurn, type ZCodeStructuredExecution } from './zcode-structured.js'
+import { assertZCodeModelSnapshot, decodeZCodeStructuredText, stopZCodeStructuredTurn, zcodeCapability, zcodeNativeModel, zcodeNativeSelection, zcodeProofEvent, zcodeRuntimeConfiguration, zcodeStructuredTurn, type ZCodeStructuredExecution } from './zcode-structured.js'
 
 test('ZCode namespace requires both exact provider and model', () => {
   assert.deepEqual(zcodeNativeModel('zcode:bigmodel-api/GLM-5.3-Flash'), { providerId: 'bigmodel-api', modelId: 'GLM-5.3-Flash' })
@@ -19,6 +19,23 @@ test('ZCode text transport only unwraps one exact JSON shell without repairing d
   const output = { value: '中文\n原文', list: [1, 2] }
   for (const raw of [JSON.stringify(output), ` \n\`\`\`json\n${JSON.stringify(output)}\n\`\`\`\n`]) assert.deepEqual(decodeZCodeStructuredText(raw), output)
   for (const raw of ['answer: {"value":1}', '```JSON\n{}\n```', '```json\n{}\n```\n```json\n{}\n```', '{} {}', '```json\n{"value":}\n```', '```json\n{}\n```\nprose']) assert.throws(() => decodeZCodeStructuredText(raw))
+})
+
+test('verified GLM high effort uses both native fields and requires the real settings selection', () => {
+  const selection = zcodeNativeSelection('zcode:bigmodel-api/GLM-5.3-Flash', 'high')
+  assert.deepEqual(selection, { model: { providerId: 'bigmodel-api', modelId: 'GLM-5.3-Flash', options: { reasoningLevel: 'high' } }, thoughtLevel: 'high' })
+  assert.deepEqual(zcodeNativeSelection('zcode:bigmodel-api/GLM-5.3-Flash'), { model: zcodeNativeModel('zcode:bigmodel-api/GLM-5.3-Flash') })
+  for (const effort of ['minimal', 'low', 'medium', 'xhigh'] as const) assert.throws(() => zcodeNativeSelection('zcode:bigmodel-api/GLM-5.3-Flash', effort), { code: 'unsupported' })
+  assert.throws(() => zcodeNativeSelection('zcode:other/GLM-5.3-Flash', 'high'), { code: 'unsupported' })
+  const snapshot = { session: { sessionId: 'session', model: zcodeNativeModel('zcode:bigmodel-api/GLM-5.3-Flash') }, settings: { model: { current: selection.model, available: ['unrelated display metadata'] }, thoughtLevel: { current: 'high', available: [{ label: 'high', value: 'high' }], defaultLevel: 'max', enabled: true } } }
+  assert.doesNotThrow(() => assertZCodeModelSnapshot(snapshot, selection))
+  for (const corrupt of [
+    () => ({ ...snapshot, settings: { ...snapshot.settings, model: { current: { ...selection.model, options: { reasoningLevel: 'max' } } } } }),
+    () => ({ ...snapshot, settings: { ...snapshot.settings, model: { current: { providerId: 'other', modelId: selection.model.modelId, options: selection.model.options } } } }),
+    () => ({ ...snapshot, settings: { ...snapshot.settings, model: { current: { ...selection.model, options: { ...selection.model.options, unknownCapability: true } } } } }),
+    () => ({ ...snapshot, settings: { ...snapshot.settings, thoughtLevel: { ...snapshot.settings.thoughtLevel, current: 'max' } } }),
+    () => ({ ...snapshot, settings: { ...snapshot.settings, thoughtLevel: { ...snapshot.settings.thoughtLevel, available: [] } } }),
+  ]) assert.throws(() => assertZCodeModelSnapshot(corrupt(), selection), { code: 'unsupported' })
 })
 
 test('safe event projection keeps the original proof object and never reads transport headers', () => {
@@ -60,7 +77,7 @@ test('cold ZCode cancellation verifies the original group and null-token MCP thr
     const policy = { ...structuredExecutionPolicy({ schema: { type: 'object' }, inputDigest: 'input', purpose: 'stop', timeoutMs: 1000, model: 'zcode:bigmodel-api/GLM-5.3-Flash', frozenContext: ref }), version: 4 as const, policy: 'zcode-frozen-read-only-v1' as const, frozenReadProof: undefined }
     const native = { version: 1 as const, root, sessionId: 'session', inputId: 'input', pid: child.pid, receiptFile }
     const execution: ZCodeStructuredExecution = { ...policy, zcodeNative: native, turnStartRequested: true }
-    const plan = { ...native, policyDigest: hash(policy), requestDigest: hash({ prompt: 'fixed prompt', policy }), cliVersion: zcodeCapability.cliVersion, cliSha256: zcodeCapability.cliSha256, builtinSha256: zcodeCapability.builtinSha256, model: zcodeNativeModel(execution.model), runtime, receiptFile }
+    const plan = { ...native, policyDigest: hash(policy), requestDigest: hash({ prompt: 'fixed prompt', policy, selection: zcodeNativeSelection(execution.model) }), cliVersion: zcodeCapability.cliVersion, cliSha256: zcodeCapability.cliSha256, builtinSha256: zcodeCapability.builtinSha256, model: zcodeNativeModel(execution.model), runtime, receiptFile }
     writeFileSync(join(root, 'plan.json'), JSON.stringify(plan))
     const readerStart = processStartToken(reader.pid)
     assert(readerStart)
