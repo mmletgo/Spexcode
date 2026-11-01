@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+ZCode v16 marker 回归保存真实 SQLite 中旧 operation/attempt/resource/ingress/journal/receipt/pair 的逐字节行，核 v1–v15 checksum 不变、升级前一致备份可由 v15 打开、旧 writer 在新库拒绝及重入迁移幂等；不以模拟 receipt 表示产品 Git 交付已通过。
+
 受控用户请求回归证明：同一实际来源快照上的不同用户编辑语义不被错误归并，仅来源requestId不同则归并原预算；同键改变请求拒绝，原来源字节不改，请求证据被 GC pin 保留。真实 v2 数据库备份升级至 v3 后，无额外请求的旧事件仍命中相同 operation/payload，备份保留 v2 与原消息。
 
 覆盖 [[sync-store]] 与 [[sync-migrations]] 的数据库边界：重复输入/capture时间回放只一operation一message；同key不同payload拒绝；claim与exact FIFO dequeue及所有租约同事务；共享path/规则冲突、独立范围并行、释放后generation不归零；独立原生dispatch预算及稳定创建键；过期fence、物理树重建失权；actual diff和V1至V4绑定门禁；取消前无journal、写入中待receipt结算、取消后保留receipt；receipt登记后重启幂等结算；partial保留needs_input；成对源/交付基线；GC pin；旧库online backup可恢复、失败DDL事务回滚、未知高版本拒写。

@@ -21,3 +21,5 @@
 - 快照/候选针对验证：`npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/sync/snapshot-candidate.test.ts`；build 后 `npm run typecheck`、`npx eslint spec-cli/src/sync/{snapshot,composition,candidate,snapshot-candidate.test}.ts`。
 
 - 模型选择冻结于 operation：新操作缺少显式选择或既有绑定时取版本化 `sync.model`，再缺省 sol；旧 operation 缺字段仍固定 sol。换模型只经显式 retryOf；非默认运行描述用 sync-tools-v2，v13组件marker使旧writer在所有入口拒绝；回滚须停writer/结算资源并恢复升级前DB备份，不能删marker或只改工具描述，resume/recover不换模型。
+
+- ZCode模型使用 `zcode:<provider-id>/<exact-model-id>`，复用结构化队列与资源桥，独立v4只读策略及原生证明；v16 writer marker拒绝旧执行器，换provider仍须新操作/正式retryOf，不自动fallback。

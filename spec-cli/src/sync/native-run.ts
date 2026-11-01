@@ -6,7 +6,9 @@ import { readRecord, type SessRec } from '../session-record.js'
 import { sessionIdForCreateKey, readSessionCreateTermination, recoverSessionCreateTermination, type SessionCreateTermination } from '../sessions.js'
 import { cancelStructuredSession, runStructuredSession, SettledSessionCreateTimeoutError, StructuredSessionError, type StructuredCancellationResult } from '../session-structured.js'
 import { prepareFrozenReaderRuntime, structuredExecutionPolicy, type FrozenReaderRuntime, type StructuredExecution } from '../session-structured-policy.js'
-import { assertFrozenBinding, prepareFrozenPrompt, verifyFrozenReadProof } from '../frozen-context.js'
+import { assertFrozenBinding, prepareFrozenPrompt } from '../frozen-context.js'
+import { verifyStructuredFrozenReadProof as verifyFrozenReadProof } from '../structured-frozen-proof.js'
+import { zcodeNativeModel } from '../zcode-structured.js'
 import type { ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult } from './elaboration-types.js'
 import { SyncStoreError, type SyncStore } from './store.js'
 import type { BlobRef, NativeSessionRef, SyncResourcePhase, WriteFence } from './operation-types.js'
@@ -76,6 +78,10 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
       if (request.frozenContext) {
         if (!result.frozenReadProof) throw new StructuredSessionError('stale_result', 'native frozen result has no real history coverage evidence')
         if (execution.version === 3 && (result.frozenReadProof.version !== 3 || result.frozenReadProof.model !== request.model?.slice(7))) throw new StructuredSessionError('stale_result', 'Claude result lacks its exact native provider/model proof')
+        if (execution.version === 4) {
+          const model = zcodeNativeModel(request.model)
+          if (result.frozenReadProof.version !== 4 || result.frozenReadProof.providerId !== model.providerId || result.frozenReadProof.modelId !== model.modelId) throw new StructuredSessionError('stale_result', 'ZCode result lacks its exact native provider/model proof')
+        }
         verifyFrozenReadProof(request.frozenContext, result.frozenReadProof, { threadId: result.threadId, turnId: result.turnId }, request.readerRuntime?.version === 2 ? request.readerRuntime.toolOutputTokenLimit : undefined, { output: result.output })
       }
     }
@@ -217,7 +223,7 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
     const resource = store.findResource(fence.attemptId, value.requestKey)
     const exactResourceRequest = resource?.plan.payloadDigest === hash(value)
     let frozen: FrozenRequest = exactResourceRequest ? copy(value) : prepareFrozenPrompt(copy(value), { directory: join(runtimeRoot(), 'frozen-context-v2'), binding: { attemptId: fence.attemptId, policyDigest: operation.policyDigest } })
-    if (!exactResourceRequest && frozen.frozenContext && !options.runtime && !frozen.model?.startsWith('claude:')) frozen = { ...frozen, readerRuntime: await prepareFrozenReaderRuntime(join(runtimeRoot(), 'structured-frozen-read-only-v2'), frozen.frozenContext) }
+    if (!exactResourceRequest && frozen.frozenContext && !options.runtime && !frozen.model?.startsWith('claude:') && !frozen.model?.startsWith('zcode:')) frozen = { ...frozen, readerRuntime: await prepareFrozenReaderRuntime(join(runtimeRoot(), 'structured-frozen-read-only-v2'), frozen.frozenContext) }
     const requestDigest = hash(frozen)
     let flight = flights.get(frozen.requestKey)
     if (flight && flight.digest !== requestDigest) throw new StructuredSessionError('key_reused', 'native request key was reused with different bytes')

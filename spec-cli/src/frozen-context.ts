@@ -18,7 +18,7 @@ export type FrozenEntryJson = { id: string; label: string; required?: boolean } 
 export type FrozenReadArguments = { contextDigest: string; entryId: string; startByte: number; endByte: number }
 export type FrozenReadReceipt = { threadId: string; turnId: string; callId: string; arguments: FrozenReadArguments; responseDigest: string }
 type FrozenCoverageProof = { contextDigest: string; threadId: string; turnId: string; receipts: FrozenReadReceipt[]; coveredEntryIds: string[]; historyDigest: string }
-export type FrozenReadProof = FrozenCoverageProof & ({ version?: never } | { version: 2; visibilityDigest: string; toolOutputTokenLimit: number } | { version: 3; provider: 'claude-code'; promptId: string; model: string; cliVersion: string; maxReadBytes: 65536; maxResultSizeChars: 500000 })
+export type FrozenReadProof = FrozenCoverageProof & ({ version?: never } | { version: 2; visibilityDigest: string; toolOutputTokenLimit: number } | { version: 3; provider: 'claude-code'; promptId: string; model: string; cliVersion: string; maxReadBytes: 65536; maxResultSizeChars: 500000 } | { version: 4; provider: 'zcode'; providerId: string; modelId: string; cliVersion: string; cliSha256: string; inputId: string; promptDigest: string; witnessDigest: string })
 type ClaudePublicContentBlock = { type: string; id?: string; name?: string; input?: unknown; tool_use_id?: string; content?: string | Array<{ type: string; text: string }>; text?: string; is_error?: boolean }
 export type ClaudePublicMessage = { role: string; content: string | ClaudePublicContentBlock[] }
 const CLAUDE_TRUNCATED_RECOVERY_TEXT = 'Your response above was cut off mid-stream. Resume directly from where it stops — no apology, no recap. If none of it survived, answer the request from the start.'
@@ -107,11 +107,12 @@ export function prepareFrozenPrompt<T extends { root: string; prompt: string; re
   const declared = request.frozenEntries ?? []
   const promptBytes = Buffer.byteLength(request.prompt, 'utf8')
   const claude = request.model?.startsWith('claude:') === true
-  if (!claude && declared.length === 0 && promptBytes <= FROZEN_PROMPT_THRESHOLD_BYTES) return request
+  const zcode = request.model?.startsWith('zcode:') === true
+  if (!claude && !zcode && declared.length === 0 && promptBytes <= FROZEN_PROMPT_THRESHOLD_BYTES) return request
   const entries = frozenEntryInputs(declared)
-  if (claude || promptBytes > FROZEN_PROMPT_THRESHOLD_BYTES) entries.unshift({ id: 'task', label: 'Complete original task and frozen context', kind: 'utf8', bytes: Buffer.from(request.prompt, 'utf8'), required: true })
+  if (claude || zcode || promptBytes > FROZEN_PROMPT_THRESHOLD_BYTES) entries.unshift({ id: 'task', label: 'Complete original task and frozen context', kind: 'utf8', bytes: Buffer.from(request.prompt, 'utf8'), required: true })
   const frozenContext = freezeContext({ directory: options.directory, sourceRoot: request.root, binding, entries })
-  const prompt = claude ? `Read every required frozen entry completely using mcp__frozen__spex_read_frozen. Entry task contains the original instructions. Follow those instructions after reading. Each call reads at most 65536 original bytes; continue from original endByte, never decodedEndByte. Do not use files, shell, discovery, subagents, or other tools. Return the requested structured answer through StructuredOutput.\n${claudeFrozenContextPrompt(frozenContext)}` : promptBytes > FROZEN_PROMPT_THRESHOLD_BYTES
+  const prompt = zcode ? `Read every required frozen entry completely using mcp__frozen__spex_read_frozen. Entry task contains the original instructions. Follow those instructions after reading. Each call reads at most 4096 original bytes; continue from original endByte, never decodedEndByte. Do not use files, shell, discovery, subagents, or other tools. Return only the requested JSON object, without prose or Markdown.\n${directFrozenContextPrompt(frozenContext, 4096)}` : claude ? `Read every required frozen entry completely using mcp__frozen__spex_read_frozen. Entry task contains the original instructions. Follow those instructions after reading. Each call reads at most 65536 original bytes; continue from original endByte, never decodedEndByte. Do not use files, shell, discovery, subagents, or other tools. Return the requested structured answer through StructuredOutput.\n${claudeFrozenContextPrompt(frozenContext)}` : promptBytes > FROZEN_PROMPT_THRESHOLD_BYTES
     ? `The complete original task, instructions, and context are frozen without truncation in entry task. Read its entire required content using ${FROZEN_READ_TOOL}, then follow that original task and return its requested structured final answer. Byte offsets are end-exclusive; continue from the response's original endByte, never decodedEndByte. No shell, paths or live data are available.\n${frozenContextPrompt(frozenContext)}`
     : `${request.prompt}\n${frozenContextPrompt(frozenContext)}`
   const { frozenEntries: _entries, ...rest } = request
@@ -214,10 +215,15 @@ export function frozenContextPrompt(ref: FrozenContextRef): string {
 
 /** Claude直接调用同一reader；字符上限独立于Codex的exec与token证明。 */
 export function claudeFrozenContextPrompt(ref: FrozenContextRef): string {
+  return directFrozenContextPrompt(ref, 65536, 500000)
+}
+
+/** 直接MCP执行器共用冻结索引，保留各自已经验证的单次读取上限。 */
+function directFrozenContextPrompt(ref: FrozenContextRef, maxReadBytes: number, maxResultSizeChars?: number): string {
   const manifest = readFrozenManifest(ref)
-  return JSON.stringify({ tool: 'mcp__frozen__spex_read_frozen', contextDigest: ref.contextDigest, maxReadBytes: 65536, maxResultSizeChars: 500000,
-    rangeRule: 'Copy each planned startByte/endByte exactly. 65536 is only a maximum span, never the end of a shorter entry. Never exceed entry.byteLength.',
-    entries: manifest.entries, readBatches: frozenReadBatches(ref, manifest.entries, 0, 65536) })
+  return JSON.stringify({ tool: 'mcp__frozen__spex_read_frozen', contextDigest: ref.contextDigest, maxReadBytes, ...(maxResultSizeChars === undefined ? {} : { maxResultSizeChars }),
+    rangeRule: `Copy each planned startByte/endByte exactly. ${maxReadBytes} is only a maximum span, never the end of a shorter entry. Never exceed entry.byteLength.`,
+    entries: manifest.entries, readBatches: frozenReadBatches(ref, manifest.entries, 0, maxReadBytes) })
 }
 
 /** 按冻结清单的真实元数据和最坏 JSON 转义，界定单个模型可见 inputText 的固定预算。 */
@@ -778,6 +784,7 @@ export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFro
 
 /** 已结算资源重放核验保存的原生历史全文和同一逻辑覆盖，不再派发工具。 */
 export function verifyFrozenReadProof(ref: FrozenContextRef, proof: FrozenReadProof, identity: { threadId: string; turnId: string }, toolOutputTokenLimit?: number, result?: { output: unknown }): void {
+  if (proof.version === 4) stale('ZCode frozen proof requires its native provider verifier')
   if (proof.contextDigest !== ref.contextDigest || proof.threadId !== identity.threadId || proof.turnId !== identity.turnId || !/^[a-f0-9]{64}$/.test(proof.historyDigest)) stale('frozen coverage evidence differs from its exact context/thread/turn')
   if (toolOutputTokenLimit !== undefined && (proof.version !== 2 || proof.toolOutputTokenLimit !== toolOutputTokenLimit)) stale('current frozen runtime requires its exact v2 model-visible proof')
   const history = readFileSync(join(dirname(ref.manifestPath), 'histories', proof.historyDigest))

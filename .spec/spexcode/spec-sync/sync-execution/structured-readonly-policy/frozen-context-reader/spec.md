@@ -20,6 +20,8 @@ related:
 
 ## expanded spec
 
+ZCode 版本4由 [[zcode-frozen-proof]] 从实际 session/messages core 的完整参数与结果、精确原始 user/input/turn、原生模型请求和终态重建证明，区间与正文算法仍共用本节点。独占 MCP 的真实公开账本在回复前持久，随后与原生工具逐项核对；账本不得补原生缺失 input。完整原生见证内容寻址绑定并供冷回放重新校验，不能把工作区 MCP 清单、模型文字或另一 turn 当作实际工具面/读取证明。
+
 明确 Claude provider 的读取使用 [[claude-frozen-mcp]]，原不可变 manifest/readFrozenRange 响应及 requested coverage 共用，单段保守最多65536原字节。首次 prompt 准备即生成该计划，不能先产生 Codex 的262144字节 exec 计划再由 MCP 拒绝。原 Codex 索引、response、history 与旧 hash 不改。
 
 固定 Claude CLI 的 `system/api_error` 仅在已核同一原生 producer 的 `request_retry` 或流式连接异常 `connection_retry`、error 级别、合法重试计数/延迟及原错误摘要完整时作为链节点保留；同 session、非 sidechain/agent、唯一 UUID 且直接衔接实际链尾（含附件与连续重试）。`connection_retry` 还必须从原 history 核其前后 actual API 的完整 params、shapeHash 与由原 base/keep/tail 重建的完整消息摘要列表完全相同，且重试后新请求被后续 assistant 以精确 requestRef 和当前父链实际消费；缺原请求、payload 变化、旧/未来请求借用、未消费及消费前新用户轮或压缩均拒绝。连续连接重试可沿同一原输入最终被消费，不授予额外正文权。该额外校验由唯一原 history 读取器供成功证明和失败来源索引复用，成功 proof 重新读取同一原件比对公开投影，不能用手造 witness 跳过完整 params 检查；params 摘要只留在本次读取内存，不增加公开 witness 字段。成功证明和失败专用来源索引共用该投影，错误正文不进入模型输入、receipt、coverage 或输出资格；未知来源、断链、fork 与新用户轮继续拒绝。原 `request_retry`、没有连接重试的既有公开历史及成功 proof 字节不变。

@@ -19,6 +19,8 @@ related:
 
 ## expanded spec
 
+明确 ZCode 命名空间进入 [[zcode-structured-runtime]]，复用现有 `zcode` harness 身份、同一创建事务、启动队列、资源桥与取消门禁，不进入普通 one-shot launcher 或 Codex generation。版本4固定策略和原生 `zcodeNative` 身份分别持久化；换 provider 仅新操作或合法 retryOf。最终文本可解码唯一完整的外层 JSON 代码围栏，正文仍由 JSON.parse 与原 object schema 严格校验，不补字段、拼接多段或接收额外说明。真实精确终态、[[zcode-frozen-proof]] 与全进程结算后才能发布；冷 completed 回放只读原证据，未知在途不追加 prompt。
+
 明确命名空间 `claude:<exact-native-model-id>` 选择 [[claude-structured-runtime]]，继续复用同一创建、排队、预算和结果接缝；无前缀或缺省 model 完全保持既有 Codex 策略、请求摘要和历史恢复。Claude 使用版本3 `claude-frozen-read-only-v1`，不进入 Codex generation ledger，不借用其 turn 或版本2证明。已冻结 operation 不能热切 provider，切换仅属于新 operation 或合法 retry 的新固定请求。
 
 `runStructuredSession` 接收冻结 prompt、object JSON schema、输入摘要、用途、请求键、超时和可选 model/effort，返回 sessionId、threadId、turnId、output 与结果摘要。输入树必须属于当前 backend 项目，可指定 base commit。生成和审查分别使用不同请求键与原生上下文；安全约束见 [[structured-readonly-policy]]。
