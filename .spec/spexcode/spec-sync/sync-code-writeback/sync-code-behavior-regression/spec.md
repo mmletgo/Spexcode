@@ -16,6 +16,8 @@ Spec分节格式以真实Git快照和精确byte/intent选择等价重放整份�
 
 真实Git分区仅Spec变化时，proposal混入可读源码/未来写目标应在新独审前以behavior_analysis_invalid拒绝并保存完整proposal和精确越界路径；同源码仍可在完整读取后作为本区facts与独审checkedPaths引用。旧v2/v3/v4及无指导版本accept不承接新v5输入，当前相同摘要仍可重放已审缓存。
 
+Native ID schema回归在真实Git old/current图上核验受影响ID为完整并集、去重且包含AC/VERIFY等所有既有item类型；ruleIds及AC提案ruleIds只枚举既有REQ/RULE/TR，空域使用maxItems:0且无空enum。raw-only空图的GAP/conflict仍可用空ID数组通过原分类门；未知ID被schema拒绝，分区路径/写权与后置AC来源授权仍按原门校验。Native schema只在新派发使用，旧合法v5 accepted缓存保持零调用复用。
+
 AC变化依据回归在真实Git中保留只读父规则与旧covers，证明未变只读来源在独审前携原完整proposal被拒；只读真实作者REQ/raw差量、只读规则业务变化和可写的旧AC闭包外新依据仍进入完整新独审，不扩写权或替P1批准最终来源链。
 
 真实 Git 的分区精确选择同时包含本区与区外真实 owner、尚未生成的 Spec 路径及未来 contract/flow null 基线，先复现 owner 全 null 时在首个派发前读取 path 崩溃，再证明分析和独审保留原 null residual 与 absent 路径证据、按真实 owner 排除区外正文。未来资源不成为既有契约或可读正文，写范围、原选择及组合证据、source/index/快照均保持；确定性 runner 只证明冻结投影与独审门禁，不代表真实 Native 或完整初始化交付。
