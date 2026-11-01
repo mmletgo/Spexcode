@@ -10,7 +10,9 @@ code:
 
 ## expanded spec
 
-分区 proposal.changes.paths 必须逐项属于该冻结 partition.changedPaths；可读 factSourcePaths、readPaths 与未来 writePaths 不等于实际变化。独审前按同一精确集合拒绝越界内容，以 behavior_analysis_invalid 保留 partitionId、expectedChangedPaths、invalidPaths 和完整原 proposal，沿既有按区 repairDiagnostics 反馈；不批准越界或新增权限。guidanceContractVersion v3 同时约束生成与独审并进入唯一输入摘要，旧v2/无版本accept不被新请求缓存承接。原后置 partition_binding 及 immutable plan/ref/digest/fence 门禁保持。
+分区 proposal.changes.paths 必须逐项属于该冻结 partition.changedPaths；可读 factSourcePaths、readPaths 与未来 writePaths 不等于实际变化。独审前按同一精确集合拒绝越界内容，以 behavior_analysis_invalid 保留 partitionId、expectedChangedPaths、invalidPaths 和完整原 proposal，沿既有按区 repairDiagnostics 反馈；不批准越界或新增权限。guidanceContractVersion v4 同时约束生成与独审并进入唯一输入摘要，旧v3及更早/无版本accept不被新请求缓存承接。原后置 partition_binding 及 immutable plan/ref/digest/fence 门禁保持。
+
+AC提案的每个变化依据若位于本区writePaths之外，且按 [[sync-contract-evolution]] 同一业务变化、REQ raw变化及精确作者差量判据在冻结旧/当前图中没有真实变化，则P1无权使其变化；独审前以behavior_analysis_invalid携带目标AC、该来源ID/owner/path及完整proposal，沿原分区修复诊断重新分析和独审，不继续以同一不可能授权反复细化。只读但已真实变化的来源、可写的未来依据（包括旧AC来源链外的新依据）仍由原P1和独审完整核验；不机械限制旧来源闭包，不扩写权、不静默过滤已审授权。未变covers义务继续保留，但不是AC变化授权；拒绝候选仅为诊断，不是用户意图。
 
 模型调用期限沿 [[structured-session-runtime]] 原样传递，明确 null 不装调用计时器；生成与独审、完整读取及各自业务门禁保持。
 

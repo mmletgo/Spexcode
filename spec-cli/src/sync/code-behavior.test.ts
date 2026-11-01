@@ -29,9 +29,11 @@ import { FROZEN_READ_MAX_BYTES, prepareFrozenPrompt, proveFrozenReads, readFroze
 
 const fixturePath = new URL('../../test/fixtures/spec-sync/export-repo/', import.meta.url)
 const git = (root: string, ...args: string[]): string => execFileSync('/usr/bin/git', ['-C', root, ...args], { encoding: 'utf8', stdio: 'pipe', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }).trim()
-async function fixture(t: test.TestContext, prepare?: (source: string) => string) {
+async function fixture(t: test.TestContext, prepare?: (source: string) => string, extraFiles: Readonly<Record<string, string>> = {}) {
   const parent = mkdtempSync(join(tmpdir(), 'sync-behavior-')), root = join(parent, 'source'), delivery = join(parent, 'delivery')
-  mkdirSync(root); cpSync(fixturePath, root, { recursive: true }); if (prepare) { const path = join(root, '.spec/export/export-contract/spec.md'); writeFileSync(path, prepare(readFileSync(path, 'utf8'))) } git(root, 'init', '-b', 'main'); git(root, 'config', 'user.name', 'behavior fixture'); git(root, 'config', 'user.email', 'fixture@example.invalid'); git(root, 'add', '.'); git(root, 'commit', '-m', 'base')
+  mkdirSync(root); cpSync(fixturePath, root, { recursive: true }); if (prepare) { const path = join(root, '.spec/export/export-contract/spec.md'); writeFileSync(path, prepare(readFileSync(path, 'utf8'))) }
+  for (const [path, text] of Object.entries(extraFiles)) { mkdirSync(join(root, path, '..'), { recursive: true }); writeFileSync(join(root, path), text) }
+  git(root, 'init', '-b', 'main'); git(root, 'config', 'user.name', 'behavior fixture'); git(root, 'config', 'user.email', 'fixture@example.invalid'); git(root, 'add', '.'); git(root, 'commit', '-m', 'base')
   git(root, 'switch', '-c', 'source'); git(root, 'worktree', 'add', '-b', 'delivery', delivery, 'HEAD')
   t.after(() => rmSync(parent, { recursive: true, force: true }))
   const base = await captureInputSnapshot(root), raw = readFileSync(join(root, '.spec/export/export-contract/spec.md'), 'utf8')
@@ -1207,7 +1209,7 @@ async function initialDiscovery(t: test.TestContext, raw: string) {
   return { f, input, model }
 }
 
-for (const previousVersion of [undefined, 'code-behavior-guidance-v2']) test(`指导合同版本进入唯一摘要，旧accept ${previousVersion} 不得被缓存承接`, async t => {
+for (const previousVersion of [undefined, 'code-behavior-guidance-v2', 'code-behavior-guidance-v3']) test(`指导合同版本进入唯一摘要，旧accept ${previousVersion} 不得被缓存承接`, async t => {
   const { f, input, model } = await initialDiscovery(t, '统计传入列表的条目数量，不修改列表；从现有模块生成治理叶及规格。')
   let context = ''
   const first = await analyzeCodeBehavior({ ...input, requestKey: 'old-guidance' }, async request => {
@@ -1225,7 +1227,7 @@ for (const previousVersion of [undefined, 'code-behavior-guidance-v2']) test(`�
     calls.push(request.purpose)
     if (process.env.SPEX_RAW_RESOLUTION_EVIDENCE_DIR) writeFileSync(join(process.env.SPEX_RAW_RESOLUTION_EVIDENCE_DIR, `guidance-current-${request.purpose}.prompt.txt`), request.prompt)
     const frozen = readFrozenBehaviorContext<{ guidanceContractVersion: string }>(request)
-    assert.equal(frozen.guidanceContractVersion, 'code-behavior-guidance-v3')
+    assert.equal(frozen.guidanceContractVersion, 'code-behavior-guidance-v4')
     const instructions = request.prompt.slice(0, request.prompt.indexOf('冻结三方输入:\n'))
     assert.match(instructions, /尚未生成.*治理叶.*待生成工作/)
     assert.match(instructions, /coverage_gap.*重大业务事实.*可观察后果/)
@@ -1680,6 +1682,39 @@ test('漏helper的accept具体拒绝并携完整前轮proposal与未批准analys
     assert.deepEqual(diagnostic.details.identityMismatch, ['inputDigest', 'analysisDigest']); assert.deepEqual(diagnostic.details.unknownChangeIds, ['unknown-change'])
     assert.equal(diagnostic.details.missingChangeIds.length, 2); assert.equal(diagnostic.approved, false); return true
   })
+})
+
+for (const mode of ['readonly-unchanged', 'readonly-author', 'readonly-business', 'writable-new-basis'] as const) test(`AC变化依据可行性 ${mode} 复用来源变化且不以旧AC闭包限制新依据`, async t => {
+  const parentPath = '.spec/export/spec.md'
+  const parent = `---\ntitle: 共享政策\ncontract-schema: sync-v1\n---\n## raw source\n\n共享数据政策，保留未选义务。\n\n## expanded spec\n\n### REQ\n\n| id | goal | source | constraints | success | depends-on |\n| --- | --- | --- | --- | --- | --- |\n| REQ-SHARED-01 | 共享数据约束 | user:raw | 保持字段 | 数据完整 | - |\n\n### RULE\n\n| id | scope | constraint | basis | authority | source | depends-on |\n| --- | --- | --- | --- | --- | --- | --- |\n| RULE-SHARED-01 | 共享字段 | 标题去首尾空白 | 原始要求 | export | user:raw | REQ-SHARED-01 |\n`
+  const f = await fixture(t, source => source.replace('| AC-EXPORT-01 | ', '| AC-EXPORT-01 | RULE-SHARED-01,'), { [parentPath]: parent })
+  writeFileSync(join(f.root, 'src/export.js'), `${f.source}\n// observable result detail\n`)
+  if (mode === 'readonly-author') writeFileSync(join(f.root, parentPath), parent.replace('共享数据政策，保留未选义务。', '共享数据政策，保留未选义务；标题最长128字符。'))
+  if (mode === 'readonly-business') writeFileSync(join(f.root, parentPath), parent.replace('标题去首尾空白 |', '标题去首尾空白且最长128字符 |'))
+  const input = await f.input()
+  input.plan.writePaths = ['src', '.spec/export/export-contract', 'tests']
+  const basis = mode === 'readonly-author' ? 'REQ-SHARED-01' : mode === 'writable-new-basis' ? 'RULE-EXPORT-06' : 'RULE-SHARED-01'
+  const calls: string[] = [], fake = runner('allowed_change', proposal => {
+    proposal.changes = (proposal.changes as Record<string, unknown>[]).map(change => ({ ...change, affectedIds: ['AC-EXPORT-01', basis], ruleIds: [basis] }))
+    proposal.acceptanceChanges = [{ id: 'AC-EXPORT-01', ruleIds: [basis], source: 'user:raw', reason: '只用本次实际变化依据，未变covers继续保留' }]
+  })
+  const run = () => analyzeCodeBehavior(input, request => { calls.push(request.purpose); return fake(request) })
+  if (mode === 'readonly-unchanged') {
+    await assert.rejects(run(), (error: Error & { code?: string }) => {
+      assert.equal(error.code, 'behavior_analysis_invalid')
+      const diagnostic = JSON.parse(error.message)
+      assert.deepEqual(diagnostic.details.unchangedReadonlyBasis, [{ id: basis, nodeId: 'export', path: parentPath }])
+      assert.deepEqual(diagnostic.proposal.acceptanceChanges[0].ruleIds, [basis])
+      assert.equal(diagnostic.review, undefined)
+      return true
+    })
+    assert.deepEqual(calls, ['code_behavior_analyze'], '不可实现的授权在独审/P1前拒绝')
+  } else {
+    const accepted = await run()
+    assert.equal(accepted.reviewPassed, true)
+    assert.deepEqual(calls, ['code_behavior_analyze', 'code_behavior_review'])
+    assert.deepEqual(accepted.authorizedChanges[0].action === 'update_acceptance' && accepted.authorizedChanges[0].ruleIds, [basis])
+  }
 })
 
 test('AC复合门禁逐项诊断未变规则与不绑定来源，不把多个allowed_change并集授权', async t => {

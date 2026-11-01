@@ -2285,14 +2285,14 @@ test('v2最终预算只列真实实现派发，纯父接口不产生虚构生成
   assert.equal(f.store.listJournals(f.operation.id).length, 0)
 })
 
-for (const mode of ['historical-aggregate', 'historical-v2-aggregate', 'current-aggregate', 'current-local', 'same-guidance', 'same-guidance-local'] as const) test(`v2指导缓存 ${mode} 正式pause恢复不把旧accept无ID gap直接复用`, async t => {
+for (const mode of ['historical-aggregate', 'historical-v2-aggregate', 'historical-v3-aggregate', 'current-aggregate', 'current-local', 'same-guidance', 'same-guidance-local'] as const) test(`v2指导缓存 ${mode} 正式pause恢复不把旧accept无ID gap直接复用`, async t => {
   const rawOnly = original.slice(0, original.indexOf('## expanded spec')).replace('contract-schema: sync-v1\n', '')
   const f = await fixture(t, { maxAttempts: 3, maxCalls: 20, maxRepairs: 2, timeoutMs: 120000 }, false, rawOnly, 'project', original, { version: 'sync-coordinator-v2', direction: 'code_to_spec', partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 }, sourcePaths: ['src'], commitTrigger: { before: null, paths: ['src/export.js'] } }, undefined, 'code')
   const same = mode.startsWith('same-guidance'), checkpoint = f.store.checkpoint.bind(f.store)
   f.store.checkpoint = (fence, ref) => {
     const value = JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())
     if (f.store.readAttempt(fence.attemptId).number === 1 && value.version === 'sync-stage-v1' && (value.stage === 'analysis' || value.stage?.endsWith(':analysis'))) {
-      if (mode.startsWith('historical-')) value.guidanceContractVersion = mode === 'historical-v2-aggregate' ? 'code-behavior-guidance-v2' : 'code-behavior-guidance-v1'
+      if (mode.startsWith('historical-')) value.guidanceContractVersion = mode === 'historical-v3-aggregate' ? 'code-behavior-guidance-v3' : mode === 'historical-v2-aggregate' ? 'code-behavior-guidance-v2' : 'code-behavior-guidance-v1'
       else if (mode === 'same-guidance' || mode === 'same-guidance-local' && value.stage !== 'analysis') value.guidanceContractVersion = CODE_BEHAVIOR_GUIDANCE_VERSION
       else delete value.guidanceContractVersion
       ref = writeEvidence(f.input.source.commonDir, value)
@@ -2363,16 +2363,17 @@ test('v2已审局部进度 正式pause恢复保留旧unsupported timeout历史�
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
 })
 
-for (const mode of ['analysis-live', 'analysis-two-accepted', 'analysis-restart', 'analysis-pause', 'analysis-settled-timeout', 'analysis-format', 'analysis-path', 'analysis-mixed', 'analysis-mixed-unsupported', 'analysis-mixed-pause', 'analysis-ref', 'analysis-plan', 'analysis-selection', 'analysis-readset', 'analysis-input', 'analysis-unreviewed', 'analysis-foreign'] as const) test(`v2已审局部进度 ${mode} 只重跑失败分析区`, async t => {
+for (const mode of ['analysis-live', 'analysis-two-accepted', 'analysis-restart', 'analysis-pause', 'analysis-settled-timeout', 'analysis-format', 'analysis-path', 'analysis-basis', 'analysis-mixed', 'analysis-mixed-unsupported', 'analysis-mixed-pause', 'analysis-ref', 'analysis-plan', 'analysis-selection', 'analysis-readset', 'analysis-input', 'analysis-unreviewed', 'analysis-foreign'] as const) test(`v2已审局部进度 ${mode} 只重跑失败分析区`, async t => {
   const otherPath = '.spec/project/beta/import-contract/spec.md'
-  const other = original.replaceAll('export-job', 'import-job').replaceAll('EXPORT', 'IMPORT').replaceAll('export-contract', 'import-contract').replaceAll('src/export.js', 'src/beta/import.js').replaceAll('tests/export.test.mjs', 'tests/import.test.mjs').replaceAll('decision:IMPORT-POLICY', 'decision:EXPORT-POLICY')
+  const other = original.replaceAll('export-job', 'import-job').replaceAll('EXPORT', 'IMPORT').replaceAll('export-contract', 'import-contract').replaceAll('src/export.js', 'src/beta/import.js').replaceAll('tests/export.test.mjs', 'tests/import.test.mjs').replaceAll('decision:IMPORT-POLICY', 'decision:EXPORT-POLICY').replace('| AC-IMPORT-01 | ', mode === 'analysis-basis' ? '| AC-IMPORT-01 | RULE-SHARED-01,' : '| AC-IMPORT-01 | ')
+  const sharedParent: Record<string, string> = mode === 'analysis-basis' ? { '.spec/project/spec.md': '---\ntitle: 共享政策\ncontract-schema: sync-v1\n---\n## raw source\n\n共享不变的字段规则。\n\n## expanded spec\n\n### RULE\n\n| id | scope | constraint | basis | authority | source | depends-on |\n| --- | --- | --- | --- | --- | --- | --- |\n| RULE-SHARED-01 | 共享字段 | 标题去首尾空白 | 原始要求 | project | user:raw | - |\n' } : {}
   const thirdPath = '.spec/project/gamma/archive-contract/spec.md'
   const third = original.replaceAll('export-job', 'archive-job').replaceAll('EXPORT', 'ARCHIVE').replaceAll('export-contract', 'archive-contract').replaceAll('src/export.js', 'src/gamma/archive.js').replaceAll('tests/export.test.mjs', 'tests/archive.test.mjs').replaceAll('decision:ARCHIVE-POLICY', 'decision:EXPORT-POLICY')
   const thirdFiles: Record<string, string> = ['analysis-two-accepted', 'analysis-mixed-pause'].includes(mode) ? { [thirdPath]: third, 'src/gamma/archive.js': readFileSync(new URL('src/export.js', fixturePath), 'utf8'), 'tests/archive.test.mjs': readFileSync(new URL('tests/export.test.mjs', fixturePath), 'utf8').replaceAll('EXPORT', 'ARCHIVE').replaceAll('src/export.js', 'src/gamma/archive.js') } : {}
   const f = await fixture(t, { maxAttempts: 2, maxCalls: 24, maxRepairs: 1, timeoutMs: 180000 }, false, original, 'project', original, {
     version: 'sync-coordinator-v2', direction: 'code_to_spec', targets: [{ nodeId: 'export-contract', path: contractPath }, { nodeId: 'import-contract', path: otherPath }, ...(['analysis-two-accepted', 'analysis-mixed-pause'].includes(mode) ? [{ nodeId: 'archive-contract', path: thirdPath }] : [])],
     partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: ['analysis-two-accepted', 'analysis-mixed-pause'].includes(mode) ? 3 : 2 }, sourcePaths: ['src'], commitTrigger: { before: null, paths: ['src/export.js', 'src/beta/import.js'] },
-  }, undefined, 'code', undefined, mode === 'analysis-selection', { ...thirdFiles, [otherPath]: other, 'src/beta/import.js': readFileSync(new URL('src/export.js', fixturePath), 'utf8'), 'tests/import.test.mjs': readFileSync(new URL('tests/export.test.mjs', fixturePath), 'utf8').replaceAll('EXPORT', 'IMPORT').replaceAll('src/export.js', 'src/beta/import.js') })
+  }, undefined, 'code', undefined, mode === 'analysis-selection', { ...thirdFiles, ...sharedParent, [otherPath]: other, 'src/beta/import.js': readFileSync(new URL('src/export.js', fixturePath), 'utf8'), 'tests/import.test.mjs': readFileSync(new URL('tests/export.test.mjs', fixturePath), 'utf8').replaceAll('EXPORT', 'IMPORT').replaceAll('src/export.js', 'src/beta/import.js') })
   let store = f.store
   const calls: { attempt: number; partition: string; purpose: string; diagnostics: unknown[] }[] = []
   f.transform(async (output, request) => {
@@ -2381,7 +2382,7 @@ for (const mode of ['analysis-live', 'analysis-two-accepted', 'analysis-restart'
       const context = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as { partition: { id: string }; changedPaths: string[]; repairDiagnostics: { message: string }[] }
       const imported = context.changedPaths.includes('src/beta/import.js'), archived = context.changedPaths.includes('src/gamma/archive.js'), rule = imported ? 'RULE-IMPORT-05' : archived ? 'RULE-ARCHIVE-05' : 'RULE-EXPORT-05'
       calls.push({ attempt: attempt.number, partition: archived ? 'archive' : imported ? 'import' : 'export', purpose: request.purpose, diagnostics: context.repairDiagnostics })
-      if (attempt.number === 2 && !imported && ['analysis-live', 'analysis-two-accepted', 'analysis-restart', 'analysis-pause', 'analysis-settled-timeout', 'analysis-format', 'analysis-path'].includes(mode)) assert.fail('已accept分析区不得重新派发')
+      if (attempt.number === 2 && !imported && ['analysis-live', 'analysis-two-accepted', 'analysis-restart', 'analysis-pause', 'analysis-settled-timeout', 'analysis-format', 'analysis-path', 'analysis-basis'].includes(mode)) assert.fail('已accept分析区不得重新派发')
       if (attempt.number === 2 && archived && mode === 'analysis-mixed-pause') assert.fail('已accept分析区不得重新派发')
       if (mode === 'analysis-format' && imported) {
         if (attempt.number === 1) {
@@ -2400,8 +2401,14 @@ for (const mode of ['analysis-live', 'analysis-two-accepted', 'analysis-restart'
         assert.equal(diagnostic.code, 'behavior_analysis_invalid')
         assert.deepEqual(JSON.parse(diagnostic.message).details.invalidPaths, ['tests/import.test.mjs'])
       }
+      if (mode === 'analysis-basis' && attempt.number === 2 && imported) {
+        const diagnostic = context.repairDiagnostics[0] as { code: string; message: string }
+        assert.equal(diagnostic.code, 'behavior_analysis_invalid')
+        assert.deepEqual(JSON.parse(diagnostic.message).details.unchangedReadonlyBasis, [{ id: 'RULE-SHARED-01', nodeId: 'project', path: '.spec/project/spec.md' }])
+      }
       if (request.purpose === 'code_behavior_analyze') {
         const changes = (output as { changes: { paths: string[] }[] }).changes.map(change => ({ ...change, affectedIds: [rule], ruleIds: [rule] }))
+        if (mode === 'analysis-basis' && attempt.number === 1 && imported) return { ...(output as object), changes: changes.map(change => ({ ...change, kind: 'allowed_change', affectedIds: ['AC-IMPORT-01'], ruleIds: [rule, 'RULE-SHARED-01'] })), acceptanceChanges: [{ id: 'AC-IMPORT-01', ruleIds: [rule, 'RULE-SHARED-01'], source: 'user:raw', reason: '错误地把未变只读父规则作为变化依据' }] }
         if (mode === 'analysis-path' && attempt.number === 1 && imported) changes[0].paths = [...changes[0].paths, 'tests/import.test.mjs']
         return { ...(output as object), changes }
       }
@@ -2432,7 +2439,7 @@ for (const mode of ['analysis-live', 'analysis-two-accepted', 'analysis-restart'
       if (mode === 'analysis-ref') accepted.traces[0].sessionId = 'foreign-session'
       if (mode === 'analysis-input') accepted.inputDigest = contentHash('changed-local-input')
       if (mode === 'analysis-unreviewed') accepted.reviewPassed = false
-      if (!['analysis-live', 'analysis-two-accepted', 'analysis-restart', 'analysis-pause', 'analysis-settled-timeout', 'analysis-format', 'analysis-path', 'analysis-mixed-pause'].includes(mode)) { local.resultRef = writeEvidence(f.input.source.commonDir, accepted); store.checkpoint(fence, local.resultRef); store.checkpoint(fence, writeEvidence(f.input.source.commonDir, local)) }
+      if (!['analysis-live', 'analysis-two-accepted', 'analysis-restart', 'analysis-pause', 'analysis-settled-timeout', 'analysis-format', 'analysis-path', 'analysis-basis', 'analysis-mixed-pause'].includes(mode)) { local.resultRef = writeEvidence(f.input.source.commonDir, accepted); store.checkpoint(fence, local.resultRef); store.checkpoint(fence, writeEvidence(f.input.source.commonDir, local)) }
       const result = recordFailure(fence, issue)
       if (mode === 'analysis-pause') {
         store.requestControl(f.operation.id, 'pause'); store.requestControl(f.operation.id, 'run')
@@ -2496,7 +2503,7 @@ for (const mode of ['analysis-live', 'analysis-two-accepted', 'analysis-restart'
   if (mode === 'analysis-foreign') { assert.equal(result.failure?.code, 'stage_binding'); return }
   assert.ok(f.calls.some(call => call.purpose === 'elaboration_generate'), JSON.stringify({ failure: result.failure, calls }))
   const stages = store.listAttempts(f.operation.id).map(attempt => attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())))
-  if (['analysis-live', 'analysis-two-accepted', 'analysis-restart', 'analysis-pause', 'analysis-settled-timeout', 'analysis-format', 'analysis-path'].includes(mode)) {
+  if (['analysis-live', 'analysis-two-accepted', 'analysis-restart', 'analysis-pause', 'analysis-settled-timeout', 'analysis-format', 'analysis-path', 'analysis-basis'].includes(mode)) {
     assert.equal(calls.filter(call => call.attempt === 2 && call.partition === 'export').length, 0)
     const acceptedStages = stages[0].filter(stage => stage.stage?.endsWith(':analysis'))
     assert.equal(acceptedStages.length, mode === 'analysis-two-accepted' ? 2 : 1)
@@ -2509,7 +2516,7 @@ for (const mode of ['analysis-live', 'analysis-two-accepted', 'analysis-restart'
   } else assert.equal(calls.filter(call => call.attempt === 2 && call.partition === 'export').length, 2)
   const resumedDiagnostics = calls.filter(call => call.attempt === 2 && call.partition === 'import')
   if (mode === 'analysis-format') assert.deepEqual(resumedDiagnostics.map(call => call.purpose), ['code_behavior_analyze', 'code_behavior_review'])
-  if (mode === 'analysis-path') {
+  if (mode === 'analysis-path' || mode === 'analysis-basis') {
     assert.equal(calls.filter(call => call.attempt === 1 && call.partition === 'import' && call.purpose === 'code_behavior_review').length, 0)
     assert.deepEqual(resumedDiagnostics.map(call => call.purpose), ['code_behavior_analyze', 'code_behavior_review'])
   }
