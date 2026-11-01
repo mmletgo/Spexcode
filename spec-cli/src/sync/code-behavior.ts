@@ -1,11 +1,11 @@
 import { posix } from 'node:path'
 import { parseCodeEntry, relationClaimsPath } from '@spexcode/spec-core'
 import { syncModel } from './model-selection.js'
-import { dependencyClosure, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
+import { dependencyClosure, parseContract, parseFrontmatter, parseParts, type ContractItem } from '@spexcode/spec-core/contracts'
 import type { AuthorizedContractChange, ElaborationRunner, ElaborationTrace } from './elaboration-types.js'
 import { outputErrors } from './elaboration-schema.js'
 import { actualTreeDiff, isHostPrivatePath } from './candidate.js'
-import { adoptedDeliveryPaths, isUtf8Text, mergeText, readCompositionEvidence } from './composition.js'
+import { adoptedDeliveryPaths, isUtf8Text, mergeText, readCompositionEvidence, type IntentObject, type IntentResidual, type SelectedCompositionEvidence } from './composition.js'
 import { validateRawIntegration } from './raw-integration.js'
 import { decisionScopeIds, sameContractBusinessMeaning } from './contract-evolution.js'
 import { controlledDecisionIdentity, readControlledChanges, readControlledDecision, renderControlledDecisionRaw } from './request-input.js'
@@ -22,7 +22,7 @@ const object = (properties: Record<string, unknown>): Record<string, unknown> =>
 const change = object({ kind: { type: 'string', enum: ['refactor', 'allowed_change', 'coverage_gap', 'conflict'] }, paths: { ...strings, minItems: 1 }, affectedIds: strings, ruleIds: strings, originalIntent: string, previousBehavior: string, sourceBehavior: string, deliveryBehavior: string, evidence: string, counterexample: string })
 export const CODE_BEHAVIOR_SCHEMA = object({ changes: { type: 'array', items: change }, facts: { type: 'array', items: object({ source: string, text: string }) }, acceptanceChanges: { type: 'array', items: object({ id: string, ruleIds: { ...strings, minItems: 1 }, source: string, reason: string }) }, newNodes: { type: 'array', items: object({ codePath: string, parentNodeId: string, basis: string }) }, resolutions: { type: 'array', items: object({ path: string, content: { type: ['string', 'null'] }, mode: { type: ['string', 'null'], enum: ['100644', '100755', '120000', null] } }) } })
 export const CODE_BEHAVIOR_REVIEW_SCHEMA = object({ inputDigest: string, analysisDigest: string, verdict: { type: 'string', enum: ['accept', 'repair'] }, checkedPaths: strings, checkedChangeIds: strings, findings: { type: 'array', description: '仅列需要修正的问题；verdict=accept时必须为空数组，不写通过说明或肯定评价。', items: object({ message: string, evidence: string, counterexample: string }) } })
-export const CODE_BEHAVIOR_GUIDANCE_VERSION = 'code-behavior-guidance-v1'
+export const CODE_BEHAVIOR_GUIDANCE_VERSION = 'code-behavior-guidance-v2'
 
 export type CodeBehaviorInput = { partition?: { id: string; changedPaths: readonly string[]; factSourcePaths: readonly string[]; authorizedParentSpecPaths?: readonly string[] }; model?: string; snapshot: InputSnapshot; baseline: BaselinePair | null; baselineSelection?: FrozenBaselineSelection; composed: ComposedInputRef; readSetDigest: string; policyDigest: string; plan: SyncCoordinatorPlan; requestKey: string; timeoutMs: number; signal?: AbortSignal; origin?: 'initial' | 'spec' | 'code' | 'combined' | 'reconcile' | 'decision'; decision?: { request: SyncDecisionInput; previous: CodeBehaviorEvidence; previousComposed?: ComposedInputRef; previousReadPaths?: readonly string[] }; repairDiagnostics?: readonly { code: string; message: string }[] }
 type Proposal = { changes: Omit<CodeBehaviorChange, 'id'>[]; facts: CodeBehaviorAnalysis['facts']; acceptanceChanges: Omit<AcceptanceChangeProposal, 'action'>[]; newNodes: { codePath: string; parentNodeId: string; basis: string }[]; resolutions: CodeBehaviorAnalysis['resolutions'] }
@@ -51,6 +51,55 @@ const fileTree = (input: CodeBehaviorInput, tree: string, reads: Map<string, Fro
 const textFiles = (files: ReadonlyMap<string, FrozenFile>): [string, string][] => [...files.values()].filter(file => file.kind === 'text').map(file => [file.path, file.content])
 
 function problem(message: string): never { throw Object.assign(new Error(message), { code: 'behavior_analysis_invalid' }) }
+
+export type FrozenBehaviorBody = { bodyRef: string; text: string; required: boolean }
+
+/** 所有正文和 JSON 值复用同一内容寻址表及必读运输 entry。 */
+export function packBehaviorBodies(bodies: readonly FrozenBehaviorBody[]) {
+  const ordered = [...bodies].sort((left, right) => left.bodyRef < right.bodyRef ? -1 : left.bodyRef > right.bodyRef ? 1 : 0)
+  for (const body of ordered) if (contentHash(Buffer.from(body.text, 'utf8')) !== body.bodyRef) problem('冻结正文与内容引用不一致')
+  const required = ordered.filter(body => body.required)
+  const requiredText = JSON.stringify(Object.fromEntries(required.map(body => [body.bodyRef, body.text]))).replace(/\uFEFF/g, '\\uFEFF')
+  const requiredSha = contentHash(Buffer.from(requiredText, 'utf8')), requiredId = `required-${requiredSha}`, requiredByteLength = Buffer.byteLength(requiredText, 'utf8')
+  const bodyIndex = Object.fromEntries(ordered.map(body => {
+    const text = body.required ? requiredText : JSON.stringify(body.text).replace(/\uFEFF/g, '\\uFEFF')
+    return [body.bodyRef, { entryId: body.required ? requiredId : body.bodyRef, kind: 'utf8' as const, encoding: body.required ? 'json-object-v1' as const : 'json-string-v1' as const,
+      sha256: body.required ? requiredSha : contentHash(Buffer.from(text, 'utf8')), byteLength: body.required ? requiredByteLength : Buffer.byteLength(text, 'utf8'), contentByteLength: Buffer.byteLength(body.text, 'utf8'), required: body.required }]
+  }))
+  const frozenEntries: FrozenEntryJson[] = [
+    ...(required.length ? [{ id: requiredId, label: 'Complete required bodies keyed by bodyRef', required: true, kind: 'utf8' as const, text: requiredText }] : []),
+    ...ordered.filter(body => !body.required).map(body => ({ id: body.bodyRef, label: `utf8:${body.bodyRef}`, required: false, kind: 'utf8' as const, text: JSON.stringify(body.text).replace(/\uFEFF/g, '\\uFEFF') })),
+  ]
+  return { bodyIndex, frozenEntries }
+}
+
+type BehaviorMetadata = {
+  contractItems: { previous: readonly ContractItem[]; current: readonly ContractItem[] }
+  compositionEvidence: SelectedCompositionEvidence | null
+  baselinePair: object | null
+  baselineSelection: Pick<FrozenBaselineSelection, 'bindings'> | null
+}
+
+/** 仅投影已核真的模型输入；状态、集合和角色原位保留，按内容而非业务 ID 复用。 */
+export function referenceCodeBehaviorMetadata<T extends BehaviorMetadata>(input: T, reference: (text: string) => { bodyRef: string }) {
+  const json = (value: object | null) => value === null ? null : { ...reference(JSON.stringify(value)), json: true as const }
+  const state = (value: IntentObject | null) => value === null ? null : json({ ...value, entry: json(value.entry), item: json(value.item),
+    rawSource: value.rawSource === null ? null : reference(value.rawSource), businessProse: reference(value.businessProse) })
+  const residual = (value: IntentResidual) => ({ ...value, before: state(value.before), delivery: state(value.delivery), source: state(value.source) })
+  const evidence = input.compositionEvidence
+  return { ...input,
+    contractItems: { previous: input.contractItems.previous.map(item => json(item)), current: input.contractItems.current.map(item => json(item)) },
+    baselinePair: json(input.baselinePair),
+    baselineSelection: input.baselineSelection && { ...input.baselineSelection, bindings: input.baselineSelection.bindings.map(binding => 'bytePair' in binding
+      ? { ...binding, bytePair: json(binding.bytePair) } : { ...binding, intentPair: json(binding.intentPair) }) },
+    compositionEvidence: evidence && { ...evidence, intents: evidence.intents.map(residual),
+      paths: evidence.paths.map(value => ({ ...value, base: json(value.base), delivery: json(value.delivery), source: json(value.source) })),
+      conflicts: evidence.conflicts.map(value => ({ ...value, base: json(value.base), delivery: json(value.delivery), source: json(value.source) })),
+      artifacts: evidence.artifacts.map(value => ({ ...value, before: json(value.before), delivery: json(value.delivery), source: json(value.source), authorBase: json(value.authorBase) })),
+      controlledAuthorPatch: evidence.controlledAuthorPatch && { ...evidence.controlledAuthorPatch, before: json(evidence.controlledAuthorPatch.before), next: json(evidence.controlledAuthorPatch.next), intents: evidence.controlledAuthorPatch.intents.map(residual) },
+      controlledAuthorGroup: evidence.controlledAuthorGroup && { ...evidence.controlledAuthorGroup, changes: evidence.controlledAuthorGroup.changes.map(value => ({ ...value, before: json(value.before), next: json(value.next) })), intents: evidence.controlledAuthorGroup.intents.map(residual) } },
+  }
+}
 
 export function readDecisionAuthority(commonDir: string, requestRef: { sha256: string }): SyncDecisionAuthority {
   const request = JSON.parse(readEvidence(commonDir, requestRef).toString('utf8')) as SyncDecisionInput & { schemaVersion: number; type: string; source: { commonDir: string } }
@@ -229,7 +278,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
     : ''
   const reviewNewNodeInstructions = '新治理叶独审阶段契约：待审JSON中的newNodeProposals是本次通过schema、会话身份和resultDigest校验的原proposal.newNodes，字段为codePath、parentNodeId、basis；analysis.newNodes是程序解析后供持久化的四字段nodeId、path、codePath、rawSource，不要求解析结果重复携带parentNodeId或basis。将每条原提案与恰好一个解析叶按codePath一一核对。只读v2的newNodeParents是本区授权父节点集合：核parentNodeId精确匹配其中nodeId、path指向已读取且raw非空的父Spec；核解析叶path位于该父Spec目录下，rawSource引用同一父nodeId且覆盖对应codePath职责。其他方向依原契约图中的非空raw父节点和writePaths核验。独立阅读冻结源码与父raw判断basis和叶职责是否有依据；原proposal、程序解析结果和“程序已解析”都不替代语义审查。repairDiagnostics仅是历史失败数据，不是当前proposal、不能补当前resolved mapping、也不是新政策。'
   const readingManifest = JSON.stringify({ requiredChangedPaths: changedPaths, unownedSourcePaths, unownedSourcePathCount: unownedSourcePaths.length, readablePaths })
-  const readingInstructions = `冻结读取清单:\n${readingManifest}\n分析要求:\n${input.partition ? '六个文本视图、readablePaths、contractItems及plan均为当前分区读取闭包的局部投影，不是全仓清单；其中缺席不证明全树不存在。其它分区的既有叶不在本区重新创建，snapshotTree身份不授予额外路径读取权。' : ''}六个文本视图、intentArtifactFiles与authorByteProjections.before/after正文使用sha256-body-entry-v2；bodyRef是原content字符串的SHA256。bodyIndex给出entryId、kind、encoding、sha256、byteLength、contentByteLength和required；optional entry是json-string-v1完整字符串；required正文按bodyRef排序合为一个json-object-v1对象entry，完整读取后JSON.parse(entry)[bodyRef]恢复该原字符串（包含BOM/CRLF），entry的sha256/byteLength绑定编码后的运输字节。nonTextFiles同样用bodyRef替换content，其encoding仍声明原content为utf8或完整base64。spex_read_frozen按entry读取全文，正文不在这份JSON里。引用只表示字节相同，不代表语义批准。required正文必须读完；optional只有该精确turn的coveredEntryIds包含其完整entry才算已读，bodyRef、目录或部分区间都不是全文。各文本视图保留其实际来源/派生树字节；compositionEvidence.source可来自author-clean投影，需按authorByteProjections核对该snapshot/path的投影前后对象，不把此角色差异当数据损坏或新业务政策。requiredChangedPaths必须逐项覆盖，不得缩小。读取完整性由工具/程序记录；业务evidence引用真实路径/符号/断言，不手工复述task/body entry的hash、长度或读取区间。unownedSourcePaths是按后置归属门同一判据求出的未治理业务源码子集，数量为unownedSourcePathCount；首次纳管时已存在、已commit的未治理实现也须逐codePath在真实上层raw下提出newNodes治理叶或具体coverage_gap/conflict，分组allowed_change不是治理，不能凭旧文件或空初始化文件跳过。newNodes.codePath只从本轮schema列出的真实未治理业务源码候选中选择；空候选返回[]，不得填Spec、测试、已治理源码或未来节点路径。newNodes只绑定既有意图对应的治理职责，不授予新业务或新政策。readablePaths标明该具体文件全文在哪些冻结快照中存在；删除文件仍重读旧全文。plan.readPaths是目录前缀授权而非仅路径字符串相等；manifest/目录/链接目标路径只属元数据，不冒充全文。nonTextFiles保留kind/encoding和完整对象content及mode/OID/digest，readablePaths的nonTextFiles.前缀指向其所属快照；binary完整base64可还原原字节，symlink只表示Git链接对象目标字节、不跟随宿主或冒充目标正文。完整字节不等于已理解图片/wheel业务含义，raw真实依赖而不可解释仍提出具体GAP，不自动allowed_change或自批业务。snapshotTree与composed.tree是真实冻结Git树身份，相同树表示同一路径的对象字节与mode相同，不代表语义或业务通过；不得编造工具未提供的hash/AST计算证据，也不得把手工重抄、转义或反转义片段的推算冒称冻结源对象校验。以下虚拟冻结快照是唯一输入权威，cwd的旧HEAD不是本次输入；不要以cwd缺少新增文件忽略已冻结正文。plan.sourcePaths存在时限定业务源码和newNodes角色，不扩展read/write授权；实际测试修改仍完整分析。contractItems.previous/current是从完整冻结正文解析的既有契约项，affectedIds/ruleIds仅引用其中真实稳定ID；baselineSelection的资源名不是契约正文，未通过P1结构检查或独审的候选不成为既有业务义务；已接受P1仍由后续冻结复用和生成保护，不成为raw或新的作者授权。首次初始化/发现时，尚未生成Spec治理叶、稳定ID、FLOW/AC或覆盖映射属于待生成工作。raw、冻结源码与完整测试已给出可核行为时，按真实行为分类并以newNodes/facts交P1生成，不能仅因尚无Spec叶或验收覆盖而报coverage_gap向用户要输入。coverage_gap必须指出仍缺的重大业务事实或政策及其可观察后果；conflict必须说明原意与双方行为的真实互斥。独审不能只以“尚无Spec/稳定ID/覆盖”为未知证据；发现将待生成工作升格为业务未知时，应返回具体repair说明已有依据和应交P1的工作。真正的coverage_gap/conflict仍保留findings，不得为了推进而清空、降格或自动接受其依赖。raw-only初始化尚无既有稳定业务ID时，允许affectedIds/ruleIds为空，按真实raw、源码及完整测试分析相容性，随后交P1建立详细契约并独审；不要虚构ID，也不因尚未展开本身提出GAP；首次纳管或changedPaths/requiredChangedPaths纳入只表示覆盖任务，不等于Spec原意有变化或需要重抄全文。逐Spec路径核authorBaseline/oldSource/newSource/composedFiles及verifiedDelivery：作者基准、旧来源、当前来源与composed正文同字节，verifiedDelivery缺席或同字节，authorChanges无该路径且无真实未消费语义残差、该路径的compositionEvidence.conflicts或明确受控裁决/生命周期授权时，不返回该路径的resolution；本区没有其他需整合路径时返回resolutions:[]。不重抄、格式化或额外转义原Spec，不在分析阶段追加规格总览或expanded spec/REQ/FLOW/STATE/AC；详细规格交P1，renderer复制冻结raw。独审不因这种空resolutions判遗漏，仍核全部覆盖及真实业务分类；真实差量、逐ID语义残差、重叠和明确裁决继续沿原完整整合与raw字节来源门禁。rawlessSpecPaths列出本区已存在、作者基准/source/composed字节相同且没有已验证交付差量或明确裁决/生命周期授权的Spec节点。这些既有节点无自己的raw时，必须原样保留，分析只能用facts/changes说明真实源码行为并交P1细化，不能向其返回任何Spec resolution、不能复制上游raw，也不能建议删除节点。存在真实作者/交付字节差量或明确用户生命周期/裁决权限的路径不进入此列表，继续使用其既有整合与删除门禁。该边界不豁免任何真实业务冲突、完整读取、独审或后续生成验证。\n`
+  const readingInstructions = `冻结读取清单:\n${readingManifest}\n分析要求:\n${input.partition ? '六个文本视图、readablePaths、contractItems及plan均为当前分区读取闭包的局部投影，不是全仓清单；其中缺席不证明全树不存在。其它分区的既有叶不在本区重新创建，snapshotTree身份不授予额外路径读取权。' : ''}六个文本视图、intentArtifactFiles与authorByteProjections.before/after正文使用sha256-body-entry-v3；bodyRef是原content字符串的SHA256。bodyIndex给出entryId、kind、encoding、sha256、byteLength、contentByteLength和required；optional entry是json-string-v1完整字符串；required正文按bodyRef排序合为一个json-object-v1对象entry，完整读取后JSON.parse(entry)[bodyRef]恢复该原字符串（包含BOM/CRLF），entry的sha256/byteLength绑定编码后的运输字节。nonTextFiles同样用bodyRef替换content，其encoding仍声明原content为utf8或完整base64。spex_read_frozen按entry读取全文，正文不在这份JSON里。引用只表示字节相同，不代表语义批准。required正文必须读完；compositionEvidence的before/delivery/source状态、其中完整item及baseline pair同样复用bodyRef，引用携json:true时，将正文JSON.parse后递归解开其中bodyRef；普通bodyRef仍还原原字符串。contractItems也按同一规则还原。所有这些语义引用均在required正文entry中，必须完整读取；各side/role/path、字段、集合成员及顺序、null与缺席语义保持，不按业务ID猜测复用，不把相同正文的多角色引用当作多个新授权。optional只有该精确turn的coveredEntryIds包含其完整entry才算已读，bodyRef、目录或部分区间都不是全文。各文本视图保留其实际来源/派生树字节；compositionEvidence.source可来自author-clean投影，需按authorByteProjections核对该snapshot/path的投影前后对象，不把此角色差异当数据损坏或新业务政策。requiredChangedPaths必须逐项覆盖，不得缩小。读取完整性由工具/程序记录；业务evidence引用真实路径/符号/断言，不手工复述task/body entry的hash、长度或读取区间。unownedSourcePaths是按后置归属门同一判据求出的未治理业务源码子集，数量为unownedSourcePathCount；首次纳管时已存在、已commit的未治理实现也须逐codePath在真实上层raw下提出newNodes治理叶或具体coverage_gap/conflict，分组allowed_change不是治理，不能凭旧文件或空初始化文件跳过。newNodes.codePath只从本轮schema列出的真实未治理业务源码候选中选择；空候选返回[]，不得填Spec、测试、已治理源码或未来节点路径。newNodes只绑定既有意图对应的治理职责，不授予新业务或新政策。readablePaths标明该具体文件全文在哪些冻结快照中存在；删除文件仍重读旧全文。plan.readPaths是目录前缀授权而非仅路径字符串相等；manifest/目录/链接目标路径只属元数据，不冒充全文。nonTextFiles保留kind/encoding和完整对象content及mode/OID/digest，readablePaths的nonTextFiles.前缀指向其所属快照；binary完整base64可还原原字节，symlink只表示Git链接对象目标字节、不跟随宿主或冒充目标正文。完整字节不等于已理解图片/wheel业务含义，raw真实依赖而不可解释仍提出具体GAP，不自动allowed_change或自批业务。snapshotTree与composed.tree是真实冻结Git树身份，相同树表示同一路径的对象字节与mode相同，不代表语义或业务通过；不得编造工具未提供的hash/AST计算证据，也不得把手工重抄、转义或反转义片段的推算冒称冻结源对象校验。以下虚拟冻结快照是唯一输入权威，cwd的旧HEAD不是本次输入；不要以cwd缺少新增文件忽略已冻结正文。plan.sourcePaths存在时限定业务源码和newNodes角色，不扩展read/write授权；实际测试修改仍完整分析。contractItems.previous/current是从完整冻结正文解析的既有契约项，affectedIds/ruleIds仅引用其中真实稳定ID；baselineSelection的资源名不是契约正文，未通过P1结构检查或独审的候选不成为既有业务义务；已接受P1仍由后续冻结复用和生成保护，不成为raw或新的作者授权。首次初始化/发现时，尚未生成Spec治理叶、稳定ID、FLOW/AC或覆盖映射属于待生成工作。raw、冻结源码与完整测试已给出可核行为时，按真实行为分类并以newNodes/facts交P1生成，不能仅因尚无Spec叶或验收覆盖而报coverage_gap向用户要输入。coverage_gap必须指出仍缺的重大业务事实或政策及其可观察后果；conflict必须说明原意与双方行为的真实互斥。独审不能只以“尚无Spec/稳定ID/覆盖”为未知证据；发现将待生成工作升格为业务未知时，应返回具体repair说明已有依据和应交P1的工作。真正的coverage_gap/conflict仍保留findings，不得为了推进而清空、降格或自动接受其依赖。raw-only初始化尚无既有稳定业务ID时，允许affectedIds/ruleIds为空，按真实raw、源码及完整测试分析相容性，随后交P1建立详细契约并独审；不要虚构ID，也不因尚未展开本身提出GAP；首次纳管或changedPaths/requiredChangedPaths纳入只表示覆盖任务，不等于Spec原意有变化或需要重抄全文。逐Spec路径核authorBaseline/oldSource/newSource/composedFiles及verifiedDelivery：作者基准、旧来源、当前来源与composed正文同字节，verifiedDelivery缺席或同字节，authorChanges无该路径且无真实未消费语义残差、该路径的compositionEvidence.conflicts或明确受控裁决/生命周期授权时，不返回该路径的resolution；本区没有其他需整合路径时返回resolutions:[]。不重抄、格式化或额外转义原Spec，不在分析阶段追加规格总览或expanded spec/REQ/FLOW/STATE/AC；详细规格交P1，renderer复制冻结raw。独审不因这种空resolutions判遗漏，仍核全部覆盖及真实业务分类；真实差量、逐ID语义残差、重叠和明确裁决继续沿原完整整合与raw字节来源门禁。rawlessSpecPaths列出本区已存在、作者基准/source/composed字节相同且没有已验证交付差量或明确裁决/生命周期授权的Spec节点。这些既有节点无自己的raw时，必须原样保留，分析只能用facts/changes说明真实源码行为并交P1细化，不能向其返回任何Spec resolution、不能复制上游raw，也不能建议删除节点。存在真实作者/交付字节差量或明确用户生命周期/裁决权限的路径不进入此列表，继续使用其既有整合与删除门禁。该边界不豁免任何真实业务冲突、完整读取、独审或后续生成验证。\n`
   const promptIds = new Set([...oldFrozen.graph.items.keys(), ...current.graph.items.keys()])
   const localPath = (path: string): boolean => within(path, input.plan.readPaths)
   const localIntent = (item: NonNullable<typeof selectedEvidence>['intents'][number]): boolean => {
@@ -292,26 +341,24 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   for (const file of intentArtifactFiles) requiredPaths.add(file.path)
   for (const projection of authorByteProjections) requiredPaths.add(projection.path)
   const requiredPath = (path: string): boolean => requiredPaths.has(path) || [...requiredClaims].some(claim => relationClaimsPath(claim, path))
-  type BodyRole = { bodyRef: string; entryId: string; kind: 'utf8'; encoding: 'json-string-v1' | 'json-object-v1'; sha256: string; byteLength: number; contentByteLength: number; required: boolean; text: string }
-  const bodyRoles = new Map<string, BodyRole>()
+  const bodyRoles = new Map<string, FrozenBehaviorBody>()
   const entriesByPath = new Map<string, Set<string>>()
-  const referenceBody = (path: string, text: string, required: boolean): { bodyRef: string } => {
+  const referenceBody = (path: string | null, text: string, required: boolean): { bodyRef: string } => {
     const bodyRef = contentHash(Buffer.from(text, 'utf8'))
     const existing = bodyRoles.get(bodyRef)
     if (existing) { if (required) existing.required = true }
-    else {
-      const framed = JSON.stringify(text).replace(/\uFEFF/g, '\\uFEFF')
-      bodyRoles.set(bodyRef, { bodyRef, entryId: bodyRef, kind: 'utf8', encoding: 'json-string-v1', sha256: contentHash(Buffer.from(framed, 'utf8')), byteLength: Buffer.byteLength(framed, 'utf8'), contentByteLength: Buffer.byteLength(text, 'utf8'), required, text: framed })
+    else bodyRoles.set(bodyRef, { bodyRef, required, text })
+    if (path !== null) {
+      const ids = entriesByPath.get(path) ?? new Set<string>()
+      ids.add(bodyRef); entriesByPath.set(path, ids)
     }
-    const ids = entriesByPath.get(path) ?? new Set<string>()
-    ids.add(bodyRef); entriesByPath.set(path, ids)
     return { bodyRef }
   }
   const referencePairs = (files: [string, string][]): [string, { bodyRef: string }][] => files.map(([path, text]) => [path, referenceBody(path, text, requiredPath(path))])
   const referenceProjectionEntry = ({ text, ...entry }: TreeEntry & { text: string }) => ({ ...entry, bodyRef: referenceBody(entry.path, text, true).bodyRef })
   const referenced = {
     ...frozen,
-    textEncoding: 'sha256-body-entry-v2' as const,
+    textEncoding: 'sha256-body-entry-v3' as const,
     nonTextFiles: frozen.nonTextFiles.map(({ content, ...entry }) => ({ ...entry, ...referenceBody(entry.path, content, requiredPath(entry.path) || entry.snapshots.includes('intentArtifactFiles')) })),
     authorByteProjections: frozen.authorByteProjections.map(({ before, after, ...projection }) => ({ ...projection, before: referenceProjectionEntry(before), after: referenceProjectionEntry(after) })),
     intentArtifactFiles: frozen.intentArtifactFiles.map(({ text, ...entry }) => ({ ...entry, bodyRef: referenceBody(entry.path, text, true).bodyRef })),
@@ -322,18 +369,10 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
     composedFiles: referencePairs(frozen.composedFiles),
     controlledBeforeFiles: referencePairs(frozen.controlledBeforeFiles),
   }
-  const orderedBodies = [...bodyRoles.values()].sort((left, right) => left.bodyRef < right.bodyRef ? -1 : left.bodyRef > right.bodyRef ? 1 : 0)
-  const requiredBodies = orderedBodies.filter(body => body.required)
-  const requiredText = `{${requiredBodies.map(body => `${JSON.stringify(body.bodyRef)}:${body.text}`).join(',')}}`
-  const requiredSha = contentHash(Buffer.from(requiredText, 'utf8')), requiredId = `required-${requiredSha}`, requiredByteLength = Buffer.byteLength(requiredText, 'utf8')
-  for (const body of requiredBodies) Object.assign(body, { entryId: requiredId, encoding: 'json-object-v1', sha256: requiredSha, byteLength: requiredByteLength })
-  const bodyIndex = Object.fromEntries(orderedBodies.map(({ text: _text, bodyRef, ...body }) => [bodyRef, body]))
-  const packed = { ...referenced, bodyIndex }
+  const metadataReferenced = referenceCodeBehaviorMetadata(referenced, text => referenceBody(null, text, true))
+  const { bodyIndex, frozenEntries } = packBehaviorBodies([...bodyRoles.values()])
+  const packed = { ...metadataReferenced, bodyIndex }
   const context = JSON.stringify(packed)
-  const frozenEntries: FrozenEntryJson[] = [
-    ...(requiredBodies.length ? [{ id: requiredId, label: 'Complete required bodies keyed by bodyRef', required: true, kind: 'utf8' as const, text: requiredText }] : []),
-    ...orderedBodies.filter(body => !body.required).map(body => ({ id: body.entryId, label: `utf8:${body.entryId}`, required: false, kind: 'utf8' as const, text: body.text })),
-  ]
   const optionalEntryIds = (path: string): string[] => [...(entriesByPath.get(path) ?? [])].filter(id => bodyRoles.get(id)?.required === false)
   const turns = new Map<string, { threadId: string; turnId: string; proof?: FrozenReadProof }>()
   const requireOptionalRead = (paths: readonly string[], turn: { threadId: string; turnId: string; proof?: FrozenReadProof } | undefined, details: Record<string, unknown> = {}): void => {
