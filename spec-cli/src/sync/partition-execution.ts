@@ -1,3 +1,4 @@
+import { stageWorktree, STAGE_READING_INSTRUCTIONS } from './stage-worktree.js'
 import { posix } from 'node:path'
 import { contractReferences, parseContract, parseParts } from '@spexcode/spec-core/contracts'
 import { analyzeCodeBehavior, deriveBehaviorAuthorization } from './code-behavior.js'
@@ -10,7 +11,7 @@ import type { Applicability, ElaborationInput, ElaborationResult, ElaborationRun
 import { elaborationTargetBindings, projectVerificationTable, withoutVerificationTables } from './elaboration-markdown.js'
 import { actualTreeDiff, isHostPrivatePath, verifyCandidate } from './candidate.js'
 import type { CandidateChanges } from './candidate.js'
-import { freezeGenerationCandidate, runGeneration } from './generation.js'
+import { freezeGenerationCandidate, generationBrief, generationStageTree, runGeneration } from './generation.js'
 import type { GenerationInput, GenerationOptions, GenerationResult } from './generation-types.js'
 import type { BlobRef, ComposedInputRef } from './operation-types.js'
 import { contentHash, readEvidence, readObject, readTree, validateRepositoryPath, verifySnapshot, writeEvidence } from './snapshot.js'
@@ -37,6 +38,12 @@ const within = (path: string, paths: readonly string[]): boolean => paths.some(p
 const unique = (values: readonly string[]): string[] => [...new Set(values)].sort()
 const reject = (message: string): never => { throw Object.assign(new Error(message), { code: 'partition_binding' }) }
 function readonlyRepairInput(input: ElaborationInput, repair: ReadonlySpecRepair): ElaborationInput {
+  if (input.worktree && input.historyInput) {
+    const generation = JSON.parse(readEvidence(input.historyInput.source.commonDir, repair.generationRef).toString('utf8')) as Pick<GenerationResult, 'candidate'>
+    if (!generation.candidate || generation.candidate.digest !== repair.candidateDigest) return reject('只读修复seed必须绑定原真实失败candidate')
+    verifyCandidate(input.historyInput.source.commonDir, generation.candidate)
+    input = { ...input, worktree: stageWorktree(input.historyInput.source.commonDir, input.historyInput.headCommit, generation.candidate.tree) }
+  }
   const sources = new Map(repair.changes.map(change => [change.path, change]))
   if (repair.changes.some(change => !input.targets.some(target => target.nodeId === change.nodeId && target.path === change.path))) reject('只读V1修复不能取得其它owner目标')
   if (repair.kind === 'candidate_review') return { ...input, implementationWritePaths: [], readonlySpecRepair: repair }
@@ -483,6 +490,7 @@ export function implementationGenerationDispatch(input: GenerationInput, plan: S
 }
 
 async function implementationFileWriters(input: GenerationInput, locals: readonly LocalGeneration[], planningIds: readonly string[], maxParallel: number, options: GenerationOptions, checkpoints: PartitionCheckpoints): Promise<FileWriterPlan> {
+  const commonDir = input.snapshot.source.commonDir
   const owner = new Map<string, string>()
   for (const local of locals) for (const path of local.input.allowedScope.paths) {
     if ([...owner].some(([owned, id]) => id !== local.partition.id && (within(path, [owned]) || within(owned, [path])))) throw Object.assign(new Error(`P1分区争用实现writer: ${path}; 需要互不重叠的文件规划`), { code: 'implementation_plan_conflict' })
@@ -497,9 +505,10 @@ async function implementationFileWriters(input: GenerationInput, locals: readonl
     const policy = options.implementationPolicy
     if (!policy) return reject('新功能分区缺少冻结的实现文件规划授权')
     const context = { partitionId: local.partition.id, inputId: input.snapshot.id, policy: input.policy, intent: local.input.intent, specs: local.input.elaboratedSpecs, contracts: local.input.contracts, facts: local.input.facts, files: [...local.input.files], authorizedWritePaths: policy.writePaths.filter(path => !path.startsWith('.spec/')), sourcePaths: policy.sourcePaths, readonlyTests: local.input.mandatoryTests, repairContext: input.repairContext }
-    const inputDigest = contentHash(JSON.stringify(context)), purpose = 'implementation_plan'
+    const worktree = input.nativeWorktree ? stageWorktree(commonDir, input.snapshot.headCommit, generationStageTree(input)) : undefined
+    const inputDigest = contentHash(JSON.stringify(worktree ? { context, worktree } : context)), purpose = 'implementation_plan'
     if (input.signal?.aborted) throw Object.assign(new Error('文件规划已取消'), { code: 'cancelled' })
-    const request: ElaborationSessionRequest = { root: input.root, base: input.snapshot.headCommit, requestKey: `${input.requestKey}:partition:${local.partition.id}:${purpose}`, purpose, inputDigest, prompt: `只规划本区已批准需求所需的精确源码/测试文件路径，不返回正文、不新增业务、政策或Spec目标。新文件只能在authorizedWritePaths中；已有文件必须已在本区files完整读取，readonlyTests不可改。不能选目录、通配符或其它区的Spec；优先复用本区已有实现。若本区没有实现/测试变更可返回空paths。只返回schema JSON。\n冻结局部输入:\n${JSON.stringify(context)}`, schema: structuredClone(IMPLEMENTATION_PLAN_SCHEMA), timeoutMs: input.timeoutMs, signal: input.signal, model: input.model, effort: input.effort }
+    const request: ElaborationSessionRequest = { root: input.root, base: worktree?.baseCommit ?? input.snapshot.headCommit, ...(worktree ? { worktree } : {}), requestKey: `${input.requestKey}:partition:${local.partition.id}:${purpose}`, purpose, inputDigest, prompt: worktree ? `${STAGE_READING_INSTRUCTIONS} 只读规划本区已审需求所需的精确源码/测试文件路径；只返回schema paths，不改文件、不新增业务或政策。只能选authorizedWritePaths内文件，readonlyTests不可改；不能选目录、通配符或其它区Spec。先读取现有实现并复用，确无变更则paths=[]。\n任务:\n${JSON.stringify({ ...generationBrief(local.input), partitionId: local.partition.id, authorizedWritePaths: policy.writePaths.filter(path => !path.startsWith('.spec/')), sourcePaths: policy.sourcePaths })}` : `只规划本区已批准需求所需的精确源码/测试文件路径，不返回正文、不新增业务、政策或Spec目标。新文件只能在authorizedWritePaths中；已有文件必须已在本区files完整读取，readonlyTests不可改。不能选目录、通配符或其它区的Spec；优先复用本区已有实现。若本区没有实现/测试变更可返回空paths。只返回schema JSON。\n冻结局部输入:\n${JSON.stringify(context)}`, schema: structuredClone(IMPLEMENTATION_PLAN_SCHEMA), timeoutMs: input.timeoutMs, signal: input.signal, model: input.model, effort: input.effort }
     const { signal: dispatchSignal, ...serializable } = request
     await options.onDispatch?.({ ...structuredClone(serializable), signal: dispatchSignal })
     if (input.signal?.aborted) throw Object.assign(new Error('文件规划已取消'), { code: 'cancelled' })
@@ -511,7 +520,7 @@ async function implementationFileWriters(input: GenerationInput, locals: readonl
     if (new Set(paths).size !== paths.length) reject('实现文件计划不能重复路径')
     for (const path of paths) {
       validateRepositoryPath(path)
-      if (path.startsWith('.spec/') || /[*?\[\]]/.test(path) || !within(path, policy.writePaths) || input.mandatoryTests.some(test => path === test.testPath) || input.manifest.entries.some(entry => entry.path.startsWith(`${path}/`)) || input.manifest.entries.some(entry => entry.path === path) && !local.input.files.has(path)) reject(`实现文件计划越过本区完整读取或原授权: ${path}`)
+      if (path.startsWith('.spec/') || /[*?\[\]]/.test(path) || !within(path, policy.writePaths) || input.mandatoryTests.some(test => path === test.testPath) || input.manifest.entries.some(entry => entry.path.startsWith(`${path}/`)) || !input.nativeWorktree && input.manifest.entries.some(entry => entry.path === path) && !local.input.files.has(path)) reject(`实现文件计划越过本区完整读取或原授权: ${path}`)
     }
     const result = { paths: [...paths].sort(), trace: { purpose, sessionId: native.sessionId, threadId: native.threadId, turnId: native.turnId, resultDigest: native.resultDigest, inputDigest } }
     checkpoints.save(key, result)
@@ -542,6 +551,7 @@ export async function generateSyncPartitions(input: GenerationInput, plan: SyncP
     const authorization = await options.beforePartitionGeneration?.(plannedPaths, writeEvidence(commonDir, planned))
     if (authorization) { input = { ...input, allowedScope: authorization.scope, composed: authorization.composed ?? input.composed } }
     generationPartitions = generationPartitions.map(partition => { const paths = planned.writers.find(writer => writer.partitionId === partition.id)?.paths ?? []; return { ...partition, readPaths: unique([...partition.readPaths, ...paths]), writePaths: unique([...partition.writePaths, ...paths]) } })
+    if (input.nativeWorktree) input = { ...input, stageTree: generationStageTree(input) }
     dispatch = implementationGenerationDispatch(input, { ...plan, partitions: generationPartitions }, specOnly)
     locals = dispatch.locals
   } catch (error) {
@@ -553,7 +563,7 @@ export async function generateSyncPartitions(input: GenerationInput, plan: SyncP
     if (saved) return saved
     const result = await runGeneration(local.input, { ...options, beforeFreezeCandidate: undefined, prepareOnly: true })
     if (result.status === 'prepared') for (const change of result.preparedChanges!.changes) {
-      if (!within(change.path, local.input.allowedScope.paths) || change.beforeDigest !== null && !local.input.files.has(change.path)) reject(`分区补丁越过读取/写入范围: ${change.path}`)
+      if (!within(change.path, local.input.allowedScope.paths) || !input.nativeWorktree && change.beforeDigest !== null && !local.input.files.has(change.path)) reject(`分区补丁越过读取/写入范围: ${change.path}`)
       if (change.path.startsWith('.spec/') && !local.input.elaboratedSpecs.some(spec => spec.path === change.path) && !local.input.nodeChanges?.some(item => item.from.path === change.path || item.action === 'move' && item.to.path === change.path)) reject(`分区不能改写只读Spec: ${change.path}`)
     }
     const { candidateFiles: _files, ...compact } = result

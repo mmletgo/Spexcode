@@ -7,3 +7,8 @@ export function syncModel(input: { model?: string }): string { return input.mode
 export function syncModelBinding(model?: string): { model?: string } {
   return model === undefined || model === DEFAULT_SYNC_MODEL ? {} : { model }
 }
+
+/** 新工作树执行只使用明确的真实Claude/ZCode CLI，历史缺省模型身份保持。 */
+export function assertWorktreeSyncModel(model: string): void {
+  if (!/^claude:.+/.test(model) && !/^zcode:[^/]+\/.+/.test(model)) throw Object.assign(new Error('native-worktree同步需要明确的claude:<exact-model>或zcode:<provider>/<exact-model>；当前模型不支持该工作流，不自动回退'), { code: 'unsupported' })
+}

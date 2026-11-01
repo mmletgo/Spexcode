@@ -7,6 +7,8 @@ import type { VerificationDriver } from './verification-executor-types.js'
 
 /** 来源与执行政策由可信应用入口冻结，未来业务 ID 由真实细化结果登记。 */
 type SyncCoordinatorPlanBody = {
+  /** 缺席的历史操作继续原frozen协议，不热迁移。 */
+  agentWorkflow?: 'native-worktree-v1'
   intentNodeId: string
   targets: readonly { nodeId: string; path: string; rawSource?: string }[]
   readPaths: readonly string[]

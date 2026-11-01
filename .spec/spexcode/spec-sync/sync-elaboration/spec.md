@@ -19,6 +19,8 @@ related:
 
 ## expanded spec
 
+当前native-worktree操作的P1生成与独审使用[[sync-stage-worktree]]的真实只读seed，允许按需读取完整仓库。生成seed为原composed加已审祖先接口；独审seed另覆盖本轮渲染的完整Spec候选及真实move/retire。提示只给相关Spec路径、targetIndex/首次必建indices、真实raw差量、事实、技术范围/不可改oracle、精确授权与失败诊断，schema仍规范业务行；不重复完整树或强制逐字读取运输。程序按实际seed对象补足契约引用验证所需代码/测试，不把files投影当读取权限。完整业务输入、实际seed/tree及prompt/schema参与摘要；原raw/ID/演进/全图seal、独审与预算门均保留。下文受限frozen读取说明仅用于无worktree的历史操作与旧单测。
+
 模型调用期限沿 [[structured-session-runtime]] 原样传递，明确 null 不装调用计时器；生成与独审、完整读取及各自业务门禁保持。
 
 interface_seed的生成与独审只承担必要REQ/RULE/GAP及跨子区共享接口，不混入完整P1的全对象、FLOW/STATE/TR和AC覆盖任务。父层已经声明的条款仍须准确、相容且有原意/事实来源；尚未确定的普通字段表示、缺省值或等价校验顺序留给对应子分区读取实现后细化，不强迫父层提前穷举或制造GAP。description与prose只保存稳定业务用途、接口与不适用依据，不保存上一候选、本轮修复或去重过程。共用表列、来源、null、权限/原意保护规则保持；非父完整细化与独审指令逐字保持原契约。schema门槛、独审、预算/修复循环和严格全局seal不改变。
