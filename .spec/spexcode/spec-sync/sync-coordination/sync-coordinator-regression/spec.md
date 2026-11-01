@@ -28,6 +28,8 @@ ZCode 严格 JSON 文本格式失败以精确错误码验证同预算有限重�
 
 Claude 已确证的结构输出重试耗尽按 [[claude-structured-runtime]] 的精确错误码进入原冻结预算：三个独立 attempt 消耗三次分析调用及两次续修后耗尽，失败不产出已审分析、P1、candidate 或交付。旧 native 资源尚未 removed 时保持 recovery_required 且不新派发；普通 failed、unsupported、cancellation_pending 不取得该自动修复分类。
 
+精确schema反馈用真实Git/SQLite与确定性runner先复现单体及analysis-schema分区下一attempt丢原错误文本，再验证两个精确结构码逐轮原样反馈，失败分区的新分析及独审收到自己的原code/message、已accept兄弟区不重派。夹具诊断包含未批准的authority建议，冻结policy/authority仍不变；缺错误码、普通Error伪精确码及StructuredSessionError的未知failed/stale继续单attempt停止。此证据不声称真实Native字段诊断已认证或业务交付通过。
+
 固定模型的分阶段派发回归同时核 P1 生成和独审收到由冻结计划派生的完整写路径集合及真实非空只读 oracle 文件清单，不能遗漏技术权限后让 P1 批准要求 P2 越权修改的测试绑定。
 
 完整候选的不存在 related 路径由 V1 与严格 lint 同源拒绝，断言不进入 code_review、V3 或 journal。历史合成 created 记录若被原生创建层的精确 notStarted、cleanupComplete 与 nativeStopped 回执消歧，应安全标记 removed，不能把合成 phase 当作真实已派发证明；真正未知创建继续由 [[sync-native-run]] 的未决事务回归证明保留资源。
