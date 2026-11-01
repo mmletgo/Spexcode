@@ -77,8 +77,8 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
       if (!result || result.sessionId !== expectedSessionId || !result.threadId || !result.turnId || (checkpoint.session.threadId !== null && result.threadId !== checkpoint.session.threadId) || (checkpoint.session.turnId !== null && result.turnId !== checkpoint.session.turnId) || !validate(result.output) || result.resultDigest !== hash(result.output)) throw new StructuredSessionError('stale_result', 'native result identity, schema or hash is invalid')
       if (request.frozenContext) {
         if (!result.frozenReadProof) throw new StructuredSessionError('stale_result', 'native frozen result has no real history coverage evidence')
-        if (execution.version === 3 && (result.frozenReadProof.version !== 3 || result.frozenReadProof.model !== request.model?.slice(7))) throw new StructuredSessionError('stale_result', 'Claude result lacks its exact native provider/model proof')
-        if (execution.version === 4) {
+        if (execution.version === (execution.timeoutMs === null ? 5 : 3) && execution.policy === 'claude-frozen-read-only-v1' && (result.frozenReadProof.version !== 3 || result.frozenReadProof.model !== request.model?.slice(7))) throw new StructuredSessionError('stale_result', 'Claude result lacks its exact native provider/model proof')
+        if (execution.version === (execution.timeoutMs === null ? 5 : 4) && execution.policy === 'zcode-frozen-read-only-v1') {
           const model = zcodeNativeModel(request.model)
           if (result.frozenReadProof.version !== 4 || result.frozenReadProof.providerId !== model.providerId || result.frozenReadProof.modelId !== model.modelId) throw new StructuredSessionError('stale_result', 'ZCode result lacks its exact native provider/model proof')
         }
@@ -154,14 +154,14 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
         throw new StructuredSessionError('cancelled', 'native request cancelled before dispatch', errorIdentity())
       }
       if (!record) {
-        const deadline = Date.now() + Math.min(15_000, request.timeoutMs)
+        const deadline = Date.now() + Math.min(15_000, request.timeoutMs ?? 15_000)
         let receipt = creationTermination()
         while (!record && !receipt && nativePromise && !outcome && Date.now() < deadline) {
           await new Promise<void>(resolve => setTimeout(resolve, Math.min(options.pollMs ?? 50, Math.max(1, deadline - Date.now()))))
           record = observe(); receipt = creationTermination()
         }
         if (!record && !receipt && (!nativePromise || outcome) && runtime.recoverCreateTermination) {
-          await runtime.recoverCreateTermination(dispatch!.sessionCreateKey, { prompt: request.prompt, payloadHash: expectedCreateHash, base: request.base, signal: AbortSignal.timeout(Math.min(15_000, request.timeoutMs)), structuredExecution: execution })
+          await runtime.recoverCreateTermination(dispatch!.sessionCreateKey, { prompt: request.prompt, payloadHash: expectedCreateHash, base: request.base, signal: AbortSignal.timeout(Math.min(15_000, request.timeoutMs ?? 15_000)), structuredExecution: execution })
           record = observe(); receipt = creationTermination()
         }
         if (!record && receipt) {
@@ -174,7 +174,7 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
       }
       let stopped: StructuredCancellationResult | undefined
       let failure: unknown
-      try { stopped = await runtime.cancel(expectedSessionId, { reason: 'cancelled', timeoutMs: Math.min(15_000, request.timeoutMs) }) }
+      try { stopped = await runtime.cancel(expectedSessionId, { reason: 'cancelled', timeoutMs: Math.min(15_000, request.timeoutMs ?? 15_000) }) }
       catch (error) { failure = error }
       const after = observe()
       if (!after?.structuredExecution) throw new StructuredSessionError('cancellation_pending', 'native record disappeared before exact stop confirmation', errorIdentity())

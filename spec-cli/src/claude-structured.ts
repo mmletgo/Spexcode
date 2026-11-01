@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { createInterface } from 'node:readline'
 import { detachedRuntimeIsGone, processStartToken, verifyDetachedRuntime, writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
 import { claudeApiRequestHashes, claudeApiSourceDigest, claudeApiToolResultIds, claudeMessageBlocks, claudeMessageDigest, claudeOutputLimitCompanions, matchingClaudeRecoveries, recordClaudeRecoveryRequest, consumeClaudeRecoveryRequest, proveClaudeFrozenReads, readClaudeApiMessageBlobs, readClaudeApiSourceMetadata, readClaudeMcpToolNames, readClaudePublicHistory, verifyFrozenReadProof, type ClaudeRecovery, type ClaudeFrozenWitness, type ClaudePublicMessage, type ClaudePublicRecord, type FrozenReadProof } from './frozen-context.js'
-import { StructuredSessionError, structuredExecutionPolicy, structuredSeatbeltProfile, type StructuredExecution } from './session-structured-policy.js'
+import { structuredExecutionTimer, StructuredSessionError, structuredExecutionPolicy, structuredSeatbeltProfile, type StructuredExecution } from './session-structured-policy.js'
 
 const CLI_VERSION = '2.1.309 (Claude Code)'
 const toolNames = ['StructuredOutput', 'mcp__frozen__spex_read_frozen']
@@ -257,7 +257,7 @@ export async function stopClaudeStructuredTurn(execution: StructuredExecution, t
 
 /** 每次正式派发只有一个原生session和user；未知in-progress只保留恢复债务，绝不自动resume。 */
 export async function claudeStructuredTurn(realm: string, id: string, prompt: string, execution: StructuredExecution, callbacks: NativeCallbacks): Promise<NativeResult> {
-  if (execution.version !== 3 || execution.policy !== 'claude-frozen-read-only-v1' || !execution.frozenContext || execution.readerRuntime) throw new StructuredSessionError('unsupported', 'Claude requires its exact isolated frozen policy')
+  if (execution.version !== (execution.timeoutMs === null ? 5 : 3) || execution.policy !== 'claude-frozen-read-only-v1' || !execution.frozenContext || execution.readerRuntime) throw new StructuredSessionError('unsupported', 'Claude requires its exact isolated frozen policy')
   const model = claudeNativeModel(execution.model), root = join(realm, id)
   const replay = completedResult(root, prompt, execution)
   if (replay) return replay
@@ -337,7 +337,7 @@ export async function claudeStructuredTurn(realm: string, id: string, prompt: st
   active.set(root, { child, interrupt })
   const abort = (): void => interrupt()
   callbacks.signal?.addEventListener('abort', abort, { once: true })
-  const timer = setTimeout(() => { timedOut = true; interrupt(); void callbacks.onTimeout?.() }, execution.timeoutMs)
+  const timer = structuredExecutionTimer(execution.timeoutMs, () => { timedOut = true; interrupt(); void callbacks.onTimeout?.() })
   const lines = createInterface({ input: child.stdout })
   lines.on('line', line => {
     work = work.then(async () => {

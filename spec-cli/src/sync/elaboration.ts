@@ -110,7 +110,7 @@ function checkInput(input: ElaborationInput): void {
     if (change.action === 'move') destinations.add(change.to.path)
   }
   if (!Number.isInteger(input.maxRepairs ?? 2) || (input.maxRepairs ?? 2) < 0 || (input.maxRepairs ?? 2) > 5) throw new TypeError('修复预算必须是0到5的整数')
-  if (!Number.isInteger(input.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS) || (input.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS) <= 0) throw new TypeError('每次调用超时必须为正整数')
+  if (input.timeoutMs !== null && (!Number.isInteger(input.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS) || (input.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS) <= 0)) throw new TypeError('每次调用超时必须为正整数或null')
   if (!Number.isInteger(input.maxCalls ?? 2 * ((input.maxRepairs ?? 2) + 1)) || (input.maxCalls ?? 1) <= 0) throw new TypeError('调用预算必须为正整数')
   if (input.totalTimeoutMs !== undefined && input.totalTimeoutMs !== null && (!Number.isInteger(input.totalTimeoutMs) || input.totalTimeoutMs <= 0)) throw new TypeError('总时间预算必须为正整数或null')
 }
@@ -335,7 +335,9 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
   const prior = seed ? { requestKey: seed.requestKey, inputDigest, candidateDigest: seed.candidateDigest, renderedCandidateDigest: digest(seedCandidate), traces: seed.traces } : null
   const result: ElaborationResult = { status: 'exhausted', ...(input.readonlySpecRepair ? { readonlySpecRepair: input.readonlySpecRepair } : {}), ...(input.partitionBinding ? { partitionBinding: input.partitionBinding } : {}), inputDigest, candidateDigest: null, prior, changes: [], contracts: [], graph: null, coverage: null, gaps: [], blockedIds: [], readyIds: [], readyFlowIds: [], blockedFlows: [], retiredIds: [], nodeChanges: [], structurePassed: false, reviewPassed: false, runtimeVerification: 'not_run', implementationReady: false, deferredImplementationFindings: [], blockedStructureFindings: [], rounds: [], failure: null }
   const maxCalls = input.maxCalls ?? 2 * ((input.maxRepairs ?? 2) + 1)
-  const deadline = input.totalTimeoutMs === null ? null : Date.now() + (input.totalTimeoutMs ?? (input.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS) * maxCalls)
+  const callTimeoutMs = input.timeoutMs === undefined ? DEFAULT_CALL_TIMEOUT_MS : input.timeoutMs
+  const totalTimeoutMs = input.totalTimeoutMs === undefined ? callTimeoutMs === null ? null : callTimeoutMs * maxCalls : input.totalTimeoutMs
+  const deadline = totalTimeoutMs === null ? null : Date.now() + totalTimeoutMs
   let calls = 0
   const runner: ElaborationRunner = options.runner ?? (async request => {
     const { runStructuredSession } = await import('../session-structured.js')
@@ -366,7 +368,7 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
       const signal = input.signal ? AbortSignal.any([input.signal, budget.signal]) : budget.signal
       const requestDigest = digest({ inputDigest, purpose, prompt, schema })
       try {
-        const session = await runner({ root: input.root, base: input.base, prompt, schema, requestKey: `${input.requestKey}:${index}:${purpose}`, inputDigest: requestDigest, purpose, timeoutMs: input.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS, signal, model: input.model, effort: input.effort })
+        const session = await runner({ root: input.root, base: input.base, prompt, schema, requestKey: `${input.requestKey}:${index}:${purpose}`, inputDigest: requestDigest, purpose, timeoutMs: callTimeoutMs, signal, model: input.model, effort: input.effort })
         const trace: ElaborationTrace = { purpose, sessionId: session.sessionId, threadId: session.threadId, turnId: session.turnId, resultDigest: session.resultDigest, inputDigest: requestDigest }
         round.traces.push(trace)
         if (purpose === 'elaboration_generate') round.output = session.output

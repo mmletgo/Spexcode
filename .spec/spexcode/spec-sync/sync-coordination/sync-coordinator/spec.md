@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+同步 budget.mode=unlimited 的新模型请求使用 timeoutMs:null，表示不设置模型调用总时限；有限数字期限及旧记录语义保持。null 调用仍受独立会话创建、租约/心跳、显式取消/停止/关闭和可信 VERIFY/Docker 各自期限约束，不以大数模拟无限。 协调器从冻结预算唯一派生该值，unlimited 不再使用旧 callTimeoutMs 覆盖模型调用；分析、细化、生成及各自独审共同沿同一策略。
+
 同一operation的分区多轮承接已通过的局部analysis及普通叶P1：只读较早已终结attempt的原stage，严格核原operation/input/policy、精确readSet/selection、完整plan/分区归属及当前真实局部输入的原唯一冻结摘要。analysis承接在code-behavior现有context摘要生成后、任何模型派发前进行，并核原独立dispatch身份；叶P1沿freezeElaborationInput及完整partitionBinding，仅结构与独审accept且无failure的局部原件可承接。当前fence保存原resultRef/fromAttempt provenance，review/traces及输入摘要不改写；未审、错误绑定及聚合全局结果不能成为局部成功。局部并集仍重新执行严格全图seal，实际candidate改变后P2独审及V1–V4全部照常，不提前交付。
 
 只读候选续修来源的资格重验以原generation wrapper保存的readSet/selection恢复原冻结语境，再沿既有仅追加null资源的选择桥核当前合法性；后续已审P1新增ID不能让先前真实诊断失去资格，也不能重写旧wrapper/hash。真实原绑定改值、删除、非null扩展、source/input/policy不符继续拒绝；通用partition loader仍要求当前精确绑定。新whole候选的P2原生失败或再次语义repair都保留最新合法已审owner链，继续最终独审与V1–V4，不回退旧候选。

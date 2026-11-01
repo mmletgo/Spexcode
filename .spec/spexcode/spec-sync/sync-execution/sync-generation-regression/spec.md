@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+数字与null调用期限均原样传给新生成和独立审查；完整scope、CAS、schema及程序硬门禁保持。
+
 测试创建独立临时 Git 仓库并真实 capture/freeze 候选；注入 runner 只替代 native 模型调用，不替代 schema/CAS/scope/manifest/候选对象校验。覆盖完整候选与未改源码/测试 assertions、不同 session/thread、稳定 requestKey、dispatch 登记顺序、warning不阻断、强制硬门禁失败不review、生成 schema/CAS/越界拒绝，以及错 inputId/digest、不完整/不存在/重复 checkedIds、accept带发现、复用会话拒绝。
 
 组合输入基线与完整 UTF-8 文本从实际 Git 对象核对；准备后磁盘变化及调用者 Map/array/policy 修改不能改变已冻结生成/审查。取消与unsupported保留真实原因，不增加派发或偷偷重试。检查用户文件/index/HEAD 保持原样，真实候选仅冻结为对象 refs；本测试不证明 Docker V3 或完整 P2 产品交付。

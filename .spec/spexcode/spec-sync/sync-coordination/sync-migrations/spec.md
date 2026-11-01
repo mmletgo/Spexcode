@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+v17 为无限模型调用的语义writer marker；正式online backup后正常迁移，不修改v1–v16 checksum或历史JSON。旧v16 sync writer因组件版本拒绝；独立旧结构化queue另由新null执行策略version5在固定策略校验时拒绝。升级前停止全部旧backend/queue consumer并结算或保留在途资源；回滚停新writer后恢复升级前一致性备份，不删marker或改写null记录冒充旧数字。
+
 复用现有 SessionProtocol 和 applyComponentMigrations，不打开第二执行数据库或第二消息队列。升级前使用 backupTo 的 SQLite online backup；禁止直接复制 WAL 主文件。组件迁移在 BEGIN IMMEDIATE 中原子执行，错误全部回滚；重复启动核对 checksum，未知更高 generation 拒绝同步写入。不做破坏性 down migration，回退保留表和 blob。
 
 初始v1保存 operation（内含冻结输入引用）、attempt（候选/证据/checkpoint 引用）、逐实际文件/规则 lease、apply journal（内含 receipt）、成对 baseline。检索身份、阶段、generation、唯一接入/派发/副作用键显式列，scope/budget/refs 小 JSON 保存运行记录，不保存正文、大契约图或第二份可编辑源码。lease tombstone 的 generation 在释放后保留。范围和动作门禁由 [[sync-store]] 负责。

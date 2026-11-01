@@ -36,7 +36,7 @@ P0至P5按完整需求交付，不以阶段演示、局部测试或可修改的�
 
 已结算交付的显式来源采纳由 [[sync-source-adoption]] 处理，只快进干净原树至真实收据提交；Dashboard 和 CLI 共用门禁，保留未提交内容及分叉历史，不自动代替另行授权的分支合并。
 
-用户可用精确budget.mode=unlimited解除同operation总调用、attempt、修复次数和总期限，持续保存真实用量且deadline显式null；有限预算原语义保持，单次Native超时回收、验证timeout、租约/取消、全部独审和完整交付验收不变。
+用户可用精确budget.mode=unlimited解除同operation总调用、attempt、修复次数和总期限，持续保存真实用量且deadline显式null；有限预算原语义保持，模型调用使用显式null且不装调用超时timer；会话创建、精确Native取消/停止/关闭、验证timeout、租约和全部独审/完整交付验收不变。
 
 首次纳管的行为分析只覆盖真实输入与业务变化，不在没有作者/交付差量、重叠或明确裁决时重抄或展开原Spec；此时空整合输出合法，详细规格由后续P1及程序raw复制形成，独审与原始字节门禁保持。
 

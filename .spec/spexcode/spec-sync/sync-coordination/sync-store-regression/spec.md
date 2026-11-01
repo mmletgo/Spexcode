@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+v17语义marker的隔离真实SQLite迁移先online backup，逐字保留历史payload/receipt与v1–v16 checksum；旧v16组件writer拒绝升级后库，备份仍可按v16读取，不修改实际用户库。
+
 ZCode v16 marker 回归保存真实 SQLite 中旧 operation/attempt/resource/ingress/journal/receipt/pair 的逐字节行，核 v1–v15 checksum 不变、升级前一致备份可由 v15 打开、旧 writer 在新库拒绝及重入迁移幂等；不以模拟 receipt 表示产品 Git 交付已通过。
 
 受控用户请求回归证明：同一实际来源快照上的不同用户编辑语义不被错误归并，仅来源requestId不同则归并原预算；同键改变请求拒绝，原来源字节不改，请求证据被 GC pin 保留。真实 v2 数据库备份升级至 v3 后，无额外请求的旧事件仍命中相同 operation/payload，备份保留 v2 与原消息。

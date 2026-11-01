@@ -36,7 +36,7 @@ export type GenerationInput = {
   nodeChanges?: readonly ContractNodeChange[]
   allowedScope: SyncScope
   policy: { version: string; digest: string }
-  timeoutMs: number
+  timeoutMs: number | null
   signal?: AbortSignal
   model: string
   effort: 'high'

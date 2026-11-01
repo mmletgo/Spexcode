@@ -18,6 +18,8 @@ related:
 
 ## expanded spec
 
+version5 仅标识 timeoutMs:null 的固定调用预算能力，policy 字符串、隔离配置、realm、模型及 reader 证明保持原 Codex/Claude/ZCode 语义；数字请求继续使用原 version1–4。三个执行器复用同一计时接缝，null 不安装调用 timer；版本/timeout 不一致不得取得原生派发权。
+
 明确 `zcode:<provider-id>/<exact-model-id>` 使用版本4 `zcode-frozen-read-only-v1`，固定隔离合同见 [[zcode-structured-runtime]]。它复用私有 HOME、私有数据根、空工作目录和实测 macOS Seatbelt；私有配置关闭插件、hooks、skills、用户指令及额外 MCP，模型仅获唯一冻结 reader。既有 provider 配置与认证只作 SDK 正常使用的只读安全引用，不读取、复制或打印凭据。短私有 TMPDIR 的实际 Unix socket bind 与内外写入诱饵必须通过，不能放宽宿主目录或改用宽松 launcher。原始证明事件不包含 transport headers；未知能力或完整证明缺失仍失败，不自动切换 provider。
 
 以下 v1/v2 为原有 Codex 策略；明确 Claude 命名空间另使用 [[claude-structured-runtime]] 的版本3固定策略，不能自动 fallback。其空执行 cwd、私有 CLAUDE_CONFIG_DIR 和同一 macOS Seatbelt 写入边界只允许专属 runtime 写入。官方 restricted、空 built-in tools、独占 MCP、空 settings sources、关闭 hooks/记忆/普通指令文件和 slash commands 共同限制能力；仅 reader 与 StructuredOutput 可实际调用。CLI 2.1.309 的固定不可调用 DeferredToolPlaceholder schema 可以存在，实际调用拒绝。

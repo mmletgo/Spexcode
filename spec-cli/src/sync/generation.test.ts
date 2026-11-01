@@ -90,8 +90,8 @@ test('原生严格响应schema显式类型和required属性完整，不能仅以
   check(CANDIDATE_RESPONSE_SCHEMA); check(GENERATION_REVIEW_SCHEMA)
 })
 
-test('生成复用唯一文件 schema/CAS/scope，评审独立读取完整候选、源码与真实断言，仍不表示运行/交付', async t => {
-  const source = await input(t); const native = runner(source); const events: string[] = []
+for (const timeoutMs of [30000, null]) test(`生成和独审原样携带timeout=${timeoutMs}并复用唯一文件schema/CAS/scope`, async t => {
+  const source = await input(t); source.timeoutMs = timeoutMs; const native = runner(source); const events: string[] = []
   const index = readFileSync(join(source.root, '.git/index'))
   const head = execFileSync('git', ['-C', source.root, 'rev-parse', 'HEAD']).toString()
   const result = await runGeneration(source, { runner: native.run, onDispatch: async request => { events.push(`planned:${request.purpose}`) }, validateCandidate: async candidate => { events.push('hard-gate'); assert.equal(candidate.sourceInputId, source.snapshot.id); return [{ severity: 'warning', code: 'diagnostic', nodeId: 'export-contract', path: contractPath, message: '非阻断诊断' }] } })
@@ -106,6 +106,7 @@ test('生成复用唯一文件 schema/CAS/scope，评审独立读取完整候选
   assert.equal(JSON.stringify(GENERATION_REVIEW_SCHEMA).includes(source.snapshot.id), false, '请求专属约束不能污染共享schema')
   assert.deepEqual(events, ['planned:code_generate', 'hard-gate', 'planned:code_review'])
   assert.deepEqual(native.calls.map(call => call.requestKey), ['operation-1:attempt-1:code_generate', 'operation-1:attempt-1:code_review'])
+  assert.ok(native.calls.every(call => call.timeoutMs === timeoutMs))
   assert.notEqual(result.traces[0].sessionId, result.traces[1].sessionId); assert.notEqual(result.traces[0].threadId, result.traces[1].threadId)
   assert.ok(native.calls[1].prompt.includes('actual candidate implementation'))
   assert.ok(native.calls[1].prompt.includes(JSON.stringify(source.files.get('tests/export.test.mjs')!)))

@@ -10,6 +10,8 @@ code:
 
 ## expanded spec
 
+模型调用期限沿 [[structured-session-runtime]] 原样传递，明确 null 不装调用计时器；生成与独审、完整读取及各自业务门禁保持。
+
 分区投影保留尚未初始化的意图资源：精确选择中的 contract/flow 若 before、delivery、source 三个 owner 均为 null，原 residual 元数据及 null 语义仍进入分析和独审，不猜测路径或丢弃资源；存在真实 owner 时仍按本区 readPaths 投影。无 owner 元数据不成为契约正文、既有稳定业务义务、读取证明或写入授权，原 selection、scope 及其摘要不被改写。
 
 分区协调可在既有完整冻结context生成唯一inputDigest后、任何Native派发前消费严格匹配的已审analysis checkpoint；此接缝不另算业务摘要，不改变原检查范围、checkedPaths/checkedChangeIds、独立session/thread或完整输入验证。原分析/ref/traces保持，来源与当前fence的承接证明由协调器保存；失败或未审原件不返回为已审结果，修复诊断仍只作当前失败分区的数据。

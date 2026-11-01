@@ -135,6 +135,34 @@ test('frozen native dispatch preserves business binding, uses actual attempt/pol
   } finally { f.cleanup(); rmSync(directory, { recursive: true, force: true }) }
 })
 
+for (const defect of ['claude-legacy', 'claude-model', 'zcode-provider', 'zcode-model'] as const) test(`v5/null ${defect} proof is refused live and on removed replay`, async () => {
+  const model = defect.startsWith('claude') ? 'claude:MiniMax-M3.1-Flash' : 'zcode:bigmodel-api/GLM-5.3-Flash'
+  const f = await fixture(undefined, model), directory = mkdtempSync(join(tmpdir(), 'native-v5-proof-'))
+  try {
+    const frozenContext = freezeContext({ directory, sourceRoot: f.root, binding: { requestKey: f.request.requestKey, inputDigest: f.request.inputDigest, attemptId: f.claimed.attempt.id, policyDigest: f.claimed.operation.policyDigest }, entries: [{ id: 'task', label: 'task', kind: 'utf8', bytes: Buffer.from('frozen task') }] })
+    let calls = 0, bad: StructuredSessionResult | undefined
+    const run = f.runner({ ...f.runtimeBase, run: async request => {
+      calls++; const record = published(request), result = completed(record); f.records.set(record.session, record)
+      assert.equal(record.structuredExecution!.version, 5)
+      const args = { contextDigest: frozenContext.contextDigest, entryId: 'task', startByte: 0, endByte: 11 }
+      const coverage = proveFrozenReads(frozenContext, { threadId: result.threadId, turnId: result.turnId }, [{ type: 'dynamicToolCall', id: 'call', namespace: null, tool: 'spex_read_frozen', arguments: args, status: 'completed', success: true, contentItems: readFrozenRange(frozenContext, args).response.contentItems }])
+      const frozenReadProof = defect === 'claude-legacy' ? coverage : defect === 'claude-model'
+        ? { ...coverage, version: 3 as const, provider: 'claude-code' as const, promptId: 'prompt', model: 'foreign', cliVersion: '2.1.309', maxReadBytes: 65536 as const, maxResultSizeChars: 500000 as const }
+        : { ...coverage, version: 4 as const, provider: 'zcode' as const, providerId: defect === 'zcode-provider' ? 'foreign' : 'bigmodel-api', modelId: defect === 'zcode-model' ? 'foreign' : 'GLM-5.3-Flash', cliVersion: '0.17.1', cliSha256: 'a'.repeat(64), inputId: 'input', promptDigest: 'b'.repeat(64), witnessDigest: 'c'.repeat(64) }
+      bad = { ...result, frozenReadProof }; record.structuredExecution!.frozenReadProof = frozenReadProof
+      return bad
+    } })
+    const request = { ...f.request, frozenContext, timeoutMs: null }, message = defect.startsWith('claude') ? /Claude result lacks its exact native provider\/model proof/ : /ZCode result lacks its exact native provider\/model proof/
+    await assert.rejects(run(request), message)
+    assert.notEqual(f.resource().phase, 'removed'); assert.equal(calls, 1)
+    for (const phase of ['terminal', 'removed'] as const) {
+      const current = f.resource(), checkpoint = { ...f.checkpoint(), phase, status: 'completed' as const, result: bad! }
+      f.store.recordResourceCheckpoint(current.id, { operationId: checkpoint.operationId, attemptId: checkpoint.attemptId, inputId: checkpoint.inputId, candidateDigest: checkpoint.candidateDigest, phase, expectedCheckpointRef: current.checkpointRef, checkpointRef: f.blobIO.put(Buffer.from(JSON.stringify(checkpoint))) })
+    }
+    await assert.rejects(run(request), message); assert.equal(calls, 1)
+  } finally { f.cleanup(); rmSync(directory, { recursive: true, force: true }) }
+})
+
 test('large native prompt freezes before reserveDispatch and reuses stable manifest on retry', async () => {
   const f = await fixture()
   try {
@@ -272,20 +300,21 @@ test('incorrect native result identity, hash or published request binding is nev
   }
 })
 
-test('cancel acknowledgement loss still records durable exact stop proof after fence revocation without restoring business authority', async () => {
+for (const timeoutMs of [5000, null]) test(`cancel acknowledgement loss with timeout=${timeoutMs} still settles exact resources after fence revocation`, async () => {
   const f = await fixture()
   try {
     let cancellations = 0
     const run = f.runner({ readRecord: f.runtimeBase.readRecord, run: async request => {
       const record = published(request); record.status = 'active'; record.harnessSessionId = 'thread'; record.structuredExecution = { ...record.structuredExecution!, state: 'running', threadId: 'thread', turnId: 'turn', turnStartRequested: true }; f.records.set(record.session, record)
       return new Promise((_resolve, reject) => request.signal!.addEventListener('abort', () => reject(new Error('caller aborted')), { once: true }))
-    }, cancel: async id => {
+    }, cancel: async (id, options) => {
+      assert.equal(options?.timeoutMs, timeoutMs === null ? 15000 : timeoutMs)
       cancellations++; assert.equal(id, f.checkpoint().expectedSessionId)
       const record = f.records.get(id)!
       record.structuredExecution = { ...record.structuredExecution!, state: 'cancelled', cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: true, acknowledged: true, nativeStatus: 'interrupted' } }
       throw new Error('cancel reply lost')
     } })
-    const pending = run(f.request)
+    const pending = run({ ...f.request, timeoutMs })
     await waitUntil(() => f.resource()?.phase === 'created')
     f.store.requestControl(f.claimed.operation.id, 'cancel')
     await assert.rejects(pending, /cancel reply lost/)

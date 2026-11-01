@@ -10,7 +10,7 @@ import { runtimeRoot, mainCheckout, harnessIdentity } from '@spexcode/spec-core'
 import { detachedRuntimeGenerationToken, migrateLegacyDetachedRuntimeReceipt, processStartToken, verifyDetachedRuntime, type VerifiedDetachedRuntime } from '@spexcode/spec-core'
 import { codexGenerationEndpoints, codexGenerationSocketPath, currentCodexGeneration, legacyCodexGenerationEndpoint, readCodexGenerationLedger, prepareCodexGenerationClose, resolveCodexGenerationForClose, resolveCodexGenerationForResume, resolveCodexGenerationForSession, rebindCodexGeneration, type CodexGenerationEndpoint } from './codex-runtime-generations.js'
 import { spawnDetachedRuntime } from './runtime-ownership.js'
-import { assertFrozenReaderRuntime, frozenReaderDisabledFeatures, StructuredSessionError, StructuredSessionTransportError, structuredRealmRoot, type StructuredExecution } from './session-structured-policy.js'
+import { assertFrozenReaderRuntime, frozenReaderDisabledFeatures, structuredExecutionTimer, StructuredSessionError, StructuredSessionTransportError, structuredRealmRoot, type StructuredExecution } from './session-structured-policy.js'
 import { FROZEN_READ_TOOL, frozenReadOutputTokenLimit, frozenReadTool, frozenVisibleOutputs, persistFrozenRead, proveFrozenReads, type FrozenNativeItem, type FrozenReadProof, type FrozenReadReceipt } from './frozen-context.js'
 import { codexRolloutPath, codexTranscript } from '@spexcode/transcript'
 import { shQuote } from './sh.js'
@@ -2680,7 +2680,7 @@ export async function codexStructuredTurn(sock: string, cwd: string, prompt: str
   signal?: AbortSignal
 }): Promise<{ threadId: string; turnId: string; text: string; frozenReadProof?: FrozenReadProof }> {
   const frozen = execution.frozenContext
-  if (frozen ? execution.version !== 2 || execution.policy !== 'codex-frozen-read-only-v2' : execution.version !== 1 || execution.policy !== 'codex-read-only-v1')
+  if (frozen ? execution.version !== (execution.timeoutMs === null ? 5 : 2) || execution.policy !== 'codex-frozen-read-only-v2' : execution.version !== (execution.timeoutMs === null ? 5 : 1) || execution.policy !== 'codex-read-only-v1')
     throw new StructuredSessionError('unsupported', 'frozen reader requires its exact fixed v2 policy')
   if (execution.readerRuntime) assertFrozenReaderRuntime(execution.readerRuntime, execution.model, execution.frozenContext ? frozenReadOutputTokenLimit(execution.frozenContext) : undefined)
   const conn = createConnection(sock)
@@ -2803,10 +2803,10 @@ export async function codexStructuredTurn(sock: string, cwd: string, prompt: str
     // detaches only the observer after the durable publication fence has been installed.
     fail(new StructuredSessionError('cancelled', 'structured Agent execution was cancelled'))
   }
-  const timer = setTimeout(() => {
+  const timer = structuredExecutionTimer(execution.timeoutMs, () => {
     if (callbacks.onTimeout) void callbacks.onTimeout().catch((error: Error) => fail(error))
     else fail(new StructuredSessionError('timeout', 'structured Agent execution exceeded its deadline'))
-  }, execution.timeoutMs)
+  })
   callbacks.signal?.addEventListener('abort', abort, { once: true })
   let completionPoll: ReturnType<typeof setTimeout> | undefined
   try {

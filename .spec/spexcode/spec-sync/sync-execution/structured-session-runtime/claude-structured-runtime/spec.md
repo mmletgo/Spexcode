@@ -20,6 +20,8 @@ related:
 
 ## expanded spec
 
+version5/null 请求沿原 Claude policy、realm 与版本3读取证明执行，不装模型调用timeout timer；数字 version3 原样恢复。显式取消的interrupt、ACK及整组/MCP停止证明与独立stop期限保持。
+
 只接受 `claude:<exact-native-model-id>`，拒绝动态别名、未知 CLI 版本和自动 fallback。固定 Claude Code 2.1.309，经实际 init 和每次 actual API params.model 同时核明确模型；上下文显示后缀不能默默归一化成另一模型。默认或普通 model 字符串继续保留 Codex 含义。CLI 执行器身份与实际模型分开记录；现有 Native 证据的实际模型为 MiniMax-M3，不能标为 Anthropic 模型。
 
 每个正式派发有独立空 cwd、私有配置/home 和专属 session/user UUID，认证与路由透明沿实际 CLI 已有机制；不从环境变量缺失推定失败。同一私有目录、restricted 和外层只读隔离内的官方 auth status 确认可用后才正式派发，只留 loggedIn/authMethod/apiProvider，现有 keychain 或 wrapper 可由 CLI 正常消费。实际确认未认证才 unsupported，不复制凭据或改付费路径。macOS 外层只允许专属 runtime 写入，模型只见 [[claude-frozen-mcp]] 和 StructuredOutput；restricted/空内置工具/独占 MCP 等能力必须由实际 init/API tools 与实际调用再次核验。固定不可调用的 DeferredToolPlaceholder schema 允许存在，真实调用拒绝。
