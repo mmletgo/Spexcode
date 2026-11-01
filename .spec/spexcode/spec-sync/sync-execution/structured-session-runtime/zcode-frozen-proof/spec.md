@@ -21,7 +21,7 @@ related:
 
 唯一允许不参与模型输入的隐藏消息是原生 producer 生成的回合前 model_change 行政分隔线：仅能位于首条、无 anchor、自指 parent、system/timeline_event 与展示可见/模型隐藏语义、完成且零 token；唯一 part 只含 completed model_change separator、from/to ModelSelection 和同一时刻元数据，时间不得晚于原 user。info/toModel 必须为固定目标，fromModel 只接受合法模型选择展示元数据。未知字段、正文/工具 payload、回合内插入或伪造 anchor 均拒绝。该完整记录仍进入原始 witness 摘要，但从模型可见消息顺序、请求计数与覆盖中排除；不能宽泛跳过 hidden 消息。
 
-安全事件保留原始 turn lifecycle、tool.updated，以及有 toolCount 的 ModelRequest session.updated；不保存 transport headers。每次实际模型请求的 provider/model 必须精确一致且 toolCount 为1；messageCount 按全部原生 user、此前 assistant 和已完成工具响应重建，总请求数须等于原生 assistant 数，调用只允许 `mcp__frozen__spex_read_frozen`，不把 workspace MCP 列表当模型可见能力。只接受同轮 completed/success、原 inputId 和完整 response；失败、取消或未终结不能产生证明。
+安全事件保留原始 turn lifecycle、tool.updated，以及有 toolCount 的 ModelRequest session.updated；不保存 transport headers。每次实际模型请求的 provider/model 必须精确一致且 toolCount 为1；messageCount 按全部原生 user、此前 assistant 和已完成工具响应重建。固定 CLI 0.17.1 的 iteration 是累计工具调用数的十次分桶：无调用为0，否则为 ceil(此前已完成且逐一核真的调用数/10)，并非请求序号；可跨桶跳号或连续请求同桶，仍必须逐值精确匹配。总请求数须等于原生 assistant 数，调用只允许 `mcp__frozen__spex_read_frozen`，不把 workspace MCP 列表当模型可见能力。只接受同轮 completed/success、原 inputId 和完整 response；失败、取消或未终结不能产生证明。
 
 每个原生 tool part 必须 completed，使用自身的完整 state.input/output，逐项匹配同轮 scheduled/result 事件。事件可以声明 inputOmitted/model_stream，因为参数权威来自原始 part；缺失 part.input 不能从 MCP 账本补齐。原始 part.state.metadata.serialization 与 result 事件均须未截断、原始/返回字节长度相等；事件结果必须 success、未遗漏且与 part 原文一致；任何参数、正文或工具篡改都拒绝。所有原生调用均须唯一配对，并按终态 anchor 的 assistant 顺序绑定第 i 次 ModelRequest：仅能在其所属 assistant 的生成请求之后派发，并在第 i+1 次请求前完成、由该紧邻后续请求消费。不能借用任意更晚请求，或把已执行工具搬到尚未生成的 assistant。
 

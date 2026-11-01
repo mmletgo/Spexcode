@@ -211,7 +211,7 @@ export function proveZCodeFrozenReads(ref: FrozenContextRef, witness: ZCodeFroze
       response = payload.response; ended = true; continue
     }
     if (event.type === 'session.updated') {
-      if (payload.providerId !== providerId || payload.modelId !== modelId || payload.toolCount !== 1 || payload.iteration !== requests.length || payload.messageCount !== userCount + requests.length + results.size) stale('actual ModelRequest has a foreign model, tool surface or iteration')
+      if (payload.providerId !== providerId || payload.modelId !== modelId || payload.toolCount !== 1 || payload.iteration !== Math.ceil(results.size / 10) || payload.messageCount !== userCount + requests.length + results.size) stale('actual ModelRequest has a foreign model, tool surface or iteration')
       requests.push(seq); continue
     }
     if (event.type !== 'tool.updated') stale('evidence contains a foreign turn, user input or unsupported event')
