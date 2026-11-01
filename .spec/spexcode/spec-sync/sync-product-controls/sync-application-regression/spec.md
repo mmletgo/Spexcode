@@ -103,6 +103,8 @@ P4 partial→decide使用原P3-DELIVERY keep_intent真实链补强：fresh exact
 
 累计提交边界由应用传给规划器的 commitTrigger 验证：initial.before 为 null，后续 before 精确复用上次自动接入 InputSnapshot；停机先提交 Spec 再提交代码仍为 combined，paths 同时含两次真实 tree 差量，before 不是 HEAD parent。暂停期间仅观测的快照不能消费首次 initial 边界。
 
+消费边界回归用真实Git/SQLite与明确只读的消费记录投影（不登记receipt或权威baseline）复现两个失败：当前已消费HEAD被排除后，自动Spec操作supersede尚未交付且保requestBlob的UI正文；501条普通observed挤掉已消费Spec后，真正code-only提交误分为combined。修复要求同HEAD为空差量、不新增operation且原请求保持queued；重新创建应用后before仍为完整已消费快照、paths仅真实新源码，不调用模型。新文件、删除、mode与null绑定的真实残差继续由提交及组合回归保留。
+
 
 分区故障回归允许单操作的不同分区同时在途，按实际唯一 requestKey 集合核对首次派发与重放/暂停期间的零新增；不把整操作固定成一个模型调用。应用夹具提供足够通过真实分区预检的测试预算，预算不足零调用的产品门禁仍由协调器专门用例验证；不调整实际项目预算。
 

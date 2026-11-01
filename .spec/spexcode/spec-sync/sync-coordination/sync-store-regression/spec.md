@@ -40,6 +40,8 @@ receipt树引用相同但manifest不同仍拒绝，journal保持未登记；相�
 
 操作列表覆盖仓库隔离、精确来源根、终态可见、rowid顺序与默认/显式分页边界，非法limit拒绝；不同更新时间不会改变接入顺序。
 
+commit观察历史读取覆盖超过500条普通重复记录、同input/difference的admitted与observed同时保留、真实来源与captureKind隔离、失败/blocked排除及数据库重开后的rowid顺序；折叠重复行不改变原持久记录或消费语义。真实临时evidence缓存先复现裸字符串差异引用未pin而被gc删除，再验证重开后按pinnedBlobRefs执行真实gc仍可逐字读取消费blob，同时确实删除无引用blob。
+
 journal精确查询证明未知operation拒绝、另一operation不可串读，终态已结算receipt仍可返回。
 
 接入key精确查询同时覆盖主key和alias、不存在返回null；不要求扫描操作列表或用latest baseline重建旧payload。

@@ -125,7 +125,8 @@ export async function buildSyncApplicationPlan(snapshot: InputSnapshot, nodeId: 
     const entry = verifySnapshot(binding.bytePair.verifiedDelivery).find(entry => entry.path === binding.resource.path)
     return entry && entry.mode !== '120000' ? [readObject(snapshot.source.commonDir, entry.oid).toString('utf8')] : []
   })
-  const discoveryPaths = discoverSyncSourcePaths(snapshot, settings.sourcePaths, [...files.values(), ...oldFiles.values(), ...discoveryOwnerFiles]).filter(path => !options.commitTrigger?.before || options.commitTrigger.paths.includes(path))
+  const discoveryGovernance = [...files.values(), ...oldFiles.values(), ...discoveryOwnerFiles]
+  const discoveryPaths = [...new Set([snapshot, ...before ? [before] : []].flatMap(input => discoverSyncSourcePaths(input, settings.sourcePaths, discoveryGovernance)))].filter(path => !before || options.commitTrigger!.paths.includes(path))
   const executionScope: SyncScope = { paths: [...new Set([...targets.map(target => target.path), ...priorTargets.map(target => target.path), ...[...codePaths, ...impact.testPaths].filter(path => coveredPath(path, writable) && !settings.mandatoryTests.some(test => test.testPath === path))])].sort(), contractIds: [...selectedContractIds].filter(id => !graphs.some(graph => graph.items.get(id)?.kind === 'FLOW')).sort(), flowIds: [...selectedContractIds].filter(id => graphs.some(graph => graph.items.get(id)?.kind === 'FLOW')).sort() }
   return {
     executionScope,

@@ -355,16 +355,16 @@ export class SyncApplication {
     return { changed: changedPaths.length > 0 || residualPaths.length > 0 || intentChanged || contextChanged, specChanged: intentChanged || changedPaths.some(path => path.path.startsWith('.spec/')), codeChanged: contextChanged || changedPaths.some(path => !path.path.startsWith('.spec/')) || residualPaths.some(path => !path.startsWith('.spec/')), readonlyContext }
   }
   private committedTrigger(snapshot: InputSnapshot, nodeId: string, plan: SyncCoordinatorPlan): { origin: SyncOperation['origin'] | null; commitTrigger: { before: InputSnapshot | null; paths: string[] } } {
-    const operations = this.store.listOperations(snapshot.source.repositoryId, { sourceRoot: this.root, limit: 500 }).filter(operation => operation.input.captureKind === 'commit' && JSON.stringify(operation.input.source) === JSON.stringify(snapshot.source) && operation.ingressKey.startsWith('observation:') && this.operationPlan(operation).intentNodeId === nodeId)
-    const consumed = this.store.listObservations(snapshot.source, 500).find(observation => {
-      if (observation.input.captureKind !== 'commit' || observation.input.id === snapshot.id || observation.failure) return false
+    const consumed = this.store.listCommittedObservationFrontiers(snapshot.source).find(observation => {
       const difference = JSON.parse(readEvidence(snapshot.source.commonDir, { sha256: observation.latestDifferenceDigest }).toString('utf8')) as { nodeId: string; consumption?: string }
       if (difference.nodeId !== nodeId) return false
       return !!observation.operationId && ['admitted', 'coalesced', 'duplicate'].includes(observation.outcome) || difference.consumption === 'baseline' && !!observation.selection?.bindings.some(binding => 'bytePair' in binding ? binding.bytePair : binding.intentPair)
     })
-    const accepted = operations.find(operation => operation.input.id === snapshot.id), before = consumed?.input ?? operations.find(operation => operation.input.id !== snapshot.id)?.input ?? null
+    const accepted = this.store.findOperationByIngressKey(`observation:${snapshot.source.repositoryId}:${snapshot.id}:${nodeId}`)
+    const before = consumed?.input ?? null
     const paths = before ? objectGit(snapshot.source.commonDir, ['diff', '--name-only', '-z', '--no-renames', before.immutableTree, snapshot.immutableTree]).toString('utf8').split('\0').filter(Boolean) : verifySnapshot(snapshot).map(entry => entry.path)
-    const relevant = paths.filter(path => coveredPath(path, [...plan.executionScope!.paths, ...plan.readPaths]))
+    const priorPaths = consumed?.selection?.bindings.flatMap(binding => binding.resource.kind === 'path' ? [binding.resource.path] : []) ?? []
+    const relevant = paths.filter(path => coveredPath(path, [...plan.executionScope!.paths, ...plan.readPaths, ...priorPaths]))
     const spec = relevant.some(isSyncSpecPath), code = relevant.some(path => !path.startsWith('.spec/'))
     const origin = accepted?.origin ?? (!before ? 'initial' : spec && code ? 'combined' : code ? 'code' : spec ? 'spec' : null)
     return { origin, commitTrigger: { before, paths } }

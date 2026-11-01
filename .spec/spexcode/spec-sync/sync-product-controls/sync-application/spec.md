@@ -113,13 +113,13 @@ revert 将精确历史恢复 Spec 作为可信目标，保原节点/业务 ID �
 
 Dashboard 的受控正文保存继续直接 submit，requestBlob 即时触发 spec→code，不等待 Git 提交。外部编辑器的 Spec/代码保存、原子替换与 git add 均不启动自动模型；自动观察只接受已提交 HEAD tree，首次显式 enable 可从既有 committed HEAD 发起 initial，同期未提交或未暂存的新编辑不混入。enable 仅授权已提交配置及意图，不从未提交内容建立初始输入。
 
-首次无已证明自动接入快照时以 initial 纳管当前已提交树；旧无 captureKind 的操作不能被猜作 committed 前态。后续自动输入依据该节点最近已消费的真实 commit 快照到当前输入的 tree 差量区分 spec/code/combined；停机多次提交仍按累计已提交差量分类，paused 中尚未处理的新作者变化只观察而不消费边界。v2 plan 的 commitTrigger 冻结该 before 快照（首次 initial 为 null）及真实累计 paths，after 仍为 operation.input。它是作者提交前态而非已验证交付，不替代 receipt/baseline，也不按 HEAD^ 猜测或只保存可能被 GC 的 OID。仅提交无关路径或空提交不启动模型。code 冻结 code_to_spec、combined 冻结 combined；initial 有已提交授权实现时冻结 code_to_spec，否则与 Spec 保存相同冻结 spec_to_code。沿同一 plan/selection 规划，不复制执行器或分区政策。
+首次无已证明自动接入快照时以 initial 纳管当前已提交树；旧无 captureKind 的操作不能被猜作 committed 前态。后续自动输入依据该节点最近已消费的真实 commit 快照到当前输入的 tree 差量区分 spec/code/combined；停机多次提交仍按累计已提交差量分类，paused 中尚未处理的新作者变化只观察而不消费边界。相关路径取当前计划与该节点最近消费记录的精确path绑定并集，已删除路径不能仅因当前树不再列出它而失去方向；不扩大到全局源码根或无关owner。v2 plan 的 commitTrigger 冻结该 before 快照（首次 initial 为 null）及真实累计 paths，after 仍为 operation.input。它是作者提交前态而非已验证交付，不替代 receipt/baseline，也不按 HEAD^ 猜测或只保存可能被 GC 的 OID。仅提交无关路径或空提交不启动模型。code 冻结 code_to_spec、combined 冻结 combined；initial 有已提交授权实现时冻结 code_to_spec，否则与 Spec 保存相同冻结 spec_to_code。沿同一 plan/selection 规划，不复制执行器或分区政策。
 
 自动 ingress 固定到提交快照与节点，同一 commit 重放不因 baseline 或差异证据推进而重新派发；已结算 receipt/baseline 继续按真实意图消费和采纳证明消除同步自身交付/采纳提交的回声，不按 Git author 或 session trailer 猜测作者。停机提交在 service 启动及周期补偿中继续发现。新 commit 沿既有作用域、物理控制和预算族门禁，不新增触发配置开关。
 
 自动 operation 的 detail 当前性、retry、decide、resume 与运行前可信配置复核均按其 input.captureKind 采集同模式当前输入；旧无标记工作区操作保持原判据。status 的原树落地投影与 adoptionEligibility/adopt 仍读取真实工作文件及 index，未提交编辑不能因 commit snapshot 而获得覆盖或采纳资格。
 
-最近已消费提交边界由既有持久 observations 和自动 operation.input 推导：真实 admitted/coalesced/duplicate 接入，或 observationChanges 已判断 changed=false 且 exact selection 含真实非 null 基线的提交快照，均可作为下一次 before。后者仅在既有差异 evidence 写 consumption=baseline，保同一 selection/receipt 证明；旧 evidence 无字段不猜已消费，暂停且 changed=true 的新作者提交不标记。同步生成 Spec 的 receipt 被正式采纳并去回声后，该完整已提交快照仍推进消费边界，后续 code-only commit 的 origin 与 commitTrigger.paths 不夹带先前已消费的生成 Spec。服务重启及停机补偿复用同一持久事实，不新建可变游标、DB 表或作者启发式。
+最近已消费提交边界由既有持久 observations 和自动 operation.input 推导：真实 admitted/coalesced/duplicate 接入，或 observationChanges 已判断 changed=false 且 exact selection 含真实非 null 基线的提交快照，均可作为下一次 before。后者仅在既有差异 evidence 写 consumption=baseline，保同一 selection/receipt 证明；旧 evidence 无字段不猜已消费，暂停且 changed=true 的新作者提交不标记。消费查询保留完整历史，不受状态列表的500条展示上限影响；普通重复观察不能挤掉消费点。当前已消费的同一commit也可作为before，真实tree差量为空时不能因captureKind、计划摘要或重新观察而退回旧initial、取代待交付的受控正文请求。同步生成 Spec 的 receipt 被正式采纳并去回声后，该完整已提交快照仍推进消费边界，后续 code-only commit 的 origin 与 commitTrigger.paths 不夹带先前已消费的生成 Spec。服务重启及停机补偿复用同一持久事实，不新建可变游标、DB 表或作者启发式。真正的新提交、文件新增/删除/mode变化与未消费意图仍沿原差量门禁，观察故障或仅暂停的新输入不能消费边界。
 
 
 用户通过正式decide明确选择保持原意、采用行为或新规则时，受控原意与所选代码分歧共同进入v2 combined新操作；仍只沿原作用域、真实authority、预算、独审及不可改oracle。原code提交操作保持code_to_spec只读，不把自动提交事件本身当作写代码授权。

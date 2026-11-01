@@ -1359,6 +1359,107 @@ test('提交门禁：code、Spec、混合commit按已提交差量分类，同com
   } finally { await f.application.stopService(); f.cleanup() }
 })
 
+test('提交消费边界不排除当前已消费HEAD，采集身份或计划变化不取代待交付正文请求', async () => {
+  const f = await fixture()
+  try {
+    governDemoCode(f)
+    f.application['ownsObservation'] = () => true
+    f.application.start = () => {}
+    await f.application.enable()
+    const initial = await captureInputSnapshot(f.root, { committed: true })
+    await f.application['observeNode'](initial, 'demo')
+    writeFileSync(join(f.root, '.spec/demo/spec.md'), readFileSync(join(f.root, '.spec/demo/spec.md'), 'utf8') + '\n已消费的交付说明。\n')
+    f.git(['add', '.']); f.git(['commit', '-qm', 'fixture: consumed publication'])
+    const consumed = await captureInputSnapshot(f.root, { committed: true }), frozen = await f.application['freezeNodePlan'](consumed, 'demo')
+    // 仅投影既有消费记录的读边界，不登记receipt、基线head或业务验证通过。
+    const pair: BaselinePair = { id: 'fixture-consumption-projection', source: consumed.source, repositoryId: consumed.source.repositoryId, sourceInput: consumed, verifiedDelivery: consumed, coveredScope: frozen.plan.executionScope!, receiptId: 'fixture-projection-only', settledAtMs: Date.now() }
+    const { digest: _digest, ...body } = frozen.selection
+    const selected = { ...body, bindings: body.bindings.map(binding => 'bytePair' in binding ? { ...binding, bytePair: pair } : binding) }
+    const selection = { ...selected, digest: contentHash(JSON.stringify(selected, (_key, value: unknown) => value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value)) }
+    const configRef = writeEvidence(consumed.source.commonDir, { fixture: 'consumed configuration' }), latestDifferenceDigest = writeEvidence(consumed.source.commonDir, { nodeId: 'demo', consumption: 'baseline' }).sha256
+    f.application.store.recordObservation({ input: consumed, configRef, selection, latestDifferenceDigest }, { controlRevision: 0, selectionDigest: selection.digest })
+    const current = await captureInputSnapshot(f.root)
+    assert.notEqual(current.id, consumed.id)
+    assert.equal(current.immutableTree, consumed.immutableTree)
+    const edit = { startLine: 5, endLine: 5, original: '返回用户指定的文本。', replacement: '返回用户指定的文本，并拒绝换行。' }
+    const pending = (await f.application.submit({ nodeId: 'demo', requestId: 'pending-ui-body', patch: edit })).operation!
+    assert.ok(pending.requestBlob)
+    const before = f.application['committedTrigger'](consumed, 'demo', frozen.plan)
+    await f.application['observeNode'](consumed, 'demo')
+    const after = f.application.store.readOperation(pending.id)
+    assert.equal(after.phase, 'queued', '同源观察不能supersede尚未交付的UI正文请求')
+    assert.equal(after.requestBlob?.sha256, pending.requestBlob!.sha256)
+    assert.equal(before.origin, null, '已消费的同HEAD不再从旧initial重算Spec方向')
+    assert.equal(before.commitTrigger.before?.id, consumed.id)
+    assert.deepEqual(before.commitTrigger.paths, [])
+    assert.equal(f.application.store.listOperations(consumed.source.repositoryId).length, 2)
+    assert.equal(f.calls.length, 0)
+  } finally { await f.application.stopService(); f.cleanup() }
+})
+
+test('提交消费边界在超过500次普通观察及重启后保留，后续code提交不夹带已消费Spec', async () => {
+  const f = await fixture()
+  try {
+    governDemoCode(f)
+    f.application['ownsObservation'] = () => true
+    f.application.start = () => {}
+    await f.application.enable()
+    await f.application['observeNode'](await captureInputSnapshot(f.root, { committed: true }), 'demo')
+    writeFileSync(join(f.root, '.spec/demo/spec.md'), readFileSync(join(f.root, '.spec/demo/spec.md'), 'utf8') + '\n已采纳的Spec正文。\n')
+    f.git(['add', '.']); f.git(['commit', '-qm', 'fixture: consumed spec'])
+    const consumed = await captureInputSnapshot(f.root, { committed: true }), frozen = await f.application['freezeNodePlan'](consumed, 'demo')
+    const pair: BaselinePair = { id: 'fixture-history-projection', source: consumed.source, repositoryId: consumed.source.repositoryId, sourceInput: consumed, verifiedDelivery: consumed, coveredScope: frozen.plan.executionScope!, receiptId: 'fixture-projection-only', settledAtMs: Date.now() }
+    const { digest: _digest, ...body } = frozen.selection
+    const selected = { ...body, bindings: body.bindings.map(binding => 'bytePair' in binding ? { ...binding, bytePair: pair } : binding) }
+    const selection = { ...selected, digest: contentHash(JSON.stringify(selected, (_key, value: unknown) => value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value)) }
+    const configRef = writeEvidence(consumed.source.commonDir, { fixture: 'configuration' })
+    f.application.store.recordObservation({ input: consumed, configRef, selection, latestDifferenceDigest: writeEvidence(consumed.source.commonDir, { nodeId: 'demo', consumption: 'baseline' }).sha256 }, { controlRevision: 0, selectionDigest: selection.digest })
+    writeFileSync(join(f.root, 'src/demo.mjs'), 'export const demo = text => `${text}!`\n')
+    f.git(['add', '.']); f.git(['commit', '-qm', 'real code-only commit'])
+    const next = await captureInputSnapshot(f.root, { committed: true })
+    const ordinary = { input: next, configRef, selection: null, latestDifferenceDigest: writeEvidence(next.source.commonDir, { nodeId: 'demo', policyDigest: 'changed metadata only' }).sha256 }
+    for (let index = 0; index < 501; index++) f.application.store.recordObservation(ordinary, { controlRevision: 0, selectionDigest: null })
+    assert.equal(f.application.store.listObservations(next.source, 500).every(observation => observation.input.id === next.id), true)
+    const reopened = await SyncApplication.create(f.root, { protocol: f.protocol, runtimeDirectory: join(f.temp, 'runtime') })
+    try {
+      const trigger = reopened['committedTrigger'](next, 'demo', frozen.plan)
+      assert.equal(trigger.origin, 'code')
+      assert.equal(trigger.commitTrigger.before?.id, consumed.id)
+      assert.deepEqual(trigger.commitTrigger.paths, ['src/demo.mjs'])
+    } finally { await reopened.stopService() }
+    assert.equal(f.calls.length, 0)
+  } finally { await f.application.stopService(); f.cleanup() }
+})
+
+test('提交消费边界仍准入真正的新文件、mode与删除，冻结未配对路径的真实存在性', async () => {
+  const f = await fixture()
+  try {
+    governDemoCode(f)
+    f.application['ownsObservation'] = () => true
+    f.application.start = () => {}
+    await f.application.enable()
+    await f.application['observeNode'](await captureInputSnapshot(f.root, { committed: true }), 'demo')
+    for (const action of ['new', 'mode', 'delete'] as const) {
+      if (action === 'new') writeFileSync(join(f.root, 'src/new.mjs'), 'export const newValue = 1\n')
+      else if (action === 'mode') chmodSync(join(f.root, 'src/new.mjs'), 0o755)
+      else rmSync(join(f.root, 'src/new.mjs'))
+      f.git(['add', '.']); f.git(['commit', '-qm', `real ${action} source`])
+      const input = await captureInputSnapshot(f.root, { committed: true })
+      await f.application['observeNode'](input, 'demo')
+      const operation = f.application.store.listOperations(input.source.repositoryId).find(operation => operation.input.id === input.id)
+      assert.ok(operation, `${action}不能因无bytehead被忽略`)
+      assert.equal(operation.origin, 'code')
+      const entry = readTree(input.source.commonDir, operation.input.immutableTree).find(entry => entry.path === 'src/new.mjs')
+      assert.equal(entry?.mode, action === 'delete' ? undefined : action === 'mode' ? '100755' : '100644')
+      const binding = operation.baselineSelection!.bindings.find(binding => binding.resource.kind === 'path' && binding.resource.path === 'src/new.mjs')
+      assert.ok(binding && 'bytePair' in binding && binding.bytePair === null)
+      const plan = JSON.parse(readEvidence(input.source.commonDir, operation.planBlob!).toString('utf8')) as { readPaths: string[] }
+      assert.ok(plan.readPaths.includes('src/new.mjs'), '删除也保留真实前态路径和当前absence的只读冻结')
+    }
+    assert.equal(f.calls.length, 0)
+  } finally { await f.application.stopService(); f.cleanup() }
+})
+
 test('AC-APPLICATION-P4-01 无浏览器暂停仍记录提交，恢复最新输入且重复失败不重开调用', async () => {
   const f = await fixture()
   try {

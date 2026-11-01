@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { applyComponentMigrations, openProtocol, type SqlParam } from '@spexcode/session-protocol'
+import { gc, getBlob, putBlob } from '@spexcode/spec-core'
 import { migrateSyncStore, SYNC_COMPONENT, SYNC_MIGRATIONS } from './migrations.js'
 import type { AdmitSyncInput, ApplyFilePlan, ApplyPlan, ApplyReceipt, BlobRef, CandidateRef, ClaimedAttempt, InputSnapshot, SyncScope, VerificationRef, VerificationResultBlob, WorktreeIdentity } from './operation-types.js'
 import { captureInputSnapshot, readEvidence } from './snapshot.js'
@@ -1649,6 +1650,49 @@ test('P4 物理暂停跨分支及重启保留，仍收件和观察，run revisio
     try { const store = new SyncStore(reopened, f.options); assert.equal(store.readPhysicalControl(physical).control, 'pause'); assert.equal(store.pinnedBlobRefs().some(ref => ref.sha256 === configRef.sha256), true); assert.throws(() => store.requestPhysicalControl(physical, 'run', 0), /SYNC_CONTROL_STALE/); store.requestPhysicalControl(physical, 'run', 1); const queued = store.nextQueued('repo')!; assert.equal(queued.id, acknowledged.id); store.claimQueuedAttempt({ operationId: queued.id, source: branch, scope: covered, leaseMs: 1000, expectedRevision: queued.revision }); assert.equal(store.readOperation(queued.id).phase, 'analyzing') } finally { reopened.close() }
     const failed = f.store.recordObservation({ input: admission.input, configRef, selection: null, latestDifferenceDigest: 'captured-plan-failed', failure: { code: 'PLAN_FAILED', message: 'true plan failure', kind: 'unsupported', evidenceRefs: [] } }, { controlRevision: 2, selectionDigest: null })
     assert.equal(failed.failure?.code, 'PLAN_FAILED')
+  } finally { f.cleanup() }
+})
+
+test('commit观察历史折叠普通重复但保留接入消费事实，不受500条展示上限且重开隔离来源', async () => {
+  const f = await fixture()
+  try {
+    const selected = f.store.readBaselineSelection(source(), [{ kind: 'path', path: 'src/a.ts' }, { kind: 'contract', id: 'RULE-A' }]); assert.ok('selection' in selected)
+    const input = { ...f.input(), captureKind: 'commit' as const }, configRef = f.put({ fixture: 'committed observation history' })
+    const value = { input, configRef, selection: selected.selection, latestDifferenceDigest: 'admitted-difference' }, expected = { controlRevision: 0, selectionDigest: selected.selection.digest }
+    const admitted = f.store.observeAndAdmit(value, { ...f.admit(), input, baselineSelection: selected.selection }, expected)
+    assert.equal(admitted.outcome, 'admitted')
+    let latest = f.store.recordObservation(value, expected)
+    for (let index = 0; index < 501; index++) latest = f.store.recordObservation(value, expected)
+    const otherDifference = f.store.recordObservation({ ...value, latestDifferenceDigest: 'other-node-or-policy' }, expected)
+    f.store.recordObservation({ ...value, input: f.input(), latestDifferenceDigest: 'working-copy-only' }, expected)
+    f.store.recordObservation({ ...value, input: { ...input, source: source('other') } }, expected)
+    f.store.recordObservation({ ...value, failure: { code: 'PLANNING_FAIL', message: 'not consumed', kind: 'unsupported', evidenceRefs: [] } }, expected)
+    const blocked = f.store.observeAndAdmit({ ...value, latestDifferenceDigest: 'blocked-admission' }, { ...f.admit(), input: { ...input, id: 'different-input' }, baselineSelection: selected.selection }, expected)
+    assert.equal(blocked.outcome, 'blocked')
+    const reopened = openProtocol(f.path)
+    try {
+      const store = new SyncStore(reopened, f.options), frontiers = store.listCommittedObservationFrontiers(source())
+      assert.deepEqual(frontiers.map(observation => observation.id), [otherDifference.id, latest.id, admitted.observation.id])
+      assert.equal(frontiers[2].operationId, 'operation' in admitted ? admitted.operation.id : null)
+      assert.equal(store.listObservations(source(), 500).some(observation => observation.id === admitted.observation.id), false)
+    } finally { reopened.close() }
+  } finally { f.cleanup() }
+})
+
+test('commit观察的差异摘要在重开和真实evidence GC后保留，消费证明不因裸字符串引用丢失', async () => {
+  const f = await fixture()
+  try {
+    const directory = join(f.root, 'evidence'), bytes = Buffer.from(JSON.stringify({ nodeId: 'demo', consumption: 'baseline' }))
+    const difference = putBlob(bytes, directory), orphan = putBlob(Buffer.from('unreferenced fixture'), directory)
+    f.store.recordObservation({ input: { ...f.input(), captureKind: 'commit' }, configRef: f.put({ fixture: 'configuration' }), selection: null, latestDifferenceDigest: difference }, { controlRevision: 0, selectionDigest: null })
+    const reopened = openProtocol(f.path)
+    try {
+      const store = new SyncStore(reopened, f.options), keep = new Set(store.pinnedBlobRefs().map(ref => ref.sha256))
+      gc(keep, directory)
+      assert.deepEqual(getBlob(difference, directory), bytes)
+      assert.equal(getBlob(orphan, directory), null)
+      assert.equal(store.listCommittedObservationFrontiers(source())[0].latestDifferenceDigest, difference)
+    } finally { reopened.close() }
   } finally { f.cleanup() }
 })
 

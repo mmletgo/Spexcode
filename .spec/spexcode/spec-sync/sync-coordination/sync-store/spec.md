@@ -50,6 +50,8 @@ findResource(attemptId,key)按精确身份查询包括removed的资源，供同�
 
 listOperations(repositoryId, {limit?, sourceRoot?}) 在 SQL 内按仓库及可选精确来源根筛选，并按 rowid DESC 返回最新接入操作，包含运行中及终态。默认 limit=100，只接受整数1..500；读取仍校验组件版本，不以壁钟决定顺序，也不读全库后过滤。
 
+listCommittedObservationFrontiers只读既有observation历史，按真实source身份筛选commit且无failure/blocked的记录；同input、差异摘要与outcome只保最新行，按rowid倒序。它不受展示分页上限影响，普通重复观察不丢历史admitted或baseline消费事实；应用在事务外核差异证据的node与consumption，不把任意观察当已处理，不引入第二份消费游标。pinnedBlobRefs包含完整observations中以latestDifferenceDigest字符串保存的差异blob，GC不得删掉仍由持久消费记录引用的证明。
+
 listJournals(operationId)先核operation存在，再按rowid顺序读取该操作全部journal及已结算receipt；终态交付事实不从恢复列表推断。
 
 findOperationByIngressKey(ingressKey)按精确主键或持久alias查询operation，不存在返回null。应用重放原operation冻结baseline，必须自行核仓库/物理来源、input/request/policy绑定；不能用latest baseline改变已接入payload。
