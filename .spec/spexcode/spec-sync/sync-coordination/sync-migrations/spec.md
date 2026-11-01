@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+v18以无DDL SELECT 1登记native-worktree阶段seed、自由仓库读取与实际Git候选导入的writer能力，结构化执行为固定version6。沿既有online backup及组件事务升级，保v1–v17原字节/checksum、旧record/payload/receipt。旧v17及更早writer必须整体拒绝；升级前正式停止全部旧backend/queue并结算真实资源。回滚先停新writer、结算或保留真实资源，再恢复升级前一致备份及原evidence，不能删marker、改v3工具描述或手改任务DB伪装旧协议。
+
 v17 为无限模型调用的语义writer marker；正式online backup后正常迁移，不修改v1–v16 checksum或历史JSON。旧v16 sync writer因组件版本拒绝；独立旧结构化queue另由新null执行策略version5在固定策略校验时拒绝。升级前停止全部旧backend/queue consumer并结算或保留在途资源；回滚停新writer后恢复升级前一致性备份，不删marker或改写null记录冒充旧数字。
 
 复用现有 SessionProtocol 和 applyComponentMigrations，不打开第二执行数据库或第二消息队列。升级前使用 backupTo 的 SQLite online backup；禁止直接复制 WAL 主文件。组件迁移在 BEGIN IMMEDIATE 中原子执行，错误全部回滚；重复启动核对 checksum，未知更高 generation 拒绝同步写入。不做破坏性 down migration，回退保留表和 blob。

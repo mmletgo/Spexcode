@@ -1,3 +1,4 @@
+import { retainHistoricalFrozenWorkflow } from './historical-workflow.test-helpers.js'
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { execFileSync } from 'node:child_process'
@@ -162,6 +163,7 @@ code:
     const unlock = (directory: string): void => { if (!existsSync(directory)) return; chmodSync(directory, 0o700); for (const entry of readdirSync(directory, { withFileTypes: true })) if (entry.isDirectory()) unlock(join(directory, entry.name)) }
     unlock(temp); rmSync(temp, { recursive: true, force: true })
   })
+  retainHistoricalFrozenWorkflow(application)
   await application.enable()
   const start = application.start.bind(application); application.start = () => {}
   const movedPath = '.spec/archive/export-contract/spec.md'

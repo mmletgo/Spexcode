@@ -1,3 +1,4 @@
+import { retainHistoricalFrozenWorkflow } from './historical-workflow.test-helpers.js'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { chmodSync, cpSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
@@ -57,7 +58,7 @@ function gitReadCounter(directory: string): { reset(): void; entries(): string[]
     },
   }
 }
-async function fixture(config: unknown = settings, onRun?: (request: ElaborationSessionRequest) => Promise<never>) {
+async function fixture(config: unknown = settings, onRun?: (request: ElaborationSessionRequest) => Promise<never>, nativeWorktree = false) {
   const temp = mkdtempSync(join(tmpdir(), 'sync-application-')), root = join(temp, 'source')
   mkdirSync(join(root, '.spec', 'demo'), { recursive: true }); mkdirSync(join(root, 'src')); mkdirSync(join(root, 'tests'))
   writeFileSync(join(root, '.spec', 'demo', 'spec.md'), source)
@@ -70,6 +71,7 @@ async function fixture(config: unknown = settings, onRun?: (request: Elaboration
   const protocol = openProtocol(join(temp, 'sessions.sqlite'))
   const calls: ElaborationSessionRequest[] = []
   const application = await SyncApplication.create(root, { protocol, runtimeDirectory: join(temp, 'runtime'), tools: { trustedRuntimeRoot: '/missing-runtime', toolEntry: '/missing-runtime/cli.js', canonicalHooksDir: '/missing-runtime/hooks' }, runner: async request => { calls.push(request); if (onRun) return onRun(request); throw Object.assign(new Error('受控生成环境故障'), { code: 'unsupported' }) } })
+  if (!nativeWorktree) retainHistoricalFrozenWorkflow(application)
   return { temp, root, git, protocol, application, calls, cleanup: (): void => { protocol.close(); rmSync(temp, { recursive: true, force: true }) } }
 }
 function governDemoCode(f: Awaited<ReturnType<typeof fixture>>): void {
@@ -113,6 +115,7 @@ test('操作模型经真实Git入口持久化，重启和省略重试继承，�
     assert.equal(JSON.parse(selectedTools).version, 'sync-tools-v2'); assert.equal(JSON.parse(selectedTools).model, chosen.model)
     await f.application.stopService()
     const restarted = await SyncApplication.create(f.root, { protocol: f.protocol, runtimeDirectory: join(f.temp, 'runtime'), tools: { trustedRuntimeRoot: '/missing-runtime', toolEntry: '/missing-runtime/cli.js', canonicalHooksDir: '/missing-runtime/hooks' }, runner: async request => { f.calls.push(request); throw Object.assign(new Error('受控原生环境故障'), { code: 'unsupported' }) } })
+    retainHistoricalFrozenWorkflow(restarted)
     try {
       const replay = (await restarted.submit({ nodeId: 'demo', requestId: 'ordinary-model-change', retryOf: first.id })).operation!
       assert.equal(replay.id, chosen.id); assert.equal(replay.model, chosen.model)
@@ -505,6 +508,7 @@ async function linkedApplication(f: Awaited<ReturnType<typeof fixture>>, directo
   const root = join(f.temp, directory), calls: ElaborationSessionRequest[] = []
   f.git(['worktree', 'add', '-b', `node/${directory}`, root, 'HEAD'])
   const application = await SyncApplication.create(root, { protocol: f.protocol, runtimeDirectory: join(f.temp, `${directory}-runtime`), tools: { trustedRuntimeRoot: '/missing-runtime', toolEntry: '/missing-runtime/cli.js', canonicalHooksDir: '/missing-runtime/hooks' }, runner: async request => { calls.push(request); if (onRun) return onRun(request); throw Object.assign(new Error('受控环境故障'), { code: 'unsupported' }) } })
+  retainHistoricalFrozenWorkflow(application)
   await application.enable()
   return { application, calls }
 }
@@ -590,6 +594,7 @@ test('AC-APPLICATION-14 不同仓库共享canonicalDB时分别派发，不执行
   governDemoCode(first); governDemoCode(second)
   const held = holdNextAdmission(first), calls: ElaborationSessionRequest[] = []
   const other = await SyncApplication.create(second.root, { protocol: first.protocol, runtimeDirectory: join(second.temp, 'shared-runtime'), tools: { trustedRuntimeRoot: '/missing-runtime', toolEntry: '/missing-runtime/cli.js', canonicalHooksDir: '/missing-runtime/hooks' }, runner: async request => { calls.push(request); throw Object.assign(new Error('另一仓库受控故障'), { code: 'unsupported' }) } })
+  retainHistoricalFrozenWorkflow(other)
   try {
     await first.application.enable(); await other.enable()
     const blocked = await first.application.submit({ nodeId: 'demo', requestId: 'blocked-repository' }); assert.ok(blocked.operation)
@@ -703,6 +708,7 @@ async function resourceFixture(options: { conflict?: boolean; callRequested?: bo
     if (options.conflict) f.application.store.recordFailure(fence, { code: 'input_changed', message: '受控来源冲突故障', kind: 'conflict', evidenceRefs: [] })
     throw Object.assign(new Error('受控创建结果未知'), { code: 'unsupported' })
   } })
+  retainHistoricalFrozenWorkflow(application)
   return { ...f, application, modelCalls: (): number => calls }
 }
 
@@ -962,6 +968,7 @@ async function exportApplicationFixture(t: test.TestContext, choice?: 'keep_inte
     const dispatch = application.store.readAttempt(operation.currentAttemptId!).dispatchPlans.find(plan => plan.key === request.requestKey)!
     return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `independent-${request.requestKey}`, turnId: 'turn-1', output, resultDigest: contentHash(JSON.stringify(output)) }
   } })
+  retainHistoricalFrozenWorkflow(application)
   await application.enable()
   return { temp, root, path, original, originalCode, contract, git, application, nativeRequests, calls: (): number => calls }
 }
@@ -1138,6 +1145,7 @@ test('AC-APPLICATION-23 正式v6结构旧patch重开后换requestId及alias重�
     }
     let newCalls = 0
     const reopened = await SyncApplication.create(f.root, { protocol: legacy, runtimeDirectory: join(f.temp, 'runtime'), tools: { trustedRuntimeRoot: '/missing-runtime', toolEntry: '/missing-runtime/cli.js', canonicalHooksDir: '/missing-runtime/hooks' }, runner: async () => { newCalls++; throw new Error('旧受控请求不应再派发') } })
+    retainHistoricalFrozenWorkflow(reopened)
     const second = await reopened.submit({ nodeId: 'demo', requestId: 'new-B', patch }); assert.ok(second.operation)
     assert.equal(second.operation.id, old.id); assert.equal(second.operation.payloadDigest, old.payloadDigest)
     assert.equal(second.operation.callsUsed, old.callsUsed); assert.equal(second.operation.deadlineAtMs, old.deadlineAtMs)
@@ -1423,6 +1431,7 @@ test('提交消费边界在超过500次普通观察及重启后保留，后续co
     for (let index = 0; index < 501; index++) f.application.store.recordObservation(ordinary, { controlRevision: 0, selectionDigest: null })
     assert.equal(f.application.store.listObservations(next.source, 500).every(observation => observation.input.id === next.id), true)
     const reopened = await SyncApplication.create(f.root, { protocol: f.protocol, runtimeDirectory: join(f.temp, 'runtime') })
+    retainHistoricalFrozenWorkflow(reopened)
     try {
       const trigger = reopened['committedTrigger'](next, 'demo', frozen.plan)
       assert.equal(trigger.origin, 'code')
@@ -2036,5 +2045,21 @@ test('冻结snapshot的untracked related glob完整正文进入真实分派投�
     assert.equal(admitted.scope.paths.some(path => dependencyPath === path || dependencyPath.startsWith(`${path}/`)), false)
     assert.equal(readFileSync(join(f.root, dependencyPath), 'utf8'), body)
     assert.equal(f.git(['ls-files', '--', dependencyPath]), '')
+  } finally { await f.application.stopService(); f.cleanup() }
+})
+
+test('新操作默认冻结native worktree计划与v3工具，旧frozen模型不被静默执行', async () => {
+  const f = await fixture({ ...settings, model: 'claude:MiniMax-M3.1-Flash' }, undefined, true)
+  try {
+    await f.application.enable()
+    await f.application.automaticControl('pause')
+    const operation = (await f.application.submit({ nodeId: 'demo', requestId: 'native-worktree-default' })).operation!
+    const plan = JSON.parse(readEvidence(operation.input.source.commonDir, operation.planBlob!).toString()) as { agentWorkflow?: string }
+    assert.equal(plan.agentWorkflow, 'native-worktree-v1')
+    const saved = JSON.parse(readFileSync(join(f.temp, 'runtime', 'artifacts', `application-runtime-${contentHash(operation.ingressKey)}.json`), 'utf8')) as { version: string; model: string; agentWorkflow: string }
+    assert.deepEqual({ version: saved.version, model: saved.model, agentWorkflow: saved.agentWorkflow }, { version: 'sync-tools-v3', model: 'claude:MiniMax-M3.1-Flash', agentWorkflow: 'native-worktree-v1' })
+    await assert.rejects(f.application.submit({ nodeId: 'demo', requestId: 'unsupported-native-model', model: 'gpt-6.1-sol' }), { code: 'unsupported' })
+    assert.equal(f.application.store.findOperationByIngressKey(`application:${operation.input.source.repositoryId}:${f.root}:unsupported-native-model`), null)
+    await f.application.control(operation.id, 'cancel')
   } finally { await f.application.stopService(); f.cleanup() }
 })

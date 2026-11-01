@@ -17,6 +17,8 @@ export type AuthorizedContractChange = { id: string; action: 'retire' | 'update_
 export type ElaborationInput = {
   root: string
   base?: string
+  /** 明确绑定的实际阶段seed；不限制仓库读取。 */
+  worktree?: { baseCommit: string; tree: string; mode: 'read' | 'edit' }
   /** 仅由分区执行器用于无源码writer的初始或既有纯父接口；结果不是完整P1或实现就绪。 */
   phase?: 'interface_seed'
   /** 原分区计划及后验纯父分类证据，只绑定本区来源，不授予写权限或完成度。 */
@@ -111,9 +113,10 @@ export type ElaborationResult = {
 }
 export type ElaborationSessionRequest = {
   root: string; base?: string; prompt: string; schema: Record<string, unknown>; requestKey: string; inputDigest: string; purpose: string; timeoutMs: number | null; signal?: AbortSignal; model?: string; effort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
+  worktree?: { baseCommit: string; tree: string; mode: 'read' | 'edit' }
   frozenContext?: FrozenContextRef
   /** 派发前由 prepareFrozenPrompt 冻结的纯 JSON 条目；持久计划只保留最终 ref。 */
   frozenEntries?: readonly FrozenEntryJson[]
 }
-export type ElaborationSessionResult = { sessionId: string; threadId: string; turnId: string; output: unknown; resultDigest: string; frozenReadProof?: FrozenReadProof }
+export type ElaborationSessionResult = { sessionId: string; threadId: string; turnId: string; output: unknown; resultDigest: string; frozenReadProof?: FrozenReadProof; worktree?: { baseCommit: string; baseTree: string; headCommit: string; tree: string; worktreePath: string } }
 export type ElaborationRunner = (request: ElaborationSessionRequest) => Promise<ElaborationSessionResult>
