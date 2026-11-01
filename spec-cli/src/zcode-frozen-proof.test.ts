@@ -7,9 +7,9 @@ import { dirname, join } from 'node:path'
 import { frozenReadTool, freezeContext, proveFrozenReads, readFrozenManifest, readFrozenRange, type FrozenNativeItem } from './frozen-context.js'
 import { decodeZCodeJsonText, proveZCodeFrozenReads, verifyZCodeFrozenReadProof, ZCODE_FROZEN_TOOL, type ZCodeFrozenWitness, type ZCodeNativeEvent } from './zcode-frozen-proof.js'
 
-function fixture(options: { modelChange?: boolean; reasoningLevel?: string } = {}) {
+function fixture(options: { modelChange?: boolean; reasoningLevel?: string; textRepeats?: number } = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'spex-zcode-proof-'))
-  const textBytes = Buffer.from('首' + '中'.repeat(4230) + '尾'), binary = Buffer.from(Array.from({ length: 19 }, (_, index) => index * 13 % 256))
+  const textBytes = Buffer.from('首' + '中'.repeat(options.textRepeats ?? 4230) + '尾'), binary = Buffer.from(Array.from({ length: 19 }, (_, index) => index * 13 % 256))
   const ref = freezeContext({ directory, sourceRoot: process.cwd(), binding: { requestKey: 'request', inputDigest: 'input' }, entries: [
     { id: 'large-text', label: 'synthetic unicode', kind: 'utf8', bytes: textBytes },
     { id: 'small-binary', label: 'synthetic binary', kind: 'binary', bytes: binary },
@@ -57,7 +57,7 @@ function fixture(options: { modelChange?: boolean; reasoningLevel?: string } = {
     event('tool.updated', { kind: 'result', toolCallId: part.callID, result: { success: true, content: state.output, truncated: false, originalBytes: bytes, returnedBytes: bytes } })
   }
   event('tool.updated', { kind: 'batch', toolCallIds: toolParts.map(part => part.callID), successCount: toolParts.length, errorCount: 0 })
-  event('session.updated', { providerId: witness.providerId, modelId: witness.modelId, toolCount: 1, messageCount: 12, iteration: 1 })
+  event('session.updated', { providerId: witness.providerId, modelId: witness.modelId, toolCount: 1, messageCount: 6 + toolParts.length, iteration: Math.ceil(toolParts.length / 10) })
   witness.messages.push({ info: { id: 'assistant-final', sessionID: 'session', role: 'assistant', parentID: 'user', providerId: witness.providerId, modelId: witness.modelId, anchor: { turnId: 'turn' }, semantics: { origin: 'agent_runtime', kind: 'assistant_response', uiVisibility: 'visible', providerVisibility: 'visible', transcriptVisibility: 'visible' } }, parts: [part('final-text', 'assistant-final', 'text', { text: '{"ok":true}' })] })
   Object.assign(finalMessage(witness).info.anchor as object, { historyRoundCount: 2, orderedMessageIds: witness.messages.filter(message => (message.info.semantics as Record<string, unknown>).providerVisibility === 'visible').map(message => message.info.id), boundaryMessageId: 'assistant-final', goalBoundary: { kind: 'none' } })
   event('turn.completed', { response: '{"ok":true}', inputId: 'input-id', resultType: 'success', toolCallCount: toolParts.length })
@@ -97,6 +97,58 @@ test('raw core six-read witness proves unicode/binary/absence and keeps the shar
     assert.equal(createHash('sha256').update(bytes).digest('hex'), proof.witnessDigest)
     assert.deepEqual(JSON.parse(bytes.toString()), f.witness, 'preserve the full raw witness, not only normalized items')
     verifyZCodeFrozenReadProof(f.ref, proof, f.identity, { providerId: f.witness.providerId, modelId: f.witness.modelId, cliVersion: f.witness.cliVersion, cliSha256: f.witness.cliSha256 })
+  } finally { f.close() }
+})
+
+test('native request iteration uses cumulative ten-call buckets, including the captured 17-read request', () => {
+  for (const [textRepeats, callCount, iteration] of [[10000, 10, 1], [11000, 11, 2], [20000, 17, 2]]) {
+    const f = fixture({ textRepeats })
+    try {
+      const request = f.witness.events.filter(event => event.type === 'session.updated')[1]
+      assert.deepEqual([request.payload.messageCount, request.payload.iteration], [6 + callCount, iteration])
+      const proof = proveZCodeFrozenReads(f.ref, f.witness)
+      assert.equal(proof.receipts.length, callCount)
+      verifyZCodeFrozenReadProof(f.ref, proof, f.identity)
+      for (const wrong of [0, iteration - 1, iteration + 1]) {
+        const altered = structuredClone(f.witness)
+        altered.events.find(event => event.eventId === request.eventId)!.payload.iteration = wrong
+        assert.throws(() => proveZCodeFrozenReads(f.ref, altered), { code: 'stale_result' })
+      }
+    } finally { f.close() }
+  }
+})
+
+test('consecutive requests can share a tool-count bucket while retaining every assistant and consumer', () => {
+  const f = fixture()
+  try {
+    const first = toolMessage(f.witness), second = structuredClone(first), final = finalMessage(f.witness)
+    second.info.id = 'assistant-more-tools'; second.parts = first.parts.splice(3)
+    for (const part of second.parts) part.messageID = second.info.id
+    f.witness.messages.splice(-1, 0, second)
+    Object.assign(final.info.anchor as object, { historyRoundCount: 3, orderedMessageIds: f.witness.messages.map(message => message.info.id) })
+    const [initial, next] = f.witness.events.filter(event => event.type === 'session.updated')
+    const events = f.witness.events, lifecycle = (parts: Record<string, unknown>[]) => {
+      const ids = new Set(parts.map(part => part.callID))
+      return events.filter(event => event.type === 'tool.updated' && ids.has(event.payload.toolCallId))
+    }
+    const more = lifecycle(second.parts)
+    for (const event of more) if (event.payload.kind === 'scheduled') event.payload.assistantMessageId = second.info.id
+    const middle = structuredClone(next)
+    middle.payload.messageCount = 9
+    next.payload.messageCount = 13
+    f.witness.events = [events[0], initial, ...lifecycle(first.parts), middle, ...more, next, events.at(-1)!]
+      .map((event, index) => ({ ...event, seq: index + 1, eventId: `bucket-event-${index}` }))
+    const proof = proveZCodeFrozenReads(f.ref, f.witness)
+    assert.equal(proof.receipts.length, 6)
+    verifyZCodeFrozenReadProof(f.ref, proof, f.identity)
+    const missing = structuredClone(f.witness)
+    missing.events = missing.events.filter(event => event.payload.messageCount !== 9)
+    assert.throws(() => proveZCodeFrozenReads(f.ref, missing), { code: 'stale_result' })
+    const repeated = structuredClone(f.witness), request = structuredClone(repeated.events.at(-2)!)
+    request.seq += 1; request.eventId = 'extra-request'; request.payload.messageCount = 14
+    repeated.events.splice(-1, 0, request)
+    repeated.events.at(-1)!.seq = request.seq + 1
+    assert.throws(() => proveZCodeFrozenReads(f.ref, repeated), { code: 'stale_result' })
   } finally { f.close() }
 })
 
