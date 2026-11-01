@@ -44,7 +44,9 @@ P0至P5按完整需求交付，不以阶段演示、局部测试或可修改的�
 
 Native worktree分区分析brief同步传递本区facts与newNodes约束：同一facts.source只给一个完整text，newNodes仅来自本区unownedSourcePaths及schema候选，候选为空或maxItems为0时返回[]；Root/接口分区不得替兄弟源码分区提出叶。该业务提示不限制Agent自由读取完整worktree，也不要求frozen-reader或逐字消费证明。
 
-Native worktree新分析请求的schema按旧/current冻结图限制受影响ID，并只允许REQ/RULE/TR作为规则依据；空ID/规则域不生成空enum，raw-only空图的GAP/conflict仍可用空身份数组。已接受的合法v5缓存继续按原摘要复用，不重派Native。
+Native worktree新分析请求的schema按旧/current冻结图限制受影响ID，并只允许REQ/RULE/TR作为规则依据；空ID/规则域不生成空enum，raw-only空图的GAP/conflict仍可用空身份数组。已接受的合法v6缓存继续按原摘要复用，不重派Native。
+
+Native worktree P0分析与独审共用业务语义：可由raw、源码和完整测试核实的行为，即使治理叶、稳定ID或覆盖映射尚未生成，也以facts/newNodes交P1；只有具体未决业务政策及可观察后果才是coverage_gap，只有真实互斥才是conflict。明确原意下的实现/测试缺陷不是新业务GAP；P2修复仍受原写权限制，只读code_to_spec缺口保持readonly_implementation_gap。独审须repair纯治理缺席误报；原Native自由读取与ID、权限、AC、unbound门保持。
 
 初始化待生成规格叶和覆盖映射不等于缺用户业务事实；已有raw、源码与测试可核的职责交后续P1，真实未知/互斥仍明确阻塞。分析指导版本纳入输入摘要，职责澄清后旧已审结果须重新分析独审，旧证据不改。
 

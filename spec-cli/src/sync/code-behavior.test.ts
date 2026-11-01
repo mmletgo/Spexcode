@@ -1209,7 +1209,7 @@ async function initialDiscovery(t: test.TestContext, raw: string) {
   return { f, input, model }
 }
 
-for (const previousVersion of [undefined, 'code-behavior-guidance-v2', 'code-behavior-guidance-v3', 'code-behavior-guidance-v4']) test(`指导合同版本进入唯一摘要，旧accept ${previousVersion} 不得被缓存承接`, async t => {
+for (const previousVersion of [undefined, 'code-behavior-guidance-v2', 'code-behavior-guidance-v3', 'code-behavior-guidance-v4', 'code-behavior-guidance-v5']) test(`指导合同版本进入唯一摘要，旧accept ${previousVersion} 不得被缓存承接`, async t => {
   const { f, input, model } = await initialDiscovery(t, '统计传入列表的条目数量，不修改列表；从现有模块生成治理叶及规格。')
   let context = ''
   const first = await analyzeCodeBehavior({ ...input, requestKey: 'old-guidance' }, async request => {
@@ -1227,7 +1227,7 @@ for (const previousVersion of [undefined, 'code-behavior-guidance-v2', 'code-beh
     calls.push(request.purpose)
     if (process.env.SPEX_RAW_RESOLUTION_EVIDENCE_DIR) writeFileSync(join(process.env.SPEX_RAW_RESOLUTION_EVIDENCE_DIR, `guidance-current-${request.purpose}.prompt.txt`), request.prompt)
     const frozen = readFrozenBehaviorContext<{ guidanceContractVersion: string }>(request)
-    assert.equal(frozen.guidanceContractVersion, 'code-behavior-guidance-v5')
+    assert.equal(frozen.guidanceContractVersion, 'code-behavior-guidance-v6')
     const instructions = request.prompt.slice(0, request.prompt.indexOf('冻结三方输入:\n'))
     assert.match(instructions, /尚未生成.*治理叶.*待生成工作/)
     assert.match(instructions, /coverage_gap.*重大业务事实.*可观察后果/)
@@ -2327,6 +2327,41 @@ test('native worktree P0看见受控raw和完整repo，省略的相关文件可�
   assert.equal(readFileSync(join(f.root, 'src/export.js'), 'utf8'), 'later WIP\n')
 })
 
+test('Native分析与独审共享业务语义且允许已知行为走newNodes交P1', async t => {
+  const { input } = await initialDiscovery(t, '统计传入列表的条目数量，不修改列表；从现有模块生成治理叶及规格。')
+  const nativeInput: CodeBehaviorInput = { ...input, model: 'claude:MiniMax-M3.1-Flash', plan: { ...input.plan, agentWorkflow: 'native-worktree-v1' } }
+  const prompts = new Map<string, string>()
+  const result = await analyzeCodeBehavior(nativeInput, async request => {
+    prompts.set(request.purpose, request.prompt)
+    assert.ok(request.worktree)
+    assert.equal(request.frozenEntries, undefined)
+    assert.match(request.prompt, /可自由读取整个仓库并沿调用关系寻找实现、测试及依赖/)
+    const task = JSON.parse(request.prompt.split('任务:\n')[1].split('\n待审分析:')[0]) as { requiredChangedPaths: string[] }
+    const output = request.purpose === 'code_behavior_analyze'
+      ? {
+          changes: task.requiredChangedPaths.map(path => ({ kind: 'refactor', paths: [path], affectedIds: [], ruleIds: [], originalIntent: '统计传入列表的条目数量，不修改列表', previousBehavior: '首次纳管时现有模块已返回列表长度', sourceBehavior: 'summarize返回传入数组长度，不改变数组', deliveryBehavior: '无已验证交付', evidence: 'src/summary.js#summarize 与 tests/summary.test.mjs 的完整断言', counterexample: '含两项的列表返回2且列表本身保持不变' })),
+          facts: [{ source: 'code:src/summary.js#summarize', text: '返回传入数组长度，不改变数组。' }], acceptanceChanges: [],
+          newNodes: [{ codePath: 'src/summary.js', parentNodeId: 'export-contract', basis: '已有统计行为由原始需求下的治理叶承接' }], resolutions: [],
+        }
+      : (() => { const stage = JSON.parse(request.prompt.split('待审分析:\n')[1]) as { analysisDigest: string; analysis: CodeBehaviorAnalysis }; return { inputDigest: request.inputDigest, analysisDigest: stage.analysisDigest, verdict: 'accept', checkedPaths: task.requiredChangedPaths, checkedChangeIds: stage.analysis.changes.map(change => change.id), findings: [] } })()
+    return { sessionId: `native-${request.purpose}`, threadId: `native-thread-${request.purpose}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)) }
+  })
+  const brief = (purpose: string): string => {
+    const match = prompts.get(purpose)?.match(/^共同业务语义：.*$/m)
+    assert.ok(match, `${purpose}必须收到共享业务语义`)
+    return match[0]
+  }
+  assert.equal(brief('code_behavior_analyze'), brief('code_behavior_review'))
+  assert.match(brief('code_behavior_analyze'), /治理叶、稳定ID、FLOW\/AC或覆盖映射.*facts与newNodes.*P1/)
+  assert.match(brief('code_behavior_analyze'), /coverage_gap.*重大业务事实或政策.*可观察后果/)
+  assert.match(brief('code_behavior_analyze'), /conflict.*外部行为不可同时成立/)
+  assert.match(brief('code_behavior_analyze'), /readonly_implementation_gap.*不转成交由P2的任务或业务GAP/)
+  assert.match(brief('code_behavior_analyze'), /独审.*repair/)
+  assert.deepEqual(result.findings, [])
+  assert.deepEqual(result.newNodes.map(node => node.codePath), ['src/summary.js'])
+  assert.equal(result.facts.length, 1)
+})
+
 test('Native code_to_spec分区brief传达本区facts与newNodes约束并保留自由读取', async t => {
   const f = await fixture(t, undefined, { 'support/info.mjs': 'export const context = "free-read context"\n' })
   const testPath = 'tests/export.test.mjs', sourcePath = 'src/export.js', parentPath = '.spec/export/export-contract/spec.md'
@@ -2378,7 +2413,7 @@ test('Native code_to_spec分区brief传达本区facts与newNodes约束并保留�
   assert.equal(result.reviewPassed, true)
 })
 
-test('Native新分析schema限定旧当前图ID并保留v5缓存及分区后置门', async t => {
+test('Native新分析schema限定旧当前图ID并保留v6缓存及分区后置门', async t => {
   const f = await fixture(t), path = '.spec/export/export-contract/spec.md', testPath = 'tests/export.test.mjs'
   const currentRaw = f.raw.replace('\n\n### FLOW\n', '\n| RULE-EXPORT-99 | Native schema | 本轮测试新规则域 | ID域测试 | export-contract | decision:EXPORT-POLICY | REQ-EXPORT-01 |\n\n### FLOW\n')
   assert.notEqual(currentRaw, f.raw)
@@ -2443,9 +2478,9 @@ test('Native新分析schema限定旧当前图ID并保留v5缓存及分区后置�
   assert.deepEqual(calls, ['code_behavior_analyze', 'code_behavior_review'])
   assert.equal(result.reviewPassed, true)
   const cacheCalls: string[] = []
-  const cached = await analyzeCodeBehavior(input, async request => { cacheCalls.push(request.purpose); throw new Error('accepted v5 cache should be reused') }, digest => digest === result.inputDigest ? result : null)
+  const cached = await analyzeCodeBehavior(input, async request => { cacheCalls.push(request.purpose); throw new Error('accepted v6 cache should be reused') }, digest => digest === result.inputDigest ? result : null)
   assert.deepEqual(cached, result)
-  assert.deepEqual(cacheCalls, [], 'a legal accepted v5 checkpoint is not invalidated by schema guidance')
+  assert.deepEqual(cacheCalls, [], 'a legal accepted v6 checkpoint is not invalidated by schema guidance')
 
   await assert.rejects(analyzeCodeBehavior({ ...input, requestKey: 'native-id-domain-unknown' }, async request => {
     if (request.purpose !== 'code_behavior_analyze') throw new Error('schema must reject unknown IDs before review')
