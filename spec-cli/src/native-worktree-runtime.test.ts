@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
-import { assertNativeWorktreeSeed, assertNativeWorktreeResult, nativeWorktreeResult, nativeWorktreePrompt } from './native-worktree-runtime.js'
+import { assertNativeWorktreeSeed, assertNativeWorktreeResult, nativeWorktreeResult, nativeWorktreePrompt, sampleNativeWorktreeProcesses, nativeWorktreeProcessesStopped } from './native-worktree-runtime.js'
 import { claudeWorktreeArgs, claudeStructuredArgs, claudeStructuredTurn, stopClaudeStructuredTurn } from './claude-structured.js'
 import { zcodeWorktreePermission, zcodeWorktreeConfiguration, zcodeRuntimeConfiguration, zcodeStructuredTurn, zcodeCapability, zcodeNativeSelection, type ZCodeStructuredExecution } from './zcode-structured.js'
 import { spawnSync } from 'node:child_process'
@@ -101,6 +101,7 @@ test('normal worktree capabilities and prompt remain distinct from the frozen re
 })
 
 async function deadProcess(root: string) {
+  sampleNativeWorktreeProcesses({ root, receiptFile: join(root, 'process.json') })
   const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' })
   assert(child.pid)
   const exited = new Promise<void>(resolve => child.once('close', () => resolve())), receiptFile = join(root, 'process.json')
@@ -126,7 +127,17 @@ test('Claude worktree cold completion binds native user/model/exit and never bor
     assert.equal(result.frozenReadProof, undefined); assert.deepEqual(JSON.parse(result.text), output)
     const completed = { ...execution, state: 'completed' as const, threadId: 'session', turnId: 'user', output, resultDigest: hash(output) }
     git(f.repo, ['worktree', 'remove', f.path])
-    assert.deepEqual(await claudeStructuredTurn(realm, 'native', prompt, completed, noDispatch, f.path), result)
+    const kill = process.kill; let historicalProbes = 0
+    process.kill = ((pid: number, signal?: NodeJS.Signals | number) => {
+      if (Math.abs(pid) === processIdentity.pid && signal === 0) { historicalProbes++; return true }
+      return kill(pid, signal)
+    }) as typeof process.kill
+    try {
+      assert.deepEqual(await claudeStructuredTurn(realm, 'native', prompt, completed, noDispatch, f.path), result)
+      assert.equal(historicalProbes, 0, 'completed replay must not consult an unrelated reused PID/PGID')
+      await assert.rejects(claudeStructuredTurn(realm, 'native', prompt, { ...completed, state: 'running' }, noDispatch, f.path), { code: 'cancellation_pending' })
+      assert(historicalProbes > 0, 'unsettled recovery must still consult the live native process identity')
+    } finally { process.kill = kill }
     await assert.rejects(claudeStructuredTurn(realm, 'native', prompt + 'changed', completed, noDispatch, f.path), { code: 'stale_result' })
     writeFileSync(join(root, 'exit.json'), JSON.stringify({ code: 0, signal: null, stopped: false }))
     await assert.rejects(claudeStructuredTurn(realm, 'native', prompt, completed, noDispatch, f.path), { code: 'stale_result' })
@@ -143,7 +154,7 @@ test('ZCode worktree cold completion binds original send, model snapshot and exa
     const native = { version: 1 as const, root, sessionId: 'session', inputId: 'input', turnId: 'turn', ...processIdentity }
     const execution: ZCodeStructuredExecution = { ...policy, version: 6, policy: 'native-worktree-v1', zcodeNative: native, state: 'running', frozenReadProof: undefined }
     const modelSnapshot = { sessionId: 'session', model: selection.model, thoughtLevel: 'high' }
-    const plan = { ...native, queryId: 'query', runtime, workspace: f.path, ...selection, policyDigest: hash(policy), requestDigest: hash({ prompt, nativePrompt, policy, selection }), cliVersion: zcodeCapability.cliVersion, cliSha256: zcodeCapability.cliSha256, builtinSha256: zcodeCapability.builtinSha256, modelSnapshotDigest: hash(modelSnapshot) }
+    const plan = { ...native, worktreeProcessBaseline: 1, queryId: 'query', runtime, workspace: f.path, ...selection, policyDigest: hash(policy), requestDigest: hash({ prompt, nativePrompt, policy, selection }), cliVersion: zcodeCapability.cliVersion, cliSha256: zcodeCapability.cliSha256, builtinSha256: zcodeCapability.builtinSha256, modelSnapshotDigest: hash(modelSnapshot) }
     const events = [
       { type: 'turn.started', payload: { inputId: 'input', queryId: 'query', messageId: 'user' } },
       { type: 'session.updated', payload: { providerId: selection.model.providerId, modelId: selection.model.modelId, toolCount: 9 } },
@@ -159,7 +170,17 @@ test('ZCode worktree cold completion binds original send, model snapshot and exa
     assert.deepEqual(JSON.parse(result.text), output); assert.equal(result.frozenReadProof, undefined)
     const completed = { ...execution, state: 'completed' as const, threadId: 'session', turnId: 'turn', output, resultDigest: hash(output) }
     git(f.repo, ['worktree', 'remove', f.path])
-    assert.deepEqual(await zcodeStructuredTurn(realm, 'native', prompt, completed, noDispatch, f.path), result)
+    const kill = process.kill; let historicalProbes = 0
+    process.kill = ((pid: number, signal?: NodeJS.Signals | number) => {
+      if (Math.abs(pid) === processIdentity.pid && signal === 0) { historicalProbes++; return true }
+      return kill(pid, signal)
+    }) as typeof process.kill
+    try {
+      assert.deepEqual(await zcodeStructuredTurn(realm, 'native', prompt, completed, noDispatch, f.path), result)
+      assert.equal(historicalProbes, 0, 'completed replay must not consult an unrelated reused PID/PGID')
+      await assert.rejects(zcodeStructuredTurn(realm, 'native', prompt, { ...completed, state: 'running' }, noDispatch, f.path), { code: 'cancellation_pending' })
+      assert(historicalProbes > 0, 'unsettled recovery must still consult the live native process identity')
+    } finally { process.kill = kill }
     await assert.rejects(zcodeStructuredTurn(realm, 'native', prompt, { ...completed, effort: undefined }, noDispatch, f.path), { code: 'stale_result' })
     writeFileSync(join(root, 'terminal.json'), JSON.stringify({ ...events.at(-1), turnId: 'foreign' }))
     await assert.rejects(zcodeStructuredTurn(realm, 'native', prompt, completed, noDispatch, f.path), { code: 'stale_result' })
@@ -204,7 +225,7 @@ send({type:'result',subtype:'success',is_error:false,session_id:session,uuid:'re
 `)
     chmodSync(executable, 0o755)
     const structured = fileURLToPath(new URL('./session-structured.ts', import.meta.url)), records = fileURLToPath(new URL('./session-record.ts', import.meta.url))
-    writeFileSync(runner, `import assert from 'node:assert/strict';import{readFileSync,renameSync}from'node:fs';import{execFileSync}from'node:child_process';import{runStructuredSession,cancelStructuredSession}from${JSON.stringify(structured)};import{readRecord,writeRecord}from${JSON.stringify(records)};
+    writeFileSync(runner, `import assert from 'node:assert/strict';import{readFileSync,renameSync,existsSync}from'node:fs';import{execFileSync}from'node:child_process';import{runStructuredSession,cancelStructuredSession}from${JSON.stringify(structured)};import{readRecord,writeRecord}from${JSON.stringify(records)};
 const git=args=>execFileSync('git',args,{encoding:'utf8'}).trim(),seed=${JSON.stringify(seed)},schema={type:'object',properties:{ok:{type:'boolean'}},required:['ok'],additionalProperties:false};
 const make=(key,prompt,mode,timeoutMs)=>({root:process.cwd(),base:seed.baseCommit,requestKey:key,inputDigest:key,purpose:'real-queue-worktree',prompt,schema,timeoutMs,model:'claude:MiniMax-M3.1-Flash',worktree:{...seed,mode}});
 const first=make('read','read '+'x'.repeat(70000),'read',10000),read=await runStructuredSession(first),record=readRecord(read.sessionId);
@@ -214,13 +235,50 @@ git(['worktree','remove',read.worktree.worktreePath]);assert.deepEqual(await run
 const stoppedRecord=readRecord(read.sessionId),receipt=stoppedRecord.structuredExecution.claudeNative.receiptFile;renameSync(receipt,receipt+'.held');writeRecord({...stoppedRecord,structuredExecution:{...stoppedRecord.structuredExecution,state:'running',output:undefined,resultDigest:undefined,resultWorktree:undefined}});
 const pending=await cancelStructuredSession(read.sessionId,{timeoutMs:20});assert.equal(pending.nativeStopped,false);assert.equal(pending.state,'cancelling');
 await assert.rejects(runStructuredSession(make('blocked','edit blocked','edit',500)),{code:'timeout'});assert.equal(JSON.parse(readFileSync(${JSON.stringify(count)},'utf8')).length,1);
-renameSync(receipt+'.held',receipt);assert.equal((await cancelStructuredSession(read.sessionId,{timeoutMs:1000})).nativeStopped,true);
+renameSync(receipt+'.held',receipt);const restoredStop=await cancelStructuredSession(read.sessionId,{timeoutMs:1000});assert.equal(restoredStop.nativeStopped,true,JSON.stringify({restoredStop,unknown:JSON.parse(readFileSync(stoppedRecord.structuredExecution.claudeNative.root+'/unknown-processes.json','utf8'))}));
 
 const edit=await runStructuredSession(make('edit','edit candidate','edit',null));assert.notEqual(edit.worktree.headCommit,seed.baseCommit);assert.equal(git(['rev-parse',edit.worktree.headCommit+'^{tree}']),edit.worktree.tree);assert.equal(readRecord(edit.sessionId).structuredExecution.resultWorktree.tree,edit.worktree.tree);
-await assert.rejects(runStructuredSession(make('dirty','dirty candidate','edit',10000)),{code:'failed'});
+const dirtyFailure=await runStructuredSession(make('dirty','dirty candidate','edit',10000)).then(()=>null,error=>error);const dirtyRecord=dirtyFailure?.sessionId&&readRecord(dirtyFailure.sessionId),unknownFile=dirtyRecord?.structuredExecution?.claudeNative?.root+'/unknown-processes.json';assert.equal(dirtyFailure?.code,'failed',JSON.stringify({code:dirtyFailure?.code,unknown:unknownFile&&existsSync(unknownFile)?JSON.parse(readFileSync(unknownFile,'utf8')):null}));
 const calls=JSON.parse(readFileSync(${JSON.stringify(count)},'utf8'));assert.equal(calls.length,3);assert.equal(calls[0].cwd,read.worktree.worktreePath);assert.equal(calls[1].cwd,edit.worktree.worktreePath);assert(calls[0].prompt.startsWith(first.prompt));assert.equal(calls.some(x=>x.args.includes('--restricted')||x.args.includes('--allowedTools')),false);process.exit(0);
 `)
     const result = spawnSync(process.execPath, ['--import', createRequire(import.meta.url).resolve('tsx/esm'), runner], { cwd: f.repo, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, SPEXCODE_HOME: home, SPEX_SESSION_DATABASE_PATH: join(home, 'sessions.sqlite'), SPEX_RUNTIME_HOME: join(home, 'runtime'), ANTHROPIC_BASE_URL: 'https://example.invalid', SPEXCODE_CODEX_USAGE_GUARD: '0', SPEX_TEST: '1' }, encoding: 'utf8', timeout: 30000 })
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
   } finally { f.close() }
+})
+
+
+test('detached child born between samples stays unknown after its native parent exits', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'spex-native-orphan-')), receiptFile = join(root, 'process.json'), daemonFile = join(root, 'daemon.json')
+  sampleNativeWorktreeProcesses({ root, receiptFile })
+  const leader = spawn(process.execPath, ['-e', `const {spawn}=require('node:child_process'),fs=require('node:fs');process.stdin.once('data',()=>{const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{detached:true,stdio:'ignore'});child.unref();fs.writeFileSync(process.argv[1],JSON.stringify({pid:child.pid}));process.exit(0)});process.stdout.write('READY')`, daemonFile], { detached: true, stdio: ['pipe', 'pipe', 'ignore'] })
+  assert(leader.pid)
+  const closed = new Promise<void>(resolve => leader.once('close', () => resolve()))
+  let daemonPid: number | undefined
+  try {
+    await new Promise<void>(resolve => leader.stdout.once('data', () => resolve()))
+    writeDetachedRuntimeReceipt(leader.pid, receiptFile)
+    const plan = { root, receiptFile, pid: leader.pid }
+    sampleNativeWorktreeProcesses(plan)
+    leader.stdin.end('GO'); await closed
+    daemonPid = (JSON.parse(readFileSync(daemonFile, 'utf8')) as { pid: number }).pid
+    process.kill(daemonPid, 0)
+    assert.equal((JSON.parse(readFileSync(join(root, 'owned-processes.json'), 'utf8')) as Array<{ pid: number }>).some(row => row.pid === daemonPid), false)
+    assert.equal(nativeWorktreeProcessesStopped(plan), false, 'live reparented daemon must keep native stop unproven')
+    assert.equal(nativeWorktreeProcessesStopped(plan, true), false, 'unknown daemon cannot become owned through cancellation')
+    process.kill(daemonPid, 0)
+    assert((JSON.parse(readFileSync(join(root, 'unknown-processes.json'), 'utf8')) as Array<{ pid: number }>).some(row => row.pid === daemonPid))
+    process.kill(-daemonPid, 'SIGTERM')
+    for (let retry = 0; retry < 100; retry++) {
+      try { process.kill(daemonPid, 0) } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') break; throw error }
+      await new Promise(resolve => setTimeout(resolve, 20))
+    }
+    daemonPid = undefined
+    assert.equal(nativeWorktreeProcessesStopped(plan), true, 'formal stop can settle after the unknown process is independently gone')
+  } finally {
+    if (daemonPid) { try { process.kill(-daemonPid, 'SIGTERM') } catch (error) { assert.equal((error as NodeJS.ErrnoException).code, 'ESRCH') } }
+    if (leader.exitCode === null && leader.signalCode === null) {
+      try { process.kill(-leader.pid, 'SIGTERM') } catch (error) { assert.equal((error as NodeJS.ErrnoException).code, 'ESRCH') }
+    }
+    await closed; rmSync(root, { recursive: true, force: true })
+  }
 })
