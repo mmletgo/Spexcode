@@ -79,6 +79,13 @@ for (const timeoutMs of [1000, null]) test(`stopped exact Claude schema retry ex
       assert.match(String(error), /error_max_structured_output_retries/)
       return true
     })
+    const terminalRequest = { version: 1, reason: 'terminal_settlement', sessionId: 'session', userUuid: 'user', pid: child.pid, receiptDigest: digest(JSON.parse(readFileSync(receiptFile, 'utf8'))), requestDigest: plan.requestDigest, resultDigest: digest(result), signal: 'SIGTERM', requestedAt: 1 }
+    writeFileSync(join(root, 'terminal-stop-request.json'), JSON.stringify(terminalRequest))
+    writeFileSync(join(root, 'terminal-stop.json'), JSON.stringify({ version: 1, requestObservationDigest: digest(terminalRequest), outcome: 'sent', observedAt: 2 }))
+    await assert.rejects(claudeStructuredTurn(realm, 'native', prompt, execution, callbacks), { code: 'stale_result' }, 'legacy forced handler exit1 is not a natural schema exhaustion exit')
+    writeFileSync(join(root, 'terminal-stop.json'), JSON.stringify({ version: 1, requestObservationDigest: digest(terminalRequest), outcome: 'gone', observedAt: 2 }))
+    await assert.rejects(claudeStructuredTurn(realm, 'native', prompt, execution, callbacks), { code: 'structured_output_retries_exhausted' })
+    rmSync(join(root, 'terminal-stop-request.json')); rmSync(join(root, 'terminal-stop.json'))
     assert.deepEqual(readFileSync(join(root, 'result.json')), failureBytes)
     assert.deepEqual(readFileSync(historyPath), historyBytes)
     for (const name of ['completed.json', 'witness.json']) assert.equal(existsSync(join(root, name)), false)
@@ -975,6 +982,9 @@ test('controlled Claude witness proves parallel replies and rejects completed-ca
     writeFileSync(join(root, 'mcp-public.jsonl'), JSON.stringify({ type: 'process', pid: process.pid, startToken: null }) + '\n')
     const completed = { ...execution, state: 'completed' as const, threadId: 'session', turnId: 'user', output: { answer: 'public' }, resultDigest: digest({ answer: 'public' }), frozenReadProof: proof }
     const callbacks = { onThread: async () => assert.fail('no dispatch'), onTurn: async () => assert.fail('no turn'), onNative: async () => assert.fail('no CLI') }
+    const terminalRequest = { version: 1, reason: 'terminal_settlement', sessionId: 'session', userUuid: 'user', pid: child.pid, receiptDigest: digest(JSON.parse(readFileSync(receiptFile, 'utf8'))), requestDigest: plan.requestDigest, resultDigest: digest(witness.result), signal: 'SIGTERM', requestedAt: 1 }
+    writeFileSync(join(root, 'terminal-stop-request.json'), JSON.stringify(terminalRequest))
+    writeFileSync(join(root, 'terminal-stop.json'), JSON.stringify({ version: 1, requestObservationDigest: digest(terminalRequest), outcome: 'sent', observedAt: 2 }))
     const kill = process.kill, signals: number[] = []
     process.kill = ((pid: number, signal?: number | NodeJS.Signals) => { if ((pid === process.pid || pid === -process.pid) && signal !== 0) { signals.push(pid); throw new Error('must not signal an unrelated reused PID') } return kill(pid, signal) }) as typeof process.kill
     try {
@@ -986,6 +996,10 @@ test('controlled Claude witness proves parallel replies and rejects completed-ca
       await assert.rejects(claudeStructuredTurn(realm, 'native', witness.prompt, completed, callbacks), error => (error as { code: string }).code === 'cancellation_pending')
       assert.deepEqual(signals, [])
     } finally { process.kill = kill }
+    writeFileSync(join(root, 'mcp-public.jsonl'), JSON.stringify({ type: 'process', pid: child.pid, startToken: processIdentity.startToken }) + '\n')
+    writeFileSync(join(root, 'init.json'), JSON.stringify({ session_id: 'session', model: 'MiniMax-M3' }))
+    writeFileSync(join(root, 'user-echo.json'), JSON.stringify(witness.echo)); writeFileSync(join(root, 'result.json'), JSON.stringify(witness.result))
+    await assert.rejects(claudeStructuredTurn(realm, 'native', witness.prompt, execution, callbacks), { code: 'failed' }, 'uncached frozen success cannot bypass a new sent observation')
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })
 
