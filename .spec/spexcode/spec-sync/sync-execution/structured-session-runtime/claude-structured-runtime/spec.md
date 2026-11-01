@@ -57,3 +57,6 @@ version5/null 请求沿原 Claude policy、realm 与版本3读取证明执行，
 验收使用外部公开随机 fixture，保留默认大于50K替换负证据、cap后的逐字正证据、64KiB以内全控制字符最坏转义、completed跨调用零新turn重放和真实取消。测试使用隔离数据库，不操作其它会话或服务。
 
 压缩预检单独显式启用：使用约720KiB公开 filler 和不在 prompt 泄露的随机末尾标记，要求本轮全部读取、实际 compact_boundary、原生完整 proof 与 completed 零新调用重放。子进程整组移除四个认证/路由环境键后沿既有 native-user-settings 投影，不保存凭据或修改用户配置。一次预检最多一轮、五分钟；未发生压缩、读取不全或失去实际 API 可见性均不能声明压缩正例。
+
+
+明确的 version6/native-worktree-v1 是独立执行模式：cwd 必须为创建记录的真实 worktree；read 使用原生 plan 权限且完成不许改动，edit 使用正常可写权限与内置文件/Bash 工具，不施加 frozen MCP 唯一工具、restricted/空工具或只读 Seatbelt。仍隔离运行记录、沿既有认证在内存使用，不输出凭据。精确 init model、原 session/user UUID、原 prompt 回显及 history、成功 structured_output/schema、exit0 和专属整组停止共同绑定结果；不要求分块读取或逐字 API 消费证明，也不借用旧 frozenReadProof。冷完成读取原 evidence 并核 Git 结果，不重启 CLI。旧 claude-frozen-read-only-v1 原约束不变。

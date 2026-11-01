@@ -44,3 +44,6 @@ version5/null 请求沿原 ZCode policy、realm 与版本4读取证明执行，�
 取消沿原协调入口撤销发布权。活运行向同 session 发 stop，核 ACK 后仍要求精确 turn 终态与 idle；关闭后仍核全部进程。冷取消只允许原固定 plan、PID/start/receipt 的专属 runtime，精确 TERM 后核进程组与 MCP 全亡；未知身份不操作，不以 ACK、leader 退出或迟到 output 释放容量或发布结果。
 
 普通测试覆盖命名空间、精确 fence decoder、事件安全投影、固定能力配置和冷取消身份；真实 native 测试必须显式环境开关，默认不得运行模型。当前节点保持 pending，直到正式产品 A/B 证据及门槛全部成立。
+
+
+明确的 version6/native-worktree-v1 使用创建记录的真实 worktree 作为 workspace/cwd，read 用原生 plan、edit 用原生 build，保留正常内置工具，不设 frozen MCP/只读 Seatbelt 或唯一工具限制。权限请求仅对当前 session 一次批准正常读/搜索/shell，文件修改只批准 edit 模式的本 worktree，且不写 permissionUpdates、不建立读取内容/路径白名单。仅 schema 控制最终 JSON；原 provider/model/effort 快照、唯一 session/input/query/turn、原始 send/messages/events、精确成功终态、idle/close、exit0 与整个自有进程停止仍逐项核实。完成及冷复用不生成或消费 frozenReadProof，也不要求分块读取及逐字 API 消费；旧 frozen policy 及工具门不变。
