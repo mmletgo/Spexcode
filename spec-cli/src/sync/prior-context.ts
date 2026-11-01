@@ -61,6 +61,14 @@ export function obligationPaths(source: string, path: string, actualPaths: reado
   return [...paths]
 }
 
+/** 仅展开实际执行目标的只读义务，不沿只读父接口扇出其它实现。 */
+export function ownedObligationPaths(targets: readonly { path: string }[], executionPaths: readonly string[] | undefined, sources: ReadonlyMap<string, string>, actualPaths: readonly string[]): string[] {
+  return [...new Set(targets.filter(target => !executionPaths || within(target.path, executionPaths)).flatMap(target => {
+    const source = sources.get(target.path)
+    return source === undefined ? [] : obligationPaths(source, target.path, actualPaths)
+  }))].sort()
+}
+
 /** 只保留本区授权路径上的历史 manifest、正文和 binary/symlink。 */
 export function projectPriorContext(prior: GenerationInput['priorContext'], paths: readonly string[]): GenerationInput['priorContext'] {
   return prior?.map(item => ({

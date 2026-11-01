@@ -1,7 +1,9 @@
 import type { ComposedInputRef, PublicationBase, PublicationHeads, SyncAttempt, SyncOperation } from './operation-types.js'
 import type { SyncStore } from './store.js'
-import { contentHash, objectGit, readEvidence, readTree, validateRepositoryPath, verifySnapshot, writeEvidence, writeTree } from './snapshot.js'
+import { contentHash, objectGit, readEvidence, readObject, readTree, validateRepositoryPath, verifySnapshot, writeEvidence, writeTree } from './snapshot.js'
 import type { TreeEntry } from './snapshot.js'
+import { isUtf8Text } from './composition.js'
+import { ownedObligationPaths } from './prior-context.js'
 
 export type PublicationProvenance = {
   version: 'sync-publication-base-v1'; operationId: string; attemptId: string; sourceInputId: string
@@ -13,10 +15,19 @@ export type PublicationProvenance = {
 const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b)
 const within = (path: string, paths: readonly string[]): boolean => paths.some(parent => path === parent || path.startsWith(`${parent}/`))
 const canonical = (paths: readonly string[]): string[] => [...new Set(paths.map(validateRepositoryPath))].sort()
-function publicationReadPaths(operation: SyncOperation): string[] {
+function publicationReadPaths(operation: SyncOperation, composed: ComposedInputRef): string[] {
   if (!operation.planBlob) throw new Error('SYNC_PUBLICATION_BASE_BINDING: frozen publication plan required')
-  const plan = JSON.parse(readEvidence(operation.input.source.commonDir, operation.planBlob).toString()) as { readPaths: string[] }
-  return canonical([...plan.readPaths, ...operation.scope.paths])
+  const commonDir = operation.input.source.commonDir
+  const plan = JSON.parse(readEvidence(commonDir, operation.planBlob).toString()) as { readPaths: string[]; targets: { path: string }[] }
+  const entries = composedEntries(commonDir, composed), sources = new Map<string, string>()
+  for (const target of plan.targets) {
+    const entry = entries.find(item => item.path === target.path)
+    if (entry && entry.mode !== '120000') {
+      const bytes = readObject(commonDir, entry.oid)
+      if (isUtf8Text(bytes)) sources.set(target.path, bytes.toString('utf8'))
+    }
+  }
+  return canonical([...plan.readPaths, ...operation.scope.paths, ...ownedObligationPaths(plan.targets, operation.scope.paths, sources, entries.map(entry => entry.path))])
 }
 function composedEntries(commonDir: string, composed: ComposedInputRef): TreeEntry[] {
   const entries = readTree(commonDir, composed.tree)
@@ -63,7 +74,7 @@ function publicationImage(operation: SyncOperation, composed: ComposedInputRef, 
 /** 只在来源发布锁内调用；恢复使用已冻结记录，不重新读取最新 frontier。 */
 export function assemblePublicationBase(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, viewComposed: ComposedInputRef, readPaths: readonly string[]): PublicationBase {
   const reads = canonical(readPaths)
-  if (!same(reads, publicationReadPaths(operation))) throw new Error('SYNC_PUBLICATION_BASE_BINDING: publication read closure differs from frozen plan and reviewed scope')
+  if (!same(reads, publicationReadPaths(operation, viewComposed))) throw new Error('SYNC_PUBLICATION_BASE_BINDING: publication read closure differs from frozen plan and reviewed scope')
   if (attempt.publicationBase) return attempt.publicationBase
   if (!operation.baselineSelection || attempt.operationId !== operation.id || !attempt.composedInput || !same(attempt.composedInput, viewComposed)) throw new Error('SYNC_PUBLICATION_BASE_BINDING: original frozen composition required')
   const commonDir = operation.input.source.commonDir, writes = canonical(operation.readyScope.paths), heads = store.readPublicationHeads(operation.input.source)
@@ -83,7 +94,7 @@ export function assemblePublicationBase(store: SyncStore, operation: SyncOperati
 export function verifyPublicationBase(operation: SyncOperation, attempt: SyncAttempt, base: PublicationBase): PublicationProvenance {
   const commonDir = operation.input.source.commonDir, evidence = JSON.parse(readEvidence(commonDir, base.provenanceBlob).toString()) as PublicationProvenance
   if (evidence.version !== 'sync-publication-base-v1' || evidence.operationId !== operation.id || evidence.attemptId !== attempt.id || evidence.sourceInputId !== operation.input.id || evidence.readSetDigest !== operation.readSetDigest || !attempt.composedInput || !same(evidence.originalComposed, attempt.composedInput) || !same(evidence.writePaths, canonical(operation.readyScope.paths)) || !same(evidence.readPaths, canonical(evidence.readPaths)) || !same({ parentCommit: evidence.parentCommit, parentTree: evidence.parentTree, parentManifestBlob: evidence.parentManifestBlob, composed: evidence.composed }, { parentCommit: base.parentCommit, parentTree: base.parentTree, parentManifestBlob: base.parentManifestBlob, composed: base.composed })) throw new Error('SYNC_PUBLICATION_BASE_BINDING: frozen identity or provenance differs')
-  if (!same(evidence.readPaths, publicationReadPaths(operation))) throw new Error('SYNC_PUBLICATION_BASE_BINDING: publication read closure differs from frozen plan and reviewed scope')
+  if (!same(evidence.readPaths, publicationReadPaths(operation, attempt.composedInput!))) throw new Error('SYNC_PUBLICATION_BASE_BINDING: publication read closure differs from frozen plan and reviewed scope')
   const image = publicationImage(operation, attempt.composedInput, evidence.heads, evidence.readPaths, evidence.writePaths)
   if (!same(image.paths, evidence.paths) || writeTree(commonDir, image.parent) !== base.parentTree || writeTree(commonDir, image.candidate) !== base.composed.tree) throw new Error('SYNC_PUBLICATION_BASE_BINDING: actual publication images differ')
   const parentEntries = readTree(commonDir, base.parentTree)

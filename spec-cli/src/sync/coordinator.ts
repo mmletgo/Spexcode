@@ -30,6 +30,7 @@ import type { NativeRunCheckpoint, NativeRunPlan } from './native-run.js'
 import type { AdmitSyncInput, ApplyReceipt, BlobRef, CandidateRef, ComposedInputRef, FrozenBaselineSelection, InputSnapshot, SyncAttempt, SyncFailure, SyncOperation, SyncScope, VerificationResultBlob, WriteFence } from './operation-types.js'
 import { deliverVerifiedAttempt, planPrivateDelivery } from './private-delivery.js'
 import { assemblePublicationBase } from './publication-base.js'
+import { ownedObligationPaths } from './prior-context.js'
 import { composeControlledRequest, readControlledChanges, readControlledDecision } from './request-input.js'
 import { sessionIdForCreateKey } from '../sessions.js'
 import { assertFrozenBinding, readFrozenManifest, readFrozenRange } from '../frozen-context.js'
@@ -85,7 +86,9 @@ function priorDeliveryFiles(operation: SyncOperation, view: InputView, readPaths
 export async function isSyncInputCurrent(operation: SyncOperation, current: InputSnapshot, plan: SyncCoordinatorPlan): Promise<boolean> {
   if (canonical(operation.input.source) !== canonical(current.source)) return false
   if (!operation.baselineSelection) return operation.input.id === current.id
-  const paths = unique([...plan.readPaths, ...operation.scope.paths])
+  const view = await readInput(operation.input, plan, operation.previousBaselinePair, operation.requestBlob ?? undefined, operation.baselineSelection ?? undefined, operation.scope.paths)
+  const originalEntries = verifySnapshot(operation.input), currentEntries = verifySnapshot(current)
+  const paths = unique([...view.readPaths, ...operation.scope.paths, ...ownedObligationPaths(plan.targets, operation.scope.paths, view.files, unique([...originalEntries, ...currentEntries].map(entry => entry.path)))])
   const treeCache = new Map<string, ReturnType<typeof readTree>>()
   const rememberTree = (input: InputSnapshot, entries: ReturnType<typeof readTree>): void => { treeCache.set(`${input.source.commonDir}\0${input.immutableTree}`, entries) }
   const readEntries = (input: InputSnapshot, tree: string): string => {
@@ -95,7 +98,7 @@ export async function isSyncInputCurrent(operation: SyncOperation, current: Inpu
     return canonical(entries.filter(entry => within(entry.path, paths)))
   }
   const headTree = (input: InputSnapshot): string => objectGit(input.source.commonDir, ['rev-parse', `${input.headCommit}^{tree}`]).toString().trim()
-  rememberTree(operation.input, verifySnapshot(operation.input)); rememberTree(current, verifySnapshot(current))
+  rememberTree(operation.input, originalEntries); rememberTree(current, currentEntries)
   return readEntries(operation.input, operation.input.immutableTree) === readEntries(current, current.immutableTree)
     && readEntries(operation.input, operation.input.indexTree) === readEntries(current, current.indexTree)
     && readEntries(operation.input, headTree(operation.input)) === readEntries(current, headTree(current))
@@ -117,12 +120,29 @@ async function readInput(input: InputSnapshot, plan: SyncCoordinatorPlan, previo
       if (canonical(unique(changed)) !== canonical(unique(plan.commitTrigger.paths))) fail('commit_trigger_binding', '累计提交路径与真实前后快照不一致')
     }
   }
-  const readPaths = selection ? unique([...plan.readPaths, ...executionPaths ?? []]) : plan.readPaths
+  let readPaths = selection ? unique([...plan.readPaths, ...executionPaths ?? []]) : [...plan.readPaths]
   let composition = composeAuthoredInput(input, selection ?? previous ?? undefined, { retainConflicts: true, ...(selection ? { executionPaths, contextPaths: readPaths } : {}) })
   if (!composition.composed) fail('composition_conflict', '人类输入与前次交付存在重叠冲突', [writeEvidence(input.source.commonDir, composition.conflicts)])
   if (requestBlob) composition = composeControlledRequest(input, composition.composed, requestBlob, { retainConflicts: true, baselineSelection: selection })
   if (!composition.composed) fail('request_conflict', '用户受控差量与已交付细化存在重叠冲突', [writeEvidence(input.source.commonDir, composition.conflicts)])
-  const composed = composition.composed, entries = readTree(input.source.commonDir, composed.tree)
+  let composed = composition.composed, entries = readTree(input.source.commonDir, composed.tree)
+  const targetSources = new Map<string, string>()
+  for (const target of plan.targets) {
+    const entry = entries.find(item => item.path === target.path)
+    if (entry && entry.mode !== '120000') {
+      const bytes = readObject(input.source.commonDir, entry.oid)
+      if (isUtf8Text(bytes)) targetSources.set(target.path, bytes.toString('utf8'))
+    }
+  }
+  const completeReadPaths = unique([...readPaths, ...ownedObligationPaths(plan.targets, executionPaths, targetSources, entries.map(entry => entry.path))])
+  if (canonical(completeReadPaths) !== canonical(readPaths)) {
+    readPaths = completeReadPaths
+    composition = composeAuthoredInput(input, selection ?? previous ?? undefined, { retainConflicts: true, ...(selection ? { executionPaths, contextPaths: readPaths } : {}) })
+    if (!composition.composed) fail('composition_conflict', '人类输入与前次交付存在重叠冲突', [writeEvidence(input.source.commonDir, composition.conflicts)])
+    if (requestBlob) composition = composeControlledRequest(input, composition.composed, requestBlob, { retainConflicts: true, baselineSelection: selection })
+    if (!composition.composed) fail('request_conflict', '用户受控差量与已交付细化存在重叠冲突', [writeEvidence(input.source.commonDir, composition.conflicts)])
+    composed = composition.composed; entries = readTree(input.source.commonDir, composed.tree)
+  }
   if (contentHash(JSON.stringify(entries)) !== composed.contentDigest || readEvidence(input.source.commonDir, composed.manifestBlob).toString() !== JSON.stringify({ version: 1, entries })) fail('composition_digest', '组合输入真实清单与引用不一致')
   const readEntries = entries.filter(entry => within(entry.path, readPaths))
   const files = new Map<string, string>()
