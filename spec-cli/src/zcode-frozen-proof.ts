@@ -98,8 +98,8 @@ export function proveZCodeFrozenReads(ref: FrozenContextRef, witness: ZCodeFroze
   if (!Array.isArray(witness.messages) || !Array.isArray(witness.events)) stale('witness lacks raw native messages/events')
   const messages = new Map<string, NativeRecord>(), calls = new Map<string, { messageId: string; state: NativeRecord }>(), partIds = new Set<string>(), rawMessageIds = new Set<string>()
   let user: ZCodeNativeMessage | undefined
-  const runtimeSources = new Set<string>()
-  let userCount = 0, assistantCount = 0, modelChangeTime: number | undefined
+  const runtimeSources = new Set<string>(), requestPrefixCounts: number[] = []
+  let assistantCount = 0, modelChangeTime: number | undefined
   for (const message of witness.messages) {
     record(message)
     const info = record(message.info), id = text(info.id)
@@ -140,15 +140,16 @@ export function proveZCodeFrozenReads(ref: FrozenContextRef, witness: ZCodeFroze
     const anchor = record(info.anchor)
     if (anchor.turnId !== turnId || semantics.providerVisibility !== 'visible') stale('message is outside the exact model-visible native turn')
     if (info.role === 'user') {
-      userCount++
       const model = record(info.modelSelection)
       if (model.providerId !== providerId || model.modelId !== modelId) stale('user input has a foreign native model selection')
       if (info.synthetic === true) {
         const source = text(semantics.source), metadata = record(info.metadata)
-        if (!['environment', 'model', 'runtime_mode', 'date'].includes(source) || runtimeSources.has(source) || anchor.origin !== 'synthetic'
+        const silentReminder = source === 'silent_turn_reminder'
+        if (!['environment', 'model', 'runtime_mode', 'date', 'silent_turn_reminder'].includes(source) || !silentReminder && (runtimeSources.has(source) || assistantCount > 0) || anchor.origin !== 'synthetic'
           || info.visibility !== 'model-only' || semantics.origin !== 'agent_runtime' || semantics.kind !== 'system_reminder'
           || semantics.uiVisibility !== 'hidden' || semantics.transcriptVisibility !== 'hidden' || metadata.source !== source
           || metadata.visibility !== 'model-only' || record(metadata.runtimeMessage).source !== source || message.parts.length !== 1) stale('synthetic user is not a known same-turn native runtime reminder')
+        if (silentReminder && (assistantCount === 0 || message.parts[0].text !== "The user hasn't heard from you in a while. As you continue, keep them updated when there's something to tell — a finding, a change of plan.")) stale('silent reminder differs from its known native body or mid-turn position')
         runtimeSources.add(source)
       } else {
         if (user || anchor.origin !== 'realUser' || semantics.origin !== 'real_user' || semantics.kind !== 'user_prompt'
@@ -157,6 +158,7 @@ export function proveZCodeFrozenReads(ref: FrozenContextRef, witness: ZCodeFroze
         text(anchor.sourceCommandId); user = message
       }
     } else {
+      requestPrefixCounts.push(messages.size - 1)
       assistantCount++
       if (info.providerId !== providerId || info.modelId !== modelId || info.error !== undefined || semantics.origin !== 'agent_runtime'
         || semantics.kind !== 'assistant_response' || semantics.uiVisibility !== 'visible' || semantics.transcriptVisibility !== 'visible') stale('assistant has a foreign model, origin or native error')
@@ -211,7 +213,7 @@ export function proveZCodeFrozenReads(ref: FrozenContextRef, witness: ZCodeFroze
       response = payload.response; ended = true; continue
     }
     if (event.type === 'session.updated') {
-      if (payload.providerId !== providerId || payload.modelId !== modelId || payload.toolCount !== 1 || payload.iteration !== Math.ceil(results.size / 10) || payload.messageCount !== userCount + requests.length + results.size) stale('actual ModelRequest has a foreign model, tool surface or iteration')
+      if (payload.providerId !== providerId || payload.modelId !== modelId || payload.toolCount !== 1 || payload.iteration !== Math.ceil(results.size / 10) || payload.messageCount !== requestPrefixCounts[requests.length] + results.size) stale('actual ModelRequest has a foreign model, tool surface or iteration')
       requests.push(seq); continue
     }
     if (event.type !== 'tool.updated') stale('evidence contains a foreign turn, user input or unsupported event')

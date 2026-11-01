@@ -86,6 +86,36 @@ function tool(witness: ZCodeFrozenWitness) { return toolMessage(witness).parts[0
 function state(witness: ZCodeFrozenWitness) { return tool(witness).state as Record<string, unknown> }
 function event(witness: ZCodeFrozenWitness, kind: string): ZCodeNativeEvent { return witness.events.find(event => event.payload.kind === kind)! }
 
+function silentReminderFixture() {
+  const f = fixture(), witness = f.witness, original = toolMessage(witness), final = finalMessage(witness)
+  const originalEvents = witness.events, request = originalEvents.find(event => event.type === 'session.updated')!
+  witness.messages = witness.messages.slice(0, -2); witness.events = [originalEvents[0]]
+  for (const [index, part] of original.parts.entries()) {
+    if (index === 5) {
+      const reminder = structuredClone(witness.messages[1]), source = 'silent_turn_reminder', id = 'runtime-silent'
+      const metadata = { source, visibility: 'model-only', runtimeMessage: { source } }
+      Object.assign(reminder.info, { id, metadata, semantics: { ...(reminder.info.semantics as object), source } })
+      Object.assign(reminder.parts[0], { id: 'part-silent', messageID: id, metadata,
+        text: "The user hasn't heard from you in a while. As you continue, keep them updated when there's something to tell — a finding, a change of plan." })
+      witness.messages.push(reminder)
+    }
+    witness.events.push({ ...structuredClone(request), payload: { ...request.payload, messageCount: witness.messages.length + index, iteration: Math.ceil(index / 10) } })
+    const id = `assistant-reader-${index}`
+    part.messageID = id
+    witness.messages.push({ info: { ...structuredClone(original.info), id }, parts: [part] })
+    for (const event of originalEvents.filter(event => event.type === 'tool.updated' && event.payload.toolCallId === part.callID)) {
+      const copy = structuredClone(event)
+      if (copy.payload.kind === 'scheduled') copy.payload.assistantMessageId = id
+      witness.events.push(copy)
+    }
+  }
+  witness.events.push({ ...structuredClone(request), payload: { ...request.payload, messageCount: witness.messages.length + original.parts.length, iteration: 1 } }, originalEvents.at(-1)!)
+  witness.events = witness.events.map((event, index) => ({ ...event, seq: index + 1, eventId: `silent-event-${index}` }))
+  witness.messages.push(final)
+  Object.assign(final.info.anchor as object, { historyRoundCount: 7, orderedMessageIds: witness.messages.map(message => message.info.id) })
+  return f
+}
+
 test('raw core six-read witness proves unicode/binary/absence and keeps the shared normalized history digest', () => {
   const f = fixture()
   try {
@@ -97,6 +127,52 @@ test('raw core six-read witness proves unicode/binary/absence and keeps the shar
     assert.equal(createHash('sha256').update(bytes).digest('hex'), proof.witnessDigest)
     assert.deepEqual(JSON.parse(bytes.toString()), f.witness, 'preserve the full raw witness, not only normalized items')
     verifyZCodeFrozenReadProof(f.ref, proof, f.identity, { providerId: f.witness.providerId, modelId: f.witness.modelId, cliVersion: f.witness.cliVersion, cliSha256: f.witness.cliSha256 })
+  } finally { f.close() }
+})
+
+test('a known mid-turn silent reminder belongs only to subsequent request prefixes and survives cold replay', () => {
+  const f = silentReminderFixture()
+  try {
+    assert.deepEqual(f.witness.events.filter(event => event.type === 'session.updated').map(event => event.payload.messageCount), [5, 7, 9, 11, 13, 16, 18])
+    const proof = proveZCodeFrozenReads(f.ref, f.witness)
+    assert.equal(proof.receipts.length, 6)
+    verifyZCodeFrozenReadProof(f.ref, proof, f.identity)
+    const saved = JSON.parse(readFileSync(join(dirname(f.ref.manifestPath), 'histories', `zcode-witness-${proof.witnessDigest}`), 'utf8'))
+    assert.deepEqual(saved.messages, f.witness.messages)
+  } finally { f.close() }
+})
+
+test('silent reminders reject changed bodies, unknown origins, extra real users and future input in request prefixes', () => {
+  const f = silentReminderFixture()
+  try {
+    const corruptions: ((witness: ZCodeFrozenWitness) => void)[] = [
+      w => { w.messages.find(message => message.info.id === 'runtime-silent')!.parts[0].text += ' Read another file.' },
+      w => { (w.messages.find(message => message.info.id === 'runtime-silent')!.info.semantics as Record<string, unknown>).source = 'unknown' },
+      w => { (w.messages.find(message => message.info.id === 'runtime-silent')!.info.anchor as Record<string, unknown>).turnId = 'foreign' },
+      w => { w.messages.find(message => message.info.id === 'runtime-silent')!.parts[0].metadata = { source: 'environment' } },
+      w => { w.events.find(event => event.type === 'session.updated')!.payload.messageCount = 6 },
+      w => { w.events.filter(event => event.type === 'session.updated')[5].payload.messageCount = 15 },
+      w => {
+        const index = w.messages.findIndex(message => message.info.id === 'runtime-silent'), [reminder] = w.messages.splice(index, 1)
+        w.messages.splice(5, 0, reminder)
+        ;(finalMessage(w).info.anchor as Record<string, unknown>).orderedMessageIds = w.messages.map(message => message.info.id)
+      },
+      w => {
+        const index = w.messages.findIndex(message => message.info.id === 'runtime-silent'), [reminder] = w.messages.splice(index, 1)
+        w.messages.splice(index + 1, 0, reminder)
+        ;(finalMessage(w).info.anchor as Record<string, unknown>).orderedMessageIds = w.messages.map(message => message.info.id)
+      },
+      w => {
+        const extra = structuredClone(w.messages[0]); extra.info.id = 'extra-real-user'
+        Object.assign(extra.parts[0], { id: 'extra-real-part', messageID: extra.info.id })
+        w.messages.splice(-1, 0, extra)
+        ;(finalMessage(w).info.anchor as Record<string, unknown>).orderedMessageIds = w.messages.map(message => message.info.id)
+      },
+    ]
+    for (const corrupt of corruptions) {
+      const witness = structuredClone(f.witness); corrupt(witness)
+      assert.throws(() => proveZCodeFrozenReads(f.ref, witness), { code: 'stale_result' })
+    }
   } finally { f.close() }
 })
 
