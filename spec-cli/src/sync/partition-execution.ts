@@ -8,12 +8,14 @@ import type { Contract, Verification } from '@spexcode/spec-core/contracts'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
 import type { Applicability, ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationTrace, ElaborationSessionRequest, ElaborationChange, ElaborationRepairSeed, ReadonlySpecRepair, VerificationOwnershipProjection } from './elaboration-types.js'
 import { elaborationTargetBindings, projectVerificationTable, withoutVerificationTables } from './elaboration-markdown.js'
-import { actualTreeDiff, verifyCandidate } from './candidate.js'
+import { actualTreeDiff, isHostPrivatePath, verifyCandidate } from './candidate.js'
 import type { CandidateChanges } from './candidate.js'
 import { freezeGenerationCandidate, runGeneration } from './generation.js'
 import type { GenerationInput, GenerationOptions, GenerationResult } from './generation-types.js'
-import type { BlobRef } from './operation-types.js'
-import { contentHash, readEvidence, validateRepositoryPath, verifySnapshot, writeEvidence } from './snapshot.js'
+import type { BlobRef, ComposedInputRef } from './operation-types.js'
+import { contentHash, readEvidence, readObject, readTree, validateRepositoryPath, verifySnapshot, writeEvidence } from './snapshot.js'
+import { isUtf8Text } from './composition.js'
+import { readFrozenContracts } from './frozen-contracts.js'
 import { projectSyncPartition, rawOnlyInterfaceSeedEvidence } from './partitioning.js'
 import { historicalOwnerPaths, historicalRetiredIds, obligationPaths, projectPriorContext } from './prior-context.js'
 import type { RawOnlyInterfaceSeedDescendant, RawOnlyInterfaceSeedEvidence, SyncPartition, SyncPartitionPlan } from './partitioning.js'
@@ -250,9 +252,9 @@ export function projectPartitionVerificationOwnership(input: ElaborationInput, c
 }
 
 /** 纯父按祖先层级先审自身原意接口；叶继承只读接口，新归属按真实 codePath 唯一分区。 */
-export async function elaborateSyncPartitions(input: ElaborationInput, plan: SyncPartitionPlan, maxParallel: number, checkpoints: PartitionCheckpoints, runner: ElaborationRunner): Promise<ElaborationResult> {
+export async function elaborateSyncPartitions(input: ElaborationInput, plan: SyncPartitionPlan, maxParallel: number, checkpoints: PartitionCheckpoints, runner: ElaborationRunner, composed?: ComposedInputRef): Promise<ElaborationResult> {
   const { signal, ...data } = input
-  input = { ...structuredClone(data), signal }; plan = structuredClone(plan)
+  input = { ...structuredClone(data), signal }; plan = structuredClone(plan); composed = composed && structuredClone(composed)
   const commonDir = input.historyInput!.source.commonDir
   const { seeds, descendants } = interfaceSeedPartitions(input, plan)
   const settledSources = new Map<string, string>()
@@ -339,7 +341,20 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
   const candidateChanges = (projection?.changes ?? reviewedChanges).map(({ nodeId, path, beforeDigest, source }) => ({ nodeId, path, beforeDigest, source }))
   const changes = candidateChanges.map(change => ({ ...change, contentDigest: contentHash(change.source) }))
   const applicability = partitionApplicability(results)
-  const seal = sealPartitionedElaboration(input, candidateChanges, applicability)
+  let sealInput = input
+  if (composed) {
+    const files = new Map(input.files), readPaths = unique(plan.partitions.flatMap(partition => partition.readPaths))
+    for (const entry of readTree(commonDir, composed.tree)) {
+      if (files.has(entry.path) || within(entry.path, readPaths) || isHostPrivatePath(entry.path) || entry.mode === '120000') continue
+      const bytes = readObject(commonDir, entry.oid)
+      if (isUtf8Text(bytes)) files.set(entry.path, bytes.toString('utf8'))
+    }
+    const frozen = await readFrozenContracts(input.root, files)
+    const excluded = new Set([...input.targets, ...input.context ?? []].map(source => source.path))
+    for (const change of input.nodeChanges ?? []) { excluded.add(change.from.path); if (change.action === 'move') excluded.add(change.to.path) }
+    sealInput = { ...input, files, context: [...input.context ?? [], ...frozen.nodes.filter(node => !excluded.has(node.path)).map(node => ({ nodeId: node.id, path: node.path, source: files.get(node.path)! }))] }
+  }
+  const seal = sealPartitionedElaboration(sealInput, candidateChanges, applicability)
   const readiness = seal.seal.passed ? projectElaborationFlowReadiness(seal.graph, seal.coverage) : { readyFlowIds: [], blockedFlows: [] }
   const gaps = seal.contracts.flatMap(contract => contract.items.filter((item): item is import('@spexcode/spec-core/contracts').Gap => item.kind === 'GAP'))
   const localStructurePassed = results.every(result => result.structurePassed)

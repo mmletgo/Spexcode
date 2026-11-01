@@ -58,6 +58,100 @@ async function fixture(t: test.TestContext): Promise<{ input: GenerationInput; p
   return { input, plan, checkpoints, root }
 }
 
+
+test('局部分区最终封口读取composed全树承接，真实缺失仍由strict门拒绝', async t => {
+  const prepared = await fixture(t), parentPath = '.spec/export/spec.md'
+  const parent = `---
+title: Export family
+contract-schema: sync-v1
+---
+
+## raw source
+
+分别提供导出、导入与归档能力。
+
+## expanded spec
+
+### REQ
+
+| id | goal | source | constraints | success | depends-on |
+| --- | --- | --- | --- | --- | --- |
+${['EXPORT', 'IMPORT', 'ARCHIVE'].map(domain => `| REQ-PARENT-${domain} | ${domain} | user:raw | 沿用既有规则 | 可完成该能力 | - |`).join('\n')}
+`
+  writeFileSync(join(prepared.root, parentPath), parent)
+  for (const contract of prepared.input.contracts) {
+    const domain = contract.nodeId.split('-')[0].toUpperCase()
+    const source = prepared.input.files.get(contract.path)!
+      .replace(`| FLOW-${domain}-01 | REQ-${domain}-01 |`, `| FLOW-${domain}-01 | REQ-${domain}-01,REQ-PARENT-${domain} |`)
+      .replace(`| AC-${domain}-01 | REQ-${domain}-01,`, `| AC-${domain}-01 | REQ-PARENT-${domain},REQ-${domain}-01,`)
+    writeFileSync(join(prepared.root, contract.path), source)
+  }
+  execFileSync('git', ['-C', prepared.root, 'add', '.'], { stdio: 'pipe' })
+  execFileSync('git', ['-C', prepared.root, 'commit', '-m', 'freeze full parent coverage'], { stdio: 'pipe' })
+  const snapshot = await captureInputSnapshot(prepared.root), composed = composeInputSnapshots(snapshot).composed!
+  const files = new Map(readTree(snapshot.source.commonDir, composed.tree).map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString('utf8')]))
+  const selected = prepared.input.contracts[0], targetSource = files.get(selected.path)!
+  const partition = { ...prepared.plan.partitions[0], readPaths: [...prepared.plan.partitions[0].readPaths, parentPath], changedPaths: [selected.path], contextNodeIds: ['export'] }
+  const plan: SyncPartitionPlan = { ...prepared.plan, partitions: [partition], dependencies: [], expectedPaths: [selected.path] }
+  const input: ElaborationInput = { root: prepared.root, requestKey: 'selective-final-seal', intent: { nodeId: selected.nodeId, rawSource: parseParts(targetSource)!.rawSource! },
+    targets: [{ nodeId: selected.nodeId, path: selected.path, source: targetSource, sourceDigest: contentHash(targetSource) }], context: [{ nodeId: 'export', path: parentPath, source: parent }],
+    historyInput: snapshot, files: new Map([...files].filter(([path]) => partition.readPaths.includes(path))), maxRepairs: 0, maxCalls: 2 }
+  const calls: ElaborationSessionRequest[] = []
+  const runner: ElaborationRunner = async request => {
+    const ordinal = calls.push(request)
+    const frozen = JSON.parse(request.prompt.split('冻结业务输入:\n')[1].split('\n')[0]) as { files: [string, string][]; targets: { path: string }[]; context: { path: string }[] }
+    assert.deepEqual(frozen.targets.map(item => item.path), [selected.path])
+    assert.deepEqual(frozen.context.map(item => item.path), [parentPath])
+    assert.ok(frozen.files.every(([path]) => partition.readPaths.includes(path)), '模型不取得兄弟正文或源码')
+    const output = request.purpose === 'elaboration_generate'
+      ? { version: 'elaboration-target-rows-v3', changes: [], applicability: ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: true, basis: '固定完整业务夹具', affectedIds: ['REQ-EXPORT-01'] })) }
+      : { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+    return { sessionId: `selective-session-${ordinal}`, threadId: `selective-thread-${ordinal}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)) }
+  }
+  const saved = new Map<string, unknown>()
+  const checkpoints: PartitionCheckpoints = { load: () => null, save: (key, value) => { saved.set(key, structuredClone(value)); return writeEvidence(snapshot.source.commonDir, value) } }
+  const result = await elaborateSyncPartitions(input, plan, 1, checkpoints, runner, composed)
+  assert.equal(result.partitionSeal?.passed, true, JSON.stringify(result.partitionSeal?.findings.filter(item => item.severity === 'error')))
+  assert.equal(result.structurePassed, true)
+  assert.equal(result.reviewPassed, true)
+  assert.equal(calls.length, 2)
+  assert.deepEqual(result.changes.map(change => change.path), [selected.path])
+  assert.equal(result.contracts.length, 4)
+  assert.ok(result.coverage!.items.find(item => item.id === 'REQ-PARENT-IMPORT')!.acceptanceIds.includes('AC-IMPORT-01'))
+  await t.test('候选破坏实际祖先承接时不能借旧target补覆盖', async () => {
+    const cached = structuredClone(saved.get(`partition:${partition.id}:elaboration`)) as ElaborationResult
+    cached.changes = cached.changes.map(change => ({ ...change, source: change.source.replace('REQ-EXPORT-01,REQ-PARENT-EXPORT', 'REQ-EXPORT-01') }))
+    const rejected = await elaborateSyncPartitions(input, plan, 1, { ...checkpoints, load: <T>() => structuredClone(cached) as T }, async () => { throw new Error('仅重放已审局部候选的最终门') }, composed)
+    assert.equal(rejected.failure?.code, 'partition_final_seal_failed')
+    assert.ok(rejected.partitionSeal!.findings.some(item => item.code === 'missing-requirement-flow' && item.itemId === 'REQ-PARENT-EXPORT'))
+    assert.ok(!rejected.partitionSeal!.findings.some(item => item.code === 'duplicate-id'), '旧target没有作为只读context补回')
+  })
+  await t.test('候选合法退役target后旧节点不能继续提供父覆盖', async () => {
+    const contract = parseContract({ nodeId: selected.nodeId, path: selected.path, source: targetSource }).contract!
+    const nodeChanges: NonNullable<ElaborationInput['nodeChanges']> = [{ action: 'retire', from: { nodeId: selected.nodeId, path: selected.path }, evidenceRef: { sha256: contentHash('fixture explicit retirement') } }]
+    const cached = structuredClone(saved.get(`partition:${partition.id}:elaboration`)) as ElaborationResult
+    cached.changes = []; cached.nodeChanges = [...nodeChanges]
+    const rejected = await elaborateSyncPartitions({ ...input, nodeChanges, authorizedChanges: contract.items.map(item => ({ id: item.id, action: 'retire', source: 'user:raw', reason: '夹具用户明确取消该节点全部业务身份' })) }, plan, 1,
+      { ...checkpoints, load: <T>() => structuredClone(cached) as T }, async () => { throw new Error('只测试候选删除的最终门') }, composed)
+    assert.equal(rejected.failure?.code, 'partition_final_seal_failed')
+    assert.ok(!rejected.graph!.items.has('REQ-EXPORT-01'))
+    assert.ok(rejected.partitionSeal!.findings.some(item => item.code === 'missing-requirement-flow' && item.itemId === 'REQ-PARENT-EXPORT'))
+  })
+  await t.test('完整树真实失去兄弟承接仍失败', async () => {
+    rmSync(join(prepared.root, '.spec/export/import-contract/spec.md'))
+    const missing = await captureInputSnapshot(prepared.root), missingComposed = composeInputSnapshots(missing).composed!
+    const rejected = await elaborateSyncPartitions({ ...input, historyInput: missing }, plan, 1, checkpoints, runner, missingComposed)
+    assert.equal(rejected.failure?.code, 'partition_final_seal_failed')
+    assert.ok(rejected.partitionSeal!.findings.some(item => item.code === 'missing-requirement-flow' && item.itemId === 'REQ-PARENT-IMPORT'))
+  })
+  await t.test('已读范围实际缺源码不得从composed补回', async () => {
+    const missingFiles = new Map(input.files); missingFiles.delete('src/export.js')
+    const rejected = await elaborateSyncPartitions({ ...input, files: missingFiles }, plan, 1, checkpoints, runner, composed)
+    assert.equal(rejected.structurePassed, false)
+    assert.ok(rejected.rounds.flatMap(round => round.findings).some(item => item.code === 'missing-governed-file'))
+  })
+})
+
 function native(delayReverse = false): { runner: ElaborationRunner; calls: ElaborationSessionRequest[]; peak: () => number } {
   const calls: ElaborationSessionRequest[] = []
   let active = 0, peak = 0

@@ -56,3 +56,6 @@ P1后新增路径若令两个生成区争用同一文件或父子路径，在文
 只读待处理诊断仍只投影受影响owner；兄弟承接基准取当前最新合法已审whole，而非诊断产生时的旧兄弟ref。已通过同一诊断的新局部结果在兄弟失败后继续沿原完整输入摘要承接；新的合法aggregate承接证明须保留原generationRef及acceptedRef，不以空findings复审代替owner的新生成与独审。
 
 最终候选的局部/跨边独审可承接同一operation中已结算attempt的严格accept原件：当前检查点优先；仅以旧requestKey重算唯一冻结摘要并核原完整请求、candidate、plan及来源绑定，全部一致才保留原ref/review/traces并在当前fence登记provenance。失败、repair及上下文改变不能复用；当前V1、真实全分区覆盖、独立性与最终交付门保持。
+
+
+分区最终封口的程序校验上下文以协调器已验证的真实 composed 不可变树为基准，补入未参与本轮分区的既有只读承接节点及其真实源码/测试；不能把只读祖先的全部义务误要求由本轮局部叶重新承接。Agent 的 targets/context/files、完整读取证明和写范围保持原分区投影。已冻结局部读范围中的真实缺席不得从旧树补回；本轮完整候选的替换、新叶和冻结 move/retire 仍由原候选 overlay 在严格全图检查前执行，删除的旧节点不能继续提供覆盖。最终门继续检查完整图的真实引用、祖先义务、AC、代码与测试，不能过滤 projection missing 或关闭 strictContextCoverage；局部已审原件与摘要不改，最终 seal 摘要绑定补全后的实际程序图。

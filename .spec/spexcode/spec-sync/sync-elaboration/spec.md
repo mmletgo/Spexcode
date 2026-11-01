@@ -93,3 +93,6 @@ readonlySpecRepair独立于P2独审refinement，绑定真实全候选V1错误及
 totalTimeoutMs显式null表示本次P1没有总时间期限，省略仍沿既有有限默认；每次调用timeoutMs仍为有限正整数。无总deadline不创建总期计时器，不将null参与减法；每attempt原maxCalls/maxRepairs机制及生成/独审角色保持，取消与未停稳原生资源仍按原失败门禁。
 
 跨attempt的P1续修在validateRepairSeed核对原结构化输出schema、候选/生成/独审摘要及traces之后，将seed.output原始JSON逐字序列化投影到repairContext，明确仅作拒绝候选的格式骨架/诊断、以当前schema为准而非事实或授权。seedCandidate保留为Markdown渲染视图作业务对照，不得把表格占位符当JSON值；null、数组等按当前schema的真实JSON类型修复，旧协议字段不取得新生成权限。原结构与独审诊断、review、来源及原件不改，仍须新独审与全部验收门槛；不涉及Native schema错误采集或分类。
+
+
+分区最终封口的程序校验上下文以协调器已验证的真实 composed 不可变树为基准，补入未参与本轮分区的既有只读承接节点及其真实源码/测试；不能把只读祖先的全部义务误要求由本轮局部叶重新承接。Agent 的 targets/context/files、完整读取证明和写范围保持原分区投影。已冻结局部读范围中的真实缺席不得从旧树补回；本轮完整候选的替换、新叶和冻结 move/retire 仍由原候选 overlay 在严格全图检查前执行，删除的旧节点不能继续提供覆盖。最终门继续检查完整图的真实引用、祖先义务、AC、代码与测试，不能过滤 projection missing 或关闭 strictContextCoverage；局部已审原件与摘要不改，最终 seal 摘要绑定补全后的实际程序图。
