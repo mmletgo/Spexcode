@@ -3,7 +3,7 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 import { buildContractGraph, CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts, projectContractCoverage } from '@spexcode/spec-core/contracts'
-import { elaborate, elaborationDigest, projectElaborationFlowReadiness } from './elaboration.js'
+import { elaborate, elaborationDigest, freezeElaborationInput, projectElaborationFlowReadiness } from './elaboration.js'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
 import type { ElaborationInput, ElaborationRepairSeed, ElaborationReview, ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
 import type { ContractCell, GeneratedElaboration, GeneratedTables, GeneratedTargetElaboration } from './elaboration-markdown.js'
@@ -74,11 +74,68 @@ test('父接口实际生成和独审请求只承担必要共享接口，不混�
   }
 })
 
+test('Native P1生成与独审共用来源语义和只读实现边界，interface_seed仍只审父接口', async () => {
+  const nativeWorktree = { baseCommit: 'a'.repeat(40), tree: 'b'.repeat(40), mode: 'read' as const }
+  const full = runner(request => candidate(request, source))
+  const fullResult = await elaborate({ ...input(), worktree: nativeWorktree, implementationWritePaths: [], maxRepairs: 0 }, { runner: full.run })
+  assert.equal(fullResult.status, 'complete', JSON.stringify({ failure: fullResult.failure, findings: fullResult.rounds.flatMap(round => round.findings) }))
+  assert.deepEqual(full.calls.map(request => request.purpose), ['elaboration_generate', 'elaboration_review'])
+  for (const request of full.calls) {
+    assert.match(request.prompt, /可观察本身不等于重大业务政策/)
+    assert.match(request.prompt, /普通字段表示\/参数类型\/序列化及等价校验顺序/)
+    assert.match(request.prompt, /使用code来源并追到REQ/)
+    assert.match(request.prompt, /参数类型或校验若违反明确raw\/facts，必须保留要求并修实现/)
+    assert.match(request.prompt, /implementationWritePaths为空数组/)
+    assert.match(request.prompt, /源码与全部测试只读/)
+    assert.match(request.prompt, /不得发明、新增或补写测试/)
+    assert.match(request.prompt, /不得以implementation-review交给无授权P2/)
+    assert.match(request.prompt, /readonly_implementation_gap/)
+    if (request.purpose === 'elaboration_review') {
+      assert.match(request.prompt, /只读实现范围下不派发P2/)
+      assert.doesNotMatch(request.prompt, /业务完整但实现错误仅以repair\/implementation-review/)
+    }
+  }
+
+  const raw = '保留导出任务的明确原意，由子实现承接完整流程与验收。'
+  const before = `---\ntitle: 导出接口\nstatus: pending\n---\n## raw source\n\n${raw}\n`
+  const parent = `---\ntitle: 导出接口\nstatus: active\ncontract-schema: sync-v1\n---\n## raw source\n\n${raw}\n\n## expanded spec\n\n父层保留必要共享接口。\n\n### REQ\n\n| id | goal | source | constraints | success | depends-on |\n| --- | --- | --- | --- | --- | --- |\n| REQ-EXPORT-01 | 保留导出任务原意 | user:raw | 由子实现承接流程与验收 | 子实现完整保持原意 | - |\n`
+  const seed = runner(request => candidate(request, parent))
+  const seedResult = await elaborate({ ...input(), worktree: nativeWorktree, implementationWritePaths: [], phase: 'interface_seed', intent: { nodeId: 'export-contract', rawSource: raw }, targets: [{ nodeId: 'export-contract', path, source: before, sourceDigest: elaborationDigest(before) }], facts: [], maxRepairs: 0 }, { runner: seed.run })
+  assert.equal(seedResult.status, 'interface_seed')
+  assert.deepEqual(seed.calls.map(request => request.purpose), ['elaboration_generate', 'elaboration_review'])
+  for (const request of seed.calls) {
+    assert.match(request.prompt, /可观察本身不等于重大业务政策/)
+    assert.match(request.prompt, /未由raw\/facts确定的普通字段表示.*由后续子分区读取实现后细化/)
+    assert.match(request.prompt, /interface_seed|父接口/)
+    assert.doesNotMatch(request.prompt, /逐项展开可完成主流程、状态处置和AC|每个业务REQ至少由一个主FLOW\.req直接覆盖|重新从用户原意和冻结事实走正常、失败、边界、重试/)
+  }
+})
+
+test('analysisRef与interface_seed分类变化都会改变P1冻结摘要', () => {
+  const sha = 'c'.repeat(64)
+  const analysis: CodeBehaviorEvidence = {
+    ref: { sha256: 'd'.repeat(64) },
+    analysis: { version: 'code-behavior-v1', inputId: 'analysis-input', baselinePairId: null, composedDigest: sha, readSetDigest: sha, policyDigest: sha, inputDigest: sha, changes: [], findings: [], facts: [], authorizedChanges: [], nodeChanges: [], newNodes: [], resolutions: [], traces: [], reviewPassed: true },
+  }
+  const binding = { planDigest: sha, partitionId: 'export-leaf', analysisRef: analysis.ref }
+  const base = { ...input(), analysis, partitionBinding: binding }
+  const changedAnalysisRef = { ...base, analysis: { ...analysis, ref: { sha256: 'e'.repeat(64) } }, partitionBinding: { ...binding, analysisRef: { sha256: 'e'.repeat(64) } } }
+  const firstDigest = freezeElaborationInput(base).inputDigest
+  assert.notEqual(freezeElaborationInput(changedAnalysisRef).inputDigest, firstDigest)
+
+  const seedBase = { ...base, phase: 'interface_seed' as const, partitionBinding: { ...binding, interfaceSeed: { phase: 'interface_seed' as const, parentNodeId: 'export-contract', parentPath: path, descendants: [] } } }
+  const changedClassification = { ...seedBase, partitionBinding: { ...seedBase.partitionBinding, interfaceSeed: { phase: 'interface_seed' as const, parentNodeId: 'export-contract', parentPath: path, descendants: [{ nodeId: 'export-child', path: '.spec/export/export-child/spec.md', codePaths: ['src/export.js'], sourcePartitionId: 'export-leaf' }] } } }
+  assert.notEqual(freezeElaborationInput(changedClassification).inputDigest, freezeElaborationInput(seedBase).inputDigest)
+})
+
 test('非父完整细化的共同指令逐字保留完整P1覆盖与独审任务', async () => {
   assert.equal(elaborationDigest(CONTRACT_INSTRUCTIONS), '1d47bf418e05f7148fb9facf6056334d36817bda9ee023d9c3486fddf0ac126f')
   const fake = runner(request => candidate(request, source))
   await elaborate(input(), { runner: fake.run })
-  for (const request of fake.calls) assert.ok(request.prompt.includes(CONTRACT_INSTRUCTIONS))
+  for (const request of fake.calls) {
+    assert.ok(request.prompt.includes(CONTRACT_INSTRUCTIONS))
+    assert.doesNotMatch(request.prompt, /implementationWritePaths为空数组表示本轮源码与全部测试只读/)
+  }
   assert.match(fake.calls[0].prompt, /逐项展开可完成主流程、状态处置和AC/)
   assert.match(fake.calls[1].prompt, /重新从用户原意和冻结事实走正常、失败、边界、重试、取消、重复及必要竞争顺序/)
 })
