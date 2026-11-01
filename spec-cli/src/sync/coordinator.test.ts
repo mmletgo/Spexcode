@@ -2408,14 +2408,14 @@ test('v2最终预算只列真实实现派发，纯父接口不产生虚构生成
   assert.equal(f.store.listJournals(f.operation.id).length, 0)
 })
 
-for (const mode of ['historical-aggregate', 'historical-v2-aggregate', 'historical-v3-aggregate', 'current-aggregate', 'current-local', 'same-guidance', 'same-guidance-local'] as const) test(`v2指导缓存 ${mode} 正式pause恢复不把旧accept无ID gap直接复用`, async t => {
+for (const mode of ['historical-aggregate', 'historical-v2-aggregate', 'historical-v3-aggregate', 'historical-v5-aggregate', 'historical-v5-local', 'current-aggregate', 'current-local', 'same-guidance', 'same-guidance-local'] as const) test(`v2指导缓存 ${mode} 正式pause恢复不把旧accept无ID gap直接复用`, async t => {
   const rawOnly = original.slice(0, original.indexOf('## expanded spec')).replace('contract-schema: sync-v1\n', '')
   const f = await fixture(t, { maxAttempts: 3, maxCalls: 20, maxRepairs: 2, timeoutMs: 120000 }, false, rawOnly, 'project', original, { version: 'sync-coordinator-v2', direction: 'code_to_spec', partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 }, sourcePaths: ['src'], commitTrigger: { before: null, paths: ['src/export.js'] } }, undefined, 'code')
   const same = mode.startsWith('same-guidance'), checkpoint = f.store.checkpoint.bind(f.store)
   f.store.checkpoint = (fence, ref) => {
     const value = JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())
     if (f.store.readAttempt(fence.attemptId).number === 1 && value.version === 'sync-stage-v1' && (value.stage === 'analysis' || value.stage?.endsWith(':analysis'))) {
-      if (mode.startsWith('historical-')) value.guidanceContractVersion = mode === 'historical-v3-aggregate' ? 'code-behavior-guidance-v3' : mode === 'historical-v2-aggregate' ? 'code-behavior-guidance-v2' : 'code-behavior-guidance-v1'
+      if (mode.startsWith('historical-')) value.guidanceContractVersion = mode.includes('v5') ? 'code-behavior-guidance-v5' : mode === 'historical-v3-aggregate' ? 'code-behavior-guidance-v3' : mode === 'historical-v2-aggregate' ? 'code-behavior-guidance-v2' : 'code-behavior-guidance-v1'
       else if (mode === 'same-guidance' || mode === 'same-guidance-local' && value.stage !== 'analysis') value.guidanceContractVersion = CODE_BEHAVIOR_GUIDANCE_VERSION
       else delete value.guidanceContractVersion
       ref = writeEvidence(f.input.source.commonDir, value)
@@ -2438,10 +2438,10 @@ for (const mode of ['historical-aggregate', 'historical-v2-aggregate', 'historic
   const calls = f.calls.length
   f.store.requestControl(f.operation.id, 'pause'); f.store.requestControl(f.operation.id, 'run')
   assert.throws(() => f.store.checkpoint({ operationId: f.operation.id, attemptId: old.id, generation: old.generation, leaseToken: old.leaseToken, sourceFingerprint: f.input.source.physicalFingerprint }, writeEvidence(f.input.source.commonDir, { stale: true })), /SYNC_FENCE_EXPIRED/)
-  if (mode === 'current-aggregate' || mode === 'current-local' || mode === 'same-guidance-local') {
+  if (mode === 'historical-v5-aggregate' || mode === 'historical-v5-local' || mode === 'current-aggregate' || mode === 'current-local' || mode === 'same-guidance-local') {
     const claimed = f.store.claimAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 30000 })
     f.store.bindComposedInput(claimed.fence, old.composedInput!)
-    const source = stages.find(stage => stage.version === 'sync-stage-v1' && (mode === 'current-aggregate' ? stage.stage === 'analysis' : stage.stage?.startsWith('partition:') && stage.stage.endsWith(':analysis')))
+    const source = stages.find(stage => stage.version === 'sync-stage-v1' && (mode.includes('aggregate') ? stage.stage === 'analysis' : stage.stage?.startsWith('partition:') && stage.stage.endsWith(':analysis')))
     assert.ok(source)
     f.store.checkpoint(claimed.fence, source.resultRef)
     f.store.checkpoint(claimed.fence, writeEvidence(f.input.source.commonDir, { ...source, attemptId: claimed.attempt.id }))

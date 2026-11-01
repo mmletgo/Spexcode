@@ -298,7 +298,9 @@ Native 资源结算只控制 receipt 原进程组和历史已观察后代；新�
 
 同步任务按节点代码归属、实际写文件与依赖边规划分区，再派发多个独立上下文。任务只提供本区目标、变更 Spec 和必要接口路径，不给每个 Agent 重复发送全仓正文或读取账本；Agent 可在完整工作树中自由查阅。原角色、共同基线、作者授权及未修改义务仍由程序保留，实际写范围不随读取自由扩大。共享写文件的节点合区，未治理源码保留明确发现分区；超大单文件和不可拆写集合保持完整可读，不能截断或遗漏。 Native分区分析brief还须明确本区facts/newNodes门禁：同一facts.source只提交一份完整text，newNodes仅来自本区unownedSourcePaths和schema候选；候选为空或maxItems为0时返回[]，Root/接口分区不替兄弟源码分区提叶。该约束不限制worktree自由读取，也不引入frozen-reader消费证明。
 
-Native worktree新分析请求仅接受旧/current冻结图中的受影响ID，规则依据限定为既有REQ/RULE/TR；空候选以maxItems:0表达，raw-only空图的GAP/conflict允许空身份数组。分区路径、写权和后置授权门保持，已接受的合法v5缓存继续复用。
+Native worktree新分析请求仅接受旧/current冻结图中的受影响ID，规则依据限定为既有REQ/RULE/TR；空候选以maxItems:0表达，raw-only空图的GAP/conflict允许空身份数组。分区路径、写权和后置授权门保持，已接受的合法v6缓存继续复用。
+
+Native P0分析与独审共用业务语义：raw、源码和完整测试足以核实的行为，即便治理叶、稳定ID或覆盖映射尚未生成，也以facts/newNodes交P1；coverage_gap须指出具体未决业务政策及可观察后果，conflict只用于真实互斥。明确原意下的实现/测试缺陷不是业务GAP；P2仍受原写权约束，只读code_to_spec实现缺口保留为readonly_implementation_gap。纯治理缺席误报须由独审repair，Native自由读取及既有ID、权限、AC、unbound门保持。
 
 分区隶属同一个 operation/attempt，共用会话队列、fence、预算和最终 candidate。保存各阶段的真实 seed、会话、原输出与 Git 差量；恢复仅复用同一任务和可见 tree 的已结算结果。程序合成唯一候选，再用独立会话审查各区和跨区接口；最终仍须全图结构检查、可信真实运行、正常提交 hooks、完整 journal/receipt 和正式采纳。
 
