@@ -5,6 +5,8 @@ hue: 175
 desc: 将协调派发、固定原生会话身份、运行观测和真实终态证据连接到既有结构化会话执行。
 code:
   - spec-cli/src/sync/native-run.ts
+related:
+  - spec-cli/src/sync/native-run.test.ts
 ---
 # 原生结构化派发的持久资源桥
 
@@ -13,6 +15,8 @@ code:
 协调尝试的原生推理必须在调用前登记意图，取消、过期和进程重启后仍能核对与结算实际执行资源，而不能只相信本地Promise完成。
 
 ## expanded spec
+
+新操作通过plan.agentWorkflow=native-worktree-v1及sync-tools-v3固定工作流。各阶段请求携明确worktree:{baseCommit,tree,mode}，复用原资源桥、创建键、预算、取消与terminal→removed；不再prepareFrozenPrompt、不安装frozen reader、不要求frozenReadProof。固定策略由真实结构化运行时version6提供，创建及恢复的payload hash使用同一nativeWorktreePrompt纯函数，base为精确seed。成功及冷重放都核result.worktree精确seed/baseTree、真实HEAD tree及祖先关系，并与durable resultWorktree逐字一致；只读阶段HEAD/tree保持seed。历史worktree关闭后只核保活Git对象和原Native终态，不要求目录仍在，也不重派发。旧无工作流标记的操作与既有已持久frozen请求继续按下文原策略恢复，不能补签读取proof冒充新工作树结果。
 
 模型调用 timeoutMs:null 原样进入固定请求和资源计划，取消/创建清理等待仍保持独立最多15秒预算，不能对null执行Math.min而变为零等待。精确nativeStopped与terminal→removed门禁保持。
 

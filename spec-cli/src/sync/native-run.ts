@@ -8,6 +8,8 @@ import { cancelStructuredSession, runStructuredSession, SettledSessionCreateTime
 import { prepareFrozenReaderRuntime, structuredExecutionPolicy, type FrozenReaderRuntime, type StructuredExecution } from '../session-structured-policy.js'
 import { assertFrozenBinding, prepareFrozenPrompt } from '../frozen-context.js'
 import { verifyStructuredFrozenReadProof as verifyFrozenReadProof } from '../structured-frozen-proof.js'
+import { nativeWorktreePrompt } from '../native-worktree-runtime.js'
+import { verifyStageResult } from './stage-worktree.js'
 import { zcodeNativeModel } from '../zcode-structured.js'
 import type { ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult } from './elaboration-types.js'
 import { SyncStoreError, type SyncStore } from './store.js'
@@ -64,7 +66,9 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
     if (!dispatch) throw new StructuredSessionError('stale_result', 'native resource lost its durable dispatch plan')
     const expectedSessionId = sessionIdForCreateKey(dispatch.sessionCreateKey)
     const execution = structuredExecutionPolicy(request)
-    const expectedCreateHash = hash({ prompt: request.prompt, parent: null, launcher: null, ...(request.base?.trim() ? { base: request.base.trim() } : {}), structuredExecution: execution })
+    const creationPrompt = request.worktree ? nativeWorktreePrompt(request.prompt, request.worktree) : request.prompt
+    const creationBase = request.worktree?.baseCommit ?? request.base
+    const expectedCreateHash = hash({ prompt: creationPrompt, parent: null, launcher: null, ...(creationBase?.trim() ? { base: creationBase.trim() } : {}), structuredExecution: execution })
     const validate = new Ajv({ allErrors: true }).compile(request.schema)
     const identity = { operationId: operation.id, attemptId: attempt.id, inputId: operation.input.id, candidateDigest: resource ? resource.plan.candidateDigest : attempt.candidate?.digest ?? null }
     const plan: NativeRunPlan = { schemaVersion: 1, request, requestDigest, sessionCreateKey: dispatch.sessionCreateKey, expectedSessionId, ...identity }
@@ -75,6 +79,10 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
     }
     const checkResult = (result: ElaborationSessionResult): void => {
       if (!result || result.sessionId !== expectedSessionId || !result.threadId || !result.turnId || (checkpoint.session.threadId !== null && result.threadId !== checkpoint.session.threadId) || (checkpoint.session.turnId !== null && result.turnId !== checkpoint.session.turnId) || !validate(result.output) || result.resultDigest !== hash(result.output)) throw new StructuredSessionError('stale_result', 'native result identity, schema or hash is invalid')
+      if (request.worktree) {
+        try { verifyStageResult(operation.input.source.commonDir, request.worktree, result) }
+        catch (error) { throw new StructuredSessionError('stale_result', (error as Error).message) }
+      }
       if (request.frozenContext) {
         if (!result.frozenReadProof) throw new StructuredSessionError('stale_result', 'native frozen result has no real history coverage evidence')
         if (execution.version === (execution.timeoutMs === null ? 5 : 3) && execution.policy === 'claude-frozen-read-only-v1' && (result.frozenReadProof.version !== 3 || result.frozenReadProof.model !== request.model?.slice(7))) throw new StructuredSessionError('stale_result', 'Claude result lacks its exact native provider/model proof')
@@ -161,7 +169,7 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
           record = observe(); receipt = creationTermination()
         }
         if (!record && !receipt && (!nativePromise || outcome) && runtime.recoverCreateTermination) {
-          await runtime.recoverCreateTermination(dispatch!.sessionCreateKey, { prompt: request.prompt, payloadHash: expectedCreateHash, base: request.base, signal: AbortSignal.timeout(Math.min(15_000, request.timeoutMs ?? 15_000)), structuredExecution: execution })
+          await runtime.recoverCreateTermination(dispatch!.sessionCreateKey, { prompt: creationPrompt, payloadHash: expectedCreateHash, base: creationBase, signal: AbortSignal.timeout(Math.min(15_000, request.timeoutMs ?? 15_000)), structuredExecution: execution })
           record = observe(); receipt = creationTermination()
         }
         if (!record && receipt) {
@@ -211,6 +219,7 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
         const record = observe(), state = record?.structuredExecution
         checkResult(outcome.result)
         if (state?.state !== 'completed' || state.threadId !== outcome.result.threadId || state.turnId !== outcome.result.turnId || state.resultDigest !== outcome.result.resultDigest || hash(state.output) !== outcome.result.resultDigest) throw new StructuredSessionError('stale_result', 'native result lacks matching durable exact-turn completion')
+        if (request.worktree && hash(state.resultWorktree) !== hash(outcome.result.worktree)) throw new StructuredSessionError('stale_result', 'native worktree result differs from its durable immutable result')
         if (request.frozenContext && hash(state.frozenReadProof) !== hash(outcome.result.frozenReadProof)) throw new StructuredSessionError('stale_result', 'native frozen result differs from its durable history evidence')
         settle('completed', { result: copy(outcome.result) })
         return copy(outcome.result)
@@ -222,7 +231,7 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
     const { signal, ...value } = request
     const resource = store.findResource(fence.attemptId, value.requestKey)
     const exactResourceRequest = resource?.plan.payloadDigest === hash(value)
-    let frozen: FrozenRequest = exactResourceRequest ? copy(value) : prepareFrozenPrompt(copy(value), { directory: join(runtimeRoot(), 'frozen-context-v2'), binding: { attemptId: fence.attemptId, policyDigest: operation.policyDigest } })
+    let frozen: FrozenRequest = exactResourceRequest || value.worktree ? copy(value) : prepareFrozenPrompt(copy(value), { directory: join(runtimeRoot(), 'frozen-context-v2'), binding: { attemptId: fence.attemptId, policyDigest: operation.policyDigest } })
     if (!exactResourceRequest && frozen.frozenContext && !options.runtime && !frozen.model?.startsWith('claude:') && !frozen.model?.startsWith('zcode:')) frozen = { ...frozen, readerRuntime: await prepareFrozenReaderRuntime(join(runtimeRoot(), 'structured-frozen-read-only-v2'), frozen.frozenContext) }
     const requestDigest = hash(frozen)
     let flight = flights.get(frozen.requestKey)

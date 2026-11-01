@@ -2301,3 +2301,28 @@ test('真实REQ-only裁决保留明确需求入口与有限旧政策见证，不
     }
   }
 })
+
+test('native worktree P0看见受控raw和完整repo，省略的相关文件可自由读且不借frozen proof', async t => {
+  const f = await fixture(t, undefined, { 'support/info.mjs': 'export const context = "real omitted context"\n' }), original = await f.input(), path = '.spec/export/export-contract/spec.md'
+  const next = f.raw.replace('用户可以提交符合筛选条件的数据导出，任务完成后下载结果。', '用户可以提交符合筛选条件的数据导出，任务完成后下载结果。保留本轮真实作者补充。')
+  const edit = prepareControlledRequest(original.snapshot, { path, source: f.raw, next, changed: true, startLine: 1, endLine: 1 }, { kind: 'user_edit', requestId: 'native-controlled-raw', nodeId: 'export-contract', intent: '保留本轮真实作者补充' })
+  assert.ok(edit.changed)
+  const composed = composeControlledRequest(original.snapshot, original.composed, edit.requestBlob, { retainConflicts: true }).composed!
+  const input = { ...original, composed, origin: 'spec' as const, model: 'claude:MiniMax-M3.1-Flash', plan: { ...original.plan, agentWorkflow: 'native-worktree-v1' as const } }
+  writeFileSync(join(f.root, 'src/export.js'), 'later index\n'); git(f.root, 'add', 'src/export.js'); writeFileSync(join(f.root, 'src/export.js'), 'later WIP\n')
+  const calls: string[] = []
+  const result = await analyzeCodeBehavior(input, async request => {
+    calls.push(request.purpose); assert.ok(request.worktree); assert.equal(request.frozenEntries, undefined); assert.doesNotMatch(request.prompt, /spex_read_frozen|bodyIndex|bodyRef/)
+    assert.equal(git(f.root, 'show', `${request.worktree.baseCommit}:${path}`), next.trim())
+    assert.equal(git(f.root, 'show', `${request.worktree.baseCommit}:src/export.js`), f.source.trim())
+    assert.equal(git(f.root, 'show', `${request.worktree.baseCommit}:support/info.mjs`), 'export const context = "real omitted context"')
+    const brief = JSON.parse(request.prompt.split('任务:\n')[1].split('\n待审分析:')[0]) as { requiredChangedPaths: string[]; historicalRoles: { baseCommit: string }[] }
+    assert.ok(brief.historicalRoles.every(role => /^[a-f0-9]{40,64}$/.test(role.baseCommit)))
+    const output = request.purpose === 'code_behavior_analyze'
+      ? { changes: brief.requiredChangedPaths.map(changed => ({ kind: 'allowed_change', paths: [changed], affectedIds: ['REQ-EXPORT-01'], ruleIds: ['REQ-EXPORT-01'], originalIntent: '保持导出任务', previousBehavior: '既有导出任务', sourceBehavior: '同一导出任务及作者补充', deliveryBehavior: '既有导出任务', evidence: changed, counterexample: '原有导出权限不得变化' })), facts: [{ source: 'code:support/info.mjs#context', text: '真实现存相关上下文' }], acceptanceChanges: [], newNodes: [], resolutions: [] }
+      : (() => { const stage = JSON.parse(request.prompt.split('待审分析:\n')[1]) as { analysisDigest: string; analysis: CodeBehaviorAnalysis }; return { inputDigest: request.inputDigest, analysisDigest: stage.analysisDigest, verdict: 'accept', checkedPaths: [...brief.requiredChangedPaths, 'support/info.mjs'], checkedChangeIds: stage.analysis.changes.map(change => change.id), findings: [] } })()
+    return { sessionId: `native-${calls.length}`, threadId: `thread-${calls.length}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)) }
+  })
+  assert.equal(result.reviewPassed, true); assert.deepEqual(calls, ['code_behavior_analyze', 'code_behavior_review'])
+  assert.equal(readFileSync(join(f.root, 'src/export.js'), 'utf8'), 'later WIP\n')
+})

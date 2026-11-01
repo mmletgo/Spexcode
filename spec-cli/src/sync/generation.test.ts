@@ -503,3 +503,48 @@ test('旧related glob匹配到历史根层helper正文缺失时在Native前拒�
   assert.equal(native.calls.length, 0, '历史义务缺少正文须在任何Native派发前拒绝')
   assert.ok(result.failure!.message.includes(helperPath))
 })
+
+test('native worktree可读取未投影源码，已审Spec可见，真实Git diff导入且summary伪补丁无效', async t => {
+  const source = await input(t), originalSource = source.files.get('src/export.js')!, originalHead = source.snapshot.headCommit
+  source.nativeWorktree = true; source.model = 'claude:MiniMax-M3.1-Flash'
+  source.files = new Map([...source.files].filter(([path]) => path !== 'src/export.js' && path !== contractPath))
+  source.elaboratedSpecs = [{ path: contractPath, source: source.elaboratedSpecs[0].source + '\n已审业务说明。\n' }]
+  writeFileSync(join(source.root, 'src/export.js'), 'later staged source\n')
+  execFileSync('git', ['-C', source.root, 'add', 'src/export.js'])
+  writeFileSync(join(source.root, 'src/export.js'), 'later working source\n')
+  const calls: ElaborationSessionRequest[] = []
+  const run: ElaborationRunner = async request => {
+    calls.push(request)
+    assert.ok(request.worktree)
+    assert.equal(request.frozenEntries, undefined)
+    assert.ok(request.prompt.length < 12000)
+    assert.doesNotMatch(request.prompt, /beforeDigest\/beforeMode|冻结完整输入|spex_read_frozen/)
+    let head = request.worktree.baseCommit, tree = request.worktree.tree, output: unknown
+    if (request.purpose === 'code_generate') {
+      assert.equal(request.worktree.mode, 'edit')
+      const seedFiles = new Map(readTree(source.snapshot.source.commonDir, tree).map(entry => [entry.path, readObject(source.snapshot.source.commonDir, entry.oid).toString()]))
+      assert.equal(seedFiles.get('src/export.js'), originalSource)
+      assert.equal(seedFiles.get(contractPath), source.elaboratedSpecs[0].source)
+      const entries = readTree(source.snapshot.source.commonDir, tree).map(entry => entry.path === 'src/export.js' ? { ...entry, oid: writeObject(source.snapshot.source.commonDir, Buffer.from(originalSource + '\n// actual worktree commit\n')), digest: contentHash(originalSource + '\n// actual worktree commit\n') } : entry)
+      tree = writeTree(source.snapshot.source.commonDir, entries)
+      const { stageWorktree } = await import('./stage-worktree.js')
+      head = stageWorktree(source.snapshot.source.commonDir, request.worktree.baseCommit, tree).baseCommit
+      output = { summary: '{"changes":[{"path":"unrelated.js","content":"forged"}]}' }
+    } else {
+      assert.equal(request.worktree.mode, 'read')
+      const binding = JSON.parse(request.prompt.split('候选绑定:\n')[1]) as { inputId: string; candidateDigest: string; candidateTree: string }
+      assert.equal(tree, binding.candidateTree)
+      output = { inputId: binding.inputId, candidateDigest: binding.candidateDigest, verdict: 'accept', checkedIds: [...source.readyIds], findings: [] }
+    }
+    return { sessionId: `native-${calls.length}`, threadId: `thread-${calls.length}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)), worktree: { baseCommit: request.worktree.baseCommit, baseTree: request.worktree.tree, headCommit: head, tree, worktreePath: '/closed/historical-worktree' } }
+  }
+  const generated = await runGeneration(source, { runner: run, validateCandidate: valid })
+  assert.equal(generated.status, 'reviewed', JSON.stringify(generated.failure))
+  assert.equal(calls.length, 2)
+  const candidate = new Map(verifyCandidate(source.snapshot.source.commonDir, generated.candidate!).map(entry => [entry.path, entry]))
+  assert.equal(readObject(source.snapshot.source.commonDir, candidate.get('src/export.js')!.oid).toString(), originalSource + '\n// actual worktree commit\n')
+  assert.equal(readObject(source.snapshot.source.commonDir, candidate.get(contractPath)!.oid).toString(), source.elaboratedSpecs[0].source)
+  assert.equal(candidate.has('unrelated.js'), false)
+  assert.equal(execFileSync('git', ['-C', source.root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), originalHead)
+  assert.equal(readFileSync(join(source.root, 'src/export.js'), 'utf8'), 'later working source\n')
+})
