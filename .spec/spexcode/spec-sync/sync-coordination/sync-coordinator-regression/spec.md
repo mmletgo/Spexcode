@@ -16,6 +16,8 @@ code:
 
 分区内容路径越界回归先复现已独审后才partition_binding停止，再证明独审前analysis_invalid沿原预算进入下一attempt，完整诊断只回失败分区的新分析/独审，已accept区不重派；原source/index、冻结集合及全部不可变绑定门保持。
 
+code→Spec的分区AC提案引用未变只读父规则时，完整原proposal和逐来源诊断在独审/P1前以behavior_analysis_invalid返回同区下一attempt；兄弟accept区沿原ref承接，只有该区重新分析和独审。全局较宽writePaths不能覆盖本区投影的只读父上下文。旧v3指导marker的aggregate不作为当前v4自动缓存，原件仍可显示与追溯。
+
 有限与unlimited对照回归沿分析/细化/生成及各自独审核对真实派发timeout值，null仅由unlimited冻结预算派生；不改变租约、资源、VERIFY或交付门。
 
 同operation局部多轮的真实Git/SQLite回归先复现已accept分析区和叶P1在兄弟失败后被重复派发，再证明下一attempt仅运行失败区；原ref/review/traces、预算/绝对deadline、source/index及零journal保持，SQLite重启和正式pause→resume后旧fence仍拒写。readSet/input/未审/foreign/ref污染拒绝承接，局部并集仍通过新的严格seal。并行分析回归保存所有在途失败及原proposal/review诊断，checkpoint绑定错误也保primary且不能借空失败列表取得有限修复权；确定性runner仅证明机制，不声称真实Native、Docker或完整交付通过。
@@ -134,4 +136,4 @@ A7形状的真实Git/SQLite回归先保存独审accept但含无IDcoverage_gap的
 
 真实Git/SQLite的P2跨轮回归保留已审及失败分区原件；无诊断首轮与带诊断后轮不能误复用，精确同冻结输入后只重跑失败审查，原accept ref/traces及源/tests不变。历史accept与本轮repair共存时仍精确反馈owner，不把失败或旧dispatch伪造成当前调用。
 
-指导cache回归同时保留旧code-behavior-guidance-v1及缺marker的历史原件，当前v2指导必须重新派发；同指导且精确绑定的已审局部仍按既有来源证明承接，不重做已进入applying的实际交付。
+指导cache回归同时保留旧code-behavior-guidance-v1/v2/v3及缺marker的历史原件，当前v4指导必须重新派发；同指导且精确绑定的已审局部仍按既有来源证明承接，不重做已进入applying的实际交付。
