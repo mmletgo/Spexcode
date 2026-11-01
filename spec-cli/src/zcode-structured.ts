@@ -27,6 +27,7 @@ type NativeEvent = { sessionId: string; turnId?: string; seq: number; eventId: s
 type NativeModel = { providerId: string; modelId: string; options?: { reasoningLevel: 'high' } }
 type NativeSelection = { model: NativeModel; thoughtLevel?: 'high' }
 type ModelSnapshot = { session?: { sessionId: string; model: NativeModel }; settings?: { model?: { current?: { providerId: string; modelId: string; options?: Record<string, unknown> } }; thoughtLevel?: { current?: string; available?: { label: string; value: string }[] } } }
+type IdleSnapshot = { session?: { sessionId: string; status: string }; runtime?: { activeTurnId?: string; activeTurnKind?: string; pendingRequestIds?: string[] }; projection?: { currentTurnId?: string; status?: string; pendingPermissions?: { requestId?: string; toolCallId?: string }[]; activeToolCalls?: { toolCallId: string; toolName: string; status: string }[] } }
 type NativePlan = ZCodeNativeState & NativeSelection & { requestDigest: string; policyDigest: string; cliPath: string; cliVersion: string; cliSha256: string; builtinSha256: string; queryId: string; runtime: string; tmp: string; workspace: string; receiptFile: string; modelSnapshotDigest?: string }
 type StopResult = { nativeStopped: boolean; acknowledged: boolean; nativeStatus?: string; error?: string }
 type StopEvidence = { code: number | null; signal: NodeJS.Signals | null; stopped: boolean; acknowledged: boolean; idle: boolean; closed: boolean; stderrBytes: number; stderrSha256: string }
@@ -36,6 +37,25 @@ const bytesDigest = (path: string): string => createHash('sha256').update(readFi
 const sleep = (milliseconds: number): Promise<void> => new Promise(resolve => setTimeout(resolve, milliseconds))
 const active = new Map<string, { interrupt(): void }>()
 const fixedPolicy = (execution: ZCodeStructuredExecution) => ({ ...structuredExecutionPolicy(execution), version: 4, policy: 'zcode-frozen-read-only-v1' })
+
+/** 原业务正文逐字保留；唯一原生user输入前置固定、只读的精确JSON schema控制段。 */
+export function zcodeStructuredPrompt(prompt: string, schema: Record<string, unknown>): string {
+  return `SpexCode structured-output contract (read-only control):\nReturn exactly one JSON value matching the JSON Schema below. Do not add prose or Markdown.\nJSON Schema: ${JSON.stringify(schema)}\nEnd of structured-output contract.\n\n${prompt}`
+}
+
+/** 只投影结算所需白名单字段；历史currentTurnId与真正activeTurn分别观察。 */
+export function zcodeIdleObservation(snapshot: IdleSnapshot, identity: { sessionId: string; turnId?: string }) {
+  const runtime = snapshot.runtime, projection = snapshot.projection
+  const observed = { sessionId: snapshot.session?.sessionId, status: snapshot.session?.status, activeTurnId: runtime?.activeTurnId, activeTurnKind: runtime?.activeTurnKind,
+    pendingRequestIds: runtime?.pendingRequestIds, currentTurnId: projection?.currentTurnId, projectionStatus: projection?.status,
+    pendingPermissions: projection?.pendingPermissions?.map(permission => ({ requestId: permission.requestId, toolCallId: permission.toolCallId })),
+    activeToolCalls: projection?.activeToolCalls?.map(tool => ({ toolCallId: tool.toolCallId, toolName: tool.toolName, status: tool.status })) }
+  const idle = observed.sessionId === identity.sessionId && observed.status === 'idle' && !!runtime && !observed.activeTurnId && !observed.activeTurnKind
+    && Array.isArray(observed.pendingRequestIds) && observed.pendingRequestIds.length === 0 && !!projection && (!observed.currentTurnId || observed.currentTurnId === identity.turnId)
+    && Array.isArray(observed.pendingPermissions) && observed.pendingPermissions.length === 0 && Array.isArray(observed.activeToolCalls)
+    && observed.activeToolCalls.every(tool => ['completed', 'failed', 'denied'].includes(tool.status))
+  return { idle, observed }
+}
 
 /** namespace只做原生路由，provider与模型必须同时明确，不接受动态别名。 */
 export function zcodeNativeModel(model: string | undefined): { providerId: string; modelId: string } {
@@ -159,12 +179,13 @@ function ownedProcessesStopped(plan: NativePlan, terminate = false): boolean {
 function verifyPlan(plan: NativePlan, root: string, prompt: string | undefined, execution: ZCodeStructuredExecution): void {
   const native = execution.zcodeNative
   if (plan.root !== root || native?.root !== root || plan.sessionId !== native.sessionId || plan.inputId !== native.inputId
-    || plan.policyDigest !== digest(fixedPolicy(execution)) || prompt !== undefined && plan.requestDigest !== digest({ prompt, policy: fixedPolicy(execution), selection: zcodeNativeSelection(execution.model, execution.effort) })
+    || plan.policyDigest !== digest(fixedPolicy(execution)) || prompt !== undefined && plan.requestDigest !== digest({ prompt, nativePrompt: zcodeStructuredPrompt(prompt, execution.schema), policy: fixedPolicy(execution), selection: zcodeNativeSelection(execution.model, execution.effort) })
     || plan.cliVersion !== zcodeCapability.cliVersion || plan.cliSha256 !== zcodeCapability.cliSha256 || plan.builtinSha256 !== zcodeCapability.builtinSha256
     || digest({ model: plan.model, ...(plan.thoughtLevel ? { thoughtLevel: plan.thoughtLevel } : {}) }) !== digest(zcodeNativeSelection(execution.model, execution.effort)) || native.turnId && native.turnId !== plan.turnId || native.pid !== plan.pid || native.receiptFile && native.receiptFile !== plan.receiptFile
     || execution.threadId && execution.threadId !== plan.sessionId || execution.turnId && execution.turnId !== plan.turnId)
     throw new StructuredSessionError('stale_result', 'ZCode fixed native plan or durable identity differs')
   if (existsSync(join(root, 'send.json')) && (!plan.modelSnapshotDigest || !existsSync(join(root, 'model-snapshot.json')) || plan.modelSnapshotDigest !== digest(JSON.parse(readFileSync(join(root, 'model-snapshot.json'), 'utf8'))))) throw new StructuredSessionError('stale_result', 'ZCode saved pre-send model selection differs')
+  if (prompt !== undefined && existsSync(join(root, 'send.json')) && digest(JSON.parse(readFileSync(join(root, 'send.json'), 'utf8'))) !== digest({ sessionId: plan.sessionId, content: zcodeStructuredPrompt(prompt, execution.schema), inputId: plan.inputId, modelSelection: plan.model })) throw new StructuredSessionError('stale_result', 'ZCode original send differs from the exact native schema/prompt input')
 }
 
 async function settleResult(plan: NativePlan, prompt: string, execution: ZCodeStructuredExecution): Promise<NativeResult> {
@@ -180,7 +201,7 @@ async function settleResult(plan: NativePlan, prompt: string, execution: ZCodeSt
   if (!validate(output)) throw new StructuredSessionError('failed', 'ZCode terminal JSON does not match the pinned JSON schema')
   const mcpPath = join(plan.runtime, 'frozen-mcp', 'mcp-public.jsonl')
   const records = readFileSync(mcpPath, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line) as Record<string, unknown>)
-  const witness = { version: 1, provider: 'zcode', cliVersion: plan.cliVersion, cliSha256: plan.cliSha256, providerId: plan.model.providerId, modelId: plan.model.modelId, sessionId: plan.sessionId, turnId: plan.turnId, inputId: plan.inputId, prompt, send, messages, events,
+  const witness = { version: 1, provider: 'zcode', cliVersion: plan.cliVersion, cliSha256: plan.cliSha256, providerId: plan.model.providerId, modelId: plan.model.modelId, sessionId: plan.sessionId, turnId: plan.turnId, inputId: plan.inputId, prompt: zcodeStructuredPrompt(prompt, execution.schema), send, messages, events,
     mcpHistory: { records, digest: digest(records) } } as ZCodeFrozenWitness
   const { proveZCodeFrozenReads } = await import('./zcode-frozen-proof.js')
   const frozenReadProof = proveZCodeFrozenReads(execution.frozenContext!, witness)
@@ -203,10 +224,11 @@ async function completedResult(root: string, prompt: string, execution: ZCodeStr
     return settleResult(plan, prompt, execution)
   }
   const saved = JSON.parse(readFileSync(path, 'utf8')) as Completed
+  const nativePrompt = zcodeStructuredPrompt(prompt, execution.schema)
   const exit = JSON.parse(readFileSync(join(root, 'exit.json'), 'utf8')) as StopEvidence
   const mcpRecords = readFileSync(join(plan.runtime, 'frozen-mcp/mcp-public.jsonl'), 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line) as Record<string, unknown>)
   if (digest(saved.plan) !== digest(plan) || digest(saved.witness) !== digest(JSON.parse(readFileSync(join(root, 'witness.json'), 'utf8')))
-    || saved.witness.prompt !== prompt || digest(saved.witness.messages) !== digest(JSON.parse(readFileSync(join(root, 'messages.json'), 'utf8')))
+    || saved.witness.prompt !== nativePrompt || digest(saved.witness.messages) !== digest(JSON.parse(readFileSync(join(root, 'messages.json'), 'utf8')))
     || digest(saved.witness.events) !== digest(JSON.parse(readFileSync(join(root, 'events.json'), 'utf8'))) || saved.witness.mcpHistory.digest !== digest(mcpRecords)
     || digest(saved.witness) !== saved.result.frozenReadProof.witnessDigest
     || !exit.stopped || !exit.idle || !exit.closed || exit.code !== 0 || exit.signal !== null)
@@ -215,7 +237,7 @@ async function completedResult(root: string, prompt: string, execution: ZCodeStr
   const proof = saved.result.frozenReadProof
   const terminal = JSON.parse(readFileSync(join(root, 'terminal.json'), 'utf8')) as NativeEvent
   const output = decodeZCodeStructuredText(terminal.payload.response as string), validate = new Ajv({ allErrors: true }).compile(execution.schema)
-  verifyZCodeFrozenReadProof(execution.frozenContext!, saved.result.frozenReadProof, { threadId: plan.sessionId, turnId: plan.turnId!, inputId: plan.inputId, prompt }, { ...plan.model, cliVersion: plan.cliVersion, cliSha256: plan.cliSha256 }, { output })
+  verifyZCodeFrozenReadProof(execution.frozenContext!, saved.result.frozenReadProof, { threadId: plan.sessionId, turnId: plan.turnId!, inputId: plan.inputId, prompt: nativePrompt }, { ...plan.model, cliVersion: plan.cliVersion, cliSha256: plan.cliSha256 }, { output })
   if (!validate(output) || saved.result.text !== JSON.stringify(output) || saved.result.threadId !== plan.sessionId || saved.result.turnId !== plan.turnId
     || !saved.witness.events.some(event => digest(event) === digest(terminal))) throw new StructuredSessionError('stale_result', 'ZCode original terminal, schema or proof differs from completion')
   if (execution.state === 'completed') {
@@ -254,7 +276,7 @@ export async function stopZCodeStructuredTurn(execution: ZCodeStructuredExecutio
 /** 单次真实send及原生证明共用已有结构化队列；未完成身份只允许精确取消。 */
 export async function zcodeStructuredTurn(realm: string, id: string, prompt: string, execution: ZCodeStructuredExecution, callbacks: NativeCallbacks): Promise<NativeResult> {
   if (execution.version !== 4 || execution.policy !== 'zcode-frozen-read-only-v1' || !execution.frozenContext || execution.readerRuntime) throw new StructuredSessionError('unsupported', 'ZCode requires its exact isolated frozen policy')
-  const selection = zcodeNativeSelection(execution.model, execution.effort), model = selection.model, root = join(realm, id)
+  const selection = zcodeNativeSelection(execution.model, execution.effort), model = selection.model, nativePrompt = zcodeStructuredPrompt(prompt, execution.schema), root = join(realm, id)
   const replay = await completedResult(root, prompt, execution)
   if (replay) return replay
   if (execution.zcodeNative || execution.turnStartRequested || execution.threadId || execution.turnId || existsSync(join(root, 'plan.json'))) throw new StructuredSessionError('cancellation_pending', 'ZCode in-progress dispatch cannot append another prompt; exact stop is required')
@@ -285,7 +307,7 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
   if (!canary.error && canary.status === 0) { try { boundary = JSON.parse(canary.stdout) as typeof boundary } catch { /* fail closed below */ } }
   if (!boundary.runtime || !boundary.tmp || !boundary.socket || Object.keys(targets).filter(key => !['runtime', 'tmp'].includes(key)).some(key => boundary[key] !== false) || readFileSync(oracle, 'utf8') !== 'UNCHANGED') throw new StructuredSessionError('unsupported', 'ZCode exact read-only write/socket boundary preflight failed')
   writeJson(join(root, 'boundary.json'), { passed: true, results: boundary, profileSha256: bytesDigest(profile) }, true)
-  let plan: NativePlan = { version: 1, root, sessionId: `sess_${randomUUID()}`, inputId: randomUUID(), queryId: randomUUID(), requestDigest: digest({ prompt, policy: fixedPolicy(execution), selection }), policyDigest: digest(fixedPolicy(execution)), cliPath, cliVersion: zcodeCapability.cliVersion, cliSha256: zcodeCapability.cliSha256, builtinSha256: zcodeCapability.builtinSha256, ...selection, runtime, tmp, workspace, receiptFile: join(root, 'process.json') }
+  let plan: NativePlan = { version: 1, root, sessionId: `sess_${randomUUID()}`, inputId: randomUUID(), queryId: randomUUID(), requestDigest: digest({ prompt, nativePrompt, policy: fixedPolicy(execution), selection }), policyDigest: digest(fixedPolicy(execution)), cliPath, cliVersion: zcodeCapability.cliVersion, cliSha256: zcodeCapability.cliSha256, builtinSha256: zcodeCapability.builtinSha256, ...selection, runtime, tmp, workspace, receiptFile: join(root, 'process.json') }
   writeJson(join(root, 'plan.json'), plan)
   const native = (): ZCodeNativeState => ({ version: 1, root, sessionId: plan.sessionId, inputId: plan.inputId, ...(plan.pid ? { pid: plan.pid, receiptFile: plan.receiptFile } : {}), ...(plan.turnId ? { turnId: plan.turnId } : {}) })
   await callbacks.onNative(native()); await callbacks.onTurnStarting?.()
@@ -384,7 +406,7 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
     plan = { ...plan, modelSnapshotDigest: digest(modelSnapshot) }; writeJson(join(root, 'plan.json'), plan)
     if (callbacks.signal?.aborted) interrupt()
     if (abortRequested) throw new StructuredSessionError(timedOut ? 'timeout' : 'cancelled', 'ZCode cancelled before send')
-    const send = { sessionId: plan.sessionId, content: prompt, inputId: plan.inputId }
+    const send = { sessionId: plan.sessionId, content: nativePrompt, inputId: plan.inputId, modelSelection: selection.model }
     writeJson(join(root, 'send.json'), send, true); sent = true
     const ack = await request('session/send', { ...send, queryId: plan.queryId }) as { accepted?: boolean; sessionId?: string }
     if (ack.accepted !== true || ack.sessionId !== plan.sessionId) throw new StructuredSessionError('stale_result', 'ZCode send ACK has no exact accepted session')
@@ -409,15 +431,14 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
       }
       if (sessionCreated && (!sent || terminal)) {
         const deadline = Date.now() + 3000
+        const observations: ReturnType<typeof zcodeIdleObservation>[] = []
         do {
-          const snapshot = await request('session/read', { sessionId: plan.sessionId }) as { session?: { sessionId: string; status: string }; runtime?: { activeTurnId?: string; activeTurnKind?: string; pendingRequestIds?: unknown[] }; projection?: { currentTurnId?: string; pendingPermissions?: unknown[]; activeToolCalls?: { status?: string }[] } }
-          idle = snapshot.session?.sessionId === plan.sessionId && snapshot.session.status === 'idle' && !!snapshot.runtime && !snapshot.runtime.activeTurnId && !snapshot.runtime.activeTurnKind
-            && Array.isArray(snapshot.runtime.pendingRequestIds) && snapshot.runtime.pendingRequestIds.length === 0 && !!snapshot.projection && !snapshot.projection.currentTurnId
-            && Array.isArray(snapshot.projection.pendingPermissions) && snapshot.projection.pendingPermissions.length === 0 && Array.isArray(snapshot.projection.activeToolCalls)
-            && !snapshot.projection.activeToolCalls.some(tool => ['pending', 'running'].includes(tool.status ?? ''))
+          const snapshot = await request('session/read', { sessionId: plan.sessionId }) as IdleSnapshot
+          const observation = zcodeIdleObservation(snapshot, { sessionId: plan.sessionId, turnId: terminal?.turnId })
+          idle = observation.idle; observations.push(observation)
+          writeJson(join(root, 'idle.json'), { sessionId: plan.sessionId, turnId: plan.turnId, idle, observations })
           if (!idle) await sleep(50)
         } while (!idle && Date.now() < deadline)
-        writeJson(join(root, 'idle.json'), { sessionId: plan.sessionId, turnId: plan.turnId, idle }, true)
         if (!idle) throw new StructuredSessionError('cancellation_pending', 'ZCode exact terminal has no matching idle runtime')
         sampleOwnedProcesses(plan)
         const response = await request('session/close', { sessionId: plan.sessionId, expectedPersistence: 'immediate' }) as { closed?: boolean }

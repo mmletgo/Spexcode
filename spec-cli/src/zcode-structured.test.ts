@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { processStartToken, writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
 import { freezeContext } from './frozen-context.js'
 import { structuredExecutionPolicy } from './session-structured-policy.js'
-import { assertZCodeModelSnapshot, decodeZCodeStructuredText, stopZCodeStructuredTurn, zcodeCapability, zcodeNativeModel, zcodeNativeSelection, zcodeProofEvent, zcodeRuntimeConfiguration, zcodeStructuredTurn, type ZCodeStructuredExecution } from './zcode-structured.js'
+import { assertZCodeModelSnapshot, decodeZCodeStructuredText, stopZCodeStructuredTurn, zcodeCapability, zcodeIdleObservation, zcodeNativeModel, zcodeNativeSelection, zcodeProofEvent, zcodeRuntimeConfiguration, zcodeStructuredPrompt, zcodeStructuredTurn, type ZCodeStructuredExecution } from './zcode-structured.js'
 
 test('ZCode namespace requires both exact provider and model', () => {
   assert.deepEqual(zcodeNativeModel('zcode:bigmodel-api/GLM-5.3-Flash'), { providerId: 'bigmodel-api', modelId: 'GLM-5.3-Flash' })
@@ -19,6 +19,17 @@ test('ZCode text transport only unwraps one exact JSON shell without repairing d
   const output = { value: '中文\n原文', list: [1, 2] }
   for (const raw of [JSON.stringify(output), ` \n\`\`\`json\n${JSON.stringify(output)}\n\`\`\`\n`]) assert.deepEqual(decodeZCodeStructuredText(raw), output)
   for (const raw of ['answer: {"value":1}', '```JSON\n{}\n```', '```json\n{}\n```\n```json\n{}\n```', '{} {}', '```json\n{"value":}\n```', '```json\n{}\n```\nprose']) assert.throws(() => decodeZCodeStructuredText(raw))
+})
+
+test('one deterministic native input carries the exact schema and the original business bytes', () => {
+  const prompt = '原业务正文\r\n保持最后空格  ', schema = { type: 'object', properties: { 未提示字段: { type: 'string', enum: ['a\nb'] } }, required: ['未提示字段'], additionalProperties: false }
+  const native = zcodeStructuredPrompt(prompt, schema), json = JSON.stringify(schema)
+  assert.equal(native, zcodeStructuredPrompt(prompt, schema))
+  assert.equal(native.split(json).length, 2)
+  assert(native.endsWith(`\n\n${prompt}`))
+  assert(!prompt.includes('未提示字段'))
+  assert(native.includes('read-only control'))
+  assert.notEqual(native, zcodeStructuredPrompt(prompt, { ...schema, additionalProperties: true }))
 })
 
 test('verified GLM high effort uses both native fields and requires the real settings selection', () => {
@@ -62,6 +73,24 @@ test('unstarted and unproven ZCode cancellation do not invent stop authority', a
   assert.equal((await stopZCodeStructuredTurn({ ...execution, turnStartRequested: true })).nativeStopped, false)
 })
 
+test('completed native turn may remain the projection history pointer while real activity is idle', () => {
+  const snapshot = { session: { sessionId: 'session', status: 'idle' }, runtime: { pendingRequestIds: [] }, projection: { currentTurnId: 'turn', status: 'idle', pendingPermissions: [], activeToolCalls: [{ toolCallId: 'reader', toolName: zcodeCapability.tool, status: 'completed' }] } }
+  Object.defineProperty(snapshot, 'transport', { get: () => { throw new Error('transport payload must not be read') } })
+  const state = zcodeIdleObservation(snapshot, { sessionId: 'session', turnId: 'turn' })
+  assert.equal(state.idle, true)
+  assert.equal(state.observed.currentTurnId, 'turn')
+  assert.deepEqual(state.observed.activeToolCalls, snapshot.projection.activeToolCalls)
+  for (const changed of [
+    { ...snapshot, session: { sessionId: 'other', status: 'idle' } },
+    { ...snapshot, session: { sessionId: 'session', status: 'running' } },
+    { ...snapshot, runtime: { ...snapshot.runtime, activeTurnId: 'turn', activeTurnKind: 'regular' } },
+    { ...snapshot, runtime: { pendingRequestIds: ['pending'] } },
+    { ...snapshot, projection: { ...snapshot.projection, currentTurnId: 'other' } },
+    { ...snapshot, projection: { ...snapshot.projection, pendingPermissions: [{ requestId: 'pending' }] } },
+    ...['pending', 'running', 'unknown'].map(status => ({ ...snapshot, projection: { ...snapshot.projection, activeToolCalls: [{ ...snapshot.projection.activeToolCalls[0], status }] } })),
+  ]) assert.equal(zcodeIdleObservation(changed, { sessionId: 'session', turnId: 'turn' }).idle, false)
+})
+
 test('cold ZCode cancellation verifies the original group and null-token MCP through host observation', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'spex-zcode-stop-')), root = join(directory, 'native'), runtime = join(root, 'runtime')
   mkdirSync(join(runtime, 'frozen-mcp'), { recursive: true })
@@ -77,7 +106,7 @@ test('cold ZCode cancellation verifies the original group and null-token MCP thr
     const policy = { ...structuredExecutionPolicy({ schema: { type: 'object' }, inputDigest: 'input', purpose: 'stop', timeoutMs: 1000, model: 'zcode:bigmodel-api/GLM-5.3-Flash', frozenContext: ref }), version: 4 as const, policy: 'zcode-frozen-read-only-v1' as const, frozenReadProof: undefined }
     const native = { version: 1 as const, root, sessionId: 'session', inputId: 'input', pid: child.pid, receiptFile }
     const execution: ZCodeStructuredExecution = { ...policy, zcodeNative: native, turnStartRequested: true }
-    const plan = { ...native, policyDigest: hash(policy), requestDigest: hash({ prompt: 'fixed prompt', policy, selection: zcodeNativeSelection(execution.model) }), cliVersion: zcodeCapability.cliVersion, cliSha256: zcodeCapability.cliSha256, builtinSha256: zcodeCapability.builtinSha256, model: zcodeNativeModel(execution.model), runtime, receiptFile }
+    const plan = { ...native, policyDigest: hash(policy), requestDigest: hash({ prompt: 'fixed prompt', nativePrompt: zcodeStructuredPrompt('fixed prompt', policy.schema), policy, selection: zcodeNativeSelection(execution.model) }), cliVersion: zcodeCapability.cliVersion, cliSha256: zcodeCapability.cliSha256, builtinSha256: zcodeCapability.builtinSha256, model: zcodeNativeModel(execution.model), runtime, receiptFile }
     writeFileSync(join(root, 'plan.json'), JSON.stringify(plan))
     const readerStart = processStartToken(reader.pid)
     assert(readerStart)
@@ -108,5 +137,33 @@ test('an existing native dispatch cannot be resumed with another send or new pro
     const execution: ZCodeStructuredExecution = { version: 4, policy: 'zcode-frozen-read-only-v1', schema: {}, purpose: 'existing', inputDigest: 'input', timeoutMs: 1000, model: 'zcode:bigmodel-api/GLM-5.3-Flash', frozenContext: ref, turnStartRequested: true }
     await assert.rejects(zcodeStructuredTurn(directory, 'native', 'original prompt', execution, { onThread: async () => assert.fail('no thread'), onTurn: async () => assert.fail('no turn'), onNative: async () => assert.fail('no native') }), { code: 'cancellation_pending' })
     assert.equal(existsSync(join(directory, 'native')), false)
+  } finally { rmSync(directory, { recursive: true, force: true }) }
+})
+
+test('cold replay binds schema and the exact original native send before reading any completion cache', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'spex-zcode-prompt-')), root = join(directory, 'native')
+  mkdirSync(root)
+  try {
+    const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
+    const schema = { type: 'object', properties: { onlyInSchema: { type: 'string' } }, required: ['onlyInSchema'], additionalProperties: false }, prompt = 'Read the opaque value and return the required response.'
+    const ref = freezeContext({ directory: join(directory, 'frozen'), sourceRoot: process.cwd(), binding: { requestKey: 'prompt-binding', inputDigest: 'input' }, entries: [{ id: 'task', label: 'task', kind: 'utf8', bytes: Buffer.from('unchanged frozen task') }] })
+    const policy = { ...structuredExecutionPolicy({ schema, inputDigest: 'input', purpose: 'prompt-binding', timeoutMs: 1000, model: 'zcode:bigmodel-api/GLM-5.3-Flash', frozenContext: ref }), version: 4 as const, policy: 'zcode-frozen-read-only-v1' as const, frozenReadProof: undefined }
+    const native = { version: 1 as const, root, sessionId: 'session', inputId: 'input' }, execution: ZCodeStructuredExecution = { ...policy, zcodeNative: native, turnStartRequested: true }
+    const nativePrompt = zcodeStructuredPrompt(prompt, schema), send = { sessionId: native.sessionId, content: nativePrompt, inputId: native.inputId, modelSelection: zcodeNativeModel(execution.model) }, modelSnapshot = { sessionId: native.sessionId, model: zcodeNativeModel(execution.model) }
+    const plan = { ...native, policyDigest: hash(policy), requestDigest: hash({ prompt, nativePrompt, policy, selection: zcodeNativeSelection(execution.model) }), cliVersion: zcodeCapability.cliVersion, cliSha256: zcodeCapability.cliSha256, builtinSha256: zcodeCapability.builtinSha256, model: zcodeNativeModel(execution.model), receiptFile: join(root, 'process.json'), modelSnapshotDigest: hash(modelSnapshot) }
+    writeFileSync(join(root, 'plan.json'), JSON.stringify(plan)); writeFileSync(join(root, 'model-snapshot.json'), JSON.stringify(modelSnapshot)); writeFileSync(join(root, 'send.json'), JSON.stringify(send))
+    const fixedManifest = readFileSync(ref.manifestPath), callbacks = { onThread: async () => assert.fail('no new thread'), onTurn: async () => assert.fail('no new turn'), onNative: async () => assert.fail('no new native') }
+    assert((JSON.parse(readFileSync(join(root, 'send.json'), 'utf8')) as { content: string }).content.includes(JSON.stringify(schema)))
+    await assert.rejects(zcodeStructuredTurn(directory, 'native', prompt, execution, callbacks), { code: 'cancellation_pending' })
+    writeFileSync(join(root, 'completed.json'), 'must not be read before fixed input validation')
+    await assert.rejects(zcodeStructuredTurn(directory, 'native', prompt, { ...execution, schema: { ...schema, additionalProperties: true } }, callbacks), { code: 'stale_result' })
+    await assert.rejects(zcodeStructuredTurn(directory, 'native', prompt + ' changed', execution, callbacks), { code: 'stale_result' })
+    for (const content of [prompt, nativePrompt + '\nchanged', zcodeStructuredPrompt(prompt, { type: 'string' })]) {
+      writeFileSync(join(root, 'send.json'), JSON.stringify({ ...send, content }))
+      await assert.rejects(zcodeStructuredTurn(directory, 'native', prompt, execution, callbacks), { code: 'stale_result' })
+    }
+    writeFileSync(join(root, 'send.json'), JSON.stringify({ ...send, modelSelection: { ...send.modelSelection, modelId: 'another-model' } }))
+    await assert.rejects(zcodeStructuredTurn(directory, 'native', prompt, execution, callbacks), { code: 'stale_result' })
+    assert.deepEqual(readFileSync(ref.manifestPath), fixedManifest)
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })
