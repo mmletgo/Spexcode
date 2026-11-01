@@ -45,7 +45,7 @@ export function historicalRetiredIds(input: Pick<GenerationInput, 'nodeChanges' 
 }
 
 /** 从旧 Spec 正文展开实际快照中的 code/related/测试/源码义务；解析失败时只保留真实存在的Spec自身。 */
-export function obligationPaths(source: string, path: string, actualPaths: readonly string[]): string[] {
+export function obligationPaths(source: string, path: string, actualPaths: readonly string[], retainLiteralAbsence = false): string[] {
   const contract = parseContract({ nodeId: path.split('/').at(-2) ?? path, path, source }).contract
   const claims = new Set<string>([path])
   if (contract) {
@@ -56,7 +56,7 @@ export function obligationPaths(source: string, path: string, actualPaths: reado
     }
   }
   const claimList = [...claims]
-  const paths = new Set<string>()
+  const paths = new Set<string>(retainLiteralAbsence ? claimList.filter(claim => !claim.includes('*')) : [])
   for (const actualPath of actualPaths) if (claimList.some(claim => relationClaimsPath(claim, actualPath))) paths.add(actualPath)
   return [...paths]
 }
@@ -65,7 +65,7 @@ export function obligationPaths(source: string, path: string, actualPaths: reado
 export function ownedObligationPaths(targets: readonly { path: string }[], executionPaths: readonly string[] | undefined, sources: ReadonlyMap<string, string>, actualPaths: readonly string[]): string[] {
   return [...new Set(targets.filter(target => !executionPaths || within(target.path, executionPaths)).flatMap(target => {
     const source = sources.get(target.path)
-    return source === undefined ? [] : obligationPaths(source, target.path, actualPaths)
+    return source === undefined ? [] : obligationPaths(source, target.path, actualPaths, true)
   }))].sort()
 }
 

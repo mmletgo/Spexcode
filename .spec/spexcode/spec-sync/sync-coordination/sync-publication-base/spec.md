@@ -22,6 +22,8 @@ code:
 
 publication readPaths 必须精确等于可信 plan.readPaths、当前已审 operation.scope.paths 及 original composed 中实际 owned target 的只读义务闭包的去重排序并集；factory 和 verifier 都沿同一共享路径匹配器核该唯一集合。该闭包只取原冻结目标的 code/related、代码来源与 AC.test，不扩写权或从 current/WIP 正文取引用。不能添加无关路径把继承的已结算字节当作 readonly carry 恢复成 original composed，亦不能遗漏配置、oracle、absence 或已审 P1 新文件。缺失冻结计划不能猜读闭包。
 
+字面引用的不存在对象仍受保护；glob 匹配也核发布时实际冻结的 path frontier 清单，未读的新匹配成员不能成为闭包外继承。verifier 复核原 provenance 的 heads，不用 latest 替换已经冻结的发布输入。
+
 publication provenance 内容寻址绑定 operation/attempt、原输入与 readSet、original composed、完整读写路径、path frontier、诊断及实际 parent/候选组合对象。[[sync-store]] bindPublicationBase 在事务外重建实际对象，在事务内复核当前 fence、原 selection 与完整 frontier CAS；仅 generating 且无 candidate/verification 时可首次绑定，相同对象重入仍核当前完整 path frontier，已变化明确 stale，不能替换。候选冻结后和恢复只能使用该 parent，不重新读取 latest 更换树。冻结候选的模型 diff 基线为 publicationBase.composed；完整 apply 差量仍须严格属于本轮实际验证 scope，继承路径、readonly 与历史 ID 不取得本轮 journal 或头推进。
 
 [[sync-publication-base-regression]] 的真实 Git/SQLite 回归覆盖 A1 后 B2、同 HEAD A/B 两种发布顺序、未消费 A2/source/index 保留、readonly config/oracle 当前字节与 absence、逐路径 head 不冒领、伪 parent/闭包/来源拒绝、全 head CAS、冻结后改 base 拒绝及已提交中断恢复原 parent。native 与 V1-V4 前置明确为受控测试证据，不能宣称真实模型或 Docker 已验收；实际 canonical hooks、Git tree/commit、SQLite journal/receipt 均真实运行。
