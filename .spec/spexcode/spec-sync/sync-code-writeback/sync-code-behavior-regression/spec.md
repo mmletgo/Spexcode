@@ -12,6 +12,8 @@ related:
 
 ## expanded spec
 
+真实 Git 的分区精确选择同时包含本区与区外真实 owner、尚未生成的 Spec 路径及未来 contract/flow null 基线，先复现 owner 全 null 时在首个派发前读取 path 崩溃，再证明分析和独审保留原 null residual 与 absent 路径证据、按真实 owner 排除区外正文。未来资源不成为既有契约或可读正文，写范围、原选择及组合证据、source/index/快照均保持；确定性 runner 只证明冻结投影与独审门禁，不代表真实 Native 或完整初始化交付。
+
 回归覆盖 [[sync-code-behavior]] 的合法外部变化、独立审查输入、正文与完整测试上下文、稳定冲突/GAP ID、重构无业务授权、文本相容重叠方案、无治理文件上层定位，以及独审遗漏/同会话/未绑定ref/自批政策/弱化验收拒绝。输入和交付实体保持真实来源及共同基线；原source/index不被写。整体运行与产品证据由 [[sync-code-writeback]] 验收。
 
 真实 Git 回归核对分析与独审均收到冻结契约图的 previous/current 完整项；raw-only 初始化的空图被明确标识，空关联仍须完整分析与独审，不把未通过 P1 结构检查或独审的候选资源名当作既有义务。此接缝只证明上下文与门禁，模型实际展开仍由真实 Dashboard 验收。
