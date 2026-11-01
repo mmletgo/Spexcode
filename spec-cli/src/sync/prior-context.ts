@@ -56,7 +56,7 @@ export function obligationPaths(source: string, path: string, actualPaths: reado
     }
   }
   const claimList = [...claims]
-  const paths = new Set<string>(retainLiteralAbsence ? claimList.filter(claim => !claim.includes('*')) : [])
+  const paths = new Set<string>(retainLiteralAbsence ? claimList.filter(claim => !claim.includes('*')).map(claim => claim.replace(/\/+$/, '')) : [])
   for (const actualPath of actualPaths) if (claimList.some(claim => relationClaimsPath(claim, actualPath))) paths.add(actualPath)
   return [...paths]
 }

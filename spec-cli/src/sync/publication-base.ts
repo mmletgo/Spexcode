@@ -74,10 +74,14 @@ function publicationImage(operation: SyncOperation, composed: ComposedInputRef, 
 /** 只在来源发布锁内调用；恢复使用已冻结记录，不重新读取最新 frontier。 */
 export function assemblePublicationBase(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, viewComposed: ComposedInputRef, readPaths: readonly string[]): PublicationBase {
   const reads = canonical(readPaths)
+  if (attempt.publicationBase) {
+    const evidence = verifyPublicationBase(operation, attempt, attempt.publicationBase)
+    if (!same(reads, evidence.readPaths) || !same(viewComposed, evidence.originalComposed)) throw new Error('SYNC_PUBLICATION_BASE_BINDING: restored publication input differs from frozen evidence')
+    return attempt.publicationBase
+  }
   const commonDir = operation.input.source.commonDir, writes = canonical(operation.readyScope.paths), heads = store.readPublicationHeads(operation.input.source)
   const frontierPaths = heads.selection.bindings.flatMap(binding => binding.resource.kind === 'path' ? [binding.resource.path] : [])
   if (!same(reads, publicationReadPaths(operation, viewComposed, frontierPaths))) throw new Error('SYNC_PUBLICATION_BASE_BINDING: publication read closure differs from frozen plan and reviewed scope')
-  if (attempt.publicationBase) return attempt.publicationBase
   if (!operation.baselineSelection || attempt.operationId !== operation.id || !attempt.composedInput || !same(attempt.composedInput, viewComposed)) throw new Error('SYNC_PUBLICATION_BASE_BINDING: original frozen composition required')
   const image = publicationImage(operation, viewComposed, heads, reads, writes), parentTree = writeTree(commonDir, image.parent), tree = writeTree(commonDir, image.candidate)
   const entries = readTree(commonDir, tree), parentManifestBlob = writeEvidence(commonDir, { version: 1, entries: readTree(commonDir, parentTree) })
