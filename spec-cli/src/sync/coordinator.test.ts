@@ -926,11 +926,15 @@ test('P3未完整独审的行为分析不能晋级细化或写入，具体path�
   assert.equal(f.calls.some(call => call.purpose === 'elaboration_generate'), false); assert.equal(f.store.listJournals(f.operation.id).length, 0)
 })
 
-test('精确Claude结构输出耗尽在同一冻结预算内使用三个独立attempt，失败不产出已审分析或交付', async t => {
-  const f = await fixture(t, { maxAttempts: 3, maxCalls: 3, maxRepairs: 2, timeoutMs: 120000 }, false, original, 'project', original, {}, undefined, 'code', 'claude:MiniMax-M3.1-Flash')
+for (const [model, code] of [['claude:MiniMax-M3.1-Flash', 'structured_output_retries_exhausted'], ['zcode:bigmodel-api/GLM-5.3-Flash', 'structured_output_format_invalid']] as const) test(`精确结构输出失败 ${code} 在同一冻结预算内使用三个独立attempt，失败不产出已审分析或交付`, async t => {
+  const f = await fixture(t, { maxAttempts: 3, maxCalls: 3, maxRepairs: 2, timeoutMs: 120000 }, false, original, 'project', original, {}, undefined, 'code', model)
   f.transform((_output, request) => {
     assert.equal(request.purpose, 'code_behavior_analyze')
-    throw new StructuredSessionError('structured_output_retries_exhausted', 'Claude error_max_structured_output_retries rejected output', { sessionId: `failed-${request.requestKey}`, threadId: 'original-session', turnId: 'original-user' })
+    if (code === 'structured_output_format_invalid') {
+      const context = JSON.parse(request.prompt.split('冻结三方输入:\n')[1]) as { repairDiagnostics: { code: string; message: string }[] }
+      assert.deepEqual(context.repairDiagnostics, f.calls.slice(0, -1).map(() => ({ code, message: 'strict JSON rejected output' })))
+    }
+    throw new StructuredSessionError(code, 'strict JSON rejected output', { sessionId: `failed-${request.requestKey}`, threadId: 'original-session', turnId: 'original-user' })
   })
   const result = await runSyncOperation(f.store, f.operation.id, f.options), attempts = f.store.listAttempts(f.operation.id)
   assert.equal(result.status, 'budget_exhausted')
@@ -939,7 +943,7 @@ test('精确Claude结构输出耗尽在同一冻结预算内使用三个独立at
   assert.deepEqual(result.operation.budget, f.operation.budget); assert.equal(result.operation.deadlineAtMs, f.operation.deadlineAtMs)
   assert.equal(new Set(f.calls.map(call => call.requestKey)).size, 3)
   for (const attempt of attempts) {
-    assert.equal(attempt.failure?.kind, 'repairable'); assert.equal(attempt.failure?.code, 'structured_output_retries_exhausted')
+    assert.equal(attempt.failure?.kind, 'repairable'); assert.equal(attempt.failure?.code, code)
     assert.equal(attempt.candidate, null)
     const stages = attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
     assert.equal(stages.some(stage => stage.stage === 'analysis' || stage.stage === 'elaboration'), false)
@@ -947,7 +951,7 @@ test('精确Claude结构输出耗尽在同一冻结预算内使用三个独立at
   assert.equal(f.store.listJournals(f.operation.id).length, 0); assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
 })
 
-test('精确结构输出失败的旧native资源尚未removed时协调器保留recovery_required且不派发下一attempt', async t => {
+for (const code of ['structured_output_retries_exhausted', 'structured_output_format_invalid'] as const) test(`精确结构输出失败 ${code} 的旧native资源尚未removed时保留recovery_required且不派发下一attempt`, async t => {
   const f = await fixture(t, { maxAttempts: 3, maxCalls: 6, maxRepairs: 2, timeoutMs: 120000 }, false, original, 'project', original, {}, undefined, 'code', 'claude:MiniMax-M3.1-Flash')
   const { fromRaw, writeRecord } = await import('../session-record.js')
   const { configuredSessionApplication } = await import('../session-application.js')
@@ -966,9 +970,9 @@ test('精确结构输出失败的旧native资源尚未removed时协调器保留r
     const policy = structuredExecutionPolicy(request)
     configuredSessionApplication().createSession({ sessionId: expectedSessionId, status: 'awaiting', proposal: 'nothing' })
     const record = fromRaw({ session_id: expectedSessionId, governed: true, worktree_path: f.root, branch: null, title: null, name: null, status: 'awaiting', proposal: 'nothing', merges: 0, note: null, sortkey: null, createdAt: 1, stopped: false, archived: false, harness: 'claude-headless', launch_cmd: 'claude', harness_session_id: 'original-thread', create_request_id: contentHash(dispatch.sessionCreateKey), create_payload_hash: contentHash(JSON.stringify({ prompt: request.prompt, parent: null, launcher: null, structuredExecution: policy })) })
-    record.structuredExecution = { ...policy, state: 'failed', error: 'original schema error', errorCode: 'structured_output_retries_exhausted', turnStartRequested: true, threadId: 'original-thread', turnId: 'original-user', claudeNative: { version: 1, root: join(f.parent, 'unproven-native'), sessionId: 'original-thread', userUuid: 'original-user' } }
+    record.structuredExecution = { ...policy, state: 'failed', error: 'original schema error', errorCode: code, turnStartRequested: true, threadId: 'original-thread', turnId: 'original-user', claudeNative: { version: 1, root: join(f.parent, 'unproven-native'), sessionId: 'original-thread', userUuid: 'original-user' } }
     writeRecord(record)
-    throw new StructuredSessionError('structured_output_retries_exhausted', 'original schema error', { sessionId: expectedSessionId, threadId: 'original-thread', turnId: 'original-user' })
+    throw new StructuredSessionError(code, 'original schema error', { sessionId: expectedSessionId, threadId: 'original-thread', turnId: 'original-user' })
   })
   const result = await runSyncOperation(f.store, f.operation.id, f.options)
   assert.equal(result.status, 'recovery_required'); assert.equal(f.calls.length, 1); assert.equal(f.store.listAttempts(f.operation.id).length, 1)
@@ -978,7 +982,7 @@ test('精确结构输出失败的旧native资源尚未removed时协调器保留r
 })
 
 test('普通unsupported或failed与未停的cancellation_pending不取得结构输出耗尽的自动修复分类', async t => {
-  for (const code of ['unsupported', 'failed', 'cancellation_pending'] as const) {
+  for (const code of ['unsupported', 'failed', 'stale_result', 'cancellation_pending'] as const) {
     const f = await fixture(t, { maxAttempts: 3, maxCalls: 3, maxRepairs: 2, timeoutMs: 120000 }, false, original, 'project', original, {}, undefined, 'code')
     f.transform(() => { throw new StructuredSessionError(code, 'preserved native rejection') })
     const result = await runSyncOperation(f.store, f.operation.id, f.options)
@@ -2343,7 +2347,7 @@ test('v2已审局部进度 正式pause恢复保留旧unsupported timeout历史�
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
 })
 
-for (const mode of ['analysis-live', 'analysis-two-accepted', 'analysis-restart', 'analysis-pause', 'analysis-settled-timeout', 'analysis-mixed', 'analysis-mixed-unsupported', 'analysis-mixed-pause', 'analysis-ref', 'analysis-plan', 'analysis-selection', 'analysis-readset', 'analysis-input', 'analysis-unreviewed', 'analysis-foreign'] as const) test(`v2已审局部进度 ${mode} 只重跑失败分析区`, async t => {
+for (const mode of ['analysis-live', 'analysis-two-accepted', 'analysis-restart', 'analysis-pause', 'analysis-settled-timeout', 'analysis-format', 'analysis-mixed', 'analysis-mixed-unsupported', 'analysis-mixed-pause', 'analysis-ref', 'analysis-plan', 'analysis-selection', 'analysis-readset', 'analysis-input', 'analysis-unreviewed', 'analysis-foreign'] as const) test(`v2已审局部进度 ${mode} 只重跑失败分析区`, async t => {
   const otherPath = '.spec/project/beta/import-contract/spec.md'
   const other = original.replaceAll('export-job', 'import-job').replaceAll('EXPORT', 'IMPORT').replaceAll('export-contract', 'import-contract').replaceAll('src/export.js', 'src/beta/import.js').replaceAll('tests/export.test.mjs', 'tests/import.test.mjs').replaceAll('decision:IMPORT-POLICY', 'decision:EXPORT-POLICY')
   const thirdPath = '.spec/project/gamma/archive-contract/spec.md'
@@ -2361,8 +2365,15 @@ for (const mode of ['analysis-live', 'analysis-two-accepted', 'analysis-restart'
       const context = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as { partition: { id: string }; changedPaths: string[]; repairDiagnostics: { message: string }[] }
       const imported = context.changedPaths.includes('src/beta/import.js'), archived = context.changedPaths.includes('src/gamma/archive.js'), rule = imported ? 'RULE-IMPORT-05' : archived ? 'RULE-ARCHIVE-05' : 'RULE-EXPORT-05'
       calls.push({ attempt: attempt.number, partition: archived ? 'archive' : imported ? 'import' : 'export', purpose: request.purpose, diagnostics: context.repairDiagnostics })
-      if (attempt.number === 2 && !imported && ['analysis-live', 'analysis-two-accepted', 'analysis-restart', 'analysis-pause', 'analysis-settled-timeout'].includes(mode)) assert.fail('已accept分析区不得重新派发')
+      if (attempt.number === 2 && !imported && ['analysis-live', 'analysis-two-accepted', 'analysis-restart', 'analysis-pause', 'analysis-settled-timeout', 'analysis-format'].includes(mode)) assert.fail('已accept分析区不得重新派发')
       if (attempt.number === 2 && archived && mode === 'analysis-mixed-pause') assert.fail('已accept分析区不得重新派发')
+      if (mode === 'analysis-format' && imported) {
+        if (attempt.number === 1) {
+          assert.equal(request.purpose, 'code_behavior_analyze')
+          throw new StructuredSessionError('structured_output_format_invalid', 'ZCode terminal response is not one strict JSON document')
+        }
+        assert.deepEqual(context.repairDiagnostics, [{ partitionId: context.partition.id, code: 'structured_output_format_invalid', message: 'ZCode terminal response is not one strict JSON document' }])
+      }
       if (mode === 'analysis-settled-timeout' && attempt.number === 1 && imported && request.purpose === 'code_behavior_analyze') throw new SettledSessionCreateTimeoutError({ version: 1, sessionId: 'settled-fixture-session', requestDigest: contentHash(request.requestKey), payloadHash: contentHash(request.prompt), code: 'session_create_timeout', phase: 'record-write', nativeStopped: true, nativeStatus: 'notStarted', cleanupComplete: true })
       if (mode === 'analysis-mixed' && !imported && request.purpose === 'code_behavior_review') { await new Promise(resolve => setTimeout(resolve, 15)); throw Object.assign(new Error('未知资源不能被兄弟业务repair遮蔽'), { code: 'cancellation_pending' }) }
       if (mode === 'analysis-mixed-unsupported' && !imported && request.purpose === 'code_behavior_review') throw Object.assign(new Error('unsupported不能被兄弟业务repair遮蔽'), { code: 'unsupported' })
@@ -2395,7 +2406,7 @@ for (const mode of ['analysis-live', 'analysis-two-accepted', 'analysis-restart'
       if (mode === 'analysis-ref') accepted.traces[0].sessionId = 'foreign-session'
       if (mode === 'analysis-input') accepted.inputDigest = contentHash('changed-local-input')
       if (mode === 'analysis-unreviewed') accepted.reviewPassed = false
-      if (!['analysis-live', 'analysis-two-accepted', 'analysis-restart', 'analysis-pause', 'analysis-settled-timeout', 'analysis-mixed-pause'].includes(mode)) { local.resultRef = writeEvidence(f.input.source.commonDir, accepted); store.checkpoint(fence, local.resultRef); store.checkpoint(fence, writeEvidence(f.input.source.commonDir, local)) }
+      if (!['analysis-live', 'analysis-two-accepted', 'analysis-restart', 'analysis-pause', 'analysis-settled-timeout', 'analysis-format', 'analysis-mixed-pause'].includes(mode)) { local.resultRef = writeEvidence(f.input.source.commonDir, accepted); store.checkpoint(fence, local.resultRef); store.checkpoint(fence, writeEvidence(f.input.source.commonDir, local)) }
       const result = recordFailure(fence, issue)
       if (mode === 'analysis-pause') {
         store.requestControl(f.operation.id, 'pause'); store.requestControl(f.operation.id, 'run')
@@ -2459,7 +2470,7 @@ for (const mode of ['analysis-live', 'analysis-two-accepted', 'analysis-restart'
   if (mode === 'analysis-foreign') { assert.equal(result.failure?.code, 'stage_binding'); return }
   assert.ok(f.calls.some(call => call.purpose === 'elaboration_generate'), JSON.stringify({ failure: result.failure, calls }))
   const stages = store.listAttempts(f.operation.id).map(attempt => attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())))
-  if (['analysis-live', 'analysis-two-accepted', 'analysis-restart', 'analysis-pause', 'analysis-settled-timeout'].includes(mode)) {
+  if (['analysis-live', 'analysis-two-accepted', 'analysis-restart', 'analysis-pause', 'analysis-settled-timeout', 'analysis-format'].includes(mode)) {
     assert.equal(calls.filter(call => call.attempt === 2 && call.partition === 'export').length, 0)
     const acceptedStages = stages[0].filter(stage => stage.stage?.endsWith(':analysis'))
     assert.equal(acceptedStages.length, mode === 'analysis-two-accepted' ? 2 : 1)
@@ -2471,6 +2482,7 @@ for (const mode of ['analysis-live', 'analysis-two-accepted', 'analysis-restart'
     assert.deepEqual(JSON.parse(readEvidence(f.input.source.commonDir, provenance.resultRef).toString()), { fromOperationId: f.operation.id, fromAttemptId: store.listAttempts(f.operation.id)[0].id, resultRef: prior.resultRef })
   } else assert.equal(calls.filter(call => call.attempt === 2 && call.partition === 'export').length, 2)
   const resumedDiagnostics = calls.filter(call => call.attempt === 2 && call.partition === 'import')
+  if (mode === 'analysis-format') assert.deepEqual(resumedDiagnostics.map(call => call.purpose), ['code_behavior_analyze', 'code_behavior_review'])
   if (mode === 'analysis-settled-timeout') assert.ok(resumedDiagnostics.every(call => call.diagnostics.length === 0), '已结算基础设施timeout不能充当模型业务诊断')
   else assert.ok(resumedDiagnostics.every(call => call.diagnostics.length > 0), '原具体业务失败仅送失败分区')
   assert.deepEqual(result.operation.budget, f.operation.budget); assert.equal(result.operation.deadlineAtMs, f.operation.deadlineAtMs)

@@ -995,16 +995,16 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
             if (partitions) {
               if (owner.id !== operation.id) return []
               const saved = partitionStage<PartitionAnalysisFailures>(store, operation, prior, 'partition:analysis-failures')
-              return saved?.result.planDigest === partitions.digest ? saved.result.failures.filter(({ code }) => ['behavior_analysis_invalid', 'behavior_review_failed'].includes(code)).map(({ partitionId, code, message }) => ({ partitionId, code, message })) : []
+              return saved?.result.planDigest === partitions.digest ? saved.result.failures.filter(({ code }) => ['behavior_analysis_invalid', 'behavior_review_failed', 'structured_output_format_invalid'].includes(code)).map(({ partitionId, code, message }) => ({ partitionId, code, message })) : []
             }
-            return ['behavior_analysis_invalid', 'behavior_review_failed'].includes(prior.failure!.code) ? [{ code: prior.failure!.code, message: prior.failure!.message }] : []
+            return ['behavior_analysis_invalid', 'behavior_review_failed', 'structured_output_format_invalid'].includes(prior.failure!.code) ? [{ code: prior.failure!.code, message: prior.failure!.message }] : []
           }))
           try { const analysisInput: import('./code-behavior.js').CodeBehaviorInput = { model, snapshot: operation.input, baseline: operation.previousBaselinePair, ...(operation.baselineSelection ? { baselineSelection: operation.baselineSelection } : {}), composed: view.composed, readSetDigest: operation.readSetDigest, policyDigest: operation.policyDigest, plan: operation.baselineSelection ? { ...options.plan, readPaths: view.readPaths } : options.plan, requestKey: `sync:${attempt.id}:analysis`, timeoutMs: callTimeoutMs, signal, origin: operation.origin, ...(decision && previousDecisionAnalysis ? { decision: { request: decision, previous: previousDecisionAnalysis, previousComposed: previousDecisionComposed, previousReadPaths: previousDecisionReadPaths } } : {}), repairDiagnostics }; approved = partitions ? await analyzeSyncPartitions(analysisInput, partitions, options.plan.version === 'sync-coordinator-v2' ? options.plan.partitionPolicy.maxParallel : 1, runner, partitionCheckpoints) : await analyzeCodeBehavior(analysisInput, runner) }
           catch (error) {
             const issue = error as { code?: string; message?: string }
             const partitionFailures = (error as { partitionFailures?: PartitionAnalysisFailure[] }).partitionFailures
             const errors = [error, ...partitionFailures?.map(item => item.error) ?? []]
-            const blocked = errors.find(item => !(['behavior_analysis_invalid', 'behavior_review_failed'].includes((item as { code?: string }).code ?? '') || item instanceof StructuredSessionError && item.code === 'structured_output_retries_exhausted' || item instanceof SettledSessionCreateTimeoutError))
+            const blocked = errors.find(item => !(['behavior_analysis_invalid', 'behavior_review_failed'].includes((item as { code?: string }).code ?? '') || item instanceof StructuredSessionError && ['structured_output_retries_exhausted', 'structured_output_format_invalid'].includes(item.code) || item instanceof SettledSessionCreateTimeoutError))
             if (blocked || signal.aborted) throw blocked ?? error
             const rejected = failure(issue.code!, issue.message ?? String(error), 'repairable', [writeEvidence(operation.input.source.commonDir, { code: issue.code, message: issue.message, ...(partitionFailures ? { partitionFailures: partitionFailures.map(({ error: _error, ...item }) => item) } : {}), ...(error instanceof StructuredSessionError ? { sessionId: error.sessionId, threadId: error.threadId, turnId: error.turnId } : {}) })])
             store.recordFailure(fence, rejected); continue

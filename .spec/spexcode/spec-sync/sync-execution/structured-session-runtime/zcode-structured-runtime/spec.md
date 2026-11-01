@@ -33,7 +33,7 @@ related:
 
 原始 session/messages 的 core info 与 parts、原始 turn lifecycle / tool.updated / 含 toolCount 的 ModelRequest 安全事件构成原生见证；不以 ledger 补写 native arguments。transport 及未知事件只保存类型计数，不保存 payload 或 headers。原生工具、消息、输入、模型和 MCP ledger 必须由专用证明模块严格绑定。
 
-终态仅接受本轮 success，响应可以是直接 JSON 或一个完整、精确的外层 `json` Markdown fence。decoder 只移除该单一外壳，正文仍使用 JSON.parse 和原 Ajv schema；不得修补 JSON、接受解释文字或多段输出。规范 JSON 结果绑定原始终态响应与完整见证。
+终态仅接受本轮 success，响应可以是直接 JSON 或一个完整、精确的外层 `json` Markdown fence。decoder 只移除该单一外壳，正文仍使用 JSON.parse 和原 Ajv schema；不得修补 JSON、接受解释文字或多段输出。规范 JSON 结果绑定原始终态响应与完整见证。首次结算先核终态与原事件精确一致，并通过完整原生消息、工具/MCP 及 required 读取证明；随后仅该严格文本解码的 JSON 语法失败标为 `structured_output_format_invalid`，仍为失败且不发布输出或读取证明；原生协议、模型/工具/消息真实性、schema 与覆盖失败不取得此码。completed 冷重放的终态篡改或格式异常仍为 stale_result，不转自动修复。
 
 先捕获原始消息，再精确 session/close:true 与 EOF，确认自有 detached 进程组及全部已观察 app/MCP 子进程死亡，才写 completed。MCP startToken 缺失时使用宿主 ps 的精确 PID/start 身份补证，不伪造 reader ledger。completed 冷重放核原请求、原始见证、schema、proof 与 durable output，零新 SDK/API；未知 in-progress 不追加 prompt，保留 cancellation_pending。
 
