@@ -182,7 +182,7 @@ test('ZCode worktree cold completion binds original send, model snapshot and exa
   mkdirSync(runtime, { recursive: true })
   try {
     const processIdentity = await deadProcess(root), prompt = 'Review normal worktree', output = { ok: true }, response = JSON.stringify(output)
-    const policy = structuredExecutionPolicy({ ...request, model: 'zcode:bigmodel-api/GLM-5.3-Flash', effort: 'high', worktree: { ...f.seed, mode: 'read' } })
+    const policy = structuredExecutionPolicy({ ...request, schema: { type: 'object', required: ['ok'] }, model: 'zcode:bigmodel-api/GLM-5.3-Flash', effort: 'high', worktree: { ...f.seed, mode: 'read' } })
     const selection = zcodeNativeSelection(policy.model, policy.effort), nativePrompt = `Return exactly one JSON value matching this JSON Schema, without prose or Markdown: ${JSON.stringify(policy.schema)}\n\n${prompt}`
     const native = { version: 1 as const, root, sessionId: 'session', inputId: 'input', turnId: 'turn', ...processIdentity }
     const execution: ZCodeStructuredExecution = { ...policy, version: 6, policy: 'native-worktree-v1', zcodeNative: native, state: 'running', frozenReadProof: undefined }
@@ -217,6 +217,60 @@ test('ZCode worktree cold completion binds original send, model snapshot and exa
     await assert.rejects(zcodeStructuredTurn(realm, 'native', prompt, { ...completed, effort: undefined }, noDispatch, f.path), { code: 'stale_result' })
     writeFileSync(join(root, 'terminal.json'), JSON.stringify({ ...events.at(-1), turnId: 'foreign' }))
     await assert.rejects(zcodeStructuredTurn(realm, 'native', prompt, completed, noDispatch, f.path), { code: 'stale_result' })
+    const schemaInvalidEvents = structuredClone(events), schemaInvalidMessages = structuredClone(messages), schemaInvalidResponse = JSON.stringify({ wrong: true })
+    schemaInvalidEvents.at(-1)!.payload.response = schemaInvalidResponse
+    schemaInvalidMessages.at(-1)!.parts[0].text = schemaInvalidResponse
+    writeFileSync(join(root, 'events.json'), JSON.stringify(schemaInvalidEvents)); writeFileSync(join(root, 'messages.json'), JSON.stringify(schemaInvalidMessages)); writeFileSync(join(root, 'terminal.json'), JSON.stringify(schemaInvalidEvents.at(-1)))
+    await assert.rejects(zcodeStructuredTurn(realm, 'native', prompt, completed, noDispatch, f.path), { code: 'stale_result' })
+  } finally { f.close() }
+})
+
+test('ZCode authenticated worktree schema mismatch is typed for repair without publishing or changing Native evidence', async () => {
+  const f = repoFixture(), realm = join(f.root, 'realm'), root = join(realm, 'native'), runtime = join(root, 'runtime')
+  mkdirSync(runtime, { recursive: true })
+  try {
+    const processIdentity = await deadProcess(root), prompt = 'Review normal worktree', output = { ids: ['outside-domain'] }, response = JSON.stringify(output)
+    const schema = { type: 'object', properties: { ids: { type: 'array', items: { type: 'string' }, maxItems: 0 } }, required: ['ids'], additionalProperties: false }
+    const policy = structuredExecutionPolicy({ ...request, schema, model: 'zcode:bigmodel-api/GLM-5.3-Flash', effort: 'high', worktree: { ...f.seed, mode: 'read' } })
+    const selection = zcodeNativeSelection(policy.model, policy.effort), nativePrompt = `Return exactly one JSON value matching this JSON Schema, without prose or Markdown: ${JSON.stringify(schema)}\n\n${prompt}`
+    const native = { version: 1 as const, root, sessionId: 'session', inputId: 'input', turnId: 'turn', ...processIdentity }
+    const execution: ZCodeStructuredExecution = { ...policy, version: 6, policy: 'native-worktree-v1', zcodeNative: native, state: 'running', frozenReadProof: undefined }
+    const modelSnapshot = { sessionId: 'session', model: selection.model, thoughtLevel: 'high' }
+    const plan = { ...native, worktreeProcessBaseline: 1, queryId: 'query', runtime, workspace: f.path, ...selection, policyDigest: hash(policy), requestDigest: hash({ prompt, nativePrompt, policy, selection }), cliVersion: zcodeCapability.cliVersion, cliSha256: zcodeCapability.cliSha256, builtinSha256: zcodeCapability.builtinSha256, modelSnapshotDigest: hash(modelSnapshot) }
+    const events = [
+      { type: 'turn.started', payload: { inputId: 'input', queryId: 'query', messageId: 'user' } },
+      { type: 'session.updated', payload: { providerId: selection.model.providerId, modelId: selection.model.modelId, toolCount: 9 } },
+      { type: 'turn.completed', payload: { inputId: 'input', resultType: 'success', response } },
+    ].map((event, index) => ({ ...event, eventId: `event-${index}`, seq: index + 1, sessionId: 'session', turnId: 'turn' }))
+    const messages = [
+      { info: { id: 'user', sessionID: 'session', role: 'user', anchor: { turnId: 'turn' }, modelSelection: selection.model, semantics: { kind: 'user_prompt' } }, parts: [{ type: 'text', text: nativePrompt }] },
+      { info: { id: 'final', sessionID: 'session', role: 'assistant', anchor: { turnId: 'turn' }, ...selection.model, semantics: { kind: 'assistant_response' } }, parts: [{ type: 'text', text: response }] },
+    ]
+    const files = { 'plan.json': plan, 'model-snapshot.json': modelSnapshot, 'events.json': events, 'messages.json': messages, 'terminal.json': events.at(-1), 'exit.json': { code: 0, signal: null, stopped: true, idle: true, closed: true }, 'send.json': { sessionId: 'session', content: nativePrompt, inputId: 'input', modelSelection: selection.model } }
+    for (const [name, value] of Object.entries(files)) writeFileSync(join(root, name), JSON.stringify(value))
+    const sha = (name: string): string => createHash('sha256').update(readFileSync(join(root, name))).digest('hex')
+    const originalHashes = Object.keys(files).map(name => [name, sha(name)] as const)
+    const requestTurn = () => zcodeStructuredTurn(realm, 'native', prompt, execution, noDispatch, f.path)
+    for (let replay = 0; replay < 2; replay++) await assert.rejects(requestTurn(), error => {
+      const failure = error as { code?: string; message?: string }
+      assert.equal(failure.code, 'structured_output_format_invalid')
+      assert.match(failure.message ?? '', /"instancePath":"\/ids"/)
+      assert.match(failure.message ?? '', /"keyword":"maxItems"/)
+      assert.match(failure.message ?? '', /"limit":0/)
+      assert(!failure.message?.includes(JSON.stringify(output)), 'diagnostics must not echo the invalid output')
+      return true
+    })
+    assert.equal(existsSync(join(root, 'completed.json')), false, 'invalid schema output must not complete or publish')
+    assert.deepEqual(Object.keys(files).map(name => [name, sha(name)]), originalHashes, 'cold failure replay must preserve every original Native file and send')
+
+    writeFileSync(join(root, 'terminal.json'), JSON.stringify({ ...events.at(-1), turnId: 'foreign' }))
+    await assert.rejects(requestTurn(), { code: 'stale_result' })
+    writeFileSync(join(root, 'terminal.json'), JSON.stringify(events.at(-1)))
+    writeFileSync(join(root, 'exit.json'), JSON.stringify({ ...files['exit.json'], stopped: false }))
+    await assert.rejects(requestTurn(), { code: 'stale_result' })
+    writeFileSync(join(root, 'exit.json'), JSON.stringify(files['exit.json']))
+    assert.deepEqual(Object.keys(files).map(name => [name, sha(name)]), originalHashes)
+    assert.equal(existsSync(join(root, 'completed.json')), false)
   } finally { f.close() }
 })
 
