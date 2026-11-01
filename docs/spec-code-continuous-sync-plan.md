@@ -308,6 +308,8 @@ P2实际无该Spec写权的只读装配late V1锚点失败按真实候选和node
 
 固定CLI producer的connection_retry仅在原metadata/parent链、前后完整API params/shape/message hashes相等且新assistant实际消费证明全部通过时接纳；普通HTTP request_retry和unknown来源门保持，不能仅凭source字符串放行。
 
+已认证精确结构输出错误的重试准入与单体/分区反馈共用同一码集合；原code/message逐字交后attempt分析及独审，只投影自己的失败分区，不丢schema字段说明，也不将诊断中的建议变为policy或authority。缺码、未知failed/stale或普通Error伪码不能取得结构错误重试资格；协调器不重做Native认证。
+
 初始化待生成的规格叶与覆盖映射不是重大业务未知；可核行为按newNodes/facts交P1，真实缺失事实或互斥仍明确阻塞。分析指导版本进入冻结摘要，指导变化后旧已审结果重新生成并独审，旧证据保持。
 
 初始化重试保留已扩 scope 中尚未建立基线的资源；分区分析/独审须原样携带无 owner 的 contract/flow null 意图元数据，不假设未来治理叶或契约已有路径，也不借这些资源名取得正文、读取证明或写权。有真实 owner 的内容仍按本区读取授权投影，原 scope、选择与冻结输入摘要保持。

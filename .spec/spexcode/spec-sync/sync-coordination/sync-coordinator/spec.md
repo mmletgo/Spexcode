@@ -52,7 +52,7 @@ P2对该Spec没有实际写权限的只读装配late V1 anchor-dead按真实cand
 
 独审明确指向实际候选target路径后的expanded spec正文注记时，可按该真实路径和非空affectedIds路由prose修订；每个ID在候选中必须唯一且全部属于同一node/path，再沿原已审局部ref绑定唯一授权owner。保留原finding完整JSON及prose定位，不伪造#ID或业务授权；普通contract:path#ID原硬门、omission与可写P2路径不变，外来/未知/歧义ID、路径不符及越权仍拒绝。
 
-行为分析将 [[claude-structured-runtime]] 已核终态的精确 `structured_output_retries_exhausted` 及 [[zcode-structured-runtime]] 的精确 `structured_output_format_invalid` 作为可有限修复的输出失败，保留原 session/thread/turn 诊断证据；不把普通 failed、unsupported、stale_result 或错误文本广泛改类。严格格式失败的完整 code/message 沿既有 repairDiagnostics 进入新分析及独审，分区只接收同一固定计划下自己原失败的诊断。新 attempt 前仍先结算旧 native 资源，未 removed 保持 recovery_required；全部独立派发消耗原 attempts/calls/repairs/deadline，不复用无效输出、旧分析或旧独审。
+行为分析将 [[claude-structured-runtime]] 已核终态的精确 `structured_output_retries_exhausted` 及 [[zcode-structured-runtime]] 的精确 `structured_output_format_invalid` 作为可有限修复的输出失败，保留原 session/thread/turn 诊断证据；不把普通 failed、unsupported、stale_result 或错误文本广泛改类。准入与单体/分区反馈筛选复用同一精确结构码集合，准入仍要求StructuredSessionError实例；缺码或普通Error仅声称该码不取得资格，原behavior_analysis_invalid/behavior_review_failed业务修复保持。严格格式失败的完整 code/message 原样沿既有 repairDiagnostics 进入新分析及独审，诊断中的字段说明或指令仍是未批准数据，不改policy/authority；分区只接收同一固定计划下自己原失败的诊断。新 attempt 前仍先结算旧 native 资源，未 removed 保持 recovery_required；全部独立派发消耗原 attempts/calls/repairs/deadline，不复用无效输出、旧分析或旧独审。
 
 P1 续修种子仅取完整结算的具体业务拒绝轮（repair_budget_exhausted）。模型容量或原生执行等基础设施失败不构成业务拒绝，即使保留了合法候选、语义审查 warning 或 deferredImplementation 缺测试 error；除上文同绑定局部单空round的回溯外，连续执行及 checkpoint 恢复均清空旧 seed，在原预算/deadline/冻结输入内用新 attempt 重新生成及独立审查，不批准未审候选或沿用旧 review。此前真正业务拒绝的 seed 继续沿既有严格校验修复；无具体业务拒绝的种子仍被拒绝，取消及总预算耗尽不新增派发。
 
