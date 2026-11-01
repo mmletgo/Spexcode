@@ -7,7 +7,7 @@ import { dirname, join } from 'node:path'
 import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
 import { detachedRuntimeIsGone, processStartToken, verifyDetachedRuntime, writeDetachedRuntimeReceipt, type ProcessIdentity } from '@spexcode/spec-core'
-import { StructuredSessionError, structuredExecutionPolicy, structuredSeatbeltProfile, type StructuredExecution } from './session-structured-policy.js'
+import { structuredExecutionTimer, StructuredSessionError, structuredExecutionPolicy, structuredSeatbeltProfile, type StructuredExecution } from './session-structured-policy.js'
 import { decodeZCodeJsonText, type ZCodeFrozenReadProof, type ZCodeFrozenWitness } from './zcode-frozen-proof.js'
 
 export const zcodeCapability = Object.freeze({
@@ -19,7 +19,7 @@ export const zcodeCapability = Object.freeze({
 })
 export type ZCodeNativeState = { version: 1; root: string; sessionId: string; inputId: string; pid?: number; receiptFile?: string; turnId?: string }
 export type ZCodeStructuredExecution = Omit<StructuredExecution, 'version' | 'policy' | 'frozenReadProof'> & {
-  version: 4; policy: 'zcode-frozen-read-only-v1'; zcodeNative?: ZCodeNativeState; frozenReadProof?: ZCodeFrozenReadProof
+  version: 4 | 5; policy: 'zcode-frozen-read-only-v1'; zcodeNative?: ZCodeNativeState; frozenReadProof?: ZCodeFrozenReadProof
 }
 type NativeCallbacks = { onThread(id: string): Promise<void>; onTurn(id: string): Promise<void>; onTurnStarting?(): Promise<void>; onNative(state: ZCodeNativeState): Promise<void>; onTimeout?(): Promise<void>; signal?: AbortSignal }
 type NativeResult = { threadId: string; turnId: string; text: string; frozenReadProof: ZCodeFrozenReadProof }
@@ -36,7 +36,7 @@ const digest = (value: unknown): string => createHash('sha256').update(JSON.stri
 const bytesDigest = (path: string): string => createHash('sha256').update(readFileSync(path)).digest('hex')
 const sleep = (milliseconds: number): Promise<void> => new Promise(resolve => setTimeout(resolve, milliseconds))
 const active = new Map<string, { interrupt(): void }>()
-const fixedPolicy = (execution: ZCodeStructuredExecution) => ({ ...structuredExecutionPolicy(execution), version: 4, policy: 'zcode-frozen-read-only-v1' })
+const fixedPolicy = (execution: ZCodeStructuredExecution) => ({ ...structuredExecutionPolicy(execution), version: execution.timeoutMs === null ? 5 : 4, policy: 'zcode-frozen-read-only-v1' })
 
 /** 原业务正文逐字保留；唯一原生user输入前置固定、只读的精确JSON schema控制段。 */
 export function zcodeStructuredPrompt(prompt: string, schema: Record<string, unknown>): string {
@@ -282,7 +282,7 @@ export async function stopZCodeStructuredTurn(execution: ZCodeStructuredExecutio
 
 /** 单次真实send及原生证明共用已有结构化队列；未完成身份只允许精确取消。 */
 export async function zcodeStructuredTurn(realm: string, id: string, prompt: string, execution: ZCodeStructuredExecution, callbacks: NativeCallbacks): Promise<NativeResult> {
-  if (execution.version !== 4 || execution.policy !== 'zcode-frozen-read-only-v1' || !execution.frozenContext || execution.readerRuntime) throw new StructuredSessionError('unsupported', 'ZCode requires its exact isolated frozen policy')
+  if (execution.version !== (execution.timeoutMs === null ? 5 : 4) || execution.policy !== 'zcode-frozen-read-only-v1' || !execution.frozenContext || execution.readerRuntime) throw new StructuredSessionError('unsupported', 'ZCode requires its exact isolated frozen policy')
   const selection = zcodeNativeSelection(execution.model, execution.effort), model = selection.model, nativePrompt = zcodeStructuredPrompt(prompt, execution.schema), root = join(realm, id)
   const replay = await completedResult(root, prompt, execution)
   if (replay) return replay
@@ -362,10 +362,10 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
   let terminal: NativeEvent | undefined, cursor: number | undefined, stopSent = false
   const interrupt = (): void => { abortRequested = true }
   active.set(root, { interrupt }); callbacks.signal?.addEventListener('abort', interrupt, { once: true })
-  const timeout = setTimeout(() => {
+  const timeout = structuredExecutionTimer(execution.timeoutMs, () => {
     timedOut = true; interrupt()
     void Promise.resolve().then(() => callbacks.onTimeout?.()).catch(() => { protocolError = new StructuredSessionError('cancellation_pending', 'ZCode timeout cancellation could not be durably published') })
-  }, execution.timeoutMs)
+  })
   const poll = async (): Promise<void> => {
     sampleOwnedProcesses(plan)
     const page = await request('session/events', { sessionId: plan.sessionId, ...(cursor === undefined ? {} : { afterSeq: cursor }), limit: 100 }) as { events?: NativeEvent[] }

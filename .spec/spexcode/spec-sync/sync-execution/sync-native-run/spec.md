@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+模型调用 timeoutMs:null 原样进入固定请求和资源计划，取消/创建清理等待仍保持独立最多15秒预算，不能对null执行Math.min而变为零等待。精确nativeStopped与terminal→removed门禁保持。
+
 明确 ZCode 版本4只进入 [[zcode-structured-runtime]]，不准备 Codex reader catalog。新结果和已结算资源重放都核对 [[zcode-frozen-proof]] 的精确 provider/model 与原始输出，沿用同一 reserveDispatch、sessionCreateKey、完整 terminal→removed 和正式取消，不另建队列或伪装其它执行器。
 
 执行器选择只由已冻结 model 命名空间进入 [[structured-session-runtime]]；Claude 版本3结果还核对明确 provider/model 的原生 proof，不准备 Codex reader catalog。共享资源计划、checkpoint、完整 terminal→removed、预算、sessionCreateKey 及恢复门禁保持同一份，旧已持久 Codex 请求和 proof 原样重放。

@@ -785,7 +785,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       store.renewLease(fence, leaseMs); await yieldToControl(); store.renewLease(fence, leaseMs)
       store.bindComposedInput(fence, view.composed)
       const budget = finiteSyncBudget(operation.budget)
-      const callTimeoutMs = options.callTimeoutMs ?? Math.min(120_000, budget?.timeoutMs ?? 120_000)
+      const callTimeoutMs = budget === null ? null : options.callTimeoutMs ?? Math.min(120_000, budget.timeoutMs)
       const runner = options.runner ? injectedRunner(store, fence, options.runner) : createAttemptRunner(store, fence)
       const readonlyAccepted = (key: string, binding: NonNullable<ElaborationResult['partitionBinding']>, inputDigest: string): SavedElaboration | null => {
         if (!readonlyOwnerRepair || readonlyActiveOwners.some(owner => owner.key === key)) return null

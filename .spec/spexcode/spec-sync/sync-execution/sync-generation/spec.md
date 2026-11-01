@@ -18,6 +18,8 @@ related:
 
 ## expanded spec
 
+模型调用期限沿 [[structured-session-runtime]] 原样传递，明确 null 不装调用计时器；生成与独审、完整读取及各自业务门禁保持。
+
 候选 schema、基础校验与任务指令由 [[sync-candidate-review]] 共用；本节点保留所有生成身份隔离及专用业务标记校验。
 
 本节点实现 [[sync-execution]] 的一次生成尝试，依赖 [[sync-input-snapshot]]、[[sync-input-composition]] 与 [[sync-frozen-candidate]]。不单独代表 P2、V3/V4 或完整产品已交付。

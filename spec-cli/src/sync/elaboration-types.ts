@@ -49,7 +49,7 @@ export type ElaborationInput = {
   maxRepairs?: number
   maxCalls?: number
   totalTimeoutMs?: number | null
-  timeoutMs?: number
+  timeoutMs?: number | null
   signal?: AbortSignal
   model?: string
   effort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
@@ -110,7 +110,7 @@ export type ElaborationResult = {
   failure: { code: string; message: string; sessionId?: string; threadId?: string; turnId?: string } | null
 }
 export type ElaborationSessionRequest = {
-  root: string; base?: string; prompt: string; schema: Record<string, unknown>; requestKey: string; inputDigest: string; purpose: string; timeoutMs: number; signal?: AbortSignal; model?: string; effort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
+  root: string; base?: string; prompt: string; schema: Record<string, unknown>; requestKey: string; inputDigest: string; purpose: string; timeoutMs: number | null; signal?: AbortSignal; model?: string; effort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
   frozenContext?: FrozenContextRef
   /** 派发前由 prepareFrozenPrompt 冻结的纯 JSON 条目；持久计划只保留最终 ref。 */
   frozenEntries?: readonly FrozenEntryJson[]

@@ -479,6 +479,21 @@ test('历史合成created资源经原生精确notStarted回执安全回收，不
   assert.equal(f.store.listRecoverableResources().length, 0); assert.equal(f.calls.length, 0)
 })
 
+for (const unlimited of [false, true]) test(`模型调用期限从冻结预算派生 unlimited=${unlimited}，原调用配置只约束有限预算`, async t => {
+  const f = await fixture(t, unlimited ? { mode: 'unlimited' } : { maxAttempts: 1, maxCalls: 10, maxRepairs: 0, timeoutMs: 120000 }, false, original, 'project', original, {}, undefined, 'code')
+  f.options.callTimeoutMs = 1200000
+  f.transform((output, request) => {
+    if (request.purpose === 'code_review') throw Object.assign(new Error('仅核模型调用链，在独审接缝停止'), { code: 'unsupported' })
+    return output
+  })
+  const result = await runSyncOperation(f.store, f.operation.id, f.options)
+  assert.equal(result.status, 'unsupported')
+  for (const purpose of ['code_behavior_analyze', 'code_behavior_review', 'elaboration_generate', 'elaboration_review', 'code_generate', 'code_review']) assert.ok(f.calls.some(call => call.purpose === purpose), purpose)
+  assert.ok(f.calls.every(call => call.timeoutMs === (unlimited ? null : 1200000)), JSON.stringify(f.calls.map(call => ({ purpose: call.purpose, timeoutMs: call.timeoutMs }))))
+  assert.equal(result.operation.deadlineAtMs === null, unlimited)
+  assert.equal(f.store.listJournals(f.operation.id).length, 0)
+})
+
 test('unlimited多轮P1独审及v2预算预检后真实Docker交付，重启恢复原receipt且无总deadline', docker, async t => {
   const f = await fixture(t, { mode: 'unlimited' }, true, original, 'project', original, { version: 'sync-coordinator-v2', direction: 'spec_to_code', partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 }, sourcePaths: ['src'] })
   await f.realTools()
@@ -493,7 +508,7 @@ test('unlimited多轮P1独审及v2预算预检后真实Docker交付，重启恢�
   assert.equal(first.status, 'recovery_required', JSON.stringify(first.failure)); assert.equal(first.operation.deadlineAtMs, null)
   assert.equal(store.listAttempts(f.operation.id).length, 3)
   assert.equal(f.calls.filter(call => call.purpose === 'elaboration_review').length, 3)
-  assert.ok(f.calls.every(call => call.timeoutMs === 1200000))
+  assert.ok(f.calls.every(call => call.timeoutMs === null))
   const callCount = f.calls.length, commit = f.git('rev-parse', first.operation.deliveryPlan.branch)
   const stages = store.readAttempt(first.operation.currentAttemptId!).checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
   const generationBudget = stages.find(stage => stage.stage === 'partition-generation-budget')
@@ -2085,7 +2100,7 @@ for (const mode of ['existing', 'new-leaf', 'aggregate-only', 'review', 'review-
       const operation = f.store.readOperation(f.operation.id)
       const proof = (value = input, source = sourceAttempt, current = operation, selected = plan, actual = candidate) => acceptedCandidateReviewSource(f.store, current, source, saved.stage, actual, selected, value)
       assert.ok(proof(), '原真实checkpoint/request/dispatch/ref资格可重现')
-      for (const patch of [{ intent: { ...input.intent, rawSource: input.intent.rawSource + '变更' } }, { facts: [...input.facts, { source: 'code:src/export.js', text: '不同上下文' }] }, { repairContext: undefined }, { model: 'gpt-6.1-terra' }, { timeoutMs: input.timeoutMs + 1 }]) assert.equal(proof({ ...input, ...patch }), null)
+      for (const patch of [{ intent: { ...input.intent, rawSource: input.intent.rawSource + '变更' } }, { facts: [...input.facts, { source: 'code:src/export.js', text: '不同上下文' }] }, { repairContext: undefined }, { model: 'gpt-6.1-terra' }, { timeoutMs: (input.timeoutMs === null ? 1000 : input.timeoutMs + 1) }]) assert.equal(proof({ ...input, ...patch }), null)
       assert.equal(proof(input, sourceAttempt, operation, { ...plan, digest: 'other-plan' }), null)
       assert.equal(proof(input, sourceAttempt, operation, plan, { ...candidate, coveredScope: { ...candidate.coveredScope, paths: [] } }), null)
       assert.equal(proof(input, sourceAttempt, { ...operation, readSetDigest: 'other-readset' }), null)

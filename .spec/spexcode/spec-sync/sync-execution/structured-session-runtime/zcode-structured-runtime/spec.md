@@ -17,6 +17,8 @@ related:
 
 ## expanded spec
 
+version5/null 请求沿原 ZCode policy、realm 与版本4读取证明执行，不装模型调用timeout timer；数字 version4 原样恢复。每次RPC、idle/close与精确停止各自期限不变。
+
 只接受 `zcode:<provider-id>/<exact-model-id>`。当前能力固定 macOS ZCode CLI 0.17.1、CLI SHA256 `9afd565a104d660259e6bdeeaa5cb8abc74a908559e21aa3c5f6a06f2a9da6c6` 和公开 builtin provider SHA256 `e537b380df05656e3757c2b220ae1044fe8a32c0ac148de265a05a94cc24b3a9`，未知版本、摘要、平台或模型别名明确拒绝，不 fallback。策略为 version4 / `zcode-frozen-read-only-v1`。
 
 每次派发使用专属空 workspace、私有 HOME / ZCODE_DATA_BASE_DIR 和 `/private/tmp` 下短 TMPDIR。固定配置关闭 plugins、hooks、skills/includeInstructions、memory、subagent；child-only 的两个 provider config 环境变量显式引用公开 builtin 与原 personal provider config。现有 credentials 只通过私有 home 的只读符号链接供 SDK 正常消费；控制器不读取、复制或记录凭据字节。父环境仅传必要 PATH，不继承其它配置或认证变量。

@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+模型调用期限沿 [[structured-session-runtime]] 原样传递，明确 null 不装调用计时器；生成与独审、完整读取及各自业务门禁保持。
+
 GenerationInput 复用 InputSnapshot、ComposedInputRef、SnapshotManifest、Contract、Acceptance、SyncScope 和既有只读会话输入类型。files 是协调器确定的完整受影响读集合，各完整正文用 ReadonlyMap；完整仓库身份仍由 manifest 绑定，不默认把整个仓库或凭据送给模型；elaboratedSpecs 单独携带 P1 通过后待交付完整正文，不替换 candidate.baseTree；事实、契约和 ready/blocked 集合由调用者冻结。可信政策带版本及摘要，执行模型固定上层指定 gpt-6.1-sol/high。
 
 GenerationOptions 必须提供 ElaborationRunner 和异步 validateCandidate；硬门禁返回既有 ContractFinding，error 阻断、warning 保留。可选 onDispatch 在 native 之前完成持久登记，不代替 native 身份绑定。

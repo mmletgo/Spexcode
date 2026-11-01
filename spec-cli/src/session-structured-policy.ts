@@ -12,12 +12,12 @@ import { withDeliveryLocks } from './delivery-lock.js'
 export type FrozenReaderRuntime = { cliVersion: string; catalogDigest: string; catalogPath: string } & ({ version: 1 } | { version: 2; toolOutputTokenLimit: number })
 
 export type StructuredExecution = {
-  version: 1 | 2 | 3 | 4
+  version: 1 | 2 | 3 | 4 | 5
   policy: 'codex-read-only-v1' | 'codex-frozen-read-only-v2' | 'claude-frozen-read-only-v1' | 'zcode-frozen-read-only-v1'
   schema: Record<string, unknown>
   inputDigest: string
   purpose: string
-  timeoutMs: number
+  timeoutMs: number | null
   model?: string
   effort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
   threadId?: string
@@ -42,14 +42,14 @@ export type StructuredExecution = {
 export function structuredRealmRoot(execution: unknown, root = runtimeRoot()): string | null {
   if (!execution || typeof execution !== 'object') return null
   const state = execution as Partial<StructuredExecution>
-  if (state.version === 4 && state.policy === 'zcode-frozen-read-only-v1' && state.frozenContext?.version === 1 && /^zcode:[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(state.model ?? '') && !state.readerRuntime)
+  if (state.version === (state.timeoutMs === null ? 5 : 4) && state.policy === 'zcode-frozen-read-only-v1' && state.frozenContext?.version === 1 && /^zcode:[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(state.model ?? '') && !state.readerRuntime)
     return join(root, 'structured-zcode-read-only-v1')
-  if (state.version === 3 && state.policy === 'claude-frozen-read-only-v1' && state.frozenContext?.version === 1 && state.model?.startsWith('claude:') && !state.readerRuntime)
+  if (state.version === (state.timeoutMs === null ? 5 : 3) && state.policy === 'claude-frozen-read-only-v1' && state.frozenContext?.version === 1 && state.model?.startsWith('claude:') && !state.readerRuntime)
     return join(root, 'structured-claude-read-only-v1')
-  if (state.version === 1 && state.policy === 'codex-read-only-v1' && state.readerRuntime === undefined && state.frozenContext === undefined)
+  if (state.version === (state.timeoutMs === null ? 5 : 1) && state.policy === 'codex-read-only-v1' && state.readerRuntime === undefined && state.frozenContext === undefined)
     return join(root, 'structured-read-only-v1')
   const readerRuntime = state.readerRuntime
-  if (state.version === 2 && state.policy === 'codex-frozen-read-only-v2' && state.frozenContext?.version === 1 && readerRuntime
+  if (state.version === (state.timeoutMs === null ? 5 : 2) && state.policy === 'codex-frozen-read-only-v2' && state.frozenContext?.version === 1 && readerRuntime
     && /^[a-f0-9]{64}$/.test(readerRuntime.catalogDigest)) {
     const realm = join(root, 'structured-frozen-read-only-v2', readerRuntime.catalogDigest)
     if (readerRuntime.version === 1) return realm
@@ -63,9 +63,13 @@ export function structuredRealmRoot(execution: unknown, root = runtimeRoot()): s
 export function structuredExecutionPolicy(request: Pick<StructuredExecution, 'schema' | 'inputDigest' | 'purpose' | 'timeoutMs' | 'model' | 'effort' | 'frozenContext' | 'readerRuntime'>): StructuredExecution {
   const claude = request.model?.startsWith('claude:') === true
   const zcode = request.model?.startsWith('zcode:') === true
-  return { version: zcode ? 4 : claude ? 3 : request.frozenContext ? 2 : 1, policy: zcode ? 'zcode-frozen-read-only-v1' : claude ? 'claude-frozen-read-only-v1' : request.frozenContext ? 'codex-frozen-read-only-v2' : 'codex-read-only-v1',
+  return { version: request.timeoutMs === null ? 5 : zcode ? 4 : claude ? 3 : request.frozenContext ? 2 : 1, policy: zcode ? 'zcode-frozen-read-only-v1' : claude ? 'claude-frozen-read-only-v1' : request.frozenContext ? 'codex-frozen-read-only-v2' : 'codex-read-only-v1',
     schema: request.schema, inputDigest: request.inputDigest, purpose: request.purpose, timeoutMs: request.timeoutMs,
     ...(request.model ? { model: request.model } : {}), ...(request.effort ? { effort: request.effort } : {}), ...(request.frozenContext ? { frozenContext: request.frozenContext } : {}), ...(request.readerRuntime ? { readerRuntime: request.readerRuntime } : {}) }
+}
+/** 模型调用无期限时不装计时器；创建和精确停止预算由各自入口持有。 */
+export function structuredExecutionTimer(timeoutMs: number | null, onTimeout: () => void): ReturnType<typeof setTimeout> | undefined {
+  return timeoutMs === null ? undefined : setTimeout(onTimeout, timeoutMs)
 }
 // A missing process-start probe is not proof of death. Only an explicit release, ESRCH or a
 // different start token permits another process to claim this exact native turn's observation.

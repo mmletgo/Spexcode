@@ -31,7 +31,7 @@ export type StructuredSessionRequest = {
   requestKey: string
   inputDigest: string
   purpose: string
-  timeoutMs: number
+  timeoutMs: number | null
   signal?: AbortSignal
   model?: string
   effort?: StructuredExecution['effort']
@@ -58,8 +58,8 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
   if (!rec?.structuredExecution) throw new StructuredSessionError('failed', 'queued structured session lost its execution policy')
   if (rec.structuredExecution.state && rec.structuredExecution.state !== 'running') return rec.structuredExecution.state
   const execution = rec.structuredExecution
-  const claude = execution.version === 3 && execution.policy === 'claude-frozen-read-only-v1'
-  const zcode = execution.version === 4 && execution.policy === 'zcode-frozen-read-only-v1'
+  const claude = execution.version === (execution.timeoutMs === null ? 5 : 3) && execution.policy === 'claude-frozen-read-only-v1'
+  const zcode = execution.version === (execution.timeoutMs === null ? 5 : 4) && execution.policy === 'zcode-frozen-read-only-v1'
   if (digest(structuredExecutionPolicy(execution)) !== digest({ ...execution, threadId: undefined, turnId: undefined, state: undefined, observer: undefined, cancellation: undefined, turnStartRequested: undefined, output: undefined, resultDigest: undefined, error: undefined, errorCode: undefined, frozenReads: undefined, frozenReadProof: undefined, claudeNative: undefined, zcodeNative: undefined }) || rec.harness !== (zcode ? 'zcode' : claude ? 'claude-headless' : 'codex-headless') || rec.launchCmd !== (zcode ? 'zcode' : claude ? 'claude' : 'codex'))
     throw new StructuredSessionError('unsupported', 'structured session no longer has the trusted fixed executor policy')
   const controller = new AbortController(); activeControllers.set(id, controller)
@@ -147,15 +147,15 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
 export async function runStructuredSession(request: StructuredSessionRequest): Promise<StructuredSessionResult> {
   if (resolve(mainRoot(request.root)) !== resolve(mainRoot()))
     throw new StructuredSessionError('unsupported', 'structured execution root must belong to the backend project')
-  if (!request.prompt.trim() || !request.inputDigest || !request.purpose || !Number.isFinite(request.timeoutMs) || request.timeoutMs <= 0
+  if (!request.prompt.trim() || !request.inputDigest || !request.purpose || request.timeoutMs !== null && (!Number.isFinite(request.timeoutMs) || request.timeoutMs <= 0)
     || !request.schema || request.schema.type !== 'object')
-    throw new StructuredSessionError('failed', 'structured execution requires a prompt, input digest, purpose, bounded timeout and object JSON schema')
+    throw new StructuredSessionError('failed', 'structured execution requires a prompt, input digest, purpose, positive or null timeout and object JSON schema')
   const claude = request.model?.startsWith('claude:') === true
   const zcode = request.model?.startsWith('zcode:') === true
   if (claude) claudeNativeModel(request.model)
   if (zcode) zcodeNativeModel(request.model)
   if (!request.frozenContext) request = prepareFrozenPrompt(request, { directory: join(runtimeRoot(), 'frozen-context-v2') })
-  const deadline = Date.now() + request.timeoutMs
+  const deadline = request.timeoutMs === null ? null : Date.now() + request.timeoutMs
   if (request.frozenContext) assertFrozenBinding(request.frozenContext, { ...readFrozenManifest(request.frozenContext).binding, requestKey: request.requestKey, inputDigest: request.inputDigest })
   const validate = new Ajv().compile(request.schema)
   if (!claude && !zcode && request.frozenContext && !request.readerRuntime) request = { ...request, readerRuntime: await prepareFrozenReaderRuntime(join(runtimeRoot(), 'structured-frozen-read-only-v2'), request.frozenContext) }
@@ -164,7 +164,7 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
   const execution = structuredExecutionPolicy(request)
   if (!claude && !zcode) prepareStructuredRealm(requiredRealmRoot(execution), request.readerRuntime)
   const created = await sessionCreateRequest({ prompt: request.prompt, ...(request.base ? { base: request.base } : {}) }, {
-    requestKey: request.sessionCreateKey ?? request.requestKey, signal: request.signal, timeoutMs: Math.min(sessionCreateTimeoutMs(), request.timeoutMs), structuredExecution: execution,
+    requestKey: request.sessionCreateKey ?? request.requestKey, signal: request.signal, timeoutMs: request.timeoutMs === null ? sessionCreateTimeoutMs() : Math.min(sessionCreateTimeoutMs(), request.timeoutMs), structuredExecution: execution,
   })
   if (created.status !== 201) throw new StructuredSessionError(created.code === 'session_create_key_reused' ? 'key_reused' : created.code === 'session_create_cancelled' ? 'cancelled' : created.code === 'session_create_timeout' ? 'timeout' : 'failed', created.error, { sessionId: created.termination?.sessionId })
   const id = created.session.id
@@ -200,11 +200,11 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
           throw new StructuredSessionError('stale_result', 'structured frozen result lacks exact native history coverage evidence')
         if (state.frozenContext) {
           verifyFrozenReadProof(state.frozenContext, state.frozenReadProof!, { threadId: state.threadId, turnId: state.turnId }, state.readerRuntime?.version === 2 ? state.readerRuntime.toolOutputTokenLimit : undefined, { output: state.output })
-          if (state.version === 4) {
+          if (state.version === (state.timeoutMs === null ? 5 : 4) && state.policy === 'zcode-frozen-read-only-v1') {
             const rejectReplay = async (): Promise<never> => { throw new StructuredSessionError('stale_result', 'completed ZCode replay cannot dispatch') }
             const recovered = await zcodeStructuredTurn(requiredRealmRoot(state), id, request.prompt, state as Parameters<typeof zcodeStructuredTurn>[3], { onThread: rejectReplay, onTurn: rejectReplay, onNative: rejectReplay })
             if (digest(JSON.parse(recovered.text)) !== state.resultDigest || digest(recovered.frozenReadProof) !== digest(state.frozenReadProof)) throw new StructuredSessionError('stale_result', 'completed ZCode result differs from original native witness')
-          } else if (state.version === 3) {
+          } else if (state.version === (state.timeoutMs === null ? 5 : 3) && state.policy === 'claude-frozen-read-only-v1') {
             const recovered = await claudeStructuredTurn(requiredRealmRoot(state), id, request.prompt, state, { onThread: async () => { throw new StructuredSessionError('stale_result', 'completed Claude replay cannot create a session') }, onTurn: async () => { throw new StructuredSessionError('stale_result', 'completed Claude replay cannot create a user turn') }, onNative: async () => { throw new StructuredSessionError('stale_result', 'completed Claude replay cannot dispatch') } })
             if (digest(JSON.parse(recovered.text)) !== state.resultDigest || digest(recovered.frozenReadProof) !== digest(state.frozenReadProof)) throw new StructuredSessionError('stale_result', 'completed Claude result differs from original native witness')
           } else {
@@ -212,7 +212,7 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
             const binding = ledger.bindings[id], generation = binding && ledger.generations[binding.generationId]
             if (!generation || generation.state === 'reclaimed' || binding.threadId !== state.threadId || rec.harnessSessionId !== state.threadId)
               throw new StructuredSessionError('stale_result', 'frozen completed result lost its exact native generation binding')
-            const recovered = await codexStructuredTurn(generation.endpoint.socketPath, rec.worktreePath, request.prompt, { ...state, timeoutMs: Math.max(1, deadline - Date.now()) }, {
+            const recovered = await codexStructuredTurn(generation.endpoint.socketPath, rec.worktreePath, request.prompt, { ...state, timeoutMs: deadline === null ? null : Math.max(1, deadline - Date.now()) }, {
               signal: request.signal, onThread: async () => { throw new StructuredSessionError('stale_result', 'completed recovery cannot create a new thread') },
               onTurn: async (turnId) => { if (turnId !== state.turnId) throw new StructuredSessionError('stale_result', 'completed recovery cannot replace its exact turn') },
               onFrozenRead: async () => { throw new StructuredSessionError('stale_result', 'completed recovery cannot reply to a new dynamic call') },
@@ -236,7 +236,7 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
         throw new StructuredSessionError(state.errorCode ?? 'failed', state.error || 'structured execution failed')
       if (state.state === 'running' && !recoveryRequested && structuredObserverState(state) === 'gone')
         recoveryRequested = await queueStructuredRecovery(id)
-      if (Date.now() >= deadline) {
+      if (deadline !== null && Date.now() >= deadline) {
         const stopped = await cancel('timeout')
         throw new StructuredSessionError(stopped.nativeStopped ? 'timeout' : 'cancellation_pending', stopped.error || 'structured execution exceeded caller deadline')
       }
@@ -299,8 +299,8 @@ export async function cancelStructuredSession(id: string, options: { reason?: 'c
     if (finished && (execution.turnStartRequested || execution.turnId)) await finished
     const current = readRecord(id)!, state = current.structuredExecution!
     let stop: { nativeStopped: boolean; acknowledged: boolean; turnId?: string; nativeStatus?: string; error?: string }
-    if (state.version === 4) stop = await stopZCodeStructuredTurn(state as Parameters<typeof stopZCodeStructuredTurn>[0], options.timeoutMs ?? 15_000)
-    else if (state.version === 3) stop = await stopClaudeStructuredTurn(state, options.timeoutMs ?? 15_000)
+    if (state.version === (state.timeoutMs === null ? 5 : 4) && state.policy === 'zcode-frozen-read-only-v1') stop = await stopZCodeStructuredTurn(state as Parameters<typeof stopZCodeStructuredTurn>[0], options.timeoutMs ?? 15_000)
+    else if (state.version === (state.timeoutMs === null ? 5 : 3) && state.policy === 'claude-frozen-read-only-v1') stop = await stopClaudeStructuredTurn(state, options.timeoutMs ?? 15_000)
     else if ((!state.threadId || state.turnStartRequested === false) && !state.turnId) stop = { nativeStopped: true, acknowledged: false, nativeStatus: 'notStarted' }
     else {
       const runtimeDir = join(requiredRealmRoot(state), 'control')

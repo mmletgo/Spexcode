@@ -39,13 +39,13 @@ for (const fixture of continuationCases) test(`真实终态续行离线重放 ${
   assert.equal(observed.code, fixture.expectedCode)
 })
 
-test('stopped exact Claude schema retry exhaustion remains a rejected output with no completion or new native turn', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'spex-claude-schema-exhaustion-'))
+for (const timeoutMs of [1000, null]) test(`stopped exact Claude schema retry exhaustion with timeout=${timeoutMs} remains rejected with no new native turn`, async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'spex-claude-schema-exhaustion-')), requestKey = `schema-exhaustion-${timeoutMs}`
   let runtimeFixture: string | undefined
   try {
     const realm = join(directory, 'realm'), root = join(realm, 'native'), projects = join(root, 'claude-home/projects/fixture')
     mkdirSync(projects, { recursive: true })
-    const ref = freezeContext({ directory, sourceRoot: process.cwd(), binding: { requestKey: 'schema-exhaustion', inputDigest: 'input' }, entries: [{ id: 'task', label: 'task', kind: 'utf8', bytes: Buffer.from('original public task') }] })
+    const ref = freezeContext({ directory, sourceRoot: process.cwd(), binding: { requestKey, inputDigest: 'input' }, entries: [{ id: 'task', label: 'task', kind: 'utf8', bytes: Buffer.from('original public task') }] })
     const prompt = 'fixed original public prompt', message = { role: 'user', content: [{ type: 'text', text: prompt }] }
     const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], { detached: true, stdio: 'ignore' })
     assert(child.pid)
@@ -53,7 +53,7 @@ test('stopped exact Claude schema retry exhaustion remains a rejected output wit
     const receiptFile = join(root, 'process.json'), identity = writeDetachedRuntimeReceipt(child.pid, receiptFile)
     process.kill(-child.pid, 'SIGTERM'); await exited
     writeFileSync(join(root, 'mcp-public.jsonl'), JSON.stringify({ type: 'process', pid: child.pid, startToken: identity.startToken }) + '\n')
-    const execution = { ...structuredExecutionPolicy({ schema: { type: 'object', properties: { newNodes: { type: 'array', maxItems: 0 } }, required: ['newNodes'], additionalProperties: false }, model: 'claude:MiniMax-M3.1-Flash', frozenContext: ref, inputDigest: 'input', purpose: 'schema-exhaustion', timeoutMs: 1000 }), claudeNative: { version: 1 as const, root, sessionId: 'session', userUuid: 'user', pid: child.pid, receiptFile } }
+    const execution = { ...structuredExecutionPolicy({ schema: { type: 'object', properties: { newNodes: { type: 'array', maxItems: 0 } }, required: ['newNodes'], additionalProperties: false }, model: 'claude:MiniMax-M3.1-Flash', frozenContext: ref, inputDigest: 'input', purpose: 'schema-exhaustion', timeoutMs }), claudeNative: { version: 1 as const, root, sessionId: 'session', userUuid: 'user', pid: child.pid, receiptFile } }
     const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
     const plan = { version: 1, root, sessionId: 'session', userUuid: 'user', pid: child.pid, receiptFile, cliVersion: '2.1.309 (Claude Code)', requestDigest: digest({ prompt, policy: structuredExecutionPolicy(execution) }), policyDigest: digest(structuredExecutionPolicy(execution)) }
     const result = { type: 'result', subtype: 'error_max_structured_output_retries', is_error: true, session_id: 'session', uuid: 'result', user_message_uuid: 'user', user_message_uuids: ['user'] }
@@ -253,7 +253,7 @@ test('stopped exact Claude schema retry exhaustion remains a rejected output wit
     const { fromRaw, writeRecord, readRecord } = await import('./session-record.js')
     const { configuredSessionApplication } = await import('./session-application.js')
     const { executeQueuedStructuredSession, runStructuredSession } = await import('./session-structured.js')
-    const requestKey = 'schema-exhaustion', id = sessionIdForCreateKey(requestKey), policy = structuredExecutionPolicy(execution)
+    const id = sessionIdForCreateKey(requestKey), policy = structuredExecutionPolicy(execution)
     runtimeFixture = join(runtimeRoot(), 'structured-claude-read-only-v1', id)
     cpSync(root, runtimeFixture, { recursive: true }); writeFileSync(join(runtimeFixture, 'plan.json'), JSON.stringify({ ...plan, root: runtimeFixture }))
     configuredSessionApplication().createSession({ sessionId: id, status: 'awaiting', proposal: 'nothing' })

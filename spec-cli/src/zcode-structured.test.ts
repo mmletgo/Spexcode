@@ -22,13 +22,13 @@ test('ZCode text transport only unwraps one exact JSON shell without repairing d
   for (const raw of ['answer: {"value":1}', '```JSON\n{}\n```', '```json\n{}\n```\n```json\n{}\n```', '{} {}', '```json\n{"value":}\n```', '```json\n{}\n```\nprose']) assert.throws(() => decodeZCodeStructuredText(raw), { code: 'structured_output_format_invalid' })
 })
 
-test('ZCode strict JSON failure requires complete native proof, persists identity and leaves legacy failed records failed', async t => {
+for (const timeoutMs of [1000, null]) test(`ZCode strict JSON failure with timeout=${timeoutMs} requires complete native proof and preserves durable identity`, async t => {
   const { runtimeRoot, sessionArtifactPath } = await import('@spexcode/spec-core')
   const { sessionIdForCreateKey } = await import('./sessions.js')
   const { fromRaw, writeRecord, readRecord } = await import('./session-record.js')
   const { configuredSessionApplication } = await import('./session-application.js')
   const { executeQueuedStructuredSession, runStructuredSession } = await import('./session-structured.js')
-  const directory = mkdtempSync(join(tmpdir(), 'spex-zcode-format-')), requestKey = 'zcode-format-failure', id = sessionIdForCreateKey(requestKey)
+  const directory = mkdtempSync(join(tmpdir(), 'spex-zcode-format-')), requestKey = `zcode-format-failure-${timeoutMs}`, id = sessionIdForCreateKey(requestKey)
   const root = join(runtimeRoot(), 'structured-zcode-read-only-v1', id), runtime = join(root, 'runtime')
   mkdirSync(join(runtime, 'frozen-mcp'), { recursive: true })
   const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' })
@@ -37,7 +37,7 @@ test('ZCode strict JSON failure requires complete native proof, persists identit
   try {
     const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex'), prompt = 'Return one JSON object.'
     const ref = freezeContext({ directory: join(directory, 'frozen'), sourceRoot: process.cwd(), binding: { requestKey, inputDigest: 'input' }, entries: [{ id: 'task', label: 'task', kind: 'utf8', bytes: Buffer.from('public task') }] })
-    const policy = structuredExecutionPolicy({ schema: { type: 'object' }, inputDigest: 'input', purpose: 'format-failure', timeoutMs: 1000, model: 'zcode:bigmodel-api/GLM-5.3-Flash', frozenContext: ref })
+    const policy = structuredExecutionPolicy({ schema: { type: 'object' }, inputDigest: 'input', purpose: 'format-failure', timeoutMs, model: 'zcode:bigmodel-api/GLM-5.3-Flash', frozenContext: ref })
     const receiptFile = join(root, 'process.json'), identity = writeDetachedRuntimeReceipt(child.pid, receiptFile)
     const native = { version: 1 as const, root, sessionId: 'session', inputId: 'input', turnId: 'turn', pid: child.pid, receiptFile }
     const nativePrompt = zcodeStructuredPrompt(prompt, policy.schema), modelSnapshot = { sessionId: native.sessionId, model: zcodeNativeModel(policy.model) }
@@ -77,7 +77,7 @@ test('ZCode strict JSON failure requires complete native proof, persists identit
     writeFileSync(join(root, 'exit.json'), JSON.stringify({ code: 0, signal: null, stopped: true, idle: true, closed: true }))
     writeFileSync(join(root, 'owned-processes.json'), JSON.stringify([{ pid: child.pid, startToken: identity.startToken.replace(/\s+/g, ' ') }]))
     process.kill(-child.pid, 'SIGTERM'); await exited
-    const execution: ZCodeStructuredExecution = { ...policy, version: 4, policy: 'zcode-frozen-read-only-v1', turnStartRequested: true, zcodeNative: native, frozenReadProof: undefined }
+    const execution: ZCodeStructuredExecution = { ...policy, version: timeoutMs === null ? 5 : 4, policy: 'zcode-frozen-read-only-v1', turnStartRequested: true, zcodeNative: native, frozenReadProof: undefined }
     const callbacks = { onThread: async () => assert.fail('no thread'), onTurn: async () => assert.fail('no turn'), onNative: async () => assert.fail('no native') }
     const unreadMessages = structuredClone(messages), unreadEvents = structuredClone(events).filter(event => event.type !== 'tool.updated')
     unreadMessages[1].parts = []; unreadEvents[2].payload.messageCount = 2; unreadEvents[2].payload.iteration = 0; unreadEvents.at(-1)!.payload.toolCallCount = 0

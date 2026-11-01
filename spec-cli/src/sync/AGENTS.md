@@ -23,3 +23,5 @@
 - 模型选择冻结于 operation：新操作缺少显式选择或既有绑定时取版本化 `sync.model`，再缺省 sol；旧 operation 缺字段仍固定 sol。换模型只经显式 retryOf；非默认运行描述用 sync-tools-v2，v13组件marker使旧writer在所有入口拒绝；回滚须停writer/结算资源并恢复升级前DB备份，不能删marker或只改工具描述，resume/recover不换模型。
 
 - ZCode模型使用 `zcode:<provider-id>/<exact-model-id>`，复用结构化队列与资源桥，独立v4只读策略及原生证明；v16 writer marker拒绝旧执行器，换provider仍须新操作/正式retryOf，不自动fallback。
+
+- unlimited模型调用使用null期限及结构化策略v5；v17组件marker拒旧sync writer，独立旧queue通过固定策略拒绝v5。升级先停全部旧backend/queue并结算资源；创建、租约、stop/close及Docker期限仍独立有限。

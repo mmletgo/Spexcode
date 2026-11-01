@@ -48,12 +48,12 @@ const registeredVerification = (() => {
   return { id: item.id, command: [...item.command], cwd: item.cwd, timeoutMs: item.timeoutMs }
 })()
 
-test('unlimited P1显式null总期仍以有限单次timeout完成生成和独审', async () => {
-  const model = runner(request => { assert.equal(request.timeoutMs, 1200000); assert.equal(request.signal?.aborted, false); return candidate(request, source) })
-  const result = await elaborate({ ...input(), totalTimeoutMs: null, timeoutMs: 1200000 }, { runner: model.run })
+for (const timeoutMs of [1200000, null]) test(`P1显式null总期与模型调用timeout=${timeoutMs}原样进入生成和独审`, async () => {
+  const model = runner(request => { assert.equal(request.timeoutMs, timeoutMs); assert.equal(request.signal?.aborted, false); return candidate(request, source) })
+  const result = await elaborate({ ...input(), totalTimeoutMs: null, timeoutMs }, { runner: model.run })
   assert.equal(result.status, 'complete'); assert.equal(result.structurePassed, true); assert.equal(result.reviewPassed, true)
   assert.deepEqual(model.calls.map(call => call.purpose), ['elaboration_generate', 'elaboration_review'])
-  assert.ok(model.calls.every(call => call.timeoutMs === 1200000 && call.signal?.aborted === false))
+  assert.ok(model.calls.every(call => call.timeoutMs === timeoutMs && call.signal?.aborted === false))
 })
 
 test('父接口实际生成和独审请求只承担必要共享接口，不混入完整P1覆盖任务', async () => {
