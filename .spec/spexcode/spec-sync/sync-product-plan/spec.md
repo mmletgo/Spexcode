@@ -44,6 +44,8 @@ P0至P5按完整需求交付，不以阶段演示、局部测试或可修改的�
 
 Native worktree分区分析brief同步传递本区facts与newNodes约束：同一facts.source只给一个完整text，newNodes仅来自本区unownedSourcePaths及schema候选，候选为空或maxItems为0时返回[]；Root/接口分区不得替兄弟源码分区提出叶。该业务提示不限制Agent自由读取完整worktree，也不要求frozen-reader或逐字消费证明。
 
+Native worktree新分析请求的schema按旧/current冻结图限制受影响ID，并只允许REQ/RULE/TR作为规则依据；空ID/规则域不生成空enum，raw-only空图的GAP/conflict仍可用空身份数组。已接受的合法v5缓存继续按原摘要复用，不重派Native。
+
 初始化待生成规格叶和覆盖映射不等于缺用户业务事实；已有raw、源码与测试可核的职责交后续P1，真实未知/互斥仍明确阻塞。分析指导版本纳入输入摘要，职责澄清后旧已审结果须重新分析独审，旧证据不改。
 
 初始化重试的扩展资源尚无真实owner时，分区分析与独审保留其null意图元数据，不猜路径或缩小原scope/选择；空资源名不构成契约正文、读取证明或写权，已存在owner仍受本区读取范围限定。

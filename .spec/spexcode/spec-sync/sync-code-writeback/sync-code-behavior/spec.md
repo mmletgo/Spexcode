@@ -48,6 +48,8 @@ AC提案的非作者raw来源必须精确引用本次已校验facts；单独的�
 
 行为分析Native schema在派发前将`acceptanceChanges.items.id`限制为`oldFrozen`与`current`冻结图中既有AC身份的并集；并集为空时设置`acceptanceChanges.maxItems: 0`，不生成空enum。Native派发与本地`outputErrors`使用同一动态schema。该身份enum不替代目标AC必须对应合法已审规则变化、affectedIds和真实来源链的运行时授权门禁。
 
+Native worktree新派发schema将changes[].affectedIds限制为old/current冻结图graph.items的并集，覆盖所有真实item类型；changes[].ruleIds与acceptanceChanges[].ruleIds仅包含按既有kind门识别的REQ/RULE/TR。空候选用maxItems:0表达，不生成空enum；无合法规则时acceptanceChanges也禁止提案。该schema只约束新Native派发，后置ID、规则kind、AC来源和变更授权门不变；已接受的同摘要v5缓存仍可复用，raw-only空图下GAP/conflict可保留空身份数组。
+
 分析与独审输入前置 requiredChangedPaths、unownedSourcePaths/unownedSourcePathCount 和具体 readablePaths；未治理源码子集与后置归属门复用同一判据，首次纳管的已存在/已提交实现及空初始化文件均按原角色纳入，不以 allowed_change 分组或旧文件身份替代真实 newNodes/GAP/conflict。显式 sourcePaths 的 v2 code_to_spec 即使源码只读，也按本区实际changed/read/owner集合发现和审核未治理代码；新叶源码候选与Spec叶写入授权分离。newNodes 必须引用原全局授权targets中的非空raw父Spec，且该父全文在本区冻结readPaths中可读；该叶只可创建在原全局writePaths授权覆盖的父Spec目录下。分区可从本区target或contextNodeIds/readPaths投影该精确父Spec资格，不把全局writePaths回填为局部源码/测试写权。newNodes 只绑定已有上层raw的对应职责，不产生新业务政策。readablePaths 从 oldSource/newSource/verifiedDelivery/composedFiles 的完整文本求出并逐路径标明所在快照；目录前缀授权覆盖新未跟踪源码，删除文件仍核旧全文，元数据或链接不是全文。虚拟冻结快照是唯一输入权威，cwd 的旧 HEAD 不替代冻结字节。必读集合保持真实changedPaths；不得自动补checkedPaths冒充模型已读。前置清单及完整原上下文、repairDiagnostics全部保留，超过2MiB由 [[frozen-context-reader]] 在同一受限执行器无损读取；分析和独审各自核完整原生读取证明。总预算仍约束，缺失或不完整读取拒绝，不截断正文或诊断。
 
 分析和独审共同收到从冻结正文解析的 contractItems.previous/current 完整项，作为既有稳定身份及义务的索引；精确 selection 的资源名不替代契约定义，未通过 P1 结构检查或独审的候选不成为既有义务；已接受 P1 仍由后续冻结复用和生成保护，不成为 raw 或新的作者授权。raw-only 初始化尚无稳定业务 ID 时，按真实 raw、源码及完整测试分析，允许空 affectedIds/ruleIds，无阻塞发现时随后由 P1 建立详细契约并独审；不能虚构既有 ID 或仅因尚未展开提出 GAP，也不能借此跳过完整业务分析、独审、P1、生成或验证门禁。

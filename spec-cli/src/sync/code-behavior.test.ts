@@ -2377,3 +2377,141 @@ test('Native code_to_spec分区brief传达本区facts与newNodes约束并保留�
   })
   assert.equal(result.reviewPassed, true)
 })
+
+test('Native新分析schema限定旧当前图ID并保留v5缓存及分区后置门', async t => {
+  const f = await fixture(t), path = '.spec/export/export-contract/spec.md', testPath = 'tests/export.test.mjs'
+  const currentRaw = f.raw.replace('\n\n### FLOW\n', '\n| RULE-EXPORT-99 | Native schema | 本轮测试新规则域 | ID域测试 | export-contract | decision:EXPORT-POLICY | REQ-EXPORT-01 |\n\n### FLOW\n')
+  assert.notEqual(currentRaw, f.raw)
+  writeFileSync(join(f.root, path), currentRaw)
+  writeFileSync(join(f.root, testPath), `${readFileSync(join(f.root, testPath), 'utf8')}\n// read-only test change\n`)
+  git(f.root, 'add', path, testPath); git(f.root, 'commit', '-m', 'add current-only schema rule and read-only test change')
+  const prepared = await f.input(), input: CodeBehaviorInput = {
+    ...prepared, origin: 'spec', model: 'claude:MiniMax-M3.1-Flash',
+    plan: { ...prepared.plan, agentWorkflow: 'native-worktree-v1', readPaths: ['.spec', 'src', 'tests'], writePaths: ['.spec', 'src'] },
+    partition: { id: 'native-id-domain', changedPaths: [path, testPath], factSourcePaths: [] },
+  }
+  const oldGraph = await readFrozenContracts(f.root, new Map([[path, f.raw]]))
+  const currentGraph = await readFrozenContracts(f.root, new Map([[path, currentRaw]]))
+  const expectedIds = [...new Set([...oldGraph.graph.items.keys(), ...currentGraph.graph.items.keys()])].sort()
+  const expectedRuleIds = [...new Set(expectedIds.filter(id => {
+    const item = currentGraph.graph.items.get(id) ?? oldGraph.graph.items.get(id)
+    return item !== undefined && ['REQ', 'RULE', 'TR'].includes(item.kind) && /^(REQ|RULE|TR)-/.test(id)
+  }))].sort()
+  assert.ok(expectedIds.includes('AC-EXPORT-01'))
+  assert.ok(expectedIds.includes('VERIFY-EXPORT-01'))
+  assert.ok(expectedIds.includes('RULE-EXPORT-99'), 'current-only graph IDs join the old/current domain')
+  const analysisOutput = {
+    changes: [{ kind: 'refactor', paths: [path, testPath], affectedIds: ['VERIFY-EXPORT-01'], ruleIds: ['RULE-EXPORT-01'], originalIntent: '保持原有导出流程', previousBehavior: '冻结旧版契约', sourceBehavior: '当前契约新增schema测试规则', deliveryBehavior: '交付沿用原导出流程', evidence: '完整冻结Spec与源码', counterexample: '不能用raw路径冒充稳定ID' }],
+    facts: [], acceptanceChanges: [], newNodes: [], resolutions: [],
+  }
+  const calls: string[] = []
+  const result = await analyzeCodeBehavior(input, async request => {
+    calls.push(request.purpose)
+    assert.ok(request.worktree)
+    assert.equal(request.frozenEntries, undefined)
+    assert.doesNotMatch(request.prompt, /spex_read_frozen|bodyIndex|bodyRef|分块读取|逐字消费证明/)
+    const stageInstructions = request.prompt.slice(0, request.prompt.indexOf('任务:\n'))
+    if (request.purpose === 'code_behavior_analyze') {
+      const task = JSON.parse(request.prompt.split('任务:\n')[1]!.split('\n待审分析:')[0]!) as Record<string, unknown>
+      assert.equal(task.contractItems, undefined, 'Native task JSON must not transport the full contract graph')
+      type ArraySchema = { maxItems?: number; items?: { enum?: string[] } }
+      type NativeSchema = { properties: {
+        changes: { items: { properties: { affectedIds: ArraySchema; ruleIds: ArraySchema } } }
+        acceptanceChanges: { maxItems?: number; items: { properties: { ruleIds: ArraySchema } } }
+      } }
+      const properties = (request.schema as unknown as NativeSchema).properties
+      const affectedIds = properties.changes.items.properties.affectedIds.items?.enum
+      const changeRuleIds = properties.changes.items.properties.ruleIds.items?.enum
+      const acceptanceRuleIds = properties.acceptanceChanges.items.properties.ruleIds.items?.enum
+      assert.deepEqual(affectedIds, expectedIds)
+      assert.deepEqual(changeRuleIds, expectedRuleIds)
+      assert.deepEqual(acceptanceRuleIds, expectedRuleIds)
+      assert.equal(new Set(affectedIds).size, affectedIds.length, 'old/current overlap must be de-duplicated')
+      assert.ok(affectedIds.includes('AC-EXPORT-01') && affectedIds.includes('VERIFY-EXPORT-01'), 'affectedIds may use every actual graph item kind')
+      assert.ok(!changeRuleIds.includes('AC-EXPORT-01') && !changeRuleIds.includes('VERIFY-EXPORT-01'))
+      assert.match(stageInstructions, /changes\[\]\.affectedIds.*graph\.items/)
+      assert.match(stageInstructions, /changes\[\]\.ruleIds.*REQ\/RULE\/TR/)
+      assert.match(stageInstructions, /raw-only.*ID候选域为空时.*空数组/)
+      assert.doesNotMatch(stageInstructions, /contractItems/)
+      assert.equal((CODE_BEHAVIOR_SCHEMA.properties as Record<string, { items?: { properties?: Record<string, { items?: { enum?: string[] } }> } }>).changes.items!.properties!.affectedIds.items?.enum, undefined, 'global/legacy schema remains unchanged')
+      return { sessionId: 'native-id-analysis', threadId: 'native-id-analysis-thread', turnId: 'turn', output: analysisOutput, resultDigest: contentHash(JSON.stringify(analysisOutput)) }
+    }
+    const stage = JSON.parse(request.prompt.split('待审分析:\n')[1]!) as { analysisDigest: string; analysis: CodeBehaviorAnalysis }
+    const output = { inputDigest: request.inputDigest, analysisDigest: stage.analysisDigest, verdict: 'accept', checkedPaths: [path, testPath], checkedChangeIds: stage.analysis.changes.map(change => change.id), findings: [] }
+    return { sessionId: 'native-id-review', threadId: 'native-id-review-thread', turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)) }
+  })
+  assert.deepEqual(calls, ['code_behavior_analyze', 'code_behavior_review'])
+  assert.equal(result.reviewPassed, true)
+  const cacheCalls: string[] = []
+  const cached = await analyzeCodeBehavior(input, async request => { cacheCalls.push(request.purpose); throw new Error('accepted v5 cache should be reused') }, digest => digest === result.inputDigest ? result : null)
+  assert.deepEqual(cached, result)
+  assert.deepEqual(cacheCalls, [], 'a legal accepted v5 checkpoint is not invalidated by schema guidance')
+
+  await assert.rejects(analyzeCodeBehavior({ ...input, requestKey: 'native-id-domain-unknown' }, async request => {
+    if (request.purpose !== 'code_behavior_analyze') throw new Error('schema must reject unknown IDs before review')
+    const output = { ...analysisOutput, changes: [{ ...analysisOutput.changes[0], affectedIds: ['.spec/root/spec.md#raw-1'], ruleIds: ['REQ-UNKNOWN'] }] }
+    return { sessionId: 'native-id-unknown', threadId: 'native-id-unknown-thread', turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)) }
+  }), /affectedIds.*未满足枚举|ruleIds.*未满足枚举/)
+
+  await assert.rejects(analyzeCodeBehavior({ ...input, requestKey: 'native-id-domain-post-gate' }, async request => {
+    const output = request.purpose === 'code_behavior_analyze'
+      ? { ...analysisOutput, changes: [{ ...analysisOutput.changes[0], paths: ['src/export.js'] }] }
+      : (() => { throw new Error('the existing partition path gate must reject before review') })()
+    return { sessionId: 'native-id-post-gate', threadId: 'native-id-post-gate-thread', turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)) }
+  }), (error: unknown) => {
+    assert.ok(error instanceof Error)
+    const diagnostic = JSON.parse(error.message) as { message: string; details: { invalidPaths: string[] } }
+    assert.equal(diagnostic.message, '分析超出本区真实变更集合')
+    assert.deepEqual(diagnostic.details.invalidPaths, ['src/export.js'])
+    return true
+  })
+
+  await assert.rejects(analyzeCodeBehavior({ ...input, requestKey: 'native-id-domain-write-gate' }, async request => {
+    if (request.purpose !== 'code_behavior_analyze') throw new Error('the existing write gate must reject before review')
+    const output = { ...analysisOutput, resolutions: [{ path: testPath, content: 'unauthorized test rewrite\n', mode: '100644' }] }
+    return { sessionId: 'native-id-write-gate', threadId: 'native-id-write-gate-thread', turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)) }
+  }), /整合解决方案没有相容分析\/授权范围/)
+})
+
+test('Native raw-only空图schema不发空enum且GAP/conflict保留空身份', async t => {
+  const { input } = await initialDiscovery(t, '统计传入列表的条目数量，不修改列表；重要跨账号可见性政策尚未确定。')
+  const nativeInput: CodeBehaviorInput = { ...input, model: 'claude:MiniMax-M3.1-Flash', plan: { ...input.plan, agentWorkflow: 'native-worktree-v1' } }
+  for (const kind of ['coverage_gap', 'conflict'] as const) {
+    const paths = [...nativeInput.partition!.changedPaths], calls: string[] = []
+    const result = await analyzeCodeBehavior({ ...nativeInput, requestKey: `native-empty-id-${kind}` }, async request => {
+      calls.push(request.purpose)
+      assert.ok(request.worktree)
+      if (request.purpose === 'code_behavior_analyze') {
+        const stageInstructions = request.prompt.slice(0, request.prompt.indexOf('任务:\n'))
+        type ArraySchema = { maxItems?: number; items?: { enum?: string[] } }
+        type NativeSchema = { properties: {
+          changes: { items: { properties: { affectedIds: ArraySchema; ruleIds: ArraySchema } } }
+          acceptanceChanges: { maxItems?: number; items: { properties: { ruleIds: ArraySchema } } }
+        } }
+        const properties = (request.schema as unknown as NativeSchema).properties
+        const affected = properties.changes.items.properties.affectedIds, rules = properties.changes.items.properties.ruleIds
+        const acRules = properties.acceptanceChanges.items.properties.ruleIds
+        assert.equal(affected.maxItems, 0); assert.equal(affected.items?.enum, undefined)
+        assert.equal(rules.maxItems, 0); assert.equal(rules.items?.enum, undefined)
+        assert.equal(acRules.maxItems, 0); assert.equal(acRules.items?.enum, undefined)
+        assert.equal(properties.acceptanceChanges.maxItems, 0)
+        assert.doesNotMatch(JSON.stringify(request.schema), /"enum":\[\]/)
+        assert.match(stageInstructions, /raw-only.*ID候选域为空时.*空数组/)
+        const task = JSON.parse(request.prompt.split('任务:\n')[1]!.split('\n待审分析:')[0]!) as Record<string, unknown>
+        assert.equal(task.contractItems, undefined)
+        const output = {
+          changes: paths.map(path => ({ kind: path === 'src/summary.js' ? kind : 'refactor', paths: [path], affectedIds: [], ruleIds: [], originalIntent: '首次统计列表', previousBehavior: '尚未建立契约ID', sourceBehavior: '实现需要明确跨账号可见性', deliveryBehavior: '无已验证交付', evidence: '真实冻结源码与完整测试', counterexample: '账号A收到A/B两项时是否可以统计B尚无政策' })),
+          facts: [], acceptanceChanges: [], newNodes: [], resolutions: [],
+        }
+        return { sessionId: `native-empty-${kind}-analysis`, threadId: `native-empty-${kind}-analysis-thread`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)) }
+      }
+      const stage = JSON.parse(request.prompt.split('待审分析:\n')[1]!) as { analysisDigest: string; analysis: CodeBehaviorAnalysis }
+      const output = { inputDigest: request.inputDigest, analysisDigest: stage.analysisDigest, verdict: 'accept', checkedPaths: paths, checkedChangeIds: stage.analysis.changes.map(change => change.id), findings: [] }
+      return { sessionId: `native-empty-${kind}-review`, threadId: `native-empty-${kind}-review-thread`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)) }
+    })
+    assert.deepEqual(calls, ['code_behavior_analyze', 'code_behavior_review'])
+    assert.equal(result.reviewPassed, true)
+    assert.equal(result.findings.some(finding => finding.kind === kind), true)
+    assert.deepEqual(result.findings.find(finding => finding.kind === kind)?.affectedIds, [])
+  }
+})
