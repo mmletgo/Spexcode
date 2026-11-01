@@ -11,7 +11,7 @@ import { SYNC_COMPONENT, SYNC_MIGRATIONS, syncCoordinatorAddress } from './migra
 import { SyncApplication } from './application.js'
 import { prepareSpecBodyEdit } from '../spec-body-edit.js'
 import { prepareSyncAdmission } from './coordinator.js'
-import { buildSyncApplicationPlan } from './planning.js'
+import { buildSyncApplicationPlan, deriveSyncBaselineResources } from './planning.js'
 import { captureInputSnapshot } from './snapshot.js'
 import { readSyncSettings, SyncApplicationError } from './settings.js'
 import type { SyncSettings } from './settings.js'
@@ -20,10 +20,12 @@ import { contractBusinessProse, sameContractBusinessMeaning } from './contract-e
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
 import type { ElaborationSessionRequest } from './elaboration-types.js'
 import { sessionIdForCreateKey } from '../sessions.js'
-import { contentHash, identifyWorktree, writeEvidence, readEvidence, readObject, readTree } from './snapshot.js'
+import { contentHash, identifyWorktree, writeEvidence, readEvidence, readObject, readTree, writeObject, writeTree } from './snapshot.js'
 import { claimFileMutex } from './file-mutex.js'
 import type { FileMutex } from './file-mutex.js'
 import { composeAuthoredInput } from './author-input.js'
+import { assemblePublicationBase, verifyPublicationBase } from './publication-base.js'
+import { ownedObligationPaths } from './prior-context.js'
 import { readCompositionEvidence } from './composition.js'
 import { adaptElaborationNativeOutput } from '../../test/elaboration-native-output.js'
 import { readFrozenBehaviorContext } from '../../test/frozen-behavior-context.js'
@@ -1876,4 +1878,163 @@ test('AC-APPLICATION-P4-11 两个独立节点保存及停机编辑补偿均真�
   assert.equal((await captureInputSnapshot(f.root)).id, latest.id)
   assert.equal(f.nativeRequests.some(request => request.purpose === 'code_generate'), false)
   assert.notEqual(f.git(['rev-parse', 'HEAD']), head); assert.notDeepEqual(readFileSync(join(f.root, '.git/index')), index)
+})
+
+function governDemoDependencies(f: Awaited<ReturnType<typeof fixture>>, related: readonly string[]): void {
+  const fixtureRoot = 'spec-cli/test/fixtures/spec-sync/export-repo'
+  const contractSource = readFileSync(join(fixtureRoot, '.spec/export/export-contract/spec.md'), 'utf8')
+    .replaceAll('EXPORT', 'DEMO').replaceAll('export-contract', 'demo').replaceAll('src/export.js', 'src/demo.mjs').replaceAll('tests/export.test.mjs', 'tests/demo.test.mjs').replace(' | 10000 |', ' | 1000 |')
+    .replace('code:\n', `related:\n${related.map(path => `  - ${path}`).join('\n')}\ncode:\n`)
+  const parsed = parseContract({ nodeId: 'demo', path: '.spec/demo/spec.md', source: contractSource })
+  assert.ok(parsed.contract); assert.deepEqual(parsed.findings, [])
+  writeFileSync(join(f.root, '.spec/demo/spec.md'), contractSource)
+  writeFileSync(join(f.root, 'src/demo.mjs'), readFileSync(join(fixtureRoot, 'src/export.js'), 'utf8'))
+  writeFileSync(join(f.root, 'tests/demo.test.mjs'), readFileSync(join(fixtureRoot, 'tests/export.test.mjs'), 'utf8').replaceAll('EXPORT', 'DEMO').replaceAll('../src/export.js', '../src/demo.mjs'))
+}
+
+test('旧failed计划retry读集变更拒绝，fresh正式操作冻结owned只读闭包且依赖变化仍过期', async t => {
+  for (const committed of [false, true]) await t.test(committed ? 'commit冻结HEAD' : 'observed冻结输入', async () => {
+    const f = await fixture({ ...settings, sourcePaths: ['src/demo.mjs'] })
+    try {
+      f.application.start = () => {}
+      const targetPath = '.spec/demo/spec.md', dependencyPath = 'src/cli.mjs', absentPath = 'src/missing-dependency.mjs'
+      const dependency = 'export const cli = "frozen CLI body"\n'
+      governDemoDependencies(f, [dependencyPath, absentPath, 'src/related/*.mjs', 'docs/'])
+      assert.ok(parseContract({ nodeId: 'demo', path: targetPath, source: readFileSync(join(f.root, targetPath), 'utf8') }).contract?.related.includes(dependencyPath))
+      writeFileSync(join(f.root, dependencyPath), dependency)
+      f.git(['add', '.']); f.git(['commit', '-qm', 'fixture: owned related dependency'])
+      await f.application.enable()
+      mkdirSync(join(f.root, 'src/related'), { recursive: true })
+      const snapshot = await captureInputSnapshot(f.root, { committed })
+      const plan = await buildSyncApplicationPlan(snapshot, 'demo')
+      // 历史计划在修复前已持久化：owned related存在于冻结树，但旧readPaths漏读。
+      plan.readPaths = [targetPath, '.spec/spexcode.json', 'src/demo.mjs', 'tests/demo.test.mjs', 'package.json']
+      const selected = f.application.store.readBaselineSelection(snapshot.source, await deriveSyncBaselineResources(snapshot, plan))
+      assert.ok('selection' in selected)
+      const baselineSelection = selected.selection
+      assert.equal(baselineSelection.bindings.some(binding => binding.resource.kind === 'path' && binding.resource.path === dependencyPath), false)
+      const paths = [...new Set([...plan.readPaths, ...plan.executionScope.paths])].sort()
+      const oldComposed = composeAuthoredInput(snapshot, baselineSelection, { retainConflicts: true, executionPaths: plan.executionScope.paths, contextPaths: paths }).composed!
+      const entries = readTree(snapshot.source.commonDir, oldComposed.tree)
+      const withinRead = (path: string): boolean => paths.some(parent => path === parent || path.startsWith(`${parent}/`))
+      const canonical = (value: unknown): string => JSON.stringify(value, (_key, entry: unknown) => entry && typeof entry === 'object' && !Array.isArray(entry) ? Object.fromEntries(Object.entries(entry).sort(([a], [b]) => a.localeCompare(b))) : entry)
+      const oldReadSetDigest = contentHash(canonical({ baseline: { selectionDigest: baselineSelection.digest }, compositionEvidence: oldComposed.compositionEvidenceBlob ?? null, declared: paths, entries: entries.filter(entry => withinRead(entry.path)), absent: paths.filter(path => !entries.some(entry => entry.path === path || entry.path.startsWith(`${path}/`))) }))
+      const options = { ingressKey: 'historical-missing-owned-read', rootCauseId: 'historical-missing-owned-read', origin: 'spec' as const, budget: settings.budget, managedRoot: f.application['managedRoot'], baselineSelection }
+      assert.ok(ownedObligationPaths(plan.targets, plan.executionScope.paths, new Map([[targetPath, readFileSync(join(f.root, targetPath), 'utf8')]]), readTree(snapshot.source.commonDir, snapshot.immutableTree).map(entry => entry.path)).includes(dependencyPath))
+      const currentAdmission = await prepareSyncAdmission(snapshot, plan, options)
+      const historicalAdmission = { ...currentAdmission, readSetDigest: oldReadSetDigest, impactDigest: contentHash(canonical({ targets: plan.targets, scope: plan.executionScope, writePaths: [...new Set(plan.writePaths)].sort(), readSetDigest: oldReadSetDigest })) }
+      f.application['prepareTools'](historicalAdmission.ingressKey, null)
+      const admitted = f.application.store.admitAndEnqueue(historicalAdmission)
+      const ack = f.application.store.ackDispatch(snapshot.source.repositoryId, admitted.dispatchMessageId)
+      const claim = f.application.store.claimQueuedAttempt({ operationId: admitted.id, source: snapshot.source, scope: admitted.scope, expectedRevision: ack.revision, leaseMs: 60000 })
+      f.application.store.bindComposedInput(claim.fence, oldComposed)
+      f.application.store.recordFailure(claim.fence, { code: 'input_invalid', message: `模型读集合缺少契约引用的完整来源/验收文件: ${dependencyPath}`, kind: 'unsupported', evidenceRefs: [] })
+      const original = f.application.store.readOperation(admitted.id)
+      const detail = await f.application.readOperation(original.id)
+      assert.equal(detail.stale, false); assert.equal(detail.retryEligibility.eligible, true)
+      assert.notEqual(currentAdmission.readSetDigest, original.readSetDigest)
+      const dispatchBefore = f.application.store.nextDispatch(snapshot.source.repositoryId)
+      await assert.rejects(f.application.submit({ nodeId: 'demo', requestId: 'owned-dependency-retry', retryOf: original.id }), /SYNC_RETRY_BINDING/)
+      assert.deepEqual(f.application.store.nextDispatch(snapshot.source.repositoryId), dispatchBefore)
+      assert.deepEqual(f.application.store.readOperation(original.id), original, '历史failed记录和原读证明不可补签')
+      const retried = (await f.application.submit({ nodeId: 'demo', requestId: 'owned-dependency-fresh' })).operation!
+      const freshPlan = f.application['operationPlan'](retried)
+      assert.notEqual(retried.id, original.id); assert.equal(retried.retryOf, undefined)
+      assert.notEqual(retried.readSetDigest, original.readSetDigest)
+      assert.notEqual(retried.policyDigest, original.policyDigest, 'fresh正式操作冻结新的完整规划，不替旧retry重签')
+      const freshAdmission = await prepareSyncAdmission(retried.input, freshPlan, { ...options, baselineSelection: retried.baselineSelection!, executionScope: retried.scope })
+      assert.equal(retried.readSetDigest, freshAdmission.readSetDigest)
+      assert.deepEqual(retried.scope, original.scope)
+      assert.equal(retried.input.immutableTree, original.input.immutableTree); assert.equal(retried.input.headCommit, original.input.headCommit); assert.deepEqual(retried.input.source, original.input.source)
+      assert.deepEqual(freshPlan.targets, plan.targets)
+      assert.equal(retried.scope.paths.some(path => dependencyPath === path || dependencyPath.startsWith(`${path}/`)), false)
+      const retained = f.application.store.readOperation(original.id)
+      assert.equal(retained.phase, 'superseded', 'fresh操作沿既有生命周期取代旧failed操作')
+      for (const key of ['input', 'planBlob', 'policyDigest', 'readSetDigest', 'baselineSelection', 'payloadDigest'] as const) assert.deepEqual(retained[key], original[key])
+      const frozenDependency = readTree(snapshot.source.commonDir, retried.input.immutableTree).find(entry => entry.path === dependencyPath)!
+      assert.equal(readObject(snapshot.source.commonDir, frozenDependency.oid).toString('utf8'), dependency)
+      const retryAck = f.application.store.ackDispatch(snapshot.source.repositoryId, retried.dispatchMessageId)
+      const retryClaim = f.application.store.claimQueuedAttempt({ operationId: retried.id, source: snapshot.source, scope: retried.scope, expectedRevision: retryAck.revision, leaseMs: 60000 })
+      const derivedReadPaths = [...new Set([...freshPlan.readPaths, ...retried.scope.paths])].sort()
+      const currentComposed = composeAuthoredInput(retried.input, retried.baselineSelection!, { retainConflicts: true, executionPaths: retried.scope.paths, contextPaths: derivedReadPaths }).composed!
+      const retryAttempt = f.application.store.bindComposedInput(retryClaim.fence, currentComposed)
+      assert.throws(() => assemblePublicationBase(f.application.store, retried, retryAttempt, currentComposed, paths), /read closure differs/)
+      const publication = assemblePublicationBase(f.application.store, retried, retryAttempt, currentComposed, derivedReadPaths)
+      const provenance = verifyPublicationBase(retried, retryAttempt, publication)
+      assert.deepEqual(provenance.readPaths, derivedReadPaths)
+      assert.equal(provenance.writePaths.includes(dependencyPath), false)
+      f.application.store.startGeneration(retryClaim.fence)
+      const frozenAttempt = f.application.store.bindPublicationBase(retryClaim.fence, publication)
+      const readHeads = f.application.store.readPublicationHeads
+      f.application.store.readPublicationHeads = () => assert.fail('恢复已冻结base不得读取新的publication frontier')
+      try { assert.deepEqual(assemblePublicationBase(f.application.store, retried, frozenAttempt, currentComposed, derivedReadPaths), publication) }
+      finally { f.application.store.readPublicationHeads = readHeads }
+      assert.deepEqual(readTree(snapshot.source.commonDir, publication.parentTree).find(entry => entry.path === dependencyPath), frozenDependency)
+      assert.equal(readTree(snapshot.source.commonDir, publication.parentTree).some(entry => entry.path === absentPath), false)
+      const changedBytes = Buffer.from('forged readonly dependency\n')
+      for (const changedPath of [dependencyPath, absentPath]) {
+        const changedEntries = readTree(snapshot.source.commonDir, publication.composed.tree).filter(entry => entry.path !== changedPath)
+        changedEntries.push({ path: changedPath, mode: '100644', oid: writeObject(snapshot.source.commonDir, changedBytes), digest: contentHash(changedBytes) })
+        const tree = writeTree(snapshot.source.commonDir, changedEntries), forgedEntries = readTree(snapshot.source.commonDir, tree)
+        const forgedComposed = { ...publication.composed, tree, manifestBlob: writeEvidence(snapshot.source.commonDir, { version: 1, entries: forgedEntries }), contentDigest: contentHash(JSON.stringify(forgedEntries)) }
+        const forged = { ...publication, composed: forgedComposed, provenanceBlob: writeEvidence(snapshot.source.commonDir, { ...provenance, composed: forgedComposed }) }
+        assert.throws(() => verifyPublicationBase(retried, retryAttempt, forged), /actual publication images differ/)
+      }
+      f.application.store.recordFailure(retryClaim.fence, { code: 'offline_fixture_complete', message: '仅验证冻结读取和发布保护，未派发模型', kind: 'unsupported', evidenceRefs: [] })
+      const indexOnlyPath = 'src/related/index-only.mjs'
+      writeFileSync(join(f.root, indexOnlyPath), 'export const indexOnly = true\n')
+      f.git(['add', indexOnlyPath]); rmSync(join(f.root, indexOnlyPath))
+      const currentOperationId = committed ? original.id : retried.id
+      const indexOnly = await f.application.readOperation(currentOperationId)
+      assert.equal(indexOnly.stale, !committed, 'observed须保护index-only新glob成员，commit仍只冻结HEAD')
+      if (!committed) assert.equal(indexOnly.retryEligibility.eligible, false)
+      f.git(['reset', '-q', 'HEAD', '--', indexOnlyPath])
+      assert.equal((await f.application.readOperation(currentOperationId)).stale, false)
+      writeFileSync(join(f.root, dependencyPath), 'export const cli = "later index body"\n')
+      if (committed) {
+        f.git(['add', dependencyPath])
+        writeFileSync(join(f.root, dependencyPath), 'export const cli = "later WIP body"\n')
+        const dirty = await f.application.readOperation(currentOperationId)
+        assert.equal(dirty.stale, false, 'commit操作只比较HEAD，不把后来的index/WIP送进模型；superseded不改变读取当前性的判据')
+        assert.equal(readObject(snapshot.source.commonDir, frozenDependency.oid).toString('utf8'), dependency)
+        f.git(['commit', '-qm', 'fixture: real committed dependency change'])
+      }
+      const stale = await f.application.readOperation(currentOperationId)
+      assert.equal(stale.stale, true); assert.equal(stale.retryEligibility.eligible, false)
+      await assert.rejects(f.application.submit({ nodeId: 'demo', requestId: 'changed-owned-dependency-retry', retryOf: retried.id }), /原输入已变化/)
+      assert.equal(f.calls.length, 0)
+    } finally { await f.application.stopService(); f.cleanup() }
+  })
+})
+
+test('冻结snapshot的untracked related glob完整正文进入真实分派投影且不授写权', async () => {
+  const f = await fixture({ ...settings, sourcePaths: ['src/demo.mjs'] })
+  try {
+    const targetPath = '.spec/demo/spec.md', dependencyPath = 'src/related/original.mjs'
+    const body = 'export const original = "frozen untracked dependency"\n'
+    governDemoDependencies(f, ['src/related/*.mjs'])
+    f.git(['add', '.']); f.git(['commit', '-qm', 'fixture: owned glob dependency'])
+    mkdirSync(join(f.root, 'src/related'), { recursive: true }); writeFileSync(join(f.root, dependencyPath), body)
+    await f.application.enable()
+    const snapshot = await captureInputSnapshot(f.root)
+    const plan = await buildSyncApplicationPlan(snapshot, 'demo', undefined, { direction: 'combined' })
+    plan.readPaths = [targetPath, '.spec/spexcode.json', 'src/demo.mjs', 'tests/demo.test.mjs', 'package.json']
+    const selected = f.application.store.readBaselineSelection(snapshot.source, await deriveSyncBaselineResources(snapshot, plan))
+    assert.ok('selection' in selected)
+    assert.ok(parseContract({ nodeId: 'demo', path: targetPath, source: readFileSync(join(f.root, targetPath), 'utf8') }).contract?.related.includes('src/related/*.mjs'))
+    const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey: 'untracked-owned-dependency', rootCauseId: 'untracked-owned-dependency', origin: 'combined', budget: settings.budget, managedRoot: f.application['managedRoot'], baselineSelection: selected.selection })
+    f.application['prepareTools'](admission.ingressKey, null)
+    const admitted = f.application.store.admitAndEnqueue(admission)
+    f.application.start(admitted.id)
+    const failed = await f.application.wait(admitted.id)
+    assert.equal(failed.operation.phase, 'failed', JSON.stringify(failed.attempt?.failure))
+    assert.equal(f.calls.length, 1, '必须跨过冻结读取门进入真实分派，而非因HEAD缺少untracked成员在模型前失败')
+    const frozen = readFrozenBehaviorContext<{ composedFiles: [string, string][] }>(f.calls[0])
+    assert.equal(new Map(frozen.composedFiles).get(dependencyPath), body)
+    const composed = failed.attempt!.composedInput!, original = readTree(admitted.input.source.commonDir, admitted.input.immutableTree).find(entry => entry.path === dependencyPath)!
+    assert.deepEqual(readTree(admitted.input.source.commonDir, composed.tree).find(entry => entry.path === dependencyPath), original)
+    assert.equal(admitted.scope.paths.some(path => dependencyPath === path || dependencyPath.startsWith(`${path}/`)), false)
+    assert.equal(readFileSync(join(f.root, dependencyPath), 'utf8'), body)
+    assert.equal(f.git(['ls-files', '--', dependencyPath]), '')
+  } finally { await f.application.stopService(); f.cleanup() }
 })

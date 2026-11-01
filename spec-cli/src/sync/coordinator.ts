@@ -30,6 +30,7 @@ import type { NativeRunCheckpoint, NativeRunPlan } from './native-run.js'
 import type { AdmitSyncInput, ApplyReceipt, BlobRef, CandidateRef, ComposedInputRef, FrozenBaselineSelection, InputSnapshot, SyncAttempt, SyncFailure, SyncOperation, SyncScope, VerificationResultBlob, WriteFence } from './operation-types.js'
 import { deliverVerifiedAttempt, planPrivateDelivery } from './private-delivery.js'
 import { assemblePublicationBase } from './publication-base.js'
+import { ownedObligationPaths } from './prior-context.js'
 import { composeControlledRequest, readControlledChanges, readControlledDecision } from './request-input.js'
 import { sessionIdForCreateKey } from '../sessions.js'
 import { assertFrozenBinding, readFrozenManifest, readFrozenRange } from '../frozen-context.js'
@@ -85,17 +86,21 @@ function priorDeliveryFiles(operation: SyncOperation, view: InputView, readPaths
 export async function isSyncInputCurrent(operation: SyncOperation, current: InputSnapshot, plan: SyncCoordinatorPlan): Promise<boolean> {
   if (canonical(operation.input.source) !== canonical(current.source)) return false
   if (!operation.baselineSelection) return operation.input.id === current.id
-  const paths = unique([...plan.readPaths, ...operation.scope.paths])
+  const view = await readInput(operation.input, plan, operation.previousBaselinePair, operation.requestBlob ?? undefined, operation.baselineSelection ?? undefined, operation.scope.paths)
+  const originalEntries = verifySnapshot(operation.input), currentEntries = verifySnapshot(current)
   const treeCache = new Map<string, ReturnType<typeof readTree>>()
   const rememberTree = (input: InputSnapshot, entries: ReturnType<typeof readTree>): void => { treeCache.set(`${input.source.commonDir}\0${input.immutableTree}`, entries) }
-  const readEntries = (input: InputSnapshot, tree: string): string => {
+  const treeEntries = (input: InputSnapshot, tree: string): ReturnType<typeof readTree> => {
     const key = `${input.source.commonDir}\0${tree}`
     let entries = treeCache.get(key)
     if (!entries) { entries = readTree(input.source.commonDir, tree); treeCache.set(key, entries) }
-    return canonical(entries.filter(entry => within(entry.path, paths)))
+    return entries
   }
   const headTree = (input: InputSnapshot): string => objectGit(input.source.commonDir, ['rev-parse', `${input.headCommit}^{tree}`]).toString().trim()
-  rememberTree(operation.input, verifySnapshot(operation.input)); rememberTree(current, verifySnapshot(current))
+  rememberTree(operation.input, originalEntries); rememberTree(current, currentEntries)
+  const inventory = [operation.input, current].flatMap(input => [input.immutableTree, input.indexTree, headTree(input)].flatMap(tree => treeEntries(input, tree).map(entry => entry.path)))
+  const paths = unique([...view.readPaths, ...operation.scope.paths, ...ownedObligationPaths(plan.targets, operation.scope.paths, view.files, unique(inventory))])
+  const readEntries = (input: InputSnapshot, tree: string): string => canonical(treeEntries(input, tree).filter(entry => within(entry.path, paths)))
   return readEntries(operation.input, operation.input.immutableTree) === readEntries(current, current.immutableTree)
     && readEntries(operation.input, operation.input.indexTree) === readEntries(current, current.indexTree)
     && readEntries(operation.input, headTree(operation.input)) === readEntries(current, headTree(current))
@@ -107,7 +112,7 @@ async function readInput(input: InputSnapshot, plan: SyncCoordinatorPlan, previo
     validateRepositoryPath(path)
     if (isHostPrivatePath(path)) fail('private_context', `可信读写集合包含宿主运行资料: ${path}`)
   }
-  verifySnapshot(input)
+  const sourceEntries = verifySnapshot(input)
   if (plan.version === 'sync-coordinator-v2' && plan.commitTrigger) {
     for (const path of plan.commitTrigger.paths) validateRepositoryPath(path)
     if (plan.commitTrigger.before) {
@@ -117,12 +122,33 @@ async function readInput(input: InputSnapshot, plan: SyncCoordinatorPlan, previo
       if (canonical(unique(changed)) !== canonical(unique(plan.commitTrigger.paths))) fail('commit_trigger_binding', '累计提交路径与真实前后快照不一致')
     }
   }
-  const readPaths = selection ? unique([...plan.readPaths, ...executionPaths ?? []]) : plan.readPaths
+  let readPaths = selection ? unique([...plan.readPaths, ...executionPaths ?? []]) : [...plan.readPaths]
   let composition = composeAuthoredInput(input, selection ?? previous ?? undefined, { retainConflicts: true, ...(selection ? { executionPaths, contextPaths: readPaths } : {}) })
   if (!composition.composed) fail('composition_conflict', '人类输入与前次交付存在重叠冲突', [writeEvidence(input.source.commonDir, composition.conflicts)])
   if (requestBlob) composition = composeControlledRequest(input, composition.composed, requestBlob, { retainConflicts: true, baselineSelection: selection })
   if (!composition.composed) fail('request_conflict', '用户受控差量与已交付细化存在重叠冲突', [writeEvidence(input.source.commonDir, composition.conflicts)])
-  const composed = composition.composed, entries = readTree(input.source.commonDir, composed.tree)
+  let composed = composition.composed, entries = readTree(input.source.commonDir, composed.tree)
+  const targetSources = new Map<string, string>()
+  for (const target of plan.targets) {
+    const entry = entries.find(item => item.path === target.path)
+    if (entry && entry.mode !== '120000') {
+      const bytes = readObject(input.source.commonDir, entry.oid)
+      if (isUtf8Text(bytes)) targetSources.set(target.path, bytes.toString('utf8'))
+    }
+  }
+  const completeReadPaths = unique([...readPaths, ...ownedObligationPaths(plan.targets, executionPaths, targetSources, unique([...entries, ...sourceEntries].map(entry => entry.path)))])
+  for (const path of completeReadPaths) {
+    validateRepositoryPath(path)
+    if (isHostPrivatePath(path)) fail('private_context', `读集合包含宿主运行资料: ${path}`)
+  }
+  if (canonical(completeReadPaths) !== canonical(readPaths)) {
+    readPaths = completeReadPaths
+    composition = composeAuthoredInput(input, selection ?? previous ?? undefined, { retainConflicts: true, ...(selection ? { executionPaths, contextPaths: readPaths } : {}) })
+    if (!composition.composed) fail('composition_conflict', '人类输入与前次交付存在重叠冲突', [writeEvidence(input.source.commonDir, composition.conflicts)])
+    if (requestBlob) composition = composeControlledRequest(input, composition.composed, requestBlob, { retainConflicts: true, baselineSelection: selection })
+    if (!composition.composed) fail('request_conflict', '用户受控差量与已交付细化存在重叠冲突', [writeEvidence(input.source.commonDir, composition.conflicts)])
+    composed = composition.composed; entries = readTree(input.source.commonDir, composed.tree)
+  }
   if (contentHash(JSON.stringify(entries)) !== composed.contentDigest || readEvidence(input.source.commonDir, composed.manifestBlob).toString() !== JSON.stringify({ version: 1, entries })) fail('composition_digest', '组合输入真实清单与引用不一致')
   const readEntries = entries.filter(entry => within(entry.path, readPaths))
   const files = new Map<string, string>()
@@ -959,7 +985,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           const trees = unique([operation.input.immutableTree, view.composed.tree, ...operation.previousBaselinePair ? [operation.previousBaselinePair.sourceInput.immutableTree, operation.previousBaselinePair.verifiedDelivery.immutableTree] : [], ...historicalSnapshots.map(snapshot => snapshot.immutableTree)])
           for (const tree of trees) readTree(operation.input.source.commonDir, tree, (entry, bytes) => { if (within(entry.path, view.readPaths)) { const versions = byteVersions.get(entry.path) ?? new Map<string, number>(); versions.set(entry.digest, bytes.length); byteVersions.set(entry.path, versions) } })
           for (const artifact of compositionEvidence?.artifacts ?? []) for (const entry of [artifact.before, artifact.delivery, artifact.source, artifact.authorBase]) if (entry && within(entry.path, view.readPaths)) { const versions = byteVersions.get(entry.path) ?? new Map<string, number>(); if (!versions.has(entry.digest)) versions.set(entry.digest, readObject(operation.input.source.commonDir, entry.oid).length); byteVersions.set(entry.path, versions) }
-          partitions = planSyncPartitions({ plan, files: view.files, contracts: view.frozen.contracts, nodes: governanceNodes, governanceSources, changedPaths, maxReadBytes: plan.partitionPolicy.maxReadBytes, readByteSizes: new Map([...byteVersions].map(([path, versions]) => [path, [...versions.values()].reduce((sum, size) => sum + size, 0)])) })
+          partitions = planSyncPartitions({ plan: { ...plan, readPaths: [...view.readPaths] }, files: view.files, contracts: view.frozen.contracts, nodes: governanceNodes, governanceSources, changedPaths, maxReadBytes: plan.partitionPolicy.maxReadBytes, readByteSizes: new Map([...byteVersions].map(([path, versions]) => [path, [...versions.values()].reduce((sum, size) => sum + size, 0)])) })
           partitionCheckpoints.save('partition-plan', partitions)
           const hasPriorWork = Boolean(operation.retryOf) || store.listAttempts(operation.id).some(prior => prior.id !== attempt!.id)
           const minimumCalls = partitions.partitions.length * ((hasPriorWork ? 0 : (behaviorOrigin ? 2 : 0) + 2) + (plan.direction === 'code_to_spec' ? 1 : 2)) + partitions.dependencies.length

@@ -32,6 +32,8 @@ AC-APPLICATION-SCRATCH 从真实 Git 冻结配置读取 environment 的可选布
 
 15 验证普通重复归并、显式 retry 关联新操作/预算及同 retry 幂等；16 验证完整继承原 requestBlob/正文意图及旧共同基线，禁止新 patch 或旧来源变化；17 验证 queued 不可借 retry 重置预算，从未交付 cancelled 可经真实 FIFO 明确重试。
 
+旧 failed plan 的 owned related 漏读回归使用真实 Git 与公开 store 准入/失败动作固定原 plan、selection、旧读摘要，再经实际 submit(retryOf) 验证读取摘要改变时按原 SYNC_RETRY_BINDING 明确拒绝，原 operation、plan/policy、scope/targets、dispatch 与读取证明均不补签。实际 fresh submit 以新计划冻结完整只读闭包，保持相同目标与写范围。observed 的 index-only 新 glob 成员与实际依赖变化须 stale，commit 捕获忽略后续 index/WIP、真实 HEAD 改变仍拒重试。snapshot 已有的 untracked related glob 成员须以原 mode/OID/完整正文进入实际分区分析分派且保持只读。字面 absence、合法 docs/ 前缀与发布父树保护沿同一闭包；原 base 恢复只用冻结 provenance，不读取新 frontier。受控 runner 仅捕获请求并失败，不证明真实 Native、代码生成或交付。
+
 18 用真实 SQLite 注册 native 创建结果未知的固定 plan/checkpoint，验证已失败/暂停但资源未 removed 时 executionAvailability 为 recovery_required，retryEligibility 拒绝新预算。创建故障为明确测试接缝，不代表实际模型或未知宿主进程已验收。
 
 19 验证 recover 对 queued 不派发、不改 operation/control/预算/输入、不消费有效 FIFO；20 用真实 store conflict 事件验证 conflicted + 未结算资源不能 ready，再恢复固定且未曾请求 native call 的资源，保留冲突、attempt和预算，配置失效也不阻清理。恢复已创建 native 或 Docker 的真实案例仍由 coordinator 的资源恢复验收覆盖。

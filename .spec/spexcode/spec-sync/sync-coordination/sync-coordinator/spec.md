@@ -14,6 +14,12 @@ code:
 
 ## expanded spec
 
+实际目标的 code/related、代码来源和 AC.test 引用沿同一冻结对象清单展开为只读闭包；已有持久计划也在接入与执行读取时补齐该闭包，不改变 targets、writePaths、executionScope 或 policy。新增完整正文及真实 mode/OID/absence 进入新 admission 的 readSetDigest 和对应分区的 Native required 输入。只读父接口不因此扇出其它实现，程序读过不替代 Native 完整读取证明。旧 retryOf 若因完整读取闭包变化而产生不同 readSetDigest，仍由原 store 精确绑定门拒绝；不改旧 operation 或证明，不以只读为由重签摘要。新的正式操作通过新计划冻结当前闭包。
+
+当前性与发布保护复用该原冻结目标闭包。新增 glob 成员只用当前快照的路径清单判断，不用 current/WIP 正文派生引用；比较实际原/现对象，不因旧记录的 readSetDigest 与新实现派生值不同而改写旧记录或误判 stale。commit 捕获继续排除后续 index/WIP，原树采纳的干净门保持。
+
+成员清单覆盖原/现已捕获的 immutable、index 与 HEAD 树；字面引用的缺席也保留在闭包。旧持久计划的分区仅使用实际 readPaths 的临时只读投影，保证同一匹配器展开的完整正文进入局部分区，不修改原计划和政策。
+
 同步 budget.mode=unlimited 的新模型请求使用 timeoutMs:null，表示不设置模型调用总时限；有限数字期限及旧记录语义保持。null 调用仍受独立会话创建、租约/心跳、显式取消/停止/关闭和可信 VERIFY/Docker 各自期限约束，不以大数模拟无限。 协调器从冻结预算唯一派生该值，unlimited 不再使用旧 callTimeoutMs 覆盖模型调用；分析、细化、生成及各自独审共同沿同一策略。
 
 同一operation的分区多轮承接已通过的局部analysis及普通叶P1：只读较早已终结attempt的原stage，严格核原operation/input/policy、精确readSet/selection、完整plan/分区归属及当前真实局部输入的原唯一冻结摘要。analysis承接在code-behavior现有context摘要生成后、任何模型派发前进行，并核原独立dispatch身份；叶P1沿freezeElaborationInput及完整partitionBinding，仅结构与独审accept且无failure的局部原件可承接。当前fence保存原resultRef/fromAttempt provenance，review/traces及输入摘要不改写；未审、错误绑定及聚合全局结果不能成为局部成功。局部并集仍重新执行严格全图seal，实际candidate改变后P2独审及V1–V4全部照常，不提前交付。

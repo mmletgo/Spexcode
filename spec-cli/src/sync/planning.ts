@@ -11,6 +11,7 @@ import { readDecisionAuthority } from './code-behavior.js'
 import type { CodeBehaviorAnalysis, SyncDecisionInput } from './writeback-types.js'
 import { coveredPath, readSyncSettings, SyncApplicationError } from './settings.js'
 import { ownerNodesForPath } from './partitioning.js'
+import { ownedObligationPaths } from './prior-context.js'
 
 /** 授权范围只枚举实际未治理源码；当前及真实交付治理均排除，发现不授予归属或执行范围。 */
 export function discoverSyncSourcePaths(snapshot: InputSnapshot, sourcePaths: readonly string[], governanceFiles: Iterable<string>): string[] {
@@ -115,6 +116,11 @@ export async function buildSyncApplicationPlan(snapshot: InputSnapshot, nodeId: 
   const declaredReadPaths = [...frozen.contracts, ...oldFrozen.contracts, ...protectedGraphs.flatMap(graph => graph.contracts)]
     .filter(contract => coveredPath(contract.path, [...specReadPaths, ...settings.readPaths]))
     .flatMap(contract => [...contract.code.map(anchor => anchor.split('#')[0]), ...contract.items.filter(item => item.kind === 'AC').map(item => item.test.split('#')[0])])
+  const ownedReadPaths = [
+    ...ownedObligationPaths(targets, undefined, files, entries.map(entry => entry.path)),
+    ...ownedObligationPaths(priorTargets, undefined, oldFiles, oldEntries.map(entry => entry.path)),
+    ...protectedGraphs.flatMap((graph, index) => ownedObligationPaths([...targets, ...priorTargets], undefined, graph.files, verifySnapshot(pairs[index].verifiedDelivery).map(entry => entry.path))),
+  ]
   const ownedVerificationIds = new Set(graphs.flatMap(graph => [...graph.items.values()].filter(item => item.kind === 'VERIFY').map(item => item.id)))
   const activeVerificationIds = new Set([...impacts.flatMap(item => item.verifyIds), ...graphs.flatMap(graph => [...graph.items.values()].filter(item => item.kind === 'VERIFY' && (selected.has(item.nodeId) || readIds.has(item.id))).map(item => item.id))])
   const contextVerificationIds = new Set(graphs.flatMap(graph => [...graph.items.values()].filter(item => item.kind === 'VERIFY' && coveredPath(item.path, [...specReadPaths, ...settings.readPaths])).map(item => item.id)))
@@ -131,7 +137,7 @@ export async function buildSyncApplicationPlan(snapshot: InputSnapshot, nodeId: 
   return {
     executionScope,
     version: 'sync-coordinator-v2', direction: options.direction ?? 'spec_to_code', ...(options.commitTrigger ? { commitTrigger: options.commitTrigger } : {}), partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 512 * 1024, maxParallel: 4 }, intentNodeId: intent.id, targets,
-    readPaths: [...new Set([...specReadPaths, ...declaredReadPaths, '.spec/spexcode.json', ...settings.readPaths, ...settings.testPaths, ...codePaths, ...discoveryPaths, ...impact.testPaths, ...mandatoryTests.map(test => test.testPath)])].sort(),
+    readPaths: [...new Set([...specReadPaths, ...declaredReadPaths, ...ownedReadPaths, '.spec/spexcode.json', ...settings.readPaths, ...settings.testPaths, ...codePaths, ...discoveryPaths, ...impact.testPaths, ...mandatoryTests.map(test => test.testPath)])].sort(),
     writePaths: [...new Set([...targets.map(target => target.path), ...targets.map(target => posix.dirname(target.path)), ...priorTargets.map(target => target.path), ...writable])].sort(),
     sourcePaths: [...settings.sourcePaths].sort(),
     facts: [...settings.facts, ...decisionFacts], decisionAuthorities: decisionRefs.map(ref => readDecisionAuthority(snapshot.source.commonDir, ref)), decisionRefs, retiredIds, verifications, mandatoryTests,

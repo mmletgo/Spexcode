@@ -581,3 +581,7 @@ CLI 入口包含 spex sync enable、status、run、pause、resume、verify、dec
 
 
 细化提示分别列全部可更新目标与首次必须构建的子集：首次必建为0并不禁止本轮按raw、明确授权和已核实repair更新既有契约。已有完整契约仅在确无必要差量时省略；不强制重写已符合要求的目标，不改变合法targetIndex、只读父上下文、写权或schema空/部分输出的验证边界。
+
+实际 owned 目标的 code/related、代码来源及 AC.test 统一展开为固定快照的只读闭包，进入实际读取摘要、Native 完整正文及 source-current/publication 保护；不把只读父接口的兄弟实现送入分区，不扩写入范围。旧持久计划 retry 的 readSet 发生变化时仍按精确绑定门拒绝，不改旧记录或读取证明；新的正式操作经新计划冻结真实完整闭包。commit 仍只捕获已提交 HEAD，后续 index/WIP 不进入模型。
+
+冻结依赖闭包的回归同时覆盖旧持久失败计划 retry 摘要变化拒绝、新正式操作的读摘要与原权限保留、index-only glob 成员、commit 后续 index/WIP 隔离、snapshot 未跟踪依赖的完整分派正文，以及字面缺失/目录前缀的发布保护。程序恢复沿原发布 provenance；这些冷态夹具与请求捕获不替代实际模型、验证或正式交付。
