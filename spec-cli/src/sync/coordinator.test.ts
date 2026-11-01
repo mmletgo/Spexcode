@@ -2272,7 +2272,8 @@ for (const mode of ['historical-aggregate', 'current-aggregate', 'current-local'
   f.store.checkpoint = (fence, ref) => {
     const value = JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())
     if (f.store.readAttempt(fence.attemptId).number === 1 && value.version === 'sync-stage-v1' && (value.stage === 'analysis' || value.stage?.endsWith(':analysis'))) {
-      if (mode === 'same-guidance' || mode === 'same-guidance-local' && value.stage !== 'analysis') value.guidanceContractVersion = 'code-behavior-guidance-v1'
+      if (mode === 'historical-aggregate') value.guidanceContractVersion = 'code-behavior-guidance-v1'
+      else if (mode === 'same-guidance' || mode === 'same-guidance-local' && value.stage !== 'analysis') value.guidanceContractVersion = 'code-behavior-guidance-v2'
       else delete value.guidanceContractVersion
       ref = writeEvidence(f.input.source.commonDir, value)
     }
@@ -2305,7 +2306,7 @@ for (const mode of ['historical-aggregate', 'current-aggregate', 'current-local'
   const result = await runSyncOperation(f.store, f.operation.id, f.options)
   const latestStages = f.store.readAttempt(result.operation.currentAttemptId!).checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
   const latestAnalysis = new Map(latestStages.filter(stage => stage.stage === 'analysis' || stage.stage?.endsWith(':analysis')).map(stage => [stage.stage, stage]))
-  assert.ok(latestAnalysis.size > 0 && [...latestAnalysis.values()].every(stage => stage.guidanceContractVersion === 'code-behavior-guidance-v1'), '仅最新的新指导已审或同指导已校验复制登记marker；旧wrapper保持原件')
+  assert.ok(latestAnalysis.size > 0 && [...latestAnalysis.values()].every(stage => stage.guidanceContractVersion === 'code-behavior-guidance-v2'), '仅最新的新指导已审或同指导已校验复制登记marker；旧wrapper保持原件')
   if (mode === 'same-guidance-local') assert.ok(!latestStages.some(stage => stage.stage === 'analysis-provenance'), '旧aggregate拒绝后由同指导local重组，不能直接复制旧aggregate')
   const nextAnalysisCalls = f.calls.slice(calls).filter(call => call.purpose.startsWith('code_behavior_')).map(call => call.purpose)
   if (same) { assert.deepEqual(nextAnalysisCalls, []); assert.equal(result.status, 'needs_input'); assert.equal(result.failure!.code, 'unbound_behavior_finding') }
