@@ -59,7 +59,7 @@ const within = (path: string, paths: readonly string[]): boolean => paths.some(p
 const overlap = (a: string, b: string): boolean => within(a, [b]) || within(b, [a])
 const unique = (ids: readonly string[]): string[] => [...new Set(ids)].sort()
 const behaviorAnalysisRepairCodes = new Set(['behavior_analysis_invalid', 'behavior_review_failed'])
-const structuredAnalysisRepairCodes = new Set(['structured_output_retries_exhausted', 'structured_output_format_invalid'])
+const structuredAnalysisRepairCodes = new Set(['structured_output_retries_exhausted', 'structured_output_format_invalid', 'native_worktree_result_invalid'])
 const analysisRepairDiagnosticCodes = new Set([...behaviorAnalysisRepairCodes, ...structuredAnalysisRepairCodes])
 const fenceFor = (operation: SyncOperation, attempt: SyncAttempt): WriteFence => ({ operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: operation.input.source.physicalFingerprint })
 type InputView = { composed: ComposedInputRef; manifest: SnapshotManifest; files: Map<string, string>; readPaths: readonly string[]; readSetDigest: string; frozen: FrozenContracts }

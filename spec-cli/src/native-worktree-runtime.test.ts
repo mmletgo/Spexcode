@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { structuredExecutionPolicy, structuredRealmRoot, type StructuredExecution } from './session-structured-policy.js'
 import { execFileSync, spawn } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
@@ -71,7 +71,40 @@ test('read mode requires unchanged seed and a clean index/worktree', () => {
     writeFileSync(join(f.path, 'untracked'), 'review mutation')
     assert.throws(() => nativeWorktreeResult(f.path, seed), /clean/)
     git(f.path, ['add', '.']); git(f.path, ['commit', '-qm', 'review mutation'])
-    assert.throws(() => nativeWorktreeResult(f.path, seed), /changed/)
+    assert.throws(() => nativeWorktreeResult(f.path, seed), { code: 'native_worktree_result_invalid', message: /changed/ })
+  } finally { f.close() }
+})
+
+test('edit HEAD outside seed ancestry remains a typed Git result failure', () => {
+  const f = repoFixture()
+  try {
+    git(f.path, ['checkout', '--orphan', 'unrelated']); git(f.path, ['add', '.']); git(f.path, ['commit', '-qm', 'unrelated root'])
+    assert.equal(git(f.path, ['status', '--porcelain']), '')
+    assert.throws(() => nativeWorktreeResult(f.path, f.seed), { code: 'native_worktree_result_invalid', message: /not a descendant/ })
+  } finally { f.close() }
+})
+
+test('read Git alias probe is a typed invalid result and preserves the actual HEAD/index/worktree', () => {
+  const f = repoFixture(), seed = { ...f.seed, mode: 'read' as const }, copy = join(f.root, 'copied-worktree')
+  try {
+    cpSync(f.path, copy, { recursive: true })
+    writeFileSync(join(copy, 'probe'), 'experimental spec draft\n'); git(copy, ['add', 'probe']); git(copy, ['commit', '-qm', 'probe'])
+    writeFileSync(join(copy, 'staged-probe'), 'uncommitted experiment\n'); git(copy, ['add', 'staged-probe'])
+    const head = git(f.path, ['rev-parse', 'HEAD']), status = git(f.path, ['status', '--porcelain=v1', '--untracked-files=all'])
+    const index = readFileSync(git(f.path, ['rev-parse', '--path-format=absolute', '--git-path', 'index']))
+    assert.notEqual(head, seed.baseCommit); assert.match(status, /probe/)
+    assert.throws(() => nativeWorktreeResult(f.path, seed), error => {
+      assert.equal((error as { code: string }).code, 'native_worktree_result_invalid')
+      const message = (error as Error).message
+      for (const value of [seed.baseCommit, seed.tree, head, status, f.path]) assert(message.includes(value) || message.includes(JSON.stringify(value).slice(1, -1)), value)
+      assert.match(message, /independent.*Git|独立.*Git/)
+      return true
+    })
+    assert.equal(git(f.path, ['rev-parse', 'HEAD']), head); assert.equal(git(f.path, ['status', '--porcelain=v1', '--untracked-files=all']), status)
+    assert.deepEqual(readFileSync(git(f.path, ['rev-parse', '--path-format=absolute', '--git-path', 'index'])), index)
+    assert.equal(readFileSync(join(copy, 'probe'), 'utf8'), 'experimental spec draft\n')
+    assert.throws(() => assertNativeWorktreeSeed(f.path, { ...seed, tree: 'f'.repeat(40) }), { code: 'failed' })
+    assert.throws(() => assertNativeWorktreeResult(f.repo, seed, { baseCommit: seed.baseCommit, baseTree: seed.tree, headCommit: head, tree: git(f.path, ['rev-parse', 'HEAD^{tree}']), worktreePath: f.path }), { code: 'stale_result' })
   } finally { f.close() }
 })
 
@@ -221,6 +254,7 @@ const project=path.join(process.env.CLAUDE_CONFIG_DIR,'projects/exact');fs.mkdir
 send({type:'system',subtype:'init',session_id:session,model,tools:['Read','Grep','Bash','Edit','StructuredOutput']});send(user);
 if(prompt.startsWith('malformed')){const Ajv=require(${JSON.stringify(createRequire(import.meta.url).resolve('ajv'))}).default,validate=new Ajv({allErrors:true}).compile(JSON.parse(arg('--json-schema'))),input={items:{}};validate(input);const error='Output does not match required schema: '+validate.errors.map(item=>item.instancePath+': '+item.message).join(', '),rows=[{type:'api-request',sessionId:session,id:'request',params:{model}},{type:'assistant',sessionId:session,uuid:'schema-assistant',parentUuid:user.uuid,requestRef:'request',message:{role:'assistant',content:[{type:'tool_use',id:'schema-call',name:'StructuredOutput',input}]}},{type:'user',sessionId:session,uuid:'schema-error',parentUuid:'schema-assistant',promptId:'prompt-'+user.uuid,sourceToolAssistantUUID:'schema-assistant',message:{role:'user',content:[{type:'tool_result',tool_use_id:'schema-call',is_error:true,content:error}]}}];fs.appendFileSync(path.join(project,session+'.jsonl'),rows.map(row=>JSON.stringify(row)).join('\\n')+'\\n');process.exitCode=1;send({type:'result',subtype:'error_max_structured_output_retries',is_error:true,session_id:session,user_message_uuid:user.uuid,user_message_uuids:[user.uuid]});return;}
 
+if(prompt.startsWith('alias')){const copy=path.join(${JSON.stringify(f.root)},'alias-copy');fs.cpSync(process.cwd(),copy,{recursive:true});fs.writeFileSync(path.join(copy,'probe'),'draft');cp.execFileSync('git',['-C',copy,'add','probe']);cp.execFileSync('git',['-C',copy,'commit','-qm','experimental probe']);fs.writeFileSync(path.join(copy,'index-probe'),'staged');cp.execFileSync('git',['-C',copy,'add','index-probe'])}
 if(prompt.startsWith('edit')||prompt.startsWith('dirty')){fs.writeFileSync('value','actual candidate\\n');if(!prompt.startsWith('dirty')){cp.execFileSync('git',['add','value']);cp.execFileSync('git',['commit','-qm','native candidate'])}}
 send({type:'result',subtype:'success',is_error:false,session_id:session,uuid:'result',user_message_uuid:user.uuid,user_message_uuids:[user.uuid],structured_output:{ok:true}});
 });
@@ -240,9 +274,11 @@ await assert.rejects(runStructuredSession(make('blocked','edit blocked','edit',5
 renameSync(receipt+'.held',receipt);const restoredStop=await cancelStructuredSession(read.sessionId,{timeoutMs:1000});assert.equal(restoredStop.nativeStopped,true,JSON.stringify({restoredStop,unknown:JSON.parse(readFileSync(stoppedRecord.structuredExecution.claudeNative.root+'/unattributed-processes.json','utf8'))}));
 
 const edit=await runStructuredSession(make('edit','edit candidate','edit',null));assert.notEqual(edit.worktree.headCommit,seed.baseCommit);assert.equal(git(['rev-parse',edit.worktree.headCommit+'^{tree}']),edit.worktree.tree);assert.equal(readRecord(edit.sessionId).structuredExecution.resultWorktree.tree,edit.worktree.tree);
-const dirtyFailure=await runStructuredSession(make('dirty','dirty candidate','edit',10000)).then(()=>null,error=>error);const dirtyRecord=dirtyFailure?.sessionId&&readRecord(dirtyFailure.sessionId),unknownFile=dirtyRecord?.structuredExecution?.claudeNative?.root+'/unattributed-processes.json';assert.equal(dirtyFailure?.code,'failed',JSON.stringify({code:dirtyFailure?.code,unknown:unknownFile&&existsSync(unknownFile)?JSON.parse(readFileSync(unknownFile,'utf8')):null}));
+const dirtyFailure=await runStructuredSession(make('dirty','dirty candidate','edit',10000)).then(()=>null,error=>error);const dirtyRecord=dirtyFailure?.sessionId&&readRecord(dirtyFailure.sessionId),unknownFile=dirtyRecord?.structuredExecution?.claudeNative?.root+'/unattributed-processes.json';assert.equal(dirtyFailure?.code,'native_worktree_result_invalid',JSON.stringify({code:dirtyFailure?.code,unknown:unknownFile&&existsSync(unknownFile)?JSON.parse(readFileSync(unknownFile,'utf8')):null}));
+assert.equal(dirtyRecord.structuredExecution.errorCode,'native_worktree_result_invalid');assert.equal(dirtyRecord.structuredExecution.state,'failed');assert.equal(dirtyRecord.structuredExecution.output,undefined);assert.equal(dirtyRecord.structuredExecution.resultWorktree,undefined);assert.equal(existsSync(dirtyRecord.structuredExecution.claudeNative.root+'/completed.json'),true);const beforeReplay=readFileSync(dirtyRecord.structuredExecution.claudeNative.root+'/completed.json');await assert.rejects(runStructuredSession(make('dirty','dirty candidate','edit',10000)),{code:'native_worktree_result_invalid'});assert.deepEqual(readFileSync(dirtyRecord.structuredExecution.claudeNative.root+'/completed.json'),beforeReplay);
+const aliasRequest=make('alias','alias read experiment','read',null),aliasFailure=await runStructuredSession(aliasRequest).then(()=>null,error=>error),aliasRecord=readRecord(aliasFailure.sessionId);assert.equal(aliasFailure.code,'native_worktree_result_invalid');assert.equal(aliasRecord.structuredExecution.errorCode,aliasFailure.code);assert.equal(aliasRecord.structuredExecution.output,undefined);assert.equal(aliasRecord.structuredExecution.resultWorktree,undefined);assert.match(aliasFailure.message,/index-probe/);await assert.rejects(runStructuredSession(aliasRequest),{code:'native_worktree_result_invalid'});
 for(const timeoutMs of [10000,null]){const malformed={...make('malformed-'+timeoutMs,'malformed output','read',timeoutMs),schema:{type:'object',properties:{items:{type:'array',maxItems:0}},required:['items'],additionalProperties:false}},failure=await runStructuredSession(malformed).then(()=>null,error=>error);assert.equal(failure?.code,'structured_output_retries_exhausted');assert.match(failure.message,/items.*must be array/);const record=readRecord(failure.sessionId);assert.equal(record.structuredExecution.errorCode,'structured_output_retries_exhausted');assert.equal(record.structuredExecution.output,undefined);assert.equal(record.structuredExecution.resultWorktree,undefined);await assert.rejects(runStructuredSession(malformed),{code:'structured_output_retries_exhausted'});assert.equal(existsSync(record.structuredExecution.claudeNative.root+'/completed.json'),false);}
-const calls=JSON.parse(readFileSync(${JSON.stringify(count)},'utf8'));assert.equal(calls.length,5);assert.equal(calls[0].cwd,read.worktree.worktreePath);assert.equal(calls[1].cwd,edit.worktree.worktreePath);assert(calls[0].prompt.startsWith(first.prompt));assert.equal(calls.some(x=>x.args.includes('--restricted')||x.args.includes('--allowedTools')),false);process.exit(0);
+const calls=JSON.parse(readFileSync(${JSON.stringify(count)},'utf8'));assert.equal(calls.length,6);assert.equal(calls[0].cwd,read.worktree.worktreePath);assert.equal(calls[1].cwd,edit.worktree.worktreePath);assert(calls[0].prompt.startsWith(first.prompt));assert.equal(calls.some(x=>x.args.includes('--restricted')||x.args.includes('--allowedTools')),false);process.exit(0);
 `)
     const result = spawnSync(process.execPath, ['--import', createRequire(import.meta.url).resolve('tsx/esm'), runner], { cwd: f.repo, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, SPEXCODE_HOME: home, SPEX_SESSION_DATABASE_PATH: join(home, 'sessions.sqlite'), SPEX_RUNTIME_HOME: join(home, 'runtime'), ANTHROPIC_BASE_URL: 'https://example.invalid', SPEXCODE_CODEX_USAGE_GUARD: '0', SPEX_TEST: '1' }, encoding: 'utf8', timeout: 30000 })
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)

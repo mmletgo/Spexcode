@@ -61,3 +61,5 @@ P0至P5按完整需求交付，不以阶段演示、局部测试或可修改的�
 原生 worktree 的资源证明按 [[native-worktree-runtime]] 的正向任务域边界：receipt/历史 owned 精确停止，cwd 关联孤儿保留粘性 PID/start 债务但不授 kill 权，无关联同 UID 系统进程只诊断。正式恢复保留旧失败原件并追加版本化停止观察，不补签 completed 或业务通过。
 
 已真实停止、输入与 Native 身份绑定的工作树结构输出重试耗尽沿 [[claude-structured-runtime]] 的精确错误码进入原格式修复与独审循环，原失败输出和资源证明保留，不由程序补造业务结果。
+
+真实原生协议成功但 Git 结果违反 read/edit 合约时仍为业务失败；精确 native_worktree_result_invalid 沿原资源结算、逐轮修复与独审闭环反馈真实 Git 差异，在新工作树重做。旧失败工作树、原生完成缓存及历史失败保留，不由程序恢复 Git 或补签通过。

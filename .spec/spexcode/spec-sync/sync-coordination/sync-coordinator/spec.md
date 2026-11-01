@@ -159,3 +159,5 @@ P2局部/跨边accepted checkpoint跨attempt仅在同operation/input/policy/read
 
 
 whole P1 aggregate 的 stage wrapper 只在真实计算 strict seal 时保存当时 composedTree 与 composedContentDigest；同attempt缓存及跨attempt/retry提升都须二字段精确匹配当前真实 composed，缺字段的旧whole或异树whole不能直接成为当前封口。来源attempt可能已在扩域后先重绑新composed再记录失败，不能拿其最终composedInput替旧seal补签。原readonlyBase继续提供owner/provenance，局部输入及原件仍按既有摘要规则承接；不同全树时由原locals重建并严格封口，不强制重派未变Agent。null资源扩展桥与全局stageSelectionMatches语义不变，promotion仅复制已核原wrapper的composition绑定，不无条件写入当前值冒称旧proof。
+
+已认证 native_worktree_result_invalid 与既有精确结构输出失败共用分析修复准入和单体/分区诊断筛选；原 mode/seed/HEAD/tree/status 诊断只反馈对应分区的新分析及独审。原资源未结算不得重派，正式结算后在新 attempt/新工作树重做，不采纳或清理旧脏工作树。生成续修沿既有 attempt.failure 反馈真实 code/message；不增加权限或绕过原预算和独审。
