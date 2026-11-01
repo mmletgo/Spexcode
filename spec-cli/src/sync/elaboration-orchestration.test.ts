@@ -75,7 +75,7 @@ test('父接口实际生成和独审请求只承担必要共享接口，不混�
 })
 
 test('非父完整细化的共同指令逐字保留完整P1覆盖与独审任务', async () => {
-  assert.equal(elaborationDigest(CONTRACT_INSTRUCTIONS), '7e418e1affc50540c7dfe1da0855268faf1dc44854457ce93e428e6af0500ad1')
+  assert.equal(elaborationDigest(CONTRACT_INSTRUCTIONS), '1d47bf418e05f7148fb9facf6056334d36817bda9ee023d9c3486fddf0ac126f')
   const fake = runner(request => candidate(request, source))
   await elaborate(input(), { runner: fake.run })
   for (const request of fake.calls) assert.ok(request.prompt.includes(CONTRACT_INSTRUCTIONS))

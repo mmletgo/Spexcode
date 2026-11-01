@@ -578,3 +578,6 @@ CLI 入口包含 spex sync enable、status、run、pause、resume、verify、dec
 
 
 显式用户裁决复用既有受控原意入口：所选原意和代码分歧以combined新操作处理，只沿原授权与精确decision authority；代码提交自动形成的code_to_spec操作本身继续保持源码及全部测试只读。不可改oracle与新裁决互斥时保留具体needs_input，不修改oracle、弱化需求或重置预算绕过。
+
+
+细化提示分别列全部可更新目标与首次必须构建的子集：首次必建为0并不禁止本轮按raw、明确授权和已核实repair更新既有契约。已有完整契约仅在确无必要差量时省略；不强制重写已符合要求的目标，不改变合法targetIndex、只读父上下文、写权或schema空/部分输出的验证边界。

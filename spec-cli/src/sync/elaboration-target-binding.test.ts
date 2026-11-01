@@ -89,6 +89,62 @@ test('冻结节点身份决定深层canonical路径，模型不再回显可写�
   assert.equal('path' in (result.rounds[0].output as { changes: Record<string, unknown>[] }).changes[0], false)
 })
 
+
+test('既有reelaborate提示分别列全部可更新目标与首次必建子集', async () => {
+  const frozen = input(); frozen.targets = [frozen.targets[0]]; frozen.mode = 'reelaborate'
+  frozen.intent.rawSource += '\n\n按本轮明确原意补齐必要业务差量。'
+  frozen.targets = [{ ...frozen.targets[0], rawSource: frozen.intent.rawSource }]
+  frozen.context = [{ nodeId: 'export', path: '.spec/export/spec.md', source: '# 只读父原意\n' }]
+  const before = structuredClone(frozen)
+  let captured: ElaborationSessionRequest | undefined
+  const result = await elaborate(frozen, { runner: async request => { captured = request; throw Object.assign(new Error('只捕获冻结提示，不派Native'), { code: 'unsupported' }) } })
+  assert.ok(captured); assert.equal(result.status, 'unsupported')
+  assert.match(captured.prompt, /本次可更新的冻结目标共 1 个，可编辑的原始 targetIndex：\[0\]/)
+  assert.match(captured.prompt, /首次必须显式构建 0 个目标，原始 targetIndex：\[\]/)
+  assert.ok(!captured.prompt.includes('本次必须显式构建 0 个目标'))
+  assert.match(captured.prompt, /reelaborate.*raw\/facts.*authorizedChanges.*repair/)
+  const changes = (captured.schema.properties as Record<string, { minItems: number; maxItems: number; items: { properties: Record<string, unknown> } }>).changes
+  assert.equal(changes.minItems, 0); assert.equal(changes.maxItems, 1)
+  assert.deepEqual(changes.items.properties.targetIndex, { type: 'integer', minimum: 0, maximum: 0 })
+  assert.deepEqual(outputErrors(build(captured, []), captured.schema), [], '空行差量仍可进入原候选与独审门')
+  assert.deepEqual(frozen, before, '提示不能改目标、raw、事实或权限')
+})
+
+test('真实retire零可更新目标提示和schema保持零且不复活旧目标', async () => {
+  const frozen = input(); frozen.targets = [frozen.targets[0]]
+  frozen.nodeChanges = [{ action: 'retire', from: { nodeId: 'export-contract', path: primaryPath }, evidenceRef: { sha256: 'a'.repeat(64) } }]
+  frozen.authorizedChanges = primary.items.map(item => ({ id: item.id, action: 'retire', source: 'user:raw', reason: '夹具用户明确退役全部既有身份' }))
+  let captured: ElaborationSessionRequest | undefined
+  await elaborate(frozen, { runner: async request => { captured = request; throw Object.assign(new Error('只捕获零目标提示'), { code: 'unsupported' }) } })
+  assert.ok(captured)
+  assert.match(captured.prompt, /本次可更新的冻结目标共 0 个，可编辑的原始 targetIndex：\[\]/)
+  assert.deepEqual(elaborationTargetBindings(frozen), [])
+  assert.equal((captured.schema.properties as Record<string, { maxItems: number }>).changes.maxItems, 0)
+})
+
+test('已有纯父接口首次必建零不扩大父阶段业务表', async () => {
+  const frozen = input(), raw = '由真实子区承接既有导出能力。'
+  const source = `---\ntitle: 父接口\ncontract-schema: sync-v1\n---\n\n## raw source\n\n${raw}\n\n## expanded spec\n\n### REQ\n\n| id | goal | source | constraints | success | depends-on |\n| --- | --- | --- | --- | --- | --- |\n| REQ-PARENT-01 | 导出能力 | user:raw | 由子区承接 | 保持既有行为 | - |\n`
+  frozen.phase = 'interface_seed'; frozen.intent = { nodeId: 'export', rawSource: raw }
+  frozen.targets = [{ nodeId: 'export', path: '.spec/export/spec.md', source, sourceDigest: elaborationDigest(source) }]
+  let captured: ElaborationSessionRequest | undefined
+  await elaborate(frozen, { runner: async request => { captured = request; throw Object.assign(new Error('只捕获父接口提示'), { code: 'unsupported' }) } })
+  assert.ok(captured)
+  assert.match(captured.prompt, /本次可更新的冻结目标共 1 个，可编辑的原始 targetIndex：\[0\]/)
+  assert.match(captured.prompt, /首次必须显式构建 0 个目标/)
+  const properties = captured.schema.properties as Record<string, { items: { properties: { tables: { properties: Record<string, { maxItems: number }> } } } }>
+  for (const kind of ['FLOW', 'STEP', 'AC', 'VERIFY']) assert.equal(properties.changes.items.properties.tables.properties[kind].maxItems, 0)
+})
+
+test('确无变化的已有完整契约继续允许空行差量逐字沿用', async () => {
+  const frozen = input(); frozen.targets = [frozen.targets[0]]
+  const fake = runner(request => build(request, []))
+  const result = await elaborate(frozen, { runner: fake.run })
+  assert.equal(result.status, 'complete', JSON.stringify(result.failure))
+  assert.equal(result.changes[0].source, primarySource)
+  assert.deepEqual(fake.calls.map(call => call.purpose), ['elaboration_generate', 'elaboration_review'])
+})
+
 test('RULE.authority schema限制为冻结canonical nodeId，move兼容旧owner且无目标不生成空enum', () => {
   const multiple = input(), multipleAuthority = ruleAuthoritySchema(multiple)
   assert.deepEqual(outputErrors('REQ-EXPORT-01', multipleAuthority), ['$: 未满足枚举'])
