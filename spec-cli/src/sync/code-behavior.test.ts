@@ -302,6 +302,32 @@ test('未读可选正文被事实或checkedPaths引用时拒绝，完整读取�
   assert.equal(accepted.facts.some(item => item.source === fact.source && item.text === fact.text), true)
 })
 
+test('分区changes仅报告真实changedPaths，可读事实和未来写目标不能混入proposal', async t => {
+  const f = await fixture(t), prepared = await f.input(), path = '.spec/export/export-contract/spec.md', codePath = 'src/export.js'
+  const input = { ...prepared, partition: { id: 'spec-only', changedPaths: [path], factSourcePaths: [codePath] } }
+  const calls: string[] = []
+  await assert.rejects(analyzeCodeBehavior(input, async request => {
+    calls.push(request.purpose)
+    return runner('refactor', proposal => {
+      proposal.changes = [...proposal.changes as object[], { ...(proposal.changes as object[])[0], paths: [codePath] }]
+    })(request)
+  }), error => {
+    assert.equal((error as { code: string }).code, 'behavior_analysis_invalid')
+    const diagnostic = JSON.parse((error as Error).message)
+    assert.deepEqual(diagnostic.details, { partitionId: 'spec-only', expectedChangedPaths: [path], invalidPaths: [codePath] })
+    assert.deepEqual(diagnostic.proposal.changes.map((change: { paths: string[] }) => change.paths), [[path], [codePath]])
+    return true
+  })
+  assert.deepEqual(calls, ['code_behavior_analyze'], '错误内容应在独审前反馈，不能等聚合绑定失败')
+  const fact = { source: `code:${codePath}#ExportService`, text: '已有源码提供导出行为事实。' }
+  const accepted = await analyzeCodeBehavior(input, async request => {
+    const result = await runner('refactor', proposal => { proposal.facts = [fact] }, review => { review.checkedPaths = [path, codePath] })(request)
+    return { ...result, frozenReadProof: { contextDigest: 'a'.repeat(64), threadId: result.threadId, turnId: result.turnId, receipts: [], coveredEntryIds: [contentHash(Buffer.from(f.source))], historyDigest: 'b'.repeat(64) } }
+  })
+  assert.equal(accepted.reviewPassed, true); assert.deepEqual(accepted.facts, [fact])
+  assert.deepEqual(accepted.changes.flatMap(change => change.paths), [path])
+})
+
 test('分区新增Code事实仅引用本区精确owner路径，共享只读测试留在change evidence', async t => {
   const f = await fixture(t), codePath = 'src/export.js', readonlyTestPath = 'tests/export.test.mjs'
   writeFileSync(join(f.root, codePath), `${f.source}\n// partition owner fact probe\n`)
@@ -1181,7 +1207,7 @@ async function initialDiscovery(t: test.TestContext, raw: string) {
   return { f, input, model }
 }
 
-test('指导合同版本进入唯一摘要，旧accept的待生成false gap不得被缓存承接', async t => {
+for (const previousVersion of [undefined, 'code-behavior-guidance-v2']) test(`指导合同版本进入唯一摘要，旧accept ${previousVersion} 不得被缓存承接`, async t => {
   const { f, input, model } = await initialDiscovery(t, '统计传入列表的条目数量，不修改列表；从现有模块生成治理叶及规格。')
   let context = ''
   const first = await analyzeCodeBehavior({ ...input, requestKey: 'old-guidance' }, async request => {
@@ -1190,7 +1216,8 @@ test('指导合同版本进入唯一摘要，旧accept的待生成false gap不�
   })
   assert.equal(first.reviewPassed, true); assert.ok(first.findings.length)
   const legacyContext = JSON.parse(context) as Record<string, unknown>
-  delete legacyContext.guidanceContractVersion
+  if (previousVersion === undefined) delete legacyContext.guidanceContractVersion
+  else legacyContext.guidanceContractVersion = previousVersion
   const legacy = { ...first, inputDigest: contentHash(JSON.stringify(legacyContext)) }
   const ref = writeEvidence(input.snapshot.source.commonDir, legacy), before = readEvidence(input.snapshot.source.commonDir, ref)
   const calls: string[] = []
@@ -1198,7 +1225,7 @@ test('指导合同版本进入唯一摘要，旧accept的待生成false gap不�
     calls.push(request.purpose)
     if (process.env.SPEX_RAW_RESOLUTION_EVIDENCE_DIR) writeFileSync(join(process.env.SPEX_RAW_RESOLUTION_EVIDENCE_DIR, `guidance-current-${request.purpose}.prompt.txt`), request.prompt)
     const frozen = readFrozenBehaviorContext<{ guidanceContractVersion: string }>(request)
-    assert.equal(frozen.guidanceContractVersion, 'code-behavior-guidance-v2')
+    assert.equal(frozen.guidanceContractVersion, 'code-behavior-guidance-v3')
     const instructions = request.prompt.slice(0, request.prompt.indexOf('冻结三方输入:\n'))
     assert.match(instructions, /尚未生成.*治理叶.*待生成工作/)
     assert.match(instructions, /coverage_gap.*重大业务事实.*可观察后果/)

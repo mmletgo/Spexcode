@@ -10,6 +10,8 @@ code:
 
 ## expanded spec
 
+分区 proposal.changes.paths 必须逐项属于该冻结 partition.changedPaths；可读 factSourcePaths、readPaths 与未来 writePaths 不等于实际变化。独审前按同一精确集合拒绝越界内容，以 behavior_analysis_invalid 保留 partitionId、expectedChangedPaths、invalidPaths 和完整原 proposal，沿既有按区 repairDiagnostics 反馈；不批准越界或新增权限。guidanceContractVersion v3 同时约束生成与独审并进入唯一输入摘要，旧v2/无版本accept不被新请求缓存承接。原后置 partition_binding 及 immutable plan/ref/digest/fence 门禁保持。
+
 模型调用期限沿 [[structured-session-runtime]] 原样传递，明确 null 不装调用计时器；生成与独审、完整读取及各自业务门禁保持。
 
 分区投影保留尚未初始化的意图资源：精确选择中的 contract/flow 若 before、delivery、source 三个 owner 均为 null，原 residual 元数据及 null 语义仍进入分析和独审，不猜测路径或丢弃资源；存在真实 owner 时仍按本区 readPaths 投影。无 owner 元数据不成为契约正文、既有稳定业务义务、读取证明或写入授权，原 selection、scope 及其摘要不被改写。
