@@ -47,3 +47,5 @@ Codex 原生 readOnly 策略保留，P1 使用提供正文的纯推理，不依�
 新readerRuntime版本2的固定tool_output_token_limit按[[frozen-context-reader]]从冻结清单派生，并进入descriptor缓存、realm路径和execution身份；实际config/read必须精确相等，不能只核磁盘配置或修改provider目录声明。新预算能力与旧catalog相同也不能复用旧daemon路径。旧版本1保留原realm/config与已存在thread/turn的历史恢复，不重写旧清单、响应或proof，不把旧证明升格为模型可见全文证明。host的独立exec额度和公开outer完整输出另由版本2读取证明核验；关闭host在当前原生路径不可用，不能把无成功读取的turn接受为完成。
 
 原生能力探针必须亲读custom exec代码与返回值：registry只有注册reader；process/require/fetch/module不可用，Node/HTTP/data动态import拒绝，constructor不取得宿主process，任意path/live诱饵不可读、任意写入与子进程不可达，网络诱饵0命中。metadata临时daemon只有在零native references且精确PID/start/receipt证实后才停止，停止确认后保存来源/前后目录摘要和changedFields，不能操作既有v1或其他generation。错误工具请求未获回复时沿cancelling保留容量，不能因本地快速失败就声称原生已停止。
+
+native_worktree_result_invalid 仅为原生 Git 结果后置合约的精确失败观测；不改变固定 policy、创建摘要、正常读取能力或旧冻结证明门禁。原 nativeWorktreePrompt 字节与历史创建哈希保持。

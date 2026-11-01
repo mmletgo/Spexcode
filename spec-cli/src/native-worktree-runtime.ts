@@ -19,12 +19,17 @@ export function assertNativeWorktreeSeed(root: string, seed: NativeWorktreeReque
 /** 只接受干净且归属 seed 的真实 Git 提交，冷复用必须保留全部身份。 */
 export function nativeWorktreeResult(worktreePath: string, seed: NativeWorktreeRequest): NativeWorktreeResult {
   assertNativeWorktreeSeed(worktreePath, seed)
-  if (realpathSync(git(worktreePath, ['rev-parse', '--show-toplevel'])) !== realpathSync(worktreePath) || git(worktreePath, ['status', '--porcelain=v1', '--untracked-files=all']))
-    throw new StructuredSessionError('failed', 'native worktree must be its recorded Git root and clean after normal add/commit')
+  const actualRoot = realpathSync(git(worktreePath, ['rev-parse', '--show-toplevel']))
   const headCommit = git(worktreePath, ['rev-parse', '--verify', 'HEAD^{commit}']), tree = git(worktreePath, ['rev-parse', '--verify', 'HEAD^{tree}'])
-  if (seed.mode === 'read' && (headCommit !== seed.baseCommit || tree !== seed.tree)) throw new StructuredSessionError('failed', 'native read worktree changed its seed')
+  const status = execFileSync('git', ['--no-optional-locks', '-C', worktreePath, 'status', '--porcelain=v1', '--untracked-files=all'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trimEnd()
+  const invalid = (reason: string): never => {
+    const diagnostic = { mode: seed.mode, expected: { root: worktreePath, headCommit: seed.baseCommit, tree: seed.tree }, actual: { root: actualRoot, headCommit, tree, status } }
+    throw new StructuredSessionError('native_worktree_result_invalid', `${reason}; Git result=${JSON.stringify(diagnostic)}. ${seed.mode === 'read' ? 'Read/review submits only this stage’s reviewable analysis; do not generate or commit experimental Specs. Experiments need independent temporary Git metadata: never copy a .git file that points back to this worktree. Submit a reviewable candidate for subsequent independent review and repair; one round need not be perfect.' : 'Use normal git add and git commit with hooks enabled after the relevant checks, and leave the worktree clean.'}`)
+  }
+  if (actualRoot !== realpathSync(worktreePath) || status) invalid('native worktree must be its recorded Git root and clean after normal add/commit')
+  if (seed.mode === 'read' && (headCommit !== seed.baseCommit || tree !== seed.tree)) invalid('native read worktree changed its seed')
   try { git(worktreePath, ['merge-base', '--is-ancestor', seed.baseCommit, headCommit]) }
-  catch { throw new StructuredSessionError('failed', 'native worktree HEAD is not a descendant of its seed') }
+  catch (error) { if ((error as { status?: number }).status === 1) invalid('native worktree HEAD is not a descendant of its seed'); throw error }
   const result = { baseCommit: seed.baseCommit, baseTree: seed.tree, headCommit, tree, worktreePath }
   return result
 }
