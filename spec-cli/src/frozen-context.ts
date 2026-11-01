@@ -23,6 +23,7 @@ type ClaudePublicContentBlock = { type: string; id?: string; name?: string; inpu
 export type ClaudePublicMessage = { role: string; content: string | ClaudePublicContentBlock[] }
 const CLAUDE_TRUNCATED_RECOVERY_TEXT = 'Your response above was cut off mid-stream. Resume directly from where it stops — no apology, no recap. If none of it survived, answer the request from the start.'
 const CLAUDE_OUTPUT_LIMIT_RECOVERY_TEXT = 'Output token limit hit. Resume directly — no apology, no recap of what you were doing. Pick up mid-thought if that is where the cut happened. Break remaining work into smaller pieces.'
+const CLAUDE_STRUCTURED_OUTPUT_ENFORCE_TEXT = '[structured-output-enforce] You MUST call the StructuredOutput tool to complete this request. Call this tool now.'
 const CLAUDE_RECOVERY_TEXTS = [CLAUDE_TRUNCATED_RECOVERY_TEXT, CLAUDE_OUTPUT_LIMIT_RECOVERY_TEXT]
 type ClaudeCompaction = { runningTurnSends: { uuids: string[]; openerUuid: string }; preservedSegment?: { headUuid: string; anchorUuid: string; tailUuid: string }; preservedMessages?: { anchorUuid: string; uuids: string[]; allUuids: string[] } }
 type ClaudeRequestRetry = { source: string; level: string; retryInMs: number; retryAttempt: number; maxRetries: number; errorDigest: string }
@@ -577,9 +578,10 @@ export function claudeApiToolResultIds(content: readonly ClaudePublicContentBloc
 }
 
 export type ClaudeRecovery = { text: string; hashes: Set<string>; summaries: Set<string>; requests: Set<string>; consumed: boolean }
-/** 只识别原生已观察的续行；输出上限的raw max_tokens父链仍由唯一公开读取器核验。 */
+/** 成功路径核已观察续行与结构输出提醒；已停失败分类仍只取输出上限。 */
 function claudeRecoveryCompanion(row: ClaudePublicRecord, promptId: string | undefined, latestMessage: string | undefined, latestAssistant: string | undefined, outputLimitOnly = false): ClaudeRecovery | null {
-  const text = row.isMeta === true && row.turnCompanion === true && row.message?.role === 'user'
+  const enforcement = !outputLimitOnly && row.isMeta === true && row.turnCompanion === undefined && row.message?.role === 'user' && row.message.content === CLAUDE_STRUCTURED_OUTPUT_ENFORCE_TEXT
+  const text = enforcement ? CLAUDE_STRUCTURED_OUTPUT_ENFORCE_TEXT : row.isMeta === true && row.turnCompanion === true && row.message?.role === 'user'
     ? (outputLimitOnly ? [CLAUDE_OUTPUT_LIMIT_RECOVERY_TEXT] : CLAUDE_RECOVERY_TEXTS).find(text => claudeMessageDigest(row.message) === claudeMessageDigest({ role: 'user', content: text })) : undefined
   if (text === undefined) return null
   if (!row.uuid || !promptId || row.promptId !== promptId || row.sourceToolAssistantUUID !== undefined || row.parentUuid !== latestMessage || row.parentUuid !== latestAssistant) stale('Claude recovery companion lost its exact native assistant or original prompt')
@@ -635,6 +637,8 @@ export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFro
     || !original.message || JSON.stringify({ ...original.message, content: claudeMessageBlocks(original.message) }) !== JSON.stringify({ role: 'user', content: [{ type: 'text', text: witness.prompt }] })) stale('Claude original user echo/history/prompt identity differs')
   if (history.some(row => row.type === 'user' && row.isMeta === true && row.turnCompanion === true && row.message?.role === 'user' && row.message.content === CLAUDE_OUTPUT_LIMIT_RECOVERY_TEXT)
     && JSON.stringify(readClaudePublicHistory(witness.nativeHistoryPath, sessionId)) !== JSON.stringify(history)) stale('Claude output-limit witness differs from its original native history')
+  if (history.some(row => row.type === 'user' && row.message?.content === CLAUDE_STRUCTURED_OUTPUT_ENFORCE_TEXT)
+    && JSON.stringify(readClaudePublicHistory(witness.nativeHistoryPath, sessionId)) !== JSON.stringify(history)) stale('Claude structured-output enforcement differs from its original native history')
   if (history.some(row => row.requestRetry?.source === 'connection_retry')
     && JSON.stringify(readClaudePublicHistory(witness.nativeHistoryPath, sessionId)) !== JSON.stringify(history)) stale('Claude connection retry witness differs from its original native history')
   const seen = new Set<string>(), requests = new Map<string, string[]>(), shapes = new Set<string>(), calls = new Map<string, { row: ClaudePublicRecord; block: ClaudePublicContentBlock; recovery: number }>()
@@ -664,7 +668,11 @@ export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFro
         if (!segment || !preserved || !Array.isArray(ids) || !ids.length || new Set(ids).size !== ids.length || JSON.stringify(preserved.uuids) !== JSON.stringify(ids)
           || segment.headUuid !== ids[0] || segment.tailUuid !== ids.at(-1) || segment.tailUuid !== row.logicalParentUuid
           || !segment.anchorUuid || segment.anchorUuid !== preserved.anchorUuid || seen.has(segment.anchorUuid)
-          || ids.some((id, index) => !seen.has(id) || index > 0 && parents.get(id) !== ids[index - 1])) stale('Claude compact preserved segment is not the exact observed chain')
+          || ids.some(id => !seen.has(id))) stale('Claude compact preserved segment is not the exact observed chain')
+        const remaining = new Set(ids)
+        let cursor: string | undefined = segment.tailUuid
+        while (cursor && cursor !== segment.headUuid && remaining.delete(cursor)) cursor = parents.get(cursor) ?? undefined
+        if (cursor !== segment.headUuid || !remaining.delete(segment.headUuid) || remaining.size) stale('Claude compact preserved segment is not the exact observed chain')
       }
       compaction = { ancestors: new Set([row.uuid]), ...(segment ? { anchor: segment.anchorUuid } : {}) }
       parents.set(row.uuid, row.logicalParentUuid); seen.add(row.uuid); latestChainNode = row.uuid
@@ -728,12 +736,14 @@ export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFro
       requestRefs.add(row.requestRef)
       for (const block of claudeMessageBlocks(row.message!)) {
         if (!block.id || calls.has(block.id) || !block.name || block.name === 'DeferredToolPlaceholder') stale('Claude called a forbidden, placeholder or repeated tool')
+        if (recoveries.at(-1)?.text === CLAUDE_STRUCTURED_OUTPUT_ENFORCE_TEXT && block.name !== 'StructuredOutput') stale('Claude structured-output enforcement dispatched another tool')
         calls.set(block.id, { row, block, recovery: recoveries.length })
       }
     }
     if (row.type === 'user' && row.uuid !== userUuid) {
       const recovery = claudeRecoveryCompanion(row, promptId, latestMessage, latestAssistant)
       if (recovery) {
+        if (recovery.text === CLAUDE_STRUCTURED_OUTPUT_ENFORCE_TEXT && (acceptedOutput || recoveries.some(previous => previous.text === CLAUDE_STRUCTURED_OUTPUT_ENFORCE_TEXT))) stale('Claude structured-output enforcement is repeated or followed an accepted output')
         recoveries.push(recovery)
         acceptedOutput = false; latestMessage = row.uuid
         continue

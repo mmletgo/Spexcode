@@ -356,6 +356,59 @@ test('controlled Claude compact boundaries preserve one original turn without gr
     verifyFrozenReadProof(ref, proof, { threadId: 'session', turnId: 'user' }, undefined, { output: { answer: 'public' } })
     const row = (rows: typeof raw, id: string) => rows.find(item => item.uuid === id || item.id === id)!
     const metadata = (rows: typeof raw, uuid = 'compact-1') => row(rows, uuid).compactMetadata as { runningTurnSends: { uuids: string[]; openerUuid: string }; preservedMessages: { anchorUuid: string; uuids: string[]; allUuids: string[] } }
+    const streamed = structuredClone(raw)
+    const fragment = assistant('stream-fragment', 'reply-1', 'request-3')
+    streamed.splice(streamed.findIndex(item => item.uuid === 'reply-1') + 1, 0, fragment)
+    row(streamed, 'consumed-2').parentUuid = 'stream-fragment'
+    const inventory = ['preserved-head', 'read-call-1', 'stream-fragment', 'reply-1', 'consumed-2']
+    Object.assign(metadata(streamed, 'compact-2').preservedMessages, { uuids: inventory, allUuids: inventory })
+    const streamedProof = proveClaudeFrozenReads(ref, witness(streamed))
+    assert.equal(streamedProof.receipts.length, 2)
+    verifyFrozenReadProof(ref, streamedProof, { threadId: 'session', turnId: 'user' }, undefined, { output: { answer: 'public' } })
+    for (const defect of ['missing-interior', 'unconnected-member', 'duplicate-member', 'branch', 'early-boundary'] as const) {
+      const bad = structuredClone(streamed), declared = metadata(bad, 'compact-2').preservedMessages
+      if (defect === 'missing-interior') Object.assign(declared, { uuids: inventory.filter(id => id !== 'reply-1'), allUuids: inventory.filter(id => id !== 'reply-1') })
+      if (defect === 'unconnected-member' || defect === 'duplicate-member') {
+        const ids = [...inventory.slice(0, -1), defect === 'duplicate-member' ? 'stream-fragment' : 'read-call-0', inventory.at(-1)!]
+        Object.assign(declared, { uuids: ids, allUuids: ids })
+      }
+      if (defect === 'branch') row(bad, 'consumed-2').parentUuid = 'reply-1'
+      if (defect === 'early-boundary') { const index = bad.findIndex(item => item.uuid === 'compact-2'); const [boundary] = bad.splice(index, 1); bad.splice(index - 1, 0, boundary) }
+      assert.throws(() => proveClaudeFrozenReads(ref, witness(bad)), { code: 'stale_result' }, defect)
+    }
+    const enforced = structuredClone(streamed), enforceText = '[structured-output-enforce] You MUST call the StructuredOutput tool to complete this request. Call this tool now.'
+    const enforceMessage = { role: 'user', content: enforceText }, enforceHash = claudeMessageDigest({ role: 'user', content: [{ type: 'text', text: enforceText }] })
+    enforced.splice(enforced.findIndex(item => item.uuid === 'final'), 0,
+      assistant('plain-answer', 'summary-2', 'request-5'),
+      { type: 'user', sessionId: 'session', uuid: 'enforce', parentUuid: 'plain-answer', promptId: 'prompt', isMeta: true, message: enforceMessage },
+      request('request-enforce', [enforceHash], 'request-5'), { ...request('request-enforce-retry', [], 'request-enforce'), keep: 1 })
+    Object.assign(row(enforced, 'final'), { parentUuid: 'enforce', requestRef: 'request-enforce-retry' })
+    const enforceProof = proveClaudeFrozenReads(ref, witness(enforced))
+    assert.equal(enforceProof.receipts.length, 2)
+    verifyFrozenReadProof(ref, enforceProof, { threadId: 'session', turnId: 'user' }, undefined, { output: { answer: 'public' } })
+    for (const defect of ['body', 'prompt', 'parent', 'early', 'non-meta', 'fake-companion', 'source', 'missing-api', 'dropped-api', 'old-api', 'other-tool', 'unconsumed', 'duplicate'] as const) {
+      const bad = structuredClone(enforced), reminder = row(bad, 'enforce')
+      if (defect === 'body') reminder.message = { role: 'user', content: enforceText + ' extra' }
+      if (defect === 'prompt') reminder.promptId = 'foreign'
+      if (defect === 'parent') reminder.parentUuid = 'summary-2'
+      if (defect === 'early') { const index = bad.indexOf(reminder); bad.splice(index, 1); bad.splice(index - 1, 0, reminder) }
+      if (defect === 'non-meta') reminder.isMeta = false
+      if (defect === 'fake-companion') reminder.turnCompanion = true
+      if (defect === 'source') reminder.sourceToolAssistantUUID = 'plain-answer'
+      if (defect === 'missing-api') row(bad, 'request-enforce').tail = []
+      if (defect === 'dropped-api') row(bad, 'request-enforce-retry').keep = 0
+      if (defect === 'duplicate') {
+        bad.splice(bad.findIndex(item => item.id === 'request-enforce-retry'), 0, assistant('enforce-empty', 'enforce', 'request-enforce'), { ...reminder, uuid: 'enforce-again', parentUuid: 'enforce-empty' }, request('request-enforce-again', [enforceHash], 'request-enforce'))
+        row(bad, 'request-enforce-retry').base = 'request-enforce-again'; row(bad, 'final').parentUuid = 'enforce-again'
+      }
+      if (defect === 'old-api') row(bad, 'final').requestRef = 'request-5'
+      if (defect === 'other-tool') row(bad, 'final').message = { role: 'assistant', content: [{ type: 'tool_use', id: 'schema', name: 'mcp__frozen__spex_read_frozen', input: inputs[1] }] }
+      if (defect === 'unconsumed') row(bad, 'final').message = { role: 'assistant', content: [] }
+      assert.throws(() => proveClaudeFrozenReads(ref, witness(bad)), { code: 'stale_result' }, defect)
+    }
+    const forgedEnforce = witness(enforced)
+    forgedEnforce.history.find(item => item.uuid === 'enforce')!.isMeta = false
+    assert.throws(() => proveClaudeFrozenReads(ref, forgedEnforce), { code: 'stale_result' }, 'raw native enforcement metadata remains authoritative')
     const retried = structuredClone(raw)
     retried.splice(retried.findIndex(item => item.uuid === 'consumed-1'), 0,
       { type: 'attachment', sessionId: 'session', uuid: 'retry-attachment', parentUuid: 'reply-0' },
