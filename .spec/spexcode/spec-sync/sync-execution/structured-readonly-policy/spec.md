@@ -1,8 +1,8 @@
 ---
-title: 结构化推理固定只读策略
+title: 结构化执行策略与只读历史边界
 status: active
 hue: 175
-desc: 按执行器固定清洁配置及经探针验证的外层隔离，禁止宽松 launcher 和未授权宿主能力。
+desc: 显式区分原生 worktree 执行与固定只读历史，禁止权限降级复用或静默切换执行器。
 code:
   - spec-cli/src/session-structured-policy.ts
 related:
@@ -14,9 +14,11 @@ related:
 
 ## raw source
 
-生成和独立审查只能读取协调器提供的冻结上下文并返回 JSON。Agent 不能修改源码、交付树或用户配置；没有安全能力时明确失败，不能退回宽松执行。
+旧冻结生成和独立审查只能读取协调器提供的冻结上下文并返回 JSON。新原生 worktree 工作流由协调器交付 seed 及变更 Spec/上下文，Agent 正常读取、编辑、检查和提交。两类能力必须显式区分；旧只读请求不得通过新模式获得权限，没有对应能力时明确失败，不能静默切换。
 
 ## expanded spec
+
+新显式 worktree:{baseCommit,tree,mode} 采用独立 version6/native-worktree-v1，数字或 null 期限都保持该版本。固定 schema/inputDigest/purpose/timeoutMs/model/effort/worktree 参与创建哈希，resultWorktree 仅为终态观察；不能同时携 frozenContext/readerRuntime，不产生 frozenReadProof。仅明确 Claude/ZCode 原生名字空间可用，无前缀/default/Codex 模型明确 unsupported。realm 固定为 structured-native-worktree-v1/claude 或 /zcode，禁止借旧只读 realm/证明；正常文件工具与 Git 结果边界见 [[native-worktree-runtime]]，两个执行器的正常模式分别由 [[claude-structured-runtime]]、[[zcode-structured-runtime]] 规定。下述 version1–5 的冻结策略完整保留，不因新增模式而放宽。
 
 version5 仅标识 timeoutMs:null 的固定调用预算能力，policy 字符串、隔离配置、realm、模型及 reader 证明保持原 Codex/Claude/ZCode 语义；数字请求继续使用原 version1–4。三个执行器复用同一计时接缝，null 不安装调用 timer；版本/timeout 不一致不得取得原生派发权。
 

@@ -1,3 +1,4 @@
+import { assertNativeWorktreeSeed } from './native-worktree-runtime.js'
 import { structuredObserverState, type StructuredExecution } from './session-structured-policy.js'
 import { spawn } from 'node:child_process'
 import { createConnection } from 'node:net'
@@ -2714,13 +2715,13 @@ async function prepareSession(prompt: string, parentage: CreateParentage, launch
         let h: Harness
         let pinned: string
         try {
-          const lname = context.structuredExecution ? 'structured-read-only' : launcher ?? defaultLauncher(mainRoot())
+          const lname = context.structuredExecution ? context.structuredExecution.policy === 'native-worktree-v1' ? 'structured-native-worktree' : 'structured-read-only' : launcher ?? defaultLauncher(mainRoot())
           chosen = context.structuredExecution
-            ? context.structuredExecution.policy === 'zcode-frozen-read-only-v1'
-              ? { name: 'structured-read-only', harness: 'zcode', cmd: 'zcode', headless: true, configDir: null }
-              : context.structuredExecution.policy === 'claude-frozen-read-only-v1'
-              ? { name: 'structured-read-only', harness: 'claude-headless', cmd: 'claude', headless: true, configDir: null }
-              : { name: 'structured-read-only', harness: 'codex-headless', cmd: 'codex', headless: true, configDir: null }
+            ? (context.structuredExecution.policy === 'zcode-frozen-read-only-v1' || context.structuredExecution.policy === 'native-worktree-v1' && context.structuredExecution.model?.startsWith('zcode:'))
+              ? { name: lname, harness: 'zcode', cmd: 'zcode', headless: true, configDir: null }
+              : (context.structuredExecution.policy === 'claude-frozen-read-only-v1' || context.structuredExecution.policy === 'native-worktree-v1' && context.structuredExecution.model?.startsWith('claude:'))
+              ? { name: lname, harness: 'claude-headless', cmd: 'claude', headless: true, configDir: null }
+              : { name: lname, harness: 'codex-headless', cmd: 'codex', headless: true, configDir: null }
             : resolveLauncher(lname)
           h = harnessById(chosen.harness)
           pinned = context.structuredExecution ? chosen.cmd : h.baseCmd(chosen.cmd)
@@ -2741,6 +2742,10 @@ async function prepareSession(prompt: string, parentage: CreateParentage, launch
         // An explicit base pins the fork point so a run is reproducible against a frozen commit instead of
         // whatever the source-of-truth branch has drifted to. Resolve it here, before any git mutation: an
         // unknown ref must fail the create request outright, never leave a half-made worktree behind.
+        if (context.structuredExecution?.worktree) {
+          assertNativeWorktreeSeed(root, context.structuredExecution.worktree)
+          if (base !== context.structuredExecution.worktree.baseCommit) throw new SessionCreateError('session_create_failed', phase, 'native worktree base must equal its immutable seed', 400)
+        }
         const startPoint = base ?? mainBranch()
         if (base) {
           const resolved = await withGitAbortSignal(signal, () => gitTry(['-C', root, 'rev-parse', '--verify', '--quiet', `${base}^{commit}`]))
@@ -2855,7 +2860,7 @@ async function prepareSession(prompt: string, parentage: CreateParentage, launch
           }, signal)
           try {
             traceSessionCreate(id, requestDigest, phase, 'start', 'seed-worktree-host-state')
-            seedWorktreeHostState(root, path)
+            if (!context.structuredExecution?.worktree) seedWorktreeHostState(root, path)
             traceSessionCreate(id, requestDigest, phase, 'finish', 'seed-worktree-host-state')
 
             // The branch ref right after `worktree add` IS the fork point. Record it: it is the only thing that
@@ -2864,6 +2869,8 @@ async function prepareSession(prompt: string, parentage: CreateParentage, launch
             // recovers the same commit from the branch's creation reflog entry.
             const forkResolved = await withGitAbortSignal(signal, () => gitTry(['-C', root, 'rev-parse', '--verify', `refs/heads/${branch}^{commit}`]))
             const forkCommit = forkResolved.ok && isGitObjectId(root, forkResolved.stdout.trim()) ? forkResolved.stdout.trim() : null
+
+            if (context.structuredExecution?.worktree && forkCommit !== context.structuredExecution.worktree.baseCommit) throw new SessionCreateError('session_create_failed', phase, 'native worktree fork differs from its immutable seed', 409)
 
             let rec: SessRec = {
               ...(context.structuredExecution ? { structuredExecution: context.structuredExecution } : {}),

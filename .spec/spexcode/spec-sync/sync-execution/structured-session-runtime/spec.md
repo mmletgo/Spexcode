@@ -64,3 +64,6 @@ Native资源桥仅在精确绑定的`session_create_timeout` receipt通过sessio
 readerRuntime版本2在新结果发布、completed精确恢复和同步资源结果读取中均要求[[frozen-context-reader]]的版本2模型可见证明及固定额度，不能携旧coverage证明降级。旧runtime只恢复已有turn；保留唯一原turn加精确prompt的丢ack识别，但不得发送thread/start或turn/start。旧字段和摘要保持原样。
 
 Claude 新请求在首次冻结时把完整 task 和条目生成最多65536字节的直接 MCP 计划，现有 ref/prompt 原样恢复。其 threadId 是真实原生 session UUID，turnId 是经回显、history 与 result.user_message_uuid(s) 三方确认的原始 user UUID，promptId 另外持久绑定。result.uuid 只是结果事件身份。success、structured_output、当前 schema、原生完整读取证明和整个 CLI/MCP 进程组停止缺一不可。先持久完整原生终态/证明，再发布 completed；同键 completed 仅重读原证据，零新 CLI/API。未知 in-progress 保留 cancelling/recovery_required，禁止用 resume 追加 prompt 冒充同轮恢复；精确停止后由既有新 attempt 协议重试。
+
+
+原生 worktree 请求明确提供 worktree:{baseCommit,tree,mode} 时，走独立 version6/native-worktree-v1 策略及专属 realm，不调用 prepareFrozenPrompt，不产生 frozenReadProof，旧只读策略与证明仍完整保留。仅明确 Claude/ZCode 原生模型可执行。baseCommit 必须是完整不可变 seed commit SHA，tree 精确等于其 Git tree；创建固定 base 与 forkCommit 均为 seed，后续主 checkout 的 HEAD/index/WIP 不参与初始化。runner 用创建记录的真实 worktreePath 作为 cwd，允许正常文件读取、搜索、编辑与检查，schema 仅控制最终输出格式。read 模式完成要求 HEAD/tree 等于 seed 且工作区干净；edit 模式要求代理正常 Git add/commit（保留 hooks），HEAD 是 seed 后代且干净。结果及持久 envelope 保存 baseCommit/baseTree/headCommit/tree/worktreePath，所有差量由真实 Git 对象导出。精确原生模型、session/turn、终态、退出与完整进程停止仍必需；冷 completed 核原证据和同一不可变 Git 对象身份，正式 close 移除 worktree 不阻断复用、不重建工作区，零新派发。有限与 null 模型期限均支持，创建及取消期限独立。
