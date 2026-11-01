@@ -38,6 +38,8 @@ version5/null 请求沿原 Claude policy、realm 与版本3读取证明执行，
 
 仅在此已停失败分支使用 [[frozen-context-reader]] 的只读来源元数据解释明确非 USER CAS 与已观察的原生 assistant 分片前缀；源 UUID、角色和消费顺序必须分别绑定。并行 tool_result 合并仍逐个以当时已配对的公开 USER 正文验证后才接受前缀摘要。可修复错误码只说明该失败拥有完整原输入来源与停止证明，不代表业务、读取覆盖或输出 schema 通过；元数据不进入成功 witness 或 proof，也不改原失败文件。
 
+固定 CLI 的 StructuredOutput enforce meta 提醒仅按 [[frozen-context-reader]] 的原始 metadata、唯一同轮 prompt/parent、精确 API 字节与后续 StructuredOutput 消费核验；不能给一般 user 或未核真的内部提示授权，也不扩展已停失败分类。
+
 模型请求不存在的工具后，只有固定 CLI 的精确未派发拒绝、实际 API 工具面及专属 MCP 派发记录共同满足 [[frozen-context-reader]] 时，才允许同轮自行纠正；不增加工具权限或读取覆盖。原失败操作不改成成功，修复后的正式新尝试仍使用原有重试入口。
 
 同一轮的 reader 范围参数拒绝只按 [[frozen-context-reader]] 的读取前精确重算、公开错误与后续 API 可见性规则保留为零覆盖事件；后续完整正确读取仍独立证明，不能因模型纠错授予新范围或放过上下文、正文摘要与权限错误。
