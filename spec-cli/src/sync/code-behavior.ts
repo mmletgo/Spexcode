@@ -7,7 +7,7 @@ import { outputErrors } from './elaboration-schema.js'
 import { actualTreeDiff, isHostPrivatePath } from './candidate.js'
 import { adoptedDeliveryPaths, isUtf8Text, mergeText, readCompositionEvidence, type IntentObject, type IntentResidual, type SelectedCompositionEvidence } from './composition.js'
 import { validateRawIntegration } from './raw-integration.js'
-import { acceptanceSourceChanged, decisionScopeIds, sameContractBusinessMeaning } from './contract-evolution.js'
+import { acceptanceSourceChanged, contractBusinessMeaning, decisionScopeIds, sameContractBusinessMeaning } from './contract-evolution.js'
 import { controlledDecisionIdentity, readControlledChanges, readControlledDecision, renderControlledDecisionRaw } from './request-input.js'
 import { isSyncSpecPath, readFrozenContracts } from './frozen-contracts.js'
 import type { BaselinePair, ComposedInputRef, FrozenBaselineSelection, InputSnapshot } from './operation-types.js'
@@ -529,6 +529,12 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   if (missingCodePaths.length) reject(`无治理代码未创建真实归属或具体GAP: ${missingCodePaths[0]}`, { missingCodePaths, missingCodePathCount: missingCodePaths.length })
   for (const resolution of proposal.resolutions) { validatePaths([resolution.path]); if (!changedPaths.includes(resolution.path) || !within(resolution.path, input.plan.writePaths) || !changes.some(item => item.paths.includes(resolution.path) && !['conflict', 'coverage_gap'].includes(item.kind))) reject(`整合解决方案没有相容分析/授权范围: ${resolution.path}；只处理已存在且实际changedPaths需三方整合/真实作者删除的位置，普通合法code变化只分类/newNodes，不提前写Spec或tests正文`); if ((resolution.content === null) !== (resolution.mode === null) || resolution.mode === '120000') reject('业务整合只接受普通UTF-8文件或明确删除') }
   requireOptionalRead(proposal.resolutions.map(item => item.path), turns.get('code_behavior_analyze'))
+  const resolutionRepairHint = '若无真实三方整合必要，返回空resolutions，把后续Spec生成交P1；若需整合，必须保留本轮作者差量之外的交付义务，并沿原raw/权限门核验。'
+  for (const resolution of proposal.resolutions) {
+    if (!isSyncSpecPath(resolution.path) || resolution.content === null || parseParts(resolution.content) !== null) continue
+    if (![authorBefore.get(resolution.path), authorSource.get(resolution.path), composedByPath.get(resolution.path), deliveryByPath.get(resolution.path)].some(text => text !== undefined && parseParts(text) !== null)) continue
+    reject(`Spec整合正文破坏既有分节结构: ${resolution.path}；content须为保留真实Markdown换行与分节的完整正文，不能将整份Spec再次转义。${resolutionRepairHint}`, { resolutionFormat: { path: resolution.path, reason: 'spec_parts_missing', actualNewlineCount: (resolution.content.match(/\r\n|\r|\n/g) ?? []).length, literalBackslashNCount: (resolution.content.match(/\\n/g) ?? []).length } })
+  }
   if (selectedEvidence) for (const resolution of proposal.resolutions.filter(item => !item.path.startsWith('.spec/'))) {
     const delivered = selectedEvidence.paths.find(item => item.path === resolution.path)?.delivery
     const residuals = new Map(selectedEvidence.artifacts.filter(item => item.path === resolution.path && item.changed).map(item => [item.authorBase?.oid ?? 'null', item]))
@@ -555,7 +561,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
       const wholeNodeDeleted = resolution.content === null && !authorSource.has(resolution.path)
       const authorChanged = authorChanges.some(change => change.path === resolution.path && change.changedIds.includes(previous.id))
       const explicitlyRetired = input.plan.authorizedChanges?.some(change => change.id === previous.id && change.action === 'retire' && change.source === 'user:raw')
-      if (!explicitlyRetired && ((!authorChanged || previous.kind === 'VERIFY') && (!next || !sameContractBusinessMeaning(previous, next)) || previous.kind === 'AC' && !next && !wholeNodeDeleted)) reject(`精确组合破坏未消费之外的交付义务: ${resolution.path} ${previous.id}`)
+      if (!explicitlyRetired && ((!authorChanged || previous.kind === 'VERIFY') && (!next || !sameContractBusinessMeaning(previous, next)) || previous.kind === 'AC' && !next && !wholeNodeDeleted)) reject(`精确组合破坏未消费之外的交付义务: ${resolution.path} ${previous.id}；${resolutionRepairHint}`, { unconsumedObligation: { path: resolution.path, id: previous.id, expected: contractBusinessMeaning(previous), proposed: next ? contractBusinessMeaning(next) : null } })
     }
     for (const policy of oldFrozen.graph.items.values()) if (policy.kind === 'VERIFY' && policy.path === resolution.path) {
       if (input.plan.authorizedChanges?.some(change => change.id === policy.id && change.action === 'retire' && change.source === 'user:raw')) continue

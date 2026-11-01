@@ -17,7 +17,7 @@ import type { ElaborationRunner } from './elaboration-types.js'
 import type { BaselinePair, FrozenBaselineSelection } from './operation-types.js'
 import { composeControlledRequest, controlledDecisionIdentity, prepareControlledDecision, prepareControlledRequest, renderControlledDecisionRaw } from './request-input.js'
 import { captureInputSnapshot, contentHash, readEvidence, readObject, readTree, writeEvidence } from './snapshot.js'
-import { validateContractEvolution } from './contract-evolution.js'
+import { contractBusinessMeaning, validateContractEvolution } from './contract-evolution.js'
 import { parseContract, parseParts } from '@spexcode/spec-core/contracts'
 import { canonicalContractFilterBindings, plantContractFilter } from '../contract-filter.js'
 import { writeManagedBlock } from '../harness-shim.js'
@@ -1805,6 +1805,66 @@ test('文本冲突先保留三方对象，不因git重叠判业务冲突；相�
   const entry = readTree(input.snapshot.source.commonDir, input.composed.tree).find(item => item.path === 'src/export.js')!
   assert.ok(readObject(input.snapshot.source.commonDir, entry.oid).toString().includes('newSource: true'))
   assert.ok(readFileSync(join(f.delivery, 'src/export.js'), 'utf8').includes('priorDelivery: true'))
+})
+
+for (const mode of ['escaped-newlines', 'sectionless', 'valid-literal-newline', 'removed-ac', 'changed-ac-dependency'] as const) test(`Spec整合分节格式 ${mode} 在义务比对前准确归因且不改原proposal`, async t => {
+  const f = await fixture(t, text => text.replace('任务完成后下载结果。', '任务完成后下载结果，字面量\\n保持。'))
+  const path = '.spec/export/export-contract/spec.md', source = f.raw.replace('## expanded spec', '作者新增可观察说明。\n\n## expanded spec')
+  writeFileSync(join(f.root, path), source)
+  const prepared = await f.input(), contract = parseContract({ nodeId: 'export-contract', path, source: f.raw }).contract!
+  const pair: BaselinePair = { ...prepared.baseline!, coveredScope: { paths: ['.spec', 'src', 'tests'], contractIds: contract.items.filter(item => item.kind !== 'FLOW').map(item => item.id), flowIds: contract.items.filter(item => item.kind === 'FLOW').map(item => item.id) } }
+  const paths = [path, 'src/export.js', 'tests/export.test.mjs']
+  const baselineSelection = freezeSelection(prepared.snapshot, [
+    ...paths.map(path => ({ resource: { kind: 'path' as const, path }, bytePair: pair })),
+    ...contract.items.filter(item => item.kind !== 'VERIFY').map(item => ({ resource: { kind: item.kind === 'FLOW' ? 'flow' as const : 'contract' as const, id: item.id }, intentPair: pair })),
+  ])
+  const input: CodeBehaviorInput = { ...prepared, baseline: null, baselineSelection, composed: composeInputSnapshots(prepared.snapshot, baselineSelection, { executionPaths: paths, retainConflicts: true }).composed! }
+  const frozenInput = JSON.stringify(input)
+  const acceptanceLine = source.split('\n').find(line => line.startsWith('| AC-EXPORT-01 |'))!, changedColumns = acceptanceLine.split('|')
+  changedColumns[changedColumns.length - 2] = ' REQ-EXPORT-01, RULE-EXPORT-06 '
+  const content = mode === 'escaped-newlines' ? source.replace(/\n/g, '\\n') : mode === 'sectionless' ? source.replace('## raw source', '## Original').replace('## expanded spec', '## Details') : mode === 'removed-ac' ? source.split('\n').filter(line => !line.startsWith('| AC-EXPORT-01 |')).join('\n') : mode === 'changed-ac-dependency' ? source.replace(acceptanceLine, changedColumns.join('|')) : source
+  const sourceNewlineCount = source.split('\n').length - 1
+  assert.equal(source.split('\\n').length - 1, 1, 'fixture仅有明确新增的一处合法字面量反斜线n')
+  let originalProposal: unknown
+  const calls: string[] = [], model = runner('allowed_change', proposal => { proposal.resolutions = [{ path, content, mode: '100644' }]; originalProposal = structuredClone(proposal) })
+  const run: ElaborationRunner = request => { calls.push(request.purpose); return model(request) }
+  if (mode === 'valid-literal-newline') {
+    assert.ok(content.includes('\\n')); assert.ok(parseParts(content))
+    const analysis = await analyzeCodeBehavior(input, run)
+    assert.equal(analysis.reviewPassed, true); assert.equal(analysis.resolutions[0].content, content)
+    assert.deepEqual(calls, ['code_behavior_analyze', 'code_behavior_review'])
+  } else await assert.rejects(analyzeCodeBehavior(input, run), (error: Error & { code?: string }) => {
+    assert.equal(error.code, 'behavior_analysis_invalid')
+    const diagnostic = JSON.parse(error.message) as { approved: boolean; message: string; details: { resolutionFormat?: { path: string; reason: string; actualNewlineCount: number; literalBackslashNCount: number }; unconsumedObligation?: unknown }; proposal: { resolutions: { path: string; content: string }[] } }
+    assert.equal(diagnostic.approved, false); assert.deepEqual(diagnostic.proposal, originalProposal)
+    if (mode === 'removed-ac' || mode === 'changed-ac-dependency') {
+      assert.match(diagnostic.message, /精确组合破坏未消费之外的交付义务.*AC-EXPORT-01/)
+      assert.equal(diagnostic.details.resolutionFormat, undefined)
+      const expected = contract.items.find(item => item.id === 'AC-EXPORT-01')!, proposed = parseContract({ nodeId: 'export-contract', path, source: content }).contract!.items.find(item => item.id === expected.id)
+      assert.deepEqual(diagnostic.details.unconsumedObligation, { path, id: expected.id, expected: contractBusinessMeaning(expected), proposed: proposed ? contractBusinessMeaning(proposed) : null })
+      assert.match(diagnostic.message, /无真实三方整合必要.*空resolutions.*P1.*保留本轮作者差量之外的交付义务/)
+    }
+    else {
+      assert.match(diagnostic.message, /Spec整合正文.*分节结构/)
+      assert.doesNotMatch(diagnostic.message, /精确组合破坏|AC-EXPORT/)
+      assert.deepEqual(diagnostic.details.resolutionFormat, { path, reason: 'spec_parts_missing', actualNewlineCount: mode === 'escaped-newlines' ? 0 : sourceNewlineCount, literalBackslashNCount: mode === 'escaped-newlines' ? sourceNewlineCount + 1 : 1 })
+      assert.equal(parseParts(content), null)
+    }
+    assert.deepEqual(calls, ['code_behavior_analyze']); return true
+  })
+  assert.equal(readFileSync(join(f.root, path), 'utf8'), source)
+  assert.equal((await captureInputSnapshot(f.root)).id, input.snapshot.id)
+  assert.equal(JSON.stringify(input), frozenInput, 'scope/authority/原冻结输入不随诊断改变')
+})
+
+test('单行代码resolution中的字面量反斜线n不当作Spec分节损坏', async t => {
+  const f = await fixture(t, text => text.replace('src/export.js#ExportService', 'src/single.js'), { 'src/single.js': 'export const value = "before";' })
+  const path = 'src/single.js', content = 'export const value = "\\n";'
+  writeFileSync(join(f.root, path), content)
+  assert.equal(content.includes('\n'), false)
+  const prepared = await f.input(), input: CodeBehaviorInput = { ...prepared, plan: { ...prepared.plan, sourcePaths: [path] } }
+  const analysis = await analyzeCodeBehavior(input, runner('allowed_change', proposal => { proposal.resolutions = [{ path, content, mode: '100644' }] }))
+  assert.equal(analysis.reviewPassed, true); assert.equal(analysis.resolutions[0].content, content)
 })
 
 test('重构只分类映射，不生成业务授权；冲突与GAP保留具体规则/路径/原意/反例稳定ID', async t => {
