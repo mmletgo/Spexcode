@@ -158,6 +158,10 @@ export function proveZCodeFrozenReads(ref: FrozenContextRef, witness: ZCodeFroze
       seen.add(parent); parent = text(messages.get(parent)!.parentID)
     }
   }
+  const finalMessage = witness.messages.at(-1)!, finalAnchor = record(finalMessage.info.anchor)
+  if (finalMessage.info.role !== 'assistant' || finalAnchor.boundaryMessageId !== finalMessage.info.id
+    || !isDeepStrictEqual(finalAnchor.orderedMessageIds, [...messages.keys()]) || finalAnchor.historyRoundCount !== assistantCount) stale('final native boundary does not close its exact ordered message history')
+  const assistants = [...messages].filter(([, info]) => info.role === 'assistant'), assistantIndices = new Map(assistants.map(([id], index) => [id, index]))
   const eventIds = new Set<string>(), scheduled = new Map<string, number>(), started = new Set<string>(), results = new Map<string, number>(), requests: number[] = []
   let previousSeq = -1, began = false, ended = false
   let response: string | undefined
@@ -200,12 +204,11 @@ export function proveZCodeFrozenReads(ref: FrozenContextRef, witness: ZCodeFroze
     } else if (payload.kind !== 'progress' || !started.has(callId) || results.has(callId)) stale('tool event is not a supported successful lifecycle')
   }
   if (!ended || !requests.length || requests.length !== assistantCount || response === undefined || scheduled.size !== calls.size || results.size !== calls.size) stale('turn or native call evidence is unfinished')
-  if (witness.messages.filter(message => message.info.role === 'assistant' && message.parts.filter(part => part.type === 'text').map(part => part.text).join('') === response).length !== 1) stale('terminal response differs from the native assistant message')
+  if (finalMessage.parts.filter(part => part.type === 'text').map(part => part.text).join('') !== response) stale('terminal response differs from its final native boundary message')
   const items: FrozenNativeItem[] = []
   for (const [callId, scheduleSeq] of scheduled) {
-    if (!requests.some(seq => seq > results.get(callId)!)) stale('reader result has no subsequent actual ModelRequest consumer')
-    const call = calls.get(callId)!
-    if (requests.some(seq => seq > scheduleSeq && seq < results.get(callId)!)) stale('model consumed an unfinished reader call')
+    const call = calls.get(callId)!, index = assistantIndices.get(call.messageId)!, consumer = requests[index + 1]
+    if (scheduleSeq <= requests[index] || consumer === undefined || results.get(callId)! >= consumer) stale('reader lifecycle differs from its assistant generation and next ModelRequest consumer')
     items.push({ type: 'dynamicToolCall', id: callId, tool: 'spex_read_frozen', namespace: null, status: 'completed', success: true,
       arguments: call.state.input, contentItems: [{ type: 'inputText', text: call.state.output }] })
   }

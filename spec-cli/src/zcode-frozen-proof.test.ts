@@ -49,6 +49,7 @@ function fixture() {
   event('tool.updated', { kind: 'batch', toolCallIds: toolParts.map(part => part.callID), successCount: toolParts.length, errorCount: 0 })
   event('session.updated', { providerId: witness.providerId, modelId: witness.modelId, toolCount: 1, messageCount: 12, iteration: 1 })
   witness.messages.push({ info: { id: 'assistant-final', sessionID: 'session', role: 'assistant', parentID: 'user', providerId: witness.providerId, modelId: witness.modelId, anchor: { turnId: 'turn' }, semantics: { origin: 'agent_runtime', kind: 'assistant_response', uiVisibility: 'visible', providerVisibility: 'visible', transcriptVisibility: 'visible' } }, parts: [part('final-text', 'assistant-final', 'text', { text: '{"ok":true}' })] })
+  Object.assign(finalMessage(witness).info.anchor as object, { historyRoundCount: 2, orderedMessageIds: witness.messages.map(message => message.info.id), boundaryMessageId: 'assistant-final', goalBoundary: { kind: 'none' } })
   event('turn.completed', { response: '{"ok":true}', inputId: 'input-id', resultType: 'success', toolCallCount: toolParts.length })
   witness.mcpHistory.records.push(
     { type: 'process', pid: 123, startToken: null },
@@ -222,5 +223,65 @@ test('one complete JSON fence preserves native body and cold proof binds the ent
       const proof = proveZCodeFrozenReads(f.ref, witness)
       assert.throws(() => verifyZCodeFrozenReadProof(f.ref, proof, f.identity, undefined, { output: { ok: true } }), { code: 'stale_result' })
     }
+  } finally { f.close() }
+})
+
+
+test('terminal output cannot substitute JSON from an assistant before its frozen tool reads', () => {
+  const f = fixture()
+  try {
+    const proof = proveZCodeFrozenReads(f.ref, f.witness), stale = structuredClone(f.witness), beforeRead = toolMessage(stale)
+    beforeRead.parts.unshift({ id: 'pre-read-json', sessionID: stale.sessionId, messageID: beforeRead.info.id, type: 'text', text: '{"stale":true}' })
+    stale.events.at(-1)!.payload.response = '{"stale":true}'
+    assert.throws(() => proveZCodeFrozenReads(f.ref, stale), { code: 'stale_result' })
+    const bytes = Buffer.from(JSON.stringify(stale)), witnessDigest = createHash('sha256').update(bytes).digest('hex')
+    writeFileSync(join(dirname(f.ref.manifestPath), 'histories', `zcode-witness-${witnessDigest}`), bytes, { mode: 0o400 })
+    assert.throws(() => verifyZCodeFrozenReadProof(f.ref, { ...proof, witnessDigest }, f.identity, undefined, { output: { stale: true } }), { code: 'stale_result' })
+  } finally { f.close() }
+})
+
+test('native tools cannot execute before the ModelRequest that generates their own assistant', () => {
+  const f = fixture()
+  try {
+    const proof = proveZCodeFrozenReads(f.ref, f.witness), early = structuredClone(f.witness), first = toolMessage(early), last = finalMessage(early)
+    for (const part of first.parts) { part.messageID = last.info.id; last.parts.push(part) }
+    first.parts = []
+    for (const event of early.events) if (event.payload.kind === 'scheduled') event.payload.assistantMessageId = last.info.id
+    assert.throws(() => proveZCodeFrozenReads(f.ref, early), { code: 'stale_result' })
+    const bytes = Buffer.from(JSON.stringify(early)), witnessDigest = createHash('sha256').update(bytes).digest('hex')
+    writeFileSync(join(dirname(f.ref.manifestPath), 'histories', `zcode-witness-${witnessDigest}`), bytes, { mode: 0o400 })
+    assert.throws(() => verifyZCodeFrozenReadProof(f.ref, { ...proof, witnessDigest }, f.identity, undefined, { output: { ok: true } }), { code: 'stale_result' })
+  } finally { f.close() }
+})
+
+test('the same JSON before and after the final native boundary remains valid', () => {
+  const f = fixture()
+  try {
+    const prior = toolMessage(f.witness)
+    prior.parts.unshift({ id: 'same-pre-read-json', sessionID: f.witness.sessionId, messageID: prior.info.id, type: 'text', text: '{"ok":true}' })
+    const proof = proveZCodeFrozenReads(f.ref, f.witness)
+    verifyZCodeFrozenReadProof(f.ref, proof, f.identity, undefined, { output: { ok: true } })
+    assert.equal(proof.receipts.length, 6)
+  } finally { f.close() }
+})
+
+test('final native anchor must close the complete raw ordered history with the exact boundary and round count', () => {
+  const f = fixture()
+  try {
+    const corruptions: ((anchor: Record<string, unknown>) => void)[] = [
+      anchor => { delete anchor.orderedMessageIds }, anchor => { delete anchor.boundaryMessageId }, anchor => { delete anchor.historyRoundCount },
+      anchor => { anchor.boundaryMessageId = 'assistant-tools' }, anchor => { anchor.historyRoundCount = 1 },
+      anchor => { (anchor.orderedMessageIds as string[]).pop() },
+      anchor => { (anchor.orderedMessageIds as string[])[1] = 'user' },
+      anchor => { (anchor.orderedMessageIds as string[])[1] = 'foreign' },
+      anchor => { (anchor.orderedMessageIds as string[]).reverse() },
+    ]
+    for (const corrupt of corruptions) {
+      const witness = structuredClone(f.witness); corrupt(finalMessage(witness).info.anchor as Record<string, unknown>)
+      assert.throws(() => proveZCodeFrozenReads(f.ref, witness), { code: 'stale_result' })
+    }
+    const reordered = structuredClone(f.witness)
+    reordered.messages.splice(1, 2, reordered.messages[2], reordered.messages[1])
+    assert.throws(() => proveZCodeFrozenReads(f.ref, reordered), { code: 'stale_result' })
   } finally { f.close() }
 })
