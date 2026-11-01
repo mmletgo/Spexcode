@@ -1,3 +1,4 @@
+import { sampleNativeWorktreeProcesses, nativeWorktreeProcessesStopped } from './native-worktree-runtime.js'
 import { Ajv } from 'ajv'
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
@@ -29,7 +30,7 @@ type NativeModel = { providerId: string; modelId: string; options?: { reasoningL
 type NativeSelection = { model: NativeModel; thoughtLevel?: 'high' }
 type ModelSnapshot = { session?: { sessionId: string; model: NativeModel }; settings?: { model?: { current?: { providerId: string; modelId: string; options?: Record<string, unknown> } }; thoughtLevel?: { current?: string; available?: { label: string; value: string }[] } } }
 type IdleSnapshot = { session?: { sessionId: string; status: string }; runtime?: { activeTurnId?: string; activeTurnKind?: string; pendingRequestIds?: string[] }; projection?: { currentTurnId?: string; status?: string; pendingPermissions?: { requestId?: string; toolCallId?: string }[]; activeToolCalls?: { toolCallId: string; toolName: string; status: string }[] } }
-type NativePlan = ZCodeNativeState & NativeSelection & { requestDigest: string; policyDigest: string; cliPath: string; cliVersion: string; cliSha256: string; builtinSha256: string; queryId: string; runtime: string; tmp: string; workspace: string; receiptFile: string; modelSnapshotDigest?: string }
+type NativePlan = ZCodeNativeState & NativeSelection & { worktreeProcessBaseline?: 1; requestDigest: string; policyDigest: string; cliPath: string; cliVersion: string; cliSha256: string; builtinSha256: string; queryId: string; runtime: string; tmp: string; workspace: string; receiptFile: string; modelSnapshotDigest?: string }
 type StopResult = { nativeStopped: boolean; acknowledged: boolean; nativeStatus?: string; error?: string }
 type StopEvidence = { code: number | null; signal: NodeJS.Signals | null; stopped: boolean; acknowledged: boolean; idle: boolean; closed: boolean; stderrBytes: number; stderrSha256: string }
 type Completed = { plan: NativePlan; witness: ZCodeFrozenWitness; result: NativeResult }
@@ -141,6 +142,10 @@ function writeJson(path: string, value: unknown, immutable = false): void {
 
 /** 宿主只读ps元数据补充reader内不可用的startToken，不读取命令行或认证参数。 */
 function sampleOwnedProcesses(plan: NativePlan): ProcessIdentity[] {
+  if (plan.worktreeProcessBaseline === 1) {
+    sampleNativeWorktreeProcesses(plan)
+    return JSON.parse(readFileSync(join(plan.root, 'owned-processes.json'), 'utf8')) as ProcessIdentity[]
+  }
   const saved = join(plan.root, 'owned-processes.json')
   const owned = new Map((existsSync(saved) ? JSON.parse(readFileSync(saved, 'utf8')) as ProcessIdentity[] : []).map(item => [item.pid, item]))
   const result = spawnSync('/bin/ps', ['-axo', 'pid=,ppid=,lstart='], { encoding: 'utf8' })
@@ -174,6 +179,7 @@ function processIdentityState(identity: ProcessIdentity): 'live' | 'gone' | 'unk
 
 /** 整组、宿主观察后代与实际reader记录分别核死亡；缺身份不取得冷取消权限。 */
 function ownedProcessesStopped(plan: NativePlan, terminate = false): boolean {
+  if (plan.worktreeProcessBaseline === 1) return nativeWorktreeProcessesStopped(plan, terminate)
   if (!plan.pid || !existsSync(join(plan.root, 'owned-processes.json'))) return false
   const owned = JSON.parse(readFileSync(join(plan.root, 'owned-processes.json'), 'utf8')) as ProcessIdentity[]
   const ledger = join(plan.runtime, 'frozen-mcp', 'mcp-public.jsonl')
@@ -203,7 +209,7 @@ function ownedProcessesStopped(plan: NativePlan, terminate = false): boolean {
 
 function verifyPlan(plan: NativePlan, root: string, prompt: string | undefined, execution: ZCodeStructuredExecution): void {
   const native = execution.zcodeNative
-  if (plan.root !== root || native?.root !== root || plan.sessionId !== native.sessionId || plan.inputId !== native.inputId
+  if (execution.policy === 'native-worktree-v1' && plan.worktreeProcessBaseline !== 1 || plan.root !== root || native?.root !== root || plan.sessionId !== native.sessionId || plan.inputId !== native.inputId
     || plan.policyDigest !== digest(fixedPolicy(execution)) || prompt !== undefined && plan.requestDigest !== digest({ prompt, nativePrompt: zcodeExecutionPrompt(prompt, execution), policy: fixedPolicy(execution), selection: zcodeNativeSelection(execution.model, execution.effort) })
     || plan.cliVersion !== zcodeCapability.cliVersion || plan.cliSha256 !== zcodeCapability.cliSha256 || plan.builtinSha256 !== zcodeCapability.builtinSha256
     || digest({ model: plan.model, ...(plan.thoughtLevel ? { thoughtLevel: plan.thoughtLevel } : {}) }) !== digest(zcodeNativeSelection(execution.model, execution.effort)) || native.turnId && native.turnId !== plan.turnId || native.pid !== plan.pid || native.receiptFile && native.receiptFile !== plan.receiptFile
@@ -216,6 +222,7 @@ function verifyPlan(plan: NativePlan, root: string, prompt: string | undefined, 
 /** 同一原生 session/input/query/turn 和实际模型选择证明正常工具执行的终态。 */
 function settleWorktreeResult(plan: NativePlan, prompt: string, execution: ZCodeStructuredExecution): WorktreeNativeResult {
   verifyPlan(plan, plan.root, prompt, execution)
+  if (execution.state !== 'completed' && !ownedProcessesStopped(plan)) throw new StructuredSessionError('cancellation_pending', 'ZCode worktree native or unknown orphan stop remains unproven')
   const read = (name: string): unknown => JSON.parse(readFileSync(join(plan.root, name), 'utf8'))
   const terminal = read('terminal.json') as NativeEvent, events = read('events.json') as NativeEvent[], messages = read('messages.json') as Array<{ info?: Record<string, unknown>; parts?: Array<Record<string, unknown>> }>
   const exit = read('exit.json') as StopEvidence, send = read('send.json')
@@ -224,7 +231,7 @@ function settleWorktreeResult(plan: NativePlan, prompt: string, execution: ZCode
     || starts.length !== 1 || starts[0].payload.inputId !== plan.inputId || starts[0].payload.queryId !== plan.queryId || starts[0].turnId !== plan.turnId
     || !events.some(event => digest(event) === digest(terminal)) || events.some(event => event.sessionId !== plan.sessionId || event.turnId !== plan.turnId)
     || !requests.length || requests.some(event => event.payload.providerId !== plan.model.providerId || event.payload.modelId !== plan.model.modelId)
-    || !exit.stopped || !exit.idle || !exit.closed || exit.code !== 0 || exit.signal !== null || !ownedProcessesStopped(plan)) throw new StructuredSessionError('stale_result', 'ZCode worktree exact native model/terminal/process evidence differs')
+    || !exit.stopped || !exit.idle || !exit.closed || exit.code !== 0 || exit.signal !== null) throw new StructuredSessionError('stale_result', 'ZCode worktree exact native model/terminal/process evidence differs')
   const users = messages.filter(message => message.info?.role === 'user' && (message.info.semantics as Record<string, unknown>)?.kind === 'user_prompt')
   if (users.length !== 1 || users[0].info?.id !== starts[0].payload.messageId || (users[0].info?.anchor as Record<string, unknown>)?.turnId !== plan.turnId || digest(users[0].info?.modelSelection) !== digest(plan.model) || users[0].info?.sessionID !== plan.sessionId || users[0].parts?.filter(part => part.type === 'text').map(part => part.text).join('') !== zcodeExecutionPrompt(prompt, execution)) throw new StructuredSessionError('stale_result', 'ZCode worktree original native user/input differs')
   const finals = messages.filter(message => message.info?.role === 'assistant' && (message.info.anchor as Record<string, unknown>)?.turnId === plan.turnId && (message.info.semantics as Record<string, unknown>)?.kind === 'assistant_response')
@@ -373,11 +380,12 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
     if (!boundary.runtime || !boundary.tmp || !boundary.socket || Object.keys(targets).filter(key => !['runtime', 'tmp'].includes(key)).some(key => boundary[key] !== false) || readFileSync(oracle, 'utf8') !== 'UNCHANGED') throw new StructuredSessionError('unsupported', 'ZCode exact read-only write/socket boundary preflight failed')
     writeJson(join(root, 'boundary.json'), { passed: true, results: boundary, profileSha256: bytesDigest(profile) }, true)
   }
-  let plan: NativePlan = { version: 1, root, sessionId: `sess_${randomUUID()}`, inputId: randomUUID(), queryId: randomUUID(), requestDigest: digest({ prompt, nativePrompt, policy: fixedPolicy(execution), selection }), policyDigest: digest(fixedPolicy(execution)), cliPath, cliVersion: zcodeCapability.cliVersion, cliSha256: zcodeCapability.cliSha256, builtinSha256: zcodeCapability.builtinSha256, ...selection, runtime, tmp, workspace, receiptFile: join(root, 'process.json') }
+  let plan: NativePlan = { ...(worktree ? { worktreeProcessBaseline: 1 as const } : {}), version: 1, root, sessionId: `sess_${randomUUID()}`, inputId: randomUUID(), queryId: randomUUID(), requestDigest: digest({ prompt, nativePrompt, policy: fixedPolicy(execution), selection }), policyDigest: digest(fixedPolicy(execution)), cliPath, cliVersion: zcodeCapability.cliVersion, cliSha256: zcodeCapability.cliSha256, builtinSha256: zcodeCapability.builtinSha256, ...selection, runtime, tmp, workspace, receiptFile: join(root, 'process.json') }
   writeJson(join(root, 'plan.json'), plan)
   const native = (): ZCodeNativeState => ({ version: 1, root, sessionId: plan.sessionId, inputId: plan.inputId, ...(plan.pid ? { pid: plan.pid, receiptFile: plan.receiptFile } : {}), ...(plan.turnId ? { turnId: plan.turnId } : {}) })
   await callbacks.onNative(native()); await callbacks.onTurnStarting?.()
   let launchFailure: Error | undefined
+  if (worktree) sampleNativeWorktreeProcesses(plan)
   const child: ChildProcessWithoutNullStreams = spawn(worktree ? cliPath : '/usr/bin/sandbox-exec', worktree ? [ 'app-server', '--cwd', workspace] : ['-f', profile, cliPath, 'app-server', '--cwd', workspace], { cwd: workspace, env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] })
   child.once('error', () => { launchFailure = new StructuredSessionError('cancellation_pending', 'ZCode native process failed during launch') })
   if (!child.pid) throw new StructuredSessionError('failed', 'ZCode isolated process could not start')

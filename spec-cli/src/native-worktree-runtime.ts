@@ -46,17 +46,30 @@ export function nativeWorktreePrompt(prompt: string, seed: NativeWorktreeRequest
 
 export type NativeOwnedPlan = { root: string; pid?: number; receiptFile: string }
 
-/** 正常 shell 工具可能派生新进程组，按 PID/start 身份记录全部已观察后代。 */
-export function sampleNativeWorktreeProcesses(plan: NativeOwnedPlan): void {
-  const path = join(plan.root, 'owned-processes.json')
-  const owned = new Map((existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) as ProcessIdentity[] : []).map(item => [item.pid, item]))
-  const result = spawnSync('/bin/ps', ['-axo', 'pid=,ppid=,lstart='], { encoding: 'utf8' })
+type NativeProcessRow = ProcessIdentity & { ppid: number }
+
+/** 只读取同 UID 的 PID、父图与启动身份，不读取 argv、环境或凭据。 */
+function nativeProcessCensus(): NativeProcessRow[] {
+  const uid = process.getuid?.()
+  if (uid === undefined) throw new StructuredSessionError('unsupported', 'native worktree requires a same-UID process census')
+  const result = spawnSync('/bin/ps', ['-axo', 'uid=,pid=,ppid=,lstart='], { encoding: 'utf8' })
   if (result.error || result.status !== 0) throw new StructuredSessionError('cancellation_pending', 'native worktree process census is unproven')
-  const rows = result.stdout.split('\n').flatMap(line => {
-    const match = /^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/.exec(line)
-    return match ? [{ pid: Number(match[1]), ppid: Number(match[2]), startToken: match[3].replace(/\s+/g, ' ') }] : []
+  return result.stdout.split('\n').flatMap(line => {
+    const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+?)\s*$/.exec(line)
+    return match && Number(match[1]) === uid ? [{ pid: Number(match[2]), ppid: Number(match[3]), startToken: match[4].replace(/\s+/g, ' ') }] : []
   })
-  const queue = plan.pid ? [plan.pid, ...owned.keys()] : [...owned.keys()], seen = new Set<number>()
+}
+
+/** spawn 前冻结同 UID 基线；运行中仅把实际观察到的 Native 后代记为已拥有。 */
+export function sampleNativeWorktreeProcesses(plan: NativeOwnedPlan): void {
+  const path = join(plan.root, 'owned-processes.json'), rows = nativeProcessCensus()
+  if (!plan.pid) {
+    writeFileSync(join(plan.root, 'process-baseline.json'), JSON.stringify(rows), { mode: 0o400, flag: 'wx' })
+    writeFileSync(path, '[]', { mode: 0o600 })
+    return
+  }
+  const owned = new Map((existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) as ProcessIdentity[] : []).map(item => [item.pid, item]))
+  const queue = [plan.pid, ...owned.keys()], seen = new Set<number>()
   while (queue.length) {
     const pid = queue.shift()!
     if (seen.has(pid)) continue
@@ -69,12 +82,32 @@ export function sampleNativeWorktreeProcesses(plan: NativeOwnedPlan): void {
   writeFileSync(path, JSON.stringify([...owned.values()]), { mode: 0o600 })
 }
 
-/** CLI 整组和记录后代均死亡才释放容量；身份未知保留取消债务。 */
+/** 采样间隙失去父链的新进程只记 unknown；不能假定归属，也不能杀它。 */
+function nativeUnknownProcesses(plan: NativeOwnedPlan, owned: ProcessIdentity[]): NativeProcessRow[] {
+  const rows = nativeProcessCensus(), current = new Map(rows.map(row => [row.pid, row]))
+  const baseline = new Map((JSON.parse(readFileSync(join(plan.root, 'process-baseline.json'), 'utf8')) as NativeProcessRow[]).map(row => [row.pid, row]))
+  const unknown = rows.filter(row => {
+    if (owned.some(identity => identity.pid === row.pid && identity.startToken === row.startToken) || baseline.get(row.pid)?.startToken === row.startToken) return false
+    let parent = current.get(row.ppid)
+    const seen = new Set<number>()
+    while (parent && parent.pid > 1 && !seen.has(parent.pid)) {
+      if (baseline.get(parent.pid)?.startToken === parent.startToken) return false
+      seen.add(parent.pid); parent = current.get(parent.ppid)
+    }
+    return true
+  })
+  writeFileSync(join(plan.root, 'unknown-processes.json'), JSON.stringify(unknown), { mode: 0o600 })
+  return unknown
+}
+
+/** 已知整组/后代死亡后再查孤儿窗口；未知进程保留容量且从不取得终止权限。 */
 export function nativeWorktreeProcessesStopped(plan: NativeOwnedPlan, terminate = false): boolean {
   const path = join(plan.root, 'owned-processes.json')
-  if (!plan.pid || !existsSync(path)) return false
+  if (!plan.pid || !existsSync(path) || !existsSync(join(plan.root, 'process-baseline.json'))) return false
+  sampleNativeWorktreeProcesses(plan)
   let stopped = detachedRuntimeIsGone(plan.pid, plan.receiptFile)
-  for (const identity of JSON.parse(readFileSync(path, 'utf8')) as ProcessIdentity[]) {
+  const owned = JSON.parse(readFileSync(path, 'utf8')) as ProcessIdentity[]
+  for (const identity of owned) {
     const token = processStartToken(identity.pid)?.replace(/\s+/g, ' ')
     if (token && token !== identity.startToken) continue
     try { process.kill(identity.pid, 0) }
@@ -85,5 +118,5 @@ export function nativeWorktreeProcessesStopped(plan: NativeOwnedPlan, terminate 
       catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error }
     }
   }
-  return stopped
+  return stopped && nativeUnknownProcesses(plan, owned).length === 0
 }

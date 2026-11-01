@@ -109,8 +109,8 @@ export function claudeWorktreeArgs(input: { sessionId: string; model: string; sc
 function settleClaudeWorktreeResult(plan: NativePlan, prompt: string, execution: StructuredExecution): WorktreeNativeResult {
   const root = plan.root, native = execution.claudeNative
   if (plan.cliVersion !== CLI_VERSION || plan.requestDigest !== hash({ prompt, policy: structuredExecutionPolicy(execution) }) || plan.policyDigest !== hash(structuredExecutionPolicy(execution))
-    || !native || native.root !== root || native.sessionId !== plan.sessionId || native.userUuid !== plan.userUuid || native.pid !== plan.pid || native.receiptFile !== plan.receiptFile
-    || !nativeWorktreeProcessesStopped(plan)) throw new StructuredSessionError('stale_result', 'Claude worktree completion lost its exact request/native/process identity')
+    || !native || native.root !== root || native.sessionId !== plan.sessionId || native.userUuid !== plan.userUuid || native.pid !== plan.pid || native.receiptFile !== plan.receiptFile) throw new StructuredSessionError('stale_result', 'Claude worktree completion lost its exact request/native/process identity')
+  if (execution.state !== 'completed' && !nativeWorktreeProcessesStopped(plan)) throw new StructuredSessionError('cancellation_pending', 'Claude worktree native or unknown orphan stop remains unproven')
   const init = JSON.parse(readFileSync(join(root, 'init.json'), 'utf8')) as { session_id: string; model: string; tools: string[] }
   const echo = JSON.parse(readFileSync(join(root, 'user-echo.json'), 'utf8')) as ClaudeFrozenWitness['echo']
   const result = JSON.parse(readFileSync(join(root, 'result.json'), 'utf8')) as ClaudeFrozenWitness['result']
@@ -365,6 +365,7 @@ export async function claudeStructuredTurn(realm: string, id: string, prompt: st
   const args = worktree ? claudeWorktreeArgs({ sessionId: native.sessionId, model, schema: execution.schema, effort: execution.effort, mode: execution.worktree!.mode }) : claudeStructuredArgs({ sessionId: native.sessionId, model, mcpConfig, schema: execution.schema, effort: execution.effort })
   writeFileSync(join(root, 'launch.json'), JSON.stringify({ command: cliPath, args, environmentNames: Object.keys(env), cwd, capability: { cliVersion: CLI_VERSION, binaryDigest, maxReadBytes: 65536, maxResultSizeChars: 500000, maxMcpOutputTokens: 500000 } }), { mode: 0o400 })
   await callbacks.onTurnStarting?.()
+  if (worktree) sampleNativeWorktreeProcesses(plan)
   const child = spawn(worktree ? cliPath : '/usr/bin/sandbox-exec', worktree ? args : ['-f', profile, cliPath, ...args], { cwd, env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] })
   if (!child.pid) throw new StructuredSessionError('failed', 'Claude isolated process could not start')
   const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => child.once('close', (code, signal) => resolve({ code, signal })))
