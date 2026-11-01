@@ -579,6 +579,49 @@ test('精确all-null选择保留HEAD差量基准，只读上下文不造新增�
   assert.equal(gap.reviewPassed, true); assert.deepEqual(gap.newNodes, []); assert.ok(gap.findings.some(finding => finding.paths.includes(unowned)))
 })
 
+test('分区保留尚无owner的null意图资源，真实owner仍按读取路径投影', async t => {
+  const f = await fixture(t), specPath = '.spec/export/export-contract/spec.md', absentPath = '.spec/export/future/spec.md'
+  const foreignPath = '.spec/other/other-contract/spec.md'
+  mkdirSync(join(f.root, '.spec/other/other-contract'), { recursive: true })
+  writeFileSync(join(f.root, foreignPath), f.raw.replaceAll('EXPORT', 'OTHER').replaceAll('src/export.js', 'src/other.js').replaceAll('tests/export.test.mjs', 'tests/other.test.mjs'))
+  git(f.root, 'add', foreignPath); git(f.root, 'commit', '-m', 'independent intent owner')
+  const prepared = await f.input(), snapshot = prepared.snapshot, commonDir = snapshot.source.commonDir
+  const paths = [specPath, absentPath, foreignPath, 'src/export.js', 'tests/export.test.mjs']
+  const baselineSelection = freezeSelection(snapshot, [
+    ...paths.map(path => ({ resource: { kind: 'path' as const, path }, bytePair: null })),
+    ...['REQ-EXPORT-01', 'REQ-OTHER-01', 'REQ-FUTURE-01'].map(id => ({ resource: { kind: 'contract' as const, id }, intentPair: null })),
+    { resource: { kind: 'flow', id: 'FLOW-FUTURE-01' }, intentPair: null },
+  ])
+  const composed = composeInputSnapshots(snapshot, baselineSelection, { executionPaths: [specPath, absentPath], contextPaths: ['src/export.js', 'tests/export.test.mjs'] }).composed!
+  const originalEvidence = readEvidence(commonDir, composed.compositionEvidenceBlob!), originalSelection = JSON.stringify(baselineSelection)
+  const originalIndex = readFileSync(join(f.root, '.git/index')), originalSource = readFileSync(join(f.root, 'src/export.js'))
+  const evidence = readCompositionEvidence(snapshot, composed, baselineSelection)
+  const uninitialized = evidence.intents.filter(item => ['REQ-FUTURE-01', 'FLOW-FUTURE-01'].includes(item.resource.id))
+  assert.equal(uninitialized.length, 2)
+  assert.ok(uninitialized.every(item => item.pairId === null && item.before === null && item.delivery === null && item.source === null))
+  const readPaths = [specPath, absentPath, 'src/export.js', 'tests/export.test.mjs']
+  const input: CodeBehaviorInput = { ...prepared, snapshot, baseline: null, baselineSelection, composed, partition: { id: 'local-owner', changedPaths: ['src/export.js'], factSourcePaths: ['src/export.js'] }, plan: { ...prepared.plan, readPaths } }
+  const calls: string[] = []
+  const analysis = await analyzeCodeBehavior(input, async request => {
+    calls.push(request.purpose)
+    const frozen = readFrozenBehaviorContext<{ compositionEvidence: typeof evidence; contractItems: { previous: { id: string }[]; current: { id: string }[] }; readablePaths: { path: string }[]; plan: CodeBehaviorInput['plan'] }>(request)
+    assert.deepEqual(frozen.compositionEvidence.intents, evidence.intents.filter(item => item.resource.id !== 'REQ-OTHER-01'))
+    assert.deepEqual(frozen.compositionEvidence.paths.find(item => item.path === absentPath), evidence.paths.find(item => item.path === absentPath))
+    assert.ok([...frozen.contractItems.previous, ...frozen.contractItems.current].every(item => !item.id.includes('FUTURE')), '未初始化资源不冒充已存在契约')
+    assert.ok(!frozen.readablePaths.some(item => item.path === absentPath || item.path === foreignPath), 'null资源不产生正文读取证明或区外读取权')
+    assert.deepEqual(frozen.plan.writePaths, input.plan.writePaths)
+    return runner('refactor')(request)
+  })
+  assert.equal(analysis.reviewPassed, true)
+  assert.deepEqual(calls, ['code_behavior_analyze', 'code_behavior_review'])
+  assert.equal(JSON.stringify(baselineSelection), originalSelection)
+  assert.deepEqual(readEvidence(commonDir, composed.compositionEvidenceBlob!), originalEvidence)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), originalIndex)
+  assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), originalSource)
+  assert.equal(existsSync(join(f.root, absentPath)), false)
+  assert.equal((await captureInputSnapshot(f.root)).id, snapshot.id)
+})
+
 test('真实paired空base仍删除HEAD差量基准，已commit新增测试不能被当作无pair跳过', async t => {
   const f = await fixture(t), path = 'tests/paired-addition.test.js'
   writeFileSync(join(f.root, path), 'export const pairedAddition = true;\n'); git(f.root, 'add', path); git(f.root, 'commit', '-m', 'new test after verified pair')

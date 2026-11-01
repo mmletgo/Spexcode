@@ -10,6 +10,8 @@ code:
 
 ## expanded spec
 
+分区投影保留尚未初始化的意图资源：精确选择中的 contract/flow 若 before、delivery、source 三个 owner 均为 null，原 residual 元数据及 null 语义仍进入分析和独审，不猜测路径或丢弃资源；存在真实 owner 时仍按本区 readPaths 投影。无 owner 元数据不成为契约正文、既有稳定业务义务、读取证明或写入授权，原 selection、scope 及其摘要不被改写。
+
 分区协调可在既有完整冻结context生成唯一inputDigest后、任何Native派发前消费严格匹配的已审analysis checkpoint；此接缝不另算业务摘要，不改变原检查范围、checkedPaths/checkedChangeIds、独立session/thread或完整输入验证。原分析/ref/traces保持，来源与当前fence的承接证明由协调器保存；失败或未审原件不返回为已审结果，修复诊断仍只作当前失败分区的数据。
 
 [[sync-code-writeback]] 的行为分析复用独立受限native会话及既有budget/checkpoint。完整旧source、已验证delivery/newsource、共同coveredScope和冻结raw/规则/调用/测试字节进入分析，原意与真实外部差量分别保留；未读取上下文或超预算拒绝，不截断断言。构建与审查session/thread独立，输出及完整readSet/policy/composed/input绑定；审查重新检查每个变化和实际影响路径。
