@@ -67,3 +67,5 @@ Claude 新请求在首次冻结时把完整 task 和条目生成最多65536字�
 
 
 原生 worktree 请求明确提供 worktree:{baseCommit,tree,mode} 时，走独立 version6/native-worktree-v1 策略及专属 realm，不调用 prepareFrozenPrompt，不产生 frozenReadProof，旧只读策略与证明仍完整保留。仅明确 Claude/ZCode 原生模型可执行。baseCommit 必须是完整不可变 seed commit SHA，tree 精确等于其 Git tree；创建固定 base 与 forkCommit 均为 seed，后续主 checkout 的 HEAD/index/WIP 不参与初始化。runner 用创建记录的真实 worktreePath 作为 cwd，允许正常文件读取、搜索、编辑与检查，schema 仅控制最终输出格式。read 模式完成要求 HEAD/tree 等于 seed 且工作区干净；edit 模式要求代理正常 Git add/commit（保留 hooks），HEAD 是 seed 后代且干净。结果及持久 envelope 保存 baseCommit/baseTree/headCommit/tree/worktreePath，所有差量由真实 Git 对象导出。精确原生模型、session/turn、终态、退出与完整进程停止仍必需；冷 completed 核原证据和同一不可变 Git 对象身份，正式 close 移除 worktree 不阻断复用、不重建工作区，零新派发。有限与 null 模型期限均支持，创建及取消期限独立。
+
+已认证原生成功输出通过 schema 后，Git 后置合约拒绝以 native_worktree_result_invalid 持久在 failed.errorCode；原错误及已知精确身份在同键冷重放保持，不新派 Native，不写 output/resultWorktree 或 canonical completed。原生 CLI 协议完成缓存与原 Git/index/草稿保持原件，不能代表业务通过；旧缺码失败不按文本推定新分类。

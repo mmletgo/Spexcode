@@ -573,7 +573,7 @@ export function claudeApiToolResultIds(content: readonly ClaudePublicContentBloc
 
 export type ClaudeRecovery = { text: string; hashes: Set<string>; summaries: Set<string>; requests: Set<string>; consumed: boolean }
 /** 成功路径核已观察续行与结构输出提醒；已停失败分类仍只取输出上限。 */
-function claudeRecoveryCompanion(row: ClaudePublicRecord, promptId: string | undefined, latestMessage: string | undefined, latestAssistant: string | undefined, outputLimitOnly = false): ClaudeRecovery | null {
+export function claudeRecoveryCompanion(row: ClaudePublicRecord, promptId: string | undefined, latestMessage: string | undefined, latestAssistant: string | undefined, outputLimitOnly = false): ClaudeRecovery | null {
   const enforcement = !outputLimitOnly && row.isMeta === true && row.turnCompanion === undefined && row.message?.role === 'user' && row.message.content === CLAUDE_STRUCTURED_OUTPUT_ENFORCE_TEXT
   const text = enforcement ? CLAUDE_STRUCTURED_OUTPUT_ENFORCE_TEXT : row.isMeta === true && row.turnCompanion === true && row.message?.role === 'user'
     ? (outputLimitOnly ? [CLAUDE_OUTPUT_LIMIT_RECOVERY_TEXT] : CLAUDE_RECOVERY_TEXTS).find(text => claudeMessageDigest(row.message) === claudeMessageDigest({ role: 'user', content: text })) : undefined

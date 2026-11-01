@@ -4,21 +4,23 @@ import { spawn, spawnSync, execFileSync, type ChildProcessWithoutNullStreams } f
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createInterface } from 'node:readline'
 import { detachedRuntimeIsGone, processStartToken, verifyDetachedRuntime, writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
-import { checkClaudeHistoryChain, claudeApiRequestHashes, claudeApiSourceDigest, claudeApiToolResultIds, claudeMessageBlocks, claudeMessageDigest, claudeOutputLimitCompanions, matchingClaudeRecoveries, recordClaudeRecoveryRequest, consumeClaudeRecoveryRequest, proveClaudeFrozenReads, readClaudeApiMessageBlobs, readClaudeApiSourceMetadata, readClaudeMcpToolNames, readClaudePublicHistory, verifyFrozenReadProof, type ClaudeRecovery, type ClaudeFrozenWitness, type ClaudePublicMessage, type ClaudePublicRecord, type FrozenReadProof } from './frozen-context.js'
+import { checkClaudeHistoryChain, claudeRecoveryCompanion, claudeApiRequestHashes, claudeApiSourceDigest, claudeApiToolResultIds, claudeMessageBlocks, claudeMessageDigest, claudeOutputLimitCompanions, matchingClaudeRecoveries, recordClaudeRecoveryRequest, consumeClaudeRecoveryRequest, proveClaudeFrozenReads, readClaudeApiMessageBlobs, readClaudeApiSourceMetadata, readClaudeMcpToolNames, readClaudePublicHistory, verifyFrozenReadProof, type ClaudeRecovery, type ClaudeFrozenWitness, type ClaudePublicMessage, type ClaudePublicRecord, type FrozenReadProof } from './frozen-context.js'
 import { structuredExecutionTimer, StructuredSessionError, structuredExecutionPolicy, structuredSeatbeltProfile, type StructuredExecution } from './session-structured-policy.js'
 
 const CLI_VERSION = '2.1.309 (Claude Code)'
 const toolNames = ['StructuredOutput', 'mcp__frozen__spex_read_frozen']
 const systemPrompt = 'Read only immutable context through the configured spex_read_frozen MCP. Follow the frozen task and return the requested schema using StructuredOutput. No shell, files, network, tools discovery, skills or subagents. Never call DeferredToolPlaceholder.'
 const hash = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex')
-type NativePlan = { version: 1; root: string; sessionId: string; userUuid: string; requestDigest: string; policyDigest: string; historyPath?: string; cliPath: string; cliVersion: string; binaryDigest: string; pid?: number; receiptFile: string }
+type NativePlan = { version: 1; root: string; sessionId: string; userUuid: string; requestDigest: string; policyDigest: string; historyPath?: string; cliPath: string; cliVersion: string; binaryDigest: string; pid?: number; receiptFile: string; workspace?: string }
 type WorktreeNativeResult = { threadId: string; turnId: string; text: string; frozenReadProof?: never }
 type NativeResult = { threadId: string; turnId: string; text: string; frozenReadProof: FrozenReadProof }
 type Completed = { plan: NativePlan; witness: ClaudeFrozenWitness; result: NativeResult }
+type TerminalStopRequest = { version: 1; reason: 'terminal_settlement'; sessionId: string; userUuid: string; pid: number; receiptDigest: string; requestDigest: string; resultDigest: string; signal: 'SIGTERM'; requestedAt: number }
+type TerminalStopObservation = { version: 1; requestObservationDigest: string; outcome: 'sent' | 'gone'; observedAt: number }
 type NativeCallbacks = { onThread(id: string): Promise<void>; onTurn(id: string): Promise<void>; onTurnStarting?(): Promise<void>; onNative(state: NonNullable<StructuredExecution['claudeNative']>): Promise<void>; onTimeout?(): Promise<void>; signal?: AbortSignal }
 const active = new Map<string, { child: ChildProcessWithoutNullStreams; interrupt: () => void }>()
 const authenticationKeys = ['ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_BASE_URL'] as const
@@ -105,21 +107,110 @@ export function claudeWorktreeArgs(input: { sessionId: string; model: string; sc
     '--permission-mode', input.mode === 'read' ? 'plan' : 'bypassPermissions', '--json-schema', JSON.stringify(input.schema), ...(input.effort ? ['--effort', input.effort] : [])]
 }
 
+type ClaudeToolReply = Exclude<ClaudePublicMessage['content'], string>[number]
+
+/** 两种执行模式共用原生 schema 错误字段提取，不修补模型业务结果。 */
+function claudeSchemaRetryError(calls: ReadonlyMap<string, ClaudePublicRecord>, responses: ReadonlyMap<string, ClaudeToolReply>, identity: { threadId: string; turnId: string }): StructuredSessionError {
+  const schemaErrors = [...responses].flatMap(([callId, reply]) => {
+    const call = calls.get(callId)?.message?.content
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(callId) || !Array.isArray(call) || !call.some(block => block.id === callId && block.name === 'StructuredOutput') || reply.is_error !== true || typeof reply.content !== 'string' || !reply.content.startsWith('Output does not match required schema: ')) return []
+    const fields = [...reply.content.slice('Output does not match required schema: '.length).matchAll(/(?:^|, )(\/[A-Za-z0-9_/-]{0,160}): (must be (?:array|object|string|number|integer|boolean|null)|must NOT have more than \d{1,8} items|must have required property '[A-Za-z0-9_-]{1,80}')(?=, | \(got \d+\)|$)/g)].slice(0, 12).map(match => ({ path: match[1], error: match[2] }))
+    return fields.length ? [{ callId, fields }] : []
+  }).slice(-5)
+  return new StructuredSessionError('structured_output_retries_exhausted', `Claude error_max_structured_output_retries rejected the structured output; original native result and schema errors remain in its history${schemaErrors.length ? `; schemaErrors=${JSON.stringify(schemaErrors)}` : ''}`, identity)
+}
+
+/** 旧 worktree plan 的真实 cwd 已在不可变 launch 中；所有结算入口共用同一归一。 */
+function claudeWorktreeProcessPlan(plan: NativePlan): NativePlan {
+  if (plan.workspace) return plan
+  const path = join(plan.root, 'launch.json')
+  if (!existsSync(path)) throw new StructuredSessionError('cancellation_pending', 'Claude worktree task directory is unproven')
+  const launch = JSON.parse(readFileSync(path, 'utf8')) as { cwd?: unknown }
+  if (typeof launch.cwd !== 'string' || !isAbsolute(launch.cwd)) throw new StructuredSessionError('cancellation_pending', 'Claude worktree launch cwd is unproven')
+  return { ...plan, workspace: launch.cwd }
+}
+
+/** 正常文件工具保持开放；失败仅认证同轮工具配对、原生模型与严格 companion。 */
+function worktreeSchemaRetryError(history: readonly ClaudePublicRecord[], original: ClaudePublicRecord, execution: StructuredExecution): StructuredSessionError {
+  const calls = new Map<string, ClaudePublicRecord>(), responses = new Map<string, ClaudeToolReply>(), requests = new Set<string>()
+  const validate = new Ajv({ allErrors: true }).compile(execution.schema)
+  let latestMessage: string | undefined, latestAssistant: string | undefined, schemaErrors = 0, enforcementSeen = false
+  for (const row of checkClaudeHistoryChain(history, original)) {
+    if (row.type === 'api-request') {
+      if (!row.id || row.model !== claudeNativeModel(execution.model)) throw new StructuredSessionError('stale_result', 'Claude worktree schema failure model request differs')
+      requests.add(row.id)
+    }
+    if (row.type === 'assistant' && Array.isArray(row.message?.content)) {
+      for (const block of row.message.content) {
+        if (!block.id || calls.has(block.id) || !row.requestRef || !requests.has(row.requestRef)) throw new StructuredSessionError('stale_result', 'Claude worktree schema failure has no exact native tool call')
+        calls.set(block.id, row)
+      }
+      latestAssistant = row.uuid
+    }
+    if (row.type === 'user' && row.uuid !== original.uuid && !row.compactSummary) {
+      const recovery = claudeRecoveryCompanion(row, original.promptId, latestMessage, latestAssistant)
+      if (recovery && row.turnCompanion === undefined) {
+        if (enforcementSeen) throw new StructuredSessionError('stale_result', 'Claude worktree schema enforcement was repeated')
+        enforcementSeen = true
+      }
+      if (!recovery) {
+        if (row.promptId !== original.promptId || !row.sourceToolAssistantUUID || row.sourceToolAssistantUUID !== row.parentUuid || !Array.isArray(row.message?.content) || !row.message.content.length) throw new StructuredSessionError('stale_result', 'Claude worktree schema failure contains another user input')
+        for (const reply of row.message.content) {
+          const call = calls.get(reply.tool_use_id ?? '')
+          if (reply.type !== 'tool_result' || !call || call.uuid !== row.sourceToolAssistantUUID || responses.has(reply.tool_use_id!)) throw new StructuredSessionError('stale_result', 'Claude worktree schema error reply lost its exact native call')
+          responses.set(reply.tool_use_id!, reply)
+          const block = Array.isArray(call.message?.content) ? call.message.content.find(block => block.id === reply.tool_use_id) : undefined
+          if (block?.name === 'StructuredOutput' && reply.is_error === true && typeof reply.content === 'string' && reply.content.startsWith('Output does not match required schema: ')) {
+            if (validate(block.input)) throw new StructuredSessionError('stale_result', 'Claude worktree schema error contradicts its pinned schema')
+            schemaErrors++
+          }
+        }
+      }
+    }
+    if (row.type === 'user' || row.type === 'assistant' || row.type === 'system' && row.subtype === 'api_error') latestMessage = row.uuid
+  }
+  if (!requests.size || !schemaErrors) throw new StructuredSessionError('stale_result', 'Claude worktree exhaustion has no original native schema errors')
+  return claudeSchemaRetryError(calls, responses, { threadId: original.sessionId, turnId: original.uuid! })
+}
+
+/** 终态控制只凭同请求的不可变意图及真实 syscall 结果；不推定已发送信号。 */
+function terminalStopOutcome(plan: NativePlan, result: ClaudeFrozenWitness['result']): 'sent' | 'gone' | null {
+  const requestPath = join(plan.root, 'terminal-stop-request.json'), observationPath = join(plan.root, 'terminal-stop.json')
+  if (!existsSync(requestPath) && !existsSync(observationPath)) return null
+  if (!existsSync(requestPath)) throw new StructuredSessionError('stale_result', 'Claude terminal stop has no matching request observation')
+  if (!existsSync(observationPath)) throw new StructuredSessionError('cancellation_pending', 'Claude terminal stop syscall outcome remains unproven')
+  const request = JSON.parse(readFileSync(requestPath, 'utf8')) as TerminalStopRequest, observation = JSON.parse(readFileSync(observationPath, 'utf8')) as TerminalStopObservation
+  if (request.version !== 1 || request.reason !== 'terminal_settlement' || request.signal !== 'SIGTERM' || request.sessionId !== plan.sessionId || request.userUuid !== plan.userUuid
+    || request.pid !== plan.pid || request.receiptDigest !== hash(JSON.parse(readFileSync(plan.receiptFile, 'utf8'))) || request.requestDigest !== plan.requestDigest || request.resultDigest !== hash(result)
+    || !Number.isFinite(request.requestedAt) || request.requestedAt <= 0 || observation.version !== 1 || observation.requestObservationDigest !== hash(request)
+    || !['sent', 'gone'].includes(observation.outcome) || !Number.isFinite(observation.observedAt) || observation.observedAt < request.requestedAt)
+    throw new StructuredSessionError('stale_result', 'Claude terminal stop observation differs from its exact native request/result/receipt')
+  return observation.outcome
+}
+
 /** 工作区模式只核原生输入、模型和终态身份，不借用冻结读取证明。 */
 function settleClaudeWorktreeResult(plan: NativePlan, prompt: string, execution: StructuredExecution): WorktreeNativeResult {
   const root = plan.root, native = execution.claudeNative
   if (plan.cliVersion !== CLI_VERSION || plan.requestDigest !== hash({ prompt, policy: structuredExecutionPolicy(execution) }) || plan.policyDigest !== hash(structuredExecutionPolicy(execution))
-    || !native || native.root !== root || native.sessionId !== plan.sessionId || native.userUuid !== plan.userUuid || native.pid !== plan.pid || native.receiptFile !== plan.receiptFile
-    || !nativeWorktreeProcessesStopped(plan)) throw new StructuredSessionError('stale_result', 'Claude worktree completion lost its exact request/native/process identity')
+    || !native || native.root !== root || native.sessionId !== plan.sessionId || native.userUuid !== plan.userUuid || native.pid !== plan.pid || native.receiptFile !== plan.receiptFile) throw new StructuredSessionError('stale_result', 'Claude worktree completion lost its exact request/native/process identity')
+  if (execution.state !== 'completed' && !nativeWorktreeProcessesStopped(claudeWorktreeProcessPlan(plan))) throw new StructuredSessionError('cancellation_pending', 'Claude worktree native or unknown orphan stop remains unproven')
   const init = JSON.parse(readFileSync(join(root, 'init.json'), 'utf8')) as { session_id: string; model: string; tools: string[] }
   const echo = JSON.parse(readFileSync(join(root, 'user-echo.json'), 'utf8')) as ClaudeFrozenWitness['echo']
   const result = JSON.parse(readFileSync(join(root, 'result.json'), 'utf8')) as ClaudeFrozenWitness['result']
-  const exit = JSON.parse(readFileSync(join(root, 'exit.json'), 'utf8')) as { code: number; signal: string | null; stopped: boolean }
+  const exit = JSON.parse(readFileSync(join(root, 'exit.json'), 'utf8')) as { code: number | null; signal: string | null; stopped: boolean }
   const history = readClaudePublicHistory(nativeHistoryPath(root, plan.sessionId), plan.sessionId), original = history.find(row => row.type === 'user' && row.uuid === plan.userUuid)
   if (init.session_id !== plan.sessionId || init.model !== claudeNativeModel(execution.model) || !original?.promptId || original.sessionId !== plan.sessionId
     || echo.uuid !== plan.userUuid || echo.session_id !== plan.sessionId || hash(echo.message) !== hash({ role: 'user', content: [{ type: 'text', text: prompt }] }) || hash(original.message) !== hash(echo.message)
-    || result.session_id !== plan.sessionId || result.user_message_uuid !== plan.userUuid || hash(result.user_message_uuids) !== hash([plan.userUuid]) || !exit.stopped || exit.code !== 0 || exit.signal !== null
-    || result.subtype !== 'success' || result.is_error || result.structured_output === undefined) throw new StructuredSessionError('stale_result', 'Claude worktree original prompt/model/success/exit evidence differs')
+    || original.parentUuid !== null || result.session_id !== plan.sessionId || result.user_message_uuid !== plan.userUuid || hash(result.user_message_uuids) !== hash([plan.userUuid]) || !exit.stopped) throw new StructuredSessionError('stale_result', 'Claude worktree original prompt/model/exit evidence differs')
+  if (result.subtype === 'error_max_structured_output_retries') {
+    const terminalOutcome = terminalStopOutcome(plan, result)
+    const naturalExit = exit.code === 1 && exit.signal === null && terminalOutcome !== 'sent'
+    const controlledExit = exit.code === null && exit.signal === 'SIGTERM' && terminalOutcome === 'sent'
+    if (execution.state === 'completed' || existsSync(join(root, 'completed.json')) || !naturalExit && !controlledExit || result.type !== 'result' || result.is_error !== true) throw new StructuredSessionError('stale_result', 'Claude worktree schema exhaustion terminal differs')
+    throw worktreeSchemaRetryError(history, original, execution)
+  }
+  if (execution.state !== 'completed' && terminalStopOutcome(plan, result) === 'sent') throw new StructuredSessionError('failed', 'Claude terminal success required process-group termination and is not a completed result')
+  if (exit.code !== 0 || exit.signal !== null || result.subtype !== 'success' || result.is_error || result.structured_output === undefined) throw new StructuredSessionError('stale_result', 'Claude worktree success evidence differs')
   const validate = new Ajv({ allErrors: true }).compile(execution.schema)
   if (!validate(result.structured_output)) throw new StructuredSessionError('failed', 'Claude worktree structured output does not match its schema')
   const answer: WorktreeNativeResult = { threadId: plan.sessionId, turnId: plan.userUuid, text: JSON.stringify(result.structured_output) }
@@ -169,6 +260,7 @@ function settleClaudeResult(plan: NativePlan, prompt: string, execution: Structu
   const echo = JSON.parse(readFileSync(join(root, 'user-echo.json'), 'utf8')) as ClaudeFrozenWitness['echo']
   const result = JSON.parse(readFileSync(join(root, 'result.json'), 'utf8')) as ClaudeFrozenWitness['result']
   if (!plan.pid || !detachedRuntimeIsGone(plan.pid, plan.receiptFile) || !claudeMcpStopped(root) || plan.cliVersion !== CLI_VERSION || init.model !== model || init.session_id !== plan.sessionId) throw new StructuredSessionError('stale_result', 'Claude complete native result lost its version, model or process-stop identity')
+  if (result.subtype === 'success' && terminalStopOutcome(plan, result) === 'sent') throw new StructuredSessionError('failed', 'Claude terminal success required process-group termination and is not a completed result')
   const historyPath = nativeHistoryPath(root, plan.sessionId)
   if (plan.historyPath && plan.historyPath !== historyPath) throw new StructuredSessionError('stale_result', 'Claude pinned native history path differs')
   const history = readClaudePublicHistory(historyPath, plan.sessionId), original = history.find(row => row.type === 'user' && row.uuid === plan.userUuid)
@@ -187,7 +279,7 @@ function settleClaudeResult(plan: NativePlan, prompt: string, execution: Structu
       const assistant = history.find(assistant => assistant.type === 'assistant' && assistant.uuid === row.sourceToolAssistantUUID)
       return row.message.content.some(block => block.type !== 'tool_result' || !Array.isArray(assistant?.message?.content) || !assistant.message.content.some(call => call.type === 'tool_use' && call.id === block.tool_use_id))
     })
-    if (exit.code !== 1 || exit.signal !== null || exit.stopped !== true || result.type !== 'result' || result.is_error !== true
+    if (exit.code !== 1 || exit.signal !== null || exit.stopped !== true || terminalStopOutcome(plan, result) === 'sent' || result.type !== 'result' || result.is_error !== true
       || plan.policyDigest !== hash(structuredExecutionPolicy(execution)) || execution.claudeNative && (execution.claudeNative.pid !== plan.pid || execution.claudeNative.receiptFile !== plan.receiptFile)
       || result.session_id !== plan.sessionId || result.user_message_uuid !== plan.userUuid || JSON.stringify(result.user_message_uuids) !== JSON.stringify([plan.userUuid])
       || echo.uuid !== plan.userUuid || echo.session_id !== plan.sessionId || original.parentUuid !== null
@@ -261,13 +353,7 @@ function settleClaudeResult(plan: NativePlan, prompt: string, execution: Structu
       }
     }
     if (recoveries.some(recovery => !recovery.consumed)) throw new StructuredSessionError('stale_result', 'Claude recovery companion has no new exact actual API consumer')
-    const schemaErrors = [...responses].flatMap(([callId, reply]) => {
-      const call = calls.get(callId)?.message?.content
-      if (!/^[A-Za-z0-9_-]{1,128}$/.test(callId) || !Array.isArray(call) || !call.some(block => block.id === callId && block.name === 'StructuredOutput') || reply.is_error !== true || typeof reply.content !== 'string' || !reply.content.startsWith('Output does not match required schema: ')) return []
-      const fields = [...reply.content.slice('Output does not match required schema: '.length).matchAll(/(?:^|, )(\/[A-Za-z0-9_/-]{0,160}): (must be (?:array|object|string|number|integer|boolean|null)|must NOT have more than \d{1,8} items|must have required property '[A-Za-z0-9_-]{1,80}')(?=, | \(got \d+\)|$)/g)].slice(0, 12).map(match => ({ path: match[1], error: match[2] }))
-      return fields.length ? [{ callId, fields }] : []
-    }).slice(-5)
-    throw new StructuredSessionError('structured_output_retries_exhausted', `Claude error_max_structured_output_retries rejected the structured output; original native result and schema errors remain in its history${schemaErrors.length ? `; schemaErrors=${JSON.stringify(schemaErrors)}` : ''}`, { threadId: plan.sessionId, turnId: plan.userUuid })
+    throw claudeSchemaRetryError(calls, responses, { threadId: plan.sessionId, turnId: plan.userUuid })
   }
   plan = { ...plan, historyPath }; writeFileSync(join(root, 'plan.json'), JSON.stringify(plan), { mode: 0o600 })
   const witness: ClaudeFrozenWitness = { version: 1, provider: 'claude-code', cliVersion: CLI_VERSION, model, sessionId: plan.sessionId, userUuid: plan.userUuid, promptId: original.promptId, prompt, nativeHistoryPath: historyPath, history, mcpHistory: { path: mcpPath, toolNames: readClaudeMcpToolNames(mcpPath) }, echo, result, initTools: init.tools }
@@ -297,7 +383,7 @@ export async function stopClaudeStructuredTurn(execution: StructuredExecution, t
     if (!proof.ok) return { nativeStopped: false, acknowledged: false, error: 'Claude exact process-group ownership is unproven' }
     try { process.kill(-plan.pid, 'SIGTERM') } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error }
   }
-  const stoppedProcesses = (terminate = false): boolean => execution.policy === 'native-worktree-v1' ? nativeWorktreeProcessesStopped(plan, terminate) : detachedRuntimeIsGone(plan.pid!, plan.receiptFile) && claudeMcpStopped(native.root, terminate)
+  const stoppedProcesses = (terminate = false): boolean => execution.policy === 'native-worktree-v1' ? nativeWorktreeProcessesStopped(claudeWorktreeProcessPlan(plan), terminate) : detachedRuntimeIsGone(plan.pid!, plan.receiptFile) && claudeMcpStopped(native.root, terminate)
   if (execution.policy !== 'native-worktree-v1') claudeMcpStopped(native.root, true)
   const deadline = Date.now() + timeoutMs
   while (!stoppedProcesses(true) && Date.now() < deadline) await new Promise<void>(resolve => setTimeout(resolve, 25))
@@ -338,7 +424,7 @@ export async function claudeStructuredTurn(realm: string, id: string, prompt: st
   for (const name of ['cwd', 'claude-home', 'tmp', 'debug']) mkdirSync(join(root, name), { recursive: true, mode: 0o700 })
   const native = { version: 1 as const, root, sessionId: randomUUID(), userUuid: randomUUID() }
   const configHome = join(root, 'claude-home'), cwd = worktree ? worktreePath! : join(root, 'cwd')
-  let plan: NativePlan = { ...native, requestDigest: hash({ prompt, policy: structuredExecutionPolicy(execution) }), policyDigest: hash(structuredExecutionPolicy(execution)), cliPath, cliVersion: CLI_VERSION, binaryDigest, receiptFile: join(root, 'process.json') }
+  let plan: NativePlan = { ...native, ...(worktree ? { workspace: cwd } : {}), requestDigest: hash({ prompt, policy: structuredExecutionPolicy(execution) }), policyDigest: hash(structuredExecutionPolicy(execution)), cliPath, cliVersion: CLI_VERSION, binaryDigest, receiptFile: join(root, 'process.json') }
   const mcpInput = join(root, 'reader.json'), mcpConfig = join(root, 'mcp.json'), profile = join(root, 'policy.sb')
   if (!worktree) {
     writeFileSync(mcpInput, JSON.stringify({ root, ref: execution.frozenContext }), { mode: 0o400 })
@@ -365,6 +451,7 @@ export async function claudeStructuredTurn(realm: string, id: string, prompt: st
   const args = worktree ? claudeWorktreeArgs({ sessionId: native.sessionId, model, schema: execution.schema, effort: execution.effort, mode: execution.worktree!.mode }) : claudeStructuredArgs({ sessionId: native.sessionId, model, mcpConfig, schema: execution.schema, effort: execution.effort })
   writeFileSync(join(root, 'launch.json'), JSON.stringify({ command: cliPath, args, environmentNames: Object.keys(env), cwd, capability: { cliVersion: CLI_VERSION, binaryDigest, maxReadBytes: 65536, maxResultSizeChars: 500000, maxMcpOutputTokens: 500000 } }), { mode: 0o400 })
   await callbacks.onTurnStarting?.()
+  if (worktree) sampleNativeWorktreeProcesses(plan)
   const child = spawn(worktree ? cliPath : '/usr/bin/sandbox-exec', worktree ? args : ['-f', profile, cliPath, ...args], { cwd, env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] })
   if (!child.pid) throw new StructuredSessionError('failed', 'Claude isolated process could not start')
   const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => child.once('close', (code, signal) => resolve({ code, signal })))
@@ -388,19 +475,29 @@ export async function claudeStructuredTurn(realm: string, id: string, prompt: st
   const stopDeadline = new Promise<never>((_resolve, reject) => { rejectStop = reject })
   const killOwnGroup = (): void => {
     if (!verifyDetachedRuntime(plan.pid!, plan.receiptFile).ok) return
-    try { process.kill(-plan.pid!, 'SIGTERM') }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') rejectStop(new StructuredSessionError('cancellation_pending', 'Claude exact process-group termination was refused')) }
+    try {
+      const request = result && !aborted && !failure ? { version: 1 as const, reason: 'terminal_settlement' as const, sessionId: native.sessionId, userUuid: native.userUuid, pid: plan.pid!, receiptDigest: hash(JSON.parse(readFileSync(plan.receiptFile, 'utf8'))), requestDigest: plan.requestDigest, resultDigest: hash(result), signal: 'SIGTERM' as const, requestedAt: Date.now() } satisfies TerminalStopRequest : undefined
+      if (request) persistCompletionJson(join(root, 'terminal-stop-request.json'), request)
+      let outcome: TerminalStopObservation['outcome'] = 'sent'
+      try { process.kill(-plan.pid!, 'SIGTERM') }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; outcome = 'gone' }
+      if (request) persistCompletionJson(join(root, 'terminal-stop.json'), { version: 1, requestObservationDigest: hash(request), outcome, observedAt: Date.now() } satisfies TerminalStopObservation)
+    } catch (error) { rejectStop(new StructuredSessionError('cancellation_pending', `Claude exact process-group termination or its observation remains unproven (${(error as NodeJS.ErrnoException).code ?? 'observation_failed'})`)) }
   }
+
   let stopTimer: ReturnType<typeof setTimeout> | undefined
   let stopLimit: ReturnType<typeof setTimeout> | undefined
+  const armStop = (): void => {
+    stopTimer ??= setTimeout(killOwnGroup, 10000)
+    stopLimit ??= setTimeout(() => rejectStop(new StructuredSessionError('cancellation_pending', 'Claude terminal/cancellation exceeded the exact native stop budget')), 15000)
+  }
   const interrupt = (): void => {
     aborted = true
+    armStop()
     if (interruptId || !child.stdin.writable) return
     interruptId = randomUUID()
     writeFileSync(join(root, 'interrupt-request.json'), JSON.stringify({ requestId: interruptId, sessionId: native.sessionId, userUuid: native.userUuid }), { mode: 0o600 })
     child.stdin.write(`${JSON.stringify({ type: 'control_request', request_id: interruptId, request: { subtype: 'interrupt' } })}\n`)
-    stopTimer = setTimeout(killOwnGroup, 10000)
-    stopLimit = setTimeout(() => rejectStop(new StructuredSessionError('cancellation_pending', 'Claude cancellation exceeded the exact native stop budget')), 15000)
   }
   active.set(root, { child, interrupt })
   const abort = (): void => interrupt()
@@ -426,7 +523,7 @@ export async function claudeStructuredTurn(realm: string, id: string, prompt: st
         if (response.subtype === 'success') writeFileSync(join(root, 'interrupt-ack.json'), JSON.stringify({ requestId: response.request_id, sessionId: native.sessionId }), { mode: 0o400 })
       } else if (event.type === 'result') {
         result = Object.fromEntries(['type', 'subtype', 'is_error', 'session_id', 'uuid', 'user_message_uuid', 'user_message_uuids', 'structured_output'].map(key => [key, event[key]])) as ClaudeFrozenWitness['result']
-        writeFileSync(join(root, 'result.json'), JSON.stringify(result), { mode: 0o400 }); child.stdin.end()
+        writeFileSync(join(root, 'result.json'), JSON.stringify(result), { mode: 0o400 }); armStop(); child.stdin.end()
       }
     }).catch(error => {
       failure = error as Error; killOwnGroup()

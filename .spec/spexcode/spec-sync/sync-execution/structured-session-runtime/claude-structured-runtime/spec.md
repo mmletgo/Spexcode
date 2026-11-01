@@ -60,3 +60,13 @@ version5/null 请求沿原 Claude policy、realm 与版本3读取证明执行，
 
 
 明确的 version6/native-worktree-v1 是独立执行模式：cwd 必须为创建记录的真实 worktree；read 使用原生 plan 权限且完成不许改动，edit 使用正常可写权限与内置文件/Bash 工具，不施加 frozen MCP 唯一工具、restricted/空工具或只读 Seatbelt。仍隔离运行记录、沿既有认证在内存使用，不输出凭据。精确 init model、原 session/user UUID、原 prompt 回显及 history、成功 structured_output/schema、exit0 和专属整组停止共同绑定结果；不要求分块读取或逐字 API 消费证明，也不借用旧 frozenReadProof。冷完成读取原 evidence 并核 Git 结果，不重启 CLI。旧 claude-frozen-read-only-v1 原约束不变。
+
+已持久 completed 的 worktree 冷重放核原完成缓存、固定请求、Native 身份、schema/输出和原 exit.stopped/close 证据，不再探测历史 PID/PGID，避免无关复用导致伪 stale；running 或未结算仍必须实时证明原进程与后代停止。
+
+worktree 停止与未结算重放共用 [[native-worktree-runtime]] 的正向任务域边界及 boundaryVersion2 追加观察，保留原 failed exit/unknown 原件。旧 Claude plan 缺 workspace 时，stop/replay/settle 都从原不可变 launch.cwd 归一，域缺失明确 pending，不以 stale→failed 释放真实任务孤儿。
+
+原生 worktree v6 的 error_max_structured_output_retries 在原请求/Native session/user/promptId、实际 model、exit1/is_error 与真实停止均绑定后，依据原 history 中精确 StructuredOutput 调用及配对 schema 错误，返回同一 structured_output_retries_exhausted。诊断复用原安全字段提取，不规范化或补填业务 JSON、不创建 completed/读取证明/Git 结果。原生同 promptId 的结构输出 enforce 元消息不是新业务用户；正常内置工具不受旧 frozen 白名单及逐字消费证明限制。旧冻结失败认证仍完整保留；普通失败、身份差异、停止不明或 completed 原件篡改不取得此分类。既有 runtime 持久 code、协调 repairDiagnostics、新 attempt 与独审/资源结算接缝保持。
+
+取消先幂等启动原 10 秒精确 receipt 组终止与 15 秒未证实停止截止，再判断 stdin 是否仍可写或 interrupt 是否已发送；重复取消不重置期限。收到原生 result 后也启动同一有限收尾窗口，与 timeoutMs:null 的无限模型调用预算独立，不能无限等待 CLI close。未证实专属组及全部任务后代停止仍保持 cancellation_pending 与容量债务。
+
+终态收尾触发 SIGTERM 时，先保存不可变 terminal-stop-request.json 控制意图，绑定原 session/user、PID、receipt 摘要、固定请求及原 result 摘要和时间，再追加 terminal-stop.json 记录同意图的真实 syscall sent/gone 结果；ESRCH 不能冒充已发 TERM，意图已有但结果未知仍 pending。exit.json 始终记录真实 code/signal/stopped。受控终止的 success（包括信号 handler 返回 exit0）不发布 completed；同观察证明 ESRCH 且真实自然 exit0 仍可通过，旧冻结无缓存补证共用此拒绝门。worktree 的真实 error_max_structured_output_retries 只有完整原身份、模型、prompt/history/schema 错误与停止门通过，并且自然 exit1，或实际 SIGTERM 退出和同 terminal/plan/receipt 控制观察精确相等时，保留原 typed schema 失败；无观察、错观察、未知停止不取得分类，不伪造 exit0/1。原自然 completed 冷缓存不要求新增观察或活查历史 PID；旧冻结失败仍只接受自然 exit1，新 sent 观察下 handler 返回1不冒充自然退出，也不扩展到受控 SIGTERM 类型。

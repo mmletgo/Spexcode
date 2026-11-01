@@ -40,7 +40,7 @@ const reject = (message: string): never => { throw Object.assign(new Error(messa
 function readonlyRepairInput(input: ElaborationInput, repair: ReadonlySpecRepair): ElaborationInput {
   if (input.worktree && input.historyInput) {
     const generation = JSON.parse(readEvidence(input.historyInput.source.commonDir, repair.generationRef).toString('utf8')) as Pick<GenerationResult, 'candidate'>
-    if (!generation.candidate || generation.candidate.digest !== repair.candidateDigest) reject('只读修复seed必须绑定原真实失败candidate')
+    if (!generation.candidate || generation.candidate.digest !== repair.candidateDigest) return reject('只读修复seed必须绑定原真实失败candidate')
     verifyCandidate(input.historyInput.source.commonDir, generation.candidate)
     input = { ...input, worktree: stageWorktree(input.historyInput.source.commonDir, input.historyInput.headCommit, generation.candidate.tree) }
   }

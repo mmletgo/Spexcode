@@ -30,7 +30,7 @@ export type StructuredExecution = {
   output?: unknown
   resultDigest?: string
   error?: string
-  errorCode?: 'structured_output_retries_exhausted' | 'structured_output_format_invalid'
+  errorCode?: 'structured_output_retries_exhausted' | 'structured_output_format_invalid' | 'native_worktree_result_invalid'
   worktree?: NativeWorktreeRequest
   resultWorktree?: NativeWorktreeResult
   frozenContext?: FrozenContextRef
@@ -99,7 +99,7 @@ export class StructuredSessionError extends Error {
   readonly sessionId?: string
   readonly threadId?: string
   readonly turnId?: string
-  constructor(readonly code: 'unsupported' | 'failed' | 'cancelled' | 'timeout' | 'key_reused' | 'stale_result' | 'cancellation_pending' | 'structured_output_retries_exhausted' | 'structured_output_format_invalid', message: string, identity: { sessionId?: string; threadId?: string; turnId?: string } = {}) {
+  constructor(readonly code: 'unsupported' | 'failed' | 'cancelled' | 'timeout' | 'key_reused' | 'stale_result' | 'cancellation_pending' | 'structured_output_retries_exhausted' | 'structured_output_format_invalid' | 'native_worktree_result_invalid', message: string, identity: { sessionId?: string; threadId?: string; turnId?: string } = {}) {
     super(message)
     this.name = 'StructuredSessionError'
     this.sessionId = identity.sessionId
