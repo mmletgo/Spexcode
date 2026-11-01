@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { structuredExecutionPolicy, structuredRealmRoot, type StructuredExecution } from './session-structured-policy.js'
 import { execFileSync, spawn } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
@@ -121,7 +121,7 @@ test('Claude worktree cold completion binds native user/model/exit and never bor
     const native = { version: 1 as const, root, sessionId: 'session', userUuid: 'user', ...processIdentity }, execution: StructuredExecution = { ...policy, claudeNative: native, state: 'running' }
     const plan = { ...native, policyDigest: hash(policy), requestDigest: hash({ prompt, policy }), cliVersion: '2.1.309 (Claude Code)' }
     const echo = { uuid: 'user', session_id: 'session', message: { role: 'user', content: [{ type: 'text', text: prompt }] } }
-    for (const [name, value] of Object.entries({ 'plan.json': plan, 'init.json': { session_id: 'session', model: 'MiniMax-M3.1-Flash', tools: ['Read', 'Bash', 'Edit', 'StructuredOutput'] }, 'user-echo.json': echo, 'result.json': { type: 'result', subtype: 'success', is_error: false, session_id: 'session', user_message_uuid: 'user', user_message_uuids: ['user'], structured_output: output }, 'exit.json': { code: 0, signal: null, stopped: true } })) writeFileSync(join(root, name), JSON.stringify(value))
+    for (const [name, value] of Object.entries({ 'plan.json': plan, 'launch.json': { cwd: f.path }, 'init.json': { session_id: 'session', model: 'MiniMax-M3.1-Flash', tools: ['Read', 'Bash', 'Edit', 'StructuredOutput'] }, 'user-echo.json': echo, 'result.json': { type: 'result', subtype: 'success', is_error: false, session_id: 'session', user_message_uuid: 'user', user_message_uuids: ['user'], structured_output: output }, 'exit.json': { code: 0, signal: null, stopped: true } })) writeFileSync(join(root, name), JSON.stringify(value))
     writeFileSync(join(root, 'claude-home/projects/exact/session.jsonl'), JSON.stringify({ type: 'user', sessionId: 'session', uuid: 'user', parentUuid: null, promptId: 'prompt', message: echo.message }) + '\n')
     const result = await claudeStructuredTurn(realm, 'native', prompt, execution, noDispatch, f.path)
     assert.equal(result.frozenReadProof, undefined); assert.deepEqual(JSON.parse(result.text), output)
@@ -235,10 +235,10 @@ git(['worktree','remove',read.worktree.worktreePath]);assert.deepEqual(await run
 const stoppedRecord=readRecord(read.sessionId),receipt=stoppedRecord.structuredExecution.claudeNative.receiptFile;renameSync(receipt,receipt+'.held');writeRecord({...stoppedRecord,structuredExecution:{...stoppedRecord.structuredExecution,state:'running',output:undefined,resultDigest:undefined,resultWorktree:undefined}});
 const pending=await cancelStructuredSession(read.sessionId,{timeoutMs:20});assert.equal(pending.nativeStopped,false);assert.equal(pending.state,'cancelling');
 await assert.rejects(runStructuredSession(make('blocked','edit blocked','edit',500)),{code:'timeout'});assert.equal(JSON.parse(readFileSync(${JSON.stringify(count)},'utf8')).length,1);
-renameSync(receipt+'.held',receipt);const restoredStop=await cancelStructuredSession(read.sessionId,{timeoutMs:1000});assert.equal(restoredStop.nativeStopped,true,JSON.stringify({restoredStop,unknown:JSON.parse(readFileSync(stoppedRecord.structuredExecution.claudeNative.root+'/unknown-processes.json','utf8'))}));
+renameSync(receipt+'.held',receipt);const restoredStop=await cancelStructuredSession(read.sessionId,{timeoutMs:1000});assert.equal(restoredStop.nativeStopped,true,JSON.stringify({restoredStop,unknown:JSON.parse(readFileSync(stoppedRecord.structuredExecution.claudeNative.root+'/unattributed-processes.json','utf8'))}));
 
 const edit=await runStructuredSession(make('edit','edit candidate','edit',null));assert.notEqual(edit.worktree.headCommit,seed.baseCommit);assert.equal(git(['rev-parse',edit.worktree.headCommit+'^{tree}']),edit.worktree.tree);assert.equal(readRecord(edit.sessionId).structuredExecution.resultWorktree.tree,edit.worktree.tree);
-const dirtyFailure=await runStructuredSession(make('dirty','dirty candidate','edit',10000)).then(()=>null,error=>error);const dirtyRecord=dirtyFailure?.sessionId&&readRecord(dirtyFailure.sessionId),unknownFile=dirtyRecord?.structuredExecution?.claudeNative?.root+'/unknown-processes.json';assert.equal(dirtyFailure?.code,'failed',JSON.stringify({code:dirtyFailure?.code,unknown:unknownFile&&existsSync(unknownFile)?JSON.parse(readFileSync(unknownFile,'utf8')):null}));
+const dirtyFailure=await runStructuredSession(make('dirty','dirty candidate','edit',10000)).then(()=>null,error=>error);const dirtyRecord=dirtyFailure?.sessionId&&readRecord(dirtyFailure.sessionId),unknownFile=dirtyRecord?.structuredExecution?.claudeNative?.root+'/unattributed-processes.json';assert.equal(dirtyFailure?.code,'failed',JSON.stringify({code:dirtyFailure?.code,unknown:unknownFile&&existsSync(unknownFile)?JSON.parse(readFileSync(unknownFile,'utf8')):null}));
 const calls=JSON.parse(readFileSync(${JSON.stringify(count)},'utf8'));assert.equal(calls.length,3);assert.equal(calls[0].cwd,read.worktree.worktreePath);assert.equal(calls[1].cwd,edit.worktree.worktreePath);assert(calls[0].prompt.startsWith(first.prompt));assert.equal(calls.some(x=>x.args.includes('--restricted')||x.args.includes('--allowedTools')),false);process.exit(0);
 `)
     const result = spawnSync(process.execPath, ['--import', createRequire(import.meta.url).resolve('tsx/esm'), runner], { cwd: f.repo, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, SPEXCODE_HOME: home, SPEX_SESSION_DATABASE_PATH: join(home, 'sessions.sqlite'), SPEX_RUNTIME_HOME: join(home, 'runtime'), ANTHROPIC_BASE_URL: 'https://example.invalid', SPEXCODE_CODEX_USAGE_GUARD: '0', SPEX_TEST: '1' }, encoding: 'utf8', timeout: 30000 })
@@ -247,38 +247,66 @@ const calls=JSON.parse(readFileSync(${JSON.stringify(count)},'utf8'));assert.equ
 })
 
 
-test('detached child born between samples stays unknown after its native parent exits', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'spex-native-orphan-')), receiptFile = join(root, 'process.json'), daemonFile = join(root, 'daemon.json')
-  sampleNativeWorktreeProcesses({ root, receiptFile })
-  const leader = spawn(process.execPath, ['-e', `const {spawn}=require('node:child_process'),fs=require('node:fs');process.stdin.once('data',()=>{const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{detached:true,stdio:'ignore'});child.unref();fs.writeFileSync(process.argv[1],JSON.stringify({pid:child.pid}));process.exit(0)});process.stdout.write('READY')`, daemonFile], { detached: true, stdio: ['pipe', 'pipe', 'ignore'] })
+for (const taskScoped of [true, false]) test(taskScoped ? 'task cwd orphan stays pending after chdir without gaining kill authority' : 'external orphan and reused task PID do not block stop or replace original evidence', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'spex-native-orphan-')), root = join(directory, 'native'), workspace = join(directory, 'worktree'), outside = join(directory, 'outside')
+  for (const path of [root, workspace, outside]) mkdirSync(path)
+  const receiptFile = join(root, 'process.json'), daemonFile = join(directory, 'daemon.json'), plan = { root, workspace, receiptFile, pid: undefined as number | undefined }
+  sampleNativeWorktreeProcesses(plan)
+  const daemonSource = `const fs=require('node:fs');const publish=()=>fs.writeFileSync(process.argv[1],JSON.stringify({pid:process.pid,cwd:process.cwd()}));process.on('SIGUSR1',()=>{process.chdir(process.argv[2]);publish()});publish();setInterval(()=>{},1000)`
+  const leader = spawn(process.execPath, ['-e', `const {spawn}=require('node:child_process');process.stdin.once('data',()=>{spawn(process.execPath,['-e',process.argv[4],process.argv[1],process.argv[3]],{detached:true,stdio:'ignore',cwd:process.argv[2]}).unref();process.exit(0)});process.stdout.write('READY')`, daemonFile, taskScoped ? workspace : outside, outside, daemonSource], { cwd: workspace, detached: true, stdio: ['pipe', 'pipe', 'ignore'] })
   assert(leader.pid)
   const closed = new Promise<void>(resolve => leader.once('close', () => resolve()))
   let daemonPid: number | undefined
   try {
     await new Promise<void>(resolve => leader.stdout.once('data', () => resolve()))
-    writeDetachedRuntimeReceipt(leader.pid, receiptFile)
-    const plan = { root, receiptFile, pid: leader.pid }
-    sampleNativeWorktreeProcesses(plan)
-    leader.stdin.end('GO'); await closed
+    writeDetachedRuntimeReceipt(leader.pid, receiptFile); plan.pid = leader.pid
+    sampleNativeWorktreeProcesses(plan); leader.stdin.end('GO'); await closed
+    for (let retry = 0; !existsSync(daemonFile) && retry < 100; retry++) await new Promise(resolve => setTimeout(resolve, 10))
     daemonPid = (JSON.parse(readFileSync(daemonFile, 'utf8')) as { pid: number }).pid
     process.kill(daemonPid, 0)
+    const oldUnknown = JSON.stringify([{ pid: daemonPid, ppid: 1, startToken: 'historical-other-identity' }]), oldExit = JSON.stringify({ code: 0, signal: null, stopped: false })
+    writeFileSync(join(root, 'unknown-processes.json'), oldUnknown); writeFileSync(join(root, 'exit.json'), oldExit)
+    if (!taskScoped) writeFileSync(join(root, 'task-related-processes.json'), JSON.stringify([{ pid: daemonPid, startToken: 'historical-other-identity', cwd: workspace, boundaryVersion: 2, observedAt: 1 }]))
     assert.equal((JSON.parse(readFileSync(join(root, 'owned-processes.json'), 'utf8')) as Array<{ pid: number }>).some(row => row.pid === daemonPid), false)
-    assert.equal(nativeWorktreeProcessesStopped(plan), false, 'live reparented daemon must keep native stop unproven')
-    assert.equal(nativeWorktreeProcessesStopped(plan, true), false, 'unknown daemon cannot become owned through cancellation')
+    assert.equal(nativeWorktreeProcessesStopped(plan), !taskScoped)
+    assert.equal(nativeWorktreeProcessesStopped(plan, true), !taskScoped)
     process.kill(daemonPid, 0)
-    assert((JSON.parse(readFileSync(join(root, 'unknown-processes.json'), 'utf8')) as Array<{ pid: number }>).some(row => row.pid === daemonPid))
+    assert.equal(readFileSync(join(root, 'unknown-processes.json'), 'utf8'), oldUnknown)
+    assert.equal(readFileSync(join(root, 'exit.json'), 'utf8'), oldExit)
+    if (taskScoped) {
+      const legacyRoot = join(directory, 'legacy'); mkdirSync(join(legacyRoot, 'claude-home/projects/exact'), { recursive: true })
+      for (const name of ['process.json', 'process-baseline.json', 'owned-processes.json']) writeFileSync(join(legacyRoot, name), readFileSync(join(root, name)))
+      const prompt = 'Read the original worktree', policy = structuredExecutionPolicy(request), native = { version: 1 as const, root: legacyRoot, sessionId: 'legacy-session', userUuid: 'legacy-user', pid: leader.pid, receiptFile: join(legacyRoot, 'process.json') }
+      const execution = { ...policy, state: 'running' as const, claudeNative: native }, message = { role: 'user', content: [{ type: 'text', text: prompt }] }
+      const legacyPlan = { ...native, cliVersion: '2.1.309 (Claude Code)', requestDigest: hash({ prompt, policy }), policyDigest: hash(policy) }
+      for (const [name, value] of Object.entries({ 'plan.json': legacyPlan, 'launch.json': { cwd: workspace }, 'init.json': { session_id: native.sessionId, model: 'MiniMax-M3.1-Flash', tools: ['Bash', 'StructuredOutput'] }, 'user-echo.json': { uuid: native.userUuid, session_id: native.sessionId, message }, 'result.json': { subtype: 'success', is_error: false, session_id: native.sessionId, user_message_uuid: native.userUuid, user_message_uuids: [native.userUuid], structured_output: { ok: true } }, 'exit.json': { code: 0, signal: null, stopped: false } })) writeFileSync(join(legacyRoot, name), JSON.stringify(value))
+      writeFileSync(join(legacyRoot, 'claude-home/projects/exact/legacy-session.jsonl'), JSON.stringify({ type: 'user', sessionId: native.sessionId, uuid: native.userUuid, promptId: 'prompt', parentUuid: null, message }) + '\n')
+      await assert.rejects(claudeStructuredTurn(directory, 'legacy', prompt, execution, noDispatch, workspace), { code: 'cancellation_pending' })
+      assert.equal(readFileSync(join(legacyRoot, 'exit.json'), 'utf8'), JSON.stringify({ code: 0, signal: null, stopped: false }))
+      const related = JSON.parse(readFileSync(join(root, 'task-related-processes.json'), 'utf8')) as Array<{ pid: number; startToken: string; cwd: string }>
+      assert(related.some(row => row.pid === daemonPid && row.cwd === realpathSync(workspace)))
+      process.kill(daemonPid, 'SIGUSR1')
+      for (let retry = 0; retry < 100 && JSON.parse(readFileSync(daemonFile, 'utf8')).cwd !== realpathSync(outside); retry++) await new Promise(resolve => setTimeout(resolve, 10))
+      assert.equal(JSON.parse(readFileSync(daemonFile, 'utf8')).cwd, realpathSync(outside))
+      assert.equal(nativeWorktreeProcessesStopped(plan), false, 'positive task association remains sticky after chdir')
+    } else {
+      const diagnostic = JSON.parse(readFileSync(join(root, 'unattributed-processes.json'), 'utf8')) as Array<{ pid: number }>
+      assert(diagnostic.some(row => row.pid === daemonPid))
+    }
+    const observations = readFileSync(join(root, 'process-stop-observations.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line) as { boundaryVersion: number; at: number; nativeStopped: boolean })
+    assert(observations.length >= 2); assert(observations.every(row => row.boundaryVersion === 2 && row.at > 0))
     process.kill(-daemonPid, 'SIGTERM')
     for (let retry = 0; retry < 100; retry++) {
       try { process.kill(daemonPid, 0) } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') break; throw error }
       await new Promise(resolve => setTimeout(resolve, 20))
     }
     daemonPid = undefined
-    assert.equal(nativeWorktreeProcessesStopped(plan), true, 'formal stop can settle after the unknown process is independently gone')
+    assert.equal(nativeWorktreeProcessesStopped(plan), true)
   } finally {
     if (daemonPid) { try { process.kill(-daemonPid, 'SIGTERM') } catch (error) { assert.equal((error as NodeJS.ErrnoException).code, 'ESRCH') } }
     if (leader.exitCode === null && leader.signalCode === null) {
       try { process.kill(-leader.pid, 'SIGTERM') } catch (error) { assert.equal((error as NodeJS.ErrnoException).code, 'ESRCH') }
     }
-    await closed; rmSync(root, { recursive: true, force: true })
+    await closed; rmSync(directory, { recursive: true, force: true })
   }
 })

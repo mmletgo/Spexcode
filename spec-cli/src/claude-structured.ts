@@ -4,7 +4,7 @@ import { spawn, spawnSync, execFileSync, type ChildProcessWithoutNullStreams } f
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createInterface } from 'node:readline'
 import { detachedRuntimeIsGone, processStartToken, verifyDetachedRuntime, writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
@@ -15,7 +15,7 @@ const CLI_VERSION = '2.1.309 (Claude Code)'
 const toolNames = ['StructuredOutput', 'mcp__frozen__spex_read_frozen']
 const systemPrompt = 'Read only immutable context through the configured spex_read_frozen MCP. Follow the frozen task and return the requested schema using StructuredOutput. No shell, files, network, tools discovery, skills or subagents. Never call DeferredToolPlaceholder.'
 const hash = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex')
-type NativePlan = { version: 1; root: string; sessionId: string; userUuid: string; requestDigest: string; policyDigest: string; historyPath?: string; cliPath: string; cliVersion: string; binaryDigest: string; pid?: number; receiptFile: string }
+type NativePlan = { version: 1; root: string; sessionId: string; userUuid: string; requestDigest: string; policyDigest: string; historyPath?: string; cliPath: string; cliVersion: string; binaryDigest: string; pid?: number; receiptFile: string; workspace?: string }
 type WorktreeNativeResult = { threadId: string; turnId: string; text: string; frozenReadProof?: never }
 type NativeResult = { threadId: string; turnId: string; text: string; frozenReadProof: FrozenReadProof }
 type Completed = { plan: NativePlan; witness: ClaudeFrozenWitness; result: NativeResult }
@@ -105,12 +105,22 @@ export function claudeWorktreeArgs(input: { sessionId: string; model: string; sc
     '--permission-mode', input.mode === 'read' ? 'plan' : 'bypassPermissions', '--json-schema', JSON.stringify(input.schema), ...(input.effort ? ['--effort', input.effort] : [])]
 }
 
+/** 旧 worktree plan 的真实 cwd 已在不可变 launch 中；所有结算入口共用同一归一。 */
+function claudeWorktreeProcessPlan(plan: NativePlan): NativePlan {
+  if (plan.workspace) return plan
+  const path = join(plan.root, 'launch.json')
+  if (!existsSync(path)) throw new StructuredSessionError('cancellation_pending', 'Claude worktree task directory is unproven')
+  const launch = JSON.parse(readFileSync(path, 'utf8')) as { cwd?: unknown }
+  if (typeof launch.cwd !== 'string' || !isAbsolute(launch.cwd)) throw new StructuredSessionError('cancellation_pending', 'Claude worktree launch cwd is unproven')
+  return { ...plan, workspace: launch.cwd }
+}
+
 /** 工作区模式只核原生输入、模型和终态身份，不借用冻结读取证明。 */
 function settleClaudeWorktreeResult(plan: NativePlan, prompt: string, execution: StructuredExecution): WorktreeNativeResult {
   const root = plan.root, native = execution.claudeNative
   if (plan.cliVersion !== CLI_VERSION || plan.requestDigest !== hash({ prompt, policy: structuredExecutionPolicy(execution) }) || plan.policyDigest !== hash(structuredExecutionPolicy(execution))
     || !native || native.root !== root || native.sessionId !== plan.sessionId || native.userUuid !== plan.userUuid || native.pid !== plan.pid || native.receiptFile !== plan.receiptFile) throw new StructuredSessionError('stale_result', 'Claude worktree completion lost its exact request/native/process identity')
-  if (execution.state !== 'completed' && !nativeWorktreeProcessesStopped(plan)) throw new StructuredSessionError('cancellation_pending', 'Claude worktree native or unknown orphan stop remains unproven')
+  if (execution.state !== 'completed' && !nativeWorktreeProcessesStopped(claudeWorktreeProcessPlan(plan))) throw new StructuredSessionError('cancellation_pending', 'Claude worktree native or unknown orphan stop remains unproven')
   const init = JSON.parse(readFileSync(join(root, 'init.json'), 'utf8')) as { session_id: string; model: string; tools: string[] }
   const echo = JSON.parse(readFileSync(join(root, 'user-echo.json'), 'utf8')) as ClaudeFrozenWitness['echo']
   const result = JSON.parse(readFileSync(join(root, 'result.json'), 'utf8')) as ClaudeFrozenWitness['result']
@@ -297,7 +307,7 @@ export async function stopClaudeStructuredTurn(execution: StructuredExecution, t
     if (!proof.ok) return { nativeStopped: false, acknowledged: false, error: 'Claude exact process-group ownership is unproven' }
     try { process.kill(-plan.pid, 'SIGTERM') } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error }
   }
-  const stoppedProcesses = (terminate = false): boolean => execution.policy === 'native-worktree-v1' ? nativeWorktreeProcessesStopped(plan, terminate) : detachedRuntimeIsGone(plan.pid!, plan.receiptFile) && claudeMcpStopped(native.root, terminate)
+  const stoppedProcesses = (terminate = false): boolean => execution.policy === 'native-worktree-v1' ? nativeWorktreeProcessesStopped(claudeWorktreeProcessPlan(plan), terminate) : detachedRuntimeIsGone(plan.pid!, plan.receiptFile) && claudeMcpStopped(native.root, terminate)
   if (execution.policy !== 'native-worktree-v1') claudeMcpStopped(native.root, true)
   const deadline = Date.now() + timeoutMs
   while (!stoppedProcesses(true) && Date.now() < deadline) await new Promise<void>(resolve => setTimeout(resolve, 25))
@@ -338,7 +348,7 @@ export async function claudeStructuredTurn(realm: string, id: string, prompt: st
   for (const name of ['cwd', 'claude-home', 'tmp', 'debug']) mkdirSync(join(root, name), { recursive: true, mode: 0o700 })
   const native = { version: 1 as const, root, sessionId: randomUUID(), userUuid: randomUUID() }
   const configHome = join(root, 'claude-home'), cwd = worktree ? worktreePath! : join(root, 'cwd')
-  let plan: NativePlan = { ...native, requestDigest: hash({ prompt, policy: structuredExecutionPolicy(execution) }), policyDigest: hash(structuredExecutionPolicy(execution)), cliPath, cliVersion: CLI_VERSION, binaryDigest, receiptFile: join(root, 'process.json') }
+  let plan: NativePlan = { ...native, ...(worktree ? { workspace: cwd } : {}), requestDigest: hash({ prompt, policy: structuredExecutionPolicy(execution) }), policyDigest: hash(structuredExecutionPolicy(execution)), cliPath, cliVersion: CLI_VERSION, binaryDigest, receiptFile: join(root, 'process.json') }
   const mcpInput = join(root, 'reader.json'), mcpConfig = join(root, 'mcp.json'), profile = join(root, 'policy.sb')
   if (!worktree) {
     writeFileSync(mcpInput, JSON.stringify({ root, ref: execution.frozenContext }), { mode: 0o400 })
