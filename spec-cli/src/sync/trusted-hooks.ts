@@ -3,9 +3,9 @@ import { spawnSync } from 'node:child_process'
 import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync } from 'node:fs'
 import { setImmediate as yieldEventLoop } from 'node:timers/promises'
 import { canonicalContractFilterBindings, describeCanonicalContractFilter } from '../contract-filter.js'
-import { runtimeRoot } from '@spexcode/spec-core'
+import { encodeProject } from '@spexcode/spec-core'
 import { readFootprintConfiguration, snapshotFootprintFile, snapshotFilterPayloads, footprintDigest, type FrozenFootprintPolicy } from './trusted-footprint.js'
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 export type TrustedHookIssue = { path: string; reason: string }
 export type TrustedRuntimeEntry = { path: string; kind: 'file' | 'directory' | 'symlink'; mode: number; digest?: string; target?: string }
@@ -122,8 +122,11 @@ export function prepareTrustedHooksBinding(root: string, options: TrustedHooksOp
       filterFiles.push(shim, ...metadata)
       const bindings = canonicalContractFilterBindings(root)
       if (readFileSync(canonicalFilter.metadataPaths[1], 'utf8') !== bindings.map(b => `${b.file}\t${b.start}\t${b.end}`).join('\n') + '\n') issue(canonicalFilter.metadataPaths[1], 'canonical filter bindings 与可信声明不一致')
-      const filterRoot = readFileSync(canonicalFilter.metadataPaths[0], 'utf8').trim()
-      if (realpathSync(filterRoot) !== realpathSync(runtimeRoot(root))) issue(canonicalFilter.metadataPaths[0], 'filter 外部 payload root 与项目身份不符')
+      const filterRoot = readFileSync(canonicalFilter.metadataPaths[0], 'utf8').trim(), filterProjectRoot = realpathSync(filterRoot)
+      if (!isAbsolute(filterRoot) || !lstatSync(filterProjectRoot).isDirectory() || basename(dirname(filterProjectRoot)) !== 'projects' || basename(filterProjectRoot) !== encodeProject(dirname(commonDir))) {
+        issue(canonicalFilter.metadataPaths[0], 'filter 外部 payload root 与项目身份不符')
+        return { status: 'unsupported', issues }
+      }
       filterFiles.push(...snapshotFilterPayloads(join(filterRoot, 'trees'), bindings.map(binding => binding.file)))
     }
     const privateFootprintDir = realpathSync(options.privateFootprintDir), privateStat = lstatSync(privateFootprintDir)
