@@ -13,7 +13,7 @@ export type ZCodeNativeEvent = { eventId: string; sessionId: string; turnId?: st
 export type ZCodeFrozenWitness = {
   version: 1; provider: 'zcode'; cliVersion: string; cliSha256: string; providerId: string; modelId: string
   sessionId: string; turnId: string; inputId: string; prompt: string
-  send: { sessionId: string; content: string; inputId: string }
+  send: { sessionId: string; content: string; inputId: string; modelSelection?: Pick<ZCodeFrozenModel, 'providerId' | 'modelId' | 'options'> }
   messages: ZCodeNativeMessage[]; events: ZCodeNativeEvent[]
   mcpHistory: { records: NativeRecord[]; digest: string }
 }
@@ -23,7 +23,7 @@ export type ZCodeFrozenReadProof = SharedProof & {
   inputId: string; promptDigest: string; witnessDigest: string
 }
 export type ZCodeFrozenIdentity = { threadId: string; turnId: string; inputId?: string; prompt?: string }
-export type ZCodeFrozenModel = { providerId: string; modelId: string; cliVersion?: string; cliSha256?: string }
+export type ZCodeFrozenModel = { providerId: string; modelId: string; cliVersion?: string; cliSha256?: string; options?: { reasoningLevel?: string } }
 const sha = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex')
 const encode = (value: unknown): Buffer => Buffer.from(JSON.stringify(value), 'utf8')
 const digest = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
@@ -96,16 +96,48 @@ export function proveZCodeFrozenReads(ref: FrozenContextRef, witness: ZCodeFroze
   const send = record(witness.send)
   if (send.sessionId !== sessionId || send.content !== prompt || send.inputId !== inputId) stale('send differs from the exact frozen prompt/input')
   if (!Array.isArray(witness.messages) || !Array.isArray(witness.events)) stale('witness lacks raw native messages/events')
-  const messages = new Map<string, NativeRecord>(), calls = new Map<string, { messageId: string; state: NativeRecord }>(), partIds = new Set<string>()
+  const messages = new Map<string, NativeRecord>(), calls = new Map<string, { messageId: string; state: NativeRecord }>(), partIds = new Set<string>(), rawMessageIds = new Set<string>()
   let user: ZCodeNativeMessage | undefined
   const runtimeSources = new Set<string>()
-  let userCount = 0, assistantCount = 0
+  let userCount = 0, assistantCount = 0, modelChangeTime: number | undefined
   for (const message of witness.messages) {
     record(message)
     const info = record(message.info), id = text(info.id)
-    if (messages.has(id) || info.sessionID !== sessionId || !['user', 'assistant'].includes(String(info.role)) || !Array.isArray(message.parts)) stale('raw message identity or role differs')
+    if (rawMessageIds.has(id) || info.sessionID !== sessionId || !['user', 'assistant'].includes(String(info.role)) || !Array.isArray(message.parts)) stale('raw message identity or role differs')
+    rawMessageIds.add(id)
+    for (const raw of message.parts) {
+      const part = record(raw), partId = text(part.id)
+      if (partIds.has(partId) || part.sessionID !== sessionId || part.messageID !== id) stale('raw part is not bound to its exact message/session')
+      partIds.add(partId); complete(part)
+    }
+    const semantics = record(info.semantics)
+    if (semantics.providerVisibility === 'hidden') {
+      const part = record(message.parts[0]), time = record(info.time), tokens = record(info.tokens), cache = record(tokens.cache), location = record(info.path)
+      if (rawMessageIds.size !== 1 || info.role !== 'assistant' || info.anchor !== undefined || info.parentID !== id || info.modelId !== modelId || info.providerId !== providerId
+        || typeof info.mode !== 'string' || typeof info.planEnabled !== 'boolean' || typeof info.agent !== 'string'
+        || typeof location.cwd !== 'string' || typeof location.root !== 'string' || Object.keys(location).some(key => !['cwd', 'root'].includes(key))
+        || info.cost !== 0 || info.finish !== 'completed' || !Number.isSafeInteger(time.created) || Number(time.created) < 0 || !isDeepStrictEqual(time, { created: time.created, completed: time.created })
+        || !isDeepStrictEqual(semantics, { origin: 'system', kind: 'timeline_event', uiVisibility: 'visible', providerVisibility: 'hidden', transcriptVisibility: 'visible' })
+        || Object.keys(info).some(key => !['id', 'sessionID', 'role', 'time', 'parentID', 'modelId', 'providerId', 'mode', 'planEnabled', 'agent', 'path', 'cost', 'tokens', 'finish', 'semantics'].includes(key))
+        || tokens.input !== 0 || tokens.output !== 0 || tokens.reasoning !== 0 || tokens.total !== undefined && tokens.total !== 0 || !isDeepStrictEqual(cache, { read: 0, write: 0 })
+        || Object.keys(tokens).some(key => !['input', 'output', 'reasoning', 'cache', 'total'].includes(key)) || message.parts.length !== 1
+        || part.type !== 'timeline' || part.timelineType !== 'model_change' || part.display !== 'separator' || part.status !== 'completed'
+        || !isDeepStrictEqual(part.time, { start: time.created, end: time.created }) || Object.keys(part).some(key => !['id', 'sessionID', 'messageID', 'type', 'timelineType', 'display', 'status', 'time', 'fromModel', 'toModel'].includes(key))) stale('hidden message is not a pre-turn display-only native model change')
+      for (const value of [part.fromModel, part.toModel].filter(value => value !== undefined)) {
+        const model = record(value)
+        if (!text(model.providerId).trim() || !text(model.modelId).trim() || model.label !== undefined && typeof model.label !== 'string'
+          || Object.keys(model).some(key => !['providerId', 'modelId', 'options', 'label'].includes(key))) stale('model change contains an unknown model selection payload')
+        if (model.options !== undefined) {
+          const options = record(model.options)
+          if (Object.keys(options).some(key => key !== 'reasoningLevel') || options.reasoningLevel !== undefined && (typeof options.reasoningLevel !== 'string' || !options.reasoningLevel.trim())) stale('model change contains invalid model options')
+        }
+      }
+      const target = record(part.toModel)
+      if (target.providerId !== providerId || target.modelId !== modelId) stale('model change target differs from the fixed model')
+      modelChangeTime = Number(time.created); continue
+    }
     messages.set(id, info)
-    const anchor = record(info.anchor), semantics = record(info.semantics)
+    const anchor = record(info.anchor)
     if (anchor.turnId !== turnId || semantics.providerVisibility !== 'visible') stale('message is outside the exact model-visible native turn')
     if (info.role === 'user') {
       userCount++
@@ -121,6 +153,7 @@ export function proveZCodeFrozenReads(ref: FrozenContextRef, witness: ZCodeFroze
       } else {
         if (user || anchor.origin !== 'realUser' || semantics.origin !== 'real_user' || semantics.kind !== 'user_prompt'
           || semantics.uiVisibility !== 'visible' || semantics.transcriptVisibility !== 'visible') stale('history contains another or unrecognized real user input')
+        if (modelChangeTime !== undefined && (!Number.isSafeInteger(record(info.time).created) || Number(record(info.time).created) < modelChangeTime)) stale('display-only model change was inserted after the real user input')
         text(anchor.sourceCommandId); user = message
       }
     } else {
@@ -129,9 +162,7 @@ export function proveZCodeFrozenReads(ref: FrozenContextRef, witness: ZCodeFroze
         || semantics.kind !== 'assistant_response' || semantics.uiVisibility !== 'visible' || semantics.transcriptVisibility !== 'visible') stale('assistant has a foreign model, origin or native error')
     }
     for (const raw of message.parts) {
-      const part = record(raw), partId = text(part.id)
-      if (partIds.has(partId) || part.sessionID !== sessionId || part.messageID !== id) stale('raw part is not bound to its exact message/session')
-      partIds.add(partId); complete(part)
+      const part = record(raw)
       if (part.type !== 'tool') {
         if (['text', 'reasoning'].includes(String(part.type)) && typeof part.text !== 'string') stale('native text part lacks its original text')
         if (!['text', 'reasoning', 'step-start', 'step-finish'].includes(String(part.type)) || info.role === 'user' && (part.type !== 'text' || (part.synthetic === true) !== (info.synthetic === true) || info.synthetic === true && !isDeepStrictEqual(part.metadata, info.metadata))) stale('native message contains unsupported input or part')
@@ -149,6 +180,7 @@ export function proveZCodeFrozenReads(ref: FrozenContextRef, witness: ZCodeFroze
     }
   }
   if (!user || user.parts.map(part => part.text).join('') !== prompt) stale('original native user message differs from the exact prompt')
+  if (send.modelSelection !== undefined && !isDeepStrictEqual(send.modelSelection, user.info.modelSelection)) stale('explicit native send model selection differs from the original real user')
   const userId = text(user.info.id)
   for (const [id, info] of messages) {
     if (info.role !== 'assistant') continue
@@ -170,7 +202,7 @@ export function proveZCodeFrozenReads(ref: FrozenContextRef, witness: ZCodeFroze
     if (event.sessionId !== sessionId || event.turnId !== turnId || !Number.isSafeInteger(event.seq) || Number(event.seq) <= previousSeq || eventIds.has(text(event.eventId)) || ended) stale('event identity, order or terminal boundary differs')
     const seq = Number(event.seq); previousSeq = seq; eventIds.add(String(event.eventId))
     if (event.type === 'turn.started') {
-      if (began || payload.input !== prompt || payload.inputId !== inputId || payload.messageId !== userId || payload.turnNumber !== 1 || payload.attachments !== undefined && (!Array.isArray(payload.attachments) || payload.attachments.length > 0)) stale('turn start differs from the unique original user/input')
+      if (began || payload.input !== prompt || payload.inputId !== inputId || payload.messageId !== userId || payload.turnNumber !== 0 || payload.attachments !== undefined && (!Array.isArray(payload.attachments) || payload.attachments.length > 0)) stale('turn start differs from the unique original user/input')
       began = true; continue
     }
     if (!began) stale('evidence precedes its original native turn start')
@@ -235,6 +267,10 @@ export function verifyZCodeFrozenReadProof(ref: FrozenContextRef, proof: ZCodeFr
   if (sha(bytes) !== proof.witnessDigest || sha(history) !== proof.historyDigest) stale('saved witness or normalized history digest differs')
   const witness = JSON.parse(bytes.toString('utf8')) as ZCodeFrozenWitness
   const actual = proveZCodeFrozenReads(ref, witness)
+  if (expectedModel?.options?.reasoningLevel !== undefined) {
+    const user = witness.messages.find(message => message.info.role === 'user' && message.info.synthetic !== true)!
+    if (record(record(user.info.modelSelection).options).reasoningLevel !== expectedModel.options.reasoningLevel) stale('original real user reasoning level differs from the fixed model options')
+  }
   if (result) {
     const response = witness.events.find(event => event.type === 'turn.completed')!.payload.response as string
     let output: unknown

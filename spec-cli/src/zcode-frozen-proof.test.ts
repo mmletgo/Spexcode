@@ -7,7 +7,7 @@ import { dirname, join } from 'node:path'
 import { frozenReadTool, freezeContext, proveFrozenReads, readFrozenManifest, readFrozenRange, type FrozenNativeItem } from './frozen-context.js'
 import { decodeZCodeJsonText, proveZCodeFrozenReads, verifyZCodeFrozenReadProof, ZCODE_FROZEN_TOOL, type ZCodeFrozenWitness, type ZCodeNativeEvent } from './zcode-frozen-proof.js'
 
-function fixture() {
+function fixture(options: { modelChange?: boolean; reasoningLevel?: string } = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'spex-zcode-proof-'))
   const textBytes = Buffer.from('首' + '中'.repeat(4230) + '尾'), binary = Buffer.from(Array.from({ length: 19 }, (_, index) => index * 13 % 256))
   const ref = freezeContext({ directory, sourceRoot: process.cwd(), binding: { requestKey: 'request', inputDigest: 'input' }, entries: [
@@ -18,7 +18,17 @@ function fixture() {
   const witness: ZCodeFrozenWitness = { version: 1, provider: 'zcode', cliVersion: '0.17.1', cliSha256: 'b'.repeat(64), providerId: 'bigmodel-api', modelId: 'GLM-5.3-Flash', sessionId: 'session', turnId: 'turn', inputId: 'input-id', prompt: 'read original frozen inputs', send: { sessionId: 'session', inputId: 'input-id', content: 'read original frozen inputs' }, messages: [], events: [], mcpHistory: { records: [], digest: '' } }
   const event = (type: string, payload: Record<string, unknown>): void => { witness.events.push({ eventId: `event-${witness.events.length}`, sessionId: 'session', turnId: 'turn', seq: witness.events.length + 1, type, payload }) }
   const part = (id: string, messageID: string, type: string, data: Record<string, unknown>) => ({ id, messageID, sessionID: 'session', type, ...data })
-  witness.messages.push({ info: { id: 'user', sessionID: 'session', role: 'user', modelSelection: { providerId: witness.providerId, modelId: witness.modelId }, anchor: { turnId: 'turn', origin: 'realUser', sourceCommandId: 'command' }, semantics: { origin: 'real_user', kind: 'user_prompt', uiVisibility: 'visible', providerVisibility: 'visible', transcriptVisibility: 'visible' } }, parts: [part('user-text', 'user', 'text', { text: witness.prompt })] })
+  if (options.modelChange) {
+    const id = 'administrative-model-change'
+    witness.messages.push({ info: { id, sessionID: 'session', role: 'assistant', parentID: id, time: { created: 1, completed: 1 },
+      modelId: witness.modelId, providerId: witness.providerId, mode: 'build', planEnabled: true, agent: 'zcode-agent', path: { cwd: '/empty', root: '/empty' }, cost: 0,
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }, finish: 'completed',
+      semantics: { origin: 'system', kind: 'timeline_event', uiVisibility: 'visible', providerVisibility: 'hidden', transcriptVisibility: 'visible' } },
+      parts: [part('model-change-part', id, 'timeline', { timelineType: 'model_change', display: 'separator', status: 'completed', time: { start: 1, end: 1 },
+        fromModel: { providerId: witness.providerId, modelId: witness.modelId, options: { reasoningLevel: 'high' }, label: `${witness.providerId}/${witness.modelId}` },
+        toModel: { providerId: witness.providerId, modelId: witness.modelId, label: `${witness.providerId}/${witness.modelId}` } })] })
+  }
+  witness.messages.push({ info: { id: 'user', sessionID: 'session', role: 'user', time: { created: 2 }, modelSelection: { providerId: witness.providerId, modelId: witness.modelId, ...(options.reasoningLevel ? { options: { reasoningLevel: options.reasoningLevel } } : {}) }, anchor: { turnId: 'turn', origin: 'realUser', sourceCommandId: 'command' }, semantics: { origin: 'real_user', kind: 'user_prompt', uiVisibility: 'visible', providerVisibility: 'visible', transcriptVisibility: 'visible' } }, parts: [part('user-text', 'user', 'text', { text: witness.prompt })] })
   for (const source of ['environment', 'model', 'runtime_mode', 'date']) {
     const metadata = { source, visibility: 'model-only', runtimeMessage: { source } }, id = `runtime-${source}`
     witness.messages.push({ info: { id, sessionID: 'session', role: 'user', synthetic: true, visibility: 'model-only', metadata,
@@ -26,7 +36,7 @@ function fixture() {
       semantics: { origin: 'agent_runtime', kind: 'system_reminder', source, uiVisibility: 'hidden', providerVisibility: 'visible', transcriptVisibility: 'hidden' } },
       parts: [part(`part-${id}`, id, 'text', { text: `synthetic ${source}`, synthetic: true, metadata })] })
   }
-  event('turn.started', { turnNumber: 1, input: witness.prompt, messageId: 'user', inputId: 'input-id' })
+  event('turn.started', { turnNumber: 0, input: witness.prompt, messageId: 'user', inputId: 'input-id' })
   event('session.updated', { providerId: witness.providerId, modelId: witness.modelId, toolCount: 1, messageCount: 5, iteration: 0 })
   const toolParts: Record<string, unknown>[] = [], items: FrozenNativeItem[] = []
   for (const entry of readFrozenManifest(ref).entries) {
@@ -49,7 +59,7 @@ function fixture() {
   event('tool.updated', { kind: 'batch', toolCallIds: toolParts.map(part => part.callID), successCount: toolParts.length, errorCount: 0 })
   event('session.updated', { providerId: witness.providerId, modelId: witness.modelId, toolCount: 1, messageCount: 12, iteration: 1 })
   witness.messages.push({ info: { id: 'assistant-final', sessionID: 'session', role: 'assistant', parentID: 'user', providerId: witness.providerId, modelId: witness.modelId, anchor: { turnId: 'turn' }, semantics: { origin: 'agent_runtime', kind: 'assistant_response', uiVisibility: 'visible', providerVisibility: 'visible', transcriptVisibility: 'visible' } }, parts: [part('final-text', 'assistant-final', 'text', { text: '{"ok":true}' })] })
-  Object.assign(finalMessage(witness).info.anchor as object, { historyRoundCount: 2, orderedMessageIds: witness.messages.map(message => message.info.id), boundaryMessageId: 'assistant-final', goalBoundary: { kind: 'none' } })
+  Object.assign(finalMessage(witness).info.anchor as object, { historyRoundCount: 2, orderedMessageIds: witness.messages.filter(message => (message.info.semantics as Record<string, unknown>).providerVisibility === 'visible').map(message => message.info.id), boundaryMessageId: 'assistant-final', goalBoundary: { kind: 'none' } })
   event('turn.completed', { response: '{"ok":true}', inputId: 'input-id', resultType: 'success', toolCallCount: toolParts.length })
   witness.mcpHistory.records.push(
     { type: 'process', pid: 123, startToken: null },
@@ -70,7 +80,7 @@ function fixture() {
   const identity = { threadId: 'session', turnId: 'turn', inputId: witness.inputId, prompt: witness.prompt }
   return { directory, ref, witness, identity, items, close: () => rmSync(directory, { recursive: true, force: true }) }
 }
-function toolMessage(witness: ZCodeFrozenWitness) { return witness.messages.find(message => message.info.role === 'assistant')! }
+function toolMessage(witness: ZCodeFrozenWitness) { return witness.messages.find(message => message.info.role === 'assistant' && (message.info.semantics as Record<string, unknown>).kind === 'assistant_response')! }
 function finalMessage(witness: ZCodeFrozenWitness) { return witness.messages.at(-1)! }
 function tool(witness: ZCodeFrozenWitness) { return toolMessage(witness).parts[0] }
 function state(witness: ZCodeFrozenWitness) { return tool(witness).state as Record<string, unknown> }
@@ -107,7 +117,7 @@ test('reject altered identity, declared DTO aliases, unknown tools and another u
       w => { tool(w).sessionID = 'foreign' }, w => { tool(w).id = w.messages[0].parts[0].id },
       w => { tool(w).tool = 'Bash' }, w => { toolMessage(w).info.parentID = 'assistant-tools' },
       w => { w.messages.push(structuredClone(w.messages[0])); w.messages.at(-1)!.info.id = 'extra-user' },
-      w => { w.events[0].payload.messageId = 'foreign' }, w => { w.events[0].payload.inputId = 'foreign' },
+      w => { w.events[0].payload.turnNumber = 1 }, w => { w.events[0].payload.messageId = 'foreign' }, w => { w.events[0].payload.inputId = 'foreign' },
       w => { event(w, 'scheduled').payload.assistantMessageId = 'foreign' },
       w => { event(w, 'scheduled').payload.input = { entryId: 'made-up' } },
       w => { event(w, 'result').turnId = 'foreign' }, w => { w.events[1].sessionId = 'foreign' },
@@ -283,5 +293,62 @@ test('final native anchor must close the complete raw ordered history with the e
     const reordered = structuredClone(f.witness)
     reordered.messages.splice(1, 2, reordered.messages[2], reordered.messages[1])
     assert.throws(() => proveZCodeFrozenReads(f.ref, reordered), { code: 'stale_result' })
+  } finally { f.close() }
+})
+
+
+test('pre-turn display-only model change stays in raw witness while the seven model-visible messages keep six reads', () => {
+  const f = fixture({ modelChange: true, reasoningLevel: 'high' })
+  try {
+    const expected = proveFrozenReads(f.ref, f.identity, f.items), proof = proveZCodeFrozenReads(f.ref, f.witness)
+    assert.equal(proof.historyDigest, expected.historyDigest)
+    assert.equal(proof.receipts.length, 6)
+    const saved = JSON.parse(readFileSync(join(dirname(f.ref.manifestPath), 'histories', `zcode-witness-${proof.witnessDigest}`), 'utf8')) as ZCodeFrozenWitness
+    assert.equal(saved.messages.length, 8)
+    assert.deepEqual(saved.messages[0], f.witness.messages[0])
+    verifyZCodeFrozenReadProof(f.ref, proof, f.identity, { providerId: f.witness.providerId, modelId: f.witness.modelId, options: { reasoningLevel: 'high' } }, { output: { ok: true } })
+    const differentDefault = structuredClone(f.witness)
+    differentDefault.messages[0].parts[0].fromModel = { providerId: 'previous-provider', modelId: 'previous-model', label: 'Previous configured model' }
+    proveZCodeFrozenReads(f.ref, differentDefault)
+  } finally { f.close() }
+})
+
+test('unknown hidden messages, payloads, in-turn timelines and foreign model changes remain rejected', () => {
+  const f = fixture({ modelChange: true })
+  try {
+    const corruptions: ((witness: ZCodeFrozenWitness) => void)[] = [
+      w => { w.messages[0].info.anchor = { turnId: 'turn' } },
+      w => { (w.messages[0].info.path as Record<string, unknown>).prompt = 'unknown payload' },
+      w => { w.messages[0].info.modelId = 'foreign' },
+      w => { (w.messages[0].info.semantics as Record<string, unknown>).kind = 'unknown' },
+      w => { w.messages[0].parts[0].text = 'hidden injected text' },
+      w => { w.messages[0].parts[0].tool = 'Bash' },
+      w => { w.messages[0].parts[0].anchorMessageId = 'user' },
+      w => { (w.messages[0].parts[0].toModel as Record<string, unknown>).modelId = 'foreign' },
+      w => { (w.messages[0].parts[0].fromModel as Record<string, unknown>).prompt = 'injected' },
+      w => { (w.messages[0].parts[0].fromModel as Record<string, unknown>).providerId = '' },
+      w => { (w.messages[0].info.time as Record<string, unknown>).created = 3 },
+      w => { w.messages.splice(1, 0, w.messages.shift()!) },
+      w => { w.messages[0].parts.push({ id: 'hidden-text', sessionID: 'session', messageID: w.messages[0].info.id, type: 'text', text: 'injected' }) },
+      w => { (w.messages[0].info.tokens as Record<string, unknown>).output = 1 },
+    ]
+    for (const corrupt of corruptions) {
+      const witness = structuredClone(f.witness); corrupt(witness)
+      assert.throws(() => proveZCodeFrozenReads(f.ref, witness), { code: 'stale_result' })
+    }
+  } finally { f.close() }
+})
+
+test('requested reasoning options and an explicit native send selection bind the original real user', () => {
+  const f = fixture({ reasoningLevel: 'high' })
+  try {
+    const user = f.witness.messages.find(message => message.info.role === 'user' && message.info.synthetic !== true)!
+    f.witness.send.modelSelection = structuredClone(user.info.modelSelection) as NonNullable<ZCodeFrozenWitness['send']['modelSelection']>
+    const proof = proveZCodeFrozenReads(f.ref, f.witness), model = { providerId: f.witness.providerId, modelId: f.witness.modelId }
+    verifyZCodeFrozenReadProof(f.ref, proof, f.identity, { ...model, options: { reasoningLevel: 'high' } })
+    assert.throws(() => verifyZCodeFrozenReadProof(f.ref, proof, f.identity, { ...model, options: { reasoningLevel: 'max' } }), { code: 'stale_result' })
+    f.witness.send.modelSelection.options = { reasoningLevel: 'max' }
+    assert.throws(() => proveZCodeFrozenReads(f.ref, f.witness), { code: 'stale_result' })
+    assert.equal(f.witness.messages.filter(message => message.info.synthetic === true).every(message => (message.info.modelSelection as Record<string, unknown>).options === undefined), true)
   } finally { f.close() }
 })
