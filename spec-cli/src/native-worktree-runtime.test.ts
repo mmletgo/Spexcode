@@ -222,6 +222,16 @@ test('ZCode worktree cold completion binds original send, model snapshot and exa
     schemaInvalidMessages.at(-1)!.parts[0].text = schemaInvalidResponse
     writeFileSync(join(root, 'events.json'), JSON.stringify(schemaInvalidEvents)); writeFileSync(join(root, 'messages.json'), JSON.stringify(schemaInvalidMessages)); writeFileSync(join(root, 'terminal.json'), JSON.stringify(schemaInvalidEvents.at(-1)))
     await assert.rejects(zcodeStructuredTurn(realm, 'native', prompt, completed, noDispatch, f.path), { code: 'stale_result' })
+    const malformedEvents = structuredClone(events), malformedMessages = structuredClone(messages), malformedResponse = 'not one JSON document'
+    malformedEvents.at(-1)!.payload.response = malformedResponse
+    malformedMessages.at(-1)!.parts[0].text = malformedResponse
+    writeFileSync(join(root, 'events.json'), JSON.stringify(malformedEvents)); writeFileSync(join(root, 'messages.json'), JSON.stringify(malformedMessages)); writeFileSync(join(root, 'terminal.json'), JSON.stringify(malformedEvents.at(-1)))
+    const changedEvidence = ['events.json', 'messages.json', 'terminal.json'] as const
+    const sha = (name: string): string => createHash('sha256').update(readFileSync(join(root, name))).digest('hex')
+    const evidenceHashes = changedEvidence.map(name => [name, sha(name)] as const), completedCache = readFileSync(join(root, 'completed.json'))
+    await assert.rejects(zcodeStructuredTurn(realm, 'native', prompt, completed, noDispatch, f.path), { code: 'stale_result' })
+    assert.deepEqual(changedEvidence.map(name => [name, sha(name)]), evidenceHashes, 'completed replay must not rewrite original Native evidence')
+    assert.deepEqual(readFileSync(join(root, 'completed.json')), completedCache, 'completed replay must preserve the original completed cache')
   } finally { f.close() }
 })
 
@@ -262,6 +272,13 @@ test('ZCode authenticated worktree schema mismatch is typed for repair without p
     })
     assert.equal(existsSync(join(root, 'completed.json')), false, 'invalid schema output must not complete or publish')
     assert.deepEqual(Object.keys(files).map(name => [name, sha(name)]), originalHashes, 'cold failure replay must preserve every original Native file and send')
+
+    const malformedEvents = structuredClone(events), malformedMessages = structuredClone(messages), malformedResponse = 'not one JSON document'
+    malformedEvents.at(-1)!.payload.response = malformedResponse
+    malformedMessages.at(-1)!.parts[0].text = malformedResponse
+    writeFileSync(join(root, 'events.json'), JSON.stringify(malformedEvents)); writeFileSync(join(root, 'messages.json'), JSON.stringify(malformedMessages)); writeFileSync(join(root, 'terminal.json'), JSON.stringify(malformedEvents.at(-1)))
+    await assert.rejects(requestTurn(), { code: 'structured_output_format_invalid' }, 'an in-progress first format failure remains repairable')
+    for (const [name, value] of Object.entries(files)) writeFileSync(join(root, name), JSON.stringify(value))
 
     writeFileSync(join(root, 'terminal.json'), JSON.stringify({ ...events.at(-1), turnId: 'foreign' }))
     await assert.rejects(requestTurn(), { code: 'stale_result' })

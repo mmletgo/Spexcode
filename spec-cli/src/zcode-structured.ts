@@ -236,7 +236,13 @@ function settleWorktreeResult(plan: NativePlan, prompt: string, execution: ZCode
   if (users.length !== 1 || users[0].info?.id !== starts[0].payload.messageId || (users[0].info?.anchor as Record<string, unknown>)?.turnId !== plan.turnId || digest(users[0].info?.modelSelection) !== digest(plan.model) || users[0].info?.sessionID !== plan.sessionId || users[0].parts?.filter(part => part.type === 'text').map(part => part.text).join('') !== zcodeExecutionPrompt(prompt, execution)) throw new StructuredSessionError('stale_result', 'ZCode worktree original native user/input differs')
   const finals = messages.filter(message => message.info?.role === 'assistant' && (message.info.anchor as Record<string, unknown>)?.turnId === plan.turnId && (message.info.semantics as Record<string, unknown>)?.kind === 'assistant_response')
   if (!finals.length || finals.at(-1)!.info?.providerId !== plan.model.providerId || finals.at(-1)!.info?.modelId !== plan.model.modelId || finals.at(-1)!.parts?.filter(part => part.type === 'text').map(part => part.text).join('') !== terminal.payload.response) throw new StructuredSessionError('stale_result', 'ZCode worktree final assistant identity/response differs')
-  const output = decodeZCodeStructuredText(terminal.payload.response), validate = new Ajv({ allErrors: true }).compile(execution.schema)
+  let output: unknown
+  try { output = decodeZCodeStructuredText(terminal.payload.response) }
+  catch (error) {
+    if (execution.state === 'completed' && error instanceof StructuredSessionError && error.code === 'structured_output_format_invalid') throw new StructuredSessionError('stale_result', 'ZCode completed worktree terminal response is not one strict JSON document')
+    throw error
+  }
+  const validate = new Ajv({ allErrors: true }).compile(execution.schema)
   if (!validate(output)) {
     if (execution.state === 'completed') throw new StructuredSessionError('stale_result', 'ZCode completed worktree terminal JSON no longer matches its schema')
     const diagnostics = validate.errors?.map(({ instancePath, schemaPath, keyword, params, message }) => ({ instancePath, schemaPath, keyword, params, message })) ?? []
