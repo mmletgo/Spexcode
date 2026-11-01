@@ -51,7 +51,7 @@ P1 的 prose 和持久契约只写业务约定；V3 尚未运行、通过或失�
 
 每轮 tables 差量相对于本轮权威冻结 Markdown：未列行由程序保留，removeIds 只删除该节点明确列出的旧行并继续受原授权约束；完整候选及全图而非差量交给独立审查和所有旧新门禁。新节点与 raw-only 输入以空行基线首次构建同一协议，不增加另一条全量生成路径。已持久失败 seed 的旧 v1/v2 路径回显输出只按原 schema、候选摘要和追踪读取诊断，不用当前目标绑定重新改写历史候选，也不成为新生成输出或权威合成基线。
 
-派发 schema 把 targetIndex 限为原冻结数组的整数范围；索引不排序或压缩，move 绑定目的身份，retire 下标留洞并由输出 schema 拒绝，具体结构发现进入既有有限修复循环，不能因绑定异常提前跳过剩余修复预算。生成 prompt 使用冻结目标绑定列出须显式构建的精确目标数量和原数组下标，并要求返回一个完整、可解析的紧凑 JSON 对象；已有完整契约仍可省略。changes 的 `minItems` 固定为零，`maxItems` 仍限制为合法目标数，以便合法但不完整的输出经过绑定和渲染后形成具体诊断候选。程序逐项核对所有目标；新目标、raw-only 或无已解析 sync-v1 契约的目标缺失时，报告 `target_not_elaborated` 并阻止独审及交付。最低数量不取代该硬门禁；重复/未知身份、额外 path 字段、索引越界和退役索引仍按结构规则拒绝，完整候选、全图与独审门禁保持。已结算 seed 仍仅为诊断，不作生成基线。
+派发 schema 把 targetIndex 限为原冻结数组的整数范围；索引不排序或压缩，move 绑定目的身份，retire 下标留洞并由输出 schema 拒绝，具体结构发现进入既有有限修复循环，不能因绑定异常提前跳过剩余修复预算。生成 prompt 使用同一冻结目标绑定分别列出全部合法可更新目标及原数组下标、首次必须构建的子集，并要求返回一个完整、可解析的紧凑 JSON 对象；首次必建0不代表禁止更新已有目标，既有完整契约仅在本轮确无相关业务差量和已核实必要修复时可省略。changes 的 `minItems` 固定为零，`maxItems` 仍限制为合法目标数，以便合法但不完整的输出经过绑定和渲染后形成具体诊断候选。程序逐项核对所有目标；新目标、raw-only 或无已解析 sync-v1 契约的目标缺失时，报告 `target_not_elaborated` 并阻止独审及交付。最低数量不取代该硬门禁；重复/未知身份、额外 path 字段、索引越界和退役索引仍按结构规则拒绝，完整候选、全图与独审门禁保持。已结算 seed 仍仅为诊断，不作生成基线。
 
 
 implementationWritePaths 显式为空时，生成与独审说明本轮源码及全部测试只读。AC.test 只能绑定冻结上下文中真实文件和用例，不把新测试或实现修复留给 P2；技术缺证不改写业务原意。
@@ -59,3 +59,6 @@ implementationWritePaths 显式为空时，生成与独审说明本轮源码及�
 提供冻结verifications且只读context已有技术登记时，生成VERIFY.id只可取当前登记且未在只读context中定义的ID；全部已在context时VERIFY差量为零项，AC.command直接引用已有技术定义，不复制只读owner。不同分区首次各自声明同一精确登记不改变业务授权，全部局部独审后由[[sync-partition-execution]]确定唯一owner；非精确登记、命令漂移和重复业务ID仍受原硬门禁。
 
 纯父既有VERIFY与本轮新登记不同，但本target拥有经过原输入授权核验的合法update_verification时，可保留旧定义进入同一接口更新；无授权或伪造授权仍拒绝。seed模型schema仍禁止所有VERIFY差量，程序只对该target已有且合法授权的ID，从精确冻结登记补入更新行，独立审查看到完整新候选。既有验证政策的完整演进与registration检查仍要求授权和新定义精确匹配，不开放任意技术行选择。
+
+
+共用行差量指令明确reelaborate按本轮raw/facts、authorizedChanges及具体repair核实必要更新，不能仅复制raw或返回空changes保留已核实失配；未批准诊断和授权字段不增加权限，也不强制改动已符合要求的行。合法目标数仍只控制maxItems与原targetIndex范围，minItems保持0，partial/空输出、首次目标遗漏、raw/授权及独审门不改变。interface_seed仍仅REQ/RULE/GAP，retire留洞、move原index及只读context排除继续共用既有绑定。
