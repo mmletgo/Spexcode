@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+GenerationInput可携nativeWorktree:true与明确stageTree；前者只由已冻结新workflow计划派生，后者让各分区继承同一个已审全局Spec overlay。files仍是核真的相关业务数据，不是读取授权；worktree builder结果不返回完整文件补丁，preparedChanges由真实Git diff导入并保持原CandidateChanges结构。无标记输入仅作历史协议和旧纯单测接缝，不改变新生产默认。
+
 模型调用期限沿 [[structured-session-runtime]] 原样传递，明确 null 不装调用计时器；生成与独审、完整读取及各自业务门禁保持。
 
 GenerationInput 复用 InputSnapshot、ComposedInputRef、SnapshotManifest、Contract、Acceptance、SyncScope 和既有只读会话输入类型。files 是协调器确定的完整受影响读集合，各完整正文用 ReadonlyMap；完整仓库身份仍由 manifest 绑定，不默认把整个仓库或凭据送给模型；elaboratedSpecs 单独携带 P1 通过后待交付完整正文，不替换 candidate.baseTree；事实、契约和 ready/blocked 集合由调用者冻结。可信政策带版本及摘要，执行模型固定上层指定 gpt-6.1-sol/high。

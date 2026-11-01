@@ -13,6 +13,8 @@ code:
 
 ## expanded spec
 
+ElaborationInput与ElaborationSessionRequest可携明确worktree:{baseCommit,tree,mode:read|edit}，ElaborationSessionResult可携真实worktree:{baseCommit,baseTree,headCommit,tree,worktreePath}。各阶段直接传递精确私有seed，调用与缓存身份绑定实际可见tree；该字段不授予主树写入或完成权。新native-worktree结果按真实Git对象验证，不能以frozenReadProof代替；旧frozenContext/frozenEntries/readProof字段只保留历史恢复及纯单测接缝。
+
 同步 budget.mode=unlimited 的新模型请求使用 timeoutMs:null，表示不设置模型调用总时限；有限数字期限及旧记录语义保持。null 调用仍受独立会话创建、租约/心跳、显式取消/停止/关闭和可信 VERIFY/Docker 各自期限约束，不以大数模拟无限。 timeoutMs 可显式为 null，省略仍沿原默认数字；totalTimeoutMs 为 null 时不产生隐式总截止时间。
 
 协调器可显式传入 implementationWritePaths 与 readonlyTestPaths，均只由冻结计划的写授权和 mandatory oracle 文件派生，随业务输入在第一个异步等待前复制，并同时进入生成与独审快照。它们是技术权限，不是业务事实或新授权；直接细化调用未提供时不推测目录权限。

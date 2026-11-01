@@ -12,6 +12,8 @@ code:
 
 ## expanded spec
 
+新native-worktree工作流明确仅支持claude:<exact-model>与zcode:<provider>/<exact-model>，新准入对其它模型给unsupported，不自动回退到旧frozen或另一provider。优先使用已获授权的Claude模型；实际目录/Native可用性仍由原运行时核对。DEFAULT_SYNC_MODEL、旧缺字段sol身份及旧请求/retry模型继承均不改；项目或显式操作选择应指定支持的真实CLI。新工具描述v3同时绑定model与agentWorkflow，不能由旧v1/v2资料热升级。下文默认模型/供应商范围描述保留于历史无workflow操作。
+
 `zcode:<provider-id>/<exact-model-id>` 明确选择 [[zcode-structured-runtime]]，provider 与 model 都作为固定身份核对，不接受自动别名或 provider fallback。它与 Claude/Codex 共用以下 admission/retryOf 规则，模型变化不改原业务意图和验收门槛。
 
 sync run/verify 的 API 和 CLI --model 接受操作级模型选择。选择进入不可变 admission/payload/ingress 身份，同 requestId 改模型拒绝；普通重复业务请求不能靠新 requestId 换模型取得新预算或归并到另一模型，换模型必须经正式 retryOf。显式 retry 未指定模型时继承原操作，显式另选模型仍复用原 source/input/policy/readset/request/origin 并保持既有已批准 P1 义务。

@@ -9,6 +9,9 @@ import type { SyncCoordinatorPlan } from './coordinator-types.js'
 /** 一次生成尝试的全部可信输入；调用者管理预算、attempt 和持久状态。 */
 export type GenerationInput = {
   root: string
+  nativeWorktree?: boolean
+  /** 分区继承同一个已审全局Spec overlay，不把局部投影当整棵输入。 */
+  stageTree?: string
   requestKey: string
   snapshot: InputSnapshot
   composed?: ComposedInputRef

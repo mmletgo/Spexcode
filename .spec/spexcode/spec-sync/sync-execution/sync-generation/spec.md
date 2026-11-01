@@ -18,6 +18,8 @@ related:
 
 ## expanded spec
 
+当前native-worktree流程由[[sync-stage-worktree]]固定已审全局Spec overlay；分区builder自由读取完整repo，只修改其原授权范围，在私有工作树正常add/commit并保持clean。code_generate只返回严格简短summary JSON，候选变化从公开结果对应的真实seed→HEAD Git对象差量导入，前digest/mode取original composed，后内容/mode取真实结果；不消费summary中的伪补丁。readPaths/files及manifest投影只表达任务相关上下文与程序校验数据，既有文件未出现在files不再阻止读取或授权修改；原scope、host-private、UTF8普通文件、CAS、不可改oracle与契约演进门禁保持。P1已审Spec仍由程序加入唯一candidate，私有seed不是交付commit。独立code_review直接读取真实完整candidate tree，输入和缓存身份同时绑定实际可见tree、任务prompt与schema，保留builder独立session/thread及checkedIds义务。无nativeWorktree的直接单测及历史固定操作继续下文frozen JSON补丁接缝，不作为新生产默认。
+
 模型调用期限沿 [[structured-session-runtime]] 原样传递，明确 null 不装调用计时器；生成与独审、完整读取及各自业务门禁保持。
 
 候选 schema、基础校验与任务指令由 [[sync-candidate-review]] 共用；本节点保留所有生成身份隔离及专用业务标记校验。

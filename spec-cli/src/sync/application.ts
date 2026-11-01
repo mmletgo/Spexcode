@@ -42,7 +42,7 @@ export type SyncApplicationOptions = Partial<Pick<SyncCoordinatorOptions, 'runne
   tools?: SyncCoordinatorOptions['tools']
 }
 type EnabledRecord = { registeredNodeIds?: string[]; version: 1; source: WorktreeIdentity; configDigest: string; enabledAtMs: number }
-type SavedTools = { tools: SyncCoordinatorOptions['tools']; runtimeDigest: string | null } & ({ version: 'sync-tools-v1' } | { version: 'sync-tools-v2'; model: string })
+type SavedTools = { tools: SyncCoordinatorOptions['tools']; runtimeDigest: string | null } & ({ version: 'sync-tools-v1' } | { version: 'sync-tools-v2'; model: string } | { version: 'sync-tools-v3'; model: string; agentWorkflow: 'native-worktree-v1' })
 type ExecutionInputs = { plan: SyncCoordinatorPlan; tools: SyncCoordinatorOptions['tools'] }
 function enabledSources(runtime: string): EnabledRecord[] {
   if (!existsSync(runtime)) return []
@@ -320,6 +320,7 @@ export class SyncApplication {
     const exact = this.store.readBaselineSelection(snapshot.source, await deriveSyncBaselineResources(snapshot, selectedPlan, selected.selection))
     if ('failure' in exact) throw Object.assign(new SyncApplicationError(exact.failure.code, exact.failure.message), { syncFailure: exact.failure })
     const plan = await buildSyncApplicationPlan(snapshot, nodeId, exact.selection, planningOptions)
+    plan.agentWorkflow = 'native-worktree-v1'
     if (reuseObserved) this.observedPlans.set(cacheKey, { direction, inputId: snapshot.id, headsDigest, plan: structuredClone(plan), selection: exact.selection })
     return { plan, selection: exact.selection }
   }
@@ -404,7 +405,7 @@ export class SyncApplication {
       }
       const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: ingressKey, origin: observedOrigin, ...syncModelBinding(model), budget: settings.budget, managedRoot: this.managedRoot, baselineSelection: selection })
       if (!this.ownsObservation()) return
-      this.prepareTools(ingressKey, this.store.findOperationByIngressKey(ingressKey), model)
+      this.prepareTools(ingressKey, this.store.findOperationByIngressKey(ingressKey), model, plan.agentWorkflow)
       const result = this.store.observeAndAdmit(observation, admission, { controlRevision: control.revision, selectionDigest: selection.digest })
       this.latestObservation = result.observation
       if (result.outcome !== 'blocked') this.start(result.operation.id)
@@ -517,13 +518,13 @@ export class SyncApplication {
   }
   private executionInputs(operation: SyncOperation): ExecutionInputs {
     const plan = this.operationPlan(operation)
-    const { tools } = this.readSavedTools(this.toolsRef(operation.ingressKey), syncModel(operation))
+    const { tools } = this.readSavedTools(this.toolsRef(operation.ingressKey), syncModel(operation), plan.agentWorkflow)
     this.checkRuntimeDirectories()
     return { plan, tools }
   }
   private async executionInputsAsync(operation: SyncOperation): Promise<ExecutionInputs> {
     const plan = this.operationPlan(operation)
-    const { tools } = await this.readSavedToolsAsync(this.toolsRef(operation.ingressKey), syncModel(operation))
+    const { tools } = await this.readSavedToolsAsync(this.toolsRef(operation.ingressKey), syncModel(operation), plan.agentWorkflow)
     this.checkRuntimeDirectories()
     return { plan, tools }
   }
@@ -535,9 +536,10 @@ export class SyncApplication {
   }
   private toolsRef(ingressKey: string): string { return join(this.artifactRoot, `application-runtime-${contentHash(ingressKey)}.json`) }
   private toolsBackup(ingressKey: string): string { return join(this.runtime, 'runtimes', contentHash(ingressKey), 'tools.json') }
-  private readSavedToolsMetadata(path: string, model: string): SavedTools {
+  private readSavedToolsMetadata(path: string, model: string, agentWorkflow?: SyncCoordinatorPlan['agentWorkflow']): SavedTools {
     const saved = JSON.parse(readFileSync(path, 'utf8')) as SavedTools
-    if (!['sync-tools-v1', 'sync-tools-v2'].includes(saved?.version) || saved.version === 'sync-tools-v2' && (typeof saved.model !== 'string' || !saved.model || saved.model !== saved.model.trim()) || !saved.tools || ![saved.tools.trustedRuntimeRoot, saved.tools.toolEntry, saved.tools.canonicalHooksDir].every(path => typeof path === 'string' && path.startsWith('/'))) throw new SyncApplicationError('sync_execution_metadata_invalid', '固定 runtime 描述不合法')
+    if (!['sync-tools-v1', 'sync-tools-v2', 'sync-tools-v3'].includes(saved?.version) || saved.version !== 'sync-tools-v1' && (typeof saved.model !== 'string' || !saved.model || saved.model !== saved.model.trim()) || !saved.tools || ![saved.tools.trustedRuntimeRoot, saved.tools.toolEntry, saved.tools.canonicalHooksDir].every(path => typeof path === 'string' && path.startsWith('/'))) throw new SyncApplicationError('sync_execution_metadata_invalid', '固定 runtime 描述不合法')
+    if ((saved.version === 'sync-tools-v3' ? saved.agentWorkflow : undefined) !== agentWorkflow) throw new SyncApplicationError('sync_execution_workflow_conflict', '固定runtime与操作工作流不同，禁止热迁移旧执行')
     if ((saved.version === 'sync-tools-v1' ? DEFAULT_SYNC_MODEL : saved.model) !== model) throw new SyncApplicationError('sync_execution_model_conflict', '固定 runtime 与请求的模型不同，禁止替换原选择')
     if (saved.runtimeDigest === null) {
       if (!this.options.tools) throw new SyncApplicationError('sync_execution_metadata_invalid', '生产固定 runtime 缺少完整 manifest 摘要')
@@ -547,22 +549,22 @@ export class SyncApplication {
   private checkSavedRuntime(saved: SavedTools, manifest: TrustedRuntimeEntry[]): void {
     if (contentHash(JSON.stringify(manifest)) !== saved.runtimeDigest) throw new SyncApplicationError('sync_execution_runtime_changed', '固定 runtime 实际 manifest 已变化，禁止沿用旧证据')
   }
-  private readSavedTools(path: string, model: string): SavedTools {
-    const saved = this.readSavedToolsMetadata(path, model)
+  private readSavedTools(path: string, model: string, agentWorkflow?: SyncCoordinatorPlan['agentWorkflow']): SavedTools {
+    const saved = this.readSavedToolsMetadata(path, model, agentWorkflow)
     if (saved.runtimeDigest !== null) this.checkSavedRuntime(saved, inspectTrustedRuntime(saved.tools.trustedRuntimeRoot))
     return saved
   }
-  private async readSavedToolsAsync(path: string, model: string): Promise<SavedTools> {
-    const saved = this.readSavedToolsMetadata(path, model)
+  private async readSavedToolsAsync(path: string, model: string, agentWorkflow?: SyncCoordinatorPlan['agentWorkflow']): Promise<SavedTools> {
+    const saved = this.readSavedToolsMetadata(path, model, agentWorkflow)
     if (saved.runtimeDigest !== null) this.checkSavedRuntime(saved, await inspectTrustedRuntimeAsync(saved.tools.trustedRuntimeRoot))
     return saved
   }
-  private prepareTools(ingressKey: string, prior: SyncOperation | null, model = syncModel(prior ?? {})): void {
+  private prepareTools(ingressKey: string, prior: SyncOperation | null, model = syncModel(prior ?? {}), agentWorkflow?: SyncCoordinatorPlan['agentWorkflow']): void {
     const path = this.toolsRef(ingressKey)
-    if (existsSync(path)) { this.readSavedTools(path, model); return }
+    if (existsSync(path)) { this.readSavedTools(path, model, agentWorkflow); return }
     const backup = this.toolsBackup(ingressKey)
     if (existsSync(backup)) {
-      const saved = this.readSavedTools(backup, model)
+      const saved = this.readSavedTools(backup, model, agentWorkflow)
       writeFileSync(path, JSON.stringify(saved), { mode: 0o600, flag: 'wx' })
       return
     }
@@ -570,7 +572,7 @@ export class SyncApplication {
     const runtimeParent = join(this.runtime, 'runtimes', contentHash(ingressKey)); mkdirSync(runtimeParent, { recursive: true, mode: 0o700 })
     const slot = mkdtempSync(join(runtimeParent, 'trusted-'))
     const frozen = this.options.tools ? null : freezeDeliveryRuntime(join(slot, 'package'))
-    const saved: SavedTools = { ...(model === DEFAULT_SYNC_MODEL ? { version: 'sync-tools-v1' as const } : { version: 'sync-tools-v2' as const, model }), tools: this.options.tools ?? frozen!, runtimeDigest: frozen?.digest ?? null }
+    const saved: SavedTools = { ...(agentWorkflow ? { version: 'sync-tools-v3' as const, model, agentWorkflow } : model === DEFAULT_SYNC_MODEL ? { version: 'sync-tools-v1' as const } : { version: 'sync-tools-v2' as const, model }), tools: this.options.tools ?? frozen!, runtimeDigest: frozen?.digest ?? null }
     const bytes = JSON.stringify(saved)
     writeFileSync(backup, bytes, { mode: 0o600, flag: 'wx' })
     writeFileSync(path, bytes, { mode: 0o600, flag: 'wx' })
@@ -636,7 +638,7 @@ export class SyncApplication {
       if (prior && (syncModel(prior) !== model || (ingress?.origin ?? prior.origin) !== origin || (prior.retryOf ?? null) !== (retry?.id ?? null) || (ingress?.input ?? prior.input).id !== snapshot.id || JSON.stringify((ingress?.input ?? prior.input).source) !== JSON.stringify(snapshot.source) || prior.policyDigest !== syncPlanDigest(plan) || ((ingress ?? prior).requestBlob?.sha256 ?? null) !== (requestBlob?.sha256 ?? null))) throw new SyncStoreError('SYNC_IDEMPOTENCY_CONFLICT', ingressKey)
       const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: input.requestId, origin, ...syncModelBinding(model), ...(retry ? { retryOf: retry.id, ...(retry.baselineSelection ? { executionScope: retry.scope, impactDigest: retry.impactDigest } : {}) } : {}), budget: settings.budget, managedRoot: this.managedRoot, ...(requestBlob ? { requestBlob } : {}), previousBaselinePair, ...(frozen ? { baselineSelection: frozen.selection } : {}) })
       if (prior) { admission.deliveryPlan = (ingress ?? prior).deliveryPlan; admission.budget = (ingress ?? prior).budget }
-      this.prepareTools(admission.ingressKey, prior, model)
+      this.prepareTools(admission.ingressKey, prior, model, plan.agentWorkflow)
       const operation = this.store.admitAndEnqueue(admission)
       this.start(operation.id)
       return { changed: true, operation: this.store.readOperation(operation.id) }
@@ -698,7 +700,7 @@ export class SyncApplication {
       const selected = this.store.readBaselineSelection(snapshot.source, [...resources.values()])
       if ('failure' in selected) throw new SyncApplicationError(selected.failure.code, selected.failure.message)
       const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: original.rootCauseId, origin: 'combined', ...syncModelBinding(model), budget: settings.budget, managedRoot: this.managedRoot, requestBlob, baselineSelection: selected.selection })
-      this.prepareTools(ingressKey, null, model)
+      this.prepareTools(ingressKey, null, model, plan.agentWorkflow)
       const operation = this.store.admitAndEnqueue(admission)
       this.start(operation.id)
       return { changed: true, operation: this.store.readOperation(operation.id) }
@@ -772,9 +774,10 @@ export class SyncApplication {
       const selected = original.baselineSelection ? this.store.readBaselineSelection(snapshot.source, original.baselineSelection.bindings.map(binding => binding.resource)) : null
       if (selected && 'failure' in selected) throw Object.assign(new SyncApplicationError(selected.failure.code, selected.failure.message), { syncFailure: selected.failure })
       const selection = selected?.selection, plan = this.operationPlan(original)
+      plan.agentWorkflow = 'native-worktree-v1'
       this.decorateDecisionPlan(plan, snapshot, input, context.analysis, requestBlob, selection ?? previousBaselinePair)
       const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: original.rootCauseId, origin: 'decision', ...syncModelBinding(model), budget: settings.budget, managedRoot: this.managedRoot, requestBlob, previousBaselinePair, ...(selection ? { baselineSelection: selection, executionScope: original.scope, impactDigest: original.impactDigest } : {}) })
-      this.prepareTools(ingressKey, null, model)
+      this.prepareTools(ingressKey, null, model, plan.agentWorkflow)
       const operation = this.store.admitAndEnqueue(admission)
       if (operation.ingressKey === ingressKey) this.start(operation.id)
       return { changed: true, operation: this.store.readOperation(operation.id) }

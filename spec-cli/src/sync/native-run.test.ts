@@ -798,3 +798,38 @@ test('exact creation timeout cannot be retried as settled after native thread an
     assert.equal(f.store.readOperation(f.claimed.operation.id).callsUsed, 1)
   } finally { f.cleanup() }
 })
+
+test('worktree资源桥贯通真实创建/queue/fake CLI，prompt只规范一次，实际commit和冷重放绑定完整', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'sync-native-worktree-bridge-')), root = join(directory, 'repo'), home = join(directory, 'home'), bin = join(directory, 'bin'), count = join(directory, 'dispatches.json')
+  mkdirSync(root); mkdirSync(home); mkdirSync(bin)
+  const git = (...args: string[]): string => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: 'pipe' }).trim()
+  try {
+    git('init', '-q', '-b', 'main'); git('config', 'user.name', 'bridge fixture'); git('config', 'user.email', 'bridge@example.invalid')
+    mkdirSync(join(root, '.spec')); writeFileSync(join(root, '.spec/spexcode.json'), JSON.stringify({ mainBranch: 'main', sessions: { maxActive: 1 } }))
+    writeFileSync(join(root, 'value'), 'seed\n'); git('add', '.'); git('commit', '-qm', 'seed')
+    const executable = join(bin, 'claude')
+    writeFileSync(executable, `#!/usr/bin/env node
+const fs=require('node:fs'),path=require('node:path'),rl=require('node:readline'),cp=require('node:child_process');
+if(process.argv.includes('--version')){process.stdout.write('2.1.309 (Claude Code)\\n');process.exit(0)}
+const arg=n=>process.argv[process.argv.indexOf(n)+1],session=arg('--session-id'),model=arg('--model'),send=x=>process.stdout.write(JSON.stringify(x)+'\\n');
+rl.createInterface({input:process.stdin}).on('line',line=>{const user=JSON.parse(line);if(user.type!=='user')return;const prompt=user.message.content[0].text;
+const calls=fs.existsSync(${JSON.stringify(count)})?JSON.parse(fs.readFileSync(${JSON.stringify(count)},'utf8')):[];calls.push({prompt,cwd:process.cwd()});fs.writeFileSync(${JSON.stringify(count)},JSON.stringify(calls));
+const project=path.join(process.env.CLAUDE_CONFIG_DIR,'projects/exact');fs.mkdirSync(project,{recursive:true});fs.writeFileSync(path.join(project,session+'.jsonl'),JSON.stringify({type:'user',sessionId:session,uuid:user.uuid,parentUuid:null,promptId:'prompt-'+user.uuid,message:user.message})+'\\n');
+send({type:'system',subtype:'init',session_id:session,model,tools:['Read','Bash','Edit','StructuredOutput']});send(user);
+if(prompt.startsWith('edit')){fs.writeFileSync('value','actual committed candidate\\n');cp.execFileSync('git',['add','value']);cp.execFileSync('git',['commit','-qm','native candidate'])}
+send({type:'result',subtype:'success',is_error:false,session_id:session,uuid:'result',user_message_uuid:user.uuid,user_message_uuids:[user.uuid],structured_output:{answer:'actual native result'}});
+});`)
+    chmodSync(executable, 0o755)
+    const modulePath = (name: string): string => fileURLToPath(new URL(name, import.meta.url)), script = join(directory, 'runner.mts')
+    writeFileSync(script, `import assert from'node:assert/strict';import{readFileSync}from'node:fs';import{execFileSync}from'node:child_process';import{createHash}from'node:crypto';
+import{openProtocol}from'${createRequire(import.meta.url).resolve('@spexcode/session-protocol')}';import{configuredSessionApplication}from${JSON.stringify(modulePath('../session-application.ts'))};
+import{migrateSyncStore}from${JSON.stringify(modulePath('./migrations.ts'))};import{SyncStore}from${JSON.stringify(modulePath('./store.ts'))};import{createAttemptRunner}from${JSON.stringify(modulePath('./native-run.ts'))};import{captureInputSnapshot,readEvidence}from${JSON.stringify(modulePath('./snapshot.ts'))};import{stageWorktree}from${JSON.stringify(modulePath('./stage-worktree.ts'))};import{nativeWorktreePrompt}from${JSON.stringify(modulePath('../native-worktree-runtime.ts'))};import{readRecord}from${JSON.stringify(modulePath('../session-record.ts'))};import{structuredExecutionPolicy}from${JSON.stringify(modulePath('../session-structured-policy.ts'))};
+const hash=x=>createHash('sha256').update(JSON.stringify(x)).digest('hex'),git=args=>execFileSync('git',args,{encoding:'utf8'}).trim(),snapshot=await captureInputSnapshot(process.cwd(),{committed:true}),application=configuredSessionApplication(),protocol=openProtocol(process.env.SPEX_SESSION_DATABASE_PATH);await migrateSyncStore(protocol);const store=new SyncStore(protocol,{readBlob:ref=>readEvidence(snapshot.source.commonDir,ref)}),scope={paths:['value'],contractIds:[],flowIds:[]};
+const operation=store.admitAndEnqueue({ingressKey:'bridge',rootCauseId:'bridge',origin:'spec',input:snapshot,scope,budget:{maxCalls:4,maxAttempts:2,maxRepairs:1,timeoutMs:60000},policyDigest:'policy',impactDigest:'impact',readSetDigest:'read',delivery:null,deliveryPlan:{canonicalRoot:process.cwd()+'/delivery',branch:'delivery',baseCommit:snapshot.headCommit}}),claim=store.claimAttempt({operationId:operation.id,source:snapshot.source,scope,leaseMs:30000,expectedMessageId:operation.dispatchMessageId}),seed=stageWorktree(snapshot.source.commonDir,snapshot.headCommit,snapshot.immutableTree,'edit'),request={root:process.cwd(),base:seed.baseCommit,worktree:seed,requestKey:'edit-bridge',inputDigest:'bound',purpose:'code_generate',prompt:'edit once',schema:{type:'object',properties:{answer:{type:'string'}},required:['answer'],additionalProperties:false},timeoutMs:10000,model:'claude:MiniMax-M3.1-Flash',effort:'high'},runner=createAttemptRunner(store,claim.fence,{pollMs:2});
+const result=await runner(request),record=readRecord(result.sessionId),expected=hash({prompt:nativeWorktreePrompt(request.prompt,seed),parent:null,launcher:null,base:seed.baseCommit,structuredExecution:structuredExecutionPolicy(request)});assert.equal(record.createPayloadHash,expected);assert.equal(result.frozenReadProof,undefined);assert.equal(record.structuredExecution.frozenContext,undefined);assert.equal(record.structuredExecution.resultWorktree.tree,result.worktree.tree);assert.notEqual(result.worktree.headCommit,seed.baseCommit);assert.equal(git(['show',result.worktree.headCommit+':value']),'actual committed candidate');assert.equal(store.findResource(claim.attempt.id,request.requestKey).phase,'removed');
+const calls=JSON.parse(readFileSync(${JSON.stringify(count)},'utf8'));assert.equal(calls.length,1);assert.equal(calls[0].prompt,nativeWorktreePrompt(request.prompt,seed));assert.equal(calls[0].cwd,result.worktree.worktreePath);
+git(['worktree','remove',result.worktree.worktreePath]);assert.deepEqual(await createAttemptRunner(store,claim.fence,{pollMs:2})(request),result);assert.equal(store.readOperation(operation.id).callsUsed,1);assert.equal(JSON.parse(readFileSync(${JSON.stringify(count)},'utf8')).length,1);await assert.rejects(runner({...request,prompt:'another task'}),{code:'key_reused'});protocol.close();process.exit(0);`)
+    const result = spawnSync(process.execPath, ['--import', tsxImport, script], { cwd: root, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, SPEXCODE_HOME: home, SPEX_SESSION_DATABASE_PATH: join(home, 'sessions.sqlite'), SPEX_RUNTIME_HOME: join(home, 'runtime'), ANTHROPIC_BASE_URL: 'https://example.invalid', SPEXCODE_CODEX_USAGE_GUARD: '0', SPEX_TEST: '1' }, encoding: 'utf8', timeout: 30000 })
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
+  } finally { rmSync(directory, { recursive: true, force: true }) }
+})

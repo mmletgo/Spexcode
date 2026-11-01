@@ -7,13 +7,14 @@ import { processStartToken, runtimeRoot, verifyDetachedRuntime, type ProcessIden
 import { spawnDetachedRuntime } from './runtime-ownership.js'
 import { ensureCodexCurrentGeneration, type CodexGenerationEndpoint } from './codex-runtime-generations.js'
 import type { FrozenContextRef, FrozenReadProof, FrozenReadReceipt } from './frozen-context.js'
+import type { NativeWorktreeRequest, NativeWorktreeResult } from './native-worktree-runtime.js'
 import { withDeliveryLocks } from './delivery-lock.js'
 
 export type FrozenReaderRuntime = { cliVersion: string; catalogDigest: string; catalogPath: string } & ({ version: 1 } | { version: 2; toolOutputTokenLimit: number })
 
 export type StructuredExecution = {
-  version: 1 | 2 | 3 | 4 | 5
-  policy: 'codex-read-only-v1' | 'codex-frozen-read-only-v2' | 'claude-frozen-read-only-v1' | 'zcode-frozen-read-only-v1'
+  version: 1 | 2 | 3 | 4 | 5 | 6
+  policy: 'native-worktree-v1' | 'codex-read-only-v1' | 'codex-frozen-read-only-v2' | 'claude-frozen-read-only-v1' | 'zcode-frozen-read-only-v1'
   schema: Record<string, unknown>
   inputDigest: string
   purpose: string
@@ -30,6 +31,8 @@ export type StructuredExecution = {
   resultDigest?: string
   error?: string
   errorCode?: 'structured_output_retries_exhausted' | 'structured_output_format_invalid'
+  worktree?: NativeWorktreeRequest
+  resultWorktree?: NativeWorktreeResult
   frozenContext?: FrozenContextRef
   frozenReads?: FrozenReadReceipt[]
   frozenReadProof?: FrozenReadProof
@@ -42,6 +45,10 @@ export type StructuredExecution = {
 export function structuredRealmRoot(execution: unknown, root = runtimeRoot()): string | null {
   if (!execution || typeof execution !== 'object') return null
   const state = execution as Partial<StructuredExecution>
+  if (state.version === 6 && state.policy === 'native-worktree-v1' && state.worktree && !state.frozenContext && !state.readerRuntime) {
+    if (state.model?.startsWith('claude:')) return join(root, 'structured-native-worktree-v1', 'claude')
+    if (/^zcode:[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(state.model ?? '')) return join(root, 'structured-native-worktree-v1', 'zcode')
+  }
   if (state.version === (state.timeoutMs === null ? 5 : 4) && state.policy === 'zcode-frozen-read-only-v1' && state.frozenContext?.version === 1 && /^zcode:[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(state.model ?? '') && !state.readerRuntime)
     return join(root, 'structured-zcode-read-only-v1')
   if (state.version === (state.timeoutMs === null ? 5 : 3) && state.policy === 'claude-frozen-read-only-v1' && state.frozenContext?.version === 1 && state.model?.startsWith('claude:') && !state.readerRuntime)
@@ -60,9 +67,13 @@ export function structuredRealmRoot(execution: unknown, root = runtimeRoot()): s
 }
 
 /** 固定策略只有一份构造，运行观测与冻结读取证明不参与创建载荷。 */
-export function structuredExecutionPolicy(request: Pick<StructuredExecution, 'schema' | 'inputDigest' | 'purpose' | 'timeoutMs' | 'model' | 'effort' | 'frozenContext' | 'readerRuntime'>): StructuredExecution {
+export function structuredExecutionPolicy(request: Pick<StructuredExecution, 'schema' | 'inputDigest' | 'purpose' | 'timeoutMs' | 'model' | 'effort' | 'frozenContext' | 'readerRuntime' | 'worktree'>): StructuredExecution {
   const claude = request.model?.startsWith('claude:') === true
   const zcode = request.model?.startsWith('zcode:') === true
+  if (request.worktree) {
+    if ((!claude && !zcode) || request.frozenContext || request.readerRuntime) throw new StructuredSessionError('unsupported', 'native worktree requires an explicit Claude/ZCode model and no frozen reader policy')
+    return { version: 6, policy: 'native-worktree-v1', schema: request.schema, inputDigest: request.inputDigest, purpose: request.purpose, timeoutMs: request.timeoutMs, model: request.model, ...(request.effort ? { effort: request.effort } : {}), worktree: request.worktree }
+  }
   return { version: request.timeoutMs === null ? 5 : zcode ? 4 : claude ? 3 : request.frozenContext ? 2 : 1, policy: zcode ? 'zcode-frozen-read-only-v1' : claude ? 'claude-frozen-read-only-v1' : request.frozenContext ? 'codex-frozen-read-only-v2' : 'codex-read-only-v1',
     schema: request.schema, inputDigest: request.inputDigest, purpose: request.purpose, timeoutMs: request.timeoutMs,
     ...(request.model ? { model: request.model } : {}), ...(request.effort ? { effort: request.effort } : {}), ...(request.frozenContext ? { frozenContext: request.frozenContext } : {}), ...(request.readerRuntime ? { readerRuntime: request.readerRuntime } : {}) }

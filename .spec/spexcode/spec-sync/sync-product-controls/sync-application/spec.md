@@ -5,6 +5,8 @@ hue: 175
 desc: HTTP 与 CLI 共用持久协调服务，受控正文差量不先提交，实际交付与原树状态分开查询。
 code:
   - spec-cli/src/sync/application.ts
+related:
+  - spec-cli/src/sync/historical-workflow.test-helpers.ts
 ---
 # 同步共享应用入口
 
@@ -15,6 +17,8 @@ code:
 已验证交付通过同一服务采纳到原工作树，资格和执行沿同一后端判据，不由界面复制安全判断。
 
 ## expanded spec
+
+新操作默认冻结plan.agentWorkflow=native-worktree-v1与sync-tools-v3:{model,agentWorkflow,tools,runtimeDigest}。读取运行资料同时核精确模型及workflow，拒绝新旧协议热替换；旧v1/v2及缺字段plan按原frozen协议恢复/retry，旧已持久payload不改写。新业务裁决/revert为新操作，使用新工作流。新workflow明确只支持Claude Code或ZCode精确模型，裸sol与其它执行器给清楚unsupported而不fallback；历史缺省sol身份不改变。v18组件writer marker使旧sync writer整体拒绝新语义，固定v3运行描述是额外能力门。
 
 本节点落实 [[sync-product-controls]] 的 P2 应用入口与 P3 手动代码意图/裁决；P4 外部 watcher由本服务实现，完整恢复矩阵与P5最终验收由上层保留。生产 configuredSyncApplication 复用后端同仓库的 canonical session protocol，按已注册 source 工作树实例化，不创建其它数据库或队列，迁移先备份。运行资料及固定 compiled CLI 位于源码外当前用户拥有的独占 0700 runtime。
 
