@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+明确 ZCode 版本4只进入 [[zcode-structured-runtime]]，不准备 Codex reader catalog。新结果和已结算资源重放都核对 [[zcode-frozen-proof]] 的精确 provider/model 与原始输出，沿用同一 reserveDispatch、sessionCreateKey、完整 terminal→removed 和正式取消，不另建队列或伪装其它执行器。
+
 执行器选择只由已冻结 model 命名空间进入 [[structured-session-runtime]]；Claude 版本3结果还核对明确 provider/model 的原生 proof，不准备 Codex reader catalog。共享资源计划、checkpoint、完整 terminal→removed、预算、sessionCreateKey 及恢复门禁保持同一份，旧已持久 Codex 请求和 proof 原样重放。
 
 原生执行权威属于 [[structured-session-runtime]]，资源CAS与恢复记录属于 [[sync-store]]。createAttemptRunner复用runStructuredSession/cancelStructuredSession/readRecord、sessionIdForCreateKey和正式创建恢复入口recoverSessionCreateTermination。每个请求保存完整root/base/prompt/schema/input/purpose/timeout/model/effort摘要，reserveDispatch同键同载荷不重复计费；返回sessionCreateKey是唯一原生创建键，不另造会话ID。资源计划在调用前持久固定key、预期sessionId、原source input和当次durable attempt候选摘要；正文只进既有commonDir evidence blob。

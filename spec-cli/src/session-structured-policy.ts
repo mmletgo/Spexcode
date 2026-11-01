@@ -12,8 +12,8 @@ import { withDeliveryLocks } from './delivery-lock.js'
 export type FrozenReaderRuntime = { cliVersion: string; catalogDigest: string; catalogPath: string } & ({ version: 1 } | { version: 2; toolOutputTokenLimit: number })
 
 export type StructuredExecution = {
-  version: 1 | 2 | 3
-  policy: 'codex-read-only-v1' | 'codex-frozen-read-only-v2' | 'claude-frozen-read-only-v1'
+  version: 1 | 2 | 3 | 4
+  policy: 'codex-read-only-v1' | 'codex-frozen-read-only-v2' | 'claude-frozen-read-only-v1' | 'zcode-frozen-read-only-v1'
   schema: Record<string, unknown>
   inputDigest: string
   purpose: string
@@ -35,12 +35,15 @@ export type StructuredExecution = {
   frozenReadProof?: FrozenReadProof
   readerRuntime?: FrozenReaderRuntime
   claudeNative?: { version: 1; root: string; sessionId: string; userUuid: string; pid?: number; receiptFile?: string; promptId?: string }
+  zcodeNative?: { version: 1; root: string; sessionId: string; inputId: string; pid?: number; receiptFile?: string; turnId?: string }
 }
 
 /** 从持久化策略推导结构化 realm；无效或不完整策略不获得控制根。 */
 export function structuredRealmRoot(execution: unknown, root = runtimeRoot()): string | null {
   if (!execution || typeof execution !== 'object') return null
   const state = execution as Partial<StructuredExecution>
+  if (state.version === 4 && state.policy === 'zcode-frozen-read-only-v1' && state.frozenContext?.version === 1 && /^zcode:[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(state.model ?? '') && !state.readerRuntime)
+    return join(root, 'structured-zcode-read-only-v1')
   if (state.version === 3 && state.policy === 'claude-frozen-read-only-v1' && state.frozenContext?.version === 1 && state.model?.startsWith('claude:') && !state.readerRuntime)
     return join(root, 'structured-claude-read-only-v1')
   if (state.version === 1 && state.policy === 'codex-read-only-v1' && state.readerRuntime === undefined && state.frozenContext === undefined)
@@ -59,7 +62,8 @@ export function structuredRealmRoot(execution: unknown, root = runtimeRoot()): s
 /** 固定策略只有一份构造，运行观测与冻结读取证明不参与创建载荷。 */
 export function structuredExecutionPolicy(request: Pick<StructuredExecution, 'schema' | 'inputDigest' | 'purpose' | 'timeoutMs' | 'model' | 'effort' | 'frozenContext' | 'readerRuntime'>): StructuredExecution {
   const claude = request.model?.startsWith('claude:') === true
-  return { version: claude ? 3 : request.frozenContext ? 2 : 1, policy: claude ? 'claude-frozen-read-only-v1' : request.frozenContext ? 'codex-frozen-read-only-v2' : 'codex-read-only-v1',
+  const zcode = request.model?.startsWith('zcode:') === true
+  return { version: zcode ? 4 : claude ? 3 : request.frozenContext ? 2 : 1, policy: zcode ? 'zcode-frozen-read-only-v1' : claude ? 'claude-frozen-read-only-v1' : request.frozenContext ? 'codex-frozen-read-only-v2' : 'codex-read-only-v1',
     schema: request.schema, inputDigest: request.inputDigest, purpose: request.purpose, timeoutMs: request.timeoutMs,
     ...(request.model ? { model: request.model } : {}), ...(request.effort ? { effort: request.effort } : {}), ...(request.frozenContext ? { frozenContext: request.frozenContext } : {}), ...(request.readerRuntime ? { readerRuntime: request.readerRuntime } : {}) }
 }

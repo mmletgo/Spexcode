@@ -2716,7 +2716,9 @@ async function prepareSession(prompt: string, parentage: CreateParentage, launch
         try {
           const lname = context.structuredExecution ? 'structured-read-only' : launcher ?? defaultLauncher(mainRoot())
           chosen = context.structuredExecution
-            ? context.structuredExecution.policy === 'claude-frozen-read-only-v1'
+            ? context.structuredExecution.policy === 'zcode-frozen-read-only-v1'
+              ? { name: 'structured-read-only', harness: 'zcode', cmd: 'zcode', headless: true, configDir: null }
+              : context.structuredExecution.policy === 'claude-frozen-read-only-v1'
               ? { name: 'structured-read-only', harness: 'claude-headless', cmd: 'claude', headless: true, configDir: null }
               : { name: 'structured-read-only', harness: 'codex-headless', cmd: 'codex', headless: true, configDir: null }
             : resolveLauncher(lname)
