@@ -7,7 +7,7 @@ type FrozenElaborationInput = { targets: readonly TargetPosition[]; nodeChanges?
 const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value)
 
 function frozenElaborationInput(request: ElaborationSessionRequest): FrozenElaborationInput {
-  const marker = '冻结业务输入:\n'
+  const marker = request.prompt.includes('冻结业务输入:\n') ? '冻结业务输入:\n' : '任务:\n'
   const markerIndex = request.prompt.indexOf(marker)
   if (markerIndex < 0) throw new Error('细化生成夹具缺少冻结业务输入')
   const jsonLine = request.prompt.slice(markerIndex + marker.length).split(/\r?\n/, 1)[0]

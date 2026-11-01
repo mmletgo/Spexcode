@@ -41,6 +41,8 @@ raw、事实及权威业务规则优先。重大未知仅指权限/资金/业务
 
 生成与独审共用的来源说明须与 [[sync-contract-evolution]] 一致：普通 raw 需求使用 user:raw，其他合法冻结 code/derived 来源继续沿用。当前精确已独审裁决合法改变 REQ 意义时，REQ.source 必须为当前 decision:stableDecisionId；共享上游 REQ 仍受旧规则直接来源、原 affected、同一 allowed_change 与实质政策变化见证限制，不能只写 RULE basis 或反向依赖造循环。明确 REQ-only 且无旧政策的裁决不强制虚构规则；keep 保持原来源和业务意义，未选义务不变。AC-ELABORATION-44 用受控生成读取实际派发指令、完整候选门禁及独审捕获验证来源说明一致，user:raw 改义和仅换规则来源仍拒绝；它不替代真实 native 产品验收。
 
+Native worktree P1生成和独审复用同一来源说明中的短来源语义；不因此把完整行、流程或验证指令加入提示，也不改变`interface_seed`对父层范围的限制。父阶段未由raw/facts确定的普通字段表示、缺省值与等价校验顺序留给后续子分区细化，具体阶段边界见[[sync-elaboration]]。
+
 生成 schema 字段说明与共用指令明确沿用 [[sync-contract-schema]] 的引用语义：STEP.rules 和 TR.rules 只能引用已定义 RULE，不能放入 REQ 或其他类型；user:raw 只是原文来源，decision/code 来源本身也不建立需求依赖边。除 REQ 自身外，每个业务项须沿实际 depends-on 或 user:REQ、rule:RULE、derived 来源引用追到 REQ，不能以正文提及原意替代图路径。提供可信登记时，AC.command 引用的 ID 若尚无只读或候选 VERIFY 行，须按精确冻结登记定义该行；登记 JSON 本身不是契约行。说明不改变原 schema 接受范围、引用类型校验、追溯门禁或独审标准。
 
 changes 允许空数组表达无行差量或已冻结的全节点退役：既有完整契约目标由程序补全；新/raw-only目标仍须显式构建，空输出自身不授权删除；节点生命周期从调用者 nodeChanges 程序复制并在全图确认。独立审查看到旧新路径、原文及逐项授权；不能因当前 active AC 数量为零跳过旧契约及退役检查。既有验收更新要求 update_acceptance 引用变化 ruleIds 和真实独审分析；普通无冲突反写可自动更新，模型自身失败不能转成要求。pure refactor/preserve_business 保留业务正文和字段，仅更新必要绑定。

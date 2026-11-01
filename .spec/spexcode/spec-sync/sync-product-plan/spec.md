@@ -32,6 +32,8 @@ P0至P5按完整需求交付，不以阶段演示、局部测试或可修改的�
 
 父接口起步阶段仅生成和独审必要的共享REQ/RULE/GAP，不同时要求完整对象、流程、状态与AC展开。具体子区承担完整细化，最后仍核全图覆盖；父层已声明的义务必须准确、有来源且相容，不能以分阶段为由接受错误。
 
+Native P1生成与独审对普通无冲突实现约定、重大业务未知和明确意图冲突按[[sync-elaboration]]的共享来源边界判断。空`implementationWritePaths`表示源码与全部测试只读，不新增测试或把实现缺口交给无权P2，并以`readonly_implementation_gap`阻断；父接口阶段仍只审必要接口种子。
+
 代码提交可在完整已结算基线已被来源 Git 真实采纳后，按提交路径的实际 owner 与必要影响闭包规划。只有真实 `before`、完整 discovery selection 的精确资源头和对应 delivery 采纳均可验证时才收窄；首次、无/未采纳/未完成基线、缺少精确绑定、根原意或配置变化、未治理源码变化继续完整 bootstrap/发现。多轮 freeze 始终用原始 discovery selection 证明完整基线，不能将上一轮的窄 selection 当作覆盖证明；失败 admission、保存或暂存信号不消费基线。
 
 方案保留九项REQ和二十八项AC及阶段依赖；产品实施状态由 [[spec-sync]] 与各权威子节点、实际当前版本证据决定。跨机器原意授权由 [[sync-intent-authorization]] 定义，可信CI从受保护目标提供policyCommit；普通候选不能选择自身政策来授予自己权限。撤销和版本回退分别复用 [[sync-history-input]] 与 [[sync-application]] 的新成组补偿及停止写入动作，真实来源采纳和主分支同步按 [[sync-landing-status]] 区分。大上下文通过 [[frozen-context-reader]] 完整读取，不改变原预算或降低审查义务。
