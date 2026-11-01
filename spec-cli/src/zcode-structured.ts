@@ -3,7 +3,7 @@ import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:chil
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve, sep } from 'node:path'
 import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
 import { detachedRuntimeIsGone, processStartToken, verifyDetachedRuntime, writeDetachedRuntimeReceipt, type ProcessIdentity } from '@spexcode/spec-core'
@@ -19,9 +19,10 @@ export const zcodeCapability = Object.freeze({
 })
 export type ZCodeNativeState = { version: 1; root: string; sessionId: string; inputId: string; pid?: number; receiptFile?: string; turnId?: string }
 export type ZCodeStructuredExecution = Omit<StructuredExecution, 'version' | 'policy' | 'frozenReadProof'> & {
-  version: 4 | 5; policy: 'zcode-frozen-read-only-v1'; zcodeNative?: ZCodeNativeState; frozenReadProof?: ZCodeFrozenReadProof
+  version: 4 | 5 | 6; policy: 'zcode-frozen-read-only-v1' | 'native-worktree-v1'; zcodeNative?: ZCodeNativeState; frozenReadProof?: ZCodeFrozenReadProof
 }
 type NativeCallbacks = { onThread(id: string): Promise<void>; onTurn(id: string): Promise<void>; onTurnStarting?(): Promise<void>; onNative(state: ZCodeNativeState): Promise<void>; onTimeout?(): Promise<void>; signal?: AbortSignal }
+type WorktreeNativeResult = { threadId: string; turnId: string; text: string; frozenReadProof?: never }
 type NativeResult = { threadId: string; turnId: string; text: string; frozenReadProof: ZCodeFrozenReadProof }
 type NativeEvent = { sessionId: string; turnId?: string; seq: number; eventId: string; type: string; payload: Record<string, unknown> }
 type NativeModel = { providerId: string; modelId: string; options?: { reasoningLevel: 'high' } }
@@ -36,11 +37,16 @@ const digest = (value: unknown): string => createHash('sha256').update(JSON.stri
 const bytesDigest = (path: string): string => createHash('sha256').update(readFileSync(path)).digest('hex')
 const sleep = (milliseconds: number): Promise<void> => new Promise(resolve => setTimeout(resolve, milliseconds))
 const active = new Map<string, { interrupt(): void }>()
-const fixedPolicy = (execution: ZCodeStructuredExecution) => ({ ...structuredExecutionPolicy(execution), version: execution.timeoutMs === null ? 5 : 4, policy: 'zcode-frozen-read-only-v1' })
+const fixedPolicy = (execution: ZCodeStructuredExecution) => execution.policy === 'native-worktree-v1' ? structuredExecutionPolicy(execution) : ({ ...structuredExecutionPolicy(execution), version: execution.timeoutMs === null ? 5 : 4, policy: 'zcode-frozen-read-only-v1' })
 
 /** 原业务正文逐字保留；唯一原生user输入前置固定、只读的精确JSON schema控制段。 */
 export function zcodeStructuredPrompt(prompt: string, schema: Record<string, unknown>): string {
   return `SpexCode structured-output contract (read-only control):\nReturn exactly one JSON value matching the JSON Schema below. Do not add prose or Markdown.\nJSON Schema: ${JSON.stringify(schema)}\nEnd of structured-output contract.\n\n${prompt}`
+}
+
+/** 正常工作区模式的 schema 只约束结果，不声明只读工具控制。 */
+function zcodeExecutionPrompt(prompt: string, execution: ZCodeStructuredExecution): string {
+  return execution.policy === 'native-worktree-v1' ? `Return exactly one JSON value matching this JSON Schema, without prose or Markdown: ${JSON.stringify(execution.schema)}\n\n${prompt}` : zcodeStructuredPrompt(prompt, execution.schema)
 }
 
 /** 只投影结算所需白名单字段；历史currentTurnId与真正activeTurn分别观察。 */
@@ -100,6 +106,22 @@ export function zcodeProofEvent(event: NativeEvent): NativeEvent | undefined {
   const keys = ['messageCount', 'providerId', 'modelId', 'temperature', 'maxTokens', 'toolCount', 'iteration']
   if (Object.keys(event.payload).some(key => !keys.includes(key))) throw new StructuredSessionError('stale_result', 'ZCode ModelRequest includes unknown proof fields')
   return event
+}
+
+/** 正常原生文件工具保持可用，仅旧冻结模式设置唯一 MCP 工具面。 */
+export function zcodeWorktreeConfiguration(): Record<string, unknown> {
+  return { ...zcodeRuntimeConfiguration(), features: { mcp: false, subagent: false, memory: false, skill: false } }
+}
+
+/** 只批准当前 session 的一次正常工具调用；读取无路径白名单，文件修改归属本工作区。 */
+export function zcodeWorktreePermission(request: { sessionId?: string; toolName?: string; input?: { file_path?: string; path?: string } }, sessionId: string, worktreePath: string, mode: 'read' | 'edit'): 'allow' | 'deny' {
+  if (request.sessionId !== sessionId || !['Read', 'Glob', 'Grep', 'Bash', 'Edit', 'Write', 'NotebookEdit'].includes(request.toolName ?? '')) return 'deny'
+  if (!['Edit', 'Write', 'NotebookEdit'].includes(request.toolName!)) return 'allow'
+  if (mode === 'read') return 'deny'
+  const path = request.input?.file_path ?? request.input?.path
+  if (typeof path !== 'string') return 'deny'
+  const target = resolve(worktreePath, path), root = resolve(worktreePath)
+  return target === root || target.startsWith(root + sep) ? 'allow' : 'deny'
 }
 
 /** 配置由控制面固定，SDK只消费认证路径引用；不继承用户能力或读取认证字节。 */
@@ -182,13 +204,39 @@ function ownedProcessesStopped(plan: NativePlan, terminate = false): boolean {
 function verifyPlan(plan: NativePlan, root: string, prompt: string | undefined, execution: ZCodeStructuredExecution): void {
   const native = execution.zcodeNative
   if (plan.root !== root || native?.root !== root || plan.sessionId !== native.sessionId || plan.inputId !== native.inputId
-    || plan.policyDigest !== digest(fixedPolicy(execution)) || prompt !== undefined && plan.requestDigest !== digest({ prompt, nativePrompt: zcodeStructuredPrompt(prompt, execution.schema), policy: fixedPolicy(execution), selection: zcodeNativeSelection(execution.model, execution.effort) })
+    || plan.policyDigest !== digest(fixedPolicy(execution)) || prompt !== undefined && plan.requestDigest !== digest({ prompt, nativePrompt: zcodeExecutionPrompt(prompt, execution), policy: fixedPolicy(execution), selection: zcodeNativeSelection(execution.model, execution.effort) })
     || plan.cliVersion !== zcodeCapability.cliVersion || plan.cliSha256 !== zcodeCapability.cliSha256 || plan.builtinSha256 !== zcodeCapability.builtinSha256
     || digest({ model: plan.model, ...(plan.thoughtLevel ? { thoughtLevel: plan.thoughtLevel } : {}) }) !== digest(zcodeNativeSelection(execution.model, execution.effort)) || native.turnId && native.turnId !== plan.turnId || native.pid !== plan.pid || native.receiptFile && native.receiptFile !== plan.receiptFile
     || execution.threadId && execution.threadId !== plan.sessionId || execution.turnId && execution.turnId !== plan.turnId)
     throw new StructuredSessionError('stale_result', 'ZCode fixed native plan or durable identity differs')
   if (existsSync(join(root, 'send.json')) && (!plan.modelSnapshotDigest || !existsSync(join(root, 'model-snapshot.json')) || plan.modelSnapshotDigest !== digest(JSON.parse(readFileSync(join(root, 'model-snapshot.json'), 'utf8'))))) throw new StructuredSessionError('stale_result', 'ZCode saved pre-send model selection differs')
-  if (prompt !== undefined && existsSync(join(root, 'send.json')) && digest(JSON.parse(readFileSync(join(root, 'send.json'), 'utf8'))) !== digest({ sessionId: plan.sessionId, content: zcodeStructuredPrompt(prompt, execution.schema), inputId: plan.inputId, modelSelection: plan.model })) throw new StructuredSessionError('stale_result', 'ZCode original send differs from the exact native schema/prompt input')
+  if (prompt !== undefined && existsSync(join(root, 'send.json')) && digest(JSON.parse(readFileSync(join(root, 'send.json'), 'utf8'))) !== digest({ sessionId: plan.sessionId, content: zcodeExecutionPrompt(prompt, execution), inputId: plan.inputId, modelSelection: plan.model })) throw new StructuredSessionError('stale_result', 'ZCode original send differs from the exact native schema/prompt input')
+}
+
+/** 同一原生 session/input/query/turn 和实际模型选择证明正常工具执行的终态。 */
+function settleWorktreeResult(plan: NativePlan, prompt: string, execution: ZCodeStructuredExecution): WorktreeNativeResult {
+  verifyPlan(plan, plan.root, prompt, execution)
+  const read = (name: string): unknown => JSON.parse(readFileSync(join(plan.root, name), 'utf8'))
+  const terminal = read('terminal.json') as NativeEvent, events = read('events.json') as NativeEvent[], messages = read('messages.json') as Array<{ info?: Record<string, unknown>; parts?: Array<Record<string, unknown>> }>
+  const exit = read('exit.json') as StopEvidence, send = read('send.json')
+  const starts = events.filter(event => event.type === 'turn.started'), requests = events.filter(event => event.type === 'session.updated')
+  if (!plan.turnId || terminal.type !== 'turn.completed' || terminal.sessionId !== plan.sessionId || terminal.turnId !== plan.turnId || terminal.payload.inputId !== plan.inputId || terminal.payload.resultType !== 'success' || typeof terminal.payload.response !== 'string'
+    || starts.length !== 1 || starts[0].payload.inputId !== plan.inputId || starts[0].payload.queryId !== plan.queryId || starts[0].turnId !== plan.turnId
+    || !events.some(event => digest(event) === digest(terminal)) || events.some(event => event.sessionId !== plan.sessionId || event.turnId !== plan.turnId)
+    || !requests.length || requests.some(event => event.payload.providerId !== plan.model.providerId || event.payload.modelId !== plan.model.modelId)
+    || !exit.stopped || !exit.idle || !exit.closed || exit.code !== 0 || exit.signal !== null || !ownedProcessesStopped(plan)) throw new StructuredSessionError('stale_result', 'ZCode worktree exact native model/terminal/process evidence differs')
+  const users = messages.filter(message => message.info?.role === 'user' && (message.info.semantics as Record<string, unknown>)?.kind === 'user_prompt')
+  if (users.length !== 1 || users[0].info?.id !== starts[0].payload.messageId || (users[0].info?.anchor as Record<string, unknown>)?.turnId !== plan.turnId || digest(users[0].info?.modelSelection) !== digest(plan.model) || users[0].info?.sessionID !== plan.sessionId || users[0].parts?.filter(part => part.type === 'text').map(part => part.text).join('') !== zcodeExecutionPrompt(prompt, execution)) throw new StructuredSessionError('stale_result', 'ZCode worktree original native user/input differs')
+  const finals = messages.filter(message => message.info?.role === 'assistant' && (message.info.anchor as Record<string, unknown>)?.turnId === plan.turnId && (message.info.semantics as Record<string, unknown>)?.kind === 'assistant_response')
+  if (!finals.length || finals.at(-1)!.info?.providerId !== plan.model.providerId || finals.at(-1)!.info?.modelId !== plan.model.modelId || finals.at(-1)!.parts?.filter(part => part.type === 'text').map(part => part.text).join('') !== terminal.payload.response) throw new StructuredSessionError('stale_result', 'ZCode worktree final assistant identity/response differs')
+  const output = decodeZCodeStructuredText(terminal.payload.response), validate = new Ajv({ allErrors: true }).compile(execution.schema)
+  if (!validate(output)) throw new StructuredSessionError('failed', 'ZCode worktree terminal JSON does not match its schema')
+  const result: WorktreeNativeResult = { threadId: plan.sessionId, turnId: plan.turnId, text: JSON.stringify(output) }
+  const completed = { plan, terminal, events, messages, exit, send, result }
+  const path = join(plan.root, 'completed.json')
+  if (execution.state === 'completed' && (!existsSync(path) || execution.threadId !== result.threadId || execution.turnId !== result.turnId || execution.resultDigest !== digest(output))) throw new StructuredSessionError('stale_result', 'ZCode worktree durable completed identity differs')
+  writeJson(path, completed, true)
+  return result
 }
 
 async function settleResult(plan: NativePlan, prompt: string, execution: ZCodeStructuredExecution): Promise<NativeResult> {
@@ -202,7 +250,7 @@ async function settleResult(plan: NativePlan, prompt: string, execution: ZCodeSt
     throw new StructuredSessionError('failed', 'ZCode has no exact successful terminal, close and complete native stop')
   const mcpPath = join(plan.runtime, 'frozen-mcp', 'mcp-public.jsonl')
   const records = readFileSync(mcpPath, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line) as Record<string, unknown>)
-  const witness = { version: 1, provider: 'zcode', cliVersion: plan.cliVersion, cliSha256: plan.cliSha256, providerId: plan.model.providerId, modelId: plan.model.modelId, sessionId: plan.sessionId, turnId: plan.turnId, inputId: plan.inputId, prompt: zcodeStructuredPrompt(prompt, execution.schema), send, messages, events,
+  const witness = { version: 1, provider: 'zcode', cliVersion: plan.cliVersion, cliSha256: plan.cliSha256, providerId: plan.model.providerId, modelId: plan.model.modelId, sessionId: plan.sessionId, turnId: plan.turnId, inputId: plan.inputId, prompt: zcodeExecutionPrompt(prompt, execution), send, messages, events,
     mcpHistory: { records, digest: digest(records) } } as ZCodeFrozenWitness
   if (!events.some(event => digest(event) === digest(terminal))) throw new StructuredSessionError('stale_result', 'ZCode terminal differs from its original native events')
   const { proveZCodeFrozenReads } = await import('./zcode-frozen-proof.js')
@@ -228,7 +276,7 @@ async function completedResult(root: string, prompt: string, execution: ZCodeStr
     return settleResult(plan, prompt, execution)
   }
   const saved = JSON.parse(readFileSync(path, 'utf8')) as Completed
-  const nativePrompt = zcodeStructuredPrompt(prompt, execution.schema)
+  const nativePrompt = zcodeExecutionPrompt(prompt, execution)
   const exit = JSON.parse(readFileSync(join(root, 'exit.json'), 'utf8')) as StopEvidence
   const mcpRecords = readFileSync(join(plan.runtime, 'frozen-mcp/mcp-public.jsonl'), 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line) as Record<string, unknown>)
   if (digest(saved.plan) !== digest(plan) || digest(saved.witness) !== digest(JSON.parse(readFileSync(join(root, 'witness.json'), 'utf8')))
@@ -281,45 +329,56 @@ export async function stopZCodeStructuredTurn(execution: ZCodeStructuredExecutio
 }
 
 /** 单次真实send及原生证明共用已有结构化队列；未完成身份只允许精确取消。 */
-export async function zcodeStructuredTurn(realm: string, id: string, prompt: string, execution: ZCodeStructuredExecution, callbacks: NativeCallbacks): Promise<NativeResult> {
-  if (execution.version !== (execution.timeoutMs === null ? 5 : 4) || execution.policy !== 'zcode-frozen-read-only-v1' || !execution.frozenContext || execution.readerRuntime) throw new StructuredSessionError('unsupported', 'ZCode requires its exact isolated frozen policy')
-  const selection = zcodeNativeSelection(execution.model, execution.effort), model = selection.model, nativePrompt = zcodeStructuredPrompt(prompt, execution.schema), root = join(realm, id)
-  const replay = await completedResult(root, prompt, execution)
+export function zcodeStructuredTurn(realm: string, id: string, prompt: string, execution: ZCodeStructuredExecution, callbacks: NativeCallbacks): Promise<NativeResult>
+// eslint-disable-next-line no-redeclare -- Preserve the legacy frozen proof return type.
+export function zcodeStructuredTurn(realm: string, id: string, prompt: string, execution: ZCodeStructuredExecution, callbacks: NativeCallbacks, worktreePath: string | undefined): Promise<NativeResult | WorktreeNativeResult>
+// eslint-disable-next-line no-redeclare -- TypeScript implementation of both executor modes.
+export async function zcodeStructuredTurn(realm: string, id: string, prompt: string, execution: ZCodeStructuredExecution, callbacks: NativeCallbacks, worktreePath?: string): Promise<NativeResult | WorktreeNativeResult> {
+  const worktree = execution.version === 6 && execution.policy === 'native-worktree-v1' && !!execution.worktree && !!worktreePath && !execution.frozenContext && !execution.readerRuntime
+  if (!worktree && (execution.version !== (execution.timeoutMs === null ? 5 : 4) || execution.policy !== 'zcode-frozen-read-only-v1' || !execution.frozenContext || execution.readerRuntime)) throw new StructuredSessionError('unsupported', 'ZCode requires its exact isolated frozen policy')
+  const selection = zcodeNativeSelection(execution.model, execution.effort), model = selection.model, nativePrompt = zcodeExecutionPrompt(prompt, execution), root = join(realm, id)
+  const replay = worktree
+    ? existsSync(join(root, 'plan.json')) && ['terminal.json', 'messages.json', 'events.json', 'exit.json', 'send.json'].every(name => existsSync(join(root, name))) ? settleWorktreeResult(JSON.parse(readFileSync(join(root, 'plan.json'), 'utf8')) as NativePlan, prompt, execution) : null
+    : await completedResult(root, prompt, execution)
   if (replay) return replay
   if (execution.zcodeNative || execution.turnStartRequested || execution.threadId || execution.turnId || existsSync(join(root, 'plan.json'))) throw new StructuredSessionError('cancellation_pending', 'ZCode in-progress dispatch cannot append another prompt; exact stop is required')
-  if (process.platform !== 'darwin' || !existsSync('/usr/bin/sandbox-exec')) throw new StructuredSessionError('unsupported', 'ZCode requires the verified macOS read-only sandbox')
+  if (!worktree && (process.platform !== 'darwin' || !existsSync('/usr/bin/sandbox-exec'))) throw new StructuredSessionError('unsupported', 'ZCode requires the verified macOS read-only sandbox')
   const resolved = spawnSync('/usr/bin/which', ['zcode'], { env: { PATH: process.env.PATH }, encoding: 'utf8' })
   if (resolved.error || resolved.status !== 0) throw new StructuredSessionError('unsupported', 'ZCode CLI is unavailable')
   const cliPath = realpathSync(resolved.stdout.trim())
   if (bytesDigest(cliPath) !== zcodeCapability.cliSha256 || !existsSync(zcodeCapability.builtinPath) || bytesDigest(zcodeCapability.builtinPath) !== zcodeCapability.builtinSha256) throw new StructuredSessionError('unsupported', 'ZCode CLI or public builtin capability digest is unverified')
   mkdirSync(root, { recursive: true, mode: 0o700 })
-  const runtime = join(root, 'runtime'), home = join(runtime, 'home'), ledgerRoot = join(runtime, 'frozen-mcp'), tmp = mkdtempSync('/private/tmp/spex-zcode-tmp-'), workspace = mkdtempSync('/private/tmp/spex-zcode-frozen-')
+  const runtime = join(root, 'runtime'), home = join(runtime, 'home'), ledgerRoot = join(runtime, 'frozen-mcp'), tmp = mkdtempSync('/private/tmp/spex-zcode-tmp-'), workspace = worktree ? worktreePath! : mkdtempSync('/private/tmp/spex-zcode-frozen-')
   for (const path of [runtime, home, ledgerRoot, join(home, '.zcode/cli'), join(home, '.zcode/v2')]) mkdirSync(path, { recursive: true, mode: 0o700 })
   const config = join(home, '.zcode/cli/config.json'), credentialSource = join(homedir(), '.zcode/v2/credentials.json'), personal = join(homedir(), '.zcode/v2/provider_config.json'), credentialLink = join(home, '.zcode/v2/credentials.json')
-  writeJson(config, zcodeRuntimeConfiguration(), true)
+  writeJson(config, worktree ? zcodeWorktreeConfiguration() : zcodeRuntimeConfiguration(), true)
   if (existsSync(credentialSource)) symlinkSync(credentialSource, credentialLink)
   const input = join(root, 'reader-input.json'), profile = join(root, 'policy.sb')
-  writeJson(input, { root: ledgerRoot, ref: execution.frozenContext }, true)
-  let policy = structuredSeatbeltProfile(realpathSync(runtime)) + `(allow file-write* (subpath ${JSON.stringify(realpathSync(tmp))}))\n`
-  for (const path of [config, credentialLink, credentialSource, personal, zcodeCapability.builtinPath, input, profile]) policy += `(deny file-write* (literal ${JSON.stringify(path)}))\n`
-  writeFileSync(profile, policy, { mode: 0o400 })
+  if (!worktree) {
+    writeJson(input, { root: ledgerRoot, ref: execution.frozenContext }, true)
+    let policy = structuredSeatbeltProfile(realpathSync(runtime)) + `(allow file-write* (subpath ${JSON.stringify(realpathSync(tmp))}))\n`
+    for (const path of [config, credentialLink, credentialSource, personal, zcodeCapability.builtinPath, input, profile]) policy += `(deny file-write* (literal ${JSON.stringify(path)}))\n`
+    writeFileSync(profile, policy, { mode: 0o400 })
+  }
   const env: NodeJS.ProcessEnv = { PATH: `${dirname(process.execPath)}:/usr/bin:/bin:/usr/sbin:/sbin`, HOME: home, TMPDIR: `${tmp}/`, ZCODE_DATA_BASE_DIR: home, ZCODE_BUILTIN_PROVIDER_CONFIG_FILE: zcodeCapability.builtinPath, ZCODE_PERSONAL_PROVIDER_CONFIG_FILE: personal }
-  const version = spawnSync('/usr/bin/sandbox-exec', ['-f', profile, cliPath, '--version'], { cwd: workspace, env, encoding: 'utf8', timeout: 10000 })
+  const version = spawnSync(worktree ? cliPath : '/usr/bin/sandbox-exec', worktree ? ['--version'] : ['-f', profile, cliPath, '--version'], { cwd: workspace, env, encoding: 'utf8', timeout: 10000 })
   if (version.error || version.status !== 0 || version.stdout.trim() !== zcodeCapability.cliVersion) throw new StructuredSessionError('unsupported', 'ZCode CLI version has no verified isolated capability identity')
-  const oracle = join(root, 'outside-oracle.txt'); writeFileSync(oracle, 'UNCHANGED', { mode: 0o600 })
-  const targets = { runtime: join(runtime, 'canary'), tmp: join(tmp, 'canary'), oracle, config, input, profile, frozen: execution.frozenContext.manifestPath, workspace: join(workspace, 'forbidden-write') }
-  const canaryCode = `const fs=require('node:fs'),net=require('node:net'),x=JSON.parse(process.argv[1]),r={};for(const[k,p]of Object.entries(x)){try{if(['runtime','tmp','oracle','workspace'].includes(k))fs.appendFileSync(p,'CANARY');else fs.closeSync(fs.openSync(p,'a'));r[k]=true}catch{r[k]=false}}const s=net.createServer();s.once('error',()=>{r.socket=false;process.stdout.write(JSON.stringify(r));process.exitCode=1});s.listen(process.argv[2],()=>{r.socket=true;s.close(()=>process.stdout.write(JSON.stringify(r)))})`
-  const canary = spawnSync('/usr/bin/sandbox-exec', ['-f', profile, process.execPath, '-e', canaryCode, JSON.stringify(targets), join(tmp, 's.sock')], { cwd: workspace, env, encoding: 'utf8', timeout: 10000 })
-  let boundary: Record<string, boolean> = {}
-  if (!canary.error && canary.status === 0) { try { boundary = JSON.parse(canary.stdout) as typeof boundary } catch { /* fail closed below */ } }
-  if (!boundary.runtime || !boundary.tmp || !boundary.socket || Object.keys(targets).filter(key => !['runtime', 'tmp'].includes(key)).some(key => boundary[key] !== false) || readFileSync(oracle, 'utf8') !== 'UNCHANGED') throw new StructuredSessionError('unsupported', 'ZCode exact read-only write/socket boundary preflight failed')
-  writeJson(join(root, 'boundary.json'), { passed: true, results: boundary, profileSha256: bytesDigest(profile) }, true)
+  if (!worktree) {
+    const oracle = join(root, 'outside-oracle.txt'); writeFileSync(oracle, 'UNCHANGED', { mode: 0o600 })
+    const targets = { runtime: join(runtime, 'canary'), tmp: join(tmp, 'canary'), oracle, config, input, profile, frozen: execution.frozenContext!.manifestPath, workspace: join(workspace, 'forbidden-write') }
+    const canaryCode = `const fs=require('node:fs'),net=require('node:net'),x=JSON.parse(process.argv[1]),r={};for(const[k,p]of Object.entries(x)){try{if(['runtime','tmp','oracle','workspace'].includes(k))fs.appendFileSync(p,'CANARY');else fs.closeSync(fs.openSync(p,'a'));r[k]=true}catch{r[k]=false}}const s=net.createServer();s.once('error',()=>{r.socket=false;process.stdout.write(JSON.stringify(r));process.exitCode=1});s.listen(process.argv[2],()=>{r.socket=true;s.close(()=>process.stdout.write(JSON.stringify(r)))})`
+    const canary = spawnSync('/usr/bin/sandbox-exec', ['-f', profile, process.execPath, '-e', canaryCode, JSON.stringify(targets), join(tmp, 's.sock')], { cwd: workspace, env, encoding: 'utf8', timeout: 10000 })
+    let boundary: Record<string, boolean> = {}
+    if (!canary.error && canary.status === 0) { try { boundary = JSON.parse(canary.stdout) as typeof boundary } catch { /* fail closed below */ } }
+    if (!boundary.runtime || !boundary.tmp || !boundary.socket || Object.keys(targets).filter(key => !['runtime', 'tmp'].includes(key)).some(key => boundary[key] !== false) || readFileSync(oracle, 'utf8') !== 'UNCHANGED') throw new StructuredSessionError('unsupported', 'ZCode exact read-only write/socket boundary preflight failed')
+    writeJson(join(root, 'boundary.json'), { passed: true, results: boundary, profileSha256: bytesDigest(profile) }, true)
+  }
   let plan: NativePlan = { version: 1, root, sessionId: `sess_${randomUUID()}`, inputId: randomUUID(), queryId: randomUUID(), requestDigest: digest({ prompt, nativePrompt, policy: fixedPolicy(execution), selection }), policyDigest: digest(fixedPolicy(execution)), cliPath, cliVersion: zcodeCapability.cliVersion, cliSha256: zcodeCapability.cliSha256, builtinSha256: zcodeCapability.builtinSha256, ...selection, runtime, tmp, workspace, receiptFile: join(root, 'process.json') }
   writeJson(join(root, 'plan.json'), plan)
   const native = (): ZCodeNativeState => ({ version: 1, root, sessionId: plan.sessionId, inputId: plan.inputId, ...(plan.pid ? { pid: plan.pid, receiptFile: plan.receiptFile } : {}), ...(plan.turnId ? { turnId: plan.turnId } : {}) })
   await callbacks.onNative(native()); await callbacks.onTurnStarting?.()
   let launchFailure: Error | undefined
-  const child: ChildProcessWithoutNullStreams = spawn('/usr/bin/sandbox-exec', ['-f', profile, cliPath, 'app-server', '--cwd', workspace], { cwd: workspace, env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] })
+  const child: ChildProcessWithoutNullStreams = spawn(worktree ? cliPath : '/usr/bin/sandbox-exec', worktree ? [ 'app-server', '--cwd', workspace] : ['-f', profile, cliPath, 'app-server', '--cwd', workspace], { cwd: workspace, env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] })
   child.once('error', () => { launchFailure = new StructuredSessionError('cancellation_pending', 'ZCode native process failed during launch') })
   if (!child.pid) throw new StructuredSessionError('failed', 'ZCode isolated process could not start')
   let exited = false
@@ -341,10 +400,14 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
   })
   const lines = createInterface({ input: child.stdout })
   lines.on('line', line => {
-    let packet: { id?: number | string; method?: string; params?: { sessionId?: string }; result?: unknown; error?: { code?: number } }
+    let packet: { id?: number | string; method?: string; params?: { sessionId?: string; toolName?: string; input?: { file_path?: string; path?: string } }; result?: unknown; error?: { code?: number } }
     try { packet = JSON.parse(line) as typeof packet } catch { protocolError = new StructuredSessionError('failed', 'ZCode emitted non-JSON native protocol'); return }
     if (packet.method && packet.id !== undefined) {
       if (packet.method === 'session/requestRuntimePreferences' && packet.params?.sessionId === plan.sessionId) child.stdin.write(`${JSON.stringify({ id: packet.id, result: { nativeSearchEnhancementsEnabled: false, toolSearchMode: 'off', subagentRuntimeConfigEnabled: false, memoryEnabled: false, askUserQuestionAutoResolutionEnabled: false, additionalDirectories: [], modelContextBudgetStrategy: 'preflight-v1' } })}\n`)
+      else if (worktree && packet.method === 'interaction/requestPermission' && packet.params?.sessionId === plan.sessionId) {
+        const decision = zcodeWorktreePermission(packet.params, plan.sessionId, workspace, execution.worktree!.mode)
+        child.stdin.write(`${JSON.stringify({ id: packet.id, result: { decision, reason: decision === 'allow' ? 'Task-authorized native worktree invocation' : 'Outside this native worktree task' } })}\n`)
+      }
       else child.stdin.write(`${JSON.stringify({ id: packet.id, error: { code: -32601, message: 'Unavailable in frozen read-only runtime' } })}\n`)
       return
     }
@@ -381,8 +444,8 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
         plan = { ...plan, turnId: event.turnId }; writeJson(join(root, 'plan.json'), plan); await callbacks.onNative(native()); await callbacks.onTurn(plan.turnId!)
       }
       if (!plan.turnId || event.turnId !== plan.turnId) throw new StructuredSessionError('stale_result', 'ZCode proof event belongs to another turn')
-      if (event.type === 'session.updated' && (event.payload.providerId !== model.providerId || event.payload.modelId !== model.modelId || event.payload.toolCount !== 1)) throw new StructuredSessionError('unsupported', 'ZCode actual ModelRequest identity or toolCount differs')
-      if (event.type === 'tool.updated' && event.payload.kind === 'scheduled' && event.payload.toolName !== zcodeCapability.tool) throw new StructuredSessionError('unsupported', 'ZCode scheduled an uncontrolled tool')
+      if (event.type === 'session.updated' && (event.payload.providerId !== model.providerId || event.payload.modelId !== model.modelId || (!worktree && event.payload.toolCount !== 1))) throw new StructuredSessionError('unsupported', 'ZCode actual ModelRequest identity or toolCount differs')
+      if (event.type === 'tool.updated' && event.payload.kind === 'scheduled' && !worktree && event.payload.toolName !== zcodeCapability.tool) throw new StructuredSessionError('unsupported', 'ZCode scheduled an uncontrolled tool')
       events.push(event)
       if (['turn.completed', 'turn.failed', 'turn.cancelled'].includes(event.type)) {
         if (terminal) throw new StructuredSessionError('stale_result', 'ZCode returned multiple terminal events')
@@ -399,8 +462,8 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
   try {
     const source = import.meta.url.endsWith('.ts'), reader = fileURLToPath(new URL(source ? './claude-frozen-mcp.ts' : './claude-frozen-mcp.js', import.meta.url))
     const args = [...(source ? ['--import', import.meta.resolve('tsx')] : []), reader, input]
-    const created = await request('session/create', { sessionId: plan.sessionId, workspace: { workspacePath: workspace, workspaceKey: workspace }, ...selection, mode: 'plan', persistence: 'immediate', titleGenerationEnabled: false,
-      mcpServers: [{ name: 'frozen', command: process.execPath, args, env: [], cwd: workspace, isolation: 'session', protocolVersion: 'legacy', alwaysLoad: true }], toolAllowlist: [zcodeCapability.tool], toolDenylist: ['Bash', 'Read', 'Edit', 'Write', 'Task', 'WebSearch', 'WebFetch'] }) as { session?: { sessionId: string; model: typeof model }; snapshot?: { session?: { sessionId: string; model: typeof model } } }
+    const created = await request('session/create', { sessionId: plan.sessionId, workspace: { workspacePath: workspace, workspaceKey: workspace }, ...selection, mode: worktree && execution.worktree!.mode === 'edit' ? 'build' : 'plan', persistence: 'immediate', titleGenerationEnabled: false,
+      ...(worktree ? { mcpServers: [] } : { mcpServers: [{ name: 'frozen', command: process.execPath, args, env: [], cwd: workspace, isolation: 'session', protocolVersion: 'legacy', alwaysLoad: true }], toolAllowlist: [zcodeCapability.tool], toolDenylist: ['Bash', 'Read', 'Edit', 'Write', 'Task', 'WebSearch', 'WebFetch'] }) }) as { session?: { sessionId: string; model: typeof model }; snapshot?: { session?: { sessionId: string; model: typeof model } } }
     const session = created.session ?? created.snapshot?.session
     if (session?.sessionId !== plan.sessionId) throw new StructuredSessionError('stale_result', 'ZCode actual session identity differs')
     sessionCreated = true; await callbacks.onThread(plan.sessionId)
@@ -475,5 +538,5 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
   }
   if (abortRequested) throw new StructuredSessionError(ownedProcessesStopped(plan) ? timedOut ? 'timeout' : 'cancelled' : 'cancellation_pending', 'ZCode cancellation revoked result publication')
   if (resultError) throw resultError
-  return settleResult(plan, prompt, execution)
+  return worktree ? settleWorktreeResult(plan, prompt, { ...execution, zcodeNative: native() }) : settleResult(plan, prompt, execution)
 }

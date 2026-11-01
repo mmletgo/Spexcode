@@ -131,3 +131,6 @@ This keeps concurrent creates from contending on `.git/config` while Git writes 
 普通 matching-receipt 创建重试与取消终止恢复在原锁内共用严格冷态、物理 Git 身份、未知内容和原 fork 检查，不重新进入会加锁的公共恢复函数。已存在 canonical 发布地址、运行记录或原生 generation 登记时拒绝清理。未知 tracked/staged/untracked/ignored 内容继续保留，仅沿用已有逐字节相同 host-state seed 例外；移除 worktree 不使用 force，分支按已核实 commit 做条件删除。已 pin 的不可变 commit 精确核对；未 pin 或 symbolic base 还须有真实 branch 创建 reflog 首项（零 old OID、创建记录及有效新 OID），当前 HEAD 必须仍为原 fork，symbolic base 当前解析也须一致。最早尚存普通 commit 条目不能替代创建证明；creation 已过期、日志缺失或不明、分支已 authored 或 base 已移动均拒绝且保留 receipt/资源。
 
 清理前还须从当前项目 runtime 的正规记录索引及 canonical address 核对其他已发布 owner，包括停止和归档记录。其他 owner 的保存路径与候选相同或为同一物理目录 alias，或其同仓 branch 仍指向候选分支时，两个恢复入口均保留全部资源、owner 记录及候选 receipt 并拒绝；同四位前缀、干净内容和相同 fork 不授予跨完整 session 身份的删除权。仅比较 branch 字符串前需确认现存 owner worktree 的实际 commonDir；另一仓库的同名分支不占有本仓资源。归档路径虽已缺失，同项目保留记录对本仓分支的归属仍有效。检查沿用当前资源/registry 锁，不嵌套其他 session 记录锁，不为新 fullname 创建增加旧短名 fallback。
+
+
+可信内部 native-worktree-v1 的 seed 必须是完整不可变 commit SHA 且 tree 精确匹配；创建前拒绝错配 base/tree，在 worktree add 后再次要求实际 forkCommit 与 seed 相同。该模式不复制 live checkout 的 host state，初始化只来自 seed Git 对象；沿原候选拥有权、幂等和取消终止收据，不另建创建管线。
