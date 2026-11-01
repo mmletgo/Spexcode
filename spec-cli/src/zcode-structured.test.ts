@@ -6,7 +6,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { processStartToken, writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
-import { freezeContext } from './frozen-context.js'
+import { freezeContext, frozenReadTool, readFrozenRange } from './frozen-context.js'
+import { ZCODE_FROZEN_TOOL, type ZCodeFrozenWitness, type ZCodeNativeEvent } from './zcode-frozen-proof.js'
 import { structuredExecutionPolicy } from './session-structured-policy.js'
 import { assertZCodeModelSnapshot, decodeZCodeStructuredText, stopZCodeStructuredTurn, zcodeCapability, zcodeIdleObservation, zcodeNativeModel, zcodeNativeSelection, zcodeProofEvent, zcodeRuntimeConfiguration, zcodeStructuredPrompt, zcodeStructuredTurn, type ZCodeStructuredExecution } from './zcode-structured.js'
 
@@ -18,7 +19,111 @@ test('ZCode namespace requires both exact provider and model', () => {
 test('ZCode text transport only unwraps one exact JSON shell without repairing data', () => {
   const output = { value: '中文\n原文', list: [1, 2] }
   for (const raw of [JSON.stringify(output), ` \n\`\`\`json\n${JSON.stringify(output)}\n\`\`\`\n`]) assert.deepEqual(decodeZCodeStructuredText(raw), output)
-  for (const raw of ['answer: {"value":1}', '```JSON\n{}\n```', '```json\n{}\n```\n```json\n{}\n```', '{} {}', '```json\n{"value":}\n```', '```json\n{}\n```\nprose']) assert.throws(() => decodeZCodeStructuredText(raw))
+  for (const raw of ['answer: {"value":1}', '```JSON\n{}\n```', '```json\n{}\n```\n```json\n{}\n```', '{} {}', '```json\n{"value":}\n```', '```json\n{}\n```\nprose']) assert.throws(() => decodeZCodeStructuredText(raw), { code: 'structured_output_format_invalid' })
+})
+
+test('ZCode strict JSON failure requires complete native proof, persists identity and leaves legacy failed records failed', async t => {
+  const { runtimeRoot, sessionArtifactPath } = await import('@spexcode/spec-core')
+  const { sessionIdForCreateKey } = await import('./sessions.js')
+  const { fromRaw, writeRecord, readRecord } = await import('./session-record.js')
+  const { configuredSessionApplication } = await import('./session-application.js')
+  const { executeQueuedStructuredSession, runStructuredSession } = await import('./session-structured.js')
+  const directory = mkdtempSync(join(tmpdir(), 'spex-zcode-format-')), requestKey = 'zcode-format-failure', id = sessionIdForCreateKey(requestKey)
+  const root = join(runtimeRoot(), 'structured-zcode-read-only-v1', id), runtime = join(root, 'runtime')
+  mkdirSync(join(runtime, 'frozen-mcp'), { recursive: true })
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' })
+  assert(child.pid)
+  const exited = new Promise<void>(resolve => child.once('close', () => resolve()))
+  try {
+    const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex'), prompt = 'Return one JSON object.'
+    const ref = freezeContext({ directory: join(directory, 'frozen'), sourceRoot: process.cwd(), binding: { requestKey, inputDigest: 'input' }, entries: [{ id: 'task', label: 'task', kind: 'utf8', bytes: Buffer.from('public task') }] })
+    const policy = structuredExecutionPolicy({ schema: { type: 'object' }, inputDigest: 'input', purpose: 'format-failure', timeoutMs: 1000, model: 'zcode:bigmodel-api/GLM-5.3-Flash', frozenContext: ref })
+    const receiptFile = join(root, 'process.json'), identity = writeDetachedRuntimeReceipt(child.pid, receiptFile)
+    const native = { version: 1 as const, root, sessionId: 'session', inputId: 'input', turnId: 'turn', pid: child.pid, receiptFile }
+    const nativePrompt = zcodeStructuredPrompt(prompt, policy.schema), modelSnapshot = { sessionId: native.sessionId, model: zcodeNativeModel(policy.model) }
+    const plan = { ...native, runtime, policyDigest: hash(policy), requestDigest: hash({ prompt, nativePrompt, policy, selection: zcodeNativeSelection(policy.model) }), cliVersion: zcodeCapability.cliVersion, cliSha256: zcodeCapability.cliSha256, builtinSha256: zcodeCapability.builtinSha256, model: zcodeNativeModel(policy.model), modelSnapshotDigest: hash(modelSnapshot) }
+    writeFileSync(join(root, 'plan.json'), JSON.stringify(plan)); writeFileSync(join(root, 'model-snapshot.json'), JSON.stringify(modelSnapshot))
+    writeFileSync(join(root, 'send.json'), JSON.stringify({ sessionId: native.sessionId, content: nativePrompt, inputId: native.inputId, modelSelection: plan.model }))
+    const response = 'Analysis is complete:\n{"answer":"exact"}', args = { contextDigest: ref.contextDigest, entryId: 'task', startByte: 0, endByte: Buffer.byteLength('public task') }
+    const output = readFrozenRange(ref, args).response.contentItems[0].text, bytes = Buffer.byteLength(output)
+    const part = (messageID: string, type: string, data: Record<string, unknown>) => ({ id: `part-${messageID}`, sessionID: native.sessionId, messageID, type, ...data })
+    const semantics = { origin: 'agent_runtime', kind: 'assistant_response', uiVisibility: 'visible', providerVisibility: 'visible', transcriptVisibility: 'visible' }
+    const messages: ZCodeFrozenWitness['messages'] = [
+      { info: { id: 'user', sessionID: native.sessionId, role: 'user', modelSelection: plan.model, anchor: { turnId: native.turnId, origin: 'realUser', sourceCommandId: 'send' }, semantics: { ...semantics, origin: 'real_user', kind: 'user_prompt' } }, parts: [part('user', 'text', { text: nativePrompt })] },
+      { info: { id: 'reader', sessionID: native.sessionId, role: 'assistant', parentID: 'user', ...plan.model, anchor: { turnId: native.turnId }, semantics }, parts: [part('reader', 'tool', { callID: 'call', tool: ZCODE_FROZEN_TOOL, state: { status: 'completed', input: args, output, metadata: { serialization: { truncated: false, originalBytes: bytes, returnedBytes: bytes } } } })] },
+      { info: { id: 'final', sessionID: native.sessionId, role: 'assistant', parentID: 'user', ...plan.model, anchor: { turnId: native.turnId, boundaryMessageId: 'final', historyRoundCount: 2, orderedMessageIds: ['user', 'reader', 'final'] }, semantics }, parts: [part('final', 'text', { text: response })] },
+    ]
+    const events: ZCodeNativeEvent[] = [
+      { type: 'turn.started', payload: { turnNumber: 0, input: nativePrompt, messageId: 'user', inputId: native.inputId } },
+      { type: 'session.updated', payload: { ...plan.model, toolCount: 1, messageCount: 1, iteration: 0 } },
+      { type: 'tool.updated', payload: { kind: 'scheduled', toolCallId: 'call', assistantMessageId: 'reader', toolName: ZCODE_FROZEN_TOOL, input: args } },
+      { type: 'tool.updated', payload: { kind: 'started', toolCallId: 'call', toolName: ZCODE_FROZEN_TOOL } },
+      { type: 'tool.updated', payload: { kind: 'result', toolCallId: 'call', toolName: ZCODE_FROZEN_TOOL, result: { success: true, content: output, truncated: false, originalBytes: bytes, returnedBytes: bytes } } },
+      { type: 'session.updated', payload: { ...plan.model, toolCount: 1, messageCount: 3, iteration: 1 } },
+      { type: 'turn.completed', payload: { inputId: native.inputId, resultType: 'success', response, toolCallCount: 1 } },
+    ].map((event, index) => ({ ...event, eventId: `event-${index}`, seq: index + 1, sessionId: native.sessionId, turnId: native.turnId }))
+    const records = [
+      { type: 'request', request: { jsonrpc: '2.0', id: 0, method: 'initialize', params: { clientInfo: { name: 'zcode', version: zcodeCapability.cliVersion } } } },
+      { type: 'response', response: { jsonrpc: '2.0', id: 0, result: { serverInfo: { name: 'spex-immutable-reader' } } } },
+      { type: 'request', request: { jsonrpc: '2.0', id: 1, method: 'tools/list' } },
+      { type: 'response', response: { jsonrpc: '2.0', id: 1, result: { tools: [{ name: 'spex_read_frozen', inputSchema: frozenReadTool.inputSchema }] } } },
+      { type: 'request', request: { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'spex_read_frozen', arguments: args, _meta: { session_id: native.sessionId, turn_id: native.turnId } } } },
+      { type: 'response', response: { jsonrpc: '2.0', id: 2, result: { content: [{ type: 'text', text: output }] } } },
+    ]
+    const mcpPath = join(runtime, 'frozen-mcp', 'mcp-public.jsonl')
+    writeFileSync(join(root, 'terminal.json'), JSON.stringify(events.at(-1)))
+    writeFileSync(join(root, 'events.json'), JSON.stringify(events)); writeFileSync(join(root, 'messages.json'), JSON.stringify(messages))
+    writeFileSync(mcpPath, records.map(row => JSON.stringify(row)).join('\n') + '\n')
+    writeFileSync(join(root, 'exit.json'), JSON.stringify({ code: 0, signal: null, stopped: true, idle: true, closed: true }))
+    writeFileSync(join(root, 'owned-processes.json'), JSON.stringify([{ pid: child.pid, startToken: identity.startToken.replace(/\s+/g, ' ') }]))
+    process.kill(-child.pid, 'SIGTERM'); await exited
+    const execution: ZCodeStructuredExecution = { ...policy, version: 4, policy: 'zcode-frozen-read-only-v1', turnStartRequested: true, zcodeNative: native, frozenReadProof: undefined }
+    const callbacks = { onThread: async () => assert.fail('no thread'), onTurn: async () => assert.fail('no turn'), onNative: async () => assert.fail('no native') }
+    const unreadMessages = structuredClone(messages), unreadEvents = structuredClone(events).filter(event => event.type !== 'tool.updated')
+    unreadMessages[1].parts = []; unreadEvents[2].payload.messageCount = 2; unreadEvents[2].payload.iteration = 0; unreadEvents.at(-1)!.payload.toolCallCount = 0
+    const foreignEvents = structuredClone(events); foreignEvents[1].payload.toolCount = 2
+    for (const scenario of [
+      { name: 'malformed JSON plus missing native messages', messages: [], events, records },
+      { name: 'malformed JSON plus missing MCP handshake', messages, events, records: [] },
+      { name: 'malformed JSON plus foreign tool surface', messages, events: foreignEvents, records },
+      { name: 'malformed JSON plus incomplete required reads', messages: unreadMessages, events: unreadEvents, records: records.slice(0, 4) },
+    ]) await t.test(scenario.name, async () => {
+      writeFileSync(join(root, 'messages.json'), JSON.stringify(scenario.messages)); writeFileSync(join(root, 'events.json'), JSON.stringify(scenario.events))
+      writeFileSync(join(root, 'terminal.json'), JSON.stringify(scenario.events.at(-1)))
+      writeFileSync(mcpPath, scenario.records.map(row => JSON.stringify(row)).join('\n') + '\n')
+      await assert.rejects(zcodeStructuredTurn(join(root, '..'), id, prompt, execution, callbacks), { code: 'stale_result' })
+    })
+    writeFileSync(join(root, 'messages.json'), JSON.stringify(messages)); writeFileSync(join(root, 'events.json'), JSON.stringify(events))
+    writeFileSync(join(root, 'terminal.json'), JSON.stringify(events.at(-1)))
+    writeFileSync(mcpPath, records.map(row => JSON.stringify(row)).join('\n') + '\n')
+    configuredSessionApplication().createSession({ sessionId: id, status: 'awaiting', proposal: 'nothing' })
+    const record = fromRaw({ session_id: id, governed: true, worktree_path: process.cwd(), branch: null, title: null, name: null, status: 'awaiting', proposal: 'nothing', merges: 0, note: null, sortkey: null, createdAt: 1, stopped: false, archived: false, harness: 'zcode', launch_cmd: 'zcode', create_request_id: createHash('sha256').update(requestKey).digest('hex'), create_payload_hash: hash({ prompt, parent: null, launcher: null, structuredExecution: policy }) })
+    record.structuredExecution = { ...policy, state: 'running', threadId: native.sessionId, turnId: native.turnId, turnStartRequested: true, zcodeNative: native }
+    record.harnessSessionId = native.sessionId; writeRecord(record)
+    const launch = sessionArtifactPath(id, 'launch'); mkdirSync(join(launch, '..'), { recursive: true }); writeFileSync(launch, prompt)
+    assert.equal(await executeQueuedStructuredSession(id), 'failed')
+    const failed = readRecord(id)!
+    assert.equal(failed.structuredExecution?.errorCode, 'structured_output_format_invalid')
+    assert.equal(failed.structuredExecution?.output, undefined); assert.equal(failed.structuredExecution?.frozenReadProof, undefined)
+    const request = { root: process.cwd(), prompt, requestKey, ...policy }
+    for (let replay = 0; replay < 2; replay++) await assert.rejects(runStructuredSession(request), { code: 'structured_output_format_invalid', sessionId: id, threadId: native.sessionId, turnId: native.turnId })
+    writeRecord({ ...failed, structuredExecution: { ...failed.structuredExecution!, errorCode: undefined } })
+    await assert.rejects(runStructuredSession(request), { code: 'failed' })
+    assert.equal(existsSync(join(root, 'completed.json')), false); assert.equal(existsSync(join(root, 'witness.json')), false)
+    const validMessages = structuredClone(messages), validEvents = structuredClone(events)
+    validMessages.at(-1)!.parts[0].text = '{}'; validEvents.at(-1)!.payload.response = '{}'
+    writeFileSync(join(root, 'messages.json'), JSON.stringify(validMessages)); writeFileSync(join(root, 'events.json'), JSON.stringify(validEvents))
+    await assert.rejects(zcodeStructuredTurn(join(root, '..'), id, prompt, execution, callbacks), { code: 'stale_result' })
+    writeFileSync(join(root, 'terminal.json'), JSON.stringify(validEvents.at(-1)))
+    const completed = await zcodeStructuredTurn(join(root, '..'), id, prompt, execution, callbacks)
+    assert.equal(completed.text, '{}')
+    writeFileSync(join(root, 'terminal.json'), JSON.stringify(events.at(-1)))
+    await assert.rejects(zcodeStructuredTurn(join(root, '..'), id, prompt, execution, callbacks), { code: 'stale_result' })
+
+  } finally {
+    if (processStartToken(child.pid)) { process.kill(-child.pid, 'SIGTERM'); await exited }
+    rmSync(root, { recursive: true, force: true }); rmSync(directory, { recursive: true, force: true })
+  }
 })
 
 test('one deterministic native input carries the exact schema and the original business bytes', () => {

@@ -50,7 +50,7 @@ P2对该Spec没有实际写权限的只读装配late V1 anchor-dead按真实cand
 
 独审明确指向实际候选target路径后的expanded spec正文注记时，可按该真实路径和非空affectedIds路由prose修订；每个ID在候选中必须唯一且全部属于同一node/path，再沿原已审局部ref绑定唯一授权owner。保留原finding完整JSON及prose定位，不伪造#ID或业务授权；普通contract:path#ID原硬门、omission与可写P2路径不变，外来/未知/歧义ID、路径不符及越权仍拒绝。
 
-行为分析仅将 [[claude-structured-runtime]] 已核终态的精确 `structured_output_retries_exhausted` 作为可有限修复的输出失败，保留原 session/thread/user 诊断证据；不把普通 failed、unsupported 或错误文本广泛改类。新 attempt 前仍先结算旧 native 资源，未 removed 保持 recovery_required；全部独立派发消耗原 attempts/calls/repairs/deadline，不复用无效输出、旧分析或旧独审。
+行为分析将 [[claude-structured-runtime]] 已核终态的精确 `structured_output_retries_exhausted` 及 [[zcode-structured-runtime]] 的精确 `structured_output_format_invalid` 作为可有限修复的输出失败，保留原 session/thread/turn 诊断证据；不把普通 failed、unsupported、stale_result 或错误文本广泛改类。严格格式失败的完整 code/message 沿既有 repairDiagnostics 进入新分析及独审，分区只接收同一固定计划下自己原失败的诊断。新 attempt 前仍先结算旧 native 资源，未 removed 保持 recovery_required；全部独立派发消耗原 attempts/calls/repairs/deadline，不复用无效输出、旧分析或旧独审。
 
 P1 续修种子仅取完整结算的具体业务拒绝轮（repair_budget_exhausted）。模型容量或原生执行等基础设施失败不构成业务拒绝，即使保留了合法候选、语义审查 warning 或 deferredImplementation 缺测试 error；除上文同绑定局部单空round的回溯外，连续执行及 checkpoint 恢复均清空旧 seed，在原预算/deadline/冻结输入内用新 attempt 重新生成及独立审查，不批准未审候选或沿用旧 review。此前真正业务拒绝的 seed 继续沿既有严格校验修复；无具体业务拒绝的种子仍被拒绝，取消及总预算耗尽不新增派发。
 
@@ -111,7 +111,7 @@ raw-only 初始化允许的空 affectedIds 不能被解释为没有阻塞。完�
 
 恢复Spec自带VERIFY时，其原技术ID与node tombstone同样纳入已审scope/head覆盖并推进新receipt；generation/review的readyIds仍只业务ID。P1及当前可信verifications的argv/cwd/预算精确登记不变，restore不能批准旧验证命令覆盖新政策。
 
-显式 retryOf 的行为修复反馈沿真实不可变引用逐代读取，仅在来源物理身份、input.id、policyDigest、readSetDigest、requestBlob 及 origin 与当前操作精确相同时，将各代 behavior_analysis_invalid/behavior_review_failed 的完整 code/message 按原先后交给本次分析和新独审。来源/input/政策/request/origin 结构绑定不符仍拒绝；合法 P1 扩作用域使当前 readSetDigest 不同于祖先时，只停止继承该代及更早诊断，保留本操作反馈并继续新分析，不由可选诊断新增业务阻断。不沿 changed-input successorOf 取反馈。诊断始终是未批准数据，不构成基线、业务批准、权限或可重用分析；现有预算、尝试、deadline 和独审门禁保持。
+显式 retryOf 的行为修复反馈沿真实不可变引用逐代读取，仅在来源物理身份、input.id、policyDigest、readSetDigest、requestBlob 及 origin 与当前操作精确相同时，将各代 behavior_analysis_invalid/behavior_review_failed/structured_output_format_invalid 的完整 code/message 按原先后交给本次分析和新独审。来源/input/政策/request/origin 结构绑定不符仍拒绝；合法 P1 扩作用域使当前 readSetDigest 不同于祖先时，只停止继承该代及更早诊断，保留本操作反馈并继续新分析，不由可选诊断新增业务阻断。不沿 changed-input successorOf 取反馈。诊断始终是未批准数据，不构成基线、业务批准、权限或可重用分析；现有预算、尝试、deadline 和独审门禁保持。
 
 所有行为分析、细化、生成与各自独立评审使用 operation 的固定有效 model（历史缺省为 gpt-6.1-sol），遵循 [[sync-model-selection]]；恢复沿原结构化请求，模型不改变预算、业务权限或已批准 P1 继承。
 

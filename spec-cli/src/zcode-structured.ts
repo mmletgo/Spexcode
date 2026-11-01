@@ -87,7 +87,10 @@ export function assertZCodeModelSnapshot(snapshot: ModelSnapshot, expected: Nati
 /** 只解一个完整json围栏；不修补正文，不接受解释文字、多段或宽松JSON。 */
 export function decodeZCodeStructuredText(text: string): unknown {
   try { return JSON.parse(decodeZCodeJsonText(text)) as unknown }
-  catch { throw new StructuredSessionError('failed', 'ZCode terminal response is not one strict JSON document') }
+  catch (error) {
+    if (!(error instanceof SyntaxError)) throw error
+    throw new StructuredSessionError('structured_output_format_invalid', 'ZCode terminal response is not one strict JSON document')
+  }
 }
 
 /** 仅返回原样安全证明事件；transport只按type计数，绝不读取或保存headers。 */
@@ -197,14 +200,15 @@ async function settleResult(plan: NativePlan, prompt: string, execution: ZCodeSt
   if (!plan.turnId || terminal.type !== 'turn.completed' || terminal.sessionId !== plan.sessionId || terminal.turnId !== plan.turnId || terminal.payload.inputId !== plan.inputId
     || terminal.payload.resultType !== 'success' || typeof terminal.payload.response !== 'string' || !exit.stopped || !exit.idle || !exit.closed || exit.code !== 0 || exit.signal !== null)
     throw new StructuredSessionError('failed', 'ZCode has no exact successful terminal, close and complete native stop')
-  const output = decodeZCodeStructuredText(terminal.payload.response), validate = new Ajv({ allErrors: true }).compile(execution.schema)
-  if (!validate(output)) throw new StructuredSessionError('failed', 'ZCode terminal JSON does not match the pinned JSON schema')
   const mcpPath = join(plan.runtime, 'frozen-mcp', 'mcp-public.jsonl')
   const records = readFileSync(mcpPath, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line) as Record<string, unknown>)
   const witness = { version: 1, provider: 'zcode', cliVersion: plan.cliVersion, cliSha256: plan.cliSha256, providerId: plan.model.providerId, modelId: plan.model.modelId, sessionId: plan.sessionId, turnId: plan.turnId, inputId: plan.inputId, prompt: zcodeStructuredPrompt(prompt, execution.schema), send, messages, events,
     mcpHistory: { records, digest: digest(records) } } as ZCodeFrozenWitness
+  if (!events.some(event => digest(event) === digest(terminal))) throw new StructuredSessionError('stale_result', 'ZCode terminal differs from its original native events')
   const { proveZCodeFrozenReads } = await import('./zcode-frozen-proof.js')
   const frozenReadProof = proveZCodeFrozenReads(execution.frozenContext!, witness)
+  const output = decodeZCodeStructuredText(terminal.payload.response), validate = new Ajv({ allErrors: true }).compile(execution.schema)
+  if (!validate(output)) throw new StructuredSessionError('failed', 'ZCode terminal JSON does not match the pinned JSON schema')
   const result: NativeResult = { threadId: plan.sessionId, turnId: plan.turnId, text: JSON.stringify(output), frozenReadProof }
   writeJson(join(plan.root, 'witness.json'), witness, true)
   writeJson(join(plan.root, 'completed.json'), { plan, witness, result } satisfies Completed, true)
@@ -236,10 +240,13 @@ async function completedResult(root: string, prompt: string, execution: ZCodeStr
   const { verifyZCodeFrozenReadProof } = await import('./zcode-frozen-proof.js')
   const proof = saved.result.frozenReadProof
   const terminal = JSON.parse(readFileSync(join(root, 'terminal.json'), 'utf8')) as NativeEvent
-  const output = decodeZCodeStructuredText(terminal.payload.response as string), validate = new Ajv({ allErrors: true }).compile(execution.schema)
+  if (!saved.witness.events.some(event => digest(event) === digest(terminal))) throw new StructuredSessionError('stale_result', 'ZCode original terminal differs from completion')
+  let output: unknown
+  try { output = JSON.parse(decodeZCodeJsonText(terminal.payload.response as string)) }
+  catch (error) { if (!(error instanceof SyntaxError)) throw error; throw new StructuredSessionError('stale_result', 'ZCode completed response is not one strict JSON document') }
+  const validate = new Ajv({ allErrors: true }).compile(execution.schema)
   verifyZCodeFrozenReadProof(execution.frozenContext!, saved.result.frozenReadProof, { threadId: plan.sessionId, turnId: plan.turnId!, inputId: plan.inputId, prompt: nativePrompt }, { ...plan.model, cliVersion: plan.cliVersion, cliSha256: plan.cliSha256 }, { output })
-  if (!validate(output) || saved.result.text !== JSON.stringify(output) || saved.result.threadId !== plan.sessionId || saved.result.turnId !== plan.turnId
-    || !saved.witness.events.some(event => digest(event) === digest(terminal))) throw new StructuredSessionError('stale_result', 'ZCode original terminal, schema or proof differs from completion')
+  if (!validate(output) || saved.result.text !== JSON.stringify(output) || saved.result.threadId !== plan.sessionId || saved.result.turnId !== plan.turnId) throw new StructuredSessionError('stale_result', 'ZCode original terminal, schema or proof differs from completion')
   if (execution.state === 'completed') {
     if (execution.threadId !== plan.sessionId || execution.turnId !== plan.turnId || execution.resultDigest !== digest(execution.output) || execution.resultDigest !== digest(output)
       || !execution.frozenReadProof || digest(execution.frozenReadProof) !== digest(proof)) throw new StructuredSessionError('stale_result', 'ZCode durable completed result or proof differs')

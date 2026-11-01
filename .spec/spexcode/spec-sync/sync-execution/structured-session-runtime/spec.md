@@ -29,7 +29,7 @@ related:
 
 策略/schema/输入/预算参与幂等哈希，公开会话创建对象不能注入安全策略。相同载荷复用同一结果，不同载荷拒绝。同一连接在初轮前订阅，原生 thread 与 turn 接受后立即持久化；只读取精确 turn 的 completed 与 final_answer。失败、取消、超时、缺失结果、非法 JSON 或 schema 不符不算成功，创建后失败包含已知的会话和原生身份。
 
-[[claude-structured-runtime]] 已确证的结构输出重试耗尽在 failed 运行元数据中保留可选 `errorCode: structured_output_retries_exhausted`；调用与同键重放保留该精确码、原错误及已知 session/thread/user 身份。此观测字段不参与固定策略或创建摘要，不改变存储 schema；旧 failed 没有此字段仍返回 failed，不按错误文本猜分类。
+[[claude-structured-runtime]] 已确证的结构输出重试耗尽在 failed 运行元数据中保留可选 `errorCode: structured_output_retries_exhausted`；调用与同键重放保留该精确码、原错误及已知 session/thread/user 身份。[[zcode-structured-runtime]] 的严格 JSON 文本格式失败同样在 failed 中保留 `errorCode: structured_output_format_invalid`，调用与同键重放保留精确码、原错误和 session/thread/turn 身份，不接纳原无效输出。此观测字段不参与固定策略或创建摘要，只扩展已有 JSON 可选值，不改变存储 schema；旧 failed 没有此字段仍返回 failed，不按错误文本猜分类。
 
 传输断连保留 running 身份；重试通过原启动队列恢复该 thread/turn。丢失 turn 接受回复时，只有唯一初轮且用户输入匹配冻结 prompt 才可恢复。不得从历史最后一条 assistant 消息猜测结果。读取持久结果再次检查输入/schema/策略、精确身份及结果摘要，拒绝旧输入或损坏结果。取消先持久化 `cancelling` 撤销结果发布，再中断原生 turn，禁止迟到结果改写终态。
 
