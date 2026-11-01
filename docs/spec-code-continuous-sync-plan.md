@@ -298,6 +298,8 @@ Native 资源结算只控制 receipt 原进程组和历史已观察后代；新�
 
 同步任务按节点代码归属、实际写文件与依赖边规划分区，再派发多个独立上下文。任务只提供本区目标、变更 Spec 和必要接口路径，不给每个 Agent 重复发送全仓正文或读取账本；Agent 可在完整工作树中自由查阅。原角色、共同基线、作者授权及未修改义务仍由程序保留，实际写范围不随读取自由扩大。共享写文件的节点合区，未治理源码保留明确发现分区；超大单文件和不可拆写集合保持完整可读，不能截断或遗漏。 Native分区分析brief还须明确本区facts/newNodes门禁：同一facts.source只提交一份完整text，newNodes仅来自本区unownedSourcePaths和schema候选；候选为空或maxItems为0时返回[]，Root/接口分区不替兄弟源码分区提叶。该约束不限制worktree自由读取，也不引入frozen-reader消费证明。
 
+Native worktree新分析请求仅接受旧/current冻结图中的受影响ID，规则依据限定为既有REQ/RULE/TR；空候选以maxItems:0表达，raw-only空图的GAP/conflict允许空身份数组。分区路径、写权和后置授权门保持，已接受的合法v5缓存继续复用。
+
 分区隶属同一个 operation/attempt，共用会话队列、fence、预算和最终 candidate。保存各阶段的真实 seed、会话、原输出与 Git 差量；恢复仅复用同一任务和可见 tree 的已结算结果。程序合成唯一候选，再用独立会话审查各区和跨区接口；最终仍须全图结构检查、可信真实运行、正常提交 hooks、完整 journal/receipt 和正式采纳。
 
 分析以真实 composed tree 为起点，细化叠加该阶段已审祖先或待审 Spec，构建使用已审 Spec overlay，独审使用实际候选 tree。每次派发先生成并保活不可变 seed commit，精确核对其 tree 和会话 forkCommit；不能只用来源 HEAD 而遗漏受控 Spec 修改，也不能从 live index/WIP 拼接后续编辑。生成摘要及自报补丁不作为修改事实，候选从构建者的实际 Git 对象差量导入；审查者工作树发生任何修改则拒绝该审查。
