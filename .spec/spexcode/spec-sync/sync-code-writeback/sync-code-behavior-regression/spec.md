@@ -12,6 +12,8 @@ related:
 
 ## expanded spec
 
+Spec分节格式以真实Git快照和精确byte/intent选择等价重放整份正文双重转义及分节消失：旧门误报首个未消费义务，新门仍analysis_invalid但返回具体分节格式/计数且原proposal逐字保留、独审零派发。真实未授权AC依赖误改与缺项仍由同一义务谓词拒绝，新增expected/proposed完整业务字段及path/id便于修复；不变policy/scope/原输入或授业务权。有效Spec及正文内字面反斜线n、普通单行代码、原rawless保护、真实三方/raw整合和null删除回归保持；确定性模型接缝不冒充真实Native或产品交付。
+
 真实Git分区仅Spec变化时，proposal混入可读源码/未来写目标应在新独审前以behavior_analysis_invalid拒绝并保存完整proposal和精确越界路径；同源码仍可在完整读取后作为本区facts与独审checkedPaths引用。旧v2/v3及无指导版本accept不承接新v4输入，当前相同摘要仍可重放已审缓存。
 
 AC变化依据回归在真实Git中保留只读父规则与旧covers，证明未变只读来源在独审前携原完整proposal被拒；只读真实作者REQ/raw差量、只读规则业务变化和可写的旧AC闭包外新依据仍进入完整新独审，不扩写权或替P1批准最终来源链。

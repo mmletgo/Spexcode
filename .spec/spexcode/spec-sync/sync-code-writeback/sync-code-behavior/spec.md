@@ -54,6 +54,8 @@ rawlessSpecPaths仅列出本轮changedPaths中的既有Spec节点：作者基准
 
 拒绝诊断以 approved:false 的 JSON 保存当次完整 proposal、尚未批准的 analysis 和 review（在各阶段实际产生时），分列 missingPaths/missingChangeIds/unknownChangeIds、身份摘要或会话不一致、verdict 和 findings；路径错误仍保同次业务证据及反例。AC复合门禁给出目标类型、同一 allowed_change 中缺失的 affectedId、不支撑的 ruleIds、非法规则类型及 source 是否绑定。AC ruleIds 只列本次变化依据，其他未改 covers 义务保持；不得拼接多个 allowed_change 的并集授权。无治理代码归属验证按原判据一次收集全部缺失 disposition 的路径，在同一拒绝的 details.missingCodePaths 与 missingCodePathCount 中返回完整列表及数量；首项仍可作为摘要，任何一项遗漏仍拒绝，空初始化文件、newNodes 和真实 GAP 的门禁不变。既有 failure.message 进入下一轮 repairDiagnostics 供逐项修复，不重复嵌入整个冻结上下文；前轮提案、未通过的 accept 或伪造批准仅是数据，不能产生基线、授权或替代新独审。
 
+Spec resolution沿原path/write/change/mode与完整读取门后，若同path任一真实冻结作者基准/source/composed/delivery可由parseParts解析分节，而nonnull提案完全不可解析，则在逐项语义义务校验前以behavior_analysis_invalid给出分节格式诊断及path、真实换行/字面反斜线n计数，完整原proposal保持。计数不参与拒绝，不反转义、规范化、删除或代写resolution；不要求两节、非空raw或AC数量来判格式。rawless原门优先，null删除、普通单行代码、合法Spec正文内字面反斜线n及真实三方/裁决/生命周期继续原规则。真正未消费交付义务失配时，原sameContractBusinessMeaning谓词不变，details.unconsumedObligation保path/id及contractBusinessMeaning的expected/proposed（缺项null），不把格式破坏误归某个业务ID。修复提示只在无真实整合必要时建议空resolutions/交P1；需要整合仍须保未消费义务，不凭无Git冲突泛禁resolution。
+
 独审 Native 请求的 schema 用本轮单值字符串枚举冻结 inputDigest 与 analysisDigest，并在说明中给出精确值，不能让模型从其他上下文摘要猜测。findings 只承载需要修正的问题，accept 必须为空数组，不把肯定说明当问题提交；最终身份、完整覆盖、verdict 与问题数组门禁保持，不由程序删改模型 findings 或补写批准。
 
 所选裁决scope复用 [[sync-contract-evolution]]：旧FLOW/STEP仅取所选规则旧闭包与原所选finding affectedIds交集；共享上游REQ只在当前精确不可变请求/旧分析/所选finding绑定下加入REQ本身，不扩其消费者或借新图边授权其他旧目标。分析阶段只判断有限eligible来源范围；最终REQ改义仍须同一已审allowed_change及所选旧规则的实际政策定义变化，并接受原P1独审。AC仍绑定同一具体allowed_change、实际来源事实和精确提案，不能凭REQ扩大整个AC集合。
