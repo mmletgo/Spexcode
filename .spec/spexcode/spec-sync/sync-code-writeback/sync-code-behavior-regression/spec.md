@@ -12,6 +12,8 @@ related:
 
 ## expanded spec
 
+真实Git分区仅Spec变化时，proposal混入可读源码/未来写目标应在新独审前以behavior_analysis_invalid拒绝并保存完整proposal和精确越界路径；同源码仍可在完整读取后作为本区facts与独审checkedPaths引用。旧v2/无指导版本accept不承接新v3输入，当前相同摘要仍可重放已审缓存。
+
 真实 Git 的分区精确选择同时包含本区与区外真实 owner、尚未生成的 Spec 路径及未来 contract/flow null 基线，先复现 owner 全 null 时在首个派发前读取 path 崩溃，再证明分析和独审保留原 null residual 与 absent 路径证据、按真实 owner 排除区外正文。未来资源不成为既有契约或可读正文，写范围、原选择及组合证据、source/index/快照均保持；确定性 runner 只证明冻结投影与独审门禁，不代表真实 Native 或完整初始化交付。
 
 回归覆盖 [[sync-code-behavior]] 的合法外部变化、独立审查输入、正文与完整测试上下文、稳定冲突/GAP ID、重构无业务授权、文本相容重叠方案、无治理文件上层定位，以及独审遗漏/同会话/未绑定ref/自批政策/弱化验收拒绝。输入和交付实体保持真实来源及共同基线；原source/index不被写。整体运行与产品证据由 [[sync-code-writeback]] 验收。
