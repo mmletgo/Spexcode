@@ -64,3 +64,5 @@ version5/null 请求沿原 Claude policy、realm 与版本3读取证明执行，
 已持久 completed 的 worktree 冷重放核原完成缓存、固定请求、Native 身份、schema/输出和原 exit.stopped/close 证据，不再探测历史 PID/PGID，避免无关复用导致伪 stale；running 或未结算仍必须实时证明原进程与后代停止。
 
 worktree 停止与未结算重放共用 [[native-worktree-runtime]] 的正向任务域边界及 boundaryVersion2 追加观察，保留原 failed exit/unknown 原件。旧 Claude plan 缺 workspace 时，stop/replay/settle 都从原不可变 launch.cwd 归一，域缺失明确 pending，不以 stale→failed 释放真实任务孤儿。
+
+原生 worktree v6 的 error_max_structured_output_retries 在原请求/Native session/user/promptId、实际 model、exit1/is_error 与真实停止均绑定后，依据原 history 中精确 StructuredOutput 调用及配对 schema 错误，返回同一 structured_output_retries_exhausted。诊断复用原安全字段提取，不规范化或补填业务 JSON、不创建 completed/读取证明/Git 结果。原生同 promptId 的结构输出 enforce 元消息不是新业务用户；正常内置工具不受旧 frozen 白名单及逐字消费证明限制。旧冻结失败认证仍完整保留；普通失败、身份差异、停止不明或 completed 原件篡改不取得此分类。既有 runtime 持久 code、协调 repairDiagnostics、新 attempt 与独审/资源结算接缝保持。
