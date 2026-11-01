@@ -1209,7 +1209,7 @@ async function initialDiscovery(t: test.TestContext, raw: string) {
   return { f, input, model }
 }
 
-for (const previousVersion of [undefined, 'code-behavior-guidance-v2', 'code-behavior-guidance-v3']) test(`指导合同版本进入唯一摘要，旧accept ${previousVersion} 不得被缓存承接`, async t => {
+for (const previousVersion of [undefined, 'code-behavior-guidance-v2', 'code-behavior-guidance-v3', 'code-behavior-guidance-v4']) test(`指导合同版本进入唯一摘要，旧accept ${previousVersion} 不得被缓存承接`, async t => {
   const { f, input, model } = await initialDiscovery(t, '统计传入列表的条目数量，不修改列表；从现有模块生成治理叶及规格。')
   let context = ''
   const first = await analyzeCodeBehavior({ ...input, requestKey: 'old-guidance' }, async request => {
@@ -1227,7 +1227,7 @@ for (const previousVersion of [undefined, 'code-behavior-guidance-v2', 'code-beh
     calls.push(request.purpose)
     if (process.env.SPEX_RAW_RESOLUTION_EVIDENCE_DIR) writeFileSync(join(process.env.SPEX_RAW_RESOLUTION_EVIDENCE_DIR, `guidance-current-${request.purpose}.prompt.txt`), request.prompt)
     const frozen = readFrozenBehaviorContext<{ guidanceContractVersion: string }>(request)
-    assert.equal(frozen.guidanceContractVersion, 'code-behavior-guidance-v4')
+    assert.equal(frozen.guidanceContractVersion, 'code-behavior-guidance-v5')
     const instructions = request.prompt.slice(0, request.prompt.indexOf('冻结三方输入:\n'))
     assert.match(instructions, /尚未生成.*治理叶.*待生成工作/)
     assert.match(instructions, /coverage_gap.*重大业务事实.*可观察后果/)
@@ -2325,4 +2325,55 @@ test('native worktree P0看见受控raw和完整repo，省略的相关文件可�
   })
   assert.equal(result.reviewPassed, true); assert.deepEqual(calls, ['code_behavior_analyze', 'code_behavior_review'])
   assert.equal(readFileSync(join(f.root, 'src/export.js'), 'utf8'), 'later WIP\n')
+})
+
+test('Native code_to_spec分区brief传达本区facts与newNodes约束并保留自由读取', async t => {
+  const f = await fixture(t, undefined, { 'support/info.mjs': 'export const context = "free-read context"\n' })
+  const testPath = 'tests/export.test.mjs', sourcePath = 'src/export.js', parentPath = '.spec/export/export-contract/spec.md'
+  writeFileSync(join(f.root, testPath), `${readFileSync(join(f.root, testPath), 'utf8')}\n// root interface change\n`)
+  git(f.root, 'add', testPath); git(f.root, 'commit', '-m', 'change root interface tests')
+  const prepared = await f.input(), plan: CodeBehaviorInput['plan'] = {
+    ...prepared.plan, agentWorkflow: 'native-worktree-v1', version: 'sync-coordinator-v2', direction: 'code_to_spec',
+    targets: [], readPaths: ['.spec', 'src', 'tests'], writePaths: [], sourcePaths: ['src'], facts: [],
+    executionScope: { paths: [parentPath], contractIds: [], flowIds: [] },
+    commitTrigger: { before: null, paths: [testPath] },
+    partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 1000000, maxParallel: 1 },
+  }
+  const input: CodeBehaviorInput = {
+    ...prepared, baseline: null, baselineSelection: undefined, composed: composeInputSnapshots(prepared.snapshot, null).composed!,
+    origin: 'code', model: 'claude:MiniMax-M3.1-Flash', plan,
+    partition: { id: 'root-interface', changedPaths: [testPath], factSourcePaths: [sourcePath], authorizedParentSpecPaths: [parentPath] },
+  }
+  const fact = { source: `code:${sourcePath}#ExportService`, text: '既有导出服务提供任务行为上下文。' }
+  const result = await analyzeCodeBehavior(input, async request => {
+    assert.ok(request.worktree, 'Native analysis runs in its fixed Git worktree')
+    assert.equal(request.frozenEntries, undefined)
+    assert.doesNotMatch(request.prompt, /spex_read_frozen|bodyIndex|bodyRef|分块读取|逐字消费证明/)
+    assert.equal(git(f.root, 'show', `${request.worktree.baseCommit}:support/info.mjs`), 'export const context = "free-read context"')
+    if (request.purpose === 'code_behavior_analyze') {
+      const stageInstructions = request.prompt.slice(0, request.prompt.indexOf('任务:\n'))
+      const newNodes = (request.schema.properties as Record<string, { maxItems?: number }>).newNodes
+      assert.equal(newNodes.maxItems, 0, 'Root interface partition has no source-leaf candidates')
+      assert.match(stageInstructions, /同一source只给一个完整text/)
+      assert.match(stageInstructions, /分区newNodes范围：只为本区unownedSourcePaths中schema列出的源码候选/)
+      assert.match(stageInstructions, /候选为空或schema\.maxItems为0时必须返回\[\]/)
+      assert.match(stageInstructions, /Root\/接口分区不能替兄弟源码分区提出newNodes/)
+      assert.match(stageInstructions, /parentNodeId必须填写nodeId/)
+      const output = {
+        changes: [{ kind: 'refactor', paths: [testPath], affectedIds: [], ruleIds: [], originalIntent: '保持原有导出流程', previousBehavior: '测试覆盖已有流程', sourceBehavior: '接口分区只改变测试覆盖', deliveryBehavior: '交付继续覆盖已有流程', evidence: '完整读取本区测试', counterexample: '不能漏掉原有行为' }],
+        facts: [fact], acceptanceChanges: [], newNodes: [], resolutions: [],
+      }
+      return {
+        sessionId: 'native-root-analysis', threadId: 'native-root-thread', turnId: 'native-root-turn',
+        output, resultDigest: contentHash(JSON.stringify(output)),
+      }
+    }
+    const stage = JSON.parse(request.prompt.split('待审分析:\n')[1]!) as { analysisDigest: string; analysis: CodeBehaviorAnalysis }
+    const output = { inputDigest: request.inputDigest, analysisDigest: stage.analysisDigest, verdict: 'accept', checkedPaths: [testPath, sourcePath, 'support/info.mjs'], checkedChangeIds: stage.analysis.changes.map(change => change.id), findings: [] }
+    return {
+      sessionId: 'native-root-review', threadId: 'native-root-review-thread', turnId: 'native-root-review-turn',
+      output, resultDigest: contentHash(JSON.stringify(output)),
+    }
+  })
+  assert.equal(result.reviewPassed, true)
 })
