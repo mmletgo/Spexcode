@@ -32,11 +32,13 @@ version5/null 请求沿原 Claude policy、realm 与版本3读取证明执行，
 
 固定 CLI 的 `error_max_structured_output_retries` 只在 exit1、精确原生 result/session/user 回显、原根 user/promptId/prompt、固定 policy/model/API 工具面与整个 CLI/MCP 进程组停止均已核对时，保留为 `structured_output_retries_exhausted` 输出失败。公开 history 的额外未知 user、工具或身份差异不取得此分类；未知 subtype、缺失事件及未停稳仍沿原拒绝/恢复入口。该失败及其原 schema 工具错误不改写、不补数组、不产生 witness/completed/读取 proof；新尝试只能沿原协调预算入口重新派发。完整的同轮失败文件可以离线重新确认此失败，不新建 CLI 或追加 prompt。
 
-已停耗尽路径与成功路径共用精确输出上限续行身份及实际API消费规则：仅已核183字符max_output_tokens_recovery、原promptId、meta/turnCompanion、直接最近max_tokens assistant及无外来source标志可参与来源重建；每条续行须在出现后由新API及其assistant实际消费。普通额外user、113字符structured-output-enforce、伪压缩、未消费或借用旧请求仍拒绝。该兼容只把已核真的终态归为结构输出耗尽，不能产生成功proof或业务通过，也不采集跨attempt字段诊断。
+已停耗尽路径与成功路径共用精确输出上限续行身份及实际API消费规则：仅已核183字符max_output_tokens_recovery、原promptId、meta/turnCompanion、直接最近max_tokens assistant及无外来source标志可参与来源重建；每条续行须在出现后由新API及其assistant实际消费。普通额外user、113字符structured-output-enforce、伪压缩、未消费或借用旧请求仍拒绝。该兼容只把已核真的终态归为结构输出耗尽，不能产生成功proof或业务通过，不产生成功读取证明。
 
-失败分类还须逐条按实际 API 的完整 base/keep/tail 重建输入，在每次消费时核每个消息摘要的来源。user 只能是当时已观察的原 prompt、已严格配对的原 tool_result或上述严格核真的输出上限续行；CAS 的前置或后置声明、合法 canonical SHA、后续删除或原生 schema 错误都不授予额外正文权限。未知 hash、缺失内容来源、未来回复、错误 base/keep 与新 turn 保守 stale_result，不按位置猜测缺失消息的角色。此分支仍拒绝compact及未经上述严格证明的recovery用户伴随输入，成功路径的完整证明含义不变。
+失败分类还须逐条按实际 API 的完整 base/keep/tail 重建输入，在每次消费时核每个消息摘要的来源。user 只能是当时已观察的原 prompt、已严格配对的原 tool_result或上述严格核真的输出上限续行；CAS 的前置或后置声明、合法 canonical SHA、后续删除或原生 schema 错误都不授予额外正文权限。未知 hash、缺失内容来源、未来回复、错误 base/keep 与新 turn 保守 stale_result，不按位置猜测缺失消息的角色。已停失败与成功证明复用同一流式主链认证：system/compact_boundary、唯一runningTurnSends、logical parent、原parent链完整preserved UUID集合与summary anchor逐项保持；精确同轮摘要仅在实际API输入摘要与原生来源/顺序吻合时参与失败分类，不按compact标志豁免。未知recovery仍拒绝，成功路径原事件检查顺序和完整证明含义保持。
 
-仅在此已停失败分支使用 [[frozen-context-reader]] 的只读来源元数据解释明确非 USER CAS 与已观察的原生 assistant 分片前缀；源 UUID、角色和消费顺序必须分别绑定。并行 tool_result 合并仍逐个以当时已配对的公开 USER 正文验证后才接受前缀摘要。可修复错误码只说明该失败拥有完整原输入来源与停止证明，不代表业务、读取覆盖或输出 schema 通过；元数据不进入成功 witness 或 proof，也不改原失败文件。
+仅在此已停失败分支使用 [[frozen-context-reader]] 的只读来源元数据解释明确非 USER CAS 与已观察的原生 assistant 分片前缀；源 UUID、角色和消费顺序必须分别绑定。并行 tool_result 合并仍逐个以当时已配对的公开 USER 正文验证后才接受前缀摘要。可修复错误码只说明该失败拥有完整原输入来源与停止证明，不代表业务、读取覆盖或输出 schema 通过；已认证压缩摘要的原生string→单text块API别名沿同一摘要门核对，不将摘要变成原prompt、工具回复或读取覆盖；source角色与消费点ordinal仍独立核验。元数据不进入成功 witness 或 proof，也不改原失败文件。
+
+仅在完整已停耗尽身份与API来源认证通过后，可从同一原生StructuredOutput调用与精确配对的is_error tool_result提取固定schema错误字段；不采信模型说明或未配对回复。最多最近5个调用、每调用12个字段，只保留受限JSON路径及类型/必填字段/数组上限错误，不输出prompt、摘要、模型正文或实际业务值；未知错误格式保原耗尽失败但不猜字段。该具体诊断进入原error.message供既有按区重试反馈，不改旧失败原件、结果或schema。
 
 固定 CLI 的 StructuredOutput enforce meta 提醒仅按 [[frozen-context-reader]] 的原始 metadata、唯一同轮 prompt/parent、精确 API 字节与后续 StructuredOutput 消费核验；不能给一般 user 或未核真的内部提示授权，也不扩展已停失败分类。
 

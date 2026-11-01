@@ -82,6 +82,44 @@ for (const timeoutMs of [1000, null]) test(`stopped exact Claude schema retry ex
     assert.deepEqual(readFileSync(join(root, 'result.json')), failureBytes)
     assert.deepEqual(readFileSync(historyPath), historyBytes)
     for (const name of ['completed.json', 'witness.json']) assert.equal(existsSync(join(root, name)), false)
+    const summaryMessage = { role: 'user', content: 'Exact same-turn compact summary, no additional instruction.' }
+    const summaryHash = claudeMessageDigest({ ...summaryMessage, content: [{ type: 'text', text: summaryMessage.content }] })
+    const compactRows: Array<Record<string, unknown>> = [...history,
+      { type: 'system', subtype: 'compact_boundary', sessionId: 'session', uuid: 'compact', parentUuid: null, logicalParentUuid: 'schema-error', compactMetadata: { runningTurnSends: { openerUuid: 'user', uuids: ['user'] }, preservedSegment: { headUuid: 'schema-call', tailUuid: 'schema-error', anchorUuid: 'summary' }, preservedMessages: { anchorUuid: 'summary', uuids: ['schema-call', 'schema-error'], allUuids: ['schema-call', 'schema-error'] } } },
+      { type: 'attachment', sessionId: 'session', uuid: 'compact-attachment', parentUuid: 'compact' },
+      { type: 'user', sessionId: 'session', uuid: 'summary', parentUuid: 'compact-attachment', promptId: 'prompt', isCompactSummary: true, isVisibleInTranscriptOnly: true, summarizedTurnPromptUuids: ['user'], message: summaryMessage },
+      { type: 'api-request-blob', sessionId: 'session', hash: summaryHash, message: summaryMessage },
+      { ...history[2], id: 'request-after-compact', keep: 0, tail: [summaryHash] },
+      { ...history[3], uuid: 'schema-call-after-compact', parentUuid: 'summary', requestRef: 'request-after-compact', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'schema-after-compact', name: 'StructuredOutput', input: { newNodes: {} } }] } },
+      { ...history[4], uuid: 'schema-error-after-compact', parentUuid: 'schema-call-after-compact', sourceToolAssistantUUID: 'schema-call-after-compact', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'schema-after-compact', is_error: true, content: "Output does not match required schema: /newNodes: must be array, /newNodes/0: must have required property 'codePath'" }] } },
+    ]
+    writeFileSync(historyPath, compactRows.map(row => JSON.stringify(row)).join('\n') + '\n')
+    for (let replay = 0; replay < 2; replay++) await assert.rejects(claudeStructuredTurn(realm, 'native', prompt, execution, callbacks), error => {
+      assert.equal((error as { code: string }).code, 'structured_output_retries_exhausted')
+      assert.match(String(error), /schema-after-compact.*newNodes.*must be array/)
+      assert.doesNotMatch(String(error), /Exact same-turn compact summary/)
+      return true
+    })
+    const compactNegative: Array<[string, (rows: Array<Record<string, unknown>>) => void]> = [
+      ['foreign summary', rows => { rows[7].sessionId = 'foreign' }],
+      ['non-string attachment UUID', rows => { rows[6].uuid = 123; rows[7].parentUuid = 123 }],
+      ['non-string compact UUID', rows => { rows[5].uuid = 123; rows[6].parentUuid = 123 }],
+      ['missing anchor', rows => { delete (rows[5].compactMetadata as { preservedSegment: { anchorUuid?: string } }).preservedSegment.anchorUuid }],
+      ['missing preserved UUID', rows => { (rows[5].compactMetadata as { preservedMessages: { allUuids: string[] } }).preservedMessages.allUuids.pop() }],
+      ['wrong summary parent', rows => { rows[7].parentUuid = 'user' }],
+      ['foreign prompt', rows => { rows[7].promptId = 'foreign' }],
+      ['foreign opener', rows => { (rows[5].compactMetadata as { runningTurnSends: { openerUuid: string } }).runningTurnSends.openerUuid = 'foreign' }],
+      ['summary API substitution', rows => { rows[8].message = { role: 'user', content: summaryMessage.content + ' extra input' } }],
+      ['future summary', rows => { const [summary] = rows.splice(7, 1); rows.push(summary) }],
+      ['old request consumer', rows => { rows[10].requestRef = 'unobserved-request' }],
+      ['extra user', rows => { rows.push({ type: 'user', sessionId: 'session', uuid: 'extra', parentUuid: 'schema-error-after-compact', promptId: 'prompt', message: { role: 'user', content: 'additional human instruction' } }) }],
+    ]
+    for (const [name, mutate] of compactNegative) {
+      const rows = structuredClone(compactRows); mutate(rows)
+      writeFileSync(historyPath, rows.map(row => JSON.stringify(row)).join('\n') + '\n')
+      await assert.rejects(claudeStructuredTurn(realm, 'native', prompt, execution, callbacks), { code: 'stale_result' }, name)
+    }
+    for (const name of ['completed.json', 'witness.json']) assert.equal(existsSync(join(root, name)), false)
     const limitText = 'Output token limit hit. Resume directly — no apology, no recap of what you were doing. Pick up mid-thought if that is where the cut happened. Break remaining work into smaller pieces.'
     const limitMessage = { role: 'user', content: [{ type: 'text', text: limitText }] }, limitHash = claudeMessageDigest(limitMessage)
     const interrupted = { type: 'assistant', sessionId: 'session', uuid: 'interrupted', parentUuid: 'user', requestRef: 'request', message: { role: 'assistant', content: [], stop_reason: 'max_tokens' } }

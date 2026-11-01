@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createInterface } from 'node:readline'
 import { detachedRuntimeIsGone, processStartToken, verifyDetachedRuntime, writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
-import { claudeApiRequestHashes, claudeApiSourceDigest, claudeApiToolResultIds, claudeMessageBlocks, claudeMessageDigest, claudeOutputLimitCompanions, matchingClaudeRecoveries, recordClaudeRecoveryRequest, consumeClaudeRecoveryRequest, proveClaudeFrozenReads, readClaudeApiMessageBlobs, readClaudeApiSourceMetadata, readClaudeMcpToolNames, readClaudePublicHistory, verifyFrozenReadProof, type ClaudeRecovery, type ClaudeFrozenWitness, type ClaudePublicMessage, type ClaudePublicRecord, type FrozenReadProof } from './frozen-context.js'
+import { checkClaudeHistoryChain, claudeApiRequestHashes, claudeApiSourceDigest, claudeApiToolResultIds, claudeMessageBlocks, claudeMessageDigest, claudeOutputLimitCompanions, matchingClaudeRecoveries, recordClaudeRecoveryRequest, consumeClaudeRecoveryRequest, proveClaudeFrozenReads, readClaudeApiMessageBlobs, readClaudeApiSourceMetadata, readClaudeMcpToolNames, readClaudePublicHistory, verifyFrozenReadProof, type ClaudeRecovery, type ClaudeFrozenWitness, type ClaudePublicMessage, type ClaudePublicRecord, type FrozenReadProof } from './frozen-context.js'
 import { structuredExecutionTimer, StructuredSessionError, structuredExecutionPolicy, structuredSeatbeltProfile, type StructuredExecution } from './session-structured-policy.js'
 
 const CLI_VERSION = '2.1.309 (Claude Code)'
@@ -142,9 +142,11 @@ function settleClaudeResult(plan: NativePlan, prompt: string, execution: Structu
   if (result.subtype === 'error_max_structured_output_retries') {
     const exit = JSON.parse(readFileSync(join(root, 'exit.json'), 'utf8')) as { code: number | null; signal: string | null; stopped: boolean }
     const requests = history.filter(row => row.type === 'api-request'), shapes = history.filter(row => row.type === 'api-request-shape')
+    const summaries = new Map([...checkClaudeHistoryChain(history, original)].filter(row => row.compactSummary).map(row => [row.uuid!, row.compactSummary!.messageDigest])), compactSummaries = new Set<string>()
     const companions = claudeOutputLimitCompanions(history, original), recoveries: ClaudeRecovery[] = []
     const unknownUser = history.some(row => {
       if (row.type !== 'user' || row.uuid === plan.userUuid) return false
+      if (summaries.has(row.uuid!)) return false
       if (companions.has(row.uuid!)) return false
       if (row.promptId !== original.promptId || !row.sourceToolAssistantUUID || row.parentUuid !== row.sourceToolAssistantUUID || row.message?.role !== 'user' || !Array.isArray(row.message.content) || !row.message.content.length) return true
       const assistant = history.find(assistant => assistant.type === 'assistant' && assistant.uuid === row.sourceToolAssistantUUID)
@@ -165,7 +167,14 @@ function settleClaudeResult(plan: NativePlan, prompt: string, execution: Structu
     const users = new Map<string, ClaudePublicMessage>(), calls = new Map<string, ClaudePublicRecord>(), responses = new Map<string, Exclude<ClaudePublicMessage['content'], string>[number]>()
     const originalHash = claudeMessageDigest(original.message)
     for (const row of history) {
-      if (row.type === 'system' || row.compactSummary || row.turnCompanion && !companions.has(row.uuid!)) throw new StructuredSessionError('stale_result', 'Claude schema retry exhaustion cannot classify compact or unknown recovery user inputs')
+      if (row.type === 'system') continue
+      if (row.compactSummary) {
+        compactSummaries.add(row.compactSummary.messageDigest)
+        for (const recovery of recoveries) if (recovery.consumed) { recovery.summaries.add(row.compactSummary.messageDigest); recovery.hashes.add(row.compactSummary.messageDigest) }
+        continue
+      }
+      if (row.turnCompanion && !companions.has(row.uuid!)) throw new StructuredSessionError('stale_result', 'Claude schema retry exhaustion cannot classify unknown recovery user inputs')
+      if (row.type === 'api-request-blob' && row.compactSummaryDigest && !compactSummaries.has(row.compactSummaryDigest)) throw new StructuredSessionError('stale_result', 'Claude API string message is not an observed same-turn compact summary')
       if (row.type === 'api-request-shape') observedShapes.add(row.shapeHash!)
       if (row.type === 'assistant') {
         if (!row.requestRef || !api.has(row.requestRef)) throw new StructuredSessionError('stale_result', 'Claude assistant has no preceding actual API request')
@@ -197,6 +206,12 @@ function settleClaudeResult(plan: NativePlan, prompt: string, execution: Structu
             continue
           }
           const blob = blobs.get(digest), userSources = source.sourceUuids.map(uuid => users.get(uuid))
+          const summaryAliases = [...(blob?.summaries ?? [])].filter(hash => compactSummaries.has(hash))
+          if (compactSummaries.has(digest) || summaryAliases.length) {
+            if (blob) claudeApiToolResultIds(blob.content, responses)
+            for (const recovery of recoveries) if (recovery.summaries.has(digest) || summaryAliases.some(hash => recovery.summaries.has(hash))) recovery.hashes.add(digest)
+            continue
+          }
           if (source.kind === 'transcript-prefix' && userSources.some((message, index) => !message || !Array.isArray(message.content) && source.sourceUuids[index] !== plan.userUuid && !companions.has(source.sourceUuids[index]))) throw new StructuredSessionError('stale_result', 'Claude user source UUID has no preceding authenticated public content')
           const content = source.kind === 'transcript-prefix' ? userSources.flatMap(message => claudeMessageBlocks(message!)) : blob?.content
           if (!users.has(plan.userUuid) || !Array.isArray(content) || !content.length
@@ -211,7 +226,13 @@ function settleClaudeResult(plan: NativePlan, prompt: string, execution: Structu
       }
     }
     if (recoveries.some(recovery => !recovery.consumed)) throw new StructuredSessionError('stale_result', 'Claude recovery companion has no new exact actual API consumer')
-    throw new StructuredSessionError('structured_output_retries_exhausted', 'Claude error_max_structured_output_retries rejected the structured output; original native result and schema errors remain in its history', { threadId: plan.sessionId, turnId: plan.userUuid })
+    const schemaErrors = [...responses].flatMap(([callId, reply]) => {
+      const call = calls.get(callId)?.message?.content
+      if (!/^[A-Za-z0-9_-]{1,128}$/.test(callId) || !Array.isArray(call) || !call.some(block => block.id === callId && block.name === 'StructuredOutput') || reply.is_error !== true || typeof reply.content !== 'string' || !reply.content.startsWith('Output does not match required schema: ')) return []
+      const fields = [...reply.content.slice('Output does not match required schema: '.length).matchAll(/(?:^|, )(\/[A-Za-z0-9_/-]{0,160}): (must be (?:array|object|string|number|integer|boolean|null)|must NOT have more than \d{1,8} items|must have required property '[A-Za-z0-9_-]{1,80}')(?=, | \(got \d+\)|$)/g)].slice(0, 12).map(match => ({ path: match[1], error: match[2] }))
+      return fields.length ? [{ callId, fields }] : []
+    }).slice(-5)
+    throw new StructuredSessionError('structured_output_retries_exhausted', `Claude error_max_structured_output_retries rejected the structured output; original native result and schema errors remain in its history${schemaErrors.length ? `; schemaErrors=${JSON.stringify(schemaErrors)}` : ''}`, { threadId: plan.sessionId, turnId: plan.userUuid })
   }
   plan = { ...plan, historyPath }; writeFileSync(join(root, 'plan.json'), JSON.stringify(plan), { mode: 0o600 })
   const witness: ClaudeFrozenWitness = { version: 1, provider: 'claude-code', cliVersion: CLI_VERSION, model, sessionId: plan.sessionId, userUuid: plan.userUuid, promptId: original.promptId, prompt, nativeHistoryPath: historyPath, history, mcpHistory: { path: mcpPath, toolNames: readClaudeMcpToolNames(mcpPath) }, echo, result, initTools: init.tools }
