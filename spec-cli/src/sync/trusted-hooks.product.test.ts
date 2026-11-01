@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
 import test, { before, after } from 'node:test'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { runtimeRoot } from '@spexcode/spec-core'
 import { freezeDeliveryRuntime } from './runtime-freeze.js'
 import { inspectTrustedHooksBinding, makeTrustedHookEnv, prepareTrustedHooksBinding, type TrustedHooksBinding } from './trusted-hooks.js'
 
@@ -22,11 +23,12 @@ after(() => {
   }
   writable(runtimeDirectory); rmSync(runtimeDirectory, { recursive: true, force: true })
 })
-function fixture(t: test.TestContext) {
+function fixture(t: test.TestContext, differentStore = false) {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), 'spex-real-hooks-'))), root = join(directory, 'source'), footprint = join(directory, 'footprint'), marker = join(directory, 'untrusted-executed')
   mkdirSync(root); mkdirSync(footprint, { mode: 0o700 })
+  if (differentStore) { mkdirSync(join(directory, 'planted-home')); symlinkSync(join(directory, 'planted-home'), join(directory, 'planted-home-alias')) }
   t.after(() => rmSync(directory, { recursive: true, force: true }))
-  const env: NodeJS.ProcessEnv = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', PATH: '/usr/bin:/bin:/usr/sbin:/sbin' }
+  const env: NodeJS.ProcessEnv = { ...process.env, SPEXCODE_HOME: differentStore ? join(directory, 'planted-home-alias') : process.env.SPEXCODE_HOME, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', PATH: '/usr/bin:/bin:/usr/sbin:/sbin' }
   const git = (...args: string[]): string => execFileSync('/usr/bin/git', ['--no-replace-objects', '-C', root, ...args], { env, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim()
   const cli = (...args: string[]): string => execFileSync(process.execPath, [runtime.toolEntry, ...args], { cwd: root, env, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] })
   const author = '# 作者原文\n必须保持冻结字节。\n'
@@ -41,14 +43,16 @@ function fixture(t: test.TestContext) {
   for (const name of readdirSync(runtime.canonicalHooksDir)) { copyFileSync(join(runtime.canonicalHooksDir, name), join(root, '.git/hooks', name)); chmodSync(join(root, '.git/hooks', name), 0o755) }
   const parent = git('rev-parse', 'HEAD'), baseTree = git('write-tree')
   const options = { ...runtime, privateFootprintDir: footprint, operation: 'prepare' as const, expectedParent: parent, expectedTree: baseTree, expectedRef: 'refs/heads/node/delivery' }
+  if (differentStore) mkdirSync(runtimeRoot(root), { recursive: true })
   const prepared = prepareTrustedHooksBinding(root, options)
   assert.equal(prepared.status, 'supported', prepared.status === 'unsupported' ? JSON.stringify(prepared.issues) : '')
   const binding = (prepared as { binding: TrustedHooksBinding }).binding
-  return { root, directory, footprint, marker, author, env, git, cli, parent, baseTree, options, binding }
+  return { root, directory, footprint, marker, author, env: { ...env, SPEXCODE_HOME: process.env.SPEXCODE_HOME }, git, cli, parent, baseTree, options, binding }
 }
 
-test('完整冻结发布CLI在现有canonical filter项目四真hook准备与发布，作者字节/source index/raw tree不变', t => {
-  const f = fixture(t), delivery = join(f.directory, 'delivery')
+for (const differentStore of [false, true]) test(`完整冻结发布CLI在${differentStore ? '另一home已植入' : '现有'}canonical filter项目四真hook准备与发布，作者字节/source index/raw tree不变`, t => {
+  const f = fixture(t, differentStore), delivery = join(f.directory, 'delivery')
+  const filterRootPath = join(f.git('rev-parse', '--path-format=absolute', '--git-common-dir'), 'spexcode/contract-filter-root'), filterRootBytes = readFileSync(filterRootPath)
   const sourceBytes = readFileSync(join(f.root, 'AGENTS.md')), sourceIndex = f.git('write-tree')
   const prepared = spawnSync('/usr/bin/git', ['-C', f.root, 'worktree', 'add', '-b', 'node/delivery', delivery, f.parent], { env: makeTrustedHookEnv(f.binding, { ...f.env, SPEXCODE_GATE_TRACE: '1' }), encoding: 'utf8' })
   assert.equal(prepared.status, 0, `${prepared.stdout}${prepared.stderr}`)
@@ -71,9 +75,24 @@ test('完整冻结发布CLI在现有canonical filter项目四真hook准备与发
   assert.equal(execFileSync('/usr/bin/git', ['--no-replace-objects', '-C', delivery, 'write-tree'], { encoding: 'utf8' }).trim(), tree)
   assert.match(f.git('show', '-s', '--format=%B', 'node/delivery'), /Session: real-delivery-fixture/)
   assert.equal(f.git('write-tree'), sourceIndex); assert.deepEqual(readFileSync(join(f.root, 'AGENTS.md')), sourceBytes)
+  assert.deepEqual(readFileSync(filterRootPath), filterRootBytes)
   const projection = JSON.parse(readFileSync(join(f.footprint, 'footprint.json'), 'utf8')) as { hooks: string; contract: string }
   assert.ok(projection.hooks.includes('custom-script')); assert.ok(projection.contract.length > 0)
   assert.equal(existsSync(f.marker), false)
+})
+
+test('canonical filter root必须属于实际commonDir项目，任意目录和外来项目不获交付绑定', t => {
+  const f = fixture(t), common = f.git('rev-parse', '--path-format=absolute', '--git-common-dir')
+  const metadata = join(common, 'spexcode/contract-filter-root'), original = readFileSync(metadata), project = basename(original.toString().trim())
+  for (const root of [join(f.directory, 'arbitrary'), join(f.directory, 'other-store/projects/another-project'), join(f.directory, 'not-projects', project)]) {
+    mkdirSync(root, { recursive: true }); writeFileSync(metadata, `${root}\n`)
+    const result = prepareTrustedHooksBinding(f.root, f.options)
+    assert.equal(result.status, 'unsupported')
+    if (result.status === 'unsupported') assert.ok(result.issues.some(issue => issue.path === metadata && issue.reason === 'filter 外部 payload root 与项目身份不符'))
+    assert.equal(existsSync(f.marker), false)
+  }
+  writeFileSync(metadata, original)
+  assert.equal(inspectTrustedHooksBinding(f.root, f.binding).status, 'supported')
 })
 
 test('真实runtime预检后config/shim/bindings漂移拒绝，unknown filter/custom hook marker从未执行', t => {
