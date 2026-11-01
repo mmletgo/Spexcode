@@ -18,6 +18,8 @@ code:
 
 config/oracle 只读当前冻结字节和不存在路径进入父树与实际候选；原 source/index 保留。伪 parent、readonly/absence、异来源 frontier、全 path-head CAS、绑定后更换 base 和 candidate 冻结后再绑定均拒绝；无关资源更新不使原 selected 资源过期。真实 commit 后中断仍沿原 commit/tree/parent 恢复，后续独立发布必须等待其结算，再形成继承它的新 base；来源已提交新 HEAD 对象保留且记录 current_head，无关 legacy 只记录明确诊断。
 
+纯发布夹具的冻结计划显式声明空 targets，表示本组不含 owned Spec 义务；不以缺字段模拟可信计划。owned related 与字面 absence 的派生读闭包、原 base 恢复探针由 [[sync-application-regression]] 的旧计划 retry 拒绝与新正式操作场景共同验证，CLI 始终只读，伪换实际 readonly/absence 对象仍被 publication verifier 拒绝。
+
 native 与 V1-V4 前置证明明确使用受控测试替身，不能声明真实模型或 Docker 已验收。实际 canonical hook 物理绑定、Git tree/commit 与 SQLite journal/receipt 均真实运行。针对命令：`npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/sync/publication-base.test.ts`。
 
 故障回归让 A/B 都先生成并各预留一次 call，B 无 base 的 native 仍运行时 A 可冻结并实际提交；A 提交后崩溃释放文件锁，B bind 被持久 BUSY 阻挡，不生成新输出或扣新 call。A 恢复真实 receipt 后 B 原待绑定 base 变 stale，重新组装当前 base 继承 A 完成 B。failed 发布的未知 resource 在真实 removed 前仍阻 B。另以真实已结算 A1 和内容寻址重算的额外 readonly a 路径伪造，证明不能抹掉 A1；factory 与 verifier 均拒绝不精确 read closure。旧无 base 冻结发布推进实际 head 后，新 base 的相同对象重入及 verified 新交付明确 stale，保原验证状态且无 journal。

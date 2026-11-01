@@ -14,7 +14,7 @@ code:
 
 ## expanded spec
 
-实际目标的 code/related、代码来源和 AC.test 引用沿同一冻结对象清单展开为只读闭包；已有持久计划也在接入与执行读取时补齐该闭包，不改变 targets、writePaths、executionScope 或 policy。新增完整正文及真实 mode/OID/absence 进入新 admission 的 readSetDigest 和对应分区的 Native required 输入。只读父接口不因此扇出其它实现，程序读过不替代 Native 完整读取证明。
+实际目标的 code/related、代码来源和 AC.test 引用沿同一冻结对象清单展开为只读闭包；已有持久计划也在接入与执行读取时补齐该闭包，不改变 targets、writePaths、executionScope 或 policy。新增完整正文及真实 mode/OID/absence 进入新 admission 的 readSetDigest 和对应分区的 Native required 输入。只读父接口不因此扇出其它实现，程序读过不替代 Native 完整读取证明。旧 retryOf 若因完整读取闭包变化而产生不同 readSetDigest，仍由原 store 精确绑定门拒绝；不改旧 operation 或证明，不以只读为由重签摘要。新的正式操作通过新计划冻结当前闭包。
 
 当前性与发布保护复用该原冻结目标闭包。新增 glob 成员只用当前快照的路径清单判断，不用 current/WIP 正文派生引用；比较实际原/现对象，不因旧记录的 readSetDigest 与新实现派生值不同而改写旧记录或误判 stale。commit 捕获继续排除后续 index/WIP，原树采纳的干净门保持。
 
