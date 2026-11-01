@@ -155,7 +155,7 @@ export async function prepareSyncAdmission(input: InputSnapshot, supplied: SyncC
   return { ...syncModelBinding(options.model), ingressKey: options.ingressKey, rootCauseId: options.rootCauseId, origin: options.origin, budget: options.budget, input, ...(options.requestBlob ? { requestBlob: options.requestBlob } : {}), ...(options.retryOf ? { retryOf: options.retryOf } : {}), ...(options.baselineSelection ? { baselineSelection: options.baselineSelection } : {}), planBlob: freezeSyncPlanEvidence(input.source.commonDir, plan), scope, policyDigest: syncPlanDigest(plan), impactDigest: options.impactDigest ?? contentHash(canonical({ targets: plan.targets, ...(plan.executionScope ? { scope } : {}), writePaths: unique(plan.writePaths), readSetDigest: view.readSetDigest })), readSetDigest: view.readSetDigest, delivery: null, deliveryPlan: planPrivateDelivery(input, options.managedRoot, options.ingressKey), previousBaselinePair: options.previousBaselinePair ?? null }
 }
 
-type Stage = { version: 'sync-stage-v1'; operationId: string; attemptId: string; inputId: string; policyDigest: string; readSetDigest?: string; baselineSelectionRef?: BlobRef; guidanceContractVersion?: string; stage: string; resultRef: BlobRef }
+type Stage = { version: 'sync-stage-v1'; operationId: string; attemptId: string; inputId: string; policyDigest: string; readSetDigest?: string; baselineSelectionRef?: BlobRef; guidanceContractVersion?: string; composedTree?: string; composedContentDigest?: string; stage: string; resultRef: BlobRef }
 const behaviorAnalysisStage = (name: string): boolean => name === 'analysis' || name.startsWith('partition:') && name.endsWith(':analysis')
 type SavedElaboration = Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>
 type SavedGeneration = Omit<GenerationResult, 'candidateFiles'> & { p2SpecWritePaths?: string[] }
@@ -193,6 +193,14 @@ function stage<T>(store: SyncStore, operation: SyncOperation, attempt: SyncAttem
     return JSON.parse(readEvidence(operation.input.source.commonDir, value.resultRef).toString('utf8')) as T
   }
   return null
+}
+type ElaborationComposedBinding = { composedTree: string; composedContentDigest: string }
+function elaborationComposedBinding(operation: SyncOperation, attempt: SyncAttempt, result: SavedElaboration, composed: ComposedInputRef): ElaborationComposedBinding | null {
+  const resultDigest = contentHash(JSON.stringify(result))
+  const original = [...attempt.checkpointRefs].reverse().map(ref => JSON.parse(readEvidence(operation.input.source.commonDir, ref).toString('utf8')) as Partial<Stage>)
+    .find(value => value.version === 'sync-stage-v1' && value.stage === 'elaboration' && value.operationId === operation.id && value.attemptId === attempt.id && value.inputId === operation.input.id && value.policyDigest === operation.policyDigest && value.resultRef?.sha256 === resultDigest && stageSelectionMatches(operation, value as Stage))
+  return original?.composedTree === composed.tree && original.composedContentDigest === composed.contentDigest
+    ? { composedTree: original.composedTree, composedContentDigest: original.composedContentDigest } : null
 }
 function elaborationRepairSeed(result: SavedElaboration | null, requestKey: string): ElaborationRepairSeed | undefined {
   const last = result?.rounds.at(-1)
@@ -487,7 +495,7 @@ function pendingReadonlyRepair(store: SyncStore, operation: SyncOperation, attem
   return null
 }
 
-function saveStage(store: SyncStore, fence: WriteFence, name: string, value: unknown, basis?: Pick<Stage, 'readSetDigest' | 'baselineSelectionRef'>): BlobRef {
+function saveStage(store: SyncStore, fence: WriteFence, name: string, value: unknown, basis?: Pick<Stage, 'readSetDigest' | 'baselineSelectionRef'>, composition?: ElaborationComposedBinding): BlobRef {
   const operation = store.readOperation(fence.operationId), commonDir = operation.input.source.commonDir
   const resultRef = writeEvidence(commonDir, value)
   const refs = new Map<string, BlobRef>([[resultRef.sha256, resultRef]])
@@ -501,7 +509,7 @@ function saveStage(store: SyncStore, fence: WriteFence, name: string, value: unk
   const guidance = behaviorAnalysisStage(name) && (value as CodeBehaviorAnalysis).reviewPassed === true ? { guidanceContractVersion: CODE_BEHAVIOR_GUIDANCE_VERSION } : {}
   if (bindings.baselineSelectionRef) refs.set(bindings.baselineSelectionRef.sha256, bindings.baselineSelectionRef)
   for (const ref of refs.values()) store.checkpoint(fence, ref)
-  store.checkpoint(fence, writeEvidence(commonDir, { version: 'sync-stage-v1', operationId: operation.id, attemptId: fence.attemptId, inputId: operation.input.id, policyDigest: operation.policyDigest, ...bindings, ...guidance, stage: name, resultRef } satisfies Stage))
+  store.checkpoint(fence, writeEvidence(commonDir, { version: 'sync-stage-v1', operationId: operation.id, attemptId: fence.attemptId, inputId: operation.input.id, policyDigest: operation.policyDigest, ...bindings, ...guidance, ...composition, stage: name, resultRef } satisfies Stage))
   return resultRef
 }
 function analysisStageBinding(store: SyncStore, operation: SyncOperation, analysis: CodeBehaviorAnalysis): Stage | null {
@@ -791,7 +799,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       const callTimeoutMs = budget === null ? null : options.callTimeoutMs ?? Math.min(120_000, budget.timeoutMs)
       const runner = options.runner ? injectedRunner(store, fence, options.runner) : createAttemptRunner(store, fence)
       const readonlyAccepted = (key: string, binding: NonNullable<ElaborationResult['partitionBinding']>, inputDigest: string): SavedElaboration | null => {
-        if (!readonlyOwnerRepair || readonlyActiveOwners.some(owner => owner.key === key)) return null
+        if (!readonlyBase || readonlyActiveOwners.some(owner => owner.key === key)) return null
         const approved = readonlyBase!.result
         const expected = approved.partitionEvidence?.find(item => item.partitionId === binding.partitionId)
         if (!expected) return null
@@ -1044,12 +1052,14 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       const effectiveIntentNodeId = moved.find(change => change.to.nodeId === options.plan.intentNodeId)?.from.nodeId ?? options.plan.intentNodeId
       const preserveBusiness = Boolean(analysis && !decision && !analysis.analysis.newNodes.length && !analysis.analysis.nodeChanges.some(change => change.action === 'retire') && analysis.analysis.changes.every(change => change.kind === 'refactor'))
       let elaboration = readonlyOwnerRepair ? null : stage<SavedElaboration>(store, operation, attempt, 'elaboration')
+      if (elaboration && !elaborationComposedBinding(operation, attempt, elaboration, view.composed)) elaboration = null
       if (!elaboration && !refinement && !readonlyOwnerRepair) {
         const selected = readonlyBase ?? latestApprovedElaboration(store, operation, attempt.number)
-        if (selected) {
+        const composition = selected && elaborationComposedBinding(store.readOperation(selected.operationId), store.readAttempt(selected.attemptId), selected.result, view.composed)
+        if (selected && composition) {
           elaboration = selected.result
           saveStage(store, fence, 'elaboration-provenance', { operationId: operation.id, inputId: operation.input.id, policyDigest: operation.policyDigest, fromOperationId: selected.operationId, fromAttemptId: selected.attemptId, evidenceRef: selected.resultRef, candidateDigest: selected.result.candidateDigest })
-          saveStage(store, fence, 'elaboration', selected.result)
+          saveStage(store, fence, 'elaboration', selected.result, undefined, composition)
         }
       }
       if (!elaboration) {
@@ -1075,9 +1085,9 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           targets = targets.map(target => { const source = priorFiles.get(target.path) ?? target.source; return { ...target, source, sourceDigest: source === null ? null : contentHash(source) } })
           refinementFiles = new Map(readTree(operation.input.source.commonDir, refinement.candidate.tree).filter(entry => within(entry.path, options.plan.readPaths) && entry.mode !== '120000').flatMap(entry => { const bytes = readObject(operation.input.source.commonDir, entry.oid); return isUtf8Text(bytes) ? [[entry.path, bytes.toString('utf8')] as [string, string]] : [] }))
         }
-        const elaborationInput: import('./elaboration-types.js').ElaborationInput = { root: operation.input.source.canonicalRoot, base: operation.input.headCommit, requestKey: `sync:${attempt.id}:elaborate`, intent: { nodeId: effectiveIntentNodeId, rawSource }, targets, context: view.frozen.nodes.filter(node => !targets.some(target => target.path === node.path) && !moved.some(change => change.to.path === node.path)).map(node => ({ nodeId: node.id, path: node.path, source: view.files.get(node.path)! })), files: refinementFiles, facts: behaviorFacts, analysis, decisionAuthorities: analysis?.analysis.decisionAuthorities ?? options.plan.decisionAuthorities,  ...(refinement ? { refinement: { candidateDigest: refinement.candidateDigest, diagnostics: refinement.diagnostics } } : {}), mode: preserveBusiness ? 'preserve_business' : 'reelaborate', nodeChanges, verifications: options.plan.verifications.map(item => item.definition), implementationWritePaths: options.plan.version === 'sync-coordinator-v2' && options.plan.direction === 'code_to_spec' ? [] : unique(options.plan.writePaths), readonlyTestPaths: unique(options.plan.mandatoryTests.map(test => test.testPath)), authorizedChanges: behaviorAuthorization, historyInput: operation.input, retiredIds: unique([...(options.plan.retiredIds ?? []), ...historicalRetiredIds]), maxRepairs: 0, maxCalls: 2, totalTimeoutMs: operation.deadlineAtMs === null ? null : operation.deadlineAtMs - Date.now(), timeoutMs: callTimeoutMs, signal, model, effort: 'high' as const }; const result = partitions ? await elaborateSyncPartitions(elaborationInput, partitions, options.plan.version === 'sync-coordinator-v2' ? options.plan.partitionPolicy.maxParallel : 1, partitionCheckpoints, runner) : await elaborate(elaborationInput, { runner, seed })
+        const elaborationInput: import('./elaboration-types.js').ElaborationInput = { root: operation.input.source.canonicalRoot, base: operation.input.headCommit, requestKey: `sync:${attempt.id}:elaborate`, intent: { nodeId: effectiveIntentNodeId, rawSource }, targets, context: view.frozen.nodes.filter(node => !targets.some(target => target.path === node.path) && !moved.some(change => change.to.path === node.path)).map(node => ({ nodeId: node.id, path: node.path, source: view.files.get(node.path)! })), files: refinementFiles, facts: behaviorFacts, analysis, decisionAuthorities: analysis?.analysis.decisionAuthorities ?? options.plan.decisionAuthorities,  ...(refinement ? { refinement: { candidateDigest: refinement.candidateDigest, diagnostics: refinement.diagnostics } } : {}), mode: preserveBusiness ? 'preserve_business' : 'reelaborate', nodeChanges, verifications: options.plan.verifications.map(item => item.definition), implementationWritePaths: options.plan.version === 'sync-coordinator-v2' && options.plan.direction === 'code_to_spec' ? [] : unique(options.plan.writePaths), readonlyTestPaths: unique(options.plan.mandatoryTests.map(test => test.testPath)), authorizedChanges: behaviorAuthorization, historyInput: operation.input, retiredIds: unique([...(options.plan.retiredIds ?? []), ...historicalRetiredIds]), maxRepairs: 0, maxCalls: 2, totalTimeoutMs: operation.deadlineAtMs === null ? null : operation.deadlineAtMs - Date.now(), timeoutMs: callTimeoutMs, signal, model, effort: 'high' as const }; const result = partitions ? await elaborateSyncPartitions(elaborationInput, partitions, options.plan.version === 'sync-coordinator-v2' ? options.plan.partitionPolicy.maxParallel : 1, partitionCheckpoints, runner, view.composed) : await elaborate(elaborationInput, { runner, seed })
         const { contracts: _contracts, graph: _graph, coverage: _coverage, ...compact } = result
-        elaboration = compact; saveStage(store, fence, 'elaboration', compact)
+        elaboration = compact; saveStage(store, fence, 'elaboration', compact, undefined, { composedTree: view.composed.tree, composedContentDigest: view.composed.contentDigest })
       }
       if (!elaboration.structurePassed || !elaboration.reviewPassed) {
         if (['SYNC_BUDGET_EXHAUSTED', 'budget_exhausted'].includes(elaboration.failure?.code ?? '')) throw new SyncStoreError('SYNC_BUDGET_EXHAUSTED', elaboration.failure!.message)

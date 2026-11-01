@@ -816,6 +816,93 @@ test('显式retryOf在SQLite重启后继承无未来IDs输入的accepted P1，�
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
 })
 
+
+for (const mode of ['historical-rebound', 'current-rebound', 'missing-binding', 'same-content'] as const) test(`whole seal composed绑定 ${mode} 不借attempt重绑覆盖原封口`, async t => {
+  const f = await fixture(t, { maxAttempts: 2, maxCalls: 8, maxRepairs: 1, timeoutMs: 120000 })
+  const outsidePath = '.spec/outside/spec.md', changedTree = mode.endsWith('rebound')
+  if (changedTree) {
+    mkdirSync(join(f.root, '.spec/outside'), { recursive: true })
+    writeFileSync(join(f.root, outsidePath), '---\ntitle: Outside obligation\ncontract-schema: sync-v1\n---\n\n## raw source\n\n另一个独立需求必须真实完成。\n\n## expanded spec\n\n### REQ\n\n| id | goal | source | constraints | success | depends-on |\n| --- | --- | --- | --- | --- | --- |\n| REQ-OUTSIDE-01 | 独立需求 | user:raw | 不丢失 | 真实承接 | - |\n')
+  }
+  const raw = parseParts(original)!.rawSource!
+  writeFileSync(join(f.root, contractPath), original.replace(raw, `${raw}\n\n本轮继续保留上述全部固定演示政策。`))
+  const input = await captureInputSnapshot(f.root)
+  const plan: SyncCoordinatorPlan = { ...f.plan, version: 'sync-coordinator-v2', direction: 'spec_to_code',
+    readPaths: [contractPath, '.spec/project/spec.md', '.spec/spexcode.json', 'src/export.js', 'tests/export.test.mjs'],
+    sourcePaths: ['src/export.js'], partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 },
+    executionScope: { paths: [contractPath], contractIds: [], flowIds: [] } }
+  const selected = f.store.readBaselineSelection(input.source, plan.readPaths.map(path => ({ kind: 'path' as const, path })))
+  assert.ok('selection' in selected)
+  const operation = f.store.admitAndEnqueue(await prepareSyncAdmission(input, plan, { ingressKey: `whole-composed-${mode}`, rootCauseId: `whole-composed-${mode}`, origin: 'initial', budget: f.operation.budget, managedRoot: f.managedRoot, baselineSelection: selected.selection }))
+  f.useOperation(operation)
+  for (;;) { const head = f.store.nextDispatch(input.source.repositoryId)!; f.store.ackDispatch(input.source.repositoryId, head.messageId); if (head.operation.id === operation.id) break }
+  let p1Calls = 0, whole: { resultRef: { sha256: string }; composedTree?: string; composedContentDigest?: string; [key: string]: unknown } | undefined
+  const checkpoint = f.store.checkpoint.bind(f.store)
+  f.store.checkpoint = (fence, ref) => {
+    const value = JSON.parse(readEvidence(input.source.commonDir, ref).toString())
+    if (fence.operationId === operation.id && f.store.readAttempt(fence.attemptId).number === 1 && value.stage === 'elaboration') {
+      if (mode === 'missing-binding') { delete value.composedTree; delete value.composedContentDigest; ref = writeEvidence(input.source.commonDir, value) }
+      whole = structuredClone(value)
+      const saved = checkpoint(fence, ref)
+      if (changedTree) {
+        const current = f.store.readOperation(operation.id)
+        f.store.expandContractScope(fence, { paths: [...current.scope.paths, outsidePath], contractIds: current.scope.contractIds, flowIds: current.scope.flowIds }, writeEvidence(input.source.commonDir, { kind: 'fixture reviewed null scope expansion', resultRef: value.resultRef }))
+      }
+      return saved
+    }
+    return checkpoint(fence, ref)
+  }
+  let injectedCurrentWhole = false
+  if (mode === 'current-rebound') {
+    const claim = f.store.claimQueuedAttempt.bind(f.store)
+    f.store.claimQueuedAttempt = request => {
+      const claimed = claim(request)
+      if (claimed.attempt.number === 2) {
+        assert.ok(whole)
+        injectedCurrentWhole = true
+        checkpoint(claimed.fence, whole.resultRef)
+        checkpoint(claimed.fence, writeEvidence(input.source.commonDir, { ...whole, attemptId: claimed.attempt.id }))
+      }
+      return claimed
+    }
+  }
+  f.transform((output, request) => {
+    if (request.purpose === 'elaboration_generate') p1Calls++
+    if (request.purpose === 'code_generate') throw Object.assign(new Error('机制回归在P2及Docker之前停止'), { code: 'failed' })
+    return output
+  })
+  await runSyncOperation(f.store, operation.id, { ...f.options, plan, readCurrentPlan: () => plan })
+  const attempts = f.store.listAttempts(operation.id)
+  assert.equal(attempts.length, 2, JSON.stringify({ failures: attempts.map(attempt => attempt.failure), calls: f.calls.map(call => call.purpose) }))
+  assert.ok(whole)
+  if (mode === 'current-rebound') assert.equal(injectedCurrentWhole, true, '当前attempt确实持有旧whole wrapper')
+  const secondStages = attempts[1].checkpointRefs.map(ref => JSON.parse(readEvidence(input.source.commonDir, ref).toString()))
+  if (changedTree) {
+    assert.equal(attempts[0].failure?.code, 'scope_context_expanded')
+    assert.equal(attempts[0].composedInput!.contentDigest, attempts[1].composedInput!.contentDigest, '来源attempt已先重绑新树，不能拿最终attempt字段证明旧seal')
+    assert.equal(attempts[1].failure?.code, 'partition_final_seal_failed')
+    const secondWhole = JSON.parse(readEvidence(input.source.commonDir, [...secondStages].reverse().find(stage => stage.stage === 'elaboration').resultRef).toString()) as ElaborationResult
+    assert.ok(secondWhole.partitionSeal!.findings.some(item => item.code === 'missing-requirement-flow' && item.itemId === 'REQ-OUTSIDE-01'))
+    assert.ok(!secondStages.some(stage => stage.stage === 'elaboration-provenance'))
+    assert.equal(p1Calls, 2, '此场景真实analysis绑定随全树改变，局部输入不同仍须新独审')
+    assert.notEqual(whole.composedTree, attempts[0].composedInput!.tree)
+    assert.notEqual(whole.composedContentDigest, attempts[0].composedInput!.contentDigest)
+  } else if (mode === 'missing-binding') {
+    assert.ok(!secondStages.some(stage => stage.stage === 'elaboration-provenance'), '旧无binding whole必须由原locals重seal')
+    const recomputed = [...secondStages].reverse().find(stage => stage.stage === 'elaboration')
+    assert.equal(recomputed.composedTree, attempts[1].composedInput!.tree)
+    assert.equal(recomputed.composedContentDigest, attempts[1].composedInput!.contentDigest)
+  } else {
+    assert.ok(secondStages.some(stage => stage.stage === 'elaboration-provenance'))
+    const reused = [...secondStages].reverse().find(stage => stage.stage === 'elaboration')
+    assert.equal(reused.resultRef.sha256, whole.resultRef.sha256)
+    assert.equal(reused.composedTree, whole.composedTree)
+    assert.equal(reused.composedContentDigest, whole.composedContentDigest)
+  }
+  if (!changedTree) assert.equal(p1Calls, 1, '局部冻结输入未变，仅程序重seal不能重派Native')
+  assert.equal(f.store.listJournals(operation.id).length, 0)
+})
+
 test('P4显式重试保留P1扩展后的路径和readSet，冻结原计划且不再次细化', async t => {
   const f = await fixture(t)
   const plan = { ...f.plan, readPaths: [contractPath, '.spec/project/spec.md', '.spec/spexcode.json', 'src/export.js', 'tests/export.test.mjs'], executionScope: { paths: [contractPath], contractIds: [], flowIds: [] } }
