@@ -1,6 +1,6 @@
 ---
 title: ZCode 原生冻结读取证明
-status: pending
+status: active
 hue: 175
 desc: 从同轮原始消息、模型请求与终态重建冻结读取，并以完整见证支持零派发冷恢复。
 code:

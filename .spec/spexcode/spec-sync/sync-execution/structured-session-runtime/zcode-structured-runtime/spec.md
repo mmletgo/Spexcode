@@ -1,6 +1,6 @@
 ---
 title: ZCode 原生结构化执行
-status: pending
+status: active
 hue: 175
 desc: 在同一结构化会话管线中运行隔离的 ZCode，绑定原生消息、实际模型工具面和完整进程停止。
 code:

@@ -1,6 +1,6 @@
 ---
 title: ZCode固定结构化路由回归
-status: pending
+status: active
 code:
   - spec-cli/src/zcode-structured-routing.test.ts
 ---

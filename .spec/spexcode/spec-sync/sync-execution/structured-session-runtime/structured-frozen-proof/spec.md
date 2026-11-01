@@ -1,6 +1,6 @@
 ---
 title: 结构化原生证明派发
-status: pending
+status: active
 code:
   - spec-cli/src/structured-frozen-proof.ts
 ---
