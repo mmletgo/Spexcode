@@ -458,6 +458,9 @@ export class SyncStore {
     if (!Number.isInteger(limit) || limit < 1 || limit > 500) fail('SYNC_LIST_LIMIT', 'limit must be an integer between 1 and 500')
     return this.write(tx => tx.query('SELECT record_json FROM sync_observations WHERE source_key=? ORDER BY rowid DESC LIMIT ?', identityKey(source), limit).map(row => parseRecord<SyncObservation>(row)!))
   }
+  listCommittedObservationFrontiers(source: WorktreeIdentity): SyncObservation[] {
+    return this.write(tx => tx.query("SELECT record_json FROM sync_observations WHERE rowid IN (SELECT MAX(rowid) FROM sync_observations WHERE source_key=? AND json_extract(record_json,'$.input.captureKind')='commit' AND json_extract(record_json,'$.failure') IS NULL AND json_extract(record_json,'$.outcome')!='blocked' GROUP BY json_extract(record_json,'$.input.id'),json_extract(record_json,'$.latestDifferenceDigest'),json_extract(record_json,'$.outcome')) ORDER BY rowid DESC", identityKey(source)).map(row => parseRecord<SyncObservation>(row)!))
+  }
   private family(tx: ProtocolTransaction, operation: SyncOperation): { calls: number; attempts: SyncAttempt[] } {
     const root = operation.dispatchAnchor?.budgetRootOperationId ?? operation.id
     const ids = tx.query('SELECT record_json FROM sync_operations WHERE repository_id=?', operation.input.source.repositoryId).map(row => parseRecord<SyncOperation>(row)!).filter(item => (item.dispatchAnchor?.budgetRootOperationId ?? item.id) === root).map(item => item.id)
@@ -915,7 +918,7 @@ export class SyncStore {
   pinnedBlobRefs(): BlobRef[] {
     return this.write(tx => {
       const refs = new Set<string>()
-      const visit = (value: unknown): void => { if (!value || typeof value !== 'object') return; if ('sha256' in value && typeof value.sha256 === 'string') refs.add(value.sha256); for (const entry of Object.values(value)) visit(entry) }
+      const visit = (value: unknown): void => { if (!value || typeof value !== 'object') return; if ('sha256' in value && typeof value.sha256 === 'string') refs.add(value.sha256); if ('latestDifferenceDigest' in value && typeof value.latestDifferenceDigest === 'string') refs.add(value.latestDifferenceDigest); for (const entry of Object.values(value)) visit(entry) }
       for (const table of ['sync_operations', 'sync_attempts', 'sync_apply_journals', 'sync_baseline_pairs', 'sync_resources', 'sync_ingress_receipts', 'sync_observations', 'sync_observer_health']) for (const row of tx.query(`SELECT record_json FROM ${table}`)) visit(JSON.parse(String(row.record_json)))
       return [...refs].sort().map(sha256 => ({ sha256 }))
     })
