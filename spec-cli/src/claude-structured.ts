@@ -19,6 +19,8 @@ type NativePlan = { version: 1; root: string; sessionId: string; userUuid: strin
 type WorktreeNativeResult = { threadId: string; turnId: string; text: string; frozenReadProof?: never }
 type NativeResult = { threadId: string; turnId: string; text: string; frozenReadProof: FrozenReadProof }
 type Completed = { plan: NativePlan; witness: ClaudeFrozenWitness; result: NativeResult }
+type TerminalStopRequest = { version: 1; reason: 'terminal_settlement'; sessionId: string; userUuid: string; pid: number; receiptDigest: string; requestDigest: string; resultDigest: string; signal: 'SIGTERM'; requestedAt: number }
+type TerminalStopObservation = { version: 1; requestObservationDigest: string; outcome: 'sent' | 'gone'; observedAt: number }
 type NativeCallbacks = { onThread(id: string): Promise<void>; onTurn(id: string): Promise<void>; onTurnStarting?(): Promise<void>; onNative(state: NonNullable<StructuredExecution['claudeNative']>): Promise<void>; onTimeout?(): Promise<void>; signal?: AbortSignal }
 const active = new Map<string, { child: ChildProcessWithoutNullStreams; interrupt: () => void }>()
 const authenticationKeys = ['ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_BASE_URL'] as const
@@ -171,6 +173,21 @@ function worktreeSchemaRetryError(history: readonly ClaudePublicRecord[], origin
   return claudeSchemaRetryError(calls, responses, { threadId: original.sessionId, turnId: original.uuid! })
 }
 
+/** 终态控制只凭同请求的不可变意图及真实 syscall 结果；不推定已发送信号。 */
+function terminalStopOutcome(plan: NativePlan, result: ClaudeFrozenWitness['result']): 'sent' | 'gone' | null {
+  const requestPath = join(plan.root, 'terminal-stop-request.json'), observationPath = join(plan.root, 'terminal-stop.json')
+  if (!existsSync(requestPath) && !existsSync(observationPath)) return null
+  if (!existsSync(requestPath)) throw new StructuredSessionError('stale_result', 'Claude terminal stop has no matching request observation')
+  if (!existsSync(observationPath)) throw new StructuredSessionError('cancellation_pending', 'Claude terminal stop syscall outcome remains unproven')
+  const request = JSON.parse(readFileSync(requestPath, 'utf8')) as TerminalStopRequest, observation = JSON.parse(readFileSync(observationPath, 'utf8')) as TerminalStopObservation
+  if (request.version !== 1 || request.reason !== 'terminal_settlement' || request.signal !== 'SIGTERM' || request.sessionId !== plan.sessionId || request.userUuid !== plan.userUuid
+    || request.pid !== plan.pid || request.receiptDigest !== hash(JSON.parse(readFileSync(plan.receiptFile, 'utf8'))) || request.requestDigest !== plan.requestDigest || request.resultDigest !== hash(result)
+    || !Number.isFinite(request.requestedAt) || request.requestedAt <= 0 || observation.version !== 1 || observation.requestObservationDigest !== hash(request)
+    || !['sent', 'gone'].includes(observation.outcome) || !Number.isFinite(observation.observedAt) || observation.observedAt < request.requestedAt)
+    throw new StructuredSessionError('stale_result', 'Claude terminal stop observation differs from its exact native request/result/receipt')
+  return observation.outcome
+}
+
 /** 工作区模式只核原生输入、模型和终态身份，不借用冻结读取证明。 */
 function settleClaudeWorktreeResult(plan: NativePlan, prompt: string, execution: StructuredExecution): WorktreeNativeResult {
   const root = plan.root, native = execution.claudeNative
@@ -180,16 +197,20 @@ function settleClaudeWorktreeResult(plan: NativePlan, prompt: string, execution:
   const init = JSON.parse(readFileSync(join(root, 'init.json'), 'utf8')) as { session_id: string; model: string; tools: string[] }
   const echo = JSON.parse(readFileSync(join(root, 'user-echo.json'), 'utf8')) as ClaudeFrozenWitness['echo']
   const result = JSON.parse(readFileSync(join(root, 'result.json'), 'utf8')) as ClaudeFrozenWitness['result']
-  const exit = JSON.parse(readFileSync(join(root, 'exit.json'), 'utf8')) as { code: number; signal: string | null; stopped: boolean }
+  const exit = JSON.parse(readFileSync(join(root, 'exit.json'), 'utf8')) as { code: number | null; signal: string | null; stopped: boolean }
   const history = readClaudePublicHistory(nativeHistoryPath(root, plan.sessionId), plan.sessionId), original = history.find(row => row.type === 'user' && row.uuid === plan.userUuid)
   if (init.session_id !== plan.sessionId || init.model !== claudeNativeModel(execution.model) || !original?.promptId || original.sessionId !== plan.sessionId
     || echo.uuid !== plan.userUuid || echo.session_id !== plan.sessionId || hash(echo.message) !== hash({ role: 'user', content: [{ type: 'text', text: prompt }] }) || hash(original.message) !== hash(echo.message)
-    || original.parentUuid !== null || result.session_id !== plan.sessionId || result.user_message_uuid !== plan.userUuid || hash(result.user_message_uuids) !== hash([plan.userUuid]) || !exit.stopped || exit.signal !== null) throw new StructuredSessionError('stale_result', 'Claude worktree original prompt/model/exit evidence differs')
+    || original.parentUuid !== null || result.session_id !== plan.sessionId || result.user_message_uuid !== plan.userUuid || hash(result.user_message_uuids) !== hash([plan.userUuid]) || !exit.stopped) throw new StructuredSessionError('stale_result', 'Claude worktree original prompt/model/exit evidence differs')
   if (result.subtype === 'error_max_structured_output_retries') {
-    if (execution.state === 'completed' || existsSync(join(root, 'completed.json')) || exit.code !== 1 || result.type !== 'result' || result.is_error !== true) throw new StructuredSessionError('stale_result', 'Claude worktree schema exhaustion terminal differs')
+    const terminalOutcome = terminalStopOutcome(plan, result)
+    const naturalExit = exit.code === 1 && exit.signal === null && terminalOutcome !== 'sent'
+    const controlledExit = exit.code === null && exit.signal === 'SIGTERM' && terminalOutcome === 'sent'
+    if (execution.state === 'completed' || existsSync(join(root, 'completed.json')) || !naturalExit && !controlledExit || result.type !== 'result' || result.is_error !== true) throw new StructuredSessionError('stale_result', 'Claude worktree schema exhaustion terminal differs')
     throw worktreeSchemaRetryError(history, original, execution)
   }
-  if (exit.code !== 0 || result.subtype !== 'success' || result.is_error || result.structured_output === undefined) throw new StructuredSessionError('stale_result', 'Claude worktree success evidence differs')
+  if (execution.state !== 'completed' && terminalStopOutcome(plan, result) === 'sent') throw new StructuredSessionError('failed', 'Claude terminal success required process-group termination and is not a completed result')
+  if (exit.code !== 0 || exit.signal !== null || result.subtype !== 'success' || result.is_error || result.structured_output === undefined) throw new StructuredSessionError('stale_result', 'Claude worktree success evidence differs')
   const validate = new Ajv({ allErrors: true }).compile(execution.schema)
   if (!validate(result.structured_output)) throw new StructuredSessionError('failed', 'Claude worktree structured output does not match its schema')
   const answer: WorktreeNativeResult = { threadId: plan.sessionId, turnId: plan.userUuid, text: JSON.stringify(result.structured_output) }
@@ -239,6 +260,7 @@ function settleClaudeResult(plan: NativePlan, prompt: string, execution: Structu
   const echo = JSON.parse(readFileSync(join(root, 'user-echo.json'), 'utf8')) as ClaudeFrozenWitness['echo']
   const result = JSON.parse(readFileSync(join(root, 'result.json'), 'utf8')) as ClaudeFrozenWitness['result']
   if (!plan.pid || !detachedRuntimeIsGone(plan.pid, plan.receiptFile) || !claudeMcpStopped(root) || plan.cliVersion !== CLI_VERSION || init.model !== model || init.session_id !== plan.sessionId) throw new StructuredSessionError('stale_result', 'Claude complete native result lost its version, model or process-stop identity')
+  if (result.subtype === 'success' && terminalStopOutcome(plan, result) === 'sent') throw new StructuredSessionError('failed', 'Claude terminal success required process-group termination and is not a completed result')
   const historyPath = nativeHistoryPath(root, plan.sessionId)
   if (plan.historyPath && plan.historyPath !== historyPath) throw new StructuredSessionError('stale_result', 'Claude pinned native history path differs')
   const history = readClaudePublicHistory(historyPath, plan.sessionId), original = history.find(row => row.type === 'user' && row.uuid === plan.userUuid)
@@ -257,7 +279,7 @@ function settleClaudeResult(plan: NativePlan, prompt: string, execution: Structu
       const assistant = history.find(assistant => assistant.type === 'assistant' && assistant.uuid === row.sourceToolAssistantUUID)
       return row.message.content.some(block => block.type !== 'tool_result' || !Array.isArray(assistant?.message?.content) || !assistant.message.content.some(call => call.type === 'tool_use' && call.id === block.tool_use_id))
     })
-    if (exit.code !== 1 || exit.signal !== null || exit.stopped !== true || result.type !== 'result' || result.is_error !== true
+    if (exit.code !== 1 || exit.signal !== null || exit.stopped !== true || terminalStopOutcome(plan, result) === 'sent' || result.type !== 'result' || result.is_error !== true
       || plan.policyDigest !== hash(structuredExecutionPolicy(execution)) || execution.claudeNative && (execution.claudeNative.pid !== plan.pid || execution.claudeNative.receiptFile !== plan.receiptFile)
       || result.session_id !== plan.sessionId || result.user_message_uuid !== plan.userUuid || JSON.stringify(result.user_message_uuids) !== JSON.stringify([plan.userUuid])
       || echo.uuid !== plan.userUuid || echo.session_id !== plan.sessionId || original.parentUuid !== null
@@ -453,19 +475,29 @@ export async function claudeStructuredTurn(realm: string, id: string, prompt: st
   const stopDeadline = new Promise<never>((_resolve, reject) => { rejectStop = reject })
   const killOwnGroup = (): void => {
     if (!verifyDetachedRuntime(plan.pid!, plan.receiptFile).ok) return
-    try { process.kill(-plan.pid!, 'SIGTERM') }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') rejectStop(new StructuredSessionError('cancellation_pending', 'Claude exact process-group termination was refused')) }
+    try {
+      const request = result && !aborted && !failure ? { version: 1 as const, reason: 'terminal_settlement' as const, sessionId: native.sessionId, userUuid: native.userUuid, pid: plan.pid!, receiptDigest: hash(JSON.parse(readFileSync(plan.receiptFile, 'utf8'))), requestDigest: plan.requestDigest, resultDigest: hash(result), signal: 'SIGTERM' as const, requestedAt: Date.now() } satisfies TerminalStopRequest : undefined
+      if (request) persistCompletionJson(join(root, 'terminal-stop-request.json'), request)
+      let outcome: TerminalStopObservation['outcome'] = 'sent'
+      try { process.kill(-plan.pid!, 'SIGTERM') }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; outcome = 'gone' }
+      if (request) persistCompletionJson(join(root, 'terminal-stop.json'), { version: 1, requestObservationDigest: hash(request), outcome, observedAt: Date.now() } satisfies TerminalStopObservation)
+    } catch (error) { rejectStop(new StructuredSessionError('cancellation_pending', `Claude exact process-group termination or its observation remains unproven (${(error as NodeJS.ErrnoException).code ?? 'observation_failed'})`)) }
   }
+
   let stopTimer: ReturnType<typeof setTimeout> | undefined
   let stopLimit: ReturnType<typeof setTimeout> | undefined
+  const armStop = (): void => {
+    stopTimer ??= setTimeout(killOwnGroup, 10000)
+    stopLimit ??= setTimeout(() => rejectStop(new StructuredSessionError('cancellation_pending', 'Claude terminal/cancellation exceeded the exact native stop budget')), 15000)
+  }
   const interrupt = (): void => {
     aborted = true
+    armStop()
     if (interruptId || !child.stdin.writable) return
     interruptId = randomUUID()
     writeFileSync(join(root, 'interrupt-request.json'), JSON.stringify({ requestId: interruptId, sessionId: native.sessionId, userUuid: native.userUuid }), { mode: 0o600 })
     child.stdin.write(`${JSON.stringify({ type: 'control_request', request_id: interruptId, request: { subtype: 'interrupt' } })}\n`)
-    stopTimer = setTimeout(killOwnGroup, 10000)
-    stopLimit = setTimeout(() => rejectStop(new StructuredSessionError('cancellation_pending', 'Claude cancellation exceeded the exact native stop budget')), 15000)
   }
   active.set(root, { child, interrupt })
   const abort = (): void => interrupt()
@@ -491,7 +523,7 @@ export async function claudeStructuredTurn(realm: string, id: string, prompt: st
         if (response.subtype === 'success') writeFileSync(join(root, 'interrupt-ack.json'), JSON.stringify({ requestId: response.request_id, sessionId: native.sessionId }), { mode: 0o400 })
       } else if (event.type === 'result') {
         result = Object.fromEntries(['type', 'subtype', 'is_error', 'session_id', 'uuid', 'user_message_uuid', 'user_message_uuids', 'structured_output'].map(key => [key, event[key]])) as ClaudeFrozenWitness['result']
-        writeFileSync(join(root, 'result.json'), JSON.stringify(result), { mode: 0o400 }); child.stdin.end()
+        writeFileSync(join(root, 'result.json'), JSON.stringify(result), { mode: 0o400 }); armStop(); child.stdin.end()
       }
     }).catch(error => {
       failure = error as Error; killOwnGroup()

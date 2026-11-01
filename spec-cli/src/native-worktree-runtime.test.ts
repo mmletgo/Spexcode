@@ -285,6 +285,83 @@ const calls=JSON.parse(readFileSync(${JSON.stringify(count)},'utf8'));assert.equ
   } finally { f.close() }
 })
 
+test('Claude terminal settlement and closed-stdin cancellation remain bounded with an unlimited model budget', () => {
+  const f = repoFixture(), bin = join(f.root, 'lifecycle-bin'), runner = join(f.root, 'lifecycle.mjs'), count = join(f.root, 'lifecycle-dispatches.json')
+  mkdirSync(bin)
+  try {
+    const executable = join(bin, 'claude')
+    writeFileSync(executable, `#!/usr/bin/env node
+const fs=require('node:fs'),path=require('node:path'),rl=require('node:readline');
+if(process.argv.includes('--version')){console.log('2.1.309 (Claude Code)');process.exit(0)}
+const arg=n=>process.argv[process.argv.indexOf(n)+1],session=arg('--session-id'),model=arg('--model'),root=path.dirname(process.env.CLAUDE_CONFIG_DIR),send=x=>process.stdout.write(JSON.stringify(x)+'\\n');
+const input=rl.createInterface({input:process.stdin});input.on('close',()=>fs.writeFileSync(path.join(root,'stdin-ended'),'true'));
+input.on('line',line=>{const user=JSON.parse(line);if(user.type!=='user')return;const mode=user.message.content[0].text,project=path.join(process.env.CLAUDE_CONFIG_DIR,'projects/exact');
+const calls=fs.existsSync(${JSON.stringify(count)})?JSON.parse(fs.readFileSync(${JSON.stringify(count)},'utf8')):[];calls.push(mode);fs.writeFileSync(${JSON.stringify(count)},JSON.stringify(calls));
+fs.mkdirSync(project,{recursive:true});const history=path.join(project,session+'.jsonl');fs.writeFileSync(history,JSON.stringify({type:'user',sessionId:session,uuid:user.uuid,parentUuid:null,promptId:'prompt-'+user.uuid,message:user.message})+'\\n');
+send({type:'system',subtype:'init',session_id:session,model,tools:['Read','Bash','StructuredOutput']});send(user);
+if(mode==='ignore-term')process.on('SIGTERM',()=>fs.writeFileSync(path.join(root,'term-received'),'true'));
+if(mode==='term-exit-zero'||mode==='hanging-exhausted-exit1')process.on('SIGTERM',()=>process.exit(mode==='term-exit-zero'?0:1));
+if(mode==='esrch-race')setTimeout(()=>process.exit(0),500);
+if(!mode.startsWith('natural'))setInterval(()=>{},1000);
+if(mode.includes('exhausted')){const Ajv=require(${JSON.stringify(createRequire(import.meta.url).resolve('ajv'))}).default,validate=new Ajv({allErrors:true}).compile(JSON.parse(arg('--json-schema'))),value={items:{}};validate(value);const error='Output does not match required schema: '+validate.errors.map(e=>e.instancePath+': '+e.message).join(', ');fs.appendFileSync(history,[{type:'api-request',sessionId:session,id:'request',params:{model}},{type:'assistant',sessionId:session,uuid:'call-parent',parentUuid:user.uuid,requestRef:'request',message:{role:'assistant',content:[{type:'tool_use',id:'schema-call',name:'StructuredOutput',input:value}]}},{type:'user',sessionId:session,uuid:'schema-error',parentUuid:'call-parent',promptId:'prompt-'+user.uuid,sourceToolAssistantUUID:'call-parent',message:{role:'user',content:[{type:'tool_result',tool_use_id:'schema-call',is_error:true,content:error}]}}].map(x=>JSON.stringify(x)).join('\\n')+'\\n');process.exitCode=1;send({type:'result',subtype:'error_max_structured_output_retries',is_error:true,session_id:session,user_message_uuid:user.uuid,user_message_uuids:[user.uuid]});}
+else send({type:'result',subtype:'success',is_error:false,session_id:session,user_message_uuid:user.uuid,user_message_uuids:[user.uuid],structured_output:{items:[]}});
+});`)
+    chmodSync(executable, 0o755)
+    const modulePath = (name: string): string => fileURLToPath(new URL(name, import.meta.url))
+    writeFileSync(runner, String.raw`import assert from 'node:assert/strict';import{readFileSync,writeFileSync,existsSync,renameSync,chmodSync}from'node:fs';import{join}from'node:path';import{randomUUID,createHash}from'node:crypto';
+import{claudeStructuredTurn,stopClaudeStructuredTurn}from${JSON.stringify(modulePath('./claude-structured.ts'))};import{structuredExecutionPolicy}from${JSON.stringify(modulePath('./session-structured-policy.ts'))};
+const originalTimeout=globalThis.setTimeout,armed=[];globalThis.setTimeout=(callback,delay,...args)=>{if(delay===10000||delay===15000)armed.push(delay);return originalTimeout(callback,delay===10000?200:delay===15000?700:delay,...args)};
+const sleep=ms=>new Promise(resolve=>originalTimeout(resolve,ms)),hash=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex'),count=${JSON.stringify(count)},realm=${JSON.stringify(join(f.root, 'lifecycle-realm'))},workspace=${JSON.stringify(f.path)},seed=${JSON.stringify(f.seed)},schema={type:'object',properties:{items:{type:'array',maxItems:0}},required:['items'],additionalProperties:false};
+const errors=[],originalKill=process.kill;
+for(const mode of ['natural-success','natural-exhausted','hanging-exhausted','hanging-success','term-exit-zero','hanging-exhausted-exit1','esrch-race','cancel-closed','ignore-term','wrong-receipt']){
+  const execution={...structuredExecutionPolicy({schema,inputDigest:mode,purpose:'lifecycle',timeoutMs:null,model:'claude:MiniMax-M3.1-Flash',worktree:{...seed,mode:'read'}}),state:'running'},id=randomUUID(),root=join(realm,id),controller=new AbortController(),start=armed.length;
+  const callbacks={signal:controller.signal,onThread:async value=>{execution.threadId=value},onTurn:async value=>{execution.turnId=value},onTurnStarting:async()=>{execution.turnStartRequested=true},onNative:async value=>{execution.claudeNative=value}};
+  const flight=claudeStructuredTurn(realm,id,mode,execution,callbacks,workspace).then(value=>({value}),error=>({error}));
+  try{
+    const ready=Date.now()+2000;while(!existsSync(join(root,'stdin-ended'))&&Date.now()<ready)await sleep(10);assert(existsSync(join(root,'stdin-ended')),'stdin must have ended after the terminal result');
+    if(mode==='wrong-receipt'){const path=execution.claudeNative.receiptFile,receipt=JSON.parse(readFileSync(path,'utf8'));renameSync(path,path+'.held');writeFileSync(path,JSON.stringify({...receipt,pid:process.pid}))}
+    if(mode==='esrch-race')process.kill=(pid,signal)=>{if(pid===-execution.claudeNative.pid&&signal==='SIGTERM'){const error=new Error('simulated exit between verification and signal');error.code='ESRCH';throw error}return originalKill(pid,signal)};
+    if(mode==='cancel-closed')controller.abort();
+    if(mode==='ignore-term'){controller.abort();await stopClaudeStructuredTurn(execution,30);await sleep(30);await stopClaudeStructuredTurn(execution,30)}
+    const outcome=await Promise.race([flight,sleep(1800).then(()=>{throw new Error('terminal/cancel flight exceeded test deadline')})]);
+    if(mode==='natural-success'||mode==='esrch-race'){
+      assert.deepEqual(JSON.parse(outcome.value.text),{items:[]});if(mode==='natural-success')assert.equal(existsSync(join(root,'terminal-stop.json')),false);else assert.equal(JSON.parse(readFileSync(join(root,'terminal-stop.json'),'utf8')).outcome,'gone');
+      execution.state='completed';execution.output={items:[]};execution.resultDigest=hash(execution.output);renameSync(execution.claudeNative.receiptFile,execution.claudeNative.receiptFile+'.held');assert.deepEqual(await claudeStructuredTurn(realm,id,mode,execution,callbacks,workspace),outcome.value);
+    }else if(mode==='hanging-exhausted-exit1'){assert.equal(outcome.error?.code,'stale_result');assert.equal(existsSync(join(root,'completed.json')),false);const exit=JSON.parse(readFileSync(join(root,'exit.json'),'utf8'));assert.equal(exit.code,1);assert.equal(exit.signal,null)
+    }else if(mode.includes('exhausted')){
+      assert.equal(outcome.error?.code,'structured_output_retries_exhausted');assert.match(outcome.error.message,/items.*must be array/);assert.equal(existsSync(join(root,'completed.json')),false);
+      const exit=JSON.parse(readFileSync(join(root,'exit.json'),'utf8'));assert.equal(exit.stopped,true);assert.equal(exit.code,mode==='natural-exhausted'?1:null);assert.equal(exit.signal,mode==='natural-exhausted'?null:'SIGTERM');
+      const dispatched=JSON.parse(readFileSync(count,'utf8')).length;execution.state='failed';await assert.rejects(claudeStructuredTurn(realm,id,mode,execution,callbacks,workspace),{code:'structured_output_retries_exhausted'});assert.equal(JSON.parse(readFileSync(count,'utf8')).length,dispatched);
+      if(mode==='hanging-exhausted'){
+        for(const [name,fields] of [['terminal-stop-request.json',['sessionId','userUuid','pid','receiptDigest','requestDigest','resultDigest','signal','requestedAt']],['terminal-stop.json',['requestObservationDigest','outcome','version','observedAt']]]){
+          const path=join(root,name),bytes=readFileSync(path),observed=JSON.parse(bytes);
+          for(const field of fields){chmodSync(path,0o600);writeFileSync(path,JSON.stringify({...observed,[field]:'foreign'}));await assert.rejects(claudeStructuredTurn(realm,id,mode,execution,callbacks,workspace),{code:'stale_result'})}
+          chmodSync(path,0o600);writeFileSync(path,bytes);chmodSync(path,0o400);renameSync(path,path+'.held');await assert.rejects(claudeStructuredTurn(realm,id,mode,execution,callbacks,workspace),{code:name==='terminal-stop.json'?'cancellation_pending':'stale_result'});renameSync(path+'.held',path);
+        }
+      }
+    }else if(mode==='hanging-success'||mode==='term-exit-zero'){
+      assert.equal(outcome.error?.code,'failed');assert.equal(existsSync(join(root,'completed.json')),false);const exit=JSON.parse(readFileSync(join(root,'exit.json'),'utf8'));assert.equal(exit.code,mode==='hanging-success'?null:0);assert.equal(exit.signal,mode==='hanging-success'?'SIGTERM':null);assert.equal(exit.stopped,true);execution.state='failed';await assert.rejects(claudeStructuredTurn(realm,id,mode,execution,callbacks,workspace),error=>['failed','stale_result'].includes(error.code));
+    }else if(mode==='cancel-closed'){assert.equal(outcome.error?.code,'cancelled');assert.equal(JSON.parse(readFileSync(join(root,'exit.json'),'utf8')).signal,'SIGTERM')}
+    else{
+      assert.equal(outcome.error?.code,'cancellation_pending');assert.equal(existsSync(join(root,'exit.json')),false);assert.equal(existsSync(join(root,'completed.json')),false);process.kill(execution.claudeNative.pid,0);
+      if(mode==='ignore-term'){assert(existsSync(join(root,'term-received')));assert.deepEqual(armed.slice(start),[10000,15000]);const stop=await stopClaudeStructuredTurn(execution,20);assert.equal(stop.nativeStopped,false)}
+      else assert.equal(existsSync(join(root,'terminal-stop.json')),false,'wrong receipt must not authorize process termination');
+    }
+    console.log(JSON.stringify({mode,status:'passed',error:outcome.error?.code,armed:armed.slice(start)}));
+  }catch(error){errors.push({mode,message:error.message})}
+  finally{
+    process.kill=originalKill;const native=execution.claudeNative;if(native?.receiptFile&&existsSync(native.receiptFile+'.held'))renameSync(native.receiptFile+'.held',native.receiptFile);
+    if(native?.pid){try{process.kill(-native.pid,'SIGKILL')}catch(error){if(error.code!=='ESRCH')throw error}}
+    await Promise.race([flight,sleep(1000)]);
+  }
+}
+assert.deepEqual(errors,[]);`)
+    const result = spawnSync(process.execPath, ['--import', createRequire(import.meta.url).resolve('tsx/esm'), runner], { cwd: f.repo, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, ANTHROPIC_BASE_URL: 'https://example.invalid', SPEX_TEST: '1' }, encoding: 'utf8', timeout: 30000 })
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
+    console.log(result.stdout)
+  } finally { f.close() }
+})
+
 
 for (const taskScoped of [true, false]) test(taskScoped ? 'task cwd orphan stays pending after chdir without gaining kill authority' : 'external orphan and reused task PID do not block stop or replace original evidence', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'spex-native-orphan-')), root = join(directory, 'native'), workspace = join(directory, 'worktree'), outside = join(directory, 'outside')
