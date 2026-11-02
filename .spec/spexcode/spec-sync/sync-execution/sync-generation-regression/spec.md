@@ -33,3 +33,5 @@ contract-omission marker回归拒绝错路径、未知existingID与affectedIds�
 真实Git冻结的单份测试全文超过2MiB时，生成和独立审查仍逐字收到全部断言及首尾内容，候选保该全文不变且会话保持独立。本文件的runner为受控接缝；原生超大读取与实际覆盖证明由 [[frozen-context-reader]] 单独验收，不能把提示到达当模型已读。
 
 旧生命周期Spec的`related` glob回归使用真实Git提交删除owner及`src/helpers/format.js`；即使prior manifest含该entry，只提供Spec/代码/测试、不提供命中的helper正文时，generation硬门禁必须在Native派发前拒绝。
+
+格式续审的native/非native双路径回归使用真实Git候选和认证格式packet引用：完整原final与精确schema进入只读诊断seed或完整提示，重复格式失败的第二份原final继续进入下一seed，原candidate全部业务字节不变；ref缺席不补，foreign thread原文拒绝，程序不解析旧final为accept。

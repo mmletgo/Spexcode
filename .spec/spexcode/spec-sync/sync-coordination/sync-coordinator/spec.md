@@ -189,3 +189,9 @@ P1的已认证精确结构输出失败沿既有已结算repairable attempt和原
 checkpoint扫描共用[[sync-checkpoint-evidence]]的typed证据读取接缝。新stage wrapper一次动作原子保存全部JSON材料与untrusted_final引用，raw不作为平铺JSON stage；先验证真实失败round、owner/source、原NativePlan/resource及canonical原生record，再排除raw的stage权限。历史无role raw引用逐字保留，已cancelled/removed但原格式错误和原文认证仍在的记录可恢复读取；未知损坏JSON仍显式报错，合法JSON伪stage原文也不取得权限。
 
 P0/P1/P2 共用 typed Native RPC 已结算准入：仅当前 control/physical run、有效 fence，且原失败精确匹配本 attempt 的固定 request/dispatch/plan、局部 candidate 与 failed terminal/removed stop，才沿既有同 operation/input/预算开启下一 attempt。并发每个 typed RPC 故障均须证明；未 removed 兄弟或 unsupported/cancelled/conflict/needs_input 不能被一个已停故障掩盖。unknown stop、pause、用户取消、过期 fence 和旧缺席保持 recovery/原控制语义，不重发旧 request、不解析 message 猜分类；普通格式/schema门和 initial code_to_spec 不调用 code_generate 的权限门保持。
+
+候选已通过V1而仅精确code_review结构格式失败时，续审从同operation的已结算原Native失败请求、合法P1批准链及validated candidate恢复原partition-plan身份，不因诊断或P1合法扩域重规划。原plan wrapper、digest及旧字段不改签；若计划冻结早于P1新增null资源，须核旧selection绑定逐字保留、新增binding全null、contractScopeExpansions的前后selection及evidenceRef精确来自同一已审P1、各owner原planDigest及composed tree/content不变。新增路径与ID必须属于该已审正文且在原冻结权限内；非null/既有绑定、source/input/readSet/policy/scope/原意变化不获得承接。原P1局部完整输入/Git/schema缓存核验及strict全图seal仍执行，唯一候选重新经V1及全部最终门。
+
+格式诊断不加入全局repairContext；已有accept的局部或跨边独审仍逐项沿原完整输入、Native传输请求/schema/seed/模型/policy及停止原件核验。原Native请求比较复用adapter的精准ZCode read policy冻结接缝，按原saved字段重建，不向旧缺席补默认。仅失败组取得reviewRepair原result/NativePlan/checkpoint引用；从原canonical record和failed→removed停止证明认证完整final后，在只读临时seed提供原回答及精确schema，要求Agent基于旧回答继续输出合法最终JSON。原文仍未批准，不抽取其中JSON、不补checkedIds/accept/receipt，不读thinking、不改业务候选。旧GenerationResult及raw ref缺席保持；新独审、V1–V4/Docker/Git/adopt和预算照常。
+
+该候选续审路径对code→Spec和Spec→Code共用；后者保原已生成候选与真实builder traces、file-writer-plan，不再调用implementation_plan/code_generate。原builder与成功review共用正式Native结果冷验，按原请求键冷回放prepareOnly重核真实Git/schema/只读范围/完整局部输入及原preparedChanges，不制造当前调用；原候选Git差量供新结果记录，V1及原发布基树绑定重新验证；发布基树变化拒绝借旧候选覆盖新发布，最终V1–V4及原预算门保持。

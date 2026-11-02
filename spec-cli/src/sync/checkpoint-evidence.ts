@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from 'node:util'
-import { assertRejectedOutput, structuredExecutionPolicy, type RejectedStructuredOutput } from '../session-structured-policy.js'
+import { assertRejectedOutput, structuredExecutionPolicy, type RejectedStructuredOutput, type StructuredExecution } from '../session-structured-policy.js'
 import { nativeWorktreePrompt } from '../native-worktree-runtime.js'
 import { sessionIdForCreateKey } from '../sessions.js'
 import { readRecord } from '../session-record.js'
@@ -34,6 +34,27 @@ export function syncCheckpointArtifacts(value: unknown, resultRef: BlobRef): Non
   return [...refs.values()].map(ref => ({ kind: raw.has(ref.sha256) ? 'untrusted_final' : 'json', ref }))
 }
 
+/** 共用原Native请求、canonical record与失败终态认证；不补缺席ref或修改原件。 */
+export function authenticateNativeRejectedFinal(store: SyncStore, operation: SyncOperation, origin: SyncAttempt, key: string, failure: NonNullable<ElaborationResult['failure']>, packet: RejectedStructuredOutput, readNativeRecord: typeof readRecord = readRecord): StructuredExecution {
+  const commonDir = operation.input.source.commonDir
+  const read = <T>(ref: BlobRef): T => JSON.parse(readEvidence(commonDir, ref).toString('utf8')) as T
+  const resource = store.findResource(origin.id, key), dispatch = origin.dispatchPlans.find(item => item.key === key)
+  if (!resource || !dispatch || resource.operationId !== operation.id || resource.plan.kind !== 'native_session' || resource.plan.inputId !== operation.input.id) fail('raw缺少原正式Native资源与派发')
+  const plan = read<NativeRunPlan>(resource.plan.planBlob)
+  if (plan.operationId !== operation.id || plan.attemptId !== origin.id || plan.inputId !== operation.input.id || plan.request.requestKey !== key || plan.requestDigest !== resource.plan.payloadDigest || plan.requestDigest !== dispatch.requestDigest || hash(plan.request) !== plan.requestDigest || plan.sessionCreateKey !== dispatch.sessionCreateKey || plan.expectedSessionId !== sessionIdForCreateKey(dispatch.sessionCreateKey) || failure?.sessionId !== plan.expectedSessionId || failure.threadId !== packet.threadId || failure.turnId !== packet.turnId) fail('raw的原请求、失败身份或输入摘要不匹配')
+  const failed = resource.checkpoints.map(item => read<NativeRunCheckpoint>(item.checkpointRef)).some(checkpoint => checkpoint.operationId === operation.id && checkpoint.attemptId === origin.id && checkpoint.inputId === operation.input.id && checkpoint.requestDigest === plan.requestDigest && checkpoint.expectedSessionId === plan.expectedSessionId && checkpoint.session.sessionId === plan.expectedSessionId && checkpoint.session.threadId === packet.threadId && checkpoint.session.turnId === packet.turnId && checkpoint.nativeState === 'failed')
+  if (!failed) fail('raw缺少原failed资源观察；后续cancelled/removed不补签或清除旧失败')
+  const prompt = plan.request.worktree ? nativeWorktreePrompt(plan.request.prompt, plan.request.worktree) : plan.request.prompt
+  const original = packet
+  assertRejectedOutput(original, prompt, structuredExecutionPolicy(plan.request), packet)
+  const record = readNativeRecord(plan.expectedSessionId), state = record?.structuredExecution, execution = structuredExecutionPolicy(plan.request)
+  const base = plan.request.worktree?.baseCommit ?? plan.request.base
+  if (!record || !state || record.session !== plan.expectedSessionId || record.createRequestId !== contentHash(plan.sessionCreateKey) || record.createPayloadHash !== hash({ prompt, parent: null, launcher: null, ...(base?.trim() ? { base: base.trim() } : {}), structuredExecution: execution }) || hash(structuredExecutionPolicy(state)) !== hash(execution) || (state.errorCode ?? 'failed') !== failure.code || state.state === 'failed' && state.error !== failure.message || state.threadId !== packet.threadId || state.turnId !== packet.turnId || !state.rejectedOutput || !isDeepStrictEqual({ ...state.rejectedOutput, ref: undefined }, { ...original, ref: undefined })) fail('raw没有canonical Native record的精确原错误与原final认证')
+  if (state.state !== 'failed' && !(state.state === 'cancelled' && resource.phase === 'removed' && state.cancellation?.nativeStopped === true && state.cancellation.nativeStatus === 'stopped')) fail('raw的后续控制状态没有精确停止证明')
+  if (packet.ref && readEvidence(commonDir, packet.ref).toString('utf8') !== packet.text) fail('raw原CAS字节不匹配typed失败原文')
+  return state
+}
+
 /** 先核失败原件与原生资源；JSON外形和checkpoint上的role都不能自行授予stage权限。 */
 export function readSyncCheckpoints(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, readNativeRecord: typeof readRecord = readRecord): { json: { ref: BlobRef; value: unknown }[]; raw: Map<string, RawFinalEvidence> } {
   const commonDir = operation.input.source.commonDir, raw = new Map<string, RawFinalEvidence>()
@@ -48,20 +69,9 @@ export function readSyncCheckpoints(store: SyncStore, operation: SyncOperation, 
     const originId = packet.ownerRequestKey.split(':')[1], origin = store.readAttempt(originId)
     const ownerKey = `sync:${origin.id}:elaborate${saved.partitionBinding ? `:partition:${saved.partitionBinding.partitionId}` : ''}`
     if (origin.operationId !== operation.id || packet.ownerRequestKey !== ownerKey || !['elaboration_generate', 'elaboration_review'].includes(packet.purpose) || packet.purpose === 'elaboration_generate' && (round.output !== null || round.candidate !== null || round.candidateDigest !== null) || packet.purpose === 'elaboration_review' && (round.reviewOutput !== null || round.review !== null)) fail('raw不能成为成功候选或其它owner的证据')
-    const key = `${ownerKey}:${round.index}:${packet.purpose}`, resource = store.findResource(origin.id, key), dispatch = origin.dispatchPlans.find(item => item.key === key)
-    if (!resource || !dispatch || resource.operationId !== operation.id || resource.plan.kind !== 'native_session' || resource.plan.inputId !== operation.input.id) fail('raw缺少原正式Native资源与派发')
-    const plan = read<NativeRunPlan>(resource.plan.planBlob)
-    if (plan.operationId !== operation.id || plan.attemptId !== origin.id || plan.inputId !== operation.input.id || plan.request.requestKey !== key || plan.requestDigest !== resource.plan.payloadDigest || plan.requestDigest !== dispatch.requestDigest || hash(plan.request) !== plan.requestDigest || plan.sessionCreateKey !== dispatch.sessionCreateKey || plan.expectedSessionId !== sessionIdForCreateKey(dispatch.sessionCreateKey) || saved.failure?.sessionId !== plan.expectedSessionId || saved.failure.threadId !== packet.threadId || saved.failure.turnId !== packet.turnId) fail('raw的原请求、失败身份或输入摘要不匹配')
-    const failed = resource.checkpoints.map(item => read<NativeRunCheckpoint>(item.checkpointRef)).some(checkpoint => checkpoint.operationId === operation.id && checkpoint.attemptId === origin.id && checkpoint.inputId === operation.input.id && checkpoint.requestDigest === plan.requestDigest && checkpoint.expectedSessionId === plan.expectedSessionId && checkpoint.session.sessionId === plan.expectedSessionId && checkpoint.session.threadId === packet.threadId && checkpoint.session.turnId === packet.turnId && checkpoint.nativeState === 'failed')
-    if (!failed) fail('raw缺少原failed资源观察；后续cancelled/removed不补签或清除旧失败')
-    const prompt = plan.request.worktree ? nativeWorktreePrompt(plan.request.prompt, plan.request.worktree) : plan.request.prompt
+    const key = `${ownerKey}:${round.index}:${packet.purpose}`
     const { ownerInputDigest: _ownerInputDigest, ownerRequestKey: _ownerRequestKey, ...original } = packet
-    assertRejectedOutput(original, prompt, structuredExecutionPolicy(plan.request), packet)
-    const record = readNativeRecord(plan.expectedSessionId), state = record?.structuredExecution, execution = structuredExecutionPolicy(plan.request)
-    const base = plan.request.worktree?.baseCommit ?? plan.request.base
-    if (!record || !state || record.session !== plan.expectedSessionId || record.createRequestId !== contentHash(plan.sessionCreateKey) || record.createPayloadHash !== hash({ prompt, parent: null, launcher: null, ...(base?.trim() ? { base: base.trim() } : {}), structuredExecution: execution }) || hash(structuredExecutionPolicy(state)) !== hash(execution) || (state.errorCode ?? 'failed') !== saved.failure.code || state.state === 'failed' && state.error !== saved.failure.message || state.threadId !== packet.threadId || state.turnId !== packet.turnId || !state.rejectedOutput || !isDeepStrictEqual({ ...state.rejectedOutput, ref: undefined }, { ...original, ref: undefined })) fail('raw没有canonical Native record的精确原错误与原final认证')
-    if (state.state !== 'failed' && !(state.state === 'cancelled' && resource.phase === 'removed' && state.cancellation?.nativeStopped === true && state.cancellation.nativeStatus === 'stopped')) fail('raw的后续控制状态没有精确停止证明')
-    if (readEvidence(commonDir, packet.ref).toString('utf8') !== packet.text) fail('raw原CAS字节不匹配typed失败原文')
+    authenticateNativeRejectedFinal(store, operation, origin, key, saved.failure!, original, readNativeRecord)
     raw.set(packet.ref.sha256, packet)
   }
   const inspect = (ref: BlobRef): void => {

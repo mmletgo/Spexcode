@@ -168,3 +168,5 @@ partition_seal反馈不能删除此前已接受的稳定ID，也不能弱化作�
 旧raw packet只有正文摘要而无ref时，collector不发明CAS pin，正式证据查询仍可读原JSON且缺席raw摘要返回404，读取不改历史记录。
 
 真实Coordinator v2通过createAttemptRunner生成父接口accept及两个独立叶syntax/schema拒绝，产出真实聚合后，全部checkpoint发布窗口、正式readCurrent/app详情与raw/普通JSON证据均可读。聚合副本的错ref、错输入、重排或删除accepted round、重复owner负例须失败；早父失败及嵌套repair-input保原绑定。仅原三local子集通过不足以证明完整操作可读，归档复核必须明确覆盖全部当前checkpoint及完整历史attempt集合，且不得冒充实际API/模型验收。
+
+格式续审回归以真实Git/SQLite、受控Native记录和停止原件复现首次P1合法null扩域后六组独审中一个格式失败；修复后五份accept保原resultRef且继续严格Native请求校验，仅失败组取得完整旧final并新派；带诊断的重试再次格式失败时仍为6→1→1，唯一candidate不换，P1不重派、原plan wrapper/digest不改签且零journal。定向反例拒source/input、composed、readSet、scope、policy、原意/model/plan、非null扩域/错误扩域evidence、跨owner原文及未知停止；ZCode显式read policy与旧缺席均按exact saved重建，真实prompt/schema/model/seed/policy差异仍拒。受控接缝不冒称真实模型或Docker/adopt完成。

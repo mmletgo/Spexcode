@@ -16,8 +16,10 @@ import { elaborate, freezeElaborationInput } from './elaboration.js'
 import { checkGenerationContractIntent, readFrozenContracts } from './frozen-contracts.js'
 import type { ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
 import { buildSyncApplicationPlan } from './planning.js'
+import { restoreGenerationInput } from './generation.js'
 import { CODE_BEHAVIOR_GUIDANCE_VERSION } from './code-behavior.js'
 import { SyncApplication } from './application.js'
+import * as continuationCoordinator from './coordinator.js'
 import { acceptedCandidateReviewSource, isSyncInputCurrent, prepareSyncAdmission, readCurrentSyncAnalysis, readonlySpecRepairStalled, recoverSyncOperationResources, runSyncOperation, syncPlanDigest } from './coordinator.js'
 import type { SyncCoordinatorOptions, SyncCoordinatorPlan } from './coordinator-types.js'
 import { migrateSyncStore, SYNC_COMPONENT, SYNC_MIGRATIONS, syncCoordinatorAddress } from './migrations.js'
@@ -37,7 +39,7 @@ import { composeAuthoredInput } from './author-input.js'
 import { controlledDecisionIdentity, guardControlledRequestPath, prepareControlledDecision, prepareControlledRequest } from './request-input.js'
 import { prepareSpecBodyEdit } from '../spec-body-edit.js'
 import { adaptElaborationNativeOutput } from '../../test/elaboration-native-output.js'
-import { rejectedFinalOutput, StructuredSessionError, structuredExecutionPolicy } from '../session-structured-policy.js'
+import { pinZCodeToolPolicy, rejectedFinalOutput, StructuredSessionError, structuredExecutionPolicy } from '../session-structured-policy.js'
 import { nativeWorktreeResult } from '../native-worktree-runtime.js'
 import { SettledSessionCreateTimeoutError } from '../session-structured.js'
 import { freezeContext, prepareFrozenPrompt } from '../frozen-context.js'
@@ -2363,8 +2365,9 @@ test('readonly-owner零派发guard只阻相同候选诊断，真实owner新派�
   assert.equal(readonlySpecRepairStalled(repair, 'same', [{ ...findings[0], message: '另一真实错误' }], attempt), false)
 })
 
-for (const mode of ['existing', 'new-leaf', 'aggregate-only', 'review', 'review-anchor-reference', 'review-accepted-reuse', 'review-accepted-reuse-repair', 'review-partial', 'review-pending', 'review-pending-unchanged', 'review-pending-sibling', 'review-pending-cross-source', 'review-pending-missing-owner', 'review-pending-lineage', 'review-pending-foreign-base', 'review-pending-unreviewed-base', 'review-prose', 'review-prose-cross-owner', 'review-prose-unknown', 'review-prose-path', 'review-prose-empty', 'review-multi', 'review-p1-fail', 'review-rebind', 'review-rebind-native', 'review-resume', 'review-location', 'review-ref', 'wrong-ref', 'unaffected-ref', 'readset', 'selection', 'selection-deleted', 'selection-source', 'non-null-selection', 'input-digest', 'foreign', 'policy', 'candidate', 'missing-owner'] as const) test(`readonly-owner late V1 ${mode} 只返修精确owner`, async t => {
-  const reuse = mode.startsWith('review-accepted-reuse'), reuseRepair = mode === 'review-accepted-reuse-repair'
+for (const mode of ['review-format-continuation', 'existing', 'new-leaf', 'aggregate-only', 'review', 'review-anchor-reference', 'review-accepted-reuse', 'review-accepted-reuse-repair', 'review-partial', 'review-pending', 'review-pending-unchanged', 'review-pending-sibling', 'review-pending-cross-source', 'review-pending-missing-owner', 'review-pending-lineage', 'review-pending-foreign-base', 'review-pending-unreviewed-base', 'review-prose', 'review-prose-cross-owner', 'review-prose-unknown', 'review-prose-path', 'review-prose-empty', 'review-multi', 'review-p1-fail', 'review-rebind', 'review-rebind-native', 'review-resume', 'review-location', 'review-ref', 'wrong-ref', 'unaffected-ref', 'readset', 'selection', 'selection-deleted', 'selection-source', 'non-null-selection', 'input-digest', 'foreign', 'policy', 'candidate', 'missing-owner'] as const) test(`readonly-owner late V1 ${mode} 只返修精确owner`, async t => {
+  const formatContinuation = mode === 'review-format-continuation'
+  const reuse = formatContinuation || mode.startsWith('review-accepted-reuse'), reuseRepair = mode === 'review-accepted-reuse-repair'
   const ordinaryAnchor = mode === 'review-anchor-reference'
   const partial = mode === 'review-partial' || ordinaryAnchor
   const rebinding = mode === 'review-rebind' || mode === 'review-rebind-native'
@@ -2377,10 +2380,10 @@ for (const mode of ['existing', 'new-leaf', 'aggregate-only', 'review', 'review-
   const baseSpec = original.split('\n').map(line => line.startsWith('| AC-EXPORT-') ? line.replace(' | derived:REQ-EXPORT-01 | REQ-EXPORT-01 |', ' | code:src/export.js#ExportService | REQ-EXPORT-01 |') : line).join('\n')
   const definitions = [
     { nodeId: 'export-contract', path: contractPath, sourcePath: 'src/export.js', testPath: 'tests/export.test.mjs', word: 'export', upper: 'EXPORT' },
-    ...['import', 'archive', 'report'].map(word => ({ nodeId: `${word}-contract`, path: `.spec/project/${word}/${word}-contract/spec.md`, sourcePath: `src/${word}/${word}.js`, testPath: `tests/${word}.test.mjs`, word, upper: word.toUpperCase() })),
+    ...(formatContinuation ? ['import', 'archive', 'report', 'download', 'upload'] : ['import', 'archive', 'report']).map(word => ({ nodeId: `${word}-contract`, path: `.spec/project/${word}/${word}-contract/spec.md`, sourcePath: `src/${word}/${word}.js`, testPath: `tests/${word}.test.mjs`, word, upper: word.toUpperCase() })),
   ]
   if (newLeaf) for (const added of definitions.slice(3)) { added.nodeId = `sync-code-${contentHash(added.sourcePath).slice(0, 16)}`; added.path = `.spec/project/export-contract/${added.nodeId}/spec.md` }
-  const badOwner = partial ? definitions[2] : newLeaf ? definitions[3] : definitions[0]
+  const badOwner = formatContinuation ? definitions.at(-1)! : partial ? definitions[2] : newLeaf ? definitions[3] : definitions[0]
   const badOwners = multi ? [definitions[2], badOwner] : [badOwner]
   const sources = new Map(definitions.map(definition => [definition.nodeId, baseSpec.replaceAll('export-job', `${definition.word}-job`).replaceAll('EXPORT', definition.upper).replaceAll('export-contract', definition.nodeId).replaceAll('src/export.js', definition.sourcePath).replaceAll('tests/export.test.mjs', definition.testPath).replaceAll(`decision:${definition.upper}-POLICY`, 'decision:EXPORT-POLICY')]))
   const extras = Object.fromEntries(definitions.slice(1).flatMap(definition => [[definition.path, multi && definition === definitions[2] ? sources.get(definition.nodeId)!.slice(0, sources.get(definition.nodeId)!.indexOf('## expanded spec')).replace('contract-schema: sync-v1\n', '') : sources.get(definition.nodeId)!], [definition.sourcePath, readFileSync(new URL('src/export.js', fixturePath), 'utf8')], [definition.testPath, readFileSync(new URL('tests/export.test.mjs', fixturePath), 'utf8').replaceAll('EXPORT', definition.upper).replaceAll('src/export.js', definition.sourcePath)]]).filter(([path]) => !newLeaf || path !== badOwner.path))
@@ -2445,6 +2448,28 @@ for (const mode of ['existing', 'new-leaf', 'aggregate-only', 'review', 'review-
     if (request.purpose === 'code_review') {
       if (reuse) {
         reviewCalls.push({ attempt: attempt.number, key: request.requestKey.split(':final:')[1] })
+        if (formatContinuation) {
+          if (attempt.number > 1) {
+            assert.ok(promptInput(request).elaboratedSpecs.some(spec => spec.path === badOwner.path), '仅失败owner真实新派发')
+            assert.ok(request.prompt.includes('原评审完整回答：'), '下一真实评审收到完整原final')
+            if (attempt.number >= 3) throw Object.assign(new Error('同组重复格式失败后再次基于原回答新派发，测试在Docker前停止'), { code: 'unsupported' })
+          }
+          if (!promptInput(request).elaboratedSpecs.some(spec => spec.path === badOwner.path)) return output
+          const operation = f.store.readOperation(f.operation.id), fence = { operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: operation.input.source.physicalFingerprint }
+          const records = new Map<string, NativeRunRecord>()
+          return createAttemptRunner(f.store, fence, { pollMs: 2, runtime: {
+            readRecord: id => records.get(id) ?? null,
+            cancel: async () => { throw new Error('不能调用真实Native') },
+            run: async actual => {
+              const execution = structuredExecutionPolicy(actual), key = actual.sessionCreateKey ?? actual.requestKey, sessionId = sessionIdForCreateKey(key), identity = { threadId: `failed-${sessionId}`, turnId: 'failed-turn' }
+              const rejectedOutput = rejectedFinalOutput('原评审完整回答：\n' + JSON.stringify(output), actual.prompt, execution, identity)
+              const record: NativeRunRecord = { session: sessionId, status: 'error', harnessSessionId: identity.threadId, createRequestId: contentHash(key), createPayloadHash: contentHash(JSON.stringify({ prompt: actual.prompt, parent: null, launcher: null, ...(actual.base?.trim() ? { base: actual.base.trim() } : {}), structuredExecution: execution })), structuredExecution: { ...execution, ...identity, state: 'failed', errorCode: 'structured_output_format_invalid', error: 'invalid_json', rejectedOutput, cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: true, acknowledged: true, nativeStatus: 'stopped' } } }
+              records.set(sessionId, record)
+              writeRecord({ governed: false, worktreePath: f.root, branch: null, title: null, name: null, parent: null, issues: [], issue: null, proposal: null, merges: 0, note: null, sortKey: null, createdAt: Date.now(), harness: 'codex', runtimeStartToken: null, stopped: false, archived: false, closedAt: null, launcher: null, launchCmd: null, launchOwner: null, ...record })
+              throw new StructuredSessionError('structured_output_format_invalid', 'invalid_json', { sessionId, ...identity, rejectedOutput })
+            },
+          } })(request)
+        }
         if (attempt.number >= 4) throw Object.assign(new Error('cached accept与fresh repair已由owner处理；Docker前停止'), { code: 'unsupported' })
         if (promptInput(request).elaboratedSpecs.some(spec => spec.path === badOwner.path)) {
           if (reuseRepair && attempt.number === 3) return { ...(output as object), verdict: 'repair', findings: [{ kind: 'repair', affectedIds: [`AC-${badOwner.upper}-01`], ruleLocation: `contract:${badOwner.path}#AC-${badOwner.upper}-01`, codeLocation: badOwner.sourcePath, evidence: '本轮真实独审要求复核已接受表述', counterexample: '旧accept不能代替本轮repair的owner回应', message: '沿原raw/source复核，允许critic误读而保持正文，不增加授权' }] }
@@ -2627,6 +2652,54 @@ for (const mode of ['existing', 'new-leaf', 'aggregate-only', 'review', 'review-
   }
   f.store.claimQueuedAttempt = input => { if (f.store.listAttempts(f.operation.id).length >= (lineage ? 6 : reuseRepair ? 4 : unchanged || invalidBase || sibling ? 5 : pending || aggregateOnly || mode === 'review-resume' || mode === 'review-rebind-native' ? 4 : 3)) throw new Error('fixture仅阻止旧实现无限零调用热循环'); return claim(input) }
   const result = await runSyncOperation(f.store, f.operation.id, f.options)
+  if (formatContinuation) {
+    assert.equal(reviewCalls.filter(call => call.attempt === 1).length, 6)
+    assert.equal(reviewCalls.filter(call => call.attempt === 2).length, 1, '五个真实accept沿严格缓存承接，仅失败组新派发')
+    assert.equal(reviewCalls.filter(call => call.attempt === 3).length, 1, '带原final诊断的重试再次格式失败，仍仅同组续修')
+    assert.equal(ownerCalls.filter(call => call.attempt > 1).length, 0, '格式故障不能重派无关P1')
+    const attempts = f.store.listAttempts(f.operation.id), wrappers = attempts.map(attempt => attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())))
+    const accepted = wrappers[0].filter(stage => stage.stage?.endsWith(':candidate-review') && JSON.parse(readEvidence(f.input.source.commonDir, stage.resultRef).toString()).reviewPassed)
+    assert.equal(accepted.length, 5)
+    for (const saved of accepted) for (const values of wrappers.slice(1)) assert.deepEqual(values.find(stage => stage.stage === saved.stage)?.resultRef, saved.resultRef)
+    for (const values of wrappers.slice(1)) {
+      assert.deepEqual(values.find(stage => stage.stage === 'partition-plan').resultRef, wrappers[0].find(stage => stage.stage === 'partition-plan').resultRef)
+      assert.deepEqual(JSON.parse(readEvidence(f.input.source.commonDir, values.find(stage => stage.stage === 'generation').resultRef).toString()).candidate, JSON.parse(readEvidence(f.input.source.commonDir, wrappers[0].find(stage => stage.stage === 'generation').resultRef).toString()).candidate, '诊断seed不能替换业务candidate')
+    }
+    const failed = wrappers[0].find(stage => stage.stage?.endsWith(':candidate-review') && JSON.parse(readEvidence(f.input.source.commonDir, stage.resultRef).toString()).failure)
+    const candidate = JSON.parse(readEvidence(f.input.source.commonDir, failed.resultRef).toString()).candidate
+    const plan = JSON.parse(readEvidence(f.input.source.commonDir, wrappers[0].find(stage => stage.stage === 'candidate-partition-plan').resultRef).toString())
+    const value = JSON.parse(readEvidence(f.input.source.commonDir, wrappers[0].find(stage => stage.stage === `${failed.stage}:input`).resultRef).toString())
+    const input = restoreGenerationInput(value), operation = f.store.readOperation(f.operation.id)
+    const proof = (current = operation, origin = attempts[0], selected = plan, supplied = input) => continuationCoordinator.failedCandidateReviewSource(f.store, current, origin, failed.stage, candidate, selected, supplied)
+    const refs = proof(); assert.ok(refs, '首次P1合法null扩域保原wrapper/digest及真实Native原件')
+    assert.equal(proof({ ...operation, readSetDigest: contentHash('foreign-readset') }), null)
+    assert.equal(proof({ ...operation, scope: { ...operation.scope, paths: [...operation.scope.paths, 'foreign-path'] } }), null)
+    assert.equal(proof({ ...operation, scope: { ...operation.scope, contractIds: [...operation.scope.contractIds, 'REQ-FOREIGN'] } }), null)
+    assert.equal(proof(operation, { ...attempts[0], composedInput: { ...attempts[0].composedInput!, tree: 'a'.repeat(40) } }), null)
+    assert.equal(proof(operation, attempts[0], { ...plan, digest: 'foreign-plan' }), null)
+    assert.equal(proof(operation, attempts[0], plan, { ...input, intent: { ...input.intent, rawSource: 'another-intent' } }), null)
+    assert.equal(proof(operation, attempts[0], plan, { ...input, model: 'gpt-6.1-terra' }), null)
+    assert.throws(() => proof({ ...operation, policyDigest: 'foreign-policy' }))
+    assert.throws(() => proof({ ...operation, input: { ...operation.input, id: 'foreign-input' } }))
+    const expansion = operation.contractScopeExpansions!.find(item => item.previousBaselineSelectionDigest !== item.baselineSelectionDigest)!
+    assert.equal(proof({ ...operation, contractScopeExpansions: operation.contractScopeExpansions!.map(item => item === expansion ? { ...item, evidenceRef: { sha256: 'b'.repeat(64) } } : item) }), null, '扩域必须来自同一已审P1')
+    const alteredSelection = structuredClone(operation.baselineSelection!)
+    const added = alteredSelection.bindings.find(binding => binding.resource.kind === 'contract')!
+    assert.ok('intentPair' in added)
+    added.intentPair = { id: 'foreign-pair', repositoryId: f.input.source.repositoryId, source: f.input.source, sourceInput: f.input, verifiedDelivery: f.input, coveredScope: operation.scope, receiptId: 'foreign-receipt', settledAtMs: 0 }
+    alteredSelection.digest = contentHash(JSON.stringify({ version: alteredSelection.version, source: alteredSelection.source, bindings: alteredSelection.bindings }, (_key, value: unknown) => value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value))
+    assert.equal(proof({ ...operation, baselineSelection: alteredSelection }), null, '新增非null基线不得借格式续审承接')
+    const checkpoint = JSON.parse(readEvidence(f.input.source.commonDir, refs.checkpointRef).toString()) as NativeRunCheckpoint
+    assert.equal(checkpoint.failure!.rejectedOutput!.ref, undefined, '原ref缺席不得补签')
+    const find = f.store.findResource.bind(f.store), key = input.requestKey + ':code_review', resource = find(attempts[0].id, key)!
+    for (const patch of [{ phase: 'terminal' as const }, { checkpointRef: writeEvidence(f.input.source.commonDir, { ...checkpoint, stop: { ...checkpoint.stop, nativeStopped: false } }) }, { checkpointRef: writeEvidence(f.input.source.commonDir, { ...checkpoint, failure: { ...checkpoint.failure, rejectedOutput: { ...checkpoint.failure!.rejectedOutput, threadId: 'foreign-owner' } } }) }]) {
+      f.store.findResource = (attemptId, requestKey) => attemptId === attempts[0].id && requestKey === key ? { ...resource, ...patch } : find(attemptId, requestKey)
+      if ('checkpointRef' in patch && JSON.parse(readEvidence(f.input.source.commonDir, patch.checkpointRef!).toString()).failure?.rejectedOutput?.threadId === 'foreign-owner') assert.throws(() => proof(), /原请求、失败身份|exact request/); else assert.equal(proof(), null, '未知停止或跨owner原文不能取得诊断权限')
+    }
+    f.store.findResource = find
+    assert.equal(f.store.listJournals(f.operation.id).length, 0)
+    return
+  }
   if (reuse) {
     const failedKey = reviewCalls.find(call => call.attempt === 3)?.key
     assert.ok(failedKey)
@@ -4101,4 +4174,17 @@ for (const missingRef of [false, true]) test(`Native whole已审draft接受缓�
   assert.equal(calls.filter(purpose => purpose === 'code_generate').length, missingRef ? 1 : 2, JSON.stringify(result.failure))
   assert.equal(f.store.listJournals(f.operation.id).length, 0)
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
+})
+
+test('原Native请求冷验沿ZCode精准read policy，旧缺席不补且实际prompt/schema/seed仍严格', () => {
+  const request: ElaborationSessionRequest = { root: '/fixture', base: 'a'.repeat(40), worktree: { mode: 'read', baseCommit: 'a'.repeat(40), tree: 'b'.repeat(40) }, purpose: 'code_review', prompt: 'original review', schema: { type: 'object' }, requestKey: 'sync:attempt:generation:final:edge:code_review', inputDigest: 'input', timeoutMs: null, model: 'zcode:fixture/model', effort: 'high' }
+  const binding = { attemptId: 'attempt', policyDigest: 'policy' }
+  const policy = pinZCodeToolPolicy(request, null)!
+  const native = { ...request, zcodeToolPolicy: policy }
+  assert.equal(continuationCoordinator.nativeReviewRequestMatches(native, request, binding), true)
+  assert.equal(continuationCoordinator.nativeReviewRequestMatches(request, request, binding), true)
+  assert.equal(request.zcodeToolPolicy, undefined, '冷验不回填历史字段')
+  assert.throws(() => continuationCoordinator.nativeReviewRequestMatches(request, { ...request, zcodeToolPolicy: policy }, binding), StructuredSessionError, '旧缺席不能由新请求补policy')
+  for (const patch of [{ prompt: 'foreign' }, { schema: { type: 'string' } }, { model: 'zcode:fixture/other' }, { worktree: { ...request.worktree!, tree: 'c'.repeat(40) } }]) assert.equal(continuationCoordinator.nativeReviewRequestMatches({ ...native, ...patch }, request, binding), false)
+  assert.throws(() => continuationCoordinator.nativeReviewRequestMatches({ ...native, zcodeToolPolicy: { version: 1, toolDenylist: [] } as unknown as typeof policy }, request, binding), StructuredSessionError)
 })
