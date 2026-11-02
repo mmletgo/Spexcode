@@ -41,7 +41,7 @@ const fs=require('node:fs'),rl=require('node:readline');
 if(process.argv.includes('--version')){console.log('0.17.1');process.exit(0)}
 let create,send;const permissions={},out=x=>console.log(JSON.stringify(x)),turn='turn',visible=['Read','Glob','Grep','Bash','Edit','Write','NotebookEdit','ExitPlanMode'];
 rl.createInterface({input:process.stdin}).on('line',line=>{
-const p=JSON.parse(line),reply=result=>out({id:p.id,result});if(!p.method){permissions[p.id]=p.result;return}
+if(!/^[\\x00-\\x7f]*$/.test(line))throw Error('non-ASCII RPC wire');const p=JSON.parse(line),reply=result=>out({id:p.id,result});if(!p.method){permissions[p.id]=p.result;return}
 if(p.method==='session/create'){create=p.params;reply({session:{sessionId:create.sessionId,model:create.model}})}
 else if(p.method==='session/read')reply({session:{sessionId:create.sessionId,model:create.model,status:'idle'},settings:{model:{current:create.model}},runtime:{pendingRequestIds:[]},projection:{currentTurnId:send?turn:undefined,pendingPermissions:[],activeToolCalls:[]}});
 else if(p.method==='session/send'){send=p.params;for(const toolName of visible)out({id:'permission-'+toolName,method:'interaction/requestPermission',params:{sessionId:create.sessionId,toolName,input:{file_path:'value'}}});reply({accepted:true,sessionId:create.sessionId})}

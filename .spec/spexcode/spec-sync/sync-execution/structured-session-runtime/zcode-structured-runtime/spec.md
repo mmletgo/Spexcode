@@ -9,6 +9,7 @@ related:
   - spec-cli/src/zcode-structured.test.ts
   - spec-cli/src/zcode-structured.native.test.ts
   - spec-cli/src/zcode-noninteractive.test.ts
+  - spec-cli/src/zcode-stdio.test.ts
 ---
 # ZCode 原生结构化执行
 
@@ -23,6 +24,8 @@ related:
 旧 NativePlan version1 及已持久但尚无 native session/send 的旧请求保持原工具列表、原提示和摘要，不能补加新字段。未完成仍不重发，已完成恢复零新 send；结构化 policy 仍 version6、工作流仍 native-worktree-v1。只有真正新建记录或新资源冻结当前策略，缺席也是旧请求的固定语义。
 
 严格 JSON.parse 语法失败的 typed message 仅保留静态错误类别及解析器提供的数值 position/line/column；位置对应移除唯一精确围栏后的 JSON 正文。不得透传可能包含原文片段的 SyntaxError.message，不输出 raw/snippet 或敏感值。失败原 terminal/messages/send/ref 与其身份保持，不修补或接受坏 JSON、不写 completed；completed 篡改仍为 stale_result。
+
+ZCode 0.17.1 的 app-server stdin 对每个 Buffer 单独 toString('utf8')；中文/astral 跨 stdio chunk 会替换为 U+FFFD。客户端全部 JSON-RPC request/回复共用 ASCII-safe 行编码，非 ASCII UTF-16 code unit 使用 JSON 的 \uXXXX，代理 JSON.parse 后语义精确相同；不改 SDK、不修补回显、不改持久 plan/send 对象或摘要。客户端 stdout 继续使用 Node readline 的流式 UTF-8 解码，并以三字节/astral 跨 chunk 及 64KiB 边界核验。旧 v1/v2 请求恢复不重发，原生 user/input/query/session/turn 精确身份门及历史失效证据保持。
 
 version5/null 请求沿原 ZCode policy、realm 与版本4读取证明执行，不装模型调用timeout timer；数字 version4 原样恢复。每次RPC、idle/close与精确停止各自期限不变。
 

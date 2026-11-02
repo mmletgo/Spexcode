@@ -46,6 +46,11 @@ export function zcodeStructuredPrompt(prompt: string, schema: Record<string, unk
   return `SpexCode structured-output contract (read-only control):\nReturn exactly one JSON value matching the JSON Schema below. Do not add prose or Markdown.\nJSON Schema: ${JSON.stringify(schema)}\nEnd of structured-output contract.\n\n${prompt}`
 }
 
+/** SDK stdin 逐 Buffer 解码；ASCII 线路避免跨块拆坏 Unicode，持久 send 仍为原语义对象。 */
+export function zcodeProtocolLine(packet: Record<string, unknown>): string {
+  return `${JSON.stringify(packet).replace(/[\u0080-\uffff]/g, character => '\\u' + character.charCodeAt(0).toString(16).padStart(4, '0'))}\n`
+}
+
 /** 只有新请求冻结的非交互策略增加控制段；历史请求保留原输入字节。 */
 function zcodeExecutionPrompt(prompt: string, execution: ZCodeStructuredExecution): string {
   return execution.policy === 'native-worktree-v1' ? `${execution.zcodeToolPolicy ? 'This read-only turn must return the complete schema JSON. Do not request plan approval or call ExitPlanMode.\n' : ''}Return exactly one JSON value matching this JSON Schema, without prose or Markdown: ${JSON.stringify(execution.schema)}\n\n${prompt}` : zcodeStructuredPrompt(prompt, execution.schema)
@@ -431,19 +436,19 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
   const request = (method: string, params: Record<string, unknown>): Promise<unknown> => new Promise((resolve, reject) => {
     if (exited || !child.stdin.writable) { reject(new StructuredSessionError('cancellation_pending', 'ZCode native transport ended before exact settlement')); return }
     const id = ++nextId, timer = setTimeout(() => { pending.delete(id); reject(new StructuredSessionError('cancellation_pending', `ZCode native RPC timeout (${method})`)) }, 10000)
-    pending.set(id, { resolve, reject, timer }); child.stdin.write(`${JSON.stringify({ id, method, params })}\n`)
+    pending.set(id, { resolve, reject, timer }); child.stdin.write(zcodeProtocolLine({ id, method, params }))
   })
   const lines = createInterface({ input: child.stdout })
   lines.on('line', line => {
     let packet: { id?: number | string; method?: string; params?: { sessionId?: string; toolName?: string; input?: { file_path?: string; path?: string } }; result?: unknown; error?: { code?: number } }
     try { packet = JSON.parse(line) as typeof packet } catch { protocolError = new StructuredSessionError('failed', 'ZCode emitted non-JSON native protocol'); return }
     if (packet.method && packet.id !== undefined) {
-      if (packet.method === 'session/requestRuntimePreferences' && packet.params?.sessionId === plan.sessionId) child.stdin.write(`${JSON.stringify({ id: packet.id, result: { nativeSearchEnhancementsEnabled: false, toolSearchMode: 'off', subagentRuntimeConfigEnabled: false, memoryEnabled: false, askUserQuestionAutoResolutionEnabled: false, additionalDirectories: [], modelContextBudgetStrategy: 'preflight-v1' } })}\n`)
+      if (packet.method === 'session/requestRuntimePreferences' && packet.params?.sessionId === plan.sessionId) child.stdin.write(zcodeProtocolLine({ id: packet.id, result: { nativeSearchEnhancementsEnabled: false, toolSearchMode: 'off', subagentRuntimeConfigEnabled: false, memoryEnabled: false, askUserQuestionAutoResolutionEnabled: false, additionalDirectories: [], modelContextBudgetStrategy: 'preflight-v1' } }))
       else if (worktree && packet.method === 'interaction/requestPermission' && packet.params?.sessionId === plan.sessionId) {
         const decision = zcodeWorktreePermission(packet.params, plan.sessionId, workspace, execution.worktree!.mode)
-        child.stdin.write(`${JSON.stringify({ id: packet.id, result: { decision, reason: decision === 'allow' ? 'Task-authorized native worktree invocation' : 'Outside this native worktree task' } })}\n`)
+        child.stdin.write(zcodeProtocolLine({ id: packet.id, result: { decision, reason: decision === 'allow' ? 'Task-authorized native worktree invocation' : 'Outside this native worktree task' } }))
       }
-      else child.stdin.write(`${JSON.stringify({ id: packet.id, error: { code: -32601, message: 'Unavailable in frozen read-only runtime' } })}\n`)
+      else child.stdin.write(zcodeProtocolLine({ id: packet.id, error: { code: -32601, message: 'Unavailable in frozen read-only runtime' } }))
       return
     }
     if (typeof packet.id !== 'number') return
