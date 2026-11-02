@@ -298,6 +298,8 @@ Claude Code 与 ZCode 共用明确版本化的 native-worktree 执行策略，�
 
 ZCode 新只读结构化请求保留 SDK plan 模式，仅通过已有 per-send toolDenylist 移除 ExitPlanMode，并明确本轮直接交完整 schema JSON、不申请计划审批。精准工具策略在新资源/新建记录时冻结，NativePlan v2 与原 send/请求摘要共同核验；旧已持久请求（包括尚无 Native session/send 的资源）保持原字段缺席、原提示和工具集。结构化 policy6、工作流v1、正常读取/Bash 与 Git seed/clean 门不变，edit/frozen/Claude不变。sync v19 writer marker 沿原在线备份与事务升级拒绝旧writer，回滚须恢复升级前一致备份及原证据。
 
+资源桥通过内部创建键传递的已冻结工具字段或缺席，在首次创建入口保持并严格校验；已有记录优先核原记录。只有 dispatch 已登记、resource 未落盘的冷恢复也按完整原请求摘要保持旧缺席或新已冻结 policy，原创建键与计费不变，任何输入变化仍由完整性门拒绝。
+
 大 JSON 的严格语法失败只把静态错误类别和解析器数值位置传入既有格式修复诊断，不回显原文片段或敏感值。原 Native 输出及引用保持原件；不自动修补、拼接或放宽 JSON/schema 接受范围。
 
 ZCode JSON-RPC 线路用标准 Unicode 转义保持 ASCII，规避已核版本 stdin 逐 Buffer 解码造成的中文/astral 跨块损坏；JSON.parse 后请求语义、原 plan/send 与摘要不变。stdout 保持流式 UTF-8 解码，原输入/消息/身份精确门不放宽，旧失效原件不修写、旧 turn 不重发。

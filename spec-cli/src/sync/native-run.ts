@@ -230,7 +230,9 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
   return async request => {
     const { signal, ...value } = request
     const resource = store.findResource(fence.attemptId, value.requestKey)
-    const zcodeToolPolicy = pinZCodeToolPolicy(value, resource ? read<NativeRunPlan>(resource.plan.planBlob).request : null)
+    const dispatch = resource ? undefined : store.readAttempt(fence.attemptId).dispatchPlans.find(plan => plan.key === value.requestKey)
+    const saved = resource ? read<NativeRunPlan>(resource.plan.planBlob).request : dispatch?.requestDigest === hash(value) ? value : null
+    const zcodeToolPolicy = pinZCodeToolPolicy(value, saved)
     const pinned = zcodeToolPolicy ? { ...value, zcodeToolPolicy } : value
     const exactResourceRequest = resource?.plan.payloadDigest === hash(pinned)
     let frozen: FrozenRequest = exactResourceRequest || pinned.worktree ? copy(pinned) : prepareFrozenPrompt(copy(pinned), { directory: join(runtimeRoot(), 'frozen-context-v2'), binding: { attemptId: fence.attemptId, policyDigest: operation.policyDigest } })

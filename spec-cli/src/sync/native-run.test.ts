@@ -88,6 +88,42 @@ for (const historical of [false, true]) test(`ZCode read resource freezes nonint
   } finally { f.cleanup() }
 })
 
+for (const historical of [false, true]) test(`reserved-only ZCode dispatch restores its exact frozen request from a new store connection; historical=${historical}`, async t => {
+  const f = await fixture(undefined, 'zcode:bigmodel-api/GLM-5.3-Flash')
+  const coldProtocol = openProtocol(join(f.root, 'db.sqlite'))
+  try {
+    const request = { ...f.request, worktree: { baseCommit: 'a'.repeat(40), tree: 'b'.repeat(40), mode: 'read' as const } }
+    const original = { ...request, ...(historical ? {} : { zcodeToolPolicy: { version: 1 as const, toolDenylist: ['ExitPlanMode'] as const } }) }
+    const dispatch = f.store.reserveDispatch(f.claimed.fence, { key: request.requestKey, purpose: request.purpose, requestDigest: hash(original) }), before = JSON.stringify(dispatch)
+    assert.equal(f.resource(), null)
+    let calls = 0
+    const coldStore = new SyncStore(coldProtocol, { readBlob: f.blobIO.read })
+    const run = createAttemptRunner(coldStore, f.claimed.fence, { blobIO: f.blobIO, pollMs: 2, runtime: { ...f.runtimeBase, run: async actual => {
+      calls++
+      assert.deepEqual(actual.zcodeToolPolicy, original.zcodeToolPolicy)
+      assert.equal(actual.sessionCreateKey, dispatch.sessionCreateKey)
+      throw new StructuredSessionError('failed', 'mock-before-native-session')
+    } } })
+    for (const changed of [
+      { ...request, prompt: 'changed full request' },
+      { ...request, schema: { type: 'object', additionalProperties: false } },
+      { ...request, worktree: { ...request.worktree, tree: 'c'.repeat(40) } },
+      { ...request, purpose: 'changed purpose' },
+    ]) await assert.rejects(run(changed), { code: 'SYNC_DISPATCH_CONFLICT' })
+    assert.equal(f.resource(), null); assert.equal(calls, 0)
+    assert.equal(JSON.stringify(coldStore.readAttempt(f.claimed.attempt.id).dispatchPlans[0]), before)
+    await assert.rejects(run(request), /mock-before-native-session/)
+    const resource = f.resource(), saved = JSON.parse(f.blobIO.read(resource.plan.planBlob).toString()) as NativeRunPlan
+    assert.deepEqual(saved.request, original)
+    assert.equal(saved.requestDigest, dispatch.requestDigest)
+    assert.equal(resource.plan.payloadDigest, dispatch.requestDigest)
+    assert.equal(JSON.stringify(coldStore.readAttempt(f.claimed.attempt.id).dispatchPlans[0]), before)
+    assert.equal(coldStore.readOperation(f.claimed.operation.id).callsUsed, 1)
+    assert.equal(f.records.size, 0); assert.equal(calls, 1)
+    t.diagnostic(JSON.stringify({ historical, originalRequestDigest: dispatch.requestDigest, savedRequestDigest: hash(saved.request), dispatchUnchanged: JSON.stringify(coldStore.readAttempt(f.claimed.attempt.id).dispatchPlans[0]) === before, sessionCreateKeyUnchanged: saved.sessionCreateKey === dispatch.sessionCreateKey, callsUsed: coldStore.readOperation(f.claimed.operation.id).callsUsed, nativeRecords: f.records.size }))
+  } finally { coldProtocol.close(); f.cleanup() }
+})
+
 test('native intent precedes run, published queued session is created with unknown thread, result binds exact identity and replays', async () => {
   const f = await fixture()
   try {

@@ -172,7 +172,7 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
   if (request.readerRuntime) assertFrozenReaderRuntime(request.readerRuntime, request.model)
   const { sessionCreateRequest, sessionCreateTimeoutMs, requestQueueDrain, queueStructuredRecovery, refreshQueueCandidate, sessionIdForCreateKey } = await import('./sessions.js')
   const saved = zcode && request.worktree ? readRecord(sessionIdForCreateKey(request.sessionCreateKey ?? request.requestKey))?.structuredExecution : undefined
-  const zcodeToolPolicy = pinZCodeToolPolicy(request, saved ?? (request.sessionCreateKey ? {} : null))
+  const zcodeToolPolicy = pinZCodeToolPolicy(request, saved ?? (request.sessionCreateKey ? request : null))
   if (zcodeToolPolicy) request = { ...request, zcodeToolPolicy }
   const execution = structuredExecutionPolicy(request)
   if (!claude && !zcode) prepareStructuredRealm(requiredRealmRoot(execution), request.readerRuntime)

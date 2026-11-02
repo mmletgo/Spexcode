@@ -108,7 +108,7 @@ else if(p.method==='session/close')reply({closed:true});else throw Error('unexpe
         writeFileSync(path, bytes)
       }
     })
-    await t.test('real creation queue pins fresh records and rejoins a legacy record without another send', async () => {
+    await t.test('real creation queue pins fresh records and rejoins a legacy record without another send', async creation => {
       const previousCwd = process.cwd(), repository = join(directory, 'repository')
       mkdirSync(repository); mkdirSync(join(repository, '.spec'))
       const git = (args: string[]): string => execFileSync('git', ['-C', repository, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
@@ -117,7 +117,7 @@ else if(p.method==='session/close')reply({closed:true});else throw Error('unexpe
       writeFileSync(join(repository, 'value'), 'seed\n'); git(['add', '.']); git(['commit', '-qm', 'seed'])
       process.chdir(repository)
       try {
-        const { runStructuredSession } = await import('./session-structured.js'), { readRecord } = await import('./session-record.js')
+        const { runStructuredSession } = await import('./session-structured.js'), { readRecord } = await import('./session-record.js'), { sessionIdForCreateKey } = await import('./sessions.js')
         const worktree = { baseCommit: git(['rev-parse', 'HEAD']), tree: git(['rev-parse', 'HEAD^{tree}']), mode: 'read' as const }
         for (const historical of [false, true]) {
           const request = { ...read, root: repository, prompt: 'Return the complete JSON result.', requestKey: `creation-${historical}-${directory}`, timeoutMs: 15000, worktree }
@@ -132,6 +132,40 @@ else if(p.method==='session/close')reply({closed:true});else throw Error('unexpe
           assert.equal(readRecord(result.sessionId)!.createPayloadHash, createHash)
           if (historical) await assert.rejects(runStructuredSession({ ...request, zcodeToolPolicy: tools }), { code: 'key_reused' })
         }
+        await creation.test('actual resource bridge preserves frozen tools through first record creation and cold replay', async () => {
+          const { openProtocol } = await import('@spexcode/session-protocol'), { migrateSyncStore } = await import('./sync/migrations.js'), { SyncStore } = await import('./sync/store.js')
+          const { captureInputSnapshot, readEvidence } = await import('./sync/snapshot.js'), { createAttemptRunner } = await import('./sync/native-run.js')
+          const input = await captureInputSnapshot(repository, { committed: true }), database = process.env.SPEX_SESSION_DATABASE_PATH
+          assert(database)
+          const protocol = openProtocol(database)
+          try {
+            await migrateSyncStore(protocol)
+            const store = new SyncStore(protocol, { readBlob: ref => readEvidence(input.source.commonDir, ref) }), scope = { paths: ['value'], contractIds: [], flowIds: [] }
+            const operation = store.admitAndEnqueue({ ingressKey: 'zcode-composed-bridge', rootCauseId: 'zcode-composed-bridge', origin: 'spec', model: read.model, input, scope, budget: { maxCalls: 2, maxAttempts: 2, maxRepairs: 1, timeoutMs: 60000 }, policyDigest: 'policy', impactDigest: 'impact', readSetDigest: 'read', delivery: null, deliveryPlan: { canonicalRoot: join(repository, 'delivery'), branch: 'delivery', baseCommit: input.headCommit } })
+            const claim = store.claimAttempt({ operationId: operation.id, source: input.source, scope, leaseMs: 30000, expectedMessageId: operation.dispatchMessageId })
+            const request = { ...read, root: repository, prompt: 'Return one complete JSON value.', requestKey: 'zcode-composed-bridge', timeoutMs: 15000, worktree }
+            const beforeInvalid = readFileSync(captured)
+            for (const [index, invalid] of [
+              { zcodeToolPolicy: { version: 1, toolDenylist: ['ExitPlanMode', 'Bash'] } as unknown as NonNullable<ZCodeStructuredExecution['zcodeToolPolicy']> },
+              { model: 'claude:MiniMax-M3.1-Flash', zcodeToolPolicy: tools },
+              { worktree: { ...worktree, mode: 'edit' as const }, zcodeToolPolicy: tools },
+            ].entries()) {
+              const sessionCreateKey = `invalid-pinned-policy-${index}-${directory}`
+              await assert.rejects(runStructuredSession({ ...request, ...invalid, sessionCreateKey }), { code: 'unsupported' })
+              assert.equal(readRecord(sessionIdForCreateKey(sessionCreateKey)), null)
+            }
+            assert.deepEqual(readFileSync(captured), beforeInvalid)
+            const run = createAttemptRunner(store, claim.fence, { pollMs: 2 }), result = await run(request), record = readRecord(result.sessionId)!
+            assert.deepEqual(record.structuredExecution!.zcodeToolPolicy, tools)
+            assert.equal(record.structuredExecution!.zcodeNative!.version, 2)
+            assert.deepEqual(JSON.parse(readFileSync(captured, 'utf8')).send.toolDenylist, ['ExitPlanMode'])
+            const original = readFileSync(captured), creationHash = record.createPayloadHash
+            assert.deepEqual(await createAttemptRunner(store, claim.fence, { pollMs: 2 })(request), result)
+            assert.deepEqual(readFileSync(captured), original, 'the composed cold replay must not send again')
+            assert.equal(readRecord(result.sessionId)!.createPayloadHash, creationHash)
+            assert.equal(store.readOperation(operation.id).callsUsed, 1)
+          } finally { protocol.close() }
+        })
       } finally { process.chdir(previousCwd) }
     })
   } finally {
