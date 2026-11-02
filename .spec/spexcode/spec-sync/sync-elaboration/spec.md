@@ -8,6 +8,7 @@ code:
   - spec-cli/src/sync/elaboration.ts#freezeElaborationInput
   - spec-cli/src/sync/elaboration.ts#projectElaborationFlowReadiness
   - spec-cli/src/sync/elaboration.ts#verifyElaborationDraftCache
+  - spec-cli/src/sync/elaboration.ts#partitionSealRepairContext
 related:
   - spec-cli/src/sync/elaboration-orchestration.test.ts
   - spec-cli/src/sync/elaboration-target-binding.test.ts
@@ -20,6 +21,8 @@ related:
 从用户原意生成可完成主流程、适用状态事件处置、规则和验收；无法确认的重要业务政策成为 GAP，只阻塞依赖分支。
 
 ## expanded spec
+
+跨owner全局封口返修中，生成与独审共用由原失败aggregate/local refs核验的完整error定位、owner、原candidate身份和Spec路径映射。真实失败并集只在以aggregate SHA命名的只读诊断目录呈现，不覆盖作者基线、raw或事实；独审诊断副本将本owner替为本轮候选，兄弟原件保持。只可修改原单一draft，schema、诊断文件、源码和全部测试不可写；正常提交hooks继续面对原作者Spec。候选先以现有parser/严格契约图替回原失败并集，本区候选先完整经过当前登记及演进门，再沿原aggregate相对原已审local确证的VERIFY移除集合复用原技术表投影，不重选owner，不隐藏漂移定义、删除义务或未登记VERIFY。原分配错误未消除或新增跨owner结构错误时不得进入独审，其他owner既有错误仍留最终strict seal。仅原真实duplicate-id精确绑定的本owner、本轮新增且不在冻结作者/已采纳基线的临时ID，可推导唯一一对一、同kind同业务字段（含代码/测试绑定）的更名，并完整更新本owner typed引用；原作者/已采纳及非冲突ID保护保持，不把兄弟同ID当成本区义务仍存在。旧draft错误只保历史，不覆盖当前已认证资格；新输入或诊断仍须新生成、新独审及严格全局封口。此回归的受控Git runner不代表真实模型全链验收。
 
 新草稿的接受缓存沿同一readStageDraft边界重核全部tagged轮的Git/ref/owner/schema/source身份，历史syntax/schema坏稿不要求满足成功schema。仅最终已接受轮严格解析正文、校验当前schema/行差量，并用现有绑定与renderer重算candidate、candidateDigest和完整changes；原JSON缓存不能替代Git正文。新tag但最终draft缺席拒绝。source tag只取原attempt已冻结的协议stage，沿同一原件provenance读取，不用当前attempt新tag给legacy补签；旧无tag无draft批准沿旧门。合法正文无需改动、仅重试回执或审查时，任务明确允许保留hooks的正常git commit --allow-empty，不制造业务diff；仍须真实新提交，不放宽head/seed证据。
 

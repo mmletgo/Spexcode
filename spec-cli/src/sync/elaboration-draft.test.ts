@@ -4,15 +4,20 @@ import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeF
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import test from 'node:test'
-import { parseParts } from '@spexcode/spec-core/contracts'
+import { CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
 import { StructuredSessionError, rejectedFinalOutput } from '../session-structured-policy.js'
 import { nativeWorktreePrompt, nativeWorktreeResult } from '../native-worktree-runtime.js'
-import { elaborate, elaborationDigest, verifyElaborationDraftCache } from './elaboration.js'
+import { elaborate, elaborationDigest, sealPartitionedElaboration, verifyElaborationDraftCache } from './elaboration.js'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
 import type { ElaborationInput, ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
 import { captureInputSnapshot, contentHash, readObject, readTree, writeEvidence, writeObject, writeTree } from './snapshot.js'
 import { captureStageDraft, overlayStageTree, readStageDraft, stageWorktree } from './stage-worktree.js'
 import { syncCheckpointArtifacts } from './checkpoint-evidence.js'
+import { elaborateSyncPartitions } from './partition-execution.js'
+import type { PartitionCheckpoints } from './partition-execution.js'
+import type { ElaborationResult, ReadonlySpecRepair } from './elaboration-types.js'
+import type { GeneratedTargetElaboration, ContractCell } from './elaboration-markdown.js'
+import type { SyncPartitionPlan } from './partitioning.js'
 
 const git = (root: string, ...args: string[]): string => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: 'pipe', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }).trim()
 const path = '.spec/export/export-contract/spec.md'
@@ -118,7 +123,7 @@ test('草稿边界拒绝错owner/schema/path/ref/OID/seed以及Spec、源码、�
   for (const patch of [{ ownerDigest: 'e'.repeat(64) }, { schemaDigest: 'e'.repeat(64) }, { path: '../escape.json' }, { resultCommit: 'e'.repeat(40) }, { oid: 'e'.repeat(40) }, { seed: { ...draft.seed, tree: draft.resultTree } }, { seed: { ...draft.seed, baseCommit: `refs/spex-sync/seeds/${draft.seed.baseCommit}` } }]) {
     assert.throws(() => readStageDraft(f.commonDir, { ...draft, ...patch }, draft))
   }
-  for (const modified of [path, 'src/export.js', 'tests/export.test.mjs', draft.path.replace(/\.json$/, '.schema.json'), `.spex-sync-drafts/${'e'.repeat(64)}.json`]) {
+  for (const modified of [path, 'src/export.js', 'tests/export.test.mjs', draft.path.replace(/\.json$/, '.schema.json'), `.spex-sync-drafts/${'e'.repeat(64)}.json`, `.spex-sync-diagnostics/${'e'.repeat(64)}/${path}`]) {
     const seed = stageWorktree(f.commonDir, f.snapshot.headCommit, f.snapshot.immutableTree, 'edit')
     const tree = overlayStageTree(f.commonDir, seed.tree, [{ path: draft.path, source: '{}' }, { path: modified, source: 'unauthorized\n' }]), head = stageWorktree(f.commonDir, seed.baseCommit, tree).baseCommit
     assert.throws(() => captureStageDraft(f.commonDir, seed, { worktree: { baseCommit: seed.baseCommit, baseTree: seed.tree, headCommit: head, tree, worktreePath: 'closed-worktree' } }, draft), /仅允许正常提交/)
@@ -297,4 +302,148 @@ test('当前新input tag不能给原legacy无draft接受结果补协议', async 
   assert.equal(legacy.status, 'complete'); assert.equal(legacy.rounds[0].draft, undefined)
   assert.doesNotThrow(() => verifyElaborationDraftCache(f.input, legacy, false))
   assert.throws(() => verifyElaborationDraftCache(f.input, legacy, true), /当前完整局部输入/)
+})
+
+
+function draftRows(source: string): GeneratedTargetElaboration {
+  const contract = parseContract({ nodeId: source.includes('REQ-PEER-01') ? 'peer-contract' : 'export-contract', path, source }).contract!, fm = parseFrontmatter(source).fm
+  return { ...rows, version: 'elaboration-target-rows-v3', changes: [{ targetIndex: 0, title: String(fm.title), description: '', code: [...contract.code], related: [...contract.related], prose: null, removeIds: [],
+    tables: Object.fromEntries(Object.entries(CONTRACT_COLUMNS).map(([kind, columns]) => [kind, contract.items.filter(item => item.kind === kind).map(item => Object.fromEntries(columns.map(column => {
+      const key = column === 'depends-on' ? 'dependsOn' : column === 'timeout-ms' ? 'timeoutMs' : column === 'kind' ? 'gapKind' : column
+      return [column, column === 'source' && item.kind !== 'VERIFY' ? `${item.source.kind}:${item.source.ref}` : (item as unknown as Record<string, ContractCell>)[key]]
+    })))])) as GeneratedTargetElaboration['changes'][number]['tables'],
+  }] }
+}
+
+async function sealFixture(t: test.TestContext, sharedVerification = false) {
+  const f = await fixture(t), peerPath = '.spec/export/peer-contract/spec.md'
+  const original = f.input.targets[0].source!, peer = original.replaceAll('export-job', 'peer-job').replaceAll('export-contract', 'peer-contract').replaceAll('EXPORT', 'PEER').replaceAll('tests/export.test.mjs', 'tests/peer.test.mjs')
+  const sources = new Map([[path, original], [peerPath, sharedVerification ? peer.replaceAll('VERIFY-PEER-01', 'VERIFY-EXPORT-01').replace('["node","--test","tests/peer.test.mjs"]', '["node","--test","tests/export.test.mjs"]') : peer]])
+  for (const [specPath, source] of sources) {
+    mkdirSync(dirname(join(f.root, specPath)), { recursive: true })
+    writeFileSync(join(f.root, specPath), source.replace(/^\| FLOW-[^\n]*-01 \|[^\n]*\n/m, '').replace(sharedVerification && specPath === peerPath ? /### VERIFY\n\n(?:[^\n]*\n){3}/ : /$^/, ''))
+  }
+  writeFileSync(join(f.root, 'tests/peer.test.mjs'), readFileSync(join(f.root, 'tests/export.test.mjs'), 'utf8').replaceAll('EXPORT', 'PEER'))
+  git(f.root, 'add', '.'); git(f.root, 'commit', '-m', 'freeze author rows before new flows')
+  const snapshot = await captureInputSnapshot(f.root), files = new Map(readTree(f.commonDir, snapshot.immutableTree).map(entry => [entry.path, readObject(f.commonDir, entry.oid).toString('utf8')]))
+  const input: ElaborationInput = { ...f.input, requestKey: 'global-seal', historyInput: snapshot, worktree: stageWorktree(f.commonDir, snapshot.headCommit, snapshot.immutableTree), intent: { nodeId: 'ancestor', rawSource: '祖先原意' },
+    ...(sharedVerification ? { facts: [{ source: 'decision:EXPORT-POLICY', text: original }, { source: 'decision:PEER-POLICY', text: peer }], verifications: [{ id: 'VERIFY-EXPORT-01', command: ['node', '--test', 'tests/export.test.mjs'], cwd: '.', timeoutMs: 10000 }] } : {}),
+    targets: [...sources].map(([specPath]) => ({ nodeId: specPath === path ? 'export-contract' : 'peer-contract', path: specPath, source: files.get(specPath)!, sourceDigest: contentHash(files.get(specPath)!) })), files, maxRepairs: 0,
+  }
+  const plan: SyncPartitionPlan = { version: 'sync-partitions-v1', digest: 'two-owner-seal', expectedPaths: ['src/export.js'], dependencies: [], partitions: input.targets.map(target => ({ id: target.nodeId, intentNodeId: 'ancestor', targets: [{ nodeId: target.nodeId, path: target.path }], readPaths: [target.path, ancestorPath, 'src/export.js', `tests/${target.nodeId === 'export-contract' ? 'export' : 'peer'}.test.mjs`], writePaths: [target.path], sourcePaths: ['src/export.js'], changedPaths: ['src/export.js'], contextNodeIds: ['ancestor'], contractIds: [], flowIds: [], readBytes: 100, readLimitBytes: 524288, oversizedReads: [] })) }
+  const saved = new Map<string, ElaborationResult>(), refs = new Map<string, ReturnType<typeof writeEvidence>>()
+  const save: PartitionCheckpoints['save'] = (key, value) => { const ref = writeEvidence(f.commonDir, value); saved.set(key, structuredClone(value) as ElaborationResult); refs.set(key, ref); return ref }
+  const candidateSource = (specPath: string) => sources.get(specPath)!.replaceAll(specPath === path ? 'FLOW-EXPORT-01' : 'FLOW-PEER-01', 'FLOW-SHARED-01')
+  const initial = await elaborateSyncPartitions(input, plan, 1, { load: () => null, save }, f.run(request => JSON.stringify(draftRows(candidateSource(request.prompt.includes('"nodeId":"peer-contract"') ? peerPath : path)))))
+  assert.equal(initial.failure?.code, 'partition_final_seal_failed', JSON.stringify({ failure: initial.failure, locals: [...saved].map(([key, value]) => ({ key, failure: value.failure, findings: value.rounds?.flatMap(round => round.findings) })) }))
+  assert.ok([...saved.values()].filter(local => local.partitionBinding).every(local => local.structurePassed && local.reviewPassed))
+  assert.ok(initial.partitionSeal!.findings.some(issue => issue.code === 'duplicate-id' && issue.path === peerPath && issue.itemId === 'FLOW-SHARED-01'))
+  const key = 'partition:peer-contract:elaboration', prior = saved.get(key)!, generationRef = writeEvidence(f.commonDir, initial)
+  const repair: ReadonlySpecRepair = { kind: 'partition_seal', baseInputDigest: prior.inputDigest, candidateDigest: initial.candidateDigest!, generationRef, acceptedRef: refs.get(key)!, changes: prior.changes, output: prior.rounds.at(-1)!.output, review: prior.rounds.at(-1)!.review, findings: initial.partitionSeal!.findings.filter(issue => issue.severity === 'error' && issue.path === peerPath) }
+  const checkpoints: PartitionCheckpoints = { load: <T>(name: string) => saved.has(name) ? structuredClone(saved.get(name)) as T : null, save,
+    loadPartitionSealRepair: name => name === key ? { prior, repair } : null,
+  }
+  const repaired = candidateSource(peerPath).replaceAll('FLOW-SHARED-01', 'FLOW-PEER-REPAIRED-01')
+  return { ...f, input, plan, initial, prior, repair, checkpoints, saved, peerPath, sources, repaired, key }
+}
+
+test('全局seal返修的生成与独审均读取同一跨owner原件、完整定位和只读诊断seed', async t => {
+  const f = await sealFixture(t), callsBefore = f.requests.length
+  const hook = join(f.root, '.git/hooks/pre-commit')
+  writeFileSync(hook, '#!/bin/sh\nif git grep -q FLOW-SHARED-01 HEAD -- .spec; then exit 41; fi\n'); chmodSync(hook, 0o755)
+  const result = await elaborateSyncPartitions({ ...f.input, requestKey: 'repair-visible' }, f.plan, 1, f.checkpoints, async request => {
+    assert.match(request.prompt, /跨owner全局封口/)
+    assert.ok(request.prompt.includes('"kind":"partition_seal"'))
+    assert.ok(request.prompt.includes(f.repair.generationRef.sha256)); assert.ok(request.prompt.includes(f.repair.acceptedRef.sha256))
+    for (const issue of f.repair.findings) for (const field of ['code', 'nodeId', 'path', 'itemId'] as const) assert.ok(request.prompt.includes(String(issue[field])))
+    const seed = new Map(readTree(f.commonDir, request.worktree!.tree).map(entry => [entry.path, readObject(f.commonDir, entry.oid).toString('utf8')]))
+    const diagnostics = [...seed].filter(([name]) => name.startsWith('.spex-sync-diagnostics/'))
+    assert.equal(diagnostics.length, 2)
+    assert.ok(diagnostics.some(([name, body]) => name.endsWith(path) && body.includes('FLOW-SHARED-01')))
+    assert.ok(diagnostics.some(([name, body]) => name.endsWith(f.peerPath) && body.includes(request.purpose === 'elaboration_review' ? 'FLOW-PEER-REPAIRED-01' : 'FLOW-SHARED-01')))
+    assert.equal(seed.get(path), f.input.targets[0].source, '失败peer/owner候选不能升格为作者基线')
+    if (request.purpose === 'elaboration_generate') assert.equal(seed.get(f.peerPath), f.input.targets[1].source, '正常commit hooks继续面对原Spec，失败并集只在只读诊断目录')
+    assert.deepEqual(readTree(f.commonDir, request.worktree!.tree).filter(entry => entry.path.startsWith('src/') || entry.path.startsWith('tests/')), readTree(f.commonDir, f.input.historyInput!.immutableTree).filter(entry => entry.path.startsWith('src/') || entry.path.startsWith('tests/')))
+    assert.ok(!request.prompt.includes('30项状态和拒绝均符合契约')); assert.ok(request.prompt.length < 16000)
+    return f.run(() => JSON.stringify(draftRows(f.repaired)))(request)
+  })
+  assert.equal(result.status, 'complete', JSON.stringify({ failure: result.failure, findings: result.rounds.flatMap(round => round.findings) }))
+  assert.deepEqual(f.requests.slice(callsBefore).map(request => request.purpose), ['elaboration_generate', 'elaboration_review'])
+})
+
+test('仅本owner本轮新提议duplicate ID一致改名通过，原错误重放不能局部accept', async t => {
+  const f = await sealFixture(t)
+  const result = await elaborateSyncPartitions({ ...f.input, requestKey: 'repair-rename' }, f.plan, 1, f.checkpoints, f.run(() => JSON.stringify(draftRows(f.repaired))))
+  assert.equal(result.status, 'complete', JSON.stringify({ failure: result.failure, findings: result.rounds.flatMap(round => round.findings) }))
+  const seal = sealPartitionedElaboration(f.input, result.changes, result.partitionSeal!.applicability)
+  assert.equal(seal.seal.passed, true, JSON.stringify(seal.seal.findings))
+  assert.equal(result.changes.find(change => change.path === path)!.source, f.initial.changes.find(change => change.path === path)!.source)
+})
+
+
+test('全局返修负向：不更名、删义务、旧作者身份、错引用与peer占名均不得进入新独审', async t => {
+  const f = await sealFixture(t), initialSaved = structuredClone([...f.saved])
+  const priorSource = f.prior.changes[0].source
+  const cases: [string, string, string[]][] = [
+    ['原稿重放', priorSource, []],
+    ['直接删除冲突行并借peer同ID承接', priorSource.replace(/^\| FLOW-SHARED-01 \|[^\n]*\n/m, ''), []],
+    ['删本轮无关义务', f.repaired, ['REQ-PEER-01']],
+    ['作者已采纳FLOW更名', f.repaired.replaceAll('FLOW-PEER-02', 'FLOW-PEER-AUTHOR-RENAMED'), ['FLOW-PEER-02']],
+    ['作者AC弱化', f.repaired.replace('全部拒绝，原结果可由所有者下载', '部分拒绝即可'), []],
+    ['作者VERIFY弱化', f.repaired.replace('10000 |', '1000 |'), []],
+    ['仅FLOW改名未更新STEP', f.repaired.replaceAll('| FLOW-PEER-REPAIRED-01 | 校验', '| FLOW-SHARED-01 | 校验'), []],
+    ['抢兄弟稳定ID', f.repaired.replaceAll('FLOW-PEER-REPAIRED-01', 'FLOW-EXPORT-02'), []],
+    ['同kind更名却删除流程义务', f.repaired.replace('提交请求', '跳过提交'), []],
+  ]
+  for (const [name, source, removeIds] of cases) await t.test(name, async () => {
+    f.saved.clear(); for (const [key, value] of initialSaved) f.saved.set(key, structuredClone(value))
+    const callsBefore = f.requests.length, output = draftRows(source); output.changes[0].removeIds = removeIds
+    for (const kind of Object.keys(CONTRACT_COLUMNS) as (keyof typeof CONTRACT_COLUMNS)[]) output.changes[0].tables[kind] = output.changes[0].tables[kind].filter(row => !removeIds.includes(String(row.id)))
+    const result = await elaborateSyncPartitions({ ...f.input, requestKey: name }, f.plan, 1, f.checkpoints, f.run(() => JSON.stringify(output)))
+    assert.equal(result.reviewPassed, false, name)
+    assert.ok(result.rounds.some(round => round.findings.some(issue => issue.severity === 'error')), name)
+    assert.deepEqual(f.requests.slice(callsBefore).map(request => request.purpose), ['elaboration_generate'], name)
+  })
+  await t.test('非duplicate或非本owner真实finding不给临时ID改名资格', async () => {
+    f.saved.clear(); for (const [key, value] of initialSaved) f.saved.set(key, structuredClone(value))
+    const repair = { ...f.repair, findings: f.repair.findings.filter(issue => issue.code !== 'duplicate-id') }
+    assert.ok(repair.findings.length)
+    const result = await elaborateSyncPartitions(f.input, f.plan, 1, { ...f.checkpoints, loadPartitionSealRepair: key => key === f.key ? { prior: f.prior, repair } : null }, f.run(() => JSON.stringify(draftRows(f.repaired))))
+    assert.equal(result.reviewPassed, false)
+    assert.ok(result.rounds.some(round => round.findings.some(issue => issue.code === 'readonly_repair_id_removed')))
+  })
+  await t.test('未绑定ref、篡改error定位或跨上下文旧accept均零派发拒绝', async () => {
+    const calls = f.requests.length
+    for (const repair of [{ ...f.repair, candidateDigest: 'e'.repeat(64) }, { ...f.repair, acceptedRef: f.repair.generationRef }, { ...f.repair, findings: f.repair.findings.map(issue => ({ ...issue, nodeId: 'export-contract', path })) }]) {
+      f.saved.clear(); for (const [key, value] of initialSaved) f.saved.set(key, structuredClone(value))
+      await assert.rejects(elaborateSyncPartitions(f.input, f.plan, 1, { ...f.checkpoints, loadPartitionSealRepair: key => key === f.key ? { prior: f.prior, repair } : null }, f.run(() => { throw new Error('不可派发') })), /全局seal诊断/)
+    }
+    f.saved.clear(); for (const [key, value] of initialSaved) f.saved.set(key, structuredClone(value))
+    await assert.rejects(elaborateSyncPartitions({ ...f.input, context: [{ nodeId: 'ancestor', path: ancestorPath, source: ancestor('上下文已变化') }] }, f.plan, 1, f.checkpoints, f.run(() => { throw new Error('不可派发') })), /当前完整局部输入|完整局部输入\/source/)
+    assert.equal(f.requests.length, calls)
+  })
+})
+
+
+test('全局返修保留已证明的共享VERIFY归属投影，正常新FLOW更名不被技术重复重阻', async t => {
+  const f = await sealFixture(t, true), originalSaved = structuredClone([...f.saved])
+  assert.ok(!parseContract(f.initial.partitionSeal!.changes.find(change => change.path === f.peerPath)!).contract!.items.some(item => item.kind === 'VERIFY'))
+  assert.ok(parseContract(f.prior.changes[0]).contract!.items.some(item => item.kind === 'VERIFY'))
+  const result = await elaborateSyncPartitions({ ...f.input, requestKey: 'repair-shared-verify' }, f.plan, 1, f.checkpoints, f.run(() => JSON.stringify(draftRows(f.repaired))))
+  assert.equal(result.status, 'complete', JSON.stringify({ failure: result.failure, findings: result.rounds.flatMap(round => round.findings) }))
+  assert.equal(result.partitionSeal!.passed, true)
+  assert.ok(!parseContract(result.changes.find(change => change.path === f.peerPath)!).contract!.items.some(item => item.kind === 'VERIFY'))
+  assert.ok(parseContract(f.saved.get(f.key)!.changes[0]).contract!.items.some(item => item.kind === 'VERIFY'), '原新独审本区原件继续保留，只有全局技术投影改变physical owner')
+  for (const change of ['漂移定义', '删除义务', '新增未登记'] as const) await t.test(`投影不能掩盖${change}`, async () => {
+    f.saved.clear(); for (const [key, value] of originalSaved) f.saved.set(key, structuredClone(value))
+    const output = draftRows(f.repaired)
+    if (change === '漂移定义') output.changes[0].tables.VERIFY[0].command = ['node', '--version']
+    else if (change === '删除义务') output.changes[0].tables.VERIFY = []
+    else output.changes[0].tables.VERIFY.push({ id: 'VERIFY-UNREGISTERED-01', command: ['node', '--version'], cwd: '.', 'timeout-ms': 10000 })
+    const calls = f.requests.length
+    const rejected = await elaborateSyncPartitions({ ...f.input, requestKey: change }, f.plan, 1, f.checkpoints, f.run(() => JSON.stringify(output)))
+    assert.equal(rejected.reviewPassed, false)
+    assert.ok(rejected.rounds.some(round => round.findings.some(issue => ['verification_registration_mismatch', 'readonly_repair_id_removed'].includes(issue.code))))
+    assert.deepEqual(f.requests.slice(calls).map(request => request.purpose), ['elaboration_generate'])
+  })
 })
