@@ -108,7 +108,32 @@ test('Native P1生成与独审共用来源语义和只读实现边界，interfac
     assert.match(request.prompt, /未由raw\/facts确定的普通字段表示.*由后续子分区读取实现后细化/)
     assert.match(request.prompt, /interface_seed|父接口/)
     assert.doesNotMatch(request.prompt, /逐项展开可完成主流程、状态处置和AC|每个业务REQ至少由一个主FLOW\.req直接覆盖|重新从用户原意和冻结事实走正常、失败、边界、重试/)
+    assert.doesNotMatch(request.prompt, /叶FLOW\.req只引用REQ|实际适用祖先RULE由AC\.covers/)
   }
+})
+
+test('Native P1祖先引用提示分别规定FLOW.req的REQ类型和RULE验收承接', async () => {
+  const fake = runner(request => candidate(request, source))
+  const result = await elaborate({ ...input(), maxRepairs: 0, worktree: { baseCommit: 'a'.repeat(40), tree: 'b'.repeat(40), mode: 'read' as const } }, { runner: fake.run })
+  assert.equal(result.status, 'complete')
+  const prompt = fake.calls[0].prompt
+  assert.match(prompt, /叶FLOW\.req只引用REQ，并直接承接各级实际适用祖先REQ/)
+  assert.match(prompt, /AC\.covers直接承接这些祖先REQ/)
+  assert.match(prompt, /实际适用祖先RULE由AC\.covers直接承接，或经TR\.rules引用并由对应AC覆盖该TR/)
+  assert.doesNotMatch(prompt, /叶FLOW\.req与AC\.covers承接各级实际适用祖先REQ\/RULE/)
+  assert.equal(result.contracts[0].rawSource, rawSource)
+})
+
+test('Native P1 FLOW.req误引RULE仍在独审前以reference-kind拒绝', async () => {
+  const fake = runner(request => { const output = candidate(request, source); output.changes[0].tables.FLOW[0].req = ['RULE-EXPORT-01']; return output })
+  const result = await elaborate({ ...input(), maxRepairs: 0, worktree: { baseCommit: 'a'.repeat(40), tree: 'b'.repeat(40), mode: 'read' as const } }, { runner: fake.run })
+  assert.equal(result.status, 'exhausted')
+  assert.equal(result.failure!.code, 'repair_budget_exhausted')
+  assert.ok(result.rounds[0].candidate)
+  assert.ok(result.rounds[0].findings.some(issue => issue.code === 'reference-kind' && issue.message.includes('需要 REQ，实际为 RULE')))
+  assert.equal(result.structurePassed, false); assert.equal(result.reviewPassed, false)
+  assert.deepEqual(fake.calls.map(call => call.purpose), ['elaboration_generate'])
+  assert.equal(result.contracts[0].rawSource, rawSource)
 })
 
 for (const mode of ['structure', 'review'] as const) test(`Native P1 ${mode}拒绝的第二轮收到真实输出和具体发现，保持只读权限`, async () => {

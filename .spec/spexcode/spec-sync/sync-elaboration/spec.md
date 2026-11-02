@@ -107,3 +107,5 @@ totalTimeoutMs显式null表示本次P1没有总时间期限，省略仍沿既有
 Native每轮生成复用与历史受限路径相同的repairContext，收到上一轮真实结构化输出、按当前阻断/P2待实现/GAP闭包分类的具体发现及原独审；已结算拒绝seed和只读owner诊断也保留完整原件对照。运行时格式失败没有候选时，不伪造seed：协调器只向同完整输入的本owner传入原失败code/message、resultRef及实际末轮输出/发现/独审/trace。诊断不成为raw/facts、业务批准、政策或写授权；新的生成和独审仍完整执行。业务inputDigest及已审缓存资格保持，诊断正文与来源ref进入真实prompt，因而参与现有模型requestDigest；旧原件、Legacy模板、解析schema、预算和全部readonly/REQ/AC门禁保持。
 
 同一诊断接缝也保留候选渲染前的具体结构拒绝：已结算repairable来源必须为exhausted/repair_budget_exhausted、末轮candidate:null且有明确error发现（如重复业务行rows_patch）；不伪造候选seed，原schema和结构门槛保持。
+
+Native完整叶生成提示明确区分引用类型：FLOW.req只引用REQ，并直接承接各级实际适用祖先REQ，AC.covers也直接承接这些祖先REQ；实际适用祖先RULE由AC.covers直接承接，或经本叶TR.rules引用并由对应AC覆盖该TR。不能将REQ/RULE合写为FLOW.req的合法集合，不引用兄弟或不适用义务。interface_seed仍不展开FLOW/AC；Legacy有效模板、schema、reference-kind硬门、原AC授权与独审范围保持。
