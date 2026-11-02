@@ -7,7 +7,7 @@ import test from 'node:test'
 import { parseParts } from '@spexcode/spec-core/contracts'
 import { StructuredSessionError, rejectedFinalOutput } from '../session-structured-policy.js'
 import { nativeWorktreePrompt, nativeWorktreeResult } from '../native-worktree-runtime.js'
-import { elaborate, elaborationDigest } from './elaboration.js'
+import { elaborate, elaborationDigest, verifyElaborationDraftCache } from './elaboration.js'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
 import type { ElaborationInput, ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
 import { captureInputSnapshot, contentHash, readObject, readTree, writeEvidence, writeObject, writeTree } from './snapshot.js'
@@ -230,4 +230,71 @@ test('已认证且停稳Native坏小回执附实际Git失败见证时，只保�
   }) })
   assert.equal(next.status, 'complete'); assert.equal(JSON.stringify(failed), original)
   assert.equal(next.rounds[0].draft!.path, draft.path)
+})
+
+test('validation-only续修明确允许正常empty commit，hooks实跑且不制造业务diff', async t => {
+  const f = await fixture(t), text = JSON.stringify(rows), committed = f.run(() => text)
+  const hookPath = join(f.commonDir, 'hooks/pre-commit'), hookLog = join(f.commonDir, 'draft-validation-hook.log')
+  writeFileSync(hookPath, '#!/bin/sh\nprintf "ran\\n" >> "$(git rev-parse --git-common-dir)/draft-validation-hook.log"\n'); chmodSync(hookPath, 0o755)
+  const failed = await elaborate({ ...f.input, maxRepairs: 0 }, { runner: async request => {
+    const actual = await committed(request), output = { invalidReceipt: '只需修正小回执，业务稿合法' }
+    return { ...actual, output, resultDigest: contentHash(JSON.stringify(output)) }
+  } })
+  const next = await elaborate({ ...f.input, requestKey: 'validation-only', maxRepairs: 0 }, { draft: failed.rounds[0].draft!, runner: f.run((request, workspace, draftPath) => {
+    assert.match(request.prompt, /git commit --allow-empty/); assert.match(request.prompt, /hooks/); assert.match(request.prompt, /不要造业务diff/)
+    assert.equal(readFileSync(join(workspace, draftPath), 'utf8'), text)
+    return text
+  }) })
+  assert.equal(next.status, 'complete', JSON.stringify(next.failure))
+  const draft = next.rounds[0].draft!
+  assert.notEqual(draft.resultCommit, draft.seed.baseCommit); assert.equal(draft.resultTree, draft.seed.tree)
+  assert.equal(readFileSync(hookLog, 'utf8'), 'ran\nran\n')
+})
+
+test('tagged draft saved/accepted冷缓存重核Git及body候选绑定，历史坏稿不误当成功schema', async t => {
+  const { elaborateSyncPartitions } = await import('./partition-execution.js')
+  const f = await fixture(t), paths = readTree(f.commonDir, f.snapshot.immutableTree).map(entry => entry.path)
+  const plan: import('./partitioning.js').SyncPartitionPlan = { version: 'sync-partitions-v1', digest: 'cache-draft-plan', expectedPaths: ['src/export.js'], dependencies: [], partitions: [{ id: 'draft-owner', intentNodeId: 'export-contract', targets: [{ nodeId: 'export-contract', path }], readPaths: paths, writePaths: [path], sourcePaths: ['src/export.js'], changedPaths: ['src/export.js'], contextNodeIds: ['ancestor'], contractIds: [], flowIds: [], readBytes: 100, readLimitBytes: 524288, oversizedReads: [] }] }
+  type Local = Omit<import('./elaboration-types.js').ElaborationResult, 'contracts' | 'graph' | 'coverage'>
+  let local: Local | undefined, generation = 0
+  const key = 'partition:draft-owner:elaboration', save = (name: string, value: unknown) => { if (name === key) local = structuredClone(value) as Local; return writeEvidence(f.commonDir, value) }
+  const first = await elaborateSyncPartitions(f.input, plan, 1, { load: () => null, save }, f.run(() => ++generation === 1 ? '{ historical syntax failure' : JSON.stringify(rows)))
+  assert.equal(first.status, 'complete'); assert.equal(local!.rounds.length, 2)
+  const approved = structuredClone(local!), calls = f.requests.length
+  for (const workspace of f.workspaces) git(f.root, 'worktree', 'remove', workspace)
+  const replay = (cached: Local, kind: 'saved' | 'accepted') => elaborateSyncPartitions(f.input, plan, 1, {
+    load: <T>(name: string) => kind === 'saved' && name === key ? structuredClone(cached) as T : null,
+    elaborationDraftTagged: () => true, // 原source首次生成前冻结的协议stage；不是当前input补签
+    loadAcceptedElaboration: () => kind === 'accepted' ? structuredClone(cached) : null, save: (_name, value) => writeEvidence(f.commonDir, value),
+  }, async () => { throw new Error('缓存验证不得重开模型') })
+  for (const kind of ['saved', 'accepted'] as const) {
+    assert.equal((await replay(approved, kind)).status, 'complete')
+    for (const patch of ['owner', 'schema', 'source', 'oid', 'missing-draft', 'candidate'] as const) {
+      const bad = structuredClone(approved), round = bad.rounds.at(-1)!
+      if (patch === 'owner') round.draft!.ownerDigest = 'e'.repeat(64)
+      if (patch === 'schema') round.draft!.schemaDigest = 'e'.repeat(64)
+      if (patch === 'source') round.draft!.sourceInputId = 'e'.repeat(64)
+      if (patch === 'oid') round.draft!.oid = 'e'.repeat(40)
+      if (patch === 'missing-draft') for (const item of bad.rounds) delete item.draft
+      if (patch === 'candidate') round.candidate!.changes[0].source += '\n伪造与Git正文不同的候选\n'
+      await assert.rejects(replay(bad, kind), `${kind}/${patch}不能作为已审缓存通过`)
+    }
+    const draft = approved.rounds.at(-1)!.draft!, ref = `refs/spex-sync/drafts/${draft.ownerDigest}/${draft.resultCommit}`
+    git(f.root, 'update-ref', '-d', ref)
+    await assert.rejects(replay(approved, kind), `${kind}/缺失Git保活ref必须拒绝`)
+    git(f.root, 'update-ref', ref, draft.resultCommit)
+  }
+  assert.equal(f.requests.length, calls)
+})
+
+
+test('当前新input tag不能给原legacy无draft接受结果补协议', async t => {
+  const f = await fixture(t)
+  const legacy = await elaborate({ ...f.input, draftProtocol: undefined, maxRepairs: 0 }, { runner: async request => {
+    const output = request.purpose === 'elaboration_generate' ? rows : { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+    return { sessionId: request.purpose, threadId: request.purpose, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)) }
+  } })
+  assert.equal(legacy.status, 'complete'); assert.equal(legacy.rounds[0].draft, undefined)
+  assert.doesNotThrow(() => verifyElaborationDraftCache(f.input, legacy, false))
+  assert.throws(() => verifyElaborationDraftCache(f.input, legacy, true), /当前完整局部输入/)
 })

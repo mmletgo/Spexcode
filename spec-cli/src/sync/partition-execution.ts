@@ -4,7 +4,7 @@ import { contractReferences, parseContract, parseParts } from '@spexcode/spec-co
 import { analyzeCodeBehavior, deriveBehaviorAuthorization } from './code-behavior.js'
 import type { CodeBehaviorInput } from './code-behavior.js'
 import { outputErrors } from './elaboration-schema.js'
-import { elaborate, freezeElaborationInput, projectElaborationFlowReadiness, sealPartitionedElaboration } from './elaboration.js'
+import { elaborate, freezeElaborationInput, verifyElaborationDraftCache, projectElaborationFlowReadiness, sealPartitionedElaboration } from './elaboration.js'
 import type { Contract, ContractFinding, Verification } from '@spexcode/spec-core/contracts'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
 import type { Applicability, ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationTrace, ElaborationSessionRequest, ElaborationChange, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial, ReadonlySpecRepair, VerificationOwnershipProjection } from './elaboration-types.js'
@@ -25,6 +25,7 @@ import type { CodeBehaviorAnalysis, CodeBehaviorEvidence } from './writeback-typ
 export type PartitionCheckpoints = {
   load<T>(key: string): T | null
   loadAcceptedCandidateReview?(key: string, plan: SyncPartitionPlan, input: GenerationInput, candidate: NonNullable<GenerationResult['candidate']>, builders: readonly ElaborationTrace[], current?: Omit<GenerationResult, 'candidateFiles'>): Omit<GenerationResult, 'candidateFiles'> | null
+  elaborationDraftTagged?(key: string, result: Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>): boolean
   loadAcceptedAnalysis?(key: string, planDigest: string, inputDigest: string): CodeBehaviorAnalysis | null
   loadAcceptedElaboration?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'> | null
   loadAcceptedInterfaceSeed?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'> | null
@@ -328,11 +329,15 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
       const priorInput = readonlyRepair.prior.readonlySpecRepair ? readonlyRepairInput(localInput, readonlyRepair.prior.readonlySpecRepair) : localInput
       if (freezeElaborationInput(priorInput).inputDigest !== readonlyRepair.prior.inputDigest) reject('只读V1修复的已审owner不匹配当前完整局部输入')
       const repairedInput = readonlyRepairInput(localInput, readonlyRepair.repair)
-      if (saved && saved.inputDigest === freezeElaborationInput(repairedInput).inputDigest && JSON.stringify(saved.readonlySpecRepair) === JSON.stringify(readonlyRepair.repair)) return saved
+      if (saved && saved.inputDigest === freezeElaborationInput(repairedInput).inputDigest && JSON.stringify(saved.readonlySpecRepair) === JSON.stringify(readonlyRepair.repair)) {
+        verifyElaborationDraftCache(repairedInput, saved, checkpoints.elaborationDraftTagged?.(key, saved))
+        return saved
+      }
       if (saved && contentHash(JSON.stringify(saved)) !== readonlyRepair.repair.acceptedRef.sha256) reject('只读V1修复不能绕过另一份当前局部原件')
       const accepted = (interfaceSeed ? checkpoints.loadAcceptedInterfaceSeed : checkpoints.loadAcceptedElaboration)?.(key, partitionBinding, freezeElaborationInput(repairedInput).inputDigest)
       if (accepted) {
         if (JSON.stringify(accepted.readonlySpecRepair) !== JSON.stringify(readonlyRepair.repair)) reject('只读修复承接不能改变原诊断来源')
+        verifyElaborationDraftCache(repairedInput, accepted, checkpoints.elaborationDraftTagged?.(key, accepted))
         return accepted
       }
       const seed = checkpoints.loadElaborationRepairSeed?.(key, partitionBinding, freezeElaborationInput(repairedInput).inputDigest) ?? undefined
@@ -341,12 +346,13 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
       return compact
     }
     if (saved) {
-      if (input.draftProtocol && saved.inputDigest !== inputDigest) reject('已审局部缓存不匹配当前完整局部输入，不能因可续草稿而继承accept')
+      verifyElaborationDraftCache(localInput, saved, checkpoints.elaborationDraftTagged?.(key, saved))
       return saved
     }
     const accepted = interfaceSeed ? checkpoints.loadAcceptedInterfaceSeed?.(key, partitionBinding, inputDigest) : checkpoints.loadAcceptedElaboration?.(key, partitionBinding, inputDigest)
     if (accepted) {
       if (accepted.readonlySpecRepair && freezeElaborationInput(readonlyRepairInput(localInput, accepted.readonlySpecRepair)).inputDigest !== accepted.inputDigest) reject('已审只读owner续修原件不匹配当前唯一冻结摘要')
+      verifyElaborationDraftCache(accepted.readonlySpecRepair ? readonlyRepairInput(localInput, accepted.readonlySpecRepair) : localInput, accepted, checkpoints.elaborationDraftTagged?.(key, accepted))
       return accepted
     }
     const seed = checkpoints.loadElaborationRepairSeed?.(key, partitionBinding, inputDigest) ?? undefined

@@ -4068,3 +4068,37 @@ test('已有reserved P1在SQLite冷恢复后草稿协议缺席仍不补签或改
   assert.equal(stages.some(stage => stage.stage === 'elaboration-draft-protocol'), false)
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
 })
+
+for (const missingRef of [false, true]) test(`Native whole已审draft接受缓存重核实际Git，missingRef=${missingRef}`, async t => {
+  const f = await fixture(t, { maxAttempts: 2, maxCalls: 8, maxRepairs: 1, timeoutMs: 120_000 }, false, original, 'project', original, { agentWorkflow: 'native-worktree-v1' }, undefined, 'spec', 'claude:MiniMax-M3.1-Flash')
+  const calls: string[] = []
+  f.options.runner = async request => {
+    calls.push(request.purpose)
+    const attempt = f.store.readAttempt(f.store.readOperation(f.operation.id).currentAttemptId!), dispatch = attempt.dispatchPlans.find(item => item.key === request.requestKey)!
+    if (request.purpose === 'code_generate') {
+      if (attempt.number === 1) {
+        if (missingRef) {
+          const wrapper = attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(stage => stage.stage === 'elaboration')
+          const saved = JSON.parse(readEvidence(f.input.source.commonDir, wrapper.resultRef).toString()) as ElaborationResult, draft = saved.rounds.at(-1)!.draft!
+          f.git('update-ref', '-d', `refs/spex-sync/drafts/${draft.ownerDigest}/${draft.resultCommit}`)
+        }
+        throw new StructuredSessionError('structured_output_format_invalid', '受控P2格式失败触发原预算内新attempt')
+      }
+      throw Object.assign(new Error('缓存验证在实际P2前停止'), { code: 'unsupported' })
+    }
+    const seed = request.worktree!, workspace = join(f.parent, `native-cached-draft-${calls.length}`)
+    f.git('worktree', 'add', '--detach', workspace, seed.baseCommit)
+    if (request.purpose === 'elaboration_generate') {
+      const draftPath = /草稿文件=([^\s]+)/.exec(request.prompt)![1]
+      mkdirSync(join(workspace, draftPath, '..'), { recursive: true }); writeFileSync(join(workspace, draftPath), JSON.stringify({ version: 'elaboration-target-rows-v3', changes: [], applicability: ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: false, basis: '沿用完整冻结契约', affectedIds: [] })) }))
+      execFileSync('git', ['-C', workspace, 'add', draftPath], { stdio: 'pipe' }); execFileSync('git', ['-C', workspace, 'commit', '-m', 'cached draft'], { stdio: 'pipe' })
+    }
+    const output = request.purpose === 'elaboration_generate' ? { summary: '实际草稿已提交' } : { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+    return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `cached-${request.requestKey}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)), worktree: nativeWorktreeResult(workspace, seed) }
+  }
+  const result = await runSyncOperation(f.store, f.operation.id, f.options)
+  assert.equal(calls.filter(purpose => purpose === 'elaboration_generate').length, 1); assert.equal(calls.filter(purpose => purpose === 'elaboration_review').length, 1)
+  assert.equal(calls.filter(purpose => purpose === 'code_generate').length, missingRef ? 1 : 2, JSON.stringify(result.failure))
+  assert.equal(f.store.listJournals(f.operation.id).length, 0)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
+})

@@ -7,6 +7,7 @@ code:
   - spec-cli/src/sync/elaboration.ts#elaborate
   - spec-cli/src/sync/elaboration.ts#freezeElaborationInput
   - spec-cli/src/sync/elaboration.ts#projectElaborationFlowReadiness
+  - spec-cli/src/sync/elaboration.ts#verifyElaborationDraftCache
 related:
   - spec-cli/src/sync/elaboration-orchestration.test.ts
   - spec-cli/src/sync/elaboration-target-binding.test.ts
@@ -19,6 +20,8 @@ related:
 从用户原意生成可完成主流程、适用状态事件处置、规则和验收；无法确认的重要业务政策成为 GAP，只阻塞依赖分支。
 
 ## expanded spec
+
+新草稿的接受缓存沿同一readStageDraft边界重核全部tagged轮的Git/ref/owner/schema/source身份，历史syntax/schema坏稿不要求满足成功schema。仅最终已接受轮严格解析正文、校验当前schema/行差量，并用现有绑定与renderer重算candidate、candidateDigest和完整changes；原JSON缓存不能替代Git正文。新tag但最终draft缺席拒绝。source tag只取原attempt已冻结的协议stage，沿同一原件provenance读取，不用当前attempt新tag给legacy补签；旧无tag无draft批准沿旧门。合法正文无需改动、仅重试回执或审查时，任务明确允许保留hooks的正常git commit --allow-empty，不制造业务diff；仍须真实新提交，不放宽head/seed证据。
 
 新P1按owner使用显式`elaboration-draft-v1`：Agent把完整elaboration-target-rows-v3业务JSON实际写入私有临时草稿文件，正常Git提交后只返回简短summary；精确schema留同seed只读sidecar供读取、自检，仍仅draft可写。程序经真实seed/result Git校验，从指定path/OID读取完整字节，再严格JSON/schema、目标绑定、唯一renderer/checkCandidate及不同会话的read审查。语法损坏、38KB级业务行或schema错误保留原始Git字节，下一轮明确给已有草稿路径、精确schema与程序/独审错误，让Agent实际编辑续修，不把旧大JSON/Markdown塞回prompt重答。历史已认证failed output或合法旧行可先复制为非权威材料，原字段和失败认证保持；不能成为raw、事实或批准。草稿元数据只作检查点身份，正文不成为第二份业务权威，也不进入最终candidate/delivery。输入或已审父接口改变时只复制同owner/schema的旧草稿到当前冻结source及新祖先seed，旧seed整树和旧accept都不继承；所有当前业务门、只读源码/tests对象与absence及独审仍完整执行。草稿失败在现有预算内修复，Native成功回执与业务draft拒绝分开，不伪造Native rejected final。已认证且停稳的Native小回执失败若由现有资源桥提供精确failedWorktree，只从该真实提交经同样scope校验保留非权威草稿；原Native错误和旧缺席不变，下一实际编辑继续该文件，不把失败回执文本当业务JSON。无安全Git见证或未提交文件不猜路径恢复。受控runner的真实Git回归不代表真实ClaudeCode/ZCode全链验收。
 
