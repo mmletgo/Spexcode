@@ -95,3 +95,5 @@ v12→v13真实SQLite marker升级逐字比较operation、attempt、ingress rece
 v13→v14提交快照/分区语义marker回归逐字比较旧operation、attempt、resource、ingress、journal与baseline记录；旧输入不添加captureKind、不改payload，升级前online backup保v13供停writer后的正式回退，旧13代writer必须拒绝14代。
 
 unlimited回归以真实SQLite越过70calls、10attempts/repair及旧90分钟阈值仍记真实用量；四种旧有限cap逐项保持拒绝，maxRepairs=0不改义。自动前驱跨有限新配置仍继承原unlimited及显式null，物理pause/resume、防回声、cancel与过期/旧fence继续生效。v15升级先online backup，v1–v14 checksum及旧operation/payload/receipt逐字保持，旧writer拒绝且原备份可恢复。
+
+v21迁移以隔离真实SQLite和online backup证明v1–v20 checksum及旧flat raw refs原字节不改，旧v20 writer被组件门拒绝，回滚备份仍可按v20读取。新wrapper一个checkpoint动作保留全部JSON/raw保活refs；材料缺失时不发布部分引用，旧ref不补role。

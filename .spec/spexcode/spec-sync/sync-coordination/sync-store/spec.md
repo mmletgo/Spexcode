@@ -120,3 +120,5 @@ sync.history 请求采用固定输入、目标真实交付及完整成组差量�
 模型选择遵循 [[sync-model-selection]]：规范化默认 sol 而不改旧摘要，非默认进入 payload/ingress。业务语义归并仍独立于模型；同 requestId 改模型为幂等冲突，普通重复换模型必须拒绝而不新建预算或归并到旧模型；只有合法 retryOf 可另选模型。
 
 预算支持旧numeric有限对象及精确unlimited对象。无限operation保存deadlineAtMs=null，claim与reserveDispatch持续累计真实calls/attempts/repair失败，但不因总计数或总时间耗尽；recordBudgetExhaustion拒绝将无限操作伪标耗尽。自动前驱继承原budget及显式null期限，暂停/恢复、幂等、防回声不重置或另建预算。取消、物理控制、未结资源、lease过期、旧fence及交付门禁保持；有限maxRepairs=0继续禁止修复。
+
+SyncCheckpointRef可含typed artifacts，单次checkpoint在事务外校验wrapper及全部材料CAS后原子登记wrapper与保活引用；pinnedBlobRefs递归保留原resultRef、全部JSON材料及原始raw。旧flat refs不改写或删除，不以role授予stage权。

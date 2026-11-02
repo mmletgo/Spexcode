@@ -55,3 +55,5 @@ reserveDispatch 已提交而 resource 尚未登记的冷恢复窗口同样属于
 已aborted的清理观察只更新精确资源checkpoint；即使旧业务fence仍有效，也不调用authority/reserveDispatch/bindSession或登记新plan，不改变attempt业务状态。原NativePlan/创建键、session/thread/turn、结果与停止证明仍逐项核验，真实未停止或未知继续保留资源；没有收据不能靠缺席伪造nativeStopped。正常未aborted执行的业务绑定与预算门保持。
 
 仅独立资源入口通过非持久runner选项禁止精确取消主动drain队列；原request/NativePlan摘要、candidate刷新与停止证明保持，普通runner和cancel默认不变。
+
+已认证rejectedOutput原文是UTF8诊断artifact，保留精确ref/SHA/text及原失败身份；它不具有JSON stage角色，即使正文可解析且伪装sync-stage-v1也不能取得阶段、候选或引用可达权限。只读恢复以原failed观察与canonical失败/后续精确cancelled停止记录核验，不把后续清理改签为原通过。

@@ -15,6 +15,7 @@ import { composeAuthoredInput } from './author-input.js'
 import { elaborate, freezeElaborationInput } from './elaboration.js'
 import type { ElaborationResult, ElaborationRunner, ElaborationSessionResult, ElaborationRepairSeed, ElaborationRepairDiagnostics } from './elaboration-types.js'
 import { claimFileMutex } from './file-mutex.js'
+import { readSyncCheckpoints, syncCheckpointArtifacts } from './checkpoint-evidence.js'
 import type { FileMutex } from './file-mutex.js'
 import { checkGenerationContractIntent, readFrozenContracts } from './frozen-contracts.js'
 import { decisionAuthorizationErrors, sameContractBusinessMeaning } from './contract-evolution.js'
@@ -213,8 +214,8 @@ export function readonlySpecRepairStalled(repair: Pick<ReadonlyOwnerRepair, 'can
   return candidateDigest === repair.candidateDigest && canonical(findings.filter(item => item.severity === 'error')) === canonical(repair.findings) && !attempt.dispatchPlans.some(dispatch => dispatch.purpose.startsWith('elaboration_') && repair.owners.some(owner => dispatch.key.startsWith(`sync:${attempt.id}:elaborate:partition:${owner.partitionId}:`)))
 }
 function stage<T>(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, name: string, usage: 'automatic' | 'evidence' = 'automatic'): T | null {
-  for (const ref of [...attempt.checkpointRefs].reverse()) {
-    const value = JSON.parse(readEvidence(operation.input.source.commonDir, ref).toString('utf8')) as Partial<Stage>
+  for (const { value: entry } of readSyncCheckpoints(store, operation, attempt).json) {
+    const value = entry as Partial<Stage>
     if (value.version !== 'sync-stage-v1' || value.stage !== name) continue
     if (value.operationId !== operation.id || value.attemptId !== attempt.id || value.inputId !== operation.input.id || value.policyDigest !== operation.policyDigest || !value.resultRef) fail('stage_binding', '持久阶段身份不一致')
     if (!stageSelectionMatches(operation, value as Stage)) continue
@@ -224,9 +225,9 @@ function stage<T>(store: SyncStore, operation: SyncOperation, attempt: SyncAttem
   return null
 }
 type ElaborationComposedBinding = { composedTree: string; composedContentDigest: string }
-function elaborationComposedBinding(operation: SyncOperation, attempt: SyncAttempt, result: SavedElaboration, composed: ComposedInputRef): ElaborationComposedBinding | null {
+function elaborationComposedBinding(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, result: SavedElaboration, composed: ComposedInputRef): ElaborationComposedBinding | null {
   const resultDigest = contentHash(JSON.stringify(result))
-  const original = [...attempt.checkpointRefs].reverse().map(ref => JSON.parse(readEvidence(operation.input.source.commonDir, ref).toString('utf8')) as Partial<Stage>)
+  const original = readSyncCheckpoints(store, operation, attempt).json.map(({ value }) => value as Partial<Stage>)
     .find(value => value.version === 'sync-stage-v1' && value.stage === 'elaboration' && value.operationId === operation.id && value.attemptId === attempt.id && value.inputId === operation.input.id && value.policyDigest === operation.policyDigest && value.resultRef?.sha256 === resultDigest && stageSelectionMatches(operation, value as Stage))
   return original?.composedTree === composed.tree && original.composedContentDigest === composed.contentDigest
     ? { composedTree: original.composedTree, composedContentDigest: original.composedContentDigest } : null
@@ -241,7 +242,7 @@ function partitionStage<T>(store: SyncStore, operation: SyncOperation, attempt: 
   const result = stage<T>(store, operation, attempt, key)
   if (!result) return null
   const resultRef = writeEvidence(operation.input.source.commonDir, result)
-  const original = [...attempt.checkpointRefs].reverse().map(ref => JSON.parse(readEvidence(operation.input.source.commonDir, ref).toString('utf8')) as Partial<Stage>)
+  const original = readSyncCheckpoints(store, operation, attempt).json.map(({ value }) => value as Partial<Stage>)
     .find(value => value.version === 'sync-stage-v1' && value.stage === key && value.operationId === operation.id && value.attemptId === attempt.id && value.inputId === operation.input.id && value.policyDigest === operation.policyDigest && value.resultRef?.sha256 === resultRef.sha256)
   if (original?.readSetDigest !== operation.readSetDigest || operation.baselineSelection && original.baselineSelectionRef?.sha256 !== writeEvidence(operation.input.source.commonDir, operation.baselineSelection).sha256) return null
   return { result, resultRef }
@@ -257,11 +258,11 @@ function readonlyLocalSource(store: SyncStore, operation: SyncOperation, attempt
   if (!result || writeEvidence(commonDir, result).sha256 !== resultRef.sha256) return null
   const selectedAggregate = JSON.parse(readEvidence(commonDir, aggregateRef).toString('utf8')) as SavedElaboration
   if (!selectedAggregate.structurePassed || !selectedAggregate.reviewPassed || !selectedAggregate.partitionEvidence?.some(owner => owner.resultRef.sha256 === resultRef.sha256)) fail('readonly_spec_repair_binding', '只读owner原件不属于精确选择的已审aggregate')
-  const wrapper = [...attempt.checkpointRefs].reverse().map(ref => JSON.parse(readEvidence(commonDir, ref).toString('utf8')) as Stage).find(value => value.stage === key && value.resultRef?.sha256 === resultRef.sha256)
+  const wrapper = readSyncCheckpoints(store, operation, attempt).json.map(({ value }) => value as Stage).find(value => value.stage === key && value.resultRef?.sha256 === resultRef.sha256)
   if (!wrapper?.readSetDigest || !store.listAttempts(operation.id).some(approved => {
     const aggregate = stage<SavedElaboration>(store, operation, approved, 'elaboration')
-    return aggregate?.structurePassed && aggregate.reviewPassed && aggregate.partitionEvidence?.some(owner => owner.resultRef.sha256 === resultRef.sha256) && approved.checkpointRefs.some(ref => {
-      const saved = JSON.parse(readEvidence(commonDir, ref).toString('utf8')) as Stage
+    return aggregate?.structurePassed && aggregate.reviewPassed && aggregate.partitionEvidence?.some(owner => owner.resultRef.sha256 === resultRef.sha256) && readSyncCheckpoints(store, operation, approved).json.some(({ value }) => {
+      const saved = value as Stage
       return saved.version === 'sync-stage-v1' && saved.stage === 'elaboration' && saved.resultRef?.sha256 === writeEvidence(commonDir, aggregate).sha256 && saved.readSetDigest === wrapper.readSetDigest && saved.baselineSelectionRef?.sha256 === wrapper.baselineSelectionRef?.sha256
     })
   })) fail('readonly_spec_repair_binding', '只读owner与精确已审aggregate的原readSet/selection不一致')
@@ -418,7 +419,7 @@ function readonlyRepairFromAttempt(store: SyncStore, operation: SyncOperation, a
 function readonlyRepairContext(store: SyncStore, operation: SyncOperation, source: SyncAttempt, generationRef: BlobRef): SyncOperation {
   let context = operation
   if (operation.baselineSelection) {
-    const basis = [...source.checkpointRefs].reverse().map(ref => JSON.parse(readEvidence(operation.input.source.commonDir, ref).toString('utf8')) as Stage).find(saved => saved.version === 'sync-stage-v1' && saved.stage === 'generation' && saved.operationId === operation.id && saved.attemptId === source.id && saved.inputId === operation.input.id && saved.policyDigest === operation.policyDigest && saved.resultRef?.sha256 === generationRef.sha256)
+    const basis = readSyncCheckpoints(store, operation, source).json.map(({ value }) => value as Stage).find(saved => saved.version === 'sync-stage-v1' && saved.stage === 'generation' && saved.operationId === operation.id && saved.attemptId === source.id && saved.inputId === operation.input.id && saved.policyDigest === operation.policyDigest && saved.resultRef?.sha256 === generationRef.sha256)
     if (!basis?.readSetDigest || !basis.baselineSelectionRef || !stageSelectionMatches(operation, basis)) fail('readonly_spec_repair_binding', '只读续修原generation绑定不属于当前合法null资源扩展')
     context = { ...operation, readSetDigest: basis.readSetDigest, baselineSelection: JSON.parse(readEvidence(operation.input.source.commonDir, basis.baselineSelectionRef).toString('utf8')) as FrozenBaselineSelection }
   }
@@ -442,7 +443,7 @@ function reviewedReadonlyLocal(store: SyncStore, operation: SyncOperation, sourc
   const source = readonlyLocalSource(store, operation, sourceAttempt, key, resultRef, aggregateRef)
   const prior = source?.result, round = prior?.rounds.at(-1)
   const generationTrace = round?.traces.find(trace => trace.purpose === 'elaboration_generate'), reviewTrace = round?.traces.find(trace => trace.purpose === 'elaboration_review')
-  if (!prior || source.resultRef.sha256 !== resultRef.sha256 || !prior.structurePassed || !prior.reviewPassed || prior.failure || round?.review?.verdict !== 'accept' || round.review.inputDigest !== prior.inputDigest || round.review.candidateDigest !== prior.candidateDigest || round.traces.length !== 2 || !generationTrace || !reviewTrace || generationTrace.sessionId === reviewTrace.sessionId || generationTrace.threadId === reviewTrace.threadId || generationTrace.resultDigest !== contentHash(JSON.stringify(round.output)) || reviewTrace.resultDigest !== contentHash(JSON.stringify(round.reviewOutput)) || !store.listAttempts(operation.id).some(attempt => attempt.number > afterAttemptNumber && attempt.checkpointRefs.some(ref => ref.sha256 === resultRef.sha256) && round.traces.every(trace => attempt.dispatchPlans.some(dispatch => dispatch.purpose === trace.purpose && dispatch.session?.sessionId === trace.sessionId && dispatch.session.threadId === trace.threadId && dispatch.session.turnId === trace.turnId)))) fail('readonly_spec_repair_binding', '只读V1 owner原件、完整输入或独审派发绑定失配')
+  if (!prior || source.resultRef.sha256 !== resultRef.sha256 || !prior.structurePassed || !prior.reviewPassed || prior.failure || round?.review?.verdict !== 'accept' || round.review.inputDigest !== prior.inputDigest || round.review.candidateDigest !== prior.candidateDigest || round.traces.length !== 2 || !generationTrace || !reviewTrace || generationTrace.sessionId === reviewTrace.sessionId || generationTrace.threadId === reviewTrace.threadId || generationTrace.resultDigest !== contentHash(JSON.stringify(round.output)) || reviewTrace.resultDigest !== contentHash(JSON.stringify(round.reviewOutput)) || !store.listAttempts(operation.id).some(attempt => attempt.number > afterAttemptNumber && readSyncCheckpoints(store, operation, attempt).json.some(({ ref }) => ref.sha256 === resultRef.sha256) && round.traces.every(trace => attempt.dispatchPlans.some(dispatch => dispatch.purpose === trace.purpose && dispatch.session?.sessionId === trace.sessionId && dispatch.session.threadId === trace.threadId && dispatch.session.turnId === trace.turnId)))) fail('readonly_spec_repair_binding', '只读V1 owner原件、完整输入或独审派发绑定失配')
   return prior
 }
 
@@ -527,24 +528,17 @@ function pendingReadonlyRepair(store: SyncStore, operation: SyncOperation, attem
 function saveStage(store: SyncStore, fence: WriteFence, name: string, value: unknown, basis?: Pick<Stage, 'readSetDigest' | 'baselineSelectionRef'>, composition?: ElaborationComposedBinding): BlobRef {
   const operation = store.readOperation(fence.operationId), commonDir = operation.input.source.commonDir
   const resultRef = writeEvidence(commonDir, value)
-  const refs = new Map<string, BlobRef>([[resultRef.sha256, resultRef]])
-  const visit = (entry: unknown): void => {
-    if (!entry || typeof entry !== 'object') return
-    if ('sha256' in entry && typeof entry.sha256 === 'string' && /^[0-9a-f]{64}$/.test(entry.sha256)) refs.set(entry.sha256, { sha256: entry.sha256 })
-    for (const child of Object.values(entry)) visit(child)
-  }
-  visit(value)
+  const artifacts = syncCheckpointArtifacts(value, resultRef)
   const bindings = basis ? { readSetDigest: basis.readSetDigest, baselineSelectionRef: basis.baselineSelectionRef } : operation.baselineSelection ? { readSetDigest: operation.readSetDigest, baselineSelectionRef: writeEvidence(commonDir, operation.baselineSelection) } : {}
   const guidance = behaviorAnalysisStage(name) && (value as CodeBehaviorAnalysis).reviewPassed === true ? { guidanceContractVersion: CODE_BEHAVIOR_GUIDANCE_VERSION } : {}
-  if (bindings.baselineSelectionRef) refs.set(bindings.baselineSelectionRef.sha256, bindings.baselineSelectionRef)
-  for (const ref of refs.values()) store.checkpoint(fence, ref)
-  store.checkpoint(fence, writeEvidence(commonDir, { version: 'sync-stage-v1', operationId: operation.id, attemptId: fence.attemptId, inputId: operation.input.id, policyDigest: operation.policyDigest, ...bindings, ...guidance, ...composition, stage: name, resultRef } satisfies Stage))
+  if (bindings.baselineSelectionRef) artifacts.push({ kind: 'json', ref: bindings.baselineSelectionRef })
+  store.checkpoint(fence, { ...writeEvidence(commonDir, { version: 'sync-stage-v1', operationId: operation.id, attemptId: fence.attemptId, inputId: operation.input.id, policyDigest: operation.policyDigest, ...bindings, ...guidance, ...composition, stage: name, resultRef } satisfies Stage), artifacts })
   return resultRef
 }
 function analysisStageBinding(store: SyncStore, operation: SyncOperation, analysis: CodeBehaviorAnalysis): Stage | null {
   const digest = contentHash(JSON.stringify(analysis))
-  for (const attempt of store.listAttempts(operation.id)) for (const ref of attempt.checkpointRefs) {
-    const saved = JSON.parse(readEvidence(operation.input.source.commonDir, ref).toString('utf8')) as Stage
+  for (const attempt of store.listAttempts(operation.id)) for (const { value } of readSyncCheckpoints(store, operation, attempt).json) {
+    const saved = value as Stage
     if (saved.version !== 'sync-stage-v1' || saved.stage !== 'analysis' || saved.operationId !== operation.id || saved.attemptId !== attempt.id || saved.inputId !== operation.input.id || saved.policyDigest !== operation.policyDigest || saved.resultRef?.sha256 !== digest) continue
     if (!operation.baselineSelection) return analysis.readSetDigest === operation.readSetDigest && analysis.baselinePairId === (operation.previousBaselinePair?.id ?? null) ? saved : null
     if (!stageSelectionMatches(operation, saved) || saved.readSetDigest !== analysis.readSetDigest || !saved.baselineSelectionRef) continue
@@ -967,7 +961,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           if (source?.result.structurePassed && source.result.reviewPassed && !source.result.failure) return null
           if (!source || source.result.failure?.code !== 'partition_final_seal_failed') continue
           const result = source.result, seal = result.partitionSeal
-          if (result.phase !== 'partitioned_final' || result.structurePassed || !result.reviewPassed || !seal || seal.passed || result.candidateDigest !== seal.candidateDigest || !elaborationComposedBinding(operation, prior, result, view.composed)
+          if (result.phase !== 'partitioned_final' || result.structurePassed || !result.reviewPassed || !seal || seal.passed || result.candidateDigest !== seal.candidateDigest || !elaborationComposedBinding(store, operation, prior, result, view.composed)
             || seal.candidateDigest !== contentHash(JSON.stringify({ inputDigest: seal.inputDigest, changes: seal.changes, applicability: seal.applicability, nodeChanges: seal.nodeChanges }))) fail('partition_final_seal_binding', '全局seal诊断缺少原失败候选及精确组合树绑定')
           const locals = new Map<string, { result: SavedElaboration; resultRef: BlobRef }>()
           for (const owner of result.partitionEvidence ?? []) {
@@ -1220,10 +1214,10 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       const effectiveIntentNodeId = moved.find(change => change.to.nodeId === options.plan.intentNodeId)?.from.nodeId ?? options.plan.intentNodeId
       const preserveBusiness = Boolean(analysis && !decision && !analysis.analysis.newNodes.length && !analysis.analysis.nodeChanges.some(change => change.action === 'retire') && analysis.analysis.changes.every(change => change.kind === 'refactor'))
       let elaboration = readonlyOwnerRepair ? null : stage<SavedElaboration>(store, operation, attempt, 'elaboration')
-      if (elaboration && !elaborationComposedBinding(operation, attempt, elaboration, view.composed)) elaboration = null
+      if (elaboration && !elaborationComposedBinding(store, operation, attempt, elaboration, view.composed)) elaboration = null
       if (!elaboration && !refinement && !readonlyOwnerRepair) {
         const selected = readonlyBase ?? latestApprovedElaboration(store, operation, attempt.number)
-        const composition = selected && elaborationComposedBinding(store.readOperation(selected.operationId), store.readAttempt(selected.attemptId), selected.result, view.composed)
+        const composition = selected && elaborationComposedBinding(store, store.readOperation(selected.operationId), store.readAttempt(selected.attemptId), selected.result, view.composed)
         if (selected && composition) {
           elaboration = selected.result
           saveStage(store, fence, 'elaboration-provenance', { operationId: operation.id, inputId: operation.input.id, policyDigest: operation.policyDigest, fromOperationId: selected.operationId, fromAttemptId: selected.attemptId, evidenceRef: selected.resultRef, candidateDigest: selected.result.candidateDigest })

@@ -628,8 +628,9 @@ export class SyncStore {
   listRecoverableResources(): RecoverableSyncResource[] {
     return this.write(tx => tx.query("SELECT r.record_json AS resource_json,o.record_json AS operation_json,a.record_json AS attempt_json FROM sync_resources r JOIN sync_operations o ON o.id=r.operation_id JOIN sync_attempts a ON a.id=r.attempt_id WHERE r.phase!='removed' ORDER BY r.rowid").map(row => ({ operation: JSON.parse(String(row.operation_json)) as SyncOperation, attempt: JSON.parse(String(row.attempt_json)) as SyncAttempt, resource: JSON.parse(String(row.resource_json)) as SyncResourceRecord })))
   }
-  checkpoint(fence: WriteFence, ref: BlobRef): SyncAttempt {
+  checkpoint(fence: WriteFence, ref: import('./operation-types.js').SyncCheckpointRef): SyncAttempt {
     this.blob(ref)
+    for (const artifact of ref.artifacts ?? []) this.blob(artifact.ref)
     return this.write(tx => { const { attempt } = this.checkFence(tx, fence, true); if (!attempt.checkpointRefs.some(prior => prior.sha256 === ref.sha256)) attempt.checkpointRefs.push(clone(ref)); this.saveAttempt(tx, attempt); return attempt })
   }
   renewLease(fence: WriteFence, leaseMs: number): SyncAttempt {

@@ -61,3 +61,5 @@ operation/admission/ingress 可带固定 model，缺省及显式 gpt-6.1-sol 省
 InputSnapshot 的可选 captureKind=commit 表示自动输入绑定已提交 HEAD tree；缺字段仍表示历史工作区采集。新标记参与快照身份与持久 operation，恢复、当前性检查、可信配置复核和显式重试均沿冻结采集模式，不由当前工作区状态猜测。实际原树采纳、落地状态及 dirty 覆盖保护仍检查独立采集的真实工作区/index。
 
 SyncBudget 保持既有四个 numeric 字段对象逐字语义，另接受精确 `{mode: "unlimited"}`，此模式没有总calls/attempts/repairs/timeout cap；operation.deadlineAtMs 显式为null。真实计数仍累计，单次Native调用、验证timeout、lease/fence和全部审查/交付门禁独立有效。
+
+SyncCheckpointRef仅在attempt checkpoint引用上可选携artifacts:{kind:json|untrusted_final,ref}，普通业务BlobRef保持仅sha256。新wrapper及其全部材料引用同次提交，旧缺席保持，无新增事实/候选/授权。

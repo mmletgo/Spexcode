@@ -265,14 +265,47 @@ test('source continuity v20 marker backs up v19 and preserves old records and ch
     const rows = (protocol: typeof f.protocol) => protocol.withTransaction(tx => Object.fromEntries(['sync_operations', 'sync_attempts', 'sync_resources', 'sync_ingress_receipts', 'sync_apply_journals', 'sync_baseline_pairs', 'sync_leases'].map(table => [table, tx.query(`SELECT * FROM ${table}`)])))
     const before = rows(f.protocol), checksums = f.protocol.withTransaction(tx => tx.query('SELECT version,checksum FROM schema_migrations WHERE component=? ORDER BY version', SYNC_COMPONENT))
     const backupPath = join(f.root, 'v19-before-continuity.backup')
-    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), 20)
+    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), SYNC_MIGRATIONS.length)
     assert.deepEqual(rows(f.protocol), before)
     assert.deepEqual(f.protocol.withTransaction(tx => tx.query('SELECT version,checksum FROM schema_migrations WHERE component=? AND version<=19 ORDER BY version', SYNC_COMPONENT)), checksums)
     assert.throws(() => applyComponentMigrations(f.protocol, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 19)), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
     backup = openProtocol(backupPath)
     assert.equal(applyComponentMigrations(backup, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 19)), 19)
     assert.deepEqual(rows(backup), before)
-    assert.equal(await migrateSyncStore(f.protocol), 20)
+    assert.equal(await migrateSyncStore(f.protocol), SYNC_MIGRATIONS.length)
+  } finally { backup?.close(); f.cleanup() }
+})
+
+test('typed checkpoint v21 atomically pins all materials, preserves v20 records and backup, and rejects old writer', async () => {
+  const f = await fixture()
+  let backup: ReturnType<typeof openProtocol> | undefined
+  try {
+    const claim = f.claim(), rawBytes = Buffer.from('{"untrusted":[}'), raw = { sha256: createHash('sha256').update(rawBytes).digest('hex') }
+    f.blobs.set(raw.sha256, rawBytes)
+    f.store.checkpoint(claim.fence, raw)
+    f.protocol.withTransaction(tx => tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=21', SYNC_COMPONENT))
+    const records = () => f.protocol.withTransaction(tx => Object.fromEntries(['sync_operations', 'sync_attempts', 'sync_resources', 'sync_leases'].map(table => [table, tx.query(`SELECT * FROM ${table}`)])))
+    const before = records(), checksums = f.protocol.withTransaction(tx => tx.query('SELECT version,checksum FROM schema_migrations WHERE component=? ORDER BY version', SYNC_COMPONENT)), backupPath = join(f.root, 'v20-before-artifacts.backup')
+    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), 21)
+    assert.deepEqual(records(), before)
+    assert.deepEqual(f.protocol.withTransaction(tx => tx.query('SELECT version,checksum FROM schema_migrations WHERE component=? AND version<=20 ORDER BY version', SYNC_COMPONENT)), checksums)
+    assert.throws(() => applyComponentMigrations(f.protocol, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 20)), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
+    backup = openProtocol(backupPath)
+    assert.equal(applyComponentMigrations(backup, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 20)), 20)
+    assert.deepEqual(backup.withTransaction(tx => Object.fromEntries(['sync_operations', 'sync_attempts', 'sync_resources', 'sync_leases'].map(table => [table, tx.query(`SELECT * FROM ${table}`)]))), before)
+    const result = f.put({ original: 'JSON material' }), wrapper = f.put({ stage: 'typed' }), missing = { sha256: 'f'.repeat(64) }, refs = f.store.readAttempt(claim.attempt.id).checkpointRefs
+    assert.throws(() => f.store.checkpoint(claim.fence, { ...wrapper, artifacts: [{ kind: 'json', ref: missing }] }))
+    assert.deepEqual(f.store.readAttempt(claim.attempt.id).checkpointRefs, refs, 'failed material validation publishes no partial checkpoint')
+    const freshBytes = Buffer.from('fresh raw final [}'), freshRaw = { sha256: createHash('sha256').update(freshBytes).digest('hex') }
+    f.blobs.set(freshRaw.sha256, freshBytes)
+    assert.ok(!f.store.pinnedBlobRefs().some(pin => pin.sha256 === freshRaw.sha256))
+    f.store.checkpoint(claim.fence, { ...wrapper, artifacts: [{ kind: 'json', ref: result }, { kind: 'untrusted_final', ref: freshRaw }] })
+    const after = f.store.readAttempt(claim.attempt.id).checkpointRefs
+    assert.equal(after.length, refs.length + 1)
+    assert.deepEqual(after[0], raw, 'legacy flat raw ref is never rewritten')
+    assert.ok(!after.some(ref => ref.sha256 === freshRaw.sha256))
+    assert.ok([wrapper, result, raw, freshRaw].every(ref => f.store.pinnedBlobRefs().some(pin => pin.sha256 === ref.sha256)))
+    assert.equal(await migrateSyncStore(f.protocol), 21)
   } finally { backup?.close(); f.cleanup() }
 })
 

@@ -28,6 +28,7 @@ import type { TrustedRuntimeEntry } from './trusted-hooks.js'
 import { coveredPath, readSyncSettings, SyncApplicationError } from './settings.js'
 import { SyncInputObserver, type SyncObserverHealth } from './observer.js'
 import { SyncStore, SyncStoreError } from './store.js'
+import { readSyncCheckpoints } from './checkpoint-evidence.js'
 import { prepareHistoryRequest, readHistoryRequest, readReceiptHistoryRestorations } from './history-input.js'
 import { readSyncLandingStatus } from './landing-status.js'
 import { isSyncSpecPath, readFrozenContracts } from './frozen-contracts.js'
@@ -885,7 +886,12 @@ export class SyncApplication {
   async readEvidence(id: string, ref: BlobRef): Promise<unknown> {
     const detail = await this.readOperation(id)
     if (!/^[a-f0-9]{64}$/.test(ref.sha256)) throw new SyncApplicationError('sync_evidence_unrelated', '证据摘要不合法', 400)
-    const references = (value: unknown): string[] => [...JSON.stringify(value).matchAll(/"sha256":"([a-f0-9]{64})"/g)].map(match => match[1])
+    const raw = new Map(this.store.listAttempts(id).flatMap(attempt => [...readSyncCheckpoints(this.store, detail.operation, attempt).raw]))
+    const references = (value: unknown): string[] => {
+      if (!value || typeof value !== 'object') return []
+      if ('kind' in value && value.kind === 'untrusted_final') return 'ref' in value ? references(value.ref) : []
+      return [...('sha256' in value && typeof value.sha256 === 'string' && /^[a-f0-9]{64}$/.test(value.sha256) ? [value.sha256] : []), ...Object.values(value).flatMap(references)]
+    }
     const queue = references(detail), seen = new Set<string>()
     let belongs = false
     for (let at = 0; at < queue.length; at++) {
@@ -893,9 +899,11 @@ export class SyncApplication {
       if (seen.has(hash)) continue
       seen.add(hash)
       if (hash === ref.sha256) { belongs = true; break }
+      if (raw.has(hash)) continue
       queue.push(...references(JSON.parse(readEvidence(detail.operation.input.source.commonDir, { sha256: hash }).toString('utf8')) as unknown))
     }
     if (!belongs) throw new SyncApplicationError('sync_evidence_unrelated', '证据不属于此操作的可查询结果', 404)
+    if (raw.has(ref.sha256)) return raw.get(ref.sha256)
     return JSON.parse(readEvidence(detail.operation.input.source.commonDir, ref).toString('utf8')) as unknown
   }
 }

@@ -133,3 +133,7 @@ Dashboard 的受控正文保存继续直接 submit，requestBlob 即时触发 sp
 可信配置可显式选择unlimited总预算；新operation保存null期限，自动前驱原样继承，重复事件和暂停恢复不改预算。接入互斥继续有限等待，单次Native默认120000ms或冻结配置的有限正数；不因总预算无限恢复普通stopped派发或跳过资源结算。
 
 resources-only是独立于control(recover)的显式清理入口：要求完整operation ID与原frozen input ID，仅准当前canonicalRoot/commonDir与历史来源相同的owned资源。它不放松read/resume/adopt的完整assertSource，不赋予身份连续性；结果只返回资源结算与pending journal摘要，不调用readOperation/detail再采集来源。专用factory不注册或复用服务owner、不启动watcher/queue、不读当前业务配置或固定交付工具，也不唤醒其它任务。资源清理成功不重签attempt.failure、accept/review、原输出/digest或预算；旧journal不回放、不新建receipt。
+
+正式detail/read-current与证据BFS使用同一typed checkpoint边界。raw只在强失败来源绑定后以明确untrusted_final/text/SHA投影返回，BFS不解析或追踪raw正文伪sha字段；普通JSON证据仍按原可达链读取，未知坏JSON显式失败。
+
+旧untrusted_final缺ref时，原文sha256仅为诊断摘要，不建立CAS可达边；正式readEvidence仍可读其原JSON材料，查询该缺席raw引用返回无关证据404，不补写旧记录。
