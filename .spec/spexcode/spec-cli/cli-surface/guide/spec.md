@@ -145,3 +145,5 @@ sync guide 说明 run/verify --model 固定全阶段及独审选择，默认 sol
 sync guide 说明budget可精确配置mode=unlimited解除四种总cap、期限为null且继续记真实用量；callTimeoutMs仍有限正整数，缺省最多120000ms，仅有限预算要求不超过总timeoutMs。单次回收、验证timeout、lease/fence及完整独审交付门槛保持，不以无限模式改写旧操作。
 
 sync帮助同时区分正常recover与显式离线sync resources recover：前者可恢复已开始journal，后者只在精确历史operation/input与当前root/commonDir绑定下结算旧资源，不回放journal或取得身份连续性。详细约束见[[sync-cli]]及[[sync-application]]。
+
+sync手册说明 [[sync-source-registration]] 的offline显式旧dev双哈希登记、原PhysicalControl暂停、独立私有continuity CAS、v20备份及配套启用记录回滚；不把登记当模型或同步成功，也不声称DB/文件跨介质原子。

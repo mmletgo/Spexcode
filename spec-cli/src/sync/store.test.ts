@@ -245,14 +245,34 @@ test('ZCode noninteractive v19 marker rejects v18 writers and preserves legacy p
     const rows = (protocol: typeof f.protocol) => protocol.withTransaction(tx => Object.fromEntries(['sync_operations', 'sync_attempts', 'sync_resources', 'sync_ingress_receipts', 'sync_apply_journals', 'sync_baseline_pairs'].map(table => [table, tx.query(`SELECT * FROM ${table}`)])))
     const before = rows(f.protocol), checksums = f.protocol.withTransaction(tx => tx.query('SELECT version,checksum FROM schema_migrations WHERE component=? ORDER BY version', SYNC_COMPONENT))
     const backupPath = join(f.root, 'v18-before-noninteractive.backup')
-    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), 19)
+    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), SYNC_MIGRATIONS.length)
     assert.deepEqual(rows(f.protocol), before)
     assert.deepEqual(f.protocol.withTransaction(tx => tx.query('SELECT version,checksum FROM schema_migrations WHERE component=? AND version<=18 ORDER BY version', SYNC_COMPONENT)), checksums)
     assert.throws(() => applyComponentMigrations(f.protocol, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 18)), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
     backup = openProtocol(backupPath)
     assert.equal(applyComponentMigrations(backup, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 18)), 18)
     assert.deepEqual(rows(backup), before)
-    assert.equal(await migrateSyncStore(f.protocol), 19)
+    assert.equal(await migrateSyncStore(f.protocol), SYNC_MIGRATIONS.length)
+  } finally { backup?.close(); f.cleanup() }
+})
+
+test('source continuity v20 marker backs up v19 and preserves old records and checksums while refusing old writers', async () => {
+  const f = await fixture()
+  let backup: ReturnType<typeof openProtocol> | undefined
+  try {
+    f.store.admitAndEnqueue(f.admit())
+    f.protocol.withTransaction(tx => tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=20', SYNC_COMPONENT))
+    const rows = (protocol: typeof f.protocol) => protocol.withTransaction(tx => Object.fromEntries(['sync_operations', 'sync_attempts', 'sync_resources', 'sync_ingress_receipts', 'sync_apply_journals', 'sync_baseline_pairs', 'sync_leases'].map(table => [table, tx.query(`SELECT * FROM ${table}`)])))
+    const before = rows(f.protocol), checksums = f.protocol.withTransaction(tx => tx.query('SELECT version,checksum FROM schema_migrations WHERE component=? ORDER BY version', SYNC_COMPONENT))
+    const backupPath = join(f.root, 'v19-before-continuity.backup')
+    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), 20)
+    assert.deepEqual(rows(f.protocol), before)
+    assert.deepEqual(f.protocol.withTransaction(tx => tx.query('SELECT version,checksum FROM schema_migrations WHERE component=? AND version<=19 ORDER BY version', SYNC_COMPONENT)), checksums)
+    assert.throws(() => applyComponentMigrations(f.protocol, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 19)), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
+    backup = openProtocol(backupPath)
+    assert.equal(applyComponentMigrations(backup, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 19)), 19)
+    assert.deepEqual(rows(backup), before)
+    assert.equal(await migrateSyncStore(f.protocol), 20)
   } finally { backup?.close(); f.cleanup() }
 })
 

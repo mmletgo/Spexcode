@@ -840,6 +840,12 @@ JSON 分列 coverage 与本次 affected_scope；未配置范围返回 unsupporte
 结果是同一完整管线的新操作，冲突仍需具体业务处理，不能把已受理当已落地。
 回退程序版本前：spex sync stop-writer。此动作暂停新写入并结算或保留实际journal/资源；
 先检查返回的恢复诊断，再停服务和回退程序。新增数据库表和证据保留，不做破坏性down migration。
+重启仅设备号漂移时，先离线停稳并用正式resources recover结算资源，再显式：
+  spex sync source-continuity <operation-id> --input-id <原input> --revision <原revision> --enabled-digest <原enabled字节SHA> --old-common-dev <旧dev> --old-root-dev <旧dev> --old-git-dev <旧dev>
+登记同时重现原repositoryId/physicalFingerprint并CAS暂停原PhysicalControl；保持旧operation/input/预算，退出后由operator核验再resume。
+同commonDir的新managed worktree只共享logical仓库ID，物理身份仍来自真实新目录；其它旧来源不借此继承权限。
+新proof及旧enabled原件在私有runtime/sync/continuity-evidence按SHA保存，不由普通Git evidence GC清理。
+v20升级先online备份，旧writer拒绝；回滚停新writer后配套恢复DB备份、旧enabled及其证据。文件与DB非跨介质原子，失败可能保持pause，不自动rollback。
 
 see also: spex help sync`
 

@@ -915,6 +915,21 @@ export class SyncStore {
       return (!TERMINAL.has(operation.phase) && operation.phase !== 'paused') || journals.length ? [{ operation, attempt, journals }] : []
     }))
   }
+  /** 连续性登记只读核整个 commonDir，不能遗漏另一个 raw namespace 的有效权威。 */
+  sourceContinuityState(commonDir: string): { sources: WorktreeIdentity[]; activeAttemptIds: string[]; leasedOperationIds: string[]; resourceIds: string[]; journalIds: string[] } {
+    return this.write(tx => {
+      const operations = tx.query('SELECT record_json FROM sync_operations').map(row => parseRecord<SyncOperation>(row)!).filter(operation => operation.input.source.commonDir === commonDir)
+      const ids = new Set(operations.map(operation => operation.id)), now = this.now()
+      const attempts = operations.flatMap(operation => operation.currentAttemptId ? [this.attempt(tx, operation.currentAttemptId)] : [])
+      return {
+        sources: [...new Map(operations.map(operation => [identityKey(operation.input.source), operation.input.source])).values()],
+        activeAttemptIds: attempts.filter(attempt => attempt.expiresAtMs > now && !['failed', 'settled', 'superseded'].includes(attempt.status)).map(attempt => attempt.id),
+        leasedOperationIds: [...new Set(tx.query('SELECT operation_id FROM sync_leases WHERE token IS NOT NULL AND expires_at_ms>?', now).map(row => String(row.operation_id)).filter(id => ids.has(id)))],
+        resourceIds: tx.query("SELECT record_json FROM sync_resources WHERE phase!='removed'").map(row => parseRecord<SyncResourceRecord>(row)!).filter(resource => ids.has(resource.operationId)).map(resource => resource.id),
+        journalIds: tx.query("SELECT record_json FROM sync_apply_journals WHERE status!='settled'").map(row => parseRecord<ApplyJournal>(row)!).filter(journal => ids.has(journal.operationId)).map(journal => journal.id),
+      }
+    })
+  }
   pinnedBlobRefs(): BlobRef[] {
     return this.write(tx => {
       const refs = new Set<string>()

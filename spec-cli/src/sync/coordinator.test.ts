@@ -2778,7 +2778,8 @@ for (const kind of ['candidate-seed', 'typed-diagnostic'] as const) test(`P1冷�
   })
   store.recordFailure = () => { throw new Error('模拟在P1 CAS保存后、attempt.failure持久化前崩溃') }
   const interruptedRun = await runSyncOperation(store, f.operation.id, f.options).then(value => ({ value }), error => ({ error }))
-  assert.ok('error' in interruptedRun, JSON.stringify({ status: interruptedRun.value?.status, phase: interruptedRun.value?.operation.phase, failure: interruptedRun.value?.failure, calls: f.calls.map(call => call.purpose), attempts: store.listAttempts(f.operation.id).map(attempt => ({ status: attempt.status, failure: attempt.failure })) }))
+  const interruptedDiagnostic = 'value' in interruptedRun ? { status: interruptedRun.value?.status, phase: interruptedRun.value?.operation.phase, failure: interruptedRun.value?.failure } : {}
+  assert.ok('error' in interruptedRun, JSON.stringify({ ...interruptedDiagnostic, calls: f.calls.map(call => call.purpose), attempts: store.listAttempts(f.operation.id).map(attempt => ({ status: attempt.status, failure: attempt.failure })) }))
 
   const crashed = store.readOperation(f.operation.id), crashedAttempt = store.readAttempt(crashed.currentAttemptId!)
   assert.equal(crashed.phase, 'elaborating')

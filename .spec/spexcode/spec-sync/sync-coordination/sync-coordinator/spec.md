@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+resource-only入口按 [[sync-source-registration]] 使用专用raw Git登记元数据核原root/commonDir/input，允许失效continuity见证后仍清理；该raw路径不进入normal resume/admit/adopt/currentness/V4，不放宽业务物理权限或重放journal。
+
 新agentWorkflow=native-worktree-v1操作显式给每阶段实际seed，P0=composed含受控raw，P1=composed/必要refinement候选加已审祖先并在独审叠加本轮Spec，P2builder=完整已审Spec overlay，独审=唯一实际candidate。seed由原冻结headCommit作parent的私有commit保活，不能从live WIP/index重建或闭包统一猜同一tree。模型结果/缓存绑定实际可见tree及任务prompt/schema。readPaths只保责任与currentness/业务验证，不限制代理FS读取；实际写范围、作者授权、原测试、独立会话、V1–V4、真实Docker、strictGit receipt、formal adopt/sourceSynced/canonicalSynced继续原门。code→Spec沿specOnly装配，绝不调用code_generate修验收。旧无workflow计划按旧固定协议恢复，不热升级其请求/摘要/预算。
 
 实际目标的 code/related、代码来源和 AC.test 引用沿同一冻结对象清单展开为只读闭包；已有持久计划也在接入与执行读取时补齐该闭包，不改变 targets、writePaths、executionScope 或 policy。新增完整正文及真实 mode/OID/absence 进入新 admission 的 readSetDigest 和对应分区的 Native required 输入。只读父接口不因此扇出其它实现，程序读过不替代 Native 完整读取证明。旧 retryOf 若因完整读取闭包变化而产生不同 readSetDigest，仍由原 store 精确绑定门拒绝；不改旧 operation 或证明，不以只读为由重签摘要。新的正式操作通过新计划冻结当前闭包。

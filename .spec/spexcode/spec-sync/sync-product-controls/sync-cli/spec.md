@@ -16,6 +16,8 @@ related:
 
 ## expanded spec
 
+`spex sync source-continuity <operation-id> --input-id <id> --revision <N> --enabled-digest <sha256> --old-common-dev <N> --old-root-dev <N> --old-git-dev <N>` 是 [[sync-source-registration]] 的正式offline入口，拒绝API路由和多余业务选项，缺值/错配非零退出。不调用HTTP或启动服务，成功输出真实proof引用与pause，重复登记不重复派发。文档要求停稳及先结算资源，v20配套备份/启用原件回滚；resume为后续明确控制。
+
 `spex sync settings|enable|status|run|verify|decide|show|pause|resume|cancel|recover` 通过 clientSyncRequest 调后端 [[sync-application]]，请求携带 cwd 项目的 targetTree，由后端持有 pipeline 生命周期。mutator 复用项目匹配 guard 和显式 API 路由；不可达或 HTTP 拒绝非零退出，不使用 cached/mock fallback。结果输出 JSON，queued、failed、GAP 及原树待落地不能用成功文案掩盖。
 
 run 接收 node-id 或 --node，--request-id 提供稳定键，缺省一次 UUID。--patch-file 是 UTF-8 JSON SpecBodyEdit，复用正文校验。status 支持 --node 和 1..200 的 --limit；show/cancel/recover 需要完整 operation ID，pause/resume 可省略ID控制物理来源。未知 flag/缺值拒绝。enable 可用 --config-digest 检查并发配置变化。help 明确手动 Spec/代码驱动、业务裁决与 Docker Node 验证，已启用来源由正式后端独立持续观察。

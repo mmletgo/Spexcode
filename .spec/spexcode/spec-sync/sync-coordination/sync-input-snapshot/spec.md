@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+[[sync-source-registration]] 的显式见证在公共identify/fingerprint接缝投影logical repositoryId及本root已证明的physicalFingerprint；actual路径、Git登记与branch仍真实读取，snapshot/source字段和顺序不增加wrapper。commonDir共享仓库ID，新managed root保真实新physical；未证明linked旧权限不能借repo共享继续。失效v2正常读取fail closed，不fallback新namespace。仅正式continuity配置核验与resource-only清理可用具名raw探针，normal capture/currentness/V4/准入不采用raw旁路。
+
 明确 blob OID 集合的批读接缝先批量查询真实对象类型和大小，再复用读树原有的容量分组、framing、完整字节与 SHA-1/SHA-256 OID 校验。去重只减少同次重复对象读取，不改变调用者的逐路径解析；空集合不启动 Git，单对象沿用原路径。元数据不匹配、缺失和损坏明确失败，每次调用重新读取，不建立跨调用缓存或放宽单对象容量。
 
 已授权的 canonicalRoot/gitDir 可独立重读同一物理 fingerprint，用于在目录删除重建、HEAD 尚不可解析时立即识别旧授权失效；它不读取 Git 业务内容，也不为缺失或未初始化来源生成 InputSnapshot。完整身份与快照继续使用同一 fingerprint 算法。

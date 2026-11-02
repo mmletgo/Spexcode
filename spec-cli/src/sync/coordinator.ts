@@ -38,7 +38,7 @@ import { withoutSessionApplicationExecutionWake } from '../session-application.j
 import { assertFrozenBinding, readFrozenManifest, readFrozenRange } from '../frozen-context.js'
 import { StructuredSessionError } from '../session-structured-policy.js'
 import { SettledSessionCreateTimeoutError } from '../session-structured.js'
-import { captureInputSnapshot, contentHash, identifyWorktree, objectGit, readEvidence, readObject, readTree, validateRepositoryPath, verifySnapshot, writeEvidence } from './snapshot.js'
+import { captureInputSnapshot, contentHash, identifyRawWorktree, objectGit, readEvidence, readObject, readTree, validateRepositoryPath, verifySnapshot, writeEvidence } from './snapshot.js'
 import type { SnapshotManifest } from './snapshot.js'
 import { SyncStoreError } from './store.js'
 import type { SyncStore } from './store.js'
@@ -643,7 +643,7 @@ export type SyncResourceRecoveryResult = { operationId: string; inputId: string;
 
 /** 只结算显式历史输入的owned资源；身份漂移不授予业务恢复或journal写入权。 */
 export async function recoverSyncOperationResources(store: SyncStore, operationId: string, options: { root: string; inputId: string; artifactRoot: string; verificationDriver?: SyncCoordinatorOptions['verificationDriver'] }): Promise<SyncResourceRecoveryResult> {
-  const operation = store.readOperation(operationId), source = identifyWorktree(options.root)
+  const operation = store.readOperation(operationId), source = identifyRawWorktree(options.root)
   if (operation.input.id !== options.inputId) fail('resource_recovery_input', '资源清理必须明确匹配原frozen input ID')
   if (source.canonicalRoot !== operation.input.source.canonicalRoot || source.commonDir !== operation.input.source.commonDir) fail('resource_recovery_source', '资源清理不属于当前canonicalRoot/commonDir')
   const result = (status: SyncResourceRecoveryResult['status'], failure?: SyncResourceRecoveryResult['failure']): SyncResourceRecoveryResult => ({ operationId, inputId: operation.input.id, status, resources: store.listRecoverableResources().filter(item => item.operation.id === operationId).map(item => item.resource), pendingJournalIds: store.listJournals(operationId).filter(journal => journal.status !== 'settled').map(journal => journal.id), ...(failure ? { failure } : {}) })
