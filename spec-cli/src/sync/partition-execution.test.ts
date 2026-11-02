@@ -17,7 +17,7 @@ import { withoutVerificationTables } from './elaboration-markdown.js'
 import type { GeneratedTables, GeneratedTargetElaboration } from './elaboration-markdown.js'
 import type { GenerationInput } from './generation-types.js'
 import { freezeGenerationInput, generationReviewRequest, restoreGenerationInput } from './generation.js'
-import { analyzeSyncPartitions, completeSyncPartitionPlan, elaborateSyncPartitions, generateSyncPartitions, implementationGenerationDispatch, implementationPartitionSelection, mapSyncPartitions, projectPartitionVerificationOwnership } from './partition-execution.js'
+import { analyzeSyncPartitions, completeSyncPartitionPlan, elaborateSyncPartitions, generateSyncPartitions, implementationGenerationDispatch, implementationPartitionSelection, mapSyncPartitions, partitionSealRepairOwners, projectPartitionVerificationOwnership } from './partition-execution.js'
 import type { PartitionCheckpoints } from './partition-execution.js'
 import { planSyncPartitions } from './partitioning.js'
 import type { SyncPartitionPlan } from './partitioning.js'
@@ -58,6 +58,19 @@ async function fixture(t: test.TestContext): Promise<{ input: GenerationInput; p
   return { input, plan, checkpoints, root }
 }
 
+
+test('全局seal只路由真实error owner及引用依赖，无关accept不失效', async t => {
+  const prepared = await fixture(t), { plan, input } = prepared
+  const changes = input.contracts.map(contract => { const source = input.files.get(contract.path)!; return { nodeId: contract.nodeId, path: contract.path, beforeDigest: contentHash(source), source, contentDigest: contentHash(source) } })
+  const locals = new Map(plan.partitions.map(partition => [partition.id, { changes: changes.filter(change => partition.targets.some(target => target.path === change.path)), partitionBinding: { planDigest: plan.digest, partitionId: partition.id } }]))
+  const error = { code: 'missing-requirement-flow', severity: 'error' as const, nodeId: 'import-contract', path: input.contracts[1].path, itemId: 'REQ-IMPORT-01', message: '真实error诊断投影' }
+  const aggregate = { changes, partitionSeal: { inputDigest: 'input', candidateDigest: 'candidate', changes, applicability: [], nodeChanges: [], findings: [error, { ...error, severity: 'warning' as const, nodeId: 'archive-contract', path: input.contracts[2].path, itemId: 'REQ-ARCHIVE-01' }], passed: false } }
+  const routed = partitionSealRepairOwners(plan, aggregate, locals)
+  assert.deepEqual([...routed.keys()].sort(), ['part-export', 'part-import'])
+  assert.ok([...routed.values()].every(findings => findings.length === 1 && findings[0] === error))
+  assert.equal(routed.has('part-archive'), false)
+  assert.throws(() => partitionSealRepairOwners(plan, { ...aggregate, partitionSeal: { ...aggregate.partitionSeal, findings: [{ ...error, path: '.spec/foreign/spec.md' }] } }, locals), { code: 'partition_final_seal_unroutable' })
+})
 
 test('局部分区最终封口读取composed全树承接，真实缺失仍由strict门拒绝', async t => {
   const prepared = await fixture(t), parentPath = '.spec/export/spec.md'

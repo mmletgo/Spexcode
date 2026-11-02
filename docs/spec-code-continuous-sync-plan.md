@@ -625,3 +625,7 @@ Native完整叶生成提示明确区分引用类型：FLOW.req只引用REQ，并
 显式sync resources recover <operation-id> --input-id <原frozen输入>及对应HTTP资源入口提供严格resource-only恢复：即使机器重启后物理repoId改变，仍只准canonicalRoot/commonDir一致的owned历史资源结算；这不授权业务连续性，正常read/resume/adopt完整source门保持。专用入口单次离线可用，不启动API/watcher/queue；不新attempt/dispatch/模型/验收容器，不prepare/apply或回放任何journal，不造receipt，不重签原失败/候选/独审/output/digest。pending journal原样保留，停止证明未知或计划错配仍保未结算。只复用现有资源/CAS/lease状态，不新增身份字段、迁移或writer marker。
 
 原生final在格式或schema拒绝时，仅经adapter认证原plan/request/schema/session/turn与已停稳终态后，作为显式不可信诊断保存完整正文、SHA及原文ref；同owner既有repairContext把正文直接送入下一实际prompt并绑定请求摘要。成功output、candidate及digest仍缺席，语法坏/JSON合法但schema坏均不接受，仍须重新生成和独审；不读取thinking，旧无证据不补写。该可选诊断不授予执行authority，不新增writer marker。
+
+全局分区封口失败不能只重放局部accept：只把真实error按原aggregate/局部ref、完整输入与候选绑定交给所属owner及其真实接口后代/引用依赖，重新生成和独审；无关accept保留。纯父不补FLOW、不降覆盖，warning不作为error。无合法可修owner或同候选同错误且无owner新派发时明确停止零调用循环；多轮真实修复继续共享原operation/input/fence及总预算。
+
+正式pause/resume在绑定前留下的superseded/failure:null空控制attempt，仅当checkpointRefs/dispatchPlans均空、composed/candidate/verification/currentSession均null、publicationBase缺席且原selectionDigest与当前一致时可越过；它不产生授权、不补签绑定，旧真实seal仍须完整匹配当前operation/input/policy/plan/composed/readSet/selection。任何业务/会话锚、非空产物或选择冲突仍是回溯屏障，空attempt仍消耗原计数。

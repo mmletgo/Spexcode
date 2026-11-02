@@ -5,7 +5,7 @@ import { analyzeCodeBehavior, deriveBehaviorAuthorization } from './code-behavio
 import type { CodeBehaviorInput } from './code-behavior.js'
 import { outputErrors } from './elaboration-schema.js'
 import { elaborate, freezeElaborationInput, projectElaborationFlowReadiness, sealPartitionedElaboration } from './elaboration.js'
-import type { Contract, Verification } from '@spexcode/spec-core/contracts'
+import type { Contract, ContractFinding, Verification } from '@spexcode/spec-core/contracts'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
 import type { Applicability, ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationTrace, ElaborationSessionRequest, ElaborationChange, ElaborationRepairSeed, ElaborationRepairDiagnostics, ReadonlySpecRepair, VerificationOwnershipProjection } from './elaboration-types.js'
 import { elaborationTargetBindings, projectVerificationTable, withoutVerificationTables } from './elaboration-markdown.js'
@@ -31,6 +31,7 @@ export type PartitionCheckpoints = {
   loadElaborationRepairSeed?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): ElaborationRepairSeed | null
   loadElaborationRepairDiagnostics?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): ElaborationRepairDiagnostics | null
   loadReadonlySpecRepair?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): { prior: Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>; repair: ReadonlySpecRepair } | null
+  loadPartitionSealRepair?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): { prior: Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>; repair: ReadonlySpecRepair } | null
   save(key: string, value: unknown): BlobRef
 }
 export type PartitionAnalysisFailure = { partitionId: string; code: string; message: string; error?: unknown }
@@ -39,6 +40,11 @@ const within = (path: string, paths: readonly string[]): boolean => paths.some(p
 const unique = (values: readonly string[]): string[] => [...new Set(values)].sort()
 const reject = (message: string): never => { throw Object.assign(new Error(message), { code: 'partition_binding' }) }
 function readonlyRepairInput(input: ElaborationInput, repair: ReadonlySpecRepair): ElaborationInput {
+  if (repair.kind === 'partition_seal') {
+    const aggregate = JSON.parse(readEvidence(input.historyInput!.source.commonDir, repair.generationRef).toString('utf8')) as ElaborationResult
+    if (aggregate.partitionSeal?.candidateDigest !== repair.candidateDigest || aggregate.partitionSeal.passed || !aggregate.partitionEvidence?.some(owner => owner.partitionId === input.partitionBinding!.partitionId && owner.resultRef.sha256 === repair.acceptedRef.sha256)) return reject('全局seal诊断必须绑定失败aggregate及本owner已审原件')
+    return { ...input, readonlySpecRepair: repair }
+  }
   if (input.worktree && input.historyInput) {
     const generation = JSON.parse(readEvidence(input.historyInput.source.commonDir, repair.generationRef).toString('utf8')) as Pick<GenerationResult, 'candidate'>
     if (!generation.candidate || generation.candidate.digest !== repair.candidateDigest) return reject('只读修复seed必须绑定原真实失败candidate')
@@ -49,6 +55,29 @@ function readonlyRepairInput(input: ElaborationInput, repair: ReadonlySpecRepair
   if (repair.changes.some(change => !input.targets.some(target => target.nodeId === change.nodeId && target.path === change.path))) reject('只读V1修复不能取得其它owner目标')
   if (repair.kind === 'candidate_review') return { ...input, implementationWritePaths: [], readonlySpecRepair: repair }
   return { ...input, implementationWritePaths: [], readonlySpecRepair: repair, targets: input.targets.map(target => { const source = sources.get(target.path)?.source ?? target.source; return { ...target, source, sourceDigest: source === null ? null : contentHash(source) } }), files: new Map([...input.files ?? [], ...repair.changes.map(change => [change.path, change.source] as const)]) }
+}
+
+export function partitionSealRepairOwners(plan: SyncPartitionPlan, aggregate: Pick<ElaborationResult, 'partitionSeal' | 'changes'>, locals: ReadonlyMap<string, Pick<ElaborationResult, 'changes' | 'partitionBinding'>>): Map<string, ContractFinding[]> {
+  const changes = aggregate.partitionSeal!.changes, reviewed = [...locals.values()].flatMap(local => local.changes)
+  if (changes.length !== reviewed.length || changes.length !== aggregate.changes.length || new Set(reviewed.map(change => change.path)).size !== reviewed.length || changes.some(change => !reviewed.some(local => local.nodeId === change.nodeId && local.path === change.path && withoutVerificationTables(local.source) === withoutVerificationTables(change.source)) || !aggregate.changes.some(local => local.nodeId === change.nodeId && local.path === change.path && local.beforeDigest === change.beforeDigest && local.source === change.source && local.contentDigest === contentHash(change.source)))) throw Object.assign(new Error('全局seal候选不是所绑定已审局部的真实并集'), { code: 'partition_final_seal_binding' })
+  const routed = new Map<string, ContractFinding[]>()
+  for (const finding of aggregate.partitionSeal!.findings.filter(finding => finding.severity === 'error')) {
+    const owners = [...locals].filter(([, local]) => local.changes.some(change => change.path === finding.path && change.nodeId === finding.nodeId && (!finding.itemId || parseContract(change).contract?.items.some(item => item.id === finding.itemId))))
+    if (owners.length !== 1) throw Object.assign(new Error(`全局seal错误没有唯一可修owner: ${finding.code} ${finding.path} ${finding.itemId ?? ''}`), { code: 'partition_final_seal_unroutable' })
+    const [ownerId, local] = owners[0], recipients = new Set([ownerId])
+    for (const descendant of local.partitionBinding?.interfaceSeed?.descendants ?? []) {
+      // 既有后代的分类证据没有sourcePartitionId，按原node/path反查本轮真实writer。
+      const children = [...locals].filter(([id, child]) => (!descendant.sourcePartitionId || descendant.sourcePartitionId === id) && child.changes.some(change => change.path === descendant.path && change.nodeId === descendant.nodeId))
+      if (children.length !== 1) throw Object.assign(new Error(`全局seal诊断缺少唯一接口后代owner: ${descendant.path}`), { code: 'partition_final_seal_unroutable' })
+      recipients.add(children[0][0])
+    }
+    for (const edge of plan.dependencies) if (edge.to === ownerId && edge.contractIds.some(id => id === finding.itemId || finding.relatedIds?.includes(id))) recipients.add(edge.from)
+    for (const id of recipients) {
+      if (!plan.partitions.some(partition => partition.id === id) || !locals.has(id)) throw Object.assign(new Error(`全局seal诊断缺少真实依赖owner: ${id}`), { code: 'partition_final_seal_unroutable' })
+      routed.set(id, [...routed.get(id) ?? [], finding])
+    }
+  }
+  return routed
 }
 
 function interfaceSeedPartitions(input: ElaborationInput, plan: SyncPartitionPlan): { seeds: Map<string, RawOnlyInterfaceSeedEvidence>; descendants: RawOnlyInterfaceSeedDescendant[] } {
@@ -292,7 +321,7 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
       phase: interfaceSeed ? 'interface_seed' : undefined,
     }
     const inputDigest = freezeElaborationInput(localInput).inputDigest
-    const readonlyRepair = checkpoints.loadReadonlySpecRepair?.(key, partitionBinding, inputDigest)
+    const readonlyRepair = checkpoints.loadReadonlySpecRepair?.(key, partitionBinding, inputDigest) ?? checkpoints.loadPartitionSealRepair?.(key, partitionBinding, inputDigest)
     if (readonlyRepair) {
       const priorInput = readonlyRepair.prior.readonlySpecRepair ? readonlyRepairInput(localInput, readonlyRepair.prior.readonlySpecRepair) : localInput
       if (freezeElaborationInput(priorInput).inputDigest !== readonlyRepair.prior.inputDigest) reject('只读V1修复的已审owner不匹配当前完整局部输入')
