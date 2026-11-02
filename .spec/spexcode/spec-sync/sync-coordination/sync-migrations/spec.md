@@ -59,3 +59,5 @@ v14仅登记提交边界快照、分区计划与分布式审查的 writer 语义
 v15以无DDL SELECT 1登记显式unlimited预算与nullable operation期限的writer语义；保持v1–v14迁移字节/checksum及全部旧record/payload/receipt。须先停writer并结算或保留真实资源，再沿online backup和组件事务升级；旧writer因v15拒写。回滚恢复升级前一致数据库备份及其evidence，不删marker、不手改旧记录或重置预算。
 
 v16以无DDL SELECT 1登记 ZCode 固定命名空间、结构化策略与原生证明的 writer 语义；保留 v1–v15 原字节/checksum 及历史记录。升级前停 writer、核对在途资源并保存一致备份，正常迁移原子登记 marker；旧 writer 必须整体拒绝，不能把 ZCode 派发为 Codex。回滚先结算或保留资源，再恢复升级前一致备份与 evidence，不删 marker 或手改 operation。
+
+v21以无DDL SELECT 1登记typed checkpoint artifacts与raw/stage权限边界；沿正常online backup与组件事务拒v20旧writer，v1–v20 checksum及旧记录/CAS原字节保持。升级前停稳全部旧服务/队列并结算或保留真实资源。回滚先停新writer，再恢复升级前一致备份及对应evidence，不删marker或改写历史raw refs。

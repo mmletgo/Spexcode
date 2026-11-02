@@ -12,6 +12,8 @@ import { SYNC_COMPONENT, SYNC_MIGRATIONS, syncCoordinatorAddress } from './migra
 import { SyncApplication } from './application.js'
 import { prepareSpecBodyEdit } from '../spec-body-edit.js'
 import { prepareSyncAdmission } from './coordinator.js'
+import { readSyncCheckpoints } from './checkpoint-evidence.js'
+import type { VerificationResult } from './verification-executor-types.js'
 import { buildSyncApplicationPlan, deriveSyncBaselineResources } from './planning.js'
 import { captureInputSnapshot } from './snapshot.js'
 import { readSyncSettings, SyncApplicationError } from './settings.js'
@@ -1044,12 +1046,12 @@ for (const choice of ['keep_intent', 'adopt_behavior', 'new_rule'] as const) tes
   const request = { operationId: first.operation.id, inputId: first.operation.input.id, analysisRef: first.decisionContext.analysisRef, findingIds: first.decisionContext.analysis.findings.map(finding => finding.id), requestId: `oracle-real-decision-${choice}`, decision: choice === 'new_rule' ? { choice, rule: 'filter长度不得超过128字符；其他原需求保持有效。' } : { choice } }
   const decision = await f.application.decide(request), result = await f.application.wait(decision.operation.id)
   const attempts = f.application.store.listAttempts(result.operation.id)
-  const verifications = attempts.flatMap(attempt => attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(before.source.commonDir, ref).toString()))).filter(value => value.status && value.checkpoint?.config?.policy?.argv?.join(' ') === 'node --test tests/export.test.mjs').map(value => ({ status: value.status, argv: value.checkpoint.config.policy.argv, exitCode: value.evidence?.exitCode, tests: value.evidence?.tests }))
+  const verifications = attempts.flatMap(attempt => readSyncCheckpoints(f.application.store, result.operation, attempt).json.map(({ value }) => value as VerificationResult)).filter(value => value.status && value.checkpoint?.config?.policy?.argv?.join(' ') === 'node --test tests/export.test.mjs').map(value => ({ status: value.status, argv: value.checkpoint!.config.policy.argv, exitCode: value.evidence?.exitCode, tests: value.evidence?.tests }))
   if (process.env.SPEX_ORACLE_EVIDENCE_DIR) writeFileSync(join(process.env.SPEX_ORACLE_EVIDENCE_DIR, `oracle-real-${choice}.json`), JSON.stringify({ choice, phase: result.operation.phase, callsUsed: result.operation.callsUsed, budget: result.operation.budget, oracleDigest: contentHash(oracle), sourceInputId: before.id, receiptIds: result.journals.flatMap(journal => journal.receipt ? [journal.receipt.id] : []), verifications }, null, 2))
   assert.equal(result.operation.phase, choice === 'keep_intent' ? 'workspace_synced' : 'budget_exhausted', JSON.stringify(result.attempt?.failure))
   assert.equal(result.journals.some(journal => journal.receipt), choice === 'keep_intent')
   assert.ok(verifications.some(value => value.status === (choice === 'keep_intent' ? 'passed' : 'failed')), JSON.stringify(verifications))
-  for (const verification of verifications.filter(value => value.status === 'failed')) { assert.notEqual(verification.exitCode, 0); assert.ok(verification.tests.some((test: { testId: string; status: string }) => test.testId === 'ORACLE-FILTER-LEGACY' && test.status === 'failed'), JSON.stringify(verification)) }
+  for (const verification of verifications.filter(value => value.status === 'failed')) { assert.notEqual(verification.exitCode, 0); assert.ok(verification.tests!.some((test: { testId: string; status: string }) => test.testId === 'ORACLE-FILTER-LEGACY' && test.status === 'failed'), JSON.stringify(verification)) }
   assert.deepEqual(readFileSync(join(f.root, 'tests/export.test.mjs')), oracle); assert.deepEqual(readFileSync(join(f.root, '.git/index')), index)
   assert.equal((await captureInputSnapshot(f.root)).id, before.id)
 })

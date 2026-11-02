@@ -1,5 +1,6 @@
 /** 内容寻址运行证据；正文、文件清单与命令结果保存在既有 evidence blob。 */
 export type BlobRef = { sha256: string }
+export type SyncCheckpointRef = BlobRef & { artifacts?: { kind: 'json' | 'untrusted_final'; ref: BlobRef }[] }
 export type WorktreeIdentity = {
   repositoryId: string
   commonDir: string
@@ -86,7 +87,7 @@ export type SyncAttempt = {
   publicationBase?: PublicationBase
   dispatchKey: string; sessionCreateKey: string; status: 'claimed' | 'running' | 'frozen' | 'verified' | 'applying' | 'settled' | 'failed' | 'superseded'
   currentSession: NativeSessionRef | null; dispatchPlans: DispatchPlan[]; composedInput: ComposedInputRef | null; candidate: CandidateRef | null; verification: VerificationRef | null
-  checkpointRefs: BlobRef[]; failure: SyncFailure | null; leaseToken: string; expiresAtMs: number
+  checkpointRefs: SyncCheckpointRef[]; failure: SyncFailure | null; leaseToken: string; expiresAtMs: number
 }
 export type WriteFence = { operationId: string; attemptId: string; generation: number; sourceFingerprint: string; leaseToken: string }
 export type ScopeLease = { token: string; operationId: string; attemptId: string; repositoryId: string; generation: number; scope: SyncScope; expiresAtMs: number }

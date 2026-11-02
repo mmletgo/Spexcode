@@ -75,3 +75,5 @@ Native worktree P0分析与独审共用业务语义：可由raw、源码和完�
 真实原生协议成功但 Git 结果违反 read/edit 合约时仍为业务失败；精确 native_worktree_result_invalid 沿原资源结算、逐轮修复与独审闭环反馈真实 Git 差异，在新工作树重做。旧失败工作树、原生完成缓存及历史失败保留，不由程序恢复 Git 或补签通过。
 
 局部分区全部accept仍不能替代全局seal。封口error绑定原aggregate/局部ref及真实输入后交回所属owner、接口后代与引用依赖重新生成和独审，保无关accept；warning不升error，父不补FLOW、不降覆盖或作者授权。无法路由或同候选同error无新派发时typed停止；只有同selection、无任何检查点/派发/业务/会话锚的superseded空控制attempt可越过，旧真实证据仍完整重验，所有attempt/calls仍计原预算。
+
+格式或schema失败的完整raw final属于不可信UTF8证据，不能被checkpoint或证据API当作stage/业务JSON。正式详情与原操作恢复在保留历史raw refs的同时继续可读；权限由原失败round/Native身份及当前停止证据核验，未知损坏材料不被静默跳过。v21按原备份/拒旧writer/回滚路径切换。

@@ -7,6 +7,8 @@ import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { applyComponentMigrations, openProtocol, type SqlParam } from '@spexcode/session-protocol'
 import { CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
+import { putBlob } from '@spexcode/spec-core'
+import { syncCheckpointArtifacts } from './checkpoint-evidence.js'
 import type { ContractCell, GeneratedElaboration, GeneratedTables } from './elaboration-markdown.js'
 import { sameContractBusinessMeaning } from './contract-evolution.js'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
@@ -26,15 +28,16 @@ import { exportCandidate, freezeCandidate } from './candidate.js'
 import { composeInputSnapshots } from './composition.js'
 import { freezeDeliveryRuntime } from './runtime-freeze.js'
 import { captureInputSnapshot, contentHash, readEvidence, readObject, readTree, writeEvidence } from './snapshot.js'
-import type { NativeRunCheckpoint, NativeRunPlan } from './native-run.js'
+import { createAttemptRunner, type NativeRunCheckpoint, type NativeRunPlan, type NativeRunRecord } from './native-run.js'
 import { SyncStore } from './store.js'
 import { sessionIdForCreateKey } from '../sessions.js'
+import { writeRecord } from '../session-record.js'
 import { claimFileMutex } from './file-mutex.js'
 import { composeAuthoredInput } from './author-input.js'
 import { controlledDecisionIdentity, guardControlledRequestPath, prepareControlledDecision, prepareControlledRequest } from './request-input.js'
 import { prepareSpecBodyEdit } from '../spec-body-edit.js'
 import { adaptElaborationNativeOutput } from '../../test/elaboration-native-output.js'
-import { StructuredSessionError, structuredExecutionPolicy } from '../session-structured-policy.js'
+import { rejectedFinalOutput, StructuredSessionError, structuredExecutionPolicy } from '../session-structured-policy.js'
 import { nativeWorktreeResult } from '../native-worktree-runtime.js'
 import { SettledSessionCreateTimeoutError } from '../session-structured.js'
 import { freezeContext, prepareFrozenPrompt } from '../frozen-context.js'
@@ -2088,6 +2091,110 @@ for (const mode of ['repair', 'drop-id', 'author-ac', 'pause-empty', 'pause-sele
   assert.equal(f.store.listJournals(f.operation.id).length, 0)
   assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
   assert.deepEqual(readFileSync(join(f.root, 'tests/export.test.mjs')), readFileSync(new URL('tests/export.test.mjs', fixturePath)))
+})
+
+for (const body of ['syntax', 'schema', 'stage-shape'] as const) for (const layout of (['atomic', 'legacy', 'cancelled', 'nested', 'generic-failed', 'generic-native-json', 'bad-record', 'unknown-json', 'false-role', 'review-rejected'] as const).filter(layout => !['review-rejected', 'generic-native-json'].includes(layout) || body === 'schema')) test(`raw final checkpoint preserves formal analysis/detail reads: ${body}/${layout}`, async t => {
+  const f = await fixture(t, { maxAttempts: 1, maxCalls: 4, maxRepairs: 0, timeoutMs: 120000 })
+  const records = new Map<string, NativeRunRecord>(), stop = new Error('fixture stops after durable failed P1 stage')
+  let raw = '', rawRef: { sha256: string } | undefined
+  const persistRecord = (record: NativeRunRecord): void => writeRecord({ governed: false, worktreePath: f.root, branch: null, title: null, name: null, parent: null, issues: [], issue: null, proposal: null, merges: 0, note: null, sortKey: null, createdAt: Date.now(), harness: 'codex', runtimeStartToken: null, stopped: false, archived: false, closedAt: null, launcher: null, launchCmd: null, launchOwner: null, ...record })
+  const checkpoint = f.store.checkpoint.bind(f.store)
+  f.store.checkpoint = (fence, ref) => {
+    if (['legacy', 'cancelled'].includes(layout)) {
+      for (const artifact of ref.artifacts ?? []) checkpoint(fence, artifact.ref)
+      return checkpoint(fence, { sha256: ref.sha256 })
+    }
+    const result = checkpoint(fence, ref)
+    assert.doesNotThrow(() => readCurrentSyncAnalysis(f.store, f.store.readOperation(f.operation.id)), 'every atomic checkpoint publication must already be formally readable')
+    for (const artifact of ref.artifacts ?? []) assert.ok(f.store.pinnedBlobRefs().some(pin => pin.sha256 === artifact.ref.sha256), 'wrapper transaction retains every JSON/raw CAS pin')
+    return result
+  }
+  f.options.runner = async request => {
+    const operation = f.store.readOperation(f.operation.id), attempt = f.store.readAttempt(operation.currentAttemptId!)
+    const fence = { operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: operation.input.source.physicalFingerprint }
+    const runner = createAttemptRunner(f.store, fence, { pollMs: 2, runtime: {
+      readRecord: id => records.get(id) ?? null,
+      cancel: async () => { throw new Error('fixture never controls a real process') },
+      run: async actual => {
+        const execution = structuredExecutionPolicy(actual), key = actual.sessionCreateKey ?? actual.requestKey, sessionId = sessionIdForCreateKey(key)
+        if (layout === 'review-rejected' && request.purpose === 'elaboration_generate') {
+          const output = adaptElaborationNativeOutput(request, rows(original)), identity = { threadId: `thread-${sessionId}`, turnId: 'generated-turn' }, result = { sessionId, ...identity, output, resultDigest: contentHash(JSON.stringify(output)) }
+          records.set(sessionId, { session: sessionId, status: 'awaiting', harnessSessionId: identity.threadId, createRequestId: contentHash(key), createPayloadHash: contentHash(JSON.stringify({ prompt: actual.prompt, parent: null, launcher: null, ...(actual.base?.trim() ? { base: actual.base.trim() } : {}), structuredExecution: execution })), structuredExecution: { ...execution, ...identity, state: 'completed', output, resultDigest: result.resultDigest } })
+          persistRecord(records.get(sessionId)!)
+          return result
+        }
+        raw = body === 'syntax' ? '{"changes":[}' : body === 'schema' ? '{"changes":"not-an-array"}' : JSON.stringify({ version: 'sync-stage-v1', operationId: operation.id, attemptId: attempt.id, inputId: operation.input.id, policyDigest: operation.policyDigest, stage: 'analysis', resultRef: { sha256: 'f'.repeat(64) } })
+        rawRef = { sha256: contentHash(raw) }
+        const identity = { threadId: `thread-${sessionId}`, turnId: 'failed-turn' }, rejectedOutput = rejectedFinalOutput(raw, actual.prompt, execution, identity, layout === 'generic-native-json' ? 'native_json' : 'text')
+        const code = ['generic-failed', 'generic-native-json'].includes(layout) ? 'failed' : 'structured_output_format_invalid'
+        records.set(sessionId, { session: sessionId, status: 'awaiting', harnessSessionId: identity.threadId, createRequestId: contentHash(key), createPayloadHash: contentHash(JSON.stringify({ prompt: actual.prompt, parent: null, launcher: null, ...(actual.base?.trim() ? { base: actual.base.trim() } : {}), structuredExecution: execution })), structuredExecution: { ...execution, ...identity, state: 'failed', error: 'exact rejected final', ...(code === 'failed' ? {} : { errorCode: code }), rejectedOutput } })
+        persistRecord(records.get(sessionId)!)
+        throw new StructuredSessionError(code, 'exact rejected final', { sessionId, ...identity, rejectedOutput })
+      },
+    } })
+    return runner(request)
+  }
+  f.store.recordFailure = () => { throw stop }
+  await assert.rejects(runSyncOperation(f.store, f.operation.id, f.options), error => error === stop)
+  const operation = f.store.readOperation(f.operation.id)
+  const wrapper = JSON.parse(readEvidence(f.input.source.commonDir, f.store.readAttempt(operation.currentAttemptId!).checkpointRefs.at(-1)!).toString())
+  const saved = [JSON.parse(readEvidence(f.input.source.commonDir, wrapper.resultRef).toString())]
+  assert.ok(saved.some(value => value.rounds.some((round: { rejectedOutput?: unknown }) => round.rejectedOutput)), JSON.stringify(saved.map(value => value.failure)))
+  if (layout === 'review-rejected') { const round = saved[0].rounds.at(-1); assert.ok(round.output && round.candidate && round.candidateDigest); assert.equal(round.reviewOutput, null); assert.equal(round.review, null); assert.equal(saved[0].reviewPassed, false) }
+  assert(rawRef); assert.equal(readEvidence(f.input.source.commonDir, rawRef).toString(), raw)
+  assert.ok([rawRef, wrapper.resultRef].every(ref => f.store.pinnedBlobRefs().some(pin => pin.sha256 === ref.sha256)), 'independently known raw and original result refs remain pinned, even when raw is not flat')
+  const attempt = f.store.readAttempt(operation.currentAttemptId!), fence = { operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: operation.input.source.physicalFingerprint }
+  if (layout === 'cancelled') {
+    const record = [...records.values()][0], resource = f.store.findResource(attempt.id, attempt.dispatchPlans[0].key)!
+    record.structuredExecution = { ...record.structuredExecution!, state: 'cancelled', error: 'structured execution cancelled; native stopped', cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: true, acknowledged: false, nativeStatus: 'stopped' } }; persistRecord(record)
+    let current = resource
+    for (const phase of ['terminal', 'removed'] as const) {
+      const prior = JSON.parse(readEvidence(f.input.source.commonDir, current.checkpointRef).toString())
+      const next = { ...prior, phase, nativeState: 'cancelled', status: 'cancelled', stop: { sessionId: record.session, state: 'cancelled', threadId: record.structuredExecution.threadId, turnId: record.structuredExecution.turnId, nativeStopped: true, acknowledged: false, nativeStatus: 'stopped' } }
+      current = f.store.recordResourceCheckpoint(resource.id, { operationId: operation.id, attemptId: attempt.id, inputId: operation.input.id, candidateDigest: null, phase, expectedCheckpointRef: current.checkpointRef, checkpointRef: writeEvidence(f.input.source.commonDir, next) })
+    }
+  }
+  if (layout === 'nested') {
+    const original = saved[0], round = original.rounds.at(-1), value = { refinement: { prior: { ...original, status: 'complete', failure: null, rounds: [], repairDiagnostics: { requestKey: round.rejectedOutput.ownerRequestKey, inputDigest: original.inputDigest, resultRef: wrapper.resultRef, failure: original.failure, round } } } }
+    const resultRef = writeEvidence(f.input.source.commonDir, value)
+    checkpoint(fence, { ...writeEvidence(f.input.source.commonDir, { ...wrapper, stage: 'repair-input', resultRef }), artifacts: syncCheckpointArtifacts(value, resultRef) })
+  }
+  if (layout === 'bad-record') { const record = [...records.values()][0]; record.structuredExecution!.rejectedOutput = { ...record.structuredExecution!.rejectedOutput!, sha256: 'e'.repeat(64) }; persistRecord(record) }
+  if (['unknown-json', 'false-role'].includes(layout)) {
+    const unknown = { sha256: putBlob(Buffer.from('{"version":"sync-stage-v1","stage":'), join(f.input.source.commonDir, 'spexcode/evidence')) }
+    checkpoint(fence, layout === 'unknown-json' ? unknown : { ...writeEvidence(f.input.source.commonDir, { diagnostic: 'role alone grants no permission' }), artifacts: [{ kind: 'untrusted_final', ref: unknown }] })
+  }
+  if (['bad-record', 'unknown-json', 'false-role'].includes(layout)) {
+    assert.throws(() => readCurrentSyncAnalysis(f.store, operation), layout === 'unknown-json' ? SyntaxError : { code: 'checkpoint_artifact_binding' })
+    return
+  }
+  const beforeRefs = f.store.readAttempt(attempt.id).checkpointRefs
+  assert.doesNotThrow(() => readCurrentSyncAnalysis(f.store, operation), 'typed rejected raw must never be parsed or trusted as a stage')
+  const app = await SyncApplication.create(f.root, { protocol: f.protocol, runtimeDirectory: join(f.parent, 'read-application') })
+  const detail = await app.readOperation(operation.id)
+  assert.equal(detail.decisionContext, null)
+  const evidence = await app.readEvidence(operation.id, rawRef) as { kind: string; text: string; sha256: string }
+  assert.equal(evidence.kind, 'untrusted_final'); assert.equal(evidence.text, raw); assert.equal(evidence.sha256, rawRef.sha256)
+  await assert.rejects(app.readEvidence(operation.id, { sha256: 'f'.repeat(64) }), { code: 'sync_evidence_unrelated' })
+  assert.deepEqual(f.store.readAttempt(attempt.id).checkpointRefs, beforeRefs, 'formal reads never rewrite legacy pins or backfill roles')
+  assert.equal(operation.callsUsed, layout === 'review-rejected' ? 2 : 1)
+  assert.equal(beforeRefs.some(ref => ref.sha256 === rawRef!.sha256), ['legacy', 'cancelled'].includes(layout), 'new raw is only pinned through its typed wrapper')
+})
+
+test('untrusted final digest without historical ref never invents a CAS pin or evidence edge', async t => {
+  const f = await fixture(t)
+  const packet = rejectedFinalOutput('original without a CAS ref', 'prompt', { inputDigest: 'input', schema: {}, purpose: 'elaboration_generate' }, { threadId: 'thread', turnId: 'turn' })
+  const value = { rounds: [{ rejectedOutput: packet }] }, result = writeEvidence(f.input.source.commonDir, value)
+  const artifacts = syncCheckpointArtifacts(value, result)
+  assert.deepEqual(artifacts, [{ kind: 'json', ref: result }])
+  assert.equal(packet.ref, undefined)
+  const claim = f.store.claimAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 30000, expectedMessageId: f.operation.dispatchMessageId })
+  f.store.checkpoint(claim.fence, { ...writeEvidence(f.input.source.commonDir, { version: 'sync-stage-v1', operationId: f.operation.id, attemptId: claim.attempt.id, inputId: f.input.id, policyDigest: f.operation.policyDigest, stage: 'diagnostic', resultRef: result }), artifacts })
+  const before = f.store.readAttempt(claim.attempt.id).checkpointRefs
+  const app = await SyncApplication.create(f.root, { protocol: f.protocol, runtimeDirectory: join(f.parent, 'read-application') })
+  assert.deepEqual(await app.readEvidence(f.operation.id, result), value)
+  await assert.rejects(app.readEvidence(f.operation.id, { sha256: packet.sha256 }), { code: 'sync_evidence_unrelated' })
+  assert.deepEqual(f.store.readAttempt(claim.attempt.id).checkpointRefs, before)
 })
 
 test('readonly-owner零派发guard只阻相同候选诊断，真实owner新派发未修好仍继续', () => {
