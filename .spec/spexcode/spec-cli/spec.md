@@ -145,3 +145,5 @@ GET 同步 status 与单操作详情在同一次只读请求中复用已完整�
 HTTP 入口先确认 Hono listener 已发出真实 `listening` 事件，再安装连接回收器与 WebSocket 升级处理，最后才等待配置同步的启动追赶。这样 `/health` 只在真实绑定后对 supervisor 可用，同时不被同步追赶延迟阻塞。
 
 /api/sync/run 与 /verify 将 model 原样交同一应用边界校验和冻结；不在路由选择全局默认或忽略非字符串，遵循 [[sync-model-selection]]。
+
+同步资源清理的独立HTTP入口为POST /api/sync/operations/:id/resources/recover，要求明确frozen inputId并沿同一targetTree/commonDir约束调用[[sync-application]]的resources-only factory；不启动该factory的观察或自动队列，不调用普通recover/journal回放。其它同步路由和完整source身份门保持。

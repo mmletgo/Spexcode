@@ -28,16 +28,17 @@ import type { GenerationFinding, GenerationInput, GenerationResult } from './gen
 import { stageWorktree } from './stage-worktree.js'
 import { createAttemptRunner } from './native-run.js'
 import type { NativeRunCheckpoint, NativeRunPlan } from './native-run.js'
-import type { AdmitSyncInput, ApplyReceipt, BlobRef, CandidateRef, ComposedInputRef, FrozenBaselineSelection, InputSnapshot, SyncAttempt, SyncFailure, SyncOperation, SyncScope, VerificationResultBlob, WriteFence } from './operation-types.js'
+import type { AdmitSyncInput, ApplyReceipt, BlobRef, CandidateRef, ComposedInputRef, FrozenBaselineSelection, InputSnapshot, SyncAttempt, SyncFailure, SyncOperation, SyncScope, SyncResourceRecord, VerificationResultBlob, WriteFence } from './operation-types.js'
 import { deliverVerifiedAttempt, planPrivateDelivery } from './private-delivery.js'
 import { assemblePublicationBase } from './publication-base.js'
 import { ownedObligationPaths } from './prior-context.js'
 import { composeControlledRequest, readControlledChanges, readControlledDecision } from './request-input.js'
 import { sessionIdForCreateKey } from '../sessions.js'
+import { withoutSessionApplicationExecutionWake } from '../session-application.js'
 import { assertFrozenBinding, readFrozenManifest, readFrozenRange } from '../frozen-context.js'
 import { StructuredSessionError } from '../session-structured-policy.js'
 import { SettledSessionCreateTimeoutError } from '../session-structured.js'
-import { captureInputSnapshot, contentHash, objectGit, readEvidence, readObject, readTree, validateRepositoryPath, verifySnapshot, writeEvidence } from './snapshot.js'
+import { captureInputSnapshot, contentHash, identifyWorktree, objectGit, readEvidence, readObject, readTree, validateRepositoryPath, verifySnapshot, writeEvidence } from './snapshot.js'
 import type { SnapshotManifest } from './snapshot.js'
 import { SyncStoreError } from './store.js'
 import type { SyncStore } from './store.js'
@@ -613,11 +614,13 @@ function acceptanceRuns(frozen: FrozenContracts, ready: SyncScope, plan: SyncCoo
   for (const run of runs) run.policy.expectedTestIds.sort()
   return runs.sort((a, b) => a.verificationId.localeCompare(b.verificationId))
 }
-async function recoverResources(store: SyncStore, operation: SyncOperation, options: SyncCoordinatorOptions, all: boolean): Promise<boolean> {
+async function recoverResources(store: SyncStore, operation: SyncOperation, options: Pick<SyncCoordinatorOptions, 'recoveryOnly' | 'verificationDriver'> & { resourceRecoveryOnly?: true }, all: boolean): Promise<boolean> {
   for (const item of store.listRecoverableResources().filter(item => item.operation.id === operation.id && (all || item.attempt.id !== operation.currentAttemptId))) {
     const fence = fenceFor(item.operation, item.attempt), commonDir = operation.input.source.commonDir
+    if (item.resource.plan.inputId !== operation.input.id) fail('resource_recovery', '既有resource不匹配原frozen input')
     if (item.resource.plan.kind === 'verification') {
       const request = JSON.parse(readEvidence(commonDir, item.resource.plan.planBlob).toString('utf8')) as Omit<VerificationRequest, 'previousCheckpoint'>
+      if (item.resource.plan.key !== `verification:${request.runId}` || request.inputDigest !== operation.input.id || request.candidateDigest !== item.resource.plan.candidateDigest || contentHash(JSON.stringify(request)) !== item.resource.plan.payloadDigest) fail('resource_recovery', '既有verification计划不匹配原resource/runId/input/candidate')
       const driver = options.verificationDriver ?? dockerVerificationDriver
       const recovered = await runAttemptVerification(store, fence, { ...request, signal: AbortSignal.abort() }, { driver: options.recoveryOnly ? (args, maxBytes) => {
         if (args[0] === 'container' && ['create', 'start'].includes(args[1])) fail('resource_recovery', '只恢复既有容器，不新建或启动verification')
@@ -626,12 +629,34 @@ async function recoverResources(store: SyncStore, operation: SyncOperation, opti
       if (recovered.result.status === 'recovery_required' || store.findResource(item.attempt.id, item.resource.plan.key)?.phase !== 'removed') return false
     } else {
       const plan = JSON.parse(readEvidence(commonDir, item.resource.plan.planBlob).toString('utf8')) as NativeRunPlan
-      try { await createAttemptRunner(store, fence)({ ...plan.request, signal: AbortSignal.abort() }) }
+      const dispatch = item.attempt.dispatchPlans.find(dispatch => dispatch.key === item.resource.plan.key)
+      if (!dispatch || plan.schemaVersion !== 1 || plan.operationId !== operation.id || plan.attemptId !== item.attempt.id || plan.inputId !== operation.input.id || plan.candidateDigest !== item.resource.plan.candidateDigest || plan.request.requestKey !== item.resource.plan.key || plan.requestDigest !== item.resource.plan.payloadDigest || contentHash(JSON.stringify(plan.request)) !== plan.requestDigest || dispatch.requestDigest !== plan.requestDigest || plan.sessionCreateKey !== dispatch.sessionCreateKey || plan.expectedSessionId !== sessionIdForCreateKey(dispatch.sessionCreateKey)) fail('resource_recovery', 'native resource plan differs from frozen request: 既有Native计划不匹配原resource/dispatch/创建键与身份')
+      try { await createAttemptRunner(store, fence, { resourceRecoveryOnly: options.resourceRecoveryOnly })({ ...plan.request, signal: AbortSignal.abort() }) }
       catch (error) { if (store.findResource(item.attempt.id, item.resource.plan.key)?.phase !== 'removed') fail('resource_recovery', error instanceof Error ? error.message : String(error)) }
       if (store.findResource(item.attempt.id, item.resource.plan.key)?.phase !== 'removed') return false
     }
   }
   return true
+}
+
+export type SyncResourceRecoveryResult = { operationId: string; inputId: string; status: 'resources_recovered' | 'recovery_required' | 'busy'; resources: SyncResourceRecord[]; pendingJournalIds: string[]; failure?: { code: string; message: string } }
+
+/** 只结算显式历史输入的owned资源；身份漂移不授予业务恢复或journal写入权。 */
+export async function recoverSyncOperationResources(store: SyncStore, operationId: string, options: { root: string; inputId: string; artifactRoot: string; verificationDriver?: SyncCoordinatorOptions['verificationDriver'] }): Promise<SyncResourceRecoveryResult> {
+  const operation = store.readOperation(operationId), source = identifyWorktree(options.root)
+  if (operation.input.id !== options.inputId) fail('resource_recovery_input', '资源清理必须明确匹配原frozen input ID')
+  if (source.canonicalRoot !== operation.input.source.canonicalRoot || source.commonDir !== operation.input.source.commonDir) fail('resource_recovery_source', '资源清理不属于当前canonicalRoot/commonDir')
+  const result = (status: SyncResourceRecoveryResult['status'], failure?: SyncResourceRecoveryResult['failure']): SyncResourceRecoveryResult => ({ operationId, inputId: operation.input.id, status, resources: store.listRecoverableResources().filter(item => item.operation.id === operationId).map(item => item.resource), pendingJournalIds: store.listJournals(operationId).filter(journal => journal.status !== 'settled').map(journal => journal.id), ...(failure ? { failure } : {}) })
+  safeArtifactRoot(options.artifactRoot, operation)
+  const locks = join(options.artifactRoot, '.locks')
+  mkdirSync(locks, { recursive: true, mode: 0o700 }); safeArtifactRoot(locks, operation)
+  const mutex = claimFileMutex(join(locks, `${contentHash(operationId)}.sqlite`))
+  if (!mutex) return result('busy')
+  try {
+    return result(await withoutSessionApplicationExecutionWake(() => recoverResources(store, operation, { recoveryOnly: true, resourceRecoveryOnly: true, verificationDriver: options.verificationDriver }, true)) ? 'resources_recovered' : 'recovery_required')
+  } catch (error) {
+    return result('recovery_required', { code: error instanceof SyncCoordinatorError || error instanceof SyncStoreError ? error.code : 'resource_recovery', message: error instanceof Error ? error.message : String(error) })
+  } finally { mutex.release() }
 }
 
 /** 唯一应用编排入口；副作用恢复优先于新生成，四层真实证据通过后才发布。 */

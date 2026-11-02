@@ -8,8 +8,9 @@ import type { SessionProtocol } from '@spexcode/session-protocol'
 import { configuredSessionApplication } from '../session-application.js'
 import { prepareSpecBodyEdit, readSpecBodyEdit } from '../spec-body-edit.js'
 import type { SpecBodyEdit } from '../spec-body-edit.js'
-import { isSyncInputCurrent, prepareSyncAdmission, readCurrentSyncAnalysis, runSyncOperation, syncPlanDigest } from './coordinator.js'
+import { isSyncInputCurrent, recoverSyncOperationResources, SyncCoordinatorError, prepareSyncAdmission, readCurrentSyncAnalysis, runSyncOperation, syncPlanDigest } from './coordinator.js'
 import type { SyncCoordinatorOptions, SyncCoordinatorPlan, SyncCoordinatorResult } from './coordinator-types.js'
+import type { SyncResourceRecoveryResult } from './coordinator.js'
 import { migrateSyncStore } from './migrations.js'
 import type { BaselinePair, BlobRef, FrozenBaselineSelection, InputSnapshot, PhysicalControl, PhysicalScope, SyncObserverHealth as PersistentObserverHealth, SyncObservation, SyncOperation, WorktreeIdentity } from './operation-types.js'
 import { buildSyncApplicationPlan, deriveSyncBaselineResources } from './planning.js'
@@ -104,6 +105,19 @@ export class SyncApplication {
     const application = new SyncApplication(root, options, registeredSource)
     applicationOwners.set(`${options.protocol.databasePath}\0${application.repositoryId}\0${application.root}`, application)
     return application
+  }
+  /** 资源清理独立于服务owner注册，不启动观察器或自动派发。 */
+  static async createResourceRecovery(root: string, options: SyncApplicationOptions): Promise<SyncApplication> {
+    await migrateSyncStore(options.protocol)
+    return new SyncApplication(root, options)
+  }
+  /** 显式资源入口不查询业务detail，不借清理绕过正常source身份门。 */
+  async recoverResources(id: string, inputId: string): Promise<SyncResourceRecoveryResult> {
+    try { return await recoverSyncOperationResources(this.store, id, { root: this.root, inputId, artifactRoot: this.artifactRoot, verificationDriver: this.options.verificationDriver }) }
+    catch (error) {
+      if (error instanceof SyncCoordinatorError && ['resource_recovery_input', 'resource_recovery_source'].includes(error.code)) throw new SyncApplicationError(error.code, error.message, error.code === 'resource_recovery_source' ? 404 : 409)
+      throw error
+    }
   }
   private enabled(snapshot: InputSnapshot): EnabledRecord | null {
     if (!existsSync(this.enabledPath)) return null
@@ -900,6 +914,13 @@ export function configuredSyncApplication(root: string, registeredSource?: Workt
     void application.catch(() => applications.delete(key))
   }
   return application
+}
+
+/** 离线CLI与专用API只打开既有协议，不进入缓存服务或自动队列。 */
+export function configuredSyncResourceRecoveryApplication(root: string): Promise<SyncApplication> {
+  const identity = identifyWorktree(root)
+  if (identity.commonDir !== identifyWorktree(repoRoot()).commonDir) throw new SyncApplicationError('sync_project_mismatch', '输入工作树不属于当前项目')
+  return SyncApplication.createResourceRecovery(identity.canonicalRoot, { protocol: configuredSessionApplication().protocol })
 }
 
 let syncServicesOnline = false

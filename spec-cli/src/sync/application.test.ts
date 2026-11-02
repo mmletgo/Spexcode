@@ -32,6 +32,8 @@ import { adaptElaborationNativeOutput } from '../../test/elaboration-native-outp
 import { readFrozenBehaviorContext } from '../../test/frozen-behavior-context.js'
 import { composeControlledRequest, prepareControlledRequest, renderControlledDecisionRaw } from './request-input.js'
 import { inspectTrustedRuntime } from './trusted-hooks.js'
+import type { NativeRunPlan, NativeRunCheckpoint } from './native-run.js'
+import type { SyncCoordinatorPlan } from './coordinator-types.js'
 import type { ApplyJournal, BaselinePair, VerificationResultBlob } from './operation-types.js'
 
 const settings = {
@@ -79,6 +81,68 @@ function governDemoCode(f: Awaited<ReturnType<typeof fixture>>): void {
   f.git(['add', '.spec/demo/spec.md'])
   f.git(['commit', '-qm', 'fixture: govern demo implementation'])
 }
+
+for (const mode of ['settled', 'pending-journal', 'unknown', 'wrong-input', 'foreign-root', 'bad-plan', 'missing-plan'] as const) test(`resource-only真实source身份变化仍能只结算旧资源，正常recover/read/resume继续404 ${mode}`, async t => {
+  const f = await fixture()
+  try {
+    const input = await captureInputSnapshot(f.root)
+    const plan: SyncCoordinatorPlan = { version: 'sync-coordinator-v1', intentNodeId: 'demo', targets: [{ nodeId: 'demo', path: '.spec/demo/spec.md' }], readPaths: ['.spec', 'src', 'tests', 'package.json'], writePaths: ['.spec', 'src'], facts: [], verifications: settings.verifications, mandatoryTests: [] }
+    const operation = f.application.store.admitAndEnqueue(await prepareSyncAdmission(input, plan, { ingressKey: 'resource-only-old-source', rootCauseId: 'resource-only-old-source', origin: 'spec', budget: settings.budget, managedRoot: f.application['managedRoot'] }))
+    const claimed = f.application.store.claimAttempt({ operationId: operation.id, source: input.source, scope: operation.scope, leaseMs: 30000, expectedMessageId: operation.dispatchMessageId })
+    const request = { root: f.root, base: input.headCommit, prompt: '尚未请求Native的精确历史资源', schema: { type: 'object' }, requestKey: 'resource-only-native', inputDigest: input.id, purpose: 'elaboration_generate', timeoutMs: 1000 }
+    const requestDigest = contentHash(JSON.stringify(request)), dispatch = f.application.store.reserveDispatch(claimed.fence, { key: request.requestKey, purpose: request.purpose, requestDigest }), expectedSessionId = sessionIdForCreateKey(dispatch.sessionCreateKey)
+    const identity = { operationId: operation.id, attemptId: claimed.attempt.id, inputId: input.id, candidateDigest: null }
+    const nativePlan: NativeRunPlan = { schemaVersion: 1, request, requestDigest, sessionCreateKey: dispatch.sessionCreateKey, expectedSessionId, ...identity }
+    const checkpoint: NativeRunCheckpoint = { schemaVersion: 1, ...identity, requestDigest, expectedSessionId, phase: 'planned', nativeCallRequested: false, nativeStarted: false, nativeState: 'unpublished', session: { sessionId: expectedSessionId, threadId: null, turnId: null } }
+    const resource = f.application.store.planResource(claimed.fence, { key: request.requestKey, kind: 'native_session', payloadDigest: requestDigest, inputId: input.id, candidateDigest: null, planBlob: writeEvidence(input.source.commonDir, nativePlan), checkpointRef: writeEvidence(input.source.commonDir, checkpoint) })
+    if (mode === 'unknown') f.application.store.recordResourceCheckpoint(resource.id, { ...identity, phase: 'created', expectedCheckpointRef: resource.checkpointRef, checkpointRef: writeEvidence(input.source.commonDir, { ...checkpoint, phase: 'created', nativeCallRequested: true, nativeStarted: true, nativeState: 'running', session: { sessionId: expectedSessionId, threadId: 'historical-missing-thread', turnId: 'historical-missing-turn' } }) })
+    if (mode === 'bad-plan' || mode === 'missing-plan') {
+      const damaged = { ...f.application.store.readResource(resource.id), plan: { ...resource.plan, planBlob: mode === 'missing-plan' ? { sha256: 'f'.repeat(64) } : writeEvidence(input.source.commonDir, { ...nativePlan, expectedSessionId: 'foreign-session' }) } }
+      f.protocol.withTransaction(tx => tx.exec('UPDATE sync_resources SET record_json=? WHERE id=?', JSON.stringify(damaged), resource.id))
+    }
+    if (mode === 'pending-journal') {
+      // 仅登记opaque未决日志作故障夹具，不声称已有V1–V4或有效交付；资源入口必须保持它而不回放。
+      const journal: ApplyJournal = { id: 'resource-only-pending-journal', operationId: operation.id, attemptId: claimed.attempt.id, generation: claimed.attempt.generation, status: 'applying', steps: [], receipt: null, createdAtMs: Date.now(), plan: { effectKey: 'resource-only-pending', payloadDigest: 'pending', candidateDigest: 'pending', verificationBlob: writeEvidence(input.source.commonDir, { pending: true }), target: input.source, expectedTargetSnapshotId: input.id, expectedBaselinePairId: null, coveredScope: operation.scope, files: [], planBlob: writeEvidence(input.source.commonDir, { pending: true }) } }
+      f.protocol.withTransaction(tx => tx.exec('INSERT INTO sync_apply_journals(id,operation_id,attempt_id,effect_key,payload_digest,status,receipt_id,record_json) VALUES(?,?,?,?,?,?,?,?)', journal.id, operation.id, claimed.attempt.id, journal.plan.effectKey, journal.plan.payloadDigest, journal.status, null, JSON.stringify(journal)))
+    }
+    const businessEvidence = writeEvidence(input.source.commonDir, { outputDigest: '原失败输出摘要不改', findings: [{ code: 'reference-kind', message: 'FLOW.req必须引用REQ' }] })
+    f.application.store.checkpoint(claimed.fence, businessEvidence)
+    f.application.store.recordFailure(claimed.fence, { code: 'repair_budget_exhausted', message: '原结构失败不因资源清理升格', kind: 'repairable', evidenceRefs: [businessEvidence] })
+    const before = f.application.store.readOperation(operation.id), beforeAttempt = f.application.store.readAttempt(claimed.attempt.id), beforeResources = f.application.store.readResource(resource.id), beforeJournals = f.application.store.listJournals(operation.id)
+    const gitBackup = join(f.temp, 'original-git')
+    renameSync(join(f.root, '.git'), gitBackup); cpSync(gitBackup, join(f.root, '.git'), { recursive: true })
+    const current = identifyWorktree(f.root)
+    assert.equal(current.canonicalRoot, input.source.canonicalRoot); assert.equal(current.commonDir, input.source.commonDir)
+    assert.notEqual(current.repositoryId, input.source.repositoryId, '真实.git inode变化复现repoId漂移，未改旧input')
+    for (const action of ['recover', 'cancel', 'resume'] as const) await assert.rejects(f.application.control(operation.id, action), { code: 'sync_operation_wrong_source', status: 404 })
+    await assert.rejects(f.application.readOperation(operation.id), { code: 'sync_operation_wrong_source', status: 404 })
+    t.diagnostic(JSON.stringify({ sourceMismatchBlocksNormalRecovery: true, sameCanonicalRoot: true, sameCommonDir: true, repositoryIdChanged: true }))
+    const businessCalls: string[] = []
+    for (const key of ['claimAttempt', 'reserveDispatch', 'bindSession', 'planResource', 'startGeneration', 'freezeCandidate', 'recordVerification', 'beginApply', 'recordReceipt', 'settleApply'] as const) f.application.store[key] = () => { businessCalls.push(key); return assert.fail(`资源入口触碰业务方法: ${key}`) }
+    if (mode === 'wrong-input') await assert.rejects(f.application.recoverResources(operation.id, 'wrong-input'), { code: 'resource_recovery_input', status: 409 })
+    else if (mode === 'foreign-root') {
+      const foreignRoot = join(f.temp, 'foreign-root'); mkdirSync(foreignRoot); execFileSync('git', ['init', '-q', foreignRoot])
+      execFileSync('git', ['-C', foreignRoot, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-qm', 'fixture'])
+      const foreign = await SyncApplication.createResourceRecovery(foreignRoot, { protocol: f.protocol, runtimeDirectory: join(f.temp, 'foreign-runtime') })
+      await assert.rejects(foreign.recoverResources(operation.id, input.id), { code: 'resource_recovery_source', status: 404 })
+    } else {
+      const recovered = await f.application.recoverResources(operation.id, input.id)
+      const pending = ['unknown', 'bad-plan', 'missing-plan'].includes(mode)
+      assert.equal(recovered.status, pending ? 'recovery_required' : 'resources_recovered', JSON.stringify(recovered.failure))
+      assert.equal(f.application.store.readResource(resource.id).phase, pending ? beforeResources.phase : 'removed')
+      assert.deepEqual(recovered.pendingJournalIds, mode === 'pending-journal' ? ['resource-only-pending-journal'] : [])
+      if (mode === 'bad-plan') assert.equal(recovered.failure!.code, 'resource_recovery')
+      if (mode === 'unknown') assert.notEqual((JSON.parse(readEvidence(input.source.commonDir, f.application.store.readResource(resource.id).checkpointRef).toString()) as NativeRunCheckpoint).stop?.nativeStopped, true)
+    }
+    assert.deepEqual(businessCalls, [])
+    if (mode === 'wrong-input' || mode === 'foreign-root') assert.deepEqual(f.application.store.readResource(resource.id), beforeResources)
+    assert.deepEqual(f.application.store.readOperation(operation.id), before)
+    assert.deepEqual(f.application.store.readAttempt(claimed.attempt.id), beforeAttempt)
+    assert.deepEqual(readEvidence(input.source.commonDir, businessEvidence), Buffer.from(JSON.stringify({ outputDigest: '原失败输出摘要不改', findings: [{ code: 'reference-kind', message: 'FLOW.req必须引用REQ' }] })))
+    assert.equal(f.calls.length, 0); assert.deepEqual(f.application.store.listJournals(operation.id), beforeJournals)
+    for (const action of ['recover', 'resume'] as const) await assert.rejects(f.application.control(operation.id, action), { code: 'sync_operation_wrong_source', status: 404 })
+  } finally { await f.application.stopService(); f.cleanup() }
+})
 
 test('操作模型经真实Git入口持久化，重启和省略重试继承，普通重复不能刷新预算', async () => {
   const f = await fixture()

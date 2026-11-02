@@ -438,6 +438,7 @@ consumes the token after it.`,
        spex sync pause|resume
        spex sync verify <node-id> [--request-id <id>] [--model <model-id>]
        spex sync pause|resume|cancel|recover <operation-id>
+       spex sync resources recover <operation-id> --input-id <frozen-input-id>
        spex sync adopt <operation-id>
        spex sync revert <operation-id> [--request-id <id>]
        spex sync stop-writer
@@ -453,6 +454,7 @@ run 返回持久 operation，后端继续实际细化、生成、验证与受管
 --patch-file 使用 SpecBodyEdit 的 startLine/endLine/original/replacement 正文差量，
 直接进入完整操作，不先单独提交 Spec。重复 --request-id 幂等；不同内容不能复用同一键。
 recover 只核对并结算已有资源或已开始的交付日志，保持原控制、输入及预算，不派发新模型任务。
+resources recover 是单次离线资源清理；必须明确原input-id，不启动API/队列，不回放journal，也不改变业务失败或取得resume/adopt权限。
 resume 继续原操作，--retry-of 建立关联新操作；三个入口各自有明确门禁。
 新业务操作的手动 --model 优先于项目 sync.model；显式 --retry-of 可用 --model 选择新模型。相同 request ID 仍固定原模型，换模型必须使用 --retry-of；省略模型时，同 request/retry 继承原选择，新操作再取项目配置或 gpt-6.1-sol。自动观察也使用项目值；旧操作缺模型仍固定 gpt-6.1-sol。模型固定于 operation 与独审请求，resume/recover 不换模型。
 --retry-of 显式重试可重试的失败操作，保留原正文意图并关联旧结果；不能同时传 --patch-file。

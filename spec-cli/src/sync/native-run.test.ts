@@ -312,6 +312,13 @@ test('exact legacy inline resource recovers after reader threshold change withou
     const put = (value: unknown) => f.blobIO.put(Buffer.from(JSON.stringify(value)))
     const resource = f.store.planResource(f.claimed.fence, { key: request.requestKey, kind: 'native_session', payloadDigest: requestDigest, inputId: identity.inputId, candidateDigest: null, planBlob: put(plan), checkpointRef: put(checkpoint) })
     f.store.recordResourceCheckpoint(resource.id, { ...identity, phase: 'created', expectedCheckpointRef: resource.checkpointRef, checkpointRef: put({ ...checkpoint, phase: 'created' }) })
+    const beforeOperation = f.store.readOperation(f.claimed.operation.id), beforeAttempt = f.store.readAttempt(f.claimed.attempt.id)
+    assert.ok(beforeAttempt.expiresAtMs > Date.now(), '证明清理时旧fence仍有效')
+    let authorityChecks = 0, bindings = 0, newPlans = 0
+    const reserve = f.store.reserveDispatch.bind(f.store), bind = f.store.bindSession.bind(f.store), planResource = f.store.planResource.bind(f.store)
+    f.store.reserveDispatch = (...args) => { authorityChecks++; return reserve(...args) }
+    f.store.bindSession = (...args) => { bindings++; return bind(...args) }
+    f.store.planResource = (...args) => { newPlans++; return planResource(...args) }
     let calls = 0, stops = 0
     const run = f.runner({ readRecord: f.runtimeBase.readRecord, run: async () => { calls++; throw new Error('legacy recovery must not start native work') }, cancel: async id => {
       stops++; assert.equal(id, record.session)
@@ -321,6 +328,10 @@ test('exact legacy inline resource recovers after reader threshold change withou
     const controller = new AbortController(); controller.abort()
     await assert.rejects(run({ ...request, signal: controller.signal }), /native execution cancelled and exact stop settled/)
     assert.equal(f.resource().phase, 'removed'); assert.equal(stops, 1); assert.equal(calls, 0)
+    assert.equal(authorityChecks, 0, 'aborted清理不能检查或申请业务dispatch权')
+    assert.equal(bindings, 0); assert.equal(newPlans, 0)
+    assert.deepEqual(f.store.readOperation(f.claimed.operation.id), beforeOperation)
+    assert.deepEqual(f.store.readAttempt(f.claimed.attempt.id), beforeAttempt)
     assert.equal(f.store.readOperation(f.claimed.operation.id).callsUsed, 1)
     assert.equal(f.resource().plan.payloadDigest, requestDigest)
     assert.deepEqual(JSON.parse(f.blobIO.read(f.resource().plan.planBlob).toString('utf8')), plan)

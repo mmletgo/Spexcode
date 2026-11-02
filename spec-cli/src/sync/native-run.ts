@@ -18,6 +18,7 @@ import type { BlobRef, NativeSessionRef, SyncResourcePhase, WriteFence } from '.
 type FrozenRequest = Omit<ElaborationSessionRequest, 'signal'> & { readerRuntime?: FrozenReaderRuntime }
 export type NativeRunRecord = Pick<SessRec, 'session' | 'status' | 'harnessSessionId' | 'structuredExecution' | 'createRequestId' | 'createPayloadHash'>
 export type AttemptRunnerOptions = {
+  resourceRecoveryOnly?: true
   runtime?: { run: typeof runStructuredSession; cancel: typeof cancelStructuredSession; readRecord: (id: string) => NativeRunRecord | null; readCreateTermination?: typeof readSessionCreateTermination; recoverCreateTermination?: typeof recoverSessionCreateTermination }
   blobIO?: { put: (bytes: Buffer) => BlobRef; read: (ref: BlobRef) => Buffer }
   pollMs?: number
@@ -145,7 +146,7 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
         const next: NativeRunCheckpoint = { ...checkpoint, phase: 'created' as const, nativeState: state.state ?? 'queued', nativeStarted: !!state.turnId, session }
         if (hash(next) !== hash(checkpoint)) save(next)
       }
-      if (authority()) store.bindSession(fence, request.requestKey, session)
+      if (!controller.signal.aborted && authority()) store.bindSession(fence, request.requestKey, session)
       return record
     }
     let outcome: { ok: true; result: ElaborationSessionResult } | { ok: false; error: unknown } | undefined
@@ -182,7 +183,7 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
       }
       let stopped: StructuredCancellationResult | undefined
       let failure: unknown
-      try { stopped = await runtime.cancel(expectedSessionId, { reason: 'cancelled', timeoutMs: Math.min(15_000, request.timeoutMs ?? 15_000) }) }
+      try { stopped = await runtime.cancel(expectedSessionId, { reason: 'cancelled', timeoutMs: Math.min(15_000, request.timeoutMs ?? 15_000), ...(options.resourceRecoveryOnly ? { wakeQueue: false } : {}) }) }
       catch (error) { failure = error }
       const after = observe()
       if (!after?.structuredExecution) throw new StructuredSessionError('cancellation_pending', 'native record disappeared before exact stop confirmation', errorIdentity())

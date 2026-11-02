@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+独立resource-only回归以真实Git/私有SQLite保存既有资源，受控Docker driver只模拟外部inspect/rm结果；精确既有容器可清理，目标缺失或labels不符继续未结算，错误runId计划在调用driver前拒绝。所有模式禁止create/start、新attempt/dispatch/资源、业务失败改写或journal交付；该接缝证据不冒称真实Docker清理。
+
 分区内容路径越界回归先复现已独审后才partition_binding停止，再证明独审前analysis_invalid沿原预算进入下一attempt，完整诊断只回失败分区的新分析/独审，已accept区不重派；原source/index、冻结集合及全部不可变绑定门保持。
 
 code→Spec的分区AC提案引用未变只读父规则时，完整原proposal和逐来源诊断在独审/P1前以behavior_analysis_invalid返回同区下一attempt；兄弟accept区沿原ref承接，只有该区重新分析和独审。全局较宽writePaths不能覆盖本区投影的只读父上下文。旧v3指导marker的aggregate不作为当前v4自动缓存，原件仍可显示与追溯。
