@@ -57,3 +57,5 @@ reserveDispatch 已提交而 resource 尚未登记的冷恢复窗口同样属于
 仅独立资源入口通过非持久runner选项禁止精确取消主动drain队列；原request/NativePlan摘要、candidate刷新与停止证明保持，普通runner和cancel默认不变。
 
 已认证rejectedOutput原文是UTF8诊断artifact，保留精确ref/SHA/text及原失败身份；它不具有JSON stage角色，即使正文可解析且伪装sync-stage-v1也不能取得阶段、候选或引用可达权限。只读恢复以原failed观察与canonical失败/后续精确cancelled停止记录核验，不把后续清理改签为原通过。
+
+已失败且 canonical record 确证 nativeStopped 的资源与成功资格分离：沿原计划/创建键、请求摘要和 session/thread/turn 重核原错误、packet 与可选 failedWorktree，再保存 failed terminal→removed；同键或 terminal 冷恢复重放原失败且不重发。failedWorktree 仍须原 request/seed、已拒 final 和不可变 Git 对象验证，不成为成功 result。Native checkpoint 保留 packet 正文/SHA，Saved round 原子发布前不授独立 raw ref 可达权；live/cold 出站错误可物化精确 ref，不能修改历史 checkpoint 或跳过 owner/round 认证。typed RPC 仅在当前 run/有效 fence、全部派发资源精确 removed、故障 request/dispatch/plan/候选与原 stop 三方一致时为协调器提供已结算资格；未知、错配、旧缺席不得推断或补签。

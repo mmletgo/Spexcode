@@ -590,8 +590,8 @@ export async function generateSyncPartitions(input: GenerationInput, plan: SyncP
     dispatch = implementationGenerationDispatch(input, { ...plan, partitions: generationPartitions }, specOnly)
     locals = dispatch.locals
   } catch (error) {
-    const cause = error as { code?: string; message?: string }
-    return { status: input.signal?.aborted ? 'cancelled' : 'repair', inputId: input.snapshot.id, inputDigest: '', candidate: null, candidateFiles: null, output: planned, reviewOutput: null, review: null, validationFindings: [], traces: planned.traces, candidateValidated: false, reviewPassed: false, runtimeVerification: 'not_run', delivery: 'not_applied', failure: { code: cause.code ?? 'implementation_plan_invalid', message: cause.message ?? String(error) } }
+    const cause = error as { code?: string; message?: string; sessionId?: string; threadId?: string; turnId?: string; requestKey?: string; inputDigest?: string }
+    return { status: input.signal?.aborted ? 'cancelled' : 'repair', inputId: input.snapshot.id, inputDigest: '', candidate: null, candidateFiles: null, output: planned, reviewOutput: null, review: null, validationFindings: [], traces: planned.traces, candidateValidated: false, reviewPassed: false, runtimeVerification: 'not_run', delivery: 'not_applied', failure: { code: cause.code ?? 'implementation_plan_invalid', message: cause.message ?? String(error), ...(cause.sessionId ? { sessionId: cause.sessionId, ...(cause.threadId ? { threadId: cause.threadId } : {}), ...(cause.turnId ? { turnId: cause.turnId } : {}), ...(cause.requestKey ? { requestKey: cause.requestKey, inputDigest: cause.inputDigest } : {}) } : {}) } }
   }
   const prepared = specOnly ? [] : await mapSyncPartitions(locals, maxParallel, input.signal, async local => {
     const key = `partition:${local.partition.id}:generation`, saved = checkpoints.load<GenerationResult>(key)

@@ -27,7 +27,7 @@ import type { SyncPartitionPlan } from './partitioning.js'
 import { contractOmissionBound, freezeGenerationInput, generationReviewRequest, restoreGenerationInput, reviewError, runGeneration } from './generation.js'
 import type { GenerationFinding, GenerationInput, GenerationResult } from './generation-types.js'
 import { stageWorktree } from './stage-worktree.js'
-import { createAttemptRunner } from './native-run.js'
+import { createAttemptRunner, hasSettledNativeRpcFailure } from './native-run.js'
 import type { NativeRunCheckpoint, NativeRunPlan } from './native-run.js'
 import type { AdmitSyncInput, ApplyReceipt, BlobRef, CandidateRef, ComposedInputRef, FrozenBaselineSelection, InputSnapshot, SyncAttempt, SyncFailure, SyncOperation, SyncScope, SyncResourceRecord, VerificationResultBlob, WriteFence } from './operation-types.js'
 import { deliverVerifiedAttempt, planPrivateDelivery } from './private-delivery.js'
@@ -63,6 +63,12 @@ const unique = (ids: readonly string[]): string[] => [...new Set(ids)].sort()
 const behaviorAnalysisRepairCodes = new Set(['behavior_analysis_invalid', 'behavior_review_failed'])
 const structuredAnalysisRepairCodes = new Set(['structured_output_retries_exhausted', 'structured_output_format_invalid', 'native_worktree_result_invalid'])
 const analysisRepairDiagnosticCodes = new Set([...behaviorAnalysisRepairCodes, ...structuredAnalysisRepairCodes])
+function requireSettledRpcSources(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, sources: readonly { status: string; failure: { code: string; message: string; sessionId?: string; threadId?: string; turnId?: string; requestKey?: string; inputDigest?: string } | null }[], evidenceRefs: BlobRef[]): void {
+  if (!sources.some(source => source.failure?.code === 'native_rpc_timeout')) return
+  const blocked = sources.find(source => ['unsupported', 'cancelled', 'conflict', 'needs_input'].includes(source.status))
+  if (blocked) fail(blocked.failure?.code ?? 'unsupported', blocked.failure?.message ?? '并发分区仍有不可自动续修的结果', evidenceRefs)
+  if (sources.some(source => source.failure?.code === 'native_rpc_timeout' && !hasSettledNativeRpcFailure(store, operation, attempt, source.failure))) fail('cancellation_pending', '原生RPC故障尚无本尝试的精确停止及资源结算证明', evidenceRefs)
+}
 const fenceFor = (operation: SyncOperation, attempt: SyncAttempt): WriteFence => ({ operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: operation.input.source.physicalFingerprint })
 type InputView = { composed: ComposedInputRef; manifest: SnapshotManifest; files: Map<string, string>; readPaths: readonly string[]; readSetDigest: string; frozen: FrozenContracts }
 
@@ -1204,7 +1210,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
             const issue = error as { code?: string; message?: string }
             const partitionFailures = (error as { partitionFailures?: PartitionAnalysisFailure[] }).partitionFailures
             const errors = [error, ...partitionFailures?.map(item => item.error) ?? []]
-            const blocked = errors.find(item => !(behaviorAnalysisRepairCodes.has((item as { code?: string }).code ?? '') || item instanceof StructuredSessionError && structuredAnalysisRepairCodes.has(item.code) || item instanceof SettledSessionCreateTimeoutError))
+            const blocked = errors.find(item => !(behaviorAnalysisRepairCodes.has((item as { code?: string }).code ?? '') || item instanceof StructuredSessionError && (structuredAnalysisRepairCodes.has(item.code) || hasSettledNativeRpcFailure(store, operation, store.readAttempt(attempt!.id), item)) || item instanceof SettledSessionCreateTimeoutError))
             if (blocked || signal.aborted) throw blocked ?? error
             const rejected = failure(issue.code!, issue.message ?? String(error), 'repairable', [writeEvidence(operation.input.source.commonDir, { code: issue.code, message: issue.message, ...(partitionFailures ? { partitionFailures: partitionFailures.map(({ error: _error, ...item }) => item) } : {}), ...(error instanceof StructuredSessionError ? { sessionId: error.sessionId, threadId: error.threadId, turnId: error.turnId } : {}) })])
             store.recordFailure(fence, rejected); continue
@@ -1289,6 +1295,9 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         const kind: SyncFailure['kind'] = unsupported ? 'unsupported' : elaboration.status === 'conflict' ? 'conflict' : elaboration.status === 'needs_input' ? 'missing_input' : 'repairable'
         const issue = failure(elaboration.failure?.code ?? 'elaboration_failed', elaboration.failure?.message ?? '细化结构或独立评审未通过', kind, [writeEvidence(operation.input.source.commonDir, elaboration)])
         if (stopped) fail('cancelled', issue.message, issue.evidenceRefs)
+        const failureSources = elaboration.partitionEvidence?.map(owner => JSON.parse(readEvidence(operation.input.source.commonDir, owner.resultRef).toString('utf8')) as SavedElaboration) ?? [elaboration]
+        requireSettledRpcSources(store, operation, store.readAttempt(attempt.id), failureSources, issue.evidenceRefs)
+        if (elaboration.failure?.code === 'cancellation_pending') fail('cancellation_pending', issue.message, issue.evidenceRefs)
         if (elaboration.failure?.code === 'partition_final_seal_failed') {
           const source = loadSealRepairSource(), currentAttempt = store.readAttempt(attempt.id)
           const previous = source?.result ?? store.listAttempts(operation.id).filter(prior => prior.number < attempt!.number && ['failed', 'superseded', 'settled'].includes(prior.status)).reverse().map(prior => stage<SavedElaboration>(store, operation, prior, 'elaboration')).find(result => result?.failure?.code === 'partition_final_seal_failed')
@@ -1448,6 +1457,14 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         const kind: SyncFailure['kind'] = oracleErrors.length ? 'repairable' : generated.status === 'needs_input' ? 'missing_input' : generated.status === 'conflict' ? 'conflict' : generated.status === 'unsupported' || generated.failure?.code === 'input_invalid' ? 'unsupported' : 'repairable'
         const issue = failure(oracleFailure?.code ?? generated.failure?.code ?? 'generation_failed', oracleFailure?.message ?? generated.failure?.message ?? '实现候选或独立评审未通过', kind, [writeEvidence(operation.input.source.commonDir, generated)])
         if (signal.aborted || generated.status === 'cancelled') fail('cancelled', issue.message, issue.evidenceRefs)
+        const localFailures = partitions ? readSyncCheckpoints(store, operation, store.readAttempt(attempt.id)).json.flatMap(({ value }) => {
+          const saved = value as Partial<Stage>
+          if (saved.version !== 'sync-stage-v1' || !saved.stage?.startsWith('partition:') || ![':generation', ':candidate-review'].some(suffix => saved.stage!.endsWith(suffix))) return []
+          const source = partitionStage<GenerationResult>(store, operation, store.readAttempt(attempt!.id), saved.stage)
+          return source ? [source.result] : []
+        }) : []
+        requireSettledRpcSources(store, operation, store.readAttempt(attempt.id), [generated, ...localFailures], issue.evidenceRefs)
+        if (generated.failure?.code === 'cancellation_pending') fail('cancellation_pending', issue.message, issue.evidenceRefs)
         if (kind === 'repairable' && generated.review?.verdict === 'repair' && generated.candidate && !nodeChanges.length) {
           const omissions = generated.review.findings.filter(finding => contractOmissionBound(finding, accepted.contracts))
           if (omissions.length) { refinement = { prior: elaboration, candidate: generated.candidate, candidateDigest: generated.candidate.digest, diagnostics: omissions.map(finding => ({ code: 'contract_boundary_omission', message: JSON.stringify(finding) })) }; saveStage(store, fence, 'refinement', refinement) }
@@ -1524,7 +1541,8 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
     }
     const code = error instanceof SyncCoordinatorError || error instanceof SyncStoreError ? error.code : typeof (error as { code?: unknown })?.code === 'string' ? String((error as { code: string }).code) : 'coordinator_failed'
     const refs = error instanceof SyncCoordinatorError ? error.evidenceRefs : []
-    const kind: SyncFailure['kind'] = code === 'SYNC_BUDGET_EXHAUSTED' ? 'budget' : ['input_changed', 'policy_changed', 'readset_changed', 'composition_conflict', 'request_conflict'].includes(code) ? 'conflict' : code === 'missing_intent' || code === 'no_ready_acceptance' ? 'missing_input' : code === 'export_recovery' || code === 'candidate_stage_missing' ? 'environment' : 'unsupported'
+    const settledRpc = !!fence && !signal.aborted && hasSettledNativeRpcFailure(store, operation, store.readAttempt(fence.attemptId), error as StructuredSessionError)
+    const kind: SyncFailure['kind'] = settledRpc ? 'repairable' : code === 'SYNC_BUDGET_EXHAUSTED' ? 'budget' : ['input_changed', 'policy_changed', 'readset_changed', 'composition_conflict', 'request_conflict'].includes(code) ? 'conflict' : code === 'missing_intent' || code === 'no_ready_acceptance' ? 'missing_input' : code === 'export_recovery' || code === 'candidate_stage_missing' ? 'environment' : 'unsupported'
     const issue = failure(code, error instanceof Error ? error.message : String(error), kind, refs)
     if (code === 'SYNC_FENCE_EXPIRED') return current('recovery_required', issue)
     if (code === 'SYNC_BUDGET_EXHAUSTED') { store.recordBudgetExhaustion(operationId); return current(undefined, issue) }
@@ -1534,6 +1552,6 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       store.recordFailure(fence, issue)
     }
     const durableFailure = operation.currentAttemptId ? store.readAttempt(operation.currentAttemptId).failure : null
-    return current(['export_recovery', 'candidate_stage_missing', 'cancellation_pending'].includes(code) ? 'recovery_required' : (durableFailure ?? issue).kind === 'unsupported' ? 'unsupported' : undefined, durableFailure ?? issue)
+    return current(['export_recovery', 'candidate_stage_missing', 'cancellation_pending'].includes(code) || code === 'native_rpc_timeout' && !settledRpc ? 'recovery_required' : (durableFailure ?? issue).kind === 'unsupported' ? 'unsupported' : undefined, durableFailure ?? issue)
   } finally { if (timer) clearInterval(timer); releasePublication(); mutex.release() }
 }

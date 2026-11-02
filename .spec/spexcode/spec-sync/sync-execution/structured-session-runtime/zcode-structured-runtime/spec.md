@@ -63,3 +63,5 @@ version5/null 请求沿原 ZCode policy、realm 与版本4读取证明执行，�
 已持久 completed 的 worktree 冷重放核原完成缓存、固定请求、Native 身份、schema/输出和原 exit.stopped/close 证据，不再探测历史 PID/PGID，避免无关复用导致伪 stale；running 或未结算仍必须实时证明原进程与后代停止。
 
 worktree 停止沿 [[native-worktree-runtime]] 正向任务域边界及 boundaryVersion2 追加观察，保留原 failed exit/unknown；workspace 与唯一私有 tmp 由原 plan 固定，无关联同 UID 进程仅诊断。
+
+唯一 stdio RPC 的原 10000ms 计时器以 native_rpc_timeout 标记本次真实超时，保留原 method/message；finally 的精确进程停止不能抹去原 typed cause。RPC 期限、pending 删除、迟到回复不接纳、未 ACK create 不发送模型请求及不自动 close 的行为保持；由 [[structured-session-runtime]] 正式消费停止证明，不以 elapsed、Promise 结束或 transport 退出自行证明停止。

@@ -95,5 +95,5 @@ export type GenerationResult = {
   reviewPassed: boolean
   runtimeVerification: 'not_run'
   delivery: 'not_applied'
-  failure: { code: string; message: string } | null
+  failure: { code: string; message: string; sessionId?: string; threadId?: string; turnId?: string; requestKey?: string; inputDigest?: string } | null
 }
