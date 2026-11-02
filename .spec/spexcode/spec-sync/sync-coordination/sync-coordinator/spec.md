@@ -190,8 +190,12 @@ checkpoint扫描共用[[sync-checkpoint-evidence]]的typed证据读取接缝。�
 
 P0/P1/P2 共用 typed Native RPC 已结算准入：仅当前 control/physical run、有效 fence，且原失败精确匹配本 attempt 的固定 request/dispatch/plan、局部 candidate 与 failed terminal/removed stop，才沿既有同 operation/input/预算开启下一 attempt。并发每个 typed RPC 故障均须证明；未 removed 兄弟或 unsupported/cancelled/conflict/needs_input 不能被一个已停故障掩盖。unknown stop、pause、用户取消、过期 fence 和旧缺席保持 recovery/原控制语义，不重发旧 request、不解析 message 猜分类；普通格式/schema门和 initial code_to_spec 不调用 code_generate 的权限门保持。
 
-候选已通过V1而仅精确code_review结构格式失败时，续审从同operation的已结算原Native失败请求、合法P1批准链及validated candidate恢复原partition-plan身份，不因诊断或P1合法扩域重规划。原plan wrapper、digest及旧字段不改签；若计划冻结早于P1新增null资源，须核旧selection绑定逐字保留、新增binding全null、contractScopeExpansions的前后selection及evidenceRef精确来自同一已审P1、各owner原planDigest及composed tree/content不变。新增路径与ID必须属于该已审正文且在原冻结权限内；非null/既有绑定、source/input/readSet/policy/scope/原意变化不获得承接。原P1局部完整输入/Git/schema缓存核验及strict全图seal仍执行，唯一候选重新经V1及全部最终门。
+候选已通过V1而仅精确code_review结构格式失败时，续审从同operation的已结算原Native失败请求、合法P1批准链及validated candidate恢复原partition-plan身份，不因诊断或P1合法扩域重规划。原plan wrapper、digest及旧字段不改签；若计划冻结早于P1新增null资源，须核旧selection绑定逐字保留、新增binding全null、contractScopeExpansions的前后selection及evidenceRef精确来自同一已审P1、各owner原planDigest及composed tree/content不变。新增业务ID/Spec路径来自该已审正文，实现与测试路径只来自同P1的code/AC.test映射或原文件规划，均在原冻结权限内；非null/既有绑定、source/input/readSet/policy/scope/原意变化不获得承接。原P1局部完整输入/Git/schema缓存核验及strict全图seal仍执行，唯一候选重新经V1及全部最终门。
 
 格式诊断不加入全局repairContext；已有accept的局部或跨边独审仍逐项沿原完整输入、Native传输请求/schema/seed/模型/policy及停止原件核验。原Native请求比较复用adapter的精准ZCode read policy冻结接缝，按原saved字段重建，不向旧缺席补默认。仅失败组取得reviewRepair原result/NativePlan/checkpoint引用；从原canonical record和failed→removed停止证明认证完整final后，在只读临时seed提供原回答及精确schema，要求Agent基于旧回答继续输出合法最终JSON。原文仍未批准，不抽取其中JSON、不补checkedIds/accept/receipt，不读thinking、不改业务候选。旧GenerationResult及raw ref缺席保持；新独审、V1–V4/Docker/Git/adopt和预算照常。
 
 该候选续审路径对code→Spec和Spec→Code共用；后者保原已生成候选与真实builder traces、file-writer-plan，不再调用implementation_plan/code_generate。原builder与成功review共用正式Native结果冷验，按原请求键冷回放prepareOnly重核真实Git/schema/只读范围/完整局部输入及原preparedChanges，不制造当前调用；原候选Git差量供新结果记录，V1及原发布基树绑定重新验证；发布基树变化拒绝借旧候选覆盖新发布，最终V1–V4及原预算门保持。
+
+多轮review-only续审的builder来源沿原review-plan-provenance追到真实prepared/Native所在attempt，逐级核同候选、原计划、file-writer-plan与builder traces；不把旧prepared复制成新派发。成功续修组的原输入同时沿accepted-review provenance.inputRef恢复，跨兄弟失败仍保自己的原reviewRepair/请求与Native结论。预算预检只计已认证必须重派的失败组下界，实际缓存失配和新调用仍由原reserveDispatch逐调用硬限，不重置或扩大预算。
+
+合法scope分层证明：业务ID/Spec路径由同一已审P1的扩域原件负责，实现/测试路径可由同P1已审code/AC.test映射负责，或由原file-writer-plan及其逐owner proposal/trace/派发负责；最终完整scope必须精确等于两层实际并集，原binding逐字保留、新增binding全null，前后selection沿既有扩域记录相连。不能把代码路径伪归P1、忽略额外路径/ID或借非null漂移；已完成且精确证实的scope步骤不对同一P1 evidence重登记更宽集合。冷builder逐组沿既有renew→yieldToControl→renew让心跳/暂停处理，保持生产lease和预算。

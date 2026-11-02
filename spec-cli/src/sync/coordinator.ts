@@ -5,7 +5,7 @@ import { existsSync, lstatSync, mkdirSync, realpathSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import { dependencyClosure, parseContract, parseParts } from '@spexcode/spec-core/contracts'
 import { relationClaimsPath } from '@spexcode/spec-core'
-import type { ContractFinding } from '@spexcode/spec-core/contracts'
+import type { Contract, ContractFinding } from '@spexcode/spec-core/contracts'
 import { actualTreeDiff, exportCandidate, isHostPrivatePath, verifyCandidate } from './candidate.js'
 import { analyzeCodeBehavior, authoredContractChanges, CODE_BEHAVIOR_GUIDANCE_VERSION, deriveBehaviorAuthorization } from './code-behavior.js'
 import type { CodeBehaviorAnalysis, CodeBehaviorEvidence, SyncDecisionInput } from './writeback-types.js'
@@ -20,8 +20,8 @@ import type { FileMutex } from './file-mutex.js'
 import { checkGenerationContractIntent, readFrozenContracts } from './frozen-contracts.js'
 import { decisionAuthorizationErrors, sameContractBusinessMeaning } from './contract-evolution.js'
 import type { FrozenContracts } from './frozen-contracts.js'
-import { implementationGenerationDispatch, completeSyncPartitionPlan, analyzeSyncPartitions, elaborateSyncPartitions, generateSyncPartitions, partitionSealRepairOwners } from './partition-execution.js'
-import type { PartitionCheckpoints, PartitionAnalysisFailure, PartitionAnalysisFailures } from './partition-execution.js'
+import { implementationGenerationDispatch, completeSyncPartitionPlan, analyzeSyncPartitions, elaborateSyncPartitions, generateSyncPartitions, partitionSealRepairOwners, IMPLEMENTATION_PLAN_SCHEMA } from './partition-execution.js'
+import type { FileWriterPlan, PartitionCheckpoints, PartitionAnalysisFailure, PartitionAnalysisFailures } from './partition-execution.js'
 import { planSyncPartitions } from './partitioning.js'
 import type { SyncPartitionPlan } from './partitioning.js'
 import { contractOmissionBound, freezeGenerationInput, generationReviewRequest, generationStageTree, restoreGenerationInput, reviewError, runGeneration } from './generation.js'
@@ -211,6 +211,11 @@ function stageSelectionMatches(operation: SyncOperation, saved: Stage): boolean 
     ? saved.readSetDigest === operation.readSetDigest
     : extendsWithUninitializedResources(selected, operation.baselineSelection)
 }
+/** P1扩域与续审共用已审映射投影；related/source不产生实现写权。 */
+function p1WritableReferences(contracts: readonly Contract[], changedPaths: ReadonlySet<string>, plan: SyncCoordinatorPlan): string[] {
+  return contracts.filter(contract => changedPaths.has(contract.path)).flatMap(contract => [...contract.code.map(anchor => anchor.split('#')[0]), ...contract.items.filter(item => item.kind === 'AC').map(item => item.test.split('#')[0])]).filter(path => within(path, plan.writePaths) && !plan.mandatoryTests.some(oracle => overlap(path, oracle.testPath)))
+}
+
 function generationRepairInput(previous: SavedGeneration, issue?: SyncFailure): { previousOutput: unknown; diagnostics: { code: string; message: string }[] } {
   return { previousOutput: previous.output, diagnostics: [...(issue ? [{ code: issue.code, message: issue.message }] : []), ...previous.validationFindings.map(item => ({ code: item.code, message: item.message })), ...(previous.review?.findings.map(item => ({ code: item.kind, message: JSON.stringify(item) })) ?? [])] }
 }
@@ -254,6 +259,45 @@ function partitionStage<T>(store: SyncStore, operation: SyncOperation, attempt: 
   if (original?.readSetDigest !== operation.readSetDigest || operation.baselineSelection && original.baselineSelectionRef?.sha256 !== writeEvidence(operation.input.source.commonDir, operation.baselineSelection).sha256) return null
   return { result, resultRef }
 }
+/** P1业务扩域与原文件规划分别作证，完整scope必须精确等于两者的实际并集。 */
+function reviewScopeProof(store: SyncStore, operation: SyncOperation, origin: SyncAttempt, approved: SavedElaboration, generation: SavedGeneration): { p1: NonNullable<SyncOperation['contractScopeExpansions']>[number]; writerRef?: BlobRef; paths: string[] } | null {
+  const commonDir = operation.input.source.commonDir, approvedRef = writeEvidence(commonDir, approved)
+  const p1 = operation.contractScopeExpansions?.find(expansion => expansion.evidenceRef.sha256 === approvedRef.sha256)
+  if (!p1 || !generation.candidate || !generation.fileWriterPlanRef) return null
+  const filePlan = JSON.parse(readEvidence(commonDir, generation.fileWriterPlanRef).toString()) as FileWriterPlan
+  const plan = JSON.parse(readEvidence(commonDir, operation.planBlob!).toString()) as SyncCoordinatorPlan
+  const originalPlan = stage<SyncPartitionPlan>(store, operation, origin, 'partition-plan')
+  if (filePlan.version !== 'sync-file-writers-v1' || filePlan.writers.length !== filePlan.traces.length || !originalPlan || new Set(filePlan.writers.map(writer => writer.partitionId)).size !== filePlan.writers.length) return null
+  for (const [index, writer] of filePlan.writers.entries()) {
+    const trace = filePlan.traces[index]
+    if (!originalPlan.partitions.some(partition => partition.id === writer.partitionId) || trace.purpose !== 'implementation_plan' || writer.paths.some(path => isHostPrivatePath(path) || path.startsWith('.spec/') || /[*?\[\]]/.test(path) || !within(path, plan.writePaths) || plan.mandatoryTests.some(test => overlap(path, test.testPath)))) return null
+    let proven = false
+    for (const source of store.listAttempts(operation.id).filter(attempt => attempt.number <= origin.number && ['failed', 'superseded', 'settled'].includes(attempt.status))) {
+      const proposal = stage<{ paths: string[]; trace: ElaborationTrace }>(store, operation, source, `partition:${writer.partitionId}:implementation-plan`)
+      if (!proposal || canonical(proposal.paths) !== canonical(writer.paths) || canonical(proposal.trace) !== canonical(trace)) continue
+      const key = `sync:${source.id}:generation:partition:${writer.partitionId}:implementation_plan`
+      const dispatch = source.dispatchPlans.find(item => item.key === key && item.purpose === 'implementation_plan' && item.session?.sessionId === trace.sessionId && item.session.threadId === trace.threadId && item.session.turnId === trace.turnId)
+      if (!dispatch || trace.sessionId !== sessionIdForCreateKey(dispatch.sessionCreateKey)) continue
+      const resource = store.findResource(source.id, key)
+      if (resource) {
+        const native = JSON.parse(readEvidence(commonDir, resource.plan.planBlob).toString()) as NativeRunPlan
+        const checkpoint = JSON.parse(readEvidence(commonDir, resource.checkpointRef).toString()) as NativeRunCheckpoint
+        const output = checkpoint.result?.output as { version?: string; paths?: string[] } | undefined
+        if (!output || output.version !== 'sync-implementation-plan-v1' || !Array.isArray(output.paths) || canonical([...output.paths].sort()) !== canonical(writer.paths) || Object.keys(output).sort().join(',') !== 'paths,version' || native.request.model !== syncModel(operation) || native.request.effort !== 'high' || native.request.root !== operation.input.source.canonicalRoot || canonical(native.request.schema) !== canonical(IMPLEMENTATION_PLAN_SCHEMA) || !completedNativeStageResult(store, operation, source, native.request, trace, output, generation.candidate.digest)) continue
+      } else {
+        const injected = stage<{ requestDigest: string; result: ElaborationSessionResult }>(store, operation, source, `injected:${key}`), output = injected?.result.output as { version?: string; paths?: string[] } | undefined
+        if (!injected || injected.requestDigest !== dispatch.requestDigest || injected.result.sessionId !== trace.sessionId || injected.result.threadId !== trace.threadId || injected.result.turnId !== trace.turnId || injected.result.resultDigest !== trace.resultDigest || contentHash(JSON.stringify(output)) !== trace.resultDigest || !output || output.version !== 'sync-implementation-plan-v1' || !Array.isArray(output.paths) || canonical([...output.paths].sort()) !== canonical(writer.paths) || Object.keys(output).sort().join(',') !== 'paths,version') continue
+      }
+      proven = true; break
+    }
+    if (!proven) return null
+  }
+  const paths = unique(filePlan.writers.flatMap(writer => writer.paths)), initial = p1.paths ?? generation.candidate.coveredScope.paths
+  const expected = paths.some(path => !within(path, initial)) ? unique([...initial, ...paths]) : initial
+  if (canonical(expected) !== canonical(operation.scope.paths) || canonical(p1.contractIds) !== canonical(operation.scope.contractIds) || canonical(p1.flowIds) !== canonical(operation.scope.flowIds)) return null
+  return { p1, ...(paths.length ? { writerRef: generation.fileWriterPlanRef } : {}), paths }
+}
+
 /** 同一已审P1的null扩域可保原计划；旧wrapper/readSet/digest原样保留。 */
 function reviewPlanStage(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, key: 'partition-plan' | 'candidate-partition-plan'): { result: SyncPartitionPlan; resultRef: BlobRef } | null {
   const exact = partitionStage<SyncPartitionPlan>(store, operation, attempt, key)
@@ -270,16 +314,28 @@ function reviewPlanStage(store: SyncStore, operation: SyncOperation, attempt: Sy
   const before = JSON.parse(readEvidence(commonDir, wrapper.baselineSelectionRef).toString()) as FrozenBaselineSelection
   const after = operation.baselineSelection
   if (!extendsWithUninitializedResources(before, after)) return null
-  const expansion = operation.contractScopeExpansions?.find(item => item.evidenceRef.sha256 === approvedRef.sha256 && item.previousBaselineSelectionDigest === before.digest && item.baselineSelectionDigest === after.digest)
+  const proof = reviewScopeProof(store, operation, attempt, approved, generation)
+  if (!proof) return null
+  let selectedDigest = before.digest
+  for (const expansion of operation.contractScopeExpansions ?? []) {
+    if (expansion.previousBaselineSelectionDigest !== selectedDigest || expansion.baselineSelectionDigest === selectedDigest) continue
+    if (expansion.evidenceRef.sha256 !== approvedRef.sha256 && expansion.evidenceRef.sha256 !== proof.writerRef?.sha256) return null
+    if (expansion.evidenceRef.sha256 === proof.writerRef?.sha256 && (canonical(expansion.paths) !== canonical(operation.scope.paths) || canonical(expansion.contractIds) !== canonical(proof.p1.contractIds) || canonical(expansion.flowIds) !== canonical(proof.p1.flowIds))) return null
+    selectedDigest = expansion.baselineSelectionDigest!
+    if (selectedDigest === after.digest) break
+  }
+  if (selectedDigest !== after.digest) return null
+  const expansion = proof.p1
   const original = stage<SyncPartitionPlan>(store, operation, attempt, 'partition-plan')
-  if (!expansion || !original || !approved.partitionEvidence?.length || approved.partitionEvidence.some(owner => (JSON.parse(readEvidence(commonDir, owner.resultRef).toString()) as SavedElaboration).partitionBinding?.planDigest !== original.digest)) return null
+  if (!original || !approved.partitionEvidence?.length || approved.partitionEvidence.some(owner => (JSON.parse(readEvidence(commonDir, owner.resultRef).toString()) as SavedElaboration).partitionBinding?.planDigest !== original.digest)) return null
   const contracts = approved.changes.flatMap(change => parseContract(change).contract ?? [])
   const additions = after.bindings.filter(binding => !before.bindings.some(prior => baselineResourceKey(prior) === baselineResourceKey(binding)))
   const plan = JSON.parse(readEvidence(commonDir, operation.planBlob!).toString()) as SyncCoordinatorPlan
+  const p1Paths = new Set([...approved.changes.map(change => change.path), ...p1WritableReferences(contracts, new Set(approved.changes.map(change => change.path)), plan)])
   if (additions.some(binding => {
     const resource = binding.resource
     return resource.kind === 'path'
-      ? !expansion.paths?.includes(resource.path) || !approved.changes.some(change => change.path === resource.path) || !within(resource.path, plan.writePaths) || plan.mandatoryTests.some(test => overlap(resource.path, test.testPath))
+      ? !(expansion.paths?.includes(resource.path) && p1Paths.has(resource.path) || proof.paths.includes(resource.path)) || !within(resource.path, plan.writePaths) || plan.mandatoryTests.some(test => overlap(resource.path, test.testPath))
       : !expansion[resource.kind === 'flow' ? 'flowIds' : 'contractIds'].includes(resource.id) || !contracts.some(contract => contract.items.some(item => item.id === resource.id && (resource.kind === 'flow') === (item.kind === 'FLOW')))
   })) return null
   return { result, resultRef }
@@ -383,16 +439,32 @@ function completedNativeStageResult(store: SyncStore, operation: SyncOperation, 
   return checkpoint.result
 }
 
+/** 续审不伪造prepared记录；沿既有计划provenance回到真实builder所在attempt。 */
+function generationBuilderSource(store: SyncStore, operation: SyncOperation, origin: SyncAttempt, key: string, candidate: CandidateRef, plan: SyncPartitionPlan): { attempt: SyncAttempt; result: SavedGeneration } {
+  for (;;) {
+    const source = partitionStage<SavedGeneration>(store, operation, origin, key)
+    if (source) return { attempt: origin, result: source.result }
+    const provenance = partitionStage<{ fromAttemptId: string; resultRef: BlobRef }>(store, operation, origin, 'review-plan-provenance')?.result
+    if (!provenance) fail('review_source_binding', '原候选缺少builder原件及真实续审provenance')
+    const previous = store.readAttempt(provenance.fromAttemptId)
+    const current = partitionStage<SavedGeneration>(store, operation, origin, 'generation')?.result
+    const prior = previous.operationId === operation.id && previous.number < origin.number && ['failed', 'superseded', 'settled'].includes(previous.status) ? partitionStage<SavedGeneration>(store, operation, previous, 'generation')?.result : null
+    const selected = prior && reviewPlanStage(store, operation, previous, 'partition-plan')
+    const builders = (result: SavedGeneration): ElaborationTrace[] => result.traces.filter(trace => trace.purpose !== 'code_review')
+    if (!current?.candidateValidated || !prior?.candidateValidated || canonical(current.candidate) !== canonical(candidate) || canonical(prior.candidate) !== canonical(candidate) || current.fileWriterPlanRef?.sha256 !== prior.fileWriterPlanRef?.sha256 || canonical(builders(current)) !== canonical(builders(prior)) || !selected || selected.resultRef.sha256 !== provenance.resultRef.sha256 || canonical(selected.result) !== canonical(plan)) fail('review_source_binding', 'builder来源链的候选/计划/真实trace或原文件计划已改变')
+    origin = previous
+  }
+}
+
 /** 沿原检查点追到真正派发的accept；拷贝不创造新会话或修改旧摘要。 */
 export function acceptedCandidateReviewSource(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, key: string, candidate: CandidateRef, plan: SyncPartitionPlan, input: GenerationInput): { result: SavedGeneration; resultRef: BlobRef; attempt: SyncAttempt } | null {
-  const commonDir = operation.input.source.commonDir
   let origin = attempt, source = partitionStage<SavedGeneration>(store, operation, origin, key)
   while (source) {
     const result = source.result, trace = result.traces[0]
     if (origin.operationId !== operation.id || !['failed', 'superseded', 'settled'].includes(origin.status) || result.status !== 'reviewed' || !result.candidateValidated || !result.reviewPassed || result.failure || result.validationFindings.some(finding => finding.severity === 'error') || result.inputId !== operation.input.id || canonical(result.candidate) !== canonical(candidate) || result.review?.verdict !== 'accept' || result.review.findings.length || canonical(result.reviewOutput) !== canonical(result.review) || result.review.inputId !== operation.input.id || result.review.candidateDigest !== candidate.digest || result.traces.length !== 1 || trace.purpose !== 'code_review' || trace.inputDigest !== result.inputDigest || trace.resultDigest !== contentHash(JSON.stringify(result.reviewOutput))) return null
     const approved = stage<SavedElaboration>(store, operation, origin, 'elaboration')
-    const expansion = approved && operation.contractScopeExpansions?.find(item => item.evidenceRef.sha256 === writeEvidence(commonDir, approved).sha256)
-    if (canonical(candidate.coveredScope.paths) !== canonical(operation.scope.paths) || expansion && (canonical(expansion.contractIds) !== canonical(operation.scope.contractIds) || canonical(expansion.flowIds) !== canonical(operation.scope.flowIds) || expansion.paths && canonical(expansion.paths) !== canonical(operation.scope.paths))) return null
+    const aggregate = partitionStage<SavedGeneration>(store, operation, origin, 'generation')?.result
+    if (canonical(candidate.coveredScope.paths) !== canonical(operation.scope.paths) || approved && aggregate && !reviewScopeProof(store, operation, origin, approved, aggregate)) return null
     const oldKey = `sync:${origin.id}:generation:final:${key.slice('partition:'.length, -':candidate-review'.length)}:code_review`
     const dispatch = origin.dispatchPlans.find(dispatch => dispatch.key === oldKey && dispatch.purpose === 'code_review' && dispatch.session?.sessionId === trace.sessionId && dispatch.session.threadId === trace.threadId && dispatch.session.turnId === trace.turnId)
     if (!dispatch) {
@@ -421,8 +493,8 @@ export function failedCandidateReviewSource(store: SyncStore, operation: SyncOpe
   const source = partitionStage<SavedGeneration>(store, operation, origin, key), result = source?.result
   if (!source || !result || !['failed', 'superseded', 'settled'].includes(origin.status) || !reviewFormatRepairCodes.has(result.failure?.code ?? '') || result.status !== 'failed' || result.inputId !== operation.input.id || canonical(candidate.coveredScope.paths) !== canonical(operation.scope.paths) || input && canonical(input.composed) !== canonical(origin.composedInput) || !result.candidateValidated || result.reviewPassed || result.review !== null || result.reviewOutput !== null || result.validationFindings.some(finding => finding.severity === 'error') || canonical(result.candidate) !== canonical(candidate) || canonical(reviewPlanStage(store, operation, origin, 'candidate-partition-plan')?.result) !== canonical(plan)) return null
   const approved = stage<SavedElaboration>(store, operation, origin, 'elaboration')
-  const expansion = approved && operation.contractScopeExpansions?.find(item => item.evidenceRef.sha256 === writeEvidence(operation.input.source.commonDir, approved).sha256)
-  if (!expansion || canonical(expansion.contractIds) !== canonical(operation.scope.contractIds) || canonical(expansion.flowIds) !== canonical(operation.scope.flowIds) || expansion.paths && canonical(expansion.paths) !== canonical(operation.scope.paths)) return null
+  const aggregate = partitionStage<SavedGeneration>(store, operation, origin, 'generation')?.result
+  if (!approved || !aggregate || !reviewScopeProof(store, operation, origin, approved, aggregate)) return null
   const requestKey = `sync:${origin.id}:generation:final:${key.slice('partition:'.length, -':candidate-review'.length)}:code_review`
   const resource = store.findResource(origin.id, requestKey)
   if (!resource || resource.phase !== 'removed' || resource.attemptId !== origin.id || resource.plan.key !== requestKey || resource.plan.inputId !== operation.input.id || result.failure?.requestKey !== requestKey || result.failure.inputDigest !== result.inputDigest) return null
@@ -937,7 +1009,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       store.bindComposedInput(fence, view.composed)
       const budget = finiteSyncBudget(operation.budget)
       const callTimeoutMs = budget === null ? null : options.callTimeoutMs ?? Math.min(120_000, budget.timeoutMs)
-      let reviewContinuation: { attempt: SyncAttempt; plan: SyncPartitionPlan; generation: SavedGeneration } | undefined
+      let reviewContinuation: { attempt: SyncAttempt; plan: SyncPartitionPlan; generation: SavedGeneration; failedReviewKeys: string[] } | undefined
       if (readonlyBase && !readonlyOwnerRepair && !refinement && options.plan.version === 'sync-coordinator-v2') {
         for (const prior of store.listAttempts(operation.id).filter(prior => prior.number < attempt!.number && ['failed', 'superseded', 'settled'].includes(prior.status)).reverse()) {
           const generation = partitionStage<SavedGeneration>(store, operation, prior, 'generation')?.result
@@ -950,7 +1022,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           const reviewKeys = readSyncCheckpoints(store, operation, prior).json.map(({ value }) => value as Stage).filter(value => value.stage?.endsWith(':candidate-review')).map(value => value.stage)
           if (!reviewKeys.length || !reviewKeys.some(key => failedCandidateReviewSource(store, operation, prior, key, candidate, candidatePlan)) || !reviewKeys.every(key => { const result = partitionStage<SavedGeneration>(store, operation, prior, key)?.result; return result?.reviewPassed && result.review?.verdict === 'accept' && !result.failure || failedCandidateReviewSource(store, operation, prior, key, candidate, candidatePlan) })) break
           verifyCandidate(operation.input.source.commonDir, candidate)
-          reviewContinuation = { attempt: prior, plan: originalPlan, generation }
+          reviewContinuation = { attempt: prior, plan: originalPlan, generation, failedReviewKeys: reviewKeys.filter(key => !partitionStage<SavedGeneration>(store, operation, prior, key)?.result.reviewPassed) }
           repairContext = stage<{ repairContext?: typeof repairContext }>(store, operation, prior, 'repair-input')?.repairContext
           saveStage(store, fence, 'repair-input', { ...repairInput, repairContext })
           break
@@ -1149,9 +1221,11 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           if (!reviewContinuation) return null
           const origin = reviewContinuation.attempt
           const saved = partitionStage<ReturnType<typeof freezeGenerationInput>['inputEvidence']>(store, operation, origin, `${key}:input`)?.result
-          if (saved?.reviewRepair) {
-            const previous = restoreGenerationInput(saved), carried = { ...input, reviewRepair: saved.reviewRepair }
-            if (freezeGenerationInput({ ...previous, requestKey: input.requestKey }).inputDigest === freezeGenerationInput(carried).inputDigest && acceptedCandidateReviewSource(store, operation, origin, key, candidate, plan, carried)) return saved.reviewRepair
+          const accepted = !saved && partitionStage<SavedGeneration>(store, operation, origin, key)
+          const previous = saved ? restoreGenerationInput(saved) : accepted ? acceptedReviewInput(store, operation, origin, key, accepted.resultRef) : null
+          if (previous?.reviewRepair) {
+            const carried = { ...input, reviewRepair: previous.reviewRepair }
+            if (freezeGenerationInput({ ...previous, requestKey: input.requestKey }).inputDigest === freezeGenerationInput(carried).inputDigest && acceptedCandidateReviewSource(store, operation, origin, key, candidate, plan, carried)) return previous.reviewRepair
           }
           return failedCandidateReviewSource(store, operation, origin, key, candidate, plan, input)
         },
@@ -1466,8 +1540,8 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       const scopeIds = unique([...operation.scope.contractIds, ...retiredContracts, ...restoredResourceIds, ...ownedItems.filter(item => item.kind !== 'FLOW' && item.kind !== 'VERIFY').map(item => item.id)])
       const flowIds = unique([...operation.scope.flowIds, ...retiredFlows, ...ownedItems.filter(item => item.kind === 'FLOW').map(item => item.id)])
       const p1Evidence = writeEvidence(operation.input.source.commonDir, elaboration)
-      if (!attempt.candidate) {
-        const writableReferences = accepted.contracts.filter(contract => changedContractPaths.has(contract.path)).flatMap(contract => [...contract.code.map(anchor => anchor.split('#')[0]), ...contract.items.filter(item => item.kind === 'AC').map(item => item.test.split('#')[0])]).filter(path => within(path, options.plan.writePaths) && !options.plan.mandatoryTests.some(oracle => overlap(path, oracle.testPath)))
+      if (!attempt.candidate && !reviewContinuation) {
+        const writableReferences = p1WritableReferences(accepted.contracts, changedContractPaths, options.plan)
         const paths = operation.baselineSelection ? unique([...operation.scope.paths, ...elaboration.changes.map(change => change.path), ...(elaboration.nodeChanges ?? []).flatMap(change => change.action === 'retire' ? [change.from.path] : [change.from.path, change.to.path]), ...writableReferences]) : undefined
         if (paths?.some(path => !within(path, options.plan.writePaths) || options.plan.mandatoryTests.some(oracle => overlap(path, oracle.testPath)))) fail('p1_write_scope', '已审细化引用的新增写路径超出冻结授权或涉及外部 oracle')
         operation = store.expandContractScope(fence, { contractIds: scopeIds, flowIds, ...(paths ? { paths } : {}) }, p1Evidence)
@@ -1523,7 +1597,8 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         if (partitions && options.plan.version === 'sync-coordinator-v2') {
           const { requiredKeys, planningIds } = implementationGenerationDispatch(generationInput, partitions, options.plan.direction === 'code_to_spec')
           const dispatched = new Set(store.readAttempt(attempt.id).dispatchPlans.map(dispatch => dispatch.key))
-          const minimumCalls = requiredKeys.filter(key => (!reviewContinuation || key.endsWith(':code_review')) && !dispatched.has(key)).length, remainingCalls = budget ? budget.maxCalls - store.readBudgetUsage(operation.id).callsUsed : null
+          const mustRetry = new Set(reviewContinuation?.failedReviewKeys.map(key => `${generationInput.requestKey}:final:${key.slice('partition:'.length, -':candidate-review'.length)}:code_review`))
+          const minimumCalls = requiredKeys.filter(key => (!reviewContinuation || mustRetry.has(key)) && !dispatched.has(key)).length, remainingCalls = budget ? budget.maxCalls - store.readBudgetUsage(operation.id).callsUsed : null
           partitionCheckpoints.save('partition-generation-budget', { minimumCalls, remainingCalls, implementationPlanningPartitions: planningIds, requiredKeys })
           if (remainingCalls !== null && minimumCalls > remainingCalls) fail('partition_budget_insufficient', `最终分区及精确文件规划至少还需要 ${minimumCalls} 次调用，剩余 ${remainingCalls} 次；保持原共享预算`, [writeEvidence(operation.input.source.commonDir, { minimumCalls, remainingCalls, requiredKeys })])
         }
@@ -1558,20 +1633,22 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           }
         } } : {}), validateCandidate: async candidate => {
           if (reviewContinuation && partitions && options.plan.version === 'sync-coordinator-v2' && options.plan.direction !== 'code_to_spec') {
-            const source = reviewContinuation, writers = JSON.parse(readEvidence(operation.input.source.commonDir, source.generation.fileWriterPlanRef!).toString()) as { writers: { partitionId: string; paths: string[] }[] }
+            const source = reviewContinuation, writers = JSON.parse(readEvidence(operation.input.source.commonDir, source.generation.fileWriterPlanRef!).toString()) as FileWriterPlan
             const sourcePlan = { ...partitions, partitions: partitions.partitions.map(partition => { const paths = writers.writers.find(writer => writer.partitionId === partition.id)?.paths ?? []; return { ...partition, readPaths: unique([...partition.readPaths, ...paths]), writePaths: unique([...partition.writePaths, ...paths]) } }) }
             const currentInput = generationInput.nativeWorktree ? { ...generationInput, stageTree: generationStageTree(generationInput) } : generationInput
             for (const local of implementationGenerationDispatch(currentInput, sourcePlan, false).locals) {
-              const prior = partitionStage<SavedGeneration>(store, operation, source.attempt, `partition:${local.partition.id}:generation`)?.result
-              if (prior?.status !== 'prepared' || prior.failure || prior.traces.length !== 1 || !prior.preparedChanges) fail('review_source_binding', '原候选缺少对应builder真实prepared原件')
-              const localInput = { ...local.input, requestKey: `sync:${source.attempt.id}:generation:partition:${local.partition.id}` }
+              store.renewLease(fence!, leaseMs); await yieldToControl(); store.renewLease(fence!, leaseMs)
+              const builder = generationBuilderSource(store, operation, source.attempt, `partition:${local.partition.id}:generation`, candidate, source.plan), prior = builder.result
+              if (prior.status !== 'prepared' || prior.failure || prior.traces.length !== 1 || !prior.preparedChanges) fail('review_source_binding', '原候选缺少对应builder真实prepared原件')
+              const localInput = { ...local.input, requestKey: `sync:${builder.attempt.id}:generation:partition:${local.partition.id}` }
               const replay = await runGeneration(localInput, { prepareOnly: true, validateCandidate: async () => [], runner: async request => {
-                const result = completedNativeStageResult(store, operation, source.attempt, request, prior.traces[0], prior.output, candidate.digest)
+                const result = completedNativeStageResult(store, operation, builder.attempt, request, prior.traces[0], prior.output, candidate.digest)
                 if (!result) fail('review_source_binding', '原builder Native/完整请求身份已改变')
                 return result
               } })
               if (replay.status !== 'prepared' || !replay.preparedChanges || replay.inputDigest !== prior.inputDigest || canonical(replay.preparedChanges) !== canonical(prior.preparedChanges) || replay.preparedChanges.changes.some(change => !within(change.path, localInput.allowedScope.paths) || change.path.startsWith('.spec/') && !localInput.elaboratedSpecs.some(spec => spec.path === change.path) && !localInput.nodeChanges?.some(item => item.from.path === change.path || item.action === 'move' && item.to.path === change.path))) fail('review_source_binding', '原builder实际Git/schema/范围或prepared变化不匹配当前冻结输入')
             }
+            await yieldToControl(); store.renewLease(fence!, leaseMs)
           }
           const frozen = await candidateContext(operation, candidate, view)
           const findings = frozen.findings.filter(issue => !(allowedGap.has(findingKey(issue)) && (!issue.itemId || blocked.contractIds.includes(issue.itemId) || blocked.flowIds.includes(issue.itemId))))

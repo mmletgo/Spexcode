@@ -497,7 +497,7 @@ function localGeneration(input: GenerationInput, partition: SyncPartition, commo
 
 type LocalGeneration = { partition: SyncPartition; input: GenerationInput }
 export const IMPLEMENTATION_PLAN_SCHEMA: Record<string, unknown> = { type: 'object', additionalProperties: false, required: ['version', 'paths'], properties: { version: { type: 'string', enum: ['sync-implementation-plan-v1'] }, paths: { type: 'array', items: { type: 'string', minLength: 1 } } } }
-type FileWriterPlan = { version: 'sync-file-writers-v1'; writers: { partitionId: string; paths: string[] }[]; traces: ElaborationTrace[] }
+export type FileWriterPlan = { version: 'sync-file-writers-v1'; writers: { partitionId: string; paths: string[] }[]; traces: ElaborationTrace[] }
 
 export function implementationPlanningPartitions(partitions: readonly SyncPartition[], contracts: readonly Contract[], nodeChanges: GenerationInput['nodeChanges'] = []): string[] {
   return partitions.filter(partition => {
