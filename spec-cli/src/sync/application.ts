@@ -1,11 +1,11 @@
 import { finiteSyncBudget } from './budget.js'
 import { randomUUID } from 'node:crypto'
 import { DEFAULT_SYNC_MODEL, syncModel, syncModelBinding } from './model-selection.js'
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { loadSpecs, parseContract, parseParts, processStartToken, readConfig, repoRoot, runtimeRoot } from '@spexcode/spec-core'
 import type { SessionProtocol } from '@spexcode/session-protocol'
-import { configuredSessionApplication } from '../session-application.js'
+import { configuredSessionApplication, withoutSessionApplicationExecutionWake } from '../session-application.js'
 import { prepareSpecBodyEdit, readSpecBodyEdit } from '../spec-body-edit.js'
 import type { SpecBodyEdit } from '../spec-body-edit.js'
 import { isSyncInputCurrent, recoverSyncOperationResources, SyncCoordinatorError, prepareSyncAdmission, readCurrentSyncAnalysis, runSyncOperation, syncPlanDigest } from './coordinator.js'
@@ -21,7 +21,8 @@ import { claimFileMutex } from './file-mutex.js'
 import { composeControlledRequest, controlledDecisionIdentity, guardControlledRequestPath, prepareControlledDecision, readControlledDecision, prepareControlledRequest, renderControlledDecisionRaw } from './request-input.js'
 import type { CodeBehaviorAnalysis, SyncDecisionInput } from './writeback-types.js'
 import { freezeDeliveryRuntime } from './runtime-freeze.js'
-import { captureInputSnapshot, contentHash, identifyWorktree, objectGit, readEvidence, readObject, readPhysicalFingerprint, readTree, verifySnapshot, writeEvidence } from './snapshot.js'
+import { captureInputSnapshot, captureContinuityConfiguration, contentHash, identifyRawWorktree, identifyWorktree, readRawSource, objectGit, readEvidence, readObject, readPhysicalFingerprint, readTree, verifySnapshot, writeEvidence } from './snapshot.js'
+import { readEnabledRecord, registeredSources as enabledSources, sourceRegistrationLock, sourceRegistrationPath, sourceRegistryDirectory, proveSourceContinuity, writeEnabledRecord, writeRegistrationEvidence, readRegistrationEvidence, type EnabledRecord, type PreviousDevices, type SourceContinuityProof } from './source-registration.js'
 import { inspectTrustedRuntime, inspectTrustedRuntimeAsync } from './trusted-hooks.js'
 import type { TrustedRuntimeEntry } from './trusted-hooks.js'
 import { coveredPath, readSyncSettings, SyncApplicationError } from './settings.js'
@@ -42,17 +43,8 @@ export type SyncApplicationOptions = Partial<Pick<SyncCoordinatorOptions, 'runne
   runtimeDirectory?: string
   tools?: SyncCoordinatorOptions['tools']
 }
-type EnabledRecord = { registeredNodeIds?: string[]; version: 1; source: WorktreeIdentity; configDigest: string; enabledAtMs: number }
 type SavedTools = { tools: SyncCoordinatorOptions['tools']; runtimeDigest: string | null } & ({ version: 'sync-tools-v1' } | { version: 'sync-tools-v2'; model: string } | { version: 'sync-tools-v3'; model: string; agentWorkflow: 'native-worktree-v1' })
 type ExecutionInputs = { plan: SyncCoordinatorPlan; tools: SyncCoordinatorOptions['tools'] }
-function enabledSources(runtime: string): EnabledRecord[] {
-  if (!existsSync(runtime)) return []
-  return readdirSync(runtime).filter(name => /^enabled-[a-f0-9]+\.json$/.test(name)).map(name => {
-    const record = JSON.parse(readFileSync(join(runtime, name), 'utf8')) as EnabledRecord
-    if (record.version !== 1 || !record.source || typeof record.configDigest !== 'string') throw new SyncApplicationError('sync_activation_invalid', '同步启用记录不合法')
-    return record
-  })
-}
 function observerProcessAlive(health: PersistentObserverHealth | null): boolean {
   const tokenEnd = health?.instanceId.lastIndexOf('|') ?? -1
   return !!health && tokenEnd > 0 && processStartToken(health.processId) === health.instanceId.slice(0, tokenEnd)
@@ -106,10 +98,13 @@ export class SyncApplication {
     applicationOwners.set(`${options.protocol.databasePath}\0${application.repositoryId}\0${application.root}`, application)
     return application
   }
+  static hasActiveSourceOwner(commonDir: string): boolean {
+    return [...applicationOwners.values()].some(owner => owner.sourceAtCreation.commonDir === commonDir && (owner.observer !== null || owner.running.size > 0))
+  }
   /** 资源清理独立于服务owner注册，不启动观察器或自动派发。 */
   static async createResourceRecovery(root: string, options: SyncApplicationOptions): Promise<SyncApplication> {
     await migrateSyncStore(options.protocol)
-    return new SyncApplication(root, options)
+    return new SyncApplication(root, options, identifyRawWorktree(root))
   }
   /** 显式资源入口不查询业务detail，不借清理绕过正常source身份门。 */
   async recoverResources(id: string, inputId: string): Promise<SyncResourceRecoveryResult> {
@@ -122,9 +117,8 @@ export class SyncApplication {
   private enabled(snapshot: InputSnapshot): EnabledRecord | null {
     if (!existsSync(this.enabledPath)) return null
     let record: EnabledRecord
-    try { record = JSON.parse(readFileSync(this.enabledPath, 'utf8')) as EnabledRecord }
+    try { record = readEnabledRecord(this.enabledPath)!.record }
     catch { throw new SyncApplicationError('sync_activation_invalid', '同步启用记录无法读取，请重新启用当前授权') }
-    if (record?.version !== 1 || !record.source || typeof record.configDigest !== 'string') throw new SyncApplicationError('sync_activation_invalid', '同步启用记录不合法，请重新启用当前授权')
     if (JSON.stringify(record.source) !== JSON.stringify(snapshot.source)) throw new SyncApplicationError('sync_source_changed', '启用时的输入工作树身份已变化，请重新启用')
     return record
   }
@@ -146,14 +140,18 @@ export class SyncApplication {
   }
   /** 仅授权当前已版本化配置；可选摘要防止用户阅读后配置已经被另一编辑者改变。 */
   async enable(expectedConfigDigest?: string): ReturnType<SyncApplication['readSettings']> {
-    const snapshot = await captureInputSnapshot(this.root, { committed: true }), { configDigest, settings } = readSyncSettings(snapshot)
-    if (expectedConfigDigest && expectedConfigDigest !== configDigest) throw new SyncApplicationError('sync_configuration_changed', '启用请求的配置摘要已过期')
-    const nodes = await this.frozenNodes(snapshot)
-    const roots = this.selectRegisteredNodes(nodes, settings, snapshot)
-    if (!roots.length) throw new SyncApplicationError('sync_scope_unregistered', '没有受授权源码/测试治理的节点；新需求请在 sync.nodeIds 明确登记意图节点')
-    const record: EnabledRecord = { version: 1, source: snapshot.source, configDigest, enabledAtMs: Date.now(), registeredNodeIds: roots.map(node => node.id) }
-    const temp = `${this.enabledPath}.${randomUUID()}`
-    writeFileSync(temp, `${JSON.stringify(record)}\n`, { mode: 0o600, flag: 'wx' }); renameSync(temp, this.enabledPath)
+    const mutex = sourceRegistrationLock(readRawSource(this.root).source.commonDir, this.root, this.runtime)
+    try {
+      const snapshot = await captureInputSnapshot(this.root, { committed: true }), { configDigest, settings } = readSyncSettings(snapshot)
+      if (expectedConfigDigest && expectedConfigDigest !== configDigest) throw new SyncApplicationError('sync_configuration_changed', '启用请求的配置摘要已过期')
+      const nodes = await this.frozenNodes(snapshot)
+      const roots = this.selectRegisteredNodes(nodes, settings, snapshot)
+      if (!roots.length) throw new SyncApplicationError('sync_scope_unregistered', '没有受授权源码/测试治理的节点；新需求请在 sync.nodeIds 明确登记意图节点')
+      const previous = readEnabledRecord(this.enabledPath)
+      const record: EnabledRecord = { source: snapshot.source, configDigest, enabledAtMs: Date.now(), registeredNodeIds: roots.map(node => node.id), ...(previous?.record.version === 2 ? { version: 2, continuity: previous.record.continuity } : { version: 1 }) }
+      mutex.assertHeld(); writeEnabledRecord(this.enabledPath, record, previous?.digest ?? null)
+    } finally { mutex.release() }
+    const snapshot = await captureInputSnapshot(this.root, { committed: true })
     if (this.observerIdentity && this.observerIdentity.source.physicalFingerprint !== snapshot.source.physicalFingerprint) await this.stopService()
     if (syncServicesOnline && !this.observer) await this.startService()
     else if (this.observer) await this.observer.scanNow()
@@ -297,7 +295,7 @@ export class SyncApplication {
   private async scanObservedInput(): Promise<void> {
     if (!this.ownsObservation()) return
     const registered = JSON.parse(readFileSync(this.enabledPath, 'utf8')) as EnabledRecord
-    if (readPhysicalFingerprint(this.root, registered.source.gitDir) !== registered.source.physicalFingerprint) throw new SyncApplicationError('sync_source_changed', '输入工作树被删除重建或仓库身份变化，请明确重新启用')
+    if (readPhysicalFingerprint(this.root, registered.source.gitDir, registered.source.commonDir) !== registered.source.physicalFingerprint) throw new SyncApplicationError('sync_source_changed', '输入工作树被删除重建或仓库身份变化，请明确重新启用')
     const snapshot = await captureInputSnapshot(this.root, { committed: true })
     this.latestSnapshot = snapshot
     this.latestObservation = this.store.readLatestObservation(snapshot.source)
@@ -522,7 +520,8 @@ export class SyncApplication {
     return this.detail(operation, existsSync(this.root) ? await captureInputSnapshot(this.root) : this.latestSnapshot ?? operation.input)
   }
   private assertSource(operation: SyncOperation): void {
-    if (operation.input.source.canonicalRoot !== this.root || operation.input.source.repositoryId !== identifyWorktree(this.root).repositoryId) throw new SyncApplicationError('sync_operation_wrong_source', '操作不属于当前输入工作树', 404)
+    const current = identifyWorktree(this.root)
+    if ((['repositoryId', 'commonDir', 'canonicalRoot', 'gitDir', 'branch', 'physicalFingerprint'] as const).some(key => operation.input.source[key] !== current[key])) throw new SyncApplicationError('sync_operation_wrong_source', '操作不属于当前输入工作树', 404)
   }
   private operationPlan(operation: SyncOperation): SyncCoordinatorPlan {
     if (!operation.planBlob) throw new SyncApplicationError('sync_plan_unavailable', '旧操作缺少持久固定计划，不能猜测恢复')
@@ -918,9 +917,70 @@ export function configuredSyncApplication(root: string, registeredSource?: Workt
 
 /** 离线CLI与专用API只打开既有协议，不进入缓存服务或自动队列。 */
 export function configuredSyncResourceRecoveryApplication(root: string): Promise<SyncApplication> {
-  const identity = identifyWorktree(root)
-  if (identity.commonDir !== identifyWorktree(repoRoot()).commonDir) throw new SyncApplicationError('sync_project_mismatch', '输入工作树不属于当前项目')
+  const identity = identifyRawWorktree(root)
+  if (identity.commonDir !== identifyRawWorktree(repoRoot()).commonDir) throw new SyncApplicationError('sync_project_mismatch', '输入工作树不属于当前项目')
   return SyncApplication.createResourceRecovery(identity.canonicalRoot, { protocol: configuredSessionApplication().protocol })
+}
+
+export type SourceContinuityInput = { operationId: string; inputId: string; revision: number; enabledDigest: string; previousDevices: PreviousDevices }
+/** 离线显式登记不启动application/service；原操作与CAS证据不改。 */
+export async function registerSourceContinuity(root: string, input: SourceContinuityInput, options: { protocol: SessionProtocol; runtimeDirectory?: string }): Promise<{ source: WorktreeIdentity; proofRef: BlobRef; enabledDigest: string; status: 'registered' | 'already_registered'; control: PhysicalControl }> {
+  return withoutSessionApplicationExecutionWake(async () => {
+    if (!input.operationId?.trim() || !input.inputId?.trim() || !Number.isSafeInteger(input.revision) || input.revision < 1 || !/^[a-f0-9]{64}$/.test(input.enabledDigest)) throw new SyncApplicationError('sync_continuity_input_invalid', '登记需要原operation/input/revision和enabled原字节SHA', 400)
+    const first = readRawSource(root), runtime = options.runtimeDirectory ?? sourceRegistryDirectory(first.source.commonDir)
+    if (runtime === first.source.canonicalRoot || runtime.startsWith(`${first.source.canonicalRoot}/`)) throw new SyncApplicationError('sync_runtime_unsafe', '连续性运行资料不能位于源码树')
+    await migrateSyncStore(options.protocol)
+    const store = new SyncStore(options.protocol, { readBlob: ref => readEvidence(first.source.commonDir, ref) })
+    const mutex = sourceRegistrationLock(first.source.commonDir, first.source.canonicalRoot, runtime)
+    try {
+      const path = sourceRegistrationPath(first.source.commonDir, first.source.canonicalRoot, runtime), saved = readEnabledRecord(path)
+      if (!saved) throw new SyncApplicationError('sync_disabled', '缺少原启用记录，不能推测旧授权')
+      const operation = store.readOperation(input.operationId), source = operation.input.source
+      const sameSource = (a: WorktreeIdentity, b: WorktreeIdentity): boolean => (['repositoryId', 'commonDir', 'canonicalRoot', 'gitDir', 'branch', 'physicalFingerprint'] as const).every(key => a[key] === b[key])
+      const assertOriginal = (): void => {
+        const latest = store.readOperation(input.operationId)
+        if (latest.input.id !== input.inputId || latest.revision !== input.revision || !sameSource(latest.input.source, source)) throw new SyncApplicationError('sync_continuity_stale', '原operation/input/revision已变化')
+        if (readEnabledRecord(path)?.digest !== saved.digest) throw new SyncApplicationError('sync_source_registration_stale', '启用原件在登记期间变化')
+      }
+      assertOriginal()
+      if (!sameSource(source, saved.record.source)) throw new SyncApplicationError('sync_continuity_source', '原操作与启用记录不是同一完整来源')
+      proveSourceContinuity(source, first.source, first.stats, input.previousDevices)
+      const config = readSyncSettings(captureContinuityConfiguration(root)).configDigest
+      if (config !== saved.record.configDigest || readSyncSettings(operation.input).configDigest !== config) throw new SyncApplicationError('sync_configuration_changed', '登记当刻配置必须仍为原授权配置')
+      const quiescent = (): void => {
+        const state = store.sourceContinuityState(source.commonDir)
+        const sources = [...state.sources, ...enabledSources(runtime).filter(record => record.source.commonDir === source.commonDir).map(record => record.source)]
+        if (state.activeAttemptIds.length || state.leasedOperationIds.length || state.resourceIds.length || state.journalIds.length
+          || sources.some(item => { const health = store.readObserverHealth(item); return health?.status !== 'stopped' && observerProcessAlive(health) })
+          || SyncApplication.hasActiveSourceOwner(source.commonDir)) throw new SyncApplicationError('sync_continuity_not_quiescent', '同commonDir仍有有效执行权、observer或未结算资源/journal；请先离线停稳并正式清理')
+      }
+      quiescent()
+      const stable = (): void => {
+        const current = readRawSource(root)
+        if (!sameSource(current.source, first.source) || JSON.stringify(current.stats) !== JSON.stringify(first.stats) || readSyncSettings(captureContinuityConfiguration(root)).configDigest !== config) throw new SyncApplicationError('sync_continuity_unstable', '登记期间stat、Git登记、分支或配置变化')
+        assertOriginal(); mutex.assertHeld(); quiescent()
+      }
+      stable()
+      if (saved.record.version === 2 && saved.record.continuity.previousRecordRef.sha256 === input.enabledDigest) {
+        const proof = JSON.parse(readRegistrationEvidence(source.commonDir, saved.record.continuity.proofRef, runtime).toString('utf8')) as SourceContinuityProof
+        if (proof.operationId !== input.operationId || proof.inputId !== input.inputId || proof.operationRevision !== input.revision || JSON.stringify(proof.observed) !== JSON.stringify(first.stats) || JSON.stringify(proof.previousDevices) !== JSON.stringify(input.previousDevices)) throw new SyncApplicationError('sync_continuity_stale', '已有登记与本次显式证明不一致')
+        const control = store.readPhysicalControl(source)
+        if (control.control !== 'pause') throw new SyncApplicationError('sync_continuity_already_registered', '已登记且已恢复运行，请读取当前状态，不重复登记')
+        return { source, proofRef: saved.record.continuity.proofRef, enabledDigest: saved.digest, status: 'already_registered', control }
+      }
+      if (saved.digest !== input.enabledDigest) throw new SyncApplicationError('sync_source_registration_stale', 'enabled原字节SHA已变化')
+      const previousRecordRef = writeRegistrationEvidence(source.commonDir, saved.bytes, runtime)
+      const previousControl = store.readPhysicalControl(source)
+      const control = previousControl.control === 'pause' ? previousControl : store.requestPhysicalControl(source, 'pause', previousControl.revision)
+      stable()
+      if (store.readPhysicalControl(source).revision !== control.revision || store.readPhysicalControl(source).control !== 'pause') throw new SyncApplicationError('sync_continuity_stale', '物理暂停CAS在登记期间变化')
+      const proof: SourceContinuityProof = { version: 1, operationId: input.operationId, inputId: input.inputId, operationRevision: input.revision, source, observed: first.stats, previousDevices: input.previousDevices, previousRecordRef, enabledDigest: saved.digest, configDigest: config, pausedControlRevision: control.revision, registeredAtMs: Date.now() }
+      const proofRef = writeRegistrationEvidence(source.commonDir, Buffer.from(JSON.stringify(proof)), runtime)
+      stable()
+      writeEnabledRecord(path, { ...saved.record, version: 2, continuity: { version: 1, proofRef, previousRecordRef } }, saved.digest)
+      return { source, proofRef, enabledDigest: readEnabledRecord(path)!.digest, status: 'registered', control }
+    } finally { mutex.release() }
+  })
 }
 
 let syncServicesOnline = false

@@ -439,6 +439,7 @@ consumes the token after it.`,
        spex sync verify <node-id> [--request-id <id>] [--model <model-id>]
        spex sync pause|resume|cancel|recover <operation-id>
        spex sync resources recover <operation-id> --input-id <frozen-input-id>
+       spex sync source-continuity <operation-id> --input-id <id> --revision <N> --enabled-digest <sha256> --old-common-dev <N> --old-root-dev <N> --old-git-dev <N>
        spex sync adopt <operation-id>
        spex sync revert <operation-id> [--request-id <id>]
        spex sync stop-writer
@@ -472,6 +473,7 @@ raw变化必须精确匹配受信policyCommit中的.spec/sync-intent-authorizati
 coverage 明确列未纳入范围；局部检查通过不表示全项目已同步。
 revert 只对已采纳且有完整收据的交付生成新的成组补偿操作，保后续编辑及历史，仍需四层验证和真实落地。
 stop-writer 为版本回退暂停新写入，并结算或保留未完成资源；检查返回的恢复诊断，不表示未知资源已释放。
+source-continuity 仅在后台离线、同仓库执行停稳且资源已清理后登记显式旧dev双哈希证明；不猜设备号。成功保持原logical来源并正式暂停原物理范围，另行核验后resume；不启动模型或重写旧操作。v20先online备份，回滚须配套恢复旧enabled及continuity-evidence，失败可能已pause而不会自动回滚。
 配置示例：spex guide sync。\n\n${ROUTING_NOTE}`,
   },
   spec: {

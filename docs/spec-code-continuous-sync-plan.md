@@ -286,6 +286,12 @@ Dashboard 的同步模式不能继续“先把新 Spec 独立提交到 main，�
 
 ### 8.4 失败恢复与资源约束
 
+重启仅设备号漂移时，提供正式offline source-continuity登记：原operation/input/revision、旧启用原字节摘要及commonDir/root/gitDir各自旧dev候选；真实Git登记/回链、原branch、当前配置与前后stat稳定后同时精确重算两个旧hash，不搜索猜值、不修旧source。先结算同commonDir全部owned资源/journal并确认无有效lease/attempt/observer/owner，再CAS暂停原PhysicalControl、CAS登记EnabledRecord v2。成功仅恢复身份连续性，后续operator另行resume，旧operation/input/预算/全部CAS原件保持。
+
+commonDir见证统一原logical仓库ID；每root旧physical authority分别证明，新managed工作树仍用真实新stat。实际path/gitDir/branch不投影回旧值，normal currentness/V4/准入及完整source门统一核验；失效v2严格拒绝，raw元数据只给显式证明和专用资源清理。后续config-only model提交与enable新digest可正常保留物理见证链。无新HTTP、维护flag或稳定VolumeUUID框架。
+
+writer20沿原online backup/事务拒旧writer，1–19 checksum不改。原enabled字节与新proof复用内容寻址机制保存于global runtime/sync/continuity-evidence独立私有CAS，随链保留且不被普通Git evidence GC漏扫；回滚停新writer后同时恢复一致DB备份、旧enabled与对应证据。文件与DB非跨介质原子，竞争或后置核对失败可能保持pause，不自动rollback或派发。
+
 操作登记与消息入队在同一数据库事务边界完成。执行租约带递增 generation，旧进程恢复后不能写入新任务结果。投递成功不等于生成、验证或应用成功。
 
 副作用前登记意图，之后登记 receipt；崩溃恢复用实际 Git、文件字节和 journal 判断完成程度。覆盖提交完成但数据库未结算、文件写到一半、合并完成但会话未结算等窗口。允许重复计算，不允许重复应用或合并。

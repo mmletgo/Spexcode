@@ -7,6 +7,7 @@ import { dirname, join, resolve, sep } from 'node:path'
 import { putBlob, readBlobByHash } from '@spexcode/spec-core'
 import { withWorktreeRegistryLock } from '../session-record-lock.js'
 import type { BlobRef, InputSnapshot, WorktreeIdentity } from './operation-types.js'
+import { projectSourceHashes, projectSourceIdentity, rawPhysicalFingerprint, rawRepositoryId, readSourceStat, readSourceStats, sourceStatText, type SourceStats } from './source-registration.js'
 
 export type TreeEntry = { path: string; mode: '100644' | '100755' | '120000'; oid: string; digest: string }
 export type SnapshotManifest = { version: 1; entries: TreeEntry[] }
@@ -61,19 +62,18 @@ export function validateRepositoryPath(path: string): string {
   return path
 }
 const physicalStat = (path: string): string => {
-  const stat = lstatSync(path, { bigint: true })
-  return `${stat.dev}:${stat.ino}:${stat.birthtimeNs}`
+  return sourceStatText(readSourceStat(path))
 }
 const readonlyTreeKey = (commonDir: string, tree: string): string => {
   const canonicalCommonDir = realpathSync(commonDir)
   return JSON.stringify([canonicalCommonDir, physicalStat(canonicalCommonDir), tree])
 }
 /** 已授权路径可在 HEAD 不可读前核对物理替换，不为缺失来源伪造快照。 */
-export const readPhysicalFingerprint = (canonicalRoot: string, gitDir: string): string => contentHash(`${physicalStat(canonicalRoot)}:${physicalStat(gitDir)}`)
+export const readPhysicalFingerprint = (canonicalRoot: string, gitDir: string, commonDir: string): string => projectSourceHashes({ canonicalRoot, gitDir, commonDir }, readSourceStats({ canonicalRoot, gitDir, commonDir })).physicalFingerprint
 const registeredWorktreeRoots = (commonDir: string): string[] => objectGit(commonDir, ['worktree', 'list', '--porcelain', '-z']).toString().split('\0').filter(line => line.startsWith('worktree ')).map(line => resolve(line.slice(9)))
 /** 固定沿用采集来源的历史字段顺序；规范JSON排序不能改变快照身份。 */
 export const canonicalSnapshotSource = (source: WorktreeIdentity): WorktreeIdentity => ({ repositoryId: source.repositoryId, commonDir: source.commonDir, canonicalRoot: source.canonicalRoot, gitDir: source.gitDir, branch: source.branch, physicalFingerprint: source.physicalFingerprint })
-export function identifyWorktree(root: string): WorktreeIdentity {
+export function readRawSource(root: string): { source: WorktreeIdentity; stats: SourceStats } {
   const canonicalRoot = realpathSync(root)
   if (realpathSync(sourceGit(canonicalRoot, ['rev-parse', '--show-toplevel']).toString().trim()) !== canonicalRoot) throw new Error('输入必须为工作树根目录')
   const commonDir = realpathSync(sourceGit(canonicalRoot, ['rev-parse', '--path-format=absolute', '--git-common-dir']).toString().trim())
@@ -84,7 +84,20 @@ export function identifyWorktree(root: string): WorktreeIdentity {
     : dirname(gitDir) === join(commonDir, 'worktrees') && resolve(gitDir, readFileSync(join(gitDir, 'gitdir'), 'utf8').trimEnd()) === join(canonicalRoot, '.git')
   if (!registered) throw new Error('输入不是 registered worktree')
   const branch = sourceGit(canonicalRoot, ['rev-parse', '--symbolic-full-name', 'HEAD']).toString().trim()
-  return { repositoryId: contentHash(`${commonDir}:${physicalStat(commonDir)}`), commonDir, canonicalRoot, gitDir, branch, physicalFingerprint: readPhysicalFingerprint(canonicalRoot, gitDir) }
+  const stats = readSourceStats({ commonDir, canonicalRoot, gitDir })
+  return { source: { repositoryId: rawRepositoryId(commonDir, stats.commonDir), commonDir, canonicalRoot, gitDir, branch, physicalFingerprint: rawPhysicalFingerprint(stats.root, stats.gitDir) }, stats }
+}
+/** 仅用于显式证明或资源-only路径元数据核验，不授予普通运行权。 */
+export const identifyRawWorktree = (root: string): WorktreeIdentity => readRawSource(root).source
+export function identifyWorktree(root: string): WorktreeIdentity {
+  const raw = readRawSource(root)
+  return projectSourceIdentity(raw.source, raw.stats)
+}
+/** 仅显式连续性登记读当前已提交配置，不向正常准入提供 raw fallback。 */
+export function captureContinuityConfiguration(root: string): InputSnapshot {
+  const source = identifyRawWorktree(root), headCommit = sourceGit(root, ['rev-parse', 'HEAD']).toString().trim()
+  const tree = objectGit(source.commonDir, ['rev-parse', `${headCommit}^{tree}`]).toString().trim()
+  return snapshotFromTree({ id: '', captureKind: 'commit', source, headCommit, immutableTree: tree, indexTree: tree, indexDigest: contentHash(tree), manifestBlob: { sha256: '' }, contentDigest: '', capturedAtMs: Date.now() }, tree)
 }
 export function readTree(commonDir: string, tree: string, onObject?: (entry: TreeEntry, bytes: Buffer) => void): TreeEntry[] {
   if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(tree)) throw new Error('tree 必须为不可变 Git OID')
