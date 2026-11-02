@@ -5,6 +5,8 @@ hue: 175
 desc: 从稳定输入经独立细化生成及四层验证结算真实私有交付。
 code:
   - spec-cli/src/sync/coordinator.ts
+related:
+  - spec-cli/src/sync/coordinator.test.ts
 ---
 # 持续同步中央编排
 
@@ -13,6 +15,10 @@ code:
 一次高层需求应自动完成可信细化、实现、真实验收和可复核交付；暂停、取消、进程中断和输入变化不能重复副作用或用旧结果覆盖新输入。
 
 ## expanded spec
+
+new tagged whole current/latestApproved接受先核原source协议；单体用当前完整输入重核Git正文与候选绑定，分区whole回到既有owner缓存重放与strict seal，不以聚合缓存跳过各owner的实际Git/schema校验。source tag沿ref精确匹配的原provenance读取，不能由当前新marker反向补给legacy；新tag缺draft拒绝，无tag旧原件不增新门。
+
+新Native P1在首次实际派发前冻结`elaboration-draft-v1`阶段标记；已冻结或仅reserved的旧P1请求没有该标记时保持原prompt/schema/模式，不补签新协议。草稿loader与原严格accept/repairSeed loader分离：只从同operation、已结算attempt、原stage/readSet/selection的对应owner读取Git草稿引用或旧认证原件的临时材料，父context导致的局部inputDigest变化不丢草稿，但不能复用旧批准。原件及Native身份、失败/候选/review字段不改写；当前fence只登记provenance。新草稿正文不成为JSON checkpoint artifact，不进入raw role；新增持久字段的上线须配套sync writer v22围栏拒绝旧v21 writer、停稳资源和完整备份，回滚恢复一致旧库及原Git/evidence/CAS字段，不靠删除marker。
 
 resource-only入口按 [[sync-source-registration]] 使用专用raw Git登记元数据核原root/commonDir/input，允许失效continuity见证后仍清理；该raw路径不进入normal resume/admit/adopt/currentness/V4，不放宽业务物理权限或重放journal。
 

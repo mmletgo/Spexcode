@@ -7,9 +7,11 @@ code:
   - spec-cli/src/sync/elaboration.ts#elaborate
   - spec-cli/src/sync/elaboration.ts#freezeElaborationInput
   - spec-cli/src/sync/elaboration.ts#projectElaborationFlowReadiness
+  - spec-cli/src/sync/elaboration.ts#verifyElaborationDraftCache
 related:
   - spec-cli/src/sync/elaboration-orchestration.test.ts
   - spec-cli/src/sync/elaboration-target-binding.test.ts
+  - spec-cli/src/sync/elaboration-draft.test.ts
 ---
 # 业务契约细化与追踪
 
@@ -19,9 +21,13 @@ related:
 
 ## expanded spec
 
-同owner已结算的原生格式/schema失败可通过既有repairDiagnostics传递round.rejectedOutput完整文本及原文ref/SHA，提示明确untrusted prior failed output。原生边界先认证final与停止，资源桥再核原请求；本轮call重核请求摘要/schema/purpose/身份后才保诊断。它不是业务输出、候选、raw/facts或批准，所有JSON/schema/引用/业务/独审门不变，旧缺席不补。
+新草稿的接受缓存沿同一readStageDraft边界重核全部tagged轮的Git/ref/owner/schema/source身份，历史syntax/schema坏稿不要求满足成功schema。仅最终已接受轮严格解析正文、校验当前schema/行差量，并用现有绑定与renderer重算candidate、candidateDigest和完整changes；原JSON缓存不能替代Git正文。新tag但最终draft缺席拒绝。source tag只取原attempt已冻结的协议stage，沿同一原件provenance读取，不用当前attempt新tag给legacy补签；旧无tag无draft批准沿旧门。合法正文无需改动、仅重试回执或审查时，任务明确允许保留hooks的正常git commit --allow-empty，不制造业务diff；仍须真实新提交，不放宽head/seed证据。
 
-当前native-worktree操作的P1生成与独审使用[[sync-stage-worktree]]的真实只读seed，允许按需读取完整仓库。生成seed为原composed加已审祖先接口；独审seed另覆盖本轮渲染的完整Spec候选及真实move/retire。提示只给相关Spec路径、targetIndex/首次必建indices、真实raw差量、事实、技术范围/不可改oracle、精确授权与失败诊断，schema仍规范业务行；不重复完整树或强制逐字读取运输。程序按实际seed对象补足契约引用验证所需代码/测试，不把files投影当读取权限。完整业务输入、实际seed/tree及prompt/schema参与摘要；原raw/ID/演进/全图seal、独审与预算门均保留。下文受限frozen读取说明仅用于无worktree的历史操作与旧单测。
+新P1按owner使用显式`elaboration-draft-v1`：Agent把完整elaboration-target-rows-v3业务JSON实际写入私有临时草稿文件，正常Git提交后只返回简短summary；精确schema留同seed只读sidecar供读取、自检，仍仅draft可写。程序经真实seed/result Git校验，从指定path/OID读取完整字节，再严格JSON/schema、目标绑定、唯一renderer/checkCandidate及不同会话的read审查。语法损坏、38KB级业务行或schema错误保留原始Git字节，下一轮明确给已有草稿路径、精确schema与程序/独审错误，让Agent实际编辑续修，不把旧大JSON/Markdown塞回prompt重答。历史已认证failed output或合法旧行可先复制为非权威材料，原字段和失败认证保持；不能成为raw、事实或批准。草稿元数据只作检查点身份，正文不成为第二份业务权威，也不进入最终candidate/delivery。输入或已审父接口改变时只复制同owner/schema的旧草稿到当前冻结source及新祖先seed，旧seed整树和旧accept都不继承；所有当前业务门、只读源码/tests对象与absence及独审仍完整执行。草稿失败在现有预算内修复，Native成功回执与业务draft拒绝分开，不伪造Native rejected final。已认证且停稳的Native小回执失败若由现有资源桥提供精确failedWorktree，只从该真实提交经同样scope校验保留非权威草稿；原Native错误和旧缺席不变，下一实际编辑继续该文件，不把失败回执文本当业务JSON。无安全Git见证或未提交文件不猜路径恢复。受控runner的真实Git回归不代表真实ClaudeCode/ZCode全链验收。
+
+历史未启用草稿协议的同owner已结算原生格式/schema失败可通过既有repairDiagnostics传递round.rejectedOutput完整文本及原文ref/SHA，提示明确untrusted prior failed output。原生边界先认证final与停止，资源桥再核原请求；本轮call重核请求摘要/schema/purpose/身份后才保诊断。它不是业务输出、候选、raw/facts或批准，所有JSON/schema/引用/业务/独审门不变，旧缺席不补。
+
+当前native-worktree操作的新P1草稿生成使用[[sync-stage-worktree]]的真实edit seed，独审仍使用真实只读seed，允许按需读取完整仓库。生成seed为原composed加已审祖先接口；独审seed另覆盖本轮渲染的完整Spec候选及真实move/retire。提示只给相关Spec路径、targetIndex/首次必建indices、真实raw差量、事实、技术范围/不可改oracle、精确授权与失败诊断，schema仍规范业务行；不重复完整树或强制逐字读取运输。程序按实际seed对象补足契约引用验证所需代码/测试，不把files投影当读取权限。完整业务输入、实际seed/tree及prompt/schema参与摘要；原raw/ID/演进/全图seal、独审与预算门均保留。下文受限frozen读取说明仅用于无worktree的历史操作与旧单测。
 
 Native P1生成和独审共用既有短来源语义：可观察不等于重大业务政策；普通无冲突实现细节可沿合法code来源并追到REQ；明确原意下的实现/测试缺陷不是未知政策或业务GAP，独审须纠正对实现的误读。显式空`implementationWritePaths`时，提示须明确源码和全部测试只读，不发明或新增测试，也不把实现差异交给无写权P2；缺口继续以`readonly_implementation_gap`阻断。共享这段来源语义不改变`interface_seed`只维护父接口、不要求完整FLOW/AC/实现的阶段边界。Legacy提示与历史原件保持原样。
 
@@ -37,7 +43,7 @@ interface_seed的生成与独审只承担必要REQ/RULE/GAP及跨子区共享接
 
 上层完整需求见 [[spec-sync]]；所有来源、稳定 ID、契约与验证绑定遵循 [[sync-contract-schema]]。`related:` 只提供现存接入点上下文，不计实现覆盖。适用产品验收由上层映射保留，不能用局部夹具通过替代全量结果。
 
-`elaborate` 接收冻结的目标路径、节点身份、原文字节及摘要、用户原意、已有契约和有来源的事实；生成、审查都调用受限只读结构化会话，返回完整 Markdown 候选，交付写权限仍属于协调器。候选不得越过目标范围、更换源摘要或改写用户原意；无明确变更依据时保留既有 REQ、AC、VERIFY 和验证政策。[[sync-contract-evolution]] 在旧新全图核对稳定 ID，跨叶移动不当作删除。已有 AC 语义仅在合法规则变化及真实冻结、独立审查的行为分析授权 update_acceptance 后自动更新；生成器自身失败不构成授权。用户原意或可信裁决已决定退役或改变验证政策时，冻结 `authorizedChanges` 提供具体 ID、操作、来源及理由，程序允许该变化并由独立审查核对依据，无需再次批准。返回实际退役 ID，拒绝复用协调器提供的历史退役 ID；退役记录由后续协调交付持久化。新增裁决来源必须属于冻结事实或既有可信契约中的裁决 ID，不能由模型声明获得授权。每个业务项经来源与依赖能追到用户需求。
+未启用草稿协议的历史`elaborate` 接收冻结的目标路径、节点身份、原文字节及摘要、用户原意、已有契约和有来源的事实；生成、审查都调用受限只读结构化会话，返回完整 Markdown 候选，交付写权限仍属于协调器。候选不得越过目标范围、更换源摘要或改写用户原意；无明确变更依据时保留既有 REQ、AC、VERIFY 和验证政策。[[sync-contract-evolution]] 在旧新全图核对稳定 ID，跨叶移动不当作删除。已有 AC 语义仅在合法规则变化及真实冻结、独立审查的行为分析授权 update_acceptance 后自动更新；生成器自身失败不构成授权。用户原意或可信裁决已决定退役或改变验证政策时，冻结 `authorizedChanges` 提供具体 ID、操作、来源及理由，程序允许该变化并由独立审查核对依据，无需再次批准。返回实际退役 ID，拒绝复用协调器提供的历史退役 ID；退役记录由后续协调交付持久化。新增裁决来源必须属于冻结事实或既有可信契约中的裁决 ID，不能由模型声明获得授权。每个业务项经来源与依赖能追到用户需求。
 
 每轮先验证 [[elaboration-output]] 的结构，再调用 [[sync-contract-schema]] 解析与引用、完整性和状态矩阵检查；raw 段使用解析器的围栏感知结果，原文里的示例标题不成为正文分界。独立审查使用另一会话及线程，从原意、冻结事实、全部适用性和候选重新走路径。程序或审查的具体缺口触发有限修复；重要未知事实或业务冲突须先形成准确 GAP，不能自动编造政策消除错误。GAP 仅阻塞来源、规则和验收依赖闭包；确实位于同一 GAP 闭包中的未知状态事件处置和业务完整性发现保留为 `blockedStructureFindings`，独立流程仍由审查确认后输出可推进项。重复 ID、悬空引用、非法来源等全域结构错误不能借 GAP 豁免。
 

@@ -20,6 +20,8 @@ export type ElaborationInput = {
   base?: string
   /** 明确绑定的实际阶段seed；不限制仓库读取。 */
   worktree?: { baseCommit: string; tree: string; mode: 'read' | 'edit' }
+  /** 新派发显式冻结；缺席继续使用原请求协议，不重写历史reserved请求。 */
+  draftProtocol?: 'elaboration-draft-v1'
   /** 仅由分区执行器用于无源码writer的初始或既有纯父接口；结果不是完整P1或实现就绪。 */
   phase?: 'interface_seed'
   /** 原分区计划及后验纯父分类证据，只绑定本区来源，不授予写权限或完成度。 */
@@ -70,7 +72,16 @@ export type VerificationOwnershipProjection = {
 export type ElaborationReviewFinding = { code: string; kind: 'repair' | 'missing_fact' | 'conflict'; message: string; affectedIds: string[]; evidence: string; decision: string }
 export type ElaborationReview = { inputDigest: string; candidateDigest: string; verdict: 'accept' | 'repair' | 'needs_input' | 'conflict'; checkedBoundaries: ElaborationBoundary[]; findings: ElaborationReviewFinding[] }
 export type ElaborationTrace = { purpose: string; sessionId: string; threadId: string; turnId: string; resultDigest: string; inputDigest: string }
-export type ElaborationRound = { rejectedOutput?: RejectedStructuredOutput & { ownerInputDigest: string; ownerRequestKey: string }; index: number; output: unknown; candidate: ElaborationCandidate | null; candidateDigest: string | null; findings: ContractFinding[]; reviewOutput: unknown; review: ElaborationReview | null; traces: ElaborationTrace[] }
+/** 草稿正文只存在真实Git blob中；这是未批准材料的身份，不是成功或accept证明。 */
+export type ElaborationDraft = {
+  version: 'elaboration-draft-v1'; ownerDigest: string; sourceInputId: string; schemaDigest: string
+  seed: { baseCommit: string; tree: string; mode: 'edit' }
+  resultCommit: string; resultTree: string; path: string; oid: string
+  errors: { code: string; message: string }[]
+}
+/** 仅在内存中从已认证历史原件读取；进入新seed后由真实提交形成draft检查点。 */
+export type ElaborationDraftMaterial = { source: string; errors: { code: string; message: string }[] }
+export type ElaborationRound = { draft?: ElaborationDraft; rejectedOutput?: RejectedStructuredOutput & { ownerInputDigest: string; ownerRequestKey: string }; index: number; output: unknown; candidate: ElaborationCandidate | null; candidateDigest: string | null; findings: ContractFinding[]; reviewOutput: unknown; review: ElaborationReview | null; traces: ElaborationTrace[] }
 export type BlockedElaborationFlow = { flowId: string; blockedStepIds: string[]; gapIds: string[] }
 /** 仅由内部协调器提供的已结算、被拒绝候选；候选不是新的业务事实。 */
 export type ElaborationRepairSeed = {
