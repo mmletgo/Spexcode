@@ -7,7 +7,7 @@ import { outputErrors } from './elaboration-schema.js'
 import { elaborate, freezeElaborationInput, projectElaborationFlowReadiness, sealPartitionedElaboration } from './elaboration.js'
 import type { Contract, Verification } from '@spexcode/spec-core/contracts'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
-import type { Applicability, ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationTrace, ElaborationSessionRequest, ElaborationChange, ElaborationRepairSeed, ReadonlySpecRepair, VerificationOwnershipProjection } from './elaboration-types.js'
+import type { Applicability, ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationTrace, ElaborationSessionRequest, ElaborationChange, ElaborationRepairSeed, ElaborationRepairDiagnostics, ReadonlySpecRepair, VerificationOwnershipProjection } from './elaboration-types.js'
 import { elaborationTargetBindings, projectVerificationTable, withoutVerificationTables } from './elaboration-markdown.js'
 import { actualTreeDiff, isHostPrivatePath, verifyCandidate } from './candidate.js'
 import type { CandidateChanges } from './candidate.js'
@@ -29,6 +29,7 @@ export type PartitionCheckpoints = {
   loadAcceptedElaboration?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'> | null
   loadAcceptedInterfaceSeed?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'> | null
   loadElaborationRepairSeed?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): ElaborationRepairSeed | null
+  loadElaborationRepairDiagnostics?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): ElaborationRepairDiagnostics | null
   loadReadonlySpecRepair?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): { prior: Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>; repair: ReadonlySpecRepair } | null
   save(key: string, value: unknown): BlobRef
 }
@@ -304,7 +305,7 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
         return accepted
       }
       const seed = checkpoints.loadElaborationRepairSeed?.(key, partitionBinding, freezeElaborationInput(repairedInput).inputDigest) ?? undefined
-      const { contracts: _contracts, graph: _graph, coverage: _coverage, ...compact } = await elaborate(repairedInput, { runner, seed })
+      const { contracts: _contracts, graph: _graph, coverage: _coverage, ...compact } = await elaborate(repairedInput, { runner, seed, repairDiagnostics: checkpoints.loadElaborationRepairDiagnostics?.(key, partitionBinding, freezeElaborationInput(repairedInput).inputDigest) ?? undefined })
       checkpoints.save(key, compact)
       return compact
     }
@@ -315,7 +316,7 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
       return accepted
     }
     const seed = checkpoints.loadElaborationRepairSeed?.(key, partitionBinding, inputDigest) ?? undefined
-    const result = await elaborate(localInput, { runner, seed })
+    const result = await elaborate(localInput, { runner, seed, repairDiagnostics: checkpoints.loadElaborationRepairDiagnostics?.(key, partitionBinding, inputDigest) ?? undefined })
     const { contracts: _contracts, graph: _graph, coverage: _coverage, ...compact } = result
     checkpoints.save(key, compact)
     return compact
@@ -371,7 +372,7 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
     ? results.find(result => !result.structurePassed || !result.reviewPassed)?.status ?? 'failed'
     : gaps.some(gap => gap.gapKind === 'conflict') ? 'conflict' : gaps.length ? 'needs_input' : 'complete'
   const failure = results.find(result => result.failure)?.failure ?? (!seal.seal.passed ? { code: 'partition_final_seal_failed', message: JSON.stringify(seal.seal.findings.map(({ code, itemId, message }) => ({ code, itemId, message }))) } : null)
-  const compact = { ...first, partitionBinding: undefined, readonlySpecRepair: undefined, phase: 'partitioned_final' as const, inputDigest: contentHash(JSON.stringify({ partitionPlanDigest: plan.digest, inputs: results.map(result => result.inputDigest) })), candidateDigest: seal.seal.candidateDigest, changes,
+  const compact = { ...first, partitionBinding: undefined, readonlySpecRepair: undefined, repairDiagnostics: undefined, phase: 'partitioned_final' as const, inputDigest: contentHash(JSON.stringify({ partitionPlanDigest: plan.digest, inputs: results.map(result => result.inputDigest) })), candidateDigest: seal.seal.candidateDigest, changes,
     readyIds: structurePassed ? seal.coverage.items.filter(item => item.blockedBy.length === 0 && item.kind !== 'GAP').map(item => item.id) : [], readyFlowIds: readiness.readyFlowIds,
     blockedIds: seal.coverage.items.filter(item => item.blockedBy.length > 0).map(item => item.id), blockedFlows: readiness.blockedFlows,
     retiredIds: unique([...results.flatMap(result => result.retiredIds), ...seal.resolvedGapIds]), nodeChanges: [...input.nodeChanges ?? []],

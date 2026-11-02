@@ -595,3 +595,11 @@ CLI 入口包含 spex sync enable、status、run、pause、resume、verify、dec
 实际 owned 目标的 code/related、代码来源及 AC.test 用于任务相关上下文、影响范围和 source-current/publication 保护，不再作为 Agent 文件读取白名单。新工作树任务的缓存与派发同时绑定完整实际可见 seed tree；不得仅凭旧局部摘要复用异树结果。旧持久请求继续遵守原精确绑定，不改旧记录或证明。commit 输入只捕获实际已提交 HEAD，后续 index/WIP 不进入该阶段工作树；结果仍按原写范围和测试对象保护检查。
 
 冻结依赖闭包的回归同时覆盖旧持久失败计划 retry 摘要变化拒绝、新正式操作的读摘要与原权限保留、index-only glob 成员、commit 后续 index/WIP 隔离、snapshot 未跟踪依赖的完整分派正文，以及字面缺失/目录前缀的发布保护。程序恢复沿原发布 provenance；这些冷态夹具与请求捕获不替代实际模型、验证或正式交付。
+
+Native P1每轮生成携上一轮实际JSON、具体结构/独审发现及完整review；同owner已结算的精确格式失败即使尚无candidate，也沿原checkpoint输入、分区、readSet和selection绑定传递真实code/message与旧resultRef/末轮产物。诊断参与真实prompt/request摘要，不成为raw/facts或新授权；业务inputDigest及accept缓存门槛保持，生成已完成但未独审不算accept，已accept父接口可沿原ref承接。原readonly、REQ/AC/ID、schema、预算和strict seal保持，历史证据不改。
+
+正式pause/resume遗留的superseded且failure:null控制attempt不清除前轮owner诊断。仅当其真实composed/selection、partition-plan原wrapper的readSet/selection及analysisRef均与当前绑定一致，且本owner没有新的已审或业务拒绝结果时，才越过该控制中断寻找最近已结算repairable来源；中间或来源的输入/分区/读取/选择变化、未结算或真实非repairable失败仍阻止继承。
+
+同一诊断接缝也保留候选渲染前的具体结构拒绝：已结算repairable来源必须为exhausted/repair_budget_exhausted、末轮candidate:null且有明确error发现（如重复业务行rows_patch）；不伪造候选seed，原schema和结构门槛保持。
+
+单体P1同样允许越过上述纯控制中断：同operation不可变计划下，readInput由相同composed、selection及冻结读集合唯一派生上下文，真实来源whole wrapper仍精确核readSet和完整inputDigest；已有P0时须保同一analysisRef，没有P0则双方均须缺席。单体不要求不存在的partition-plan，不新增checkpoint或补写历史绑定。
