@@ -107,7 +107,7 @@ export const VERIFICATION_REGISTRATION_SCHEMA = object({ id: rowProperty('VERIFY
 export const ELABORATION_REVIEW_SCHEMA = object({
   verdict: { enum: ['accept', 'repair', 'needs_input', 'conflict'], description: 'accept仅在findings为空时使用；任何待修发现（包括延后P2的implementation-review）均用repair。' },
   checkedBoundaries: { type: 'array', items: { enum: ELABORATION_BOUNDARIES }, minItems: ELABORATION_BOUNDARIES.length },
-  findings: { type: 'array', items: object({ code: string, kind: { enum: ['repair', 'missing_fact', 'conflict'] }, message: string, affectedIds: strings, evidence: string, decision: string }) },
+  findings: { type: 'array', items: object({ code: { ...string, description: '完整业务契约下可在原授权范围修复的实现/测试发现只用精确code:"implementation-review"，同时kind:"repair"、verdict:"repair"，不得添加后缀或自定实现code；普通业务repair使用其具体业务code，仍在P1修复。' }, kind: { enum: ['repair', 'missing_fact', 'conflict'] }, message: string, affectedIds: strings, evidence: string, decision: string }) },
 })
 
 /** 对模型输出这一外部边界重复执行严格 schema 检查，注入 runner 也不能绕过门禁。 */

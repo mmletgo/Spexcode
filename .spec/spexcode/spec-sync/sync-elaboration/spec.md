@@ -34,7 +34,7 @@ related:
 
 当前native-worktree操作的新P1草稿生成使用[[sync-stage-worktree]]的真实edit seed，独审仍使用真实只读seed，允许按需读取完整仓库。生成seed为原composed加已审祖先接口；独审seed另覆盖本轮渲染的完整Spec候选及真实move/retire。提示只给相关Spec路径、targetIndex/首次必建indices、真实raw差量、事实、技术范围/不可改oracle、精确授权与失败诊断，schema仍规范业务行；不重复完整树或强制逐字读取运输。程序按实际seed对象补足契约引用验证所需代码/测试，不把files投影当读取权限。完整业务输入、实际seed/tree及prompt/schema参与摘要；原raw/ID/演进/全图seal、独审与预算门均保留。下文受限frozen读取说明仅用于无worktree的历史操作与旧单测。
 
-Native P1生成和独审共用既有短来源语义：可观察不等于重大业务政策；普通无冲突实现细节可沿合法code来源并追到REQ；明确原意下的实现/测试缺陷不是未知政策或业务GAP，独审须纠正对实现的误读。显式空`implementationWritePaths`时，提示须明确源码和全部测试只读，不发明或新增测试，也不把实现差异交给无写权P2；缺口继续以`readonly_implementation_gap`阻断。共享这段来源语义不改变`interface_seed`只维护父接口、不要求完整FLOW/AC/实现的阶段边界。Legacy提示与历史原件保持原样。
+Native P1生成和独审共用既有短来源语义：可观察不等于重大业务政策；普通无冲突实现细节可沿合法code来源并追到REQ；明确原意下的实现/测试缺陷不是未知政策或业务GAP，独审须纠正对实现的误读。显式空`implementationWritePaths`时，提示须明确源码和全部测试只读，不发明或新增测试，也不把实现差异交给无写权P2；缺口继续以`readonly_implementation_gap`阻断。共享这段来源语义不改变`interface_seed`只维护父接口、不要求完整FLOW/AC/实现的阶段边界。历史请求及原件不改写。
 
 模型调用期限沿 [[structured-session-runtime]] 原样传递，明确 null 不装调用计时器；生成与独审、完整读取及各自业务门禁保持。
 
@@ -58,7 +58,7 @@ interface_seed的生成与独审只承担必要REQ/RULE/GAP及跨子区共享接
 
 这些均是细化阶段结果；`runtimeVerification: not_run`、`implementationReady: false` 不能作为已同步证据。尚无实现锚点或测试的具体缺口保留给 P2，不制造虚构 `code:` 或运行通过结论。
 
-独立审查发现完整业务契约下的源码或测试缺陷时，用 `kind: repair`、规范 `code: implementation-review` 交给 P2；例如代码 TypeError、DTO 被当完整对象递归、修改返回值后按污染结构比较导致误断言，不触发业务细化或新 REQ/RULE/GAP。该发现必须关联当前契约图真实且非空的 affectedIds，并在 evidence 中提供冻结上下文中受治理 code 或 AC.test 的具体相对路径加符号或行号、失败反例；decision 明确仅修实现并保留业务义务。程序核对身份和冻结治理位置，绑定不成立仍作为具体阻断发现。原 review 完整留存，待实现发现保留受影响身份、位置、证据及修复决定；review 新增发现后刷新 deferredImplementationFindings。任意自定义业务 repair、真实遗漏边界、重大未知和冲突继续按原门禁处理；reviewPassed 仅表示业务独审通过，不是运行通过。仅有待实现发现的候选不能成为要求具体业务阻断的 repair seed。AC-ELABORATION-41–43 覆盖完整契约不变与实现证据延后、位置/身份不合法的硬拒和混合业务缺口阻断。
+独立审查发现完整业务契约下的源码或测试缺陷时，Native与非Native请求共用完整说明，明确 `verdict: "repair"`、`kind: "repair"`、`code: "implementation-review"` 三个精确值，不得添加后缀或自定实现code；例如代码 TypeError、DTO 被当完整对象递归、修改返回值后按污染结构比较导致误断言，不触发业务细化或新 REQ/RULE/GAP。该发现必须关联当前契约图真实且非空的 affectedIds，并在 evidence 中提供冻结上下文中受治理 code 或 AC.test 的具体相对路径加符号或行号、失败反例；decision 明确仅修实现并保留业务义务。程序核对身份和冻结治理位置，绑定不成立仍作为具体阻断发现。原 review 完整留存，待实现发现保留受影响身份、位置、证据及修复决定；review 新增发现后刷新 deferredImplementationFindings。任意自定义业务 repair、真实遗漏边界、重大未知和冲突继续按原门禁处理；reviewPassed 仅表示业务独审通过，不是运行通过。仅有待实现发现的候选不能成为要求具体业务阻断的 repair seed。AC-ELABORATION-41–43 覆盖完整契约不变与实现证据延后、位置/身份不合法的硬拒和混合业务缺口阻断。Native请求的受控消费者回归验证精确协议经真实P1门禁后产生待实现发现并可进入现有code_generate派发，后缀code仍阻断；该模拟不证明真实模型必然遵守，实际新Native仍须产品验收，旧拒绝结果不变接受。
 
 编排回归由 `AC-ELABORATION-01` 至 `AC-ELABORATION-31` 覆盖解析/矩阵/独立审查、状态缺支修复、语义发现修复、GAP 独立分支、冲突证据、路径/摘要/raw 边界、既有验收保护、无效结构与重复会话、待实现证据、伪造裁决、安全失败/取消、输入冻结、合法退役、验证政策演进、围栏原意、未知矩阵单元、调用/总时间预算、行 schema、固定格式渲染、幂等预算身份及字符/argv 转义、未停稳取消、证据支持的可覆盖默认超时、真实 GAP 候选的父流程聚合及已结算拒绝候选的摘要/输入/原生审查追踪核对、渲染升级和新独立审查，以及 GAP 仅影响 TR 时经派发步骤传递的父流程阻塞、旧种子在当前结构检查新增缺口后的准确修复反馈。注入 runner 仅用于控制这些编排路径；P1 的真实 Agent 自然语言细化验收仍由完整产品链路单独验证。
 

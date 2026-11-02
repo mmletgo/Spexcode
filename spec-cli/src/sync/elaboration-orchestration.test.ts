@@ -1,7 +1,9 @@
 import { StructuredSessionError, rejectedFinalOutput } from '../session-structured-policy.js'
 import { nativeWorktreePrompt } from '../native-worktree-runtime.js'
 import assert from 'node:assert/strict'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { buildContractGraph, CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts, projectContractCoverage } from '@spexcode/spec-core/contracts'
@@ -13,6 +15,9 @@ import { bindElaborationTargets, renderElaboration } from './elaboration-markdow
 import { CONTRACT_INSTRUCTIONS, ELABORATION_SCHEMA, outputErrors } from './elaboration-schema.js'
 import type { CodeBehaviorEvidence, SyncDecisionAuthority } from './writeback-types.js'
 import { adaptElaborationNativeOutput } from '../../test/elaboration-native-output.js'
+import { runGeneration } from './generation.js'
+import { captureInputSnapshot, readObject, readTree } from './snapshot.js'
+import { stageWorktree } from './stage-worktree.js'
 
 const fixture = new URL('../../test/fixtures/spec-sync/export-repo/', import.meta.url)
 const path = '.spec/export/export-contract/spec.md'
@@ -1164,6 +1169,55 @@ test('AC-ELABORATION-41 完整业务契约的规范实现独审缺陷交P2，保
   const last = result.rounds[0]
   const seed: ElaborationRepairSeed = { settled: true, requestKey: 'operation-1', inputDigest: result.inputDigest, candidateDigest: last.candidateDigest!, output: last.output, candidate: last.candidate!, findings: last.findings, review: last.review, traces: last.traces }
   await assert.rejects(elaborate({ ...input(true), requestKey: 'implementation-only-seed' }, { seed, runner: async () => assert.fail('仅待实现发现不得续修业务契约') }), /具体被拒绝发现/)
+})
+
+test('Native独审精确实现发现协议使完整P1交接现有code_generate入口', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'spex-native-review-contract-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  cpSync(fixture, root, { recursive: true })
+  const git = (...args: string[]): void => { execFileSync('git', ['-C', root, ...args], { stdio: 'pipe', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }) }
+  git('init', '-b', 'main'); git('config', 'user.email', 'review@example.invalid'); git('config', 'user.name', 'review fixture'); git('add', '.'); git('commit', '-m', 'fixture')
+  const snapshot = await captureInputSnapshot(root)
+  const entries = readTree(snapshot.source.commonDir, snapshot.immutableTree)
+  const context = new Map(entries.map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString('utf8')]))
+  const output = candidate({} as ElaborationSessionRequest, source); output.changes = []
+  const fake = runner(() => output, request => {
+    // 受控消费者按实际请求契约选择code，不模拟模型必然理解或遵守自然语言。
+    const fields = request.prompt.match(/verdict:"([^"]+)", kind:"([^"]+)", code:"([^"]+)"/)
+    const schema = request.schema as { properties: { findings: { items: { properties: { code: { description?: string } } } } } }
+    const exact = fields?.[1] === 'repair' && fields[2] === 'repair' && fields[3] === 'implementation-review'
+      && schema.properties.findings.items.properties.code.description?.includes('code:"implementation-review"')
+    return { ...review(request), verdict: 'repair', findings: [{ code: exact ? fields[3] : 'implementation-review-add-title-noline-pending', kind: 'repair', message: '业务契约完整，冻结测试断言仍待按已定语义修复', affectedIds: ['AC-EXPORT-03'], evidence: 'tests/export.test.mjs#AC-EXPORT-03：正确下载结果被现存断言误判。', decision: '仅在原授权测试内修正断言，保留业务正文和全部义务。' }] }
+  })
+  const supplied: ElaborationInput = { ...input(true), root, files: context, historyInput: snapshot, worktree: stageWorktree(snapshot.source.commonDir, snapshot.headCommit, snapshot.immutableTree), implementationWritePaths: ['src/export.js', 'tests/export.test.mjs'], maxRepairs: 0 }
+  const result = await elaborate(supplied, { runner: fake.run })
+  assert.equal(result.status, 'complete', JSON.stringify(result.rounds[0].findings))
+  assert.equal(result.structurePassed, true)
+  assert.equal(result.reviewPassed, true)
+  assert.equal(result.changes[0].source, source)
+  assert.deepEqual(result.deferredImplementationFindings.map(issue => issue.code), ['implementation-review'])
+  assert.deepEqual(result.rounds[0].review!.findings.map(issue => issue.code), ['implementation-review'])
+  assert.deepEqual(fake.calls.map(call => call.purpose), ['elaboration_generate', 'elaboration_review'])
+  const dispatched: ElaborationSessionRequest[] = []
+  const generated = await runGeneration({ root, nativeWorktree: true, requestKey: 'review-to-code-generate', snapshot, manifest: { version: 1, entries }, files: context, contracts: result.contracts, elaboratedSpecs: result.changes, readyIds: result.readyIds, blockedIds: result.blockedIds, intent: input().intent, facts: [], existingAcceptance: result.contracts.flatMap(contract => contract.items.filter(item => item.kind === 'AC')), mandatoryTests: [], verifications: [registeredVerification], allowedScope: { paths: ['src', 'tests', '.spec'], contractIds: result.readyIds, flowIds: result.readyFlowIds }, policy: { version: 'trusted-v1', digest: 'review-contract' }, timeoutMs: 30_000, model: 'gpt-6.1-sol', effort: 'high' }, {
+    runner: async request => { dispatched.push(request); throw Object.assign(new Error('受控停止：只验证P1产物可进入现有P2派发'), { code: 'controlled_codegen_dispatch' }) },
+    validateCandidate: async () => assert.fail('本例不执行或验证实现候选'),
+  })
+  assert.deepEqual(dispatched.map(request => request.purpose), ['code_generate'])
+  assert.equal(dispatched[0].worktree!.mode, 'edit')
+  const task = JSON.parse(dispatched[0].prompt.split('\n任务:\n')[1]) as { readyIds: string[]; approvedSpecs: string[] }
+  assert.deepEqual(task.readyIds, result.readyIds)
+  assert.deepEqual(task.approvedSpecs, [path])
+  assert.equal(generated.failure!.code, 'controlled_codegen_dispatch')
+  assert.equal(generated.runtimeVerification, 'not_run')
+  const suffix = 'implementation-review-add-title-noline-pending'
+  const rejected = runner(() => output, request => ({ ...review(request), verdict: 'repair', findings: [{ ...result.rounds[0].review!.findings[0], code: suffix }] }))
+  const blocked = await elaborate(supplied, { runner: rejected.run })
+  assert.equal(blocked.status, 'exhausted')
+  assert.equal(blocked.reviewPassed, false)
+  assert.equal(blocked.deferredImplementationFindings.length, 0)
+  assert.equal(blocked.rounds[0].review!.findings[0].code, suffix)
+  assert.ok(blocked.rounds[0].findings.some(issue => issue.code === suffix && issue.severity === 'error'))
 })
 
 test('AC-ELABORATION-42 实现review缺少冻结治理位置或有效受影响ID时仍具体阻塞', async () => {

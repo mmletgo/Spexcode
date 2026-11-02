@@ -15,7 +15,7 @@ code:
 
 原生 code/related 字段说明明确沿用仓库文件关系语义：code 最多治理一个源文件基路径，related 是补充文件/目录关系，节点或 REQ/FLOW/RULE/VERIFY 等业务 ID 不是文件路径。完整候选仍经 [[spec-lint]] 同源关系完整性门禁，不把字段说明当作验证证据。
 
-review verdict 的原生说明明确 accept 仅可搭配空 findings；implementation-review 等待修发现也使用 repair，再由现有分类门禁转交对应阶段，不把矛盾回执自动改成通过。
+review verdict 的原生说明明确 accept 仅可搭配空 findings；implementation-review 等待修发现也使用 repair，再由现有分类门禁转交对应阶段，不把矛盾回执自动改成通过。code字段说明完整业务契约下的实现/测试发现使用精确`code:"implementation-review"`及repair分类/结论，不能添加后缀或自定实现code；普通业务repair保留具体业务code并在P1修复。此说明不改变string/minLength约束、schema接受范围或既有精确分类门禁。
 
 模型临时输出 `elaboration-target-rows-v3`：冻结目标的输入内 targetIndex、标题和说明、真实代码/相关绑定、业务解释（null 表示沿用）、显式 removeIds、各类型新增或替换的完整业务行，以及每个适用性边界的依据和影响 ID。模型不返回 nodeId/path；wire 为每个冻结目标附原数组下标 targetIndex，程序从同一冻结目标及显式 nodeChanges 唯一绑定节点、可写路径、原意和源摘要。全部类型数组均存在，空数组表示无该表；行对象的列直接派生自解析器 `CONTRACT_COLUMNS`，不复制另一份列定义。严格 schema 约束稳定 ID、单一来源、引用数组、布尔值、VERIFY argv 和正整数超时；`STEP.next` 的 END 单值不能混入 ID 列表。有状态流程引用 STATE 结果，不能把同步动作当成无状态能力。
 
