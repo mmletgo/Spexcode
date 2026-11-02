@@ -2210,6 +2210,128 @@ for (const body of ['syntax', 'schema', 'stage-shape'] as const) for (const layo
   assert.equal(beforeRefs.some(ref => ref.sha256 === rawRef!.sha256), ['legacy', 'cancelled'].includes(layout), 'new raw is only pinned through its typed wrapper')
 })
 
+for (const target of ['code_behavior_analyze', 'elaboration_generate'] as const) for (const mode of ['settled', 'paused', 'expired', 'wrong-proof'] as const) test(`settled RPC failure at ${target} advances only a fresh request in the same operation: ${mode}`, async t => {
+  const f = await fixture(t, { maxAttempts: 2, maxCalls: 12, maxRepairs: 2, timeoutMs: 30000 }, false, original, 'project', original, { agentWorkflow: 'native-worktree-v1' }, undefined, target === 'code_behavior_analyze' ? 'code' : 'spec', 'zcode:bigmodel-api/GLM-5.3-Flash')
+  const originalRunner = f.options.runner!, records = new Map<string, NativeRunRecord>()
+  let advanced = false, firstCalls = 0
+  const checkpoint = f.store.recordResourceCheckpoint.bind(f.store)
+  f.store.recordResourceCheckpoint = (id, update) => {
+    const saved = JSON.parse(readEvidence(f.input.source.commonDir, update.checkpointRef).toString()) as NativeRunCheckpoint
+    if (mode === 'wrong-proof' && update.phase === 'removed' && saved.failure?.code === 'native_rpc_timeout') { saved.stop!.sessionId = 'another-native-owner'; return checkpoint(id, { ...update, checkpointRef: writeEvidence(f.input.source.commonDir, saved) }) }
+    return checkpoint(id, update)
+  }
+  f.options.runner = async request => {
+    if (request.purpose !== target) return originalRunner(request)
+    const operation = f.store.readOperation(f.operation.id), attempt = f.store.readAttempt(operation.currentAttemptId!)
+    if (attempt.number > 1) { advanced = true; throw new StructuredSessionError('unsupported', 'fixture stops after the same operation makes a fresh request') }
+    const fence = { operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: operation.input.source.physicalFingerprint }
+    return createAttemptRunner(f.store, fence, { pollMs: 2, runtime: {
+      readRecord: id => records.get(id) ?? null,
+      cancel: async id => { const state = records.get(id)!.structuredExecution!; return { sessionId: id, state: state.state!, nativeStopped: state.cancellation!.nativeStopped, acknowledged: false, nativeStatus: 'stopped' } },
+      run: async actual => {
+        firstCalls++
+        const execution = structuredExecutionPolicy(actual), key = actual.sessionCreateKey ?? actual.requestKey, sessionId = sessionIdForCreateKey(key)
+        const prompt = actual.worktree ? (await import('../native-worktree-runtime.js')).nativeWorktreePrompt(actual.prompt, actual.worktree) : actual.prompt
+        const message = 'ZCode native RPC timeout (session/create)'
+        records.set(sessionId, { session: sessionId, status: 'error', harnessSessionId: null, createRequestId: contentHash(key), createPayloadHash: contentHash(JSON.stringify({ prompt, parent: null, launcher: null, ...(actual.base?.trim() ? { base: actual.base.trim() } : {}), structuredExecution: execution })), structuredExecution: { ...execution, state: 'failed', errorCode: 'native_rpc_timeout', error: message, cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: true, acknowledged: false, nativeStatus: 'stopped' } } })
+        if (mode === 'paused') f.store.requestControl(operation.id, 'pause')
+        if (mode === 'expired') { f.store.renewLease(fence, 1); await new Promise(resolve => setTimeout(resolve, 5)) }
+        throw new StructuredSessionError('native_rpc_timeout', message, { sessionId })
+      },
+    } })(request)
+  }
+  await runSyncOperation(f.store, f.operation.id, f.options)
+  assert.equal(advanced, mode === 'settled', 'only a current run fence with exact stopped transport proof may enter the existing repair loop')
+  assert.equal(firstCalls, 1)
+  const attempts = f.store.listAttempts(f.operation.id)
+  assert.equal(attempts.length, mode === 'settled' ? 2 : 1)
+  if (mode === 'settled') { assert.equal(attempts[0].failure?.code, 'native_rpc_timeout'); assert.equal(attempts[0].failure?.kind, 'repairable') }
+  assert.equal(f.store.listRecoverableResources().length, 0)
+  assert.equal(f.store.readOperation(f.operation.id).id, f.operation.id)
+  assert.equal(f.calls.some(call => call.purpose === 'code_generate'), false)
+})
+
+for (const target of ['code_generate', 'code_review'] as const) for (const mode of ['settled', 'partition', 'unknown', 'paused', 'wrong-proof'] as const) test(`P2 typed RPC ${target}/${mode} preserves failure identity and shares exact-stop repair admission`, async t => {
+  const f = await fixture(t, { maxAttempts: 2, maxCalls: 12, maxRepairs: 2, timeoutMs: 30000 }, false, original, 'project', original, mode === 'partition' ? { version: 'sync-coordinator-v2', direction: 'spec_to_code', sourcePaths: ['src/export.js'], partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 2 } } : {})
+  const originalRunner = f.options.runner!, records = new Map<string, NativeRunRecord>()
+  let advanced = false, firstCalls = 0
+  const checkpoint = f.store.recordResourceCheckpoint.bind(f.store)
+  f.store.recordResourceCheckpoint = (id, update) => {
+    const saved = JSON.parse(readEvidence(f.input.source.commonDir, update.checkpointRef).toString()) as NativeRunCheckpoint
+    if (mode === 'wrong-proof' && update.phase === 'removed' && saved.failure?.code === 'native_rpc_timeout') { saved.stop!.sessionId = 'another-native-owner'; return checkpoint(id, { ...update, checkpointRef: writeEvidence(f.input.source.commonDir, saved) }) }
+    return checkpoint(id, update)
+  }
+  f.options.runner = async request => {
+    const operation = f.store.readOperation(f.operation.id), attempt = f.store.readAttempt(operation.currentAttemptId!)
+    if (request.purpose === target && attempt.number > 1) { advanced = true; throw new StructuredSessionError('unsupported', 'fixture halts at the next same-operation Native request') }
+    const fence = { operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: operation.input.source.physicalFingerprint }
+    return createAttemptRunner(f.store, fence, { pollMs: 2, runtime: {
+      readRecord: id => records.get(id) ?? null,
+      cancel: async id => { const state = records.get(id)!.structuredExecution!; return { sessionId: id, state: state.state!, nativeStopped: state.cancellation?.nativeStopped ?? state.state === 'completed', acknowledged: false, nativeStatus: 'stopped' } },
+      run: async actual => {
+        const execution = structuredExecutionPolicy(actual), key = actual.sessionCreateKey ?? actual.requestKey, sessionId = sessionIdForCreateKey(key)
+        const record: NativeRunRecord = { session: sessionId, status: 'error', harnessSessionId: null, createRequestId: contentHash(key), createPayloadHash: contentHash(JSON.stringify({ prompt: actual.prompt, parent: null, launcher: null, ...(actual.base?.trim() ? { base: actual.base.trim() } : {}), structuredExecution: execution })), structuredExecution: execution }
+        records.set(sessionId, record)
+        if (request.purpose !== target) {
+          const result = await originalRunner(request)
+          record.harnessSessionId = result.threadId; record.structuredExecution = { ...execution, state: 'completed', threadId: result.threadId, turnId: result.turnId, output: result.output, resultDigest: result.resultDigest }
+          return result
+        }
+        firstCalls++
+        const message = 'ZCode native RPC timeout (session/create)'
+        record.structuredExecution = { ...execution, state: mode === 'unknown' ? 'cancelling' : 'failed', errorCode: 'native_rpc_timeout', error: message, turnStartRequested: true, cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: mode !== 'unknown', acknowledged: false, ...(mode === 'unknown' ? { error: message } : { nativeStatus: 'stopped' }) } }
+        if (mode === 'paused') f.store.requestControl(operation.id, 'pause')
+        throw new StructuredSessionError(mode === 'unknown' ? 'cancellation_pending' : 'native_rpc_timeout', message, { sessionId })
+      },
+    } })(request)
+  }
+  const result = await runSyncOperation(f.store, f.operation.id, f.options)
+  assert.equal(advanced, ['settled', 'partition'].includes(mode)); assert.equal(firstCalls, 1)
+  const attempts = f.store.listAttempts(f.operation.id)
+  assert.equal(attempts.length, ['settled', 'partition'].includes(mode) ? 2 : 1)
+  if (['settled', 'partition'].includes(mode)) { assert.equal(attempts[0].failure?.code, 'native_rpc_timeout'); assert.equal(attempts[0].failure?.kind, 'repairable') }
+  if (mode === 'unknown' || mode === 'wrong-proof') assert.equal(result.status, 'recovery_required')
+  assert.equal(f.store.listRecoverableResources().length, mode === 'unknown' ? 1 : 0)
+})
+
+for (const kind of ['syntax', 'json-reference'] as const) test(`Native terminal failure before Saved round publishes no raw evidence edge: ${kind}`, async t => {
+  const f = await fixture(t), claim = f.store.claimAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 30000, expectedMessageId: f.operation.dispatchMessageId })
+  const unrelated = writeEvidence(f.input.source.commonDir, { privateFixture: 'must remain unreachable' }), text = kind === 'syntax' ? '{"bad":[}' : JSON.stringify({ sha256: unrelated.sha256 })
+  const records = new Map<string, NativeRunRecord>(), interrupted = new Error('fixture interrupts after Native terminal before Saved round')
+  const checkpoint = f.store.recordResourceCheckpoint.bind(f.store)
+  f.store.recordResourceCheckpoint = (id, update) => { const result = checkpoint(id, update); if (update.phase === 'terminal') throw interrupted; return result }
+  const request = { root: f.root, base: f.input.headCommit, requestKey: `sync:${claim.attempt.id}:elaborate:0:elaboration_generate`, inputDigest: 'terminal-input', purpose: 'elaboration_generate', prompt: 'Return a JSON object', schema: { type: 'object', required: ['summary'], properties: { summary: { type: 'string' } }, additionalProperties: false }, timeoutMs: 5000 }
+  const runtime = {
+    readRecord: (id: string) => records.get(id) ?? null,
+    cancel: async (): Promise<never> => { throw new Error('cold failure replay must not invoke Native cancellation') },
+    run: async (actual: import('../session-structured.js').StructuredSessionRequest): Promise<never> => {
+      const policy = structuredExecutionPolicy(actual), key = actual.sessionCreateKey ?? actual.requestKey, sessionId = sessionIdForCreateKey(key), identity = { threadId: 'terminal-thread', turnId: 'terminal-turn' }
+      const rejectedOutput = rejectedFinalOutput(text, actual.prompt, policy, identity)
+      records.set(sessionId, { session: sessionId, status: 'error', harnessSessionId: identity.threadId, createRequestId: contentHash(key), createPayloadHash: contentHash(JSON.stringify({ prompt: actual.prompt, parent: null, launcher: null, base: actual.base, structuredExecution: policy })), structuredExecution: { ...policy, ...identity, state: 'failed', errorCode: 'structured_output_format_invalid', error: 'original format failure', rejectedOutput, cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: true, acknowledged: false, nativeStatus: 'stopped' } } })
+      throw new StructuredSessionError('structured_output_format_invalid', 'original format failure', { sessionId, ...identity, rejectedOutput })
+    },
+  }
+  await assert.rejects(createAttemptRunner(f.store, claim.fence, { runtime, pollMs: 2 })(request), error => error === interrupted)
+  assert.equal(f.store.findResource(claim.attempt.id, request.requestKey)!.phase, 'terminal')
+  assert.deepEqual(f.store.readAttempt(claim.attempt.id).checkpointRefs, [])
+  const app = await SyncApplication.create(f.root, { protocol: f.protocol, runtimeDirectory: join(f.parent, 'terminal-read') })
+  await app.readOperation(f.operation.id)
+  await assert.rejects(app.readEvidence(f.operation.id, unrelated), { code: 'sync_evidence_unrelated' })
+  const before = JSON.parse(readEvidence(f.input.source.commonDir, f.store.findResource(claim.attempt.id, request.requestKey)!.checkpointRef).toString()) as NativeRunCheckpoint
+  assert.equal(before.failure!.rejectedOutput!.ref, undefined)
+  f.store.recordResourceCheckpoint = checkpoint
+  await assert.rejects(createAttemptRunner(f.store, claim.fence, { runtime: { ...runtime, run: async () => assert.fail('cold replay cannot resend') }, pollMs: 2 })(request), error => {
+    const failure = error as StructuredSessionError
+    assert.equal(failure.code, 'structured_output_format_invalid'); assert.equal(failure.message, 'original format failure'); assert(failure.rejectedOutput?.ref)
+    assert.equal(readEvidence(f.input.source.commonDir, failure.rejectedOutput.ref).toString(), text)
+    return true
+  })
+  const resource = f.store.findResource(claim.attempt.id, request.requestKey)!
+  assert.equal(resource.phase, 'removed')
+  assert.equal((JSON.parse(readEvidence(f.input.source.commonDir, resource.checkpointRef).toString()) as NativeRunCheckpoint).failure!.rejectedOutput!.ref, undefined)
+  assert.equal(f.store.readOperation(f.operation.id).callsUsed, 1)
+})
+
 test('untrusted final digest without historical ref never invents a CAS pin or evidence edge', async t => {
   const f = await fixture(t)
   const packet = rejectedFinalOutput('original without a CAS ref', 'prompt', { inputDigest: 'input', schema: {}, purpose: 'elaboration_generate' }, { threadId: 'thread', turnId: 'turn' })

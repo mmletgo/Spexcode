@@ -179,6 +179,29 @@ test('same key concurrent callers share one run and call budget; changed payload
   } finally { f.cleanup() }
 })
 
+test('exactly stopped typed RPC failure removes its Native resource and replays the original failure without redispatch', async () => {
+  const f = await fixture()
+  try {
+    let calls = 0
+    const message = 'ZCode native RPC timeout (session/create)'
+    const runtime = { ...f.runtimeBase, run: async (request: StructuredSessionRequest): Promise<never> => {
+      calls++
+      const record = published(request)
+      record.structuredExecution = { ...record.structuredExecution!, state: 'failed', errorCode: 'native_rpc_timeout', error: message, cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: true, acknowledged: false, nativeStatus: 'stopped' } }
+      f.records.set(record.session, record)
+      throw new StructuredSessionError('native_rpc_timeout', message, { sessionId: record.session })
+    } }
+    const run = f.runner(runtime)
+    for (let replay = 0; replay < 2; replay++) {
+      await assert.rejects(run(f.request), error => { assert.equal((error as StructuredSessionError).code, 'native_rpc_timeout'); assert.equal((error as Error).message, message); return true })
+      assert.equal(f.resource().phase, 'removed'); assert.equal(f.checkpoint().status, 'failed')
+      assert.equal(f.checkpoint().stop?.state, 'failed'); assert.equal(f.checkpoint().stop?.nativeStopped, true)
+      assert.equal(f.checkpoint().result, undefined)
+    }
+    assert.equal(calls, 1); assert.equal(f.store.readOperation(f.claimed.operation.id).callsUsed, 1)
+  } finally { f.cleanup() }
+})
+
 test('frozen native dispatch preserves business binding, uses actual attempt/policy and verifies proof on removed replay', async () => {
   const f = await fixture(undefined, 'gpt-6.1-terra'), directory = mkdtempSync(join(tmpdir(), 'native-run-frozen-'))
   try {

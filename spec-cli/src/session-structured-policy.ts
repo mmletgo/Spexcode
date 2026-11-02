@@ -39,11 +39,12 @@ export type StructuredExecution = {
   output?: unknown
   resultDigest?: string
   error?: string
-  errorCode?: 'structured_output_retries_exhausted' | 'structured_output_format_invalid' | 'native_worktree_result_invalid'
+  errorCode?: 'structured_output_retries_exhausted' | 'structured_output_format_invalid' | 'native_worktree_result_invalid' | 'native_rpc_timeout'
   rejectedOutput?: RejectedStructuredOutput
   worktree?: NativeWorktreeRequest
   zcodeToolPolicy?: ZCodeToolPolicy
   resultWorktree?: NativeWorktreeResult
+  failedWorktree?: NativeWorktreeResult
   frozenContext?: FrozenContextRef
   frozenReads?: FrozenReadReceipt[]
   frozenReadProof?: FrozenReadProof
@@ -119,13 +120,19 @@ export class StructuredSessionError extends Error {
   readonly threadId?: string
   readonly turnId?: string
   readonly rejectedOutput?: RejectedStructuredOutput
-  constructor(readonly code: 'unsupported' | 'failed' | 'cancelled' | 'timeout' | 'key_reused' | 'stale_result' | 'cancellation_pending' | 'structured_output_retries_exhausted' | 'structured_output_format_invalid' | 'native_worktree_result_invalid', message: string, identity: { sessionId?: string; threadId?: string; turnId?: string; rejectedOutput?: RejectedStructuredOutput } = {}) {
+  readonly failedWorktree?: NativeWorktreeResult
+  readonly requestKey?: string
+  readonly inputDigest?: string
+  constructor(readonly code: 'unsupported' | 'failed' | 'cancelled' | 'timeout' | 'key_reused' | 'stale_result' | 'cancellation_pending' | 'structured_output_retries_exhausted' | 'structured_output_format_invalid' | 'native_worktree_result_invalid' | 'native_rpc_timeout', message: string, identity: { sessionId?: string; threadId?: string; turnId?: string; rejectedOutput?: RejectedStructuredOutput; failedWorktree?: NativeWorktreeResult; requestKey?: string; inputDigest?: string } = {}) {
     super(message)
     this.name = 'StructuredSessionError'
     this.sessionId = identity.sessionId
     this.threadId = identity.threadId
     this.turnId = identity.turnId
     if (identity.rejectedOutput !== undefined) this.rejectedOutput = identity.rejectedOutput
+    if (identity.failedWorktree !== undefined) this.failedWorktree = identity.failedWorktree
+    if (identity.requestKey !== undefined) this.requestKey = identity.requestKey
+    if (identity.inputDigest !== undefined) this.inputDigest = identity.inputDigest
   }
 }
 

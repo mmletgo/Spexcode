@@ -436,7 +436,7 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
   const pending = new Map<number, { resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>()
   const request = (method: string, params: Record<string, unknown>): Promise<unknown> => new Promise((resolve, reject) => {
     if (exited || !child.stdin.writable) { reject(new StructuredSessionError('cancellation_pending', 'ZCode native transport ended before exact settlement')); return }
-    const id = ++nextId, timer = setTimeout(() => { pending.delete(id); reject(new StructuredSessionError('cancellation_pending', `ZCode native RPC timeout (${method})`)) }, 10000)
+    const id = ++nextId, timer = setTimeout(() => { pending.delete(id); reject(new StructuredSessionError('native_rpc_timeout', `ZCode native RPC timeout (${method})`)) }, 10000)
     pending.set(id, { resolve, reject, timer }); child.stdin.write(zcodeProtocolLine({ id, method, params }))
   })
   const lines = createInterface({ input: child.stdout })
@@ -570,9 +570,9 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
     }
     const stopped = ownedProcessesStopped(plan)
     writeJson(join(root, 'exit.json'), { code: exit?.code ?? null, signal: exit?.signal ?? null, stopped, acknowledged, idle, closed: closeAcknowledged, stderrBytes, stderrSha256: stderrHash.digest('hex') } satisfies StopEvidence, true)
-    if (!stopped) { child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy(); child.unref(); resultError = new StructuredSessionError('cancellation_pending', 'ZCode app/MCP process stop is unproven') }
+    if (!stopped) { child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy(); child.unref(); if (!(resultError instanceof StructuredSessionError && resultError.code === 'native_rpc_timeout')) resultError = new StructuredSessionError('cancellation_pending', 'ZCode app/MCP process stop is unproven') }
   } catch {
-    resultError = new StructuredSessionError('cancellation_pending', 'ZCode native cleanup or stop evidence could not be settled')
+    if (!(resultError instanceof StructuredSessionError && resultError.code === 'native_rpc_timeout')) resultError = new StructuredSessionError('cancellation_pending', 'ZCode native cleanup or stop evidence could not be settled')
     child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy(); child.unref()
   } finally {
     clearTimeout(timeout); callbacks.signal?.removeEventListener('abort', interrupt); active.delete(root); lines.close()

@@ -64,11 +64,12 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
   const nativeWorktree = execution.version === 6 && execution.policy === 'native-worktree-v1'
   const claude = nativeWorktree && execution.model?.startsWith('claude:') || execution.version === (execution.timeoutMs === null ? 5 : 3) && execution.policy === 'claude-frozen-read-only-v1'
   const zcode = nativeWorktree && execution.model?.startsWith('zcode:') || execution.version === (execution.timeoutMs === null ? 5 : 4) && execution.policy === 'zcode-frozen-read-only-v1'
-  if (digest(structuredExecutionPolicy(execution)) !== digest({ ...execution, threadId: undefined, turnId: undefined, state: undefined, observer: undefined, cancellation: undefined, turnStartRequested: undefined, output: undefined, resultDigest: undefined, error: undefined, errorCode: undefined, frozenReads: undefined, frozenReadProof: undefined, claudeNative: undefined, zcodeNative: undefined, resultWorktree: undefined }) || rec.harness !== (zcode ? 'zcode' : claude ? 'claude-headless' : 'codex-headless') || rec.launchCmd !== (zcode ? 'zcode' : claude ? 'claude' : 'codex'))
+  if (digest(structuredExecutionPolicy(execution)) !== digest({ ...execution, threadId: undefined, turnId: undefined, state: undefined, observer: undefined, cancellation: undefined, turnStartRequested: undefined, output: undefined, resultDigest: undefined, error: undefined, errorCode: undefined, frozenReads: undefined, frozenReadProof: undefined, claudeNative: undefined, zcodeNative: undefined, resultWorktree: undefined, failedWorktree: undefined }) || rec.harness !== (zcode ? 'zcode' : claude ? 'claude-headless' : 'codex-headless') || rec.launchCmd !== (zcode ? 'zcode' : claude ? 'claude' : 'codex'))
     throw new StructuredSessionError('unsupported', 'structured session no longer has the trusted fixed executor policy')
   const controller = new AbortController(); activeControllers.set(id, controller)
   let finish: () => void = () => {}
   activeFinished.set(id, new Promise<void>((resolvePromise) => { finish = resolvePromise }))
+  let failedStage: { worktree?: NativeWorktreeResult; stop: { nativeStopped: boolean; acknowledged: boolean; nativeStatus?: string; error?: string } } | undefined
   const update = async (change: Partial<StructuredExecution>): Promise<void> => {
     await withRecordLock(id, async () => {
       const current = readRecord(id)
@@ -115,11 +116,27 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
       },
     }
     const prompt = readFileSync(sessionArtifactPath(id, 'launch'), 'utf8')
-    const result = zcode
+    let result: { threadId: string; turnId: string; text: string; frozenReadProof?: FrozenReadProof }
+    try { result = zcode
       ? await zcodeStructuredTurn(requiredRealmRoot(execution), id, prompt, execution as Parameters<typeof zcodeStructuredTurn>[3], { ...callbacks, onNative: async native => update({ zcodeNative: native }) }, nativeWorktree ? rec.worktreePath : undefined)
       : claude
       ? await claudeStructuredTurn(requiredRealmRoot(execution), id, prompt, execution, { ...callbacks, onNative: async native => update({ claudeNative: native }) }, nativeWorktree ? rec.worktreePath : undefined)
       : await codexStructuredTurn(generation!.endpoint.socketPath, rec.worktreePath, readFileSync(sessionArtifactPath(id, 'launch'), 'utf8'), execution, callbacks)
+    } catch (error) {
+      if (nativeWorktree && error instanceof StructuredSessionError && error.rejectedOutput) {
+        const current = readRecord(id)!.structuredExecution!
+        assertRejectedOutput(error.rejectedOutput, prompt, execution, current)
+        const stop = zcode ? await stopZCodeStructuredTurn(current as Parameters<typeof stopZCodeStructuredTurn>[0]) : await stopClaudeStructuredTurn(current)
+        if (!stop.nativeStopped) throw new StructuredSessionError('cancellation_pending', stop.error || 'failed native stage stop remains unproven')
+        failedStage = { stop }
+        try { failedStage.worktree = nativeWorktreeResult(rec.worktreePath, execution.worktree!) }
+        catch (cause) {
+          if (!(cause instanceof StructuredSessionError) || cause.code !== 'native_worktree_result_invalid') throw cause
+          console.error('structured failed stage Git witness rejected', JSON.stringify({ sessionId: id, code: cause.code, message: cause.message }))
+        }
+      }
+      throw error
+    }
     if (zcode && !nativeWorktree) {
       const model = zcodeNativeModel(execution.model)
       if (result.frozenReadProof?.version !== 4 || result.frozenReadProof.providerId !== model.providerId || result.frozenReadProof.modelId !== model.modelId) throw new StructuredSessionError('stale_result', 'ZCode result has no exact native provider/model witness')
@@ -139,14 +156,14 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
     const pendingStop = readRecord(id)?.structuredExecution
     if (pendingStop?.state === 'completed' || pendingStop?.state === 'cancelling' || pendingStop?.state === 'cancelled' || pendingStop?.state === 'timeout') return pendingStop.state
     if (error instanceof StructuredSessionTransportError) throw error
-    if (error instanceof StructuredSessionError && error.code === 'cancellation_pending') {
-      await update({ state: 'cancelling', cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: false, acknowledged: false, error: error.message }, error: error.message })
+    if (error instanceof StructuredSessionError && (error.code === 'cancellation_pending' || error.code === 'native_rpc_timeout')) {
+      await update({ state: 'cancelling', ...(error.code === 'native_rpc_timeout' ? { errorCode: error.code } : {}), cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: false, acknowledged: false, error: error.message }, error: error.message })
       return 'cancelling'
     }
     const rejectedOutput = error instanceof StructuredSessionError ? error.rejectedOutput : undefined
     if (rejectedOutput) assertRejectedOutput(rejectedOutput, readFileSync(sessionArtifactPath(id, 'launch'), 'utf8'), execution, { threadId: pendingStop?.threadId, turnId: pendingStop?.turnId })
     const state = error instanceof StructuredSessionError && (error.code === 'cancelled' || error.code === 'timeout') ? error.code : 'failed'
-    await update({ state, ...(rejectedOutput ? { rejectedOutput } : {}), error: error instanceof Error ? error.message : String(error), ...(error instanceof StructuredSessionError && (error.code === 'structured_output_retries_exhausted' || error.code === 'structured_output_format_invalid' || error.code === 'native_worktree_result_invalid') ? { errorCode: error.code } : {}) })
+    await update({ state, ...(rejectedOutput ? { rejectedOutput } : {}), ...(failedStage ? { ...(failedStage.worktree ? { failedWorktree: failedStage.worktree } : {}), cancellation: { reason: 'cancelled', requestedAt: Date.now(), ...failedStage.stop } } : {}), error: error instanceof Error ? error.message : String(error), ...(error instanceof StructuredSessionError && (error.code === 'structured_output_retries_exhausted' || error.code === 'structured_output_format_invalid' || error.code === 'native_worktree_result_invalid') ? { errorCode: error.code } : {}) })
     return state
   } finally { activeControllers.delete(id); activeFinished.delete(id); finish() }
 }
@@ -249,6 +266,10 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
         return { sessionId: id, threadId: state.threadId, turnId: state.turnId, output: state.output, resultDigest: state.resultDigest, ...(state.resultWorktree ? { worktree: state.resultWorktree } : {}), ...(state.frozenReadProof ? { frozenReadProof: state.frozenReadProof } : {}) }
       }
       if (state.state === 'cancelling') {
+        if (state.errorCode === 'native_rpc_timeout') {
+          const stopped = await (cancelTask ??= cancelStructuredSession(id, { reason: state.cancellation?.reason ?? 'cancelled', settleFailure: true }))
+          throw new StructuredSessionError(stopped.nativeStopped ? stopped.state === 'failed' && !request.signal?.aborted ? 'native_rpc_timeout' : state.cancellation?.reason ?? 'cancelled' : 'cancellation_pending', state.error || 'native RPC failed before exact stop')
+        }
         if (state.cancellation?.error) throw new StructuredSessionError('cancellation_pending', state.cancellation.error)
         const stopped = await cancel(state.cancellation?.reason ?? 'cancelled')
         throw new StructuredSessionError(stopped.nativeStopped ? state.cancellation?.reason ?? 'cancelled' : 'cancellation_pending', stopped.error || 'structured cancellation settled')
@@ -259,7 +280,11 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
       }
       if (state.state === 'failed') {
         if (state.rejectedOutput) assertRejectedOutput(state.rejectedOutput, request.prompt, execution, state)
-        throw new StructuredSessionError(state.errorCode ?? 'failed', state.error || 'structured execution failed', { rejectedOutput: state.rejectedOutput })
+        if (state.failedWorktree) {
+          if (!request.worktree || !state.rejectedOutput || !state.cancellation?.nativeStopped || state.failedWorktree.worktreePath !== rec!.worktreePath) throw new StructuredSessionError('stale_result', 'failed stage Git witness lacks its original stopped request and record')
+          assertNativeWorktreeResult(request.root, request.worktree, state.failedWorktree)
+        }
+        throw new StructuredSessionError(state.errorCode ?? 'failed', state.error || 'structured execution failed', { rejectedOutput: state.rejectedOutput, failedWorktree: state.failedWorktree })
       }
       if (state.state === 'running' && !recoveryRequested && structuredObserverState(state) === 'gone')
         recoveryRequested = await queueStructuredRecovery(id)
@@ -272,7 +297,7 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
   } catch (error) {
     if (error instanceof StructuredSessionError) {
       const state = readRecord(id)?.structuredExecution
-      throw new StructuredSessionError(error.code, error.message, { sessionId: id, threadId: state?.threadId, turnId: state?.turnId, rejectedOutput: error.rejectedOutput })
+      throw new StructuredSessionError(error.code, error.message, { sessionId: id, threadId: state?.threadId, turnId: state?.turnId, rejectedOutput: error.rejectedOutput, failedWorktree: error.failedWorktree })
     }
     throw error
   } finally { request.signal?.removeEventListener('abort', onAbort) }
@@ -292,7 +317,7 @@ export type StructuredCancellationResult = {
 
 // Cancellation revokes result publication before native control. A queued task has no native turn to
 // stop; an accepted task stops only its pinned turn and requires native acknowledgement + settled read.
-export async function cancelStructuredSession(id: string, options: { reason?: 'cancelled' | 'timeout'; timeoutMs?: number; wakeQueue?: boolean } = {}): Promise<StructuredCancellationResult> {
+export async function cancelStructuredSession(id: string, options: { reason?: 'cancelled' | 'timeout'; timeoutMs?: number; wakeQueue?: boolean; settleFailure?: true } = {}): Promise<StructuredCancellationResult> {
   if ((options.reason !== undefined && !['cancelled', 'timeout'].includes(options.reason)) || (options.timeoutMs !== undefined && (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0)))
     throw new StructuredSessionError('failed', 'structured cancellation needs a valid reason and positive bounded deadline', { sessionId: id })
   const existing = cancellations.get(id)
@@ -305,6 +330,7 @@ export async function cancelStructuredSession(id: string, options: { reason?: 'c
       const rec = readRecord(id)
       if (!rec?.structuredExecution) throw new StructuredSessionError('unsupported', 'target is not a structured session', { sessionId: id })
       const execution = rec.structuredExecution
+      if (options.settleFailure && execution.errorCode !== 'native_rpc_timeout') throw new StructuredSessionError('unsupported', 'automatic failure settlement requires the original typed native RPC failure', { sessionId: id })
       if (execution.state === 'completed' || execution.cancellation?.nativeStopped) return rec
       reason = execution.cancellation?.reason ?? reason
       writeRecord({ ...rec, stopped: true, structuredExecution: { ...execution, state: 'cancelling', cancellation: {
@@ -345,8 +371,9 @@ export async function cancelStructuredSession(id: string, options: { reason?: 'c
         return { sessionId: id, state: pinned.state!, threadId: pinned.threadId, turnId: pinned.turnId,
           nativeStopped: true, acknowledged: pinned.cancellation.acknowledged, nativeStatus: pinned.cancellation.nativeStatus }
       const cancellation = { reason, requestedAt: pinned.cancellation!.requestedAt, ...stop, acknowledged: stop.acknowledged || pinned.cancellation!.acknowledged }
-      const next = stop.nativeStopped ? reason : 'cancelling'
-      const note = stop.nativeStopped ? `structured execution ${reason}; native ${stop.nativeStatus}` : `structured cancellation pending: ${stop.error}`
+      const failed = options.settleFailure && pinned.errorCode === 'native_rpc_timeout'
+      const next = stop.nativeStopped ? failed ? 'failed' : reason : 'cancelling'
+      const note = failed ? pinned.error! : stop.nativeStopped ? `structured execution ${reason}; native ${stop.nativeStatus}` : `structured cancellation pending: ${stop.error}`
       configuredSessionApplication().transitionSession(id, { status: 'error', proposal: null, note })
       writeRecord({ ...latest, status: 'error', proposal: null, note, launchOwner: null, launchReadinessStartedAt: null,
         structuredExecution: { ...pinned, state: next, ...(stop.turnId ? { turnId: stop.turnId } : {}), cancellation, error: note } })

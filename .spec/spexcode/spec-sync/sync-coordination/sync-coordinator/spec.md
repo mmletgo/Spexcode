@@ -181,3 +181,5 @@ P1的已认证精确结构输出失败沿既有已结算repairable attempt和原
 正式pause/resume在绑定前留下的superseded/failure:null空控制attempt，仅当checkpointRefs/dispatchPlans均空、composed/candidate/verification/currentSession均null、publicationBase缺席且原selectionDigest与当前一致时可越过；它不产生授权、不补签绑定，旧真实seal仍须完整匹配当前operation/input/policy/plan/composed/readSet/selection。任何业务/会话锚、非空产物或选择冲突仍是回溯屏障，空attempt仍消耗原计数。
 
 checkpoint扫描共用[[sync-checkpoint-evidence]]的typed证据读取接缝。新stage wrapper一次动作原子保存全部JSON材料与untrusted_final引用，raw不作为平铺JSON stage；先验证真实失败round、owner/source、原NativePlan/resource及canonical原生record，再排除raw的stage权限。历史无role raw引用逐字保留，已cancelled/removed但原格式错误和原文认证仍在的记录可恢复读取；未知损坏JSON仍显式报错，合法JSON伪stage原文也不取得权限。
+
+P0/P1/P2 共用 typed Native RPC 已结算准入：仅当前 control/physical run、有效 fence，且原失败精确匹配本 attempt 的固定 request/dispatch/plan、局部 candidate 与 failed terminal/removed stop，才沿既有同 operation/input/预算开启下一 attempt。并发每个 typed RPC 故障均须证明；未 removed 兄弟或 unsupported/cancelled/conflict/needs_input 不能被一个已停故障掩盖。unknown stop、pause、用户取消、过期 fence 和旧缺席保持 recovery/原控制语义，不重发旧 request、不解析 message 猜分类；普通格式/schema门和 initial code_to_spec 不调用 code_generate 的权限门保持。
