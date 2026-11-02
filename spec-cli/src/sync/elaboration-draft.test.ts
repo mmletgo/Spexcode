@@ -4,7 +4,7 @@ import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeF
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import test from 'node:test'
-import { CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
+import { buildContractGraph, CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
 import { StructuredSessionError, rejectedFinalOutput } from '../session-structured-policy.js'
 import { nativeWorktreePrompt, nativeWorktreeResult } from '../native-worktree-runtime.js'
 import { elaborate, elaborationDigest, sealPartitionedElaboration, verifyElaborationDraftCache } from './elaboration.js'
@@ -315,7 +315,7 @@ function draftRows(source: string): GeneratedTargetElaboration {
   }] }
 }
 
-async function sealFixture(t: test.TestContext, sharedVerification = false) {
+async function sealFixture(t: test.TestContext, sharedVerification = false, redundantGeneratedAcceptance = false) {
   const f = await fixture(t), peerPath = '.spec/export/peer-contract/spec.md'
   const original = f.input.targets[0].source!, peer = original.replaceAll('export-job', 'peer-job').replaceAll('export-contract', 'peer-contract').replaceAll('EXPORT', 'PEER').replaceAll('tests/export.test.mjs', 'tests/peer.test.mjs')
   const sources = new Map([[path, original], [peerPath, sharedVerification ? peer.replaceAll('VERIFY-PEER-01', 'VERIFY-EXPORT-01').replace('["node","--test","tests/peer.test.mjs"]', '["node","--test","tests/export.test.mjs"]') : peer]])
@@ -333,7 +333,10 @@ async function sealFixture(t: test.TestContext, sharedVerification = false) {
   const plan: SyncPartitionPlan = { version: 'sync-partitions-v1', digest: 'two-owner-seal', expectedPaths: ['src/export.js'], dependencies: [], partitions: input.targets.map(target => ({ id: target.nodeId, intentNodeId: 'ancestor', targets: [{ nodeId: target.nodeId, path: target.path }], readPaths: [target.path, ancestorPath, 'src/export.js', `tests/${target.nodeId === 'export-contract' ? 'export' : 'peer'}.test.mjs`], writePaths: [target.path], sourcePaths: ['src/export.js'], changedPaths: ['src/export.js'], contextNodeIds: ['ancestor'], contractIds: [], flowIds: [], readBytes: 100, readLimitBytes: 524288, oversizedReads: [] })) }
   const saved = new Map<string, ElaborationResult>(), refs = new Map<string, ReturnType<typeof writeEvidence>>()
   const save: PartitionCheckpoints['save'] = (key, value) => { const ref = writeEvidence(f.commonDir, value); saved.set(key, structuredClone(value) as ElaborationResult); refs.set(key, ref); return ref }
-  const candidateSource = (specPath: string) => sources.get(specPath)!.replaceAll(specPath === path ? 'FLOW-EXPORT-01' : 'FLOW-PEER-01', 'FLOW-SHARED-01')
+  const candidateSource = (specPath: string) => {
+    const source = sources.get(specPath)!.replaceAll(specPath === path ? 'FLOW-EXPORT-01' : 'FLOW-PEER-01', 'FLOW-SHARED-01')
+    return redundantGeneratedAcceptance && specPath === peerPath ? source.replace('\n\n### VERIFY', `\n${[1, 2].map(index => `| AC-PEER-NEW-0${index} | REQ-PEER-01,FLOW-SHARED-01 | 当前合法请求 | 完成原流程 | 原义务全部完成 | tests/peer.test.mjs#AC-PEER-01 | VERIFY-PEER-01 | derived:REQ-PEER-01 | REQ-PEER-01,FLOW-SHARED-01 |`).join('\n')}\n\n### VERIFY`) : source
+  }
   const initial = await elaborateSyncPartitions(input, plan, 1, { load: () => null, save }, f.run(request => JSON.stringify(draftRows(candidateSource(request.prompt.includes('"nodeId":"peer-contract"') ? peerPath : path)))))
   assert.equal(initial.failure?.code, 'partition_final_seal_failed', JSON.stringify({ failure: initial.failure, locals: [...saved].map(([key, value]) => ({ key, failure: value.failure, findings: value.rounds?.flatMap(round => round.findings) })) }))
   assert.ok([...saved.values()].filter(local => local.partitionBinding).every(local => local.structurePassed && local.reviewPassed))
@@ -429,7 +432,18 @@ test('全局返修保留已证明的共享VERIFY归属投影，正常新FLOW更�
   const f = await sealFixture(t, true), originalSaved = structuredClone([...f.saved])
   assert.ok(!parseContract(f.initial.partitionSeal!.changes.find(change => change.path === f.peerPath)!).contract!.items.some(item => item.kind === 'VERIFY'))
   assert.ok(parseContract(f.prior.changes[0]).contract!.items.some(item => item.kind === 'VERIFY'))
-  const result = await elaborateSyncPartitions({ ...f.input, requestKey: 'repair-shared-verify' }, f.plan, 1, f.checkpoints, f.run(() => JSON.stringify(draftRows(f.repaired))))
+  const native = f.run(() => JSON.stringify(draftRows(f.repaired)))
+  const result = await elaborateSyncPartitions({ ...f.input, requestKey: 'repair-shared-verify' }, f.plan, 1, f.checkpoints, async request => {
+    if (request.purpose === 'elaboration_review') {
+      const specs = readTree(f.commonDir, request.worktree!.tree).filter(entry => entry.path.startsWith('.spex-sync-diagnostics/')).map(entry => ({ nodeId: entry.path.endsWith(f.peerPath) ? 'peer-contract' : 'export-contract', path: entry.path.endsWith(f.peerPath) ? f.peerPath : path, source: readObject(f.commonDir, entry.oid).toString('utf8') }))
+      const contracts = specs.flatMap(spec => parseContract(spec).contract ?? [])
+      assert.equal(contracts.flatMap(contract => contract.items.filter(item => item.kind === 'VERIFY')).length, 1, '独审看到的并集必须与程序检查的VERIFY技术投影相同')
+      const graph = buildContractGraph(contracts)
+      assert.ok(!graph.findings.some(issue => issue.code === 'duplicate-id'))
+      assert.equal(graph.owners.get('VERIFY-EXPORT-01')!.path, path, '不重选VERIFY原owner')
+    }
+    return native(request)
+  })
   assert.equal(result.status, 'complete', JSON.stringify({ failure: result.failure, findings: result.rounds.flatMap(round => round.findings) }))
   assert.equal(result.partitionSeal!.passed, true)
   assert.ok(!parseContract(result.changes.find(change => change.path === f.peerPath)!).contract!.items.some(item => item.kind === 'VERIFY'))
@@ -446,4 +460,36 @@ test('全局返修保留已证明的共享VERIFY归属投影，正常新FLOW更�
     assert.ok(rejected.rounds.some(round => round.findings.some(issue => ['verification_registration_mismatch', 'readonly_repair_id_removed'].includes(issue.code))))
     assert.deepEqual(f.requests.slice(calls).map(request => request.purpose), ['elaboration_generate'])
   })
+})
+
+
+test('临时ID更名须保留每一本区typed引用，不能借新生成冗余AC覆盖删除其中引用', async t => {
+  const f = await sealFixture(t, false, true), output = draftRows(f.repaired), originalSaved = structuredClone([...f.saved])
+  const accepted = await elaborateSyncPartitions({ ...f.input, requestKey: 'preserve-generated-acceptance-reference' }, f.plan, 1, f.checkpoints, f.run(() => JSON.stringify(output)))
+  assert.equal(accepted.status, 'complete')
+  f.saved.clear(); for (const [key, value] of originalSaved) f.saved.set(key, structuredClone(value))
+  const acceptance = output.changes[0].tables.AC.find(row => row.id === 'AC-PEER-NEW-01')!
+  acceptance.covers = ['REQ-PEER-01']; acceptance['depends-on'] = ['REQ-PEER-01']
+  const calls = f.requests.length
+  const rejected = await elaborateSyncPartitions({ ...f.input, requestKey: 'drop-generated-acceptance-reference' }, f.plan, 1, f.checkpoints, f.run(() => JSON.stringify(output)))
+  assert.equal(rejected.reviewPassed, false, '另一AC仍覆盖FLOW不能替代原本区引用边的保留')
+  assert.ok(rejected.rounds.some(round => round.findings.some(issue => issue.code === 'readonly_repair_id_removed' && issue.itemId === 'AC-PEER-NEW-01')))
+  assert.deepEqual(f.requests.slice(calls).map(request => request.purpose), ['elaboration_generate'])
+})
+
+
+test('无draftProtocol的旧全局返修保持read/fullrows提示，不补sidecar或新brief', async t => {
+  const f = await sealFixture(t), target = f.input.targets[1], requests: ElaborationSessionRequest[] = []
+  const input: ElaborationInput = { ...f.input, requestKey: 'legacy-global-repair', targets: [target], partitionBinding: f.prior.partitionBinding, validationScope: 'partition_local', readonlySpecRepair: f.repair, draftProtocol: undefined }
+  const result = await elaborate(input, { runner: async request => {
+    requests.push(request)
+    assert.equal(request.worktree!.mode, 'read')
+    assert.ok(!request.prompt.includes('"diagnosticPath"')); assert.ok(!request.prompt.includes('renameableIds'))
+    assert.ok(!readTree(f.commonDir, request.worktree!.tree).some(entry => entry.path.startsWith('.spex-sync-diagnostics/')))
+    if (request.purpose === 'elaboration_generate') assert.match(request.prompt, /真实全局封口error与已审局部原件/)
+    const output = request.purpose === 'elaboration_generate' ? draftRows(f.repaired) : { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+    return { sessionId: `legacy-${requests.length}`, threadId: `legacy-thread-${requests.length}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)) }
+  } })
+  assert.equal(result.status, 'complete', JSON.stringify({ failure: result.failure, findings: result.rounds.flatMap(round => round.findings) }))
+  assert.deepEqual(requests.map(request => request.purpose), ['elaboration_generate', 'elaboration_review'])
 })

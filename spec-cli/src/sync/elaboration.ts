@@ -98,7 +98,7 @@ export function partitionSealRepairContext(input: ElaborationInput) {
   const renameable = repair.changes.flatMap(change => (parseContract(change).contract?.items ?? []).filter(item =>
     repair.findings.some(issue => issue.code === 'duplicate-id' && issue.severity === 'error' && issue.nodeId === item.nodeId && issue.path === item.path && issue.itemId === item.id)
     && !input.targets.some(target => target.nodeId === item.nodeId && target.path === item.path && target.source !== null && parseContract({ ...target, source: target.source }).contract?.items.some(original => original.id === item.id))))
-  return { aggregate, renameable, specs: aggregate.partitionSeal!.changes.map(change => ({ ...change, diagnosticPath: `.spex-sync-diagnostics/${repair.generationRef.sha256}/${change.path}` })) }
+  return { aggregate, accepted, renameable, specs: aggregate.partitionSeal!.changes.map(change => ({ ...change, diagnosticPath: `.spex-sync-diagnostics/${repair.generationRef.sha256}/${change.path}` })) }
 }
 
 /** 使用唯一列定义和typed引用比较临时项；测试/代码来源亦保留，不能借更名删义务。 */
@@ -115,6 +115,18 @@ function repairItemColumns(item: ContractItem, renames: ReadonlyMap<string, stri
     }
     return [column, value]
   }))
+}
+
+/** 全局检查与独审副本共用原已证VERIFY技术投影；本区原件与注册/演进检查不改。 */
+function partitionSealRepairChanges(context: ReturnType<typeof partitionSealRepairContext>, changes: readonly ElaborationChange[]): ElaborationChange[] {
+  const previous = context.accepted.changes.flatMap(change => parseContract(change).contract!.items)
+  return changes.map(change => {
+    const projected = context.aggregate.partitionSeal!.changes.find(original => original.nodeId === change.nodeId && original.path === change.path)!
+    const kept = new Set(parseContract(projected).contract!.items.filter(item => item.kind === 'VERIFY').map(item => item.id))
+    const removed = new Set(previous.filter(item => item.nodeId === change.nodeId && item.path === change.path && item.kind === 'VERIFY' && !kept.has(item.id)).map(item => item.id))
+    const verifications = parseContract(change).contract!.items.filter((item): item is Verification => item.kind === 'VERIFY' && !removed.has(item.id))
+    return { ...change, source: removed.size ? projectVerificationTable(change.source, verifications) : change.source }
+  })
 }
 
 function checkInput(input: ElaborationInput): void {
@@ -281,7 +293,9 @@ function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate
       const renamed = renames.has(item.id) && new Set(renames.values()).size === renames.size
         && next && digest(repairItemColumns(item, renames)) === digest(repairItemColumns(next, new Map()))
         && !current.some(next => next.path === item.path && contractReferences(next).some(reference => reference.id === item.id))
-      if (!next || renames.has(item.id) && !renamed) findings.push(finding(input, 'readonly_repair_id_removed', '只读诊断须保留本owner稳定ID；仅已绑定本轮新提议duplicate可同类、同义且完整更新引用地唯一更名', item.id))
+      const nextReferences = next ? contractReferences(next) : []
+      const missingRenamedReference = contractReferences(item).some(reference => renames.has(reference.id) && !nextReferences.some(current => current.field === reference.field && current.id === renames.get(reference.id)))
+      if (!next || renames.has(item.id) && !renamed || missingRenamedReference) findings.push(finding(input, 'readonly_repair_id_removed', '只读诊断须保留本owner稳定ID；仅已绑定本轮新提议duplicate可同类、同义且完整更新引用地唯一更名', item.id))
     }
   }
   if (input.verifications) {
@@ -334,13 +348,7 @@ function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate
     const files = new Map(input.files)
     for (const change of [...sealRepair.aggregate.partitionSeal!.nodeChanges, ...candidate.nodeChanges ?? []]) if (change.action === 'retire' || change.from.path !== change.to.path) files.delete(change.from.path)
     for (const change of sealRepair.aggregate.partitionSeal!.changes) files.set(change.path, change.source)
-    for (const change of candidate.changes) {
-      const projected = sealRepair.aggregate.partitionSeal!.changes.find(original => original.nodeId === change.nodeId && original.path === change.path)!
-      const kept = new Set(parseContract(projected).contract!.items.filter(item => item.kind === 'VERIFY').map(item => item.id))
-      const removed = new Set(previous.filter(item => item.nodeId === change.nodeId && item.path === change.path && item.kind === 'VERIFY' && !kept.has(item.id)).map(item => item.id))
-      const verifications = parseContract(change).contract!.items.filter((item): item is Verification => item.kind === 'VERIFY' && !removed.has(item.id))
-      files.set(change.path, removed.size ? projectVerificationTable(change.source, verifications) : change.source)
-    }
+    for (const change of partitionSealRepairChanges(sealRepair, candidate.changes)) files.set(change.path, change.source)
     const sources = [...files].filter(([path]) => specPath(path))
     const nodeIds = mintIds(sources.map(([path]) => path.split('/').slice(1, -1)))
     const parsed = sources.map(([path, source], index) => parseContract({ nodeId: nodeIds[index], path, source }))
@@ -475,10 +483,10 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
   const generationScope = input.phase === 'interface_seed' ? '只构建本轮必要REQ/RULE/GAP及跨子区共享接口；普通叶实现细节留给对应子区，不要求在父层展开完整对象、流程、状态或AC。所有适用性边界逐项提供依据；没有事实不得编造政策。保留稳定身份与不受影响内容。' : '按用户原意识别全部相关对象并逐项展开可完成主流程、状态处置和AC；所有适用性边界逐项提供依据；没有事实不得编造政策。保留稳定身份与不受影响内容。'
   const reviewScope = input.phase === 'interface_seed' ? '只核本轮父接口的必要共享义务、已声明条款的准确性及来源，不以缺少子叶完整对象、流程、状态或AC判父接口遗漏；' : '重新从用户原意和冻结事实走正常、失败、边界、重试、取消、重复及必要竞争顺序；'
   const reviewFindingsScope = input.phase === 'interface_seed' ? '若必要共享接口遗漏、已声明条款错误或相互矛盾、既有义务被删除或政策无来源，提供具体repair发现。' : '若遗漏对象/事件/场景、scope被删除、AC变弱、政策无来源，提供具体repair发现。'
-  const sealRepair = input.worktree && input.readonlySpecRepair?.kind === 'partition_seal' ? partitionSealRepairContext(input) : null
+  const sealRepair = draftMode && input.worktree && input.readonlySpecRepair?.kind === 'partition_seal' ? partitionSealRepairContext(input) : null
   const sealRepairBrief = sealRepair ? { kind: 'partition_seal', owner: input.partitionBinding, candidateDigest: input.readonlySpecRepair!.candidateDigest, generationRef: input.readonlySpecRepair!.generationRef, acceptedRef: input.readonlySpecRepair!.acceptedRef,
     findings: input.readonlySpecRepair!.findings, specs: sealRepair.specs.map(({ nodeId, path, diagnosticPath }) => ({ nodeId, path, diagnosticPath })), renameableIds: sealRepair.renameable.map(({ nodeId, path, id, kind }) => ({ nodeId, path, id, kind })) } : undefined
-  const sealRepairInstructions = sealRepair ? '\n本轮是跨owner全局封口返修：读取repair诊断目录中的真实失败并集，按原路径核对冲突双方；它仅为非权威诊断，不是raw、事实、批准或新增写权。只在本owner原意/源码/tests支持下修复所列error；纯父仍只负责接口。仅renameableIds中的本轮未采纳duplicate可同类同义唯一更名并更新本owner全部typed引用，原作者/已采纳及非冲突ID继续保留；旧draft错误不是更名资格裁定。程序替回同一并集核原错误及新增错误后再独审，最后仍须strict全图封口。' : ''
+  const sealRepairInstructions = sealRepair ? '\n本轮是跨owner全局封口返修：读取repair诊断目录中的真实失败并集，按原路径核对冲突双方；它仅为非权威诊断，不是raw、事实、批准或新增写权。只在本owner原意/源码/tests支持下修复所列error；纯父仍只负责接口。仅renameableIds中的本轮未采纳duplicate可同类同义唯一更名并更新本owner全部typed引用，原作者/已采纳及非冲突ID继续保留；旧draft错误不是更名资格裁定。程序与独审诊断副本沿同一原VERIFY技术归属投影替回本区候选，本区原件不重写；核原错误及新增错误后再独审，最后仍须strict全图封口。' : ''
   const snapshot = JSON.stringify(input.worktree ? { ...(sealRepairBrief ? { repair: sealRepairBrief } : {}), intent: input.intent, targets: input.targets.map((target, targetIndex) => ({ targetIndex, nodeId: target.nodeId, path: target.path, rawSource: target.rawSource })), relatedSpecs: input.context?.map(context => ({ nodeId: context.nodeId, path: context.path })), facts: input.facts, authorizedChanges: input.authorizedChanges, verifications: input.verifications, implementationWritePaths: input.implementationWritePaths, readonlyTestPaths: input.readonlyTestPaths, retiredIds: input.retiredIds, nodeChanges: input.nodeChanges, mode: input.mode, authorChanges: input.analysis?.analysis.authorChanges, decisionAuthorities: input.decisionAuthorities, refinement: input.refinement } : { ...frozenInput.frozen, targets: frozenInput.frozen.targets.map((target, targetIndex) => ({ targetIndex, ...target })) })
   const generationSchema = elaborationSchema(input, { purpose: input.phase === 'interface_seed' ? 'interface_seed' : 'generation' })
   const draftBinding = elaborationDraftBinding(input, generationSchema)
@@ -507,7 +515,8 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
       const timer = remainingMs === null ? null : setTimeout(() => budget.abort(), remainingMs)
       const signal = input.signal ? AbortSignal.any([input.signal, budget.signal]) : budget.signal
       const writingDraft = draftMode && purpose === 'elaboration_generate'
-      const worktree = input.worktree && input.historyInput ? stageWorktree(input.historyInput.source.commonDir, input.historyInput.headCommit, overlayStageTree(input.historyInput.source.commonDir, input.worktree.tree, [...input.context ?? [], ...sealRepair?.specs.map(spec => ({ path: spec.diagnosticPath, source: purpose === 'elaboration_review' ? round.candidate!.changes.find(change => change.nodeId === spec.nodeId && change.path === spec.path)?.source ?? spec.source : spec.source })) ?? [], ...(writingDraft ? [{ path: draftBinding.path.replace(/\.json$/, '.schema.json'), source: JSON.stringify(schema) }, ...(draftSource !== undefined ? [{ path: draftBinding.path, source: draftSource }] : [])] : []), ...(purpose === 'elaboration_review' ? [...round.candidate!.changes, ...(round.candidate!.nodeChanges ?? []).filter(change => change.action === 'retire' || change.from.path !== change.to.path).map(change => ({ path: change.from.path, source: null }))] : [])]), writingDraft ? 'edit' : 'read') : input.worktree
+      const diagnosticChanges = sealRepair && purpose === 'elaboration_review' ? partitionSealRepairChanges(sealRepair, round.candidate!.changes) : []
+      const worktree = input.worktree && input.historyInput ? stageWorktree(input.historyInput.source.commonDir, input.historyInput.headCommit, overlayStageTree(input.historyInput.source.commonDir, input.worktree.tree, [...input.context ?? [], ...sealRepair?.specs.map(spec => ({ path: spec.diagnosticPath, source: diagnosticChanges.find(change => change.nodeId === spec.nodeId && change.path === spec.path)?.source ?? spec.source })) ?? [], ...(writingDraft ? [{ path: draftBinding.path.replace(/\.json$/, '.schema.json'), source: JSON.stringify(schema) }, ...(draftSource !== undefined ? [{ path: draftBinding.path, source: draftSource }] : [])] : []), ...(purpose === 'elaboration_review' ? [...round.candidate!.changes, ...(round.candidate!.nodeChanges ?? []).filter(change => change.action === 'retire' || change.from.path !== change.to.path).map(change => ({ path: change.from.path, source: null }))] : [])]), writingDraft ? 'edit' : 'read') : input.worktree
       if (writingDraft) {
         prompt += `\n草稿业务schema只读文件=${draftBinding.path.replace(/\.json$/, '.schema.json')}；先读取精确schema并在原草稿上自检，禁止修改schema。final仅返回小summary。`
         schema = DRAFT_RECEIPT_SCHEMA
