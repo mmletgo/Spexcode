@@ -70,7 +70,16 @@ export function readSyncCheckpoints(store: SyncStore, operation: SyncOperation, 
     const walk = (value: unknown): void => {
       if (!value || typeof value !== 'object') return
       const saved = value as Saved
-      for (const round of Array.isArray(saved.rounds) ? saved.rounds : []) if (round.rejectedOutput) authenticate(saved, round)
+      const owners = Array.isArray(saved.rounds) ? saved.partitionEvidence : undefined
+      if (owners) {
+        const locals = owners.map(owner => read<Saved>(owner.resultRef))
+        if (!locals.length || new Set(owners.map(owner => owner.partitionId)).size !== owners.length || locals.some((local, index) => local.partitionBinding?.partitionId !== owners[index].partitionId || !local.partitionBinding?.planDigest) || !isDeepStrictEqual(saved.rounds, locals.flatMap(local => local.rounds))) fail('聚合rounds必须是原partitionEvidence局部结果的精确有序并集')
+        const inputMatches = saved.partitionBinding
+          ? owners.length === 1 && isDeepStrictEqual(saved.partitionBinding, locals[0].partitionBinding) && saved.inputDigest === locals[0].inputDigest
+          : saved.phase === 'partitioned_final' && locals.every(local => local.partitionBinding!.planDigest === locals[0].partitionBinding!.planDigest) && saved.inputDigest === hash({ partitionPlanDigest: locals[0].partitionBinding!.planDigest, inputs: locals.map(local => local.inputDigest) })
+        if (!inputMatches) fail('聚合诊断必须保留原局部身份或精确重算全局输入，不能替代原owner认证')
+        for (const owner of owners) inspect(owner.resultRef)
+      } else for (const round of Array.isArray(saved.rounds) ? saved.rounds : []) if (round.rejectedOutput) authenticate(saved, round)
       const diagnostic = Array.isArray(saved.rounds) ? saved.repairDiagnostics : undefined
       if (diagnostic) {
         const original = read<Saved>(diagnostic.resultRef), last = original.rounds.at(-1)

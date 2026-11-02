@@ -2093,9 +2093,12 @@ for (const mode of ['repair', 'drop-id', 'author-ac', 'pause-empty', 'pause-sele
   assert.deepEqual(readFileSync(join(f.root, 'tests/export.test.mjs')), readFileSync(new URL('tests/export.test.mjs', fixturePath)))
 })
 
-for (const body of ['syntax', 'schema', 'stage-shape'] as const) for (const layout of (['atomic', 'legacy', 'cancelled', 'nested', 'generic-failed', 'generic-native-json', 'bad-record', 'unknown-json', 'false-role', 'review-rejected'] as const).filter(layout => !['review-rejected', 'generic-native-json'].includes(layout) || body === 'schema')) test(`raw final checkpoint preserves formal analysis/detail reads: ${body}/${layout}`, async t => {
-  const f = await fixture(t, { maxAttempts: 1, maxCalls: 4, maxRepairs: 0, timeoutMs: 120000 })
+for (const body of ['syntax', 'schema', 'stage-shape'] as const) for (const layout of (['atomic', 'legacy', 'cancelled', 'nested', 'generic-failed', 'generic-native-json', 'bad-record', 'unknown-json', 'false-role', 'review-rejected', 'aggregate', 'aggregate-early', 'aggregate-nested', 'aggregate-ref', 'aggregate-round', 'aggregate-input', 'aggregate-duplicate', 'aggregate-drop'] as const).filter(layout => !(['review-rejected', 'generic-native-json'].includes(layout) || layout.startsWith('aggregate')) || body === 'schema')) test(`raw final checkpoint preserves formal analysis/detail reads: ${body}/${layout}`, async t => {
+  const aggregate = layout.startsWith('aggregate'), parentPath = '.spec/project/spec.md', backupPath = '.spec/project/backup/backup-contract/spec.md'
+  const parent = '---\ntitle: 导出共享接口\n---\n\n## raw source\n\n保留现有导出能力与模块分工，完成既有导出主流程。\n\n## expanded spec\n'
+  const f = await fixture(t, { maxAttempts: 1, maxCalls: aggregate ? 12 : 4, maxRepairs: 0, timeoutMs: 120000 }, false, original, 'project', original, aggregate ? { version: 'sync-coordinator-v2', direction: 'spec_to_code', intentNodeId: 'project', targets: [{ nodeId: 'project', path: parentPath }, { nodeId: 'export-contract', path: contractPath }, { nodeId: 'backup-contract', path: backupPath }], sourcePaths: ['src/export.js', 'src/backup.js'], partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 } } : {}, undefined, 'spec', undefined, false, aggregate ? { [parentPath]: parent, [backupPath]: original.replaceAll('EXPORT', 'BACKUP').replaceAll('export-contract', 'backup-contract').replaceAll('export.js', 'backup.js').replaceAll('export.test.mjs', 'backup.test.mjs'), 'src/backup.js': 'export const backup = true\n', 'tests/backup.test.mjs': 'export const fixture = true\n' } : {})
   const records = new Map<string, NativeRunRecord>(), stop = new Error('fixture stops after durable failed P1 stage')
+  const failedFinals: { ref: { sha256: string }; text: string }[] = []
   let raw = '', rawRef: { sha256: string } | undefined
   const persistRecord = (record: NativeRunRecord): void => writeRecord({ governed: false, worktreePath: f.root, branch: null, title: null, name: null, parent: null, issues: [], issue: null, proposal: null, merges: 0, note: null, sortKey: null, createdAt: Date.now(), harness: 'codex', runtimeStartToken: null, stopped: false, archived: false, closedAt: null, launcher: null, launchCmd: null, launchOwner: null, ...record })
   const checkpoint = f.store.checkpoint.bind(f.store)
@@ -2117,14 +2120,17 @@ for (const body of ['syntax', 'schema', 'stage-shape'] as const) for (const layo
       cancel: async () => { throw new Error('fixture never controls a real process') },
       run: async actual => {
         const execution = structuredExecutionPolicy(actual), key = actual.sessionCreateKey ?? actual.requestKey, sessionId = sessionIdForCreateKey(key)
-        if (layout === 'review-rejected' && request.purpose === 'elaboration_generate') {
-          const output = adaptElaborationNativeOutput(request, rows(original)), identity = { threadId: `thread-${sessionId}`, turnId: 'generated-turn' }, result = { sessionId, ...identity, output, resultDigest: contentHash(JSON.stringify(output)) }
+        const nodeId = JSON.parse(request.prompt.split('冻结业务输入:\n')[1].split('\n')[0]).targets[0].nodeId
+        if (layout === 'review-rejected' && request.purpose === 'elaboration_generate' || aggregate && layout !== 'aggregate-early' && nodeId === 'project') {
+          const generated = { version: 'elaboration-rows-v2', changes: [{ nodeId, path: parentPath, title: '导出共享接口', description: '', code: [], related: [], prose: '', removeIds: [], tables: { ...Object.fromEntries(Object.keys(CONTRACT_COLUMNS).map(kind => [kind, []])), REQ: [{ id: 'REQ-PARENT-RAW', goal: '保留既有导出模块分工与主流程', source: 'user:raw', constraints: '不改变现有行为', success: '导出主流程完成', 'depends-on': [] }] } }], applicability: rows(original).applicability.map(entry => ({ ...entry, affectedIds: ['REQ-PARENT-RAW'] })) }
+          const output = request.purpose === 'elaboration_review' ? { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] } : adaptElaborationNativeOutput(request, aggregate ? generated : rows(original)), identity = { threadId: `thread-${sessionId}`, turnId: 'generated-turn' }, result = { sessionId, ...identity, output, resultDigest: contentHash(JSON.stringify(output)) }
           records.set(sessionId, { session: sessionId, status: 'awaiting', harnessSessionId: identity.threadId, createRequestId: contentHash(key), createPayloadHash: contentHash(JSON.stringify({ prompt: actual.prompt, parent: null, launcher: null, ...(actual.base?.trim() ? { base: actual.base.trim() } : {}), structuredExecution: execution })), structuredExecution: { ...execution, ...identity, state: 'completed', output, resultDigest: result.resultDigest } })
           persistRecord(records.get(sessionId)!)
           return result
         }
-        raw = body === 'syntax' ? '{"changes":[}' : body === 'schema' ? '{"changes":"not-an-array"}' : JSON.stringify({ version: 'sync-stage-v1', operationId: operation.id, attemptId: attempt.id, inputId: operation.input.id, policyDigest: operation.policyDigest, stage: 'analysis', resultRef: { sha256: 'f'.repeat(64) } })
+        raw = body === 'syntax' || aggregate && nodeId === 'export-contract' ? '{"changes":[}' : body === 'schema' ? '{"changes":"not-an-array"}' : JSON.stringify({ version: 'sync-stage-v1', operationId: operation.id, attemptId: attempt.id, inputId: operation.input.id, policyDigest: operation.policyDigest, stage: 'analysis', resultRef: { sha256: 'f'.repeat(64) } })
         rawRef = { sha256: contentHash(raw) }
+        failedFinals.push({ ref: rawRef, text: raw })
         const identity = { threadId: `thread-${sessionId}`, turnId: 'failed-turn' }, rejectedOutput = rejectedFinalOutput(raw, actual.prompt, execution, identity, layout === 'generic-native-json' ? 'native_json' : 'text')
         const code = ['generic-failed', 'generic-native-json'].includes(layout) ? 'failed' : 'structured_output_format_invalid'
         records.set(sessionId, { session: sessionId, status: 'awaiting', harnessSessionId: identity.threadId, createRequestId: contentHash(key), createPayloadHash: contentHash(JSON.stringify({ prompt: actual.prompt, parent: null, launcher: null, ...(actual.base?.trim() ? { base: actual.base.trim() } : {}), structuredExecution: execution })), structuredExecution: { ...execution, ...identity, state: 'failed', error: 'exact rejected final', ...(code === 'failed' ? {} : { errorCode: code }), rejectedOutput } })
@@ -2139,11 +2145,32 @@ for (const body of ['syntax', 'schema', 'stage-shape'] as const) for (const layo
   const operation = f.store.readOperation(f.operation.id)
   const wrapper = JSON.parse(readEvidence(f.input.source.commonDir, f.store.readAttempt(operation.currentAttemptId!).checkpointRefs.at(-1)!).toString())
   const saved = [JSON.parse(readEvidence(f.input.source.commonDir, wrapper.resultRef).toString())]
+  assert.ok(Array.isArray(saved[0].rounds), JSON.stringify({ stage: wrapper.stage, result: saved[0] }))
   assert.ok(saved.some(value => value.rounds.some((round: { rejectedOutput?: unknown }) => round.rejectedOutput)), JSON.stringify(saved.map(value => value.failure)))
   if (layout === 'review-rejected') { const round = saved[0].rounds.at(-1); assert.ok(round.output && round.candidate && round.candidateDigest); assert.equal(round.reviewOutput, null); assert.equal(round.review, null); assert.equal(saved[0].reviewPassed, false) }
   assert(rawRef); assert.equal(readEvidence(f.input.source.commonDir, rawRef).toString(), raw)
   assert.ok([rawRef, wrapper.resultRef].every(ref => f.store.pinnedBlobRefs().some(pin => pin.sha256 === ref.sha256)), 'independently known raw and original result refs remain pinned, even when raw is not flat')
   const attempt = f.store.readAttempt(operation.currentAttemptId!), fence = { operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: operation.input.source.physicalFingerprint }
+  if (aggregate) {
+    assert.equal(saved[0].phase, layout === 'aggregate-early' ? undefined : 'partitioned_final'); assert.equal(saved[0].partitionEvidence.length, layout === 'aggregate-early' ? 1 : 3)
+    assert.equal(saved[0].rounds.filter((round: { review?: { verdict: string } }) => round.review?.verdict === 'accept').length, layout === 'aggregate-early' ? 0 : 1)
+    assert.equal(saved[0].rounds.filter((round: { rejectedOutput?: unknown }) => round.rejectedOutput).length, layout === 'aggregate-early' ? 1 : 2)
+    if (layout === 'aggregate-nested') {
+      const value = { refinement: { prior: saved[0] } }, resultRef = writeEvidence(f.input.source.commonDir, value)
+      checkpoint(fence, { ...writeEvidence(f.input.source.commonDir, { ...wrapper, stage: 'repair-input', resultRef }), artifacts: syncCheckpointArtifacts(value, resultRef) })
+    } else if (!['aggregate', 'aggregate-early'].includes(layout)) {
+      const value = structuredClone(saved[0])
+      if (layout === 'aggregate-ref') value.partitionEvidence[0].resultRef = value.partitionEvidence[1].resultRef
+      if (layout === 'aggregate-round') value.rounds.reverse()
+      if (layout === 'aggregate-input') value.inputDigest = 'f'.repeat(64)
+      if (layout === 'aggregate-duplicate') value.partitionEvidence.push(value.partitionEvidence[0])
+      if (layout === 'aggregate-drop') value.rounds.shift()
+      const resultRef = writeEvidence(f.input.source.commonDir, value)
+      checkpoint(fence, { ...writeEvidence(f.input.source.commonDir, { ...wrapper, resultRef }), artifacts: syncCheckpointArtifacts(value, resultRef) })
+      assert.throws(() => readCurrentSyncAnalysis(f.store, operation), { code: 'checkpoint_artifact_binding' })
+      return
+    }
+  }
   if (layout === 'cancelled') {
     const record = [...records.values()][0], resource = f.store.findResource(attempt.id, attempt.dispatchPlans[0].key)!
     record.structuredExecution = { ...record.structuredExecution!, state: 'cancelled', error: 'structured execution cancelled; native stopped', cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: true, acknowledged: false, nativeStatus: 'stopped' } }; persistRecord(record)
@@ -2175,9 +2202,11 @@ for (const body of ['syntax', 'schema', 'stage-shape'] as const) for (const layo
   assert.equal(detail.decisionContext, null)
   const evidence = await app.readEvidence(operation.id, rawRef) as { kind: string; text: string; sha256: string }
   assert.equal(evidence.kind, 'untrusted_final'); assert.equal(evidence.text, raw); assert.equal(evidence.sha256, rawRef.sha256)
+  for (const failure of failedFinals) { const value = await app.readEvidence(operation.id, failure.ref) as { kind: string; text: string }; assert.equal(value.kind, 'untrusted_final'); assert.equal(value.text, failure.text) }
+  assert.deepEqual(await app.readEvidence(operation.id, wrapper.resultRef), saved[0])
   await assert.rejects(app.readEvidence(operation.id, { sha256: 'f'.repeat(64) }), { code: 'sync_evidence_unrelated' })
   assert.deepEqual(f.store.readAttempt(attempt.id).checkpointRefs, beforeRefs, 'formal reads never rewrite legacy pins or backfill roles')
-  assert.equal(operation.callsUsed, layout === 'review-rejected' ? 2 : 1)
+  assert.equal(operation.callsUsed, aggregate ? layout === 'aggregate-early' ? 1 : 4 : layout === 'review-rejected' ? 2 : 1)
   assert.equal(beforeRefs.some(ref => ref.sha256 === rawRef!.sha256), ['legacy', 'cancelled'].includes(layout), 'new raw is only pinned through its typed wrapper')
 })
 
