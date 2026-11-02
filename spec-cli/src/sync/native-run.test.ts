@@ -53,6 +53,41 @@ async function fixture(existingRoot?: string, model?: string) {
   return { root, store, claimed, request, records, resource, checkpoint, blobIO, cache, runtimeBase, runner, cleanup: () => { protocol.close(); if (!existingRoot) rmSync(root, { recursive: true, force: true }) } }
 }
 
+for (const historical of [false, true]) test(`ZCode read resource freezes noninteractive tools only for new plans; historical=${historical}`, async () => {
+  const f = await fixture(undefined, 'zcode:bigmodel-api/GLM-5.3-Flash')
+  try {
+    const request = { ...f.request, worktree: { baseCommit: 'a'.repeat(40), tree: 'b'.repeat(40), mode: 'read' as const } }
+    if (historical) {
+      const requestDigest = hash(request), dispatch = f.store.reserveDispatch(f.claimed.fence, { key: request.requestKey, purpose: request.purpose, requestDigest })
+      const identity = { operationId: f.claimed.operation.id, attemptId: f.claimed.attempt.id, inputId: f.claimed.operation.input.id, candidateDigest: null }
+      const expectedSessionId = sessionIdForCreateKey(dispatch.sessionCreateKey)
+      const plan: NativeRunPlan = { schemaVersion: 1, request, requestDigest, sessionCreateKey: dispatch.sessionCreateKey, expectedSessionId, ...identity }
+      const checkpoint: NativeRunCheckpoint = { schemaVersion: 1, ...identity, requestDigest, expectedSessionId, phase: 'planned', nativeCallRequested: false, nativeStarted: false, nativeState: 'unpublished', session: { sessionId: expectedSessionId, threadId: null, turnId: null } }
+      f.store.planResource(f.claimed.fence, { key: request.requestKey, kind: 'native_session', payloadDigest: requestDigest, inputId: identity.inputId, candidateDigest: null, planBlob: f.blobIO.put(Buffer.from(JSON.stringify(plan))), checkpointRef: f.blobIO.put(Buffer.from(JSON.stringify(checkpoint))) })
+    }
+    let calls = 0
+    const run = f.runner({ ...f.runtimeBase, run: async actual => {
+      calls++
+      assert.equal(actual.requestKey, request.requestKey)
+      assert.equal(actual.sessionCreateKey, f.store.readAttempt(f.claimed.attempt.id).dispatchPlans[0].sessionCreateKey)
+      assert.deepEqual(actual.zcodeToolPolicy, historical ? undefined : { version: 1, toolDenylist: ['ExitPlanMode'] })
+      assert.equal(actual.inputDigest, request.inputDigest)
+      throw new StructuredSessionError('failed', 'mock-before-native-session')
+    } })
+    await assert.rejects(run(request), /mock-before-native-session/)
+    const resource = f.resource(), planBytes = f.blobIO.read(resource.plan.planBlob), saved = JSON.parse(planBytes.toString()) as NativeRunPlan
+    assert.deepEqual(saved.request.zcodeToolPolicy, historical ? undefined : { version: 1, toolDenylist: ['ExitPlanMode'] })
+    assert.equal(saved.requestDigest, hash(saved.request))
+    assert.equal(f.records.size, 0, 'the fixture covers persisted requests before any Native session or send')
+    await assert.rejects(run(request), /mock-before-native-session/)
+    assert.deepEqual(f.blobIO.read(f.resource().plan.planBlob), planBytes)
+    assert.equal(f.store.readOperation(f.claimed.operation.id).callsUsed, 1)
+    const changed = { ...request, zcodeToolPolicy: { version: 1, toolDenylist: historical ? ['ExitPlanMode'] : ['ExitPlanMode', 'Bash'] } } as typeof request
+    await assert.rejects(run(changed), { code: 'key_reused' })
+    assert.equal(calls, 2, 'tampered control policy must not reach the native runtime')
+  } finally { f.cleanup() }
+})
+
 test('native intent precedes run, published queued session is created with unknown thread, result binds exact identity and replays', async () => {
   const f = await fixture()
   try {

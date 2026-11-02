@@ -8,6 +8,7 @@ code:
 related:
   - spec-cli/src/zcode-structured.test.ts
   - spec-cli/src/zcode-structured.native.test.ts
+  - spec-cli/src/zcode-noninteractive.test.ts
 ---
 # ZCode 原生结构化执行
 
@@ -16,6 +17,10 @@ related:
 沿 [[structured-session-runtime]] 的队列、资源桥和取消接缝，增加已实测 ZCode 的最小结构化执行器；不派生第二套业务协调器，不降低 [[frozen-context-reader]] 的完整读取证明门槛。
 
 ## expanded spec
+
+新 ZCode 原生 worktree read 请求在创建/资源登记时冻结 `zcodeToolPolicy:{version:1,toolDenylist:['ExitPlanMode']}`。其 NativePlan 与持久 native 身份为 version2，计划保存同一精准 denylist；唯一 session/send 通过 SDK 已有 per-send toolDenylist 从模型可见工具列表移除 ExitPlanMode，SDK mode 仍为 plan。完整提示明确本轮交完整 schema JSON，不请求计划审批；业务正文逐字保留。tool policy 进入固定 policy/创建摘要，effective denylist 另进入 NativePlan.requestDigest，原 send、计划与恢复逐项核验；篡改或版本不符拒绝。Read/Glob/Grep/Bash 与原读范围、Edit/Write/NotebookEdit 拒绝、read Git seed/clean 门均不变，不切 build、不增 sandbox/MCP。edit、旧冻结和 Claude 不采用该工具策略。
+
+旧 NativePlan version1 及已持久但尚无 native session/send 的旧请求保持原工具列表、原提示和摘要，不能补加新字段。未完成仍不重发，已完成恢复零新 send；结构化 policy 仍 version6、工作流仍 native-worktree-v1。只有真正新建记录或新资源冻结当前策略，缺席也是旧请求的固定语义。
 
 version5/null 请求沿原 ZCode policy、realm 与版本4读取证明执行，不装模型调用timeout timer；数字 version4 原样恢复。每次RPC、idle/close与精确停止各自期限不变。
 

@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 import { processStartToken, runtimeRoot, verifyDetachedRuntime, type ProcessIdentity } from '@spexcode/spec-core'
 import { spawnDetachedRuntime } from './runtime-ownership.js'
 import { ensureCodexCurrentGeneration, type CodexGenerationEndpoint } from './codex-runtime-generations.js'
@@ -11,6 +12,8 @@ import type { NativeWorktreeRequest, NativeWorktreeResult } from './native-workt
 import { withDeliveryLocks } from './delivery-lock.js'
 
 export type FrozenReaderRuntime = { cliVersion: string; catalogDigest: string; catalogPath: string } & ({ version: 1 } | { version: 2; toolOutputTokenLimit: number })
+export type ZCodeToolPolicy = { version: 1; toolDenylist: readonly ['ExitPlanMode'] }
+const zcodeReadToolPolicy: ZCodeToolPolicy = Object.freeze({ version: 1, toolDenylist: Object.freeze(['ExitPlanMode'] as const) })
 
 export type StructuredExecution = {
   version: 1 | 2 | 3 | 4 | 5 | 6
@@ -32,13 +35,21 @@ export type StructuredExecution = {
   error?: string
   errorCode?: 'structured_output_retries_exhausted' | 'structured_output_format_invalid' | 'native_worktree_result_invalid'
   worktree?: NativeWorktreeRequest
+  zcodeToolPolicy?: ZCodeToolPolicy
   resultWorktree?: NativeWorktreeResult
   frozenContext?: FrozenContextRef
   frozenReads?: FrozenReadReceipt[]
   frozenReadProof?: FrozenReadProof
   readerRuntime?: FrozenReaderRuntime
   claudeNative?: { version: 1; root: string; sessionId: string; userUuid: string; pid?: number; receiptFile?: string; promptId?: string }
-  zcodeNative?: { version: 1; root: string; sessionId: string; inputId: string; pid?: number; receiptFile?: string; turnId?: string }
+  zcodeNative?: { version: 1 | 2; root: string; sessionId: string; inputId: string; pid?: number; receiptFile?: string; turnId?: string }
+}
+
+/** 新请求冻结已验证工具策略；已有请求的缺席也是固定语义，显式换策略必须拒绝。 */
+export function pinZCodeToolPolicy(request: Pick<StructuredExecution, 'model' | 'worktree' | 'zcodeToolPolicy'>, saved: Pick<StructuredExecution, 'zcodeToolPolicy'> | null): ZCodeToolPolicy | undefined {
+  const policy = saved === null ? request.model?.startsWith('zcode:') && request.worktree?.mode === 'read' ? zcodeReadToolPolicy : undefined : saved.zcodeToolPolicy
+  if (request.zcodeToolPolicy !== undefined && !isDeepStrictEqual(request.zcodeToolPolicy, policy)) throw new StructuredSessionError(saved === null ? 'unsupported' : 'key_reused', 'ZCode tool policy differs from the fixed structured request')
+  return policy
 }
 
 /** 从持久化策略推导结构化 realm；无效或不完整策略不获得控制根。 */
@@ -67,12 +78,13 @@ export function structuredRealmRoot(execution: unknown, root = runtimeRoot()): s
 }
 
 /** 固定策略只有一份构造，运行观测与冻结读取证明不参与创建载荷。 */
-export function structuredExecutionPolicy(request: Pick<StructuredExecution, 'schema' | 'inputDigest' | 'purpose' | 'timeoutMs' | 'model' | 'effort' | 'frozenContext' | 'readerRuntime' | 'worktree'>): StructuredExecution {
+export function structuredExecutionPolicy(request: Pick<StructuredExecution, 'schema' | 'inputDigest' | 'purpose' | 'timeoutMs' | 'model' | 'effort' | 'frozenContext' | 'readerRuntime' | 'worktree' | 'zcodeToolPolicy'>): StructuredExecution {
   const claude = request.model?.startsWith('claude:') === true
   const zcode = request.model?.startsWith('zcode:') === true
+  if (request.zcodeToolPolicy !== undefined && (!zcode || request.worktree?.mode !== 'read' || !isDeepStrictEqual(request.zcodeToolPolicy, zcodeReadToolPolicy))) throw new StructuredSessionError('unsupported', 'ZCode structured tool policy requires the exact noninteractive read policy')
   if (request.worktree) {
     if ((!claude && !zcode) || request.frozenContext || request.readerRuntime) throw new StructuredSessionError('unsupported', 'native worktree requires an explicit Claude/ZCode model and no frozen reader policy')
-    return { version: 6, policy: 'native-worktree-v1', schema: request.schema, inputDigest: request.inputDigest, purpose: request.purpose, timeoutMs: request.timeoutMs, model: request.model, ...(request.effort ? { effort: request.effort } : {}), worktree: request.worktree }
+    return { version: 6, policy: 'native-worktree-v1', schema: request.schema, inputDigest: request.inputDigest, purpose: request.purpose, timeoutMs: request.timeoutMs, model: request.model, ...(request.effort ? { effort: request.effort } : {}), worktree: request.worktree, ...(request.zcodeToolPolicy ? { zcodeToolPolicy: request.zcodeToolPolicy } : {}) }
   }
   return { version: request.timeoutMs === null ? 5 : zcode ? 4 : claude ? 3 : request.frozenContext ? 2 : 1, policy: zcode ? 'zcode-frozen-read-only-v1' : claude ? 'claude-frozen-read-only-v1' : request.frozenContext ? 'codex-frozen-read-only-v2' : 'codex-read-only-v1',
     schema: request.schema, inputDigest: request.inputDigest, purpose: request.purpose, timeoutMs: request.timeoutMs,
