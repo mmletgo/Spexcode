@@ -13,6 +13,8 @@ import type { ElaborationInput, ElaborationRunner, ElaborationSessionRequest } f
 import { captureInputSnapshot, contentHash, readObject, readTree, writeEvidence, writeObject, writeTree } from './snapshot.js'
 import { captureStageDraft, overlayStageTree, readStageDraft, stageWorktree } from './stage-worktree.js'
 import { syncCheckpointArtifacts } from './checkpoint-evidence.js'
+import { freezeCandidate } from './candidate.js'
+import { projectVerificationTable } from './elaboration-markdown.js'
 import { elaborateSyncPartitions } from './partition-execution.js'
 import type { PartitionCheckpoints } from './partition-execution.js'
 import type { ElaborationResult, ReadonlySpecRepair } from './elaboration-types.js'
@@ -562,4 +564,36 @@ test('V1 baseline只绑定原acceptedRef及本owner正文，legacy不补新brief
     return { sessionId: `legacy-v1-${requests.length}`, threadId: `legacy-v1-thread-${requests.length}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)) }
   } })
   assert.equal(legacy.status, 'complete'); assert.deepEqual(requests.map(request => request.purpose), ['elaboration_generate', 'elaboration_review'])
+})
+
+
+test('V1真实caller区分投影seed与完整accepted target，VERIFY剔表不误拒baseline guard', async t => {
+  const f = await anchorRepairFixture(t), originalEntry = readTree(f.commonDir, f.snapshot.immutableTree).find(entry => entry.path === path)!, original = readObject(f.commonDir, originalEntry.oid).toString('utf8')
+  const input: ElaborationInput = { ...f.input, requestKey: 'v1-caller-original', readonlySpecRepair: undefined, targets: [{ nodeId: 'export-contract', path, source: original, sourceDigest: originalEntry.digest }], worktree: stageWorktree(f.commonDir, f.snapshot.headCommit, f.snapshot.immutableTree) }
+  const paths = readTree(f.commonDir, f.snapshot.immutableTree).map(entry => entry.path)
+  const plan: SyncPartitionPlan = { version: 'sync-partitions-v1', digest: 'v1-caller-plan', expectedPaths: ['src/export.js'], dependencies: [], partitions: [{ id: 'owner', intentNodeId: 'export-contract', targets: [{ nodeId: 'export-contract', path }], readPaths: paths, writePaths: [path], sourcePaths: ['src/export.js'], changedPaths: ['src/export.js'], contextNodeIds: ['ancestor'], contractIds: [], flowIds: [], readBytes: 100, readLimitBytes: 524288, oversizedReads: [] }] }
+  let local: Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'> | undefined
+  const save: PartitionCheckpoints['save'] = (key, value) => { if (key === 'partition:owner:elaboration') local = structuredClone(value) as NonNullable<typeof local>; return writeEvidence(f.commonDir, value) }
+  const first = await elaborateSyncPartitions(input, plan, 1, { load: () => null, save }, f.run(() => JSON.stringify(draftRows(f.baseline))))
+  assert.equal(first.status, 'complete')
+  const prior = local!, baseline = prior.changes[0].source, projected = projectVerificationTable(baseline, [])
+  assert.notEqual(projected, baseline)
+  const candidate = freezeCandidate(f.snapshot, { version: 'sync-files-v1', changes: [{ path, beforeDigest: originalEntry.digest, beforeMode: originalEntry.mode, content: projected }] }, { paths: [path], contractIds: [], flowIds: [] })
+  const acceptedRef = writeEvidence(f.commonDir, prior), generationRef = writeEvidence(f.commonDir, { candidate })
+  const repair: ReadonlySpecRepair = { ...f.repair, candidateDigest: candidate.digest, acceptedRef, generationRef, changes: prior.changes, output: prior.rounds.at(-1)!.output, review: prior.rounds.at(-1)!.review }
+  const native = f.run(() => JSON.stringify(f.corrected)), calls = f.requests.length
+  const result = await elaborateSyncPartitions({ ...input, requestKey: 'v1-caller-repair' }, plan, 1, { load: () => null, save,
+    loadReadonlySpecRepair: (_key, _binding, inputDigest) => ({ prior, repair: { ...repair, baseInputDigest: inputDigest } }),
+  }, async request => {
+    const task = JSON.parse(request.prompt.split('任务:\n')[1].split(request.purpose === 'elaboration_generate' ? '\n失败诊断' : '\n候选范围')[0]) as { repair: { baselines: { baselineSpecPath: string }[] } }
+    const entries = readTree(f.commonDir, request.worktree!.tree), baselineEntry = entries.find(entry => entry.path === task.repair.baselines[0].baselineSpecPath)!
+    assert.equal(readObject(f.commonDir, baselineEntry.oid).toString('utf8'), baseline)
+    if (request.purpose === 'elaboration_generate') {
+      const physical = readObject(f.commonDir, entries.find(entry => entry.path === path)!.oid).toString('utf8')
+      assert.equal(physical, projected); assert.ok(!parseContract({ nodeId: 'export-contract', path, source: physical }).contract!.items.some(item => item.kind === 'VERIFY'))
+    }
+    return native(request)
+  })
+  assert.equal(result.status, 'complete', JSON.stringify({ failure: result.failure, findings: result.rounds.flatMap(round => round.findings) }))
+  assert.deepEqual(f.requests.slice(calls).map(request => request.purpose), ['elaboration_generate', 'elaboration_review'])
 })
