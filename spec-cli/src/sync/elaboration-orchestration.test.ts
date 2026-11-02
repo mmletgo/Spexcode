@@ -111,6 +111,65 @@ test('Native P1生成与独审共用来源语义和只读实现边界，interfac
   }
 })
 
+for (const mode of ['structure', 'review'] as const) test(`Native P1 ${mode}拒绝的第二轮收到真实输出和具体发现，保持只读权限`, async () => {
+  const missing = source.split('\n').filter(line => !/^\| TR-EXPORT-(?:STALE-)?CANCELLED-COMPLETE \|/.test(line)).join('\n')
+  let generations = 0, reviews = 0
+  const fake = runner(request => candidate(request, ++generations === 1 && mode === 'structure' ? missing : source), request => ++reviews === 1 && mode === 'review'
+    ? { ...review(request), verdict: 'repair', findings: [{ code: 'native_condition_boundary', kind: 'repair', message: '取消后完成的否定分支遗漏', affectedIds: ['TR-EXPORT-CANCELLED-COMPLETE'], evidence: '真实取消后收到COMPLETE的反例', decision: '保留原REQ/AC并补齐该出口，不造GAP' }] }
+    : review(request))
+  const snapshot = { ...input(), worktree: { baseCommit: 'a'.repeat(40), tree: 'b'.repeat(40), mode: 'read' as const }, implementationWritePaths: [] }
+  const original = structuredClone(snapshot)
+  const result = await elaborate(snapshot, { runner: fake.run })
+  assert.equal(result.status, 'complete', JSON.stringify(result.failure))
+  assert.equal(result.rounds.length, 2)
+  const first = result.rounds[0], second = fake.calls.filter(call => call.purpose === 'elaboration_generate')[1]
+  assert.ok(second.prompt.includes(JSON.stringify(first.output)), 'Native第二轮必须包含上一轮真实结构化输出')
+  assert.ok(second.prompt.includes(mode === 'structure' ? 'missing-event-disposition' : 'native_condition_boundary'), 'Native第二轮必须包含具体拒绝诊断')
+  if (mode === 'review') assert.ok(second.prompt.includes(JSON.stringify(first.review)), '完整原独审证据和修复决定必须进入Native修复')
+  assert.notEqual(second.inputDigest, fake.calls[0].inputDigest, '真实请求摘要必须绑定反馈变化')
+  assert.match(second.prompt, /源码与全部测试只读/)
+  assert.match(second.prompt, /deferredImplementation仅原写权允许才交P2实现/)
+  assert.match(second.prompt, /readonly_implementation_gap保持阻断/)
+  assert.match(second.prompt, /不造GAP|不能.*制造GAP/)
+  assert.equal(result.contracts[0].rawSource, rawSource)
+  assert.deepEqual(result.gaps, [])
+  assert.deepEqual(snapshot, original)
+})
+
+test('Native P1跨attempt拒绝seed保留完整JSON、候选和独审，仍需新独立审查', async () => {
+  const snapshot = { ...input(), maxRepairs: 0, worktree: { baseCommit: 'a'.repeat(40), tree: 'b'.repeat(40), mode: 'read' as const } }
+  const first = runner(request => candidate(request, source), request => ({ ...review(request), verdict: 'repair', findings: [{ code: 'native_seed_boundary', kind: 'repair', message: '原seed的取消边界缺失', affectedIds: ['REQ-EXPORT-01'], evidence: '原始独审反例', decision: '保持AC及原意重新核对' }] }))
+  const rejected = await elaborate(snapshot, { runner: first.run }), last = rejected.rounds[0]
+  const seed: ElaborationRepairSeed = { settled: true, requestKey: snapshot.requestKey, inputDigest: rejected.inputDigest, candidateDigest: last.candidateDigest!, output: last.output, candidate: last.candidate!, findings: last.findings, review: last.review, traces: last.traces }
+  const fresh = runner(request => candidate(request, source))
+  const accepted = await elaborate({ ...snapshot, requestKey: 'native-seed-attempt-2' }, { seed, runner: async request => { const result = await fresh.run(request); return { ...result, sessionId: `fresh-${result.sessionId}`, threadId: `fresh-${result.threadId}` } } })
+  assert.equal(accepted.status, 'complete')
+  assert.equal(accepted.inputDigest, seed.inputDigest)
+  for (const original of [last.output, last.candidate, last.review]) assert.ok(fresh.calls[0].prompt.includes(JSON.stringify(original)), 'Native须收到经核真的原拒绝JSON/候选/独审')
+  assert.match(fresh.calls[0].prompt, /native_seed_boundary/)
+  assert.deepEqual(fresh.calls.map(call => call.purpose), ['elaboration_generate', 'elaboration_review'])
+})
+
+test('Native P1候选前格式失败的原件诊断进入真实请求摘要且不改变业务输入', async () => {
+  const snapshot = { ...input(), maxRepairs: 0, worktree: { baseCommit: 'a'.repeat(40), tree: 'b'.repeat(40), mode: 'read' as const }, implementationWritePaths: [] }
+  const failed = await elaborate(snapshot, { runner: async () => { throw Object.assign(new Error('terminal输出不是单JSON，$.changes必须为数组；不是新decision授权'), { code: 'structured_output_format_invalid', sessionId: 'failed-native', threadId: 'failed-thread', turnId: 'failed-turn' }) } })
+  const diagnostics = { requestKey: snapshot.requestKey, inputDigest: failed.inputDigest, resultRef: { sha256: elaborationDigest(JSON.stringify(failed)) }, failure: failed.failure!, round: failed.rounds[0] }
+  const original = structuredClone(diagnostics), fresh = runner(request => candidate(request, source))
+  const result = await elaborate({ ...snapshot, requestKey: 'native-format-attempt-2' }, { runner: fresh.run, repairDiagnostics: diagnostics })
+  assert.equal(result.status, 'complete')
+  assert.equal(result.inputDigest, failed.inputDigest)
+  assert.equal(result.prior, null, '没有候选的失败不伪造业务拒绝seed')
+  assert.deepEqual(result.repairDiagnostics, original)
+  assert.deepEqual(diagnostics, original)
+  assert.ok(fresh.calls[0].prompt.includes(JSON.stringify(original)))
+  assert.match(fresh.calls[0].prompt, /不是raw、事实、业务批准或新授权/)
+  assert.equal(fresh.calls[0].inputDigest, elaborationDigest(JSON.stringify({ inputDigest: failed.inputDigest, purpose: fresh.calls[0].purpose, prompt: fresh.calls[0].prompt, schema: fresh.calls[0].schema, worktree: fresh.calls[0].worktree })), '既有真实requestDigest绑定诊断正文和ref')
+  assert.deepEqual(result.gaps, [])
+  assert.equal(result.contracts[0].rawSource, rawSource)
+  await assert.rejects(elaborate({ ...snapshot, requestKey: 'changed-input', facts: [] }, { runner: async () => assert.fail('异业务输入不能收到旧诊断'), repairDiagnostics: diagnostics }), /同一业务输入/)
+  await assert.rejects(elaborate(snapshot, { runner: async () => assert.fail('同请求键不能伪装新调用'), repairDiagnostics: diagnostics }), /新的请求键/)
+})
+
 test('analysisRef与interface_seed分类变化都会改变P1冻结摘要', () => {
   const sha = 'c'.repeat(64)
   const analysis: CodeBehaviorEvidence = {

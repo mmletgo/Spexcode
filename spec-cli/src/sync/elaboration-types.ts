@@ -77,6 +77,8 @@ export type ElaborationRepairSeed = {
   output: unknown; candidate: ElaborationCandidate; findings: ContractFinding[]
   review: ElaborationReview | null; traces: ElaborationTrace[]
 }
+/** 已结算的生成/独审失败；无候选时保留真实原件诊断，不伪造业务拒绝seed。 */
+export type ElaborationRepairDiagnostics = { requestKey: string; inputDigest: string; resultRef: BlobRef; failure: NonNullable<ElaborationResult['failure']>; round: ElaborationRound }
 export type ElaborationPriorReference = { requestKey: string; inputDigest: string; candidateDigest: string; renderedCandidateDigest: string; traces: ElaborationTrace[] }
 export type ElaborationResult = {
   status: 'complete' | 'needs_input' | 'conflict' | 'unsupported' | 'failed' | 'cancelled' | 'exhausted' | 'interface_seed'
@@ -87,6 +89,7 @@ export type ElaborationResult = {
   inputDigest: string
   candidateDigest: string | null
   prior: ElaborationPriorReference | null
+  repairDiagnostics?: ElaborationRepairDiagnostics
   changes: (ElaborationChange & { contentDigest: string })[]
   contracts: Contract[]
   graph: ContractGraph | null
