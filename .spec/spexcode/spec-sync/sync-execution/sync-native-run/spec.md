@@ -16,6 +16,10 @@ related:
 
 ## expanded spec
 
+新 ZCode worktree read 资源在 requestDigest/plan 登记前冻结可选 zcodeToolPolicy，策略见 [[zcode-structured-runtime]]；已登记资源只从原 plan.request 恢复其字段或缺席，显式换策略拒绝，不能给尚无 Native session/send 的旧请求补工具控制。恢复仍完整核其余请求、原 payloadDigest 与创建哈希。worktree 与 frozen 请求统一保留业务 requestKey，并通过已有 sessionCreateKey 传递精确原创建键和已冻结语义；inputDigest 不改，NativeRunPlan schemaVersion 保持1。
+
+reserveDispatch 已提交而 resource 尚未登记的冷恢复窗口同样属于已冻结请求：只有调用者完整请求 hash 精确等于原 dispatch.requestDigest 时，保留该请求的原工具字段或缺席；否则按当前规则重建后仍须经原 reserveDispatch 的完整 digest/purpose 校验，绝不只凭 key 采纳或清空策略。旧缺席与新已冻结 policy 都保持原 requestDigest、sessionCreateKey、callsUsed；prompt/schema/worktree 等任一变化仍拒绝，不能创建 Native 或重发旧 turn。
+
 新操作通过plan.agentWorkflow=native-worktree-v1及sync-tools-v3固定工作流。各阶段请求携明确worktree:{baseCommit,tree,mode}，复用原资源桥、创建键、预算、取消与terminal→removed；不再prepareFrozenPrompt、不安装frozen reader、不要求frozenReadProof。固定策略由真实结构化运行时version6提供，创建及恢复的payload hash使用同一nativeWorktreePrompt纯函数，base为精确seed。成功及冷重放都核result.worktree精确seed/baseTree、真实HEAD tree及祖先关系，并与durable resultWorktree逐字一致；只读阶段HEAD/tree保持seed。历史worktree关闭后只核保活Git对象和原Native终态，不要求目录仍在，也不重派发。旧无工作流标记的操作与既有已持久frozen请求继续按下文原策略恢复，不能补签读取proof冒充新工作树结果。
 
 模型调用 timeoutMs:null 原样进入固定请求和资源计划，取消/创建清理等待仍保持独立最多15秒预算，不能对null执行Math.min而变为零等待。精确nativeStopped与terminal→removed门禁保持。

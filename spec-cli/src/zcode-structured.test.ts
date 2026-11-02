@@ -22,6 +22,22 @@ test('ZCode text transport only unwraps one exact JSON shell without repairing d
   for (const raw of ['answer: {"value":1}', '```JSON\n{}\n```', '```json\n{}\n```\n```json\n{}\n```', '{} {}', '```json\n{"value":}\n```', '```json\n{}\n```\nprose']) assert.throws(() => decodeZCodeStructuredText(raw), { code: 'structured_output_format_invalid' })
 })
 
+test('large strict JSON syntax failures retain only safe parser category and numeric location', () => {
+  const raw = `{\n"payload":"${'x'.repeat(13200)}PRIVATE_DIAGNOSTIC_CANARY"\n"next":1\n}`, position = raw.indexOf('"next"')
+  for (const text of [raw, `\`\`\`json\n${raw}\n\`\`\``]) assert.throws(() => decodeZCodeStructuredText(text), error => {
+    const failure = error as { code: string; message: string }
+    assert.equal(failure.code, 'structured_output_format_invalid')
+    for (const value of ['"category":"expected_property_delimiter"', `"position":${position}`, '"line":3', '"column":1']) assert(failure.message.includes(value), value)
+    assert(!failure.message.includes('PRIVATE_DIAGNOSTIC_CANARY'))
+    assert(!failure.message.includes('payload'))
+    return true
+  })
+  for (const raw of ['PRIVATE_DIAGNOSTIC_CANARY', '{"value":']) assert.throws(() => decodeZCodeStructuredText(raw), error => {
+    assert(!(error as Error).message.includes('PRIVATE_DIAGNOSTIC_CANARY'))
+    return true
+  })
+})
+
 for (const timeoutMs of [1000, null]) test(`ZCode strict JSON failure with timeout=${timeoutMs} requires complete native proof and preserves durable identity`, async t => {
   const { runtimeRoot, sessionArtifactPath } = await import('@spexcode/spec-core')
   const { sessionIdForCreateKey } = await import('./sessions.js')

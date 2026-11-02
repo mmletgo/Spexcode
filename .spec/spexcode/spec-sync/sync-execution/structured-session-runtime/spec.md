@@ -19,6 +19,8 @@ related:
 
 ## expanded spec
 
+ZCode worktree read 真正新建记录默认冻结 [[zcode-structured-runtime]] 的非交互工具策略；同创建键已有记录按原字段或缺席恢复，显式不同策略拒绝。内部 sessionCreateKey 表示资源桥已经冻结工具策略：尚无会话记录时原样保留上游显式字段或缺席，由固定策略构造严格验证 provider、mode 和精准 denylist，不能改成空策略或再补默认；已有记录仍优先核原记录。业务 requestKey、inputDigest 和创建实际键的语义保持。策略字段参与创建摘要，旧创建哈希和原 native 输入不改。
+
 同步 budget.mode=unlimited 的新模型请求使用 timeoutMs:null，表示不设置模型调用总时限；有限数字期限及旧记录语义保持。null 调用仍受独立会话创建、租约/心跳、显式取消/停止/关闭和可信 VERIFY/Docker 各自期限约束，不以大数模拟无限。 仅 null 固定执行策略采用 version5，原 policy/realm/原生读取证明版本保持各执行器语义；旧数字 version1–4 原样兼容。独立旧 queue 的固定策略比较必须在任何 Native 启动、timer 或停止副作用前拒绝新版本。创建仍取独立 sessionCreateTimeoutMs，模型无期限不解除创建限幅。
 
 明确 ZCode 命名空间进入 [[zcode-structured-runtime]]，复用现有 `zcode` harness 身份、同一创建事务、启动队列、资源桥与取消门禁，不进入普通 one-shot launcher 或 Codex generation。版本4固定策略和原生 `zcodeNative` 身份分别持久化；换 provider 仅新操作或合法 retryOf。最终文本可解码唯一完整的外层 JSON 代码围栏，正文仍由 JSON.parse 与原 object schema 严格校验，不补字段、拼接多段或接收额外说明。真实精确终态、[[zcode-frozen-proof]] 与全进程结算后才能发布；冷 completed 回放只读原证据，未知在途不追加 prompt。

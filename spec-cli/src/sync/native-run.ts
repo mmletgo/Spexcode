@@ -5,7 +5,7 @@ import { getBlob, putBlob, runtimeRoot } from '@spexcode/spec-core'
 import { readRecord, type SessRec } from '../session-record.js'
 import { sessionIdForCreateKey, readSessionCreateTermination, recoverSessionCreateTermination, type SessionCreateTermination } from '../sessions.js'
 import { cancelStructuredSession, runStructuredSession, SettledSessionCreateTimeoutError, StructuredSessionError, type StructuredCancellationResult } from '../session-structured.js'
-import { prepareFrozenReaderRuntime, structuredExecutionPolicy, type FrozenReaderRuntime, type StructuredExecution } from '../session-structured-policy.js'
+import { prepareFrozenReaderRuntime, structuredExecutionPolicy, pinZCodeToolPolicy, type FrozenReaderRuntime, type StructuredExecution } from '../session-structured-policy.js'
 import { assertFrozenBinding, prepareFrozenPrompt } from '../frozen-context.js'
 import { verifyStructuredFrozenReadProof as verifyFrozenReadProof } from '../structured-frozen-proof.js'
 import { nativeWorktreePrompt } from '../native-worktree-runtime.js'
@@ -205,7 +205,7 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
     }
     if (creationTermination() || controller.signal.aborted || !authority()) return stop()
     save({ ...checkpoint, nativeCallRequested: true })
-    nativePromise = Promise.resolve().then(() => runtime.run({ ...request, ...(request.frozenContext ? { sessionCreateKey: dispatch!.sessionCreateKey } : { requestKey: dispatch!.sessionCreateKey }), signal: controller.signal })).then(result => { outcome = { ok: true, result } }, error => { outcome = { ok: false, error } })
+    nativePromise = Promise.resolve().then(() => runtime.run({ ...request, ...(request.frozenContext || request.worktree ? { sessionCreateKey: dispatch!.sessionCreateKey } : { requestKey: dispatch!.sessionCreateKey }), signal: controller.signal })).then(result => { outcome = { ok: true, result } }, error => { outcome = { ok: false, error } })
     for (;;) {
       observe()
       if (controller.signal.aborted || !authority()) return await stop()
@@ -230,8 +230,12 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
   return async request => {
     const { signal, ...value } = request
     const resource = store.findResource(fence.attemptId, value.requestKey)
-    const exactResourceRequest = resource?.plan.payloadDigest === hash(value)
-    let frozen: FrozenRequest = exactResourceRequest || value.worktree ? copy(value) : prepareFrozenPrompt(copy(value), { directory: join(runtimeRoot(), 'frozen-context-v2'), binding: { attemptId: fence.attemptId, policyDigest: operation.policyDigest } })
+    const dispatch = resource ? undefined : store.readAttempt(fence.attemptId).dispatchPlans.find(plan => plan.key === value.requestKey)
+    const saved = resource ? read<NativeRunPlan>(resource.plan.planBlob).request : dispatch?.requestDigest === hash(value) ? value : null
+    const zcodeToolPolicy = pinZCodeToolPolicy(value, saved)
+    const pinned = zcodeToolPolicy ? { ...value, zcodeToolPolicy } : value
+    const exactResourceRequest = resource?.plan.payloadDigest === hash(pinned)
+    let frozen: FrozenRequest = exactResourceRequest || pinned.worktree ? copy(pinned) : prepareFrozenPrompt(copy(pinned), { directory: join(runtimeRoot(), 'frozen-context-v2'), binding: { attemptId: fence.attemptId, policyDigest: operation.policyDigest } })
     if (!exactResourceRequest && frozen.frozenContext && !options.runtime && !frozen.model?.startsWith('claude:') && !frozen.model?.startsWith('zcode:')) frozen = { ...frozen, readerRuntime: await prepareFrozenReaderRuntime(join(runtimeRoot(), 'structured-frozen-read-only-v2'), frozen.frozenContext) }
     const requestDigest = hash(frozen)
     let flight = flights.get(frozen.requestKey)

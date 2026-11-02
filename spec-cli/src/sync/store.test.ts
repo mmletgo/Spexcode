@@ -234,6 +234,28 @@ test('native工作树 v18 marker拒绝v17 writer，备份与升级逐字保留�
   } finally { backup?.close(); f.cleanup() }
 })
 
+test('ZCode noninteractive v19 marker rejects v18 writers and preserves legacy payloads in online backup', async () => {
+  const f = await fixture()
+  let backup: ReturnType<typeof openProtocol> | undefined
+  try {
+    const ready = f.ready(), journal = f.store.beginApply(ready.fence, ready.plan, ready.target)
+    for (const step of journal.steps) f.store.recordApplyStep(ready.fence, journal.id, { ...step, status: 'completed' })
+    const receipt = f.receipt(journal.id, ready.plan); f.store.recordReceipt(journal.id, receipt); f.store.settleApply(journal.id, receipt.id)
+    f.protocol.withTransaction(tx => tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=19', SYNC_COMPONENT))
+    const rows = (protocol: typeof f.protocol) => protocol.withTransaction(tx => Object.fromEntries(['sync_operations', 'sync_attempts', 'sync_resources', 'sync_ingress_receipts', 'sync_apply_journals', 'sync_baseline_pairs'].map(table => [table, tx.query(`SELECT * FROM ${table}`)])))
+    const before = rows(f.protocol), checksums = f.protocol.withTransaction(tx => tx.query('SELECT version,checksum FROM schema_migrations WHERE component=? ORDER BY version', SYNC_COMPONENT))
+    const backupPath = join(f.root, 'v18-before-noninteractive.backup')
+    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), 19)
+    assert.deepEqual(rows(f.protocol), before)
+    assert.deepEqual(f.protocol.withTransaction(tx => tx.query('SELECT version,checksum FROM schema_migrations WHERE component=? AND version<=18 ORDER BY version', SYNC_COMPONENT)), checksums)
+    assert.throws(() => applyComponentMigrations(f.protocol, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 18)), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
+    backup = openProtocol(backupPath)
+    assert.equal(applyComponentMigrations(backup, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 18)), 18)
+    assert.deepEqual(rows(backup), before)
+    assert.equal(await migrateSyncStore(f.protocol), 19)
+  } finally { backup?.close(); f.cleanup() }
+})
+
 test('same stable admission and capture-time replay create one operation and protocol message; conflict rolls back', async () => {
   const f = await fixture()
   try {
