@@ -13,6 +13,8 @@ code:
 
 ## expanded spec
 
+新派发可显式冻结`draftProtocol:elaboration-draft-v1`并进入完整inputDigest。该协议的round.output是Native真实小summary回执，业务JSON正文留在Git；可选round.draft仅记录version、ownerDigest、sourceInputId、schemaDigest、seed commit/tree/mode、resultCommit/resultTree、path/OID和具体errors，不含正文或raw BlobRef/role。语法/业务schema失败不是Native rejected final，不伪造rejectedOutput、candidate或成功认证；旧round和已有rejectedOutput字段不补写、不改签。临时历史材料只在内存读取并复制到当前seed，须经新的真实编辑提交才形成draft检查点；旧accept仍不继承。已携真实Git结果的小回执schema失败也先保留非权威草稿，结果仍为失败；Native错误未提供实际Git见证时不能伪造该身份。
+
 ElaborationRound可选rejectedOutput为显式untrusted_final诊断，包含完整被拒final文本、SHA、可用原文BlobRef与原调用绑定；generation的output/candidate/candidateDigest仍为null。其随已结算同owner完整round沿既有repairDiagnostics进入新真实prompt/request摘要，明确untrusted prior failed output；业务inputDigest不变，仍要求新生成与独立审查。旧round缺席不改写，无新增成功typed输出或业务授权。
 
 ElaborationSessionRequest 可携由 [[sync-native-run]] 冻结的 ZCode 专属工具策略；它仅属于运行请求/创建摘要，不进入业务 inputDigest，也不授予新业务政策或文件写权限。旧请求缺席按原语义恢复。

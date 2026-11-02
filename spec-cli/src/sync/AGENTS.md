@@ -28,7 +28,8 @@
 - ZCode模型使用 `zcode:<provider-id>/<exact-model-id>`，与 Claude 共用版本化原生工作树执行、队列和资源桥；换provider仍须新操作/正式retryOf，不自动fallback。旧v4只读策略和原生读取证明仅用于其历史请求。
 
 - 原生工作树使用结构化策略 v6，sync v21 组件 marker 拒绝旧 writer；ZCode 新 read 请求冻结精准 ExitPlanMode denylist 与 NativePlan v2，旧资源/记录及仅 reserved dispatch 的字段缺席保持，后者只以完整请求摘要确证；内部创建键首建保留上游冻结字段并严格验策略，不能恢复时补默认。旧数字与 null 的只读 v1–v5 原样恢复。unlimited 模型调用期限为 null，创建、租约、stop/close 及 Docker 期限仍独立有限。升级先停全部旧 backend/queue 并结算资源、备份数据库；回滚恢复升级前备份，不能只删 marker 或改工具描述。
-- 格式/schema拒绝的final仅经adapter原请求/身份/停止认证后保存为可选rejectedOutput诊断；原文ref/SHA与完整正文进入同owner下一prompt，不能填成功output或候选、继承accept、读取thinking或追补旧缺席。review失败保留此前合法generation和candidate。
+- 新P1按owner显式冻结elaboration-draft-v1，v6 edit只写真实Git临时草稿并正常提交、小summary回执；程序读指定blob后再JSON/schema/renderer/独审。失败正文留Git refs，checkpoint只记身份和errors，不进入raw role/业务candidate；跨父输入只迁draft不迁旧树，accept仍核完整摘要。已冻结/仅reserved旧请求不补协议。该持久变更须整体配套writer22围栏；精准回归：`npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/sync/elaboration-draft.test.ts`。
+- 格式/schema拒绝的final仅经adapter原请求/身份/停止认证后保存为可选rejectedOutput诊断；历史只读请求的原文ref/SHA与完整正文进入同owner下一prompt，不能填成功output或候选、继承accept、读取thinking或追补旧缺席。review失败保留此前合法generation和candidate。
 
 - 跨boot显式continuity用offline `sync source-continuity`，先停稳并清资源，核原op/input/revision、enabled原字节SHA与三旧dev双哈希；commonDir共享enable/register锁。v21拒旧writer，成功仅暂停原PhysicalControl并登记v2；旧op/input/CAS不改。私有runtime/sync/continuity-evidence保原enabled及proof链，不依赖DB-only GC；回滚配套恢复DB/启用原件/证据。正常身份只投影已证明哈希并保actual branch/path，失效不fallback；raw仅显式证明及资源清理可用。
 

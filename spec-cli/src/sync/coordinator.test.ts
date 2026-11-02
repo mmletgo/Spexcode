@@ -3884,3 +3884,42 @@ test('协调器拒绝related glob命中超出全局readPaths的旧helper', async
   assert.ok(f.calls.some(call => call.purpose === 'elaboration_generate'))
   assert.equal(f.calls.some(call => call.purpose === 'code_generate' || call.purpose === 'code_review'), false)
 })
+
+// 草稿使用原生工作树及持久coordinator接缝；受控runner不代表真实LLM验收。
+test('Native P1草稿跨attempt从真实Git原文件续改，小回执保持成功而业务坏JSON单独拒绝', async t => {
+  const f = await fixture(t, { maxAttempts: 2, maxCalls: 8, maxRepairs: 1, timeoutMs: 120_000 }, false, original, 'project', original, { agentWorkflow: 'native-worktree-v1' }, undefined, 'spec', 'claude:MiniMax-M3.1-Flash')
+  const calls: ElaborationSessionRequest[] = [], invalid = `{ INVALID_COORDINATOR_DRAFT${'x'.repeat(38_000)}`
+  f.options.runner = async request => {
+    calls.push(request)
+    const attempt = f.store.readAttempt(f.store.readOperation(f.operation.id).currentAttemptId!), dispatch = attempt.dispatchPlans.find(item => item.key === request.requestKey)!
+    const workspace = join(f.parent, `native-draft-${calls.length}`), seed = request.worktree!
+    f.git('worktree', 'add', '--detach', workspace, seed.baseCommit)
+    if (request.purpose === 'elaboration_review') {
+      assert.equal(seed.mode, 'read'); assert.ok(!readTree(f.input.source.commonDir, seed.tree).some(entry => entry.path.startsWith('.spex-sync-drafts/')))
+      throw Object.assign(new Error('受控草稿coordinator验证在P2前停止'), { code: 'unsupported' })
+    }
+    assert.equal(request.purpose, 'elaboration_generate'); assert.equal(seed.mode, 'edit')
+    const draftPath = /草稿文件=([^\s]+)/.exec(request.prompt)![1]
+    if (attempt.number === 2) {
+      assert.equal(readFileSync(join(workspace, draftPath), 'utf8'), invalid); assert.match(request.prompt, /output_json/); assert.ok(!request.prompt.includes(invalid))
+    }
+    mkdirSync(join(workspace, draftPath, '..'), { recursive: true })
+    writeFileSync(join(workspace, draftPath), attempt.number === 1 ? invalid : JSON.stringify({ version: 'elaboration-target-rows-v3', changes: [], applicability: ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: false, basis: '沿用冻结完整契约', affectedIds: [] })) }))
+    execFileSync('git', ['-C', workspace, 'add', draftPath], { stdio: 'pipe' }); execFileSync('git', ['-C', workspace, 'commit', '-m', 'normal draft commit'], { stdio: 'pipe' })
+    const output = { summary: '已正常提交草稿' }
+    return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `thread-${request.requestKey}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)), worktree: nativeWorktreeResult(workspace, seed) }
+  }
+  await runSyncOperation(f.store, f.operation.id, f.options)
+  const attempts = f.store.listAttempts(f.operation.id)
+  assert.equal(attempts.length, 2); assert.deepEqual(calls.map(call => call.purpose), ['elaboration_generate', 'elaboration_generate', 'elaboration_review'])
+  for (const attempt of attempts) {
+    const stages = attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
+    assert.ok(stages.some(stage => stage.stage === 'elaboration-draft-protocol'))
+    const wrapper = stages.find(stage => stage.stage === 'elaboration'), saved = JSON.parse(readEvidence(f.input.source.commonDir, wrapper.resultRef).toString()) as ElaborationResult
+    assert.deepEqual(saved.rounds[0].output, { summary: '已正常提交草稿' }); assert.equal(saved.rounds[0].rejectedOutput, undefined); assert.ok(saved.rounds[0].draft)
+    if (attempt.number === 1) { assert.equal(saved.rounds[0].candidate, null); assert.ok(saved.rounds[0].findings.some(issue => issue.code === 'output_json')) }
+    else assert.ok(stages.some(stage => stage.stage === 'elaboration:draft-provenance'))
+  }
+  assert.equal(f.store.listJournals(f.operation.id).length, 0); assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
+  assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+})
