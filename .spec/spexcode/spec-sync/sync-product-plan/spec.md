@@ -14,6 +14,8 @@ P0至P5按完整需求交付，不以阶段演示、局部测试或可修改的�
 
 ## expanded spec
 
+机器重启造成物理来源身份变化时，可由[[sync-application]]的显式历史operation/input资源入口结算精确owned资源；canonicalRoot/commonDir仍须相同，正常read/resume/adopt完整身份门不变。此单次离线入口不重放journal或新建交付，不改原失败/候选/独审，不授予业务连续性，未知停止继续保留资源；复用原CAS/lease协议，不新增身份字段或writer版本。
+
 明确ZCode provider/model沿 [[zcode-structured-runtime]] 与同一会话/资源接缝执行。私有配置和实测只读边界下仅允许冻结reader；完整原生参数/结果、精确schema的实际模型输入、独立审查及正式关闭/全进程停止分别核验。既有认证只由SDK正常沿用，不复制凭据；不同provider不自动fallback，换模型仅新操作或合法retryOf。引擎能力证明不等于项目V1–V4、Docker、Git交付或采纳完成。
 
 自动事件边界为 SpexCode 页面保存 Spec，或外部编辑后形成的真实 Git 提交。未提交保存与暂存不启动模型；提交树输入排除同期工作区编辑。Spec 变化驱动代码，代码提交只驱动对应 Spec，不自动修写代码或测试；组合提交和真实冲突仍按既有意图/裁决规则处理，已结算同步提交按 receipt 与实际基线去回声。

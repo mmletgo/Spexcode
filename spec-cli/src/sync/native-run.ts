@@ -145,7 +145,7 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
         const next: NativeRunCheckpoint = { ...checkpoint, phase: 'created' as const, nativeState: state.state ?? 'queued', nativeStarted: !!state.turnId, session }
         if (hash(next) !== hash(checkpoint)) save(next)
       }
-      if (authority()) store.bindSession(fence, request.requestKey, session)
+      if (!controller.signal.aborted && authority()) store.bindSession(fence, request.requestKey, session)
       return record
     }
     let outcome: { ok: true; result: ElaborationSessionResult } | { ok: false; error: unknown } | undefined

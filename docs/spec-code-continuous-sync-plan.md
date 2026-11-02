@@ -615,3 +615,5 @@ Native P1每轮生成携上一轮实际JSON、具体结构/独审发现及完整
 已记录candidate的P1拒绝seed与无candidate诊断共享同一纯控制attempt判据；正式pause/resume的superseded/failure:null不能遮住此前同owner已结算拒绝。分区与whole都在实际派发前沿完整业务inputDigest、原stage/readSet/selection、composed及P0 ref核对来源；分区另核原plan/binding。原candidateDigest、output/原生trace、review和具体发现仍交既有validateRepairSeed重验，不能把失败候选当raw、facts或accept。新accept、业务结果、未结算或上下文改变均是继承屏障，原严格同绑定空round及capacity/lease失败行为保持；不新增缓存、持久字段或writer版本。
 
 Native完整叶生成提示明确区分引用类型：FLOW.req只引用REQ，并直接承接各级实际适用祖先REQ，AC.covers也直接承接这些祖先REQ；实际适用祖先RULE由AC.covers直接承接，或经本叶TR.rules引用并由对应AC覆盖该TR。不能将REQ/RULE合写为FLOW.req的合法集合，不引用兄弟或不适用义务。interface_seed仍不展开FLOW/AC；Legacy有效模板、schema、reference-kind硬门、原AC授权与独审范围保持。
+
+显式sync resources recover <operation-id> --input-id <原frozen输入>及对应HTTP资源入口提供严格resource-only恢复：即使机器重启后物理repoId改变，仍只准canonicalRoot/commonDir一致的owned历史资源结算；这不授权业务连续性，正常read/resume/adopt完整source门保持。专用入口单次离线可用，不启动API/watcher/queue；不新attempt/dispatch/模型/验收容器，不prepare/apply或回放任何journal，不造receipt，不重签原失败/候选/独审/output/digest。pending journal原样保留，停止证明未知或计划错配仍保未结算。只复用现有资源/CAS/lease状态，不新增身份字段、迁移或writer marker。

@@ -34,7 +34,7 @@ code:
 
 冻结读取回归另外验证业务requestKey与实际sessionCreateKey分离、真实attempt/policy绑定、派发摘要前自动无损冻结超大prompt、稳定引用同键重入、精确native history proof保存与removed重放核验。此文件使用受控runtime接缝；真正原生大于2MiB读取和能力隔离证据由 [[frozen-context-reader]] 的独立native测试承担，不混称为LLM验收。
 
-1至2MiB旧 inline 资源回归固定完整请求、dispatch及真实SQLite资源后，以已 aborted 的原请求重入，核对只取消原精确会话并推进 removed、无新 run、callsUsed 不增、计划摘要不变。同 key 修改正文仍拒绝，不能借旧资源跳过新请求冻结或摘要核验。该前置资源是明确夹具，不冒称原生模型交付。
+1至2MiB旧 inline 资源回归固定完整请求、dispatch及真实SQLite资源后，以已 aborted 的原请求重入，核对只取消原精确会话并推进 removed、无新 run、callsUsed 不增、计划摘要不变。旧fence仍有效时也必须零authority/reserveDispatch/bindSession/planResource，原operation/attempt业务记录不改。同 key 修改正文仍拒绝，不能借旧资源跳过新请求冻结或摘要核验。该前置资源是明确夹具，不冒称原生模型交付。
 
 固定非默认 terra/high 运行通过原完整 frozenReadProof 接缝，plan/requestDigest及实际结构化记录均保精确模型；同key换模型或published record模型错配拒绝。此为受控runtime协议证明，不冒称实时容量或真实LLM完成；操作选择属于 [[sync-model-selection]]。
 

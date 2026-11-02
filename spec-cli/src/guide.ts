@@ -799,6 +799,12 @@ callTimeoutMs 是可选的有限正整数单次模型调用上限；有限预算
 受控保存或 --patch-file 的正文差量不先修改/提交原树 Spec；no-op 不派发。同请求键不能改意图。
 executionAvailability 显示 recovery_required 时，可用 recover 精确恢复已有资源及已开始日志，
 不修改原控制、输入或预算，不派发新 attempt、模型、验证，也不开始新的交付。完成后另选 resume 或显式 retry。
+
+无需启动API的单次历史资源清理：
+  spex sync resources recover <operation-id> --input-id <原frozen-input-id>
+当前canonicalRoot/commonDir必须与原来源一致。此入口只结算精确Native/Docker资源，不启动watcher/queue，
+不回放任何journal或创建receipt，不改变原失败、候选与输出摘要；未知停止仍保留资源。
+它不授予物理身份连续性，正常read/resume/adopt仍核完整来源身份；有未决journal时只列出并保留。
 run/verify 的 --model 固定本操作及全部独审模型，默认 gpt-6.1-sol；显式重试省略时继承原模型。普通重复请求不能换模型取得新预算，同 requestId 改模型拒绝；resume/recover 始终沿原选择。模型仍须通过实际 Native/catalog 校验，不自动 fallback。 操作模型采用 sync component v13 writer 语义；回滚旧二进制须先停 writer/结算资源并恢复升级前一致数据库备份，不能让旧 writer 直接读新 generation。
 
 show/status 的 retryEligibility 给出能否显式重试及具体拒绝原因。--retry-of 为可重试的失败或未交付取消建立

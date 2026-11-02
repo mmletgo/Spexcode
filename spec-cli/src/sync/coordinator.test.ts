@@ -16,11 +16,14 @@ import type { ElaborationInput, ElaborationResult, ElaborationRunner, Elaboratio
 import { buildSyncApplicationPlan } from './planning.js'
 import { CODE_BEHAVIOR_GUIDANCE_VERSION } from './code-behavior.js'
 import { SyncApplication } from './application.js'
-import { acceptedCandidateReviewSource, isSyncInputCurrent, prepareSyncAdmission, readCurrentSyncAnalysis, readonlySpecRepairStalled, runSyncOperation, syncPlanDigest } from './coordinator.js'
+import { acceptedCandidateReviewSource, isSyncInputCurrent, prepareSyncAdmission, readCurrentSyncAnalysis, readonlySpecRepairStalled, recoverSyncOperationResources, runSyncOperation, syncPlanDigest } from './coordinator.js'
 import type { SyncCoordinatorOptions, SyncCoordinatorPlan } from './coordinator-types.js'
 import { migrateSyncStore, SYNC_COMPONENT, SYNC_MIGRATIONS, syncCoordinatorAddress } from './migrations.js'
-import { dockerVerificationDriver } from './verification-executor.js'
-import type { VerificationCheckpoint, VerificationCommandResult } from './verification-executor-types.js'
+import { dockerVerificationDriver, verificationExportDigest } from './verification-executor.js'
+import type { VerificationCheckpoint, VerificationCommandResult, VerificationDriver, VerificationRequest } from './verification-executor-types.js'
+import { runAttemptVerification } from './verification-run.js'
+import { exportCandidate, freezeCandidate } from './candidate.js'
+import { composeInputSnapshots } from './composition.js'
 import { freezeDeliveryRuntime } from './runtime-freeze.js'
 import { captureInputSnapshot, contentHash, readEvidence, readObject, readTree, writeEvidence } from './snapshot.js'
 import type { NativeRunCheckpoint, NativeRunPlan } from './native-run.js'
@@ -155,7 +158,7 @@ async function fixture(t: test.TestContext, budget: import('./operation-types.js
   }
   let closed = false
   t.after(() => { if (!closed) protocol.close(); unlock(parent); rmSync(parent, { recursive: true, force: true }) })
-  return { root, parent, managedRoot, artifactRoot, input, index, bytes, store, operation, plan, options, calls, git, priorCommitCount, realTools, closeForRestart: () => { protocol.close(); closed = true }, useStore: (next: SyncStore) => { store = next }, useOperation: (next: typeof operation) => { operation = next }, transform: (fn: typeof transform) => { transform = fn } }
+  return { root, parent, managedRoot, artifactRoot, input, index, bytes, protocol, store, operation, plan, options, calls, git, priorCommitCount, realTools, closeForRestart: () => { protocol.close(); closed = true }, useStore: (next: SyncStore) => { store = next }, useOperation: (next: typeof operation) => { operation = next }, transform: (fn: typeof transform) => { transform = fn } }
 }
 
 test('固定操作模型到达行为/P1/P2及全部独审，独立会话与调用预算保持', async t => {
@@ -961,6 +964,47 @@ test('recoveryOnly不派发queued操作；paused且原生尚未调用的计划�
   assert.equal(resource.phase, 'removed'); assert.deepEqual(resource.checkpoints.map(item => item.phase), ['planned', 'terminal', 'removed'])
   assert.equal(JSON.parse(readEvidence(f.input.source.commonDir, resource.checkpointRef).toString()).stop.nativeStatus, 'notDispatched')
   assert.equal(f.calls.length, 0); assert.equal(f.store.listAttempts(f.operation.id).length, 1); assert.equal(f.store.listJournals(f.operation.id).length, 0)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+})
+
+for (const mode of ['existing', 'missing', 'foreign-label', 'wrong-run'] as const) test(`resource-only受控Docker桥 ${mode} 只清理精确既有资源且不create/start`, async t => {
+  const f = await fixture(t), commands: string[][] = []
+  const claimed = f.store.claimAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 30000, expectedMessageId: f.operation.dispatchMessageId })
+  const composed = composeInputSnapshots(f.input).composed!
+  f.store.bindComposedInput(claimed.fence, composed); f.store.startGeneration(claimed.fence)
+  const candidate = freezeCandidate(f.input, { version: 'sync-files-v1', changes: [] }, f.operation.scope, composed)
+  f.store.freezeCandidate(claimed.fence, candidate)
+  const exported = exportCandidate(f.input.source.commonDir, candidate, join(f.parent, 'resource-export'))
+  const request: VerificationRequest = { runId: 'resource-only-docker', inputDigest: f.input.id, candidateDigest: candidate.digest, candidateExportDigest: await verificationExportDigest(exported.root), candidateExportPath: exported.root, privateScratchRoot: join(f.parent, 'scratch'), policy: { version: 'resource-only-test-v1', image: `node@sha256:${'a'.repeat(64)}`, platform: 'linux/arm64', argv: ['node', '--test', 'tests/export.test.mjs'], cwd: '.', expectedTestIds: ['AC-EXPORT-03'], timeoutMs: 30000, memoryBytes: 128000000, cpus: 1, pidsLimit: 64, scratchBytes: 1000000, logBytes: 65536 } }
+  const first = await runAttemptVerification(f.store, claimed.fence, request, { driver: async args => {
+    if (args[0] === 'version') return { exitCode: 0, stdout: JSON.stringify({ Os: 'linux', Arch: 'arm64', Version: 'controlled-test' }), stderr: '', truncated: false }
+    assert.equal(args[0], 'image', '夹具只准备真实planned检查点，不调用create')
+    return { exitCode: 0, stdout: JSON.stringify([{ Id: 'sha256:test-image', Os: 'linux', Architecture: 'arm64', Config: { Env: ['PATH=/usr/local/bin'], Volumes: null } }]), stderr: '', truncated: false }
+  }, onCheckpointRecorded: async resource => { assert.equal(resource.phase, 'planned'); throw new Error('模拟planned回执后的中断；无真实Docker调用') } })
+  assert.match(first.result.reason!, /模拟planned回执后的中断/); assert.ok(first.resourceId)
+  const resource = f.store.readResource(first.resourceId!), checkpoint = JSON.parse(readEvidence(f.input.source.commonDir, resource.checkpointRef).toString()) as VerificationCheckpoint
+  const config = checkpoint.config, policy = config.policy
+  const actual = { Id: 'b'.repeat(64), Name: `/${checkpoint.uniqueContainerName}`, Image: config.imageId, Platform: 'linux', Config: { Image: config.image, User: '1000:1000', WorkingDir: '/candidate', Entrypoint: [config.argv[0]], Cmd: config.argv.slice(1), Labels: mode === 'foreign-label' ? { ...checkpoint.labels, 'spex.run': 'foreign' } : checkpoint.labels, Env: config.environment, Healthcheck: { Test: ['NONE'] } }, HostConfig: { ReadonlyRootfs: true, NetworkMode: 'none', Privileged: false, CapDrop: ['ALL'], CapAdd: null, SecurityOpt: ['no-new-privileges'], Init: true, AutoRemove: false, CgroupnsMode: 'private', RestartPolicy: { Name: 'no' }, Memory: policy.memoryBytes, MemorySwap: policy.memoryBytes, NanoCpus: policy.cpus * 1e9, PidsLimit: policy.pidsLimit, Tmpfs: { '/tmp': `rw,noexec,nosuid,nodev,size=${policy.scratchBytes},mode=1777` }, LogConfig: { Type: 'local', Config: { 'max-size': String(policy.logBytes), 'max-file': '1', compress: 'false' } }, Binds: null, Devices: [], PidMode: '', IpcMode: 'private' }, Mounts: [{ Type: 'bind', Source: config.candidatePath, Destination: '/candidate', RW: false }, { Type: 'bind', Source: config.runnerPath, Destination: '/runner', RW: false }], State: { Status: 'created', Running: false, ExitCode: 0, OOMKilled: false, Error: '' } }
+  const driver: VerificationDriver = async args => {
+    commands.push([...args])
+    if (args[0] === 'version') return { exitCode: 0, stdout: JSON.stringify({ Os: 'linux', Arch: 'arm64', Version: 'controlled-test' }), stderr: '', truncated: false }
+    assert.equal(args[0], 'container'); assert.ok(['inspect', 'rm'].includes(args[1]), `禁止启动或创建: ${args}`)
+    if (args[1] === 'rm') { assert.equal(args[2], actual.Id); return { exitCode: 0, stdout: actual.Id, stderr: '', truncated: false } }
+    return mode === 'missing' ? { exitCode: 1, stdout: '', stderr: 'No such container', truncated: false } : { exitCode: 0, stdout: JSON.stringify([actual]), stderr: '', truncated: false }
+  }
+  if (mode === 'wrong-run') {
+    const damaged = { ...resource, plan: { ...resource.plan, planBlob: writeEvidence(f.input.source.commonDir, { ...request, runId: 'foreign-run' }) } }
+    f.protocol.withTransaction(tx => tx.exec('UPDATE sync_resources SET record_json=? WHERE id=?', JSON.stringify(damaged), resource.id))
+  }
+  const before = f.store.readOperation(f.operation.id), beforeAttempt = f.store.readAttempt(claimed.attempt.id)
+  for (const key of ['claimAttempt', 'reserveDispatch', 'bindSession', 'planResource', 'startGeneration', 'freezeCandidate', 'recordVerification', 'beginApply', 'recordReceipt', 'settleApply'] as const) f.store[key] = () => assert.fail(`资源清理不得调用${key}`)
+  const recovered = await recoverSyncOperationResources(f.store, f.operation.id, { root: f.root, inputId: f.input.id, artifactRoot: f.artifactRoot, verificationDriver: driver })
+  assert.equal(recovered.status, mode === 'existing' ? 'resources_recovered' : 'recovery_required', JSON.stringify(recovered.failure))
+  assert.equal(f.store.readResource(resource.id).phase, mode === 'existing' ? 'removed' : 'planned')
+  assert.equal(commands.some(args => args[1] === 'rm'), mode === 'existing')
+  if (mode === 'wrong-run') { assert.equal(commands.length, 0); assert.equal(recovered.failure!.code, 'resource_recovery') }
+  assert.deepEqual(f.store.readOperation(f.operation.id), before); assert.deepEqual(f.store.readAttempt(claimed.attempt.id), beforeAttempt)
+  assert.equal(f.calls.length, 0); assert.deepEqual(f.store.listJournals(f.operation.id), [])
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
 })
 
