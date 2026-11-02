@@ -4,7 +4,7 @@ import { contractReferences, parseContract, parseParts } from '@spexcode/spec-co
 import { analyzeCodeBehavior, deriveBehaviorAuthorization } from './code-behavior.js'
 import type { CodeBehaviorInput } from './code-behavior.js'
 import { outputErrors } from './elaboration-schema.js'
-import { elaborate, freezeElaborationInput, verifyElaborationDraftCache, projectElaborationFlowReadiness, sealPartitionedElaboration } from './elaboration.js'
+import { elaborate, freezeElaborationInput, verifyElaborationDraftCache, projectElaborationFlowReadiness, sealPartitionedElaboration, partitionSealRepairContext } from './elaboration.js'
 import type { Contract, ContractFinding, Verification } from '@spexcode/spec-core/contracts'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
 import type { Applicability, ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationTrace, ElaborationSessionRequest, ElaborationChange, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial, ReadonlySpecRepair, VerificationOwnershipProjection } from './elaboration-types.js'
@@ -44,9 +44,9 @@ const unique = (values: readonly string[]): string[] => [...new Set(values)].sor
 const reject = (message: string): never => { throw Object.assign(new Error(message), { code: 'partition_binding' }) }
 function readonlyRepairInput(input: ElaborationInput, repair: ReadonlySpecRepair): ElaborationInput {
   if (repair.kind === 'partition_seal') {
-    const aggregate = JSON.parse(readEvidence(input.historyInput!.source.commonDir, repair.generationRef).toString('utf8')) as ElaborationResult
-    if (aggregate.partitionSeal?.candidateDigest !== repair.candidateDigest || aggregate.partitionSeal.passed || !aggregate.partitionEvidence?.some(owner => owner.partitionId === input.partitionBinding!.partitionId && owner.resultRef.sha256 === repair.acceptedRef.sha256)) return reject('全局seal诊断必须绑定失败aggregate及本owner已审原件')
-    return { ...input, readonlySpecRepair: repair }
+    const repaired = { ...input, readonlySpecRepair: repair }
+    partitionSealRepairContext(repaired)
+    return repaired
   }
   if (input.worktree && input.historyInput) {
     const generation = JSON.parse(readEvidence(input.historyInput.source.commonDir, repair.generationRef).toString('utf8')) as Pick<GenerationResult, 'candidate'>
