@@ -9,7 +9,7 @@ import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
 import { detachedRuntimeIsGone, processStartToken, verifyDetachedRuntime, writeDetachedRuntimeReceipt, type ProcessIdentity } from '@spexcode/spec-core'
-import { structuredExecutionTimer, StructuredSessionError, structuredExecutionPolicy, structuredSeatbeltProfile, type StructuredExecution } from './session-structured-policy.js'
+import { rejectedFinalOutput, structuredExecutionTimer, StructuredSessionError, structuredExecutionPolicy, structuredSeatbeltProfile, type StructuredExecution } from './session-structured-policy.js'
 import { decodeZCodeJsonText, type ZCodeFrozenReadProof, type ZCodeFrozenWitness } from './zcode-frozen-proof.js'
 
 export const zcodeCapability = Object.freeze({
@@ -262,13 +262,14 @@ function settleWorktreeResult(plan: NativePlan, prompt: string, execution: ZCode
   try { output = decodeZCodeStructuredText(terminal.payload.response) }
   catch (error) {
     if (execution.state === 'completed' && error instanceof StructuredSessionError && error.code === 'structured_output_format_invalid') throw new StructuredSessionError('stale_result', 'ZCode completed worktree terminal response is not one strict JSON document')
+    if (error instanceof StructuredSessionError && error.code === 'structured_output_format_invalid') throw new StructuredSessionError(error.code, error.message, { threadId: plan.sessionId, turnId: plan.turnId, rejectedOutput: rejectedFinalOutput(terminal.payload.response, prompt, execution, { threadId: plan.sessionId, turnId: plan.turnId }) })
     throw error
   }
   const validate = new Ajv({ allErrors: true }).compile(execution.schema)
   if (!validate(output)) {
     if (execution.state === 'completed') throw new StructuredSessionError('stale_result', 'ZCode completed worktree terminal JSON no longer matches its schema')
     const diagnostics = validate.errors?.map(({ instancePath, schemaPath, keyword, params, message }) => ({ instancePath, schemaPath, keyword, params, message })) ?? []
-    throw new StructuredSessionError('structured_output_format_invalid', `ZCode worktree terminal JSON does not match its schema: ${JSON.stringify(diagnostics)}`)
+    throw new StructuredSessionError('structured_output_format_invalid', `ZCode worktree terminal JSON does not match its schema: ${JSON.stringify(diagnostics)}`, { threadId: plan.sessionId, turnId: plan.turnId, rejectedOutput: rejectedFinalOutput(terminal.payload.response, prompt, execution, { threadId: plan.sessionId, turnId: plan.turnId }) })
   }
   const result: WorktreeNativeResult = { threadId: plan.sessionId, turnId: plan.turnId, text: JSON.stringify(output) }
   const completed = { plan, terminal, events, messages, exit, send, result }

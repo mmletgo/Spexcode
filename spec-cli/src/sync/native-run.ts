@@ -5,7 +5,7 @@ import { getBlob, putBlob, runtimeRoot } from '@spexcode/spec-core'
 import { readRecord, type SessRec } from '../session-record.js'
 import { sessionIdForCreateKey, readSessionCreateTermination, recoverSessionCreateTermination, type SessionCreateTermination } from '../sessions.js'
 import { cancelStructuredSession, runStructuredSession, SettledSessionCreateTimeoutError, StructuredSessionError, type StructuredCancellationResult } from '../session-structured.js'
-import { prepareFrozenReaderRuntime, structuredExecutionPolicy, pinZCodeToolPolicy, type FrozenReaderRuntime, type StructuredExecution } from '../session-structured-policy.js'
+import { assertRejectedOutput, prepareFrozenReaderRuntime, structuredExecutionPolicy, pinZCodeToolPolicy, type FrozenReaderRuntime, type StructuredExecution } from '../session-structured-policy.js'
 import { assertFrozenBinding, prepareFrozenPrompt } from '../frozen-context.js'
 import { verifyStructuredFrozenReadProof as verifyFrozenReadProof } from '../structured-frozen-proof.js'
 import { nativeWorktreePrompt } from '../native-worktree-runtime.js'
@@ -215,6 +215,14 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
           if (!observe() && creationTermination()) return stop()
           const state = runtime.readRecord(expectedSessionId)?.structuredExecution
           if (state?.cancellation?.nativeStopped && (state.state === 'cancelled' || state.state === 'timeout')) settle(state.state, { stop: { sessionId: expectedSessionId, state: state.state, threadId: state.threadId, turnId: state.turnId, nativeStopped: true, acknowledged: state.cancellation.acknowledged, nativeStatus: state.cancellation.nativeStatus } })
+          if (outcome.error instanceof StructuredSessionError && outcome.error.rejectedOutput) {
+            const rejectedOutput = outcome.error.rejectedOutput
+            if (state?.state !== 'failed' || !state.rejectedOutput || hash(state.rejectedOutput) !== hash(rejectedOutput) || outcome.error.sessionId !== expectedSessionId || outcome.error.threadId !== state.threadId || outcome.error.turnId !== state.turnId) throw new StructuredSessionError('stale_result', 'rejected final output lacks its matching failed native record', errorIdentity())
+            assertRejectedOutput(rejectedOutput, creationPrompt, execution, state)
+            const ref = blobs.put(Buffer.from(rejectedOutput.text, 'utf8'))
+            if (ref.sha256 !== rejectedOutput.sha256) throw new StructuredSessionError('stale_result', 'rejected final output blob differs from its exact native bytes', errorIdentity())
+            throw new StructuredSessionError(outcome.error.code, outcome.error.message, { ...errorIdentity(), rejectedOutput: { ...rejectedOutput, ref } })
+          }
           throw outcome.error
         }
         const record = observe(), state = record?.structuredExecution

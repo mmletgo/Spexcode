@@ -20,6 +20,8 @@ related:
 
 ## expanded spec
 
+工作区schema拒绝仅在原plan/prompt/model/turn/终态与stop认证后保留不可信final诊断：success的structured_output schema拒绝可保存其原生JSON值的确定JSON表示；重试耗尽仅取最后一份已严格配对、被本schema拒绝的StructuredOutput input，不提取thinking/任意assistant文本。标明native_json表示与原请求/schema身份，仍不填成功output或写completed，原错误分类不变；没有可证final则缺席。
+
 version5/null 请求沿原 Claude policy、realm 与版本3读取证明执行，不装模型调用timeout timer；数字 version3 原样恢复。显式取消的interrupt、ACK及整组/MCP停止证明与独立stop期限保持。
 
 只接受 `claude:<exact-native-model-id>`，拒绝动态别名、未知 CLI 版本和自动 fallback。固定 Claude Code 2.1.309，经实际 init 和每次 actual API params.model 同时核明确模型；上下文显示后缀不能默默归一化成另一模型。默认或普通 model 字符串继续保留 Codex 含义。CLI 执行器身份与实际模型分开记录；现有 Native 证据的实际模型为 MiniMax-M3，不能标为 Anthropic 模型。

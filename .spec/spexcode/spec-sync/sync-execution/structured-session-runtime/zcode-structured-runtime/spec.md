@@ -19,6 +19,8 @@ related:
 
 ## expanded spec
 
+仅version6工作区路径在原plan/send/user/model/final消息/turn/idle/close/stop全部认证后，将格式或schema拒绝的terminal原response附为tagged untrusted_final诊断，保原字节与SHA和原请求绑定。格式失败仍不写completed/output；取消、缺terminal、身份或stop失败不授正文，旧failed缺字段不追补。不得提取thinking或放宽JSON/schema。
+
 新 ZCode 原生 worktree read 请求在创建/资源登记时冻结 `zcodeToolPolicy:{version:1,toolDenylist:['ExitPlanMode']}`。其 NativePlan 与持久 native 身份为 version2，计划保存同一精准 denylist；唯一 session/send 通过 SDK 已有 per-send toolDenylist 从模型可见工具列表移除 ExitPlanMode，SDK mode 仍为 plan。完整提示明确本轮交完整 schema JSON，不请求计划审批；业务正文逐字保留。tool policy 进入固定 policy/创建摘要，effective denylist 另进入 NativePlan.requestDigest，原 send、计划与恢复逐项核验；篡改或版本不符拒绝。Read/Glob/Grep/Bash 与原读范围、Edit/Write/NotebookEdit 拒绝、read Git seed/clean 门均不变，不切 build、不增 sandbox/MCP。edit、旧冻结和 Claude 不采用该工具策略。
 
 旧 NativePlan version1 及已持久但尚无 native session/send 的旧请求保持原工具列表、原提示和摘要，不能补加新字段。未完成仍不重发，已完成恢复零新 send；结构化 policy 仍 version6、工作流仍 native-worktree-v1。只有真正新建记录或新资源冻结当前策略，缺席也是旧请求的固定语义。
@@ -45,7 +47,7 @@ version5/null 请求沿原 ZCode policy、realm 与版本4读取证明执行，�
 
 原始 session/messages 的 core info 与 parts、原始 turn lifecycle / tool.updated / 含 toolCount 的 ModelRequest 安全事件构成原生见证；不以 ledger 补写 native arguments。transport 及未知事件只保存类型计数，不保存 payload 或 headers。原生工具、消息、输入、模型和 MCP ledger 必须由专用证明模块严格绑定。
 
-终态仅接受本轮 success，响应可以是直接 JSON 或一个完整、精确的外层 `json` Markdown fence。decoder 只移除该单一外壳，正文仍使用 JSON.parse 和原 Ajv schema；不得修补 JSON、接受解释文字或多段输出。规范 JSON 结果绑定原始终态响应与完整见证。version4/5 冻结路径首次结算先核终态与原事件精确一致，并通过完整原生消息、工具/MCP 及 required 读取证明；随后仅该严格文本解码的 JSON 语法失败标为 `structured_output_format_invalid`，仍为失败且不发布输出或读取证明；原生协议、模型/工具/消息真实性、schema 与覆盖失败不取得此码，保持旧分类。version6/native-worktree 仅在精确 Native 模型、原输入/消息、success 终态、idle/close 与 exit stopped 均核验后，AJV schema 不符才复用 `structured_output_format_invalid`；错误保留 AJV 字段/路径诊断，不包含原始输出、不修补 JSON、不写 completed 或发布业务输出。此前身份或停止门失败仍按原 stale/cancellation 分类。completed 冷重放的终态篡改、schema 或格式异常仍为 stale_result，不转自动修复。
+终态仅接受本轮 success，响应可以是直接 JSON 或一个完整、精确的外层 `json` Markdown fence。decoder 只移除该单一外壳，正文仍使用 JSON.parse 和原 Ajv schema；不得修补 JSON、接受解释文字或多段输出。规范 JSON 结果绑定原始终态响应与完整见证。version4/5 冻结路径首次结算先核终态与原事件精确一致，并通过完整原生消息、工具/MCP 及 required 读取证明；随后仅该严格文本解码的 JSON 语法失败标为 `structured_output_format_invalid`，仍为失败且不发布输出或读取证明；原生协议、模型/工具/消息真实性、schema 与覆盖失败不取得此码，保持旧分类。version6/native-worktree 仅在精确 Native 模型、原输入/消息、success 终态、idle/close 与 exit stopped 均核验后，AJV schema 不符才复用 `structured_output_format_invalid`；错误message保留 AJV 字段/路径诊断且不包含原始输出；可选rejectedOutput独立按上述不可信诊断规则保原件，不修补 JSON、不写 completed 或发布业务输出。此前身份或停止门失败仍按原 stale/cancellation 分类。completed 冷重放的终态篡改、schema 或格式异常仍为 stale_result，不转自动修复。
 
 先捕获原始消息，再精确 session/close:true 与 EOF，确认自有 detached 进程组及全部已观察 app/MCP 子进程死亡，才写 completed。MCP startToken 缺失时使用宿主 ps 的精确 PID/start 身份补证，不伪造 reader ledger。completed 冷重放核原请求、原始见证、schema、proof 与 durable output，零新 SDK/API；未知 in-progress 不追加 prompt，保留 cancellation_pending。
 

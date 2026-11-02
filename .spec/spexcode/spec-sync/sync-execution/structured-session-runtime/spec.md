@@ -19,6 +19,8 @@ related:
 
 ## expanded spec
 
+新产生的已认证final格式/schema拒绝可在failed运行元数据及StructuredSessionError上携可选tagged rejectedOutput：完整final文本、SHA、prompt/schema/input/purpose及原生thread/turn绑定。它只是不可信诊断，成功output槽仍缺席，旧failed无字段不补读/不猜分类。同键读取和资源桥重核固定请求与证据身份；取消、无final、未停稳、身份不符不得附正文。可选观测不参与固定策略/创建摘要、不增加执行authority，因此不新增writer marker。
+
 资源专用恢复可在非持久取消选项中明确wakeQueue:false：仍刷新原queue candidate投影并保存精确取消/停止证明，只禁止本次主动requestQueueDrain。独立资源入口同时沿[[production-cutin]]静音本次canonical提交后的主动delivery wake；普通cancel默认行为保持。已有queued目标尚无nativeStopped时同样适用，资源结算不替旁置queued任务或watcher启动新turn；后续正常drain重新核目标stopped，仅推进仍合法的queued任务。
 
 ZCode worktree read 真正新建记录默认冻结 [[zcode-structured-runtime]] 的非交互工具策略；同创建键已有记录按原字段或缺席恢复，显式不同策略拒绝。内部 sessionCreateKey 表示资源桥已经冻结工具策略：尚无会话记录时原样保留上游显式字段或缺席，由固定策略构造严格验证 provider、mode 和精准 denylist，不能改成空策略或再补默认；已有记录仍优先核原记录。业务 requestKey、inputDigest 和创建实际键的语义保持。策略字段参与创建摘要，旧创建哈希和原 native 输入不改。

@@ -2,7 +2,7 @@ import type { CodeBehaviorEvidence, ContractNodeChange, SyncDecisionAuthority } 
 import type { RawOnlyInterfaceSeedEvidence } from './partitioning.js'
 import type { BlobRef, InputSnapshot } from './operation-types.js'
 import type { FrozenContextRef, FrozenEntryJson, FrozenReadProof } from '../frozen-context.js'
-import type { ZCodeToolPolicy } from '../session-structured-policy.js'
+import type { RejectedStructuredOutput, ZCodeToolPolicy } from '../session-structured-policy.js'
 import type { Contract, ContractCoverage, ContractFinding, ContractGraph, Gap, ParseContractInput, Verification } from '@spexcode/spec-core/contracts'
 
 export const ELABORATION_BOUNDARIES = ['permissions', 'mutation', 'async', 'network', 'concurrency', 'callbacks', 'retries', 'cancellation', 'idempotency', 'external_side_effects'] as const
@@ -70,7 +70,7 @@ export type VerificationOwnershipProjection = {
 export type ElaborationReviewFinding = { code: string; kind: 'repair' | 'missing_fact' | 'conflict'; message: string; affectedIds: string[]; evidence: string; decision: string }
 export type ElaborationReview = { inputDigest: string; candidateDigest: string; verdict: 'accept' | 'repair' | 'needs_input' | 'conflict'; checkedBoundaries: ElaborationBoundary[]; findings: ElaborationReviewFinding[] }
 export type ElaborationTrace = { purpose: string; sessionId: string; threadId: string; turnId: string; resultDigest: string; inputDigest: string }
-export type ElaborationRound = { index: number; output: unknown; candidate: ElaborationCandidate | null; candidateDigest: string | null; findings: ContractFinding[]; reviewOutput: unknown; review: ElaborationReview | null; traces: ElaborationTrace[] }
+export type ElaborationRound = { rejectedOutput?: RejectedStructuredOutput & { ownerInputDigest: string; ownerRequestKey: string }; index: number; output: unknown; candidate: ElaborationCandidate | null; candidateDigest: string | null; findings: ContractFinding[]; reviewOutput: unknown; review: ElaborationReview | null; traces: ElaborationTrace[] }
 export type BlockedElaborationFlow = { flowId: string; blockedStepIds: string[]; gapIds: string[] }
 /** 仅由内部协调器提供的已结算、被拒绝候选；候选不是新的业务事实。 */
 export type ElaborationRepairSeed = {

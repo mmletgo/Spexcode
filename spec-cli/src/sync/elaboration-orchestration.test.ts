@@ -1,3 +1,5 @@
+import { StructuredSessionError, rejectedFinalOutput } from '../session-structured-policy.js'
+import { nativeWorktreePrompt } from '../native-worktree-runtime.js'
 import assert from 'node:assert/strict'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -1290,4 +1292,28 @@ for (const scenario of ['author-ac', 'missing-oracle', 'stable-id'] as const) te
   assert.ok(result.rounds.flatMap(round => round.findings).some(finding => finding.code === code), JSON.stringify(result.rounds.map(round => round.findings)))
   assert.equal(fake.calls.some(call => call.purpose === 'elaboration_review'), false, '原硬门失败不得靠新独审自批')
   assert.equal(snapshot.intent.rawSource, rawSource)
+})
+
+
+test('rejected review final remains diagnostic without erasing the successful generation or accepting the review', async () => {
+  const snapshot = { ...input(), maxRepairs: 0, worktree: { baseCommit: 'a'.repeat(40), tree: 'b'.repeat(40), mode: 'read' as const } }
+  const generated = runner(request => candidate(request, source)), text = '{"verdict":"accept","findings":"not an array"}'
+  const failed = await elaborate(snapshot, { runner: async request => {
+    if (request.purpose !== 'elaboration_review') return generated.run(request)
+    const identity = { sessionId: 'rejected-review-session', threadId: 'rejected-review-thread', turnId: 'rejected-review-turn' }
+    throw new StructuredSessionError('structured_output_format_invalid', 'original review schema failure', { ...identity, rejectedOutput: rejectedFinalOutput(text, nativeWorktreePrompt(request.prompt, request.worktree!), request, identity) })
+  } })
+  const round = failed.rounds[0], original = structuredClone(round)
+  assert.equal(failed.failure?.code, 'structured_output_format_invalid')
+  assert(round.output); assert(round.candidate); assert(round.candidateDigest)
+  assert.equal(round.reviewOutput, null); assert.equal(round.review, null); assert.equal(failed.reviewPassed, false)
+  assert.equal(round.rejectedOutput?.purpose, 'elaboration_review'); assert.equal(round.rejectedOutput?.text, text)
+  const diagnostics = { requestKey: snapshot.requestKey, inputDigest: failed.inputDigest, resultRef: { sha256: elaborationDigest(JSON.stringify(failed)) }, failure: failed.failure!, round }
+  const fresh = runner(request => candidate(request, source))
+  const result = await elaborate({ ...snapshot, requestKey: 'review-diagnostic-new-attempt' }, { runner: fresh.run, repairDiagnostics: diagnostics })
+  assert.equal(result.status, 'complete')
+  assert.deepEqual(round, original)
+  assert.deepEqual(fresh.calls.map(call => call.purpose), ['elaboration_generate', 'elaboration_review'])
+  assert(fresh.calls[0].prompt.includes(JSON.stringify(text)))
+  assert.match(fresh.calls[0].prompt, /untrusted prior failed output/)
 })

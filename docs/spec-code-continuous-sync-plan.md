@@ -623,3 +623,5 @@ Native P1每轮生成携上一轮实际JSON、具体结构/独审发现及完整
 Native完整叶生成提示明确区分引用类型：FLOW.req只引用REQ，并直接承接各级实际适用祖先REQ，AC.covers也直接承接这些祖先REQ；实际适用祖先RULE由AC.covers直接承接，或经本叶TR.rules引用并由对应AC覆盖该TR。不能将REQ/RULE合写为FLOW.req的合法集合，不引用兄弟或不适用义务。interface_seed仍不展开FLOW/AC；Legacy有效模板、schema、reference-kind硬门、原AC授权与独审范围保持。
 
 显式sync resources recover <operation-id> --input-id <原frozen输入>及对应HTTP资源入口提供严格resource-only恢复：即使机器重启后物理repoId改变，仍只准canonicalRoot/commonDir一致的owned历史资源结算；这不授权业务连续性，正常read/resume/adopt完整source门保持。专用入口单次离线可用，不启动API/watcher/queue；不新attempt/dispatch/模型/验收容器，不prepare/apply或回放任何journal，不造receipt，不重签原失败/候选/独审/output/digest。pending journal原样保留，停止证明未知或计划错配仍保未结算。只复用现有资源/CAS/lease状态，不新增身份字段、迁移或writer marker。
+
+原生final在格式或schema拒绝时，仅经adapter认证原plan/request/schema/session/turn与已停稳终态后，作为显式不可信诊断保存完整正文、SHA及原文ref；同owner既有repairContext把正文直接送入下一实际prompt并绑定请求摘要。成功output、candidate及digest仍缺席，语法坏/JSON合法但schema坏均不接受，仍须重新生成和独审；不读取thinking，旧无证据不补写。该可选诊断不授予执行authority，不新增writer marker。
