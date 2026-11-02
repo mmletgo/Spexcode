@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import test from 'node:test'
@@ -84,7 +84,7 @@ test('跨source/父上下文只迁移同owner草稿；新seed保留新父Spec、
   const oldDraft = structuredClone(failed.rounds[0].draft!), oldResult = JSON.stringify(failed)
   for (const workspace of f.workspaces) git(f.root, 'worktree', 'remove', workspace)
   writeFileSync(join(f.root, ancestorPath), ancestor('新父接口'))
-  writeFileSync(join(f.root, 'src/new-source.mjs'), 'export const added = true\n')
+  writeFileSync(join(f.root, 'src/new-source.mjs'), 'export const added = true\n'); chmodSync(join(f.root, 'src/new-source.mjs'), 0o755)
   git(f.root, 'add', '.'); git(f.root, 'commit', '-m', 'new frozen source and ancestor')
   const snapshot = await captureInputSnapshot(f.root)
   const nextInput = { ...f.input, requestKey: 'new-parent', historyInput: snapshot, worktree: stageWorktree(f.commonDir, snapshot.headCommit, snapshot.immutableTree), context: [{ nodeId: 'ancestor', path: ancestorPath, source: ancestor('新父接口') }], maxRepairs: 0 }
@@ -98,6 +98,7 @@ test('跨source/父上下文只迁移同owner草稿；新seed保留新父Spec、
   assert.equal(next.status, 'complete', JSON.stringify(next.failure)); assert.notEqual(next.inputDigest, failed.inputDigest)
   assert.equal(JSON.stringify(failed), oldResult); assert.equal(oldDraft.sourceInputId, f.snapshot.id); assert.equal(next.rounds[0].draft!.sourceInputId, snapshot.id)
   const resultTree = next.rounds[0].draft!.resultTree
+  assert.equal(readTree(f.commonDir, resultTree).find(entry => entry.path === 'src/new-source.mjs')!.mode, '100755')
   assert.deepEqual(readTree(f.commonDir, resultTree).filter(entry => !entry.path.startsWith('.spex-sync-drafts/')), readTree(f.commonDir, snapshot.immutableTree))
   assert.equal(readStageDraft(f.commonDir, oldDraft, oldDraft), invalid)
 })
