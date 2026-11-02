@@ -432,6 +432,10 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
           assertRejectedOutput(error.rejectedOutput, worktree ? nativeWorktreePrompt(prompt, worktree) : prompt, { inputDigest: requestDigest, purpose, schema }, error)
           round.rejectedOutput = { ...structuredClone(error.rejectedOutput), ownerInputDigest: inputDigest, ownerRequestKey: input.requestKey }
         }
+        if (writingDraft && error instanceof StructuredSessionError && error.failedWorktree) {
+          try { round.draft = captureStageDraft(input.historyInput!.source.commonDir, worktree!, { worktree: error.failedWorktree }, draftBinding) }
+          catch (draftError) { round.findings.push(finding(input, 'draft_witness_rejected', (draftError as Error).message)) }
+        }
         if (budget.signal.aborted && !input.signal?.aborted && (error as { code?: string }).code !== 'cancellation_pending') throw Object.assign(new Error('细化总时间预算已耗尽'), { ...(error as object), code: 'budget_exhausted' })
         throw error
       } finally { if (timer !== null) clearTimeout(timer) }

@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import test from 'node:test'
 import { parseParts } from '@spexcode/spec-core/contracts'
-import { nativeWorktreeResult } from '../native-worktree-runtime.js'
+import { StructuredSessionError, rejectedFinalOutput } from '../session-structured-policy.js'
+import { nativeWorktreePrompt, nativeWorktreeResult } from '../native-worktree-runtime.js'
 import { elaborate, elaborationDigest } from './elaboration.js'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
 import type { ElaborationInput, ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
@@ -113,13 +114,13 @@ test('历史失败原件仅复制为非权威草稿材料，不在prompt重答JS
 
 test('草稿边界拒绝错owner/schema/path/ref/OID/seed以及Spec、源码、测试和其他owner修改', async t => {
   const f = await fixture(t), result = await elaborate(f.input, { runner: f.run(() => JSON.stringify(rows)) }), draft = result.rounds[0].draft!
-  for (const patch of [{ ownerDigest: 'e'.repeat(64) }, { schemaDigest: 'e'.repeat(64) }, { path: '../escape.json' }, { resultCommit: 'e'.repeat(40) }, { oid: 'e'.repeat(40) }, { seed: { ...draft.seed, tree: draft.resultTree } }]) {
+  for (const patch of [{ ownerDigest: 'e'.repeat(64) }, { schemaDigest: 'e'.repeat(64) }, { path: '../escape.json' }, { resultCommit: 'e'.repeat(40) }, { oid: 'e'.repeat(40) }, { seed: { ...draft.seed, tree: draft.resultTree } }, { seed: { ...draft.seed, baseCommit: `refs/spex-sync/seeds/${draft.seed.baseCommit}` } }]) {
     assert.throws(() => readStageDraft(f.commonDir, { ...draft, ...patch }, draft))
   }
   for (const modified of [path, 'src/export.js', 'tests/export.test.mjs', draft.path.replace(/\.json$/, '.schema.json'), `.spex-sync-drafts/${'e'.repeat(64)}.json`]) {
     const seed = stageWorktree(f.commonDir, f.snapshot.headCommit, f.snapshot.immutableTree, 'edit')
     const tree = overlayStageTree(f.commonDir, seed.tree, [{ path: draft.path, source: '{}' }, { path: modified, source: 'unauthorized\n' }]), head = stageWorktree(f.commonDir, seed.baseCommit, tree).baseCommit
-    assert.throws(() => captureStageDraft(f.commonDir, seed, { sessionId: 'scope', threadId: 'scope', turnId: 'turn', output: { summary: '声称成功' }, resultDigest: '', worktree: { baseCommit: seed.baseCommit, baseTree: seed.tree, headCommit: head, tree, worktreePath: 'closed-worktree' } }, draft), /仅允许正常提交/)
+    assert.throws(() => captureStageDraft(f.commonDir, seed, { worktree: { baseCommit: seed.baseCommit, baseTree: seed.tree, headCommit: head, tree, worktreePath: 'closed-worktree' } }, draft), /仅允许正常提交/)
   }
   assert.throws(() => overlayStageTree(f.commonDir, f.snapshot.immutableTree, [{ path: draft.path, source: '../outside', mode: '120000' }]), /普通文件/)
   const symlinkBytes = Buffer.from('../outside'), symlinkTree = writeTree(f.commonDir, [...readTree(f.commonDir, f.snapshot.immutableTree), { path: '.spex-sync-drafts', mode: '120000', oid: writeObject(f.commonDir, symlinkBytes), digest: contentHash(symlinkBytes) }])
@@ -195,10 +196,37 @@ test('已有真实Git结果而小回执schema失败时保留非权威草稿，�
   assert.equal(failed.status, 'failed'); assert.match(failed.failure!.message, /summary回执不符合schema/)
   assert.equal(failed.rounds[0].candidate, null); assert.equal(failed.rounds[0].rejectedOutput, undefined)
   const draft = failed.rounds[0].draft!
+  assert.ok(draft, '已提交且具有精确失败Git见证的草稿不能丢失')
   assert.equal(readStageDraft(f.commonDir, draft, draft), text)
   const next = await elaborate({ ...f.input, requestKey: 'retry-invalid-receipt', maxRepairs: 0 }, { draft, runner: f.run((_request, workspace, draftPath) => {
     assert.equal(readFileSync(join(workspace, draftPath), 'utf8'), text)
     return JSON.stringify({ ...rows, applicability: rows.applicability.map(item => ({ ...item, basis: '保留原草稿并核实当前输入' })) })
   }) })
   assert.equal(next.status, 'complete'); assert.equal(failed.structurePassed, false); assert.equal(failed.reviewPassed, false)
+})
+
+
+test('已认证且停稳Native坏小回执附实际Git失败见证时，只保留草稿并在下一真实编辑续修', async t => {
+  const f = await fixture(t), draftBytes = `{ actual business draft${'x'.repeat(38_000)}`, rejectedReceipt = 'BROKEN_SMALL_RECEIPT', committed = f.run(() => draftBytes)
+  const failed = await elaborate({ ...f.input, maxRepairs: 0 }, { runner: async request => {
+    const actual = await committed(request)
+    throw new StructuredSessionError('structured_output_format_invalid', '原Native小回执格式错误且已停稳', {
+      sessionId: actual.sessionId, threadId: actual.threadId, turnId: actual.turnId, failedWorktree: actual.worktree,
+      rejectedOutput: rejectedFinalOutput(rejectedReceipt, nativeWorktreePrompt(request.prompt, request.worktree!), request, actual),
+    })
+  } })
+  assert.equal(failed.status, 'failed'); assert.equal(failed.failure!.code, 'structured_output_format_invalid')
+  assert.equal(failed.rounds[0].output, null); assert.equal(failed.rounds[0].candidate, null); assert.equal(failed.rounds[0].traces.length, 0)
+  assert.equal(failed.rounds[0].rejectedOutput!.text, rejectedReceipt)
+  const draft = failed.rounds[0].draft!
+  assert.ok(draft, '已提交且具有精确失败Git见证的草稿不能丢失')
+  assert.equal(readStageDraft(f.commonDir, draft, draft), draftBytes)
+  const original = JSON.stringify(failed)
+  const next = await elaborate({ ...f.input, requestKey: 'retry-native-failed-receipt', maxRepairs: 0 }, { draft, runner: f.run((request, workspace, draftPath) => {
+    assert.equal(readFileSync(join(workspace, draftPath), 'utf8'), draftBytes)
+    assert.match(request.prompt, /structured_output_format_invalid/); assert.ok(!request.prompt.includes(draftBytes)); assert.ok(!request.prompt.includes(rejectedReceipt))
+    return JSON.stringify(rows)
+  }) })
+  assert.equal(next.status, 'complete'); assert.equal(JSON.stringify(failed), original)
+  assert.equal(next.rounds[0].draft!.path, draft.path)
 })

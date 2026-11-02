@@ -3923,3 +3923,26 @@ test('Native P1草稿跨attempt从真实Git原文件续改，小回执保持成�
   assert.equal(f.store.listJournals(f.operation.id).length, 0); assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
   assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
 })
+
+test('已有reserved P1在SQLite冷恢复后草稿协议缺席仍不补签或改写历史派发', async t => {
+  const f = await fixture(t, { maxAttempts: 1, maxCalls: 4, maxRepairs: 0, timeoutMs: 120_000 }, false, original, 'project', original, { agentWorkflow: 'native-worktree-v1' }, undefined, 'spec', 'claude:MiniMax-M3.1-Flash')
+  const claimed = f.store.claimAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 30_000, expectedMessageId: f.operation.dispatchMessageId })
+  const reserved = f.store.reserveDispatch(claimed.fence, { key: `sync:${claimed.attempt.id}:historical-reserved-p1`, purpose: 'elaboration_review', requestDigest: contentHash('frozen original historical request') })
+  const originalReservation = JSON.stringify(reserved)
+  f.closeForRestart()
+  const protocol = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => protocol.close())
+  const store = new SyncStore(protocol, { readBlob: ref => readEvidence(f.input.source.commonDir, ref) }); f.useStore(store)
+  let observed = false
+  f.options.runner = async request => {
+    observed = true; assert.equal(request.purpose, 'elaboration_generate'); assert.equal(request.worktree!.mode, 'read')
+    assert.match(request.prompt, /不直接改文件/); assert.doesNotMatch(request.prompt, /草稿文件=/)
+    assert.notDeepEqual(request.schema, { type: 'object', additionalProperties: false, properties: { summary: { type: 'string' } }, required: ['summary'] })
+    throw Object.assign(new Error('历史reserved保持验证到此停止'), { code: 'unsupported' })
+  }
+  await runSyncOperation(store, f.operation.id, f.options)
+  const attempt = store.readAttempt(claimed.attempt.id)
+  assert.equal(observed, true); assert.equal(JSON.stringify(attempt.dispatchPlans.find(item => item.key === reserved.key)), originalReservation)
+  const stages = attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
+  assert.equal(stages.some(stage => stage.stage === 'elaboration-draft-protocol'), false)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
+})
