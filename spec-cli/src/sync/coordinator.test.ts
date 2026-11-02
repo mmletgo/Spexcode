@@ -2752,6 +2752,97 @@ for (const mode of ['format', 'rows', 'pause', 'pause-restart', 'seed-pause', 's
   assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
 })
 
+for (const kind of ['candidate-seed', 'typed-diagnostic'] as const) test(`P1冷中断后从同绑定CAS恢复${kind}，durable failure尚未写入`, async t => {
+  const f = await fixture(t, { maxAttempts: 2, maxCalls: 12, maxRepairs: 1, timeoutMs: 120_000 }, false, original, 'project', original, {}, undefined, 'spec', undefined, true)
+  let store = f.store
+  let retryPrompt = ''
+  f.transform((output, request) => {
+    const attempt = store.readAttempt(store.readOperation(f.operation.id).currentAttemptId!)
+    if (request.purpose === 'elaboration_generate') {
+      if (attempt.number === 1) {
+        if (kind === 'typed-diagnostic') throw new StructuredSessionError('structured_output_format_invalid', 'P1原生输出不是严格JSON', { sessionId: 'crashed-p1', threadId: 'crashed-thread', turnId: 'crashed-turn' })
+        const rejected = rows(original)
+        rejected.changes[0].tables.FLOW[0].req = ['RULE-EXPORT-01']
+        return rejected
+      }
+      retryPrompt = request.prompt
+      if (kind === 'candidate-seed') assert.match(request.prompt, /已结算的拒绝候选|reference-kind/)
+      else {
+        assert.match(request.prompt, /structured_output_format_invalid/)
+        assert.match(request.prompt, /P1原生输出不是严格JSON/)
+      }
+      return output
+    }
+    if (request.purpose === 'code_review') throw Object.assign(new Error('冷恢复P1机制用例在P2前停止'), { code: 'unsupported' })
+    return output
+  })
+  store.recordFailure = () => { throw new Error('模拟在P1 CAS保存后、attempt.failure持久化前崩溃') }
+  const interruptedRun = await runSyncOperation(store, f.operation.id, f.options).then(value => ({ value }), error => ({ error }))
+  assert.ok('error' in interruptedRun, JSON.stringify({ status: interruptedRun.value?.status, phase: interruptedRun.value?.operation.phase, failure: interruptedRun.value?.failure, calls: f.calls.map(call => call.purpose), attempts: store.listAttempts(f.operation.id).map(attempt => ({ status: attempt.status, failure: attempt.failure })) }))
+
+  const crashed = store.readOperation(f.operation.id), crashedAttempt = store.readAttempt(crashed.currentAttemptId!)
+  assert.equal(crashed.phase, 'elaborating')
+  assert.equal(crashed.control, 'run')
+  assert.equal(crashedAttempt.status, 'running')
+  assert.equal(crashedAttempt.failure, null)
+  const wrapper = crashedAttempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString('utf8')))
+    .find(stage => stage.version === 'sync-stage-v1' && stage.stage === 'elaboration')
+  assert.ok(wrapper, '崩溃前已保存真实stage wrapper')
+  assert.equal(wrapper.operationId, f.operation.id)
+  assert.equal(wrapper.attemptId, crashedAttempt.id)
+  assert.equal(wrapper.inputId, crashed.input.id)
+  assert.equal(wrapper.policyDigest, crashed.policyDigest)
+  assert.equal(wrapper.readSetDigest, crashed.readSetDigest)
+  assert.equal(wrapper.baselineSelectionRef.sha256, writeEvidence(f.input.source.commonDir, crashed.baselineSelection).sha256)
+  assert.equal(wrapper.composedTree, crashedAttempt.composedInput!.tree)
+  assert.equal(wrapper.composedContentDigest, crashedAttempt.composedInput!.contentDigest)
+  const saved = JSON.parse(readEvidence(f.input.source.commonDir, wrapper.resultRef).toString('utf8')) as ElaborationResult
+  if (kind === 'candidate-seed') {
+    assert.equal(saved.status, 'exhausted')
+    assert.equal(saved.failure!.code, 'repair_budget_exhausted')
+    assert.ok(saved.rounds.at(-1)!.candidate)
+    assert.ok(saved.rounds.at(-1)!.findings.some(finding => finding.severity === 'error'))
+  } else {
+    assert.equal(saved.status, 'failed')
+    assert.equal(saved.failure!.code, 'structured_output_format_invalid')
+    assert.equal(saved.candidateDigest, null)
+    assert.equal(saved.rounds.at(-1)!.candidate, null)
+  }
+
+  f.closeForRestart()
+  const originalNow = Date.now, coldNow = originalNow() + 60_000
+  Date.now = () => coldNow
+  try {
+    const protocol = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => protocol.close())
+    store = new SyncStore(protocol, { readBlob: ref => readEvidence(f.input.source.commonDir, ref) }); f.useStore(store)
+    const result = await runSyncOperation(store, f.operation.id, f.options)
+    const attempts = store.listAttempts(f.operation.id)
+    assert.equal(attempts.length, 2, '冷重启先expired原attempt，再领取新attempt')
+    assert.equal(attempts[0].status, 'superseded')
+    assert.equal(attempts[0].failure, null, '不伪造或改写历史attempt.failure')
+    assert.equal(attempts[1].composedInput!.tree, crashedAttempt.composedInput!.tree)
+    assert.ok(retryPrompt)
+    if (kind === 'candidate-seed') {
+      assert.ok(retryPrompt.includes(JSON.stringify(saved.rounds.at(-1)!.candidate)))
+      assert.ok(retryPrompt.includes(JSON.stringify(saved.rounds.at(-1)!.output)))
+      const provenance = attempts[1].checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString('utf8')))
+        .find(stage => stage.stage === 'elaboration:repair-provenance')
+      assert.deepEqual(JSON.parse(readEvidence(f.input.source.commonDir, provenance.resultRef).toString('utf8')), { fromOperationId: f.operation.id, fromAttemptId: attempts[0].id, resultRef: wrapper.resultRef, candidateDigest: saved.candidateDigest })
+    } else {
+      assert.ok(retryPrompt.includes(wrapper.resultRef.sha256))
+      assert.ok(retryPrompt.includes('P1原生输出不是严格JSON'))
+    }
+    assert.ok(f.calls.some(call => call.purpose === 'code_review'))
+    assert.equal(result.operation.callsUsed, f.calls.length)
+    assert.equal(result.operation.policyDigest, f.operation.policyDigest)
+    assert.equal(result.operation.input.id, f.operation.input.id)
+    assert.deepEqual(store.listRecoverableResources(), [])
+    assert.equal(store.listJournals(f.operation.id).length, 0)
+    assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
+    assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+  } finally { Date.now = originalNow }
+})
+
 for (const mode of ['live', 'restart', 'input', 'readset', 'partition', 'review-capacity', 'needs_input', 'conflict'] as const) test(`v2局部空生成失败续修 ${mode} 只越过严格同绑定空round并优先最近业务拒绝`, async t => {
   const f = await fixture(t, { maxAttempts: 4, maxCalls: 16, maxRepairs: 3, timeoutMs: 180000 }, false, original, 'project', original, {
     version: 'sync-coordinator-v2', direction: 'spec_to_code', partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 }, sourcePaths: ['src'],
@@ -2835,7 +2926,7 @@ for (const mode of ['live', 'restart', 'input', 'readset', 'partition', 'review-
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
 })
 
-for (const mode of ['format', 'format-restart', 'format-pause', 'format-pause-restart', 'format-pause-readset', 'format-pause-selection', 'seed-pause', 'seed-pause-restart', 'seed-pause-readset', 'seed-pause-selection', 'format-input', 'format-readset', 'format-partition', 'format-selection', 'format-unsettled', 'parent-structure', 'parent-review', 'parent-restart', 'parent-capacity-clear', 'parent-lease-clear', 'accepted-leaf', 'accepted-leaf-restart', 'accepted-leaf-readset', 'accepted-leaf-input', 'accepted-leaf-unreviewed', 'leaves', 'leaves-restart', 'input', 'ancestor', 'readset', 'selection', 'foreign', 'policy', 'unsettled', 'aggregate'] as const) test(`v2局部分区续修 ${mode} 绑定原候选诊断而不串区`, async t => {
+for (const mode of ['format', 'format-restart', 'format-pause', 'format-pause-restart', 'format-pause-readset', 'format-pause-selection', 'seed-pause', 'seed-pause-restart', 'seed-pause-readset', 'seed-pause-selection', 'format-cold-restart', 'seed-cold-restart', 'format-input', 'format-readset', 'format-partition', 'format-selection', 'format-unsettled', 'parent-structure', 'parent-review', 'parent-restart', 'parent-capacity-clear', 'parent-lease-clear', 'accepted-leaf', 'accepted-leaf-restart', 'accepted-leaf-readset', 'accepted-leaf-input', 'accepted-leaf-unreviewed', 'leaves', 'leaves-restart', 'input', 'ancestor', 'readset', 'selection', 'foreign', 'policy', 'unsettled', 'aggregate'] as const) test(`v2局部分区续修 ${mode} 绑定原候选诊断而不串区`, async t => {
   const parentPath = '.spec/project/spec.md', parentId = 'REQ-PARENT-01', otherPath = '.spec/project/beta/import-contract/spec.md'
   const candidateSeed = mode.startsWith('seed-'), pauseControl = mode.includes('-pause'), resumeNumber = pauseControl ? 3 : 2
   const threeAttempts = mode.endsWith('-clear') || pauseControl
@@ -2851,11 +2942,11 @@ for (const mode of ['format', 'format-restart', 'format-pause', 'format-pause-re
     version: 'sync-coordinator-v2', direction: 'spec_to_code', intentNodeId: 'project',
     targets: [{ nodeId: 'project', path: parentPath, rawSource: raw }, { nodeId: 'export-contract', path: contractPath }, { nodeId: 'import-contract', path: otherPath }],
     partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 2 }, sourcePaths: ['src'], verifications, mandatoryTests,
-  }, undefined, 'spec', undefined, ['selection', 'format-selection', 'format-pause-selection', 'seed-pause-selection'].includes(mode), { [parentPath]: parentBefore, [otherPath]: rawOnly(other), 'src/beta/import.js': readFileSync(new URL('src/export.js', fixturePath), 'utf8'), 'tests/import.test.mjs': readFileSync(new URL('tests/export.test.mjs', fixturePath), 'utf8').replaceAll('EXPORT', 'IMPORT').replaceAll('src/export.js', 'src/beta/import.js') })
+  }, undefined, 'spec', undefined, ['selection', 'format-selection', 'format-pause-selection', 'seed-pause-selection', 'format-cold-restart', 'seed-cold-restart'].includes(mode), { [parentPath]: parentBefore, [otherPath]: rawOnly(other), 'src/beta/import.js': readFileSync(new URL('src/export.js', fixturePath), 'utf8'), 'tests/import.test.mjs': readFileSync(new URL('tests/export.test.mjs', fixturePath), 'utf8').replaceAll('EXPORT', 'IMPORT').replaceAll('src/export.js', 'src/beta/import.js') })
   const admitted = f.operation
   let store = f.store
   const formatFailure = mode.startsWith('format'), formatDenied = ['format-input', 'format-readset', 'format-partition', 'format-selection', 'format-unsettled', 'format-pause-readset', 'format-pause-selection'].includes(mode)
-  const parentFailure = mode.startsWith('parent-'), restart = mode.endsWith('restart'), acceptedLeaf = mode.startsWith('accepted-leaf')
+  const parentFailure = mode.startsWith('parent-'), coldCrash = mode.endsWith('cold-restart'), restart = mode.endsWith('restart') && !coldCrash, acceptedLeaf = mode.startsWith('accepted-leaf')
   const calls: { attempt: number; nodeId: string; purpose: string; prompt: string; inputDigest: string }[] = []
   f.transform((output, request) => {
     const attempt = store.readAttempt(store.readOperation(admitted.id).currentAttemptId!)
@@ -2869,7 +2960,7 @@ for (const mode of ['format', 'format-restart', 'format-pause', 'format-pause-re
         if (pauseControl && attempt.number === 2 && !parent) { store.requestControl(admitted.id, 'pause'); throw Object.assign(new Error('正式pause中断在途owner，未产生局部结果'), { code: 'cancelled' }) }
         const shouldRepair = attempt.number === resumeNumber && (parentFailure ? parent : !parent && (!acceptedLeaf || nodeId === 'import-contract'))
         const denied = ['seed-pause-readset', 'seed-pause-selection'].includes(mode) || ['input', 'readset', 'selection', 'aggregate'].includes(mode) && nodeId === 'export-contract' || ['ancestor', 'unsettled'].includes(mode)
-        if (shouldRepair && !denied && !formatFailure) {
+        if (shouldRepair && !denied && !formatFailure && !coldCrash) {
           assert.ok(request.prompt.includes('已结算的拒绝候选'), `下一attempt ${nodeId}必须收到原局部候选`)
           assert.ok(request.prompt.includes(`候选-${nodeId}-A1`), '必须收到原完整候选正文')
           assert.ok(request.prompt.includes(candidateSeed ? 'reference-kind' : parentFailure && mode === 'parent-structure' ? 'dependency-cycle' : `repair-${nodeId}`), '必须保留原结构或独审具体诊断')
@@ -2878,8 +2969,8 @@ for (const mode of ['format', 'format-restart', 'format-pause', 'format-pause-re
         if (shouldRepair && denied) assert.ok(!request.prompt.includes('已结算的拒绝候选'), '绑定变化或聚合结果不能作为本叶续修seed')
         if (formatFailure && !parent) {
           const ownMessage = `原Native-${nodeId}-单JSON失败，保留REQ/AC且不授予decision权限`
-          if (attempt.number === 1 && nodeId === 'export-contract') throw new StructuredSessionError('structured_output_format_invalid', ownMessage, { sessionId: 'format-generator', threadId: 'format-generator-thread', turnId: 'format-turn' })
-          if (attempt.number === resumeNumber) {
+          if (attempt.number === 1 && (nodeId === 'export-contract' || coldCrash)) throw new StructuredSessionError('structured_output_format_invalid', ownMessage, { sessionId: 'format-generator', threadId: 'format-generator-thread', turnId: 'format-turn' })
+          if (attempt.number === resumeNumber && !coldCrash) {
             if (formatDenied && (nodeId === 'export-contract' || mode === 'format-unsettled' || pauseControl)) assert.ok(!request.prompt.includes(ownMessage), '输入/分区/读取/选择改变或未结算不能承接旧格式诊断')
             else { assert.ok(request.prompt.includes(ownMessage), `${nodeId}须收到自己的精确格式失败`); assert.match(request.prompt, /structured_output_format_invalid/) }
             assert.ok(!request.prompt.includes(`原Native-${nodeId === 'export-contract' ? 'import-contract' : 'export-contract'}-`), '不能收到兄弟格式失败')
@@ -2967,6 +3058,7 @@ for (const mode of ['format', 'format-restart', 'format-pause', 'format-pause-re
         const resultRef = mode === 'aggregate' ? stages.find(stage => stage.stage === 'elaboration').resultRef : writeEvidence(f.input.source.commonDir, prior)
         store.checkpoint(fence, resultRef); store.checkpoint(fence, writeEvidence(f.input.source.commonDir, { ...local, resultRef }))
       }
+      if (coldCrash) throw new Error('SavedElab已CAS持久化，attempt.failure写入前模拟进程中断')
       const failed = recordFailure(fence, issue)
       if (restart && !pauseControl) throw new Error('fixture在已持久失败之后模拟进程退出')
       return failed
@@ -2977,7 +3069,39 @@ for (const mode of ['format', 'format-restart', 'format-pause', 'format-pause-re
     const attempts = store.listAttempts.bind(store)
     store.listAttempts = id => attempts(id).map(attempt => attempt.number === 1 && store.readOperation(id).currentAttemptId !== attempt.id ? { ...attempt, status: 'running' as const } : attempt)
   }
-  let result = await runSyncOperation(store, admitted.id, f.options)
+  let result: Awaited<ReturnType<typeof runSyncOperation>>
+  if (coldCrash) {
+    await assert.rejects(runSyncOperation(store, admitted.id, f.options), /attempt.failure写入前模拟进程中断/)
+    const interrupted = store.readAttempt(store.readOperation(admitted.id).currentAttemptId!)
+    assert.equal(interrupted.status, 'running'); assert.equal(interrupted.failure, null)
+    const persisted = interrupted.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
+      .filter(stage => stage.stage?.startsWith('partition:') && stage.stage.endsWith(':elaboration'))
+    assert.ok(persisted.length > 0)
+    const ownerWrapper = persisted.find(stage => {
+      const result = JSON.parse(readEvidence(f.input.source.commonDir, stage.resultRef).toString()) as ElaborationResult
+      return mode.startsWith('seed-') ? result.status === 'exhausted' : result.status === 'failed'
+    })
+    assert.ok(ownerWrapper)
+    assert.equal(ownerWrapper.operationId, admitted.id); assert.equal(ownerWrapper.attemptId, interrupted.id)
+    assert.equal(ownerWrapper.inputId, store.readOperation(admitted.id).input.id); assert.equal(ownerWrapper.policyDigest, f.operation.policyDigest)
+    assert.equal(JSON.parse(readEvidence(f.input.source.commonDir, ownerWrapper.baselineSelectionRef).toString()).digest, store.readOperation(admitted.id).baselineSelection!.digest)
+    assert.ok(persisted.some(stage => {
+      const result = JSON.parse(readEvidence(f.input.source.commonDir, stage.resultRef).toString()) as ElaborationResult
+      return mode.startsWith('seed-') ? result.status === 'exhausted' && result.failure?.code === 'repair_budget_exhausted' && !!result.rounds.at(-1)?.candidate
+        : result.status === 'failed' && result.failure?.code === 'structured_output_format_invalid' && result.candidateDigest === null
+    }), '真实P1结果及attempt:null failure共存于冷中断记录')
+    f.closeForRestart()
+    const originalNow = Date.now, coldNow = originalNow() + 60_000
+    Date.now = () => coldNow
+    try {
+      const protocol = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => protocol.close())
+      store = new SyncStore(protocol, { readBlob: ref => readEvidence(f.input.source.commonDir, ref) }); f.useStore(store)
+      result = await runSyncOperation(store, admitted.id, f.options)
+      const resumed = store.listAttempts(admitted.id)
+      assert.equal(resumed.length, 2)
+      assert.equal(resumed[0].status, 'superseded'); assert.equal(resumed[0].failure, null)
+    } finally { Date.now = originalNow }
+  } else result = await runSyncOperation(store, admitted.id, f.options)
   if (mode === 'parent-lease-clear') {
     assert.equal(result.status, 'recovery_required')
     const leaseAttempt = store.readAttempt(result.operation.currentAttemptId!)
@@ -3005,6 +3129,19 @@ for (const mode of ['format', 'format-restart', 'format-pause', 'format-pause-re
     store = new SyncStore(protocol, { readBlob: ref => readEvidence(f.input.source.commonDir, ref) }); f.useStore(store)
     result = await runSyncOperation(store, admitted.id, f.options)
   }
+  if (coldCrash) {
+    const replayed = calls.filter(call => call.attempt === 2 && call.purpose === 'elaboration_generate' && call.nodeId !== 'project')
+    assert.equal(replayed.length, 2)
+    for (const call of replayed) {
+      const category = call.nodeId === 'export-contract' ? 'EXPORT' : 'IMPORT'
+      const own = mode.startsWith('seed-') ? `FLOW-${category}-01.req` : `原Native-${call.nodeId}-单JSON失败`
+      assert.ok(call.prompt.includes(own), `冷恢复必须把同owner的原P1拒绝反馈给${call.nodeId}`)
+      const sibling = `FLOW-${category === 'EXPORT' ? 'IMPORT' : 'EXPORT'}-01.req`
+      assert.ok(!call.prompt.includes(sibling), 'P1原件不能跨owner串用')
+      if (mode.startsWith('seed-')) assert.ok(call.prompt.includes('已结算的拒绝候选'))
+      else assert.match(call.prompt, /structured_output_format_invalid/)
+    }
+  }
   if (mode === 'foreign' || mode === 'policy') {
     assert.equal(result.failure!.code, 'stage_binding')
     assert.equal(calls.filter(call => call.attempt === 2 && call.nodeId === 'export-contract').length, 0)
@@ -3018,6 +3155,30 @@ for (const mode of ['format', 'format-restart', 'format-pause', 'format-pause-re
   const stages = attempts.map(attempt => attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())))
   const retryStages = stages[pauseControl ? 2 : 1]
   const localStages = retryStages.filter(stage => stage.stage?.startsWith('partition:') && stage.stage.endsWith(':elaboration'))
+  if (coldCrash) {
+    const parentStage = stages[0].find(stage => stage.stage?.startsWith('partition:') && stage.stage.endsWith(':elaboration') && JSON.parse(readEvidence(f.input.source.commonDir, stage.resultRef).toString()).phase === 'interface_seed')
+    assert.ok(parentStage)
+    assert.deepEqual(retryStages.find(stage => stage.stage === parentStage.stage).resultRef, parentStage.resultRef, '冷恢复沿用原父接口accepted ref')
+    for (const call of calls.filter(item => item.attempt === 2 && item.purpose === 'elaboration_generate' && item.nodeId !== 'project')) {
+      const source = stages[0].find(stage => {
+        if (!stage.stage?.startsWith('partition:') || !stage.stage.endsWith(':elaboration')) return false
+        const saved = JSON.parse(readEvidence(f.input.source.commonDir, stage.resultRef).toString()) as ElaborationResult
+        return mode.startsWith('seed-')
+          ? saved.changes.some(change => change.nodeId === call.nodeId)
+          : saved.failure?.message.includes(`原Native-${call.nodeId}-单JSON失败`)
+      })
+      assert.ok(source, `原owner ${call.nodeId} 的SavedElab结果必须存在`)
+      const saved = JSON.parse(readEvidence(f.input.source.commonDir, source.resultRef).toString()) as ElaborationResult
+      if (mode.startsWith('seed-')) {
+        assert.ok(call.prompt.includes(JSON.stringify(saved.rounds.at(-1)!.candidate)))
+        assert.ok(call.prompt.includes(JSON.stringify(saved.rounds.at(-1)!.output)))
+      } else {
+        assert.ok(call.prompt.includes(source.resultRef.sha256), 'diagnostic prompt须绑定原SavedElab resultRef')
+        assert.match(call.prompt, /structured_output_format_invalid/)
+        assert.ok(call.prompt.includes(saved.failure!.message))
+      }
+    }
+  }
   if (formatFailure && !formatDenied) {
     const parentStage = stages[0].find(stage => stage.stage?.startsWith('partition:') && stage.stage.endsWith(':elaboration') && JSON.parse(readEvidence(f.input.source.commonDir, stage.resultRef).toString()).phase === 'interface_seed')
     assert.deepEqual(retryStages.find(stage => stage.stage === parentStage.stage).resultRef, parentStage.resultRef, '已accept父接口沿真实原ref承接')
