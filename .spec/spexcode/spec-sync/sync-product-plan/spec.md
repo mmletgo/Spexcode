@@ -73,3 +73,5 @@ Native worktree P0分析与独审共用业务语义：可由raw、源码和完�
 已真实停止、输入与 Native 身份绑定的原生结构化 JSON 语法失败，以及仅 version6/native-worktree 在精确模型、输入、消息、成功终态、idle/close 与 exit 均核验后出现的 AJV schema 不符，沿现有精确格式错误码进入格式修复与独审循环；后者复用 [[zcode-structured-runtime]] 的 `structured_output_format_invalid` 并保留 AJV 字段/路径诊断。原失败输出和资源证明保留，不补造业务结果；version4/5 冻结路径 schema 不符仍保持旧分类。
 
 真实原生协议成功但 Git 结果违反 read/edit 合约时仍为业务失败；精确 native_worktree_result_invalid 沿原资源结算、逐轮修复与独审闭环反馈真实 Git 差异，在新工作树重做。旧失败工作树、原生完成缓存及历史失败保留，不由程序恢复 Git 或补签通过。
+
+局部分区全部accept仍不能替代全局seal。封口error绑定原aggregate/局部ref及真实输入后交回所属owner、接口后代与引用依赖重新生成和独审，保无关accept；warning不升error，父不补FLOW、不降覆盖或作者授权。无法路由或同候选同error无新派发时typed停止；只有同selection、无任何检查点/派发/业务/会话锚的superseded空控制attempt可越过，旧真实证据仍完整重验，所有attempt/calls仍计原预算。

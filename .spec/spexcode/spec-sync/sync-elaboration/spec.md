@@ -111,3 +111,5 @@ Native每轮生成复用与历史受限路径相同的repairContext，收到上�
 同一诊断接缝也保留候选渲染前的具体结构拒绝：已结算repairable来源必须为exhausted/repair_budget_exhausted、末轮candidate:null且有明确error发现（如重复业务行rows_patch）；不伪造候选seed，原schema和结构门槛保持。
 
 Native完整叶生成提示明确区分引用类型：FLOW.req只引用REQ，并直接承接各级实际适用祖先REQ，AC.covers也直接承接这些祖先REQ；实际适用祖先RULE由AC.covers直接承接，或经本叶TR.rules引用并由对应AC覆盖该TR。不能将REQ/RULE合写为FLOW.req的合法集合，不引用兄弟或不适用义务。interface_seed仍不展开FLOW/AC；Legacy有效模板、schema、reference-kind硬门、原AC授权与独审范围保持。
+
+readonlySpecRepair的partition_seal分支复用已接受局部诊断接缝，绑定真实失败aggregate与其局部原件，仅传severity:error和历史JSON/review；保留原业务写权限，不强制改变implementationWritePaths。父仍仅审接口，真实full owner修复适用承接，原raw、稳定ID及作者AC/VERIFY授权门保持；旧accept不成为失败seed或全局批准。

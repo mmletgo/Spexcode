@@ -56,3 +56,5 @@ raw-only父接口回归使用三节点Git夹具：只有无自身源码writer且
 
 
 局部分区封口回归以真实四节点Git树复现只读父加当前叶时误报兄弟REQ缺FLOW/AC/code，再证明从真实composed补程序全树后通过；模型仍只有原局部files/context/targets，changes仅本叶。候选去掉实际祖先FLOW引用、合法retire目标后旧REQ确实消失而父覆盖缺失、完整树真实删除兄弟承接、已读范围源码缺席都继续拒绝，旧target不能被补回提供假覆盖。
+
+全局seal反馈回归按真实node/path/ID及引用依赖只路由error，warning与无关owner不失效；无法定位唯一writer时typed停止。

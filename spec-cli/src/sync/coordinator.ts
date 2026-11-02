@@ -19,7 +19,7 @@ import type { FileMutex } from './file-mutex.js'
 import { checkGenerationContractIntent, readFrozenContracts } from './frozen-contracts.js'
 import { decisionAuthorizationErrors, sameContractBusinessMeaning } from './contract-evolution.js'
 import type { FrozenContracts } from './frozen-contracts.js'
-import { implementationGenerationDispatch, completeSyncPartitionPlan, analyzeSyncPartitions, elaborateSyncPartitions, generateSyncPartitions } from './partition-execution.js'
+import { implementationGenerationDispatch, completeSyncPartitionPlan, analyzeSyncPartitions, elaborateSyncPartitions, generateSyncPartitions, partitionSealRepairOwners } from './partition-execution.js'
 import type { PartitionCheckpoints, PartitionAnalysisFailure, PartitionAnalysisFailures } from './partition-execution.js'
 import { planSyncPartitions } from './partitioning.js'
 import type { SyncPartitionPlan } from './partitioning.js'
@@ -952,6 +952,39 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         }
         return null
       }
+      type SealRepairSource = { attempt: SyncAttempt; result: SavedElaboration; resultRef: BlobRef; locals: Map<string, { result: SavedElaboration; resultRef: BlobRef }>; owners: Map<string, ContractFinding[]> }
+      let sealRepairSource: SealRepairSource | null | undefined
+      const loadSealRepairSource = (): SealRepairSource | null => {
+        if (sealRepairSource !== undefined) return sealRepairSource
+        sealRepairSource = null
+        if (!partitions) return null
+        for (const prior of store.listAttempts(operation.id).filter(item => item.number < attempt!.number).reverse()) {
+          if (!['failed', 'superseded', 'settled'].includes(prior.status) || prior.failure?.kind !== 'repairable' && !(prior.status === 'superseded' && !prior.failure)) return null
+          if (prior.operationId === operation.id && prior.status === 'superseded' && !prior.failure && !prior.checkpointRefs.length && !prior.dispatchPlans.length && prior.composedInput === null && prior.candidate === null && prior.verification === null && prior.currentSession === null && prior.publicationBase === undefined && prior.baselineSelectionDigest === operation.baselineSelection?.digest) continue
+          const plan = partitionStage<SyncPartitionPlan>(store, operation, prior, 'partition-plan')
+          if (!plan || canonical(plan.result) !== canonical(partitions) || !priorElaborationInputMatches(prior, { planDigest: partitions.digest, partitionId: '', ...(analysis ? { analysisRef: analysis.ref } : {}) })) return null
+          const source = partitionStage<SavedElaboration>(store, operation, prior, 'elaboration')
+          if (source?.result.structurePassed && source.result.reviewPassed && !source.result.failure) return null
+          if (!source || source.result.failure?.code !== 'partition_final_seal_failed') continue
+          const result = source.result, seal = result.partitionSeal
+          if (result.phase !== 'partitioned_final' || result.structurePassed || !result.reviewPassed || !seal || seal.passed || result.candidateDigest !== seal.candidateDigest || !elaborationComposedBinding(operation, prior, result, view.composed)
+            || seal.candidateDigest !== contentHash(JSON.stringify({ inputDigest: seal.inputDigest, changes: seal.changes, applicability: seal.applicability, nodeChanges: seal.nodeChanges }))) fail('partition_final_seal_binding', '全局seal诊断缺少原失败候选及精确组合树绑定')
+          const locals = new Map<string, { result: SavedElaboration; resultRef: BlobRef }>()
+          for (const owner of result.partitionEvidence ?? []) {
+            const local = partitionStage<SavedElaboration>(store, operation, prior, `partition:${owner.partitionId}:elaboration`)
+            if (!local || local.resultRef.sha256 !== owner.resultRef.sha256 || local.result.partitionBinding?.planDigest !== partitions.digest || local.result.partitionBinding.partitionId !== owner.partitionId || !local.result.structurePassed || !local.result.reviewPassed || local.result.failure || local.result.rounds.at(-1)?.review?.verdict !== 'accept' || locals.has(owner.partitionId)) fail('partition_final_seal_binding', '全局seal诊断缺少同计划真实已审局部原件')
+            const round = local.result.rounds.at(-1)!
+            if (!round.candidate || local.result.candidateDigest !== round.candidateDigest || round.review!.inputDigest !== local.result.inputDigest || round.review!.candidateDigest !== round.candidateDigest || round.candidate.inputDigest !== local.result.inputDigest || round.candidateDigest !== contentHash(JSON.stringify(round.candidate)) || round.candidate.changes.length !== local.result.changes.length || round.candidate.changes.some(change => !local.result.changes.some(saved => saved.nodeId === change.nodeId && saved.path === change.path && saved.beforeDigest === change.beforeDigest && saved.source === change.source))) fail('partition_final_seal_binding', '全局seal局部原件缺少真实候选与独审摘要绑定')
+            locals.set(owner.partitionId, local)
+          }
+          if (locals.size !== partitions.partitions.length || partitions.partitions.some(partition => !locals.has(partition.id))) fail('partition_final_seal_binding', '全局seal诊断没有完整分区来源')
+          const owners = partitionSealRepairOwners(partitions, result, new Map([...locals].map(([id, local]) => [id, local.result])))
+          if (!owners.size) fail('partition_final_seal_unroutable', '失败全局seal没有可反馈的真实error')
+          sealRepairSource = { attempt: prior, ...source, locals, owners }
+          return sealRepairSource
+        }
+        return null
+      }
       const partitionCheckpoints: PartitionCheckpoints = {
         load: <T>(key: string) => stage<T>(store, operation, store.readAttempt(attempt!.id), key),
         loadAcceptedCandidateReview: (key, plan, input, candidate, builders, current) => {
@@ -1014,6 +1047,15 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           if (prior.changes.some(change => !within(change.path, options.plan.writePaths) || options.plan.mandatoryTests.some(test => overlap(change.path, test.testPath)))) fail('readonly_spec_repair_binding', '只读V1 owner目标越过冻结授权')
           saveStage(store, fence!, `${key}:readonly-repair-provenance`, { fromAttemptId: sourceAttempt.id, resultRef: owner.resultRef, generationRef: readonlyOwnerRepair!.generationRef })
           return { prior, repair: { ...(readonlyOwnerRepair!.kind ? { kind: readonlyOwnerRepair!.kind, reviewEvidence: readonlyOwnerRepair!.reviewEvidence } : {}), baseInputDigest: inputDigest, candidateDigest: readonlyOwnerRepair!.candidateDigest, generationRef: readonlyOwnerRepair!.generationRef, acceptedRef: owner.resultRef, changes: prior.changes, output: round.output, review: round.review, findings } }
+        },
+        loadPartitionSealRepair: (key, binding, inputDigest) => {
+          const source = loadSealRepairSource(), local = source?.locals.get(binding.partitionId), findings = source?.owners.get(binding.partitionId)
+          if (!source || !local || !findings) return null
+          const prior = local.result, round = prior.rounds.at(-1)!
+          if (canonical(prior.partitionBinding) !== canonical(binding) || (prior.readonlySpecRepair?.baseInputDigest ?? prior.inputDigest) !== inputDigest) return null
+          if (prior.changes.some(change => !within(change.path, options.plan.writePaths) || options.plan.mandatoryTests.some(test => overlap(change.path, test.testPath)))) fail('partition_final_seal_binding', '全局seal返修owner越过原冻结写范围')
+          saveStage(store, fence!, `${key}:readonly-repair-provenance`, { fromAttemptId: source.attempt.id, resultRef: local.resultRef, generationRef: source.resultRef })
+          return { prior, repair: { kind: 'partition_seal', baseInputDigest: inputDigest, candidateDigest: source.result.candidateDigest!, generationRef: source.resultRef, acceptedRef: local.resultRef, changes: prior.changes, output: round.output, review: round.review, findings } }
         },
         loadAcceptedInterfaceSeed: (key, binding, inputDigest) => {
           const readonly = readonlyAccepted(key, binding, inputDigest)
@@ -1221,6 +1263,12 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         const kind: SyncFailure['kind'] = unsupported ? 'unsupported' : elaboration.status === 'conflict' ? 'conflict' : elaboration.status === 'needs_input' ? 'missing_input' : 'repairable'
         const issue = failure(elaboration.failure?.code ?? 'elaboration_failed', elaboration.failure?.message ?? '细化结构或独立评审未通过', kind, [writeEvidence(operation.input.source.commonDir, elaboration)])
         if (stopped) fail('cancelled', issue.message, issue.evidenceRefs)
+        if (elaboration.failure?.code === 'partition_final_seal_failed') {
+          const source = loadSealRepairSource(), currentAttempt = store.readAttempt(attempt.id)
+          const previous = source?.result ?? store.listAttempts(operation.id).filter(prior => prior.number < attempt!.number && ['failed', 'superseded', 'settled'].includes(prior.status)).reverse().map(prior => stage<SavedElaboration>(store, operation, prior, 'elaboration')).find(result => result?.failure?.code === 'partition_final_seal_failed')
+          const owners = source ? [...source.owners.keys()] : []
+          if (previous?.candidateDigest === elaboration.candidateDigest && canonical(previous.partitionSeal!.findings.filter(finding => finding.severity === 'error')) === canonical(elaboration.partitionSeal!.findings.filter(finding => finding.severity === 'error')) && !currentAttempt.dispatchPlans.some(dispatch => dispatch.purpose.startsWith('elaboration_') && (!owners.length || owners.some(owner => dispatch.key.startsWith(`sync:${attempt!.id}:elaborate:partition:${owner}:`))))) fail('partition_final_seal_stalled', '同一全局候选和error没有对应owner新派发，停止缓存重播', issue.evidenceRefs)
+        }
         store.recordFailure(fence, issue)
         if (kind !== 'repairable') return current(unsupported ? 'unsupported' : undefined, issue)
         seed = elaborationRepairSeed(elaboration, `sync:${attempt.id}:elaborate`)
