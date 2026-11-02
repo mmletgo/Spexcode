@@ -9,8 +9,10 @@ import type { Acceptance, ContractFinding } from '@spexcode/spec-core/contracts'
 import { CANDIDATE_RESPONSE_SCHEMA, verifyCandidate } from './candidate.js'
 import type { CandidateChanges } from './candidate.js'
 import type { ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
-import { GENERATION_REVIEW_SCHEMA, runGeneration } from './generation.js'
+import { GENERATION_REVIEW_SCHEMA, generationReviewRequest, runGeneration } from './generation.js'
 import { candidateReviewSchema } from './candidate-review.js'
+import { rejectedFinalOutput, StructuredSessionError } from '../session-structured-policy.js'
+import { nativeWorktreePrompt } from '../native-worktree-runtime.js'
 import type { GenerationInput, GenerationReview } from './generation-types.js'
 import { captureInputSnapshot, contentHash, readObject, readTree, writeEvidence, writeObject, writeTree } from './snapshot.js'
 
@@ -547,4 +549,41 @@ test('native worktree可读取未投影源码，已审Spec可见，真实Git dif
   assert.equal(candidate.has('unrelated.js'), false)
   assert.equal(execFileSync('git', ['-C', source.root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), originalHead)
   assert.equal(readFileSync(join(source.root, 'src/export.js'), 'utf8'), 'later working source\n')
+})
+
+for (const nativeWorktree of [false, true]) test(`格式续审只读诊断保完整原final与schema，native=${nativeWorktree}`, async t => {
+  const source = await input(t), native = runner(source)
+  const built = await runGeneration(source, { runner: native.run, validateCandidate: valid })
+  source.nativeWorktree = nativeWorktree
+  if (nativeWorktree) source.model = 'zcode:fixture/model'
+  const originalRequest = generationReviewRequest(source, built.candidate!).request
+  const final = '原先评审结果如下：\n' + JSON.stringify(review(native.calls[1]))
+  const identity = { sessionId: 'session-failed', threadId: 'thread-failed', turnId: 'turn-failed' }
+  const packet = rejectedFinalOutput(final, originalRequest.worktree ? nativeWorktreePrompt(originalRequest.prompt, originalRequest.worktree) : originalRequest.prompt, originalRequest, identity)
+  const failed = { ...built, status: 'failed', reviewOutput: null, review: null, reviewPassed: false, inputDigest: originalRequest.inputDigest, failure: { code: 'structured_output_format_invalid', message: 'invalid_json', ...identity, requestKey: originalRequest.requestKey, inputDigest: originalRequest.inputDigest } }
+  const { signal: _signal, ...request } = originalRequest
+  const repair = { resultRef: writeEvidence(source.snapshot.source.commonDir, failed), nativePlanRef: writeEvidence(source.snapshot.source.commonDir, { request }), checkpointRef: writeEvidence(source.snapshot.source.commonDir, { failure: { code: failed.failure.code, message: failed.failure.message, rejectedOutput: packet } }) }
+  const resumed = generationReviewRequest({ ...source, requestKey: source.requestKey + ':next', reviewRepair: repair }, built.candidate!).request
+  assert.notEqual(resumed.inputDigest, originalRequest.inputDigest)
+  assert.match(resumed.prompt, /未批准.*格式/)
+  if (nativeWorktree) {
+    const files = new Map(readTree(source.snapshot.source.commonDir, resumed.worktree!.tree).map(entry => [entry.path, readObject(source.snapshot.source.commonDir, entry.oid).toString('utf8')]))
+    assert.ok([...files].some(([path, body]) => path.startsWith('.spex-sync-diagnostics/') && body === final))
+    assert.ok([...files].some(([path, body]) => path.endsWith('.schema.json') && body === JSON.stringify(originalRequest.schema)))
+    for (const entry of readTree(source.snapshot.source.commonDir, built.candidate!.tree)) assert.equal(files.get(entry.path), readObject(source.snapshot.source.commonDir, entry.oid).toString('utf8'))
+  } else assert.ok(resumed.prompt.includes(final))
+  const secondPacket = rejectedFinalOutput('再次格式失败：' + final, resumed.worktree ? nativeWorktreePrompt(resumed.prompt, resumed.worktree) : resumed.prompt, resumed, identity)
+  const secondFailure = { ...failed, inputDigest: resumed.inputDigest, failure: { ...failed.failure, requestKey: resumed.requestKey, inputDigest: resumed.inputDigest } }
+  const { signal: _nextSignal, ...nextRequest } = resumed
+  const nextRepair = { resultRef: writeEvidence(source.snapshot.source.commonDir, secondFailure), nativePlanRef: writeEvidence(source.snapshot.source.commonDir, { request: nextRequest }), checkpointRef: writeEvidence(source.snapshot.source.commonDir, { failure: { code: failed.failure.code, message: failed.failure.message, rejectedOutput: secondPacket } }) }
+  const third = generationReviewRequest({ ...source, requestKey: source.requestKey + ':third', reviewRepair: nextRepair }, built.candidate!).request
+  if (nativeWorktree) {
+    const entries = readTree(source.snapshot.source.commonDir, third.worktree!.tree)
+    assert.ok(entries.some(entry => readObject(source.snapshot.source.commonDir, entry.oid).toString('utf8') === secondPacket.text))
+    for (const entry of readTree(source.snapshot.source.commonDir, built.candidate!.tree)) assert.deepEqual(entries.find(actual => actual.path === entry.path), entry)
+  } else assert.ok(third.prompt.includes(secondPacket.text))
+  assert.equal(secondPacket.ref, undefined)
+  assert.equal(packet.ref, undefined)
+  const foreign = { ...packet, threadId: 'another-owner' }
+  assert.throws(() => generationReviewRequest({ ...source, reviewRepair: { ...repair, checkpointRef: writeEvidence(source.snapshot.source.commonDir, { failure: { ...failed.failure, rejectedOutput: foreign } }) } }, built.candidate!), StructuredSessionError)
 })

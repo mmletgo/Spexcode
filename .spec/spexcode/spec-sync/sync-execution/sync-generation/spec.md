@@ -69,3 +69,5 @@ P2 接收操作固定 model 并传给生成与独立评审，effort 仍为 high�
 冻结输入及候选独审请求构造保留唯一接缝，供运行与严格历史accept来源校验共同复用。内部输入原件保留原键序及JSON省略的undefined槽，恢复Map后仍用原算法重算，不能因冷态序列化改变旧摘要或请求正文。旧requestKey只恢复原派发身份，其余raw/context/repairContext/model/schema/prompt不变且摘要逐字相等才具复用资格；不删除诊断字段或改写原摘要。
 
 生成或独审的 Native 失败值保留原 code/message 及真实 session/thread/turn、requestKey/inputDigest，供 [[sync-coordinator]] 复用 [[sync-native-run]] 的已结算 RPC 门禁；不以默认 repairable 或错误文本跳过停止证明。原业务生成、候选、独审和授权规则保持。
+
+reviewRepair仅是协调器已认证的同组失败result/NativePlan/checkpoint引用，进入该独审的完整冻结摘要。构造请求时再核原失败candidate、request/inputDigest及原final的schema/prompt/thread/turn；完整原文不解析为业务结果。native只读seed在真实candidate之外增加隔离诊断final与当前精确schema文件，实际candidateFiles/diff/tree及业务写权保持原值；非native接缝完整内联同一未批准诊断。Agent基于旧回答续审并重新返回严格JSON，原candidate/V1、独立session/thread、checkedIds覆盖及结果门不变。

@@ -28,6 +28,7 @@ import { composeInputSnapshots } from './composition.js'
 import { captureInputSnapshot, contentHash, readEvidence, readObject, readTree, writeEvidence } from './snapshot.js'
 import { buildSyncApplicationPlan } from './planning.js'
 import { verifyCandidate } from './candidate.js'
+import { nativeWorktreeResult } from '../native-worktree-runtime.js'
 import { readFrozenBehaviorContext } from '../../test/frozen-behavior-context.js'
 
 async function fixture(t: test.TestContext): Promise<{ input: GenerationInput; plan: SyncPartitionPlan; checkpoints: PartitionCheckpoints; root: string }> {
@@ -1812,4 +1813,44 @@ test('P1跨区共享新测试writer在任何代码生成前给出规划repair', 
   assert.equal(result.failure?.code, 'implementation_plan_conflict')
   assert.ok(result.failure!.message.includes(path))
   assert.equal(calls, 0)
+})
+
+test('普通Spec→Code已生成且V1通过的候选只续审，不重派builder或更换Git候选', async t => {
+  const { input, plan, checkpoints, root } = await fixture(t), failedKey = 'partition:part-export:candidate-review'
+  input.nativeWorktree = true; input.model = 'zcode:fixture/model'
+  const calls: ElaborationSessionRequest[] = []
+  const runtime = { calls, runner: async (request: ElaborationSessionRequest) => {
+    calls.push(request)
+    let output: unknown, worktree: ReturnType<typeof nativeWorktreeResult> | undefined
+    if (request.purpose === 'code_generate') {
+      const task = JSON.parse(request.prompt.split('任务:\n')[1]) as { allowedScope: { paths: string[] } }
+      const path = task.allowedScope.paths.find(path => path.startsWith('src/') && path.endsWith('.js'))!
+      const scratch = join(root, `.scratch-${calls.length}`)
+      execFileSync('git', ['-C', root, 'worktree', 'add', '--detach', scratch, request.worktree!.baseCommit], { stdio: 'pipe' })
+      writeFileSync(join(scratch, path), readFileSync(join(scratch, path), 'utf8') + '\n// actual scratch Git build\n')
+      execFileSync('git', ['-C', scratch, 'add', path], { stdio: 'pipe' }); execFileSync('git', ['-C', scratch, 'commit', '-m', 'actual controlled build'], { stdio: 'pipe' })
+      output = { summary: '真实scratch提交完成' }; worktree = nativeWorktreeResult(scratch, request.worktree!)
+    } else {
+      const binding = JSON.parse(request.prompt.split('候选绑定:\n')[1]) as { inputId: string; candidateDigest: string; requiredIds: string[] }
+      output = { inputId: binding.inputId, candidateDigest: binding.candidateDigest, verdict: 'accept', checkedIds: binding.requiredIds, findings: [] }
+    }
+    return { sessionId: `session-${request.requestKey}`, threadId: `thread-${request.requestKey}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)), ...(worktree ? { worktree } : {}) }
+  } }
+  let validations = 0
+  const first = await generateSyncPartitions(input, plan, 1, false, { runner: async request => {
+    if (request.purpose === 'code_review' && request.requestKey.includes(':final:part-export:')) throw Object.assign(new Error('format fixture'), { code: 'structured_output_format_invalid' })
+    return runtime.runner(request)
+  }, validateCandidate: async () => { validations++; return [] } }, checkpoints)
+  assert.equal(first.candidateValidated, true); assert.equal(first.status, 'failed')
+  const builderTraces = first.traces.filter(trace => trace.purpose !== 'code_review')
+  assert.ok(builderTraces.some(trace => trace.purpose === 'code_generate'), '首轮确有真实生成接缝及候选Git变化')
+  const actualEntries = verifyCandidate(input.snapshot.source.commonDir, first.candidate!)
+  assert.notDeepEqual(actualEntries.filter(entry => entry.path.startsWith('src/')), input.manifest.entries.filter(entry => entry.path.startsWith('src/')), '首轮scratch正常提交实际改变源码Git对象')
+  const before = runtime.calls.length, current = new Map<string, unknown>([['file-writer-plan', JSON.parse(readEvidence(input.snapshot.source.commonDir, first.fileWriterPlanRef!).toString())]])
+  const resumed: PartitionCheckpoints = { load: <T>(key: string) => current.get(key) as T ?? null, save: (key, value) => { current.set(key, value); return writeEvidence(input.snapshot.source.commonDir, value) }, loadAcceptedCandidateReview: key => key === failedKey ? null : checkpoints.load(key) }
+  const result = await generateSyncPartitions({ ...input, requestKey: 'next-review' }, plan, 1, false, { runner: async request => { assert.equal(request.purpose, 'code_review'); assert.ok(request.requestKey.includes(':final:part-export:')); return runtime.runner(request) }, reviewCandidate: first.candidate!, builderTraces, validateCandidate: async () => { validations++; return [] } }, resumed)
+  assert.equal(result.status, 'reviewed', JSON.stringify(result.failure))
+  assert.deepEqual(result.candidate, first.candidate); assert.equal(validations, 2)
+  assert.deepEqual(verifyCandidate(input.snapshot.source.commonDir, result.candidate!), actualEntries, '续审保全部path/mode/OID及absence')
+  assert.equal(runtime.calls.length - before, 1); assert.deepEqual(result.traces.filter(trace => trace.purpose !== 'code_review'), builderTraces)
 })

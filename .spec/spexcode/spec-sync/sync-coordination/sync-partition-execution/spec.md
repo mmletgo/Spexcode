@@ -82,3 +82,7 @@ Native局部P1的精确结构输出格式失败沿同一checkpoint接缝传递�
 全局seal的具体error沿真实局部node/path/ID路由；纯父接口还反馈其interfaceSeed已证明的后代source partition及真实引用依赖，不能要求父接口添加FLOW或豁免全局覆盖。受影响局部accept缓存让位于绑定原aggregate/local refs的partition_seal诊断，新生成和独审保持原raw、稳定ID、作者AC/VERIFY、源码与测试权限；未受影响owner原件继续承接。当前attempt已完成同诊断的新结果可正常重入，不把局部accept改写为失败seed；最终strict seal仍重新执行。
 
 实现文件分区的生成/独审失败保留原 Native session/thread/turn 与 requestKey/inputDigest，不让 aggregate 首失败抹去各局部故障身份；局部 candidate 命名空间保持，聚合失败不因此获得成功或续修资格。
+
+最终独审格式续修只经对应partition/edge的reviewRepair loader；成功组的input/prompt/schema/seed与原repairContext不注入兄弟格式错误，继续既有严格accept来源校验。真实新派发前以既有checkpoint记录该组完整冻结input原件，失败来源仅作诊断refs；当前candidate及所有局部和跨边覆盖仍重新核验，不把历史untrusted final当作accept或候选。
+
+已认证reviewCandidate续审复用原file-writer-plan与builderTraces、从实际候选Git差量重建结果变化，跳过实现规划/生成；两方向共用原候选、V1、发布基树和逐组/跨边独审门，不迁移局部builder接受缓存。

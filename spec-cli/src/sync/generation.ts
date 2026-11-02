@@ -5,6 +5,9 @@ export { GENERATION_REVIEW_SCHEMA } from './candidate-review.js'
 import type { Contract } from '@spexcode/spec-core/contracts'
 import { parseContract } from '@spexcode/spec-core/contracts'
 import { relationClaimsPath } from '@spexcode/spec-core'
+import { assertRejectedOutput, StructuredSessionError } from '../session-structured-policy.js'
+import { nativeWorktreePrompt } from '../native-worktree-runtime.js'
+import type { NativeRunCheckpoint, NativeRunPlan } from './native-run.js'
 import { importStageChanges, overlayStageTree, stageWorktree, STAGE_READING_INSTRUCTIONS } from './stage-worktree.js'
 import { CANDIDATE_RESPONSE_SCHEMA, freezeCandidate, isHostPrivatePath, verifyCandidate } from './candidate.js'
 import type { CandidateChanges } from './candidate.js'
@@ -149,6 +152,23 @@ export function generationReviewRequest(input: GenerationInput, candidate: Candi
     request.worktree = stageWorktree(input.snapshot.source.commonDir, input.snapshot.headCommit, candidate.tree)
     request.base = request.worktree.baseCommit
     request.prompt = `${STAGE_READING_INSTRUCTIONS} 独立审查当前工作树中的完整实际候选，沿调用方、完整测试断言与相关Spec重走义务；不采用构建者总结。只读，不修改文件。${CANDIDATE_REVIEW_INSTRUCTIONS}\n任务:\n${JSON.stringify(generationBrief(input))}\n候选绑定:\n${JSON.stringify({ inputId: input.snapshot.id, candidateDigest: candidate.digest, requiredIds: input.readyIds, actualIds: reviewBinding.actualIds, originalTree: candidate.baseTree, candidateTree: candidate.tree, changedPaths: changed.map(change => change.path) })}`
+  }
+  if (input.reviewRepair) {
+    const commonDir = input.snapshot.source.commonDir
+    const prior = JSON.parse(readEvidence(commonDir, input.reviewRepair.resultRef).toString()) as GenerationResult
+    const native = JSON.parse(readEvidence(commonDir, input.reviewRepair.nativePlanRef).toString()) as NativeRunPlan
+    const checkpoint = JSON.parse(readEvidence(commonDir, input.reviewRepair.checkpointRef).toString()) as NativeRunCheckpoint
+    const packet = checkpoint.failure?.rejectedOutput
+    if (!prior.failure || prior.reviewPassed || prior.review !== null || prior.reviewOutput !== null || prior.candidate?.digest !== candidate.digest || !prior.candidateValidated || prior.failure.requestKey !== native.request.requestKey || prior.failure.inputDigest !== native.request.inputDigest || prior.inputDigest !== native.request.inputDigest || native.request.purpose !== 'code_review' || checkpoint.failure?.code !== prior.failure.code || checkpoint.failure.message !== prior.failure.message) throw new StructuredSessionError('stale_result', 'review repair differs from its original failed candidate/request')
+    if (packet) assertRejectedOutput(packet, native.request.worktree ? nativeWorktreePrompt(native.request.prompt, native.request.worktree) : native.request.prompt, native.request, prior.failure)
+    const directory = `.spex-sync-diagnostics/${input.reviewRepair.resultRef.sha256}`
+    const diagnostic = `未批准的历史评审格式诊断：仅纠正同一候选的最终JSON；原回答不是accept或业务事实。原错误=${JSON.stringify({ code: checkpoint.failure.code, message: checkpoint.failure.message })}。精确schema=${directory}/review.schema.json${packet ? `；完整原final=${directory}/review.final.txt` : ''}。读取完整原final，沿已有检查继续本次独审；必要时依原候选纠正未批准判断，最终只返回符合schema的完整JSON。`
+    if (request.worktree) {
+      const sidecars = [{ path: `${directory}/review.schema.json`, source: JSON.stringify(request.schema) }, ...(packet ? [{ path: `${directory}/review.final.txt`, source: packet.text }] : [])]
+      request.worktree = stageWorktree(commonDir, input.snapshot.headCommit, overlayStageTree(commonDir, candidate.tree, sidecars))
+      request.base = request.worktree.baseCommit
+      request.prompt += `\n${diagnostic}`
+    } else request.prompt += `\n${diagnostic}\n${packet?.text ?? ''}\n精确schema:\n${JSON.stringify(request.schema)}`
   }
   return { request, binding: reviewBinding, candidateFiles }
 }

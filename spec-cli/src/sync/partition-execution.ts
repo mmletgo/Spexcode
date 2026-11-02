@@ -11,7 +11,7 @@ import type { Applicability, ElaborationInput, ElaborationResult, ElaborationRun
 import { elaborationTargetBindings, projectVerificationTable, withoutVerificationTables } from './elaboration-markdown.js'
 import { actualTreeDiff, isHostPrivatePath, verifyCandidate } from './candidate.js'
 import type { CandidateChanges } from './candidate.js'
-import { freezeGenerationCandidate, generationBrief, generationStageTree, runGeneration } from './generation.js'
+import { freezeGenerationCandidate, freezeGenerationInput, generationBrief, generationStageTree, runGeneration } from './generation.js'
 import type { GenerationInput, GenerationOptions, GenerationResult } from './generation-types.js'
 import type { BlobRef, ComposedInputRef } from './operation-types.js'
 import { contentHash, readEvidence, readObject, readTree, validateRepositoryPath, verifySnapshot, writeEvidence } from './snapshot.js'
@@ -24,6 +24,7 @@ import type { CodeBehaviorAnalysis, CodeBehaviorEvidence } from './writeback-typ
 
 export type PartitionCheckpoints = {
   load<T>(key: string): T | null
+  loadCandidateReviewRepair?(key: string, plan: SyncPartitionPlan, input: GenerationInput, candidate: NonNullable<GenerationResult['candidate']>): GenerationInput['reviewRepair'] | null
   loadAcceptedCandidateReview?(key: string, plan: SyncPartitionPlan, input: GenerationInput, candidate: NonNullable<GenerationResult['candidate']>, builders: readonly ElaborationTrace[], current?: Omit<GenerationResult, 'candidateFiles'>): Omit<GenerationResult, 'candidateFiles'> | null
   elaborationDraftTagged?(key: string, result: Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>): boolean
   loadAcceptedAnalysis?(key: string, planDigest: string, inputDigest: string): CodeBehaviorAnalysis | null
@@ -496,7 +497,7 @@ function localGeneration(input: GenerationInput, partition: SyncPartition, commo
 
 type LocalGeneration = { partition: SyncPartition; input: GenerationInput }
 export const IMPLEMENTATION_PLAN_SCHEMA: Record<string, unknown> = { type: 'object', additionalProperties: false, required: ['version', 'paths'], properties: { version: { type: 'string', enum: ['sync-implementation-plan-v1'] }, paths: { type: 'array', items: { type: 'string', minLength: 1 } } } }
-type FileWriterPlan = { version: 'sync-file-writers-v1'; writers: { partitionId: string; paths: string[] }[]; traces: ElaborationTrace[] }
+export type FileWriterPlan = { version: 'sync-file-writers-v1'; writers: { partitionId: string; paths: string[] }[]; traces: ElaborationTrace[] }
 
 export function implementationPlanningPartitions(partitions: readonly SyncPartition[], contracts: readonly Contract[], nodeChanges: GenerationInput['nodeChanges'] = []): string[] {
   return partitions.filter(partition => {
@@ -587,7 +588,10 @@ export async function generateSyncPartitions(input: GenerationInput, plan: SyncP
   let locals = dispatch.locals
   let planned: FileWriterPlan = { version: 'sync-file-writers-v1', writers: [], traces: [] }
   try {
-    if (!specOnly) planned = await implementationFileWriters(input, locals, dispatch.planningIds, maxParallel, options, checkpoints)
+    if (options.reviewCandidate) {
+      const saved = checkpoints.load<FileWriterPlan>('file-writer-plan')
+      planned = saved ?? reject('原候选续审缺少原file-writer-plan')
+    } else if (!specOnly) planned = await implementationFileWriters(input, locals, dispatch.planningIds, maxParallel, options, checkpoints)
     const plannedPaths = unique(planned.writers.flatMap(writer => writer.paths))
     const authorization = await options.beforePartitionGeneration?.(plannedPaths, writeEvidence(commonDir, planned))
     if (authorization) { input = { ...input, allowedScope: authorization.scope, composed: authorization.composed ?? input.composed } }
@@ -599,7 +603,7 @@ export async function generateSyncPartitions(input: GenerationInput, plan: SyncP
     const cause = error as { code?: string; message?: string; sessionId?: string; threadId?: string; turnId?: string; requestKey?: string; inputDigest?: string }
     return { status: input.signal?.aborted ? 'cancelled' : 'repair', inputId: input.snapshot.id, inputDigest: '', candidate: null, candidateFiles: null, output: planned, reviewOutput: null, review: null, validationFindings: [], traces: planned.traces, candidateValidated: false, reviewPassed: false, runtimeVerification: 'not_run', delivery: 'not_applied', failure: { code: cause.code ?? 'implementation_plan_invalid', message: cause.message ?? String(error), ...(cause.sessionId ? { sessionId: cause.sessionId, ...(cause.threadId ? { threadId: cause.threadId } : {}), ...(cause.turnId ? { turnId: cause.turnId } : {}), ...(cause.requestKey ? { requestKey: cause.requestKey, inputDigest: cause.inputDigest } : {}) } : {}) } }
   }
-  const prepared = specOnly ? [] : await mapSyncPartitions(locals, maxParallel, input.signal, async local => {
+  const prepared = specOnly || options.reviewCandidate ? [] : await mapSyncPartitions(locals, maxParallel, input.signal, async local => {
     const key = `partition:${local.partition.id}:generation`, saved = checkpoints.load<GenerationResult>(key)
     if (saved) return saved
     const result = await runGeneration(local.input, { ...options, beforeFreezeCandidate: undefined, prepareOnly: true })
@@ -617,7 +621,10 @@ export async function generateSyncPartitions(input: GenerationInput, plan: SyncP
     const before = input.manifest.entries.find(entry => entry.path === spec.path)
     return { path: spec.path, beforeDigest: before?.digest ?? null, beforeMode: before?.mode ?? null, content: spec.source, mode: null }
   })
-  const changes: CandidateChanges['changes'] = specOnly
+  const reviewEntries = options.reviewCandidate ? new Map(verifyCandidate(commonDir, options.reviewCandidate).map(entry => [entry.path, entry])) : null
+  const changes: CandidateChanges['changes'] = options.reviewCandidate
+    ? actualTreeDiff(readTree(commonDir, options.reviewCandidate.baseTree), [...reviewEntries!.values()]).map(change => ({ path: change.path, beforeDigest: change.preDigest, beforeMode: change.preMode as CandidateChanges['changes'][number]['beforeMode'], content: reviewEntries!.has(change.path) ? readObject(commonDir, reviewEntries!.get(change.path)!.oid).toString('utf8') : null, mode: change.postMode as CandidateChanges['changes'][number]['mode'] }))
+    : specOnly
     ? input.elaboratedSpecs.filter(spec => input.files.get(spec.path) !== spec.source).map(spec => { const before = input.manifest.entries.find(entry => entry.path === spec.path); return { path: spec.path, beforeDigest: before?.digest ?? null, beforeMode: before?.mode ?? null, content: spec.source, mode: null } })
     : [...prepared.flatMap(result => result.preparedChanges!.changes), ...interfaceSpecChanges]
   const seen = new Set<string>()
@@ -627,11 +634,16 @@ export async function generateSyncPartitions(input: GenerationInput, plan: SyncP
     if (specOnly && (!change.path.startsWith('.spec/') || !change.path.endsWith('/spec.md'))) reject('代码到Spec方向不得修改代码或测试')
     if (input.mandatoryTests.some(test => test.testPath === change.path)) reject(`禁止改写独立oracle: ${change.path}`)
   }
-  let candidate = checkpoints.load<NonNullable<GenerationResult['candidate']>>('partition:candidate')
+  let candidate = options.reviewCandidate ?? checkpoints.load<NonNullable<GenerationResult['candidate']>>('partition:candidate')
   if (!candidate) { candidate = await freezeGenerationCandidate(input, { version: 'sync-files-v1', changes: changes.sort((a, b) => a.path.localeCompare(b.path)) }, options); checkpoints.save('partition:candidate', candidate) }
+  if (options.reviewCandidate) {
+    const publication = await options.beforeFreezeCandidate?.()
+    if (publication && publication.tree !== candidate.baseTree) reject('原候选发布基树已改变，不能借续审覆盖新发布')
+    checkpoints.save('partition:candidate', candidate)
+  }
   if (specOnly && actualTreeDiff(verifySnapshot(input.snapshot), verifyCandidate(commonDir, candidate)).some(change => !input.elaboratedSpecs.some(spec => spec.path === change.path))) reject('代码提交方向只能替换本次已审Spec；组合基树改变其它真实source/tests或配置时先结算冲突，禁止反向写代码或测试')
   const validationFindings = [...await options.validateCandidate(candidate)]
-  const builders = [...planned.traces, ...prepared.flatMap(result => result.traces)]
+  const builders = options.builderTraces ? [...options.builderTraces] : [...planned.traces, ...prepared.flatMap(result => result.traces)]
   const base: GenerationResult = { fileWriterPlanRef: writeEvidence(commonDir, planned), status: 'repair', inputId: input.snapshot.id, inputDigest: contentHash(JSON.stringify({ partitionPlanDigest: plan.digest, candidateDigest: candidate.digest })), candidate, candidateFiles: null, output: { version: 'sync-files-v1', changes }, reviewOutput: null, review: null, validationFindings, traces: builders, candidateValidated: false, reviewPassed: false, runtimeVerification: 'not_run', delivery: 'not_applied', failure: null }
   if (validationFindings.some(finding => finding.severity === 'error')) return base
   base.candidateValidated = true
@@ -639,7 +651,9 @@ export async function generateSyncPartitions(input: GenerationInput, plan: SyncP
   const settledReviewTraces = [...builders]
   const checked = await mapSyncPartitions(reviews, maxParallel, input.signal, async local => {
     const key = `partition:${local.id}:candidate-review`, saved = checkpoints.load<GenerationResult>(key)
-    const reviewInput = { ...local.input, requestKey: `${input.requestKey}:final:${local.id}` }
+    const baseInput = { ...local.input, requestKey: `${input.requestKey}:final:${local.id}` }
+    const repair = checkpoints.loadCandidateReviewRepair?.(key, plan, baseInput, candidate)
+    const reviewInput = repair ? { ...baseInput, reviewRepair: repair } : baseInput
     if (saved) {
       if (JSON.stringify(saved.candidate) !== JSON.stringify(candidate)) reject('分区独审绑定了另一候选')
       const current = saved.reviewPassed ? checkpoints.loadAcceptedCandidateReview?.(key, plan, reviewInput, candidate, settledReviewTraces, saved) ?? saved : saved
@@ -647,6 +661,7 @@ export async function generateSyncPartitions(input: GenerationInput, plan: SyncP
     }
     const accepted = checkpoints.loadAcceptedCandidateReview?.(key, plan, reviewInput, candidate, settledReviewTraces)
     if (accepted) { settledReviewTraces.push(...accepted.traces); return accepted }
+    checkpoints.save(`${key}:input`, freezeGenerationInput(reviewInput).inputEvidence)
     const result = await runGeneration(reviewInput, { ...options, beforeFreezeCandidate: undefined, reviewCandidate: candidate, builderTraces: builders, validateCandidate: async () => validationFindings })
     const { candidateFiles: _files, ...compact } = result
     settledReviewTraces.push(...compact.traces)

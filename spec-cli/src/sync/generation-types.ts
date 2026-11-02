@@ -32,6 +32,8 @@ export type GenerationInput = {
   mandatoryTests: SyncCoordinatorPlan['mandatoryTests']
   verifications: readonly SyncCoordinatorPlan['verifications'][number]['definition'][]
   /** 已结算失败产物和诊断；修复上下文不是新的业务事实或通过证据。 */
+  /** 仅引用同组已认证失败原件；原final仍为未批准诊断，不进入业务候选。 */
+  reviewRepair?: { resultRef: import('./operation-types.js').BlobRef; nativePlanRef: import('./operation-types.js').BlobRef; checkpointRef: import('./operation-types.js').BlobRef }
   repairContext?: { previousOutput: unknown; diagnostics: readonly { code: string; message: string }[] }
   analysis?: CodeBehaviorEvidence
   analysisEvidence?: readonly CodeBehaviorEvidence[]
