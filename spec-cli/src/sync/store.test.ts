@@ -286,7 +286,7 @@ test('typed checkpoint v21 atomically pins all materials, preserves v20 records 
     f.protocol.withTransaction(tx => tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=21', SYNC_COMPONENT))
     const records = () => f.protocol.withTransaction(tx => Object.fromEntries(['sync_operations', 'sync_attempts', 'sync_resources', 'sync_leases'].map(table => [table, tx.query(`SELECT * FROM ${table}`)])))
     const before = records(), checksums = f.protocol.withTransaction(tx => tx.query('SELECT version,checksum FROM schema_migrations WHERE component=? ORDER BY version', SYNC_COMPONENT)), backupPath = join(f.root, 'v20-before-artifacts.backup')
-    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), 21)
+    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), SYNC_MIGRATIONS.length)
     assert.deepEqual(records(), before)
     assert.deepEqual(f.protocol.withTransaction(tx => tx.query('SELECT version,checksum FROM schema_migrations WHERE component=? AND version<=20 ORDER BY version', SYNC_COMPONENT)), checksums)
     assert.throws(() => applyComponentMigrations(f.protocol, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 20)), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
@@ -305,7 +305,34 @@ test('typed checkpoint v21 atomically pins all materials, preserves v20 records 
     assert.deepEqual(after[0], raw, 'legacy flat raw ref is never rewritten')
     assert.ok(!after.some(ref => ref.sha256 === freshRaw.sha256))
     assert.ok([wrapper, result, raw, freshRaw].every(ref => f.store.pinnedBlobRefs().some(pin => pin.sha256 === ref.sha256)))
-    assert.equal(await migrateSyncStore(f.protocol), 21)
+    assert.equal(await migrateSyncStore(f.protocol), SYNC_MIGRATIONS.length)
+  } finally { backup?.close(); f.cleanup() }
+})
+
+test('v22 draft and settled native RPC writer marker preserves v21 records and refuses old writers', async () => {
+  const f = await fixture()
+  let backup: ReturnType<typeof openProtocol> | undefined
+  try {
+    const claim = f.claim(), material = f.put({ original: 'v21 JSON material' })
+    const wrapper = f.put({ version: 'sync-stage-v1', stage: 'historical', resultRef: material })
+    f.store.checkpoint(claim.fence, { ...wrapper, artifacts: [{ kind: 'json', ref: material }] })
+    const refs = f.store.readAttempt(claim.attempt.id).checkpointRefs
+    f.protocol.withTransaction(tx => tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=22', SYNC_COMPONENT))
+    const tables = ['sync_operations', 'sync_attempts', 'sync_resources', 'sync_ingress_receipts', 'sync_apply_journals', 'sync_baseline_pairs', 'sync_leases']
+    const rows = (protocol: typeof f.protocol) => protocol.withTransaction(tx => Object.fromEntries(tables.map(table => [table, tx.query(`SELECT * FROM ${table}`)])))
+    const before = rows(f.protocol)
+    const checksums = f.protocol.withTransaction(tx => tx.query('SELECT version,checksum,applied_at_ms FROM schema_migrations WHERE component=? ORDER BY version', SYNC_COMPONENT))
+    const backupPath = join(f.root, 'v21-before-owner-drafts.backup')
+    assert.ok(SYNC_MIGRATIONS.some(migration => migration.version === 22), 'draft and settled RPC records require an explicit new writer generation')
+    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), SYNC_MIGRATIONS.length)
+    assert.deepEqual(rows(f.protocol), before)
+    assert.deepEqual(f.protocol.withTransaction(tx => tx.query('SELECT version,checksum,applied_at_ms FROM schema_migrations WHERE component=? AND version<=21 ORDER BY version', SYNC_COMPONENT)), checksums)
+    assert.deepEqual(f.store.readAttempt(claim.attempt.id).checkpointRefs, refs)
+    assert.throws(() => applyComponentMigrations(f.protocol, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 21)), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
+    backup = openProtocol(backupPath)
+    assert.equal(applyComponentMigrations(backup, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 21)), 21)
+    assert.deepEqual(rows(backup), before)
+    assert.equal(await migrateSyncStore(f.protocol), SYNC_MIGRATIONS.length)
   } finally { backup?.close(); f.cleanup() }
 })
 
