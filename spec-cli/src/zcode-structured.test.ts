@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -36,6 +36,71 @@ test('large strict JSON syntax failures retain only safe parser category and num
     assert(!(error as Error).message.includes('PRIVATE_DIAGNOSTIC_CANARY'))
     return true
   })
+})
+
+for (const mode of ['frozen', 'worktree', 'unknown-plan', 'wrong-receipt', 'legacy', 'user-cancel'] as const) test(`RPC timeout with an exactly stopped Native automatically settles failure without a model send: ${mode}`, async () => {
+  const { runtimeRoot, sessionArtifactPath } = await import('@spexcode/spec-core')
+  const { sessionIdForCreateKey } = await import('./sessions.js')
+  const { fromRaw, writeRecord, readRecord } = await import('./session-record.js')
+  const { configuredSessionApplication } = await import('./session-application.js')
+  const { runStructuredSession, cancelStructuredSession } = await import('./session-structured.js')
+  const { nativeWorktreePrompt, sampleNativeWorktreeProcesses } = await import('./native-worktree-runtime.js')
+  const worktree = mode === 'worktree'
+  const directory = mkdtempSync(join(tmpdir(), 'spex-native-rpc-stop-')), requestKey = `native-rpc-stop-${mode}-${process.pid}`, id = sessionIdForCreateKey(requestKey)
+  const root = join(runtimeRoot(), worktree ? 'structured-native-worktree-v1/zcode' : 'structured-zcode-read-only-v1', id), runtime = join(root, 'runtime'), workspace = join(directory, 'workspace'), tmp = join(directory, 'tmp')
+  for (const path of [runtime, workspace, tmp]) mkdirSync(path, { recursive: true })
+  const ownedPlan = { root, runtime, workspace, tmp, receiptFile: join(root, 'process.json') }
+  if (worktree) sampleNativeWorktreeProcesses(ownedPlan)
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { cwd: workspace, detached: true, stdio: 'ignore' })
+  assert(child.pid)
+  const exited = new Promise<void>(resolve => child.once('close', () => resolve()))
+  try {
+    const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex'), prompt = 'Return one JSON object.', message = 'ZCode native RPC timeout (session/create)'
+    const frozenContext = freezeContext({ directory: join(directory, 'frozen'), sourceRoot: process.cwd(), binding: { requestKey, inputDigest: 'rpc-input' }, entries: [{ id: 'task', label: 'task', kind: 'utf8', bytes: Buffer.from('public task') }] })
+    const seed = { baseCommit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), tree: execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { encoding: 'utf8' }).trim(), mode: 'read' as const }
+    const request = { root: process.cwd(), prompt, requestKey, schema: { type: 'object' }, inputDigest: 'rpc-input', purpose: 'rpc-stop', timeoutMs: 1000, model: 'zcode:bigmodel-api/GLM-5.3-Flash', ...(worktree ? { base: seed.baseCommit, worktree: seed, zcodeToolPolicy: { version: 1 as const, toolDenylist: ['ExitPlanMode'] as const } } : { frozenContext }) }
+    const policy = structuredExecutionPolicy(request), receiptFile = join(root, 'process.json'), identity = writeDetachedRuntimeReceipt(child.pid, receiptFile)
+    const native = { version: worktree ? 2 as const : 1 as const, root, sessionId: 'rpc-native', inputId: 'rpc-input', pid: child.pid, receiptFile }
+    const plan = { ...ownedPlan, ...native, ...(worktree ? { worktreeProcessBaseline: 1, toolDenylist: policy.zcodeToolPolicy!.toolDenylist } : {}), policyDigest: hash(policy), cliVersion: zcodeCapability.cliVersion, cliSha256: zcodeCapability.cliSha256, builtinSha256: zcodeCapability.builtinSha256, model: zcodeNativeModel(policy.model) }
+    writeFileSync(join(root, 'plan.json'), JSON.stringify(plan)); writeFileSync(join(root, 'owned-processes.json'), JSON.stringify([{ pid: child.pid, startToken: identity.startToken.replace(/\s+/g, ' ') }]))
+    process.kill(-child.pid, 'SIGTERM'); await exited
+    writeFileSync(join(root, 'exit.json'), JSON.stringify({ code: 0, signal: null, stopped: true, acknowledged: false, idle: false, closed: false, stderrBytes: 0, stderrSha256: createHash('sha256').update('').digest('hex') }))
+    configuredSessionApplication().createSession({ sessionId: id, status: 'error' })
+    const launchPrompt = worktree ? nativeWorktreePrompt(prompt, seed) : prompt
+    const record = fromRaw({ session_id: id, governed: true, worktree_path: workspace, branch: null, title: null, name: null, status: 'error', proposal: null, merges: 0, note: null, sortkey: null, createdAt: 1, stopped: false, archived: false, harness: 'zcode', launch_cmd: 'zcode', create_request_id: createHash('sha256').update(requestKey).digest('hex'), create_payload_hash: hash({ prompt: launchPrompt, parent: null, launcher: null, ...(worktree ? { base: seed.baseCommit } : {}), structuredExecution: policy }) })
+    record.structuredExecution = { ...policy, state: 'cancelling', turnStartRequested: true, zcodeNative: native, ...(mode === 'legacy' ? {} : { errorCode: 'native_rpc_timeout' as const }), error: message, cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: false, acknowledged: false, error: message } }
+    writeRecord(record)
+    const launch = sessionArtifactPath(id, 'launch'); mkdirSync(join(launch, '..'), { recursive: true }); writeFileSync(launch, launchPrompt)
+    if (mode === 'unknown-plan' || mode === 'wrong-receipt' || mode === 'legacy') {
+      const planBytes = readFileSync(join(root, 'plan.json')), receiptBytes = readFileSync(receiptFile)
+      if (mode === 'unknown-plan') writeFileSync(join(root, 'plan.json'), JSON.stringify({ ...plan, sessionId: 'wrong-native-owner' }))
+      if (mode === 'wrong-receipt') writeFileSync(receiptFile, JSON.stringify({ ...JSON.parse(receiptBytes.toString()), processGroupId: child.pid + 1 }))
+      await assert.rejects(runStructuredSession(request), { code: 'cancellation_pending' })
+      const pending = readRecord(id)!.structuredExecution!; assert.equal(pending.state, 'cancelling'); assert.equal(pending.cancellation?.nativeStopped, false); assert.equal(pending.error, message)
+      if (mode === 'legacy') { assert.equal(pending.errorCode, undefined); return }
+      writeFileSync(join(root, 'plan.json'), planBytes); writeFileSync(receiptFile, receiptBytes)
+    }
+    if (mode === 'user-cancel') {
+      assert.equal((await cancelStructuredSession(id, { reason: 'cancelled' })).state, 'cancelled')
+      await assert.rejects(runStructuredSession(request), { code: 'cancelled' }); assert.equal(readRecord(id)!.structuredExecution!.state, 'cancelled'); return
+    }
+    for (let replay = 0; replay < 2; replay++) await assert.rejects(runStructuredSession(request), error => {
+      assert.equal((error as { code: string }).code, 'native_rpc_timeout'); assert.equal((error as Error).message, message); return true
+    })
+    const state = readRecord(id)!.structuredExecution!
+    assert.equal(state.state, 'failed'); assert.equal(state.error, message); assert.equal(state.errorCode, 'native_rpc_timeout')
+    assert.equal(state.cancellation?.nativeStopped, true); assert.equal(state.cancellation?.acknowledged, false); assert.equal(state.cancellation?.nativeStatus, 'stopped')
+    assert.equal(state.output, undefined); assert.equal(state.resultDigest, undefined); assert.equal(state.rejectedOutput, undefined)
+    assert.equal(existsSync(join(root, 'send.json')), false); assert.equal(existsSync(join(root, 'terminal.json')), false)
+    assert.deepEqual(structuredExecutionPolicy(state), policy)
+    const before = JSON.stringify(state)
+    assert.equal((await cancelStructuredSession(id, { settleFailure: true })).state, 'failed')
+    assert.equal(JSON.stringify(readRecord(id)!.structuredExecution), before, 'duplicate stop cannot rewrite the original failure or stop proof')
+    if (worktree) assert.equal(existsSync(join(root, 'process-stop-observations.jsonl')), true)
+  } finally {
+    if (processStartToken(child.pid)) { process.kill(-child.pid, 'SIGTERM'); await exited }
+    rmSync(directory, { recursive: true, force: true }); rmSync(root, { recursive: true, force: true })
+  }
 })
 
 for (const timeoutMs of [1000, null]) test(`ZCode strict JSON failure with timeout=${timeoutMs} requires complete native proof and preserves durable identity`, async t => {

@@ -44,3 +44,5 @@ GenerationOptions新增prepareOnly、reviewCandidate与builderTraces，分别用
 
 
 readonlyContractPaths只用于sync-coordinator-v2局部只读接口上下文，不授予写权或实现审查覆盖；跨边合并两端targets后对应路径不再只读。完整Spec仍在files中，真实owner代码/测试及外部oracle读取不变。
+
+失败值可携原 Native session/thread/turn、requestKey/inputDigest，仅绑定原故障来源，不表示成功或自动续修授权；已结算资格由 [[sync-native-run]] 与 [[sync-coordinator]] 重核。

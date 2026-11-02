@@ -14,6 +14,7 @@ import { zcodeNativeModel } from '../zcode-structured.js'
 import type { ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult } from './elaboration-types.js'
 import { SyncStoreError, type SyncStore } from './store.js'
 import type { BlobRef, NativeSessionRef, SyncResourcePhase, WriteFence } from './operation-types.js'
+import type { SyncAttempt, SyncOperation } from './operation-types.js'
 
 type FrozenRequest = Omit<ElaborationSessionRequest, 'signal'> & { readerRuntime?: FrozenReaderRuntime }
 export type NativeRunRecord = Pick<SessRec, 'session' | 'status' | 'harnessSessionId' | 'structuredExecution' | 'createRequestId' | 'createPayloadHash'>
@@ -31,13 +32,34 @@ export type NativeRunCheckpoint = {
   schemaVersion: 1; operationId: string; attemptId: string; inputId: string; candidateDigest: string | null
   requestDigest: string; expectedSessionId: string; phase: SyncResourcePhase; nativeCallRequested: boolean
   nativeStarted: boolean; nativeState: StructuredExecution['state'] | 'queued' | 'unpublished'
-  session: NativeSessionRef; result?: ElaborationSessionResult; status?: 'completed' | 'cancelled' | 'timeout'
+  session: NativeSessionRef; result?: ElaborationSessionResult; status?: 'completed' | 'cancelled' | 'timeout' | 'failed'
+  failure?: { code: StructuredSessionError['code']; message: string; rejectedOutput?: StructuredSessionError['rejectedOutput']; failedWorktree?: StructuredSessionError['failedWorktree'] }
   stop?: StructuredCancellationResult
   creationTermination?: SessionCreateTermination
 }
 const sha = (bytes: string | Buffer): string => createHash('sha256').update(bytes).digest('hex')
 const hash = (value: unknown): string => sha(JSON.stringify(value))
 const copy = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
+
+export function hasSettledNativeRpcFailure(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, failure: { code?: string; message?: string; sessionId?: string; threadId?: string; turnId?: string; requestKey?: string; inputDigest?: string }): boolean {
+  const current = store.readOperation(operation.id)
+  if (failure.code !== 'native_rpc_timeout' || !failure.sessionId || current.control !== 'run' || current.currentAttemptId !== attempt.id || current.generation !== attempt.generation || ['failed', 'superseded', 'settled'].includes(attempt.status) || attempt.expiresAtMs <= Date.now() || store.readPhysicalControl(current.input.source).control !== 'run') return false
+  const resources = attempt.dispatchPlans.map(dispatch => ({ dispatch, resource: store.findResource(attempt.id, dispatch.key) }))
+  if (resources.some(({ resource }) => !resource || resource.phase !== 'removed')) return false
+  const directory = join(operation.input.source.commonDir, 'spexcode', 'evidence')
+  const read = <T>(ref: BlobRef): T => {
+    const bytes = getBlob(ref.sha256, directory)
+    if (!bytes || sha(bytes) !== ref.sha256) throw new StructuredSessionError('stale_result', 'native RPC settlement evidence object is missing or invalid')
+    return JSON.parse(bytes.toString('utf8')) as T
+  }
+  return resources.some(({ dispatch, resource }) => {
+    if (resource!.plan.kind !== 'native_session') return false
+    const plan = read<NativeRunPlan>(resource!.plan.planBlob), checkpoint = read<NativeRunCheckpoint>(resource!.checkpointRef), stop = checkpoint.stop
+    return resource!.operationId === operation.id && resource!.attemptId === attempt.id && resource!.generation === attempt.generation && resource!.plan.inputId === operation.input.id && plan.operationId === operation.id && plan.attemptId === attempt.id && plan.inputId === operation.input.id && plan.expectedSessionId === failure.sessionId && plan.sessionCreateKey === dispatch.sessionCreateKey && plan.expectedSessionId === sessionIdForCreateKey(dispatch.sessionCreateKey) && plan.request.requestKey === dispatch.key && plan.requestDigest === dispatch.requestDigest && plan.requestDigest === resource!.plan.payloadDigest && plan.requestDigest === hash(plan.request)
+      && (failure.requestKey === undefined || failure.requestKey === plan.request.requestKey) && (failure.inputDigest === undefined || failure.inputDigest === plan.request.inputDigest) && checkpoint.operationId === plan.operationId && checkpoint.attemptId === plan.attemptId && checkpoint.inputId === plan.inputId && checkpoint.candidateDigest === plan.candidateDigest && checkpoint.candidateDigest === resource!.plan.candidateDigest && checkpoint.requestDigest === plan.requestDigest && checkpoint.expectedSessionId === plan.expectedSessionId && checkpoint.phase === 'removed' && checkpoint.status === 'failed' && checkpoint.nativeState === 'failed' && checkpoint.failure?.code === failure.code && checkpoint.failure?.message === failure.message
+      && stop?.nativeStopped === true && stop.state === 'failed' && stop.sessionId === failure.sessionId && checkpoint.session.sessionId === stop.sessionId && checkpoint.session.threadId === (stop.threadId ?? null) && checkpoint.session.turnId === (stop.turnId ?? null) && stop.threadId === failure.threadId && stop.turnId === failure.turnId
+  })
+}
 
 /** 为一个固定attempt连接既有结构化执行与资源证据，不承担候选发布或文件写入。 */
 export function createAttemptRunner(store: SyncStore, fence: WriteFence, options: AttemptRunnerOptions = {}): ElaborationRunner {
@@ -74,7 +96,7 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
     const identity = { operationId: operation.id, attemptId: attempt.id, inputId: operation.input.id, candidateDigest: resource ? resource.plan.candidateDigest : attempt.candidate?.digest ?? null }
     const plan: NativeRunPlan = { schemaVersion: 1, request, requestDigest, sessionCreateKey: dispatch.sessionCreateKey, expectedSessionId, ...identity }
     let checkpoint: NativeRunCheckpoint = { schemaVersion: 1, ...identity, requestDigest, expectedSessionId, phase: 'planned', nativeCallRequested: false, nativeStarted: false, nativeState: 'unpublished', session: { sessionId: expectedSessionId, threadId: null, turnId: null } }
-    const errorIdentity = (): { sessionId: string; threadId?: string; turnId?: string } => ({ sessionId: expectedSessionId, threadId: checkpoint.session.threadId ?? undefined, turnId: checkpoint.session.turnId ?? undefined })
+    const errorIdentity = (): { sessionId: string; threadId?: string; turnId?: string; requestKey: string; inputDigest: string } => ({ sessionId: expectedSessionId, threadId: checkpoint.session.threadId ?? undefined, turnId: checkpoint.session.turnId ?? undefined, requestKey: request.requestKey, inputDigest: request.inputDigest })
     const checkEvidence = (value: NativeRunCheckpoint): void => {
       if (value.schemaVersion !== 1 || value.operationId !== identity.operationId || value.attemptId !== identity.attemptId || value.inputId !== identity.inputId || value.candidateDigest !== identity.candidateDigest || value.requestDigest !== requestDigest || value.expectedSessionId !== expectedSessionId || value.session.sessionId !== expectedSessionId) throw new StructuredSessionError('stale_result', 'native checkpoint identity does not match fixed dispatch')
     }
@@ -101,6 +123,20 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
         throw new StructuredSessionError('stale_result', 'native creation termination differs from fixed request or started execution', errorIdentity())
       return receipt
     }
+    const stoppedFailedEvidence = (state: StructuredExecution): NativeRunCheckpoint['failure'] | null => {
+      if (state.state !== 'failed' || !state.cancellation?.nativeStopped) return null
+      let rejectedOutput: StructuredSessionError['rejectedOutput']
+      if (state.rejectedOutput) {
+        assertRejectedOutput(state.rejectedOutput, creationPrompt, execution, state)
+        const { ref: _ref, ...packet } = state.rejectedOutput
+        rejectedOutput = packet
+      }
+      if (state.failedWorktree) {
+        if (!request.worktree || !rejectedOutput) throw new StructuredSessionError('stale_result', 'failed Git witness lacks its original rejected request', errorIdentity())
+        verifyStageResult(operation.input.source.commonDir, request.worktree, { worktree: state.failedWorktree })
+      }
+      return { code: state.errorCode ?? 'failed', message: state.error!, ...(rejectedOutput ? { rejectedOutput } : {}), ...(state.failedWorktree ? { failedWorktree: state.failedWorktree } : {}) }
+    }
     const restoreSettledCreationTimeout = (saved?: SessionCreateTermination): SettledSessionCreateTimeoutError | null => {
       if (saved?.code !== 'session_create_timeout') return null
       const receipt = creationTermination()
@@ -108,11 +144,30 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
       if (hash(receipt) !== hash(saved)) throw new StructuredSessionError('stale_result', 'native creation termination checkpoint differs from its canonical receipt', errorIdentity())
       return new SettledSessionCreateTimeoutError(receipt)
     }
+    const restoreSettledFailure = (): StructuredSessionError | null => {
+      if (checkpoint.status !== 'failed') return null
+      const stop = checkpoint.stop
+      if (!checkpoint.failure || checkpoint.nativeState !== 'failed' || !stop?.nativeStopped || stop.state !== 'failed' || stop.sessionId !== expectedSessionId || (stop.threadId ?? null) !== checkpoint.session.threadId || (stop.turnId ?? null) !== checkpoint.session.turnId) throw new StructuredSessionError('stale_result', 'native failure lacks its exact durable stop proof', errorIdentity())
+      let rejectedOutput = checkpoint.failure.rejectedOutput
+      if (rejectedOutput) {
+        assertRejectedOutput(rejectedOutput, creationPrompt, execution, errorIdentity())
+        const ref = blobs.put(Buffer.from(rejectedOutput.text, 'utf8'))
+        if (ref.sha256 !== rejectedOutput.sha256) throw new StructuredSessionError('stale_result', 'failed native packet differs from its original bytes', errorIdentity())
+        rejectedOutput = { ...rejectedOutput, ref }
+      }
+      if (checkpoint.failure.failedWorktree) {
+        if (!request.worktree || !checkpoint.failure.rejectedOutput) throw new StructuredSessionError('stale_result', 'failed Git witness lacks its exact rejected native request', errorIdentity())
+        verifyStageResult(operation.input.source.commonDir, request.worktree, { worktree: checkpoint.failure.failedWorktree })
+      }
+      return new StructuredSessionError(checkpoint.failure.code, checkpoint.failure.message, { ...errorIdentity(), rejectedOutput, failedWorktree: checkpoint.failure.failedWorktree })
+    }
     if (resource) {
       const savedPlan = read<NativeRunPlan>(resource.plan.planBlob)
       if (hash(savedPlan) !== hash(plan)) throw new StructuredSessionError('key_reused', 'native resource plan differs from frozen request')
       checkpoint = read<NativeRunCheckpoint>(resource.checkpointRef); checkEvidence(checkpoint)
       if (resource.phase === 'removed') {
+        const rpcFailure = restoreSettledFailure()
+        if (rpcFailure) throw rpcFailure
         if (checkpoint.status !== 'completed' || !checkpoint.result) {
           const settledTimeout = restoreSettledCreationTimeout(checkpoint.creationTermination)
           if (settledTimeout) throw settledTimeout
@@ -151,7 +206,7 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
     }
     let outcome: { ok: true; result: ElaborationSessionResult } | { ok: false; error: unknown } | undefined
     let nativePromise: Promise<void> | undefined
-    const settle = (status: 'completed' | 'cancelled' | 'timeout', extra: { result?: ElaborationSessionResult; stop?: StructuredCancellationResult; creationTermination?: SessionCreateTermination }): void => {
+    const settle = (status: 'completed' | 'cancelled' | 'timeout' | 'failed', extra: { result?: ElaborationSessionResult; stop?: StructuredCancellationResult; creationTermination?: SessionCreateTermination; failure?: NativeRunCheckpoint['failure'] }): void => {
       if (resource!.phase !== 'terminal') save({ ...checkpoint, ...extra, status, phase: 'terminal' })
       save({ ...checkpoint, phase: 'removed' })
     }
@@ -188,13 +243,17 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
       const after = observe()
       if (!after?.structuredExecution) throw new StructuredSessionError('cancellation_pending', 'native record disappeared before exact stop confirmation', errorIdentity())
       const state = after.structuredExecution
-      const durableStop = state.cancellation?.nativeStopped && (state.state === 'cancelled' || state.state === 'timeout')
+      const stoppedFailure = stoppedFailedEvidence(state)
+      const durableStop = state.cancellation?.nativeStopped && (state.state === 'cancelled' || state.state === 'timeout' || !!stoppedFailure)
       if (!stopped && durableStop) stopped = { sessionId: expectedSessionId, state: state.state!, threadId: state.threadId, turnId: state.turnId, nativeStopped: true, acknowledged: state.cancellation!.acknowledged, nativeStatus: state.cancellation!.nativeStatus }
       if (stopped?.nativeStopped && stopped.sessionId === expectedSessionId && ['completed', 'cancelled', 'timeout'].includes(stopped.state) && (stopped.threadId ?? null) === (state.threadId ?? null) && (stopped.turnId ?? null) === (state.turnId ?? null)) settle(stopped.state === 'timeout' ? 'timeout' : 'cancelled', { stop: stopped })
+      if (stopped?.nativeStopped && stopped.sessionId === expectedSessionId && stopped.state === 'failed' && stoppedFailure && (stopped.threadId ?? null) === (state.threadId ?? null) && (stopped.turnId ?? null) === (state.turnId ?? null)) settle('failed', { stop: stopped, failure: stoppedFailure })
       if (failure) throw failure
       throw new StructuredSessionError(resource!.phase === 'removed' ? 'cancelled' : 'cancellation_pending', resource!.phase === 'removed' ? 'native execution cancelled and exact stop settled' : stopped?.error ?? 'native cancellation has not been proven', errorIdentity())
     }
     if (resource.phase === 'terminal') {
+      const rpcFailure = restoreSettledFailure()
+      if (rpcFailure) { save({ ...checkpoint, phase: 'removed' }); throw rpcFailure }
       if (checkpoint.stop?.nativeStopped && checkpoint.stop.sessionId === expectedSessionId && ['completed', 'cancelled', 'timeout'].includes(checkpoint.stop.state) && (checkpoint.stop.threadId ?? null) === checkpoint.session.threadId && (checkpoint.stop.turnId ?? null) === checkpoint.session.turnId) {
         save({ ...checkpoint, phase: 'removed' })
         const settledTimeout = restoreSettledCreationTimeout(checkpoint.creationTermination)
@@ -214,6 +273,12 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
         if (!outcome.ok) {
           if (!observe() && creationTermination()) return stop()
           const state = runtime.readRecord(expectedSessionId)?.structuredExecution
+          const stoppedFailure = state ? stoppedFailedEvidence(state) : null
+          if (stoppedFailure) {
+            if (!(outcome.error instanceof StructuredSessionError) || outcome.error.code !== stoppedFailure.code || state!.error !== outcome.error.message || outcome.error.sessionId !== expectedSessionId || outcome.error.threadId !== state!.threadId || outcome.error.turnId !== state!.turnId) throw new StructuredSessionError('stale_result', 'native failure lacks its matching stopped failed record', errorIdentity())
+            settle('failed', { failure: stoppedFailure, stop: { sessionId: expectedSessionId, state: 'failed', threadId: state!.threadId, turnId: state!.turnId, nativeStopped: true, acknowledged: state!.cancellation!.acknowledged, nativeStatus: state!.cancellation!.nativeStatus } })
+          }
+          if (outcome.error instanceof StructuredSessionError && outcome.error.code === 'native_rpc_timeout' && !stoppedFailure) throw new StructuredSessionError('stale_result', 'typed native RPC failure has no exact stopped failed record', errorIdentity())
           if (state?.cancellation?.nativeStopped && (state.state === 'cancelled' || state.state === 'timeout')) settle(state.state, { stop: { sessionId: expectedSessionId, state: state.state, threadId: state.threadId, turnId: state.turnId, nativeStopped: true, acknowledged: state.cancellation.acknowledged, nativeStatus: state.cancellation.nativeStatus } })
           if (outcome.error instanceof StructuredSessionError && outcome.error.rejectedOutput) {
             const rejectedOutput = outcome.error.rejectedOutput
@@ -221,8 +286,15 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
             assertRejectedOutput(rejectedOutput, creationPrompt, execution, state)
             const ref = blobs.put(Buffer.from(rejectedOutput.text, 'utf8'))
             if (ref.sha256 !== rejectedOutput.sha256) throw new StructuredSessionError('stale_result', 'rejected final output blob differs from its exact native bytes', errorIdentity())
-            throw new StructuredSessionError(outcome.error.code, outcome.error.message, { ...errorIdentity(), rejectedOutput: { ...rejectedOutput, ref } })
+            const failedWorktree = outcome.error.failedWorktree
+            if (failedWorktree) {
+              if (!request.worktree || !state.cancellation?.nativeStopped || !state.failedWorktree || hash(state.failedWorktree) !== hash(failedWorktree)) throw new StructuredSessionError('stale_result', 'failed stage Git witness lacks its matching stopped failed record', errorIdentity())
+              verifyStageResult(operation.input.source.commonDir, request.worktree, { worktree: failedWorktree })
+            }
+            const diagnostic = { ...rejectedOutput, ref }
+            throw new StructuredSessionError(outcome.error.code, outcome.error.message, { ...errorIdentity(), rejectedOutput: diagnostic, failedWorktree })
           }
+          if (outcome.error instanceof StructuredSessionError && outcome.error.code === 'native_rpc_timeout') throw new StructuredSessionError(outcome.error.code, outcome.error.message, errorIdentity())
           throw outcome.error
         }
         const record = observe(), state = record?.structuredExecution

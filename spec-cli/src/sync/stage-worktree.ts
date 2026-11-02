@@ -31,7 +31,7 @@ export function overlayStageTree(commonDir: string, tree: string, changes: reado
 }
 
 /** 公开结果同时绑定固定seed和真实不可变Git对象，summary不能替代此证明。 */
-export function verifyStageResult(commonDir: string, seed: StageWorktree, result: ElaborationSessionResult): NonNullable<ElaborationSessionResult['worktree']> {
+export function verifyStageResult(commonDir: string, seed: StageWorktree, result: Pick<ElaborationSessionResult, 'worktree'>): NonNullable<ElaborationSessionResult['worktree']> {
   const actual = result.worktree
   if (!actual || actual.baseCommit !== seed.baseCommit || actual.baseTree !== seed.tree || !actual.worktreePath || objectGit(commonDir, ['rev-parse', '--verify', `${actual.headCommit}^{commit}`]).toString().trim() !== actual.headCommit || objectGit(commonDir, ['rev-parse', '--verify', `${actual.headCommit}^{tree}`]).toString().trim() !== actual.tree) throw new Error('worktree结果不匹配固定seed或真实HEAD tree')
   objectGit(commonDir, ['merge-base', '--is-ancestor', seed.baseCommit, actual.headCommit])

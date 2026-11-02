@@ -171,12 +171,14 @@ export async function runGeneration(supplied: GenerationInput, options: Generati
   const cancelled = (): void => { if (signal?.aborted) throw Object.assign(new Error('生成已取消，拒绝后续派发或发布'), { code: 'cancelled' }) }
   let generatedNative: ElaborationSessionResult | undefined
   let generatedRequest: ElaborationSessionRequest | undefined
+  let failedRequest: ElaborationSessionRequest | undefined
   const dispatch = async (request: ElaborationSessionRequest): Promise<unknown> => {
     cancelled()
     const purpose = request.purpose
     const { signal: dispatchSignal, ...serializable } = request
     await options.onDispatch?.({ ...structuredClone(serializable), signal: dispatchSignal })
     cancelled()
+    failedRequest = request
     const native = await options.runner(request)
     const output = structuredClone(native.output)
     result.traces.push({ purpose, sessionId: native.sessionId, threadId: native.threadId, turnId: native.turnId, resultDigest: native.resultDigest, inputDigest: result.inputDigest })
@@ -237,9 +239,9 @@ export async function runGeneration(supplied: GenerationInput, options: Generati
     result.status = review.verdict === 'accept' ? 'reviewed' : review.verdict === 'repair' ? 'repair' : review.verdict === 'needs_input' ? 'needs_input' : 'conflict'
     return result
   } catch (error) {
-    const cause = error as { code?: string; name?: string; message?: string }
+    const cause = error as { code?: string; name?: string; message?: string; sessionId?: string; threadId?: string; turnId?: string; requestKey?: string; inputDigest?: string }
     const code = cause.code ?? stage
-    result.failure = { code, message: cause.message ?? String(error) }
+    result.failure = { code, message: cause.message ?? String(error), ...(cause.sessionId ? { sessionId: cause.sessionId, ...(cause.threadId ? { threadId: cause.threadId } : {}), ...(cause.turnId ? { turnId: cause.turnId } : {}), ...(failedRequest ? { requestKey: failedRequest.requestKey, inputDigest: failedRequest.inputDigest } : {}) } : {}) }
     result.status = code === 'unsupported' ? 'unsupported' : code === 'cancelled' || cause.name === 'AbortError' ? 'cancelled' : stage === 'candidate_invalid' ? 'repair' : 'failed'
     return result
   }

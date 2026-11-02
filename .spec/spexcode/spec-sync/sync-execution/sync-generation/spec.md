@@ -67,3 +67,5 @@ P2 接收操作固定 model 并传给生成与独立评审，effort 仍为 high�
 显式v2局部输入可声明readonlyContractPaths：这些依赖仍完整读取Spec/raw/稳定ID接口，程序不为局部分析自动拉取其全部实现、related及AC测试正文；本区targets及mandatory/source/test的完整读取门保持。局部checkedIds仅枚举真实owner候选项，不能把借读接口列成实现已审。最终cross-edge将两端同时作为实现targets，不能保留readonly skip，两端完整源码/测试及新增文件仍绑定同一最终candidateDigest独审。旧v1没有该字段时原完整读取判据不变，v1显式提供该语义被拒绝。
 
 冻结输入及候选独审请求构造保留唯一接缝，供运行与严格历史accept来源校验共同复用。内部输入原件保留原键序及JSON省略的undefined槽，恢复Map后仍用原算法重算，不能因冷态序列化改变旧摘要或请求正文。旧requestKey只恢复原派发身份，其余raw/context/repairContext/model/schema/prompt不变且摘要逐字相等才具复用资格；不删除诊断字段或改写原摘要。
+
+生成或独审的 Native 失败值保留原 code/message 及真实 session/thread/turn、requestKey/inputDigest，供 [[sync-coordinator]] 复用 [[sync-native-run]] 的已结算 RPC 门禁；不以默认 repairable 或错误文本跳过停止证明。原业务生成、候选、独审和授权规则保持。

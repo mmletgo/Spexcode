@@ -53,3 +53,5 @@ Codex 原生 readOnly 策略保留，P1 使用提供正文的纯推理，不依�
 原生能力探针必须亲读custom exec代码与返回值：registry只有注册reader；process/require/fetch/module不可用，Node/HTTP/data动态import拒绝，constructor不取得宿主process，任意path/live诱饵不可读、任意写入与子进程不可达，网络诱饵0命中。metadata临时daemon只有在零native references且精确PID/start/receipt证实后才停止，停止确认后保存来源/前后目录摘要和changedFields，不能操作既有v1或其他generation。错误工具请求未获回复时沿cancelling保留容量，不能因本地快速失败就声称原生已停止。
 
 native_worktree_result_invalid 仅为原生 Git 结果后置合约的精确失败观测；不改变固定 policy、创建摘要、正常读取能力或旧冻结证明门禁。原 nativeWorktreePrompt 字节与历史创建哈希保持。
+
+计时器产生的 native_rpc_timeout 是显式原生故障观测，不能从错误文本补分类。失败可选 failedWorktree 仅承载原 seed 下已认证且确证停止的 Git 事实，与成功 resultWorktree 分离，不参与固定策略摘要、不授予成功 output 或候选；旧记录缺席保持。资源终态及续修准入由 [[sync-native-run]] 与 [[sync-coordinator]] 分别核验。

@@ -631,3 +631,5 @@ Native完整叶生成提示明确区分引用类型：FLOW.req只引用REQ，并
 正式pause/resume在绑定前留下的superseded/failure:null空控制attempt，仅当checkpointRefs/dispatchPlans均空、composed/candidate/verification/currentSession均null、publicationBase缺席且原selectionDigest与当前一致时可越过；它不产生授权、不补签绑定，旧真实seal仍须完整匹配当前operation/input/policy/plan/composed/readSet/selection。任何业务/会话锚、非空产物或选择冲突仍是回溯屏障，空attempt仍消耗原计数。
 
 被拒final原文以不可信UTF8 artifact保留完整字节/SHA/ref；单次stage checkpoint原子登记JSON wrapper及全部JSON/raw保活引用。正式详情、恢复与证据BFS只依据真实失败round、原Native请求/资源/record精确区分raw，历史无role引用不改；JSON合法但schema坏或伪stage原文也不获stage或引用可达权限，未知损坏JSON仍报错。组件v21在正常online backup后拒v20旧writer；回滚停新writer并恢复升级前一致备份与原evidence，不删marker或篡改旧引用。
+
+Native RPC 的实际计时器故障保留原 typed code/message；复用精确身份停止协议后，failed 资源先 terminal 再 removed，同键不重发。只有当前 run、有效 fence 和每个故障的原 request/plan/候选及停止证明均成立时，P0/P1/P2 沿同 operation/input/总预算继续；pause、用户取消和 unknown 不自动重启。失败 Git witness 只由新 observer 在认证 rejected final、原 seed 和确证停止后保存，独立于成功结果；Git 不合法保原格式错误和 raw，旧缺席不补捕。Native checkpoint 不提前授独立 raw ref 可达权，后续 Saved round 与 typed artifacts 原子发布。统一 sync v22 迁移正常备份并拒旧21 writer，回滚须停新 writer、恢复一致备份及原 evidence，不删 marker。受控 Node/MockNative 证明上述状态链，不等于真实 ZCode timeout 根因或模型协议已验证。
