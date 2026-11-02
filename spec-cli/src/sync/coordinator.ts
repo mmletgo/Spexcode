@@ -34,6 +34,7 @@ import { assemblePublicationBase } from './publication-base.js'
 import { ownedObligationPaths } from './prior-context.js'
 import { composeControlledRequest, readControlledChanges, readControlledDecision } from './request-input.js'
 import { sessionIdForCreateKey } from '../sessions.js'
+import { withoutSessionApplicationExecutionWake } from '../session-application.js'
 import { assertFrozenBinding, readFrozenManifest, readFrozenRange } from '../frozen-context.js'
 import { StructuredSessionError } from '../session-structured-policy.js'
 import { SettledSessionCreateTimeoutError } from '../session-structured.js'
@@ -613,7 +614,7 @@ function acceptanceRuns(frozen: FrozenContracts, ready: SyncScope, plan: SyncCoo
   for (const run of runs) run.policy.expectedTestIds.sort()
   return runs.sort((a, b) => a.verificationId.localeCompare(b.verificationId))
 }
-async function recoverResources(store: SyncStore, operation: SyncOperation, options: Pick<SyncCoordinatorOptions, 'recoveryOnly' | 'verificationDriver'>, all: boolean): Promise<boolean> {
+async function recoverResources(store: SyncStore, operation: SyncOperation, options: Pick<SyncCoordinatorOptions, 'recoveryOnly' | 'verificationDriver'> & { resourceRecoveryOnly?: true }, all: boolean): Promise<boolean> {
   for (const item of store.listRecoverableResources().filter(item => item.operation.id === operation.id && (all || item.attempt.id !== operation.currentAttemptId))) {
     const fence = fenceFor(item.operation, item.attempt), commonDir = operation.input.source.commonDir
     if (item.resource.plan.inputId !== operation.input.id) fail('resource_recovery', '既有resource不匹配原frozen input')
@@ -630,7 +631,7 @@ async function recoverResources(store: SyncStore, operation: SyncOperation, opti
       const plan = JSON.parse(readEvidence(commonDir, item.resource.plan.planBlob).toString('utf8')) as NativeRunPlan
       const dispatch = item.attempt.dispatchPlans.find(dispatch => dispatch.key === item.resource.plan.key)
       if (!dispatch || plan.schemaVersion !== 1 || plan.operationId !== operation.id || plan.attemptId !== item.attempt.id || plan.inputId !== operation.input.id || plan.candidateDigest !== item.resource.plan.candidateDigest || plan.request.requestKey !== item.resource.plan.key || plan.requestDigest !== item.resource.plan.payloadDigest || contentHash(JSON.stringify(plan.request)) !== plan.requestDigest || dispatch.requestDigest !== plan.requestDigest || plan.sessionCreateKey !== dispatch.sessionCreateKey || plan.expectedSessionId !== sessionIdForCreateKey(dispatch.sessionCreateKey)) fail('resource_recovery', 'native resource plan differs from frozen request: 既有Native计划不匹配原resource/dispatch/创建键与身份')
-      try { await createAttemptRunner(store, fence)({ ...plan.request, signal: AbortSignal.abort() }) }
+      try { await createAttemptRunner(store, fence, { resourceRecoveryOnly: options.resourceRecoveryOnly })({ ...plan.request, signal: AbortSignal.abort() }) }
       catch (error) { if (store.findResource(item.attempt.id, item.resource.plan.key)?.phase !== 'removed') fail('resource_recovery', error instanceof Error ? error.message : String(error)) }
       if (store.findResource(item.attempt.id, item.resource.plan.key)?.phase !== 'removed') return false
     }
@@ -652,7 +653,7 @@ export async function recoverSyncOperationResources(store: SyncStore, operationI
   const mutex = claimFileMutex(join(locks, `${contentHash(operationId)}.sqlite`))
   if (!mutex) return result('busy')
   try {
-    return result(await recoverResources(store, operation, { recoveryOnly: true, verificationDriver: options.verificationDriver }, true) ? 'resources_recovered' : 'recovery_required')
+    return result(await withoutSessionApplicationExecutionWake(() => recoverResources(store, operation, { recoveryOnly: true, resourceRecoveryOnly: true, verificationDriver: options.verificationDriver }, true)) ? 'resources_recovered' : 'recovery_required')
   } catch (error) {
     return result('recovery_required', { code: error instanceof SyncCoordinatorError || error instanceof SyncStoreError ? error.code : 'resource_recovery', message: error instanceof Error ? error.message : String(error) })
   } finally { mutex.release() }

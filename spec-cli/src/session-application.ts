@@ -1,5 +1,6 @@
 import { existsSync, readdirSync, rmSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import {
   openProjectSessionApplication,
   legacyResidueExists,
@@ -21,6 +22,12 @@ type SessionApplicationCommitWake = (recipients: readonly string[]) => void
 let commitWake: SessionApplicationCommitWake = () => {}
 type SessionApplicationCommitChange = Pick<CommittedSessionChange, 'recipients' | 'subjectSessionIds' | 'changeMask'>
 let commitObserver: ((change: SessionApplicationCommitChange) => void) | undefined
+const executionWakeSuppressed = new AsyncLocalStorage<true>()
+
+/** 仅静音资源清理派生的主动执行回调，canonical事务及历史照常提交。 */
+export function withoutSessionApplicationExecutionWake<T>(body: () => T): T {
+  return executionWakeSuppressed.run(true, body)
+}
 
 /** The application owns commit ordering; Spex supplies the adopter transport wake. */
 export function setSessionApplicationCommitWake(wake: SessionApplicationCommitWake): void {
@@ -41,10 +48,11 @@ function openConfiguredSessionApplication(): ProductionSessionApplication {
     databasePath,
     locality: path => { requireLocalDatabasePath(path) },
     onCommitted: result => {
+      if (executionWakeSuppressed.getStore()) return
       commitWake(result.recipients)
       if (commitObserver) setImmediate(() => commitObserver?.(result))
     },
-    onRuntimeBound: sessionId => commitWake([sessionId]),
+    onRuntimeBound: sessionId => { if (!executionWakeSuppressed.getStore()) commitWake([sessionId]) },
   })
   cachedPath = databasePath
   return cached

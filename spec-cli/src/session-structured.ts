@@ -288,7 +288,7 @@ export type StructuredCancellationResult = {
 
 // Cancellation revokes result publication before native control. A queued task has no native turn to
 // stop; an accepted task stops only its pinned turn and requires native acknowledgement + settled read.
-export async function cancelStructuredSession(id: string, options: { reason?: 'cancelled' | 'timeout'; timeoutMs?: number } = {}): Promise<StructuredCancellationResult> {
+export async function cancelStructuredSession(id: string, options: { reason?: 'cancelled' | 'timeout'; timeoutMs?: number; wakeQueue?: boolean } = {}): Promise<StructuredCancellationResult> {
   if ((options.reason !== undefined && !['cancelled', 'timeout'].includes(options.reason)) || (options.timeoutMs !== undefined && (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0)))
     throw new StructuredSessionError('failed', 'structured cancellation needs a valid reason and positive bounded deadline', { sessionId: id })
   const existing = cancellations.get(id)
@@ -349,7 +349,8 @@ export async function cancelStructuredSession(id: string, options: { reason?: 'c
       return { sessionId: id, state: next, threadId: pinned.threadId, turnId: stop.turnId ?? pinned.turnId, ...stop, acknowledged: cancellation.acknowledged }
     })
     const { refreshQueueCandidate, requestQueueDrain } = await import('./sessions.js')
-    refreshQueueCandidate(id); requestQueueDrain()
+    refreshQueueCandidate(id)
+    if (options.wakeQueue !== false) requestQueueDrain()
     return result
   })
   cancellations.set(id, flight)
