@@ -13,6 +13,8 @@ import type { ElaborationInput, ElaborationRunner, ElaborationSessionRequest } f
 import { captureInputSnapshot, contentHash, readObject, readTree, writeEvidence, writeObject, writeTree } from './snapshot.js'
 import { captureStageDraft, overlayStageTree, readStageDraft, stageWorktree } from './stage-worktree.js'
 import { syncCheckpointArtifacts } from './checkpoint-evidence.js'
+import { freezeCandidate } from './candidate.js'
+import { projectVerificationTable } from './elaboration-markdown.js'
 import { elaborateSyncPartitions } from './partition-execution.js'
 import type { PartitionCheckpoints } from './partition-execution.js'
 import type { ElaborationResult, ReadonlySpecRepair } from './elaboration-types.js'
@@ -492,4 +494,106 @@ test('无draftProtocol的旧全局返修保持read/fullrows提示，不补sideca
   } })
   assert.equal(result.status, 'complete', JSON.stringify({ failure: result.failure, findings: result.rounds.flatMap(round => round.findings) }))
   assert.deepEqual(requests.map(request => request.purpose), ['elaboration_generate', 'elaboration_review'])
+})
+
+async function anchorRepairFixture(t: test.TestContext) {
+  const f = await fixture(t), ids = ['STEP-EXPORT-01', 'STEP-EXPORT-02', 'STEP-EXPORT-03']
+  const original = f.input.targets[0].source!
+  const source = original.split('\n').map(line => ids.some(id => line.startsWith(`| ${id} |`)) ? line.replace('derived:FLOW-EXPORT-01', 'code:src/export.js#permitted') : line).join('\n')
+  const accepted = await elaborate({ ...f.input, maxRepairs: 0 }, { runner: f.run(() => JSON.stringify(draftRows(source))) })
+  assert.equal(accepted.status, 'complete')
+  const baseline = accepted.changes[0].source, parsed = parseContract(accepted.changes[0]).contract!
+  const findings = ids.map(id => ({ code: 'anchor-dead', severity: 'error' as const, nodeId: 'export-contract', path, line: parsed.items.find(item => item.id === id)!.line, itemId: id, relatedIds: ['FLOW-EXPORT-01'], message: 'src/export.js#permitted 不存在于冻结候选' }))
+  const repair: ReadonlySpecRepair = { baseInputDigest: accepted.inputDigest, candidateDigest: accepted.candidateDigest!, generationRef: writeEvidence(f.commonDir, { fixture: 'readonly V1 anchor failure', findings }), acceptedRef: writeEvidence(f.commonDir, accepted), changes: accepted.changes, output: accepted.rounds[0].output, review: accepted.rounds[0].review, findings }
+  const input: ElaborationInput = { ...f.input, requestKey: 'readonly-anchor-repair', targets: [{ nodeId: 'export-contract', path, source: baseline, sourceDigest: contentHash(baseline) }], worktree: stageWorktree(f.commonDir, f.snapshot.headCommit, overlayStageTree(f.commonDir, f.snapshot.immutableTree, [{ path, source: baseline }])), readonlySpecRepair: repair, mode: 'reelaborate', maxRepairs: 0, authorizedChanges: [] }
+  const corrected = draftRows(baseline.replaceAll('src/export.js#permitted', 'src/export.js#ExportService'))
+  const bad = structuredClone(corrected); bad.changes[0].prose = '重新概括全部业务说明，省略原来详细依据。'; bad.changes[0].tables.RULE[0].basis = '顺带改写已接受的规则依据'
+  const badText = JSON.stringify(bad), failed = await elaborate(input, { runner: f.run(() => badText) })
+  assert.equal(failed.status, 'exhausted')
+  for (const code of ['refinement_accepted_prose_changed', 'refinement_accepted_meaning_changed']) assert.ok(failed.rounds[0].findings.some(issue => issue.code === code))
+  const draft = failed.rounds[0].draft!
+  assert.equal(readStageDraft(f.commonDir, draft, draft), badText)
+  return { ...f, input, repair, baseline, corrected, badText, draft, failed }
+}
+
+for (const purpose of ['elaboration_generate', 'elaboration_review']) test(`V1锚点返修${purpose}保留完整任务与真实baseline，坏草稿自行恢复而不改旧证据`, async t => {
+  const f = await anchorRepairFixture(t), prior = JSON.stringify(f.draft), requestsBefore = f.requests.length
+  const native = f.run((_request, workspace, draftPath) => {
+    assert.equal(readFileSync(join(workspace, draftPath), 'utf8'), f.badText)
+    return JSON.stringify(f.corrected)
+  })
+  const result = await elaborate({ ...f.input, requestKey: `continue-${purpose}` }, { draft: f.draft, runner: async request => {
+    if (request.purpose === purpose) {
+      const task = JSON.parse(request.prompt.split('任务:\n')[1].split(request.purpose === 'elaboration_generate' ? '\n失败诊断' : '\n候选范围')[0]) as { repair?: { kind: string; acceptedRef: { sha256: string }; generationRef: { sha256: string }; findings: typeof f.repair.findings; baselines: { nodeId: string; path: string; baselineSpecPath: string }[] } }
+      assert.equal(task.repair?.kind, 'readonly_v1_anchor', '必须明确是V1定位返修，不能只交相同code/message或reelaborate模式')
+      assert.deepEqual(task.repair.findings, f.repair.findings)
+      assert.deepEqual(task.repair.acceptedRef, f.repair.acceptedRef); assert.deepEqual(task.repair.generationRef, f.repair.generationRef)
+      assert.match(request.prompt, /仅修.*code.*选择器/); assert.match(request.prompt, /prose/); assert.match(request.prompt, /RULE/); assert.match(request.prompt, /basis/)
+      const baseline = task.repair.baselines.find(spec => spec.nodeId === 'export-contract' && spec.path === path)!
+      assert.equal(baseline.baselineSpecPath, `.spex-sync-diagnostics/${f.repair.acceptedRef.sha256}/${path}`)
+      const entries = readTree(f.commonDir, request.worktree!.tree), entry = entries.find(entry => entry.path === baseline.baselineSpecPath)!
+      assert.equal(readObject(f.commonDir, entry.oid).toString('utf8'), f.baseline, '独审候选overlay不能替掉已接受正文副本')
+      const actual = entries.find(entry => entry.path === path)!
+      assert.equal(readObject(f.commonDir, actual.oid).toString('utf8').includes('src/export.js#permitted'), purpose === 'elaboration_generate')
+      assert.deepEqual(entries.filter(entry => entry.path.startsWith('src/') || entry.path.startsWith('tests/')), readTree(f.commonDir, f.snapshot.immutableTree).filter(entry => entry.path.startsWith('src/') || entry.path.startsWith('tests/')))
+      assert.ok(!request.prompt.includes(f.baseline)); assert.ok(!request.prompt.includes(f.badText)); assert.ok(request.prompt.length < 14000)
+    }
+    return native(request)
+  } })
+  assert.equal(result.status, 'complete', JSON.stringify({ failure: result.failure, findings: result.rounds.flatMap(round => round.findings) }))
+  assert.deepEqual(f.requests.slice(requestsBefore).map(request => request.purpose), ['elaboration_generate', 'elaboration_review'])
+  assert.equal(JSON.stringify(f.draft), prior); assert.equal(readStageDraft(f.commonDir, f.draft, f.draft), f.badText)
+  assert.equal(result.changes[0].source, f.baseline.replaceAll('src/export.js#permitted', 'src/export.js#ExportService'))
+})
+
+
+test('V1 baseline只绑定原acceptedRef及本owner正文，legacy不补新brief或副本', async t => {
+  const f = await anchorRepairFixture(t), calls = f.requests.length
+  const mismatched = { ...f.repair, changes: f.repair.changes.map(change => ({ ...change, source: change.source + '\n伪造baseline\n' })) }
+  await assert.rejects(elaborate({ ...f.input, readonlySpecRepair: mismatched }, { runner: f.run(() => { throw new Error('不可派发') }) }), /baseline必须匹配原已接受owner正文/)
+  const foreign = f.repair.changes.map(change => ({ ...change, nodeId: 'foreign-owner', path: '.spec/foreign-owner/spec.md' }))
+  await assert.rejects(elaborate({ ...f.input, readonlySpecRepair: { ...f.repair, changes: foreign, acceptedRef: writeEvidence(f.commonDir, { changes: foreign }) } }, { runner: f.run(() => { throw new Error('不可派发') }) }), /baseline必须匹配原已接受owner正文/)
+  assert.equal(f.requests.length, calls)
+  const requests: ElaborationSessionRequest[] = []
+  const legacy = await elaborate({ ...f.input, requestKey: 'legacy-v1-anchor', draftProtocol: undefined }, { runner: async request => {
+    requests.push(request)
+    assert.equal(request.worktree!.mode, 'read'); assert.ok(!request.prompt.includes('baselineSpecPath'))
+    assert.ok(!readTree(f.commonDir, request.worktree!.tree).some(entry => entry.path.startsWith('.spex-sync-diagnostics/')))
+    if (request.purpose === 'elaboration_generate') assert.match(request.prompt, /真实只读全候选V1诊断/)
+    const output = request.purpose === 'elaboration_generate' ? f.corrected : { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+    return { sessionId: `legacy-v1-${requests.length}`, threadId: `legacy-v1-thread-${requests.length}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)) }
+  } })
+  assert.equal(legacy.status, 'complete'); assert.deepEqual(requests.map(request => request.purpose), ['elaboration_generate', 'elaboration_review'])
+})
+
+
+test('V1真实caller区分投影seed与完整accepted target，VERIFY剔表不误拒baseline guard', async t => {
+  const f = await anchorRepairFixture(t), originalEntry = readTree(f.commonDir, f.snapshot.immutableTree).find(entry => entry.path === path)!, original = readObject(f.commonDir, originalEntry.oid).toString('utf8')
+  const input: ElaborationInput = { ...f.input, requestKey: 'v1-caller-original', readonlySpecRepair: undefined, targets: [{ nodeId: 'export-contract', path, source: original, sourceDigest: originalEntry.digest }], worktree: stageWorktree(f.commonDir, f.snapshot.headCommit, f.snapshot.immutableTree) }
+  const paths = readTree(f.commonDir, f.snapshot.immutableTree).map(entry => entry.path)
+  const plan: SyncPartitionPlan = { version: 'sync-partitions-v1', digest: 'v1-caller-plan', expectedPaths: ['src/export.js'], dependencies: [], partitions: [{ id: 'owner', intentNodeId: 'export-contract', targets: [{ nodeId: 'export-contract', path }], readPaths: paths, writePaths: [path], sourcePaths: ['src/export.js'], changedPaths: ['src/export.js'], contextNodeIds: ['ancestor'], contractIds: [], flowIds: [], readBytes: 100, readLimitBytes: 524288, oversizedReads: [] }] }
+  let local: Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'> | undefined
+  const save: PartitionCheckpoints['save'] = (key, value) => { if (key === 'partition:owner:elaboration') local = structuredClone(value) as NonNullable<typeof local>; return writeEvidence(f.commonDir, value) }
+  const first = await elaborateSyncPartitions(input, plan, 1, { load: () => null, save }, f.run(() => JSON.stringify(draftRows(f.baseline))))
+  assert.equal(first.status, 'complete')
+  const prior = local!, baseline = prior.changes[0].source, projected = projectVerificationTable(baseline, [])
+  assert.notEqual(projected, baseline)
+  const candidate = freezeCandidate(f.snapshot, { version: 'sync-files-v1', changes: [{ path, beforeDigest: originalEntry.digest, beforeMode: originalEntry.mode, content: projected }] }, { paths: [path], contractIds: [], flowIds: [] })
+  const acceptedRef = writeEvidence(f.commonDir, prior), generationRef = writeEvidence(f.commonDir, { candidate })
+  const repair: ReadonlySpecRepair = { ...f.repair, candidateDigest: candidate.digest, acceptedRef, generationRef, changes: prior.changes, output: prior.rounds.at(-1)!.output, review: prior.rounds.at(-1)!.review }
+  const native = f.run(() => JSON.stringify(f.corrected)), calls = f.requests.length
+  const result = await elaborateSyncPartitions({ ...input, requestKey: 'v1-caller-repair' }, plan, 1, { load: () => null, save,
+    loadReadonlySpecRepair: (_key, _binding, inputDigest) => ({ prior, repair: { ...repair, baseInputDigest: inputDigest } }),
+  }, async request => {
+    const task = JSON.parse(request.prompt.split('任务:\n')[1].split(request.purpose === 'elaboration_generate' ? '\n失败诊断' : '\n候选范围')[0]) as { repair: { baselines: { baselineSpecPath: string }[] } }
+    const entries = readTree(f.commonDir, request.worktree!.tree), baselineEntry = entries.find(entry => entry.path === task.repair.baselines[0].baselineSpecPath)!
+    assert.equal(readObject(f.commonDir, baselineEntry.oid).toString('utf8'), baseline)
+    if (request.purpose === 'elaboration_generate') {
+      const physical = readObject(f.commonDir, entries.find(entry => entry.path === path)!.oid).toString('utf8')
+      assert.equal(physical, projected); assert.ok(!parseContract({ nodeId: 'export-contract', path, source: physical }).contract!.items.some(item => item.kind === 'VERIFY'))
+    }
+    return native(request)
+  })
+  assert.equal(result.status, 'complete', JSON.stringify({ failure: result.failure, findings: result.rounds.flatMap(round => round.findings) }))
+  assert.deepEqual(f.requests.slice(calls).map(request => request.purpose), ['elaboration_generate', 'elaboration_review'])
 })
