@@ -10,7 +10,7 @@ import { test } from 'node:test'
 import { openProtocol } from '@spexcode/session-protocol'
 import { sessionIdForCreateKey, readSessionCreateTermination, recoverSessionCreateTermination, type SessionCreateTermination } from '../sessions.js'
 import { cancelStructuredSession, runStructuredSession, SettledSessionCreateTimeoutError, StructuredSessionError, type StructuredSessionRequest, type StructuredSessionResult } from '../session-structured.js'
-import { structuredExecutionPolicy } from '../session-structured-policy.js'
+import { rejectedFinalOutput, structuredExecutionPolicy } from '../session-structured-policy.js'
 import { freezeContext, proveFrozenReads, readFrozenManifest, readFrozenRange } from '../frozen-context.js'
 import { createAttemptRunner, type AttemptRunnerOptions, type NativeRunCheckpoint, type NativeRunPlan, type NativeRunRecord } from './native-run.js'
 import { migrateSyncStore } from './migrations.js'
@@ -923,4 +923,37 @@ const gitRepair={...alias,requestKey:'alias-repair-bridge',prompt:'review in new
     const result = spawnSync(process.execPath, ['--import', tsxImport, script], { cwd: root, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, SPEXCODE_HOME: home, SPEX_SESSION_DATABASE_PATH: join(home, 'sessions.sqlite'), SPEX_RUNTIME_HOME: join(home, 'runtime'), ANTHROPIC_BASE_URL: 'https://example.invalid', SPEXCODE_CODEX_USAGE_GUARD: '0', SPEX_TEST: '1' }, encoding: 'utf8', timeout: 30000 })
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
   } finally { rmSync(directory, { recursive: true, force: true }) }
+})
+
+for (const defect of ['none', 'session', 'thread', 'turn', 'input', 'schema', 'prompt', 'purpose', 'sha', 'record-absence', 'unsettled', 'legacy'] as const) test(`rejected final diagnostic bridge authenticates exact failed record and preserves legacy absence: ${defect}`, async () => {
+  const f = await fixture()
+  try {
+    const text = '{"answer":[}', message = 'original format failure'
+    const run = f.runner({ ...f.runtimeBase, run: async actual => {
+      const record = published(actual), identity = { threadId: 'native-thread', turnId: 'native-turn' }
+      const rejectedOutput = rejectedFinalOutput(text, actual.prompt, record.structuredExecution!, identity)
+      if (defect === 'thread') rejectedOutput.threadId = 'foreign'
+      if (defect === 'turn') rejectedOutput.turnId = 'foreign'
+      if (defect === 'input') rejectedOutput.inputDigest = 'foreign-owner-input'
+      if (defect === 'schema') rejectedOutput.schemaDigest = '0'.repeat(64)
+      if (defect === 'prompt') rejectedOutput.promptDigest = '0'.repeat(64)
+      if (defect === 'purpose') rejectedOutput.purpose = 'another-owner'
+      if (defect === 'sha') rejectedOutput.sha256 = '0'.repeat(64)
+      record.harnessSessionId = identity.threadId
+      record.structuredExecution = { ...record.structuredExecution!, ...identity, state: defect === 'unsettled' ? 'cancelling' : 'failed', ...(defect === 'legacy' || defect === 'record-absence' ? {} : { rejectedOutput }) }
+      f.records.set(record.session, record)
+      throw new StructuredSessionError('structured_output_format_invalid', message, { sessionId: defect === 'session' ? 'foreign' : record.session, ...identity, ...(defect === 'legacy' ? {} : { rejectedOutput }) })
+    } })
+    await assert.rejects(run(f.request), error => {
+      assert(error instanceof StructuredSessionError)
+      assert.equal(error.code, defect === 'none' || defect === 'legacy' ? 'structured_output_format_invalid' : 'stale_result')
+      if (defect === 'none') {
+        assert.equal(error.message, message); assert(error.rejectedOutput?.ref)
+        assert.equal(f.blobIO.read(error.rejectedOutput.ref).toString('utf8'), text)
+      } else assert.equal(error.rejectedOutput, undefined)
+      return true
+    })
+    assert.equal(f.cache.has(textHash(text)), defect === 'none', 'no rejected bytes are granted for mismatched/unsettled/legacy records')
+    assert.notEqual(f.resource().phase, 'removed', 'failure diagnostic does not claim stop or success')
+  } finally { f.cleanup() }
 })

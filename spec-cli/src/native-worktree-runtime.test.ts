@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { structuredExecutionPolicy, structuredRealmRoot, type StructuredExecution } from './session-structured-policy.js'
+import { StructuredSessionError, structuredExecutionPolicy, structuredRealmRoot, type StructuredExecution } from './session-structured-policy.js'
 import { execFileSync, spawn } from 'node:child_process'
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -156,6 +156,15 @@ test('Claude worktree cold completion binds native user/model/exit and never bor
     const echo = { uuid: 'user', session_id: 'session', message: { role: 'user', content: [{ type: 'text', text: prompt }] } }
     for (const [name, value] of Object.entries({ 'plan.json': plan, 'launch.json': { cwd: f.path }, 'init.json': { session_id: 'session', model: 'MiniMax-M3.1-Flash', tools: ['Read', 'Bash', 'Edit', 'StructuredOutput'] }, 'user-echo.json': echo, 'result.json': { type: 'result', subtype: 'success', is_error: false, session_id: 'session', user_message_uuid: 'user', user_message_uuids: ['user'], structured_output: output }, 'exit.json': { code: 0, signal: null, stopped: true } })) writeFileSync(join(root, name), JSON.stringify(value))
     writeFileSync(join(root, 'claude-home/projects/exact/session.jsonl'), JSON.stringify({ type: 'user', sessionId: 'session', uuid: 'user', parentUuid: null, promptId: 'prompt', message: echo.message }) + '\n')
+    const savedResult = readFileSync(join(root, 'result.json'))
+    writeFileSync(join(root, 'result.json'), JSON.stringify({ ...JSON.parse(savedResult.toString('utf8')), structured_output: {} }))
+    await assert.rejects(claudeStructuredTurn(realm, 'native', prompt, execution, noDispatch, f.path), error => {
+      assert(error instanceof StructuredSessionError); assert.equal(error.code, 'failed')
+      assert.equal(error.rejectedOutput?.text, '{}'); assert.equal(error.rejectedOutput?.representation, 'native_json')
+      assert.equal(existsSync(join(root, 'completed.json')), false)
+      return true
+    })
+    writeFileSync(join(root, 'result.json'), savedResult)
     const result = await claudeStructuredTurn(realm, 'native', prompt, execution, noDispatch, f.path)
     assert.equal(result.frozenReadProof, undefined); assert.deepEqual(JSON.parse(result.text), output)
     const completed = { ...execution, state: 'completed' as const, threadId: 'session', turnId: 'user', output, resultDigest: hash(output) }
@@ -262,7 +271,10 @@ test('ZCode authenticated worktree schema mismatch is typed for repair without p
     const originalHashes = Object.keys(files).map(name => [name, sha(name)] as const)
     const requestTurn = () => zcodeStructuredTurn(realm, 'native', prompt, execution, noDispatch, f.path)
     for (let replay = 0; replay < 2; replay++) await assert.rejects(requestTurn(), error => {
-      const failure = error as { code?: string; message?: string }
+      assert(error instanceof StructuredSessionError)
+      const failure = error
+      assert.equal(failure.rejectedOutput?.text, response)
+      assert.equal(failure.rejectedOutput?.sha256, createHash('sha256').update(response).digest('hex'))
       assert.equal(failure.code, 'structured_output_format_invalid')
       assert.match(failure.message ?? '', /"instancePath":"\/ids"/)
       assert.match(failure.message ?? '', /"keyword":"maxItems"/)
@@ -279,7 +291,9 @@ test('ZCode authenticated worktree schema mismatch is typed for repair without p
     writeFileSync(join(root, 'events.json'), JSON.stringify(malformedEvents)); writeFileSync(join(root, 'messages.json'), JSON.stringify(malformedMessages)); writeFileSync(join(root, 'terminal.json'), JSON.stringify(malformedEvents.at(-1)))
     const malformedHashes = Object.keys(files).map(name => [name, sha(name)] as const)
     for (let replay = 0; replay < 2; replay++) await assert.rejects(requestTurn(), error => {
-      assert.equal((error as { code: string }).code, 'structured_output_format_invalid')
+      assert(error instanceof StructuredSessionError)
+      assert.equal(error.code, 'structured_output_format_invalid')
+      assert.equal(error.rejectedOutput?.text, malformedResponse)
       const message = (error as Error).message
       for (const value of ['"category":"expected_property_delimiter"', `"position":${malformedResponse.indexOf('"next"')}`, '"line":3', '"column":1']) assert(message.includes(value), value)
       assert(!message.includes('PRIVATE_DIAGNOSTIC_CANARY'))
@@ -289,6 +303,21 @@ test('ZCode authenticated worktree schema mismatch is typed for repair without p
     assert.equal(existsSync(join(root, 'completed.json')), false)
     for (const [name, value] of Object.entries(files)) writeFileSync(join(root, name), JSON.stringify(value))
 
+    for (const [name, value] of [
+      ['plan.json', { ...plan, requestDigest: '0'.repeat(64) }],
+      ['plan.json', { ...plan, inputId: 'foreign' }],
+      ['send.json', { ...files['send.json'], content: nativePrompt + 'foreign owner' }],
+      ['terminal.json', { ...events.at(-1), sessionId: 'foreign' }],
+      ['terminal.json', { ...events.at(-1), payload: { ...events.at(-1)!.payload, resultType: 'cancelled' } }],
+    ] as const) {
+      writeFileSync(join(root, name), JSON.stringify(value))
+      await assert.rejects(requestTurn(), error => { assert(!(error instanceof StructuredSessionError) || !error.rejectedOutput); return true })
+      writeFileSync(join(root, name), JSON.stringify(files[name]))
+    }
+    await assert.rejects(zcodeStructuredTurn(realm, 'native', prompt, { ...execution, schema: { type: 'object', required: ['foreign'] } }, noDispatch, f.path), error => { assert(!(error instanceof StructuredSessionError) || !error.rejectedOutput); return true })
+    rmSync(join(root, 'terminal.json'))
+    await assert.rejects(requestTurn(), error => { assert(!(error instanceof StructuredSessionError) || !error.rejectedOutput); return true })
+    writeFileSync(join(root, 'terminal.json'), JSON.stringify(files['terminal.json']))
     writeFileSync(join(root, 'terminal.json'), JSON.stringify({ ...events.at(-1), turnId: 'foreign' }))
     await assert.rejects(requestTurn(), { code: 'stale_result' })
     writeFileSync(join(root, 'terminal.json'), JSON.stringify(events.at(-1)))
@@ -505,4 +534,32 @@ for (const taskScoped of [true, false]) test(taskScoped ? 'task cwd orphan stays
     }
     await closed; rmSync(directory, { recursive: true, force: true })
   }
+})
+
+
+test('Claude worktree exhaustion retains only the last authenticated rejected StructuredOutput input', async () => {
+  const f = repoFixture(), realm = join(f.root, 'realm'), root = join(realm, 'native'), historyPath = join(root, 'claude-home/projects/exact/session.jsonl')
+  mkdirSync(join(root, 'claude-home/projects/exact'), { recursive: true })
+  try {
+    const processIdentity = await deadProcess(root), prompt = 'Review this exact owner', output = { ok: 'rejected final' }
+    const policy = structuredExecutionPolicy({ ...request, schema: { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'] }, worktree: { ...f.seed, mode: 'read' } })
+    const native = { version: 1 as const, root, sessionId: 'session', userUuid: 'user', ...processIdentity }, execution: StructuredExecution = { ...policy, claudeNative: native, state: 'running' }
+    const plan = { ...native, policyDigest: hash(policy), requestDigest: hash({ prompt, policy }), cliVersion: '2.1.309 (Claude Code)' }
+    const message = { role: 'user', content: [{ type: 'text', text: prompt }] }
+    for (const [name, value] of Object.entries({ 'plan.json': plan, 'launch.json': { cwd: f.path }, 'init.json': { session_id: 'session', model: 'MiniMax-M3.1-Flash', tools: ['Read', 'StructuredOutput'] }, 'user-echo.json': { uuid: 'user', session_id: 'session', message }, 'result.json': { type: 'result', subtype: 'error_max_structured_output_retries', is_error: true, session_id: 'session', user_message_uuid: 'user', user_message_uuids: ['user'] }, 'exit.json': { code: 1, signal: null, stopped: true } })) writeFileSync(join(root, name), JSON.stringify(value))
+    const history = [
+      { type: 'user', sessionId: 'session', uuid: 'user', parentUuid: null, promptId: 'prompt', message },
+      { type: 'api-request', sessionId: 'session', id: 'request', keep: 0, tail: [], params: { model: 'MiniMax-M3.1-Flash' } },
+      { type: 'assistant', sessionId: 'session', uuid: 'schema-call', parentUuid: 'user', requestRef: 'request', message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'SYNTHETIC_PRIVATE_THINKING' }, { type: 'tool_use', id: 'schema', name: 'StructuredOutput', input: output }] } },
+      { type: 'user', sessionId: 'session', uuid: 'schema-error', parentUuid: 'schema-call', promptId: 'prompt', sourceToolAssistantUUID: 'schema-call', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'schema', is_error: true, content: 'Output does not match required schema: /ok: must be boolean' }] } },
+    ]
+    writeFileSync(historyPath, history.map(row => JSON.stringify(row)).join('\n') + '\n')
+    await assert.rejects(claudeStructuredTurn(realm, 'native', prompt, execution, noDispatch, f.path), error => {
+      assert(error instanceof StructuredSessionError); assert.equal(error.code, 'structured_output_retries_exhausted')
+      assert.equal(error.rejectedOutput?.text, JSON.stringify(output)); assert.equal(error.rejectedOutput?.representation, 'native_json')
+      assert(!JSON.stringify(error.rejectedOutput).includes('SYNTHETIC_PRIVATE_THINKING'))
+      assert.equal(existsSync(join(root, 'completed.json')), false)
+      return true
+    })
+  } finally { f.close() }
 })

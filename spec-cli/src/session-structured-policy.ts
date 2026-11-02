@@ -13,6 +13,12 @@ import { withDeliveryLocks } from './delivery-lock.js'
 
 export type FrozenReaderRuntime = { cliVersion: string; catalogDigest: string; catalogPath: string } & ({ version: 1 } | { version: 2; toolOutputTokenLimit: number })
 export type ZCodeToolPolicy = { version: 1; toolDenylist: readonly ['ExitPlanMode'] }
+export type RejectedStructuredOutput = {
+  version: 1; kind: 'untrusted_final'; representation: 'text' | 'native_json'
+  text: string; sha256: string; ref?: { sha256: string }
+  inputDigest: string; schemaDigest: string; promptDigest: string; purpose: string
+  threadId: string; turnId: string
+}
 const zcodeReadToolPolicy: ZCodeToolPolicy = Object.freeze({ version: 1, toolDenylist: Object.freeze(['ExitPlanMode'] as const) })
 
 export type StructuredExecution = {
@@ -34,6 +40,7 @@ export type StructuredExecution = {
   resultDigest?: string
   error?: string
   errorCode?: 'structured_output_retries_exhausted' | 'structured_output_format_invalid' | 'native_worktree_result_invalid'
+  rejectedOutput?: RejectedStructuredOutput
   worktree?: NativeWorktreeRequest
   zcodeToolPolicy?: ZCodeToolPolicy
   resultWorktree?: NativeWorktreeResult
@@ -111,13 +118,29 @@ export class StructuredSessionError extends Error {
   readonly sessionId?: string
   readonly threadId?: string
   readonly turnId?: string
-  constructor(readonly code: 'unsupported' | 'failed' | 'cancelled' | 'timeout' | 'key_reused' | 'stale_result' | 'cancellation_pending' | 'structured_output_retries_exhausted' | 'structured_output_format_invalid' | 'native_worktree_result_invalid', message: string, identity: { sessionId?: string; threadId?: string; turnId?: string } = {}) {
+  readonly rejectedOutput?: RejectedStructuredOutput
+  constructor(readonly code: 'unsupported' | 'failed' | 'cancelled' | 'timeout' | 'key_reused' | 'stale_result' | 'cancellation_pending' | 'structured_output_retries_exhausted' | 'structured_output_format_invalid' | 'native_worktree_result_invalid', message: string, identity: { sessionId?: string; threadId?: string; turnId?: string; rejectedOutput?: RejectedStructuredOutput } = {}) {
     super(message)
     this.name = 'StructuredSessionError'
     this.sessionId = identity.sessionId
     this.threadId = identity.threadId
     this.turnId = identity.turnId
+    if (identity.rejectedOutput !== undefined) this.rejectedOutput = identity.rejectedOutput
   }
+}
+
+const rejectedDigest = (text: string): string => createHash('sha256').update(text).digest('hex')
+
+/** 仅由已认证final的adapter调用；正文只进入失败诊断，不是成功结果。 */
+export function rejectedFinalOutput(text: string, prompt: string, execution: Pick<StructuredExecution, 'inputDigest' | 'schema' | 'purpose'>, identity: { threadId: string; turnId: string }, representation: RejectedStructuredOutput['representation'] = 'text'): RejectedStructuredOutput {
+  return { version: 1, kind: 'untrusted_final', representation, text, sha256: rejectedDigest(text), inputDigest: execution.inputDigest, schemaDigest: rejectedDigest(JSON.stringify(execution.schema)), promptDigest: rejectedDigest(prompt), purpose: execution.purpose, threadId: identity.threadId, turnId: identity.turnId }
+}
+
+/** 失败证据跨record、资源桥与owner请求边界时逐项核原绑定。 */
+export function assertRejectedOutput(output: RejectedStructuredOutput, prompt: string, execution: Pick<StructuredExecution, 'inputDigest' | 'schema' | 'purpose'>, identity: { threadId?: string; turnId?: string }): void {
+  if (typeof output.text !== 'string' || !identity.threadId || !identity.turnId || !isDeepStrictEqual({ ...output, ref: undefined }, { ...rejectedFinalOutput(output.text, prompt, execution, { threadId: identity.threadId, turnId: identity.turnId }, output.representation), ref: undefined })
+    || !['text', 'native_json'].includes(output.representation) || output.ref && output.ref.sha256 !== output.sha256)
+    throw new StructuredSessionError('stale_result', 'rejected final output differs from its exact request/schema/native identity')
 }
 
 export class StructuredSessionTransportError extends StructuredSessionError {

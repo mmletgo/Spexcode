@@ -19,6 +19,8 @@ related:
 
 ## expanded spec
 
+同owner已结算的原生格式/schema失败可通过既有repairDiagnostics传递round.rejectedOutput完整文本及原文ref/SHA，提示明确untrusted prior failed output。原生边界先认证final与停止，资源桥再核原请求；本轮call重核请求摘要/schema/purpose/身份后才保诊断。它不是业务输出、候选、raw/facts或批准，所有JSON/schema/引用/业务/独审门不变，旧缺席不补。
+
 当前native-worktree操作的P1生成与独审使用[[sync-stage-worktree]]的真实只读seed，允许按需读取完整仓库。生成seed为原composed加已审祖先接口；独审seed另覆盖本轮渲染的完整Spec候选及真实move/retire。提示只给相关Spec路径、targetIndex/首次必建indices、真实raw差量、事实、技术范围/不可改oracle、精确授权与失败诊断，schema仍规范业务行；不重复完整树或强制逐字读取运输。程序按实际seed对象补足契约引用验证所需代码/测试，不把files投影当读取权限。完整业务输入、实际seed/tree及prompt/schema参与摘要；原raw/ID/演进/全图seal、独审与预算门均保留。下文受限frozen读取说明仅用于无worktree的历史操作与旧单测。
 
 Native P1生成和独审共用既有短来源语义：可观察不等于重大业务政策；普通无冲突实现细节可沿合法code来源并追到REQ；明确原意下的实现/测试缺陷不是未知政策或业务GAP，独审须纠正对实现的误读。显式空`implementationWritePaths`时，提示须明确源码和全部测试只读，不发明或新增测试，也不把实现差异交给无写权P2；缺口继续以`readonly_implementation_gap`阻断。共享这段来源语义不改变`interface_seed`只维护父接口、不要求完整FLOW/AC/实现的阶段边界。Legacy提示与历史原件保持原样。

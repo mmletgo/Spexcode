@@ -16,6 +16,8 @@ related:
 
 ## expanded spec
 
+原生错误携rejectedOutput时，仅在本资源精确record为failed、证据与错误相同且固定创建请求/schema/input/purpose/thread/turn逐项一致后，经现有blobIO保存完整被拒final原文字节，并携原文ref/SHA传回；不读取provider协议目录。原error/code/身份保持，资源停止仍走原正式结算，不因诊断取得成功或removed。旧无证据不扫描补读。
+
 新 ZCode worktree read 资源在 requestDigest/plan 登记前冻结可选 zcodeToolPolicy，策略见 [[zcode-structured-runtime]]；已登记资源只从原 plan.request 恢复其字段或缺席，显式换策略拒绝，不能给尚无 Native session/send 的旧请求补工具控制。恢复仍完整核其余请求、原 payloadDigest 与创建哈希。worktree 与 frozen 请求统一保留业务 requestKey，并通过已有 sessionCreateKey 传递精确原创建键和已冻结语义；inputDigest 不改，NativeRunPlan schemaVersion 保持1。
 
 reserveDispatch 已提交而 resource 尚未登记的冷恢复窗口同样属于已冻结请求：只有调用者完整请求 hash 精确等于原 dispatch.requestDigest 时，保留该请求的原工具字段或缺席；否则按当前规则重建后仍须经原 reserveDispatch 的完整 digest/purpose 校验，绝不只凭 key 采纳或清空策略。旧缺席与新已冻结 policy 都保持原 requestDigest、sessionCreateKey、callsUsed；prompt/schema/worktree 等任一变化仍拒绝，不能创建 Native 或重发旧 turn。

@@ -7,7 +7,7 @@ import { mainRoot, runtimeRoot, sessionArtifactPath } from '@spexcode/spec-core'
 import { readRecord, withRecordLock, writeRecord } from './session-record.js'
 import { codexStructuredTurn, codexStopStructuredTurn } from './codex-harness.js'
 import { commitCodexGenerationRegistration, prepareCodexGenerationRegistration, readCodexGenerationLedger, resolveCodexGenerationForClose } from './codex-runtime-generations.js'
-import { structuredGeneration, prepareStructuredRealm, prepareFrozenReaderRuntime, assertFrozenReaderRuntime, StructuredSessionError, StructuredSessionTransportError, structuredObserverState, structuredExecutionPolicy, structuredRealmRoot, pinZCodeToolPolicy, type StructuredExecution, type FrozenReaderRuntime } from './session-structured-policy.js'
+import { assertRejectedOutput, structuredGeneration, prepareStructuredRealm, prepareFrozenReaderRuntime, assertFrozenReaderRuntime, StructuredSessionError, StructuredSessionTransportError, structuredObserverState, structuredExecutionPolicy, structuredRealmRoot, pinZCodeToolPolicy, type StructuredExecution, type FrozenReaderRuntime } from './session-structured-policy.js'
 import { assertFrozenBinding, prepareFrozenPrompt, readFrozenManifest, type FrozenContextRef, type FrozenEntryJson, type FrozenReadProof, type FrozenReadReceipt } from './frozen-context.js'
 import { verifyStructuredFrozenReadProof as verifyFrozenReadProof } from './structured-frozen-proof.js'
 import { configuredSessionApplication } from './session-application.js'
@@ -143,8 +143,10 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
       await update({ state: 'cancelling', cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: false, acknowledged: false, error: error.message }, error: error.message })
       return 'cancelling'
     }
+    const rejectedOutput = error instanceof StructuredSessionError ? error.rejectedOutput : undefined
+    if (rejectedOutput) assertRejectedOutput(rejectedOutput, readFileSync(sessionArtifactPath(id, 'launch'), 'utf8'), execution, { threadId: pendingStop?.threadId, turnId: pendingStop?.turnId })
     const state = error instanceof StructuredSessionError && (error.code === 'cancelled' || error.code === 'timeout') ? error.code : 'failed'
-    await update({ state, error: error instanceof Error ? error.message : String(error), ...(error instanceof StructuredSessionError && (error.code === 'structured_output_retries_exhausted' || error.code === 'structured_output_format_invalid' || error.code === 'native_worktree_result_invalid') ? { errorCode: error.code } : {}) })
+    await update({ state, ...(rejectedOutput ? { rejectedOutput } : {}), error: error instanceof Error ? error.message : String(error), ...(error instanceof StructuredSessionError && (error.code === 'structured_output_retries_exhausted' || error.code === 'structured_output_format_invalid' || error.code === 'native_worktree_result_invalid') ? { errorCode: error.code } : {}) })
     return state
   } finally { activeControllers.delete(id); activeFinished.delete(id); finish() }
 }
@@ -255,8 +257,10 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
         const stopped = await cancel(state.state)
         throw new StructuredSessionError(stopped.nativeStopped ? state.state : 'cancellation_pending', stopped.error || 'structured cancellation settlement recovered')
       }
-      if (state.state === 'failed')
-        throw new StructuredSessionError(state.errorCode ?? 'failed', state.error || 'structured execution failed')
+      if (state.state === 'failed') {
+        if (state.rejectedOutput) assertRejectedOutput(state.rejectedOutput, request.prompt, execution, state)
+        throw new StructuredSessionError(state.errorCode ?? 'failed', state.error || 'structured execution failed', { rejectedOutput: state.rejectedOutput })
+      }
       if (state.state === 'running' && !recoveryRequested && structuredObserverState(state) === 'gone')
         recoveryRequested = await queueStructuredRecovery(id)
       if (deadline !== null && Date.now() >= deadline) {
@@ -268,7 +272,7 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
   } catch (error) {
     if (error instanceof StructuredSessionError) {
       const state = readRecord(id)?.structuredExecution
-      throw new StructuredSessionError(error.code, error.message, { sessionId: id, threadId: state?.threadId, turnId: state?.turnId })
+      throw new StructuredSessionError(error.code, error.message, { sessionId: id, threadId: state?.threadId, turnId: state?.turnId, rejectedOutput: error.rejectedOutput })
     }
     throw error
   } finally { request.signal?.removeEventListener('abort', onAbort) }

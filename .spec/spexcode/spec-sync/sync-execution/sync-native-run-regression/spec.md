@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+被拒final回归用真实SQLite及受控runtime逐项拒绝session/thread/turn/input/schema/prompt/purpose/SHA、未settled或record缺证据；匹配原failed record才生成可读原文字节ref，legacy无字段不补且不把诊断当removed。实际Git/正式创建队列与MockNative组合另证syntax/schema两种失败完整正文进入下一实际send、候选仍null和同键不重发；此证据不冒充真实LLM通过。
+
 有限与null请求均通过精确取消/回执丢失场景结算原资源，null的取消清理预算仍为15秒；未知停止不释放容量。
 
 验证派发前持久计划、published但thread未知、精确thread/turn绑定、完整结果证据、同键无重复调用与计费、同键不同载荷拒绝、结果/record身份与hash错配拒绝、未知原生终态不removed、取消回执丢失与旧fence资源结算、已结算结果blob核验重放、精确同键恢复不另造会话。真实原生Agent全链路验收由上层负责。

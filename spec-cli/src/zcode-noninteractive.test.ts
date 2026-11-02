@@ -35,18 +35,18 @@ test('new read defaults are frozen only at admission; old absence and explicit t
 test('MockNative captures exact send filtering, unchanged plan mode and permissions, v1 recovery and v2 tamper refusal', async t => {
   const directory = mkdtempSync(join(tmpdir(), 'zcode-noninteractive-')), bin = join(directory, 'bin'), cli = join(bin, 'zcode'), builtin = Buffer.from('PUBLIC_MOCK_BUILTIN')
   mkdirSync(bin)
-  const captured = join(directory, 'captured.json')
+  const captured = join(directory, 'captured.json'), rejectedResponse = join(directory, 'rejected-response.txt')
   const script = `#!/usr/bin/env node
 const fs=require('node:fs'),rl=require('node:readline');
 if(process.argv.includes('--version')){console.log('0.17.1');process.exit(0)}
-let create,send;const permissions={},out=x=>console.log(JSON.stringify(x)),turn='turn',visible=['Read','Glob','Grep','Bash','Edit','Write','NotebookEdit','ExitPlanMode'];
+let create,send;const response=fs.existsSync(${JSON.stringify(rejectedResponse)})?fs.readFileSync(${JSON.stringify(rejectedResponse)},'utf8'):'{}';const permissions={},out=x=>console.log(JSON.stringify(x)),turn='turn',visible=['Read','Glob','Grep','Bash','Edit','Write','NotebookEdit','ExitPlanMode'];
 rl.createInterface({input:process.stdin}).on('line',line=>{
 if(!/^[\\x00-\\x7f]*$/.test(line))throw Error('non-ASCII RPC wire');const p=JSON.parse(line),reply=result=>out({id:p.id,result});if(!p.method){permissions[p.id]=p.result;return}
 if(p.method==='session/create'){create=p.params;reply({session:{sessionId:create.sessionId,model:create.model}})}
 else if(p.method==='session/read')reply({session:{sessionId:create.sessionId,model:create.model,status:'idle'},settings:{model:{current:create.model}},runtime:{pendingRequestIds:[]},projection:{currentTurnId:send?turn:undefined,pendingPermissions:[],activeToolCalls:[]}});
 else if(p.method==='session/send'){send=p.params;for(const toolName of visible)out({id:'permission-'+toolName,method:'interaction/requestPermission',params:{sessionId:create.sessionId,toolName,input:{file_path:'value'}}});reply({accepted:true,sessionId:create.sessionId})}
-else if(p.method==='session/events'){fs.writeFileSync(${JSON.stringify(captured)},JSON.stringify({create,send,permissions,visibleTools:visible.filter(name=>!send.toolDenylist?.includes(name))}));reply({events:[{type:'turn.started',payload:{inputId:send.inputId,queryId:send.queryId,messageId:'user'}},{type:'session.updated',payload:{providerId:create.model.providerId,modelId:create.model.modelId,toolCount:visible.length-(send.toolDenylist?.length??0)}},{type:'turn.completed',payload:{inputId:send.inputId,resultType:'success',response:'{}'}}].map((e,i)=>({...e,eventId:'event-'+i,seq:i+1,sessionId:create.sessionId,turnId:turn}))})}
-else if(p.method==='session/messages')reply({messages:[{info:{id:'user',sessionID:create.sessionId,role:'user',anchor:{turnId:turn},modelSelection:create.model,semantics:{kind:'user_prompt'}},parts:[{type:'text',text:send.content}]},{info:{role:'assistant',anchor:{turnId:turn},...create.model,semantics:{kind:'assistant_response'}},parts:[{type:'text',text:'{}'}]}],hasMore:false});
+else if(p.method==='session/events'){fs.writeFileSync(${JSON.stringify(captured)},JSON.stringify({create,send,permissions,visibleTools:visible.filter(name=>!send.toolDenylist?.includes(name))}));reply({events:[{type:'turn.started',payload:{inputId:send.inputId,queryId:send.queryId,messageId:'user'}},{type:'session.updated',payload:{providerId:create.model.providerId,modelId:create.model.modelId,toolCount:visible.length-(send.toolDenylist?.length??0)}},{type:'turn.completed',payload:{inputId:send.inputId,resultType:'success',response}}].map((e,i)=>({...e,eventId:'event-'+i,seq:i+1,sessionId:create.sessionId,turnId:turn}))})}
+else if(p.method==='session/messages')reply({messages:[{info:{id:'user',sessionID:create.sessionId,role:'user',anchor:{turnId:turn},modelSelection:create.model,semantics:{kind:'user_prompt'}},parts:[{type:'text',text:send.content}]},{info:{role:'assistant',anchor:{turnId:turn},...create.model,semantics:{kind:'assistant_response'}},parts:[{type:'text',text:response}]}],hasMore:false});
 else if(p.method==='session/close')reply({closed:true});else throw Error('unexpected RPC '+p.method);
 });
 `
@@ -117,7 +117,7 @@ else if(p.method==='session/close')reply({closed:true});else throw Error('unexpe
       writeFileSync(join(repository, 'value'), 'seed\n'); git(['add', '.']); git(['commit', '-qm', 'seed'])
       process.chdir(repository)
       try {
-        const { runStructuredSession } = await import('./session-structured.js'), { readRecord } = await import('./session-record.js'), { sessionIdForCreateKey } = await import('./sessions.js')
+        const { runStructuredSession } = await import('./session-structured.js'), { readRecord, writeRecord } = await import('./session-record.js'), { sessionIdForCreateKey } = await import('./sessions.js')
         const worktree = { baseCommit: git(['rev-parse', 'HEAD']), tree: git(['rev-parse', 'HEAD^{tree}']), mode: 'read' as const }
         for (const historical of [false, true]) {
           const request = { ...read, root: repository, prompt: 'Return the complete JSON result.', requestKey: `creation-${historical}-${directory}`, timeoutMs: 15000, worktree }
@@ -164,6 +164,68 @@ else if(p.method==='session/close')reply({closed:true});else throw Error('unexpe
             assert.deepEqual(readFileSync(captured), original, 'the composed cold replay must not send again')
             assert.equal(readRecord(result.sessionId)!.createPayloadHash, creationHash)
             assert.equal(store.readOperation(operation.id).callsUsed, 1)
+          } finally { protocol.close() }
+        })
+        await creation.test('authenticated rejected final bytes survive real record and resource bridge into the next owner request', async rejected => {
+          const { openProtocol } = await import('@spexcode/session-protocol'), { migrateSyncStore } = await import('./sync/migrations.js'), { SyncStore } = await import('./sync/store.js')
+          const { captureInputSnapshot, readEvidence } = await import('./sync/snapshot.js'), { createAttemptRunner } = await import('./sync/native-run.js')
+          const { elaborate, elaborationDigest } = await import('./sync/elaboration.js')
+          const input = await captureInputSnapshot(repository, { committed: true }), database = process.env.SPEX_SESSION_DATABASE_PATH
+          assert(database)
+          const protocol = openProtocol(database)
+          try {
+            await migrateSyncStore(protocol)
+            const store = new SyncStore(protocol, { readBlob: ref => readEvidence(input.source.commonDir, ref) })
+            for (const [kind, text] of [['syntax', '{"changes":[}'], ['schema', '{"version":"elaboration-target-rows-v3","changes":"not an array"}']] as const) await rejected.test(`rejected-${kind}`, async () => {
+              writeFileSync(rejectedResponse, text)
+              const scope = { paths: [], contractIds: [`rejected-${kind}`], flowIds: [] }
+              const operation = store.admitAndEnqueue({ ingressKey: `rejected-${kind}`, rootCauseId: `rejected-${kind}`, origin: 'spec', model: read.model, input, scope, budget: { maxCalls: 2, maxAttempts: 1, maxRepairs: 0, timeoutMs: 60000 }, policyDigest: `rejected-${kind}`, impactDigest: 'impact', readSetDigest: 'read', delivery: null, deliveryPlan: { canonicalRoot: join(repository, `delivery-${kind}`), branch: `delivery-${kind}`, baseCommit: input.headCommit } })
+              const claim = store.claimAttempt({ operationId: operation.id, source: input.source, scope, leaseMs: 30000, expectedMessageId: operation.dispatchMessageId })
+              const snapshot = { root: repository, requestKey: `rejected-${kind}-first`, intent: { nodeId: `rejected-${kind}`, rawSource: '返回固定文本。' }, targets: [{ nodeId: `rejected-${kind}`, path: `.spec/rejected-${kind}/spec.md`, source: null, sourceDigest: null }], worktree, model: read.model, implementationWritePaths: [], maxRepairs: 0 }
+              const bridge = createAttemptRunner(store, claim.fence, { pollMs: 2 })
+              let originalRequest: Parameters<typeof runStructuredSession>[0] | undefined
+              const runner: typeof bridge = async request => { originalRequest ??= request; return bridge(request) }
+              const failed = await elaborate(snapshot, { runner }), round = failed.rounds[0]
+              assert.equal(failed.failure?.code, 'structured_output_format_invalid')
+              assert.equal(round.output, null); assert.equal(round.candidate, null); assert.equal(round.candidateDigest, null)
+              assert(round.rejectedOutput, 'authenticated final body must survive the failed record/bridge; absence reproduces the repair gap')
+              assert.equal(round.rejectedOutput.text, text)
+              assert.equal(round.rejectedOutput.sha256, elaborationDigest(text))
+              assert(round.rejectedOutput.ref)
+              assert.equal(readEvidence(input.source.commonDir, round.rejectedOutput.ref).toString('utf8'), text)
+              const record = readRecord(failed.failure!.sessionId!)!
+              assert.equal(record.structuredExecution!.state, 'failed')
+              assert.equal(record.structuredExecution!.output, undefined)
+              assert(originalRequest)
+              const rejoin = () => runStructuredSession({ ...originalRequest!, sessionCreateKey: store.readAttempt(claim.attempt.id).dispatchPlans[0].sessionCreateKey })
+              const beforeRejoin = readFileSync(captured)
+              for (const field of ['threadId', 'turnId', 'inputDigest', 'schemaDigest', 'promptDigest'] as const) {
+                const corrupt = structuredClone(record)
+                assert(corrupt.structuredExecution?.rejectedOutput)
+                corrupt.structuredExecution.rejectedOutput[field] = 'foreign'
+                writeRecord(corrupt)
+                await assert.rejects(rejoin(), { code: 'stale_result' })
+              }
+              const legacy = structuredClone(record)
+              delete legacy.structuredExecution!.rejectedOutput
+              writeRecord(legacy)
+              await assert.rejects(rejoin(), error => { assert(error instanceof Error); assert(!('rejectedOutput' in error) || !error.rejectedOutput); return true })
+              assert.equal(readRecord(record.session)!.structuredExecution!.rejectedOutput, undefined, 'legacy absence is never backfilled from Native files')
+              writeRecord(record)
+              assert.deepEqual(readFileSync(captured), beforeRejoin, 'failed record rejoin must not send again')
+              const diagnostics = { requestKey: snapshot.requestKey, inputDigest: failed.inputDigest, resultRef: { sha256: elaborationDigest(JSON.stringify(failed)) }, failure: failed.failure!, round }
+              for (const field of ['ownerInputDigest', 'ownerRequestKey', 'threadId', 'sha256'] as const) {
+                const corrupt = structuredClone(diagnostics)
+                corrupt.round.rejectedOutput![field] = 'foreign'
+                await assert.rejects(elaborate({ ...snapshot, requestKey: `rejected-${kind}-foreign-${field}` }, { runner: async () => assert.fail('foreign rejected body must not reach a request'), repairDiagnostics: corrupt }), /同owner/)
+              }
+              await elaborate({ ...snapshot, requestKey: `rejected-${kind}-second` }, { runner, repairDiagnostics: diagnostics })
+              const actual = JSON.parse(readFileSync(captured, 'utf8')) as { send: { content: string } }
+              assert(actual.send.content.includes(JSON.stringify(text)), 'next actual Native send must include all rejected bytes as untrusted data')
+              assert(actual.send.content.includes(round.rejectedOutput.ref.sha256))
+              assert.match(actual.send.content, /untrusted prior failed output/)
+              assert.equal(store.readOperation(operation.id).callsUsed, 2)
+            })
           } finally { protocol.close() }
         })
       } finally { process.chdir(previousCwd) }
