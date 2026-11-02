@@ -865,15 +865,29 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         }
         return null
       }
-      const canSkipElaborationControlAttempt = (prior: SyncAttempt, saved: SavedElaboration | null, binding?: NonNullable<ElaborationResult['partitionBinding']>): boolean => {
-        if (prior.status !== 'superseded' || prior.failure || canonical(prior.composedInput) !== canonical(view.composed) || prior.baselineSelectionDigest !== operation.baselineSelection?.digest) return false
+      const priorElaborationInputMatches = (prior: SyncAttempt, binding?: NonNullable<ElaborationResult['partitionBinding']>): boolean => {
+        if (canonical(prior.composedInput) !== canonical(view.composed) || prior.baselineSelectionDigest !== operation.baselineSelection?.digest) return false
         if (binding) {
           const plan = partitionStage<SyncPartitionPlan>(store, operation, prior, 'partition-plan')
           if (!plan || plan.result.digest !== binding.planDigest) return false
         }
         const priorAnalysis = stage<CodeBehaviorAnalysis>(store, operation, prior, 'analysis'), analysisRef = binding?.analysisRef ?? analysis?.ref
         if (analysisRef ? !priorAnalysis || contentHash(JSON.stringify(priorAnalysis)) !== analysisRef.sha256 : priorAnalysis !== null) return false
+        return true
+      }
+      const canSkipElaborationControlAttempt = (prior: SyncAttempt, saved: SavedElaboration | null, binding?: NonNullable<ElaborationResult['partitionBinding']>): boolean => {
+        if (prior.status !== 'superseded' || prior.failure || !priorElaborationInputMatches(prior, binding)) return false
         return !saved || saved.status === 'cancelled' && !saved.rounds.some(round => round.review !== null || round.findings.some(issue => issue.severity === 'error'))
+      }
+      const canRecoverInterruptedElaborationResult = (prior: SyncAttempt, source: { result: SavedElaboration }, binding?: NonNullable<ElaborationResult['partitionBinding']>): boolean => {
+        if (prior.status !== 'superseded' || prior.failure || !priorElaborationInputMatches(prior, binding)) return false
+        const result = source.result, round = result.rounds.at(-1)
+        if (elaborationRepairSeed(result, `sync:${prior.id}:elaborate${binding ? `:partition:${binding.partitionId}` : ''}`)) return true
+        const runtimeFailure = result.status === 'failed' && result.candidateDigest === null && !!round && round.candidate === null && round.candidateDigest === null
+          && structuredAnalysisRepairCodes.has(result.failure?.code ?? '')
+        const structuralFailure = result.status === 'exhausted' && result.failure?.code === 'repair_budget_exhausted' && !!round
+          && round.candidate === null && round.findings.some(issue => issue.severity === 'error')
+        return runtimeFailure || structuralFailure
       }
       const loadElaborationRepairSeed = (key: string, inputDigest: string, binding?: NonNullable<ElaborationResult['partitionBinding']>): ElaborationRepairSeed | null => {
         for (const prior of store.listAttempts(operation.id).filter(item => item.number < attempt!.number).reverse()) {
@@ -882,10 +896,18 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           const source = binding ? partitionElaborationStage(store, operation, prior, key, binding, inputDigest) : partitionStage<SavedElaboration>(store, operation, prior, key)
           if (saved && (!source || saved.inputDigest !== inputDigest || saved.phase === 'partitioned_final' || saved.reviewPassed)) return null
           if (prior.failure?.kind !== 'repairable') {
+            if (source && canRecoverInterruptedElaborationResult(prior, source, binding)) {
+              const seed = elaborationRepairSeed(source.result, `sync:${prior.id}:elaborate${binding ? `:partition:${binding.partitionId}` : ''}`)
+              if (seed) {
+                saveStage(store, fence!, `${key}:repair-provenance`, { fromOperationId: operation.id, fromAttemptId: prior.id, resultRef: source.resultRef, candidateDigest: seed.candidateDigest })
+                return seed
+              }
+            }
             if (!canSkipElaborationControlAttempt(prior, saved, binding)) return null
             continue
           }
           if (!source) return null
+          if (!priorElaborationInputMatches(prior, binding)) return null
           const result = source.result
           if (result.status === 'failed' && result.candidateDigest === null && result.rounds.length === 1
             && result.rounds.every(round => round.output === null && round.candidate === null && round.candidateDigest === null && !round.findings.length && round.reviewOutput === null && round.review === null && !round.traces.length)) continue
@@ -904,10 +926,22 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           const source = binding ? partitionElaborationStage(store, operation, prior, key, binding, inputDigest) : partitionStage<SavedElaboration>(store, operation, prior, key)
           if (saved && (!source || saved.inputDigest !== inputDigest || saved.phase === 'partitioned_final' || saved.reviewPassed)) return null
           if (prior.failure?.kind !== 'repairable') {
+            if (source && canRecoverInterruptedElaborationResult(prior, source, binding)) {
+              const { failure } = source.result, round = source.result.rounds.at(-1)
+              if (failure && round) {
+                const runtimeFailure = source.result.status === 'failed' && source.result.candidateDigest === null && round.candidate === null && round.candidateDigest === null && structuredAnalysisRepairCodes.has(failure.code)
+                const structuralFailure = source.result.status === 'exhausted' && failure.code === 'repair_budget_exhausted' && round.candidate === null && round.findings.some(issue => issue.severity === 'error')
+                if (runtimeFailure || structuralFailure) {
+                  saveStage(store, fence!, `${key}:repair-diagnostics-provenance`, { fromOperationId: operation.id, fromAttemptId: prior.id, resultRef: source.resultRef })
+                  return { requestKey: `sync:${prior.id}:elaborate${binding ? `:partition:${binding.partitionId}` : ''}`, inputDigest, resultRef: source.resultRef, failure, round }
+                }
+              }
+            }
             if (!canSkipElaborationControlAttempt(prior, saved, binding)) return null
             continue
           }
           if (!source) return null
+          if (!priorElaborationInputMatches(prior, binding)) return null
           const { failure } = source.result, round = source.result.rounds.at(-1)
           if (!failure || !round) return null
           const runtimeFailure = source.result.status === 'failed' && structuredAnalysisRepairCodes.has(failure.code)
