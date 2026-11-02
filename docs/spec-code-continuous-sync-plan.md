@@ -338,6 +338,10 @@ draft模式的只读V1锚点返修须让生成和独立审查同见完整finding
 
 已认证精确结构输出错误的重试准入与单体/分区反馈共用同一码集合；原code/message逐字交后attempt分析及独审，只投影自己的失败分区，不丢schema字段说明，也不将诊断中的建议变为policy或authority。缺码、未知failed/stale或普通Error伪码不能取得结构错误重试资格；协调器不重做Native认证。
 
+候选已通过程序校验、仅最终独审发生已认证的格式/schema失败时，沿原操作的合法批准链承接原分区计划、P1与同一真实候选，不把失败诊断变成重新生成无关Spec或代码的理由。P1合法新增null资源后，须证明旧基线绑定逐字保留、扩域来自同一已审P1、source/input、composed tree/content、readSet、scope与原政策/写权限仍相符；原plan digest、wrapper和历史批准不改签。真实原意、源码、非null基线或权限变化，以及语义repair，继续走原输入失效与业务修复流程。
+
+仅精确失败的owner/跨边评审取得其原Native请求、身份与停止证明认证的完整最终回答，以及当前精确schema，在只读诊断seed中基于旧回答续修；再次格式失败仍只续该组，诊断seed不成为业务candidate。成功组保持原无新增诊断的请求形态，逐项重核完整输入、候选、schema/seed、模型/政策、原Native结果与严格缓存。此路径同时适用于code→Spec和Spec→Code：保持已审Spec与既有代码候选，后者冷验原builder真实Git/范围及Native原件后跳过新代码生成；程序校验、全图封口、独立审查及V1–V4/Docker/Git/adopt仍照常。旧无raw/ref/policy字段保持缺席，不从原文抽取JSON升格accept、不读取thinking、不补checkedIds/完成状态，也不增加写权或另建评审草稿协议。
+
 行为分析resolution破坏既有可解析Spec分节时，先给精确格式诊断，保完整原proposal而不自动修正文；未消费义务真正失配则反馈原path/id及完整expected/proposed业务字段，原语义门不放宽。无真实整合必要时用空resolutions交P1生成，需要三方整合时仍保全部未消费义务；合法字面反斜线n、普通代码、裁决与null删除不因格式提示受限。
 
 初始化待生成的规格叶与覆盖映射不是重大业务未知；可核行为按newNodes/facts交P1，真实缺失事实或互斥仍明确阻塞。分析指导版本进入冻结摘要，指导变化后旧已审结果重新生成并独审，旧证据保持。
