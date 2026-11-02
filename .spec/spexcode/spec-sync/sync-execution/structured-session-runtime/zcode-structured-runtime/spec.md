@@ -22,6 +22,8 @@ related:
 
 旧 NativePlan version1 及已持久但尚无 native session/send 的旧请求保持原工具列表、原提示和摘要，不能补加新字段。未完成仍不重发，已完成恢复零新 send；结构化 policy 仍 version6、工作流仍 native-worktree-v1。只有真正新建记录或新资源冻结当前策略，缺席也是旧请求的固定语义。
 
+严格 JSON.parse 语法失败的 typed message 仅保留静态错误类别及解析器提供的数值 position/line/column；位置对应移除唯一精确围栏后的 JSON 正文。不得透传可能包含原文片段的 SyntaxError.message，不输出 raw/snippet 或敏感值。失败原 terminal/messages/send/ref 与其身份保持，不修补或接受坏 JSON、不写 completed；completed 篡改仍为 stale_result。
+
 version5/null 请求沿原 ZCode policy、realm 与版本4读取证明执行，不装模型调用timeout timer；数字 version4 原样恢复。每次RPC、idle/close与精确停止各自期限不变。
 
 只接受 `zcode:<provider-id>/<exact-model-id>`。当前能力固定 macOS ZCode CLI 0.17.1、CLI SHA256 `9afd565a104d660259e6bdeeaa5cb8abc74a908559e21aa3c5f6a06f2a9da6c6` 和公开 builtin provider SHA256 `e537b380df05656e3757c2b220ae1044fe8a32c0ac148de265a05a94cc24b3a9`，未知版本、摘要、平台或模型别名明确拒绝，不 fallback。策略为 version4 / `zcode-frozen-read-only-v1`。

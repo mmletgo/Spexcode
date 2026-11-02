@@ -273,11 +273,20 @@ test('ZCode authenticated worktree schema mismatch is typed for repair without p
     assert.equal(existsSync(join(root, 'completed.json')), false, 'invalid schema output must not complete or publish')
     assert.deepEqual(Object.keys(files).map(name => [name, sha(name)]), originalHashes, 'cold failure replay must preserve every original Native file and send')
 
-    const malformedEvents = structuredClone(events), malformedMessages = structuredClone(messages), malformedResponse = 'not one JSON document'
+    const malformedEvents = structuredClone(events), malformedMessages = structuredClone(messages), malformedResponse = `{\n"payload":"${'x'.repeat(13200)}PRIVATE_DIAGNOSTIC_CANARY"\n"next":1\n}`
     malformedEvents.at(-1)!.payload.response = malformedResponse
     malformedMessages.at(-1)!.parts[0].text = malformedResponse
     writeFileSync(join(root, 'events.json'), JSON.stringify(malformedEvents)); writeFileSync(join(root, 'messages.json'), JSON.stringify(malformedMessages)); writeFileSync(join(root, 'terminal.json'), JSON.stringify(malformedEvents.at(-1)))
-    await assert.rejects(requestTurn(), { code: 'structured_output_format_invalid' }, 'an in-progress first format failure remains repairable')
+    const malformedHashes = Object.keys(files).map(name => [name, sha(name)] as const)
+    for (let replay = 0; replay < 2; replay++) await assert.rejects(requestTurn(), error => {
+      assert.equal((error as { code: string }).code, 'structured_output_format_invalid')
+      const message = (error as Error).message
+      for (const value of ['"category":"expected_property_delimiter"', `"position":${malformedResponse.indexOf('"next"')}`, '"line":3', '"column":1']) assert(message.includes(value), value)
+      assert(!message.includes('PRIVATE_DIAGNOSTIC_CANARY'))
+      return true
+    })
+    assert.deepEqual(Object.keys(files).map(name => [name, sha(name)]), malformedHashes, 'large JSON syntax failures preserve original Native evidence and send')
+    assert.equal(existsSync(join(root, 'completed.json')), false)
     for (const [name, value] of Object.entries(files)) writeFileSync(join(root, name), JSON.stringify(value))
 
     writeFileSync(join(root, 'terminal.json'), JSON.stringify({ ...events.at(-1), turnId: 'foreign' }))

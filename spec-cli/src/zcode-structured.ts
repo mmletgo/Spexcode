@@ -105,7 +105,14 @@ export function decodeZCodeStructuredText(text: string): unknown {
   try { return JSON.parse(decodeZCodeJsonText(text)) as unknown }
   catch (error) {
     if (!(error instanceof SyntaxError)) throw error
-    throw new StructuredSessionError('structured_output_format_invalid', 'ZCode terminal response is not one strict JSON document')
+    const location = / at position (\d+)(?: \(line (\d+) column (\d+)\))?$/.exec(error.message)
+    const category = [
+      ["Expected ',' or '}' after property value in JSON", 'expected_property_delimiter'],
+      ["Expected ',' or ']' after array element in JSON", 'expected_array_delimiter'],
+      ['Unexpected end of JSON input', 'unexpected_end'],
+    ].find(([prefix]) => error.message.startsWith(prefix))?.[1] ?? 'invalid_json'
+    const diagnostic = { category, ...(location ? { position: Number(location[1]), ...(location[2] ? { line: Number(location[2]), column: Number(location[3]) } : {}) } : {}) }
+    throw new StructuredSessionError('structured_output_format_invalid', `ZCode terminal response is not one strict JSON document: ${JSON.stringify(diagnostic)}`)
   }
 }
 
