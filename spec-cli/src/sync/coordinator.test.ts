@@ -485,6 +485,15 @@ async function rejectedReviewFixture(f: Awaited<ReturnType<typeof fixture>>, req
   } })(request)
 }
 
+function committedDraftFixture(f: Awaited<ReturnType<typeof fixture>>, request: ElaborationSessionRequest, output: unknown, workspace: string): ReturnType<typeof nativeWorktreeResult> {
+  const seed = request.worktree!, path = /草稿文件=([^\s；]+)/.exec(request.prompt)![1]
+  f.git('worktree', 'add', '--detach', workspace, seed.baseCommit)
+  mkdirSync(join(workspace, path, '..'), { recursive: true }); writeFileSync(join(workspace, path), JSON.stringify(output), 'utf8')
+  execFileSync('git', ['-C', workspace, 'add', path], { stdio: 'pipe' })
+  execFileSync('git', ['-C', workspace, 'commit', '-m', 'real Native fixture draft'], { stdio: 'pipe' })
+  return nativeWorktreeResult(workspace, seed)
+}
+
 test('固定操作模型到达行为/P1/P2及全部独审，独立会话与调用预算保持', async t => {
   const oracle = parseContract({ nodeId: 'export-contract', path: contractPath, source: original }).contract!.items.find(item => item.kind === 'AC')!
   const [testPath, testId] = oracle.test.split('#')
@@ -4740,7 +4749,7 @@ test('Coordinator Native Spec→Code scratch构建后6→1→1沿原builder来�
     if (request.purpose === 'code_behavior_analyze') {
       output = { changes: task.requiredChangedPaths.map((path: string) => { const owner = definitions.find(item => item.path === path || item.sourcePath === path)!; return { kind: 'refactor', paths: [path], affectedIds: [`RULE-${owner.upper}-05`], ruleIds: [`RULE-${owner.upper}-05`], originalIntent: '原明确契约保持', previousBehavior: '当前导出流程', sourceBehavior: '当前导出流程', deliveryBehavior: '当前导出流程', evidence: '完整冻结Spec/source/tests均相同业务', counterexample: '内部注释不改变任何行为' } }), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
     } else if (request.purpose === 'code_behavior_review') {
-      const state = JSON.parse(request.prompt.split('待审分析:\n')[1])
+      const state = JSON.parse(request.prompt.split('待审分析:\n')[1].split('\n草稿文件=')[0])
       output = { inputDigest: request.inputDigest, analysisDigest: state.analysisDigest, verdict: 'accept', checkedPaths: task.requiredChangedPaths, checkedChangeIds: state.analysis.changes.map((item: { id: string }) => item.id), findings: [] }
     } else if (request.purpose === 'elaboration_generate' || request.purpose === 'code_generate') {
       assert.equal(attempt.number, 1, '格式续审不得派新P1或代码builder')
@@ -4767,6 +4776,10 @@ test('Coordinator Native Spec→Code scratch构建后6→1→1沿原builder来�
         return rejectedReviewFixture(f, request, '原评审完整回答：\n' + JSON.stringify(output))
       }
     } else assert.fail(request.purpose)
+    if (request.purpose.startsWith('code_behavior_')) {
+      witness = committedDraftFixture(f, request, output, join(f.parent, `scratch-p0-${calls.length}`))
+      output = { summary: '真实P0业务JSON已正常提交' }
+    }
     const dispatch = attempt.dispatchPlans.find(item => item.key === request.requestKey)!
     return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `native-${request.requestKey}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)), ...(witness ? { worktree: witness } : {}) }
   }
@@ -4825,7 +4838,8 @@ test('Coordinator 合法file-writer新增源码测试null扩域后仅续原候�
 
 test('Coordinator 已有code且P1新增managed AC.test的null路径只续原评审', async t => {
   const managedTest = 'tests/managed-export.test.mjs'
-  const f = await fixture(t, { mode: 'unlimited' }, false, original, 'project', original, { version: 'sync-coordinator-v2', agentWorkflow: 'native-worktree-v1', direction: 'spec_to_code', sourcePaths: ['src'], writePaths: ['.spec', 'src', managedTest], partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 }, commitTrigger: { before: null, paths: [contractPath] } }, undefined, 'spec', 'claude:MiniMax-M3.1-Flash', true)
+  const managedRaw = `${parseParts(original)!.rawSource}\n\n保留AC-EXPORT-01的业务义务和断言，本轮将其技术测试绑定调整为${managedTest}#AC-EXPORT-01，并生成该受管测试文件。`
+  const f = await fixture(t, { mode: 'unlimited' }, false, original, 'project', original, { version: 'sync-coordinator-v2', agentWorkflow: 'native-worktree-v1', direction: 'spec_to_code', sourcePaths: ['src'], writePaths: ['.spec', 'src', managedTest], partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 }, commitTrigger: { before: null, paths: [contractPath] } }, { original: parseParts(original)!.rawSource, replacement: managedRaw, intent: '原导出义务和AC断言保持，本轮新增明确受管测试绑定', testPath: managedTest }, 'spec', 'claude:MiniMax-M3.1-Flash', true)
   const calls: { attempt: number; purpose: string }[] = []
   f.options.runner = async request => {
     f.calls.push(request)
@@ -4835,7 +4849,7 @@ test('Coordinator 已有code且P1新增managed AC.test的null路径只续原评�
     let output: unknown, witness: ReturnType<typeof nativeWorktreeResult> | undefined
     if (request.purpose === 'code_behavior_analyze') output = { changes: task.requiredChangedPaths.map((path: string) => ({ kind: 'refactor', paths: [path], affectedIds: ['RULE-EXPORT-05'], ruleIds: ['RULE-EXPORT-05'], originalIntent: '保持原导出业务', previousBehavior: '原导出流程', sourceBehavior: '原导出流程', deliveryBehavior: '原导出流程', evidence: '冻结完整源码与原断言相同业务', counterexample: '测试技术绑定不改变业务语义' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
     else if (request.purpose === 'code_behavior_review') {
-      const state = JSON.parse(request.prompt.split('待审分析:\n')[1])
+      const state = JSON.parse(request.prompt.split('待审分析:\n')[1].split('\n草稿文件=')[0])
       output = { inputDigest: request.inputDigest, analysisDigest: state.analysisDigest, verdict: 'accept', checkedPaths: task.requiredChangedPaths, checkedChangeIds: state.analysis.changes.map((item: { id: string }) => item.id), findings: [] }
     } else if (request.purpose === 'elaboration_generate' || request.purpose === 'code_generate') {
       assert.equal(attempt.number, 1, '合法P1测试绑定扩域不能重派P1/builder')
@@ -4860,6 +4874,10 @@ test('Coordinator 已有code且P1新增managed AC.test的null路径只续原评�
       if (attempt.number === 1) return rejectedReviewFixture(f, request, '原评审完整回答：\n' + JSON.stringify(output))
       throw Object.assign(new Error('原managed路径来源冷验完成，Docker前停止'), { code: 'unsupported' })
     } else assert.fail(request.purpose)
+    if (request.purpose.startsWith('code_behavior_')) {
+      witness = committedDraftFixture(f, request, output, join(f.parent, `managed-p0-${calls.length}`))
+      output = { summary: '真实P0业务JSON已正常提交' }
+    }
     const dispatch = attempt.dispatchPlans.find(item => item.key === request.requestKey)!
     return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `managed-${request.requestKey}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)), ...(witness ? { worktree: witness } : {}) }
   }
