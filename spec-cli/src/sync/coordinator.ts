@@ -557,8 +557,8 @@ export function acceptedCandidateReviewSource(store: SyncStore, operation: SyncO
     }
     if (trace.sessionId !== sessionIdForCreateKey(dispatch.sessionCreateKey) || !trace.threadId || !trace.turnId || canonical(reviewPlanStage(store, operation, origin, 'candidate-partition-plan')?.result) !== canonical(plan)) return null
     const sourceInput = { ...input, requestKey: oldKey.slice(0, -':code_review'.length) }
-    const expected = generationReviewRequest(sourceInput, candidate)
-    if (expected.request.inputDigest !== result.inputDigest || reviewError(sourceInput, result.review, expected.binding)) return null
+    const expected = generationReviewRequest(sourceInput, candidate, true, aggregate?.p2SpecWritePaths)
+    if (expected.request.inputDigest !== result.inputDigest || reviewError(sourceInput, result.review, expected.binding, undefined, aggregate?.p2SpecWritePaths)) return null
     const native = completedNativeStageResult(store, operation, origin, expected.request, trace, result.reviewOutput, candidate.digest)
     if (!native) return null
     verifyGenerationReviewDraft(operation.input.source.commonDir, expected.request, native, expected.draftBinding)
@@ -574,11 +574,11 @@ export function failedCandidateReviewSource(store: SyncStore, operation: SyncOpe
   const approved = stage<SavedElaboration>(store, operation, origin, 'elaboration')
   const aggregate = partitionStage<SavedGeneration>(store, operation, origin, 'generation')?.result
   if (!approved || !aggregate || !reviewScopeProof(store, operation, origin, approved, aggregate)) return null
+  const savedPlan = JSON.parse(readEvidence(operation.input.source.commonDir, operation.planBlob!).toString()) as SyncCoordinatorPlan
+  const writable = aggregate.p2SpecWritePaths ?? (savedPlan.version === 'sync-coordinator-v2' && savedPlan.direction === 'code_to_spec' ? [] : undefined)
   const completed = result.reviewOutput !== null
   if (completed) {
     const contracts = verifyCandidate(operation.input.source.commonDir, candidate).filter(entry => entry.mode !== '120000' && entry.path.startsWith('.spec/') && entry.path.endsWith('/spec.md')).flatMap(entry => parseContract({ nodeId: entry.path.split('/').at(-2)!, path: entry.path, source: readObject(operation.input.source.commonDir, entry.oid).toString('utf8') }).contract ?? [])
-    const savedPlan = JSON.parse(readEvidence(operation.input.source.commonDir, operation.planBlob!).toString()) as SyncCoordinatorPlan
-    const writable = aggregate.p2SpecWritePaths ?? (savedPlan.version === 'sync-coordinator-v2' && savedPlan.direction === 'code_to_spec' ? [] : null)
     if (!writable) return null
     if (candidateReviewError(result.reviewOutput, { inputId: operation.input.id, candidateDigest: candidate.digest, requiredIds: [], actualIds: contracts.flatMap(contract => contract.items.map(item => item.id)), priorIds: [] }) || candidateReviewLocationError(result.reviewOutput as NonNullable<GenerationResult['review']>, contracts, writable)?.code !== 'review_location_format' || result.failure && !completedReviewRepairCodes.has(result.failure.code) || result.review !== null && canonical(result.review) !== canonical(result.reviewOutput)) return null
   } else if (!reviewFormatRepairCodes.has(result.failure?.code ?? '') || result.review !== null) return null
@@ -602,7 +602,7 @@ export function failedCandidateReviewSource(store: SyncStore, operation: SyncOpe
     const previous = savedInput ? restoreGenerationInput(savedInput) : { ...input, requestKey: requestKey.slice(0, -':code_review'.length), reviewRepair: undefined }
     const base = { ...previous, requestKey: input.requestKey, reviewRepair: undefined }
     if (freezeGenerationInput(base).inputDigest !== freezeGenerationInput({ ...input, reviewRepair: undefined }).inputDigest) return null
-    const expected = generationReviewRequest(previous, candidate).request
+    const expected = generationReviewRequest(previous, candidate, true, writable).request
     if (!nativeReviewRequestMatches(native.request, expected, { attemptId: origin.id, policyDigest: operation.policyDigest })) return null
   }
   return { resultRef: source.resultRef, nativePlanRef: resource.plan.planBlob, checkpointRef: resource.checkpointRef }

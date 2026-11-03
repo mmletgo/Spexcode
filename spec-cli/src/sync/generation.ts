@@ -143,7 +143,7 @@ function generationRequest(input: GenerationInput, inputDigest: string, purpose:
 }
 
 /** 从实际候选构造唯一独审请求；历史校验只恢复旧requestKey，不改变其余输入。 */
-export function generationReviewRequest(input: GenerationInput, candidate: CandidateRef, reviewOnly = true) {
+export function generationReviewRequest(input: GenerationInput, candidate: CandidateRef, reviewOnly = true, specWritePaths?: readonly string[]) {
   frozenEntries(input)
   const { inputDigest, context, partitionReading, priorRole } = freezeGenerationInput(input)
   const changed = JSON.parse(readEvidence(input.snapshot.source.commonDir, candidate.actualDiffBlob).toString()) as { path: string; preDigest: string | null }[]
@@ -172,7 +172,7 @@ export function generationReviewRequest(input: GenerationInput, candidate: Candi
       const originalTrace = prior.traces.find(trace => trace.purpose === 'code_review')
       const schemaError = candidateReviewError(prior.reviewOutput, reviewBinding)
       if (schemaError) throw new StructuredSessionError('stale_result', schemaError)
-      const locationError = candidateReviewLocationError(prior.reviewOutput as GenerationReview, [...candidateFiles].filter(([path]) => path.startsWith('.spec/') && path.endsWith('/spec.md')).flatMap(([path, source]) => parseContract({ nodeId: path.split('/').at(-2)!, path, source }).contract ?? []))
+      const locationError = candidateReviewLocationError(prior.reviewOutput as GenerationReview, [...candidateFiles].filter(([path]) => path.startsWith('.spec/') && path.endsWith('/spec.md')).flatMap(([path, source]) => parseContract({ nodeId: path.split('/').at(-2)!, path, source }).contract ?? []), specWritePaths)
       if (!originalTrace || locationError?.code !== 'review_location_format' || checkpoint.status !== 'completed' || checkpoint.phase !== 'removed' || !checkpoint.result || checkpoint.result.sessionId !== originalTrace.sessionId || checkpoint.result.threadId !== originalTrace.threadId || checkpoint.result.turnId !== originalTrace.turnId || checkpoint.result.resultDigest !== originalTrace.resultDigest || originalTrace.inputDigest !== prior.inputDigest || originalTrace.resultDigest !== contentHash(JSON.stringify(prior.reviewOutput)) || JSON.stringify(checkpoint.result.output) !== JSON.stringify(prior.reviewOutput)) throw new StructuredSessionError('stale_result', 'review draft material differs from authenticated completed Native output')
       if (!request.worktree) throw new StructuredSessionError('unsupported', 'review draft repair requires the original native worktree workflow')
       text = JSON.stringify(prior.reviewOutput); error = locationError; trace = originalTrace
@@ -277,7 +277,7 @@ export async function runGeneration(supplied: GenerationInput, options: Generati
     cancelled()
     if (result.validationFindings.some(finding => finding.severity === 'error')) { result.status = 'repair'; return result }
     result.candidateValidated = true
-    const { request, binding: reviewBinding, candidateFiles, draftBinding } = generationReviewRequest(input, result.candidate, !!options.reviewCandidate)
+    const { request, binding: reviewBinding, candidateFiles, draftBinding } = generationReviewRequest(input, result.candidate, !!options.reviewCandidate, options.reviewSpecWritePaths)
     result.candidateFiles = candidateFiles
     stage = 'review_failed'
     const reviewOutput = await dispatch(request)
