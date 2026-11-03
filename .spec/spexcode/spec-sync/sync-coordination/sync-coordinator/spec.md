@@ -38,7 +38,7 @@ resource-only入口按 [[sync-source-registration]] 使用专用raw Git登记元
 
 并行分析异常保留全部已在途分区的完整原错误，按partitionId保存原proposal/程序校验/review诊断，并等待在途结算；主错误不能遮蔽其它未知资源或不可修复错误。只有全部错误均属于原允许的业务/结构修复，或原生接缝已精确确认notStarted且terminal→removed的SettledSessionCreateTimeoutError时，才进入原attempt/calls/repairs及绝对deadline内的有限自动修复。普通timeout、未知/未结算资源、绑定及保存错误不因此取得自动续修权。相同operation经明确pause→resume启动的新attempt时，仍可从该operation、同摘要的分区失败stage恢复 `behavior_analysis_invalid` / `behavior_review_failed` 原件，只按partitionId投影到对应分区；不把unsupported或其他基础设施错误作为模型诊断，不取得自动重试资格。下一attempt仅向对应失败分区重送该区历史诊断，已accept区不被兄弟诊断改变摘要；失败原件不是事实或批准。
 
-P2 的 V1 把实际验证 candidate tree 的完整 entry 路径清单交给 [[sync-frozen-contracts]]，与冻结正文共同核前元数据关系完整性。模型可读正文子集不能被当作完整存在性清单；错误 related/code/one-govern 在生成修复阶段拒绝，不推进 V2、V3 或 apply journal。
+P2 的 V1 从核验后的实际 candidate tree 重建完整业务契约及必要代码/测试的 UTF-8 普通文件正文，并把同树完整 entry 路径清单交给 [[sync-frozen-contracts]]。宿主私有路径、符号链接和非 UTF-8 对象不进入正文；模型局部读集不代替全局结构图，也不扩大 Agent 任务、ready、写范围或验证政策。错误 related/code/one-govern 及真实全局覆盖缺口在生成修复阶段拒绝，不推进 V2、V3 或 apply journal。
 
 派发 P1 时由同一冻结 plan.writePaths 和 mandatoryTests 派生显式技术写范围与只读测试文件清单，供生成及独审正确绑定新增测试；不改变原写授权、实际 scope、只读 oracle 或预算。
 
@@ -50,13 +50,13 @@ P4 派发先由应用消费真实 protocol FIFO 头并事务确认到持久 queu
 
 P1 只把实际目标正文及其已审代码/可写验收路径、业务 ID 加入执行范围；只读上下文的声明不取得覆盖或写锁。新增资源由同一 fence 事务取得精确选择及租约，再从原不可变输入重组并绑定新 readSet。阶段复用保原选择与 readSet 证据：仅追加 null 资源且原绑定不变可沿用已审义务；真实组合字节变化或引入既有非 null 基线时，在原预算内重新分析。V1–V4、验证 blob 与 apply 均绑定最终选择。目标及退役历史按各文件的实际交付头读取，不能借另一个资源的全局最新交付作为作者来源。构造分区历史上下文时，协调器用[[code-anchor]]共享路径匹配器展开旧code/related/测试/源码义务并逐entry核对全局read授权；命中旧entry但超出冻结全局readPaths时明确拒绝，不能让局部glob投影绕过授权。
 
-生成可独立并行；结构化生成响应核验后才取得同来源发布 mutex，冻结 [[sync-publication-base]]，随后独审、真实验证和完整交付针对同一实际组合树。只读上下文保持当前冻结 source 的 bytes/mode/absence，不成为模型写权。闭包外的已结算组件只作可继承交付，不进入本轮业务覆盖；结构检查只重读实际影响闭包与本轮修改，不能把继承节点冒作本轮新增需求。发布父树及 provenance 参与 contextDigest；恢复保原冻结父树与 journal，不读取 latest 换候选。失败或安全边界释放本机 mutex，持久门禁负责跨进程的已冻结发布次序。
+生成可独立并行；结构化生成响应核验后才取得同来源发布 mutex，冻结 [[sync-publication-base]]，随后独审、真实验证和完整交付针对同一实际组合树。只读上下文保持当前冻结 source 的 bytes/mode/absence，不成为模型写权。闭包外的已结算组件只作可继承交付，不进入本轮业务覆盖；结构 V1 使用完整候选图，生成意图的 after 只投影本轮 accepted 节点与 candidate.baseTree→candidate.tree 的真实业务 Spec 差量。before 保留已批准 P1 正文，真实改删但原未读取的 Spec 仅从 baseTree 补前态，绝不由候选反向补批准。未变 peer 不冒作新增需求或自动取得 VERIFY 登记；真实新增、修改、删除仍执行原意、业务项、schema 与冻结验证政策门。发布父树及 provenance 参与 contextDigest；恢复保原冻结父树与 journal，不读取 latest 换候选。失败或安全边界释放本机 mutex，持久门禁负责跨进程的已冻结发布次序。
 
 复用现有快照、成对 composition、受控 request overlay、P1 elaborate、scope 扩充/租约、generation、真实 V3 resource 执行与 private delivery，不另建消息队列、契约图或事实数据库。原 source/composed/candidate 分开，policy/readset 内容摘要必须绑定 operation。读集合完整保留契约及 source/code/related/AC 测试全文，不以2MiB内联限制拒绝或截断。超大阶段正文由 [[frozen-context-reader]] 在正式派发摘要前无损冻结，各独立turn核完整读取证明，仍保原input/readSet/policy和总预算。host private、越界路径、目录未授权字节拒绝。
 
 operation 独立本机 kernel mutex 防双 coordinator；紧凑 stage checkpoint 只保存 refs、独立结果及诊断，不复制整张契约图。当前 attempt 在独占证明下重入稳定 requestKey，派发前原子计费、持久资源意图，完整真实结果/hash/独立身份保存后重放。lease heartbeat 贯穿原生长调用，控制/总deadline触发 Abort；旧 generation 只能结算真实资源证据。历史未removed资源精确恢复，未知终态保留 recovery_required，不假释放容量。
 
-P1 已审结构结果登记所有未来业务 ID，包括 GAP/partial FLOW；ready/blocked 分区只隔离业务 ID，共享 paths 留 ready。无可执行 ready AC 不生成或写半成品；V1 仅容许已审 GAP 精确解释的缺口。generation 硬门禁保护 raw/全局REQ/AC/VERIFY、实际diff与独立oracle，V2使用不同会话；V3仅执行 ready AC 和 mandatoryTests 的固定命令/镜像；V4复采完整source、当前可信plan/readset与物理身份，一致才可交付，并于 beginApply 前再核。完整V1–V4 pass才 recordVerification(pass)，范围精确ready声明/完整FLOW，不包含blocked。
+P1 已审结构结果登记所有未来业务 ID，包括 GAP/partial FLOW；ready/blocked 分区只隔离业务 ID，共享 paths 留 ready。无可执行 ready AC 不生成或写半成品；V1 仅容许已审 GAP 精确解释的缺口。未读继承 GAP 必须来自本轮已通过 partitionSeal 的同义原项和精确 finding，复用原 GAP 闭包分类；GAP及完整 affected 闭包不得涉及 ready 声明或 FLOW 步骤，其全部 owner 不属于本轮 accepted，且 Spec、治理源码、AC.test 等冻结义务在已审 composed、baseTree 与 candidate 的 path/mode/OID/absence 完全一致。缺证明、新增、改变或涉及本轮依赖的 GAP 仍阻断，不扩 scope/blocked/验证登记。generation 硬门禁保护 raw/全局REQ/AC/VERIFY、实际diff与独立oracle，V2使用不同会话；V3仅执行 ready AC 和 mandatoryTests 的固定命令/镜像；V4复采完整source、当前可信plan/readset与物理身份，一致才可交付，并于 beginApply 前再核。完整V1–V4 pass才 recordVerification(pass)，范围精确ready声明/完整FLOW，不包含blocked。
 
 同一operation的局部纯父接口已通过结构校验及独立accept时，后代失败的新attempt只可承接较早已终结attempt的该interface_seed原件。原stage读取仍严格绑定所属attempt；专用承接须核同operation/input/policy、精确readSet/基线选择、完整partitionBinding及当前局部输入的唯一freezeElaborationInput摘要全部相同，且seed无failure、phase/status正确并保有独审accept。新interface_seed checkpoint即使没有基线选择也记录真实readSetDigest；缺失该绑定的旧局部原件不能跨attempt承接。失败/未审seed、旧全局seal及其他operation不取得局部承接权；在当前fence登记原resultRef及fromAttempt provenance，原review/traces不改写。所有子区继续读取已审接口，最终strict全局seal及V1–V4仍重做；局部证据不是raw、作者事实或全局批准。
 

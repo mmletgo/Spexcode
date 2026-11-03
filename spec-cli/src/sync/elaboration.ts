@@ -57,7 +57,7 @@ const contextCoverageFinding = new Set(['missing-source-file', 'missing-governed
 const interfaceSeedCoverageFinding = new Set([...contextCoverageFinding, 'incomplete-contract'])
 const interfaceKinds = new Set(['REQ', 'RULE', 'GAP'])
 const trustedInterfaceItem = (input: ElaborationInput, item: ContractItem): boolean => interfaceKinds.has(item.kind) || item.kind === 'VERIFY' && (input.verifications?.some(policy => policy.id === item.id && JSON.stringify(policy.command) === JSON.stringify(item.command) && policy.cwd === item.cwd && policy.timeoutMs === item.timeoutMs) ?? false)
-const gapBlockedFinding = (issue: ContractFinding, coverage: ContractCoverage | null): boolean => {
+export const gapBlockedFinding = (issue: ContractFinding, coverage: ContractCoverage | null): boolean => {
   if (!issue.itemId || !['missing-event-disposition', 'nonterminal-no-exit', 'unreachable-state', 'missing-acceptance', 'missing-requirement-flow', 'incomplete-stateless-step', 'missing-flow-terminal', 'flow-no-exit', 'unreachable-step'].includes(issue.code)) return false
   const affected = [issue.itemId, ...(issue.relatedIds ?? [])]
   return coverage?.gaps.some(gap => affected.every(id => gap.affectedIds.includes(id))) ?? false
