@@ -123,6 +123,8 @@ Dashboard 的受控正文保存继续直接 submit，requestBlob 即时触发 sp
 
 自动 ingress 固定到提交快照与节点，同一 commit 重放不因 baseline 或差异证据推进而重新派发；已结算 receipt/baseline 继续按真实意图消费和采纳证明消除同步自身交付/采纳提交的回声，不按 Git author 或 session trailer 猜测作者。停机提交在 service 启动及周期补偿中继续发现。新 commit 沿既有作用域、物理控制和预算族门禁，不新增触发配置开关。
 
+混合资源heads中的旧只读context不改原差异判据。仅从当前exact selection的非null pair定位其实际receipt/journal，核原source、启用配置与节点授权、全部settled journal、四层证据、实际完整scope及Git commit/tree/parent/effect，且当前HEAD/tree精确等于该完整receipt时，观察器才可沿原baseline消费接缝消除自身写回。最近已消费frontier到真实receipt parent只允许空差量，或唯一同mode普通配置文件的有效完整项目JSON仅sync.model不同；parent/current配置原字节摘要与mode须等于receipt原input，且当前已重新授权。其他配置字段、code、业务Spec、只读docs或混合差量保原观察；外部同tree新commit不冒认receipt，同一已接入快照的重复记录仍复用既有前沿，不伪结算原外部操作。此证明复用[[sync-source-adoption]]的纯settledReceipt与[[sync-landing-status]]读取，不调用adopt写入准入、不要求物理run或无在途资源；paused观察仍健康且不派发，仅写既有observation消费证据，不新建或改写receipt、baseline、journal与业务完成状态。
+
 自动 operation 的 detail 当前性、retry、decide、resume 与运行前可信配置复核均按其 input.captureKind 采集同模式当前输入；旧无标记工作区操作保持原判据。status 的原树落地投影与 adoptionEligibility/adopt 仍读取真实工作文件及 index，未提交编辑不能因 commit snapshot 而获得覆盖或采纳资格。
 
 最近已消费提交边界由既有持久 observations 和自动 operation.input 推导：真实 admitted/coalesced/duplicate 接入，或 observationChanges 已判断 changed=false 且 exact selection 含真实非 null 基线的提交快照，均可作为下一次 before。后者仅在既有差异 evidence 写 consumption=baseline，保同一 selection/receipt 证明；旧 evidence 无字段不猜已消费，暂停且 changed=true 的新作者提交不标记。消费查询保留完整历史，不受状态列表的500条展示上限影响；普通重复观察不能挤掉消费点。当前已消费的同一commit也可作为before，真实tree差量为空时不能因captureKind、计划摘要或重新观察而退回旧initial、取代待交付的受控正文请求。同步生成 Spec 的 receipt 被正式采纳并去回声后，该完整已提交快照仍推进消费边界，后续 code-only commit 的 origin 与 commitTrigger.paths 不夹带先前已消费的生成 Spec。服务重启及停机补偿复用同一持久事实，不新建可变游标、DB 表或作者启发式。真正的新提交、文件新增/删除/mode变化与未消费意图仍沿原差量门禁，观察故障或仅暂停的新输入不能消费边界。
