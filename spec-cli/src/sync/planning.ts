@@ -1,6 +1,6 @@
 import { posix } from 'node:path'
 import { loadSpecs, parseCodeEntry, parseRelation, relationClaimsPath } from '@spexcode/spec-core'
-import { contractImpact, contractReferences, parseFrontmatter } from '@spexcode/spec-core/contracts'
+import { contractImpact, contractReferences, parseContract, parseFrontmatter } from '@spexcode/spec-core/contracts'
 import type { SyncCoordinatorPlan, SyncDirection } from './coordinator-types.js'
 import type { BaselinePair, BaselineResource, FrozenBaselineSelection, InputSnapshot, SyncScope } from './operation-types.js'
 import { adoptedDeliveryPaths, selectedRetiredIds, verifyBaselineSelection } from './composition.js'
@@ -60,7 +60,8 @@ export async function buildSyncApplicationPlan(snapshot: InputSnapshot, nodeId: 
   const readinessSelection = options.discoverySelection
   const readinessPairs = new Map((readinessSelection?.bindings ?? []).flatMap(binding => { const pair = 'bytePair' in binding ? binding.bytePair : binding.intentPair; return pair ? [[pair.id, pair] as const] : [] }))
   const adopted = new Map([...readinessPairs.values()].map(pair => [pair.id, before ? adoptedDeliveryPaths(before, pair) : new Set<string>()]))
-  const beforePaths = new Set(before ? verifySnapshot(before).map(entry => entry.path) : [])
+  const beforeEntries = new Map((before ? verifySnapshot(before) : []).map(entry => [entry.path, entry]))
+  const beforePaths = new Set(beforeEntries.keys())
   const bootstrapNodes = oldFrozen.nodes.filter(node => beforePaths.has(node.path) && coveredPath(node.path, [posix.dirname(previousIntent?.path ?? intent.path)]))
   const bootstrapPaths = new Set(bootstrapNodes.map(node => node.path))
   const bootstrapItems = oldFrozen.contracts.filter(contract => bootstrapPaths.has(contract.path)).flatMap(contract => contract.items.filter(item => item.kind !== 'VERIFY'))
@@ -71,10 +72,35 @@ export async function buildSyncApplicationPlan(snapshot: InputSnapshot, nodeId: 
     const pair = binding ? 'bytePair' in binding ? binding.bytePair : binding.intentPair : null
     return !!pair && (resource.kind === 'path' ? pair.coveredScope.paths.some(scope => coveredPath(resource.path, [scope])) : (resource.kind === 'flow' ? pair.coveredScope.flowIds : pair.coveredScope.contractIds).includes(resource.id)) && !!adopted.get(pair.id)?.has(path)
   }
+  // 初始化的只读源码不产生byte head；仅已采纳owner的真实正文和未改对象能证明其先前已验证。
+  const readonlyOwners = bootstrapNodes.flatMap(node => {
+    const binding = readinessSelection?.bindings.find(binding => binding.resource.kind === 'path' && binding.resource.path === node.path)
+    const pair = binding && 'bytePair' in binding ? binding.bytePair : null
+    if (!pair || !settledResource({ kind: 'path', path: node.path }, node.path)) return []
+    const source = new Map(verifySnapshot(pair.sourceInput).map(entry => [entry.path, entry])), delivery = new Map(verifySnapshot(pair.verifiedDelivery).map(entry => [entry.path, entry]))
+    const owner = delivery.get(node.path), prior = beforeEntries.get(node.path)
+    if (!owner || owner.mode === '120000') return []
+    const text = readObject(snapshot.source.commonDir, owner.oid).toString('utf8'), code = parseFrontmatter(text).fm.code
+    const contract = parseContract({ nodeId: node.id, path: node.path, source: text }).contract
+    const claims = [...parseRelation(Array.isArray(code) ? code.filter((entry): entry is string => typeof entry === 'string') : [], 'code').entries.map(entry => entry.path), ...contract?.items.filter(item => item.kind === 'AC').map(item => parseCodeEntry(item.test).path) ?? []]
+    for (const path of delivery.keys()) if (coveredPath(path, [...settings.sourcePaths, ...settings.testPaths]) && !settings.mandatoryTests.some(test => test.testPath === path) && claims.some(claim => relationClaimsPath(claim, path))) bootstrapPaths.add(path)
+    if (prior?.oid !== owner.oid || prior.mode !== owner.mode) return []
+    return [{ pair, source, delivery, claims }]
+  })
+  const readonlyInitialized = (path: string): boolean => {
+    if (isSyncSpecPath(path)) return false
+    const binding = readinessSelection?.bindings.find(binding => binding.resource.kind === 'path' && binding.resource.path === path)
+    if (binding && 'bytePair' in binding && binding.bytePair) return false
+    return readonlyOwners.some(({ pair, source, delivery, claims }) => {
+      if (!claims.some(claim => relationClaimsPath(claim, path)) || !adopted.get(pair.id)?.has(path)) return false
+      const original = source.get(path), verified = delivery.get(path), prior = beforeEntries.get(path)
+      return !!original && !!verified && !!prior && original.oid === verified.oid && original.mode === verified.mode && prior.oid === verified.oid && prior.mode === verified.mode
+    })
+  }
   const subtreeIds = new Set([...nodes, ...oldFrozen.nodes].filter(node => coveredPath(node.path, [posix.dirname(intent.path), ...previousIntent ? [posix.dirname(previousIntent.path)] : []])).map(node => node.id))
   const changedOwners = (options.commitTrigger?.paths ?? []).map(path => ({ path, ids: [...ownerNodesForPath(path, views.flatMap(view => view.contracts), governanceNodes)].filter(id => subtreeIds.has(id)) }))
   const incremental = !!before && !!readinessSelection && bootstrapNodes.length > 0
-    && [...bootstrapPaths].every(path => settledResource({ kind: 'path', path }, path))
+    && [...bootstrapPaths].every(path => settledResource({ kind: 'path', path }, path) || readonlyInitialized(path))
     && bootstrapItems.every(item => settledResource({ kind: item.kind === 'FLOW' ? 'flow' : 'contract', id: item.id }, item.path))
     && !options.commitTrigger!.paths.includes(intent.path) && !options.commitTrigger!.paths.includes('.spec/spexcode.json')
     && changedOwners.some(change => change.ids.length) && changedOwners.every(change => change.ids.length || !coveredPath(change.path, [...settings.sourcePaths, ...settings.testPaths]))
