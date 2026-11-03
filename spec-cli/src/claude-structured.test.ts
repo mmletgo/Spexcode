@@ -1045,7 +1045,7 @@ test('native CLI configuration accepts opaque selections and omits --model for d
 
 for (const selected of ['default', 'sonnet', 'provider/opaque[1m]']) test(`native CLI configuration fixture preserves configuration and resolved model for ${selected}`, async () => {
   const directory = mkdtempSync(join(tmpdir(), 'spex-claude-native-config-')), bin = join(directory, 'bin'), config = selected === 'default' ? join(directory, 'home', '.claude') : join(directory, 'native-config'), workspace = join(directory, 'worktree'), realm = join(directory, 'realm'), root = join(realm, 'native')
-  const environmentKeys = ['PATH', 'HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_USE_BEDROCK', 'ANTHROPIC_MODEL', 'PUBLIC_CLAUDE_FIXTURE_LOG'] as const
+  const environmentKeys = ['PATH', 'HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_USE_BEDROCK', 'ANTHROPIC_MODEL', 'ANTHROPIC_BASE_URL', 'PUBLIC_CLAUDE_FIXTURE_LOG'] as const
   const before = Object.fromEntries(environmentKeys.map(key => [key, process.env[key]]))
   try {
     mkdirSync(bin); mkdirSync(config, { recursive: true }); mkdirSync(workspace)
@@ -1054,19 +1054,19 @@ for (const selected of ['default', 'sonnet', 'provider/opaque[1m]']) test(`nativ
     writeFileSync(cli, `#!${process.execPath}
 const fs=require('node:fs'),path=require('node:path'),readline=require('node:readline');
 if(process.argv.includes('--version')){console.log('9.8.7 (Claude Code)');process.exit(0)}
-const args=process.argv.slice(2);fs.writeFileSync(process.env.PUBLIC_CLAUDE_FIXTURE_LOG,JSON.stringify({args,config:process.env.CLAUDE_CONFIG_DIR,provider:process.env.CLAUDE_CODE_USE_BEDROCK,model:process.env.ANTHROPIC_MODEL}));
+const args=process.argv.slice(2);fs.writeFileSync(process.env.PUBLIC_CLAUDE_FIXTURE_LOG,JSON.stringify({args,config:process.env.CLAUDE_CONFIG_DIR,provider:process.env.CLAUDE_CODE_USE_BEDROCK,model:process.env.ANTHROPIC_MODEL,baseUrl:process.env.ANTHROPIC_BASE_URL}));
 const emit=x=>console.log(JSON.stringify(x));readline.createInterface({input:process.stdin}).once('line',line=>{const input=JSON.parse(line),session=input.session_id,user=input.uuid;const projects=path.join(process.env.CLAUDE_CONFIG_DIR||path.join(process.env.HOME,'.claude'),'projects','fixture');fs.mkdirSync(projects,{recursive:true});const history=[{type:'user',sessionId:session,uuid:user,parentUuid:null,promptId:'public-prompt',message:input.message},{type:'assistant',sessionId:session,uuid:'assistant',parentUuid:user,message:{role:'assistant',content:[{type:'thinking',thinking:'SYNTHETIC_PRIVATE_THINKING'},{type:'tool_use',id:'final',name:'StructuredOutput',input:{ok:true}}]}}];fs.writeFileSync(path.join(projects,session+'.jsonl'),history.map(x=>JSON.stringify(x)).join('\\n')+'\\n');emit({type:'system',subtype:'init',session_id:session,model:${JSON.stringify(actualModel)},tools:['Read','Bash','StructuredOutput']});emit({type:'user',uuid:user,session_id:session,message:input.message});emit({type:'result',subtype:'success',is_error:false,session_id:session,user_message_uuid:user,user_message_uuids:[user],structured_output:{ok:true}})});
 `)
     chmodSync(cli, 0o755)
-    process.env.PATH = `${bin}:${before.PATH}`; process.env.HOME = join(directory, 'home'); if (selected === 'default') delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = config; process.env.CLAUDE_CODE_USE_BEDROCK = '1'; process.env.ANTHROPIC_MODEL = 'native-user-default'; process.env.PUBLIC_CLAUDE_FIXTURE_LOG = log
+    process.env.PATH = `${bin}:${before.PATH}`; process.env.HOME = join(directory, 'home'); if (selected === 'default') delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = config; process.env.CLAUDE_CODE_USE_BEDROCK = '1'; process.env.ANTHROPIC_MODEL = 'native-user-default'; process.env.ANTHROPIC_BASE_URL = 'https://public-provider.invalid/arbitrary-route'; process.env.PUBLIC_CLAUDE_FIXTURE_LOG = log
     const schema = { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'], additionalProperties: false }
     let execution: StructuredExecution = { ...structuredExecutionPolicy({ schema, inputDigest: 'fixture', purpose: 'native-config-fixture', timeoutMs: 10000, model: `claude:${selected}`, worktree: { baseCommit: 'a'.repeat(40), tree: 'b'.repeat(40), mode: 'read' } }), nativeConfiguration: 'cli-config-v1' }
     const callbacks = { onThread: async (threadId: string) => { execution = { ...execution, threadId } }, onTurn: async (turnId: string) => { execution = { ...execution, turnId } }, onNative: async (claudeNative: NonNullable<StructuredExecution['claudeNative']>) => { execution = { ...execution, claudeNative } } }
     const result = await claudeStructuredTurn(realm, 'native', 'public native config task', execution, callbacks, workspace)
     assert.deepEqual(JSON.parse(result.text), { ok: true }); assert.equal(result.frozenReadProof, undefined)
     assert.equal(execution.model, `claude:${selected}`)
-    const observed = JSON.parse(readFileSync(log, 'utf8')) as { args: string[]; config: string; provider: string; model: string }
-    assert.equal(observed.config, selected === 'default' ? undefined : config); assert.equal(observed.provider, '1'); assert.equal(observed.model, 'native-user-default')
+    const observed = JSON.parse(readFileSync(log, 'utf8')) as { args: string[]; config?: string; provider: string; model: string; baseUrl: string }
+    assert.equal(observed.config, selected === 'default' ? undefined : config); assert.equal(observed.provider, '1'); assert.equal(observed.model, 'native-user-default'); assert.equal(observed.baseUrl, 'https://public-provider.invalid/arbitrary-route')
     assert.equal(observed.args.includes('--model'), selected !== 'default')
     if (selected !== 'default') assert.equal(observed.args[observed.args.indexOf('--model') + 1], selected)
     const plan = JSON.parse(readFileSync(join(root, 'plan.json'), 'utf8')) as { version: number; cliVersion: string; binaryDigest: string; requestedModel: string; resolvedModel: string; historyDigest: string }
