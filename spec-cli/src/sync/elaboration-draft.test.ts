@@ -191,6 +191,45 @@ test('草稿业务schema合法但独审repair时继续原文件，审查错误�
   assert.notEqual(result.rounds[0].traces[0].sessionId, result.rounds[1].traces[1].sessionId)
 })
 
+test('冻结owner的非法repair跨请求只续独审，原Git稿和候选不变，取消不派发', async t => {
+  const f = await fixture(t), sha = contentHash('current unaffected analysis')
+  const analysis: CodeBehaviorAnalysis = { version: 'code-behavior-v1', inputId: f.snapshot.id, baselinePairId: null, composedDigest: sha, readSetDigest: sha, policyDigest: sha, inputDigest: sha, changes: [], findings: [], facts: [], authorizedChanges: [], nodeChanges: [], newNodes: [], resolutions: [], traces: [], reviewPassed: true }
+  const input = { ...f.input, maxRepairs: 0, analysis: { analysis, ref: { sha256: contentHash(JSON.stringify(analysis)) } } }
+  const rawReview = { verdict: 'repair', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [{ code: 'arbitrary-history-prose', kind: 'repair', message: '旧轮实现待写和5/5进度文案不符合冻结实现7/7；业务行不必修改', affectedIds: ['RULE-EXPORT-01'], evidence: `${path}:3及:26旧desc/prose`, decision: '仅改未变owner的desc/prose和运行计数，业务行保留' }] }
+  const base = f.run(() => JSON.stringify(rows))
+  const failed = await elaborate(input, { runner: async request => {
+    const result = await base(request)
+    return request.purpose === 'elaboration_review' ? { ...result, output: rawReview, resultDigest: contentHash(JSON.stringify(rawReview)) } : result
+  } })
+  assert.equal(failed.status, 'exhausted'); assert.equal(failed.structurePassed, true); assert.equal(failed.reviewPassed, false)
+  const original = JSON.stringify(failed), round = failed.rounds[0], draft = structuredClone(round.draft!), draftText = readStageDraft(f.commonDir, draft, draft)
+  const repairDiagnostics = { requestKey: input.requestKey, inputDigest: failed.inputDigest, resultRef: writeEvidence(f.commonDir, failed), failure: failed.failure!, round }
+  const cancelled = await elaborate({ ...input, requestKey: 'scope-review-cancelled', signal: AbortSignal.abort() }, { draft, repairDiagnostics, runner: async () => assert.fail('取消后不得派发') })
+  assert.equal(cancelled.status, 'cancelled')
+  for (const patch of [{ schemaDigest: 'e'.repeat(64) }, { oid: 'e'.repeat(40) }]) {
+    await assert.rejects(elaborate({ ...input, requestKey: 'scope-review-corrupt' }, { draft: { ...draft, ...patch }, repairDiagnostics, runner: async () => assert.fail('损坏原稿不得派发') }))
+  }
+  await assert.rejects(elaborate({ ...input, requestKey: 'scope-review-corrupt-source' }, { draft, repairDiagnostics: { ...repairDiagnostics, round: { ...round, draft: { ...draft, sourceInputId: 'foreign-input' } } }, runner: async () => assert.fail('异source生成资格不得派发') }), /source input/)
+  for (const corrupt of ['generation-trace', 'candidate-digest', 'review-output'] as const) {
+    const bad = structuredClone(repairDiagnostics)
+    if (corrupt === 'generation-trace') bad.round.traces[0].resultDigest = 'e'.repeat(64)
+    else if (corrupt === 'candidate-digest') bad.round.candidateDigest = 'e'.repeat(64)
+    else bad.round.reviewOutput = { ...rawReview, findings: [] }
+    await assert.rejects(elaborate({ ...input, requestKey: `scope-review-${corrupt}` }, { draft, repairDiagnostics: bad, runner: async () => assert.fail('身份摘要损坏不得fallback生成') }), { code: 'review_retry_binding' })
+  }
+  await assert.rejects(elaborate({ ...input, requestKey: 'scope-review-new-analysis', analysis: { ...input.analysis, ref: { sha256: 'e'.repeat(64) } } }, { draft, repairDiagnostics, runner: async () => assert.fail('异分析不得派发') }), /同一业务输入/)
+  const before = f.requests.length
+  const restored = await elaborate({ ...input, requestKey: 'scope-review-fresh' }, { draft, repairDiagnostics, runner: f.run(() => assert.fail('同一合法Git稿不得重新生成')) })
+  assert.equal(restored.status, 'complete', JSON.stringify(restored.failure))
+  assert.deepEqual(f.requests.slice(before).map(request => request.purpose), ['elaboration_review'])
+  assert.match(f.requests.at(-1)!.prompt, /review_scope/); assert.ok(f.requests.at(-1)!.prompt.includes(JSON.stringify(rawReview)))
+  assert.deepEqual(restored.rounds[0].traces[0], round.traces[0]); assert.deepEqual(restored.rounds[0].draft, { ...draft, errors: restored.rounds[0].findings })
+  assert.equal(restored.candidateDigest, failed.candidateDigest); assert.deepEqual(restored.changes, failed.changes)
+  assert.equal(readStageDraft(f.commonDir, draft, draft), draftText); assert.equal(JSON.stringify(failed), original)
+  const reviewEntries = readTree(f.commonDir, f.requests.at(-1)!.worktree!.tree)
+  assert.deepEqual(reviewEntries.filter(entry => !entry.path.startsWith('.spec/')), readTree(f.commonDir, f.snapshot.immutableTree).filter(entry => !entry.path.startsWith('.spec/')), '源码/tests全部path/mode/OID与absence保持')
+})
+
 test('分区checkpoint按owner承接草稿且跨父输入重派；当前局部accept缓存摘要失配仍拒绝', async t => {
   const { elaborateSyncPartitions } = await import('./partition-execution.js')
   const f = await fixture(t), paths = readTree(f.commonDir, f.snapshot.immutableTree).map(entry => entry.path)

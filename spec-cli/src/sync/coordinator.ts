@@ -304,6 +304,20 @@ function authenticatedDraftResult(store: SyncStore, owner: SyncOperation, prior:
   if (result && !draft) return { result, request }
   return result?.worktree && draft && canonical({ baseCommit: result.worktree.baseCommit, tree: result.worktree.baseTree, mode: 'edit' }) === canonical(draft.seed) && result.worktree.headCommit === draft.resultCommit && result.worktree.tree === draft.resultTree ? { result, request } : null
 }
+
+/** 续审保留原生成身份；从真实dispatch定位其原请求，不用新review轮号虚构generate。 */
+function elaborationGenerationSource(store: SyncStore, owner: SyncOperation, prior: SyncAttempt, round: ElaborationResult['rounds'][number]): { attempt: SyncAttempt; key: string; request?: ElaborationSessionRequest } | null {
+  const traces = round.traces.filter(trace => trace.purpose === 'elaboration_generate'), trace = traces[0]
+  if (traces.length !== 1 || trace.resultDigest !== contentHash(JSON.stringify(round.output))) return null
+  for (const attempt of store.listAttempts(owner.id).filter(attempt => attempt.number <= prior.number)) {
+    const dispatch = attempt.dispatchPlans.find(dispatch => dispatch.purpose === trace.purpose && canonical(dispatch.session) === canonical({ sessionId: trace.sessionId, threadId: trace.threadId, turnId: trace.turnId }))
+    if (!dispatch) continue
+    const authenticated = authenticatedDraftResult(store, owner, attempt, dispatch.key, 'elaboration_generate', round.draft)
+    if (!authenticated?.result || authenticated.result.resultDigest !== trace.resultDigest || canonical(authenticated.result.output) !== canonical(round.output) || authenticated.request && authenticated.request.inputDigest !== trace.inputDigest) return null
+    return { attempt, key: dispatch.key, ...(authenticated.request ? { request: authenticated.request } : {}) }
+  }
+  return null
+}
 /** P1业务扩域与原文件规划分别作证，完整scope必须精确等于两者的实际并集。 */
 function reviewScopeProof(store: SyncStore, operation: SyncOperation, origin: SyncAttempt, approved: SavedElaboration, generation: SavedGeneration): { p1: NonNullable<SyncOperation['contractScopeExpansions']>[number]; writerRef?: BlobRef; paths: string[] } | null {
   const commonDir = operation.input.source.commonDir, approvedRef = writeEvidence(commonDir, approved)
@@ -711,7 +725,7 @@ function reviewedReadonlyLocal(store: SyncStore, operation: SyncOperation, sourc
   const source = readonlyLocalSource(store, operation, sourceAttempt, key, resultRef, aggregateRef)
   const prior = source?.result, round = prior?.rounds.at(-1)
   const generationTrace = round?.traces.find(trace => trace.purpose === 'elaboration_generate'), reviewTrace = round?.traces.find(trace => trace.purpose === 'elaboration_review')
-  if (!prior || source.resultRef.sha256 !== resultRef.sha256 || !prior.structurePassed || !prior.reviewPassed || prior.failure || round?.review?.verdict !== 'accept' || round.review.inputDigest !== prior.inputDigest || round.review.candidateDigest !== prior.candidateDigest || round.traces.length !== 2 || !generationTrace || !reviewTrace || generationTrace.sessionId === reviewTrace.sessionId || generationTrace.threadId === reviewTrace.threadId || generationTrace.resultDigest !== contentHash(JSON.stringify(round.output)) || reviewTrace.resultDigest !== contentHash(JSON.stringify(round.reviewOutput)) || !store.listAttempts(operation.id).some(attempt => attempt.number > afterAttemptNumber && readSyncCheckpoints(store, operation, attempt).json.some(({ ref }) => ref.sha256 === resultRef.sha256) && round.traces.every(trace => attempt.dispatchPlans.some(dispatch => dispatch.purpose === trace.purpose && dispatch.session?.sessionId === trace.sessionId && dispatch.session.threadId === trace.threadId && dispatch.session.turnId === trace.turnId)))) fail('readonly_spec_repair_binding', '只读V1 owner原件、完整输入或独审派发绑定失配')
+  if (!prior || !round || !elaborationGenerationSource(store, operation, sourceAttempt, round) || source.resultRef.sha256 !== resultRef.sha256 || !prior.structurePassed || !prior.reviewPassed || prior.failure || round?.review?.verdict !== 'accept' || round.review.inputDigest !== prior.inputDigest || round.review.candidateDigest !== prior.candidateDigest || round.traces.length !== 2 || !generationTrace || !reviewTrace || generationTrace.sessionId === reviewTrace.sessionId || generationTrace.threadId === reviewTrace.threadId || generationTrace.resultDigest !== contentHash(JSON.stringify(round.output)) || reviewTrace.resultDigest !== contentHash(JSON.stringify(round.reviewOutput)) || !store.listAttempts(operation.id).some(attempt => attempt.number > afterAttemptNumber && readSyncCheckpoints(store, operation, attempt).json.some(({ ref }) => ref.sha256 === resultRef.sha256) && attempt.dispatchPlans.some(dispatch => dispatch.purpose === reviewTrace.purpose && dispatch.session?.sessionId === reviewTrace.sessionId && dispatch.session.threadId === reviewTrace.threadId && dispatch.session.turnId === reviewTrace.turnId))) fail('readonly_spec_repair_binding', '只读V1 owner原件、完整输入或独审派发绑定失配')
   return prior
 }
 
@@ -1221,7 +1235,12 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           if (!source || source.result.phase === 'partitioned_final' || source.result.partitionBinding?.partitionId !== binding?.partitionId) continue
           const draft = source.result.rounds.at(-1)?.draft
           if (!draft || owner.id !== operation.id && (!schemaDigest || draft.schemaDigest !== schemaDigest || binding && (source.result.partitionBinding?.planDigest !== binding.planDigest || partitionStage<SyncPartitionPlan>(store, owner, prior, 'partition-plan')?.result.digest !== binding.planDigest))) continue
-          if (!authenticatedDraftResult(store, owner, prior, `sync:${prior.id}:elaborate${binding ? `:partition:${binding.partitionId}` : ''}:${source.result.rounds.at(-1)!.index}:elaboration_generate`, 'elaboration_generate', draft)) continue
+          const round = source.result.rounds.at(-1)!
+          const generation = round.candidate
+            ? elaborationGenerationSource(store, owner, prior, round)
+            : authenticatedDraftResult(store, owner, prior, `sync:${prior.id}:elaborate${binding ? `:partition:${binding.partitionId}` : ''}:${round.index}:elaboration_generate`, 'elaboration_generate', draft)
+          if (round.candidate && !generation) fail('review_retry_binding', '已生成P1候选的原Native生成身份失配，不能回退为重新生成')
+          if (!generation) continue
           // 字节只作未批准材料；完整inputDigest及accept仍由独立的缓存门核验。
           saveStage(store, fence!, `${key}:draft-provenance`, { fromOperationId: owner.id, fromAttemptId: prior.id, resultRef: source.resultRef, resultCommit: draft.resultCommit, oid: draft.oid })
           return owner.id === operation.id ? draft : { ...draft, errors: [...source.result.rounds.at(-1)!.findings, ...draft.errors.filter(error => !source.result.rounds.at(-1)!.findings.some(finding => finding.code === error.code && finding.message === error.message))] }
@@ -1261,11 +1280,10 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       const renderedElaborationSource = (owner: SyncOperation, prior: SyncAttempt, key: string): { result: SavedElaboration; resultRef: BlobRef; round: ElaborationResult['rounds'][number] } | null => {
         if (!['failed', 'superseded', 'settled'].includes(prior.status) || prior.failure?.kind !== 'repairable' || canonical(prior.composedInput) !== canonical(view.composed)) return null
         const source = partitionStage<SavedElaboration>(store, owner, prior, key), round = source?.result.rounds.at(-1)
-        if (!source || source.result.reviewPassed || source.result.phase === 'partitioned_final' || source.result.status !== 'exhausted' || source.result.failure?.code !== 'repair_budget_exhausted' || !round?.candidate || round.candidate.inputDigest !== source.result.inputDigest || round.candidateDigest !== contentHash(JSON.stringify(round.candidate)) || !round.findings.some(finding => finding.severity === 'error')) return null
+        if (!source || source.result.reviewPassed || source.result.phase === 'partitioned_final' || source.result.status !== 'exhausted' || source.result.failure?.code !== 'repair_budget_exhausted' || !round?.candidate || !round.findings.some(finding => finding.severity === 'error')) return null
+        if (round.candidate.inputDigest !== source.result.inputDigest || round.candidateDigest !== contentHash(JSON.stringify(round.candidate))) fail('review_retry_binding', '已生成P1候选的原输入或摘要失配，不能回退为重新生成')
+        if (!elaborationGenerationSource(store, owner, prior, round)) fail('review_retry_binding', '已生成P1候选的原Native请求/结果绑定失配，不能回退为重新生成')
         if (owner.id !== operation.id) {
-          const requestKey = `sync:${prior.id}:elaborate${source.result.partitionBinding ? `:partition:${source.result.partitionBinding.partitionId}` : ''}:${round.index}:elaboration_generate`
-          const authenticated = authenticatedDraftResult(store, owner, prior, requestKey, 'elaboration_generate', round.draft)
-          if (!authenticated || round.draft === undefined && canonical(authenticated.result?.output) !== canonical(round.output)) return null
           if (round.draft) {
             const targets = source.result.partitionBinding ? partitions?.partitions.find(partition => partition.id === source.result.partitionBinding!.partitionId)?.targets : options.plan.targets
             if (!targets) return null

@@ -6,6 +6,7 @@ desc: 从高层原意生成可追踪的主流程与状态处置，经独立审�
 code:
   - spec-cli/src/sync/elaboration.ts#elaborate
   - spec-cli/src/sync/elaboration.ts#elaborationScopeErrors
+  - spec-cli/src/sync/elaboration.ts#elaborationReviewScopeErrors
   - spec-cli/src/sync/elaboration.ts#targetHasCurrentChanges
   - spec-cli/src/sync/elaboration.ts#freezeElaborationInput
   - spec-cli/src/sync/elaboration.ts#projectElaborationFlowReadiness
@@ -23,6 +24,10 @@ related:
 从用户原意生成可完成主流程、适用状态事件处置、规则和验收；无法确认的重要业务政策成为 GAP，只阻塞依赖分支。
 
 ## expanded spec
+
+存在当前受审分析及冻结owner时，独审与生成共享同一owner范围事实及生命周期目标绑定；新独审任务明确可变目标与冻结目标/上下文。repair的affectedIds必须全部真实存在，并至少定位一个本轮可变owner；可同时引用冻结祖先或依赖作为证据，真实受影响owner的语义修复继续原生成修复与分析回审通道。仅指向未变owner的历史description/prose/进度文案，不能取得本轮写权。程序在转换业务finding前拒绝越界或未知ID绑定，给出具体review_scope/review_binding拒因并保留完整原review JSON，不过滤发现或替模型改accept。历史无当前分析的请求不顺带改变绑定语义。
+
+此类独审权限/绑定错误仅重开独审：原生成JSON或Git稿、原summary追踪和候选必须经当前完整输入、source、schema、目标范围、唯一renderer、机械校验及candidate摘要重新证明，且原review在当前范围下仍确属权限/绑定错误；不能凭旧finding.code取得资格。沿现有rounds及同owner已结算repairDiagnostics保留原review、拒因、Git身份与generation trace，新round只派独立read审查同一候选，不重新生成，不新增业务/源码/tests写权。真正域内repair、输入/分析变化或机械检查失败仍走原修复/失效门；预算、取消、独立性与全图seal保持。新任务范围只是prompt派生数据，不追补历史请求、字段或marker。
 
 本轮已审分析只为实际受影响owner提供范围证据；冻结targets不自动授权重写每个已有目标。细化在生成后和完整候选检查时核本轮影响归属、作者原意及已有逐项/生命周期授权，未受影响目标的metadata、解释、绑定及行变化以可续修rows_patch阻断。范围门与原行结构核验分离：历史合法JSON和精确schema继续作为原诊断材料进入续修，不能因新增语义门直接丢弃；旧候选不取得accept或ready。省略及显式等价输出由[[elaboration-markdown]]逐字沿用冻结正文，合法受影响owner的prose-only更新继续进入原演进检查及新独审。
 
@@ -52,7 +57,7 @@ Native P1生成和独审共用既有短来源语义：可观察不等于重大�
 
 interface_seed的生成与独审只承担必要REQ/RULE/GAP及跨子区共享接口，不混入完整P1的全对象、FLOW/STATE/TR和AC覆盖任务。父层已经声明的条款仍须准确、相容且有原意/事实来源；尚未确定的普通字段表示、缺省值或等价校验顺序留给对应子分区读取实现后细化，不强迫父层提前穷举或制造GAP。description与prose只保存稳定业务用途、接口与不适用依据，不保存上一候选、本轮修复或去重过程。共用表列、来源、null、权限/原意保护规则保持；非父完整细化与独审指令逐字保持原契约。schema门槛、独审、预算/修复循环和严格全局seal不改变。
 
-生成与独审共同读取冻结技术写范围及只读测试清单。既有只读 oracle 继续执行；需要新增断言时，P1 先把 AC.test 绑定到原授权可写测试路径，不能把修改只读 oracle 的要求延后交给 P2。候选业务正文的待办/进度问题也须在 P1 普通 repair 修正。implementation-review 仅用于可在原授权实现/测试范围完成且无需改业务正文的实现修复；含此发现的原生 verdict 同样须为 repair，accept 仍严格要求无发现。
+生成与独审共同读取冻结技术写范围及只读测试清单。既有只读 oracle 继续执行；需要新增断言时，P1 先把 AC.test 绑定到原授权可写测试路径，不能把修改只读 oracle 的要求延后交给 P2。本轮可变owner候选业务正文的待办/进度问题须在 P1 普通 repair 修正。implementation-review 仅用于可在原授权实现/测试范围完成且无需改业务正文的实现修复；含此发现的原生 verdict 同样须为 repair，accept 仍严格要求无发现。
 
 范围映射：REQ-SYNC-03、04；P1；AC-SYNC-01、02、03、08、14、25。实施依据为 `docs/spec-code-continuous-sync-plan.md`。本节点交付需求细化、声明追踪及独立语义审查；完整代码、运行验收和落盘由 [[sync-execution]] 与 [[sync-verification]] 继续完成，不能把细化通过作为已同步证明。
 

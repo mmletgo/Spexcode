@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
-import { CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
-import { elaborate, elaborationDigest, elaborationScopeErrors, freezeElaborationInput } from './elaboration.js'
+import { buildContractGraph, CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
+import { elaborate, elaborationDigest, elaborationReviewScopeErrors, elaborationScopeErrors, freezeElaborationInput } from './elaboration.js'
 import { elaborationSchema, outputErrors } from './elaboration-schema.js'
 import { bindElaborationTargets, elaborationTargetBindings, renderElaboration } from './elaboration-markdown.js'
 import type { GeneratedTargetElaboration } from './elaboration-markdown.js'
 import { contractBusinessProse } from './contract-evolution.js'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
-import type { ElaborationInput, ElaborationRepairSeed, ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
+import type { ElaborationInput, ElaborationRepairSeed, ElaborationReview, ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
 import type { CodeBehaviorAnalysis } from './writeback-types.js'
 
 const fixture = new URL('../../test/fixtures/spec-sync/export-repo/', import.meta.url)
@@ -88,6 +88,87 @@ const unchangedOwner = (frozen: ElaborationInput, targetIndex: number): Generate
   const target = frozen.targets[targetIndex], contract = parseContract({ ...target, source: target.source! }).contract!, fm = parseFrontmatter(target.source!).fm
   return { targetIndex, title: String(fm.title ?? ''), description: String(fm.desc ?? ''), code: contract.code, related: contract.related, prose: null, tables: Object.fromEntries(Object.keys(CONTRACT_COLUMNS).map(kind => [kind, []])) as unknown as GeneratedTargetElaboration['changes'][number]['tables'], removeIds: [] }
 }
+
+test('冻结owner旧进度文案的越界repair只重开独审，保留合法生成及同一候选', async () => {
+  const frozen = ownerScopeInput(), parent = frozen.targets[1]
+  frozen.targets = [parent]; frozen.intent = { nodeId: parent.nodeId, rawSource: parseParts(parent.source!)!.rawSource }; frozen.phase = 'interface_seed'; frozen.maxRepairs = 1
+  frozen.verifications = [{ id: 'VERIFY-PARENT-01', command: ['node', '--version'], cwd: '.', timeoutMs: 1000 }]
+  frozen.analysis!.analysis.changes = []; frozen.analysis!.ref.sha256 = elaborationDigest(JSON.stringify(frozen.analysis!.analysis))
+  const calls: ElaborationSessionRequest[] = []
+  let reviews = 0
+  const originalReview = { verdict: 'repair', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [{ code: 'stale-progress-narrative', kind: 'repair', message: '未变owner的desc/prose仍记实现待写及5/5，冻结代码和测试已实现7/7；业务行无需改', affectedIds: ['REQ-PARENT-01'], evidence: `${parent.path}:3和:26旧进度叙述`, decision: '仅更正未变owner的desc/prose和5/5计数，全部业务行保留' }] }
+  const result = await elaborate(frozen, { runner: async request => {
+    calls.push(request)
+    const output = request.purpose === 'elaboration_generate' ? build(request, [unchangedOwner(frozen, 0)]) : ++reviews === 1 ? originalReview : { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+    return { sessionId: `scope-session-${calls.length}`, threadId: `scope-thread-${calls.length}`, turnId: 'turn', output, resultDigest: elaborationDigest(JSON.stringify(output)) }
+  } })
+  assert.equal(result.status, 'interface_seed', JSON.stringify(result.failure))
+  assert.deepEqual(calls.map(call => call.purpose), ['elaboration_generate', 'elaboration_review', 'elaboration_review'])
+  assert.deepEqual(result.rounds[0].reviewOutput, originalReview, '原错误review JSON不可改写或转accept')
+  assert.ok(result.rounds[0].findings.some(issue => issue.code === 'review_scope'))
+  assert.equal(result.rounds[0].candidateDigest, result.rounds[1].candidateDigest)
+  assert.deepEqual(result.rounds[0].output, result.rounds[1].output)
+  assert.deepEqual(result.rounds[0].traces[0], result.rounds[1].traces[0], '保留原generation身份，不伪造新调用')
+  assert.match(calls[2].prompt, /review_scope/); assert.match(calls[2].prompt, /5\/5/)
+  assert.equal(result.changes[0].source, parent.source)
+})
+
+test('review范围复用owner事实：未知ID不能混入，冻结依赖可引用，作者扩域及move按原授权', () => {
+  const frozen = ownerScopeInput(), parent = frozen.targets[1]
+  const graph = buildContractGraph(frozen.targets.flatMap(target => parseContract({ ...target, source: target.source! }).contract ?? []))
+  const review = (affectedIds: string[]): ElaborationReview => ({ inputDigest: '', candidateDigest: '', verdict: 'repair', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [{ code: '任意业务发现码', kind: 'repair', message: '具体语义问题', affectedIds, evidence: '原意及冻结来源', decision: '修复具体义务' }] })
+  assert.equal(elaborationReviewScopeErrors(frozen, review(['REQ-PARENT-01']), graph)[0].code, 'review_scope')
+  assert.equal(elaborationReviewScopeErrors(frozen, review(['RULE-EXPORT-01', 'UNKNOWN-ID']), graph)[0].code, 'review_binding')
+  assert.deepEqual(elaborationReviewScopeErrors(frozen, review(['RULE-EXPORT-01', 'REQ-PARENT-01']), graph), [], '当前改变影响冻结依赖时仍可给域内修复')
+  frozen.analysis!.analysis.authorChanges = [{ nodeId: parent.nodeId, path: parent.path, beforeRaw: '原意', afterRaw: '新原意', changedIds: ['REQ-PARENT-01'] }]
+  assert.deepEqual(elaborationReviewScopeErrors(frozen, review(['REQ-PARENT-01']), graph), [])
+  frozen.analysis!.analysis.authorChanges = []
+  frozen.authorizedChanges = [{ id: 'VERIFY-PARENT-01', action: 'update_verification', source: 'user:raw', reason: '明确授权另一owner更新验证政策' }]
+  assert.deepEqual(elaborationReviewScopeErrors(frozen, review(['REQ-PARENT-01']), graph), [], '合法跨owner授权继续沿同一owner事实')
+  frozen.authorizedChanges = []
+  frozen.targets = [frozen.targets[0], { ...parent, rawSource: '明确的新原意' }]
+  assert.deepEqual(elaborationReviewScopeErrors(frozen, review(['REQ-PARENT-01']), graph), [])
+  frozen.targets = [frozen.targets[0], parent]
+  const destination = { nodeId: 'moved-parent', path: '.spec/moved-parent/spec.md' }
+  frozen.nodeChanges = [{ action: 'move', from: parent, to: destination, evidenceRef: { sha256: 'b'.repeat(64) } }]
+  const moved = buildContractGraph([...graph.contracts.filter(contract => contract.nodeId !== parent.nodeId), parseContract({ ...destination, source: parent.source! }).contract!])
+  assert.deepEqual(elaborationReviewScopeErrors(frozen, review(['REQ-PARENT-01']), moved), [])
+  frozen.analysis = undefined
+  assert.deepEqual(elaborationReviewScopeErrors(frozen, review([]), graph), [], '历史无分析的空finding绑定不顺带改变')
+})
+
+test('非draft已结算seed的越界review跨请求只重审，绑定字段不污染Native原输出摘要', async () => {
+  const frozen = ownerScopeInput(), parent = frozen.targets[1]
+  frozen.targets = [parent]; frozen.intent = { nodeId: parent.nodeId, rawSource: parseParts(parent.source!)!.rawSource }; frozen.phase = 'interface_seed'
+  frozen.verifications = [{ id: 'VERIFY-PARENT-01', command: ['node', '--version'], cwd: '.', timeoutMs: 1000 }]
+  frozen.analysis!.analysis.changes = []; frozen.analysis!.ref.sha256 = elaborationDigest(JSON.stringify(frozen.analysis!.analysis))
+  const first = runner(request => build(request, [unchangedOwner(frozen, 0)]))
+  const failed = await elaborate(frozen, { runner: async request => {
+    const result = await first.run(request)
+    const output = request.purpose === 'elaboration_review' ? { verdict: 'repair', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [{ code: 'old-prose-only', kind: 'repair', message: '仅改冻结owner旧进度', affectedIds: ['REQ-PARENT-01'], evidence: `${parent.path}:3旧说明`, decision: '更正文案' }] } : result.output
+    return { ...result, output, resultDigest: elaborationDigest(JSON.stringify(output)) }
+  } })
+  const round = failed.rounds[0], seed: ElaborationRepairSeed = { settled: true, requestKey: frozen.requestKey, inputDigest: failed.inputDigest, candidateDigest: round.candidateDigest!, output: round.output, candidate: round.candidate!, findings: round.findings, review: round.review, traces: round.traces }, original = structuredClone(seed)
+  const fresh = runner(() => assert.fail('非draft原合法JSON不得重生成'))
+  const restored = await elaborate({ ...frozen, requestKey: 'fresh-nondraft-review' }, { seed, runner: async request => { const result = await fresh.run(request); return { ...result, sessionId: `fresh-${result.sessionId}`, threadId: `fresh-${result.threadId}` } } })
+  assert.equal(restored.status, 'interface_seed', JSON.stringify(restored.failure))
+  assert.deepEqual(fresh.calls.map(call => call.purpose), ['elaboration_review'])
+  assert.equal(restored.candidateDigest, failed.candidateDigest); assert.deepEqual(seed, original)
+})
+
+test('真实受影响owner的语义repair及冻结依赖问题继续生成修复，不借review-only跳过', async () => {
+  const frozen = ownerScopeInput(), parent = frozen.targets[1]
+  frozen.targets = [frozen.targets[0]]; frozen.context = [{ ...parent, source: parent.source! }]; frozen.validationScope = 'partition_local'; frozen.maxRepairs = 1
+  const calls: ElaborationSessionRequest[] = []
+  let reviews = 0
+  const result = await elaborate(frozen, { runner: async request => {
+    calls.push(request)
+    const output = request.purpose === 'elaboration_generate' ? build(request, []) : ++reviews === 1 ? { verdict: 'repair', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [{ code: 'review_scope', kind: 'repair', message: '当前导出义务与冻结父约束的真实差异', affectedIds: ['RULE-EXPORT-01', 'REQ-PARENT-01'], evidence: '当前源码与父原意', decision: '修复当前导出owner的具体语义差异，冻结父正文保持' }] } : { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+    return { sessionId: `semantic-${calls.length}`, threadId: `semantic-thread-${calls.length}`, turnId: 'turn', output, resultDigest: elaborationDigest(JSON.stringify(output)) }
+  } })
+  assert.equal(result.status, 'complete', JSON.stringify(result.rounds.flatMap(round => round.findings)))
+  assert.deepEqual(calls.map(call => call.purpose), ['elaboration_generate', 'elaboration_review', 'elaboration_generate', 'elaboration_review'], '不能凭历史finding.code=review_scope跳过合法语义repair')
+})
 
 test('当前分析只影响A时拒绝B显式metadata、prose、related及行变化，旧schema仍接收原稿', () => {
   const frozen = ownerScopeInput(), node = unchangedOwner(frozen, 1)
