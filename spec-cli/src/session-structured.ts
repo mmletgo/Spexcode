@@ -7,7 +7,7 @@ import { mainRoot, runtimeRoot, sessionArtifactPath } from '@spexcode/spec-core'
 import { readRecord, withRecordLock, writeRecord } from './session-record.js'
 import { codexStructuredTurn, codexStopStructuredTurn } from './codex-harness.js'
 import { commitCodexGenerationRegistration, prepareCodexGenerationRegistration, readCodexGenerationLedger, resolveCodexGenerationForClose } from './codex-runtime-generations.js'
-import { assertRejectedOutput, structuredGeneration, prepareStructuredRealm, prepareFrozenReaderRuntime, assertFrozenReaderRuntime, StructuredSessionError, StructuredSessionTransportError, structuredObserverState, structuredExecutionPolicy, structuredRealmRoot, pinZCodeToolPolicy, type StructuredExecution, type FrozenReaderRuntime } from './session-structured-policy.js'
+import { assertRejectedOutput, structuredGeneration, prepareStructuredRealm, prepareFrozenReaderRuntime, assertFrozenReaderRuntime, StructuredSessionError, StructuredSessionTransportError, structuredObserverState, structuredExecutionPolicy, structuredRealmRoot, pinNativeConfiguration, pinZCodeToolPolicy, type StructuredExecution, type FrozenReaderRuntime } from './session-structured-policy.js'
 import { assertFrozenBinding, prepareFrozenPrompt, readFrozenManifest, type FrozenContextRef, type FrozenEntryJson, type FrozenReadProof, type FrozenReadReceipt } from './frozen-context.js'
 import { verifyStructuredFrozenReadProof as verifyFrozenReadProof } from './structured-frozen-proof.js'
 import { configuredSessionApplication } from './session-application.js'
@@ -38,6 +38,7 @@ export type StructuredSessionRequest = {
   effort?: StructuredExecution['effort']
   worktree?: NativeWorktreeRequest
   zcodeToolPolicy?: StructuredExecution['zcodeToolPolicy']
+  nativeConfiguration?: StructuredExecution['nativeConfiguration']
   frozenContext?: FrozenContextRef
   /** 通用纯 JSON 冻结条目；prepareFrozenPrompt 在派发前物化并从持久请求中去掉载荷。 */
   frozenEntries?: readonly FrozenEntryJson[]
@@ -176,8 +177,13 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
     throw new StructuredSessionError('failed', 'structured execution requires a prompt, input digest, purpose, positive or null timeout and object JSON schema')
   const claude = request.model?.startsWith('claude:') === true
   const zcode = request.model?.startsWith('zcode:') === true
-  if (claude) claudeNativeModel(request.model)
-  if (zcode) zcodeNativeModel(request.model)
+  const { sessionCreateRequest, sessionCreateTimeoutMs, requestQueueDrain, queueStructuredRecovery, refreshQueueCandidate, sessionIdForCreateKey } = await import('./sessions.js')
+  const saved = (claude || zcode) && request.worktree ? readRecord(sessionIdForCreateKey(request.sessionCreateKey ?? request.requestKey))?.structuredExecution : undefined
+  const original = saved ?? (request.sessionCreateKey ? request : null)
+  const nativeConfiguration = pinNativeConfiguration(request, original)
+  if (nativeConfiguration) request = { ...request, nativeConfiguration }
+  if (!nativeConfiguration && claude) claudeNativeModel(request.model)
+  if (!nativeConfiguration && zcode) zcodeNativeModel(request.model)
   if (request.worktree) {
     assertNativeWorktreeSeed(request.root, request.worktree)
     if (request.base && request.base !== request.worktree.baseCommit) throw new StructuredSessionError('failed', 'native worktree base differs from immutable seed')
@@ -189,9 +195,7 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
   const validate = new Ajv().compile(request.schema)
   if (!claude && !zcode && request.frozenContext && !request.readerRuntime) request = { ...request, readerRuntime: await prepareFrozenReaderRuntime(join(runtimeRoot(), 'structured-frozen-read-only-v2'), request.frozenContext) }
   if (request.readerRuntime) assertFrozenReaderRuntime(request.readerRuntime, request.model)
-  const { sessionCreateRequest, sessionCreateTimeoutMs, requestQueueDrain, queueStructuredRecovery, refreshQueueCandidate, sessionIdForCreateKey } = await import('./sessions.js')
-  const saved = zcode && request.worktree ? readRecord(sessionIdForCreateKey(request.sessionCreateKey ?? request.requestKey))?.structuredExecution : undefined
-  const zcodeToolPolicy = pinZCodeToolPolicy(request, saved ?? (request.sessionCreateKey ? request : null))
+  const zcodeToolPolicy = pinZCodeToolPolicy(request, original)
   if (zcodeToolPolicy) request = { ...request, zcodeToolPolicy }
   const execution = structuredExecutionPolicy(request)
   if (!claude && !zcode) prepareStructuredRealm(requiredRealmRoot(execution), request.readerRuntime)

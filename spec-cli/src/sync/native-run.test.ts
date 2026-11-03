@@ -53,6 +53,31 @@ async function fixture(existingRoot?: string, model?: string) {
   return { root, store, claimed, request, records, resource, checkpoint, blobIO, cache, runtimeBase, runner, cleanup: () => { protocol.close(); if (!existingRoot) rmSync(root, { recursive: true, force: true }) } }
 }
 
+for (const model of ['claude:default', 'zcode:default']) for (const historical of [false, true]) test(`原生CLI配置仅冻结新resource，历史缺席与摘要保持 ${model}/${historical}`, async () => {
+  const f = await fixture(undefined, model)
+  try {
+    const request = { ...f.request, worktree: { baseCommit: 'a'.repeat(40), tree: 'b'.repeat(40), mode: 'edit' as const } }
+    if (historical) f.store.reserveDispatch(f.claimed.fence, { key: request.requestKey, purpose: request.purpose, requestDigest: hash(request) })
+    let calls = 0
+    const run = f.runner({ ...f.runtimeBase, run: async actual => {
+      calls++
+      assert.equal((actual as StructuredSessionRequest & { nativeConfiguration?: string }).nativeConfiguration, historical ? undefined : 'cli-config-v1')
+      throw new StructuredSessionError('failed', 'mock-native-config-boundary')
+    } })
+    await assert.rejects(run(request), /mock-native-config-boundary/)
+    const resource = f.resource(), bytes = f.blobIO.read(resource.plan.planBlob), plan = JSON.parse(bytes.toString()) as NativeRunPlan
+    assert.equal((plan.request as typeof request & { nativeConfiguration?: string }).nativeConfiguration, historical ? undefined : 'cli-config-v1')
+    assert.equal(plan.requestDigest, hash(plan.request))
+    assert.equal(resource.plan.payloadDigest, plan.requestDigest)
+    await assert.rejects(run(request), /mock-native-config-boundary/)
+    assert.deepEqual(f.blobIO.read(f.resource().plan.planBlob), bytes)
+    const changed = { ...request, nativeConfiguration: historical ? 'cli-config-v1' : 'unknown' } as typeof request
+    await assert.rejects(run(changed), { code: 'key_reused' })
+    assert.equal(calls, 2)
+    assert.equal(f.store.readOperation(f.claimed.operation.id).callsUsed, 1)
+  } finally { f.cleanup() }
+})
+
 for (const historical of [false, true]) test(`ZCode read resource freezes noninteractive tools only for new plans; historical=${historical}`, async () => {
   const f = await fixture(undefined, 'zcode:bigmodel-api/GLM-5.3-Flash')
   try {

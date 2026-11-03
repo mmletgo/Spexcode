@@ -6,6 +6,7 @@ desc: 显式区分原生 worktree 执行与固定只读历史，禁止权限降�
 code:
   - spec-cli/src/session-structured-policy.ts
 related:
+  - spec-cli/src/session-native-configuration.test.ts
   - spec-cli/src/session-structured.test.ts
   - spec-cli/src/frozen-context.test.ts
   - spec-cli/src/codex-runtime-generations.ts
@@ -20,9 +21,11 @@ related:
 
 可选rejectedOutput明确标记untrusted_final，仅携已认证被拒final与SHA、原请求/schema/input/purpose及原生thread/turn绑定；不进入成功output或固定策略，不授予新权限。错误透传/重放须核原绑定，旧缺席保持；不读取thinking或以任意末条消息猜final。
 
+可选 nativeConfiguration 只接受 cli-config-v1，且只适用于明确 Claude/ZCode 的 version6/native-worktree-v1，无 frozenContext/readerRuntime。它随固定策略、创建载荷与资源请求摘要冻结，纯策略构造不补默认；历史缺席保持。新路由接受 claude:default 或任意非空 Claude 模型/别名，以及 zcode:default 或非空 provider/不透明 model；default 只选择执行器，不覆盖 CLI 默认模型。实际 CLI 版本、配置的 provider/baseurl 和每轮实际模型由原生初始化及精确历史记录证明，不设版本或模型允许名册。旧缺席及 version1–5 仍走原固定策略，不扩大旧冻结模型解析或 realm。
+
 可选 zcodeToolPolicy 仅对明确 ZCode worktree read 接受 version1 与精准 ExitPlanMode denylist，随固定策略进入创建摘要；纯策略构造只保留显式字段，不给旧请求补默认。新建/恢复的选择由 [[structured-session-runtime]] 和 [[sync-native-run]] 冻结，原生 plan/send 版本边界由 [[zcode-structured-runtime]] 校验；不改变结构化 version6 或其它 provider。
 
-新显式 worktree:{baseCommit,tree,mode} 采用独立 version6/native-worktree-v1，数字或 null 期限都保持该版本。固定 schema/inputDigest/purpose/timeoutMs/model/effort/worktree 参与创建哈希，resultWorktree 仅为终态观察；不能同时携 frozenContext/readerRuntime，不产生 frozenReadProof。仅明确 Claude/ZCode 原生名字空间可用，无前缀/default/Codex 模型明确 unsupported。realm 固定为 structured-native-worktree-v1/claude 或 /zcode，禁止借旧只读 realm/证明；正常文件工具与 Git 结果边界见 [[native-worktree-runtime]]，两个执行器的正常模式分别由 [[claude-structured-runtime]]、[[zcode-structured-runtime]] 规定。下述 version1–5 的冻结策略完整保留，不因新增模式而放宽。
+新显式 worktree:{baseCommit,tree,mode} 采用独立 version6/native-worktree-v1，数字或 null 期限都保持该版本。固定 schema/inputDigest/purpose/timeoutMs/model/effort/worktree 参与创建哈希，resultWorktree 仅为终态观察；不能同时携 frozenContext/readerRuntime，不产生 frozenReadProof。仅明确 Claude/ZCode 原生名字空间可用；无前缀/default/Codex 模型明确 unsupported，带命名空间的 default 仅在上述 cli-config-v1 路由可用。realm 固定为 structured-native-worktree-v1/claude 或 /zcode，禁止借旧只读 realm/证明；正常文件工具与 Git 结果边界见 [[native-worktree-runtime]]，两个执行器的正常模式分别由 [[claude-structured-runtime]]、[[zcode-structured-runtime]] 规定。下述 version1–5 的冻结策略完整保留，不因新增模式而放宽。
 
 version5 仅标识 timeoutMs:null 的固定调用预算能力，policy 字符串、隔离配置、realm、模型及 reader 证明保持原 Codex/Claude/ZCode 语义；数字请求继续使用原 version1–4。三个执行器复用同一计时接缝，null 不安装调用 timer；版本/timeout 不一致不得取得原生派发权。
 
