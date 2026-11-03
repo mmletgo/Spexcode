@@ -57,6 +57,203 @@ function rows(source: string, path = contractPath): GeneratedElaboration {
   })))])) as GeneratedTables
   return { version: 'elaboration-rows-v2', changes: [{ nodeId: 'export-contract', path, title: String(parseFrontmatter(source).fm.title), description: '', code: contract.code, related: contract.related, prose: parseParts(source)!.expandedSpec.split(/^### /m)[0], tables, removeIds: [] }], applicability: ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: true, basis: '固定演示夹具的显式业务政策和原始范围', affectedIds: ['REQ-EXPORT-01'] })) }
 }
+
+for (const partitioned of [false, true]) for (const keepRefactor of [false, true]) for (const formatPhase of !partitioned && !keepRefactor ? ['', 'code_behavior_analyze', 'code_behavior_review'] : ['']) test(`P1后置分类回审 ${partitioned ? 'partition' : 'whole'} ${keepRefactor ? '维持refactor恢复候选' : '重新分析allowed_change'} ${formatPhase}`, async t => {
+  const plan = partitioned ? { version: 'sync-coordinator-v2' as const, direction: 'code_to_spec' as const, sourcePaths: ['src'], writePaths: ['.spec'], partitionPolicy: { version: 'sync-partition-policy-v1' as const, maxReadBytes: 524288, maxParallel: 1 }, commitTrigger: { before: null, paths: ['src/export.js'] } } : {}
+  const f = await fixture(t, { maxAttempts: formatPhase ? 3 : 2, maxCalls: 20, maxRepairs: formatPhase ? 2 : 1, timeoutMs: 120_000 }, false, original, 'project', original, { ...plan, agentWorkflow: 'native-worktree-v1' }, undefined, 'code', 'claude:MiniMax-M3.1-Flash', partitioned)
+  const calls: ElaborationSessionRequest[] = [], originalBlobs = readTree(f.input.source.commonDir, f.input.immutableTree)
+  const draftTexts: string[] = []
+  f.store.startGeneration = () => { throw Object.assign(new Error('P1已完整通过，fixture在实现前停止'), { code: 'unsupported' }) }
+  f.store.expandContractScope = () => { throw Object.assign(new Error('P1已完整通过，fixture在扩域前停止'), { code: 'unsupported' }) }
+  f.options.runner = async request => {
+    calls.push(request)
+    const attempt = f.store.readAttempt(f.store.readOperation(f.operation.id).currentAttemptId!), seed = request.worktree!
+    if (request.purpose === 'elaboration_review') {
+      const output = { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }, dispatch = attempt.dispatchPlans.find(dispatch => dispatch.key === request.requestKey)!
+      return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `postgate-${request.requestKey}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)) }
+    }
+    assert.ok(['code_behavior_analyze', 'code_behavior_review', 'elaboration_generate'].includes(request.purpose), request.purpose)
+    const task = JSON.parse(request.prompt.split('任务:\n')[1].split('\n')[0]) as { requiredChangedPaths: string[]; postGateReview?: { analysisRef: { sha256: string }; resultRef: { sha256: string }; candidateDigest: string; findings: { finding: { code: string; path: string; itemId: string; severity: string }; before: unknown; after: unknown }[] }[] }
+    const path = /草稿文件=([^\s；]+)/.exec(request.prompt)![1], workspace = join(f.parent, `postgate-${calls.length}`)
+    f.git('worktree', 'add', '--detach', workspace, seed.baseCommit)
+    let output: unknown
+    if (request.purpose === 'code_behavior_analyze') {
+      if (attempt.number === 2) {
+        assert.equal(readFileSync(join(workspace, path), 'utf8'), draftTexts[0], '沿认证原P0 JSON续改')
+        assert.equal(task.postGateReview?.length, 1)
+        const feedback = task.postGateReview![0]
+        assert.ok(feedback.analysisRef.sha256); assert.ok(feedback.resultRef.sha256); assert.ok(feedback.candidateDigest)
+        const rejected = JSON.parse(readEvidence(f.input.source.commonDir, feedback.resultRef).toString()) as ElaborationResult
+        assert.deepEqual(feedback.findings.map(item => item.finding), rejected.rounds.at(-1)!.findings.filter(finding => finding.code === 'refactor_business_meaning_changed'))
+        assert.deepEqual(feedback.findings.map(item => ({ ...item.finding, message: '' })), [{ code: 'refactor_business_meaning_changed', message: '', nodeId: 'export-contract', path: contractPath, itemId: 'RULE-EXPORT-05', severity: 'error' }])
+        assert.ok(feedback.findings[0].before); assert.ok(feedback.findings[0].after)
+      }
+      output = { changes: task.requiredChangedPaths.map(path => ({ kind: attempt.number >= 2 && !keepRefactor ? 'allowed_change' : 'refactor', paths: [path], affectedIds: ['RULE-EXPORT-05'], ruleIds: ['RULE-EXPORT-05'], originalIntent: '保留原意，核实表示细节', previousBehavior: '原结果和失败事实', sourceBehavior: '普通序列化惯例', deliveryBehavior: '原结果和失败事实', evidence: 'src/export.js#ExportService', counterexample: '不得改变权限或AC/VERIFY' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+    } else if (request.purpose === 'code_behavior_review') {
+      const reviewed = JSON.parse(request.prompt.split('待审分析:\n')[1].split('\n草稿文件=')[0]) as { analysisDigest: string; analysis: import('./writeback-types.js').CodeBehaviorAnalysis }
+      output = { inputDigest: request.inputDigest, analysisDigest: reviewed.analysisDigest, verdict: 'accept', checkedPaths: task.requiredChangedPaths, checkedChangeIds: reviewed.analysis.changes.map(change => change.id), findings: [] }
+    } else {
+      const changed = rows(original)
+      if (attempt.number === 1 || !keepRefactor) changed.changes[0].tables.RULE.find(row => row.id === 'RULE-EXPORT-05')!.basis = '普通序列化惯例'
+      output = adaptElaborationNativeOutput(request, changed)
+    }
+    if (attempt.number === 3 && request.purpose === formatPhase) assert.equal(readFileSync(join(workspace, path), 'utf8'), '{POSTGATE_ORIGINAL_INVALID_JSON')
+    const text = request.purpose === formatPhase && attempt.number === 2 ? '{POSTGATE_ORIGINAL_INVALID_JSON' : JSON.stringify(output)
+    if (request.purpose === 'code_behavior_analyze') draftTexts.push(text)
+    mkdirSync(join(workspace, path, '..'), { recursive: true }); writeFileSync(join(workspace, path), text)
+    execFileSync('git', ['-C', workspace, 'add', path], { stdio: 'pipe' }); execFileSync('git', ['-C', workspace, 'commit', '--allow-empty', '-m', 'postgate fixture draft'], { stdio: 'pipe' })
+    const dispatch = attempt.dispatchPlans.find(dispatch => dispatch.key === request.requestKey)!, receipt = { summary: '正常提交fixture草稿' }
+    return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `postgate-${request.requestKey}`, turnId: 'turn', output: receipt, resultDigest: contentHash(JSON.stringify(receipt)), worktree: nativeWorktreeResult(workspace, seed) }
+  }
+  const result = await runSyncOperation(f.store, f.operation.id, f.options)
+  assert.equal(calls.filter(call => call.purpose === 'code_behavior_analyze').length, formatPhase === 'code_behavior_analyze' ? 3 : 2, JSON.stringify({ failure: result.failure, calls: calls.map(call => call.purpose) }))
+  assert.equal(calls.filter(call => call.purpose === 'code_behavior_review').length, formatPhase === 'code_behavior_review' ? 3 : 2, JSON.stringify({ failure: result.failure, calls: calls.map(call => call.purpose) }))
+  assert.equal(calls.filter(call => call.purpose === 'elaboration_review').length, 1)
+  assert.equal(calls.filter(call => call.purpose === 'code_generate').length, 0)
+  const analyses = calls.filter(call => call.purpose === 'code_behavior_analyze')
+  assert.notEqual(analyses[0].inputDigest, analyses[1].inputDigest)
+  const elaborations = calls.filter(call => call.purpose === 'elaboration_generate')
+  assert.notEqual(elaborations[0].inputDigest, elaborations[1].inputDigest, '新analysisRef使旧P1身份失效')
+  const finalStage = f.store.listAttempts(f.operation.id).at(-1)!.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find((entry: { stage: string }) => entry.stage === 'elaboration')
+  const accepted = JSON.parse(readEvidence(f.input.source.commonDir, finalStage.resultRef).toString()) as ElaborationResult
+  assert.equal(accepted.structurePassed, true); assert.equal(accepted.reviewPassed, true)
+  assert.deepEqual(readTree(f.input.source.commonDir, f.input.immutableTree), originalBlobs)
+  assert.deepEqual(readTree(f.input.source.commonDir, (await captureInputSnapshot(f.root)).immutableTree), originalBlobs, '原源码/测试的path、mode、OID及absence逐项不变')
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
+  assert.equal(f.store.listJournals(f.operation.id).length, 0)
+})
+
+for (const partitioned of [false, true]) for (const invalidBinding of partitioned ? ['', 'missing-ref', 'foreign-owner'] : ['']) test(`rendered P1旧短errors经真实coordinator传完整诊断 ${partitioned ? 'partition' : 'whole'} ${invalidBinding}`, async t => {
+  const plan = partitioned ? { version: 'sync-coordinator-v2' as const, direction: 'code_to_spec' as const, sourcePaths: ['src'], writePaths: ['.spec'], partitionPolicy: { version: 'sync-partition-policy-v1' as const, maxReadBytes: 524288, maxParallel: 1 }, commitTrigger: { before: null, paths: ['src/export.js'] } } : {}
+  const f = await fixture(t, { maxAttempts: 2, maxCalls: 12, maxRepairs: 1, timeoutMs: 120_000 }, false, original, 'project', original, { ...plan, agentWorkflow: 'native-worktree-v1' }, undefined, 'code', 'claude:MiniMax-M3.1-Flash', partitioned)
+  const originalRunner = f.options.runner!, calls: ElaborationSessionRequest[] = []
+  let historic: { ref: { sha256: string }; bytes: Buffer; findings: import('@spexcode/spec-core/contracts').ContractFinding[] } | undefined
+  const checkpoint = f.store.checkpoint.bind(f.store)
+  f.store.checkpoint = (fence, ref) => {
+    const wrapper = JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()) as { stage: string; resultRef: { sha256: string } }
+    if (!historic && (partitioned ? /^partition:.*:elaboration$/.test(wrapper.stage) : wrapper.stage === 'elaboration')) {
+      const saved = JSON.parse(readEvidence(f.input.source.commonDir, wrapper.resultRef).toString()) as ElaborationResult
+      const round = saved.rounds.at(-1)!
+      assert.ok(round.candidate); assert.ok(round.draft); assert.equal(saved.status, 'exhausted')
+      const findings = structuredClone(round.findings)
+      if (invalidBinding === 'missing-ref') delete saved.partitionBinding!.analysisRef
+      if (invalidBinding === 'foreign-owner') saved.partitionBinding!.partitionId = 'another-owner'
+      round.draft.errors = round.draft.errors.map(({ code, message }) => ({ code, message }))
+      const oldRef = writeEvidence(f.input.source.commonDir, saved)
+      historic = { ref: oldRef, bytes: readEvidence(f.input.source.commonDir, oldRef), findings }
+      return checkpoint(fence, { ...writeEvidence(f.input.source.commonDir, { ...wrapper, resultRef: oldRef }), artifacts: [{ kind: 'json', ref: oldRef }, ...syncCheckpointArtifacts(saved, oldRef)] })
+    }
+    return checkpoint(fence, ref)
+  }
+  f.options.runner = async request => {
+    calls.push(request)
+    if (request.purpose === 'elaboration_review') throw Object.assign(new Error('完整诊断已到达实际runner，在P1独审入口停止'), { code: 'unsupported' })
+    const attempt = f.store.readAttempt(f.store.readOperation(f.operation.id).currentAttemptId!), seed = request.worktree!
+    const workspace = join(f.parent, `short-errors-${calls.length}`), path = /草稿文件=([^\s；]+)/.exec(request.prompt)![1]
+    f.git('worktree', 'add', '--detach', workspace, seed.baseCommit)
+    let produced: ElaborationSessionResult
+    if (request.purpose.startsWith('code_behavior_')) produced = await originalRunner({ ...request, prompt: request.prompt.split('\n草稿文件=')[0].replace('\n任务:\n', '\n冻结三方输入:\n').replace('"requiredChangedPaths":', '"changedPaths":') })
+    else {
+      assert.equal(request.purpose, 'elaboration_generate')
+      const generated = rows(original)
+      if (attempt.number === 1) generated.changes[0].tables.RULE.find(row => row.id === (invalidBinding ? 'RULE-EXPORT-05' : 'RULE-EXPORT-06'))!.basis = '无关P1漂移'
+      else {
+        assert.ok(historic)
+        assert.equal(request.prompt.includes(`"runtimeFindings":${JSON.stringify(historic.findings)}`), !invalidBinding, '缺refs或非本owner不打开原round诊断')
+        assert.ok(historic.findings.some(finding => finding.path === contractPath && finding.itemId === (invalidBinding ? 'RULE-EXPORT-05' : 'RULE-EXPORT-06') && finding.severity === 'error'))
+        if (invalidBinding === 'foreign-owner') assert.equal(existsSync(join(workspace, path)), false)
+        else assert.ok(readFileSync(join(workspace, path), 'utf8').includes('无关P1漂移'))
+      }
+      produced = { sessionId: '', threadId: '', turnId: '', output: adaptElaborationNativeOutput(request, generated), resultDigest: '' }
+    }
+    mkdirSync(join(workspace, path, '..'), { recursive: true }); writeFileSync(join(workspace, path), JSON.stringify(produced.output))
+    execFileSync('git', ['-C', workspace, 'add', path], { stdio: 'pipe' }); execFileSync('git', ['-C', workspace, 'commit', '--allow-empty', '-m', 'short errors fixture draft'], { stdio: 'pipe' })
+    const dispatch = attempt.dispatchPlans.find(dispatch => dispatch.key === request.requestKey)!, output = { summary: '真实Git续改' }
+    return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `short-${request.requestKey}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)), worktree: nativeWorktreeResult(workspace, seed) }
+  }
+  const result = await runSyncOperation(f.store, f.operation.id, f.options)
+  assert.equal(calls.filter(call => call.purpose === 'code_behavior_analyze').length, 1, '无关affectedId、缺refs或非本owner漂移不能重授P0')
+  assert.equal(calls.filter(call => call.purpose === 'elaboration_review').length, 1, JSON.stringify({ status: result.status, failure: result.failure, attempts: f.store.listAttempts(f.operation.id).map(attempt => ({ number: attempt.number, failure: attempt.failure })), calls: calls.map(call => call.purpose) }))
+  assert.deepEqual(readEvidence(f.input.source.commonDir, historic!.ref), historic!.bytes)
+  const first = f.store.listAttempts(f.operation.id)[0]
+  const source = JSON.parse(historic!.bytes.toString()) as ElaborationResult
+  assert.ok(source.rounds[0].draft!.errors.every(error => !('path' in error) && !('severity' in error)))
+  assert.equal(source.prior, null); assert.equal(first.status, 'superseded')
+  assert.equal(calls.filter(call => call.purpose === 'code_generate').length, 0)
+})
+
+test('P1分类质疑不重签已有reserved P0请求', async t => {
+  const f = await fixture(t, { maxAttempts: 2, maxCalls: 12, maxRepairs: 1, timeoutMs: 120_000 }, false, original, 'project', original, {}, undefined, 'code')
+  f.transform((output, request) => {
+    if (request.purpose === 'elaboration_generate') (output as GeneratedElaboration).changes[0].tables.RULE.find(row => row.id === 'RULE-EXPORT-05')!.basis = '表示变化'
+    return output
+  })
+  const claim = f.store.claimAttempt.bind(f.store), originalDigest = contentHash('historical reserved immutable request')
+  let reservedKey = ''
+  f.store.claimAttempt = input => {
+    const next = claim(input)
+    if (next.attempt.number === 2) {
+      reservedKey = `sync:${next.attempt.id}:analysis:code_behavior_analyze`
+      f.store.reserveDispatch(next.fence, { key: reservedKey, purpose: 'code_behavior_analyze', requestDigest: originalDigest })
+    }
+    return next
+  }
+  const result = await runSyncOperation(f.store, f.operation.id, f.options)
+  assert.equal(f.calls.filter(call => call.purpose === 'code_behavior_analyze').length, 1)
+  const reserved = f.store.listAttempts(f.operation.id).at(-1)!.dispatchPlans.find(dispatch => dispatch.key === reservedKey)!
+  assert.equal(reserved.requestDigest, originalDigest); assert.equal(reserved.session, null)
+  assert.match(result.failure?.message ?? '', /request|dispatch|派发|请求/i)
+})
+
+test('P1分类质疑只重做受影响P0，保留兄弟已审原ref', async t => {
+  const importPath = '.spec/project/import-contract/spec.md', importSpec = original.replaceAll('export-job', 'import-job').replaceAll('EXPORT', 'IMPORT').replaceAll('export-contract', 'import-contract').replaceAll('src/export.js', 'src/import.js').replaceAll('tests/export.test.mjs', 'tests/import.test.mjs')
+  const f = await fixture(t, { maxAttempts: 2, maxCalls: 24, maxRepairs: 1, timeoutMs: 120_000 }, false, original, 'project', original, {
+    version: 'sync-coordinator-v2', direction: 'code_to_spec', agentWorkflow: 'native-worktree-v1', sourcePaths: ['src'], writePaths: ['.spec'],
+    targets: [{ nodeId: 'export-contract', path: contractPath }, { nodeId: 'import-contract', path: importPath }],
+    partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 32768, maxParallel: 2 }, commitTrigger: { before: null, paths: ['src/export.js', 'src/import.js'] },
+  }, undefined, 'code', 'claude:MiniMax-M3.1-Flash', true, { [importPath]: importSpec, 'src/import.js': 'export class ImportService {}\n', 'tests/import.test.mjs': readFileSync(new URL('tests/export.test.mjs', fixturePath), 'utf8').replaceAll('EXPORT', 'IMPORT').replaceAll('ExportService', 'ImportService').replaceAll('export.js', 'import.js') })
+  const calls: { attempt: number; domain: string; purpose: string }[] = []
+  f.options.runner = async request => {
+    const attempt = f.store.readAttempt(f.store.readOperation(f.operation.id).currentAttemptId!), seed = request.worktree!
+    const task = request.prompt.includes('任务:\n') ? JSON.parse(request.prompt.split('任务:\n')[1].split('\n')[0]) as { requiredChangedPaths?: string[]; targets?: { nodeId: string }[]; postGateReview?: unknown[] } : null
+    const domain = task?.requiredChangedPaths?.some(path => path.includes('import')) || task?.targets?.some(target => target.nodeId === 'import-contract') || request.purpose === 'elaboration_review' && request.prompt.includes('REQ-IMPORT-01') ? 'IMPORT' : 'EXPORT'
+    calls.push({ attempt: attempt.number, domain, purpose: request.purpose })
+    if (request.purpose === 'elaboration_review') {
+      if (attempt.number === 2) throw Object.assign(new Error('新P0及兄弟来源已验证，在P1重审入口停止'), { code: 'unsupported' })
+      const output = { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }, dispatch = attempt.dispatchPlans.find(dispatch => dispatch.key === request.requestKey)!
+      return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `sibling-${request.requestKey}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)) }
+    }
+    assert.ok(['code_behavior_analyze', 'code_behavior_review', 'elaboration_generate'].includes(request.purpose))
+    let output: unknown
+    if (request.purpose === 'code_behavior_analyze') {
+      assert.equal(Boolean(task?.postGateReview?.length), attempt.number === 2 && domain === 'EXPORT')
+      output = { changes: task!.requiredChangedPaths!.map(path => ({ kind: 'refactor', paths: [path], affectedIds: [`RULE-${domain}-05`], ruleIds: [`RULE-${domain}-05`], originalIntent: '保原业务', previousBehavior: '原业务', sourceBehavior: '原业务', deliveryBehavior: '原业务', evidence: path, counterexample: '不得改变权限' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+    } else if (request.purpose === 'code_behavior_review') {
+      const state = JSON.parse(request.prompt.split('待审分析:\n')[1].split('\n草稿文件=')[0]) as { analysisDigest: string; analysis: import('./writeback-types.js').CodeBehaviorAnalysis }
+      output = { inputDigest: request.inputDigest, analysisDigest: state.analysisDigest, verdict: 'accept', checkedPaths: task!.requiredChangedPaths, checkedChangeIds: state.analysis.changes.map(change => change.id), findings: [] }
+    } else {
+      const generated = rows(domain === 'IMPORT' ? importSpec : original, domain === 'IMPORT' ? importPath : contractPath)
+      generated.changes[0].nodeId = domain === 'IMPORT' ? 'import-contract' : 'export-contract'
+      for (const entry of generated.applicability) entry.affectedIds = [`REQ-${domain}-01`]
+      if (attempt.number === 1 && domain === 'EXPORT') generated.changes[0].tables.RULE.find(row => row.id === 'RULE-EXPORT-05')!.basis = 'P1错误漂移'
+      output = adaptElaborationNativeOutput(request, generated)
+    }
+    const path = /草稿文件=([^\s；]+)/.exec(request.prompt)![1], workspace = join(f.parent, `sibling-${calls.length}`)
+    f.git('worktree', 'add', '--detach', workspace, seed.baseCommit)
+    mkdirSync(join(workspace, path, '..'), { recursive: true }); writeFileSync(join(workspace, path), JSON.stringify(output))
+    execFileSync('git', ['-C', workspace, 'add', path], { stdio: 'pipe' }); execFileSync('git', ['-C', workspace, 'commit', '--allow-empty', '-m', 'sibling fixture draft'], { stdio: 'pipe' })
+    const dispatch = attempt.dispatchPlans.find(dispatch => dispatch.key === request.requestKey)!, receipt = { summary: '正常提交' }
+    return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `sibling-${request.requestKey}`, turnId: 'turn', output: receipt, resultDigest: contentHash(JSON.stringify(receipt)), worktree: nativeWorktreeResult(workspace, seed) }
+  }
+  const result = await runSyncOperation(f.store, f.operation.id, f.options)
+  assert.equal(calls.filter(call => call.domain === 'EXPORT' && call.purpose === 'code_behavior_analyze').length, 2, JSON.stringify({ calls, failure: result.failure }))
+  assert.equal(calls.filter(call => call.domain === 'IMPORT' && call.purpose === 'code_behavior_analyze').length, 1)
+  const aggregates = f.store.listAttempts(f.operation.id).map(attempt => attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find((entry: { stage: string }) => entry.stage === 'analysis')).map((entry: { resultRef: { sha256: string } }) => JSON.parse(readEvidence(f.input.source.commonDir, entry.resultRef).toString()) as import('./writeback-types.js').CodeBehaviorAnalysis)
+  const sibling = (analysis: import('./writeback-types.js').CodeBehaviorAnalysis) => analysis.partitionEvidence!.find(owner => owner.analysis.changes.some(change => change.paths.includes('src/import.js')))!
+  assert.deepEqual(sibling(aggregates[0]).analysisRef, sibling(aggregates[1]).analysisRef)
+  assert.deepEqual(sibling(aggregates[0]).analysis, sibling(aggregates[1]).analysis)
+  assert.equal(calls.filter(call => call.purpose === 'code_generate').length, 0)
+})
 type FrozenGenerationPrompt = { contracts: unknown[]; readyIds: string[]; elaboratedSpecs: { path: string; source: string }[]; manifest: { entries: { path: string; digest: string; mode: string }[] }; files: [string, string][]; priorContext?: { role: 'source_before' | 'verified_delivery'; pairId?: string; snapshot: { id: string; immutableTree: string }; entries: { path: string; mode: string; digest: string }[]; files: [string, string][] }[] }
 const promptInput = (request: ElaborationSessionRequest): FrozenGenerationPrompt => JSON.parse(request.prompt.split(request.purpose === 'code_generate' ? '冻结完整输入:\n' : '冻结原意和基线完整输入:\n')[1].split('\n实际候选身份')[0]) as FrozenGenerationPrompt
 function unlock(root: string): void {

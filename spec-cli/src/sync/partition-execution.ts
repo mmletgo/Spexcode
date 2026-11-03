@@ -190,7 +190,7 @@ export async function analyzeSyncPartitions(input: CodeBehaviorInput, plan: Sync
     try {
       const key = `partition:${partition.id}:analysis`
       const saved = checkpoints.load<CodeBehaviorAnalysis>(key)
-      if (saved) return saved
+      if (saved && !input.postGateReview?.some(diagnostic => diagnostic.partitionId === partition.id && diagnostic.analysisRef.sha256 === contentHash(JSON.stringify(saved)))) return saved
       // 只把全局授权、处于本区targets/只读上下文且正文可读的父Spec投影给新叶门禁，不扩充局部writePaths。
       const authorizedParentSpecPaths = input.plan.version === 'sync-coordinator-v2' && input.plan.direction === 'code_to_spec' && input.plan.sourcePaths !== undefined
         ? input.plan.targets.filter(target => (partition.contextNodeIds.includes(target.nodeId) || partition.targets.some(local => local.nodeId === target.nodeId && local.path === target.path))
@@ -199,7 +199,7 @@ export async function analyzeSyncPartitions(input: CodeBehaviorInput, plan: Sync
       const factSourcePaths = input.plan.sourcePaths === undefined
         ? unique(partition.writePaths.filter(path => !path.startsWith('.spec/')))
         : unique(partition.sourcePaths.filter(path => !path.startsWith('.spec/')))
-      const local = await analyzeCodeBehavior({ ...input, repairDiagnostics: input.repairDiagnostics?.filter(diagnostic => 'partitionId' in diagnostic && diagnostic.partitionId === partition.id), requestKey: `${input.requestKey}:partition:${partition.id}`, plan: projectSyncPartition(input.plan, partition), partition: { id: partition.id, changedPaths: partition.changedPaths, factSourcePaths, ...(authorizedParentSpecPaths !== undefined ? { authorizedParentSpecPaths } : {}) } }, runner, inputDigest => checkpoints.loadAcceptedAnalysis?.(key, plan.digest, inputDigest) ?? null, { loadMaterial: (purpose, schemaDigest, inputDigest, request) => checkpoints.loadBehaviorDraftMaterial?.(key, plan.digest, purpose, schemaDigest, inputDigest, request) ?? null, load: inputDigest => checkpoints.loadBehaviorContinuation?.(key, plan.digest, inputDigest) ?? null, save: continuation => { checkpoints.save(`${key}:continuation`, continuation) } })
+      const local = await analyzeCodeBehavior({ ...input, postGateReview: input.postGateReview?.filter(diagnostic => diagnostic.partitionId === partition.id), repairDiagnostics: input.repairDiagnostics?.filter(diagnostic => 'partitionId' in diagnostic && diagnostic.partitionId === partition.id), requestKey: `${input.requestKey}:partition:${partition.id}`, plan: projectSyncPartition(input.plan, partition), partition: { id: partition.id, changedPaths: partition.changedPaths, factSourcePaths, ...(authorizedParentSpecPaths !== undefined ? { authorizedParentSpecPaths } : {}) } }, runner, inputDigest => checkpoints.loadAcceptedAnalysis?.(key, plan.digest, inputDigest) ?? null, { loadMaterial: (purpose, schemaDigest, inputDigest, request) => checkpoints.loadBehaviorDraftMaterial?.(key, plan.digest, purpose, schemaDigest, inputDigest, request) ?? null, load: inputDigest => checkpoints.loadBehaviorContinuation?.(key, plan.digest, inputDigest) ?? null, save: continuation => { checkpoints.save(`${key}:continuation`, continuation) } })
       if (local.changes.some(change => change.paths.some(path => !partition.changedPaths.includes(path)))) reject(`分析超出本区真实变更集合: ${partition.id}`)
       checkpoints.save(key, local)
       return local
