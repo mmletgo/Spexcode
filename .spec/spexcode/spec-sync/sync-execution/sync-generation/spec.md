@@ -70,4 +70,6 @@ P2 接收操作固定 model 并传给生成与独立评审，effort 仍为 high�
 
 生成或独审的 Native 失败值保留原 code/message 及真实 session/thread/turn、requestKey/inputDigest，供 [[sync-coordinator]] 复用 [[sync-native-run]] 的已结算 RPC 门禁；不以默认 repairable 或错误文本跳过停止证明。原业务生成、候选、独审和授权规则保持。
 
-reviewRepair仅是协调器已认证的同组失败result/NativePlan/checkpoint引用，进入该独审的完整冻结摘要。构造请求时再核原失败candidate、request/inputDigest及原final的schema/prompt/thread/turn；完整原文不解析为业务结果。native只读seed在真实candidate之外增加隔离诊断final与当前精确schema文件，实际candidateFiles/diff/tree及业务写权保持原值；非native接缝完整内联同一未批准诊断。Agent基于旧回答续审并重新返回严格JSON，原candidate/V1、独立session/thread、checkedIds覆盖及结果门不变。
+reviewRepair仅引用协调器已认证的同组result/NativePlan/checkpoint，进入该独审的完整冻结摘要。它可来自原Native格式拒绝，也可来自Native已成功但程序字段格式拒绝的完整reviewOutput；两类终态、原JSON、resultDigest和trace均保持原样，不互相伪装。构造请求再次核原candidate、request/inputDigest及原final或成功输出的session/thread/turn/digest。实际只读P1位置按[[sync-candidate-review]]核真实候选路径/ID及全图唯一affectedIds，格式稿续修须全部affectedIds同owner；不清洗括号、猜位置或以affectedIds替代主位置。
+
+Native续审复用现有stage-worktree/v6 edit，在同一candidate之外加入唯一临时评审Git稿，精确schema、原错误及原trace作为只读sidecar。Agent读取原稿续改并正常提交，只能修改指定draft，源码、测试、Spec和其他sidecar保持；程序先capture/read同一Git草稿，再核返回的严格review JSON与稿正文一致。原candidateFiles/diff/tree及业务写权限不变；仅重新通过位置和完整review门的发现才进入原业务修复路由。非Native历史接缝完整内联同一未批准诊断。独立session/thread、checkedIds覆盖与最终验证保持，不另增持久字段或执行器。
