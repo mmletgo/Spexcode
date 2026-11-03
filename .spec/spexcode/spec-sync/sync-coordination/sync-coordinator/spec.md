@@ -16,6 +16,8 @@ related:
 
 ## expanded spec
 
+P1的whole缓存沿[[sync-elaboration]]同时核身份与当前owner范围。分区whole不直接继承ready，必须回原local input逐owner核缓存资格并重新严格seal；单体的当前saved与历史accepted入口均须消费资格结果。scope失效只放弃当前ready复用，优先沿既有草稿来源，必要时用已冷验缓存末轮Git稿继续，不丢JSON或改原reviewPassed/trace/ref，重新生成及独审后才保存新结果。
+
 最终分区独审的程序字段格式失败沿现有reviewRepair续审同一候选。旧Native completed而程序曾接受的无效定位也只在原dispatch、request/input、plan、candidate、输出digest/trace及removed终态完整认证后作为未批准材料读取；不改旧status/resultDigest，不伪造rejectedOutput或Native失败。待处理只读发现必须先取得合法位置，格式错误先续该review组，已accept兄弟按原完整输入及原件严格复用；新稿校验通过的真实repair再回原唯一P1。缺原件、身份/候选失配、未知/重复affectedIds或错误path/ID不得因草稿续修扩大业务权限。原失败请求冷重建及已accept组来源重验从既有aggregate的p2SpecWritePaths恢复同一瞬态写范围，再调用共享请求构造接缝，不将可写owner套入只读定位约束。复用同一stage-worktree临时稿与现有refs，无DB版本或持久字段变更。
 
 未批准P0/P1草稿、旧只读Native材料及P1后置分类质疑共用正式retryOf来源链：input/source、原意、policy、readSet、selection与scope精确一致，分区另核plan/owner，原JSON与当前精确schema匹配才overlay；所有stage、dispatch、Native计划/终态和Git refs均按所属operation/attempt认证。较新控制中断、无输出或身份未认证稿不遮蔽更早合格祖先；已认证且停稳的格式失败原稿仍可续修。换模型只采用正式新操作，不沿材料继承readyAnalysis或accept，新分析与独审必须重做；旧失败、wrapper、JSON、Git对象及摘要原样保留，当前fence只登记真实provenance。P1在生成本轮schema后通过进程内回调选源，不新增持久字段或DB版本。该迁接仅消费原v6 worktree read/edit传输协议；无worktree的旧frozen请求继续原历史恢复接缝，不热升级为新材料。已读取并核真的Git稿命中后不再求备选Native材料，字节、错误、标签与provenance保持同一来源。独审格式拒绝的final只作审查诊断，业务材料必须来自另外认证的原generation output，不能把review JSON当业务行。
@@ -94,7 +96,7 @@ initial与spec共享P2入口。旧无planBlob operation先claim持久unsupported
 
 默认租约120秒，heartbeat最多5秒且小于lease，总deadline与预算不因租约调整改变。持权细化/生成阶段边界先renewLease门禁再setImmediate给控制/heartbeat一次执行机会，再核控制和fence；长native调用由heartbeat续约/Abort，已过期authority绝不能恢复。该窗口覆盖实际同步Git/Tree-sitter可信读取阶段。
 
-显式retryOf沿真实operation链读取同source/input/policy/request的持久accepted P1证据；保留原approved contract/AC及原attempt/evidence provenance，不重新细化弱化AC。只有链上从未approved时才P1新派发；新operation重新执行generation/V1-V4，不借旧fence或receipt发布。
+显式retryOf沿真实operation链读取同source/input/policy/request的持久accepted P1证据；保留原approved contract/AC及原attempt/evidence provenance，不重新细化弱化AC。完整未采纳交付的正式重验是批准复用断点；其余情况只有链上从未approved时才P1新派发；新operation重新执行generation/V1-V4，不借旧fence或receipt发布。
 
 P4 显式重试按原 operation 已审扩展后的 scope 及最终 selection 重组同一 readSet，复用原 impactDigest；冻结 planBlob 和 policyDigest 不被扩展结果改写。原严格接入事务仍拒绝缺失路径、改变义务或不匹配的读取/选择，不能以重试丢弃已批准的实现范围。
 
@@ -207,3 +209,5 @@ P0/P1/P2 共用 typed Native RPC 已结算准入：仅当前 control/physical ru
 多轮review-only续审的builder来源沿原review-plan-provenance追到真实prepared/Native所在attempt，逐级核同候选、原计划、file-writer-plan与builder traces；不把旧prepared复制成新派发。成功续修组的原输入同时沿accepted-review provenance.inputRef恢复，跨兄弟失败仍保自己的原reviewRepair/请求与Native结论。预算预检只计已认证必须重派的失败组下界，实际缓存失配和新调用仍由原reserveDispatch逐调用硬限，不重置或扩大预算。
 
 合法scope分层证明：业务ID/Spec路径由同一已审P1的扩域原件负责，实现/测试路径可由同P1已审code/AC.test映射负责，或由原file-writer-plan及其逐owner proposal/trace/派发负责；最终完整scope必须精确等于两层实际并集，原binding逐字保留、新增binding全null，前后selection沿既有扩域记录相连。不能把代码路径伪归P1、忽略额外路径/ID或借非null漂移；已完成且精确证实的scope步骤不对同一P1 evidence重登记更宽集合。冷builder逐组沿既有renew→yieldToControl→renew让心跳/暂停处理，保持生产lease和预算。
+
+对完整但明确未采纳 settled 交付的正式重验，当前 selection 仅保护 CAS；组合输入、真实读集、目标 before、P0/P1及阶段 wrapper 使用 retryOf 派生的原业务 selection，不将拒绝候选作为 verifiedDelivery 义务。跨此边界不复用旧 accepted P0/P1、generation/review/candidate；新分析和独审重建 owner 投影。原 Git/Native JSON 仍经原 operation/attempt/owner/schema/终态认证后作为未批准材料续修，不迁旧树或批准。

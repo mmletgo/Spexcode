@@ -1,13 +1,15 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
-import { CONTRACT_COLUMNS, parseContract } from '@spexcode/spec-core/contracts'
-import { elaborate, elaborationDigest } from './elaboration.js'
+import { CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
+import { elaborate, elaborationDigest, elaborationScopeErrors, freezeElaborationInput } from './elaboration.js'
 import { elaborationSchema, outputErrors } from './elaboration-schema.js'
 import { bindElaborationTargets, elaborationTargetBindings, renderElaboration } from './elaboration-markdown.js'
 import type { GeneratedTargetElaboration } from './elaboration-markdown.js'
+import { contractBusinessProse } from './contract-evolution.js'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
-import type { ElaborationInput, ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
+import type { ElaborationInput, ElaborationRepairSeed, ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
+import type { CodeBehaviorAnalysis } from './writeback-types.js'
 
 const fixture = new URL('../../test/fixtures/spec-sync/export-repo/', import.meta.url)
 const primaryPath = '.spec/export/export-contract/spec.md'
@@ -72,6 +74,134 @@ const runner = (generate: (request: ElaborationSessionRequest) => unknown): { ru
     return { sessionId: 'target-session-' + calls.length, threadId: 'target-thread-' + calls.length, turnId: 'turn', output, resultDigest: elaborationDigest(JSON.stringify(output)) }
   } }
 }
+
+const ownerScopeInput = (): ElaborationInput => {
+  const frozen = input()
+  const source = `---\ntitle: 原父接口\ndesc: 保留原说明\ncontract-schema: sync-v1\nrelated:\n  - tests/export.test.mjs\n---\n# 原父标题\n\n## raw source\n\n父接口原意。\n\n## expanded spec\n\n父接口原解释。\n\n### VERIFY\n\n| id | command | cwd | timeout-ms |\n| --- | --- | --- | --- |\n| VERIFY-PARENT-01 | ["node","--version"] | . | 1000 |\n\n后置解释。\n\n### REQ\n\n| id | goal | source | constraints | success | depends-on |\n| --- | --- | --- | --- | --- | --- |\n| REQ-PARENT-01 | 保留父接口 | user:raw | 不改变接口 | 子叶可承接 | - |\n`.replace(/\n/g, '\r\n')
+  const fullSource = source.replace(/\| REQ-PARENT-01[^\r]*\r\n/, row => row + Array.from({ length: 7 }, (_, index) => `| REQ-PARENT-0${index + 2} | 保留父接口 | user:raw | 不改变接口 | 子叶可承接 | - |\r\n`).join(''))
+  frozen.targets = [frozen.targets[0], { nodeId: 'parent', path: '.spec/parent/spec.md', source: fullSource, sourceDigest: elaborationDigest(fullSource) }]
+  const analysis: CodeBehaviorAnalysis = { version: 'code-behavior-v1', inputId: 'scope-input', baselinePairId: null, composedDigest: 'a'.repeat(64), readSetDigest: 'a'.repeat(64), policyDigest: 'a'.repeat(64), inputDigest: 'a'.repeat(64), changes: [{ id: 'current-change', kind: 'allowed_change', paths: [], affectedIds: ['RULE-EXPORT-01'], ruleIds: ['RULE-EXPORT-01'], originalIntent: '保留导出义务', previousBehavior: '原导出说明', sourceBehavior: '补充导出说明', deliveryBehavior: '补充导出说明', evidence: '本轮只影响导出节点解释', counterexample: '父接口未改变' }], findings: [], facts: [], authorizedChanges: [], nodeChanges: [], newNodes: [], resolutions: [], traces: [], reviewPassed: true }
+  frozen.analysis = { analysis, ref: { sha256: elaborationDigest(JSON.stringify(analysis)) } }
+  return frozen
+}
+const unchangedOwner = (frozen: ElaborationInput, targetIndex: number): GeneratedTargetElaboration['changes'][number] => {
+  const target = frozen.targets[targetIndex], contract = parseContract({ ...target, source: target.source! }).contract!, fm = parseFrontmatter(target.source!).fm
+  return { targetIndex, title: String(fm.title ?? ''), description: String(fm.desc ?? ''), code: contract.code, related: contract.related, prose: null, tables: Object.fromEntries(Object.keys(CONTRACT_COLUMNS).map(kind => [kind, []])) as unknown as GeneratedTargetElaboration['changes'][number]['tables'], removeIds: [] }
+}
+
+test('当前分析只影响A时拒绝B显式metadata、prose、related及行变化，旧schema仍接收原稿', () => {
+  const frozen = ownerScopeInput(), node = unchangedOwner(frozen, 1)
+  for (const changed of [{ title: '越界标题' }, { description: '越界说明' }, { prose: '越界解释' }, { related: ['src/export.js'] }, { code: ['src/export.js'] }, { removeIds: ['REQ-PARENT-01'] }, { tables: { ...node.tables, REQ: [{ id: 'REQ-PARENT-01', goal: '越界父接口', source: 'user:raw', constraints: '不改变接口', success: '子叶可承接', 'depends-on': [] }] } }]) {
+    const output: GeneratedTargetElaboration = { version: 'elaboration-target-rows-v3', changes: [{ ...node, ...changed }], applicability: [] }
+    assert.deepEqual(outputErrors(output.changes[0], ((elaborationSchema(frozen).properties as Record<string, { items: Record<string, unknown> }>).changes.items)), [], '新范围门不得改变历史草稿schema')
+    const generated = bindElaborationTargets(frozen, output)
+    assert.match(elaborationScopeErrors(frozen, generated).join(';'), /本轮分析未影响.*parent/, JSON.stringify(changed))
+  }
+})
+
+test('受影响A的合法prose-only仍交付，B省略或显式等价正文与行逐字保留含VERIFY位置和CRLF', () => {
+  const frozen = ownerScopeInput(), a = unchangedOwner(frozen, 0), b = unchangedOwner(frozen, 1)
+  const prose = contractBusinessProse(parseParts(primarySource)!.expandedSpec) + '\n\n本轮合法补充导出解释。'
+  const equivalent = { ...b, prose: contractBusinessProse(parseParts(frozen.targets[1].source!)!.expandedSpec), tables: { ...b.tables, REQ: [{ id: 'REQ-PARENT-01', goal: '保留父接口', source: 'user:raw', constraints: '不改变接口', success: '子叶可承接', 'depends-on': [] }] } }
+  for (const others of [[], [b], [equivalent]]) {
+    const generated = bindElaborationTargets(frozen, { version: 'elaboration-target-rows-v3', changes: [{ ...a, prose }, ...others], applicability: [] })
+    assert.deepEqual(elaborationScopeErrors(frozen, generated), [])
+    const result = renderElaboration(frozen, generated, 'scope-proof')
+    assert.match(result.changes.find(change => change.nodeId === 'export-contract')!.source, /本轮合法补充导出解释/)
+    assert.equal(result.changes.find(change => change.nodeId === 'parent')!.source, frozen.targets[1].source)
+  }
+})
+
+test('无变化的已有interface parent不因宽计划变更metadata或重排VERIFY，新required与明确move及VERIFY授权保持', () => {
+  const frozen = ownerScopeInput(), parent = frozen.targets[1]
+  frozen.targets = [parent]; frozen.intent = { nodeId: parent.nodeId, rawSource: parseParts(parent.source!)!.rawSource }; frozen.phase = 'interface_seed'
+  frozen.analysis!.analysis.changes = []
+  const node = unchangedOwner(frozen, 0)
+  const render = (change: GeneratedTargetElaboration['changes'][number]) => renderElaboration(frozen, bindElaborationTargets(frozen, { version: 'elaboration-target-rows-v3', changes: [change], applicability: [] }), 'parent-proof')
+  assert.equal(elaborationScopeErrors(frozen, bindElaborationTargets(frozen, { version: 'elaboration-target-rows-v3', changes: [{ ...node, title: '旧草稿标题', prose: '旧草稿解释' }], applicability: [] })).length, 1)
+  assert.equal(render({ ...node, prose: contractBusinessProse(parseParts(parent.source!)!.expandedSpec) }).changes[0].source, parent.source)
+  frozen.authorizedChanges = [{ id: 'VERIFY-PARENT-01', action: 'update_verification', source: 'user:raw', reason: '明确更新技术预算' }]
+  frozen.verifications = [{ id: 'VERIFY-PARENT-01', command: ['node', '--version'], cwd: '.', timeoutMs: 2000 }]
+  assert.match(render(node).changes[0].source, /2000/)
+  frozen.authorizedChanges = []; frozen.verifications = undefined
+  frozen.nodeChanges = [{ action: 'move', from: { nodeId: parent.nodeId, path: parent.path }, to: { nodeId: 'moved-parent', path: '.spec/moved-parent/spec.md' }, evidenceRef: { sha256: 'b'.repeat(64) } }]
+  assert.equal(render(node).changes[0].nodeId, 'moved-parent')
+  assert.deepEqual(elaborationScopeErrors(frozen, bindElaborationTargets(frozen, { version: 'elaboration-target-rows-v3', changes: [node], applicability: [] })), [])
+  frozen.nodeChanges = []; frozen.targets = [{ ...parent, source: null, sourceDigest: null, rawSource: '首次接口原意' }]
+  assert.doesNotThrow(() => render({ ...node, title: '首次接口', prose: '首次接口说明' }))
+  assert.deepEqual(elaborationScopeErrors(frozen, bindElaborationTargets(frozen, { version: 'elaboration-target-rows-v3', changes: [{ ...node, prose: '首次接口说明' }], applicability: [] })), [])
+  frozen.targets = [{ ...parent, source: '# 尚未启用契约的接口\n', sourceDigest: 'raw-only' }]
+  assert.doesNotThrow(() => render({ ...node, title: '首次接口', prose: '首次接口说明' }))
+  const emptySource = '---\ncontract-schema: sync-v1\n---\n## raw source\n\n父接口原意。\n\n## expanded spec\n\n'
+  frozen.targets = [{ ...parent, source: emptySource, sourceDigest: elaborationDigest(emptySource) }]
+  assert.deepEqual(elaborationScopeErrors(frozen, bindElaborationTargets(frozen, { version: 'elaboration-target-rows-v3', changes: [{ ...node, prose: '首次接口说明' }], applicability: [] })), [])
+  frozen.nodeChanges = [{ action: 'retire', from: { nodeId: parent.nodeId, path: parent.path }, evidenceRef: { sha256: 'b'.repeat(64) } }]
+  assert.deepEqual(elaborationTargetBindings(frozen), [])
+})
+
+test('本轮真实code或AC.test路径确定owner，related和诊断不扩权，明确作者差量可命中', () => {
+  const frozen = ownerScopeInput(), a = unchangedOwner(frozen, 0), b = unchangedOwner(frozen, 1), change = frozen.analysis!.analysis.changes[0]
+  change.affectedIds = []; change.ruleIds = []
+  for (const path of ['src/export.js', 'tests/export.test.mjs']) {
+    change.paths = [path]
+    const output = bindElaborationTargets(frozen, { version: 'elaboration-target-rows-v3', changes: [{ ...a, prose: '当前owner合法解释' }, { ...b, title: '关联不能扩权' }], applicability: [] })
+    assert.deepEqual(elaborationScopeErrors(frozen, output), ['本轮分析未影响目标，必须沿用冻结正文: .spec/parent/spec.md'])
+  }
+  frozen.refinement = { candidateDigest: 'a'.repeat(64), diagnostics: [{ code: 'repair', message: '诊断不是扩权' }] }
+  const output = bindElaborationTargets(frozen, { version: 'elaboration-target-rows-v3', changes: [{ ...b, title: '明确作者更新' }], applicability: [] })
+  assert.equal(elaborationScopeErrors(frozen, output).length, 1)
+  frozen.analysis!.analysis.authorChanges = [{ nodeId: 'parent', path: frozen.targets[1].path, beforeRaw: '旧原意', afterRaw: '父接口原意。', changedIds: ['REQ-PARENT-01'] }]
+  assert.deepEqual(elaborationScopeErrors(frozen, output), [])
+})
+
+test('显式等价完整AC保留原字节，AC.test变化不能被业务等价投影掩盖', () => {
+  const frozen = ownerScopeInput(), node = unchangedOwner(frozen, 0), ac = primary.items.find(item => item.kind === 'AC')!
+  frozen.analysis!.analysis.changes = []
+  const row = { id: ac.id, covers: ac.covers, preconditions: ac.preconditions, action: ac.action, assertion: ac.assertion, source: `${ac.source.kind}:${ac.source.ref}`, test: ac.test, command: ac.command, 'depends-on': ac.dependsOn }
+  const generated = bindElaborationTargets(frozen, { version: 'elaboration-target-rows-v3', changes: [{ ...node, tables: { ...node.tables, AC: [row] } }], applicability: [] })
+  assert.deepEqual(elaborationScopeErrors(frozen, generated), [])
+  assert.equal(renderElaboration(frozen, generated, 'ac-proof').changes[0].source, primarySource)
+  generated.changes[0].tables.AC[0].test = 'tests/changed.test.mjs#changed'
+  assert.equal(elaborationScopeErrors(frozen, generated).length, 1)
+})
+
+test('未受影响owner旧JSON经rows_patch保留并在原预算续修，不能提前独审或升ready', async () => {
+  const frozen = ownerScopeInput(), parent = frozen.targets[1]
+  frozen.targets = [parent]; frozen.intent = { nodeId: parent.nodeId, rawSource: parseParts(parent.source!)!.rawSource }; frozen.phase = 'interface_seed'; frozen.maxRepairs = 1
+  frozen.verifications = [{ id: 'VERIFY-PARENT-01', command: ['node', '--version'], cwd: '.', timeoutMs: 1000 }]
+  frozen.analysis!.analysis.changes = []; frozen.analysis!.ref.sha256 = elaborationDigest(JSON.stringify(frozen.analysis!.analysis))
+  const node = unchangedOwner(frozen, 0), outputs: unknown[] = []
+  const fake = runner(request => {
+    const output = build(request, [{ ...node, ...(outputs.length ? { prose: contractBusinessProse(parseParts(parent.source!)!.expandedSpec) } : { title: '旧草稿越界标题', prose: '旧草稿越界说明' }) }])
+    outputs.push(output); return output
+  })
+  const result = await elaborate(frozen, { runner: fake.run })
+  assert.equal(result.status, 'interface_seed', JSON.stringify(result.rounds.flatMap(round => round.findings)))
+  assert.deepEqual(result.rounds[0].output, outputs[0], '被拒JSON原件保留供续修')
+  assert.equal(result.rounds[0].candidate, null); assert.equal(result.rounds[0].review, null)
+  assert.ok(result.rounds[0].findings.some(finding => finding.code === 'rows_patch' && finding.message.includes('本轮分析未影响')))
+  assert.deepEqual(fake.calls.map(call => call.purpose), ['elaboration_generate', 'elaboration_generate', 'elaboration_review'])
+  assert.match(fake.calls[1].prompt, /rows_patch/); assert.match(fake.calls[1].prompt, /旧草稿越界标题/)
+  assert.equal(result.changes[0].source, parent.source)
+  assert.equal(result.implementationReady, false)
+})
+
+test('历史已结算v3拒绝seed保留原JSON和candidate身份，新owner范围诊断不阻断续修入口', async () => {
+  const frozen = ownerScopeInput(), parent = frozen.targets[1]
+  frozen.targets = [parent]; frozen.intent = { nodeId: parent.nodeId, rawSource: parseParts(parent.source!)!.rawSource }; frozen.phase = 'interface_seed'
+  frozen.verifications = [{ id: 'VERIFY-PARENT-01', command: ['node', '--version'], cwd: '.', timeoutMs: 1000 }]
+  frozen.analysis!.analysis.changes = []; frozen.analysis!.ref.sha256 = elaborationDigest(JSON.stringify(frozen.analysis!.analysis))
+  const node = unchangedOwner(frozen, 0), output: GeneratedTargetElaboration = { version: 'elaboration-target-rows-v3', changes: [{ ...node, title: '历史拒绝稿标题', prose: '历史拒绝稿说明' }], applicability: ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: false, basis: '父接口不执行子业务', affectedIds: [] })) }
+  const inputDigest = freezeElaborationInput(frozen).inputDigest, candidate = renderElaboration(frozen, bindElaborationTargets(frozen, output), inputDigest)
+  const seed: ElaborationRepairSeed = { settled: true, requestKey: 'prior-settled-owner', inputDigest, candidateDigest: elaborationDigest(JSON.stringify(candidate)), output, candidate, review: null, findings: [{ code: 'prior-review-repair', severity: 'error', nodeId: parent.nodeId, path: parent.path, message: '旧稿需恢复未受影响父说明' }], traces: [{ purpose: 'elaboration_generate', sessionId: 'prior-owner-session', threadId: 'prior-owner-thread', turnId: 'prior-turn', resultDigest: elaborationDigest(JSON.stringify(output)), inputDigest }] }
+  const original = structuredClone(seed), fake = runner(request => build(request, [node]))
+  const result = await elaborate(frozen, { seed, runner: fake.run })
+  assert.equal(result.status, 'interface_seed', JSON.stringify(result.failure))
+  assert.equal(result.prior?.candidateDigest, seed.candidateDigest)
+  assert.match(fake.calls[0].prompt, /历史拒绝稿标题/); assert.match(fake.calls[0].prompt, /rows_patch/)
+  assert.equal(result.changes[0].source, parent.source)
+  assert.deepEqual(seed, original, '原seed和摘要不能重签')
+})
 
 test('冻结节点身份决定深层canonical路径，模型不再回显可写路径', async () => {
   const fake = runner(request => build(request))

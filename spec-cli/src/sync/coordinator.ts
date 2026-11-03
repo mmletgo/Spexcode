@@ -96,10 +96,10 @@ function priorDeliveryFiles(operation: SyncOperation, view: InputView, readPaths
 }
 
 /** 精确操作只因自身读取/写入闭包变化过期，原有冻结操作保留完整快照判据。 */
-export async function isSyncInputCurrent(operation: SyncOperation, current: InputSnapshot, plan: SyncCoordinatorPlan): Promise<boolean> {
+export async function isSyncInputCurrent(operation: SyncOperation, current: InputSnapshot, plan: SyncCoordinatorPlan, businessSelection = operation.baselineSelection): Promise<boolean> {
   if (canonical(operation.input.source) !== canonical(current.source)) return false
   if (!operation.baselineSelection) return operation.input.id === current.id
-  const view = await readInput(operation.input, plan, operation.previousBaselinePair, operation.requestBlob ?? undefined, operation.baselineSelection ?? undefined, operation.scope.paths)
+  const view = await readInput(operation.input, plan, operation.previousBaselinePair, operation.requestBlob ?? undefined, businessSelection, operation.scope.paths)
   const originalEntries = verifySnapshot(operation.input), currentEntries = verifySnapshot(current)
   const treeCache = new Map<string, ReturnType<typeof readTree>>()
   const rememberTree = (input: InputSnapshot, entries: ReturnType<typeof readTree>): void => { treeCache.set(`${input.source.commonDir}\0${input.immutableTree}`, entries) }
@@ -186,12 +186,12 @@ async function readInput(input: InputSnapshot, plan: SyncCoordinatorPlan, previo
 }
 
 /** 接入之前冻结真实读集合和派生输入，只返回既有协议接入结构，不改 source/index。 */
-export async function prepareSyncAdmission(input: InputSnapshot, supplied: SyncCoordinatorPlan, options: SyncAdmissionOptions): Promise<AdmitSyncInput> {
+export async function prepareSyncAdmission(input: InputSnapshot, supplied: SyncCoordinatorPlan, options: SyncAdmissionOptions, businessSelection = options.baselineSelection): Promise<AdmitSyncInput> {
   if (supplied.agentWorkflow) assertWorktreeSyncModel(syncModel(options))
   const plan = structuredClone(supplied), executionScope = options.executionScope ?? (options.baselineSelection ? plan.executionScope : undefined)
   if (options.baselineSelection && !executionScope) fail('execution_scope_missing', '精确基线接入必须冻结实际目标写入范围')
   const scope = executionScope ?? { paths: unique(plan.writePaths), contractIds: [], flowIds: [] }
-  const view = await readInput(input, plan, options.previousBaselinePair, options.requestBlob, options.baselineSelection, executionScope?.paths)
+  const view = await readInput(input, plan, options.previousBaselinePair, options.requestBlob, businessSelection, executionScope?.paths)
   return { ...syncModelBinding(options.model), ingressKey: options.ingressKey, rootCauseId: options.rootCauseId, origin: options.origin, budget: options.budget, input, ...(options.requestBlob ? { requestBlob: options.requestBlob } : {}), ...(options.retryOf ? { retryOf: options.retryOf } : {}), ...(options.baselineSelection ? { baselineSelection: options.baselineSelection } : {}), planBlob: freezeSyncPlanEvidence(input.source.commonDir, plan), scope, policyDigest: syncPlanDigest(plan), impactDigest: options.impactDigest ?? contentHash(canonical({ targets: plan.targets, ...(plan.executionScope ? { scope } : {}), writePaths: unique(plan.writePaths), readSetDigest: view.readSetDigest })), readSetDigest: view.readSetDigest, delivery: null, deliveryPlan: planPrivateDelivery(input, options.managedRoot, options.ingressKey), previousBaselinePair: options.previousBaselinePair ?? null }
 }
 
@@ -205,14 +205,15 @@ function extendsWithUninitializedResources(before: FrozenBaselineSelection, afte
     && before.bindings.every(binding => after.bindings.some(next => baselineResourceKey(next) === baselineResourceKey(binding) && canonical(next) === canonical(binding)))
     && after.bindings.every(binding => before.bindings.some(prior => baselineResourceKey(prior) === baselineResourceKey(binding)) || ('bytePair' in binding ? binding.bytePair : binding.intentPair) === null)
 }
-function stageSelectionMatches(operation: SyncOperation, saved: Stage): boolean {
+function stageSelectionMatches(store: SyncStore, operation: SyncOperation, saved: Stage): boolean {
   if (!operation.baselineSelection) return true
   if (!saved.baselineSelectionRef || !saved.readSetDigest) return false
   const selected = JSON.parse(readEvidence(operation.input.source.commonDir, saved.baselineSelectionRef).toString('utf8')) as FrozenBaselineSelection
   verifyBaselineSelection(operation.input, selected)
-  return selected.digest === operation.baselineSelection.digest
+  const business = store.readBusinessBaselineSelection(operation.id)!
+  return selected.digest === business.digest
     ? saved.readSetDigest === operation.readSetDigest
-    : extendsWithUninitializedResources(selected, operation.baselineSelection)
+    : extendsWithUninitializedResources(selected, business)
 }
 /** P1扩域与续审共用已审映射投影；related/source不产生实现写权。 */
 function p1WritableReferences(contracts: readonly Contract[], changedPaths: ReadonlySet<string>, plan: SyncCoordinatorPlan): string[] {
@@ -233,7 +234,7 @@ function stage<T>(store: SyncStore, operation: SyncOperation, attempt: SyncAttem
     const value = entry as Partial<Stage>
     if (value.version !== 'sync-stage-v1' || value.stage !== name) continue
     if (value.operationId !== operation.id || value.attemptId !== attempt.id || value.inputId !== operation.input.id || value.policyDigest !== operation.policyDigest || !value.resultRef) fail('stage_binding', '持久阶段身份不一致')
-    if (!stageSelectionMatches(operation, value as Stage)) continue
+    if (!stageSelectionMatches(store, operation, value as Stage)) continue
     if (usage === 'automatic' && behaviorAnalysisStage(name) && value.guidanceContractVersion !== CODE_BEHAVIOR_GUIDANCE_VERSION) return null
     return JSON.parse(readEvidence(operation.input.source.commonDir, value.resultRef).toString('utf8')) as T
   }
@@ -243,7 +244,7 @@ type ElaborationComposedBinding = { composedTree: string; composedContentDigest:
 function elaborationComposedBinding(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, result: SavedElaboration, composed: ComposedInputRef): ElaborationComposedBinding | null {
   const resultDigest = contentHash(JSON.stringify(result))
   const original = readSyncCheckpoints(store, operation, attempt).json.map(({ value }) => value as Partial<Stage>)
-    .find(value => value.version === 'sync-stage-v1' && value.stage === 'elaboration' && value.operationId === operation.id && value.attemptId === attempt.id && value.inputId === operation.input.id && value.policyDigest === operation.policyDigest && value.resultRef?.sha256 === resultDigest && stageSelectionMatches(operation, value as Stage))
+    .find(value => value.version === 'sync-stage-v1' && value.stage === 'elaboration' && value.operationId === operation.id && value.attemptId === attempt.id && value.inputId === operation.input.id && value.policyDigest === operation.policyDigest && value.resultRef?.sha256 === resultDigest && stageSelectionMatches(store, operation, value as Stage))
   return original?.composedTree === composed.tree && original.composedContentDigest === composed.contentDigest
     ? { composedTree: original.composedTree, composedContentDigest: original.composedContentDigest } : null
 }
@@ -259,7 +260,7 @@ function partitionStage<T>(store: SyncStore, operation: SyncOperation, attempt: 
   const resultRef = writeEvidence(operation.input.source.commonDir, result)
   const original = readSyncCheckpoints(store, operation, attempt).json.map(({ value }) => value as Partial<Stage>)
     .find(value => value.version === 'sync-stage-v1' && value.stage === key && value.operationId === operation.id && value.attemptId === attempt.id && value.inputId === operation.input.id && value.policyDigest === operation.policyDigest && value.resultRef?.sha256 === resultRef.sha256)
-  if (original?.readSetDigest !== operation.readSetDigest || operation.baselineSelection && original.baselineSelectionRef?.sha256 !== writeEvidence(operation.input.source.commonDir, operation.baselineSelection).sha256) return null
+  if (original?.readSetDigest !== operation.readSetDigest || operation.baselineSelection && original.baselineSelectionRef?.sha256 !== writeEvidence(operation.input.source.commonDir, store.readBusinessBaselineSelection(operation.id)).sha256) return null
   return { result, resultRef }
 }
 
@@ -270,7 +271,7 @@ function retryDraftSources(store: SyncStore, operation: SyncOperation, attemptNu
   while (owner) {
     if (seen.has(owner.id) || owner.input.id !== operation.input.id || canonical(owner.input.source) !== canonical(operation.input.source) || owner.policyDigest !== operation.policyDigest || (owner.requestBlob?.sha256 ?? null) !== (operation.requestBlob?.sha256 ?? null) || owner.origin !== operation.origin) fail('retry_provenance_binding', '草稿重试链不匹配固定来源、输入或政策')
     seen.add(owner.id)
-    if (owner.readSetDigest !== operation.readSetDigest || canonical(owner.baselineSelection) !== canonical(operation.baselineSelection) || canonical(owner.scope) !== canonical(operation.scope)) break
+    if (owner.readSetDigest !== operation.readSetDigest || canonical(store.readBusinessBaselineSelection(owner.id)) !== canonical(store.readBusinessBaselineSelection(operation.id)) || canonical(owner.scope) !== canonical(operation.scope)) break
     sources.push(...store.listAttempts(owner.id).filter(prior => (owner!.id !== operation.id || prior.number < attemptNumber) && ['failed', 'superseded', 'settled'].includes(prior.status)).reverse().map(prior => ({ owner: owner!, prior })))
     owner = owner.retryOf ? store.readOperation(owner.retryOf) : null
   }
@@ -687,7 +688,7 @@ function readonlyRepairContext(store: SyncStore, operation: SyncOperation, sourc
   let context = operation
   if (operation.baselineSelection) {
     const basis = readSyncCheckpoints(store, operation, source).json.map(({ value }) => value as Stage).find(saved => saved.version === 'sync-stage-v1' && saved.stage === 'generation' && saved.operationId === operation.id && saved.attemptId === source.id && saved.inputId === operation.input.id && saved.policyDigest === operation.policyDigest && saved.resultRef?.sha256 === generationRef.sha256)
-    if (!basis?.readSetDigest || !basis.baselineSelectionRef || !stageSelectionMatches(operation, basis)) fail('readonly_spec_repair_binding', '只读续修原generation绑定不属于当前合法null资源扩展')
+    if (!basis?.readSetDigest || !basis.baselineSelectionRef || !stageSelectionMatches(store, operation, basis)) fail('readonly_spec_repair_binding', '只读续修原generation绑定不属于当前合法null资源扩展')
     context = { ...operation, readSetDigest: basis.readSetDigest, baselineSelection: JSON.parse(readEvidence(operation.input.source.commonDir, basis.baselineSelectionRef).toString('utf8')) as FrozenBaselineSelection }
   }
   return context
@@ -747,7 +748,8 @@ function latestApprovedElaboration(store: SyncStore, operation: SyncOperation, a
       selected = { result: approved, attemptId: prior.id }; lineage.push({ ...selected, operationId: ancestor.id, resultRef: writeEvidence(operation.input.source.commonDir, approved) })
     }
     if (selected) return { ...selected, operationId: ancestor.id, resultRef: writeEvidence(operation.input.source.commonDir, selected.result), lineage }
-    ancestor = ancestor.retryOf ? store.readOperation(ancestor.retryOf) : null
+    const parent: SyncOperation | null = ancestor.retryOf ? store.readOperation(ancestor.retryOf) : null
+    ancestor = parent && !['workspace_synced', 'awaiting_landing'].includes(parent.phase) ? parent : null
   }
   return null
 }
@@ -796,7 +798,7 @@ function saveStage(store: SyncStore, fence: WriteFence, name: string, value: unk
   const operation = store.readOperation(fence.operationId), commonDir = operation.input.source.commonDir
   const resultRef = writeEvidence(commonDir, value)
   const artifacts = syncCheckpointArtifacts(value, resultRef)
-  const bindings = basis ? { readSetDigest: basis.readSetDigest, baselineSelectionRef: basis.baselineSelectionRef } : operation.baselineSelection ? { readSetDigest: operation.readSetDigest, baselineSelectionRef: writeEvidence(commonDir, operation.baselineSelection) } : {}
+  const bindings = basis ? { readSetDigest: basis.readSetDigest, baselineSelectionRef: basis.baselineSelectionRef } : operation.baselineSelection ? { readSetDigest: operation.readSetDigest, baselineSelectionRef: writeEvidence(commonDir, store.readBusinessBaselineSelection(operation.id)) } : {}
   const guidance = behaviorAnalysisStage(name) && (value as CodeBehaviorAnalysis).reviewPassed === true ? { guidanceContractVersion: CODE_BEHAVIOR_GUIDANCE_VERSION } : {}
   if (bindings.baselineSelectionRef) artifacts.push({ kind: 'json', ref: bindings.baselineSelectionRef })
   store.checkpoint(fence, { ...writeEvidence(commonDir, { version: 'sync-stage-v1', operationId: operation.id, attemptId: fence.attemptId, inputId: operation.input.id, policyDigest: operation.policyDigest, ...bindings, ...guidance, ...composition, stage: name, resultRef } satisfies Stage), artifacts })
@@ -808,7 +810,7 @@ function analysisStageBinding(store: SyncStore, operation: SyncOperation, analys
     const saved = value as Stage
     if (saved.version !== 'sync-stage-v1' || saved.stage !== 'analysis' || saved.operationId !== operation.id || saved.attemptId !== attempt.id || saved.inputId !== operation.input.id || saved.policyDigest !== operation.policyDigest || saved.resultRef?.sha256 !== digest) continue
     if (!operation.baselineSelection) return analysis.readSetDigest === operation.readSetDigest && analysis.baselinePairId === (operation.previousBaselinePair?.id ?? null) ? saved : null
-    if (!stageSelectionMatches(operation, saved) || saved.readSetDigest !== analysis.readSetDigest || !saved.baselineSelectionRef) continue
+    if (!stageSelectionMatches(store, operation, saved) || saved.readSetDigest !== analysis.readSetDigest || !saved.baselineSelectionRef) continue
     const selected = JSON.parse(readEvidence(operation.input.source.commonDir, saved.baselineSelectionRef).toString('utf8')) as FrozenBaselineSelection
     if (analysis.baselineSelectionDigest === selected.digest && analysis.baselinePairId === null) return saved
   }
@@ -964,10 +966,10 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
   const v4 = async (): Promise<BlobRef> => {
     mutex.assertHeld()
     const snapshot = await captureInputSnapshot(operation.input.source.canonicalRoot, operation.input.captureKind === 'commit' ? { committed: true } : undefined)
-    if (!await isSyncInputCurrent(operation, snapshot, options.plan)) fail('input_changed', '来源相关内容/index/HEAD或物理身份已改变', [writeEvidence(operation.input.source.commonDir, { expected: operation.input, actual: snapshot })])
+    if (!await isSyncInputCurrent(operation, snapshot, options.plan, store.readBusinessBaselineSelection(operation.id))) fail('input_changed', '来源相关内容/index/HEAD或物理身份已改变', [writeEvidence(operation.input.source.commonDir, { expected: operation.input, actual: snapshot })])
     const plan = await options.readCurrentPlan()
     if (syncPlanDigest(plan) !== operation.policyDigest) fail('policy_changed', '当前可信政策与冻结操作不同')
-    const view = await readInput(operation.baselineSelection ? operation.input : snapshot, plan, operation.previousBaselinePair, operation.requestBlob, operation.baselineSelection, operation.scope.paths)
+    const view = await readInput(operation.baselineSelection ? operation.input : snapshot, plan, operation.previousBaselinePair, operation.requestBlob, store.readBusinessBaselineSelection(operation.id), operation.scope.paths)
     if (view.readSetDigest !== operation.readSetDigest) fail('readset_changed', '当前完整读取上下文已改变')
     const now = store.readOperation(operation.id), attempt = store.readAttempt(fence!.attemptId)
     if (now.control !== 'run' || physicallyPaused() || now.currentAttemptId !== attempt.id || attempt.expiresAtMs <= Date.now() || syncDeadlineExpired(now.deadlineAtMs) || signal.aborted) fail('controlled', '交付门禁已停止或过期')
@@ -1067,7 +1069,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           throw error
         }
       } else fence = fenceFor(operation, attempt!)
-      if (operation.baselineSelection && !await isSyncInputCurrent(operation, await captureInputSnapshot(operation.input.source.canonicalRoot, operation.input.captureKind === 'commit' ? { committed: true } : undefined), options.plan)) fail('input_changed', '派发前来源相关输入已改变')
+      if (operation.baselineSelection && !await isSyncInputCurrent(operation, await captureInputSnapshot(operation.input.source.canonicalRoot, operation.input.captureKind === 'commit' ? { committed: true } : undefined), options.plan, store.readBusinessBaselineSelection(operation.id))) fail('input_changed', '派发前来源相关输入已改变')
       if (timer) clearInterval(timer)
       timer = setInterval(() => {
         try {
@@ -1112,7 +1114,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         if (operation.origin !== 'combined' || !history) fail('restore_binding', '恢复只能由正式固定成组撤销输入授权')
         if (restorations.some(change => change.history.inputId !== operation.input.id || change.history.requestBlob.sha256 !== operation.requestBlob!.sha256 || !restored.some(item => item.id === change.id))) fail('restore_binding', '恢复未绑定原已结算receipt及同一历史Spec对象')
       }
-      let view = await readInput(operation.input, options.plan, operation.previousBaselinePair, operation.requestBlob, operation.baselineSelection, operation.scope.paths)
+      let view = await readInput(operation.input, options.plan, operation.previousBaselinePair, operation.requestBlob, store.readBusinessBaselineSelection(operation.id), operation.scope.paths)
       if (view.readSetDigest !== operation.readSetDigest) fail('readset_binding', '冻结读集合与operation.readSetDigest不同')
       if (signal.aborted) fail('cancelled', '协调执行已停止')
       store.renewLease(fence, leaseMs); await yieldToControl(); store.renewLease(fence, leaseMs)
@@ -1341,7 +1343,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       }
       const loadBehaviorDraftMaterial = (key: string, purpose: string, schemaDigest: string, inputDigest: string, request: Pick<ElaborationSessionRequest, 'prompt' | 'worktree'>, planDigest?: string): ElaborationDraftMaterial | null => {
         for (const { owner, prior } of retryDraftSources(store, operation, attempt!.number)) {
-          if (prior.baselineSelectionDigest !== operation.baselineSelection?.digest || canonical(prior.composedInput) !== canonical(view.composed) || planDigest && partitionStage<SyncPartitionPlan>(store, owner, prior, 'partition-plan')?.result.digest !== planDigest) continue
+          if (owner.id === operation.id && prior.baselineSelectionDigest !== operation.baselineSelection?.digest || canonical(prior.composedInput) !== canonical(view.composed) || planDigest && partitionStage<SyncPartitionPlan>(store, owner, prior, 'partition-plan')?.result.digest !== planDigest) continue
           const continuation = partitionStage<CodeBehaviorContinuation>(store, owner, prior, `${key}:continuation`)
           const original = continuation?.result.readyAnalysis, draft = continuation?.result.drafts.code_behavior_analyze
           if (purpose === 'code_behavior_analyze' && postGateReview.some(diagnostic => diagnostic.partitionId === (key === 'analysis' ? undefined : key.slice('partition:'.length, -':analysis'.length))) && original && draft && draft.schemaDigest === schemaDigest) {
@@ -1534,7 +1536,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       const deliveredAuthorFiles = operation.previousBaselinePair ? new Map(readTree(operation.input.source.commonDir, operation.previousBaselinePair.verifiedDelivery.immutableTree).filter(entry => entry.path.startsWith('.spec/') && entry.path.endsWith('/spec.md') && entry.mode !== '120000').map(entry => [entry.path, readObject(operation.input.source.commonDir, entry.oid).toString('utf8')])) : authorFiles
       for (const path of adoptedDeliveryPaths(operation.input, operation.previousBaselinePair)) { const text = deliveredAuthorFiles.get(path); if (text === undefined) authorFiles.delete(path); else authorFiles.set(path, text) }
       const authoredContractChanged = operation.baselineSelection
-        ? readCompositionEvidence(operation.input, view.composed, operation.baselineSelection)?.intents.some(intent => intent.changed) ?? false
+        ? readCompositionEvidence(operation.input, view.composed, store.readBusinessBaselineSelection(operation.id)!)?.intents.some(intent => intent.changed) ?? false
         : authoredContractChanges(authorFiles, authorNewFiles, deliveredAuthorFiles, view.frozen.nodes).some(change => options.plan.targets.some(target => target.path === change.path))
       const baselineCodeChanged = Boolean(operation.previousBaselinePair && actualTreeDiff(readTree(operation.input.source.commonDir, authorTree), verifySnapshot(operation.input)).some(file => !file.path.startsWith('.spec/') && within(file.path, options.plan.writePaths)))
       const behaviorOrigin = options.plan.version === 'sync-coordinator-v2' && options.plan.direction === 'code_to_spec' || baselineCodeChanged || authoredContractChanged || ['code', 'combined', 'reconcile'].includes(operation.origin) || Boolean(view.composed.compositionEvidenceBlob) || Boolean(decision)
@@ -1557,12 +1559,12 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           const sourceEntries = verifySnapshot(operation.input)
           const before = readTree(operation.input.source.commonDir, operation.previousBaselinePair?.sourceInput.immutableTree ?? plan.commitTrigger?.before?.immutableTree ?? operation.input.immutableTree)
           const delivery = readTree(operation.input.source.commonDir, operation.previousBaselinePair?.verifiedDelivery.immutableTree ?? operation.input.immutableTree)
-          const compositionEvidence = operation.baselineSelection ? readCompositionEvidence(operation.input, view.composed, operation.baselineSelection) : null
+          const compositionEvidence = operation.baselineSelection ? readCompositionEvidence(operation.input, view.composed, store.readBusinessBaselineSelection(operation.id)!) : null
           const residuals = compositionEvidence?.residualPaths ?? []
           const initialSources = operation.origin === 'initial' || plan.commitTrigger?.before === null ? sourceEntries.filter(entry => within(entry.path, plan.sourcePaths ?? [])).map(entry => entry.path) : []
           let changedPaths = unique([...(plan.commitTrigger?.before === null ? [] : plan.commitTrigger?.paths ?? []), ...residuals, ...initialSources, ...(operation.origin === 'initial' ? plan.targets.map(target => target.path) : []), ...actualTreeDiff(before, sourceEntries).map(file => file.path), ...actualTreeDiff(delivery, view.manifest.entries).map(file => file.path), ...(operation.requestBlob && !decision ? readControlledChanges(operation.input, operation.requestBlob).map(change => change.path) : [])]).filter(path => within(path, view.readPaths))
           if (plan.direction === 'spec_to_code') changedPaths = changedPaths.filter(path => path.startsWith('.spec/'))
-          const historicalSnapshots = [...new Map([...(operation.baselineSelection?.bindings.flatMap(binding => { const pair = 'bytePair' in binding ? binding.bytePair : binding.intentPair; return pair ? [pair.verifiedDelivery, pair.sourceInput] : [] }) ?? []), ...operation.previousBaselinePair ? [operation.previousBaselinePair.verifiedDelivery, operation.previousBaselinePair.sourceInput] : [], ...plan.commitTrigger?.before ? [plan.commitTrigger.before] : []].map(snapshot => [snapshot.immutableTree, snapshot])).values()]
+          const historicalSnapshots = [...new Map([...(store.readBusinessBaselineSelection(operation.id)?.bindings.flatMap(binding => { const pair = 'bytePair' in binding ? binding.bytePair : binding.intentPair; return pair ? [pair.verifiedDelivery, pair.sourceInput] : [] }) ?? []), ...operation.previousBaselinePair ? [operation.previousBaselinePair.verifiedDelivery, operation.previousBaselinePair.sourceInput] : [], ...plan.commitTrigger?.before ? [plan.commitTrigger.before] : []].map(snapshot => [snapshot.immutableTree, snapshot])).values()]
           const governanceSources = new Map<string, string>(), governanceNodes = [...view.frozen.nodes]
           for (const snapshot of historicalSnapshots) {
             verifySnapshot(snapshot)
@@ -1587,7 +1589,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       const postGateReview: CodeBehaviorPostGateReview[] = []
       if (behaviorOrigin) {
         const owners = partitions?.partitions.map(partition => ({ partitionId: partition.id, key: `partition:${partition.id}:elaboration` })) ?? [{ partitionId: undefined, key: 'elaboration' }]
-        const beforeFiles = priorDeliveryFiles(operation, view, [...options.plan.readPaths, ...operation.scope.paths], options.plan)
+        const beforeFiles = priorDeliveryFiles({ ...operation, baselineSelection: store.readBusinessBaselineSelection(operation.id) }, view, [...options.plan.readPaths, ...operation.scope.paths], options.plan)
         for (const owner of owners) for (const { owner: sourceOwner, prior } of retryDraftSources(store, operation, attempt!.number)) {
           const source = renderedElaborationSource(sourceOwner, prior, owner.key)
           const approved = source && stage<CodeBehaviorAnalysis>(store, sourceOwner, prior, 'analysis')
@@ -1653,7 +1655,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
             draftProtocol = 'code-behavior-draft-v1'
             saveStage(store, fence, 'behavior-draft-protocol', { version: draftProtocol })
           }
-          try { const analysisInput: import('./code-behavior.js').CodeBehaviorInput = { ...(draftProtocol ? { draftProtocol } : {}), model, snapshot: operation.input, baseline: operation.previousBaselinePair, ...(operation.baselineSelection ? { baselineSelection: operation.baselineSelection } : {}), composed: view.composed, readSetDigest: operation.readSetDigest, policyDigest: operation.policyDigest, plan: operation.baselineSelection ? { ...options.plan, readPaths: view.readPaths } : options.plan, requestKey: `sync:${attempt.id}:analysis`, timeoutMs: callTimeoutMs, signal, origin: operation.origin, ...(decision && previousDecisionAnalysis ? { decision: { request: decision, previous: previousDecisionAnalysis, previousComposed: previousDecisionComposed, previousReadPaths: previousDecisionReadPaths } } : {}), repairDiagnostics, postGateReview }; approved = partitions ? await analyzeSyncPartitions(analysisInput, partitions, options.plan.version === 'sync-coordinator-v2' ? options.plan.partitionPolicy.maxParallel : 1, runner, partitionCheckpoints) : await analyzeCodeBehavior(analysisInput, runner, undefined, { loadMaterial: (purpose, schemaDigest, inputDigest, request) => loadBehaviorDraftMaterial('analysis', purpose, schemaDigest, inputDigest, request), load: inputDigest => loadBehaviorContinuation('analysis', inputDigest), save: continuation => { saveStage(store, fence!, 'analysis:continuation', continuation, !operation.baselineSelection ? { readSetDigest: operation.readSetDigest } : undefined) } }) }
+          try { const analysisInput: import('./code-behavior.js').CodeBehaviorInput = { ...(draftProtocol ? { draftProtocol } : {}), model, snapshot: operation.input, baseline: operation.previousBaselinePair, ...(operation.baselineSelection ? { baselineSelection: store.readBusinessBaselineSelection(operation.id) } : {}), composed: view.composed, readSetDigest: operation.readSetDigest, policyDigest: operation.policyDigest, plan: operation.baselineSelection ? { ...options.plan, readPaths: view.readPaths } : options.plan, requestKey: `sync:${attempt.id}:analysis`, timeoutMs: callTimeoutMs, signal, origin: operation.origin, ...(decision && previousDecisionAnalysis ? { decision: { request: decision, previous: previousDecisionAnalysis, previousComposed: previousDecisionComposed, previousReadPaths: previousDecisionReadPaths } } : {}), repairDiagnostics, postGateReview }; approved = partitions ? await analyzeSyncPartitions(analysisInput, partitions, options.plan.version === 'sync-coordinator-v2' ? options.plan.partitionPolicy.maxParallel : 1, runner, partitionCheckpoints) : await analyzeCodeBehavior(analysisInput, runner, undefined, { loadMaterial: (purpose, schemaDigest, inputDigest, request) => loadBehaviorDraftMaterial('analysis', purpose, schemaDigest, inputDigest, request), load: inputDigest => loadBehaviorContinuation('analysis', inputDigest), save: continuation => { saveStage(store, fence!, 'analysis:continuation', continuation, !operation.baselineSelection ? { readSetDigest: operation.readSetDigest } : undefined) } }) }
           catch (error) {
             const issue = error as { code?: string; message?: string }
             const partitionFailures = (error as { partitionFailures?: PartitionAnalysisFailure[] }).partitionFailures
@@ -1677,15 +1679,15 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         store.recordFailure(fence, issue)
         return current(undefined, issue)
       }
-      const deliveredFiles = priorDeliveryFiles(operation, view, [...options.plan.readPaths, ...operation.scope.paths], options.plan)
-      const historyGroup = operation.baselineSelection && operation.requestBlob ? readCompositionEvidence(operation.input, view.composed, operation.baselineSelection).controlledAuthorGroup : undefined
+      const deliveredFiles = priorDeliveryFiles({ ...operation, baselineSelection: store.readBusinessBaselineSelection(operation.id) }, view, [...options.plan.readPaths, ...operation.scope.paths], options.plan)
+      const historyGroup = operation.baselineSelection && operation.requestBlob ? readCompositionEvidence(operation.input, view.composed, store.readBusinessBaselineSelection(operation.id)!).controlledAuthorGroup : undefined
       for (const change of historyGroup?.changes ?? []) {
         if (!change.path.startsWith('.spec/') || !change.path.endsWith('/spec.md')) continue
-        const binding = operation.baselineSelection!.bindings.find(binding => binding.resource.kind === 'path' && binding.resource.path === change.path)
+        const binding = store.readBusinessBaselineSelection(operation.id)!.bindings.find(binding => binding.resource.kind === 'path' && binding.resource.path === change.path)
         if (!binding || !('bytePair' in binding) || binding.bytePair) continue
         if (change.before) deliveredFiles.set(change.path, readObject(operation.input.source.commonDir, change.before.oid).toString('utf8')); else deliveredFiles.delete(change.path)
       }
-      const historicalRetiredIds = unique([...(operation.previousBaselinePair?.retiredIds ?? []), ...(operation.baselineSelection ? selectedRetiredIds(operation.baselineSelection) : [])])
+      const historicalRetiredIds = unique([...(operation.previousBaselinePair?.retiredIds ?? []), ...(operation.baselineSelection ? selectedRetiredIds(store.readBusinessBaselineSelection(operation.id)!) : [])])
       const behaviorFacts = [...options.plan.facts, ...(analysis?.analysis.facts ?? []), ...effectiveFindings.map(finding => ({ source: `derived:${finding.ruleIds[0] ?? finding.affectedIds[0]}`, text: JSON.stringify(finding) }))]
       const nodeChanges = analysis?.analysis.nodeChanges.map(change => ({ ...change, evidenceRef: analysis.ref })) ?? []
       const moved = nodeChanges.filter(change => change.action === 'move')
@@ -1717,21 +1719,25 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         }
         return { ...(draftProtocol ? { draftProtocol } : {}), ...(options.plan.agentWorkflow ? { worktree: stageWorktree(operation.input.source.commonDir, operation.input.headCommit, refinement?.candidate.tree ?? view.composed.tree) } : {}), root: operation.input.source.canonicalRoot, base: operation.input.headCommit, requestKey: `sync:${attempt!.id}:elaborate`, intent: { nodeId: effectiveIntentNodeId, rawSource }, targets, context: view.frozen.nodes.filter(node => !targets.some(target => target.path === node.path) && !moved.some(change => change.to.path === node.path)).map(node => ({ nodeId: node.id, path: node.path, source: view.files.get(node.path)! })), files: refinementFiles, facts: behaviorFacts, analysis, decisionAuthorities: analysis?.analysis.decisionAuthorities ?? options.plan.decisionAuthorities,  ...(refinement ? { refinement: { candidateDigest: refinement.candidateDigest, diagnostics: refinement.diagnostics } } : {}), mode: preserveBusiness ? 'preserve_business' : 'reelaborate', nodeChanges, verifications: options.plan.verifications.map(item => item.definition), implementationWritePaths: options.plan.version === 'sync-coordinator-v2' && options.plan.direction === 'code_to_spec' ? [] : unique(options.plan.writePaths), readonlyTestPaths: unique(options.plan.mandatoryTests.map(test => test.testPath)), authorizedChanges: behaviorAuthorization, historyInput: operation.input, retiredIds: unique([...(options.plan.retiredIds ?? []), ...historicalRetiredIds]), maxRepairs: 0, maxCalls: 2, totalTimeoutMs: operation.deadlineAtMs === null ? null : operation.deadlineAtMs - Date.now(), timeoutMs: callTimeoutMs, signal, model, effort: 'high' as const }
       }
+      let cacheDraft: ElaborationDraft | undefined
+      const reusableElaborationCache = (cached: SavedElaboration, tagged: boolean): boolean => {
+        const draftProtocol = tagged || cached.rounds.some(round => round.draft) ? 'elaboration-draft-v1' : undefined
+        const reusable = verifyElaborationDraftCache(makeElaborationInput(draftProtocol), cached, tagged)
+        const draft = cached.rounds.at(-1)?.draft
+        if (!reusable && !cacheDraft && draft) cacheDraft = { ...draft, errors: [...draft.errors, { code: 'rows_patch', message: '已审草稿超出本轮owner范围；恢复未受影响目标并重新独审' }] }
+        return reusable
+      }
       let elaboration = readonlyOwnerRepair ? null : stage<SavedElaboration>(store, operation, attempt, 'elaboration')
       if (elaboration && !elaborationComposedBinding(store, operation, attempt, elaboration, view.composed)) elaboration = null
       if (elaboration) {
         const tagged = elaborationDraftTagged(store, operation, attempt, 'elaboration', elaboration)
-        if (tagged || elaboration.rounds.some(round => round.draft)) {
-          if (partitions) elaboration = null
-          else verifyElaborationDraftCache(makeElaborationInput('elaboration-draft-v1'), elaboration, tagged)
-        }
+        if (partitions || !reusableElaborationCache(elaboration, tagged)) elaboration = null
       }
       if (!elaboration && !refinement && !readonlyOwnerRepair) {
         const selected = readonlyBase ?? latestApprovedElaboration(store, operation, attempt.number)
         const composition = selected && elaborationComposedBinding(store, store.readOperation(selected.operationId), store.readAttempt(selected.attemptId), selected.result, view.composed)
         const tagged = selected && elaborationDraftTagged(store, store.readOperation(selected.operationId), store.readAttempt(selected.attemptId), 'elaboration', selected.result)
-        if (selected && composition && !(partitions && (tagged || selected.result.rounds.some(round => round.draft)))) {
-          if (tagged || selected.result.rounds.some(round => round.draft)) verifyElaborationDraftCache(makeElaborationInput('elaboration-draft-v1'), selected.result, tagged ?? false)
+        if (selected && composition && !partitions && reusableElaborationCache(selected.result, tagged ?? false)) {
           elaboration = selected.result
           saveStage(store, fence, 'elaboration-provenance', { operationId: operation.id, inputId: operation.input.id, policyDigest: operation.policyDigest, fromOperationId: selected.operationId, fromAttemptId: selected.attemptId, evidenceRef: selected.resultRef, candidateDigest: selected.result.candidateDigest })
           saveStage(store, fence, 'elaboration', selected.result, undefined, composition)
@@ -1746,7 +1752,11 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           saveStage(store, fence, 'elaboration-draft-protocol', { version: draftProtocol })
         }
         const elaborationInput = makeElaborationInput(draftProtocol)
-        const result = partitions ? await elaborateSyncPartitions(elaborationInput, partitions, options.plan.version === 'sync-coordinator-v2' ? options.plan.partitionPolicy.maxParallel : 1, partitionCheckpoints, runner, view.composed) : await elaborate(elaborationInput, { runner, loadDraft: draftProtocol ? schemaDigest => loadElaborationDraft('elaboration', undefined, schemaDigest) : undefined, loadDraftMaterial: draftProtocol ? schemaDigest => loadElaborationDraftMaterial('elaboration', undefined, schemaDigest) : undefined, seed: loadElaborationRepairSeed('elaboration', freezeElaborationInput(elaborationInput).inputDigest) ?? undefined, repairDiagnostics: loadElaborationRepairDiagnostics('elaboration', freezeElaborationInput(elaborationInput).inputDigest) ?? undefined })
+        const loadDraft = draftProtocol ? (schemaDigest: string): ElaborationDraft | null => {
+          const draft = loadElaborationDraft('elaboration', undefined, schemaDigest)
+          return draft && cacheDraft ? { ...draft, errors: [...draft.errors, ...cacheDraft.errors] } : draft
+        } : undefined
+        const result = partitions ? await elaborateSyncPartitions(elaborationInput, partitions, options.plan.version === 'sync-coordinator-v2' ? options.plan.partitionPolicy.maxParallel : 1, partitionCheckpoints, runner, view.composed) : await elaborate(elaborationInput, { runner, draft: cacheDraft, loadDraft, loadDraftMaterial: draftProtocol ? schemaDigest => loadElaborationDraftMaterial('elaboration', undefined, schemaDigest) : undefined, seed: loadElaborationRepairSeed('elaboration', freezeElaborationInput(elaborationInput).inputDigest) ?? undefined, repairDiagnostics: loadElaborationRepairDiagnostics('elaboration', freezeElaborationInput(elaborationInput).inputDigest) ?? undefined })
         const { contracts: _contracts, graph: _graph, coverage: _coverage, ...compact } = result
         elaboration = compact; saveStage(store, fence, 'elaboration', compact, !operation.baselineSelection ? { readSetDigest: operation.readSetDigest } : undefined, { composedTree: view.composed.tree, composedContentDigest: view.composed.contentDigest })
       }
@@ -1797,7 +1807,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         operation = store.expandContractScope(fence, { contractIds: scopeIds, flowIds, ...(paths ? { paths } : {}) }, p1Evidence)
         if (operation.baselineSelection) {
           const previousView = view
-          view = await readInput(operation.input, options.plan, operation.previousBaselinePair, operation.requestBlob, operation.baselineSelection, operation.scope.paths)
+          view = await readInput(operation.input, options.plan, operation.previousBaselinePair, operation.requestBlob, store.readBusinessBaselineSelection(operation.id), operation.scope.paths)
           store.bindComposedInput(fence, view.composed, { readSetDigest: view.readSetDigest })
           operation = store.readOperation(operation.id); attempt = store.readAttempt(attempt.id)
           if (previousView.composed.contentDigest !== view.composed.contentDigest || analysis && !analysisStageBinding(store, operation, analysis.analysis)) {
@@ -1825,7 +1835,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         const allowedGap = new Set([...elaboration.blockedStructureFindings, ...elaboration.rounds.flatMap(round => round.findings.filter(issue => ['unresolved-gap', 'unresolved-conflict'].includes(issue.code) && issue.itemId && accepted.graph.items.get(issue.itemId)?.kind === 'GAP'))].map(findingKey))
         const priorContext: NonNullable<import('./generation-types.js').GenerationInput['priorContext']>[number][] = []
         if (partitions && (retiredIds.length || (elaboration.nodeChanges ?? nodeChanges).length)) {
-          const pairs = [...new Map([...(operation.baselineSelection?.bindings.flatMap(binding => { const pair = 'bytePair' in binding ? binding.bytePair : binding.intentPair; return pair ? [pair] : [] }) ?? []), ...operation.previousBaselinePair ? [operation.previousBaselinePair] : []].map(pair => [pair.id, pair])).values()]
+          const pairs = [...new Map([...(store.readBusinessBaselineSelection(operation.id)?.bindings.flatMap(binding => { const pair = 'bytePair' in binding ? binding.bytePair : binding.intentPair; return pair ? [pair] : [] }) ?? []), ...operation.previousBaselinePair ? [operation.previousBaselinePair] : []].map(pair => [pair.id, pair])).values()]
           const snapshots = [...new Map([...pairs.flatMap(pair => [{ snapshot: pair.sourceInput, role: 'source_before' as const, pairId: pair.id }, { snapshot: pair.verifiedDelivery, role: 'verified_delivery' as const, pairId: pair.id }]), ...options.plan.version === 'sync-coordinator-v2' && options.plan.commitTrigger?.before ? [{ snapshot: options.plan.commitTrigger.before, role: 'source_before' as const }] : []].map(context => [`${context.role}:${context.snapshot.id}`, context])).values()]
           const obligations = unique(retirementBefore.contracts.filter(contract => retiredIds.some(id => contract.items.some(item => item.id === id)) || (elaboration.nodeChanges ?? nodeChanges).some(change => change.from.path === contract.path)).flatMap(contract => [contract.path, ...contract.code.map(anchor => anchor.split('#')[0]), ...contract.related.map(anchor => anchor.split('#')[0]), ...contract.items.filter(item => item.kind === 'AC').map(item => item.test.split('#')[0]), ...contract.items.flatMap(item => item.kind !== 'VERIFY' && item.source.kind === 'code' ? [item.source.ref.split('#')[0]] : [])]))
           for (const context of snapshots) {
@@ -1858,7 +1868,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           if (additions.length) {
             operation = store.expandContractScope(fence!, { paths: unique([...operation.scope.paths, ...additions]), contractIds: operation.scope.contractIds, flowIds: operation.scope.flowIds }, evidenceRef)
             const previousView = view
-            view = await readInput(operation.input, options.plan, operation.previousBaselinePair, operation.requestBlob, operation.baselineSelection, operation.scope.paths)
+            view = await readInput(operation.input, options.plan, operation.previousBaselinePair, operation.requestBlob, store.readBusinessBaselineSelection(operation.id), operation.scope.paths)
             if (view.composed.contentDigest !== previousView.composed.contentDigest) fail('implementation_plan_context_changed', '实现文件规划引入了尚未独审的真实上下文')
             store.bindComposedInput(fence!, view.composed, { readSetDigest: view.readSetDigest })
             operation = store.readOperation(operation.id)

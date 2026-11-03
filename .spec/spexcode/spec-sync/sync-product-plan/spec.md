@@ -14,6 +14,12 @@ P0至P5按完整需求交付，不以阶段演示、局部测试或可修改的�
 
 ## expanded spec
 
+完整 settled 私有交付尚未采纳时，用户可沿现有执行入口以新 requestId 和 retryOf 显式重验同输入。workspace_synced 与 awaiting_landing 均须当前 attempt 和全部真实 journal/receipt 完整结算、验证及覆盖原范围，无未决业务或资源，Source 身份与干净工作区/index/冻结 HEAD 未变，且真实交付尚未由 Source/canonical Git 采纳；不能仅由阶段或 false 投影授予资格。已采纳、部分交付、缺证据、漂移及第三方资源头推进拒绝，准入事务重新核父完整记录和交付证据。
+
+原 business selection、冻结 input/request/plan/readSet/scope 沿 retryOf 链保留，用于组合、目标 before、分析与细化；新操作的当前 selection 只保护 CAS，必须同资源集且仅含父本次 receipt 实际造成的文件/业务 ID/退役头推进，未写资源不能借父 receipt 推进。后续普通 failed→retry 仍沿最早业务基线，claim/fence/验证/交付保持新 CAS。旧 operation、attempt、原生会话、候选、journal/receipt、Git 分支与资源历史保留，不改旧阶段骗取重试。
+
+重验重新分析和 owner 投影、P1 及独立审查，旧 accepted P0/P1、generation/review/candidate 不复用；经原 owner/schema/source/Native/Git 终态认证的原 JSON 仅作未批准材料续修，不继承 ready/accept。省略 requested model 保持原选择，显式换模型沿既有 retry 规则，不引入 CLI 版本、baseURL 或模型白名单。预算配置和原真实计数不改，不自动借新操作延长内部修复；完整 V1–V4、可信运行、正常 Git hooks 与正式采纳仍需新证明，Source/Main 不自动前进。
+
 正式retryOf换模型或恢复其后暂停的同一操作时，未批准P0/P1草稿和精确后置质疑沿同输入/source、原意、policy、readSet、selection/scope及分区plan/owner的正式祖先链取源。原Native和Git/schema/ref按原operation/attempt认证，未认证新稿不遮蔽更早合格原稿；只将精确schema匹配的原JSON字节放入新seed，旧只读成功输出标为native_output临时材料，不继承ready/accept或回签旧失败。新分析及独审、当前操作预算与最终V1–V4/采纳门保持，schema选源回调仅在进程内，不新增DB版本。材料迁接沿原v6 worktree read/edit传输协议，不将无worktree旧frozen热升级；已认证Git稿命中后不再混入备选Native诊断或来源。review格式拒绝原文仅作审查诊断，业务稿仍绑定已认证generation。
 
 失败findings的原条目、路径与严重级别必须跨草稿检查点及实际续修caller保真，不能把同码同文问题压成无法定位的重复文字。已渲染候选的完整失败只沿认证原件作为诊断继续传递，不变成旧seed、原意或新授权；历史短errors原件不回写。

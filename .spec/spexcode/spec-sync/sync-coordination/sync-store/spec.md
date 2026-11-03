@@ -72,7 +72,7 @@ paused且尚无attempt的头已被合法消费后resume，claim可依据同op精
 
 接入payload纳入origin，primary/alias重放必须同origin且精确命中已存在new或旧legacy摘要；不重写既有operation摘要。sameInput归并仅相同origin，不能用Spec旧结果隐式执行code/initial等另一来源。派发地址按repositoryId稳定摘要分区，nextDispatch(repositoryId)读取该真实地址头，同仓库多worktree仍严格FIFO，跨仓库不互堵。
 
-readRetryEligibility(id)只读返回{eligible,reason?:{code,message}}真实事实，admit复用同事务门禁。仅failed/budget_exhausted或从未receipt的cancelled；旧operation所有历史resource必须removed、journals全部settled、无liveattempt/lease。retryOf绑定旧source物理身份、input、requestBlob、policy/readset/impact、scope、baseline与origin；完整复用未落地用户请求，只允许新显式ingress/rootCause、交付私有plan和执行budget/deadline。新operation记录retryOf，同retry ingress/payload重放幂等；原失败及原预算记录不改，不用自动事件重开。
+readRetryEligibility(id)只读返回{eligible,reason?:{code,message}}真实事实，admit复用同事务门禁。failed/budget_exhausted、从未receipt的cancelled，或下述认证完整未采纳的settled交付；旧operation所有历史resource必须removed、journals全部settled、无liveattempt/lease。retryOf绑定旧source物理身份、input、requestBlob、policy/readset/impact、scope、baseline与origin；完整复用未落地用户请求，只允许新显式ingress/rootCause、交付私有plan和执行budget/deadline。新operation记录retryOf，同retry ingress/payload重放幂等；原失败及原预算记录不改，不用自动事件重开。
 
 预算耗尽的未消费dispatch已无自动执行资格，作为stopped头由同事务精确消费，避免显式新retry在旧budget头之后永远阻塞；不将可修复failed阶段机械归为终态。
 
@@ -122,3 +122,5 @@ sync.history 请求采用固定输入、目标真实交付及完整成组差量�
 预算支持旧numeric有限对象及精确unlimited对象。无限operation保存deadlineAtMs=null，claim与reserveDispatch持续累计真实calls/attempts/repair失败，但不因总计数或总时间耗尽；recordBudgetExhaustion拒绝将无限操作伪标耗尽。自动前驱继承原budget及显式null期限，暂停/恢复、幂等、防回声不重置或另建预算。取消、物理控制、未结资源、lease过期、旧fence及交付门禁保持；有限maxRepairs=0继续禁止修复。
 
 SyncCheckpointRef可含typed artifacts，单次checkpoint在事务外校验wrapper及全部材料CAS后原子登记wrapper与保活引用；pinnedBlobRefs递归保留原resultRef、全部JSON材料及原始raw。旧flat refs不改写或删除，不以role授予stage权。
+
+完整未采纳 settled 交付的正式 retryOf 先在事务外认证真实 Git 与全部 settledReceipt，准入事务再核父完整记录及 journal 摘要未变、历史资源已清空、当前 attempt 已结算。selection 只允许同资源集逐项保持原 binding 或推进为该父实际 journal 的 source BaselinePair；pair 的原输入、receipt 与覆盖必须逐项一致，第三方推进拒绝。子保存当前 CAS selection，业务组合及阶段仍沿 retryOf 派生的原 selection，bindComposedInput 仅接受该认证业务摘要；claim/fence/verification/apply 始终核子当前 CAS。没有新持久字段，不改旧记录或资源头。
