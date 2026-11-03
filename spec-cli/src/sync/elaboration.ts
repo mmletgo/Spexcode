@@ -29,9 +29,12 @@ function elaborationDraftBinding(input: ElaborationInput, schema: Record<string,
   return { ownerDigest, sourceInputId: input.historyInput?.id ?? '', schemaDigest: digest(schema), path: `.spex-sync-drafts/${ownerDigest}.json` }
 }
 
-/** 冷接受只重核原source tag的Git草稿和最终已审候选；旧无tag原件不补协议。 */
-export function verifyElaborationDraftCache(input: ElaborationInput, result: Pick<ElaborationResult, 'rounds' | 'inputDigest' | 'candidateDigest' | 'changes' | 'structurePassed' | 'reviewPassed'>, sourceTagged = false): void {
-  if (!sourceTagged && !result.rounds.some(round => round.draft)) return
+/** 冷接受重核原件及本区范围；范围失效仅撤当前复用资格，不改变旧批准或草稿身份。 */
+export function verifyElaborationDraftCache(input: ElaborationInput, result: Pick<ElaborationResult, 'rounds' | 'inputDigest' | 'candidateDigest' | 'changes' | 'structurePassed' | 'reviewPassed'>, sourceTagged = false): boolean {
+  if (!sourceTagged && !result.rounds.some(round => round.draft)) return result.changes.every(change => {
+    const target = input.targets.find(target => target.nodeId === change.nodeId && target.path === change.path)
+    return !target || targetHasCurrentChanges(input, target) || change.source === target.source
+  })
   if (!input.worktree || !input.historyInput || result.inputDigest !== freezeElaborationInput(input).inputDigest) throw new Error('已审草稿缓存不匹配当前完整局部输入/source')
   const schema = elaborationSchema(input, { purpose: input.phase === 'interface_seed' ? 'interface_seed' : 'generation' }), binding = elaborationDraftBinding(input, schema)
   let lastSource: string | undefined
@@ -40,7 +43,7 @@ export function verifyElaborationDraftCache(input: ElaborationInput, result: Pic
     const source = readStageDraft(input.historyInput.source.commonDir, round.draft, binding)
     if (round === result.rounds.at(-1)) lastSource = source
   }
-  if (!result.structurePassed || !result.reviewPassed) return
+  if (!result.structurePassed || !result.reviewPassed) return true
   const round = result.rounds.at(-1)!
   if (lastSource === undefined || !round.candidate) throw new Error('原source已标记草稿协议的accept缺少最终draft/candidate')
   const output: unknown = JSON.parse(lastSource), errors = outputErrors(output, schema)
@@ -50,6 +53,7 @@ export function verifyElaborationDraftCache(input: ElaborationInput, result: Pic
   const candidate = renderElaboration(input, generated, result.inputDigest), candidateDigest = digest(candidate)
   if (digest(round.candidate) !== candidateDigest || round.candidateDigest !== candidateDigest || result.candidateDigest !== candidateDigest
     || digest(result.changes) !== digest(candidate.changes.map(change => ({ ...change, contentDigest: elaborationDigest(change.source) })))) throw new Error('已审候选并非当前Git草稿正文的真实渲染结果')
+  return elaborationScopeErrors(input, generated).length === 0
 }
 const specPath = (path: string): boolean => path.startsWith('.spec/') && path.endsWith('/spec.md') && posix.normalize(path) === path && !path.includes('\\')
 // 未决事实保留为显式业务门禁；不能要求构建者编造事实来消除检查错误。
