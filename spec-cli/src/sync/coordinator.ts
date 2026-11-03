@@ -275,17 +275,6 @@ function retryDraftSources(store: SyncStore, operation: SyncOperation, attemptNu
   return sources
 }
 
-/** 解包原冻结运输正文，仍由既有Native冷验核完整请求摘要。 */
-function originalNativeRequest(native: NativeRunPlan, policyDigest: string): ElaborationSessionRequest {
-  const { frozenContext, readerRuntime: _runtime, ...request } = native.request
-  if (!frozenContext) return request
-  assertFrozenBinding(frozenContext, { requestKey: request.requestKey, inputDigest: request.inputDigest, attemptId: native.attemptId, policyDigest })
-  const manifest = readFrozenManifest(frozenContext), task = manifest.entries[0]
-  if (manifest.entries.length !== 1 || task.id !== 'task' || task.kind !== 'utf8' || !task.required) fail('draft_native_binding', '原草稿Native缺少唯一冻结任务正文')
-  const body = JSON.parse(readFrozenRange(frozenContext, { contextDigest: frozenContext.contextDigest, entryId: task.id, startByte: 0, endByte: task.byteLength }).response.contentItems[0].text) as { text: string }
-  return { ...request, prompt: body.text }
-}
-
 /** Git保活本身不证明模型完成；未认证的Native稿不能遮蔽更早合格原稿。 */
 function authenticatedDraftResult(store: SyncStore, owner: SyncOperation, prior: SyncAttempt, key: string, purpose: string, draft?: ElaborationDraft): { result?: ElaborationSessionResult; request?: ElaborationSessionRequest } | null {
   const dispatch = prior.dispatchPlans.find(dispatch => dispatch.key === key && dispatch.purpose === purpose)
@@ -295,13 +284,14 @@ function authenticatedDraftResult(store: SyncStore, owner: SyncOperation, prior:
   if (resource) {
     const native = JSON.parse(readEvidence(owner.input.source.commonDir, resource.plan.planBlob).toString()) as NativeRunPlan
     const checkpoint = JSON.parse(readEvidence(owner.input.source.commonDir, resource.checkpointRef).toString()) as NativeRunCheckpoint
+    if (native.request.worktree?.mode !== (draft ? 'edit' : 'read') || native.request.frozenContext) return null
     if (!checkpoint.result || checkpoint.nativeState !== 'completed') {
       const failure = checkpoint.failure, packet = failure?.rejectedOutput, witness = failure?.failedWorktree
       if (!draft || !failure || !packet || !witness || !reviewFormatRepairCodes.has(failure.code) || checkpoint.phase !== 'removed' || checkpoint.stop?.nativeStopped !== true) return null
       const state = authenticateNativeRejectedFinal(store, owner, prior, key, { ...failure, sessionId: checkpoint.session.sessionId, threadId: checkpoint.session.threadId ?? undefined, turnId: checkpoint.session.turnId ?? undefined }, packet)
       return state.cancellation?.nativeStopped === true && canonical({ baseCommit: witness.baseCommit, tree: witness.baseTree, mode: 'edit' }) === canonical(draft.seed) && witness.headCommit === draft.resultCommit && witness.tree === draft.resultTree ? {} : null
     }
-    request = originalNativeRequest(native, owner.policyDigest)
+    request = native.request
     const trace = { purpose, sessionId: dispatch.session.sessionId, threadId: dispatch.session.threadId, turnId: dispatch.session.turnId, inputDigest: request.inputDigest, resultDigest: checkpoint.result.resultDigest }
     result = completedNativeStageResult(store, owner, prior, request, trace, checkpoint.result.output, '')
   } else {
@@ -1214,8 +1204,10 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           const source = draftMaterialStage(owner, prior, key), round = source?.result.rounds.at(-1)
           if (!source || !round || source.result.phase === 'partitioned_final' || source.result.partitionBinding?.partitionId !== binding?.partitionId) continue
           if (round.draft || stage<{ version: string }>(store, owner, prior, 'elaboration-draft-protocol')?.version === 'elaboration-draft-v1') continue
+          const rejectedGeneration = round.rejectedOutput?.purpose === 'elaboration_generate' ? round.rejectedOutput : undefined
+          const rejectedReview = round.rejectedOutput?.purpose === 'elaboration_review' ? round.rejectedOutput : undefined
           const version = (round.output as { version?: unknown } | null)?.version
-          const text = round.rejectedOutput?.text ?? (['elaboration-rows-v1', 'elaboration-rows-v2', 'elaboration-target-rows-v3'].includes(String(version)) ? JSON.stringify(round.output) : undefined)
+          const text = rejectedGeneration?.text ?? (['elaboration-rows-v1', 'elaboration-rows-v2', 'elaboration-target-rows-v3'].includes(String(version)) ? JSON.stringify(round.output) : undefined)
           if (text === undefined) continue
           let nativeMaterial: { nativePlanRef: BlobRef; checkpointRef: BlobRef; sourceKind: 'native_output' | 'native_rejected' } | undefined
           if (owner.id !== operation.id) {
@@ -1223,12 +1215,16 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
             const requestKey = `sync:${prior.id}:elaborate${binding ? `:partition:${binding.partitionId}` : ''}:${round.index}:elaboration_generate`, resource = store.findResource(prior.id, requestKey)
             if (!resource) continue
             const native = JSON.parse(readEvidence(operation.input.source.commonDir, resource.plan.planBlob).toString()) as NativeRunPlan
-            if (contentHash(JSON.stringify(native.request.schema)) !== schemaDigest || native.request.worktree?.mode !== 'read') continue
-            if (round.rejectedOutput ? !round.rejectedOutput.ref : !authenticatedDraftResult(store, owner, prior, requestKey, 'elaboration_generate') || canonical(round.output) !== canonical(JSON.parse(readEvidence(operation.input.source.commonDir, resource.checkpointRef).toString()).result.output)) continue
-            nativeMaterial = { nativePlanRef: resource.plan.planBlob, checkpointRef: resource.checkpointRef, sourceKind: round.rejectedOutput ? 'native_rejected' : 'native_output' }
+            if (contentHash(JSON.stringify(native.request.schema)) !== schemaDigest || native.request.worktree?.mode !== 'read' || native.request.frozenContext || native.request.purpose !== 'elaboration_generate') continue
+            if (rejectedGeneration) { if (!rejectedGeneration.ref) continue }
+            else {
+              const authenticated = authenticatedDraftResult(store, owner, prior, requestKey, 'elaboration_generate')
+              if (!authenticated?.result || canonical(round.output) !== canonical(authenticated.result.output)) continue
+            }
+            nativeMaterial = { nativePlanRef: resource.plan.planBlob, checkpointRef: resource.checkpointRef, sourceKind: rejectedGeneration ? 'native_rejected' : 'native_output' }
           }
           saveStage(store, fence!, `${key}:draft-material-provenance`, { fromOperationId: owner.id, fromAttemptId: prior.id, resultRef: source.resultRef, ...nativeMaterial })
-          return { source: text, ...(owner.id !== operation.id && !round.rejectedOutput ? { sourceKind: 'native_output' as const } : {}), errors: [...round.findings, ...round.review?.findings.map(({ code, message, evidence, decision }) => ({ code, message: `${message}; ${evidence}; ${decision}` })) ?? [], ...source.result.failure ? [{ code: source.result.failure.code, message: source.result.failure.message }] : []] }
+          return { source: text, ...(owner.id !== operation.id && !rejectedGeneration ? { sourceKind: 'native_output' as const } : {}), errors: [...round.findings, ...(rejectedReview ? [{ code: 'elaboration_review_rejected_output', message: JSON.stringify({ ...rejectedReview, role: 'review_format_diagnostic' }) }] : []), ...round.review?.findings.map(({ code, message, evidence, decision }) => ({ code, message: `${message}; ${evidence}; ${decision}` })) ?? [], ...source.result.failure ? [{ code: source.result.failure.code, message: source.result.failure.message }] : []] }
         }
         return null
       }
@@ -1345,10 +1341,11 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           if (!resource || resource.phase !== 'removed' || resource.plan.inputId !== operation.input.id) continue
           const native = JSON.parse(readEvidence(operation.input.source.commonDir, resource.plan.planBlob).toString()) as NativeRunPlan
           const checkpoint = JSON.parse(readEvidence(operation.input.source.commonDir, resource.checkpointRef).toString()) as NativeRunCheckpoint
+          if (native.request.worktree?.mode !== 'read' || native.request.frozenContext) continue
           const wholeAnalysis = purpose === 'code_behavior_analyze' && key === 'analysis' ? stage<CodeBehaviorAnalysis>(store, owner, prior, key) : null
           if (wholeAnalysis && !analysisStageBinding(store, owner, wholeAnalysis)) continue
           const priorAnalysis = wholeAnalysis ? { result: wholeAnalysis, resultRef: writeEvidence(operation.input.source.commonDir, wholeAnalysis) } : purpose === 'code_behavior_analyze' ? partitionStage<CodeBehaviorAnalysis>(store, owner, prior, key) : null
-          const trace = priorAnalysis?.result.traces.find(trace => trace.purpose === purpose), originalRequest = originalNativeRequest(native, owner.policyDigest)
+          const trace = priorAnalysis?.result.traces.find(trace => trace.purpose === purpose), originalRequest = native.request
           if (priorAnalysis && trace && (owner.id !== operation.id || postGateReview.some(diagnostic => diagnostic.analysisRef.sha256 === priorAnalysis.resultRef.sha256)) && native.request.worktree?.mode === 'read' && contentHash(JSON.stringify(native.request.schema)) === schemaDigest && canonical(native.request.worktree) === canonical(request.worktree) && behaviorMaterialTask(originalRequest.prompt) === behaviorMaterialTask(request.prompt) && checkpoint.result && completedNativeStageResult(store, owner, prior, originalRequest, trace, checkpoint.result.output, '')) {
             saveStage(store, fence!, `${key}:post-gate-native-material-provenance`, { fromOperationId: owner.id, fromAttemptId: prior.id, analysisRef: priorAnalysis.resultRef, nativePlanRef: resource.plan.planBlob, checkpointRef: resource.checkpointRef, originalInputDigest: native.request.inputDigest, currentInputDigest: inputDigest })
             return { source: JSON.stringify(checkpoint.result.output), errors: [], sourceKind: 'native_output' }

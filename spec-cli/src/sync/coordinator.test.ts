@@ -4851,7 +4851,7 @@ for (const businessRepair of [false, true]) for (const legacyMaterial of [false,
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
 })
 
-for (const partitioned of [false, true]) for (const legacyP0 of partitioned ? [false] : [false, true]) for (const legacyP1 of !partitioned && legacyP0 ? [false, true] : [false]) for (const unprovenAncestor of partitioned ? [false, true] : [false]) for (const bindingMismatch of partitioned && !unprovenAncestor ? ['none', 'schema', 'owner', 'plan', 'readset', 'p1-schema', 'p1-owner'] as const : ['none'] as const) test(`正式retryOf换模型并SQLite重启保留P0/P1原Git稿与八项后置发现 ${partitioned ? 'partition' : 'whole'} unproven=${unprovenAncestor} legacyP0=${legacyP0} legacyP1=${legacyP1} binding=${bindingMismatch}`, async t => {
+for (const partitioned of [false, true]) for (const legacyP0 of partitioned ? [false] : [false, true]) for (const legacyP1 of !partitioned && legacyP0 ? [false, true] : [false]) for (const mixedAncestors of legacyP1 ? [false, true] : [false]) for (const reviewRejected of legacyP1 && !mixedAncestors ? [false, true] : [false]) for (const unprovenAncestor of partitioned ? [false, true] : [false]) for (const bindingMismatch of partitioned && !unprovenAncestor ? ['none', 'schema', 'owner', 'plan', 'readset', 'p1-schema', 'p1-owner'] as const : ['none'] as const) test(`正式retryOf换模型并SQLite重启保留P0/P1原Git稿与八项后置发现 ${partitioned ? 'partition' : 'whole'} unproven=${unprovenAncestor} legacyP0=${legacyP0} legacyP1=${legacyP1} mixed=${mixedAncestors} reviewRejected=${reviewRejected} binding=${bindingMismatch}`, async t => {
   const plan = partitioned ? { version: 'sync-coordinator-v2' as const, direction: 'code_to_spec' as const, sourcePaths: ['src'], writePaths: ['.spec'], partitionPolicy: { version: 'sync-partition-policy-v1' as const, maxReadBytes: 524288, maxParallel: 1 }, commitTrigger: { before: null, paths: ['src/export.js'] } } : {}
   const f = await fixture(t, { maxAttempts: 1, maxCalls: 12, maxRepairs: 0, timeoutMs: 120_000 }, false, original, 'project', original, { ...plan, agentWorkflow: 'native-worktree-v1' }, undefined, 'code', 'zcode:fixture/old', partitioned)
   if (legacyP0) {
@@ -4860,11 +4860,14 @@ for (const partitioned of [false, true]) for (const legacyP0 of partitioned ? [f
     if (legacyP1) f.store.reserveDispatch(claim.fence, { key: `sync:${claim.attempt.id}:legacy-read-p1`, purpose: 'elaboration_generate', requestDigest: contentHash('既有只读P1请求不补协议') })
   }
   let store = f.store, active = f.operation, retry = false, unproven = false
+  let reviewSeedSha: string | undefined
+  let mixedLabelSeen: boolean | undefined, latestDraft: { text: string; oid: string; schemaDigest: string } | undefined
   const drafts = new Map<string, { text: string; oid: string; schema: Buffer }>(), calls: string[] = []
   const ids = [...Array.from({ length: 6 }, (_, index) => `RULE-EXPORT-0${index + 1}`), 'STEP-EXPORT-01', 'STEP-EXPORT-02']
   f.options.runner = async request => {
     calls.push(`${retry ? 'retry' : 'old'}:${request.purpose}`)
     const attempt = store.readAttempt(store.readOperation(active.id).currentAttemptId!), seed = request.worktree!
+    if (request.purpose === 'elaboration_review' && !retry && reviewRejected) return rejectedReviewFixture(f, request, '{ORIGINAL_REVIEW_REJECTED_FINAL', '原独审JSON语法错误，不是业务行')
     if (request.purpose === 'elaboration_review') throw Object.assign(new Error('新P1已基于原稿通过程序门，在新独审入口停止'), { code: 'unsupported' })
     const path = /草稿文件=([^\s；]+)/.exec(request.prompt)?.[1], workspace = join(f.parent, `retry-lineage-${calls.length}`)
     f.git('worktree', 'add', '--detach', workspace, seed.baseCommit)
@@ -4882,15 +4885,23 @@ for (const partitioned of [false, true]) for (const legacyP0 of partitioned ? [f
         assert.equal(existsSync(join(workspace, path)), false, 'schema/plan/readset不匹配不得把旧JSON带到新seed')
         throw Object.assign(new Error('绑定反例已核新seed无旧材料'), { code: 'unsupported' })
       }
-      const old = drafts.get(request.purpose)!
-      assert.equal(readFileSync(join(workspace, path), 'utf8'), old.text, '正式retry必须overlay祖先原JSON，不能从零创建')
-      assert.equal(readTree(f.input.source.commonDir, seed.tree).find(entry => entry.path === path)!.oid, old.oid)
+      if (reviewRejected && request.purpose === 'elaboration_generate') reviewSeedSha = contentHash(readFileSync(join(workspace, path)))
+      const old = drafts.get(request.purpose)!, newestGit = mixedAncestors && attempt.number === 2 && request.purpose === 'elaboration_generate'
+      if (newestGit) {
+        mixedLabelSeen = /旧只读Native成功结构化输出/.test(request.prompt)
+        assert.equal(mixedLabelSeen, false, '较新Git稿不能混入更早Native材料标签')
+        assert.match(request.prompt, /output_json/); assert.doesNotMatch(request.prompt, /materialErrors|refactor_business_meaning_changed/)
+        assert.equal(readTree(f.input.source.commonDir, seed.tree).find(entry => entry.path === path)!.oid, latestDraft!.oid)
+        assert.equal(contentHash(readFileSync(join(workspace, path.replace(/\.json$/, '.schema.json')))), latestDraft!.schemaDigest)
+      }
+      assert.equal(readFileSync(join(workspace, path), 'utf8'), newestGit ? '{NEWER_NATIVE_AUTHENTICATED_GIT_JSON_ERROR' : old.text, '正式retry必须overlay祖先原JSON，不能从零创建')
+      if (!newestGit) assert.equal(readTree(f.input.source.commonDir, seed.tree).find(entry => entry.path === path)!.oid, old.oid)
       assert.deepEqual(readFileSync(join(workspace, path.replace(/\.json$/, '.schema.json'))), old.schema)
       if (request.purpose === 'code_behavior_analyze') {
         if (legacyP0) assert.match(request.prompt, /旧只读Native成功结构化输出.*不是历史Git草稿/)
-        assert.equal(task.postGateReview?.length, 1)
-        assert.deepEqual(task.postGateReview![0].findings.map(item => item.finding), rejectedFindings)
-      } else { if (legacyP1) assert.match(request.prompt, /旧只读Native成功结构化输出.*不是历史Git草稿/); for (const finding of rejectedFindings) assert.ok(request.prompt.includes(JSON.stringify(finding)), finding.itemId) }
+        assert.equal(task.postGateReview?.length ?? 0, reviewRejected ? 0 : 1)
+        if (!reviewRejected) assert.deepEqual(task.postGateReview![0].findings.map(item => item.finding), rejectedFindings)
+      } else if (!newestGit) { if (legacyP1) assert.match(request.prompt, /旧只读Native成功结构化输出.*不是历史Git草稿/); for (const finding of rejectedFindings) assert.ok(request.prompt.includes(JSON.stringify(finding)), finding.itemId); if (reviewRejected) { assert.match(request.prompt, /elaboration_review_rejected_output/); assert.match(request.prompt, /ORIGINAL_REVIEW_REJECTED_FINAL/); assert.match(request.prompt, /原独审JSON语法错误，不是业务行/) } }
     }
     let output: unknown
     if (request.purpose === 'code_behavior_analyze') output = { changes: task.requiredChangedPaths.map(path => ({ kind: 'refactor', paths: [path], affectedIds: ids, ruleIds: ids.filter(id => id.startsWith('RULE')), originalIntent: '保全部原业务行', previousBehavior: '原导出语义', sourceBehavior: '实现内部编辑', deliveryBehavior: '原导出语义', evidence: path, counterexample: '不改权限与状态事件' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
@@ -4899,13 +4910,13 @@ for (const partitioned of [false, true]) for (const legacyP0 of partitioned ? [f
       output = { inputDigest: request.inputDigest, analysisDigest: reviewed.analysisDigest, verdict: 'accept', checkedPaths: task.requiredChangedPaths, checkedChangeIds: reviewed.analysis.changes.map(change => change.id), findings: [] }
     } else {
       const changed = rows(original)
-      if (!retry) {
+      if (!retry && !reviewRejected) {
         for (const row of changed.changes[0].tables.RULE) row.basis = `未经批准的表示漂移 ${row.id}`
         for (const row of changed.changes[0].tables.STEP.slice(0, 2)) row.action = `未经批准的动作漂移 ${row.id}`
       }
       output = adaptElaborationNativeOutput(request, changed)
     }
-    const text = JSON.stringify(output)
+    const text = mixedAncestors && retry && attempt.number === 1 && request.purpose === 'elaboration_generate' ? '{NEWER_NATIVE_AUTHENTICATED_GIT_JSON_ERROR' : JSON.stringify(output)
     if (!path) {
       assert.equal(legacyP0, true); assert.equal(retry, false)
       drafts.set(request.purpose, { text, oid: execFileSync('git', ['hash-object', '--stdin'], { input: text, encoding: 'utf8' }).trim(), schema: Buffer.from(JSON.stringify(request.schema)) })
@@ -4923,16 +4934,17 @@ for (const partitioned of [false, true]) for (const legacyP0 of partitioned ? [f
     mkdirSync(join(workspace, path, '..'), { recursive: true }); writeFileSync(join(workspace, path), text)
     execFileSync('git', ['-C', workspace, 'add', path], { stdio: 'pipe' }); execFileSync('git', ['-C', workspace, 'commit', '--allow-empty', '-m', 'controlled retry draft'], { stdio: 'pipe' })
     if (!retry) drafts.set(request.purpose, { text, oid: execFileSync('git', ['-C', workspace, 'rev-parse', `HEAD:${path}`], { encoding: 'utf8' }).trim(), schema: readFileSync(join(workspace, path.replace(/\.json$/, '.schema.json'))) })
+    if (mixedAncestors && retry && attempt.number === 1 && request.purpose === 'elaboration_generate') latestDraft = { text, oid: execFileSync('git', ['-C', workspace, 'rev-parse', `HEAD:${path}`], { encoding: 'utf8' }).trim(), schemaDigest: contentHash(readFileSync(join(workspace, path.replace(/\.json$/, '.schema.json')))) }
     const dispatch = attempt.dispatchPlans.find(dispatch => dispatch.key === request.requestKey)!, receipt = { summary: '受控Native真实Git稿' }
     return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `retry-${request.requestKey}`, turnId: 'turn', output: receipt, resultDigest: contentHash(JSON.stringify(receipt)), worktree: nativeWorktreeResult(workspace, seed) }
   }
   let rejectedFindings: import('@spexcode/spec-core/contracts').ContractFinding[] = []
   await runSyncOperation(store, active.id, f.options)
   const oldAttempt = store.listAttempts(active.id)[0], oldOperation = store.readOperation(active.id)
-  const rejected = oldAttempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()) as { stage: string; resultRef: { sha256: string } }).filter(entry => entry.stage === 'elaboration' || entry.stage.endsWith(':elaboration')).map(entry => JSON.parse(readEvidence(f.input.source.commonDir, entry.resultRef).toString()) as ElaborationResult).find(result => result.rounds.at(-1)?.findings.length)!
+  const rejected = oldAttempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()) as { stage: string; resultRef: { sha256: string } }).filter(entry => entry.stage === 'elaboration' || entry.stage.endsWith(':elaboration')).map(entry => JSON.parse(readEvidence(f.input.source.commonDir, entry.resultRef).toString()) as ElaborationResult).find(result => result.rounds.at(-1)?.findings.length || reviewRejected && result.failure)!
   assert.ok(rejected, JSON.stringify({ failure: oldAttempt.failure, calls }))
   rejectedFindings = rejected.rounds.at(-1)!.findings.filter(finding => finding.code === 'refactor_business_meaning_changed')
-  assert.equal(rejectedFindings.length, 8)
+  assert.equal(rejectedFindings.length, reviewRejected ? 0 : 8)
   let oldBytes = JSON.stringify({ operation: oldOperation, attempts: store.listAttempts(active.id), resources: oldAttempt.dispatchPlans.map(dispatch => store.findResource(oldAttempt.id, dispatch.key)) })
   const originalRefs = oldAttempt.checkpointRefs.map(ref => ({ ref, bytes: readEvidence(f.input.source.commonDir, ref) }))
   if (bindingMismatch !== 'none') {
@@ -4961,7 +4973,7 @@ for (const partitioned of [false, true]) for (const legacyP0 of partitioned ? [f
   f.closeForRestart()
   const protocol = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => protocol.close())
   store = new SyncStore(protocol, { readBlob: ref => readEvidence(f.input.source.commonDir, ref) }); f.useStore(store)
-  active = store.admitAndEnqueue(await prepareSyncAdmission(f.input, f.plan, { ingressKey: 'official-retry-lineage', rootCauseId: 'official-retry-lineage', retryOf: active.id, model: 'claude:default', origin: oldOperation.origin, budget: unprovenAncestor ? { ...oldOperation.budget, maxAttempts: 2, maxRepairs: 1 } : oldOperation.budget, managedRoot: f.managedRoot, ...(oldOperation.baselineSelection ? { baselineSelection: oldOperation.baselineSelection, executionScope: oldOperation.scope, impactDigest: oldOperation.impactDigest } : {}) }))
+  active = store.admitAndEnqueue(await prepareSyncAdmission(f.input, f.plan, { ingressKey: 'official-retry-lineage', rootCauseId: 'official-retry-lineage', retryOf: active.id, model: 'claude:default', origin: oldOperation.origin, budget: unprovenAncestor || mixedAncestors ? { ...oldOperation.budget, maxAttempts: 2, maxRepairs: 1 } : oldOperation.budget, managedRoot: f.managedRoot, ...(oldOperation.baselineSelection ? { baselineSelection: oldOperation.baselineSelection, executionScope: oldOperation.scope, impactDigest: oldOperation.impactDigest } : {}) }))
   if (partitioned) active = store.ackDispatch(f.input.source.repositoryId, active.dispatchMessageId)
   if (unprovenAncestor) {
     f.useOperation(active); unproven = true
@@ -4975,9 +4987,27 @@ for (const partitioned of [false, true]) for (const legacyP0 of partitioned ? [f
   oldBytes = JSON.stringify({ operation: store.readOperation(oldOperation.id), attempts: store.listAttempts(oldOperation.id), resources: oldAttempt.dispatchPlans.map(dispatch => store.findResource(oldAttempt.id, dispatch.key)) })
   f.useOperation(active); retry = true
   const result = await runSyncOperation(store, active.id, f.options)
-  assert.deepEqual(calls.filter(call => call.startsWith('retry:')), bindingMismatch === 'owner' || bindingMismatch.startsWith('p1-') ? [] : bindingMismatch !== 'none' ? ['retry:code_behavior_analyze'] : ['retry:code_behavior_analyze', 'retry:code_behavior_review', 'retry:elaboration_generate', 'retry:elaboration_review'], JSON.stringify({ failure: result.failure, phase: result.operation.phase }))
+  if (reviewRejected) assert.equal(reviewSeedSha, contentHash(drafts.get('elaboration_generate')!.text), 'review拒绝final不得冒充generation业务行原稿')
+  if (mixedAncestors) assert.equal(mixedLabelSeen, false, '较新Git稿不得触发更早Native材料的提示、诊断或provenance')
+  assert.deepEqual(calls.filter(call => call.startsWith('retry:')), mixedAncestors ? ['retry:code_behavior_analyze', 'retry:code_behavior_review', 'retry:elaboration_generate', 'retry:elaboration_generate', 'retry:elaboration_review'] : bindingMismatch === 'owner' || bindingMismatch.startsWith('p1-') ? [] : bindingMismatch !== 'none' ? ['retry:code_behavior_analyze'] : ['retry:code_behavior_analyze', 'retry:code_behavior_review', 'retry:elaboration_generate', 'retry:elaboration_review'], JSON.stringify({ failure: result.failure, phase: result.operation.phase }))
   if (bindingMismatch === 'owner' || bindingMismatch === 'p1-owner') assert.match(result.failure!.message, /草稿owner\/schema\/path或保活ref不匹配/)
   if (bindingMismatch === 'p1-schema') assert.match(result.failure!.message, /草稿seed没有精确只读schema/)
+  if (reviewRejected) {
+    const current = store.listAttempts(active.id)[0], wrapper = current.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(wrapper => wrapper.stage === 'elaboration:draft-material-provenance')
+    const provenance = JSON.parse(readEvidence(f.input.source.commonDir, wrapper.resultRef).toString())
+    const generation = oldAttempt.dispatchPlans.filter(dispatch => dispatch.purpose === 'elaboration_generate').map(dispatch => store.findResource(oldAttempt.id, dispatch.key)).find(Boolean)!
+    const review = oldAttempt.dispatchPlans.filter(dispatch => dispatch.purpose === 'elaboration_review').map(dispatch => store.findResource(oldAttempt.id, dispatch.key)).find(Boolean)!
+    assert.equal(provenance.sourceKind, 'native_output'); assert.equal(provenance.fromOperationId, oldOperation.id)
+    assert.equal(provenance.nativePlanRef.sha256, generation.plan.planBlob.sha256); assert.equal(provenance.checkpointRef.sha256, generation.checkpointRef.sha256)
+    assert.notEqual(provenance.nativePlanRef.sha256, review.plan.planBlob.sha256)
+  }
+  if (mixedAncestors) {
+    const attempts = store.listAttempts(active.id), wrappers = attempts[1].checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
+    assert.equal(wrappers.some(wrapper => wrapper.stage === 'elaboration:draft-material-provenance'), false)
+    const wrapper = wrappers.find(wrapper => wrapper.stage === 'elaboration:draft-provenance'), provenance = JSON.parse(readEvidence(f.input.source.commonDir, wrapper.resultRef).toString())
+    assert.equal(provenance.fromOperationId, active.id); assert.equal(provenance.fromAttemptId, attempts[0].id); assert.equal(provenance.oid, latestDraft!.oid)
+    assert.equal('sourceKind' in provenance, false); assert.equal('nativePlanRef' in provenance, false); assert.equal('checkpointRef' in provenance, false)
+  }
   assert.equal(JSON.stringify({ operation: store.readOperation(oldOperation.id), attempts: store.listAttempts(oldOperation.id), resources: oldAttempt.dispatchPlans.map(dispatch => store.findResource(oldAttempt.id, dispatch.key)) }), oldBytes)
   for (const original of originalRefs) assert.deepEqual(readEvidence(f.input.source.commonDir, original.ref), original.bytes)
   if (process.env.SPEX_RETRY_DRAFT_EVIDENCE_DIR) {
