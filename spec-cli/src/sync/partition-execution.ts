@@ -1,3 +1,4 @@
+import { setImmediate as yieldToControl } from 'node:timers/promises'
 import { stageWorktree, STAGE_READING_INSTRUCTIONS } from './stage-worktree.js'
 import { posix } from 'node:path'
 import { contractReferences, parseContract, parseParts } from '@spexcode/spec-core/contracts'
@@ -149,6 +150,7 @@ export async function mapSyncPartitions<T, R>(items: readonly T[], maxParallel: 
       const index = next++
       try { results[index] = await run(items[index], index) }
       catch (error) { if (!stopped) failure = error; stopped = true }
+      await yieldToControl()
     }
   }))
   if (stopped) throw failure

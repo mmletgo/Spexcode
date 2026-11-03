@@ -4,10 +4,12 @@
 - Dashboard 保存 Spec 立即进入 spec→code；外部文件保存/index变化只观察，Git 提交冻结 HEAD 后才派发。已采纳的真实同步发布先消费为基线，避免回声或污染下次提交方向。
 - code→spec 只装配已审 Spec，source/test 的 Git path、mode、OID 与 absence 必须不变；不能调用代码生成器修绿验收。
 - 分区复用 partitioning/partition-execution 的唯一计划，共用 operation、fence、预算与最终 candidate/journal/receipt。任务只交付变更 Spec、相关接口和明确目标；Agent 在独立 worktree 自由读取，不以分块读取或逐字消费证明作为同步门禁。
+- 共享分区调度每项结束均须真正让出事件循环，缓存、末项与失败亦然；让原心跳与控制运行，不延长租约或弱化fence。
 - 每阶段绑定真实 seed commit/tree：分析使用 composed，细化包含已审祖先，构建包含已审 Spec，独审使用实际候选。缓存同时核验实际可见 tree；不能只传原 HEAD 而漏掉受控 Spec 修改，也不能混入提交后的 index/WIP。
 - 实现 Agent 在工作树真实修改、测试并正常提交；候选从实际 Git 对象差量导入。程序检查写范围、CAS、原测试和契约演进，生成摘要或自报补丁不能替代实际修改。
 - 模型临时业务行由 `CONTRACT_COLUMNS` 渲染唯一 Markdown；raw/摘要由程序复制，JSON 仅是执行证据。
 - 生成和独立评审使用不同会话。输入、候选和检查结果均按内容摘要绑定；未决 GAP 只阻塞依赖闭包。
+- P1独审共用生成侧owner范围；仅要求冻结owner改写的repair或未知ID绑定须给具体拒因重审。原JSON/Git稿、候选与原Native生成身份冷验相同后只续独审；域内语义repair仍续生成，旧请求字段不追补。
 - 状态派发 STEP 显式关联实际 TR；next→TR 是依赖，next→STEP/STATE 仍为导航，独立审查核对派发集合与步骤声明范围。
 - `readyIds` 是声明级可推进；完整流程使用 `readyFlowIds`，`blockedFlows` 解释受阻步骤/GAP，不向独立子项回传父阻塞。
 - 普通无冲突实现约定用 code 来源沿用；GAP 仅承载重大业务未知/意图冲突。内部已结算 seed 只作诊断，新请求/完整独立审查必须重新绑定，不能升格为 raw 或事实。
