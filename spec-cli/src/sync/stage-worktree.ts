@@ -82,7 +82,7 @@ export function captureStageDraft(commonDir: string, seed: StageWorktree, result
   if (seed.mode !== 'edit' || actual.headCommit === seed.baseCommit || !entry || entry.mode !== '100644'
     || binding.path !== `.spex-sync-drafts/${binding.ownerDigest}.json` || !/^[a-f0-9]{64}$/.test(binding.ownerDigest)
     || actualTreeDiff(readTree(commonDir, seed.tree), entries).some(change => change.path !== binding.path)
-    || !isUtf8Text(readObject(commonDir, entry.oid))) throw new Error('P1仅允许正常提交指定UTF8草稿文件，不得修改Spec、源码、测试或其他owner')
+    || !isUtf8Text(readObject(commonDir, entry.oid))) throw new Error('同步仅允许正常提交指定UTF8草稿文件，不得修改Spec、源码、测试或其他owner')
   objectGit(commonDir, ['update-ref', `refs/spex-sync/drafts/${binding.ownerDigest}/${actual.headCommit}`, actual.headCommit])
   return { version: 'elaboration-draft-v1', ...binding, seed: { ...seed, mode: 'edit' }, resultCommit: actual.headCommit, resultTree: actual.tree, oid: entry.oid, errors: [] }
 }

@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+v23回归在隔离真实SQLite保存behavior-draft-protocol checkpoint且dispatch为空，明确复现未reserved崩溃窗口；正式online backup后22→23保持原operation/attempt/resource/ingress/journal/pair/lease行与v1–v22 checksum逐字不变，旧slice(0,22) writer被组件围栏拒绝，备份仍可由v22打开并保原数据，重入迁移幂等。仅验证专用私库，不访问用户或生产数据库。
+
 v17语义marker的隔离真实SQLite迁移先online backup，逐字保留历史payload/receipt与v1–v16 checksum；旧v16组件writer拒绝升级后库，备份仍可按v16读取，不修改实际用户库。
 
 ZCode v16 marker 回归保存真实 SQLite 中旧 operation/attempt/resource/ingress/journal/receipt/pair 的逐字节行，核 v1–v15 checksum 不变、升级前一致备份可由 v15 打开、旧 writer 在新库拒绝及重入迁移幂等；不以模拟 receipt 表示产品 Git 交付已通过。

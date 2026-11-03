@@ -649,3 +649,7 @@ Native完整叶生成提示明确区分引用类型：FLOW.req只引用REQ，并
 被拒final原文以不可信UTF8 artifact保留完整字节/SHA/ref；单次stage checkpoint原子登记JSON wrapper及全部JSON/raw保活引用。正式详情、恢复与证据BFS只依据真实失败round、原Native请求/资源/record精确区分raw，历史无role引用不改；JSON合法但schema坏或伪stage原文也不获stage或引用可达权限，未知损坏JSON仍报错。组件v21在正常online backup后拒v20旧writer；回滚停新writer并恢复升级前一致备份与原evidence，不删marker或篡改旧引用。
 
 Native RPC 的实际计时器故障保留原 typed code/message；复用精确身份停止协议后，failed 资源先 terminal 再 removed，同键不重发。只有当前 run、有效 fence 和每个故障的原 request/plan/候选及停止证明均成立时，P0/P1/P2 沿同 operation/input/总预算继续；pause、用户取消和 unknown 不自动重启。失败 Git witness 只由新 observer 在认证 rejected final、原 seed 和确证停止后保存，独立于成功结果；Git 不合法保原格式错误和 raw，旧缺席不补捕。Native checkpoint 不提前授独立 raw ref 可达权，后续 Saved round 与 typed artifacts 原子发布。统一 sync v22 迁移正常备份并拒旧21 writer，回滚须停新 writer、恢复一致备份及原 evidence，不删 marker。受控 Node/MockNative 证明上述状态链，不等于真实 ZCode timeout 根因或模型协议已验证。
+
+Native P0按attempt显式冻结code-behavior-draft-v1：分析和独审复用P1的Git临时JSON草稿与精确只读schema，先保活实际提交blob再验证syntax/schema；失败跨attempt在原文件续改，不从零重答。每个owner/purpose独立，源码/tests/Spec及absence保持。独审格式失败保此前已校验分析的原draft及Native trace，仅重开独立review；业务拒绝仍回分析和完整独审。诊断只进入真实请求，不改变同业务输入的缓存身份，原预算、fence、写范围与最终验证不变。旧已reserved read请求不补协议；原生格式失败仅经authenticateNativeRejectedFinal核原请求/精确schema/input/owner、canonical错误与停止证明后，将CAS原bytes/errors作为下一真实seed的临时输入，明确区别于Git稿；真实Agent正常提交后才生成新Git身份，不改写历史原件。
+
+P0草稿持久协议由sync writer23围栏保护，避免marker已落盘但dispatch未reserved时被旧writer22忽略。升级必须先停稳旧writer并结算或保留真实资源，经原SQLite online backup/组件事务22→23，保全部旧checksum、请求、记录与CAS；回滚先停新writer，恢复升级前v22一致备份与原evidence/Git refs，不删marker降级。

@@ -12,6 +12,8 @@ related:
 
 ## expanded spec
 
+P0真实Git fixture对analyze/review分别复现syntax与schema失败，冷序列化checkpoint后下一attempt在相同原路径读取原bytes与schema/errors再正常提交；review格式失败调用序列为analyze→review→review，原分析trace/OID/resultCommit保持，独审仍独立。错owner/schema输入及修改源码、测试或schema的真实提交必须拒绝，完整非草稿path/mode/OID及absence等于原composed。该受控runner不代表真实模型验收。
+
 Spec分节格式以真实Git快照和精确byte/intent选择等价重放整份正文双重转义及分节消失：旧门误报首个未消费义务，新门仍analysis_invalid但返回具体分节格式/计数且原proposal逐字保留、独审零派发。真实未授权AC依赖误改与缺项仍由同一义务谓词拒绝，新增expected/proposed完整业务字段及path/id便于修复；不变policy/scope/原输入或授业务权。有效Spec及正文内字面反斜线n、普通单行代码、原rawless保护、真实三方/raw整合和null删除回归保持；确定性模型接缝不冒充真实Native或产品交付。
 
 真实Git分区仅Spec变化时，proposal混入可读源码/未来写目标应在新独审前以behavior_analysis_invalid拒绝并保存完整proposal和精确越界路径；同源码仍可在完整读取后作为本区facts与独审checkedPaths引用。旧v2/v3/v4/v5及无指导版本accept不承接新v6输入，当前相同摘要仍可重放已审缓存。

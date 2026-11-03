@@ -14,6 +14,8 @@ P0至P5按完整需求交付，不以阶段演示、局部测试或可修改的�
 
 ## expanded spec
 
+P0的analysis/review同样按owner/purpose保真实Git临时JSON与精确只读schema；格式失败跨attempt续原稿，review格式失败保已校验分析，业务repair仍回分析和独审。旧只读Native原输出只在精确schema与原任务（仅剥非权威repairDiagnostics）、seed及冻结身份一致并经原真实性/停止认证后成为新seed材料，不冒充旧Git稿或批准。三轮兄弟分区仍承接原analyze及review出处，不重跑已接受区。持久语义由writer23在线备份/事务迁移围栏保护，回滚恢复升级前v22一致库及原evidence；既有reserved请求保持原绑定，原预算、source/tests只读与最终V1–V4/采纳门不变。
+
 机器重启造成物理来源身份变化时，可由[[sync-application]]的显式历史operation/input资源入口结算精确owned资源；canonicalRoot/commonDir仍须相同，正常read/resume/adopt完整身份门不变。此单次离线入口不重放journal或新建交付，不改原失败/候选/独审，不授予业务连续性，未知停止继续保留资源；复用原CAS/lease协议，不新增身份字段或writer版本。
 
 明确ZCode provider/model沿 [[zcode-structured-runtime]] 与同一会话/资源接缝执行。私有配置和实测只读边界下仅允许冻结reader；完整原生参数/结果、精确schema的实际模型输入、独立审查及正式关闭/全进程停止分别核验。既有认证只由SDK正常沿用，不复制凭据；不同provider不自动fallback，换模型仅新操作或合法retryOf。引擎能力证明不等于项目V1–V4、Docker、Git交付或采纳完成。

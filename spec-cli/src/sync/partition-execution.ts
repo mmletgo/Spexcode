@@ -2,7 +2,7 @@ import { stageWorktree, STAGE_READING_INSTRUCTIONS } from './stage-worktree.js'
 import { posix } from 'node:path'
 import { contractReferences, parseContract, parseParts } from '@spexcode/spec-core/contracts'
 import { analyzeCodeBehavior, deriveBehaviorAuthorization } from './code-behavior.js'
-import type { CodeBehaviorInput } from './code-behavior.js'
+import type { CodeBehaviorInput, CodeBehaviorContinuation } from './code-behavior.js'
 import { outputErrors } from './elaboration-schema.js'
 import { elaborate, freezeElaborationInput, verifyElaborationDraftCache, projectElaborationFlowReadiness, sealPartitionedElaboration, partitionSealRepairContext } from './elaboration.js'
 import type { Contract, ContractFinding, Verification } from '@spexcode/spec-core/contracts'
@@ -27,6 +27,8 @@ export type PartitionCheckpoints = {
   loadCandidateReviewRepair?(key: string, plan: SyncPartitionPlan, input: GenerationInput, candidate: NonNullable<GenerationResult['candidate']>): GenerationInput['reviewRepair'] | null
   loadAcceptedCandidateReview?(key: string, plan: SyncPartitionPlan, input: GenerationInput, candidate: NonNullable<GenerationResult['candidate']>, builders: readonly ElaborationTrace[], current?: Omit<GenerationResult, 'candidateFiles'>): Omit<GenerationResult, 'candidateFiles'> | null
   elaborationDraftTagged?(key: string, result: Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>): boolean
+  loadBehaviorDraftMaterial?(key: string, planDigest: string, purpose: string, schemaDigest: string, inputDigest: string, request: Pick<ElaborationSessionRequest, 'prompt' | 'worktree'>): ElaborationDraftMaterial | null
+  loadBehaviorContinuation?(key: string, planDigest: string, inputDigest: string): CodeBehaviorContinuation | null
   loadAcceptedAnalysis?(key: string, planDigest: string, inputDigest: string): CodeBehaviorAnalysis | null
   loadAcceptedElaboration?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'> | null
   loadAcceptedInterfaceSeed?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'> | null
@@ -197,7 +199,7 @@ export async function analyzeSyncPartitions(input: CodeBehaviorInput, plan: Sync
       const factSourcePaths = input.plan.sourcePaths === undefined
         ? unique(partition.writePaths.filter(path => !path.startsWith('.spec/')))
         : unique(partition.sourcePaths.filter(path => !path.startsWith('.spec/')))
-      const local = await analyzeCodeBehavior({ ...input, repairDiagnostics: input.repairDiagnostics?.filter(diagnostic => 'partitionId' in diagnostic && diagnostic.partitionId === partition.id), requestKey: `${input.requestKey}:partition:${partition.id}`, plan: projectSyncPartition(input.plan, partition), partition: { id: partition.id, changedPaths: partition.changedPaths, factSourcePaths, ...(authorizedParentSpecPaths !== undefined ? { authorizedParentSpecPaths } : {}) } }, runner, inputDigest => checkpoints.loadAcceptedAnalysis?.(key, plan.digest, inputDigest) ?? null)
+      const local = await analyzeCodeBehavior({ ...input, repairDiagnostics: input.repairDiagnostics?.filter(diagnostic => 'partitionId' in diagnostic && diagnostic.partitionId === partition.id), requestKey: `${input.requestKey}:partition:${partition.id}`, plan: projectSyncPartition(input.plan, partition), partition: { id: partition.id, changedPaths: partition.changedPaths, factSourcePaths, ...(authorizedParentSpecPaths !== undefined ? { authorizedParentSpecPaths } : {}) } }, runner, inputDigest => checkpoints.loadAcceptedAnalysis?.(key, plan.digest, inputDigest) ?? null, { loadMaterial: (purpose, schemaDigest, inputDigest, request) => checkpoints.loadBehaviorDraftMaterial?.(key, plan.digest, purpose, schemaDigest, inputDigest, request) ?? null, load: inputDigest => checkpoints.loadBehaviorContinuation?.(key, plan.digest, inputDigest) ?? null, save: continuation => { checkpoints.save(`${key}:continuation`, continuation) } })
       if (local.changes.some(change => change.paths.some(path => !partition.changedPaths.includes(path)))) reject(`分析超出本区真实变更集合: ${partition.id}`)
       checkpoints.save(key, local)
       return local
