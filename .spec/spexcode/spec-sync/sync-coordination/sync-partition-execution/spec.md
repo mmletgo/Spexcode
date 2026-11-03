@@ -11,6 +11,8 @@ code:
 
 ## expanded spec
 
+分区P1把本轮实际业务schema摘要传给同一草稿/材料来源回调，仅作进程内选源参数；plan、owner和schema均匹配才能接续正式retryOf祖先原稿，不继承祖先的ready或accept，当前唯一计划和最终strict seal保持。
+
 P1后置分类质疑按原partitionId及局部analysisRef投影给唯一P0 owner，受影响的当前saved分析也不能绕过新inputDigest；其它分区不收到兄弟诊断，继续按原完整输入承接已审P0。新局部独审形成新聚合ref后，P1保持原全局analysisRef binding、global mode、祖先接口与跨区语义输入，按完整新绑定重审，不为缓存命中削减输入或补写旧binding。原operation/fence及预算、唯一计划与最终全图seal不变。
 
 P0分区续修复用唯一analyzeCodeBehavior接缝及[[sync-code-behavior]]草稿协议；每区continuation独立checkpoint，完整计划和局部inputDigest均匹配才加载。原draft/errors与已校验analysis trace跨attempt保留；review格式失败只重开对应review，兄弟accept不受失败诊断污染。旧只读Native材料通过同一按区key及精确schema/input读取接缝迁接，不与Git草稿混淆；失败并集、真实changedPaths、完整独审与最终验证门保持。
