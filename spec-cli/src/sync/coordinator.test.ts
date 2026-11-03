@@ -8,7 +8,8 @@ import { fileURLToPath } from 'node:url'
 import { applyComponentMigrations, openProtocol, type SqlParam } from '@spexcode/session-protocol'
 import { CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
 import { putBlob } from '@spexcode/spec-core'
-import { syncCheckpointArtifacts } from './checkpoint-evidence.js'
+import { authenticateNativeRejectedFinal, syncCheckpointArtifacts } from './checkpoint-evidence.js'
+import { outputErrors } from './elaboration-schema.js'
 import type { ContractCell, GeneratedElaboration, GeneratedTables } from './elaboration-markdown.js'
 import { sameContractBusinessMeaning } from './contract-evolution.js'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
@@ -166,7 +167,7 @@ async function fixture(t: test.TestContext, budget: import('./operation-types.js
   return { root, parent, managedRoot, artifactRoot, input, index, bytes, protocol, store, operation, plan, options, calls, git, priorCommitCount, realTools, closeForRestart: () => { protocol.close(); closed = true }, useStore: (next: SyncStore) => { store = next }, useOperation: (next: typeof operation) => { operation = next }, transform: (fn: typeof transform) => { transform = fn } }
 }
 
-async function rejectedReviewFixture(f: Awaited<ReturnType<typeof fixture>>, request: ElaborationSessionRequest, text: string): Promise<ElaborationSessionResult> {
+async function rejectedReviewFixture(f: Awaited<ReturnType<typeof fixture>>, request: ElaborationSessionRequest, text: string, message = 'invalid_json'): Promise<ElaborationSessionResult> {
   const operation = f.store.readOperation(f.operation.id), attempt = f.store.readAttempt(operation.currentAttemptId!)
   const fence = { operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: operation.input.source.physicalFingerprint }
   const records = new Map<string, NativeRunRecord>()
@@ -178,10 +179,10 @@ async function rejectedReviewFixture(f: Awaited<ReturnType<typeof fixture>>, req
       const prompt = actual.worktree ? nativeWorktreePrompt(actual.prompt, actual.worktree) : actual.prompt
       const base = actual.worktree?.baseCommit ?? actual.base
       const rejectedOutput = rejectedFinalOutput(text, prompt, execution, identity)
-      const record: NativeRunRecord = { session: sessionId, status: 'error', harnessSessionId: identity.threadId, createRequestId: contentHash(key), createPayloadHash: contentHash(JSON.stringify({ prompt, parent: null, launcher: null, ...(base?.trim() ? { base: base.trim() } : {}), structuredExecution: execution })), structuredExecution: { ...execution, ...identity, state: 'failed', errorCode: 'structured_output_format_invalid', error: 'invalid_json', rejectedOutput, cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: true, acknowledged: true, nativeStatus: 'stopped' } } }
+      const record: NativeRunRecord = { session: sessionId, status: 'error', harnessSessionId: identity.threadId, createRequestId: contentHash(key), createPayloadHash: contentHash(JSON.stringify({ prompt, parent: null, launcher: null, ...(base?.trim() ? { base: base.trim() } : {}), structuredExecution: execution })), structuredExecution: { ...execution, ...identity, state: 'failed', errorCode: 'structured_output_format_invalid', error: message, rejectedOutput, cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: true, acknowledged: true, nativeStatus: 'stopped' } } }
       records.set(sessionId, record)
       writeRecord({ governed: false, worktreePath: f.root, branch: null, title: null, name: null, parent: null, issues: [], issue: null, proposal: null, merges: 0, note: null, sortKey: null, createdAt: Date.now(), harness: 'codex', runtimeStartToken: null, stopped: false, archived: false, closedAt: null, launcher: null, launchCmd: null, launchOwner: null, ...record })
-      throw new StructuredSessionError('structured_output_format_invalid', 'invalid_json', { sessionId, ...identity, rejectedOutput })
+      throw new StructuredSessionError('structured_output_format_invalid', message, { sessionId, ...identity, rejectedOutput })
     },
   } })(request)
 }
@@ -4678,5 +4679,50 @@ test('Native P0三attempt保留已审兄弟，analysis与review沿精确Git/Nati
   const last = f.store.listAttempts(f.operation.id).at(-1)!
   const stages = last.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()) as { stage: string })
   assert.ok(stages.some(stage => stage.stage.endsWith(':analysis:provenance')))
+  assert.equal(f.store.listJournals(f.operation.id).length, 0)
+})
+
+
+// 先实际持久并认证被拒Native final，再在协调器外断言下一seed内容；不能用read/edit模式差异代替丢稿证明。
+for (const invalidity of ['syntax', 'schema'] as const) test(`P0已认证Native ${invalidity}原final必须进入下一attempt临时输入`, async t => {
+  const f = await fixture(t, { maxAttempts: 2, maxCalls: 8, maxRepairs: 1, timeoutMs: 120_000 }, false, original, 'project', original, { agentWorkflow: 'native-worktree-v1' }, undefined, 'code', 'claude:MiniMax-M3.1-Flash')
+  const claimed = f.store.claimAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 30_000, expectedMessageId: f.operation.dispatchMessageId })
+  f.store.reserveDispatch(claimed.fence, { key: `sync:${claimed.attempt.id}:frozen-read-p0`, purpose: 'code_behavior_analyze', requestDigest: contentHash('既有冻结只读请求') })
+  const rejectedText = invalidity === 'syntax' ? '{ "changes": [ ORIGINAL_SYNTAX_REJECTED 原文🙂\r\n' : JSON.stringify({ changes: 'ORIGINAL_SCHEMA_REJECTED 原文🙂', facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] })
+  let firstRequest: ElaborationSessionRequest | undefined, originalError = '', authenticated = false
+  let nextDrafts: string[] | undefined, nextSchemas: string[] | undefined, nextErrors: unknown
+  f.options.runner = async request => {
+    const operation = f.store.readOperation(f.operation.id), attempt = f.store.readAttempt(operation.currentAttemptId!)
+    if (attempt.number === 1) {
+      firstRequest = request
+      let parsed: unknown
+      try { parsed = JSON.parse(rejectedText) as unknown }
+      catch (error) { if (!(error instanceof SyntaxError)) throw error; originalError = `output_json: ${error.message}` }
+      if (!originalError) { const errors = outputErrors(parsed, request.schema); assert.ok(errors.length); originalError = `output_schema: ${errors.join('; ')}` }
+      return rejectedReviewFixture(f, request, rejectedText, originalError)
+    }
+    const prior = f.store.readAttempt(claimed.attempt.id), resource = f.store.findResource(prior.id, firstRequest!.requestKey)!
+    const checkpoint = JSON.parse(readEvidence(f.input.source.commonDir, resource.checkpointRef).toString()) as NativeRunCheckpoint
+    const failure = checkpoint.failure!, packet = failure.rejectedOutput!
+    const native = JSON.parse(readEvidence(f.input.source.commonDir, resource.plan.planBlob).toString()) as NativeRunPlan
+    assert.equal(resource.phase, 'removed'); assert.equal(native.request.worktree?.mode, 'read')
+    assert.equal(packet.sha256, contentHash(rejectedText)); assert.deepEqual(native.request.schema, firstRequest!.schema)
+    const state = authenticateNativeRejectedFinal(f.store, operation, prior, firstRequest!.requestKey, { ...failure, sessionId: checkpoint.session.sessionId, threadId: checkpoint.session.threadId ?? undefined, turnId: checkpoint.session.turnId ?? undefined }, packet)
+    assert.equal(packet.text, rejectedText); assert.equal(failure.message, originalError); assert.equal(state.cancellation?.nativeStopped, true)
+    authenticated = true
+    const entries = readTree(f.input.source.commonDir, request.worktree!.tree).filter(entry => entry.path.startsWith('.spex-sync-drafts/'))
+    nextDrafts = entries.filter(entry => entry.path.endsWith('.json') && !entry.path.endsWith('.schema.json')).map(entry => readObject(f.input.source.commonDir, entry.oid).toString('utf8'))
+    nextSchemas = entries.filter(entry => entry.path.endsWith('.schema.json')).map(entry => readObject(f.input.source.commonDir, entry.oid).toString('utf8'))
+    const errors = request.prompt.split('原具体错误：')[1]?.split('；本轮修复诊断：')[0]
+    nextErrors = errors === undefined ? null : JSON.parse(errors) as unknown
+    t.diagnostic(JSON.stringify({ invalidity, originalNativeAuthenticated: true, nativePlanRefSha256: resource.plan.planBlob.sha256, checkpointRefSha256: resource.checkpointRef.sha256, originalSchemaSha256: contentHash(JSON.stringify(native.request.schema)), originalFinalSha256: packet.sha256, originalFinalBytes: Buffer.byteLength(rejectedText), originalErrorCode: failure.code, originalError, nextDraftCount: nextDrafts.length, nextSchemaCount: nextSchemas.length }))
+    throw Object.assign(new Error('仅核下一真实seed的失败材料，在后续模型修改前停止'), { code: 'unsupported' })
+  }
+  await runSyncOperation(f.store, f.operation.id, f.options)
+  assert.equal(authenticated, true, '必须先取得真实已停止Native失败原件的认证证据')
+  assert.deepEqual(nextDrafts, [rejectedText], '已认证Native原final没有按exact bytes进入下一attempt临时输入；此断言不依赖read/edit模式')
+  assert.deepEqual(nextSchemas, [JSON.stringify(firstRequest!.schema)], '下一临时输入必须绑定原精确业务schema')
+  assert.deepEqual(nextErrors, [{ code: 'structured_output_format_invalid', message: originalError }], '下一请求必须携原具体错误，不能只带概括消息')
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
   assert.equal(f.store.listJournals(f.operation.id).length, 0)
 })
