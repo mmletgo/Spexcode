@@ -304,7 +304,7 @@ writer20沿原online backup/事务拒旧writer，1–19 checksum不改。原enab
 
 每区复用现有原生会话、创建事务和资源桥，在独立 worktree 运行。所有阶段都允许正常文件读取与搜索；分析、细化和审查使用只输出结果的任务，构建者直接修改实现与测试并正常提交。无需冻结 reader 或逐字 API 消费证明；JSON 只约束需要机器处理的结果格式。实际 Native 身份、终态、错误、停止与工作树 Git 对象仍需持久保存。
 
-Claude Code 与 ZCode 共用明确版本化的 native-worktree 执行策略，固定实际模型、任务、seed commit/tree 和结果身份，沿用本机认证且不读取、输出或改写凭据。旧受限只读请求按原策略恢复，原 MCP/读取证明不能补签为新工作树结果。升级先停止旧执行器并确认资源结算，旧 writer 必须拒绝新策略。
+Claude Code 与 ZCode 共用明确版本化的 native-worktree 执行策略，绑定任务、seed commit/tree 和结果身份。新任务优先使用 Claude Code；没有显式模型及项目选择时不传模型参数，沿用用户 CLI 的原生认证、base URL、模型和供应商配置。显式模型或别名原样传递，CLI 版本、可执行文件摘要和模型名不作为产品允许名册；必要协议缺失或原生配置不可用时报告实际错误。请求选择和每轮真实 CLI/解析后模型分别记录，恢复按原始快照认证，不用今天配置改写历史或编造实际端点；控制器不读取、输出或改写凭据。新请求显式冻结nativeConfiguration:cli-config-v1，sync v24 writer保护前置创建/资源摘要，旧saved/reserved缺席保持原语义。旧受限只读请求按原策略恢复，原 MCP/读取证明不能补签为新工作树结果。升级先停止旧执行器并确认资源结算，正式备份/迁移；回滚恢复一致备份和原证据，旧 writer 必须拒绝新策略。
 
 ZCode 新只读结构化请求保留 SDK plan 模式，仅通过已有 per-send toolDenylist 移除 ExitPlanMode，并明确本轮直接交完整 schema JSON、不申请计划审批。精准工具策略在新资源/新建记录时冻结，NativePlan v2 与原 send/请求摘要共同核验；旧已持久请求（包括尚无 Native session/send 的资源）保持原字段缺席、原提示和工具集。结构化 policy6、工作流v1、正常读取/Bash 与 Git seed/clean 门不变，edit/frozen/Claude不变。sync v19 writer marker 沿原在线备份与事务升级拒绝旧writer，回滚须恢复升级前一致备份及原证据。
 

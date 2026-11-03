@@ -418,7 +418,6 @@ export class SyncApplication {
   }
   private async observeNode(snapshot: InputSnapshot, nodeId: string): Promise<void> {
     const { settings, configDigest } = readSyncSettings(snapshot)
-    const model = syncModel(settings)
     const configRef = writeEvidence(snapshot.source.commonDir, { version: 'sync-observed-configuration-v1', configDigest, settings })
     const control = this.store.readPhysicalControl(this.physicalScope(snapshot.source))
     let selection: FrozenBaselineSelection | null = null
@@ -430,6 +429,7 @@ export class SyncApplication {
       const direction = origin === 'combined' ? 'combined' : origin === 'code' || origin === 'initial' && hasImplementation ? 'code_to_spec' : 'spec_to_code'
       if (trigger || direction !== 'spec_to_code') frozen = await this.freezeNodePlan(snapshot, nodeId, true, direction, trigger?.commitTrigger)
       const plan = frozen.plan
+      const model = syncModel(settings, Boolean(plan.agentWorkflow))
       selection = frozen.selection
       const differenceKey = `${snapshot.id}:${selection.digest}:${syncPlanDigest(plan)}`
       let cachedDifference = this.observedDifferences.get(nodeId)
@@ -661,7 +661,6 @@ export class SyncApplication {
     const mutex = await this.requestMutex(ingressKey, finiteSyncBudget(settings.budget)?.timeoutMs ?? 30000)
     try {
       const prior = this.store.findOperationByIngressKey(ingressKey), ingress = this.store.findIngressReceipt(ingressKey)
-      const model = input.model ?? syncModel(prior ?? retry ?? settings)
       if (prior?.baselineSelection) {
         if (prior.input.captureKind === 'commit' && snapshot.captureKind !== 'commit') snapshot = await captureInputSnapshot(this.root, { committed: true })
         this.requireEnabled(snapshot, prior)
@@ -673,6 +672,7 @@ export class SyncApplication {
       const direction = origin === 'combined' ? 'combined' : origin === 'code' || origin === 'initial' && verifySnapshot(snapshot).some(entry => entry.mode !== '120000' && coveredPath(entry.path, settings.sourcePaths)) ? 'code_to_spec' : 'spec_to_code'
       const frozen = oldSelection ? { plan: this.operationPlan(prior ?? retry!), selection: oldSelection } : prior || retry ? null : await this.freezeNodePlan(snapshot, input.nodeId, false, direction)
       const plan = frozen?.plan ?? this.operationPlan((prior ?? retry)!)
+      const model = input.model ?? (prior || retry ? syncModel(prior ?? retry!) : syncModel(settings, Boolean(plan.agentWorkflow)))
       if (prior && input.nodeId !== plan.intentNodeId) throw new SyncStoreError('SYNC_IDEMPOTENCY_CONFLICT', ingressKey)
       if (retry && (origin !== retry.origin || syncPlanDigest(plan) !== retry.policyDigest)) throw new SyncApplicationError('sync_retry_changed', '显式重试必须沿用原来源和授权计划；新的输入请发起新请求')
       let requestBlob: BlobRef | undefined = retry?.requestBlob
@@ -700,7 +700,7 @@ export class SyncApplication {
     const snapshot = await captureInputSnapshot(this.root); this.requireEnabled(snapshot)
     const nodeId = this.operationPlan(original).intentNodeId
     await this.requireNodeAuthorized(snapshot, nodeId)
-    const { settings } = readSyncSettings(snapshot), model = syncModel(settings), ingressKey = `application:${snapshot.source.repositoryId}:${this.root}:${input.requestId}`
+    const { settings } = readSyncSettings(snapshot), ingressKey = `application:${snapshot.source.repositoryId}:${this.root}:${input.requestId}`
     const mutex = await this.requestMutex(ingressKey, finiteSyncBudget(settings.budget)?.timeoutMs ?? 30000)
     try {
       const prior = this.store.findOperationByIngressKey(ingressKey), ingress = this.store.findIngressReceipt(ingressKey)
@@ -748,6 +748,7 @@ export class SyncApplication {
       for (const item of after.graph.items.values()) if (paths.includes(item.path) && item.kind !== 'VERIFY') { const resource = item.kind === 'FLOW' ? { kind: 'flow' as const, id: item.id } : { kind: 'contract' as const, id: item.id }; resources.set(JSON.stringify(resource), resource) }
       const selected = this.store.readBaselineSelection(snapshot.source, [...resources.values()])
       if ('failure' in selected) throw new SyncApplicationError(selected.failure.code, selected.failure.message)
+      const model = syncModel(settings, Boolean(plan.agentWorkflow))
       const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: original.rootCauseId, origin: 'combined', ...syncModelBinding(model), budget: settings.budget, managedRoot: this.managedRoot, requestBlob, baselineSelection: selected.selection })
       this.prepareTools(ingressKey, null, model, plan.agentWorkflow)
       const operation = this.store.admitAndEnqueue(admission)
@@ -807,7 +808,7 @@ export class SyncApplication {
     const findings = input.findingIds.map(id => context.analysis.findings.find(finding => finding.id === id))
     if (findings.some(finding => !finding)) throw new SyncApplicationError('sync_decision_finding', '裁决只能选择分析中真实存在的分歧', 400)
     const ingressKey = `application:${snapshot.source.repositoryId}:${this.root}:${input.requestId}`
-    const { settings } = readSyncSettings(snapshot), model = syncModel(settings)
+    const { settings } = readSyncSettings(snapshot)
     const mutex = await this.requestMutex(ingressKey, finiteSyncBudget(settings.budget)?.timeoutMs ?? 30000)
     try {
       const prior = this.store.findOperationByIngressKey(ingressKey), ingress = this.store.findIngressReceipt(ingressKey)
@@ -824,6 +825,7 @@ export class SyncApplication {
       if (selected && 'failure' in selected) throw Object.assign(new SyncApplicationError(selected.failure.code, selected.failure.message), { syncFailure: selected.failure })
       const selection = selected?.selection, plan = this.operationPlan(original)
       plan.agentWorkflow = 'native-worktree-v1'
+      const model = syncModel(settings, true)
       this.decorateDecisionPlan(plan, snapshot, input, context.analysis, requestBlob, selection ?? previousBaselinePair)
       const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: original.rootCauseId, origin: 'decision', ...syncModelBinding(model), budget: settings.budget, managedRoot: this.managedRoot, requestBlob, previousBaselinePair, ...(selection ? { baselineSelection: selection, executionScope: original.scope, impactDigest: original.impactDigest } : {}) })
       this.prepareTools(ingressKey, null, model, plan.agentWorkflow)

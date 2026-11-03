@@ -63,6 +63,11 @@ test('真实diff的不可改oracle/host-private和非UTF8修改都拒绝', t => 
 
 test('新workflow明确选择真实CLI；旧缺省模型身份不变且不fallback', () => {
   assert.equal(syncModel({}), DEFAULT_SYNC_MODEL)
+  assert.equal(syncModel({}, true), 'claude:default')
+  assert.equal(syncModel({ model: 'zcode:team/model:preview' }, true), 'zcode:team/model:preview')
+  assert.doesNotThrow(() => assertWorktreeSyncModel('claude:default'))
+  assert.doesNotThrow(() => assertWorktreeSyncModel('zcode:default'))
+  assert.doesNotThrow(() => assertWorktreeSyncModel('claude:team/model:preview[1m]'))
   assert.doesNotThrow(() => assertWorktreeSyncModel('claude:MiniMax-M3.1-Flash'))
   assert.doesNotThrow(() => assertWorktreeSyncModel('zcode:bigmodel-api/GLM-5.3-Flash'))
   assert.throws(() => assertWorktreeSyncModel(DEFAULT_SYNC_MODEL), { code: 'unsupported' })
