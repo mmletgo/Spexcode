@@ -14,6 +14,10 @@ code:
 
 ## expanded spec
 
+P0丢稿修复的失败对照须先由真实Native资源桥持久化同一syntax/schema拒绝原final，再经authenticateNativeRejectedFinal核原schema/request/身份/停止证明；下一attempt在协调器外检查临时seed的exact原bytes、只读业务schema及原具体错误。旧实现必须在该原文缺失断言失败，新实现同例通过；仅read/edit模式前置断言失败只能说明草稿transport未启用，不能当作原JSON丢失的复现。此受控runner接缝仍不代表真实模型完成。
+
+Native P0单体与分区使用真实临时worktree、Git提交和SQLite检查点，分析/独审syntax或schema拒绝后沿同operation/原预算续原草稿，独审格式拒绝不重跑已校验分析。旧reserved只读派发不补协议，其认证Native错误/CAS原bytes通过原资源桥进入下一真实草稿seed，记录native-material provenance；旧原件保持，不造历史Git witness或业务批准。只读源码/tests及原index保持，回归在P1前明确停止，不调用真实模型、Docker或采纳。
+
 正式已审Native JSON用真实正常Git提交与独审建立后，实际P1全null扩域改变读集/基线选择，再经真实V1锚点拒绝及正式pause/run留下无产物控制attempt。恢复后的下一Native seed须保原草稿path/OID/完整字节及当前精确schema，局部inputDigest改变不丢材料，也不继承旧accept；原已审JSON、generation失败和refs逐字不变。此受控runner只证明材料续修接缝，不冒称真实模型、Docker或交付通过；owner/schema/source及Git边界沿原草稿回归拒绝。
 
 独立resource-only回归以真实Git/私有SQLite保存既有资源，受控Docker driver只模拟外部inspect/rm结果；精确既有容器可清理，目标缺失或labels不符继续未结算，错误runId计划在调用driver前拒绝。所有模式禁止create/start、新attempt/dispatch/资源、业务失败改写或journal交付；该接缝证据不冒称真实Docker清理。

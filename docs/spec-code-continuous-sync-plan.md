@@ -197,7 +197,7 @@ Dashboard 的同步模式不能继续“先把新 Spec 独立提交到 main，�
 
 1. 捕获已提交 HEAD 相对上次已观察提交的代码差异；冻结实际 Git 对象和治理映射，不混入同期 index 或工作文件中尚未提交的改动。不要求提交代码的人或外部 Agent 必须由 SpexCode 启动。
    提交消费边界沿既有已接入或经真实共同基线去回声的持久观察，不受最近500条展示记录限制；同一已消费HEAD的重复采集与计划元数据变化不重开旧差量，也不能取代仍保留受控正文请求的操作。普通观察、故障及暂停中的未消费作者输入不推进该边界，真正新提交仍按累计tree差量分类；相关范围保留本节点精确前态路径，源码发现同时核当前与before，删除不能因当前文件缺失而漏掉。
-   若存在已结算且来源 Git 已真实采纳的完整验证基线，代码方向可以按本次提交路径收窄到实际 owner 与必要影响闭包。只有 `before`、完整精确 baseline selection、相关治理资源的 delivery 采纳均可证明时才收窄；freeze 的后续轮次沿用完整 discovery selection 证明 bootstrap 已结算，不能拿已裁窄 selection 代替。首次/无基线、before 缺失、未采纳或覆盖不完整、根原意或配置变化，以及未治理源码变化都按完整 bootstrap/发现处理。观察到文件变化或 admission 失败不算消费基线。
+   若存在已结算且来源 Git 已真实采纳的完整验证基线，代码方向可以按本次提交路径收窄到实际 owner 与必要影响闭包。只有 `before`、完整精确Spec/业务ID头与其正式settled receipt、delivery采纳可证明时才收窄。初始化可验证只读代码而未写它：缺binding/null源码或生成测试仅在其精确owner Spec的已审交付声明、verified scope、before owner Spec未漂移、sourceInput/delivery/before文件path/mode/OID三方一致时取得只读初始化资格；不生成byte头、不提供三方合成基线或写权，已有非null头绝不fallback。freeze 的后续轮次沿用完整 discovery selection 证明 bootstrap 已结算，不能拿已裁窄 selection 代替。首次/无基线、before 缺失、未采纳或覆盖不完整、根原意或配置变化，以及未治理源码变化都按完整 bootstrap/发现处理。观察到文件变化或 admission 失败不算消费基线。
 2. 以最近一次共同验证基线分析差异。结合源代码、调用点、测试与运行行为，识别实现重构、合法行为变化、冲突或覆盖缺口；不能只把 diff 逐行翻译成自然语言。
 3. 行为未变时保持业务正文稳定，更新失效符号映射和对应验证记录。
 4. 行为变化且不违背原始需求或显式规则时，自动改写 expanded spec 的权威规则、流程、状态、边界和验收；更新依赖这些规则的节点。实际文件必须更新，不能仅生成“建议同步”报告。
@@ -335,6 +335,10 @@ Native P0分析与独审共用业务语义：raw、源码和完整测试足以�
 P2实际无该Spec写权的只读装配late V1锚点失败按真实候选和node/path回到唯一P1 owner，新生成和独审仅修该区，其他已审区及源码/tests保持；V1有效但全候选独审要求修订的只读Spec也沿真实ruleLocation/affectedIds回到唯一P1 owner，完整review只作诊断，原作者契约授权门及raw义务保持；同candidate且owner仍原ref的已验证反馈持续到该owner新生成/独审并进入合法aggregate，Native失败或后续accept空发现不能清除；同一候选某分区已有真实独审repair时，另一区Native失败导致aggregate failed也不能丢弃该有效诊断；失败区无review仍保原失败，完整P2重审与最终交付不放宽；新结果可经独审维持原正文，其他owner保最新已审ref，不以诊断增加授权或新round协议；明确expanded spec正文定位按真实候选path及全部唯一同owner affectedIds路由，不要求伪造#ID；普通contract:path#RULE是规则定位引用，受影响ID不必包含RULE但须非空、唯一并实际存在，可跨owner；不把它当新授权，omission特殊成员约束不变；旧续修资格按原generation wrapper的真实readSet/selection重验，仅以既有null资源扩展桥连接当前绑定；新P1增加ID后不误使原诊断失效。独审提示明确候选文件是本次分派的本地审查投影，不能仅据未提供就宣称完整候选缺文件，具体义务确需未提供证据时仍repair。源和候选manifest旁同时提供由真实数组计算的局部/完整条数与complete标记，不增加完整路径inventory或正文。最终全图seal/V1重做。 分区最终程序封口读取真实composed冻结全树中的未改动承接方，再叠加本轮候选及既有生命周期删除；Agent可在冻结工作树自行读取需要的文件，实际写范围仍由原分区约束；不以关闭严格检查或过滤缺口代替完整树核验。 whole封口原wrapper同时固定当时composed tree/contentDigest，当前缓存与跨attempt提升须精确一致；缺绑定或异树仅沿已审locals重seal，不能用扩域后已重绑的attempt最终值替旧proof补签。相同input/candidate/findings且无对应owner新agent派发时停止零调用热循环，真实多轮修订仍沿原无限预算继续。
 
 draft模式的只读V1锚点返修须让生成和独立审查同见完整finding身份与绑定已接受正文的只读baselineSpecPath；Agent据此自行恢复被拒草稿中的prose及已接受RULE等业务字段，仅修typed code来源选择器，不把mode或失败诊断当重写业务的授权，原演进、锚点、独审和单一草稿写范围不变。
+
+一般草稿续修同样保留原finding的severity、owner/路径与条目定位，不能仅把同码同文的多个问题压为重复code/message。当前draft检查点和下一实际prompt均保留原字段；旧检查点不回写，已认证原round的完整findings可作为新请求诊断继续传递。它只改善定位，不增加业务授权或放宽任何演进、校验、独审门。
+
+P1后置门禁若精确质疑已审P0的refactor分类，只将命中原真实变更治理owner及affectedIds的完整finding、原分析/候选引用、真实旧新业务行和代码差量交回原owner，在原operation/fence/预算内重新分析并独审；Agent可据原意和代码重判allowed_change，也可维持refactor要求P1恢复错误改写，程序不改分类或扩AC/VERIFY授权。新analysisRef使依赖P1重绑重审，兄弟P0已审原件保持；格式/schema失败仍沿认证原文件只续失败环节。旧短errors和已渲染拒绝候选的完整原round只在同owner、完整绑定不变时供下一实际prompt诊断，不补写旧稿、旧ref或reserved请求。
 
 全局封口返修时，生成与独立审查共同读取绑定原件的真实失败并集诊断文件和精确error/owner/ref定位；只有本owner本轮未采纳的临时duplicate ID可在同义、同kind、唯一且逐条保持typed引用的条件下一致更名，作者/已采纳ID、原业务义务和源码/tests不动，程序与独审沿同一已证VERIFY技术归属投影复核，最终仍须strict全图封口。
 
@@ -649,3 +653,7 @@ Native完整叶生成提示明确区分引用类型：FLOW.req只引用REQ，并
 被拒final原文以不可信UTF8 artifact保留完整字节/SHA/ref；单次stage checkpoint原子登记JSON wrapper及全部JSON/raw保活引用。正式详情、恢复与证据BFS只依据真实失败round、原Native请求/资源/record精确区分raw，历史无role引用不改；JSON合法但schema坏或伪stage原文也不获stage或引用可达权限，未知损坏JSON仍报错。组件v21在正常online backup后拒v20旧writer；回滚停新writer并恢复升级前一致备份与原evidence，不删marker或篡改旧引用。
 
 Native RPC 的实际计时器故障保留原 typed code/message；复用精确身份停止协议后，failed 资源先 terminal 再 removed，同键不重发。只有当前 run、有效 fence 和每个故障的原 request/plan/候选及停止证明均成立时，P0/P1/P2 沿同 operation/input/总预算继续；pause、用户取消和 unknown 不自动重启。失败 Git witness 只由新 observer 在认证 rejected final、原 seed 和确证停止后保存，独立于成功结果；Git 不合法保原格式错误和 raw，旧缺席不补捕。Native checkpoint 不提前授独立 raw ref 可达权，后续 Saved round 与 typed artifacts 原子发布。统一 sync v22 迁移正常备份并拒旧21 writer，回滚须停新 writer、恢复一致备份及原 evidence，不删 marker。受控 Node/MockNative 证明上述状态链，不等于真实 ZCode timeout 根因或模型协议已验证。
+
+Native P0按attempt显式冻结code-behavior-draft-v1：分析和独审复用P1的Git临时JSON草稿与精确只读schema，先保活实际提交blob再验证syntax/schema；失败跨attempt在原文件续改，不从零重答。每个owner/purpose独立，源码/tests/Spec及absence保持。独审格式失败保此前已校验分析的原draft及Native trace，仅重开独立review；业务拒绝仍回分析和完整独审。诊断只进入真实请求，不改变同业务输入的缓存身份，原预算、fence、写范围与最终验证不变。旧已reserved read请求不补协议；原生格式失败仅经authenticateNativeRejectedFinal核原请求/精确schema/input/owner、canonical错误与停止证明后，将CAS原bytes/errors作为下一真实seed的临时输入，明确区别于Git稿；真实Agent正常提交后才生成新Git身份，不改写历史原件。
+
+P0草稿持久协议由sync writer23围栏保护，避免marker已落盘但dispatch未reserved时被旧writer22忽略。升级必须先停稳旧writer并结算或保留真实资源，经原SQLite online backup/组件事务22→23，保全部旧checksum、请求、记录与CAS；回滚先停新writer，恢复升级前v22一致备份与原evidence/Git refs，不删marker降级。

@@ -8,7 +8,9 @@ import test from 'node:test'
 import { isHostPrivatePath } from './candidate.js'
 import { isUtf8Text } from './composition.js'
 import { analyzeCodeBehavior, CODE_BEHAVIOR_REVIEW_SCHEMA, CODE_BEHAVIOR_SCHEMA, deriveBehaviorAuthorization, packBehaviorBodies, referenceCodeBehaviorMetadata, type FrozenBehaviorBody } from './code-behavior.js'
-import type { CodeBehaviorInput } from './code-behavior.js'
+import type { CodeBehaviorInput, CodeBehaviorContinuation } from './code-behavior.js'
+import { nativeWorktreeResult } from '../native-worktree-runtime.js'
+import { readStageDraft } from './stage-worktree.js'
 import { adoptedDeliveryPaths, composeInputSnapshots, readCompositionEvidence, type IntentObject, type IntentResidual, type SelectedCompositionEvidence } from './composition.js'
 import { prepareHistoryRequest } from './history-input.js'
 import { buildSyncApplicationPlan } from './planning.js'
@@ -2548,5 +2550,64 @@ test('Native raw-only空图schema不发空enum且GAP/conflict保留空身份', a
     assert.equal(result.reviewPassed, true)
     assert.equal(result.findings.some(finding => finding.kind === kind), true)
     assert.deepEqual(result.findings.find(finding => finding.kind === kind)?.affectedIds, [])
+  }
+})
+
+
+for (const phase of ['code_behavior_analyze', 'code_behavior_review'] as const) for (const invalidity of ['syntax', 'schema'] as const) test(`P0 ${phase} ${invalidity}失败跨attempt续改真实JSON草稿，review不重做分析`, async t => {
+  const f = await fixture(t)
+  writeFileSync(join(f.root, 'src/export.js'), f.source + '\n// same business\n')
+  const original = await f.input()
+  const input: CodeBehaviorInput = { ...original, draftProtocol: 'code-behavior-draft-v1', model: 'claude:MiniMax-M3.1-Flash', plan: { ...original.plan, agentWorkflow: 'native-worktree-v1' } }
+  const invalid = invalidity === 'syntax' ? '{ "原始JSON": [ BROKEN 草稿\n' : '{"原始JSON":"SCHEMA_REJECTED"}'
+  let checkpoint: CodeBehaviorContinuation | null = null, failed = false, violation: string | undefined
+  const requests: string[] = []
+  const run: ElaborationRunner = async request => {
+    requests.push(request.purpose)
+    const seed = request.worktree!
+    assert.equal(seed.mode, 'edit', '仅指定JSON临时稿允许写入，业务文件保持只读')
+    const draftPath = /草稿文件=([^\s；]+)/.exec(request.prompt)![1]
+    const schemaPath = /草稿业务schema只读文件=([^；]+)/.exec(request.prompt)![1]
+    const workspace = join(f.root, '..', `p0-draft-${requests.length}`)
+    git(f.root, 'worktree', 'add', '--detach', workspace, seed.baseCommit)
+    const schema = JSON.parse(readFileSync(join(workspace, schemaPath), 'utf8')) as Record<string, unknown>
+    assert.deepEqual(request.schema, { type: 'object', additionalProperties: false, properties: { summary: { type: 'string' } }, required: ['summary'] })
+    const brief = JSON.parse(request.prompt.split('任务:\n')[1].split('\n待审分析:')[0].split('\n草稿文件=')[0]) as { requiredChangedPaths: string[] }
+    const stage = request.purpose === 'code_behavior_review' ? JSON.parse(request.prompt.split('待审分析:\n')[1].split('\n草稿文件=')[0]) as { analysisDigest: string; analysis: CodeBehaviorAnalysis } : null
+    const output = stage ? { inputDigest: request.inputDigest, analysisDigest: stage.analysisDigest, verdict: 'accept', checkedPaths: brief.requiredChangedPaths, checkedChangeIds: stage.analysis.changes.map(change => change.id), findings: [] }
+      : { changes: brief.requiredChangedPaths.map(path => ({ kind: 'refactor', paths: [path], affectedIds: ['RULE-EXPORT-05'], ruleIds: ['RULE-EXPORT-05'], originalIntent: '保留既有业务', previousBehavior: '既有行为', sourceBehavior: '既有行为', deliveryBehavior: '既有行为', evidence: path, counterexample: '不改变发布次数' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+    let text = JSON.stringify(output)
+    if (request.purpose === phase && !failed) { failed = true; text = invalid }
+    else if (request.purpose === phase) {
+      assert.equal(readFileSync(join(workspace, draftPath), 'utf8'), invalid)
+      assert.match(request.prompt, invalidity === 'syntax' ? /behavior_output_json/ : /behavior_output_schema/)
+      assert.ok(!request.prompt.includes(invalid), '原稿从文件续改，不能在prompt重答原JSON')
+      assert.equal(contentHash(JSON.stringify(schema)), checkpoint!.drafts[phase]!.schemaDigest)
+    }
+    mkdirSync(join(workspace, draftPath, '..'), { recursive: true }); writeFileSync(join(workspace, draftPath), text)
+    if (violation) { const path = violation.replace(/^delete:/, ''); if (violation.startsWith('delete:')) rmSync(join(workspace, path)); else writeFileSync(join(workspace, path), 'unauthorized edit\n'); git(workspace, 'add', path) }
+    git(workspace, 'add', draftPath); git(workspace, 'commit', '--allow-empty', '-m', `real P0 draft ${requests.length}`)
+    const summary = { summary: '已正常提交指定JSON草稿' }
+    return { sessionId: `p0-draft-session-${requests.length}`, threadId: `p0-draft-thread-${requests.length}`, turnId: 'turn', output: summary, resultDigest: contentHash(JSON.stringify(summary)), worktree: nativeWorktreeResult(workspace, seed) }
+  }
+  const continuations = { load: () => checkpoint, save: (value: CodeBehaviorContinuation) => { checkpoint = structuredClone(value) } }
+  await assert.rejects(analyzeCodeBehavior(input, run, undefined, continuations), error => {
+    assert.equal((error as { code: string }).code, invalidity === 'syntax' ? 'behavior_output_json' : 'behavior_output_schema', String(error)); return true
+  })
+  const prior = structuredClone(checkpoint!)
+  assert.equal(readStageDraft(input.snapshot.source.commonDir, prior.drafts[phase]!, prior.drafts[phase]!), invalid)
+  const result = await analyzeCodeBehavior({ ...input, requestKey: 'next-attempt', repairDiagnostics: [{ code: 'prior-format', message: '本轮格式诊断不改变业务输入' }] }, run, undefined, continuations)
+  assert.equal(result.reviewPassed, true)
+  assert.deepEqual(requests, phase === 'code_behavior_review' ? ['code_behavior_analyze', 'code_behavior_review', 'code_behavior_review'] : ['code_behavior_analyze', 'code_behavior_analyze', 'code_behavior_review'])
+  assert.equal(checkpoint!.drafts[phase]!.path, prior.drafts[phase]!.path)
+  assert.ok(!JSON.stringify(prior).includes(invalid))
+  assert.deepEqual(readTree(input.snapshot.source.commonDir, checkpoint!.drafts[phase]!.resultTree).filter(entry => !entry.path.startsWith('.spex-sync-drafts/')), readTree(input.snapshot.source.commonDir, input.composed.tree))
+  for (const patch of [{ ownerDigest: 'e'.repeat(64) }, { schemaDigest: 'e'.repeat(64) }]) {
+    const corrupted = structuredClone(prior); Object.assign(corrupted.drafts[phase]!, patch)
+    await assert.rejects(analyzeCodeBehavior(input, run, undefined, { load: () => corrupted, save() {} }), /owner|schema|草稿/)
+  }
+  if (invalidity === 'syntax') for (const path of ['src/export.js', 'tests/export.test.mjs', 'delete:src/export.js', 'delete:tests/export.test.mjs', prior.drafts[phase]!.path.replace(/\.json$/, '.schema.json')]) {
+    violation = path
+    await assert.rejects(analyzeCodeBehavior(input, run, undefined, { load: () => structuredClone(prior), save() {} }), /仅允许正常提交/)
   }
 })

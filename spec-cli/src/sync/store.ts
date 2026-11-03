@@ -148,6 +148,7 @@ export class SyncStore {
       const head = tx.query('SELECT pair_id,legacy_reason FROM sync_baseline_heads WHERE source_key=? AND resource_key=?', identityKey(source), resourceKey(resource))[0]
       if (head?.legacy_reason) return { failure: { code: 'SYNC_BASELINE_LEGACY_UNKNOWN', message: String(head.legacy_reason), kind: 'unsupported', evidenceRefs: [] } }
       const pair = head?.pair_id ? parseRecord<BaselinePair>(tx.query('SELECT record_json FROM sync_baseline_pairs WHERE id=?', String(head.pair_id))[0])! : null
+      if (head?.pair_id && (!pair || !tx.query("SELECT id FROM sync_apply_journals WHERE receipt_id=? AND status='settled'", pair.receiptId).length)) return { failure: { code: 'SYNC_PUBLICATION_BASE_BINDING', message: 'selected baseline head lacks settled receipt', kind: 'unsupported', evidenceRefs: [] } }
       bindings.push(resource.kind === 'path' ? { resource, bytePair: pair } : { resource, intentPair: pair })
     }
     const body = { version: 'sync-baseline-selection-v1' as const, source: clone(source), bindings }

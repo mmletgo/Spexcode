@@ -14,6 +14,10 @@ P0至P5按完整需求交付，不以阶段演示、局部测试或可修改的�
 
 ## expanded spec
 
+P1后置门禁对已审P0分类的质疑须精确绑定原真实变更owner、affectedIds与原分析/候选证据，在同operation和预算内重新分析及独审；可重判合法细节变化或维持refactor恢复错误候选，程序不改变分类或扩大AC/VERIFY权限。新分析使依赖P1重绑，兄弟P0保持；格式失败只续原文件与失败环节，同绑定的历史完整findings只作诊断，旧稿、引用和reserved请求不补写。
+
+P0的analysis/review同样按owner/purpose保真实Git临时JSON与精确只读schema；格式失败跨attempt续原稿，review格式失败保已校验分析，业务repair仍回分析和独审。旧只读Native原输出只在精确schema与原任务（仅剥非权威repairDiagnostics）、seed及冻结身份一致并经原真实性/停止认证后成为新seed材料，不冒充旧Git稿或批准。三轮兄弟分区仍承接原analyze及review出处，不重跑已接受区。持久语义由writer23在线备份/事务迁移围栏保护，回滚恢复升级前v22一致库及原evidence；既有reserved请求保持原绑定，原预算、source/tests只读与最终V1–V4/采纳门不变。
+
 机器重启造成物理来源身份变化时，可由[[sync-application]]的显式历史operation/input资源入口结算精确owned资源；canonicalRoot/commonDir仍须相同，正常read/resume/adopt完整身份门不变。此单次离线入口不重放journal或新建交付，不改原失败/候选/独审，不授予业务连续性，未知停止继续保留资源；复用原CAS/lease协议，不新增身份字段或writer版本。
 
 明确ZCode provider/model沿 [[zcode-structured-runtime]] 与同一会话/资源接缝执行。私有配置和实测只读边界下仅允许冻结reader；完整原生参数/结果、精确schema的实际模型输入、独立审查及正式关闭/全进程停止分别核验。既有认证只由SDK正常沿用，不复制凭据；不同provider不自动fallback，换模型仅新操作或合法retryOf。引擎能力证明不等于项目V1–V4、Docker、Git交付或采纳完成。
@@ -27,6 +31,8 @@ P0至P5按完整需求交付，不以阶段演示、局部测试或可修改的�
 原生输出上限的精确同轮续行在成功与已停结构输出耗尽中使用相同身份和实际API消费证明；合法续行不误判新用户轮，未知内部提示继续拒绝，耗尽仍是失败而非业务或交付通过。ZCode 严格 JSON 格式错误仅在完整原生真实性与 required 读取已核真后沿原预算有限续修，原 code/message 只反馈对应分区的新分析和独审；冷态原件篡改、真实性失败和旧缺码失败不取得该资格，原输出不改判通过。
 
 只读Spec全候选的晚发现锚点错误回到唯一P1 owner新生成并独审，保留其它已审分区及源/tests；相同产物且无owner新派发时停止热循环，真实多轮修订不增加预算上限。
+
+完整初始化资格与源码写头分开：正式已审并采纳的精确owner Spec/业务ID基线可证明其声明的未写源码或生成测试曾被只读验证，但须有settled receipt、真实scope、未漂移的before owner正文与sourceInput/delivery/before对象一致；缺binding/null不因此变成byte头或三方基线。已有非null路径头仍只认原头，未采纳、缺结算凭据、scope外或owner/源码漂移不取得该资格；单代码提交只派真实owner及原影响闭包，源码/tests与全部验证/采纳门保持。
 
 全量重建允许在同一 operation 内多轮生成与独立审查，不要求首次生成即完全一致。已独审通过的局部结果仅在原输入、政策、分区、依赖及实际局部冻结正文均保持精确绑定时跨 attempt 承接，并保留原审查与产物引用；未审、拒绝或仅生成的内容不能当作已通过。下一轮针对剩余问题继续，候选改变后必须重新审查受其影响的范围，最终候选仍须取得完整覆盖的独立审查。各轮共同消耗原 calls、attempts、repairs 与绝对期限，暂停恢复不重置预算，不通过另建操作绕过限制；局部进度不推进正式交付、基线或已同步状态。
 

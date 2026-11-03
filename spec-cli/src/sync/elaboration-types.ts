@@ -77,10 +77,10 @@ export type ElaborationDraft = {
   version: 'elaboration-draft-v1'; ownerDigest: string; sourceInputId: string; schemaDigest: string
   seed: { baseCommit: string; tree: string; mode: 'edit' }
   resultCommit: string; resultTree: string; path: string; oid: string
-  errors: { code: string; message: string }[]
+  errors: (Pick<ContractFinding, 'code' | 'message'> & Partial<ContractFinding>)[]
 }
 /** 仅在内存中从已认证历史原件读取；进入新seed后由真实提交形成draft检查点。 */
-export type ElaborationDraftMaterial = { source: string; errors: { code: string; message: string }[] }
+export type ElaborationDraftMaterial = { source: string; errors: (Pick<ContractFinding, 'code' | 'message'> & Partial<ContractFinding>)[]; sourceKind?: 'git_draft' | 'native_output' }
 export type ElaborationRound = { draft?: ElaborationDraft; rejectedOutput?: RejectedStructuredOutput & { ownerInputDigest: string; ownerRequestKey: string }; index: number; output: unknown; candidate: ElaborationCandidate | null; candidateDigest: string | null; findings: ContractFinding[]; reviewOutput: unknown; review: ElaborationReview | null; traces: ElaborationTrace[] }
 export type BlockedElaborationFlow = { flowId: string; blockedStepIds: string[]; gapIds: string[] }
 /** 仅由内部协调器提供的已结算、被拒绝候选；候选不是新的业务事实。 */
@@ -89,7 +89,7 @@ export type ElaborationRepairSeed = {
   output: unknown; candidate: ElaborationCandidate; findings: ContractFinding[]
   review: ElaborationReview | null; traces: ElaborationTrace[]
 }
-/** 已结算的生成/独审失败；无候选时保留真实原件诊断，不伪造业务拒绝seed。 */
+/** 已结算的生成/独审失败；完整原round仅作同绑定诊断，不伪造业务拒绝seed。 */
 export type ElaborationRepairDiagnostics = { requestKey: string; inputDigest: string; resultRef: BlobRef; failure: NonNullable<ElaborationResult['failure']>; round: ElaborationRound }
 export type ElaborationPriorReference = { requestKey: string; inputDigest: string; candidateDigest: string; renderedCandidateDigest: string; traces: ElaborationTrace[] }
 export type ElaborationResult = {

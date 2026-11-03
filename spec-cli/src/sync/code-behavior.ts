@@ -1,9 +1,9 @@
-import { overlayStageTree, stageWorktree, STAGE_READING_INSTRUCTIONS } from './stage-worktree.js'
+import { captureStageDraft, DRAFT_RECEIPT_SCHEMA, overlayStageTree, readStageDraft, stageWorktree, STAGE_READING_INSTRUCTIONS, type StageDraftBinding } from './stage-worktree.js'
 import { posix } from 'node:path'
 import { parseCodeEntry, relationClaimsPath } from '@spexcode/spec-core'
 import { syncModel } from './model-selection.js'
-import { dependencyClosure, parseContract, parseFrontmatter, parseParts, type ContractItem } from '@spexcode/spec-core/contracts'
-import type { AuthorizedContractChange, ElaborationRunner, ElaborationTrace } from './elaboration-types.js'
+import { dependencyClosure, parseContract, parseFrontmatter, parseParts, type ContractFinding, type ContractItem } from '@spexcode/spec-core/contracts'
+import type { AuthorizedContractChange, ElaborationDraft, ElaborationDraftMaterial, ElaborationSessionRequest, ElaborationRunner, ElaborationTrace } from './elaboration-types.js'
 import { outputErrors } from './elaboration-schema.js'
 import { actualTreeDiff, isHostPrivatePath } from './candidate.js'
 import { adoptedDeliveryPaths, isUtf8Text, mergeText, readCompositionEvidence, type IntentObject, type IntentResidual, type SelectedCompositionEvidence } from './composition.js'
@@ -11,10 +11,12 @@ import { validateRawIntegration } from './raw-integration.js'
 import { acceptanceSourceChanged, contractBusinessMeaning, decisionScopeIds, sameContractBusinessMeaning } from './contract-evolution.js'
 import { controlledDecisionIdentity, readControlledChanges, readControlledDecision, renderControlledDecisionRaw } from './request-input.js'
 import { isSyncSpecPath, readFrozenContracts } from './frozen-contracts.js'
-import type { BaselinePair, ComposedInputRef, FrozenBaselineSelection, InputSnapshot } from './operation-types.js'
-import { canonicalSnapshotSource, contentHash, objectGit, readEvidence, readObject, readTree, validateRepositoryPath, verifySnapshot, writeTree } from './snapshot.js'
+import type { BlobRef, BaselinePair, ComposedInputRef, FrozenBaselineSelection, InputSnapshot } from './operation-types.js'
+import { canonicalSnapshotSource, contentHash, objectGit, readEvidence, readObject, readTree, validateRepositoryPath, verifySnapshot, writeEvidence, writeTree } from './snapshot.js'
 import type { TreeEntry } from './snapshot.js'
 import type { SyncCoordinatorPlan } from './coordinator-types.js'
+import { StructuredSessionError, assertRejectedOutput } from '../session-structured-policy.js'
+import { nativeWorktreePrompt } from '../native-worktree-runtime.js'
 import type { FrozenEntryJson, FrozenReadProof } from '../frozen-context.js'
 import type { AcceptanceChangeProposal, ContractChangeProposal, CodeBehaviorAnalysis, CodeBehaviorChange, CodeBehaviorEvidence, CodeBehaviorFinding, ContractNodeProposal, SyncDecisionAuthority, SyncDecisionInput } from './writeback-types.js'
 
@@ -25,7 +27,24 @@ export const CODE_BEHAVIOR_SCHEMA = object({ changes: { type: 'array', items: ch
 export const CODE_BEHAVIOR_REVIEW_SCHEMA = object({ inputDigest: string, analysisDigest: string, verdict: { type: 'string', enum: ['accept', 'repair'] }, checkedPaths: strings, checkedChangeIds: strings, findings: { type: 'array', description: '仅列需要修正的问题；verdict=accept时必须为空数组，不写通过说明或肯定评价。', items: object({ message: string, evidence: string, counterexample: string }) } })
 export const CODE_BEHAVIOR_GUIDANCE_VERSION = 'code-behavior-guidance-v6'
 
-export type CodeBehaviorInput = { partition?: { id: string; changedPaths: readonly string[]; factSourcePaths: readonly string[]; authorizedParentSpecPaths?: readonly string[] }; model?: string; snapshot: InputSnapshot; baseline: BaselinePair | null; baselineSelection?: FrozenBaselineSelection; composed: ComposedInputRef; readSetDigest: string; policyDigest: string; plan: SyncCoordinatorPlan; requestKey: string; timeoutMs: number | null; signal?: AbortSignal; origin?: 'initial' | 'spec' | 'code' | 'combined' | 'reconcile' | 'decision'; decision?: { request: SyncDecisionInput; previous: CodeBehaviorEvidence; previousComposed?: ComposedInputRef; previousReadPaths?: readonly string[] }; repairDiagnostics?: readonly { code: string; message: string }[] }
+/** 后置门禁只质疑原分类；原件、真实行和代码差量不授予新业务权限。 */
+export type CodeBehaviorPostGateReview = {
+  partitionId?: string; analysisRef: BlobRef; analysis: CodeBehaviorAnalysis; resultRef: BlobRef; candidateDigest: string
+  findings: { finding: ContractFinding; before: ContractItem; after: ContractItem; changedPaths: string[] }[]
+  codeDiff: string
+}
+export type CodeBehaviorInput = { postGateReview?: readonly CodeBehaviorPostGateReview[]; draftProtocol?: 'code-behavior-draft-v1'; partition?: { id: string; changedPaths: readonly string[]; factSourcePaths: readonly string[]; authorizedParentSpecPaths?: readonly string[] }; model?: string; snapshot: InputSnapshot; baseline: BaselinePair | null; baselineSelection?: FrozenBaselineSelection; composed: ComposedInputRef; readSetDigest: string; policyDigest: string; plan: SyncCoordinatorPlan; requestKey: string; timeoutMs: number | null; signal?: AbortSignal; origin?: 'initial' | 'spec' | 'code' | 'combined' | 'reconcile' | 'decision'; decision?: { request: SyncDecisionInput; previous: CodeBehaviorEvidence; previousComposed?: ComposedInputRef; previousReadPaths?: readonly string[] }; repairDiagnostics?: readonly { code: string; message: string }[] }
+type BehaviorPurpose = 'code_behavior_analyze' | 'code_behavior_review'
+type CompletedBehaviorDraft = { trace: ElaborationTrace; draftOid: string; resultCommit: string; requestRef: BlobRef; receipt: unknown }
+/** 未批准临时稿只记录真实Git身份；readyAnalysis仅省去格式失败后的重复分析，不批准独审。 */
+export type CodeBehaviorContinuation = {
+  version: 'code-behavior-draft-v1'; inputDigest: string
+  drafts: Partial<Record<BehaviorPurpose, ElaborationDraft>>
+  errors?: Partial<Record<BehaviorPurpose, { code: string; message: string }[]>>
+  readyAnalysis?: CompletedBehaviorDraft
+  reviewResult?: CompletedBehaviorDraft
+}
+export type CodeBehaviorCheckpoints = { loadMaterial?(purpose: BehaviorPurpose, schemaDigest: string, inputDigest: string, request: Pick<ElaborationSessionRequest, 'prompt' | 'worktree'>): ElaborationDraftMaterial | null; load(inputDigest: string): CodeBehaviorContinuation | null; save(value: CodeBehaviorContinuation): void }
 type Proposal = { changes: Omit<CodeBehaviorChange, 'id'>[]; facts: CodeBehaviorAnalysis['facts']; acceptanceChanges: Omit<AcceptanceChangeProposal, 'action'>[]; newNodes: { codePath: string; parentNodeId: string; basis: string }[]; resolutions: CodeBehaviorAnalysis['resolutions'] }
 const within = (path: string, paths: readonly string[]): boolean => paths.some(parent => path === parent || path.startsWith(`${parent}/`))
 const sorted = (ids: readonly string[]): string[] => [...new Set(ids)].sort()
@@ -148,12 +167,20 @@ export function selectedAuthoredContractChanges(evidence: ReturnType<typeof read
   return [...changes.values()].sort((a, b) => a.path.localeCompare(b.path))
 }
 
-export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: ElaborationRunner, accepted?: (inputDigest: string) => CodeBehaviorAnalysis | null): Promise<CodeBehaviorAnalysis> {
+export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: ElaborationRunner, accepted?: (inputDigest: string) => CodeBehaviorAnalysis | null, checkpoints?: CodeBehaviorCheckpoints): Promise<CodeBehaviorAnalysis> {
   const { signal, ...data } = supplied, input: CodeBehaviorInput = { ...structuredClone(data), signal }
+  let continuation: CodeBehaviorContinuation | undefined
+  const persist = (): void => { if (continuation) checkpoints?.save(structuredClone(continuation)) }
   const diagnostic: { proposal?: unknown; analysis?: CodeBehaviorAnalysis; review?: unknown } = {}
-  function reject(message: string, details: Record<string, unknown> = {}, code = 'behavior_analysis_invalid'): never { throw Object.assign(new Error(JSON.stringify({ approved: false, message, details, ...diagnostic })), { code }) }
+  function reject(message: string, details: Record<string, unknown> = {}, code = 'behavior_analysis_invalid'): never {
+    const formatFailure = ['behavior_output_json', 'behavior_output_schema'].includes(code)
+    if (continuation && !formatFailure) { delete continuation.readyAnalysis; persist() }
+    throw Object.assign(new Error(JSON.stringify({ approved: false, message, details, ...(formatFailure ? { drafts: continuation?.drafts } : diagnostic) })), { code })
+  }
   const commonDir = input.snapshot.source.commonDir
   const worktree = input.plan.agentWorkflow ? stageWorktree(commonDir, input.snapshot.headCommit, input.composed.tree) : undefined
+  const draftMode = input.draftProtocol === 'code-behavior-draft-v1'
+  if (draftMode && !worktree) throw new TypeError('P0草稿协议必须绑定真实工作树')
   const frozenTreeReads = new Map<string, FrozenTreeRead>()
   verifySnapshot(input.snapshot)
   const selectedEvidence = input.baselineSelection ? readCompositionEvidence(input.snapshot, input.composed, input.baselineSelection) : null
@@ -333,13 +360,15 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
     partitionEvidence: undefined, partitionCoverage: undefined,
   } } } : input.decision ?? null
   const promptPlan = input.partition ? { ...input.plan, decisionAuthorities: input.plan.decisionAuthorities?.filter(authority => authority.paths.some(localPath) || authority.affectedIds.some(id => promptIds.has(id))), authorizedChanges: input.plan.authorizedChanges?.filter(change => promptIds.has(change.id)), ...(input.plan.version === 'sync-coordinator-v2' && input.plan.commitTrigger ? { commitTrigger: { ...input.plan.commitTrigger, paths: input.plan.commitTrigger.paths.filter(localPath) } } : {}) } : input.plan
+  const postGateReview = input.postGateReview?.length ? { postGateReview: input.postGateReview, postGateReviewPolicy: '仅为原分类的非权威质疑；沿原refs、真实旧新行和代码差量重新分析及独审，可维持refactor要求P1恢复错误改写，也可据原意和代码重判allowed_change，不扩大AC/VERIFY授权' } : {}
   const frozen = {
     guidanceContractVersion: CODE_BEHAVIOR_GUIDANCE_VERSION,
+    ...postGateReview,
     requiredChangedPaths: changedPaths, unownedSourcePaths, unownedSourcePathCount: unownedSourcePaths.length, rawlessSpecPaths,
     ...(readonlyCodeToSpec ? { newNodeParents } : {}),
     ...(input.partition ? { partition: { id: input.partition.id, changedPaths, factSourcePaths: sorted(input.partition.factSourcePaths), ...(input.partition.authorizedParentSpecPaths !== undefined ? { authorizedParentSpecPaths: sorted(input.partition.authorizedParentSpecPaths) } : {}) } } : {}),
     snapshotTree: input.snapshot.immutableTree, readablePaths,
-    contractItems: { previous: [...oldFrozen.graph.items.values()], current: [...current.graph.items.values()] }, origin: input.origin ?? 'code', decision: promptDecision, repairDiagnostics: input.repairDiagnostics ?? [], inputId: input.snapshot.id,
+    contractItems: { previous: [...oldFrozen.graph.items.values()], current: [...current.graph.items.values()] }, origin: input.origin ?? 'code', decision: promptDecision, repairDiagnostics: draftMode ? [] : input.repairDiagnostics ?? [], inputId: input.snapshot.id,
     baselinePair: input.partition && input.baseline ? { id: input.baseline.id, sourceInput: { id: input.baseline.sourceInput.id, immutableTree: input.baseline.sourceInput.immutableTree }, verifiedDelivery: { id: input.baseline.verifiedDelivery.id, immutableTree: input.baseline.verifiedDelivery.immutableTree }, coveredScope: { paths: input.baseline.coveredScope.paths.filter(localPath), contractIds: input.baseline.coveredScope.contractIds.filter(id => promptIds.has(id)), flowIds: input.baseline.coveredScope.flowIds.filter(id => promptIds.has(id)) } } : input.baseline,
     baselineSelection: promptSelection, compositionEvidence: promptComposition, authorByteProjections, intentArtifactFiles, nonTextFiles, composed: input.composed,
     readSetDigest: input.readSetDigest, policyDigest: input.policyDigest, plan: promptPlan, changedPaths, authorChanges, adoptedDeliveryPaths: sorted([...adopted].filter(path => !input.partition || localPath(path))), authorBaseline: [...authorBefore], oldSource, verifiedDelivery: delivery, newSource: source, composedFiles: composed, controlledBeforeFiles,
@@ -401,7 +430,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
     const entries = [...files.values()].map(({ path, mode, oid, digest }) => ({ path, mode, oid, digest }))
     return { role, projectedTaskPaths: true, ...stageWorktree(commonDir, input.snapshot.headCommit, writeTree(commonDir, [...inherited, ...entries])) }
   }) : undefined
-  const context = worktree ? JSON.stringify({ inputId: input.snapshot.id, origin: input.origin, partition: frozen.partition, requiredChangedPaths: changedPaths, unownedSourcePaths, rawlessSpecPaths, relatedSpecs: current.nodes.map(node => ({ nodeId: node.id, path: node.path })), newNodeParents, authorChanges, facts: input.plan.facts, allowedWritePaths: input.plan.writePaths, factSourcePaths: input.partition?.factSourcePaths, readonlyTests: input.plan.mandatoryTests, authorizations: input.plan.authorizedChanges, decisionAuthorities: input.plan.decisionAuthorities, decision: input.decision && { request: input.decision.request, priorAnalysisRef: input.decision.previous.ref }, historicalRoles, residuals: selectedEvidence?.intents.filter(item => item.changed).map(item => ({ resource: item.resource, pairId: item.pairId, before: item.before && { path: item.before.path, entry: item.before.entry }, delivery: item.delivery && { path: item.delivery.path, entry: item.delivery.entry }, source: item.source && { path: item.source.path, entry: item.source.entry } })), repairDiagnostics: input.repairDiagnostics }) : JSON.stringify(packed)
+  const context = worktree ? JSON.stringify({ inputId: input.snapshot.id, origin: input.origin, partition: frozen.partition, requiredChangedPaths: changedPaths, unownedSourcePaths, rawlessSpecPaths, relatedSpecs: current.nodes.map(node => ({ nodeId: node.id, path: node.path })), newNodeParents, authorChanges, facts: input.plan.facts, allowedWritePaths: input.plan.writePaths, factSourcePaths: input.partition?.factSourcePaths, readonlyTests: input.plan.mandatoryTests, authorizations: input.plan.authorizedChanges, decisionAuthorities: input.plan.decisionAuthorities, decision: input.decision && { request: input.decision.request, priorAnalysisRef: input.decision.previous.ref }, historicalRoles, residuals: selectedEvidence?.intents.filter(item => item.changed).map(item => ({ resource: item.resource, pairId: item.pairId, before: item.before && { path: item.before.path, entry: item.before.entry }, delivery: item.delivery && { path: item.delivery.path, entry: item.delivery.entry }, source: item.source && { path: item.source.path, entry: item.source.entry } })), repairDiagnostics: draftMode ? [] : input.repairDiagnostics, ...postGateReview }) : JSON.stringify(packed)
   const optionalEntryIds = (path: string): string[] => [...(entriesByPath.get(path) ?? [])].filter(id => bodyRoles.get(id)?.required === false)
   const turns = new Map<string, { threadId: string; turnId: string; proof?: FrozenReadProof }>()
   const requireOptionalRead = (paths: readonly string[], turn: { threadId: string; turnId: string; proof?: FrozenReadProof } | undefined, details: Record<string, unknown> = {}): void => {
@@ -430,21 +459,81 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   const decisionFrozen = previousComposed && previousReadPaths && input.baseline === null && input.baselineSelection && input.baselineSelection.bindings.every(binding => ('bytePair' in binding ? binding.bytePair : binding.intentPair) === null)
     ? await readFrozenContracts(input.snapshot.source.canonicalRoot, new Map(textFiles(fileTree(input, previousComposed.tree, frozenTreeReads)).filter(([path]) => within(path, previousReadPaths)))) : null
   frozenTreeReads.clear()
+  let analysisRequest: { requestRef: BlobRef; receipt: unknown } | undefined
   const inputDigest = contentHash(worktree ? JSON.stringify({ context, worktree, logicalInput: contentHash(JSON.stringify(frozen)) }) : context), traces: ElaborationTrace[] = []
   const previous = accepted?.(inputDigest)
   if (previous) return previous
+  if (draftMode) {
+    continuation = checkpoints?.load(inputDigest) ?? { version: 'code-behavior-draft-v1', inputDigest, drafts: {} }
+    if (continuation.version !== input.draftProtocol || continuation.inputDigest !== inputDigest) throw new Error('P0草稿续修完整输入绑定不匹配')
+  }
   let reviewWorktree = worktree
-  const dispatch = async (purpose: string, prompt: string, schema: Record<string, unknown>): Promise<unknown> => {
+  const dispatch = async (purpose: BehaviorPurpose, prompt: string, schema: Record<string, unknown>): Promise<unknown> => {
     if (signal?.aborted) throw Object.assign(new Error('行为分析已停止'), { code: 'cancelled' })
-    const result = await runner({ root: input.snapshot.source.canonicalRoot, base: (purpose === 'code_behavior_review' ? reviewWorktree : worktree)?.baseCommit ?? input.snapshot.headCommit, ...(worktree ? { worktree: purpose === 'code_behavior_review' ? reviewWorktree : worktree } : {}), requestKey: `${input.requestKey}:${purpose}`, inputDigest, purpose, prompt, schema, timeoutMs: input.timeoutMs, signal, model: syncModel(input), effort: 'high', ...(!worktree && frozenEntries.length ? { frozenEntries } : {}) })
+    const base = purpose === 'code_behavior_review' ? reviewWorktree : worktree
+    const ownerDigest = contentHash(JSON.stringify({ version: input.draftProtocol, source: canonicalSnapshotSource(input.snapshot.source), partitionId: input.partition?.id ?? null, purpose }))
+    const binding: StageDraftBinding = { ownerDigest, sourceInputId: input.snapshot.id, schemaDigest: contentHash(JSON.stringify(schema)), path: `.spex-sync-drafts/${ownerDigest}.json` }
+    const prior = continuation?.drafts[purpose]
+    if (prior && (prior.ownerDigest !== ownerDigest || prior.path !== binding.path || prior.schemaDigest !== binding.schemaDigest)) throw new Error('P0草稿owner/schema与当前阶段不匹配')
+    const material = draftMode && !prior ? checkpoints?.loadMaterial?.(purpose, binding.schemaDigest, inputDigest, { prompt, worktree: base }) : undefined
+    const source = prior ? readStageDraft(commonDir, prior, binding) : material?.source
+    if (purpose === 'code_behavior_analyze' && continuation?.readyAnalysis) {
+      const ready = continuation.readyAnalysis, trace = ready.trace
+      if (!prior || source === undefined || ready.draftOid !== prior.oid || ready.resultCommit !== prior.resultCommit || prior.errors.length || trace.purpose !== purpose || trace.inputDigest !== inputDigest || !trace.sessionId || !trace.threadId || !trace.turnId) throw new Error('P0已校验分析缺少原草稿及真实trace')
+      const output: unknown = JSON.parse(source)
+      if (outputErrors(output, schema).length) throw new Error('P0已校验分析草稿不符合当前schema')
+      analysisRequest = { requestRef: ready.requestRef, receipt: ready.receipt }
+      diagnostic.proposal = output; traces.push(trace)
+      return output
+    }
+    if (continuation && purpose === 'code_behavior_analyze') { delete continuation.drafts.code_behavior_review; delete continuation.reviewResult; delete continuation.readyAnalysis }
+    const seed = draftMode ? stageWorktree(commonDir, input.snapshot.headCommit, overlayStageTree(commonDir, base!.tree, [{ path: binding.path.replace(/\.json$/, '.schema.json'), source: JSON.stringify(schema) }, ...(source === undefined ? [] : [{ path: binding.path, source }])]), 'edit') : base
+    if (draftMode) prompt += `\n草稿文件=${binding.path}；${material ? material.sourceKind === 'git_draft' ? '认证的原Git分析草稿已按原字节复制到当前seed；沿该原文件核实分类并续修，旧批准不继承。' : material.sourceKind === 'native_output' ? '认证的旧只读Native成功结构化输出已序列化为本轮临时材料；它不是历史Git草稿或新批准，在该文件核实分类并续修。' : '旧Native原输出材料已按认证CAS原字节复制为本轮临时输入，不是既有Git草稿；在该原文件继续修复。' : source === undefined ? '首次实际创建该文件。' : '已有原草稿已复制到当前seed，在原文件继续修改，不从零重答。'}本段规定输出运输方式，替代上文只返回JSON/不修改文件的运输要求；业务文件仍只读，唯一可写例外为此草稿。结构化业务JSON写入此临时文件，Spec、源码、全部测试、其他owner文件保持不变。只允许正常git add和git commit该草稿并保持clean；无需改正文时可正常commit --allow-empty，保留hooks。final只返回简短summary，不重答整份JSON。草稿仅为非权威诊断材料，不是raw、事实、批准或新授权。\n草稿业务schema只读文件=${binding.path.replace(/\.json$/, '.schema.json')}；先读取精确schema并自检，禁止修改schema。原具体错误：${JSON.stringify(prior?.errors ?? material?.errors ?? continuation?.errors?.[purpose] ?? [])}；本轮修复诊断：${JSON.stringify(input.repairDiagnostics ?? [])}`
+    const nativeSchema = draftMode ? DRAFT_RECEIPT_SCHEMA : schema
+    const request = { root: input.snapshot.source.canonicalRoot, base: seed?.baseCommit ?? input.snapshot.headCommit, ...(seed ? { worktree: seed } : {}), requestKey: `${input.requestKey}:${purpose}`, inputDigest, purpose, prompt, schema: nativeSchema, timeoutMs: input.timeoutMs, signal, model: syncModel(input), effort: 'high' as const, ...(!worktree && frozenEntries.length ? { frozenEntries } : {}) }
+    let result: Awaited<ReturnType<ElaborationRunner>>
+    try { result = await runner(request) }
+    catch (error) {
+      if (draftMode && error instanceof StructuredSessionError && error.rejectedOutput) assertRejectedOutput(error.rejectedOutput, nativeWorktreePrompt(prompt, seed!), { inputDigest, purpose, schema: nativeSchema }, error)
+      if (draftMode && error instanceof StructuredSessionError) {
+        const errors: { code: string; message: string }[] = [{ code: error.code, message: error.message }]
+        if (error.failedWorktree) {
+          try {
+            const draft = captureStageDraft(commonDir, seed!, { worktree: error.failedWorktree }, binding)
+            draft.errors = errors; continuation!.drafts[purpose] = draft
+          } catch (draftError) { errors.push({ code: 'draft_witness_rejected', message: (draftError as Error).message }) }
+        }
+        continuation!.errors = { ...continuation!.errors, [purpose]: errors }; persist()
+      }
+      throw error
+    }
     if (signal?.aborted) throw Object.assign(new Error('行为分析结果已停止'), { code: 'cancelled' })
-    const output = structuredClone(result.output)
+    if (!result.sessionId || !result.threadId || !result.turnId || result.resultDigest !== contentHash(JSON.stringify(result.output))) reject('行为分析native身份/输出摘要不匹配')
+    let output: unknown = structuredClone(result.output)
+    if (draftMode) {
+      const draft = captureStageDraft(commonDir, seed!, result, binding)
+      continuation!.drafts[purpose] = draft; delete continuation!.errors?.[purpose]; persist()
+      if (outputErrors(result.output, DRAFT_RECEIPT_SCHEMA).length) reject('Native草稿summary回执不符合schema')
+      try { output = JSON.parse(readStageDraft(commonDir, draft, binding)) as unknown }
+      catch (error) {
+        if (!(error instanceof SyntaxError)) throw error
+        draft.errors = [{ code: 'behavior_output_json', message: error.message }]; persist(); reject(error.message, {}, 'behavior_output_json')
+      }
+    }
     if (purpose === 'code_behavior_review') diagnostic.review = output
     else diagnostic.proposal = output
-    if (!result.sessionId || !result.threadId || !result.turnId || result.resultDigest !== contentHash(JSON.stringify(output))) reject('行为分析native身份/输出摘要不匹配')
-    const errors = outputErrors(output, purpose === 'code_behavior_review' ? CODE_BEHAVIOR_REVIEW_SCHEMA : schema)
-    if (errors.length) reject(errors.join('; '))
-    traces.push({ purpose, sessionId: result.sessionId, threadId: result.threadId, turnId: result.turnId, inputDigest, resultDigest: result.resultDigest })
+    const errors = outputErrors(output, !draftMode && purpose === 'code_behavior_review' ? CODE_BEHAVIOR_REVIEW_SCHEMA : schema)
+    if (errors.length) {
+      if (draftMode) { continuation!.drafts[purpose]!.errors = errors.map(message => ({ code: 'behavior_output_schema', message })); persist() }
+      reject(errors.join('; '), {}, draftMode ? 'behavior_output_schema' : 'behavior_analysis_invalid')
+    }
+    if (draftMode && purpose === 'code_behavior_analyze') { const { signal: _signal, ...payload } = request; analysisRequest = { requestRef: writeEvidence(commonDir, payload), receipt: result.output } }
+    const trace = { purpose, sessionId: result.sessionId, threadId: result.threadId, turnId: result.turnId, inputDigest, resultDigest: result.resultDigest }
+    traces.push(trace)
+    if (draftMode && purpose === 'code_behavior_review') {
+      const { signal: _signal, ...payload } = request, draft = continuation!.drafts[purpose]!
+      continuation!.reviewResult = { trace, draftOid: draft.oid, resultCommit: draft.resultCommit, requestRef: writeEvidence(commonDir, payload), receipt: result.output }; persist()
+    }
     turns.set(purpose, { threadId: result.threadId, turnId: result.turnId, proof: result.frozenReadProof })
     return output
   }
@@ -618,6 +707,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   })
   const analysis: CodeBehaviorAnalysis = { version: 'code-behavior-v1', inputId: input.snapshot.id, baselinePairId: input.baseline?.id ?? null, ...(input.baselineSelection ? { baselineSelectionDigest: input.baselineSelection.digest } : {}), composedDigest: input.composed.contentDigest, readSetDigest: input.readSetDigest, policyDigest: input.policyDigest, inputDigest, decisionAuthorities, ...(input.decision && input.composed.requestBlob ? { decision: { requestRef: input.composed.requestBlob, analysisRef: input.decision.previous.ref, findingIds: input.decision.request.findingIds } } : {}), authorChanges, rawIntegrations, changes, findings, facts: proposal.facts, authorizedChanges, nodeChanges, newNodes, resolutions: proposal.resolutions, traces: [], reviewPassed: false }
   diagnostic.analysis = analysis
+  if (continuation) { continuation.readyAnalysis = { ...analysisRequest!, trace: traces[0], draftOid: continuation.drafts.code_behavior_analyze!.oid, resultCommit: continuation.drafts.code_behavior_analyze!.resultCommit }; persist() }
   const analysisDigest = contentHash(JSON.stringify(analysis))
   const reviewSchema = structuredClone(CODE_BEHAVIOR_REVIEW_SCHEMA)
   const reviewProperties = reviewSchema.properties as Record<string, unknown>

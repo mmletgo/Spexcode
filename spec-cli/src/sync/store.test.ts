@@ -336,6 +336,31 @@ test('v22 draft and settled native RPC writer marker preserves v21 records and r
   } finally { backup?.close(); f.cleanup() }
 })
 
+test('v23 P0 draft marker fences v22 before any dispatch reservation and keeps backup recoverable', async () => {
+  const f = await fixture()
+  let backup: ReturnType<typeof openProtocol> | undefined
+  try {
+    const claim = f.claim(), marker = f.put({ version: 'code-behavior-draft-v1' })
+    const wrapper = f.put({ version: 'sync-stage-v1', stage: 'behavior-draft-protocol', resultRef: marker })
+    f.store.checkpoint(claim.fence, { ...wrapper, artifacts: [{ kind: 'json', ref: marker }] })
+    assert.deepEqual(f.store.readAttempt(claim.attempt.id).dispatchPlans, [], '模拟协议已冻结但尚未reserve的崩溃窗口')
+    f.protocol.withTransaction(tx => tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=23', SYNC_COMPONENT))
+    const tables = ['sync_operations', 'sync_attempts', 'sync_resources', 'sync_ingress_receipts', 'sync_apply_journals', 'sync_baseline_pairs', 'sync_leases']
+    const rows = (protocol: typeof f.protocol) => protocol.withTransaction(tx => Object.fromEntries(tables.map(table => [table, tx.query(`SELECT * FROM ${table}`)])))
+    const before = rows(f.protocol), checksums = f.protocol.withTransaction(tx => tx.query('SELECT version,checksum,applied_at_ms FROM schema_migrations WHERE component=? ORDER BY version', SYNC_COMPONENT))
+    assert.ok(SYNC_MIGRATIONS.some(migration => migration.version === 23), 'P0 draft protocol needs its own writer fence')
+    const backupPath = join(f.root, 'v22-before-p0-drafts.backup')
+    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), 23)
+    assert.deepEqual(rows(f.protocol), before)
+    assert.deepEqual(f.protocol.withTransaction(tx => tx.query('SELECT version,checksum,applied_at_ms FROM schema_migrations WHERE component=? AND version<=22 ORDER BY version', SYNC_COMPONENT)), checksums)
+    assert.throws(() => applyComponentMigrations(f.protocol, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 22)), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
+    backup = openProtocol(backupPath)
+    assert.equal(applyComponentMigrations(backup, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 22)), 22)
+    assert.deepEqual(rows(backup), before)
+    assert.equal(await migrateSyncStore(f.protocol), 23)
+  } finally { backup?.close(); f.cleanup() }
+})
+
 test('same stable admission and capture-time replay create one operation and protocol message; conflict rolls back', async () => {
   const f = await fixture()
   try {
