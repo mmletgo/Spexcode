@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+正式已审Native JSON用真实正常Git提交与独审建立后，实际P1全null扩域改变读集/基线选择，再经真实V1锚点拒绝及正式pause/run留下无产物控制attempt。恢复后的下一Native seed须保原草稿path/OID/完整字节及当前精确schema，局部inputDigest改变不丢材料，也不继承旧accept；原已审JSON、generation失败和refs逐字不变。此受控runner只证明材料续修接缝，不冒称真实模型、Docker或交付通过；owner/schema/source及Git边界沿原草稿回归拒绝。
+
 独立resource-only回归以真实Git/私有SQLite保存既有资源，受控Docker driver只模拟外部inspect/rm结果；精确既有容器可清理，目标缺失或labels不符继续未结算，错误runId计划在调用driver前拒绝。所有模式禁止create/start、新attempt/dispatch/资源、业务失败改写或journal交付；该接缝证据不冒称真实Docker清理。
 
 分区内容路径越界回归先复现已独审后才partition_binding停止，再证明独审前analysis_invalid沿原预算进入下一attempt，完整诊断只回失败分区的新分析/独审，已accept区不重派；原source/index、冻结集合及全部不可变绑定门保持。

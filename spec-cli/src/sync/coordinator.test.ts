@@ -4255,6 +4255,81 @@ test('Native P1草稿跨attempt从真实Git原文件续改，小回执保持成�
   assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
 })
 
+test('已审Native JSON经P1合法null扩域及V1拒绝后，跨纯暂停attempt继续原Git草稿', async t => {
+  const source = original.split('\n').map(line => line.startsWith('| AC-EXPORT-') ? line.replace(' | derived:REQ-EXPORT-01 | REQ-EXPORT-01 |', ' | code:src/export.js#ExportService | REQ-EXPORT-01 |') : line).join('\n')
+  const f = await fixture(t, { maxAttempts: 4, maxCalls: 12, maxRepairs: 2, timeoutMs: 120_000 }, false, source, 'project', source, {
+    version: 'sync-coordinator-v2', direction: 'code_to_spec', agentWorkflow: 'native-worktree-v1', writePaths: ['.spec'], sourcePaths: ['src'],
+    partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 },
+    commitTrigger: { before: null, paths: ['src/export.js'] },
+  }, undefined, 'code', 'claude:MiniMax-M3.1-Flash', true)
+  let draft: NonNullable<ElaborationResult['rounds'][number]['draft']> | undefined, draftBytes = '', firstInput = '', continued = false, emptyAttempt = ''
+  const originalArtifacts: string[] = []
+  const originalRunner = f.options.runner!
+  f.options.runner = async request => {
+    const attempt = f.store.readAttempt(f.store.readOperation(f.operation.id).currentAttemptId!), dispatch = attempt.dispatchPlans.find(item => item.key === request.requestKey)!
+    const seed = request.worktree!, workspace = join(f.parent, `accepted-draft-${attempt.number}-${request.purpose}`)
+    f.git('worktree', 'add', '--detach', workspace, seed.baseCommit)
+    if (request.purpose.startsWith('code_behavior_')) return { ...await originalRunner({ ...request, prompt: request.prompt.replace('\n任务:\n', '\n冻结三方输入:\n').replace('"requiredChangedPaths":', '"changedPaths":') }), worktree: nativeWorktreeResult(workspace, seed) }
+    assert.ok(request.purpose.startsWith('elaboration_'), 'V1拒绝前不派P2独审或代码生成')
+    if (request.purpose === 'elaboration_generate') {
+      const path = /草稿文件=([^\s]+)/.exec(request.prompt)![1]
+      if (attempt.number > 1) {
+        assert.ok(draft)
+        const priorDraft = draft, entry = readTree(f.input.source.commonDir, seed.tree).find(entry => entry.path === priorDraft.path)
+        assert.ok(entry, '合法null扩域后的新Native seed必须承接正式已审JSON')
+        assert.equal(entry.oid, draft.oid); assert.equal(readObject(f.input.source.commonDir, entry.oid).toString('utf8'), draftBytes)
+        const schema = readTree(f.input.source.commonDir, seed.tree).find(entry => entry.path === path.replace(/\.json$/, '.schema.json'))!
+        assert.equal(contentHash(readObject(f.input.source.commonDir, schema.oid)), draft.schemaDigest)
+        assert.notEqual(request.inputDigest, firstInput); assert.ok(request.prompt.includes('旧accept不继承')); assert.ok(!request.prompt.includes('"priorDraft":null'))
+        continued = true
+        throw Object.assign(new Error('已核真实seed草稿身份，受控回归在新批准前停止'), { code: 'unsupported' })
+      }
+      firstInput = request.inputDigest
+      const generated = rows(source)
+      for (const acceptance of generated.changes[0].tables.AC) acceptance.source = `code:tests/export.test.mjs#${String(acceptance.id)}`
+      draftBytes = JSON.stringify(adaptElaborationNativeOutput(request, generated))
+      mkdirSync(join(workspace, path, '..'), { recursive: true }); writeFileSync(join(workspace, path), draftBytes)
+      execFileSync('git', ['-C', workspace, 'add', path], { stdio: 'pipe' }); execFileSync('git', ['-C', workspace, 'commit', '-m', 'accepted owner draft'], { stdio: 'pipe' })
+    }
+    const output = request.purpose === 'elaboration_generate' ? { summary: '实际JSON草稿已提交' } : { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+    return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `accepted-draft-${request.requestKey}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)), worktree: nativeWorktreeResult(workspace, seed) }
+  }
+  const recordFailure = f.store.recordFailure.bind(f.store)
+  f.store.recordFailure = (fence, issue) => {
+    const attempt = f.store.readAttempt(fence.attemptId)
+    const failed = recordFailure(fence, issue)
+    if (attempt.number !== 1 || issue.code !== 'generation_failed') return failed
+    const stages = attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
+    const local = stages.find(stage => stage.stage?.startsWith('partition:') && stage.stage.endsWith(':elaboration'))
+    const accepted = JSON.parse(readEvidence(f.input.source.commonDir, local.resultRef).toString()) as ElaborationResult
+    const whole = stages.find(stage => stage.stage === 'elaboration'), generation = stages.find(stage => stage.stage === 'generation')
+    const generated = JSON.parse(readEvidence(f.input.source.commonDir, generation.resultRef).toString()) as import('./generation-types.js').GenerationResult
+    assert.equal(accepted.reviewPassed, true); assert.equal(accepted.structurePassed, true); assert.equal(generated.candidateValidated, false)
+    assert.ok(generated.validationFindings.some(finding => finding.code === 'anchor-dead'))
+    draft = accepted.rounds.at(-1)!.draft!
+    assert.equal(readObject(f.input.source.commonDir, draft.oid).toString('utf8'), draftBytes)
+    const current = f.store.readOperation(f.operation.id), priorSelection = JSON.parse(readEvidence(f.input.source.commonDir, local.baselineSelectionRef).toString()) as NonNullable<typeof current.baselineSelection>
+    assert.notEqual(local.readSetDigest, current.readSetDigest)
+    for (const binding of priorSelection.bindings) assert.ok(current.baselineSelection!.bindings.some(item => JSON.stringify(item) === JSON.stringify(binding)))
+    assert.ok(current.contractScopeExpansions!.some(expansion => expansion.evidenceRef.sha256 === whole.resultRef.sha256))
+    originalArtifacts.push(JSON.stringify(accepted), JSON.stringify(generated))
+    f.store.requestControl(f.operation.id, 'pause'); f.store.requestControl(f.operation.id, 'run')
+    const queued = f.store.readOperation(f.operation.id)
+    const empty = f.store.claimQueuedAttempt({ operationId: f.operation.id, source: f.input.source, scope: queued.scope, leaseMs: 30_000, expectedRevision: queued.revision }).attempt
+    emptyAttempt = empty.id
+    f.store.requestControl(f.operation.id, 'pause'); f.store.requestControl(f.operation.id, 'run')
+    assert.deepEqual(empty.checkpointRefs, []); assert.deepEqual(empty.dispatchPlans, []); assert.equal(empty.composedInput, null)
+    return f.store.readOperation(f.operation.id)
+  }
+  const result = await runSyncOperation(f.store, f.operation.id, f.options)
+  assert.equal(continued, true, JSON.stringify({ status: result.status, failure: result.failure, attempts: f.store.listAttempts(f.operation.id).map(attempt => ({ number: attempt.number, failure: attempt.failure })) }))
+  assert.equal(f.store.readAttempt(emptyAttempt).status, 'superseded')
+  const initial = f.store.listAttempts(f.operation.id)[0], stages = initial.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
+  const currentArtifacts = [stages.find(stage => stage.stage?.startsWith('partition:') && stage.stage.endsWith(':elaboration')), stages.find(stage => stage.stage === 'generation')].map(stage => readEvidence(f.input.source.commonDir, stage.resultRef).toString())
+  assert.deepEqual(currentArtifacts, originalArtifacts)
+  assert.equal(f.store.listJournals(f.operation.id).length, 0); assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
+})
+
 test('已有reserved P1在SQLite冷恢复后草稿协议缺席仍不补签或改写历史派发', async t => {
   const f = await fixture(t, { maxAttempts: 1, maxCalls: 4, maxRepairs: 0, timeoutMs: 120_000 }, false, original, 'project', original, { agentWorkflow: 'native-worktree-v1' }, undefined, 'spec', 'claude:MiniMax-M3.1-Flash')
   const claimed = f.store.claimAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 30_000, expectedMessageId: f.operation.dispatchMessageId })

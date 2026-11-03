@@ -1105,9 +1105,15 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         }
         return null
       }
+      const draftMaterialStage = (prior: SyncAttempt, key: string): { result: SavedElaboration; resultRef: BlobRef } | null => {
+        const exact = partitionStage<SavedElaboration>(store, operation, prior, key)
+        if (exact || !operation.baselineSelection) return exact
+        const result = stage<SavedElaboration>(store, operation, prior, key)
+        return result ? { result, resultRef: writeEvidence(operation.input.source.commonDir, result) } : null
+      }
       const loadElaborationDraft = (key: string, binding?: NonNullable<ElaborationResult['partitionBinding']>): ElaborationDraft | null => {
         for (const prior of store.listAttempts(operation.id).filter(item => item.number < attempt!.number && ['failed', 'superseded', 'settled'].includes(item.status)).reverse()) {
-          const source = partitionStage<SavedElaboration>(store, operation, prior, key)
+          const source = draftMaterialStage(prior, key)
           if (!source || source.result.phase === 'partitioned_final' || source.result.partitionBinding?.partitionId !== binding?.partitionId) continue
           const draft = source.result.rounds.at(-1)?.draft
           if (!draft) continue
@@ -1119,7 +1125,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       }
       const loadElaborationDraftMaterial = (key: string, binding?: NonNullable<ElaborationResult['partitionBinding']>): ElaborationDraftMaterial | null => {
         for (const prior of store.listAttempts(operation.id).filter(item => item.number < attempt!.number && ['failed', 'superseded', 'settled'].includes(item.status)).reverse()) {
-          const source = partitionStage<SavedElaboration>(store, operation, prior, key), round = source?.result.rounds.at(-1)
+          const source = draftMaterialStage(prior, key), round = source?.result.rounds.at(-1)
           if (!source || !round || source.result.phase === 'partitioned_final' || source.result.partitionBinding?.partitionId !== binding?.partitionId) continue
           if (round.draft || stage<{ version: string }>(store, operation, prior, 'elaboration-draft-protocol')?.version === 'elaboration-draft-v1') return null
           const version = (round.output as { version?: unknown } | null)?.version
