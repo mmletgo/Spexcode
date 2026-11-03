@@ -664,7 +664,7 @@ export async function generateSyncPartitions(input: GenerationInput, plan: SyncP
     const accepted = checkpoints.loadAcceptedCandidateReview?.(key, plan, reviewInput, candidate, settledReviewTraces)
     if (accepted) { settledReviewTraces.push(...accepted.traces); return accepted }
     checkpoints.save(`${key}:input`, freezeGenerationInput(reviewInput).inputEvidence)
-    const result = await runGeneration(reviewInput, { ...options, beforeFreezeCandidate: undefined, reviewCandidate: candidate, builderTraces: builders, validateCandidate: async () => validationFindings })
+    const result = await runGeneration(reviewInput, { ...options, beforeFreezeCandidate: undefined, reviewCandidate: candidate, reviewSpecWritePaths: dispatch.specWritePaths, builderTraces: builders, validateCandidate: async () => validationFindings })
     const { candidateFiles: _files, ...compact } = result
     settledReviewTraces.push(...compact.traces)
     checkpoints.save(key, compact)

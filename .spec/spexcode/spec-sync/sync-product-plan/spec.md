@@ -44,7 +44,7 @@ P0的analysis/review同样按owner/purpose保真实Git临时JSON与精确只读s
 
 父接口起步阶段仅生成和独审必要的共享REQ/RULE/GAP，不同时要求完整对象、流程、状态与AC展开。具体子区承担完整细化，最后仍核全图覆盖；父层已声明的义务必须准确、有来源且相容，不能以分阶段为由接受错误。
 
-Native P1生成与独审对普通无冲突实现约定、重大业务未知和明确意图冲突按[[sync-elaboration]]的共享来源边界判断。空`implementationWritePaths`表示源码与全部测试只读，不新增测试或把实现缺口交给无权P2，并以`readonly_implementation_gap`阻断；父接口阶段仍只审必要接口种子。
+Native P1生成与独审对普通无冲突实现约定、重大业务未知和明确意图冲突按[[sync-elaboration]]的共享来源边界判断。空`implementationWritePaths`表示源码与全部测试只读，不新增测试或把实现缺口交给无权P2，并以`readonly_implementation_gap`阻断；父接口阶段仍只审必要接口种子。存在当前受审P0时，两阶段共用完整analysis正文/ref及实际分区binding，按当前分类重核原样历史诊断；authorizedChanges为空仅表示没有AC/VERIFY、退役/恢复特殊动作，不阻止当前raw及源码支持的已审非冲突明细同步，也不扩大原纯refactor、特殊动作授权或P1批准边界。
 
 代码提交可在完整已结算基线已被来源 Git 真实采纳后，按提交路径的实际 owner 与必要影响闭包规划。只有真实 `before`、完整 discovery selection 的精确资源头和对应 delivery 采纳均可验证时才收窄；首次、无/未采纳/未完成基线、缺少精确绑定、根原意或配置变化、未治理源码变化继续完整 bootstrap/发现。多轮 freeze 始终用原始 discovery selection 证明完整基线，不能将上一轮的窄 selection 当作覆盖证明；失败 admission、保存或暂存信号不消费基线。
 
@@ -87,3 +87,5 @@ Native worktree P0分析与独审共用业务语义：可由raw、源码和完�
 局部分区全部accept仍不能替代全局seal。封口error绑定原aggregate/局部ref及真实输入后交回所属owner、接口后代与引用依赖重新生成和独审，保无关accept；warning不升error，父不补FLOW、不降覆盖或作者授权。无法路由或同候选同error无新派发时typed停止；只有同selection、无任何检查点/派发/业务/会话锚的superseded空控制attempt可越过，旧真实证据仍完整重验，所有attempt/calls仍计原预算。
 
 格式或schema失败的完整raw final属于不可信UTF8证据，不能被checkpoint或证据API当作stage/业务JSON。正式详情与原操作恢复在保留历史raw refs的同时继续可读；权限由原失败round/Native身份及当前停止证据核验，未知损坏材料不被静默跳过。v21按原备份/拒旧writer/回滚路径切换。
+
+最终候选独审的格式/schema拒绝及已认证Native成功但只读P1定位字段无效时，沿[[sync-generation]]同一候选与reviewRepair原件把完整原JSON、精确schema、错误和trace交唯一临时Git稿续改；仅失败组新派发，兄弟accept原绑定保持。Agent正常提交并重新严格校验后才回原P1，不清洗原位置、伪造Native失败或扩业务写权；一般可写P2及合法跨owner精确诊断保持原协议，瞬态写范围复用唯一dispatch，无新持久字段或DB版本。
