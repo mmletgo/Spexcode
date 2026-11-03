@@ -12,14 +12,14 @@ import type { CodeBehaviorAnalysis, CodeBehaviorEvidence, SyncDecisionInput } fr
 import { adoptedDeliveryPaths, isUtf8Text, readCompositionEvidence, selectedRetiredIds, verifyBaselineSelection } from './composition.js'
 import { readHistoryRequest, readReceiptHistoryRestorations } from './history-input.js'
 import { composeAuthoredInput } from './author-input.js'
-import { elaborate, freezeElaborationInput, verifyElaborationDraftCache } from './elaboration.js'
+import { elaborate, freezeElaborationInput, gapBlockedFinding, verifyElaborationDraftCache } from './elaboration.js'
 import type { ElaborationResult, ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult, ElaborationTrace, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial } from './elaboration-types.js'
 import { claimFileMutex } from './file-mutex.js'
 import { authenticateNativeRejectedFinal, readSyncCheckpoints, syncCheckpointArtifacts } from './checkpoint-evidence.js'
 import type { FileMutex } from './file-mutex.js'
-import { checkGenerationContractIntent, readFrozenContracts } from './frozen-contracts.js'
+import { checkGenerationContractIntent, isSyncSpecPath, readFrozenContracts } from './frozen-contracts.js'
 import { decisionAuthorizationErrors, sameContractBusinessMeaning } from './contract-evolution.js'
-import type { FrozenContracts } from './frozen-contracts.js'
+import type { FrozenContracts, GenerationContractPolicy } from './frozen-contracts.js'
 import { implementationGenerationDispatch, completeSyncPartitionPlan, analyzeSyncPartitions, elaborateSyncPartitions, generateSyncPartitions, partitionSealRepairOwners, IMPLEMENTATION_PLAN_SCHEMA } from './partition-execution.js'
 import type { FileWriterPlan, PartitionCheckpoints, PartitionAnalysisFailure, PartitionAnalysisFailures } from './partition-execution.js'
 import { planSyncPartitions } from './partitioning.js'
@@ -32,7 +32,7 @@ import type { NativeRunCheckpoint, NativeRunPlan } from './native-run.js'
 import type { AdmitSyncInput, ApplyReceipt, BlobRef, CandidateRef, ComposedInputRef, FrozenBaselineSelection, InputSnapshot, SyncAttempt, SyncFailure, SyncOperation, SyncScope, SyncResourceRecord, VerificationResultBlob, WriteFence } from './operation-types.js'
 import { deliverVerifiedAttempt, planPrivateDelivery } from './private-delivery.js'
 import { assemblePublicationBase } from './publication-base.js'
-import { ownedObligationPaths } from './prior-context.js'
+import { obligationPaths, ownedObligationPaths } from './prior-context.js'
 import { composeControlledRequest, readControlledChanges, readControlledDecision } from './request-input.js'
 import { sessionIdForCreateKey } from '../sessions.js'
 import { withoutSessionApplicationExecutionWake } from '../session-application.js'
@@ -741,18 +741,26 @@ function safeArtifactRoot(root: string, operation: SyncOperation): void {
   if (resolve(root) !== root || realpathSync(root) !== root || !stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== process.getuid?.() || (stat.mode & 0o077) !== 0 || root === operation.input.source.canonicalRoot || root.startsWith(`${operation.input.source.canonicalRoot}${sep}`) || operation.input.source.canonicalRoot.startsWith(`${root}${sep}`)) fail('artifact_directory', 'artifactRoot必须是source外canonical、当前用户独占0700目录')
 }
 function findingKey(finding: ContractFinding): string { return canonical({ code: finding.code, path: finding.path, nodeId: finding.nodeId, itemId: finding.itemId ?? null, relatedIds: unique(finding.relatedIds ?? []) }) }
-async function candidateContext(operation: SyncOperation, candidate: CandidateRef, view: InputView): Promise<FrozenContracts> {
-  const files = new Map(view.files)
-  const entries = verifyCandidate(operation.input.source.commonDir, candidate), changed = actualTreeDiff(view.manifest.entries, entries)
-  for (const file of changed.filter(file => within(file.path, [...view.readPaths, ...operation.scope.paths]))) {
-    const entry = entries.find(item => item.path === file.path)
-    if (!entry) files.delete(file.path)
-    else {
-      const bytes = readObject(operation.input.source.commonDir, entry.oid)
-      if (entry.mode !== '120000' && isUtf8Text(bytes)) files.set(file.path, bytes.toString('utf8'))
-    }
-  }
+export async function candidateContext(operation: SyncOperation, candidate: CandidateRef): Promise<FrozenContracts> {
+  const files = new Map<string, string>()
+  const entries = verifyCandidate(operation.input.source.commonDir, candidate)
+  readTree(operation.input.source.commonDir, candidate.tree, (entry, bytes) => {
+    if (entry.mode === '120000' || isHostPrivatePath(entry.path)) return
+    if (isUtf8Text(bytes)) files.set(entry.path, bytes.toString('utf8'))
+  })
   return readFrozenContracts(operation.input.source.canonicalRoot, files, new Set(entries.map(entry => entry.path)))
+}
+/** 完整结构上下文不授予新意图；真实Spec差量的未读前态只取候选基树。 */
+export async function checkCandidateContractIntent(operation: SyncOperation, candidate: CandidateRef, accepted: FrozenContracts, frozen: FrozenContracts, policy: GenerationContractPolicy): Promise<ContractFinding[]> {
+  const commonDir = operation.input.source.commonDir, entries = verifyCandidate(commonDir, candidate), base = readTree(commonDir, candidate.baseTree)
+  const changed = new Set(actualTreeDiff(base, entries).filter(change => isSyncSpecPath(change.path)).map(change => change.path))
+  const paths = new Set([...accepted.nodes.map(node => node.path), ...changed]), before = new Map(accepted.files)
+  for (const entry of base) if (changed.has(entry.path) && !before.has(entry.path) && entry.mode !== '120000' && !isHostPrivatePath(entry.path)) {
+    const bytes = readObject(commonDir, entry.oid)
+    if (isUtf8Text(bytes)) before.set(entry.path, bytes.toString('utf8'))
+  }
+  const after = new Map([...frozen.files].filter(([path]) => !isSyncSpecPath(path) || paths.has(path)))
+  return checkGenerationContractIntent(await readFrozenContracts(operation.input.source.canonicalRoot, before), await readFrozenContracts(operation.input.source.canonicalRoot, after), policy)
 }
 function acceptanceRuns(frozen: FrozenContracts, ready: SyncScope, plan: SyncCoordinatorPlan, retirement?: { before: FrozenContracts; ids: string[] }): AcceptanceRun[] {
   const acIds = ready.contractIds.filter(id => frozen.graph.items.get(id)?.kind === 'AC')
@@ -1650,14 +1658,30 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
             }
             await yieldToControl(); store.renewLease(fence!, leaseMs)
           }
-          const frozen = await candidateContext(operation, candidate, view)
-          const findings = frozen.findings.filter(issue => !(allowedGap.has(findingKey(issue)) && (!issue.itemId || blocked.contractIds.includes(issue.itemId) || blocked.flowIds.includes(issue.itemId))))
+          const frozen = await candidateContext(operation, candidate)
+          const inheritedGapFindings = new Set<string>()
+          if (elaboration.partitionSeal?.passed) {
+            const commonDir = operation.input.source.commonDir, base = readTree(commonDir, candidate.baseTree), entries = verifyCandidate(commonDir, candidate)
+            const composedEntries = new Map(view.manifest.entries.map(entry => [entry.path, entry])), baseEntries = new Map(base.map(entry => [entry.path, entry])), candidateEntries = new Map(entries.map(entry => [entry.path, entry]))
+            const inventory = unique([...composedEntries.keys(), ...baseEntries.keys(), ...candidateEntries.keys()])
+            const readyIds = new Set([...ready.contractIds, ...ready.flowIds, ...ready.flowIds.flatMap(id => { const flow = frozen.graph.items.get(id); return flow?.kind === 'FLOW' ? flow.steps : [] })])
+            const gaps = frozen.coverage.gaps.filter(gap => {
+              const item = frozen.graph.items.get(gap.id)!, approved = elaboration.gaps.find(item => item.id === gap.id)
+              if (!approved || !sameContractBusinessMeaning(approved, item) || [gap.id, ...gap.affectedIds].some(id => readyIds.has(id))) return false
+              const owners = [gap.id, ...gap.affectedIds].map(id => frozen.graph.owners.get(id))
+              if (owners.some(owner => !owner || accepted.nodes.some(node => node.path === owner.path))) return false
+              return unique(owners.map(owner => owner!.path)).flatMap(path => obligationPaths(frozen.files.get(path)!, path, inventory, true)).every(path => canonical(composedEntries.get(path)) === canonical(baseEntries.get(path)) && canonical(baseEntries.get(path)) === canonical(candidateEntries.get(path)))
+            })
+            const coverage = { ...frozen.coverage, gaps }
+            for (const issue of elaboration.partitionSeal.findings) if (issue.severity === 'error' && (['unresolved-gap', 'unresolved-conflict'].includes(issue.code) ? gaps.some(gap => gap.id === issue.itemId) : gapBlockedFinding(issue, coverage))) inheritedGapFindings.add(findingKey(issue))
+          }
+          const findings = frozen.findings.filter(issue => !(allowedGap.has(findingKey(issue)) && (!issue.itemId || blocked.contractIds.includes(issue.itemId) || blocked.flowIds.includes(issue.itemId))) && !inheritedGapFindings.has(findingKey(issue)))
           for (const gap of [...accepted.graph.items.values()].filter(item => item.kind === 'GAP')) {
             const next = frozen.graph.items.get(gap.id)
             const meaning = (item: typeof gap): unknown => ({ id: item.id, kind: item.kind, gapKind: item.gapKind, unknown: item.unknown, affects: item.affects, evidence: item.evidence, decision: item.decision, source: item.source, dependsOn: item.dependsOn })
             if (next?.kind !== 'GAP' || canonical(meaning(gap)) !== canonical(meaning(next))) findings.push({ code: 'generation-gap-changed', severity: 'error', path: gap.path, nodeId: gap.nodeId, itemId: gap.id, message: '生成阶段不能删除或改变已独立审查GAP及其精确阻塞范围' })
           }
-          findings.push(...checkGenerationContractIntent(accepted, frozen, { newNodeRawSources: new Map([...(options.plan.newNodeRawSources ?? []), ...(analysis?.analysis.newNodes ?? [])].map(item => [item.path, item.rawSource])), verifications: options.plan.verifications.map(item => item.definition) }))
+          findings.push(...await checkCandidateContractIntent(operation, candidate, accepted, frozen, { newNodeRawSources: new Map([...(options.plan.newNodeRawSources ?? []), ...(analysis?.analysis.newNodes ?? [])].map(item => [item.path, item.rawSource])), verifications: options.plan.verifications.map(item => item.definition) }))
           for (const oracle of options.plan.mandatoryTests) if (frozen.files.get(oracle.testPath) !== view.files.get(oracle.testPath)) findings.push({ code: 'oracle_changed', severity: 'error', path: oracle.testPath, nodeId: options.plan.intentNodeId, message: '独立测试义务不得由模型改写' })
           return findings
         } }; const result = partitions ? await generateSyncPartitions(generationInput, partitions, options.plan.version === 'sync-coordinator-v2' ? options.plan.partitionPolicy.maxParallel : 1, options.plan.version === 'sync-coordinator-v2' && options.plan.direction === 'code_to_spec', generationOptions, partitionCheckpoints) : await runGeneration(generationInput, generationOptions)
@@ -1708,7 +1732,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       if (attempt.publicationBase) await acquirePublication()
       if (!attempt.candidate) store.freezeCandidate(fence, candidate)
       else if (canonical(attempt.candidate) !== canonical(candidate)) fail('candidate_binding', '已有候选不能替换')
-      const frozenCandidate = await candidateContext(operation, candidate, view)
+      const frozenCandidate = await candidateContext(operation, candidate)
       const runs = acceptanceRuns(frozenCandidate, ready, options.plan, { before: retirementBefore, ids: retiredIds })
       const candidateExportPath = join(options.artifactRoot, `export-${attempt.id}`), scratch = join(options.artifactRoot, `scratch-${attempt.id}`)
       let exported = stage<{ path: string; digest: string; exclusionBlob: BlobRef }>(store, operation, store.readAttempt(attempt.id), 'export')

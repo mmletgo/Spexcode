@@ -213,6 +213,109 @@ test('固定操作模型到达行为/P1/P2及全部独审，独立会话与调�
   }
 })
 
+for (const gapMode of ['none', 'peer', 'task'] as const) test(`增量V1从完整Git候选核root覆盖，未改peer不扩大Task派发或验证登记 ${gapMode}`, async t => {
+  const rootPath = '.spec/project/spec.md', managedTest = 'generated-tests/task.test.mjs'
+  const definitions = [
+    { name: 'TASK', nodeId: 'export-contract', path: contractPath, source: 'src/export.js', test: 'tests/export.test.mjs' },
+    { name: 'CLI', nodeId: 'cli-contract', path: '.spec/project/cli-contract/spec.md', source: 'src/cli.js', test: 'tests/cli.test.mjs' },
+    { name: 'STORE', nodeId: 'storage-contract', path: '.spec/project/storage-contract/spec.md', source: 'src/storage.js', test: 'tests/storage.test.mjs' },
+  ]
+  const specs = definitions.map(item => original
+    .replace(/^(\| FLOW-EXPORT-[^|]+ \| )REQ-EXPORT-01 \|/gm, `$1REQ-EXPORT-01,REQ-ROOT-${item.name} |`)
+    .replace(/^(\| AC-EXPORT-[^|]+ \| )/gm, `$1REQ-ROOT-${item.name},`)
+    .replaceAll('EXPORT', item.name === 'TASK' ? 'EXPORT' : item.name)
+    .replaceAll('export-job', `${item.name.toLowerCase()}-job`)
+    .replaceAll('export-contract', item.nodeId).replaceAll('src/export.js', item.source).replaceAll('tests/export.test.mjs', item.test)
+    .replaceAll(`decision:${item.name}-POLICY`, 'decision:EXPORT-POLICY'))
+  specs[0] = specs[0].replace('tests/export.test.mjs#AC-EXPORT-01', `${managedTest}#AC-EXPORT-01`)
+  if (gapMode !== 'none') specs[1] += `\n### GAP\n\n| id | kind | unknown | affects | evidence | decision | source | depends-on |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| GAP-CLI-REMOTE | missing_fact | 尚未确定远端重试政策 | RULE-${gapMode === 'peer' ? 'CLI' : 'EXPORT'}-06 | 原意没有定义该政策 | 需要业务裁决 | user:raw | REQ-CLI-01 |\n`
+  const root = `---\ntitle: 增量父接口\ncontract-schema: sync-v1\n---\n## raw source\n\nTask、CLI与Storage各自完成原功能。\n\n## expanded spec\n\n仅变更Task，保留CLI与Storage。\n\n### REQ\n\n| id | goal | source | constraints | success | depends-on |\n| --- | --- | --- | --- | --- | --- |\n${definitions.map(item => `| REQ-ROOT-${item.name} | ${item.name}完成 | user:raw | 保持既有政策 | 子模块完成 | - |`).join('\n')}\n`
+  const extras: Record<string, string> = { [rootPath]: root }
+  for (let index = 1; index < definitions.length; index++) {
+    const item = definitions[index]
+    extras[item.path] = specs[index]
+    extras[item.source] = readFileSync(new URL('src/export.js', fixturePath), 'utf8')
+    extras[item.test] = readFileSync(new URL('tests/export.test.mjs', fixturePath), 'utf8').replaceAll('EXPORT', item.name).replaceAll('src/export.js', item.source)
+  }
+  const verifications = specs.map((source, index) => {
+    const definition = parseContract({ nodeId: definitions[index].nodeId, path: definitions[index].path, source }).contract!.items.find(item => item.kind === 'VERIFY')!
+    assert.equal(definition.kind, 'VERIFY')
+    return { definition: { id: definition.id, command: definition.command, cwd: definition.cwd, timeoutMs: definition.timeoutMs }, environment: { version: 'trusted-test-v1' as const, image: 'node@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392', platform: 'linux/arm64' as const, memoryBytes: 134217728, cpus: 1, pidsLimit: 64, scratchBytes: 16777216, logBytes: 131072 } }
+  })
+  const f = await fixture(t, { maxAttempts: 1, maxCalls: 8, maxRepairs: 0, timeoutMs: 120_000 }, false, specs[0], 'project', specs[0], {
+    version: 'sync-coordinator-v2', direction: 'spec_to_code',
+    readPaths: [rootPath, contractPath, 'src/export.js', 'tests/export.test.mjs', '.spec/spexcode.json'],
+    writePaths: [contractPath, 'src/export.js', managedTest], sourcePaths: ['src/export.js'],
+    executionScope: { paths: [contractPath, 'src/export.js', managedTest], contractIds: [], flowIds: [] },
+    verifications,
+    partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 },
+  }, undefined, 'spec', undefined, false, extras)
+  let reviewed = false
+  f.transform((output, request) => {
+    if (request.purpose === 'elaboration_generate') return rows(specs[0])
+    if (request.purpose === 'code_generate') {
+      const frozen = promptInput(request), source = new Map(frozen.files).get('src/export.js')!
+      assert.ok(!frozen.files.some(([path]) => definitions.slice(1).some(peer => peer.path === path)), 'Agent保留局部读集')
+      const change = (path: string, content: string) => {
+        const entry = frozen.manifest.entries.find(item => item.path === path)
+        return { path, beforeDigest: entry?.digest ?? null, beforeMode: entry?.mode ?? null, mode: entry ? null : '100644', content }
+      }
+      return { version: 'sync-files-v1', changes: [...frozen.elaboratedSpecs.map(spec => change(spec.path, spec.source)), change('src/export.js', `${source}\n// Task increment\n`), change(managedTest, "import test from 'node:test'\ntest('AC-EXPORT-01', () => {})\n")] }
+    }
+    if (request.purpose === 'code_review') {
+      reviewed = true
+      assert.ok(promptInput(request).readyIds.every(id => !/CLI|STORE/.test(id)), '只派发Task业务')
+      throw Object.assign(new Error('受控回归已到V1之后的Task独审，不替代真实V2–V4'), { code: 'unsupported' })
+    }
+    return output
+  })
+  const result = await runSyncOperation(f.store, f.operation.id, f.options)
+  const attempt = f.store.listAttempts(f.operation.id)[0]
+  const stages = attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())) as { stage?: string; resultRef?: { sha256: string } }[]
+  const generation = stages.find(stage => stage.stage === 'generation')
+  const elaboration = JSON.parse(readEvidence(f.input.source.commonDir, stages.find(stage => stage.stage === 'elaboration')!.resultRef!).toString()) as ElaborationResult
+  assert.ok(generation, JSON.stringify({ status: result.status, failure: result.failure ?? attempt.failure, elaborationFailure: elaboration.failure, calls: f.calls.map(call => call.purpose) }))
+  const generated = JSON.parse(readEvidence(f.input.source.commonDir, generation.resultRef!).toString()) as import('./generation-types.js').GenerationResult
+  if (gapMode === 'task') {
+    assert.equal(reviewed, false)
+    assert.equal(generated.candidateValidated, false)
+    assert.ok(generated.validationFindings.some(finding => finding.code === 'unresolved-gap' && finding.itemId === 'GAP-CLI-REMOTE'), 'peer GAP影响Task依赖时仍拒绝')
+    return
+  }
+  assert.equal(reviewed, true, JSON.stringify({ failure: result.failure, findings: generated.validationFindings, calls: f.calls.map(call => call.purpose) }))
+  assert.equal(generated.candidateValidated, true)
+  assert.deepEqual(generated.validationFindings.filter(finding => finding.severity === 'error'), [])
+  const before = readTree(f.input.source.commonDir, f.input.immutableTree), after = readTree(f.input.source.commonDir, generated.candidate!.tree)
+  for (const path of [rootPath, ...definitions.slice(1).flatMap(item => [item.path, item.source, item.test]), 'tests/export.test.mjs']) assert.deepEqual(after.find(entry => entry.path === path), before.find(entry => entry.path === path), path)
+  assert.deepEqual(JSON.parse(readEvidence(f.input.source.commonDir, generated.candidate!.actualDiffBlob).toString()).map((change: { path: string }) => change.path).sort(), [contractPath, 'src/export.js', managedTest].sort())
+  assert.deepEqual(f.plan.verifications.map(item => item.definition.id), ['VERIFY-EXPORT-01', 'VERIFY-CLI-01', 'VERIFY-STORE-01'])
+  assert.ok(!result.operation.scope.paths.some(path => definitions.slice(1).some(peer => peer.path === path || peer.source === path || peer.test === path)))
+  assert.equal(f.calls.filter(call => call.purpose === 'elaboration_generate').length, 1)
+  assert.equal(f.calls.filter(call => call.purpose === 'code_generate').length, 1)
+  assert.equal(f.calls.filter(call => call.purpose === 'code_review').length, 1)
+  assert.equal(f.store.listJournals(f.operation.id).length, 0)
+  if (gapMode === 'peer') return
+  const acceptedFiles = new Map(before.filter(entry => f.plan.readPaths.includes(entry.path)).map(entry => [entry.path, readObject(f.input.source.commonDir, entry.oid).toString('utf8')]))
+  for (const change of elaboration.changes) acceptedFiles.set(change.path, change.source)
+  const accepted = await readFrozenContracts(f.root, acceptedFiles), policy = { newNodeRawSources: new Map<string, string>(), verifications: [f.plan.verifications[0].definition] }
+  const complete = await continuationCoordinator.candidateContext(f.operation, generated.candidate!)
+  assert.deepEqual(await continuationCoordinator.checkCandidateContractIntent(f.operation, generated.candidate!, accepted, complete, policy), [], '未改peer VERIFY不自动登记，也不因本轮未登记误拒')
+  const req = specs[0].match(/^\| REQ-EXPORT-01 .*$/m)![0]
+  const variants = [
+    { path: contractPath, content: specs[0].replace(req, `${req}\n| REQ-UNAPPROVED-01 | 候选自批业务 | user:raw | 额外约束 | 额外结果 | - |`), expected: 'generation-unaccepted-item' },
+    { path: definitions[1].path, content: null, expected: 'generation-raw-changed' },
+    { path: definitions[1].path, content: specs[1].replace(' | 10000 |', ' | 10001 |'), expected: 'generation-protected-meaning-changed' },
+  ]
+  for (const variant of variants) {
+    const entry = before.find(entry => entry.path === variant.path)!
+    const candidate = freezeCandidate(f.input, { version: 'sync-files-v1', changes: [{ path: variant.path, content: variant.content, beforeDigest: entry.digest, beforeMode: entry.mode, mode: null }] }, { paths: [variant.path], contractIds: [], flowIds: [] })
+    const context = await continuationCoordinator.candidateContext(f.operation, candidate)
+    const findings = await continuationCoordinator.checkCandidateContractIntent(f.operation, candidate, accepted, context, policy)
+    assert.ok(findings.some(finding => finding.code === variant.expected), JSON.stringify(findings))
+    if (variant.content === null) assert.ok(context.findings.some(finding => finding.code === 'missing-requirement-flow' && finding.itemId === 'REQ-ROOT-CLI'), '真实缺失覆盖仍拒绝')
+  }
+})
+
 for (const kind of ['conflict', 'coverage_gap'] as const) test(`raw-only已审 ${kind} 无既有ID时明确阻塞，不派P1或消耗新attempt`, async t => {
   const raw = original.split('## expanded spec')[0]
   const f = await fixture(t, { maxAttempts: 2, maxCalls: 8, maxRepairs: 1, timeoutMs: 120000 }, false, raw, 'project', raw, {}, undefined, 'code')
@@ -430,7 +533,8 @@ test('真实V1/意图门禁拒绝弱化AC、命令及错误关系，有限预算
     assert.equal(result.status, 'budget_exhausted', JSON.stringify(result.failure))
     assert.equal(f.calls.filter(call => call.purpose === 'code_review').length, 0)
     for (const plan of f.store.readAttempt(result.operation.currentAttemptId!).dispatchPlans) if (plan.session) assert.deepEqual(Object.keys(plan.session).sort(), ['sessionId', 'threadId', 'turnId'])
-    assert.ok(f.store.readAttempt(result.operation.currentAttemptId!).checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).some(value => value.validationFindings?.some((item: { code: string }) => mutation === 'related' ? item.code === 'integrity' : item.code === 'generation-protected-meaning-changed' || item.code === 'generation-verification-unregistered')))
+    const generations = f.store.listAttempts(f.operation.id).flatMap(attempt => attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).filter(stage => stage.stage === 'generation').map(stage => JSON.parse(readEvidence(f.input.source.commonDir, stage.resultRef).toString()) as import('./generation-types.js').GenerationResult))
+    assert.ok(generations.some(value => value.validationFindings.some(item => mutation === 'related' ? item.code === 'integrity' : item.code === 'generation-protected-meaning-changed' || item.code === 'generation-verification-unregistered')))
     assert.equal(f.store.listJournals(f.operation.id).length, 0)
     assert.ok(f.store.pinnedBlobRefs().length > 3)
     assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
