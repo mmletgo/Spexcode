@@ -20,6 +20,7 @@ import type { PartitionCheckpoints } from './partition-execution.js'
 import type { ElaborationResult, ReadonlySpecRepair } from './elaboration-types.js'
 import type { GeneratedTargetElaboration, ContractCell } from './elaboration-markdown.js'
 import type { SyncPartitionPlan } from './partitioning.js'
+import type { CodeBehaviorEvidence } from './writeback-types.js'
 
 const git = (root: string, ...args: string[]): string => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: 'pipe', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }).trim()
 const path = '.spec/export/export-contract/spec.md'
@@ -345,6 +346,89 @@ function draftRows(source: string): GeneratedTargetElaboration {
     })))])) as GeneratedTargetElaboration['changes'][number]['tables'],
   }] }
 }
+
+async function reviewedDetailFixture(t: test.TestContext, scope: 'whole' | 'partition' = 'whole') {
+  const f = await fixture(t)
+  const before = f.input.targets[0].source!.replace('QUEUED或既有任务；错误退出', 'QUEUED且新任务attempt=0或既有任务；错误退出')
+  const input: ElaborationInput = { ...f.input, targets: [{ ...f.input.targets[0], source: before, sourceDigest: contentHash(before) }], worktree: stageWorktree(f.commonDir, f.snapshot.headCommit, overlayStageTree(f.commonDir, f.snapshot.immutableTree, [{ path, source: before }])), maxRepairs: 0, authorizedChanges: [], ...(scope === 'partition' ? { partitionBinding: { planDigest: contentHash('controlled detail partition plan'), partitionId: 'detail-owner' }, validationScope: 'partition_local' } : {}) }
+  const corrected = draftRows(before)
+  corrected.changes[0].tables.STEP.find(row => row.id === 'STEP-EXPORT-01')!.output = 'QUEUED且新任务attempt=1或既有任务；错误退出'
+  const drifted = structuredClone(corrected)
+  for (const row of drifted.changes[0].tables.RULE.slice(0, 6)) row.constraint += '；无关历史漂移'
+  drifted.changes[0].tables.REQ[0].goal += '；无关历史漂移'
+  const rejected = await elaborate({ ...input, mode: 'preserve_business' }, { runner: f.run(() => JSON.stringify(drifted)) })
+  assert.equal(rejected.status, 'exhausted')
+  assert.equal(rejected.rounds[0].findings.filter(issue => issue.code === 'refactor_business_meaning_changed').length, 8)
+  const sha = contentHash('controlled reviewed P0 detail')
+  const analysis: CodeBehaviorEvidence['analysis'] = { version: 'code-behavior-v1', inputId: f.snapshot.id, baselinePairId: null, composedDigest: f.snapshot.id, readSetDigest: sha, policyDigest: sha, inputDigest: sha,
+    changes: [{ id: 'current-reviewed-attempt-detail', kind: 'allowed_change', paths: ['src/export.js'], affectedIds: ['STEP-EXPORT-01'], ruleIds: ['RULE-EXPORT-02'], originalIntent: input.intent.rawSource, previousBehavior: '旧Spec记新任务attempt=0', sourceBehavior: 'src/export.js#ExportService.submit创建新任务attempt=1', deliveryBehavior: '同步该非冲突实现明细，其他权限、状态和验收保持', evidence: '冻结源码const job含attempt: 1；非用户政策变化，无AC或退役动作', counterexample: '复制旧诊断回滚为attempt=0将与当前源码不符' }],
+    findings: [], facts: [{ source: 'code:src/export.js#ExportService', text: '新任务attempt=1' }], authorizedChanges: [], nodeChanges: [], newNodes: [], resolutions: [], authorChanges: [],
+    traces: ['code_behavior_analyze', 'code_behavior_review'].map((purpose, index) => ({ purpose, sessionId: `controlled-analysis-${index}`, threadId: `controlled-analysis-thread-${index}`, turnId: 'turn', resultDigest: sha, inputDigest: sha })), reviewPassed: true }
+  return { ...f, input: { ...input, mode: 'reelaborate' as const, facts: analysis.facts }, corrected, rejected, evidence: { ref: writeEvidence(f.commonDir, analysis), analysis } }
+}
+
+for (const scope of ['whole', 'partition'] as const) test(`Native P1当前受审analysis完整同入${scope}生成与独审，空特殊授权不遮盖非冲突明细`, async t => {
+  const f = await reviewedDetailFixture(t, scope), original = JSON.stringify(f.rejected), draft = f.rejected.rounds[0].draft!
+  const local = f.evidence, planDigest = contentHash('controlled detail partition plan')
+  const combined = { ...local.analysis, partitionCoverage: { planDigest, partitionIds: ['detail-owner'], changedPaths: ['src/export.js'] }, partitionEvidence: [{ partitionId: 'detail-owner', changedPaths: ['src/export.js'], analysisRef: local.ref, analysis: local.analysis }] }
+  const analysis = scope === 'whole' ? local : { ref: writeEvidence(f.commonDir, combined), analysis: combined }
+  const input = { ...f.input, requestKey: `current-analysis-${scope}`, analysis }
+  const callStart = f.requests.length, runner = f.run((_request, workspace, draftPath) => {
+    assert.equal(readFileSync(join(workspace, draftPath), 'utf8'), readStageDraft(f.commonDir, draft, draft))
+    return JSON.stringify(f.corrected)
+  })
+  const plan: SyncPartitionPlan = { version: 'sync-partitions-v1', digest: planDigest, expectedPaths: ['src/export.js'], dependencies: [], partitions: [{ id: 'detail-owner', intentNodeId: 'export-contract', targets: [{ nodeId: 'export-contract', path }], readPaths: readTree(f.commonDir, f.snapshot.immutableTree).map(entry => entry.path), writePaths: [path], sourcePaths: ['src/export.js'], changedPaths: ['src/export.js'], contextNodeIds: ['ancestor'], contractIds: [], flowIds: [], readBytes: 100, readLimitBytes: 524288, oversizedReads: [] }] }
+  const result = scope === 'whole'
+    ? await elaborate(input, { draft, runner })
+    : await elaborateSyncPartitions(input, plan, 1, { load: () => null, save: (_key, value) => writeEvidence(f.commonDir, value), loadElaborationDraft: () => draft }, runner)
+  const requests = f.requests.slice(callStart)
+  const evidenceDir = process.env.SPEX_NATIVE_ANALYSIS_BRIEF_EVIDENCE_DIR
+  if (evidenceDir) writeFileSync(join(evidenceDir, `${scope}.json`), JSON.stringify({ controlledNative: true, scope, analysis, local, oldResult: f.rejected, originalDraft: readStageDraft(f.commonDir, draft, draft), requests, result }, null, 2))
+  assert.equal(result.status, 'complete', JSON.stringify(result.rounds.map(round => round.findings)))
+  assert.deepEqual(requests.map(request => request.purpose), ['elaboration_generate', 'elaboration_review'])
+  for (const request of requests) {
+    const task = JSON.parse(request.prompt.split('\n任务:\n')[1].split('\n')[0])
+    assert.deepEqual(task.analysis, local, '生成与独审必须收到当前真实受审分析ref和完整正文，不只authorChanges或facts')
+    assert.equal(task.authorChanges, undefined, '原authorChanges仅在完整analysis内出现，不另造重复投影')
+    assert.deepEqual(task.targets, [{ targetIndex: 0, nodeId: 'export-contract', path }])
+    assert.equal(task.mode, 'reelaborate'); assert.deepEqual(task.authorizedChanges, [])
+    assert.deepEqual(task.partitionBinding, scope === 'whole' ? undefined : { planDigest, partitionId: 'detail-owner', analysisRef: analysis.ref })
+    assert.match(request.prompt, /authorizedChanges.*特殊动作/)
+    assert.match(request.prompt, /历史.*诊断.*当前.*分类/)
+  }
+  assert.ok(requests[0].prompt.includes(`"errors":${JSON.stringify(draft.errors)}`), '原8处历史finding逐项保持')
+  const before = parseContract({ nodeId: 'export-contract', path, source: f.input.targets[0].source! }).contract!
+  const after = result.contracts.find(contract => contract.nodeId === 'export-contract')!
+  assert.equal(after.items.find(item => item.id === 'STEP-EXPORT-01')!.kind, 'STEP')
+  assert.equal((after.items.find(item => item.id === 'STEP-EXPORT-01') as { output: string }).output, 'QUEUED且新任务attempt=1或既有任务；错误退出')
+  assert.deepEqual(after.items.filter(item => item.id !== 'STEP-EXPORT-01'), before.items.filter(item => item.id !== 'STEP-EXPORT-01'))
+  assert.equal(JSON.stringify(f.rejected), original); assert.deepEqual(analysis.analysis.authorizedChanges, [])
+})
+
+test('Native当前analysis可见不授予纯refactor、AC、VERIFY或退役越权', async t => {
+  const f = await reviewedDetailFixture(t)
+  for (const change of ['refactor', 'acceptance', 'verification', 'retire'] as const) {
+    const output = structuredClone(f.corrected)
+    if (change === 'acceptance') output.changes[0].tables.AC[0].assertion += '；越权改变既有验收'
+    if (change === 'verification') output.changes[0].tables.VERIFY[0].command = ['node', '--version']
+    if (change === 'retire') { output.changes[0].tables.AC.shift(); output.changes[0].removeIds = ['AC-EXPORT-01'] }
+    const calls = f.requests.length
+    const result = await elaborate({ ...f.input, requestKey: `no-extra-authorization-${change}`, analysis: f.evidence, mode: change === 'refactor' ? 'preserve_business' : 'reelaborate' }, { runner: f.run(() => JSON.stringify(output)) })
+    assert.equal(result.reviewPassed, false)
+    assert.ok(result.rounds[0].findings.some(issue => issue.code === ({ refactor: 'refactor_business_meaning_changed', acceptance: 'acceptance_update_unauthorized', verification: 'verification_policy_changed', retire: 'protected_item_removed' })[change]), JSON.stringify(result.rounds[0].findings))
+    assert.deepEqual(f.requests.slice(calls).map(request => request.purpose), ['elaboration_generate'])
+  }
+})
+
+test('Native P1无analysis时不宣称已有受审分类', async t => {
+  const f = await fixture(t)
+  const result = await elaborate({ ...f.input, maxRepairs: 0 }, { runner: f.run(() => JSON.stringify(rows)) })
+  assert.equal(result.status, 'complete')
+  for (const request of f.requests) {
+    assert.equal(JSON.parse(request.prompt.split('\n任务:\n')[1].split('\n')[0]).analysis, undefined)
+    assert.doesNotMatch(request.prompt, /任务analysis为本轮冻结受审P0分析/)
+  }
+})
 
 async function sealFixture(t: test.TestContext, sharedVerification = false, redundantGeneratedAcceptance = false) {
   const f = await fixture(t), peerPath = '.spec/export/peer-contract/spec.md'
