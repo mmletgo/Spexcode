@@ -260,6 +260,57 @@ function partitionStage<T>(store: SyncStore, operation: SyncOperation, attempt: 
   if (original?.readSetDigest !== operation.readSetDigest || operation.baselineSelection && original.baselineSelectionRef?.sha256 !== writeEvidence(operation.input.source.commonDir, operation.baselineSelection).sha256) return null
   return { result, resultRef }
 }
+
+/** 正式retry链只供应未批准材料；原stage和Native身份始终由所属operation认证。 */
+function retryDraftSources(store: SyncStore, operation: SyncOperation, attemptNumber: number): { owner: SyncOperation; prior: SyncAttempt }[] {
+  const sources: { owner: SyncOperation; prior: SyncAttempt }[] = [], seen = new Set<string>()
+  let owner: SyncOperation | null = operation
+  while (owner) {
+    if (seen.has(owner.id) || owner.input.id !== operation.input.id || canonical(owner.input.source) !== canonical(operation.input.source) || owner.policyDigest !== operation.policyDigest || (owner.requestBlob?.sha256 ?? null) !== (operation.requestBlob?.sha256 ?? null) || owner.origin !== operation.origin) fail('retry_provenance_binding', '草稿重试链不匹配固定来源、输入或政策')
+    seen.add(owner.id)
+    if (owner.readSetDigest !== operation.readSetDigest || canonical(owner.baselineSelection) !== canonical(operation.baselineSelection) || canonical(owner.scope) !== canonical(operation.scope)) break
+    sources.push(...store.listAttempts(owner.id).filter(prior => (owner!.id !== operation.id || prior.number < attemptNumber) && ['failed', 'superseded', 'settled'].includes(prior.status)).reverse().map(prior => ({ owner: owner!, prior })))
+    owner = owner.retryOf ? store.readOperation(owner.retryOf) : null
+  }
+  return sources
+}
+
+/** 解包原冻结运输正文，仍由既有Native冷验核完整请求摘要。 */
+function originalNativeRequest(native: NativeRunPlan, policyDigest: string): ElaborationSessionRequest {
+  const { frozenContext, readerRuntime: _runtime, ...request } = native.request
+  if (!frozenContext) return request
+  assertFrozenBinding(frozenContext, { requestKey: request.requestKey, inputDigest: request.inputDigest, attemptId: native.attemptId, policyDigest })
+  const manifest = readFrozenManifest(frozenContext), task = manifest.entries[0]
+  if (manifest.entries.length !== 1 || task.id !== 'task' || task.kind !== 'utf8' || !task.required) fail('draft_native_binding', '原草稿Native缺少唯一冻结任务正文')
+  const body = JSON.parse(readFrozenRange(frozenContext, { contextDigest: frozenContext.contextDigest, entryId: task.id, startByte: 0, endByte: task.byteLength }).response.contentItems[0].text) as { text: string }
+  return { ...request, prompt: body.text }
+}
+
+/** Git保活本身不证明模型完成；未认证的Native稿不能遮蔽更早合格原稿。 */
+function authenticatedDraftResult(store: SyncStore, owner: SyncOperation, prior: SyncAttempt, key: string, purpose: string, draft?: ElaborationDraft): { result?: ElaborationSessionResult; request?: ElaborationSessionRequest } | null {
+  const dispatch = prior.dispatchPlans.find(dispatch => dispatch.key === key && dispatch.purpose === purpose)
+  if (!dispatch?.session?.threadId || !dispatch.session.turnId || dispatch.session.sessionId !== sessionIdForCreateKey(dispatch.sessionCreateKey)) return null
+  const resource = store.findResource(prior.id, key)
+  let result: ElaborationSessionResult | null, request: ElaborationSessionRequest | undefined
+  if (resource) {
+    const native = JSON.parse(readEvidence(owner.input.source.commonDir, resource.plan.planBlob).toString()) as NativeRunPlan
+    const checkpoint = JSON.parse(readEvidence(owner.input.source.commonDir, resource.checkpointRef).toString()) as NativeRunCheckpoint
+    if (!checkpoint.result || checkpoint.nativeState !== 'completed') {
+      const failure = checkpoint.failure, packet = failure?.rejectedOutput, witness = failure?.failedWorktree
+      if (!draft || !failure || !packet || !witness || !reviewFormatRepairCodes.has(failure.code) || checkpoint.phase !== 'removed' || checkpoint.stop?.nativeStopped !== true) return null
+      const state = authenticateNativeRejectedFinal(store, owner, prior, key, { ...failure, sessionId: checkpoint.session.sessionId, threadId: checkpoint.session.threadId ?? undefined, turnId: checkpoint.session.turnId ?? undefined }, packet)
+      return state.cancellation?.nativeStopped === true && canonical({ baseCommit: witness.baseCommit, tree: witness.baseTree, mode: 'edit' }) === canonical(draft.seed) && witness.headCommit === draft.resultCommit && witness.tree === draft.resultTree ? {} : null
+    }
+    request = originalNativeRequest(native, owner.policyDigest)
+    const trace = { purpose, sessionId: dispatch.session.sessionId, threadId: dispatch.session.threadId, turnId: dispatch.session.turnId, inputDigest: request.inputDigest, resultDigest: checkpoint.result.resultDigest }
+    result = completedNativeStageResult(store, owner, prior, request, trace, checkpoint.result.output, '')
+  } else {
+    const injected = stage<{ requestDigest: string; result: ElaborationSessionResult }>(store, owner, prior, `injected:${key}`)
+    result = injected && injected.requestDigest === dispatch.requestDigest && canonical({ sessionId: injected.result.sessionId, threadId: injected.result.threadId, turnId: injected.result.turnId }) === canonical(dispatch.session) && injected.result.resultDigest === contentHash(JSON.stringify(injected.result.output)) ? injected.result : null
+  }
+  if (result && !draft) return { result, request }
+  return result?.worktree && draft && canonical({ baseCommit: result.worktree.baseCommit, tree: result.worktree.baseTree, mode: 'edit' }) === canonical(draft.seed) && result.worktree.headCommit === draft.resultCommit && result.worktree.tree === draft.resultTree ? { result, request } : null
+}
 /** P1业务扩域与原文件规划分别作证，完整scope必须精确等于两者的实际并集。 */
 function reviewScopeProof(store: SyncStore, operation: SyncOperation, origin: SyncAttempt, approved: SavedElaboration, generation: SavedGeneration): { p1: NonNullable<SyncOperation['contractScopeExpansions']>[number]; writerRef?: BlobRef; paths: string[] } | null {
   const commonDir = operation.input.source.commonDir, approvedRef = writeEvidence(commonDir, approved)
@@ -1139,42 +1190,64 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         }
         return null
       }
-      const draftMaterialStage = (prior: SyncAttempt, key: string): { result: SavedElaboration; resultRef: BlobRef } | null => {
-        const exact = partitionStage<SavedElaboration>(store, operation, prior, key)
-        if (exact || !operation.baselineSelection) return exact
-        const result = stage<SavedElaboration>(store, operation, prior, key)
+      const draftMaterialStage = (owner: SyncOperation, prior: SyncAttempt, key: string): { result: SavedElaboration; resultRef: BlobRef } | null => {
+        const exact = partitionStage<SavedElaboration>(store, owner, prior, key)
+        if (exact || !owner.baselineSelection || owner.id !== operation.id) return exact
+        const result = stage<SavedElaboration>(store, owner, prior, key)
         return result ? { result, resultRef: writeEvidence(operation.input.source.commonDir, result) } : null
       }
-      const loadElaborationDraft = (key: string, binding?: NonNullable<ElaborationResult['partitionBinding']>): ElaborationDraft | null => {
-        for (const prior of store.listAttempts(operation.id).filter(item => item.number < attempt!.number && ['failed', 'superseded', 'settled'].includes(item.status)).reverse()) {
-          const source = draftMaterialStage(prior, key)
+      const loadElaborationDraft = (key: string, binding?: NonNullable<ElaborationResult['partitionBinding']>, schemaDigest?: string): ElaborationDraft | null => {
+        for (const { owner, prior } of retryDraftSources(store, operation, attempt!.number)) {
+          const source = draftMaterialStage(owner, prior, key)
           if (!source || source.result.phase === 'partitioned_final' || source.result.partitionBinding?.partitionId !== binding?.partitionId) continue
           const draft = source.result.rounds.at(-1)?.draft
-          if (!draft) continue
+          if (!draft || owner.id !== operation.id && (!schemaDigest || draft.schemaDigest !== schemaDigest || binding && (source.result.partitionBinding?.planDigest !== binding.planDigest || partitionStage<SyncPartitionPlan>(store, owner, prior, 'partition-plan')?.result.digest !== binding.planDigest))) continue
+          if (!authenticatedDraftResult(store, owner, prior, `sync:${prior.id}:elaborate${binding ? `:partition:${binding.partitionId}` : ''}:${source.result.rounds.at(-1)!.index}:elaboration_generate`, 'elaboration_generate', draft)) continue
           // 字节只作未批准材料；完整inputDigest及accept仍由独立的缓存门核验。
-          saveStage(store, fence!, `${key}:draft-provenance`, { fromOperationId: operation.id, fromAttemptId: prior.id, resultRef: source.resultRef, resultCommit: draft.resultCommit, oid: draft.oid })
-          return draft
+          saveStage(store, fence!, `${key}:draft-provenance`, { fromOperationId: owner.id, fromAttemptId: prior.id, resultRef: source.resultRef, resultCommit: draft.resultCommit, oid: draft.oid })
+          return owner.id === operation.id ? draft : { ...draft, errors: [...source.result.rounds.at(-1)!.findings, ...draft.errors.filter(error => !source.result.rounds.at(-1)!.findings.some(finding => finding.code === error.code && finding.message === error.message))] }
         }
         return null
       }
-      const loadElaborationDraftMaterial = (key: string, binding?: NonNullable<ElaborationResult['partitionBinding']>): ElaborationDraftMaterial | null => {
-        for (const prior of store.listAttempts(operation.id).filter(item => item.number < attempt!.number && ['failed', 'superseded', 'settled'].includes(item.status)).reverse()) {
-          const source = draftMaterialStage(prior, key), round = source?.result.rounds.at(-1)
+      const loadElaborationDraftMaterial = (key: string, binding?: NonNullable<ElaborationResult['partitionBinding']>, schemaDigest?: string): ElaborationDraftMaterial | null => {
+        for (const { owner, prior } of retryDraftSources(store, operation, attempt!.number)) {
+          const source = draftMaterialStage(owner, prior, key), round = source?.result.rounds.at(-1)
           if (!source || !round || source.result.phase === 'partitioned_final' || source.result.partitionBinding?.partitionId !== binding?.partitionId) continue
-          if (round.draft || stage<{ version: string }>(store, operation, prior, 'elaboration-draft-protocol')?.version === 'elaboration-draft-v1') return null
+          if (round.draft || stage<{ version: string }>(store, owner, prior, 'elaboration-draft-protocol')?.version === 'elaboration-draft-v1') continue
           const version = (round.output as { version?: unknown } | null)?.version
           const text = round.rejectedOutput?.text ?? (['elaboration-rows-v1', 'elaboration-rows-v2', 'elaboration-target-rows-v3'].includes(String(version)) ? JSON.stringify(round.output) : undefined)
           if (text === undefined) continue
-          saveStage(store, fence!, `${key}:draft-material-provenance`, { fromOperationId: operation.id, fromAttemptId: prior.id, resultRef: source.resultRef })
-          return { source: text, errors: [...round.findings.map(({ code, message }) => ({ code, message })), ...round.review?.findings.map(({ code, message, evidence, decision }) => ({ code, message: `${message}; ${evidence}; ${decision}` })) ?? [], ...source.result.failure ? [{ code: source.result.failure.code, message: source.result.failure.message }] : []] }
+          let nativeMaterial: { nativePlanRef: BlobRef; checkpointRef: BlobRef; sourceKind: 'native_output' | 'native_rejected' } | undefined
+          if (owner.id !== operation.id) {
+            if (!schemaDigest || binding && (source.result.partitionBinding?.planDigest !== binding.planDigest || partitionStage<SyncPartitionPlan>(store, owner, prior, 'partition-plan')?.result.digest !== binding.planDigest)) continue
+            const requestKey = `sync:${prior.id}:elaborate${binding ? `:partition:${binding.partitionId}` : ''}:${round.index}:elaboration_generate`, resource = store.findResource(prior.id, requestKey)
+            if (!resource) continue
+            const native = JSON.parse(readEvidence(operation.input.source.commonDir, resource.plan.planBlob).toString()) as NativeRunPlan
+            if (contentHash(JSON.stringify(native.request.schema)) !== schemaDigest || native.request.worktree?.mode !== 'read') continue
+            if (round.rejectedOutput ? !round.rejectedOutput.ref : !authenticatedDraftResult(store, owner, prior, requestKey, 'elaboration_generate') || canonical(round.output) !== canonical(JSON.parse(readEvidence(operation.input.source.commonDir, resource.checkpointRef).toString()).result.output)) continue
+            nativeMaterial = { nativePlanRef: resource.plan.planBlob, checkpointRef: resource.checkpointRef, sourceKind: round.rejectedOutput ? 'native_rejected' : 'native_output' }
+          }
+          saveStage(store, fence!, `${key}:draft-material-provenance`, { fromOperationId: owner.id, fromAttemptId: prior.id, resultRef: source.resultRef, ...nativeMaterial })
+          return { source: text, ...(owner.id !== operation.id && !round.rejectedOutput ? { sourceKind: 'native_output' as const } : {}), errors: [...round.findings, ...round.review?.findings.map(({ code, message, evidence, decision }) => ({ code, message: `${message}; ${evidence}; ${decision}` })) ?? [], ...source.result.failure ? [{ code: source.result.failure.code, message: source.result.failure.message }] : []] }
         }
         return null
       }
       // 同一原round既供P1完整定位，也供精确P0分类质疑；候选仍只是拒绝诊断。
-      const renderedElaborationSource = (prior: SyncAttempt, key: string): { result: SavedElaboration; resultRef: BlobRef; round: ElaborationResult['rounds'][number] } | null => {
+      const renderedElaborationSource = (owner: SyncOperation, prior: SyncAttempt, key: string): { result: SavedElaboration; resultRef: BlobRef; round: ElaborationResult['rounds'][number] } | null => {
         if (!['failed', 'superseded', 'settled'].includes(prior.status) || prior.failure?.kind !== 'repairable' || canonical(prior.composedInput) !== canonical(view.composed)) return null
-        const source = partitionStage<SavedElaboration>(store, operation, prior, key), round = source?.result.rounds.at(-1)
+        const source = partitionStage<SavedElaboration>(store, owner, prior, key), round = source?.result.rounds.at(-1)
         if (!source || source.result.reviewPassed || source.result.phase === 'partitioned_final' || source.result.status !== 'exhausted' || source.result.failure?.code !== 'repair_budget_exhausted' || !round?.candidate || round.candidate.inputDigest !== source.result.inputDigest || round.candidateDigest !== contentHash(JSON.stringify(round.candidate)) || !round.findings.some(finding => finding.severity === 'error')) return null
+        if (owner.id !== operation.id) {
+          const requestKey = `sync:${prior.id}:elaborate${source.result.partitionBinding ? `:partition:${source.result.partitionBinding.partitionId}` : ''}:${round.index}:elaboration_generate`
+          const authenticated = authenticatedDraftResult(store, owner, prior, requestKey, 'elaboration_generate', round.draft)
+          if (!authenticated || round.draft === undefined && canonical(authenticated.result?.output) !== canonical(round.output)) return null
+          if (round.draft) {
+            const targets = source.result.partitionBinding ? partitions?.partitions.find(partition => partition.id === source.result.partitionBinding!.partitionId)?.targets : options.plan.targets
+            if (!targets) return null
+            const ownerDigest = contentHash(JSON.stringify({ partitionId: source.result.partitionBinding?.partitionId ?? null, targets: targets.map(({ nodeId, path }) => ({ nodeId, path })) }))
+            readStageDraft(operation.input.source.commonDir, round.draft, { ownerDigest, sourceInputId: operation.input.id, schemaDigest: round.draft.schemaDigest, path: `.spex-sync-drafts/${ownerDigest}.json` })
+          }
+        }
         return { ...source, round }
       }
       const loadElaborationRepairDiagnostics = (key: string, inputDigest: string, binding?: NonNullable<ElaborationResult['partitionBinding']>): ElaborationRepairDiagnostics | null => {
@@ -1203,7 +1276,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           const { failure } = source.result, round = source.result.rounds.at(-1)
           if (!failure || !round) return null
           const runtimeFailure = source.result.status === 'failed' && structuredAnalysisRepairCodes.has(failure.code)
-          const structuralFailure = source.result.status === 'exhausted' && failure.code === 'repair_budget_exhausted' && (round.candidate === null || renderedElaborationSource(prior, key) !== null) && round.findings.some(issue => issue.severity === 'error')
+          const structuralFailure = source.result.status === 'exhausted' && failure.code === 'repair_budget_exhausted' && (round.candidate === null || renderedElaborationSource(operation, prior, key) !== null) && round.findings.some(issue => issue.severity === 'error')
           if (!runtimeFailure && !structuralFailure) return null
           saveStage(store, fence!, `${key}:repair-diagnostics-provenance`, { fromOperationId: operation.id, fromAttemptId: prior.id, resultRef: source.resultRef })
           return { requestKey: `sync:${prior.id}:elaborate${binding ? `:partition:${binding.partitionId}` : ''}`, inputDigest, resultRef: source.resultRef, failure, round }
@@ -1244,35 +1317,48 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         return null
       }
       const loadBehaviorDraftMaterial = (key: string, purpose: string, schemaDigest: string, inputDigest: string, request: Pick<ElaborationSessionRequest, 'prompt' | 'worktree'>, planDigest?: string): ElaborationDraftMaterial | null => {
-        for (const prior of store.listAttempts(operation.id).filter(prior => prior.number < attempt!.number && ['failed', 'superseded', 'settled'].includes(prior.status)).reverse()) {
-          if (prior.baselineSelectionDigest !== operation.baselineSelection?.digest || canonical(prior.composedInput) !== canonical(view.composed) || planDigest && partitionStage<SyncPartitionPlan>(store, operation, prior, 'partition-plan')?.result.digest !== planDigest) continue
-          const continuation = partitionStage<CodeBehaviorContinuation>(store, operation, prior, `${key}:continuation`)
+        for (const { owner, prior } of retryDraftSources(store, operation, attempt!.number)) {
+          if (prior.baselineSelectionDigest !== operation.baselineSelection?.digest || canonical(prior.composedInput) !== canonical(view.composed) || planDigest && partitionStage<SyncPartitionPlan>(store, owner, prior, 'partition-plan')?.result.digest !== planDigest) continue
+          const continuation = partitionStage<CodeBehaviorContinuation>(store, owner, prior, `${key}:continuation`)
           const original = continuation?.result.readyAnalysis, draft = continuation?.result.drafts.code_behavior_analyze
           if (purpose === 'code_behavior_analyze' && postGateReview.some(diagnostic => diagnostic.partitionId === (key === 'analysis' ? undefined : key.slice('partition:'.length, -':analysis'.length))) && original && draft && draft.schemaDigest === schemaDigest) {
             const previousRequest = JSON.parse(readEvidence(operation.input.source.commonDir, original.requestRef).toString('utf8')) as ElaborationSessionRequest
-            if (!behaviorTraceBinding(store, operation, prior, key, original.trace) || behaviorMaterialTask(previousRequest.prompt) !== behaviorMaterialTask(request.prompt)) fail('behavior_continuation_binding', '后置回审的分析草稿缺少精确原请求/Git来源')
+            if (!behaviorTraceBinding(store, owner, prior, key, original.trace) || behaviorMaterialTask(previousRequest.prompt) !== behaviorMaterialTask(request.prompt)) fail('behavior_continuation_binding', '后置回审的分析草稿缺少精确原请求/Git来源')
             const ownerDigest = contentHash(JSON.stringify({ version: 'code-behavior-draft-v1', source: canonicalSnapshotSource(operation.input.source), partitionId: key === 'analysis' ? null : key.slice('partition:'.length, -':analysis'.length), purpose }))
             const source = readStageDraft(operation.input.source.commonDir, draft, { ownerDigest, sourceInputId: operation.input.id, schemaDigest, path: `.spex-sync-drafts/${ownerDigest}.json` })
-            saveStage(store, fence!, `${key}:post-gate-material-provenance`, { fromOperationId: operation.id, fromAttemptId: prior.id, resultRef: continuation!.resultRef, requestRef: original.requestRef, resultCommit: draft.resultCommit, oid: draft.oid, originalInputDigest: continuation!.result.inputDigest, currentInputDigest: inputDigest })
+            saveStage(store, fence!, `${key}:post-gate-material-provenance`, { fromOperationId: owner.id, fromAttemptId: prior.id, resultRef: continuation!.resultRef, requestRef: original.requestRef, resultCommit: draft.resultCommit, oid: draft.oid, originalInputDigest: continuation!.result.inputDigest, currentInputDigest: inputDigest })
             return { source, errors: draft.errors, sourceKind: 'git_draft' }
+          }
+          const materialDraft = continuation?.result.drafts[purpose as keyof CodeBehaviorContinuation['drafts']]
+          if (owner.id !== operation.id && materialDraft && materialDraft.schemaDigest === schemaDigest) {
+            const suffix = key === 'analysis' ? '' : `:partition:${key.slice('partition:'.length, -':analysis'.length)}`
+            const authenticated = authenticatedDraftResult(store, owner, prior, `sync:${prior.id}:analysis${suffix}:${purpose}`, purpose, materialDraft)
+            if (authenticated && (authenticated.request ? behaviorMaterialTask(authenticated.request.prompt) === behaviorMaterialTask(request.prompt) : continuation!.result.inputDigest === inputDigest)) {
+              const ownerDigest = contentHash(JSON.stringify({ version: 'code-behavior-draft-v1', source: canonicalSnapshotSource(operation.input.source), partitionId: key === 'analysis' ? null : key.slice('partition:'.length, -':analysis'.length), purpose }))
+              const source = readStageDraft(operation.input.source.commonDir, materialDraft, { ownerDigest, sourceInputId: operation.input.id, schemaDigest, path: `.spex-sync-drafts/${ownerDigest}.json` })
+              saveStage(store, fence!, `${key}:${purpose}:draft-material-provenance`, { fromOperationId: owner.id, fromAttemptId: prior.id, resultRef: continuation!.resultRef, resultCommit: materialDraft.resultCommit, oid: materialDraft.oid })
+              return { source, errors: materialDraft.errors, sourceKind: 'git_draft' }
+            }
           }
           const suffix = key === 'analysis' ? '' : `:partition:${key.slice('partition:'.length, -':analysis'.length)}`
           const requestKey = `sync:${prior.id}:analysis${suffix}:${purpose}`, resource = store.findResource(prior.id, requestKey)
           if (!resource || resource.phase !== 'removed' || resource.plan.inputId !== operation.input.id) continue
           const native = JSON.parse(readEvidence(operation.input.source.commonDir, resource.plan.planBlob).toString()) as NativeRunPlan
           const checkpoint = JSON.parse(readEvidence(operation.input.source.commonDir, resource.checkpointRef).toString()) as NativeRunCheckpoint
-          const priorAnalysis = purpose === 'code_behavior_analyze' ? partitionStage<CodeBehaviorAnalysis>(store, operation, prior, key) : null
-          const trace = priorAnalysis?.result.traces.find(trace => trace.purpose === purpose)
-          if (priorAnalysis && trace && postGateReview.some(diagnostic => diagnostic.analysisRef.sha256 === priorAnalysis.resultRef.sha256) && native.request.worktree?.mode === 'read' && contentHash(JSON.stringify(native.request.schema)) === schemaDigest && canonical(native.request.worktree) === canonical(request.worktree) && behaviorMaterialTask(native.request.prompt) === behaviorMaterialTask(request.prompt) && checkpoint.result && completedNativeStageResult(store, operation, prior, native.request, trace, checkpoint.result.output, '')) {
-            saveStage(store, fence!, `${key}:post-gate-native-material-provenance`, { fromOperationId: operation.id, fromAttemptId: prior.id, analysisRef: priorAnalysis.resultRef, nativePlanRef: resource.plan.planBlob, checkpointRef: resource.checkpointRef, originalInputDigest: native.request.inputDigest, currentInputDigest: inputDigest })
+          const wholeAnalysis = purpose === 'code_behavior_analyze' && key === 'analysis' ? stage<CodeBehaviorAnalysis>(store, owner, prior, key) : null
+          if (wholeAnalysis && !analysisStageBinding(store, owner, wholeAnalysis)) continue
+          const priorAnalysis = wholeAnalysis ? { result: wholeAnalysis, resultRef: writeEvidence(operation.input.source.commonDir, wholeAnalysis) } : purpose === 'code_behavior_analyze' ? partitionStage<CodeBehaviorAnalysis>(store, owner, prior, key) : null
+          const trace = priorAnalysis?.result.traces.find(trace => trace.purpose === purpose), originalRequest = originalNativeRequest(native, owner.policyDigest)
+          if (priorAnalysis && trace && (owner.id !== operation.id || postGateReview.some(diagnostic => diagnostic.analysisRef.sha256 === priorAnalysis.resultRef.sha256)) && native.request.worktree?.mode === 'read' && contentHash(JSON.stringify(native.request.schema)) === schemaDigest && canonical(native.request.worktree) === canonical(request.worktree) && behaviorMaterialTask(originalRequest.prompt) === behaviorMaterialTask(request.prompt) && checkpoint.result && completedNativeStageResult(store, owner, prior, originalRequest, trace, checkpoint.result.output, '')) {
+            saveStage(store, fence!, `${key}:post-gate-native-material-provenance`, { fromOperationId: owner.id, fromAttemptId: prior.id, analysisRef: priorAnalysis.resultRef, nativePlanRef: resource.plan.planBlob, checkpointRef: resource.checkpointRef, originalInputDigest: native.request.inputDigest, currentInputDigest: inputDigest })
             return { source: JSON.stringify(checkpoint.result.output), errors: [], sourceKind: 'native_output' }
           }
           const failure = checkpoint.failure, packet = failure?.rejectedOutput
           if (!packet || !failure || !reviewFormatRepairCodes.has(failure.code) || native.request.purpose !== purpose || native.request.worktree?.mode !== 'read' || checkpoint.nativeState !== 'failed' || checkpoint.phase !== 'removed' || checkpoint.stop?.nativeStopped !== true) continue
-          if (contentHash(JSON.stringify(native.request.schema)) !== schemaDigest || canonical(native.request.worktree) !== canonical(request.worktree) || behaviorMaterialTask(native.request.prompt) !== behaviorMaterialTask(request.prompt)) return null
-          const state = authenticateNativeRejectedFinal(store, operation, prior, requestKey, { ...failure, sessionId: checkpoint.session.sessionId, threadId: checkpoint.session.threadId ?? undefined, turnId: checkpoint.session.turnId ?? undefined }, packet)
+          if (contentHash(JSON.stringify(native.request.schema)) !== schemaDigest || canonical(native.request.worktree) !== canonical(request.worktree) || behaviorMaterialTask(originalRequest.prompt) !== behaviorMaterialTask(request.prompt)) continue
+          const state = authenticateNativeRejectedFinal(store, owner, prior, requestKey, { ...failure, sessionId: checkpoint.session.sessionId, threadId: checkpoint.session.threadId ?? undefined, turnId: checkpoint.session.turnId ?? undefined }, packet)
           if (state.cancellation?.nativeStopped !== true || checkpoint.stop.nativeStatus !== state.cancellation.nativeStatus) continue
-          saveStage(store, fence!, `${key}:${purpose}:native-material-provenance`, { fromOperationId: operation.id, fromAttemptId: prior.id, nativePlanRef: resource.plan.planBlob, checkpointRef: resource.checkpointRef, rejectedSha256: packet.sha256, schemaDigest, originalInputDigest: native.request.inputDigest, currentInputDigest: inputDigest })
+          saveStage(store, fence!, `${key}:${purpose}:native-material-provenance`, { fromOperationId: owner.id, fromAttemptId: prior.id, nativePlanRef: resource.plan.planBlob, checkpointRef: resource.checkpointRef, rejectedSha256: packet.sha256, schemaDigest, originalInputDigest: native.request.inputDigest, currentInputDigest: inputDigest })
           return { source: packet.text, errors: [{ code: failure.code, message: failure.message }] }
         }
         return null
@@ -1290,6 +1376,8 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           if (!source || source.result.inputDigest !== inputDigest || stage<{ version: string }>(store, operation, prior, 'behavior-draft-protocol')?.version !== 'code-behavior-draft-v1') continue
           if (planDigest && partitionStage<SyncPartitionPlan>(store, operation, prior, 'partition-plan')?.result.digest !== planDigest) continue
           const trace = source.result.readyAnalysis?.trace
+          const suffix = key === 'analysis' ? '' : `:partition:${key.slice('partition:'.length, -':analysis'.length)}`
+          if (Object.entries(source.result.drafts).some(([purpose, draft]) => !(purpose === 'code_behavior_analyze' && trace) && !authenticatedDraftResult(store, operation, prior, `sync:${prior.id}:analysis${suffix}:${purpose}`, purpose, draft))) continue
           if (trace && !behaviorTraceBinding(store, operation, prior, key, trace)) fail('behavior_continuation_binding', 'P0已校验分析没有原生派发身份')
           saveStage(store, fence!, `${key}:continuation-provenance`, { fromOperationId: operation.id, fromAttemptId: prior.id, resultRef: source.resultRef })
           saveStage(store, fence!, `${key}:continuation`, source.result, !operation.baselineSelection ? { readSetDigest: operation.readSetDigest } : undefined)
@@ -1399,8 +1487,8 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           }
           return null
         },
-        loadElaborationDraftMaterial: (key, binding) => loadElaborationDraftMaterial(key, binding),
-        loadElaborationDraft: (key, binding) => loadElaborationDraft(key, binding),
+        loadElaborationDraftMaterial: (key, binding, schemaDigest) => loadElaborationDraftMaterial(key, binding, schemaDigest),
+        loadElaborationDraft: (key, binding, schemaDigest) => loadElaborationDraft(key, binding, schemaDigest),
         loadElaborationRepairDiagnostics: (key, binding, inputDigest) => loadElaborationRepairDiagnostics(key, inputDigest, binding),
         loadElaborationRepairSeed: (key, binding, inputDigest) => loadElaborationRepairSeed(key, inputDigest, binding),
         save: (key, value) => saveStage(store, fence!, key, value, !operation.baselineSelection && (key.startsWith('partition:') || key === 'partition-plan') ? { readSetDigest: operation.readSetDigest } : undefined),
@@ -1476,12 +1564,12 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       if (behaviorOrigin) {
         const owners = partitions?.partitions.map(partition => ({ partitionId: partition.id, key: `partition:${partition.id}:elaboration` })) ?? [{ partitionId: undefined, key: 'elaboration' }]
         const beforeFiles = priorDeliveryFiles(operation, view, [...options.plan.readPaths, ...operation.scope.paths], options.plan)
-        for (const owner of owners) for (const prior of store.listAttempts(operation.id).filter(prior => prior.number < attempt!.number).reverse()) {
-          const source = renderedElaborationSource(prior, owner.key)
-          const approved = source && stage<CodeBehaviorAnalysis>(store, operation, prior, 'analysis')
-          if (!source || !approved?.reviewPassed || !analysisStageBinding(store, operation, approved)) continue
+        for (const owner of owners) for (const { owner: sourceOwner, prior } of retryDraftSources(store, operation, attempt!.number)) {
+          const source = renderedElaborationSource(sourceOwner, prior, owner.key)
+          const approved = source && stage<CodeBehaviorAnalysis>(store, sourceOwner, prior, 'analysis')
+          if (!source || !approved?.reviewPassed || !analysisStageBinding(store, sourceOwner, approved)) continue
           const local = owner.partitionId ? approved.partitionEvidence?.find(item => item.partitionId === owner.partitionId) : undefined
-          if (owner.partitionId && (!local || partitionStage<SyncPartitionPlan>(store, operation, prior, 'partition-plan')?.result.digest !== partitions!.digest || source.result.partitionBinding?.planDigest !== partitions!.digest || source.result.partitionBinding?.partitionId !== owner.partitionId)) continue
+          if (owner.partitionId && (!local || partitionStage<SyncPartitionPlan>(store, sourceOwner, prior, 'partition-plan')?.result.digest !== partitions!.digest || source.result.partitionBinding?.planDigest !== partitions!.digest || source.result.partitionBinding?.partitionId !== owner.partitionId)) continue
           const original = local?.analysis ?? approved, analysisRef = local?.analysisRef ?? writeEvidence(operation.input.source.commonDir, approved)
           if (contentHash(JSON.stringify(original)) !== analysisRef.sha256 || !original.reviewPassed || original.inputId !== operation.input.id || original.policyDigest !== operation.policyDigest || original.composedDigest !== view.composed.contentDigest) continue
           if (owner.partitionId && source.result.partitionBinding?.analysisRef?.sha256 !== writeEvidence(operation.input.source.commonDir, approved).sha256) continue
@@ -1529,22 +1617,13 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
             const originalSelection = binding.baselineSelectionRef ? JSON.parse(readEvidence(operation.input.source.commonDir, binding.baselineSelectionRef).toString('utf8')) as FrozenBaselineSelection : undefined
             previousDecisionReadPaths = unique([...originalPlan.readPaths, ...originalSelection?.bindings.flatMap(binding => binding.resource.kind === 'path' ? [binding.resource.path] : []) ?? []])
           }
-          const diagnosticLineage: SyncOperation[] = []
-          let diagnosticOwner: SyncOperation | null = operation
-          while (diagnosticOwner) {
-            if (diagnosticOwner.input.id !== operation.input.id || canonical(diagnosticOwner.input.source) !== canonical(operation.input.source) || diagnosticOwner.policyDigest !== operation.policyDigest || (diagnosticOwner.requestBlob?.sha256 ?? null) !== (operation.requestBlob?.sha256 ?? null) || diagnosticOwner.origin !== operation.origin) fail('retry_provenance_binding', '行为修复诊断重试链不匹配固定来源、输入或政策')
-            if (diagnosticOwner.readSetDigest !== operation.readSetDigest) break
-            diagnosticLineage.unshift(diagnosticOwner)
-            diagnosticOwner = diagnosticOwner.retryOf ? store.readOperation(diagnosticOwner.retryOf) : null
-          }
-          const repairDiagnostics = diagnosticLineage.flatMap(owner => store.listAttempts(owner.id).filter(prior => (!partitions || owner.id === operation.id && prior.number < attempt!.number) && ['failed', 'superseded', 'settled'].includes(prior.status) && (partitions !== null || prior.failure?.kind === 'repairable')).flatMap(prior => {
+          const repairDiagnostics = retryDraftSources(store, operation, attempt!.number).reverse().flatMap(({ owner, prior }) => {
             if (partitions) {
-              if (owner.id !== operation.id) return []
-              const saved = partitionStage<PartitionAnalysisFailures>(store, operation, prior, 'partition:analysis-failures')
+              const saved = partitionStage<PartitionAnalysisFailures>(store, owner, prior, 'partition:analysis-failures')
               return saved?.result.planDigest === partitions.digest ? saved.result.failures.filter(({ code }) => analysisRepairDiagnosticCodes.has(code)).map(({ partitionId, code, message }) => ({ partitionId, code, message })) : []
             }
-            return analysisRepairDiagnosticCodes.has(prior.failure!.code) ? [{ code: prior.failure!.code, message: prior.failure!.message }] : []
-          }))
+            return prior.failure?.kind === 'repairable' && analysisRepairDiagnosticCodes.has(prior.failure.code) ? [{ code: prior.failure.code, message: prior.failure.message }] : []
+          })
           let draftProtocol = stage<{ version: 'code-behavior-draft-v1' }>(store, operation, attempt, 'behavior-draft-protocol')?.version
           if (!draftProtocol && options.plan.agentWorkflow && !attempt.dispatchPlans.some(dispatch => dispatch.purpose.startsWith('code_behavior_'))) {
             draftProtocol = 'code-behavior-draft-v1'
@@ -1643,7 +1722,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           saveStage(store, fence, 'elaboration-draft-protocol', { version: draftProtocol })
         }
         const elaborationInput = makeElaborationInput(draftProtocol)
-        const result = partitions ? await elaborateSyncPartitions(elaborationInput, partitions, options.plan.version === 'sync-coordinator-v2' ? options.plan.partitionPolicy.maxParallel : 1, partitionCheckpoints, runner, view.composed) : await elaborate(elaborationInput, { runner, draft: draftProtocol ? loadElaborationDraft('elaboration') ?? undefined : undefined, draftMaterial: draftProtocol ? loadElaborationDraftMaterial('elaboration') ?? undefined : undefined, seed: loadElaborationRepairSeed('elaboration', freezeElaborationInput(elaborationInput).inputDigest) ?? undefined, repairDiagnostics: loadElaborationRepairDiagnostics('elaboration', freezeElaborationInput(elaborationInput).inputDigest) ?? undefined })
+        const result = partitions ? await elaborateSyncPartitions(elaborationInput, partitions, options.plan.version === 'sync-coordinator-v2' ? options.plan.partitionPolicy.maxParallel : 1, partitionCheckpoints, runner, view.composed) : await elaborate(elaborationInput, { runner, loadDraft: draftProtocol ? schemaDigest => loadElaborationDraft('elaboration', undefined, schemaDigest) : undefined, loadDraftMaterial: draftProtocol ? schemaDigest => loadElaborationDraftMaterial('elaboration', undefined, schemaDigest) : undefined, seed: loadElaborationRepairSeed('elaboration', freezeElaborationInput(elaborationInput).inputDigest) ?? undefined, repairDiagnostics: loadElaborationRepairDiagnostics('elaboration', freezeElaborationInput(elaborationInput).inputDigest) ?? undefined })
         const { contracts: _contracts, graph: _graph, coverage: _coverage, ...compact } = result
         elaboration = compact; saveStage(store, fence, 'elaboration', compact, !operation.baselineSelection ? { readSetDigest: operation.readSetDigest } : undefined, { composedTree: view.composed.tree, composedContentDigest: view.composed.contentDigest })
       }
