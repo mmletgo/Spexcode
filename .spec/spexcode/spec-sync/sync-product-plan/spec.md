@@ -14,6 +14,8 @@ P0至P5按完整需求交付，不以阶段演示、局部测试或可修改的�
 
 ## expanded spec
 
+共享分区调度在每项结束后真正让出事件循环，包括缓存复用、末项和失败，使既有租约心跳与暂停/取消及时运行；不通过延长时限或放宽fence掩盖缓存批次的事件循环饥饿。缓存原件、真实终态、调用预算和最终验收边界保持。
+
 当前受审分析存在冻结owner时，P1独审沿[[sync-elaboration]]的生成侧同一范围事实拒绝仅改未变owner历史文案或未知ID绑定的repair。程序给具体拒因并保完整原review；原JSON/Git稿、summary追踪、Native请求及同一candidate经当前完整机械门重核后，仅新派独审，不重复生成或扩大源码/tests写权。真正域内语义repair仍续生成；原件绑定损坏明确停止，失败小回执的认证Git稿仍仅作材料。旧请求、字段缺席、控制中断回溯、原预算及最终V1–V4/采纳门保持。
 
 完整 settled 私有交付尚未采纳时，用户可沿现有执行入口以新 requestId 和 retryOf 显式重验同输入。workspace_synced 与 awaiting_landing 均须当前 attempt 和全部真实 journal/receipt 完整结算、验证及覆盖原范围，无未决业务或资源，Source 身份与干净工作区/index/冻结 HEAD 未变，且真实交付尚未由 Source/canonical Git 采纳；不能仅由阶段或 false 投影授予资格。已采纳、部分交付、缺证据、漂移及第三方资源头推进拒绝，准入事务重新核父完整记录和交付证据。

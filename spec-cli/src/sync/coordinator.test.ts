@@ -2833,6 +2833,11 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
   const verifications = definitions.map(definition => { const item = parseContract({ nodeId: definition.nodeId, path: definition.path, source: sources.get(definition.nodeId)! }).contract!.items.find(item => item.kind === 'VERIFY')!; assert.equal(item.kind, 'VERIFY'); return { definition: { id: item.id, command: item.command, cwd: item.cwd, timeoutMs: item.timeoutMs }, environment: { version: 'trusted-test-v1' as const, image: 'node@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392', platform: 'linux/arm64' as const, memoryBytes: 128 * 1024 * 1024, cpus: 1, pidsLimit: 64, scratchBytes: 16 * 1024 * 1024, logBytes: 128 * 1024 } } })
   const mandatoryTests = definitions.map(definition => ({ verificationId: `VERIFY-${definition.upper}-01`, testPath: definition.testPath, testId: `AC-${definition.upper}-01` }))
   const f = await fixture(t, formatFinite ? { maxAttempts: 3, maxCalls: 30 + formatRemaining, maxRepairs: 2, timeoutMs: 300000 } : { mode: 'unlimited' }, false, baseSpec, 'project', baseSpec, { version: 'sync-coordinator-v2', direction: 'code_to_spec', targets: definitions.filter(item => !newLeaf || item !== badOwner).map(({ nodeId, path }) => ({ nodeId, path })), sourcePaths: ['src'], writePaths: ['.spec'], verifications, mandatoryTests, partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 }, commitTrigger: { before: null, paths: definitions.map(item => item.sourcePath) } }, undefined, 'code', undefined, true, extras)
+  const renewals: { attemptId: string; at: number }[] = []
+  if (formatInterleaved) {
+    const renew = f.store.renewLease.bind(f.store)
+    f.store.renewLease = (fence, duration) => { const result = renew(fence, duration); renewals.push({ attemptId: fence.attemptId, at: Date.now() }); return result }
+  }
   if (newLeaf) assert.equal(f.input && readTree(f.input.source.commonDir, f.input.immutableTree).some(entry => entry.path === badOwner.path), false)
   const snapshotObjects = readTree(f.input.source.commonDir, f.input.immutableTree).filter(entry => !entry.path.startsWith('.spec/'))
   const ownerCalls: { attempt: number; nodeId: string; purpose: string }[] = []
@@ -3084,6 +3089,14 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
   }
   f.store.claimQueuedAttempt = input => { if (f.store.listAttempts(f.operation.id).length >= (lineage ? 6 : formatInterleaved ? 4 : reuseRepair ? 4 : unchanged || invalidBase || sibling ? 5 : pending || aggregateOnly || mode === 'review-resume' || mode === 'review-rebind-native' ? 4 : 3)) throw new Error('fixture仅阻止旧实现无限零调用热循环'); return claim(input) }
   const result = await runSyncOperation(f.store, f.operation.id, f.options)
+  const terminalDiagnostics = formatInterleaved ? (() => {
+    const attempts = f.store.listAttempts(f.operation.id), wrappers = attempts.map(attempt => attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())))
+    const a = wrappers[1]?.find(stage => stage.stage?.endsWith(':candidate-review') && !wrappers[0].some(before => before.stage === stage.stage && before.resultRef.sha256 === stage.resultRef.sha256) && JSON.parse(readEvidence(f.input.source.commonDir, stage.resultRef).toString()).reviewPassed)
+    return { status: result.status, failure: result.failure, leaseMs: f.options.leaseMs, heartbeatMs: f.options.heartbeatMs, maximumRenewalGapMs: Math.max(0, ...renewals.slice(1).flatMap((item, index) => item.attemptId === renewals[index].attemptId ? [item.at - renewals[index].at] : [])), sinceLastRenewalMs: renewals.length ? Date.now() - renewals.at(-1)!.at : null,
+      aStage: a?.stage, missingAttemptNumber: a ? attempts.find((attempt, index) => index >= 2 && !wrappers[index].some(stage => stage.stage === a.stage))?.number ?? null : null,
+      attempts: attempts.map((attempt, index) => ({ number: attempt.number, status: attempt.status, failure: attempt.failure, expiresAtMs: attempt.expiresAtMs, stageKeys: wrappers[index].map(stage => stage.stage), aResultRef: a ? wrappers[index].find(stage => stage.stage === a.stage)?.resultRef ?? null : null })), reviewCalls }
+  })() : null
+  if (formatInterleaved) t.diagnostic(JSON.stringify({ interleavedTerminal: terminalDiagnostics }))
   if (formatContinuation) {
     if (formatFinite) {
       assert.equal(reviewCalls.filter(call => call.attempt === 1).length, 6)
@@ -3110,7 +3123,12 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
     if (formatInterleaved) {
       const a = wrappers[1].find(stage => stage.stage?.endsWith(':candidate-review') && !wrappers[0].some(before => before.stage === stage.stage && before.resultRef.sha256 === stage.resultRef.sha256) && JSON.parse(readEvidence(f.input.source.commonDir, stage.resultRef).toString()).reviewPassed)
       assert.ok(a)
-      for (const values of wrappers.slice(2)) assert.deepEqual(values.find(stage => stage.stage === a.stage)?.resultRef, a.resultRef, 'A原accept/ref/请求不重签')
+      for (const values of wrappers.slice(2)) assert.deepEqual(values.find(stage => stage.stage === a.stage)?.resultRef, a.resultRef, `A原accept/ref/请求不重签；${JSON.stringify(terminalDiagnostics)}`)
+      assert.equal(result.status, 'unsupported', JSON.stringify(terminalDiagnostics))
+      assert.equal(result.failure?.code, 'unsupported', JSON.stringify(terminalDiagnostics))
+      assert.equal(result.failure?.message, '目标多轮续审已证，在Docker前停止', JSON.stringify(terminalDiagnostics))
+      assert.ok(attempts.every(attempt => ['failed', 'superseded', 'settled'].includes(attempt.status)), JSON.stringify(terminalDiagnostics))
+      assert.deepEqual(f.store.listRecoverableResources(), [], JSON.stringify(terminalDiagnostics))
     }
     for (const saved of accepted) for (const values of wrappers.slice(1)) assert.deepEqual(values.find(stage => stage.stage === saved.stage)?.resultRef, saved.resultRef)
     for (const values of wrappers.slice(1)) {

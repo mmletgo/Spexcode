@@ -797,6 +797,41 @@ test('取消停止小批后续派发，已在途任务先结算；失败亦不�
   await assert.rejects(mapSyncPartitions([1, 2, 3], 1, undefined, async value => { throw new Error(`failed-${value}`) }), /failed-1/)
 })
 
+test('立即缓存分区在边界响应timer取消，不耗完余下任务', async t => {
+  const controller = new AbortController(), dispatched: number[] = [], wait = new Int32Array(new SharedArrayBuffer(4))
+  const timer = setTimeout(() => controller.abort(), 0)
+  t.after(() => clearTimeout(timer))
+  await assert.rejects(mapSyncPartitions(Array.from({ length: 20 }, (_, index) => index), 1, controller.signal, async value => {
+    dispatched.push(value); Atomics.wait(wait, 0, 0, 2)
+    return value
+  }), { code: 'cancelled' })
+  assert.ok(dispatched.length > 0 && dispatched.length < 20, '真实timer必须在缓存全批耗完前生效')
+})
+
+test('立即缓存分区允许timer心跳执行，完成顺序与结果不变', async t => {
+  const wait = new Int32Array(new SharedArrayBuffer(4)), items = Array.from({ length: 20 }, (_, index) => index)
+  let heartbeats = 0
+  const timer = setInterval(() => heartbeats++, 1)
+  t.after(() => clearInterval(timer))
+  const result = await mapSyncPartitions(items, 1, undefined, async value => { Atomics.wait(wait, 0, 0, 2); return value })
+  assert.deepEqual(result, items)
+  assert.ok(heartbeats > 0, '立即Promise链不能饿死心跳timer')
+})
+
+for (const fails of [false, true]) test(`最后一个分区${fails ? '失败' : '成功'}边界仍让控制回调运行`, async t => {
+  let observed = false, handle: ReturnType<typeof setImmediate> | undefined
+  t.after(() => { if (handle) clearImmediate(handle) })
+  const error = new Error('原分区失败身份')
+  const pending = mapSyncPartitions([1], 1, undefined, async value => {
+    handle = setImmediate(() => { observed = true })
+    if (fails) throw error
+    return value
+  })
+  if (fails) await assert.rejects(pending, actual => actual === error)
+  else assert.deepEqual(await pending, [1])
+  assert.equal(observed, true, '末项与失败边界也必须真正让出事件循环')
+})
+
 
 test('分区P1原意根作为其他区只读上下文，独审原件与可写目标各自保留', async t => {
   const { input, plan, checkpoints } = await fixture(t), calls: ElaborationSessionRequest[] = []
