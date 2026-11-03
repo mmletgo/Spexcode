@@ -28,7 +28,7 @@ import type { SyncPartitionPlan } from './partitioning.js'
 import { contractOmissionBound, freezeGenerationInput, generationReviewRequest, generationStageTree, restoreGenerationInput, reviewError, runGeneration } from './generation.js'
 import type { GenerationFinding, GenerationInput, GenerationResult } from './generation-types.js'
 import { readStageDraft, stageWorktree } from './stage-worktree.js'
-import { createAttemptRunner, hasSettledNativeRpcFailure } from './native-run.js'
+import { createAttemptRunner, hasSettledNativeRpcFailure, pinSyncNativeRequest } from './native-run.js'
 import type { NativeRunCheckpoint, NativeRunPlan } from './native-run.js'
 import type { AdmitSyncInput, ApplyReceipt, BlobRef, CandidateRef, ComposedInputRef, FrozenBaselineSelection, InputSnapshot, SyncAttempt, SyncFailure, SyncOperation, SyncScope, SyncResourceRecord, VerificationResultBlob, WriteFence } from './operation-types.js'
 import { deliverVerifiedAttempt, planPrivateDelivery } from './private-delivery.js'
@@ -38,7 +38,7 @@ import { composeControlledRequest, readControlledChanges, readControlledDecision
 import { sessionIdForCreateKey } from '../sessions.js'
 import { withoutSessionApplicationExecutionWake } from '../session-application.js'
 import { assertFrozenBinding, readFrozenManifest, readFrozenRange } from '../frozen-context.js'
-import { pinZCodeToolPolicy, structuredExecutionPolicy, StructuredSessionError } from '../session-structured-policy.js'
+import { structuredExecutionPolicy, StructuredSessionError } from '../session-structured-policy.js'
 import { SettledSessionCreateTimeoutError } from '../session-structured.js'
 import { canonicalSnapshotSource, captureInputSnapshot, contentHash, identifyRawWorktree, objectGit, readEvidence, readObject, readTree, validateRepositoryPath, verifySnapshot, writeEvidence } from './snapshot.js'
 import type { SnapshotManifest } from './snapshot.js'
@@ -410,8 +410,7 @@ function acceptedReviewInput(store: SyncStore, operation: SyncOperation, attempt
 /** 原Native传输冻结由同一adapter接缝重建；缺席policy不追补，正文/schema/seed逐字核验。 */
 export function nativeReviewRequestMatches(native: NativeRunPlan['request'], supplied: ElaborationSessionRequest, binding: { attemptId: string; policyDigest: string }): boolean {
   const { signal: _signal, ...value } = supplied
-  const zcodeToolPolicy = pinZCodeToolPolicy(value, native)
-  const expected = zcodeToolPolicy ? { ...value, zcodeToolPolicy } : value
+  const expected = pinSyncNativeRequest(value, native)
   structuredExecutionPolicy(native)
   if (!native.frozenContext) return canonical(native) === canonical(expected)
   assertFrozenBinding(native.frozenContext, { requestKey: expected.requestKey, inputDigest: expected.inputDigest, ...binding })

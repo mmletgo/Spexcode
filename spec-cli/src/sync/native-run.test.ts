@@ -16,6 +16,7 @@ import { createAttemptRunner, type AttemptRunnerOptions, type NativeRunCheckpoin
 import { migrateSyncStore } from './migrations.js'
 import type { BlobRef } from './operation-types.js'
 import { SyncStore } from './store.js'
+import { nativeReviewRequestMatches } from './coordinator.js'
 
 const tsxImport = createRequire(import.meta.url).resolve('tsx/esm')
 const hash = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex')
@@ -53,7 +54,7 @@ async function fixture(existingRoot?: string, model?: string) {
   return { root, store, claimed, request, records, resource, checkpoint, blobIO, cache, runtimeBase, runner, cleanup: () => { protocol.close(); if (!existingRoot) rmSync(root, { recursive: true, force: true }) } }
 }
 
-for (const model of ['claude:default', 'zcode:default']) for (const historical of [false, true]) test(`原生CLI配置仅冻结新resource，历史缺席与摘要保持 ${model}/${historical}`, async () => {
+for (const model of ['claude:default', 'zcode:default']) for (const historical of [false, true]) test(`原生CLI配置仅冻结新resource，历史缺席与摘要保持 ${model}/${historical}`, async t => {
   const f = await fixture(undefined, model)
   try {
     const request = { ...f.request, worktree: { baseCommit: 'a'.repeat(40), tree: 'b'.repeat(40), mode: 'edit' as const } }
@@ -69,6 +70,12 @@ for (const model of ['claude:default', 'zcode:default']) for (const historical o
     assert.equal((plan.request as typeof request & { nativeConfiguration?: string }).nativeConfiguration, historical ? undefined : 'cli-config-v1')
     assert.equal(plan.requestDigest, hash(plan.request))
     assert.equal(resource.plan.payloadDigest, plan.requestDigest)
+    await t.test('实际持久Native请求可沿同一冻结规则冷验', () => {
+      assert.equal(nativeReviewRequestMatches(plan.request, request, { attemptId: f.claimed.attempt.id, policyDigest: f.claimed.operation.policyDigest }), true)
+    })
+    await t.test('新CLI沿原生effort而旧请求保内部high', () => {
+      assert.equal(plan.request.effort, historical ? 'high' : undefined)
+    })
     await assert.rejects(run(request), /mock-native-config-boundary/)
     assert.deepEqual(f.blobIO.read(f.resource().plan.planBlob), bytes)
     const changed = { ...request, nativeConfiguration: historical ? 'cli-config-v1' : 'unknown' } as typeof request
@@ -115,12 +122,13 @@ for (const historical of [false, true]) test(`ZCode read resource freezes nonint
   } finally { f.cleanup() }
 })
 
-for (const historical of [false, true, 'tool-policy-only'] as const) test(`reserved-only ZCode dispatch restores its exact frozen request from a new store connection; historical=${historical}`, async t => {
+for (const historical of [false, true, 'tool-policy-only', 'configured-high'] as const) test(`reserved-only ZCode dispatch restores its exact frozen request from a new store connection; historical=${historical}`, async t => {
   const f = await fixture(undefined, 'zcode:bigmodel-api/GLM-5.3-Flash')
   const coldProtocol = openProtocol(join(f.root, 'db.sqlite'))
   try {
     const request = { ...f.request, worktree: { baseCommit: 'a'.repeat(40), tree: 'b'.repeat(40), mode: 'read' as const } }
-    const original = { ...request, ...(historical === false ? { nativeConfiguration: 'cli-config-v1' as const } : {}), ...(historical === true ? {} : { zcodeToolPolicy: { version: 1 as const, toolDenylist: ['ExitPlanMode'] as const } }) }
+    const original = { ...request, ...(historical === false || historical === 'configured-high' ? { nativeConfiguration: 'cli-config-v1' as const } : {}), ...(historical === true ? {} : { zcodeToolPolicy: { version: 1 as const, toolDenylist: ['ExitPlanMode'] as const } }) }
+    if (historical === false) delete original.effort
     const dispatch = f.store.reserveDispatch(f.claimed.fence, { key: request.requestKey, purpose: request.purpose, requestDigest: hash(original) }), before = JSON.stringify(dispatch)
     assert.equal(f.resource(), null)
     let calls = 0
@@ -129,6 +137,7 @@ for (const historical of [false, true, 'tool-policy-only'] as const) test(`reser
       calls++
       assert.deepEqual(actual.zcodeToolPolicy, original.zcodeToolPolicy)
       assert.equal(actual.nativeConfiguration, original.nativeConfiguration)
+      assert.equal(actual.effort, original.effort)
       assert.equal(actual.sessionCreateKey, dispatch.sessionCreateKey)
       throw new StructuredSessionError('failed', 'mock-before-native-session')
     } } })
@@ -962,7 +971,7 @@ import{openProtocol}from'${createRequire(import.meta.url).resolve('@spexcode/ses
 import{migrateSyncStore}from${JSON.stringify(modulePath('./migrations.ts'))};import{SyncStore}from${JSON.stringify(modulePath('./store.ts'))};import{createAttemptRunner}from${JSON.stringify(modulePath('./native-run.ts'))};import{captureInputSnapshot,readEvidence}from${JSON.stringify(modulePath('./snapshot.ts'))};import{stageWorktree}from${JSON.stringify(modulePath('./stage-worktree.ts'))};import{nativeWorktreePrompt}from${JSON.stringify(modulePath('../native-worktree-runtime.ts'))};import{readRecord}from${JSON.stringify(modulePath('../session-record.ts'))};import{StructuredSessionError}from${JSON.stringify(modulePath('../session-structured.ts'))};import{structuredExecutionPolicy}from${JSON.stringify(modulePath('../session-structured-policy.ts'))};
 const hash=x=>createHash('sha256').update(JSON.stringify(x)).digest('hex'),git=args=>execFileSync('git',args,{encoding:'utf8'}).trim(),snapshot=await captureInputSnapshot(process.cwd(),{committed:true}),application=configuredSessionApplication(),protocol=openProtocol(process.env.SPEX_SESSION_DATABASE_PATH);await migrateSyncStore(protocol);const store=new SyncStore(protocol,{readBlob:ref=>readEvidence(snapshot.source.commonDir,ref)}),scope={paths:['value'],contractIds:[],flowIds:[]};
 const operation=store.admitAndEnqueue({ingressKey:'bridge',rootCauseId:'bridge',origin:'spec',input:snapshot,scope,budget:{maxCalls:6,maxAttempts:2,maxRepairs:1,timeoutMs:60000},policyDigest:'policy',impactDigest:'impact',readSetDigest:'read',delivery:null,deliveryPlan:{canonicalRoot:process.cwd()+'/delivery',branch:'delivery',baseCommit:snapshot.headCommit}}),claim=store.claimAttempt({operationId:operation.id,source:snapshot.source,scope,leaseMs:30000,expectedMessageId:operation.dispatchMessageId}),seed=stageWorktree(snapshot.source.commonDir,snapshot.headCommit,snapshot.immutableTree,'edit'),request={root:process.cwd(),base:seed.baseCommit,worktree:seed,requestKey:'edit-bridge',inputDigest:'bound',purpose:'code_generate',prompt:'edit once',schema:{type:'object',properties:{answer:{type:'string'}},required:['answer'],additionalProperties:false},timeoutMs:10000,model:'claude:MiniMax-M3.1-Flash',effort:'high'},runner=createAttemptRunner(store,claim.fence,{pollMs:2});
-const result=await runner(request),record=readRecord(result.sessionId),expected=hash({prompt:nativeWorktreePrompt(request.prompt,seed),parent:null,launcher:null,base:seed.baseCommit,structuredExecution:structuredExecutionPolicy({...request,nativeConfiguration:'cli-config-v1'})});assert.equal(record.structuredExecution.nativeConfiguration,'cli-config-v1');assert.equal(record.createPayloadHash,expected);assert.equal(result.frozenReadProof,undefined);assert.equal(record.structuredExecution.frozenContext,undefined);assert.equal(record.structuredExecution.resultWorktree.tree,result.worktree.tree);assert.notEqual(result.worktree.headCommit,seed.baseCommit);assert.equal(git(['show',result.worktree.headCommit+':value']),'actual committed candidate');assert.equal(store.findResource(claim.attempt.id,request.requestKey).phase,'removed');
+const result=await runner(request),record=readRecord(result.sessionId),expected=hash({prompt:nativeWorktreePrompt(request.prompt,seed),parent:null,launcher:null,base:seed.baseCommit,structuredExecution:structuredExecutionPolicy({...request,effort:undefined,nativeConfiguration:'cli-config-v1'})});assert.equal(record.structuredExecution.nativeConfiguration,'cli-config-v1');assert.equal(record.structuredExecution.effort,undefined);assert.equal(JSON.parse(readFileSync(record.structuredExecution.claudeNative.root+'/launch.json','utf8')).args.includes('--effort'),false);assert.equal(record.createPayloadHash,expected);assert.equal(result.frozenReadProof,undefined);assert.equal(record.structuredExecution.frozenContext,undefined);assert.equal(record.structuredExecution.resultWorktree.tree,result.worktree.tree);assert.notEqual(result.worktree.headCommit,seed.baseCommit);assert.equal(git(['show',result.worktree.headCommit+':value']),'actual committed candidate');assert.equal(store.findResource(claim.attempt.id,request.requestKey).phase,'removed');
 const calls=JSON.parse(readFileSync(${JSON.stringify(count)},'utf8'));assert.equal(calls.length,1);assert.equal(calls[0].prompt,nativeWorktreePrompt(request.prompt,seed));assert.equal(calls[0].cwd,result.worktree.worktreePath);
 git(['worktree','remove',result.worktree.worktreePath]);assert.deepEqual(await createAttemptRunner(store,claim.fence,{pollMs:2})(request),result);assert.equal(store.readOperation(operation.id).callsUsed,1);assert.equal(JSON.parse(readFileSync(${JSON.stringify(count)},'utf8')).length,1);await assert.rejects(runner({...request,prompt:'another task'}),{code:'key_reused'});
 const malformed={...request,requestKey:'schema-bridge',purpose:'code_behavior_analyze',prompt:'malformed original response',schema:{type:'object',properties:{items:{type:'array',maxItems:0}},required:['items'],additionalProperties:false},worktree:{...seed,mode:'read'},timeoutMs:null},failure=await runner(malformed).then(()=>null,error=>error);assert(failure instanceof StructuredSessionError);assert.equal(failure.code,'structured_output_retries_exhausted');assert.match(failure.message,/items.*must be array/);const failed=readRecord(failure.sessionId),exitPath=failed.structuredExecution.claudeNative.root+'/exit.json',originalExit=readFileSync(exitPath);assert.equal(failed.structuredExecution.errorCode,'structured_output_retries_exhausted');assert.equal(failed.structuredExecution.output,undefined);assert.equal(store.findResource(claim.attempt.id,malformed.requestKey).phase,'removed');assert.equal(failed.structuredExecution.cancellation.nativeStopped,true);
@@ -971,7 +980,7 @@ const repair={...malformed,requestKey:'schema-repair-bridge',prompt:'repair orig
 const alias={...malformed,requestKey:'alias-bridge',prompt:'alias read experiment',schema:request.schema},aliasFailure=await runner(alias).then(()=>null,error=>error);assert(aliasFailure instanceof StructuredSessionError);assert.equal(aliasFailure.code,'native_worktree_result_invalid');assert.match(aliasFailure.message,/index-probe/);const aliasRecord=readRecord(aliasFailure.sessionId),aliasNative=aliasRecord.structuredExecution.claudeNative.root,aliasGit=args=>execFileSync('git',['-C',aliasRecord.worktreePath,...args],{encoding:'utf8'}).trim(),aliasHead=aliasGit(['rev-parse','HEAD']),aliasStatus=aliasGit(['status','--porcelain']),aliasIndexPath=aliasGit(['rev-parse','--path-format=absolute','--git-path','index']),aliasIndex=readFileSync(aliasIndexPath),protocolComplete=readFileSync(aliasNative+'/completed.json');assert.equal(aliasRecord.structuredExecution.state,'failed');assert.equal(aliasRecord.structuredExecution.output,undefined);assert.notEqual(aliasHead,seed.baseCommit);assert.notEqual(store.findResource(claim.attempt.id,alias.requestKey).phase,'removed');
 await assert.rejects(createAttemptRunner(store,claim.fence,{pollMs:2})({...alias,signal:AbortSignal.abort()}),{code:'cancelled'});assert.equal(store.findResource(claim.attempt.id,alias.requestKey).phase,'removed');assert.equal(aliasGit(['rev-parse','HEAD']),aliasHead);assert.equal(aliasGit(['status','--porcelain']),aliasStatus);assert.deepEqual(readFileSync(aliasIndexPath),aliasIndex);assert.deepEqual(readFileSync(aliasNative+'/completed.json'),protocolComplete);
 const gitRepair={...alias,requestKey:'alias-repair-bridge',prompt:'review in new worktree; actual prior Git failure: '+aliasFailure.message},gitRepaired=await runner(gitRepair);assert.notEqual(gitRepaired.sessionId,aliasFailure.sessionId);assert.notEqual(gitRepaired.worktree.worktreePath,aliasRecord.worktreePath);assert.equal(gitRepaired.worktree.headCommit,seed.baseCommit);assert.equal(store.findResource(claim.attempt.id,gitRepair.requestKey).phase,'removed');assert.equal(aliasGit(['rev-parse','HEAD']),aliasHead);assert.equal(aliasGit(['status','--porcelain']),aliasStatus);assert.equal(store.readOperation(operation.id).callsUsed,5);assert.equal(JSON.parse(readFileSync(${JSON.stringify(count)},'utf8')).length,5);protocol.close();process.exit(0);`)
-    const result = spawnSync(process.execPath, ['--import', tsxImport, script], { cwd: root, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, SPEXCODE_HOME: home, SPEX_SESSION_DATABASE_PATH: join(home, 'sessions.sqlite'), SPEX_RUNTIME_HOME: join(home, 'runtime'), ANTHROPIC_BASE_URL: 'https://example.invalid', SPEXCODE_CODEX_USAGE_GUARD: '0', SPEX_TEST: '1' }, encoding: 'utf8', timeout: 30000 })
+    const result = spawnSync(process.execPath, ['--import', tsxImport, script], { cwd: root, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, SPEXCODE_HOME: home, SPEX_SESSION_DATABASE_PATH: join(home, 'sessions.sqlite'), SPEX_RUNTIME_HOME: join(home, 'runtime'), CLAUDE_CONFIG_DIR: join(home, 'claude-config'), ANTHROPIC_BASE_URL: 'https://example.invalid', SPEXCODE_CODEX_USAGE_GUARD: '0', SPEX_TEST: '1' }, encoding: 'utf8', timeout: 30000 })
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })
