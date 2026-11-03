@@ -137,7 +137,7 @@ function claudeWorktreeProcessPlan(plan: NativePlan): NativePlan {
   return { ...plan, workspace: launch.cwd }
 }
 
-/** 新轮只认证其唯一init解析结果；请求别名与默认选择不冒充实际模型。 */
+/** 新轮绑定唯一init的选择表达式；API实际模型由各自原生history记录认证。 */
 function claudeWorktreeModel(plan: NativePlan, execution: StructuredExecution, init: { model: string }): string {
   if (execution.nativeConfiguration === 'cli-config-v1') {
     if (plan.version !== 2 || plan.requestedModel !== execution.model || typeof init.model !== 'string' || !init.model.trim() || plan.resolvedModel !== init.model || !plan.cliVersion.trim())
@@ -168,13 +168,13 @@ function claudeWorktreeHistory(plan: NativePlan, completed: boolean): ClaudePubl
 }
 
 /** 正常文件工具保持开放；失败仅认证同轮工具配对、原生模型与严格 companion。 */
-function worktreeSchemaRetryError(history: readonly ClaudePublicRecord[], original: ClaudePublicRecord, execution: StructuredExecution, prompt: string, model: string): StructuredSessionError {
+function worktreeSchemaRetryError(history: readonly ClaudePublicRecord[], original: ClaudePublicRecord, execution: StructuredExecution, prompt: string, exactModel?: string): StructuredSessionError {
   const calls = new Map<string, ClaudePublicRecord>(), responses = new Map<string, ClaudeToolReply>(), requests = new Set<string>()
   const validate = new Ajv({ allErrors: true }).compile(execution.schema)
   let latestMessage: string | undefined, latestAssistant: string | undefined, schemaErrors = 0, enforcementSeen = false, rejected: unknown
   for (const row of checkClaudeHistoryChain(history, original)) {
     if (row.type === 'api-request') {
-      if (!row.id || row.model !== model) throw new StructuredSessionError('stale_result', 'Claude worktree schema failure model request differs')
+      if (!row.id || exactModel !== undefined && row.model !== exactModel) throw new StructuredSessionError('stale_result', 'Claude worktree schema failure model request differs')
       requests.add(row.id)
     }
     if (row.type === 'assistant' && Array.isArray(row.message?.content)) {
@@ -237,9 +237,9 @@ function settleClaudeWorktreeResult(plan: NativePlan, prompt: string, execution:
   const echo = JSON.parse(readFileSync(join(root, 'user-echo.json'), 'utf8')) as ClaudeFrozenWitness['echo']
   const result = JSON.parse(readFileSync(join(root, 'result.json'), 'utf8')) as ClaudeFrozenWitness['result']
   const exit = JSON.parse(readFileSync(join(root, 'exit.json'), 'utf8')) as { code: number | null; signal: string | null; stopped: boolean }
-  const model = claudeWorktreeModel(plan, execution, init)
+  const selection = claudeWorktreeModel(plan, execution, init)
   const history = claudeWorktreeHistory(plan, execution.state === 'completed'), original = history.find(row => row.type === 'user' && row.uuid === plan.userUuid)
-  if (init.session_id !== plan.sessionId || !original?.promptId || original.sessionId !== plan.sessionId || plan.version === 2 && history.some(row => row.sessionId !== plan.sessionId || row.type === 'api-request' && row.model !== model)
+  if (init.session_id !== plan.sessionId || !original?.promptId || original.sessionId !== plan.sessionId || plan.version === 2 && history.some(row => row.sessionId !== plan.sessionId || row.type === 'api-request' && (typeof row.id !== 'string' || !row.id || typeof row.model !== 'string' || !row.model.trim()))
     || echo.uuid !== plan.userUuid || echo.session_id !== plan.sessionId || hash(echo.message) !== hash({ role: 'user', content: [{ type: 'text', text: prompt }] }) || hash(original.message) !== hash(echo.message)
     || original.parentUuid !== null || result.session_id !== plan.sessionId || result.user_message_uuid !== plan.userUuid || hash(result.user_message_uuids) !== hash([plan.userUuid]) || !exit.stopped) throw new StructuredSessionError('stale_result', 'Claude worktree original prompt/model/exit evidence differs')
   if (result.subtype === 'error_max_structured_output_retries') {
@@ -247,7 +247,7 @@ function settleClaudeWorktreeResult(plan: NativePlan, prompt: string, execution:
     const naturalExit = exit.code === 1 && exit.signal === null && terminalOutcome !== 'sent'
     const controlledExit = exit.code === null && exit.signal === 'SIGTERM' && terminalOutcome === 'sent'
     if (execution.state === 'completed' || existsSync(join(root, 'completed.json')) || !naturalExit && !controlledExit || result.type !== 'result' || result.is_error !== true) throw new StructuredSessionError('stale_result', 'Claude worktree schema exhaustion terminal differs')
-    throw worktreeSchemaRetryError(history, original, execution, prompt, model)
+    throw worktreeSchemaRetryError(history, original, execution, prompt, plan.version === 2 ? undefined : selection)
   }
   if (execution.state !== 'completed' && terminalStopOutcome(plan, result) === 'sent') throw new StructuredSessionError('failed', 'Claude terminal success required process-group termination and is not a completed result')
   if (exit.code !== 0 || exit.signal !== null || result.subtype !== 'success' || result.is_error || result.structured_output === undefined) throw new StructuredSessionError('stale_result', 'Claude worktree success evidence differs')
