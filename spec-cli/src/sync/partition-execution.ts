@@ -32,8 +32,8 @@ export type PartitionCheckpoints = {
   loadAcceptedAnalysis?(key: string, planDigest: string, inputDigest: string): CodeBehaviorAnalysis | null
   loadAcceptedElaboration?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'> | null
   loadAcceptedInterfaceSeed?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'> | null
-  loadElaborationDraftMaterial?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>): ElaborationDraftMaterial | null
-  loadElaborationDraft?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>): ElaborationDraft | null
+  loadElaborationDraftMaterial?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, schemaDigest?: string): ElaborationDraftMaterial | null
+  loadElaborationDraft?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, schemaDigest?: string): ElaborationDraft | null
   loadElaborationRepairSeed?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): ElaborationRepairSeed | null
   loadElaborationRepairDiagnostics?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): ElaborationRepairDiagnostics | null
   loadReadonlySpecRepair?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): { prior: Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>; repair: ReadonlySpecRepair } | null
@@ -344,7 +344,7 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
         return accepted
       }
       const seed = checkpoints.loadElaborationRepairSeed?.(key, partitionBinding, freezeElaborationInput(repairedInput).inputDigest) ?? undefined
-      const { contracts: _contracts, graph: _graph, coverage: _coverage, ...compact } = await elaborate(repairedInput, { runner, seed, draft: localInput.draftProtocol ? checkpoints.loadElaborationDraft?.(key, partitionBinding) ?? undefined : undefined, draftMaterial: localInput.draftProtocol ? checkpoints.loadElaborationDraftMaterial?.(key, partitionBinding) ?? undefined : undefined, repairDiagnostics: checkpoints.loadElaborationRepairDiagnostics?.(key, partitionBinding, freezeElaborationInput(repairedInput).inputDigest) ?? undefined })
+      const { contracts: _contracts, graph: _graph, coverage: _coverage, ...compact } = await elaborate(repairedInput, { runner, seed, loadDraft: localInput.draftProtocol ? schemaDigest => checkpoints.loadElaborationDraft?.(key, partitionBinding, schemaDigest) ?? null : undefined, loadDraftMaterial: localInput.draftProtocol ? schemaDigest => checkpoints.loadElaborationDraftMaterial?.(key, partitionBinding, schemaDigest) ?? null : undefined, repairDiagnostics: checkpoints.loadElaborationRepairDiagnostics?.(key, partitionBinding, freezeElaborationInput(repairedInput).inputDigest) ?? undefined })
       checkpoints.save(key, compact)
       return compact
     }
@@ -359,7 +359,7 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
       return accepted
     }
     const seed = checkpoints.loadElaborationRepairSeed?.(key, partitionBinding, inputDigest) ?? undefined
-    const result = await elaborate(localInput, { runner, seed, draft: localInput.draftProtocol ? checkpoints.loadElaborationDraft?.(key, partitionBinding) ?? undefined : undefined, draftMaterial: localInput.draftProtocol ? checkpoints.loadElaborationDraftMaterial?.(key, partitionBinding) ?? undefined : undefined, repairDiagnostics: checkpoints.loadElaborationRepairDiagnostics?.(key, partitionBinding, inputDigest) ?? undefined })
+    const result = await elaborate(localInput, { runner, seed, loadDraft: localInput.draftProtocol ? schemaDigest => checkpoints.loadElaborationDraft?.(key, partitionBinding, schemaDigest) ?? null : undefined, loadDraftMaterial: localInput.draftProtocol ? schemaDigest => checkpoints.loadElaborationDraftMaterial?.(key, partitionBinding, schemaDigest) ?? null : undefined, repairDiagnostics: checkpoints.loadElaborationRepairDiagnostics?.(key, partitionBinding, inputDigest) ?? undefined })
     const { contracts: _contracts, graph: _graph, coverage: _coverage, ...compact } = result
     checkpoints.save(key, compact)
     return compact
