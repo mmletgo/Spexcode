@@ -624,6 +624,8 @@ CLI 入口包含 spex sync enable、status、run、pause、resume、verify、dec
 
 Native P1每轮生成携上一轮实际JSON、具体结构/独审发现及完整review；同owner已结算的精确格式失败即使尚无candidate，也沿原checkpoint输入、分区、readSet和selection绑定传递真实code/message与旧resultRef/末轮产物。诊断参与真实prompt/request摘要，不成为raw/facts或新授权；业务inputDigest及accept缓存门槛保持，生成已完成但未独审不算accept，已accept父接口可沿原ref承接。原readonly、REQ/AC/ID、schema、预算和strict seal保持，历史证据不改。
 
+同operation的正式Git JSON草稿还可作为未批准材料跨合法P1全null扩域续用：原stage仍核source/input/policy和旧binding逐字保留，只有完整baseline/readSet/selection证明成立才沿已有null桥读取；无baseline旧路径继续精确匹配。暂停控制attempt没有正式草稿不遮蔽历史原稿，advisory不取得输出权限。当前seed只叠加重验owner/schema/path/ref/Git后的原字节，不搬旧树、不继承旧摘要或批准；新生成及独审继续重新核验当前业务输入。
+
 正式pause/resume遗留的superseded且failure:null控制attempt不清除前轮owner诊断。仅当其真实composed/selection、partition-plan原wrapper的readSet/selection及analysisRef均与当前绑定一致，且本owner没有新的已审或业务拒绝结果时，才越过该控制中断寻找最近已结算repairable来源；中间或来源的输入/分区/读取/选择变化、未结算或真实非repairable失败仍阻止继承。
 
 同一诊断接缝也保留候选渲染前的具体结构拒绝：已结算repairable来源必须为exhausted/repair_budget_exhausted、末轮candidate:null且有明确error发现（如重复业务行rows_patch）；不伪造候选seed，原schema和结构门槛保持。
