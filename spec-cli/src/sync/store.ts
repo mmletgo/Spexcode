@@ -7,6 +7,7 @@ import { controlledDecisionIdentity, readControlledDecision, readControlledReque
 import { readHistoryRequest } from './history-input.js'
 import { verifyPublicationBase } from './publication-base.js'
 import { selectedRetiredIds } from './composition.js'
+import { proveUnadoptedDelivery } from './source-adoption.js'
 import type { SyncCoordinatorPlan } from './coordinator-types.js'
 import type { PublicationBase, PublicationHeads } from './operation-types.js'
 import { SYNC_COMPONENT, SYNC_MIGRATIONS, syncCoordinatorAddress, syncSemanticDigest } from './migrations.js'
@@ -44,6 +45,8 @@ const dispatchStopped = (operation: SyncOperation): boolean => operation.control
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
 const parseRecord = <T>(row: Record<string, unknown> | undefined): T | null => row ? JSON.parse(String(row.record_json)) as T : null
 const inputPayload = (input: InputSnapshot): Omit<InputSnapshot, 'capturedAtMs'> => ({ id: input.id, source: input.source, headCommit: input.headCommit, immutableTree: input.immutableTree, indexTree: input.indexTree, indexDigest: input.indexDigest, manifestBlob: input.manifestBlob, contentDigest: input.contentDigest })
+const revalidatable = (operation: SyncOperation): boolean => ['workspace_synced', 'awaiting_landing'].includes(operation.phase)
+type RevalidationProof = ReturnType<typeof proveUnadoptedDelivery>
 const validateScope = (scope: SyncScope): void => {
   if (scope.paths.some(path => !path || path.startsWith('/') || path.includes('\\') || path.includes('\0') || path.split('/').some(part => !part || part === '.' || part === '..'))) fail('SYNC_SCOPE_INVALID', 'paths must be canonical relative repository paths')
 }
@@ -217,6 +220,47 @@ export class SyncStore {
       return next !== null && tx.query('SELECT operation_id FROM sync_apply_journals WHERE receipt_id=? AND status=?', next.receiptId, 'settled')[0]?.operation_id === operation.id
     })
   }
+  private revalidationSelection(tx: ProtocolTransaction, operation: SyncOperation, incoming: FrozenBaselineSelection): boolean {
+    const original = operation.baselineSelection
+    if (!original || identityKey(incoming.source) !== identityKey(operation.input.source) || incoming.bindings.length !== original.bindings.length) return false
+    return incoming.bindings.every(binding => {
+      const prior = original.bindings.find(item => resourceKey(item.resource) === resourceKey(binding.resource))
+      if (!prior) return false
+      if (digest(prior) === digest(binding)) return true
+      const pair = 'bytePair' in binding ? binding.bytePair : binding.intentPair
+      if (!pair) return false
+      const journal = parseRecord<ApplyJournal>(tx.query("SELECT record_json FROM sync_apply_journals WHERE operation_id=? AND receipt_id=? AND status='settled'", operation.id, pair.receiptId)[0])
+      const persisted = parseRecord<BaselinePair>(tx.query('SELECT record_json FROM sync_baseline_pairs WHERE id=?', pair.id)[0])
+      const resource = binding.resource
+      const advanced = journal && (resource.kind === 'path' ? journal.plan.files.some(file => file.path === resource.path) : (resource.kind === 'flow' ? journal.plan.coveredScope.flowIds : journal.plan.coveredScope.contractIds).includes(resource.id) || (pair.retiredIds ?? []).includes(resource.id) && (resource.kind === 'flow' ? operation.scope.flowIds : operation.scope.contractIds).includes(resource.id))
+      return !!advanced && !!journal?.receipt && !!persisted && pair.id === `baseline-${journal.id}` && digest(pair) === digest(persisted) && digest(pair.source) === digest(operation.input.source) && digest(pair.sourceInput) === digest(operation.input) && digest(pair.verifiedDelivery) === digest(journal.receipt.deliverySnapshot) && digest(pair.coveredScope) === digest(journal.plan.coveredScope)
+    })
+  }
+  /** 子操作只把父自身结算推进用于当前CAS，不替换原业务输入。 */
+  readRevalidationSelection(operationId: string): FrozenBaselineSelection {
+    return this.write(tx => {
+      const parent = this.operation(tx, operationId)
+      if (!parent.baselineSelection) fail('SYNC_RETRY_BINDING', '重验缺少原精确资源选择')
+      const current = this.baselineSelection(tx, parent.input.source, parent.baselineSelection.bindings.map(binding => binding.resource))
+      if ('failure' in current) fail(current.failure.code, current.failure.message)
+      if (!this.revalidationSelection(tx, parent, current.selection)) fail('SYNC_RETRY_BASELINE_CHANGED', '资源头并非仅由原操作自身结算推进')
+      return current.selection
+    })
+  }
+  private businessSelection(tx: ProtocolTransaction, operation: SyncOperation): FrozenBaselineSelection | undefined {
+    if (!operation.retryOf || !operation.baselineSelection) return operation.baselineSelection
+    const parent = this.operation(tx, operation.retryOf)
+    const business = this.businessSelection(tx, parent)
+    if (!business || !parent.baselineSelection) return operation.baselineSelection
+    if (!revalidatable(parent) && business.digest === parent.baselineSelection.digest) return operation.baselineSelection
+    if (identityKey(parent.input.source) !== identityKey(operation.input.source) || digest(inputPayload(parent.input)) !== digest(inputPayload(operation.input)) || parent.policyDigest !== operation.policyDigest || parent.origin !== operation.origin || (parent.requestBlob?.sha256 ?? null) !== (operation.requestBlob?.sha256 ?? null) || parent.impactDigest !== operation.impactDigest || !contains(operation.scope, parent.scope) || !operation.contractScopeExpansions?.length && (parent.readSetDigest !== operation.readSetDigest || digest(parent.scope) !== digest(operation.scope))) fail('SYNC_RETRY_BINDING', '重验来源链已改变原输入、政策、读集或授权范围')
+    const originalKeys = new Set(parent.baselineSelection.bindings.map(binding => resourceKey(binding.resource)))
+    const selected = { ...operation.baselineSelection, bindings: operation.baselineSelection.bindings.filter(binding => originalKeys.has(resourceKey(binding.resource))) }
+    if (revalidatable(parent) && !this.revalidationSelection(tx, parent, selected) || !revalidatable(parent) && selected.bindings.some(binding => !parent.baselineSelection!.bindings.some(prior => digest(prior) === digest(binding)))) fail('SYNC_RETRY_BINDING', '重验业务选择与原父交付不匹配')
+    const body = { version: business.version, source: business.source, bindings: operation.baselineSelection.bindings.map(binding => business.bindings.find(prior => resourceKey(prior.resource) === resourceKey(binding.resource)) ?? binding) }
+    return { ...body, digest: digest(body) }
+  }
+  readBusinessBaselineSelection(operationId: string): FrozenBaselineSelection | undefined { return this.write(tx => this.businessSelection(tx, this.operation(tx, operationId))) }
   ackDispatch(repositoryId: string, expectedMessageId: string): SyncOperation {
     return this.write(tx => {
       const head = this.dispatchHead(tx, repositoryId)
@@ -337,6 +381,8 @@ export class SyncStore {
     if (input.retryOf !== undefined && (typeof input.retryOf !== 'string' || !input.retryOf.trim())) fail('SYNC_RETRY_BINDING', '显式重试需要有效的原operation身份')
     this.blob(input.input.manifestBlob)
     if (input.retryOf && (this.readOperation(input.retryOf).requestBlob?.sha256 ?? null) !== (input.requestBlob?.sha256 ?? null)) fail('SYNC_RETRY_BINDING', '显式重试必须继承原始用户请求引用')
+    const parent = input.retryOf ? this.readOperation(input.retryOf) : null
+    const revalidation = parent && revalidatable(parent) && !this.findOperationByIngressKey(input.ingressKey) ? proveUnadoptedDelivery(this, parent) : undefined
     if (input.planBlob) { this.blob(input.planBlob); if (input.planBlob.sha256 !== input.policyDigest) fail('SYNC_PLAN_BINDING', 'plan evidence must have exactly the frozen policy digest') }
     if (input.delivery && (input.delivery.canonicalRoot !== input.deliveryPlan.canonicalRoot || input.delivery.branch !== input.deliveryPlan.branch || input.delivery.repositoryId !== input.input.source.repositoryId)) fail('SYNC_DELIVERY_BINDING', 'bound delivery differs from durable plan')
     const payload = { input: inputPayload(input.input), ...syncModelBinding(input.model), ...(input.requestBlob ? { requestBlob: input.requestBlob } : {}), ...(input.planBlob ? { planBlob: input.planBlob } : {}), ...(input.retryOf ? { retryOf: input.retryOf } : {}), scope: canonicalScope(input.scope), policyDigest: input.policyDigest, impactDigest: input.impactDigest, readSetDigest: input.readSetDigest, deliveryPlan: input.deliveryPlan, previousBaselinePairId: input.previousBaselinePair?.id ?? null, ...(input.baselineSelection ? { baselineSelectionDigest: input.baselineSelection.digest } : {}), budget: input.budget }
@@ -381,9 +427,10 @@ export class SyncStore {
       if (sameInput) { tx.exec("UPDATE sync_operations SET ingress_aliases_json=json_insert(ingress_aliases_json,'$[#]',?) WHERE id=?", input.ingressKey, sameInput.id); this.saveIngressReceipt(tx, input, sameInput.id, payloadDigest); return finish(sameInput, 'duplicate') }
       if (input.baselineSelection) this.assertSelection(tx, input.input.source, input.baselineSelection, scopeResources(input.scope))
       if (input.retryOf) {
-        const previous = this.operation(tx, input.retryOf), eligibility = this.retryEligibility(tx, previous)
+        const previous = this.operation(tx, input.retryOf), eligibility = this.retryEligibility(tx, previous, revalidation)
         if (!eligibility.eligible) fail(eligibility.reason!.code, eligibility.reason!.message)
-        if ((previous.baselineSelection?.digest ?? null) !== (input.baselineSelection?.digest ?? null) || previous.origin !== input.origin || identityKey(previous.input.source) !== identityKey(input.input.source) || digest(inputPayload(previous.input)) !== digest(inputPayload(input.input)) || (previous.requestBlob?.sha256 ?? null) !== (input.requestBlob?.sha256 ?? null) || previous.policyDigest !== input.policyDigest || previous.impactDigest !== input.impactDigest || previous.readSetDigest !== input.readSetDigest || previous.deliveryPlan.baseCommit !== input.deliveryPlan.baseCommit || (previous.previousBaselinePair?.id ?? null) !== (input.previousBaselinePair?.id ?? null) || digest(previous.scope.paths) !== digest(canonicalScope(input.scope).paths) || !contains(previous.scope, input.scope)) fail('SYNC_RETRY_BINDING', '显式重试必须完整复用原冻结来源、用户请求、政策及授权范围')
+        const selectionMatches = revalidation ? !!input.baselineSelection && this.revalidationSelection(tx, previous, input.baselineSelection) : (previous.baselineSelection?.digest ?? null) === (input.baselineSelection?.digest ?? null)
+        if (!selectionMatches || revalidation && (digest(previous.budget) !== digest(input.budget) || digest(previous.scope) !== digest(canonicalScope(input.scope))) || previous.origin !== input.origin || identityKey(previous.input.source) !== identityKey(input.input.source) || digest(inputPayload(previous.input)) !== digest(inputPayload(input.input)) || (previous.requestBlob?.sha256 ?? null) !== (input.requestBlob?.sha256 ?? null) || previous.policyDigest !== input.policyDigest || previous.impactDigest !== input.impactDigest || previous.readSetDigest !== input.readSetDigest || previous.deliveryPlan.baseCommit !== input.deliveryPlan.baseCommit || (previous.previousBaselinePair?.id ?? null) !== (input.previousBaselinePair?.id ?? null) || digest(previous.scope.paths) !== digest(canonicalScope(input.scope).paths) || !contains(previous.scope, input.scope)) fail('SYNC_RETRY_BINDING', '显式重试必须完整复用原冻结来源、用户请求、政策及授权范围')
         if (input.ingressKey === previous.ingressKey || input.rootCauseId === previous.rootCauseId) fail('SYNC_RETRY_BINDING', '显式重试需要新的用户请求身份')
       }
       if (input.previousBaselinePair) {
@@ -542,9 +589,9 @@ export class SyncStore {
     if (composed.compositionEvidenceBlob) this.blob(composed.compositionEvidenceBlob)
     return this.write(tx => {
       const { operation, attempt } = this.checkFence(tx, fence)
-      if (operation.baselineSelection && composed.baselineSelectionDigest !== operation.baselineSelection.digest) fail('SYNC_COMPOSITION_BINDING', 'composition baseline selection digest differs')
+      if (operation.baselineSelection && composed.baselineSelectionDigest !== this.businessSelection(tx, operation)?.digest) fail('SYNC_COMPOSITION_BINDING', 'composition business baseline selection digest differs')
       if (composed.sourceInputId !== operation.input.id || composed.previousBaselinePairId !== (operation.previousBaselinePair?.id ?? null) || (composed.requestBlob?.sha256 ?? null) !== (operation.requestBlob?.sha256 ?? null)) fail('SYNC_COMPOSITION_BINDING', 'composition must retain original source, baseline pair and controlled request')
-      const expanded = operation.baselineSelection && attempt.composedInput?.baselineSelectionDigest !== operation.baselineSelection.digest && operation.contractScopeExpansions?.some(expansion => expansion.baselineSelectionDigest === operation.baselineSelection!.digest && expansion.previousBaselineSelectionDigest !== expansion.baselineSelectionDigest) && ['analyzing', 'elaborating', 'repairing'].includes(operation.phase) && !attempt.candidate && !attempt.verification
+      const expanded = operation.baselineSelection && attempt.composedInput?.baselineSelectionDigest !== this.businessSelection(tx, operation)?.digest && operation.contractScopeExpansions?.some(expansion => expansion.baselineSelectionDigest === operation.baselineSelection!.digest && expansion.previousBaselineSelectionDigest !== expansion.baselineSelectionDigest) && ['analyzing', 'elaborating', 'repairing'].includes(operation.phase) && !attempt.candidate && !attempt.verification
       if (bindings && bindings.readSetDigest !== operation.readSetDigest) {
         if (!expanded) fail('SYNC_READ_SET_FROZEN', 'read set can only rebind after reviewed scope expansion before generation')
         operation.readSetDigest = bindings.readSetDigest; this.saveOperation(tx, operation)
@@ -692,7 +739,7 @@ export class SyncStore {
         if (!contains(operation.readyScope, scopes.readyScope) || !contains(operation.scope, scopes.blockedScope) || overlaps(scopes.readyScope, scopes.blockedScope)) fail('SYNC_SCOPE_INVALID', 'ready/blocked scopes must be disjoint operation subsets')
         operation.readyScope = clone(scopes.readyScope); operation.blockedScope = clone(scopes.blockedScope); operation.blockedReason = scopes.blockedReason
       }
-      if (operation.baselineSelection && attempt.composedInput && attempt.composedInput.baselineSelectionDigest !== operation.baselineSelection.digest) fail('SYNC_COMPOSITION_BINDING', 'scope expansion requires a composition bound to the expanded selection')
+      if (operation.baselineSelection && attempt.composedInput && attempt.composedInput.baselineSelectionDigest !== this.businessSelection(tx, operation)?.digest) fail('SYNC_COMPOSITION_BINDING', 'scope expansion requires a composition bound to the expanded business selection')
       operation.phase = 'generating'; attempt.status = 'running'; this.saveAttempt(tx, attempt); this.saveOperation(tx, operation); return operation
     })
   }
@@ -874,16 +921,26 @@ export class SyncStore {
     return { eligible: true }
   }
   readDecisionEligibility(operationId: string): SyncDecisionEligibility { return this.write(tx => this.decisionEligibility(tx, this.operation(tx, operationId))) }
-  private retryEligibility(tx: ProtocolTransaction, operation: SyncOperation): SyncRetryEligibility {
+  private retryEligibility(tx: ProtocolTransaction, operation: SyncOperation, revalidation?: RevalidationProof): SyncRetryEligibility {
     const refused = (code: string, message: string): SyncRetryEligibility => ({ eligible: false, reason: { code, message } })
-    if (!['failed', 'budget_exhausted', 'cancelled'].includes(operation.phase)) return refused('SYNC_RETRY_PHASE', '当前操作未以失败、预算耗尽或取消结束')
+    if (revalidatable(operation)) {
+      if (!revalidation || digest(revalidation.operation) !== digest(operation) || digest(revalidation.journals) !== digest(tx.query('SELECT record_json FROM sync_apply_journals WHERE operation_id=? ORDER BY rowid', operation.id).map(row => parseRecord<ApplyJournal>(row)!))) return refused('SYNC_RETRY_REVALIDATION_REQUIRED', '完整私有交付需要当前真实未采纳证明')
+    } else if (!['failed', 'budget_exhausted', 'cancelled'].includes(operation.phase)) return refused('SYNC_RETRY_PHASE', '当前操作未以失败、预算耗尽或取消结束')
     if (operation.phase === 'cancelled' && tx.query('SELECT id FROM sync_apply_journals WHERE operation_id=? AND receipt_id IS NOT NULL LIMIT 1', operation.id).length) return refused('SYNC_RETRY_DELIVERED', '取消操作已有真实交付结果，不能重复交付')
     if (tx.query("SELECT id FROM sync_resources WHERE operation_id=? AND phase!='removed' LIMIT 1", operation.id).length) return refused('SYNC_RETRY_RESOURCE_PENDING', '旧操作仍有未确认结算的原生资源')
     if (tx.query("SELECT id FROM sync_apply_journals WHERE operation_id=? AND status!='settled' LIMIT 1", operation.id).length) return refused('SYNC_RETRY_JOURNAL_PENDING', '旧操作仍有未结算的文件或Git副作用')
     if (operation.currentAttemptId && !['failed', 'superseded', 'settled'].includes(this.attempt(tx, operation.currentAttemptId).status) || tx.query('SELECT resource_key FROM sync_leases WHERE operation_id=? AND token IS NOT NULL AND expires_at_ms>? LIMIT 1', operation.id, this.now()).length) return refused('SYNC_RETRY_ATTEMPT_ACTIVE', '旧操作仍有有效执行或租约写权')
     return { eligible: true }
   }
-  readRetryEligibility(operationId: string): SyncRetryEligibility { return this.write(tx => this.retryEligibility(tx, this.operation(tx, operationId))) }
+  readRetryEligibility(operationId: string): SyncRetryEligibility {
+    const operation = this.readOperation(operationId)
+    let proof: RevalidationProof | undefined
+    if (revalidatable(operation)) {
+      try { proof = proveUnadoptedDelivery(this, operation); this.readRevalidationSelection(operation.id) }
+      catch (error) { return { eligible: false, reason: { code: error instanceof Error && 'code' in error ? String(error.code) : 'SYNC_RETRY_EVIDENCE_INVALID', message: error instanceof Error ? error.message : String(error) } } }
+    }
+    return this.write(tx => this.retryEligibility(tx, this.operation(tx, operationId), proof))
+  }
   readBudgetUsage(operationId: string): { budgetRootOperationId: string; callsUsed: number; attemptsUsed: number; repairFailures: number } {
     return this.write(tx => {
       const operation = this.operation(tx, operationId), family = this.family(tx, operation)

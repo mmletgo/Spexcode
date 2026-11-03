@@ -30,3 +30,5 @@ settledReceipt及既有scope覆盖谓词可由[[sync-application]]复用为纯�
 临近 merge 的同步边界再次核实 symbolic-ref HEAD 与实际 HEAD 仍为计划中的原分支/提交；preflight 后切支或推进 HEAD 明确拒绝。执行后的身份与分支仍需核实。这些复核不承诺阻绝任意外部进程同时操作 Git，最终仍以正常 hooks 和实际状态投影为准。
 
 Git 非零退出不等于没有副作用；错误包含实际 HEAD 是否前进，保留现场并要求重新读取状态，不承诺自动撤销。Git 完整成功后仍通过 [[sync-landing-status]] 读取实际 sourceSynced/canonicalSynced；没有新造的 journal、receipt 或持久完成阶段。主分支仍有脏改动时拒绝采纳不妨碍原私有交付成果查询。
+
+未采纳重验只读复用 settledReceipt：原 Source 的完整物理身份、HEAD、index 与工作区仍精确匹配干净冻结输入，完整交付当前尝试及全部 journal 已结算且覆盖原范围，同来源资源和未决副作用清空。实际交付已在 Source 或 canonical ref 祖先链时拒绝；缺证据与任何本地/HEAD漂移不能由 sourceSynced=false 代替未采纳证明。不调用采纳、快进或任何业务文件写入。
