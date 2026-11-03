@@ -10,7 +10,7 @@ import { nativeWorktreePrompt, nativeWorktreeResult } from '../native-worktree-r
 import { elaborate, elaborationDigest, sealPartitionedElaboration, verifyElaborationDraftCache } from './elaboration.js'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
 import type { ElaborationInput, ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
-import { captureInputSnapshot, contentHash, readObject, readTree, writeEvidence, writeObject, writeTree } from './snapshot.js'
+import { captureInputSnapshot, contentHash, readEvidence, readObject, readTree, writeEvidence, writeObject, writeTree } from './snapshot.js'
 import { captureStageDraft, overlayStageTree, readStageDraft, stageWorktree } from './stage-worktree.js'
 import { syncCheckpointArtifacts } from './checkpoint-evidence.js'
 import { freezeCandidate } from './candidate.js'
@@ -118,6 +118,35 @@ test('历史失败原件仅复制为非权威草稿材料，不在prompt重答JS
     return JSON.stringify(rows)
   }) })
   assert.equal(result.status, 'complete'); assert.equal(JSON.stringify(material), original); assert.equal(result.repairDiagnostics, undefined)
+})
+
+test('草稿续修保留同码同文的具体finding定位和严重级别，历史短错误不改写', async t => {
+  const f = await fixture(t), invalid = draftRows(f.input.targets[0].source!)
+  invalid.changes[0].tables.REQ[0].goal = '擅自改变导出业务目标'
+  invalid.changes[0].tables.RULE[0].constraint = '擅自改变提交权限'
+  const input = { ...f.input, mode: 'preserve_business' as const, maxRepairs: 0 }
+  const failed = await elaborate(input, { runner: f.run(() => JSON.stringify(invalid)) })
+  const checkpoint = JSON.parse(readEvidence(f.commonDir, writeEvidence(f.commonDir, failed.rounds[0])).toString()) as ElaborationResult['rounds'][number]
+  const concrete = checkpoint.findings.filter(issue => issue.code === 'refactor_business_meaning_changed')
+  assert.ok(concrete.length >= 2, JSON.stringify(checkpoint.findings))
+  assert.equal(new Set(concrete.map(issue => issue.message)).size, 1)
+  assert.ok(new Set(concrete.map(issue => issue.itemId)).size >= 2)
+  assert.deepEqual(checkpoint.draft!.errors, checkpoint.findings, '保存原finding，不丢path/itemId/severity')
+  const legacyDraft = { ...structuredClone(checkpoint.draft!), errors: checkpoint.findings.map(({ code, message }) => ({ code, message })) }
+  const legacyBytes = JSON.stringify(legacyDraft), inputDigest = failed.inputDigest
+  const restored = await elaborate({ ...input, requestKey: 'diagnostic-next-attempt' }, {
+    draft: legacyDraft,
+    repairDiagnostics: { requestKey: input.requestKey, inputDigest, resultRef: writeEvidence(f.commonDir, failed), failure: failed.failure!, round: checkpoint },
+    runner: f.run((request, workspace, draftPath) => {
+      assert.equal(readFileSync(join(workspace, draftPath), 'utf8'), JSON.stringify(invalid))
+      assert.ok(request.prompt.includes(`"runtimeFindings":${JSON.stringify(checkpoint.findings)}`), '实际prompt携原轮完整定位')
+      assert.ok(request.prompt.includes(`"errors":${JSON.stringify(legacyDraft.errors)}`), '历史短错误仍原样缺席定位')
+      return JSON.stringify(rows)
+    }),
+  })
+  assert.equal(restored.status, 'complete', JSON.stringify(restored.failure))
+  assert.equal(JSON.stringify(legacyDraft), legacyBytes)
+  assert.deepEqual(f.requests.slice(1).map(request => request.purpose), ['elaboration_generate', 'elaboration_review'])
 })
 
 test('草稿边界拒绝错owner/schema/path/ref/OID/seed以及Spec、源码、测试和其他owner修改', async t => {
