@@ -20,7 +20,7 @@ code:
 
 sync run/verify 的 API 和 CLI --model 接受操作级模型选择。选择进入不可变 admission/payload/ingress 身份，同 requestId 改模型拒绝；普通重复业务请求不能靠新 requestId 换模型取得新预算或归并到另一模型，换模型必须经正式 retryOf。显式 retry 未指定模型时继承原操作，显式另选模型仍复用原 source/input/policy/readset/request/origin 并保持既有已批准 P1 义务。
 
-缺省及显式 gpt-6.1-sol 统一为字段省略，其持久语义固定为该模型。旧操作不回写字段，不改旧 payload、receipt、fence；重启、恢复及同请求重放保持原选择。非默认模型的新操作使用带精确模型的 sync-tools-v2 固定运行描述，旧二进制只识别 v1 时明确拒绝执行；同时以既有 sync component v13 无DDL writer marker 在入口整体拒绝旧二进制，避免其绕过原运行描述派生 sol 重试；运行描述仅为能力/回滚门，选择权威仍为 operation。默认旧操作继续读原 v1。
+历史缺省及显式 gpt-6.1-sol 统一为字段省略，其持久语义固定为该模型。旧操作不回写字段，不改旧 payload、receipt、fence；重启、恢复及同请求重放保持原选择。非默认模型的新操作使用带精确模型的 sync-tools-v2 固定运行描述，旧二进制只识别 v1 时明确拒绝执行；同时以既有 sync component v13 无DDL writer marker 在入口整体拒绝旧二进制，避免其绕过原运行描述派生 sol 重试；运行描述仅为能力/回滚门，选择权威仍为 operation。默认旧操作继续读原 v1。
 
 新手动 run/verify 操作可显式选择模型覆盖项目默认；省略时同 request 的 prior 或 retryOf 原 operation 选择优先于当前输入冻结的版本化项目 `sync.model`，无 prior/retry 才使用项目值或当前工作流默认值（原生工作树为 `claude:default`，历史工作流为 gpt-6.1-sol）。相同 requestId 改选择拒绝；普通重复即使换 requestId 也不能改变选择或取得新预算，换执行器或选择须经正式 retryOf。自动观察、decide 和 revert 的新 operation 采用相同默认判据。项目值原样交给正式 runtime，不增加供应商白名单。旧 operation 缺少 model 字段仍固定为 gpt-6.1-sol；配置变化不能替换已准入选择或重置预算。
 
