@@ -7,20 +7,20 @@ import test from 'node:test'
 import { buildContractGraph, CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
 import { StructuredSessionError, rejectedFinalOutput } from '../session-structured-policy.js'
 import { nativeWorktreePrompt, nativeWorktreeResult } from '../native-worktree-runtime.js'
-import { elaborate, elaborationDigest, sealPartitionedElaboration, verifyElaborationDraftCache } from './elaboration.js'
+import { elaborate, elaborationDigest, freezeElaborationInput, sealPartitionedElaboration, verifyElaborationDraftCache } from './elaboration.js'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
 import type { ElaborationInput, ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
 import { captureInputSnapshot, contentHash, readEvidence, readObject, readTree, writeEvidence, writeObject, writeTree } from './snapshot.js'
 import { captureStageDraft, overlayStageTree, readStageDraft, stageWorktree } from './stage-worktree.js'
 import { syncCheckpointArtifacts } from './checkpoint-evidence.js'
 import { freezeCandidate } from './candidate.js'
-import { projectVerificationTable } from './elaboration-markdown.js'
+import { bindElaborationTargets, projectVerificationTable, renderElaboration } from './elaboration-markdown.js'
 import { elaborateSyncPartitions } from './partition-execution.js'
 import type { PartitionCheckpoints } from './partition-execution.js'
 import type { ElaborationResult, ReadonlySpecRepair } from './elaboration-types.js'
 import type { GeneratedTargetElaboration, ContractCell } from './elaboration-markdown.js'
 import type { SyncPartitionPlan } from './partitioning.js'
-import type { CodeBehaviorEvidence } from './writeback-types.js'
+import type { CodeBehaviorAnalysis, CodeBehaviorEvidence } from './writeback-types.js'
 
 const git = (root: string, ...args: string[]): string => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: 'pipe', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }).trim()
 const path = '.spec/export/export-contract/spec.md'
@@ -324,6 +324,49 @@ test('tagged draft saved/accepted冷缓存重核Git及body候选绑定，历史�
   assert.equal(f.requests.length, calls)
 })
 
+
+for (const kind of ['saved', 'accepted'] as const) test(`${kind}旧ready缓存按原local空analysis失效，兄弟全局REQ影响不扩权且真实Git原稿继续修`, async t => {
+  const f = await fixture(t), source = f.input.targets[0].source!
+  const analysis: CodeBehaviorAnalysis = { version: 'code-behavior-v1', inputId: f.snapshot.id, baselinePairId: null, composedDigest: 'a'.repeat(64), readSetDigest: 'a'.repeat(64), policyDigest: 'a'.repeat(64), inputDigest: 'a'.repeat(64), changes: [], findings: [], facts: [], authorizedChanges: [], nodeChanges: [], newNodes: [], resolutions: [], traces: [], reviewPassed: true }
+  const localAnalysis: CodeBehaviorEvidence = { ref: writeEvidence(f.commonDir, analysis), analysis }, partitionId = 'scope-cache-owner', planDigest = contentHash('scope-cache-plan')
+  const combined = { ...analysis, changes: [{ id: 'sibling-change', kind: 'allowed_change' as const, paths: ['src/sibling.js'], affectedIds: ['REQ-EXPORT-01'], ruleIds: ['REQ-EXPORT-01'], originalIntent: '兄弟承接祖先要求', previousBehavior: '旧兄弟行为', sourceBehavior: '当前兄弟行为', deliveryBehavior: '当前兄弟行为', evidence: '兄弟变化不授权此owner文案', counterexample: '本owner没有代码变化' }], partitionEvidence: [{ partitionId, changedPaths: [], analysisRef: localAnalysis.ref, analysis }] }
+  f.input.analysis = { analysis: combined, ref: writeEvidence(f.commonDir, combined) }
+  const plan: SyncPartitionPlan = { version: 'sync-partitions-v1', digest: planDigest, expectedPaths: [], dependencies: [], partitions: [{ id: partitionId, intentNodeId: 'export-contract', targets: [{ nodeId: 'export-contract', path }], readPaths: readTree(f.commonDir, f.snapshot.immutableTree).map(entry => entry.path), writePaths: [path], sourcePaths: ['src/export.js'], changedPaths: [], contextNodeIds: ['ancestor'], contractIds: [], flowIds: [], readBytes: 100, readLimitBytes: 524288, oversizedReads: [] }] }
+  type Local = Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>
+  const key = `partition:${partitionId}:elaboration`, output = draftRows(source)
+  output.changes[0].title = '旧版本已接受但本区未受影响的标题'
+  const bytes = JSON.stringify(output)
+  let captured: Local | undefined
+  await elaborateSyncPartitions(f.input, plan, 1, { load: () => null, save: (name, value) => { if (name === key) captured = structuredClone(value) as Local; return writeEvidence(f.commonDir, value) } }, f.run(() => bytes))
+  assert.ok(captured); assert.equal(captured.reviewPassed, false)
+  const localInput: ElaborationInput = { ...f.input, analysis: localAnalysis, partitionBinding: { planDigest, partitionId, analysisRef: f.input.analysis.ref }, validationScope: 'partition_local', authorizedChanges: [] }
+  assert.equal(freezeElaborationInput(localInput).inputDigest, captured.inputDigest)
+  const candidate = renderElaboration(localInput, bindElaborationTargets(localInput, output), captured.inputDigest), candidateDigest = contentHash(JSON.stringify(candidate))
+  // 旧版本已审回执是显式测试夹具；真实Git稿、schema及渲染身份仍逐项绑定，生产不改历史原件。
+  const old: Local = { ...captured, status: 'complete', structurePassed: true, reviewPassed: true, candidateDigest, changes: candidate.changes.map(change => ({ ...change, contentDigest: contentHash(change.source) })), rounds: [{ ...captured.rounds[0], findings: [], candidate, candidateDigest, draft: { ...captured.rounds[0].draft!, errors: [] }, reviewOutput: { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }, review: { inputDigest: captured.inputDigest, candidateDigest, verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] } }] }
+  const original = JSON.stringify(old), draft = old.rounds[0].draft!
+  assert.equal(readStageDraft(f.commonDir, draft, draft), bytes)
+  assert.equal(sealPartitionedElaboration(f.input, old.changes, candidate.applicability).seal.passed, true, '全局兄弟影响不能代替本区缓存资格')
+  let resumed = 0
+  const result = await elaborateSyncPartitions(f.input, plan, 1, {
+    load: <T>(name: string) => kind === 'saved' && name === key ? structuredClone(old) as T : null,
+    loadAcceptedElaboration: () => kind === 'accepted' ? structuredClone(old) : null,
+    loadElaborationDraft: kind === 'accepted' ? () => structuredClone(draft) : undefined,
+    elaborationDraftTagged: () => true,
+    save: (_name, value) => writeEvidence(f.commonDir, value),
+  }, f.run((request, workspace, draftPath) => {
+    resumed++
+    assert.equal(readFileSync(join(workspace, draftPath), 'utf8'), bytes, '不能丢弃已认证旧稿从零开始')
+    assert.match(request.prompt, /rows_patch/)
+    return JSON.stringify(rows)
+  }))
+  assert.equal(resumed, 1, '不合格旧ready必须重开生成及新独审')
+  assert.equal(result.status, 'complete', JSON.stringify(result.failure))
+  assert.equal(result.changes[0].source, source)
+  assert.deepEqual(f.requests.slice(-2).map(request => request.purpose), ['elaboration_generate', 'elaboration_review'])
+  assert.equal(verifyElaborationDraftCache(localInput, old, true), false)
+  assert.equal(JSON.stringify(old), original); assert.equal(readStageDraft(f.commonDir, draft, draft), bytes)
+})
 
 test('当前新input tag不能给原legacy无draft接受结果补协议', async t => {
   const f = await fixture(t)

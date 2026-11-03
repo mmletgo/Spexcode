@@ -1,6 +1,7 @@
 import { CONTRACT_COLUMNS, contractTableCells, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
 import type { ContractItem, ContractKind, Verification } from '@spexcode/spec-core/contracts'
-import type { Applicability, ElaborationCandidate, ElaborationInput } from './elaboration-types.js'
+import type { Applicability, ElaborationCandidate, ElaborationInput, ElaborationTarget } from './elaboration-types.js'
+import { contractBusinessProse } from './contract-evolution.js'
 
 export type ContractCell = string | string[] | boolean | number | null
 export type GeneratedTables = Record<ContractKind, Record<string, ContractCell>[]>
@@ -38,6 +39,22 @@ const contractRow = (item: ContractItem): Record<string, ContractCell> => Object
   const value = column === 'source' && item.kind !== 'VERIFY' ? `${item.source.kind}:${item.source.ref}` : (item as unknown as Record<string, ContractCell>)[key]
   return [column, value]
 }))
+
+/** 显式等价差量也沿用整个冻结文件，不因重渲染改变正文及技术表的位置。 */
+export function unchangedTargetOutput(target: ElaborationTarget, node: GeneratedNode): boolean {
+  if (!target.source) return false
+  const contract = parseContract({ ...target, source: target.source }).contract
+  if (!contract || node.removeIds.length) return false
+  const original = parseFrontmatter(target.source), expanded = parseParts(target.source)?.expandedSpec ?? original.body
+  const same = (before: unknown, after: unknown): boolean => JSON.stringify(before) === JSON.stringify(after)
+  return node.title === String(original.fm.title ?? '') && node.description === String(original.fm.desc ?? '')
+    && same(node.code, contract.code) && same(node.related, contract.related)
+    && (node.prose === null || node.prose.replace(/\r\n?/g, '\n').replace(/\n{3,}/g, '\n\n').trim() === contractBusinessProse(expanded.replace(/\r\n?/g, '\n')))
+    && Object.entries(node.tables).every(([kind, rows]) => rows.every(row => {
+      const previous = contract.items.find(item => item.kind === kind && item.id === row.id)
+      return previous && CONTRACT_COLUMNS[previous.kind].every(column => same(contractRow(previous)[column], row[column]))
+    }))
+}
 
 /** 当前协议按冻结节点应用完整行更新；重复更新或不属于该节点的删除不能被合并掩盖。 */
 export function elaborationPatchErrors(input: ElaborationInput, generated: GeneratedElaboration): string[] {
@@ -141,6 +158,7 @@ export function renderElaboration(input: ElaborationInput, generated: GeneratedE
     const programVerificationUpdates = input.phase === 'interface_seed' ? (input.verifications ?? []).filter(policy => baseline?.items.some(item => item.kind === 'VERIFY' && item.id === policy.id) && input.authorizedChanges?.some(change => change.id === policy.id && change.action === 'update_verification')) : []
     const raw = (move && target?.source ? originalParts?.rawSource : node.nodeId === input.intent.nodeId ? input.intent.rawSource : target?.rawSource || originalParts?.rawSource) || null
     const fm = input.mode === 'preserve_business' && target?.source ? { ...original, 'contract-schema': 'sync-v1', code: node.code, related: node.related } : { ...original, title: node.title, desc: node.description, 'contract-schema': 'sync-v1', ...(!target?.source ? { status: 'pending' } : {}), code: node.code, related: node.related }
+    if (target && unchangedTargetOutput(target, node) && raw === (parts?.rawSource || null) && !move && !programVerificationUpdates.length) return { nodeId: node.nodeId, path: node.path, beforeDigest: target.sourceDigest, source: target.source! }
     const metadataEqual = Object.entries(fm).every(([key, value]) => JSON.stringify(value) === JSON.stringify((key === 'code' || key === 'related') && typeof original[key] === 'string' ? [original[key]] : original[key]) || Array.isArray(value) && !value.length && !original[key] || value === '' && original[key] === undefined)
     if (baseline && (node.prose === null || input.mode === 'preserve_business') && metadataEqual && raw === (parts?.rawSource || null) && !move && !programVerificationUpdates.length && !node.removeIds.length && Object.values(node.tables).every(rows => !rows.length)) return { nodeId: node.nodeId, path: node.path, beforeDigest: target!.sourceDigest, source: target!.source! }
     const metadata = Object.entries(fm).filter(([_key, value]) => !Array.isArray(value) || value.length).map(([key, value]) => Array.isArray(value)

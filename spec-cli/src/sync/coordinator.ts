@@ -1717,21 +1717,25 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         }
         return { ...(draftProtocol ? { draftProtocol } : {}), ...(options.plan.agentWorkflow ? { worktree: stageWorktree(operation.input.source.commonDir, operation.input.headCommit, refinement?.candidate.tree ?? view.composed.tree) } : {}), root: operation.input.source.canonicalRoot, base: operation.input.headCommit, requestKey: `sync:${attempt!.id}:elaborate`, intent: { nodeId: effectiveIntentNodeId, rawSource }, targets, context: view.frozen.nodes.filter(node => !targets.some(target => target.path === node.path) && !moved.some(change => change.to.path === node.path)).map(node => ({ nodeId: node.id, path: node.path, source: view.files.get(node.path)! })), files: refinementFiles, facts: behaviorFacts, analysis, decisionAuthorities: analysis?.analysis.decisionAuthorities ?? options.plan.decisionAuthorities,  ...(refinement ? { refinement: { candidateDigest: refinement.candidateDigest, diagnostics: refinement.diagnostics } } : {}), mode: preserveBusiness ? 'preserve_business' : 'reelaborate', nodeChanges, verifications: options.plan.verifications.map(item => item.definition), implementationWritePaths: options.plan.version === 'sync-coordinator-v2' && options.plan.direction === 'code_to_spec' ? [] : unique(options.plan.writePaths), readonlyTestPaths: unique(options.plan.mandatoryTests.map(test => test.testPath)), authorizedChanges: behaviorAuthorization, historyInput: operation.input, retiredIds: unique([...(options.plan.retiredIds ?? []), ...historicalRetiredIds]), maxRepairs: 0, maxCalls: 2, totalTimeoutMs: operation.deadlineAtMs === null ? null : operation.deadlineAtMs - Date.now(), timeoutMs: callTimeoutMs, signal, model, effort: 'high' as const }
       }
+      let cacheDraft: ElaborationDraft | undefined
+      const reusableElaborationCache = (cached: SavedElaboration, tagged: boolean): boolean => {
+        const draftProtocol = tagged || cached.rounds.some(round => round.draft) ? 'elaboration-draft-v1' : undefined
+        const reusable = verifyElaborationDraftCache(makeElaborationInput(draftProtocol), cached, tagged)
+        const draft = cached.rounds.at(-1)?.draft
+        if (!reusable && !cacheDraft && draft) cacheDraft = { ...draft, errors: [...draft.errors, { code: 'rows_patch', message: '已审草稿超出本轮owner范围；恢复未受影响目标并重新独审' }] }
+        return reusable
+      }
       let elaboration = readonlyOwnerRepair ? null : stage<SavedElaboration>(store, operation, attempt, 'elaboration')
       if (elaboration && !elaborationComposedBinding(store, operation, attempt, elaboration, view.composed)) elaboration = null
       if (elaboration) {
         const tagged = elaborationDraftTagged(store, operation, attempt, 'elaboration', elaboration)
-        if (tagged || elaboration.rounds.some(round => round.draft)) {
-          if (partitions) elaboration = null
-          else verifyElaborationDraftCache(makeElaborationInput('elaboration-draft-v1'), elaboration, tagged)
-        }
+        if (partitions || !reusableElaborationCache(elaboration, tagged)) elaboration = null
       }
       if (!elaboration && !refinement && !readonlyOwnerRepair) {
         const selected = readonlyBase ?? latestApprovedElaboration(store, operation, attempt.number)
         const composition = selected && elaborationComposedBinding(store, store.readOperation(selected.operationId), store.readAttempt(selected.attemptId), selected.result, view.composed)
         const tagged = selected && elaborationDraftTagged(store, store.readOperation(selected.operationId), store.readAttempt(selected.attemptId), 'elaboration', selected.result)
-        if (selected && composition && !(partitions && (tagged || selected.result.rounds.some(round => round.draft)))) {
-          if (tagged || selected.result.rounds.some(round => round.draft)) verifyElaborationDraftCache(makeElaborationInput('elaboration-draft-v1'), selected.result, tagged ?? false)
+        if (selected && composition && !partitions && reusableElaborationCache(selected.result, tagged ?? false)) {
           elaboration = selected.result
           saveStage(store, fence, 'elaboration-provenance', { operationId: operation.id, inputId: operation.input.id, policyDigest: operation.policyDigest, fromOperationId: selected.operationId, fromAttemptId: selected.attemptId, evidenceRef: selected.resultRef, candidateDigest: selected.result.candidateDigest })
           saveStage(store, fence, 'elaboration', selected.result, undefined, composition)
@@ -1746,7 +1750,11 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           saveStage(store, fence, 'elaboration-draft-protocol', { version: draftProtocol })
         }
         const elaborationInput = makeElaborationInput(draftProtocol)
-        const result = partitions ? await elaborateSyncPartitions(elaborationInput, partitions, options.plan.version === 'sync-coordinator-v2' ? options.plan.partitionPolicy.maxParallel : 1, partitionCheckpoints, runner, view.composed) : await elaborate(elaborationInput, { runner, loadDraft: draftProtocol ? schemaDigest => loadElaborationDraft('elaboration', undefined, schemaDigest) : undefined, loadDraftMaterial: draftProtocol ? schemaDigest => loadElaborationDraftMaterial('elaboration', undefined, schemaDigest) : undefined, seed: loadElaborationRepairSeed('elaboration', freezeElaborationInput(elaborationInput).inputDigest) ?? undefined, repairDiagnostics: loadElaborationRepairDiagnostics('elaboration', freezeElaborationInput(elaborationInput).inputDigest) ?? undefined })
+        const loadDraft = draftProtocol ? (schemaDigest: string): ElaborationDraft | null => {
+          const draft = loadElaborationDraft('elaboration', undefined, schemaDigest)
+          return draft && cacheDraft ? { ...draft, errors: [...draft.errors, ...cacheDraft.errors] } : draft
+        } : undefined
+        const result = partitions ? await elaborateSyncPartitions(elaborationInput, partitions, options.plan.version === 'sync-coordinator-v2' ? options.plan.partitionPolicy.maxParallel : 1, partitionCheckpoints, runner, view.composed) : await elaborate(elaborationInput, { runner, draft: cacheDraft, loadDraft, loadDraftMaterial: draftProtocol ? schemaDigest => loadElaborationDraftMaterial('elaboration', undefined, schemaDigest) : undefined, seed: loadElaborationRepairSeed('elaboration', freezeElaborationInput(elaborationInput).inputDigest) ?? undefined, repairDiagnostics: loadElaborationRepairDiagnostics('elaboration', freezeElaborationInput(elaborationInput).inputDigest) ?? undefined })
         const { contracts: _contracts, graph: _graph, coverage: _coverage, ...compact } = result
         elaboration = compact; saveStage(store, fence, 'elaboration', compact, !operation.baselineSelection ? { readSetDigest: operation.readSetDigest } : undefined, { composedTree: view.composed.tree, composedContentDigest: view.composed.contentDigest })
       }

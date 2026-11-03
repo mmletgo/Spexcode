@@ -5,6 +5,8 @@ hue: 175
 desc: 从高层原意生成可追踪的主流程与状态处置，经独立审查和有限修复，精确保留未知政策。
 code:
   - spec-cli/src/sync/elaboration.ts#elaborate
+  - spec-cli/src/sync/elaboration.ts#elaborationScopeErrors
+  - spec-cli/src/sync/elaboration.ts#targetHasCurrentChanges
   - spec-cli/src/sync/elaboration.ts#freezeElaborationInput
   - spec-cli/src/sync/elaboration.ts#projectElaborationFlowReadiness
   - spec-cli/src/sync/elaboration.ts#verifyElaborationDraftCache
@@ -21,6 +23,10 @@ related:
 从用户原意生成可完成主流程、适用状态事件处置、规则和验收；无法确认的重要业务政策成为 GAP，只阻塞依赖分支。
 
 ## expanded spec
+
+本轮已审分析只为实际受影响owner提供范围证据；冻结targets不自动授权重写每个已有目标。细化在生成后和完整候选检查时核本轮影响归属、作者原意及已有逐项/生命周期授权，未受影响目标的metadata、解释、绑定及行变化以可续修rows_patch阻断。范围门与原行结构核验分离：历史合法JSON和精确schema继续作为原诊断材料进入续修，不能因新增语义门直接丢弃；旧候选不取得accept或ready。省略及显式等价输出由[[elaboration-markdown]]逐字沿用冻结正文，合法受影响owner的prose-only更新继续进入原演进检查及新独审。
+
+已审缓存除原input/Git/ref/schema/渲染绑定外，必须按当前本区输入重核同一owner范围。仅范围不合格返回不可复用资格，不抛原件损坏、不改旧reviewPassed/trace/JSON/ref；原身份或正文绑定损坏仍明确报错。调用者放弃该ready承接后，优先沿现有正式草稿来源，无来源则把已冷验缓存的精确末轮Git稿作为未批准材料续修，附rows_patch诊断并重新生成及独审，不能从零丢稿。全局兄弟分析命中祖先ID不替代本区scope，whole分区结果须回各局部缓存核资格后重新seal。
 
 P1草稿与旧Native材料在本轮业务schema计算完成后才通过进程内回调选源，跨正式retryOf的材料必须精确匹配schema；旧只读成功输出明确标为新临时材料，不能冒充历史Git草稿或批准。该回调不进入持久输入、wrapper或receipt。实际Git稿已按当前binding读出后不再调用fallback材料来源，避免旧Native诊断、标签或provenance混入。原review final格式失败时保留已认证generation业务稿，review原文只作untrusted诊断，不能覆为业务JSON。
 
