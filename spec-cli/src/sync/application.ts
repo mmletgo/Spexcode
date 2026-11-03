@@ -32,7 +32,7 @@ import { readSyncCheckpoints } from './checkpoint-evidence.js'
 import { prepareHistoryRequest, readHistoryRequest, readReceiptHistoryRestorations } from './history-input.js'
 import { readSyncLandingStatus } from './landing-status.js'
 import { isSyncSpecPath, readFrozenContracts } from './frozen-contracts.js'
-import { assertSourceAdoptionComplete, fastForwardSource, prepareSourceAdoption, sourceAdoptionMutexPath, type SourceAdoptionPlan } from './source-adoption.js'
+import { assertSourceAdoptionComplete, fastForwardSource, prepareSourceAdoption, settledReceipt, sourceAdoptionScopeCovers, sourceAdoptionMutexPath, type SourceAdoptionPlan } from './source-adoption.js'
 
 export type SyncScopeCoverage = { includedNodeIds: string[]; contextNodeIds: string[]; missingNodeIds: string[]; excludedNodeIds: string[]; totalNodeCount: number }
 export type SyncSubmitInput = { nodeId: string; requestId: string; origin?: 'spec' | 'initial' | 'code' | 'combined' | 'decision'; patch?: SpecBodyEdit; retryOf?: string; model?: string }
@@ -383,6 +383,39 @@ export class SyncApplication {
     const origin = accepted?.origin ?? (!before ? 'initial' : spec && code ? 'combined' : code ? 'code' : spec ? 'spec' : null)
     return { origin, commitTrigger: { before, paths } }
   }
+  private async consumedAdoptedPublication(snapshot: InputSnapshot, before: InputSnapshot, selection: FrozenBaselineSelection): Promise<boolean> {
+    const pairs = new Map(selection.bindings.flatMap(binding => { const pair = 'bytePair' in binding ? binding.bytePair : binding.intentPair; return pair ? [[pair.receiptId, pair] as const] : [] }))
+    for (const pair of pairs.values()) {
+      if (pair.verifiedDelivery.headCommit !== snapshot.headCommit || pair.verifiedDelivery.immutableTree !== snapshot.immutableTree || !pair.receiptId.startsWith('receipt-')) continue
+      const journal = this.store.readJournal(pair.receiptId.slice('receipt-'.length)), operation = this.store.readOperation(journal.operationId)
+      const journals = this.store.listJournals(operation.id), last = journals.at(-1)
+      if (last?.receipt?.id !== pair.receiptId || last.attemptId !== operation.currentAttemptId || pair.sourceInput.id !== operation.input.id || pair.verifiedDelivery.id !== last.receipt.deliverySnapshot.id || JSON.stringify(pair.coveredScope) !== JSON.stringify(journal.plan.coveredScope) || !['workspace_synced', 'awaiting_landing', 'canonical_synced'].includes(operation.phase)) continue
+      this.assertSource(operation); this.requireEnabled(snapshot, operation); assertSourceAdoptionComplete(operation)
+      const plan = this.operationPlan(operation)
+      await this.requireNodeAuthorized(snapshot, plan.intentNodeId)
+      const receipts = journals.map(item => settledReceipt(this.store, operation, item)), latest = receipts.at(-1)!
+      const covered = { paths: journals.flatMap(item => item.plan.coveredScope.paths), contractIds: journals.flatMap(item => item.plan.coveredScope.contractIds), flowIds: journals.flatMap(item => item.plan.coveredScope.flowIds) }
+      if (!sourceAdoptionScopeCovers(covered, operation.scope) || latest.receipt.actualCommit !== snapshot.headCommit || latest.receipt.actualTree !== snapshot.immutableTree || !readSyncLandingStatus(operation, snapshot, journals, { canonicalBranch: `refs/heads/${readConfig(this.root).mainBranch?.trim() || 'main'}`, readPaths: plan.readPaths }).sourceSynced) continue
+      const commonDir = snapshot.source.commonDir, parentTree = objectGit(commonDir, ['rev-parse', `${latest.intent.parent}^{tree}`]).toString().trim()
+      const parent = readTree(commonDir, parentTree).find(entry => entry.path === '.spec/spexcode.json')
+      const input = readSyncSettings(operation.input), current = readSyncSettings(snapshot)
+      const modes = [verifySnapshot(operation.input), verifySnapshot(snapshot)].map(entries => entries.find(entry => entry.path === '.spec/spexcode.json')!.mode)
+      if (!parent || parent.mode === '120000' || modes.some(mode => mode !== parent.mode) || parent.digest !== input.configDigest || current.configDigest !== input.configDigest) continue
+      if (before.id === snapshot.id) return true
+      const paths = objectGit(commonDir, ['diff', '--name-only', '-z', '--no-renames', before.immutableTree, parentTree]).toString('utf8').split('\0').filter(Boolean)
+      if (paths.some(path => path !== '.spec/spexcode.json')) continue
+      const prior = verifySnapshot(before).find(entry => entry.path === '.spec/spexcode.json')
+      if (!prior || prior.mode !== parent.mode) continue
+      readSyncSettings(before)
+      const withoutModel = (oid: string): string => {
+        const project = JSON.parse(readObject(commonDir, oid).toString('utf8')) as { sync: Record<string, unknown> }
+        delete project.sync.model
+        return JSON.stringify(project, (_key, value: unknown) => value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value)
+      }
+      if (withoutModel(prior.oid) === withoutModel(parent.oid)) return true
+    }
+    return false
+  }
   private async observeNode(snapshot: InputSnapshot, nodeId: string): Promise<void> {
     const { settings, configDigest } = readSyncSettings(snapshot)
     const model = syncModel(settings)
@@ -403,7 +436,9 @@ export class SyncApplication {
       if (cachedDifference?.key !== differenceKey) {
         const composed = composeAuthoredInput(snapshot, selection, { retainConflicts: true, executionPaths: plan.executionScope!.paths, contextPaths: plan.readPaths }).composed!
         const evidence = readCompositionEvidence(snapshot, composed, selection)
-        const { changed, specChanged, codeChanged, readonlyContext } = this.observationChanges(snapshot, plan, selection, evidence)
+        const changes = this.observationChanges(snapshot, plan, selection, evidence)
+        const consumedPublication = changes.changed && trigger?.commitTrigger.before && !evidence.intents.some(intent => intent.changed) && !evidence.residualPaths.length && !evidence.conflicts.length && await this.consumedAdoptedPublication(snapshot, trigger.commitTrigger.before, selection)
+        const { specChanged, codeChanged, readonlyContext } = changes, changed = changes.changed && !consumedPublication
         const difference = { nodeId, ...(!changed && selection.bindings.some(binding => 'bytePair' in binding ? binding.bytePair : binding.intentPair) ? { consumption: 'baseline' } : {}), readonlyContext, selection: selection.digest, configDigest, policyDigest: syncPlanDigest(plan), paths: evidence.paths.map(path => ({ path: path.path, base: path.base?.oid ?? null, baseMode: path.base?.mode ?? null, source: path.source?.oid ?? null, sourceMode: path.source?.mode ?? null })), intents: evidence.intents.map(intent => ({ resource: intent.resource, changed: intent.changed, before: intent.before?.semanticDigest ?? null, source: intent.source?.semanticDigest ?? null })), residualPaths: evidence.residualPaths, conflicts: evidence.conflicts }
         cachedDifference = { key: differenceKey, changed, specChanged, codeChanged, latestDifferenceDigest: writeEvidence(snapshot.source.commonDir, difference).sha256 }
         this.observedDifferences.set(nodeId, cachedDifference)

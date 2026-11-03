@@ -25,7 +25,7 @@ import type { SyncSettings } from './settings.js'
 import { sessionIdForCreateKey } from '../sessions.js'
 import { adaptElaborationNativeOutput } from '../../test/elaboration-native-output.js'
 
-async function fixture(t: test.TestContext, mode: 'content' | 'move' | 'retire' = 'content', options: { automaticCode?: boolean; deferAdoption?: boolean } = {}) {
+async function fixture(t: test.TestContext, mode: 'content' | 'move' | 'retire' = 'content', options: { automaticCode?: boolean; deferAdoption?: boolean; model?: string; readonlyDocs?: boolean } = {}) {
   const moveNode = mode === 'move', retireNode = mode === 'retire'
   const temp = realpathSync(mkdtempSync(join(tmpdir(), 'sync-application-history-'))), root = join(temp, 'source')
   cpSync(new URL('../../test/fixtures/spec-sync/export-repo/', import.meta.url), root, { recursive: true })
@@ -93,6 +93,8 @@ code:
   assert.equal(verify.kind, 'VERIFY')
   const settings: SyncSettings = { version: 'sync-settings-v1', nodeIds: ['export-contract'], sourcePaths: ['src'], testPaths: ['generated-tests'], readPaths: ['package.json'], facts: [{ source: 'decision:EXPORT-POLICY', text: original }], mandatoryTests: [], budget: { maxAttempts: 3, maxCalls: 16, maxRepairs: 2, timeoutMs: 300000 }, verifications: [{ definition: { id: verify.id, command: verify.command, cwd: verify.cwd, timeoutMs: verify.timeoutMs }, environment: { version: 'test-v1', image: 'node@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392', platform: 'linux/arm64', memoryBytes: 128 * 1024 * 1024, cpus: 1, pidsLimit: 64, scratchBytes: 16 * 1024 * 1024, logBytes: 128 * 1024 } }] }
   if (retireNode) settings.verifications.push({ definition: { id: 'VERIFY-SUMMARY-01', command: [...verify.command], cwd: verify.cwd, timeoutMs: verify.timeoutMs }, environment: settings.verifications[0].environment })
+  if (options.model) settings.model = options.model
+  if (options.readonlyDocs) { settings.readPaths.push('README.md'); writeFileSync(join(root, 'README.md'), 'unchanged readonly business context\n') }
   writeFileSync(join(root, '.spec/spexcode.json'), JSON.stringify({ mainBranch: 'main', harnesses: [], sync: settings }))
   const git = (...args: string[]) => execFileSync('/usr/bin/git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }).trim()
   git('init', '-b', 'main'); git('config', 'user.name', 'History application'); git('config', 'user.email', 'history@example.invalid'); git('add', '.'); git('commit', '-m', 'base')
@@ -328,6 +330,91 @@ test('已结算交付被原来源采纳后，提交观察沿真实receipt/baseli
   assert.ok(f.application.store.listJournals(f.original.id)[0].receipt)
 })
 
+for (const mixed of [false, true]) test(`混合资源heads的model配置更新与局部receipt采纳：${mixed ? '未消费业务差量不吞掉' : '不回声且后继提交仍观察'}`, { timeout: 180000 }, async t => {
+  const f = await fixture(t, 'content', { deferAdoption: true, model: 'claude:MiniMax-M3.1-Flash', readonlyDocs: true })
+  let dispatched = 0
+  f.application.start = () => { dispatched++ }; f.application['startNextDispatch'] = () => false
+  await f.application.adopt(f.original.id)
+  await f.application.startService({ compensationMs: 10000, debounceMs: 5 })
+  await f.application['scanObservedInput']()
+  const before = await captureInputSnapshot(f.root, { committed: true })
+  assert.equal((f.application.observationStatus().latestDifference as { consumption?: string }).consumption, 'baseline', JSON.stringify(f.application.observationStatus().latestDifference))
+  const scan = f.application['scanObservedInput'].bind(f.application)
+  let observing = false
+  f.application['scanObservedInput'] = async () => { if (observing) await scan() }
+  const configPath = join(f.root, '.spec/spexcode.json'), project = JSON.parse(readFileSync(configPath, 'utf8')) as { sync: SyncSettings }
+  project.sync.model = 'zcode:fixture/GLM'; writeFileSync(configPath, JSON.stringify(project))
+  if (mixed) {
+    writeFileSync(join(f.root, 'src/export.js'), readFileSync(join(f.root, 'src/export.js'), 'utf8') + '// UNCONSUMED EXTERNAL CODE\n')
+    writeFileSync(join(f.root, f.path), readFileSync(join(f.root, f.path), 'utf8') + '\n外部新增业务细节。\n')
+    writeFileSync(join(f.root, 'README.md'), 'unconsumed readonly business documentation\n')
+  }
+  f.git('add', '.'); f.git('commit', '-m', 'reauthorize model and preserve external input')
+  await f.application.enable()
+  const input = await captureInputSnapshot(f.root, { committed: true }), frozen = await f.application['freezeNodePlan'](input, 'export-contract')
+  const scope = { ...frozen.plan.executionScope!, paths: [f.path, 'generated-tests/export.test.mjs'] }
+  const admission = await prepareSyncAdmission(input, frozen.plan, { ingressKey: `local-receipt:${input.id}`, rootCauseId: 'local-receipt', origin: 'spec', budget: project.sync.budget, managedRoot: f.application['managedRoot'], baselineSelection: frozen.selection, executionScope: scope })
+  f.application['prepareTools'](admission.ingressKey, null)
+  const operation = f.application.store.admitAndEnqueue(admission), ack = f.application.store.ackDispatch(input.source.repositoryId, operation.dispatchMessageId)
+  const claimed = f.application.store.claimQueuedAttempt({ operationId: operation.id, source: input.source, scope: operation.scope, leaseMs: 300000, expectedRevision: ack.revision })
+  const composed = composeAuthoredInput(input, operation.baselineSelection, { executionPaths: scope.paths, contextPaths: frozen.plan.readPaths }).composed!
+  f.application.store.bindComposedInput(claimed.fence, composed); f.application.store.startGeneration(claimed.fence)
+  const entries = readTree(input.source.commonDir, composed.tree)
+  const candidate = freezeCandidate(input, { version: 'sync-files-v1', changes: scope.paths.map(path => {
+    const entry = entries.find(entry => entry.path === path)!
+    return { path, beforeDigest: entry.digest, beforeMode: entry.mode, content: readObject(input.source.commonDir, entry.oid).toString('utf8') + '\n// verified local increment\n', mode: null }
+  }) }, operation.scope, composed)
+  f.application.store.freezeCandidate(claimed.fence, candidate)
+  const evidence = writeEvidence(input.source.commonDir, { fixture: '仅证明真实receipt采纳消费；四门前置受控，不冒称模型或Docker验收' })
+  const bindings = { inputId: input.id, candidateDigest: candidate.digest, policyDigest: operation.policyDigest, readSetDigest: operation.readSetDigest, baselineSelectionDigest: operation.baselineSelection!.digest, environmentDigest: 'seed-fixture', contextDigest: 'seed-fixture' }
+  const result: VerificationResultBlob = { schemaVersion: 1, ...bindings, coveredScope: operation.scope, layers: (['V1', 'V2', 'V3', 'V4'] as const).map(layer => ({ layer, verdict: 'pass', evidenceRefs: [evidence] })) }
+  f.application.store.recordVerification(claimed.fence, { ...bindings, passed: true, coveredScope: operation.scope, evidenceRefs: [evidence], resultBlob: writeEvidence(input.source.commonDir, result) })
+  const delivery = await deliverVerifiedAttempt(f.application.store, claimed.fence, { managedRoot: f.application['managedRoot'], tools: f.application['executionInputs'](operation).tools, beforeApply: () => {} })
+  const countBefore = f.application.store.listOperations(input.source.repositoryId).length, dispatchBefore = dispatched
+  const readOperation = f.application.readOperation.bind(f.application)
+  const firstDifferences: { consumption?: string }[] = [], externalSnapshots: string[] = []
+  let scannedAdoption = false
+  f.application.readOperation = async id => {
+    if (id === operation.id && !scannedAdoption && f.git('rev-parse', 'HEAD') === delivery.receipt.actualCommit) {
+      scannedAdoption = true
+      if (!mixed) await f.application.automaticControl('pause')
+      observing = true; await f.application['scanObservedInput']()
+      assert.equal(f.application.observationStatus().latest?.failure, undefined, '暂停的只读receipt观察不能调用写入准入而报错')
+      firstDifferences.push(f.application.observationStatus().latestDifference as { consumption?: string })
+      if (mixed) externalSnapshots.push(JSON.stringify(f.application.store.listOperations(input.source.repositoryId).find(item => item.input.headCommit === delivery.receipt.actualCommit)))
+      else await f.application.automaticControl('resume')
+    }
+    return readOperation(id)
+  }
+  await f.application.adopt(operation.id)
+  assert.equal(scannedAdoption, true)
+  await f.application['scanObservedInput']()
+  const difference = f.application.observationStatus().latestDifference as { consumption?: string; intents?: { changed: boolean }[]; residualPaths?: string[] }
+  const count = f.application.store.listOperations(input.source.repositoryId).length
+  if (mixed) {
+    assert.ok(count > countBefore, 'parent之前未消费code/Spec/docs不能由局部receipt吞掉')
+    assert.equal(firstDifferences[0].consumption, undefined)
+    assert.equal(JSON.stringify(f.application.store.listOperations(input.source.repositoryId).find(item => item.input.headCommit === delivery.receipt.actualCommit)), externalSnapshots[0], '重复观察不伪结算或删除已准入的外部真实输入')
+    return
+  }
+  assert.equal(count, countBefore, '旧pair的model只读上下文不能把已验证写回重开为echo')
+  assert.equal(dispatched, dispatchBefore); assert.equal(difference.consumption, 'baseline')
+  assert.ok(difference.intents?.every(intent => !intent.changed)); assert.deepEqual(difference.residualPaths, [])
+  const adopted = await captureInputSnapshot(f.root, { committed: true }), selected = await f.application['freezeNodePlan'](adopted, 'export-contract')
+  assert.ok(new Set(selected.selection.bindings.flatMap(binding => { const pair = 'bytePair' in binding ? binding.bytePair : binding.intentPair; return pair ? [pair.id] : [] })).size > 1, '真实混合heads保留')
+  assert.notEqual(before.headCommit, input.headCommit)
+  f.git('commit', '--allow-empty', '-m', 'external same-tree successor')
+  await f.application['scanObservedInput']()
+  assert.equal((f.application.observationStatus().latestDifference as { consumption?: string }).consumption, undefined, '同tree新commit不冒认receipt')
+  assert.equal(f.application.store.listOperations(input.source.repositoryId).length, countBefore)
+  writeFileSync(join(f.root, 'src/export.js'), readFileSync(join(f.root, 'src/export.js'), 'utf8') + '// NEXT EXTERNAL CODE\n')
+  f.git('add', 'src/export.js'); f.git('commit', '-m', 'external code after adopted receipt')
+  await f.application['scanObservedInput']()
+  const successor = f.application.store.listOperations(input.source.repositoryId).find(item => item.input.headCommit === f.git('rev-parse', 'HEAD'))!
+  assert.ok(successor); assert.equal(successor.origin, 'code')
+  assert.equal(f.calls.length, 0)
+})
+
 for (const offline of [false, true]) test(`receipt消费边界：${offline ? '停机采纳后启动补偿' : '在线采纳'}后下一次纯代码提交仍为code`, { timeout: 180000 }, async t => {
   const f = await fixture(t, 'content', { automaticCode: true, deferAdoption: true })
   f.application.start = () => {}; f.application['startNextDispatch'] = () => false
@@ -342,6 +429,7 @@ for (const offline of [false, true]) test(`receipt消费边界：${offline ? '�
   assert.equal((f.application.observationStatus().latestDifference as { consumption?: string }).consumption, 'baseline')
   await f.application.stopService()
   const restarted = await SyncApplication.create(f.root, { protocol: f.protocol, runtimeDirectory: join(f.temp, 'runtime'), runner: async () => { throw new Error('本观察回归不允许调用模型') } })
+  retainHistoricalFrozenWorkflow(restarted)
   try {
     restarted.start = () => {}; restarted['startNextDispatch'] = () => false
     const triggers = new Map<string, { before: Awaited<ReturnType<typeof captureInputSnapshot>> | null; paths: readonly string[] }>()
@@ -351,7 +439,7 @@ for (const offline of [false, true]) test(`receipt消费边界：${offline ? '�
     f.git('add', 'src/export.js'); f.git('commit', '-m', 'C1 author code only')
     await restarted.startService({ compensationMs: 10000, debounceMs: 5 })
     const head = f.git('rev-parse', 'HEAD'), operation = restarted.store.listOperations(adopted.source.repositoryId).find(item => item.input.headCommit === head)!
-    assert.ok(operation, JSON.stringify(restarted.observationStatus().latest))
+    assert.ok(operation, JSON.stringify({ failure: restarted.observationStatus().latest?.failure, head }))
     assert.equal(operation.origin, 'code', '自身生成Spec不能把下次代码事件升级为combined')
     assert.equal(triggers.get(operation.input.id)!.before!.id, adopted.id)
     assert.deepEqual(triggers.get(operation.input.id)!.paths, ['src/export.js'])

@@ -15,6 +15,7 @@ export type SourceAdoptionPlan = { source: WorktreeIdentity; headCommit: string;
 const same = (left: unknown, right: unknown): boolean => JSON.stringify(left) === JSON.stringify(right)
 function fail(code: string, message: string): never { throw new SyncApplicationError(code, message) }
 const covers = (outer: SyncScope, inner: SyncScope): boolean => inner.paths.every(path => outer.paths.some(parent => path === parent || path.startsWith(`${parent}/`))) && inner.contractIds.every(id => outer.contractIds.includes(id)) && inner.flowIds.every(id => outer.flowIds.includes(id))
+export { covers as sourceAdoptionScopeCovers }
 const hasScope = (scope: SyncScope): boolean => !!(scope.paths.length || scope.contractIds.length || scope.flowIds.length)
 const identity = (source: WorktreeIdentity): string => JSON.stringify(source, Object.keys(source).sort())
 const gitText = (commonDir: string, args: string[]): string => objectGit(commonDir, args).toString().trim()
@@ -34,7 +35,7 @@ export function sourceAdoptionMutexPath(artifactRoot: string, source: WorktreeId
 }
 
 /** 读取既有已结算证明，不创建交付计划、验证、receipt 或新提交。 */
-function settledReceipt(store: SyncStore, operation: SyncOperation, journal: ApplyJournal): { receipt: ApplyReceipt; intent: CommitIntent } {
+export function settledReceipt(store: SyncStore, operation: SyncOperation, journal: ApplyJournal): { receipt: ApplyReceipt; intent: CommitIntent } {
   const commonDir = operation.input.source.commonDir, attempt = store.readAttempt(journal.attemptId), candidate = attempt.candidate, verification = attempt.verification, receipt = journal.receipt, plan = journal.plan
   if (journal.operationId !== operation.id || attempt.operationId !== operation.id || journal.generation !== attempt.generation || attempt.status !== 'settled' || journal.status !== 'settled' || !receipt || !candidate || !verification?.passed || !attempt.composedInput || journal.steps.some(step => step.status !== 'completed' || !step.evidenceRef)) fail('sync_adoption_not_settled', '交付缺少完整的已结算尝试、文件步骤或验证')
   const after = verifyCandidate(commonDir, candidate)
