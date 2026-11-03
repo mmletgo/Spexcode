@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+v24 cli-config-v1回归在专用临时SQLite保存已结算journal/receipt，23→24只追加SELECT1 marker。online backup前后比较全部旧业务/protocol表逐行原值与v1–v23完整migration行（含checksum/applied_at）；旧23 writer拒绝24库，升级前备份可由23 writer读取并保持全部旧行，重复迁移幂等。不得操作用户或真实同步库。
+
 v23回归在隔离真实SQLite保存behavior-draft-protocol checkpoint且dispatch为空，明确复现未reserved崩溃窗口；正式online backup后22→23保持原operation/attempt/resource/ingress/journal/pair/lease行与v1–v22 checksum逐字不变，旧slice(0,22) writer被组件围栏拒绝，备份仍可由v22打开并保原数据，重入迁移幂等。仅验证专用私库，不访问用户或生产数据库。
 
 v17语义marker的隔离真实SQLite迁移先online backup，逐字保留历史payload/receipt与v1–v16 checksum；旧v16组件writer拒绝升级后库，备份仍可按v16读取，不修改实际用户库。

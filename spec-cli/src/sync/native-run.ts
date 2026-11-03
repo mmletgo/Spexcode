@@ -5,7 +5,7 @@ import { getBlob, putBlob, runtimeRoot } from '@spexcode/spec-core'
 import { readRecord, type SessRec } from '../session-record.js'
 import { sessionIdForCreateKey, readSessionCreateTermination, recoverSessionCreateTermination, type SessionCreateTermination } from '../sessions.js'
 import { cancelStructuredSession, runStructuredSession, SettledSessionCreateTimeoutError, StructuredSessionError, type StructuredCancellationResult } from '../session-structured.js'
-import { assertRejectedOutput, prepareFrozenReaderRuntime, structuredExecutionPolicy, pinZCodeToolPolicy, type FrozenReaderRuntime, type StructuredExecution } from '../session-structured-policy.js'
+import { assertRejectedOutput, prepareFrozenReaderRuntime, structuredExecutionPolicy, pinNativeConfiguration, pinZCodeToolPolicy, type FrozenReaderRuntime, type StructuredExecution } from '../session-structured-policy.js'
 import { assertFrozenBinding, prepareFrozenPrompt } from '../frozen-context.js'
 import { verifyStructuredFrozenReadProof as verifyFrozenReadProof } from '../structured-frozen-proof.js'
 import { nativeWorktreePrompt } from '../native-worktree-runtime.js'
@@ -17,6 +17,14 @@ import type { BlobRef, NativeSessionRef, SyncResourcePhase, WriteFence } from '.
 import type { SyncAttempt, SyncOperation } from './operation-types.js'
 
 type FrozenRequest = Omit<ElaborationSessionRequest, 'signal'> & { readerRuntime?: FrozenReaderRuntime }
+
+/** 同步冻结与原件冷验共用CLI配置规则；历史请求保持原字段及执行强度。 */
+export function pinSyncNativeRequest(request: FrozenRequest, saved: Pick<StructuredExecution, 'nativeConfiguration' | 'zcodeToolPolicy' | 'effort'> | null): FrozenRequest {
+  const nativeConfiguration = pinNativeConfiguration(request, saved), zcodeToolPolicy = pinZCodeToolPolicy(request, saved)
+  const pinned = { ...request, ...(nativeConfiguration ? { nativeConfiguration } : {}), ...(zcodeToolPolicy ? { zcodeToolPolicy } : {}) }
+  if (nativeConfiguration && saved?.effort === undefined) delete pinned.effort
+  return pinned
+}
 export type NativeRunRecord = Pick<SessRec, 'session' | 'status' | 'harnessSessionId' | 'structuredExecution' | 'createRequestId' | 'createPayloadHash'>
 export type AttemptRunnerOptions = {
   resourceRecoveryOnly?: true
@@ -312,9 +320,14 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
     const { signal, ...value } = request
     const resource = store.findResource(fence.attemptId, value.requestKey)
     const dispatch = resource ? undefined : store.readAttempt(fence.attemptId).dispatchPlans.find(plan => plan.key === value.requestKey)
-    const saved = resource ? read<NativeRunPlan>(resource.plan.planBlob).request : dispatch?.requestDigest === hash(value) ? value : null
+    let saved = resource ? read<NativeRunPlan>(resource.plan.planBlob).request : dispatch?.requestDigest === hash(value) ? value : null
     const zcodeToolPolicy = pinZCodeToolPolicy(value, saved)
-    const pinned = zcodeToolPolicy ? { ...value, zcodeToolPolicy } : value
+    if (!saved && dispatch) {
+      const previous = zcodeToolPolicy ? { ...value, zcodeToolPolicy } : value
+      const configuration = pinNativeConfiguration(value, null)
+      saved = [previous, ...(configuration ? [{ ...value, nativeConfiguration: configuration, ...(zcodeToolPolicy ? { zcodeToolPolicy } : {}) }] : [])].find(candidate => dispatch.requestDigest === hash(candidate)) ?? null
+    }
+    const pinned = pinSyncNativeRequest(value, saved)
     const exactResourceRequest = resource?.plan.payloadDigest === hash(pinned)
     let frozen: FrozenRequest = exactResourceRequest || pinned.worktree ? copy(pinned) : prepareFrozenPrompt(copy(pinned), { directory: join(runtimeRoot(), 'frozen-context-v2'), binding: { attemptId: fence.attemptId, policyDigest: operation.policyDigest } })
     if (!exactResourceRequest && frozen.frozenContext && !options.runtime && !frozen.model?.startsWith('claude:') && !frozen.model?.startsWith('zcode:')) frozen = { ...frozen, readerRuntime: await prepareFrozenReaderRuntime(join(runtimeRoot(), 'structured-frozen-read-only-v2'), frozen.frozenContext) }

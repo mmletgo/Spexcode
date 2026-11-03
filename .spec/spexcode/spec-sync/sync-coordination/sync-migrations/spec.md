@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+v24仅追加无DDL SELECT 1 marker，保护 nativeConfiguration:cli-config-v1、Claude NativePlan v2 与 ZCode NativePlan v3 的实际每轮配置/模型证据协议。v23及更旧writer在写入或派发前拒绝；正常升级先停稳全部旧backend/queue并结算或保留资源，按既有online backup后事务迁移。v1–v23 SQL/checksum/applied_at及全部旧表/请求/receipt原字节保持，不补历史字段。回滚先停新writer，再恢复升级前v23一致备份及配套evidence/Git refs；不能删marker或重签旧计划。
+
 v23以无DDL SELECT 1登记P0按purpose的Git草稿、认证Native材料和精确分析续审协议；关闭behavior-draft-protocol已保存而dispatch尚未reserved的崩溃窗口，v22及更旧writer必须在任何业务写入/派发前拒绝。沿既有online backup及组件事务保v1–v22 checksum、原记录/请求/CAS不变；既有reserved请求仍按原绑定恢复。升级先停稳全部旧writer并结算或保留真实资源，回滚先停新writer，再恢复升级前v22一致备份及原evidence/Git refs，不删marker或补造历史草稿。
 
 v20仅以SELECT 1登记 [[sync-source-registration]] 及EnabledRecord v2的writer语义。沿原online backup与组件事务，旧v19 writer逐事务拒绝，v1–v19 checksum及全部旧记录/CAS保持。continuity记录另在私有global runtime保存；回滚停新writer后恢复升级前一致DB备份、原enabled字节及原continuity-evidence链，不删marker或用新见证改旧input。失败暂停可能已生效，文件CAS和DB不是跨介质原子事务，不自动恢复run。

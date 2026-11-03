@@ -23,11 +23,11 @@
 - P2 快照/候选仅操作明确 commonDir 的 Git 对象及私有保活 refs，禁用元数据 fsmonitor/reference hooks；开发/交付提交不可照搬禁 hooks。原输入与 ComposedInputRef 分开；实际模型 diff 和最终 apply diff 分开。
 - 快照/候选针对验证：`npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/sync/snapshot-candidate.test.ts`；build 后 `npm run typecheck`、`npx eslint spec-cli/src/sync/{snapshot,composition,candidate,snapshot-candidate.test}.ts`。
 
-- 模型选择冻结于 operation：新操作缺少显式选择或既有绑定时取版本化 `sync.model`，再缺省 sol；旧 operation 缺字段仍固定 sol。换模型只经新操作或显式 retryOf；resume/recover 不换模型。原生工作树任务使用 sync-tools-v3 固定工作流，旧 v1/v2 只恢复原请求；不因注入 runner 降级生产策略。
+- operation固定请求选择；同request/retry先沿原绑定，真正新操作取显式选择或版本化`sync.model`，再按工作流缺省（native为`claude:default`，历史frozen为sol）。旧operation缺字段仍固定sol，不回写。换模型只经新操作或显式 retryOf；resume/recover 不换模型。原生工作树任务使用 sync-tools-v3 固定工作流，旧 v1/v2 只恢复原请求；不因注入 runner 降级生产策略。
 
-- ZCode模型使用 `zcode:<provider-id>/<exact-model-id>`，与 Claude 共用版本化原生工作树执行、队列和资源桥；换provider仍须新操作/正式retryOf，不自动fallback。旧v4只读策略和原生读取证明仅用于其历史请求。
+- ZCode使用`zcode:default`或`zcode:<provider-id>/<model>`，模型/别名交SDK解析，实际每轮选择另行留证；与Claude共用版本化原生工作树执行、队列和资源桥；换provider仍须新操作/正式retryOf，不自动fallback。旧v4只读策略和原生读取证明仅用于其历史请求。
 
-- 原生工作树使用结构化策略 v6，sync v23 组件 marker 拒绝旧 writer；ZCode 新 read 请求冻结精准 ExitPlanMode denylist 与 NativePlan v2，旧资源/记录及仅 reserved dispatch 的字段缺席保持，后者只以完整请求摘要确证；内部创建键首建保留上游冻结字段并严格验策略，不能恢复时补默认。旧数字与 null 的只读 v1–v5 原样恢复。unlimited 模型调用期限为 null，创建、租约、stop/close 及 Docker 期限仍独立有限。升级先停全部旧 backend/queue 并结算资源、备份数据库；回滚恢复升级前备份，不能只删 marker 或改工具描述。
+- 原生工作树使用结构化策略 v6，sync v24 组件 marker 拒绝旧 writer；ZCode 新 read 请求冻结精准 ExitPlanMode denylist 与 NativePlan v2，旧资源/记录及仅 reserved dispatch 的字段缺席保持，后者只以完整请求摘要确证；内部创建键首建保留上游冻结字段并严格验策略，不能恢复时补默认。旧数字与 null 的只读 v1–v5 原样恢复。unlimited 模型调用期限为 null，创建、租约、stop/close 及 Docker 期限仍独立有限。升级先停全部旧 backend/queue 并结算资源、备份数据库；回滚恢复升级前备份，不能只删 marker 或改工具描述。
 - 新P1按owner显式冻结elaboration-draft-v1，精确schema在同seed只读sidecar，v6 edit只写真实Git临时草稿并正常提交、小summary回执；程序读指定blob后再JSON/schema/renderer/独审。失败正文留Git refs，checkpoint只记身份和errors并保留原finding定位及severity，旧缺席不补写；诊断不进入raw role/业务candidate；跨父输入只迁draft不迁旧树，accept仍核完整摘要及冷Git/schema/最终正文渲染绑定，原source tag不向legacy补签；仅验证时允许保留hooks的正常空提交，不造业务diff。已冻结/仅reserved旧请求不补协议。该持久变更由writer22围栏保护；精准回归：`npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/sync/elaboration-draft.test.ts`。
 - 格式/schema拒绝的final仅经adapter原请求/身份/停止认证后保存为可选rejectedOutput诊断；历史只读请求的原文ref/SHA与完整正文进入同owner下一prompt，不能填成功output或候选、继承accept、读取thinking或追补旧缺席。review失败保留此前合法generation和candidate。 仅格式失败续审沿原P1/null扩域证明保partition计划及候选，认证原Native refs只给精确失败组的只读诊断seed；兄弟accept仍核完整原请求，ZCode policy按saved原字段重建，不追补缺席。
 
@@ -41,3 +41,5 @@
 - writer23围栏保护新P0持久协议；升级前停稳旧writer/结算或保留资源，正常online backup迁移，回滚恢复一致旧库及evidence，不删marker。新P0按attempt显式冻结code-behavior-draft-v1，analyze/review复用stage-worktree的同owner/purpose Git草稿与只读schema；格式失败续原JSON，review格式失败保已校验分析，仅重开独审。旧reserved不补协议；认证旧Native CAS仅作新seed临时材料，不伪造历史Git稿。仅认证且命中原变更owner/affectedIds的P1后置语义质疑才触发新analysis与独审；格式失败继续原文件及失败环节，不改kind或扩授权。
 
 - 完整初始化资格不等于所有源码曾被写过：未写path可用精确已采纳owner Spec、正式settled receipt、scope及三份对象一致证明只读初始化，缺binding/null保持；已有非null头不fallback，未审owner/源码漂移拒绝。规划回归：`npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/sync/planning.test.ts`。
+
+- 新Claude/ZCode native-worktree请求只在真正新记录/资源冻结nativeConfiguration:cli-config-v1；原saved及仅reserved请求缺席保持并核完整原摘要。default/不透明模型由原生CLI配置与每轮init核实，不维护CLI版本/模型名册。新sync请求在冻结前省略内部默认high，已有Native原件按原effort或缺席冷验，standalone显式effort保持；派发和coordinator原件重验共用pinSyncNativeRequest。writer24只追加SELECT1；升级停稳旧backend/queue并结算资源、online backup后迁移，回滚停新writer并恢复升级前一致DB及evidence，禁止删marker或改签旧plan。针对回归：`npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/session-native-configuration.test.ts spec-cli/src/sync/native-run.test.ts spec-cli/src/sync/store.test.ts`。

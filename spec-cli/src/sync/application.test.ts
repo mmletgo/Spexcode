@@ -238,8 +238,8 @@ test('新手动操作采用各项目版本化默认模型，显式模型优先�
   }
 })
 
-test('自动观察准入、固定工具描述和真实runner请求使用同一项目model', async () => {
-  const model = 'claude:MiniMax-M3', f = await fixture({ ...settings, model })
+for (const nativeDefault of [false, true]) test(`自动观察准入、固定工具描述和真实runner请求使用同一项目model ${nativeDefault ? '原生缺省' : '显式项目选择'}`, async () => {
+  const model = nativeDefault ? 'claude:default' : 'claude:MiniMax-M3', f = await fixture(nativeDefault ? settings : { ...settings, model }, undefined, nativeDefault)
   try {
     await f.application.enable(); await f.application.automaticControl('pause')
     await f.application.startService({ compensationMs: 40, debounceMs: 5 })
@@ -258,7 +258,7 @@ test('自动观察准入、固定工具描述和真实runner请求使用同一�
     assert.ok(f.calls.every(call => call.model === detail.operation.model))
     const toolsRef = join(f.temp, 'runtime', 'artifacts', `application-runtime-${contentHash(detail.operation.ingressKey)}.json`)
     const saved = JSON.parse(readFileSync(toolsRef, 'utf8'))
-    assert.equal(saved.version, 'sync-tools-v2')
+    assert.equal(saved.version, nativeDefault ? 'sync-tools-v3' : 'sync-tools-v2')
     assert.equal(saved.model, model)
   } finally { await f.application.stopService(); f.cleanup() }
 })
@@ -2111,6 +2111,26 @@ test('冻结snapshot的untracked related glob完整正文进入真实分派投�
     assert.equal(admitted.scope.paths.some(path => dependencyPath === path || dependencyPath.startsWith(`${path}/`)), false)
     assert.equal(readFileSync(join(f.root, dependencyPath), 'utf8'), body)
     assert.equal(f.git(['ls-files', '--', dependencyPath]), '')
+  } finally { await f.application.stopService(); f.cleanup() }
+})
+
+test('新原生操作缺省优先Claude配置，重放和省略retry保持原请求选择', async () => {
+  const f = await fixture(settings, undefined, true)
+  try {
+    await f.application.enable()
+    await f.application.automaticControl('pause')
+    const first = (await f.application.submit({ nodeId: 'demo', requestId: 'native-cli-default' })).operation!
+    assert.equal(first.model, 'claude:default')
+    assert.equal((JSON.parse(readEvidence(first.input.source.commonDir, first.planBlob!).toString()) as SyncCoordinatorPlan).agentWorkflow, 'native-worktree-v1')
+    const saved = JSON.parse(readFileSync(join(f.temp, 'runtime', 'artifacts', `application-runtime-${contentHash(first.ingressKey)}.json`), 'utf8')) as { version: string; model: string }
+    assert.deepEqual({ version: saved.version, model: saved.model }, { version: 'sync-tools-v3', model: 'claude:default' })
+    assert.equal((await f.application.submit({ nodeId: 'demo', requestId: 'native-cli-default' })).operation!.id, first.id)
+    await f.application.control(first.id, 'cancel')
+    const retry = (await f.application.submit({ nodeId: 'demo', requestId: 'native-cli-default-retry', retryOf: first.id })).operation!
+    assert.equal(retry.model, 'claude:default')
+    assert.equal(retry.callsUsed, 0)
+    assert.equal(f.calls.length, 0)
+    await f.application.control(retry.id, 'cancel')
   } finally { await f.application.stopService(); f.cleanup() }
 })
 

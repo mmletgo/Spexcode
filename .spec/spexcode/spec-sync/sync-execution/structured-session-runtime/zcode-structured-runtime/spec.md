@@ -31,7 +31,11 @@ ZCode 0.17.1 的 app-server stdin 对每个 Buffer 单独 toString('utf8')；中
 
 version5/null 请求沿原 ZCode policy、realm 与版本4读取证明执行，不装模型调用timeout timer；数字 version4 原样恢复。每次RPC、idle/close与精确停止各自期限不变。
 
-只接受 `zcode:<provider-id>/<exact-model-id>`。当前能力固定 macOS ZCode CLI 0.17.1、CLI SHA256 `9afd565a104d660259e6bdeeaa5cb8abc74a908559e21aa3c5f6a06f2a9da6c6` 和公开 builtin provider SHA256 `e537b380df05656e3757c2b220ae1044fe8a32c0ac148de265a05a94cc24b3a9`，未知版本、摘要、平台或模型别名明确拒绝，不 fallback。策略为 version4 / `zcode-frozen-read-only-v1`。
+新建的 v6/native-worktree ZCode 请求冻结 `nativeConfiguration: cli-config-v1`。执行器写 NativePlan/ZCodeNative version3，并记录本次实际解析 CLI path、`--version`、CLI SHA256、所引用 public builtin path 及可读取时的 SHA256；这些运行身份绑定 plan、model snapshot、send 与完成证据，不作为版本、摘要、provider 或模型准入名单。显式 `zcode:<provider>/<model>` 原样交给 SDK；`zcode:default` 创建 session 时省略 model，随后只从 SDK 原生 session/read 取得实际选择，不合成 provider/model。effort 原样作为请求交给 SDK，只有 session/read 的当前选项与可用项精确证实后才发送；SDK拒绝、未回显或不可用时保留真实失败，不按具体模型推断成功。既有 personal provider config、endpoint/baseurl 与凭据引用不改写，控制面不读取或输出凭据字节。
+
+NativePlan v1/v2 与缺席 `nativeConfiguration` 的历史请求保持原策略及持久字节，不补字段、不重签 plan/receipt。历史完成恢复按原 plan 中保存的 CLI、builtin、provider/model 与原 send/schema/input 重新核对，不比较当前安装的 CLI 常量；新配置 v3 冷恢复也只核原快照和全部原始 Native 证据，不新建 CLI/send。旧未完成 plan 不得由新配置启动或续发；只允许按原身份精确取消。固定冻结读取 v4/v5 的派发仍沿原固定隔离策略与 frozen proof，不借用 worktree 的新配置语义。
+
+缺席 `nativeConfiguration` 的 legacy v1/v2 与固定冻结读取路径沿原能力配置：只接受 `zcode:<provider-id>/<exact-model-id>`；新派发要求 macOS ZCode CLI 0.17.1、CLI SHA256 `9afd565a104d660259e6bdeeaa5cb8abc74a908559e21aa3c5f6a06f2a9da6c6` 和公开 builtin provider SHA256 `e537b380df05656e3757c2b220ae1044fe8a32c0ac148de265a05a94cc24b3a9`。该门槛不用于新建 `cli-config-v1` worktree，也不用于已完成历史的冷恢复。策略为 version4 / `zcode-frozen-read-only-v1`。
 
 每次派发使用专属空 workspace、私有 HOME / ZCODE_DATA_BASE_DIR 和 `/private/tmp` 下短 TMPDIR。固定配置关闭 plugins、hooks、skills/includeInstructions、memory、subagent；child-only 的两个 provider config 环境变量显式引用公开 builtin 与原 personal provider config。现有 credentials 只通过私有 home 的只读符号链接供 SDK 正常消费；控制器不读取、复制或记录凭据字节。父环境仅传必要 PATH，不继承其它配置或认证变量。
 

@@ -124,7 +124,8 @@ else if(p.method==='session/close')reply({closed:true});else throw Error('unexpe
           const result = await runStructuredSession({ ...request, ...(historical ? { sessionCreateKey: request.requestKey } : {}) })
           const record = readRecord(result.sessionId)!, state = record.structuredExecution!
           assert.deepEqual(state.zcodeToolPolicy, historical ? undefined : tools)
-          assert.equal(state.zcodeNative?.version, historical ? 1 : 2)
+          assert.equal(state.nativeConfiguration, historical ? undefined : 'cli-config-v1')
+          assert.equal(state.zcodeNative?.version, historical ? 1 : 3)
           assert.equal(state.resultWorktree?.tree, worktree.tree)
           const actual = readFileSync(captured), createHash = record.createPayloadHash
           assert.deepEqual(await runStructuredSession(request), result)
@@ -157,7 +158,8 @@ else if(p.method==='session/close')reply({closed:true});else throw Error('unexpe
             assert.deepEqual(readFileSync(captured), beforeInvalid)
             const run = createAttemptRunner(store, claim.fence, { pollMs: 2 }), result = await run(request), record = readRecord(result.sessionId)!
             assert.deepEqual(record.structuredExecution!.zcodeToolPolicy, tools)
-            assert.equal(record.structuredExecution!.zcodeNative!.version, 2)
+            assert.equal(record.structuredExecution!.nativeConfiguration, 'cli-config-v1')
+            assert.equal(record.structuredExecution!.zcodeNative!.version, 3)
             assert.deepEqual(JSON.parse(readFileSync(captured, 'utf8')).send.toolDenylist, ['ExitPlanMode'])
             const original = readFileSync(captured), creationHash = record.createPayloadHash
             assert.deepEqual(await createAttemptRunner(store, claim.fence, { pollMs: 2 })(request), result)

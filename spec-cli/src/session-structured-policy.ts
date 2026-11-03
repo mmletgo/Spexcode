@@ -43,14 +43,33 @@ export type StructuredExecution = {
   rejectedOutput?: RejectedStructuredOutput
   worktree?: NativeWorktreeRequest
   zcodeToolPolicy?: ZCodeToolPolicy
+  nativeConfiguration?: 'cli-config-v1'
   resultWorktree?: NativeWorktreeResult
   failedWorktree?: NativeWorktreeResult
   frozenContext?: FrozenContextRef
   frozenReads?: FrozenReadReceipt[]
   frozenReadProof?: FrozenReadProof
   readerRuntime?: FrozenReaderRuntime
-  claudeNative?: { version: 1; root: string; sessionId: string; userUuid: string; pid?: number; receiptFile?: string; promptId?: string }
-  zcodeNative?: { version: 1 | 2; root: string; sessionId: string; inputId: string; pid?: number; receiptFile?: string; turnId?: string }
+  claudeNative?: { version: 1 | 2; root: string; sessionId: string; userUuid: string; pid?: number; receiptFile?: string; promptId?: string }
+  zcodeNative?: { version: 1 | 2 | 3; root: string; sessionId: string; inputId: string; pid?: number; receiptFile?: string; turnId?: string }
+}
+
+/** 只识别原生路由形状；模型与别名是否可用由CLI实际初始化确认。 */
+function nativeConfigurationHarness(model?: string): 'claude' | 'zcode' | null {
+  if (model?.startsWith('claude:') && model.length > 7) return 'claude'
+  if (model === 'zcode:default') return 'zcode'
+  if (model?.startsWith('zcode:')) {
+    const separator = model.indexOf('/', 6)
+    if (separator > 6 && separator < model.length - 1) return 'zcode'
+  }
+  return null
+}
+
+/** 仅真正新建工作树请求冻结CLI配置；历史缺席和上游已固定请求保持原样。 */
+export function pinNativeConfiguration(request: Pick<StructuredExecution, 'model' | 'worktree' | 'nativeConfiguration'>, saved: Pick<StructuredExecution, 'nativeConfiguration'> | null): StructuredExecution['nativeConfiguration'] {
+  const configuration = saved === null ? request.worktree && nativeConfigurationHarness(request.model) ? 'cli-config-v1' : undefined : saved.nativeConfiguration
+  if (request.nativeConfiguration !== undefined && request.nativeConfiguration !== configuration) throw new StructuredSessionError(saved === null ? 'unsupported' : 'key_reused', 'native CLI configuration differs from the fixed structured request')
+  return configuration
 }
 
 /** 新请求冻结已验证工具策略；已有请求的缺席也是固定语义，显式换策略必须拒绝。 */
@@ -64,7 +83,12 @@ export function pinZCodeToolPolicy(request: Pick<StructuredExecution, 'model' | 
 export function structuredRealmRoot(execution: unknown, root = runtimeRoot()): string | null {
   if (!execution || typeof execution !== 'object') return null
   const state = execution as Partial<StructuredExecution>
+  if (state.nativeConfiguration !== undefined && (state.nativeConfiguration !== 'cli-config-v1' || state.version !== 6 || state.policy !== 'native-worktree-v1')) return null
   if (state.version === 6 && state.policy === 'native-worktree-v1' && state.worktree && !state.frozenContext && !state.readerRuntime) {
+    if (state.nativeConfiguration === 'cli-config-v1') {
+      const harness = nativeConfigurationHarness(state.model)
+      return harness ? join(root, 'structured-native-worktree-v1', harness) : null
+    }
     if (state.model?.startsWith('claude:')) return join(root, 'structured-native-worktree-v1', 'claude')
     if (/^zcode:[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(state.model ?? '')) return join(root, 'structured-native-worktree-v1', 'zcode')
   }
@@ -86,13 +110,14 @@ export function structuredRealmRoot(execution: unknown, root = runtimeRoot()): s
 }
 
 /** 固定策略只有一份构造，运行观测与冻结读取证明不参与创建载荷。 */
-export function structuredExecutionPolicy(request: Pick<StructuredExecution, 'schema' | 'inputDigest' | 'purpose' | 'timeoutMs' | 'model' | 'effort' | 'frozenContext' | 'readerRuntime' | 'worktree' | 'zcodeToolPolicy'>): StructuredExecution {
+export function structuredExecutionPolicy(request: Pick<StructuredExecution, 'schema' | 'inputDigest' | 'purpose' | 'timeoutMs' | 'model' | 'effort' | 'frozenContext' | 'readerRuntime' | 'worktree' | 'zcodeToolPolicy' | 'nativeConfiguration'>): StructuredExecution {
   const claude = request.model?.startsWith('claude:') === true
   const zcode = request.model?.startsWith('zcode:') === true
+  if (request.nativeConfiguration !== undefined && (request.nativeConfiguration !== 'cli-config-v1' || !request.worktree || !nativeConfigurationHarness(request.model) || request.frozenContext || request.readerRuntime)) throw new StructuredSessionError('unsupported', 'native CLI configuration requires a v6 Claude/ZCode worktree request')
   if (request.zcodeToolPolicy !== undefined && (!zcode || request.worktree?.mode !== 'read' || !isDeepStrictEqual(request.zcodeToolPolicy, zcodeReadToolPolicy))) throw new StructuredSessionError('unsupported', 'ZCode structured tool policy requires the exact noninteractive read policy')
   if (request.worktree) {
     if ((!claude && !zcode) || request.frozenContext || request.readerRuntime) throw new StructuredSessionError('unsupported', 'native worktree requires an explicit Claude/ZCode model and no frozen reader policy')
-    return { version: 6, policy: 'native-worktree-v1', schema: request.schema, inputDigest: request.inputDigest, purpose: request.purpose, timeoutMs: request.timeoutMs, model: request.model, ...(request.effort ? { effort: request.effort } : {}), worktree: request.worktree, ...(request.zcodeToolPolicy ? { zcodeToolPolicy: request.zcodeToolPolicy } : {}) }
+    return { version: 6, policy: 'native-worktree-v1', schema: request.schema, inputDigest: request.inputDigest, purpose: request.purpose, timeoutMs: request.timeoutMs, model: request.model, ...(request.effort ? { effort: request.effort } : {}), worktree: request.worktree, ...(request.nativeConfiguration ? { nativeConfiguration: request.nativeConfiguration } : {}), ...(request.zcodeToolPolicy ? { zcodeToolPolicy: request.zcodeToolPolicy } : {}) }
   }
   return { version: request.timeoutMs === null ? 5 : zcode ? 4 : claude ? 3 : request.frozenContext ? 2 : 1, policy: zcode ? 'zcode-frozen-read-only-v1' : claude ? 'claude-frozen-read-only-v1' : request.frozenContext ? 'codex-frozen-read-only-v2' : 'codex-read-only-v1',
     schema: request.schema, inputDigest: request.inputDigest, purpose: request.purpose, timeoutMs: request.timeoutMs,

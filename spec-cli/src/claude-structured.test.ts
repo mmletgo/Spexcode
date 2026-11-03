@@ -1,14 +1,15 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { cpSync, existsSync, mkdtempSync, rmSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, cpSync, existsSync, mkdtempSync, rmSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
-import { writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
+import { HARNESS_IDENTITIES, writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { prepareFrozenPrompt, readFrozenManifest, claudeFrozenContextPrompt, freezeContext, readFrozenRange, proveClaudeFrozenReads, verifyFrozenReadProof, claudeMessageDigest, readClaudeApiSourceMetadata, readClaudePublicHistory, type ClaudeFrozenWitness, type ClaudePublicMessage, type ClaudePublicRecord } from './frozen-context.js'
 import { structuredExecutionPolicy, structuredRealmRoot, type StructuredExecution } from './session-structured-policy.js'
-import { claudeNativeModel, claudeStructuredArgs, claudeStructuredTurn, prepareClaudeAuthenticationEnvironment } from './claude-structured.js'
+import { sampleNativeWorktreeProcesses } from './native-worktree-runtime.js'
+import { claudeNativeModel, claudeWorktreeArgs, claudeStructuredArgs, claudeStructuredTurn, prepareClaudeAuthenticationEnvironment } from './claude-structured.js'
 
 const contentBlocks = (message: ClaudePublicMessage): Exclude<ClaudePublicMessage['content'], string> => {
   assert(Array.isArray(message.content))
@@ -1027,5 +1028,139 @@ test('native authentication projection keeps only four keys and explicit process
     writeFileSync(path, '{"env":{"ANTHROPIC_AUTH_TOKEN":"PUBLIC_DUMMY_BROKEN"')
     assert.throws(() => prepareClaudeAuthenticationEnvironment({}, path), error => { assert(!String(error).includes('PUBLIC_DUMMY_BROKEN')); return true })
     assert.deepEqual(prepareClaudeAuthenticationEnvironment({ ANTHROPIC_AUTH_TOKEN: 'PUBLIC_EXPLICIT' }, path), { environment: { ANTHROPIC_AUTH_TOKEN: 'PUBLIC_EXPLICIT' }, source: 'process' })
+  } finally { rmSync(directory, { recursive: true, force: true }) }
+})
+
+
+test('native CLI configuration accepts opaque selections and omits --model for default', () => {
+  for (const model of ['sonnet', 'opus', 'haiku', 'provider/model[1m]', 'a model;$(never-shell)']) {
+    assert.equal(claudeNativeModel(`claude:${model}`, 'cli-config-v1'), model)
+    const args = claudeWorktreeArgs({ sessionId: 'session', model, schema: {}, nativeConfiguration: 'cli-config-v1' })
+    assert.equal(args[args.indexOf('--model') + 1], model)
+    for (const flag of ['--setting-sources', '--settings', '--strict-mcp-config', '--mcp-config', '--restricted', '--tools']) assert(!args.includes(flag))
+  }
+  assert(!claudeWorktreeArgs({ sessionId: 'session', model: 'default', schema: {}, nativeConfiguration: 'cli-config-v1' }).includes('--model'))
+  for (const model of ['claude:', 'claude:   ', 'claude:a\0b', 'codex:model']) assert.throws(() => claudeNativeModel(model, 'cli-config-v1'))
+})
+
+for (const [selected, configMode] of [['default', 'unset'], ['default', 'empty'], ['sonnet', 'explicit'], ['provider/opaque[1m]', 'explicit']] as const) test(`native CLI configuration fixture preserves configuration and resolved model for ${selected}/${configMode}`, async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'spex-claude-native-config-')), bin = join(directory, 'bin'), config = selected === 'default' ? join(directory, 'home', '.claude') : join(directory, 'native-config'), workspace = join(directory, 'worktree'), realm = join(directory, 'realm'), root = join(realm, 'native')
+  const identityKeys = [...new Set(['SPEXCODE_SESSION_ID', ...HARNESS_IDENTITIES.map(harness => harness.sessionEnvVar)])].filter(Boolean)
+  const environmentKeys = [...identityKeys, 'PATH', 'HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_USE_BEDROCK', 'ANTHROPIC_MODEL', 'ANTHROPIC_BASE_URL', 'PUBLIC_CLAUDE_FIXTURE_LOG'] as const
+  const before = Object.fromEntries(environmentKeys.map(key => [key, process.env[key]]))
+  try {
+    mkdirSync(bin); mkdirSync(config, { recursive: true }); mkdirSync(workspace)
+    writeFileSync(join(config, 'settings.json'), 'UNPARSEABLE_PUBLIC_FIXTURE_SETTINGS')
+    const log = join(directory, 'observed.json'), cli = join(bin, 'claude'), actualModel = 'native-provider/resolved-model'
+    writeFileSync(cli, `#!${process.execPath}
+const fs=require('node:fs'),path=require('node:path'),readline=require('node:readline');
+if(process.argv.includes('--version')){console.log('9.8.7 (Claude Code)');process.exit(0)}
+const args=process.argv.slice(2);fs.writeFileSync(process.env.PUBLIC_CLAUDE_FIXTURE_LOG,JSON.stringify({args,config:process.env.CLAUDE_CONFIG_DIR,provider:process.env.CLAUDE_CODE_USE_BEDROCK,model:process.env.ANTHROPIC_MODEL,baseUrl:process.env.ANTHROPIC_BASE_URL,identity:Object.fromEntries(${JSON.stringify(identityKeys)}.filter(key=>process.env[key]!==undefined).map(key=>[key,process.env[key]])),store:{SPEXCODE_HOME:process.env.SPEXCODE_HOME,SPEX_SESSION_DATABASE_PATH:process.env.SPEX_SESSION_DATABASE_PATH}}));
+const emit=x=>console.log(JSON.stringify(x));readline.createInterface({input:process.stdin}).once('line',line=>{const input=JSON.parse(line),session=input.session_id,user=input.uuid;const projects=path.join(process.env.CLAUDE_CONFIG_DIR||path.join(process.env.HOME,'.claude'),'projects','fixture');fs.mkdirSync(projects,{recursive:true});const history=[{type:'user',sessionId:session,uuid:user,parentUuid:null,promptId:'public-prompt',message:input.message},{type:'assistant',sessionId:session,uuid:'assistant',parentUuid:user,message:{role:'assistant',content:[{type:'thinking',thinking:'SYNTHETIC_PRIVATE_THINKING'},{type:'tool_use',id:'final',name:'StructuredOutput',input:{ok:true}}]}}];fs.writeFileSync(path.join(projects,session+'.jsonl'),history.map(x=>JSON.stringify(x)).join('\\n')+'\\n');emit({type:'system',subtype:'init',session_id:session,model:${JSON.stringify(actualModel)},tools:['Read','Bash','StructuredOutput']});emit({type:'user',uuid:user,session_id:session,message:input.message});emit({type:'result',subtype:'success',is_error:false,session_id:session,user_message_uuid:user,user_message_uuids:[user],structured_output:{ok:true}})});
+`)
+    chmodSync(cli, 0o755)
+    process.env.PATH = `${bin}:${before.PATH}`; process.env.HOME = join(directory, 'home'); if (configMode === 'unset') delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = configMode === 'empty' ? '' : config; process.env.CLAUDE_CODE_USE_BEDROCK = '1'; process.env.ANTHROPIC_MODEL = 'native-user-default'; process.env.ANTHROPIC_BASE_URL = 'https://public-provider.invalid/arbitrary-route'; process.env.PUBLIC_CLAUDE_FIXTURE_LOG = log
+    for (const key of identityKeys) process.env[key] = `PUBLIC_PARENT_${key}`
+    const schema = { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'], additionalProperties: false }
+    let execution: StructuredExecution = { ...structuredExecutionPolicy({ schema, inputDigest: 'fixture', purpose: 'native-config-fixture', timeoutMs: 10000, model: `claude:${selected}`, worktree: { baseCommit: 'a'.repeat(40), tree: 'b'.repeat(40), mode: 'read' } }), nativeConfiguration: 'cli-config-v1' }
+    const callbacks = { onThread: async (threadId: string) => { execution = { ...execution, threadId } }, onTurn: async (turnId: string) => { execution = { ...execution, turnId } }, onNative: async (claudeNative: NonNullable<StructuredExecution['claudeNative']>) => { execution = { ...execution, claudeNative } } }
+    const result = await claudeStructuredTurn(realm, 'native', 'public native config task', execution, callbacks, workspace)
+    assert.deepEqual(JSON.parse(result.text), { ok: true }); assert.equal(result.frozenReadProof, undefined)
+    assert.equal(execution.model, `claude:${selected}`)
+    const observed = JSON.parse(readFileSync(log, 'utf8')) as { args: string[]; config?: string; provider: string; model: string; baseUrl: string; identity: Record<string, string>; store: Record<string, string | undefined> }
+    assert.equal(observed.config, configMode === 'unset' ? undefined : configMode === 'empty' ? '' : config); assert.equal(observed.provider, '1'); assert.equal(observed.model, 'native-user-default'); assert.equal(observed.baseUrl, 'https://public-provider.invalid/arbitrary-route')
+    assert.deepEqual(observed.identity, { SPEXCODE_SESSION_ID: 'native' })
+    assert.deepEqual(observed.store, { SPEXCODE_HOME: process.env.SPEXCODE_HOME, SPEX_SESSION_DATABASE_PATH: process.env.SPEX_SESSION_DATABASE_PATH })
+    assert.equal(observed.args.includes('--model'), selected !== 'default')
+    if (selected !== 'default') assert.equal(observed.args[observed.args.indexOf('--model') + 1], selected)
+    const plan = JSON.parse(readFileSync(join(root, 'plan.json'), 'utf8')) as { version: number; cliVersion: string; binaryDigest: string; requestedModel: string; resolvedModel: string; historyDigest: string }
+    assert.equal(plan.version, 2); assert.equal(plan.cliVersion, '9.8.7 (Claude Code)'); assert.match(plan.binaryDigest, /^[a-f0-9]{64}$/)
+    assert.equal(plan.requestedModel, `claude:${selected}`); assert.equal(plan.resolvedModel, actualModel)
+    const snapshot = readFileSync(join(root, 'public-history.json'), 'utf8'); assert(!snapshot.includes('SYNTHETIC_PRIVATE_THINKING'))
+    execution = { ...execution, state: 'completed', output: { ok: true }, resultDigest: createHash('sha256').update(JSON.stringify({ ok: true })).digest('hex') }
+    rmSync(config, { recursive: true }); rmSync(bin, { recursive: true }); process.env.CLAUDE_CONFIG_DIR = join(directory, 'different-config')
+    const noDispatch = { onThread: async () => assert.fail('cold replay must not dispatch'), onTurn: async () => assert.fail('cold replay must not append'), onNative: async () => assert.fail('cold replay must not launch') }
+    assert.deepEqual(await claudeStructuredTurn(realm, 'native', 'public native config task', execution, noDispatch, workspace), result)
+    const originalInit = readFileSync(join(root, 'init.json'))
+    chmodSync(join(root, 'init.json'), 0o600)
+    writeFileSync(join(root, 'init.json'), JSON.stringify({ session_id: execution.threadId, model: 'forged-model', tools: ['Read'] }))
+    await assert.rejects(claudeStructuredTurn(realm, 'native', 'public native config task', execution, noDispatch, workspace), { code: 'stale_result' })
+    writeFileSync(join(root, 'init.json'), originalInit)
+    await assert.rejects(claudeStructuredTurn(realm, 'native', 'changed prompt', execution, noDispatch, workspace), { code: 'stale_result' })
+    await assert.rejects(claudeStructuredTurn(realm, 'native', 'public native config task', { ...execution, claudeNative: { ...execution.claudeNative!, userUuid: 'foreign-user' } }, noDispatch, workspace), { code: 'stale_result' })
+    chmodSync(join(root, 'public-history.json'), 0o600)
+    writeFileSync(join(root, 'public-history.json'), snapshot.replace('public-prompt', 'forged-prompt'))
+    await assert.rejects(claudeStructuredTurn(realm, 'native', 'public native config task', execution, noDispatch, workspace), { code: 'stale_result' })
+  } finally {
+    for (const key of environmentKeys) if (before[key] === undefined) delete process.env[key]; else process.env[key] = before[key]
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+
+test('native configuration schema exhaustion authenticates resolved model and preserves rejected output', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'spex-claude-native-config-schema-')), realm = join(directory, 'realm'), root = join(realm, 'native'), workspace = join(directory, 'workspace')
+  mkdirSync(root, { recursive: true }); mkdirSync(workspace)
+  const hash = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex')
+  const prompt = 'public schema task', model = 'provider/actual-model', rejected = { ok: 'bad' }
+  try {
+    sampleNativeWorktreeProcesses({ root, receiptFile: join(root, 'process.json'), workspace })
+    const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], { detached: true, stdio: 'ignore' })
+    assert(child.pid)
+    const closed = new Promise<void>(resolve => child.once('close', () => resolve()))
+    const receiptFile = join(root, 'process.json'); writeDetachedRuntimeReceipt(child.pid, receiptFile)
+    process.kill(-child.pid, 'SIGTERM'); await closed
+    const native = { version: 2 as const, root, sessionId: 'session', userUuid: 'user', pid: child.pid, receiptFile }
+    const execution: StructuredExecution = { ...structuredExecutionPolicy({ schema: { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'] }, inputDigest: 'fixture', purpose: 'native-schema-fixture', timeoutMs: null, model: 'claude:sonnet', worktree: { baseCommit: 'a'.repeat(40), tree: 'b'.repeat(40), mode: 'read' } }), nativeConfiguration: 'cli-config-v1', claudeNative: native }
+    const policy = structuredExecutionPolicy(execution), message = { role: 'user', content: [{ type: 'text', text: prompt }] }
+    const history = [
+      { type: 'user', sessionId: 'session', uuid: 'user', parentUuid: null, promptId: 'prompt', message },
+      { type: 'api-request', sessionId: 'session', id: 'request', model },
+      { type: 'assistant', sessionId: 'session', uuid: 'call', parentUuid: 'user', requestRef: 'request', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'schema', name: 'StructuredOutput', input: rejected }] } },
+      { type: 'user', sessionId: 'session', uuid: 'reply', parentUuid: 'call', promptId: 'prompt', sourceToolAssistantUUID: 'call', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'schema', is_error: true, content: 'Output does not match required schema: /ok: must be boolean' }] } },
+    ]
+    const plan = { ...native, workspace, cliVersion: 'future-native-version', requestedModel: execution.model, resolvedModel: model, historyDigest: hash(history), policyDigest: hash(policy), requestDigest: hash({ prompt, policy }) }
+    const init = { session_id: 'session', model, tools: ['Read', 'StructuredOutput'] }, echo = { session_id: 'session', uuid: 'user', message }, result = { type: 'result', subtype: 'error_max_structured_output_retries', is_error: true, session_id: 'session', user_message_uuid: 'user', user_message_uuids: ['user'] }
+    for (const [name, value] of Object.entries({ 'plan.json': plan, 'init.json': init, 'user-echo.json': echo, 'result.json': result, 'exit.json': { code: 1, signal: null, stopped: true }, 'public-history.json': { version: 1, sessionId: 'session', history } })) writeFileSync(join(root, name), JSON.stringify(value))
+    const noDispatch = { onThread: async () => assert.fail('no new session'), onTurn: async () => assert.fail('no new prompt'), onNative: async () => assert.fail('no new CLI') }
+    for (let replay = 0; replay < 2; replay++) await assert.rejects(claudeStructuredTurn(realm, 'native', prompt, execution, noDispatch, workspace), error => {
+      assert.equal((error as { code: string }).code, 'structured_output_retries_exhausted')
+      assert.match(String(error), /schema.*must be boolean/)
+      assert.equal((error as { rejectedOutput: { text: string } }).rejectedOutput.text, JSON.stringify(rejected))
+      return true
+    })
+    assert.equal(execution.model, 'claude:sonnet'); assert(!existsSync(join(root, 'completed.json')))
+    const foreign = structuredClone(history); foreign[1].model = 'sonnet'
+    writeFileSync(join(root, 'public-history.json'), JSON.stringify({ version: 1, sessionId: 'session', history: foreign }))
+    writeFileSync(join(root, 'plan.json'), JSON.stringify({ ...plan, historyDigest: hash(foreign) }))
+    await assert.rejects(claudeStructuredTurn(realm, 'native', prompt, execution, noDispatch, workspace), { code: 'stale_result' })
+    writeFileSync(join(root, 'public-history.json'), JSON.stringify({ version: 1, sessionId: 'session', history })); writeFileSync(join(root, 'plan.json'), JSON.stringify(plan))
+    writeFileSync(join(root, 'init.json'), JSON.stringify({ ...init, model: undefined }))
+    await assert.rejects(claudeStructuredTurn(realm, 'native', prompt, execution, noDispatch, workspace), { code: 'stale_result' })
+  } finally { rmSync(directory, { recursive: true, force: true }) }
+})
+
+
+for (const apiModel of [undefined, 'legacy-internal-model']) test(`legacy Claude completed worktree preserves original API model semantics for ${apiModel}`, async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'spex-claude-legacy-cold-')), realm = join(directory, 'realm'), root = join(realm, 'native'), workspace = join(directory, 'workspace'), projects = join(root, 'claude-home', 'projects', 'fixture')
+  mkdirSync(projects, { recursive: true })
+  const hash = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex')
+  try {
+    const prompt = 'public legacy task', output = { ok: true }, native = { version: 1 as const, root, sessionId: 'session', userUuid: 'user', pid: 123, receiptFile: join(root, 'process.json') }
+    const policy = structuredExecutionPolicy({ schema: { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'] }, inputDigest: 'legacy', purpose: 'legacy-completed', timeoutMs: null, model: 'claude:MiniMax-M3', worktree: { baseCommit: 'a'.repeat(40), tree: 'b'.repeat(40), mode: 'read' } })
+    const execution: StructuredExecution = { ...policy, claudeNative: native, state: 'completed', threadId: 'session', turnId: 'user', output, resultDigest: hash(output) }
+    const plan = { ...native, workspace, cliVersion: '2.1.309 (Claude Code)', requestDigest: hash({ prompt, policy }), policyDigest: hash(policy) }
+    const init = { session_id: 'session', model: 'MiniMax-M3', tools: ['Read', 'StructuredOutput'] }, echo = { uuid: 'user', session_id: 'session', message: { role: 'user', content: [{ type: 'text', text: prompt }] } }
+    const result = { type: 'result', subtype: 'success', is_error: false, session_id: 'session', user_message_uuid: 'user', user_message_uuids: ['user'], structured_output: output }, exit = { code: 0, signal: null, stopped: true }
+    const answer = { threadId: 'session', turnId: 'user', text: JSON.stringify(output) }, completed = { plan, init, echo, result, exit, promptId: 'prompt', answer }
+    for (const [name, value] of Object.entries({ 'plan.json': plan, 'init.json': init, 'user-echo.json': echo, 'result.json': result, 'exit.json': exit, 'completed.json': completed })) writeFileSync(join(root, name), JSON.stringify(value))
+    writeFileSync(join(projects, 'session.jsonl'), [
+      { type: 'user', sessionId: 'session', uuid: 'user', parentUuid: null, promptId: 'prompt', message: echo.message },
+      { type: 'api-request', sessionId: 'session', id: 'legacy-request', params: { model: apiModel } },
+    ].map(row => JSON.stringify(row)).join('\n') + '\n')
+    const original = readFileSync(join(root, 'completed.json'))
+    const noDispatch = { onThread: async () => assert.fail('no new session'), onTurn: async () => assert.fail('no new prompt'), onNative: async () => assert.fail('no new CLI') }
+    assert.deepEqual(await claudeStructuredTurn(realm, 'native', prompt, execution, noDispatch, workspace), answer)
+    assert.deepEqual(readFileSync(join(root, 'completed.json')), original)
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })
