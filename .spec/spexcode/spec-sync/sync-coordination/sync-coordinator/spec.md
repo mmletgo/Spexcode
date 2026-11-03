@@ -96,7 +96,7 @@ initial与spec共享P2入口。旧无planBlob operation先claim持久unsupported
 
 默认租约120秒，heartbeat最多5秒且小于lease，总deadline与预算不因租约调整改变。持权细化/生成阶段边界先renewLease门禁再setImmediate给控制/heartbeat一次执行机会，再核控制和fence；长native调用由heartbeat续约/Abort，已过期authority绝不能恢复。该窗口覆盖实际同步Git/Tree-sitter可信读取阶段。
 
-显式retryOf沿真实operation链读取同source/input/policy/request的持久accepted P1证据；保留原approved contract/AC及原attempt/evidence provenance，不重新细化弱化AC。只有链上从未approved时才P1新派发；新operation重新执行generation/V1-V4，不借旧fence或receipt发布。
+显式retryOf沿真实operation链读取同source/input/policy/request的持久accepted P1证据；保留原approved contract/AC及原attempt/evidence provenance，不重新细化弱化AC。完整未采纳交付的正式重验是批准复用断点；其余情况只有链上从未approved时才P1新派发；新operation重新执行generation/V1-V4，不借旧fence或receipt发布。
 
 P4 显式重试按原 operation 已审扩展后的 scope 及最终 selection 重组同一 readSet，复用原 impactDigest；冻结 planBlob 和 policyDigest 不被扩展结果改写。原严格接入事务仍拒绝缺失路径、改变义务或不匹配的读取/选择，不能以重试丢弃已批准的实现范围。
 
@@ -209,3 +209,5 @@ P0/P1/P2 共用 typed Native RPC 已结算准入：仅当前 control/physical ru
 多轮review-only续审的builder来源沿原review-plan-provenance追到真实prepared/Native所在attempt，逐级核同候选、原计划、file-writer-plan与builder traces；不把旧prepared复制成新派发。成功续修组的原输入同时沿accepted-review provenance.inputRef恢复，跨兄弟失败仍保自己的原reviewRepair/请求与Native结论。预算预检只计已认证必须重派的失败组下界，实际缓存失配和新调用仍由原reserveDispatch逐调用硬限，不重置或扩大预算。
 
 合法scope分层证明：业务ID/Spec路径由同一已审P1的扩域原件负责，实现/测试路径可由同P1已审code/AC.test映射负责，或由原file-writer-plan及其逐owner proposal/trace/派发负责；最终完整scope必须精确等于两层实际并集，原binding逐字保留、新增binding全null，前后selection沿既有扩域记录相连。不能把代码路径伪归P1、忽略额外路径/ID或借非null漂移；已完成且精确证实的scope步骤不对同一P1 evidence重登记更宽集合。冷builder逐组沿既有renew→yieldToControl→renew让心跳/暂停处理，保持生产lease和预算。
+
+对完整但明确未采纳 settled 交付的正式重验，当前 selection 仅保护 CAS；组合输入、真实读集、目标 before、P0/P1及阶段 wrapper 使用 retryOf 派生的原业务 selection，不将拒绝候选作为 verifiedDelivery 义务。跨此边界不复用旧 accepted P0/P1、generation/review/candidate；新分析和独审重建 owner 投影。原 Git/Native JSON 仍经原 operation/attempt/owner/schema/终态认证后作为未批准材料续修，不迁旧树或批准。
