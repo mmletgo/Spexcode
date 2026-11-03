@@ -312,9 +312,13 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
     const { signal, ...value } = request
     const resource = store.findResource(fence.attemptId, value.requestKey)
     const dispatch = resource ? undefined : store.readAttempt(fence.attemptId).dispatchPlans.find(plan => plan.key === value.requestKey)
-    const saved = resource ? read<NativeRunPlan>(resource.plan.planBlob).request : dispatch?.requestDigest === hash(value) ? value : null
-    const nativeConfiguration = pinNativeConfiguration(value, saved)
+    let saved = resource ? read<NativeRunPlan>(resource.plan.planBlob).request : dispatch?.requestDigest === hash(value) ? value : null
     const zcodeToolPolicy = pinZCodeToolPolicy(value, saved)
+    if (!saved && dispatch && value.nativeConfiguration === undefined) {
+      const previous = zcodeToolPolicy ? { ...value, zcodeToolPolicy } : value
+      if (dispatch.requestDigest === hash(previous)) saved = previous
+    }
+    const nativeConfiguration = pinNativeConfiguration(value, saved)
     const pinned = { ...value, ...(nativeConfiguration ? { nativeConfiguration } : {}), ...(zcodeToolPolicy ? { zcodeToolPolicy } : {}) }
     const exactResourceRequest = resource?.plan.payloadDigest === hash(pinned)
     let frozen: FrozenRequest = exactResourceRequest || pinned.worktree ? copy(pinned) : prepareFrozenPrompt(copy(pinned), { directory: join(runtimeRoot(), 'frozen-context-v2'), binding: { attemptId: fence.attemptId, policyDigest: operation.policyDigest } })

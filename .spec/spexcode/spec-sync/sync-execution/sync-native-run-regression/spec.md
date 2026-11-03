@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+隔离真实SQLite及受控runtime覆盖新Claude/ZCode worktree冻结nativeConfiguration:cli-config-v1、旧plan与仅reserved缺席、上一代工具策略已冻结但配置仍缺席的完整摘要恢复；schema/prompt/purpose/tree/配置篡改均不得派发。dispatch/requestDigest/plan/payload及callsUsed原绑定保持。同一真实创建/queue/fake CLI集成核新配置进入创建哈希、正常Git提交及冷完成不重发；已认证格式失败确证停止后自动removed，cold replay保原错误而不改为cancelled。此证明使用专用私库与进程级fake CLI，不访问真实provider。
+
 被拒final回归用真实SQLite及受控runtime逐项拒绝session/thread/turn/input/schema/prompt/purpose/SHA、未settled或record缺证据；匹配原failed record才生成可读原文字节ref，legacy无字段不补且不把诊断当removed。实际Git/正式创建队列与MockNative组合另证syntax/schema两种失败完整正文进入下一实际send、候选仍null和同键不重发；此证据不冒充真实LLM通过。
 
 有限与null请求均通过精确取消/回执丢失场景结算原资源，null的取消清理预算仍为15秒；未知停止不释放容量。
