@@ -10,6 +10,7 @@ import { createInterface } from 'node:readline'
 import { detachedRuntimeIsGone, processStartToken, verifyDetachedRuntime, writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
 import { checkClaudeHistoryChain, claudeRecoveryCompanion, claudeApiRequestHashes, claudeApiSourceDigest, claudeApiToolResultIds, claudeMessageBlocks, claudeMessageDigest, claudeOutputLimitCompanions, matchingClaudeRecoveries, recordClaudeRecoveryRequest, consumeClaudeRecoveryRequest, proveClaudeFrozenReads, readClaudeApiMessageBlobs, readClaudeApiSourceMetadata, readClaudeMcpToolNames, readClaudePublicHistory, verifyFrozenReadProof, type ClaudeRecovery, type ClaudeFrozenWitness, type ClaudePublicMessage, type ClaudePublicRecord, type FrozenReadProof } from './frozen-context.js'
 import { rejectedFinalOutput, structuredExecutionTimer, StructuredSessionError, structuredExecutionPolicy, structuredSeatbeltProfile, type StructuredExecution } from './session-structured-policy.js'
+import { sessionIdentityEnvVars } from './harness-shim.js'
 
 const CLI_VERSION = '2.1.309 (Claude Code)'
 const toolNames = ['StructuredOutput', 'mcp__frozen__spex_read_frozen']
@@ -238,7 +239,7 @@ function settleClaudeWorktreeResult(plan: NativePlan, prompt: string, execution:
   const exit = JSON.parse(readFileSync(join(root, 'exit.json'), 'utf8')) as { code: number | null; signal: string | null; stopped: boolean }
   const model = claudeWorktreeModel(plan, execution, init)
   const history = claudeWorktreeHistory(plan, execution.state === 'completed'), original = history.find(row => row.type === 'user' && row.uuid === plan.userUuid)
-  if (init.session_id !== plan.sessionId || !original?.promptId || original.sessionId !== plan.sessionId || history.some(row => row.sessionId !== plan.sessionId || row.type === 'api-request' && row.model !== model)
+  if (init.session_id !== plan.sessionId || !original?.promptId || original.sessionId !== plan.sessionId || plan.version === 2 && history.some(row => row.sessionId !== plan.sessionId || row.type === 'api-request' && row.model !== model)
     || echo.uuid !== plan.userUuid || echo.session_id !== plan.sessionId || hash(echo.message) !== hash({ role: 'user', content: [{ type: 'text', text: prompt }] }) || hash(original.message) !== hash(echo.message)
     || original.parentUuid !== null || result.session_id !== plan.sessionId || result.user_message_uuid !== plan.userUuid || hash(result.user_message_uuids) !== hash([plan.userUuid]) || !exit.stopped) throw new StructuredSessionError('stale_result', 'Claude worktree original prompt/model/exit evidence differs')
   if (result.subtype === 'error_max_structured_output_retries') {
@@ -468,7 +469,7 @@ export async function claudeStructuredTurn(realm: string, id: string, prompt: st
   for (const name of [...(nativeConfiguration ? [] : ['cwd', 'claude-home']), 'tmp', 'debug']) mkdirSync(join(root, name), { recursive: true, mode: 0o700 })
   const native = { version: nativeConfiguration ? 2 as const : 1 as const, root, sessionId: randomUUID(), userUuid: randomUUID() }
   const configHome = join(root, 'claude-home'), cwd = worktree ? worktreePath! : join(root, 'cwd')
-  let plan: NativePlan = { ...native, ...(worktree ? { workspace: cwd } : {}), ...(nativeConfiguration ? { configRoot: resolve(cwd, process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude')), requestedModel: execution.model } : {}), requestDigest: hash({ prompt, policy: structuredExecutionPolicy(execution) }), policyDigest: hash(structuredExecutionPolicy(execution)), cliPath, cliVersion, binaryDigest, receiptFile: join(root, 'process.json') }
+  let plan: NativePlan = { ...native, ...(worktree ? { workspace: cwd } : {}), ...(nativeConfiguration ? { configRoot: resolve(cwd, process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude')), requestedModel: execution.model } : {}), requestDigest: hash({ prompt, policy: structuredExecutionPolicy(execution) }), policyDigest: hash(structuredExecutionPolicy(execution)), cliPath, cliVersion, binaryDigest, receiptFile: join(root, 'process.json') }
   const mcpInput = join(root, 'reader.json'), mcpConfig = join(root, 'mcp.json'), profile = join(root, 'policy.sb')
   if (!worktree) {
     writeFileSync(mcpInput, JSON.stringify({ root, ref: execution.frozenContext }), { mode: 0o400 })
@@ -480,6 +481,10 @@ export async function claudeStructuredTurn(realm: string, id: string, prompt: st
   const env: NodeJS.ProcessEnv = nativeConfiguration
     ? { ...process.env, TMPDIR: join(root, 'tmp'), CLAUDE_CODE_TMPDIR: join(root, 'tmp'), CLAUDE_CODE_DEBUG_LOGS_DIR: join(root, 'debug') }
     : { PATH: process.env.PATH, HOME: homedir(), TMPDIR: join(root, 'tmp'), CLAUDE_CONFIG_DIR: configHome, CLAUDE_CODE_TMPDIR: join(root, 'tmp'), CLAUDE_CODE_DEBUG_LOGS_DIR: join(root, 'debug'), MAX_MCP_OUTPUT_TOKENS: '500000' }
+  if (nativeConfiguration) {
+    for (const key of sessionIdentityEnvVars()) delete env[key]
+    env.SPEXCODE_SESSION_ID = id
+  }
   const authenticationEnvironment = nativeConfiguration ? { environment: {}, source: 'native' } : prepareClaudeAuthenticationEnvironment(process.env)
   if (!nativeConfiguration) Object.assign(env, authenticationEnvironment.environment)
   if (!worktree) {
