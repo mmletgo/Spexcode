@@ -39,3 +39,5 @@
 - v22登记owner Git草稿续修与已证停止RPC故障的显式准入。草稿只存Git对象身份，不借raw权限；旧缺席字段不追补，已接受候选仍须原绑定。只有现有停止协议确证并结算资源后，运行中的有效fence才能续修，用户暂停/取消和未知停止不自动重启。
 
 - writer23围栏保护新P0持久协议；升级前停稳旧writer/结算或保留资源，正常online backup迁移，回滚恢复一致旧库及evidence，不删marker。新P0按attempt显式冻结code-behavior-draft-v1，analyze/review复用stage-worktree的同owner/purpose Git草稿与只读schema；格式失败续原JSON，review格式失败保已校验分析，仅重开独审。旧reserved不补协议；认证旧Native CAS仅作新seed临时材料，不伪造历史Git稿。
+
+- 完整初始化资格不等于所有源码曾被写过：未写path可用精确已采纳owner Spec、正式settled receipt、scope及三份对象一致证明只读初始化，缺binding/null保持；已有非null头不fallback，未审owner/源码漂移拒绝。规划回归：`npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/sync/planning.test.ts`。
