@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+P1后置分类回审回归必须覆盖单体/分区、重新判定allowed_change及维持refactor两条真实程序路径；完整finding、旧新条款、代码差量与原analysis/result/candidate引用只作为同owner的非权威质疑。新分析及独审后依赖P1重新绑定；缺ref、foreign owner、无关条款与旧reserved不取得重新授权。原Git稿、原引用和未受影响P0保持；格式失败仍续原文件。核心用例须到受控P1独审accept，旧短errors的真实caller回归单独核完整定位，不把受控runner、独审入口或零code_generate冒称真实模型与最终交付。
+
 P0丢稿修复的失败对照须先由真实Native资源桥持久化同一syntax/schema拒绝原final，再经authenticateNativeRejectedFinal核原schema/request/身份/停止证明；下一attempt在协调器外检查临时seed的exact原bytes、只读业务schema及原具体错误。旧实现必须在该原文缺失断言失败，新实现同例通过；仅read/edit模式前置断言失败只能说明草稿transport未启用，不能当作原JSON丢失的复现。此受控runner接缝仍不代表真实模型完成。
 
 Native P0单体与分区使用真实临时worktree、Git提交和SQLite检查点，分析/独审syntax或schema拒绝后沿同operation/原预算续原草稿，独审格式拒绝不重跑已校验分析。旧reserved只读派发不补协议，其认证Native错误/CAS原bytes通过原资源桥进入下一真实草稿seed，记录native-material provenance；旧原件保持，不造历史Git witness或业务批准。只读源码/tests及原index保持，回归在P1前明确停止，不调用真实模型、Docker或采纳。

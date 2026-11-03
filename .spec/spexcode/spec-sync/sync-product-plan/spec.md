@@ -14,6 +14,8 @@ P0至P5按完整需求交付，不以阶段演示、局部测试或可修改的�
 
 ## expanded spec
 
+失败findings的原条目、路径与严重级别必须跨草稿检查点及实际续修caller保真，不能把同码同文问题压成无法定位的重复文字。已渲染候选的完整失败只沿认证原件作为诊断继续传递，不变成旧seed、原意或新授权；历史短errors原件不回写。
+
 P1后置门禁对已审P0分类的质疑须精确绑定原真实变更owner、affectedIds与原分析/候选证据，在同operation和预算内重新分析及独审；可重判合法细节变化或维持refactor恢复错误候选，程序不改变分类或扩大AC/VERIFY权限。新分析使依赖P1重绑，兄弟P0保持；格式失败只续原文件与失败环节，同绑定的历史完整findings只作诊断，旧稿、引用和reserved请求不补写。
 
 P0的analysis/review同样按owner/purpose保真实Git临时JSON与精确只读schema；格式失败跨attempt续原稿，review格式失败保已校验分析，业务repair仍回分析和独审。旧只读Native原输出只在精确schema与原任务（仅剥非权威repairDiagnostics）、seed及冻结身份一致并经原真实性/停止认证后成为新seed材料，不冒充旧Git稿或批准。三轮兄弟分区仍承接原analyze及review出处，不重跑已接受区。持久语义由writer23在线备份/事务迁移围栏保护，回滚恢复升级前v22一致库及原evidence；既有reserved请求保持原绑定，原预算、source/tests只读与最终V1–V4/采纳门不变。
