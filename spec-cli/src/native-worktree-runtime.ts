@@ -1,0 +1,174 @@
+import { execFileSync, spawnSync } from 'node:child_process'
+import { appendFileSync, existsSync, readFileSync, readlinkSync, realpathSync, writeFileSync } from 'node:fs'
+import { join, resolve } from 'node:path'
+import { detachedRuntimeIsGone, processStartToken, type ProcessIdentity } from '@spexcode/spec-core'
+import { StructuredSessionError } from './session-structured-policy.js'
+
+export type NativeWorktreeRequest = { baseCommit: string; tree: string; mode: 'read' | 'edit' }
+export type NativeWorktreeResult = { baseCommit: string; baseTree: string; headCommit: string; tree: string; worktreePath: string }
+const git = (cwd: string, args: string[]): string => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+
+/** 固定真实 seed 对象，拒绝 ref 或从当前工作区派生输入。 */
+export function assertNativeWorktreeSeed(root: string, seed: NativeWorktreeRequest): void {
+  if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(seed.baseCommit) || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(seed.tree) || !['read', 'edit'].includes(seed.mode))
+    throw new StructuredSessionError('failed', 'native worktree requires an immutable seed commit/tree and read or edit mode')
+  if (git(root, ['rev-parse', '--verify', `${seed.baseCommit}^{commit}`]) !== seed.baseCommit || git(root, ['rev-parse', '--verify', `${seed.baseCommit}^{tree}`]) !== seed.tree)
+    throw new StructuredSessionError('failed', 'native worktree seed commit/tree identity differs')
+}
+
+/** 只接受干净且归属 seed 的真实 Git 提交，冷复用必须保留全部身份。 */
+export function nativeWorktreeResult(worktreePath: string, seed: NativeWorktreeRequest): NativeWorktreeResult {
+  assertNativeWorktreeSeed(worktreePath, seed)
+  const actualRoot = realpathSync(git(worktreePath, ['rev-parse', '--show-toplevel']))
+  const headCommit = git(worktreePath, ['rev-parse', '--verify', 'HEAD^{commit}']), tree = git(worktreePath, ['rev-parse', '--verify', 'HEAD^{tree}'])
+  const status = execFileSync('git', ['--no-optional-locks', '-C', worktreePath, 'status', '--porcelain=v1', '--untracked-files=all'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trimEnd()
+  const invalid = (reason: string): never => {
+    const diagnostic = { mode: seed.mode, expected: { root: worktreePath, headCommit: seed.baseCommit, tree: seed.tree }, actual: { root: actualRoot, headCommit, tree, status } }
+    throw new StructuredSessionError('native_worktree_result_invalid', `${reason}; Git result=${JSON.stringify(diagnostic)}. ${seed.mode === 'read' ? 'Read/review submits only this stage’s reviewable analysis; do not generate or commit experimental Specs. Experiments need independent temporary Git metadata: never copy a .git file that points back to this worktree. Submit a reviewable candidate for subsequent independent review and repair; one round need not be perfect.' : 'Use normal git add and git commit with hooks enabled after the relevant checks, and leave the worktree clean.'}`)
+  }
+  if (actualRoot !== realpathSync(worktreePath) || status) invalid('native worktree must be its recorded Git root and clean after normal add/commit')
+  if (seed.mode === 'read' && (headCommit !== seed.baseCommit || tree !== seed.tree)) invalid('native read worktree changed its seed')
+  try { git(worktreePath, ['merge-base', '--is-ancestor', seed.baseCommit, headCommit]) }
+  catch (error) { if ((error as { status?: number }).status === 1) invalid('native worktree HEAD is not a descendant of its seed'); throw error }
+  const result = { baseCommit: seed.baseCommit, baseTree: seed.tree, headCommit, tree, worktreePath }
+  return result
+}
+
+/** 正式 close 可移除历史工作区；冷复用只验证保留的不可变 Git 对象。 */
+export function assertNativeWorktreeResult(root: string, seed: NativeWorktreeRequest, result: NativeWorktreeResult): void {
+  assertNativeWorktreeSeed(root, seed)
+  if (result.baseCommit !== seed.baseCommit || result.baseTree !== seed.tree || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(result.headCommit)
+    || git(root, ['rev-parse', '--verify', `${result.headCommit}^{commit}`]) !== result.headCommit || git(root, ['rev-parse', '--verify', `${result.headCommit}^{tree}`]) !== result.tree
+    || seed.mode === 'read' && (result.headCommit !== seed.baseCommit || result.tree !== seed.tree)) throw new StructuredSessionError('stale_result', 'native worktree saved Git object identity differs')
+  try { git(root, ['merge-base', '--is-ancestor', seed.baseCommit, result.headCommit]) }
+  catch { throw new StructuredSessionError('stale_result', 'native worktree saved HEAD is not a descendant of its seed') }
+}
+
+/** 给代理明确正常 Git 收尾要求；不限制正常文件工具。 */
+export function nativeWorktreePrompt(prompt: string, seed: NativeWorktreeRequest): string {
+  return `${prompt}\n\nWork in the current Git worktree using normal read/search/edit/test tools. ${seed.mode === 'read' ? 'This is a read/review task: leave HEAD, index and all worktree files unchanged and clean.' : 'Complete the requested changes and relevant checks, then use normal git add and git commit with hooks enabled. Leave the worktree clean; uncommitted edits are a failed result.'}`
+}
+
+export type NativeOwnedPlan = { root: string; pid?: number; receiptFile: string; workspace?: string; tmp?: string }
+
+type NativeProcessRow = ProcessIdentity & { ppid: number }
+
+/** 只读取同 UID 的 PID、父图与启动身份，不读取 argv、环境或凭据。 */
+function nativeProcessCensus(): NativeProcessRow[] {
+  const uid = process.getuid?.()
+  if (uid === undefined) throw new StructuredSessionError('unsupported', 'native worktree requires a same-UID process census')
+  const result = spawnSync('/bin/ps', ['-axo', 'uid=,pid=,ppid=,lstart='], { encoding: 'utf8' })
+  if (result.error || result.status !== 0) throw new StructuredSessionError('cancellation_pending', 'native worktree process census is unproven')
+  return result.stdout.split('\n').flatMap(line => {
+    const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+?)\s*$/.exec(line)
+    return match && Number(match[1]) === uid ? [{ pid: Number(match[2]), ppid: Number(match[3]), startToken: match[4].replace(/\s+/g, ' ') }] : []
+  })
+}
+
+/** spawn 前冻结同 UID 基线；运行中仅把实际观察到的 Native 后代记为已拥有。 */
+export function sampleNativeWorktreeProcesses(plan: NativeOwnedPlan): void {
+  const path = join(plan.root, 'owned-processes.json'), rows = nativeProcessCensus()
+  if (!plan.pid) {
+    writeFileSync(join(plan.root, 'process-baseline.json'), JSON.stringify(rows), { mode: 0o400, flag: 'wx' })
+    writeFileSync(path, '[]', { mode: 0o600 })
+    return
+  }
+  const owned = new Map((existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) as ProcessIdentity[] : []).map(item => [item.pid, item]))
+  const queue = [plan.pid, ...owned.keys()], seen = new Set<number>()
+  while (queue.length) {
+    const pid = queue.shift()!
+    if (seen.has(pid)) continue
+    seen.add(pid)
+    const row = rows.find(item => item.pid === pid), previous = owned.get(pid)
+    if (previous && row && previous.startToken !== row.startToken) continue
+    if (row) owned.set(pid, { pid, startToken: row.startToken })
+    queue.push(...rows.filter(item => item.ppid === pid).map(item => item.pid))
+  }
+  writeFileSync(path, JSON.stringify([...owned.values()]), { mode: 0o600 })
+  persistNativeOrphanObservation(plan, classifyNativeWorktreeOrphans(plan))
+}
+
+type NativeTaskRelatedProcess = ProcessIdentity & { boundaryVersion: 2; observedAt: number; cwd: string }
+export type NativeOrphanObservation = { related: NativeTaskRelatedProcess[]; pending: NativeTaskRelatedProcess[]; unattributed: Array<NativeProcessRow & { cwd: string | null }> }
+
+/** 只查候选 cwd；读取不到的位置不伪造成任务关联，且从不读取 argv/env。 */
+function nativeProcessWorkingDirectories(pids: number[]): Map<number, string> {
+  const paths = new Map<number, string>()
+  if (!pids.length) return paths
+  if (process.platform === 'linux') {
+    for (const pid of pids) {
+      try { paths.set(pid, readlinkSync(`/proc/${pid}/cwd`)) }
+      catch (error) { if (!['ENOENT', 'ESRCH', 'EACCES'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error }
+    }
+    return paths
+  }
+  const result = spawnSync('/usr/sbin/lsof', ['-a', '-p', pids.join(','), '-d', 'cwd', '-Fn'], { encoding: 'utf8' })
+  if (result.error || ![0, 1].includes(result.status ?? -1)) throw new StructuredSessionError('cancellation_pending', 'native worktree cwd observation is unavailable')
+  let pid: number | undefined
+  for (const line of result.stdout.split('\n')) {
+    if (/^p\d+$/.test(line)) pid = Number(line.slice(1))
+    else if (pid !== undefined && line.startsWith('n')) paths.set(pid, line.slice(1))
+  }
+  return paths
+}
+
+/** 只读分类可用于旧现场离线核验；同 UID/PPID1 本身不产生任务债务。 */
+export function classifyNativeWorktreeOrphans(plan: NativeOwnedPlan): NativeOrphanObservation {
+  const rows = nativeProcessCensus(), current = new Map(rows.map(row => [row.pid, row]))
+  const baseline = new Map((JSON.parse(readFileSync(join(plan.root, 'process-baseline.json'), 'utf8')) as NativeProcessRow[]).map(row => [row.pid, row]))
+  const owned = JSON.parse(readFileSync(join(plan.root, 'owned-processes.json'), 'utf8')) as ProcessIdentity[]
+  const relatedPath = join(plan.root, 'task-related-processes.json')
+  const related = existsSync(relatedPath) ? JSON.parse(readFileSync(relatedPath, 'utf8')) as NativeTaskRelatedProcess[] : []
+  const candidates = rows.filter(row => {
+    if (owned.some(identity => identity.pid === row.pid && identity.startToken === row.startToken) || baseline.get(row.pid)?.startToken === row.startToken) return false
+    let parent = current.get(row.ppid)
+    const seen = new Set<number>()
+    while (parent && parent.pid > 1 && !seen.has(parent.pid)) {
+      if (baseline.get(parent.pid)?.startToken === parent.startToken) return false
+      seen.add(parent.pid); parent = current.get(parent.ppid)
+    }
+    return true
+  })
+  const paths = nativeProcessWorkingDirectories(candidates.filter(row => !related.some(item => item.pid === row.pid && item.startToken === row.startToken)).map(row => row.pid))
+  const domains = [plan.root, plan.workspace, plan.tmp].filter((path): path is string => !!path).map(path => existsSync(path) ? realpathSync(path) : resolve(path))
+  const unattributed: NativeOrphanObservation['unattributed'] = []
+  for (const row of candidates) {
+    if (related.some(item => item.pid === row.pid && item.startToken === row.startToken)) continue
+    const cwd = paths.get(row.pid) ?? null
+    if (cwd && domains.some(domain => cwd === domain || cwd.startsWith(domain + '/')))
+      related.push({ pid: row.pid, startToken: row.startToken, cwd, boundaryVersion: 2, observedAt: Date.now() })
+    else unattributed.push({ ...row, cwd })
+  }
+  return { related, pending: related.filter(item => current.get(item.pid)?.startToken === item.startToken), unattributed }
+}
+
+/** 新边界观察另存，绝不覆盖旧 unknown/exit 原件，也不为 cwd 关联授予 kill 权。 */
+function persistNativeOrphanObservation(plan: NativeOwnedPlan, observation: NativeOrphanObservation): void {
+  writeFileSync(join(plan.root, 'task-related-processes.json'), JSON.stringify(observation.related), { mode: 0o600 })
+  writeFileSync(join(plan.root, 'unattributed-processes.json'), JSON.stringify(observation.unattributed), { mode: 0o600 })
+}
+
+/** receipt/历史 owned 与正向任务关联分别结算；系统旁观进程不进入任务容量。 */
+export function nativeWorktreeProcessesStopped(plan: NativeOwnedPlan, terminate = false): boolean {
+  const path = join(plan.root, 'owned-processes.json')
+  if (!plan.pid || !existsSync(path) || !existsSync(join(plan.root, 'process-baseline.json'))) return false
+  sampleNativeWorktreeProcesses(plan)
+  let stopped = detachedRuntimeIsGone(plan.pid, plan.receiptFile)
+  const owned = JSON.parse(readFileSync(path, 'utf8')) as ProcessIdentity[]
+  for (const identity of owned) {
+    const token = processStartToken(identity.pid)?.replace(/\s+/g, ' ')
+    if (token && token !== identity.startToken) continue
+    try { process.kill(identity.pid, 0) }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') continue; throw error }
+    stopped = false
+    if (terminate && token === identity.startToken) {
+      try { process.kill(identity.pid, 'SIGTERM') }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error }
+    }
+  }
+  const observation = classifyNativeWorktreeOrphans(plan)
+  persistNativeOrphanObservation(plan, observation)
+  const nativeStopped = stopped && observation.pending.length === 0
+  appendFileSync(join(plan.root, 'process-stop-observations.jsonl'), JSON.stringify({ boundaryVersion: 2, at: Date.now(), pid: plan.pid, receiptFile: plan.receiptFile, knownStopped: stopped, taskRelatedPending: observation.pending, unattributed: observation.unattributed, nativeStopped }) + '\n', { mode: 0o600 })
+  return nativeStopped
+}

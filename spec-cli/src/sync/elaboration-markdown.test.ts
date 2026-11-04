@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
-import { elaborationPatchErrors, renderElaboration } from './elaboration-markdown.js'
+import { elaborationPatchErrors, projectVerificationTable, renderElaboration, withoutVerificationTables } from './elaboration-markdown.js'
 import type { GeneratedElaboration, GeneratedTables } from './elaboration-markdown.js'
 import { elaborationDigest } from './elaboration.js'
 import type { ElaborationInput } from './elaboration-types.js'
@@ -97,6 +97,124 @@ test('raw-only旧节点用同一协议首次建立契约，保留原raw及既有
   assert.equal(parsed.contract!.items.length, 1)
   assert.equal(parsed.contract!.rawSource, '真实旧原意。')
   assert.ok(rendered.includes('原有不适用依据与业务输入域。'))
+})
+
+test('preserve_business首次细化raw-only节点仍启用契约，保留人工元数据和原意', () => {
+  const rawOnly = '---\ntitle: 人工标题\ndesc: 人工说明\nstatus: pending\n---\n# 人工正文标题\n\n## raw source\n\n真实旧原意。\n\n## expanded spec\n\n原有业务说明。\n'
+  const output = patch()
+  output.changes[0].prose = '首次契约的无状态依据：同步返回结果，不存在持久业务状态。'
+  output.changes[0].tables.REQ = [{ id: 'REQ-EXPORT-01', goal: '导出', source: 'user:raw', constraints: '-', success: '返回数据', 'depends-on': [] }]
+  const snapshot: ElaborationInput = { ...input, mode: 'preserve_business', intent: { ...input.intent, rawSource: '真实旧原意。' }, targets: [{ ...input.targets[0], source: rawOnly, sourceDigest: elaborationDigest(rawOnly) }] }
+  const rendered = renderElaboration(snapshot, output, 'input').changes[0].source
+  const parsed = parseContract({ nodeId: 'export-contract', path, source: rendered })
+  assert.ok(parsed.contract, '首次细化的确定性装配必须启用 sync-v1')
+  assert.deepEqual(parsed.findings, [])
+  assert.equal(parsed.contract.items.length, 1)
+  assert.equal(parsed.contract.rawSource, '真实旧原意。')
+  assert.equal(parseFrontmatter(rendered).fm.title, '人工标题')
+  assert.equal(parseFrontmatter(rendered).fm.desc, '人工说明')
+  assert.ok(rendered.includes('原有业务说明。'))
+  assert.ok(rendered.includes('# 人工正文标题'))
+  assert.ok(rendered.includes(output.changes[0].prose))
+  for (const expanded of ['## expanded spec\n\n', '']) {
+    const empty = rawOnly.replace('## expanded spec\n\n原有业务说明。\n', expanded)
+    const fresh = renderElaboration({ ...snapshot, targets: [{ ...snapshot.targets[0], source: empty, sourceDigest: elaborationDigest(empty) }] }, output, 'input').changes[0].source
+    assert.equal(parseContract({ nodeId: 'export-contract', path, source: fresh }).contract!.items.length, 1)
+    assert.equal(parseParts(fresh)!.rawSource, '真实旧原意。')
+    assert.ok(fresh.includes('# 人工正文标题'))
+    assert.ok(fresh.includes(output.changes[0].prose))
+    assert.equal((fresh.match(/^## raw source$/gm) ?? []).length, 1)
+  }
+})
+
+test('preserve_business已有契约忽略模型prose，纯重构不追加或覆盖正文', () => {
+  const output = patch()
+  output.changes[0].prose = '不能借纯重构追加的新业务解释。'
+  assert.equal(renderElaboration({ ...input, mode: 'preserve_business' }, output, 'input').changes[0].source, source)
+})
+
+test('补建缺失raw段位于真实expanded之前，保留标题及围栏中的伪标题', () => {
+  const prefix = '# 人工正文标题\n\n导言。\n\n~~~markdown\n## expanded spec\n示例。\n~~~\n\n'
+  const frozen = `---\ntitle: 人工标题\n---\n${prefix}## expanded spec\n\n原有业务说明。\n`
+  const output = patch()
+  output.changes[0].tables.REQ = [{ id: 'REQ-EXPORT-01', goal: '导出', source: 'user:raw', constraints: '-', success: '返回数据', 'depends-on': [] }]
+  const rendered = renderElaboration({ ...input, intent: { ...input.intent, rawSource: '真实新原意。' }, targets: [{ ...input.targets[0], source: frozen, sourceDigest: elaborationDigest(frozen) }] }, output, 'input').changes[0].source
+  assert.equal(parseParts(rendered)!.rawSource, '真实新原意。')
+  assert.ok(rendered.includes(prefix))
+  assert.ok(rendered.indexOf('## raw source') < rendered.lastIndexOf('## expanded spec'))
+  assert.ok(rendered.includes('原有业务说明。'))
+})
+
+test('rawless旧正文完整保留为expanded，非null prose与VERIFY不注入primary raw', () => {
+  const legacyBody = '# 全树验证\n\n旧业务说明完整保留。\n\n## 执行约束\n\n~~~sh\nprintf "保留正文与围栏"\n~~~\n\n后置说明。\n'
+  const legacy = `---\ntitle: 全树验证\n---\n${legacyBody}`
+  const childPath = '.spec/export/full-tree-verification/spec.md'
+  for (const prose of [null, '本次新增的技术验证说明。']) {
+    const output = patch(), child = output.changes[0]
+    child.nodeId = 'full-tree-verification'; child.path = childPath; child.title = '全树验证'; child.prose = prose
+    child.code = []; child.related = []
+    child.tables.VERIFY = [{ id: 'VERIFY-EXPORT-TREE', command: ['node', '--version'], cwd: '.', 'timeout-ms': 1000 }]
+    const rendered = renderElaboration({ ...input, targets: [...input.targets, { nodeId: child.nodeId, path: childPath, source: legacy, sourceDigest: elaborationDigest(legacy) }] }, output, 'input').changes.find(change => change.path === childPath)!.source
+    const parsed = parseContract({ nodeId: child.nodeId, path: childPath, source: rendered })
+    assert.deepEqual(parsed.findings, [])
+    assert.equal(parseParts(rendered)!.rawSource, '')
+    assert.ok(!rendered.includes('## raw source'))
+    assert.ok(!rendered.includes(input.intent.rawSource))
+    assert.ok(rendered.includes(legacyBody))
+    if (prose !== null) assert.ok(rendered.includes(prose))
+    assert.equal(parsed.contract!.items.filter(item => item.kind === 'VERIFY').length, 1)
+  }
+})
+
+test('已启用rawless节点的空差量保留原字节，不把整body提升为raw', () => {
+  const childPath = '.spec/export/full-tree-verification/spec.md'
+  for (const body of ['# 旧正文\n完整保留。\n', '## expanded spec\n完整保留。\n']) {
+    const frozen = `---\ntitle: 全树验证\ncontract-schema: sync-v1\n---\n${body}`.replace(/\n/g, '\r\n')
+    const output = patch(), child = output.changes[0]
+    child.nodeId = 'full-tree-verification'; child.path = childPath; child.title = '全树验证'; child.description = ''; child.code = []; child.related = []
+    const rendered = renderElaboration({ ...input, targets: [...input.targets, { nodeId: child.nodeId, path: childPath, source: frozen, sourceDigest: elaborationDigest(frozen) }] }, output, 'input').changes.find(change => change.path === childPath)!.source
+    assert.equal(rendered, frozen)
+  }
+})
+
+test('已启用但未分段的旧VERIFY表按差量更新，metadata及非null prose不复制继承表', () => {
+  const childPath = '.spec/export/full-tree-verification/spec.md'
+  const oldRows = '| VERIFY-EXPORT-TREE | ["node","--version"] | . | 1000 |\n| VERIFY-EXPORT-KEEP | ["node","-p","process.version"] | . | 1000 |'
+  const legacy = `---\ntitle: 全树验证\ncontract-schema: sync-v1\n---\n# 全树验证\n\n前置旧说明。\n\n### VERIFY\n\n| id | command | cwd | timeout-ms |\n| --- | --- | --- | --- |\n${oldRows}\n\n后置旧说明。\n`
+  for (const variant of ['verify', 'metadata', 'prose']) {
+    const output = patch(), child = output.changes[0]
+    child.nodeId = 'full-tree-verification'; child.path = childPath; child.title = '全树验证'; child.description = ''; child.code = []; child.related = []
+    if (variant === 'verify') child.tables.VERIFY = [{ id: 'VERIFY-EXPORT-TREE', command: ['node', '--version'], cwd: '.', 'timeout-ms': 2000 }]
+    if (variant === 'metadata') child.description = '更新后的技术说明。'
+    if (variant === 'prose') child.prose = '追加业务解释，保留旧表。'
+    const rendered = renderElaboration({ ...input, targets: [...input.targets, { nodeId: child.nodeId, path: childPath, source: legacy, sourceDigest: elaborationDigest(legacy) }] }, output, 'input').changes.find(change => change.path === childPath)!.source
+    const parsed = parseContract({ nodeId: child.nodeId, path: childPath, source: rendered })
+    assert.deepEqual(parsed.findings, [], variant)
+    assert.equal(parsed.contract!.items.length, 2, variant)
+    assert.equal(rendered.match(/^### VERIFY$/gm)!.length, 1, variant)
+    const verification = parsed.contract!.items.find(item => item.id === 'VERIFY-EXPORT-TREE')!
+    assert.equal(verification.kind, 'VERIFY')
+    assert.ok(rendered.includes('| VERIFY-EXPORT-KEEP | ["node","-p","process.version"] | . | 1000 |'))
+    assert.ok(rendered.includes('前置旧说明。') && rendered.includes('后置旧说明。'))
+    assert.equal(parseParts(rendered)!.rawSource, '')
+    if (variant === 'verify') assert.equal(verification.timeoutMs, 2000)
+    if (variant === 'prose') assert.ok(rendered.includes(child.prose!))
+  }
+})
+
+test('未分段legacy的CRLF正文携非null prose启用后不产生CRCRLF', () => {
+  const childPath = '.spec/export/full-tree-verification/spec.md'
+  const legacyBody = '# 全树验证\r\n\r\n完整保留的旧说明。\r\n\r\n~~~sh\r\nprintf "旧围栏"\r\n~~~\r\n'
+  const legacy = `---\r\ntitle: 全树验证\r\n---\r\n${legacyBody}`
+  const output = patch(), child = output.changes[0]
+  child.nodeId = 'full-tree-verification'; child.path = childPath; child.title = '全树验证'; child.description = ''; child.code = []; child.related = []; child.prose = '新增技术解释。'
+  child.tables.VERIFY = [{ id: 'VERIFY-EXPORT-TREE', command: ['node', '--version'], cwd: '.', 'timeout-ms': 1000 }]
+  const rendered = renderElaboration({ ...input, targets: [...input.targets, { nodeId: child.nodeId, path: childPath, source: legacy, sourceDigest: elaborationDigest(legacy) }] }, output, 'input').changes.find(change => change.path === childPath)!.source
+  assert.ok(rendered.includes(legacyBody))
+  assert.ok(!rendered.includes('\r\r\n'))
+  assert.ok(!/(?<!\r)\n/.test(rendered))
+  assert.deepEqual(parseContract({ nodeId: child.nodeId, path: childPath, source: rendered }).findings, [])
+  assert.equal(parseParts(rendered)!.rawSource, '')
 })
 
 test('无状态N/A正文与普通STATE/EVENT/TR显式转换，不混留旧表或丢不适用依据', () => {
@@ -214,4 +332,27 @@ test('重复识别段落的位置不跨过另一业务段，raw更新保留交�
   assert.ok(parsed.contract!.items.some(item => item.id === 'RULE-EXPORT-SPAN-DELTA'))
   assert.equal(parsed.contract!.items.length, baseline.items.length + 1)
   assert.ok(parseParts(bothChanged)!.expandedSpec.includes('首段正文。'))
+})
+
+
+test('VERIFY技术投影只触碰真实expanded技术表，原意/围栏/业务行及CRLF逐字不变', () => {
+  const verify = baseline.items.find(item => item.kind === 'VERIFY')!
+  assert.equal(verify.kind, 'VERIFY')
+  assert.throws(() => projectVerificationTable(source.replace('## expanded spec', '## expanded spec\r'), []), /混合换行/)
+  const example = '\n~~~markdown\n### VERIFY\n| id | command | cwd | timeout-ms |\n| --- | --- | --- | --- |\n| VERIFY-EXAMPLE-01 | ["example"] | . | 1 |\n~~~\n'
+  const rich = source.replace('## expanded spec', `${example}\n## expanded spec\n${example}`) + '\n业务后记必须保持。\n'
+  for (const frozen of [rich, rich.replace(/\n/g, '\r\n')]) {
+    const removed = projectVerificationTable(frozen, [])
+    assert.equal(withoutVerificationTables(removed), withoutVerificationTables(frozen))
+    assert.equal(parseParts(removed)!.rawSource, parseParts(frozen)!.rawSource)
+    assert.ok(removed.includes('VERIFY-EXAMPLE-01'))
+    assert.equal(parseContract({ nodeId: 'export-contract', path, source: removed }).contract!.items.some(item => item.kind === 'VERIFY'), false)
+    const restored = projectVerificationTable(removed, [verify])
+    assert.equal(withoutVerificationTables(restored), withoutVerificationTables(frozen))
+    const actual = parseContract({ nodeId: 'export-contract', path, source: restored }).contract!.items.find(item => item.kind === 'VERIFY')!
+    assert.equal(actual.kind, 'VERIFY')
+    assert.deepEqual(actual.command, verify.command)
+    assert.equal(actual.cwd, verify.cwd)
+    assert.equal(actual.timeoutMs, verify.timeoutMs)
+  }
 })

@@ -14,6 +14,14 @@ code:
 
 ## expanded spec
 
+v24 cli-config-v1回归在专用临时SQLite保存已结算journal/receipt，23→24只追加SELECT1 marker。online backup前后比较全部旧业务/protocol表逐行原值与v1–v23完整migration行（含checksum/applied_at）；旧23 writer拒绝24库，升级前备份可由23 writer读取并保持全部旧行，重复迁移幂等。不得操作用户或真实同步库。
+
+v23回归在隔离真实SQLite保存behavior-draft-protocol checkpoint且dispatch为空，明确复现未reserved崩溃窗口；正式online backup后22→23保持原operation/attempt/resource/ingress/journal/pair/lease行与v1–v22 checksum逐字不变，旧slice(0,22) writer被组件围栏拒绝，备份仍可由v22打开并保原数据，重入迁移幂等。仅验证专用私库，不访问用户或生产数据库。
+
+v17语义marker的隔离真实SQLite迁移先online backup，逐字保留历史payload/receipt与v1–v16 checksum；旧v16组件writer拒绝升级后库，备份仍可按v16读取，不修改实际用户库。
+
+ZCode v16 marker 回归保存真实 SQLite 中旧 operation/attempt/resource/ingress/journal/receipt/pair 的逐字节行，核 v1–v15 checksum 不变、升级前一致备份可由 v15 打开、旧 writer 在新库拒绝及重入迁移幂等；不以模拟 receipt 表示产品 Git 交付已通过。
+
 受控用户请求回归证明：同一实际来源快照上的不同用户编辑语义不被错误归并，仅来源requestId不同则归并原预算；同键改变请求拒绝，原来源字节不改，请求证据被 GC pin 保留。真实 v2 数据库备份升级至 v3 后，无额外请求的旧事件仍命中相同 operation/payload，备份保留 v2 与原消息。
 
 覆盖 [[sync-store]] 与 [[sync-migrations]] 的数据库边界：重复输入/capture时间回放只一operation一message；同key不同payload拒绝；claim与exact FIFO dequeue及所有租约同事务；共享path/规则冲突、独立范围并行、释放后generation不归零；独立原生dispatch预算及稳定创建键；过期fence、物理树重建失权；actual diff和V1至V4绑定门禁；取消前无journal、写入中待receipt结算、取消后保留receipt；receipt登记后重启幂等结算；partial保留needs_input；成对源/交付基线；GC pin；旧库online backup可恢复、失败DDL事务回滚、未知高版本拒写。
@@ -35,6 +43,8 @@ receipt树引用相同但manifest不同仍拒绝，journal保持未登记；相�
 两个独立进程同时操作同一 SQLite 文件争抢新业务 ID，只有一方扩展成功，另一方明确 lease conflict；数据库只登记一个 ID holder，双方原路径租约保持原 token。
 
 操作列表覆盖仓库隔离、精确来源根、终态可见、rowid顺序与默认/显式分页边界，非法limit拒绝；不同更新时间不会改变接入顺序。
+
+commit观察历史读取覆盖超过500条普通重复记录、同input/difference的admitted与observed同时保留、真实来源与captureKind隔离、失败/blocked排除及数据库重开后的rowid顺序；折叠重复行不改变原持久记录或消费语义。真实临时evidence缓存先复现裸字符串差异引用未pin而被gc删除，再验证重开后按pinnedBlobRefs执行真实gc仍可逐字读取消费blob，同时确实删除无引用blob。
 
 journal精确查询证明未知operation拒绝、另一operation不可串读，终态已结算receipt仍可返回。
 
@@ -81,3 +91,15 @@ P4 裁决复现已结算选择后，另一真实 SQLite journal/receipt 推进�
 模拟旧版迁移库时移除目标旧代之后全部 marker，不能留下新增 writer marker 形成不存在的 schema gap；旧 writer 拒绝断言从当前迁移注册推导最高代数。
 
 历史恢复结算仅接受与冻结计划逐项相同的 restoredIds；未获固定历史授权的验证元数据不能发布新资源头或解除退休状态。新 pair 的当前退休集合按真实恢复身份推进，原不可变退休审计保持；新版 writer 语义 marker 必须拒绝旧 writer 和未知未来版本写入。
+
+固定模型用例先复现旧实现忽略模型，再验证同键冲突、普通重复换模型拒绝、显式retry可换且旧sol记录不改写；预算与原业务绑定保持，遵循 [[sync-model-selection]]。
+
+v12→v13真实SQLite marker升级逐字比较operation、attempt、ingress receipt、journal/receipt及baseline表，核一致备份保原generation且旧migration数组拒读新generation；模型缺字段旧记录保持sol语义，无DDL与payload改写。
+
+v13→v14提交快照/分区语义marker回归逐字比较旧operation、attempt、resource、ingress、journal与baseline记录；旧输入不添加captureKind、不改payload，升级前online backup保v13供停writer后的正式回退，旧13代writer必须拒绝14代。
+
+unlimited回归以真实SQLite越过70calls、10attempts/repair及旧90分钟阈值仍记真实用量；四种旧有限cap逐项保持拒绝，maxRepairs=0不改义。自动前驱跨有限新配置仍继承原unlimited及显式null，物理pause/resume、防回声、cancel与过期/旧fence继续生效。v15升级先online backup，v1–v14 checksum及旧operation/payload/receipt逐字保持，旧writer拒绝且原备份可恢复。
+
+v21迁移以隔离真实SQLite和online backup证明v1–v20 checksum及旧flat raw refs原字节不改，旧v20 writer被组件门拒绝，回滚备份仍可按v20读取。新wrapper一个checkpoint动作保留全部JSON/raw保活refs；材料缺失时不发布部分引用，旧ref不补role。
+
+v22 writer marker用隔离真实SQLite与online backup核对v1–v21 checksum、旧operation/attempt/checkpoint及资源记录逐字保持；旧v21 writer被组件门拒绝，升级前备份可按v21读取。迁移不把历史缺席的草稿或RPC停止字段补写为新协议证明。

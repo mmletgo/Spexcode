@@ -10,8 +10,8 @@ import { runtimeRoot, mainCheckout, harnessIdentity } from '@spexcode/spec-core'
 import { detachedRuntimeGenerationToken, migrateLegacyDetachedRuntimeReceipt, processStartToken, verifyDetachedRuntime, type VerifiedDetachedRuntime } from '@spexcode/spec-core'
 import { codexGenerationEndpoints, codexGenerationSocketPath, currentCodexGeneration, legacyCodexGenerationEndpoint, readCodexGenerationLedger, prepareCodexGenerationClose, resolveCodexGenerationForClose, resolveCodexGenerationForResume, resolveCodexGenerationForSession, rebindCodexGeneration, type CodexGenerationEndpoint } from './codex-runtime-generations.js'
 import { spawnDetachedRuntime } from './runtime-ownership.js'
-import { assertFrozenReaderRuntime, frozenReaderDisabledFeatures, StructuredSessionError, StructuredSessionTransportError, structuredRealmRoot, type StructuredExecution } from './session-structured-policy.js'
-import { FROZEN_READ_TOOL, frozenReadTool, persistFrozenRead, proveFrozenReads, type FrozenNativeItem, type FrozenReadProof, type FrozenReadReceipt } from './frozen-context.js'
+import { assertFrozenReaderRuntime, frozenReaderDisabledFeatures, structuredExecutionTimer, StructuredSessionError, StructuredSessionTransportError, structuredRealmRoot, type StructuredExecution } from './session-structured-policy.js'
+import { FROZEN_READ_TOOL, frozenReadOutputTokenLimit, frozenReadTool, frozenVisibleOutputs, persistFrozenRead, proveFrozenReads, type FrozenNativeItem, type FrozenReadProof, type FrozenReadReceipt } from './frozen-context.js'
 import { codexRolloutPath, codexTranscript } from '@spexcode/transcript'
 import { shQuote } from './sh.js'
 import { writeFileIfChanged } from './file-write.js'
@@ -519,6 +519,7 @@ export function codexGenerationIdentityObserver(
     try { message = JSON.parse(json) } catch { return }
     if (message.error) return finish(`Codex generation observer request failed: ${message.error.message || JSON.stringify(message.error)}`)
     if (message.id === 1 && message.result) {
+      clearTimeout(timer)
       send({ method: 'initialized', params: {} })
       if (!readySettled) { readySettled = true; resolveReady(true) }
       return
@@ -1956,8 +1957,8 @@ const codexRolloutParented = (witness: CodexRolloutWitness): witness is CodexRol
   witness.ok && !!witness.parentThreadId && !!witness.cwd
 const CODEX_ROLLOUT_HEADER_CHUNK_BYTES = 64 * 1024
 const CODEX_ROLLOUT_HEADER_MAX_BYTES = 4 * 1024 * 1024
-function codexRolloutWitness(threadId: string, root?: string): CodexRolloutWitness {
-  const path = codexRolloutPath(threadId, root)
+function codexRolloutWitness(threadId: string, root?: string, exactPath?: string): CodexRolloutWitness {
+  const path = exactPath ?? codexRolloutPath(threadId, root)
   if (!path) return { ok: false, reason: 'rollout is missing' }
   let fd: number | null = null
   try {
@@ -2665,6 +2666,9 @@ export const codexHeadlessHarness: Harness = {
 }
 
 
+type StructuredNativeItem = FrozenNativeItem & { phase?: string; text?: string; content?: Array<{ type: string; text?: string }> }
+type StructuredNativeTurn = { id: string; status: string; error?: { message?: string } }
+
 // Subscribe before the first turn on this connection. Reconnect reads only the exact durable turn, or the
 // sole first turn whose user input equals the pinned prompt when its acceptance reply was lost.
 export async function codexStructuredTurn(sock: string, cwd: string, prompt: string, execution: StructuredExecution, callbacks: {
@@ -2676,9 +2680,9 @@ export async function codexStructuredTurn(sock: string, cwd: string, prompt: str
   signal?: AbortSignal
 }): Promise<{ threadId: string; turnId: string; text: string; frozenReadProof?: FrozenReadProof }> {
   const frozen = execution.frozenContext
-  if (frozen ? execution.version !== 2 || execution.policy !== 'codex-frozen-read-only-v2' : execution.version !== 1 || execution.policy !== 'codex-read-only-v1')
+  if (frozen ? execution.version !== (execution.timeoutMs === null ? 5 : 2) || execution.policy !== 'codex-frozen-read-only-v2' : execution.version !== (execution.timeoutMs === null ? 5 : 1) || execution.policy !== 'codex-read-only-v1')
     throw new StructuredSessionError('unsupported', 'frozen reader requires its exact fixed v2 policy')
-  if (execution.readerRuntime) assertFrozenReaderRuntime(execution.readerRuntime, execution.model)
+  if (execution.readerRuntime) assertFrozenReaderRuntime(execution.readerRuntime, execution.model, execution.frozenContext ? frozenReadOutputTokenLimit(execution.frozenContext) : undefined)
   const conn = createConnection(sock)
   const frames: FrameState = { buf: Buffer.alloc(0), fragOp: 0, fragBuf: Buffer.alloc(0) }
   let upgraded = false, requestId = 0
@@ -2686,8 +2690,9 @@ export async function codexStructuredTurn(sock: string, cwd: string, prompt: str
   const pending = new Map<number, { resolve(value: unknown): void; reject(error: Error): void }>()
   let rejectReady: (error: Error) => void = () => {}
   let rejectCompletion: (error: Error) => void = () => {}
-  let resolveCompletion: (turn: unknown) => void = () => {}
-  const completion = new Promise<unknown>((resolve, reject) => { resolveCompletion = resolve; rejectCompletion = reject })
+  let completionObserved = false
+  let resolveCompletion: (turn: StructuredNativeTurn) => void = () => {}
+  const completion = new Promise<StructuredNativeTurn>((resolve, reject) => { resolveCompletion = turn => { completionObserved = true; resolve(turn) }; rejectCompletion = reject })
   // Establish the rejection handler before transport events can arrive during preflight.
   void completion.catch(() => {})
   let threadId = execution.threadId, turnId = execution.turnId
@@ -2705,7 +2710,7 @@ export async function codexStructuredTurn(sock: string, cwd: string, prompt: str
     if (failure) throw failure
     send({ id: message.id, result: response })
   }
-  const earlyTurns = new Map<string, unknown>()
+  const earlyTurns = new Map<string, StructuredNativeTurn>()
   const fail = (error: Error): void => {
     failure = error
     for (const waiter of pending.values()) waiter.reject(error)
@@ -2720,6 +2725,39 @@ export async function codexStructuredTurn(sock: string, cwd: string, prompt: str
     pending.set(id, { resolve, reject })
     send({ id, method, params })
   })
+  const readTurns = async (): Promise<StructuredNativeTurn[]> => {
+    const turns: StructuredNativeTurn[] = [], cursors = new Set<string>()
+    let cursor: string | null | undefined
+    do {
+      const page = await request('thread/turns/list', { threadId, limit: 100, itemsView: 'notLoaded', ...(cursor ? { cursor } : {}) }) as { data: StructuredNativeTurn[]; nextCursor?: string | null }
+      turns.push(...page.data)
+      if (turnId && turns.some(turn => turn.id === turnId)) return turns
+      cursor = page.nextCursor
+      if (cursor && cursors.has(cursor)) throw new StructuredSessionError('stale_result', 'structured turn pagination repeated a cursor')
+      if (cursor) cursors.add(cursor)
+    } while (cursor)
+    return turns
+  }
+  const readExactTurn = async (): Promise<StructuredNativeTurn> => {
+    const turn = (await readTurns()).find(turn => turn.id === turnId)
+    if (!turn) throw new StructuredSessionError('stale_result', 'exact structured turn is missing')
+    return turn
+  }
+  const readItems = async (exactTurnId: string): Promise<StructuredNativeItem[]> => {
+    const items: StructuredNativeItem[] = [], cursors = new Set<string>()
+    let cursor: string | null | undefined
+    do {
+      const page = await request('thread/items/list', { threadId, turnId: exactTurnId, limit: 16, sortDirection: 'asc', ...(cursor ? { cursor } : {}) }) as { data: Array<{ turnId: string; item: StructuredNativeItem }>; nextCursor?: string | null }
+      for (const entry of page.data) {
+        if (entry.turnId !== exactTurnId) throw new StructuredSessionError('stale_result', 'structured item page names a different turn')
+        items.push(entry.item)
+      }
+      cursor = page.nextCursor
+      if (cursor && cursors.has(cursor)) throw new StructuredSessionError('stale_result', 'structured item pagination repeated a cursor')
+      if (cursor) cursors.add(cursor)
+    } while (cursor)
+    return items
+  }
   const handle = (json: string): void => {
     const message = JSON.parse(json) as JsonRpc
     if (!message.method && typeof message.id === 'number' && pending.has(message.id)) {
@@ -2734,7 +2772,7 @@ export async function codexStructuredTurn(sock: string, cwd: string, prompt: str
       return
     }
     if (message.method === 'turn/completed') {
-      const params = message.params as { threadId?: string; turn?: { id?: string } }
+      const params = message.params as { threadId?: string; turn?: StructuredNativeTurn }
       if (params.threadId !== threadId || !params.turn?.id) return
       if (turnId === params.turn.id) resolveCompletion(params.turn)
       else earlyTurns.set(params.turn.id, params.turn)
@@ -2765,11 +2803,12 @@ export async function codexStructuredTurn(sock: string, cwd: string, prompt: str
     // detaches only the observer after the durable publication fence has been installed.
     fail(new StructuredSessionError('cancelled', 'structured Agent execution was cancelled'))
   }
-  const timer = setTimeout(() => {
+  const timer = structuredExecutionTimer(execution.timeoutMs, () => {
     if (callbacks.onTimeout) void callbacks.onTimeout().catch((error: Error) => fail(error))
     else fail(new StructuredSessionError('timeout', 'structured Agent execution exceeded its deadline'))
-  }, execution.timeoutMs)
+  })
   callbacks.signal?.addEventListener('abort', abort, { once: true })
+  let completionPoll: ReturnType<typeof setTimeout> | undefined
   try {
     if (callbacks.signal?.aborted) throw new StructuredSessionError('cancelled', 'structured Agent execution was cancelled')
     await ready
@@ -2780,7 +2819,8 @@ export async function codexStructuredTurn(sock: string, cwd: string, prompt: str
     const mcp = config.config?.mcp_servers as Record<string, unknown> | undefined
     if (!config.config || config.config.sandbox_mode !== 'read-only' || config.config.approval_policy !== 'never'
       || features?.apps !== false || features?.plugins !== false || features?.hooks !== false || features?.shell_tool !== false || features?.code_mode !== false || features?.code_mode_host !== !!execution.readerRuntime || (mcp && Object.keys(mcp).length)
-      || (execution.readerRuntime && (config.config.model_catalog_json !== execution.readerRuntime.catalogPath || frozenReaderDisabledFeatures.some(feature => features?.[feature] !== false))))
+      || (execution.readerRuntime && (config.config.model_catalog_json !== execution.readerRuntime.catalogPath || frozenReaderDisabledFeatures.some(feature => features?.[feature] !== false)
+        || (execution.readerRuntime.version === 2 && config.config.tool_output_token_limit !== execution.readerRuntime.toolOutputTokenLimit))))
       throw new StructuredSessionError('unsupported', 'effective Codex config cannot prove the fixed read-only policy and zero external tools')
     const hooks = await request('hooks/list', { cwds: [cwd] }) as { data?: Array<{ hooks?: unknown[]; errors?: unknown[] }> }
     if (!Array.isArray(hooks.data) || hooks.data.some((entry) => !Array.isArray(entry.hooks) || entry.hooks.length || entry.errors?.length))
@@ -2788,11 +2828,12 @@ export async function codexStructuredTurn(sock: string, cwd: string, prompt: str
     const servers = await request('mcpServerStatus/list', {}) as { data?: unknown[]; nextCursor?: string | null }
     if (!Array.isArray(servers.data) || servers.data.length || servers.nextCursor)
       throw new StructuredSessionError('unsupported', 'effective Codex MCP servers/tools are present or could not be audited')
-    let thread: { id?: string; turns?: unknown[] }
+    let thread: { id?: string }
     if (threadId) {
-      const resumed = await request('thread/resume', { threadId, cwd, approvalPolicy: 'never', sandbox: 'read-only' }) as { thread: typeof thread }
+      const resumed = await request('thread/resume', { threadId, cwd, approvalPolicy: 'never', sandbox: 'read-only', excludeTurns: true }) as { thread: typeof thread }
       thread = resumed.thread
     } else {
+      if (execution.readerRuntime?.version === 1) throw new StructuredSessionError('unsupported', 'legacy frozen runtime can only recover an existing exact native turn')
       const started = await request('thread/start', { cwd, approvalPolicy: 'never', sandbox: 'read-only', ...(frozen ? { dynamicTools: [frozenReadTool] } : {}), ...(execution.model ? { model: execution.model } : {}) }) as { thread: typeof thread }
       thread = started.thread
       if (!thread?.id) throw new StructuredSessionError('failed', 'Codex returned no structured thread identity')
@@ -2800,14 +2841,16 @@ export async function codexStructuredTurn(sock: string, cwd: string, prompt: str
       await callbacks.onThread(threadId)
     }
     if (thread.id !== threadId) throw new StructuredSessionError('stale_result', 'Codex resumed a different structured thread')
-    const turns = (thread.turns ?? []) as Array<{ id: string; status: string; items?: Array<{ type: string; content?: Array<{ type: string; text?: string }> }> }>
+    const turns = execution.threadId ? await readTurns() : []
+    if (execution.turnId && !turns.some(turn => turn.id === execution.turnId)) throw new StructuredSessionError('stale_result', 'exact structured turn is missing')
     if (!turnId && turns.length) {
-      if (turns.length !== 1 || !turns[0].items?.some((item) => item.type === 'userMessage' && item.content?.some((input) => input.type === 'text' && input.text === prompt)))
+      if (turns.length !== 1 || !(await readItems(turns[0].id)).some((item) => item.type === 'userMessage' && item.content?.some((input) => input.type === 'text' && input.text === prompt)))
         throw new StructuredSessionError('stale_result', 'unacknowledged structured turn cannot be matched to its exact pinned input')
       turnId = turns[0].id
       await callbacks.onTurn(turnId)
     }
     if (!turnId) {
+      if (execution.readerRuntime?.version === 1) throw new StructuredSessionError('unsupported', 'legacy frozen runtime cannot start a new native turn')
       await callbacks.onTurnStarting?.()
       const accepted = await request('turn/start', { threadId, input: codexTextInput(prompt), cwd, approvalPolicy: 'never', sandboxPolicy: { type: 'readOnly' },
         outputSchema: execution.schema, ...(execution.model ? { model: execution.model } : {}), ...(execution.effort ? { effort: execution.effort } : {}) }) as { turn?: { id?: string } }
@@ -2821,23 +2864,37 @@ export async function codexStructuredTurn(sock: string, cwd: string, prompt: str
       throw new StructuredSessionError('cancellation_pending', 'frozen reader recovery requires exact native stop before a new attempt; old RPC response identities cannot be replayed')
     if (execution.turnId && stored?.status === 'inProgress') await callbacks.onTurn(turnId)
     if (stored && stored.status !== 'inProgress') resolveCompletion(stored)
-    if (earlyTurns.has(turnId)) resolveCompletion(earlyTurns.get(turnId))
+    if (earlyTurns.has(turnId)) resolveCompletion(earlyTurns.get(turnId)!)
+    while (!completionObserved) {
+      await Promise.race([completion, new Promise<void>(resolve => { completionPoll = setTimeout(resolve, 1000) })])
+      clearTimeout(completionPoll)
+      if (!completionObserved) {
+        const observed = await Promise.race([completion, readTurns().then(turns => turns.find(turn => turn.id === turnId))])
+        if (observed && observed.status !== 'inProgress') resolveCompletion(observed)
+      }
+    }
     await completion
     await toolWork
-    // Completion notifications can omit full items. Read only after settled completion, and select by id.
-    const read = await request('thread/read', { threadId, includeTurns: true }) as { thread?: { id?: string; turns?: unknown[] } }
-    if (read.thread?.id !== threadId) throw new StructuredSessionError('stale_result', 'structured result names a different thread')
-    const turn = (read.thread.turns as Array<{ id: string; status: string; items: Array<FrozenNativeItem & { phase?: string; text?: string }>; error?: { message?: string } }>).find((item) => item.id === turnId)
-    if (!turn) throw new StructuredSessionError('stale_result', 'exact structured turn is missing')
+    const turn = await readExactTurn()
     if (turn.status === 'interrupted') throw new StructuredSessionError('cancelled', 'structured Agent turn was interrupted')
     if (turn.status !== 'completed') throw new StructuredSessionError('failed', turn.error?.message || `structured Agent turn ended ${turn.status}`)
-    const final = turn.items.filter((item) => item.type === 'agentMessage' && item.phase === 'final_answer')
+    const items = await readItems(turnId)
+    const final = items.filter((item) => item.type === 'agentMessage' && item.phase === 'final_answer')
     if (final.length !== 1 || !final[0].text) throw new StructuredSessionError('failed', 'exact structured turn did not return one final answer')
-    const frozenReadProof = frozen ? proveFrozenReads(frozen, { threadId, turnId }, turn.items) : undefined
+    let visibility: { toolOutputTokenLimit: number; outputs: ReturnType<typeof frozenVisibleOutputs> } | undefined
+    if (frozen && execution.readerRuntime?.version === 2) {
+      const result = await request('thread/read', { threadId, includeTurns: false }) as { thread?: { id?: string; path?: string | null } }
+      if (result.thread?.id !== threadId || !result.thread.path) throw new StructuredSessionTransportError('exact frozen rollout path is not materialized yet')
+      const witness = codexRolloutWitness(threadId, undefined, result.thread.path)
+      if (!witness.ok || witness.cwd !== cwd) throw new StructuredSessionError('stale_result', 'frozen visible rollout does not witness the exact thread and working directory')
+      visibility = { toolOutputTokenLimit: execution.readerRuntime.toolOutputTokenLimit, outputs: frozenVisibleOutputs(readFileSync(result.thread.path, 'utf8'), turnId) }
+    }
+    const frozenReadProof = frozen ? proveFrozenReads(frozen, { threadId, turnId }, items, visibility) : undefined
     return { threadId, turnId, text: final[0].text, ...(frozenReadProof ? { frozenReadProof } : {}) }
   } finally {
     releaseIdentity()
     clearTimeout(timer)
+    clearTimeout(completionPoll)
     callbacks.signal?.removeEventListener('abort', abort)
     conn.destroy()
   }

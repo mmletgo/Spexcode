@@ -55,6 +55,25 @@ same volume from `.worktrees/<name>` to `.worktrees/.trash/wt-<epoch>-<nonce>`, 
 invalidate Git's old registration, and enqueue the renamed tree for serial asynchronous deletion. The close
 request never recursively removes the worktree; a backend-start scan resumes `.trash/` leftovers, and every
 deletion failure is logged and left for the next startup retry. The materialize slot is removed after enqueueing.
+The rename and registry prune share [[record-lock]]'s physical Git common-directory fence with create rollback
+and worktree add, including archived restore. The fence ends before asynchronous trash deletion and never spans
+adapter/model execution. Restore releases it after `worktree add` before applying the archived dirty delta.
+An ordinary archived restore gives that add the existing child-only footprint defer marker, then performs one
+bounded materialize child after releasing the registry fence and before replaying the dirty delta. The standard
+checkout hook still executes; its deferred child cannot reenter the fence held by its Git parent. Structured
+read-only records retain their existing no-ordinary-materialize policy.
+An existing restore tree is admitted only when its registration, Git top-level, and checked-out branch still
+match the archived record. Restore checks the archive delta even when the directory already exists: reverse
+`git apply --check` proves it is already present; otherwise a forward check and ordinary apply restore it.
+If neither check matches, restore reports a resource conflict and preserves existing WIP. A materialize failure still attempts
+this safe replay, retains the archived record, and refuses launch; replay failure reports both causes when
+applicable. Every retry repeats those checks, with no force deletion or new persisted restore stage.
+Existing-tree identity also binds the target's physical Git common directory to the explicit source root,
+requires its actual Git directory to be a direct linked registration under that common directory's
+`worktrees`, and checks that admin's own `gitdir` backlink names this exact tree's `.git`. A stale matching
+path in the root registry, same branch/base in another repository, or another admin in the same repository
+grants no materialize/replay authority. Physical common-directory aliases and relative own backlinks remain
+valid; a primary repository cannot impersonate a session's linked candidate.
 The branch and the global session store remain. The record is retained with `archived: true`,
 `stopped: true`, a cold proof, and the same close transaction's ISO `closedAt`; list projection omits it from the
 working board while id-addressed record, timeline, transcript, and conversation reads remain available. A record

@@ -1,11 +1,12 @@
 ---
-title: 结构化推理固定只读策略
+title: 结构化执行策略与只读历史边界
 status: active
 hue: 175
-desc: 独立清洁 Codex 配置及经过探针验证的外层隔离，禁止继承宽松 launcher、shell、MCP、apps 与 hooks。
+desc: 显式区分原生 worktree 执行与固定只读历史，禁止权限降级复用或静默切换执行器。
 code:
   - spec-cli/src/session-structured-policy.ts
 related:
+  - spec-cli/src/session-native-configuration.test.ts
   - spec-cli/src/session-structured.test.ts
   - spec-cli/src/frozen-context.test.ts
   - spec-cli/src/codex-runtime-generations.ts
@@ -14,9 +15,29 @@ related:
 
 ## raw source
 
-生成和独立审查只能读取协调器提供的冻结上下文并返回 JSON。Agent 不能修改源码、交付树或用户配置；没有安全能力时明确失败，不能退回宽松执行。
+旧冻结生成和独立审查只能读取协调器提供的冻结上下文并返回 JSON。新原生 worktree 工作流由协调器交付 seed 及变更 Spec/上下文，Agent 正常读取、编辑、检查和提交。两类能力必须显式区分；旧只读请求不得通过新模式获得权限，没有对应能力时明确失败，不能静默切换。
 
 ## expanded spec
+
+可选rejectedOutput明确标记untrusted_final，仅携已认证被拒final与SHA、原请求/schema/input/purpose及原生thread/turn绑定；不进入成功output或固定策略，不授予新权限。错误透传/重放须核原绑定，旧缺席保持；不读取thinking或以任意末条消息猜final。
+
+可选 nativeConfiguration 只接受 cli-config-v1，且只适用于明确 Claude/ZCode 的 version6/native-worktree-v1，无 frozenContext/readerRuntime。它随固定策略、创建载荷与资源请求摘要冻结，纯策略构造不补默认；历史缺席保持。新路由接受 claude:default 或任意非空 Claude 模型/别名，以及 zcode:default 或非空 provider/不透明 model；default 只选择执行器，不覆盖 CLI 默认模型。CLI 版本和每轮实际模型按真实观测保存，provider/baseurl由CLI原生配置决定；只记录配置来源，不读取凭据或声称逐请求URL已被观测，不设版本或模型允许名册。旧缺席及 version1–5 仍走原固定策略，不扩大旧冻结模型解析或 realm。
+
+可选 zcodeToolPolicy 仅对明确 ZCode worktree read 接受 version1 与精准 ExitPlanMode denylist，随固定策略进入创建摘要；纯策略构造只保留显式字段，不给旧请求补默认。新建/恢复的选择由 [[structured-session-runtime]] 和 [[sync-native-run]] 冻结，原生 plan/send 版本边界由 [[zcode-structured-runtime]] 校验；不改变结构化 version6 或其它 provider。
+
+新显式 worktree:{baseCommit,tree,mode} 采用独立 version6/native-worktree-v1，数字或 null 期限都保持该版本。固定 schema/inputDigest/purpose/timeoutMs/model/effort/worktree 参与创建哈希，resultWorktree 仅为终态观察；不能同时携 frozenContext/readerRuntime，不产生 frozenReadProof。仅明确 Claude/ZCode 原生名字空间可用；无前缀/default/Codex 模型明确 unsupported，带命名空间的 default 仅在上述 cli-config-v1 路由可用。realm 固定为 structured-native-worktree-v1/claude 或 /zcode，禁止借旧只读 realm/证明；正常文件工具与 Git 结果边界见 [[native-worktree-runtime]]，两个执行器的正常模式分别由 [[claude-structured-runtime]]、[[zcode-structured-runtime]] 规定。下述 version1–5 的冻结策略完整保留，不因新增模式而放宽。
+
+version5 仅标识 timeoutMs:null 的固定调用预算能力，policy 字符串、隔离配置、realm、模型及 reader 证明保持原 Codex/Claude/ZCode 语义；数字请求继续使用原 version1–4。三个执行器复用同一计时接缝，null 不安装调用 timer；版本/timeout 不一致不得取得原生派发权。
+
+明确 `zcode:<provider-id>/<exact-model-id>` 使用版本4 `zcode-frozen-read-only-v1`，固定隔离合同见 [[zcode-structured-runtime]]。它复用私有 HOME、私有数据根、空工作目录和实测 macOS Seatbelt；私有配置关闭插件、hooks、skills、用户指令及额外 MCP，模型仅获唯一冻结 reader。既有 provider 配置与认证只作 SDK 正常使用的只读安全引用，不读取、复制或打印凭据。短私有 TMPDIR 的实际 Unix socket bind 与内外写入诱饵必须通过，不能放宽宿主目录或改用宽松 launcher。原始证明事件不包含 transport headers；未知能力或完整证明缺失仍失败，不自动切换 provider。
+
+以下 v1/v2 为原有 Codex 策略；明确 Claude 命名空间另使用 [[claude-structured-runtime]] 的版本3固定策略，不能自动 fallback。其空执行 cwd、私有 CLAUDE_CONFIG_DIR 和同一 macOS Seatbelt 写入边界只允许专属 runtime 写入。官方 restricted、空 built-in tools、独占 MCP、空 settings sources、关闭 hooks/记忆/普通指令文件和 slash commands 共同限制能力；仅 reader 与 StructuredOutput 可实际调用。CLI 2.1.309 的固定不可调用 DeferredToolPlaceholder schema 可以存在，实际调用拒绝。
+
+结构化执行的可选精确失败码属于 [[structured-session-runtime]] 的终态观测，不授予新工具、模型或读取能力，不改变固定策略摘要与成功的完整读取证明要求。
+
+旧version1–5冻结路径中的Claude透明沿用实际CLI的既有认证机制与API路由，包括安全环境、正常 keychain 或现有 wrapper；不读取或复制凭据文件，不保存/打印 token，不改变付费路径。不能仅凭父进程缺少环境变量判定未认证；同一 CLI 在同一私有配置目录、restricted 与外层隔离中运行只读 auth status，仅保存 loggedIn/authMethod/apiProvider，实际确认不可用才 unsupported。未知 CLI 版本或未证明 managed policy/provider 同样拒绝。服务启动环境缺变量不能从交互终端偷取或写入全局配置。完整工具 surface 和实际 API model 必须再次由原生 init/history 核实，不能只相信 flags。
+
+该旧冻结路径已有原生用户 settings.json.env 的认证来源按 [[claude-structured-runtime]] 只在内存投影四个允许键；任一显式进程键优先整组。其它用户 settings 仍由 restricted 和空配置来源排除，不能以复用认证为由继承权限、hooks 或 MCP。
 
 内部固定策略为 codex-read-only-v1。独立 CODEX_HOME 仅包含可信配置及既有认证文件的只读安全引用；不读取、复制或打印认证字节，不继承用户 config 或 launcher 的 yolo/bypass 权限。配置关闭 shell、code mode、多 Agent、MCP、apps、plugins、hooks 和 web search；在模型 turn 前检查有效只读/never 策略、禁用特性以及零 MCP/hook 工具。
 
@@ -30,4 +51,10 @@ Codex 原生 readOnly 策略保留，P1 使用提供正文的纯推理，不依�
 
 默认gpt-6.1-sol通过原生code-mode host中转动态调用；单纯开启host会暴露apply_patch、图片和goals，不能作为冻结读取策略。v2独立realm仅对经过真实探针验证的Codex0.160.0启用受限host，code_mode仍false，禁goals/view_image/image_generation/sleep/tool_suggest/current_time_reminder/asyncuserinput/tokenbudget。clean metadata子realm只调用typed model/list、不创建thread/turn；只提取其原生provider模型metadata，保相同实际模型所有信息，仅清空apply_patch_tool_type和experimental_supported_tools工具能力。冻结catalog的SHA、CLI版本和控制路径进入固定execution与资源计划，预检/恢复校验内容与版本，变更不可沿用旧证据。模型不能写catalog/config；无受验证版本、目录或隔离证明时明确unsupported。
 
+新readerRuntime版本2的固定tool_output_token_limit按[[frozen-context-reader]]从冻结清单派生，并进入descriptor缓存、realm路径和execution身份；实际config/read必须精确相等，不能只核磁盘配置或修改provider目录声明。新预算能力与旧catalog相同也不能复用旧daemon路径。旧版本1保留原realm/config与已存在thread/turn的历史恢复，不重写旧清单、响应或proof，不把旧证明升格为模型可见全文证明。host的独立exec额度和公开outer完整输出另由版本2读取证明核验；关闭host在当前原生路径不可用，不能把无成功读取的turn接受为完成。
+
 原生能力探针必须亲读custom exec代码与返回值：registry只有注册reader；process/require/fetch/module不可用，Node/HTTP/data动态import拒绝，constructor不取得宿主process，任意path/live诱饵不可读、任意写入与子进程不可达，网络诱饵0命中。metadata临时daemon只有在零native references且精确PID/start/receipt证实后才停止，停止确认后保存来源/前后目录摘要和changedFields，不能操作既有v1或其他generation。错误工具请求未获回复时沿cancelling保留容量，不能因本地快速失败就声称原生已停止。
+
+native_worktree_result_invalid 仅为原生 Git 结果后置合约的精确失败观测；不改变固定 policy、创建摘要、正常读取能力或旧冻结证明门禁。原 nativeWorktreePrompt 字节与历史创建哈希保持。
+
+计时器产生的 native_rpc_timeout 是显式原生故障观测，不能从错误文本补分类。失败可选 failedWorktree 仅承载原 seed 下已认证且确证停止的 Git 事实，与成功 resultWorktree 分离，不参与固定策略摘要、不授予成功 output 或候选；旧记录缺席保持。资源终态及续修准入由 [[sync-native-run]] 与 [[sync-coordinator]] 分别核验。

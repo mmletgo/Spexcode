@@ -45,6 +45,24 @@ export function sameContractBusinessMeaning(before: ContractItem, after: Contrac
 function reviewedAnalysisErrors(evidence: CodeBehaviorEvidence | undefined, expectedHash: string): string[] {
   if (!evidence || expectedHash !== evidence.ref.sha256 || hash(evidence.analysis) !== evidence.ref.sha256) return ['契约变更未绑定真实冻结分析']
   const analysis = evidence.analysis
+  if (analysis.partitionEvidence) {
+    const parts = analysis.partitionEvidence, coverage = analysis.partitionCoverage
+    if (!analysis.reviewPassed || !parts.length || !coverage || !/^[0-9a-f]{64}$/.test(coverage.planDigest) || new Set(parts.map(part => part.partitionId)).size !== parts.length || new Set(coverage.partitionIds).size !== coverage.partitionIds.length || !same([...coverage.partitionIds].sort(), parts.map(part => part.partitionId).sort())) return ['分区分析缺少完整唯一计划覆盖']
+    const paths = parts.flatMap(part => part.changedPaths)
+    if (new Set(paths).size !== paths.length || new Set(coverage.changedPaths).size !== coverage.changedPaths.length || !same([...paths].sort(), [...coverage.changedPaths].sort())) return ['分区分析变更路径并集不完整或重复']
+    for (const part of parts) {
+      if (part.analysis.partitionEvidence || part.analysis.traces.some(trace => trace.inputDigest !== part.analysis.inputDigest) || reviewedAnalysisErrors({ ref: part.analysisRef, analysis: part.analysis }, part.analysisRef.sha256).length) return ['分区分析原件缺少真实独立审查或摘要绑定']
+      if (['inputId', 'baselinePairId', 'baselineSelectionDigest', 'composedDigest', 'readSetDigest', 'policyDigest'].some(key => !same(part.analysis[key as keyof CodeBehaviorAnalysis], analysis[key as keyof CodeBehaviorAnalysis]))) return ['分区分析原件输入/政策/读取身份不一致']
+      if (part.changedPaths.some(path => !part.analysis.changes.some(change => change.paths.includes(path))) || part.analysis.changes.some(change => change.paths.some(path => !part.changedPaths.includes(path)))) return ['分区分析原件没有完整覆盖本区实际变化']
+    }
+    const union = (values: readonly unknown[]): string[] => [...new Set(values.map(value => JSON.stringify(value)))].sort()
+    for (const field of ['changes', 'findings', 'facts', 'authorizedChanges', 'nodeChanges', 'newNodes', 'resolutions', 'authorChanges', 'rawIntegrations', 'decisionAuthorities'] as const) {
+      if (!same(union(parts.flatMap<unknown>(part => part.analysis[field] ?? [])), union(analysis[field] ?? []))) return ['分区分析聚合授权或业务原件并集不一致']
+    }
+    const traces = parts.flatMap(part => part.analysis.traces)
+    if (!same(traces, analysis.traces) || new Set(traces.map(trace => trace.sessionId)).size !== traces.length || new Set(traces.map(trace => trace.threadId)).size !== traces.length) return ['分区分析聚合不能伪造或复用原生会话证据']
+    return []
+  }
   const builds = analysis.traces.filter(trace => trace.purpose === 'code_behavior_analyze')
   const reviews = analysis.traces.filter(trace => trace.purpose === 'code_behavior_review')
   if (!analysis.reviewPassed || builds.length !== 1 || reviews.length !== 1 || builds[0].sessionId === reviews[0].sessionId || builds[0].threadId === reviews[0].threadId || [...builds, ...reviews].some(trace => !trace.sessionId || !trace.threadId || !trace.turnId || !/^[a-f0-9]{64}$/.test(trace.resultDigest) || !/^[a-f0-9]{64}$/.test(trace.inputDigest)) || !analysis.inputDigest || !analysis.composedDigest || !analysis.readSetDigest || !analysis.policyDigest) return ['契约变更缺少独立审查和冻结输入绑定']
@@ -102,14 +120,24 @@ export function decisionAuthorizationErrors(source: string, ids: readonly string
 
 type AuthorizationPolicy = Pick<ContractEvolutionPolicy, 'analysis' | 'facts' | 'decisionAuthorities' | 'historyInput'> & Partial<Pick<ContractEvolutionPolicy, 'newNodeRawSources'>>
 
-function authoredSourceMatches(id: string, before: FrozenContracts, policy: AuthorizationPolicy): boolean {
-  const item = before.graph.items.get(id), analysis = policy.analysis?.analysis
+type AuthoredSourceAnalysis = Pick<CodeBehaviorAnalysis, 'authorChanges' | 'rawIntegrations' | 'resolutions'>
+
+function authoredSourceMatches(id: string, before: FrozenContracts, analysis: AuthoredSourceAnalysis | undefined, rawSources?: ReadonlyMap<string, string>): boolean {
+  const item = before.graph.items.get(id)
   if (!item || !analysis) return false
   const change = analysis.authorChanges?.find(entry => entry.path === item.path && entry.nodeId === item.nodeId && entry.changedIds.includes(id))
   if (!change || change.afterRaw === null) return false
-  const expectedRaw = policy.newNodeRawSources?.get(item.path)?.trim() ?? before.nodes.find(node => node.path === item.path)!.rawSource
+  const expectedRaw = rawSources?.get(item.path)?.trim() ?? before.nodes.find(node => node.path === item.path)!.rawSource
   if (change.afterRaw === expectedRaw) return true
   return analysis.rawIntegrations?.some(proof => proof.path === item.path && proof.sourceRaw === change.afterRaw && proof.expectedRaw === expectedRaw && analysis.resolutions.some(resolution => resolution.path === item.path && resolution.content !== null && parseParts(resolution.content)?.rawSource === proof.resolvedRaw)) === true
+}
+
+/** 来源变化的同一判据供分析可行性与最终AC演进复用，不授予来源链或写入权限。 */
+export function acceptanceSourceChanged(id: string, before: FrozenContracts, after: FrozenContracts, author?: AuthoredSourceAnalysis): boolean {
+  const previous = before.graph.items.get(id), next = after.graph.items.get(id)
+  if (!next || !['REQ', 'RULE', 'TR'].includes(next.kind)) return false
+  const rawChanged = next.kind === 'REQ' && before.nodes.find(node => node.path === previous?.path)?.rawSource !== after.nodes.find(node => node.path === next.path)?.rawSource
+  return !previous || !sameContractBusinessMeaning(previous, next) || rawChanged || authoredSourceMatches(id, before, author, new Map(after.nodes.flatMap(node => node.rawSource === null ? [] : [[node.path, node.rawSource] as const])))
 }
 
 function acceptanceSources(frozen: FrozenContracts, id: string): Set<string> {
@@ -128,10 +156,10 @@ function independentlyAuthoredChange(change: AuthorizedContractChange, before: F
   if (change.source !== 'user:raw' || !policy.analysis || reviewedAnalysisErrors(policy.analysis, policy.analysis.ref.sha256).length) return false
   if (change.action === 'update_acceptance') {
     if (acceptanceAuthorizationErrors(change, before, policy).length || !change.ruleIds.every(id => acceptanceSources(before, change.id).has(id))) return false
-    if (change.ruleIds.every(id => authoredSourceMatches(id, before, policy))) return true
+    if (change.ruleIds.every(id => authoredSourceMatches(id, before, policy.analysis?.analysis, policy.newNodeRawSources))) return true
     return policy.analysis.analysis.changes.some(entry => {
       if (entry.kind !== 'allowed_change' || !entry.affectedIds.includes(change.id) || !change.ruleIds.every(id => entry.ruleIds.includes(id))) return false
-      const authored = change.ruleIds.filter(id => authoredSourceMatches(id, before, policy)), scope = new Set(dependencyClosure(before.graph, authored))
+      const authored = change.ruleIds.filter(id => authoredSourceMatches(id, before, policy.analysis?.analysis, policy.newNodeRawSources)), scope = new Set(dependencyClosure(before.graph, authored))
       return authored.length > 0 && scope.has(change.id) && change.ruleIds.every(id => scope.has(id) && (authored.includes(id) || entry.affectedIds.includes(id)))
     })
   }
@@ -208,7 +236,7 @@ export function validateContractEvolution(before: FrozenContracts, after: Frozen
     const authorization = authorizations.get(item.id)
     if (authorization && independentlyAuthoredChange(authorization, before, policy)) continue
     if (['RULE', 'TR'].includes(item.kind) && policy.authorizedChanges.some(change => change.action === 'update_acceptance' && change.ruleIds.includes(item.id) && independentlyAuthoredChange(change, before, policy))) continue
-    if (next && !['AC', 'VERIFY'].includes(item.kind) && !reviewedAnalysisErrors(policy.analysis, policy.analysis!.ref.sha256).length && authoredSourceMatches(item.id, before, policy) && !policy.analysis!.analysis.findings.some(finding => finding.affectedIds.includes(item.id)) && policy.analysis!.analysis.changes.some(change => change.kind === 'allowed_change' && change.affectedIds.includes(item.id) && change.evidence.trim())) continue
+    if (next && !['AC', 'VERIFY'].includes(item.kind) && !reviewedAnalysisErrors(policy.analysis, policy.analysis!.ref.sha256).length && authoredSourceMatches(item.id, before, policy.analysis?.analysis, policy.newNodeRawSources) && !policy.analysis!.analysis.findings.some(finding => finding.affectedIds.includes(item.id)) && policy.analysis!.analysis.changes.some(change => change.kind === 'allowed_change' && change.affectedIds.includes(item.id) && change.evidence.trim())) continue
     if (!current || reviewedAnalysisErrors(policy.analysis, policy.analysis!.ref.sha256).length || current.decision.choice === 'keep_intent' || !currentScope.has(item.id)) issue('decision_scope_exceeded', next ?? item, '当前裁决不能改变或退役未选义务，user:raw和旧decision事实不能扩大作用范围', item.id)
     else if (item.kind === 'REQ' && next?.kind === 'REQ') {
       const source = `decision:${current.stableDecisionId}`
@@ -277,7 +305,14 @@ export function validateContractEvolution(before: FrozenContracts, after: Frozen
     for (const error of contractAuthorizationErrors(change, before, policy)) issue(change.action === 'update_acceptance' ? 'acceptance_update_unauthorized' : 'contract_authorization_untrusted', item, error, item.id)
     if (change.action === 'retire' && after.graph.items.has(change.id)) issue('retirement_not_applied', item, '已决定退役的身份仍存在', item.id)
   }
-  if (policy.mode === 'preserve_business') for (const item of after.graph.items.values()) if (!before.graph.items.has(item.id)) issue('refactor_business_item_added', item, '纯重构不能新增业务契约项', item.id)
+  const frozenRawOnlyNodes = new Map(before.nodes.flatMap(node => {
+    const next = after.nodes.find(candidate => candidate.path === node.path)
+    const eligible = node.rawSource !== null && !before.contracts.some(contract => contract.path === node.path) && next?.id === node.id && next.rawSource === node.rawSource && policy.newNodeRawSources.get(node.path) === node.rawSource
+    return eligible ? [[node.path, node.id] as const] : []
+  }))
+  if (policy.mode === 'preserve_business') for (const item of after.graph.items.values()) {
+    if (!before.graph.items.has(item.id) && frozenRawOnlyNodes.get(item.path) !== item.nodeId) issue('refactor_business_item_added', item, '纯重构不能新增业务契约项', item.id)
+  }
   for (const item of before.graph.items.values()) {
     const next = after.graph.items.get(item.id)
     const authorization = authorizations.get(item.id)
@@ -295,13 +330,7 @@ export function validateContractEvolution(before: FrozenContracts, after: Frozen
       if (authorization?.action !== 'update_acceptance') issue('acceptance_update_unauthorized', next, '验收语义变更必须有规则变化及独立分析授权', item.id)
       else {
         const sources = acceptanceSources(after, next.id)
-        if (!authorization.ruleIds.every(id => {
-          const priorSource = before.graph.items.get(id), nextSource = after.graph.items.get(id)
-          if (!nextSource || !['REQ', 'RULE', 'TR'].includes(nextSource.kind) || !sources.has(id)) return false
-          const rawChanged = nextSource.kind === 'REQ' && before.nodes.find(node => node.path === priorSource?.path)?.rawSource !== after.nodes.find(node => node.path === nextSource.path)?.rawSource
-          const authorChanged = authorization.source === 'user:raw' && authoredSourceMatches(id, before, { ...policy, newNodeRawSources: new Map(after.nodes.flatMap(node => node.rawSource === null ? [] : [[node.path, node.rawSource] as const])) })
-          return !priorSource || !sameContractBusinessMeaning(priorSource, nextSource) || rawChanged || authorChanged === true
-        })) issue('acceptance_rule_unchanged', next, '验收更新必须追溯到实际变化的合法需求、规则或状态处置', item.id)
+        if (!authorization.ruleIds.every(id => sources.has(id) && acceptanceSourceChanged(id, before, after, authorization.source === 'user:raw' ? policy.analysis?.analysis : undefined))) issue('acceptance_rule_unchanged', next, '验收更新必须追溯到实际变化的合法需求、规则或状态处置', item.id)
       }
     }
   }

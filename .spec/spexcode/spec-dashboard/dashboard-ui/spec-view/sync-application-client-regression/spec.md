@@ -15,6 +15,8 @@ related:
 
 验证 settled/current receipt 的唯一完成门、stale/failed/needs_input/recovery禁止成功、私有树不可阅读、暂停恢复取消可用状态、重复保存/同步身份稳定、真实结构错误透传、过时读取Abort不重试，以及GAP证据不泄露代理prompt。纯fixture/transport测试不冒充真实HTTP或LLM产品验收。
 
+失败证据回归覆盖生成 validationFindings 的完整定位、细化轮次与独立审查发现可读，同时排除嵌套模型输出、候选正文与 prompt。
+
 候选/交付代码及测试diff保持path、kind和targetTree；超过限额的413保留原错误，不截断或空白伪装为成功。
 
 即使存在已结算receipt，activation invalidated仍拒绝当前同步完成投影。
@@ -33,3 +35,5 @@ related:
 物理自动 pause/resume transport 核对 endpoint、targetTree query 和空请求体，并保留后端控制错误码/消息。HTTP 200 缺少 settings/operations/observation/sources 时 readSyncStatus 返回可重试错误。观察器投影分别覆盖 live online、离线/退化/缺失/失效、持久 watching 但身份未确认、无状态数据、真实补偿扫描时间、项目 coverage 分母与原始节点集合；status.sources 必须按 physical root 对应真实状态，不能把失联的持久 watching 显示为在线，baseline 数只对应最近观测节点，selection 无效时不当作零缺失或全项目结论。
 
 回归覆盖 canonicalSynced/sourceSynced 的分别显示、canonical_synced 仍可作为新输入、source stale 时 backend eligible 仍开放成组撤销但 recovery/invalidated 关闭。Revert transport 失败后稳定 requestId 不变，并校验 response operation；stop-writer transport 保持物理 action scope、pause control 与恢复 operations 子集响应。真实 UI 验收须确认恢复子集不替换历史列表，暂停写入与单项取消文案/行为分离。
+
+采纳回归验证状态/响应必须携带有效的 `adoptionEligibility`，false 必须保留 reason code/message；采纳 transport 将编码后的 operation ID POST 到 `/api/sync/operations/:id/adopt`，不附 targetTree，保留服务端错误。pending 资格展示由完成阶段、当前 settled receipt、sourceSynced/canonicalSynced 未成立决定，不随 stale/invalidated/recovery 隐藏；测试覆盖 stale + dirty 与 invalidated 的具体后端 reason。按钮仍只在 backend eligible=true 时开放；已采纳或未结算时不重复诱导。

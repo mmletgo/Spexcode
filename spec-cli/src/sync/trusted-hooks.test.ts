@@ -1,14 +1,88 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { inspectTrustedHooksBinding, makeTrustedHookEnv, prepareTrustedHooksBinding } from './trusted-hooks.js'
+import { inspectTrustedHooksBinding, inspectTrustedRuntime, inspectTrustedRuntimeAsync, makeTrustedHookEnv, prepareTrustedHooksBinding } from './trusted-hooks.js'
 import type { TrustedHooksBinding } from './trusted-hooks.js'
 
 const canonical = fileURLToPath(new URL('../../templates/hooks/', import.meta.url))
+function runtimeFixture(t: test.TestContext): { root: string; outside: string } {
+  const parent = realpathSync(mkdtempSync(join(tmpdir(), 'spex-runtime-inspection-')))
+  const root = join(parent, 'runtime'), outside = join(parent, 'outside.txt')
+  t.after(() => rmSync(parent, { recursive: true, force: true }))
+  mkdirSync(root)
+  writeFileSync(join(root, 'target.txt'), 'original target\n')
+  for (let directory = 0; directory < 4; directory++) {
+    const nested = join(root, `part-${directory}`)
+    mkdirSync(nested)
+    for (let file = 0; file < 12; file++) writeFileSync(join(nested, `file-${String(file).padStart(2, '0')}.js`), `export const value = ${directory * 12 + file}\n`)
+  }
+  return { root, outside }
+}
+
+test('async runtime inspection在超过一批的manifest完成前让出事件循环，且与sync顺序完全一致', async t => {
+  const { root } = runtimeFixture(t)
+  let immediateRan = false
+  setImmediate(() => { immediateRan = true })
+  const manifest = inspectTrustedRuntimeAsync(root).then(entries => {
+    assert.equal(immediateRan, true, 'manifest结束前应让已排队的setImmediate回调执行')
+    return entries
+  })
+  const asyncEntries = await manifest
+  assert.ok(asyncEntries.length > 32)
+  assert.deepEqual(asyncEntries, inspectTrustedRuntime(root))
+})
+
+test('async runtime inspection逐次反映文件字节、模式和内部链接变化', async t => {
+  const { root } = runtimeFixture(t), target = join(root, 'target.txt')
+  chmodSync(target, 0o644)
+  const original = await inspectTrustedRuntimeAsync(root)
+  assert.deepEqual(original, inspectTrustedRuntime(root))
+  const originalTarget = original.find(entry => entry.path === 'target.txt')
+  assert.ok(originalTarget?.kind === 'file')
+
+  writeFileSync(target, 'changed target bytes\n')
+  const changedBytes = await inspectTrustedRuntimeAsync(root)
+  assert.deepEqual(changedBytes, inspectTrustedRuntime(root))
+  const changedTarget = changedBytes.find(entry => entry.path === 'target.txt')
+  assert.ok(changedTarget?.kind === 'file')
+  assert.notEqual(changedTarget.digest, originalTarget.digest)
+
+  chmodSync(target, 0o600)
+  const changedMode = await inspectTrustedRuntimeAsync(root)
+  assert.deepEqual(changedMode, inspectTrustedRuntime(root))
+  const modeTarget = changedMode.find(entry => entry.path === 'target.txt')
+  assert.ok(modeTarget?.kind === 'file')
+  assert.notEqual(modeTarget.mode, changedTarget.mode)
+
+  symlinkSync('target.txt', join(root, 'inside-link.txt'))
+  const changedLink = await inspectTrustedRuntimeAsync(root)
+  assert.deepEqual(changedLink, inspectTrustedRuntime(root))
+  const link = changedLink.find(entry => entry.path === 'inside-link.txt')
+  assert.ok(link?.kind === 'symlink')
+  assert.equal(link.target, 'target.txt')
+})
+
+test('async runtime inspection让出期间修改尚未读取的文件不会沿用旧manifest', async t => {
+  const { root } = runtimeFixture(t)
+  const before = inspectTrustedRuntime(root)
+  setImmediate(() => writeFileSync(join(root, 'target.txt'), 'changed during the first yield\n'))
+  const after = await inspectTrustedRuntimeAsync(root)
+  assert.notDeepEqual(after, before)
+  assert.deepEqual(after, inspectTrustedRuntime(root))
+})
+
+test('sync與async runtime inspection都拒絕外部symlink', async t => {
+  const { root, outside } = runtimeFixture(t)
+  writeFileSync(outside, 'outside bytes\n')
+  symlinkSync(outside, join(root, 'outside-link.txt'))
+  assert.throws(() => inspectTrustedRuntime(root), /runtime 外部链接无法绑定: outside-link\.txt/)
+  await assert.rejects(inspectTrustedRuntimeAsync(root), /runtime 外部链接无法绑定: outside-link\.txt/)
+})
+
 function fixture(t: test.TestContext) {
   const directory = mkdtempSync(join(tmpdir(), 'spex-trusted-hooks-'))
   t.after(() => rmSync(directory, { recursive: true, force: true }))

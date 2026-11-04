@@ -14,7 +14,11 @@ code:
 
 ## expanded spec
 
+当前及历史实际 owned target 的 related、code 来源与 code/AC.test 义务沿共享路径匹配器展开到真实快照，纳入只读 readPaths；只读祖先接口不因此扇出其 related 实现。读取不会扩 targets、executionScope、writePaths 或 mandatoryTests。旧计划重试仍保原 planBlob/policy，通过 coordinator 的同一派生闭包绑定新的真实读集。
+
 [[sync-application]] 从 source snapshot 读取 Spec，复用 loadSpecs、readFrozenContracts 和 contractImpact，不维护第二份业务图。初始上下文仅读 Spec，不把整仓未授权文件或凭据转成字符串。目标包含意图节点、其子节点、图影响节点和共享代码治理闭包；related 不计治理。受影响 code/test 必须在 [[sync-application-settings]] 的授权或独立保护测试登记，否则显示未授权路径。
+
+当前和历史 Spec 枚举、逐 path head 的源码发现治理元数据均复用 [[sync-frozen-contracts]] 的业务路径判定，排除 `.plugins` 实例配置树；官方 init 播种的插件脚本不成为业务源码授权要求，也不能被选成同步意图或抑制业务源码发现。业务子节点、产品 `plugin-system` 系统规格及其真实依赖保持原影响与政策检查。
 
 readPaths 纳入冻结 Spec、版本化配置、额外 readPaths、实际影响代码/测试及保护测试；writePaths 只含目标 Spec 精确路径和 source/test 授权目录。目录授权允许新自然语言需求创建实现，不授权任意磁盘或模型创造新 raw 意图。plan 传递 facts、精确 verification 和 mandatoryTests 给 coordinator；全部 source/composed 差量仍经过完整 read/write 检查，不能偷偷交付未验证的其它 dirty 修改。V4 复核冻结 plan 的配置、selection与readSet，不能借最新无关基线改写本次政策。
 
@@ -26,13 +30,17 @@ readPaths 纳入冻结 Spec、版本化配置、额外 readPaths、实际影响�
 
 P4规划可读取精确 FrozenBaselineSelection：文件正文以各 path 真 bytePair 的交付对象恢复保护上下文，逐 ID 不同旧交付图的真实影响保持并集。deriveSyncBaselineResources 从真实当前/既有快照及 plan 的实际读取/保护文件推导 exact path 与既有契约/flow ID；授权目录不是完整范围或已验证覆盖。缺失的精确目标、保护测试、配置与既有 tombstone 仍是资源；未来新业务 ID 由真实细化结果原子扩范围，不猜测。已结算裁决与退役历史按实际选中 pair 去重继承。
 
-P4的executionScope只含实际目标Spec/治理代码/影响测试路径及目标业务身份。readPaths只含目标、实际引用权威、祖先需求、影响code/test、mandatory测试与明确额外上下文；source/test授权目录保持模型写授权，不能假冒本次完整读取。FLOW只用flow资源，VERIFY保执行政策而不是已消费业务身份；只读与保护资源不等同写lease或验证覆盖。
+P4的executionScope只含实际目标Spec/治理代码/影响测试路径及目标业务身份。readPaths包含目标、实际引用权威、祖先需求、影响code/test、mandatory测试、明确额外上下文和已授权settings.testPaths；后者为raw-only冷启动提供现有pytest/npm测试正文，即使尚无AC.test引用也能完整进入冻结行为分析。settings.sourcePaths仍按实际影响与发现逐文件读取，授权目录不是lease；读取testPaths不会扩展executionScope或mandatoryTests。FLOW只用flow资源，VERIFY保执行政策而不是已消费业务身份；只读与保护资源不等同写lease或验证覆盖。
+
+规划同时将 settings.sourcePaths 排序复制为冻结 plan.sourcePaths，独立保留业务源码角色；source/test 的合并可写集合不能替代该角色。行为分析可读取已授权测试正文，但不把未改的纯测试目录当作新增未治理业务源码。角色事实与其余计划一同进入既有 policyDigest；相同 read/write 集合的不同 source/test 划分仍为不同政策，不另建角色配置或摘要机制。
 
 实际纳入完整readonly上下文的契约须同时读取其code治理与AC.test绑定的精确文件路径，包括当前、旧交付和各选中历史pair在同一已读Spec路径的声明并集。移动子节点不能只带父契约全文却漏掉其声明文件，造成严格结构检查误报不存在；此读取闭包不把父契约加入targets、executionScope、writePaths或mandatory执行范围，也不纳入未读取的独立节点。
 
 mandatoryTests即使由contractImpact引用也只读；executionScope仅纳入可信source/test授权内且非保护测试的实际code/test，不把独立oracle晋升为写lease。
 
 已注册上层的源码发现复用冻结snapshot及现有治理元数据：sourcePaths仅作为可信枚举授权，实际未治理功能源码（含已commit与未跟踪新模块）以exact readonly路径进入readPaths/selection及完整行为分析，不能被窄闭包静默遗漏。治理排除取当前source、真实path交付及每个实际path byte头对应的verifiedDelivery owner Spec并集；来源尚未ff接受的已结算新leaf/code亦不重复当无治理。独立已治理B的dirty/commit不进入A读取、executionScope或coverage。发现不是归属批准：沿已有raw提出newNodes，归属不明返回具体coverage_gap；不能仅因sourcePaths发现新模块而自动启用新节点，注册成员仍由应用层可信nodeIds/既有治理范围限定。
+
+已结算且来源 Git 已真实采纳的完整基线可让 code-to-spec 提交按真实变更 owner 收窄：仅当 `commitTrigger.before` 存在、完整 `discoverySelection` 为相关根下每个冻结 Spec 与非 VERIFY 业务身份提供精确已结算头，并且 verifiedDelivery 已被 before HEAD 采纳时，才判断治理源码/测试的初始化资格。实际写过的路径仍只认其精确非null byte头，不回退其它pair。缺binding或显式null的未写源码/生成测试只能由该owner Spec的精确已采纳pair证明先前只读验证：声明来自该pair verifiedDelivery的真实code/AC，before owner Spec的path/mode/OID必须与该正文相同；路径受真实verified coveredScope覆盖，sourceInput、verifiedDelivery与before三份path/mode/OID均存在且完全相同。正式旧声明中的路径即使在before缺失仍须检查，不能因不再枚举而漏过。该独立资格不提供composition byte基线、写权或head，不回写receipt或把readPaths当交付；资格完整时才以提交路径的当前/历史真实 owner 为seed，沿原共享治理和contractImpact闭包规划。增量三轮始终用原始完整 `discoverySelection` 证明 bootstrap 完整性；逐轮收窄的 selection 只用于本轮精确 byte/intent 头，不能替代完整证明。before 缺失、无基线、缺少精确绑定、未采纳或未完成的基线、根原意/配置变更及未治理源码提交均回到完整 bootstrap/发现，不能把失败 admission 或观察到的文件变化当作已消费基线。
 
 业务selection裁到本次真实读取资源后，调用者仍以discoverySelection传已有真实全资源头selection，仅供各真实path头对应的已交付治理元数据排除；程序重核该selection和真实delivery对象。它不作本次byte/intent基准，不加入write/coverage，不恢复global latestpair回退。fresh freeze的各次构建传同一实际发现selection；V4/重放/重试复用冻结plan并复核配置及既有readSet/selection门禁，不能改用最新无关头重新规划policy。不能从其它code头的历史全树复活已退役owner；避免完全独立的已结算新leaf被裁掉后再次误归无治理。
 
@@ -43,3 +51,6 @@ mandatoryTests即使由contractImpact引用也只读；executionScope仅纳入�
 已存在的node tombstone沿原contract资源head保存；当前精确规划保留实际读取节点的已知该head，不造新node资源协议。已审恢复的node身份由原Spec路径与scope覆盖；generation/review readyIds仍只包含实际契约图业务ID，不伪标恢复node为退役业务义务。
 
 当前Spec自身VERIFY若已有精确head，规划保留该已知head的只读绑定，使已恢复验证登记不被旧path累计退休误导；不把读取登记转成模型或执行政策授权。
+
+
+新正式构建返回 sync-coordinator-v2；可信入口显式冻结 direction 与 commitTrigger，直接 Spec 保存默认 spec_to_code。分区策略默认512KiB完整正文工作集及最多4个本操作同时任务，原生session容量仍另行约束。普通提交有真实before时，未治理源码发现从当前与before真实快照取并集且只纳入累计paths；删除的旧源码仍冻结精确readonly路径与当前absence，不能只发现仍存在的文件。治理排除继续沿当前和旧owner，不读取独立已治理节点。首次before:null才全量发现。旧已持久计划不通过此构建器升级；重试/恢复沿原计划与摘要。

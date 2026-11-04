@@ -1,5 +1,6 @@
 import { Ajv } from 'ajv'
 import type { InputSnapshot, SyncBudget } from './operation-types.js'
+import { finiteSyncBudget } from './budget.js'
 import type { ElaborationFact } from './elaboration-types.js'
 import type { RegisteredVerification } from './verification-plan.js'
 import { isHostPrivatePath } from './candidate.js'
@@ -8,6 +9,7 @@ import { readObject, validateRepositoryPath, verifySnapshot } from './snapshot.j
 
 export type SyncSettings = {
   version: 'sync-settings-v1'
+  model?: string
   nodeIds?: string[]
   sourcePaths: string[]
   testPaths: string[]
@@ -27,13 +29,16 @@ const validate = new Ajv({ allErrors: true }).compile({
   type: 'object', additionalProperties: false,
   required: ['version', 'sourcePaths', 'testPaths', 'readPaths', 'verifications', 'mandatoryTests', 'facts', 'budget'],
   properties: {
-    version: { const: 'sync-settings-v1' }, nodeIds: { ...paths, minItems: 1 }, sourcePaths: { ...paths, minItems: 1 }, testPaths: { ...paths, minItems: 1 }, readPaths: paths, callTimeoutMs: positive,
+    version: { const: 'sync-settings-v1' }, model: { type: 'string', minLength: 1 }, nodeIds: { ...paths, minItems: 1 }, sourcePaths: { ...paths, minItems: 1 }, testPaths: { ...paths, minItems: 1 }, readPaths: paths, callTimeoutMs: positive,
     facts: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['source', 'text'], properties: { source: { type: 'string', minLength: 1 }, text: { type: 'string', minLength: 1 } } } },
-    budget: { type: 'object', additionalProperties: false, required: ['maxAttempts', 'maxCalls', 'maxRepairs', 'timeoutMs'], properties: { maxAttempts: positive, maxCalls: positive, maxRepairs: { type: 'integer', minimum: 0 }, timeoutMs: positive } },
+    budget: { oneOf: [
+      { type: 'object', additionalProperties: false, required: ['maxAttempts', 'maxCalls', 'maxRepairs', 'timeoutMs'], properties: { maxAttempts: positive, maxCalls: positive, maxRepairs: { type: 'integer', minimum: 0 }, timeoutMs: positive } },
+      { type: 'object', additionalProperties: false, required: ['mode'], properties: { mode: { const: 'unlimited' } } },
+    ] },
     mandatoryTests: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['verificationId', 'testPath', 'testId'], properties: { verificationId: { type: 'string', minLength: 1 }, testPath: { type: 'string', minLength: 1 }, testId: { type: 'string', pattern: '^\\S+$' } } } },
     verifications: { type: 'array', minItems: 1, items: { type: 'object', additionalProperties: false, required: ['definition', 'environment'], properties: {
       definition: { type: 'object', additionalProperties: false, required: ['id', 'command', 'cwd', 'timeoutMs'], properties: { id: { type: 'string', minLength: 1 }, command: { type: 'array', minItems: 2, items: { type: 'string', minLength: 1 } }, cwd: { type: 'string', minLength: 1 }, timeoutMs: positive } },
-      environment: { type: 'object', additionalProperties: false, required: ['version', 'image', 'platform', 'memoryBytes', 'cpus', 'pidsLimit', 'scratchBytes', 'logBytes'], properties: { version: { type: 'string', minLength: 1 }, image: { type: 'string', pattern: '^\\S+@sha256:[a-f0-9]{64}$' }, platform: { enum: ['linux/arm64', 'linux/amd64'] }, memoryBytes: positive, cpus: { type: 'number', exclusiveMinimum: 0 }, pidsLimit: positive, scratchBytes: positive, logBytes: positive } },
+      environment: { type: 'object', additionalProperties: false, required: ['version', 'image', 'platform', 'memoryBytes', 'cpus', 'pidsLimit', 'scratchBytes', 'logBytes'], properties: { version: { type: 'string', minLength: 1 }, image: { type: 'string', pattern: '^\\S+@sha256:[a-f0-9]{64}$' }, platform: { enum: ['linux/arm64', 'linux/amd64'] }, memoryBytes: positive, cpus: { type: 'number', exclusiveMinimum: 0 }, pidsLimit: positive, scratchBytes: positive, scratchExecutable: { type: 'boolean' }, logBytes: positive } },
     } } },
   },
 })
@@ -54,8 +59,10 @@ export function readSyncSettings(snapshot: InputSnapshot): { settings: SyncSetti
   const config = parsed as { sync?: unknown }
   if (!validate(config.sync)) throw new SyncApplicationError('sync_configuration_invalid', `sync 配置缺口：${new Ajv().errorsText(validate.errors)}`)
   const settings = config.sync as SyncSettings
+  if (settings.model !== undefined && settings.model !== settings.model.trim()) throw new SyncApplicationError('sync_configuration_invalid', 'sync.model 需要非空精确 ID')
   if (settings.nodeIds?.some(id => !id.trim() || id !== id.trim())) throw new SyncApplicationError('sync_configuration_invalid', 'nodeIds 必须为非空精确节点 ID')
-  if (settings.callTimeoutMs !== undefined && settings.callTimeoutMs > settings.budget.timeoutMs) throw new SyncApplicationError('sync_configuration_invalid', 'callTimeoutMs 不能超过操作总预算 timeoutMs')
+  const budget = finiteSyncBudget(settings.budget)
+  if (budget && settings.callTimeoutMs !== undefined && settings.callTimeoutMs > budget.timeoutMs) throw new SyncApplicationError('sync_configuration_invalid', 'callTimeoutMs 不能超过操作总预算 timeoutMs')
   for (const path of [...settings.sourcePaths, ...settings.testPaths, ...settings.readPaths]) {
     settingsPath(path)
     if (isHostPrivatePath(path)) throw new SyncApplicationError('sync_configuration_invalid', `授权不能读取或写入私有资料：${path}`)

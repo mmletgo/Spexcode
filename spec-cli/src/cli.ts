@@ -840,7 +840,7 @@ if (cmd === 'serve') {
 } else if (cmd === 'materialize') {
   const { materialize } = await import('./materialize.js')
   try {
-    console.log(`materialized — content-hash ${materialize().contentHash}`)
+    console.log(`materialized — content-hash ${(await materialize()).contentHash}`)
   } catch (e) {
     // a policy error (e.g. a missing/illegal `harnesses` set) is a user-facing verdict, not a crash — one
     // line + the repair it already carries, never a stack trace.
@@ -1690,13 +1690,13 @@ if (cmd === 'serve') {
     // by the planted pre-commit hook; repairs and proceeds, never rejects. Exit non-zero only on an internal
     // error — the hook treats that as advisory (warn + continue), CI lint remains the real gate.
     const { commitSurgery } = await import('./commit-surgery.js')
-    commitSurgery()
+    await commitSurgery()
   } else if (sub === 'refresh-footprint') {
     // the post-checkout / post-merge freshness anchor ([[commit-surgery]]): a quiet materialize after a git
     // state transition (the only events that can move the materialize's inputs — .spec/.plugins arrive by commit,
     // merge, or checkout). Best-effort and silent on success; hooks call it fire-and-forget.
     const { materialize } = await import('./materialize.js')
-    try { materialize() } catch (e) { console.error(`spexcode: footprint refresh failed (${(e as Error).message})`); process.exit(1) }
+    try { await materialize() } catch (e) { console.error(`spexcode: footprint refresh failed (${(e as Error).message})`); process.exit(1) }
   } else if (sub === 'codex-turn') {
     // fire a follow-up turn on an OWNED thread over the per-project socket (the delivery channel, exposed for
     // tests / scripts). steer-vs-start is chosen live from the thread read.

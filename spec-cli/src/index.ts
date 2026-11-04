@@ -51,7 +51,8 @@ import { configuredSessionApplication, setSessionApplicationCommitObserver } fro
 import { SESSION_CHANGE } from '@spexcode/session-application'
 import { editSpecBody, readSpecBodyEdit, SpecBodyEditError } from './spec-body-edit.js'
 import { ContractReportScopeError, readProjectContractReport, resolveProjectReadRoot } from './sync/contract-report.js'
-import { configuredSyncApplication, startConfiguredSyncServices, closeConfiguredSyncServices, type SyncSubmitInput } from './sync/application.js'
+import { configuredSyncApplication, configuredSyncResourceRecoveryApplication, startConfiguredSyncServices, closeConfiguredSyncServices, type SyncSubmitInput } from './sync/application.js'
+import { withReadonlySnapshotQuery } from './sync/snapshot.js'
 import type { SyncDecisionInput } from './sync/writeback-types.js'
 import { SyncApplicationError } from './sync/settings.js'
 import { SyncStoreError } from './sync/store.js'
@@ -111,10 +112,13 @@ async function syncRequestBody(request: { json: () => Promise<unknown> }): Promi
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new SyncApplicationError('sync_request_invalid', '请求必须是 JSON 对象', 400)
   return value as Record<string, unknown>
 }
-async function syncApplication(queryTree?: string, bodyTree?: unknown) {
+async function syncTargetRoot(queryTree?: string, bodyTree?: unknown) {
   if (bodyTree !== undefined && (typeof bodyTree !== 'string' || !bodyTree)) throw new SyncApplicationError('sync_target_invalid', 'targetTree 必须为工作树路径', 400)
   if (queryTree && bodyTree && queryTree !== bodyTree) throw new SyncApplicationError('sync_target_conflict', '请求的工作树范围不一致', 400)
-  return configuredSyncApplication(await resolveProjectReadRoot(repoRoot(), queryTree ?? bodyTree as string | undefined))
+  return resolveProjectReadRoot(repoRoot(), queryTree ?? bodyTree as string | undefined)
+}
+async function syncApplication(queryTree?: string, bodyTree?: unknown) {
+  return configuredSyncApplication(await syncTargetRoot(queryTree, bodyTree))
 }
 app.get('/api/sync/settings', async c => c.json(await (await syncApplication(c.req.query('targetTree'))).readSettings()))
 app.post('/api/sync/settings', async c => {
@@ -125,7 +129,8 @@ app.post('/api/sync/settings', async c => {
 app.get('/api/sync/status', async c => {
   const rawLimit = c.req.query('limit'), limit = rawLimit === undefined ? undefined : Number(rawLimit)
   if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1 || limit > 200)) throw new SyncApplicationError('sync_request_invalid', 'limit 必须为 1 至 200 的整数', 400)
-  return c.json(await (await syncApplication(c.req.query('targetTree'))).status({ nodeId: c.req.query('nodeId'), limit }))
+  const application = await syncApplication(c.req.query('targetTree'))
+  return c.json(await withReadonlySnapshotQuery(() => application.status({ nodeId: c.req.query('nodeId'), limit })))
 })
 for (const action of ['pause', 'resume'] as const) app.post(`/api/sync/automatic/${action}`, async c => {
   const body = await syncRequestBody(c.req)
@@ -137,12 +142,15 @@ app.post('/api/sync/stop-writer', async c => {
 })
 app.post('/api/sync/verify', async c => {
   const body = await syncRequestBody(c.req)
-  return c.json(await (await syncApplication(c.req.query('targetTree'), body.targetTree)).submit({ nodeId: body.nodeId as string, requestId: body.requestId as string, origin: 'combined' }))
+  return c.json(await (await syncApplication(c.req.query('targetTree'), body.targetTree)).submit({ nodeId: body.nodeId as string, requestId: body.requestId as string, origin: 'combined', ...(body.model === undefined ? {} : { model: body.model as string }) }))
 })
-app.get('/api/sync/operations/:id', async c => c.json(await (await syncApplication(c.req.query('targetTree'))).readOperation(c.req.param('id'))))
+app.get('/api/sync/operations/:id', async c => {
+  const application = await syncApplication(c.req.query('targetTree'))
+  return c.json(await withReadonlySnapshotQuery(() => application.readOperation(c.req.param('id'))))
+})
 app.post('/api/sync/run', async c => {
   const body = await syncRequestBody(c.req), application = await syncApplication(c.req.query('targetTree'), body.targetTree)
-  return c.json(await application.submit({ nodeId: body.nodeId as string, requestId: body.requestId as string, ...(body.origin === undefined ? {} : { origin: body.origin as SyncSubmitInput['origin'] }), ...(body.retryOf === undefined ? {} : { retryOf: body.retryOf as string }), ...(body.patch === undefined ? {} : { patch: readSpecBodyEdit(body.patch) }) }))
+  return c.json(await application.submit({ nodeId: body.nodeId as string, requestId: body.requestId as string, ...(body.origin === undefined ? {} : { origin: body.origin as SyncSubmitInput['origin'] }), ...(body.retryOf === undefined ? {} : { retryOf: body.retryOf as string }), ...(body.model === undefined ? {} : { model: body.model as string }), ...(body.patch === undefined ? {} : { patch: readSpecBodyEdit(body.patch) }) }))
 })
 app.post('/api/sync/operations/:id/decide', async c => {
   const body = await syncRequestBody(c.req)
@@ -154,6 +162,18 @@ app.post('/api/sync/operations/:id/revert', async c => {
   if (body.operationId !== undefined && body.operationId !== c.req.param('id')) throw new SyncApplicationError('sync_request_invalid', '撤销 operation 身份不一致', 400)
   if (typeof body.requestId !== 'string' || !body.requestId.trim()) throw new SyncApplicationError('sync_request_invalid', '撤销需要非空 requestId', 400)
   return c.json(await (await syncApplication(c.req.query('targetTree'), body.targetTree)).revert({ operationId: c.req.param('id'), requestId: body.requestId }))
+})
+app.post('/api/sync/operations/:id/adopt', async c => {
+  const body = await syncRequestBody(c.req)
+  if (body.operationId !== undefined && body.operationId !== c.req.param('id')) throw new SyncApplicationError('sync_request_invalid', '采纳 operation 身份不一致', 400)
+  return c.json(await (await syncApplication(c.req.query('targetTree'), body.targetTree)).adopt(c.req.param('id')))
+})
+app.post('/api/sync/operations/:id/resources/recover', async c => {
+  const body = await syncRequestBody(c.req)
+  if (body.operationId !== undefined && body.operationId !== c.req.param('id')) throw new SyncApplicationError('sync_request_invalid', '资源清理operation身份不一致', 400)
+  if (typeof body.inputId !== 'string' || !body.inputId.trim()) throw new SyncApplicationError('sync_request_invalid', '资源清理需要明确frozen inputId', 400)
+  const application = await configuredSyncResourceRecoveryApplication(await syncTargetRoot(c.req.query('targetTree'), body.targetTree))
+  return c.json(await application.recoverResources(c.req.param('id'), body.inputId))
 })
 for (const action of ['pause', 'resume', 'cancel', 'recover'] as const) app.post(`/api/sync/operations/:id/${action}`, async c => {
   const body = await syncRequestBody(c.req)

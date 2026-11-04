@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import test from 'node:test'
 import { CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
-import { contractBusinessMeaning, contractBusinessProse, decisionScopeIds, resolvedDecisionGapIds, validateContractEvolution } from './contract-evolution.js'
+import { acceptanceAuthorizationErrors, contractBusinessMeaning, contractBusinessProse, decisionScopeIds, resolvedDecisionGapIds, validateContractEvolution } from './contract-evolution.js'
 import type { ContractEvolutionPolicy } from './contract-evolution.js'
 import { checkGenerationContractIntent, readFrozenContracts } from './frozen-contracts.js'
 import { elaborate, elaborationDigest } from './elaboration.js'
@@ -12,6 +12,7 @@ import type { ContractCell, GeneratedElaboration, GeneratedTables } from './elab
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
 import type { AuthorizedContractChange, ElaborationInput, ElaborationRunner } from './elaboration-types.js'
 import type { AcceptanceChangeProposal, CodeBehaviorEvidence, ContractNodeChange } from './writeback-types.js'
+import { adaptElaborationNativeOutput } from '../../test/elaboration-native-output.js'
 
 const fixture = resolve('spec-cli/test/fixtures/spec-sync/export-repo')
 const path = '.spec/export/export-contract/spec.md'
@@ -41,9 +42,24 @@ const build = (text: string, nodeId = 'export-contract', nodePath = path): Gener
 const input = (): ElaborationInput => ({ root: '/frozen', requestKey: 'evolution', intent: { nodeId: 'export-contract', rawSource: parseParts(source)!.rawSource }, targets: [{ nodeId: 'export-contract', path, source, sourceDigest: elaborationDigest(source) }], facts: [{ source: 'decision:EXPORT-POLICY', text: '冻结既有业务政策' }], files: files(), maxRepairs: 0 })
 const runner = (output: GeneratedElaboration, prompts: string[] = []): ElaborationRunner => async request => {
   prompts.push(request.prompt)
-  const value = request.purpose === 'elaboration_generate' ? output : { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+  const generated = request.purpose === 'elaboration_generate' ? output : { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+  const value = adaptElaborationNativeOutput(request, generated)
   return { sessionId: `session-${prompts.length}`, threadId: `thread-${prompts.length}`, turnId: 'turn', output: value, resultDigest: elaborationDigest(JSON.stringify(value)) }
 }
+
+test('rawless旧正文和显式空raw是同一缺席语义，真实非空raw变化仍拒绝', async () => {
+  const childPath = '.spec/export/full-tree-verification/spec.md'
+  const beforeFiles = files()
+  beforeFiles.set(childPath, '---\ntitle: 全树验证\n---\n# 旧业务正文\n原有执行约束。\n')
+  const before = await readFrozenContracts('/frozen', beforeFiles)
+  const afterFiles = new Map(beforeFiles)
+  afterFiles.set(childPath, '---\ntitle: 全树验证\ncontract-schema: sync-v1\n---\n## raw source\n\n## expanded spec\n# 旧业务正文\n原有执行约束。\n')
+  const after = await readFrozenContracts('/frozen', afterFiles)
+  assert.deepEqual(validateContractEvolution(before, after, policy()), [])
+  afterFiles.set(path, source.replace(parseParts(source)!.rawSource, '模型擅自改变真实原意。'))
+  const changed = await readFrozenContracts('/frozen', afterFiles)
+  assert.ok(validateContractEvolution(before, changed, policy()).some(issue => issue.code === 'raw_changed' && issue.path === path))
+})
 
 test('合法独审规则变化自动更新AC，接受后的生成器仍不能改政策', async () => {
   const before = await readFrozenContracts('/frozen', files())
@@ -130,6 +146,61 @@ test('纯重构保留业务正文和字段，仅实现测试符号可改变', as
   const prose = await readFrozenContracts('/frozen', proseFiles)
   assert.ok(validateContractEvolution(before, prose, policy({ mode: 'preserve_business' })).some(issue => issue.code === 'refactor_business_prose_changed'))
   assert.ok(validateContractEvolution(before, await readFrozenContracts('/frozen', new Map([...files()].map(([file, text]) => [file, file === path ? updatedSource(text) : text]))), policy({ mode: 'preserve_business' })).some(issue => issue.code === 'refactor_business_meaning_changed'))
+})
+
+test('preserve_business允许精确冻结raw-only旧节点首次建契约，且不放开其他新增项', async () => {
+  const rawOnlySource = `${source.split('\n### REQ\n')[0].replace('contract-schema: sync-v1\n', '')}\n`
+  const raw = parseParts(rawOnlySource)!.rawSource
+  const beforeFiles = files(); beforeFiles.set(path, rawOnlySource)
+  const before = await readFrozenContracts('/frozen', beforeFiles)
+  assert.deepEqual(before.contracts, [])
+  assert.deepEqual(before.nodes, [{ id: 'export-contract', path, rawSource: raw }])
+  const snapshot: ElaborationInput = {
+    ...input(), mode: 'preserve_business', intent: { nodeId: 'export-contract', rawSource: raw },
+    targets: [{ nodeId: 'export-contract', path, source: rawOnlySource, sourceDigest: elaborationDigest(rawOnlySource) }], files: beforeFiles,
+  }
+  const result = await elaborate(snapshot, { runner: runner(build(source)) })
+  assert.equal(result.status, 'complete', JSON.stringify(result.rounds[0].findings.map(issue => issue.code)))
+  const firstContract = result.contracts.find(contract => contract.path === path)!
+  assert.equal(firstContract.rawSource, raw)
+  assert.equal(contractBusinessProse(firstContract.expandedSpec), contractBusinessProse(parseParts(rawOnlySource)!.expandedSpec))
+  assert.deepEqual([...new Set([...result.graph!.items.values()].map(item => item.kind))].sort(), ['AC', 'EVENT', 'FLOW', 'REQ', 'RULE', 'STATE', 'STEP', 'TR', 'VERIFY'])
+
+  const synchronized = await readFrozenContracts('/frozen', files())
+  const addedRow = source.replace(/^\| REQ-EXPORT-01 .*$/m, row => `${row}\n| REQ-EXPORT-NEW | 新导出需求 | user:raw | - | 返回新结果 | - |`)
+  const synchronizedFiles = files(); synchronizedFiles.set(path, addedRow)
+  const addedToExisting = validateContractEvolution(synchronized, await readFrozenContracts('/frozen', synchronizedFiles), policy({ mode: 'preserve_business' }))
+  assert.ok(addedToExisting.some(issue => issue.code === 'refactor_business_item_added' && issue.itemId === 'REQ-EXPORT-NEW'))
+
+  const rawChanged = '用户可以提交不同筛选条件的数据导出并下载结果。'
+  const changedFiles = files(); changedFiles.set(path, source.replace(raw, rawChanged))
+  const changed = await readFrozenContracts('/frozen', changedFiles)
+  const changedIssues = validateContractEvolution(before, changed, policy({ mode: 'preserve_business', newNodeRawSources: new Map([[path, raw]]) }))
+  assert.ok(changedIssues.some(issue => issue.code === 'raw_changed' && issue.path === path))
+  assert.ok(changedIssues.some(issue => issue.code === 'refactor_business_item_added'))
+
+  const renamedPath = '.spec/export/renamed-contract/spec.md'
+  const renamedFiles = files(); renamedFiles.set(path, rawOnlySource); renamedFiles.set(renamedPath, source)
+  const renamed = await readFrozenContracts('/frozen', renamedFiles)
+  const wrongPathIssues = validateContractEvolution(before, renamed, policy({ mode: 'preserve_business', newNodeRawSources: new Map([[renamedPath, raw]]) }))
+  assert.ok(wrongPathIssues.some(issue => issue.code === 'refactor_business_item_added'))
+
+  const wrongIdentityFiles = new Map(beforeFiles); wrongIdentityFiles.set(path, source)
+  const wrongIdentity = await readFrozenContracts('/frozen', wrongIdentityFiles)
+  wrongIdentity.nodes.find(node => node.path === path)!.id = 'wrong-identity'
+  assert.ok(validateContractEvolution(before, wrongIdentity, policy({ mode: 'preserve_business', newNodeRawSources: new Map([[path, raw]]) })).some(issue => issue.code === 'refactor_business_item_added'))
+
+  const missingFreezeFiles = new Map(beforeFiles); missingFreezeFiles.set(path, source)
+  const missingFreeze = validateContractEvolution(before, await readFrozenContracts('/frozen', missingFreezeFiles), policy({ mode: 'preserve_business' }))
+  assert.ok(missingFreeze.some(issue => issue.code === 'refactor_business_item_added'))
+
+  const rawlessSource = rawOnlySource.replace(/## raw source[\s\S]*?(?=## expanded spec)/, '')
+  const rawlessFiles = files(); rawlessFiles.set(path, rawlessSource)
+  const rawlessBefore = await readFrozenContracts('/frozen', rawlessFiles)
+  assert.equal(rawlessBefore.nodes.find(node => node.path === path)!.rawSource, null)
+  const rawlessAfterFiles = new Map(rawlessFiles); rawlessAfterFiles.set(path, source)
+  const rawlessAfter = await readFrozenContracts('/frozen', rawlessAfterFiles)
+  assert.ok(validateContractEvolution(rawlessBefore, rawlessAfter, policy({ mode: 'preserve_business', newNodeRawSources: new Map([[path, raw]]) })).some(issue => issue.code === 'refactor_business_item_added'))
 })
 
 test('用户明确raw变化的简单REQ来源能授权AC更新，不要求虚构中间RULE', async () => {
@@ -467,7 +538,7 @@ test('真实冻结move允许空tables保留RULE稳定ID并程序迁移authority�
   assert.ok(omitted.contracts[0].items.filter(item => item.kind === 'RULE').every(rule => rule.authority === move.to.nodeId))
   const unauthorized = await elaborate(input(), { runner: runner(output) })
   assert.equal(unauthorized.status, 'exhausted')
-  assert.ok(unauthorized.rounds[0].findings.some(issue => issue.code === 'write_scope'))
+  assert.ok(unauthorized.rounds[0].findings.some(issue => issue.code === 'output_schema' && issue.message.includes('targetIndex')))
 })
 
 
@@ -513,7 +584,8 @@ test('共享REQ自然语言扩大未选操作仍由原P1完整候选独审拒绝
   const result = await elaborate({ ...input(), analysis, authorizedChanges: [authorization], facts: [...input().facts!, ...analysis.analysis.facts], decisionAuthorities: [authority] }, { runner: async request => {
     calls++
     if (request.purpose === 'elaboration_review') { assert.ok(request.prompt.includes('非所有者也可下载、取消、重试')); assert.ok(request.prompt.includes(authority.decision.rule)) }
-    const output = request.purpose === 'elaboration_generate' ? build(candidate) : { verdict: 'repair', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [{ code: 'selected-policy-contradiction', kind: 'repair', message: '共享REQ扩大取消与重试，超出明确仅下载的裁决', affectedIds: ['REQ-EXPORT-01', 'RULE-EXPORT-06'], evidence: 'REQ声明非所有者可重试，而原RULE-EXPORT-06仍要求FAILED且所有者', decision: '只同步下载例外，保取消及重试的原所有权约束' }] }
+    const generated = request.purpose === 'elaboration_generate' ? build(candidate) : { verdict: 'repair', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [{ code: 'selected-policy-contradiction', kind: 'repair', message: '共享REQ扩大取消与重试，超出明确仅下载的裁决', affectedIds: ['REQ-EXPORT-01', 'RULE-EXPORT-06'], evidence: 'REQ声明非所有者可重试，而原RULE-EXPORT-06仍要求FAILED且所有者', decision: '只同步下载例外，保取消及重试的原所有权约束' }] }
+    const output = adaptElaborationNativeOutput(request, generated)
     return { sessionId: `semantic-session-${calls}`, threadId: `semantic-thread-${calls}`, turnId: 'turn', output, resultDigest: elaborationDigest(JSON.stringify(output)) }
   } })
   assert.equal(calls, 2); assert.equal(result.structurePassed, true); assert.equal(result.reviewPassed, false); assert.equal(result.failure?.code, 'repair_budget_exhausted')
@@ -580,4 +652,36 @@ test('已审精确裁决仅删除所选旧诊断GAP与依赖，独审后记录�
   assert.equal(rejected.reviewPassed, false); assert.deepEqual(rejected.retiredIds, [])
   const reused = await elaborate({ ...input(), retiredIds: accepted.retiredIds }, { runner: runner(build(previousSource)) })
   assert.ok(reused.rounds[0].findings.some(issue => issue.code === 'retired_id_reused' && issue.itemId === gapId))
+})
+
+
+test('分区授权只接受完整独审原件并集，错SHA/少区/重复区/错输入/假批准均拒绝', async () => {
+  const before = await readFrozenContracts('/frozen', files())
+  const aggregate = (): CodeBehaviorEvidence => {
+    const a = evidence(), b = evidence()
+    b.analysis.changes = [{ ...b.analysis.changes[0], id: 'change-2', kind: 'refactor', paths: ['src/other.js'], affectedIds: [], ruleIds: [] }]
+    b.analysis.facts = []; b.analysis.authorizedChanges = []
+    b.analysis.traces = b.analysis.traces.map(trace => ({ ...trace, sessionId: `other-${trace.sessionId}`, threadId: `other-${trace.threadId}` }))
+    b.ref.sha256 = elaborationDigest(JSON.stringify(b.analysis))
+    const analysis: CodeBehaviorEvidence['analysis'] = { ...a.analysis, changes: [...a.analysis.changes, ...b.analysis.changes], traces: [...a.analysis.traces, ...b.analysis.traces], partitionCoverage: { planDigest: sha, partitionIds: ['a', 'b'], changedPaths: ['src/export.js', 'src/other.js'] }, partitionEvidence: [{ partitionId: 'a', changedPaths: ['src/export.js'], analysisRef: a.ref, analysis: a.analysis }, { partitionId: 'b', changedPaths: ['src/other.js'], analysisRef: b.ref, analysis: b.analysis }] }
+    return { analysis, ref: { sha256: elaborationDigest(JSON.stringify(analysis)) } }
+  }
+  const accepted = aggregate()
+  assert.deepEqual(acceptanceAuthorizationErrors(authorization(accepted) as Extract<AuthorizedContractChange, { action: 'update_acceptance' }>, before, policy({ analysis: accepted })), [])
+  const mutations: ((value: CodeBehaviorEvidence) => void)[] = [
+    value => { value.analysis.partitionEvidence![0].analysisRef.sha256 = sha },
+    value => { value.analysis.partitionEvidence!.pop() },
+    value => { value.analysis.partitionEvidence![1].partitionId = 'a' },
+    value => { const part = value.analysis.partitionEvidence![1]; part.analysis.inputId = 'another-input'; part.analysisRef.sha256 = elaborationDigest(JSON.stringify(part.analysis)) },
+    value => { const part = value.analysis.partitionEvidence![1]; part.analysis.reviewPassed = false; part.analysisRef.sha256 = elaborationDigest(JSON.stringify(part.analysis)) },
+    value => { value.analysis.authorizedChanges = [] },
+    value => { value.analysis.partitionCoverage!.changedPaths.pop() },
+    value => { value.analysis.traces = value.analysis.traces.slice(0, 2) },
+  ]
+  for (const mutate of mutations) {
+    const forged = aggregate(); mutate(forged); forged.ref.sha256 = elaborationDigest(JSON.stringify(forged.analysis))
+    assert.ok(acceptanceAuthorizationErrors(authorization(forged) as Extract<AuthorizedContractChange, { action: 'update_acceptance' }>, before, policy({ analysis: forged })).length)
+  }
+  const old = evidence(); old.analysis.traces.push({ ...old.analysis.traces[0], sessionId: 'extra', threadId: 'extra' }); old.ref.sha256 = elaborationDigest(JSON.stringify(old.analysis))
+  assert.ok(acceptanceAuthorizationErrors(authorization(old) as Extract<AuthorizedContractChange, { action: 'update_acceptance' }>, before, policy({ analysis: old })).length, '旧单体恰一对独审规则保持')
 })

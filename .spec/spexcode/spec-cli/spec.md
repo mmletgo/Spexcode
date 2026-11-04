@@ -57,6 +57,8 @@ starts an agent; its not_run verification field cannot be interpreted as synchro
 
 The sync HTTP seam forwards an explicit `/operations/:id/revert` request and `/stop-writer` to the shared sync application. It validates request identities and the existing registered project scope; group compensation, eligibility, stopping and journal settlement remain application responsibilities. HTTP acceptance does not claim canonical adoption or complete native resource release.
 
+`POST /api/sync/operations/:id/adopt` forwards explicit adoption to [[sync-source-adoption]] through the same registered targetTree scope. A conflicting body operationId or query/body tree is rejected before mutation; the application owns receipt, authorization, clean-tree and fast-forward checks. The route returns actual landing projections rather than manufacturing a completion state.
+
 A CLI output contract, in the same fail-loud spirit: a verb with unbounded stdout (`issue ls --json`,
 `graph --json`, `session review --json`, `spec search --json`, …) must FULLY reach a pipe. `process.exit()` force-quits
 without draining buffered pipe writes, silently truncating a large dump at the ~64KB pipe buffer, so those
@@ -134,8 +136,14 @@ Evidence bytes ride `/api/evidence` (`POST` = content-addressed put,
 
 `/api/sync/run` 显式传递 retryOf 至同一应用服务；无效身份格式返回 400，未知操作返回 404，不能忽略字段后发起普通执行。是否允许新预算、旧请求继承及重复接入由 [[sync-application]] 与 [[sync-store]] 的原规则裁定。
 
+GET 同步 status 与单操作详情在同一次只读请求中复用已完整核验的相同物理 Git tree 读取；每个 snapshot 的 manifest、身份和 commit 绑定仍独立核对，请求结束即清空。应用构造及后台 lifecycle 在该范围外，写入、派发、恢复和采纳入口不继承查询读取结果；不跨请求缓存或降低真实执行校验。
+
 正文保存先读取目标树的同步设置。已启用时要求稳定 idempotency-key，把用户 patch 作为不可变请求送入同一操作，返回 commit:null 和 syncOperation；不先单独提交 Spec。未启用且没有显式 targetTree 时保留 [[spec-body-edit]] 原有提交语义；显式树未启用则拒绝，不能静默写到后台树。应用错误保留具体 code/message 和正确 HTTP 状态，监听失联、未落盘或读取失败不能包装成成功。
 
 正式后端启动恢复本机明确enable的同步来源并持有 [[sync-input-observer]]，与SSE订阅无关。关闭/正常signal先回收同步watcher、timer并安全结算已开始扫描与执行。/api/sync/automatic/pause|resume 是物理输入控制，/verify仍调用 [[sync-application]] 同一完整管线；路由不复制资格判定。
 
 HTTP 入口先确认 Hono listener 已发出真实 `listening` 事件，再安装连接回收器与 WebSocket 升级处理，最后才等待配置同步的启动追赶。这样 `/health` 只在真实绑定后对 supervisor 可用，同时不被同步追赶延迟阻塞。
+
+/api/sync/run 与 /verify 将 model 原样交同一应用边界校验和冻结；不在路由选择全局默认或忽略非字符串，遵循 [[sync-model-selection]]。
+
+同步资源清理的独立HTTP入口为POST /api/sync/operations/:id/resources/recover，要求明确frozen inputId并沿同一targetTree/commonDir约束调用[[sync-application]]的resources-only factory；不启动该factory的观察或自动队列，不调用普通recover/journal回放。其它同步路由和完整source身份门保持。

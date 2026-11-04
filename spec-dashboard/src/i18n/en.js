@@ -40,6 +40,8 @@ export default {
     "viewedTree": "Currently viewed worktree",
     "sourceBranch": "Source branch",
     "sourceAccepted": "The source worktree has adopted this delivery.",
+    "adopt": "Adopt to source worktree",
+    "adoptionBlocked": "Adoption to the source worktree is unavailable",
     "configuredDeliveryRoot": "Configured delivery root",
     "deliveryPlanBranch": "Planned delivery branch",
     "deliveryBranch": "Receipt branch",

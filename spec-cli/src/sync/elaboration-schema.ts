@@ -1,5 +1,7 @@
-import { CONTRACT_COLUMNS } from '@spexcode/spec-core/contracts'
+import { CONTRACT_COLUMNS, parseContract, parseFrontmatter } from '@spexcode/spec-core/contracts'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
+import type { ElaborationInput } from './elaboration-types.js'
+import { elaborationTargetBindings } from './elaboration-markdown.js'
 
 const string = { type: 'string', minLength: 1 }
 const strings = { type: 'array', items: string }
@@ -9,7 +11,8 @@ const refs = { type: 'array', items: businessId }
 const source = { type: 'string', pattern: '^(user:(raw|REQ-[A-Z0-9-]+)|decision:[^\\s,:|]+|rule:RULE-[A-Z0-9-]+|derived:(REQ|FLOW|STEP|STATE|EVENT|TR|RULE|AC|GAP)-[A-Z0-9-]+|code:[^\\s,#|]+#[^\\s,#|]+)$' }
 const rowProperty = (kind: string, column: string): Record<string, unknown> => {
   if (column === 'id') return { type: 'string', pattern: `^${kind}-[A-Z0-9]+(?:-[A-Z0-9]+)+$` }
-  if (column === 'source') return source
+  if (column === 'source') return { ...source, description: '单一来源；user:raw声明原文来源但不创建REQ依赖边，非REQ业务项仍须经实际source引用或depends-on追到REQ。' }
+  if (column === 'rules') return { ...refs, description: '仅引用已定义的RULE-ID；不能填REQ或其他类型ID。需求追溯使用实际source引用或depends-on。' }
   if (['req', 'steps', 'rules', 'covers', 'depends-on', 'affects'].includes(column)) return refs
   if (column === 'initial' || kind === 'STATE' && column === 'terminal') return { type: 'boolean' }
   if (column === 'next' || kind === 'FLOW' && column === 'terminal') return { anyOf: [{ enum: ['END'] }, refs] }
@@ -23,13 +26,75 @@ const rowProperty = (kind: string, column: string): Record<string, unknown> => {
   return string
 }
 export const ELABORATION_SCHEMA = object({
-  version: { enum: ['elaboration-rows-v2'] },
-  changes: { type: 'array', minItems: 0, items: object({ nodeId: string, path: string, title: { ...string, pattern: '^[^\\r\\n]+$' }, description: { type: 'string' }, code: strings, related: strings, prose: { type: ['string', 'null'] }, removeIds: { type: 'array', items: { type: 'string', pattern: '^(REQ|FLOW|STEP|STATE|EVENT|TR|RULE|AC|GAP|VERIFY)-[A-Z0-9]+(?:-[A-Z0-9]+)+$' } }, tables: object(Object.fromEntries(Object.entries(CONTRACT_COLUMNS).map(([kind, columns]) => [kind, { type: 'array', items: object(Object.fromEntries(columns.map(column => [column, rowProperty(kind, column)]))) }]))) }) },
+  version: { enum: ['elaboration-target-rows-v3'] },
+  changes: { type: 'array', minItems: 0, items: object({ targetIndex: { type: 'integer', minimum: 0 }, title: { ...string, pattern: '^[^\\r\\n]+$' }, description: { type: 'string' }, code: { ...strings, description: '治理的仓库相对源文件路径，可带#符号；一个节点最多治理一个文件基路径。' }, related: { ...strings, description: '补充关联的仓库相对文件或目录路径，可用既有关系语法；不得填写节点ID、REQ/FLOW/RULE/VERIFY等业务ID。' }, prose: { type: ['string', 'null'] }, removeIds: { type: 'array', items: { type: 'string', pattern: '^(REQ|FLOW|STEP|STATE|EVENT|TR|RULE|AC|GAP|VERIFY)-[A-Z0-9]+(?:-[A-Z0-9]+)+$' } }, tables: object(Object.fromEntries(Object.entries(CONTRACT_COLUMNS).map(([kind, columns]) => [kind, { type: 'array', items: object(Object.fromEntries(columns.map(column => [column, rowProperty(kind, column)]))) }]))) }) },
   applicability: { type: 'array', minItems: ELABORATION_BOUNDARIES.length, items: object({ boundary: { enum: ELABORATION_BOUNDARIES }, applies: { type: 'boolean' }, basis: string, affectedIds: strings }) },
 })
+/** 生成边界限制 authority；诊断边界保留原字符串，后续候选校验仍核对实际 owner。 */
+export function elaborationSchema(input: ElaborationInput, options: { purpose?: 'generation' | 'diagnostic' | 'interface_seed' } = {}): Record<string, unknown> {
+  const targets = elaborationTargetBindings(input)
+  const schema = structuredClone(ELABORATION_SCHEMA)
+  const changes = (schema.properties as Record<string, Record<string, unknown>>).changes
+  changes.maxItems = targets.length
+  const properties = (changes.items as { properties: Record<string, unknown> }).properties
+  properties.targetIndex = { type: 'integer', minimum: 0, maximum: input.targets.length - 1, ...(targets.length > 0 && targets.length < input.targets.length ? { enum: targets.map(target => target.targetIndex) } : {}) }
+  const tables = properties.tables as { properties: { RULE: { items: { properties: Record<string, Record<string, unknown>> } } } }
+  const authority = tables.properties.RULE.items.properties.authority
+  const owners = new Set(targets.map(target => target.nodeId))
+  for (const change of input.nodeChanges ?? []) {
+    if (change.action !== 'move') continue
+    const sourceIndex = input.targets.findIndex(target => target.nodeId === change.from.nodeId && target.path === change.from.path)
+    const source = input.targets[sourceIndex]
+    const binding = targets.find(target => target.targetIndex === sourceIndex && target.nodeId === change.to.nodeId && target.path === change.to.path)
+    if (sourceIndex < 0 || !source?.source || !binding) continue
+    const contract = parseContract({ nodeId: source.nodeId, path: source.path, source: source.source }).contract
+    if (contract?.items.some(item => item.kind === 'RULE' && item.authority === change.from.nodeId)) owners.add(change.from.nodeId)
+  }
+  tables.properties.RULE.items.properties.authority = {
+    ...authority,
+    description: options.purpose === 'diagnostic'
+      ? '诊断seed保留原始authority字符串，不代表授权；当前候选全图校验仍要求规则归属其canonical nodeId。'
+      : 'RULE.authority必须是当前可写target的canonical nodeId，不是REQ/RULE业务ID；冻结move的旧canonical owner可保留，由renderer按真实move归一化，最终owner仍由原有全图校验核对。',
+    ...(options.purpose !== 'diagnostic' && owners.size ? { enum: [...owners] } : {}),
+  }
+  if (options.purpose !== 'diagnostic' && input.verifications) {
+    const readonlyIds = new Set((input.context ?? []).flatMap(source => parseContract(source).contract?.items.filter(item => item.kind === 'VERIFY').map(item => item.id) ?? []))
+    const allowedIds = input.verifications.filter(row => !readonlyIds.has(row.id)).map(row => row.id)
+    const verify = (properties.tables as { properties: { VERIFY: { maxItems?: number; items: { properties: Record<string, Record<string, unknown>> } } } }).properties.VERIFY
+    if (readonlyIds.size && !allowedIds.length) verify.maxItems = 0
+    else if (readonlyIds.size) verify.items.properties.id = { ...verify.items.properties.id, enum: allowedIds }
+  }
+  if (options.purpose === 'interface_seed') {
+    const target = input.targets[0]
+    const frontmatter = target?.source ? parseFrontmatter(target.source).fm : {}
+    const entries = (value: unknown): string[] => typeof value === 'string' ? [value] : Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
+    const rowTables = properties.tables as { properties: Record<string, Record<string, unknown>> }
+    for (const [kind, schema] of Object.entries(rowTables.properties)) if (!['REQ', 'RULE', 'GAP'].includes(kind)) schema.maxItems = 0
+    const code = entries(frontmatter.code), related = entries(frontmatter.related)
+    properties.code = { type: 'array', maxItems: code.length, items: { ...string, ...(code.length ? { enum: code } : {}) } }
+    properties.related = { type: 'array', maxItems: related.length, items: { ...string, ...(related.length ? { enum: related } : {}) } }
+    const contract = target?.source ? parseContract({ ...target, source: target.source }).contract : null
+    const removableIds = contract?.items.filter(item => input.authorizedChanges?.some(change => change.action === 'retire' && change.id === item.id)).map(item => item.id) ?? []
+    properties.removeIds = { type: 'array', maxItems: removableIds.length, items: { type: 'string', ...(removableIds.length ? { enum: removableIds } : {}) } }
+  }
+  return schema
+}
+/** 历史路径回显协议只保留为拒绝候选诊断，不用于新生成或路径合成。 */
+export const LEGACY_ELABORATION_V2_DIAGNOSTIC_SCHEMA = (() => {
+  const schema = structuredClone(ELABORATION_SCHEMA)
+  const properties = schema.properties as Record<string, Record<string, unknown>>
+  properties.version = { enum: ['elaboration-rows-v2'] }
+  const node = properties.changes.items as { properties: Record<string, unknown>; required: string[] }
+  delete node.properties.targetIndex
+  node.required = node.required.filter(key => key !== 'targetIndex')
+  node.properties.nodeId = string
+  node.properties.path = string
+  node.required.push('nodeId', 'path')
+  return schema
+})()
 /** 只校验已持久失败种子的旧输出；新生成始终使用当前协议。 */
 export const LEGACY_ELABORATION_DIAGNOSTIC_SCHEMA = (() => {
-  const schema = structuredClone(ELABORATION_SCHEMA)
+  const schema = structuredClone(LEGACY_ELABORATION_V2_DIAGNOSTIC_SCHEMA)
   const properties = schema.properties as Record<string, Record<string, unknown>>
   properties.version = { enum: ['elaboration-rows-v1'] }
   const node = properties.changes.items as { properties: Record<string, unknown>; required: string[] }
@@ -40,9 +105,9 @@ export const LEGACY_ELABORATION_DIAGNOSTIC_SCHEMA = (() => {
 })()
 export const VERIFICATION_REGISTRATION_SCHEMA = object({ id: rowProperty('VERIFY', 'id'), command: rowProperty('VERIFY', 'command'), cwd: rowProperty('VERIFY', 'cwd'), timeoutMs: rowProperty('VERIFY', 'timeout-ms') })
 export const ELABORATION_REVIEW_SCHEMA = object({
-  verdict: { enum: ['accept', 'repair', 'needs_input', 'conflict'] },
+  verdict: { enum: ['accept', 'repair', 'needs_input', 'conflict'], description: 'accept仅在findings为空时使用；任何待修发现（包括延后P2的implementation-review）均用repair。' },
   checkedBoundaries: { type: 'array', items: { enum: ELABORATION_BOUNDARIES }, minItems: ELABORATION_BOUNDARIES.length },
-  findings: { type: 'array', items: object({ code: string, kind: { enum: ['repair', 'missing_fact', 'conflict'] }, message: string, affectedIds: strings, evidence: string, decision: string }) },
+  findings: { type: 'array', items: object({ code: { ...string, description: '完整业务契约下可在原授权范围修复的实现/测试发现只用精确code:"implementation-review"，同时kind:"repair"、verdict:"repair"，不得添加后缀或自定实现code；普通业务repair使用其具体业务code，仍在P1修复。' }, kind: { enum: ['repair', 'missing_fact', 'conflict'] }, message: string, affectedIds: strings, evidence: string, decision: string }) },
 })
 
 /** 对模型输出这一外部边界重复执行严格 schema 检查，注入 runner 也不能绕过门禁。 */
@@ -53,10 +118,12 @@ export function outputErrors(value: unknown, schema: Record<string, unknown>, pa
   const actual = value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value
   if (types.length && !types.includes(actual) && !(types.includes('integer') && typeof value === 'number' && Number.isInteger(value))) return [`${path}: 类型应为 ${types.join('/')}`]
   if (typeof value === 'number' && typeof schema.minimum === 'number' && value < schema.minimum) return [`${path}: 数值小于最小值`]
+  if (typeof value === 'number' && typeof schema.maximum === 'number' && value > schema.maximum) return [path + ': 数值超过冻结目标范围']
   if (typeof value === 'string' && typeof schema.pattern === 'string' && !new RegExp(schema.pattern).test(value)) return [`${path}: 格式不符合契约`]
   if (typeof value === 'string' && typeof schema.minLength === 'number' && value.length < schema.minLength) return [`${path}: 字符串不能为空`]
   if (Array.isArray(value)) {
     const errors = typeof schema.minItems === 'number' && value.length < schema.minItems ? [`${path}: 项数不足`] : []
+    if (typeof schema.maxItems === 'number' && value.length > schema.maxItems) errors.push(path + ': 项数超过冻结目标数量')
     if (schema.items) value.forEach((item, index) => errors.push(...outputErrors(item, schema.items as Record<string, unknown>, `${path}[${index}]`)))
     return errors
   }
@@ -74,15 +141,24 @@ export function outputErrors(value: unknown, schema: Record<string, unknown>, pa
   return []
 }
 
-export const CONTRACT_INSTRUCTIONS = `当前输出elaboration-rows-v2统一使用行差量：tables仅列新增或替换的完整行，未列旧行由程序从冻结sync-v1 Markdown保留；removeIds仅列本节点显式删除的旧ID，删除仍需原有授权，跨叶移动必须旧叶removeIds加新叶完整行，不能重复保留。prose:null保留完整既有业务正文（包括围栏和不适用依据），string显式替换仍受原义务保护；新节点/raw-only空基线以同一协议列全量行首次构建。每轮差量都相对于原冻结输入，不以上轮失败候选为基线。最终唯一可编辑契约是规范 Markdown，由程序从业务行确定性渲染；程序复制原始raw、contract-schema: sync-v1、固定标题及表格，不让模型拼语法。业务行字段由schema定义；单元格简洁，避免同义政策复制。独立审查检查最终Markdown及业务语义。prose与持久业务表只写业务契约和不适用依据，不写“V3尚未运行/已通过”等本轮运行时状态或生成进度；当前验证状态与结果由冻结证据查询，不能变成业务约定。
-冻结输入中的 verifications 是可信执行器的独立技术登记，不属于业务facts，不是用户未知，也不授予改变已有业务契约的权限。提供时，VERIFY.id/command/cwd/timeout-ms 必须精确符合登记，AC.command 只引用已登记VERIFY；不得自行造占位ID、换命令或放宽预算。执行器启动这些命令并汇总真实结果；generated业务测试只实现业务断言，不自行启动runner/oracle或递归运行登记命令。不要为这些已明确编排职责新增业务REQ/RULE/AC，或将它们误写为业务GAP。真正业务GAP仍按raw/facts保留；没有verifications时细化不代表命令已登记、已执行或具备交付权。
-raw、冻结事实和权威业务规则优先。仅影响权限、资金或业务权益、数据范围、保留删除义务、不可逆副作用、竞争胜负、重复执行语义或业务承诺的重要未知事实，以及实际意图冲突才形成GAP。可观察本身不等于重大业务政策。既有无冲突错误名称/错误协议、普通字段表示/参数类型/序列化及等价校验顺序等实现细节可自动沿用，使用code来源并追到REQ；不冒充decision授权，不制造GAP或再次要求用户裁决。没有明确矛盾，不扩展管理员、防枚举等政策。参数类型或校验若违反明确raw/facts，必须保留要求并修实现，不能新增GAP掩盖冲突。不得仅凭代码授权上述重大业务政策。
+const CONTRACT_ROW_INSTRUCTIONS = `当前输出elaboration-target-rows-v3统一使用行差量：targetIndex只引用冻结targets的原数组下标，不返回nodeId/path；两者由冻结目标和nodeChanges唯一绑定，已退役下标不可写。新目标和无已解析sync-v1契约的目标必须全部显式构建，不用重复节点填数量；已有完整契约只有确认本轮没有相关业务差量、也没有已核实的必要修复时才允许省略并由程序保留。reelaborate仍须对照本轮raw/facts、authorizedChanges与具体repair，在明确授权范围内落实确有需要的业务行和解释；不得仅复制raw或用空changes保留已核实的失配，已经符合要求的行与未受影响义务不必重写。tables仅列新增或替换的完整行，未列旧行由程序从冻结sync-v1 Markdown保留；removeIds仅列本节点显式删除的旧ID，删除仍需原有授权，跨叶移动必须旧叶removeIds加新叶完整行，不能重复保留。prose:null保留完整既有业务正文（包括围栏和不适用依据），string显式替换仍受原义务保护；新节点/raw-only空基线以同一协议列全量行首次构建。每轮差量都相对于原冻结输入，不以上轮失败候选为基线。最终唯一可编辑契约是规范 Markdown，由程序从业务行确定性渲染；程序复制原始raw、contract-schema: sync-v1、固定标题及表格，不让模型拼语法。业务行字段由schema定义；单元格简洁，避免同义政策复制。独立审查检查最终Markdown及业务语义。implementationWritePaths与readonlyTestPaths仅是冻结技术权限：已有只读oracle仍须通过，新增或不足的测试断言应绑定原授权可写测试路径，不能计划修改只读oracle，也不另造执行边界业务REQ。implementationWritePaths为空数组时，本轮只根据现存实现更新Spec，源码和全部测试只读；AC.test必须绑定冻结上下文中真实存在的文件与用例，不能新建或补写测试，也不能把缺代码/测试或实现缺陷延后交给P2。prose与持久业务表只写业务契约和不适用依据，不写“V3尚未运行/已通过”等本轮运行时状态或生成进度；当前验证状态与结果由冻结证据查询，不能变成业务约定。`
+
+const CONTRACT_VERIFICATION_INSTRUCTIONS = `冻结输入中的 verifications 是可信执行器的独立技术登记，不属于业务facts，不是用户未知，也不授予改变已有业务契约的权限。提供时，VERIFY.id/command/cwd/timeout-ms 必须精确符合登记，AC.command 只引用已登记VERIFY；只读context已有该ID时直接引用，不得在本target重复定义。AC.command引用的登记ID若在只读context和当前候选都没有VERIFY行，须从精确冻结登记新增该VERIFY定义；登记JSON本身不是契约行，不能代替VERIFY定义。各区新共享登记可在局部完整候选中声明，程序仅对精确登记技术行做唯一owner投影，业务行和独审原件保持；不得自行造占位ID、换命令或放宽预算。执行器启动这些命令并汇总真实结果；generated业务测试只实现业务断言，不自行启动runner/oracle或递归运行登记命令。不要为这些已明确编排职责新增业务REQ/RULE/AC，或将它们误写为业务GAP。真正业务GAP仍按raw/facts保留；没有verifications时细化不代表命令已登记、已执行或具备交付权。`
+
+export const CONTRACT_SOURCE_INSTRUCTIONS = `raw、冻结事实和权威业务规则优先。仅影响权限、资金或业务权益、数据范围、保留删除义务、不可逆副作用、竞争胜负、重复执行语义或业务承诺的重要未知事实，以及实际意图冲突才形成GAP。可观察本身不等于重大业务政策。既有无冲突错误名称/错误协议、普通字段表示/参数类型/序列化及等价校验顺序等实现细节可自动沿用，使用code来源并追到REQ；不冒充decision授权，不制造GAP或再次要求用户裁决。没有明确矛盾，不扩展管理员、防枚举等政策。参数类型或校验若违反明确raw/facts，必须保留要求并修实现，不能新增GAP掩盖冲突。不得仅凭代码授权上述重大业务政策。
 生成与审查均须核实每条评审发现是否获raw、facts或相应代码来源支持；误读实现细节、错把技术选择当业务政策的发现必须纠正，不能照单全收并扩大GAP。只修已核实缺口及直接依赖，逐条保留未受影响且符合raw/facts的既有AC细分断言，包括已有测试支持的断言；不因重写表格把断言挪成前置条件、缩成部分效果或删除。来源混合时拆分业务规则与实现细节或建立相应依赖，不能因仅能填写一个source而要求用户重复授权普通技术约定。
-所有出现表包含完整表头和非空数据行；空值用 -，布尔 true/false，引用集合逗号分隔。ID为类型-业务域-稳定后缀（ASCII大写/数字/连字符）。source必须是唯一单值，不能逗号拼多个来源；例如derived:REQ-EXPORT-01有效，user:REQ-EXPORT-01,decision:EXPORT-POLICY无效。单值来源包括user:raw、user:REQ-ID、decision:裁决ID、rule:RULE-ID、derived:稳定ID、code:相对路径#符号；直接表达普通raw的REQ使用user:raw，已有合法来源按冻结依据保留，不能把code或derived来源统一改成user:raw。多个推导依赖只放depends-on引用列表。必须真实depends-on追到原意；每项业务政策有可核实来源。缺代码/测试属于待实现证据，不是业务事实GAP；不要为已有明确政策伪造缺失事实。
-当前裁决改变REQ业务意义时，REQ.source必须准确为decision:<当前stableDecisionId>，取冻结decisionAuthorities中精确绑定当前requestRef、原analysisRef和所选findingIds的身份，不能继续写user:raw或只改RULE的basis说明。仅当前已独审的adopt_behavior/new_rule可按所选有限范围更新REQ；共享REQ须是所选旧RULE/TR的直接source或depends-on上游及原affected项，同一已独审allowed_change同时包含该REQ与规则，候选规则的实际政策定义必须变化。REQ仅加入自身，不扩其消费者；不得给REQ反向添加所选RULE依赖形成循环，或用候选新边扩大旧范围。真实REQ-only裁决且原selected/affected均无旧RULE/TR时，按明确REQ身份、本次来源和同一已独审allowed_change更新，不虚构中间政策。keep_intent保持REQ来源和业务意义，只修实现；未选业务及来源保持。仅更换RULE来源、旧decision事实、未获批准的变化或模型自身失败均不授权REQ改义，生成与独审都核对上述来源和见证；普通无冲突实现细节继续沿合法code/derived来源处理。
-FLOW.req引用REQ，FLOW.steps引用STEP；STEP.flow是单FLOW，STEP.next为STEP/TR/STATE引用列表或END单值，END不能和ID混写。有状态对象的FLOW.terminal列对应STATE结果；只有整个能力完全无状态时才用END，同步调用不等于无状态。无状态必须正文说明输入域、不变量、不适用依据和可观察结束。
+模型只返回schema规定的JSON行对象，不返回表头或Markdown行；所有必填列都须存在，引用集合用JSON数组，布尔用JSON boolean，schema允许null的列用JSON null表达空值，不能用空字符串或字符串“-”替代null。最终Markdown的表头、空值“-”及引用集合的逗号分隔由程序渲染。ID为类型-业务域-稳定后缀（ASCII大写/数字/连字符）。source必须是唯一单值，不能逗号拼多个来源；例如derived:REQ-EXPORT-01有效，user:REQ-EXPORT-01,decision:EXPORT-POLICY无效。单值来源包括user:raw、user:REQ-ID、decision:裁决ID、rule:RULE-ID、derived:稳定ID、code:相对路径#符号；直接表达普通raw的REQ使用user:raw，已有合法来源按冻结依据保留，不能把code或derived来源统一改成user:raw。多个推导依赖只放depends-on引用列表。user:raw只声明原文来源，不创建指向REQ的依赖边；decision和code来源本身也不建立该边。除REQ自身外，RULE等每个业务项都须经真实depends-on或source的user:REQ-ID、rule:RULE-ID、derived:稳定ID引用建立能追到REQ的来源/依赖路径；仅写user:raw或正文提到需求不构成追溯。每项业务政策有可核实来源。缺代码/测试属于待实现证据，不是业务事实GAP；不要为已有明确政策伪造缺失事实。
+当前裁决改变REQ业务意义时，REQ.source必须准确为decision:<当前stableDecisionId>，取冻结decisionAuthorities中精确绑定当前requestRef、原analysisRef和所选findingIds的身份，不能继续写user:raw或只改RULE的basis说明。仅当前已独审的adopt_behavior/new_rule可按所选有限范围更新REQ；共享REQ须是所选旧RULE/TR的直接source或depends-on上游及原affected项，同一已独审allowed_change同时包含该REQ与规则，候选规则的实际政策定义必须变化。REQ仅加入自身，不扩其消费者；不得给REQ反向添加所选RULE依赖形成循环，或用候选新边扩大旧范围。真实REQ-only裁决且原selected/affected均无旧RULE/TR时，按明确REQ身份、本次来源和同一已独审allowed_change更新，不虚构中间政策。keep_intent保持REQ来源和业务意义，只修实现；未选业务及来源保持。仅更换RULE来源、旧decision事实、未获批准的变化或模型自身失败均不授权REQ改义，生成与独审都核对上述来源和见证；普通无冲突实现细节继续沿合法code/derived来源处理。`
+
+const CONTRACT_FLOW_INSTRUCTIONS = `FLOW.req引用REQ，FLOW.steps引用STEP；STEP.rules和TR.rules只能引用已定义RULE-ID，不能填REQ或其他类型ID，需求追溯使用对应source或depends-on；STEP.flow是单FLOW，STEP.next为STEP/TR/STATE引用列表或END单值，END不能和ID混写。有状态对象的FLOW.terminal列对应STATE结果；只有整个能力完全无状态时才用END，同步调用不等于无状态。无状态必须正文说明输入域、不变量、不适用依据和可观察结束。
 状态派发STEP必须以next、depends-on或source显式引用实际执行或选择的TR，并在depends-on或source声明对应EVENT。TR集合须忠实覆盖该步骤input/action/output声明的对象、状态域和条件分支；不能只列已确定TR掩盖同一步里的未决TR，也不反推与步骤无关的全事件所有状态。纯参数校验、提交和导航步骤不强求TR。next→TR是业务依赖；next→STEP/STATE、FLOW.steps仍仅导航，不扩大GAP闭包。独立审查必须重走派发步骤，对照TR集合核实声明范围与受阻处置的真实依赖；正文提到GAP或对应TR不能替代结构引用，不能把含未知派发的父FLOW列为完整可交付。
-STATE/EVENT/TR.object为稳定对象名。每个适用对象全部可达状态×事件必须有TR，disposition为transition/reject/idempotent/not_applicable；reject/idempotent.to等于from；not_applicable.to为-且reason必填。condition成立、不成立、边界、失败/恢复、取消、重试、重复回调、竞争的必要到达顺序、副作用均覆盖。不能用“其他忽略”缩减范围。
-主动从场景发现响应丢失后的重复请求、异步任务失联、失败后恢复、取消与完成的两种顺序、回调身份过期、操作时权限变化及外部结果不可用；不能把“用户没写”当作这些相关边界不适用的依据。未知是否允许取消/重试及失联恢复政策须保留具体GAP和受阻分支，不能通过删去事件或宣布不适用让覆盖变绿。
-RULE.authority为唯一权威nodeId；其他节点引用RULE，不复制政策。AC.covers引用REQ/RULE/TR，AC.test是测试相对路径#稳定用例ID，AC.command引用VERIFY-ID；VERIFY.command是JSON argv数组文本，cwd相对根，timeout-ms正整数。叶节点code最多一个真实代码文件，related不计实现覆盖。不存在的代码/测试只作为待实现绑定，绝不声称运行已过。
-未知重大业务政策必须写GAP，kind为missing_fact/conflict，unknown/affects/evidence/decision具体明确；只阻塞依赖项，独立分支继续完善。不可发明权限、保留时间、超时或竞争政策。业务项在旧新全图按稳定ID核对，跨叶移动不当作删除。节点move/retire只从冻结nodeChanges复制，不能模型自批；移动raw原样保留，canonical身份与规则authority按旧新定位迁移。preserve_business只更新必要的实现和测试符号绑定，逐字沿用业务正文。未经冻结update_acceptance绑定真实独审行为分析和变化ruleIds（REQ/RULE/TR来源闭包），已有AC语义不得改变；原意允许的新代码行为可经合法规则变化和独审自动授权更新AC，模型自身失败不构成新意图。未获冻结authorizedChanges提供具体用户原意或可信裁决的依据时，保留REQ/AC/VERIFY及验证政策；明确已决定的退役或验证政策变更可按依据执行，无需再批准，但独立审查须核对与raw/facts相符且未缩减未授权范围。retiredIds中的历史稳定ID不能复用。不能弱化验收断言或改写raw让结果变绿。无GAP省略表，不输出空表。`
+STATE/EVENT/TR.object为稳定对象名。每个适用对象全部可达状态×事件必须有TR，disposition为transition/reject/idempotent/not_applicable；reject/idempotent.to等于from；not_applicable.to在JSON中为null（程序渲染为-）且reason必填。condition成立、不成立、边界、失败/恢复、取消、重试、重复回调、竞争的必要到达顺序、副作用均覆盖。不能用“其他忽略”缩减范围。
+主动从场景发现响应丢失后的重复请求、异步任务失联、失败后恢复、取消与完成的两种顺序、回调身份过期、操作时权限变化及外部结果不可用；不能把“用户没写”当作这些相关边界不适用的依据。未知是否允许取消/重试及失联恢复政策须保留具体GAP和受阻分支，不能通过删去事件或宣布不适用让覆盖变绿。`
+
+const CONTRACT_REFERENCE_INSTRUCTIONS = `验证配置、写路径授权、执行器/schema和本轮元数据属于执行边界，不另造业务REQ或测试执行FLOW；仍须遵守这些边界，测试和验证绑定在业务AC/可信VERIFY中，不能借此省略raw里的业务需求。RULE.authority必须是该RULE所在当前target的canonical nodeId，不是REQ-ID或RULE-ID；冻结move中原RULE的旧nodeId由renderer按nodeChanges归一，最终owner仍由原有全图校验核对。其他节点引用RULE，不复制政策。AC.covers引用REQ/RULE/TR，AC.test是测试相对路径#稳定用例ID；source=code必须引用冻结源码中真实声明符号的相对路径#symbol，测试用例ID只能用于AC.test，不能充当代码符号。AC.command引用VERIFY-ID；VERIFY.command是JSON argv数组文本，cwd相对根，timeout-ms正整数。叶节点code最多一个真实代码文件，related不计实现覆盖。不存在的代码/测试只作为待实现绑定，绝不声称运行已过。`
+
+const CONTRACT_EVOLUTION_INSTRUCTIONS = `未知重大业务政策必须写GAP，kind为missing_fact/conflict，unknown/affects/evidence/decision具体明确；只阻塞依赖项，独立分支继续完善。不可发明权限、保留时间、超时或竞争政策。业务项在旧新全图按稳定ID核对，跨叶移动不当作删除。节点move/retire只从冻结nodeChanges复制，不能模型自批；移动raw原样保留，canonical身份与规则authority按旧新定位迁移。preserve_business只更新必要的实现和测试符号绑定，逐字沿用业务正文。未经冻结update_acceptance绑定真实独审行为分析和变化ruleIds（REQ/RULE/TR来源闭包），已有AC语义不得改变；原意允许的新代码行为可经合法规则变化和独审自动授权更新AC，模型自身失败不构成新意图。未获冻结authorizedChanges提供具体用户原意或可信裁决的依据时，保留REQ/AC/VERIFY及验证政策；明确已决定的退役或验证政策变更可按依据执行，无需再批准，但独立审查须核对与raw/facts相符且未缩减未授权范围。retiredIds中的历史稳定ID不能复用。不能弱化验收断言或改写raw让结果变绿。无GAP省略表，不输出空表。`
+
+export const CONTRACT_INSTRUCTIONS = `${CONTRACT_ROW_INSTRUCTIONS}\n${CONTRACT_VERIFICATION_INSTRUCTIONS}\n${CONTRACT_SOURCE_INSTRUCTIONS}\n${CONTRACT_FLOW_INSTRUCTIONS}\n每个业务REQ至少由一个主FLOW.req直接覆盖。${CONTRACT_REFERENCE_INSTRUCTIONS}\n${CONTRACT_EVOLUTION_INSTRUCTIONS}`
+
+export const INTERFACE_SEED_CONTRACT_INSTRUCTIONS = `${CONTRACT_ROW_INSTRUCTIONS}\n冻结输入中的verifications只作可信技术登记；父接口不输出VERIFY或AC，既有精确可信VERIFY及合法更新行均由程序保留，不要求在父阶段新增技术行或测试绑定。\n${CONTRACT_SOURCE_INSTRUCTIONS}\n${CONTRACT_REFERENCE_INSTRUCTIONS}\n${CONTRACT_EVOLUTION_INSTRUCTIONS}\ndescription与prose均只写稳定的业务用途、共享接口及不适用依据，不写本轮修复、上一候选、去重过程或其他生成进度。父阶段只保证本轮必要共享接口准确、无冲突且有来源；未由raw/facts确定的普通字段表示、缺省值及等价校验顺序由后续子分区读取实现后细化，不要求在父层提前穷举，也不制造GAP。父层已经声明的具体条款仍须独立核实，错误、矛盾或无来源的政策不能以阶段较薄为由通过。完整对象、流程、状态事件和AC由后续子分区及严格全局seal覆盖，本阶段不要求重复展开。`

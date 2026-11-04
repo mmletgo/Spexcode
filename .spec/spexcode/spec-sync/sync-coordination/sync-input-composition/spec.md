@@ -14,11 +14,15 @@ code:
 
 ## expanded spec
 
+业务意图正文沿用冻结契约的唯一业务 Spec 路径规则，排除工具插件实例；完整快照、组合树和对象校验仍保留这些文件的 path/mode/OID/bytes。每次意图投影通过快照原语批读真实业务 blob，逐路径解析并保留重复业务身份拒绝，不能为减少进程跳过正文或缓存跨调用验证结论。
+
 成组历史补偿恢复已退役对象时，某个精确 ID 的已采纳 before、delivery 与当前 source 可以全空；作者请求中恢复的真实 Markdown 仍决定其 source 意图对象，不能因旧对象都空而漏投影。恢复身份是否获准仍由后续契约演化门禁判断。
 
 本节点实现 [[sync-coordination]] 成对基线原语：next = priorVerifiedDelivery + delta(priorSourceInput, newSourceInput)。无基线时从新来源构建派生输入，previousBaselinePairId 为 null，不伪称已验证基线。来源物理身份、分支或仓库不匹配时拒绝；发布交付树成为来源必须使用该真实物理树自己的基线。
 
 ComposedInputRef 独立绑定 sourceInputId、previousBaselinePairId、tree、manifestBlob 和 contentDigest；原 InputSnapshot 的 immutableTree/indexDigest 不改变。成对基线只证明 coveredScope；未覆盖的来源路径直接采用 newSource，即使本轮没有继续编辑也保留前轮未交付的 blocked 输入，不把完整 sourceInput 误作全量已交付基线。原字节和 mode 相同视为未改；新增、删除、移动表现为完整 path/mode/bytes 差量。同文件双方非重叠 UTF-8 文本通过真实三方合并；重叠、删除修改、二进制和 symlink 分歧保存 base/source/delivery 的 Git blob OID 与摘要，返回明确冲突，不产出可自动接受的组合输入。私有 composition ref 保活派生对象，不执行候选代码或提交。
+
+组合 manifest 与 contentDigest 采用和不可变快照读回一致、与区域语言无关的路径顺序；大小写混合的合法路径不能导致真实 Git 树的证据校验失败。
 
 mergeText 导出同一真实三方文本算法供 [[sync-controlled-request]] 叠加用户请求；调用方明确提供 delivery/base/source Git 对象，冲突返回 null，运行故障继续抛出，不能把冲突标记当有效正文。
 
@@ -37,6 +41,8 @@ P4按冻结 FrozenBaselineSelection 逐资源组合：path 的 bytePair 只负�
 受控投影即使与历史pair共用同一snapshot ID，也不得反改原immutable source对象缓存；作者请求和真正历史基准仍是分别可核验的Git事实。声明executionPaths时，每个路径必须有显式exact byte绑定（可null），缺失不能静默采用HEAD掩盖本轮输入。
 
 代码或测试变化不会因Spec行未变而消失。逐真实intent pair根据其ID实际所属owner的code与AC测试绑定，保source/delivery/newsource完整真实Git对象及owner；不从共享REQ扩大无关消费者。artifacts独立记录authorBase与真实采纳pair/commit，code/test差量进入residualPaths，即使path bytePair.source已夹带该差量也不认定已消费。实际HEAD已接受较新byte head的完整提交时，该真实交付对象可作文件作者基准；code回声不制造变化，后续新编辑仍捕获。getter从同一真实pairs、snapshot、治理和测试绑定重算全部artifact对象与残差，不能凭hash正确的新JSON抹去code-only差量。
+
+旧 byte head 的采纳已经包含在当前 intentPair.sourceInput 的真实 Git 历史中时，该 intent 已消费采纳后的作者源码；旧 byte 交付不能再次压过此 sourceInput 作 artifact.authorBase。只用既有 adoptedDeliveryPaths 核该冻结 sourceInput 的提交祖先、覆盖范围和交付 bytes/mode，不按结算时间或相同 inputId 猜测。intent 自己尚未消费该采纳时，继续以实际已采纳的 byte 交付为作者基准；未消费 owner、partial 分支和后续新源码仍保残差。getter与组合复用同一判据，证明缓存只存在于单次读取。
 
 contextPaths显式冻结只读上下文：执行路径继续按真实byte pair三方组合；选中非执行路径直接保实际source的对象、mode及删除/缺失，不从HEAD取旧配置或旧oracle。未选且非执行路径仍以真实HEAD为基，不能夹带其它作者dirty。有效executionPaths/contextPaths随组合证据保存并重核：context必须等于真实InputSnapshot，其余非执行对象必须等于HEAD；读取上下文不授模型写权、lease或已验证coverage。目录形式的明确额外读取只展开其中真实文件，不把目录当字节资源。
 

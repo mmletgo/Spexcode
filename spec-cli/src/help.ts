@@ -432,18 +432,22 @@ consumes the token after it.`,
     body: `Usage: spex sync settings
        spex sync enable [--config-digest <sha256>]
        spex sync status [--node <node-id>] [--limit N] [--json]
-       spex sync run <node-id> [--request-id <id>] [--patch-file <json>] [--retry-of <operation-id>] [--origin spec|initial|code|combined]
+       spex sync run <node-id> [--request-id <id>] [--patch-file <json>] [--retry-of <operation-id>] [--origin spec|initial|code|combined] [--model <model-id>]
        spex sync decide <operation-id> --input-id <id> --analysis <sha256> --findings <id,...> --choice keep_intent|adopt_behavior|new_rule [--rule <text>] [--request-id <id>]
        spex sync show <operation-id>
        spex sync pause|resume
-       spex sync verify <node-id> [--request-id <id>]
+       spex sync verify <node-id> [--request-id <id>] [--model <model-id>]
        spex sync pause|resume|cancel|recover <operation-id>
+       spex sync resources recover <operation-id> --input-id <frozen-input-id>
+       spex sync source-continuity <operation-id> --input-id <id> --revision <N> --enabled-digest <sha256> --old-common-dev <N> --old-root-dev <N> --old-git-dev <N>
+       spex sync adopt <operation-id>
        spex sync revert <operation-id> [--request-id <id>]
        spex sync stop-writer
        spex sync check --base <sha> --candidate <sha> [--policy <trusted-sha>] [--repository <path>] [--evidence-directory <existing-directory>]
 
 在 .spec/spexcode.json 的 sync 字段登记 sync-settings-v1、sourcePaths/testPaths/readPaths、
 verifications、mandatoryTests、facts 与 budget，再启用当前输入工作树的授权。
+可选 sync.model 为本项目新 operation 固定精确默认模型；配置变化仍需重新启用。
 nodeIds 可明确限定意图根；新纯raw需求须登记根节点，status显示实际纳入与未纳入范围。
 支持已登记的 Docker Node --test；缺少可信镜像、命令或预算明确拒绝。
 可配置有限 callTimeoutMs；缺省单次最多 120000ms，旧操作沿用自身冻结配置和总期限。
@@ -451,10 +455,14 @@ run 返回持久 operation，后端继续实际细化、生成、验证与受管
 --patch-file 使用 SpecBodyEdit 的 startLine/endLine/original/replacement 正文差量，
 直接进入完整操作，不先单独提交 Spec。重复 --request-id 幂等；不同内容不能复用同一键。
 recover 只核对并结算已有资源或已开始的交付日志，保持原控制、输入及预算，不派发新模型任务。
+resources recover 是单次离线资源清理；必须明确原input-id，不启动API/队列，不回放journal，也不改变业务失败或取得resume/adopt权限。
 resume 继续原操作，--retry-of 建立关联新操作；三个入口各自有明确门禁。
+新业务操作的手动 --model 优先于项目 sync.model；显式 --retry-of 可用 --model 选择新模型。相同 request ID 仍固定原模型，换模型必须使用 --retry-of；省略模型时，同 request/retry 继承原选择，新操作再取项目配置或 gpt-6.1-sol。自动观察也使用项目值；旧操作缺模型仍固定 gpt-6.1-sol。模型固定于 operation 与独审请求，resume/recover 不换模型。
 --retry-of 显式重试可重试的失败操作，保留原正文意图并关联旧结果；不能同时传 --patch-file。
 只有显式重试建立新操作和新预算，普通重复请求继续归并。未结算资源或已变输入拒绝重试。
 show/status 展示真实失败、GAP、过期和交付工作树；workspace_synced 不代表原输入树已落地。
+adopt 显式采纳已验证且结算的交付，只安全快进干净原工作树；未提交改动或分叉明确拒绝并保留交付。
+show/status 的 adoptionEligibility 给出资格与具体原因，sourceSynced 与 canonicalSynced 分别表示原树采纳和主分支同步。
 手动 --origin code|combined 接入外部代码变更并分析业务冲突；来源不构成采用新业务的授权。
 decide 绑定 show 中的原输入、可信分析及具体 finding IDs；保持需求、采用行为或新规则进入新关联操作。
 启用后服务持续观察授权来源；无参数 pause/resume 控制物理输入自动执行，带 operation ID 控制单个操作。暂停仍记录最新输入；服务停止明确离线。所有命令输出 JSON。
@@ -465,6 +473,7 @@ raw变化必须精确匹配受信policyCommit中的.spec/sync-intent-authorizati
 coverage 明确列未纳入范围；局部检查通过不表示全项目已同步。
 revert 只对已采纳且有完整收据的交付生成新的成组补偿操作，保后续编辑及历史，仍需四层验证和真实落地。
 stop-writer 为版本回退暂停新写入，并结算或保留未完成资源；检查返回的恢复诊断，不表示未知资源已释放。
+source-continuity 仅在后台离线、同仓库执行停稳且资源已清理后登记显式旧dev双哈希证明；不猜设备号。成功保持原logical来源并正式暂停原物理范围，另行核验后resume；不启动模型或重写旧操作。v20先online备份，回滚须配套恢复旧enabled及continuity-evidence，失败可能已pause而不会自动回滚。
 配置示例：spex guide sync。\n\n${ROUTING_NOTE}`,
   },
   spec: {

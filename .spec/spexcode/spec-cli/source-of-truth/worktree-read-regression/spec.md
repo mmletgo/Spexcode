@@ -20,3 +20,5 @@ code:
 
 
 P3真实HTTP确认code origin到达共享应用授权校验而非旧unsupported入口；未知decision原operation返回404，path/body身份冲突返回400。
+
+采纳入口也遵守相同范围和身份边界：未知操作返回 404，path/body operationId 冲突及 query/body targetTree 冲突返回 400，不在 HTTP 层执行 Git 或推断采纳资格。

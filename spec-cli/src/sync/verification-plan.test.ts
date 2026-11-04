@@ -18,13 +18,17 @@ function fixture() {
 
 test('必需AC集合完整映射到真实testID，按固定VERIFY命令分组', () => {
   const { graph, registrations } = fixture()
+  registrations[0].environment.scratchExecutable = true
   const jobs = planAcceptanceRuns(graph, ['AC-EXPORT-03', 'AC-EXPORT-01'], registrations)
   assert.equal(jobs.length, 1)
   assert.deepEqual(jobs[0].policy.expectedTestIds, ['AC-EXPORT-01', 'AC-EXPORT-03'])
   assert.deepEqual(jobs[0].policy.argv, ['node', '--test', 'tests/export.test.mjs'])
+  assert.equal(jobs[0].policy.scratchExecutable, true)
   assert.deepEqual(jobs[0].bindings.map(binding => binding.acceptanceId), ['AC-EXPORT-01', 'AC-EXPORT-03'])
   registrations[0].definition.command.push('changed')
+  registrations[0].environment.scratchExecutable = false
   assert.equal(jobs[0].policy.argv.length, 3)
+  assert.equal(jobs[0].policy.scratchExecutable, true)
 })
 
 test('空集合、未知/重复/非AC、候选换命令或未登记不能静默跳过', () => {

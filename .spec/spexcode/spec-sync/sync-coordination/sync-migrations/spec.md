@@ -14,6 +14,18 @@ code:
 
 ## expanded spec
 
+v24仅追加无DDL SELECT 1 marker，保护 nativeConfiguration:cli-config-v1、Claude NativePlan v2 与 ZCode NativePlan v3 的实际每轮配置/模型证据协议。v23及更旧writer在写入或派发前拒绝；正常升级先停稳全部旧backend/queue并结算或保留资源，按既有online backup后事务迁移。v1–v23 SQL/checksum/applied_at及全部旧表/请求/receipt原字节保持，不补历史字段。回滚先停新writer，再恢复升级前v23一致备份及配套evidence/Git refs；不能删marker或重签旧计划。
+
+v23以无DDL SELECT 1登记P0按purpose的Git草稿、认证Native材料和精确分析续审协议；关闭behavior-draft-protocol已保存而dispatch尚未reserved的崩溃窗口，v22及更旧writer必须在任何业务写入/派发前拒绝。沿既有online backup及组件事务保v1–v22 checksum、原记录/请求/CAS不变；既有reserved请求仍按原绑定恢复。升级先停稳全部旧writer并结算或保留真实资源，回滚先停新writer，再恢复升级前v22一致备份及原evidence/Git refs，不删marker或补造历史草稿。
+
+v20仅以SELECT 1登记 [[sync-source-registration]] 及EnabledRecord v2的writer语义。沿原online backup与组件事务，旧v19 writer逐事务拒绝，v1–v19 checksum及全部旧记录/CAS保持。continuity记录另在私有global runtime保存；回滚停新writer后恢复升级前一致DB备份、原enabled字节及原continuity-evidence链，不删marker或用新见证改旧input。失败暂停可能已生效，文件CAS和DB不是跨介质原子事务，不自动恢复run。
+
+v19以无DDL SELECT 1登记 ZCode 非交互工具策略与 NativePlan version2 的 writer 能力；结构化策略仍 version6、工作流仍 native-worktree-v1。旧 v18 writer 不能理解新固定请求字段，必须整体拒绝。沿原 online backup/事务迁移保留 v1–v18 checksum、旧 record/payload/receipt 与旧请求缺席语义；升级前停止旧 backend/queue 并结算或保留真实资源，回滚恢复升级前一致备份和原 evidence，不能删 marker 或改写历史请求。
+
+v18以无DDL SELECT 1登记native-worktree阶段seed、自由仓库读取与实际Git候选导入的writer能力，结构化执行为固定version6。沿既有online backup及组件事务升级，保v1–v17原字节/checksum、旧record/payload/receipt。旧v17及更早writer必须整体拒绝；升级前正式停止全部旧backend/queue并结算真实资源。回滚先停新writer、结算或保留真实资源，再恢复升级前一致备份及原evidence，不能删marker、改v3工具描述或手改任务DB伪装旧协议。
+
+v17 为无限模型调用的语义writer marker；正式online backup后正常迁移，不修改v1–v16 checksum或历史JSON。旧v16 sync writer因组件版本拒绝；独立旧结构化queue另由新null执行策略version5在固定策略校验时拒绝。升级前停止全部旧backend/queue consumer并结算或保留在途资源；回滚停新writer后恢复升级前一致性备份，不删marker或改写null记录冒充旧数字。
+
 复用现有 SessionProtocol 和 applyComponentMigrations，不打开第二执行数据库或第二消息队列。升级前使用 backupTo 的 SQLite online backup；禁止直接复制 WAL 主文件。组件迁移在 BEGIN IMMEDIATE 中原子执行，错误全部回滚；重复启动核对 checksum，未知更高 generation 拒绝同步写入。不做破坏性 down migration，回退保留表和 blob。
 
 初始v1保存 operation（内含冻结输入引用）、attempt（候选/证据/checkpoint 引用）、逐实际文件/规则 lease、apply journal（内含 receipt）、成对 baseline。检索身份、阶段、generation、唯一接入/派发/副作用键显式列，scope/budget/refs 小 JSON 保存运行记录，不保存正文、大契约图或第二份可编辑源码。lease tombstone 的 generation 在释放后保留。范围和动作门禁由 [[sync-store]] 负责。
@@ -43,3 +55,15 @@ P4 采用第10代增量组件迁移：新增物理控制、资源 frontier、持
 第11代仅登记成组不可变历史请求的 writer 语义，不修改既有迁移字节、会话或 journal。先在线备份，marker 与升级事务一起结算，旧 writer 拒绝未知授权；版本回退保留新增表和 evidence。
 
 v12标记同一历史身份restore及按当前逐ID head读取退休状态的writer语义；v11及更旧writer必须拒绝新generation，迁移保原表/retirement pair并先一致备份。
+
+v13仅以无DDL SELECT 1登记操作固定模型的writer能力，保v1-v12字节/checksum及全部旧operation/payload/receipt/fence记录。先按原流程online backup，旧二进制必须在读取operation或派生retry前因未来generation拒绝；v2运行描述继续核精确操作模型。回滚须先停writer并结算或保留真实资源，按既有恢复流程恢复升级前一致数据库备份及其原evidence，不能让旧writer直接读v13或删marker降级。模型合同属于 [[sync-model-selection]]。
+
+v14仅登记提交边界快照、分区计划与分布式审查的 writer 语义，沿现有流程先在线一致备份，再在组件事务中增加 marker。旧 operation、输入/请求摘要、分区前历史与 receipt 字节不变，旧版写方不能忽略新语义而继续派发。分区运行记录复用既有 attempt/checkpoint/resource，不另建任务数据库或队列。回退须停 writer、保留或结算资源并恢复升级前备份及原 evidence，不能删 marker 或把新计划伪装成旧单任务。
+
+v15以无DDL SELECT 1登记显式unlimited预算与nullable operation期限的writer语义；保持v1–v14迁移字节/checksum及全部旧record/payload/receipt。须先停writer并结算或保留真实资源，再沿online backup和组件事务升级；旧writer因v15拒写。回滚恢复升级前一致数据库备份及其evidence，不删marker、不手改旧记录或重置预算。
+
+v16以无DDL SELECT 1登记 ZCode 固定命名空间、结构化策略与原生证明的 writer 语义；保留 v1–v15 原字节/checksum 及历史记录。升级前停 writer、核对在途资源并保存一致备份，正常迁移原子登记 marker；旧 writer 必须整体拒绝，不能把 ZCode 派发为 Codex。回滚先结算或保留资源，再恢复升级前一致备份与 evidence，不删 marker 或手改 operation。
+
+v21以无DDL SELECT 1登记typed checkpoint artifacts与raw/stage权限边界；沿正常online backup与组件事务拒v20旧writer，v1–v20 checksum及旧记录/CAS原字节保持。升级前停稳全部旧服务/队列并结算或保留真实资源。回滚先停新writer，再恢复升级前一致备份及对应evidence，不删marker或改写历史raw refs。
+
+v22以无DDL SELECT 1登记按owner保留的Git JSON草稿续修及已证停止的原生RPC暂态失败准入。忽略这些持久身份与结算边界的v21及更旧writer必须拒绝；结构化执行仍复用v6 read/edit，不改写旧请求、输出、缺席字段或CAS。升级前停稳writer并结算或保留真实资源，沿既有online backup和组件事务保v1–v21 checksum与全部旧记录。回滚先停新writer，再恢复升级前一致DB备份、原enabled/continuity evidence及相应Git保活引用，保留未采纳的新草稿，禁止删marker降级。

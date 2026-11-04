@@ -30,10 +30,10 @@ function replaceBlob(p: string, content: string): void {
   console.error(`spexcode: stripped the <!-- spexcode --> block from staged ${p} (the block is working-tree context, never history)`)
 }
 
-export function commitSurgery(proj = process.cwd()): void {
+export async function commitSurgery(proj = process.cwd()): Promise<void> {
   // (1) unconditional materialize — machine-fixable state (exclude entries, filter binding, kind flips)
   // is repaired BEFORE the index is inspected, so the inspection below judges against fresh masks.
-  try { materialize(proj) } catch (e) {
+  try { await materialize(proj) } catch (e) {
     if (process.env.SPEXCODE_SYNC_HOOK_MODE) throw e
     console.error(`spexcode: pre-commit materialize failed (${(e as Error).message}) — footprint may be stale this commit`)
   }

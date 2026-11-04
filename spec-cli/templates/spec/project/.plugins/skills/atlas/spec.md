@@ -12,6 +12,15 @@ Draw the spec tree's pictures: one `diagram.json` beside each node's `spec.md` t
 The format, the rules and the loop for a single diagram live in `spex guide diagram` — read it before drawing.
 This skill is the campaign around that loop.
 
+When writing or revising a spec, use `## raw source` for detailed business logic in plain language: who needs
+it, what triggers it, preconditions, rules and decision branches, exceptions, and observable results. Translate
+technical source documents into that account; do not copy their jargon, function names, code paths or
+implementation sequence. Preserve every supported business condition, limit and outcome; plain language must
+not become a vague summary. Keep the original intent's scope; do not lift implementation constraints from the
+expanded section into raw source. Explain a technical term only when it is itself a necessary business concept. Put source
+attribution, implementation details, code references and uncertain inferences in `## expanded spec`; do not
+invent business rules or claim a paraphrase is a verbatim human quote.
+
 1. **Scope.** The user names one node, a subtree, or the whole tree. `spex graph` lists the tree;
    `spex spec search <topic>` finds a node by what it is about.
 2. **Choose what deserves a picture.** A node whose body explains how its children fit together gets an

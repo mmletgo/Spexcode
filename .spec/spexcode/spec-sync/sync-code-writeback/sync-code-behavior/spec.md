@@ -3,12 +3,34 @@ title: 冻结三方行为分类与独立审查
 status: active
 code:
   - spec-cli/src/sync/code-behavior.ts
+related:
+  - spec-cli/src/sync/code-behavior.test.ts
 ---
 ## raw source
 
 外部代码和两边同改应依据真实共同验证基线自动协调；文本重叠不是业务冲突，模型自身错误不能成为新需求或批准。
 
 ## expanded spec
+
+P1精确后置门禁可对已审refactor分类提出非权威回审：只接同operation、原输入/组合/读取及计划绑定的已结算拒绝round，finding须命中原refactor的affectedIds与其真实changedPaths治理owner。原analysisRef及原分析、P1 resultRef/candidateDigest、完整finding、匹配原beforeDigest的真实旧/新业务行与代码差量一并进入postGateReview。该语义质疑参与新的分析inputDigest，使旧accept及readyAnalysis不跨质疑承接；真实Agent重新analyze并由独立Agent审查，可改判allowed_change，也可维持refactor要求P1恢复错误改写。程序不改kind、不采纳被拒候选为事实或raw，不扩AC/VERIFY/生命周期授权。认证原Git分析稿仅按原bytes迁为本轮临时材料，明确来源且不继承已校验资格；旧只读成功Native输出须沿原完整请求、schema、seed、trace及completed资源认证后才迁为临时JSON，不能伪造历史Git稿。
+
+新Native P0在本attempt尚无code_behavior派发时显式冻结code-behavior-draft-v1；已有reserved/read请求不补协议。分析与独审共用[[sync-stage-worktree]]的真实Git临时JSON草稿：每个owner与purpose独立路径，业务schema作为同seed只读sidecar，只有该草稿可正常提交，final只返回summary。程序先保活原blob再解析JSON及验证精确schema；syntax/schema错误和原bytes留在原Git证明中，下一attempt沿同input/readSet/selection/partition/schema/owner接线，只overlay原字节到当前真实seed，不在prompt重答正文，不将失败材料升格为raw、事实、批准或业务候选。repairDiagnostics仍绑定真实prompt/request，但不改变该协议的业务inputDigest；输入、schema、seed与原正常提交身份继续核验。
+
+分析通过程序语义门后保留其draft OID/resultCommit及原请求ref、summary回执与真实Native trace；只有独审格式/schema失败时在同业务输入重验该原分析并只续原review文件，重新开启独立审查，不重做analyze。业务独审repair或后置语义拒绝清除该续审资格，回原分析草稿修复并重新独审。独审仍须原摘要、changedPaths/change.id完整覆盖、独立session/thread与空findings accept。旧Native只读格式失败仅在authenticateNativeRejectedFinal核原请求、精确schema/input/owner和已停止removed资源后，才可将认证CAS原bytes/errors作为下一seed临时输入材料；provenance保原Native plan/checkpoint，不伪造旧Git稿，新Agent正常提交后才形成新Git身份。缺少精确旧schema/input的材料不跨绑定复用，旧已审结果不被追补草稿协议。
+
+新native-worktree操作的P0使用真实composed seed（含UI受控raw差量），以保活私有commit暴露明确的历史角色投影，代理自由读取仓库及git show角色ref。提示只含真实changedPaths、相关Spec、作者需求差量、历史角色refs、授权/不可改oracle、必要事实和诊断，不发送完整frozen树或bodyRef账本；resolutions独审以实际整合候选tree作为seed。inputDigest绑定完整逻辑输入与实际可见tree，dispatch另绑定prompt/schema；异树不得复用。readPaths是责任投影，checkedPaths可含实际存在且非host-private的自由读取文件；事实仍核真实代码、partition.factSourcePaths及原业务授权，changedPaths/所有变化与独审覆盖仍严格。新工作树不要求optional/required逐字Native消费proof；下文bodyRef、reader与完整覆盖证明规则只用于无工作流标记的旧操作/单测，原旧请求及proof不改写。
+
+分区本次分析路径由原 partition.changedPaths 联合完整不可变组合证据中、精确命中本区 source/factSourcePaths、writePaths 或 target 文件角色且可读取的真实冲突推导；shared readPaths 和宽目录授权不授予 owner，单独的可读角色、未来 writer 也不制造实际变化。proposal.changes.paths 必须逐项属于该本次冻结集合，resolution 仍须满足原精确写权限。独审前按同一集合拒绝越界内容，以 behavior_analysis_invalid 保留 partitionId、expectedChangedPaths、invalidPaths 和完整原 proposal，沿既有按区 repairDiagnostics 反馈。局部只要求自身组合冲突的整合或具体业务发现；原完整全局证据由 [[sync-partition-execution]] 在最终合并逐项闭合。guidanceContractVersion v7 同时约束生成与独审并进入唯一输入摘要，旧v6及更早/无版本accept不被新请求缓存承接；已有reserved请求、旧分析/计划/ref和全部旧CAS原字节不回填或改签，摘要不匹配沿现有固定请求门拒绝，正式新attempt才形成新请求。原输出schema、partition_binding及写权限门禁保持。
+
+Native worktree分区分析brief复用本区业务约束：每个facts.source只给一个完整text；newNodes只能来自本区unownedSourcePaths和本次schema候选，候选为空或maxItems为0时返回[]；Root/接口分区不能替兄弟源码分区提出叶。此提示不收窄Native worktree自由读取，也不要求frozen-reader或逐字消费证明。
+
+AC提案的每个变化依据若位于本区writePaths之外，且按 [[sync-contract-evolution]] 同一业务变化、REQ raw变化及精确作者差量判据在冻结旧/当前图中没有真实变化，则P1无权使其变化；独审前以behavior_analysis_invalid携带目标AC、该来源ID/owner/path及完整proposal，沿原分区修复诊断重新分析和独审，不继续以同一不可能授权反复细化。只读但已真实变化的来源、可写的未来依据（包括旧AC来源链外的新依据）仍由原P1和独审完整核验；不机械限制旧来源闭包，不扩写权、不静默过滤已审授权。未变covers义务继续保留，但不是AC变化授权；拒绝候选仅为诊断，不是用户意图。
+
+模型调用期限沿 [[structured-session-runtime]] 原样传递，明确 null 不装调用计时器；生成与独审、完整读取及各自业务门禁保持。
+
+分区投影保留尚未初始化的意图资源：精确选择中的 contract/flow 若 before、delivery、source 三个 owner 均为 null，原 residual 元数据及 null 语义仍进入分析和独审，不猜测路径或丢弃资源；存在真实 owner 时仍按本区 readPaths 投影。无 owner 元数据不成为契约正文、既有稳定业务义务、读取证明或写入授权，原 selection、scope 及其摘要不被改写。
+
+分区协调可在既有完整冻结context生成唯一inputDigest后、任何Native派发前消费严格匹配的已审analysis checkpoint；此接缝不另算业务摘要，不改变原检查范围、checkedPaths/checkedChangeIds、独立session/thread或完整输入验证。原分析/ref/traces保持，来源与当前fence的承接证明由协调器保存；失败或未审原件不返回为已审结果，修复诊断仍只作当前失败分区的数据。
 
 [[sync-code-writeback]] 的行为分析复用独立受限native会话及既有budget/checkpoint。完整旧source、已验证delivery/newsource、共同coveredScope和冻结raw/规则/调用/测试字节进入分析，原意与真实外部差量分别保留；未读取上下文或超预算拒绝，不截断断言。构建与审查session/thread独立，输出及完整readSet/policy/composed/input绑定；审查重新检查每个变化和实际影响路径。
 
@@ -20,17 +42,35 @@ code:
 
 交付内容被来源接受时属于三方回声，不能将详细表再次升为用户新授权；仅不同于旧来源与已交付业务含义的真实raw/REQ/RULE/TR作者差量形成authorChanges。裁决范围由不可变request及原独审所选finding程序派生结构化authority；既有ID只取旧图依赖闭包，新图闭包仅接新ID，候选不能靠新连边扩权。新的裁决独审全部findings保持有效，即使ID恰与已选择历史finding相同也阻其依赖。
 
+没有成对已验证基线且精确selection的bytePair/intentPair全部为null时，当前精确绑定request/analysis/finding的authority可用原完整独审实际读取的composed契约图求旧范围。该图必须绑定原inputId及原analysis.composedDigest，并受原冻结readPaths和当前读取授权共同限定；受控正文的原composed可不同于source快照，不能改取source或当前图。历史authority、oldFrozen及verifiedDelivery语义不变，不制造已验证基线；当前新连边仍不能扩大旧ID范围。
+
 公开作者删除：已采纳交付的准确作者基准中旧节点存在、新source真正缺失，独审allowed_change和对应Spec null整合方案成立时，程序从旧图生成全部旧身份逐项退役授权。当前裁决退役还须非keep选择、所选原finding精确含节点及全部旧身份范围；普通局部规则裁决不能删除整节点。无需调用者预注入plan退役权限，不能凭模型任意列表删验收。
 
 受审Spec raw整合保sourceRaw真实来源及原immutable作者patch、deliveryRaw历史交付，resolvedRaw为完整相容整合，expectedRaw仅由真实原choice程序追加说明。proof在同analysis独审hash内；作者afterRaw/changedIds保持真实差量。真实raw-only作者种子只能经具体已独审AC提案、明确派生RULE/TR集合及目标旧来源关系授权；独立B裁决不阻作者A，也不赋未列无关规则改义权限。raw整合先按真实作者基准、source和delivery的Unicode细粒度编辑合成：无冲突部分逐字保留，只有双方真正交叠的不同局部编辑可由独审自动相容重述。裁决本身不豁免该边界；keep恢复被删Spec仅能恢复精确所选历史原raw，随后程序追加choice说明。产品源码排除.spec内治理/插件资源；未治理但已commit产品源码亦必须完整分析及独审治理，不依赖未提交diff才发现。
 
-changedPaths从已采纳交付的逐路径作者基准与当前source真实差量，再联合delivery到composed差量形成；旧source完整上下文仍保留，已ff接受的生成Spec/tests不再次当本轮改动。模型resolutions不得提前写未来治理叶或未改路径，普通合法变化交后续细化/生成；事实复用须source/text逐字相同，affectedIds只用契约图稳定身份，错误明确路径及非法ID便于自动修复。
+changedPaths从已采纳交付的逐路径作者基准与当前source真实差量，再联合delivery到composed差量形成；旧source完整上下文仍保留，已ff接受的生成Spec/tests不再次当本轮改动。精确selection的path binding为pairId:null时，base/delivery:null表示没有验证配对，不表示HEAD中该路径缺席；两段实际树差量保留既有比较条目（无共同基线时为HEAD），已commit且未改的只读上下文不造新增，真实修改、新增和删除仍须受审，已commit未治理业务源码仍经原newNodes/GAP归属门。无pair路径的旧source同样保留该真实旧来源全文，使删除文件仍在readablePaths内可完整受审；verifiedDelivery继续缺席，不把HEAD冒充共同已验证基线。真实pair中的base/delivery:null仍按对象缺席删除对应比较条目及旧source/verifiedDelivery视图。模型resolutions不得提前写未来治理叶或未改路径，普通合法变化交后续细化/生成；事实复用须source/text逐字相同，affectedIds只用契约图稳定身份，错误明确路径及非法ID便于自动修复。
 
 AC提案的非作者raw来源必须精确引用本次已校验facts；单独的规则标识不是已绑定事实。独审checkedPaths只声明实际冻结读取且位于授权readPaths内的具体文件，元数据清单、目录名和符号链接不能冒充完整读取。独审路径校验失败时仍携带同次完整审查结果供下一轮诊断，保留业务遗漏和反例；该失败不产生分析批准或新授权。
 
-分析与独审输入前置 requiredChangedPaths 和具体 readablePaths，后者从 oldSource/newSource/verifiedDelivery/composedFiles 的完整文本求出并逐路径标明所在快照；目录前缀授权覆盖新未跟踪源码，删除文件仍核旧全文，元数据或链接不是全文。虚拟冻结快照是唯一输入权威，cwd 的旧 HEAD 不替代冻结字节。必读集合保持真实 changedPaths；不得自动补 checkedPaths 冒充模型已读。前置清单及完整原上下文、repairDiagnostics 全部保留，超过2MiB由 [[frozen-context-reader]] 在同一受限执行器无损读取；分析和独审各自核完整原生读取证明。总预算仍约束，缺失或不完整读取拒绝，不截断正文或诊断。
+行为分析Native schema在派发前将`acceptanceChanges.items.id`限制为`oldFrozen`与`current`冻结图中既有AC身份的并集；并集为空时设置`acceptanceChanges.maxItems: 0`，不生成空enum。Native派发与本地`outputErrors`使用同一动态schema。该身份enum不替代目标AC必须对应合法已审规则变化、affectedIds和真实来源链的运行时授权门禁。
 
-拒绝诊断以 approved:false 的 JSON 保存当次完整 proposal、尚未批准的 analysis 和 review（在各阶段实际产生时），分列 missingPaths/missingChangeIds/unknownChangeIds、身份摘要或会话不一致、verdict 和 findings；路径错误仍保同次业务证据及反例。AC复合门禁给出目标类型、同一 allowed_change 中缺失的 affectedId、不支撑的 ruleIds、非法规则类型及 source 是否绑定。AC ruleIds 只列本次变化依据，其他未改 covers 义务保持；不得拼接多个 allowed_change 的并集授权。既有 failure.message 进入下一轮 repairDiagnostics 供逐项修复，不重复嵌入整个冻结上下文；前轮提案、未通过的 accept 或伪造批准仅是数据，不能产生基线、授权或替代新独审。
+Native worktree新派发schema将changes[].affectedIds限制为old/current冻结图graph.items的并集，覆盖所有真实item类型；changes[].ruleIds与acceptanceChanges[].ruleIds仅包含按既有kind门识别的REQ/RULE/TR。空候选用maxItems:0表达，不生成空enum；无合法规则时acceptanceChanges也禁止提案。该schema只约束新Native派发，后置ID、规则kind、AC来源和变更授权门不变；已接受的同摘要v6缓存仍可复用，raw-only空图下GAP/conflict可保留空身份数组。
+
+分析与独审输入前置 requiredChangedPaths、unownedSourcePaths/unownedSourcePathCount 和具体 readablePaths；未治理源码子集与后置归属门复用同一判据，首次纳管的已存在/已提交实现及空初始化文件均按原角色纳入，不以 allowed_change 分组或旧文件身份替代真实 newNodes/GAP/conflict。显式 sourcePaths 的 v2 code_to_spec 即使源码只读，也按本区实际changed/read/owner集合发现和审核未治理代码；新叶源码候选与Spec叶写入授权分离。newNodes 必须引用原全局授权targets中的非空raw父Spec，且该父全文在本区冻结readPaths中可读；该叶只可创建在原全局writePaths授权覆盖的父Spec目录下。分区可从本区target或contextNodeIds/readPaths投影该精确父Spec资格，不把全局writePaths回填为局部源码/测试写权。newNodes 只绑定已有上层raw的对应职责，不产生新业务政策。readablePaths 从 oldSource/newSource/verifiedDelivery/composedFiles 的完整文本求出并逐路径标明所在快照；目录前缀授权覆盖新未跟踪源码，删除文件仍核旧全文，元数据或链接不是全文。虚拟冻结快照是唯一输入权威，cwd 的旧 HEAD 不替代冻结字节。必读集合保持真实changedPaths；不得自动补checkedPaths冒充模型已读。前置清单及完整原上下文、repairDiagnostics全部保留，超过2MiB由 [[frozen-context-reader]] 在同一受限执行器无损读取；分析和独审各自核完整原生读取证明。总预算仍约束，缺失或不完整读取拒绝，不截断正文或诊断。
+
+分析和独审共同收到从冻结正文解析的 contractItems.previous/current 完整项，作为既有稳定身份及义务的索引；精确 selection 的资源名不替代契约定义，未通过 P1 结构检查或独审的候选不成为既有义务；已接受 P1 仍由后续冻结复用和生成保护，不成为 raw 或新的作者授权。raw-only 初始化尚无稳定业务 ID 时，按真实 raw、源码及完整测试分析，允许空 affectedIds/ruleIds，无阻塞发现时随后由 P1 建立详细契约并独审；不能虚构既有 ID 或仅因尚未展开提出 GAP，也不能借此跳过完整业务分析、独审、P1、生成或验证门禁。
+
+raw-only 空关联例外由程序从冻结输入判定：没有成对已验证基线，精确 selection 也没有任何非 null bytePair/intentPair，且旧/当前契约图均无稳定业务 ID。该情形真实 conflict/coverage_gap 同样允许空 affectedIds/ruleIds，保原分类、路径、证据、反例及程序生成的 finding 身份进入独审；批准分析不等于批准业务完成，由 [[sync-coordinator]] 显式阻塞尚无契约关联的已审发现。存在任一已验证基线或任一图有稳定 ID 时仍要求非空 affectedIds；未知 ID、非法 ruleId、路径和完整独审门禁保持。
+
+rawlessSpecPaths仅列出本轮changedPaths中的既有Spec节点：作者基准、当前source与composed必须逐字相同；有已验证基线时，verifiedDelivery也必须存在且逐字相同；无基线时delivery角色可以缺席。这些角色均不得含该节点raw，且不得存在当前裁决或生命周期写授权。对这些路径，分析只用facts/changes完整覆盖业务行为并交 [[sync-elaboration]] 初始化，必须保留原Spec字节且不产生任何resolution（包括content:null）；根/上游raw只作为只读上下文，不能填成该叶raw。真实作者/交付正文或raw差异、缺失的基准字节及显式裁决/生命周期授权不进入该列表，继续沿原相容整合、raw保真和逐项删除门禁处理。
+
+冻结 plan.sourcePaths 存在时，它是业务源码角色的唯一依据；同一角色判据约束未治理文件发现、新业务 newNodes 及后置业务归属门。可读/可写的纯测试正文不因 Python 文件名或 helper 形式变成业务源码；实际测试改动仍由 actualTreeDiff 纳入完整分析和独审，读取与写入授权及既有 JS 测试过滤不变。历史计划缺角色字段时保持原发现和归属语义，不从当前配置推断或修改其历史权限。
+
+拒绝诊断以 approved:false 的 JSON 保存当次完整 proposal、尚未批准的 analysis 和 review（在各阶段实际产生时），分列 missingPaths/missingChangeIds/unknownChangeIds、身份摘要或会话不一致、verdict 和 findings；路径错误仍保同次业务证据及反例。AC复合门禁给出目标类型、同一 allowed_change 中缺失的 affectedId、不支撑的 ruleIds、非法规则类型及 source 是否绑定。AC ruleIds 只列本次变化依据，其他未改 covers 义务保持；不得拼接多个 allowed_change 的并集授权。无治理代码归属验证按原判据一次收集全部缺失 disposition 的路径，在同一拒绝的 details.missingCodePaths 与 missingCodePathCount 中返回完整列表及数量；首项仍可作为摘要，任何一项遗漏仍拒绝，空初始化文件、newNodes 和真实 GAP 的门禁不变。既有 failure.message 进入下一轮 repairDiagnostics 供逐项修复，不重复嵌入整个冻结上下文；前轮提案、未通过的 accept 或伪造批准仅是数据，不能产生基线、授权或替代新独审。
+
+Spec resolution沿原path/write/change/mode与完整读取门后，若同path任一真实冻结作者基准/source/composed/delivery可由parseParts解析分节，而nonnull提案完全不可解析，则在逐项语义义务校验前以behavior_analysis_invalid给出分节格式诊断及path、真实换行/字面反斜线n计数，完整原proposal保持。计数不参与拒绝，不反转义、规范化、删除或代写resolution；不要求两节、非空raw或AC数量来判格式。rawless原门优先，null删除、普通单行代码、合法Spec正文内字面反斜线n及真实三方/裁决/生命周期继续原规则。真正未消费交付义务失配时，原sameContractBusinessMeaning谓词不变，details.unconsumedObligation保path/id及contractBusinessMeaning的expected/proposed（缺项null），不把格式破坏误归某个业务ID。修复提示只在无真实整合必要时建议空resolutions/交P1；需要整合仍须保未消费义务，不凭无Git冲突泛禁resolution。
+
+独审 Native 请求的 schema 用本轮单值字符串枚举冻结 inputDigest 与 analysisDigest，并在说明中给出精确值，不能让模型从其他上下文摘要猜测。findings 只承载需要修正的问题，accept 必须为空数组，不把肯定说明当问题提交；最终身份、完整覆盖、verdict 与问题数组门禁保持，不由程序删改模型 findings 或补写批准。
 
 所选裁决scope复用 [[sync-contract-evolution]]：旧FLOW/STEP仅取所选规则旧闭包与原所选finding affectedIds交集；共享上游REQ只在当前精确不可变请求/旧分析/所选finding绑定下加入REQ本身，不扩其消费者或借新图边授权其他旧目标。分析阶段只判断有限eligible来源范围；最终REQ改义仍须同一已审allowed_change及所选旧规则的实际政策定义变化，并接受原P1独审。AC仍绑定同一具体allowed_change、实际来源事实和精确提案，不能凭REQ扩大整个AC集合。
 
@@ -49,3 +89,40 @@ raw/shared prose 的 broad affected closure只保证完整路径进入分析，�
 行为分析只能派生本次受审变化对应的验收或退役授权，不能产生恢复退役身份的授权。恢复同一历史对象须由正式撤销入口、固定不可变历史请求及原已结算 receipt 逐项证明；普通作者 raw 或模型声明不能替代该来源链。
 
 成组补偿的新 source 已应用删除或移动时，controlledBeforeFiles 独立保留 immutable group.before 的真实完整文本并纳入独审 readablePaths；该当前作者前置不叫 verifiedDelivery。缺少旧交付基线时，旧 authority 仍能从这一真实 preimage 检查节点迁移及原业务 ID，不能因组后文件消失丢掉必读全文或退役义务。
+
+冻结文本视图直接消费 [[sync-input-snapshot]] 同次批量读取中已核对 OID 的完整原字节，不在摘要读取后为每个 blob 再启动 Git。输出路径顺序、全文和摘要保持与逐对象读取一致；readPaths、symlink mode、host-private 和 UTF-8/二进制过滤保持原判据，不截断、不跨调用缓存，也不改变后续作者差量或独审语义。单次 `analyzeCodeBehavior` 的冻结输入准备阶段按同一 `commonDir` 与完整 tree OID 复用已通过 `readTree/onObject` 校验的全量entries和授权 `FrozenFile`；不同 tree 不混用，每个快照角色保持独立Map及必要对象副本，selection/受控替换只改变对应角色。复用仅覆盖本次冻结装配及其作者/交付差量树读取，不扩展 `readPaths`；路径顺序、mode、全文、UTF-8/BOM/CRLF、binary与symlink编码保持逐角色旧语义。函数本地缓存最后一次装配后立即清空，且在首个Native派发前释放；所有 `verifySnapshot`、OID校验、授权、后置归属和独审门保持原样，下一次调用仍重新验证Git对象并拒绝缺失或损坏的对象。
+
+冻结上下文中的 nonTextFiles 保留授权路径的完整非文本 Git 对象，按 path/mode/OID 去重并列出真实所属快照及 digest、kind、encoding、content；binary 以完整 base64 表示，symlink 仅保存链接 blob 的目标字节（有效 UTF-8 否则 base64），永不跟随宿主目标。精确 selection 的真实pair中base/delivery null同步表示对象缺席，不借当前HEAD伪造已验证旧全文；无pair时仅oldSource保留真实旧来源对象，verifiedDelivery仍缺席。受控 before/source 及 intent artifact 同样按真实对象投影。readablePaths 的 nonTextFiles.快照名只指向这些完整 payload，元数据和链接目标路径本身仍不能冒充目标正文；真实非文本变化、删除和 requiredChangedPaths/changes/checkedPaths 覆盖保持，不通过过滤非文本消除缺口。所有字节先经原 Git OID 核验，readPaths 与 host-private 边界保持；原文本视图只含真实 UTF-8 普通文件。完整字节可读不等于已理解图片或 wheel 业务含义，raw 真实依赖而不可解释的语义仍须具体 GAP，不自动改成 allowed_change 或产生业务批准。
+
+冻结输入显式给出真实 snapshotTree，并保留 composed.tree 身份。相同 Git 树只证明对应路径的对象字节及 mode 相同，不证明语义相容或业务通过。分析不得编造输入/工具未提供的 hash、AST 或执行校验证据，不把手工重抄、转义或反转义片段的推算冒称冻结原对象校验；真正不可解释且原意依赖的语义继续保留具体 GAP，完整独审与后续门禁不变。
+
+行为分析与独立评审使用协调器传入的固定操作 model，历史缺省 sol；不把 model 加入业务语义上下文或改写旧证明，实际结构化请求仍绑定模型，遵循 [[sync-model-selection]]。
+
+发送给 Native 分析/独审前的最后 JSON 使用 `textEncoding: "sha256-body-entry-v3"` 与 `bodyIndex`。六个文本视图保留路径顺序、各对象角色与来源；intentArtifactFiles/authorByteProjections保留path/mode/oid/digest，只把text改为bodyRef；nonTextFiles同样只把content改为bodyRef，原kind/encoding与全部元数据不变。bodyRef是原content字符串的SHA-256；每个唯一optional content用一个UTF8 entry（json-string-v1）；所有角色升级结束后，required content按bodyRef排序合成一个json-object-v1对象entry，值直接使用完整字符串的JSON编码，避免逐小文件Native往返。所有U+FEFF写为JSON转义，避免任一对齐分段开头被旧reader去掉；读取全文后JSON解析一次，required再按bodyRef取值还原原字符串，保留BOM、中文、CRLF及完整base64。bodyIndex自述entryId、kind、encoding、运输字节sha256/byteLength、原字符串contentByteLength和required（required locator共用完整对象entry的运输身份）；原Git对象digest继续绑定实际原字节。同一正文任一角色必读即必读，去重不丢来源、路径或mode。正文不嵌入必读元数据，另附纯JSON frozenEntries，由prepareFrozenPrompt在真实attempt/policy与派发摘要前冻结；持久计划只保留最终ref。required来自changedPaths的全部实际版本（含删除前）、全部冻结业务规格全文及frontmatter code/related实际引用（raw-only也适用，复用既有精确路径、目录、glob、#symbol语法）、AC.test、mandatoryTests、code事实来源、当前作者before/after、controlled与intent artifacts。无关未改且未引用的文本、二进制或链接本体均可optional，仍完整存在同一私有清单、授权与inputDigest中，链接不跟随宿主。inputDigest绑定完整逻辑元数据、全部正文SHA和角色；不递归提取任意元数据字符串。分析实际引用的facts/changes/newNodes/resolutions路径必须在分析精确turn完整覆盖；独审除了自己的checkedPaths，还须独立覆盖所批准分析的全部这些引用路径，不能借分析证明。缺证明、部分覆盖、目录或只有bodyRef均不算全文；证明只来自可信runner。其余ownership、checkedPaths、序列化前业务对象及后续完整独审、生成与验收门禁不变。旧已持久请求和证明原样恢复，不就地改写旧wire或响应。
+
+明确的语义元数据也复用同一bodyRef/CAS：contractItems的完整item、compositionEvidence中各before/delivery/source状态及其entry/item/rawSource/businessProse、路径/冲突/artifact的TreeEntry、controlledAuthorPatch/Group的before/next/changes，以及baselinePair和每个baselineSelection binding的完整pair。字符串仍按原UTF8字节引用；对象先JSON序列化为正文，引用标记json:true，取回正文后JSON.parse并递归解开其中明确bodyRef。所有此类语义引用均为required，与文件正文合入原required json-object运输entry，不建立另一套证明或放宽原覆盖门。原before/source/delivery角色、path/mode/OID/digest、semanticDigest、item全部字段、授权集合、residual resource/pairId/adopted/changed/broadChange、controlled原request与集合成员/顺序、每个baseline binding、null及缺席语义全部保留。仅内容字节相同才共享，不按业务ID猜测相同；同ID不同内容保持不同ref，权威selection的矛盾仍由原组合验证拒绝。投影在原readCompositionEvidence及selection核验之后，只改变发给模型的表示，不改持久业务对象/摘要或扩大本区读取闭包。新guidanceContractVersion为code-behavior-guidance-v2，使旧指导已审cache不得自动沿用；旧请求/失败Native仍保持原件。
+
+当 `composed.authorProjectionBlob` 直接指向 `canonical-author-projection-v1`，或指向 `selected-author-projection-v1` 且沿其 `priorProjection` 引用链解析到该版本时，冻结上下文额外提供受 `plan.readPaths` 限定且排除 host-private 路径的 `authorByteProjections`，保留每项 snapshotId/path 与原 before/after mode/OID/digest，并读取Git对象中的完整 UTF-8 正文。两端正文使用同一 body table。各文本视图保留其实际来源/派生树字节；compositionEvidence 的 source 可来自 author-clean 投影，需按 `authorByteProjections` 核对对应 snapshotId/path 的投影前后对象，不把此角色差异当数据损坏或新业务政策。非 canonical 语义投影元数据保持原样。
+
+
+v2 分区执行携带显式 partition.id/changedPaths；分析及独审仅对本区真实差量负责，不把其它未治理文件重新并入普通事件。原 v1 没有该字段时保留历史发现语义。plan.commitTrigger.before 可在没有共同验证基线时提供真实旧来源，verifiedDelivery 仍为空，不冒充已验证交付。前态必须同物理来源且完整snapshot验证通过。分区 native 输入按本区读取闭包投影来源、正文索引、语义残差、裁决及路径元数据；程序仍用原完整不可变对象核授权。聚合仅保独立原件引用与唯一变更并集，不伪造一次全局模型独审。
+
+
+无验证基线的v2提交前态可证明真实作者删除：作者差量对照真实oldSource，不把不存在的delivery当作已经消费了删除。冻结verifiedDelivery角色仍为空，不能冒称验证交付；退役逐项授权和独审继续要求真实before→source删除、原义务ID及null resolution。
+
+
+分区裁决仍向生成和独审保留原previousComposed不可变引用及previousReadPaths元数据，证明原完整独审契约图的真实身份与范围；只投影previous.analysis的本区事实及变更，不能丢失原组合身份。原范围元数据不是本区未提供正文的已读证明，也不扩充本区写权限或伪造verifiedDelivery角色。
+
+分区行为输入仅在partition存在时冻结其id、changedPaths和factSourcePaths；若plan显式声明sourcePaths，factSourcePaths取本区sourcePaths角色路径中非Spec项，sourcePaths缺失的旧计划仍沿用本区writePaths排除.spec的发现语义。factSourcePaths不等同于源码实现写权限。新增code事实必须引用本区factSourcePaths中的真实冻结文件和非空anchor，同一source只能有一个完整text；共享只读测试或依赖可在change.evidence中举证，但不能成为本区新增事实来源。与plan.facts的source和text逐字一致时继续沿用既有可信事实检查，不受本区owner路径限制。
+
+分区任务的六个文本视图、readablePaths、contractItems及plan均是本区读取闭包的局部投影，局部缺席不证明全树不存在；其它分区的既有叶不在本区重新创建。snapshotTree及composed.tree仍是真实冻结全树身份，不把其身份当额外读取授权，也不补造全仓inventory或扩大正文。显式sourcePaths的v2 code_to_spec分析schema逐请求克隆，将本区changedPaths/readablePaths中按sourcePaths和未治理判据得到的真实业务源码作为精确newNodes.codePath候选，即使本区writePaths不含只读源码也可提出治理叶。新Spec叶的写入另须从原全局writePaths中证明父Spec目录已授权；分区仅投影本区targets或contextNodeIds中、且在本区readPaths内可读的原global target父Spec，不把全局目录复制进本区writePaths。候选非空使用精确enum和数量上限，空候选或没有授权父Spec时用maxItems:0且不产生空enum。Spec、测试或已治理路径不能从局部缺席推成新业务源码；原上层raw、读取、父Spec写授权、事实归属、后置newNodes及全局并集门禁继续核验，schema限域不成为新授权。
+
+读取完整性由真实工具和程序记录，业务evidence引用真实路径、符号或测试断言，不手工复述task/body entry的hash、长度或读取区间；原完整读取证明、独审核对及禁止编造工具未提供hash的门禁保持，不能以减少业务证据元数据复述豁免实际读取。
+
+只读 v2 `code_to_spec` 的新治理父身份必须可消歧：程序从最终授权父路径投影当前冻结契约图中具有非空 raw 的节点，以 `{nodeId, path}` 同时提供真实身份和定位信息，并将同一列表冻结给分析与独审。仅该分支的 `newNodes.parentNodeId` schema 使用此列表里的精确 nodeId enum；提示要求填写 nodeId，path 只用于定位。所有有效父节点都可选且不设默认。没有有效父节点或没有本区源码候选时 `maxItems` 为 0，不生成空 enum。模型返回的 `parentNodeId` 仍按当前节点 ID 查找，父目录授权、源码归属及完整读取门禁继续有效；路径值不得自动转换为 ID。v1 和非 `code_to_spec` 方向保持原 schema 与校验语义。
+
+行为分析提案的 `newNodes` 在Native阶段保持schema定义的 `{codePath, parentNodeId, basis}`；通过身份、摘要和schema校验后，程序解析为持久 `analysis.newNodes` 的 `{nodeId, path, codePath, rawSource}`，不改变持久格式或 `analysisDigest`。独审请求同时携带本次原 `newNodeProposals` 与该解析结果。独审按codePath一一核父ID、basis、授权且真实读取的父raw、叶path目录和raw引用，并继续独立核代码与业务职责；不要求解析结果复现parentNodeId/basis，也不因程序解析而跳过语义审查。`repairDiagnostics`保留为历史失败数据，不能替代或补写本次提案，也不成为当前政策。
+
+首次纳管或changedPaths/requiredChangedPaths纳入仅表示覆盖任务，不意味着Spec作者原意已变或必须返回全文。逐路径核作者基准、oldSource/newSource/composed及真实verifiedDelivery；当Spec正文同字节、交付缺席或同字节、authorChanges无该路径且没有未消费语义残差、overlap.conflict或明确受控裁决/生命周期授权时，分析返回空resolutions，不重抄、格式化或转义Spec，也不在分析阶段扩规格。详细契约交P1，renderer复制冻结raw。独审同样不把该空输出判为遗漏；真实差量、相容重叠、逐ID语义残差及明确裁决仍要求精确完整整合并按原raw字节来源、独审与权限门禁验证。
+
+行为指导合同以guidanceContractVersion显式进入同一冻结context及唯一inputDigest；指导职责变化使旧无该版本的已审analysis不匹配，必须重新分析与独审，不改source input/policy或旧ref/findings。Native worktree分析和独审共用短业务语义：raw、冻结源码与完整测试可核实行为、但缺少治理叶/稳定ID/FLOW/AC/覆盖映射时，以facts与newNodes交P1，不将治理缺席单独报coverage_gap；真正coverage_gap须指出仍未决的重大业务事实/政策及可观察后果，conflict仅用于原意与真实外部行为不可同时成立。未违背既有REQ的表示形式、错误名、参数类型、序列化及语义等价顺序可沿合法code事实与REQ沿用；明确原意下的实现/测试缺陷不是业务GAP，只能在原写权允许时交P2修复，readonly code_to_spec缺口保留readonly_implementation_gap。独审遇到只由待生成治理工作造成的GAP必须repair；真实业务未知仍保留。此指导不以字符串匹配自动重分类，不收窄Native自由读取或改变既有ID、权限、AC及unbound门。

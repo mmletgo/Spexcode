@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
-import { StructuredSessionError } from './session-structured-policy.js'
+import { StructuredSessionError, StructuredSessionTransportError } from './session-structured-policy.js'
 
 export const FROZEN_READER_POLICY = 'codex-frozen-read-only-v2' as const
 export const FROZEN_READ_TOOL = 'spex_read_frozen' as const
@@ -13,15 +13,44 @@ export type FrozenContextManifest = { version: 1; binding: FrozenContextBinding;
 /** 路径仅供可信控制面使用，不能进入模型 prompt 或工具参数。 */
 export type FrozenContextRef = { version: 1; contextDigest: string; manifestPath: string }
 export type FrozenContextInput = { id: string; label: string; required?: boolean } & ({ kind: 'utf8' | 'binary'; bytes: Buffer } | { kind: 'absent' })
+/** 可经 JSON 拷贝的通用冻结条目；字节在冻结时才物化，避免 Buffer 被拷贝成普通对象。 */
+export type FrozenEntryJson = { id: string; label: string; required?: boolean } & ({ kind: 'utf8'; text: string } | { kind: 'binary'; base64: string } | { kind: 'absent' })
 export type FrozenReadArguments = { contextDigest: string; entryId: string; startByte: number; endByte: number }
 export type FrozenReadReceipt = { threadId: string; turnId: string; callId: string; arguments: FrozenReadArguments; responseDigest: string }
-export type FrozenReadProof = { contextDigest: string; threadId: string; turnId: string; receipts: FrozenReadReceipt[]; coveredEntryIds: string[]; historyDigest: string }
+type FrozenCoverageProof = { contextDigest: string; threadId: string; turnId: string; receipts: FrozenReadReceipt[]; coveredEntryIds: string[]; historyDigest: string }
+export type FrozenReadProof = FrozenCoverageProof & ({ version?: never } | { version: 2; visibilityDigest: string; toolOutputTokenLimit: number } | { version: 3; provider: 'claude-code'; promptId: string; model: string; cliVersion: string; maxReadBytes: 65536; maxResultSizeChars: 500000 } | { version: 4; provider: 'zcode'; providerId: string; modelId: string; cliVersion: string; cliSha256: string; inputId: string; promptDigest: string; witnessDigest: string })
+type ClaudePublicContentBlock = { type: string; id?: string; name?: string; input?: unknown; tool_use_id?: string; content?: string | Array<{ type: string; text: string }>; text?: string; is_error?: boolean }
+export type ClaudePublicMessage = { role: string; content: string | ClaudePublicContentBlock[] }
+const CLAUDE_TRUNCATED_RECOVERY_TEXT = 'Your response above was cut off mid-stream. Resume directly from where it stops — no apology, no recap. If none of it survived, answer the request from the start.'
+const CLAUDE_OUTPUT_LIMIT_RECOVERY_TEXT = 'Output token limit hit. Resume directly — no apology, no recap of what you were doing. Pick up mid-thought if that is where the cut happened. Break remaining work into smaller pieces.'
+const CLAUDE_STRUCTURED_OUTPUT_ENFORCE_TEXT = '[structured-output-enforce] You MUST call the StructuredOutput tool to complete this request. Call this tool now.'
+const CLAUDE_RECOVERY_TEXTS = [CLAUDE_TRUNCATED_RECOVERY_TEXT, CLAUDE_OUTPUT_LIMIT_RECOVERY_TEXT]
+type ClaudeCompaction = { runningTurnSends: { uuids: string[]; openerUuid: string }; preservedSegment?: { headUuid: string; anchorUuid: string; tailUuid: string }; preservedMessages?: { anchorUuid: string; uuids: string[]; allUuids: string[] } }
+type ClaudeRequestRetry = { source: string; level: string; retryInMs: number; retryAttempt: number; maxRetries: number; errorDigest: string }
+export type ClaudePublicRecord = { type: string; sessionId: string; uuid?: string; parentUuid?: string | null; promptId?: string; requestRef?: string; sourceToolAssistantUUID?: string; isMeta?: boolean; turnCompanion?: boolean; message?: ClaudePublicMessage; id?: string; hash?: string; shapeHash?: string; base?: string; keep?: number; tail?: string[]; model?: string; toolNames?: string[]; placeholderValid?: boolean
+  subtype?: string; logicalParentUuid?: string; compactMetadata?: ClaudeCompaction
+  requestRetry?: ClaudeRequestRetry
+  compactSummary?: { transcriptOnly: boolean; promptUuids?: string[]; messageDigest: string; textOnly: boolean }
+  compactSummaryDigest?: string
+}
+export type ClaudeFrozenWitness = { version: 1; provider: 'claude-code'; cliVersion: string; model: string; sessionId: string; userUuid: string; promptId: string; prompt: string; nativeHistoryPath: string; history: ClaudePublicRecord[]; mcpHistory?: { path: string; toolNames: string[] }; echo: { uuid: string; session_id: string; message: ClaudePublicMessage }; result: { type: string; subtype: string; is_error: boolean; session_id: string; uuid: string; user_message_uuid: string; user_message_uuids: string[]; structured_output: unknown }; initTools: string[] }
+export type FrozenVisibleOutput = { callId: string; output: string | { type: 'input_text'; text: string }[]; historyTokenLimit: number }
+type FrozenVisibility = { toolOutputTokenLimit: number; outputs: FrozenVisibleOutput[] }
 export type FrozenNativeItem = { type: string; id?: string; namespace?: string | null; tool?: string; arguments?: unknown; status?: string; success?: boolean | null; contentItems?: unknown }
 export type FrozenToolResponse = { contentItems: { type: 'inputText'; text: string }[]; success: true }
 const sha = (bytes: Buffer | string): string => createHash('sha256').update(bytes).digest('hex')
 const encode = (value: unknown): Buffer => Buffer.from(JSON.stringify(value), 'utf8')
 function stale(message: string): never { throw new StructuredSessionError('stale_result', message) }
 const bytesPath = (ref: FrozenContextRef, hash: string): string => join(dirname(ref.manifestPath), 'bytes', hash)
+function isFrozenVisibleOutput(value: unknown): value is FrozenVisibleOutput['output'] {
+  return typeof value === 'string' || Array.isArray(value) && value.every(item => item !== null && typeof item === 'object' && !Array.isArray(item) && item.type === 'input_text' && typeof item.text === 'string')
+}
+function frozenVisibleTexts(output: FrozenVisibleOutput['output']): string[] {
+  return typeof output === 'string' ? [output] : output.map(item => item.text)
+}
+function frozenVisibleTokenCost(output: FrozenVisibleOutput['output']): number {
+  return frozenVisibleTexts(output).reduce((cost, text) => cost + Math.ceil(Buffer.byteLength(text, 'utf8') / 4), 0)
+}
 
 /** 将调用者已冻结的字节写入源码树之外的私有内容寻址存储。 */
 export function freezeContext(input: { directory: string; sourceRoot: string; binding: FrozenContextBinding; entries: readonly FrozenContextInput[] }): FrozenContextRef {
@@ -54,15 +83,41 @@ export function freezeContext(input: { directory: string; sourceRoot: string; bi
   return { version: 1, contextDigest, manifestPath: join(destination, 'manifest.json') }
 }
 
-/** 在任何派发摘要之前冻结超大正文；同键同内容返回同一个稳定引用。 */
-export function prepareFrozenPrompt<T extends { root: string; prompt: string; requestKey: string; inputDigest: string; frozenContext?: FrozenContextRef }>(request: T, options: { directory: string; binding?: Pick<FrozenContextBinding, 'policyDigest' | 'attemptId'> }): T & { frozenContext?: FrozenContextRef } {
+function frozenEntryInputs(entries: readonly FrozenEntryJson[]): FrozenContextInput[] {
+  return entries.map(entry => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) stale('frozen entry must be pure JSON')
+    if (entry.kind === 'utf8') {
+      if (typeof entry.text !== 'string') stale('utf8 frozen entry requires text')
+      return { id: entry.id, label: entry.label, required: entry.required, kind: 'utf8', bytes: Buffer.from(entry.text, 'utf8') }
+    }
+    if (entry.kind === 'binary') {
+      if (typeof entry.base64 !== 'string' || entry.base64.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(entry.base64)) stale('binary frozen entry requires canonical base64')
+      const bytes = Buffer.from(entry.base64, 'base64')
+      if (bytes.toString('base64') !== entry.base64) stale('binary frozen entry requires canonical base64')
+      return { id: entry.id, label: entry.label, required: entry.required, kind: 'binary', bytes }
+    }
+    if (entry.kind === 'absent') return { id: entry.id, label: entry.label, required: entry.required, kind: 'absent' }
+    stale('frozen entry kind is invalid')
+  })
+}
+
+/** 在任何派发摘要之前冻结超大正文或调用者给出的纯 JSON 条目；同键同内容返回同一个稳定引用。已有 ref 原样返回。 */
+export function prepareFrozenPrompt<T extends { root: string; prompt: string; requestKey: string; inputDigest: string; model?: string; frozenContext?: FrozenContextRef; frozenEntries?: readonly FrozenEntryJson[] }>(request: T, options: { directory: string; binding?: Pick<FrozenContextBinding, 'policyDigest' | 'attemptId'> }): Omit<T, 'frozenEntries'> & { frozenContext?: FrozenContextRef } {
   const binding = { requestKey: request.requestKey, inputDigest: request.inputDigest, ...options.binding }
   if (request.frozenContext) { assertFrozenBinding(request.frozenContext, binding); return request }
-  if (Buffer.byteLength(request.prompt, 'utf8') <= FROZEN_PROMPT_THRESHOLD_BYTES) return request
-  const frozenContext = freezeContext({ directory: options.directory, sourceRoot: request.root, binding,
-    entries: [{ id: 'task', label: 'Complete original task and frozen context', kind: 'utf8', bytes: Buffer.from(request.prompt, 'utf8') }] })
-  const prompt = `The complete original task, instructions, and context are frozen without truncation in entry task. Read its entire required content using ${FROZEN_READ_TOOL}, then follow that original task and return its requested structured final answer. Byte offsets are end-exclusive. No shell, paths or live data are available.\n${frozenContextPrompt(frozenContext)}`
-  return { ...request, prompt, frozenContext }
+  const declared = request.frozenEntries ?? []
+  const promptBytes = Buffer.byteLength(request.prompt, 'utf8')
+  const claude = request.model?.startsWith('claude:') === true
+  const zcode = request.model?.startsWith('zcode:') === true
+  if (!claude && !zcode && declared.length === 0 && promptBytes <= FROZEN_PROMPT_THRESHOLD_BYTES) return request
+  const entries = frozenEntryInputs(declared)
+  if (claude || zcode || promptBytes > FROZEN_PROMPT_THRESHOLD_BYTES) entries.unshift({ id: 'task', label: 'Complete original task and frozen context', kind: 'utf8', bytes: Buffer.from(request.prompt, 'utf8'), required: true })
+  const frozenContext = freezeContext({ directory: options.directory, sourceRoot: request.root, binding, entries })
+  const prompt = zcode ? `Read every required frozen entry completely using mcp__frozen__spex_read_frozen. Entry task contains the original instructions. Follow those instructions after reading. Each call reads at most 4096 original bytes; continue from original endByte, never decodedEndByte. Do not use files, shell, discovery, subagents, or other tools. Return only the requested JSON object, without prose or Markdown.\n${directFrozenContextPrompt(frozenContext, 4096)}` : claude ? `Read every required frozen entry completely using mcp__frozen__spex_read_frozen. Entry task contains the original instructions. Follow those instructions after reading. Each call reads at most 65536 original bytes; continue from original endByte, never decodedEndByte. Do not use files, shell, discovery, subagents, or other tools. Return the requested structured answer through StructuredOutput.\n${claudeFrozenContextPrompt(frozenContext)}` : promptBytes > FROZEN_PROMPT_THRESHOLD_BYTES // dead-words-ok: 历史冻结请求的固定 prompt 参与原请求摘要，恢复必须保持原字节。
+    ? `The complete original task, instructions, and context are frozen without truncation in entry task. Read its entire required content using ${FROZEN_READ_TOOL}, then follow that original task and return its requested structured final answer. Byte offsets are end-exclusive; continue from the response's original endByte, never decodedEndByte. No shell, paths or live data are available.\n${frozenContextPrompt(frozenContext)}`
+    : `${request.prompt}\n${frozenContextPrompt(frozenContext)}`
+  const { frozenEntries: _entries, ...rest } = request
+  return { ...rest, prompt, frozenContext }
 }
 
 /** 只从内容摘要已锚定的清单恢复条目，不读取 live source 或模型提供的路径。 */
@@ -84,28 +139,10 @@ export function assertFrozenBinding(ref: FrozenContextRef, expected: FrozenConte
     if (binding[key] !== expected[key]) stale(`frozen context ${key} differs from its exact request binding`)
 }
 
-/** 模型索引只有逻辑条目、内容身份和字节长度，不泄露控制面路径。 */
-export function frozenContextPrompt(ref: FrozenContextRef): string {
-  const manifest = readFrozenManifest(ref)
-  return JSON.stringify({ tool: FROZEN_READ_TOOL, contextDigest: ref.contextDigest, maxReadBytes: FROZEN_READ_MAX_BYTES, entries: manifest.entries })
-}
+type FrozenReadPlanRange = { startByte: number; endByte: number }
+type FrozenReadBatch = { entryId: string; ranges: FrozenReadPlanRange[] }
 
-export const frozenReadTool = {
-  type: 'function', name: FROZEN_READ_TOOL,
-  description: 'Read immutable frozen context only. Read every required unique content fully before the final answer. Byte ranges are end-exclusive and must preserve UTF-8 boundaries. No paths, live files, shell, or network are available.',
-  inputSchema: { type: 'object', properties: { contextDigest: { type: 'string' }, entryId: { type: 'string' }, startByte: { type: 'integer', minimum: 0 }, endByte: { type: 'integer', minimum: 0 } }, required: ['contextDigest', 'entryId', 'startByte', 'endByte'], additionalProperties: false },
-} as const
-
-/** 校验系统边界的工具参数，并生成可由原生历史逐字节复核的唯一返回值。 */
-export function readFrozenRange(ref: FrozenContextRef, value: unknown): { arguments: FrozenReadArguments; response: FrozenToolResponse } {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) stale('frozen reader requires an argument object')
-  const args = value as FrozenReadArguments
-  if (Object.keys(args).sort().join(',') !== 'contextDigest,endByte,entryId,startByte' || args.contextDigest !== ref.contextDigest || typeof args.entryId !== 'string') stale('frozen reader context identity or argument shape differs')
-  const entry = readFrozenManifest(ref).entries.find(item => item.id === args.entryId)
-  if (!entry) stale('frozen reader entry is not in this context')
-  if (!Number.isSafeInteger(args.startByte) || !Number.isSafeInteger(args.endByte) || args.startByte < 0 || args.endByte < args.startByte || args.endByte > entry.byteLength || args.endByte - args.startByte > FROZEN_READ_MAX_BYTES || (entry.byteLength > 0 && args.endByte === args.startByte)) stale('frozen reader range is invalid or exceeds its bounded response')
-  const bytes = readFileSync(bytesPath(ref, entry.sha256))
-  if (bytes.length !== entry.byteLength || sha(bytes) !== entry.sha256) stale('frozen entry bytes differ from their immutable digest')
+function serializeFrozenRange(entry: FrozenEntry, args: FrozenReadArguments, bytes: Buffer): { arguments: FrozenReadArguments; response: FrozenToolResponse } {
   const range = bytes.subarray(args.startByte, args.endByte)
   let decodedStartByte = args.startByte, decodedEndByte = args.endByte
   if (entry.kind === 'utf8') {
@@ -120,6 +157,102 @@ export function readFrozenRange(ref: FrozenContextRef, value: unknown): { argume
   return { arguments: { ...args }, response: { contentItems: [{ type: 'inputText', text }], success: true } }
 }
 
+function frozenReadOutputTokenLimitForEntries(ref: FrozenContextRef, entries: readonly FrozenEntry[]): number {
+  let maximumBytes = 1
+  for (const entry of entries) {
+    const args = { contextDigest: ref.contextDigest, entryId: entry.id, startByte: entry.byteLength, endByte: entry.byteLength }
+    const metadata = { ...args, kind: entry.kind, sha256: entry.sha256, byteLength: entry.byteLength, rangeSha256: entry.sha256 }
+    const rangeBytes = Math.min(entry.byteLength, FROZEN_READ_MAX_BYTES)
+    const bytes = entry.kind === 'utf8'
+      ? encode({ ...metadata, text: '', decodedStartByte: entry.byteLength, decodedEndByte: entry.byteLength }).length + 6 * (rangeBytes + 6)
+      : entry.kind === 'binary' ? encode({ ...metadata, base64: '' }).length + 4 * Math.ceil(rangeBytes / 3)
+        : encode({ ...metadata, absent: true }).length
+    maximumBytes = Math.max(maximumBytes, bytes)
+  }
+  return Math.max(10_000, Math.ceil(maximumBytes / 4))
+}
+
+function frozenReadBatches(ref: FrozenContextRef, entries: readonly FrozenEntry[], tokenLimit: number, maxReadBytes = FROZEN_READ_MAX_BYTES): FrozenReadBatch[] {
+  const verifiedBytes = new Map<string, Buffer>(), plannedContent = new Set<string>(), batches: FrozenReadBatch[] = []
+  for (const entry of entries) {
+    if (!entry.required) continue
+    const contentKey = `${entry.kind}:${entry.sha256}:${entry.byteLength}`
+    if (plannedContent.has(contentKey)) continue
+    plannedContent.add(contentKey)
+    let bytes = verifiedBytes.get(entry.sha256)
+    if (!bytes) {
+      bytes = readFileSync(bytesPath(ref, entry.sha256))
+      if (bytes.length !== entry.byteLength || sha(bytes) !== entry.sha256) stale('frozen entry bytes differ from their immutable digest')
+      verifiedBytes.set(entry.sha256, bytes)
+    }
+    if (bytes.length !== entry.byteLength) stale('frozen entry bytes differ from their immutable digest')
+    const ranges: FrozenReadPlanRange[] = [], costs: number[] = []
+    for (let startByte = 0; entry.byteLength === 0 ? startByte === 0 : startByte < entry.byteLength;) {
+      const endByte = Math.min(entry.byteLength, startByte + maxReadBytes)
+      const args = { contextDigest: ref.contextDigest, entryId: entry.id, startByte, endByte }
+      const response = serializeFrozenRange(entry, args, bytes).response.contentItems[0].text
+      ranges.push({ startByte, endByte })
+      costs.push(Math.ceil(Buffer.byteLength(response, 'utf8') / 4))
+      if (entry.byteLength === 0) break
+      startByte = endByte
+    }
+    for (let index = 0; index < ranges.length;) {
+      const paired = ranges[index + 1] !== undefined && costs[index] + costs[index + 1] <= tokenLimit
+      batches.push({ entryId: entry.id, ranges: paired ? [ranges[index], ranges[index + 1]!] : [ranges[index]] })
+      index += paired ? 2 : 1
+    }
+  }
+  return batches
+}
+
+/** 模型索引只含冻结条目元数据与由冻结正文派生的有界读取计划，不泄露控制面路径。 */
+export function frozenContextPrompt(ref: FrozenContextRef): string {
+  const manifest = readFrozenManifest(ref)
+  const toolOutputTokenLimit = frozenReadOutputTokenLimitForEntries(ref, manifest.entries)
+  return JSON.stringify({ tool: FROZEN_READ_TOOL, contextDigest: ref.contextDigest, maxReadBytes: FROZEN_READ_MAX_BYTES,
+    toolOutputTokenLimit, execMaxOutputTokens: Math.ceil(toolOutputTokenLimit * 1.2), entries: manifest.entries,
+    readBatches: frozenReadBatches(ref, manifest.entries, toolOutputTokenLimit) })
+}
+
+/** Claude直接调用同一reader；字符上限独立于Codex的exec与token证明。 */
+export function claudeFrozenContextPrompt(ref: FrozenContextRef): string {
+  return directFrozenContextPrompt(ref, 65536, 500000)
+}
+
+/** 直接MCP执行器共用冻结索引，保留各自已经验证的单次读取上限。 */
+function directFrozenContextPrompt(ref: FrozenContextRef, maxReadBytes: number, maxResultSizeChars?: number): string {
+  const manifest = readFrozenManifest(ref)
+  return JSON.stringify({ tool: 'mcp__frozen__spex_read_frozen', contextDigest: ref.contextDigest, maxReadBytes, ...(maxResultSizeChars === undefined ? {} : { maxResultSizeChars }),
+    rangeRule: `Copy each planned startByte/endByte exactly. ${maxReadBytes} is only a maximum span, never the end of a shorter entry. Never exceed entry.byteLength.`,
+    entries: manifest.entries, readBatches: frozenReadBatches(ref, manifest.entries, 0, maxReadBytes) })
+}
+
+/** 按冻结清单的真实元数据和最坏 JSON 转义，界定单个模型可见 inputText 的固定预算。 */
+export function frozenReadOutputTokenLimit(ref: FrozenContextRef): number {
+  const manifest = readFrozenManifest(ref)
+  // Codex 0.160.0 charges ceil(inputText UTF-8 bytes / 4); the exec allowance adds its existing 20% margin.
+  return frozenReadOutputTokenLimitForEntries(ref, manifest.entries)
+}
+
+export const frozenReadTool = {
+  type: 'function', name: FROZEN_READ_TOOL,
+  description: 'Read immutable frozen context only. The index readBatches are a plan, not extra authorization: read every required unique content fully, using one exec per planned batch and at most its two listed adjacent ranges. Set each exec first-line // @exec: {"max_output_tokens": H} with H = execMaxOutputTokens from the index; call each listed read in order and print every returned string verbatim with its own text(await tools.spex_read_frozen(...)) call. If exec returns Script running with cell ID, do not rerun any read or advance the batch; call wait with {cell_id, yield_time_ms: 10000, max_tokens: H}, repeat with the same cell_id if still running, and wait for Script completed before continuing. A running marker is not read content; use the completed wait output, preserving each full text item. Optional entries remain available for reads as needed. Byte ranges are end-exclusive. Continue with startByte equal to the response original endByte; decodedStartByte/decodedEndByte only describe UTF-8 display expansion and are never cursors. No paths, live files, shell, or network are available.',
+  inputSchema: { type: 'object', properties: { contextDigest: { type: 'string' }, entryId: { type: 'string' }, startByte: { type: 'integer', minimum: 0 }, endByte: { type: 'integer', minimum: 0 } }, required: ['contextDigest', 'entryId', 'startByte', 'endByte'], additionalProperties: false },
+} as const
+
+/** 校验系统边界的工具参数，并生成可由原生历史逐字节复核的唯一返回值。 */
+export function readFrozenRange(ref: FrozenContextRef, value: unknown): { arguments: FrozenReadArguments; response: FrozenToolResponse } {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) stale('frozen reader requires an argument object')
+  const args = value as FrozenReadArguments
+  if (Object.keys(args).sort().join(',') !== 'contextDigest,endByte,entryId,startByte' || args.contextDigest !== ref.contextDigest || typeof args.entryId !== 'string') stale('frozen reader context identity or argument shape differs')
+  const entry = readFrozenManifest(ref).entries.find(item => item.id === args.entryId)
+  if (!entry) stale('frozen reader entry is not in this context')
+  if (!Number.isSafeInteger(args.startByte) || !Number.isSafeInteger(args.endByte) || args.startByte < 0 || args.endByte < args.startByte || args.endByte > entry.byteLength || args.endByte - args.startByte > FROZEN_READ_MAX_BYTES || (entry.byteLength > 0 && args.endByte === args.startByte)) stale('frozen reader range is invalid or exceeds its bounded response')
+  const bytes = readFileSync(bytesPath(ref, entry.sha256))
+  if (bytes.length !== entry.byteLength || sha(bytes) !== entry.sha256) stale('frozen entry bytes differ from their immutable digest')
+  return serializeFrozenRange(entry, args, bytes)
+}
+
 /** 在发送RPC回复前持久保存真实返回字节；RPC id不作为可恢复的调用身份。 */
 export function persistFrozenRead(ref: FrozenContextRef, identity: { threadId: string; turnId: string; callId: string }, value: unknown): { receipt: FrozenReadReceipt; response: FrozenToolResponse } {
   const { arguments: args, response } = readFrozenRange(ref, value)
@@ -130,19 +263,86 @@ export function persistFrozenRead(ref: FrozenContextRef, identity: { threadId: s
   return { receipt: { ...identity, arguments: args, responseDigest }, response }
 }
 
+/** 仅提取精确 turn 中真实配对的公开 exec/wait 回复；不把完整rollout等同于模型实际可见的history。 */
+export function frozenVisibleOutputs(rollout: string, turnId: string): FrozenVisibleOutput[] {
+  if (!rollout.endsWith('\n')) throw new StructuredSessionTransportError('exact frozen visible rollout has not flushed its final record yet')
+  let currentTurn: string | undefined, completed = false
+  const calls = new Map<string, 'custom' | 'function'>(), outputs: FrozenVisibleOutput[] = [], returned = new Set<string>()
+  for (const line of rollout.split('\n')) {
+    if (!line.trim()) continue
+    const record = JSON.parse(line) as { type?: string; payload?: { type?: string; turn_id?: string; call_id?: string; name?: string; output?: unknown }; metadata?: { fallback_token_limit_override?: number } }
+    const payload = record.payload
+    if (record.type === 'turn_context' || record.type === 'event_msg' && payload?.type === 'task_started') currentTurn = payload?.turn_id
+    if (record.type === 'event_msg' && payload?.type === 'task_complete' && payload.turn_id === turnId) {
+      if (currentTurn !== turnId) stale('frozen visible completion does not belong to the active exact turn')
+      completed = true; currentTurn = undefined
+    }
+    if (currentTurn !== turnId || record.type !== 'response_item') continue
+    if (payload?.type === 'custom_tool_call' || payload?.type === 'function_call') {
+      const expectedName = payload.type === 'custom_tool_call' ? 'exec' : 'wait'
+      if (payload.name !== expectedName || !payload.call_id || calls.has(payload.call_id)) stale('frozen visible history contains an invalid or repeated host call')
+      calls.set(payload.call_id, payload.type === 'custom_tool_call' ? 'custom' : 'function')
+    } else if (payload?.type === 'custom_tool_call_output' || payload?.type === 'function_call_output') {
+      const outputKind = payload.type === 'custom_tool_call_output' ? 'custom' : 'function'
+      if (!payload.call_id || calls.get(payload.call_id) !== outputKind || returned.has(payload.call_id) || !isFrozenVisibleOutput(payload.output)
+        || !Number.isSafeInteger(record.metadata?.fallback_token_limit_override) || record.metadata!.fallback_token_limit_override! <= 0)
+        stale('frozen visible output is not bound to its exact exec/wait call and history budget')
+      returned.add(payload.call_id)
+      outputs.push({ callId: payload.call_id, output: payload.output, historyTokenLimit: record.metadata!.fallback_token_limit_override! })
+    }
+  }
+  if (!completed) throw new StructuredSessionTransportError('exact frozen visible rollout has not persisted its completed turn yet')
+  if (returned.size !== calls.size) stale('frozen visible history contains an exec call without its output')
+  return outputs
+}
+
+/** 校验所有外层文本的真实预算，并逐项证明内层冻结正文原样进入模型可见回复。 */
+function checkFrozenVisibility(ref: FrozenContextRef, visibility: FrozenVisibility, responses: string[]): void {
+  if (visibility.toolOutputTokenLimit !== frozenReadOutputTokenLimit(ref)) stale('frozen visible evidence differs from the fixed response budget')
+  const callIds = new Set<string>(), texts = new Set<string>()
+  for (const outer of visibility.outputs) {
+    if (!outer.callId || callIds.has(outer.callId) || !isFrozenVisibleOutput(outer.output)
+      || outer.historyTokenLimit !== Math.ceil(visibility.toolOutputTokenLimit * 1.2)
+      || frozenVisibleTokenCost(outer.output) > outer.historyTokenLimit)
+      stale('frozen outer output exceeds or differs from its actual fixed history budget')
+    callIds.add(outer.callId)
+    for (const text of frozenVisibleTexts(outer.output)) texts.add(text)
+  }
+  if (responses.some(text => !texts.has(text))) stale('frozen response was not returned verbatim in the exact model-visible exec output')
+}
+
 /** 以精确原生turn的真实arguments和result重建coverage；不信模型声明或本地回执。 */
-export function proveFrozenReads(ref: FrozenContextRef, identity: { threadId: string; turnId: string }, items: readonly FrozenNativeItem[]): FrozenReadProof {
-  const receipts: FrozenReadReceipt[] = [], ranges = new Map<string, [number, number][]>(), ids = new Set<string>()
-  const manifest = readFrozenManifest(ref)
+export function proveFrozenReads(ref: FrozenContextRef, identity: { threadId: string; turnId: string }, items: readonly FrozenNativeItem[], visibility?: FrozenVisibility): FrozenReadProof {
+  const receipts: FrozenReadReceipt[] = [], ids = new Set<string>()
+  const responses: string[] = []
   for (const item of items) {
     if (item.type !== 'dynamicToolCall') continue
     if (!item.id || ids.has(item.id) || item.tool !== FROZEN_READ_TOOL || item.namespace != null || item.status !== 'completed' || item.success !== true) stale('exact frozen turn contains an invalid, pending or foreign dynamic tool call')
     ids.add(item.id)
     const { arguments: args, response } = readFrozenRange(ref, item.arguments)
     if (JSON.stringify(item.contentItems) !== JSON.stringify(response.contentItems)) stale('native frozen read result bytes differ from the immutable entry')
+    responses.push(response.contentItems[0].text)
     const { receipt } = persistFrozenRead(ref, { ...identity, callId: item.id }, args)
     receipts.push(receipt)
-    const entry = manifest.entries.find(entry => entry.id === args.entryId)!
+  }
+  const coveredEntryIds = frozenReadCoverage(ref, receipts)
+  const history = encode(items), historyDigest = sha(history), historyPath = join(dirname(ref.manifestPath), 'histories', historyDigest)
+  if (!existsSync(historyPath)) writeFileSync(historyPath, history, { mode: 0o400 })
+  else if (sha(readFileSync(historyPath)) !== historyDigest) stale('persisted native frozen history was modified')
+  const proof = { contextDigest: ref.contextDigest, ...identity, receipts, coveredEntryIds, historyDigest }
+  if (!visibility) return proof
+  checkFrozenVisibility(ref, visibility, responses)
+  const visible = encode({ ...identity, ...visibility }), visibilityDigest = sha(visible), visiblePath = join(dirname(ref.manifestPath), 'histories', visibilityDigest)
+  if (!existsSync(visiblePath)) writeFileSync(visiblePath, visible, { mode: 0o400 })
+  else if (sha(readFileSync(visiblePath)) !== visibilityDigest) stale('persisted frozen visible history was modified')
+  return { ...proof, version: 2, visibilityDigest, toolOutputTokenLimit: visibility.toolOutputTokenLimit }
+}
+
+/** 所有执行器共享原requested字节覆盖，原生见证格式由各执行器单独核验。 */
+export function frozenReadCoverage(ref: FrozenContextRef, receipts: readonly FrozenReadReceipt[]): string[] {
+  const manifest = readFrozenManifest(ref), ranges = new Map<string, [number, number][]>()
+  for (const receipt of receipts) {
+    const args = receipt.arguments, entry = manifest.entries.find(entry => entry.id === args.entryId)!
     const key = `${entry.kind}:${entry.sha256}:${entry.byteLength}`
     const intervals = ranges.get(key) ?? []; intervals.push([args.startByte, args.endByte]); ranges.set(key, intervals)
   }
@@ -154,17 +354,479 @@ export function proveFrozenReads(ref: FrozenContextRef, identity: { threadId: st
     if (intervals?.length && end === entry.byteLength) coveredEntryIds.push(entry.id)
     else if (entry.required) stale(`required frozen entry ${entry.id} was not completely read in this exact native turn`)
   }
-  const history = encode(items), historyDigest = sha(history), historyPath = join(dirname(ref.manifestPath), 'histories', historyDigest)
-  if (!existsSync(historyPath)) writeFileSync(historyPath, history, { mode: 0o400 })
-  else if (sha(readFileSync(historyPath)) !== historyDigest) stale('persisted native frozen history was modified')
-  return { contextDigest: ref.contextDigest, ...identity, receipts, coveredEntryIds, historyDigest }
+  return coveredEntryIds
+}
+
+/** 与Claude原生api-request.tail一致的递归键排序消息摘要；不触及私密推理。 */
+export function claudeMessageDigest(value: unknown): string {
+  const sorted = (item: unknown): unknown => Array.isArray(item) ? item.map(sorted) : item !== null && typeof item === 'object'
+    ? Object.fromEntries(Object.keys(item).sort().map(key => [key, sorted((item as Record<string, unknown>)[key])])) : item
+  return sha(encode(sorted(value)))
+}
+
+export function claudeMessageBlocks(message: ClaudePublicMessage): ClaudePublicContentBlock[] {
+  return typeof message.content === 'string' ? [{ type: 'text', text: message.content }] : message.content
+}
+
+function checkClaudeRequestRetry(retry: ClaudeRequestRetry | undefined): void {
+  if (!retry || !['request_retry', 'connection_retry'].includes(retry.source) || retry.level !== 'error'
+    || !Number.isSafeInteger(retry.retryInMs) || retry.retryInMs < 0
+    || !Number.isSafeInteger(retry.retryAttempt) || retry.retryAttempt < 1
+    || !Number.isSafeInteger(retry.maxRetries) || retry.maxRetries < retry.retryAttempt
+    || !/^[a-f0-9]{64}$/.test(retry.errorDigest)) stale('Claude API error is not an exact native request retry')
+}
+
+/** 原生重试只保留链节点与诊断摘要，错误正文不成为模型输入或读取证据。 */
+function claudeRequestRetry(row: Record<string, unknown>): ClaudeRequestRetry {
+  const error = row.error as Record<string, unknown> | undefined
+  if (typeof row.uuid !== 'string' || !row.uuid || typeof row.parentUuid !== 'string' || !row.parentUuid
+    || row.agentId !== undefined || !error || typeof error !== 'object' || Array.isArray(error)
+    || typeof error.message !== 'string' || typeof error.formatted !== 'string') stale('Claude request retry has an unknown native error shape')
+  const retry = { source: row.source as string, level: row.level as string, retryInMs: row.retryInMs as number, retryAttempt: row.retryAttempt as number, maxRetries: row.maxRetries as number, errorDigest: claudeMessageDigest(error) }
+  checkClaudeRequestRetry(retry)
+  return retry
+}
+
+/** 连接重试须重发原完整输入，并由其后真实assistant消费；不增加公开投影字段。 */
+function checkClaudeConnectionRetries(history: readonly ClaudePublicRecord[], paramsDigests: ReadonlyMap<string, string>): void {
+  if (!history.some(row => row.requestRetry?.source === 'connection_retry')) return
+  const model = history.find(row => row.type === 'api-request')?.model
+  if (!model) stale('Claude connection retry has no preceding actual API model')
+  const requests = new Map<string, string[]>(), shapes = new Set<string>()
+  let latestChainNode: string | undefined
+  let current: { id: string; shapeHash: string; paramsDigest: string; hashes: string[] } | undefined
+  let pending: typeof current, retriedRequest: string | undefined
+  for (const row of history) {
+    if (row.type === 'api-request-shape') shapes.add(row.shapeHash!)
+    if (row.type === 'api-request') {
+      const hashes = claudeApiRequestHashes(row, requests, shapes, model)
+      requests.set(row.id!, hashes)
+      current = { id: row.id!, shapeHash: row.shapeHash!, paramsDigest: paramsDigests.get(row.id!)!, hashes }
+      if (pending) {
+        if (current.shapeHash !== pending.shapeHash || current.paramsDigest !== pending.paramsDigest || JSON.stringify(hashes) !== JSON.stringify(pending.hashes)) stale('Claude connection retry changed its exact API payload')
+        retriedRequest = current.id
+      }
+    }
+    if (row.requestRetry?.source === 'connection_retry') {
+      if (!current || row.parentUuid !== latestChainNode) stale('Claude connection retry lost its preceding request or exact chain tail')
+      pending = current; retriedRequest = undefined
+    }
+    if (pending && (row.type === 'user' || row.subtype === 'compact_boundary')) stale('Claude connection retry inserted a new user or compact boundary before consumption')
+    if (pending && row.type === 'assistant') {
+      if (!retriedRequest || row.requestRef !== retriedRequest || row.parentUuid !== latestChainNode) stale('Claude connection retry lacks exact subsequent API and assistant consumption')
+      pending = undefined
+    }
+    if (row.uuid) latestChainNode = row.uuid
+  }
+  if (pending) stale('Claude connection retry has no subsequent API and assistant consumption')
+}
+
+/** 只提取本专属session的公开调用、回复、主链身份和实际API索引；推理正文与签名不进入证据。 */
+export function readClaudePublicHistory(path: string, sessionId: string): ClaudePublicRecord[] {
+  const source = readFileSync(path, 'utf8')
+  if (!source.endsWith('\n')) throw new StructuredSessionTransportError('Claude native history has not flushed its final record')
+  const records: ClaudePublicRecord[] = []
+  const paramsDigests = new Map<string, string>()
+  let latestAssistant: { uuid: unknown; stopReason: unknown } | undefined
+  for (const line of source.split('\n').filter(Boolean)) {
+    const row = JSON.parse(line) as Record<string, unknown> & { message?: ClaudePublicMessage & { stop_reason?: unknown }; shape?: { tools: { name: string; description?: string; input_schema?: unknown; defer_loading?: boolean }[] }; params?: { model: string } }
+    const compact = row.type === 'system' && row.subtype === 'compact_boundary'
+    const retry = row.type === 'system' && row.subtype === 'api_error'
+    if (!compact && !retry && !['user', 'assistant', 'attachment', 'api-request', 'api-request-shape', 'api-request-blob'].includes(String(row.type))) continue // dead-words-ok: Claude CLI 原生公开事件类型，外部协议名称必须逐字匹配。
+    if (row.type === 'api-request-blob' && row.message?.role !== 'user') continue // dead-words-ok: Claude CLI 原生公开事件类型，外部协议名称必须逐字匹配。
+    if (row.sessionId !== sessionId || row.isSidechain === true) stale('Claude history contains a foreign session or sidechain')
+    if (row.type === 'user' && row.isMeta === true && row.turnCompanion === true && row.message?.role === 'user' && row.message.content === CLAUDE_OUTPUT_LIMIT_RECOVERY_TEXT
+      && (!row.parentUuid || row.parentUuid !== latestAssistant?.uuid || latestAssistant.stopReason !== 'max_tokens')) stale('Claude output-limit companion has no exact preceding max_tokens assistant')
+    const record = Object.fromEntries(['type', 'sessionId', 'uuid', 'parentUuid', 'promptId', 'requestRef', 'sourceToolAssistantUUID', 'isMeta', 'turnCompanion'].filter(key => key in row).map(key => [key, row[key]])) as ClaudePublicRecord
+    if (retry) Object.assign(record, { subtype: 'api_error', requestRetry: claudeRequestRetry(row) })
+    if (compact) {
+      const metadata = row.compactMetadata as ClaudeCompaction | undefined
+      Object.assign(record, { subtype: row.subtype, logicalParentUuid: row.logicalParentUuid, compactMetadata: metadata && { runningTurnSends: metadata.runningTurnSends, ...(metadata.preservedSegment !== undefined ? { preservedSegment: metadata.preservedSegment } : {}), ...(metadata.preservedMessages !== undefined ? { preservedMessages: metadata.preservedMessages } : {}) } })
+    }
+    if (row.type === 'user') {
+      if (row.isCompactSummary === true) {
+        const content: unknown = row.message?.content
+        record.compactSummary = { transcriptOnly: row.isVisibleInTranscriptOnly === true, promptUuids: row.summarizedTurnPromptUuids as string[] | undefined, messageDigest: claudeMessageDigest(row.message), textOnly: row.message?.role === 'user' && (typeof content === 'string' ? content.length > 0 : Array.isArray(content) && content.length > 0 && content.every(block => block?.type === 'text' && typeof block.text === 'string')) }
+      } else record.message = row.message
+    }
+    if (row.type === 'api-request-blob') { // dead-words-ok: Claude CLI 原生公开事件类型，外部协议名称必须逐字匹配。
+      const content: unknown = row.message!.content
+      record.message = typeof content === 'string' ? { ...row.message!, content: claudeMessageBlocks(row.message!) } : row.message
+      if (typeof content === 'string') record.compactSummaryDigest = claudeMessageDigest(row.message)
+      record.hash = String(row.hash)
+    }
+    if (row.type === 'assistant') {
+      record.message = { role: 'assistant', content: claudeMessageBlocks(row.message!).filter(block => block.type === 'tool_use') }
+      latestAssistant = { uuid: row.uuid, stopReason: row.message?.stop_reason }
+    }
+    if (row.type === 'api-request') {
+      Object.assign(record, { id: row.id, shapeHash: row.shapeHash, base: row.base, keep: row.keep, tail: row.tail, model: row.params!.model })
+      paramsDigests.set(record.id!, claudeMessageDigest(row.params))
+    }
+    if (row.type === 'api-request-shape') {
+      record.shapeHash = String(row.shapeHash)
+      record.toolNames = row.shape!.tools.map(tool => tool.name)
+      record.placeholderValid = row.shape!.tools.filter(tool => tool.name === 'DeferredToolPlaceholder').every(tool => tool.description === 'Reserved placeholder that keeps deferred tool loading active; never call this tool.' && tool.defer_loading === true && claudeMessageDigest(tool.input_schema) === claudeMessageDigest({ type: 'object', properties: {} }))
+    }
+    records.push(record)
+  }
+  checkClaudeConnectionRetries(records, paramsDigests)
+  return records
+}
+
+export type ClaudeApiSourceMetadata = { digest: string; role: 'user' | 'assistant' | 'system'; kind: 'cas' | 'transcript-prefix'; sourceUuids: string[]; ordinal: number }
+export type ClaudeApiRequestSourceMetadata = { ordinal: number; messages: ReadonlyMap<string, ClaudeApiSourceMetadata> }
+
+/** 固定原生 producer 的消息摘要：string 转 text 块，递归省略 cache_control；不改成功 proof 的摘要。 */
+export function claudeApiSourceDigest(message: ClaudePublicMessage): string {
+  const withoutCacheControl = (value: unknown): unknown => Array.isArray(value) ? value.map(withoutCacheControl) : value !== null && typeof value === 'object'
+    ? Object.fromEntries(Object.entries(value).filter(([key, item]) => key !== 'cache_control' && item !== undefined).map(([key, item]) => [key, withoutCacheControl(item)])) : value
+  return claudeMessageDigest(withoutCacheControl({ ...message, content: claudeMessageBlocks(message) }))
+}
+
+/** 只为已停失败分类重建 U5 来源；返回消费点角色/UUID/顺序，不返回或持久化正文与私密块。 */
+export function readClaudeApiSourceMetadata(path: string, sessionId: string, model: string): Map<string, ClaudeApiRequestSourceMetadata> {
+  const bytes = readFileSync(path, 'utf8')
+  if (!bytes.endsWith('\n')) throw new StructuredSessionTransportError('Claude native source history has not flushed its final record')
+  const sources = new Map<string, ClaudeApiSourceMetadata>(), snapshots = new Map<string, ClaudeApiRequestSourceMetadata>()
+  const requests = new Map<string, string[]>(), shapes = new Set<string>()
+  const history = readClaudePublicHistory(path, sessionId), original = history.find(row => row.type === 'user' && row.parentUuid === null)
+  if (!original) stale('Claude failed source index has no original user')
+  Array.from(checkClaudeHistoryChain(history, original))
+  const companions = claudeOutputLimitCompanions(history, original)
+  let run: { role: 'user' | 'assistant'; messageId?: string; blocks: ClaudePublicContentBlock[]; uuids: string[] } | undefined
+  for (const [ordinal, line] of bytes.split('\n').filter(Boolean).entries()) {
+    const row = JSON.parse(line) as Record<string, unknown> & { message?: ClaudePublicMessage & { id?: string }; params?: { model?: string } }
+    if (row.type === 'fork-context-ref' || row.turnCompanion && !companions.has(String(row.uuid)))
+      stale('Claude failed source index cannot interpret fork or recovery inputs')
+    const compact = row.type === 'system' && row.subtype === 'compact_boundary'
+    const retry = row.type === 'system' && row.subtype === 'api_error'
+    if (!compact && !retry && !['user', 'assistant', 'attachment', 'api-request-blob', 'api-request', 'api-request-shape'].includes(String(row.type))) continue // dead-words-ok: Claude CLI 原生公开事件类型，外部协议名称必须逐字匹配。
+    if (row.sessionId !== sessionId || row.isSidechain === true || row.agentId !== undefined) stale('Claude failed source index contains a foreign session or sidechain')
+    if (compact) { run = undefined; continue }
+    if (row.type === 'api-request-shape') {
+      if (typeof row.shapeHash !== 'string') stale('Claude failed source index has no shape identity')
+      shapes.add(row.shapeHash)
+    }
+    if (row.type === 'api-request-blob') { // dead-words-ok: Claude CLI 原生公开事件类型，外部协议名称必须逐字匹配。
+      if (!row.message || !['user', 'assistant', 'system'].includes(row.message.role) || typeof row.message.content !== 'string' && !Array.isArray(row.message.content)) stale('Claude failed source CAS has an unknown message role or shape')
+      const digest = claudeApiSourceDigest(row.message)
+      if (row.hash !== digest) stale('Claude failed source CAS differs from its canonical digest')
+      if (sources.get(digest)?.kind !== 'transcript-prefix') sources.set(digest, { digest, role: row.message.role as ClaudeApiSourceMetadata['role'], kind: 'cas', sourceUuids: [], ordinal })
+    }
+    if (row.type === 'user' || row.type === 'assistant') {
+      const message = row.message
+      if (!message || message.role !== row.type || typeof row.uuid !== 'string' || typeof message.content !== 'string' && !Array.isArray(message.content)) stale('Claude failed source transcript has a mismatched role or message identity')
+      if (!run || run.role !== message.role || message.role !== 'user' && !(typeof message.id === 'string' && run.messageId === message.id))
+        run = { role: row.type, ...(typeof message.id === 'string' ? { messageId: message.id } : {}), blocks: [], uuids: [] }
+      run.blocks.push(...claudeMessageBlocks(message)); run.uuids.push(row.uuid)
+      const digest = claudeApiSourceDigest({ role: run.role, content: run.blocks })
+      sources.set(digest, { digest, role: run.role, kind: 'transcript-prefix', sourceUuids: [...run.uuids], ordinal })
+    }
+    if (row.type === 'api-request') {
+      if (typeof row.id !== 'string') stale('Claude failed source request has no exact identity')
+      const hashes = claudeApiRequestHashes({ ...row, model: row.params?.model } as ClaudePublicRecord, requests, shapes, model)
+      snapshots.set(row.id, { ordinal, messages: new Map(hashes.flatMap(digest => sources.has(digest) ? [[digest, sources.get(digest)!] as const] : [])) })
+      requests.set(row.id, hashes)
+    }
+  }
+  return snapshots
+}
+
+/** 只读取专属 MCP 的实际派发名；原生不可用工具回复不能掩盖服务端派发的矛盾证据。 */
+export function readClaudeMcpToolNames(path: string): string[] {
+  return readFileSync(path, 'utf8').split('\n').filter(Boolean).flatMap(line => {
+    const row = JSON.parse(line) as { type: string; request?: { method: string; params?: { name?: string } } }
+    if (row.type !== 'request' || row.request?.method !== 'tools/call') return []
+    if (typeof row.request.params?.name !== 'string') stale('Claude MCP call has no exact tool identity')
+    return [row.request.params.name]
+  })
+}
+
+/** CAS 只登记公开消息字节；来源和消费时点仍须由实际请求逐次核对。 */
+export function readClaudeApiMessageBlobs(history: readonly ClaudePublicRecord[]): Map<string, { content: ClaudePublicContentBlock[]; canonical: boolean; summaries: Set<string> }> {
+  const messages = new Map<string, { content: ClaudePublicContentBlock[]; canonical: boolean; summaries: Set<string> }>()
+  for (const row of history) if (row.type === 'api-request-blob') { // dead-words-ok: Claude CLI 原生公开事件类型，外部协议名称必须逐字匹配。
+    if (!row.message || row.message.role !== 'user' || !Array.isArray(row.message.content) || row.hash !== claudeMessageDigest(row.message) || row.message.content.some(block => !['tool_result', 'text'].includes(block.type))) stale('Claude public API message has invalid bytes or type')
+    const blob = messages.get(row.hash) ?? { content: row.message.content, canonical: row.hash === claudeMessageDigest({ role: 'user', content: row.message.content }), summaries: new Set<string>() }
+    if (row.compactSummaryDigest) blob.summaries.add(row.compactSummaryDigest)
+    messages.set(row.hash, blob)
+  }
+  return messages
+}
+
+/** 按已观察请求重建完整实际 API 输入，不以 tail 片段或未知 base 代替。 */
+export function claudeApiRequestHashes(row: ClaudePublicRecord, requests: ReadonlyMap<string, string[]>, shapes: ReadonlySet<string>, model: string): string[] {
+  const base = row.base ? requests.get(row.base) : []
+  if (!row.id || requests.has(row.id) || !row.shapeHash || !shapes.has(row.shapeHash) || !base || !Number.isSafeInteger(row.keep) || row.keep! < 0 || row.keep! > base.length || !Array.isArray(row.tail) || row.model !== model) stale('Claude API model, tools shape or request history boundary differs')
+  return [...base.slice(0, row.keep), ...row.tail]
+}
+
+/** actual API 的每个工具回复只能引用此前已配对观察到的原公开回复。 */
+export function claudeApiToolResultIds(content: readonly ClaudePublicContentBlock[], responseBlocks: ReadonlyMap<string, ClaudePublicContentBlock>): string[] {
+  return content.filter(block => block.type === 'tool_result').map(block => {
+    const originalBlock = responseBlocks.get(block.tool_use_id!)
+    if (!originalBlock || claudeMessageDigest(originalBlock) !== claudeMessageDigest(block)) stale('Claude merged API tool result differs from its exact native public reply')
+    return block.tool_use_id!
+  })
+}
+
+export type ClaudeRecovery = { text: string; hashes: Set<string>; summaries: Set<string>; requests: Set<string>; consumed: boolean }
+/** 成功路径核已观察续行与结构输出提醒；已停失败分类仍只取输出上限。 */
+export function claudeRecoveryCompanion(row: ClaudePublicRecord, promptId: string | undefined, latestMessage: string | undefined, latestAssistant: string | undefined, outputLimitOnly = false): ClaudeRecovery | null {
+  const enforcement = !outputLimitOnly && row.isMeta === true && row.turnCompanion === undefined && row.message?.role === 'user' && row.message.content === CLAUDE_STRUCTURED_OUTPUT_ENFORCE_TEXT
+  const text = enforcement ? CLAUDE_STRUCTURED_OUTPUT_ENFORCE_TEXT : row.isMeta === true && row.turnCompanion === true && row.message?.role === 'user'
+    ? (outputLimitOnly ? [CLAUDE_OUTPUT_LIMIT_RECOVERY_TEXT] : CLAUDE_RECOVERY_TEXTS).find(text => claudeMessageDigest(row.message) === claudeMessageDigest({ role: 'user', content: text })) : undefined
+  if (text === undefined) return null
+  if (!row.uuid || !promptId || row.promptId !== promptId || row.sourceToolAssistantUUID !== undefined || row.parentUuid !== latestMessage || row.parentUuid !== latestAssistant) stale('Claude recovery companion lost its exact native assistant or original prompt')
+  return { text, hashes: new Set([claudeMessageDigest(row.message), claudeMessageDigest({ role: 'user', content: claudeMessageBlocks(row.message!) })]), summaries: new Set(), requests: new Set(), consumed: false }
+}
+
+/** 已停失败只接纳已支持的输出上限事件，不接纳其它内部提示或压缩。 */
+export function claudeOutputLimitCompanions(history: readonly ClaudePublicRecord[], original: ClaudePublicRecord | undefined): Map<string, ClaudeRecovery> {
+  const companions = new Map<string, ClaudeRecovery>()
+  let latestMessage: string | undefined, latestAssistant: string | undefined
+  for (const row of history) {
+    if (row.type === 'user' && row.uuid !== original?.uuid) {
+      const recovery = claudeRecoveryCompanion(row, original?.promptId, latestMessage, latestAssistant, true)
+      if (recovery) companions.set(row.uuid!, recovery)
+    }
+    if (row.type === 'assistant') latestAssistant = row.uuid
+    if (row.type === 'user' || row.type === 'assistant' || row.type === 'system' && row.subtype === 'api_error') latestMessage = row.uuid
+  }
+  return companions
+}
+
+/** plain或merged API只能包含这条已观察续行的精确文本形态。 */
+export function matchingClaudeRecoveries(recoveries: readonly ClaudeRecovery[], content: readonly ClaudePublicContentBlock[], prompt: string): ClaudeRecovery[] {
+  const texts = content.filter(block => block.type === 'text')
+  return recoveries.filter(recovery => {
+    const text = { type: 'text', text: recovery.text }
+    return JSON.stringify(texts) === JSON.stringify([text]) || JSON.stringify(content) === JSON.stringify([{ type: 'text', text: prompt + '\n' }, text])
+  })
+}
+
+/** 每代续行只能继承其出现后已含精确正文的API请求。 */
+export function recordClaudeRecoveryRequest(recoveries: readonly ClaudeRecovery[], row: ClaudePublicRecord, hashes: readonly string[]): void {
+  for (const recovery of recoveries) if (row.tail!.some(hash => recovery.hashes.has(hash)) || row.base && recovery.requests.has(row.base) && hashes.some(hash => recovery.hashes.has(hash))) recovery.requests.add(row.id!)
+}
+
+/** 请求存在还不够，后续实际assistant必须消费本代精确续行。 */
+export function consumeClaudeRecoveryRequest(recoveries: readonly ClaudeRecovery[], requestRef: string): void {
+  const recovery = recoveries.at(-1)
+  if (recovery && !recovery.requests.has(requestRef)) stale('Claude recovery companion has no new exact actual API consumer')
+  for (const item of recoveries) if (item.requests.has(requestRef)) item.consumed = true
+}
+
+/** 同一公开主链认证供成功证明和已停失败来源索引复用，不产生读取覆盖或完成证据。 */
+export function* checkClaudeHistoryChain(history: readonly ClaudePublicRecord[], original: ClaudePublicRecord): Generator<ClaudePublicRecord> {
+  if (typeof original.uuid !== 'string') stale('Claude original user has no native UUID')
+  const sessionId = original.sessionId, userUuid = original.uuid, promptId = original.promptId
+  const seen = new Set<string>(), parents = new Map<string, string | null>()
+  let latestMessage: string | undefined, latestChainNode: string | undefined, compaction: { ancestors: Set<string>; anchor?: string } | undefined
+  for (const row of history) {
+    if (row.sessionId !== sessionId) stale('Claude native history changed its session identity')
+    if (row.uuid !== undefined && typeof row.uuid !== 'string') stale('Claude public history has a non-string native UUID')
+    const compact = row.type === 'system' && row.subtype === 'compact_boundary'
+    const retry = row.type === 'system' && row.subtype === 'api_error'
+    if (row.type === 'system' && !compact && !retry) stale('Claude public system event is not a supported compact boundary')
+    if (retry) {
+      checkClaudeRequestRetry(row.requestRetry)
+      if (typeof row.uuid !== 'string' || !row.uuid || typeof row.parentUuid !== 'string' || !row.parentUuid || row.parentUuid !== latestChainNode || compaction) stale('Claude request retry does not extend its exact native chain')
+    }
+    if (compact) {
+      const metadata = row.compactMetadata, segment = metadata?.preservedSegment, preserved = metadata?.preservedMessages
+      if (!row.uuid || seen.has(row.uuid) || row.parentUuid !== null || !row.logicalParentUuid || row.logicalParentUuid !== latestMessage || !seen.has(row.logicalParentUuid) || compaction
+        || metadata?.runningTurnSends?.openerUuid !== userUuid || JSON.stringify(metadata.runningTurnSends.uuids) !== JSON.stringify([userUuid])) stale('Claude compact boundary lost its exact running turn or logical parent')
+      if (segment !== undefined || preserved !== undefined) {
+        const ids = preserved?.allUuids
+        if (!segment || !preserved || !Array.isArray(ids) || !ids.length || new Set(ids).size !== ids.length || JSON.stringify(preserved.uuids) !== JSON.stringify(ids)
+          || segment.headUuid !== ids[0] || segment.tailUuid !== ids.at(-1) || segment.tailUuid !== row.logicalParentUuid
+          || !segment.anchorUuid || segment.anchorUuid !== preserved.anchorUuid || seen.has(segment.anchorUuid)
+          || ids.some(id => !seen.has(id))) stale('Claude compact preserved segment is not the exact observed chain')
+        const remaining = new Set(ids)
+        let cursor: string | undefined = segment.tailUuid
+        while (cursor && cursor !== segment.headUuid && remaining.delete(cursor)) cursor = parents.get(cursor) ?? undefined
+        if (cursor !== segment.headUuid || !remaining.delete(segment.headUuid) || remaining.size) stale('Claude compact preserved segment is not the exact observed chain')
+      }
+      compaction = { ancestors: new Set([row.uuid]), ...(segment ? { anchor: segment.anchorUuid } : {}) }
+      parents.set(row.uuid, row.logicalParentUuid); seen.add(row.uuid); latestChainNode = row.uuid
+      yield row; continue
+    }
+    if (row.uuid) {
+      if (seen.has(row.uuid) || row.uuid !== userUuid && (!row.parentUuid || !seen.has(row.parentUuid))) stale('Claude public history is not the exact original main chain')
+      seen.add(row.uuid); parents.set(row.uuid, row.parentUuid ?? null); latestChainNode = row.uuid
+    }
+    if (retry) { latestMessage = row.uuid; yield row; continue }
+    if (compaction && row.type === 'attachment') {
+      if (!row.uuid || !row.parentUuid || !compaction.ancestors.has(row.parentUuid)) stale('Claude compact attachment is outside its exact boundary')
+      compaction.ancestors.add(row.uuid)
+    }
+    if (row.compactSummary) {
+      const summary = row.compactSummary
+      if (row.type !== 'user' || row.turnCompanion !== undefined || !row.uuid || !row.parentUuid || !compaction?.ancestors.has(row.parentUuid) || compaction.anchor && compaction.anchor !== row.uuid
+        || row.promptId !== promptId || row.sourceToolAssistantUUID !== undefined || !summary.transcriptOnly || !summary.textOnly
+        || !/^[a-f0-9]{64}$/.test(summary.messageDigest) || JSON.stringify(summary.promptUuids) !== JSON.stringify([userUuid])) stale('Claude compact summary is not the exact original turn metadata')
+      compaction = undefined; latestMessage = row.uuid
+      yield row; continue
+    }
+    if (compaction && ['user', 'assistant', 'api-request'].includes(row.type)) stale('Claude compact boundary has no exact same-turn summary')
+    if (row.type === 'user' || row.type === 'assistant') latestMessage = row.uuid
+    yield row
+  }
+  if (compaction) stale('Claude compact boundary has no exact same-turn summary')
+}
+
+/** Claude用原生user UUID/promptId、配对公开消息及真实API请求索引证明可见性，绝不冒充Codex动态工具。 */
+export function proveClaudeFrozenReads(ref: FrozenContextRef, witness: ClaudeFrozenWitness): FrozenReadProof {
+  const { sessionId, userUuid, promptId, model, result, echo, history } = witness
+  const allowed = ['StructuredOutput', 'mcp__frozen__spex_read_frozen']
+  if (witness.version !== 1 || witness.provider !== 'claude-code' || witness.cliVersion !== '2.1.309 (Claude Code)' || !model || !promptId
+    || result.type !== 'result' || result.subtype !== 'success' || result.is_error !== false || result.structured_output === undefined
+    || result.session_id !== sessionId || result.user_message_uuid !== userUuid || JSON.stringify(result.user_message_uuids) !== JSON.stringify([userUuid])
+    || echo.uuid !== userUuid || echo.session_id !== sessionId || JSON.stringify([...witness.initTools].sort()) !== JSON.stringify([...allowed].sort())) stale('Claude completion lacks exact native identity or isolated capabilities')
+  const original = history.find(row => row.type === 'user' && row.uuid === userUuid)
+  if (!original || original.parentUuid !== null || original.promptId !== promptId || JSON.stringify(original.message) !== JSON.stringify(echo.message)
+    || !original.message || JSON.stringify({ ...original.message, content: claudeMessageBlocks(original.message) }) !== JSON.stringify({ role: 'user', content: [{ type: 'text', text: witness.prompt }] })) stale('Claude original user echo/history/prompt identity differs')
+  if (history.some(row => row.type === 'user' && row.isMeta === true && row.turnCompanion === true && row.message?.role === 'user' && row.message.content === CLAUDE_OUTPUT_LIMIT_RECOVERY_TEXT)
+    && JSON.stringify(readClaudePublicHistory(witness.nativeHistoryPath, sessionId)) !== JSON.stringify(history)) stale('Claude output-limit witness differs from its original native history')
+  if (history.some(row => row.type === 'user' && row.message?.content === CLAUDE_STRUCTURED_OUTPUT_ENFORCE_TEXT)
+    && JSON.stringify(readClaudePublicHistory(witness.nativeHistoryPath, sessionId)) !== JSON.stringify(history)) stale('Claude structured-output enforcement differs from its original native history')
+  if (history.some(row => row.requestRetry?.source === 'connection_retry')
+    && JSON.stringify(readClaudePublicHistory(witness.nativeHistoryPath, sessionId)) !== JSON.stringify(history)) stale('Claude connection retry witness differs from its original native history')
+  const requests = new Map<string, string[]>(), shapes = new Set<string>(), calls = new Map<string, { row: ClaudePublicRecord; block: ClaudePublicContentBlock; recovery: number }>()
+  const compactSummaries = new Set<string>()
+  let latestMessage: string | undefined
+  const receipts: FrozenReadReceipt[] = [], rejectedCalls: string[] = [], responseMessages = new Map<string, string>(), responseBlocks = new Map<string, ClaudePublicContentBlock>(), requestRefs = new Set<string>()
+  if (witness.mcpHistory && (JSON.stringify(readClaudeMcpToolNames(witness.mcpHistory.path)) !== JSON.stringify(witness.mcpHistory.toolNames) || witness.mcpHistory.toolNames.some(name => name !== 'spex_read_frozen'))) stale('Claude MCP dispatched a foreign tool or its actual history changed')
+  const apiMessages = readClaudeApiMessageBlobs(history)
+  const recoveries: ClaudeRecovery[] = []
+  let latestAssistant: string | undefined, acceptedOutput = false
+  for (const row of checkClaudeHistoryChain(history, original)) {
+    if (row.type === 'system') { if (row.subtype === 'api_error') latestMessage = row.uuid; continue }
+    if (row.compactSummary) {
+      const summary = row.compactSummary
+      compactSummaries.add(summary.messageDigest)
+      for (const recovery of recoveries) if (recovery.consumed) { recovery.summaries.add(summary.messageDigest); recovery.hashes.add(summary.messageDigest) }
+      latestMessage = row.uuid
+      continue
+    }
+    if (row.type === 'api-request-shape') {
+      if (!row.shapeHash || !/^[a-f0-9]{64}$/.test(row.shapeHash) || !row.toolNames || allowed.some(name => !row.toolNames!.includes(name)) || row.toolNames.some(name => ![...allowed, 'DeferredToolPlaceholder'].includes(name)) || !row.placeholderValid) stale('Claude API exposes a foreign or discoverable tool or has no shape identity')
+      shapes.add(row.shapeHash)
+    }
+    if (row.type === 'api-request-blob') { // dead-words-ok: Claude CLI 原生公开事件类型，外部协议名称必须逐字匹配。
+      if (row.compactSummaryDigest && recoveries.length && CLAUDE_RECOVERY_TEXTS.some(text => row.compactSummaryDigest === claudeMessageDigest({ role: 'user', content: text }))) stale('Claude recovery API message cannot masquerade as a compact summary')
+      if (row.compactSummaryDigest && !compactSummaries.has(row.compactSummaryDigest)) stale('Claude API string message is not an observed same-turn compact summary')
+      claudeApiToolResultIds(apiMessages.get(row.hash!)!.content, responseBlocks)
+    }
+    if (row.type === 'api-request') {
+      const hashes = claudeApiRequestHashes(row, requests, shapes, model)
+      if (!requests.size && (!row.tail!.includes(claudeMessageDigest(original.message)) || row.keep !== 0 || row.base)) stale('Claude original user prompt was not in the actual first API request')
+      for (const hash of hashes) {
+        const blob = apiMessages.get(hash)
+        if (!blob) continue
+        for (const callId of claudeApiToolResultIds(blob.content, responseBlocks)) responseMessages.set(callId, hash)
+        const summaries = [...blob.summaries].filter(digest => compactSummaries.has(digest))
+        if (compactSummaries.has(hash) || summaries.length) {
+          for (const recovery of recoveries) if (recovery.summaries.has(hash) || summaries.some(digest => recovery.summaries.has(digest))) recovery.hashes.add(hash)
+          continue
+        }
+        if (!blob.content.some(block => block.type === 'text')) continue
+        const matchingRecoveries = matchingClaudeRecoveries(recoveries, blob.content, witness.prompt)
+        const originalInput = hash === claudeMessageDigest(original.message) || hash === claudeMessageDigest({ role: 'user', content: claudeMessageBlocks(original.message) })
+        if (!blob.canonical || !originalInput && !matchingRecoveries.length) stale('Claude API user message contains unobserved text or a different coalescing shape')
+        for (const recovery of matchingRecoveries) recovery.hashes.add(hash)
+      }
+      requests.set(row.id!, hashes)
+      recordClaudeRecoveryRequest(recoveries, row, hashes)
+    }
+    if (row.type === 'assistant') {
+      latestMessage = row.uuid
+      if (!row.requestRef || !requests.has(row.requestRef)) stale('Claude assistant lacks an exact actual API request reference')
+      consumeClaudeRecoveryRequest(recoveries, row.requestRef)
+      latestAssistant = row.uuid
+      requestRefs.add(row.requestRef)
+      for (const block of claudeMessageBlocks(row.message!)) {
+        if (!block.id || calls.has(block.id) || !block.name || block.name === 'DeferredToolPlaceholder') stale('Claude called a forbidden, placeholder or repeated tool')
+        if (recoveries.at(-1)?.text === CLAUDE_STRUCTURED_OUTPUT_ENFORCE_TEXT && block.name !== 'StructuredOutput') stale('Claude structured-output enforcement dispatched another tool')
+        calls.set(block.id, { row, block, recovery: recoveries.length })
+      }
+    }
+    if (row.type === 'user' && row.uuid !== userUuid) {
+      const recovery = claudeRecoveryCompanion(row, promptId, latestMessage, latestAssistant)
+      if (recovery) {
+        if (recovery.text === CLAUDE_STRUCTURED_OUTPUT_ENFORCE_TEXT && (acceptedOutput || recoveries.some(previous => previous.text === CLAUDE_STRUCTURED_OUTPUT_ENFORCE_TEXT))) stale('Claude structured-output enforcement is repeated or followed an accepted output')
+        recoveries.push(recovery)
+        acceptedOutput = false; latestMessage = row.uuid
+        continue
+      }
+      latestMessage = row.uuid
+      if (row.promptId !== promptId || !row.message || !Array.isArray(row.message.content) || !row.message.content.length || row.message.content.some(block => block.type !== 'tool_result')) stale('Claude history appended another user turn')
+      for (const block of row.message.content) {
+        const call = calls.get(block.tool_use_id!)
+        if (!call || responseMessages.has(block.tool_use_id!) || row.sourceToolAssistantUUID !== call.row.uuid || row.parentUuid !== call.row.uuid) stale('Claude tool result is not paired with its exact native call')
+        responseMessages.set(block.tool_use_id!, claudeMessageDigest(row.message))
+        responseBlocks.set(block.tool_use_id!, block)
+        if (!allowed.includes(call.block.name!)) {
+          if (!witness.mcpHistory || block.is_error !== true || block.content !== `<tool_use_error>Error: No such tool available: ${call.block.name}</tool_use_error>`) stale('Claude foreign tool call has no exact native non-dispatch rejection')
+          rejectedCalls.push(block.tool_use_id!); continue
+        }
+        if (call.block.name === 'StructuredOutput') { if (!block.is_error && call.recovery === recoveries.length && claudeMessageDigest(call.block.input) === claudeMessageDigest(result.structured_output)) acceptedOutput = true; continue }
+        let read: ReturnType<typeof readFrozenRange>
+        try { read = readFrozenRange(ref, call.block.input) }
+        catch (error) {
+          if (!(error instanceof StructuredSessionError) || error.code !== 'stale_result' || error.message !== 'frozen reader range is invalid or exceeds its bounded response'
+            || !witness.mcpHistory || block.is_error !== true || block.content !== error.message) throw error
+          rejectedCalls.push(block.tool_use_id!); continue
+        }
+        const { arguments: args, response } = read
+        if (args.endByte - args.startByte > 65536 || block.is_error || !Array.isArray(block.content)
+          || JSON.stringify(block.content) !== JSON.stringify(response.contentItems.map(item => ({ type: 'text', text: item.text }))) || response.contentItems[0].text.length > 500000) stale('Claude public tool_result is truncated, substituted or differs from immutable bytes')
+        const { receipt } = persistFrozenRead(ref, { threadId: sessionId, turnId: userUuid, callId: call.block.id! }, args)
+        receipts.push(receipt)
+      }
+    }
+    if (row.uuid === userUuid) latestMessage = row.uuid
+  }
+  if (recoveries.some(recovery => !recovery.consumed)) stale('Claude recovery companion has no new exact actual API consumer')
+  if (!acceptedOutput || [...calls].some(([id]) => !responseMessages.has(id))) stale('Claude result has no matching accepted schema tool output or has unanswered calls')
+  const coveredEntryIds = frozenReadCoverage(ref, receipts)
+  for (const callId of [...receipts.map(receipt => receipt.callId), ...rejectedCalls]) {
+    const messageHash = responseMessages.get(callId)!
+    if (![...requests].some(([id, hashes]) => hashes.includes(messageHash) && requestRefs.has(id))) stale('Claude reader result was not present in a subsequent actual model API request')
+  }
+  const historyBytes = encode(witness), historyDigest = sha(historyBytes)
+  const path = join(dirname(ref.manifestPath), 'histories', historyDigest)
+  if (!existsSync(path)) writeFileSync(path, historyBytes, { mode: 0o400 })
+  else if (sha(readFileSync(path)) !== historyDigest) stale('Claude public witness content was modified')
+  return { version: 3, provider: 'claude-code', contextDigest: ref.contextDigest, threadId: sessionId, turnId: userUuid, promptId, model,
+    cliVersion: witness.cliVersion, maxReadBytes: 65536, maxResultSizeChars: 500000, receipts, coveredEntryIds, historyDigest }
 }
 
 /** 已结算资源重放核验保存的原生历史全文和同一逻辑覆盖，不再派发工具。 */
-export function verifyFrozenReadProof(ref: FrozenContextRef, proof: FrozenReadProof, identity: { threadId: string; turnId: string }): void {
+export function verifyFrozenReadProof(ref: FrozenContextRef, proof: FrozenReadProof, identity: { threadId: string; turnId: string }, toolOutputTokenLimit?: number, result?: { output: unknown }): void {
+  if (proof.version === 4) stale('ZCode frozen evidence requires its native provider verifier')
   if (proof.contextDigest !== ref.contextDigest || proof.threadId !== identity.threadId || proof.turnId !== identity.turnId || !/^[a-f0-9]{64}$/.test(proof.historyDigest)) stale('frozen coverage evidence differs from its exact context/thread/turn')
+  if (toolOutputTokenLimit !== undefined && (proof.version !== 2 || proof.toolOutputTokenLimit !== toolOutputTokenLimit)) stale('current frozen runtime requires its exact v2 model-visible evidence')
   const history = readFileSync(join(dirname(ref.manifestPath), 'histories', proof.historyDigest))
   if (sha(history) !== proof.historyDigest) stale('saved native frozen history digest differs')
-  const actual = proveFrozenReads(ref, identity, JSON.parse(history.toString('utf8')) as FrozenNativeItem[])
+  if (proof.version === 3) {
+    const witness = JSON.parse(history.toString('utf8')) as ClaudeFrozenWitness
+    if (result && !encode(witness.result.structured_output).equals(encode(result.output))) stale('Claude result differs from its authoritative content-addressed native witness')
+    if (JSON.stringify(readClaudePublicHistory(witness.nativeHistoryPath, witness.sessionId)) !== JSON.stringify(witness.history)) stale('Claude saved public witness differs from original native history')
+    if (!encode(proveClaudeFrozenReads(ref, witness)).equals(encode(proof))) stale('Claude frozen evidence differs from its exact native witness')
+    return
+  }
+  let visibility: FrozenVisibility | undefined
+  if (proof.version === 2) {
+    if (!/^[a-f0-9]{64}$/.test(proof.visibilityDigest)) stale('frozen visible history digest is invalid')
+    const bytes = readFileSync(join(dirname(ref.manifestPath), 'histories', proof.visibilityDigest))
+    if (sha(bytes) !== proof.visibilityDigest) stale('saved frozen visible history digest differs')
+    const saved = JSON.parse(bytes.toString('utf8')) as FrozenVisibility & { threadId: string; turnId: string }
+    if (saved.threadId !== identity.threadId || saved.turnId !== identity.turnId || saved.toolOutputTokenLimit !== proof.toolOutputTokenLimit) stale('saved frozen visible history names a different runtime or turn')
+    visibility = { toolOutputTokenLimit: saved.toolOutputTokenLimit, outputs: saved.outputs }
+  }
+  const actual = proveFrozenReads(ref, identity, JSON.parse(history.toString('utf8')) as FrozenNativeItem[], visibility)
   if (!encode(actual).equals(encode(proof))) stale('frozen read coverage differs from its saved exact native history')
 }

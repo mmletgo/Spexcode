@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -9,9 +9,13 @@ import type { Acceptance, ContractFinding } from '@spexcode/spec-core/contracts'
 import { CANDIDATE_RESPONSE_SCHEMA, verifyCandidate } from './candidate.js'
 import type { CandidateChanges } from './candidate.js'
 import type { ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
-import { GENERATION_REVIEW_SCHEMA, runGeneration } from './generation.js'
+import { GENERATION_REVIEW_SCHEMA, freezeGenerationInput, generationReviewRequest, restoreGenerationInput, reviewError, runGeneration } from './generation.js'
+import { candidateReviewSchema, candidateReviewError, candidateReviewLocationError } from './candidate-review.js'
+import { rejectedFinalOutput, StructuredSessionError } from '../session-structured-policy.js'
+import { nativeWorktreeResult } from '../native-worktree-runtime.js'
+import { nativeWorktreePrompt } from '../native-worktree-runtime.js'
 import type { GenerationInput, GenerationReview } from './generation-types.js'
-import { captureInputSnapshot, contentHash, readObject, readTree, writeEvidence, writeObject, writeTree } from './snapshot.js'
+import { captureInputSnapshot, contentHash, readEvidence, readObject, readTree, writeEvidence, writeObject, writeTree } from './snapshot.js'
 
 const contractPath = '.spec/export/export-contract/spec.md'
 async function input(t: test.TestContext, largeContext = false): Promise<GenerationInput> {
@@ -35,7 +39,7 @@ function changes(input: GenerationInput): unknown {
   return { version: 'sync-files-v1', changes: [{ path: entry.path, beforeDigest: entry.digest, beforeMode: entry.mode, mode: null, content: `${input.files.get(entry.path)}\n// actual candidate implementation\n` }] }
 }
 function review(request: ElaborationSessionRequest): GenerationReview {
-  const identity = JSON.parse(request.prompt.split('实际候选身份与 manifest:\n')[1].split('\n实际完整候选')[0]) as { inputId: string; candidate: { digest: string } }
+  const identity = JSON.parse(request.prompt.split('实际候选身份与 manifest:\n')[1].split('\n')[0]) as { inputId: string; candidate: { digest: string } }
   return { inputId: identity.inputId, candidateDigest: identity.candidate.digest, verdict: 'accept', checkedIds: ['REQ-EXPORT-01', 'AC-EXPORT-03'], findings: [] }
 }
 function runner(input: GenerationInput, generation: (request: ElaborationSessionRequest) => unknown = () => changes(input), inspect: (request: ElaborationSessionRequest) => unknown = review) {
@@ -48,6 +52,14 @@ function runner(input: GenerationInput, generation: (request: ElaborationSession
   return { calls, run }
 }
 const valid = async (): Promise<ContractFinding[]> => []
+
+test('空候选项输出面也不与共享schema复用可变属性', () => {
+  const schema = candidateReviewSchema({ inputId: 'input', candidateDigest: 'candidate', requiredIds: [], actualIds: [], priorIds: [] })
+  const items = (schema.properties as { checkedIds: { items: Record<string, unknown> } }).checkedIds.items
+  const before = JSON.stringify(GENERATION_REVIEW_SCHEMA)
+  items.minLength = 99
+  assert.equal(JSON.stringify(GENERATION_REVIEW_SCHEMA), before)
+})
 
 test('超过2MiB的真实冻结测试全文仍到达生成和独审，保留首尾及全部断言', async t => {
   const source = await input(t, true), assertions = source.files.get('tests/export.test.mjs')!
@@ -81,20 +93,31 @@ test('原生严格响应schema显式类型和required属性完整，不能仅以
   check(CANDIDATE_RESPONSE_SCHEMA); check(GENERATION_REVIEW_SCHEMA)
 })
 
-test('生成复用唯一文件 schema/CAS/scope，评审独立读取完整候选、源码与真实断言，仍不表示运行/交付', async t => {
-  const source = await input(t); const native = runner(source); const events: string[] = []
+for (const timeoutMs of [30000, null]) test(`生成和独审原样携带timeout=${timeoutMs}并复用唯一文件schema/CAS/scope`, async t => {
+  const source = await input(t); source.timeoutMs = timeoutMs; const native = runner(source); const events: string[] = []
   const index = readFileSync(join(source.root, '.git/index'))
   const head = execFileSync('git', ['-C', source.root, 'rev-parse', 'HEAD']).toString()
   const result = await runGeneration(source, { runner: native.run, onDispatch: async request => { events.push(`planned:${request.purpose}`) }, validateCandidate: async candidate => { events.push('hard-gate'); assert.equal(candidate.sourceInputId, source.snapshot.id); return [{ severity: 'warning', code: 'diagnostic', nodeId: 'export-contract', path: contractPath, message: '非阻断诊断' }] } })
   assert.equal(result.status, 'reviewed'); assert.equal(result.reviewPassed, true); assert.equal(result.candidateValidated, true)
   assert.equal(result.runtimeVerification, 'not_run'); assert.equal(result.delivery, 'not_applied')
   assert.deepEqual(native.calls[0].schema, CANDIDATE_RESPONSE_SCHEMA)
+  const properties = native.calls[1].schema.properties as Record<string, { enum?: string[]; items?: { enum: string[] }; minItems?: number }>
+  assert.deepEqual(properties.inputId.enum, [source.snapshot.id])
+  assert.deepEqual(properties.candidateDigest.enum, [result.candidate!.digest])
+  assert.deepEqual(new Set(properties.checkedIds.items!.enum), new Set(source.contracts.flatMap(contract => contract.items.map(item => item.id))))
+  assert.equal(properties.checkedIds.minItems, source.readyIds.length)
+  assert.equal(JSON.stringify(GENERATION_REVIEW_SCHEMA).includes(source.snapshot.id), false, '请求专属约束不能污染共享schema')
   assert.deepEqual(events, ['planned:code_generate', 'hard-gate', 'planned:code_review'])
   assert.deepEqual(native.calls.map(call => call.requestKey), ['operation-1:attempt-1:code_generate', 'operation-1:attempt-1:code_review'])
+  assert.ok(native.calls.every(call => call.timeoutMs === timeoutMs))
   assert.notEqual(result.traces[0].sessionId, result.traces[1].sessionId); assert.notEqual(result.traces[0].threadId, result.traces[1].threadId)
   assert.ok(native.calls[1].prompt.includes('actual candidate implementation'))
   assert.ok(native.calls[1].prompt.includes(JSON.stringify(source.files.get('tests/export.test.mjs')!)))
   assert.ok(native.calls[1].prompt.includes(JSON.stringify(source.files.get(contractPath)!)))
+  for (const marker of ['冻结原意和基线完整输入:\n', '实际候选身份与 manifest:\n']) {
+    const view = JSON.parse(native.calls[1].prompt.split(marker)[1].split('\n')[0]) as { manifest: { entries: unknown[] }; manifestProjection: unknown }
+    assert.deepEqual(view.manifestProjection, { scope: 'local-read-set', includedEntryCount: view.manifest.entries.length, completeEntryCount: source.manifest.entries.length, complete: true })
+  }
   assert.ok(result.candidateFiles!.get('tests/export.test.mjs')!.includes('assert.'))
   assert.equal(result.candidate!.baseTree, source.snapshot.immutableTree)
   assert.deepEqual(readFileSync(join(source.root, '.git/index')), index)
@@ -334,7 +357,9 @@ test('contract-omission必须精确绑定已审Spec路径和关联existingID，�
 })
 
 test('可信freeze回调发生在生成返回后，实际候选继承闭包外字节且原模型输入/readonly保持原绑定', async t => {
-  const source = await input(t), native = runner(source), originalManifest = structuredClone(source.manifest)
+  const initial = await input(t), source = { ...initial, files: new Map(initial.files) }
+  source.files.delete('package.json')
+  const native = runner(source), originalManifest = structuredClone(source.manifest)
   source.allowedScope.paths = ['src/export.js']
   const inherited = Buffer.from('settled independent delivery\n'), entries = [...source.manifest.entries, { path: 'unselected.txt', mode: '100644' as const, oid: writeObject(source.snapshot.source.commonDir, inherited), digest: contentHash(inherited) }]
   const tree = writeTree(source.snapshot.source.commonDir, entries), actual = readTree(source.snapshot.source.commonDir, tree)
@@ -348,6 +373,26 @@ test('可信freeze回调发生在生成返回后，实际候选继承闭包外�
   assert.ok(!native.calls[0].prompt.includes(inherited.toString().trim()))
   assert.ok(native.calls[1].prompt.includes(result.candidate!.digest))
   assert.equal(result.candidateFiles?.get('tests/export.test.mjs'), source.files.get('tests/export.test.mjs'))
+  const projected = runner(source, () => assert.fail('已冻结候选仅独审，不重新生成'), request => ({ ...review(request), verdict: 'repair', findings: [{ kind: 'repair', affectedIds: ['AC-EXPORT-03'], ruleLocation: `contract:${contractPath}#AC-EXPORT-03`, codeLocation: 'unselected.txt', evidence: '分派义务所需的具体实现证据未提供', counterexample: '当前投影不足以判断该义务', message: '需要该义务的具体证据，不推断完整候选缺文件' }] }))
+  const checked = await runGeneration(source, { runner: projected.run, reviewCandidate: result.candidate!, validateCandidate: valid })
+  assert.equal(checked.status, 'repair'); assert.equal(projected.calls.length, 1)
+  assert.equal(checked.review!.findings[0].codeLocation, 'unselected.txt', '具体证据不足仍可要求repair')
+  const prompt = projected.calls[0].prompt
+  assert.ok(prompt.includes('本地审查投影'))
+  assert.ok(!prompt.includes('实际完整候选'))
+  assert.ok(prompt.includes('不能仅据本投影未提供文件就宣称完整候选缺文件'))
+  assert.ok(prompt.includes('具体义务确需未提供证据时仍返回repair'))
+  type ManifestView = { manifest: { entries: { path: string }[] }; manifestProjection: { scope: string; includedEntryCount: number; completeEntryCount: number; complete: boolean }; completeManifestDigest: string }
+  const identity = JSON.parse(prompt.split('实际候选身份与 manifest:\n')[1].split('\n')[0]) as ManifestView
+  const baseline = JSON.parse(prompt.split('冻结原意和基线完整输入:\n')[1].split('\n实际候选身份')[0]) as ManifestView
+  assert.deepEqual(baseline.manifestProjection, { scope: 'local-read-set', includedEntryCount: baseline.manifest.entries.length, completeEntryCount: source.manifest.entries.length, complete: false })
+  assert.equal(baseline.completeManifestDigest, contentHash(JSON.stringify(source.manifest)))
+  assert.equal(baseline.manifest.entries.some(entry => entry.path === 'package.json'), false)
+  assert.deepEqual(identity.manifestProjection, { scope: 'local-read-set', includedEntryCount: identity.manifest.entries.length, completeEntryCount: verifyCandidate(source.snapshot.source.commonDir, result.candidate!).length, complete: false })
+  assert.equal(identity.manifest.entries.some(entry => entry.path === 'unselected.txt'), false)
+  assert.equal(identity.completeManifestDigest, contentHash(JSON.stringify({ version: 1, entries: verifyCandidate(source.snapshot.source.commonDir, result.candidate!) })))
+  assert.ok(!prompt.includes(JSON.stringify(inherited.toString())), '不为更正caption扩大本地读取范围')
+  assert.ok(!prompt.includes(JSON.stringify(initial.files.get('package.json')!)), '未额外发送源manifest闭包外正文')
 })
 
 test('可信publication回调仍不能改变readonly或缺失路径；模型改readonly也硬拒绝', async t => {
@@ -362,4 +407,324 @@ test('可信publication回调仍不能改变readonly或缺失路径；模型改r
   const path = 'tests/export.test.mjs', before = source.manifest.entries.find(entry => entry.path === path)!, native = runner(source, () => ({ version: 'sync-files-v1', changes: [{ path, beforeDigest: before.digest, beforeMode: before.mode, content: 'model changed oracle\n', mode: null }] }))
   const result = await runGeneration(source, { runner: native.run, validateCandidate: valid })
   assert.equal(result.status, 'repair'); assert.match(result.failure!.message, /越界/); assert.equal(result.candidate, null)
+})
+
+test('旧v1请求没有priorContext时冻结JSON与提示保持原样', async t => {
+  const source = await input(t)
+  const native = runner(source)
+  const result = await runGeneration(source, { runner: native.run, validateCandidate: valid })
+  assert.equal(result.status, 'reviewed', JSON.stringify(result.failure))
+  const omitted = await runGeneration({ ...source, priorContext: undefined }, { runner: runner(source).run, validateCandidate: valid })
+  assert.equal(omitted.inputDigest, result.inputDigest)
+  for (const request of native.calls) {
+    assert.equal(request.prompt.includes('priorContext'), false)
+    assert.equal(request.prompt.includes('独立旧来源角色'), false)
+  }
+})
+
+test('删除后的旧Spec与已不在current的源码以source_before进入生成和独审', async t => {
+  const source = await input(t)
+  const beforeSnapshot = source.snapshot
+  const spec = source.files.get(contractPath)!
+  const code = source.files.get('src/export.js')!
+  const testSource = source.files.get('tests/export.test.mjs')!
+  const historicalPaths = [contractPath, 'src/export.js', 'tests/export.test.mjs']
+  rmSync(join(source.root, contractPath))
+  rmSync(join(source.root, 'src/export.js'))
+  const git = (...args: string[]): void => { execFileSync('git', ['-C', source.root, ...args], { stdio: 'pipe', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }) }
+  git('add', '-A'); git('commit', '-m', 'remove specification and implementation')
+  const snapshot = await captureInputSnapshot(source.root)
+  const entries = readTree(snapshot.source.commonDir, snapshot.immutableTree)
+  const files = new Map(entries.map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString()]))
+  const prior = { role: 'source_before' as const, snapshot: beforeSnapshot, entries: source.manifest.entries.filter(entry => historicalPaths.includes(entry.path)), files: new Map(historicalPaths.map(path => [path, source.files.get(path)!])), objects: [] }
+  const deleted: GenerationInput = { ...source, snapshot, manifest: { version: 1, entries }, files, elaboratedSpecs: [], readyIds: ['AC-EXPORT-03'], retiredIds: ['AC-EXPORT-03'], retiredOwners: [{ id: 'AC-EXPORT-03', path: contractPath }], priorContext: [prior], policy: { ...source.policy, version: 'sync-coordinator-v2' } }
+  assert.equal(deleted.files.has(contractPath), false)
+  assert.equal(deleted.files.has('src/export.js'), false)
+  const accept = (request: ElaborationSessionRequest): GenerationReview => {
+    const properties = request.schema.properties as { inputId: { enum: string[] }; candidateDigest: { enum: string[] }; checkedIds: { items: { enum: string[] } } }
+    return { inputId: properties.inputId.enum[0], candidateDigest: properties.candidateDigest.enum[0], verdict: 'accept', checkedIds: properties.checkedIds.items.enum, findings: [] }
+  }
+  const native = runner(deleted, () => ({ version: 'sync-files-v1', changes: [] }), accept)
+  const result = await runGeneration(deleted, { runner: native.run, validateCandidate: valid })
+  assert.equal(result.status, 'reviewed', JSON.stringify(result.failure))
+  assert.equal(native.calls.length, 2)
+  for (const request of native.calls) {
+    const context = JSON.parse(request.prompt.split(request.purpose === 'code_generate' ? '冻结完整输入:\n' : '冻结原意和基线完整输入:\n')[1].split('\n实际候选身份')[0]) as { files: [string, string][]; priorContext: { role: string; pairId?: string; files: [string, string][] }[]; readyIds: string[] }
+    const bodies = new Map(context.priorContext[0].files)
+    assert.equal(context.priorContext.length, 1)
+    assert.equal(context.priorContext[0].role, 'source_before')
+    assert.equal(context.priorContext[0].pairId, undefined)
+    assert.equal(bodies.get(contractPath), spec)
+    assert.equal(bodies.get('src/export.js'), code)
+    assert.equal(bodies.get('tests/export.test.mjs'), testSource)
+    assert.equal(context.files.some(([path]) => path === contractPath || path === 'src/export.js'), false)
+    assert.ok(context.readyIds.includes('AC-EXPORT-03'))
+    assert.ok(request.prompt.includes('role为source_before时明确不是verifiedDelivery'))
+    assert.equal(context.priorContext.some(item => item.role === 'verified_delivery'), false)
+  }
+  assert.ok(result.review!.checkedIds.includes('AC-EXPORT-03'))
+  const mismatched = { ...deleted, priorContext: [{ ...prior, files: new Map([...prior.files].map(([path, body]) => [path, path === 'src/export.js' ? `${body}\n` : body])) }] }
+  const rejected = await runGeneration(mismatched, { runner: runner(mismatched).run, validateCandidate: valid })
+  assert.equal(rejected.status, 'failed')
+  assert.match(rejected.failure!.message, /历史正文与真实旧快照不匹配/)
+})
+
+test('旧related glob匹配到历史根层helper正文缺失时在Native前拒绝', async t => {
+  const source = await input(t)
+  const helperPath = 'src/helpers/format.js'
+  const helper = 'export function format(value) { return String(value) }\n// helper tail marker\n'
+  const oldSpec = source.files.get(contractPath)!.replace('  - src/export.js#ExportService\n', '  - src/export.js#ExportService\nrelated:\n  - src/helpers/**/*.js\n')
+  writeFileSync(join(source.root, contractPath), oldSpec)
+  mkdirSync(join(source.root, 'src/helpers'), { recursive: true })
+  writeFileSync(join(source.root, helperPath), helper)
+  const git = (...args: string[]): void => { execFileSync('git', ['-C', source.root, ...args], { stdio: 'pipe', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }) }
+  git('add', '-A'); git('commit', '-m', 'record related helper obligation')
+  const before = await captureInputSnapshot(source.root, { committed: true })
+  const beforeEntries = readTree(before.source.commonDir, before.immutableTree)
+  const beforeFiles = new Map(beforeEntries.map(entry => [entry.path, readObject(before.source.commonDir, entry.oid).toString()]))
+  git('rm', contractPath, helperPath); git('commit', '-m', 'delete spec and related helper')
+  const snapshot = await captureInputSnapshot(source.root, { committed: true })
+  const entries = readTree(snapshot.source.commonDir, snapshot.immutableTree)
+  const files = new Map(entries.map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString()]))
+  const oldContract = parseContract({ nodeId: 'export-contract', path: contractPath, source: oldSpec }).contract!
+  const historicalPaths = [contractPath, 'src/export.js', 'tests/export.test.mjs', helperPath]
+  const prior: NonNullable<GenerationInput['priorContext']>[number] = {
+    role: 'source_before', snapshot: before,
+    entries: beforeEntries.filter(entry => historicalPaths.includes(entry.path)),
+    files: new Map(historicalPaths.filter(path => path !== helperPath).map(path => [path, beforeFiles.get(path)!])),
+    objects: [],
+  }
+  const deleted: GenerationInput = {
+    ...source, snapshot, manifest: { version: 1, entries }, files, contracts: [], elaboratedSpecs: [],
+    readyIds: oldContract.items.map(item => item.id), retiredIds: oldContract.items.map(item => item.id),
+    retiredOwners: oldContract.items.map(item => ({ id: item.id, path: contractPath })),
+    priorContext: [prior], policy: { ...source.policy, version: 'sync-coordinator-v2' },
+  }
+  const native = runner(deleted)
+  const result = await runGeneration(deleted, { runner: native.run, validateCandidate: valid })
+  assert.equal(result.status, 'failed')
+  assert.equal(native.calls.length, 0, '历史义务缺少正文须在任何Native派发前拒绝')
+  assert.ok(result.failure!.message.includes(helperPath))
+})
+
+test('native worktree可读取未投影源码，已审Spec可见，真实Git diff导入且summary伪补丁无效', async t => {
+  const source = await input(t), originalSource = source.files.get('src/export.js')!, originalHead = source.snapshot.headCommit
+  source.nativeWorktree = true; source.model = 'claude:MiniMax-M3.1-Flash'
+  source.files = new Map([...source.files].filter(([path]) => path !== 'src/export.js' && path !== contractPath))
+  source.elaboratedSpecs = [{ path: contractPath, source: source.elaboratedSpecs[0].source + '\n已审业务说明。\n' }]
+  writeFileSync(join(source.root, 'src/export.js'), 'later staged source\n')
+  execFileSync('git', ['-C', source.root, 'add', 'src/export.js'])
+  writeFileSync(join(source.root, 'src/export.js'), 'later working source\n')
+  const calls: ElaborationSessionRequest[] = []
+  const run: ElaborationRunner = async request => {
+    calls.push(request)
+    assert.ok(request.worktree)
+    assert.equal(request.frozenEntries, undefined)
+    assert.ok(request.prompt.length < 12000)
+    assert.doesNotMatch(request.prompt, /beforeDigest\/beforeMode|冻结完整输入|spex_read_frozen/)
+    let head = request.worktree.baseCommit, tree = request.worktree.tree, output: unknown
+    if (request.purpose === 'code_generate') {
+      assert.equal(request.worktree.mode, 'edit')
+      const seedFiles = new Map(readTree(source.snapshot.source.commonDir, tree).map(entry => [entry.path, readObject(source.snapshot.source.commonDir, entry.oid).toString()]))
+      assert.equal(seedFiles.get('src/export.js'), originalSource)
+      assert.equal(seedFiles.get(contractPath), source.elaboratedSpecs[0].source)
+      const entries = readTree(source.snapshot.source.commonDir, tree).map(entry => entry.path === 'src/export.js' ? { ...entry, oid: writeObject(source.snapshot.source.commonDir, Buffer.from(originalSource + '\n// actual worktree commit\n')), digest: contentHash(originalSource + '\n// actual worktree commit\n') } : entry)
+      tree = writeTree(source.snapshot.source.commonDir, entries)
+      const { stageWorktree } = await import('./stage-worktree.js')
+      head = stageWorktree(source.snapshot.source.commonDir, request.worktree.baseCommit, tree).baseCommit
+      output = { summary: '{"changes":[{"path":"unrelated.js","content":"forged"}]}' }
+    } else {
+      assert.equal(request.worktree.mode, 'read')
+      const binding = JSON.parse(request.prompt.split('候选绑定:\n')[1]) as { inputId: string; candidateDigest: string; candidateTree: string }
+      assert.equal(tree, binding.candidateTree)
+      output = { inputId: binding.inputId, candidateDigest: binding.candidateDigest, verdict: 'accept', checkedIds: [...source.readyIds], findings: [] }
+    }
+    return { sessionId: `native-${calls.length}`, threadId: `thread-${calls.length}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)), worktree: { baseCommit: request.worktree.baseCommit, baseTree: request.worktree.tree, headCommit: head, tree, worktreePath: '/closed/historical-worktree' } }
+  }
+  const generated = await runGeneration(source, { runner: run, validateCandidate: valid })
+  assert.equal(generated.status, 'reviewed', JSON.stringify(generated.failure))
+  assert.equal(calls.length, 2)
+  const candidate = new Map(verifyCandidate(source.snapshot.source.commonDir, generated.candidate!).map(entry => [entry.path, entry]))
+  assert.equal(readObject(source.snapshot.source.commonDir, candidate.get('src/export.js')!.oid).toString(), originalSource + '\n// actual worktree commit\n')
+  assert.equal(readObject(source.snapshot.source.commonDir, candidate.get(contractPath)!.oid).toString(), source.elaboratedSpecs[0].source)
+  assert.equal(candidate.has('unrelated.js'), false)
+  assert.equal(execFileSync('git', ['-C', source.root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), originalHead)
+  assert.equal(readFileSync(join(source.root, 'src/export.js'), 'utf8'), 'later working source\n')
+})
+
+for (const nativeWorktree of [false, true]) test(`格式续审保完整原final与schema，Native用同一Git稿，native=${nativeWorktree}`, async t => {
+  const source = await input(t), native = runner(source)
+  const built = await runGeneration(source, { runner: native.run, validateCandidate: valid })
+  source.nativeWorktree = nativeWorktree
+  if (nativeWorktree) source.model = 'zcode:fixture/model'
+  const originalRequest = generationReviewRequest(source, built.candidate!).request
+  const final = '原先评审结果如下：\n' + JSON.stringify(review(native.calls[1]))
+  const identity = { sessionId: 'session-failed', threadId: 'thread-failed', turnId: 'turn-failed' }
+  const packet = rejectedFinalOutput(final, originalRequest.worktree ? nativeWorktreePrompt(originalRequest.prompt, originalRequest.worktree) : originalRequest.prompt, originalRequest, identity)
+  const failed = { ...built, status: 'failed', reviewOutput: null, review: null, reviewPassed: false, inputDigest: originalRequest.inputDigest, failure: { code: 'structured_output_format_invalid', message: 'invalid_json', ...identity, requestKey: originalRequest.requestKey, inputDigest: originalRequest.inputDigest } }
+  const { signal: _signal, ...request } = originalRequest
+  const repair = { resultRef: writeEvidence(source.snapshot.source.commonDir, failed), nativePlanRef: writeEvidence(source.snapshot.source.commonDir, { request }), checkpointRef: writeEvidence(source.snapshot.source.commonDir, { failure: { code: failed.failure.code, message: failed.failure.message, rejectedOutput: packet } }) }
+  const resumed = generationReviewRequest({ ...source, requestKey: source.requestKey + ':next', reviewRepair: repair }, built.candidate!).request
+  assert.notEqual(resumed.inputDigest, originalRequest.inputDigest)
+  assert.match(resumed.prompt, /未批准.*格式/)
+  if (nativeWorktree) {
+    assert.equal(resumed.worktree!.mode, 'edit')
+    const files = new Map(readTree(source.snapshot.source.commonDir, resumed.worktree!.tree).map(entry => [entry.path, readObject(source.snapshot.source.commonDir, entry.oid).toString('utf8')]))
+    assert.ok([...files].some(([path, body]) => path.startsWith('.spex-sync-drafts/') && body === final))
+    assert.ok([...files].some(([path, body]) => path.endsWith('.schema.json') && body === JSON.stringify(originalRequest.schema)))
+    for (const entry of readTree(source.snapshot.source.commonDir, built.candidate!.tree)) assert.equal(files.get(entry.path), readObject(source.snapshot.source.commonDir, entry.oid).toString('utf8'))
+  } else assert.ok(resumed.prompt.includes(final))
+  const secondPacket = rejectedFinalOutput('再次格式失败：' + final, resumed.worktree ? nativeWorktreePrompt(resumed.prompt, resumed.worktree) : resumed.prompt, resumed, identity)
+  const secondFailure = { ...failed, inputDigest: resumed.inputDigest, failure: { ...failed.failure, requestKey: resumed.requestKey, inputDigest: resumed.inputDigest } }
+  const { signal: _nextSignal, ...nextRequest } = resumed
+  const nextRepair = { resultRef: writeEvidence(source.snapshot.source.commonDir, secondFailure), nativePlanRef: writeEvidence(source.snapshot.source.commonDir, { request: nextRequest }), checkpointRef: writeEvidence(source.snapshot.source.commonDir, { failure: { code: failed.failure.code, message: failed.failure.message, rejectedOutput: secondPacket } }) }
+  const third = generationReviewRequest({ ...source, requestKey: source.requestKey + ':third', reviewRepair: nextRepair }, built.candidate!).request
+  if (nativeWorktree) {
+    const entries = readTree(source.snapshot.source.commonDir, third.worktree!.tree)
+    assert.ok(entries.some(entry => readObject(source.snapshot.source.commonDir, entry.oid).toString('utf8') === secondPacket.text))
+    for (const entry of readTree(source.snapshot.source.commonDir, built.candidate!.tree)) assert.deepEqual(entries.find(actual => actual.path === entry.path), entry)
+  } else assert.ok(third.prompt.includes(secondPacket.text))
+  assert.equal(secondPacket.ref, undefined)
+  assert.equal(packet.ref, undefined)
+  const foreign = { ...packet, threadId: 'another-owner' }
+  assert.throws(() => generationReviewRequest({ ...source, reviewRepair: { ...repair, checkpointRef: writeEvidence(source.snapshot.source.commonDir, { failure: { ...failed.failure, rejectedOutput: foreign } }) } }, built.candidate!), StructuredSessionError)
+})
+
+
+test('已认证原716完整JSON不能带括号通过位置门禁，也不能按affectedIds替代原位置', async t => {
+  const original = JSON.parse(readFileSync(new URL('../../test/fixtures/spec-sync/candidate-review-decorated-location.json', import.meta.url), 'utf8')) as GenerationReview
+  assert.equal(contentHash(JSON.stringify(original)), '69149f84bf8fc0ad9f5add024ae4d4fa458d9c985fa929c00da04b1dc2146986')
+  const source = await input(t)
+  source.nativeWorktree = true
+  const path = '.spec/root/sync-code-12718cdd3f7cfae8/spec.md', nodeId = path.split('/').at(-2)!
+  const contract = { ...source.contracts[0], nodeId, path, items: source.contracts[0].items.slice(0, 1).flatMap(item => original.findings[0].affectedIds.map(id => ({ ...item, id, path, nodeId }))) }
+  const binding = { inputId: original.inputId, candidateDigest: original.candidateDigest, requiredIds: original.checkedIds, actualIds: original.checkedIds, priorIds: [] }
+  assert.equal(candidateReviewError(original, binding), null, '原Native schema成功及基础schema成功不是位置协议证明')
+  assert.ok(reviewError(source, original, binding, [contract], []), '原完整回答必须在路由P1前拒绝')
+  assert.equal(candidateReviewLocationError(original, [contract])?.code, 'review_location_format')
+  for (const invalid of ['unknown', 'duplicate', 'path', 'id']) {
+    const value = structuredClone(original)
+    if (invalid === 'unknown') value.findings[0].affectedIds.push('REQ-FOREIGN')
+    if (invalid === 'duplicate') value.findings[0].affectedIds.push(value.findings[0].affectedIds[0])
+    if (invalid === 'path') value.findings[0].ruleLocation = '.spec/foreign/spec.md#REQ-TODO-STORAGE-SAVE-01'
+    if (invalid === 'id') value.findings[0].ruleLocation = `${path}#REQ-FOREIGN`
+    assert.equal(candidateReviewLocationError(value, [contract])?.code, 'review_location_binding', invalid)
+  }
+  const crossOwner = structuredClone(original), peer = { ...contract, nodeId: 'peer', path: '.spec/peer/spec.md', items: [{ ...contract.items[0], id: 'REQ-PEER', nodeId: 'peer', path: '.spec/peer/spec.md' }] }
+  crossOwner.findings[0].ruleLocation = `${path}#REQ-TODO-STORAGE-SAVE-01`
+  crossOwner.findings[0].affectedIds.push('REQ-PEER')
+  assert.equal(candidateReviewLocationError(crossOwner, [contract, peer]), null, '精确path#ID保持原全图唯一affectedIds跨owner语义')
+  assert.equal(candidateReviewLocationError(original, [contract], [path]), null, '真实可写P2的Spec发现不取得只读P1早验限制')
+  const unicode = structuredClone(crossOwner), unicodeContract = structuredClone(contract)
+  unicodeContract.items[0].id = 'REQ-存储'
+  unicode.findings[0].ruleLocation = `${path}#REQ-存储`; unicode.findings[0].affectedIds = ['REQ-存储']
+  assert.equal(candidateReviewLocationError(unicode, [unicodeContract]), null, '实际候选精确存在的ID优先，不新增ASCII白名单')
+  const mixed = structuredClone(crossOwner); mixed.findings[0].kind = 'missing_fact'
+  assert.equal(candidateReviewLocationError(mixed, [contract, peer])?.code, 'review_location_binding', '只读P1返修仍须repair finding，混合kind不取得位置权限')
+  assert.equal(original.findings[0].ruleLocation.includes('（同一冲突亦见同文件'), true, '程序不能清洗原输出')
+})
+
+for (const formatRejected of [false, true]) test(`Native成功但ruleLocation格式无效：保同candidate原JSON到唯一Git稿，真实提交后严格复核，原件=${formatRejected ? 'Native schema拒绝' : 'Native completed'}`, async t => {
+  const source = await input(t), built = await runGeneration(source, { runner: runner(source).run, validateCandidate: valid })
+  source.nativeWorktree = true
+  const fixed: GenerationReview = { inputId: source.snapshot.id, candidateDigest: built.candidate!.digest, verdict: 'repair', checkedIds: [...source.readyIds], findings: [{ kind: 'repair', affectedIds: ['AC-EXPORT-03'], ruleLocation: `${contractPath}#AC-EXPORT-03`, codeLocation: 'src/export.js#download', evidence: '保留原检查证据', counterexample: '无权限不得下载', message: '复核原候选' }] }
+  const bad = structuredClone(fixed); bad.findings[0].ruleLocation += '（同一冲突亦见同文件）'
+  let originalRequest: ElaborationSessionRequest | undefined
+  const native = { sessionId: 'original-review', threadId: 'original-thread', turnId: 'turn', output: bad, resultDigest: contentHash(JSON.stringify(bad)) }
+  const failed = await runGeneration(source, { reviewCandidate: built.candidate!, reviewSpecWritePaths: [], validateCandidate: valid, runner: async request => { originalRequest = request; assert.equal(request.purpose, 'code_review'); return native } })
+  for (const reviewSpecWritePaths of [undefined, [contractPath]]) {
+    const ordinary = await runGeneration(source, { reviewCandidate: built.candidate!, reviewSpecWritePaths, validateCandidate: valid, runner: async () => native })
+    assert.equal(ordinary.status, 'repair', '普通可写P2保原评审协议，定位门只约束实际只读P1路由')
+    assert.deepEqual(ordinary.review, bad)
+  }
+  assert.equal(failed.failure?.code, 'review_location_format'); assert.equal(failed.review, null)
+  assert.deepEqual(failed.reviewOutput, bad); assert.deepEqual(failed.candidate, built.candidate)
+  const originalText = formatRejected ? JSON.stringify({ inputId: source.snapshot.id, candidateDigest: built.candidate!.digest, findings: 'invalid-array' }) : JSON.stringify(bad)
+  const identity = { sessionId: native.sessionId, threadId: native.threadId, turnId: native.turnId }
+  const packet = rejectedFinalOutput(originalText, nativeWorktreePrompt(originalRequest!.prompt, originalRequest!.worktree!), originalRequest!, identity, 'native_json')
+  const material = formatRejected ? { ...failed, reviewOutput: null, failure: { code: 'structured_output_format_invalid', message: 'schema拒绝原JSON', ...identity, requestKey: originalRequest!.requestKey, inputDigest: originalRequest!.inputDigest } } : failed
+  const resultRef = writeEvidence(source.snapshot.source.commonDir, material)
+  const reviewRepair = { resultRef, nativePlanRef: writeEvidence(source.snapshot.source.commonDir, { request: originalRequest }), checkpointRef: writeEvidence(source.snapshot.source.commonDir, formatRejected ? { status: 'failed', phase: 'removed', failure: { code: material.failure!.code, message: material.failure!.message, rejectedOutput: packet } } : { status: 'completed', phase: 'removed', result: native }) }
+  const attempts: ElaborationSessionRequest[] = []
+  for (const variant of ['valid', 'reordered', 'no-commit', 'source', 'schema', 'output', 'syntax']) {
+    const repaired = await runGeneration({ ...source, requestKey: 'next-attempt', reviewRepair }, { reviewCandidate: built.candidate!, reviewSpecWritePaths: [], validateCandidate: valid, runner: async request => {
+      attempts.push(request); assert.equal(request.purpose, 'code_review'); assert.equal(request.worktree!.mode, 'edit')
+      const path = /草稿文件=([^；]+)/.exec(request.prompt)![1], seed = request.worktree!, workspace = join(source.root, '..', `review-draft-${resultRef.sha256}-${variant}`)
+      t.after(() => rmSync(workspace, { recursive: true, force: true }))
+      execFileSync('git', ['-C', source.root, 'worktree', 'add', '--detach', workspace, seed.baseCommit], { stdio: 'pipe' })
+      assert.equal(readFileSync(join(workspace, path), 'utf8'), originalText, '原JSON逐字保全，非重答或程序清洗')
+      assert.match(readFileSync(join(workspace, path.replace(/\.json$/, '.errors.json')), 'utf8'), formatRejected ? /schema/ : /ruleLocation/)
+      assert.ok(readFileSync(join(workspace, path.replace(/\.json$/, '.trace.json')), 'utf8').includes(formatRejected ? packet.sha256 : native.resultDigest))
+      writeFileSync(join(workspace, path), variant === 'syntax' ? '{broken-review' : JSON.stringify(variant === 'reordered' ? Object.fromEntries(Object.entries(fixed).reverse()) : fixed))
+      if (variant === 'source') writeFileSync(join(workspace, 'src/export.js'), 'unauthorized source')
+      if (variant === 'schema') writeFileSync(join(workspace, path.replace(/\.json$/, '.schema.json')), '{}')
+      if (variant !== 'no-commit') { execFileSync('git', ['-C', workspace, 'add', '.'], { stdio: 'pipe' }); execFileSync('git', ['-C', workspace, 'commit', '-m', 'repair original review JSON'], { stdio: 'pipe' }) }
+      return { sessionId: 'repair-review', threadId: 'repair-thread', turnId: 'turn', output: variant === 'output' ? bad : fixed, resultDigest: contentHash(JSON.stringify(variant === 'output' ? bad : fixed)), worktree: nativeWorktreeResult(workspace, seed) }
+    } })
+    if (variant === 'valid' || variant === 'reordered') { assert.equal(repaired.status, 'repair', JSON.stringify(repaired.failure)); assert.deepEqual(repaired.review, fixed) }
+    else { assert.equal(repaired.review, null, variant); assert.ok(repaired.failure, variant) }
+    assert.deepEqual(repaired.candidate, built.candidate)
+  }
+  assert.equal(attempts.length, 7)
+  assert.equal(verifyCandidate(source.snapshot.source.commonDir, built.candidate!).some(entry => entry.path.startsWith('.spex-sync-')), false)
+  assert.equal(readEvidence(source.snapshot.source.commonDir, resultRef).toString(), JSON.stringify(material), '旧失败原件不可改签')
+})
+
+
+for (const cold of [false, true]) test(`mixed只读格式稿与可写missing_fact：续修及原请求冷重建保留瞬态写范围 cold=${cold}`, async t => {
+  const source = await input(t), writablePath = '.spec/import/import-contract/spec.md'
+  mkdirSync(join(source.root, '.spec/import/import-contract'), { recursive: true })
+  writeFileSync(join(source.root, writablePath), source.files.get(contractPath)!.replaceAll('EXPORT', 'IMPORT'))
+  execFileSync('git', ['-C', source.root, 'add', '.'], { stdio: 'pipe' })
+  execFileSync('git', ['-C', source.root, 'commit', '-m', 'add independent writable owner'], { stdio: 'pipe' })
+  source.snapshot = await captureInputSnapshot(source.root)
+  source.manifest = { version: 1, entries: readTree(source.snapshot.source.commonDir, source.snapshot.immutableTree) }
+  source.files = new Map(source.manifest.entries.map(entry => [entry.path, readObject(source.snapshot.source.commonDir, entry.oid).toString('utf8')]))
+  source.contracts = [...source.contracts, parseContract({ nodeId: 'import-contract', path: writablePath, source: source.files.get(writablePath)! }).contract!]
+  source.elaboratedSpecs = [...source.elaboratedSpecs, { path: writablePath, source: source.files.get(writablePath)! }]
+  source.readyIds = [...source.readyIds, 'AC-IMPORT-03']
+  const built = await runGeneration(source, { runner: runner(source, () => changes(source), request => ({ ...review(request), checkedIds: [...source.readyIds] })).run, validateCandidate: valid })
+  assert.equal(built.status, 'reviewed', JSON.stringify(built.failure))
+  source.nativeWorktree = true
+  const fixed: GenerationReview = { inputId: source.snapshot.id, candidateDigest: built.candidate!.digest, verdict: 'repair', checkedIds: [...source.readyIds], findings: [
+    { kind: 'repair', affectedIds: ['AC-EXPORT-03'], ruleLocation: `${contractPath}#AC-EXPORT-03`, codeLocation: 'src/export.js#download', evidence: '同一候选的只读诊断', counterexample: '无权限不得下载', message: '复核只读owner' },
+    { kind: 'missing_fact', affectedIds: ['AC-IMPORT-03'], ruleLocation: `${writablePath}#AC-IMPORT-03`, codeLocation: 'src/export.js#download', evidence: '同一候选的可写诊断', counterexample: '缺少可信输入', message: '保留可写P2原协议' },
+  ] }
+  const bad = structuredClone(fixed); bad.findings[0].ruleLocation += '（原说明）'
+  assert.equal(candidateReviewLocationError(bad, source.contracts, [writablePath])?.code, 'review_location_format')
+  assert.equal(candidateReviewLocationError(bad, source.contracts)?.code, 'review_location_binding')
+  const native = { sessionId: 'mixed-original', threadId: 'mixed-original-thread', turnId: 'turn', output: bad, resultDigest: contentHash(JSON.stringify(bad)) }
+  let originalRequest: ElaborationSessionRequest | undefined
+  const failed = await runGeneration(source, { reviewCandidate: built.candidate!, reviewSpecWritePaths: [writablePath], validateCandidate: valid, runner: async request => { originalRequest = request; return native } })
+  assert.equal(failed.failure?.code, 'review_location_format')
+  const commonDir = source.snapshot.source.commonDir
+  const repairInput = { ...source, requestKey: 'mixed-next', reviewRepair: { resultRef: writeEvidence(commonDir, failed), nativePlanRef: writeEvidence(commonDir, { request: originalRequest }), checkpointRef: writeEvidence(commonDir, { status: 'completed', phase: 'removed', result: native }) } }
+  const stored = JSON.parse(readEvidence(commonDir, writeEvidence(commonDir, freezeGenerationInput(repairInput).inputEvidence)).toString()) as ReturnType<typeof freezeGenerationInput>['inputEvidence']
+  const restored = restoreGenerationInput(stored)
+  assert.equal(Object.hasOwn(restored, 'reviewSpecWritePaths'), false, '写范围不进入持久输入或摘要')
+  let calls = 0, dispatched: ElaborationSessionRequest | undefined
+  const repaired = await runGeneration(cold ? restored : repairInput, { reviewCandidate: built.candidate!, reviewSpecWritePaths: [writablePath], validateCandidate: valid, runner: async request => {
+    calls++; dispatched = request
+    const path = /草稿文件=([^；]+)/.exec(request.prompt)![1], seed = request.worktree!, workspace = join(source.root, '..', `mixed-review-${cold}-${failed.inputDigest}`)
+    t.after(() => rmSync(workspace, { recursive: true, force: true }))
+    execFileSync('git', ['-C', source.root, 'worktree', 'add', '--detach', workspace, seed.baseCommit], { stdio: 'pipe' })
+    assert.equal(readFileSync(join(workspace, path), 'utf8'), JSON.stringify(bad))
+    writeFileSync(join(workspace, path), JSON.stringify(fixed))
+    execFileSync('git', ['-C', workspace, 'add', '.'], { stdio: 'pipe' })
+    execFileSync('git', ['-C', workspace, 'commit', '-m', 'repair mixed review draft'], { stdio: 'pipe' })
+    return { sessionId: 'mixed-repair', threadId: 'mixed-repair-thread', turnId: 'turn', output: fixed, resultDigest: contentHash(JSON.stringify(fixed)), worktree: nativeWorktreeResult(workspace, seed) }
+  } })
+  assert.equal(repaired.status, 'repair', JSON.stringify(repaired.failure))
+  assert.equal(calls, 1)
+  assert.deepEqual(repaired.review, fixed, '可写missing_fact保持原语义，只读定位严格修复')
+  assert.deepEqual(repaired.candidate, built.candidate)
+  assert.deepEqual(generationReviewRequest(restored, built.candidate!, true, [writablePath]).request, dispatched, '原request冷重建与当前派发逐字一致')
+  for (const invalid of ['readonly-kind', 'unknown-id']) {
+    const rejected = structuredClone(fixed)
+    if (invalid === 'readonly-kind') rejected.findings[0].kind = 'missing_fact'
+    else rejected.findings[0].affectedIds = ['AC-FOREIGN']
+    const result = await runGeneration(source, { reviewCandidate: built.candidate!, reviewSpecWritePaths: [writablePath], validateCandidate: valid, runner: async () => ({ ...native, output: rejected, resultDigest: contentHash(JSON.stringify(rejected)) }) })
+    assert.equal(result.failure?.code, 'review_location_binding', invalid)
+    assert.equal(result.review, null, invalid)
+  }
 })

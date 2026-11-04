@@ -1,3 +1,4 @@
+import { finiteSyncBudget } from './budget.js'
 import { randomUUID } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
@@ -126,8 +127,8 @@ export async function runConformance(supplied: ConformanceInput, options: Confor
     const baseEntries = readTree(commonDir, base.tree), candidateEntries = candidate.tree === base.tree ? baseEntries : readTree(commonDir, candidate.tree)
     const policyEntries = policy.tree === base.tree ? baseEntries : policy.tree === candidate.tree ? candidateEntries : readTree(commonDir, policy.tree)
     result.identities = { baseCommit: base.commit, candidateCommit: candidate.commit, policyCommit: policy.commit, baseTree: base.tree, candidateTree: candidate.tree, policyTree: policy.tree }
-    const before = await readFrozenContracts(root, files(commonDir, baseEntries))
-    const after = candidate.tree === base.tree ? before : await readFrozenContracts(root, files(commonDir, candidateEntries))
+    const before = await readFrozenContracts(root, files(commonDir, baseEntries), new Set(baseEntries.map(entry => entry.path)))
+    const after = candidate.tree === base.tree ? before : await readFrozenContracts(root, files(commonDir, candidateEntries), new Set(candidateEntries.map(entry => entry.path)))
     result.coverage.governedNodeIds = sorted(after.contracts.map(contract => contract.nodeId))
     result.coverage.uncoveredNodeIds = sorted(after.nodes.filter(node => !after.contracts.some(contract => contract.path === node.path)).map(node => node.id))
     result.coverage.governedPaths = sorted(after.contracts.flatMap(contract => [...contract.code.map(pathOf), ...contract.items.flatMap(item => item.kind === 'AC' ? [pathOf(item.test)] : [])]))
@@ -244,7 +245,7 @@ export async function runConformance(supplied: ConformanceInput, options: Confor
     const serialized = JSON.stringify(reviewContext)
     writeFileSync(join(evidenceDirectory, 'input.json'), serialized)
     const runner: ElaborationRunner = options.testReviewRunner ?? (async request => (await import('../session-structured.js')).runStructuredSession(request))
-    const reviewed = await runCandidateReview({ root, base: base.commit, requestKey: `conformance:${result.inputDigest}:${randomUUID()}`, inputDigest: result.inputDigest, purpose: 'code_review', timeoutMs: trusted.callTimeoutMs ?? trusted.budget.timeoutMs, signal, model: 'gpt-6.1-sol', effort: 'high', schema: GENERATION_REVIEW_SCHEMA,
+    const reviewed = await runCandidateReview({ root, base: base.commit, requestKey: `conformance:${result.inputDigest}:${randomUUID()}`, inputDigest: result.inputDigest, purpose: 'code_review', timeoutMs: trusted.callTimeoutMs ?? finiteSyncBudget(trusted.budget)?.timeoutMs ?? 120_000, signal, model: 'gpt-6.1-sol', effort: 'high', schema: GENERATION_REVIEW_SCHEMA,
       prompt: `${CANDIDATE_REVIEW_INSTRUCTIONS}\n这是从真实Git对象重建的独立CI候选检查，没有builder总结或本机passed证据。base∪candidate旧新完整契约和断言同入读集合。intentAuthorization仅来自外部可信调用者选定的policyCommit，程序已精确匹配intentChanges的path及旧新raw摘要；此登记批准该具体原意差量，source是来源说明而非身份签名，候选自带记录不提供权限。授权不证明实现正确；仍须核对完整旧新raw、实现、规则及断言。退役必须由授权raw或上层规则变更支持，旧AC保留原test路径、稳定ID与固定命令，改成验证移除后行为的真实负向断言。逐项核退役来源和负向断言，随意删schema/node/AC/test、弱化未授权raw或断言均repair。新旧所有itemIds均必须checkedIds，retiredIds仍是本次实际待审义务。没有裁决权限，不得用oracle-policy批准命令或oracle更新。缺少调用依赖必须repair。\n冻结完整输入:\n${serialized}` }, runner, { inputId: result.inputDigest, candidateDigest, requiredIds: scope.itemIds, actualIds: scope.itemIds, priorIds: [...before.graph.items.keys()] })
     result.review = reviewed.review; result.trace = reviewed.trace
     if (reviewed.review.verdict !== 'accept') fail('review_rejected', JSON.stringify(reviewed.review.findings))

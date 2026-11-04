@@ -1,7 +1,8 @@
 import { existsSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import { TreeWatcherRegistry } from '../tree-watcher.js'
 import type { TreeWatcherOptions } from '../tree-watcher.js'
+import { sourceGit } from './snapshot.js'
 
 export type SyncObserverHealth = {
   status: 'offline' | 'starting' | 'watching' | 'degraded' | 'missing' | 'invalidated'
@@ -20,7 +21,69 @@ export type SyncObserverOptions = {
   watchFactory?: TreeWatcherOptions['watchFactory']
 }
 
-/** 服务持有观察器；事件合并只减少突发扫描，不丢扫描期间的最后一次保存。 */
+type GitCommandError = { status?: number | null }
+
+const gitCommandStatus = (error: unknown): number | null | undefined =>
+  typeof error === 'object' && error !== null && 'status' in error
+    ? (error as GitCommandError).status
+    : undefined
+
+const validRefName = (root: string, refName: string): boolean | null => {
+  try {
+    sourceGit(root, ['check-ref-format', refName])
+    return true
+  } catch (error) {
+    return gitCommandStatus(error) === 1 ? false : null
+  }
+}
+
+const symbolicRefTarget = (root: string, refName: string): string | null | undefined => {
+  try {
+    const target = sourceGit(root, ['symbolic-ref', '--no-recurse', '--quiet', refName]).toString().trim()
+    return target || undefined
+  } catch (error) {
+    return gitCommandStatus(error) === 1 ? null : undefined
+  }
+}
+
+const currentHeadRefChain = (root: string): string[] | null => {
+  const refs: string[] = [], seen = new Set<string>()
+  let refName = 'HEAD'
+  while (true) {
+    if (seen.has(refName)) return null
+    seen.add(refName)
+    const target = symbolicRefTarget(root, refName)
+    if (target === undefined) return null
+    if (target === null) {
+      if (refName !== 'HEAD') return refs
+      try { sourceGit(root, ['rev-parse', '--verify', 'HEAD']); return refs }
+      catch { return null }
+    }
+    if (!target.startsWith('refs/') || validRefName(root, target) !== true) return null
+    refs.push(target)
+    refName = target
+  }
+}
+
+const relatedRefPath = (left: string, right: string): boolean =>
+  left === right || left.startsWith(`${right}/`) || right.startsWith(`${left}/`)
+
+const shouldScanRefEvent = (root: string, relativePath: string): boolean => {
+  const path = relativePath.split(sep).join('/')
+  if (path.endsWith('.lock')) return false
+  const eventRef = `refs/${path}`
+  const headRefs = currentHeadRefChain(root)
+  if (headRefs === null) return true
+  if (headRefs.some(ref => relatedRefPath(ref, eventRef))) return true
+  try {
+    sourceGit(root, ['show-ref', '--verify', '--quiet', eventRef])
+    return false
+  } catch {
+    return true
+  }
+}
+
+/** 服务持有观察器；仅 Git 提交引用事件加速扫描，不丢扫描期间的最后一次提交。 */
 export class SyncInputObserver {
   private rootFingerprint: string | null = null
   private watchers: TreeWatcherRegistry[] = []
@@ -44,15 +107,15 @@ export class SyncInputObserver {
     if (!existsSync(this.options.root)) { this.report('missing', { code: 'sync_source_missing', message: '已注册输入工作树不存在，等待补偿扫描确认恢复' }); return }
     const stat = statSync(this.options.root)
     this.rootFingerprint = `${stat.dev}:${stat.ino}`
-    const paths = [...new Set([this.options.root, this.options.gitDir, this.options.commonDir, join(this.options.commonDir, 'refs')])]
+    const paths = [...new Set([this.options.gitDir, this.options.commonDir, join(this.options.commonDir, 'refs')])]
     for (const root of paths) {
-      const sourceTree = root === this.options.root, refsTree = root === join(this.options.commonDir, 'refs')
+      const refsTree = root === join(this.options.commonDir, 'refs')
       if (refsTree && !existsSync(root)) continue
       const watcher = new TreeWatcherRegistry({
-        root, source: `sync:${root}`, scope: 'full', recursive: sourceTree || refsTree,
-        ignore: path => sourceTree ? path.split(/[\\/]/).some(part => ['.git', 'node_modules', '.worktrees', '.codex', '.claude'].includes(part)) : refsTree ? path === 'spex-sync' || path.startsWith('spex-sync/') : !['HEAD', 'index', 'packed-refs', 'config'].includes(path),
+        root, source: `sync:${root}`, scope: 'full', recursive: refsTree,
+        ignore: path => refsTree ? path === 'spex-sync' || path.startsWith('spex-sync/') : !['HEAD', 'packed-refs', 'config'].includes(path),
         watchFactory: this.options.watchFactory,
-        onInput: () => this.schedule(),
+        onInput: (_event, relativePath) => { if (!refsTree || shouldScanRefEvent(this.options.root, relativePath)) this.schedule() },
         onFailure: error => { this.watchFailure = error; this.report('degraded', { code: 'sync_watch_failed', message: error.message }); this.schedule() },
       })
       this.watchers.push(watcher)

@@ -1,15 +1,23 @@
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { spawn, execFileSync } from 'node:child_process'
+import { cpSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import ts from 'typescript'
+import { SyncApplicationError } from './settings.js'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
+import { openProtocol } from '@spexcode/session-protocol'
+import { migrateSyncStore } from './migrations.js'
+import { SyncStore } from './store.js'
+import { captureInputSnapshot, readEvidence } from './snapshot.js'
 
 const workspace = fileURLToPath(new URL('../../../', import.meta.url))
 function cli(args: string[], cwd = workspace): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['--import', 'tsx', join(workspace, 'spec-cli/src/cli.ts'), ...args], { cwd, env: { ...process.env, SPEX_PROFILE: 'full' }, stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(process.execPath, ['--import', import.meta.resolve('tsx'), join(workspace, 'spec-cli/src/cli.ts'), ...args], { cwd, env: { ...process.env, SPEX_PROFILE: 'full' }, stdio: ['ignore', 'pipe', 'pipe'] })
     let stdout = '', stderr = ''
     child.stdout.on('data', (bytes: Buffer) => { stdout += bytes.toString() })
     child.stderr.on('data', (bytes: Buffer) => { stderr += bytes.toString() })
@@ -34,6 +42,8 @@ test('AC-SYNC-CLI-01 sync help说明真实后端与阶段范围，错误flag和�
   assert.equal(misplaced.code, 1); assert.match(misplaced.stderr, /只用于 sync run/)
   const stopId = await cli(['sync', 'stop-writer', '--request-id', 'unneeded'])
   assert.equal(stopId.code, 1); assert.match(stopId.stderr, /stop-writer 不接收/)
+  const missingAdoption = await cli(['sync', 'adopt'])
+  assert.equal(missingAdoption.code, 1); assert.match(missingAdoption.stderr, /adopt 需要完整 operation ID/)
 })
 test('AC-SYNC-CLI-02 CLI run/status/control 走相同持久服务HTTP且保留稳定request ID', async () => {
   const requests: { method: string; url: string; body: unknown }[] = []
@@ -84,8 +94,31 @@ test('AC-SYNC-CLI-02 CLI run/status/control 走相同持久服务HTTP且保留�
     assert.equal((await cli(['sync', 'verify', 'demo', '--request-id', 'verify-1', '--api', api])).code, 0)
     assert.equal(requests[12].url, '/api/sync/verify')
 
+    const adopted = await cli(['sync', 'adopt', 'op-1', '--api', api])
+    assert.equal(adopted.code, 0, adopted.stderr)
+    assert.deepEqual(requests[13], { method: 'POST', url: '/api/sync/operations/op-1/adopt', body: { targetTree: workspace.replace(/\/$/, '') } })
+
   } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())) }
 })
+test('sync run和verify传递--model，resume/recover不接受模型切换', async () => {
+  const requests: { url: string; body: { model?: string } }[] = []
+  const server = createServer(async (request, response) => {
+    const chunks: Buffer[] = []; for await (const bytes of request) chunks.push(bytes as Buffer)
+    requests.push({ url: request.url!, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) })
+    response.writeHead(200, { 'content-type': 'application/json' }); response.end('{}')
+  })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  const api = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+  try {
+    for (const verb of ['run', 'verify']) assert.equal((await cli(['sync', verb, 'demo', '--model', 'gpt-6.1-terra', '--api', api])).code, 0)
+    assert.deepEqual(requests.map(item => [item.url, item.body.model]), [['/api/sync/run', 'gpt-6.1-terra'], ['/api/sync/verify', 'gpt-6.1-terra']])
+    for (const verb of ['resume', 'recover']) {
+      const refused = await cli(['sync', verb, 'op-1', '--model', 'gpt-6-astra', '--api', api])
+      assert.equal(refused.code, 1); assert.equal(requests.length, 2)
+    }
+  } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())) }
+})
+
 test('AC-SYNC-CLI-03 后端离线不回退mock或留下虚假成功输出', async () => {
   const server = createServer()
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
@@ -95,4 +128,66 @@ test('AC-SYNC-CLI-03 后端离线不回退mock或留下虚假成功输出', asyn
   assert.equal(result.code, 1)
   assert.equal(result.stdout, '')
   assert.match(result.stderr, /no backend reachable/)
+})
+
+test('resource-only CLI单次离线访问精确operation/input，不向API发送或启动服务', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sync-resource-cli-')), requests: string[] = []
+  execFileSync('git', ['init', '-q', root])
+  writeFileSync(join(root, 'fixture.txt'), '原作者内容不改\n'); execFileSync('git', ['-C', root, 'add', 'fixture.txt'])
+  execFileSync('git', ['-C', root, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'fixture'])
+  const database = join(root, '.git', 'private-cli-proof.sqlite'), gitBackup = `${root}-original-git`
+  const server = createServer((request, response) => { requests.push(request.url!); response.writeHead(200); response.end('{}') })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  const originalApi = process.env.SPEXCODE_API_URL, originalDatabase = process.env.SPEX_SESSION_DATABASE_PATH, api = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+  process.env.SPEXCODE_API_URL = api; process.env.SPEX_SESSION_DATABASE_PATH = database
+  try {
+    const help = await cli(['sync', '--help'], root)
+    assert.equal(help.code, 0, help.stderr)
+    assert.match(help.stdout, /sync resources recover/); assert.match(help.stdout, /离线/)
+    const result = await cli(['sync', 'resources', 'recover', 'missing-operation', '--input-id', 'a'.repeat(64)], root)
+    assert.equal(result.code, 1); assert.equal(result.stdout, ''); assert.match(result.stderr, /SYNC_OPERATION_UNKNOWN/)
+    // 先经上述正式CLI初始化canonical protocol，再登记隔离历史操作，不手造cutover marker。
+    const protocol = openProtocol(database)
+    await migrateSyncStore(protocol)
+    const input = await captureInputSnapshot(root), store = new SyncStore(protocol, { readBlob: ref => readEvidence(input.source.commonDir, ref) })
+    const operation = store.admitAndEnqueue({ ingressKey: 'offline-resource-proof', rootCauseId: 'offline-resource-proof', origin: 'spec', input, scope: { paths: ['fixture.txt'], contractIds: [], flowIds: [] }, budget: { maxCalls: 4, maxAttempts: 2, maxRepairs: 1, timeoutMs: 30000 }, delivery: null, deliveryPlan: { canonicalRoot: root, branch: 'refs/heads/codex/delivery', baseCommit: input.headCommit }, policyDigest: 'frozen-policy', impactDigest: 'frozen-impact', readSetDigest: 'frozen-readset' })
+    protocol.close()
+    renameSync(join(root, '.git'), gitBackup); cpSync(gitBackup, join(root, '.git'), { recursive: true })
+    const cleaned = await cli(['sync', 'resources', 'recover', operation.id, '--input-id', input.id], root)
+    assert.equal(cleaned.code, 0, cleaned.stderr)
+    assert.deepEqual(JSON.parse(cleaned.stdout), { operationId: operation.id, inputId: input.id, status: 'resources_recovered', resources: [], pendingJournalIds: [] })
+    const reopened = openProtocol(database)
+    try {
+      const after = new SyncStore(reopened, { readBlob: ref => readEvidence(input.source.commonDir, ref) })
+      assert.deepEqual(after.readOperation(operation.id), operation); assert.deepEqual(after.listAttempts(operation.id), [])
+      assert.equal(after.nextDispatch(input.source.repositoryId)?.operation.id, operation.id, '离线清理不能消费原业务队列')
+    } finally { reopened.close() }
+    assert.deepEqual(requests, [], '离线入口不能fallback HTTP')
+    const missing = await cli(['sync', 'resources', 'recover', 'op'], root)
+    assert.equal(missing.code, 1); assert.match(missing.stderr, /input-id/)
+    const remote = await cli(['sync', 'resources', 'recover', 'op', '--input-id', 'a'.repeat(64), '--api', api], root)
+    assert.equal(remote.code, 1); assert.match(remote.stderr, /离线|仅接受/); assert.deepEqual(requests, [])
+  } finally {
+    if (originalApi === undefined) delete process.env.SPEXCODE_API_URL; else process.env.SPEXCODE_API_URL = originalApi
+    if (originalDatabase === undefined) delete process.env.SPEX_SESSION_DATABASE_PATH; else process.env.SPEX_SESSION_DATABASE_PATH = originalDatabase
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
+    rmSync(root, { recursive: true, force: true })
+    rmSync(gitBackup, { recursive: true, force: true })
+  }
+})
+
+test('resource-only API真实路由handler只委派专用factory并要求明确input ID', async () => {
+  const source = readFileSync(join(workspace, 'spec-cli/src/index.ts'), 'utf8'), file = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true)
+  let arrow: ts.Expression | undefined
+  const visit = (node: ts.Node): void => { if (ts.isCallExpression(node) && node.expression.getText(file) === 'app.post' && ts.isStringLiteral(node.arguments[0]) && node.arguments[0].text === '/api/sync/operations/:id/resources/recover') arrow = node.arguments[1]; ts.forEachChild(node, visit) }
+  visit(file); assert.ok(arrow, '必须有独立resources/recover路由')
+  const compiled = ts.transpileModule(`const handler = ${arrow.getText(file)}`, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText
+  type Context = { req: { json(): Promise<unknown>; param(name: string): string; query(name: string): string | undefined }; json(value: unknown): unknown }
+  const calls: unknown[] = [], reply = { status: 'resources_recovered', pendingJournalIds: ['preserved-journal'] }
+  const handler = new Function('syncRequestBody', 'syncTargetRoot', 'configuredSyncResourceRecoveryApplication', 'SyncApplicationError', `${compiled}; return handler`)(async (request: Context['req']) => request.json(), async (query: unknown, target: unknown) => { assert.equal(query, '/trusted-root'); assert.equal(target, '/trusted-root'); return '/trusted-root' }, async (root: string) => { assert.equal(root, '/trusted-root'); return { recoverResources: async (id: string, input: string) => { calls.push([id, input]); return reply } } }, SyncApplicationError) as (context: Context) => Promise<unknown>
+  const context = (body: unknown): Context => ({ req: { json: async () => body, param: () => 'explicit-operation', query: () => '/trusted-root' }, json: value => value })
+  assert.deepEqual(await handler(context({ targetTree: '/trusted-root', inputId: 'frozen-input' })), reply)
+  assert.deepEqual(calls, [['explicit-operation', 'frozen-input']])
+  for (const body of [{ targetTree: '/trusted-root' }, { targetTree: '/trusted-root', inputId: '' }, { targetTree: '/trusted-root', inputId: 'frozen-input', operationId: 'foreign' }]) await assert.rejects(handler(context(body)), { code: 'sync_request_invalid', status: 400 })
+  assert.equal(calls.length, 1, '非法请求不能进入资源清理')
 })

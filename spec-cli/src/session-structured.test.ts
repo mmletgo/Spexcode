@@ -1,14 +1,15 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer, type Socket } from 'node:net'
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, realpathSync, mkdirSync } from 'node:fs'
+import { chmodSync, mkdtempSync, rmSync, readFileSync, writeFileSync, realpathSync, mkdirSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { processStartToken } from '@spexcode/spec-core'
 import { codexStructuredTurn } from './codex-harness.js'
-import { prepareStructuredRealm, structuredObserverState, StructuredSessionError, StructuredSessionTransportError, type StructuredExecution } from './session-structured-policy.js'
-import { freezeContext, readFrozenRange, type FrozenNativeItem } from './frozen-context.js'
+import { frozenReaderDisabledFeatures, prepareStructuredRealm, structuredExecutionPolicy, structuredExecutionTimer, structuredRealmRoot, structuredObserverState, StructuredSessionError, StructuredSessionTransportError, type StructuredExecution, type FrozenReaderRuntime } from './session-structured-policy.js'
+import { freezeContext, frozenReadOutputTokenLimit, readFrozenRange, type FrozenNativeItem } from './frozen-context.js'
 
 type Rpc = { id?: number; method: string; params: Record<string, unknown> }
 const schema = { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'], additionalProperties: false }
@@ -24,8 +25,15 @@ async function fixture(handler: (request: Rpc, send: (value: unknown) => void, s
   const server = createServer((socket) => {
     sockets.add(socket); socket.on('close', () => sockets.delete(socket))
     let buffer = Buffer.alloc(0), upgraded = false
+    const nativeTurns = new Map<string, ReturnType<typeof finalTurn>>()
     const send = (value: unknown): void => {
-      const payload = Buffer.from(JSON.stringify(value)); const header = payload.length < 126 ? Buffer.from([0x81, payload.length]) : Buffer.from([0x81, 126, payload.length >> 8, payload.length & 255])
+      const notification = value as { params?: { turn?: ReturnType<typeof finalTurn> } }
+      if (notification.params?.turn?.items) nativeTurns.set(notification.params.turn.id, notification.params.turn)
+      const payload = Buffer.from(JSON.stringify(value))
+      let header: Buffer
+      if (payload.length < 126) header = Buffer.from([0x81, payload.length])
+      else if (payload.length < 65536) header = Buffer.from([0x81, 126, payload.length >> 8, payload.length & 255])
+      else { header = Buffer.alloc(10); header[0] = 0x81; header[1] = 127; header.writeBigUInt64BE(BigInt(payload.length), 2) }
       socket.write(Buffer.concat([header, payload]))
     }
     socket.on('data', (chunk: Buffer) => {
@@ -38,14 +46,22 @@ async function fixture(handler: (request: Rpc, send: (value: unknown) => void, s
       while (buffer.length >= 2) {
         const masked = !!(buffer[1] & 128); let length = buffer[1] & 127, offset = 2
         if (length === 126) { if (buffer.length < 4) return; length = buffer.readUInt16BE(2); offset = 4 }
-        if (length === 127) { if (buffer.length < 10) return; length = Number(buffer.readBigUInt64BE(2)); offset = 10 }
+        else if (length === 127) { if (buffer.length < 10) return; length = Number(buffer.readBigUInt64BE(2)); offset = 10 }
         const start = offset + (masked ? 4 : 0); if (buffer.length < start + length) return
         const payload = Buffer.from(buffer.subarray(start, start + length)); if (masked) for (let index = 0; index < length; index++) payload[index] ^= buffer[offset + index % 4]
         buffer = buffer.subarray(start + length)
         const request = JSON.parse(payload.toString()) as Rpc; calls.push(request)
         if (request.id === undefined) continue
-        const response = handler(request, send, socket)
-        if (response !== undefined) send({ id: request.id, result: response })
+        let response = handler(request, send, socket)
+        if (request.method === 'thread/resume' && response) {
+          const thread = (response as { thread: { turns?: Array<ReturnType<typeof finalTurn>> } }).thread
+          for (const turn of thread.turns ?? []) nativeTurns.set(turn.id, turn)
+          assert.equal(request.params.excludeTurns, true)
+          response = { ...response, thread: { ...thread, turns: [] } }
+        }
+        if (response === undefined && request.method === 'thread/turns/list') response = { data: [...nativeTurns.values()].map(({ id, status }) => ({ id, status })), nextCursor: null }
+        if (response === undefined && request.method === 'thread/items/list') response = { data: (nativeTurns.get(request.params.turnId as string)?.items ?? []).map(item => ({ turnId: request.params.turnId, item })), nextCursor: null }
+        if (response !== undefined && response !== null) send({ id: request.id, result: response })
       }
     })
   })
@@ -69,8 +85,145 @@ function frozenFixture() {
   const item: FrozenNativeItem = { type: 'dynamicToolCall', id: 'native-call', namespace: null, tool: 'spex_read_frozen', arguments: args, status: 'completed', success: true, contentItems: readFrozenRange(ref, args).response.contentItems }
   const policy = (extra: Partial<StructuredExecution> = {}) => execution({ version: 2, policy: 'codex-frozen-read-only-v2', frozenContext: ref, ...extra })
   const turn = (items = [item]) => ({ ...finalTurn(), items: [...items, ...finalTurn().items] })
-  return { ref, args, item, policy, turn, close: () => rmSync(directory, { recursive: true, force: true }) }
+  return { ref, directory, args, item, policy, turn, close: () => rmSync(directory, { recursive: true, force: true }) }
 }
+
+test('structured settlement pages exact raw items when full history never answers', async () => {
+  const data = frozenFixture()
+  const secondArgs = { ...data.args, startByte: 6 }
+  const items = data.turn([{ ...data.item, arguments: { ...data.args, endByte: 6 }, contentItems: readFrozenRange(data.ref, { ...data.args, endByte: 6 }).response.contentItems },
+    { ...data.item, id: 'native-call-2', arguments: secondArgs, contentItems: readFrozenRange(data.ref, secondArgs).response.contentItems }]).items
+  const finalText = JSON.stringify({ answer: 'x'.repeat(150_000) })
+  items[items.length - 1] = { type: 'agentMessage', phase: 'final_answer', text: finalText }
+  const f = await fixture((request, send) => {
+    if (request.method === 'turn/start') {
+      send({ method: 'turn/completed', params: { threadId: 'thread-exact', turn: { id: 'turn-exact', status: 'completed' } } })
+      return { turn: { id: 'turn-exact' } }
+    }
+    if (request.method === 'thread/turns/list') return { data: [{ id: 'turn-exact', status: 'completed' }], nextCursor: null }
+    if (request.method === 'thread/items/list') {
+      assert.equal(request.params.turnId, 'turn-exact')
+      const offset = Number(request.params.cursor ?? 0)
+      return { data: [{ turnId: 'turn-exact', item: items[offset] }], nextCursor: offset + 1 < items.length ? String(offset + 1) : null }
+    }
+    return safePrelude(request)
+  })
+  try {
+    const result = await codexStructuredTurn(f.path, '/fixture', 'pinned prompt', data.policy({ timeoutMs: 500 }), callbacks)
+    assert.deepEqual(result.frozenReadProof?.coveredEntryIds, ['source'])
+    assert.equal(result.frozenReadProof?.receipts.length, 2)
+    assert.equal(result.text, finalText)
+    assert.equal(f.calls.filter(call => call.method === 'thread/items/list').length, items.length)
+    assert.equal(f.calls.some(call => call.method === 'thread/read'), false)
+  } finally { await f.close(); data.close() }
+})
+
+for (const mode of ['foreign-turn', 'tampered']) test(`structured item pagination rejects ${mode} on a later page`, async () => {
+  const data = frozenFixture(), items = data.turn().items
+  const f = await fixture(request => {
+    if (request.method === 'thread/resume') return { thread: { id: 'thread-exact', turns: [data.turn()] } }
+    if (request.method === 'thread/items/list') {
+      if (!request.params.cursor) return { data: [{ turnId: 'turn-exact', item: items[1] }], nextCursor: 'tools' }
+      const item = mode === 'tampered' ? { ...data.item, contentItems: [{ type: 'inputText', text: 'tampered' }] } : data.item
+      return { data: [{ turnId: mode === 'foreign-turn' ? 'foreign' : 'turn-exact', item }, ...items.slice(2).map(item => ({ turnId: 'turn-exact', item }))], nextCursor: null }
+    }
+    return safePrelude(request)
+  })
+  try {
+    await assert.rejects(codexStructuredTurn(f.path, '/fixture', 'pinned prompt', data.policy({ threadId: 'thread-exact', turnId: 'turn-exact' }), callbacks), /different turn|result bytes/)
+    assert.equal(f.calls.some(call => call.method === 'turn/start' || call.method === 'thread/read'), false)
+  } finally { await f.close(); data.close() }
+})
+
+test('structured recovery finds its exact turn beyond the first metadata page', async () => {
+  const f = await fixture(request => {
+    if (request.method === 'thread/resume') return { thread: { id: 'thread-exact', turns: [] } }
+    if (request.method === 'thread/turns/list') return request.params.cursor
+      ? { data: [{ id: 'turn-exact', status: 'completed' }], nextCursor: null }
+      : { data: [{ id: 'foreign', status: 'completed' }], nextCursor: 'exact' }
+    if (request.method === 'thread/items/list') return { data: finalTurn().items.map(item => ({ turnId: 'turn-exact', item })), nextCursor: null }
+    return safePrelude(request)
+  })
+  try {
+    const result = await codexStructuredTurn(f.path, '/fixture', 'pinned prompt', execution({ threadId: 'thread-exact', turnId: 'turn-exact' }), callbacks)
+    assert.equal(result.turnId, 'turn-exact')
+    assert.equal(f.calls.some(call => call.method === 'turn/start'), false)
+  } finally { await f.close() }
+})
+
+test('structured missing completion notification settles through exact turn metadata without another turn', async () => {
+  const f = await fixture(request => {
+    if (request.method === 'turn/start') return { turn: { id: 'turn-exact' } }
+    if (request.method === 'thread/turns/list') return { data: [{ id: 'turn-exact', status: 'completed' }], nextCursor: null }
+    if (request.method === 'thread/items/list') return { data: finalTurn().items.map(item => ({ turnId: 'turn-exact', item })), nextCursor: null }
+    return safePrelude(request)
+  })
+  try {
+    const result = await codexStructuredTurn(f.path, '/fixture', 'pinned prompt', execution(), callbacks)
+    assert.equal(result.text, '{"answer":"exact"}')
+    assert.equal(f.calls.filter(call => call.method === 'turn/start').length, 1)
+    assert.equal(f.calls.some(call => call.method === 'thread/read'), false)
+  } finally { await f.close() }
+})
+
+test('structured completion polling waits through accepted-turn materialization without starting another turn', async () => {
+  let polls = 0
+  const f = await fixture(request => {
+    if (request.method === 'turn/start') return { turn: { id: 'turn-exact' } }
+    if (request.method === 'thread/turns/list') return { data: ++polls === 1 ? [] : [{ id: 'turn-exact', status: polls === 2 ? 'inProgress' : 'completed' }], nextCursor: null }
+    if (request.method === 'thread/items/list') return { data: finalTurn().items.map(item => ({ turnId: 'turn-exact', item })), nextCursor: null }
+    return safePrelude(request)
+  })
+  try {
+    const result = await codexStructuredTurn(f.path, '/fixture', 'pinned prompt', execution({ timeoutMs: 5000 }), callbacks)
+    assert.equal(result.turnId, 'turn-exact')
+    assert.equal(f.calls.filter(call => call.method === 'turn/start').length, 1)
+    assert.ok(polls >= 3)
+  } finally { await f.close() }
+})
+
+test('structured recovery refuses a missing pinned turn instead of treating it as materializing', async () => {
+  const f = await fixture(request => request.method === 'thread/resume' ? { thread: { id: 'thread-exact', turns: [] } } : safePrelude(request))
+  try {
+    await assert.rejects(codexStructuredTurn(f.path, '/fixture', 'pinned prompt', execution({ threadId: 'thread-exact', turnId: 'turn-exact' }), callbacks), error => error instanceof StructuredSessionError && error.code === 'stale_result')
+    assert.equal(f.calls.some(call => call.method === 'turn/start'), false)
+  } finally { await f.close() }
+})
+
+test('structured completion waits for its original durable frozen tool work before reading result pages', async () => {
+  const data = frozenFixture()
+  let durable = false
+  const f = await fixture((request, send) => {
+    if (request.method === 'turn/start') {
+      send({ id: 99, method: 'item/tool/call', params: { threadId: 'thread-exact', turnId: 'turn-exact', callId: 'native-call', tool: 'spex_read_frozen', arguments: data.args } })
+      send({ method: 'turn/completed', params: { threadId: 'thread-exact', turn: data.turn() } })
+      return { turn: { id: 'turn-exact' } }
+    }
+    if (request.method === 'thread/items/list') assert.equal(durable, true)
+    return safePrelude(request)
+  })
+  try {
+    const result = await codexStructuredTurn(f.path, '/fixture', 'pinned prompt', data.policy(), { ...callbacks, onFrozenRead: async () => { await new Promise(resolve => setTimeout(resolve, 30)); durable = true } })
+    assert.equal(result.frozenReadProof?.receipts.length, 1)
+  } finally { await f.close(); data.close() }
+})
+
+for (const mode of ['cancel', 'timeout']) test(`structured ${mode} while a result page is pending cannot publish output`, async () => {
+  const controller = new AbortController()
+  const f = await fixture(request => {
+    if (request.method === 'thread/resume') return { thread: { id: 'thread-exact', turns: [finalTurn()] } }
+    if (request.method === 'thread/items/list') {
+      if (!request.params.cursor) return { data: [{ turnId: 'turn-exact', item: finalTurn().items[0] }], nextCursor: 'pending' }
+      if (mode === 'cancel') setTimeout(() => controller.abort(), 10)
+      return null
+    }
+    return safePrelude(request)
+  })
+  try {
+    await assert.rejects(codexStructuredTurn(f.path, '/fixture', 'pinned prompt', execution({ threadId: 'thread-exact', turnId: 'turn-exact', timeoutMs: 100 }), { ...callbacks, signal: controller.signal }), error => error instanceof StructuredSessionError && error.code === (mode === 'cancel' ? 'cancelled' : 'timeout'))
+    assert.equal(f.calls.some(call => call.method === 'turn/start' || call.method === 'turn/interrupt'), false)
+  } finally { await f.close() }
+})
 
 test('frozen native dynamic requests persist before replying and cannot collide with a client RPC id', async () => {
   const data = frozenFixture(), receipts: unknown[] = []
@@ -96,6 +249,48 @@ test('frozen native dynamic requests persist before replying and cannot collide 
     assert.equal(result.frozenReadProof?.receipts[0].callId, 'native-call')
     assert.equal(result.frozenReadProof?.receipts[0].turnId, 'turn-exact')
   } finally { await f.close(); data.close() }
+})
+
+test('frozen runtime audits the effective output budget while legacy exact-history recovery keeps its old policy', async () => {
+  const data = frozenFixture(), previousPath = process.env.PATH
+  const bin = join(data.directory, 'bin'); mkdirSync(bin)
+  writeFileSync(join(bin, 'codex'), `#!${process.execPath}\nconsole.log('codex-cli 0.160.0')\n`); chmodSync(join(bin, 'codex'), 0o700)
+  process.env.PATH = `${bin}:${previousPath}`
+  const catalogPath = join(data.directory, 'catalog.json'), catalog = JSON.stringify({ models: [{ slug: 'gpt-6.1-sol', apply_patch_tool_type: null, experimental_supported_tools: [] }] })
+  writeFileSync(catalogPath, catalog)
+  const base = { cliVersion: 'codex-cli 0.160.0', catalogDigest: createHash('sha256').update(catalog).digest('hex'), catalogPath }
+  const toolOutputTokenLimit = frozenReadOutputTokenLimit(data.ref)
+  const rolloutPath = join(data.directory, 'visible-rollout.jsonl')
+  writeFileSync(rolloutPath, [
+    { type: 'session_meta', payload: { id: 'thread-exact', cwd: '/fixture' } },
+    { type: 'turn_context', payload: { turn_id: 'turn-exact' } },
+    { type: 'response_item', payload: { type: 'custom_tool_call', name: 'exec', call_id: 'outer-exec' } },
+    { type: 'response_item', payload: { type: 'custom_tool_call_output', call_id: 'outer-exec', output: [{ type: 'input_text', text: readFrozenRange(data.ref, data.args).response.contentItems[0].text }] }, metadata: { fallback_token_limit_override: Math.ceil(toolOutputTokenLimit * 1.2) } },
+    { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-exact' } },
+  ].map(record => JSON.stringify(record)).join('\n') + '\n')
+  try {
+    for (const mode of ['legacy', 'legacy-unacknowledged', 'legacy-new-thread', 'legacy-new-turn', 'exact', 'missing', 'changed'] as const) {
+      const readerRuntime: FrozenReaderRuntime = mode.startsWith('legacy') ? { ...base, version: 1 } : { ...base, version: 2, toolOutputTokenLimit }
+      const f = await fixture(request => {
+        if (request.method === 'config/read') return { config: { sandbox_mode: 'read-only', approval_policy: 'never', model_catalog_json: catalogPath,
+          ...(mode === 'exact' ? { tool_output_token_limit: toolOutputTokenLimit } : mode === 'changed' ? { tool_output_token_limit: toolOutputTokenLimit - 1 } : {}),
+          features: { apps: false, plugins: false, hooks: false, shell_tool: false, code_mode: false, code_mode_host: true, ...Object.fromEntries(frozenReaderDisabledFeatures.map(feature => [feature, false])) }, mcp_servers: {} } }
+        if (request.method === 'thread/resume') return { thread: { id: 'thread-exact', turns: mode === 'legacy-new-turn' ? [] : [data.turn()] } }
+        if (request.method === 'thread/read') {
+          assert.equal(request.params.includeTurns, false)
+          return { thread: { id: 'thread-exact', path: rolloutPath } }
+        }
+        return safePrelude(request)
+      })
+      try {
+        const refs = mode === 'legacy-new-thread' ? {} : mode === 'legacy-unacknowledged' || mode === 'legacy-new-turn' ? { threadId: 'thread-exact' } : { threadId: 'thread-exact', turnId: 'turn-exact' }
+        const result = codexStructuredTurn(f.path, '/fixture', 'pinned prompt', data.policy({ readerRuntime, ...refs }), callbacks)
+        if (mode === 'missing' || mode === 'changed' || mode === 'legacy-new-thread' || mode === 'legacy-new-turn') await assert.rejects(result, error => error instanceof StructuredSessionError && error.code === 'unsupported')
+        else assert.equal((await result).text, '{"answer":"exact"}')
+        assert.equal(f.calls.some(call => call.method === 'turn/start' || call.method === 'thread/start'), false)
+      } finally { await f.close() }
+    }
+  } finally { process.env.PATH = previousPath; data.close() }
 })
 
 for (const mode of ['foreign-thread', 'foreign-turn', 'wrong-digest', 'path']) test(`frozen ${mode} request is refused before any successful response`, async () => {
@@ -183,6 +378,42 @@ for (const mode of ['cancel', 'timeout']) test(`structured ${mode} detaches its 
   } finally { await f.close() }
 })
 
+test('all structured providers share explicit null call timers and preserve finite policy versions', t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let finite = 0, unlimited = 0
+  assert.equal(structuredExecutionTimer(null, () => { unlimited++ }), undefined)
+  const timer = structuredExecutionTimer(1200000, () => { finite++ })
+  t.mock.timers.tick(1199999); assert.equal(finite, 0); assert.equal(unlimited, 0)
+  t.mock.timers.tick(2); assert.equal(finite, 1); assert.equal(unlimited, 0)
+  clearTimeout(timer)
+  for (const [model, version] of [[undefined, 1], ['gpt-6.1-sol', 2], ['claude:MiniMax-M3.1-Flash', 3], ['zcode:bigmodel-api/GLM-5.3-Flash', 4]] as const) {
+    const request = { schema, inputDigest: 'input', purpose: 'test', timeoutMs: 1000, ...(model ? { model, frozenContext: { version: 1 as const, contextDigest: 'a'.repeat(64), manifestPath: '/private/frozen/manifest.json' }, ...(model === 'gpt-6.1-sol' ? { readerRuntime: { version: 2 as const, cliVersion: 'fixture', catalogDigest: 'b'.repeat(64), catalogPath: '/private/catalog', toolOutputTokenLimit: 1024 } } : {}) } : {}) }
+    const finitePolicy = structuredExecutionPolicy(request), unlimitedPolicy = structuredExecutionPolicy({ ...request, timeoutMs: null })
+    assert.equal(finitePolicy.version, version); assert.equal(unlimitedPolicy.version, 5)
+    assert.equal(unlimitedPolicy.policy, finitePolicy.policy)
+    assert.notEqual(structuredRealmRoot(unlimitedPolicy, '/private/runtime'), null)
+    assert.equal(structuredRealmRoot(unlimitedPolicy, '/private/runtime'), structuredRealmRoot(finitePolicy, '/private/runtime'))
+    assert.equal(structuredRealmRoot({ ...unlimitedPolicy, version: 99 }, '/private/runtime'), null)
+  }
+})
+
+test('structured null timeout keeps observing past the finite window and detaches only on explicit abort', async () => {
+  const controller = new AbortController()
+  let accepted = false, timedOut = false
+  let onStarted: () => void = () => {}
+  const started = new Promise<void>(resolve => { onStarted = resolve })
+  const f = await fixture(request => request.method === 'turn/start' ? { turn: { id: 'turn-exact' } } : safePrelude(request))
+  try {
+    const running = codexStructuredTurn(f.path, '/fixture', 'pinned prompt', execution({ timeoutMs: null, version: 5 }), { ...callbacks, signal: controller.signal, onTimeout: async () => { timedOut = true }, onTurn: async () => { accepted = true; onStarted() } })
+    await started
+    await new Promise(resolve => setTimeout(resolve, 120))
+    assert.equal(accepted, true); assert.equal(timedOut, false)
+    controller.abort()
+    await assert.rejects(running, { code: 'cancelled' })
+    assert.equal(f.calls.some(request => request.method === 'turn/interrupt'), false, '精确native停止仍由持久控制接缝完成')
+  } finally { controller.abort(); await f.close() }
+})
+
 test('structured recovery reuses exact persisted thread/turn without launching another turn', async () => {
   const f = await fixture((request) => {
     if (request.method === 'thread/resume' || request.method === 'thread/read') return { thread: { id: 'thread-exact', turns: [finalTurn(), finalTurn('old')] } }
@@ -241,16 +472,30 @@ test('outer runtime realm permits rollout writes and rejects source/config write
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
-test('structured completed receipts replay one session and bind policy/schema/input in the create key', { skip: process.platform !== 'darwin' }, async () => {
+for (const deadline of [
+  { name: 'unlimited-default', configured: undefined, requestMs: null, expectedMs: 30_000 },
+  { name: 'unlimited-max-create', configured: '900000', requestMs: null, expectedMs: 120_000 },
+  { name: 'default', configured: undefined, requestMs: 90_000, expectedMs: 30_000 },
+  { name: 'configured', configured: '120000', requestMs: 90_000, expectedMs: 90_000 },
+  { name: 'request-bound', configured: '120000', requestMs: 2000, expectedMs: 2000 },
+  { name: 'configured-bound', configured: '500', requestMs: 2000, expectedMs: 500 },
+]) test(`structured completed receipts preserve identity and ${deadline.name} creation deadline`, { skip: process.platform !== 'darwin' }, async t => {
   const { createHash } = await import('node:crypto')
   const { sessionCreateRequest, sessionIdForCreateKey } = await import('./sessions.js')
   const { fromRaw, writeRecord, readRecord } = await import('./session-record.js')
   const { configuredSessionApplication } = await import('./session-application.js')
   const { runStructuredSession } = await import('./session-structured.js')
-  const requestKey = `structured-replay-${process.pid}`
+  const previousTimeout = process.env.SPEXCODE_SESSION_CREATE_TIMEOUT_MS
+  if (deadline.configured === undefined) delete process.env.SPEXCODE_SESSION_CREATE_TIMEOUT_MS
+  else process.env.SPEXCODE_SESSION_CREATE_TIMEOUT_MS = deadline.configured
+  t.after(() => {
+    if (previousTimeout === undefined) delete process.env.SPEXCODE_SESSION_CREATE_TIMEOUT_MS
+    else process.env.SPEXCODE_SESSION_CREATE_TIMEOUT_MS = previousTimeout
+  })
+  const requestKey = `structured-replay-${process.pid}-${deadline.name}`
   const id = sessionIdForCreateKey(requestKey)
   const prompt = 'pinned structured input @parent:must-not-be-a-directive'
-  const policy = execution()
+  const policy = structuredExecutionPolicy(execution({ timeoutMs: deadline.requestMs }))
   const output = { answer: 'exact' }
   const sha = (value: string): string => createHash('sha256').update(value).digest('hex')
   configuredSessionApplication().createSession({ sessionId: id, status: 'awaiting', proposal: 'nothing' })
@@ -261,7 +506,9 @@ test('structured completed receipts replay one session and bind policy/schema/in
   rec.structuredExecution = { ...policy, state: 'completed', threadId: 'thread-exact', turnId: 'turn-exact', output, resultDigest: sha(JSON.stringify(output)) }
   rec.harnessSessionId = 'thread-exact'; writeRecord(rec)
   const request = { root: process.cwd(), prompt, schema, requestKey, inputDigest: policy.inputDigest, purpose: policy.purpose, timeoutMs: policy.timeoutMs }
+  const creationTimer = t.mock.method(globalThis, 'setTimeout')
   const first = await runStructuredSession(request)
+  assert.equal(creationTimer.mock.calls[0]?.arguments[1], deadline.expectedMs, 'the real create transaction must use the configured deadline within the caller budget')
   assert.deepEqual(await runStructuredSession(request), first)
   assert.equal(first.sessionId, id)
   assert.equal(readRecord(id)?.structuredExecution?.policy, 'codex-read-only-v1')

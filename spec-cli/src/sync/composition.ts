@@ -7,9 +7,10 @@ import type { ContractItem } from '@spexcode/spec-core/contracts'
 import { contractBusinessMeaning, contractBusinessProse, sameContractBusinessMeaning } from './contract-evolution.js'
 import { canonicalContractFilterBindings, cleanCanonicalContractText } from '../contract-filter.js'
 import { readHistoryRequest } from './history-input.js'
+import { isSyncSpecPath } from './frozen-contracts.js'
 import type { HistoryChange } from './history-input.js'
 import type { BaselinePair, BaselineResource, BlobRef, ComposedInputRef, FrozenBaselineSelection, InputSnapshot } from './operation-types.js'
-import { contentHash, objectGit, readEvidence, readObject, readTree, validateRepositoryPath, verifySnapshot, writeEvidence, writeObject, writeTree } from './snapshot.js'
+import { contentHash, objectGit, readEvidence, readObject, readObjectBatch, readTree, validateRepositoryPath, verifySnapshot, writeEvidence, writeObject, writeTree } from './snapshot.js'
 import type { TreeEntry } from './snapshot.js'
 
 export type CompositionConflict = { path: string; base: TreeEntry | null; source: TreeEntry | null; delivery: TreeEntry | null }
@@ -137,9 +138,10 @@ export function selectedRetiredIds(selection: FrozenBaselineSelection): string[]
 }
 
 function intentObjects(commonDir: string, entries: readonly TreeEntry[]): Map<string, IntentObject> {
-  const objects = new Map<string, IntentObject>()
-  for (const entry of entries.filter(entry => entry.mode !== '120000' && entry.path.startsWith('.spec/') && entry.path.endsWith('/spec.md'))) {
-    const bytes = readObject(commonDir, entry.oid)
+  const objects = new Map<string, IntentObject>(), specs = entries.filter(entry => entry.mode !== '120000' && isSyncSpecPath(entry.path))
+  const contents = readObjectBatch(commonDir, specs.map(entry => entry.oid))
+  for (const entry of specs) {
+    const bytes = contents.get(entry.oid)!
     if (!isUtf8Text(bytes)) throw new Error(`SYNC_COMPOSITION_BLOCKED: non UTF-8 contract ${entry.path}`)
     const text = bytes.toString('utf8'), contract = parseContract({ nodeId: entry.path.split('/').at(-2)!, path: entry.path, source: text }).contract
     for (const item of contract?.items ?? []) {
@@ -162,6 +164,7 @@ function intentArtifactResiduals(input: InputSnapshot, selection: FrozenBaseline
   const owners = (snapshot: InputSnapshot): Map<string, IntentObject> => { let value = ownerMaps.get(snapshot.id); if (!value) { value = intentObjects(input.source.commonDir, entries(snapshot)); ownerMaps.set(snapshot.id, value) }; return value }
   const pairs = new Map(selection.bindings.flatMap(binding => 'intentPair' in binding ? [[`${binding.resource.kind}:${binding.resource.id}`, binding.intentPair] as const] : []))
   const bytePairs = new Map(selection.bindings.flatMap(binding => 'bytePair' in binding ? [[binding.resource.path, binding.bytePair] as const] : []))
+  const consumedAdoptions = new Map<string, Set<string>>()
   const artifacts: IntentArtifactResidual[] = []
   const authored = authoredEntries ? new Map(authoredEntries.map(entry => [entry.path, entry])) : files(input)
   for (const intent of intents) {
@@ -172,7 +175,14 @@ function intentArtifactResiduals(input: InputSnapshot, selection: FrozenBaseline
       for (const path of paths) {
         const before = pair ? files(pair.sourceInput).get(path) ?? null : null, delivery = pair ? files(pair.verifiedDelivery).get(path) ?? null : null, source = authored.get(path) ?? null
         const bytePair = bytePairs.get(path), adoptedByte = bytePair && adoptedPaths(bytePair).has(path)
-        const adoptedPair = adoptedByte ? bytePair : pair && adoptedPaths(pair).has(path) ? pair : null
+        let consumedByteAdoption = false
+        if (pair && bytePair && adoptedByte) {
+          const key = `${pair.sourceInput.id}:${bytePair.id}`
+          let paths = consumedAdoptions.get(key)
+          if (!paths) { paths = adoptedDeliveryPaths(pair.sourceInput, bytePair); consumedAdoptions.set(key, paths) }
+          consumedByteAdoption = paths.has(path)
+        }
+        const adoptedPair = adoptedByte && !consumedByteAdoption ? bytePair : pair && adoptedPaths(pair).has(path) ? pair : null
         const authorBase = adoptedPair ? files(adoptedPair.verifiedDelivery).get(path) ?? null : before
         artifacts.push({ resource: intent.resource, pairId: pair?.id ?? null, path, binding, owners: { before: priorOwner?.path ?? null, delivery: deliveredOwner?.path ?? null, source: intent.source?.path ?? null }, before, delivery, source, authorBase, adoptionPairId: adoptedPair?.id ?? null, adoptionCommit: adoptedPair?.verifiedDelivery.headCommit ?? null, changed: !same(authorBase ?? undefined, source ?? undefined) })
       }
@@ -262,7 +272,7 @@ function composeSelectedInput(input: InputSnapshot, selection: FrozenBaselineSel
     return known.length ? known : [parent]
   }).filter(path => !writable(path)))].sort()
   for (const path of contextPaths) { const entry = physicalSource.get(path); if (entry) result.set(path, entry); else result.delete(path) }
-  const entries = [...result.values()].sort((a, b) => a.path.localeCompare(b.path))
+  const entries = [...result.values()].sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
   for (const entry of entries) if (entries.some(other => entry.path.startsWith(`${other.path}/`)) && !conflicts.some(conflict => conflict.path === entry.path)) conflicts.push({ path: entry.path, base: null, source: next.get(entry.path) ?? null, delivery: result.get(entry.path) ?? null })
   if (conflicts.length && !options.retainConflicts) return { composed: null, conflicts }
   const evidence: SelectedCompositionEvidence = { version: 'selected-composition-v1', sourceInputId: input.id, baselineSelectionDigest: selection.digest, executionPaths, contextPaths, paths, intents, artifacts, residualPaths: [...residualPaths].sort(), conflicts }

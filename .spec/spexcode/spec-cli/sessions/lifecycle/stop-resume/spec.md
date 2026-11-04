@@ -109,3 +109,10 @@ without removing the worktree, while close is reversible through resume. Their p
 whenever the backend commits no target transition; printing “no such session” while returning success is a false
 state-machine result. A stopped session
 occupies no working-set slot ([[launch]]) — offline never does — so the freed capacity drains a queued one. 
+
+Every archived resume verifies the restore boundary before launch preflight, including an already-existing
+candidate directory. The tree must retain the archived record's exact registration/top-level/branch identity,
+and [[archive]]'s archive delta must either already be present or apply cleanly. Ordinary materialization runs
+after add releases the shared registry fence; its failure still attempts safe archive replay, preserves the
+archived record, and refuses launch. Existing WIP that matches neither archive direction remains untouched and
+blocks every retry. Directory presence alone never proves a previous restore finished.

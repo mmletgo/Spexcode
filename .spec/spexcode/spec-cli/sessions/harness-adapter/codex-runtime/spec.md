@@ -55,8 +55,9 @@ after an atomic replacement. No ledger content or cache survives the process, so
 derived from the current runtime files.
 
 Structured execution records select their own Codex control root from the persisted fixed policy: v1 uses
-`structured-read-only-v1/control`, while v2 uses
-`structured-frozen-read-only-v2/<readerRuntime.catalogDigest>/control`. Ordinary Codex records continue to use
+`structured-read-only-v1/control`, while v2 with legacy readerRuntime version 1 uses
+`structured-frozen-read-only-v2/<readerRuntime.catalogDigest>/control`; readerRuntime version 2 adds
+`output-<toolOutputTokenLimit>/control` below that catalog directory, as specified by [[structured-readonly-policy]]. Ordinary Codex records continue to use
 the project root. Descriptor selection, turn control, retirement, close, and compensation derive that same root
 from the record and still require its exact session/thread generation binding; an empty structured ledger never
 falls through to the project's legacy endpoint. The close contract is [[archive]], and structured execution owns
@@ -175,7 +176,9 @@ missing payload leaves the record unchanged and refuses loudly.
 The SpexCode session id is the stable product address; the Codex thread id is a replaceable native
 execution address. Codex TUI rewind/backtrack may fork the current conversation and switch the TUI to a
 new thread whose `forkedFromId` is the previously bound thread. The shared-runtime adapter opens one
-observer for the app-server generation and reports exact `{ previousThreadId, nextThreadId, runtimeKey }`
+observer for the app-server generation. A successful `initialize` response ends its 30-second startup deadline;
+the timeout bounds subscription setup only and must not periodically close an established observer. It reports
+exact `{ previousThreadId, nextThreadId, runtimeKey }`
 successor pairs. The session layer maps the predecessor to its unique SpexCode record, then rebinds the same
 record, runtime binding, and generation ledger entry under the record lock, preserving the generation while
 replacing only the native target. A notification with no exact parent,
@@ -408,3 +411,7 @@ found or changed during the relocation. The same copy-versus-shared-helper wall 
 record-I/O extraction lane and is recorded here as a structural lesson, not a behavior fix.
 
 内部结构化执行的受限分支沿 [[structured-session-runtime]] 与 [[structured-readonly-policy]]，不继承普通项目daemon能力。v2仅登记 [[frozen-context-reader]] 的动态工具，按精确thread/turn/callId服务并持久化真实回复；原生history独立核验完整覆盖。CLI与去工具provider目录构成冻结能力身份，未答请求恢复不伪造RPC回执；普通项目runtime的归属与控制契约保持本节点定义。
+
+结构化结果与同 turn 恢复使用 Codex 原生分页：`thread/resume` 仅恢复 metadata，`thread/turns/list` 的 `notLoaded` 页定位精确 turn，`thread/items/list` 按该 turn 的升序 cursor 读尽原始 item。每页 item 必须属于固定 turn；不再用 `thread/read includeTurns:true` 或 resume 的完整历史 hydration，不以 summary 或归一化 transcript 替代动态工具原文。完成通知丢失且连接仍活时，同一 observer 在原预算内通过轻量 turn metadata 复核终态，等待原工具回复工作完成后才读取并核验结果；首轮已接受但 metadata 暂缺时，仅原 owner 的完成等待继续沿原预算观察；已绑定恢复和最终读取缺失仍拒绝。不新建 turn，不绕过原取消及冻结覆盖证明。
+
+结构化version5/null请求保持原v1或v2 policy/realm/读取证明，不装模型调用timer；数字旧策略和每次控制RPC期限保持。显式Abort仍只撤销observer，精确原生停止由原持久控制接缝证明。

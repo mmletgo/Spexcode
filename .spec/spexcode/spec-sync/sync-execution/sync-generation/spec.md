@@ -18,13 +18,17 @@ related:
 
 ## expanded spec
 
+当前native-worktree流程由[[sync-stage-worktree]]固定已审全局Spec overlay；分区builder自由读取完整repo，只修改其原授权范围，在私有工作树正常add/commit并保持clean。code_generate只返回严格简短summary JSON，候选变化从公开结果对应的真实seed→HEAD Git对象差量导入，前digest/mode取original composed，后内容/mode取真实结果；不消费summary中的伪补丁。readPaths/files及manifest投影只表达任务相关上下文与程序校验数据，既有文件未出现在files不再阻止读取或授权修改；原scope、host-private、UTF8普通文件、CAS、不可改oracle与契约演进门禁保持。P1已审Spec仍由程序加入唯一candidate，私有seed不是交付commit。独立code_review直接读取真实完整candidate tree，输入和缓存身份同时绑定实际可见tree、任务prompt与schema，保留builder独立session/thread及checkedIds义务。无nativeWorktree的直接单测及历史固定操作继续下文frozen JSON补丁接缝，不作为新生产默认。
+
+模型调用期限沿 [[structured-session-runtime]] 原样传递，明确 null 不装调用计时器；生成与独审、完整读取及各自业务门禁保持。
+
 候选 schema、基础校验与任务指令由 [[sync-candidate-review]] 共用；本节点保留所有生成身份隔离及专用业务标记校验。
 
 本节点实现 [[sync-execution]] 的一次生成尝试，依赖 [[sync-input-snapshot]]、[[sync-input-composition]] 与 [[sync-frozen-candidate]]。不单独代表 P2、V3/V4 或完整产品已交付。
 
 `runGeneration(input, { runner, validateCandidate, onDispatch? })` 复用调用者注入的 ElaborationRunner 接缝，不新建会话执行器、持久 store、队列或修复循环。调用者决定 attempt、总预算、恢复和有限重试；一次调用至多生成一次与独立评审一次。模型与 effort 由上层指定为 gpt-6.1-sol/high，不私自切换模型。稳定 requestKey 分出 code_generate/code_review 用途；onDispatch 先完成 durable 登记才进入 native runner，最终 session/thread/turn 的持久绑定由上层 runner 包装负责。
 
-第一个异步等待前复制 manifest、original composed 的受影响文本读集合、细化契约、待交付 elaboratedSpecs 全文、ready/blocked ID、原始需求/事实/既有验收、允许范围和政策；只保留原 AbortSignal 身份。先验证 snapshot manifest，组合输入则核对 sourceInputId、composed.tree、manifest evidence 和内容摘要。传入 manifest 必须精确对应实际 tree；读集合各完整正文必须逐字匹配实际 Git 对象中的 UTF-8 普通文件，不混用后续磁盘字节。所给契约的 code/related/source 引用、现存 AC 测试及细化 Spec 必须完整进入读集合，不能省略未改断言。协调器另外负责完整依赖影响闭包；独立评审发现缺少依赖上下文时必须要求修复。既有文件未进入读集合时不能修改，新增文件和所有实际变化必须进入候选审查。完整二进制与链接身份仍保留于 manifest，不把它们伪装成文本。
+第一个异步等待前复制 manifest、original composed 的受影响文本读集合、细化契约、待交付 elaboratedSpecs 全文、ready/blocked ID、原始需求/事实/既有验收、允许范围和政策；只保留原 AbortSignal 身份。先验证 snapshot manifest，组合输入则核对 sourceInputId、composed.tree、manifest evidence 和内容摘要。传入 manifest 必须精确对应实际 tree；读集合各完整正文必须逐字匹配实际 Git 对象中的 UTF-8 普通文件，不混用后续磁盘字节。所给契约的 code/related/source 引用、现存 AC 测试及细化 Spec 必须完整进入读集合，不能省略未改断言。生命周期旧Spec的精确code、related目录或glob义务按[[code-anchor]]共享路径匹配器展开到真实旧snapshot entries；每个命中正文或binary/symlink对象都必须完整提供，否则在Native派发前拒绝。协调器另外负责完整依赖影响闭包；独立评审发现缺少依赖上下文时必须要求修复。既有文件未进入读集合时不能修改，新增文件和所有实际变化必须进入候选审查。完整二进制与链接身份仍保留于 manifest，不把它们伪装成文本。
 
 P1 通过后的 elaboratedSpecs 是需实现和交付的目标正文，contracts 可以来自该细化结果；它们不替换 original composed tree，不制造细化中间 tree/commit。程序把未由生成器显式修改的已审正文直接加入最终候选，避免模型重复抄写完整契约；未变字节不产生额外修改。生成器只需返回实际实现、测试和必要映射修改，确需调整 Spec anchors 时可以显式返回完整 Spec，仍受同一硬门禁约束，不能用程序默认正文掩盖模型的越权改写。所有 beforeDigest/beforeMode 仍对应 original composed，程序加入的 Spec 同样经过 CAS、范围、完整 diff 及独立审查。原始模型输出和 trace 摘要保持原样，候选同时绑定冻结的已审正文。
 
@@ -34,9 +38,11 @@ validateCandidate 是必需可信硬门禁，按实际候选回调；没有回�
 
 评审重新接收冻结原意/基线、实际候选 manifest、影响闭包内完整候选 Spec、源码与测试断言，包括未修改文件；不接收构建者总结作为可信证据。审查主流程/状态、遗漏边界、权限/副作用/顺序、弱化验收、空或假断言、跳过与自免检。review 严格 schema 绑定 inputId/candidateDigest，checkedIds 必须唯一、属于实际候选项并覆盖全部预定 readyIds。会话和线程都必须独立于生成。accept 必须无发现；其余 verdict 必须有对应 repair/missing_fact/conflict 的具体 affectedIds、规则位置、代码位置、证据、反例和信息。发现均为阻断项，不能以未知事实为理由编造政策。
 
+原生 review 输出约束通过 [[sync-candidate-review]] 从当前实际候选身份、真实项和预定 readyIds 派生；消费者复用同一冻结绑定继续核验完整覆盖，不依赖模型自行抄写摘要或猜测项集合，不回填缺失 checkedIds。
+
 取消检查贯穿派发前、登记后、native 输出后和硬门禁后，拒绝继续派发或发布晚结果；unsupported 保留平台原因，不隐式重试。结果保留候选引用、真实结构化输出和 native trace；完整 candidateFiles Map 仅作本地检查，不能写入 store 或外发 JSON。成功仅为 reviewed，始终 runtimeVerification=not_run、delivery=not_applied；上层必须另行完成真实 V3、版本交付门禁和 journal 结算。
 
-模型输入拒绝 [[sync-frozen-candidate]] 定义的宿主凭据和运行文件；业务 src/auth 不因名称被排除。发送的 manifest 只含已读取路径并附完整 manifest 摘要，本地冻结仍使用完整 manifest。生成及审查上下文完整传入既有 runner；超过2MiB时由 [[frozen-context-reader]] 在派发身份冻结前转换为无损按需读取，两次独立turn各自证明完整覆盖。不能截断源码或断言，也不能仅因内联大小拒绝完整义务；总时间、调用次数及资源预算继续约束。candidateFiles 作为本地投影排除同一凭据路径；审查只发送可信读集合及实际变化的完整文件。原 source 与 candidate 身份不因投影改变。repairContext 仅为既有失败诊断，不是新原意、政策或通过证据。
+模型输入拒绝 [[sync-frozen-candidate]] 定义的宿主凭据和运行文件；业务 src/auth 不因名称被排除。发送的 manifest 只含已读取路径并附完整 manifest 摘要，本地冻结仍使用完整 manifest。源manifest与实际候选manifest旁均由对应真实数组派生manifestProjection，声明scope=local-read-set、includedEntryCount、completeEntryCount以及两数相等时才为true的complete；这些计数不发送完整路径inventory或额外正文，不扩大权限或代表候选缺文件。生成及审查上下文完整传入既有 runner；超过2MiB时由 [[frozen-context-reader]] 在派发身份冻结前转换为无损按需读取，两次独立turn各自证明完整覆盖。不能截断源码或断言，也不能仅因内联大小拒绝完整义务；总时间、调用次数及资源预算继续约束。candidateFiles 作为本地投影排除同一凭据路径；审查只发送可信读集合及实际变化的完整文件，提示明确称为本地审查投影，只审本次分派义务，分区审查时其余分区另审，不能仅据未提供文件推断完整候选缺文件；具体义务确需未提供证据时仍返回repair并指出证据不足，不猜测。原 source 与 candidate 身份不因投影改变。repairContext 仅为既有失败诊断，不是新原意、政策或通过证据。
 
 已审三方analysis及明确direction纳入同一冻结输入和独审上下文。合法外部行为及resolutions保持，纯重构业务正文稳定；明确裁决或真实作者raw/规则变更时依对应新原意修实现，其他合法外部行为保持。retiredIds明确负向测试义务，旧binding标识/固定命令仍执行。真正已明确原意的契约遗漏只通过专用contract-omission:path#existingID位置回细化；普通contract:path#id只是规则引用，代码/测试TypeError、错误断言与实现次序缺陷继续generation repair，不自行新增或改已接受业务项。持久Spec不写暂态V3尚未运行/已通过，运行状态只在receipt及证据记录。
 
@@ -46,6 +52,24 @@ validateCandidate 是必需可信硬门禁，按实际候选回调；没有回�
 
 专用 contract-omission 发现必须为 repair，精确引用已审 contracts 的仓库Spec路径与既有ID，且 affectedIds 包含该ID；错路径、未知/不关联ID或错分类均 review_invalid。它只请求既有受限refinement，不新增授权。普通修复诊断完整保留实际finding的规则/代码位置、证据、反例与信息，仍不作为新需求或批准证据。
 
+P2 的 V1 检查报告 `anchor-dead` 或来源格式 `invalid-source` 后，下一生成必须收到实际诊断。允许只把 `source=code` 修正为冻结源码中真实声明符号的 `path#symbol`；`AC.test` 的稳定用例 ID 只属于测试绑定，不能充当代码符号。只修绑定时完整保留 sync-v1 正文、业务稳定 ID、AC 业务断言与 `AC.test` 绑定；裸 `code:path` 仍由 schema 拒绝，且继续受 [[sync-frozen-contracts]] 保护项门禁约束。
+
 contractOmissionBound为生成独审、协调器live与持久恢复共用的专用marker/path/existingID/affectedIds判断；旧contract:合法诊断仅可校验后撤销重细化权限，不作为新marker别名或授权。
 
 P4 可在模型响应核 schema、计算 approvedSpecs 后调用可信 beforeFreezeCandidate。程序逐 entry 核 protectedReadPaths、原 files 和实际 allowedScope 的完整原字节/mode/OID/absence 未变，随后在发布组合树 freeze 并执行 V1/V2、实际候选独审；模型 prompt、beforeDigest/beforeMode、inputDigest 和行为分析仍绑定 original composed/readSet。闭包外真实已结算继承进入实际 candidate manifest/完整摘要，不能成为模型写权限；readonly 模型修改继续按原 scope 拒绝。
+
+P2 接收操作固定 model 并传给生成与独立评审，effort 仍为 high；实际模型可用性由原生目录及结构化执行校验，遵循 [[sync-model-selection]]，不再将模型固定为全局 sol。
+
+
+分区主干复用同一生成实现的两个明确接缝：prepareOnly只返回已核schema的结构化preparedChanges，不冻结、不独审、不表示实现完成；reviewCandidate只审调用者已冻结的同一候选，读取本区完整正文及实际修改并对全部builder身份核独立。freezeGenerationCandidate统一执行原发布基树闭包保护、scope与CAS，不因分区另开写入路径。局部及跨边review的checkedIds只属于该真实读取范围，仍须完整覆盖预定业务ID。
+
+
+显式v2局部输入可声明readonlyContractPaths：这些依赖仍完整读取Spec/raw/稳定ID接口，程序不为局部分析自动拉取其全部实现、related及AC测试正文；本区targets及mandatory/source/test的完整读取门保持。局部checkedIds仅枚举真实owner候选项，不能把借读接口列成实现已审。最终cross-edge将两端同时作为实现targets，不能保留readonly skip，两端完整源码/测试及新增文件仍绑定同一最终candidateDigest独审。旧v1没有该字段时原完整读取判据不变，v1显式提供该语义被拒绝。
+
+冻结输入及候选独审请求构造保留唯一接缝，供运行与严格历史accept来源校验共同复用。内部输入原件保留原键序及JSON省略的undefined槽，恢复Map后仍用原算法重算，不能因冷态序列化改变旧摘要或请求正文。旧requestKey只恢复原派发身份，其余raw/context/repairContext/model/schema/prompt不变且摘要逐字相等才具复用资格；不删除诊断字段或改写原摘要。
+
+生成或独审的 Native 失败值保留原 code/message 及真实 session/thread/turn、requestKey/inputDigest，供 [[sync-coordinator]] 复用 [[sync-native-run]] 的已结算 RPC 门禁；不以默认 repairable 或错误文本跳过停止证明。原业务生成、候选、独审和授权规则保持。
+
+reviewRepair仅引用协调器已认证的同组result/NativePlan/checkpoint，进入该独审的完整冻结摘要。它可来自原Native格式拒绝，也可来自Native已成功但程序字段格式拒绝的完整reviewOutput；两类终态、原JSON、resultDigest和trace均保持原样，不互相伪装。构造请求再次核原candidate、request/inputDigest及原final或成功输出的session/thread/turn/digest。当前续修和冷态原请求重建均显式沿用唯一dispatch派生的瞬态P2 Spec写范围；只读格式错误与可写owner的合法missing_fact混合时，不能把可写项重分类为只读绑定错误。该范围不加入GenerationInput或输入摘要。实际只读P1位置按[[sync-candidate-review]]核真实候选路径/ID及全图唯一affectedIds，格式稿续修须全部affectedIds同owner；不清洗括号、猜位置或以affectedIds替代主位置。
+
+Native续审复用现有stage-worktree/v6 edit，在同一candidate之外加入唯一临时评审Git稿，精确schema、原错误及原trace作为只读sidecar。Agent读取原稿续改并正常提交，只能修改指定draft，源码、测试、Spec和其他sidecar保持；程序先capture/read同一Git草稿，再核返回的严格review JSON与稿正文一致。原candidateFiles/diff/tree及业务写权限不变；仅重新通过位置和完整review门的发现才进入原业务修复路由。非Native历史接缝完整内联同一未批准诊断。独立session/thread、checkedIds覆盖与最终验证保持，不另增持久字段或执行器。

@@ -3,21 +3,31 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 import { processStartToken, runtimeRoot, verifyDetachedRuntime, type ProcessIdentity } from '@spexcode/spec-core'
 import { spawnDetachedRuntime } from './runtime-ownership.js'
 import { ensureCodexCurrentGeneration, type CodexGenerationEndpoint } from './codex-runtime-generations.js'
 import type { FrozenContextRef, FrozenReadProof, FrozenReadReceipt } from './frozen-context.js'
+import type { NativeWorktreeRequest, NativeWorktreeResult } from './native-worktree-runtime.js'
 import { withDeliveryLocks } from './delivery-lock.js'
 
-export type FrozenReaderRuntime = { version: 1; cliVersion: string; catalogDigest: string; catalogPath: string }
+export type FrozenReaderRuntime = { cliVersion: string; catalogDigest: string; catalogPath: string } & ({ version: 1 } | { version: 2; toolOutputTokenLimit: number })
+export type ZCodeToolPolicy = { version: 1; toolDenylist: readonly ['ExitPlanMode'] }
+export type RejectedStructuredOutput = {
+  version: 1; kind: 'untrusted_final'; representation: 'text' | 'native_json'
+  text: string; sha256: string; ref?: { sha256: string }
+  inputDigest: string; schemaDigest: string; promptDigest: string; purpose: string
+  threadId: string; turnId: string
+}
+const zcodeReadToolPolicy: ZCodeToolPolicy = Object.freeze({ version: 1, toolDenylist: Object.freeze(['ExitPlanMode'] as const) })
 
 export type StructuredExecution = {
-  version: 1 | 2
-  policy: 'codex-read-only-v1' | 'codex-frozen-read-only-v2'
+  version: 1 | 2 | 3 | 4 | 5 | 6
+  policy: 'native-worktree-v1' | 'codex-read-only-v1' | 'codex-frozen-read-only-v2' | 'claude-frozen-read-only-v1' | 'zcode-frozen-read-only-v1'
   schema: Record<string, unknown>
   inputDigest: string
   purpose: string
-  timeoutMs: number
+  timeoutMs: number | null
   model?: string
   effort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
   threadId?: string
@@ -29,30 +39,93 @@ export type StructuredExecution = {
   output?: unknown
   resultDigest?: string
   error?: string
+  errorCode?: 'structured_output_retries_exhausted' | 'structured_output_format_invalid' | 'native_worktree_result_invalid' | 'native_rpc_timeout'
+  rejectedOutput?: RejectedStructuredOutput
+  worktree?: NativeWorktreeRequest
+  zcodeToolPolicy?: ZCodeToolPolicy
+  nativeConfiguration?: 'cli-config-v1'
+  resultWorktree?: NativeWorktreeResult
+  failedWorktree?: NativeWorktreeResult
   frozenContext?: FrozenContextRef
   frozenReads?: FrozenReadReceipt[]
   frozenReadProof?: FrozenReadProof
   readerRuntime?: FrozenReaderRuntime
+  claudeNative?: { version: 1 | 2; root: string; sessionId: string; userUuid: string; pid?: number; receiptFile?: string; promptId?: string }
+  zcodeNative?: { version: 1 | 2 | 3; root: string; sessionId: string; inputId: string; pid?: number; receiptFile?: string; turnId?: string }
+}
+
+/** 只识别原生路由形状；模型与别名是否可用由CLI实际初始化确认。 */
+function nativeConfigurationHarness(model?: string): 'claude' | 'zcode' | null {
+  if (model?.startsWith('claude:') && model.length > 7) return 'claude'
+  if (model === 'zcode:default') return 'zcode'
+  if (model?.startsWith('zcode:')) {
+    const separator = model.indexOf('/', 6)
+    if (separator > 6 && separator < model.length - 1) return 'zcode'
+  }
+  return null
+}
+
+/** 仅真正新建工作树请求冻结CLI配置；历史缺席和上游已固定请求保持原样。 */
+export function pinNativeConfiguration(request: Pick<StructuredExecution, 'model' | 'worktree' | 'nativeConfiguration'>, saved: Pick<StructuredExecution, 'nativeConfiguration'> | null): StructuredExecution['nativeConfiguration'] {
+  const configuration = saved === null ? request.worktree && nativeConfigurationHarness(request.model) ? 'cli-config-v1' : undefined : saved.nativeConfiguration
+  if (request.nativeConfiguration !== undefined && request.nativeConfiguration !== configuration) throw new StructuredSessionError(saved === null ? 'unsupported' : 'key_reused', 'native CLI configuration differs from the fixed structured request')
+  return configuration
+}
+
+/** 新请求冻结已验证工具策略；已有请求的缺席也是固定语义，显式换策略必须拒绝。 */
+export function pinZCodeToolPolicy(request: Pick<StructuredExecution, 'model' | 'worktree' | 'zcodeToolPolicy'>, saved: Pick<StructuredExecution, 'zcodeToolPolicy'> | null): ZCodeToolPolicy | undefined {
+  const policy = saved === null ? request.model?.startsWith('zcode:') && request.worktree?.mode === 'read' ? zcodeReadToolPolicy : undefined : saved.zcodeToolPolicy
+  if (request.zcodeToolPolicy !== undefined && !isDeepStrictEqual(request.zcodeToolPolicy, policy)) throw new StructuredSessionError(saved === null ? 'unsupported' : 'key_reused', 'ZCode tool policy differs from the fixed structured request')
+  return policy
 }
 
 /** 从持久化策略推导结构化 realm；无效或不完整策略不获得控制根。 */
 export function structuredRealmRoot(execution: unknown, root = runtimeRoot()): string | null {
   if (!execution || typeof execution !== 'object') return null
   const state = execution as Partial<StructuredExecution>
-  if (state.version === 1 && state.policy === 'codex-read-only-v1' && state.readerRuntime === undefined && state.frozenContext === undefined)
+  if (state.nativeConfiguration !== undefined && (state.nativeConfiguration !== 'cli-config-v1' || state.version !== 6 || state.policy !== 'native-worktree-v1')) return null
+  if (state.version === 6 && state.policy === 'native-worktree-v1' && state.worktree && !state.frozenContext && !state.readerRuntime) {
+    if (state.nativeConfiguration === 'cli-config-v1') {
+      const harness = nativeConfigurationHarness(state.model)
+      return harness ? join(root, 'structured-native-worktree-v1', harness) : null
+    }
+    if (state.model?.startsWith('claude:')) return join(root, 'structured-native-worktree-v1', 'claude')
+    if (/^zcode:[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(state.model ?? '')) return join(root, 'structured-native-worktree-v1', 'zcode')
+  }
+  if (state.version === (state.timeoutMs === null ? 5 : 4) && state.policy === 'zcode-frozen-read-only-v1' && state.frozenContext?.version === 1 && /^zcode:[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(state.model ?? '') && !state.readerRuntime)
+    return join(root, 'structured-zcode-read-only-v1')
+  if (state.version === (state.timeoutMs === null ? 5 : 3) && state.policy === 'claude-frozen-read-only-v1' && state.frozenContext?.version === 1 && state.model?.startsWith('claude:') && !state.readerRuntime)
+    return join(root, 'structured-claude-read-only-v1')
+  if (state.version === (state.timeoutMs === null ? 5 : 1) && state.policy === 'codex-read-only-v1' && state.readerRuntime === undefined && state.frozenContext === undefined)
     return join(root, 'structured-read-only-v1')
   const readerRuntime = state.readerRuntime
-  if (state.version === 2 && state.policy === 'codex-frozen-read-only-v2' && state.frozenContext?.version === 1 && readerRuntime?.version === 1
-    && /^[a-f0-9]{64}$/.test(readerRuntime.catalogDigest))
-    return join(root, 'structured-frozen-read-only-v2', readerRuntime.catalogDigest)
+  if (state.version === (state.timeoutMs === null ? 5 : 2) && state.policy === 'codex-frozen-read-only-v2' && state.frozenContext?.version === 1 && readerRuntime
+    && /^[a-f0-9]{64}$/.test(readerRuntime.catalogDigest)) {
+    const realm = join(root, 'structured-frozen-read-only-v2', readerRuntime.catalogDigest)
+    if (readerRuntime.version === 1) return realm
+    if (readerRuntime.version === 2 && Number.isSafeInteger(readerRuntime.toolOutputTokenLimit) && readerRuntime.toolOutputTokenLimit > 0)
+      return join(realm, `output-${readerRuntime.toolOutputTokenLimit}`)
+  }
   return null
 }
 
 /** 固定策略只有一份构造，运行观测与冻结读取证明不参与创建载荷。 */
-export function structuredExecutionPolicy(request: Pick<StructuredExecution, 'schema' | 'inputDigest' | 'purpose' | 'timeoutMs' | 'model' | 'effort' | 'frozenContext' | 'readerRuntime'>): StructuredExecution {
-  return { version: request.frozenContext ? 2 : 1, policy: request.frozenContext ? 'codex-frozen-read-only-v2' : 'codex-read-only-v1',
+export function structuredExecutionPolicy(request: Pick<StructuredExecution, 'schema' | 'inputDigest' | 'purpose' | 'timeoutMs' | 'model' | 'effort' | 'frozenContext' | 'readerRuntime' | 'worktree' | 'zcodeToolPolicy' | 'nativeConfiguration'>): StructuredExecution {
+  const claude = request.model?.startsWith('claude:') === true
+  const zcode = request.model?.startsWith('zcode:') === true
+  if (request.nativeConfiguration !== undefined && (request.nativeConfiguration !== 'cli-config-v1' || !request.worktree || !nativeConfigurationHarness(request.model) || request.frozenContext || request.readerRuntime)) throw new StructuredSessionError('unsupported', 'native CLI configuration requires a v6 Claude/ZCode worktree request')
+  if (request.zcodeToolPolicy !== undefined && (!zcode || request.worktree?.mode !== 'read' || !isDeepStrictEqual(request.zcodeToolPolicy, zcodeReadToolPolicy))) throw new StructuredSessionError('unsupported', 'ZCode structured tool policy requires the exact noninteractive read policy')
+  if (request.worktree) {
+    if ((!claude && !zcode) || request.frozenContext || request.readerRuntime) throw new StructuredSessionError('unsupported', 'native worktree requires an explicit Claude/ZCode model and no frozen reader policy')
+    return { version: 6, policy: 'native-worktree-v1', schema: request.schema, inputDigest: request.inputDigest, purpose: request.purpose, timeoutMs: request.timeoutMs, model: request.model, ...(request.effort ? { effort: request.effort } : {}), worktree: request.worktree, ...(request.nativeConfiguration ? { nativeConfiguration: request.nativeConfiguration } : {}), ...(request.zcodeToolPolicy ? { zcodeToolPolicy: request.zcodeToolPolicy } : {}) }
+  }
+  return { version: request.timeoutMs === null ? 5 : zcode ? 4 : claude ? 3 : request.frozenContext ? 2 : 1, policy: zcode ? 'zcode-frozen-read-only-v1' : claude ? 'claude-frozen-read-only-v1' : request.frozenContext ? 'codex-frozen-read-only-v2' : 'codex-read-only-v1',
     schema: request.schema, inputDigest: request.inputDigest, purpose: request.purpose, timeoutMs: request.timeoutMs,
     ...(request.model ? { model: request.model } : {}), ...(request.effort ? { effort: request.effort } : {}), ...(request.frozenContext ? { frozenContext: request.frozenContext } : {}), ...(request.readerRuntime ? { readerRuntime: request.readerRuntime } : {}) }
+}
+/** 模型调用无期限时不装计时器；创建和精确停止预算由各自入口持有。 */
+export function structuredExecutionTimer(timeoutMs: number | null, onTimeout: () => void): ReturnType<typeof setTimeout> | undefined {
+  return timeoutMs === null ? undefined : setTimeout(onTimeout, timeoutMs)
 }
 // A missing process-start probe is not proof of death. Only an explicit release, ESRCH or a
 // different start token permits another process to claim this exact native turn's observation.
@@ -71,13 +144,35 @@ export class StructuredSessionError extends Error {
   readonly sessionId?: string
   readonly threadId?: string
   readonly turnId?: string
-  constructor(readonly code: 'unsupported' | 'failed' | 'cancelled' | 'timeout' | 'key_reused' | 'stale_result' | 'cancellation_pending', message: string, identity: { sessionId?: string; threadId?: string; turnId?: string } = {}) {
+  readonly rejectedOutput?: RejectedStructuredOutput
+  readonly failedWorktree?: NativeWorktreeResult
+  readonly requestKey?: string
+  readonly inputDigest?: string
+  constructor(readonly code: 'unsupported' | 'failed' | 'cancelled' | 'timeout' | 'key_reused' | 'stale_result' | 'cancellation_pending' | 'structured_output_retries_exhausted' | 'structured_output_format_invalid' | 'native_worktree_result_invalid' | 'native_rpc_timeout', message: string, identity: { sessionId?: string; threadId?: string; turnId?: string; rejectedOutput?: RejectedStructuredOutput; failedWorktree?: NativeWorktreeResult; requestKey?: string; inputDigest?: string } = {}) {
     super(message)
     this.name = 'StructuredSessionError'
     this.sessionId = identity.sessionId
     this.threadId = identity.threadId
     this.turnId = identity.turnId
+    if (identity.rejectedOutput !== undefined) this.rejectedOutput = identity.rejectedOutput
+    if (identity.failedWorktree !== undefined) this.failedWorktree = identity.failedWorktree
+    if (identity.requestKey !== undefined) this.requestKey = identity.requestKey
+    if (identity.inputDigest !== undefined) this.inputDigest = identity.inputDigest
   }
+}
+
+const rejectedDigest = (text: string): string => createHash('sha256').update(text).digest('hex')
+
+/** 仅由已认证final的adapter调用；正文只进入失败诊断，不是成功结果。 */
+export function rejectedFinalOutput(text: string, prompt: string, execution: Pick<StructuredExecution, 'inputDigest' | 'schema' | 'purpose'>, identity: { threadId: string; turnId: string }, representation: RejectedStructuredOutput['representation'] = 'text'): RejectedStructuredOutput {
+  return { version: 1, kind: 'untrusted_final', representation, text, sha256: rejectedDigest(text), inputDigest: execution.inputDigest, schemaDigest: rejectedDigest(JSON.stringify(execution.schema)), promptDigest: rejectedDigest(prompt), purpose: execution.purpose, threadId: identity.threadId, turnId: identity.turnId }
+}
+
+/** 失败证据跨record、资源桥与owner请求边界时逐项核原绑定。 */
+export function assertRejectedOutput(output: RejectedStructuredOutput, prompt: string, execution: Pick<StructuredExecution, 'inputDigest' | 'schema' | 'purpose'>, identity: { threadId?: string; turnId?: string }): void {
+  if (typeof output.text !== 'string' || !identity.threadId || !identity.turnId || !isDeepStrictEqual({ ...output, ref: undefined }, { ...rejectedFinalOutput(output.text, prompt, execution, { threadId: identity.threadId, turnId: identity.turnId }, output.representation), ref: undefined })
+    || !['text', 'native_json'].includes(output.representation) || output.ref && output.ref.sha256 !== output.sha256)
+    throw new StructuredSessionError('stale_result', 'rejected final output differs from its exact request/schema/native identity')
 }
 
 export class StructuredSessionTransportError extends StructuredSessionError {
@@ -92,9 +187,11 @@ export const frozenReaderDisabledFeatures = ['goals', 'view_image', 'image_gener
 const readerFlights = new Map<string, Promise<FrozenReaderRuntime>>()
 
 /** 固定原生版本和去工具目录共同构成v2的能力身份，不读取用户模型缓存。 */
-export function assertFrozenReaderRuntime(runtime: FrozenReaderRuntime, model?: string): void {
+export function assertFrozenReaderRuntime(runtime: FrozenReaderRuntime, model?: string, toolOutputTokenLimit?: number): void {
   const cliVersion = execFileSync('codex', ['--version'], { encoding: 'utf8' }).trim()
-  if (runtime.version !== 1 || cliVersion !== 'codex-cli 0.160.0' || runtime.cliVersion !== cliVersion || !/^[a-f0-9]{64}$/.test(runtime.catalogDigest)
+  if ((runtime.version !== 1 && runtime.version !== 2) || (runtime.version === 2 && (!Number.isSafeInteger(runtime.toolOutputTokenLimit) || runtime.toolOutputTokenLimit <= 0
+    || (toolOutputTokenLimit !== undefined && runtime.toolOutputTokenLimit !== toolOutputTokenLimit)))
+    || cliVersion !== 'codex-cli 0.160.0' || runtime.cliVersion !== cliVersion || !/^[a-f0-9]{64}$/.test(runtime.catalogDigest)
     || createHash('sha256').update(readFileSync(runtime.catalogPath)).digest('hex') !== runtime.catalogDigest)
     throw new StructuredSessionError('unsupported', 'frozen reader CLI version or immutable tool catalog identity differs')
   const catalog = JSON.parse(readFileSync(runtime.catalogPath, 'utf8')) as { models?: Array<{ slug?: string; apply_patch_tool_type?: unknown; experimental_supported_tools?: unknown[] }> }
@@ -105,16 +202,18 @@ export function assertFrozenReaderRuntime(runtime: FrozenReaderRuntime, model?: 
 }
 
 /** 从独立无turn的清洁原生realm获取provider metadata，只删工具能力并固定摘要。 */
-export async function prepareFrozenReaderRuntime(root: string): Promise<FrozenReaderRuntime> {
+export async function prepareFrozenReaderRuntime(root: string, frozenContext: FrozenContextRef): Promise<FrozenReaderRuntime> {
   const cliVersion = execFileSync('codex', ['--version'], { encoding: 'utf8' }).trim()
   if (cliVersion !== 'codex-cli 0.160.0') throw new StructuredSessionError('unsupported', 'this native CLI has no verified frozen-reader host capability evidence')
-  const policyRoot = join(root, 'reader-policy', createHash('sha256').update(cliVersion).digest('hex').slice(0, 16))
+  const { frozenReadOutputTokenLimit } = await import('./frozen-context.js')
+  const toolOutputTokenLimit = frozenReadOutputTokenLimit(frozenContext)
+  const policyRoot = join(root, 'reader-policy', createHash('sha256').update(JSON.stringify({ cliVersion, toolOutputTokenLimit })).digest('hex').slice(0, 16))
   const descriptor = join(policyRoot, 'runtime.json')
-  if (existsSync(descriptor)) { const runtime = JSON.parse(readFileSync(descriptor, 'utf8')) as FrozenReaderRuntime; assertFrozenReaderRuntime(runtime); return runtime }
+  if (existsSync(descriptor)) { const runtime = JSON.parse(readFileSync(descriptor, 'utf8')) as FrozenReaderRuntime; assertFrozenReaderRuntime(runtime, undefined, toolOutputTokenLimit); return runtime }
   let flight = readerFlights.get(policyRoot)
   if (!flight) {
     flight = withDeliveryLocks([`frozen-reader-policy-${createHash('sha256').update(policyRoot).digest('hex')}`], async () => {
-      if (existsSync(descriptor)) { const runtime = JSON.parse(readFileSync(descriptor, 'utf8')) as FrozenReaderRuntime; assertFrozenReaderRuntime(runtime); return runtime }
+      if (existsSync(descriptor)) { const runtime = JSON.parse(readFileSync(descriptor, 'utf8')) as FrozenReaderRuntime; assertFrozenReaderRuntime(runtime, undefined, toolOutputTokenLimit); return runtime }
       mkdirSync(policyRoot, { recursive: true, mode: 0o700 })
       const metadataRoot = join(policyRoot, 'metadata'), { endpoint } = await structuredGeneration(metadataRoot)
       const { codexLoadedReferenceIds, codexRefreshStructuredModels } = await import('./codex-harness.js')
@@ -125,8 +224,8 @@ export async function prepareFrozenReaderRuntime(root: string): Promise<FrozenRe
       const catalog = Buffer.from(JSON.stringify({ models: provider.models.map(model => ({ ...model, apply_patch_tool_type: null, experimental_supported_tools: [] })) }))
       const catalogDigest = createHash('sha256').update(catalog).digest('hex'), catalogPath = join(policyRoot, `${catalogDigest}.json`)
       if (!existsSync(catalogPath)) writeFileSync(catalogPath, catalog, { mode: 0o400 })
-      const runtime: FrozenReaderRuntime = { version: 1, cliVersion, catalogDigest, catalogPath }
-      assertFrozenReaderRuntime(runtime)
+      const runtime: FrozenReaderRuntime = { version: 2, cliVersion, catalogDigest, catalogPath, toolOutputTokenLimit }
+      assertFrozenReaderRuntime(runtime, undefined, toolOutputTokenLimit)
       const references = await codexLoadedReferenceIds(endpoint.socketPath), pid = Number(readFileSync(endpoint.pidFile, 'utf8').trim()), proof = verifyDetachedRuntime(pid, endpoint.receiptFile)
       if (!references.ok || references.referenceIds.length || !proof.ok)
         throw new StructuredSessionError('unsupported', 'isolated metadata realm cannot prove zero threads and its exact process identity')
@@ -157,7 +256,7 @@ export function prepareStructuredRealm(root: string, readerRuntime?: FrozenReade
   const home = join(root, 'config'); mkdirSync(home, { recursive: true, mode: 0o700 })
   const config = join(home, 'config.toml')
   if (readerRuntime) assertFrozenReaderRuntime(readerRuntime)
-  const trustedConfig = readerRuntime ? `model_catalog_json = ${JSON.stringify(readerRuntime.catalogPath)}\n` + configText.replace('code_mode_host = false', 'code_mode_host = true').replace('[features]', '[features]\n' + frozenReaderDisabledFeatures.map(feature => `${feature} = false`).join('\n')) : configText
+  const trustedConfig = readerRuntime ? `model_catalog_json = ${JSON.stringify(readerRuntime.catalogPath)}\n` + (readerRuntime.version === 2 ? `tool_output_token_limit = ${readerRuntime.toolOutputTokenLimit}\n` : '') + configText.replace('code_mode_host = false', 'code_mode_host = true').replace('[features]', '[features]\n' + frozenReaderDisabledFeatures.map(feature => `${feature} = false`).join('\n')) : configText
   if (existsSync(config) && readFileSync(config, 'utf8') !== trustedConfig)
     throw new StructuredSessionError('unsupported', 'structured runtime configuration differs from the trusted fixed policy')
   writeFileSync(config, trustedConfig, { mode: 0o600 })

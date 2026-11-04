@@ -5,6 +5,8 @@ hue: 175
 desc: 无浏览器提交与控制真实后端操作，离线明确失败。
 code:
   - spec-cli/src/sync-cli.ts
+related:
+  - spec-cli/src/help.ts
 ---
 # 同步 CLI
 
@@ -13,6 +15,8 @@ code:
 无 Dashboard 时仍能启用、执行、查询和控制同步；CLI 不静默 mock，不只打印 proposal，也不退出后丢掉长流程。
 
 ## expanded spec
+
+`spex sync source-continuity <operation-id> --input-id <id> --revision <N> --enabled-digest <sha256> --old-common-dev <N> --old-root-dev <N> --old-git-dev <N>` 是 [[sync-source-registration]] 的正式offline入口，拒绝API路由和多余业务选项，缺值/错配非零退出。不调用HTTP或启动服务，成功输出真实proof引用与pause，重复登记不重复派发。文档要求停稳及先结算资源，v20配套备份/启用原件回滚；resume为后续明确控制。
 
 `spex sync settings|enable|status|run|verify|decide|show|pause|resume|cancel|recover` 通过 clientSyncRequest 调后端 [[sync-application]]，请求携带 cwd 项目的 targetTree，由后端持有 pipeline 生命周期。mutator 复用项目匹配 guard 和显式 API 路由；不可达或 HTTP 拒绝非零退出，不使用 cached/mock fallback。结果输出 JSON，queued、failed、GAP 及原树待落地不能用成功文案掩盖。
 
@@ -35,4 +39,10 @@ P4 增加无operation参数的 pause/resume，调用 /automatic/pause|resume 物
 
 `spex sync revert <operation-id> [--request-id <id>]` 明确请求撤销已采纳的完整交付，由同一应用资格检查和成组补偿管线建立新操作；稳定请求键幂等，CLI不直接reset、改源文件或假造已落地。`spex sync stop-writer` 不接操作ID或请求键，暂停物理来源、停止新派发并结算或保留实际资源/journal，返回恢复诊断；stopped只指停写入口，不能解释为所有未知原生资源已释放。两者沿既有targetTree/后端路由与拒绝退出码，帮助页说明其语义。
 
+`spex sync adopt <operation-id>` 将已验证且结算的交付交给 [[sync-source-adoption]] 采纳，只传当前 targetTree 和完整操作身份，不由 CLI 执行 Git。无参数或多余操作参数在 HTTP 前拒绝；后端资格不满足时非零退出并保留具体原因。成功输出仍区分 sourceSynced 与 canonicalSynced，不把工作树交付当作主分支完成。
+
 独立check的help与guide说明受信policyCommit中的原意精确登记、null新增删除、移动双登记及失败摘要；外部调用方负责选择受信政策并配置必需检查，授权不豁免独审/VERIFY/oracle。
+
+run/verify 接收 --model 并传给正式 HTTP 应用；控制/恢复命令遇到该 flag 明确拒绝。help/guide说明新业务操作显式模型覆盖版本化 `sync.model`，无 prior/retry 时以项目值或 sol 为默认；同 request ID 保持原模型，换模型必须使用 retryOf，合法省略 retry 继承原选择，遵循 [[sync-model-selection]]。
+
+spex sync resources recover <operation-id> --input-id <frozen-input-id>是显式单次离线资源入口，直接调用同一resources-only应用，不启动API、watcher或automatic queue；不接受模型、retry、业务request或HTTP选项。必须提供精确旧输入身份，当前canonicalRoot/commonDir核对仍执行；只输出资源结算及未决journal摘要。busy/资源未证实停止时非零退出并保留资源。普通recover仍走后端且可能恢复已开始journal，语义不变；离线资源清理不表示resume、adopt、业务通过或可忽略source身份变化。

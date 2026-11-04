@@ -10,9 +10,11 @@ code:
 
 ## raw source
 
-CLI 必须把请求交同一后台服务，不依赖浏览器或用成功输出掩盖离线。
+持续业务执行的CLI必须把请求交同一后台服务，不依赖浏览器或用成功输出掩盖离线；显式资源清理允许不启动后台的一次离线调用。
 
 ## expanded spec
+
+sync resources recover用真实CLI子进程、正式初始化的私有SQLite和真实.git身份变化证明单次离线可读精确历史operation/input，零HTTP且不消费queued操作或创建attempt。缺input及远程参数在资源调用前拒绝；独立API路由从实际源码提取handler验证明确input与专用factory委派，不启动index后台或调用普通业务detail。原服务运输回归保持。
 
 AC-SYNC-CLI-01 用实际子进程检查阶段 help 与未知 flag/缺参及 retryOf/patch 参数冲突、retryOf误放recover的拒绝；02 用本机 HTTP 记录器检查 run/status/show/control 路径、稳定请求键、节点引用归一化及 targetTree，显式 retryOf 传旧 ID 且不覆盖原 origin，recover 精确 POST旧 operation /recover 且只传 targetTree；03 检查离线非零退出、无成功 stdout。记录器仅证明客户端运输，不替代 [[sync-application-regression]] 的 SQLite/Git pipeline 或最终模型验收。
 
@@ -24,3 +26,7 @@ P4 客户端运输回归同时核无ID pause/resume 的 /automatic 路由、veri
 AC-SYNC-CLI-01还在HTTP前拒绝pause/resume误带--node与verify误带--patch-file，不能把用户的局部控制或正文编辑静默扩大/丢弃。
 
 成组撤销运输保留指定稳定requestId并发往原操作revert，停止写入只传targetTree；stop-writer误带操作或请求键在HTTP前拒绝。
+
+采纳运输验证 adopt 将完整操作 ID 与 targetTree 发给同一后端 /operations/:id/adopt；缺少操作 ID 在接触后端前拒绝。运输通过不替代 [[sync-source-adoption]] 的真实 Git 门禁验证。
+
+模型选择覆盖 run/verify 请求正文与控制命令拒绝，保留原稳定请求键行为，遵循 [[sync-model-selection]]。

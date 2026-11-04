@@ -1,4 +1,5 @@
 import { Ajv } from 'ajv'
+import type { Contract } from '@spexcode/spec-core/contracts'
 import type { ElaborationRunner, ElaborationSessionRequest, ElaborationTrace } from './elaboration-types.js'
 import type { GenerationReview } from './generation-types.js'
 import { contentHash } from './snapshot.js'
@@ -23,6 +24,17 @@ export type CandidateReviewBinding = {
   priorIds: readonly string[]
 }
 
+/** 原生输出面使用同一冻结身份及可审项；实际覆盖和语义仍由独审与消费者核验。 */
+export function candidateReviewSchema(binding: CandidateReviewBinding): Record<string, unknown> {
+  const schema = structuredClone(GENERATION_REVIEW_SCHEMA)
+  const properties = schema.properties as Record<string, unknown>
+  const ids = [...new Set(binding.actualIds)]
+  properties.inputId = { type: 'string', enum: [binding.inputId] }
+  properties.candidateDigest = { type: 'string', enum: [binding.candidateDigest] }
+  properties.checkedIds = { type: 'array', items: ids.length ? { type: 'string', enum: ids } : { ...string }, minItems: binding.requiredIds.length, maxItems: ids.length, description: `独立检查实际候选项，必须覆盖全部预定项：${JSON.stringify(binding.requiredIds)}；不能列测试用例标签或其它不存在的项。` }
+  return schema
+}
+
 /** 生成和跨机器检查共用同一结构与完成语义；调用者继续核验专用业务标记。 */
 export function candidateReviewError(output: unknown, binding: CandidateReviewBinding): string | null {
   if (!validateReview(output)) return `评审 schema 不合法: ${JSON.stringify(validateReview.errors)}`
@@ -39,9 +51,39 @@ export function candidateReviewError(output: unknown, binding: CandidateReviewBi
   return null
 }
 
+/** 格式不合格的定位只允许续改原评审；真实路径、ID及owner绑定错误不能取得修复路由。 */
+export function candidateReviewLocationError(review: GenerationReview, contracts: readonly Contract[], writablePaths: readonly string[] = []): { code: 'review_location_format' | 'review_location_binding'; message: string } | null {
+  if (review.verdict !== 'repair') return null
+  const items = contracts.flatMap(contract => contract.items)
+  let format: { code: 'review_location_format'; message: string } | null = null
+  for (const [index, finding] of review.findings.entries()) {
+    if (finding.ruleLocation.startsWith('contract-omission:') || finding.ruleLocation.startsWith('oracle-policy:')) continue
+    const location = finding.ruleLocation.replace(/^contract:/, '')
+    if (!location.startsWith('.spec/')) continue
+    const [path, id, extra] = location.split('#')
+    const prose = contracts.filter(contract => location.startsWith(`${contract.path} — expanded spec `) && location.slice(`${contract.path} — expanded spec `.length).trim())
+    const owner = prose.length === 1 ? prose[0] : contracts.find(contract => contract.path === path)
+    if (writablePaths.some(parent => (owner?.path ?? path) === parent || (owner?.path ?? path).startsWith(`${parent}/`))) continue
+    const bound = finding.kind === 'repair' && owner && finding.affectedIds.length && new Set(finding.affectedIds).size === finding.affectedIds.length && finding.affectedIds.every(id => {
+      const matches = items.filter(item => item.id === id)
+      return matches.length === 1
+    })
+    const sameOwner = owner && finding.affectedIds.every(id => items.some(item => item.id === id && item.path === owner.path && item.nodeId === owner.nodeId))
+    if (!bound || prose.length > 1 || prose.length && !sameOwner) return { code: 'review_location_binding', message: `findings[${index}].ruleLocation须绑定实际候选且affectedIds须全图唯一，正文定位须同owner：${JSON.stringify(finding)}` }
+    if (prose.length || extra === undefined && items.filter(item => item.path === path && item.id === id).length === 1) continue
+    if (extra !== undefined || !id || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(id)) {
+      if (!sameOwner) return { code: 'review_location_binding', message: `findings[${index}]格式续稿必须绑定唯一同owner affectedIds：${JSON.stringify(finding)}` }
+      format = { code: 'review_location_format', message: `findings[${index}].ruleLocation必须严格为实际候选Spec路径#既有ID；说明文字放入evidence/message，不得附加在位置字段：${JSON.stringify(finding.ruleLocation)}` }
+      continue
+    }
+    return { code: 'review_location_binding', message: `findings[${index}].ruleLocation没有唯一实际候选path/ID：${JSON.stringify(finding.ruleLocation)}` }
+  }
+  return format
+}
+
 /** 只读独立审查经既有 runner 派发，绑定完整输入和真实 native 身份。 */
 export async function runCandidateReview(request: ElaborationSessionRequest, runner: ElaborationRunner, binding: CandidateReviewBinding): Promise<{ review: GenerationReview; trace: ElaborationTrace }> {
-  const native = await runner(request), output: unknown = structuredClone(native.output)
+  const native = await runner({ ...request, schema: candidateReviewSchema(binding) }), output: unknown = structuredClone(native.output)
   if (!native.sessionId || !native.threadId || !native.turnId || native.resultDigest !== contentHash(JSON.stringify(output))) throw new Error('native 身份或输出摘要不匹配')
   const error = candidateReviewError(output, binding)
   if (error) throw new Error(error)

@@ -1,11 +1,33 @@
 import { CONTRACT_COLUMNS, contractTableCells, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
-import type { ContractItem, ContractKind } from '@spexcode/spec-core/contracts'
-import type { Applicability, ElaborationCandidate, ElaborationInput } from './elaboration-types.js'
+import type { ContractItem, ContractKind, Verification } from '@spexcode/spec-core/contracts'
+import type { Applicability, ElaborationCandidate, ElaborationInput, ElaborationTarget } from './elaboration-types.js'
+import { contractBusinessProse } from './contract-evolution.js'
 
 export type ContractCell = string | string[] | boolean | number | null
 export type GeneratedTables = Record<ContractKind, Record<string, ContractCell>[]>
 export type GeneratedNode = { nodeId: string; path: string; title: string; description: string; code: string[]; related: string[]; prose: string | null; tables: GeneratedTables; removeIds: string[] }
-export type GeneratedElaboration = { version: 'elaboration-rows-v2'; changes: GeneratedNode[]; applicability: Applicability[] }
+export type GeneratedElaboration = { version: 'elaboration-rows-v2' | 'elaboration-target-rows-v3'; changes: GeneratedNode[]; applicability: Applicability[] }
+export type GeneratedTargetElaboration = { version: 'elaboration-target-rows-v3'; changes: (Omit<GeneratedNode, 'path' | 'nodeId'> & { targetIndex: number })[]; applicability: Applicability[] }
+
+/** 可写定位由冻结目标和明确生命周期唯一派生，不由模型重复填写。 */
+export function elaborationTargetBindings(input: ElaborationInput): { targetIndex: number; nodeId: string; path: string; required: boolean }[] {
+  return input.targets.flatMap((target, targetIndex) => {
+    const lifecycle = input.nodeChanges?.find(change => change.from.nodeId === target.nodeId && change.from.path === target.path)
+    if (lifecycle?.action === 'retire') return []
+    const identity = lifecycle?.action === 'move' ? lifecycle.to : target
+    return [{ targetIndex, nodeId: identity.nodeId, path: identity.path, required: !(target.source && parseContract({ ...target, source: target.source }).contract) }]
+  })
+}
+
+/** 只补入程序拥有的路径；原生输出和追踪摘要仍保存原来的业务行对象。 */
+export function bindElaborationTargets(input: ElaborationInput, output: GeneratedTargetElaboration): GeneratedElaboration {
+  const targets = new Map(elaborationTargetBindings(input).map(target => [target.targetIndex, target]))
+  return { ...output, changes: output.changes.map(({ targetIndex, ...node }) => {
+    const target = targets.get(targetIndex)
+    if (!target) throw new TypeError('细化输出包含未冻结或已退役目标: ' + targetIndex)
+    return { ...node, nodeId: target.nodeId, path: target.path }
+  }) }
+}
 
 const markdownCell = (value: ContractCell, command = false): string => {
   const text = value === null ? '-' : value === '' ? '-' : Array.isArray(value) ? command ? JSON.stringify(value) : value.length ? value.join(',') : '-' : String(value)
@@ -17,6 +39,22 @@ const contractRow = (item: ContractItem): Record<string, ContractCell> => Object
   const value = column === 'source' && item.kind !== 'VERIFY' ? `${item.source.kind}:${item.source.ref}` : (item as unknown as Record<string, ContractCell>)[key]
   return [column, value]
 }))
+
+/** 显式等价差量也沿用整个冻结文件，不因重渲染改变正文及技术表的位置。 */
+export function unchangedTargetOutput(target: ElaborationTarget, node: GeneratedNode): boolean {
+  if (!target.source) return false
+  const contract = parseContract({ ...target, source: target.source }).contract
+  if (!contract || node.removeIds.length) return false
+  const original = parseFrontmatter(target.source), expanded = parseParts(target.source)?.expandedSpec ?? original.body
+  const same = (before: unknown, after: unknown): boolean => JSON.stringify(before) === JSON.stringify(after)
+  return node.title === String(original.fm.title ?? '') && node.description === String(original.fm.desc ?? '')
+    && same(node.code, contract.code) && same(node.related, contract.related)
+    && (node.prose === null || node.prose.replace(/\r\n?/g, '\n').replace(/\n{3,}/g, '\n\n').trim() === contractBusinessProse(expanded.replace(/\r\n?/g, '\n')))
+    && Object.entries(node.tables).every(([kind, rows]) => rows.every(row => {
+      const previous = contract.items.find(item => item.kind === kind && item.id === row.id)
+      return previous && CONTRACT_COLUMNS[previous.kind].every(column => same(contractRow(previous)[column], row[column]))
+    }))
+}
 
 /** 当前协议按冻结节点应用完整行更新；重复更新或不属于该节点的删除不能被合并掩盖。 */
 export function elaborationPatchErrors(input: ElaborationInput, generated: GeneratedElaboration): string[] {
@@ -41,6 +79,57 @@ export function elaborationPatchErrors(input: ElaborationInput, generated: Gener
   })
 }
 
+/** 与业务差量共用真实表定位；围栏中的示例始终逐字保留。 */
+function mapContractTables(source: string, replace: (kind: ContractKind, section: string, offset: number) => string): string {
+  const fencedRanges: { start: number; end: number }[] = []
+  let fence: { start: number; marker: string; length: number } | null = null, offset = 0
+  for (const line of source.split('\n')) {
+    const marker = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/)
+    if (marker && !fence) fence = { start: offset, marker: marker[1][0], length: marker[1].length }
+    else if (marker && fence && marker[1][0] === fence.marker && marker[1].length >= fence.length && !marker[2].trim()) {
+      fencedRanges.push({ start: fence.start, end: offset + line.length + 1 }); fence = null
+    }
+    offset += line.length + 1
+  }
+  if (fence) fencedRanges.push({ start: fence.start, end: source.length })
+  return source.replace(/^(###[ \t]+(?:REQ|FLOW|STEP|STATE|EVENT|TR|RULE|AC|GAP|VERIFY)[ \t]*\n)(?:[ \t]*\n)*(?:[ \t]*\|[^\n]*\n?)+/gm, (section: string, _heading: string, offset: number) => {
+    if (fencedRanges.some(range => offset >= range.start && offset < range.end)) return section
+    return replace(section.match(/^###[ \t]+(\w+)/)![1] as ContractKind, section, offset)
+  })
+}
+
+/** 只定位真实 expanded 中的技术表，原意及围栏示例不进入投影。 */
+function mapVerificationTables(source: string, replace: (section: string) => string): string {
+  const expanded = new Set<number>()
+  parseParts(source, (part, _line, offset) => { if (part === 'expandedSpec') expanded.add(offset) })
+  return mapContractTables(source, (kind, section, offset) => kind === 'VERIFY' && expanded.has(offset) ? replace(section) : section)
+}
+
+/** 去除且仅去除技术表；用于逐字证明技术投影未触碰任何其余正文。 */
+export function withoutVerificationTables(source: string): string {
+  const projected = mapVerificationTables(source.replace(/\r\n?/g, '\n'), () => '')
+  return source.includes('\r\n') ? projected.replace(/\n/g, '\r\n') : projected
+}
+
+/** 只替换受审正文的 VERIFY 表；冻结登记提供定义，绝不重渲染业务或元数据。 */
+export function projectVerificationTable(source: string, rows: readonly Pick<Verification, 'id' | 'command' | 'cwd' | 'timeoutMs'>[]): string {
+  const columns = CONTRACT_COLUMNS.VERIFY
+  const table = rows.length ? `### VERIFY\n\n| ${columns.join(' | ')} |\n| ${columns.map(() => '---').join(' | ')} |\n${rows.map(row => `| ${[row.id, markdownCell(row.command, true), markdownCell(row.cwd), row.timeoutMs].join(' | ')} |`).join('\n')}\n` : ''
+  const normalized = source.replace(/\r\n?/g, '\n')
+  if (source !== normalized && source !== normalized.replace(/\n/g, '\r\n')) throw new TypeError('VERIFY投影无法证明混合换行的非技术字节不变')
+  let written = false
+  let projected = mapVerificationTables(normalized, () => { const replacement = written ? '' : table; written = true; return replacement })
+  if (!written && rows.length) {
+    let insertion: number | undefined
+    parseParts(normalized, (part, line, offset) => { if (part === 'expandedSpec' && line.trim() && insertion === undefined) insertion = offset })
+    if (insertion === undefined) throw new TypeError('VERIFY投影缺少受审expanded正文')
+    projected = normalized.slice(0, insertion) + table + normalized.slice(insertion)
+  }
+  const result = source.includes('\r\n') ? projected.replace(/\n/g, '\r\n') : projected
+  if (withoutVerificationTables(source) !== withoutVerificationTables(result)) throw new TypeError('VERIFY投影改变了技术表以外的源码字节')
+  return result
+}
+
 /** 模型只产生临时差量行；未列旧行与正文从冻结 Markdown 保留，最终仍是完整候选。 */
 export function renderElaboration(input: ElaborationInput, generated: GeneratedElaboration, inputDigest: string): ElaborationCandidate {
   const errors = elaborationPatchErrors(input, generated)
@@ -60,22 +149,29 @@ export function renderElaboration(input: ElaborationInput, generated: GeneratedE
     const move = input.nodeChanges?.find(change => change.action === 'move' && change.to.nodeId === node.nodeId && change.to.path === node.path)
     const target = input.targets.find(target => move ? target.nodeId === move.from.nodeId && target.path === move.from.path : target.nodeId === node.nodeId && target.path === node.path)
     const original = target?.source ? parseFrontmatter(target.source).fm : {}
-    const parts = target?.source ? parseParts(target.source) : null
-    const baseline = target?.source ? parseContract({ ...target, source: target.source }).contract : null
-    const raw = move && target?.source ? parts?.rawSource : node.nodeId === input.intent.nodeId ? input.intent.rawSource : target?.rawSource ?? parts?.rawSource ?? input.intent.rawSource
-    const fm = input.mode === 'preserve_business' && target?.source ? { ...original, code: node.code, related: node.related } : { ...original, title: node.title, desc: node.description, 'contract-schema': 'sync-v1', ...(!target?.source ? { status: 'pending' } : {}), code: node.code, related: node.related }
+    const originalParts = target?.source ? parseParts(target.source) : null
+    const legacyBody = target?.source && !originalParts ? parseFrontmatter(target.source).body : null
+    const normalizedSource = target?.source?.replace(/\r\n?/g, '\n') ?? null
+    const renderingSource = normalizedSource !== null && legacyBody !== null ? `${normalizedSource.slice(0, normalizedSource.length - legacyBody.length)}## expanded spec\n\n${legacyBody}` : normalizedSource
+    const parts = renderingSource ? parseParts(renderingSource) : null
+    const baseline = target && renderingSource ? parseContract({ ...target, source: renderingSource }).contract : null
+    const programVerificationUpdates = input.phase === 'interface_seed' ? (input.verifications ?? []).filter(policy => baseline?.items.some(item => item.kind === 'VERIFY' && item.id === policy.id) && input.authorizedChanges?.some(change => change.id === policy.id && change.action === 'update_verification')) : []
+    const raw = (move && target?.source ? originalParts?.rawSource : node.nodeId === input.intent.nodeId ? input.intent.rawSource : target?.rawSource || originalParts?.rawSource) || null
+    const fm = input.mode === 'preserve_business' && target?.source ? { ...original, 'contract-schema': 'sync-v1', code: node.code, related: node.related } : { ...original, title: node.title, desc: node.description, 'contract-schema': 'sync-v1', ...(!target?.source ? { status: 'pending' } : {}), code: node.code, related: node.related }
+    if (target && unchangedTargetOutput(target, node) && raw === (parts?.rawSource || null) && !move && !programVerificationUpdates.length) return { nodeId: node.nodeId, path: node.path, beforeDigest: target.sourceDigest, source: target.source! }
     const metadataEqual = Object.entries(fm).every(([key, value]) => JSON.stringify(value) === JSON.stringify((key === 'code' || key === 'related') && typeof original[key] === 'string' ? [original[key]] : original[key]) || Array.isArray(value) && !value.length && !original[key] || value === '' && original[key] === undefined)
-    if (baseline && (node.prose === null || input.mode === 'preserve_business') && metadataEqual && raw === parts?.rawSource && !move && !node.removeIds.length && Object.values(node.tables).every(rows => !rows.length)) return { nodeId: node.nodeId, path: node.path, beforeDigest: target!.sourceDigest, source: target!.source! }
+    if (baseline && (node.prose === null || input.mode === 'preserve_business') && metadataEqual && raw === (parts?.rawSource || null) && !move && !programVerificationUpdates.length && !node.removeIds.length && Object.values(node.tables).every(rows => !rows.length)) return { nodeId: node.nodeId, path: node.path, beforeDigest: target!.sourceDigest, source: target!.source! }
     const metadata = Object.entries(fm).filter(([_key, value]) => !Array.isArray(value) || value.length).map(([key, value]) => Array.isArray(value)
       ? `${key}:\n${value.map(item => `  - ${JSON.stringify(item)}`).join('\n')}`
       : `${key}: ${JSON.stringify(value)}`).join('\n')
-    const sourceLines = target?.source?.replace(/\r\n?/g, '\n').split('\n') ?? []
+    const sourceLines = renderingSource?.split('\n') ?? []
     const removedIds = new Set(node.removeIds)
-    const preserveExpanded = baseline && parts?.expandedSpec && (node.prose === null || input.mode === 'preserve_business')
+    const preserveExpanded = parts !== null && (legacyBody !== null || node.prose === null || input.mode === 'preserve_business')
     const tables = Object.fromEntries(Object.entries(CONTRACT_COLUMNS).map(([kind, columns]) => {
       const updates = new Map(node.tables[kind as ContractKind].map(row => [String(row.id), row]))
       const rows: string[] = []
       const previous = baseline?.items.filter(item => item.kind === kind) ?? []
+      if (kind === 'VERIFY') for (const policy of programVerificationUpdates) updates.set(policy.id, { id: policy.id, command: policy.command, cwd: policy.cwd, 'timeout-ms': policy.timeoutMs })
       const rowColumns = preserveExpanded && previous.length ? contractTableCells(sourceLines[previous[0].line! - 3]) : columns
       for (const item of previous) {
         if (removedIds.has(item.id)) continue
@@ -91,21 +187,8 @@ export function renderElaboration(input: ElaborationInput, generated: GeneratedE
     })) as Record<ContractKind, string[]>
     const section = (kind: ContractKind): string => tables[kind].length ? `### ${kind}\n\n| ${CONTRACT_COLUMNS[kind].join(' | ')} |\n| ${CONTRACT_COLUMNS[kind].map(() => '---').join(' | ')} |\n${tables[kind].join('\n')}` : ''
     if (preserveExpanded) {
-      const fencedRanges: { start: number; end: number }[] = []
-      let fence: { start: number; marker: string; length: number } | null = null, offset = 0
-      for (const line of parts!.expandedSpec.split('\n')) {
-        const marker = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/)
-        if (marker && !fence) fence = { start: offset, marker: marker[1][0], length: marker[1].length }
-        else if (marker && fence && marker[1][0] === fence.marker && marker[1].length >= fence.length && !marker[2].trim()) {
-          fencedRanges.push({ start: fence.start, end: offset + line.length + 1 }); fence = null
-        }
-        offset += line.length + 1
-      }
-      if (fence) fencedRanges.push({ start: fence.start, end: parts!.expandedSpec.length })
       const seen = new Set<ContractKind>()
-      let expanded = parts!.expandedSpec.replace(/^(###[ \t]+(?:REQ|FLOW|STEP|STATE|EVENT|TR|RULE|AC|GAP|VERIFY)[ \t]*\n)(?:[ \t]*\n)*(?:[ \t]*\|[^\n]*\n?)+/gm, (originalSection: string, _heading: string, offset: number) => {
-        if (fencedRanges.some(range => offset >= range.start && offset < range.end)) return originalSection
-        const kind = originalSection.match(/^###[ \t]+(\w+)/)![1] as ContractKind
+      let expanded = mapContractTables(parts!.expandedSpec, (kind, originalSection) => {
         seen.add(kind)
         const originalRows = originalSection.trimEnd().split('\n')
         const firstRow = originalRows.findIndex(line => /^[ \t]*\|/.test(line))
@@ -113,7 +196,8 @@ export function renderElaboration(input: ElaborationInput, generated: GeneratedE
       })
       const added = (Object.keys(CONTRACT_COLUMNS) as ContractKind[]).filter(kind => !seen.has(kind) && tables[kind].length).map(section)
       if (added.length) expanded += `\n\n${added.join('\n\n')}`
-      const normalized = target!.source!.replace(/\r\n?/g, '\n')
+      if (node.prose && (!baseline && !parts!.expandedSpec.includes(node.prose.trim()) || legacyBody !== null && input.mode !== 'preserve_business')) expanded += `\n\n${node.prose}`
+      const normalized = renderingSource!
       const originalBody = parseFrontmatter(normalized).body
       const ranges: Record<'rawSource' | 'expandedSpec', { start: number; end: number }[]> = { rawSource: [], expandedSpec: [] }
       parseParts(originalBody, (part, line, offset) => {
@@ -122,7 +206,7 @@ export function renderElaboration(input: ElaborationInput, generated: GeneratedE
         else ranges[part].push({ start: offset, end: offset + line.length })
       })
       const edits: { start: number; end: number; text: string }[] = []
-      for (const [part, replacement] of [['rawSource', raw!], ['expandedSpec', expanded]] as const) {
+      for (const [part, replacement] of [['rawSource', raw ?? ''], ['expandedSpec', expanded]] as const) {
         if (replacement === parts![part]) continue
         let written = false
         for (const range of ranges[part]) {
@@ -133,16 +217,25 @@ export function renderElaboration(input: ElaborationInput, generated: GeneratedE
           edits.push({ start, end, text: written ? '' : replacement })
           written = true
         }
-        if (!written) edits.push({ start: ranges[part][0].start, end: ranges[part][0].start, text: replacement })
+        if (!written) {
+          if (ranges[part].length) edits.push({ start: ranges[part][0].start, end: ranges[part][0].start, text: replacement })
+          else {
+            const expandedStart = ranges.expandedSpec[0]?.start
+            const start = part === 'rawSource' ? expandedStart === undefined ? 0 : originalBody.lastIndexOf('\n', expandedStart - 2) + 1 : originalBody.length
+            edits.push({ start, end: start, text: `${part === 'rawSource' ? '' : '\n\n'}## ${part === 'rawSource' ? 'raw source' : 'expanded spec'}\n\n${replacement}\n\n` })
+          }
+        }
       }
       let body = originalBody
       for (const edit of edits.sort((left, right) => right.start - left.start)) body = body.slice(0, edit.start) + edit.text + body.slice(edit.end)
       let rendered = normalized.slice(0, normalized.length - originalBody.length) + body
 
       if (!metadataEqual) rendered = `---\n${metadata}\n---\n${parseFrontmatter(rendered).body}`
-      return { nodeId: node.nodeId, path: node.path, beforeDigest: target!.sourceDigest, source: rendered === normalized ? target!.source! : target!.source!.includes('\r\n') ? rendered.replace(/\n/g, '\r\n') : rendered }
+      return { nodeId: node.nodeId, path: node.path, beforeDigest: target!.sourceDigest, source: rendered === normalized && legacyBody === null ? target!.source! : target!.source!.includes('\r\n') ? rendered.replace(/\n/g, '\r\n') : rendered }
     }
-    return { nodeId: node.nodeId, path: node.path, beforeDigest: target?.sourceDigest ?? null, source: `---\n${metadata}\n---\n# ${node.title}\n\n## raw source\n\n${raw}\n\n## expanded spec\n\n${node.prose ?? parts?.expandedSpec ?? ''}\n\n${(Object.keys(CONTRACT_COLUMNS) as ContractKind[]).map(section).filter(Boolean).join('\n\n')}\n` }
+    const prose = legacyBody === null ? node.prose ?? parts?.expandedSpec ?? '' : `${legacyBody}\n${node.prose ?? ''}`
+    const rendered = `---\n${metadata}\n---\n# ${node.title}\n\n${raw === null ? '' : `## raw source\n\n${raw}\n\n`}## expanded spec\n\n${prose}\n\n${(Object.keys(CONTRACT_COLUMNS) as ContractKind[]).map(section).filter(Boolean).join('\n\n')}\n`
+    return { nodeId: node.nodeId, path: node.path, beforeDigest: target?.sourceDigest ?? null, source: target?.source?.includes('\r\n') ? rendered.replace(/\n/g, '\r\n') : rendered }
   })
   return { inputDigest, changes, applicability: generated.applicability, ...(input.nodeChanges?.length ? { nodeChanges: structuredClone([...input.nodeChanges]) } : {}) }
 }

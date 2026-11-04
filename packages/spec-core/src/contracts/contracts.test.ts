@@ -294,6 +294,140 @@ test('真实Node测试导入别名保留静态标题，注释和字符串不能�
   }
 })
 
+test('封闭const数据及for-of绑定组成的真实测试标题可静态归因', () => {
+  const graph = buildContractGraph([parse()])
+  const fake = new Map(files)
+  for (const source of [
+    "const IDS = ['AC-EXPORT-01']; test(`${IDS[0]} candidate`, () => {});",
+    "const ID = 'AC-EXPORT-01'; test(`${ID} candidate`, () => {});",
+    "const SUITES = [{ id: 'AC-EXPORT-01', module: 'backend' }]; for (const suite of SUITES) test(`${suite.id} ${suite.module} existing CI pytest targets`, () => {});",
+    "import { test as check } from 'node:test'; const SUITES = [{ id: 'AC-EXPORT-01' }]; for (const suite of SUITES) { check(`${suite['id']} candidate`, () => {}); }",
+    "const IDS: readonly string[] = ['AC-EXPORT-01']; test(`${IDS[0]} candidate`, () => {});",
+    "const ID = 'AC-EXPORT-01' as const; const view = <span>preview</span>; test(`${ID} candidate`, () => {});",
+    "const ID = <string>'AC-EXPORT-01'; test(`${ID} candidate`, () => {});",
+    "import { test as check } from 'node:test'; check.only('AC-EXPORT-01 candidate', () => {});",
+    "const IDS = ['AC-EXPORT-01']; for (const id of IDS) { const title = `${id} candidate`; test(title, () => {}); }",
+    "const ID = 'AC-EXPORT-01'; { const ID = 'other'; } test(`${ID} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; function registered(id) { const ids = new Set(IDS); return ids.has(id); } test(`${IDS[0]} candidate`, () => {});",
+    "const SUITE = { id: 'AC-EXPORT-01', optional: null }; test(`${SUITE.id} ${SUITE.optional} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; const made = helper(IDS); made.inspect(); test(`${IDS[0]} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; const made = helper?.(IDS); made.inspect(); test(`${IDS[0]} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; const make = () => IDS; make.inspect(); test(`${IDS[0]} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; const copy = { IDS: [] }; copy.extra = 'other'; test(`${IDS[0]} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; const copy = external.IDS; copy.extra = 'other'; test(`${IDS[0]} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; const copy = ({ unrelated: [] } as unknown as typeof IDS); copy.extra = 'other'; test(`${IDS[0]} candidate`, () => {});",
+  ]) {
+    fake.set('tests/export.test.mjs', source)
+    assert.ok(!validateContractGraph(graph, { files: fake }).some((finding) => finding.code === 'missing-test-case' && finding.itemId === 'AC-EXPORT-01'), source)
+  }
+})
+
+test('Vitest each注册不抹去同一TSX文件中的直接it标题', () => {
+  const graph = buildContractGraph([parse()])
+  const fake = new Map(files)
+  fake.set('tests/export.test.mjs', `
+    import { describe, it } from 'vitest'
+    import type { ReactNode } from 'react'
+    const panel: ReactNode = <NodeDetailPanel />
+    describe('NodeDetailPanel', () => {
+      it.each(['source_failed', 'evidence_pending'] as const)('等待时禁止 %s finalize', (status) => { render(panel) })
+      it('AC-EXPORT-01 已剪枝时拒绝恢复', () => { render(<NodeDetailPanel />) })
+      it.each(['failed', 'cancelled'] as const)('%s 不显示取消入口', (status) => {})
+    })
+  `)
+  assert.ok(!validateContractGraph(graph, { files: fake }).some((finding) => finding.code === 'missing-test-case' && finding.itemId === 'AC-EXPORT-01'))
+  for (const source of [
+    "import { it } from 'vitest'; it.each([1])('AC-EXPORT-01 row %s', () => {});",
+    "const IDS = ['AC-EXPORT-01']; IDS.each(() => {}); test(`${IDS[0]} candidate`, () => {});",
+    "import { it } from 'vitest'; const each = 'unrelated'; it[each](); it('AC-EXPORT-01 direct', () => {});",
+  ]) {
+    fake.set('tests/export.test.mjs', source)
+    assert.ok(validateContractGraph(graph, { files: fake }).some((finding) => finding.code === 'missing-test-case' && finding.itemId === 'AC-EXPORT-01'), source)
+  }
+})
+
+test('optional成员调用及赋值或解构别名的可见写入使标题失效', () => {
+  const graph = buildContractGraph([parse()])
+  const sources = [
+    "const IDS = ['AC-EXPORT-01']; IDS?.pop(); test(`${IDS[0]} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; IDS.pop?.(); test(`${IDS[0]} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; IDS?.pop?.(); test(`${IDS[0]} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; IDS?.['pop'](); test(`${IDS[0]} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; let alias; alias = IDS; alias[0] = 'other'; test(`${IDS[0]} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; const [alias] = [IDS]; alias[0] = 'other'; test(`${IDS[0]} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; const { ids: alias } = { ids: IDS }; alias[0] = 'other'; test(`${IDS[0]} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; let alias; [alias] = [IDS]; alias[0] = 'other'; test(`${IDS[0]} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; let alias; ({ ids: alias } = { ids: IDS }); alias[0] = 'other'; test(`${IDS[0]} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; const [alias = IDS] = []; alias[0] = 'other'; test(`${IDS[0]} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; const alias = ({ ids: IDS } as const); alias.ids[0] = 'other'; test(`${IDS[0]} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; let alias; [alias = IDS] = []; alias[0] = 'other'; test(`${IDS[0]} candidate`, () => {});",
+  ]
+  const declared = sources.map((source) => {
+    const fake = new Map(files).set('tests/export.test.mjs', source)
+    return !validateContractGraph(graph, { files: fake }).some((finding) => finding.code === 'missing-test-case' && finding.itemId === 'AC-EXPORT-01')
+  })
+  assert.deepEqual(declared, sources.map(() => false))
+})
+
+test('不求值的表达式及展开包装仍保守保留可能的别名来源', () => {
+  const graph = buildContractGraph([parse()])
+  const sources = [
+    "const IDS = ['AC-EXPORT-01']; let alias; alias = true ? IDS : []; alias[0] = 'other'; test(`${IDS[0]} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; const alias = (0, IDS); alias[0] = 'other'; test(`${IDS[0]} candidate`, () => {});",
+    "const SUITES = [{ id: 'AC-EXPORT-01' }]; const copy = [...SUITES]; copy[0].id = 'other'; test(`${SUITES[0].id} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; const alias = IDS || []; alias[0] = 'other'; test(`${IDS[0]} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; const alias = await IDS; alias[0] = 'other'; test(`${IDS[0]} candidate`, () => {});",
+    "const SOURCE = { ids: ['AC-EXPORT-01'] }; const copy = { ...SOURCE }; copy.ids[0] = 'other'; test(`${SOURCE.ids[0]} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; const alias = ((0, IDS) satisfies string[]); alias[0] = 'other'; test(`${IDS[0]} candidate`, () => {});",
+  ]
+  const declared = sources.map((source) => {
+    const fake = new Map(files).set('tests/export.test.mjs', source)
+    return !validateContractGraph(graph, { files: fake }).some((finding) => finding.code === 'missing-test-case' && finding.itemId === 'AC-EXPORT-01')
+  })
+  assert.deepEqual(declared, sources.map(() => false))
+})
+
+test('动态或错绑定标题、未使用ID及作用域阴影不计测试声明', () => {
+  const graph = buildContractGraph([parse()])
+  const fake = new Map(files)
+  for (const source of [
+    "const ID = 'AC-EXPORT-01'; test('unrelated title', () => {});",
+    "const ID = 'AC-EXPORT-01'; const example = `test('${ID}', () => {})`;",
+    "// const ID = 'AC-EXPORT-01';\ntest(`${ID} candidate`, () => {});",
+    "const ID = makeId('AC-EXPORT-01'); test(`${ID} candidate`, () => {});",
+    "const ID = 'AC-EXPORT-01'; test(`${ID} ${dynamic()} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; test(`${IDS[missing]} candidate`, () => {});",
+    "const SUITES = [{ id: 'AC-EXPORT-01' }]; for (const other of SUITES) test(`${suite.id} candidate`, () => {});",
+    "const ID = 'AC-EXPORT-01'; { const ID = dynamic(); test(`${ID} candidate`, () => {}); }",
+    "const ID = 'AC-EXPORT-01'; function nested(ID) { test(`${ID} candidate`, () => {}); }",
+    "import { test as check } from 'node:test'; function nested(check) { check('AC-EXPORT-01 candidate', () => {}); }",
+    "const test = unrelated; test('AC-EXPORT-01 candidate', () => {});",
+    "const IDS = ['AC-EXPORT-01']; IDS[0] = 'other'; test(`${IDS[0]} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; const alias = IDS; alias[0] = 'other'; test(`${IDS[0]} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; const alias = IDS as string[]; alias[0] = 'other'; test(`${IDS[0]} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; const alias = { ids: IDS }; alias.ids[0] = 'other'; test(`${IDS[0]} candidate`, () => {});",
+    "const IDS = ['AC-EXPORT-01']; [IDS[0]] = ['other']; test(`${IDS[0]} candidate`, () => {});",
+    "const SUITE = { id: 'AC-EXPORT-01' }; ({ id: SUITE.id } = { id: 'other' }); test(`${SUITE.id} candidate`, () => {});",
+    "const SUITES = [{ id: 'AC-EXPORT-01' }]; for (const suite of SUITES) { suite.id = 'other'; test(`${suite.id} candidate`, () => {}); }",
+    "const IDS = ['AC-EXPORT-01']; IDS.pop(); test(`${IDS[0]} candidate`, () => {});",
+    "const ID = 'AC-EXPORT-01'; { test(`${ID} candidate`, () => {}); const ID = dynamic(); }",
+    "const ID = 'AC-EXPORT-01'; const nested = ({ ID }) => test(`${ID} candidate`, () => {});",
+    "const ID = 'AC-EXPORT-01'; try {} catch (ID) { test(`${ID} candidate`, () => {}); }",
+    "const ID = 'AC-EXPORT-01'; function nested() { test(`${ID} candidate`, () => {}); var ID; }",
+    "import { test as check } from 'unrelated-library'; check('AC-EXPORT-01 candidate', () => {});",
+    "const example = /test\\('AC-EXPORT-01',/;",
+    "test = unrelated; test('AC-EXPORT-01 candidate', () => {});",
+    "import { test as check } from 'node:test'; function nested(check: Function) { check('AC-EXPORT-01 candidate', () => {}); }",
+    "with ({ test: unrelated }) { test('AC-EXPORT-01 candidate', () => {}); }",
+    "test('AC-EXPORT-01 candidate', () => {}); const = ;",
+    "enum test { unrelated }; test('AC-EXPORT-01 candidate', () => {});",
+    "declare function test(title: string, run: Function): void; test('AC-EXPORT-01 candidate', () => {});",
+  ]) {
+    fake.set('tests/export.test.mjs', source)
+    assert.ok(validateContractGraph(graph, { files: fake }).some((finding) => finding.code === 'missing-test-case' && finding.itemId === 'AC-EXPORT-01'), source)
+  }
+})
+
  test('非终态无出口、不可达状态、跨对象事件和未解释无状态分支被拒绝', () => {
   const contract = parse()
   const changed = structuredClone(contract)

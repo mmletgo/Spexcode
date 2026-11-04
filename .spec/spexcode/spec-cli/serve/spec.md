@@ -8,6 +8,7 @@ related:
   - spec-cli/src/reaper.ts
   - spec-cli/src/reaper.test.ts
   - spec-cli/src/service-cwd.ts
+  - spec-cli/src/supervisor-readiness.ts
 ---
 # serve
 
@@ -30,7 +31,7 @@ refused (a node merge touching backend code took the dashboard down); that windo
 
 The mechanism is a tiny **supervisor** (`serve` runs `supervise.ts`) that owns the public port as a
 raw-TCP proxy and runs the real Hono server as a child on a private port. On a source change it boots a
-fresh child, waits for `GET /health` (a cheap, git-free readiness probe), atomically flips the proxy to
+fresh child, waits through [[backend-readiness]] for `GET /health` (a cheap, git-free readiness probe), atomically flips the proxy to
 it, then **gracefully drains** the old child — which stops accepting new connections but finishes
 in-flight requests before exiting. The public socket never closes, so the flip is invisible. (SO_REUSEPORT
 is the obvious alternative but is unsupported on this platform, hence the proxy.) An unhealthy new child

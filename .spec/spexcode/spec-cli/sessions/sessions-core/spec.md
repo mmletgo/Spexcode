@@ -13,6 +13,7 @@ related:
   - spec-cli/src/sessionSlug.test.ts
   - spec-cli/src/session-create-cli.test.ts
   - spec-cli/src/sessions-hot.test.ts
+  - spec-cli/src/sessions.test.ts
   - packages/spec-core/src/layout.ts
   - spec-cli/src/session-public-projection.api.test.ts
   - spec-cli/src/session-managed-watch-realtime.yatu.test.ts
@@ -31,6 +32,8 @@ feature as its owner, so per-feature drift on it fanned the same change across a
 foundation owner: the features govern their own surfaces and REFERENCE this module via `related:`.
 
 ## expanded spec
+
+受限结构化创建的内部可信 policy 决定固定 launcher：既有 Codex policy 保留 codex-headless/codex，明确 Claude policy 使用 claude-headless/claude；公开 create 对象不能注入该 policy。两者复用原创建事务和队列，普通人工 launcher 选择不受影响；精确结构化运行/恢复由 [[structured-session-runtime]] 负责。
 
 sessions-core owns `sessions.ts` — the common session layer around the global per-session runtime/worktree envelope;
 `session-record.ts` owns that envelope's typed read/write and quarantine controls, while lifecycle, proposal, note, event,
@@ -198,8 +201,9 @@ lifecycle is [[state]]'s; the prompt seam left but `launcherCmd` stayed, because
 is not what text it is handed. That several features still hold no code of their own is the honest
 signal that the rest of `sessions.ts` remains a monolith outside the record seam.
 
-The shared layer also reconciles each executing governed record (`status: active`) with its adapter's optional
-native turn-failure subscription. Waiting states (`asking`, `awaiting`, and `parked`) have no native turn and do
+The shared layer also reconciles each ordinary executing governed record (`status: active`) with its adapter's optional
+native turn-failure subscription. Structured execution records are excluded because their exact turn/result observer
+and lifecycle belong to the runner in [[structured-session-runtime]]. Waiting states (`asking`, `awaiting`, and `parked`) have no native turn and do
 not hold an observer. It owns subscription lifetime across backend replacement and record stop/archive/retirement,
 admits native subscriptions one at a time during reconciliation so a backend restart cannot fan out expensive
 resume handshakes, with bounded backoff after a transport disconnect. The supervisor performs one full roster
@@ -222,11 +226,20 @@ The record's existing `name` is the one human display override: CLI creation may
 rename later replaces or clears that same field. It affects only the shared label/title projection;
 the branch, worktree slug, and stored prompt title retain their own responsibilities.
 
+New session branch and worktree storage names append the complete session UUID to their prompt/spec slug.
+The visible short ID, selector grammar, labels and titles keep their existing semantics. Published records
+continue to address their stored branch and worktreePath; no path or record migration is inferred from a label.
+
 **Exclusion lives in the lock, never in a privileged process.** The per-session record lock implementation lives at
 `spec-cli/src/session-record-lock.ts`: a filesystem lock with a PID liveness check, held across processes, so a session operation may run in whatever process
 takes it — a backend is the convenient owner of the launch environment and a shared cache, not the holder
 of the invariant, and a read that takes no lock needs no permission from anyone. That is what lets this
 layer be a brick an external system can drive rather than a service it must be granted access to.
+The same lock primitive also fences shared Git worktree registry mutations and their candidate inspections,
+keyed by the physical common directory rather than a session id or runtime home ([[record-lock]]).
+Create releases this short registry fence before materialization or model admission; close holds it only for
+the rename/prune boundary, and archived restore only for its add. The candidate ownership receipt remains the
+authority to remove resources; holding the registry fence alone conveys no ownership.
 
 A text send delegates its record-locked append-plus-queue acceptance to the canonical application and the local record lock; an
 agent-attributed send also fences its named sender in sorted order. Before a new append, sessions-core asks the resolved adapter's optional

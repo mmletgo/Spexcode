@@ -25,10 +25,11 @@ function fake() {
   let labelsMismatch = false
   let disconnected = false
   let configMismatch = false
+  let scratchOptions = ''
   let logs = report()
   const actual = () => {
     const config = checkpoint.config
-    return { Id: 'a'.repeat(64), Name: `/${checkpoint.uniqueContainerName}`, Image: config.imageId, Platform: 'linux', Config: { Image: config.image, User: '1000:1000', WorkingDir: config.policy.cwd === '.' ? '/candidate' : `/candidate/${config.policy.cwd}`, Entrypoint: [config.argv[0]], Cmd: config.argv.slice(1), Labels: labelsMismatch ? { ...checkpoint.labels, 'spex.config': 'wrong' } : checkpoint.labels, Env: config.environment, Healthcheck: { Test: ['NONE'] } }, HostConfig: { ReadonlyRootfs: true, NetworkMode: configMismatch ? 'host' : 'none', Privileged: false, CapDrop: ['ALL'], CapAdd: null, SecurityOpt: ['no-new-privileges'], Init: true, AutoRemove: false, CgroupnsMode: 'private', RestartPolicy: { Name: 'no' }, Memory: config.policy.memoryBytes, MemorySwap: config.policy.memoryBytes, NanoCpus: config.policy.cpus * 1e9, PidsLimit: config.policy.pidsLimit, Tmpfs: { '/tmp': `rw,noexec,nosuid,nodev,size=${config.policy.scratchBytes},mode=1777` }, LogConfig: { Type: 'local', Config: { 'max-size': String(config.policy.logBytes), 'max-file': '1', compress: 'false' } }, Binds: null, Devices: [], PidMode: '', IpcMode: 'private' }, Mounts: [{ Type: 'bind', Source: config.candidatePath, Destination: '/candidate', RW: false }, { Type: 'bind', Source: config.runnerPath, Destination: '/runner', RW: false }], State: { Status: state, Running: state === 'running', ExitCode: 0, OOMKilled: false, Error: '' } }
+    return { Id: 'a'.repeat(64), Name: `/${checkpoint.uniqueContainerName}`, Image: config.imageId, Platform: 'linux', Config: { Image: config.image, User: '1000:1000', WorkingDir: config.policy.cwd === '.' ? '/candidate' : `/candidate/${config.policy.cwd}`, Entrypoint: [config.argv[0]], Cmd: config.argv.slice(1), Labels: labelsMismatch ? { ...checkpoint.labels, 'spex.config': 'wrong' } : checkpoint.labels, Env: config.environment, Healthcheck: { Test: ['NONE'] } }, HostConfig: { ReadonlyRootfs: true, NetworkMode: configMismatch ? 'host' : 'none', Privileged: false, CapDrop: ['ALL'], CapAdd: null, SecurityOpt: ['no-new-privileges'], Init: true, AutoRemove: false, CgroupnsMode: 'private', RestartPolicy: { Name: 'no' }, Memory: config.policy.memoryBytes, MemorySwap: config.policy.memoryBytes, NanoCpus: config.policy.cpus * 1e9, PidsLimit: config.policy.pidsLimit, Tmpfs: { '/tmp': scratchOptions }, LogConfig: { Type: 'local', Config: { 'max-size': String(config.policy.logBytes), 'max-file': '1', compress: 'false' } }, Binds: null, Devices: [], PidMode: '', IpcMode: 'private' }, Mounts: [{ Type: 'bind', Source: config.candidatePath, Destination: '/candidate', RW: false }, { Type: 'bind', Source: config.runnerPath, Destination: '/runner', RW: false }], State: { Status: state, Running: state === 'running', ExitCode: 0, OOMKilled: false, Error: '' } }
   }
   const driver: VerificationDriver = async argv => {
     calls.push([...argv])
@@ -36,14 +37,14 @@ function fake() {
     if (argv[0] === 'version') return ok(JSON.stringify({ Os: 'linux', Arch: 'arm64', Version: '29.4.3' }))
     if (argv[0] === 'image') return ok(JSON.stringify([{ Id: 'sha256:image', Os: 'linux', Architecture: 'arm64', Config: { Env: ['PATH=/usr/local/bin'], Volumes: null } }]))
     if (argv[1] === 'inspect') return exists ? ok(JSON.stringify([actual()])) : { ...ok(), exitCode: 1, stderr: 'Error: No such container' }
-    if (argv[1] === 'create') { exists = true; return ok('a'.repeat(64)) }
+    if (argv[1] === 'create') { exists = true; scratchOptions = argv[argv.indexOf('--tmpfs') + 1].slice('/tmp:'.length); return ok('a'.repeat(64)) }
     if (argv[1] === 'start') { state = 'exited'; return ok('a'.repeat(64)) }
     if (argv[1] === 'stop' || argv[1] === 'kill') { state = 'exited'; return ok('a'.repeat(64)) }
     if (argv[1] === 'logs') return ok(logs)
     if (argv[1] === 'rm') { exists = false; return ok('a'.repeat(64)) }
     assert.fail(`unexpected ${argv}`)
   }
-  return { driver, calls, save: (value: VerificationCheckpoint) => { checkpoint = value }, mismatch: () => { labelsMismatch = true }, badConfig: () => { configMismatch = true }, disconnect: () => { disconnected = true }, setLogs: (value: string) => { logs = value }, running: () => { state = 'running' } }
+  return { driver, calls, save: (value: VerificationCheckpoint) => { checkpoint = value }, mismatch: () => { labelsMismatch = true }, badConfig: () => { configMismatch = true }, badScratch: () => { scratchOptions = scratchOptions.replace(',exec,', ',noexec,') }, disconnect: () => { disconnected = true }, setLogs: (value: string) => { logs = value }, running: () => { state = 'running' } }
 }
 
 test('AC-VERIFIER-01 create/start/terminal/remove 持久顺序与真实测试结果', async () => {
@@ -136,12 +137,13 @@ test('AC-VERIFIER-08 普通仓库内部相对软链接可验证，越界链接�
 test('AC-VERIFIER-09 等待驱动时调用者改写政策，不改变本轮绑定或验收集合', async () => {
   const input = await request(); const engine = fake()
   const driver: VerificationDriver = async (argv, maxBytes) => {
-    if (argv[0] === 'version') input.policy.expectedTestIds = ['AC-NOT-THIS-RUN']
+    if (argv[0] === 'version') { input.policy.expectedTestIds = ['AC-NOT-THIS-RUN']; input.policy.scratchExecutable = true }
     return engine.driver(argv, maxBytes)
   }
   const result = await executeVerification(input, { driver, onCheckpoint: async checkpoint => engine.save(checkpoint) })
   assert.equal(result.status, 'passed')
   assert.equal(result.evidence!.tests[0].testId, 'AC-VERIFY-01')
+  assert.equal(result.checkpoint!.config.policy.scratchExecutable, undefined)
 })
 
 test('AC-VERIFIER-10 验证目录拒绝越界，稳定用例无需冒用业务AC命名', async () => {
@@ -153,4 +155,41 @@ test('AC-VERIFIER-10 验证目录拒绝越界，稳定用例无需冒用业务AC
   input.policy.expectedTestIds = ['export.case:1']
   engine.setLogs(report('export.case:1'))
   assert.equal((await executeVerification(input, { driver: engine.driver, onCheckpoint: async checkpoint => engine.save(checkpoint) })).status, 'passed')
+})
+
+test('AC-VERIFIER-11 scratch 默认和 false 均 noexec，只有显式 true 允许 exec 并核对实际挂载', async () => {
+  for (const scratchExecutable of [undefined, false, true]) {
+    const input = await request(); const engine = fake()
+    if (scratchExecutable !== undefined) input.policy.scratchExecutable = scratchExecutable
+    const result = await executeVerification(input, { driver: engine.driver, onCheckpoint: async checkpoint => engine.save(checkpoint) })
+    assert.equal(result.status, 'passed', result.reason)
+    const create = engine.calls.find(call => call[1] === 'create')!
+    assert.equal(create[create.indexOf('--tmpfs') + 1], `/tmp:rw,${scratchExecutable ? 'exec' : 'noexec'},nosuid,nodev,size=${input.policy.scratchBytes},mode=1777`)
+  }
+})
+
+test('AC-VERIFIER-12 scratch 执行能力拒绝非布尔值，不能因 truthy 放宽政策', async () => {
+  for (const scratchExecutable of ['true', 1, null]) {
+    const input = await request(); const engine = fake()
+    Object.assign(input.policy, { scratchExecutable })
+    const result = await executeVerification(input, { driver: engine.driver, onCheckpoint: async checkpoint => engine.save(checkpoint) })
+    assert.equal(result.status, 'unsupported')
+    assert.match(result.reason!, /scratchExecutable/)
+    assert.equal(engine.calls.length, 0)
+  }
+})
+
+test('AC-VERIFIER-13 恢复不能改变 scratch 执行政策，实际挂载不符不能启动或删除', async () => {
+  for (const mutation of ['enable', 'disable', 'inspect']) {
+    const input = await request(); const engine = fake()
+    if (mutation !== 'enable') input.policy.scratchExecutable = true
+    const first = await executeVerification(input, { driver: engine.driver, onCheckpoint: async checkpoint => { engine.save(checkpoint); if (checkpoint.phase === 'created') throw new Error('crash') } })
+    assert.equal(first.status, 'recovery_required')
+    if (mutation === 'inspect') engine.badScratch()
+    else input.policy.scratchExecutable = mutation === 'enable'
+    const result = await executeVerification({ ...input, previousCheckpoint: first.checkpoint }, { driver: engine.driver, onCheckpoint: async checkpoint => engine.save(checkpoint) })
+    assert.equal(result.status, 'recovery_required')
+    assert.match(result.reason!, mutation === 'inspect' ? /mounts\/scratch 不匹配/ : /政策不匹配/)
+    assert.ok(!engine.calls.some(call => call[1] === 'start' || call[1] === 'rm'))
+  }
 })

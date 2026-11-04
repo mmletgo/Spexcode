@@ -23,7 +23,11 @@ update_acceptance 必须绑定真实内容摘要的冻结行为分析；分析�
 
 preserve_business 保持 raw、expanded 业务正文和全部业务字段，只允许必要实现、来源符号及测试定位变化，以及移动导致的 canonical 权威身份调整。reelaborate 接受合法意图细化；未经授权不能弱化已有验收。所有检查独立于当前 active AC 数量，不以空验收或 GAP 跳过旧图和退役检查；GAP 仍只影响真实依赖分支。
 
+preserve_business 允许 raw-only 旧节点第一次建立契约，但仅限该节点已存在于冻结旧图的 nodes 中，候选继续使用同一 canonical nodeId 与 path，冻结旧图的 contracts 没有该 path，调用者以 newNodeRawSources 精确绑定该 path 且其值与旧节点非空 rawSource 逐字相同，候选该 path 的 rawSource 也逐字保持该冻结值。此例外只免除首次业务项新增门禁；已有 sync-v1 节点新增项、身份或路径变化、缺少冻结 raw、raw 改动仍拒绝，其他既有业务语义、authority、退役及引用门禁不变。
+
 用户已经编辑 raw/详细规则、保留旧 AC 时，真实作者 old→new 差量由程序生成并纳入同一独审分析：changedIds 包含合法来源，定位匹配该来源节点，afterRaw 必须精确匹配当前冻结原意。它证明用户变更已经发生，不要求细化再改一次规则；模型不能填此作者差量，旧合法分析不能跨输入复用，版本绑定由协调器核对。
+
+业务变化、REQ raw变化与精确作者差量的来源变化判据由行为分析和P1复用；分析只提前拒绝本区不可写且尚未发生真实变化的来源。P1仍逐个要求全部授权来源在最终AC来源链中且真实变化，不因前置可行性检查通过而批准来源或放宽every门禁。
 
 实现遗漏诊断触发再细化时，preserveAcceptedItems 保护全部既有稳定身份、raw/REQ、RULE政策、AC/VERIFY与原业务说明；FLOW/STEP/TR等详细逻辑可增补原意允许的失败出口与边界，并经结构检查及独审接受。已有TR不能改为not_applicable逃检查。诊断本身不授予任何原意、政策或验收变更授权。
 
@@ -48,3 +52,6 @@ RULE 独立跨叶搬迁时，旧定义与新定义的 authority 均须等于各�
 当前精确request/旧analysis/所选finding绑定且已独审通过的裁决，可结清候选实际删除的旧派生诊断GAP：来源须为所选旧RULE/TR，依赖仅限这些旧规则与原affected需求，affects仅原affected STEP/AC及这些STEP所属FLOW，所有旧消费者也须在此有限范围且只以depends-on引用。当前相关finding未解决、同一allowed_change未明确支持来源规则及受影响义务或缺真实evidence，均不授权清除；不按GAP名称或文字推断。删除GAP与仅移除这些诊断dependsOn且其余canonical业务意义完全相同的项，属于诊断结清而非业务retire；父FLOW不因此获得改义权限。keep仍禁止raw、政策、AC及VERIFY变化；preserve_business或已接受refinement不享有清理豁免。
 
 退役身份不能用于新业务对象。显式 revert 恢复同一历史对象是精确 restore 授权：只接受不可变历史请求证明在原提交 parent 已存在、原交付确实删除、当前来源仍缺失，并按同路径/节点/业务字段与原代码测试绑定恢复的 ID。候选再次核相同身份；假来源、错误对象/路径或无该请求的普通新节点复用继续拒绝。
+
+
+分区聚合分析不受旧单体恰一对trace假设限制：partitionCoverage冻结计划摘要、全部区身份和真实changedPaths；partitionEvidence携每区真实完整原件及analysisRef。程序逐原件沿原严格hash/批准/独立会话检查，额外核同input/baseline/composed/readSet/policy及精确trace.inputDigest、唯一完整区/路径覆盖、事实/发现/授权/归属/resolution等并集与全部原生trace一致。缺区、重复区、错原件摘要/输入、假批准或聚合增删授权均拒绝，不制造单体trace或删掉真实extra native证据。旧无partitionEvidence的历史单体规则逐字保持。

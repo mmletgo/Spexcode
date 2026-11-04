@@ -780,8 +780,10 @@ facts 仅放有来源的业务事实，执行环境、token 和本机路径不�
 当前仅支持 Docker Node --test；export 不带宿主 node_modules，不猜 npm script。
 nodeIds 可登记明确意图根与其子树。省略时只纳入真实治理已授权源码/测试的节点；新纯raw需求须先明确 nodeIds。
 status.observation.coverage 展示纳入与未纳入范围，分模块启用不能冒称全项目已同步。
-callTimeoutMs 是可选单次模型调用上限，正整数且不超过 budget.timeoutMs；缺省最多 120000ms，
-同时受操作总期限限制。复杂完整流程可在新操作的可信配置中明确设置更长有限值，不能扩大旧操作预算。
+budget 也可仅设为 { "mode": "unlimited" }，解除总调用、尝试、修复次数和总期限；真实用量仍记录。
+callTimeoutMs 是可选的有限正整数单次模型调用上限；有限预算时不能超过 budget.timeoutMs，
+缺省最多 120000ms。无限总预算不取消单次超时回收、验证 timeout、lease/fence 或独审与交付门槛；
+复杂完整流程可在新操作的可信配置中明确设置更长有限值，不能改写旧操作预算。
 
 启动本项目 spex serve 后执行：
   spex sync settings
@@ -789,17 +791,29 @@ callTimeoutMs 是可选单次模型调用上限，正整数且不超过 budget.t
   spex sync run <node-id> --request-id <一次用户请求的稳定键>
   spex sync status --node <node-id>
   spex sync show <operation-id>
+  spex sync adopt <operation-id>
   spex sync recover <operation-id>
-  spex sync run <node-id> --retry-of <失败operation-id> --request-id <重试稳定键>
+  spex sync run <node-id> --retry-of <失败operation-id> --request-id <重试稳定键> [--model <可用模型ID>]
 
 无需打开 Dashboard。run 返回持久操作，后端继续细化、实现、独立评审、Docker 验证与实际交付。
 受控保存或 --patch-file 的正文差量不先修改/提交原树 Spec；no-op 不派发。同请求键不能改意图。
 executionAvailability 显示 recovery_required 时，可用 recover 精确恢复已有资源及已开始日志，
 不修改原控制、输入或预算，不派发新 attempt、模型、验证，也不开始新的交付。完成后另选 resume 或显式 retry。
+
+无需启动API的单次历史资源清理：
+  spex sync resources recover <operation-id> --input-id <原frozen-input-id>
+当前canonicalRoot/commonDir必须与原来源一致。此入口只结算精确Native/Docker资源，不启动watcher/queue，
+不回放任何journal或创建receipt，不改变原失败、候选与输出摘要；未知停止仍保留资源。
+它不授予物理身份连续性，正常read/resume/adopt仍核完整来源身份；有未决journal时只列出并保留。
+run/verify 的 --model 固定本操作及全部独审模型，默认 gpt-6.1-sol；显式重试省略时继承原模型。普通重复请求不能换模型取得新预算，同 requestId 改模型拒绝；resume/recover 始终沿原选择。模型仍须通过实际 Native/catalog 校验，不自动 fallback。 操作模型采用 sync component v13 writer 语义；回滚旧二进制须先停 writer/结算资源并恢复升级前一致数据库备份，不能让旧 writer 直接读新 generation。
+
 show/status 的 retryEligibility 给出能否显式重试及具体拒绝原因。--retry-of 为可重试的失败或未交付取消建立
 关联的新操作和新预算，继承原正文保存意图及来源；不能同时 --patch-file。普通重复请求不重置预算，
 同重试请求幂等。输入或配置已变时发起当前输入的新请求；未结算资源、GAP或冲突不能用重试绕过。
 workspace_synced 是交付工作树结果，原输入树待落地单独展示。新输入使旧结果过期，恢复只能用当前输入。
+已结算交付可在 Dashboard 点“采纳到原工作树”，或用 sync adopt <operation-id>。
+服务只把干净原树安全快进到真实收据提交，照常执行项目 hooks；未提交改动或分支分叉时保留交付并明确拒绝。
+adoptionEligibility 给出当前资格，采纳后分别检查 sourceSynced 和 canonicalSynced；开发分支采纳不能当主分支完成。
 手动外部代码接入：spex sync run <node-id> --origin code（正文与代码同时改用 combined）。
 系统按最近共同基线分析业务行为，来源类型本身不授权改变业务规则。正常无冲突无需新确认。
 show 的 decisionContext 展示原意、双方行为、规则/路径、反例、具体 finding IDs 与可信 analysisRef。
@@ -826,6 +840,12 @@ JSON 分列 coverage 与本次 affected_scope；未配置范围返回 unsupporte
 结果是同一完整管线的新操作，冲突仍需具体业务处理，不能把已受理当已落地。
 回退程序版本前：spex sync stop-writer。此动作暂停新写入并结算或保留实际journal/资源；
 先检查返回的恢复诊断，再停服务和回退程序。新增数据库表和证据保留，不做破坏性down migration。
+重启仅设备号漂移时，先离线停稳并用正式resources recover结算资源，再显式：
+  spex sync source-continuity <operation-id> --input-id <原input> --revision <原revision> --enabled-digest <原enabled字节SHA> --old-common-dev <旧dev> --old-root-dev <旧dev> --old-git-dev <旧dev>
+登记同时重现原repositoryId/physicalFingerprint并CAS暂停原PhysicalControl；保持旧operation/input/预算，退出后由operator核验再resume。
+同commonDir的新managed worktree只共享logical仓库ID，物理身份仍来自真实新目录；其它旧来源不借此继承权限。
+新证据及旧enabled原件在私有runtime/sync/continuity-evidence按SHA保存，不由普通Git evidence GC清理。
+v20升级先online备份，旧writer拒绝；回滚停新writer后配套恢复DB备份、旧enabled及其证据。文件与DB非跨介质原子，失败可能保持pause，不自动rollback。
 
 see also: spex help sync`
 

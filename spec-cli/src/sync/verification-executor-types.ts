@@ -11,6 +11,7 @@ export interface VerificationPolicy {
   cpus: number
   pidsLimit: number
   scratchBytes: number
+  scratchExecutable?: boolean
   logBytes: number
 }
 export interface VerificationRequest {

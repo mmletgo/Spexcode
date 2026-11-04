@@ -2,10 +2,12 @@ import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
+import { createRequire, syncBuiltinESMExports } from 'node:module'
 import { join } from 'node:path'
 import test from 'node:test'
 import { openProtocol } from '@spexcode/session-protocol'
 import { parseContract } from '@spexcode/spec-core/contracts'
+import { frozenBodyText, readFrozenBehaviorContext } from '../../test/frozen-behavior-context.js'
 import { analyzeCodeBehavior, authoredContractChanges, selectedAuthoredContractChanges } from './code-behavior.js'
 import { composeInputSnapshots, readCompositionEvidence } from './composition.js'
 import { buildSyncApplicationPlan, deriveSyncBaselineResources } from './planning.js'
@@ -21,6 +23,50 @@ import type { CodeBehaviorAnalysis } from './writeback-types.js'
 const path = '.spec/export/export-contract/spec.md', a = 'RULE-EXPORT-05'
 const git = (root: string, ...args: string[]): string => execFileSync('/usr/bin/git', ['-C', root, ...args], { encoding: 'utf8', stdio: 'pipe', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }).trim()
 const texts = (input: InputSnapshot): Map<string, string> => new Map(verifySnapshot(input).map(entry => [entry.path, readObject(input.source.commonDir, entry.oid).toString('utf8')]))
+
+test('组合只解析业务Spec，批读完整正文并保留插件原对象', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'sync-business-objects-'))
+  const protocol = openProtocol(join(root, 'state.sqlite'))
+  t.after(() => { protocol.close(); rmSync(root, { recursive: true, force: true }) })
+  await migrateSyncStore(protocol, { backupPath: join(root, 'backup.sqlite') })
+  const source = join(root, 'source'); mkdirSync(source)
+  const specs = Array.from({ length: 12 }, (_, index) => ({
+    path: `.spec/module-${index}/spec.md`, id: `REQ-BATCH-${index}`,
+    text: `---\ncontract-schema: sync-v1\n---\n# 模块${index}\n\n## raw source\n\n原始需求${index}\n\n## expanded spec\n\n### REQ\n\n| id | goal | source | constraints | success | depends-on |\n| --- | --- | --- | --- | --- | --- |\n| REQ-BATCH-${index} | 完整业务${index} | user:raw | 保留原文 | 成功${index} | - |\n`,
+  }))
+  const pluginPath = '.spec/project/.plugins/binary/spec.md', plugin = Buffer.from([0xff, 0, 0xfe])
+  for (const spec of specs) { mkdirSync(join(source, spec.path, '..'), { recursive: true }); writeFileSync(join(source, spec.path), spec.text) }
+  mkdirSync(join(source, pluginPath, '..'), { recursive: true }); writeFileSync(join(source, pluginPath), plugin)
+  git(source, 'init', '-q', '-b', 'main'); git(source, 'config', 'user.name', '组合批读'); git(source, 'config', 'user.email', 'test@example.invalid')
+  git(source, 'add', '.'); git(source, 'commit', '-qm', '真实业务及工具实例')
+  const input = await captureInputSnapshot(source), originalIndex = readFileSync(join(source, '.git/index'))
+  const entries = verifySnapshot(input), store = new SyncStore(protocol, { readBlob: ref => readEvidence(input.source.commonDir, ref) })
+  const selected = store.readBaselineSelection(input.source, specs.flatMap(spec => [{ kind: 'path' as const, path: spec.path }, { kind: 'contract' as const, id: spec.id }]))
+  assert.ok('selection' in selected)
+  const cp = createRequire(import.meta.url)('node:child_process') as typeof import('node:child_process'), original = cp.execFileSync, calls: string[][] = []
+  cp.execFileSync = ((file: string, args: string[], options: unknown) => { if (file === 'git') calls.push(args); return original(file, args, options as never) }) as typeof execFileSync
+  syncBuiltinESMExports()
+  try {
+    const composed = composeInputSnapshots(input, selected.selection).composed!
+    const evidence = readCompositionEvidence(input, composed, selected.selection)
+    for (const spec of specs) {
+      const intent = evidence.intents.find(intent => intent.resource.id === spec.id)!
+      assert.equal(intent.source?.path, spec.path); assert.equal(intent.source?.rawSource, `原始需求${specs.indexOf(spec)}`)
+      assert.deepEqual(intent.source?.entry, entries.find(entry => entry.path === spec.path))
+      assert.equal(intent.source?.item.id, spec.id)
+    }
+    assert.deepEqual(readTree(input.source.commonDir, composed.tree), entries)
+    assert.deepEqual(readObject(input.source.commonDir, entries.find(entry => entry.path === pluginPath)!.oid), plugin)
+  } finally { cp.execFileSync = original; syncBuiltinESMExports() }
+  const businessOids = new Set(entries.filter(entry => specs.some(spec => spec.path === entry.path)).map(entry => entry.oid))
+  assert.equal(calls.filter(args => args.includes('cat-file') && args.includes('blob') && args.some(arg => businessOids.has(arg))).length, 0)
+  assert.ok(calls.some(args => args.includes('--batch')))
+  assert.deepEqual(readFileSync(join(source, '.git/index')), originalIndex)
+  writeFileSync(join(source, specs[0].path), plugin)
+  const invalid = await captureInputSnapshot(source), nextSelection = store.readBaselineSelection(invalid.source, selected.selection.bindings.map(binding => binding.resource))
+  assert.ok('selection' in nextSelection)
+  assert.throws(() => composeInputSnapshots(invalid, nextSelection.selection), /non UTF-8 contract/)
+})
 
 /** Git快照、提交、mode与store事务是真实的；验证四层是显式fake，不能作为native产品通过证据。 */
 async function fixture(t: test.TestContext, pendingInB = false, legacyDirectoryCoverage = false, codeOnly = false) {
@@ -79,17 +125,29 @@ function fakeBehavior(resolution?: string, assertInput?: (frozen: Record<string,
   return async request => {
     let output: unknown
     if (request.purpose === 'code_behavior_analyze') {
-      const frozen = JSON.parse(request.prompt.split('冻结三方输入:\n')[1]) as { changedPaths: string[] }
+      const frozen = readFrozenBehaviorContext(request) as { changedPaths: string[] }
       assertInput?.(frozen)
       output = { changes: frozen.changedPaths.map(path => ({ kind: 'allowed_change', paths: [path], affectedIds: [a], ruleIds: [a], originalIntent: '保留作者A与已交付B', previousBehavior: 'A1', sourceBehavior: 'A2', deliveryBehavior: 'A1+B1', evidence: '真实Git对象及逐ID残差', counterexample: '不能把A2隐藏为A1' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: resolution ? [{ path: resolutionPath, content: resolution, mode: resolutionMode }] : [] }
     } else {
       const reviewed = JSON.parse(request.prompt.split('待审分析:\n')[1]) as { analysisDigest: string; analysis: CodeBehaviorAnalysis }
-      const frozen = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as { changedPaths: string[] }
+      const frozen = readFrozenBehaviorContext(request) as { changedPaths: string[] }
       output = { inputDigest: request.inputDigest, analysisDigest: reviewed.analysisDigest, verdict: 'accept', checkedPaths: frozen.changedPaths, checkedChangeIds: reviewed.analysis.changes.map(change => change.id), findings: [] }
     }
     return { sessionId: `fake-session-${request.purpose}`, threadId: `fake-thread-${request.purpose}`, turnId: 'fake-turn', output, resultDigest: contentHash(JSON.stringify(output)) }
   }
 }
+
+test('混合大小写路径的组合证据可从真实 Git 树重读', async t => {
+  const f = await fixture(t), paths = ['src/Z.mjs', 'src/b.mjs']
+  for (const file of paths) writeFileSync(join(f.root, file), `export const name = ${JSON.stringify(file)}\n`)
+  git(f.root, 'add', ...paths); git(f.root, 'commit', '-m', 'mixed-case paths')
+  const input = await captureInputSnapshot(f.root), selection = f.selection()
+  const composed = composeInputSnapshots(input, selection, { retainConflicts: true }).composed!
+  const evidence = readCompositionEvidence(input, composed, selection)
+  assert.equal(evidence.sourceInputId, input.id)
+  const entries = readTree(input.source.commonDir, composed.tree)
+  for (const file of paths) assert.equal(readObject(input.source.commonDir, entries.find(entry => entry.path === file)!.oid).toString(), `export const name = ${JSON.stringify(file)}\n`)
+})
 
 test('真实store partial heads：A作者残差保留B交付，不以不同pairID制造业务冲突', async t => {
   const f = await fixture(t)
@@ -264,6 +322,41 @@ test('code-only A2夹在B.source但未消费：实际行为分析必须读取并
   if (evidenceRoot) writeFileSync(join(evidenceRoot, 'code-only-after.json'), JSON.stringify({ scenario: '真实code-only A2尚未消费', limitation: '真实Git/store；验证及行为runner fake', input, selection, artifact, evidence, analysis, files: { source: f.sourceCode, newSource: f.codeA2, delivered: f.addCodeB(f.codeA1) } }, null, 2))
 })
 
+test('broad作者raw baseline与intent artifact对象在共享正文后仍逐字逐对象保留', async t => {
+  const f = await fixture(t, true), authorRaw = f.nextA.replace('## raw source', '## raw source\n\n作者补充一条宏观原意。')
+  writeFileSync(join(f.root, path), authorRaw)
+  const input = await captureInputSnapshot(f.root), selection = f.selection(), composed = composeInputSnapshots(input, selection, { retainConflicts: true }).composed!, evidence = readCompositionEvidence(input, composed, selection)
+  const broadAuthorIntent = evidence.intents.find(item => item.changed && item.broadChange && (item.source?.path ?? item.before?.path) === path)
+  assert.ok(broadAuthorIntent?.before)
+  const expectedAuthorBaseline = readObject(input.source.commonDir, broadAuthorIntent.before.entry.oid).toString('utf8')
+  const expectedArtifacts = new Map(evidence.artifacts.flatMap(item => [item.before, item.delivery, item.source, item.authorBase].filter((entry): entry is NonNullable<typeof entry> => !!entry))
+    .filter(entry => f.plan.readPaths.some(readPath => entry.path === readPath || entry.path.startsWith(`${readPath}/`)))
+    .map(entry => [`${entry.path}:${entry.mode}:${entry.oid}`, entry] as const))
+  const merged = f.addB(authorRaw), behavior = fakeBehavior(merged)
+  const analysis = await analyzeCodeBehavior({ snapshot: input, baseline: null, baselineSelection: selection, composed, readSetDigest: 'dedup-author-read', policyDigest: 'dedup-author-policy', requestKey: 'dedup-author-baseline', timeoutMs: 10000, plan: f.plan }, async request => {
+    const wire = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as { textEncoding: string; bodyIndex: Record<string, { required: boolean }>; intentArtifactFiles: { path: string; mode: string; oid: string; digest: string; bodyRef: string }[] }
+    assert.equal(wire.textEncoding, 'sha256-body-entry-v3')
+    const frozen = readFrozenBehaviorContext(request) as { authorBaseline: [string, string][]; oldSource: [string, string][]; newSource: [string, string][]; intentArtifactFiles: { path: string; mode: string; oid: string; digest: string; text: string }[] }
+    assert.equal(new Map(frozen.authorBaseline).get(path), expectedAuthorBaseline)
+    assert.equal(new Map(frozen.newSource).get(path), authorRaw)
+    const expectedMetadata = [...expectedArtifacts.values()].map(({ path, mode, oid, digest }) => ({ path, mode, oid, digest })).sort((left, right) => `${left.path}:${left.mode}:${left.oid}`.localeCompare(`${right.path}:${right.mode}:${right.oid}`))
+    const actualMetadata = frozen.intentArtifactFiles.map(({ text: _text, ...entry }) => entry).sort((left, right) => `${left.path}:${left.mode}:${left.oid}`.localeCompare(`${right.path}:${right.mode}:${right.oid}`))
+    assert.deepEqual(actualMetadata, expectedMetadata)
+    assert.equal(wire.intentArtifactFiles.length, frozen.intentArtifactFiles.length)
+    for (const artifact of wire.intentArtifactFiles) {
+      const restored = frozen.intentArtifactFiles.find(item => item.path === artifact.path && item.mode === artifact.mode && item.oid === artifact.oid)!
+      const bytes = readObject(input.source.commonDir, artifact.oid)
+      assert.equal(artifact.bodyRef, contentHash(bytes))
+      assert.equal(frozenBodyText(request, artifact.bodyRef), restored.text)
+      assert.equal(wire.bodyIndex[artifact.bodyRef].required, true)
+      assert.equal(restored.text, bytes.toString('utf8'))
+      assert.equal(restored.digest, contentHash(bytes))
+    }
+    return behavior(request)
+  })
+  assert.equal(analysis.reviewPassed, true)
+})
+
 test('code-only完整整合不能删除B1或弱化未选权限，即使fake独审accept', async t => {
   const f = await fixture(t, true, false, true), input = await captureInputSnapshot(f.root), selection = f.selection(), composed = composeInputSnapshots(input, selection, { retainConflicts: true }).composed!
   for (const wrong of [f.codeA2, f.addCodeB(f.codeA2).replace("throw new Error('forbidden');", 'return null;')]) {
@@ -287,6 +380,42 @@ test('code-only真实ff采纳完整byte head后无代码回声，再A3仍进入�
   const next = await captureInputSnapshot(f.root), updated = composeInputSnapshots(next, selection, { retainConflicts: true }).composed!
   const analysis = await analyzeCodeBehavior({ snapshot: next, baseline: null, baselineSelection: selection, composed: updated, readSetDigest: 'test-read-A3', policyDigest: 'test-policy-code', requestKey: 'code-A3', timeoutMs: 10000, plan: f.plan }, fakeBehavior(codeA3, frozen => { assert.deepEqual(frozen.requiredChangedPaths, [f.codePath]) }, f.codePath))
   assert.match(analysis.resolutions[0].content!, /resultVersion = 'A3'/); assert.match(analysis.resolutions[0].content!, /deliveryPolicy = 'B1'/)
+})
+
+test('旧byte head已采纳且新intent已消费源码：只写Spec的真实journal不制造重复源码残差', async t => {
+  const f = await fixture(t, false, false, true)
+  git(f.root, 'merge', '--ff-only', f.deliveryB1.headCommit)
+  const sourceSpec = readFileSync(join(f.root, path), 'utf8'), consumedCode = `${readFileSync(join(f.root, f.codePath), 'utf8')}\n// author change consumed by latest intent\n`
+  writeFileSync(join(f.root, f.codePath), consumedCode)
+  const input = await captureInputSnapshot(f.root)
+  writeFileSync(join(f.deliveryRoot, f.codePath), consumedCode)
+  writeFileSync(join(f.deliveryRoot, path), `${sourceSpec}\n本轮已读取作者源码，原业务规则保持。\n`)
+  git(f.deliveryRoot, 'add', '.'); git(f.deliveryRoot, 'commit', '-m', 'consume code with spec-only journal')
+  const delivery = await captureInputSnapshot(f.deliveryRoot), consumed = await f.settle(input, delivery, 'settle-consumed-code', f.allIds, [path])
+  const operation = f.store.findOperationByIngressKey('settle-consumed-code')!
+  assert.deepEqual(f.store.listJournals(operation.id)[0].plan.files.map(file => file.path), [path])
+  const selection = f.selection(), byte = selection.bindings.find(binding => binding.resource.kind === 'path' && binding.resource.path === f.codePath)!
+  assert.ok('bytePair' in byte); assert.equal(byte.bytePair!.id, f.pairB.id)
+  const inspect = async (selected = selection) => {
+    const snapshot = await captureInputSnapshot(f.root), composed = composeInputSnapshots(snapshot, selected, { retainConflicts: true }).composed!
+    return readCompositionEvidence(snapshot, composed, selected)
+  }
+  const evidence = await inspect()
+  assert.ok(evidence.paths.find(item => item.path === f.codePath)!.base)
+  assert.ok(evidence.intents.every(item => !item.changed && item.pairId === consumed.id))
+  assert.ok(evidence.artifacts.filter(item => item.path === f.codePath).every(item => !item.changed), '较新intent已消费的源码不能再以旧采纳byte head作作者基准')
+  assert.deepEqual(evidence.residualPaths, [])
+  writeFileSync(join(f.root, f.codePath), `${consumedCode}// new unconsumed source\n`)
+  assert.ok((await inspect()).residualPaths.includes(f.codePath), '后续新源码必须保留')
+  writeFileSync(join(f.root, f.codePath), consumedCode)
+  const { digest: _digest, ...body } = selection
+  const partial = { ...body, bindings: body.bindings.map(binding => binding.resource.kind === 'contract' && binding.resource.id === a ? { ...binding, intentPair: f.pairA } : binding) }
+  const partialSelection = { ...partial, digest: contentHash(JSON.stringify(partial, (_key, value: unknown) => value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value)) }
+  const unconsumed = await inspect(partialSelection)
+  assert.equal(unconsumed.artifacts.find(item => item.path === f.codePath && item.resource.id === a)!.changed, true, '未消费owner仍须独立分析')
+  assert.ok(unconsumed.residualPaths.includes(f.codePath))
+  writeFileSync(join(f.root, path), sourceSpec.replace('用户可以提交符合筛选条件的数据导出', '用户可以提交符合筛选条件的数据导出并查看新的确认提醒'))
+  assert.ok((await inspect()).residualPaths.includes(path), '新原始意图不得按同输入粗略跳过')
 })
 
 test('readonly context使用真实dirty config/oracle对象，保持mode/删除且不升写范围', async t => {
