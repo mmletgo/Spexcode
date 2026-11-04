@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
+import fs from 'node:fs'
 import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -8,7 +10,7 @@ import { fileURLToPath } from 'node:url'
 import { applyComponentMigrations, openProtocol, type SqlParam } from '@spexcode/session-protocol'
 import { CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
 import { putBlob } from '@spexcode/spec-core'
-import { authenticateNativeRejectedFinal, syncCheckpointArtifacts } from './checkpoint-evidence.js'
+import { authenticateNativeRejectedFinal, readSyncCheckpoints, syncCheckpointArtifacts } from './checkpoint-evidence.js'
 import { outputErrors } from './elaboration-schema.js'
 import type { ContractCell, GeneratedElaboration, GeneratedTables } from './elaboration-markdown.js'
 import { sameContractBusinessMeaning } from './contract-evolution.js'
@@ -23,6 +25,7 @@ import { SyncApplication } from './application.js'
 import * as continuationCoordinator from './coordinator.js'
 import { acceptedCandidateReviewSource, isSyncInputCurrent, prepareSyncAdmission, readCurrentSyncAnalysis, readonlySpecRepairStalled, recoverSyncOperationResources, runSyncOperation, syncPlanDigest } from './coordinator.js'
 import type { SyncCoordinatorOptions, SyncCoordinatorPlan } from './coordinator-types.js'
+import type { SyncAttempt, SyncOperation } from './operation-types.js'
 import { migrateSyncStore, SYNC_COMPONENT, SYNC_MIGRATIONS, syncCoordinatorAddress } from './migrations.js'
 import { dockerVerificationDriver, verificationExportDigest } from './verification-executor.js'
 import type { VerificationCheckpoint, VerificationCommandResult, VerificationDriver, VerificationRequest } from './verification-executor-types.js'
@@ -57,6 +60,132 @@ function rows(source: string, path = contractPath): GeneratedElaboration {
   })))])) as GeneratedTables
   return { version: 'elaboration-rows-v2', changes: [{ nodeId: 'export-contract', path, title: String(parseFrontmatter(source).fm.title), description: '', code: contract.code, related: contract.related, prose: parseParts(source)!.expandedSpec.split(/^### /m)[0], tables, removeIds: [] }], applicability: ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: true, basis: '固定演示夹具的显式业务政策和原始范围', affectedIds: ['REQ-EXPORT-01'] })) }
 }
+
+test('历史checkpoint的相同SHA只解码一次，每次仍核CAS且返回独立对象', t => {
+  const commonDir = mkdtempSync(join(tmpdir(), 'checkpoint-decode-'))
+  t.after(() => rmSync(commonDir, { recursive: true, force: true }))
+  const store = {} as SyncStore, operation = { id: 'history-operation', input: { id: 'input', source: { commonDir } }, policyDigest: 'policy' } as SyncOperation
+  const attempts = Array.from({ length: 14 }, (_, index) => {
+    const attempt = { id: `history-${index}`, checkpointRefs: [] } as unknown as SyncAttempt
+    for (let owner = 0; owner < (index === 13 ? 63 : 64); owner++) {
+      const value = { checkpointHistoryFixture: true, index, owner, material: Array.from({ length: 64 }, (_, row) => ({ row, text: '完整历史材料' })) }
+      const resultRef = writeEvidence(commonDir, value)
+      attempt.checkpointRefs.push({ ...writeEvidence(commonDir, { version: 'sync-stage-v1', operationId: operation.id, attemptId: attempt.id, inputId: operation.input.id, policyDigest: operation.policyDigest, stage: `history:${owner}`, resultRef }), artifacts: syncCheckpointArtifacts(value, resultRef) })
+    }
+    return attempt
+  })
+  const hashes = new Set(attempts.flatMap(attempt => attempt.checkpointRefs.flatMap(ref => [ref.sha256, ...ref.artifacts!.map(artifact => artifact.ref.sha256)])))
+  const texts = new Set([...hashes].map(sha256 => readEvidence(commonDir, { sha256 }).toString('utf8')))
+  let decodes = 0, casReads = 0
+  const read = fs.readFileSync
+  t.mock.method(fs, 'readFileSync', (...args: Parameters<typeof fs.readFileSync>) => { if (String(args[0]).startsWith(join(commonDir, 'spexcode/evidence') + '/')) casReads++; return read(...args) })
+  syncBuiltinESMExports()
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports() })
+  const parse = JSON.parse
+  t.mock.method(JSON, 'parse', (text: string, reviver?: (key: string, value: unknown) => unknown) => { if (texts.has(text)) decodes++; return parse(text, reviver) })
+  for (const attempt of attempts) readSyncCheckpoints(store, operation, attempt)
+  const firstPass = decodes, firstPassReads = casReads
+  for (const attempt of attempts) readSyncCheckpoints(store, operation, attempt)
+  t.diagnostic(JSON.stringify({ attempts: attempts.length, casObjects: hashes.size, firstPassDecodes: firstPass, repeatedDecodes: decodes - firstPass, firstPassReads, repeatedReads: casReads - firstPassReads }))
+  assert.equal(firstPass, hashes.size, '内部MIME判断及root/artifact/inspect不能重复JSON解码')
+  assert.equal(decodes, firstPass, '历史重复读取只复用纯解码，不再次解析同SHA')
+  assert.equal(firstPassReads, hashes.size, '一次读取快照内root/artifact/inspect共用已经校验的字节')
+  assert.equal(casReads - firstPassReads, hashes.size, '下一次扫描仍重读每份当前CAS')
+
+  const attempt = attempts[0], resultRef = attempt.checkpointRefs[0].artifacts![0].ref
+  const first = readSyncCheckpoints(store, operation, attempt), original = first.json.find(entry => entry.ref.sha256 === resultRef.sha256)!
+  const material = original.value as { material: { text: string }[] }
+  material.material[0].text = '调用者污染'
+  assert.equal((readSyncCheckpoints(store, operation, attempt).json.find(entry => entry.ref.sha256 === resultRef.sha256)!.value as { material: { text: string }[] }).material[0].text, '完整历史材料')
+  const next = { ...attempt, checkpointRefs: [] }
+  assert.deepEqual(readSyncCheckpoints(store, operation, next).json, [], '当前refs移除后不得沿旧attempt快照暴露材料')
+  const falseRole = { ...writeEvidence(commonDir, { diagnostic: '新role不能借缓存取得认证' }), artifacts: [{ kind: 'untrusted_final' as const, ref: resultRef }] }
+  assert.throws(() => readSyncCheckpoints(store, operation, { ...attempt, checkpointRefs: [...attempt.checkpointRefs, falseRole] }), { code: 'checkpoint_artifact_binding' })
+  writeFileSync(join(commonDir, 'spexcode/evidence', resultRef.sha256), '{"tampered":true}')
+  assert.throws(() => readSyncCheckpoints(store, operation, attempt), /证据摘要不匹配/, '命中解码缓存仍逐次核CAS摘要')
+})
+
+test('内部CAS读取不解码JSON，缺失与不合法SHA继续显式拒绝', t => {
+  const commonDir = mkdtempSync(join(tmpdir(), 'checkpoint-bytes-'))
+  t.after(() => rmSync(commonDir, { recursive: true, force: true }))
+  const value = { exact: '原始UTF8字节' }, ref = writeEvidence(commonDir, value), parse = JSON.parse
+  let decodes = 0
+  t.mock.method(JSON, 'parse', (text: string) => { decodes++; return parse(text) })
+  assert.equal(readEvidence(commonDir, ref).toString('utf8'), JSON.stringify(value))
+  assert.equal(decodes, 0, '内部CAS读取不需要MIME解析')
+  assert.throws(() => readEvidence(commonDir, { sha256: 'f'.repeat(64) }), /缺失证据/)
+  assert.throws(() => readEvidence(commonDir, { sha256: '../outside' }), /缺失证据/)
+})
+
+test('14attempt/1790CAS历史扫描交还控制，同一30秒fence到达首次受控dispatch', async t => {
+  const extra: Record<string, string> = {}, targets = [{ nodeId: 'export-contract', path: contractPath }], sourcePaths = ['src/export.js']
+  for (let index = 1; index < 101; index++) {
+    const id = `owner-${index}`, path = `.spec/project/module-${index}/${id}/spec.md`, sourcePath = `src/owner-${index}.js`
+    extra[path] = `---\ntitle: 历史扫描owner${index}\ncontract-schema: sync-v1\ncode:\n  - ${sourcePath}\n---\n\n## raw source\n\n保留owner${index}的只读实现。\n\n## expanded spec\n\n### REQ\n\n| id | goal | source | constraints | success | depends-on |\n| --- | --- | --- | --- | --- | --- |\n| REQ-OWNER${index}-01 | 保留owner${index} | user:raw | 原实现只读 | 实现不变 | - |\n`
+    extra[sourcePath] = `export const owner${index} = true\n`
+    extra[`tests/owner-${index}.test.mjs`] = 'export const readonlyOracle = true\n'
+    targets.push({ nodeId: id, path }); sourcePaths.push(sourcePath)
+  }
+  const f = await fixture(t, { maxAttempts: 15, maxCalls: 1000, maxRepairs: 14, timeoutMs: 300_000 }, false, original, 'project', original, { version: 'sync-coordinator-v2', direction: 'code_to_spec', agentWorkflow: 'native-worktree-v1', targets, sourcePaths, commitTrigger: { before: null, paths: [] }, partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 } }, undefined, 'code', 'claude:default', false, extra)
+  const composed = composeAuthoredInput(f.input, undefined, { retainConflicts: true }).composed!
+  const historyBytes = new Map<string, number>()
+  for (let index = 0; index < 14; index++) {
+    const claimed = f.store.claimAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: f.options.leaseMs!, ...(index === 0 ? { expectedMessageId: f.operation.dispatchMessageId } : {}) })
+    f.store.bindComposedInput(claimed.fence, composed)
+    for (let owner = 0; owner < (index === 13 ? 63 : 64); owner++) {
+      const value = { checkpointHistoryFixture: true, index, owner, material: Array.from({ length: 64 }, (_, row) => ({ row, text: '完整历史材料' })) }, resultRef = writeEvidence(f.input.source.commonDir, value)
+      const wrapperRef = writeEvidence(f.input.source.commonDir, { version: 'sync-stage-v1', operationId: f.operation.id, attemptId: claimed.attempt.id, inputId: f.input.id, policyDigest: f.operation.policyDigest, stage: `history:${owner}`, resultRef })
+      f.store.checkpoint(claimed.fence, { ...wrapperRef, artifacts: syncCheckpointArtifacts(value, resultRef) })
+      for (const ref of [wrapperRef, resultRef]) historyBytes.set(ref.sha256, readEvidence(f.input.source.commonDir, ref).length)
+    }
+    f.store.recordFailure(claimed.fence, { code: 'behavior_analysis_invalid', message: `未批准的历史失败${index}`, kind: 'repairable', evidenceRefs: [] })
+  }
+  const texts = new Set([...historyBytes.keys()].map(sha256 => readEvidence(f.input.source.commonDir, { sha256 }).toString('utf8')))
+  const read = fs.readFileSync, parse = JSON.parse, clone = globalThis.structuredClone
+  let historicalReads = 0, historicalDecodes = 0, checkpointClones = 0, clonedHistoryBytes = 0
+  fs.readFileSync = ((...args: Parameters<typeof fs.readFileSync>) => { if (historyBytes.has(String(args[0]).slice(-64))) historicalReads++; return read(...args) }) as typeof fs.readFileSync
+  JSON.parse = (text: string, reviver?: (key: string, value: unknown) => unknown) => { if (texts.has(text)) historicalDecodes++; return parse(text, reviver) }
+  globalThis.structuredClone = ((value: unknown, options?: Parameters<typeof clone>[1]): unknown => {
+    const checkpoint = value as { json?: { ref: { sha256: string } }[]; raw?: unknown }
+    if (Array.isArray(checkpoint?.json) && checkpoint.raw instanceof Map) { checkpointClones++; for (const entry of checkpoint.json) clonedHistoryBytes += historyBytes.get(entry.ref.sha256) ?? 0 }
+    return clone(value, options)
+  }) as typeof structuredClone
+  syncBuiltinESMExports()
+  t.after(() => { fs.readFileSync = read; JSON.parse = parse; globalThis.structuredClone = clone; syncBuiltinESMExports() })
+  const checkpoint = f.store.checkpoint.bind(f.store), renew = f.store.renewLease.bind(f.store)
+  let inScan = false, controlOpportunity = false, controlBeforeProtocol = false, partitionCount = 0, dispatches = 0
+  const renewals: { at: number; attemptId: string; leaseToken: string }[] = []
+  f.store.renewLease = (fence, leaseMs) => { if (inScan) renewals.push({ at: Date.now(), attemptId: fence.attemptId, leaseToken: fence.leaseToken }); return renew(fence, leaseMs) }
+  f.store.checkpoint = (fence, ref) => {
+    const wrapper = JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()) as { stage?: string; resultRef: { sha256: string } }
+    if (wrapper.stage === 'partition-budget') {
+      partitionCount = (JSON.parse(readEvidence(f.input.source.commonDir, wrapper.resultRef).toString()) as { partitionCount: number }).partitionCount
+      inScan = true; setImmediate(() => { controlOpportunity = true })
+    }
+    if (wrapper.stage === 'behavior-draft-protocol') { controlBeforeProtocol = controlOpportunity; inScan = false }
+    return checkpoint(fence, ref)
+  }
+  f.options.runner = async request => {
+    dispatches++
+    const current = f.store.readAttempt(f.store.readOperation(f.operation.id).currentAttemptId!)
+    assert.equal(current.number, 15); assert.equal(current.dispatchPlans.length, 1)
+    assert.equal(current.dispatchPlans[0].key, request.requestKey)
+    assert.ok(current.expiresAtMs > Date.now(), '首次dispatch必须仍有原有效fence')
+    assert.ok(renewals.every(renewal => renewal.attemptId === current.id && renewal.leaseToken === current.leaseToken), '扫描不另建attempt或lease')
+    throw Object.assign(new Error('受控runner只证明首次真实reserveDispatch，不调用模型'), { code: 'unsupported' })
+  }
+  const started = performance.now(), result = await runSyncOperation(f.store, f.operation.id, f.options)
+  t.diagnostic(JSON.stringify({ historyAttempts: 14, historyCas: historyBytes.size, partitionCount, leaseMs: f.options.leaseMs, heartbeatMs: f.options.heartbeatMs, controlBeforeProtocol, dispatches, scanRenewals: renewals.length, maximumRenewalGapMs: Math.max(0, ...renewals.slice(1).map((item, index) => item.at - renewals[index].at)), historicalReads, historicalDecodes, checkpointClones, clonedHistoryBytes, coordinatorMs: performance.now() - started, status: result.status, failure: result.failure }))
+  assert.equal(historyBytes.size, 1790); assert.equal(partitionCount, 101)
+  assert.equal(controlBeforeProtocol, true, 'owner×history及诊断扫描必须在下一阶段前让事件循环处理控制')
+  assert.equal(historicalDecodes, historyBytes.size, '全历史协调扫描只解码每份真实CAS一次')
+  assert.equal(dispatches, 1); assert.equal(result.status, 'unsupported')
+  assert.equal(f.store.readOperation(f.operation.id).callsUsed, 1)
+  assert.equal(f.store.listAttempts(f.operation.id).length, 15)
+  assert.equal(f.store.listJournals(f.operation.id).length, 0)
+  assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
+})
 
 test('P1失败summary的精确stopped Git稿跨attempt仍只作材料续改，不要求成功generation追踪', async t => {
   const f = await fixture(t, { maxAttempts: 2, maxCalls: 4, maxRepairs: 1, timeoutMs: 120000 }, false, original, 'project', original, { agentWorkflow: 'native-worktree-v1' }, undefined, 'spec', 'claude:default')
@@ -2628,7 +2757,18 @@ for (const body of ['syntax', 'schema', 'stage-shape'] as const) for (const layo
     const resultRef = writeEvidence(f.input.source.commonDir, value)
     checkpoint(fence, { ...writeEvidence(f.input.source.commonDir, { ...wrapper, stage: 'repair-input', resultRef }), artifacts: syncCheckpointArtifacts(value, resultRef) })
   }
-  if (layout === 'bad-record') { const record = [...records.values()][0]; record.structuredExecution!.rejectedOutput = { ...record.structuredExecution!.rejectedOutput!, sha256: 'e'.repeat(64) }; persistRecord(record) }
+  if (layout === 'bad-record') {
+    assert.doesNotThrow(() => readCurrentSyncAnalysis(f.store, operation), '同一store先完整认证并命中纯JSON缓存')
+    const record = [...records.values()][0], execution = structuredClone(record.structuredExecution!), resource = f.store.findResource(attempt.id, attempt.dispatchPlans[0].key)!
+    record.structuredExecution = { ...execution, state: 'cancelled', cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: false, acknowledged: false, nativeStatus: 'stopped' } }; persistRecord(record)
+    assert.throws(() => readCurrentSyncAnalysis(f.store, operation), { code: 'checkpoint_artifact_binding' }, '缓存不能沿用已失效的canonical Native停止证明')
+    record.structuredExecution = execution; persistRecord(record)
+    f.protocol.withTransaction(tx => tx.exec('UPDATE sync_resources SET record_json=? WHERE id=?', JSON.stringify({ ...resource, checkpoints: [] }), resource.id))
+    assert.throws(() => readCurrentSyncAnalysis(f.store, operation), { code: 'checkpoint_artifact_binding' }, '缓存不能补签当前resource缺失的原failed观察')
+    f.protocol.withTransaction(tx => tx.exec('UPDATE sync_resources SET record_json=? WHERE id=?', JSON.stringify(resource), resource.id))
+    assert.doesNotThrow(() => readCurrentSyncAnalysis(f.store, operation), '恢复精确原record/resource后仍沿原refs重新认证')
+    record.structuredExecution!.rejectedOutput = { ...record.structuredExecution!.rejectedOutput!, sha256: 'e'.repeat(64) }; persistRecord(record)
+  }
   if (['unknown-json', 'false-role'].includes(layout)) {
     const unknown = { sha256: putBlob(Buffer.from('{"version":"sync-stage-v1","stage":'), join(f.input.source.commonDir, 'spexcode/evidence')) }
     checkpoint(fence, layout === 'unknown-json' ? unknown : { ...writeEvidence(f.input.source.commonDir, { diagnostic: 'role alone grants no permission' }), artifacts: [{ kind: 'untrusted_final', ref: unknown }] })

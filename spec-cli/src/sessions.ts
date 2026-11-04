@@ -1985,8 +1985,7 @@ type SessionCreateRequestOptions = {
   timeoutMs?: number
   onPublished?: (session: Session) => void | Promise<void>
 }
-export type SessionCreateTermination = {
-  version: 1
+type SessionCreateTerminationBase = {
   sessionId: string
   requestDigest: string
   payloadHash: string
@@ -1994,8 +1993,15 @@ export type SessionCreateTermination = {
   phase: SessionCreatePhase
   nativeStopped: true
   nativeStatus: 'notStarted'
-  cleanupComplete: true
 }
+export type SessionCreateRetainedCandidate = {
+  root: string; path: string; branch: string; forkCommit: string
+  commonDir: string; gitDir: string; physicalIdentity: string; registrationDigest: string; preparedReceiptDigest: string
+}
+export type SessionCreateTermination = SessionCreateTerminationBase & (
+  | { version: 1; cleanupComplete: true }
+  | { version: 2; code: 'session_create_cancelled'; phase: 'cleanup'; disposition: 'preserved'; cleanupComplete: false; retained: SessionCreateRetainedCandidate }
+)
 const sessionCreateTerminationPath = (id: string): string => join(runtimeRoot(), '.session-create-terminations', `${id}.json`)
 export function readSessionCreateTermination(requestKey: string): SessionCreateTermination | null {
   const key = normalizeCreateKey(requestKey)
@@ -2007,11 +2013,42 @@ function readSessionCreateTerminationById(id: string, requestDigest: string): Se
   try { bytes = readFileSync(path, 'utf8') }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error }
   const value = JSON.parse(bytes) as Partial<SessionCreateTermination>
-  if (value.version !== 1 || value.sessionId !== id || value.requestDigest !== requestDigest || !/^[a-f0-9]{64}$/.test(value.payloadHash ?? '')
+  const dispositionValid = value.version === 1 && value.cleanupComplete === true && !('disposition' in value) && !('retained' in value)
+    || value.version === 2 && value.disposition === 'preserved' && value.cleanupComplete === false && value.code === 'session_create_cancelled' && value.phase === 'cleanup' && !!value.retained
+  if (!dispositionValid || value.sessionId !== id || value.requestDigest !== requestDigest || !/^[a-f0-9]{64}$/.test(value.payloadHash ?? '')
     || !['session_create_cancelled', 'session_create_timeout'].includes(value.code ?? '') || !['creation-lock', 'launcher-resolution', 'target-resolution', 'git-worktree', 'materialize', 'record-write', 'cleanup'].includes(value.phase ?? '')
-    || value.nativeStopped !== true || value.nativeStatus !== 'notStarted' || value.cleanupComplete !== true)
+    || value.nativeStopped !== true || value.nativeStatus !== 'notStarted')
     throw new SessionCreateError('session_create_failed', 'creation-lock', 'invalid structured session-create termination receipt', 409)
+  if (value.version === 2) verifyPreservedSessionCreateTermination(value as SessionCreateTermination)
   return value as SessionCreateTermination
+}
+function retainedSessionCandidate(id: string, root: string, path: string, branch: string): SessionCreateRetainedCandidate {
+  const commonDir = realpathSync(git(['-C', root, 'rev-parse', '--path-format=absolute', '--git-common-dir']).trim())
+  const gitDir = realpathSync(git(['-C', path, 'rev-parse', '--absolute-git-dir']).trim())
+  const forkCommit = git(['-C', root, 'rev-parse', '--verify', `refs/heads/${branch}^{commit}`]).trim()
+  const physicalIdentity = digest(JSON.stringify([root, path, commonDir, gitDir].map(file => {
+    const value = statSync(realpathSync(file), { bigint: true })
+    return [value.dev.toString(), value.ino.toString()]
+  })))
+  const registrationDigest = digest(JSON.stringify([
+    readFileSync(join(path, '.git')).toString('base64'),
+    ...['HEAD', 'gitdir', 'commondir'].map(name => readFileSync(join(gitDir, name)).toString('base64')),
+  ]))
+  return { root, path, branch, forkCommit, commonDir, gitDir, physicalIdentity, registrationDigest, preparedReceiptDigest: createHash('sha256').update(readFileSync(sessionCandidateReceiptPath(id))).digest('hex') }
+}
+// 保留场地的收据只证明未派发执行已经结算，不授予删除或采纳权。
+export function verifyPreservedSessionCreateTermination(receipt: SessionCreateTermination): void {
+  if (receipt.version !== 2 || receipt.disposition !== 'preserved' || receipt.cleanupComplete !== false || receipt.code !== 'session_create_cancelled' || receipt.phase !== 'cleanup' || receipt.nativeStopped !== true || receipt.nativeStatus !== 'notStarted')
+    throw new SessionCreateError('session_create_failed', 'cleanup', 'preserved termination requires its explicit version and notStarted disposition', 409)
+  const retained = receipt.retained, durable = readSessionCandidateReceipt(receipt.sessionId)
+  if (!retained || retained.root !== mainRoot() || durable.kind !== 'valid'
+    || durable.receipt.root !== retained.root || durable.receipt.path !== retained.path || durable.receipt.branch !== retained.branch
+    || durable.receipt.requestDigest !== receipt.requestDigest || durable.receipt.payloadHash !== receipt.payloadHash
+    || !['prepared', 'git-created'].includes(durable.receipt.stage) || existsSync(sessionStoreDir(receipt.sessionId)))
+    throw new SessionCreateError('session_create_failed', 'cleanup', 'preserved candidate does not match its original private receipt', 409)
+  assertSessionCandidateUnpublished(receipt.sessionId)
+  if (JSON.stringify(retainedSessionCandidate(receipt.sessionId, retained.root, retained.path, retained.branch)) !== JSON.stringify(retained))
+    throw new SessionCreateError('session_create_failed', 'cleanup', 'preserved candidate physical identity or original receipt differs', 409)
 }
 function writeSessionCreateTermination(receipt: SessionCreateTermination): void {
   const path = sessionCreateTerminationPath(receipt.sessionId), dir = dirname(path)
@@ -2417,11 +2454,14 @@ function sessionCandidateTarget(prompt: string, id: string, structured: boolean)
 }
 
 /** 在拥有权锁与 registry fence 内核验精确创建，再登记正式终止证明。 */
-export async function recoverSessionCreateTermination(requestKey: string, options: { prompt: string; payloadHash: string; base?: string; signal: AbortSignal; structuredExecution?: StructuredExecution }): Promise<SessionCreateTermination | null> {
+export async function recoverSessionCreateTermination(requestKey: string, options: { prompt: string; payloadHash: string; base?: string; signal: AbortSignal; structuredExecution?: StructuredExecution; resourceRecoveryOnly?: true }): Promise<SessionCreateTermination | null> {
   const key = normalizeCreateKey(requestKey), id = sessionIdForCreateKey(key), requestDigest = digest(key)
   return withRecordLock(id, async () => {
     const termination = readSessionCreateTerminationById(id, requestDigest)
-    if (termination) return termination
+    if (termination) {
+      if (termination.payloadHash !== options.payloadHash) throw new SessionCreateError('session_create_key_reused', 'creation-lock', 'Idempotency-Key is already bound to another session-create payload', 409)
+      return termination
+    }
     if (readRecord(id)) return null
     const { root, path, branch, legacy } = sessionCandidateTarget(options.prompt, id, !!options.structuredExecution)
     return withRecordLock(sessionCandidateLockId(path, branch), () => withWorktreeRegistryLock(async () => {
@@ -2446,7 +2486,20 @@ export async function recoverSessionCreateTermination(requestKey: string, option
       if (receipt.requestDigest !== requestDigest || receipt.payloadHash !== options.payloadHash || receipt.root !== root || receipt.path !== path || receipt.branch !== branch)
         throw new SessionCreateError('session_create_failed', 'cleanup', 'private candidate receipt does not match cancelled create request; preserving candidate resources', 409)
       const state = await sessionCandidateState(root, path, branch, options.signal)
-      const recoveryBranchCommit = await proveSessionCandidateRecovery(root, id, path, branch, state, options.base, options.signal)
+      const preserving = options.resourceRecoveryOnly === true && !!options.structuredExecution
+        && state.path && state.worktree && state.branch && !existsSync(sessionStoreDir(id)) && ['prepared', 'git-created'].includes(receipt.stage)
+      const recoveryBranchCommit = await proveSessionCandidateRecovery(root, id, path, branch, state, options.base, options.signal, preserving)
+      if (preserving) {
+        if (!recoveryBranchCommit) throw new SessionCreateError('session_create_failed', 'cleanup', 'candidate retention requires its frozen fork', 409)
+        const retained = retainedSessionCandidate(id, root, path, branch)
+        if (retained.forkCommit !== recoveryBranchCommit) throw new SessionCreateError('session_create_failed', 'cleanup', 'candidate retention fork changed during recovery', 409)
+        await proveSessionCandidateRecovery(root, id, path, branch, state, options.base, options.signal, true)
+        const recovered: SessionCreateTermination = { version: 2, sessionId: id, requestDigest, payloadHash: options.payloadHash, code: 'session_create_cancelled', phase: 'cleanup', nativeStopped: true, nativeStatus: 'notStarted', disposition: 'preserved', cleanupComplete: false, retained }
+        verifyPreservedSessionCreateTermination(recovered)
+        throwIfCreateAborted(options.signal, 'cleanup')
+        writeSessionCreateTermination(recovered)
+        return recovered
+      }
       const residues = await cleanupSessionCandidateUnlocked(root, id, path, branch, { ...state, store: existsSync(sessionStoreDir(id)) }, false, recoveryBranchCommit)
       if (!residues.length && !retireSessionCandidateReceipt(id)) residues.push(`private candidate receipt remains at ${sessionCandidateReceiptPath(id)}`)
       if (residues.length) throw new SessionCreateError('session_create_cleanup_failed', 'cleanup', `matching candidate recovery left residue: ${residues.join('; ')}`, 500)
@@ -2626,11 +2679,15 @@ async function proveSessionCandidate(root: string, path: string, branch: string,
   return null
 }
 
-async function proveSessionCandidateRecovery(root: string, id: string, path: string, branch: string, state: SessionCandidateState, base: string | null | undefined, signal: AbortSignal): Promise<string | undefined> {
+function assertSessionCandidateUnpublished(id: string): void {
   const application = configuredSessionApplication()
   if (readRecord(id) || application.readAddress(id)
     || codexGenerationBindingForSession(join(runtimeRoot(), 'structured-read-only-v1', 'control'), id))
     throw new SessionCreateError('session_create_failed', 'cleanup', 'candidate publication or native ownership is not cold; preserving resources', 409)
+}
+async function proveSessionCandidateRecovery(root: string, id: string, path: string, branch: string, state: SessionCandidateState, base: string | null | undefined, signal: AbortSignal, preserveContents = false): Promise<string | undefined> {
+  assertSessionCandidateUnpublished(id)
+  const application = configuredSessionApplication()
   for (const ownerId of listSessionIds()) {
     if (ownerId === id || !application.readAddress(ownerId)) continue
     const owner = readRecord(ownerId)
@@ -2652,12 +2709,14 @@ async function proveSessionCandidateRecovery(root: string, id: string, path: str
   if (state.worktree) {
     const mismatch = await proveSessionCandidate(root, path, branch, signal)
     if (mismatch) throw new SessionCreateError('session_create_failed', 'cleanup', `candidate recovery identity mismatch: ${mismatch}`, 409)
-    const status = await withGitAbortSignal(signal, () => gitTry(['-C', path, 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored']))
-    if (!status.ok) throw new SessionCreateError('session_create_failed', 'cleanup', `cannot inspect candidate contents: ${status.stderr.trim() || status.failure}`, 409)
-    const seeded = '.spec/spexcode.local.json'
-    const unknown = status.stdout.split('\0').filter(Boolean).some(entry => entry !== `!! ${seeded}`
-      || !existsSync(join(root, seeded)) || !readFileSync(join(root, seeded)).equals(readFileSync(join(path, seeded))))
-    if (unknown) throw new SessionCreateError('session_create_failed', 'cleanup', 'candidate contains new or modified contents; preserving user edits', 409)
+    if (!preserveContents) {
+      const status = await withGitAbortSignal(signal, () => gitTry(['-C', path, 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored']))
+      if (!status.ok) throw new SessionCreateError('session_create_failed', 'cleanup', `cannot inspect candidate contents: ${status.stderr.trim() || status.failure}`, 409)
+      const seeded = '.spec/spexcode.local.json'
+      const unknown = status.stdout.split('\0').filter(Boolean).some(entry => entry !== `!! ${seeded}`
+        || !existsSync(join(root, seeded)) || !readFileSync(join(root, seeded)).equals(readFileSync(join(path, seeded))))
+      if (unknown) throw new SessionCreateError('session_create_failed', 'cleanup', 'candidate contains new or modified contents; preserving user edits', 409)
+    }
   }
   let recoveryBranchCommit: string | undefined
   if (state.branch) {

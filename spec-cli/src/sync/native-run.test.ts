@@ -630,7 +630,7 @@ test('exact unpublished creation termination settles only after cleanup and repl
 })
 
 
-for (const creationPhase of ['target-resolution', 'git-worktree', 'cleanup-failed', 'cleanup-interrupted', 'cleanup-rebuilt-path', 'cleanup-advanced-branch', 'published-concurrent'] as const) test(`real Git creation abort ${creationPhase} holds capacity through cleanup and restart reads exact termination without redispatch`, { timeout: 25_000 }, async () => {
+for (const creationPhase of ['target-resolution', 'git-worktree', 'cleanup-failed', 'cleanup-preserved', 'cleanup-interrupted', 'cleanup-rebuilt-path', 'cleanup-advanced-branch', 'published-concurrent'] as const) test(`real Git creation abort ${creationPhase} holds capacity through cleanup and restart reads exact termination without redispatch`, { timeout: 25_000 }, async () => {
   const childMode = process.env.SPEX_NATIVE_CREATE_PROOF_MODE
   if (childMode) {
     const f = await fixture(process.cwd())
@@ -670,6 +670,68 @@ for (const creationPhase of ['target-resolution', 'git-worktree', 'cleanup-faile
         const record = published({ ...request, requestKey: createKey })
         const recoveryOptions = { prompt: request.prompt, payloadHash: record.createPayloadHash!, base: request.base, signal: AbortSignal.timeout(5000), structuredExecution: record.structuredExecution! }
         await assert.rejects(recoverSessionCreateTermination(createKey, { ...recoveryOptions, payloadHash: '0'.repeat(64) }), /does not match cancelled create request/)
+        if (creationPhase === 'cleanup-preserved') {
+          const { runtimeRoot } = await import('@spexcode/spec-core')
+          const preparedPath = join(runtimeRoot(), '.session-create-candidates', `${record.session}.json`), preparedBytes = readFileSync(preparedPath)
+          const candidate = JSON.parse(preparedBytes.toString()) as { path: string; branch: string }
+          const gitDir = execFileSync('git', ['-C', candidate.path, 'rev-parse', '--absolute-git-dir'], { encoding: 'utf8' }).trim()
+          rmSync(join(gitDir, 'index')); writeFileSync(join(gitDir, 'locked'), 'initializing\n')
+          writeFileSync(join(candidate.path, 'README'), 'retained user bytes\n')
+          const branchBefore = execFileSync('git', ['rev-parse', `refs/heads/${candidate.branch}`], { encoding: 'utf8' })
+          const operationBefore = f.store.readOperation(f.claimed.operation.id), attemptBefore = f.store.readAttempt(f.claimed.attempt.id)
+          const recoveryRequest = { ...request, signal: AbortSignal.abort() }
+          let recoveryCalls = 0
+          const recoverCreateTermination: typeof recoverSessionCreateTermination = async (key, options) => {
+            recoveryCalls++; assert.equal(options.resourceRecoveryOnly, true)
+            return recoverSessionCreateTermination(key, options)
+          }
+          const stoppedRuntime = { ...runtime, run: async (): Promise<never> => { throw new Error('preserved recovery must not dispatch native') }, recoverCreateTermination }
+          const recoveryRunner = () => createAttemptRunner(f.store, f.claimed.fence, { resourceRecoveryOnly: true, runtime: stoppedRuntime, blobIO: f.blobIO, pollMs: 2 })
+          const save = f.store.recordResourceCheckpoint.bind(f.store)
+          f.store.recordResourceCheckpoint = (id, update) => {
+            if (update.phase === 'removed') throw new Error('controlled failure after preserved terminal')
+            return save(id, update)
+          }
+          await assert.rejects(recoveryRunner()(recoveryRequest), /controlled failure after preserved terminal/)
+          assert.equal(f.resource().phase, 'terminal')
+          const receipt = readSessionCreateTermination(createKey)
+          assert.equal(receipt?.version, 2)
+          assert.equal(receipt?.cleanupComplete, false)
+          assert.equal(f.checkpoint().creationTermination?.version, 2)
+          const terminationPath = join(runtimeRoot(), '.session-create-terminations', `${record.session}.json`), terminationBytes = readFileSync(terminationPath)
+          f.store.recordResourceCheckpoint = save
+          rmSync(terminationPath)
+          await assert.rejects(recoveryRunner()(recoveryRequest), /canonical receipt is missing/)
+          assert.equal(f.resource().phase, 'terminal', 'missing proof cannot turn terminal into removed')
+          writeFileSync(terminationPath, terminationBytes)
+          await assert.rejects(recoveryRunner()(recoveryRequest), error => error instanceof StructuredSessionError && error.code === 'cancelled')
+          assert.equal(f.resource().phase, 'removed')
+          writeFileSync(preparedPath, Buffer.concat([preparedBytes, Buffer.from('\n')]))
+          await assert.rejects(recoveryRunner()(recoveryRequest), /original receipt differs/)
+          writeFileSync(preparedPath, preparedBytes)
+          const application = (await import('../session-application.js')).configuredSessionApplication()
+          const { fromRaw, writeRecord } = await import('../session-record.js')
+          const ownerId = sessionIdForCreateKey('later retained candidate owner')
+          application.createSession({ sessionId: ownerId, status: 'idle' })
+          writeRecord(fromRaw({ session_id: ownerId, governed: true, worktree_path: candidate.path, branch: candidate.branch, title: null, name: null, status: 'idle', proposal: null, merges: 0, note: null, sortkey: null, createdAt: 0, stopped: true }))
+          const ownerBefore = application.readState(ownerId), ownerRecordBefore = runtime.readRecord(ownerId)
+          await assert.rejects(recoveryRunner()(recoveryRequest), error => error instanceof StructuredSessionError && error.code === 'cancelled')
+          assert.deepEqual(application.readState(ownerId), ownerBefore)
+          assert.deepEqual(runtime.readRecord(ownerId), ownerRecordBefore)
+          assert.deepEqual(f.store.readOperation(f.claimed.operation.id), operationBefore)
+          assert.deepEqual(f.store.readAttempt(f.claimed.attempt.id), attemptBefore)
+          assert.equal(calls, 1); assert.equal(recoveryCalls, 1)
+          assert.deepEqual(readFileSync(preparedPath), preparedBytes)
+          assert.equal(readFileSync(join(candidate.path, 'README'), 'utf8'), 'retained user bytes\n')
+          assert.equal(existsSync(join(gitDir, 'index')), false)
+          assert.equal(readFileSync(join(gitDir, 'locked'), 'utf8'), 'initializing\n')
+          assert.equal(execFileSync('git', ['rev-parse', `refs/heads/${candidate.branch}`], { encoding: 'utf8' }), branchBefore)
+          assert.deepEqual(readFileSync(join(process.cwd(), '.git', 'index')), sourceIndex)
+          assert.deepEqual(readFileSync('README'), sourceReadme)
+          assert.deepEqual(readFileSync(join(userPath, 'README')), userReadme)
+          console.log(JSON.stringify({ creationTermination: receipt, resource: f.resource().phase, phases: ['planned', 'terminal', 'removed'], nativeStarted: false, calls, callsUsed: operationBefore.callsUsed, replay: 'authenticated' }))
+          return
+        }
         if (creationPhase === 'cleanup-failed') {
           await assert.rejects(recoverSessionCreateTermination(createKey, { ...recoveryOptions, structuredExecution: undefined }), /does not match cancelled create request/)
           process.env.SPEX_NATIVE_CREATE_PROOF_PHASE = 'recovery'
@@ -799,7 +861,7 @@ for (const creationPhase of ['target-resolution', 'git-worktree', 'cleanup-faile
     writeFileSync(join(repo, 'user-worktree', 'README'), 'other user worktree input\n')
     const gitPath = execFileSync('which', ['git'], { encoding: 'utf8' }).trim()
     writeFileSync(join(bin, 'git'), `#!/bin/sh
-case " $* " in *" branch -D "*) ${JSON.stringify(gitPath)} "$@" || exit $?; if [ "$SPEX_NATIVE_CREATE_PROOF_PHASE" = cleanup-interrupted ]; then sleep 30; fi ;; *" worktree remove "*) case "$SPEX_NATIVE_CREATE_PROOF_PHASE" in cleanup-failed|cleanup-rebuilt-path|cleanup-advanced-branch|published-concurrent) printf 'controlled cleanup failure\\n' >&2; exit 17 ;; recovery-rebuilt-path) ${JSON.stringify(gitPath)} "$@" || exit $?; mkdir -p "$SPEX_NATIVE_CREATE_PROOF_CANDIDATE_PATH"; printf 'concurrent user content\\n' > "$SPEX_NATIVE_CREATE_PROOF_CANDIDATE_PATH/concurrent-user-data" ;; recovery-advanced-branch) ${JSON.stringify(gitPath)} "$@" || exit $?; exec ${JSON.stringify(gitPath)} update-ref "$SPEX_NATIVE_CREATE_PROOF_CANDIDATE_REF" "$SPEX_NATIVE_CREATE_PROOF_ADVANCED" ;; *) exec ${JSON.stringify(gitPath)} "$@" ;; esac ;; *" rev-parse --verify --quiet "*) if [ "$SPEX_NATIVE_CREATE_PROOF_PHASE" = target-resolution ]; then printf 'target\\n' >> "$SPEX_NATIVE_CREATE_PROOF_TRACE"; sleep 30; else exec ${JSON.stringify(gitPath)} "$@"; fi ;; *" worktree add "*) ${JSON.stringify(gitPath)} "$@" || exit $?; printf 'created\\n' >> "$SPEX_NATIVE_CREATE_PROOF_TRACE"; sleep 30 ;; *) exec ${JSON.stringify(gitPath)} "$@" ;; esac
+case " $* " in *" branch -D "*) ${JSON.stringify(gitPath)} "$@" || exit $?; if [ "$SPEX_NATIVE_CREATE_PROOF_PHASE" = cleanup-interrupted ]; then sleep 30; fi ;; *" worktree remove "*) case "$SPEX_NATIVE_CREATE_PROOF_PHASE" in cleanup-failed|cleanup-preserved|cleanup-rebuilt-path|cleanup-advanced-branch|published-concurrent) printf 'controlled cleanup failure\\n' >&2; exit 17 ;; recovery-rebuilt-path) ${JSON.stringify(gitPath)} "$@" || exit $?; mkdir -p "$SPEX_NATIVE_CREATE_PROOF_CANDIDATE_PATH"; printf 'concurrent user content\\n' > "$SPEX_NATIVE_CREATE_PROOF_CANDIDATE_PATH/concurrent-user-data" ;; recovery-advanced-branch) ${JSON.stringify(gitPath)} "$@" || exit $?; exec ${JSON.stringify(gitPath)} update-ref "$SPEX_NATIVE_CREATE_PROOF_CANDIDATE_REF" "$SPEX_NATIVE_CREATE_PROOF_ADVANCED" ;; *) exec ${JSON.stringify(gitPath)} "$@" ;; esac ;; *" rev-parse --verify --quiet "*) if [ "$SPEX_NATIVE_CREATE_PROOF_PHASE" = target-resolution ]; then printf 'target\\n' >> "$SPEX_NATIVE_CREATE_PROOF_TRACE"; sleep 30; else exec ${JSON.stringify(gitPath)} "$@"; fi ;; *" worktree add "*) ${JSON.stringify(gitPath)} "$@" || exit $?; printf 'created\\n' >> "$SPEX_NATIVE_CREATE_PROOF_TRACE"; sleep 30 ;; *) exec ${JSON.stringify(gitPath)} "$@" ;; esac
 `)
     chmodSync(join(bin, 'git'), 0o755)
     const result = spawnSync(process.execPath, ['--import', tsxImport, '--test', '--test-name-pattern', `^real Git creation abort ${creationPhase}`, fileURLToPath(import.meta.url)], { cwd: repo, encoding: 'utf8', timeout: 20_000, env: { ...process.env, NODE_TEST_CONTEXT: undefined, SPEX_SESSION_DATABASE_PATH: join(root, 'home', 'sessions.sqlite'), PATH: `${bin}:${process.env.PATH}`, SPEXCODE_HOME: join(root, 'home'), SPEX_NATIVE_CREATE_PROOF_MODE: 'child', SPEX_NATIVE_CREATE_PROOF_PHASE: creationPhase, SPEX_NATIVE_CREATE_PROOF_TRACE: trace, SPEX_NATIVE_CREATE_PROOF_REF_TRACE: join(root, 'ref-trace') } })
@@ -886,7 +948,7 @@ test('terminal create timeout checkpoint resumes terminal-to-removed with its ex
   } finally { f.cleanup() }
 })
 
-for (const defect of ['session', 'request', 'payload', 'cleanup', 'native', 'schema'] as const) test(`creation termination ${defect} mismatch cannot settle or dispatch`, async () => {
+for (const defect of ['session', 'request', 'payload', 'cleanup', 'native', 'schema', 'v1-preserved', 'v2-cleaned', 'v2-timeout', 'v2-forged'] as const) test(`creation termination ${defect} mismatch cannot settle or dispatch`, async () => {
   const f = await fixture()
   try {
     let calls = 0
@@ -900,10 +962,16 @@ for (const defect of ['session', 'request', 'payload', 'cleanup', 'native', 'sch
     if (defect === 'cleanup') Object.assign(receipt, { cleanupComplete: false })
     if (defect === 'native') Object.assign(receipt, { nativeStopped: false })
     if (defect === 'schema') receipt.version = 2 as 1
+    if (defect === 'v1-preserved') Object.assign(receipt, { disposition: 'preserved', retained: {} })
+    if (defect.startsWith('v2-')) {
+      Object.assign(receipt, { version: 2, disposition: 'preserved', cleanupComplete: false, phase: 'cleanup', retained: { root: f.root } })
+      if (defect === 'v2-cleaned') Object.assign(receipt, { cleanupComplete: true })
+      if (defect === 'v2-timeout') Object.assign(receipt, { code: 'session_create_timeout' })
+    }
     await assert.rejects(f.runner({ ...runtime, readCreateTermination: () => receipt })(f.request), error => {
       assert.ok(error instanceof StructuredSessionError)
       assert.equal(error instanceof SettledSessionCreateTimeoutError, false)
-      assert.match(error.message, /termination differs/)
+      assert.match(error.message, /termination differs|preserved candidate/)
       return true
     })
     assert.equal(f.resource().phase, 'planned')

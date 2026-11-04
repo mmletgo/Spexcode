@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { getBlob, putBlob, runtimeRoot } from '@spexcode/spec-core'
 import { readRecord, type SessRec } from '../session-record.js'
-import { sessionIdForCreateKey, readSessionCreateTermination, recoverSessionCreateTermination, type SessionCreateTermination } from '../sessions.js'
+import { sessionIdForCreateKey, readSessionCreateTermination, recoverSessionCreateTermination, verifyPreservedSessionCreateTermination, type SessionCreateTermination } from '../sessions.js'
 import { cancelStructuredSession, runStructuredSession, SettledSessionCreateTimeoutError, StructuredSessionError, type StructuredCancellationResult } from '../session-structured.js'
 import { assertRejectedOutput, prepareFrozenReaderRuntime, structuredExecutionPolicy, pinNativeConfiguration, pinZCodeToolPolicy, type FrozenReaderRuntime, type StructuredExecution } from '../session-structured-policy.js'
 import { assertFrozenBinding, prepareFrozenPrompt } from '../frozen-context.js'
@@ -127,8 +127,14 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
     const creationTermination = (): SessionCreateTermination | null => {
       const receipt = runtime.readCreateTermination?.(dispatch!.sessionCreateKey) ?? null
       if (!receipt) return null
-      if (receipt.version !== 1 || receipt.sessionId !== expectedSessionId || receipt.requestDigest !== sha(dispatch!.sessionCreateKey) || receipt.payloadHash !== expectedCreateHash || !['session_create_cancelled', 'session_create_timeout'].includes(receipt.code) || receipt.cleanupComplete !== true || receipt.nativeStopped !== true || receipt.nativeStatus !== 'notStarted' || checkpoint.session.threadId || checkpoint.session.turnId || checkpoint.nativeStarted)
+      const dispositionValid = receipt.version === 1 && receipt.cleanupComplete === true && !('disposition' in receipt) && !('retained' in receipt)
+        || receipt.version === 2 && receipt.disposition === 'preserved' && receipt.cleanupComplete === false && receipt.code === 'session_create_cancelled' && receipt.phase === 'cleanup' && !!receipt.retained
+      if (!dispositionValid || receipt.sessionId !== expectedSessionId || receipt.requestDigest !== sha(dispatch!.sessionCreateKey) || receipt.payloadHash !== expectedCreateHash || !['session_create_cancelled', 'session_create_timeout'].includes(receipt.code) || receipt.nativeStopped !== true || receipt.nativeStatus !== 'notStarted' || checkpoint.session.threadId || checkpoint.session.turnId || checkpoint.nativeStarted)
         throw new StructuredSessionError('stale_result', 'native creation termination differs from fixed request or started execution', errorIdentity())
+      if (receipt.version === 2) {
+        try { verifyPreservedSessionCreateTermination(receipt) }
+        catch (error) { throw new StructuredSessionError('stale_result', error instanceof Error ? error.message : String(error), errorIdentity()) }
+      }
       return receipt
     }
     const stoppedFailedEvidence = (state: StructuredExecution): NativeRunCheckpoint['failure'] | null => {
@@ -145,12 +151,12 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
       }
       return { code: state.errorCode ?? 'failed', message: state.error!, ...(rejectedOutput ? { rejectedOutput } : {}), ...(state.failedWorktree ? { failedWorktree: state.failedWorktree } : {}) }
     }
-    const restoreSettledCreationTimeout = (saved?: SessionCreateTermination): SettledSessionCreateTimeoutError | null => {
-      if (saved?.code !== 'session_create_timeout') return null
+    const restoreSettledCreationTermination = (saved?: SessionCreateTermination): SettledSessionCreateTimeoutError | null => {
+      if (!saved) return null
       const receipt = creationTermination()
-      if (!receipt) return null
+      if (!receipt) throw new StructuredSessionError('stale_result', 'native creation termination canonical receipt is missing', errorIdentity())
       if (hash(receipt) !== hash(saved)) throw new StructuredSessionError('stale_result', 'native creation termination checkpoint differs from its canonical receipt', errorIdentity())
-      return new SettledSessionCreateTimeoutError(receipt)
+      return receipt.code === 'session_create_timeout' ? new SettledSessionCreateTimeoutError(receipt) : null
     }
     const restoreSettledFailure = (): StructuredSessionError | null => {
       if (checkpoint.status !== 'failed') return null
@@ -177,7 +183,7 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
         const rpcFailure = restoreSettledFailure()
         if (rpcFailure) throw rpcFailure
         if (checkpoint.status !== 'completed' || !checkpoint.result) {
-          const settledTimeout = restoreSettledCreationTimeout(checkpoint.creationTermination)
+          const settledTimeout = restoreSettledCreationTermination(checkpoint.creationTermination)
           if (settledTimeout) throw settledTimeout
           throw new StructuredSessionError(checkpoint.status === 'timeout' ? 'timeout' : 'cancelled', 'native execution has already stopped', errorIdentity())
         }
@@ -233,14 +239,14 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
           record = observe(); receipt = creationTermination()
         }
         if (!record && !receipt && (!nativePromise || outcome) && runtime.recoverCreateTermination) {
-          await runtime.recoverCreateTermination(dispatch!.sessionCreateKey, { prompt: creationPrompt, payloadHash: expectedCreateHash, base: creationBase, signal: AbortSignal.timeout(Math.min(15_000, request.timeoutMs ?? 15_000)), structuredExecution: execution })
+          await runtime.recoverCreateTermination(dispatch!.sessionCreateKey, { prompt: creationPrompt, payloadHash: expectedCreateHash, base: creationBase, signal: AbortSignal.timeout(Math.min(15_000, request.timeoutMs ?? 15_000)), structuredExecution: execution, ...(options.resourceRecoveryOnly ? { resourceRecoveryOnly: true } : {}) })
           record = observe(); receipt = creationTermination()
         }
         if (!record && receipt) {
           const status = receipt.code === 'session_create_timeout' ? 'timeout' : 'cancelled'
           settle(status, { creationTermination: receipt, stop: { sessionId: expectedSessionId, state: status, nativeStopped: true, acknowledged: false, nativeStatus: receipt.nativeStatus } })
           if (receipt.code === 'session_create_timeout') throw new SettledSessionCreateTimeoutError(receipt)
-          throw new StructuredSessionError(status, 'native creation cancelled and exact cleanup settled', errorIdentity())
+          throw new StructuredSessionError(status, receipt.version === 2 ? 'native creation cancelled; exact candidate retained and execution capacity settled' : 'native creation cancelled and exact cleanup settled', errorIdentity())
         }
         if (!record) throw new StructuredSessionError('cancellation_pending', 'native creation may be in progress; absence alone does not confirm stop', errorIdentity())
       }
@@ -263,8 +269,8 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
       const rpcFailure = restoreSettledFailure()
       if (rpcFailure) { save({ ...checkpoint, phase: 'removed' }); throw rpcFailure }
       if (checkpoint.stop?.nativeStopped && checkpoint.stop.sessionId === expectedSessionId && ['completed', 'cancelled', 'timeout'].includes(checkpoint.stop.state) && (checkpoint.stop.threadId ?? null) === checkpoint.session.threadId && (checkpoint.stop.turnId ?? null) === checkpoint.session.turnId) {
+        const settledTimeout = restoreSettledCreationTermination(checkpoint.creationTermination)
         save({ ...checkpoint, phase: 'removed' })
-        const settledTimeout = restoreSettledCreationTimeout(checkpoint.creationTermination)
         if (settledTimeout) throw settledTimeout
         throw new StructuredSessionError(checkpoint.status === 'timeout' ? 'timeout' : 'cancelled', 'native execution stop evidence was already settled', errorIdentity())
       }
