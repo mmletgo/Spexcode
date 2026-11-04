@@ -531,6 +531,29 @@ function behaviorTraceBinding(store: SyncStore, operation: SyncOperation, origin
   }
 }
 
+/** 业务repair清除ready后，原分析稿仍沿精确continuation来源认证；不继承祖先的推进状态。 */
+function behaviorAnalysisDraftBinding(store: SyncStore, operation: SyncOperation, origin: SyncAttempt, key: string, draft: ElaborationDraft, planDigest?: string): boolean {
+  const suffix = key === 'analysis' ? '' : `:partition:${key.slice('partition:'.length, -':analysis'.length)}`
+  for (;;) {
+    const source = partitionStage<CodeBehaviorContinuation>(store, operation, origin, `${key}:continuation`)
+    if (!source || canonical(source.result.drafts.code_behavior_analyze) !== canonical(draft) || draft.sourceInputId !== operation.input.id || stage<{ version: string }>(store, operation, origin, 'behavior-draft-protocol')?.version !== 'code-behavior-draft-v1') return false
+    if (planDigest && partitionStage<SyncPartitionPlan>(store, operation, origin, 'partition-plan')?.result.digest !== planDigest) return false
+    const requestKey = `sync:${origin.id}:analysis${suffix}:code_behavior_analyze`
+    const dispatch = origin.dispatchPlans.find(dispatch => dispatch.key === requestKey && dispatch.purpose === 'code_behavior_analyze')
+    if (dispatch) {
+      const trace = source.result.readyAnalysis?.trace
+      return !!trace && dispatch.session?.sessionId === trace.sessionId && dispatch.session.threadId === trace.threadId && dispatch.session.turnId === trace.turnId && behaviorTraceBinding(store, operation, origin, key, trace)
+    }
+    const provenance = stage<{ fromOperationId: string; fromAttemptId: string; resultRef: BlobRef }>(store, operation, origin, `${key}:continuation-provenance`)
+    if (!provenance || provenance.fromOperationId !== operation.id) return false
+    const previous = store.readAttempt(provenance.fromAttemptId)
+    if (previous.operationId !== operation.id || previous.number >= origin.number || !['failed', 'superseded', 'settled'].includes(previous.status) || canonical(previous.composedInput) !== canonical(origin.composedInput)) return false
+    const prior = partitionStage<CodeBehaviorContinuation>(store, operation, previous, `${key}:continuation`)
+    if (!prior || prior.resultRef.sha256 !== provenance.resultRef.sha256 || prior.result.inputDigest !== source.result.inputDigest) return false
+    origin = previous
+  }
+}
+
 /** 续审不伪造prepared记录；沿既有计划provenance回到真实builder所在attempt。 */
 function generationBuilderSource(store: SyncStore, operation: SyncOperation, origin: SyncAttempt, key: string, candidate: CandidateRef, plan: SyncPartitionPlan): { attempt: SyncAttempt; result: SavedGeneration } {
   for (;;) {
@@ -1421,7 +1444,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           if (planDigest && partitionStage<SyncPartitionPlan>(store, operation, prior, 'partition-plan')?.result.digest !== planDigest) continue
           const trace = source.result.readyAnalysis?.trace
           const suffix = key === 'analysis' ? '' : `:partition:${key.slice('partition:'.length, -':analysis'.length)}`
-          if (Object.entries(source.result.drafts).some(([purpose, draft]) => !(purpose === 'code_behavior_analyze' && trace) && !authenticatedDraftResult(store, operation, prior, `sync:${prior.id}:analysis${suffix}:${purpose}`, purpose, draft))) continue
+          if (Object.entries(source.result.drafts).some(([purpose, draft]) => !(purpose === 'code_behavior_analyze' && trace) && !authenticatedDraftResult(store, operation, prior, `sync:${prior.id}:analysis${suffix}:${purpose}`, purpose, draft) && !(purpose === 'code_behavior_analyze' && behaviorAnalysisDraftBinding(store, operation, prior, key, draft, planDigest)))) continue
           if (trace && !behaviorTraceBinding(store, operation, prior, key, trace)) fail('behavior_continuation_binding', 'P0已校验分析没有原生派发身份')
           saveStage(store, fence!, `${key}:continuation-provenance`, { fromOperationId: operation.id, fromAttemptId: prior.id, resultRef: source.resultRef })
           saveStage(store, fence!, `${key}:continuation`, source.result, !operation.baselineSelection ? { readSetDigest: operation.readSetDigest } : undefined)

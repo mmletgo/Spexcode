@@ -490,7 +490,7 @@ function committedDraftFixture(f: Awaited<ReturnType<typeof fixture>>, request: 
   f.git('worktree', 'add', '--detach', workspace, seed.baseCommit)
   mkdirSync(join(workspace, path, '..'), { recursive: true }); writeFileSync(join(workspace, path), JSON.stringify(output), 'utf8')
   execFileSync('git', ['-C', workspace, 'add', path], { stdio: 'pipe' })
-  execFileSync('git', ['-C', workspace, 'commit', '-m', 'real Native fixture draft'], { stdio: 'pipe' })
+  execFileSync('git', ['-C', workspace, 'commit', '--allow-empty', '-m', 'real Native fixture draft'], { stdio: 'pipe' })
   return nativeWorktreeResult(workspace, seed)
 }
 
@@ -5246,6 +5246,199 @@ test('Native P0三attempt保留已审兄弟，analysis与review沿精确Git/Nati
   const stages = last.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()) as { stage: string })
   assert.ok(stages.some(stage => stage.stage.endsWith(':analysis:provenance')))
   assert.equal(f.store.listJournals(f.operation.id).length, 0)
+})
+
+for (const [protocolRounds, staleCarry, tamper] of [[1, false, 'none'], [1, true, 'none'], [2, false, 'none'], ...(['native-operation', 'native-input', 'native-digest', 'schema', 'git', 'provenance', 'purpose'] as const).map(tamper => [1, false, tamper] as const)] as const) test(`Native P0协议续审后业务repair沿原分析来源SQLite冷恢复 protocolRounds=${protocolRounds} staleCarry=${staleCarry} tamper=${tamper}`, async t => {
+  const importPath = '.spec/project/import-contract/spec.md', importSpec = original.replaceAll('export-job', 'import-job').replaceAll('EXPORT', 'IMPORT').replaceAll('export-contract', 'import-contract').replaceAll('src/export.js', 'src/import.js').replaceAll('tests/export.test.mjs', 'tests/import.test.mjs')
+  const semanticRound = protocolRounds + 1, staleRound = staleCarry ? semanticRound + 1 : -1, rounds = semanticRound + (staleCarry ? 2 : 1)
+  const f = await fixture(t, { maxAttempts: rounds, maxCalls: 24, maxRepairs: rounds - 1, timeoutMs: 300_000 }, false, original, 'project', original, {
+    version: 'sync-coordinator-v2', direction: 'code_to_spec', agentWorkflow: 'native-worktree-v1', sourcePaths: ['src'], writePaths: ['.spec'],
+    targets: [{ nodeId: 'export-contract', path: contractPath }, { nodeId: 'import-contract', path: importPath }],
+    partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 32768, maxParallel: 2 }, commitTrigger: { before: null, paths: ['src/export.js', 'src/import.js'] },
+  }, undefined, 'code', 'claude:default', true, { [importPath]: importSpec, 'src/import.js': 'export class ImportService {}\n', 'tests/import.test.mjs': 'import assert from "node:assert/strict"\n' })
+  let store = f.store, reopened: ReturnType<typeof openProtocol> | undefined, targetKey = '', siblingKey = '', analysisText = ''
+  const realNow = Date.now
+  let clockAdvance = 0
+  if (staleCarry) { Date.now = () => realNow() + clockAdvance; t.after(() => { Date.now = realNow }) }
+  const calls: { attempt: number; domain: string; purpose: string; sessionId: string; threadId: string }[] = [], records = new Map<string, NativeRunRecord>()
+  const finding = { message: '真实业务遗漏需重做分析', evidence: '原冻结源码与完整测试', counterexample: '不得漏掉幂等行为' }
+  const frozenObjects = readTree(f.input.source.commonDir, f.input.immutableTree).filter(entry => !entry.path.startsWith('.spec/'))
+  t.after(() => reopened?.close())
+  f.options.runner = async request => {
+    if (!request.purpose.startsWith('code_behavior_')) throw Object.assign(new Error('冷恢复P0及新独审已验证，在P1前停止'), { code: 'unsupported' })
+    const operation = store.readOperation(f.operation.id), attempt = store.readAttempt(operation.currentAttemptId!), seed = request.worktree!
+    const brief = JSON.parse(request.prompt.split('任务:\n')[1].split('\n待审分析:')[0].split('\n草稿文件=')[0]) as { requiredChangedPaths: string[] }
+    const domain = brief.requiredChangedPaths.some(path => path.includes('import')) ? 'IMPORT' : 'EXPORT'
+    const partitionKey = `partition:${request.requestKey.split(':partition:')[1].split(':')[0]}:analysis`
+    if (domain === 'EXPORT') targetKey = partitionKey
+    else siblingKey = partitionKey
+    const reviewed = request.purpose === 'code_behavior_review' ? JSON.parse(request.prompt.split('待审分析:\n')[1].split('\n草稿文件=')[0]) as { analysisDigest: string; analysis: import('./writeback-types.js').CodeBehaviorAnalysis } : null
+    if (reviewed && domain === 'EXPORT' && attempt.number === 1) {
+      while (!latest(store.readAttempt(attempt.id), siblingKey)) {
+        if (request.signal?.aborted) throw new Error('fixture已审兄弟前提尚未成立即被停止')
+        await new Promise<void>(resolve => setImmediate(resolve))
+      }
+    }
+    const output = reviewed ? { inputDigest: request.inputDigest, analysisDigest: reviewed.analysisDigest, verdict: 'accept', checkedPaths: brief.requiredChangedPaths, checkedChangeIds: reviewed.analysis.changes.map(change => change.id), findings: [] as typeof finding[] }
+      : { changes: brief.requiredChangedPaths.map(path => ({ kind: 'refactor', paths: [path], affectedIds: [`RULE-${domain}-05`], ruleIds: [`RULE-${domain}-05`], originalIntent: '保留原业务', previousBehavior: '原业务', sourceBehavior: '原业务', deliveryBehavior: '原业务', evidence: path, counterexample: '不得改变权限或发布次数' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+    if (reviewed && domain === 'EXPORT' && attempt.number <= semanticRound) {
+      const review = output as { verdict: string; checkedChangeIds: string[]; findings: typeof finding[] }
+      review.verdict = 'repair'; review.findings = [finding]
+      if (attempt.number <= protocolRounds) review.checkedChangeIds[0] += 'e'
+    }
+    const path = /草稿文件=([^\s；]+)/.exec(request.prompt)![1]
+    if (domain === 'EXPORT' && attempt.number === rounds && !reviewed) {
+      assert.equal(readObject(f.input.source.commonDir, readTree(f.input.source.commonDir, seed.tree).find(entry => entry.path === path)!.oid).toString('utf8'), analysisText, '语义repair必须续原分析JSON，不能从零重答')
+      for (const text of Object.values(finding)) assert.ok(request.prompt.includes(text), `新分析必须收到完整finding: ${text}`)
+    }
+    const carried = domain === 'EXPORT' && attempt.number === staleRound
+    const actual = carried ? undefined : committedDraftFixture(f, request, output, join(f.parent, `semantic-p0-${contentHash(request.requestKey)}`))
+    if (domain === 'EXPORT' && attempt.number === 1 && !reviewed) analysisText = JSON.stringify(output)
+    const fence = { operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: operation.input.source.physicalFingerprint }
+    try { return await createAttemptRunner(store, fence, { pollMs: 2, runtime: {
+      readRecord: id => records.get(id) ?? null,
+      cancel: async () => { throw new Error('fixture不得控制真实进程') },
+      run: async native => {
+        const sessionId = sessionIdForCreateKey(native.sessionCreateKey!), identity = { threadId: `semantic-${sessionId}`, turnId: 'turn' }, receipt = { summary: '真实Git草稿与原Native资源绑定' }, resultDigest = contentHash(JSON.stringify(receipt)), execution = structuredExecutionPolicy(native)
+        calls.push({ attempt: attempt.number, domain, purpose: request.purpose, sessionId, threadId: identity.threadId })
+        if (carried) {
+          records.set(sessionId, { session: sessionId, status: 'awaiting', harnessSessionId: identity.threadId, createRequestId: contentHash(native.sessionCreateKey!), createPayloadHash: contentHash(JSON.stringify({ prompt: nativeWorktreePrompt(native.prompt, seed), parent: null, launcher: null, ...(native.base?.trim() ? { base: native.base.trim() } : {}), structuredExecution: execution })), structuredExecution: { ...execution, ...identity, state: 'cancelled', cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: true, acknowledged: true, nativeStatus: 'stopped' } } })
+          throw new StructuredSessionError('cancelled', '旧版搬运后的新review已停止，无新产物', { sessionId, ...identity })
+        }
+        records.set(sessionId, { session: sessionId, status: 'awaiting', harnessSessionId: identity.threadId, createRequestId: contentHash(native.sessionCreateKey!), createPayloadHash: contentHash(JSON.stringify({ prompt: nativeWorktreePrompt(native.prompt, seed), parent: null, launcher: null, ...(native.base?.trim() ? { base: native.base.trim() } : {}), structuredExecution: execution })), structuredExecution: { ...execution, ...identity, state: 'completed', output: receipt, resultDigest, resultWorktree: actual } })
+        return { sessionId, ...identity, output: receipt, resultDigest, worktree: actual }
+      },
+    } })(request) } catch (error) { if (carried) store.requestControl(f.operation.id, 'pause'); throw error }
+  }
+  const wrappers = (attempt: import('./operation-types.js').SyncAttempt) => attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()) as { stage: string; resultRef: { sha256: string } })
+  const latest = (attempt: import('./operation-types.js').SyncAttempt, key: string) => wrappers(attempt).filter(wrapper => wrapper.stage === key).at(-1)!
+  let semanticRef: { sha256: string } | undefined, siblingRef: { sha256: string } | undefined
+  for (let round = 1; round <= rounds; round++) {
+    if (round === semanticRound && tamper !== 'none') {
+      const recordFailure = store.recordFailure.bind(store)
+      store.recordFailure = (fence, failure) => {
+        const current = store.readAttempt(fence.attemptId), saved = latest(current, `${targetKey}:continuation`)
+        const value = JSON.parse(readEvidence(f.input.source.commonDir, saved.resultRef).toString()) as import('./code-behavior.js').CodeBehaviorContinuation
+        const originalWrapper = current.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(wrapper => wrapper.resultRef?.sha256 === saved.resultRef.sha256)
+        if (tamper.startsWith('native-')) {
+          const origin = store.listAttempts(f.operation.id)[0], dispatch = origin.dispatchPlans.find(dispatch => dispatch.purpose === 'code_behavior_analyze' && dispatch.key.includes(targetKey.split(':')[1]))!, resource = store.findResource(origin.id, dispatch.key)!
+          const checkpoint = JSON.parse(readEvidence(f.input.source.commonDir, resource.checkpointRef).toString()) as NativeRunCheckpoint
+          if (tamper === 'native-digest') {
+            // 机制反例：Native原件自身摘要完全一致，但其真实业务inputDigest不同于continuation链。
+            const source = latest(origin, `${targetKey}:continuation`), sourceValue = JSON.parse(readEvidence(f.input.source.commonDir, source.resultRef).toString()) as import('./code-behavior.js').CodeBehaviorContinuation
+            const sourceWrapper = origin.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(wrapper => wrapper.resultRef?.sha256 === source.resultRef.sha256)
+            const native = JSON.parse(readEvidence(f.input.source.commonDir, resource.plan.planBlob).toString()) as NativeRunPlan
+            const request = JSON.parse(readEvidence(f.input.source.commonDir, sourceValue.readyAnalysis!.requestRef).toString()) as ElaborationSessionRequest
+            native.request.inputDigest = request.inputDigest = sourceValue.readyAnalysis!.trace.inputDigest = contentHash('different-native-business-input')
+            native.requestDigest = dispatch.requestDigest = checkpoint.requestDigest = resource.plan.payloadDigest = contentHash(JSON.stringify(native.request))
+            sourceValue.readyAnalysis!.requestRef = writeEvidence(f.input.source.commonDir, request)
+            const sourceRef = writeEvidence(f.input.source.commonDir, sourceValue), wrapperRef = writeEvidence(f.input.source.commonDir, { ...sourceWrapper, resultRef: sourceRef })
+            origin.checkpointRefs[origin.checkpointRefs.findIndex(ref => ref.sha256 === contentHash(JSON.stringify(sourceWrapper)))] = wrapperRef
+            resource.plan.planBlob = writeEvidence(f.input.source.commonDir, native); resource.checkpointRef = writeEvidence(f.input.source.commonDir, checkpoint)
+            resource.checkpoints.at(-1)!.checkpointRef = resource.checkpointRef
+            const protocol = reopened ?? f.protocol
+            protocol.withTransaction(tx => {
+              tx.exec('UPDATE sync_attempts SET record_json=? WHERE id=?', JSON.stringify(origin), origin.id)
+              tx.exec('UPDATE sync_resources SET payload_digest=?,checkpoint_sha=?,record_json=? WHERE id=?', resource.plan.payloadDigest, resource.checkpointRef.sha256, JSON.stringify(resource), resource.id)
+            })
+            const provenance = { fromOperationId: f.operation.id, fromAttemptId: origin.id, resultRef: sourceRef }, resultRef = writeEvidence(f.input.source.commonDir, provenance)
+            store.checkpoint(fence, { ...writeEvidence(f.input.source.commonDir, { ...originalWrapper, stage: `${targetKey}:continuation-provenance`, resultRef }), artifacts: syncCheckpointArtifacts(provenance, resultRef) })
+            assert.equal(native.requestDigest, contentHash(JSON.stringify(native.request)))
+            assert.notEqual(native.request.inputDigest, sourceValue.inputDigest)
+          } else {
+            if (tamper === 'native-operation') checkpoint.operationId = 'foreign-operation'
+            else checkpoint.inputId = contentHash('foreign-input')
+            store.recordResourceCheckpoint(resource.id, { operationId: resource.operationId, attemptId: resource.attemptId, inputId: resource.plan.inputId, candidateDigest: resource.plan.candidateDigest, phase: 'removed', expectedCheckpointRef: resource.checkpointRef, checkpointRef: writeEvidence(f.input.source.commonDir, checkpoint) })
+          }
+        } else {
+          let stage = `${targetKey}:continuation`, result: unknown = value
+          if (tamper === 'schema') value.drafts.code_behavior_analyze!.schemaDigest = contentHash('foreign-schema')
+          if (tamper === 'git') value.drafts.code_behavior_analyze!.resultCommit = value.drafts.code_behavior_analyze!.seed.baseCommit
+          if (tamper === 'purpose') value.drafts.code_behavior_review = structuredClone(value.drafts.code_behavior_analyze)
+          if (tamper === 'provenance') {
+            stage = `${targetKey}:continuation-provenance`
+            result = { fromOperationId: f.operation.id, fromAttemptId: store.listAttempts(f.operation.id)[0].id, resultRef: writeEvidence(f.input.source.commonDir, { unrelated: true }) }
+          }
+          const resultRef = writeEvidence(f.input.source.commonDir, result)
+          store.checkpoint(fence, { ...writeEvidence(f.input.source.commonDir, { ...originalWrapper, stage, resultRef }), artifacts: syncCheckpointArtifacts(result, resultRef) })
+        }
+        return recordFailure(fence, failure)
+      }
+    }
+    if (round < rounds) {
+      const claim = store.claimQueuedAttempt.bind(store)
+      store.claimQueuedAttempt = input => {
+        if (store.listAttempts(f.operation.id).some(attempt => attempt.number === round && attempt.status === 'failed')) throw new Error('fixture durable P0 process boundary')
+        const next = claim(input)
+        if (round === staleRound) {
+          // 重放旧版本已写入的搬运状态；不改祖先原件，也不伪造本轮成功结果。
+          const first = store.listAttempts(f.operation.id)[0], source = latest(first, `${targetKey}:continuation`)
+          const originalWrapper = first.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(wrapper => wrapper.resultRef?.sha256 === source.resultRef.sha256)
+          for (const [stage, value] of [[`${targetKey}:continuation-provenance`, { fromOperationId: f.operation.id, fromAttemptId: first.id, resultRef: source.resultRef }], [`${targetKey}:continuation`, JSON.parse(readEvidence(f.input.source.commonDir, source.resultRef).toString())]] as const) {
+            const resultRef = writeEvidence(f.input.source.commonDir, value)
+            store.checkpoint(next.fence, { ...writeEvidence(f.input.source.commonDir, { ...originalWrapper, attemptId: next.attempt.id, stage, resultRef }), artifacts: syncCheckpointArtifacts(value, resultRef) })
+          }
+        }
+        return next
+      }
+    }
+    await runSyncOperation(store, f.operation.id, f.options)
+    const attempts = store.listAttempts(f.operation.id), current = attempts.at(-1)!
+    assert.equal(attempts.length, round)
+    if (round === 1) {
+      const sibling = latest(current, siblingKey)
+      assert.ok(sibling, JSON.stringify({ failure: current.failure, calls, stages: wrappers(current).map(wrapper => wrapper.stage) }))
+      siblingRef = sibling.resultRef
+    }
+    if (round < rounds) {
+      if (round === staleRound) {
+        const dispatch = current.dispatchPlans.find(dispatch => dispatch.purpose === 'code_behavior_review')!, resource = store.findResource(current.id, dispatch.key)!
+        const checkpoint = JSON.parse(readEvidence(f.input.source.commonDir, resource.checkpointRef).toString()) as NativeRunCheckpoint
+        assert.equal(resource.phase, 'removed'); assert.equal(checkpoint.nativeState, 'cancelled')
+        assert.equal(checkpoint.result, undefined); assert.equal(checkpoint.failure, undefined)
+        store.requestControl(f.operation.id, 'run')
+        clockAdvance = 60_000 // 正式冷恢复要越过原租约；不等待真实一分钟或改生产期限。
+      } else assert.equal(current.failure?.code, 'behavior_review_failed', JSON.stringify({ failure: current.failure, calls }))
+      const saved = latest(current, `${targetKey}:continuation`), continuation = JSON.parse(readEvidence(f.input.source.commonDir, saved.resultRef).toString()) as import('./code-behavior.js').CodeBehaviorContinuation
+      assert.equal(!!continuation.readyAnalysis, round <= protocolRounds || round === staleRound)
+      if (round === semanticRound) {
+        semanticRef = saved.resultRef
+        assert.deepEqual(current.dispatchPlans.filter(dispatch => dispatch.purpose.startsWith('code_behavior_')).map(dispatch => dispatch.purpose), ['code_behavior_review'])
+        if (tamper !== 'purpose') assert.deepEqual(JSON.parse(readObject(f.input.source.commonDir, continuation.drafts.code_behavior_review!.oid).toString()).findings, [finding])
+      }
+      if (reopened) reopened.close()
+      else f.closeForRestart()
+      reopened = openProtocol(join(f.parent, 'sync.sqlite'))
+      store = new SyncStore(reopened, { readBlob: ref => readEvidence(f.input.source.commonDir, ref) }); f.useStore(store); records.clear()
+    }
+  }
+  const attempts = store.listAttempts(f.operation.id), last = attempts.at(-1)!
+  const targetCalls = calls.filter(call => call.domain === 'EXPORT')
+  if (tamper !== 'none') {
+    assert.equal(targetCalls.some(call => call.attempt === rounds && call.purpose === 'code_behavior_analyze'), false, '失配来源不能取得继承分析稿资格')
+    if (tamper.startsWith('native-')) {
+      assert.equal(targetCalls.some(call => call.attempt === rounds), false)
+      assert.equal(last.failure?.code, 'behavior_continuation_binding')
+    } else {
+      const selected = JSON.parse(readEvidence(f.input.source.commonDir, latest(last, `${targetKey}:continuation-provenance`).resultRef).toString())
+      assert.notEqual(selected.resultRef.sha256, semanticRef!.sha256, '同OID但schema/Git/purpose或provenance失配的continuation不得被采用')
+    }
+    assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+    assert.equal(store.listJournals(f.operation.id).length, 0)
+    t.diagnostic(JSON.stringify({ tamper, preservedAnalysisOid: JSON.parse(readEvidence(f.input.source.commonDir, latest(attempts[semanticRound - 1], `${targetKey}:continuation`).resultRef).toString()).drafts.code_behavior_analyze.oid, rejectedSemanticRef: semanticRef, finalCalls: targetCalls.filter(call => call.attempt === rounds), failureCode: last.failure?.code }))
+    return
+  }
+  assert.deepEqual(targetCalls.map(call => [call.attempt, call.purpose]), [[1, 'code_behavior_analyze'], ...Array.from({ length: semanticRound }, (_, index) => [index + 1, 'code_behavior_review']), ...staleCarry ? [[staleRound, 'code_behavior_review']] : [], [rounds, 'code_behavior_analyze'], [rounds, 'code_behavior_review']], `最新业务repair必须触发分析，不能复活更早readyAnalysis: ${JSON.stringify(last.failure)}`)
+  assert.deepEqual(calls.filter(call => call.domain === 'IMPORT').map(call => [call.attempt, call.purpose]), [[1, 'code_behavior_analyze'], [1, 'code_behavior_review']])
+  const provenance = JSON.parse(readEvidence(f.input.source.commonDir, latest(last, `${targetKey}:continuation-provenance`).resultRef).toString())
+  assert.equal(provenance.fromAttemptId, attempts[semanticRound - 1].id); assert.deepEqual(provenance.resultRef, semanticRef)
+  assert.deepEqual(latest(last, siblingKey).resultRef, siblingRef)
+  const fresh = targetCalls.filter(call => call.attempt === rounds)
+  assert.notEqual(fresh[0].sessionId, fresh[1].sessionId); assert.notEqual(fresh[0].threadId, fresh[1].threadId)
+  assert.deepEqual(readTree(f.input.source.commonDir, f.input.immutableTree).filter(entry => !entry.path.startsWith('.spec/')), frozenObjects)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+  assert.equal(store.listJournals(f.operation.id).length, 0)
+  t.diagnostic(JSON.stringify({ protocolRounds, staleCarry, coldRestarts: rounds - 1, calls, latestSemanticRef: semanticRef, siblingRef, reusedSiblingRef: latest(last, siblingKey).resultRef, finalStatus: store.readOperation(f.operation.id).phase }))
 })
 
 
