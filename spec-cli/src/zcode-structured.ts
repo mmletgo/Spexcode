@@ -3,7 +3,7 @@ import { Ajv } from 'ajv'
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, symlinkSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
 import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
@@ -440,7 +440,7 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
   const cliSha256 = bytesDigest(cliPath), builtinExists = existsSync(zcodeCapability.builtinPath), builtinSha256 = builtinExists ? bytesDigest(zcodeCapability.builtinPath) : undefined
   if (!genericNativeConfiguration && (cliSha256 !== zcodeCapability.cliSha256 || !builtinExists || builtinSha256 !== zcodeCapability.builtinSha256)) throw new StructuredSessionError('unsupported', 'ZCode CLI or public builtin capability digest is unverified')
   mkdirSync(root, { recursive: true, mode: 0o700 })
-  const runtime = join(root, 'runtime'), home = join(runtime, 'home'), ledgerRoot = join(runtime, 'frozen-mcp'), tmp = mkdtempSync('/private/tmp/spex-zcode-tmp-'), workspace = worktree ? worktreePath! : mkdtempSync('/private/tmp/spex-zcode-frozen-')
+  const runtime = join(root, 'runtime'), home = join(runtime, 'home'), ledgerRoot = join(runtime, 'frozen-mcp'), tmp = mkdtempSync(worktree ? join(tmpdir(), 'spex-zcode-tmp-') : '/private/tmp/spex-zcode-tmp-'), workspace = worktree ? worktreePath! : mkdtempSync('/private/tmp/spex-zcode-frozen-')
   for (const path of [runtime, home, ledgerRoot, join(home, '.zcode/cli'), join(home, '.zcode/v2')]) mkdirSync(path, { recursive: true, mode: 0o700 })
   const config = join(home, '.zcode/cli/config.json'), credentialSource = join(homedir(), '.zcode/v2/credentials.json'), personal = join(homedir(), '.zcode/v2/provider_config.json'), credentialLink = join(home, '.zcode/v2/credentials.json')
   writeJson(config, worktree ? zcodeWorktreeConfiguration() : zcodeRuntimeConfiguration(), true)
