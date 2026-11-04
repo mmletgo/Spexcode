@@ -263,8 +263,8 @@ export function decodeZCodeJsonText(rawText: string): string {
 /** 冷恢复只重读内容寻址原始见证和标准化历史，绝不启动 CLI 或重发工具。 */
 export function verifyZCodeFrozenReadProof(ref: FrozenContextRef, proof: ZCodeFrozenReadProof, identity: ZCodeFrozenIdentity, expectedModel?: ZCodeFrozenModel, result?: { output: unknown }): void {
   if (proof.version !== 4 || proof.provider !== 'zcode' || proof.contextDigest !== ref.contextDigest || proof.threadId !== identity.threadId || proof.turnId !== identity.turnId
-    || !digest(proof.witnessDigest) || !digest(proof.historyDigest) || identity.inputId !== undefined && proof.inputId !== identity.inputId || identity.prompt !== undefined && proof.promptDigest !== sha(identity.prompt)) stale('proof differs from the exact context/session/turn/input')
-  if (expectedModel && (proof.providerId !== expectedModel.providerId || proof.modelId !== expectedModel.modelId || expectedModel.cliVersion !== undefined && proof.cliVersion !== expectedModel.cliVersion || expectedModel.cliSha256 !== undefined && proof.cliSha256 !== expectedModel.cliSha256)) stale('proof differs from its fixed model/CLI')
+    || !digest(proof.witnessDigest) || !digest(proof.historyDigest) || identity.inputId !== undefined && proof.inputId !== identity.inputId || identity.prompt !== undefined && proof.promptDigest !== sha(identity.prompt)) stale('evidence differs from the exact context/session/turn/input')
+  if (expectedModel && (proof.providerId !== expectedModel.providerId || proof.modelId !== expectedModel.modelId || expectedModel.cliVersion !== undefined && proof.cliVersion !== expectedModel.cliVersion || expectedModel.cliSha256 !== undefined && proof.cliSha256 !== expectedModel.cliSha256)) stale('evidence differs from its fixed model/CLI')
   const bytes = readFileSync(witnessPath(ref, proof.witnessDigest)), history = readFileSync(join(dirname(ref.manifestPath), 'histories', proof.historyDigest))
   if (sha(bytes) !== proof.witnessDigest || sha(history) !== proof.historyDigest) stale('saved witness or normalized history digest differs')
   const witness = JSON.parse(bytes.toString('utf8')) as ZCodeFrozenWitness
@@ -280,5 +280,5 @@ export function verifyZCodeFrozenReadProof(ref: FrozenContextRef, proof: ZCodeFr
     catch (error) { if (!(error instanceof SyntaxError)) throw error; stale('authoritative native response is not one JSON value') }
     if (!isDeepStrictEqual(output, result.output)) stale('result differs from its authoritative native response')
   }
-  if (!isDeepStrictEqual(actual, proof)) stale('proof differs from its authoritative native witness')
+  if (!isDeepStrictEqual(actual, proof)) stale('evidence differs from its authoritative native witness')
 }

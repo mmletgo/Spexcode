@@ -7,7 +7,7 @@ import { sessionIdForCreateKey, readSessionCreateTermination, recoverSessionCrea
 import { cancelStructuredSession, runStructuredSession, SettledSessionCreateTimeoutError, StructuredSessionError, type StructuredCancellationResult } from '../session-structured.js'
 import { assertRejectedOutput, prepareFrozenReaderRuntime, structuredExecutionPolicy, pinNativeConfiguration, pinZCodeToolPolicy, type FrozenReaderRuntime, type StructuredExecution } from '../session-structured-policy.js'
 import { assertFrozenBinding, prepareFrozenPrompt } from '../frozen-context.js'
-import { verifyStructuredFrozenReadProof as verifyFrozenReadProof } from '../structured-frozen-proof.js'
+import { verifyStructuredFrozenReadProof as verifyFrozenReadProof } from '../structured-frozen-evidence.js'
 import { nativeWorktreePrompt } from '../native-worktree-runtime.js'
 import { verifyStageResult } from './stage-worktree.js'
 import { zcodeNativeModel } from '../zcode-structured.js'
@@ -116,10 +116,10 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
       }
       if (request.frozenContext) {
         if (!result.frozenReadProof) throw new StructuredSessionError('stale_result', 'native frozen result has no real history coverage evidence')
-        if (execution.version === (execution.timeoutMs === null ? 5 : 3) && execution.policy === 'claude-frozen-read-only-v1' && (result.frozenReadProof.version !== 3 || result.frozenReadProof.model !== request.model?.slice(7))) throw new StructuredSessionError('stale_result', 'Claude result lacks its exact native provider/model proof')
+        if (execution.version === (execution.timeoutMs === null ? 5 : 3) && execution.policy === 'claude-frozen-read-only-v1' && (result.frozenReadProof.version !== 3 || result.frozenReadProof.model !== request.model?.slice(7))) throw new StructuredSessionError('stale_result', 'Claude result lacks its exact native provider/model evidence')
         if (execution.version === (execution.timeoutMs === null ? 5 : 4) && execution.policy === 'zcode-frozen-read-only-v1') {
           const model = zcodeNativeModel(request.model)
-          if (result.frozenReadProof.version !== 4 || result.frozenReadProof.providerId !== model.providerId || result.frozenReadProof.modelId !== model.modelId) throw new StructuredSessionError('stale_result', 'ZCode result lacks its exact native provider/model proof')
+          if (result.frozenReadProof.version !== 4 || result.frozenReadProof.providerId !== model.providerId || result.frozenReadProof.modelId !== model.modelId) throw new StructuredSessionError('stale_result', 'ZCode result lacks its exact native provider/model evidence')
         }
         verifyFrozenReadProof(request.frozenContext, result.frozenReadProof, { threadId: result.threadId, turnId: result.turnId }, request.readerRuntime?.version === 2 ? request.readerRuntime.toolOutputTokenLimit : undefined, { output: result.output })
       }
@@ -155,7 +155,7 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
     const restoreSettledFailure = (): StructuredSessionError | null => {
       if (checkpoint.status !== 'failed') return null
       const stop = checkpoint.stop
-      if (!checkpoint.failure || checkpoint.nativeState !== 'failed' || !stop?.nativeStopped || stop.state !== 'failed' || stop.sessionId !== expectedSessionId || (stop.threadId ?? null) !== checkpoint.session.threadId || (stop.turnId ?? null) !== checkpoint.session.turnId) throw new StructuredSessionError('stale_result', 'native failure lacks its exact durable stop proof', errorIdentity())
+      if (!checkpoint.failure || checkpoint.nativeState !== 'failed' || !stop?.nativeStopped || stop.state !== 'failed' || stop.sessionId !== expectedSessionId || (stop.threadId ?? null) !== checkpoint.session.threadId || (stop.turnId ?? null) !== checkpoint.session.turnId) throw new StructuredSessionError('stale_result', 'native failure lacks its exact durable stop evidence', errorIdentity())
       let rejectedOutput = checkpoint.failure.rejectedOutput
       if (rejectedOutput) {
         assertRejectedOutput(rejectedOutput, creationPrompt, execution, errorIdentity())
@@ -293,7 +293,7 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
             if (state?.state !== 'failed' || !state.rejectedOutput || hash(state.rejectedOutput) !== hash(rejectedOutput) || outcome.error.sessionId !== expectedSessionId || outcome.error.threadId !== state.threadId || outcome.error.turnId !== state.turnId) throw new StructuredSessionError('stale_result', 'rejected final output lacks its matching failed native record', errorIdentity())
             assertRejectedOutput(rejectedOutput, creationPrompt, execution, state)
             const ref = blobs.put(Buffer.from(rejectedOutput.text, 'utf8'))
-            if (ref.sha256 !== rejectedOutput.sha256) throw new StructuredSessionError('stale_result', 'rejected final output blob differs from its exact native bytes', errorIdentity())
+            if (ref.sha256 !== rejectedOutput.sha256) throw new StructuredSessionError('stale_result', 'rejected final output content differs from its exact native bytes', errorIdentity())
             const failedWorktree = outcome.error.failedWorktree
             if (failedWorktree) {
               if (!request.worktree || !state.cancellation?.nativeStopped || !state.failedWorktree || hash(state.failedWorktree) !== hash(failedWorktree)) throw new StructuredSessionError('stale_result', 'failed stage Git witness lacks its matching stopped failed record', errorIdentity())

@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
 import { detachedRuntimeIsGone, processStartToken, verifyDetachedRuntime, writeDetachedRuntimeReceipt, type ProcessIdentity } from '@spexcode/spec-core'
 import { rejectedFinalOutput, structuredExecutionTimer, StructuredSessionError, structuredExecutionPolicy, structuredSeatbeltProfile, type StructuredExecution } from './session-structured-policy.js'
-import { decodeZCodeJsonText, type ZCodeFrozenReadProof, type ZCodeFrozenWitness } from './zcode-frozen-proof.js'
+import { decodeZCodeJsonText, type ZCodeFrozenReadProof, type ZCodeFrozenWitness } from './zcode-frozen-evidence.js'
 
 export const zcodeCapability = Object.freeze({
   cliVersion: '0.17.1',
@@ -156,7 +156,7 @@ export function zcodeProofEvent(event: NativeEvent): NativeEvent | undefined {
   if (['turn.started', 'turn.completed', 'turn.failed', 'turn.cancelled', 'tool.updated'].includes(event.type)) return event
   if (event.type !== 'session.updated' || typeof event.payload.toolCount !== 'number') return undefined
   const keys = ['messageCount', 'providerId', 'modelId', 'temperature', 'maxTokens', 'toolCount', 'iteration']
-  if (Object.keys(event.payload).some(key => !keys.includes(key))) throw new StructuredSessionError('stale_result', 'ZCode ModelRequest includes unknown proof fields')
+  if (Object.keys(event.payload).some(key => !keys.includes(key))) throw new StructuredSessionError('stale_result', 'ZCode ModelRequest includes unknown evidence fields')
   return event
 }
 
@@ -339,7 +339,7 @@ async function settleResult(plan: NativePlan, prompt: string, execution: ZCodeSt
   const witness = { version: 1, provider: 'zcode', cliVersion: plan.cliVersion, cliSha256: plan.cliSha256, providerId: model.providerId, modelId: model.modelId, sessionId: plan.sessionId, turnId: plan.turnId, inputId: plan.inputId, prompt: zcodeExecutionPrompt(prompt, execution), send, messages, events,
     mcpHistory: { records, digest: digest(records) } } as ZCodeFrozenWitness
   if (!events.some(event => digest(event) === digest(terminal))) throw new StructuredSessionError('stale_result', 'ZCode terminal differs from its original native events')
-  const { proveZCodeFrozenReads } = await import('./zcode-frozen-proof.js')
+  const { proveZCodeFrozenReads } = await import('./zcode-frozen-evidence.js')
   const frozenReadProof = proveZCodeFrozenReads(execution.frozenContext!, witness)
   const output = decodeZCodeStructuredText(terminal.payload.response), validate = new Ajv({ allErrors: true }).compile(execution.schema)
   if (!validate(output)) throw new StructuredSessionError('failed', 'ZCode terminal JSON does not match the pinned JSON schema')
@@ -373,7 +373,7 @@ async function completedResult(root: string, prompt: string, execution: ZCodeStr
     || digest(saved.witness) !== saved.result.frozenReadProof.witnessDigest
     || !exit.stopped || !exit.idle || !exit.closed || exit.code !== 0 || exit.signal !== null)
     throw new StructuredSessionError('stale_result', 'ZCode completion cache differs from original native evidence')
-  const { verifyZCodeFrozenReadProof } = await import('./zcode-frozen-proof.js')
+  const { verifyZCodeFrozenReadProof } = await import('./zcode-frozen-evidence.js')
   const proof = saved.result.frozenReadProof
   const terminal = JSON.parse(readFileSync(join(root, 'terminal.json'), 'utf8')) as NativeEvent
   if (!saved.witness.events.some(event => digest(event) === digest(terminal))) throw new StructuredSessionError('stale_result', 'ZCode original terminal differs from completion')
@@ -382,10 +382,10 @@ async function completedResult(root: string, prompt: string, execution: ZCodeStr
   catch (error) { if (!(error instanceof SyntaxError)) throw error; throw new StructuredSessionError('stale_result', 'ZCode completed response is not one strict JSON document') }
   const validate = new Ajv({ allErrors: true }).compile(execution.schema)
   verifyZCodeFrozenReadProof(execution.frozenContext!, saved.result.frozenReadProof, { threadId: plan.sessionId, turnId: plan.turnId!, inputId: plan.inputId, prompt: nativePrompt }, { ...model, cliVersion: plan.cliVersion, cliSha256: plan.cliSha256 }, { output })
-  if (!validate(output) || saved.result.text !== JSON.stringify(output) || saved.result.threadId !== plan.sessionId || saved.result.turnId !== plan.turnId) throw new StructuredSessionError('stale_result', 'ZCode original terminal, schema or proof differs from completion')
+  if (!validate(output) || saved.result.text !== JSON.stringify(output) || saved.result.threadId !== plan.sessionId || saved.result.turnId !== plan.turnId) throw new StructuredSessionError('stale_result', 'ZCode original terminal, schema or evidence differs from completion')
   if (execution.state === 'completed') {
     if (execution.threadId !== plan.sessionId || execution.turnId !== plan.turnId || execution.resultDigest !== digest(execution.output) || execution.resultDigest !== digest(output)
-      || !execution.frozenReadProof || digest(execution.frozenReadProof) !== digest(proof)) throw new StructuredSessionError('stale_result', 'ZCode durable completed result or proof differs')
+      || !execution.frozenReadProof || digest(execution.frozenReadProof) !== digest(proof)) throw new StructuredSessionError('stale_result', 'ZCode durable completed result or evidence differs')
   } else if (!ownedProcessesStopped(plan)) return null
   return saved.result
 }
@@ -537,7 +537,7 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
         if (!sent || plan.turnId || !event.turnId || event.payload.inputId !== plan.inputId || event.payload.queryId !== plan.queryId) throw new StructuredSessionError('stale_result', 'ZCode has no exact original input/query turn identity')
         plan = { ...plan, turnId: event.turnId }; writeJson(join(root, 'plan.json'), plan); await callbacks.onNative(native()); await callbacks.onTurn(plan.turnId!)
       }
-      if (!plan.turnId || event.turnId !== plan.turnId) throw new StructuredSessionError('stale_result', 'ZCode proof event belongs to another turn')
+      if (!plan.turnId || event.turnId !== plan.turnId) throw new StructuredSessionError('stale_result', 'ZCode evidence event belongs to another turn')
       if (event.type === 'session.updated' && (!plan.model || event.payload.providerId !== plan.model.providerId || event.payload.modelId !== plan.model.modelId || (!worktree && event.payload.toolCount !== 1))) throw new StructuredSessionError('unsupported', 'ZCode actual ModelRequest identity or toolCount differs')
       if (event.type === 'tool.updated' && event.payload.kind === 'scheduled' && !worktree && event.payload.toolName !== zcodeCapability.tool) throw new StructuredSessionError('unsupported', 'ZCode scheduled an uncontrolled tool')
       events.push(event)
