@@ -9,7 +9,7 @@ import { basename, dirname, join } from 'node:path'
 import { prepareFrozenPrompt, readFrozenManifest, claudeFrozenContextPrompt, freezeContext, readFrozenRange, proveClaudeFrozenReads, verifyFrozenReadProof, claudeMessageDigest, readClaudeApiSourceMetadata, readClaudePublicHistory, type ClaudeFrozenWitness, type ClaudePublicMessage, type ClaudePublicRecord } from './frozen-context.js'
 import { structuredExecutionPolicy, structuredRealmRoot, type StructuredExecution } from './session-structured-policy.js'
 import { sampleNativeWorktreeProcesses } from './native-worktree-runtime.js'
-import { claudeNativeModel, claudeWorktreeArgs, claudeStructuredArgs, claudeStructuredTurn, prepareClaudeAuthenticationEnvironment } from './claude-structured.js'
+import { claudeNativeModel, claudeWorktreeArgs, claudeStructuredArgs, claudeStructuredTurn, observeClaudeWorktreeMissingFinal, assertClaudeStoppedDraftSource, prepareClaudeAuthenticationEnvironment } from './claude-structured.js'
 
 const contentBlocks = (message: ClaudePublicMessage): Exclude<ClaudePublicMessage['content'], string> => {
   assert(Array.isArray(message.content))
@@ -1169,6 +1169,17 @@ test('native configuration schema exhaustion authenticates per-request wire mode
     writeFileSync(join(root, 'public-history.json'), JSON.stringify({ version: 1, sessionId: 'session', history })); writeFileSync(join(root, 'plan.json'), JSON.stringify(plan))
     writeFileSync(join(root, 'init.json'), JSON.stringify({ ...init, model: undefined }))
     await assert.rejects(claudeStructuredTurn(realm, 'native', prompt, execution, noDispatch, workspace), { code: 'stale_result' })
+    const stopped: StructuredExecution = { ...execution, worktree: { ...execution.worktree!, mode: 'edit' }, state: 'cancelled', threadId: 'session', turnId: 'user', cancellation: { reason: 'cancelled', requestedAt: 1, nativeStopped: true, acknowledged: false, nativeStatus: 'processGroupGone' } }
+    const editPolicy = structuredExecutionPolicy(stopped), editPlan = { ...plan, policyDigest: hash(editPolicy), requestDigest: hash({ prompt, policy: editPolicy }) }
+    for (const [name, value] of Object.entries({ 'plan.json': editPlan, 'init.json': init, 'result.json': { ...result, subtype: 'success', is_error: false }, 'exit.json': { code: 0, signal: null, stopped: true } })) writeFileSync(join(root, name), JSON.stringify(value))
+    const paths = ['plan.json', 'init.json', 'user-echo.json', 'result.json', 'exit.json', 'public-history.json'], before = paths.map(name => readFileSync(join(root, name)))
+    assertClaudeStoppedDraftSource(prompt, stopped, workspace)
+    assert.equal(observeClaudeWorktreeMissingFinal(prompt, stopped, workspace).code, 'structured_output_format_invalid')
+    assert.deepEqual(paths.map(name => readFileSync(join(root, name))), before, 'v2新观察只读原已封存字节')
+    rmSync(join(root, 'public-history.json'))
+    assert.throws(() => observeClaudeWorktreeMissingFinal(prompt, stopped, workspace), { code: 'stale_result' })
+    assert.equal(existsSync(join(root, 'public-history.json')), false, '缺sealed history不得补封存旧原件')
+    assert.deepEqual(readFileSync(join(root, 'plan.json')), before[0]); assert.equal(existsSync(join(root, 'completed.json')), false)
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })
 

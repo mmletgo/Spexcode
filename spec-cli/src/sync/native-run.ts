@@ -25,7 +25,7 @@ export function pinSyncNativeRequest(request: FrozenRequest, saved: Pick<Structu
   if (nativeConfiguration && saved?.effort === undefined) delete pinned.effort
   return pinned
 }
-export type NativeRunRecord = Pick<SessRec, 'session' | 'status' | 'harnessSessionId' | 'structuredExecution' | 'createRequestId' | 'createPayloadHash'>
+export type NativeRunRecord = Pick<SessRec, 'session' | 'status' | 'harnessSessionId' | 'structuredExecution' | 'createRequestId' | 'createPayloadHash'> & Partial<Pick<SessRec, 'worktreePath'>>
 export type AttemptRunnerOptions = {
   resourceRecoveryOnly?: true
   runtime?: { run: typeof runStructuredSession; cancel: typeof cancelStructuredSession; readRecord: (id: string) => NativeRunRecord | null; readCreateTermination?: typeof readSessionCreateTermination; recoverCreateTermination?: typeof recoverSessionCreateTermination }
@@ -146,7 +146,7 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
         rejectedOutput = packet
       }
       if (state.failedWorktree) {
-        if (!request.worktree || !rejectedOutput) throw new StructuredSessionError('stale_result', 'failed Git witness lacks its original rejected request', errorIdentity())
+        if (!request.worktree || !rejectedOutput && !['structured_output_format_invalid', 'structured_output_retries_exhausted'].includes(state.errorCode ?? '')) throw new StructuredSessionError('stale_result', 'failed Git witness lacks its original rejected request', errorIdentity())
         verifyStageResult(operation.input.source.commonDir, request.worktree, { worktree: state.failedWorktree })
       }
       return { code: state.errorCode ?? 'failed', message: state.error!, ...(rejectedOutput ? { rejectedOutput } : {}), ...(state.failedWorktree ? { failedWorktree: state.failedWorktree } : {}) }
@@ -162,6 +162,8 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
       if (checkpoint.status !== 'failed') return null
       const stop = checkpoint.stop
       if (!checkpoint.failure || checkpoint.nativeState !== 'failed' || !stop?.nativeStopped || stop.state !== 'failed' || stop.sessionId !== expectedSessionId || (stop.threadId ?? null) !== checkpoint.session.threadId || (stop.turnId ?? null) !== checkpoint.session.turnId) throw new StructuredSessionError('stale_result', 'native failure lacks its exact durable stop evidence', errorIdentity())
+      const record = runtime.readRecord(expectedSessionId), state = record?.structuredExecution
+      if (checkpoint.failure.failedWorktree && !checkpoint.failure.rejectedOutput && (!record || !state || record.session !== expectedSessionId || record.worktreePath !== checkpoint.failure.failedWorktree.worktreePath || record.createRequestId !== sha(dispatch!.sessionCreateKey) || record.createPayloadHash !== expectedCreateHash || hash(structuredExecutionPolicy(state)) !== hash(execution) || record.harnessSessionId !== null && record.harnessSessionId !== state.threadId || state.state !== 'failed' || (state.errorCode ?? 'failed') !== checkpoint.failure.code || state.error !== checkpoint.failure.message || state.threadId !== stop.threadId || state.turnId !== stop.turnId || state.cancellation?.nativeStopped !== true || state.cancellation.acknowledged !== stop.acknowledged || state.cancellation.nativeStatus !== stop.nativeStatus || state.cancellation.error !== stop.error || hash(state.failedWorktree ?? null) !== hash(checkpoint.failure.failedWorktree ?? null))) throw new StructuredSessionError('stale_result', 'native failure checkpoint differs from its canonical stopped failed record', errorIdentity())
       let rejectedOutput = checkpoint.failure.rejectedOutput
       if (rejectedOutput) {
         assertRejectedOutput(rejectedOutput, creationPrompt, execution, errorIdentity())
@@ -170,7 +172,7 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
         rejectedOutput = { ...rejectedOutput, ref }
       }
       if (checkpoint.failure.failedWorktree) {
-        if (!request.worktree || !checkpoint.failure.rejectedOutput) throw new StructuredSessionError('stale_result', 'failed Git witness lacks its exact rejected native request', errorIdentity())
+        if (!request.worktree || !checkpoint.failure.rejectedOutput && !['structured_output_format_invalid', 'structured_output_retries_exhausted'].includes(checkpoint.failure.code)) throw new StructuredSessionError('stale_result', 'failed Git witness lacks its exact rejected native request', errorIdentity())
         verifyStageResult(operation.input.source.commonDir, request.worktree, { worktree: checkpoint.failure.failedWorktree })
       }
       return new StructuredSessionError(checkpoint.failure.code, checkpoint.failure.message, { ...errorIdentity(), rejectedOutput, failedWorktree: checkpoint.failure.failedWorktree })
@@ -290,6 +292,7 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
           const stoppedFailure = state ? stoppedFailedEvidence(state) : null
           if (stoppedFailure) {
             if (!(outcome.error instanceof StructuredSessionError) || outcome.error.code !== stoppedFailure.code || state!.error !== outcome.error.message || outcome.error.sessionId !== expectedSessionId || outcome.error.threadId !== state!.threadId || outcome.error.turnId !== state!.turnId) throw new StructuredSessionError('stale_result', 'native failure lacks its matching stopped failed record', errorIdentity())
+            if (hash(outcome.error.failedWorktree ?? null) !== hash(state!.failedWorktree ?? null)) throw new StructuredSessionError('stale_result', 'failed stage Git witness differs from its exact stopped native error', errorIdentity())
             settle('failed', { failure: stoppedFailure, stop: { sessionId: expectedSessionId, state: 'failed', threadId: state!.threadId, turnId: state!.turnId, nativeStopped: true, acknowledged: state!.cancellation!.acknowledged, nativeStatus: state!.cancellation!.nativeStatus } })
           }
           if (outcome.error instanceof StructuredSessionError && outcome.error.code === 'native_rpc_timeout' && !stoppedFailure) throw new StructuredSessionError('stale_result', 'typed native RPC failure has no exact stopped failed record', errorIdentity())

@@ -124,9 +124,10 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
       ? await claudeStructuredTurn(requiredRealmRoot(execution), id, prompt, execution, { ...callbacks, onNative: async native => update({ claudeNative: native }) }, nativeWorktree ? rec.worktreePath : undefined)
       : await codexStructuredTurn(generation!.endpoint.socketPath, rec.worktreePath, readFileSync(sessionArtifactPath(id, 'launch'), 'utf8'), execution, callbacks)
     } catch (error) {
-      if (nativeWorktree && error instanceof StructuredSessionError && error.rejectedOutput) {
+      if (nativeWorktree && error instanceof StructuredSessionError && (error.rejectedOutput || ['structured_output_format_invalid', 'structured_output_retries_exhausted'].includes(error.code))) {
         const current = readRecord(id)!.structuredExecution!
-        assertRejectedOutput(error.rejectedOutput, prompt, execution, current)
+        if (!error.threadId || !error.turnId || error.threadId !== current.threadId || error.turnId !== current.turnId) throw new StructuredSessionError('stale_result', 'failed stage format error differs from its exact native identity')
+        if (error.rejectedOutput) assertRejectedOutput(error.rejectedOutput, prompt, execution, current)
         const stop = zcode ? await stopZCodeStructuredTurn(current as Parameters<typeof stopZCodeStructuredTurn>[0]) : await stopClaudeStructuredTurn(current)
         if (!stop.nativeStopped) throw new StructuredSessionError('cancellation_pending', stop.error || 'failed native stage stop remains unproven')
         failedStage = { stop }
@@ -285,7 +286,7 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
       if (state.state === 'failed') {
         if (state.rejectedOutput) assertRejectedOutput(state.rejectedOutput, request.prompt, execution, state)
         if (state.failedWorktree) {
-          if (!request.worktree || !state.rejectedOutput || !state.cancellation?.nativeStopped || state.failedWorktree.worktreePath !== rec!.worktreePath) throw new StructuredSessionError('stale_result', 'failed stage Git witness lacks its original stopped request and record')
+          if (!request.worktree || !state.rejectedOutput && !['structured_output_format_invalid', 'structured_output_retries_exhausted'].includes(state.errorCode ?? '') || !state.cancellation?.nativeStopped || state.failedWorktree.worktreePath !== rec!.worktreePath) throw new StructuredSessionError('stale_result', 'failed stage Git witness lacks its original stopped request and record')
           assertNativeWorktreeResult(request.root, request.worktree, state.failedWorktree)
         }
         throw new StructuredSessionError(state.errorCode ?? 'failed', state.error || 'structured execution failed', { rejectedOutput: state.rejectedOutput, failedWorktree: state.failedWorktree })

@@ -675,3 +675,7 @@ Native RPC 的实际计时器故障保留原 typed code/message；复用精确�
 Native P0按attempt显式冻结code-behavior-draft-v1：分析和独审复用P1的Git临时JSON草稿与精确只读schema，先保活实际提交blob再验证syntax/schema；失败跨attempt在原文件续改，不从零重答。每个owner/purpose独立，源码/tests/Spec及absence保持。独审格式失败保此前已校验分析的原draft及Native trace，仅重开独立review；业务拒绝仍回分析和完整独审。诊断只进入真实请求，不改变同业务输入的缓存身份，原预算、fence、写范围与最终验证不变。旧已reserved read请求不补协议；原生格式失败仅经authenticateNativeRejectedFinal核原请求/精确schema/input/owner、canonical错误与停止证明后，将CAS原bytes/errors作为下一真实seed的临时输入，明确区别于Git稿；真实Agent正常提交后才生成新Git身份，不改写历史原件。
 
 P0草稿持久协议由sync writer23围栏保护，避免marker已落盘但dispatch未reserved时被旧writer22忽略。升级必须先停稳旧writer并结算或保留真实资源，经原SQLite online backup/组件事务22→23，保全部旧checksum、请求、记录与CAS；回滚先停新writer，恢复升级前v22一致备份与原evidence/Git refs，不删marker降级。
+
+原生exit0/success缺少必需structured_output仍严格失败；只有完整原身份/停止认证后才给typed格式诊断，正文packet保持缺席。已停真实Git草稿可独立于packet保留并沿原预算续修。历史无typed witness和正式安全暂停的最新已提交编辑稿，只在新的有效attempt中经原request/owner/input/seed/schema/path、source/tests对象与正式stop/removed全值重验，观察为未批准Git材料并复制原字节到新seed。原failed、Native记录/计划/checkpoint一律不补签，旧CLI键不重发；actual missing-final才有格式诊断，普通pause不造final/raw/错误码。新观察provenance记时间、原失败及Native引用、实际HEAD/tree/OID/正文SHA，旧批准、模型选择、总预算、fence与V1–V4/Docker/严格Git/采纳门保持。
+
+已有认证draft不屏蔽更晚正式停止执行的最新Git观察。材料选择携当前draft作瞬态参数，仅当原正常Native/注入trace认证定位到该draft来源，暂停资源在既有retry来源顺序中严格更晚、原seed与当前业务树除本owner临时稿/schema外全部对象相同，且所有原材料门槛仍过时，才复制其最新正常Git正文到新seed。更老暂停、未知来源、不同起点及普通Native/material fallback不能覆盖已有draft；无更晚可救稿则保持原draft、错误与标签，不继承批准。该参数不进入业务摘要、旧请求或持久协议。

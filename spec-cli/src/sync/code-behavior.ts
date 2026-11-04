@@ -44,7 +44,7 @@ export type CodeBehaviorContinuation = {
   readyAnalysis?: CompletedBehaviorDraft
   reviewResult?: CompletedBehaviorDraft
 }
-export type CodeBehaviorCheckpoints = { loadMaterial?(purpose: BehaviorPurpose, schemaDigest: string, inputDigest: string, request: Pick<ElaborationSessionRequest, 'prompt' | 'worktree'>): ElaborationDraftMaterial | null; load(inputDigest: string): CodeBehaviorContinuation | null; save(value: CodeBehaviorContinuation): void }
+export type CodeBehaviorCheckpoints = { loadMaterial?(purpose: BehaviorPurpose, schemaDigest: string, inputDigest: string, request: Pick<ElaborationSessionRequest, 'prompt' | 'worktree'>, existingDraft?: ElaborationDraft): ElaborationDraftMaterial | null; load(inputDigest: string): CodeBehaviorContinuation | null; save(value: CodeBehaviorContinuation): void }
 type Proposal = { changes: Omit<CodeBehaviorChange, 'id'>[]; facts: CodeBehaviorAnalysis['facts']; acceptanceChanges: Omit<AcceptanceChangeProposal, 'action'>[]; newNodes: { codePath: string; parentNodeId: string; basis: string }[]; resolutions: CodeBehaviorAnalysis['resolutions'] }
 const within = (path: string, paths: readonly string[]): boolean => paths.some(parent => path === parent || path.startsWith(`${parent}/`))
 const sorted = (ids: readonly string[]): string[] => [...new Set(ids)].sort()
@@ -503,8 +503,8 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
     const binding: StageDraftBinding = { ownerDigest, sourceInputId: input.snapshot.id, schemaDigest: contentHash(JSON.stringify(schema)), path: `.spex-sync-drafts/${ownerDigest}.json` }
     const prior = continuation?.drafts[purpose]
     if (prior && (prior.ownerDigest !== ownerDigest || prior.path !== binding.path || prior.schemaDigest !== binding.schemaDigest)) throw new Error('P0草稿owner/schema与当前阶段不匹配')
-    const material = draftMode && !prior ? checkpoints?.loadMaterial?.(purpose, binding.schemaDigest, inputDigest, { prompt, worktree: base }) : undefined
-    const source = prior ? readStageDraft(commonDir, prior, binding) : material?.source
+    const material = draftMode && (purpose !== 'code_behavior_analyze' || !continuation?.readyAnalysis) ? checkpoints?.loadMaterial?.(purpose, binding.schemaDigest, inputDigest, { prompt, worktree: base }, prior) : undefined
+    const source = material?.source ?? (prior ? readStageDraft(commonDir, prior, binding) : undefined)
     if (purpose === 'code_behavior_analyze' && continuation?.readyAnalysis) {
       const ready = continuation.readyAnalysis, trace = ready.trace
       if (!prior || source === undefined || ready.draftOid !== prior.oid || ready.resultCommit !== prior.resultCommit || prior.errors.length || trace.purpose !== purpose || trace.inputDigest !== inputDigest || !trace.sessionId || !trace.threadId || !trace.turnId) throw new Error('P0已校验分析缺少原草稿及真实trace')
@@ -516,7 +516,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
     }
     if (continuation && purpose === 'code_behavior_analyze') { delete continuation.drafts.code_behavior_review; delete continuation.reviewResult; delete continuation.readyAnalysis }
     const seed = draftMode ? stageWorktree(commonDir, input.snapshot.headCommit, overlayStageTree(commonDir, base!.tree, [{ path: binding.path.replace(/\.json$/, '.schema.json'), source: JSON.stringify(schema) }, ...(source === undefined ? [] : [{ path: binding.path, source }])]), 'edit') : base
-    if (draftMode) prompt += `\n草稿文件=${binding.path}；${material ? material.sourceKind === 'git_draft' ? '认证的原Git分析草稿已按原字节复制到当前seed；沿该原文件核实分类并续修，旧批准不继承。' : material.sourceKind === 'native_output' ? '认证的旧只读Native成功结构化输出已序列化为本轮临时材料；它不是历史Git草稿或新批准，在该文件核实分类并续修。' : '旧Native原输出材料已按认证CAS原字节复制为本轮临时输入，不是既有Git草稿；在该原文件继续修复。' : source === undefined ? '首次实际创建该文件。' : '已有原草稿已复制到当前seed，在原文件继续修改，不从零重答。'}本段规定输出运输方式，替代上文只返回JSON/不修改文件的运输要求；业务文件仍只读，唯一可写例外为此草稿。结构化业务JSON写入此临时文件，Spec、源码、全部测试、其他owner文件保持不变。只允许正常git add和git commit该草稿并保持clean；无需改正文时可正常commit --allow-empty，保留hooks。final只返回简短summary，不重答整份JSON。草稿仅为非权威诊断材料，不是raw、事实、批准或新授权。\n草稿业务schema只读文件=${binding.path.replace(/\.json$/, '.schema.json')}；先读取精确schema并自检，禁止修改schema。原具体错误：${JSON.stringify(prior?.errors ?? material?.errors ?? continuation?.errors?.[purpose] ?? [])}；本轮修复诊断：${JSON.stringify(input.repairDiagnostics ?? [])}`
+    if (draftMode) prompt += `\n草稿文件=${binding.path}；${material ? material.sourceKind === 'git_draft' ? '认证的原Git分析草稿已按原字节复制到当前seed；沿该原文件核实分类并续修，旧批准不继承。' : material.sourceKind === 'native_output' ? '认证的旧只读Native成功结构化输出已序列化为本轮临时材料；它不是历史Git草稿或新批准，在该文件核实分类并续修。' : '旧Native原输出材料已按认证CAS原字节复制为本轮临时输入，不是既有Git草稿；在该原文件继续修复。' : source === undefined ? '首次实际创建该文件。' : '已有原草稿已复制到当前seed，在原文件继续修改，不从零重答。'}本段规定输出运输方式，替代上文只返回JSON/不修改文件的运输要求；业务文件仍只读，唯一可写例外为此草稿。结构化业务JSON写入此临时文件，Spec、源码、全部测试、其他owner文件保持不变。只允许正常git add和git commit该草稿并保持clean；无需改正文时可正常commit --allow-empty，保留hooks。final只返回简短summary，不重答整份JSON。草稿仅为非权威诊断材料，不是raw、事实、批准或新授权。\n草稿业务schema只读文件=${binding.path.replace(/\.json$/, '.schema.json')}；先读取精确schema并自检，禁止修改schema。原具体错误：${JSON.stringify(material?.errors ?? prior?.errors ?? continuation?.errors?.[purpose] ?? [])}；本轮修复诊断：${JSON.stringify(input.repairDiagnostics ?? [])}`
     const nativeSchema = draftMode ? DRAFT_RECEIPT_SCHEMA : schema
     const request = { root: input.snapshot.source.canonicalRoot, base: seed?.baseCommit ?? input.snapshot.headCommit, ...(seed ? { worktree: seed } : {}), requestKey: `${input.requestKey}:${purpose}`, inputDigest, purpose, prompt, schema: nativeSchema, timeoutMs: input.timeoutMs, signal, model: syncModel(input), effort: 'high' as const, ...(!worktree && frozenEntries.length ? { frozenEntries } : {}) }
     let result: Awaited<ReturnType<ElaborationRunner>>

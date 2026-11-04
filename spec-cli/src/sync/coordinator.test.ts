@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import fs from 'node:fs'
 import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
@@ -9,7 +9,7 @@ import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { applyComponentMigrations, openProtocol, type SqlParam } from '@spexcode/session-protocol'
 import { CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
-import { putBlob } from '@spexcode/spec-core'
+import { putBlob, writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
 import { authenticateNativeRejectedFinal, readSyncCheckpoints, syncCheckpointArtifacts } from './checkpoint-evidence.js'
 import { outputErrors } from './elaboration-schema.js'
 import type { ContractCell, GeneratedElaboration, GeneratedTables } from './elaboration-markdown.js'
@@ -37,15 +37,16 @@ import { captureInputSnapshot, contentHash, readEvidence, readObject, readTree, 
 import { createAttemptRunner, type NativeRunCheckpoint, type NativeRunPlan, type NativeRunRecord } from './native-run.js'
 import { SyncStore } from './store.js'
 import { sessionIdForCreateKey } from '../sessions.js'
-import { writeRecord } from '../session-record.js'
+import { configuredSessionApplication } from '../session-application.js'
+import { readRecord, writeRecord } from '../session-record.js'
 import { claimFileMutex } from './file-mutex.js'
 import { composeAuthoredInput } from './author-input.js'
 import { controlledDecisionIdentity, guardControlledRequestPath, prepareControlledDecision, prepareControlledRequest } from './request-input.js'
 import { prepareSpecBodyEdit } from '../spec-body-edit.js'
 import { adaptElaborationNativeOutput } from '../../test/elaboration-native-output.js'
 import { pinZCodeToolPolicy, rejectedFinalOutput, StructuredSessionError, structuredExecutionPolicy } from '../session-structured-policy.js'
-import { nativeWorktreePrompt, nativeWorktreeResult } from '../native-worktree-runtime.js'
-import { SettledSessionCreateTimeoutError } from '../session-structured.js'
+import { nativeWorktreePrompt, nativeWorktreeResult, sampleNativeWorktreeProcesses } from '../native-worktree-runtime.js'
+import { cancelStructuredSession, SettledSessionCreateTimeoutError } from '../session-structured.js'
 import { freezeContext, prepareFrozenPrompt } from '../frozen-context.js'
 
 const contractPath = '.spec/project/export-contract/spec.md'
@@ -187,7 +188,108 @@ test('14attempt/1790CAS历史扫描交还控制，同一30秒fence到达首次�
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
 })
 
-test('P1失败summary的精确stopped Git稿跨attempt仍只作材料续改，不要求成功generation追踪', async t => {
+for (const [mode, defect] of [['missing-final', 'none'], ['pause', 'none'], ['pause', 'prior-draft'], ['missing-final', 'prior-draft'], ['pause', 'older-pause'], ['pause', 'not-started'], ['pause', 'no-commit'], ['missing-final', 'session'], ['missing-final', 'user'], ['missing-final', 'exit'], ['missing-final', 'unknown'], ['missing-final', 'completed'], ['pause', 'source'], ['pause', 'tests'], ['pause', 'scope'], ['pause', 'seed'], ['pause', 'thread'], ['pause', 'turn'], ['pause', 'schema'], ['pause', 'worktree'], ['pause', 'stop'], ['pause', 'request']] as const) test(`旧Native无typed witness的新attempt仅观察最新Git材料，旧原件不补签 mode=${mode}/${defect}`, async t => {
+  const f = await fixture(t, { maxAttempts: defect === 'older-pause' ? 4 : 3, maxCalls: 6, maxRepairs: defect === 'older-pause' ? 3 : 2, timeoutMs: 120000 }, false, original, 'project', original, { agentWorkflow: 'native-worktree-v1' }, undefined, 'code', 'claude:MiniMax-M3.1-Flash')
+  const latest = `{LATEST_UNAPPROVED_DRAFT${'x'.repeat((defect === 'prior-draft' || defect === 'older-pause' ? 85970 : 59388) - 24)}}`
+  let oldSession = '', oldPath = '', oldNativeRoot = '', originalRequest: ElaborationSessionRequest | undefined, continued = false
+  f.options.runner = async request => {
+    const operation = f.store.readOperation(f.operation.id), attempt = f.store.readAttempt(operation.currentAttemptId!)
+    assert.equal(request.purpose, 'code_behavior_analyze')
+    const path = /草稿文件=([^\s；]+)/.exec(request.prompt)![1], workspace = join(f.parent, `observed-${attempt.number}`), seed = request.worktree!
+    f.git('worktree', 'add', '--detach', workspace, seed.baseCommit)
+    if ((defect === 'prior-draft' || defect === 'older-pause') && attempt.number === 1) {
+      mkdirSync(join(workspace, path, '..'), { recursive: true }); writeFileSync(join(workspace, path), '{EARLIER_SEED_DRAFT' + 'a'.repeat(59010))
+      execFileSync('git', ['-C', workspace, 'add', path], { stdio: 'pipe' }); execFileSync('git', ['-C', workspace, 'commit', '-m', 'earlier real native draft'], { stdio: 'pipe' })
+      const dispatch = attempt.dispatchPlans.find(item => item.key === request.requestKey)!, output = { summary: '已正常提交早期未批准业务稿' }
+      return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `earlier-${dispatch.sessionCreateKey}`, turnId: 'earlier-turn', output, resultDigest: contentHash(JSON.stringify(output)), worktree: nativeWorktreeResult(workspace, seed) }
+    }
+    if (defect === 'older-pause' && attempt.number === 3) {
+      assert.equal(contentHash(readFileSync(join(workspace, path))), contentHash(latest))
+      writeFileSync(join(workspace, path), '{EARLIER_SEED_DRAFT' + 'a'.repeat(59010))
+      execFileSync('git', ['-C', workspace, 'add', path], { stdio: 'pipe' }); execFileSync('git', ['-C', workspace, 'commit', '-m', 'newer authenticated draft returns to same bytes'], { stdio: 'pipe' })
+      const dispatch = attempt.dispatchPlans.find(item => item.key === request.requestKey)!, output = { summary: '更新的认证稿，不能再被更早暂停稿遮盖' }
+      return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `newer-${dispatch.sessionCreateKey}`, turnId: 'newer-turn', output, resultDigest: contentHash(JSON.stringify(output)), worktree: nativeWorktreeResult(workspace, seed) }
+    }
+    if (originalRequest) {
+      if (defect !== 'none' && defect !== 'prior-draft' && defect !== 'older-pause') { assert.equal(existsSync(join(workspace, path)), false, '不合格或无稿的旧记录不能向新seed投影正文'); throw Object.assign(new Error('反例安全进入新派发且无旧材料'), { code: 'unsupported' }) }
+      assert.equal(contentHash(readFileSync(join(workspace, path))), contentHash(defect === 'older-pause' ? '{EARLIER_SEED_DRAFT' + 'a'.repeat(59010) : latest), '必须取最新normal Git正文SHA，不能回原seed或旧59010字节')
+      assert.match(request.prompt, defect === 'older-pause' ? /已有原草稿已复制/ : /认证的原Git分析草稿/)
+      if (mode === 'missing-final') assert.match(request.prompt, /missing required structured_output/)
+      else assert.doesNotMatch(request.prompt, /missing required structured_output/, '普通暂停不能伪加缺final分类')
+      continued = true
+      throw Object.assign(new Error('已核新attempt在最新真实Git草稿续修入口'), { code: 'unsupported' })
+    }
+    originalRequest = request; oldPath = workspace
+    mkdirSync(join(workspace, path, '..'), { recursive: true })
+    for (const text of defect === 'not-started' || defect === 'no-commit' ? [] : ['{EARLIER_SEED_DRAFT' + 'a'.repeat(59010), latest]) {
+      writeFileSync(join(workspace, path), text)
+      execFileSync('git', ['-C', workspace, 'add', path], { stdio: 'pipe' }); execFileSync('git', ['-C', workspace, 'commit', '--allow-empty', '-m', 'normal native draft progress'], { stdio: 'pipe' })
+    }
+    const fence = { operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: operation.input.source.physicalFingerprint }
+    for (let index = 0; index < 23; index++) { const resultRef = writeEvidence(f.input.source.commonDir, { fixtureSibling: index }); f.store.checkpoint(fence, { ...writeEvidence(f.input.source.commonDir, { version: 'sync-stage-v1', operationId: operation.id, attemptId: attempt.id, inputId: f.input.id, policyDigest: operation.policyDigest, stage: `sibling:${index}`, resultRef }), artifacts: [{ kind: 'json', ref: resultRef }] }) }
+    return createAttemptRunner(f.store, fence, { pollMs: 2, runtime: {
+      readRecord: id => readRecord(id), cancel: cancelStructuredSession,
+      run: async actual => {
+        const execution = structuredExecutionPolicy(actual), session = sessionIdForCreateKey(actual.sessionCreateKey!), root = join(f.parent, 'original-native')
+        mkdirSync(root); sampleNativeWorktreeProcesses({ root, receiptFile: join(root, 'process.json'), workspace })
+        const child = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { detached: true, stdio: 'ignore' }); assert(child.pid)
+        const ended = new Promise<void>(resolve => child.once('close', () => resolve())), receiptFile = join(root, 'process.json')
+        writeDetachedRuntimeReceipt(child.pid, receiptFile); process.kill(-child.pid, 'SIGTERM'); await ended
+        const native = { version: 1 as const, root, sessionId: `thread-${session}`, userUuid: `user-${session}`, pid: child.pid, receiptFile }, prompt = nativeWorktreePrompt(actual.prompt, actual.worktree!), identity = { threadId: native.sessionId, turnId: native.userUuid }, message = { role: 'user', content: [{ type: 'text', text: prompt }] }, history = [{ type: 'user', sessionId: native.sessionId, uuid: native.userUuid, parentUuid: null, promptId: 'original-prompt', message }]
+        const hash = (value: unknown): string => contentHash(JSON.stringify(value)), plan = { ...native, workspace, cliVersion: '2.1.309 (Claude Code)', requestedModel: execution.model, resolvedModel: 'MiniMax-M3.1-Flash', historyDigest: hash(history), policyDigest: hash(execution), requestDigest: hash({ prompt, policy: execution }) }
+        const files = { 'plan.json': plan, 'public-history.json': { version: 1, sessionId: native.sessionId, history }, 'init.json': { session_id: native.sessionId, model: 'MiniMax-M3.1-Flash', tools: ['Read', 'Bash'] }, 'user-echo.json': { uuid: native.userUuid, session_id: native.sessionId, message }, ...(mode === 'missing-final' ? { 'result.json': { type: 'result', subtype: 'success', is_error: false, session_id: native.sessionId, user_message_uuid: native.userUuid, user_message_uuids: [native.userUuid] }, 'exit.json': { code: 0, signal: null, stopped: true } } : {}) }
+        for (const [name, value] of Object.entries(files)) writeFileSync(join(root, name), JSON.stringify(value))
+        mkdirSync(join(root, 'claude-home/projects/exact'), { recursive: true }); writeFileSync(join(root, 'claude-home/projects/exact', native.sessionId + '.jsonl'), history.map(row => JSON.stringify(row)).join('\n') + '\n')
+        const failure = mode === 'missing-final' ? 'Claude worktree success evidence differs' : 'explicit safe pause'
+        const record: NativeRunRecord = { session, status: 'error', harnessSessionId: identity.threadId, createRequestId: contentHash(actual.sessionCreateKey!), createPayloadHash: hash({ prompt, parent: null, launcher: null, base: actual.worktree!.baseCommit, structuredExecution: execution }), structuredExecution: { ...execution, ...identity, claudeNative: native, state: mode === 'missing-final' ? 'failed' : 'running', error: failure } }
+        oldSession = session; oldNativeRoot = root
+        if (defect === 'not-started') { record.harnessSessionId = null; record.structuredExecution = { ...execution, state: 'running' } }
+        configuredSessionApplication().createSession({ sessionId: session, status: 'error' })
+        writeRecord({ governed: true, worktreePath: workspace, base: seed.baseCommit, forkCommit: seed.baseCommit, branch: null, title: null, name: null, parent: null, issues: [], issue: null, proposal: null, merges: 0, note: null, sortKey: null, createdAt: Date.now(), harness: 'claude-headless', runtimeStartToken: null, stopped: false, archived: false, closedAt: null, launcher: null, launchCmd: 'claude', launchOwner: null, ...record })
+        if (mode === 'pause') f.store.requestControl(operation.id, 'pause')
+        throw new StructuredSessionError(mode === 'missing-final' ? 'stale_result' : 'cancelled', failure, { sessionId: session, ...identity })
+      },
+    } })(request)
+  }
+  const initialResult = await runSyncOperation(f.store, f.operation.id, f.options)
+  assert(oldSession, JSON.stringify({ initial: initialResult.failure, attempts: f.store.listAttempts(f.operation.id).map(attempt => ({ number: attempt.number, failure: attempt.failure })) }))
+  if (mode === 'missing-final') f.store.requestControl(f.operation.id, 'pause')
+  const recovery = await recoverSyncOperationResources(f.store, f.operation.id, { root: f.root, inputId: f.input.id, artifactRoot: f.artifactRoot })
+  assert.equal(recovery.status, 'resources_recovered', JSON.stringify(recovery))
+  const recordForDefect = readRecord(oldSession)!
+  if (defect === 'worktree') writeRecord({ ...recordForDefect, worktreePath: f.root })
+  if (defect === 'seed') writeRecord({ ...recordForDefect, base: f.input.headCommit })
+  if (defect === 'thread' || defect === 'turn') writeRecord({ ...recordForDefect, structuredExecution: { ...recordForDefect.structuredExecution!, ...(defect === 'thread' ? { threadId: 'foreign' } : { turnId: 'foreign' }) } })
+  if (defect === 'stop') writeRecord({ ...recordForDefect, structuredExecution: { ...recordForDefect.structuredExecution!, cancellation: { ...recordForDefect.structuredExecution!.cancellation!, acknowledged: !recordForDefect.structuredExecution!.cancellation!.acknowledged } } })
+  if (defect === 'request') writeRecord({ ...recordForDefect, structuredExecution: { ...recordForDefect.structuredExecution!, inputDigest: 'foreign-input' } })
+  if (defect === 'session' || defect === 'user' || defect === 'unknown') { const path = join(oldNativeRoot, 'result.json'), result = JSON.parse(readFileSync(path, 'utf8')); if (defect === 'session') result.session_id = 'foreign'; if (defect === 'user') result.user_message_uuid = 'foreign'; if (defect === 'unknown') result.subtype = 'unknown'; writeFileSync(path, JSON.stringify(result)) }
+  if (defect === 'exit') writeFileSync(join(oldNativeRoot, 'exit.json'), JSON.stringify({ code: 0, signal: null, stopped: false }))
+  if (defect === 'completed') writeFileSync(join(oldNativeRoot, 'completed.json'), '{CORRUPT_COMPLETED')
+  if (defect === 'source' || defect === 'tests' || defect === 'scope' || defect === 'schema') { const path = defect === 'source' ? 'src/export.js' : defect === 'tests' ? 'tests/export.test.mjs' : defect === 'scope' ? '.spex-sync-drafts/foreign.json' : /草稿文件=([^\s；]+)/.exec(originalRequest!.prompt)![1].replace(/\.json$/, '.schema.json'); writeFileSync(join(oldPath, path), 'foreign unauthorized edit'); execFileSync('git', ['-C', oldPath, 'add', path], { stdio: 'pipe' }); execFileSync('git', ['-C', oldPath, 'commit', '-m', 'negative unauthorized edit'], { stdio: 'pipe' }) }
+  if (mode === 'pause' && (defect === 'none' || defect === 'prior-draft' || defect === 'older-pause')) { rmSync(join(oldNativeRoot, 'public-history.json')); rmSync(join(oldNativeRoot, 'claude-home'), { recursive: true }) }
+  const originalRecord = readRecord(oldSession)!, originalState = originalRecord.structuredExecution!, oldAttempts = f.store.listAttempts(f.operation.id)
+  assert.equal(originalState.state, 'cancelled'); assert.equal(originalState.cancellation?.nativeStopped, true); assert.equal(originalState.errorCode, undefined); assert.equal(originalState.failedWorktree, undefined)
+  const oldResources = oldAttempts.flatMap(attempt => attempt.dispatchPlans.map(dispatch => f.store.findResource(attempt.id, dispatch.key))).filter(resource => resource !== null)
+  assert(oldResources.every(resource => resource.phase === 'removed'))
+  const oldRecordBytes = JSON.stringify(originalRecord), refs = oldAttempts.flatMap(attempt => attempt.checkpointRefs.map(ref => ({ ref, bytes: readEvidence(f.input.source.commonDir, ref) })))
+  const nativeFiles = Object.fromEntries(readdirSync(oldNativeRoot).filter(name => name !== 'claude-home').map(name => [name, readFileSync(join(oldNativeRoot, name))]))
+  const latestHead = execFileSync('git', ['-C', oldPath, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
+  f.store.requestControl(f.operation.id, 'run')
+  const result = await runSyncOperation(f.store, f.operation.id, f.options)
+  assert.equal(result.status, 'unsupported', JSON.stringify(result.failure)); assert.equal(continued, defect === 'none' || defect === 'prior-draft' || defect === 'older-pause', JSON.stringify({ result: result.failure, attempts: f.store.listAttempts(f.operation.id).map(attempt => ({ number: attempt.number, failure: attempt.failure, calls: attempt.dispatchPlans.length })) }))
+  assert.equal(JSON.stringify(readRecord(oldSession)), oldRecordBytes)
+  for (const { ref, bytes } of refs) assert.deepEqual(readEvidence(f.input.source.commonDir, ref), bytes)
+  for (const [name, bytes] of Object.entries(nativeFiles)) assert.deepEqual(readFileSync(join(oldNativeRoot, name)), bytes)
+  for (const prior of oldAttempts) assert.deepEqual(f.store.readAttempt(prior.id), prior)
+  for (const resource of oldResources) assert.deepEqual(f.store.findResource(resource.attemptId, resource.plan.key), resource)
+  const current = f.store.listAttempts(f.operation.id).at(-1)!, observed = current.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(wrapper => wrapper.stage.endsWith(':stopped-git-material-provenance'))
+  if (defect !== 'none' && defect !== 'prior-draft') { assert.equal(observed, undefined); return }
+  assert(observed); const provenance = JSON.parse(readEvidence(f.input.source.commonDir, observed.resultRef).toString())
+  assert.equal(provenance.resultCommit, latestHead); assert.equal(provenance.sourceKind, 'git_draft'); assert.equal(provenance.approved, false); assert.equal(provenance.observationKind, mode); assert.equal(provenance.draftSha256, contentHash(latest)); assert(provenance.observedAt > 0)
+  assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes); assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
+})
+
+for (const missingFinal of [false, true]) test(`P1失败summary的精确stopped Git稿跨attempt仍只作材料续改，不要求成功generation追踪 missingFinal=${missingFinal}`, async t => {
   const f = await fixture(t, { maxAttempts: 2, maxCalls: 4, maxRepairs: 1, timeoutMs: 120000 }, false, original, 'project', original, { agentWorkflow: 'native-worktree-v1' }, undefined, 'spec', 'claude:default')
   const originalText = `{FAILED_NATIVE_BUSINESS_DRAFT${'x'.repeat(38000)}`, calls: ElaborationSessionRequest[] = []
   f.options.runner = async request => {
@@ -200,7 +302,7 @@ test('P1失败summary的精确stopped Git稿跨attempt仍只作材料续改，�
     mkdirSync(join(workspace, path, '..'), { recursive: true }); writeFileSync(join(workspace, path), attempt.number === 1 ? originalText : JSON.stringify(adaptElaborationNativeOutput(request, rows(original))))
     execFileSync('git', ['-C', workspace, 'add', path], { stdio: 'pipe' }); execFileSync('git', ['-C', workspace, 'commit', '--allow-empty', '-m', 'failed summary fixture draft'], { stdio: 'pipe' })
     const worktree = nativeWorktreeResult(workspace, seed)
-    if (attempt.number === 1) return rejectedReviewFixture(f, request, '{"summary":7}', 'summary schema rejected after actual Git commit', worktree)
+    if (attempt.number === 1) return rejectedReviewFixture(f, request, missingFinal ? undefined : '{"summary":7}', missingFinal ? 'Claude worktree success is missing required structured_output' : 'summary schema rejected after actual Git commit', worktree)
     const dispatch = attempt.dispatchPlans.find(item => item.key === request.requestKey)!, output = { summary: '在认证原稿上修复业务JSON' }
     return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `failed-summary-${request.requestKey}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)), worktree }
   }
@@ -208,7 +310,7 @@ test('P1失败summary的精确stopped Git稿跨attempt仍只作材料续改，�
   assert.equal(result.status, 'unsupported', JSON.stringify(result.failure))
   assert.deepEqual(calls.map(call => call.purpose), ['elaboration_generate', 'elaboration_generate', 'elaboration_review'])
   const resource = f.store.findResource(old.id, old.dispatchPlans[0].key)!, native = JSON.parse(readEvidence(f.input.source.commonDir, resource.checkpointRef).toString()) as NativeRunCheckpoint
-  assert.equal(resource.phase, 'removed'); assert.equal(native.stop?.nativeStopped, true); assert.equal(native.result, undefined); assert.equal(native.failure?.rejectedOutput?.text, '{"summary":7}')
+  assert.equal(resource.phase, 'removed'); assert.equal(native.stop?.nativeStopped, true); assert.equal(native.result, undefined); assert.equal(native.failure?.rejectedOutput?.text, missingFinal ? undefined : '{"summary":7}')
   const wrapper = old.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()) as { stage: string; resultRef: { sha256: string } }).find(entry => entry.stage === 'elaboration')!
   const saved = JSON.parse(readEvidence(f.input.source.commonDir, wrapper.resultRef).toString()) as ElaborationResult, round = saved.rounds[0]
   assert.equal(round.output, null); assert.deepEqual(round.traces, []); assert.equal(round.candidate, null)
@@ -594,7 +696,7 @@ async function fixture(t: test.TestContext, budget: import('./operation-types.js
   return { root, parent, managedRoot, artifactRoot, input, index, bytes, protocol, store, operation, plan, options, calls, git, priorCommitCount, realTools, closeForRestart: () => { protocol.close(); closed = true }, useStore: (next: SyncStore) => { store = next }, useOperation: (next: typeof operation) => { operation = next }, transform: (fn: typeof transform) => { transform = fn } }
 }
 
-async function rejectedReviewFixture(f: Awaited<ReturnType<typeof fixture>>, request: ElaborationSessionRequest, text: string, message = 'invalid_json', failedWorktree?: ElaborationSessionResult['worktree']): Promise<ElaborationSessionResult> {
+async function rejectedReviewFixture(f: Awaited<ReturnType<typeof fixture>>, request: ElaborationSessionRequest, text: string | undefined, message = 'invalid_json', failedWorktree?: ElaborationSessionResult['worktree']): Promise<ElaborationSessionResult> {
   const operation = f.store.readOperation(f.operation.id), attempt = f.store.readAttempt(operation.currentAttemptId!)
   const fence = { operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: operation.input.source.physicalFingerprint }
   const records = new Map<string, NativeRunRecord>()
@@ -605,7 +707,7 @@ async function rejectedReviewFixture(f: Awaited<ReturnType<typeof fixture>>, req
       const execution = structuredExecutionPolicy(actual), key = actual.sessionCreateKey ?? actual.requestKey, sessionId = sessionIdForCreateKey(key), identity = { threadId: `failed-${sessionId}`, turnId: 'failed-turn' }
       const prompt = actual.worktree ? nativeWorktreePrompt(actual.prompt, actual.worktree) : actual.prompt
       const base = actual.worktree?.baseCommit ?? actual.base
-      const rejectedOutput = rejectedFinalOutput(text, prompt, execution, identity)
+      const rejectedOutput = text === undefined ? undefined : rejectedFinalOutput(text, prompt, execution, identity)
       const record: NativeRunRecord = { session: sessionId, status: 'error', harnessSessionId: identity.threadId, createRequestId: contentHash(key), createPayloadHash: contentHash(JSON.stringify({ prompt, parent: null, launcher: null, ...(base?.trim() ? { base: base.trim() } : {}), structuredExecution: execution })), structuredExecution: { ...execution, ...identity, state: 'failed', errorCode: 'structured_output_format_invalid', error: message, rejectedOutput, ...(failedWorktree ? { failedWorktree } : {}), cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: true, acknowledged: true, nativeStatus: 'stopped' } } }
       records.set(sessionId, record)
       writeRecord({ governed: false, worktreePath: f.root, branch: null, title: null, name: null, parent: null, issues: [], issue: null, proposal: null, merges: 0, note: null, sortKey: null, createdAt: Date.now(), harness: 'codex', runtimeStartToken: null, stopped: false, archived: false, closedAt: null, launcher: null, launchCmd: null, launchOwner: null, ...record })
