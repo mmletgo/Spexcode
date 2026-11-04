@@ -2,7 +2,7 @@ import { setImmediate as yieldToControl } from 'node:timers/promises'
 import { stageWorktree, STAGE_READING_INSTRUCTIONS } from './stage-worktree.js'
 import { posix } from 'node:path'
 import { contractReferences, parseContract, parseParts } from '@spexcode/spec-core/contracts'
-import { analyzeCodeBehavior, deriveBehaviorAuthorization } from './code-behavior.js'
+import { analyzeCodeBehavior, compositionConflictPaths, deriveBehaviorAuthorization, partitionBehaviorChangedPaths, uncoveredCompositionConflicts } from './code-behavior.js'
 import type { CodeBehaviorInput, CodeBehaviorContinuation } from './code-behavior.js'
 import { outputErrors } from './elaboration-schema.js'
 import { elaborate, freezeElaborationInput, verifyElaborationDraftCache, projectElaborationFlowReadiness, sealPartitionedElaboration, partitionSealRepairContext } from './elaboration.js'
@@ -187,12 +187,12 @@ export async function analyzeSyncPartitions(input: CodeBehaviorInput, plan: Sync
   const { signal, ...data } = input
   input = { ...structuredClone(data), signal }; plan = structuredClone(plan)
   const failures: PartitionAnalysisFailure[] = []
+  const scopes = new Map<string, string[]>()
   let analyses: CodeBehaviorAnalysis[]
   try { analyses = await mapSyncPartitions(plan.partitions, maxParallel, input.signal, async partition => {
     try {
       const key = `partition:${partition.id}:analysis`
       const saved = checkpoints.load<CodeBehaviorAnalysis>(key)
-      if (saved && !input.postGateReview?.some(diagnostic => diagnostic.partitionId === partition.id && diagnostic.analysisRef.sha256 === contentHash(JSON.stringify(saved)))) return saved
       // 只把全局授权、处于本区targets/只读上下文且正文可读的父Spec投影给新叶门禁，不扩充局部writePaths。
       const authorizedParentSpecPaths = input.plan.version === 'sync-coordinator-v2' && input.plan.direction === 'code_to_spec' && input.plan.sourcePaths !== undefined
         ? input.plan.targets.filter(target => (partition.contextNodeIds.includes(target.nodeId) || partition.targets.some(local => local.nodeId === target.nodeId && local.path === target.path))
@@ -201,8 +201,11 @@ export async function analyzeSyncPartitions(input: CodeBehaviorInput, plan: Sync
       const factSourcePaths = input.plan.sourcePaths === undefined
         ? unique(partition.writePaths.filter(path => !path.startsWith('.spec/')))
         : unique(partition.sourcePaths.filter(path => !path.startsWith('.spec/')))
-      const local = await analyzeCodeBehavior({ ...input, postGateReview: input.postGateReview?.filter(diagnostic => diagnostic.partitionId === partition.id), repairDiagnostics: input.repairDiagnostics?.filter(diagnostic => 'partitionId' in diagnostic && diagnostic.partitionId === partition.id), requestKey: `${input.requestKey}:partition:${partition.id}`, plan: projectSyncPartition(input.plan, partition), partition: { id: partition.id, changedPaths: partition.changedPaths, factSourcePaths, ...(authorizedParentSpecPaths !== undefined ? { authorizedParentSpecPaths } : {}) } }, runner, inputDigest => checkpoints.loadAcceptedAnalysis?.(key, plan.digest, inputDigest) ?? null, { loadMaterial: (purpose, schemaDigest, inputDigest, request) => checkpoints.loadBehaviorDraftMaterial?.(key, plan.digest, purpose, schemaDigest, inputDigest, request) ?? null, load: inputDigest => checkpoints.loadBehaviorContinuation?.(key, plan.digest, inputDigest) ?? null, save: continuation => { checkpoints.save(`${key}:continuation`, continuation) } })
-      if (local.changes.some(change => change.paths.some(path => !partition.changedPaths.includes(path)))) reject(`分析超出本区真实变更集合: ${partition.id}`)
+      const localInput: CodeBehaviorInput = { ...input, postGateReview: input.postGateReview?.filter(diagnostic => diagnostic.partitionId === partition.id), repairDiagnostics: input.repairDiagnostics?.filter(diagnostic => 'partitionId' in diagnostic && diagnostic.partitionId === partition.id), requestKey: `${input.requestKey}:partition:${partition.id}`, plan: projectSyncPartition(input.plan, partition), partition: { id: partition.id, changedPaths: partition.changedPaths, factSourcePaths, ...(authorizedParentSpecPaths !== undefined ? { authorizedParentSpecPaths } : {}) } }
+      const paths = partitionBehaviorChangedPaths(localInput)
+      scopes.set(partition.id, paths)
+      const local = await analyzeCodeBehavior(localInput, runner, inputDigest => saved?.inputDigest === inputDigest ? saved : checkpoints.loadAcceptedAnalysis?.(key, plan.digest, inputDigest) ?? null, { loadMaterial: (purpose, schemaDigest, inputDigest, request) => checkpoints.loadBehaviorDraftMaterial?.(key, plan.digest, purpose, schemaDigest, inputDigest, request) ?? null, load: inputDigest => checkpoints.loadBehaviorContinuation?.(key, plan.digest, inputDigest) ?? null, save: continuation => { checkpoints.save(`${key}:continuation`, continuation) } })
+      if (local.changes.some(change => change.paths.some(path => !paths.includes(path)))) reject(`分析超出本区真实变更集合: ${partition.id}`)
       checkpoints.save(key, local)
       return local
     } catch (error) {
@@ -215,6 +218,8 @@ export async function analyzeSyncPartitions(input: CodeBehaviorInput, plan: Sync
     throw Object.assign(error instanceof Error ? error : new Error(String(error)), { partitionFailures: failures })
   }
   if (plan.expectedPaths.some(path => plan.partitions.filter(partition => partition.changedPaths.includes(path)).length !== 1) || analyses.some(analysis => !analysis.reviewPassed)) reject('分区并集未唯一覆盖完整变更集合或缺少独审')
+  const conflicts = compositionConflictPaths(input)
+  if (conflicts.some(path => [...scopes.values()].filter(paths => paths.includes(path)).length !== 1)) reject('组合冲突没有唯一分区归属')
   independentTraces(analyses.flatMap(analysis => analysis.traces))
   const first = analyses[0]
   if (!first) reject('分区计划为空')
@@ -231,9 +236,11 @@ export async function analyzeSyncPartitions(input: CodeBehaviorInput, plan: Sync
     resolutions: distinct(analyses.flatMap(item => item.resolutions), item => item.path, 'resolution'),
     decisionAuthorities: distinct(analyses.flatMap(item => item.decisionAuthorities ?? []), item => item.requestRef.sha256, 'authority'),
     traces: analyses.flatMap(item => item.traces), reviewPassed: true,
-    partitionCoverage: { planDigest: plan.digest, partitionIds: plan.partitions.map(partition => partition.id), changedPaths: [...plan.expectedPaths] },
-    partitionEvidence: analyses.map((analysis, index) => ({ analysis, partitionId: plan.partitions[index].id, changedPaths: [...plan.partitions[index].changedPaths], analysisRef: writeEvidence(input.snapshot.source.commonDir, analysis) })),
+    partitionCoverage: { planDigest: plan.digest, partitionIds: plan.partitions.map(partition => partition.id), changedPaths: unique([...scopes.values()].flat()) },
+    partitionEvidence: analyses.map((analysis, index) => ({ analysis, partitionId: plan.partitions[index].id, changedPaths: scopes.get(plan.partitions[index].id)!, analysisRef: writeEvidence(input.snapshot.source.commonDir, analysis) })),
   }
+  const missingConflicts = uncoveredCompositionConflicts(conflicts, merged.findings, merged.resolutions)
+  if (missingConflicts.length) reject(`分区合并遗漏组合冲突: ${missingConflicts.join(', ')}`)
   return merged
 }
 
