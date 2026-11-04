@@ -35,6 +35,9 @@ source change.
    precisely because of the vote's collapse: materialize's write surface is untracked artifacts + per-clone
    config — ZERO tracked-file touches — so running it inside a hook can neither dirty the commit nor need
    to amend it.
+   The anchor awaits materialize's result, including a bounded wait for [[record-lock]]'s registry fence when
+   unregistering unused shared filter transport. Index surgery never runs ahead of that asynchronous cleanup;
+   ordinary failures remain advisory and trusted failures still propagate the original error.
 2. *Staged-index surgery — repair, never reject.* Over staged ∩ artifact paths, by kind: a contract blob
    carrying our sentinel block is cleaned IN PLACE (source = the STAGED BLOB, never the worktree — `git
    add -p` partial staging survives byte-for-byte; only the block is removed); a HEAD-untracked

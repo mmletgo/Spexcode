@@ -14,6 +14,41 @@ const enabled = process.env.SPEX_CLAUDE_NATIVE_TEST === '1'
 const evidence = process.env.SPEX_CLAUDE_EVIDENCE_DIR
 const schema = { type: 'object', properties: { marker: { type: 'string' } }, required: ['marker'], additionalProperties: false }
 
+test('actual Claude compact reads a complete public payload and replays without another native call', { skip: !enabled || process.env.SPEX_CLAUDE_COMPACT_NATIVE_TEST !== '1', timeout: 300000 }, async () => {
+  assert(evidence)
+  for (const key of ['ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_BASE_URL']) assert(!Object.hasOwn(process.env, key), 'the compact probe must select the intact native-user-settings bundle')
+  const root = join(evidence, 'compact'), source = join(root, 'source'), realm = join(root, 'realm')
+  mkdirSync(source, { recursive: true, mode: 0o700 })
+  assert(!existsSync(join(realm, 'native', 'plan.json')), 'this opt-in probe permits one fresh native call only')
+  const marker = `PUBLIC_${randomUUID().replaceAll('-', '')}`, ending = `\nEND_MARKER=${marker}\n`
+  const filler = 'Public filler 0123456789 abcdefghijklmnopqrstuvwxyz.\n'
+  const text = filler.repeat(Math.ceil(720 * 1024 / filler.length)).slice(0, 720 * 1024 - ending.length) + ending
+  const prepared = prepareFrozenPrompt({ root: source, model: process.env.SPEX_CLAUDE_NATIVE_MODEL ?? 'claude:glm-5.3-flash', prompt: 'Read the complete required task and payload entries, following every readBatches range in order. Do not skip filler or use a summary as a substitute for reading. If native context compaction occurs, continue reading the remaining original ranges without repeating a completed range. Return the exact END_MARKER in marker only after all required bytes have been read.', requestKey: 'native-compact', inputDigest: 'native-compact', purpose: 'native-compact-proof', timeoutMs: 240000, schema, frozenEntries: [{ id: 'payload', label: 'public filler with hidden final marker', kind: 'utf8', text }] }, { directory: join(root, 'frozen') })
+  let execution: StructuredExecution = structuredExecutionPolicy(prepared)
+  const persist = (change: Partial<StructuredExecution>): void => { execution = { ...execution, ...change }; writeFileSync(join(root, 'checkpoint.json'), JSON.stringify(execution), { mode: 0o600 }) }
+  let proofPassed = false, replayPassed = false
+  try {
+    const result = await claudeStructuredTurn(realm, 'native', prepared.prompt, execution, { onThread: async threadId => persist({ threadId }), onTurn: async turnId => persist({ turnId }), onTurnStarting: async () => persist({ turnStartRequested: true }), onNative: async claudeNative => persist({ claudeNative }) })
+    assert.deepEqual(JSON.parse(result.text), { marker })
+    verifyFrozenReadProof(prepared.frozenContext!, result.frozenReadProof, { threadId: result.threadId, turnId: result.turnId }, undefined, { output: JSON.parse(result.text) as unknown })
+    proofPassed = true
+    persist({ state: 'completed', output: JSON.parse(result.text) as unknown, resultDigest: createHash('sha256').update(result.text).digest('hex'), frozenReadProof: result.frozenReadProof })
+    const completed = JSON.parse(readFileSync(join(realm, 'native', 'completed.json'), 'utf8')) as { witness: { history: { type: string; subtype?: string }[]; nativeHistoryPath: string } }
+    const before = readFileSync(completed.witness.nativeHistoryPath)
+    const replay = await claudeStructuredTurn(realm, 'native', prepared.prompt, execution, { onThread: async () => assert.fail('replay cannot create a session'), onTurn: async () => assert.fail('replay cannot append a prompt'), onNative: async () => assert.fail('replay cannot dispatch') })
+    assert.deepEqual(replay, result); assert.deepEqual(readFileSync(completed.witness.nativeHistoryPath), before)
+    replayPassed = true
+    const compactBoundaries = completed.witness.history.filter(row => row.type === 'system' && row.subtype === 'compact_boundary').length
+    const auth = JSON.parse(readFileSync(join(realm, 'native', 'auth-status.json'), 'utf8')) as { source: string }
+    assert.equal(auth.source, 'native-user-settings')
+    writeFileSync(join(root, 'verified.json'), JSON.stringify({ payloadBytes: Buffer.byteLength(text), marker, proofPassed, replayPassed, compactBoundaries, authSource: auth.source, result, replayAdditionalCalls: 0 }, null, 2), { mode: 0o600 })
+    assert(compactBoundaries > 0, 'full reading without actual compaction is not native compaction proof')
+  } catch (error) {
+    writeFileSync(join(root, 'failure.json'), JSON.stringify({ proofPassed, replayPassed, payloadBytes: Buffer.byteLength(text), nativeCalls: 1, code: (error as { code?: string }).code, message: (error as Error).message }, null, 2), { mode: 0o600 })
+    throw error
+  }
+})
+
 for (const kind of ['small', 'worst-controls'] as const) test(`actual Claude ${kind} reads immutable bytes and replays completed proof with zero new CLI turn`, { skip: !enabled, timeout: 300000 }, async () => {
   assert(evidence)
   const root = join(evidence, kind), source = join(root, 'source')

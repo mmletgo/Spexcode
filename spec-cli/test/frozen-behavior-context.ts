@@ -27,6 +27,7 @@ export function frozenBodyText(source: { prompt: string; frozenEntries?: readonl
     assert.equal(locator.entryId, entry?.id ?? bodyRef)
     assert.equal(locator.byteLength, Buffer.byteLength(payload!, 'utf8'))
     if (locator.contentByteLength !== undefined) assert.equal(locator.contentByteLength, Buffer.byteLength(text, 'utf8'))
+    if (locator.required) assert.equal(entry?.required, true, `必读正文未登记为 required ${bodyRef}`)
   }
   return text
 }
@@ -37,15 +38,34 @@ export function readFrozenBehaviorContext<T>(source: FrozenBehaviorSource): T {
   const entries = typeof source === 'string' ? undefined : source.frozenEntries
   const contextText = prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]
   const context = JSON.parse(contextText) as Record<string, unknown>
-  if (!['sha256-body-ref-v1', 'sha256-body-entry-v2'].includes(context.textEncoding as string)) return context as T
+  if (!['sha256-body-ref-v1', 'sha256-body-entry-v2', 'sha256-body-entry-v3'].includes(context.textEncoding as string)) return context as T
   const textBodies = context.textBodies as Record<string, string> | undefined
+  const bodies = new Map<string, string>()
   const expand = (value: string | BodyReference): string => {
     if (typeof value === 'string') return value
     if (textBodies && typeof textBodies[value.bodyRef] === 'string') {
       assert.equal(sha256(textBodies[value.bodyRef]), value.bodyRef)
       return textBodies[value.bodyRef]
     }
-    return frozenBodyText({ prompt, frozenEntries: entries }, value.bodyRef)
+    let text = bodies.get(value.bodyRef)
+    if (text === undefined) { text = frozenBodyText({ prompt, frozenEntries: entries }, value.bodyRef); bodies.set(value.bodyRef, text) }
+    return text
+  }
+  if (context.textEncoding === 'sha256-body-entry-v3') {
+    const metadata = (value: unknown): unknown => {
+      if (Array.isArray(value)) return value.map(metadata)
+      if (!value || typeof value !== 'object') return value
+      const row = value as Record<string, unknown>
+      if (typeof row.bodyRef === 'string') {
+        assert.ok(Object.keys(row).every(key => key === 'bodyRef' || key === 'json'))
+        const text = expand({ bodyRef: row.bodyRef })
+        if (row.json === undefined) return text
+        assert.equal(row.json, true)
+        return metadata(JSON.parse(text))
+      }
+      return Object.fromEntries(Object.entries(row).map(([key, child]) => [key, metadata(child)]))
+    }
+    for (const key of ['contractItems', 'compositionEvidence', 'baselinePair', 'baselineSelection']) context[key] = metadata(context[key])
   }
   for (const key of ['oldSource', 'newSource', 'authorBaseline', 'verifiedDelivery', 'composedFiles', 'controlledBeforeFiles']) {
     context[key] = (context[key] as [string, string | BodyReference][]).map(([path, value]) => [path, expand(value)])

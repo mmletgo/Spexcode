@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { processStartToken } from '@spexcode/spec-core'
 import { codexStructuredTurn } from './codex-harness.js'
-import { frozenReaderDisabledFeatures, prepareStructuredRealm, structuredObserverState, StructuredSessionError, StructuredSessionTransportError, type StructuredExecution, type FrozenReaderRuntime } from './session-structured-policy.js'
+import { frozenReaderDisabledFeatures, prepareStructuredRealm, structuredExecutionPolicy, structuredExecutionTimer, structuredRealmRoot, structuredObserverState, StructuredSessionError, StructuredSessionTransportError, type StructuredExecution, type FrozenReaderRuntime } from './session-structured-policy.js'
 import { freezeContext, frozenReadOutputTokenLimit, readFrozenRange, type FrozenNativeItem } from './frozen-context.js'
 
 type Rpc = { id?: number; method: string; params: Record<string, unknown> }
@@ -378,6 +378,42 @@ for (const mode of ['cancel', 'timeout']) test(`structured ${mode} detaches its 
   } finally { await f.close() }
 })
 
+test('all structured providers share explicit null call timers and preserve finite policy versions', t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let finite = 0, unlimited = 0
+  assert.equal(structuredExecutionTimer(null, () => { unlimited++ }), undefined)
+  const timer = structuredExecutionTimer(1200000, () => { finite++ })
+  t.mock.timers.tick(1199999); assert.equal(finite, 0); assert.equal(unlimited, 0)
+  t.mock.timers.tick(2); assert.equal(finite, 1); assert.equal(unlimited, 0)
+  clearTimeout(timer)
+  for (const [model, version] of [[undefined, 1], ['gpt-6.1-sol', 2], ['claude:MiniMax-M3.1-Flash', 3], ['zcode:bigmodel-api/GLM-5.3-Flash', 4]] as const) {
+    const request = { schema, inputDigest: 'input', purpose: 'test', timeoutMs: 1000, ...(model ? { model, frozenContext: { version: 1 as const, contextDigest: 'a'.repeat(64), manifestPath: '/private/frozen/manifest.json' }, ...(model === 'gpt-6.1-sol' ? { readerRuntime: { version: 2 as const, cliVersion: 'fixture', catalogDigest: 'b'.repeat(64), catalogPath: '/private/catalog', toolOutputTokenLimit: 1024 } } : {}) } : {}) }
+    const finitePolicy = structuredExecutionPolicy(request), unlimitedPolicy = structuredExecutionPolicy({ ...request, timeoutMs: null })
+    assert.equal(finitePolicy.version, version); assert.equal(unlimitedPolicy.version, 5)
+    assert.equal(unlimitedPolicy.policy, finitePolicy.policy)
+    assert.notEqual(structuredRealmRoot(unlimitedPolicy, '/private/runtime'), null)
+    assert.equal(structuredRealmRoot(unlimitedPolicy, '/private/runtime'), structuredRealmRoot(finitePolicy, '/private/runtime'))
+    assert.equal(structuredRealmRoot({ ...unlimitedPolicy, version: 99 }, '/private/runtime'), null)
+  }
+})
+
+test('structured null timeout keeps observing past the finite window and detaches only on explicit abort', async () => {
+  const controller = new AbortController()
+  let accepted = false, timedOut = false
+  let onStarted: () => void = () => {}
+  const started = new Promise<void>(resolve => { onStarted = resolve })
+  const f = await fixture(request => request.method === 'turn/start' ? { turn: { id: 'turn-exact' } } : safePrelude(request))
+  try {
+    const running = codexStructuredTurn(f.path, '/fixture', 'pinned prompt', execution({ timeoutMs: null, version: 5 }), { ...callbacks, signal: controller.signal, onTimeout: async () => { timedOut = true }, onTurn: async () => { accepted = true; onStarted() } })
+    await started
+    await new Promise(resolve => setTimeout(resolve, 120))
+    assert.equal(accepted, true); assert.equal(timedOut, false)
+    controller.abort()
+    await assert.rejects(running, { code: 'cancelled' })
+    assert.equal(f.calls.some(request => request.method === 'turn/interrupt'), false, '精确native停止仍由持久控制接缝完成')
+  } finally { controller.abort(); await f.close() }
+})
+
 test('structured recovery reuses exact persisted thread/turn without launching another turn', async () => {
   const f = await fixture((request) => {
     if (request.method === 'thread/resume' || request.method === 'thread/read') return { thread: { id: 'thread-exact', turns: [finalTurn(), finalTurn('old')] } }
@@ -437,6 +473,8 @@ test('outer runtime realm permits rollout writes and rejects source/config write
 })
 
 for (const deadline of [
+  { name: 'unlimited-default', configured: undefined, requestMs: null, expectedMs: 30_000 },
+  { name: 'unlimited-max-create', configured: '900000', requestMs: null, expectedMs: 120_000 },
   { name: 'default', configured: undefined, requestMs: 90_000, expectedMs: 30_000 },
   { name: 'configured', configured: '120000', requestMs: 90_000, expectedMs: 90_000 },
   { name: 'request-bound', configured: '120000', requestMs: 2000, expectedMs: 2000 },
@@ -457,7 +495,7 @@ for (const deadline of [
   const requestKey = `structured-replay-${process.pid}-${deadline.name}`
   const id = sessionIdForCreateKey(requestKey)
   const prompt = 'pinned structured input @parent:must-not-be-a-directive'
-  const policy = execution({ timeoutMs: deadline.requestMs })
+  const policy = structuredExecutionPolicy(execution({ timeoutMs: deadline.requestMs }))
   const output = { answer: 'exact' }
   const sha = (value: string): string => createHash('sha256').update(value).digest('hex')
   configuredSessionApplication().createSession({ sessionId: id, status: 'awaiting', proposal: 'nothing' })

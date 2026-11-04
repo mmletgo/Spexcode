@@ -395,7 +395,7 @@ export async function specInit(targetArg: string | undefined, presetArg?: string
   try {
     process.chdir(targetDir)
     const { materialize } = await import('./materialize.js')
-    const result = materialize(targetDir)
+    const result = await materialize(targetDir)
     const display = (path: string) => {
       const local = relative(targetDir, path)
       return local && local !== '..' && !local.startsWith('../') && !local.startsWith('..\\') ? local : path

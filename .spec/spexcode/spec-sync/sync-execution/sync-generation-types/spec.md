@@ -14,6 +14,10 @@ code:
 
 ## expanded spec
 
+GenerationInput可携nativeWorktree:true与明确stageTree；前者只由已冻结新workflow计划派生，后者让各分区继承同一个已审全局Spec overlay。files仍是核真的相关业务数据，不是读取授权；worktree builder结果不返回完整文件补丁，preparedChanges由真实Git diff导入并保持原CandidateChanges结构。无标记输入仅作历史协议和旧纯单测接缝，不改变新生产默认。
+
+模型调用期限沿 [[structured-session-runtime]] 原样传递，明确 null 不装调用计时器；生成与独审、完整读取及各自业务门禁保持。
+
 GenerationInput 复用 InputSnapshot、ComposedInputRef、SnapshotManifest、Contract、Acceptance、SyncScope 和既有只读会话输入类型。files 是协调器确定的完整受影响读集合，各完整正文用 ReadonlyMap；完整仓库身份仍由 manifest 绑定，不默认把整个仓库或凭据送给模型；elaboratedSpecs 单独携带 P1 通过后待交付完整正文，不替换 candidate.baseTree；事实、契约和 ready/blocked 集合由调用者冻结。可信政策带版本及摘要，执行模型固定上层指定 gpt-6.1-sol/high。
 
 GenerationOptions 必须提供 ElaborationRunner 和异步 validateCandidate；硬门禁返回既有 ContractFinding，error 阻断、warning 保留。可选 onDispatch 在 native 之前完成持久登记，不代替 native 身份绑定。
@@ -31,3 +35,18 @@ GenerationInput 必填 mandatoryTests 与 verifications 直接复用 SyncCoordin
 GenerationOptions 可选 beforeFreezeCandidate 为可信程序回调，在生成响应 schema 与 approvedSpecs 核验后、freezeCandidate 前取得派生发布组合输入；protectedReadPaths 携完整读闭包（含不存在路径），不进入模型提示或 inputDigest。回调不授予模型选择发布父树的权限。
 
 GenerationInput.model 是由 operation 固定的模型 ID，effort 保持 high；缺省 sol 与显式选择的持久语义属于 [[sync-model-selection]]。
+
+
+GenerationOptions新增prepareOnly、reviewCandidate与builderTraces，分别用于结构化补丁准备和统一冻结候选的独立审查；原runGeneration默认行为保持。GenerationResult可返回prepared及preparedChanges，此状态没有候选验证或review通过含义。partitionEvidence保存每个真实分区/跨边review、同candidateDigest及trace；聚合review留null，不捏造全仓模型accept。跨边analysisEvidence携对应端点的真实独审原件用于提示，原业务授权核验仍沿不可变analysis。
+
+
+分区调用可携implementationPolicy的原授权目录与源码角色，只供受限文件规划；beforePartitionGeneration接收程序已核的精确路径及持久证据，由可信协调器沿既有scope门禁取得租约/绑定后返回实际scope/composed。此回调发生在任何code_generate前，不授予局部builder全局目录。GenerationResult.fileWriterPlanRef把真实布局计划绑定最终V2证据。
+
+
+readonlyContractPaths只用于sync-coordinator-v2局部只读接口上下文，不授予写权或实现审查覆盖；跨边合并两端targets后对应路径不再只读。完整Spec仍在files中，真实owner代码/测试及外部oracle读取不变。
+
+失败值可携原 Native session/thread/turn、requestKey/inputDigest，仅绑定原故障来源，不表示成功或自动续修授权；已结算资格由 [[sync-native-run]] 与 [[sync-coordinator]] 重核。
+
+GenerationInput可选reviewRepair只携既有resultRef、nativePlanRef、checkpointRef，交精确失败组的未批准格式诊断；既可来自Native格式拒绝，也可来自已认证Native成功但程序位置字段格式拒绝。复用既有stage-worktree临时Git稿，不新增持久字段，不追补旧ref/缺席。该引用进入失败组真实请求摘要，兄弟输入不带它。
+
+GenerationOptions.reviewSpecWritePaths只接唯一最终dispatch已派生的P2 Spec写范围，供实际只读P1位置早验使用；不进入GenerationInput、inputDigest或持久记录，不是新的权限配置。一般可写P2与合法跨owner精确诊断保持原协议。

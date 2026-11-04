@@ -9,13 +9,14 @@ import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 import { openProtocol } from '@spexcode/session-protocol'
 import { sessionIdForCreateKey, readSessionCreateTermination, recoverSessionCreateTermination, type SessionCreateTermination } from '../sessions.js'
-import { cancelStructuredSession, runStructuredSession, StructuredSessionError, type StructuredSessionRequest, type StructuredSessionResult } from '../session-structured.js'
-import { structuredExecutionPolicy } from '../session-structured-policy.js'
+import { cancelStructuredSession, runStructuredSession, SettledSessionCreateTimeoutError, StructuredSessionError, type StructuredSessionRequest, type StructuredSessionResult } from '../session-structured.js'
+import { rejectedFinalOutput, structuredExecutionPolicy } from '../session-structured-policy.js'
 import { freezeContext, proveFrozenReads, readFrozenManifest, readFrozenRange } from '../frozen-context.js'
 import { createAttemptRunner, type AttemptRunnerOptions, type NativeRunCheckpoint, type NativeRunPlan, type NativeRunRecord } from './native-run.js'
 import { migrateSyncStore } from './migrations.js'
 import type { BlobRef } from './operation-types.js'
 import { SyncStore } from './store.js'
+import { nativeReviewRequestMatches } from './coordinator.js'
 
 const tsxImport = createRequire(import.meta.url).resolve('tsx/esm')
 const hash = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex')
@@ -52,6 +53,113 @@ async function fixture(existingRoot?: string, model?: string) {
   const runner = (runtime: AttemptRunnerOptions['runtime']) => createAttemptRunner(store, claimed.fence, { runtime, blobIO, pollMs: 2 })
   return { root, store, claimed, request, records, resource, checkpoint, blobIO, cache, runtimeBase, runner, cleanup: () => { protocol.close(); if (!existingRoot) rmSync(root, { recursive: true, force: true }) } }
 }
+
+for (const model of ['claude:default', 'zcode:default']) for (const historical of [false, true]) test(`原生CLI配置仅冻结新resource，历史缺席与摘要保持 ${model}/${historical}`, async t => {
+  const f = await fixture(undefined, model)
+  try {
+    const request = { ...f.request, worktree: { baseCommit: 'a'.repeat(40), tree: 'b'.repeat(40), mode: 'edit' as const } }
+    if (historical) f.store.reserveDispatch(f.claimed.fence, { key: request.requestKey, purpose: request.purpose, requestDigest: hash(request) })
+    let calls = 0
+    const run = f.runner({ ...f.runtimeBase, run: async actual => {
+      calls++
+      assert.equal((actual as StructuredSessionRequest & { nativeConfiguration?: string }).nativeConfiguration, historical ? undefined : 'cli-config-v1')
+      throw new StructuredSessionError('failed', 'mock-native-config-boundary')
+    } })
+    await assert.rejects(run(request), /mock-native-config-boundary/)
+    const resource = f.resource(), bytes = f.blobIO.read(resource.plan.planBlob), plan = JSON.parse(bytes.toString()) as NativeRunPlan
+    assert.equal((plan.request as typeof request & { nativeConfiguration?: string }).nativeConfiguration, historical ? undefined : 'cli-config-v1')
+    assert.equal(plan.requestDigest, hash(plan.request))
+    assert.equal(resource.plan.payloadDigest, plan.requestDigest)
+    await t.test('实际持久Native请求可沿同一冻结规则冷验', () => {
+      assert.equal(nativeReviewRequestMatches(plan.request, request, { attemptId: f.claimed.attempt.id, policyDigest: f.claimed.operation.policyDigest }), true)
+    })
+    await t.test('新CLI沿原生effort而旧请求保内部high', () => {
+      assert.equal(plan.request.effort, historical ? 'high' : undefined)
+    })
+    await assert.rejects(run(request), /mock-native-config-boundary/)
+    assert.deepEqual(f.blobIO.read(f.resource().plan.planBlob), bytes)
+    const changed = { ...request, nativeConfiguration: historical ? 'cli-config-v1' : 'unknown' } as typeof request
+    await assert.rejects(run(changed), { code: 'key_reused' })
+    for (const mutation of [{ model: 'claude:other-native-alias' }, { inputDigest: 'other-input' }, { root: join(f.root, 'other-source') }, { base: 'c'.repeat(40) }, { timeoutMs: null }])
+      await assert.rejects(run({ ...request, ...mutation }), { code: 'key_reused' })
+    assert.equal(calls, 2)
+    assert.equal(f.store.readOperation(f.claimed.operation.id).callsUsed, 1)
+  } finally { f.cleanup() }
+})
+
+for (const historical of [false, true]) test(`ZCode read resource freezes noninteractive tools only for new plans; historical=${historical}`, async () => {
+  const f = await fixture(undefined, 'zcode:bigmodel-api/GLM-5.3-Flash')
+  try {
+    const request = { ...f.request, worktree: { baseCommit: 'a'.repeat(40), tree: 'b'.repeat(40), mode: 'read' as const } }
+    if (historical) {
+      const requestDigest = hash(request), dispatch = f.store.reserveDispatch(f.claimed.fence, { key: request.requestKey, purpose: request.purpose, requestDigest })
+      const identity = { operationId: f.claimed.operation.id, attemptId: f.claimed.attempt.id, inputId: f.claimed.operation.input.id, candidateDigest: null }
+      const expectedSessionId = sessionIdForCreateKey(dispatch.sessionCreateKey)
+      const plan: NativeRunPlan = { schemaVersion: 1, request, requestDigest, sessionCreateKey: dispatch.sessionCreateKey, expectedSessionId, ...identity }
+      const checkpoint: NativeRunCheckpoint = { schemaVersion: 1, ...identity, requestDigest, expectedSessionId, phase: 'planned', nativeCallRequested: false, nativeStarted: false, nativeState: 'unpublished', session: { sessionId: expectedSessionId, threadId: null, turnId: null } }
+      f.store.planResource(f.claimed.fence, { key: request.requestKey, kind: 'native_session', payloadDigest: requestDigest, inputId: identity.inputId, candidateDigest: null, planBlob: f.blobIO.put(Buffer.from(JSON.stringify(plan))), checkpointRef: f.blobIO.put(Buffer.from(JSON.stringify(checkpoint))) })
+    }
+    let calls = 0
+    const run = f.runner({ ...f.runtimeBase, run: async actual => {
+      calls++
+      assert.equal(actual.requestKey, request.requestKey)
+      assert.equal(actual.sessionCreateKey, f.store.readAttempt(f.claimed.attempt.id).dispatchPlans[0].sessionCreateKey)
+      assert.deepEqual(actual.zcodeToolPolicy, historical ? undefined : { version: 1, toolDenylist: ['ExitPlanMode'] })
+      assert.equal(actual.inputDigest, request.inputDigest)
+      throw new StructuredSessionError('failed', 'mock-before-native-session')
+    } })
+    await assert.rejects(run(request), /mock-before-native-session/)
+    const resource = f.resource(), planBytes = f.blobIO.read(resource.plan.planBlob), saved = JSON.parse(planBytes.toString()) as NativeRunPlan
+    assert.deepEqual(saved.request.zcodeToolPolicy, historical ? undefined : { version: 1, toolDenylist: ['ExitPlanMode'] })
+    assert.equal(saved.requestDigest, hash(saved.request))
+    assert.equal(f.records.size, 0, 'the fixture covers persisted requests before any Native session or send')
+    await assert.rejects(run(request), /mock-before-native-session/)
+    assert.deepEqual(f.blobIO.read(f.resource().plan.planBlob), planBytes)
+    assert.equal(f.store.readOperation(f.claimed.operation.id).callsUsed, 1)
+    const changed = { ...request, zcodeToolPolicy: { version: 1, toolDenylist: historical ? ['ExitPlanMode'] : ['ExitPlanMode', 'Bash'] } } as typeof request
+    await assert.rejects(run(changed), { code: 'key_reused' })
+    assert.equal(calls, 2, 'tampered control policy must not reach the native runtime')
+  } finally { f.cleanup() }
+})
+
+for (const historical of [false, true, 'tool-policy-only', 'configured-high'] as const) test(`reserved-only ZCode dispatch restores its exact frozen request from a new store connection; historical=${historical}`, async t => {
+  const f = await fixture(undefined, 'zcode:bigmodel-api/GLM-5.3-Flash')
+  const coldProtocol = openProtocol(join(f.root, 'db.sqlite'))
+  try {
+    const request = { ...f.request, worktree: { baseCommit: 'a'.repeat(40), tree: 'b'.repeat(40), mode: 'read' as const } }
+    const original = { ...request, ...(historical === false || historical === 'configured-high' ? { nativeConfiguration: 'cli-config-v1' as const } : {}), ...(historical === true ? {} : { zcodeToolPolicy: { version: 1 as const, toolDenylist: ['ExitPlanMode'] as const } }) }
+    if (historical === false) delete original.effort
+    const dispatch = f.store.reserveDispatch(f.claimed.fence, { key: request.requestKey, purpose: request.purpose, requestDigest: hash(original) }), before = JSON.stringify(dispatch)
+    assert.equal(f.resource(), null)
+    let calls = 0
+    const coldStore = new SyncStore(coldProtocol, { readBlob: f.blobIO.read })
+    const run = createAttemptRunner(coldStore, f.claimed.fence, { blobIO: f.blobIO, pollMs: 2, runtime: { ...f.runtimeBase, run: async actual => {
+      calls++
+      assert.deepEqual(actual.zcodeToolPolicy, original.zcodeToolPolicy)
+      assert.equal(actual.nativeConfiguration, original.nativeConfiguration)
+      assert.equal(actual.effort, original.effort)
+      assert.equal(actual.sessionCreateKey, dispatch.sessionCreateKey)
+      throw new StructuredSessionError('failed', 'mock-before-native-session')
+    } } })
+    for (const changed of [
+      { ...request, prompt: 'changed full request' },
+      { ...request, schema: { type: 'object', additionalProperties: false } },
+      { ...request, worktree: { ...request.worktree, tree: 'c'.repeat(40) } },
+      { ...request, purpose: 'changed purpose' },
+    ]) await assert.rejects(run(changed), { code: 'SYNC_DISPATCH_CONFLICT' })
+    assert.equal(f.resource(), null); assert.equal(calls, 0)
+    assert.equal(JSON.stringify(coldStore.readAttempt(f.claimed.attempt.id).dispatchPlans[0]), before)
+    await assert.rejects(run(request), /mock-before-native-session/)
+    const resource = f.resource(), saved = JSON.parse(f.blobIO.read(resource.plan.planBlob).toString()) as NativeRunPlan
+    assert.deepEqual(saved.request, original)
+    assert.equal(saved.requestDigest, dispatch.requestDigest)
+    assert.equal(resource.plan.payloadDigest, dispatch.requestDigest)
+    assert.equal(JSON.stringify(coldStore.readAttempt(f.claimed.attempt.id).dispatchPlans[0]), before)
+    assert.equal(coldStore.readOperation(f.claimed.operation.id).callsUsed, 1)
+    assert.equal(f.records.size, 0); assert.equal(calls, 1)
+    t.diagnostic(JSON.stringify({ historical, originalRequestDigest: dispatch.requestDigest, savedRequestDigest: hash(saved.request), dispatchUnchanged: JSON.stringify(coldStore.readAttempt(f.claimed.attempt.id).dispatchPlans[0]) === before, sessionCreateKeyUnchanged: saved.sessionCreateKey === dispatch.sessionCreateKey, callsUsed: coldStore.readOperation(f.claimed.operation.id).callsUsed, nativeRecords: f.records.size }))
+  } finally { coldProtocol.close(); f.cleanup() }
+})
 
 test('native intent precedes run, published queued session is created with unknown thread, result binds exact identity and replays', async () => {
   const f = await fixture()
@@ -108,6 +216,29 @@ test('same key concurrent callers share one run and call budget; changed payload
   } finally { f.cleanup() }
 })
 
+test('exactly stopped typed RPC failure removes its Native resource and replays the original failure without redispatch', async () => {
+  const f = await fixture()
+  try {
+    let calls = 0
+    const message = 'ZCode native RPC timeout (session/create)'
+    const runtime = { ...f.runtimeBase, run: async (request: StructuredSessionRequest): Promise<never> => {
+      calls++
+      const record = published(request)
+      record.structuredExecution = { ...record.structuredExecution!, state: 'failed', errorCode: 'native_rpc_timeout', error: message, cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: true, acknowledged: false, nativeStatus: 'stopped' } }
+      f.records.set(record.session, record)
+      throw new StructuredSessionError('native_rpc_timeout', message, { sessionId: record.session })
+    } }
+    const run = f.runner(runtime)
+    for (let replay = 0; replay < 2; replay++) {
+      await assert.rejects(run(f.request), error => { assert.equal((error as StructuredSessionError).code, 'native_rpc_timeout'); assert.equal((error as Error).message, message); return true })
+      assert.equal(f.resource().phase, 'removed'); assert.equal(f.checkpoint().status, 'failed')
+      assert.equal(f.checkpoint().stop?.state, 'failed'); assert.equal(f.checkpoint().stop?.nativeStopped, true)
+      assert.equal(f.checkpoint().result, undefined)
+    }
+    assert.equal(calls, 1); assert.equal(f.store.readOperation(f.claimed.operation.id).callsUsed, 1)
+  } finally { f.cleanup() }
+})
+
 test('frozen native dispatch preserves business binding, uses actual attempt/policy and verifies proof on removed replay', async () => {
   const f = await fixture(undefined, 'gpt-6.1-terra'), directory = mkdtempSync(join(tmpdir(), 'native-run-frozen-'))
   try {
@@ -132,6 +263,34 @@ test('frozen native dispatch preserves business binding, uses actual attempt/pol
     const bad = freezeContext({ directory, sourceRoot: f.root, binding: { requestKey: 'foreign', inputDigest: f.request.inputDigest, attemptId: f.claimed.attempt.id, policyDigest: f.claimed.operation.policyDigest }, entries: [] })
     await assert.rejects(run({ ...f.request, frozenContext: bad }), /requestKey/)
     assert.equal(f.store.readOperation(f.claimed.operation.id).callsUsed, 1)
+  } finally { f.cleanup(); rmSync(directory, { recursive: true, force: true }) }
+})
+
+for (const defect of ['claude-legacy', 'claude-model', 'zcode-provider', 'zcode-model'] as const) test(`v5/null ${defect} proof is refused live and on removed replay`, async () => {
+  const model = defect.startsWith('claude') ? 'claude:MiniMax-M3.1-Flash' : 'zcode:bigmodel-api/GLM-5.3-Flash'
+  const f = await fixture(undefined, model), directory = mkdtempSync(join(tmpdir(), 'native-v5-proof-'))
+  try {
+    const frozenContext = freezeContext({ directory, sourceRoot: f.root, binding: { requestKey: f.request.requestKey, inputDigest: f.request.inputDigest, attemptId: f.claimed.attempt.id, policyDigest: f.claimed.operation.policyDigest }, entries: [{ id: 'task', label: 'task', kind: 'utf8', bytes: Buffer.from('frozen task') }] })
+    let calls = 0, bad: StructuredSessionResult | undefined
+    const run = f.runner({ ...f.runtimeBase, run: async request => {
+      calls++; const record = published(request), result = completed(record); f.records.set(record.session, record)
+      assert.equal(record.structuredExecution!.version, 5)
+      const args = { contextDigest: frozenContext.contextDigest, entryId: 'task', startByte: 0, endByte: 11 }
+      const coverage = proveFrozenReads(frozenContext, { threadId: result.threadId, turnId: result.turnId }, [{ type: 'dynamicToolCall', id: 'call', namespace: null, tool: 'spex_read_frozen', arguments: args, status: 'completed', success: true, contentItems: readFrozenRange(frozenContext, args).response.contentItems }])
+      const frozenReadProof = defect === 'claude-legacy' ? coverage : defect === 'claude-model'
+        ? { ...coverage, version: 3 as const, provider: 'claude-code' as const, promptId: 'prompt', model: 'foreign', cliVersion: '2.1.309', maxReadBytes: 65536 as const, maxResultSizeChars: 500000 as const }
+        : { ...coverage, version: 4 as const, provider: 'zcode' as const, providerId: defect === 'zcode-provider' ? 'foreign' : 'bigmodel-api', modelId: defect === 'zcode-model' ? 'foreign' : 'GLM-5.3-Flash', cliVersion: '0.17.1', cliSha256: 'a'.repeat(64), inputId: 'input', promptDigest: 'b'.repeat(64), witnessDigest: 'c'.repeat(64) }
+      bad = { ...result, frozenReadProof }; record.structuredExecution!.frozenReadProof = frozenReadProof
+      return bad
+    } })
+    const request = { ...f.request, frozenContext, timeoutMs: null }, message = defect.startsWith('claude') ? /Claude result lacks its exact native provider\/model proof/ : /ZCode result lacks its exact native provider\/model proof/
+    await assert.rejects(run(request), message)
+    assert.notEqual(f.resource().phase, 'removed'); assert.equal(calls, 1)
+    for (const phase of ['terminal', 'removed'] as const) {
+      const current = f.resource(), checkpoint = { ...f.checkpoint(), phase, status: 'completed' as const, result: bad! }
+      f.store.recordResourceCheckpoint(current.id, { operationId: checkpoint.operationId, attemptId: checkpoint.attemptId, inputId: checkpoint.inputId, candidateDigest: checkpoint.candidateDigest, phase, expectedCheckpointRef: current.checkpointRef, checkpointRef: f.blobIO.put(Buffer.from(JSON.stringify(checkpoint))) })
+    }
+    await assert.rejects(run(request), message); assert.equal(calls, 1)
   } finally { f.cleanup(); rmSync(directory, { recursive: true, force: true }) }
 })
 
@@ -213,6 +372,13 @@ test('exact legacy inline resource recovers after reader threshold change withou
     const put = (value: unknown) => f.blobIO.put(Buffer.from(JSON.stringify(value)))
     const resource = f.store.planResource(f.claimed.fence, { key: request.requestKey, kind: 'native_session', payloadDigest: requestDigest, inputId: identity.inputId, candidateDigest: null, planBlob: put(plan), checkpointRef: put(checkpoint) })
     f.store.recordResourceCheckpoint(resource.id, { ...identity, phase: 'created', expectedCheckpointRef: resource.checkpointRef, checkpointRef: put({ ...checkpoint, phase: 'created' }) })
+    const beforeOperation = f.store.readOperation(f.claimed.operation.id), beforeAttempt = f.store.readAttempt(f.claimed.attempt.id)
+    assert.ok(beforeAttempt.expiresAtMs > Date.now(), '证明清理时旧fence仍有效')
+    let authorityChecks = 0, bindings = 0, newPlans = 0
+    const reserve = f.store.reserveDispatch.bind(f.store), bind = f.store.bindSession.bind(f.store), planResource = f.store.planResource.bind(f.store)
+    f.store.reserveDispatch = (...args) => { authorityChecks++; return reserve(...args) }
+    f.store.bindSession = (...args) => { bindings++; return bind(...args) }
+    f.store.planResource = (...args) => { newPlans++; return planResource(...args) }
     let calls = 0, stops = 0
     const run = f.runner({ readRecord: f.runtimeBase.readRecord, run: async () => { calls++; throw new Error('legacy recovery must not start native work') }, cancel: async id => {
       stops++; assert.equal(id, record.session)
@@ -222,6 +388,10 @@ test('exact legacy inline resource recovers after reader threshold change withou
     const controller = new AbortController(); controller.abort()
     await assert.rejects(run({ ...request, signal: controller.signal }), /native execution cancelled and exact stop settled/)
     assert.equal(f.resource().phase, 'removed'); assert.equal(stops, 1); assert.equal(calls, 0)
+    assert.equal(authorityChecks, 0, 'aborted清理不能检查或申请业务dispatch权')
+    assert.equal(bindings, 0); assert.equal(newPlans, 0)
+    assert.deepEqual(f.store.readOperation(f.claimed.operation.id), beforeOperation)
+    assert.deepEqual(f.store.readAttempt(f.claimed.attempt.id), beforeAttempt)
     assert.equal(f.store.readOperation(f.claimed.operation.id).callsUsed, 1)
     assert.equal(f.resource().plan.payloadDigest, requestDigest)
     assert.deepEqual(JSON.parse(f.blobIO.read(f.resource().plan.planBlob).toString('utf8')), plan)
@@ -272,20 +442,21 @@ test('incorrect native result identity, hash or published request binding is nev
   }
 })
 
-test('cancel acknowledgement loss still records durable exact stop proof after fence revocation without restoring business authority', async () => {
+for (const timeoutMs of [5000, null]) test(`cancel acknowledgement loss with timeout=${timeoutMs} still settles exact resources after fence revocation`, async () => {
   const f = await fixture()
   try {
     let cancellations = 0
     const run = f.runner({ readRecord: f.runtimeBase.readRecord, run: async request => {
       const record = published(request); record.status = 'active'; record.harnessSessionId = 'thread'; record.structuredExecution = { ...record.structuredExecution!, state: 'running', threadId: 'thread', turnId: 'turn', turnStartRequested: true }; f.records.set(record.session, record)
       return new Promise((_resolve, reject) => request.signal!.addEventListener('abort', () => reject(new Error('caller aborted')), { once: true }))
-    }, cancel: async id => {
+    }, cancel: async (id, options) => {
+      assert.equal(options?.timeoutMs, timeoutMs === null ? 15000 : timeoutMs)
       cancellations++; assert.equal(id, f.checkpoint().expectedSessionId)
       const record = f.records.get(id)!
       record.structuredExecution = { ...record.structuredExecution!, state: 'cancelled', cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: true, acknowledged: true, nativeStatus: 'interrupted' } }
       throw new Error('cancel reply lost')
     } })
-    const pending = run(f.request)
+    const pending = run({ ...f.request, timeoutMs })
     await waitUntil(() => f.resource()?.phase === 'created')
     f.store.requestControl(f.claimed.operation.id, 'cancel')
     await assert.rejects(pending, /cancel reply lost/)
@@ -651,10 +822,66 @@ test('restart with an exact creation termination settles held resource without c
     await assert.rejects(f.runner(runtime)(f.request), /transport lost/)
     const key = f.store.readAttempt(f.claimed.attempt.id).dispatchPlans[0].sessionCreateKey, record = published({ ...f.request, requestKey: key })
     const receipt: SessionCreateTermination = { version: 1, sessionId: record.session, requestDigest: record.createRequestId!, payloadHash: record.createPayloadHash!, code: 'session_create_timeout', phase: 'target-resolution', nativeStopped: true, nativeStatus: 'notStarted', cleanupComplete: true }
-    await assert.rejects(f.runner({ ...runtime, readCreateTermination: () => receipt })(f.request), error => error instanceof StructuredSessionError && error.code === 'timeout')
+    const settledRunner = f.runner({ ...runtime, readCreateTermination: () => receipt })
+    const assertSettledTimeout = (error: unknown): boolean => {
+      assert.ok(error instanceof SettledSessionCreateTimeoutError)
+      assert.equal(error.code, 'timeout')
+      assert.deepEqual(error.termination, receipt)
+      return true
+    }
+    await assert.rejects(settledRunner(f.request), assertSettledTimeout)
+    await assert.rejects(settledRunner(f.request), assertSettledTimeout, 'removed replay retains the exact settled creation timeout subtype')
     assert.equal(calls, 1)
     assert.equal(f.resource().phase, 'removed')
     assert.equal(f.checkpoint().creationTermination?.code, 'session_create_timeout')
+    assert.equal(f.store.readOperation(f.claimed.operation.id).callsUsed, 1)
+  } finally { f.cleanup() }
+})
+
+test('timeout without an exact creation termination receipt is not classified as a settled retry', async () => {
+  const f = await fixture()
+  try {
+    let calls = 0
+    const runtime = { ...f.runtimeBase, run: async () => { calls++; throw new StructuredSessionError('timeout', 'creation observer timed out without a termination receipt') } }
+    await assert.rejects(f.runner(runtime)(f.request), error => {
+      assert.ok(error instanceof StructuredSessionError)
+      assert.equal(error.code, 'timeout')
+      assert.equal(error instanceof SettledSessionCreateTimeoutError, false)
+      return true
+    })
+    assert.equal(calls, 1)
+    assert.equal(f.resource().phase, 'planned')
+    assert.equal(f.checkpoint().nativeCallRequested, true)
+    assert.equal(f.store.readOperation(f.claimed.operation.id).callsUsed, 1)
+  } finally { f.cleanup() }
+})
+
+test('terminal create timeout checkpoint resumes terminal-to-removed with its exact subtype', async () => {
+  const f = await fixture()
+  try {
+    let calls = 0
+    const runtime = { ...f.runtimeBase, run: async () => { calls++; throw new Error('creation observer transport lost') } }
+    await assert.rejects(f.runner(runtime)(f.request), /transport lost/)
+    const key = f.store.readAttempt(f.claimed.attempt.id).dispatchPlans[0].sessionCreateKey, record = published({ ...f.request, requestKey: key })
+    const receipt: SessionCreateTermination = { version: 1, sessionId: record.session, requestDigest: record.createRequestId!, payloadHash: record.createPayloadHash!, code: 'session_create_timeout', phase: 'record-write', nativeStopped: true, nativeStatus: 'notStarted', cleanupComplete: true }
+    const resource = f.resource(), checkpoint = f.checkpoint(), terminal: NativeRunCheckpoint = {
+      ...checkpoint,
+      phase: 'terminal',
+      status: 'timeout',
+      creationTermination: receipt,
+      stop: { sessionId: record.session, state: 'timeout', nativeStopped: true, acknowledged: false, nativeStatus: 'notStarted' },
+    }
+    f.store.recordResourceCheckpoint(resource.id, {
+      operationId: checkpoint.operationId, attemptId: checkpoint.attemptId, inputId: checkpoint.inputId, candidateDigest: checkpoint.candidateDigest,
+      phase: 'terminal', expectedCheckpointRef: resource.checkpointRef, checkpointRef: f.blobIO.put(Buffer.from(JSON.stringify(terminal))),
+    })
+    await assert.rejects(f.runner({ ...runtime, readCreateTermination: () => receipt })(f.request), error => {
+      assert.ok(error instanceof SettledSessionCreateTimeoutError)
+      assert.deepEqual(error.termination, receipt)
+      return true
+    })
+    assert.equal(calls, 1)
+    assert.equal(f.resource().phase, 'removed')
     assert.equal(f.store.readOperation(f.claimed.operation.id).callsUsed, 1)
   } finally { f.cleanup() }
 })
@@ -673,9 +900,120 @@ for (const defect of ['session', 'request', 'payload', 'cleanup', 'native', 'sch
     if (defect === 'cleanup') Object.assign(receipt, { cleanupComplete: false })
     if (defect === 'native') Object.assign(receipt, { nativeStopped: false })
     if (defect === 'schema') receipt.version = 2 as 1
-    await assert.rejects(f.runner({ ...runtime, readCreateTermination: () => receipt })(f.request), /termination differs/)
+    await assert.rejects(f.runner({ ...runtime, readCreateTermination: () => receipt })(f.request), error => {
+      assert.ok(error instanceof StructuredSessionError)
+      assert.equal(error instanceof SettledSessionCreateTimeoutError, false)
+      assert.match(error.message, /termination differs/)
+      return true
+    })
     assert.equal(f.resource().phase, 'planned')
     assert.equal(calls, 1)
     assert.equal(f.store.readOperation(f.claimed.operation.id).callsUsed, 1)
+  } finally { f.cleanup() }
+})
+
+test('exact creation timeout cannot be retried as settled after native thread and turn have started', async () => {
+  const f = await fixture()
+  try {
+    let calls = 0
+    const runtime = { ...f.runtimeBase, run: async (request: StructuredSessionRequest) => {
+      calls++
+      const record = published(request)
+      record.status = 'active'
+      record.harnessSessionId = 'thread-started'
+      record.structuredExecution = { ...record.structuredExecution!, state: 'running', threadId: 'thread-started', turnId: 'turn-started', turnStartRequested: true }
+      f.records.set(record.session, record)
+      throw new Error('native transport lost after start')
+    } }
+    await assert.rejects(f.runner(runtime)(f.request), /native transport lost after start/)
+    const record = [...f.records.values()][0]
+    const receipt: SessionCreateTermination = { version: 1, sessionId: record.session, requestDigest: record.createRequestId!, payloadHash: record.createPayloadHash!, code: 'session_create_timeout', phase: 'record-write', nativeStopped: true, nativeStatus: 'notStarted', cleanupComplete: true }
+    await assert.rejects(f.runner({ ...runtime, readCreateTermination: () => receipt })(f.request), error => {
+      assert.ok(error instanceof StructuredSessionError)
+      assert.equal(error.code, 'stale_result')
+      assert.equal(error instanceof SettledSessionCreateTimeoutError, false)
+      return true
+    })
+    assert.equal(calls, 1)
+    assert.equal(f.resource().phase, 'created')
+    assert.equal(f.checkpoint().nativeStarted, true)
+    assert.equal(f.store.readOperation(f.claimed.operation.id).callsUsed, 1)
+  } finally { f.cleanup() }
+})
+
+test('worktree资源桥贯通真实创建/queue/fake CLI，prompt只规范一次，实际commit和冷重放绑定完整', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'sync-native-worktree-bridge-')), root = join(directory, 'repo'), home = join(directory, 'home'), bin = join(directory, 'bin'), count = join(directory, 'dispatches.json')
+  mkdirSync(root); mkdirSync(home); mkdirSync(bin)
+  const git = (...args: string[]): string => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: 'pipe' }).trim()
+  try {
+    git('init', '-q', '-b', 'main'); git('config', 'user.name', 'bridge fixture'); git('config', 'user.email', 'bridge@example.invalid')
+    mkdirSync(join(root, '.spec')); writeFileSync(join(root, '.spec/spexcode.json'), JSON.stringify({ mainBranch: 'main', sessions: { maxActive: 1 } }))
+    writeFileSync(join(root, 'value'), 'seed\n'); git('add', '.'); git('commit', '-qm', 'seed')
+    const executable = join(bin, 'claude')
+    writeFileSync(executable, `#!/usr/bin/env node
+const fs=require('node:fs'),path=require('node:path'),rl=require('node:readline'),cp=require('node:child_process');
+if(process.argv.includes('--version')){process.stdout.write('2.1.309 (Claude Code)\\n');process.exit(0)}
+const arg=n=>process.argv[process.argv.indexOf(n)+1],session=arg('--session-id'),model=arg('--model'),send=x=>process.stdout.write(JSON.stringify(x)+'\\n');
+rl.createInterface({input:process.stdin}).on('line',line=>{const user=JSON.parse(line);if(user.type!=='user')return;const prompt=user.message.content[0].text;
+const calls=fs.existsSync(${JSON.stringify(count)})?JSON.parse(fs.readFileSync(${JSON.stringify(count)},'utf8')):[];calls.push({prompt,cwd:process.cwd()});fs.writeFileSync(${JSON.stringify(count)},JSON.stringify(calls));
+const project=path.join(process.env.CLAUDE_CONFIG_DIR,'projects/exact');fs.mkdirSync(project,{recursive:true});fs.writeFileSync(path.join(project,session+'.jsonl'),JSON.stringify({type:'user',sessionId:session,uuid:user.uuid,parentUuid:null,promptId:'prompt-'+user.uuid,message:user.message})+'\\n');
+send({type:'system',subtype:'init',session_id:session,model,tools:['Read','Bash','Edit','StructuredOutput']});send(user);
+if(prompt.startsWith('malformed')){const Ajv=require(${JSON.stringify(createRequire(import.meta.url).resolve('ajv'))}).default,validate=new Ajv({allErrors:true}).compile(JSON.parse(arg('--json-schema'))),input={items:{}};validate(input);const error='Output does not match required schema: '+validate.errors.map(item=>item.instancePath+': '+item.message).join(', '),rows=[{type:'api-request',sessionId:session,id:'request',params:{model}},{type:'assistant',sessionId:session,uuid:'schema-assistant',parentUuid:user.uuid,requestRef:'request',message:{role:'assistant',content:[{type:'tool_use',id:'schema-call',name:'StructuredOutput',input}]}},{type:'user',sessionId:session,uuid:'schema-error',parentUuid:'schema-assistant',promptId:'prompt-'+user.uuid,sourceToolAssistantUUID:'schema-assistant',message:{role:'user',content:[{type:'tool_result',tool_use_id:'schema-call',is_error:true,content:error}]}}];fs.appendFileSync(path.join(project,session+'.jsonl'),rows.map(row=>JSON.stringify(row)).join('\\n')+'\\n');process.exitCode=1;send({type:'result',subtype:'error_max_structured_output_retries',is_error:true,session_id:session,user_message_uuid:user.uuid,user_message_uuids:[user.uuid]});return;}
+
+if(prompt.startsWith('alias')){const copy=path.join(${JSON.stringify(directory)},'alias-copy');fs.cpSync(process.cwd(),copy,{recursive:true});fs.writeFileSync(path.join(copy,'probe'),'draft');cp.execFileSync('git',['-C',copy,'add','probe']);cp.execFileSync('git',['-C',copy,'commit','-qm','experimental probe']);fs.writeFileSync(path.join(copy,'index-probe'),'staged');cp.execFileSync('git',['-C',copy,'add','index-probe'])}
+if(prompt.startsWith('edit')){fs.writeFileSync('value','actual committed candidate\\n');cp.execFileSync('git',['add','value']);cp.execFileSync('git',['commit','-qm','native candidate'])}
+send({type:'result',subtype:'success',is_error:false,session_id:session,uuid:'result',user_message_uuid:user.uuid,user_message_uuids:[user.uuid],structured_output:{answer:'actual native result'}});
+});`)
+    chmodSync(executable, 0o755)
+    const modulePath = (name: string): string => fileURLToPath(new URL(name, import.meta.url)), script = join(directory, 'runner.mts')
+    writeFileSync(script, `import assert from'node:assert/strict';import{readFileSync}from'node:fs';import{execFileSync}from'node:child_process';import{createHash}from'node:crypto';
+import{openProtocol}from'${createRequire(import.meta.url).resolve('@spexcode/session-protocol')}';import{configuredSessionApplication}from${JSON.stringify(modulePath('../session-application.ts'))};
+import{migrateSyncStore}from${JSON.stringify(modulePath('./migrations.ts'))};import{SyncStore}from${JSON.stringify(modulePath('./store.ts'))};import{createAttemptRunner}from${JSON.stringify(modulePath('./native-run.ts'))};import{captureInputSnapshot,readEvidence}from${JSON.stringify(modulePath('./snapshot.ts'))};import{stageWorktree}from${JSON.stringify(modulePath('./stage-worktree.ts'))};import{nativeWorktreePrompt}from${JSON.stringify(modulePath('../native-worktree-runtime.ts'))};import{readRecord}from${JSON.stringify(modulePath('../session-record.ts'))};import{StructuredSessionError}from${JSON.stringify(modulePath('../session-structured.ts'))};import{structuredExecutionPolicy}from${JSON.stringify(modulePath('../session-structured-policy.ts'))};
+const hash=x=>createHash('sha256').update(JSON.stringify(x)).digest('hex'),git=args=>execFileSync('git',args,{encoding:'utf8'}).trim(),snapshot=await captureInputSnapshot(process.cwd(),{committed:true}),application=configuredSessionApplication(),protocol=openProtocol(process.env.SPEX_SESSION_DATABASE_PATH);await migrateSyncStore(protocol);const store=new SyncStore(protocol,{readBlob:ref=>readEvidence(snapshot.source.commonDir,ref)}),scope={paths:['value'],contractIds:[],flowIds:[]};
+const operation=store.admitAndEnqueue({ingressKey:'bridge',rootCauseId:'bridge',origin:'spec',input:snapshot,scope,budget:{maxCalls:6,maxAttempts:2,maxRepairs:1,timeoutMs:60000},policyDigest:'policy',impactDigest:'impact',readSetDigest:'read',delivery:null,deliveryPlan:{canonicalRoot:process.cwd()+'/delivery',branch:'delivery',baseCommit:snapshot.headCommit}}),claim=store.claimAttempt({operationId:operation.id,source:snapshot.source,scope,leaseMs:30000,expectedMessageId:operation.dispatchMessageId}),seed=stageWorktree(snapshot.source.commonDir,snapshot.headCommit,snapshot.immutableTree,'edit'),request={root:process.cwd(),base:seed.baseCommit,worktree:seed,requestKey:'edit-bridge',inputDigest:'bound',purpose:'code_generate',prompt:'edit once',schema:{type:'object',properties:{answer:{type:'string'}},required:['answer'],additionalProperties:false},timeoutMs:10000,model:'claude:MiniMax-M3.1-Flash',effort:'high'},runner=createAttemptRunner(store,claim.fence,{pollMs:2});
+const result=await runner(request),record=readRecord(result.sessionId),expected=hash({prompt:nativeWorktreePrompt(request.prompt,seed),parent:null,launcher:null,base:seed.baseCommit,structuredExecution:structuredExecutionPolicy({...request,effort:undefined,nativeConfiguration:'cli-config-v1'})});assert.equal(record.structuredExecution.nativeConfiguration,'cli-config-v1');assert.equal(record.structuredExecution.effort,undefined);assert.equal(JSON.parse(readFileSync(record.structuredExecution.claudeNative.root+'/launch.json','utf8')).args.includes('--effort'),false);assert.equal(record.createPayloadHash,expected);assert.equal(result.frozenReadProof,undefined);assert.equal(record.structuredExecution.frozenContext,undefined);assert.equal(record.structuredExecution.resultWorktree.tree,result.worktree.tree);assert.notEqual(result.worktree.headCommit,seed.baseCommit);assert.equal(git(['show',result.worktree.headCommit+':value']),'actual committed candidate');assert.equal(store.findResource(claim.attempt.id,request.requestKey).phase,'removed');
+const calls=JSON.parse(readFileSync(${JSON.stringify(count)},'utf8'));assert.equal(calls.length,1);assert.equal(calls[0].prompt,nativeWorktreePrompt(request.prompt,seed));assert.equal(calls[0].cwd,result.worktree.worktreePath);
+git(['worktree','remove',result.worktree.worktreePath]);assert.deepEqual(await createAttemptRunner(store,claim.fence,{pollMs:2})(request),result);assert.equal(store.readOperation(operation.id).callsUsed,1);assert.equal(JSON.parse(readFileSync(${JSON.stringify(count)},'utf8')).length,1);await assert.rejects(runner({...request,prompt:'another task'}),{code:'key_reused'});
+const malformed={...request,requestKey:'schema-bridge',purpose:'code_behavior_analyze',prompt:'malformed original response',schema:{type:'object',properties:{items:{type:'array',maxItems:0}},required:['items'],additionalProperties:false},worktree:{...seed,mode:'read'},timeoutMs:null},failure=await runner(malformed).then(()=>null,error=>error);assert(failure instanceof StructuredSessionError);assert.equal(failure.code,'structured_output_retries_exhausted');assert.match(failure.message,/items.*must be array/);const failed=readRecord(failure.sessionId),exitPath=failed.structuredExecution.claudeNative.root+'/exit.json',originalExit=readFileSync(exitPath);assert.equal(failed.structuredExecution.errorCode,'structured_output_retries_exhausted');assert.equal(failed.structuredExecution.output,undefined);assert.equal(store.findResource(claim.attempt.id,malformed.requestKey).phase,'removed');assert.equal(failed.structuredExecution.cancellation.nativeStopped,true);
+await assert.rejects(createAttemptRunner(store,claim.fence,{pollMs:2})({...malformed,signal:AbortSignal.abort()}),{code:'structured_output_retries_exhausted'});assert.equal(store.findResource(claim.attempt.id,malformed.requestKey).phase,'removed');assert.deepEqual(readFileSync(exitPath),originalExit);
+const repair={...malformed,requestKey:'schema-repair-bridge',prompt:'repair original fields using actual Native diagnostic: '+failure.message,schema:request.schema},repaired=await runner(repair);assert.equal(repaired.output.answer,'actual native result');assert.notEqual(repaired.sessionId,failure.sessionId);assert.equal(store.findResource(claim.attempt.id,repair.requestKey).phase,'removed');assert.equal(store.readOperation(operation.id).callsUsed,3);assert.equal(JSON.parse(readFileSync(${JSON.stringify(count)},'utf8')).length,3);
+const alias={...malformed,requestKey:'alias-bridge',prompt:'alias read experiment',schema:request.schema},aliasFailure=await runner(alias).then(()=>null,error=>error);assert(aliasFailure instanceof StructuredSessionError);assert.equal(aliasFailure.code,'native_worktree_result_invalid');assert.match(aliasFailure.message,/index-probe/);const aliasRecord=readRecord(aliasFailure.sessionId),aliasNative=aliasRecord.structuredExecution.claudeNative.root,aliasGit=args=>execFileSync('git',['-C',aliasRecord.worktreePath,...args],{encoding:'utf8'}).trim(),aliasHead=aliasGit(['rev-parse','HEAD']),aliasStatus=aliasGit(['status','--porcelain']),aliasIndexPath=aliasGit(['rev-parse','--path-format=absolute','--git-path','index']),aliasIndex=readFileSync(aliasIndexPath),protocolComplete=readFileSync(aliasNative+'/completed.json');assert.equal(aliasRecord.structuredExecution.state,'failed');assert.equal(aliasRecord.structuredExecution.output,undefined);assert.notEqual(aliasHead,seed.baseCommit);assert.notEqual(store.findResource(claim.attempt.id,alias.requestKey).phase,'removed');
+await assert.rejects(createAttemptRunner(store,claim.fence,{pollMs:2})({...alias,signal:AbortSignal.abort()}),{code:'cancelled'});assert.equal(store.findResource(claim.attempt.id,alias.requestKey).phase,'removed');assert.equal(aliasGit(['rev-parse','HEAD']),aliasHead);assert.equal(aliasGit(['status','--porcelain']),aliasStatus);assert.deepEqual(readFileSync(aliasIndexPath),aliasIndex);assert.deepEqual(readFileSync(aliasNative+'/completed.json'),protocolComplete);
+const gitRepair={...alias,requestKey:'alias-repair-bridge',prompt:'review in new worktree; actual prior Git failure: '+aliasFailure.message},gitRepaired=await runner(gitRepair);assert.notEqual(gitRepaired.sessionId,aliasFailure.sessionId);assert.notEqual(gitRepaired.worktree.worktreePath,aliasRecord.worktreePath);assert.equal(gitRepaired.worktree.headCommit,seed.baseCommit);assert.equal(store.findResource(claim.attempt.id,gitRepair.requestKey).phase,'removed');assert.equal(aliasGit(['rev-parse','HEAD']),aliasHead);assert.equal(aliasGit(['status','--porcelain']),aliasStatus);assert.equal(store.readOperation(operation.id).callsUsed,5);assert.equal(JSON.parse(readFileSync(${JSON.stringify(count)},'utf8')).length,5);protocol.close();process.exit(0);`)
+    const result = spawnSync(process.execPath, ['--import', tsxImport, script], { cwd: root, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, SPEXCODE_HOME: home, SPEX_SESSION_DATABASE_PATH: join(home, 'sessions.sqlite'), SPEX_RUNTIME_HOME: join(home, 'runtime'), CLAUDE_CONFIG_DIR: join(home, 'claude-config'), ANTHROPIC_BASE_URL: 'https://example.invalid', SPEXCODE_CODEX_USAGE_GUARD: '0', SPEX_TEST: '1' }, encoding: 'utf8', timeout: 30000 })
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
+  } finally { rmSync(directory, { recursive: true, force: true }) }
+})
+
+for (const defect of ['none', 'session', 'thread', 'turn', 'input', 'schema', 'prompt', 'purpose', 'sha', 'record-absence', 'unsettled', 'legacy'] as const) test(`rejected final diagnostic bridge authenticates exact failed record and preserves legacy absence: ${defect}`, async () => {
+  const f = await fixture()
+  try {
+    const text = '{"answer":[}', message = 'original format failure'
+    const run = f.runner({ ...f.runtimeBase, run: async actual => {
+      const record = published(actual), identity = { threadId: 'native-thread', turnId: 'native-turn' }
+      const rejectedOutput = rejectedFinalOutput(text, actual.prompt, record.structuredExecution!, identity)
+      if (defect === 'thread') rejectedOutput.threadId = 'foreign'
+      if (defect === 'turn') rejectedOutput.turnId = 'foreign'
+      if (defect === 'input') rejectedOutput.inputDigest = 'foreign-owner-input'
+      if (defect === 'schema') rejectedOutput.schemaDigest = '0'.repeat(64)
+      if (defect === 'prompt') rejectedOutput.promptDigest = '0'.repeat(64)
+      if (defect === 'purpose') rejectedOutput.purpose = 'another-owner'
+      if (defect === 'sha') rejectedOutput.sha256 = '0'.repeat(64)
+      record.harnessSessionId = identity.threadId
+      record.structuredExecution = { ...record.structuredExecution!, ...identity, state: defect === 'unsettled' ? 'cancelling' : 'failed', ...(defect === 'legacy' || defect === 'record-absence' ? {} : { rejectedOutput }) }
+      f.records.set(record.session, record)
+      throw new StructuredSessionError('structured_output_format_invalid', message, { sessionId: defect === 'session' ? 'foreign' : record.session, ...identity, ...(defect === 'legacy' ? {} : { rejectedOutput }) })
+    } })
+    await assert.rejects(run(f.request), error => {
+      assert(error instanceof StructuredSessionError)
+      assert.equal(error.code, defect === 'none' || defect === 'legacy' ? 'structured_output_format_invalid' : 'stale_result')
+      if (defect === 'none') {
+        assert.equal(error.message, message); assert(error.rejectedOutput?.ref)
+        assert.equal(f.blobIO.read(error.rejectedOutput.ref).toString('utf8'), text)
+      } else assert.equal(error.rejectedOutput, undefined)
+      return true
+    })
+    assert.equal(f.cache.has(textHash(text)), defect === 'none', 'no rejected bytes are granted for mismatched/unsettled/legacy records')
+    assert.notEqual(f.resource().phase, 'removed', 'failure diagnostic does not claim stop or success')
   } finally { f.cleanup() }
 })

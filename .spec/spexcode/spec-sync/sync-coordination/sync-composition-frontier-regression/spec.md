@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+真实 Git 空基线夹具包含多个独立业务 Spec 和非 UTF-8 工具插件实例：组合及证据重读只投影真实业务契约，逐 ID 核对 owner、原始需求和完整对象；插件原字节与用户 index 保持。业务正文经批量对象通道读取，不逐 Spec 启动单 blob 进程；真正业务 Spec 的非 UTF-8 内容仍拒绝。此夹具不创建验证或 receipt，不代表原生产品验收。
+
 回归 [[sync-input-composition]]、[[sync-code-behavior]]、[[sync-controlled-request]] 及 [[sync-application-planning]] 的精确资源行为。夹具保存真实 source/交付 worktree、Git提交/blob/mode，成对基线经真实store admission→generation→verification→journal→receipt→settlement动作建立，禁止手写SQLite伪造权威。验证四层和行为分析runner明确fake，不把这些单测称为真实native产品验收。
 
 大小写混合路径的真实 Git 树经组合后，必须能够重读并核对 manifest/contentDigest，且保留各文件的原始字节。
@@ -32,4 +34,4 @@ code:
 
 新module发现反例把helper/feature真实提交Git、现治理源码新增literal动态import、独立B已提交后又dirty；直接actual analyzeCodeBehavior要求两个新模块完整正文及requiredChangedPaths，必须真实newNodes或具体coverage_gap，fake模型仅列allowed_change仍被程序拒绝。readPaths/selection只增exact readonly，不晋写scope，B读取与锁范围仍排除。另以真实store结算新leaf/code而source未ff接受的场景证明实际交付治理阻止重复发现；另在真实退役后保旧code头snapshot的历史owner，确认不能复活已删除的真实owner path；验证和runner仍明确fake。
 
-行为分析接缝按body-entry-v2的独立或必读共享entry展开真实冻结正文，仍逐字核原三方字节、OID、mode与intent artifacts；运输去重不改变原精确基线、作者残差和独立交付断言。
+行为分析接缝按body-entry-v3的独立或必读共享entry展开真实冻结正文及JSON语义引用，仍逐字核原三方字节、OID、mode与intent artifacts；运输去重不改变原精确基线、作者残差和独立交付断言。

@@ -184,3 +184,6 @@ unknown hook remains the user's and is left byte-for-byte untouched; the canonic
 collision statically and retains the old HEAD lint rather than silently removing local coverage. On success
 init prints what it installed, refreshed, and preserved, then the next steps — install the packages, edit
 `project/spec.md`, run the backend, confirm `spex lint` is clean.
+
+Init awaits the materialize receipt, including its bounded registry-fenced shared-filter cleanup, before it
+reports the planted artifacts; asynchronous failure follows the same explicit materialize-skipped warning.

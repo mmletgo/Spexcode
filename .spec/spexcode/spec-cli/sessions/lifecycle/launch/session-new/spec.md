@@ -51,13 +51,22 @@ Cleanup is part of the outcome, not a detached best-effort continuation. If exac
 the request returns `session_create_cleanup_failed` and names the residue rather than claiming zero artifacts.
 No timeout path falls back to another launcher, an in-process create, or a background create.
 
-Branch and worktree names are shorter than the session identity, so a different request may derive the same
-Git resources. The transaction therefore locks the exact `{branch,path}` pair with the existing lock primitive,
+Branch and worktree names carry the complete session identity, but pre-existing refs or unknown directories
+may still occupy the target. The transaction locks the exact `{branch,path}` pair with the existing lock primitive,
 then records whether the store, branch, and registered worktree were absent before preparation and which of
 them its successful operations created. Pre-existing resources fail without mutation. Rollback consumes that
 one ownership receipt and removes only resources this transaction proved it created; a failed add never turns
 the candidate name into authority to delete. A colliding request therefore cannot damage an already-published
 receipt, while a transaction that owns its candidate still removes exactly that candidate on abort.
+
+Different candidates also share the physical Git common directory's cross-process registry fence
+([[record-lock]]). Candidate inspection, matching orphan cleanup, and the following `git worktree add` form
+one registry critical section; an add failure retains that fence through ownership inspection and rollback.
+After successful add, creation releases the registry fence before host seeding, child-process materialization,
+record publication, queue admission, or model execution. A later preparation failure reacquires the fence for
+cleanup inspection, remove, and final verification. Close pruning and archived restore use this same fence,
+so one session cannot scan a sibling's half-written worktree registration. Different repositories and the
+sessions' actual model turns remain parallel.
 
 Worktree registry checks recognize a configured path alias and Git's canonical path as the same existing
 directory only after resolving their filesystem identities. Recovery still requires the exact matching
@@ -72,6 +81,27 @@ restart the candidate only when that receipt is valid and matches every field of
 mismatched payload/resource identity, malformed receipt, or occupied orphan with no receipt conveys no
 ownership: all resources are preserved and creation fails loud. Normal rollback or record publication retires
 the private receipt; a matching retry also retires a publication-left receipt after recovering the public row.
+
+New branch/path storage slugs carry the complete session UUID, so different UUIDs sharing their first four
+characters have distinct physical resources. Existing published records retain their saved identities.
+An unpublished old receipt may freeze the former four-character layout only when its root/path/branch exactly
+match that same prompt and UUID's legacy derivation; request/payload and physical Git ownership checks remain
+mandatory under the same locks. A missing receipt never authorizes claiming or deleting an old path. The public
+fixture proves equal-prefix creates both return 201, while genuinely occupied complete targets and unknown
+contents still refuse creation; isolated synthetic old receipts exercise recovery without changing live evidence.
+
+Matching receipts permit recovery only while the candidate is unpublished and cold. Ordinary create retries
+and cancellation recovery use the same physical Git identity, unknown-content and original-fork checks under
+the existing locks, then remove without force and delete a branch only at its proved commit. A pinned immutable
+commit supplies the fork; an unpinned or symbolic-base candidate also needs its actual branch-creation reflog
+entry with zero old OID. The oldest surviving commit entry is insufficient: missing or expired creation evidence,
+a moved symbolic base, an authored HEAD, tracked/untracked/ignored WIP, or an unknown registration preserves
+the resources and receipt and refuses recovery. Only the existing byte-identical host-state seed exception remains.
+
+Recovery also refuses resources claimed by another canonically published session in the same project, including
+stopped and archived owners. Saved path identity (including a physical alias) and same-repository branch ownership
+both fence deletion; another repository's same-named branch does not. A valid old receipt for one complete UUID
+cannot delete another published UUID's resources even when their former four-character suffix and fork coincide.
 
 Record publication itself fences any receipt that could not be retired: while that public record exists,
 create returns it and never enters candidate cleanup. Before terminal close may remove that fence, close holds
@@ -133,6 +163,10 @@ the synchronous atomic record replace and re-proves that the candidate path is t
 checked out on the recorded branch, and that exact branch ref exists. JavaScript cannot interleave an abort
 between the final check and replace. A `201` may therefore never name a detached, switched, deleted, or
 rolled-back Git candidate.
+That identity proof uses the explicit source root and the candidate's own Git metadata: their physical common
+directories must match, and the candidate's direct linked admin must backlink to its own `.git`. A copied
+gitfile or matching top-level/branch name in another registry cannot be published as this candidate. The same
+proof protects matching orphan recovery and archived restore; aliases resolve by physical filesystem identity.
 Once the record exists, a lost connection is a lost response, not a failed create: the same idempotency key
 recovers the receipt. The published record is already a normal durable `queued` session with its prompt and
 launch payload present, so backend restart and the ordinary queue supervisor can recover it. Queue draining is

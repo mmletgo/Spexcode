@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+数字与null调用期限均原样传给新生成和独立审查；完整scope、CAS、schema及程序硬门禁保持。
+
 测试创建独立临时 Git 仓库并真实 capture/freeze 候选；注入 runner 只替代 native 模型调用，不替代 schema/CAS/scope/manifest/候选对象校验。覆盖完整候选与未改源码/测试 assertions、不同 session/thread、稳定 requestKey、dispatch 登记顺序、warning不阻断、强制硬门禁失败不review、生成 schema/CAS/越界拒绝，以及错 inputId/digest、不完整/不存在/重复 checkedIds、accept带发现、复用会话拒绝。
 
 组合输入基线与完整 UTF-8 文本从实际 Git 对象核对；准备后磁盘变化及调用者 Map/array/policy 修改不能改变已冻结生成/审查。取消与unsupported保留真实原因，不增加派发或偷偷重试。检查用户文件/index/HEAD 保持原样，真实候选仅冻结为对象 refs；本测试不证明 Docker V3 或完整 P2 产品交付。
@@ -26,6 +28,14 @@ oracle 定向回归核 mandatory tuple、固定 verification definition 与完�
 
 contract-omission marker回归拒绝错路径、未知existingID与affectedIds未关联；普通contract引用仍返回repair而不获得重细化权。真实候选、独立identity与原schema门禁全部保留。
 
-可信发布 freeze 回调回归证明：响应返回后才调用，闭包外真实继承进入实际候选且原模型提示不变；闭包内 readonly 字节和不存在路径被回调修改均拒绝，模型修改 readonly oracle 仍越界拒绝。
+可信发布 freeze 回调回归证明：响应返回后才调用，闭包外真实继承进入实际候选且原模型提示不变；闭包内 readonly 字节和不存在路径被回调修改均拒绝，模型修改 readonly oracle 仍越界拒绝。源与候选manifest投影回归核对真实full/partial条数及complete标记、完整manifest摘要与local-read-set范围；不扩大正文或路径inventory，局部未提供不等于完整候选缺文件，具体义务缺证据仍可repair。
 
 真实Git冻结的单份测试全文超过2MiB时，生成和独立审查仍逐字收到全部断言及首尾内容，候选保该全文不变且会话保持独立。本文件的runner为受控接缝；原生超大读取与实际覆盖证明由 [[frozen-context-reader]] 单独验收，不能把提示到达当模型已读。
+
+旧生命周期Spec的`related` glob回归使用真实Git提交删除owner及`src/helpers/format.js`；即使prior manifest含该entry，只提供Spec/代码/测试、不提供命中的helper正文时，generation硬门禁必须在Native派发前拒绝。
+
+格式续审的native/非native双路径回归使用真实Git候选和认证格式packet引用：完整原final与精确schema进入Native唯一临时Git评审稿及只读sidecar，或非Native完整提示，重复格式失败的第二份原final继续进入下一seed，原candidate全部业务字节不变；ref缺席不补，foreign thread原文拒绝，程序不解析旧final为accept。
+
+原716完整review JSON按原resultDigest固定，带括号的ruleLocation须在只读P1路由前报格式错误，原字符串不清洗；unknown/重复affectedIds、错误path/ID和混合finding.kind拒绝。实际候选精确存在的非ASCII ID、合法跨owner path#ID及真实可写P2发现保持原协议。Native completed字段格式拒绝与Native schema拒绝两类原件均以真实scratch Git稿正常提交后返回严格review；key order变化但值相等允许，无commit、改源码/schema sidecar、坏JSON及final与稿不一致拒绝，原candidate与原件保持。受控runner只证明该程序接缝，不代表真实模型或交付通过。
+
+混合发现回归在真实候选内同时放入只读owner的带说明定位和可写owner的精确ID missing_fact，首轮仍报review_location_format；当前续修与JSON证据冷恢复均正常派发唯一Git稿，提交后保留可写发现并严格修正只读定位，冷重建原请求逐字一致。写范围保持瞬态，不进入持久输入或摘要；只读missing_fact与未知affectedId仍报review_location_binding。

@@ -10,9 +10,11 @@ code:
   - packages/spec-core/src/anchors.ts#anchorHitExists
   - packages/spec-core/src/anchors.ts#anchorHitCommits
   - packages/spec-core/src/anchors.ts#resolveAnchor
+  - packages/spec-core/src/anchors.ts#relationClaimsPath
 related:
   - scripts/anchor-drift-golden-proof.mjs
   - scripts/anchor-drift-fold-proof.mjs
+  - packages/spec-core/src/anchors.test.ts
   - spec-cli/src/anchors.test.ts
   - spec-cli/src/lint.ts
   - packages/spec-core/src/git.ts
@@ -51,6 +53,11 @@ ambiguous (two same-named units), an unparseable current file, a language with n
 extractor, or an extractor that cannot run here — each a lint **error** naming its repair. When an
 extractor cannot run, the error also records that those anchors were skipped and remain unverified;
 the rest of lint continues, but the non-zero result cannot be reported as a pass.
+
+Path claims share `relationClaimsPath`: a bare directory recurses, `*` stays within one path
+component, terminal `**` may cross directories, and `**/` matches zero or more complete directory
+components. Thus `src/helpers/**/*.js` covers both `src/helpers/format.js` and deeper JavaScript
+files. This matcher expands path claims; code-anchor syntax still rejects a glob or directory selector.
 
 **That verdict is decided in ONE place, for every reader.** Two readers ask it: the gate, judging the
 candidate TIP it is about to admit, and the eval freshness probe, judging the WORKING tree to decide whether

@@ -1,13 +1,15 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, lstatSync, statSync, rmSync, readdirSync } from 'node:fs'
+import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, lstatSync, statSync, realpathSync, rmSync, readdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
-import { execFileSync, spawnSync } from 'node:child_process'
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
+import { once } from 'node:events'
 import { seedWorktreeHostState } from './worktree-sources.js'
 import { tsxBin } from './tsx-bin.js'
 import { openProjectSessionApplication } from '@spexcode/session-application'
+import { withWorktreeRegistryLock } from './session-record-lock.js'
 
 // [[residence]] / [[content-filter]] / [[commit-surgery]] / [[harness-delivery]] — the vote-less
 // footprint engine: materialized artifacts are NEVER tracked (one residence behavior), a contract file's domain is a LIVE
@@ -31,7 +33,7 @@ function gitAvailable(): boolean {
 // a fresh host repo that tracks its own contract files + .gitignore (internal blank-line run included —
 // the shape whose bytes every round-trip must preserve), adopted via the real `spex init`, data committed.
 function makeHost() {
-  const proj = mkdtempSync(join(tmpdir(), 'spex-rp-'))
+  const proj = realpathSync(mkdtempSync(join(tmpdir(), 'spex-rp-')))
   const home = mkdtempSync(join(tmpdir(), 'spex-home-'))
   const codex = mkdtempSync(join(tmpdir(), 'spex-codex-'))
   const piAgent = mkdtempSync(join(tmpdir(), 'spex-pi-'))
@@ -97,6 +99,75 @@ test('same-input materialize is an operational no-op', { skip: !gitAvailable() &
   spex('materialize')
   assert.deepEqual(outputs.map((path) => statSync(path, { bigint: true }).ctimeNs), before,
     'an unchanged target map must not rewrite already-correct materialized outputs')
+})
+
+test('materialize filter removal waits for a concurrent registry writer before listing and unregistering', { timeout: 20_000 }, async () => {
+  const fixture = mkdtempSync(join(tmpdir(), 'spex-materialize-registry-')), proj = join(fixture, 'project'), bin = join(fixture, 'bin')
+  const writerEntered = join(fixture, 'writer-entered'), writerRelease = join(fixture, 'writer-release')
+  const removalReady = join(fixture, 'removal-ready'), registryRead = join(fixture, 'registry-read')
+  const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim()
+  mkdirSync(proj); mkdirSync(bin)
+  const g = (...args: string[]) => execFileSync(realGit, ['-C', proj, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+  g('init', '-q', '-b', 'main'); g('config', 'user.name', 'registry-fixture'); g('config', 'user.email', 'registry@example.test')
+  g('commit', '-qm', 'fixture', '--allow-empty')
+  mkdirSync(join(proj, '.spec')); writeFileSync(join(proj, '.spec/spexcode.json'), JSON.stringify({ harnesses: [] }))
+  g('config', 'filter.spexcode.clean', 'cat')
+  const hook = join(proj, '.git/hooks/post-checkout')
+  writeFileSync(hook, '#!/bin/sh\ntouch "$SPEX_MATERIALIZE_WRITER_ENTERED"\nwhile [ ! -e "$SPEX_MATERIALIZE_WRITER_RELEASE" ]; do sleep 0.01; done\n')
+  chmodSync(hook, 0o755)
+  const wrapper = join(bin, 'git')
+  writeFileSync(wrapper, `#!/bin/sh
+case " $* " in
+  *" config filter.spexcode.clean "*) touch "$SPEX_MATERIALIZE_REMOVAL_READY" ;;
+  *" worktree list --porcelain -z "*) touch "$SPEX_MATERIALIZE_REGISTRY_READ" ;;
+esac
+exec ${JSON.stringify(realGit)} "$@"
+`)
+  chmodSync(wrapper, 0o755)
+  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, SPEXCODE_HOME: join(fixture, 'home'), SPEX_SESSION_DATABASE_PATH: join(fixture, 'sessions.sqlite'),
+    SPEX_MATERIALIZE_WRITER_ENTERED: writerEntered, SPEX_MATERIALIZE_WRITER_RELEASE: writerRelease,
+    SPEX_MATERIALIZE_REMOVAL_READY: removalReady, SPEX_MATERIALIZE_REGISTRY_READ: registryRead }
+  const children: ReturnType<typeof spawn>[] = []
+  const start = (command: string, args: string[]) => {
+    const child = spawn(command, args, { cwd: proj, env, stdio: ['ignore', 'pipe', 'pipe'] })
+    children.push(child)
+    let output = ''
+    child.stdout!.on('data', chunk => { output += chunk }); child.stderr!.on('data', chunk => { output += chunk })
+    return { child, done: once(child, 'close').then(([code]) => ({ code, output })) }
+  }
+  const waitFor = async (file: string) => {
+    const deadline = Date.now() + 5_000
+    while (!existsSync(file)) {
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${file}`)
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+  }
+  let writer: ReturnType<typeof start> | undefined, reader: ReturnType<typeof start> | undefined
+  try {
+    await withWorktreeRegistryLock(async () => {
+      writer = start(realGit, ['-C', proj, 'worktree', 'add', '-b', 'held-writer', join(fixture, 'held'), 'main'])
+      await waitFor(writerEntered)
+      reader = start(process.execPath, [TSX, CLI, 'materialize'])
+      await waitFor(removalReady)
+      await new Promise(resolve => setTimeout(resolve, 500))
+      assert.equal(existsSync(registryRead), false, 'the registry read and shared filter removal wait behind the real Git add')
+      assert.equal(g('config', 'filter.spexcode.clean').trim(), 'cat', 'the shared filter remains installed while the writer owns the fence')
+      writeFileSync(writerRelease, 'release\n')
+      const result = await writer.done
+      assert.equal(result.code, 0, result.output)
+    }, undefined, join(proj, '.git'))
+    const result = await reader!.done
+    assert.equal(result.code, 0, result.output)
+    assert.match(result.output, /materialized — content-hash/)
+    assert.equal(existsSync(registryRead), true)
+    assert.throws(() => g('config', 'filter.spexcode.clean'), 'the completed materialize removes the unused shared filter')
+  } finally {
+    writeFileSync(writerRelease, 'release\n')
+    await writer?.done
+    for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM')
+    await Promise.all(children.map(child => child.exitCode !== null || child.signalCode !== null ? Promise.resolve() : once(child, 'close')))
+    rmSync(fixture, { recursive: true, force: true })
+  }
 })
 
 test('materialize refreshes legacy core handlers before dispatch and lifecycle hooks recover', { skip: !gitAvailable() && 'git not available' }, () => {
@@ -383,7 +454,7 @@ test('commit surgery honors GIT_INDEX_FILE: a temporary index (pathspec/-a commi
 // when the worktree (a) ANCHORS a project config layer and (b) that project is TRUSTED and (c) each hook is
 // HASHED. materialize must satisfy all three at the worktree so a fresh-init codex worker's hooks fire.
 test('codex worktree materialize plants the .codex anchor + unconditional project trust + per-hook hashes', { skip: !gitAvailable() && 'git not available' }, () => {
-  const proj = mkdtempSync(join(tmpdir(), 'spex-cxwt-'))
+  const proj = realpathSync(mkdtempSync(join(tmpdir(), 'spex-cxwt-')))
   const home = mkdtempSync(join(tmpdir(), 'spex-home-'))
   const codex = mkdtempSync(join(tmpdir(), 'spex-codex-'))
   const piAgent = mkdtempSync(join(tmpdir(), 'spex-pi-'))
@@ -478,7 +549,7 @@ test('worktree seeding: tracked data via checkout (never a link), host state cop
 const DISPATCH = join(SRC, '..', 'hooks', 'dispatch.sh')
 
 function makeBareRepo(prefix: string) {
-  const proj = mkdtempSync(join(tmpdir(), prefix))
+  const proj = realpathSync(mkdtempSync(join(tmpdir(), prefix)))
   const home = mkdtempSync(join(tmpdir(), 'spex-home-'))
   const codex = mkdtempSync(join(tmpdir(), 'spex-codex-'))
   const piAgent = mkdtempSync(join(tmpdir(), 'spex-pi-'))

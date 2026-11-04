@@ -19,3 +19,12 @@ code:
 对象批处理以真实 SHA-1/SHA-256 仓库验证特殊 UTF-8 路径、二进制/空文件、mode/symlink、缺失 index 与空树；进程计数锁定每轮观察一次批量写对象、每次读树一次批量读对象。先读后篡改同 OID loose object 或移除对象必须再次失败；聚合超过 128 MiB 的分组、单对象恰好 128 MiB 与超限失败分别验证，避免缓存或批次容量改变不可变对象核对语义。
 
 同次读树交出的原始 bytes 与逐对象读取在真实 SHA-1/SHA-256 树逐字一致，条目 digest 对应这些完整字节，空文件、二进制、mode/symlink 和特殊路径不变；篡改 OID 在交出坏对象前明确失败，仍保留原批次聚合、单对象容量及缺失对象回归。
+
+只读查询 scope 内同物理 commonDir+tree 的重复无回调读树只批量读一次；不同物理仓库或不同 tree 必须各自读取。缓存命中返回独立条目副本，不替代逐次 verifySnapshot 的 HEAD/tree、manifest、contentDigest 与 id 校验；onObject 命中仍逐对象回调并核对原字节。成功或失败结束 scope 后，直接调用和继承 ALS 的遗留异步任务都必须重读，实际篡改/缺失对象继续拒绝。
+
+已提交模式以真实 Git 验证默认工作区快照身份保持、captureKind 参与新身份、staged/unstaged/untracked 与采集中保存/暂存均不污染 HEAD 输入，HEAD 变化重试后只返回同一已提交树；indexTree/indexDigest 绑定 HEAD tree，旧无标记快照仍验证成功。
+
+
+真实快照经固定计划同源的JSON递归键排序后，working-tree与commit身份均保持可验证；改变source分支仍因身份摘要拒绝。
+
+无关 worktree 登记的 commondir 真实为 0 字节且 Git 全局枚举退出 128 时，normal/linked 来源身份及已提交快照不变；显式工作区采集等待同 commonDir 的登记事务完成再读取完整嵌套边界，观察回调可再次取得该锁。真实 Git 矩阵覆盖 normal、linked、bare+linked、separate-git-dir 的 linked、路径 alias、相对回链；separate primary 保留既有拒绝。复制 gitfile、丢登记、错回链、foreign commonDir 继续拒绝，自身 admin 物理替换仍使前后观察失败并撤销旧 fingerprint。

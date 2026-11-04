@@ -43,7 +43,7 @@ async function fixture(t: test.TestContext, dirtyReadonly = true) {
     const resources = [...reads(path).map(path => ({ kind: 'path' as const, path })), { kind: 'contract' as const, id: `RULE-${path}` }], selection = store.readBaselineSelection(snapshot.source, resources)
     assert.ok('selection' in selection)
     const scope: SyncScope = { paths: [path], contractIds: [`RULE-${path}`], flowIds: [] }
-    const planBlob = writeEvidence(commonDir, { readPaths: reads(path), fixture: 'publication read closure only; not full coordinator policy' })
+    const planBlob = writeEvidence(commonDir, { readPaths: reads(path), targets: [], fixture: 'publication read closure only; not full coordinator policy' })
     const operation = store.admitAndEnqueue({ ingressKey: `${snapshot.id}:${path}`, rootCauseId: `${snapshot.id}:${path}`, origin: 'spec', input: snapshot, scope, baselineSelection: selection.selection, budget: { maxAttempts: 3, maxCalls: 8, maxRepairs: 2, timeoutMs: 1000000 }, delivery: null, deliveryPlan: planPrivateDelivery(snapshot, managed, `${snapshot.id}:${path}`), planBlob, policyDigest: planBlob.sha256, impactDigest: 'fixture-impact', readSetDigest: 'fixture-read' })
     const ack = store.ackDispatch(snapshot.source.repositoryId, operation.dispatchMessageId)
     const claimed = store.claimQueuedAttempt({ operationId: operation.id, source: snapshot.source, scope, leaseMs: 1000000, expectedRevision: ack.revision })

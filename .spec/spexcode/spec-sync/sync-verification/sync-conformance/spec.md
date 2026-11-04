@@ -27,3 +27,5 @@ CI 不能依赖开发机数据库或候选自行提交的通过记录，也不�
 每次新建独立 native 请求，不回放先前会话通过结果。V2 使用 [[sync-candidate-review]] 与既有 readonly native structured adapter，完整绑定 base/candidate/policy/tree、范围和读集合摘要。完整上下文超过2MiB时复用 [[frozen-context-reader]] 无损读取与精确native history覆盖证明，不因内联大小unsupported或截断；不存在已验证语义/读取能力仍明确unsupported。测试可注入 runner，结果明确标记 injected；产品入口不接受传入 passed JSON。V3 仅复用 [[verification-executor]]，基线和候选 AC 分别按可信固定政策计划，再合并全部必需稳定 test ID；候选导出无 Git 和宿主认证依赖。旧命令与新政策命令均执行，无法登记的新政策变更明确阻塞。Docker 不可用、测试缺失/跳过/失败、独审拒绝与绑定不匹配都不能通过。
 
 每次输出包含完整冻结输入身份、范围、真实审查 trace、容器结果与诊断；passed 只说明这次候选检查，不授予落盘或主分支同步状态。远端 required-check 必须由受保护目标版本 runner 启动，仓库 workflow 建议本身不证明保护设置已启用。
+
+可信unlimited配置没有operation总期限，独立候选审查仍使用有限正数callTimeoutMs，未配置时默认120000ms；旧有限配置原timeout fallback保持。Docker固定验证timeout、政策及完整通过标准不变。

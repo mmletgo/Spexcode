@@ -12,9 +12,23 @@ related:
 
 ## expanded spec
 
+P0真实Git fixture对analyze/review分别复现syntax与schema失败，冷序列化checkpoint后下一attempt在相同原路径读取原bytes与schema/errors再正常提交；review格式失败调用序列为analyze→review→review，原分析trace/OID/resultCommit保持，独审仍独立。错owner/schema输入及修改源码、测试或schema的真实提交必须拒绝，完整非草稿path/mode/OID及absence等于原composed。该受控runner不代表真实模型验收。
+
+Spec分节格式以真实Git快照和精确byte/intent选择等价重放整份正文双重转义及分节消失：旧门误报首个未消费义务，新门仍analysis_invalid但返回具体分节格式/计数且原proposal逐字保留、独审零派发。真实未授权AC依赖误改与缺项仍由同一义务谓词拒绝，新增expected/proposed完整业务字段及path/id便于修复；不变policy/scope/原输入或授业务权。有效Spec及正文内字面反斜线n、普通单行代码、原rawless保护、真实三方/raw整合和null删除回归保持；确定性模型接缝不冒充真实Native或产品交付。
+
+真实Git分区仅Spec变化时，proposal混入可读源码/未来写目标应在新独审前以behavior_analysis_invalid拒绝并保存完整proposal和精确越界路径；同源码仍可在完整读取后作为本区facts与独审checkedPaths引用。旧v2/v3/v4/v5及无指导版本accept不承接新v6输入，当前相同摘要仍可重放已审缓存。
+
+Native ID schema回归在真实Git old/current图上核验受影响ID为完整并集、去重且包含AC/VERIFY等所有既有item类型；ruleIds及AC提案ruleIds只枚举既有REQ/RULE/TR，空域使用maxItems:0且无空enum。raw-only空图的GAP/conflict仍可用空ID数组通过原分类门；未知ID被schema拒绝，分区路径/写权与后置AC来源授权仍按原门校验。Native schema只在新派发使用，旧v5输入须重跑，合法v6同摘要accepted缓存保持零调用复用。
+
+AC变化依据回归在真实Git中保留只读父规则与旧covers，证明未变只读来源在独审前携原完整proposal被拒；只读真实作者REQ/raw差量、只读规则业务变化和可写的旧AC闭包外新依据仍进入完整新独审，不扩写权或替P1批准最终来源链。
+
+真实 Git 的分区精确选择同时包含本区与区外真实 owner、尚未生成的 Spec 路径及未来 contract/flow null 基线，先复现 owner 全 null 时在首个派发前读取 path 崩溃，再证明分析和独审保留原 null residual 与 absent 路径证据、按真实 owner 排除区外正文。未来资源不成为既有契约或可读正文，写范围、原选择及组合证据、source/index/快照均保持；确定性 runner 只证明冻结投影与独审门禁，不代表真实 Native 或完整初始化交付。
+
 回归覆盖 [[sync-code-behavior]] 的合法外部变化、独立审查输入、正文与完整测试上下文、稳定冲突/GAP ID、重构无业务授权、文本相容重叠方案、无治理文件上层定位，以及独审遗漏/同会话/未绑定ref/自批政策/弱化验收拒绝。输入和交付实体保持真实来源及共同基线；原source/index不被写。整体运行与产品证据由 [[sync-code-writeback]] 验收。
 
 真实 Git 回归核对分析与独审均收到冻结契约图的 previous/current 完整项；raw-only 初始化的空图被明确标识，空关联仍须完整分析与独审，不把未通过 P1 结构检查或独审的候选资源名当作既有义务。此接缝只证明上下文与门禁，模型实际展开仍由真实 Dashboard 验收。
+
+验收提案schema的真实Git回归覆盖`oldFrozen`与`current`中的既有AC并集：previous-only和current-only身份均可通过结构校验，未知/未来AC由派发schema及同一`outputErrors`门禁拒绝。空AC域使用`maxItems: 0`且不产生空enum；合法既有AC进入enum仍不能绕过已审规则变化、affectedIds和真实来源链的运行时授权检查。此fake runner回归不代表真实Native执行。
 
 all-null裁决回归用真实受控正文令原独审composed图不同于source：仅原图的AC02关联所选RULE02时允许精确提案，当前AC03新增covers RULE02仍拒。追加缺席null资源后同完整树/摘要的新selection指针仍可读取该原图，不混用旧selection与新composition证据。缺原图/原读取范围、错input或摘要、历史authority及已有pair均不能借此扩大范围；旧契约和verifiedDelivery视图保持空，不将原独审图冒作交付基线。
 
@@ -52,3 +66,32 @@ all-null裁决回归用真实受控正文令原独审composed图不同于source�
 行为分析回归以真实 `analyzeCodeBehavior` runner 输入先证实旧 JSON 在多个视图重复携带相同完整正文，再核 `sha256-body-entry-v2` 的 body index 每个原正文只绑定一次、视图路径顺序不变，并由共享测试 helper 将 wire context 无损展开为原逻辑字段。覆盖 UTF-8 中文、emoji、BOM、CRLF、空正文、修改/删除、mode-only、controlled before、broad authorBaseline 正文及 intentArtifactFiles 的真实对象元数据；nonTextFiles、输出 schema、required/ownership/checkedPaths 门禁保持原断言。真实canonical filter fixture复用既有作者投影生产路径，并经精确selection/controlled请求wrapper验证 `priorProjection`，证明 raw snapshot 正文不变、before/after OID与clean全文真实对应、readPaths限定的投影进入同一正文表，展示不改index或composed候选。生产路径不增加 unpack API。
 
 运输回归使用至少两个真实Git项目：无关未改文本和非文本按需保留，原始规格的数组/标量code与related精确/目录/glob引用保持必读；删除前/三方不同版本、BOM/CRLF及262144字节对齐边界均经真实冻结工具逐字还原。body-entry-v2区分原content SHA与运输entry SHA，必读正文共享确定排序JSON对象，optional独立entry；所有视图与对象元数据展开后仍等于原冻结逻辑输入。分析读过的optional事实不能替代独审重读，缺证明、错turn或漏checkedPaths仍拒绝。这里的runner为明确测试接缝，实际Native读取/恢复另由frozen-context-reader验收。
+
+
+all-null裁决的分区生成/独审均保留原previousComposed与previousReadPaths元数据，verifiedDelivery仍为空；缺原组合引用或改原图摘要继续拒绝所选AC授权。
+
+真实Git source与verifiedDelivery具有相同旧expanded正文、无raw的既有叶stub回归先复现Native为该路径提出原stub或复制上游root raw的resolution，固定rawlessSpecPaths精确列叶路径后两者及未授权null删除均拒绝。stub保留无分节正文、仅expanded spec、空raw段加expanded spec三种真实字节形态，证明rawless判定按非空raw语义。相同冻结输入的空resolutions与完整facts/changes必须完成独审，叶source/delivery字节不变且不创建newNode；随后现有P1 rawless旧body用例证明可以细化为Spec而raw仍缺席。该路径是已有归属，不能用newNodes重复登记；不改stub业务意图、不改变author/delivery范围，也不产生源码或测试文件写入。
+
+真实分区输入冻结精确factSourcePaths；只读共享测试anchor不得作为新增code事实source，失败用可修复behavior_analysis_invalid列明owner路径与本区scope。新增事实来自本区owned source并提供完整变化证据可通过独审；逐字复用原plan.facts中的source/text不因路径只读而被拒。同一分区相同source的不同text给出可修复诊断，保留跨分区的事实身份冲突门禁。
+
+纯父局部范围回归在真实冻结Git树保留既有业务叶，但本区只读父Spec及配置，sourcePaths与unownedSourcePaths为空。分析和独审提示均明确局部视图不是全仓清单、缺席不证明全树不存在，完整snapshotTree身份保持。空源码候选的请求schema用maxItems:0拒绝将他区既有叶、Spec或测试当newNodes.codePath，合法空newNodes仍完整独审；跨区源码引用继续被原未完整读取门禁拒绝。真实业务源码正例只允许原未治理子集的精确enum，不含已治理源码、Spec及纯测试；全局导出schema原件不改写，运输展开、实际测试变更、新叶真实上层与后置归属门禁保留。
+
+Native code_to_spec分区brief回归使用Root/接口分区和真实工作树，核对facts同一source只给一个完整text、newNodes只来自本区候选且空候选/maxItems为0时返回[]、不替兄弟源码分区提叶；同时确认提示允许读取完整worktree且没有frozen-reader消费要求。fake runner仅证明请求/schema契约，不声称真实模型执行。
+
+raw-only v2 code_to_spec回归以local writePaths=[]和真实只读业务源码建立确定性正例：本区changedPaths、sourcePaths与完整冻结正文限定newNodes.codePath精确enum，合法新叶只写入原全局writePaths授权覆盖且在本区targets或contextNodeIds/readPaths中可见的非空raw父Spec目录；父可仅作为只读上下文，不能提升为本区writer。global executionScope可仅含父`spec.md`，分析不能预扩scope冒充未来叶租约；后续仍由原P1/lease门扩scope。无父目录授权、未知/未选父、越界或非本分区源码、已治理源码、测试源码均拒绝；源码或测试resolution仍受空本区writePaths拒绝。另覆盖未分区raw-only发现不依赖源码writePaths，保留完整实际unownedSourcePaths。
+
+局部输入的分析和独审均提示读取完整性由工具/程序记录，业务evidence只引用真实路径、符号与断言，避免手抄task/body entry的hash、长度或读取区间；完整读取证明及真实独审核对门禁原样保持。
+
+只读 v2 `code_to_spec` 的真实 Git 回归核对：多个授权 raw 父节点全部以 `{nodeId, path}` 冻结给分析和独审；`parentNodeId` enum 与真实有效 ID 集合完全一致，输出必须使用 ID。路径冒充 ID、未知 ID、未授权 ID 和没有 raw 的父节点均拒绝；无有效父或源码候选时 `maxItems=0` 且 schema 不含空 enum。仍核对新叶目录来自原全局父目录授权、源码来自本区精确候选、review 获得相同冻结映射，并确认 v1 与非 `code_to_spec` 的旧 schema 行为不变。
+
+真实Git raw-only v2 `targets=[]` 的独审阶段回归保留旧父绑定失败于 `repairDiagnostics`，但独审仅以当前校验后的原proposal `newNodeProposals` 为提案，逐个核对analysis里的四字段解析叶、授权 `newNodeParents`/非空raw、源码、叶目录与raw引用；不从历史诊断拼当前父ID或basis，不删历史诊断，也不要求持久解析叶额外携带提案字段。缺原proposal或阶段说明的review输入必须给具体repair；错误父ID仍在review派发前拒绝且review计数为零；basis与raw矛盾或伪造解析叶path得到review repair，并由 `behavior_review_failed` 保持阻断。虚拟review只把实际全文读取过的源码和父raw列为checkedPaths，不能借此伪造Native成功证据。
+
+单次冻结输入复用回归使用真实Git计数：raw-only v2、baseline与selection缺席且old/source/composed同tree时，在首个Native请求处捕获完整冻结输入并抛诊断停止，不构造模型结果；真实文本视图逐角色对照独立Git字节参考，验证原 `verifySnapshot` 仍执行而重复tree读取减少。不同完整tree OID仍逐角色绑定独立参考正文；精确selection/受控替换只更新目标角色，不污染共享tree的其它Map或条目副本。第一次分析结束后移除其OID对象，下一次同输入必须在snapshot/OID校验失败且Native调用数为零，证明局部缓存不跨调用存活。
+
+真实Git的raw-only、v2 code_to_spec纯父分区以无基线/无delivery、四角色同字节、authorChanges为空且无重叠证明：空resolutions仍经分析和独审完整覆盖，原snapshot/raw摘要不变，实际提示没有无条件重抄全文命令。追加总览、改写原词或额外转义原raw仍被原byte guard在独审前拒绝；真正三方相容整合与明确裁决的既有回归继续保持。fake模型接缝只证明输入职责及门禁，不声称真实Native收敛或完整初始化通过。
+
+真实raw-only/code_to_spec发现回归保留旧指导下已accept的完整coverage_gap原件，以现有accepted回调比较旧无指导版本context摘要；新guidanceContractVersion须改变唯一inputDigest并实际重新生成、独审，不能复用旧false gap；同新指导摘要仍可沿原回调承接。原input/policy/readSet及旧findings/ref字节保持。真实缺失跨账号可见性政策及raw/实现互斥的反例仍保coverage_gap/conflict和具体后果，不由程序清除；协调器既有无ID发现阻塞回归继续保持。
+
+Native analysis与独立review须收到逐字相同的短业务语义，并保留整个仓库自由读取。真实raw-only冻结Git fixture中已有明确REQ、源码符号和完整测试可核行为、但尚无治理叶时，以facts/newNodes完整交P1且不得产生false coverage_gap；已知事实的表示/错误名/参数类型/序列化/等价顺序差异不能单独构成conflict；仅治理缺席的coverage_gap须由review返回repair。明确意图下的实现/测试缺陷在原write scope内才交P2；只读code_to_spec缺口保持readonly_implementation_gap。真实重大政策未知仍保留coverage_gap及具体可观察后果，原Native ID、source/newNode owner、AC、写权、后置归属及coordinator unbound门不变。独审回归使用fake runner，只证明请求语义与当前review门禁，不冒称真实Native模型执行。
+
+语义元数据去重回归以完整原JSON作逐字段/UTF8对照，保留不同source/before/delivery正文、raw变化、完整item、controlled patch/group集合及顺序、同pair多binding、同ID不同内容和初始null owner。所有新语义ref须登记required并实际经过prepareFrozenPrompt、真实冻结readBatches/reader、原proveFrozenReads及cold校验；漏required仍失败，改ref/运输身份或required标记拒绝。生成与独审共用同一投影，不以单纯helper展开或体积减少代替读取证明。

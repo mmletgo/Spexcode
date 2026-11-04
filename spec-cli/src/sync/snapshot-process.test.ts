@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { deflateSync } from 'node:zlib'
-import { captureInputSnapshot, contentHash, readObject, readTree, writeObject, writeTree } from './snapshot.js'
+import { captureInputSnapshot, contentHash, readObject, readObjectBatch, readTree, writeObject, writeTree } from './snapshot.js'
 
 const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim()
 const git = (root: string, ...args: string[]): string => execFileSync(realGit, ['-C', root, ...args], { env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' }, timeout: 5000 }).toString().trim()
@@ -26,7 +26,7 @@ function shim(t: test.TestContext): { bin: string; trace: string } {
 const fs = require('node:fs'), path = require('node:path'), os = require('node:os'), cp = require('node:child_process');
 const args = process.argv.slice(2), stat = fs.fstatSync(0);
 const record = { args, regular: stat.isFile(), mode: stat.mode & 0o777, size: stat.size };
-if (args.includes('--stdin') || args.includes('--index-info') || args.includes('--stdin-paths') || args.includes('--batch')) {
+if (args.includes('--stdin') || args.includes('--index-info') || args.includes('--stdin-paths') || args.includes('--batch') || args.includes('--batch-check')) {
   if (!record.regular) { process.stderr.write('stdin must be owned regular file\\n'); process.exit(31); }
   for (const name of fs.readdirSync(os.tmpdir()).filter(name => name.startsWith('spex-sync-git-input-'))) {
     const directory = path.join(os.tmpdir(), name), input = path.join(directory, 'input');
@@ -59,10 +59,12 @@ test('生产快照及batch stdin仅用私有普通文件，真实Git原字节写
   try {
     assert.equal(readObject(join(root, '.git'), writeObject(join(root, '.git'), Buffer.alloc(0))).length, 0)
     const snapshot = await captureInputSnapshot(root), entries = readTree(snapshot.source.commonDir, snapshot.immutableTree)
+    const objects = readObjectBatch(snapshot.source.commonDir, entries.map(entry => entry.oid))
+    assert.deepEqual(objects.get(entries.find(entry => entry.path === 'binary')!.oid), Buffer.from([0, 255, 128, 1]))
     assert.deepEqual(readObject(snapshot.source.commonDir, entries.find(entry => entry.path === 'binary')!.oid), Buffer.from([0, 255, 128, 1]))
     assert.equal(readObject(snapshot.source.commonDir, entries.find(entry => entry.path === 'empty')!.oid).length, 0)
   } finally { process.env.PATH = priorPath; if (priorTmp === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = priorTmp }
-  const calls = traces(wrapper.trace), inputs = calls.filter(call => call.args.includes('--stdin') || call.args.includes('--index-info') || call.args.includes('--stdin-paths') || call.args.includes('--batch'))
+  const calls = traces(wrapper.trace), inputs = calls.filter(call => call.args.includes('--stdin') || call.args.includes('--index-info') || call.args.includes('--stdin-paths') || call.args.includes('--batch') || call.args.includes('--batch-check'))
   assert.ok(inputs.some(call => call.args.includes('hash-object') && call.size === 0))
   assert.ok(inputs.some(call => call.args.includes('update-index')))
   for (const call of inputs) {
@@ -95,6 +97,11 @@ for (const format of ['sha1', 'sha256'] as const) test(`真实${format}空/二�
     return { path, mode: '100644' as const, oid, digest: contentHash(bytes) }
   })
   assert.deepEqual(readTree(commonDir, writeTree(commonDir, entries)), entries)
+  assert.deepEqual(readObjectBatch(commonDir, []), new Map())
+  assert.deepEqual([...readObjectBatch(commonDir, [...entries.map(entry => entry.oid), entries[0].oid])], entries.map((entry, index) => [entry.oid, contents[index]]))
+  assert.deepEqual(readObjectBatch(commonDir, [entries[1].oid]).get(entries[1].oid), contents[1])
+  assert.throws(() => readObjectBatch(commonDir, ['HEAD']), /不可变 Git OID/)
+  assert.throws(() => readObjectBatch(commonDir, [entries[0].oid, '0'.repeat(format === 'sha1' ? 40 : 64)]))
   const snapshot = await captureInputSnapshot(root)
   for (const entry of entries) assert.equal(readTree(commonDir, snapshot.immutableTree).find(item => item.path === entry.path)!.oid, entry.oid)
   assert.deepEqual(readFileSync(indexPath), originalIndex)
@@ -102,6 +109,7 @@ for (const format of ['sha1', 'sha256'] as const) test(`真实${format}空/二�
   const oid = entries[1].oid, objectPath = join(commonDir, 'objects', oid.slice(0, 2), oid.slice(2))
   chmodSync(objectPath, 0o600); writeFileSync(objectPath, deflateSync(Buffer.from('blob 5\0wrong')))
   assert.throws(() => readObject(commonDir, oid), /Git object OID 不匹配/)
+  assert.throws(() => readObjectBatch(commonDir, entries.map(entry => entry.oid)), /Git object OID 不匹配/)
 })
 
 for (const failure of ['exit', 'timeout'] as const) test(`外部Git ${failure}错误透传且输入fd和owned临时目录清理`, t => {

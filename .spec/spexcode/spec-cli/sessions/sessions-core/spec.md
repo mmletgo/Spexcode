@@ -226,11 +226,20 @@ The record's existing `name` is the one human display override: CLI creation may
 rename later replaces or clears that same field. It affects only the shared label/title projection;
 the branch, worktree slug, and stored prompt title retain their own responsibilities.
 
+New session branch and worktree storage names append the complete session UUID to their prompt/spec slug.
+The visible short ID, selector grammar, labels and titles keep their existing semantics. Published records
+continue to address their stored branch and worktreePath; no path or record migration is inferred from a label.
+
 **Exclusion lives in the lock, never in a privileged process.** The per-session record lock implementation lives at
 `spec-cli/src/session-record-lock.ts`: a filesystem lock with a PID liveness check, held across processes, so a session operation may run in whatever process
 takes it — a backend is the convenient owner of the launch environment and a shared cache, not the holder
 of the invariant, and a read that takes no lock needs no permission from anyone. That is what lets this
 layer be a brick an external system can drive rather than a service it must be granted access to.
+The same lock primitive also fences shared Git worktree registry mutations and their candidate inspections,
+keyed by the physical common directory rather than a session id or runtime home ([[record-lock]]).
+Create releases this short registry fence before materialization or model admission; close holds it only for
+the rename/prune boundary, and archived restore only for its add. The candidate ownership receipt remains the
+authority to remove resources; holding the registry fence alone conveys no ownership.
 
 A text send delegates its record-locked append-plus-queue acceptance to the canonical application and the local record lock; an
 agent-attributed send also fences its named sender in sorted order. Before a new append, sessions-core asks the resolved adapter's optional

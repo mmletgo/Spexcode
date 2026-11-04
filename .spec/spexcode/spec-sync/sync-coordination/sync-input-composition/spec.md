@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+业务意图正文沿用冻结契约的唯一业务 Spec 路径规则，排除工具插件实例；完整快照、组合树和对象校验仍保留这些文件的 path/mode/OID/bytes。每次意图投影通过快照原语批读真实业务 blob，逐路径解析并保留重复业务身份拒绝，不能为减少进程跳过正文或缓存跨调用验证结论。
+
 成组历史补偿恢复已退役对象时，某个精确 ID 的已采纳 before、delivery 与当前 source 可以全空；作者请求中恢复的真实 Markdown 仍决定其 source 意图对象，不能因旧对象都空而漏投影。恢复身份是否获准仍由后续契约演化门禁判断。
 
 本节点实现 [[sync-coordination]] 成对基线原语：next = priorVerifiedDelivery + delta(priorSourceInput, newSourceInput)。无基线时从新来源构建派生输入，previousBaselinePairId 为 null，不伪称已验证基线。来源物理身份、分支或仓库不匹配时拒绝；发布交付树成为来源必须使用该真实物理树自己的基线。

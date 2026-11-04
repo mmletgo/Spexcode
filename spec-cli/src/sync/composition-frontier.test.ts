@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
+import { createRequire, syncBuiltinESMExports } from 'node:module'
 import { join } from 'node:path'
 import test from 'node:test'
 import { openProtocol } from '@spexcode/session-protocol'
@@ -22,6 +23,50 @@ import type { CodeBehaviorAnalysis } from './writeback-types.js'
 const path = '.spec/export/export-contract/spec.md', a = 'RULE-EXPORT-05'
 const git = (root: string, ...args: string[]): string => execFileSync('/usr/bin/git', ['-C', root, ...args], { encoding: 'utf8', stdio: 'pipe', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }).trim()
 const texts = (input: InputSnapshot): Map<string, string> => new Map(verifySnapshot(input).map(entry => [entry.path, readObject(input.source.commonDir, entry.oid).toString('utf8')]))
+
+test('组合只解析业务Spec，批读完整正文并保留插件原对象', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'sync-business-objects-'))
+  const protocol = openProtocol(join(root, 'state.sqlite'))
+  t.after(() => { protocol.close(); rmSync(root, { recursive: true, force: true }) })
+  await migrateSyncStore(protocol, { backupPath: join(root, 'backup.sqlite') })
+  const source = join(root, 'source'); mkdirSync(source)
+  const specs = Array.from({ length: 12 }, (_, index) => ({
+    path: `.spec/module-${index}/spec.md`, id: `REQ-BATCH-${index}`,
+    text: `---\ncontract-schema: sync-v1\n---\n# 模块${index}\n\n## raw source\n\n原始需求${index}\n\n## expanded spec\n\n### REQ\n\n| id | goal | source | constraints | success | depends-on |\n| --- | --- | --- | --- | --- | --- |\n| REQ-BATCH-${index} | 完整业务${index} | user:raw | 保留原文 | 成功${index} | - |\n`,
+  }))
+  const pluginPath = '.spec/project/.plugins/binary/spec.md', plugin = Buffer.from([0xff, 0, 0xfe])
+  for (const spec of specs) { mkdirSync(join(source, spec.path, '..'), { recursive: true }); writeFileSync(join(source, spec.path), spec.text) }
+  mkdirSync(join(source, pluginPath, '..'), { recursive: true }); writeFileSync(join(source, pluginPath), plugin)
+  git(source, 'init', '-q', '-b', 'main'); git(source, 'config', 'user.name', '组合批读'); git(source, 'config', 'user.email', 'test@example.invalid')
+  git(source, 'add', '.'); git(source, 'commit', '-qm', '真实业务及工具实例')
+  const input = await captureInputSnapshot(source), originalIndex = readFileSync(join(source, '.git/index'))
+  const entries = verifySnapshot(input), store = new SyncStore(protocol, { readBlob: ref => readEvidence(input.source.commonDir, ref) })
+  const selected = store.readBaselineSelection(input.source, specs.flatMap(spec => [{ kind: 'path' as const, path: spec.path }, { kind: 'contract' as const, id: spec.id }]))
+  assert.ok('selection' in selected)
+  const cp = createRequire(import.meta.url)('node:child_process') as typeof import('node:child_process'), original = cp.execFileSync, calls: string[][] = []
+  cp.execFileSync = ((file: string, args: string[], options: unknown) => { if (file === 'git') calls.push(args); return original(file, args, options as never) }) as typeof execFileSync
+  syncBuiltinESMExports()
+  try {
+    const composed = composeInputSnapshots(input, selected.selection).composed!
+    const evidence = readCompositionEvidence(input, composed, selected.selection)
+    for (const spec of specs) {
+      const intent = evidence.intents.find(intent => intent.resource.id === spec.id)!
+      assert.equal(intent.source?.path, spec.path); assert.equal(intent.source?.rawSource, `原始需求${specs.indexOf(spec)}`)
+      assert.deepEqual(intent.source?.entry, entries.find(entry => entry.path === spec.path))
+      assert.equal(intent.source?.item.id, spec.id)
+    }
+    assert.deepEqual(readTree(input.source.commonDir, composed.tree), entries)
+    assert.deepEqual(readObject(input.source.commonDir, entries.find(entry => entry.path === pluginPath)!.oid), plugin)
+  } finally { cp.execFileSync = original; syncBuiltinESMExports() }
+  const businessOids = new Set(entries.filter(entry => specs.some(spec => spec.path === entry.path)).map(entry => entry.oid))
+  assert.equal(calls.filter(args => args.includes('cat-file') && args.includes('blob') && args.some(arg => businessOids.has(arg))).length, 0)
+  assert.ok(calls.some(args => args.includes('--batch')))
+  assert.deepEqual(readFileSync(join(source, '.git/index')), originalIndex)
+  writeFileSync(join(source, specs[0].path), plugin)
+  const invalid = await captureInputSnapshot(source), nextSelection = store.readBaselineSelection(invalid.source, selected.selection.bindings.map(binding => binding.resource))
+  assert.ok('selection' in nextSelection)
+  assert.throws(() => composeInputSnapshots(invalid, nextSelection.selection), /non UTF-8 contract/)
+})
 
 /** Git快照、提交、mode与store事务是真实的；验证四层是显式fake，不能作为native产品通过证据。 */
 async function fixture(t: test.TestContext, pendingInB = false, legacyDirectoryCoverage = false, codeOnly = false) {
@@ -290,7 +335,7 @@ test('broad作者raw baseline与intent artifact对象在共享正文后仍逐字
   const merged = f.addB(authorRaw), behavior = fakeBehavior(merged)
   const analysis = await analyzeCodeBehavior({ snapshot: input, baseline: null, baselineSelection: selection, composed, readSetDigest: 'dedup-author-read', policyDigest: 'dedup-author-policy', requestKey: 'dedup-author-baseline', timeoutMs: 10000, plan: f.plan }, async request => {
     const wire = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as { textEncoding: string; bodyIndex: Record<string, { required: boolean }>; intentArtifactFiles: { path: string; mode: string; oid: string; digest: string; bodyRef: string }[] }
-    assert.equal(wire.textEncoding, 'sha256-body-entry-v2')
+    assert.equal(wire.textEncoding, 'sha256-body-entry-v3')
     const frozen = readFrozenBehaviorContext(request) as { authorBaseline: [string, string][]; oldSource: [string, string][]; newSource: [string, string][]; intentArtifactFiles: { path: string; mode: string; oid: string; digest: string; text: string }[] }
     assert.equal(new Map(frozen.authorBaseline).get(path), expectedAuthorBaseline)
     assert.equal(new Map(frozen.newSource).get(path), authorRaw)

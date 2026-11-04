@@ -3,10 +3,11 @@ import test from 'node:test'
 import { execFileSync } from 'node:child_process'
 import { createRequire, syncBuiltinESMExports } from 'node:module'
 import { deflateSync } from 'node:zlib'
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { captureInputSnapshot, contentHash, identifyWorktree, readEvidence, readObject, readTree, UnstableSnapshotError, verifySnapshot, writeObject, writeTree } from './snapshot.js'
+import { join, relative } from 'node:path'
+import { withWorktreeRegistryLock } from '../session-record-lock.js'
+import { captureInputSnapshot, contentHash, identifyWorktree, readEvidence, readObject, readTree, UnstableSnapshotError, verifySnapshot, withReadonlySnapshotQuery, writeObject, writeTree } from './snapshot.js'
 import { composeInputSnapshots } from './composition.js'
 import { exportCandidate, freezeCandidate, verifyCandidate } from './candidate.js'
 import type { BaselinePair, InputSnapshot, SyncScope } from './operation-types.js'
@@ -72,6 +73,210 @@ for (const format of ['sha1', 'sha256'] as const) {
     assert.throws(() => readTree(snapshot.source.commonDir, snapshot.immutableTree), (error: unknown) => typeof (error as { status?: unknown }).status === 'number')
   })
 }
+
+test('只读查询仅按物理commonDir与完整tree OID复用成功读树结果', async t => {
+  const root = repo(t), otherRoot = repo(t), snapshot = await captureInputSnapshot(root, { committed: true }), other = await captureInputSnapshot(otherRoot, { committed: true })
+  assert.equal(snapshot.immutableTree, other.immutableTree)
+  const otherBytes = Buffer.from('different immutable tree\n'), otherEntry = { path: 'other.ts', mode: '100644' as const, oid: writeObject(snapshot.source.commonDir, otherBytes), digest: contentHash(otherBytes) }, otherTree = writeTree(snapshot.source.commonDir, [otherEntry])
+  assert.notEqual(otherTree, snapshot.immutableTree)
+
+  const childProcess = createRequire(import.meta.url)('node:child_process') as typeof import('node:child_process'), original = childProcess.execFileSync, batches: string[][] = []
+  childProcess.execFileSync = ((...args: Parameters<typeof execFileSync>) => { if (args[0] === 'git' && (args[1] as string[]).includes('--batch')) batches.push(args[1] as string[]); return Reflect.apply(original, childProcess, args) }) as typeof execFileSync
+  syncBuiltinESMExports()
+  try {
+    await withReadonlySnapshotQuery(() => {
+      const entries = readTree(snapshot.source.commonDir, snapshot.immutableTree)
+      assert.deepEqual(readTree(snapshot.source.commonDir, snapshot.immutableTree), entries)
+      assert.deepEqual(readTree(other.source.commonDir, other.immutableTree), entries)
+      assert.deepEqual(readTree(snapshot.source.commonDir, otherTree), [otherEntry])
+    })
+  } finally { childProcess.execFileSync = original; syncBuiltinESMExports() }
+  assert.equal(batches.length, 3)
+})
+
+test('只读查询返回独立TreeEntry副本，调用者修改不能污染同scope命中值', async t => {
+  const root = repo(t), snapshot = await captureInputSnapshot(root, { committed: true }), expected = readTree(snapshot.source.commonDir, snapshot.immutableTree)
+  await withReadonlySnapshotQuery(() => {
+    const first = readTree(snapshot.source.commonDir, snapshot.immutableTree)
+    first[0].digest = '0'.repeat(64); first.push({ ...first[0], path: 'caller-pollution.ts' })
+    assert.deepEqual(readTree(snapshot.source.commonDir, snapshot.immutableTree), expected)
+  })
+})
+
+test('缓存读树条目时verifySnapshot仍逐次拒绝坏manifest、contentDigest和id', async t => {
+  const root = repo(t), snapshot = await captureInputSnapshot(root, { committed: true })
+  await withReadonlySnapshotQuery(() => {
+    assert.doesNotThrow(() => verifySnapshot(snapshot))
+    assert.throws(() => verifySnapshot({ ...snapshot, manifestBlob: { sha256: 'f'.repeat(64) } }), /缺失证据/)
+    assert.throws(() => verifySnapshot({ ...snapshot, contentDigest: '0'.repeat(64) }), /快照 manifest\/contentDigest 不匹配/)
+    assert.throws(() => verifySnapshot({ ...snapshot, id: '0'.repeat(64) }), /快照身份摘要不匹配/)
+  })
+})
+
+test('onObject总是逐字节回调，失败后同scope没有成功缓存残留', async t => {
+  const root = repo(t), snapshot = await captureInputSnapshot(root, { committed: true })
+  const childProcess = createRequire(import.meta.url)('node:child_process') as typeof import('node:child_process'), original = childProcess.execFileSync, batches: string[][] = []
+  childProcess.execFileSync = ((...args: Parameters<typeof execFileSync>) => { if (args[0] === 'git' && (args[1] as string[]).includes('--batch')) batches.push(args[1] as string[]); return Reflect.apply(original, childProcess, args) }) as typeof execFileSync
+  syncBuiltinESMExports()
+  try {
+    await withReadonlySnapshotQuery(() => {
+      const entries = readTree(snapshot.source.commonDir, snapshot.immutableTree), observed: string[] = []
+      assert.deepEqual(readTree(snapshot.source.commonDir, snapshot.immutableTree, (entry, bytes) => { assert.equal(entry.digest, contentHash(bytes)); observed.push(entry.path) }), entries)
+      assert.deepEqual(observed, entries.map(entry => entry.path))
+      assert.throws(() => readTree(snapshot.source.commonDir, snapshot.immutableTree, () => { throw new Error('callback failed') }), /callback failed/)
+      assert.deepEqual(readTree(snapshot.source.commonDir, snapshot.immutableTree), entries)
+    })
+  } finally { childProcess.execFileSync = original; syncBuiltinESMExports() }
+  assert.equal(batches.length, 4)
+})
+
+test('scope结束或抛错后，普通读取与继承的异步任务都必须重读坏对象', async t => {
+  const root = repo(t), snapshot = await captureInputSnapshot(root, { committed: true }), [entry] = readTree(snapshot.source.commonDir, snapshot.immutableTree)
+  const objectPath = join(snapshot.source.commonDir, 'objects', entry.oid.slice(0, 2), entry.oid.slice(2))
+  const original = readFileSync(objectPath), altered = Buffer.from('changed object bytes\n'), broken = deflateSync(Buffer.concat([Buffer.from(`blob ${altered.length}\0`), altered]))
+  await withReadonlySnapshotQuery(() => readTree(snapshot.source.commonDir, snapshot.immutableTree))
+  chmodSync(objectPath, 0o600); writeFileSync(objectPath, broken)
+  assert.throws(() => readTree(snapshot.source.commonDir, snapshot.immutableTree), /OID 不匹配/)
+  writeFileSync(objectPath, original)
+
+  let lateRead!: Promise<{ error?: unknown }>
+  await assert.rejects(withReadonlySnapshotQuery(() => {
+    readTree(snapshot.source.commonDir, snapshot.immutableTree)
+    lateRead = new Promise(resolve => setImmediate(() => {
+      try { readTree(snapshot.source.commonDir, snapshot.immutableTree); resolve({}) }
+      catch (error) { resolve({ error }) }
+    }))
+    throw new Error('query failed')
+  }), /query failed/)
+  writeFileSync(objectPath, broken)
+  const late = await lateRead
+  assert.ok(late.error instanceof Error)
+  assert.match(late.error.message, /OID 不匹配/)
+})
+
+test('无关worktree半登记commondir为空不影响来源身份和已提交快照', async t => {
+  const root = repo(t), linked = join(root, 'linked')
+  git(root, 'worktree', 'add', '--detach', linked, 'HEAD')
+  const sources = [root, linked].map(path => identifyWorktree(path))
+  const snapshots = await Promise.all([root, linked].map(path => captureInputSnapshot(path, { committed: true })))
+  const incomplete = join(sources[0].commonDir, 'worktrees/creating')
+  cpSync(sources[1].gitDir, incomplete, { recursive: true }); writeFileSync(join(incomplete, 'commondir'), '')
+  assert.throws(() => git(root, 'worktree', 'list', '--porcelain'), (error: unknown) => (error as { status?: number }).status === 128)
+  for (const [index, path] of [root, linked].entries()) {
+    assert.deepEqual(identifyWorktree(path), sources[index])
+    assert.equal((await captureInputSnapshot(path, { committed: true })).id, snapshots[index].id)
+  }
+})
+
+test('显式工作区采集等待同commonDir登记事务结束再读取嵌套边界，文件扫描不持锁', async t => {
+  const root = repo(t), linked = join(root, 'linked')
+  git(root, 'worktree', 'add', '--detach', linked, 'HEAD')
+  const source = identifyWorktree(root), linkedSource = identifyWorktree(linked), before = await captureInputSnapshot(root)
+  const incomplete = join(source.commonDir, 'worktrees/creating')
+  let release!: () => void, entered!: () => void
+  const ready = new Promise<void>(done => { entered = done })
+  const owner = withWorktreeRegistryLock(async () => {
+    cpSync(linkedSource.gitDir, incomplete, { recursive: true }); writeFileSync(join(incomplete, 'commondir'), '')
+    entered(); await new Promise<void>(done => { release = done }); rmSync(incomplete, { recursive: true })
+  }, undefined, source.commonDir)
+  await ready
+  let settled = false
+  const capture = captureInputSnapshot(root).then(value => { settled = true; return { value } }, error => { settled = true; return { error } })
+  try { await new Promise<void>(done => setImmediate(done)); assert.equal(settled, false) }
+  finally { release(); await owner }
+  const result = await capture
+  if ('error' in result) throw result.error
+  assert.equal(result.value.id, before.id)
+  await captureInputSnapshot(root, { onObservation: async () => {
+    await withWorktreeRegistryLock(async () => {}, undefined, source.commonDir)
+  } })
+})
+
+test('来源登记保留normal、linked、bare-linked、相对backlink及路径alias身份', t => {
+  const root = repo(t), linked = join(root, 'linked')
+  git(root, 'worktree', 'add', '--detach', linked, 'HEAD')
+  for (const path of [root, linked]) {
+    const identity = identifyWorktree(path), alias = `${path}-alias`
+    symlinkSync(path, alias); t.after(() => rmSync(alias, { force: true }))
+    assert.deepEqual(identifyWorktree(alias), identity)
+    assert.equal(identity.canonicalRoot, realpathSync(path))
+  }
+  const identity = identifyWorktree(linked)
+  writeFileSync(join(identity.gitDir, 'gitdir'), `${relative(identity.gitDir, join(realpathSync(linked), '.git'))}\n`)
+  assert.deepEqual(identifyWorktree(linked), identity)
+  const bare = join(root, 'bare.git'), bareLinked = join(root, 'bare-linked')
+  git(root, 'clone', '--bare', root, bare); git(bare, 'worktree', 'add', '--detach', bareLinked, 'HEAD')
+  assert.equal(identifyWorktree(bareLinked).commonDir, realpathSync(bare))
+  const separate = repo(t), metadata = join(separate, 'metadata'), separateLinked = join(separate, 'linked')
+  git(separate, 'init', '--separate-git-dir', metadata)
+  assert.throws(() => identifyWorktree(separate), /registered worktree/)
+  git(separate, 'worktree', 'add', '--detach', separateLinked, 'HEAD')
+  assert.equal(identifyWorktree(separateLinked).commonDir, realpathSync(metadata))
+})
+
+test('复制gitfile、丢登记、错backlink和foreign commonDir不能冒充registered来源', t => {
+  const root = repo(t), linked = join(root, 'linked'), copy = join(root, 'copy'), orphan = join(root, 'orphan-admin')
+  git(root, 'worktree', 'add', '--detach', linked, 'HEAD')
+  const identity = identifyWorktree(linked), gitfile = readFileSync(join(linked, '.git')), backlink = readFileSync(join(identity.gitDir, 'gitdir')), commondir = readFileSync(join(identity.gitDir, 'commondir'))
+  cpSync(linked, copy, { recursive: true })
+  assert.throws(() => identifyWorktree(copy), /registered worktree/)
+  writeFileSync(join(identity.gitDir, 'gitdir'), `${join(copy, '.git')}\n`)
+  assert.throws(() => identifyWorktree(linked), /registered worktree/)
+  writeFileSync(join(identity.gitDir, 'gitdir'), backlink)
+  renameSync(identity.gitDir, orphan); writeFileSync(join(orphan, 'commondir'), `${identity.commonDir}\n`); writeFileSync(join(linked, '.git'), `gitdir: ${orphan}\n`)
+  assert.throws(() => identifyWorktree(linked), /registered worktree/)
+  renameSync(orphan, identity.gitDir); writeFileSync(join(identity.gitDir, 'commondir'), commondir); writeFileSync(join(linked, '.git'), gitfile)
+  const foreign = repo(t)
+  writeFileSync(join(identity.gitDir, 'commondir'), `${join(foreign, '.git')}\n`)
+  assert.throws(() => identifyWorktree(linked), /registered worktree/)
+  writeFileSync(join(identity.gitDir, 'commondir'), commondir)
+  assert.deepEqual(identifyWorktree(linked), identity)
+})
+
+test('来源自己的admin目录被替换仍撤销既有物理身份', async t => {
+  const root = repo(t), linked = join(root, 'linked')
+  git(root, 'worktree', 'add', '--detach', linked, 'HEAD')
+  const identity = identifyWorktree(linked), replacement = join(root, 'replacement-admin')
+  await assert.rejects(captureInputSnapshot(linked, { committed: true, maxAttempts: 1, onObservation: () => {
+    cpSync(identity.gitDir, replacement, { recursive: true }); rmSync(identity.gitDir, { recursive: true }); renameSync(replacement, identity.gitDir)
+  } }), UnstableSnapshotError)
+  const next = identifyWorktree(linked)
+  assert.equal(next.repositoryId, identity.repositoryId)
+  assert.notEqual(next.physicalFingerprint, identity.physicalFingerprint)
+})
+
+test('已提交快照只读HEAD tree且身份不受未提交、暂存或并发保存影响，历史快照身份仍可验证', async t => {
+  const root = repo(t), clean = await captureInputSnapshot(root), committed = await captureInputSnapshot(root, { committed: true })
+  assert.equal(committed.captureKind, 'commit')
+  assert.notEqual(committed.id, clean.id, '采集语义必须参与身份')
+  assert.equal(committed.immutableTree, git(root, 'rev-parse', 'HEAD^{tree}'))
+  assert.equal(committed.indexTree, committed.immutableTree)
+  assert.equal(committed.indexDigest, contentHash(committed.indexTree))
+  writeFileSync(join(root, 'file.ts'), 'staged author bytes\n'); git(root, 'add', 'file.ts')
+  writeFileSync(join(root, 'file.ts'), 'unstaged author bytes\n'); writeFileSync(join(root, 'new.ts'), 'untracked author bytes\n')
+  const index = readFileSync(join(root, '.git/index'))
+  let observations = 0
+  const same = await captureInputSnapshot(root, { committed: true, onObservation: () => { observations++; writeFileSync(join(root, 'file.ts'), `concurrent ${observations}\n`); git(root, 'add', 'new.ts') } })
+  assert.equal(observations, 1); assert.equal(same.id, committed.id)
+  assert.equal(files(same).get('file.ts'), files(clean).get('file.ts')); assert.equal(files(same).has('new.ts'), false)
+  assert.notDeepEqual(readFileSync(join(root, '.git/index')), index, '只有夹具主动stage改变了用户index')
+  assert.doesNotThrow(() => verifySnapshot(clean)); assert.doesNotThrow(() => verifySnapshot(same))
+  assert.throws(() => verifySnapshot({ ...same, captureKind: undefined }), /身份摘要/)
+  git(root, 'commit', '-m', 'committed input')
+  const next = await captureInputSnapshot(root, { committed: true })
+  assert.notEqual(next.id, committed.id); assert.equal(files(next).get('file.ts'), 'staged author bytes\n')
+  assert.equal(files(next).get('new.ts'), 'untracked author bytes\n')
+  assert.equal(readFileSync(join(root, 'file.ts'), 'utf8'), 'concurrent 1\n')
+})
+
+test('已提交快照在HEAD切换期间重试，未提交index冲突不进入提交输入', async t => {
+  const root = repo(t), old = git(root, 'rev-parse', 'HEAD')
+  writeFileSync(join(root, 'file.ts'), 'next commit\n'); git(root, 'add', '.'); git(root, 'commit', '-m', 'next')
+  const next = git(root, 'rev-parse', 'HEAD'); git(root, 'reset', '--soft', old)
+  let attempts = 0
+  const input = await captureInputSnapshot(root, { committed: true, onObservation: () => { if (++attempts === 1) git(root, 'update-ref', 'refs/heads/main', next) } })
+  assert.equal(attempts, 2); assert.equal(input.headCommit, next); assert.equal(files(input).get('file.ts'), 'next commit\n')
+})
 
 test('缺失用户index和空树仍真实采集，批处理不创建用户index', async t => {
   const root = repo(t), index = join(root, '.git/index')
@@ -315,4 +520,15 @@ test('真实gitlink即使工作目录缺失仍明确拒绝，不能误当普通�
   const root = repo(t), head = git(root, 'rev-parse', 'HEAD')
   git(root, 'update-index', '--add', '--cacheinfo', `160000,${head},submodule`)
   await assert.rejects(captureInputSnapshot(root), /submodule|gitlink/)
+})
+
+
+test('快照经固定计划的规范JSON键排序后保持真实历史身份', async t => {
+  const root = repo(t)
+  for (const snapshot of [await captureInputSnapshot(root), await captureInputSnapshot(root, { committed: true })]) {
+    const sorted = JSON.parse(JSON.stringify(snapshot, (_key, value: unknown) => value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value)) as InputSnapshot
+    assert.equal(sorted.id, snapshot.id)
+    assert.deepEqual(verifySnapshot(sorted), verifySnapshot(snapshot))
+    assert.throws(() => verifySnapshot({ ...sorted, source: { ...sorted.source, branch: 'refs/heads/forged' } }), /身份摘要不匹配/)
+  }
 })

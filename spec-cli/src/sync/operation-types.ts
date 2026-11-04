@@ -1,5 +1,6 @@
 /** 内容寻址运行证据；正文、文件清单与命令结果保存在既有 evidence blob。 */
 export type BlobRef = { sha256: string }
+export type SyncCheckpointRef = BlobRef & { artifacts?: { kind: 'json' | 'untrusted_final'; ref: BlobRef }[] }
 export type WorktreeIdentity = {
   repositoryId: string
   commonDir: string
@@ -15,6 +16,8 @@ export type InputSnapshot = {
   /** 内容与物理身份形成稳定 ID；采集时间不参与。 */
   id: string
   source: WorktreeIdentity
+  /** 缺字段为历史工作区采集；commit 固定已提交 HEAD tree。 */
+  captureKind?: 'commit'
   headCommit: string
   immutableTree: string
   indexTree: string
@@ -28,7 +31,7 @@ export type ContractScopeExpansion = Pick<SyncScope, 'contractIds' | 'flowIds'> 
 export const SYNC_PHASES = ['detected', 'queued', 'analyzing', 'elaborating', 'generating', 'verifying', 'repairing', 'needs_input', 'conflicted', 'ready_to_apply', 'applying', 'workspace_synced', 'awaiting_landing', 'canonical_synced', 'superseded', 'pausing', 'paused', 'cancelling', 'cancelled', 'failed', 'budget_exhausted', 'recovering', 'recovery_required'] as const
 export type SyncPhase = typeof SYNC_PHASES[number]
 export type SyncControl = 'run' | 'pause' | 'cancel'
-export type SyncBudget = { maxAttempts: number; maxCalls: number; maxRepairs: number; timeoutMs: number }
+export type SyncBudget = { maxAttempts: number; maxCalls: number; maxRepairs: number; timeoutMs: number } | { mode: 'unlimited' }
 export type SyncFailure = { code: string; message: string; kind: 'repairable' | 'environment' | 'conflict' | 'missing_input' | 'unsupported' | 'budget'; evidenceRefs: BlobRef[] }
 export type BaselinePair = {
   id: string
@@ -67,7 +70,7 @@ export type SyncOperation = {
   contractScopeExpansions?: ContractScopeExpansion[]
   blockedReason: 'needs_input' | 'conflicted' | null
   policyDigest: string; impactDigest: string; readSetDigest: string
-  budget: SyncBudget; callsUsed: number; deadlineAtMs: number; currentAttemptId: string | null
+  budget: SyncBudget; callsUsed: number; deadlineAtMs: number | null; currentAttemptId: string | null
   dispatchMessageId: string; delivery: WorktreeIdentity | null; deliveryPlan: DeliveryPlan; createdAtMs: number; updatedAtMs: number
 }
 export type DeliveryPlan = { canonicalRoot: string; branch: string; baseCommit: string }
@@ -84,7 +87,7 @@ export type SyncAttempt = {
   publicationBase?: PublicationBase
   dispatchKey: string; sessionCreateKey: string; status: 'claimed' | 'running' | 'frozen' | 'verified' | 'applying' | 'settled' | 'failed' | 'superseded'
   currentSession: NativeSessionRef | null; dispatchPlans: DispatchPlan[]; composedInput: ComposedInputRef | null; candidate: CandidateRef | null; verification: VerificationRef | null
-  checkpointRefs: BlobRef[]; failure: SyncFailure | null; leaseToken: string; expiresAtMs: number
+  checkpointRefs: SyncCheckpointRef[]; failure: SyncFailure | null; leaseToken: string; expiresAtMs: number
 }
 export type WriteFence = { operationId: string; attemptId: string; generation: number; sourceFingerprint: string; leaseToken: string }
 export type ScopeLease = { token: string; operationId: string; attemptId: string; repositoryId: string; generation: number; scope: SyncScope; expiresAtMs: number }
