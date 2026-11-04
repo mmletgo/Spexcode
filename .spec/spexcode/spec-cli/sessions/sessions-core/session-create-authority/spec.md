@@ -134,3 +134,5 @@ This keeps concurrent creates from contending on `.git/config` while Git writes 
 
 
 可信内部 native-worktree-v1 的 seed 必须是完整不可变 commit SHA 且 tree 精确匹配；创建前拒绝错配 base/tree，在 worktree add 后再次要求实际 forkCommit 与 seed 相同。该模式不复制 live checkout 的 host state，初始化只来自 seed Git 对象；沿原候选拥有权、幂等和取消终止收据，不另建创建管线。
+
+显式 resources-only 恢复可在原 session-key、精确候选锁及物理 registry fence 内结算未发布的保留场地：仍完整证明 canonical 从未发布、无 Native generation、无其他已发布 owner、物理 commonDir/admin/backlink 与冻结 fork 精确一致，且原 prepared/git-created 私有收据匹配、session store 不存在。此分支不要求内容 clean，也完全不改 worktree、branch、index、initializing 锁或原私有收据；用 version2、disposition:preserved、cleanupComplete:false、notStarted 终止收据绑定原 root/path/branch/fork、物理身份/登记字节摘要与 prepared 收据原字节摘要。收据只释放执行容量，保留场地仍未合入或采纳、原拥有权及保留责任持续存在，不新增备份/归档体系或删除授权。同键永久终止；读及冷重放重新核原收据、物理登记和冷态。场地后来出现任意内容仍无自动删除权。普通创建重试与普通恢复的未知内容删除保护保持。
