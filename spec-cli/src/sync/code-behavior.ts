@@ -36,7 +36,7 @@ export type CodeBehaviorPostGateReview = {
 export type CodeBehaviorInput = { postGateReview?: readonly CodeBehaviorPostGateReview[]; draftProtocol?: 'code-behavior-draft-v1'; partition?: { id: string; changedPaths: readonly string[]; factSourcePaths: readonly string[]; authorizedParentSpecPaths?: readonly string[] }; model?: string; snapshot: InputSnapshot; baseline: BaselinePair | null; baselineSelection?: FrozenBaselineSelection; composed: ComposedInputRef; readSetDigest: string; policyDigest: string; plan: SyncCoordinatorPlan; requestKey: string; timeoutMs: number | null; signal?: AbortSignal; origin?: 'initial' | 'spec' | 'code' | 'combined' | 'reconcile' | 'decision'; decision?: { request: SyncDecisionInput; previous: CodeBehaviorEvidence; previousComposed?: ComposedInputRef; previousReadPaths?: readonly string[] }; repairDiagnostics?: readonly { code: string; message: string }[] }
 type BehaviorPurpose = 'code_behavior_analyze' | 'code_behavior_review'
 type CompletedBehaviorDraft = { trace: ElaborationTrace; draftOid: string; resultCommit: string; requestRef: BlobRef; receipt: unknown }
-/** 未批准临时稿只记录真实Git身份；readyAnalysis仅省去格式失败后的重复分析，不批准独审。 */
+/** 未批准临时稿只记录真实Git身份；readyAnalysis仅省去独审协议失败后的重复分析，不批准独审。 */
 export type CodeBehaviorContinuation = {
   version: 'code-behavior-draft-v1'; inputDigest: string
   drafts: Partial<Record<BehaviorPurpose, ElaborationDraft>>
@@ -192,10 +192,18 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   let continuation: CodeBehaviorContinuation | undefined
   const persist = (): void => { if (continuation) checkpoints?.save(structuredClone(continuation)) }
   const diagnostic: { proposal?: unknown; analysis?: CodeBehaviorAnalysis; review?: unknown } = {}
-  function reject(message: string, details: Record<string, unknown> = {}, code = 'behavior_analysis_invalid'): never {
+  function reject(message: string, details: Record<string, unknown> = {}, code = 'behavior_analysis_invalid', reviewOnly = false): never {
     const formatFailure = ['behavior_output_json', 'behavior_output_schema'].includes(code)
-    if (continuation && !formatFailure) { delete continuation.readyAnalysis; persist() }
-    throw Object.assign(new Error(JSON.stringify({ approved: false, message, details, ...(formatFailure ? { drafts: continuation?.drafts } : diagnostic) })), { code })
+    const failure = JSON.stringify({ approved: false, message, details, ...(formatFailure ? { drafts: continuation?.drafts } : diagnostic) })
+    if (continuation && !formatFailure) {
+      if (reviewOnly) {
+        const errors = [{ code, message: failure }]
+        continuation.drafts.code_behavior_review!.errors = errors
+        continuation.errors = { ...continuation.errors, code_behavior_review: errors }
+      } else delete continuation.readyAnalysis
+      persist()
+    }
+    throw Object.assign(new Error(failure), { code })
   }
   const commonDir = input.snapshot.source.commonDir
   const worktree = input.plan.agentWorkflow ? stageWorktree(commonDir, input.snapshot.headCommit, input.composed.tree) : undefined
@@ -568,8 +576,8 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   const readablePathSet = new Set(worktree ? [...readTree(commonDir, worktree.tree).map(entry => entry.path), ...historicalRoles!.flatMap(role => readTree(commonDir, role.tree).map(entry => entry.path))] : readablePaths.map(item => item.path))
   const validatePaths = (paths: readonly string[], reviewDetails?: Record<string, unknown>): void => {
     for (const path of paths) {
-      try { validateRepositoryPath(path) } catch (error) { reject((error as Error).message, { ...reviewDetails, invalidPaths: [path] }) }
-      if (!worktree && !within(path, input.plan.readPaths) || isHostPrivatePath(path) || reviewDetails && !readablePathSet.has(path)) reject(`分析引用了未完整读取的路径: ${path}`, { ...reviewDetails, invalidPaths: [path] })
+      try { validateRepositoryPath(path) } catch (error) { reject((error as Error).message, { ...reviewDetails, invalidPaths: [path] }, 'behavior_analysis_invalid', !!reviewDetails) }
+      if (!worktree && !within(path, input.plan.readPaths) || isHostPrivatePath(path) || reviewDetails && !readablePathSet.has(path)) reject(`分析引用了未完整读取的路径: ${path}`, { ...reviewDetails, invalidPaths: [path] }, 'behavior_analysis_invalid', !!reviewDetails)
     }
   }
   for (const item of proposal.changes) { validatePaths(item.paths); if (['coverage_gap', 'conflict'].includes(item.kind) && !item.affectedIds.length && !rawOnlyBootstrap) reject('业务发现必须指明阻塞的既有意图/规则ID'); const unknown = item.affectedIds.filter(id => !ids.has(id)), invalidRules = item.ruleIds.filter(id => !ids.has(id) || !/^(REQ|RULE|TR)-/.test(id)); if (unknown.length || invalidRules.length) reject(`行为变化引用不存在的契约ID/合法来源: paths=${JSON.stringify(item.paths)} affectedIds=${JSON.stringify(unknown)} ruleIds=${JSON.stringify(invalidRules)}；affectedIds只允许graph.items稳定契约ID，不使用nodeId；无业务依赖的治理文本变化可[]`) }
@@ -741,12 +749,13 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
     identityMismatch: [...review.inputDigest !== inputDigest ? ['inputDigest'] : [], ...review.analysisDigest !== analysisDigest ? ['analysisDigest'] : [], ...traces[0].sessionId === traces[1].sessionId ? ['sessionId'] : [], ...traces[0].threadId === traces[1].threadId ? ['threadId'] : []],
     verdict: review.verdict, findings: review.findings,
   }
-  if (traces[0].sessionId === traces[1].sessionId || traces[0].threadId === traces[1].threadId) reject('行为分析与审查必须使用独立会话及线程', reviewDetails)
+  if (traces[0].sessionId === traces[1].sessionId || traces[0].threadId === traces[1].threadId) reject('行为分析与审查必须使用独立会话及线程', reviewDetails, 'behavior_analysis_invalid', true)
   validatePaths(review.checkedPaths, reviewDetails)
   const referencedPaths = [...proposal.changes.flatMap(item => item.paths), ...proposal.facts.filter(fact => fact.source.startsWith('code:')).map(fact => anchorPath(fact.source.slice(5))), ...proposal.newNodes.map(item => item.codePath), ...proposal.resolutions.map(item => item.path)]
   requireOptionalRead([...review.checkedPaths, ...referencedPaths], turns.get('code_behavior_review'), reviewDetails)
-  if (new Set(review.checkedPaths).size !== review.checkedPaths.length || new Set(review.checkedChangeIds).size !== review.checkedChangeIds.length) reject('独审检查范围不能重复', reviewDetails)
-  if (reviewDetails.identityMismatch.length || review.verdict !== 'accept' || review.findings.length || reviewDetails.missingPaths.length || reviewDetails.missingChangeIds.length || reviewDetails.unknownChangeIds.length) reject('行为独审未接受当前完整分析', reviewDetails, 'behavior_review_failed')
+  if (new Set(review.checkedPaths).size !== review.checkedPaths.length || new Set(review.checkedChangeIds).size !== review.checkedChangeIds.length) reject('独审检查范围不能重复', reviewDetails, 'behavior_analysis_invalid', true)
+  if (reviewDetails.identityMismatch.length || reviewDetails.missingPaths.length || reviewDetails.missingChangeIds.length || reviewDetails.unknownChangeIds.length) reject('行为独审未接受当前完整分析', reviewDetails, 'behavior_review_failed', true)
+  if (review.verdict !== 'accept' || review.findings.length) reject('行为独审未接受当前完整分析', reviewDetails, 'behavior_review_failed')
   analysis.traces = traces; analysis.reviewPassed = true
   return analysis
 }

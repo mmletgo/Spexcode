@@ -2554,13 +2554,15 @@ test('Native raw-only空图schema不发空enum且GAP/conflict保留空身份', a
 })
 
 
-for (const phase of ['code_behavior_analyze', 'code_behavior_review'] as const) for (const invalidity of ['syntax', 'schema'] as const) test(`P0 ${phase} ${invalidity}失败跨attempt续改真实JSON草稿，review不重做分析`, async t => {
+for (const phase of ['code_behavior_analyze', 'code_behavior_review'] as const) for (const invalidity of phase === 'code_behavior_review' ? ['syntax', 'schema', 'change-id', 'missing-path', 'invalid-path', 'duplicate', 'session', 'thread', 'repair-scope'] as const : ['syntax', 'schema'] as const) test(`P0 ${phase} ${invalidity}失败跨attempt续改真实JSON草稿，review不重做分析`, async t => {
   const f = await fixture(t)
   writeFileSync(join(f.root, 'src/export.js'), f.source + '\n// same business\n')
   const original = await f.input()
   const input: CodeBehaviorInput = { ...original, draftProtocol: 'code-behavior-draft-v1', model: 'claude:MiniMax-M3.1-Flash', plan: { ...original.plan, agentWorkflow: 'native-worktree-v1' } }
-  const invalid = invalidity === 'syntax' ? '{ "原始JSON": [ BROKEN 草稿\n' : '{"原始JSON":"SCHEMA_REJECTED"}'
-  let checkpoint: CodeBehaviorContinuation | null = null, failed = false, violation: string | undefined
+  let invalid = invalidity === 'syntax' ? '{ "原始JSON": [ BROKEN 草稿\n' : '{"原始JSON":"SCHEMA_REJECTED"}'
+  const failureCode = invalidity === 'syntax' ? 'behavior_output_json' : invalidity === 'schema' ? 'behavior_output_schema' : ['invalid-path', 'duplicate', 'session', 'thread'].includes(invalidity) ? 'behavior_analysis_invalid' : 'behavior_review_failed'
+  let checkpoint: CodeBehaviorContinuation | null = null, failed = false, violation: string | undefined, failureMessage = ''
+  let originalSchema: Buffer | undefined, originalDraftOid: string | undefined, originalSchemaOid: string | undefined
   const requests: string[] = []
   const run: ElaborationRunner = async request => {
     requests.push(request.purpose)
@@ -2574,25 +2576,49 @@ for (const phase of ['code_behavior_analyze', 'code_behavior_review'] as const) 
     assert.deepEqual(request.schema, { type: 'object', additionalProperties: false, properties: { summary: { type: 'string' } }, required: ['summary'] })
     const brief = JSON.parse(request.prompt.split('任务:\n')[1].split('\n待审分析:')[0].split('\n草稿文件=')[0]) as { requiredChangedPaths: string[] }
     const stage = request.purpose === 'code_behavior_review' ? JSON.parse(request.prompt.split('待审分析:\n')[1].split('\n草稿文件=')[0]) as { analysisDigest: string; analysis: CodeBehaviorAnalysis } : null
-    const output = stage ? { inputDigest: request.inputDigest, analysisDigest: stage.analysisDigest, verdict: 'accept', checkedPaths: brief.requiredChangedPaths, checkedChangeIds: stage.analysis.changes.map(change => change.id), findings: [] }
-      : { changes: brief.requiredChangedPaths.map(path => ({ kind: 'refactor', paths: [path], affectedIds: ['RULE-EXPORT-05'], ruleIds: ['RULE-EXPORT-05'], originalIntent: '保留既有业务', previousBehavior: '既有行为', sourceBehavior: '既有行为', deliveryBehavior: '既有行为', evidence: path, counterexample: '不改变发布次数' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+    const review = stage ? { inputDigest: request.inputDigest, analysisDigest: stage.analysisDigest, verdict: 'accept', checkedPaths: [...brief.requiredChangedPaths], checkedChangeIds: stage.analysis.changes.map(change => change.id), findings: [] as { message: string; evidence: string; counterexample: string }[] } : null
+    const output = review ?? { changes: brief.requiredChangedPaths.map(path => ({ kind: 'refactor', paths: [path], affectedIds: ['RULE-EXPORT-05'], ruleIds: ['RULE-EXPORT-05'], originalIntent: '保留既有业务', previousBehavior: '既有行为', sourceBehavior: '既有行为', deliveryBehavior: '既有行为', evidence: path, counterexample: '不改变发布次数' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
     let text = JSON.stringify(output)
-    if (request.purpose === phase && !failed) { failed = true; text = invalid }
+    const firstFailure = request.purpose === phase && !failed
+    if (firstFailure) {
+      if (review && !['syntax', 'schema'].includes(invalidity)) {
+        if (invalidity === 'change-id' || invalidity === 'repair-scope') review.checkedChangeIds[0] += 'e'
+        if (invalidity === 'missing-path') review.checkedPaths = []
+        if (invalidity === 'invalid-path') review.checkedPaths.push('src/missing.js')
+        if (invalidity === 'duplicate') review.checkedChangeIds.push(review.checkedChangeIds[0])
+        if (invalidity === 'repair-scope') { review.verdict = 'repair'; review.findings = [{ message: '覆盖未绑定前不能采纳的业务质疑', evidence: '原源码', counterexample: '原幂等边界' }] }
+        invalid = JSON.stringify(review)
+      }
+      failed = true; text = invalid; originalSchema = readFileSync(join(workspace, schemaPath)); originalSchemaOid = git(workspace, 'rev-parse', `HEAD:${schemaPath}`)
+    }
     else if (request.purpose === phase) {
       assert.equal(readFileSync(join(workspace, draftPath), 'utf8'), invalid)
-      assert.match(request.prompt, invalidity === 'syntax' ? /behavior_output_json/ : /behavior_output_schema/)
+      if (['syntax', 'schema'].includes(invalidity)) assert.ok(request.prompt.includes(failureCode))
+      else assert.ok(request.prompt.includes(JSON.stringify({ code: failureCode, message: failureMessage })), '续修携完整原拒因')
       assert.ok(!request.prompt.includes(invalid), '原稿从文件续改，不能在prompt重答原JSON')
       assert.equal(contentHash(JSON.stringify(schema)), checkpoint!.drafts[phase]!.schemaDigest)
+      assert.deepEqual(readFileSync(join(workspace, schemaPath)), originalSchema)
+      assert.equal(git(workspace, 'rev-parse', `HEAD:${schemaPath}`), originalSchemaOid)
+      assert.equal(git(workspace, 'rev-parse', `HEAD:${draftPath}`), originalDraftOid)
     }
     mkdirSync(join(workspace, draftPath, '..'), { recursive: true }); writeFileSync(join(workspace, draftPath), text)
     if (violation) { const path = violation.replace(/^delete:/, ''); if (violation.startsWith('delete:')) rmSync(join(workspace, path)); else writeFileSync(join(workspace, path), 'unauthorized edit\n'); git(workspace, 'add', path) }
     git(workspace, 'add', draftPath); git(workspace, 'commit', '--allow-empty', '-m', `real P0 draft ${requests.length}`)
+    if (firstFailure) originalDraftOid = git(workspace, 'rev-parse', `HEAD:${draftPath}`)
     const summary = { summary: '已正常提交指定JSON草稿' }
-    return { sessionId: `p0-draft-session-${requests.length}`, threadId: `p0-draft-thread-${requests.length}`, turnId: 'turn', output: summary, resultDigest: contentHash(JSON.stringify(summary)), worktree: nativeWorktreeResult(workspace, seed) }
+    return { sessionId: firstFailure && invalidity === 'session' ? 'p0-draft-session-1' : `p0-draft-session-${requests.length}`, threadId: firstFailure && invalidity === 'thread' ? 'p0-draft-thread-1' : `p0-draft-thread-${requests.length}`, turnId: 'turn', output: summary, resultDigest: contentHash(JSON.stringify(summary)), worktree: nativeWorktreeResult(workspace, seed) }
   }
   const continuations = { load: () => checkpoint, save: (value: CodeBehaviorContinuation) => { checkpoint = structuredClone(value) } }
   await assert.rejects(analyzeCodeBehavior(input, run, undefined, continuations), error => {
-    assert.equal((error as { code: string }).code, invalidity === 'syntax' ? 'behavior_output_json' : 'behavior_output_schema', String(error)); return true
+    assert.equal((error as { code: string }).code, failureCode, String(error)); failureMessage = (error as Error).message
+    if (invalidity === 'change-id') {
+      const diagnostic = JSON.parse(failureMessage)
+      assert.deepEqual(diagnostic.details.missingPaths, []); assert.deepEqual(diagnostic.details.identityMismatch, [])
+      assert.equal(diagnostic.details.missingChangeIds.length, 1)
+      assert.deepEqual(diagnostic.details.unknownChangeIds, [diagnostic.details.missingChangeIds[0] + 'e'])
+      assert.equal(diagnostic.analysis.reviewPassed, false)
+    }
+    return true
   })
   const prior = structuredClone(checkpoint!)
   assert.equal(readStageDraft(input.snapshot.source.commonDir, prior.drafts[phase]!, prior.drafts[phase]!), invalid)
@@ -2600,11 +2626,22 @@ for (const phase of ['code_behavior_analyze', 'code_behavior_review'] as const) 
   assert.equal(result.reviewPassed, true)
   assert.deepEqual(requests, phase === 'code_behavior_review' ? ['code_behavior_analyze', 'code_behavior_review', 'code_behavior_review'] : ['code_behavior_analyze', 'code_behavior_analyze', 'code_behavior_review'])
   assert.equal(checkpoint!.drafts[phase]!.path, prior.drafts[phase]!.path)
+  if (phase === 'code_behavior_review') {
+    assert.ok(prior.readyAnalysis, 'review协议拒绝保留有效分析')
+    assert.deepEqual(checkpoint!.readyAnalysis, prior.readyAnalysis)
+    assert.deepEqual(result.traces[0], prior.readyAnalysis.trace)
+    assert.equal(checkpoint!.drafts.code_behavior_analyze!.oid, prior.drafts.code_behavior_analyze!.oid)
+    if (invalidity === 'change-id') t.diagnostic(JSON.stringify({ calls: requests, originalReviewSeedOid: originalDraftOid, originalSchemaSeedOid: originalSchemaOid, originalSchemaSha256: contentHash(originalSchema!), analysisTraceUnchanged: true, analysisOidUnchanged: true, details: JSON.parse(failureMessage).details }))
+  }
   assert.ok(!JSON.stringify(prior).includes(invalid))
   assert.deepEqual(readTree(input.snapshot.source.commonDir, checkpoint!.drafts[phase]!.resultTree).filter(entry => !entry.path.startsWith('.spex-sync-drafts/')), readTree(input.snapshot.source.commonDir, input.composed.tree))
   for (const patch of [{ ownerDigest: 'e'.repeat(64) }, { schemaDigest: 'e'.repeat(64) }]) {
     const corrupted = structuredClone(prior); Object.assign(corrupted.drafts[phase]!, patch)
     await assert.rejects(analyzeCodeBehavior(input, run, undefined, { load: () => corrupted, save() {} }), /owner|schema|草稿/)
+  }
+  if (invalidity === 'change-id') {
+    const corrupted = structuredClone(prior); corrupted.readyAnalysis!.trace.inputDigest = 'wrong-original-analysis-input'
+    await assert.rejects(analyzeCodeBehavior(input, run, undefined, { load: () => corrupted, save() {} }), /真实trace/)
   }
   if (invalidity === 'syntax') for (const path of ['src/export.js', 'tests/export.test.mjs', 'delete:src/export.js', 'delete:tests/export.test.mjs', prior.drafts[phase]!.path.replace(/\.json$/, '.schema.json')]) {
     violation = path
