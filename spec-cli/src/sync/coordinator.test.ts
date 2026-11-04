@@ -4913,11 +4913,14 @@ test('Coordinator 已有code且P1新增managed AC.test的null路径只续原评�
 })
 
 
-for (const businessRepair of [false, true]) for (const legacyMaterial of [false, true]) for (const partitioned of [false, true]) for (const phase of ['code_behavior_analyze', 'code_behavior_review']) if (!businessRepair || !legacyMaterial && !partitioned && phase === 'code_behavior_review') test(`Native P0 ${partitioned ? '分区' : '单体'} ${phase}格式失败持久续改，${businessRepair ? '业务repair重做分析独审' : legacyMaterial ? '旧Native材料' : '保已校验分析'}与只读对象`, async t => {
+for (const failureKind of ['format', 'business', 'protocol'] as const) for (const legacyMaterial of [false, true]) for (const partitioned of [false, true]) for (const phase of ['code_behavior_analyze', 'code_behavior_review']) if (failureKind === 'format' || !legacyMaterial && phase === 'code_behavior_review' && (failureKind === 'protocol' || !partitioned)) test(`Native P0 ${partitioned ? '分区' : '单体'} ${phase}${failureKind === 'protocol' ? 'ID协议失败SQLite冷恢复' : '格式失败持久续改'}，${failureKind === 'business' ? '业务repair重做分析独审' : legacyMaterial ? '旧Native材料' : '保已校验分析'}与只读对象`, async t => {
+  const businessRepair = failureKind === 'business', protocolRepair = failureKind === 'protocol'
   const plan = partitioned ? { version: 'sync-coordinator-v2' as const, direction: 'code_to_spec' as const, sourcePaths: ['src'], writePaths: ['.spec'], partitionPolicy: { version: 'sync-partition-policy-v1' as const, maxReadBytes: 524288, maxParallel: 1 }, commitTrigger: { before: null, paths: ['src/export.js'] } } : {}
   const legacyRounds = legacyMaterial && phase === 'code_behavior_analyze' ? 2 : 1
   const f = await fixture(t, { maxAttempts: legacyRounds + 1, maxCalls: 16, maxRepairs: legacyRounds, timeoutMs: 120_000 }, false, original, 'project', original, { ...plan, agentWorkflow: 'native-worktree-v1' }, undefined, 'code', 'claude:MiniMax-M3.1-Flash', partitioned)
-  const originalRunner = f.options.runner!, requests: ElaborationSessionRequest[] = [], invalid = partitioned ? '{"original":"WRONG_SCHEMA_P0"}' : '{ ORIGINAL_INVALID_P0_JSON\n'
+  const originalRunner = f.options.runner!, requests: ElaborationSessionRequest[] = []
+  let activeStore = f.store, invalid = partitioned ? '{"original":"WRONG_SCHEMA_P0"}' : '{ ORIGINAL_INVALID_P0_JSON\n'
+  let originalReview: { oid: string; schemaOid: string; schema: Buffer } | undefined
   let failed = false
   if (legacyMaterial) {
     const claimed = partitioned ? f.store.claimQueuedAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 30_000, expectedRevision: f.store.readOperation(f.operation.id).revision }) : f.store.claimAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 30_000, expectedMessageId: f.operation.dispatchMessageId })
@@ -4934,7 +4937,7 @@ for (const businessRepair of [false, true]) for (const legacyMaterial of [false,
   f.options.runner = async request => {
     requests.push(request)
     if (!request.purpose.startsWith('code_behavior_')) throw Object.assign(new Error('P0验证通过，受控回归在P1前停止'), { code: 'unsupported' })
-    const attempt = f.store.readAttempt(f.store.readOperation(f.operation.id).currentAttemptId!), seed = request.worktree!
+    const attempt = activeStore.readAttempt(activeStore.readOperation(f.operation.id).currentAttemptId!), seed = request.worktree!
     if (legacyMaterial && attempt.number <= legacyRounds) {
       assert.equal(seed.mode, 'read'); assert.doesNotMatch(request.prompt, /草稿文件=/)
       if (request.purpose === phase) { failed = true; return rejectedReviewFixture(f, request, attempt.number < legacyRounds ? 'A1_OLDER_ORIGINAL_FINAL' : invalid) }
@@ -4946,14 +4949,26 @@ for (const businessRepair of [false, true]) for (const legacyMaterial of [false,
     assert.deepEqual(readTree(f.input.source.commonDir, seed.tree).filter(entry => !entry.path.startsWith('.spex-sync-drafts/')), readTree(f.input.source.commonDir, f.input.immutableTree))
     let text: string
     const produced = await originalRunner({ ...request, prompt: request.prompt.split('\n草稿文件=')[0].replace('\n任务:\n', '\n冻结三方输入:\n').replace('"requiredChangedPaths":', '"changedPaths":') })
-    if (request.purpose === phase && !failed) { text = businessRepair ? JSON.stringify({ ...produced.output as object, verdict: 'repair', findings: [{ message: '真实业务遗漏需重做分析', evidence: '原冻结源码与完整测试', counterexample: '不得漏掉幂等行为' }] }) : invalid; failed = true }
+    if (request.purpose === phase && !failed) {
+      if (protocolRepair) {
+        const review = structuredClone(produced.output) as { checkedChangeIds: string[] }
+        review.checkedChangeIds[0] += 'e'; invalid = JSON.stringify(review)
+      }
+      text = businessRepair ? JSON.stringify({ ...produced.output as object, verdict: 'repair', findings: [{ message: '真实业务遗漏需重做分析', evidence: '原冻结源码与完整测试', counterexample: '不得漏掉幂等行为' }] }) : invalid; failed = true
+    }
     else {
       if (request.purpose === phase) {
         assert.equal(attempt.number, legacyRounds + 1)
         if (businessRepair) { assert.equal(existsSync(join(workspace, path)), false); assert.match(request.prompt, /真实业务遗漏需重做分析/) }
         else {
           assert.equal(readFileSync(join(workspace, path), 'utf8'), invalid)
-          assert.match(request.prompt, legacyMaterial ? /structured_output_format_invalid/ : partitioned ? /behavior_output_schema/ : /behavior_output_json/)
+          assert.match(request.prompt, protocolRepair ? /behavior_review_failed/ : legacyMaterial ? /structured_output_format_invalid/ : partitioned ? /behavior_output_schema/ : /behavior_output_json/)
+          if (protocolRepair) {
+            assert.match(request.prompt, /missingChangeIds/); assert.match(request.prompt, /unknownChangeIds/)
+            assert.equal(f.git('rev-parse', `${seed.baseCommit}:${path}`), originalReview!.oid)
+            assert.equal(f.git('rev-parse', `${seed.baseCommit}:${path.replace(/\.json$/, '.schema.json')}`), originalReview!.schemaOid)
+            assert.deepEqual(readFileSync(join(workspace, path.replace(/\.json$/, '.schema.json'))), originalReview!.schema)
+          }
           if (legacyMaterial) assert.match(request.prompt, /旧Native原输出材料.*不是既有Git草稿/)
           assert.ok(!request.prompt.includes(invalid))
         }
@@ -4962,11 +4977,27 @@ for (const businessRepair of [false, true]) for (const legacyMaterial of [false,
     }
     mkdirSync(join(workspace, path, '..'), { recursive: true }); writeFileSync(join(workspace, path), text)
     execFileSync('git', ['-C', workspace, 'add', path], { stdio: 'pipe' }); execFileSync('git', ['-C', workspace, 'commit', '--allow-empty', '-m', 'normal P0 draft'], { stdio: 'pipe' })
+    if (protocolRepair && request.purpose === phase && attempt.number === 1) originalReview = { oid: execFileSync('git', ['-C', workspace, 'rev-parse', `HEAD:${path}`], { encoding: 'utf8' }).trim(), schemaOid: f.git('rev-parse', `${seed.baseCommit}:${path.replace(/\.json$/, '.schema.json')}`), schema: readFileSync(join(workspace, path.replace(/\.json$/, '.schema.json'))) }
     const output = { summary: '正常提交真实P0临时JSON' }
     return { ...produced, output, resultDigest: contentHash(JSON.stringify(output)), worktree: nativeWorktreeResult(workspace, seed) }
   }
-  await runSyncOperation(f.store, f.operation.id, f.options)
-  const attempts = f.store.listAttempts(f.operation.id)
+  if (protocolRepair) {
+    const claim = partitioned ? activeStore.claimQueuedAttempt.bind(activeStore) : activeStore.claimAttempt.bind(activeStore)
+    const claimNext = (input: Parameters<typeof claim>[0]) => {
+      if (activeStore.listAttempts(f.operation.id).some(attempt => attempt.status === 'failed')) throw new Error('fixture process boundary after durable P0 protocol failure')
+      return claim(input)
+    }
+    if (partitioned) activeStore.claimQueuedAttempt = claimNext
+    else activeStore.claimAttempt = claimNext
+    await runSyncOperation(activeStore, f.operation.id, f.options)
+    assert.equal(activeStore.listAttempts(f.operation.id).length, 1)
+    assert.equal(activeStore.listAttempts(f.operation.id)[0].failure?.code, 'behavior_review_failed')
+    f.closeForRestart()
+    const protocol = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => protocol.close())
+    activeStore = new SyncStore(protocol, { readBlob: ref => readEvidence(f.input.source.commonDir, ref) }); f.useStore(activeStore)
+  }
+  await runSyncOperation(activeStore, f.operation.id, f.options)
+  const attempts = activeStore.listAttempts(f.operation.id)
   assert.equal(attempts.length, legacyRounds + 1)
   assert.deepEqual(requests.filter(request => request.purpose.startsWith('code_behavior_')).map(request => request.purpose), phase === 'code_behavior_review' ? legacyMaterial || businessRepair ? ['code_behavior_analyze', 'code_behavior_review', 'code_behavior_analyze', 'code_behavior_review'] : ['code_behavior_analyze', 'code_behavior_review', 'code_behavior_review'] : legacyMaterial ? [...Array.from({ length: legacyRounds + 1 }, () => 'code_behavior_analyze'), 'code_behavior_review'] : ['code_behavior_analyze', 'code_behavior_analyze', 'code_behavior_review'])
   const stages = attempts.map(attempt => attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()) as { stage: string; resultRef: { sha256: string } }))
@@ -4991,8 +5022,17 @@ for (const businessRepair of [false, true]) for (const legacyMaterial of [false,
     assert.ok(saved.readyAnalysis)
     const trace = saved.readyAnalysis.trace
     assert.ok(attempts[0].dispatchPlans.some(dispatch => dispatch.session?.sessionId === trace.sessionId && dispatch.session.threadId === trace.threadId && dispatch.session.turnId === trace.turnId))
+    if (protocolRepair) {
+      const resumed = stages[1].filter(entry => entry.stage.endsWith('analysis:continuation')).map(entry => JSON.parse(readEvidence(f.input.source.commonDir, entry.resultRef).toString()) as import('./code-behavior.js').CodeBehaviorContinuation).at(-1)!
+      assert.deepEqual(resumed.readyAnalysis, saved.readyAnalysis)
+      assert.equal(resumed.drafts.code_behavior_analyze!.oid, saved.drafts.code_behavior_analyze!.oid)
+      const diagnostic = JSON.parse(saved.drafts.code_behavior_review!.errors[0].message)
+      assert.equal(diagnostic.details.missingChangeIds.length, 1)
+      assert.deepEqual(diagnostic.details.unknownChangeIds, [diagnostic.details.missingChangeIds[0] + 'e'])
+      t.diagnostic(JSON.stringify({ calls: requests.filter(request => request.purpose.startsWith('code_behavior_')).map(request => request.purpose), coldRestart: true, originalReviewSeedOid: originalReview!.oid, originalSchemaSeedOid: originalReview!.schemaOid, originalSchemaSha256: contentHash(originalReview!.schema), analysisTraceUnchanged: true, analysisOidUnchanged: true, details: diagnostic.details }))
+    }
   }
-  assert.equal(f.store.listJournals(f.operation.id).length, 0)
+  assert.equal(activeStore.listJournals(f.operation.id).length, 0)
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
 })
 

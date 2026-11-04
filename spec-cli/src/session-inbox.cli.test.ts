@@ -125,16 +125,19 @@ test('wait-dequeue: blocks as a background command and exits with the one messag
 
 test('stream-dequeue: a persistent monitor prints one line per message and only a signal ends it', async () => {
   const f = fixture()
+  const child = spawn(process.execPath, ['--import', import.meta.resolve('tsx'), cli, 'session', 'stream-dequeue', '--interval', '0.1'], { cwd: pkgRoot, env: f.env, stdio: ['ignore', 'pipe', 'pipe'] })
+  const closed = once(child, 'close')
   try {
-    const child = spawn(process.execPath, [tsxCli, cli, 'session', 'stream-dequeue', '--interval', '0.1'], { cwd: pkgRoot, env: f.env, stdio: ['ignore', 'pipe', 'pipe'] })
     const lines: string[] = []
-    let buffer = ''
+    let buffer = '', stderr = ''
     child.stdout.setEncoding('utf8').on('data', (c) => { buffer += c; const parts = buffer.split('\n'); buffer = parts.pop()!; lines.push(...parts) })
-    await new Promise((r) => setTimeout(r, 1200))
+    child.stderr.setEncoding('utf8').on('data', (c) => { stderr += c })
+    const deadline = Date.now() + 10_000
+    while (!stderr.includes('spex session stream-dequeue: streaming every message') && child.exitCode === null && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25))
+    assert.match(stderr, /spex session stream-dequeue: streaming every message/)
     enqueue(f.app, SELF, 'one')
     enqueue(f.app, SELF, 'two\nlines', STRANGER)
     enqueue(f.app, SELF, 'three')
-    const deadline = Date.now() + 10_000
     while (lines.length < 3 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100))
     assert.equal(lines.length, 3, `three messages, three lines: ${JSON.stringify(lines)}`)
     assert.match(lines[0], /^\[spex\] message · from human · .*: one$/)
@@ -142,9 +145,12 @@ test('stream-dequeue: a persistent monitor prints one line per message and only 
     assert.equal(child.exitCode, null, 'a stream never exits on its own')
     assert.equal(f.app.readPendingMessages(SELF).length, 0, 'every printed line was consumed')
     child.kill('SIGTERM')
-    const [code] = await once(child, 'close') as [number | null]
-    assert.equal(code, 0)
-  } finally { f.app.close(); rmSync(f.home, { recursive: true, force: true }) }
+    const [code] = await closed as [number | null]
+    assert.equal(code, 0, stderr)
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await closed }
+    f.app.close(); rmSync(f.home, { recursive: true, force: true })
+  }
 })
 
 test('send to a registered recordless address with no backend queues locally; an unregistered id is refused', () => {
