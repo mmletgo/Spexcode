@@ -270,7 +270,7 @@ export class SyncApplication {
     this.store.requestPhysicalControl(scope, 'pause', control.revision)
     const owners = [...new Set([this, ...applicationOwners.values()])].filter(owner => owner.root === this.root && owner.repositoryId === this.repositoryId && owner.options.protocol.databasePath === this.options.protocol.databasePath)
     await Promise.all(owners.map(owner => owner.stopService()))
-    const ids = new Set([...this.store.listRecoverable().filter(item => item.operation.input.source.canonicalRoot === this.root).map(item => item.operation.id), ...this.store.listRecoverableResources().filter(item => item.operation.input.source.canonicalRoot === this.root).map(item => item.operation.id)])
+    const ids = new Set([...this.store.listRecoverable().filter(item => item.operation.input.source.canonicalRoot === this.root && item.operation.input.source.repositoryId === this.repositoryId).map(item => item.operation.id), ...this.store.listRecoverableResources().filter(item => item.operation.input.source.canonicalRoot === this.root && item.operation.input.source.repositoryId === this.repositoryId).map(item => item.operation.id)])
     const operations = await Promise.all([...ids].map(id => this.readOperation(id)))
     return { stopped: true, control: this.store.readPhysicalControl(scope), operations }
   }

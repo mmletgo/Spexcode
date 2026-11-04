@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+AC-APPLICATION-STOPPED-04 以真实 Git 元数据身份替换复现同 canonicalRoot、不同 repositoryId 的历史 queued 操作和未结算资源共存；当前来源 stopWriter 成功暂停，只返回当前仓库诊断及其真实未结算资源，旧操作、attempt、资源与物理控制逐值保持。使用隔离 SQLite 与受控 runner，不声称真实 Native 执行或生产恢复完成。
+
 资源专用入口用真实隔离Git的.git替换复现repoId变化，先确认正常read/recover/cancel/resume仍404，再证明只结算原operation/input的精确Native资源。错误input/foreign root拒绝，缺失/错配计划及停止未知保持未结算；pending journal原样保留，原operation/attempt.failure、输出/发现原件逐字不变，业务claim/dispatch/生成/交付方法均零调用。测试只证明正式资源接缝，不冒称真实Native停止。
 
 AC-APPLICATION-STOPPED-01/02/03用真实Git/SQLite和正式stopWriter→control(recover)入口先复现stopped门禁使finished缺席的TypeError，再证明只清理原planned且明确未派发的资源；六次真实store预算预留（模型runner一次）及原operation/失败/refs/deadline保持，observer/FIFO和物理控制不恢复。queued无资源仍零模型/attempt；stopService且物理control仍run的对照在recover后显式start仍不派发，不能靠物理pause掩盖stopped门禁。错误plan仍以resource_recovery 409保留planned及原业务失败，不以空值fallback或假removed绕过。夹具仅证明编排与原清理机制，不作为真实Native调用/清理的产品验收。

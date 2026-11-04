@@ -778,6 +778,45 @@ async function resourceFixture(options: { conflict?: boolean; callRequested?: bo
   return { ...f, application, modelCalls: (): number => calls }
 }
 
+test('AC-APPLICATION-STOPPED-04 stopWriter只诊断当前仓库身份且保留同路径旧操作与当前未结算资源', async t => {
+  const f = await resourceFixture({ callRequested: false })
+  try {
+    await f.application.enable()
+    const submitted = await f.application.submit({ nodeId: 'demo', requestId: 'old-source-resource' }); assert.ok(submitted.operation)
+    const old = await f.application.wait(submitted.operation.id), oldControl = f.application.observationStatus().control
+    assert.equal(old.resources.length, 1)
+    const queued = f.application.store.admitAndEnqueue(await prepareSyncAdmission(old.operation.input, f.application['operationPlan'](old.operation), { ingressKey: 'old-source-queued', rootCauseId: 'old-source-queued', origin: 'spec', budget: settings.budget, managedRoot: f.application['managedRoot'] }))
+    assert.ok(f.application.store.listRecoverable().some(item => item.operation.id === queued.id))
+    assert.ok(f.application.store.listRecoverableResources().some(item => item.operation.id === old.operation.id))
+    const historical = { operation: f.application.store.readOperation(old.operation.id), attempt: f.application.store.readAttempt(old.operation.currentAttemptId!), resource: f.application.store.readResource(old.resources[0].id), queued: f.application.store.readOperation(queued.id) }
+    const gitBackup = join(f.temp, 'original-git')
+    renameSync(join(f.root, '.git'), gitBackup); cpSync(gitBackup, join(f.root, '.git'), { recursive: true })
+    const source = identifyWorktree(f.root)
+    assert.equal(source.canonicalRoot, old.operation.input.source.canonicalRoot)
+    assert.notEqual(source.repositoryId, old.operation.input.source.repositoryId)
+    const current = await SyncApplication.create(f.root, { ...f.application['options'] })
+    await current.enable()
+    const currentSubmitted = await current.submit({ nodeId: 'demo', requestId: 'current-source-resource' }); assert.ok(currentSubmitted.operation)
+    const before = await current.wait(currentSubmitted.operation.id)
+    assert.equal(before.resources.length, 1)
+    const resourceBefore = current.store.readResource(before.resources[0].id)
+    const stopped = await current.stopWriter()
+    assert.equal(stopped.stopped, true); assert.equal(stopped.control.control, 'pause')
+    assert.equal(stopped.control.scope.repositoryId, source.repositoryId)
+    assert.deepEqual(stopped.operations.map(detail => detail.operation.id), [before.operation.id])
+    assert.deepEqual(stopped.operations[0].resources, before.resources)
+    assert.equal(stopped.operations[0].executionAvailability.status, 'recovery_required')
+    assert.deepEqual(current.store.readResource(resourceBefore.id), resourceBefore)
+    assert.deepEqual(current.store.readOperation(old.operation.id), historical.operation)
+    assert.deepEqual(current.store.readAttempt(old.operation.currentAttemptId!), historical.attempt)
+    assert.deepEqual(current.store.readResource(old.resources[0].id), historical.resource)
+    assert.deepEqual(current.store.readOperation(queued.id), historical.queued)
+    assert.deepEqual(current.store.readPhysicalControl(oldControl.scope), oldControl)
+    assert.equal(f.modelCalls(), 2)
+    t.diagnostic(JSON.stringify({ sameCanonicalRoot: true, repositoryIdChanged: true, foreignQueuedAndResourceRecordsUnchanged: true, currentUnsettledResourceStillReported: true, control: stopped.control.control }))
+  } finally { await f.application.stopService(); f.cleanup() }
+})
+
 test('AC-APPLICATION-STOPPED-01 stopWriter后recover仍仅结算原planned资源并保留六次预算预留与失败证据', async () => {
   const f = await resourceFixture({ callRequested: false, priorReservedCalls: 5 })
   try {
