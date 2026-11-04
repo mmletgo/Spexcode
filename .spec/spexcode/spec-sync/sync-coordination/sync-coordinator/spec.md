@@ -215,3 +215,5 @@ P0/P1/P2 共用 typed Native RPC 已结算准入：仅当前 control/physical ru
 合法scope分层证明：业务ID/Spec路径由同一已审P1的扩域原件负责，实现/测试路径可由同P1已审code/AC.test映射负责，或由原file-writer-plan及其逐owner proposal/trace/派发负责；最终完整scope必须精确等于两层实际并集，原binding逐字保留、新增binding全null，前后selection沿既有扩域记录相连。不能把代码路径伪归P1、忽略额外路径/ID或借非null漂移；已完成且精确证实的scope步骤不对同一P1 evidence重登记更宽集合。冷builder逐组沿既有renew→yieldToControl→renew让心跳/暂停处理，保持生产lease和预算。
 
 对完整但明确未采纳 settled 交付的正式重验，当前 selection 仅保护 CAS；组合输入、真实读集、目标 before、P0/P1及阶段 wrapper 使用 retryOf 派生的原业务 selection，不将拒绝候选作为 verifiedDelivery 义务。跨此边界不复用旧 accepted P0/P1、generation/review/candidate；新分析和独审重建 owner 投影。原 Git/Native JSON 仍经原 operation/attempt/owner/schema/终态认证后作为未批准材料续修，不迁旧树或批准。
+
+派发前owner×history、既有P0选择与失败诊断历史扫描逐项沿已有renew→setImmediate→renew边界真正交还事件循环，让原heartbeat和暂停/取消处理；让步后重读本项attempt，不跨让步复用认证快照。stage与partitionStage在同一次typed读取快照内选wrapper和result，保持原身份、guidance/readSet/selection及raw边界。不增加租约、预算、timeout或权限，也不以减少业务输入规避历史成本。

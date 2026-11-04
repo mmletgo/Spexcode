@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process'
 import { closeSync, existsSync, lstatSync, mkdtempSync, openSync, readFileSync, readlinkSync, realpathSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
-import { putBlob, readBlobByHash } from '@spexcode/spec-core'
+import { putBlob, getBlob } from '@spexcode/spec-core'
 import { withWorktreeRegistryLock } from '../session-record-lock.js'
 import type { BlobRef, InputSnapshot, WorktreeIdentity } from './operation-types.js'
 import { projectSourceHashes, projectSourceIdentity, rawPhysicalFingerprint, rawRepositoryId, readSourceStat, readSourceStats, sourceStatText, type SourceStats } from './source-registration.js'
@@ -52,10 +52,10 @@ export function objectGit(commonDir: string, args: string[], input?: Buffer, ind
 export const sourceGit = (root: string, args: string[]): Buffer => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'core.splitIndex=false', '-C', root, ...args], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...gitEnv(), GIT_NO_REPLACE_OBJECTS: '1' }, timeout: GIT_TIMEOUT_MS, killSignal: 'SIGKILL', maxBuffer: 128 * 1024 * 1024 })
 export function writeEvidence(commonDir: string, value: unknown): BlobRef { return { sha256: putBlob(Buffer.from(JSON.stringify(value)), evidenceDir(commonDir)) } }
 export function readEvidence(commonDir: string, ref: BlobRef): Buffer {
-  const result = readBlobByHash(ref.sha256, evidenceDir(commonDir))
-  if (!result.ok) throw new Error(`缺失证据 ${ref.sha256}`)
-  if (contentHash(result.bytes) !== ref.sha256) throw new Error(`证据摘要不匹配 ${ref.sha256}`)
-  return result.bytes
+  const bytes = /^[a-f0-9]{64}$/.test(ref.sha256) ? getBlob(ref.sha256, evidenceDir(commonDir)) : null
+  if (!bytes) throw new Error(`缺失证据 ${ref.sha256}`)
+  if (contentHash(bytes) !== ref.sha256) throw new Error(`证据摘要不匹配 ${ref.sha256}`)
+  return bytes
 }
 export function validateRepositoryPath(path: string): string {
   if (!path || path.includes('\\') || path.includes('\0') || path.startsWith('/') || path.split('/').some(part => !part || part === '.' || part === '..' || part.toLowerCase() === '.git')) throw new Error(`不合法仓库路径: ${path}`)

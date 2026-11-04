@@ -14,6 +14,25 @@ export type RawFinalEvidence = RejectedStructuredOutput & { ownerInputDigest: st
 type Wrapper = { version: string; operationId: string; attemptId: string; inputId: string; policyDigest: string; stage: string; resultRef: BlobRef }
 function fail(message: string): never { throw Object.assign(new Error(message), { code: 'checkpoint_artifact_binding' }) }
 const hash = (value: unknown): string => contentHash(JSON.stringify(value))
+type DecodedCheckpoint = { value: unknown } | { error: SyntaxError }
+const decodedCheckpoints = new WeakMap<SyncStore, { operationId: string; commonDir: string; values: Map<string, DecodedCheckpoint> }>()
+
+function readCheckpointJson<T>(store: SyncStore, operation: SyncOperation, ref: BlobRef): T {
+  const commonDir = operation.input.source.commonDir, bytes = readEvidence(commonDir, ref)
+  let cache = decodedCheckpoints.get(store)
+  if (!cache || cache.operationId !== operation.id || cache.commonDir !== commonDir) {
+    cache = { operationId: operation.id, commonDir, values: new Map() }
+    decodedCheckpoints.set(store, cache)
+  }
+  let decoded = cache.values.get(ref.sha256)
+  if (!decoded) {
+    try { decoded = { value: JSON.parse(bytes.toString('utf8')) as unknown } }
+    catch (error) { if (!(error instanceof SyntaxError)) throw error; decoded = { error } }
+    cache.values.set(ref.sha256, decoded)
+  }
+  if ('error' in decoded) throw decoded.error
+  return decoded.value as T
+}
 
 export function syncCheckpointArtifacts(value: unknown, resultRef: BlobRef): NonNullable<SyncCheckpointRef['artifacts']> {
   const refs = new Map([[resultRef.sha256, resultRef]]), raw = new Set<string>()
@@ -37,7 +56,7 @@ export function syncCheckpointArtifacts(value: unknown, resultRef: BlobRef): Non
 /** 共用原Native请求、canonical record与失败终态认证；不补缺席ref或修改原件。 */
 export function authenticateNativeRejectedFinal(store: SyncStore, operation: SyncOperation, origin: SyncAttempt, key: string, failure: NonNullable<ElaborationResult['failure']>, packet: RejectedStructuredOutput, readNativeRecord: typeof readRecord = readRecord): StructuredExecution {
   const commonDir = operation.input.source.commonDir
-  const read = <T>(ref: BlobRef): T => JSON.parse(readEvidence(commonDir, ref).toString('utf8')) as T
+  const read = <T>(ref: BlobRef): T => readCheckpointJson<T>(store, operation, ref)
   const resource = store.findResource(origin.id, key), dispatch = origin.dispatchPlans.find(item => item.key === key)
   if (!resource || !dispatch || resource.operationId !== operation.id || resource.plan.kind !== 'native_session' || resource.plan.inputId !== operation.input.id) fail('raw缺少原正式Native资源与派发')
   const plan = read<NativeRunPlan>(resource.plan.planBlob)
@@ -57,11 +76,14 @@ export function authenticateNativeRejectedFinal(store: SyncStore, operation: Syn
 
 /** 先核失败原件与原生资源；JSON外形和checkpoint上的role都不能自行授予stage权限。 */
 export function readSyncCheckpoints(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, readNativeRecord: typeof readRecord = readRecord): { json: { ref: BlobRef; value: unknown }[]; raw: Map<string, RawFinalEvidence> } {
-  const commonDir = operation.input.source.commonDir, raw = new Map<string, RawFinalEvidence>()
+  const raw = new Map<string, RawFinalEvidence>()
   const roots = [...attempt.checkpointRefs].reverse(), refs = new Map<string, BlobRef>()
   for (const root of roots) { refs.set(root.sha256, root); for (const artifact of root.artifacts ?? []) refs.set(artifact.ref.sha256, artifact.ref) }
-  const json = new Map<string, unknown>(), syntax = new Map<string, SyntaxError>(), proofs = new Set<string>()
-  const read = <T>(ref: BlobRef): T => JSON.parse(readEvidence(commonDir, ref).toString('utf8')) as T
+  const json = new Map<string, unknown>(), syntax = new Map<string, SyntaxError>(), proofs = new Set<string>(), decoded = new Map<string, unknown>()
+  const read = <T>(ref: BlobRef): T => {
+    if (!decoded.has(ref.sha256)) decoded.set(ref.sha256, readCheckpointJson(store, operation, ref))
+    return decoded.get(ref.sha256) as T
+  }
   const authenticate = (saved: Saved, round: ElaborationRound): void => {
     const packet = round.rejectedOutput
     if (!packet?.ref) return
@@ -118,5 +140,5 @@ export function readSyncCheckpoints(store: SyncStore, operation: SyncOperation, 
   }
   for (const root of roots) for (const artifact of root.artifacts ?? []) if (artifact.kind === 'untrusted_final' && !raw.has(artifact.ref.sha256)) fail('raw role没有真实失败原件，不能隐藏损坏checkpoint')
   for (const [sha256, error] of syntax) if (!raw.has(sha256)) throw error
-  return { json: [...json].filter(([sha256]) => !raw.has(sha256)).map(([sha256, value]) => ({ ref: { sha256 }, value })), raw }
+  return structuredClone({ json: [...json].filter(([sha256]) => !raw.has(sha256)).map(([sha256, value]) => ({ ref: { sha256 }, value })), raw })
 }

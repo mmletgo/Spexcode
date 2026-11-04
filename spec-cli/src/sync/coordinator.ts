@@ -229,14 +229,15 @@ type ReadonlyOwnerRepair = { kind?: 'candidate_review'; reviewEvidence?: { parti
 export function readonlySpecRepairStalled(repair: Pick<ReadonlyOwnerRepair, 'candidateDigest' | 'findings' | 'owners'>, candidateDigest: string | undefined, findings: readonly ContractFinding[], attempt: Pick<SyncAttempt, 'id' | 'dispatchPlans'>): boolean {
   return candidateDigest === repair.candidateDigest && canonical(findings.filter(item => item.severity === 'error')) === canonical(repair.findings) && !attempt.dispatchPlans.some(dispatch => dispatch.purpose.startsWith('elaboration_') && repair.owners.some(owner => dispatch.key.startsWith(`sync:${attempt.id}:elaborate:partition:${owner.partitionId}:`)))
 }
-function stage<T>(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, name: string, usage: 'automatic' | 'evidence' = 'automatic'): T | null {
-  for (const { value: entry } of readSyncCheckpoints(store, operation, attempt).json) {
+function stage<T>(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, name: string, usage: 'automatic' | 'evidence' = 'automatic', checkpoints = readSyncCheckpoints(store, operation, attempt)): T | null {
+  for (const { value: entry } of checkpoints.json) {
     const value = entry as Partial<Stage>
     if (value.version !== 'sync-stage-v1' || value.stage !== name) continue
     if (value.operationId !== operation.id || value.attemptId !== attempt.id || value.inputId !== operation.input.id || value.policyDigest !== operation.policyDigest || !value.resultRef) fail('stage_binding', '持久阶段身份不一致')
     if (!stageSelectionMatches(store, operation, value as Stage)) continue
     if (usage === 'automatic' && behaviorAnalysisStage(name) && value.guidanceContractVersion !== CODE_BEHAVIOR_GUIDANCE_VERSION) return null
-    return JSON.parse(readEvidence(operation.input.source.commonDir, value.resultRef).toString('utf8')) as T
+    const result = checkpoints.json.find(entry => entry.ref.sha256 === value.resultRef!.sha256)
+    return result ? result.value as T : JSON.parse(readEvidence(operation.input.source.commonDir, value.resultRef).toString('utf8')) as T
   }
   return null
 }
@@ -255,10 +256,10 @@ function elaborationRepairSeed(result: SavedElaboration | null, requestKey: stri
 }
 
 function partitionStage<T>(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, key: string): { result: T; resultRef: BlobRef } | null {
-  const result = stage<T>(store, operation, attempt, key)
+  const checkpoints = readSyncCheckpoints(store, operation, attempt), result = stage<T>(store, operation, attempt, key, 'automatic', checkpoints)
   if (!result) return null
   const resultRef = writeEvidence(operation.input.source.commonDir, result)
-  const original = readSyncCheckpoints(store, operation, attempt).json.map(({ value }) => value as Partial<Stage>)
+  const original = checkpoints.json.map(({ value }) => value as Partial<Stage>)
     .find(value => value.version === 'sync-stage-v1' && value.stage === key && value.operationId === operation.id && value.attemptId === attempt.id && value.inputId === operation.input.id && value.policyDigest === operation.policyDigest && value.resultRef?.sha256 === resultRef.sha256)
   if (original?.readSetDigest !== operation.readSetDigest || operation.baselineSelection && original.baselineSelectionRef?.sha256 !== writeEvidence(operation.input.source.commonDir, store.readBusinessBaselineSelection(operation.id)).sha256) return null
   return { result, resultRef }
@@ -1631,7 +1632,9 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       if (behaviorOrigin) {
         const owners = partitions?.partitions.map(partition => ({ partitionId: partition.id, key: `partition:${partition.id}:elaboration` })) ?? [{ partitionId: undefined, key: 'elaboration' }]
         const beforeFiles = priorDeliveryFiles({ ...operation, baselineSelection: store.readBusinessBaselineSelection(operation.id) }, view, [...options.plan.readPaths, ...operation.scope.paths], options.plan)
-        for (const owner of owners) for (const { owner: sourceOwner, prior } of retryDraftSources(store, operation, attempt!.number)) {
+        for (const owner of owners) for (const sourceAttempt of retryDraftSources(store, operation, attempt!.number)) {
+          store.renewLease(fence, leaseMs); await yieldToControl(); store.renewLease(fence, leaseMs)
+          const sourceOwner = store.readOperation(sourceAttempt.owner.id), prior = store.readAttempt(sourceAttempt.prior.id)
           const source = renderedElaborationSource(sourceOwner, prior, owner.key)
           const approved = source && stage<CodeBehaviorAnalysis>(store, sourceOwner, prior, 'analysis')
           if (!source || !approved?.reviewPassed || !analysisStageBinding(store, sourceOwner, approved)) continue
@@ -1664,7 +1667,8 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         let approved = stage<CodeBehaviorAnalysis>(store, operation, attempt, 'analysis')
         if (approved && challenged(approved)) approved = null
         if (!approved) for (const prior of store.listAttempts(operation.id).filter(item => item.number < attempt!.number).reverse()) {
-          const previous = stage<CodeBehaviorAnalysis>(store, operation, prior, 'analysis')
+          store.renewLease(fence, leaseMs); await yieldToControl(); store.renewLease(fence, leaseMs)
+          const previous = stage<CodeBehaviorAnalysis>(store, operation, store.readAttempt(prior.id), 'analysis')
           const binding = previous ? analysisStageBinding(store, operation, previous) : null
           if (previous?.reviewPassed && !challenged(previous) && binding && previous.inputId === operation.input.id && previous.policyDigest === operation.policyDigest && previous.composedDigest === view.composed.contentDigest) { approved = previous; saveStage(store, fence, 'analysis-provenance', { fromAttemptId: prior.id, analysisRef: writeEvidence(operation.input.source.commonDir, previous), baselineSelectionRef: binding.baselineSelectionRef }); saveStage(store, fence, 'analysis', approved, binding); break }
         }
@@ -1684,13 +1688,15 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
             const originalSelection = binding.baselineSelectionRef ? JSON.parse(readEvidence(operation.input.source.commonDir, binding.baselineSelectionRef).toString('utf8')) as FrozenBaselineSelection : undefined
             previousDecisionReadPaths = unique([...originalPlan.readPaths, ...originalSelection?.bindings.flatMap(binding => binding.resource.kind === 'path' ? [binding.resource.path] : []) ?? []])
           }
-          const repairDiagnostics = retryDraftSources(store, operation, attempt!.number).reverse().flatMap(({ owner, prior }) => {
+          const repairDiagnostics: NonNullable<import('./code-behavior.js').CodeBehaviorInput['repairDiagnostics']>[number][] = []
+          for (const sourceAttempt of retryDraftSources(store, operation, attempt!.number).reverse()) {
+            store.renewLease(fence, leaseMs); await yieldToControl(); store.renewLease(fence, leaseMs)
+            const owner = store.readOperation(sourceAttempt.owner.id), prior = store.readAttempt(sourceAttempt.prior.id)
             if (partitions) {
               const saved = partitionStage<PartitionAnalysisFailures>(store, owner, prior, 'partition:analysis-failures')
-              return saved?.result.planDigest === partitions.digest ? saved.result.failures.filter(({ code }) => analysisRepairDiagnosticCodes.has(code)).map(({ partitionId, code, message }) => ({ partitionId, code, message })) : []
-            }
-            return prior.failure?.kind === 'repairable' && analysisRepairDiagnosticCodes.has(prior.failure.code) ? [{ code: prior.failure.code, message: prior.failure.message }] : []
-          })
+              if (saved?.result.planDigest === partitions.digest) repairDiagnostics.push(...saved.result.failures.filter(({ code }) => analysisRepairDiagnosticCodes.has(code)).map(({ partitionId, code, message }) => ({ partitionId, code, message })))
+            } else if (prior.failure?.kind === 'repairable' && analysisRepairDiagnosticCodes.has(prior.failure.code)) repairDiagnostics.push({ code: prior.failure.code, message: prior.failure.message })
+          }
           let draftProtocol = stage<{ version: 'code-behavior-draft-v1' }>(store, operation, attempt, 'behavior-draft-protocol')?.version
           if (!draftProtocol && options.plan.agentWorkflow && !attempt.dispatchPlans.some(dispatch => dispatch.purpose.startsWith('code_behavior_'))) {
             draftProtocol = 'code-behavior-draft-v1'
