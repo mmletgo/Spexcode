@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
 import { assertNativeWorktreeSeed, assertNativeWorktreeResult, nativeWorktreeResult, nativeWorktreePrompt, sampleNativeWorktreeProcesses, nativeWorktreeProcessesStopped } from './native-worktree-runtime.js'
-import { claudeWorktreeArgs, claudeStructuredArgs, claudeStructuredTurn, stopClaudeStructuredTurn } from './claude-structured.js'
+import { claudeWorktreeArgs, claudeStructuredArgs, claudeStructuredTurn, observeClaudeWorktreeMissingFinal, stopClaudeStructuredTurn } from './claude-structured.js'
 import { zcodeWorktreePermission, zcodeWorktreeConfiguration, zcodeRuntimeConfiguration, zcodeStructuredTurn, zcodeCapability, zcodeNativeSelection, type ZCodeStructuredExecution } from './zcode-structured.js'
 import { spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
@@ -149,14 +149,38 @@ test('Claude worktree cold completion binds native user/model/exit and never bor
   const f = repoFixture(), realm = join(f.root, 'realm'), root = join(realm, 'native')
   mkdirSync(join(root, 'claude-home/projects/exact'), { recursive: true })
   try {
-    const processIdentity = await deadProcess(root), prompt = nativeWorktreePrompt('read real files', { ...f.seed, mode: 'read' }), output = { ok: true }
-    const policy = structuredExecutionPolicy({ ...request, schema: { type: 'object', required: ['ok'] }, worktree: { ...f.seed, mode: 'read' } })
+    const processIdentity = await deadProcess(root), prompt = nativeWorktreePrompt('read real files', { ...f.seed, mode: 'edit' }), output = { ok: true }
+    const policy = structuredExecutionPolicy({ ...request, schema: { type: 'object', required: ['ok'] }, worktree: { ...f.seed, mode: 'edit' } })
     const native = { version: 1 as const, root, sessionId: 'session', userUuid: 'user', ...processIdentity }, execution: StructuredExecution = { ...policy, claudeNative: native, state: 'running' }
     const plan = { ...native, policyDigest: hash(policy), requestDigest: hash({ prompt, policy }), cliVersion: '2.1.309 (Claude Code)' }
     const echo = { uuid: 'user', session_id: 'session', message: { role: 'user', content: [{ type: 'text', text: prompt }] } }
     for (const [name, value] of Object.entries({ 'plan.json': plan, 'launch.json': { cwd: f.path }, 'init.json': { session_id: 'session', model: 'MiniMax-M3.1-Flash', tools: ['Read', 'Bash', 'Edit', 'StructuredOutput'] }, 'user-echo.json': echo, 'result.json': { type: 'result', subtype: 'success', is_error: false, session_id: 'session', user_message_uuid: 'user', user_message_uuids: ['user'], structured_output: output }, 'exit.json': { code: 0, signal: null, stopped: true } })) writeFileSync(join(root, name), JSON.stringify(value))
     writeFileSync(join(root, 'claude-home/projects/exact/session.jsonl'), JSON.stringify({ type: 'user', sessionId: 'session', uuid: 'user', parentUuid: null, promptId: 'prompt', message: echo.message }) + '\n')
     const savedResult = readFileSync(join(root, 'result.json'))
+    const missing = { ...JSON.parse(savedResult.toString('utf8')) }; delete missing.structured_output
+    writeFileSync(join(root, 'result.json'), JSON.stringify(missing))
+    await assert.rejects(claudeStructuredTurn(realm, 'native', prompt, execution, noDispatch, f.path), error => {
+      assert(error instanceof StructuredSessionError); assert.equal(error.code, 'structured_output_format_invalid')
+      assert.equal(error.threadId, 'session'); assert.equal(error.turnId, 'user'); assert.equal(error.rejectedOutput, undefined)
+      assert.match(error.message, /missing required structured_output/); assert.equal(existsSync(join(root, 'completed.json')), false)
+      return true
+    })
+    const nativeFiles = ['plan.json', 'init.json', 'user-echo.json', 'result.json', 'exit.json', 'owned-processes.json']
+    const beforeObservation = nativeFiles.map(name => readFileSync(join(root, name)))
+    const observed = observeClaudeWorktreeMissingFinal(prompt, { ...execution, state: 'cancelled', threadId: 'session', turnId: 'user' }, f.path)
+    assert.equal(observed.code, 'structured_output_format_invalid'); assert.equal(observed.rejectedOutput, undefined)
+    assert.deepEqual(nativeFiles.map(name => readFileSync(join(root, name))), beforeObservation, '新观察不得补写旧adapter原件')
+    for (const changed of [{ ...missing, session_id: 'foreign' }, { ...missing, user_message_uuid: 'foreign' }, { ...missing, user_message_uuids: ['foreign'] }, { ...missing, subtype: 'unknown' }, { ...missing, is_error: true }]) {
+      writeFileSync(join(root, 'result.json'), JSON.stringify(changed))
+      await assert.rejects(claudeStructuredTurn(realm, 'native', prompt, execution, noDispatch, f.path), { code: 'stale_result' })
+    }
+    writeFileSync(join(root, 'result.json'), JSON.stringify(missing))
+    await assert.rejects(claudeStructuredTurn(realm, 'native', prompt, { ...execution, state: 'completed' }, noDispatch, f.path), { code: 'stale_result' })
+    for (const changed of [{ code: 1, signal: null, stopped: true }, { code: null, signal: 'SIGTERM', stopped: true }, { code: 0, signal: null, stopped: false }]) {
+      writeFileSync(join(root, 'exit.json'), JSON.stringify(changed))
+      await assert.rejects(claudeStructuredTurn(realm, 'native', prompt, execution, noDispatch, f.path), { code: 'stale_result' })
+    }
+    writeFileSync(join(root, 'exit.json'), JSON.stringify({ code: 0, signal: null, stopped: true }))
     writeFileSync(join(root, 'result.json'), JSON.stringify({ ...JSON.parse(savedResult.toString('utf8')), structured_output: {} }))
     await assert.rejects(claudeStructuredTurn(realm, 'native', prompt, execution, noDispatch, f.path), error => {
       assert(error instanceof StructuredSessionError); assert.equal(error.code, 'failed')

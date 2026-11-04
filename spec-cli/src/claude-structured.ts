@@ -227,21 +227,33 @@ function terminalStopOutcome(plan: NativePlan, result: ClaudeFrozenWitness['resu
   return observation.outcome
 }
 
-/** 工作区模式只核原生输入、模型和终态身份，不借用冻结读取证明。 */
-function settleClaudeWorktreeResult(plan: NativePlan, prompt: string, execution: StructuredExecution): WorktreeNativeResult {
+/** 原生计划只认证固定请求和进程身份；不会采样、派发或写入。 */
+function assertClaudeWorktreePlan(plan: NativePlan, prompt: string, execution: StructuredExecution): void {
   const root = plan.root, native = execution.claudeNative
   if (plan.requestDigest !== hash({ prompt, policy: structuredExecutionPolicy(execution) }) || plan.policyDigest !== hash(structuredExecutionPolicy(execution))
     || !native || native.version !== (plan.version === 2 ? 2 : 1) || native.root !== root || native.sessionId !== plan.sessionId || native.userUuid !== plan.userUuid || native.pid !== plan.pid || native.receiptFile !== plan.receiptFile) throw new StructuredSessionError('stale_result', 'Claude worktree completion lost its exact request/native/process identity')
-  if (execution.state !== 'completed' && !nativeWorktreeProcessesStopped(claudeWorktreeProcessPlan(plan))) throw new StructuredSessionError('cancellation_pending', 'Claude worktree native or unknown orphan stop remains unproven')
+}
+
+/** 原工作区请求与公开终态共用认证；sealed只读模式不封存或改写旧原件。 */
+function authenticateClaudeWorktreeResult(plan: NativePlan, prompt: string, execution: StructuredExecution, sealed = false) {
+  assertClaudeWorktreePlan(plan, prompt, execution)
+  const root = plan.root
+  if (sealed ? !plan.pid || !detachedRuntimeIsGone(plan.pid, plan.receiptFile) : execution.state !== 'completed' && !nativeWorktreeProcessesStopped(claudeWorktreeProcessPlan(plan))) throw new StructuredSessionError('cancellation_pending', 'Claude worktree native or unknown orphan stop remains unproven')
   const init = JSON.parse(readFileSync(join(root, 'init.json'), 'utf8')) as { session_id: string; model: string; tools: string[] }
   const echo = JSON.parse(readFileSync(join(root, 'user-echo.json'), 'utf8')) as ClaudeFrozenWitness['echo']
   const result = JSON.parse(readFileSync(join(root, 'result.json'), 'utf8')) as ClaudeFrozenWitness['result']
   const exit = JSON.parse(readFileSync(join(root, 'exit.json'), 'utf8')) as { code: number | null; signal: string | null; stopped: boolean }
   const selection = claudeWorktreeModel(plan, execution, init)
-  const history = claudeWorktreeHistory(plan, execution.state === 'completed'), original = history.find(row => row.type === 'user' && row.uuid === plan.userUuid)
+  const history = claudeWorktreeHistory(plan, sealed || execution.state === 'completed'), original = history.find(row => row.type === 'user' && row.uuid === plan.userUuid)
   if (init.session_id !== plan.sessionId || !original?.promptId || original.sessionId !== plan.sessionId || plan.version === 2 && history.some(row => row.sessionId !== plan.sessionId || row.type === 'api-request' && (typeof row.id !== 'string' || !row.id || typeof row.model !== 'string' || !row.model.trim()))
     || echo.uuid !== plan.userUuid || echo.session_id !== plan.sessionId || hash(echo.message) !== hash({ role: 'user', content: [{ type: 'text', text: prompt }] }) || hash(original.message) !== hash(echo.message)
     || original.parentUuid !== null || result.session_id !== plan.sessionId || result.user_message_uuid !== plan.userUuid || hash(result.user_message_uuids) !== hash([plan.userUuid]) || !exit.stopped) throw new StructuredSessionError('stale_result', 'Claude worktree original prompt/model/exit evidence differs')
+  return { root, init, echo, result, exit, selection, history, original }
+}
+
+/** 工作区模式只核原生输入、模型和终态身份，不借用冻结读取证明。 */
+function settleClaudeWorktreeResult(plan: NativePlan, prompt: string, execution: StructuredExecution): WorktreeNativeResult {
+  const { root, init, echo, result, exit, selection, history, original } = authenticateClaudeWorktreeResult(plan, prompt, execution)
   if (result.subtype === 'error_max_structured_output_retries') {
     const terminalOutcome = terminalStopOutcome(plan, result)
     const naturalExit = exit.code === 1 && exit.signal === null && terminalOutcome !== 'sent'
@@ -250,7 +262,8 @@ function settleClaudeWorktreeResult(plan: NativePlan, prompt: string, execution:
     throw worktreeSchemaRetryError(history, original, execution, prompt, plan.version === 2 ? undefined : selection)
   }
   if (execution.state !== 'completed' && terminalStopOutcome(plan, result) === 'sent') throw new StructuredSessionError('failed', 'Claude terminal success required process-group termination and is not a completed result')
-  if (exit.code !== 0 || exit.signal !== null || result.subtype !== 'success' || result.is_error || result.structured_output === undefined) throw new StructuredSessionError('stale_result', 'Claude worktree success evidence differs')
+  if (exit.code !== 0 || exit.signal !== null || result.type !== 'result' || result.subtype !== 'success' || result.is_error !== false) throw new StructuredSessionError('stale_result', 'Claude worktree success evidence differs')
+  if (result.structured_output === undefined) throw new StructuredSessionError(execution.state === 'completed' || existsSync(join(root, 'completed.json')) ? 'stale_result' : 'structured_output_format_invalid', 'Claude worktree success is missing required structured_output', { threadId: plan.sessionId, turnId: plan.userUuid })
   const validate = new Ajv({ allErrors: true }).compile(execution.schema)
   if (!validate(result.structured_output)) throw new StructuredSessionError('failed', 'Claude worktree structured output does not match its schema', execution.state === 'completed' ? {} : { threadId: plan.sessionId, turnId: plan.userUuid, rejectedOutput: rejectedFinalOutput(JSON.stringify(result.structured_output), prompt, execution, { threadId: plan.sessionId, turnId: plan.userUuid }, 'native_json') })
   const answer: WorktreeNativeResult = { threadId: plan.sessionId, turnId: plan.userUuid, text: JSON.stringify(result.structured_output) }
@@ -259,6 +272,29 @@ function settleClaudeWorktreeResult(plan: NativePlan, prompt: string, execution:
   if (execution.state === 'completed' && (!existsSync(path) || execution.threadId !== answer.threadId || execution.turnId !== answer.turnId || execution.resultDigest !== hash(result.structured_output))) throw new StructuredSessionError('stale_result', 'Claude worktree durable completed identity differs')
   persistCompletionJson(path, completion)
   return answer
+}
+
+/** 正式暂停后的新材料仍须核原计划、已回显输入和同一owned工作树；不签发final。 */
+export function assertClaudeStoppedDraftSource(prompt: string, execution: StructuredExecution, worktreePath: string): void {
+  const native = execution.claudeNative
+  if (execution.version !== 6 || execution.policy !== 'native-worktree-v1' || !execution.model?.startsWith('claude:') || execution.worktree?.mode !== 'edit' || !native || execution.state !== 'cancelled' || !execution.cancellation?.nativeStopped || execution.threadId !== native.sessionId || execution.turnId !== native.userUuid || existsSync(join(native.root, 'completed.json'))) throw new StructuredSessionError('stale_result', 'stopped draft observation requires its original cancelled native worktree')
+  const plan = JSON.parse(readFileSync(join(native.root, 'plan.json'), 'utf8')) as NativePlan
+  assertClaudeWorktreePlan(plan, prompt, execution)
+  if (plan.root !== native.root || realpathSync(claudeWorktreeProcessPlan(plan).workspace!) !== realpathSync(worktreePath) || !plan.pid || !detachedRuntimeIsGone(plan.pid, plan.receiptFile)) throw new StructuredSessionError('stale_result', 'stopped draft observation differs from its recorded native worktree/process')
+  const init = JSON.parse(readFileSync(join(plan.root, 'init.json'), 'utf8')) as ClaudeInit, echo = JSON.parse(readFileSync(join(plan.root, 'user-echo.json'), 'utf8')) as ClaudeFrozenWitness['echo']
+  claudeWorktreeModel(plan, execution, init)
+  if (init.session_id !== plan.sessionId || echo.uuid !== plan.userUuid || echo.session_id !== plan.sessionId || hash(echo.message) !== hash({ role: 'user', content: [{ type: 'text', text: prompt }] })) throw new StructuredSessionError('stale_result', 'stopped draft observation lost its original native input')
+}
+
+/** 新attempt只观察已停止的原缺final失败；不派发、不补签或改写旧Native证据。 */
+export function observeClaudeWorktreeMissingFinal(prompt: string, execution: StructuredExecution, worktreePath: string): StructuredSessionError {
+  const native = execution.claudeNative
+  if (execution.version !== 6 || execution.policy !== 'native-worktree-v1' || !execution.model?.startsWith('claude:') || execution.worktree?.mode !== 'edit' || !native || !['failed', 'cancelled'].includes(execution.state ?? '') || execution.threadId !== native.sessionId || execution.turnId !== native.userUuid || existsSync(join(native.root, 'completed.json'))) throw new StructuredSessionError('stale_result', 'missing final observation requires the exact original failed native worktree')
+  const plan = JSON.parse(readFileSync(join(native.root, 'plan.json'), 'utf8')) as NativePlan
+  if (plan.root !== native.root || realpathSync(claudeWorktreeProcessPlan(plan).workspace!) !== realpathSync(worktreePath)) throw new StructuredSessionError('stale_result', 'missing final observation differs from its recorded native worktree')
+  const { result, exit } = authenticateClaudeWorktreeResult(plan, prompt, execution, true)
+  if (exit.code !== 0 || exit.signal !== null || result.type !== 'result' || result.subtype !== 'success' || result.is_error !== false || result.structured_output !== undefined || terminalStopOutcome(plan, result) === 'sent') throw new StructuredSessionError('stale_result', 'original native evidence is not a naturally stopped success missing structured_output')
+  return new StructuredSessionError('structured_output_format_invalid', 'Claude worktree success is missing required structured_output', { threadId: plan.sessionId, turnId: plan.userUuid })
 }
 
 /** 完整终态重放只核原公开history、schema与原进程组，不启动CLI或新增turn。 */

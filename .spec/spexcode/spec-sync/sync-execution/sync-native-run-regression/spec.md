@@ -45,3 +45,5 @@ code:
 纯JSON frozenEntries经真实资源桥绑定当前attempt/policy，派发前转换为不可变ref，保存计划不含正文载荷；重启与terminal重放继续使用原请求/证明，不增加调用或预算。小prompt也可有显式冻结条目，旧已有ref及旧inline恢复不被新传输重写。
 
 资源-only 保留回归使用真实 Git 候选与真实 SQLite 资源计划，确认只有显式选项传入创建恢复；严格认证 v2 preserved/cleanupComplete:false 的原收据和物理身份后 terminal→removed，不调用模型/新会话、不增调用预算、不改变原 pause/attempt/failure。terminal 和 removed 冷重放都重新认证 canonical receipt，伪造/缺失/错配或当前 session 的 Native 已启动均拒绝，未结算资源继续保留；原场地保留不能变成清理或采纳证明。
+
+真实queue/SQLite/Git桥中，受控Claude exit0/success缺structured_output必须失败为typed格式错误，原文缺席但实际正常提交可成为failedWorktree；资源先terminal再removed，同键冷重放无新CLI/预算/record变化。合法schema坏final原packet继续同门续修；completed损坏、错session/user/turn、非零退出/signal及未停稳保持拒绝。
