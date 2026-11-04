@@ -2,7 +2,7 @@ import { nativeWorktreeProcessesStopped, sampleNativeWorktreeProcesses } from '.
 import { Ajv } from 'ajv'
 import { spawn, spawnSync, execFileSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -295,6 +295,17 @@ export function observeClaudeWorktreeMissingFinal(prompt: string, execution: Str
   const { result, exit } = authenticateClaudeWorktreeResult(plan, prompt, execution, true)
   if (exit.code !== 0 || exit.signal !== null || result.type !== 'result' || result.subtype !== 'success' || result.is_error !== false || result.structured_output !== undefined || terminalStopOutcome(plan, result) === 'sent') throw new StructuredSessionError('stale_result', 'original native evidence is not a naturally stopped success missing structured_output')
   return new StructuredSessionError('structured_output_format_invalid', 'Claude worktree success is missing required structured_output', { threadId: plan.sessionId, turnId: plan.userUuid })
+}
+
+/** 已停错误结果只授予未批准Git材料，不冒充缺final格式失败或成功。 */
+export function observeClaudeStoppedWorktreeFailure(prompt: string, execution: StructuredExecution, worktreePath: string): StructuredSessionError | undefined {
+  assertClaudeStoppedDraftSource(prompt, execution, worktreePath)
+  const native = execution.claudeNative!
+  const result = JSON.parse(readFileSync(join(native.root, 'result.json'), 'utf8')) as ClaudeFrozenWitness['result']
+  const exit = JSON.parse(readFileSync(join(native.root, 'exit.json'), 'utf8')) as { code: number | null; signal: string | null; stopped: boolean }
+  if (exit.code === 1 && exit.signal === null && exit.stopped && result.type === 'result' && result.subtype === 'success' && result.is_error === true && result.structured_output === undefined
+    && result.session_id === native.sessionId && result.user_message_uuid === native.userUuid && hash(result.user_message_uuids) === hash([native.userUuid])) return undefined
+  return observeClaudeWorktreeMissingFinal(prompt, execution, worktreePath)
 }
 
 /** 完整终态重放只核原公开history、schema与原进程组，不启动CLI或新增turn。 */
@@ -590,13 +601,29 @@ export async function claudeStructuredTurn(realm: string, id: string, prompt: st
   const abort = (): void => interrupt()
   callbacks.signal?.addEventListener('abort', abort, { once: true })
   const timer = structuredExecutionTimer(execution.timeoutMs, () => { timedOut = true; interrupt(); void callbacks.onTimeout?.() })
-  const processCensus = worktree ? setInterval(() => { try { sampleNativeWorktreeProcesses(plan) } catch (error) { failure = error as Error; interrupt() } }, 100) : undefined
+  const processCensus = worktree ? setInterval(() => { try { sampleNativeWorktreeProcesses(plan) } catch (error) { failure ??= error as Error; interrupt() } }, 100) : undefined
   const stoppedProcesses = (): boolean => worktree ? nativeWorktreeProcessesStopped(plan) : detachedRuntimeIsGone(plan.pid!, plan.receiptFile) && claudeMcpStopped(root)
   const lines = createInterface({ input: child.stdout })
+  let protocolOrdinal = 0
   lines.on('line', line => {
+    let ordinal = 0
     work = work.then(async () => {
       if (failure) return
+      ordinal = ++protocolOrdinal
       const event = JSON.parse(line) as Record<string, unknown>
+      if (event.type === 'result' || event.type === 'system' && event.subtype === 'init') {
+        const initEvent = event.type === 'system', strings = (value: unknown): value is string[] => Array.isArray(value) && value.every(item => typeof item === 'string')
+        appendFileSync(join(root, 'native-protocol.jsonl'), JSON.stringify({
+          version: 1, ordinal, kind: initEvent ? 'init' : 'result',
+          sessionId: typeof event.session_id === 'string' ? event.session_id : undefined,
+          uuid: typeof event.uuid === 'string' ? event.uuid : undefined,
+          parentToolUseIdOwn: Object.hasOwn(event, 'parent_tool_use_id'),
+          ...(typeof event.parent_tool_use_id === 'string' || event.parent_tool_use_id === null ? { parentToolUseId: event.parent_tool_use_id } : {}),
+          ...(initEvent ? { modelDigest: typeof event.model === 'string' ? hash(event.model) : undefined, toolsDigest: strings(event.tools) ? hash(event.tools) : undefined, toolsCount: Array.isArray(event.tools) ? event.tools.length : undefined }
+            : { subtype: typeof event.subtype === 'string' && /^[a-z0-9_-]{1,80}$/i.test(event.subtype) ? event.subtype : undefined, isError: typeof event.is_error === 'boolean' ? event.is_error : undefined,
+              userUuid: typeof event.user_message_uuid === 'string' ? event.user_message_uuid : undefined, userUuidsDigest: strings(event.user_message_uuids) ? hash(event.user_message_uuids) : undefined, userUuidsCount: Array.isArray(event.user_message_uuids) ? event.user_message_uuids.length : undefined, structuredOutputOwn: Object.hasOwn(event, 'structured_output') }),
+        }) + '\n', { mode: 0o600 })
+      }
       if (event.type === 'system' && event.subtype === 'init') {
         if (init) throw new StructuredSessionError('stale_result', 'Claude emitted more than one native init identity')
         init = event as unknown as ClaudeInit
@@ -615,13 +642,14 @@ export async function claudeStructuredTurn(realm: string, id: string, prompt: st
         writeFileSync(join(root, 'result.json'), JSON.stringify(result), { mode: 0o400 }); armStop(); child.stdin.end()
       }
     }).catch(error => {
-      failure = error as Error; killOwnGroup()
+      failure ??= error as Error; killOwnGroup()
       stopLimit ??= setTimeout(() => rejectStop(new StructuredSessionError('cancellation_pending', 'Claude failed protocol observation has no bounded native stop evidence')), 15000)
+      appendFileSync(join(root, 'native-protocol.jsonl'), JSON.stringify({ version: 1, ordinal, kind: 'error', code: failure instanceof StructuredSessionError ? failure.code : 'observer_failed' }) + '\n', { mode: 0o600 })
     })
   })
   const stderrHash = createHash('sha256'); let stderrBytes = 0
   child.stderr.on('data', (bytes: Buffer) => { stderrHash.update(bytes); stderrBytes += bytes.length })
-  child.once('error', error => { failure = error })
+  child.once('error', error => { failure ??= error })
   try {
     child.stdin.write(`${JSON.stringify({ type: 'user', session_id: native.sessionId, uuid: native.userUuid, message: { role: 'user', content: [{ type: 'text', text: prompt }] } })}\n`)
     if (callbacks.signal?.aborted) interrupt()
@@ -633,7 +661,8 @@ export async function claudeStructuredTurn(realm: string, id: string, prompt: st
     if (!stopped) throw new StructuredSessionError('cancellation_pending', 'Claude or MCP descendant process group remains unproven')
     if (aborted) throw new StructuredSessionError(timedOut ? 'timeout' : 'cancelled', 'Claude exact process group stopped after cancellation')
     if (failure) throw failure
-    if (!init || !echo || !result || exit.code !== 0 && result.subtype !== 'error_max_structured_output_retries') throw new StructuredSessionError('failed', 'Claude execution ended without a complete native result and user echo')
+    if (!init || !echo || !result) throw new StructuredSessionError('failed', `Claude execution is missing native events: ${[!init ? 'init' : '', !echo ? 'user-echo' : '', !result ? 'result' : ''].filter(Boolean).join(', ')}`)
+    if (exit.code !== 0 && result.subtype !== 'error_max_structured_output_retries') throw new StructuredSessionError('failed', `Claude native execution exited unsuccessfully: code=${exit.code}, signal=${exit.signal}, result.is_error=${typeof result.is_error === 'boolean' ? result.is_error : 'invalid'}`)
     const history = worktree ? claudeWorktreeHistory(plan, false) : readClaudePublicHistory(nativeHistoryPath(root, native.sessionId), native.sessionId), original = history.find(row => row.type === 'user' && row.uuid === native.userUuid)
     if (!original?.promptId) throw new StructuredSessionError('stale_result', 'Claude original native promptId is missing')
     await callbacks.onNative({ ...native, pid: child.pid, receiptFile: plan.receiptFile, promptId: original.promptId })

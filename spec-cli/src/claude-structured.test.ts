@@ -9,7 +9,7 @@ import { basename, dirname, join } from 'node:path'
 import { prepareFrozenPrompt, readFrozenManifest, claudeFrozenContextPrompt, freezeContext, readFrozenRange, proveClaudeFrozenReads, verifyFrozenReadProof, claudeMessageDigest, readClaudeApiSourceMetadata, readClaudePublicHistory, type ClaudeFrozenWitness, type ClaudePublicMessage, type ClaudePublicRecord } from './frozen-context.js'
 import { structuredExecutionPolicy, structuredRealmRoot, type StructuredExecution } from './session-structured-policy.js'
 import { sampleNativeWorktreeProcesses } from './native-worktree-runtime.js'
-import { claudeNativeModel, claudeWorktreeArgs, claudeStructuredArgs, claudeStructuredTurn, observeClaudeWorktreeMissingFinal, assertClaudeStoppedDraftSource, prepareClaudeAuthenticationEnvironment } from './claude-structured.js'
+import { claudeNativeModel, claudeWorktreeArgs, claudeStructuredArgs, claudeStructuredTurn, observeClaudeWorktreeMissingFinal, observeClaudeStoppedWorktreeFailure, assertClaudeStoppedDraftSource, prepareClaudeAuthenticationEnvironment } from './claude-structured.js'
 
 const contentBlocks = (message: ClaudePublicMessage): Exclude<ClaudePublicMessage['content'], string> => {
   assert(Array.isArray(message.content))
@@ -1180,6 +1180,13 @@ test('native configuration schema exhaustion authenticates per-request wire mode
     assert.throws(() => observeClaudeWorktreeMissingFinal(prompt, stopped, workspace), { code: 'stale_result' })
     assert.equal(existsSync(join(root, 'public-history.json')), false, '缺sealed history不得补封存旧原件')
     assert.deepEqual(readFileSync(join(root, 'plan.json')), before[0]); assert.equal(existsSync(join(root, 'completed.json')), false)
+    const errorResult = { ...result, subtype: 'success', is_error: true }
+    writeFileSync(join(root, 'result.json'), JSON.stringify(errorResult)); writeFileSync(join(root, 'exit.json'), JSON.stringify({ code: 1, signal: null, stopped: true }))
+    const beforeFailureObservation = ['plan.json', 'init.json', 'user-echo.json', 'result.json', 'exit.json'].map(name => readFileSync(join(root, name)))
+    assert.equal(observeClaudeStoppedWorktreeFailure(prompt, stopped, workspace), undefined, '明确错误终态仅续Git材料，不给格式码')
+    assert.throws(() => observeClaudeWorktreeMissingFinal(prompt, stopped, workspace), { code: 'stale_result' }, '原精准missing-final资格不扩展到exit1/error')
+    assert.deepEqual(['plan.json', 'init.json', 'user-echo.json', 'result.json', 'exit.json'].map(name => readFileSync(join(root, name))), beforeFailureObservation)
+    assert.equal(existsSync(join(root, 'public-history.json')), false); assert.equal(existsSync(join(root, 'native-protocol.jsonl')), false, '冷观察不补安全诊断或sealed原件')
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })
 
