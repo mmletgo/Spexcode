@@ -15,6 +15,7 @@ import { adoptedDeliveryPaths, isUtf8Text, readCompositionEvidence, selectedReti
 import { readHistoryRequest, readReceiptHistoryRestorations } from './history-input.js'
 import { composeAuthoredInput } from './author-input.js'
 import { elaborate, freezeElaborationInput, gapBlockedFinding, verifyElaborationDraftCache } from './elaboration.js'
+import { outputErrors } from './elaboration-schema.js'
 import type { ElaborationResult, ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult, ElaborationTrace, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial } from './elaboration-types.js'
 import { claimFileMutex } from './file-mutex.js'
 import { authenticateNativeFailure, authenticateNativeRejectedFinal, readSyncCheckpoints, syncCheckpointArtifacts } from './checkpoint-evidence.js'
@@ -1413,11 +1414,25 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           if (!existingDraft && owner.id !== operation.id && materialDraft && materialDraft.schemaDigest === schemaDigest) {
             const suffix = key === 'analysis' ? '' : `:partition:${key.slice('partition:'.length, -':analysis'.length)}`
             const authenticated = authenticatedDraftResult(store, owner, prior, `sync:${prior.id}:analysis${suffix}:${purpose}`, purpose, materialDraft)
-            if (authenticated && (authenticated.request ? behaviorMaterialTask(authenticated.request.prompt) === behaviorMaterialTask(request.prompt) : continuation!.result.inputDigest === inputDigest)) {
+            const carriedAnalysis = !authenticated && purpose === 'code_behavior_analyze' && behaviorAnalysisDraftBinding(store, owner, prior, key, materialDraft, planDigest)
+            if ((authenticated || carriedAnalysis) && (authenticated?.request ? behaviorMaterialTask(authenticated.request.prompt) === behaviorMaterialTask(request.prompt) : continuation!.result.inputDigest === inputDigest)) {
               const ownerDigest = contentHash(JSON.stringify({ version: 'code-behavior-draft-v1', source: canonicalSnapshotSource(operation.input.source), partitionId: key === 'analysis' ? null : key.slice('partition:'.length, -':analysis'.length), purpose }))
               const source = readStageDraft(operation.input.source.commonDir, materialDraft, { ownerDigest, sourceInputId: operation.input.id, schemaDigest, path: `.spex-sync-drafts/${ownerDigest}.json` })
+              const errors = [...materialDraft.errors], reviewedResult = purpose === 'code_behavior_analyze' && !continuation!.result.readyAnalysis ? continuation!.result.reviewResult : undefined
+              if (reviewedResult) {
+                if (!behaviorTraceBinding(store, owner, prior, key, reviewedResult.trace)) fail('behavior_review_material_binding', '业务续修诊断缺少原独审Native/Git身份')
+                const reviewDraft = continuation!.result.drafts.code_behavior_review!, commonDir = operation.input.source.commonDir
+                const reviewRequest = JSON.parse(readEvidence(commonDir, reviewedResult.requestRef).toString()) as ElaborationSessionRequest
+                const review = JSON.parse(readObject(commonDir, reviewDraft.oid).toString()) as { inputDigest: string; analysisDigest: string; verdict: string; checkedPaths: string[]; checkedChangeIds: string[]; findings: unknown[] }
+                const reviewSchema = readTree(commonDir, reviewDraft.seed.tree).find(entry => entry.path === reviewDraft.path.replace(/\.json$/, '.schema.json'))!
+                const reviewed = JSON.parse(reviewRequest.prompt.split('\n待审分析:\n')[1].split('\n草稿文件=')[0]) as { analysisDigest: string; analysis: CodeBehaviorAnalysis }
+                const task = JSON.parse(reviewRequest.prompt.split('\n任务:\n')[1].split('\n待审分析:\n')[0]) as { requiredChangedPaths: string[] }
+                if (outputErrors(review, JSON.parse(readObject(commonDir, reviewSchema.oid).toString()) as Record<string, unknown>).length || reviewRequest.inputDigest !== continuation!.result.inputDigest || review.inputDigest !== inputDigest || reviewed.analysis.inputDigest !== inputDigest || review.analysisDigest !== reviewed.analysisDigest || reviewed.analysisDigest !== contentHash(JSON.stringify(reviewed.analysis))
+                  || task.requiredChangedPaths.some(path => !review.checkedPaths.includes(path)) || new Set(review.checkedPaths).size !== review.checkedPaths.length || new Set(review.checkedChangeIds).size !== reviewed.analysis.changes.length || review.checkedChangeIds.some(id => !reviewed.analysis.changes.some(change => change.id === id))) fail('behavior_review_material_binding', '业务续修诊断未绑定原完整分析、schema或独审范围')
+                if (review.verdict === 'repair' && review.findings.length) errors.push({ code: 'behavior_review_failed', message: JSON.stringify({ approved: false, review }) })
+              }
               saveStage(store, fence!, `${key}:${purpose}:draft-material-provenance`, { fromOperationId: owner.id, fromAttemptId: prior.id, resultRef: continuation!.resultRef, resultCommit: materialDraft.resultCommit, oid: materialDraft.oid })
-              return { source, errors: materialDraft.errors, sourceKind: 'git_draft' }
+              return { source, errors, sourceKind: 'git_draft' }
             }
           }
           const suffix = key === 'analysis' ? '' : `:partition:${key.slice('partition:'.length, -':analysis'.length)}`

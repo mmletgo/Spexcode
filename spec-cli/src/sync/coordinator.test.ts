@@ -5690,6 +5690,102 @@ for (const [protocolRounds, staleCarry, tamper] of [[1, false, 'none'], [1, true
 })
 
 
+for (const tamper of ['none', 'review-identity', 'analysis-digest', 'owner'] as const) test(`正式retryOf保留父unsupported时跨attempt独审的完整业务finding tamper=${tamper}`, async t => {
+  const f = await fixture(t, { maxAttempts: 3, maxCalls: 16, maxRepairs: 2, timeoutMs: 300_000 }, false, original, 'project', original, {
+    version: 'sync-coordinator-v2', direction: 'code_to_spec', agentWorkflow: 'native-worktree-v1', sourcePaths: ['src'], writePaths: ['.spec'],
+    partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 }, commitTrigger: { before: null, paths: ['src/export.js'] },
+  }, undefined, 'code', 'claude:default', true)
+  let store = f.store, active = f.operation, retried = false, key = '', analysisText = '', newPrompt = '', newCalls = 0
+  const finding = [
+    { message: '权威业务锚已失效', evidence: '原冻结锚与调用方全文', counterexample: '不能沿无效锚解释现行为' },
+    { message: '遗漏断开连接回调', evidence: 'onDisconnect真实调用与断言', counterexample: '断开后必须释放原资源' },
+  ]
+  const records = new Map<string, NativeRunRecord>()
+  const wrappers = (attempt: import('./operation-types.js').SyncAttempt) => attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()) as { stage: string; resultRef: { sha256: string } })
+  const latest = (attempt: import('./operation-types.js').SyncAttempt) => wrappers(attempt).filter(wrapper => wrapper.stage === `${key}:continuation`).at(-1)!
+  f.options.runner = async request => {
+    const operation = store.readOperation(active.id), attempt = store.readAttempt(operation.currentAttemptId!), seed = request.worktree!
+    key = `partition:${request.requestKey.split(':partition:')[1].split(':')[0]}:analysis`
+    const path = /草稿文件=([^\s；]+)/.exec(request.prompt)![1]
+    if (retried) {
+      newCalls++
+      assert.equal(request.purpose, 'code_behavior_analyze', '正式后继必须重做分析，不能继承旧ready/accept')
+      const entry = readTree(f.input.source.commonDir, seed.tree).find(entry => entry.path === path)
+      assert.ok(entry, '跨attempt原分析Git稿必须进入新seed')
+      assert.equal(readObject(f.input.source.commonDir, entry.oid).toString(), analysisText)
+      const errors = JSON.parse(request.prompt.split('原具体错误：')[1].split('；本轮修复诊断：')[0]) as { code: string; message: string }[]
+      assert.ok(errors.some(error => error.code === 'behavior_review_failed' && JSON.stringify(JSON.parse(error.message).review.findings) === JSON.stringify(finding)), '父unsupported且无partitionFailures仍须携完整原review findings，不只复制分析稿')
+      newPrompt = request.prompt
+      throw Object.assign(new Error('fixture已核新analyze seed和完整prompt，停止于模型调用边界'), { code: 'unsupported' })
+    }
+    const brief = JSON.parse(request.prompt.split('任务:\n')[1].split('\n待审分析:')[0].split('\n草稿文件=')[0]) as { requiredChangedPaths: string[] }
+    const reviewed = request.purpose === 'code_behavior_review' ? JSON.parse(request.prompt.split('待审分析:\n')[1].split('\n草稿文件=')[0]) as { analysisDigest: string; analysis: import('./writeback-types.js').CodeBehaviorAnalysis } : null
+    const output = reviewed ? { inputDigest: request.inputDigest, analysisDigest: reviewed.analysisDigest, verdict: 'repair', checkedPaths: brief.requiredChangedPaths, checkedChangeIds: reviewed.analysis.changes.map(change => change.id), findings: finding }
+      : { changes: brief.requiredChangedPaths.map(path => ({ kind: 'refactor', paths: [path], affectedIds: ['RULE-EXPORT-05'], ruleIds: ['RULE-EXPORT-05'], originalIntent: '保留原业务', previousBehavior: '原业务', sourceBehavior: '原业务', deliveryBehavior: '原业务', evidence: path, counterexample: '不得漏掉现行为' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+    if (reviewed && attempt.number === 1) output.checkedChangeIds![0] += 'e'
+    if (!reviewed) analysisText = JSON.stringify(output)
+    const actual = committedDraftFixture(f, request, output, join(f.parent, `cross-review-${contentHash(request.requestKey)}`))
+    const fence = { operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: operation.input.source.physicalFingerprint }
+    return createAttemptRunner(store, fence, { pollMs: 2, runtime: {
+      readRecord: id => records.get(id) ?? null, cancel: async () => { throw new Error('fixture不得控制真实进程') },
+      run: async native => {
+        const sessionId = sessionIdForCreateKey(native.sessionCreateKey!), identity = { threadId: `cross-review-${sessionId}`, turnId: 'turn' }, receipt = { summary: '真实Git及Native资源' }, resultDigest = contentHash(JSON.stringify(receipt)), execution = structuredExecutionPolicy(native)
+        records.set(sessionId, { session: sessionId, status: 'awaiting', harnessSessionId: identity.threadId, createRequestId: contentHash(native.sessionCreateKey!), createPayloadHash: contentHash(JSON.stringify({ prompt: nativeWorktreePrompt(native.prompt, seed), parent: null, launcher: null, base: native.base, structuredExecution: execution })), structuredExecution: { ...execution, ...identity, state: 'completed', output: receipt, resultDigest, resultWorktree: actual } })
+        return { sessionId, ...identity, output: receipt, resultDigest, worktree: actual }
+      },
+    } })(request)
+  }
+  const claim = store.claimQueuedAttempt.bind(store)
+  store.claimQueuedAttempt = input => {
+    if (store.listAttempts(active.id).some(attempt => attempt.number === 1 && attempt.status === 'failed')) throw new Error('fixture首轮协议失败后的真实冷边界')
+    return claim(input)
+  }
+  await runSyncOperation(store, active.id, f.options)
+  assert.equal(store.listAttempts(active.id).length, 1)
+  f.closeForRestart()
+  const protocol = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => protocol.close())
+  store = new SyncStore(protocol, { readBlob: ref => readEvidence(f.input.source.commonDir, ref) }); f.useStore(store)
+  const checkpoint = store.checkpoint.bind(store), recordFailure = store.recordFailure.bind(store)
+  store.checkpoint = (fence, ref) => {
+    const wrapper = JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()) as { stage: string }
+    return wrapper.stage === 'partition:analysis-failures' ? store.readAttempt(fence.attemptId) : checkpoint(fence, ref)
+  }
+  store.recordFailure = (fence, failure) => recordFailure(fence, { ...failure, code: 'failed', kind: 'unsupported', message: '真实外部CLI失败；根details为空' })
+  await runSyncOperation(store, active.id, f.options)
+  const semantic = store.listAttempts(active.id).at(-1)!, saved = latest(semantic), continuation = JSON.parse(readEvidence(f.input.source.commonDir, saved.resultRef).toString()) as import('./code-behavior.js').CodeBehaviorContinuation
+  assert.equal(semantic.number, 2); assert.equal(semantic.failure?.kind, 'unsupported'); assert.equal(semantic.failure.code, 'failed')
+  assert.equal(wrappers(semantic).some(wrapper => wrapper.stage === 'partition:analysis-failures'), false)
+  assert.deepEqual(semantic.dispatchPlans.map(dispatch => dispatch.purpose), ['code_behavior_review'])
+  assert.equal(continuation.readyAnalysis, undefined); assert.ok(continuation.reviewResult); assert.deepEqual(continuation.errors?.code_behavior_review ?? [], [])
+  assert.deepEqual(JSON.parse(readObject(f.input.source.commonDir, continuation.drafts.code_behavior_review!.oid).toString()).findings, finding)
+  if (tamper !== 'none') {
+    if (tamper === 'review-identity') continuation.reviewResult!.trace.sessionId = 'foreign-review-session'
+    if (tamper === 'owner') continuation.drafts.code_behavior_review!.ownerDigest = contentHash('foreign-review-owner')
+    if (tamper === 'analysis-digest') {
+      const review = JSON.parse(readObject(f.input.source.commonDir, continuation.drafts.code_behavior_review!.oid).toString())
+      review.analysisDigest = contentHash('foreign-analysis')
+      const originalRequest = JSON.parse(readEvidence(f.input.source.commonDir, continuation.reviewResult!.requestRef).toString()) as ElaborationSessionRequest
+      const actual = committedDraftFixture(f, originalRequest, review, join(f.parent, 'wrong-review-analysis'))
+      continuation.drafts.code_behavior_review = { ...continuation.drafts.code_behavior_review!, resultCommit: actual.headCommit, resultTree: actual.tree, oid: readTree(f.input.source.commonDir, actual.tree).find(entry => entry.path === continuation.drafts.code_behavior_review!.path)!.oid }
+      continuation.reviewResult!.draftOid = continuation.drafts.code_behavior_review.oid; continuation.reviewResult!.resultCommit = actual.headCommit
+    }
+    const previous = semantic.checkpointRefs.findIndex(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()).resultRef?.sha256 === saved.resultRef.sha256)
+    semantic.checkpointRefs[previous] = { ...writeEvidence(f.input.source.commonDir, { ...saved, version: 'sync-stage-v1', operationId: active.id, attemptId: semantic.id, inputId: f.input.id, policyDigest: active.policyDigest, readSetDigest: active.readSetDigest, baselineSelectionRef: writeEvidence(f.input.source.commonDir, store.readBusinessBaselineSelection(active.id)), resultRef: writeEvidence(f.input.source.commonDir, continuation) }) }
+    protocol.withTransaction(tx => tx.exec('UPDATE sync_attempts SET record_json=? WHERE id=?', JSON.stringify(semantic), semantic.id))
+  }
+  const parent = store.readOperation(active.id), before = JSON.stringify({ operation: parent, attempts: store.listAttempts(active.id) })
+  const oldRefs = store.listAttempts(active.id).flatMap(attempt => attempt.checkpointRefs.map(ref => ({ ref, bytes: readEvidence(f.input.source.commonDir, ref) })))
+  store.checkpoint = checkpoint; store.recordFailure = recordFailure
+  active = store.admitAndEnqueue(await prepareSyncAdmission(f.input, f.plan, { ingressKey: 'cross-review-successor', rootCauseId: 'cross-review-successor', retryOf: parent.id, model: 'zcode:default', origin: parent.origin, budget: parent.budget, managedRoot: f.managedRoot, baselineSelection: parent.baselineSelection, executionScope: parent.scope, impactDigest: parent.impactDigest }))
+  active = store.ackDispatch(f.input.source.repositoryId, active.dispatchMessageId); f.useOperation(active); retried = true
+  const result = await runSyncOperation(store, active.id, f.options)
+  if (tamper === 'none') assert.ok(newPrompt, JSON.stringify(result.failure))
+  else { assert.equal(newPrompt, ''); assert.equal(newCalls, 0); assert.ok(result.failure, '错误review身份/owner/analysis绑定不能投新分析') }
+  assert.equal(JSON.stringify({ operation: store.readOperation(parent.id), attempts: store.listAttempts(parent.id) }), before)
+  for (const { ref, bytes } of oldRefs) assert.deepEqual(readEvidence(f.input.source.commonDir, ref), bytes)
+  assert.equal(store.listJournals(active.id).length, 0); assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+})
+
 // 先实际持久并认证被拒Native final，再在协调器外断言下一seed内容；不能用read/edit模式差异代替丢稿证明。
 for (const invalidity of ['syntax', 'schema'] as const) for (const formalRetry of [false, true]) test(`P0已认证Native ${invalidity}原final必须进入下一attempt临时输入 retryOf=${formalRetry}`, async t => {
   const f = await fixture(t, { maxAttempts: formalRetry ? 1 : 2, maxCalls: 8, maxRepairs: 1, timeoutMs: 120_000 }, false, original, 'project', original, { agentWorkflow: 'native-worktree-v1' }, undefined, 'code', 'claude:MiniMax-M3.1-Flash')
