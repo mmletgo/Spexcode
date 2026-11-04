@@ -283,7 +283,7 @@ for (const defect of ['claude-legacy', 'claude-model', 'zcode-provider', 'zcode-
       bad = { ...result, frozenReadProof }; record.structuredExecution!.frozenReadProof = frozenReadProof
       return bad
     } })
-    const request = { ...f.request, frozenContext, timeoutMs: null }, message = defect.startsWith('claude') ? /Claude result lacks its exact native provider\/model proof/ : /ZCode result lacks its exact native provider\/model proof/
+    const request = { ...f.request, frozenContext, timeoutMs: null }, message = defect.startsWith('claude') ? /Claude result lacks its exact native provider\/model evidence/ : /ZCode result lacks its exact native provider\/model evidence/
     await assert.rejects(run(request), message)
     assert.notEqual(f.resource().phase, 'removed'); assert.equal(calls, 1)
     for (const phase of ['terminal', 'removed'] as const) {

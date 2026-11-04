@@ -101,7 +101,7 @@ partial真实receipt推进ready资源heads后，fresh decision须以相同资源
 
 revert 接受 operationId 与稳定 requestId，意图节点从原固定计划派生。仅真实完整 settled 交付、原生资源已结算且 actualCommit 已被当前来源 HEAD 采纳才可撤销；当前相关后续编辑通过 Git 反向三方合成保留。完整补偿路径逐项核当前可信写授权及独立测试边界，精确 before/next 身份删除才能产生既有 user:raw 退役授权。补偿沿 combined 来源建立新的不可变协调操作，真实冲突经同一分析/裁决，成功经同一四层验证与新提交交付；不 reset、不直接改原树。相同请求精确重放，相同补偿不同运输键归并。
 
-stopWriter 在版本回退前先持久暂停当前物理来源，停止相同来源本进程执行者和观察服务，等待已开始执行在安全边界结算；剩余 journal/resource 作为可恢复记录与具体诊断返回，不删除表、worktree 或 blob。物理暂停跨服务重启保留，未知新版 schema 继续由 store 每事务 fencing 拒旧 writer。
+stopWriter 在版本回退前先持久暂停当前物理来源，停止相同来源本进程执行者和观察服务，等待已开始执行在安全边界结算；剩余 journal/resource 作为可恢复记录与具体诊断返回，不删除表、worktree 或 blob。诊断与停止执行者共用当前数据库、canonicalRoot 和 repositoryId 范围；同路径另一仓库身份的历史操作和资源原样保留，不读取为当前来源详情，当前身份的真实未结算资源仍须完整返回。物理暂停跨服务重启保留，未知新版 schema 继续由 store 每事务 fencing 拒旧 writer。
 
 detail 的原来源采纳与主分支完成由 [[sync-landing-status]] 只读推导。sourceSynced 表示真实原树包含已验证完整交付且当前执行/读取闭包字节一致；canonicalSynced 还要求当前分支是仓库明确 mainBranch。已采纳后快照身份变化不单独制造 stale，无关提交允许保当前证据；相关工作文件、index、HEAD、配置或只读上下文变化仍过期。返回 operation 的 canonical 阶段是当前 Git 事实投影，不写虚构持久完成状态。
 

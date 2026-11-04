@@ -25,7 +25,7 @@ const object = (properties: Record<string, unknown>): Record<string, unknown> =>
 const change = object({ kind: { type: 'string', enum: ['refactor', 'allowed_change', 'coverage_gap', 'conflict'] }, paths: { ...strings, minItems: 1 }, affectedIds: strings, ruleIds: strings, originalIntent: string, previousBehavior: string, sourceBehavior: string, deliveryBehavior: string, evidence: string, counterexample: string })
 export const CODE_BEHAVIOR_SCHEMA = object({ changes: { type: 'array', items: change }, facts: { type: 'array', items: object({ source: string, text: string }) }, acceptanceChanges: { type: 'array', items: object({ id: string, ruleIds: { ...strings, minItems: 1 }, source: string, reason: string }) }, newNodes: { type: 'array', items: object({ codePath: string, parentNodeId: string, basis: string }) }, resolutions: { type: 'array', items: object({ path: string, content: { type: ['string', 'null'] }, mode: { type: ['string', 'null'], enum: ['100644', '100755', '120000', null] } }) } })
 export const CODE_BEHAVIOR_REVIEW_SCHEMA = object({ inputDigest: string, analysisDigest: string, verdict: { type: 'string', enum: ['accept', 'repair'] }, checkedPaths: strings, checkedChangeIds: strings, findings: { type: 'array', description: '仅列需要修正的问题；verdict=accept时必须为空数组，不写通过说明或肯定评价。', items: object({ message: string, evidence: string, counterexample: string }) } })
-export const CODE_BEHAVIOR_GUIDANCE_VERSION = 'code-behavior-guidance-v6'
+export const CODE_BEHAVIOR_GUIDANCE_VERSION = 'code-behavior-guidance-v7'
 
 /** 后置门禁只质疑原分类；原件、真实行和代码差量不授予新业务权限。 */
 export type CodeBehaviorPostGateReview = {
@@ -49,6 +49,26 @@ type Proposal = { changes: Omit<CodeBehaviorChange, 'id'>[]; facts: CodeBehavior
 const within = (path: string, paths: readonly string[]): boolean => paths.some(parent => path === parent || path.startsWith(`${parent}/`))
 const sorted = (ids: readonly string[]): string[] => [...new Set(ids)].sort()
 const stable = (prefix: string, value: unknown): string => `${prefix}-${contentHash(JSON.stringify(value)).slice(0, 24)}`
+
+/** 局部分析和最终合并读取同一份完整不可变组合证据，不回写原冲突集合。 */
+export function compositionConflictPaths(input: Pick<CodeBehaviorInput, 'snapshot' | 'composed'>): string[] {
+  if (!input.composed.compositionEvidenceBlob) return []
+  const evidence = JSON.parse(readEvidence(input.snapshot.source.commonDir, input.composed.compositionEvidenceBlob).toString('utf8')) as { conflicts: { path: string }[] }
+  return evidence.conflicts.map(item => item.path)
+}
+
+/** 组合冲突只沿现有精确来源/写者角色归属，shared read 与目录授权不授予 owner。 */
+export function partitionBehaviorChangedPaths(input: CodeBehaviorInput): string[] {
+  const partition = input.partition!
+  const owned = new Set([...partition.changedPaths, ...partition.factSourcePaths, ...input.plan.writePaths, ...input.plan.targets.map(target => target.path)])
+  return sorted([...partition.changedPaths, ...compositionConflictPaths(input).filter(path => owned.has(path))].filter(path => within(path, input.plan.readPaths)))
+}
+
+/** 相容整合或具体业务发现必须逐条覆盖实际冲突，局部和聚合共用同一判定。 */
+export function uncoveredCompositionConflicts(paths: readonly string[], findings: readonly Pick<CodeBehaviorChange, 'kind' | 'paths'>[], resolutions: readonly { path: string }[]): string[] {
+  return paths.filter(path => !resolutions.some(resolution => resolution.path === path) && !findings.some(finding => finding.paths.includes(path) && ['coverage_gap', 'conflict'].includes(finding.kind)))
+}
+
 type FrozenFile = TreeEntry & { kind: 'text' | 'binary' | 'symlink'; encoding: 'utf8' | 'base64'; content: string }
 function freezeFile(entry: TreeEntry, bytes: Buffer): FrozenFile {
   const utf8 = isUtf8Text(bytes)
@@ -249,7 +269,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   if (selectedEvidence) {
     for (const entry of selectedEvidence.paths) if (entry.pairId !== null) { if (entry.base) authorEntries.set(entry.path, entry.base); else authorEntries.delete(entry.path); if (entry.delivery) deliveryEntries.set(entry.path, entry.delivery); else deliveryEntries.delete(entry.path) }
   }
-  const changedPaths = input.partition ? sorted(input.partition.changedPaths.filter(path => within(path, input.plan.readPaths))) : sorted([...(selectedEvidence?.residualPaths ?? []), ...ungoverned, ...actualTreeDiff([...authorEntries.values()], verifySnapshot(input.snapshot)).map(file => file.path), ...actualTreeDiff([...deliveryEntries.values()], frozenTreeRead(input, input.composed.tree, frozenTreeReads).entries.map(entry => ({ ...entry }))).map(file => file.path)].filter(path => within(path, input.plan.readPaths)))
+  const changedPaths = input.partition ? partitionBehaviorChangedPaths(input) : sorted([...(selectedEvidence?.residualPaths ?? []), ...ungoverned, ...actualTreeDiff([...authorEntries.values()], verifySnapshot(input.snapshot)).map(file => file.path), ...actualTreeDiff([...deliveryEntries.values()], frozenTreeRead(input, input.composed.tree, frozenTreeReads).entries.map(entry => ({ ...entry }))).map(file => file.path)].filter(path => within(path, input.plan.readPaths)))
   authorEntries.clear(); deliveryEntries.clear()
   const decisionScopePaths = new Set([
     ...input.plan.decisionAuthorities?.flatMap(authority => authority.paths) ?? [],
@@ -339,7 +359,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   const promptComposition = input.partition && selectedEvidence ? {
     ...selectedEvidence, executionPaths: selectedEvidence.executionPaths.filter(localPath), contextPaths: selectedEvidence.contextPaths.filter(localPath),
     paths: selectedEvidence.paths.filter(item => localPath(item.path)), residualPaths: selectedEvidence.residualPaths.filter(localPath),
-    conflicts: selectedEvidence.conflicts.filter(item => localPath(item.path)), artifacts: selectedEvidence.artifacts.filter(item => localPath(item.path)), intents: selectedEvidence.intents.filter(localIntent),
+    conflicts: selectedEvidence.conflicts.filter(item => changedPaths.includes(item.path)), artifacts: selectedEvidence.artifacts.filter(item => localPath(item.path)), intents: selectedEvidence.intents.filter(localIntent),
     controlledAuthorPatch: selectedEvidence.controlledAuthorPatch && localPath(selectedEvidence.controlledAuthorPatch.next.path) ? { ...selectedEvidence.controlledAuthorPatch, intents: selectedEvidence.controlledAuthorPatch.intents.filter(localIntent) } : undefined,
     controlledAuthorGroup: selectedEvidence.controlledAuthorGroup ? { ...selectedEvidence.controlledAuthorGroup, changes: selectedEvidence.controlledAuthorGroup.changes.filter(change => localPath(change.path)), intents: selectedEvidence.controlledAuthorGroup.intents.filter(localIntent) } : undefined,
   } : selectedEvidence
@@ -554,7 +574,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   }
   for (const item of proposal.changes) { validatePaths(item.paths); if (['coverage_gap', 'conflict'].includes(item.kind) && !item.affectedIds.length && !rawOnlyBootstrap) reject('业务发现必须指明阻塞的既有意图/规则ID'); const unknown = item.affectedIds.filter(id => !ids.has(id)), invalidRules = item.ruleIds.filter(id => !ids.has(id) || !/^(REQ|RULE|TR)-/.test(id)); if (unknown.length || invalidRules.length) reject(`行为变化引用不存在的契约ID/合法来源: paths=${JSON.stringify(item.paths)} affectedIds=${JSON.stringify(unknown)} ruleIds=${JSON.stringify(invalidRules)}；affectedIds只允许graph.items稳定契约ID，不使用nodeId；无业务依赖的治理文本变化可[]`) }
   if (input.partition) {
-    const expectedChangedPaths = input.partition.changedPaths
+    const expectedChangedPaths = changedPaths
     const invalidPaths = sorted(proposal.changes.flatMap(change => change.paths).filter(path => !expectedChangedPaths.includes(path)))
     if (invalidPaths.length) reject('分析超出本区真实变更集合', { partitionId: input.partition.id, expectedChangedPaths, invalidPaths })
   }
@@ -692,10 +712,8 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
       if (!next || !sameContractBusinessMeaning(policy, next)) reject(`精确组合破坏VERIFY执行政策: ${resolution.path} ${policy.id}`)
     }
   }
-  if (input.composed.compositionEvidenceBlob) {
-    const overlap = JSON.parse(readEvidence(commonDir, input.composed.compositionEvidenceBlob).toString('utf8')) as { conflicts: { path: string }[] }
-    for (const item of overlap.conflicts) if (!proposal.resolutions.some(resolution => resolution.path === item.path) && !changes.some(change => change.paths.includes(item.path) && ['coverage_gap', 'conflict'].includes(change.kind))) reject(`文本重叠未提供独审整合正文或具体业务发现: ${item.path}`)
-  }
+  const missingConflicts = uncoveredCompositionConflicts(compositionConflictPaths(input).filter(path => !input.partition || changedPaths.includes(path)), changes, proposal.resolutions)
+  if (missingConflicts.length) reject(`文本重叠未提供独审整合正文或具体业务发现: ${missingConflicts[0]}`)
   const findings: CodeBehaviorFinding[] = changes.filter(item => item.kind === 'conflict' || item.kind === 'coverage_gap').map(item => ({ id: stable('finding', { kind: item.kind, paths: item.paths, affectedIds: item.affectedIds, evidence: item.evidence }), kind: item.kind as CodeBehaviorFinding['kind'], affectedIds: item.affectedIds, paths: item.paths, ruleIds: item.ruleIds, originalIntent: item.originalIntent, sourceBehavior: item.sourceBehavior, deliveryBehavior: item.deliveryBehavior, evidence: item.evidence, counterexample: item.counterexample, decision: item.kind === 'conflict' ? '保留原意、采用外部行为或提供新规则' : '明确缺失业务事实和政策' }))
   const rawIntegrations = proposal.resolutions.filter(resolution => resolution.path.startsWith('.spec/') && resolution.path.endsWith('/spec.md') && resolution.content !== null).map(resolution => {
     const sourceRaw = parseParts(authorSource.get(resolution.path) ?? '')?.rawSource ?? null, deliveryRaw = parseParts(new Map(delivery).get(resolution.path) ?? '')?.rawSource ?? null, resolvedRaw = parseParts(resolution.content!)?.rawSource

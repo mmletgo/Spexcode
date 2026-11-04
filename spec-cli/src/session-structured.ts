@@ -9,7 +9,7 @@ import { codexStructuredTurn, codexStopStructuredTurn } from './codex-harness.js
 import { commitCodexGenerationRegistration, prepareCodexGenerationRegistration, readCodexGenerationLedger, resolveCodexGenerationForClose } from './codex-runtime-generations.js'
 import { assertRejectedOutput, structuredGeneration, prepareStructuredRealm, prepareFrozenReaderRuntime, assertFrozenReaderRuntime, StructuredSessionError, StructuredSessionTransportError, structuredObserverState, structuredExecutionPolicy, structuredRealmRoot, pinNativeConfiguration, pinZCodeToolPolicy, type StructuredExecution, type FrozenReaderRuntime } from './session-structured-policy.js'
 import { assertFrozenBinding, prepareFrozenPrompt, readFrozenManifest, type FrozenContextRef, type FrozenEntryJson, type FrozenReadProof, type FrozenReadReceipt } from './frozen-context.js'
-import { verifyStructuredFrozenReadProof as verifyFrozenReadProof } from './structured-frozen-proof.js'
+import { verifyStructuredFrozenReadProof as verifyFrozenReadProof } from './structured-frozen-evidence.js'
 import { configuredSessionApplication } from './session-application.js'
 import { withDeliveryLocks } from './delivery-lock.js'
 import { claudeNativeModel, claudeStructuredTurn, stopClaudeStructuredTurn } from './claude-structured.js'
@@ -144,7 +144,7 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
     }
     if (claude && !nativeWorktree && (result.frozenReadProof?.version !== 3 || result.frozenReadProof.model !== claudeNativeModel(execution.model))) throw new StructuredSessionError('stale_result', 'Claude result has no exact native provider/model witness')
     if (execution.readerRuntime?.version === 2 && result.frozenReadProof?.version !== 2)
-      throw new StructuredSessionError('stale_result', 'current frozen execution cannot publish legacy coverage as model-visible proof')
+      throw new StructuredSessionError('stale_result', 'current frozen execution cannot publish legacy coverage as model-visible evidence')
     const output: unknown = JSON.parse(result.text)
     const validate = new Ajv({ allErrors: true }).compile(execution.schema)
     if (!validate(output)) throw new StructuredSessionError('failed', `structured output does not match JSON schema: ${JSON.stringify(validate.errors)}`)

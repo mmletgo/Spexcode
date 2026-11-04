@@ -238,6 +238,8 @@ test('AC-SYNC-24 正式revert入口经同一协调器、真实Docker与新提交
 
 test('AC-SYNC-24 真正Git重叠进入同一业务冲突，无补偿提交且不覆盖人类编辑', { timeout: 180000 }, async t => {
   const f = await fixture(t), path = join(f.root, 'src/export.js')
+  f.git('switch', f.original.input.source.branch.slice('refs/heads/'.length)); await f.application.enable()
+  assert.deepEqual(identifyWorktree(f.root), f.original.input.source)
   writeFileSync(path, readFileSync(path, 'utf8').replace('// FEATURE-MARK', '// CURRENT-HUMAN-CHOICE'))
   const head = f.git('rev-parse', 'HEAD'), index = readFileSync(join(f.root, '.git/index')), current = readFileSync(path)
   const submitted = await f.application.revert({ operationId: f.original.id, requestId: 'overlapping-revert' }); assert.ok(submitted.operation)

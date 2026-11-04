@@ -20,7 +20,7 @@ P1精确后置门禁可对已审refactor分类提出非权威回审：只接同o
 
 新native-worktree操作的P0使用真实composed seed（含UI受控raw差量），以保活私有commit暴露明确的历史角色投影，代理自由读取仓库及git show角色ref。提示只含真实changedPaths、相关Spec、作者需求差量、历史角色refs、授权/不可改oracle、必要事实和诊断，不发送完整frozen树或bodyRef账本；resolutions独审以实际整合候选tree作为seed。inputDigest绑定完整逻辑输入与实际可见tree，dispatch另绑定prompt/schema；异树不得复用。readPaths是责任投影，checkedPaths可含实际存在且非host-private的自由读取文件；事实仍核真实代码、partition.factSourcePaths及原业务授权，changedPaths/所有变化与独审覆盖仍严格。新工作树不要求optional/required逐字Native消费proof；下文bodyRef、reader与完整覆盖证明规则只用于无工作流标记的旧操作/单测，原旧请求及proof不改写。
 
-分区 proposal.changes.paths 必须逐项属于该冻结 partition.changedPaths；可读 factSourcePaths、readPaths 与未来 writePaths 不等于实际变化。独审前按同一精确集合拒绝越界内容，以 behavior_analysis_invalid 保留 partitionId、expectedChangedPaths、invalidPaths 和完整原 proposal，沿既有按区 repairDiagnostics 反馈；不批准越界或新增权限。guidanceContractVersion v6 同时约束生成与独审并进入唯一输入摘要，旧v5及更早/无版本accept不被新请求缓存承接。原后置 partition_binding 及 immutable plan/ref/digest/fence 门禁保持。
+分区本次分析路径由原 partition.changedPaths 联合完整不可变组合证据中、精确命中本区 source/factSourcePaths、writePaths 或 target 文件角色且可读取的真实冲突推导；shared readPaths 和宽目录授权不授予 owner，单独的可读角色、未来 writer 也不制造实际变化。proposal.changes.paths 必须逐项属于该本次冻结集合，resolution 仍须满足原精确写权限。独审前按同一集合拒绝越界内容，以 behavior_analysis_invalid 保留 partitionId、expectedChangedPaths、invalidPaths 和完整原 proposal，沿既有按区 repairDiagnostics 反馈。局部只要求自身组合冲突的整合或具体业务发现；原完整全局证据由 [[sync-partition-execution]] 在最终合并逐项闭合。guidanceContractVersion v7 同时约束生成与独审并进入唯一输入摘要，旧v6及更早/无版本accept不被新请求缓存承接；已有reserved请求、旧分析/计划/ref和全部旧CAS原字节不回填或改签，摘要不匹配沿现有固定请求门拒绝，正式新attempt才形成新请求。原输出schema、partition_binding及写权限门禁保持。
 
 Native worktree分区分析brief复用本区业务约束：每个facts.source只给一个完整text；newNodes只能来自本区unownedSourcePaths和本次schema候选，候选为空或maxItems为0时返回[]；Root/接口分区不能替兄弟源码分区提出叶。此提示不收窄Native worktree自由读取，也不要求frozen-reader或逐字消费证明。
 

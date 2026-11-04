@@ -24,6 +24,7 @@ import type { SyncPartitionPlan } from './partitioning.js'
 import type { SyncCoordinatorPlan } from './coordinator-types.js'
 import type { CodeBehaviorInput } from './code-behavior.js'
 import type { CodeBehaviorAnalysis } from './writeback-types.js'
+import type { BaselinePair } from './operation-types.js'
 import { composeInputSnapshots } from './composition.js'
 import { captureInputSnapshot, contentHash, readEvidence, readObject, readTree, writeEvidence } from './snapshot.js'
 import { buildSyncApplicationPlan } from './planning.js'
@@ -59,6 +60,80 @@ async function fixture(t: test.TestContext): Promise<{ input: GenerationInput; p
   return { input, plan, checkpoints, root }
 }
 
+
+test('P0组合冲突按精确owner派发且聚合拒绝遗漏任何全局冲突', async t => {
+  const prepared = await fixture(t), delivery = mkdtempSync(join(tmpdir(), 'partition-conflict-delivery-'))
+  rmSync(delivery, { recursive: true })
+  execFileSync('git', ['-C', prepared.root, 'worktree', 'add', '-b', 'conflict-delivery', delivery, prepared.input.snapshot.headCommit], { stdio: 'pipe' })
+  t.after(() => rmSync(delivery, { recursive: true, force: true }))
+  const conflicts = ['src/export.js', 'src/import.js']
+  for (const path of conflicts) {
+    writeFileSync(join(prepared.root, path), `// source change\n${prepared.input.files.get(path)!}`)
+    writeFileSync(join(delivery, path), `// delivery change\n${prepared.input.files.get(path)!}`)
+    const specPath = `.spec/export/${path.slice(4, -3)}-contract/spec.md`
+    writeFileSync(join(prepared.root, specPath), prepared.input.files.get(specPath)! + '\n<!-- author governance update -->\n')
+  }
+  const snapshot = await captureInputSnapshot(prepared.root)
+  const baseline: BaselinePair = { id: 'two-owner-conflicts', repositoryId: snapshot.source.repositoryId, source: snapshot.source, sourceInput: prepared.input.snapshot, verifiedDelivery: await captureInputSnapshot(delivery), coveredScope: { paths: ['.spec', 'src', 'tests'], contractIds: [], flowIds: [] }, receiptId: 'conflict-fixture', settledAtMs: 1 }
+  const composed = composeInputSnapshots(snapshot, baseline, { retainConflicts: true }).composed!
+  assert.deepEqual((JSON.parse(readEvidence(snapshot.source.commonDir, composed.compositionEvidenceBlob!).toString()) as { conflicts: { path: string }[] }).conflicts.map(item => item.path).sort(), [...conflicts].sort())
+  const plan = structuredClone(prepared.plan)
+  for (const partition of plan.partitions) partition.changedPaths = partition.id === 'part-archive' ? [] : partition.targets.map(target => target.path)
+  plan.partitions.find(partition => partition.id === 'part-export')!.readPaths.push('src/import.js')
+  plan.partitions.find(partition => partition.id === 'part-archive')!.readPaths.push(...conflicts)
+  plan.expectedPaths = plan.partitions.flatMap(partition => partition.changedPaths).sort()
+  const input: CodeBehaviorInput = { snapshot, baseline, composed, readSetDigest: 'conflict-readset', policyDigest: 'conflict-policy', requestKey: 'partition-conflicts', timeoutMs: 30000, origin: 'combined', plan: { version: 'sync-coordinator-v2', direction: 'spec_to_code', intentNodeId: 'export-contract', targets: plan.partitions.flatMap(partition => partition.targets), readPaths: ['.spec', 'src', 'tests'], writePaths: ['.spec', 'src', 'tests'], sourcePaths: ['src'], facts: [], verifications: [], mandatoryTests: [], partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 2 } } }
+  const frozenPlan = JSON.stringify(plan), frozenInput = JSON.stringify(input), observed = new Map<string, string[]>()
+  let foreign: 'change' | 'resolution' | undefined, ordinal = 0
+  const runner: ElaborationRunner = async request => {
+    const sequence = ordinal++, frozen = readFrozenBehaviorContext<{ partition: { id: string }; changedPaths: string[]; compositionEvidence: { conflicts: { path: string }[] } | null }>(request)
+    const owner = plan.partitions.find(partition => partition.id === frozen.partition.id)!, domain = owner.targets[0].nodeId.split('-')[0].toUpperCase()
+    let output: unknown
+    if (request.purpose === 'code_behavior_analyze') {
+      observed.set(owner.id, frozen.changedPaths)
+      const changes = frozen.changedPaths.map(path => ({ kind: conflicts.includes(path) ? 'conflict' : 'allowed_change', paths: [path], affectedIds: [`REQ-${domain}-01`], ruleIds: [`REQ-${domain}-01`], originalIntent: '保留原导出规则和用户编辑', previousBehavior: '原函数行为', sourceBehavior: '作者在同一位置编辑', deliveryBehavior: '已交付在同一位置编辑', evidence: `真实三方对象 ${path}`, counterexample: '选择一方不得静默覆盖另一方输入' }))
+      const resolutions: { path: string; content: string; mode: '100644' }[] = []
+      if (owner.id === 'part-export' && foreign === 'change') changes.push({ ...changes[0], paths: ['src/import.js'] })
+      if (owner.id === 'part-export' && foreign === 'resolution') resolutions.push({ path: 'src/import.js', content: prepared.input.files.get('src/import.js')!, mode: '100644' })
+      output = { changes, facts: [], acceptanceChanges: [], newNodes: [], resolutions }
+    } else {
+      const reviewed = JSON.parse(request.prompt.split('待审分析:\n')[1]) as { analysisDigest: string; analysis: CodeBehaviorAnalysis }
+      output = { inputDigest: request.inputDigest, analysisDigest: reviewed.analysisDigest, verdict: 'accept', checkedPaths: frozen.changedPaths, checkedChangeIds: reviewed.analysis.changes.map(change => change.id), findings: [] }
+    }
+    return { sessionId: `conflict-session-${sequence}`, threadId: `conflict-thread-${sequence}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)) }
+  }
+  const analysis = await analyzeSyncPartitions(input, plan, 2, runner, prepared.checkpoints)
+  assert.deepEqual(observed.get('part-export'), ['.spec/export/export-contract/spec.md', 'src/export.js'])
+  assert.deepEqual(observed.get('part-import'), ['.spec/export/import-contract/spec.md', 'src/import.js'])
+  assert.deepEqual(observed.get('part-archive'), [], '无关owner不承担其他分区的组合冲突')
+  assert.deepEqual(analysis.findings.flatMap(finding => finding.paths).sort(), [...conflicts].sort())
+  assert.deepEqual(analysis.partitionCoverage!.changedPaths, ['.spec/export/export-contract/spec.md', '.spec/export/import-contract/spec.md', ...conflicts])
+  assert.equal(JSON.stringify(plan), frozenPlan); assert.equal(JSON.stringify(input), frozenInput)
+  const previous = new Map(analysis.partitionEvidence!.map(item => [`partition:${item.partitionId}:analysis`, { ...structuredClone(item.analysis), inputDigest: contentHash(`old-guidance:${item.analysis.inputDigest}`) }]))
+  const previousBytes = JSON.stringify([...previous]), beforeCalls = ordinal
+  await analyzeSyncPartitions(input, plan, 1, runner, { load: <T>(key: string) => previous.has(key) ? structuredClone(previous.get(key)) as T : null, save: (_key, value) => writeEvidence(snapshot.source.commonDir, value) })
+  assert.equal(ordinal - beforeCalls, 6, '已saved旧指导/输入摘要不能跳过本次分析和独审')
+  assert.equal(JSON.stringify([...previous]), previousBytes, '旧已审原件不补字段或改摘要')
+  for (const kind of ['change', 'resolution'] as const) {
+    foreign = kind
+    await assert.rejects(analyzeSyncPartitions(input, plan, 1, runner, { ...prepared.checkpoints, load: () => null }), /分析引用了未完整读取的路径: src\/import\.js|分析超出本区真实变更集合|整合解决方案没有相容分析\/授权范围/)
+  }
+  foreign = undefined
+  for (const ownership of ['unowned', 'ambiguous'] as const) {
+    const invalidPlan = structuredClone(plan)
+    if (ownership === 'unowned') {
+      const owner = invalidPlan.partitions.find(partition => partition.id === 'part-import')!
+      owner.sourcePaths = []; owner.writePaths = owner.writePaths.filter(path => path !== 'src/import.js')
+    } else invalidPlan.partitions.find(partition => partition.id === 'part-export')!.sourcePaths.push('src/import.js')
+    await assert.rejects(analyzeSyncPartitions(input, invalidPlan, 1, runner, { ...prepared.checkpoints, load: () => null }), /组合冲突没有唯一分区归属/)
+  }
+  for (const path of conflicts) {
+    const cached = new Map(analysis.partitionEvidence!.map(item => [`partition:${item.partitionId}:analysis`, { ...structuredClone(item.analysis), findings: item.analysis.findings.filter(finding => !finding.paths.includes(path)), resolutions: item.analysis.resolutions.filter(resolution => resolution.path !== path) }]))
+    const checkpoints: PartitionCheckpoints = { load: <T>(key: string) => cached.has(key) ? structuredClone(cached.get(key)) as T : null, save: (_key, value) => writeEvidence(snapshot.source.commonDir, value) }
+    await assert.rejects(analyzeSyncPartitions(input, plan, 1, async () => { throw new Error('聚合检查不得补发Native') }, checkpoints), /分区合并遗漏组合冲突/)
+  }
+  t.diagnostic(JSON.stringify({ ownerConflicts: conflicts, unrelatedOwnerPaths: observed.get('part-archive'), sharedReadDoesNotGrantOwnership: true, foreignChangeAndResolutionRejected: true, unownedAndAmbiguousConflictRejected: true, missingEitherGlobalFindingRejected: true, originalPlanAndInputUnchanged: true, oldAcceptedInputNotReusedOrRewritten: true }))
+})
 
 test('全局seal只路由真实error owner及引用依赖，无关accept不失效', async t => {
   const prepared = await fixture(t), { plan, input } = prepared

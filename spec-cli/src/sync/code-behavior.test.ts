@@ -1211,7 +1211,7 @@ async function initialDiscovery(t: test.TestContext, raw: string) {
   return { f, input, model }
 }
 
-for (const previousVersion of [undefined, 'code-behavior-guidance-v2', 'code-behavior-guidance-v3', 'code-behavior-guidance-v4', 'code-behavior-guidance-v5']) test(`指导合同版本进入唯一摘要，旧accept ${previousVersion} 不得被缓存承接`, async t => {
+for (const previousVersion of [undefined, 'code-behavior-guidance-v2', 'code-behavior-guidance-v3', 'code-behavior-guidance-v4', 'code-behavior-guidance-v5', 'code-behavior-guidance-v6']) test(`指导合同版本进入唯一摘要，旧accept ${previousVersion} 不得被缓存承接`, async t => {
   const { f, input, model } = await initialDiscovery(t, '统计传入列表的条目数量，不修改列表；从现有模块生成治理叶及规格。')
   let context = ''
   const first = await analyzeCodeBehavior({ ...input, requestKey: 'old-guidance' }, async request => {
@@ -1229,7 +1229,7 @@ for (const previousVersion of [undefined, 'code-behavior-guidance-v2', 'code-beh
     calls.push(request.purpose)
     if (process.env.SPEX_RAW_RESOLUTION_EVIDENCE_DIR) writeFileSync(join(process.env.SPEX_RAW_RESOLUTION_EVIDENCE_DIR, `guidance-current-${request.purpose}.prompt.txt`), request.prompt)
     const frozen = readFrozenBehaviorContext<{ guidanceContractVersion: string }>(request)
-    assert.equal(frozen.guidanceContractVersion, 'code-behavior-guidance-v6')
+    assert.equal(frozen.guidanceContractVersion, 'code-behavior-guidance-v7')
     const instructions = request.prompt.slice(0, request.prompt.indexOf('冻结三方输入:\n'))
     assert.match(instructions, /尚未生成.*治理叶.*待生成工作/)
     assert.match(instructions, /coverage_gap.*重大业务事实.*可观察后果/)

@@ -574,7 +574,7 @@ test('controlled Claude compact boundaries preserve one original turn without gr
     const rawStringBlob = structuredClone(stringWitness), rawBlob = rawStringBlob.history.find(item => item.type === 'api-request-blob')!
     rawBlob.message = stringMessage
     rawBlob.hash = claudeMessageDigest(stringMessage)
-    assert.throws(() => proveClaudeFrozenReads(ref, rawStringBlob), { code: 'stale_result', message: 'Claude public API message blob has invalid bytes or type' }, 'raw API strings cannot bypass the observed compact-summary binding')
+    assert.throws(() => proveClaudeFrozenReads(ref, rawStringBlob), { code: 'stale_result', message: 'Claude public API message has invalid bytes or type' }, 'raw API strings cannot bypass the observed compact-summary binding')
     const cases: Array<[string, (rows: typeof raw) => void]> = [
       ['foreign session', rows => { row(rows, 'compact-1').sessionId = 'foreign' }],
       ['sidechain', rows => { row(rows, 'compact-1').isSidechain = true }],

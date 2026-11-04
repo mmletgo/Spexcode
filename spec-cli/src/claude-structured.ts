@@ -286,7 +286,7 @@ function completedResult(root: string, prompt: string, execution: StructuredExec
   if (execution.state === 'completed') {
     if (execution.threadId !== plan.sessionId || execution.turnId !== plan.userUuid || execution.claudeNative?.pid !== plan.pid || execution.claudeNative.receiptFile !== plan.receiptFile
       || !execution.resultDigest || execution.resultDigest !== hash(execution.output) || execution.resultDigest !== hash(saved.witness.result.structured_output)
-      || !execution.frozenReadProof || hash(execution.frozenReadProof) !== hash(saved.result.frozenReadProof)) throw new StructuredSessionError('stale_result', 'Claude durable completed state has missing or mismatched result/identity/proof')
+      || !execution.frozenReadProof || hash(execution.frozenReadProof) !== hash(saved.result.frozenReadProof)) throw new StructuredSessionError('stale_result', 'Claude durable completed state has missing or mismatched result/identity/evidence')
     return saved.result
   }
   if (!plan.pid || !detachedRuntimeIsGone(plan.pid, plan.receiptFile) || !claudeMcpStopped(root)) return null
@@ -341,7 +341,7 @@ function settleClaudeResult(plan: NativePlan, prompt: string, execution: Structu
         continue
       }
       if (row.turnCompanion && !companions.has(row.uuid!)) throw new StructuredSessionError('stale_result', 'Claude schema retry exhaustion cannot classify unknown recovery user inputs')
-      if (row.type === 'api-request-blob' && row.compactSummaryDigest && !compactSummaries.has(row.compactSummaryDigest)) throw new StructuredSessionError('stale_result', 'Claude API string message is not an observed same-turn compact summary')
+      if (row.type === 'api-request-blob' && row.compactSummaryDigest && !compactSummaries.has(row.compactSummaryDigest)) throw new StructuredSessionError('stale_result', 'Claude API string message is not an observed same-turn compact summary') // dead-words-ok: Claude CLI 原生公开事件类型，外部协议名称必须逐字匹配。
       if (row.type === 'api-request-shape') observedShapes.add(row.shapeHash!)
       if (row.type === 'assistant') {
         if (!row.requestRef || !api.has(row.requestRef)) throw new StructuredSessionError('stale_result', 'Claude assistant has no preceding actual API request')
@@ -457,7 +457,7 @@ export async function claudeStructuredTurn(realm: string, id: string, prompt: st
   if (!worktree && (process.platform !== 'darwin' || !existsSync('/usr/bin/sandbox-exec'))) throw new StructuredSessionError('unsupported', 'Claude requires the verified outer macOS read-only sandbox')
   if (!nativeConfiguration) {
     if (['CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY'].some(key => process.env[key])) throw new StructuredSessionError('unsupported', 'Claude third-party provider isolation has not been verified')
-    for (const name of ['CLAUDE.md', 'managed-settings.json', 'managed-mcp.json']) if (existsSync(join('/Library/Application Support/ClaudeCode', name))) throw new StructuredSessionError('unsupported', 'Claude managed policy isolation needs separate capability proof')
+    for (const name of ['CLAUDE.md', 'managed-settings.json', 'managed-mcp.json']) if (existsSync(join('/Library/Application Support/ClaudeCode', name))) throw new StructuredSessionError('unsupported', 'Claude managed policy isolation needs separate capability evidence')
   }
   const resolved = spawnSync('/usr/bin/which', ['claude'], { encoding: 'utf8' })
   if (resolved.error || resolved.status !== 0) throw new StructuredSessionError('unsupported', 'Claude CLI is unavailable in the current process PATH')
@@ -580,7 +580,7 @@ export async function claudeStructuredTurn(realm: string, id: string, prompt: st
       }
     }).catch(error => {
       failure = error as Error; killOwnGroup()
-      stopLimit ??= setTimeout(() => rejectStop(new StructuredSessionError('cancellation_pending', 'Claude failed protocol observation has no bounded native stop proof')), 15000)
+      stopLimit ??= setTimeout(() => rejectStop(new StructuredSessionError('cancellation_pending', 'Claude failed protocol observation has no bounded native stop evidence')), 15000)
     })
   })
   const stderrHash = createHash('sha256'); let stderrBytes = 0
