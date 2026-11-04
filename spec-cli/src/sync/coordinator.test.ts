@@ -188,31 +188,31 @@ test('14attempt/1790CAS历史扫描交还控制，同一30秒fence到达首次�
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
 })
 
-for (const [mode, defect] of [['missing-final', 'none'], ['pause', 'none'], ['pause', 'prior-draft'], ['missing-final', 'prior-draft'], ['pause', 'older-pause'], ['pause', 'not-started'], ['pause', 'no-commit'], ['missing-final', 'session'], ['missing-final', 'user'], ['missing-final', 'exit'], ['missing-final', 'unknown'], ['missing-final', 'completed'], ['pause', 'source'], ['pause', 'tests'], ['pause', 'scope'], ['pause', 'seed'], ['pause', 'thread'], ['pause', 'turn'], ['pause', 'schema'], ['pause', 'worktree'], ['pause', 'stop'], ['pause', 'request']] as const) test(`旧Native无typed witness的新attempt仅观察最新Git材料，旧原件不补签 mode=${mode}/${defect}`, async t => {
+for (const [mode, defect] of [['native-failure', 'no-progress-143'], ['native-failure', 'no-progress-143-foreign'], ['native-failure', 'no-progress-143-stop'], ['native-failure', 'no-progress-143-process'], ['native-failure', 'progress-143'], ['native-failure', 'none'], ['native-failure', 'prior-draft'], ['native-failure', 'session'], ['native-failure', 'user'], ['native-failure', 'exit'], ['native-failure', 'unknown'], ['native-failure', 'source'], ['native-failure', 'tests'], ['native-failure', 'stop'], ['missing-final', 'none'], ['pause', 'none'], ['pause', 'prior-draft'], ['missing-final', 'prior-draft'], ['pause', 'older-pause'], ['pause', 'not-started'], ['pause', 'no-commit'], ['missing-final', 'session'], ['missing-final', 'user'], ['missing-final', 'exit'], ['missing-final', 'unknown'], ['missing-final', 'completed'], ['pause', 'source'], ['pause', 'tests'], ['pause', 'scope'], ['pause', 'seed'], ['pause', 'thread'], ['pause', 'turn'], ['pause', 'schema'], ['pause', 'worktree'], ['pause', 'stop'], ['pause', 'request']] as const) test(`旧Native无typed witness的新attempt仅观察最新Git材料，旧原件不补签 mode=${mode}/${defect}`, async t => {
   const f = await fixture(t, { maxAttempts: defect === 'older-pause' ? 4 : 3, maxCalls: 6, maxRepairs: defect === 'older-pause' ? 3 : 2, timeoutMs: 120000 }, false, original, 'project', original, { agentWorkflow: 'native-worktree-v1' }, undefined, 'code', 'claude:MiniMax-M3.1-Flash')
-  const latest = `{LATEST_UNAPPROVED_DRAFT${'x'.repeat((defect === 'prior-draft' || defect === 'older-pause' ? 85970 : 59388) - 24)}}`
-  let oldSession = '', oldPath = '', oldNativeRoot = '', originalRequest: ElaborationSessionRequest | undefined, continued = false
+  const latest = `{LATEST_UNAPPROVED_DRAFT${'x'.repeat((mode === 'native-failure' ? 92755 : defect === 'prior-draft' || defect === 'older-pause' ? 85970 : 59388) - 24)}}`, priorText = '{EARLIER_SEED_DRAFT' + 'a'.repeat(mode === 'native-failure' ? 85970 - '{EARLIER_SEED_DRAFT'.length : 59010)
+  let oldSession = '', oldPath = '', oldNativeRoot = '', originalRequest: ElaborationSessionRequest | undefined, continued = false, restartedWithoutMaterial = false
   f.options.runner = async request => {
     const operation = f.store.readOperation(f.operation.id), attempt = f.store.readAttempt(operation.currentAttemptId!)
     assert.equal(request.purpose, 'code_behavior_analyze')
     const path = /草稿文件=([^\s；]+)/.exec(request.prompt)![1], workspace = join(f.parent, `observed-${attempt.number}`), seed = request.worktree!
     f.git('worktree', 'add', '--detach', workspace, seed.baseCommit)
     if ((defect === 'prior-draft' || defect === 'older-pause') && attempt.number === 1) {
-      mkdirSync(join(workspace, path, '..'), { recursive: true }); writeFileSync(join(workspace, path), '{EARLIER_SEED_DRAFT' + 'a'.repeat(59010))
+      mkdirSync(join(workspace, path, '..'), { recursive: true }); writeFileSync(join(workspace, path), priorText)
       execFileSync('git', ['-C', workspace, 'add', path], { stdio: 'pipe' }); execFileSync('git', ['-C', workspace, 'commit', '-m', 'earlier real native draft'], { stdio: 'pipe' })
       const dispatch = attempt.dispatchPlans.find(item => item.key === request.requestKey)!, output = { summary: '已正常提交早期未批准业务稿' }
       return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `earlier-${dispatch.sessionCreateKey}`, turnId: 'earlier-turn', output, resultDigest: contentHash(JSON.stringify(output)), worktree: nativeWorktreeResult(workspace, seed) }
     }
     if (defect === 'older-pause' && attempt.number === 3) {
       assert.equal(contentHash(readFileSync(join(workspace, path))), contentHash(latest))
-      writeFileSync(join(workspace, path), '{EARLIER_SEED_DRAFT' + 'a'.repeat(59010))
+      writeFileSync(join(workspace, path), priorText)
       execFileSync('git', ['-C', workspace, 'add', path], { stdio: 'pipe' }); execFileSync('git', ['-C', workspace, 'commit', '-m', 'newer authenticated draft returns to same bytes'], { stdio: 'pipe' })
       const dispatch = attempt.dispatchPlans.find(item => item.key === request.requestKey)!, output = { summary: '更新的认证稿，不能再被更早暂停稿遮盖' }
       return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `newer-${dispatch.sessionCreateKey}`, turnId: 'newer-turn', output, resultDigest: contentHash(JSON.stringify(output)), worktree: nativeWorktreeResult(workspace, seed) }
     }
     if (originalRequest) {
-      if (defect !== 'none' && defect !== 'prior-draft' && defect !== 'older-pause') { assert.equal(existsSync(join(workspace, path)), false, '不合格或无稿的旧记录不能向新seed投影正文'); throw Object.assign(new Error('反例安全进入新派发且无旧材料'), { code: 'unsupported' }) }
-      assert.equal(contentHash(readFileSync(join(workspace, path))), contentHash(defect === 'older-pause' ? '{EARLIER_SEED_DRAFT' + 'a'.repeat(59010) : latest), '必须取最新normal Git正文SHA，不能回原seed或旧59010字节')
+      if (defect !== 'none' && defect !== 'prior-draft' && defect !== 'older-pause') { assert.equal(existsSync(join(workspace, path)), false, '不合格或无稿的旧记录不能向新seed投影正文'); restartedWithoutMaterial = true; throw Object.assign(new Error('反例安全进入新派发且无旧材料'), { code: 'unsupported' }) }
+      assert.equal(contentHash(readFileSync(join(workspace, path))), contentHash(defect === 'older-pause' ? priorText : latest), '必须取最新normal Git正文SHA，不能回原seed或旧59010字节')
       assert.match(request.prompt, defect === 'older-pause' ? /已有原草稿已复制/ : /认证的原Git分析草稿/)
       if (mode === 'missing-final') assert.match(request.prompt, /missing required structured_output/)
       else assert.doesNotMatch(request.prompt, /missing required structured_output/, '普通暂停不能伪加缺final分类')
@@ -221,7 +221,7 @@ for (const [mode, defect] of [['missing-final', 'none'], ['pause', 'none'], ['pa
     }
     originalRequest = request; oldPath = workspace
     mkdirSync(join(workspace, path, '..'), { recursive: true })
-    for (const text of defect === 'not-started' || defect === 'no-commit' ? [] : ['{EARLIER_SEED_DRAFT' + 'a'.repeat(59010), latest]) {
+    for (const text of defect === 'not-started' || defect === 'no-commit' || defect.startsWith('no-progress-143') ? [] : [priorText, latest]) {
       writeFileSync(join(workspace, path), text)
       execFileSync('git', ['-C', workspace, 'add', path], { stdio: 'pipe' }); execFileSync('git', ['-C', workspace, 'commit', '--allow-empty', '-m', 'normal native draft progress'], { stdio: 'pipe' })
     }
@@ -237,28 +237,31 @@ for (const [mode, defect] of [['missing-final', 'none'], ['pause', 'none'], ['pa
         writeDetachedRuntimeReceipt(child.pid, receiptFile); process.kill(-child.pid, 'SIGTERM'); await ended
         const native = { version: 1 as const, root, sessionId: `thread-${session}`, userUuid: `user-${session}`, pid: child.pid, receiptFile }, prompt = nativeWorktreePrompt(actual.prompt, actual.worktree!), identity = { threadId: native.sessionId, turnId: native.userUuid }, message = { role: 'user', content: [{ type: 'text', text: prompt }] }, history = [{ type: 'user', sessionId: native.sessionId, uuid: native.userUuid, parentUuid: null, promptId: 'original-prompt', message }]
         const hash = (value: unknown): string => contentHash(JSON.stringify(value)), plan = { ...native, workspace, cliVersion: '2.1.309 (Claude Code)', requestedModel: execution.model, resolvedModel: 'MiniMax-M3.1-Flash', historyDigest: hash(history), policyDigest: hash(execution), requestDigest: hash({ prompt, policy: execution }) }
-        const files = { 'plan.json': plan, 'public-history.json': { version: 1, sessionId: native.sessionId, history }, 'init.json': { session_id: native.sessionId, model: 'MiniMax-M3.1-Flash', tools: ['Read', 'Bash'] }, 'user-echo.json': { uuid: native.userUuid, session_id: native.sessionId, message }, ...(mode === 'missing-final' ? { 'result.json': { type: 'result', subtype: 'success', is_error: false, session_id: native.sessionId, user_message_uuid: native.userUuid, user_message_uuids: [native.userUuid] }, 'exit.json': { code: 0, signal: null, stopped: true } } : {}) }
+        const files = { 'plan.json': plan, 'public-history.json': { version: 1, sessionId: native.sessionId, history }, 'init.json': { session_id: native.sessionId, model: 'MiniMax-M3.1-Flash', tools: ['Read', 'Bash'] }, 'user-echo.json': { uuid: native.userUuid, session_id: native.sessionId, message }, ...(mode !== 'pause' ? { 'result.json': { type: 'result', subtype: 'success', is_error: mode === 'native-failure', session_id: native.sessionId, user_message_uuid: native.userUuid, user_message_uuids: [native.userUuid] }, 'exit.json': { code: defect.includes('143') ? 143 : mode === 'native-failure' ? 1 : 0, signal: null, stopped: true } } : {}) }
         for (const [name, value] of Object.entries(files)) writeFileSync(join(root, name), JSON.stringify(value))
         mkdirSync(join(root, 'claude-home/projects/exact'), { recursive: true }); writeFileSync(join(root, 'claude-home/projects/exact', native.sessionId + '.jsonl'), history.map(row => JSON.stringify(row)).join('\n') + '\n')
-        const failure = mode === 'missing-final' ? 'Claude worktree success evidence differs' : 'explicit safe pause'
-        const record: NativeRunRecord = { session, status: 'error', harnessSessionId: identity.threadId, createRequestId: contentHash(actual.sessionCreateKey!), createPayloadHash: hash({ prompt, parent: null, launcher: null, base: actual.worktree!.baseCommit, structuredExecution: execution }), structuredExecution: { ...execution, ...identity, claudeNative: native, state: mode === 'missing-final' ? 'failed' : 'running', error: failure } }
+        const failure = defect.includes('143') ? 'Claude emitted more than one native init identity' : mode === 'missing-final' ? 'Claude worktree success evidence differs' : mode === 'native-failure' ? 'Claude execution ended without a complete native result and user echo' : 'explicit safe pause'
+        const record: NativeRunRecord = { session, status: 'error', harnessSessionId: identity.threadId, createRequestId: contentHash(actual.sessionCreateKey!), createPayloadHash: hash({ prompt, parent: null, launcher: null, base: actual.worktree!.baseCommit, structuredExecution: execution }), structuredExecution: { ...execution, ...identity, claudeNative: native, state: mode !== 'pause' ? 'failed' : 'running', error: failure } }
         oldSession = session; oldNativeRoot = root
         if (defect === 'not-started') { record.harnessSessionId = null; record.structuredExecution = { ...execution, state: 'running' } }
         configuredSessionApplication().createSession({ sessionId: session, status: 'error' })
         writeRecord({ governed: true, worktreePath: workspace, base: seed.baseCommit, forkCommit: seed.baseCommit, branch: null, title: null, name: null, parent: null, issues: [], issue: null, proposal: null, merges: 0, note: null, sortKey: null, createdAt: Date.now(), harness: 'claude-headless', runtimeStartToken: null, stopped: false, archived: false, closedAt: null, launcher: null, launchCmd: 'claude', launchOwner: null, ...record })
         if (mode === 'pause') f.store.requestControl(operation.id, 'pause')
-        throw new StructuredSessionError(mode === 'missing-final' ? 'stale_result' : 'cancelled', failure, { sessionId: session, ...identity })
+        throw new StructuredSessionError(mode === 'missing-final' ? 'stale_result' : mode === 'native-failure' ? 'failed' : 'cancelled', failure, { sessionId: session, ...identity })
       },
     } })(request)
   }
   const initialResult = await runSyncOperation(f.store, f.operation.id, f.options)
   assert(oldSession, JSON.stringify({ initial: initialResult.failure, attempts: f.store.listAttempts(f.operation.id).map(attempt => ({ number: attempt.number, failure: attempt.failure })) }))
-  if (mode === 'missing-final') f.store.requestControl(f.operation.id, 'pause')
+  if (mode !== 'pause') f.store.requestControl(f.operation.id, 'pause')
   const recovery = await recoverSyncOperationResources(f.store, f.operation.id, { root: f.root, inputId: f.input.id, artifactRoot: f.artifactRoot })
   assert.equal(recovery.status, 'resources_recovered', JSON.stringify(recovery))
   const recordForDefect = readRecord(oldSession)!
   if (defect === 'worktree') writeRecord({ ...recordForDefect, worktreePath: f.root })
   if (defect === 'seed') writeRecord({ ...recordForDefect, base: f.input.headCommit })
+  if (defect === 'no-progress-143-foreign') writeRecord({ ...recordForDefect, structuredExecution: { ...recordForDefect.structuredExecution!, threadId: 'foreign' } })
+  if (defect === 'no-progress-143-process') writeRecord({ ...recordForDefect, structuredExecution: { ...recordForDefect.structuredExecution!, claudeNative: { ...recordForDefect.structuredExecution!.claudeNative!, pid: process.pid } } })
+  if (defect === 'no-progress-143-stop') writeRecord({ ...recordForDefect, structuredExecution: { ...recordForDefect.structuredExecution!, cancellation: { ...recordForDefect.structuredExecution!.cancellation!, nativeStatus: 'unknown' } } })
   if (defect === 'thread' || defect === 'turn') writeRecord({ ...recordForDefect, structuredExecution: { ...recordForDefect.structuredExecution!, ...(defect === 'thread' ? { threadId: 'foreign' } : { turnId: 'foreign' }) } })
   if (defect === 'stop') writeRecord({ ...recordForDefect, structuredExecution: { ...recordForDefect.structuredExecution!, cancellation: { ...recordForDefect.structuredExecution!.cancellation!, acknowledged: !recordForDefect.structuredExecution!.cancellation!.acknowledged } } })
   if (defect === 'request') writeRecord({ ...recordForDefect, structuredExecution: { ...recordForDefect.structuredExecution!, inputDigest: 'foreign-input' } })
@@ -266,7 +269,7 @@ for (const [mode, defect] of [['missing-final', 'none'], ['pause', 'none'], ['pa
   if (defect === 'exit') writeFileSync(join(oldNativeRoot, 'exit.json'), JSON.stringify({ code: 0, signal: null, stopped: false }))
   if (defect === 'completed') writeFileSync(join(oldNativeRoot, 'completed.json'), '{CORRUPT_COMPLETED')
   if (defect === 'source' || defect === 'tests' || defect === 'scope' || defect === 'schema') { const path = defect === 'source' ? 'src/export.js' : defect === 'tests' ? 'tests/export.test.mjs' : defect === 'scope' ? '.spex-sync-drafts/foreign.json' : /草稿文件=([^\s；]+)/.exec(originalRequest!.prompt)![1].replace(/\.json$/, '.schema.json'); writeFileSync(join(oldPath, path), 'foreign unauthorized edit'); execFileSync('git', ['-C', oldPath, 'add', path], { stdio: 'pipe' }); execFileSync('git', ['-C', oldPath, 'commit', '-m', 'negative unauthorized edit'], { stdio: 'pipe' }) }
-  if (mode === 'pause' && (defect === 'none' || defect === 'prior-draft' || defect === 'older-pause')) { rmSync(join(oldNativeRoot, 'public-history.json')); rmSync(join(oldNativeRoot, 'claude-home'), { recursive: true }) }
+  if ((mode === 'pause' || mode === 'native-failure') && (defect === 'none' || defect === 'prior-draft' || defect === 'older-pause')) { rmSync(join(oldNativeRoot, 'public-history.json')); rmSync(join(oldNativeRoot, 'claude-home'), { recursive: true }) }
   const originalRecord = readRecord(oldSession)!, originalState = originalRecord.structuredExecution!, oldAttempts = f.store.listAttempts(f.operation.id)
   assert.equal(originalState.state, 'cancelled'); assert.equal(originalState.cancellation?.nativeStopped, true); assert.equal(originalState.errorCode, undefined); assert.equal(originalState.failedWorktree, undefined)
   const oldResources = oldAttempts.flatMap(attempt => attempt.dispatchPlans.map(dispatch => f.store.findResource(attempt.id, dispatch.key))).filter(resource => resource !== null)
@@ -277,9 +280,12 @@ for (const [mode, defect] of [['missing-final', 'none'], ['pause', 'none'], ['pa
   f.store.requestControl(f.operation.id, 'run')
   const result = await runSyncOperation(f.store, f.operation.id, f.options)
   assert.equal(result.status, 'unsupported', JSON.stringify(result.failure)); assert.equal(continued, defect === 'none' || defect === 'prior-draft' || defect === 'older-pause', JSON.stringify({ result: result.failure, attempts: f.store.listAttempts(f.operation.id).map(attempt => ({ number: attempt.number, failure: attempt.failure, calls: attempt.dispatchPlans.length })) }))
+  if (defect === 'no-progress-143') assert.equal(restartedWithoutMaterial, true, '合法owned/stopped但HEAD==seed无JSON须在终态分类前skip，允许新任务')
+  if (defect.startsWith('no-progress-143-')) assert.equal(restartedWithoutMaterial, false, 'foreign/unknown stop不能借无进度越过认证')
   assert.equal(JSON.stringify(readRecord(oldSession)), oldRecordBytes)
   for (const { ref, bytes } of refs) assert.deepEqual(readEvidence(f.input.source.commonDir, ref), bytes)
   for (const [name, bytes] of Object.entries(nativeFiles)) assert.deepEqual(readFileSync(join(oldNativeRoot, name)), bytes)
+  assert.deepEqual(readdirSync(oldNativeRoot).filter(name => name !== 'claude-home').sort(), Object.keys(nativeFiles).sort(), '冷观察不新增protocol log或补封存')
   for (const prior of oldAttempts) assert.deepEqual(f.store.readAttempt(prior.id), prior)
   for (const resource of oldResources) assert.deepEqual(f.store.findResource(resource.attemptId, resource.plan.key), resource)
   const current = f.store.listAttempts(f.operation.id).at(-1)!, observed = current.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(wrapper => wrapper.stage.endsWith(':stopped-git-material-provenance'))

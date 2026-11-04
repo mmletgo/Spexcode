@@ -679,3 +679,7 @@ P0草稿持久协议由sync writer23围栏保护，避免marker已落盘但dispa
 原生exit0/success缺少必需structured_output仍严格失败；只有完整原身份/停止认证后才给typed格式诊断，正文packet保持缺席。已停真实Git草稿可独立于packet保留并沿原预算续修。历史无typed witness和正式安全暂停的最新已提交编辑稿，只在新的有效attempt中经原request/owner/input/seed/schema/path、source/tests对象与正式stop/removed全值重验，观察为未批准Git材料并复制原字节到新seed。原failed、Native记录/计划/checkpoint一律不补签，旧CLI键不重发；actual missing-final才有格式诊断，普通pause不造final/raw/错误码。新观察provenance记时间、原失败及Native引用、实际HEAD/tree/OID/正文SHA，旧批准、模型选择、总预算、fence与V1–V4/Docker/严格Git/采纳门保持。
 
 已有认证draft不屏蔽更晚正式停止执行的最新Git观察。材料选择携当前draft作瞬态参数，仅当原正常Native/注入trace认证定位到该draft来源，暂停资源在既有retry来源顺序中严格更晚、原seed与当前业务树除本owner临时稿/schema外全部对象相同，且所有原材料门槛仍过时，才复制其最新正常Git正文到新seed。更老暂停、未知来源、不同起点及普通Native/material fallback不能覆盖已有draft；无更晚可救稿则保持原draft、错误与标签，不继承批准。该参数不进入业务摘要、旧请求或持久协议。
+
+已停止的真实CLI错误与未批准Git材料资格分别验证：原root投影明确exit1/signal:null/stopped、type=result/subtype=success/is_error:true且无structured_output时，仅在完整原身份/回显/计划、正式资源停止、owner/schema/path、source/tests对象和真实干净Git后代均认证后，允许新有效attempt续最新正常提交；不将API限流或其他原生失败改判成功/格式，不要求失败前未产生的sealed history，不补旧记录或raw/final。可选协议诊断只追加init/result公开身份/parent存在位/ordinal及固定错误码和摘要，禁止正文、thinking、stderr或凭据；第二init仍拒绝，缺事件与非零退出分别准确诊断。模型/CLI版本/BaseURL选择、预算/租约、独审与V1–V4/Docker/Git/采纳门保持。
+
+原request/plan/init/echo/正式stop、source/schema与当前fence均认证后，实际干净HEAD仍等于原seed的无进度候选先沿既有分支跳过，再判断输出终态形状；不将无JSON的exit143旧失败误判为missing-final阻断新任务。该skip不代表成功或格式资格，foreign身份、未知停止/进程与真实新提交仍不得借此越过认证；exit143已有新稿不取得本轮明确exit1错误材料资格。

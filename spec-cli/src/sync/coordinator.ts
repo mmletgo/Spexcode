@@ -39,7 +39,7 @@ import { composeControlledRequest, readControlledChanges, readControlledDecision
 import { sessionIdForCreateKey } from '../sessions.js'
 import { withoutSessionApplicationExecutionWake } from '../session-application.js'
 import { assertFrozenBinding, readFrozenManifest, readFrozenRange } from '../frozen-context.js'
-import { assertClaudeStoppedDraftSource, observeClaudeWorktreeMissingFinal } from '../claude-structured.js'
+import { assertClaudeStoppedDraftSource, observeClaudeStoppedWorktreeFailure } from '../claude-structured.js'
 import { nativeWorktreePrompt, nativeWorktreeResult } from '../native-worktree-runtime.js'
 import { readRecord } from '../session-record.js'
 import { structuredExecutionPolicy, StructuredSessionError } from '../session-structured-policy.js'
@@ -1438,14 +1438,14 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
             if (!request.worktree || canonical(protectedEntries(native.request.worktree.tree)) !== canonical(protectedEntries(request.worktree.tree))) continue
             const prompt = nativeWorktreePrompt(native.request.prompt, native.request.worktree)
             assertClaudeStoppedDraftSource(prompt, state, proof.record.worktreePath)
-            const format = proof.observedFailure ? observeClaudeWorktreeMissingFinal(prompt, state, proof.record.worktreePath) : undefined
             const current = store.readOperation(operation.id), active = store.readAttempt(attempt!.id)
             if (current.control !== 'run' || current.currentAttemptId !== active.id || current.generation !== fence!.generation || active.generation !== fence!.generation || active.leaseToken !== fence!.leaseToken || ['failed', 'superseded', 'settled'].includes(active.status) || active.expiresAtMs <= Date.now() || store.readPhysicalControl(current.input.source).control !== 'run') fail('cancelled', '新Git材料观察已失去当前运行fence')
             const witness = nativeWorktreeResult(proof.record.worktreePath, native.request.worktree)
             if (witness.headCommit === native.request.worktree.baseCommit) continue
+            const format = proof.observedFailure ? observeClaudeStoppedWorktreeFailure(prompt, state, proof.record.worktreePath) : undefined
             const draft = captureStageDraft(operation.input.source.commonDir, native.request.worktree, { worktree: witness }, binding)
             const source = readStageDraft(operation.input.source.commonDir, draft, binding), observedAt = Date.now()
-            saveStage(store, fence!, `${key}:${purpose}:stopped-git-material-provenance`, { sourceKind: 'git_draft', approved: false, observationKind: format ? 'missing-final' : 'pause', observedAt, fromOperationId: owner.id, fromAttemptId: prior.id, nativePlanRef: resource.plan.planBlob, checkpointRef: resource.checkpointRef, originalFailure: prior.failure, canonicalRecordSha256: contentHash(JSON.stringify(proof.record)), resultCommit: draft.resultCommit, resultTree: draft.resultTree, oid: draft.oid, draftSha256: contentHash(source), schemaDigest, originalInputDigest: native.request.inputDigest, currentInputDigest: inputDigest })
+            saveStage(store, fence!, `${key}:${purpose}:stopped-git-material-provenance`, { sourceKind: 'git_draft', approved: false, observationKind: format ? 'missing-final' : proof.observedFailure ? 'native-failure' : 'pause', observedAt, fromOperationId: owner.id, fromAttemptId: prior.id, nativePlanRef: resource.plan.planBlob, checkpointRef: resource.checkpointRef, originalFailure: prior.failure, canonicalRecordSha256: contentHash(JSON.stringify(proof.record)), resultCommit: draft.resultCommit, resultTree: draft.resultTree, oid: draft.oid, draftSha256: contentHash(source), schemaDigest, originalInputDigest: native.request.inputDigest, currentInputDigest: inputDigest })
             return { source, errors: format ? [{ code: format.code, message: format.message }] : [], sourceKind: 'git_draft' }
           }
           if (existingDraft || native.request.worktree?.mode !== 'read' || native.request.frozenContext) continue
