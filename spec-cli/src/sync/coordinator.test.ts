@@ -3377,6 +3377,7 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
   const recordFailure = f.store.recordFailure.bind(f.store)
   const listAttempts = f.store.listAttempts.bind(f.store)
   let immutable: { refs: import('./operation-types.js').BlobRef[]; failure: unknown; dispatchPlans: SyncAttempt['dispatchPlans'] } | undefined
+  let missingOwnerOriginal: SyncAttempt | undefined
   f.store.recordFailure = (fence, issue) => {
     const before = f.store.readAttempt(fence.attemptId)
     if (partial && before.number === 1) {
@@ -3453,6 +3454,7 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
       }
     }
     const failed = recordFailure(fence, issue)
+    if (missingOwner && before.number === 3) missingOwnerOriginal = f.store.readAttempt(fence.attemptId)
     if (before.number === 1) {
       const saved = f.store.readAttempt(fence.attemptId); immutable = { refs: saved.checkpointRefs, failure: saved.failure, dispatchPlans: saved.dispatchPlans }
       if (pending && !sibling && issue.code === 'generation_failed') {
@@ -3682,7 +3684,21 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
     }
     return
   }
-  if (crossSource || missingOwner) { assert.equal(result.failure?.code, 'readonly_spec_repair_binding'); assert.equal(f.store.listAttempts(f.operation.id).length, 4); assert.equal(ownerCalls.some(call => call.attempt === 4), false); return }
+  if (crossSource) { assert.equal(result.failure?.code, 'readonly_spec_repair_binding'); assert.equal(f.store.listAttempts(f.operation.id).length, 4); assert.equal(ownerCalls.some(call => call.attempt === 4), false); return }
+  if (missingOwner) {
+    assert.equal(result.status, 'unsupported')
+    assert.equal(result.failure?.code, 'checkpoint_artifact_binding')
+    assert.match(result.failure!.message, /聚合rounds必须是原partitionEvidence局部结果的精确有序并集/)
+    const attempts = f.store.listAttempts(f.operation.id)
+    assert.equal(attempts.length, 3, '缺失聚合owner在领取A4前强认证拒绝')
+    assert.equal(ownerCalls.some(call => call.attempt >= 4), false)
+    assert.deepEqual(attempts[0].checkpointRefs, immutable!.refs); assert.deepEqual(attempts[0].failure, immutable!.failure); assert.deepEqual(attempts[0].dispatchPlans, immutable!.dispatchPlans)
+    assert.deepEqual(attempts[2].checkpointRefs, missingOwnerOriginal!.checkpointRefs); assert.deepEqual(attempts[2].failure, missingOwnerOriginal!.failure); assert.deepEqual(attempts[2].dispatchPlans, missingOwnerOriginal!.dispatchPlans, '当前拒绝不改签损坏A3原件或新增dispatch')
+    assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+    assert.deepEqual(readTree(f.input.source.commonDir, f.input.immutableTree).filter(entry => !entry.path.startsWith('.spec/')), snapshotObjects)
+    assert.equal(f.store.listJournals(f.operation.id).length, 0)
+    return
+  }
   if (invalidBase) { assert.equal(result.failure?.code, 'readonly_spec_repair_binding'); assert.equal(f.store.listAttempts(f.operation.id).length, 5); assert.equal(ownerCalls.some(call => call.attempt === 5), false); return }
   if (['wrong-ref', 'unaffected-ref', 'input-digest'].includes(mode)) {
     assert.equal(result.status, 'unsupported')
