@@ -19,7 +19,9 @@ related:
 
 ## expanded spec
 
-新fence观察已停ZCode edit的未批准Git稿时，复用原verifyPlan、send与public model snapshot，精确核workspace、原session/model、唯一turn.started的input/query/非空messageId、所有events身份与唯一terminal原摘要。只读核原receipt/进程组与正式canonical stop/removed，不能调用会改写旧观察的进程采样或要求messages/success/final。原exit须code0、signal:null、stopped:true，idle/closed原值保持；基础认证后HEAD==seed只跳过无进度，有新HEAD仅精确turn.failed可授Git材料，cancelled终态不取得材料资格。仅打开exit.json时遇到ENOENT返回缺证据（null），将此候选标为不合格；不会用canonical stop/removed替代exit或turn.failed证明。缺plan/send、其他读取错误、坏JSON及存在但非法exit仍显式失败。新failed和旧cancelled沿[[sync-checkpoint-evidence]]各自原证明认证，不附failedWorktree/rejectedOutput，不改原计划/策略/请求或错误分类。
+新fence观察已停ZCode edit的未批准Git稿时，复用原verifyPlan、send与public model snapshot，精确核workspace、原session/model、唯一turn.started的input/query/非空messageId、所有events身份与唯一terminal原摘要。只读核原receipt/进程组与正式canonical stop/removed，不能调用会改写旧观察的进程采样或要求messages/success/final。原exit须code0、signal:null、stopped:true，idle/closed原值保持；基础认证后HEAD==seed只跳过无进度，常规有新HEAD仅精确turn.failed可授Git材料，cancelled终态不取得材料资格；已结算P0 events RPC例外见下。仅打开exit.json时遇到ENOENT返回缺证据（null），将此候选标为不合格；不会用canonical stop/removed替代exit或turn.failed证明。缺plan/send、其他读取错误、坏JSON及存在但非法exit仍显式失败。新failed和旧cancelled沿[[sync-checkpoint-evidence]]各自原证明认证，不附failedWorktree/rejectedOutput，不改原计划/策略/请求或错误分类。
+
+P0已结算的canonical failed原typed `native_rpc_timeout` 与同一adapter官方`session/events` method/message同时精确匹配时，复用上述原计划、模型、send、process/receipt及完整公开events/terminal认证。仅原同session/turn/input的唯一turn.completed/success、同session/turn的idle.json为true及原exit0/signal:null/idle/closed/stopped全真才通过未批准Git材料源检查；不解码response、不读messages或补completed、原Native版本/CLI版本/实际模型选择照原冻结策略认证。仅打开terminal.json遇到ENOENT返回无材料；同身份原失败/取消通过公开事件和相容的原stop证据后也跳过，不要求成功的exit0/idle/closed；错误身份、未知终态结果、损坏原件及互斥停止证据仍明确拒绝。该进程内分类不认普通pause、其它method或脏物理稿；仍由[[sync-coordinator]]核原正式removed/stop、正常Git、源/测试/owner及当前fence，不授成功、格式或新调用权。
 
 仅version6工作区路径在原plan/send/user/model/final消息/turn/idle/close/stop全部认证后，将格式或schema拒绝的terminal原response附为tagged untrusted_final诊断，保原字节与SHA和原请求绑定。格式失败仍不写completed/output；取消、缺terminal、身份或stop失败不授正文，旧failed缺字段不追补。不得提取thinking或放宽JSON/schema。
 

@@ -12,6 +12,8 @@ related:
 
 ## expanded spec
 
+P0的精确ZCode `session/events` typed RPC已结算失败在原公开完成/idle/close/stop及完整正常Git单稿证据通过后，沿[[sync-coordinator]]既有git_draft材料接缝只续入原未批准bytes、原请求完整errors/repairDiagnostics和本次精确typed RPC错误；原诊断顺序保持，已有相同RPC错误不再追加；不以公开完成事件替代模型final、readyAnalysis、独审或候选批准，不进入物理草稿分支，不补写旧continuation/Native原件。原owner、阶段schema/上下文、来源排序及当前fence保护保持。
+
 physical_draft是已认证停止owner工作树的未批准物理JSON材料，提示明确未提交、不是历史Git稿或Native final。仅其原bytes进入当前seed；沿同一来源保完整errors与repairDiagnostics（和本轮诊断逐对象合并），不覆盖较新认证Git稿，也不清除review的原ready分析。未使用此材料的已有请求诊断序列/字节保持，业务inputDigest、accepted早退及正常clean提交/JSON/schema/独审门不变。
 
 旧contextTransport缺席的程序草稿请求，readCodeBehaviorContext只读其精确draft/schema路径与固定说明绑定的冻结诊断尾段。线性扫描JSON字符串转义及数组层级确定原errors边界，再核精确本轮修复诊断分隔符与完整JSON数组到EOF；字符串中的中文标记、括号、换行和嵌套对象不参与分段。返回原errors/repairDiagnostics完整对象，显式空数组保持为空；缺损、重复、错路径或非数组明确拒绝，不抽取模型正文或猜字段。非draft内联请求无该程序段时保持无草稿诊断语义。生成prompt、saved字节、业务inputDigest、accepted早退、Native schema/parser及writer26版本均不改；git-json-v1仍沿原Git指针认证。

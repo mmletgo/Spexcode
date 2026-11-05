@@ -291,7 +291,13 @@ function verifyPlan(plan: NativePlan, root: string, prompt: string | undefined, 
   if (prompt !== undefined && existsSync(join(root, 'send.json')) && digest(JSON.parse(readFileSync(join(root, 'send.json'), 'utf8'))) !== digest(nativeSend(plan, prompt, execution))) throw new StructuredSessionError('stale_result', 'ZCode original send differs from the exact native schema/prompt input')
 }
 
-/** 只读核原任务拥有权与公开终态；精确失败返回true，exit缺失返回null供新fence跳过此候选。 */
+const nativeRpcTimeoutMessage = (method: string): string => `ZCode native RPC timeout (${method})`
+
+export function isZCodeEventsRpcTimeout(execution: Pick<StructuredExecution, 'state' | 'errorCode' | 'error'>): boolean {
+  return execution.state === 'failed' && execution.errorCode === 'native_rpc_timeout' && execution.error === nativeRpcTimeoutMessage('session/events')
+}
+
+/** 只读核原任务与公开终态；true认证未批准稿，null跳过不具资格的候选。 */
 export function assertZCodeStoppedDraftSource(prompt: string, execution: ZCodeStructuredExecution, worktreePath: string): boolean | null {
   const native = execution.zcodeNative
   if (execution.version !== 6 || execution.policy !== 'native-worktree-v1' || !execution.model?.startsWith('zcode:') || execution.worktree?.mode !== 'edit' || !native || !['failed', 'cancelled'].includes(execution.state ?? '') || !execution.cancellation?.nativeStopped || existsSync(join(native.root, 'completed.json')))
@@ -300,16 +306,31 @@ export function assertZCodeStoppedDraftSource(prompt: string, execution: ZCodeSt
   const plan = read('plan.json') as NativePlan
   verifyPlan(plan, native.root, prompt, execution)
   if (plan.workspace !== worktreePath || !plan.pid || !detachedRuntimeIsGone(plan.pid, plan.receiptFile)) throw new StructuredSessionError('stale_result', 'stopped ZCode draft differs from its exact workspace/process')
-  const send = read('send.json'), snapshot = read('model-snapshot.json') as { sessionId: string; model: NativeModel }, events = read('events.json') as NativeEvent[], terminal = read('terminal.json') as NativeEvent
+  const send = read('send.json'), snapshot = read('model-snapshot.json') as { sessionId: string; model: NativeModel }, events = read('events.json') as NativeEvent[]
+  const completedEventsRpc = isZCodeEventsRpcTimeout(execution)
+  let terminal: NativeEvent
+  try { terminal = read('terminal.json') as NativeEvent }
+  catch (error) { if (completedEventsRpc && (error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error }
   let exit: StopEvidence
   try { exit = read('exit.json') as StopEvidence }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error }
   const starts = events.filter(event => event.type === 'turn.started'), terminals = events.filter(event => ['turn.completed', 'turn.failed', 'turn.cancelled'].includes(event.type)), requests = events.filter(event => event.type === 'session.updated')
+  const nonSuccess = completedEventsRpc && (terminal.type !== 'turn.completed' || terminal.payload.resultType === 'cancelled' && typeof terminal.payload.response === 'string')
+  const exitMatches = nonSuccess ? exit.stopped === true && (exit.code === null || Number.isSafeInteger(exit.code) && exit.code >= 0)
+    && (exit.signal === null || exit.code === null && typeof exit.signal === 'string' && Object.hasOwn(constants.signals, exit.signal)) : !!exit.stopped && exit.code === 0 && exit.signal === null
   if (digest(send) !== digest(nativeSend(plan, prompt, execution)) || !plan.turnId || typeof plan.model?.providerId !== 'string' || !plan.model.providerId || typeof plan.model.modelId !== 'string' || !plan.model.modelId || snapshot.sessionId !== plan.sessionId || digest(snapshot.model) !== digest(plan.model) || starts.length !== 1 || starts[0].payload.inputId !== plan.inputId || starts[0].payload.queryId !== plan.queryId || typeof starts[0].payload.messageId !== 'string' || !starts[0].payload.messageId
     || events.some(event => event.sessionId !== plan.sessionId || event.turnId !== plan.turnId || !Number.isSafeInteger(event.seq) || typeof event.eventId !== 'string') || new Set(events.map(event => event.eventId)).size !== events.length
     || !requests.length || requests.some(event => event.payload.providerId !== plan.model?.providerId || event.payload.modelId !== plan.model?.modelId)
-    || terminals.length !== 1 || digest(terminals[0]) !== digest(terminal) || terminal.sessionId !== plan.sessionId || terminal.turnId !== plan.turnId || terminal.payload.inputId !== plan.inputId || !exit.stopped || exit.code !== 0 || exit.signal !== null)
+    || terminals.length !== 1 || digest(terminals[0]) !== digest(terminal) || terminal.sessionId !== plan.sessionId || terminal.turnId !== plan.turnId || terminal.payload.inputId !== plan.inputId || !exitMatches)
     throw new StructuredSessionError('stale_result', 'stopped ZCode draft lost its original model/input/terminal/exit identity')
+  if (completedEventsRpc) {
+    if (nonSuccess) return null
+    const idle = read('idle.json') as { sessionId: string; turnId: string; idle: boolean }
+    if (terminal.payload.resultType !== 'success' || typeof terminal.payload.response !== 'string'
+      || idle.sessionId !== plan.sessionId || idle.turnId !== plan.turnId || idle.idle !== true || exit.idle !== true || exit.closed !== true || exit.stopped !== true)
+      throw new StructuredSessionError('stale_result', 'ZCode events RPC draft has no exact completed terminal and idle/closed stop')
+    return true
+  }
   return terminal.type === 'turn.failed'
 }
 
@@ -519,7 +540,7 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
   const pending = new Map<number, { resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>()
   const request = (method: string, params: Record<string, unknown>): Promise<unknown> => new Promise((resolve, reject) => {
     if (exited || !child.stdin.writable) { reject(new StructuredSessionError('cancellation_pending', 'ZCode native transport ended before exact settlement')); return }
-    const id = ++nextId, timer = setTimeout(() => { pending.delete(id); reject(new StructuredSessionError('native_rpc_timeout', `ZCode native RPC timeout (${method})`)) }, 10000)
+    const id = ++nextId, timer = setTimeout(() => { pending.delete(id); reject(new StructuredSessionError('native_rpc_timeout', nativeRpcTimeoutMessage(method))) }, 10000)
     pending.set(id, { resolve, reject, timer }); child.stdin.write(zcodeProtocolLine({ id, method, params }))
   })
   const lines = createInterface({ input: child.stdout })
