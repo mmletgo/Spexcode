@@ -510,7 +510,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   const { bodyIndex, frozenEntries } = packBehaviorBodies([...bodyRoles.values()])
   const packed = { ...metadataReferenced, bodyIndex }
   const historicalRoles = worktree ? Object.entries(fileViews).filter(([role]) => role !== 'intentArtifactFiles' && role !== 'composedFiles').map(([role, files]) => {
-    const inherited = readTree(commonDir, oldTree).filter(entry => !within(entry.path, input.plan.readPaths))
+    const inherited = frozenTreeRead(input, oldTree, frozenTreeReads).entries.filter(entry => !within(entry.path, input.plan.readPaths))
     const entries = [...files.values()].map(({ path, mode, oid, digest }) => ({ path, mode, oid, digest }))
     return { role, projectedTaskPaths: true, ...stageWorktree(commonDir, input.snapshot.headCommit, writeTree(commonDir, [...inherited, ...entries])) }
   }) : undefined
