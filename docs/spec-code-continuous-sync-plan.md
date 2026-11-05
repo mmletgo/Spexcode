@@ -680,6 +680,8 @@ Native P0的新contextTransport:git-json-v1只在behavior-draft-protocol对象�
 
 已停ZCode的精确turn.failed可在合法新fence下续最新未批准Git编辑稿，复用原严格较新来源选择；旧正式cancelled与有原failed观察的新failed均核完整request/dispatch/record、formalstop/removed原值及公开plan/send/model/start/terminal身份。只读认证不要求messages/success/final、不采样改写旧Native；原exit code0/null/stopped保持且error不当idle。基础身份与停止认证后HEAD==seed仅跳过无进度，有新HEAD才授失败Git材料；新seed保原bytes与业务诊断，source/tests对象、owner/schema/path/Git后代/clean及当前fence/lease/CAS门全保，不附failedWorktree或授自动重试。writer26仅追加SELECT1，停稳旧writer/资源后online backup及事务25→26，旧25拒写；回滚恢复升级前一致v25库及evidence/Git refs，不删marker或重签旧记录，NativePlan v3/structured v6不变。
 
+上述材料的旧inline原诊断只从程序自己生成、精确draft/schema路径绑定的冻结尾段读取，按JSON字符串/数组边界及精确分隔符完整恢复errors和repairDiagnostics；合法字符串内标记不参与切割，空数组保持为空，缺损/歧义明确拒绝。非draft无该段仍无草稿诊断；不解析模型final、不改原prompt/请求字节、业务摘要或accepted位置，git-json现有认证及writer26保持。
+
 Native P0按attempt显式冻结code-behavior-draft-v1：分析和独审复用P1的Git临时JSON草稿与精确只读schema，先保活实际提交blob再验证syntax/schema；失败跨attempt在原文件续改，不从零重答。每个owner/purpose独立，源码/tests/Spec及absence保持。独审格式失败保此前已校验分析的原draft及Native trace，仅重开独立review；业务拒绝仍回分析和完整独审。诊断只进入真实请求，不改变同业务输入的缓存身份，原预算、fence、写范围与最终验证不变。旧已reserved read请求不补协议；原生格式失败仅经authenticateNativeRejectedFinal核原请求/精确schema/input/owner、canonical错误与停止证明后，将CAS原bytes/errors作为下一真实seed的临时输入，明确区别于Git稿；真实Agent正常提交后才生成新Git身份，不改写历史原件。
 
 P0草稿持久协议由sync writer23围栏保护，避免marker已落盘但dispatch未reserved时被旧writer22忽略。升级必须先停稳旧writer并结算或保留真实资源，经原SQLite online backup/组件事务22→23，保全部旧checksum、请求、记录与CAS；回滚先停新writer，恢复升级前v22一致备份与原evidence/Git refs，不删marker降级。

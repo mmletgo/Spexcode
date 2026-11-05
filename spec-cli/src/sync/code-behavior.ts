@@ -53,12 +53,38 @@ export type CodeBehaviorContext = {
   errors: readonly { code: string; message: string }[]
 }
 
-/** 只从冻结请求的真实Git seed读取显式context指针，旧内联任务保持原语义。 */
+/** 只读冻结Git context或程序内联草稿尾段，不改原请求、业务摘要或诊断角色。 */
 export function readCodeBehaviorContext(request: Pick<ElaborationSessionRequest, 'prompt' | 'worktree' | 'inputDigest' | 'purpose'>, commonDir: string): CodeBehaviorContext {
   const body = request.prompt.split('\n任务:\n')[1].split('\n草稿文件=')[0]
   const [taskText, reviewText] = body.split('\n待审分析:\n')
   const task = JSON.parse(taskText) as Record<string, unknown>
-  if (task.contextTransport === undefined) return { task, ...(reviewText === undefined ? {} : { pendingAnalysis: JSON.parse(reviewText) as CodeBehaviorContext['pendingAnalysis'] }), repairDiagnostics: [], errors: [] }
+  if (task.contextTransport === undefined) {
+    const context: CodeBehaviorContext = { task, ...(reviewText === undefined ? {} : { pendingAnalysis: JSON.parse(reviewText) as CodeBehaviorContext['pendingAnalysis'] }), repairDiagnostics: [], errors: [] }
+    const drafts = request.prompt.split('\n草稿文件=')
+    if (drafts.length === 1) return context
+    const path = drafts.length === 2 ? /^(\.spex-sync-drafts\/[a-f0-9]{64}\.json)；/.exec(drafts[1])?.[1] : undefined
+    const marker = '\n草稿业务schema只读文件=', invalid = 'legacy P0草稿诊断尾段不完整或不唯一'
+    const tails = path ? request.prompt.split(`${marker}${path.replace(/\.json$/, '.schema.json')}；先读取精确schema并自检，禁止修改schema。原具体错误：`) : []
+    if (tails.length !== 2 || request.prompt.split(marker).length !== 2) throw new Error(invalid)
+    const text = tails[1], separator = '；本轮修复诊断：'
+    let depth = 0, quoted = false, escaped = false, end = -1
+    for (let index = 0; index < text.length; index++) {
+      const character = text[index]
+      if (quoted) {
+        if (escaped) escaped = false
+        else if (character === '\\') escaped = true
+        else if (character === '"') quoted = false
+      } else if (character === '"') quoted = true
+      else if (character === '[') depth++
+      else if (character === ']' && --depth === 0) { end = index + 1; break }
+    }
+    if (text[0] !== '[' || end < 0 || !text.slice(end).startsWith(separator)) throw new Error(invalid)
+    try {
+      const errors: unknown = JSON.parse(text.slice(0, end)), repairDiagnostics: unknown = JSON.parse(text.slice(end + separator.length))
+      if (!Array.isArray(errors) || !Array.isArray(repairDiagnostics)) throw new Error(invalid)
+      return { ...context, errors, repairDiagnostics }
+    } catch (error) { if (!(error instanceof SyntaxError)) throw error; throw new Error(invalid) }
+  }
   const seed = request.worktree, path = task.path, draftPath = /草稿文件=([^\s；]+)/.exec(request.prompt)?.[1]
   if (task.contextTransport !== 'git-json-v1' || !seed || typeof path !== 'string' || !/^\.spex-sync-drafts\/[a-f0-9]{64}\.context\.json$/.test(path)
     || path !== draftPath?.replace(/\.json$/, '.context.json')

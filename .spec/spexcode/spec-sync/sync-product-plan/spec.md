@@ -16,6 +16,8 @@ P0至P5按完整需求交付，不以阶段演示、局部测试或可修改的�
 
 已停ZCode精确失败的最新正常Git编辑稿也可沿既有材料选择接缝进入合法新attempt；旧cancelled与新failed分别核原观察、完整请求/Native身份、formalstop/removed全值，原稿只作approved:false材料，原bytes和业务诊断续到新seed，不回较旧稿、不继承批准或自动重试。source/tests/Git/schema/owner及当前fence门保持，旧原件不补签；writer26在线备份/事务围栏拒旧25，回滚恢复一致旧库与evidence/Git refs，NativePlan/执行策略不变。
 
+旧inline程序草稿诊断按精确路径绑定的冻结尾段只读恢复完整JSON数组，不用[]覆盖已存在错误，也不回退较旧来源；字符串内中文标记/转义/换行不影响边界，缺损/歧义拒绝，非draft无尾段保持原语义。原prompt/业务摘要/accepted位置及git-json运输不变，无新持久协议或模型输出兼容层。
+
 共享分区调度在每项结束后真正让出事件循环，包括缓存复用、末项和失败，使既有租约心跳与暂停/取消及时运行；不通过延长时限或放宽fence掩盖缓存批次的事件循环饥饿。缓存原件、真实终态、调用预算和最终验收边界保持。
 
 当前受审分析存在冻结owner时，P1独审沿[[sync-elaboration]]的生成侧同一范围事实拒绝仅改未变owner历史文案或未知ID绑定的repair。程序给具体拒因并保完整原review；原JSON/Git稿、summary追踪、Native请求及同一candidate经当前完整机械门重核后，仅新派独审，不重复生成或扩大源码/tests写权。真正域内语义repair仍续生成；原件绑定损坏明确停止，失败小回执的认证Git稿仍仅作材料。旧请求、字段缺席、控制中断回溯、原预算及最终V1–V4/采纳门保持。
