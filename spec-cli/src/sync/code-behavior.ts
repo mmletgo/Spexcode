@@ -510,7 +510,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   const { bodyIndex, frozenEntries } = packBehaviorBodies([...bodyRoles.values()])
   const packed = { ...metadataReferenced, bodyIndex }
   const historicalRoles = worktree ? Object.entries(fileViews).filter(([role]) => role !== 'intentArtifactFiles' && role !== 'composedFiles').map(([role, files]) => {
-    const inherited = readTree(commonDir, oldTree).filter(entry => !within(entry.path, input.plan.readPaths))
+    const inherited = frozenTreeRead(input, oldTree, frozenTreeReads).entries.filter(entry => !within(entry.path, input.plan.readPaths))
     const entries = [...files.values()].map(({ path, mode, oid, digest }) => ({ path, mode, oid, digest }))
     return { role, projectedTaskPaths: true, ...stageWorktree(commonDir, input.snapshot.headCommit, writeTree(commonDir, [...inherited, ...entries])) }
   }) : undefined
@@ -639,10 +639,19 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   const rawOnlyBootstrap = input.baseline === null && !input.baselineSelection?.bindings.some(binding => ('bytePair' in binding ? binding.bytePair : binding.intentPair) !== null) && ids.size === 0
   const readablePathSet = new Set(worktree ? [...readTree(commonDir, worktree.tree).map(entry => entry.path), ...historicalRoles!.flatMap(role => readTree(commonDir, role.tree).map(entry => entry.path))] : readablePaths.map(item => item.path))
   const validatePaths = (paths: readonly string[], reviewDetails?: Record<string, unknown>): void => {
+    const invalidPaths: string[] = [], invalidMessages: string[] = []
     for (const path of paths) {
-      try { validateRepositoryPath(path) } catch (error) { reject((error as Error).message, { ...reviewDetails, invalidPaths: [path] }, 'behavior_analysis_invalid', !!reviewDetails) }
-      if (!worktree && !within(path, input.plan.readPaths) || isHostPrivatePath(path) || reviewDetails && !readablePathSet.has(path)) reject(`分析引用了未完整读取的路径: ${path}`, { ...reviewDetails, invalidPaths: [path] }, 'behavior_analysis_invalid', !!reviewDetails)
+      try { validateRepositoryPath(path) } catch (error) {
+        if (!reviewDetails) reject((error as Error).message, { invalidPaths: [path] }, 'behavior_analysis_invalid')
+        invalidPaths.push(path); invalidMessages.push((error as Error).message); continue
+      }
+      if (!worktree && !within(path, input.plan.readPaths) || isHostPrivatePath(path) || reviewDetails && !readablePathSet.has(path)) {
+        const message = `分析引用了未完整读取的路径: ${path}`
+        if (!reviewDetails) reject(message, { invalidPaths: [path] }, 'behavior_analysis_invalid')
+        invalidPaths.push(path); invalidMessages.push(message)
+      }
     }
+    if (invalidPaths.length) reject(`${[...invalidMessages, 'checkedPaths 每项必须是实际文件的仓库根相对路径，不带 git:/tree/commit 前缀'].join('；')}`, { ...reviewDetails, invalidPaths }, 'behavior_analysis_invalid', !!reviewDetails)
   }
   for (const item of proposal.changes) { validatePaths(item.paths); if (['coverage_gap', 'conflict'].includes(item.kind) && !item.affectedIds.length && !rawOnlyBootstrap) reject('业务发现必须指明阻塞的既有意图/规则ID'); const unknown = item.affectedIds.filter(id => !ids.has(id)), invalidRules = item.ruleIds.filter(id => !ids.has(id) || !/^(REQ|RULE|TR)-/.test(id)); if (unknown.length || invalidRules.length) reject(`行为变化引用不存在的契约ID/合法来源: paths=${JSON.stringify(item.paths)} affectedIds=${JSON.stringify(unknown)} ruleIds=${JSON.stringify(invalidRules)}；affectedIds只允许graph.items稳定契约ID，不使用nodeId；无业务依赖的治理文本变化可[]`) }
   if (input.partition) {
