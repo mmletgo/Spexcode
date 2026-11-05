@@ -19,7 +19,7 @@ StageDraftMaterialRequest仅在进程内传当前binding/真实seed/inputDigest�
 
 P0分析及独审同样复用此草稿捕获/读取能力；owner与purpose共同隔离临时路径，两个阶段只可提交各自精确draft，schema/Spec/源码/tests及其absence继续保持。P0独审seed可以含自身未批准JSON临时稿，但分析稿不混入独审业务tree；最终candidate与交付不含任何临时草稿。认证的旧Native final只作为新seed输入材料，不是旧Git witness，必须经下一真实Agent提交后才产生当前草稿身份。
 
-正式停止的工作树若严格Git状态只有ignored条目，只在HEAD及tree仍为精确原seed、全部stage-0索引path/mode/OID和受控物理文件逐项相等时判定无新增材料。授权draft在seed中缺席则物理也须缺席，已存在则保持原普通文件模式和字节。禁止穿过父目录软链接，并在返回前复核原索引摘要、HEAD及完整严格状态。ignored条目不进入草稿材料或交付；新增的ignored draft、隐藏只读修改、索引变化、实际dirty与已有新提交仍经原严格门。
+正式停止的工作树若严格Git状态只有ignored条目，只在HEAD及tree仍为精确原seed、全部stage-0索引path/mode/OID和受控物理文件逐项相等时判定无新增材料。`.spex-sync-drafts`本身及其所有子项的ignored变化（含大小写别名和其他owner草稿/sidecar）明确拒绝。授权draft在seed中缺席则物理也须缺席，已存在则保持原普通文件模式和字节。禁止穿过父目录软链接，并在返回前复核原索引摘要、HEAD及完整严格状态。其它ignored条目不进入草稿材料或交付；隐藏只读修改、索引变化、实际dirty与已有新提交仍经原严格门。
 
 P1草稿复用同一stageWorktree/verifyStageResult和原生v6 edit执行，不增加执行器。生成只能正常提交指定的`.spex-sync-drafts/<ownerDigest>.json` UTF-8普通文件，精确业务schema作为同seed只读sidecar供Agent读取与自检，仍只有主draft可写；真实seed→result diff若包含schema、Spec、源码、测试、其他owner或symlink即拒绝；只有summary且未形成真实提交也拒绝。程序从提交的精确path/OID读取字节，在JSON解析前以`refs/spex-sync/drafts/<ownerDigest>/<resultCommit>`保活，syntax-invalid同样保留。冷恢复重核seed commit/tree、真实result commit/tree、owner/schema/path/OID/ref及写范围。当前source与已审祖先始终重新建立seed，只overlay旧owner草稿字节，不继承旧工作树；临时文件不进入独审seed、业务candidate或交付。
 

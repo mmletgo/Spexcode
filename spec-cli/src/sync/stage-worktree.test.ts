@@ -58,18 +58,29 @@ for (const defect of ['source', 'test', 'schema', 'context', 'absence', 'index',
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), index)
 })
 
-for (const mode of ['absent', 'seed-draft', 'hidden-source', 'index', 'ignored-draft', 'ignored-draft-symlink', 'parent-symlink', 'dirty-source', 'dirty-draft', 'committed-draft'] as const) test(`stopped worktree ignored-only no-material boundary: ${mode}`, t => {
+for (const mode of ['absent', 'seed-draft', 'hidden-source', 'index', 'ignored-draft', 'ignored-draft-symlink', 'ignored-foreign-draft', 'ignored-foreign-sidecar', 'ignored-foreign-case', 'parent-symlink', 'source-parent-symlink', 'dirty-source', 'dirty-draft', 'committed-draft'] as const) test(`stopped worktree ignored-only no-material boundary: ${mode}`, t => {
   const f = fixture(t), ownerDigest = 'c'.repeat(64), path = `.spex-sync-drafts/${ownerDigest}.json`, schema = '{"type":"object"}'
   const binding = { ownerDigest, path, sourceInputId: 'input', schemaDigest: contentHash(schema) }
   const seed = stageWorktree(f.commonDir, f.parent, overlayStageTree(f.commonDir, f.tree, [
     { path: path.replace('.json', '.schema.json'), source: schema },
     { path: path.replace('.json', '.context.json'), source: '{"readonly":true}' },
     ...(mode === 'seed-draft' ? [{ path, source: '{"original":"immutable"}' }] : []),
+    ...(mode === 'source-parent-symlink' ? [{ path: 'src/nested.mjs', source: 'export const value = 1\n' }] : []),
   ]), 'edit')
   git(f.root, 'checkout', '--detach', seed.baseCommit)
-  writeFileSync(join(f.root, '.git/info/exclude'), `/runtime-cache/\n${mode.startsWith('ignored-draft') ? `/${path}\n` : mode === 'parent-symlink' ? '/.spex-sync-drafts\n' : ''}`)
+  const foreign = mode === 'ignored-foreign-draft' ? '.spex-sync-drafts/foreign.json' : mode === 'ignored-foreign-sidecar' ? '.spex-sync-drafts/foreign.schema.json' : mode === 'ignored-foreign-case' ? '.SPEX-SYNC-DRAFTS/foreign.context.json' : null
+  const ignored = ['/runtime-cache/']
+  if (mode.startsWith('ignored-draft')) ignored.push(`/${path}`)
+  if (foreign) ignored.push(`/${foreign}`, `/${foreign.toLowerCase()}`)
+  if (mode === 'parent-symlink') ignored.push('/.spex-sync-drafts')
+  if (mode === 'source-parent-symlink') ignored.push('/src')
+  writeFileSync(join(f.root, '.git/info/exclude'), ignored.join('\n') + '\n')
   mkdirSync(join(f.root, 'runtime-cache'))
   writeFileSync(join(f.root, 'runtime-cache/retained'), 'ignored run cache')
+  if (foreign) {
+    mkdirSync(join(f.root, foreign, '..'), { recursive: true })
+    writeFileSync(join(f.root, foreign), '{"unauthorized":"different owner"}')
+  }
   if (mode === 'hidden-source') git(f.root, 'update-index', '--assume-unchanged', 'source.mjs')
   if (mode === 'hidden-source' || mode === 'index' || mode === 'dirty-source') {
     writeFileSync(join(f.root, 'source.mjs'), 'unauthorized change\n')
@@ -82,12 +93,18 @@ for (const mode of ['absent', 'seed-draft', 'hidden-source', 'index', 'ignored-d
     renameSync(join(f.root, '.spex-sync-drafts'), join(f.root, 'runtime-cache/drafts'))
     symlinkSync('runtime-cache/drafts', join(f.root, '.spex-sync-drafts'))
   }
+  if (mode === 'source-parent-symlink') {
+    git(f.root, 'update-index', '--assume-unchanged', 'src/nested.mjs')
+    renameSync(join(f.root, 'src'), join(f.root, 'runtime-cache/source'))
+    symlinkSync('runtime-cache/source', join(f.root, 'src'))
+  }
   if (mode === 'committed-draft') { git(f.root, 'add', path); git(f.root, 'commit', '-m', 'real draft progress') }
   const ordinary = git(f.root, '--no-optional-locks', 'status', '--porcelain=v1', '-z', '--untracked-files=all')
   const strict = git(f.root, '--no-optional-locks', 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored')
   const visibleChange = ['index', 'dirty-source', 'dirty-draft'].includes(mode)
   assert.equal(ordinary.length > 0, visibleChange)
   assert.equal(strict.split('\0').filter(Boolean).every(row => row.startsWith('!! ')), !visibleChange)
+  if (foreign) assert(strict.split('\0').some(row => row.toLowerCase() === `!! ${foreign.toLowerCase()}`))
   const index = readFileSync(join(f.root, '.git/index'))
   const head = git(f.root, 'rev-parse', 'HEAD')
   if (mode === 'absent' || mode === 'seed-draft') assert.equal(readStoppedPhysicalDraft(f.commonDir, f.root, seed, binding), null)

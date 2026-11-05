@@ -76,7 +76,8 @@ export function readStoppedPhysicalDraft(commonDir: string, worktreePath: string
   const rows = status.toString('utf8').split('\0').filter(Boolean)
   const ignoredOnly = rows.every(row => row.startsWith('!! '))
   if (ignoredOnly) {
-    if (observedHeadCommit !== seed.baseCommit || observedTree !== seed.tree) invalid()
+    if (observedHeadCommit !== seed.baseCommit || observedTree !== seed.tree
+      || rows.some(row => /^!! \.spex-sync-drafts(?:\/|$)/iu.test(row))) invalid()
   } else if (rows.some(row => !/^(?:\?\?|[ AM]{2}) /.test(row) || row.slice(3) !== binding.path)) invalid()
   const indexPath = resolve(worktreePath, git('rev-parse', '--git-path', 'index').toString().trim()), indexSha256 = contentHash(readFileSync(indexPath))
   const index = git('ls-files', '--stage', '-z').toString('utf8').split('\0').filter(Boolean).map(row => {
