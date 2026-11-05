@@ -3473,7 +3473,8 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
   const claim = f.store.claimQueuedAttempt.bind(f.store)
   const recordFailure = f.store.recordFailure.bind(f.store)
   const listAttempts = f.store.listAttempts.bind(f.store)
-  let immutable: { refs: import('./operation-types.js').BlobRef[]; failure: unknown } | undefined
+  let immutable: { refs: import('./operation-types.js').BlobRef[]; failure: unknown; dispatchPlans: SyncAttempt['dispatchPlans'] } | undefined
+  let missingOwnerOriginal: SyncAttempt | undefined
   f.store.recordFailure = (fence, issue) => {
     const before = f.store.readAttempt(fence.attemptId)
     if (partial && before.number === 1) {
@@ -3550,8 +3551,9 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
       }
     }
     const failed = recordFailure(fence, issue)
+    if (missingOwner && before.number === 3) missingOwnerOriginal = f.store.readAttempt(fence.attemptId)
     if (before.number === 1) {
-      const saved = f.store.readAttempt(fence.attemptId); immutable = { refs: saved.checkpointRefs, failure: saved.failure }
+      const saved = f.store.readAttempt(fence.attemptId); immutable = { refs: saved.checkpointRefs, failure: saved.failure, dispatchPlans: saved.dispatchPlans }
       if (pending && !sibling && issue.code === 'generation_failed') {
         const operation = f.store.readOperation(f.operation.id)
         const broken = claim({ operationId: operation.id, source: operation.input.source, scope: operation.scope, leaseMs: 30000, expectedRevision: operation.revision, continuation: true })
@@ -3675,7 +3677,7 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
     const find = f.store.findResource.bind(f.store), key = input.requestKey + ':code_review', resource = find(attempts[0].id, key)!
     for (const patch of [{ phase: 'terminal' as const }, { checkpointRef: writeEvidence(f.input.source.commonDir, { ...checkpoint, stop: { ...checkpoint.stop, nativeStopped: false } }) }, { checkpointRef: writeEvidence(f.input.source.commonDir, { ...checkpoint, failure: { ...checkpoint.failure, rejectedOutput: { ...checkpoint.failure!.rejectedOutput, threadId: 'foreign-owner' } } }) }]) {
       f.store.findResource = (attemptId, requestKey) => attemptId === attempts[0].id && requestKey === key ? { ...resource, ...patch } : find(attemptId, requestKey)
-      if ('checkpointRef' in patch && JSON.parse(readEvidence(f.input.source.commonDir, patch.checkpointRef!).toString()).failure?.rejectedOutput?.threadId === 'foreign-owner') assert.throws(() => proof(), /原请求、失败身份|exact request/); else assert.equal(proof(), null, '未知停止或跨owner原文不能取得诊断权限')
+      if ('checkpointRef' in patch && JSON.parse(readEvidence(f.input.source.commonDir, patch.checkpointRef!).toString()).failure?.rejectedOutput?.threadId === 'foreign-owner') assert.throws(() => proof(), { code: 'checkpoint_artifact_binding', message: 'raw的原失败身份不匹配' }); else assert.equal(proof(), null, '未知停止或跨owner原文不能取得诊断权限')
     }
     f.store.findResource = find
     assert.equal(f.store.listJournals(f.operation.id).length, 0)
@@ -3698,6 +3700,7 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
       assert.equal(result.candidateValidated, true)
       assert.deepEqual(readTree(f.input.source.commonDir, result.candidate.tree).filter(entry => !entry.path.startsWith('.spec/')), snapshotObjects, '实际候选源码/tests path-mode-OID-absence不变')
     }
+    for (const values of wrappers.slice(1)) assert.deepEqual(values.find(stage => stage.stage === 'partition-plan')?.resultRef, wrappers[0].find(stage => stage.stage === 'partition-plan').resultRef, '普通P2失败沿原已审P1分区计划，不能把局部analysis重建为whole')
     const accepted = wrappers[1].filter(stage => stage.stage?.endsWith(':candidate-review') && JSON.parse(readEvidence(f.input.source.commonDir, stage.resultRef).toString()).reviewPassed)
     assert.equal(accepted.length, 3)
     for (const saved of accepted) {
@@ -3778,14 +3781,47 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
     }
     return
   }
-  if (crossSource || missingOwner) { assert.equal(result.failure?.code, 'readonly_spec_repair_binding'); assert.equal(f.store.listAttempts(f.operation.id).length, 4); assert.equal(ownerCalls.some(call => call.attempt === 4), false); return }
+  if (crossSource) { assert.equal(result.failure?.code, 'readonly_spec_repair_binding'); assert.equal(f.store.listAttempts(f.operation.id).length, 4); assert.equal(ownerCalls.some(call => call.attempt === 4), false); return }
+  if (missingOwner) {
+    assert.equal(result.status, 'unsupported')
+    assert.equal(result.failure?.code, 'checkpoint_artifact_binding')
+    assert.match(result.failure!.message, /聚合rounds必须是原partitionEvidence局部结果的精确有序并集/)
+    const attempts = f.store.listAttempts(f.operation.id)
+    assert.equal(attempts.length, 3, '缺失聚合owner在领取A4前强认证拒绝')
+    assert.equal(ownerCalls.some(call => call.attempt >= 4), false)
+    assert.deepEqual(attempts[0].checkpointRefs, immutable!.refs); assert.deepEqual(attempts[0].failure, immutable!.failure); assert.deepEqual(attempts[0].dispatchPlans, immutable!.dispatchPlans)
+    assert.deepEqual(attempts[2].checkpointRefs, missingOwnerOriginal!.checkpointRefs); assert.deepEqual(attempts[2].failure, missingOwnerOriginal!.failure); assert.deepEqual(attempts[2].dispatchPlans, missingOwnerOriginal!.dispatchPlans, '当前拒绝不改签损坏A3原件或新增dispatch')
+    assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+    assert.deepEqual(readTree(f.input.source.commonDir, f.input.immutableTree).filter(entry => !entry.path.startsWith('.spec/')), snapshotObjects)
+    assert.equal(f.store.listJournals(f.operation.id).length, 0)
+    return
+  }
   if (invalidBase) { assert.equal(result.failure?.code, 'readonly_spec_repair_binding'); assert.equal(f.store.listAttempts(f.operation.id).length, 5); assert.equal(ownerCalls.some(call => call.attempt === 5), false); return }
+  if (['wrong-ref', 'unaffected-ref', 'input-digest'].includes(mode)) {
+    assert.equal(result.status, 'unsupported')
+    assert.equal(result.failure?.code, 'checkpoint_artifact_binding')
+    assert.match(result.failure!.message, mode === 'input-digest' ? /聚合诊断必须保留原局部身份或精确重算全局输入/ : /聚合rounds必须是原partitionEvidence局部结果的精确有序并集/)
+    const attempts = f.store.listAttempts(f.operation.id)
+    assert.equal(attempts.length, 1, '损坏原件在领取下一attempt前强认证拒绝')
+    assert.equal(ownerCalls.filter(call => call.attempt > 1).length, 0)
+    assert.deepEqual(attempts[0].checkpointRefs, immutable!.refs); assert.deepEqual(attempts[0].failure, immutable!.failure, '本次拒因不能改签旧持久failure')
+    assert.deepEqual(attempts[0].dispatchPlans, immutable!.dispatchPlans, '强认证拒绝不派发新Native任务')
+    assert.equal(attempts[0].failure?.code, 'generation_failed')
+    assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+    assert.deepEqual(readTree(f.input.source.commonDir, f.input.immutableTree).filter(entry => !entry.path.startsWith('.spec/')), snapshotObjects)
+    assert.equal(f.store.listJournals(f.operation.id).length, 0)
+    return
+  }
   if (negative) { assert.equal(finalReview, false); assert.equal(f.store.listAttempts(f.operation.id).length, 2); assert.equal(ownerCalls.filter(call => call.attempt > 1).length, 0); assert.notEqual(result.failure?.kind, 'repairable', JSON.stringify(result.failure)); assert.ok(['failed', 'unsupported'].includes(result.status), JSON.stringify(result.failure)); return }
   assert.ok(finalReview, JSON.stringify({ failure: result.failure, calls: ownerCalls, failures: f.store.listAttempts(f.operation.id).map(attempt => attempt.failure) }))
   const second = pending ? 4 : aggregateOnly || mode === 'review-resume' ? 3 : 2
   for (const owner of badOwners) assert.deepEqual(ownerCalls.filter(call => call.attempt > 1 && call.nodeId === owner.nodeId).map(({ attempt, purpose }) => [attempt, purpose]), partial ? [[second, 'elaboration_generate'], [second, 'elaboration_review']] : lineage ? [[4, 'elaboration_generate'], [4, 'elaboration_review'], [5, 'elaboration_generate'], [5, 'elaboration_review']] : pending || mode === 'review-p1-fail' && owner !== badOwner ? [[second, 'elaboration_generate'], [second, 'elaboration_review']] : [[second, 'elaboration_generate'], [second, 'elaboration_review'], [mode === 'review-rebind-native' ? 4 : second + 1, 'elaboration_generate'], [mode === 'review-rebind-native' ? 4 : second + 1, 'elaboration_review']])
   const attempts = f.store.listAttempts(f.operation.id)
   const stages = attempts.map(attempt => attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())))
+  for (const values of stages.slice(1)) {
+    const plan = values.find(stage => stage.stage === 'partition-plan')
+    if (plan) assert.deepEqual(plan.resultRef, stages[0].find(stage => stage.stage === 'partition-plan').resultRef, '已审whole后普通P2失败仍保原局部plan/analysis身份')
+  }
   for (const source of stages[0].filter(stage => stage.stage?.startsWith('partition:') && stage.stage.endsWith(':elaboration'))) {
     const prior = JSON.parse(readEvidence(f.input.source.commonDir, source.resultRef).toString()) as ElaborationResult
     if (prior.changes.some(change => badOwners.some(owner => owner.nodeId === change.nodeId))) continue

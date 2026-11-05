@@ -56,6 +56,8 @@ resource-only入口按 [[sync-source-registration]] 使用专用raw Git登记元
 
 只读候选续修来源的资格重验以原generation wrapper保存的readSet/selection恢复原冻结语境，再沿既有仅追加null资源的选择桥核当前合法性；后续已审P1新增ID不能让先前真实诊断失去资格，也不能重写旧wrapper/hash。真实原绑定改值、删除、非null扩展、source/input/policy不符继续拒绝；通用partition loader仍要求当前精确绑定。新whole候选的P2原生失败或再次语义repair都保留最新合法已审owner链，继续最终独审与V1–V4，不回退旧候选。
 
+同operation已审whole经过原composed、完整局部owner及合法null扩域证明后，普通P2失败沿原partition-plan继续，不因扩展后的readPaths重建分区身份或把局部analysis替为whole。历史只读诊断重验显式使用原wrapper的selection，默认局部loader仍核当前严格选择；接受缓存先验证传入selection自身完整摘要，不以store中的有效选择遮蔽损坏输入。旧原件、请求摘要及业务授权不改签，局部候选重新seal，后续P2与V1–V4保持。
+
 并行分析异常保留全部已在途分区的完整原错误，按partitionId保存原proposal/程序校验/review诊断，并等待在途结算；主错误不能遮蔽其它未知资源或不可修复错误。只有全部错误均属于原允许的业务/结构修复，或原生接缝已精确确认notStarted且terminal→removed的SettledSessionCreateTimeoutError时，才进入原attempt/calls/repairs及绝对deadline内的有限自动修复。普通timeout、未知/未结算资源、绑定及保存错误不因此取得自动续修权。相同operation经明确pause→resume启动的新attempt时，仍可从该operation、同摘要的分区失败stage恢复 `behavior_analysis_invalid` / `behavior_review_failed` 原件，只按partitionId投影到对应分区；不把unsupported或其他基础设施错误作为模型诊断，不取得自动重试资格。下一attempt仅向对应失败分区重送该区历史诊断，已accept区不被兄弟诊断改变摘要；失败原件不是事实或批准。
 
 P2 的 V1 从核验后的实际 candidate tree 重建完整业务契约及必要代码/测试的 UTF-8 普通文件正文，并把同树完整 entry 路径清单交给 [[sync-frozen-contracts]]。宿主私有路径、符号链接和非 UTF-8 对象不进入正文；模型局部读集不代替全局结构图，也不扩大 Agent 任务、ready、写范围或验证政策。错误 related/code/one-govern 及真实全局覆盖缺口在生成修复阶段拒绝，不推进 V2、V3 或 apply journal。
