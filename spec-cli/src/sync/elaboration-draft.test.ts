@@ -44,10 +44,15 @@ async function fixture(t: test.TestContext) {
     const workspace = join(root, `wt-${requests.length}`); workspaces.push(workspace)
     git(root, 'worktree', 'add', '--detach', workspace, seed.baseCommit)
     if (request.purpose === 'elaboration_generate') {
+      assert.match(request.prompt, /Native final与业务草稿JSON是两份不同内容.*形式为\{"summary":"简短处理摘要"\}.*final前后不附说明.*Markdown代码围栏/s)
       const draftPath = /草稿文件=([^\s]+)/.exec(request.prompt)![1]
       assert.deepEqual(request.schema, { type: 'object', additionalProperties: false, properties: { summary: { type: 'string' } }, required: ['summary'] })
       const schemaPath = /草稿业务schema只读文件=([^；]+)/.exec(request.prompt)![1]
-      assert.equal(JSON.parse(readFileSync(join(workspace, schemaPath), 'utf8')).type, 'object')
+      const businessSchema = JSON.parse(readFileSync(join(workspace, schemaPath), 'utf8')) as Record<string, unknown>
+      const businessProperties = businessSchema.properties as Record<string, unknown>
+      assert.deepEqual(Object.keys(businessProperties).sort(), ['applicability', 'changes', 'version'])
+      assert.deepEqual(businessProperties.version, { enum: ['elaboration-target-rows-v3'] }, '只读sidecar保留原业务行schema')
+      assert.notDeepEqual(request.schema, businessSchema, 'Native final使用独立的summary回执schema')
       assert.match(request.prompt, /禁止修改schema/)
       const text = generate(request, workspace, draftPath)
       mkdirSync(dirname(join(workspace, draftPath)), { recursive: true }); writeFileSync(join(workspace, draftPath), text)

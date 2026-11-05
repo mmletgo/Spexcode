@@ -26,6 +26,8 @@ P0至P5按完整需求交付，不以阶段演示、局部测试或可修改的�
 
 正式retryOf换模型或恢复其后暂停的同一操作时，未批准P0/P1草稿和精确后置质疑沿同输入/source、原意、policy、readSet、selection/scope及分区plan/owner的正式祖先链取源。原Native和Git/schema/ref按原operation/attempt认证，未认证新稿不遮蔽更早合格原稿；只将精确schema匹配的原JSON字节放入新seed，旧只读成功输出标为native_output临时材料，不继承ready/accept或回签旧失败。新分析及独审、当前操作预算与最终V1–V4/采纳门保持，schema选源回调仅在进程内，不新增DB版本。材料迁接沿原v6 worktree read/edit传输协议，不将无worktree旧frozen热升级；已认证Git稿命中后不再混入备选Native诊断或来源。review格式拒绝原文仅作审查诊断，业务稿仍绑定已认证generation。
 
+P0/P1草稿业务JSON写入真实Git草稿文件；Native final是独立回执，只返回符合`DRAFT_RECEIPT_SCHEMA`的单一JSON对象，形如`{"summary":"..."}`，前后不附说明或Markdown代码围栏。业务schema仍是只读sidecar，Native schema、严格解析及旧saved/reserved请求的完整原件绑定不变；fake runner的提示合同不等于真实模型的遵循保证。
+
 失败findings的原条目、路径与严重级别必须跨草稿检查点及实际续修caller保真，不能把同码同文问题压成无法定位的重复文字。已渲染候选的完整失败只沿认证原件作为诊断继续传递，不变成旧seed、原意或新授权；历史短errors原件不回写。
 
 P1后置门禁对已审P0分类的质疑须精确绑定原真实变更owner、affectedIds与原分析/候选证据，在同operation和预算内重新分析及独审；可重判合法细节变化或维持refactor恢复错误候选，程序不改变分类或扩大AC/VERIFY权限。新分析使依赖P1重绑，兄弟P0保持；格式失败只续原文件与失败环节，同绑定的历史完整findings只作诊断，旧稿、引用和reserved请求不补写。

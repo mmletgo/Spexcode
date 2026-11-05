@@ -2629,6 +2629,7 @@ for (const contextTransport of [undefined, 'git-json-v1'] as const) for (const p
   const requests: string[] = []
   const run: ElaborationRunner = async request => {
     requests.push(request.purpose)
+    assert.match(request.prompt, /Native final与业务草稿JSON是两份不同内容.*形式为\{"summary":"简短处理摘要"\}.*final前后不附说明.*Markdown代码围栏/s)
     const seed = request.worktree!
     assert.equal(seed.mode, 'edit', '仅指定JSON临时稿允许写入，业务文件保持只读')
     const draftPath = /草稿文件=([^\s；]+)/.exec(request.prompt)![1]
@@ -2637,6 +2638,7 @@ for (const contextTransport of [undefined, 'git-json-v1'] as const) for (const p
     git(f.root, 'worktree', 'add', '--detach', workspace, seed.baseCommit)
     const schema = JSON.parse(readFileSync(join(workspace, schemaPath), 'utf8')) as Record<string, unknown>
     assert.deepEqual(request.schema, { type: 'object', additionalProperties: false, properties: { summary: { type: 'string' } }, required: ['summary'] })
+    assert.notDeepEqual(request.schema, schema, 'Native final的summary回执schema与业务JSON schema分离')
     const { readCodeBehaviorContext } = await import('./code-behavior.js')
     const context = readCodeBehaviorContext(request, input.snapshot.source.commonDir)
     const brief = context.task as { requiredChangedPaths: string[] }
