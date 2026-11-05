@@ -2801,7 +2801,7 @@ test('v2 code→Spec协调器保留分区证据并跳过代码生成，最终候
   assert.equal(f.store.listJournals(f.operation.id).length, 0)
 })
 
-for (const mode of ['repair', 'drop-id', 'author-ac', 'pause-empty', 'pause-selection', 'pause-candidate', 'pause-dispatch', 'later-approved', 'unchanged', 'missing-owner', 'local-ref', 'candidate', 'candidate-locals', 'round-review', 'composed', 'legacy-composed', 'input', 'policy', 'plan', 'readset', 'selection', 'unroutable'] as const) test(`全局seal拒绝已accept父REQ ${mode} 真实返修或typed停止，不零调用复播`, async t => {
+for (const mode of ['repair', 'drop-id', 'author-ac', 'new-parent-error', 'parent-missing-source', 'pause-empty', 'pause-selection', 'pause-candidate', 'pause-dispatch', 'later-approved', 'unchanged', 'missing-owner', 'local-ref', 'candidate', 'candidate-locals', 'round-review', 'composed', 'legacy-composed', 'input', 'policy', 'plan', 'readset', 'selection', 'unroutable'] as const) test(`全局seal拒绝已accept父REQ ${mode} 真实返修或typed停止，不零调用复播`, async t => {
   const parentPath = '.spec/project/spec.md'
   const parent = '---\ntitle: 导出共享接口\n---\n\n## raw source\n\n保留现有导出能力与模块分工，完成既有导出主流程。\n\n## expanded spec\n'
   const precise = ['later-approved', 'selection'].includes(mode)
@@ -2809,9 +2809,10 @@ for (const mode of ['repair', 'drop-id', 'author-ac', 'pause-empty', 'pause-sele
   const f = await fixture(t, { maxAttempts: 4, maxCalls: 32, maxRepairs: 3, timeoutMs: 120000 }, false, source, 'project', original,
     { version: 'sync-coordinator-v2', direction: 'spec_to_code', intentNodeId: 'project', targets: [{ nodeId: 'project', path: parentPath }, { nodeId: 'export-contract', path: contractPath }], sourcePaths: ['src/export.js'], ...(['later-approved', 'selection'].includes(mode) ? { executionScope: { paths: [parentPath, contractPath, 'src/export.js'], contractIds: [], flowIds: [] } } : {}), partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 } }, undefined, 'spec', undefined, ['later-approved', 'selection'].includes(mode), { [parentPath]: parent })
   const owners: { attempt: number; nodeId: string; purpose: string }[] = []
+  let rejectedSource: { attempt: SyncAttempt; evidence: { ref: { sha256: string }; bytes: Buffer }[] } | undefined
   const recordFailure = f.store.recordFailure.bind(f.store)
   f.store.recordFailure = (fence, issue) => {
-    if (f.store.readAttempt(fence.attemptId).number === 1 && !mode.startsWith('pause-') && !['repair', 'drop-id', 'author-ac', 'later-approved', 'unchanged'].includes(mode)) {
+    if (f.store.readAttempt(fence.attemptId).number === 1 && !mode.startsWith('pause-') && !['repair', 'drop-id', 'author-ac', 'new-parent-error', 'parent-missing-source', 'later-approved', 'unchanged'].includes(mode)) {
       const wrappers = f.store.readAttempt(fence.attemptId).checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
       const wrapper = wrappers.find(stage => ['input', 'policy'].includes(mode) ? stage.stage?.startsWith('partition:') && stage.stage.endsWith(':elaboration') : stage.stage === (mode === 'plan' ? 'partition-plan' : 'elaboration'))
       const result = JSON.parse(readEvidence(f.input.source.commonDir, wrapper.resultRef).toString())
@@ -2844,6 +2845,10 @@ for (const mode of ['repair', 'drop-id', 'author-ac', 'pause-empty', 'pause-sele
       f.store.checkpoint(fence, resultRef); f.store.checkpoint(fence, writeEvidence(f.input.source.commonDir, { ...wrapper, resultRef }))
     }
     const result = recordFailure(fence, issue)
+    if (['missing-owner', 'local-ref', 'round-review'].includes(mode)) {
+      const attempt = f.store.readAttempt(fence.attemptId)
+      rejectedSource = { attempt, evidence: attempt.checkpointRefs.flatMap(ref => [ref, ...ref.artifacts?.map(artifact => artifact.ref) ?? []]).map(ref => ({ ref, bytes: readEvidence(f.input.source.commonDir, ref) })) }
+    }
     if (f.store.readAttempt(fence.attemptId).number !== 1 || !mode.startsWith('pause-')) return result
     f.store.requestControl(f.operation.id, 'pause'); f.store.requestControl(f.operation.id, 'run')
     const empty = f.store.claimAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.store.readOperation(f.operation.id).scope, leaseMs: 30000 }).attempt
@@ -2862,19 +2867,26 @@ for (const mode of ['repair', 'drop-id', 'author-ac', 'pause-empty', 'pause-sele
     const attempt = f.store.readAttempt(f.store.readOperation(f.operation.id).currentAttemptId!)
     if (request.purpose === 'code_behavior_analyze' && precise) return { ...(output as object), changes: (output as { changes: object[] }).changes.map(change => ({ ...change, kind: 'allowed_change', affectedIds: [], ruleIds: [] })) }
     if (request.purpose.startsWith('elaboration_')) {
-      const frozen = JSON.parse(request.prompt.split('冻结业务输入:\n')[1].split('\n')[0]) as { targets: { nodeId: string }[]; readonlySpecRepair?: { kind: string; findings: { code: string; severity: string }[] } }
+      const frozen = JSON.parse(request.prompt.split('冻结业务输入:\n')[1].split('\n')[0]) as { targets: { nodeId: string }[]; files: [string, string][]; readonlySpecRepair?: { kind: string; findings: { code: string; severity: string }[] } }
       const nodeId = frozen.targets[0].nodeId
       owners.push({ attempt: attempt.number, nodeId, purpose: request.purpose })
       if (attempt.number > 1) {
+        assert.equal(Object.hasOwn(frozen, 'partitionSealFiles'), false, '完整程序校验文件不得成为模型输入或业务摘要')
+        if (nodeId === 'project') assert.equal(new Map(frozen.files).has('src/export.js'), false, '父接口仍保原局部任务投影')
         assert.equal(frozen.readonlySpecRepair?.kind, attempt.number === 3 && mode === 'later-approved' ? 'candidate_review' : 'partition_seal')
-        if (attempt.number === 2) assert.ok(frozen.readonlySpecRepair.findings.some(finding => finding.code === 'missing-requirement-flow'))
+        if (attempt.number === 2) assert.ok(frozen.readonlySpecRepair.findings.some(finding => finding.code === (mode === 'parent-missing-source' ? 'missing-source-file' : 'missing-requirement-flow')))
         assert.ok(frozen.readonlySpecRepair.findings.every(finding => finding.severity === 'error'))
       }
       if (request.purpose === 'elaboration_review') return output
-      if (nodeId === 'project') return { version: 'elaboration-rows-v2', changes: [{ nodeId, path: parentPath, title: '导出共享接口', description: '', code: [], related: [], prose: '', removeIds: [], tables: { ...Object.fromEntries(Object.keys(CONTRACT_COLUMNS).map(kind => [kind, []])), REQ: mode === 'drop-id' && attempt.number > 1 ? [] : [{ id: 'REQ-PARENT-SEAL', goal: '保留既有导出模块分工与主流程', source: 'user:raw', constraints: '不改变现有行为', success: '导出主流程完成', 'depends-on': [] }] } }], applicability: rows(original).applicability.map(entry => ({ ...entry, affectedIds: ['REQ-PARENT-SEAL'] })) }
+      if (nodeId === 'project') {
+        const parentRows: GeneratedElaboration = { version: 'elaboration-rows-v2', changes: [{ nodeId, path: parentPath, title: '导出共享接口', description: '', code: [], related: [], prose: '', removeIds: [], tables: { ...(Object.fromEntries<Record<string, ContractCell>[]>(Object.keys(CONTRACT_COLUMNS).map(kind => [kind, []])) as GeneratedTables), REQ: mode === 'drop-id' && attempt.number > 1 ? [] : [{ id: 'REQ-PARENT-SEAL', goal: '保留既有导出模块分工与主流程', source: 'user:raw', constraints: '不改变现有行为', success: '导出主流程完成', 'depends-on': [] }, ...(mode === 'new-parent-error' && attempt.number > 1 ? [{ id: 'REQ-PARENT-NEW', goal: '保留既有导出主流程', source: 'user:raw', constraints: '不改变现有行为', success: '导出主流程完成', 'depends-on': [] }] : [])] } }], applicability: rows(original).applicability.map(entry => ({ ...entry, affectedIds: ['REQ-PARENT-SEAL'] })) }
+        if (mode === 'parent-missing-source') parentRows.changes[0].tables.RULE.push({ id: 'RULE-PARENT-SOURCE', scope: '导出主流程', constraint: '保持既有导出行为', basis: '冻结实现', authority: 'project', source: 'code:src/actually-absent.js#X', 'depends-on': ['REQ-PARENT-SEAL'] })
+        return parentRows
+      }
       const next = rows(original)
       next.changes[0].tables.AC.push({ ...next.changes[0].tables.AC[0], id: 'AC-EXPORT-SEAL', source: 'derived:REQ-PARENT-SEAL', covers: ['REQ-PARENT-SEAL'], 'depends-on': ['REQ-PARENT-SEAL'] })
-      if (attempt.number > 1 && mode !== 'unchanged') next.changes[0].tables.FLOW[0].req = [...next.changes[0].tables.FLOW[0].req as string[], 'REQ-PARENT-SEAL']
+      if (mode === 'parent-missing-source') next.changes[0].tables.AC.at(-1)!.covers = ['REQ-PARENT-SEAL', 'RULE-PARENT-SOURCE']
+      if (attempt.number > 1 && mode !== 'unchanged' || mode === 'parent-missing-source') next.changes[0].tables.FLOW[0].req = [...next.changes[0].tables.FLOW[0].req as string[], 'REQ-PARENT-SEAL']
       if (attempt.number > 1 && mode === 'author-ac') next.changes[0].tables.AC[0].assertion = '弱化作者既有断言以迎合seal诊断'
       return next
     }
@@ -2885,7 +2897,7 @@ for (const mode of ['repair', 'drop-id', 'author-ac', 'pause-empty', 'pause-sele
     }
     return output
   })
-  await runSyncOperation(f.store, f.operation.id, f.options)
+  const result = await runSyncOperation(f.store, f.operation.id, f.options)
   const attempts = f.store.listAttempts(f.operation.id)
   const firstStages = attempts[0].checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
   assert.ok(firstStages.some(stage => stage.stage === 'elaboration'), JSON.stringify(attempts.map(attempt => attempt.failure)))
@@ -2893,6 +2905,62 @@ for (const mode of ['repair', 'drop-id', 'author-ac', 'pause-empty', 'pause-sele
   assert.equal(attempts[0].failure?.code, 'partition_final_seal_failed', JSON.stringify(firstAggregate.rounds.flatMap(round => round.findings).filter(finding => finding.severity === 'error')))
   assert.equal(firstAggregate.reviewPassed, true)
   assert.equal(firstAggregate.partitionSeal?.passed, false)
+  if (mode === 'parent-missing-source') {
+    assert.equal(existsSync(join(f.root, 'src/actually-absent.js')), false)
+    assert.deepEqual(firstAggregate.partitionSeal!.findings.filter(issue => issue.severity === 'error').map(({ code, nodeId, path, itemId }) => ({ code, nodeId, path, itemId })), [{ code: 'missing-source-file', nodeId: 'project', path: parentPath, itemId: 'RULE-PARENT-SOURCE' }], '原并集只保父自身来源错误，叶已承接全部父REQ/RULE完成性')
+    assert.equal(attempts.length, 4)
+    assert.deepEqual(owners.filter(owner => owner.attempt > 1), attempts.slice(1).map(attempt => ({ attempt: attempt.number, nodeId: 'project', purpose: 'elaboration_generate' })), '父自身代码来源未修，不得进入新父独审或转交只读后代')
+    for (const attempt of attempts.slice(1)) {
+      const wrappers = attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
+      const rejected = JSON.parse(readEvidence(f.input.source.commonDir, wrappers.find(stage => stage.stage === 'elaboration').resultRef).toString()) as ElaborationResult
+      assert.equal(attempt.failure?.code, 'repair_budget_exhausted')
+      assert.equal(rejected.partitionSeal, undefined)
+      assert.equal(rejected.reviewPassed, false); assert.equal(rejected.rounds.at(-1)!.review, null)
+      assert.ok(rejected.rounds.flatMap(round => round.findings).some(issue => issue.code === 'missing-source-file' && issue.nodeId === 'project' && issue.path === parentPath && issue.itemId === 'RULE-PARENT-SOURCE'))
+    }
+    assert.equal(f.store.readOperation(f.operation.id).callsUsed, 7)
+    assert.deepEqual(f.store.readOperation(f.operation.id).budget, f.operation.budget)
+    assert.ok(attempts.every(attempt => attempt.candidate === null && attempt.verification === null))
+    assert.equal(f.store.listJournals(f.operation.id).length, 0)
+    assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
+    assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+    assert.deepEqual(readFileSync(join(f.root, 'tests/export.test.mjs')), readFileSync(new URL('tests/export.test.mjs', fixturePath)))
+    return
+  }
+  if (mode === 'new-parent-error') {
+    assert.equal(attempts.length, 4)
+    for (const attempt of attempts.slice(1)) {
+      const wrappers = attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
+      const rejected = JSON.parse(readEvidence(f.input.source.commonDir, wrappers.find(stage => stage.stage === 'elaboration').resultRef).toString()) as ElaborationResult
+      assert.equal(attempt.failure?.code, 'repair_budget_exhausted')
+      assert.equal(rejected.partitionSeal, undefined)
+      assert.ok(rejected.rounds.flatMap(round => round.findings).some(issue => issue.code === 'missing-requirement-flow' && issue.itemId === 'REQ-PARENT-NEW'))
+      assert.deepEqual(owners.filter(owner => owner.attempt === attempt.number), [{ attempt: attempt.number, nodeId: 'project', purpose: 'elaboration_generate' }], '新跨owner完成性错误仍须在父独审前阻断')
+    }
+    assert.equal(f.store.readOperation(f.operation.id).callsUsed, owners.length)
+    assert.ok(attempts.every(attempt => attempt.candidate === null && attempt.verification === null))
+    assert.equal(f.store.listJournals(f.operation.id).length, 0)
+    assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
+    assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+    assert.deepEqual(readFileSync(join(f.root, 'tests/export.test.mjs')), readFileSync(new URL('tests/export.test.mjs', fixturePath)))
+    return
+  }
+  if (['missing-owner', 'local-ref', 'round-review'].includes(mode)) {
+    assert.equal(result.status, 'unsupported')
+    assert.equal(result.failure?.code, 'checkpoint_artifact_binding')
+    assert.equal(result.failure?.kind, 'unsupported')
+    assert.equal(result.failure?.message, '聚合rounds必须是原partitionEvidence局部结果的精确有序并集')
+    assert.ok(rejectedSource)
+    assert.deepEqual(attempts, [rejectedSource.attempt], 'claim前拒绝须保持旧已结算attempt，不创建或改签attempt')
+    for (const { ref, bytes } of rejectedSource.evidence) assert.deepEqual(readEvidence(f.input.source.commonDir, ref), bytes)
+    assert.equal(owners.some(owner => owner.attempt > 1), false)
+    assert.equal(attempts[0].candidate, null); assert.equal(attempts[0].verification, null)
+    assert.equal(f.store.listJournals(f.operation.id).length, 0)
+    assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
+    assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+    assert.deepEqual(readFileSync(join(f.root, 'tests/export.test.mjs')), readFileSync(new URL('tests/export.test.mjs', fixturePath)))
+    return
+  }
   if (['drop-id', 'author-ac'].includes(mode)) {
     const stages = attempts[1].checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
     const rejected = JSON.parse(readEvidence(f.input.source.commonDir, stages.find(stage => stage.stage === 'elaboration').resultRef).toString()) as ElaborationResult
@@ -2913,9 +2981,38 @@ for (const mode of ['repair', 'drop-id', 'author-ac', 'pause-empty', 'pause-sele
   assert.ok(owners.some(owner => owner.attempt === retryNumber && owner.nodeId === 'project' && owner.purpose === 'elaboration_review'))
   if (mode === 'unchanged') {
     assert.equal(attempts.length, 4)
-    assert.ok(attempts.every(attempt => attempt.dispatchPlans.filter(dispatch => dispatch.purpose.startsWith('elaboration_')).length === 4))
-    assert.equal(f.store.readOperation(f.operation.id).callsUsed, 16)
-    assert.ok(attempts.every(attempt => attempt.failure?.code === 'partition_final_seal_failed'))
+    assert.deepEqual(attempts.map(attempt => attempt.dispatchPlans.filter(dispatch => dispatch.purpose.startsWith('elaboration_')).length), [4, 3, 1, 1])
+    assert.equal(f.store.readOperation(f.operation.id).callsUsed, 9)
+    assert.deepEqual(f.store.readOperation(f.operation.id).budget, f.operation.budget)
+    const parentKey = firstStages.find(stage => stage.stage?.startsWith('partition:') && stage.stage.endsWith(':elaboration') && (JSON.parse(readEvidence(f.input.source.commonDir, stage.resultRef).toString()) as ElaborationResult).phase === 'interface_seed').stage
+    const leafKey = firstStages.find(stage => stage.stage?.startsWith('partition:') && stage.stage.endsWith(':elaboration') && (JSON.parse(readEvidence(f.input.source.commonDir, stage.resultRef).toString()) as ElaborationResult).changes.some(change => change.nodeId === 'export-contract')).stage
+    const repairedParentStages = attempts[1].checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
+    const parentRef = repairedParentStages.find(stage => stage.stage === parentKey).resultRef
+    const parent = JSON.parse(readEvidence(f.input.source.commonDir, parentRef).toString()) as ElaborationResult
+    assert.equal(parent.phase, 'interface_seed'); assert.equal(parent.structurePassed, true); assert.equal(parent.reviewPassed, true)
+    assert.equal(parent.rounds.at(-1)!.review?.verdict, 'accept')
+    for (const attempt of attempts.slice(1)) {
+      const wrappers = attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
+      const rejected = JSON.parse(readEvidence(f.input.source.commonDir, wrappers.find(stage => stage.stage === 'elaboration').resultRef).toString()) as ElaborationResult
+      const leaf = JSON.parse(readEvidence(f.input.source.commonDir, wrappers.find(stage => stage.stage === leafKey).resultRef).toString()) as ElaborationResult
+      assert.equal(attempt.failure?.code, 'repair_budget_exhausted')
+      assert.equal(rejected.structurePassed, false)
+      assert.equal(rejected.partitionSeal?.passed, false, '叶未消原错误仍须由strict全图seal明确拒绝')
+      assert.ok(rejected.partitionSeal!.findings.some(issue => issue.code === 'missing-requirement-flow' && issue.itemId === 'REQ-PARENT-SEAL'))
+      assert.equal(rejected.reviewPassed, false); assert.equal(leaf.reviewPassed, false); assert.equal(leaf.rounds.at(-1)!.review, null)
+      assert.ok(leaf.rounds.flatMap(round => round.findings).some(issue => issue.code === 'missing-requirement-flow' && issue.itemId === 'REQ-PARENT-SEAL'))
+      assert.deepEqual(owners.filter(owner => owner.attempt === attempt.number && owner.nodeId === 'export-contract'), [{ attempt: attempt.number, nodeId: 'export-contract', purpose: 'elaboration_generate' }], '真实叶返修必须派发，但原assigned错误未消前不得独审')
+      if (attempt.number > 2) {
+        assert.equal(wrappers.find(stage => stage.stage === parentKey).resultRef.sha256, parentRef.sha256)
+        const provenance = JSON.parse(readEvidence(f.input.source.commonDir, wrappers.find(stage => stage.stage === `${parentKey}:provenance`).resultRef).toString())
+        assert.equal(provenance.fromAttemptId, attempts[1].id); assert.equal(provenance.resultRef.sha256, parentRef.sha256)
+      }
+    }
+    assert.ok(attempts.every(attempt => attempt.candidate === null && attempt.verification === null))
+    assert.equal(f.store.listJournals(f.operation.id).length, 0)
+    assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
+    assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+    assert.deepEqual(readFileSync(join(f.root, 'tests/export.test.mjs')), readFileSync(new URL('tests/export.test.mjs', fixturePath)))
     return
   }
   const stages = attempts[retryNumber - 1].checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))

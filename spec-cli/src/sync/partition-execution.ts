@@ -309,6 +309,19 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
   const { signal, ...data } = input
   input = { ...structuredClone(data), signal }; plan = structuredClone(plan); composed = composed && structuredClone(composed)
   const commonDir = input.historyInput!.source.commonDir
+  let sealInput = input
+  if (composed) {
+    const files = new Map(input.files), readPaths = unique(plan.partitions.flatMap(partition => partition.readPaths))
+    for (const entry of readTree(commonDir, composed.tree)) {
+      if (files.has(entry.path) || within(entry.path, readPaths) || isHostPrivatePath(entry.path) || entry.mode === '120000') continue
+      const bytes = readObject(commonDir, entry.oid)
+      if (isUtf8Text(bytes)) files.set(entry.path, bytes.toString('utf8'))
+    }
+    const frozen = await readFrozenContracts(input.root, files)
+    const excluded = new Set([...input.targets, ...input.context ?? []].map(source => source.path))
+    for (const change of input.nodeChanges ?? []) { excluded.add(change.from.path); if (change.action === 'move') excluded.add(change.to.path) }
+    sealInput = { ...input, files, context: [...input.context ?? [], ...frozen.nodes.filter(node => !excluded.has(node.path)).map(node => ({ nodeId: node.id, path: node.path, source: files.get(node.path)! }))] }
+  }
   const { seeds, descendants } = interfaceSeedPartitions(input, plan)
   const settledSources = new Map<string, string>()
   const run = async (partition: SyncPartition): Promise<Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>> => {
@@ -362,7 +375,7 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
         if (reusableCache(repairedInput, accepted)) return accepted
       }
       const seed = checkpoints.loadElaborationRepairSeed?.(key, partitionBinding, freezeElaborationInput(repairedInput).inputDigest) ?? undefined
-      const { contracts: _contracts, graph: _graph, coverage: _coverage, ...compact } = await elaborate(repairedInput, { runner, seed, draft: cacheDraft, loadDraft, loadDraftMaterial: localInput.draftProtocol ? (schemaDigest, request) => checkpoints.loadElaborationDraftMaterial?.(key, partitionBinding, schemaDigest, request) ?? null : undefined, repairDiagnostics: checkpoints.loadElaborationRepairDiagnostics?.(key, partitionBinding, freezeElaborationInput(repairedInput).inputDigest) ?? undefined })
+      const { contracts: _contracts, graph: _graph, coverage: _coverage, ...compact } = await elaborate(repairedInput, { runner, partitionSealFiles: sealInput.files, seed, draft: cacheDraft, loadDraft, loadDraftMaterial: localInput.draftProtocol ? (schemaDigest, request) => checkpoints.loadElaborationDraftMaterial?.(key, partitionBinding, schemaDigest, request) ?? null : undefined, repairDiagnostics: checkpoints.loadElaborationRepairDiagnostics?.(key, partitionBinding, freezeElaborationInput(repairedInput).inputDigest) ?? undefined })
       checkpoints.save(key, compact)
       return compact
     }
@@ -406,19 +419,6 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
   const candidateChanges = (projection?.changes ?? reviewedChanges).map(({ nodeId, path, beforeDigest, source }) => ({ nodeId, path, beforeDigest, source }))
   const changes = candidateChanges.map(change => ({ ...change, contentDigest: contentHash(change.source) }))
   const applicability = partitionApplicability(results)
-  let sealInput = input
-  if (composed) {
-    const files = new Map(input.files), readPaths = unique(plan.partitions.flatMap(partition => partition.readPaths))
-    for (const entry of readTree(commonDir, composed.tree)) {
-      if (files.has(entry.path) || within(entry.path, readPaths) || isHostPrivatePath(entry.path) || entry.mode === '120000') continue
-      const bytes = readObject(commonDir, entry.oid)
-      if (isUtf8Text(bytes)) files.set(entry.path, bytes.toString('utf8'))
-    }
-    const frozen = await readFrozenContracts(input.root, files)
-    const excluded = new Set([...input.targets, ...input.context ?? []].map(source => source.path))
-    for (const change of input.nodeChanges ?? []) { excluded.add(change.from.path); if (change.action === 'move') excluded.add(change.to.path) }
-    sealInput = { ...input, files, context: [...input.context ?? [], ...frozen.nodes.filter(node => !excluded.has(node.path)).map(node => ({ nodeId: node.id, path: node.path, source: files.get(node.path)! }))] }
-  }
   const seal = sealPartitionedElaboration(sealInput, candidateChanges, applicability)
   const readiness = seal.seal.passed ? projectElaborationFlowReadiness(seal.graph, seal.coverage) : { readyFlowIds: [], blockedFlows: [] }
   const gaps = seal.contracts.flatMap(contract => contract.items.filter((item): item is import('@spexcode/spec-core/contracts').Gap => item.kind === 'GAP'))
