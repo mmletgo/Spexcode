@@ -588,7 +588,10 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   }
   const missingAnalyzedPaths = changedPaths.filter(path => !proposal.changes.some(item => item.paths.includes(path)))
   if (missingAnalyzedPaths.length) reject('行为分析遗漏实际新旧范围的变更路径', { missingPaths: missingAnalyzedPaths })
-  const sourcePathSet = new Set(worktree ? readTree(commonDir, input.snapshot.immutableTree).filter(entry => entry.mode !== '120000' && !isHostPrivatePath(entry.path) && isUtf8Text(readObject(commonDir, entry.oid))).map(entry => entry.path) : source.map(([path]) => path))
+  const sourcePathSet = new Set(worktree ? [] : source.map(([path]) => path))
+  if (worktree) readTree(commonDir, input.snapshot.immutableTree, (entry, bytes) => {
+    if (entry.mode !== '120000' && !isHostPrivatePath(entry.path) && isUtf8Text(bytes)) sourcePathSet.add(entry.path)
+  })
   const factTextsBySource = new Map<string, string>()
   for (const fact of proposal.facts) {
     const trusted = input.plan.facts.some(item => item.source === fact.source && item.text === fact.text)

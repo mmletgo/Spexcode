@@ -330,6 +330,8 @@ Native worktree新分析请求仅接受旧/current冻结图中的受影响ID，�
 
 Native P0分析与独审共用业务语义：raw、源码和完整测试足以核实的行为，即便治理叶、稳定ID或覆盖映射尚未生成，也以facts/newNodes交P1；coverage_gap须指出具体未决业务政策及可观察后果，conflict只用于真实互斥。明确原意下的实现/测试缺陷不是业务GAP；P2仍受原写权约束，只读code_to_spec实现缺口保留为readonly_implementation_gap。纯治理缺席误报须由独审repair，Native自由读取及既有ID、权限、AC、unbound门保持。
 
+Native P0的事实来源集合使用完整不可变source tree批读时已核对OID的原字节，不在批读后为每个blob另启Git；不按readPaths缩小来源范围，UTF-8、普通文件及host-private过滤和分区事实授权保持原判据。
+
 分区隶属同一个 operation/attempt，共用会话队列、fence、预算和最终 candidate。保存各阶段的真实 seed、会话、原输出与 Git 差量；恢复仅复用同一任务和可见 tree 的已结算结果。程序合成唯一候选，再用独立会话审查各区和跨区接口；最终仍须全图结构检查、可信真实运行、正常提交 hooks、完整 journal/receipt 和正式采纳。
 
 分析以真实 composed tree 为起点，细化叠加该阶段已审祖先或待审 Spec，构建使用已审 Spec overlay，独审使用实际候选 tree。每次派发先生成并保活不可变 seed commit，精确核对其 tree 和会话 forkCommit；不能只用来源 HEAD 而遗漏受控 Spec 修改，也不能从 live index/WIP 拼接后续编辑。生成摘要及自报补丁不作为修改事实，候选从构建者的实际 Git 对象差量导入；审查者工作树发生任何修改则拒绝该审查。
