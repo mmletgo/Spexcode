@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { chmodSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -56,6 +56,44 @@ for (const defect of ['source', 'test', 'schema', 'context', 'absence', 'index',
   const index = readFileSync(join(f.root, '.git/index'))
   assert.throws(() => readStoppedPhysicalDraft(f.commonDir, f.root, seed, binding), /越界变化/)
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), index)
+})
+
+for (const mode of ['absent', 'seed-draft', 'hidden-source', 'index', 'ignored-draft', 'ignored-draft-symlink', 'parent-symlink', 'dirty-source', 'dirty-draft', 'committed-draft'] as const) test(`stopped worktree ignored-only no-material boundary: ${mode}`, t => {
+  const f = fixture(t), ownerDigest = 'c'.repeat(64), path = `.spex-sync-drafts/${ownerDigest}.json`, schema = '{"type":"object"}'
+  const binding = { ownerDigest, path, sourceInputId: 'input', schemaDigest: contentHash(schema) }
+  const seed = stageWorktree(f.commonDir, f.parent, overlayStageTree(f.commonDir, f.tree, [
+    { path: path.replace('.json', '.schema.json'), source: schema },
+    { path: path.replace('.json', '.context.json'), source: '{"readonly":true}' },
+    ...(mode === 'seed-draft' ? [{ path, source: '{"original":"immutable"}' }] : []),
+  ]), 'edit')
+  git(f.root, 'checkout', '--detach', seed.baseCommit)
+  writeFileSync(join(f.root, '.git/info/exclude'), `/runtime-cache/\n${mode.startsWith('ignored-draft') ? `/${path}\n` : mode === 'parent-symlink' ? '/.spex-sync-drafts\n' : ''}`)
+  mkdirSync(join(f.root, 'runtime-cache'))
+  writeFileSync(join(f.root, 'runtime-cache/retained'), 'ignored run cache')
+  if (mode === 'hidden-source') git(f.root, 'update-index', '--assume-unchanged', 'source.mjs')
+  if (mode === 'hidden-source' || mode === 'index' || mode === 'dirty-source') {
+    writeFileSync(join(f.root, 'source.mjs'), 'unauthorized change\n')
+    if (mode === 'index') { git(f.root, 'add', 'source.mjs'); writeFileSync(join(f.root, 'source.mjs'), 'export const value = 1\n') }
+  }
+  if (mode === 'ignored-draft' || mode === 'dirty-draft' || mode === 'committed-draft') writeFileSync(join(f.root, path), '{"unauthorized":"new"}')
+  if (mode === 'ignored-draft-symlink') symlinkSync('../source.mjs', join(f.root, path))
+  if (mode === 'parent-symlink') {
+    git(f.root, 'update-index', '--assume-unchanged', path.replace('.json', '.schema.json'), path.replace('.json', '.context.json'))
+    renameSync(join(f.root, '.spex-sync-drafts'), join(f.root, 'runtime-cache/drafts'))
+    symlinkSync('runtime-cache/drafts', join(f.root, '.spex-sync-drafts'))
+  }
+  if (mode === 'committed-draft') { git(f.root, 'add', path); git(f.root, 'commit', '-m', 'real draft progress') }
+  const ordinary = git(f.root, '--no-optional-locks', 'status', '--porcelain=v1', '-z', '--untracked-files=all')
+  const strict = git(f.root, '--no-optional-locks', 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored')
+  const visibleChange = ['index', 'dirty-source', 'dirty-draft'].includes(mode)
+  assert.equal(ordinary.length > 0, visibleChange)
+  assert.equal(strict.split('\0').filter(Boolean).every(row => row.startsWith('!! ')), !visibleChange)
+  const index = readFileSync(join(f.root, '.git/index'))
+  const head = git(f.root, 'rev-parse', 'HEAD')
+  if (mode === 'absent' || mode === 'seed-draft') assert.equal(readStoppedPhysicalDraft(f.commonDir, f.root, seed, binding), null)
+  else assert.throws(() => readStoppedPhysicalDraft(f.commonDir, f.root, seed, binding), /越界变化/)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), index)
+  assert.equal(git(f.root, 'rev-parse', 'HEAD'), head)
 })
 
 test('精确阶段tree含受控raw/已审overlay并隔离后续index和WIP；同树同seed、异树不同身份', t => {
