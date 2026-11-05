@@ -69,3 +69,5 @@ NativePlan v1/v2 与缺席 `nativeConfiguration` 的历史请求保持原策略�
 worktree 停止沿 [[native-worktree-runtime]] 正向任务域边界及 boundaryVersion2 追加观察，保留原 failed exit/unknown；首次派发在宿主平台的临时目录中创建唯一私有 tmp，workspace 与 tmp 随原 plan 固定，冷恢复不重选或改写。旧 macOS frozen policy 的 `/private/tmp` 短路径不变，无关联同 UID 进程仅诊断。
 
 唯一 stdio RPC 的原 10000ms 计时器以 native_rpc_timeout 标记本次真实超时，保留原 method/message；finally 的精确进程停止不能抹去原 typed cause。RPC 期限、pending 删除、迟到回复不接纳、未 ACK create 不发送模型请求及不自动 close 的行为保持；由 [[structured-session-runtime]] 正式消费停止证明，不以 elapsed、Promise 结束或 transport 退出自行证明停止。
+
+本次新观察的 turn.failed 必须绑定原 session、turn、已接受的 input 和唯一 turn.started 的 query；认证后以进程内专用 failed 错误保留首要失败，仅投影宿主 errno 定义中的安全原码，不透传 provider 错误正文。失败不请求成功消息历史，不授 output、rejectedOutput 或 Git witness；finally 仍原样观察并保留 error/idle=false、close=false 和 exit，不把 error 当作 idle。清理异常不覆盖已认证首要失败，正式结算仍由现有 exact adapter.stop 独立核原 plan、PID/start/receipt、整组、后代与任务域停止，未知不得释放容量。历史失败不补读或追补认证，不新增 plan/持久策略版本或自动重试资格。

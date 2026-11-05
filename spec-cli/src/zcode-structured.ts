@@ -3,7 +3,7 @@ import { Ajv } from 'ajv'
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, symlinkSync, writeFileSync } from 'node:fs'
-import { homedir, tmpdir } from 'node:os'
+import { constants, homedir, tmpdir } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
 import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
@@ -41,6 +41,14 @@ const bytesDigest = (path: string): string => createHash('sha256').update(readFi
 const sleep = (milliseconds: number): Promise<void> => new Promise(resolve => setTimeout(resolve, milliseconds))
 const active = new Map<string, { interrupt(): void }>()
 const fixedPolicy = (execution: ZCodeStructuredExecution) => execution.policy === 'native-worktree-v1' ? structuredExecutionPolicy(execution) : ({ ...structuredExecutionPolicy(execution), version: execution.timeoutMs === null ? 5 : 4, policy: 'zcode-frozen-read-only-v1' })
+
+/** 只认证本次精确失败终态；原生正文不进入错误诊断，停止权限仍由既有adapter独立证明。 */
+export class ZCodeNativeTurnFailedError extends StructuredSessionError {
+  constructor(threadId: string, turnId: string, nativeCode: unknown) {
+    const code = typeof nativeCode === 'string' && Object.hasOwn(constants.errno, nativeCode) ? nativeCode : 'unavailable'
+    super('failed', `ZCode native turn failed (code=${code})`, { threadId, turnId })
+  }
+}
 
 /** 原业务正文逐字保留；唯一原生user输入前置固定、只读的精确JSON schema控制段。 */
 export function zcodeStructuredPrompt(prompt: string, schema: Record<string, unknown>): string {
@@ -542,11 +550,16 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
       if (event.type === 'tool.updated' && event.payload.kind === 'scheduled' && !worktree && event.payload.toolName !== zcodeCapability.tool) throw new StructuredSessionError('unsupported', 'ZCode scheduled an uncontrolled tool')
       events.push(event)
       if (['turn.completed', 'turn.failed', 'turn.cancelled'].includes(event.type)) {
+        if (event.payload.inputId !== plan.inputId) throw new StructuredSessionError('stale_result', 'ZCode terminal belongs to another original input')
         if (terminal) throw new StructuredSessionError('stale_result', 'ZCode returned multiple terminal events')
         terminal = event; writeJson(join(root, 'terminal.json'), terminal, true)
       }
     }
     writeJson(join(root, 'events.json'), events); writeJson(join(root, 'event-counts.json'), counts)
+    if (terminal?.type === 'turn.failed') {
+      const error = terminal.payload.error as { code?: unknown } | undefined
+      throw new ZCodeNativeTurnFailedError(plan.sessionId, plan.turnId!, error?.code)
+    }
   }
   const stop = async (): Promise<void> => {
     if (stopSent || !sessionCreated || terminal) return
@@ -627,9 +640,9 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
     }
     const stopped = ownedProcessesStopped(plan)
     writeJson(join(root, 'exit.json'), { code: exit?.code ?? null, signal: exit?.signal ?? null, stopped, acknowledged, idle, closed: closeAcknowledged, stderrBytes, stderrSha256: stderrHash.digest('hex') } satisfies StopEvidence, true)
-    if (!stopped) { child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy(); child.unref(); if (!(resultError instanceof StructuredSessionError && resultError.code === 'native_rpc_timeout')) resultError = new StructuredSessionError('cancellation_pending', 'ZCode app/MCP process stop is unproven') }
+    if (!stopped) { child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy(); child.unref(); if (!(resultError instanceof ZCodeNativeTurnFailedError) && !(resultError instanceof StructuredSessionError && resultError.code === 'native_rpc_timeout')) resultError = new StructuredSessionError('cancellation_pending', 'ZCode app/MCP process stop is unproven') }
   } catch {
-    if (!(resultError instanceof StructuredSessionError && resultError.code === 'native_rpc_timeout')) resultError = new StructuredSessionError('cancellation_pending', 'ZCode native cleanup or stop evidence could not be settled')
+    if (!(resultError instanceof ZCodeNativeTurnFailedError) && !(resultError instanceof StructuredSessionError && resultError.code === 'native_rpc_timeout')) resultError = new StructuredSessionError('cancellation_pending', 'ZCode native cleanup or stop evidence could not be settled')
     child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy(); child.unref()
   } finally {
     clearTimeout(timeout); callbacks.signal?.removeEventListener('abort', interrupt); active.delete(root); lines.close()

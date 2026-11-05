@@ -9,7 +9,16 @@ import { processStartToken, writeDetachedRuntimeReceipt } from '@spexcode/spec-c
 import { freezeContext, frozenReadTool, readFrozenRange } from './frozen-context.js'
 import { ZCODE_FROZEN_TOOL, type ZCodeFrozenWitness, type ZCodeNativeEvent } from './zcode-frozen-evidence.js'
 import { structuredExecutionPolicy } from './session-structured-policy.js'
-import { assertZCodeModelSnapshot, decodeZCodeStructuredText, stopZCodeStructuredTurn, zcodeCapability, zcodeIdleObservation, zcodeNativeConfigModel, zcodeNativeConfigSelection, zcodeNativeModel, zcodeNativeSelection, zcodeProofEvent, zcodeRuntimeConfiguration, zcodeStructuredPrompt, zcodeStructuredTurn, type ZCodeStructuredExecution } from './zcode-structured.js'
+import { assertZCodeModelSnapshot, decodeZCodeStructuredText, stopZCodeStructuredTurn, zcodeCapability, zcodeIdleObservation, zcodeNativeConfigModel, zcodeNativeConfigSelection, zcodeNativeModel, zcodeNativeSelection, zcodeProofEvent, zcodeRuntimeConfiguration, zcodeStructuredPrompt, zcodeStructuredTurn, ZCodeNativeTurnFailedError, type ZCodeStructuredExecution } from './zcode-structured.js'
+
+test('Native failure diagnostics expose only safe errno codes and exact turn identity', () => {
+  for (const code of ['EPIPE', 'UNTRUSTED_PROVIDER_BODY', '__proto__', null, { message: 'UNTRUSTED_PROVIDER_BODY' }]) {
+    const error = new ZCodeNativeTurnFailedError('exact-session', 'exact-turn', code)
+    assert.equal(error.code, 'failed'); assert.equal(error.threadId, 'exact-session'); assert.equal(error.turnId, 'exact-turn')
+    assert.equal(error.message, `ZCode native turn failed (code=${code === 'EPIPE' ? 'EPIPE' : 'unavailable'})`)
+    assert.equal(error.rejectedOutput, undefined); assert.equal(error.failedWorktree, undefined)
+  }
+})
 
 test('ZCode namespace requires both exact provider and model', () => {
   assert.deepEqual(zcodeNativeModel('zcode:bigmodel-api/GLM-5.3-Flash'), { providerId: 'bigmodel-api', modelId: 'GLM-5.3-Flash' })
