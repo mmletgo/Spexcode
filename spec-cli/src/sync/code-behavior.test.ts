@@ -2715,13 +2715,20 @@ test('Native raw-only空图schema不发空enum且GAP/conflict保留空身份', a
 })
 
 
-for (const contextTransport of [undefined, 'git-json-v1'] as const) for (const phase of ['code_behavior_analyze', 'code_behavior_review'] as const) for (const invalidity of phase === 'code_behavior_review' ? ['syntax', 'schema', 'change-id', 'missing-path', 'invalid-path', 'duplicate', 'session', 'thread', 'repair-scope', 'context-path'] as const : ['syntax', 'schema'] as const) test(`P0 ${contextTransport ?? 'legacy'} ${phase} ${invalidity}失败跨attempt续改真实JSON草稿，review不重做分析`, async t => {
-  const f = await fixture(t)
+const historicalGitCheckedPaths = [
+  'git:f6b19b6d223b150b547e8363db0c9c710c530d9b:frontend/src/app/route.ts',
+  'git:dda7e5cadbe23f1048b5f4b8ac94a7f477a20061',
+  'git:ecca8855b8018e479b824fcbd711f1791877e9bb:frontend/src/features/projects/ProjectList.tsx',
+  'git:ecca8855b8018e479b824fcbd711f1791877e9bb:frontend/src/features/devices/WorkDevicesPanel.tsx',
+] as const
+
+for (const contextTransport of [undefined, 'git-json-v1'] as const) for (const phase of ['code_behavior_analyze', 'code_behavior_review'] as const) for (const invalidity of phase === 'code_behavior_review' ? ['syntax', 'schema', 'change-id', 'missing-path', 'invalid-path', 'multiple-invalid-paths', 'duplicate', 'session', 'thread', 'repair-scope', 'context-path'] as const : ['syntax', 'schema'] as const) test(`P0 ${contextTransport ?? 'legacy'} ${phase} ${invalidity}失败跨attempt续改真实JSON草稿，review不重做分析`, async t => {
+  const f = await fixture(t, undefined, phase === 'code_behavior_review' && invalidity === 'multiple-invalid-paths' ? { 'tests/colon:name.test.mjs': 'export const colonPath = true;\n' } : {})
   writeFileSync(join(f.root, 'src/export.js'), f.source + '\n// same business\n')
   const original = await f.input()
   const input: CodeBehaviorInput = { ...original, ...(contextTransport ? { contextTransport } : {}), draftProtocol: 'code-behavior-draft-v1', model: 'claude:MiniMax-M3.1-Flash', plan: { ...original.plan, agentWorkflow: 'native-worktree-v1' } }
   let invalid = invalidity === 'syntax' ? '{ "原始JSON": [ BROKEN 草稿\n' : '{"原始JSON":"SCHEMA_REJECTED"}'
-  const failureCode = invalidity === 'syntax' ? 'behavior_output_json' : invalidity === 'schema' ? 'behavior_output_schema' : ['invalid-path', 'context-path', 'duplicate', 'session', 'thread'].includes(invalidity) ? 'behavior_analysis_invalid' : 'behavior_review_failed'
+  const failureCode = invalidity === 'syntax' ? 'behavior_output_json' : invalidity === 'schema' ? 'behavior_output_schema' : ['invalid-path', 'multiple-invalid-paths', 'context-path', 'duplicate', 'session', 'thread'].includes(invalidity) ? 'behavior_analysis_invalid' : 'behavior_review_failed'
   let checkpoint: CodeBehaviorContinuation | null = null, failed = false, violation: string | undefined, failureMessage = ''
   let originalSchema: Buffer | undefined, originalDraftOid: string | undefined, originalSchemaOid: string | undefined, originalErrors: { code: string; message: string }[] = []
   const requests: string[] = []
@@ -2743,6 +2750,7 @@ for (const contextTransport of [undefined, 'git-json-v1'] as const) for (const p
     const stage = context.pendingAnalysis ?? null
     const diagnosticText = contextTransport ? JSON.stringify(context) : request.prompt
     const review = stage ? { inputDigest: request.inputDigest, analysisDigest: stage.analysisDigest, verdict: 'accept', checkedPaths: [...brief.requiredChangedPaths], checkedChangeIds: stage.analysis.changes.map(change => change.id), findings: [] as { message: string; evidence: string; counterexample: string }[] } : null
+    if (review && invalidity === 'multiple-invalid-paths') review.checkedPaths.push('tests/colon:name.test.mjs')
     const output = review ?? { changes: brief.requiredChangedPaths.map(path => ({ kind: 'refactor', paths: [path], affectedIds: ['RULE-EXPORT-05'], ruleIds: ['RULE-EXPORT-05'], originalIntent: '保留既有业务', previousBehavior: '既有行为', sourceBehavior: '既有行为', deliveryBehavior: '既有行为', evidence: path, counterexample: '不改变发布次数' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
     let text = JSON.stringify(output)
     const firstFailure = request.purpose === phase && !failed
@@ -2751,6 +2759,7 @@ for (const contextTransport of [undefined, 'git-json-v1'] as const) for (const p
         if (invalidity === 'change-id' || invalidity === 'repair-scope') review.checkedChangeIds[0] += 'e'
         if (invalidity === 'missing-path') review.checkedPaths = []
         if (invalidity === 'invalid-path') review.checkedPaths.push('src/missing.js')
+        if (invalidity === 'multiple-invalid-paths') review.checkedPaths.push(...historicalGitCheckedPaths)
         if (invalidity === 'context-path') review.checkedPaths.push(draftPath.replace(/\.json$/, '.context.json'))
         if (invalidity === 'duplicate') review.checkedChangeIds.push(review.checkedChangeIds[0])
         if (invalidity === 'repair-scope') { review.verdict = 'repair'; review.findings = [{ message: '覆盖未绑定前不能采纳的业务质疑', evidence: '原源码', counterexample: '原幂等边界' }] }
@@ -2788,6 +2797,12 @@ for (const contextTransport of [undefined, 'git-json-v1'] as const) for (const p
       assert.equal(diagnostic.details.missingChangeIds.length, 1)
       assert.deepEqual(diagnostic.details.unknownChangeIds, [diagnostic.details.missingChangeIds[0] + 'e'])
       assert.equal(diagnostic.analysis.reviewPassed, false)
+    }
+    if (invalidity === 'multiple-invalid-paths') {
+      const diagnostic = JSON.parse(failureMessage)
+      assert.deepEqual(diagnostic.details.invalidPaths, historicalGitCheckedPaths)
+      assert.ok(historicalGitCheckedPaths.every(path => diagnostic.message.includes(path)))
+      assert.match(diagnostic.message, /checkedPaths.*仓库根相对路径/)
     }
     return true
   })
