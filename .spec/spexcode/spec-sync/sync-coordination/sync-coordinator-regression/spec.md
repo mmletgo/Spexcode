@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+P0 transport 回归让同一 operation 的三兄弟分别精确已停 EPIPE、原业务独审拒绝和通过独审。真实 Git/隔离 SQLite 的下一 attempt 只重新分析并独审无稿失败区，业务拒绝区保 readyAnalysis 和原拒因而只续独审，已审区原 refs 承接且零派发。原端到端受控 ZCode adapter 保专用 code 和冷重放身份；普通 errno/同文本 generic、错 stop/turn、未知停止和兄弟资源未释放均拒绝自动重试。既有 P0/P1 停态稿门及完成后 events RPC 的独立回归保持。
+
 P1追加A正常Git拒稿→B新物理EPIPE无witness→C原bytes续改并独审，以及旧物理晚观察不盖后来正常Git反向；A完整finding进入C且priorDraft角色清除。parent/新旧诊断的比较另由真实elaborate冻结任务、生产elaborationMaterialContext、原物理observer与新seed回调组合覆盖，原整树比较先fail，精确投影后pass，source/tests/非角色Spec差异配对拒绝；formalNative/stop认证复用前述coordinator真实fixture。此组合不假称现场模型全链验收。
 
 新增真实Git/私有SQLite/正式ZCode stop场景：EPIPE前仅有untracked invalidJSON且HEAD==seed，旧clean门重复失败，修复后新seed保原bytes；tracked/staged亦然。核较新physical承接较旧认证稿、旧physical晚观察不覆盖更新Git、review仅续审保ready及原诊断、P1物理稿续改正常commit后独立accept；source/tests/schema/context/index/owner/session/stop/seed/root/fence/CAS反例拒绝。原record/checkpoint/Native文件/raw index/HEAD/源draft逐字保持；只证明受控真实机制，不替代现场模型恢复。

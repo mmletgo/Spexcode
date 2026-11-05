@@ -49,9 +49,19 @@ const sha = (bytes: string | Buffer): string => createHash('sha256').update(byte
 const hash = (value: unknown): string => sha(JSON.stringify(value))
 const copy = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
 
-export function hasSettledNativeRpcFailure(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, failure: { code?: string; message?: string; sessionId?: string; threadId?: string; turnId?: string; requestKey?: string; inputDigest?: string }): boolean {
+type NativeFailureIdentity = { code?: string; message?: string; sessionId?: string; threadId?: string; turnId?: string; requestKey?: string; inputDigest?: string }
+
+export function hasSettledNativeRpcFailure(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, failure: NativeFailureIdentity): boolean {
+  return failure.code === 'native_rpc_timeout' && hasSettledNativeFailure(store, operation, attempt, failure)
+}
+
+export function hasSettledNativeTurnTransportFailure(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, failure: NativeFailureIdentity): boolean {
+  return failure.code === 'native_turn_transport_failed' && hasSettledNativeFailure(store, operation, attempt, failure)
+}
+
+function hasSettledNativeFailure(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, failure: NativeFailureIdentity): boolean {
   const current = store.readOperation(operation.id)
-  if (failure.code !== 'native_rpc_timeout' || !failure.sessionId || current.control !== 'run' || current.currentAttemptId !== attempt.id || current.generation !== attempt.generation || ['failed', 'superseded', 'settled'].includes(attempt.status) || attempt.expiresAtMs <= Date.now() || store.readPhysicalControl(current.input.source).control !== 'run') return false
+  if (!failure.sessionId || current.control !== 'run' || current.currentAttemptId !== attempt.id || current.generation !== attempt.generation || ['failed', 'superseded', 'settled'].includes(attempt.status) || attempt.expiresAtMs <= Date.now() || store.readPhysicalControl(current.input.source).control !== 'run') return false
   const resources = attempt.dispatchPlans.map(dispatch => ({ dispatch, resource: store.findResource(attempt.id, dispatch.key) }))
   if (resources.some(({ resource }) => !resource || resource.phase !== 'removed')) return false
   const directory = join(operation.input.source.commonDir, 'spexcode', 'evidence')
@@ -63,9 +73,17 @@ export function hasSettledNativeRpcFailure(store: SyncStore, operation: SyncOper
   return resources.some(({ dispatch, resource }) => {
     if (resource!.plan.kind !== 'native_session') return false
     const plan = read<NativeRunPlan>(resource!.plan.planBlob), checkpoint = read<NativeRunCheckpoint>(resource!.checkpointRef), stop = checkpoint.stop
-    return resource!.operationId === operation.id && resource!.attemptId === attempt.id && resource!.generation === attempt.generation && resource!.plan.inputId === operation.input.id && plan.operationId === operation.id && plan.attemptId === attempt.id && plan.inputId === operation.input.id && plan.expectedSessionId === failure.sessionId && plan.sessionCreateKey === dispatch.sessionCreateKey && plan.expectedSessionId === sessionIdForCreateKey(dispatch.sessionCreateKey) && plan.request.requestKey === dispatch.key && plan.requestDigest === dispatch.requestDigest && plan.requestDigest === resource!.plan.payloadDigest && plan.requestDigest === hash(plan.request)
+    const settled = resource!.operationId === operation.id && resource!.attemptId === attempt.id && resource!.generation === attempt.generation && resource!.plan.inputId === operation.input.id && plan.operationId === operation.id && plan.attemptId === attempt.id && plan.inputId === operation.input.id && plan.expectedSessionId === failure.sessionId && plan.sessionCreateKey === dispatch.sessionCreateKey && plan.expectedSessionId === sessionIdForCreateKey(dispatch.sessionCreateKey) && plan.request.requestKey === dispatch.key && plan.requestDigest === dispatch.requestDigest && plan.requestDigest === resource!.plan.payloadDigest && plan.requestDigest === hash(plan.request)
       && (failure.requestKey === undefined || failure.requestKey === plan.request.requestKey) && (failure.inputDigest === undefined || failure.inputDigest === plan.request.inputDigest) && checkpoint.operationId === plan.operationId && checkpoint.attemptId === plan.attemptId && checkpoint.inputId === plan.inputId && checkpoint.candidateDigest === plan.candidateDigest && checkpoint.candidateDigest === resource!.plan.candidateDigest && checkpoint.requestDigest === plan.requestDigest && checkpoint.expectedSessionId === plan.expectedSessionId && checkpoint.phase === 'removed' && checkpoint.status === 'failed' && checkpoint.nativeState === 'failed' && checkpoint.failure?.code === failure.code && checkpoint.failure?.message === failure.message
       && stop?.nativeStopped === true && stop.state === 'failed' && stop.sessionId === failure.sessionId && checkpoint.session.sessionId === stop.sessionId && checkpoint.session.threadId === (stop.threadId ?? null) && checkpoint.session.turnId === (stop.turnId ?? null) && stop.threadId === failure.threadId && stop.turnId === failure.turnId
+    if (!settled || failure.code !== 'native_turn_transport_failed') return settled
+    return resource!.plan.key === dispatch.key && plan.schemaVersion === 1 && checkpoint.schemaVersion === 1
+      && plan.request.model?.startsWith('zcode:') === true && !!plan.request.worktree && !plan.request.frozenContext
+      && (plan.request.purpose === 'code_behavior_analyze' || plan.request.purpose === 'code_behavior_review') && dispatch.purpose === plan.request.purpose
+      && failure.requestKey === plan.request.requestKey && failure.inputDigest === plan.request.inputDigest && !!failure.threadId && !!failure.turnId
+      && dispatch.session?.sessionId === checkpoint.session.sessionId && dispatch.session.threadId === checkpoint.session.threadId && dispatch.session.turnId === checkpoint.session.turnId
+      && checkpoint.nativeCallRequested && checkpoint.nativeStarted && stop?.nativeStatus === 'stopped'
+      && !checkpoint.failure?.failedWorktree && !checkpoint.failure?.rejectedOutput && !checkpoint.result
   })
 }
 
@@ -139,6 +157,9 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
     }
     const stoppedFailedEvidence = (state: StructuredExecution): NativeRunCheckpoint['failure'] | null => {
       if (state.state !== 'failed' || !state.cancellation?.nativeStopped) return null
+      if (state.errorCode === 'native_turn_transport_failed' && (!request.worktree || !request.model?.startsWith('zcode:') || !state.threadId || !state.turnId
+        || state.zcodeNative?.sessionId !== state.threadId || state.zcodeNative.turnId !== state.turnId || state.cancellation.nativeStatus !== 'stopped'
+        || state.failedWorktree || state.rejectedOutput || state.resultWorktree || state.output !== undefined || state.resultDigest !== undefined)) throw new StructuredSessionError('stale_result', 'typed native turn transport failure lacks its exact stopped ZCode identity', errorIdentity())
       let rejectedOutput: StructuredSessionError['rejectedOutput']
       if (state.rejectedOutput) {
         assertRejectedOutput(state.rejectedOutput, creationPrompt, execution, state)
@@ -163,6 +184,11 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
       const stop = checkpoint.stop
       if (!checkpoint.failure || checkpoint.nativeState !== 'failed' || !stop?.nativeStopped || stop.state !== 'failed' || stop.sessionId !== expectedSessionId || (stop.threadId ?? null) !== checkpoint.session.threadId || (stop.turnId ?? null) !== checkpoint.session.turnId) throw new StructuredSessionError('stale_result', 'native failure lacks its exact durable stop evidence', errorIdentity())
       const record = runtime.readRecord(expectedSessionId), state = record?.structuredExecution
+      if (checkpoint.failure.code === 'native_turn_transport_failed' && (!record || !state || record.session !== expectedSessionId || record.createRequestId !== sha(dispatch!.sessionCreateKey) || record.createPayloadHash !== expectedCreateHash
+        || hash(structuredExecutionPolicy(state)) !== hash(execution) || record.harnessSessionId !== null && record.harnessSessionId !== state.threadId
+        || dispatch!.session?.sessionId !== expectedSessionId || dispatch!.session.threadId !== checkpoint.session.threadId || dispatch!.session.turnId !== checkpoint.session.turnId
+        || state.threadId !== stop.threadId || state.turnId !== stop.turnId || state.cancellation?.acknowledged !== stop.acknowledged || state.cancellation?.nativeStatus !== stop.nativeStatus
+        || checkpoint.result || hash(stoppedFailedEvidence(state)) !== hash(checkpoint.failure))) throw new StructuredSessionError('stale_result', 'typed native turn transport checkpoint differs from its canonical stopped failure', errorIdentity())
       if (checkpoint.failure.failedWorktree && !checkpoint.failure.rejectedOutput && (!record || !state || record.session !== expectedSessionId || record.worktreePath !== checkpoint.failure.failedWorktree.worktreePath || record.createRequestId !== sha(dispatch!.sessionCreateKey) || record.createPayloadHash !== expectedCreateHash || hash(structuredExecutionPolicy(state)) !== hash(execution) || record.harnessSessionId !== null && record.harnessSessionId !== state.threadId || state.state !== 'failed' || (state.errorCode ?? 'failed') !== checkpoint.failure.code || state.error !== checkpoint.failure.message || state.threadId !== stop.threadId || state.turnId !== stop.turnId || state.cancellation?.nativeStopped !== true || state.cancellation.acknowledged !== stop.acknowledged || state.cancellation.nativeStatus !== stop.nativeStatus || state.cancellation.error !== stop.error || hash(state.failedWorktree ?? null) !== hash(checkpoint.failure.failedWorktree ?? null))) throw new StructuredSessionError('stale_result', 'native failure checkpoint differs from its canonical stopped failed record', errorIdentity())
       let rejectedOutput = checkpoint.failure.rejectedOutput
       if (rejectedOutput) {
@@ -292,10 +318,12 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
           const stoppedFailure = state ? stoppedFailedEvidence(state) : null
           if (stoppedFailure) {
             if (!(outcome.error instanceof StructuredSessionError) || outcome.error.code !== stoppedFailure.code || state!.error !== outcome.error.message || outcome.error.sessionId !== expectedSessionId || outcome.error.threadId !== state!.threadId || outcome.error.turnId !== state!.turnId) throw new StructuredSessionError('stale_result', 'native failure lacks its matching stopped failed record', errorIdentity())
+            if (outcome.error.code === 'native_turn_transport_failed' && (outcome.error.requestKey !== request.requestKey || outcome.error.inputDigest !== request.inputDigest)) throw new StructuredSessionError('stale_result', 'typed native turn transport failure differs from its fixed request', errorIdentity())
             if (hash(outcome.error.failedWorktree ?? null) !== hash(state!.failedWorktree ?? null)) throw new StructuredSessionError('stale_result', 'failed stage Git witness differs from its exact stopped native error', errorIdentity())
             settle('failed', { failure: stoppedFailure, stop: { sessionId: expectedSessionId, state: 'failed', threadId: state!.threadId, turnId: state!.turnId, nativeStopped: true, acknowledged: state!.cancellation!.acknowledged, nativeStatus: state!.cancellation!.nativeStatus } })
           }
           if (outcome.error instanceof StructuredSessionError && outcome.error.code === 'native_rpc_timeout' && !stoppedFailure) throw new StructuredSessionError('stale_result', 'typed native RPC failure has no exact stopped failed record', errorIdentity())
+          if (outcome.error instanceof StructuredSessionError && outcome.error.code === 'native_turn_transport_failed' && !stoppedFailure) throw new StructuredSessionError('stale_result', 'typed native turn transport failure has no exact stopped failed record', errorIdentity())
           if (state?.cancellation?.nativeStopped && (state.state === 'cancelled' || state.state === 'timeout')) settle(state.state, { stop: { sessionId: expectedSessionId, state: state.state, threadId: state.threadId, turnId: state.turnId, nativeStopped: true, acknowledged: state.cancellation.acknowledged, nativeStatus: state.cancellation.nativeStatus } })
           if (outcome.error instanceof StructuredSessionError && outcome.error.rejectedOutput) {
             const rejectedOutput = outcome.error.rejectedOutput
@@ -311,7 +339,7 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
             const diagnostic = { ...rejectedOutput, ref }
             throw new StructuredSessionError(outcome.error.code, outcome.error.message, { ...errorIdentity(), rejectedOutput: diagnostic, failedWorktree })
           }
-          if (outcome.error instanceof StructuredSessionError && outcome.error.code === 'native_rpc_timeout') throw new StructuredSessionError(outcome.error.code, outcome.error.message, errorIdentity())
+          if (outcome.error instanceof StructuredSessionError && (outcome.error.code === 'native_rpc_timeout' || outcome.error.code === 'native_turn_transport_failed')) throw new StructuredSessionError(outcome.error.code, outcome.error.message, errorIdentity())
           throw outcome.error
         }
         const record = observe(), state = record?.structuredExecution

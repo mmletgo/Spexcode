@@ -14,10 +14,13 @@ import { assertZCodeModelSnapshot, assertZCodeStoppedDraftSource, decodeZCodeStr
 
 test('Native failure diagnostics expose only safe errno codes and exact turn identity', () => {
   for (const code of ['EPIPE', 'UNTRUSTED_PROVIDER_BODY', '__proto__', null, { message: 'UNTRUSTED_PROVIDER_BODY' }]) {
-    const error = new ZCodeNativeTurnFailedError('exact-session', 'exact-turn', code)
+    const error = new ZCodeNativeTurnFailedError('exact-session', 'exact-turn', code, false)
     assert.equal(error.code, 'failed'); assert.equal(error.threadId, 'exact-session'); assert.equal(error.turnId, 'exact-turn')
     assert.equal(error.message, `ZCode native turn failed (code=${code === 'EPIPE' ? 'EPIPE' : 'unavailable'})`)
     assert.equal(error.rejectedOutput, undefined); assert.equal(error.failedWorktree, undefined)
+    const worktree = new ZCodeNativeTurnFailedError('exact-session', 'exact-turn', code, true)
+    assert.equal(worktree.code, code === 'EPIPE' ? 'native_turn_transport_failed' : 'failed')
+    assert.equal(worktree.message, error.message)
   }
 })
 

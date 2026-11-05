@@ -212,6 +212,8 @@ P1的已认证精确结构输出失败沿既有已结算repairable attempt和原
 
 checkpoint扫描共用[[sync-checkpoint-evidence]]的typed证据读取接缝。新stage wrapper一次动作原子保存全部JSON材料与untrusted_final引用，raw不作为平铺JSON stage；先验证真实失败round、owner/source、原NativePlan/resource及canonical原生record，再排除raw的stage权限。历史无role raw引用逐字保留，已cancelled/removed但原格式错误和原文认证仍在的记录可恢复读取；未知损坏JSON仍显式报错，合法JSON伪stage原文也不取得权限。
 
+P0 精确已结算的 ZCode native_turn_transport_failed 走既有本 operation 的行为分析重试。原 requestKey/inputDigest、已接受的 thread/turn、正式派发与 removed checkpoint 全相同，肯定 nativeStatus=stopped 且所有并发兄弟资源释放时，才与本轮其它可返修问题一同进入下一 attempt。已审分区保原 refs，未审区保原业务诊断并按已有草稿/ready 身份续修；无真实草稿则正常派新任务。旧 generic failed 不补分类，P1/P2 无新增自动重试。新专用码经过原 turn.failed EPIPE 证明后仍可沿既有 P0/P1 停态草稿入口观察真实材料。
+
 P0/P1/P2 共用 typed Native RPC 已结算准入：仅当前 control/physical run、有效 fence，且原失败精确匹配本 attempt 的固定 request/dispatch/plan、局部 candidate 与 failed terminal/removed stop，才沿既有同 operation/input/预算开启下一 attempt。并发每个 typed RPC 故障均须证明；未 removed 兄弟或 unsupported/cancelled/conflict/needs_input 不能被一个已停故障掩盖。unknown stop、pause、用户取消、过期 fence 和旧缺席保持 recovery/原控制语义，不重发旧 request、不解析 message 猜分类；普通格式/schema门和 initial code_to_spec 不调用 code_generate 的权限门保持。
 
 候选已通过V1而仅精确code_review结构格式失败时，续审从同operation的已结算原Native失败请求、合法P1批准链及validated candidate恢复原partition-plan身份，不因诊断或P1合法扩域重规划。原plan wrapper、digest及旧字段不改签；若计划冻结早于P1新增null资源，须核旧selection绑定逐字保留、新增binding全null、contractScopeExpansions的前后selection及evidenceRef精确来自同一已审P1、各owner原planDigest及composed tree/content不变。新增业务ID/Spec路径来自该已审正文，实现与测试路径只来自同P1的code/AC.test映射或原文件规划，均在原冻结权限内；非null/既有绑定、source/input/readSet/policy/scope/原意变化不获得承接。原P1局部完整输入/Git/schema缓存核验及strict全图seal仍执行，唯一候选重新经V1及全部最终门。

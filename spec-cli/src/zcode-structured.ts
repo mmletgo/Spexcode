@@ -44,9 +44,9 @@ const fixedPolicy = (execution: ZCodeStructuredExecution) => execution.policy ==
 
 /** 只认证本次精确失败终态；原生正文不进入错误诊断，停止权限仍由既有adapter独立证明。 */
 export class ZCodeNativeTurnFailedError extends StructuredSessionError {
-  constructor(threadId: string, turnId: string, nativeCode: unknown) {
+  constructor(threadId: string, turnId: string, nativeCode: unknown, worktree: boolean) {
     const code = typeof nativeCode === 'string' && Object.hasOwn(constants.errno, nativeCode) ? nativeCode : 'unavailable'
-    super('failed', `ZCode native turn failed (code=${code})`, { threadId, turnId })
+    super(worktree && code === 'EPIPE' ? 'native_turn_transport_failed' : 'failed', `ZCode native turn failed (code=${code})`, { threadId, turnId })
   }
 }
 
@@ -331,6 +331,7 @@ export function assertZCodeStoppedDraftSource(prompt: string, execution: ZCodeSt
       throw new StructuredSessionError('stale_result', 'ZCode events RPC draft has no exact completed terminal and idle/closed stop')
     return true
   }
+  if (execution.errorCode === 'native_turn_transport_failed' && (terminal.type !== 'turn.failed' || (terminal.payload.error as { code?: unknown } | undefined)?.code !== 'EPIPE')) throw new StructuredSessionError('stale_result', 'ZCode turn transport failure differs from the original EPIPE terminal')
   return terminal.type === 'turn.failed'
 }
 
@@ -601,7 +602,7 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
     writeJson(join(root, 'events.json'), events); writeJson(join(root, 'event-counts.json'), counts)
     if (terminal?.type === 'turn.failed') {
       const error = terminal.payload.error as { code?: unknown } | undefined
-      throw new ZCodeNativeTurnFailedError(plan.sessionId, plan.turnId!, error?.code)
+      throw new ZCodeNativeTurnFailedError(plan.sessionId, plan.turnId!, error?.code, worktree)
     }
   }
   const stop = async (): Promise<void> => {
