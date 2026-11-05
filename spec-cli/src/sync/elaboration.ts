@@ -256,7 +256,7 @@ export function elaborationScopeErrors(input: ElaborationInput, generated: Gener
   })
 }
 
-function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate, inputDigest: string, options: { strictContextCoverage?: boolean } = {}): { contracts: Contract[]; graph: ContractGraph; findings: ContractFinding[]; resolvedGapIds: string[] } {
+function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate, inputDigest: string, options: { strictContextCoverage?: boolean; partitionSealFiles?: ReadonlyMap<string, string> } = {}): { contracts: Contract[]; graph: ContractGraph; findings: ContractFinding[]; resolvedGapIds: string[] } {
   if (input.worktree && input.historyInput) {
     const files = new Map(input.files)
     for (const entry of readTree(input.historyInput.source.commonDir, input.worktree.tree)) {
@@ -397,7 +397,7 @@ function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate
     }
   }
   if (sealRepair && !findings.some(issue => repairRequired(issue, projectContractCoverage(graph)))) {
-    const files = new Map(input.files)
+    const files = new Map(options.partitionSealFiles ?? input.files)
     for (const change of [...sealRepair.aggregate.partitionSeal!.nodeChanges, ...candidate.nodeChanges ?? []]) if (change.action === 'retire' || change.from.path !== change.to.path) files.delete(change.from.path)
     for (const change of sealRepair.aggregate.partitionSeal!.changes) files.set(change.path, change.source)
     for (const change of partitionSealRepairChanges(sealRepair, candidate.changes)) files.set(change.path, change.source)
@@ -408,8 +408,9 @@ function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate
     const key = (issue: ContractFinding) => digest([issue.code, issue.nodeId, issue.path, issue.itemId, issue.relatedIds])
     const priorErrors = new Set(sealRepair.aggregate.partitionSeal!.findings.filter(issue => repairRequired(issue, coverage)).map(key))
     const assigned = new Set(input.readonlySpecRepair!.findings.map(key))
+    const interfaceSeed = input.phase === 'interface_seed' && sealRepair.accepted.phase === 'interface_seed' && input.partitionBinding?.interfaceSeed
     findings.push(...[...parsed.flatMap(result => result.findings), ...validateContractGraph(combined, { mode: 'final', files, nodeIds: new Set(nodeIds) })]
-      .filter(issue => repairRequired(issue, coverage) && (assigned.has(key(issue)) || !priorErrors.has(key(issue)))))
+      .filter(issue => repairRequired(issue, coverage) && (!priorErrors.has(key(issue)) || assigned.has(key(issue)) && !(interfaceSeed && interfaceSeedCoverageFinding.has(issue.code)))))
   }
   return { contracts, graph, findings, resolvedGapIds }
 }
@@ -499,7 +500,7 @@ export function projectElaborationFlowReadiness(graph: ContractGraph, coverage: 
   return result
 }
 
-function validateRepairSeed(input: ElaborationInput, seed: ElaborationRepairSeed, inputDigest: string): { candidate: ElaborationCandidate; findings: ContractFinding[]; coverage: ContractCoverage } {
+function validateRepairSeed(input: ElaborationInput, seed: ElaborationRepairSeed, inputDigest: string, partitionSealFiles?: ReadonlyMap<string, string>): { candidate: ElaborationCandidate; findings: ContractFinding[]; coverage: ContractCoverage } {
   if (seed.settled !== true || !seed.requestKey || seed.requestKey === input.requestKey || seed.inputDigest !== inputDigest || seed.candidate.inputDigest !== inputDigest) throw new TypeError('续修种子须已结算、输入一致且使用新的请求键')
   if (digest(seed.candidate) !== seed.candidateDigest) throw new TypeError('续修种子原候选摘要不符')
   const version = (seed.output as { version?: unknown })?.version
@@ -516,18 +517,19 @@ function validateRepairSeed(input: ElaborationInput, seed: ElaborationRepairSeed
     if (seed.review.inputDigest !== inputDigest || seed.review.candidateDigest !== seed.candidateDigest || outputErrors(nativeReview, ELABORATION_REVIEW_SCHEMA).length || reviews[0].resultDigest !== digest(nativeReview)) throw new TypeError('续修种子评审身份或原生输出摘要不符')
   }
   const candidate = generated ? renderElaboration(input, generated, inputDigest) : seed.candidate
-  const checked = checkCandidate(input, candidate, inputDigest)
+  const checked = checkCandidate(input, candidate, inputDigest, { partitionSealFiles })
   if (!seed.findings.some(issue => repairRequired(issue, projectContractCoverage(checked.graph)))) throw new TypeError('续修种子必须保留具体被拒绝发现')
   return { candidate, findings: checked.findings, coverage: projectContractCoverage(checked.graph) }
 }
 
 /** 从不可变业务输入连续生成、解析和独立审查；仅返回候选，不拥有交付树写权限。 */
-export async function elaborate(input: ElaborationInput, options: { runner?: ElaborationRunner; seed?: ElaborationRepairSeed; repairDiagnostics?: ElaborationRepairDiagnostics; draft?: ElaborationDraft; draftMaterial?: ElaborationDraftMaterial; loadDraft?(schemaDigest: string): ElaborationDraft | null; loadDraftMaterial?(schemaDigest: string, request?: StageDraftMaterialRequest): ElaborationDraftMaterial | null } = {}): Promise<ElaborationResult> {
+export async function elaborate(input: ElaborationInput, options: { runner?: ElaborationRunner; seed?: ElaborationRepairSeed; repairDiagnostics?: ElaborationRepairDiagnostics; draft?: ElaborationDraft; draftMaterial?: ElaborationDraftMaterial; partitionSealFiles?: ReadonlyMap<string, string>; loadDraft?(schemaDigest: string): ElaborationDraft | null; loadDraftMaterial?(schemaDigest: string, request?: StageDraftMaterialRequest): ElaborationDraftMaterial | null } = {}): Promise<ElaborationResult> {
   checkInput(input)
   // 在任何 await 前复制调用者输入，后续生成/评审不能混入继续编辑的字节。
   const frozenInput = freezeElaborationInput(input)
   input = frozenInput.input
   const inputDigest = frozenInput.inputDigest
+  const partitionSealFiles = options.partitionSealFiles && new Map(options.partitionSealFiles)
   const draftMode = input.draftProtocol === 'elaboration-draft-v1'
   if (draftMode && (!input.worktree || !input.historyInput)) throw new TypeError('草稿协议必须绑定真实工作树及source input')
   const runtimeDiagnostics = options.repairDiagnostics ? structuredClone(options.repairDiagnostics) : undefined
@@ -535,7 +537,7 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
   const rejected = runtimeDiagnostics?.round.rejectedOutput
   if (rejected && (rejected.ownerInputDigest !== inputDigest || rejected.ownerRequestKey !== runtimeDiagnostics!.requestKey || rejected.threadId !== runtimeDiagnostics!.failure.threadId || rejected.turnId !== runtimeDiagnostics!.failure.turnId || rejected.sha256 !== elaborationDigest(rejected.text) || rejected.ref && rejected.ref.sha256 !== rejected.sha256)) throw new TypeError('被拒final诊断必须绑定同owner原请求、原生身份及完整字节摘要')
   const seed = options.seed ? structuredClone(options.seed) : undefined
-  const seedChecked = seed ? validateRepairSeed(input, seed, inputDigest) : undefined
+  const seedChecked = seed ? validateRepairSeed(input, seed, inputDigest, partitionSealFiles) : undefined
   const seedCandidate = seedChecked?.candidate
   const prior = seed ? { requestKey: seed.requestKey, inputDigest, candidateDigest: seed.candidateDigest, renderedCandidateDigest: digest(seedCandidate), traces: seed.traces } : null
   const result: ElaborationResult = { status: 'exhausted', ...(runtimeDiagnostics ? { repairDiagnostics: runtimeDiagnostics } : {}), ...(input.readonlySpecRepair ? { readonlySpecRepair: input.readonlySpecRepair } : {}), ...(input.partitionBinding ? { partitionBinding: input.partitionBinding } : {}), inputDigest, candidateDigest: null, prior, changes: [], contracts: [], graph: null, coverage: null, gaps: [], blockedIds: [], readyIds: [], readyFlowIds: [], blockedFlows: [], retiredIds: [], nodeChanges: [], structurePassed: false, reviewPassed: false, runtimeVerification: 'not_run', implementationReady: false, deferredImplementationFindings: [], blockedStructureFindings: [], rounds: [], failure: null }
@@ -593,7 +595,7 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
   const reviewScopeInstructions = `本轮审查修复范围（由生成侧同一owner事实派生，不新增写权）：${JSON.stringify({ targets: targetBindings.map(binding => ({ ...binding, mutable: targetHasCurrentChanges(input, input.targets[binding.targetIndex]) })), readonlyContext: input.context?.map(({ nodeId, path }) => ({ nodeId, path })) ?? [] })}。mutable=false及readonlyContext的metadata、description、prose、绑定和业务行均为冻结已接受内容，不因历史进度/文案质量在本轮要求修订。mutable=true只允许原raw/分析/逐项授权支持的字段差量；raw仍由程序保持，AC/VERIFY与生命周期继续核原授权。repair的affectedIds须全部存在且至少一个属于本轮可变owner；允许同时引用冻结祖先/依赖作为证据，须定位本轮改变造成的具体义务失败。真实扩域沿原分析重审与授权流程，不由finding扩权。`
   const reviewRetry = (source: ElaborationRound | undefined): { round: ElaborationRound; output: unknown; errors: ContractFinding[] } | null => {
     if (!source?.candidate || !source.review || !input.analysis) return null
-    const checked = checkCandidate(input, source.candidate, inputDigest)
+    const checked = checkCandidate(input, source.candidate, inputDigest, { partitionSealFiles })
     if (!elaborationReviewScopeErrors(input, source.review, checked.graph).length) return null
     if (source.candidate.inputDigest !== inputDigest || source.candidateDigest !== digest(source.candidate)) throw Object.assign(new TypeError('续审候选身份或摘要不匹配'), { code: 'review_retry_binding' })
     const nativeReview = Object.fromEntries(Object.entries(source.review).filter(([key]) => key !== 'inputDigest' && key !== 'candidateDigest'))
@@ -684,7 +686,7 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
       if (!round.findings.length) {
         round.candidate = renderElaboration(input, generated!, inputDigest)
         round.candidateDigest = digest(round.candidate)
-        const checked = checkCandidate(input, round.candidate, inputDigest)
+        const checked = checkCandidate(input, round.candidate, inputDigest, { partitionSealFiles })
         round.findings.push(...checked.findings)
         result.nodeChanges = round.candidate.nodeChanges ?? []
         result.changes = round.candidate.changes.map(change => ({ ...change, contentDigest: elaborationDigest(change.source) }))

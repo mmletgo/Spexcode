@@ -596,6 +596,7 @@ test('全局返修负向：不更名、删义务、旧作者身份、错引用�
     ['作者已采纳FLOW更名', f.repaired.replaceAll('FLOW-PEER-02', 'FLOW-PEER-AUTHOR-RENAMED'), ['FLOW-PEER-02']],
     ['作者AC弱化', f.repaired.replace('全部拒绝，原结果可由所有者下载', '部分拒绝即可'), []],
     ['作者VERIFY弱化', f.repaired.replace('10000 |', '1000 |'), []],
+    ['新增不存在的源码治理', f.repaired.replaceAll('src/export.js', 'src/missing-export.js'), []],
     ['仅FLOW改名未更新STEP', f.repaired.replaceAll('| FLOW-PEER-REPAIRED-01 | 校验', '| FLOW-SHARED-01 | 校验'), []],
     ['抢兄弟稳定ID', f.repaired.replaceAll('FLOW-PEER-REPAIRED-01', 'FLOW-EXPORT-02'), []],
     ['同kind更名却删除流程义务', f.repaired.replace('提交请求', '跳过提交'), []],
@@ -607,6 +608,7 @@ test('全局返修负向：不更名、删义务、旧作者身份、错引用�
     const result = await elaborateSyncPartitions({ ...f.input, requestKey: name }, f.plan, 1, f.checkpoints, f.run(() => JSON.stringify(output)))
     assert.equal(result.reviewPassed, false, name)
     assert.ok(result.rounds.some(round => round.findings.some(issue => issue.severity === 'error')), name)
+    if (name === '新增不存在的源码治理') assert.ok(result.rounds.some(round => round.findings.some(issue => issue.code === 'missing-governed-file' && issue.path === f.peerPath)))
     assert.deepEqual(f.requests.slice(callsBefore).map(request => request.purpose), ['elaboration_generate'], name)
   })
   await t.test('非duplicate或非本owner真实finding不给临时ID改名资格', async () => {
