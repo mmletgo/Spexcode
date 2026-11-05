@@ -257,13 +257,13 @@ function elaborationRepairSeed(result: SavedElaboration | null, requestKey: stri
     ? { settled: true, requestKey, inputDigest: result.inputDigest, candidateDigest: last.candidateDigest, output: last.output, candidate: last.candidate, findings: last.findings, review: last.review, traces: last.traces } : undefined
 }
 
-function partitionStage<T>(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, key: string): { result: T; resultRef: BlobRef } | null {
+function partitionStage<T>(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, key: string, sourceSelection?: FrozenBaselineSelection): { result: T; resultRef: BlobRef } | null {
   const checkpoints = readSyncCheckpoints(store, operation, attempt), result = stage<T>(store, operation, attempt, key, 'automatic', checkpoints)
   if (!result) return null
   const resultRef = writeEvidence(operation.input.source.commonDir, result)
   const original = checkpoints.json.map(({ value }) => value as Partial<Stage>)
     .find(value => value.version === 'sync-stage-v1' && value.stage === key && value.operationId === operation.id && value.attemptId === attempt.id && value.inputId === operation.input.id && value.policyDigest === operation.policyDigest && value.resultRef?.sha256 === resultRef.sha256)
-  if (original?.readSetDigest !== operation.readSetDigest || operation.baselineSelection && original.baselineSelectionRef?.sha256 !== writeEvidence(operation.input.source.commonDir, store.readBusinessBaselineSelection(operation.id)).sha256) return null
+  if (original?.readSetDigest !== operation.readSetDigest || operation.baselineSelection && original.baselineSelectionRef?.sha256 !== writeEvidence(operation.input.source.commonDir, sourceSelection ?? store.readBusinessBaselineSelection(operation.id)).sha256) return null
   return { result, resultRef }
 }
 
@@ -579,6 +579,8 @@ function generationBuilderSource(store: SyncStore, operation: SyncOperation, ori
 
 /** 沿原检查点追到真正派发的accept；拷贝不创造新会话或修改旧摘要。 */
 export function acceptedCandidateReviewSource(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, key: string, candidate: CandidateRef, plan: SyncPartitionPlan, input: GenerationInput): { result: SavedGeneration; resultRef: BlobRef; attempt: SyncAttempt } | null {
+  const selected = operation.baselineSelection
+  if (selected && selected.digest !== contentHash(canonical({ version: selected.version, source: selected.source, bindings: selected.bindings }))) return null
   let origin = attempt, source = partitionStage<SavedGeneration>(store, operation, origin, key)
   while (source) {
     const result = source.result, trace = result.traces[0]
@@ -657,7 +659,7 @@ function readonlyRepairFromAttempt(store: SyncStore, operation: SyncOperation, a
   const saved = stage<SavedGeneration>(store, operation, attempt, 'generation')
   if (!saved) return null
   operation = readonlyRepairContext(store, operation, attempt, writeEvidence(operation.input.source.commonDir, saved))
-  const generation = partitionStage<SavedGeneration>(store, operation, attempt, 'generation')
+  const generation = partitionStage<SavedGeneration>(store, operation, attempt, 'generation', operation.baselineSelection)
   let allFindings = generation?.result.validationFindings.filter(item => item.severity === 'error') ?? []
   const semantic = generation?.result.candidateValidated === true && ['repair', 'failed'].includes(generation.result.status) && !generation.result.reviewPassed && generation.result.partitionEvidence?.some(item => item.review.verdict === 'repair')
   if (!generation?.result.candidate || !semantic && (generation.result.candidateValidated || !allFindings.length || allFindings.some(item => item.code !== 'anchor-dead'))) return null
@@ -694,7 +696,7 @@ function readonlyRepairFromAttempt(store: SyncStore, operation: SyncOperation, a
   if (semantic) {
     allFindings = readonlyReviewFindings(generation.result, prior.result.changes, writable)
     for (const evidence of generation.result.partitionEvidence!) {
-      const saved = partitionStage<SavedGeneration>(store, operation, attempt, `partition:${evidence.partitionId}:candidate-review`)
+      const saved = partitionStage<SavedGeneration>(store, operation, attempt, `partition:${evidence.partitionId}:candidate-review`, operation.baselineSelection)
       const result = saved?.result, trace = result?.traces.find(trace => trace.purpose === 'code_review')
       const currentDispatch = trace && attempt.dispatchPlans.some(dispatch => dispatch.purpose === 'code_review' && dispatch.session?.sessionId === trace.sessionId && dispatch.session.threadId === trace.threadId && dispatch.session.turnId === trace.turnId)
       const reviewPlan = evidence.review.verdict === 'accept' && !currentDispatch ? partitionStage<SyncPartitionPlan>(store, operation, attempt, 'candidate-partition-plan') : null
@@ -1706,6 +1708,15 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           const originalPlan = stage<SyncPartitionPlan>(store, operation, store.readAttempt(readonlyOwnerRepair.planAttemptId), 'partition-plan')
           if (!originalPlan || writeEvidence(operation.input.source.commonDir, originalPlan).sha256 !== readonlyOwnerRepair.planRef.sha256 || partitions && partitions.digest !== originalPlan.digest) fail('readonly_spec_repair_binding', '只读V1返修不能更换原已审partition计划')
           if (!partitions) { partitions = originalPlan; partitionCheckpoints.save('partition-plan', partitions); saveStage(store, fence, 'readonly-repair-plan-provenance', { fromAttemptId: readonlyOwnerRepair.planAttemptId, resultRef: readonlyOwnerRepair.planRef }) }
+        }
+        if (!partitions && options.plan.direction === 'code_to_spec' && readonlyBase?.operationId === operation.id && !readonlyOwnerRepair) {
+          const origin = store.readAttempt(readonlyBase.attemptId)
+          const original = elaborationComposedBinding(store, operation, origin, readonlyBase.result, view.composed) && reviewPlanStage(store, operation, origin, 'partition-plan')
+          const owners = readonlyBase.result.partitionEvidence
+          if (original && owners?.length === original.result.partitions.length && owners.every(owner => original.result.partitions.some(partition => partition.id === owner.partitionId) && (JSON.parse(readEvidence(operation.input.source.commonDir, owner.resultRef).toString()) as SavedElaboration).partitionBinding?.planDigest === original.result.digest)) {
+            partitions = original.result
+            partitionCheckpoints.save('partition-plan', partitions)
+          }
         }
         if (!partitions) {
           const sourceEntries = verifySnapshot(operation.input)

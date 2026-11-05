@@ -168,6 +168,8 @@ A7形状的真实Git/SQLite回归先保存独审accept但含无IDcoverage_gap的
 
 真实Git/SQLite的P2跨轮回归保留已审及失败分区原件；无诊断首轮与带诊断后轮不能误复用，精确同冻结输入后只重跑失败审查，原accept ref/traces及源/tests不变。历史accept与本轮repair共存时仍精确反馈owner，不把失败或旧dispatch伪造成当前调用。
 
+普通P2失败后的承接同时核原partition-plan引用及局部analysis身份，accepted-review维持4→4→1且兄弟零P1重派；同正文pending/lineage和新增AC的null扩域两路仍只返修精确owner，原raw/facts/授权/冻结源码tests输入逐字保持。传入selection自身摘要损坏必须拒绝。错owner/ref或local input破坏聚合强认证时可在下一attempt领取前停止：返回本次checkpoint_artifact_binding精确拒因，旧持久failure/refs不改、无后续派发和journal；跨owner raw身份负控核稳定错误码及原失败身份拒因，不依赖历史文案正则。
+
 指导cache回归同时保留旧code-behavior-guidance-v1/v2/v3及缺marker的历史原件，当前v4指导必须重新派发；同指导且精确绑定的已审局部仍按既有来源证明承接，不重做已进入applying的实际交付。
 
 
