@@ -50,4 +50,4 @@
 
 - ZCode最新失败Git稿沿既有严格较新来源/currentfence材料接缝；旧cancelled/新failed均核formalstop+removed全值及原公开Native身份，冷观察不改旧原件或读success history，不附failedWorktree/授自动重试。writer26保护新准入，升级先停旧writer/结算资源、online backup，回滚恢复一致v25库及evidence/Git refs。定向材料回归：`npx tsx --import ./scripts/test-home.mjs --test --test-name-pattern='mode=zcode-' spec-cli/src/sync/coordinator.test.ts`。
 
-- 已停owner的精确物理JSON草稿只在新fence沿stage-worktree observer读取；只此draft可dirty，source/tests/schema/context/index授权外变化拒绝，原目录/index/Native原件不改。physical_draft明确未批准且不是旧Git/final，正常提交后才形成新draft；P0保严格较新来源与ready，P1按真实Native attempt/round只取严格较新物理稿，合法candidate/续审优先；跨父/诊断只豁免程序可信精确overlay投影，其余保护面保持。writer27围栏，升级停旧writer/结算资源、0600 online backup，回滚恢复一致v26库及evidence/Git refs。
+- 已停owner的精确物理JSON草稿只在新fence沿stage-worktree observer读取；ZCode另须原精确turn.failed（可保原canonical cancelled），普通暂停的turn.completed/turn.cancelled不在此物理准入，既有正常Git暂停材料政策保持；只此draft可dirty，source/tests/schema/context/index授权外变化拒绝，原目录/index/Native原件不改。physical_draft明确未批准且不是旧Git/final，正常提交后才形成新draft；P0保严格较新来源与ready，P1按真实Native attempt/round只取严格较新物理稿，合法candidate/续审优先；跨父/诊断只豁免程序可信精确overlay投影，其余保护面保持。writer27围栏，升级停旧writer/结算资源、0600 online backup，回滚恢复一致v26库及evidence/Git refs。
