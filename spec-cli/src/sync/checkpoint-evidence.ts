@@ -69,7 +69,7 @@ export function authenticateNativeFailure(store: SyncStore, operation: SyncOpera
   if (state.state !== 'failed' && !(state.state === 'cancelled' && resource.phase === 'removed' && state.cancellation?.nativeStopped === true)) fail('失败的后续控制状态没有精确停止证明')
   if (allowStoppedDraft && state.cancellation?.nativeStopped && resource.phase === 'removed' && !isDeepStrictEqual(checkpoint.stop, { sessionId: plan.expectedSessionId, state: state.state, threadId: state.threadId, turnId: state.turnId, nativeStopped: true, acknowledged: state.cancellation.acknowledged, nativeStatus: state.cancellation.nativeStatus, ...(state.cancellation.error ? { error: state.cancellation.error } : {}) })) fail('失败的checkpoint与canonical停止原值不一致')
   if (allowStoppedDraft && dispatch.session && (dispatch.session.sessionId !== checkpoint.session.sessionId || dispatch.session.threadId !== null && dispatch.session.threadId !== checkpoint.session.threadId || dispatch.session.turnId !== null && dispatch.session.turnId !== checkpoint.session.turnId)) fail('新Git材料缺少原派发的精确Native身份')
-  if (allowStoppedDraft && (state.state !== 'cancelled' || resource.phase !== 'removed' || state.cancellation?.nativeStopped !== true)) fail('新Git材料观察必须有原正式取消及资源停止证明')
+  if (allowStoppedDraft && (state.state !== 'cancelled' && !(state.state === 'failed' && observedFailure) || resource.phase !== 'removed' || state.cancellation?.nativeStopped !== true)) fail('新Git材料观察必须有原正式取消或已认证失败及资源停止证明')
   return { plan, checkpoint, record, state, observedFailure }
 }
 

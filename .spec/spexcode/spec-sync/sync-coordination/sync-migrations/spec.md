@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+v26仅追加无DDL SELECT1 marker，保护精确已停ZCode失败的未批准Git材料准入与既有严格较新来源选择，v25及更旧writer写入/派发前拒绝。NativePlan及structured policy仍按原v3/v6或原历史版本冷验，不补字段。升级前停稳旧writer并结算或保留资源，经SQLite online backup及组件事务25→26；v1–v25 migration完整行/checksum/applied_at与全部旧业务/protocol表保持。回滚停新writer并恢复升级前v25一致备份及原evidence/Git refs，不删marker、不重签旧记录或丢弃最新未批准稿。
+
 v25仅追加无DDL SELECT 1 marker，保护P0 behavior-draft-protocol可选contextTransport:git-json-v1及同owner/purpose只读Git context文件运输。v24及更旧writer必须在写入或派发前拒绝，避免已冻结传输选择被忽略。升级先停稳全部旧backend/queue并结算或保留资源，再沿既有SQLite online backup及组件事务迁移；v1–v24 SQL/checksum/applied_at、全部旧表、请求、缓存和receipt原字节保持，不补历史缺席。回滚先停新writer，再恢复升级前v24一致备份及原evidence/Git refs；不能删marker或重签旧请求。
 
 v24仅追加无DDL SELECT 1 marker，保护 nativeConfiguration:cli-config-v1、Claude NativePlan v2 与 ZCode NativePlan v3 的实际每轮配置/模型证据协议。v23及更旧writer在写入或派发前拒绝；正常升级先停稳全部旧backend/queue并结算或保留资源，按既有online backup后事务迁移。v1–v23 SQL/checksum/applied_at及全部旧表/请求/receipt原字节保持，不补历史字段。回滚先停新writer，再恢复升级前v23一致备份及配套evidence/Git refs；不能删marker或重签旧计划。

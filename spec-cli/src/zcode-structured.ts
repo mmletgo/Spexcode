@@ -291,6 +291,25 @@ function verifyPlan(plan: NativePlan, root: string, prompt: string | undefined, 
   if (prompt !== undefined && existsSync(join(root, 'send.json')) && digest(JSON.parse(readFileSync(join(root, 'send.json'), 'utf8'))) !== digest(nativeSend(plan, prompt, execution))) throw new StructuredSessionError('stale_result', 'ZCode original send differs from the exact native schema/prompt input')
 }
 
+/** 只读核原任务拥有权与公开终态；返回失败资格供新fence在有实际Git进度时使用。 */
+export function assertZCodeStoppedDraftSource(prompt: string, execution: ZCodeStructuredExecution, worktreePath: string): boolean {
+  const native = execution.zcodeNative
+  if (execution.version !== 6 || execution.policy !== 'native-worktree-v1' || !execution.model?.startsWith('zcode:') || execution.worktree?.mode !== 'edit' || !native || !['failed', 'cancelled'].includes(execution.state ?? '') || !execution.cancellation?.nativeStopped || existsSync(join(native.root, 'completed.json')))
+    throw new StructuredSessionError('stale_result', 'stopped ZCode draft requires its original stopped native worktree')
+  const read = (name: string): unknown => JSON.parse(readFileSync(join(native.root, name), 'utf8'))
+  const plan = read('plan.json') as NativePlan
+  verifyPlan(plan, native.root, prompt, execution)
+  if (plan.workspace !== worktreePath || !plan.pid || !detachedRuntimeIsGone(plan.pid, plan.receiptFile)) throw new StructuredSessionError('stale_result', 'stopped ZCode draft differs from its exact workspace/process')
+  const send = read('send.json'), snapshot = read('model-snapshot.json') as { sessionId: string; model: NativeModel }, events = read('events.json') as NativeEvent[], terminal = read('terminal.json') as NativeEvent, exit = read('exit.json') as StopEvidence
+  const starts = events.filter(event => event.type === 'turn.started'), terminals = events.filter(event => ['turn.completed', 'turn.failed', 'turn.cancelled'].includes(event.type)), requests = events.filter(event => event.type === 'session.updated')
+  if (digest(send) !== digest(nativeSend(plan, prompt, execution)) || !plan.turnId || typeof plan.model?.providerId !== 'string' || !plan.model.providerId || typeof plan.model.modelId !== 'string' || !plan.model.modelId || snapshot.sessionId !== plan.sessionId || digest(snapshot.model) !== digest(plan.model) || starts.length !== 1 || starts[0].payload.inputId !== plan.inputId || starts[0].payload.queryId !== plan.queryId || typeof starts[0].payload.messageId !== 'string' || !starts[0].payload.messageId
+    || events.some(event => event.sessionId !== plan.sessionId || event.turnId !== plan.turnId || !Number.isSafeInteger(event.seq) || typeof event.eventId !== 'string') || new Set(events.map(event => event.eventId)).size !== events.length
+    || !requests.length || requests.some(event => event.payload.providerId !== plan.model?.providerId || event.payload.modelId !== plan.model?.modelId)
+    || terminals.length !== 1 || digest(terminals[0]) !== digest(terminal) || terminal.sessionId !== plan.sessionId || terminal.turnId !== plan.turnId || terminal.payload.inputId !== plan.inputId || !exit.stopped || exit.code !== 0 || exit.signal !== null)
+    throw new StructuredSessionError('stale_result', 'stopped ZCode draft lost its original model/input/terminal/exit identity')
+  return terminal.type === 'turn.failed'
+}
+
 /** 同一原生 session/input/query/turn 和实际模型选择证明正常工具执行的终态。 */
 function settleWorktreeResult(plan: NativePlan, prompt: string, execution: ZCodeStructuredExecution): WorktreeNativeResult {
   verifyPlan(plan, plan.root, prompt, execution)

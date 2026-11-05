@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+ZCode停止材料回归复用真实Git/私有SQLite及正式adapter.stop/资源恢复：旧cancelling→cancelled与新failed+exactstop均在新fence续较新正常提交的原bytes，existing较旧认证draft不能遮蔽它，原业务诊断、已accept兄弟和预算保持。v3 explicit/default另以真实receipt核无messages的只读投影；session/turn/input/query/messageId/model/workspace/stop/seed/source/tests/schema/owner/request/fence错配不授材料，cancelled终态仅无进度skip，有新稿拒绝。旧record/Native文件、原attempt/checkpoint/resource逐字不变，不追加冷停止观察，不冒称真实模型、远端EPIPE修复或交付。
+
 P0 context运输回归在真实Git/私有SQLite核首次冻结git-json-v1、已有checkpoint缺席字段继续legacy，以及reserved原plan与checkpoint原bytes不改。字段存在但null、空串或未知版本在派发前明确unsupported，零runner/零dispatch。旧Native原final迁入下一精确draft，context/schema按各自角色只读；legacy→file、file→file的正式retryOf、后置分类回审、续审及完整业务finding沿同一原件认证，P1任务消费者保持原协议。模型、权限、source/tests/index、业务摘要与独审门保持；受控Native接缝不冒称真实模型或EPIPE修复。
 
 P1范围冲突回归用真实Git/SQLite证明：冻结owner旧文案repair仅重审同candidate，多个attempt保留原generation真实dispatch/summary/Git身份；原Native请求或candidate摘要损坏时零后续派发。认证且removed/stopped的失败小回执与failedWorktree仍能精确续改原Git稿，不要求成功generation trace或继承accept。同attempt已有父接口accept且本owner为空cancelled时，正式pause/resume仍回到此前同owner局部诊断，不误取aggregate末轮。受控runner不冒称真实模型、Docker或Tiny闭环完成。
