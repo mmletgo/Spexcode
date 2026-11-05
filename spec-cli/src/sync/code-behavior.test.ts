@@ -15,7 +15,7 @@ import { adoptedDeliveryPaths, composeInputSnapshots, readCompositionEvidence, t
 import { prepareHistoryRequest } from './history-input.js'
 import { buildSyncApplicationPlan } from './planning.js'
 import { readFrozenContracts } from './frozen-contracts.js'
-import type { ElaborationRunner } from './elaboration-types.js'
+import type { ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
 import type { BaselinePair, FrozenBaselineSelection } from './operation-types.js'
 import { composeControlledRequest, controlledDecisionIdentity, prepareControlledDecision, prepareControlledRequest, renderControlledDecisionRaw } from './request-input.js'
 import { captureInputSnapshot, contentHash, readEvidence, readObject, readTree, writeEvidence } from './snapshot.js'
@@ -55,13 +55,15 @@ test('legacy P0程序草稿尾段只读保留原诊断，字符串标记和嵌�
 
 const fixturePath = new URL('../../test/fixtures/spec-sync/export-repo/', import.meta.url)
 const git = (root: string, ...args: string[]): string => execFileSync('/usr/bin/git', ['-C', root, ...args], { encoding: 'utf8', stdio: 'pipe', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }).trim()
-async function fixture(t: test.TestContext, prepare?: (source: string) => string, extraFiles: Readonly<Record<string, string>> = {}) {
-  const parent = mkdtempSync(join(tmpdir(), 'sync-behavior-')), root = join(parent, 'source'), delivery = join(parent, 'delivery')
-  mkdirSync(root); cpSync(fixturePath, root, { recursive: true }); if (prepare) { const path = join(root, '.spec/export/export-contract/spec.md'); writeFileSync(path, prepare(readFileSync(path, 'utf8'))) }
-  for (const [path, text] of Object.entries(extraFiles)) { mkdirSync(join(root, path, '..'), { recursive: true }); writeFileSync(join(root, path), text) }
-  git(root, 'init', '-b', 'main'); git(root, 'config', 'user.name', 'behavior fixture'); git(root, 'config', 'user.email', 'fixture@example.invalid'); git(root, 'add', '.'); git(root, 'commit', '-m', 'base')
-  git(root, 'switch', '-c', 'source'); git(root, 'worktree', 'add', '-b', 'delivery', delivery, 'HEAD')
-  t.after(() => rmSync(parent, { recursive: true, force: true }))
+async function fixture(t: test.TestContext, prepare?: (source: string) => string, extraFiles: Readonly<Record<string, string>> = {}, persistentParent?: string) {
+  const parent = persistentParent ?? mkdtempSync(join(tmpdir(), 'sync-behavior-')), root = join(parent, 'source'), delivery = join(parent, 'delivery')
+  if (!existsSync(join(root, '.git'))) {
+    mkdirSync(root, { recursive: true }); cpSync(fixturePath, root, { recursive: true }); if (prepare) { const path = join(root, '.spec/export/export-contract/spec.md'); writeFileSync(path, prepare(readFileSync(path, 'utf8'))) }
+    for (const [path, text] of Object.entries(extraFiles)) { mkdirSync(join(root, path, '..'), { recursive: true }); writeFileSync(join(root, path), text) }
+    git(root, 'init', '-b', 'main'); git(root, 'config', 'user.name', 'behavior fixture'); git(root, 'config', 'user.email', 'fixture@example.invalid'); git(root, 'add', '.'); git(root, 'commit', '-m', 'base')
+    git(root, 'switch', '-c', 'source'); git(root, 'worktree', 'add', '-b', 'delivery', delivery, 'HEAD')
+  }
+  if (!persistentParent) t.after(() => rmSync(parent, { recursive: true, force: true }))
   const base = await captureInputSnapshot(root), raw = readFileSync(join(root, '.spec/export/export-contract/spec.md'), 'utf8')
   const source = readFileSync(join(root, 'src/export.js'), 'utf8')
   const pair = async (): Promise<BaselinePair> => ({ id: 'pair-verified', repositoryId: base.source.repositoryId, source: base.source, sourceInput: base, verifiedDelivery: await captureInputSnapshot(delivery), coveredScope: { paths: ['src', '.spec', 'tests'], contractIds: [], flowIds: [] }, receiptId: 'receipt-real-fixture', settledAtMs: 1 })
@@ -87,6 +89,78 @@ function runner(kind: CodeBehaviorKind, patch?: (proposal: Record<string, unknow
     return { sessionId: `session-${request.purpose}`, threadId: `thread-${request.purpose}`, turnId: 'turn-1', output, resultDigest: contentHash(JSON.stringify(output)) }
   }
 }
+
+test('Native P0历史seed复用已校验old tree entries且输入与接受门不变', async t => {
+  const f = await fixture(t, undefined, {}, process.env.SPEX_P0_LOCAL_TREE_REUSE_FIXTURE), sourcePath = join(f.root, 'src/export.js'), marker = '// immutable tree reuse fixture change'
+  const source = readFileSync(sourcePath, 'utf8')
+  if (!source.includes(marker)) writeFileSync(sourcePath, `${source.trimEnd()}\n${marker}\n`)
+  else assert.equal(source.split(marker).length, 2, '持久Git fixture只带一处固定测试差量')
+  // capturedAtMs is excluded from snapshot identity; pin this audit-only field for cross-process A/B evidence.
+  const prepared = await f.input(), snapshot = { ...prepared.snapshot, capturedAtMs: 1 }, baseline: BaselinePair = {
+    ...prepared.baseline!,
+    sourceInput: { ...await captureInputSnapshot(f.root, { committed: true }), capturedAtMs: 1 },
+    verifiedDelivery: { ...await captureInputSnapshot(f.delivery, { committed: true }), capturedAtMs: 1 },
+  }
+  const input: CodeBehaviorInput = {
+    ...prepared,
+    snapshot,
+    baseline,
+    composed: composeInputSnapshots(snapshot, baseline, { retainConflicts: true }).composed!,
+    plan: { ...prepared.plan, agentWorkflow: 'native-worktree-v1' },
+  }
+  const oldTree = baseline.sourceInput.immutableTree
+  assert.equal(baseline.verifiedDelivery.immutableTree, oldTree, '至少两个历史角色共用同一真实immutable tree')
+  const cp = createRequire(import.meta.url)('node:child_process') as typeof import('node:child_process'), original = cp.execFileSync, calls: string[][] = []
+  const treeReads = (): number => calls.filter(args => args.includes('ls-tree') && args.at(-1) === oldTree).length
+  const dispatches: { purpose: string; inputDigest: string; worktree: NonNullable<ElaborationSessionRequest['worktree']>; taskText: string; historicalRoles: { role: string; baseCommit: string; tree: string }[]; oldTreeReads: number }[] = []
+  const accepted: { inputDigest: string; oldTreeReads: number }[] = [], referenceAccepted: { inputDigest: string; oldTreeReads: number }[] = [], referencePurposes: string[] = []
+  cp.execFileSync = ((...args: Parameters<typeof execFileSync>) => { if (args[0] === 'git') calls.push(args[1] as string[]); return Reflect.apply(original, cp, args) }) as typeof execFileSync
+  syncBuiltinESMExports()
+  let result: CodeBehaviorAnalysis, referenceResult: CodeBehaviorAnalysis
+  try {
+    const referenceInput: CodeBehaviorInput = structuredClone(input)
+    delete referenceInput.plan.agentWorkflow
+    referenceResult = await analyzeCodeBehavior(referenceInput, async request => {
+      referencePurposes.push(request.purpose)
+      return runner('refactor')(request)
+    }, inputDigest => { referenceAccepted.push({ inputDigest, oldTreeReads: treeReads() }); return null })
+    assert.equal(referenceResult.reviewPassed, true)
+    assert.deepEqual(referencePurposes, ['code_behavior_analyze', 'code_behavior_review'])
+    assert.equal(referenceAccepted.length, 1)
+    calls.length = 0
+    result = await analyzeCodeBehavior(input, async request => {
+      const taskText = request.prompt.split('任务:\n')[1]?.split('\n待审分析:')[0]
+      assert.ok(taskText)
+      const task = JSON.parse(taskText) as { requiredChangedPaths: string[]; historicalRoles: { role: string; baseCommit: string; tree: string }[] }
+      assert.ok(request.worktree)
+      dispatches.push({ purpose: request.purpose, inputDigest: request.inputDigest, worktree: request.worktree, taskText, historicalRoles: task.historicalRoles, oldTreeReads: treeReads() })
+      const output = request.purpose === 'code_behavior_analyze'
+        ? { changes: task.requiredChangedPaths.map(path => ({ kind: 'refactor', paths: [path], affectedIds: ['RULE-EXPORT-05'], ruleIds: ['RULE-EXPORT-05'], originalIntent: '保留既有业务', previousBehavior: '既有行为', sourceBehavior: '既有行为', deliveryBehavior: '既有行为', evidence: path, counterexample: '不改变既有业务' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+        : (() => { const reviewed = JSON.parse(request.prompt.split('待审分析:\n')[1]) as { analysisDigest: string; analysis: CodeBehaviorAnalysis }; return { inputDigest: request.inputDigest, analysisDigest: reviewed.analysisDigest, verdict: 'accept', checkedPaths: task.requiredChangedPaths, checkedChangeIds: reviewed.analysis.changes.map(change => change.id), findings: [] } })()
+      return { sessionId: `reuse-${request.purpose}`, threadId: `reuse-thread-${request.purpose}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)) }
+    }, inputDigest => { accepted.push({ inputDigest, oldTreeReads: treeReads() }); return null })
+  } finally { cp.execFileSync = original; syncBuiltinESMExports() }
+  assert.equal(result.reviewPassed, true)
+  assert.deepEqual(dispatches.map(request => request.purpose), ['code_behavior_analyze', 'code_behavior_review'])
+  assert.equal(accepted.length, 1, '完整上下文准备后仍只经过原accepted门一次')
+  assert.equal(accepted[0].inputDigest, dispatches[0].inputDigest)
+  assert.equal(accepted[0].oldTreeReads, dispatches[0].oldTreeReads)
+  assert.equal(dispatches.length, 2, '分析与独审Native调用数保持原流程')
+  assert.deepEqual(dispatches[0].historicalRoles.map(role => role.role), ['oldSource', 'newSource', 'verifiedDelivery', 'controlledBeforeFiles', 'authorBaseline'])
+  assert.equal(dispatches[0].historicalRoles.find(role => role.role === 'oldSource')?.tree, dispatches[0].historicalRoles.find(role => role.role === 'authorBaseline')?.tree)
+  assert.equal(dispatches[0].historicalRoles.find(role => role.role === 'oldSource')?.baseCommit, dispatches[0].historicalRoles.find(role => role.role === 'authorBaseline')?.baseCommit)
+  for (const request of dispatches.slice(1)) {
+    assert.equal(request.inputDigest, dispatches[0].inputDigest)
+    assert.equal(request.taskText, dispatches[0].taskText)
+    assert.deepEqual(request.worktree, dispatches[0].worktree)
+    assert.deepEqual(request.historicalRoles, dispatches[0].historicalRoles)
+  }
+  const artifact = { inputDigest: dispatches[0].inputDigest, taskContext: dispatches[0].taskText, taskContextSha256: contentHash(dispatches[0].taskText), worktree: dispatches[0].worktree, historicalRoles: dispatches[0].historicalRoles, acceptedInputDigests: accepted.map(item => item.inputDigest), acceptedCount: accepted.length, referenceAcceptedInputDigests: referenceAccepted.map(item => item.inputDigest), referenceAcceptedCount: referenceAccepted.length, referenceReviewPassed: referenceResult.reviewPassed, referenceNativePurposes: referencePurposes, referenceOldTreeLsTreeReads: referenceAccepted[0].oldTreeReads, workflowReviewPassed: result.reviewPassed, workflowNativePurposes: dispatches.map(request => request.purpose), firstNativeOldTreeLsTreeReads: dispatches[0].oldTreeReads, historicalRoleCount: dispatches[0].historicalRoles.length }
+  const evidencePath = process.env.SPEX_P0_LOCAL_TREE_REUSE_EVIDENCE
+  if (evidencePath) writeFileSync(evidencePath, `${JSON.stringify(artifact, null, 2)}\n`)
+  t.diagnostic(JSON.stringify({ inputDigest: artifact.inputDigest, taskContextSha256: artifact.taskContextSha256, worktree: artifact.worktree, historicalRoles: artifact.historicalRoles, acceptedInputDigests: artifact.acceptedInputDigests, acceptedCount: artifact.acceptedCount, referenceAcceptedInputDigests: artifact.referenceAcceptedInputDigests, referenceAcceptedCount: artifact.referenceAcceptedCount, referenceNativePurposes: artifact.referenceNativePurposes, referenceOldTreeLsTreeReads: artifact.referenceOldTreeLsTreeReads, workflowNativePurposes: artifact.workflowNativePurposes, firstNativeOldTreeLsTreeReads: artifact.firstNativeOldTreeLsTreeReads, historicalRoleCount: artifact.historicalRoleCount }))
+  assert.equal(dispatches[0].oldTreeReads, referenceAccepted[0].oldTreeReads, `historical seed assembly should reuse cached old tree entries; roles=${dispatches[0].historicalRoles.length}`)
+})
 
 test('语义元数据复用同一bodyRef且逐字段无损，所有版本与集合引用真实进入必读计划和冷证明', async t => {
   const f = await fixture(t), baseline = (await f.input()).baseline!
