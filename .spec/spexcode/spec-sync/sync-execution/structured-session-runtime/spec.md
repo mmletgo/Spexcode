@@ -19,6 +19,8 @@ related:
 
 ## expanded spec
 
+本次执行中新认证的 ZCode worktree 原生失败由 [[zcode-structured-runtime]] 保留 failed 首要原因，执行队列复用原 exact adapter.stop；只有独立真实停止证明成立，才以既有 failed+cancellation.nativeStopped 交给资源桥结算 terminal→removed。错误和清理事实分别保存在既有 error/cancellation，不增加持久格式或成功授权；停止未知仍 cancelling，首要失败不被清理诊断遮蔽。该路径不提供 output、rejectedOutput 或 failedWorktree，不扫描或重签历史 failed/cancelling、saved/reserved 请求。成功、schema、Git、独审与显式取消门禁保持；新不同请求只在原资源正式释放后取得容量，同键恢复不发送。
+
 新产生的已认证final格式/schema拒绝可在failed运行元数据及StructuredSessionError上携可选tagged rejectedOutput：完整final文本、SHA、prompt/schema/input/purpose及原生thread/turn绑定。它只是不可信诊断，成功output槽仍缺席，旧failed无字段不补读/不猜分类。同键读取和资源桥重核固定请求与证据身份；取消、无final、未停稳、身份不符不得附正文。可选观测不参与固定策略/创建摘要、不增加执行authority，因此不新增writer marker。
 
 资源专用恢复可在非持久取消选项中明确wakeQueue:false：仍刷新原queue candidate投影并保存精确取消/停止证明，只禁止本次主动requestQueueDrain。独立资源入口同时沿[[production-cutin]]静音本次canonical提交后的主动delivery wake；普通cancel默认行为保持。已有queued目标尚无nativeStopped时同样适用，资源结算不替旁置queued任务或watcher启动新turn；后续正常drain重新核目标stopped，仅推进仍合法的queued任务。

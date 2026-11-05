@@ -3,7 +3,7 @@ import { Ajv } from 'ajv'
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, symlinkSync, writeFileSync } from 'node:fs'
-import { homedir, tmpdir } from 'node:os'
+import { constants, homedir, tmpdir } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
 import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
@@ -41,6 +41,14 @@ const bytesDigest = (path: string): string => createHash('sha256').update(readFi
 const sleep = (milliseconds: number): Promise<void> => new Promise(resolve => setTimeout(resolve, milliseconds))
 const active = new Map<string, { interrupt(): void }>()
 const fixedPolicy = (execution: ZCodeStructuredExecution) => execution.policy === 'native-worktree-v1' ? structuredExecutionPolicy(execution) : ({ ...structuredExecutionPolicy(execution), version: execution.timeoutMs === null ? 5 : 4, policy: 'zcode-frozen-read-only-v1' })
+
+/** 只认证本次精确失败终态；原生正文不进入错误诊断，停止权限仍由既有adapter独立证明。 */
+export class ZCodeNativeTurnFailedError extends StructuredSessionError {
+  constructor(threadId: string, turnId: string, nativeCode: unknown) {
+    const code = typeof nativeCode === 'string' && Object.hasOwn(constants.errno, nativeCode) ? nativeCode : 'unavailable'
+    super('failed', `ZCode native turn failed (code=${code})`, { threadId, turnId })
+  }
+}
 
 /** 原业务正文逐字保留；唯一原生user输入前置固定、只读的精确JSON schema控制段。 */
 export function zcodeStructuredPrompt(prompt: string, schema: Record<string, unknown>): string {
@@ -281,6 +289,25 @@ function verifyPlan(plan: NativePlan, root: string, prompt: string | undefined, 
     throw new StructuredSessionError('stale_result', 'ZCode fixed native plan or durable identity differs')
   if (existsSync(join(root, 'send.json')) && (!plan.modelSnapshotDigest || !existsSync(join(root, 'model-snapshot.json')) || plan.modelSnapshotDigest !== digest(JSON.parse(readFileSync(join(root, 'model-snapshot.json'), 'utf8'))))) throw new StructuredSessionError('stale_result', 'ZCode saved pre-send model selection differs')
   if (prompt !== undefined && existsSync(join(root, 'send.json')) && digest(JSON.parse(readFileSync(join(root, 'send.json'), 'utf8'))) !== digest(nativeSend(plan, prompt, execution))) throw new StructuredSessionError('stale_result', 'ZCode original send differs from the exact native schema/prompt input')
+}
+
+/** 只读核原任务拥有权与公开终态；返回失败资格供新fence在有实际Git进度时使用。 */
+export function assertZCodeStoppedDraftSource(prompt: string, execution: ZCodeStructuredExecution, worktreePath: string): boolean {
+  const native = execution.zcodeNative
+  if (execution.version !== 6 || execution.policy !== 'native-worktree-v1' || !execution.model?.startsWith('zcode:') || execution.worktree?.mode !== 'edit' || !native || !['failed', 'cancelled'].includes(execution.state ?? '') || !execution.cancellation?.nativeStopped || existsSync(join(native.root, 'completed.json')))
+    throw new StructuredSessionError('stale_result', 'stopped ZCode draft requires its original stopped native worktree')
+  const read = (name: string): unknown => JSON.parse(readFileSync(join(native.root, name), 'utf8'))
+  const plan = read('plan.json') as NativePlan
+  verifyPlan(plan, native.root, prompt, execution)
+  if (plan.workspace !== worktreePath || !plan.pid || !detachedRuntimeIsGone(plan.pid, plan.receiptFile)) throw new StructuredSessionError('stale_result', 'stopped ZCode draft differs from its exact workspace/process')
+  const send = read('send.json'), snapshot = read('model-snapshot.json') as { sessionId: string; model: NativeModel }, events = read('events.json') as NativeEvent[], terminal = read('terminal.json') as NativeEvent, exit = read('exit.json') as StopEvidence
+  const starts = events.filter(event => event.type === 'turn.started'), terminals = events.filter(event => ['turn.completed', 'turn.failed', 'turn.cancelled'].includes(event.type)), requests = events.filter(event => event.type === 'session.updated')
+  if (digest(send) !== digest(nativeSend(plan, prompt, execution)) || !plan.turnId || typeof plan.model?.providerId !== 'string' || !plan.model.providerId || typeof plan.model.modelId !== 'string' || !plan.model.modelId || snapshot.sessionId !== plan.sessionId || digest(snapshot.model) !== digest(plan.model) || starts.length !== 1 || starts[0].payload.inputId !== plan.inputId || starts[0].payload.queryId !== plan.queryId || typeof starts[0].payload.messageId !== 'string' || !starts[0].payload.messageId
+    || events.some(event => event.sessionId !== plan.sessionId || event.turnId !== plan.turnId || !Number.isSafeInteger(event.seq) || typeof event.eventId !== 'string') || new Set(events.map(event => event.eventId)).size !== events.length
+    || !requests.length || requests.some(event => event.payload.providerId !== plan.model?.providerId || event.payload.modelId !== plan.model?.modelId)
+    || terminals.length !== 1 || digest(terminals[0]) !== digest(terminal) || terminal.sessionId !== plan.sessionId || terminal.turnId !== plan.turnId || terminal.payload.inputId !== plan.inputId || !exit.stopped || exit.code !== 0 || exit.signal !== null)
+    throw new StructuredSessionError('stale_result', 'stopped ZCode draft lost its original model/input/terminal/exit identity')
+  return terminal.type === 'turn.failed'
 }
 
 /** 同一原生 session/input/query/turn 和实际模型选择证明正常工具执行的终态。 */
@@ -542,11 +569,16 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
       if (event.type === 'tool.updated' && event.payload.kind === 'scheduled' && !worktree && event.payload.toolName !== zcodeCapability.tool) throw new StructuredSessionError('unsupported', 'ZCode scheduled an uncontrolled tool')
       events.push(event)
       if (['turn.completed', 'turn.failed', 'turn.cancelled'].includes(event.type)) {
+        if (event.payload.inputId !== plan.inputId) throw new StructuredSessionError('stale_result', 'ZCode terminal belongs to another original input')
         if (terminal) throw new StructuredSessionError('stale_result', 'ZCode returned multiple terminal events')
         terminal = event; writeJson(join(root, 'terminal.json'), terminal, true)
       }
     }
     writeJson(join(root, 'events.json'), events); writeJson(join(root, 'event-counts.json'), counts)
+    if (terminal?.type === 'turn.failed') {
+      const error = terminal.payload.error as { code?: unknown } | undefined
+      throw new ZCodeNativeTurnFailedError(plan.sessionId, plan.turnId!, error?.code)
+    }
   }
   const stop = async (): Promise<void> => {
     if (stopSent || !sessionCreated || terminal) return
@@ -627,9 +659,9 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
     }
     const stopped = ownedProcessesStopped(plan)
     writeJson(join(root, 'exit.json'), { code: exit?.code ?? null, signal: exit?.signal ?? null, stopped, acknowledged, idle, closed: closeAcknowledged, stderrBytes, stderrSha256: stderrHash.digest('hex') } satisfies StopEvidence, true)
-    if (!stopped) { child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy(); child.unref(); if (!(resultError instanceof StructuredSessionError && resultError.code === 'native_rpc_timeout')) resultError = new StructuredSessionError('cancellation_pending', 'ZCode app/MCP process stop is unproven') }
+    if (!stopped) { child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy(); child.unref(); if (!(resultError instanceof ZCodeNativeTurnFailedError) && !(resultError instanceof StructuredSessionError && resultError.code === 'native_rpc_timeout')) resultError = new StructuredSessionError('cancellation_pending', 'ZCode app/MCP process stop is unproven') }
   } catch {
-    if (!(resultError instanceof StructuredSessionError && resultError.code === 'native_rpc_timeout')) resultError = new StructuredSessionError('cancellation_pending', 'ZCode native cleanup or stop evidence could not be settled')
+    if (!(resultError instanceof ZCodeNativeTurnFailedError) && !(resultError instanceof StructuredSessionError && resultError.code === 'native_rpc_timeout')) resultError = new StructuredSessionError('cancellation_pending', 'ZCode native cleanup or stop evidence could not be settled')
     child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy(); child.unref()
   } finally {
     clearTimeout(timeout); callbacks.signal?.removeEventListener('abort', interrupt); active.delete(root); lines.close()

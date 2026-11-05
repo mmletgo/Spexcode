@@ -13,7 +13,7 @@ import { verifyStructuredFrozenReadProof as verifyFrozenReadProof } from './stru
 import { configuredSessionApplication } from './session-application.js'
 import { withDeliveryLocks } from './delivery-lock.js'
 import { claudeNativeModel, claudeStructuredTurn, stopClaudeStructuredTurn } from './claude-structured.js'
-import { zcodeNativeModel, zcodeStructuredTurn, stopZCodeStructuredTurn } from './zcode-structured.js'
+import { zcodeNativeModel, zcodeStructuredTurn, stopZCodeStructuredTurn, ZCodeNativeTurnFailedError } from './zcode-structured.js'
 import type { SessionCreateTermination } from './sessions.js'
 export { StructuredSessionError } from './session-structured-policy.js'
 
@@ -124,6 +124,11 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
       ? await claudeStructuredTurn(requiredRealmRoot(execution), id, prompt, execution, { ...callbacks, onNative: async native => update({ claudeNative: native }) }, nativeWorktree ? rec.worktreePath : undefined)
       : await codexStructuredTurn(generation!.endpoint.socketPath, rec.worktreePath, readFileSync(sessionArtifactPath(id, 'launch'), 'utf8'), execution, callbacks)
     } catch (error) {
+      if (nativeWorktree && error instanceof ZCodeNativeTurnFailedError) {
+        const current = readRecord(id)!.structuredExecution!
+        if (error.threadId !== current.threadId || error.turnId !== current.turnId) throw new StructuredSessionError('stale_result', 'failed native terminal differs from its exact pinned identity')
+        failedStage = { stop: await stopZCodeStructuredTurn(current as Parameters<typeof stopZCodeStructuredTurn>[0]) }
+      }
       if (nativeWorktree && error instanceof StructuredSessionError && (error.rejectedOutput || ['structured_output_format_invalid', 'structured_output_retries_exhausted'].includes(error.code))) {
         const current = readRecord(id)!.structuredExecution!
         if (!error.threadId || !error.turnId || error.threadId !== current.threadId || error.turnId !== current.turnId) throw new StructuredSessionError('stale_result', 'failed stage format error differs from its exact native identity')
@@ -158,6 +163,10 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
     const pendingStop = readRecord(id)?.structuredExecution
     if (pendingStop?.state === 'completed' || pendingStop?.state === 'cancelling' || pendingStop?.state === 'cancelled' || pendingStop?.state === 'timeout') return pendingStop.state
     if (error instanceof StructuredSessionTransportError) throw error
+    if (error instanceof ZCodeNativeTurnFailedError && failedStage && !failedStage.stop.nativeStopped) {
+      await update({ state: 'cancelling', error: error.message, cancellation: { reason: 'cancelled', requestedAt: Date.now(), ...failedStage.stop } })
+      return 'cancelling'
+    }
     if (error instanceof StructuredSessionError && (error.code === 'cancellation_pending' || error.code === 'native_rpc_timeout')) {
       await update({ state: 'cancelling', ...(error.code === 'native_rpc_timeout' ? { errorCode: error.code } : {}), cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: false, acknowledged: false, error: error.message }, error: error.message })
       return 'cancelling'
@@ -275,7 +284,7 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
           const stopped = await (cancelTask ??= cancelStructuredSession(id, { reason: state.cancellation?.reason ?? 'cancelled', settleFailure: true }))
           throw new StructuredSessionError(stopped.nativeStopped ? stopped.state === 'failed' && !request.signal?.aborted ? 'native_rpc_timeout' : state.cancellation?.reason ?? 'cancelled' : 'cancellation_pending', state.error || 'native RPC failed before exact stop')
         }
-        if (state.cancellation?.error) throw new StructuredSessionError('cancellation_pending', state.cancellation.error)
+        if (state.cancellation?.error) throw new StructuredSessionError('cancellation_pending', state.error || state.cancellation.error)
         const stopped = await cancel(state.cancellation?.reason ?? 'cancelled')
         throw new StructuredSessionError(stopped.nativeStopped ? state.cancellation?.reason ?? 'cancelled' : 'cancellation_pending', stopped.error || 'structured cancellation settled')
       }

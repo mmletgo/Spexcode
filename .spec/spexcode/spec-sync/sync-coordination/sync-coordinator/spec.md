@@ -226,6 +226,8 @@ P0/P1/P2 共用 typed Native RPC 已结算准入：仅当前 control/physical ru
 
 已有认证draft不屏蔽更晚正式停止执行的最新Git观察。材料选择携当前draft作瞬态参数，仅当原正常Native/注入trace认证定位到该draft来源，暂停资源在既有retry来源顺序中严格更晚、原seed与当前业务树除本owner临时稿/schema外全部对象相同，且所有原材料门槛仍过时，才复制其最新正常Git正文到新seed。更老暂停、未知来源、不同起点及普通Native/material fallback不能覆盖已有draft；无更晚可救稿则保持原draft、错误与标签，不继承批准。该参数不进入业务摘要、旧请求或持久协议。
 
+该停止Git材料接缝也覆盖ZCode：旧正式cancelled及有原failed观察的新canonical failed均须原request/dispatch/record、removed及stop全字段相等，adapter只读核原workspace/send/model/start/terminal与精确receipt，不要求成功history/final或改写旧Native。所有owner/purpose/input/path/schema、protected source/tests完整path/mode/OID/absence、正常Git后代/clean与当前run/fence/lease门保持；认证后HEAD==seed跳过，无进度取消不伪成功，有新HEAD仅精确turn.failed授approved:false的git_draft。原较新来源排序保持，不退回旧稿，也不把普通failed授为failedWorktree、格式或自动重试。writer26围栏保护该材料准入，NativePlan/structured策略版本不变。
+
 原failed资源观察不等于精准missing-final资格。原正式cancelled/stopped、removed及完整request/owner/input/seed/schema/path/source/tests/Git/当前fence门均通过时，实际原root的exit1/is_error:true同形错误投影可在新attempt将最新正常Git记为native-failure未批准材料；不要求错误发生前未封存的history，不判success/format，不补旧record/raw/final或退回更早稿。真正exit0/false缺字段仍沿原sealed认证，未知错误形状与foreign身份仍失败；普通pause和更晚来源才覆盖prior的规则保持。
 
 原request/plan/init/echo/正式stop、source/schema与当前fence均认证后，实际干净HEAD仍等于原seed的无进度候选先沿既有分支跳过，再判断输出终态形状；不将无JSON的exit143旧失败误判为missing-final阻断新任务。该skip不代表成功或格式资格，foreign身份、未知停止/进程与真实新提交仍不得借此越过认证；exit143已有新稿不取得本轮明确exit1错误材料资格。

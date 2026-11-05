@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+v26 ZCode停止材料marker回归仅操作专用临时SQLite：25→26只追加SELECT1，完整保v1–v25 migration行/checksum/applied_at及全部业务/protocol旧表与schema，旧25 writer拒26，online backup可由25 writer读取且原行相等，重复迁移幂等。不得操作生产数据库或删除真实marker。
+
 v25 P0 context marker回归使用专用临时SQLite：24→25仅追加SELECT1，逐行保全部业务/protocol表及v1–v24完整migration行和checksum/applied_at；旧24 writer拒绝升级库，online backup可由24 writer读取且原行一致，重复迁移幂等。不打开用户或生产数据库。
 
 v24 cli-config-v1回归在专用临时SQLite保存已结算journal/receipt，23→24只追加SELECT1 marker。online backup前后比较全部旧业务/protocol表逐行原值与v1–v23完整migration行（含checksum/applied_at）；旧23 writer拒绝24库，升级前备份可由23 writer读取并保持全部旧行，重复迁移幂等。不得操作用户或真实同步库。
