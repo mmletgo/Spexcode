@@ -1318,6 +1318,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
                 if (proof.record.base === native.request.worktree.baseCommit && proof.record.forkCommit === native.request.worktree.baseCommit && /草稿文件=([^\s；。]+)/.exec(native.request.prompt)?.[1] === request.binding.path && context) {
                   const prompt = nativeWorktreePrompt(native.request.prompt, native.request.worktree)
                   const failed = zcode ? assertZCodeStoppedDraftSource(prompt, state as ZCodeStructuredExecution, proof.record.worktreePath) : undefined
+                  if (zcode && failed === null) continue
                   if (!zcode) assertClaudeStoppedDraftSource(prompt, state, proof.record.worktreePath)
                   assertMaterialFence()
                   const physical = readStoppedPhysicalDraft(operation.input.source.commonDir, proof.record.worktreePath, native.request.worktree, request.binding)
@@ -1504,6 +1505,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
             if (!request.worktree || canonical(protectedEntries(native.request.worktree.tree)) !== canonical(protectedEntries(request.worktree.tree))) continue
             const prompt = nativeWorktreePrompt(native.request.prompt, native.request.worktree)
             const zcodeFailed = zcode ? assertZCodeStoppedDraftSource(prompt, state as ZCodeStructuredExecution, proof.record.worktreePath) : undefined
+            if (zcode && zcodeFailed === null) continue
             if (!zcode) assertClaudeStoppedDraftSource(prompt, state, proof.record.worktreePath)
             assertMaterialFence()
             const physical = readStoppedPhysicalDraft(operation.input.source.commonDir, proof.record.worktreePath, native.request.worktree, binding)

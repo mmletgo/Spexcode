@@ -19,7 +19,7 @@ related:
 
 ## expanded spec
 
-新fence观察已停ZCode edit的未批准Git稿时，复用原verifyPlan、send与public model snapshot，精确核workspace、原session/model、唯一turn.started的input/query/非空messageId、所有events身份与唯一terminal原摘要。只读核原receipt/进程组与正式canonical stop/removed，不能调用会改写旧观察的进程采样或要求messages/success/final。原exit须code0、signal:null、stopped:true，idle/closed原值保持；基础认证后HEAD==seed只跳过无进度，有新HEAD仅精确turn.failed可授Git材料，cancelled终态不取得材料资格。新failed和旧cancelled沿[[sync-checkpoint-evidence]]各自原证明认证，不附failedWorktree/rejectedOutput，不改原计划/策略/请求或错误分类。
+新fence观察已停ZCode edit的未批准Git稿时，复用原verifyPlan、send与public model snapshot，精确核workspace、原session/model、唯一turn.started的input/query/非空messageId、所有events身份与唯一terminal原摘要。只读核原receipt/进程组与正式canonical stop/removed，不能调用会改写旧观察的进程采样或要求messages/success/final。原exit须code0、signal:null、stopped:true，idle/closed原值保持；基础认证后HEAD==seed只跳过无进度，有新HEAD仅精确turn.failed可授Git材料，cancelled终态不取得材料资格。仅打开exit.json时遇到ENOENT返回缺证据（null），将此候选标为不合格；不会用canonical stop/removed替代exit或turn.failed证明。缺plan/send、其他读取错误、坏JSON及存在但非法exit仍显式失败。新failed和旧cancelled沿[[sync-checkpoint-evidence]]各自原证明认证，不附failedWorktree/rejectedOutput，不改原计划/策略/请求或错误分类。
 
 仅version6工作区路径在原plan/send/user/model/final消息/turn/idle/close/stop全部认证后，将格式或schema拒绝的terminal原response附为tagged untrusted_final诊断，保原字节与SHA和原请求绑定。格式失败仍不写completed/output；取消、缺terminal、身份或stop失败不授正文，旧failed缺字段不追补。不得提取thinking或放宽JSON/schema。
 
