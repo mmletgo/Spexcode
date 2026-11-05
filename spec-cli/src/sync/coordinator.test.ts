@@ -1084,6 +1084,19 @@ test('P4当前性完整复核快照并仅在本次调用内复用同OID树读取
       [sameTreeReads.length, sameTreeReads.filter(tree => tree === operation.input.immutableTree).length, new Set(sameTreeReads).size],
       [differentTreeReads.length, differentTreeReads.filter(tree => tree === operation.input.immutableTree).length, differentTreeReads.filter(tree => tree === changed.immutableTree).length],
     ], [[4, 2, 3], [4, 1, 1]], '完整验证同OID旧/当前快照；异OID快照各读一次，index/HEAD复用仅限本调用')
+
+    counter.reset()
+    assert.equal(await isSyncInputCurrent(operation, changed, plan), true)
+    assert.deepEqual(counter.entries().filter(entry => entry.startsWith('tree:')), differentTreeReads.map(tree => `tree:${tree}`), '下一次调用重新读取所有原/现快照、index与HEAD对象')
+    for (const [input, error] of [
+      [{ ...operation.input, manifestBlob: { sha256: 'f'.repeat(64) } }, /缺失证据/],
+      [{ ...operation.input, contentDigest: '0'.repeat(64) }, /快照 manifest\/contentDigest 不匹配/],
+      [{ ...operation.input, id: '0'.repeat(64) }, /快照身份摘要不匹配/],
+      [{ ...operation.input, captureKind: 'commit' as const }, /提交快照必须绑定同一 HEAD tree/],
+    ] as const) {
+      await assert.rejects(isSyncInputCurrent({ ...operation, input }, changed, plan), error, '装配输入仍完整核对原快照')
+      await assert.rejects(isSyncInputCurrent(operation, input, plan), error, '相同tree OID不能掩盖当前快照绑定损坏')
+    }
   } finally { counter.restore() }
 })
 
