@@ -2227,7 +2227,6 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       if (attempt.expiresAtMs <= Date.now() && attempt.status !== 'applying') return current('recovery_required', issue)
       store.recordFailure(fence, issue)
     }
-    const durableFailure = operation.currentAttemptId ? store.readAttempt(operation.currentAttemptId).failure : null
-    return current(['export_recovery', 'candidate_stage_missing', 'cancellation_pending'].includes(code) || code === 'native_rpc_timeout' && !settledRpc ? 'recovery_required' : (durableFailure ?? issue).kind === 'unsupported' ? 'unsupported' : undefined, durableFailure ?? issue)
+    return current(['export_recovery', 'candidate_stage_missing', 'cancellation_pending'].includes(code) || code === 'native_rpc_timeout' && !settledRpc ? 'recovery_required' : issue.kind === 'unsupported' ? 'unsupported' : undefined, issue)
   } finally { if (timer) clearInterval(timer); releasePublication(); mutex.release() }
 }
