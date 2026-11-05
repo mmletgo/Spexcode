@@ -92,6 +92,8 @@ raw/shared prose 的 broad affected closure只保证完整路径进入分析，�
 
 冻结文本视图直接消费 [[sync-input-snapshot]] 同次批量读取中已核对 OID 的完整原字节，不在摘要读取后为每个 blob 再启动 Git。输出路径顺序、全文和摘要保持与逐对象读取一致；readPaths、symlink mode、host-private 和 UTF-8/二进制过滤保持原判据，不截断、不跨调用缓存，也不改变后续作者差量或独审语义。单次 `analyzeCodeBehavior` 的冻结输入准备阶段按同一 `commonDir` 与完整 tree OID 复用已通过 `readTree/onObject` 校验的全量entries和授权 `FrozenFile`；不同 tree 不混用，每个快照角色保持独立Map及必要对象副本，selection/受控替换只改变对应角色。复用仅覆盖本次冻结装配及其作者/交付差量树读取，不扩展 `readPaths`；路径顺序、mode、全文、UTF-8/BOM/CRLF、binary与symlink编码保持逐角色旧语义。函数本地缓存最后一次装配后立即清空，且在首个Native派发前释放；所有 `verifySnapshot`、OID校验、授权、后置归属和独审门保持原样，下一次调用仍重新验证Git对象并拒绝缺失或损坏的对象。
 
+Native worktree 的事实来源集合仍覆盖完整不可变 source tree 中非 host-private 的 UTF-8 普通文件，不按 readPaths 收窄；直接使用该次 readTree/onObject 已核对 OID 的原字节判定，不在全树批读后再逐 blob 启动 Git。symlink、非 UTF-8 与私密路径排除、分区 factSourcePaths 及后续事实授权门保持。
+
 冻结上下文中的 nonTextFiles 保留授权路径的完整非文本 Git 对象，按 path/mode/OID 去重并列出真实所属快照及 digest、kind、encoding、content；binary 以完整 base64 表示，symlink 仅保存链接 blob 的目标字节（有效 UTF-8 否则 base64），永不跟随宿主目标。精确 selection 的真实pair中base/delivery null同步表示对象缺席，不借当前HEAD伪造已验证旧全文；无pair时仅oldSource保留真实旧来源对象，verifiedDelivery仍缺席。受控 before/source 及 intent artifact 同样按真实对象投影。readablePaths 的 nonTextFiles.快照名只指向这些完整 payload，元数据和链接目标路径本身仍不能冒充目标正文；真实非文本变化、删除和 requiredChangedPaths/changes/checkedPaths 覆盖保持，不通过过滤非文本消除缺口。所有字节先经原 Git OID 核验，readPaths 与 host-private 边界保持；原文本视图只含真实 UTF-8 普通文件。完整字节可读不等于已理解图片或 wheel 业务含义，raw 真实依赖而不可解释的语义仍须具体 GAP，不自动改成 allowed_change 或产生业务批准。
 
 冻结输入显式给出真实 snapshotTree，并保留 composed.tree 身份。相同 Git 树只证明对应路径的对象字节及 mode 相同，不证明语义相容或业务通过。分析不得编造输入/工具未提供的 hash、AST 或执行校验证据，不把手工重抄、转义或反转义片段的推算冒称冻结原对象校验；真正不可解释且原意依赖的语义继续保留具体 GAP，完整独审与后续门禁不变。

@@ -896,6 +896,69 @@ test('较大冻结树全文与逐对象参考逐字相同，行为上下文不�
   assert.ok(catFile.length < 24, 'Git进程次数应随冻结视图批次而非文件数增长')
 })
 
+test('Native P0全树事实来源复用batch原字节且不逐blob重读', async t => {
+  const f = await fixture(t), contextRoot = join(f.root, 'context')
+  mkdirSync(contextRoot)
+  for (let index = 0; index < 128; index++) writeFileSync(join(contextRoot, `来源 ${index}.txt`), index === 0 ? '' : `\uFEFF冻结来源 ${index}\r\n`)
+  chmodSync(join(contextRoot, '来源 1.txt'), 0o755)
+  writeFileSync(join(contextRoot, 'binary'), Buffer.from([0, 10, 255])); writeFileSync(join(contextRoot, 'invalid-utf8'), Buffer.from([255]))
+  writeFileSync(join(contextRoot, '.env'), 'PRIVATE=not-a-fact-source\n'); symlinkSync('来源 1.txt', join(contextRoot, 'link'))
+  git(f.root, 'add', '.'); git(f.root, 'commit', '-m', 'frozen whole-tree fact sources')
+  const before = await captureInputSnapshot(f.root)
+  writeFileSync(join(f.root, 'src/export.js'), `${f.source}\n// same business\n`)
+  const prepared = await f.input(), baseline = { ...prepared.baseline!, sourceInput: before, verifiedDelivery: before }
+  const input: CodeBehaviorInput = { ...prepared, baseline, composed: composeInputSnapshots(prepared.snapshot, baseline).composed!, plan: { ...prepared.plan, agentWorkflow: 'native-worktree-v1' } }
+  const entries = readTree(input.snapshot.source.commonDir, input.snapshot.immutableTree)
+  const expected = entries.filter(entry => entry.mode !== '120000' && !isHostPrivatePath(entry.path) && isUtf8Text(readObject(input.snapshot.source.commonDir, entry.oid))).map(entry => entry.path)
+  assert.equal(expected.filter(path => path.startsWith('context/')).length, 128)
+  assert.ok(expected.some(path => !input.plan.readPaths.some(parent => path === parent || path.startsWith(`${parent}/`))), 'Native事实来源保持全树语义，不缩小到readPaths')
+  const facts = expected.map(path => ({ source: `code:${path}#fixture`, text: `冻结事实 ${path}` })), purposes: string[] = []
+  const cp = createRequire(import.meta.url)('node:child_process') as typeof import('node:child_process'), original = cp.execFileSync, pointReads: string[] = []
+  let afterAnalysis = false
+  cp.execFileSync = ((...args: Parameters<typeof execFileSync>) => {
+    const argv = args[1] as string[]
+    if (afterAnalysis && args[0] === 'git' && argv.includes('cat-file') && argv.includes('blob')) pointReads.push(argv.at(-1)!)
+    return Reflect.apply(original, cp, args)
+  }) as typeof execFileSync
+  syncBuiltinESMExports()
+  try {
+    const result = await analyzeCodeBehavior(input, async request => {
+      purposes.push(request.purpose)
+      const task = JSON.parse(request.prompt.split('任务:\n')[1].split('\n待审分析:')[0]) as { requiredChangedPaths: string[] }
+      const reviewed = request.purpose === 'code_behavior_review' ? JSON.parse(request.prompt.split('待审分析:\n')[1]) as { analysisDigest: string; analysis: CodeBehaviorAnalysis } : null
+      const output = reviewed ? { inputDigest: request.inputDigest, analysisDigest: reviewed.analysisDigest, verdict: 'accept', checkedPaths: task.requiredChangedPaths, checkedChangeIds: reviewed.analysis.changes.map(change => change.id), findings: [] }
+        : { changes: task.requiredChangedPaths.map(path => ({ kind: 'refactor', paths: [path], affectedIds: ['RULE-EXPORT-05'], ruleIds: ['RULE-EXPORT-05'], originalIntent: '保留既有业务', previousBehavior: '既有行为', sourceBehavior: '既有行为', deliveryBehavior: '既有行为', evidence: path, counterexample: '不改变发布次数' })), facts, acceptanceChanges: [], newNodes: [], resolutions: [] }
+      afterAnalysis = request.purpose === 'code_behavior_analyze'
+      return { sessionId: `fact-${request.purpose}`, threadId: `fact-thread-${request.purpose}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)) }
+    })
+    assert.equal(result.reviewPassed, true)
+    assert.deepEqual(result.facts.filter(fact => fact.source.startsWith('code:')), facts, '全树可用来源与原逐对象判据完全相同')
+  } finally { cp.execFileSync = original; syncBuiltinESMExports() }
+  assert.deepEqual(purposes, ['code_behavior_analyze', 'code_behavior_review'])
+  t.diagnostic(JSON.stringify({ manifestEntries: entries.length, eligibleSourcePaths: expected.length, singleBlobReadsAfterAnalysis: pointReads.length, uniquePointReadOids: new Set(pointReads).size, expectedSourcePathsSha256: contentHash(JSON.stringify(expected)) }))
+  assert.equal(pointReads.length, 0, 'P0事实来源全树已经batch核验，不得逐blob重读')
+})
+
+for (const kind of ['binary', 'invalid-utf8', 'symlink', 'private'] as const) test(`Native P0事实来源仍拒绝${kind}`, async t => {
+  const f = await fixture(t), path = kind === 'private' ? 'context/.env' : `context/${kind}`
+  mkdirSync(join(f.root, 'context'))
+  if (kind === 'symlink') symlinkSync('../src/export.js', join(f.root, path))
+  else writeFileSync(join(f.root, path), kind === 'binary' ? Buffer.from([0, 255]) : kind === 'invalid-utf8' ? Buffer.from([255]) : 'PRIVATE=not-a-fact-source\n')
+  git(f.root, 'add', '.'); git(f.root, 'commit', '-m', `frozen excluded ${kind}`)
+  const before = await captureInputSnapshot(f.root)
+  writeFileSync(join(f.root, 'src/export.js'), `${f.source}\n// same business\n`)
+  const prepared = await f.input(), baseline = { ...prepared.baseline!, sourceInput: before, verifiedDelivery: before }
+  const input: CodeBehaviorInput = { ...prepared, baseline, composed: composeInputSnapshots(prepared.snapshot, baseline).composed!, plan: { ...prepared.plan, agentWorkflow: 'native-worktree-v1' } }
+  let calls = 0
+  await assert.rejects(analyzeCodeBehavior(input, async request => {
+    calls++; assert.equal(request.purpose, 'code_behavior_analyze')
+    const task = JSON.parse(request.prompt.split('任务:\n')[1]) as { requiredChangedPaths: string[] }
+    const output = { changes: task.requiredChangedPaths.map(path => ({ kind: 'refactor', paths: [path], affectedIds: ['RULE-EXPORT-05'], ruleIds: ['RULE-EXPORT-05'], originalIntent: '保留既有业务', previousBehavior: '既有行为', sourceBehavior: '既有行为', deliveryBehavior: '既有行为', evidence: path, counterexample: '不改变发布次数' })), facts: [{ source: `code:${path}#fixture`, text: '不能作为文本事实来源' }], acceptanceChanges: [], newNodes: [], resolutions: [] }
+    return { sessionId: 'excluded-fact-analysis', threadId: 'excluded-fact-thread', turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)) }
+  }), error => (error as { code: string }).code === 'behavior_analysis_invalid' && (error as Error).message.includes('分析事实没有冻结代码来源'))
+  assert.equal(calls, 1, '无效来源不能进入独审')
+})
+
 test('raw-only v2同tree冻结角色共享单次完整读取且保留verifySnapshot校验', async t => {
   const f = await fixture(t), prepared = await f.input(), composed = composeInputSnapshots(prepared.snapshot, null).composed!
   const input: CodeBehaviorInput = {
