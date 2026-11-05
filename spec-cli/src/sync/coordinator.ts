@@ -29,7 +29,7 @@ import { planSyncPartitions } from './partitioning.js'
 import type { SyncPartitionPlan } from './partitioning.js'
 import { contractOmissionBound, freezeGenerationInput, generationReviewRequest, generationStageTree, restoreGenerationInput, reviewError, verifyGenerationReviewDraft, runGeneration } from './generation.js'
 import type { GenerationFinding, GenerationInput, GenerationResult } from './generation-types.js'
-import { captureStageDraft, readStageDraft, stageWorktree } from './stage-worktree.js'
+import { captureStageDraft, readStageDraft, readStoppedPhysicalDraft, stageWorktree, type StageDraftMaterialRequest } from './stage-worktree.js'
 import { createAttemptRunner, hasSettledNativeRpcFailure, pinSyncNativeRequest } from './native-run.js'
 import type { NativeRunCheckpoint, NativeRunPlan } from './native-run.js'
 import type { AdmitSyncInput, ApplyReceipt, BlobRef, CandidateRef, ComposedInputRef, FrozenBaselineSelection, InputSnapshot, SyncAttempt, SyncFailure, SyncOperation, SyncScope, SyncResourceRecord, VerificationResultBlob, WriteFence } from './operation-types.js'
@@ -1279,10 +1279,39 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         }
         return null
       }
-      const loadElaborationDraftMaterial = (key: string, binding?: NonNullable<ElaborationResult['partitionBinding']>, schemaDigest?: string): ElaborationDraftMaterial | null => {
+      const assertMaterialFence = (): void => {
+        const current = store.readOperation(operation.id), active = store.readAttempt(attempt!.id)
+        if (current.control !== 'run' || current.currentAttemptId !== active.id || current.generation !== fence!.generation || active.generation !== fence!.generation || active.leaseToken !== fence!.leaseToken || ['failed', 'superseded', 'settled'].includes(active.status) || active.expiresAtMs <= Date.now() || store.readPhysicalControl(current.input.source).control !== 'run') fail('cancelled', '新草稿材料观察已失去当前运行fence')
+      }
+      const loadElaborationDraftMaterial = (key: string, binding?: NonNullable<ElaborationResult['partitionBinding']>, schemaDigest?: string, request?: StageDraftMaterialRequest): ElaborationDraftMaterial | null => {
         for (const { owner, prior } of retryDraftSources(store, operation, attempt!.number)) {
           const source = draftMaterialStage(owner, prior, key), round = source?.result.rounds.at(-1)
           if (!source || !round || source.result.phase === 'partitioned_final' || source.result.partitionBinding?.partitionId !== binding?.partitionId) continue
+          if (request && schemaDigest === request.binding.schemaDigest && (!binding || source.result.partitionBinding?.planDigest === binding.planDigest && partitionStage<SyncPartitionPlan>(store, owner, prior, 'partition-plan')?.result.digest === binding.planDigest) && !round.draft && (owner.id !== operation.id || priorElaborationInputMatches(prior, binding))) {
+            const requestKey = `sync:${prior.id}:elaborate${binding ? `:partition:${binding.partitionId}` : ''}:${round.index}:elaboration_generate`, resource = store.findResource(prior.id, requestKey)
+            if (resource?.phase === 'removed' && resource.plan.inputId === operation.input.id) {
+              const native = JSON.parse(readEvidence(operation.input.source.commonDir, resource.plan.planBlob).toString()) as NativeRunPlan
+              const checkpoint = JSON.parse(readEvidence(operation.input.source.commonDir, resource.checkpointRef).toString()) as NativeRunCheckpoint
+              const state = readRecord(native.expectedSessionId)?.structuredExecution, zcode = native.request.model?.startsWith('zcode:') === true
+              if (native.request.purpose === 'elaboration_generate' && native.request.worktree?.mode === 'edit' && !native.request.frozenContext && state && (zcode || native.request.model?.startsWith('claude:')) && (state.state === 'cancelled' || zcode && state.state === 'failed') && state.cancellation?.nativeStopped && !state.failedWorktree && !state.resultWorktree && !state.rejectedOutput && !state.errorCode && state.threadId && state.turnId) {
+                const proof = authenticateNativeFailure(store, owner, prior, requestKey, { code: 'failed', message: state.state === 'failed' ? state.error! : prior.failure?.message ?? '', sessionId: checkpoint.session.sessionId, threadId: checkpoint.session.threadId ?? undefined, turnId: checkpoint.session.turnId ?? undefined }, readRecord, true)
+                const protectedEntries = (tree: string) => readTree(operation.input.source.commonDir, tree).filter(entry => entry.path !== request.binding.path && entry.path !== request.binding.path.replace(/\.json$/, '.schema.json'))
+                if (proof.record.base === native.request.worktree.baseCommit && proof.record.forkCommit === native.request.worktree.baseCommit && /草稿文件=([^\s；。]+)/.exec(native.request.prompt)?.[1] === request.binding.path && canonical(protectedEntries(native.request.worktree.tree)) === canonical(protectedEntries(request.worktree.tree))) {
+                  const prompt = nativeWorktreePrompt(native.request.prompt, native.request.worktree)
+                  const failed = zcode ? assertZCodeStoppedDraftSource(prompt, state as ZCodeStructuredExecution, proof.record.worktreePath) : undefined
+                  if (!zcode) assertClaudeStoppedDraftSource(prompt, state, proof.record.worktreePath)
+                  assertMaterialFence()
+                  const physical = readStoppedPhysicalDraft(operation.input.source.commonDir, proof.record.worktreePath, native.request.worktree, request.binding)
+                  if (physical) {
+                    if (zcode && !failed) fail('stale_result', 'ZCode物理细化草稿没有原精确失败终态')
+                    const materialRef = writeEvidence(operation.input.source.commonDir, { version: 'stopped-physical-draft-v1', path: request.binding.path, source: physical.source })
+                    saveStage(store, fence!, `${key}:stopped-physical-material-provenance`, { sourceKind: 'physical_draft', approved: false, observationKind: zcode || proof.observedFailure ? 'native-failure' : 'pause', observedAt: Date.now(), fromOperationId: owner.id, fromAttemptId: prior.id, nativePlanRef: resource.plan.planBlob, checkpointRef: resource.checkpointRef, canonicalRecordSha256: contentHash(JSON.stringify(proof.record)), observedHeadCommit: physical.observedHeadCommit, observedTree: physical.observedTree, indexSha256: physical.indexSha256, materialRef, draftSha256: contentHash(physical.source), schemaDigest, originalInputDigest: native.request.inputDigest, currentInputDigest: request.inputDigest })
+                    return { source: physical.source, errors: [...round.findings, ...source.result.failure ? [{ code: source.result.failure.code, message: source.result.failure.message }] : []], sourceKind: 'physical_draft' }
+                  }
+                }
+              }
+            }
+          }
           if (round.draft || stage<{ version: string }>(store, owner, prior, 'elaboration-draft-protocol')?.version === 'elaboration-draft-v1') continue
           const rejectedGeneration = round.rejectedOutput?.purpose === 'elaboration_generate' ? round.rejectedOutput : undefined
           const rejectedReview = round.rejectedOutput?.purpose === 'elaboration_review' ? round.rejectedOutput : undefined
@@ -1457,8 +1486,15 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
             const prompt = nativeWorktreePrompt(native.request.prompt, native.request.worktree)
             const zcodeFailed = zcode ? assertZCodeStoppedDraftSource(prompt, state as ZCodeStructuredExecution, proof.record.worktreePath) : undefined
             if (!zcode) assertClaudeStoppedDraftSource(prompt, state, proof.record.worktreePath)
-            const current = store.readOperation(operation.id), active = store.readAttempt(attempt!.id)
-            if (current.control !== 'run' || current.currentAttemptId !== active.id || current.generation !== fence!.generation || active.generation !== fence!.generation || active.leaseToken !== fence!.leaseToken || ['failed', 'superseded', 'settled'].includes(active.status) || active.expiresAtMs <= Date.now() || store.readPhysicalControl(current.input.source).control !== 'run') fail('cancelled', '新Git材料观察已失去当前运行fence')
+            assertMaterialFence()
+            const physical = readStoppedPhysicalDraft(operation.input.source.commonDir, proof.record.worktreePath, native.request.worktree, binding)
+            if (physical) {
+              if (zcode && !zcodeFailed) fail('stale_result', 'ZCode物理草稿没有原精确失败终态')
+              const context = readCodeBehaviorContext(native.request, operation.input.source.commonDir)
+              const materialRef = writeEvidence(operation.input.source.commonDir, { version: 'stopped-physical-draft-v1', path: binding.path, source: physical.source })
+              saveStage(store, fence!, `${key}:${purpose}:stopped-physical-material-provenance`, { sourceKind: 'physical_draft', approved: false, observationKind: zcode || proof.observedFailure ? 'native-failure' : 'pause', observedAt: Date.now(), fromOperationId: owner.id, fromAttemptId: prior.id, nativePlanRef: resource.plan.planBlob, checkpointRef: resource.checkpointRef, originalFailure: prior.failure, canonicalRecordSha256: contentHash(JSON.stringify(proof.record)), observedHeadCommit: physical.observedHeadCommit, observedTree: physical.observedTree, indexSha256: physical.indexSha256, materialRef, draftSha256: contentHash(physical.source), schemaDigest, originalInputDigest: native.request.inputDigest, currentInputDigest: inputDigest })
+              return { source: physical.source, errors: [...context.errors], repairDiagnostics: context.repairDiagnostics, sourceKind: 'physical_draft' }
+            }
             const witness = nativeWorktreeResult(proof.record.worktreePath, native.request.worktree)
             if (witness.headCommit === native.request.worktree.baseCommit) continue
             if (zcode && !zcodeFailed) fail('stale_result', 'ZCode新Git材料没有原精确失败终态')
@@ -1611,7 +1647,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           }
           return null
         },
-        loadElaborationDraftMaterial: (key, binding, schemaDigest) => loadElaborationDraftMaterial(key, binding, schemaDigest),
+        loadElaborationDraftMaterial: (key, binding, schemaDigest, request) => loadElaborationDraftMaterial(key, binding, schemaDigest, request),
         loadElaborationDraft: (key, binding, schemaDigest) => loadElaborationDraft(key, binding, schemaDigest),
         loadElaborationRepairDiagnostics: (key, binding, inputDigest) => loadElaborationRepairDiagnostics(key, inputDigest, binding),
         loadElaborationRepairSeed: (key, binding, inputDigest) => loadElaborationRepairSeed(key, inputDigest, binding),
@@ -1861,7 +1897,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           const draft = loadElaborationDraft('elaboration', undefined, schemaDigest)
           return draft && cacheDraft ? { ...draft, errors: [...draft.errors, ...cacheDraft.errors] } : draft
         } : undefined
-        const result = partitions ? await elaborateSyncPartitions(elaborationInput, partitions, options.plan.version === 'sync-coordinator-v2' ? options.plan.partitionPolicy.maxParallel : 1, partitionCheckpoints, runner, view.composed) : await elaborate(elaborationInput, { runner, draft: cacheDraft, loadDraft, loadDraftMaterial: draftProtocol ? schemaDigest => loadElaborationDraftMaterial('elaboration', undefined, schemaDigest) : undefined, seed: loadElaborationRepairSeed('elaboration', freezeElaborationInput(elaborationInput).inputDigest) ?? undefined, repairDiagnostics: loadElaborationRepairDiagnostics('elaboration', freezeElaborationInput(elaborationInput).inputDigest) ?? undefined })
+        const result = partitions ? await elaborateSyncPartitions(elaborationInput, partitions, options.plan.version === 'sync-coordinator-v2' ? options.plan.partitionPolicy.maxParallel : 1, partitionCheckpoints, runner, view.composed) : await elaborate(elaborationInput, { runner, draft: cacheDraft, loadDraft, loadDraftMaterial: draftProtocol ? (schemaDigest, request) => loadElaborationDraftMaterial('elaboration', undefined, schemaDigest, request) : undefined, seed: loadElaborationRepairSeed('elaboration', freezeElaborationInput(elaborationInput).inputDigest) ?? undefined, repairDiagnostics: loadElaborationRepairDiagnostics('elaboration', freezeElaborationInput(elaborationInput).inputDigest) ?? undefined })
         const { contracts: _contracts, graph: _graph, coverage: _coverage, ...compact } = result
         elaboration = compact; saveStage(store, fence, 'elaboration', compact, !operation.baselineSelection ? { readSetDigest: operation.readSetDigest } : undefined, { composedTree: view.composed.tree, composedContentDigest: view.composed.contentDigest })
       }

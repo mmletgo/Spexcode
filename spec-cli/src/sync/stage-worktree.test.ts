@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { contentHash, objectGit, readObject, readTree, writeObject, writeTree } from './snapshot.js'
-import { importStageChanges, overlayStageTree, stageWorktree, verifyStageResult } from './stage-worktree.js'
+import { importStageChanges, overlayStageTree, readStoppedPhysicalDraft, stageWorktree, verifyStageResult } from './stage-worktree.js'
+import { nativeWorktreeResult } from '../native-worktree-runtime.js'
 import { assertWorktreeSyncModel, DEFAULT_SYNC_MODEL, syncModel } from './model-selection.js'
 import type { ElaborationSessionResult } from './elaboration-types.js'
 
@@ -22,6 +23,40 @@ function result(seed: ReturnType<typeof stageWorktree>, headCommit = seed.baseCo
   const output = { summary: '摘要声称的补丁不作为候选' }
   return { sessionId: 'session', threadId: 'thread', turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)), worktree: { baseCommit: seed.baseCommit, baseTree: seed.tree, headCommit, tree, worktreePath: '/historical/closed-worktree' } }
 }
+
+for (const kind of ['untracked', 'tracked', 'staged'] as const) test(`stopped physical draft只读保存工作区原bytes，不授clean交付 kind=${kind}`, t => {
+  const f = fixture(t), ownerDigest = 'a'.repeat(64), path = `.spex-sync-drafts/${ownerDigest}.json`, schema = '{"type":"object"}'
+  const binding = { ownerDigest, path, sourceInputId: 'input', schemaDigest: contentHash(schema) }
+  const seed = stageWorktree(f.commonDir, f.parent, overlayStageTree(f.commonDir, f.tree, [{ path: path.replace('.json', '.schema.json'), source: schema }, { path: path.replace('.json', '.context.json'), source: '{"readonly":true}' }, ...(kind === 'tracked' ? [{ path, source: '{EARLIER' }] : [])]), 'edit')
+  git(f.root, 'checkout', '--detach', seed.baseCommit)
+  const source = '{INVALID_JSON原文\n'; writeFileSync(join(f.root, path), source)
+  if (kind === 'staged') { git(f.root, 'add', path); writeFileSync(join(f.root, path), source + '未暂存的最新正文') }
+  const bytes = readFileSync(join(f.root, path)), index = readFileSync(join(f.root, '.git/index'))
+  assert.throws(() => nativeWorktreeResult(f.root, seed), { code: 'native_worktree_result_invalid' })
+  const material = readStoppedPhysicalDraft(f.commonDir, f.root, seed, binding)!
+  assert.equal(material.source, bytes.toString('utf8')); assert.equal(material.observedHeadCommit, seed.baseCommit)
+  assert.equal(material.indexSha256, contentHash(index)); assert.deepEqual(readFileSync(join(f.root, '.git/index')), index)
+  assert.deepEqual(readFileSync(join(f.root, path)), bytes); assert.equal(git(f.root, 'rev-parse', 'HEAD'), seed.baseCommit)
+})
+
+for (const defect of ['source', 'test', 'schema', 'context', 'absence', 'index', 'hidden-source', 'mode', 'symlink'] as const) test(`stopped physical draft不豁免其他文件/index对象与absence defect=${defect}`, t => {
+  const f = fixture(t), ownerDigest = 'b'.repeat(64), path = `.spex-sync-drafts/${ownerDigest}.json`, schema = '{}'
+  const binding = { ownerDigest, path, sourceInputId: 'input', schemaDigest: contentHash(schema) }
+  const seed = stageWorktree(f.commonDir, f.parent, overlayStageTree(f.commonDir, f.tree, [{ path: path.replace('.json', '.schema.json'), source: schema }, { path: path.replace('.json', '.context.json'), source: '{}' }]), 'edit')
+  git(f.root, 'checkout', '--detach', seed.baseCommit); writeFileSync(join(f.root, path), '{partial')
+  const protectedPath = defect === 'test' ? 'oracle.test.mjs' : defect === 'schema' ? path.replace('.json', '.schema.json') : defect === 'context' ? path.replace('.json', '.context.json') : defect === 'absence' ? 'unexpected.test.mjs' : 'source.mjs'
+  if (defect === 'mode') chmodSync(join(f.root, protectedPath), 0o755)
+  else if (defect === 'symlink') { rmSync(join(f.root, path)); symlinkSync('source.mjs', join(f.root, path)) }
+  else {
+    const original = defect === 'index' ? readFileSync(join(f.root, protectedPath)) : undefined
+    if (defect === 'hidden-source') git(f.root, 'update-index', '--assume-unchanged', protectedPath)
+    writeFileSync(join(f.root, protectedPath), 'unauthorized')
+    if (defect === 'index') { git(f.root, 'add', protectedPath); writeFileSync(join(f.root, protectedPath), original!) }
+  }
+  const index = readFileSync(join(f.root, '.git/index'))
+  assert.throws(() => readStoppedPhysicalDraft(f.commonDir, f.root, seed, binding), /越界变化/)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), index)
+})
 
 test('精确阶段tree含受控raw/已审overlay并隔离后续index和WIP；同树同seed、异树不同身份', t => {
   const f = fixture(t), controlled = overlayStageTree(f.commonDir, f.tree, [{ path: 'spec.md', source: '真实受控raw\n' }])

@@ -200,24 +200,43 @@ test('14attempt/1790CAS历史扫描交还控制，同一30秒fence到达首次�
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
 })
 
-const zcodeMaterialCases = [...(['zcode-old', 'zcode-new'] as const).flatMap(mode => (['none', 'prior-draft', 'session', 'send', 'turn', 'input', 'query', 'message', 'model', 'worktree', 'stop', 'seed', 'source', 'tests', 'schema', 'scope', 'request', 'exit', 'terminal', 'no-progress-cancelled', 'progress-cancelled', 'fence'] as const).map(defect => [mode, defect] as const)), ['zcode-new', 'failed-observation'] as const]
+const zcodeMaterialCases = [...(['zcode-old', 'zcode-new'] as const).flatMap(mode => (['none', 'prior-draft', 'session', 'send', 'turn', 'input', 'query', 'message', 'model', 'worktree', 'stop', 'seed', 'source', 'tests', 'schema', 'scope', 'request', 'exit', 'terminal', 'no-progress-cancelled', 'progress-cancelled', 'fence'] as const).map(defect => [mode, defect] as const)), ['zcode-new', 'failed-observation'] as const, ...(['none', 'prior-draft', 'older-physical', 'staged', 'review', 'session', 'stop', 'seed', 'source', 'tests', 'schema', 'context', 'index', 'scope', 'worktree', 'fence', 'cas'] as const).map(defect => ['zcode-dirty', defect] as const), ['zcode-p1-dirty', 'none'] as const]
 for (const [mode, defect] of [['native-failure', 'no-progress-143'], ['native-failure', 'no-progress-143-foreign'], ['native-failure', 'no-progress-143-stop'], ['native-failure', 'no-progress-143-process'], ['native-failure', 'progress-143'], ['native-failure', 'none'], ['native-failure', 'prior-draft'], ['native-failure', 'session'], ['native-failure', 'user'], ['native-failure', 'exit'], ['native-failure', 'unknown'], ['native-failure', 'source'], ['native-failure', 'tests'], ['native-failure', 'stop'], ['missing-final', 'none'], ['pause', 'none'], ['pause', 'prior-draft'], ['missing-final', 'prior-draft'], ['pause', 'older-pause'], ['pause', 'not-started'], ['pause', 'no-commit'], ['missing-final', 'session'], ['missing-final', 'user'], ['missing-final', 'exit'], ['missing-final', 'unknown'], ['missing-final', 'completed'], ['pause', 'source'], ['pause', 'tests'], ['pause', 'scope'], ['pause', 'seed'], ['pause', 'thread'], ['pause', 'turn'], ['pause', 'schema'], ['pause', 'worktree'], ['pause', 'stop'], ['pause', 'request'], ...zcodeMaterialCases] as const) test(`旧Native无typed witness的新attempt仅观察最新Git材料，旧原件不补签 mode=${mode}/${defect}`, async t => {
-  const zcode = mode === 'zcode-old' || mode === 'zcode-new'
-  const f = await fixture(t, { maxAttempts: defect === 'older-pause' ? 4 : 3, maxCalls: 6, maxRepairs: defect === 'older-pause' ? 3 : 2, timeoutMs: 120000 }, false, original, 'project', original, { agentWorkflow: 'native-worktree-v1' }, undefined, 'code', zcode ? 'zcode:bigmodel-api/GLM-5.3-Flash' : 'claude:MiniMax-M3.1-Flash')
-  const latest = `{LATEST_UNAPPROVED_DRAFT${'x'.repeat((mode === 'native-failure' ? 92755 : defect === 'prior-draft' || defect === 'older-pause' ? 85970 : 59388) - 24)}}`, priorText = '{EARLIER_SEED_DRAFT' + 'a'.repeat(mode === 'native-failure' ? 85970 - '{EARLIER_SEED_DRAFT'.length : 59010)
+  const p1 = mode === 'zcode-p1-dirty', dirty = mode === 'zcode-dirty' || p1, freshZCode = mode === 'zcode-new' || dirty
+  const zcode = mode === 'zcode-old' || freshZCode, older = defect === 'older-pause' || defect === 'older-physical'
+  const onlyReview = defect === 'review', materialExpected = defect === 'none' || defect === 'prior-draft' || older || defect === 'staged' || onlyReview
+  const f = await fixture(t, { maxAttempts: older ? 4 : 3, maxCalls: 6, maxRepairs: older ? 3 : 2, timeoutMs: 120000 }, false, original, 'project', original, { agentWorkflow: 'native-worktree-v1' }, undefined, p1 ? 'spec' : 'code', zcode ? 'zcode:bigmodel-api/GLM-5.3-Flash' : 'claude:MiniMax-M3.1-Flash')
+  if (p1) f.store.startGeneration = () => { throw Object.assign(new Error('P1原物理稿经真实提交及独审后停止，不运行P2'), { code: 'unsupported' }) }
+  const latest = `{LATEST_UNAPPROVED_DRAFT${'x'.repeat((mode === 'native-failure' ? 92755 : defect === 'prior-draft' || older ? 85970 : 59388) - 24)}}`, priorText = '{EARLIER_SEED_DRAFT' + 'a'.repeat(mode === 'native-failure' ? 85970 - '{EARLIER_SEED_DRAFT'.length : 59010)
   let oldSession = '', oldPath = '', oldNativeRoot = '', originalRequest: ElaborationSessionRequest | undefined, continued = false, restartedWithoutMaterial = false
+  const originalRunner = f.options.runner!
+  let analysisCalls = 0
   f.options.runner = async request => {
     const operation = f.store.readOperation(f.operation.id), attempt = f.store.readAttempt(operation.currentAttemptId!)
-    assert.equal(request.purpose, 'code_behavior_analyze')
+    if (p1 && request.purpose === 'elaboration_review') {
+      const dispatch = attempt.dispatchPlans.find(item => item.key === request.requestKey)!, output = { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+      return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `independent-${dispatch.sessionCreateKey}`, turnId: 'review-turn', output, resultDigest: contentHash(JSON.stringify(output)) }
+    }
+    if (onlyReview && request.purpose === 'code_behavior_analyze') {
+      assert.equal(++analysisCalls, 1, '已校验分析不得因review物理稿恢复而重做')
+      const path = /草稿文件=([^\s；]+)/.exec(request.prompt)![1], workspace = join(f.parent, 'ready-analysis'), seed = request.worktree!
+      f.git('worktree', 'add', '--detach', workspace, seed.baseCommit)
+      const produced = await originalRunner({ ...request, prompt: inlineBehaviorPrompt(request, f.input.source.commonDir) })
+      mkdirSync(join(workspace, path, '..'), { recursive: true }); writeFileSync(join(workspace, path), JSON.stringify(produced.output))
+      execFileSync('git', ['-C', workspace, 'add', path], { stdio: 'pipe' }); execFileSync('git', ['-C', workspace, 'commit', '-m', 'ready original analysis'], { stdio: 'pipe' })
+      const output = { summary: '原分析正常提交并等待独审' }
+      return { ...produced, output, resultDigest: contentHash(JSON.stringify(output)), worktree: nativeWorktreeResult(workspace, seed) }
+    }
+    assert.equal(request.purpose, p1 ? 'elaboration_generate' : onlyReview ? 'code_behavior_review' : 'code_behavior_analyze')
     const path = /草稿文件=([^\s；]+)/.exec(request.prompt)![1], workspace = join(f.parent, `observed-${attempt.number}`), seed = request.worktree!
     f.git('worktree', 'add', '--detach', workspace, seed.baseCommit)
-    if ((defect === 'prior-draft' || defect === 'older-pause') && attempt.number === 1) {
+    if ((defect === 'prior-draft' || older) && attempt.number === 1) {
       mkdirSync(join(workspace, path, '..'), { recursive: true }); writeFileSync(join(workspace, path), priorText)
       execFileSync('git', ['-C', workspace, 'add', path], { stdio: 'pipe' }); execFileSync('git', ['-C', workspace, 'commit', '-m', 'earlier real native draft'], { stdio: 'pipe' })
       const dispatch = attempt.dispatchPlans.find(item => item.key === request.requestKey)!, output = { summary: '已正常提交早期未批准业务稿' }
       return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `earlier-${dispatch.sessionCreateKey}`, turnId: 'earlier-turn', output, resultDigest: contentHash(JSON.stringify(output)), worktree: nativeWorktreeResult(workspace, seed) }
     }
-    if (defect === 'older-pause' && attempt.number === 3) {
+    if (older && attempt.number === 3) {
       assert.equal(contentHash(readFileSync(join(workspace, path))), contentHash(latest))
       writeFileSync(join(workspace, path), priorText)
       execFileSync('git', ['-C', workspace, 'add', path], { stdio: 'pipe' }); execFileSync('git', ['-C', workspace, 'commit', '-m', 'newer authenticated draft returns to same bytes'], { stdio: 'pipe' })
@@ -225,25 +244,38 @@ for (const [mode, defect] of [['native-failure', 'no-progress-143'], ['native-fa
       return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `newer-${dispatch.sessionCreateKey}`, turnId: 'newer-turn', output, resultDigest: contentHash(JSON.stringify(output)), worktree: nativeWorktreeResult(workspace, seed) }
     }
     if (originalRequest) {
-      if (defect !== 'none' && defect !== 'prior-draft' && defect !== 'older-pause') { assert.equal(existsSync(join(workspace, path)), false, '不合格或无稿的旧记录不能向新seed投影正文'); restartedWithoutMaterial = true; throw Object.assign(new Error('反例安全进入新派发且无旧材料'), { code: 'unsupported' }) }
-      assert.equal(contentHash(readFileSync(join(workspace, path))), contentHash(defect === 'older-pause' ? priorText : latest), '必须取最新normal Git正文SHA，不能回原seed或旧59010字节')
-      if (zcode && defect === 'prior-draft') {
+      if (!materialExpected) { assert.equal(existsSync(join(workspace, path)), false, '不合格或无稿的旧记录不能向新seed投影正文'); restartedWithoutMaterial = true; throw Object.assign(new Error('反例安全进入新派发且无旧材料'), { code: 'unsupported' }) }
+      assert.equal(contentHash(readFileSync(join(workspace, path))), contentHash(older ? priorText : latest), '必须取最新normal Git正文SHA，不能回原seed或旧59010字节')
+      if (zcode && !p1 && (defect === 'prior-draft' || dirty)) {
         const errors = readCodeBehaviorContext(originalRequest, f.input.source.commonDir).errors
-        assert(errors.some(error => error.code === 'behavior_output_json'))
+        if (defect === 'prior-draft') assert(errors.some(error => error.code === 'behavior_output_json'))
         assert.deepEqual(readCodeBehaviorContext(request, f.input.source.commonDir).errors, errors, '更新Git材料不能清空原实际请求的具体业务诊断')
+        const old = readCodeBehaviorContext(originalRequest, f.input.source.commonDir), current = readCodeBehaviorContext(request, f.input.source.commonDir)
+        for (const item of old.repairDiagnostics) assert(current.repairDiagnostics.some(value => JSON.stringify(value) === JSON.stringify(item)), '原修复诊断完整保留')
+        if (onlyReview) assert.deepEqual(current.pendingAnalysis, old.pendingAnalysis, '物理review稿仅续审，原ready分析完整保持')
       }
-      assert.match(request.prompt, defect === 'older-pause' ? /已有原草稿已复制/ : /认证的原Git分析草稿/)
+      assert.match(request.prompt, older ? /已有原草稿已复制/ : dirty ? /未批准的物理草稿/ : /认证的原Git分析草稿/)
       if (mode === 'missing-final') assert.match(JSON.stringify(readCodeBehaviorContext(request, f.input.source.commonDir)), /missing required structured_output/)
       else assert.doesNotMatch(request.prompt, /missing required structured_output/, '普通暂停不能伪加缺final分类')
       continued = true
+      if (p1) {
+        assert.match(request.prompt, /EPIPE/)
+        const protectedEntries = (tree: string) => readTree(f.input.source.commonDir, tree).filter(entry => entry.path !== path)
+        assert.deepEqual(protectedEntries(seed.tree), protectedEntries(originalRequest.worktree!.tree), '新P1 seed只复制精确原稿，原readonly overlay/schema/source/tests全保')
+        writeFileSync(join(workspace, path), JSON.stringify(adaptElaborationNativeOutput(request, rows(original))))
+        execFileSync('git', ['-C', workspace, 'add', path], { stdio: 'pipe' }); execFileSync('git', ['-C', workspace, 'commit', '-m', 'repair original stopped physical draft'], { stdio: 'pipe' })
+        const dispatch = attempt.dispatchPlans.find(item => item.key === request.requestKey)!, output = { summary: '原物理稿续改后正常提交' }
+        return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `repaired-${dispatch.sessionCreateKey}`, turnId: 'generation-turn', output, resultDigest: contentHash(JSON.stringify(output)), worktree: nativeWorktreeResult(workspace, seed) }
+      }
       throw Object.assign(new Error('已核新attempt在最新真实Git草稿续修入口'), { code: 'unsupported' })
     }
     originalRequest = request; oldPath = workspace
     mkdirSync(join(workspace, path, '..'), { recursive: true })
     for (const text of defect === 'not-started' || defect === 'no-commit' || defect.startsWith('no-progress-') ? [] : [priorText, latest]) {
       writeFileSync(join(workspace, path), text)
-      execFileSync('git', ['-C', workspace, 'add', path], { stdio: 'pipe' }); execFileSync('git', ['-C', workspace, 'commit', '--allow-empty', '-m', 'normal native draft progress'], { stdio: 'pipe' })
+      if (!dirty) { execFileSync('git', ['-C', workspace, 'add', path], { stdio: 'pipe' }); execFileSync('git', ['-C', workspace, 'commit', '--allow-empty', '-m', 'normal native draft progress'], { stdio: 'pipe' }) }
     }
+    if (dirty && defect === 'staged') execFileSync('git', ['-C', workspace, 'add', path], { stdio: 'pipe' })
     const fence = { operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: operation.input.source.physicalFingerprint }
     for (let index = 0; index < 23; index++) { const resultRef = writeEvidence(f.input.source.commonDir, { fixtureSibling: index }); f.store.checkpoint(fence, { ...writeEvidence(f.input.source.commonDir, { version: 'sync-stage-v1', operationId: operation.id, attemptId: attempt.id, inputId: f.input.id, policyDigest: operation.policyDigest, stage: `sibling:${index}`, resultRef }), artifacts: [{ kind: 'json', ref: resultRef }] }) }
     return createAttemptRunner(f.store, fence, { pollMs: 2, runtime: {
@@ -261,12 +293,12 @@ for (const [mode, defect] of [['native-failure', 'no-progress-143'], ['native-fa
           const event = (type: string, seq: number, payload: Record<string, unknown>) => ({ sessionId: native.sessionId, turnId: native.turnId, type, seq, eventId: `event-${seq}`, payload })
           const terminal = event(defect.endsWith('cancelled') ? 'turn.completed' : 'turn.failed', 3, { inputId: native.inputId, ...(defect.endsWith('cancelled') ? { resultType: 'cancelled', response: '' } : { error: { code: 'EPIPE' } }) }), events = [event('turn.started', 1, { inputId: native.inputId, queryId, messageId: 'exact-user' }), event('session.updated', 2, { providerId: model.providerId, modelId: model.modelId, toolCount: 3 }), terminal]
           for (const [name, value] of Object.entries({ 'plan.json': plan, 'send.json': { sessionId: native.sessionId, content: nativePrompt, inputId: native.inputId, modelSelection: model }, 'model-snapshot.json': snapshot, 'events.json': events, 'terminal.json': terminal, 'exit.json': { code: 0, signal: null, stopped: true, acknowledged: false, idle: false, closed: false, stderrBytes: 0, stderrSha256: contentHash('') } })) writeFileSync(join(root, name), JSON.stringify(value))
-          const identity = { threadId: native.sessionId, turnId: native.turnId }, failure = mode === 'zcode-new' ? 'ZCode native turn failed (code=EPIPE)' : 'ZCode exact terminal has no matching idle runtime', policy = { ...execution, ...identity, zcodeNative: native, turnStartRequested: true }
-          const stop = mode === 'zcode-new' ? await stopZCodeStructuredTurn(policy as ZCodeStructuredExecution) : { nativeStopped: false, acknowledged: false, error: failure }
+          const identity = { threadId: native.sessionId, turnId: native.turnId }, failure = freshZCode ? 'ZCode native turn failed (code=EPIPE)' : 'ZCode exact terminal has no matching idle runtime', policy = { ...execution, ...identity, zcodeNative: native, turnStartRequested: true }
+          const stop = freshZCode ? await stopZCodeStructuredTurn(policy as ZCodeStructuredExecution) : { nativeStopped: false, acknowledged: false, error: failure }
           configuredSessionApplication().createSession({ sessionId: session, status: 'error' })
-          writeRecord({ session, governed: true, worktreePath: workspace, base: seed.baseCommit, forkCommit: seed.baseCommit, branch: null, title: null, name: null, parent: null, issues: [], issue: null, proposal: null, merges: 0, note: null, sortKey: null, createdAt: Date.now(), harness: 'zcode', harnessSessionId: identity.threadId, runtimeStartToken: null, status: 'error', stopped: false, archived: false, closedAt: null, launcher: null, launchCmd: 'zcode', launchOwner: null, createRequestId: contentHash(actual.sessionCreateKey!), createPayloadHash: hash({ prompt, parent: null, launcher: null, base: actual.worktree!.baseCommit, structuredExecution: execution }), structuredExecution: { ...policy, state: mode === 'zcode-new' ? 'failed' : 'cancelling', error: failure, cancellation: { reason: 'cancelled', requestedAt: Date.now(), ...stop } } })
+          writeRecord({ session, governed: true, worktreePath: workspace, base: seed.baseCommit, forkCommit: seed.baseCommit, branch: null, title: null, name: null, parent: null, issues: [], issue: null, proposal: null, merges: 0, note: null, sortKey: null, createdAt: Date.now(), harness: 'zcode', harnessSessionId: identity.threadId, runtimeStartToken: null, status: 'error', stopped: false, archived: false, closedAt: null, launcher: null, launchCmd: 'zcode', launchOwner: null, createRequestId: contentHash(actual.sessionCreateKey!), createPayloadHash: hash({ prompt, parent: null, launcher: null, base: actual.worktree!.baseCommit, structuredExecution: execution }), structuredExecution: { ...policy, state: freshZCode ? 'failed' : 'cancelling', error: failure, cancellation: { reason: 'cancelled', requestedAt: Date.now(), ...stop } } })
           oldSession = session; oldNativeRoot = root
-          throw new StructuredSessionError(mode === 'zcode-new' ? 'failed' : 'cancellation_pending', failure, { sessionId: session, ...identity })
+          throw new StructuredSessionError(freshZCode ? 'failed' : 'cancellation_pending', failure, { sessionId: session, ...identity })
         }
         const native = { version: 1 as const, root, sessionId: `thread-${session}`, userUuid: `user-${session}`, pid: child.pid, receiptFile }, prompt = nativeWorktreePrompt(actual.prompt, actual.worktree!), identity = { threadId: native.sessionId, turnId: native.userUuid }, message = { role: 'user', content: [{ type: 'text', text: prompt }] }, history = [{ type: 'user', sessionId: native.sessionId, uuid: native.userUuid, parentUuid: null, promptId: 'original-prompt', message }]
         const hash = (value: unknown): string => contentHash(JSON.stringify(value)), plan = { ...native, workspace, cliVersion: '2.1.309 (Claude Code)', requestedModel: execution.model, resolvedModel: 'MiniMax-M3.1-Flash', historyDigest: hash(history), policyDigest: hash(execution), requestDigest: hash({ prompt, policy: execution }) }
@@ -306,25 +338,27 @@ for (const [mode, defect] of [['native-failure', 'no-progress-143'], ['native-fa
   if (!zcode && (defect === 'session' || defect === 'user' || defect === 'unknown')) { const path = join(oldNativeRoot, 'result.json'), result = JSON.parse(readFileSync(path, 'utf8')); if (defect === 'session') result.session_id = 'foreign'; if (defect === 'user') result.user_message_uuid = 'foreign'; if (defect === 'unknown') result.subtype = 'unknown'; writeFileSync(path, JSON.stringify(result)) }
   if (defect === 'exit') writeFileSync(join(oldNativeRoot, 'exit.json'), JSON.stringify({ code: 0, signal: null, stopped: false }))
   if (defect === 'completed') writeFileSync(join(oldNativeRoot, 'completed.json'), '{CORRUPT_COMPLETED')
-  if (defect === 'source' || defect === 'tests' || defect === 'scope' || defect === 'schema') { const path = defect === 'source' ? 'src/export.js' : defect === 'tests' ? 'tests/export.test.mjs' : defect === 'scope' ? '.spex-sync-drafts/foreign.json' : /草稿文件=([^\s；]+)/.exec(originalRequest!.prompt)![1].replace(/\.json$/, '.schema.json'); writeFileSync(join(oldPath, path), 'foreign unauthorized edit'); execFileSync('git', ['-C', oldPath, 'add', path], { stdio: 'pipe' }); execFileSync('git', ['-C', oldPath, 'commit', '-m', 'negative unauthorized edit'], { stdio: 'pipe' }) }
-  if ((mode === 'pause' || mode === 'native-failure') && (defect === 'none' || defect === 'prior-draft' || defect === 'older-pause')) { rmSync(join(oldNativeRoot, 'public-history.json')); rmSync(join(oldNativeRoot, 'claude-home'), { recursive: true }) }
+  if (defect === 'source' || defect === 'tests' || defect === 'scope' || defect === 'schema' || defect === 'context' || defect === 'index') { const path = defect === 'source' || defect === 'index' ? 'src/export.js' : defect === 'tests' ? 'tests/export.test.mjs' : defect === 'scope' ? '.spex-sync-drafts/foreign.json' : /草稿文件=([^\s；]+)/.exec(originalRequest!.prompt)![1].replace(/\.json$/, defect === 'context' ? '.context.json' : '.schema.json'); writeFileSync(join(oldPath, path), 'foreign unauthorized edit'); if (!dirty || defect === 'index') execFileSync('git', ['-C', oldPath, 'add', path], { stdio: 'pipe' }); if (!dirty) execFileSync('git', ['-C', oldPath, 'commit', '-m', 'negative unauthorized edit'], { stdio: 'pipe' }) }
+  if ((mode === 'pause' || mode === 'native-failure') && (defect === 'none' || defect === 'prior-draft' || older)) { rmSync(join(oldNativeRoot, 'public-history.json')); rmSync(join(oldNativeRoot, 'claude-home'), { recursive: true }) }
   const originalRecord = readRecord(oldSession)!, originalState = originalRecord.structuredExecution!, oldAttempts = f.store.listAttempts(f.operation.id)
-  assert.equal(originalState.state, mode === 'zcode-new' ? 'failed' : 'cancelled'); assert.equal(originalState.cancellation?.nativeStopped, true); assert.equal(originalState.errorCode, undefined); assert.equal(originalState.failedWorktree, undefined)
+  assert.equal(originalState.state, freshZCode ? 'failed' : 'cancelled'); assert.equal(originalState.cancellation?.nativeStopped, true); assert.equal(originalState.errorCode, undefined); assert.equal(originalState.failedWorktree, undefined)
   const oldResources = oldAttempts.flatMap(attempt => attempt.dispatchPlans.map(dispatch => f.store.findResource(attempt.id, dispatch.key))).filter(resource => resource !== null)
   assert(oldResources.every(resource => resource.phase === 'removed'))
   const oldRecordBytes = JSON.stringify(originalRecord), refs = oldAttempts.flatMap(attempt => attempt.checkpointRefs.map(ref => ({ ref, bytes: readEvidence(f.input.source.commonDir, ref) })))
   const nativeFiles = Object.fromEntries(readdirSync(oldNativeRoot, { withFileTypes: true }).filter(entry => entry.isFile()).map(entry => [entry.name, readFileSync(join(oldNativeRoot, entry.name))]))
-  const latestHead = execFileSync('git', ['-C', oldPath, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
+  const latestHead = execFileSync('git', ['-C', oldPath, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), oldIndex = execFileSync('git', ['-C', oldPath, 'rev-parse', '--git-path', 'index'], { encoding: 'utf8' }).trim()
+  const oldIndexBytes = readFileSync(oldIndex), oldDraftPath = /草稿文件=([^\s；]+)/.exec(originalRequest!.prompt)![1], oldDraftBytes = existsSync(join(oldPath, oldDraftPath)) ? readFileSync(join(oldPath, oldDraftPath)) : null
   f.store.requestControl(f.operation.id, 'run')
   if (defect === 'fence') {
     const checkpoint = f.store.checkpoint.bind(f.store)
     f.store.checkpoint = (fence, ref) => { const result = checkpoint(fence, ref), wrapper = JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()) as { stage?: string }; if (wrapper.stage === 'behavior-draft-protocol') f.store.requestControl(f.operation.id, 'pause'); return result }
   }
+  if (defect === 'cas') { const checkpoint = f.store.checkpoint.bind(f.store); f.store.checkpoint = (fence, ref) => { const wrapper = JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()); if (wrapper.stage?.endsWith(':stopped-physical-material-provenance')) f.store.requestControl(f.operation.id, 'pause'); return checkpoint(fence, ref) } }
   const readResource = f.store.findResource.bind(f.store)
   if (defect === 'failed-observation') f.store.findResource = (attemptId, key) => { const resource = readResource(attemptId, key); return resource ? { ...resource, checkpoints: resource.checkpoints.filter(item => (JSON.parse(readEvidence(f.input.source.commonDir, item.checkpointRef).toString()) as NativeRunCheckpoint).nativeState !== 'failed') } : null }
   const result = await runSyncOperation(f.store, f.operation.id, f.options).finally(() => { f.store.findResource = readResource })
-  if (defect === 'fence') { assert.equal(continued, false); assert.notEqual(result.status, 'settled'); return }
-  assert.equal(result.status, 'unsupported', JSON.stringify(result.failure)); assert.equal(continued, defect === 'none' || defect === 'prior-draft' || defect === 'older-pause', JSON.stringify({ result: result.failure, attempts: f.store.listAttempts(f.operation.id).map(attempt => ({ number: attempt.number, failure: attempt.failure, calls: attempt.dispatchPlans.length })) }))
+  if (defect === 'fence' || defect === 'cas') { assert.equal(continued, false); assert.notEqual(result.status, 'settled'); return }
+  assert.equal(result.status, 'unsupported', JSON.stringify(result.failure)); assert.equal(continued, materialExpected, JSON.stringify({ result: result.failure, attempts: f.store.listAttempts(f.operation.id).map(attempt => ({ number: attempt.number, failure: attempt.failure, calls: attempt.dispatchPlans.length })) }))
   if (defect === 'no-progress-143') assert.equal(restartedWithoutMaterial, true, '合法owned/stopped但HEAD==seed无JSON须在终态分类前skip，允许新任务')
   if (defect === 'no-progress-cancelled') assert.equal(restartedWithoutMaterial, true, '合法ZCode无进度取消仅跳过，不授新稿或成功')
   if (defect.startsWith('no-progress-143-')) assert.equal(restartedWithoutMaterial, false, 'foreign/unknown stop不能借无进度越过认证')
@@ -334,10 +368,21 @@ for (const [mode, defect] of [['native-failure', 'no-progress-143'], ['native-fa
   assert.deepEqual(readdirSync(oldNativeRoot, { withFileTypes: true }).filter(entry => entry.isFile()).map(entry => entry.name).sort(), Object.keys(nativeFiles).sort(), '冷观察不新增protocol log或补封存')
   for (const prior of oldAttempts) assert.deepEqual(f.store.readAttempt(prior.id), prior)
   for (const resource of oldResources) assert.deepEqual(f.store.findResource(resource.attemptId, resource.plan.key), resource)
-  const current = f.store.listAttempts(f.operation.id).at(-1)!, observed = current.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(wrapper => wrapper.stage.endsWith(':stopped-git-material-provenance'))
-  if (defect !== 'none' && defect !== 'prior-draft') { assert.equal(observed, undefined); return }
+  assert.deepEqual(readFileSync(oldIndex), oldIndexBytes, '只读材料观察不得刷新原index')
+  if (oldDraftBytes) assert.deepEqual(readFileSync(join(oldPath, oldDraftPath)), oldDraftBytes)
+  assert.equal(execFileSync('git', ['-C', oldPath, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), latestHead)
+  const current = f.store.listAttempts(f.operation.id).at(-1)!, observed = (p1 ? f.store.listAttempts(f.operation.id).flatMap(attempt => attempt.checkpointRefs) : current.checkpointRefs).map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(wrapper => wrapper.stage.endsWith(dirty ? ':stopped-physical-material-provenance' : ':stopped-git-material-provenance'))
+  if (p1) {
+    const wrapper = current.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(wrapper => wrapper.stage === 'elaboration')!
+    const result = JSON.parse(readEvidence(f.input.source.commonDir, wrapper.resultRef).toString()) as ElaborationResult
+    assert.equal(result.reviewPassed, true, JSON.stringify(result.failure)); assert(result.rounds.at(-1)?.draft?.resultCommit)
+    assert.notEqual(result.rounds.at(-1)?.traces.find(trace => trace.purpose === 'elaboration_generate')?.sessionId, result.rounds.at(-1)?.traces.find(trace => trace.purpose === 'elaboration_review')?.sessionId)
+  }
+  if (older) { assert.equal(observed, undefined, '较旧物理来源即使在新fence晚观察，也不能覆盖更新正常Git稿'); return }
+  if (!materialExpected) { assert.equal(observed, undefined); return }
   assert(observed); const provenance = JSON.parse(readEvidence(f.input.source.commonDir, observed.resultRef).toString())
-  assert.equal(provenance.resultCommit, latestHead); assert.equal(provenance.sourceKind, 'git_draft'); assert.equal(provenance.approved, false); assert.equal(provenance.observationKind, zcode ? 'native-failure' : mode); assert.equal(provenance.draftSha256, contentHash(latest)); assert(provenance.observedAt > 0)
+  assert.equal(dirty ? provenance.observedHeadCommit : provenance.resultCommit, latestHead); assert.equal(provenance.sourceKind, dirty ? 'physical_draft' : 'git_draft'); assert.equal(provenance.approved, false); assert.equal(provenance.observationKind, zcode ? 'native-failure' : mode); assert.equal(provenance.draftSha256, contentHash(latest)); assert(provenance.observedAt > 0)
+  if (dirty) { assert.equal(provenance.resultCommit, undefined); assert.equal(provenance.oid, undefined); assert.equal(JSON.parse(readEvidence(f.input.source.commonDir, provenance.materialRef).toString()).source, latest) }
   assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes); assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
 })
 

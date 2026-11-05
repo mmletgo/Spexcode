@@ -13,6 +13,8 @@ Spec变更只把任务相关规格与原始需求差量告知代理，代理在�
 
 ## expanded spec
 
+已认证原Native身份并正式stop/removed的owner编辑工作树，可由调用者在新有效fence只读观察精确UTF8普通JSON草稿。HEAD仍为seed或其后代；Git提交、index及工作区仅此draft允许变化，schema/context/Spec/源码/tests的path-mode-OID与absence全部保持，含隐藏index标记也不豁免。允许untracked、tracked修改及仅draft暂存；材料始终取最新工作区原bytes并记录原index SHA，syntax/schema坏稿不修正文。只读Git命令禁optional locks，旧HEAD/index/工作文件/Native原件不改写。此来源是physical_draft，不能构造ElaborationDraft或旧Git结果；正常交付仍须真实clean正常提交。
+
 P0分析及独审同样复用此草稿捕获/读取能力；owner与purpose共同隔离临时路径，两个阶段只可提交各自精确draft，schema/Spec/源码/tests及其absence继续保持。P0独审seed可以含自身未批准JSON临时稿，但分析稿不混入独审业务tree；最终candidate与交付不含任何临时草稿。认证的旧Native final只作为新seed输入材料，不是旧Git witness，必须经下一真实Agent提交后才产生当前草稿身份。
 
 P1草稿复用同一stageWorktree/verifyStageResult和原生v6 edit执行，不增加执行器。生成只能正常提交指定的`.spex-sync-drafts/<ownerDigest>.json` UTF-8普通文件，精确业务schema作为同seed只读sidecar供Agent读取与自检，仍只有主draft可写；真实seed→result diff若包含schema、Spec、源码、测试、其他owner或symlink即拒绝；只有summary且未形成真实提交也拒绝。程序从提交的精确path/OID读取字节，在JSON解析前以`refs/spex-sync/drafts/<ownerDigest>/<resultCommit>`保活，syntax-invalid同样保留。冷恢复重核seed commit/tree、真实result commit/tree、owner/schema/path/OID/ref及写范围。当前source与已审祖先始终重新建立seed，只overlay旧owner草稿字节，不继承旧工作树；临时文件不进入独审seed、业务candidate或交付。

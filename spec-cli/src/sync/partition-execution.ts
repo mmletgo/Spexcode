@@ -1,3 +1,4 @@
+import type { StageDraftMaterialRequest } from './stage-worktree.js'
 import { setImmediate as yieldToControl } from 'node:timers/promises'
 import { stageWorktree, STAGE_READING_INSTRUCTIONS } from './stage-worktree.js'
 import { posix } from 'node:path'
@@ -33,7 +34,7 @@ export type PartitionCheckpoints = {
   loadAcceptedAnalysis?(key: string, planDigest: string, inputDigest: string): CodeBehaviorAnalysis | null
   loadAcceptedElaboration?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'> | null
   loadAcceptedInterfaceSeed?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'> | null
-  loadElaborationDraftMaterial?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, schemaDigest?: string): ElaborationDraftMaterial | null
+  loadElaborationDraftMaterial?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, schemaDigest?: string, request?: StageDraftMaterialRequest): ElaborationDraftMaterial | null
   loadElaborationDraft?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, schemaDigest?: string): ElaborationDraft | null
   loadElaborationRepairSeed?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): ElaborationRepairSeed | null
   loadElaborationRepairDiagnostics?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): ElaborationRepairDiagnostics | null
@@ -361,7 +362,7 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
         if (reusableCache(repairedInput, accepted)) return accepted
       }
       const seed = checkpoints.loadElaborationRepairSeed?.(key, partitionBinding, freezeElaborationInput(repairedInput).inputDigest) ?? undefined
-      const { contracts: _contracts, graph: _graph, coverage: _coverage, ...compact } = await elaborate(repairedInput, { runner, seed, draft: cacheDraft, loadDraft, loadDraftMaterial: localInput.draftProtocol ? schemaDigest => checkpoints.loadElaborationDraftMaterial?.(key, partitionBinding, schemaDigest) ?? null : undefined, repairDiagnostics: checkpoints.loadElaborationRepairDiagnostics?.(key, partitionBinding, freezeElaborationInput(repairedInput).inputDigest) ?? undefined })
+      const { contracts: _contracts, graph: _graph, coverage: _coverage, ...compact } = await elaborate(repairedInput, { runner, seed, draft: cacheDraft, loadDraft, loadDraftMaterial: localInput.draftProtocol ? (schemaDigest, request) => checkpoints.loadElaborationDraftMaterial?.(key, partitionBinding, schemaDigest, request) ?? null : undefined, repairDiagnostics: checkpoints.loadElaborationRepairDiagnostics?.(key, partitionBinding, freezeElaborationInput(repairedInput).inputDigest) ?? undefined })
       checkpoints.save(key, compact)
       return compact
     }
@@ -372,7 +373,7 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
       if (reusableCache(accepted.readonlySpecRepair ? readonlyRepairInput(localInput, accepted.readonlySpecRepair) : localInput, accepted)) return accepted
     }
     const seed = checkpoints.loadElaborationRepairSeed?.(key, partitionBinding, inputDigest) ?? undefined
-    const result = await elaborate(localInput, { runner, seed, draft: cacheDraft, loadDraft, loadDraftMaterial: localInput.draftProtocol ? schemaDigest => checkpoints.loadElaborationDraftMaterial?.(key, partitionBinding, schemaDigest) ?? null : undefined, repairDiagnostics: checkpoints.loadElaborationRepairDiagnostics?.(key, partitionBinding, inputDigest) ?? undefined })
+    const result = await elaborate(localInput, { runner, seed, draft: cacheDraft, loadDraft, loadDraftMaterial: localInput.draftProtocol ? (schemaDigest, request) => checkpoints.loadElaborationDraftMaterial?.(key, partitionBinding, schemaDigest, request) ?? null : undefined, repairDiagnostics: checkpoints.loadElaborationRepairDiagnostics?.(key, partitionBinding, inputDigest) ?? undefined })
     const { contracts: _contracts, graph: _graph, coverage: _coverage, ...compact } = result
     checkpoints.save(key, compact)
     return compact
