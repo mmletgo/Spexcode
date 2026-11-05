@@ -104,15 +104,12 @@ function priorDeliveryFiles(operation: SyncOperation, view: InputView, readPaths
 export async function isSyncInputCurrent(operation: SyncOperation, current: InputSnapshot, plan: SyncCoordinatorPlan, businessSelection = operation.baselineSelection): Promise<boolean> {
   if (canonical(operation.input.source) !== canonical(current.source)) return false
   if (!operation.baselineSelection) return operation.input.id === current.id
-  const view = await readInput(operation.input, plan, operation.previousBaselinePair, operation.requestBlob ?? undefined, businessSelection, operation.scope.paths)
-  const originalEntries = verifySnapshot(operation.input), currentEntries = verifySnapshot(current)
   const treeCache = new Map<string, ReturnType<typeof readTree>>()
+  const view = await readInput(operation.input, plan, operation.previousBaselinePair, operation.requestBlob ?? undefined, businessSelection, operation.scope.paths, treeCache)
+  const originalEntries = verifySnapshot(operation.input, treeCache), currentEntries = verifySnapshot(current)
   const rememberTree = (input: InputSnapshot, entries: ReturnType<typeof readTree>): void => { treeCache.set(`${input.source.commonDir}\0${input.immutableTree}`, entries) }
   const treeEntries = (input: InputSnapshot, tree: string): ReturnType<typeof readTree> => {
-    const key = `${input.source.commonDir}\0${tree}`
-    let entries = treeCache.get(key)
-    if (!entries) { entries = readTree(input.source.commonDir, tree); treeCache.set(key, entries) }
-    return entries
+    return readTree(input.source.commonDir, tree, undefined, treeCache)
   }
   const headTree = (input: InputSnapshot): string => objectGit(input.source.commonDir, ['rev-parse', `${input.headCommit}^{tree}`]).toString().trim()
   rememberTree(operation.input, originalEntries); rememberTree(current, currentEntries)
@@ -124,28 +121,28 @@ export async function isSyncInputCurrent(operation: SyncOperation, current: Inpu
     && readEntries(operation.input, headTree(operation.input)) === readEntries(current, headTree(current))
 }
 
-async function readInput(input: InputSnapshot, plan: SyncCoordinatorPlan, previous?: SyncOperation['previousBaselinePair'], requestBlob?: BlobRef, selection?: FrozenBaselineSelection, executionPaths = plan.executionScope?.paths): Promise<InputView> {
+async function readInput(input: InputSnapshot, plan: SyncCoordinatorPlan, previous?: SyncOperation['previousBaselinePair'], requestBlob?: BlobRef, selection?: FrozenBaselineSelection, executionPaths = plan.executionScope?.paths, treeCache = new Map<string, ReturnType<typeof readTree>>()): Promise<InputView> {
   if (!['sync-coordinator-v1', 'sync-coordinator-v2'].includes(plan.version) || !plan.targets.length || !plan.writePaths.length) fail('invalid_plan', '可信计划缺少版本、目标或写范围')
   for (const path of [...plan.readPaths, ...plan.writePaths, ...plan.targets.map(item => item.path), ...(plan.newNodeRawSources ?? []).map(item => item.path)]) {
     validateRepositoryPath(path)
     if (isHostPrivatePath(path)) fail('private_context', `可信读写集合包含宿主运行资料: ${path}`)
   }
-  const sourceEntries = verifySnapshot(input)
+  const sourceEntries = verifySnapshot(input, treeCache)
   if (plan.version === 'sync-coordinator-v2' && plan.commitTrigger) {
     for (const path of plan.commitTrigger.paths) validateRepositoryPath(path)
     if (plan.commitTrigger.before) {
       const before = plan.commitTrigger.before
       if (canonical(before.source) !== canonical(input.source)) fail('commit_trigger_binding', '提交前态不属于同一真实物理来源')
-      const changed = actualTreeDiff(verifySnapshot(before), verifySnapshot(input)).map(change => change.path)
+      const changed = actualTreeDiff(verifySnapshot(before, treeCache), verifySnapshot(input, treeCache)).map(change => change.path)
       if (canonical(unique(changed)) !== canonical(unique(plan.commitTrigger.paths))) fail('commit_trigger_binding', '累计提交路径与真实前后快照不一致')
     }
   }
   let readPaths = selection ? unique([...plan.readPaths, ...executionPaths ?? []]) : [...plan.readPaths]
-  let composition = composeAuthoredInput(input, selection ?? previous ?? undefined, { retainConflicts: true, ...(selection ? { executionPaths, contextPaths: readPaths } : {}) })
+  let composition = composeAuthoredInput(input, selection ?? previous ?? undefined, { retainConflicts: true, treeCache, ...(selection ? { executionPaths, contextPaths: readPaths } : {}) })
   if (!composition.composed) fail('composition_conflict', '人类输入与前次交付存在重叠冲突', [writeEvidence(input.source.commonDir, composition.conflicts)])
   if (requestBlob) composition = composeControlledRequest(input, composition.composed, requestBlob, { retainConflicts: true, baselineSelection: selection })
   if (!composition.composed) fail('request_conflict', '用户受控差量与已交付细化存在重叠冲突', [writeEvidence(input.source.commonDir, composition.conflicts)])
-  let composed = composition.composed, entries = readTree(input.source.commonDir, composed.tree)
+  let composed = composition.composed, entries = readTree(input.source.commonDir, composed.tree, undefined, treeCache)
   const targetSources = new Map<string, string>()
   for (const target of plan.targets) {
     const entry = entries.find(item => item.path === target.path)
@@ -161,11 +158,11 @@ async function readInput(input: InputSnapshot, plan: SyncCoordinatorPlan, previo
   }
   if (canonical(completeReadPaths) !== canonical(readPaths)) {
     readPaths = completeReadPaths
-    composition = composeAuthoredInput(input, selection ?? previous ?? undefined, { retainConflicts: true, ...(selection ? { executionPaths, contextPaths: readPaths } : {}) })
+    composition = composeAuthoredInput(input, selection ?? previous ?? undefined, { retainConflicts: true, treeCache, ...(selection ? { executionPaths, contextPaths: readPaths } : {}) })
     if (!composition.composed) fail('composition_conflict', '人类输入与前次交付存在重叠冲突', [writeEvidence(input.source.commonDir, composition.conflicts)])
     if (requestBlob) composition = composeControlledRequest(input, composition.composed, requestBlob, { retainConflicts: true, baselineSelection: selection })
     if (!composition.composed) fail('request_conflict', '用户受控差量与已交付细化存在重叠冲突', [writeEvidence(input.source.commonDir, composition.conflicts)])
-    composed = composition.composed; entries = readTree(input.source.commonDir, composed.tree)
+    composed = composition.composed; entries = readTree(input.source.commonDir, composed.tree, undefined, treeCache)
   }
   if (contentHash(JSON.stringify(entries)) !== composed.contentDigest || readEvidence(input.source.commonDir, composed.manifestBlob).toString() !== JSON.stringify({ version: 1, entries })) fail('composition_digest', '组合输入真实清单与引用不一致')
   const readEntries = entries.filter(entry => within(entry.path, readPaths))
@@ -183,7 +180,7 @@ async function readInput(input: InputSnapshot, plan: SyncCoordinatorPlan, previo
     ids.add(`${test.verificationId}:${test.testId}`)
   }
   const headTree = objectGit(input.source.commonDir, ['rev-parse', `${input.headCommit}^{tree}`]).toString().trim()
-  const uncovered = actualTreeDiff(readTree(input.source.commonDir, headTree), entries).filter(file => !within(file.path, readPaths) || !selection && !within(file.path, plan.writePaths))
+  const uncovered = actualTreeDiff(readTree(input.source.commonDir, headTree, undefined, treeCache), entries).filter(file => !within(file.path, readPaths) || !selection && !within(file.path, plan.writePaths))
   if (uncovered.length) fail('uncovered_source_change', `外部输入/前次交付差量不在可信影响范围: ${uncovered.map(file => file.path).join(', ')}`, [writeEvidence(input.source.commonDir, uncovered)])
   const readSetDigest = contentHash(canonical({ baseline: selection ? { selectionDigest: selection.digest } : previous ? { id: previous.id, sourceInput: previous.sourceInput.immutableTree, verifiedDelivery: previous.verifiedDelivery.immutableTree, coveredScope: previous.coveredScope } : null, compositionEvidence: composed.compositionEvidenceBlob ?? null, declared: unique(readPaths), entries: readEntries, absent: unique(readPaths.filter(path => !entries.some(entry => within(entry.path, [path])))) }))
   const frozen = await readFrozenContracts(input.source.canonicalRoot, files)
@@ -260,13 +257,13 @@ function elaborationRepairSeed(result: SavedElaboration | null, requestKey: stri
     ? { settled: true, requestKey, inputDigest: result.inputDigest, candidateDigest: last.candidateDigest, output: last.output, candidate: last.candidate, findings: last.findings, review: last.review, traces: last.traces } : undefined
 }
 
-function partitionStage<T>(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, key: string): { result: T; resultRef: BlobRef } | null {
+function partitionStage<T>(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, key: string, sourceSelection?: FrozenBaselineSelection): { result: T; resultRef: BlobRef } | null {
   const checkpoints = readSyncCheckpoints(store, operation, attempt), result = stage<T>(store, operation, attempt, key, 'automatic', checkpoints)
   if (!result) return null
   const resultRef = writeEvidence(operation.input.source.commonDir, result)
   const original = checkpoints.json.map(({ value }) => value as Partial<Stage>)
     .find(value => value.version === 'sync-stage-v1' && value.stage === key && value.operationId === operation.id && value.attemptId === attempt.id && value.inputId === operation.input.id && value.policyDigest === operation.policyDigest && value.resultRef?.sha256 === resultRef.sha256)
-  if (original?.readSetDigest !== operation.readSetDigest || operation.baselineSelection && original.baselineSelectionRef?.sha256 !== writeEvidence(operation.input.source.commonDir, store.readBusinessBaselineSelection(operation.id)).sha256) return null
+  if (original?.readSetDigest !== operation.readSetDigest || operation.baselineSelection && original.baselineSelectionRef?.sha256 !== writeEvidence(operation.input.source.commonDir, sourceSelection ?? store.readBusinessBaselineSelection(operation.id)).sha256) return null
   return { result, resultRef }
 }
 
@@ -582,6 +579,8 @@ function generationBuilderSource(store: SyncStore, operation: SyncOperation, ori
 
 /** 沿原检查点追到真正派发的accept；拷贝不创造新会话或修改旧摘要。 */
 export function acceptedCandidateReviewSource(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, key: string, candidate: CandidateRef, plan: SyncPartitionPlan, input: GenerationInput): { result: SavedGeneration; resultRef: BlobRef; attempt: SyncAttempt } | null {
+  const selected = operation.baselineSelection
+  if (selected && selected.digest !== contentHash(canonical({ version: selected.version, source: selected.source, bindings: selected.bindings }))) return null
   let origin = attempt, source = partitionStage<SavedGeneration>(store, operation, origin, key)
   while (source) {
     const result = source.result, trace = result.traces[0]
@@ -660,7 +659,7 @@ function readonlyRepairFromAttempt(store: SyncStore, operation: SyncOperation, a
   const saved = stage<SavedGeneration>(store, operation, attempt, 'generation')
   if (!saved) return null
   operation = readonlyRepairContext(store, operation, attempt, writeEvidence(operation.input.source.commonDir, saved))
-  const generation = partitionStage<SavedGeneration>(store, operation, attempt, 'generation')
+  const generation = partitionStage<SavedGeneration>(store, operation, attempt, 'generation', operation.baselineSelection)
   let allFindings = generation?.result.validationFindings.filter(item => item.severity === 'error') ?? []
   const semantic = generation?.result.candidateValidated === true && ['repair', 'failed'].includes(generation.result.status) && !generation.result.reviewPassed && generation.result.partitionEvidence?.some(item => item.review.verdict === 'repair')
   if (!generation?.result.candidate || !semantic && (generation.result.candidateValidated || !allFindings.length || allFindings.some(item => item.code !== 'anchor-dead'))) return null
@@ -697,7 +696,7 @@ function readonlyRepairFromAttempt(store: SyncStore, operation: SyncOperation, a
   if (semantic) {
     allFindings = readonlyReviewFindings(generation.result, prior.result.changes, writable)
     for (const evidence of generation.result.partitionEvidence!) {
-      const saved = partitionStage<SavedGeneration>(store, operation, attempt, `partition:${evidence.partitionId}:candidate-review`)
+      const saved = partitionStage<SavedGeneration>(store, operation, attempt, `partition:${evidence.partitionId}:candidate-review`, operation.baselineSelection)
       const result = saved?.result, trace = result?.traces.find(trace => trace.purpose === 'code_review')
       const currentDispatch = trace && attempt.dispatchPlans.some(dispatch => dispatch.purpose === 'code_review' && dispatch.session?.sessionId === trace.sessionId && dispatch.session.threadId === trace.threadId && dispatch.session.turnId === trace.turnId)
       const reviewPlan = evidence.review.verdict === 'accept' && !currentDispatch ? partitionStage<SyncPartitionPlan>(store, operation, attempt, 'candidate-partition-plan') : null
@@ -1710,6 +1709,15 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           if (!originalPlan || writeEvidence(operation.input.source.commonDir, originalPlan).sha256 !== readonlyOwnerRepair.planRef.sha256 || partitions && partitions.digest !== originalPlan.digest) fail('readonly_spec_repair_binding', '只读V1返修不能更换原已审partition计划')
           if (!partitions) { partitions = originalPlan; partitionCheckpoints.save('partition-plan', partitions); saveStage(store, fence, 'readonly-repair-plan-provenance', { fromAttemptId: readonlyOwnerRepair.planAttemptId, resultRef: readonlyOwnerRepair.planRef }) }
         }
+        if (!partitions && options.plan.direction === 'code_to_spec' && readonlyBase?.operationId === operation.id && !readonlyOwnerRepair) {
+          const origin = store.readAttempt(readonlyBase.attemptId)
+          const original = elaborationComposedBinding(store, operation, origin, readonlyBase.result, view.composed) && reviewPlanStage(store, operation, origin, 'partition-plan')
+          const owners = readonlyBase.result.partitionEvidence
+          if (original && owners?.length === original.result.partitions.length && owners.every(owner => original.result.partitions.some(partition => partition.id === owner.partitionId) && (JSON.parse(readEvidence(operation.input.source.commonDir, owner.resultRef).toString()) as SavedElaboration).partitionBinding?.planDigest === original.result.digest)) {
+            partitions = original.result
+            partitionCheckpoints.save('partition-plan', partitions)
+          }
+        }
         if (!partitions) {
           const sourceEntries = verifySnapshot(operation.input)
           const before = readTree(operation.input.source.commonDir, operation.previousBaselinePair?.sourceInput.immutableTree ?? plan.commitTrigger?.before?.immutableTree ?? operation.input.immutableTree)
@@ -2219,7 +2227,6 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       if (attempt.expiresAtMs <= Date.now() && attempt.status !== 'applying') return current('recovery_required', issue)
       store.recordFailure(fence, issue)
     }
-    const durableFailure = operation.currentAttemptId ? store.readAttempt(operation.currentAttemptId).failure : null
-    return current(['export_recovery', 'candidate_stage_missing', 'cancellation_pending'].includes(code) || code === 'native_rpc_timeout' && !settledRpc ? 'recovery_required' : (durableFailure ?? issue).kind === 'unsupported' ? 'unsupported' : undefined, durableFailure ?? issue)
+    return current(['export_recovery', 'candidate_stage_missing', 'cancellation_pending'].includes(code) || code === 'native_rpc_timeout' && !settledRpc ? 'recovery_required' : issue.kind === 'unsupported' ? 'unsupported' : undefined, issue)
   } finally { if (timer) clearInterval(timer); releasePublication(); mutex.release() }
 }

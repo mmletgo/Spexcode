@@ -86,6 +86,8 @@ test('a note carrying quote/backslash/newline/unicode survives every real declar
   delete env.PORT
   delete env.SPEXCODE_SESSION_ID
 
+  // Finish the duplicate-owner seed before the backend can scan the same legacy records.
+  execFileSync(process.execPath, [tsxBin(packageRoot), runner, 'seed-duplicate-owner'], { cwd: project, env })
   const backend = spawn(process.execPath, [tsxBin(packageRoot), join(packageRoot, 'src', 'cli.ts'), 'serve', '--port', String(port)], {
     cwd: project, env, stdio: ['ignore', 'pipe', 'pipe'],
   })

@@ -1,8 +1,7 @@
 // No-model product fixture for session-record INTEGRITY: every note-carrying declaration entry must survive a
 // full round trip through the real product surfaces — the real CLI declaration verbs, the real hook dispatcher,
 // the real backend read routes — with a note carrying the characters that break string-assembled JSON.
-// Run against a backend whose claude launcher resolves to spec-cli/test/fixtures/fake-claude:
-//   BASE=http://127.0.0.1:8787 npx tsx test/session-record-integrity-fixture.ts
+// session-record-integrity.test.ts seeds duplicate ownership before starting the backend with fake-claude.
 import assert from 'node:assert/strict'
 import { execFile, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
@@ -322,35 +321,37 @@ function quarantineFiles(home: string): string[] {
   return out
 }
 
-async function duplicateLoadedThreadIsBlocked(home: string, project: string): Promise<void> {
+async function duplicateLoadedThreadFixture(home: string, project: string, phase: 'seed' | 'check'): Promise<void> {
   const first = '00000000-0000-4000-8000-0000d001ca7e'
   const second = '00000000-0000-4000-8000-0000d002ca7e'
   const thread = 'thread-with-two-readable-records'
-  const parent = dirname(project)
-  const worktrees = new Map([[first, join(parent, `duplicate-owner-a-${process.pid}`)], [second, join(parent, `duplicate-owner-b-${process.pid}`)]])
-  const branches = new Map([[first, `node/duplicate-owner-a-${process.pid}`], [second, `node/duplicate-owner-b-${process.pid}`]])
-  const record = (id: string) => ({
-    session_id: id,
-    governed: true,
-    worktree_path: worktrees.get(id),
-    branch: branches.get(id),
-    title: '', name: '', parent: '',
-    status: 'active', proposal: '', merges: 0, note: '', sortkey: '', createdAt: Date.now(),
-    harness: 'codex', harness_session_id: thread, stopped: false, archived: false,
-    launcher: 'codex', launch_cmd: 'codex --yolo', launch_owner: '',
-  })
-  for (const id of [first, second]) {
-    await pexec('git', ['-C', project, 'worktree', 'add', '-q', '-b', branches.get(id)!, worktrees.get(id)!])
-    const path = await legacyRecordPath(home, project, id)
-    mkdirSync(dirname(path), { recursive: true })
-    writeFileSync(path, `${JSON.stringify(record(id), null, 2)}\n`)
+  const worktrees = new Map([[first, `${project}-duplicate-owner-a`], [second, `${project}-duplicate-owner-b`]])
+  const branches = new Map([[first, 'node/duplicate-owner-a'], [second, 'node/duplicate-owner-b']])
+  if (phase === 'seed') {
+    for (const id of [first, second]) {
+      await pexec('git', ['-C', project, 'worktree', 'add', '-q', '-b', branches.get(id)!, worktrees.get(id)!])
+      const path = await legacyRecordPath(home, project, id)
+      const record = {
+        session_id: id,
+        governed: true,
+        worktree_path: worktrees.get(id),
+        branch: branches.get(id),
+        title: '', name: '', parent: '',
+        status: 'active', proposal: '', merges: 0, note: '', sortkey: '', createdAt: Date.now(),
+        harness: 'codex', harness_session_id: thread, stopped: false, archived: false,
+        launcher: 'codex', launch_cmd: 'codex --yolo', launch_owner: '',
+      }
+      mkdirSync(dirname(path), { recursive: true })
+      writeFileSync(path, `${JSON.stringify(record, null, 2)}\n`)
+    }
+    const { migrateJsonSessionRecords } = await import('@spexcode/session-application')
+    migrateJsonSessionRecords({
+      databasePath: join(home, 'sessions.sqlite'),
+      recordsRoot: join(runtimeRoot(project), 'sessions'),
+      locality: () => {},
+    })
+    return
   }
-  const { migrateJsonSessionRecords } = await import('@spexcode/session-application')
-  migrateJsonSessionRecords({
-    databasePath: join(home, 'sessions.sqlite'),
-    recordsRoot: join(runtimeRoot(project), 'sessions'),
-    locality: () => {},
-  })
   const tmux = process.env.SPEXCODE_TMUX!
   await pexec('tmux', ['-L', tmux, 'new-session', '-d', '-s', first, 'sleep 300'])
   const pane = (await pexec('tmux', ['-L', tmux, 'display-message', '-p', '-t', first, '#{pane_pid}'])).stdout.trim()
@@ -628,10 +629,14 @@ async function ordinaryStopResumeStillWorks(home: string): Promise<void> {
 async function main(): Promise<void> {
   const home = process.env.SPEXCODE_HOME
   assert.ok(home, 'SPEXCODE_HOME must point at the fixture store')
-  assert.equal((await fetch(`${BASE}/health`)).status, 200, 'backend health')
   const project = process.cwd()
+  if (process.argv[2] === 'seed-duplicate-owner') {
+    if (runs('corrupt')) await duplicateLoadedThreadFixture(home, project, 'seed')
+    return
+  }
+  assert.equal((await fetch(`${BASE}/health`)).status, 200, 'backend health')
 
-  if (runs('corrupt')) await duplicateLoadedThreadIsBlocked(home!, project)
+  if (runs('corrupt')) await duplicateLoadedThreadFixture(home, project, 'check')
   if (runs('notes')) await notesRoundTrip(home!)
   if (runs('corrupt')) {
     await corruptRecordIsDiagnosable(home!, project)

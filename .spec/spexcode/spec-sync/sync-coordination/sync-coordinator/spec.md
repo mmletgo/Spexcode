@@ -56,6 +56,8 @@ resource-only入口按 [[sync-source-registration]] 使用专用raw Git登记元
 
 只读候选续修来源的资格重验以原generation wrapper保存的readSet/selection恢复原冻结语境，再沿既有仅追加null资源的选择桥核当前合法性；后续已审P1新增ID不能让先前真实诊断失去资格，也不能重写旧wrapper/hash。真实原绑定改值、删除、非null扩展、source/input/policy不符继续拒绝；通用partition loader仍要求当前精确绑定。新whole候选的P2原生失败或再次语义repair都保留最新合法已审owner链，继续最终独审与V1–V4，不回退旧候选。
 
+同operation已审whole经过原composed、完整局部owner及合法null扩域证明后，普通P2失败沿原partition-plan继续，不因扩展后的readPaths重建分区身份或把局部analysis替为whole。历史只读诊断重验显式使用原wrapper的selection，默认局部loader仍核当前严格选择；接受缓存先验证传入selection自身完整摘要，不以store中的有效选择遮蔽损坏输入。旧原件、请求摘要及业务授权不改签，局部候选重新seal，后续P2与V1–V4保持。
+
 并行分析异常保留全部已在途分区的完整原错误，按partitionId保存原proposal/程序校验/review诊断，并等待在途结算；主错误不能遮蔽其它未知资源或不可修复错误。只有全部错误均属于原允许的业务/结构修复，或原生接缝已精确确认notStarted且terminal→removed的SettledSessionCreateTimeoutError时，才进入原attempt/calls/repairs及绝对deadline内的有限自动修复。普通timeout、未知/未结算资源、绑定及保存错误不因此取得自动续修权。相同operation经明确pause→resume启动的新attempt时，仍可从该operation、同摘要的分区失败stage恢复 `behavior_analysis_invalid` / `behavior_review_failed` 原件，只按partitionId投影到对应分区；不把unsupported或其他基础设施错误作为模型诊断，不取得自动重试资格。下一attempt仅向对应失败分区重送该区历史诊断，已accept区不被兄弟诊断改变摘要；失败原件不是事实或批准。
 
 P2 的 V1 从核验后的实际 candidate tree 重建完整业务契约及必要代码/测试的 UTF-8 普通文件正文，并把同树完整 entry 路径清单交给 [[sync-frozen-contracts]]。宿主私有路径、符号链接和非 UTF-8 对象不进入正文；模型局部读集不代替全局结构图，也不扩大 Agent 任务、ready、写范围或验证政策。错误 related/code/one-govern 及真实全局覆盖缺口在生成修复阶段拒绝，不推进 V2、V3 或 apply journal。
@@ -203,6 +205,8 @@ P1的已认证精确结构输出失败沿既有已结算repairable attempt和原
 该独立入口的资源调用保持无execution-wake异步上下文，并以非持久选项让精确Native取消不主动drain队列；canonical事件、待投递历史、运行绑定与queue candidate刷新保持。普通runSyncOperation recoveryOnly及普通cancel默认wake不变。
 
 全局partition_final_seal_failed的局部accept不构成全局通过。下一attempt只从同operation/input/policy、精确readSet/selection/composed及原partition-plan绑定的已结算repairable aggregate提取severity:error，沿真实局部resultRef及node/path/ID定位owner，并反馈其接口后代与实际引用依赖；无合法owner明确停止，不空转。受影响owner沿既有readonlySpecRepair诊断接缝重新生成及独审，保无关accept；来源全局候选摘要、aggregate/局部refs和原输出/review保持，warning不升error，不增加写权或改变原预算。相同candidate/errors且没有对应owner新派发时typed停止；真实新派发仍按原预算多轮修复。
+
+下一attempt领取前的阶段认证失败，运行结果须返回本次捕获的精确code、message、kind及evidenceRefs，不能由上次已结算attempt.failure遮蔽；unsupported仍明确停止。没有当前可写attempt时，不新建attempt、不改签旧failure、raw或checkpoint；已有fence下的失败保存与暂停、取消、资源恢复和预算门保持。
 
 正式pause/resume在绑定前留下的superseded/failure:null空控制attempt，仅当checkpointRefs/dispatchPlans均空、composed/candidate/verification/currentSession均null、publicationBase缺席且原selectionDigest与当前一致时可越过；它不产生授权、不补签绑定，旧真实seal仍须完整匹配当前operation/input/policy/plan/composed/readSet/selection。任何业务/会话锚、非空产物或选择冲突仍是回溯屏障，空attempt仍消耗原计数。
 
