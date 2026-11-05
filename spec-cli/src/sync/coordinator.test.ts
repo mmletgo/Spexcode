@@ -49,6 +49,7 @@ import { pinZCodeToolPolicy, rejectedFinalOutput, StructuredSessionError, struct
 import { nativeWorktreePrompt, nativeWorktreeResult, sampleNativeWorktreeProcesses } from '../native-worktree-runtime.js'
 import { cancelStructuredSession, SettledSessionCreateTimeoutError } from '../session-structured.js'
 import { freezeContext, prepareFrozenPrompt } from '../frozen-context.js'
+import { retainHistoricalFrozenWorkflow } from './historical-workflow.test-helpers.js'
 import { stopZCodeStructuredTurn, zcodeCapability, zcodeNativeConfigSelection, zcodeNativeSelection, type ZCodeStructuredExecution } from '../zcode-structured.js'
 
 function nativeTask(request: ElaborationSessionRequest, commonDir: string): Record<string, unknown> {
@@ -1021,8 +1022,24 @@ test('可信目录授权/完整readset固定，同source不同policy不混，unc
   assert.equal(f.operation.policyDigest, syncPlanDigest(f.plan))
   assert.deepEqual(f.operation.scope.paths, ['.spec', 'src'])
   const options = { ingressKey: 'next', rootCauseId: 'next', origin: 'spec' as const, budget: f.operation.budget, managedRoot: f.managedRoot }
-  await assert.rejects(prepareSyncAdmission(f.input, { ...f.plan, readPaths: ['.spec', 'tests'] }, options), /uncovered_source_change/)
-  await assert.rejects(prepareSyncAdmission(f.input, { ...f.plan, writePaths: ['.spec', 'src', 'tests'] }, options), /oracle_binding/)
+  const omittedSourcePlan = { ...f.plan, readPaths: ['.spec'] }
+  const closure = await prepareSyncAdmission(f.input, omittedSourcePlan, options)
+  assert.notEqual(closure.policyDigest, f.operation.policyDigest)
+  assert.deepEqual(closure.scope, f.operation.scope, '闭包补齐不能扩大写范围')
+  const changedSource = Buffer.concat([f.bytes, Buffer.from('\n// owned source changes the readset\n')])
+  writeFileSync(join(f.root, 'src/export.js'), changedSource)
+  const changedInput = await captureInputSnapshot(f.root)
+  const changedClosure = await prepareSyncAdmission(changedInput, omittedSourcePlan, { ...options, ingressKey: 'changed-owned-source', rootCauseId: 'changed-owned-source' })
+  assert.notEqual(changedClosure.readSetDigest, closure.readSetDigest, '省略显式source readPath后，owned source仍进入readSet')
+  assert.equal(changedClosure.policyDigest, closure.policyDigest)
+  assert.deepEqual(changedClosure.scope, closure.scope)
+  writeFileSync(join(f.root, 'src/export.js'), f.bytes)
+  writeFileSync(join(f.root, 'unclaimed.txt'), '真实闭包外输入\n')
+  const uncoveredInput = await captureInputSnapshot(f.root)
+  await assert.rejects(prepareSyncAdmission(uncoveredInput, omittedSourcePlan, { ...options, ingressKey: 'uncovered-input', rootCauseId: 'uncovered-input' }), /uncovered_source_change/)
+  rmSync(join(f.root, 'unclaimed.txt'))
+  const oracleInput = await captureInputSnapshot(f.root)
+  await assert.rejects(prepareSyncAdmission(oracleInput, { ...omittedSourcePlan, writePaths: ['.spec', 'src', 'tests'] }, options), /oracle_binding/)
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
   assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
 })
@@ -1710,11 +1727,20 @@ for (const mode of ['historical-rebound', 'current-rebound', 'missing-binding', 
     assert.equal(recomputed.composedTree, attempts[1].composedInput!.tree)
     assert.equal(recomputed.composedContentDigest, attempts[1].composedInput!.contentDigest)
   } else {
-    assert.ok(secondStages.some(stage => stage.stage === 'elaboration-provenance'))
-    const reused = [...secondStages].reverse().find(stage => stage.stage === 'elaboration')
-    assert.equal(reused.resultRef.sha256, whole.resultRef.sha256)
-    assert.equal(reused.composedTree, whole.composedTree)
-    assert.equal(reused.composedContentDigest, whole.composedContentDigest)
+    assert.ok(!secondStages.some(stage => stage.stage === 'elaboration-provenance'), '分区whole不得直接继承whole级provenance')
+    const priorLocal = attempts[0].checkpointRefs.map(ref => JSON.parse(readEvidence(input.source.commonDir, ref).toString())).find(stage => /^partition:.*:elaboration$/.test(stage.stage))
+    assert.ok(priorLocal)
+    const localProvenanceStage = secondStages.find(stage => stage.stage === `${priorLocal.stage}:provenance`)
+    assert.ok(localProvenanceStage, '局部whole输入不变时须保留已审owner的精确来源')
+    const localProvenance = JSON.parse(readEvidence(input.source.commonDir, localProvenanceStage.resultRef).toString()) as { fromAttemptId: string; resultRef: { sha256: string } }
+    assert.equal(localProvenance.fromAttemptId, attempts[0].id)
+    assert.equal(localProvenance.resultRef.sha256, priorLocal.resultRef.sha256)
+    const resealed = [...secondStages].reverse().find(stage => stage.stage === 'elaboration')
+    assert.ok(resealed)
+    assert.equal(resealed.composedTree, attempts[1].composedInput!.tree)
+    assert.equal(resealed.composedContentDigest, attempts[1].composedInput!.contentDigest)
+    assert.equal(whole.composedTree, attempts[0].composedInput!.tree)
+    assert.equal(whole.composedContentDigest, attempts[0].composedInput!.contentDigest)
   }
   if (!changedTree) assert.equal(p1Calls, 1, '局部冻结输入未变，仅程序重seal不能重派Native')
   assert.equal(f.store.listJournals(operation.id).length, 0)
@@ -1872,8 +1898,9 @@ test('P3真实code来源先持久独立analyzing再细化/生成，policy冻结�
   assert.equal(result.status, 'conflicted', JSON.stringify(result.failure))
   assert.equal(result.operation.policyDigest, syncPlanDigest(f.plan)); assert.equal(result.operation.callsUsed, 6)
   assert.deepEqual(f.calls.map(call => call.purpose), ['code_behavior_analyze', 'code_behavior_review', 'elaboration_generate', 'elaboration_review', 'code_generate', 'code_review'])
-  const attempt = f.store.readAttempt(result.operation.currentAttemptId!), checkpoints = attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
+  const attempt = f.store.readAttempt(result.operation.currentAttemptId!), checkpoints = readSyncCheckpoints(f.store, result.operation, attempt).json.map(({ value }) => value as { version?: string; policyDigest?: string; readSetDigest?: string; reviewPassed?: boolean; stage?: string; attemptId?: string })
   const analysis = checkpoints.find(value => value.version === 'code-behavior-v1')
+  assert.ok(analysis, 'analysis typed artifact必须经绑定checkpoint读层展开')
   assert.equal(analysis.policyDigest, result.operation.policyDigest); assert.equal(analysis.readSetDigest, result.operation.readSetDigest); assert.equal(analysis.reviewPassed, true)
   assert.ok(checkpoints.some(value => value.stage === 'analysis' && value.attemptId === attempt.id))
   assert.equal(f.store.listJournals(result.operation.id).length, 0); assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
@@ -2696,10 +2723,15 @@ for (const scenario of ['failed', 'budget', 'unreviewed', 'no-conflict', 'active
   })
   const protocol = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => protocol.close())
   const application = await SyncApplication.create(f.root, { protocol, runtimeDirectory: join(f.parent, 'application'), tools: f.options.tools, runner: f.options.runner })
+  retainHistoricalFrozenWorkflow(application)
   await application.enable()
   const admitted = await application.submit({ nodeId: 'export-contract', requestId: `reviewed-conflict-${scenario}`, origin: 'code' })
   if (scenario === 'active-p1') {
-    await enteredP1
+    const progress = await Promise.race([
+      enteredP1.then(() => ({ kind: 'entered-p1' as const })),
+      application.wait(admitted.operation!.id).then(detail => ({ kind: 'settled' as const, detail })),
+    ])
+    if (progress.kind === 'settled') assert.fail(`P1进入前操作已结算: ${JSON.stringify({ phase: progress.detail.operation.phase, failure: progress.detail.attempt?.failure })}`)
     try {
       const active = await application.readOperation(admitted.operation!.id), context = active.decisionContext!
       assert.equal(active.decisionEligibility.eligible, false); assert.equal(active.operation.phase, 'elaborating'); assert.equal(active.operation.blockedReason, 'conflicted'); assert.equal(active.attempt!.status, 'running')
