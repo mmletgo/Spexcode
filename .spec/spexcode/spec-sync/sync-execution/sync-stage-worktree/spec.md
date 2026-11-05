@@ -13,6 +13,8 @@ Spec变更只把任务相关规格与原始需求差量告知代理，代理在�
 
 ## expanded spec
 
+StageDraftMaterialRequest仅在进程内传当前binding/真实seed/inputDigest、可定位的existingDraft与程序可信readonly overlay的精确path/mode/OID投影，供P1按真实Native attempt/round选择严格较新物理材料及跨父/诊断比较。它不进入旧请求或NativePlan，不改变本模块对原停止工作树、index、schema/context及其他文件的完整冷验，也不能赋予旧稿新的Git或批准角色。
+
 已认证原Native身份并正式stop/removed的owner编辑工作树，可由调用者在新有效fence只读观察精确UTF8普通JSON草稿。HEAD仍为seed或其后代；Git提交、index及工作区仅此draft允许变化，schema/context/Spec/源码/tests的path-mode-OID与absence全部保持，含隐藏index标记也不豁免。允许untracked、tracked修改及仅draft暂存；材料始终取最新工作区原bytes并记录原index SHA，syntax/schema坏稿不修正文。只读Git命令禁optional locks，旧HEAD/index/工作文件/Native原件不改写。此来源是physical_draft，不能构造ElaborationDraft或旧Git结果；正常交付仍须真实clean正常提交。
 
 P0分析及独审同样复用此草稿捕获/读取能力；owner与purpose共同隔离临时路径，两个阶段只可提交各自精确draft，schema/Spec/源码/tests及其absence继续保持。P0独审seed可以含自身未批准JSON临时稿，但分析稿不混入独审业务tree；最终candidate与交付不含任何临时草稿。认证的旧Native final只作为新seed输入材料，不是旧Git witness，必须经下一真实Agent提交后才产生当前草稿身份。
