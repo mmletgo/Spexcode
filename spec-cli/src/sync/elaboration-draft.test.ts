@@ -7,11 +7,11 @@ import test from 'node:test'
 import { buildContractGraph, CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
 import { StructuredSessionError, rejectedFinalOutput } from '../session-structured-policy.js'
 import { nativeWorktreePrompt, nativeWorktreeResult } from '../native-worktree-runtime.js'
-import { elaborate, elaborationDigest, freezeElaborationInput, sealPartitionedElaboration, verifyElaborationDraftCache } from './elaboration.js'
+import { elaborate, elaborationMaterialContext, elaborationDigest, freezeElaborationInput, sealPartitionedElaboration, verifyElaborationDraftCache } from './elaboration.js'
 import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
 import type { ElaborationInput, ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
 import { captureInputSnapshot, contentHash, readEvidence, readObject, readTree, writeEvidence, writeObject, writeTree } from './snapshot.js'
-import { captureStageDraft, overlayStageTree, readStageDraft, stageWorktree } from './stage-worktree.js'
+import { captureStageDraft, overlayStageTree, readStageDraft, readStoppedPhysicalDraft, stageWorktree } from './stage-worktree.js'
 import { syncCheckpointArtifacts } from './checkpoint-evidence.js'
 import { freezeCandidate } from './candidate.js'
 import { bindElaborationTargets, projectVerificationTable, renderElaboration } from './elaboration-markdown.js'
@@ -47,7 +47,7 @@ async function fixture(t: test.TestContext) {
       assert.match(request.prompt, /Native final与业务草稿JSON是两份不同内容.*形式为\{"summary":"简短处理摘要"\}.*final前后不附说明.*Markdown代码围栏/s)
       const draftPath = /草稿文件=([^\s]+)/.exec(request.prompt)![1]
       assert.deepEqual(request.schema, { type: 'object', additionalProperties: false, properties: { summary: { type: 'string' } }, required: ['summary'] })
-      const schemaPath = /草稿业务schema只读文件=([^；]+)/.exec(request.prompt)![1]
+      const schemaPath = /\n草稿业务schema只读文件=([^；]+)/.exec(request.prompt)![1]
       const businessSchema = JSON.parse(readFileSync(join(workspace, schemaPath), 'utf8')) as Record<string, unknown>
       const businessProperties = businessSchema.properties as Record<string, unknown>
       assert.deepEqual(Object.keys(businessProperties).sort(), ['applicability', 'changes', 'version'])
@@ -224,7 +224,7 @@ test('冻结owner的非法repair跨请求只续独审，原Git稿和候选不变
   }
   await assert.rejects(elaborate({ ...input, requestKey: 'scope-review-new-analysis', analysis: { ...input.analysis, ref: { sha256: 'e'.repeat(64) } } }, { draft, repairDiagnostics, runner: async () => assert.fail('异分析不得派发') }), /同一业务输入/)
   const before = f.requests.length
-  const restored = await elaborate({ ...input, requestKey: 'scope-review-fresh' }, { draft, repairDiagnostics, runner: f.run(() => assert.fail('同一合法Git稿不得重新生成')) })
+  const restored = await elaborate({ ...input, requestKey: 'scope-review-fresh' }, { draft, repairDiagnostics, loadDraftMaterial: () => assert.fail('合法候选只续独审，不读物理材料覆盖'), runner: f.run(() => assert.fail('同一合法Git稿不得重新生成')) })
   assert.equal(restored.status, 'complete', JSON.stringify(restored.failure))
   assert.deepEqual(f.requests.slice(before).map(request => request.purpose), ['elaboration_review'])
   assert.match(f.requests.at(-1)!.prompt, /review_scope/); assert.ok(f.requests.at(-1)!.prompt.includes(JSON.stringify(rawReview)))
@@ -715,6 +715,54 @@ async function anchorRepairFixture(t: test.TestContext) {
   assert.equal(readStageDraft(f.commonDir, draft, draft), badText)
   return { ...f, input, repair, baseline, corrected, badText, draft, failed }
 }
+
+test('P1物理材料跨新父与新旧诊断精确overlay，原seed仍完整冷验且source/tests不豁免', async t => {
+  const f = await anchorRepairFixture(t), source = '{ ORIGINAL_UNCOMMITTED_EPIPE\n', before = f.requests.length
+  const richError = { code: 'program-diagnostic', message: '字符串中含\n任务:\n[]、\n草稿业务schema只读文件=、\\与"引号"', severity: 'error' as const, nodeId: 'export-contract', path, line: 17, itemId: 'STEP-EXPORT-01' }
+  const failed = await elaborate({ ...f.input, requestKey: 'physical-old-parent' }, { draft: { ...f.draft, errors: [...f.draft.errors, richError] }, runner: f.run((_request, workspace, draftPath) => {
+    mkdirSync(dirname(join(workspace, draftPath)), { recursive: true }); writeFileSync(join(workspace, draftPath), source)
+    throw new StructuredSessionError('failed', 'controlled EPIPE')
+  }) })
+  assert.equal(failed.status, 'failed'); assert.equal(failed.failure?.code, 'failed'); assert.equal(failed.rounds[0].draft, undefined)
+  const oldRequest = f.requests[before], oldWorkspace = f.workspaces[before], originalRequest = JSON.stringify(oldRequest)
+  const indexPath = git(oldWorkspace, 'rev-parse', '--git-path', 'index'), index = readFileSync(indexPath)
+  const context = [{ nodeId: 'ancestor', path: ancestorPath, source: ancestor('已审新父接口') }]
+  const accepted = await elaborate({ ...f.input, readonlySpecRepair: undefined, context, requestKey: 'new-parent-accepted' }, { runner: f.run(() => JSON.stringify(draftRows(f.baseline))) })
+  assert.equal(accepted.status, 'complete')
+  const repair = { ...f.repair, baseInputDigest: accepted.inputDigest, candidateDigest: accepted.candidateDigest!, acceptedRef: writeEvidence(f.commonDir, accepted), changes: accepted.changes, output: accepted.rounds[0].output, review: accepted.rounds[0].review }
+  let originalDiagnostics: Record<string, unknown> | undefined, projections: { previous: string[]; current: string[] } | undefined
+  const result = await elaborate({ ...f.input, context, readonlySpecRepair: repair, requestKey: 'new-parent-physical' }, {
+    loadDraftMaterial: (_schema, current) => {
+      assert(current)
+      const binding = elaborationMaterialContext(f.commonDir, oldRequest, current)
+      assert(binding, '新父/精确诊断overlay变化不应清空合法旧物理材料')
+      originalDiagnostics = binding.diagnostics
+      assert((binding.diagnostics.priorDraft as { errors: unknown[] }).errors.some(error => JSON.stringify(error) === JSON.stringify(richError)))
+      projections = { previous: binding.previousReadonlyOverlay.map(entry => entry.path), current: binding.currentReadonlyOverlay.map(entry => entry.path) }
+      for (const prompt of [oldRequest.prompt + '\nambiguous suffix', oldRequest.prompt.replace('\n失败诊断（不是新授权）:', '\nwrong marker'), oldRequest.prompt.replace('\n草稿业务schema只读文件=', '\nwrong schema marker=')]) assert.throws(() => elaborationMaterialContext(f.commonDir, { ...oldRequest, prompt }, current), /精确程序任务/)
+      for (const path of ['src/export.js', 'tests/export.test.mjs', '.spec/unauthorized/spec.md']) {
+        const tree = overlayStageTree(f.commonDir, current.worktree.tree, [{ path, source: 'unauthorized' }]), worktree = stageWorktree(f.commonDir, f.snapshot.headCommit, tree, 'edit')
+        assert.equal(elaborationMaterialContext(f.commonDir, oldRequest, { ...current, worktree }), null, '只排精确可信overlay，其他Spec/source/tests仍拒绝')
+      }
+      const physical = readStoppedPhysicalDraft(f.commonDir, oldWorkspace, oldRequest.worktree!, current.binding)!
+      assert.equal(physical.source, source)
+      return { source: physical.source, errors: f.draft.errors, diagnostics: binding.diagnostics, sourceKind: 'physical_draft' }
+    }, runner: f.run((request, workspace, draftPath) => {
+      assert.equal(readFileSync(join(workspace, draftPath), 'utf8'), source)
+      assert.equal(readFileSync(join(workspace, ancestorPath), 'utf8'), context[0].source)
+      assert.equal(readFileSync(join(workspace, `.spex-sync-diagnostics/${repair.acceptedRef.sha256}/${path}`), 'utf8'), f.baseline)
+      const diagnostic = JSON.parse(request.prompt.split('\n失败诊断（不是新授权）:\n')[1].split('\n草稿业务schema只读文件=')[0])
+      assert.deepEqual(diagnostic.materialDiagnostics, originalDiagnostics, 'B原冻结诊断完整进入新请求，不仅保EPIPE')
+      assert.deepEqual(readTree(f.commonDir, request.worktree!.tree).filter(entry => !entry.path.startsWith('.spec/') && !entry.path.startsWith('.spex-sync-')), readTree(f.commonDir, f.input.worktree!.tree).filter(entry => !entry.path.startsWith('.spec/')))
+      return JSON.stringify(f.corrected)
+    }),
+  })
+  assert.equal(result.status, 'complete', JSON.stringify(result.failure)); assert.equal(result.reviewPassed, true)
+  assert(projections!.previous.includes(`.spex-sync-diagnostics/${f.repair.acceptedRef.sha256}/${path}`)); assert(projections!.current.includes(`.spex-sync-diagnostics/${repair.acceptedRef.sha256}/${path}`))
+  assert.notEqual(f.repair.acceptedRef.sha256, repair.acceptedRef.sha256)
+  assert.equal(JSON.stringify(oldRequest), originalRequest); assert.deepEqual(readFileSync(indexPath), index)
+  assert.equal(readFileSync(join(oldWorkspace, /草稿文件=([^\s]+)/.exec(oldRequest.prompt)![1]), 'utf8'), source)
+})
 
 for (const purpose of ['elaboration_generate', 'elaboration_review']) test(`V1锚点返修${purpose}保留完整任务与真实baseline，坏草稿自行恢复而不改旧证据`, async t => {
   const f = await anchorRepairFixture(t), prior = JSON.stringify(f.draft), requestsBefore = f.requests.length

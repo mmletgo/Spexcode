@@ -5,6 +5,7 @@ hue: 175
 desc: 从高层原意生成可追踪的主流程与状态处置，经独立审查和有限修复，精确保留未知政策。
 code:
   - spec-cli/src/sync/elaboration.ts#elaborate
+  - spec-cli/src/sync/elaboration.ts#elaborationMaterialContext
   - spec-cli/src/sync/elaboration.ts#elaborationScopeErrors
   - spec-cli/src/sync/elaboration.ts#elaborationReviewScopeErrors
   - spec-cli/src/sync/elaboration.ts#targetHasCurrentChanges
@@ -25,6 +26,12 @@ related:
 
 ## expanded spec
 
+P1物理选源的新鲜度来自原认证generation的attempt与round，不来自载体round、观察时间或mtime。既有draft定位时忽略非权威errors增补但完整身份必须相同，并经原Native/Git冷验；同attempt较晚真实generation亦可优于早轮稿，不能定位来源时拒绝覆盖。原candidate/合法仅续审资格不因材料被替换。
+
+原P1程序冻结task/诊断沿精确schema尾段只读解析，不解析模型正文；新旧可信readonly overlay只取原task的relatedSpecs、repair.baselines/specs及本轮程序context/anchor/seal投影，逐项记录精确path/mode/OID。比较仅排这些路径并集及draft/schema，处理新增或消失诊断路径；不豁免整个.spec或source/tests/其absence。旧工作树仍对原seed全量冷验，新seed保当前已审父/诊断内容。原冻结诊断对象完整作为非权威materialDiagnostics进入新请求，新provenance留双投影，旧请求/NativePlan/摘要不重签，writer27已覆盖。
+
+P1材料回调还接收当前StageDraftBinding、含完整只读overlay的真实StageWorktree及业务inputDigest，均仅进程内参数，不重签旧saved/reserved请求。原认证Git draft必须定位到其真实owner/attempt/round；仅严格较新的已认证物理来源可替换为同一observer的physical_draft，未知或更早来源保原稿，合法candidate/仅续审仍优先，提示明确它未提交、未批准且不是Native final或历史Git稿。只复制原bytes，原Native失败/全部具体诊断保留；Agent正常提交后才沿原schema、renderer、业务授权和独立审查形成新稿，原只读祖先/source/tests/absence保持。
+
 存在当前受审分析及冻结owner时，独审与生成共享同一owner范围事实及生命周期目标绑定；新独审任务明确可变目标与冻结目标/上下文。repair的affectedIds必须全部真实存在，并至少定位一个本轮可变owner；可同时引用冻结祖先或依赖作为证据，真实受影响owner的语义修复继续原生成修复与分析回审通道。仅指向未变owner的历史description/prose/进度文案，不能取得本轮写权。程序在转换业务finding前拒绝越界或未知ID绑定，给出具体review_scope/review_binding拒因并保留完整原review JSON，不过滤发现或替模型改accept。历史无当前分析的请求不顺带改变绑定语义。
 
 此类独审权限/绑定错误仅重开独审：原生成JSON或Git稿、原summary追踪和候选必须经当前完整输入、source、schema、目标范围、唯一renderer、机械校验及candidate摘要重新证明，且原review在当前范围下仍确属权限/绑定错误；不能凭旧finding.code取得资格。沿现有rounds及同owner已结算repairDiagnostics保留原review、拒因、Git身份与generation trace，新round只派独立read审查同一候选，不重新生成，不新增业务/源码/tests写权。真正域内repair、输入/分析变化或机械检查失败仍走原修复/失效门；预算、取消、独立性与全图seal保持。新任务范围只是prompt派生数据，不追补历史请求、字段或marker。
@@ -33,7 +40,7 @@ related:
 
 已审缓存除原input/Git/ref/schema/渲染绑定外，必须按当前本区输入重核同一owner范围。仅范围不合格返回不可复用资格，不抛原件损坏、不改旧reviewPassed/trace/JSON/ref；原身份或正文绑定损坏仍明确报错。调用者放弃该ready承接后，优先沿现有正式草稿来源，无来源则把已冷验缓存的精确末轮Git稿作为未批准材料续修，附rows_patch诊断并重新生成及独审，不能从零丢稿。全局兄弟分析命中祖先ID不替代本区scope，whole分区结果须回各局部缓存核资格后重新seal。
 
-P1草稿与旧Native材料在本轮业务schema计算完成后才通过进程内回调选源，跨正式retryOf的材料必须精确匹配schema；旧只读成功输出明确标为新临时材料，不能冒充历史Git草稿或批准。该回调不进入持久输入、wrapper或receipt。实际Git稿已按当前binding读出后不再调用fallback材料来源，避免旧Native诊断、标签或provenance混入。原review final格式失败时保留已认证generation业务稿，review原文只作untrusted诊断，不能覆为业务JSON。
+P1草稿与旧Native材料在本轮业务schema计算完成后才通过进程内回调选源，跨正式retryOf的材料必须精确匹配schema；旧只读成功输出明确标为新临时材料，不能冒充历史Git草稿或批准。该回调不进入持久输入、wrapper或receipt。实际Git稿已按当前binding读出后，材料回调仅可按认证来源顺序选择严格较新的物理稿，不读普通Native fallback；命中物理稿须清旧draft角色并保原完整errors和冻结程序诊断，不能把新bytes包成旧Git身份。原review final格式失败时保留已认证generation业务稿，review原文只作untrusted诊断，不能覆为业务JSON。
 
 临时草稿的续修诊断保留原finding完整身份，包括原有severity、nodeId、path、line、itemId及relatedIds；同码同文但定位不同的发现不得压成重复code/message。当前轮检查点、跨请求的已结算诊断及其实际生成prompt均保留这些字段，未提供的字段保持缺席。诊断仅帮助定位与区分error/warning，不改变业务授权、拒绝门、原稿或独审资格。
 
@@ -43,7 +50,7 @@ P1草稿与旧Native材料在本轮业务schema计算完成后才通过进程内
 
 新草稿的接受缓存沿同一readStageDraft边界重核全部tagged轮的Git/ref/owner/schema/source身份，历史syntax/schema坏稿不要求满足成功schema。仅最终已接受轮严格解析正文、校验当前schema/行差量，并用现有绑定与renderer重算candidate、candidateDigest和完整changes；原JSON缓存不能替代Git正文。新tag但最终draft缺席拒绝。source tag只取原attempt已冻结的协议stage，沿同一原件provenance读取，不用当前attempt新tag给legacy补签；旧无tag无draft批准沿旧门。合法正文无需改动、仅重试回执或审查时，任务明确允许保留hooks的正常git commit --allow-empty，不制造业务diff；仍须真实新提交，不放宽head/seed证据。
 
-新P1按owner使用显式`elaboration-draft-v1`：Agent把完整elaboration-target-rows-v3业务JSON实际写入私有临时草稿文件，正常Git提交后，Native final只返回符合`DRAFT_RECEIPT_SCHEMA`的单一JSON对象，形如`{"summary":"..."}`，前后不附说明或Markdown代码围栏；业务JSON只写入草稿文件。精确schema留同seed只读sidecar供读取、自检，仍仅draft可写。程序经真实seed/result Git校验，从指定path/OID读取完整字节，再严格JSON/schema、目标绑定、唯一renderer/checkCandidate及不同会话的read审查。语法损坏、38KB级业务行或schema错误保留原始Git字节，下一轮明确给已有草稿路径、精确schema与程序/独审错误，让Agent实际编辑续修，不把旧大JSON/Markdown塞回prompt重答。历史已认证failed output或合法旧行可先复制为非权威材料，原字段和失败认证保持；不能成为raw、事实或批准。草稿元数据只作检查点身份，正文不成为第二份业务权威，也不进入最终candidate/delivery。输入或已审父接口改变时只复制同owner/schema的旧草稿到当前冻结source及新祖先seed，旧seed整树和旧accept都不继承；所有当前业务门、只读源码/tests对象与absence及独审仍完整执行。草稿失败在现有预算内修复，Native成功回执与业务draft拒绝分开，不伪造Native rejected final。已认证且停稳的Native小回执失败若由现有资源桥提供精确failedWorktree，只从该真实提交经同样scope校验保留非权威草稿；原Native错误和旧缺席不变，下一实际编辑继续该文件，不把失败回执文本当业务JSON。无安全Git见证或未提交文件不猜路径恢复。受控runner的真实Git回归不代表真实ClaudeCode/ZCode全链验收。
+新P1按owner使用显式`elaboration-draft-v1`：Agent把完整elaboration-target-rows-v3业务JSON实际写入私有临时草稿文件，正常Git提交后，Native final只返回符合`DRAFT_RECEIPT_SCHEMA`的单一JSON对象，形如`{"summary":"..."}`，前后不附说明或Markdown代码围栏；业务JSON只写入草稿文件。精确schema留同seed只读sidecar供读取、自检，仍仅draft可写。程序经真实seed/result Git校验，从指定path/OID读取完整字节，再严格JSON/schema、目标绑定、唯一renderer/checkCandidate及不同会话的read审查。语法损坏、38KB级业务行或schema错误保留原始Git字节，下一轮明确给已有草稿路径、精确schema与程序/独审错误，让Agent实际编辑续修，不把旧大JSON/Markdown塞回prompt重答。历史已认证failed output或合法旧行可先复制为非权威材料，原字段和失败认证保持；不能成为raw、事实或批准。草稿元数据只作检查点身份，正文不成为第二份业务权威，也不进入最终candidate/delivery。输入或已审父接口改变时只复制同owner/schema的旧草稿到当前冻结source及新祖先seed，旧seed整树和旧accept都不继承；所有当前业务门、只读源码/tests对象与absence及独审仍完整执行。草稿失败在现有预算内修复，Native成功回执与业务draft拒绝分开，不伪造Native rejected final。已认证且停稳的Native小回执失败若由现有资源桥提供精确failedWorktree，只从该真实提交经同样scope校验保留非权威草稿；原Native错误和旧缺席不变，下一实际编辑继续该文件，不把失败回执文本当业务JSON。无安全Git见证不补Git身份；未提交文件仅可按已认证停止的精确physical_draft材料接缝读取，不猜路径或补签。受控runner的真实Git回归不代表真实ClaudeCode/ZCode全链验收。
 
 历史未启用草稿协议的同owner已结算原生格式/schema失败可通过既有repairDiagnostics传递round.rejectedOutput完整文本及原文ref/SHA，提示明确untrusted prior failed output。原生边界先认证final与停止，资源桥再核原请求；本轮call重核请求摘要/schema/purpose/身份后才保诊断。它不是业务输出、候选、raw/facts或批准，所有JSON/schema/引用/业务/独审门不变，旧缺席不补。
 

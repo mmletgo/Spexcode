@@ -80,7 +80,7 @@ export type ElaborationDraft = {
   errors: (Pick<ContractFinding, 'code' | 'message'> & Partial<ContractFinding>)[]
 }
 /** 仅在内存中从已认证历史原件读取；进入新seed后由真实提交形成draft检查点。 */
-export type ElaborationDraftMaterial = { source: string; errors: (Pick<ContractFinding, 'code' | 'message'> & Partial<ContractFinding>)[]; sourceKind?: 'git_draft' | 'native_output' }
+export type ElaborationDraftMaterial = { source: string; errors: (Pick<ContractFinding, 'code' | 'message'> & Partial<ContractFinding>)[]; repairDiagnostics?: readonly { code: string; message: string }[]; diagnostics?: Record<string, unknown>; sourceKind?: 'git_draft' | 'native_output' | 'physical_draft' }
 export type ElaborationRound = { draft?: ElaborationDraft; rejectedOutput?: RejectedStructuredOutput & { ownerInputDigest: string; ownerRequestKey: string }; index: number; output: unknown; candidate: ElaborationCandidate | null; candidateDigest: string | null; findings: ContractFinding[]; reviewOutput: unknown; review: ElaborationReview | null; traces: ElaborationTrace[] }
 export type BlockedElaborationFlow = { flowId: string; blockedStepIds: string[]; gapIds: string[] }
 /** 仅由内部协调器提供的已结算、被拒绝候选；候选不是新的业务事实。 */

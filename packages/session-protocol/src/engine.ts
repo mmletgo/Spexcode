@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto'
-import { existsSync, statSync } from 'node:fs'
+import { closeSync, existsSync, openSync, statSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, isAbsolute, sep } from 'node:path'
 
@@ -509,6 +509,7 @@ function buildHandle(
       }
       backupActive = true
       try {
+        closeSync(openSync(destination, 'wx', 0o600))
         await backup(database, destination)
       } catch (error) {
         rethrowProtocolError(error)
