@@ -16,6 +16,8 @@ related:
 
 ## expanded spec
 
+ZCode 原生工作树 native_turn_transport_failed 须绑定精确非空 thread/turn、固定 requestKey/inputDigest、canonical failed/stop 及原派发身份。正式 terminal/removed 资源保原 code/message，无成功、raw 或 Git witness。同键冷重放重验 canonical 请求和 stop，不再派发。P0 重试复用既有 Native RPC 的当前 operation、lease/control、资源全 removed、原 CAS 与 checkpoint 认证；已接受 turn 的专用 code 还须 nativeStarted 和 nativeStatus=stopped。普通失败、未知 stop 及其它阶段重试政策保持。
+
 原生错误携rejectedOutput时，仅在本资源精确record为failed、证据与错误相同且固定创建请求/schema/input/purpose/thread/turn逐项一致后，经现有blobIO保存完整被拒final原文字节，并携原文ref/SHA传回；不读取provider协议目录。原error/code/身份保持，资源停止仍走原正式结算，不因诊断取得成功或removed。旧无证据不扫描补读。
 
 真正新建的 Claude/ZCode worktree 资源在 reserveDispatch/requestDigest/plan 之前冻结 nativeConfiguration:cli-config-v1，ZCode read 工具策略独立冻结。新配置同步请求在冻结前省略各业务阶段内部默认high，让原生CLI配置决定执行强度；本桥没有用户effort入口，不用内部提示限制模型资格。已有资源及reserved请求按原完整摘要保留其effort或缺席，包括已带配置标记的原件，独立结构化API显式effort仍按原请求透传。协调器对实际持久Native原件的冷验复用同一规范化接缝，不能漏配置字段或按今天默认重签历史。已有 resource 只沿原 plan.request 的字段或缺席；仅 reserved 的冷恢复先核调用者完整请求摘要；上一代只冻结 ZCode 工具策略的请求可经原工具策略重建，但只有完整摘要精确匹配原 dispatch 才保留其原配置缺席。字段参与资源 payloadDigest 与创建 execution 哈希；不能重签旧 plan/receipt、补旧缺席或只凭 key 采纳。显式变更配置、model、source/input、prompt、schema 或 seed 仍经原完整摘要拒绝，预算和停止门禁保持。

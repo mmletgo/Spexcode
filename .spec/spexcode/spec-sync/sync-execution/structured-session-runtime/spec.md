@@ -80,6 +80,8 @@ Claude 新请求在首次冻结时把完整 task 和条目生成最多65536字�
 
 已认证原生成功输出通过 schema 后，Git 后置合约拒绝以 native_worktree_result_invalid 持久在 failed.errorCode；原错误及已知精确身份在同键冷重放保持，不新派 Native，不写 output/resultWorktree 或 canonical completed。原生 CLI 协议完成缓存与原 Git/index/草稿保持原件，不能代表业务通过；旧缺码失败不按文本推定新分类。
 
+ZCode 原生工作树的精确 turn.failed EPIPE 在正式 stop 肯定后保存 failed、native_turn_transport_failed 和原诊断，调用者得到原 SID/thread/turn/requestKey/inputDigest；停止未知仍保首要失败诊断且处于 cancelling，不发布该 typed 失败权限。已结算失败可按原键重放同一错误，不添成功、raw 或 Git witness。
+
 本地 Native RPC 的 typed native_rpc_timeout 先保存 cancelling 与原 code/message，再复用既有精确 adapter.stop 协议消费 PID/start/receipt 和原 session/turn 停止证明；确证后保存 failed 与原错误及 stop，未知仍 cancelling 占容量。同键只重放失败，不重发未 ACK 的 create，不把原生故障改签为用户取消；显式取消和总 timeout 保持原语义。新 observer 对已认证 rejectedOutput 且确证停稳的 version6 stage 可保存 failedWorktree：只取实际记录工作树的干净、归属原 seed 的真实 Git 结果。Git 后置合约不成立时保留原格式错误及原 final，不附 witness；冷读取只核已有事实，不补捕。该持久失败/停止语义受统一 sync v22 writer fence 约束，旧 writer 不得消费新状态。
 
 已认证typed格式错误不要求必有rejectedOutput：缺少最终结构化字段时，先核error原thread/turn与canonical一致，再复用原adapter.stop与真实nativeWorktreeResult保可选failedWorktree。Git后置合约失败保原格式错误及确证stop，绝不假造Git或final；同键只验证已存原seed/record路径/停止与Git对象，不补捕旧失败。旧无typed code/witness仍按原failed重放；后续新attempt的现在材料观察由协调器承担，不能追写原record。

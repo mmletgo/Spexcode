@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+P0 transport 回归让同一 operation 的三兄弟分别精确已停 EPIPE、原业务独审拒绝和通过独审。真实 Git/隔离 SQLite 的下一 attempt 只重新分析并独审无稿失败区，业务拒绝区保 readyAnalysis 和原拒因而只续独审，已审区原 refs 承接且零派发。原端到端受控 ZCode adapter 保专用 code 和冷重放身份；普通 errno/同文本 generic、错 stop/turn、未知停止和兄弟资源未释放均拒绝自动重试。既有 P0/P1 停态稿门及完成后 events RPC 的独立回归保持。
+
 P1追加A正常Git拒稿→B新物理EPIPE无witness→C原bytes续改并独审，以及旧物理晚观察不盖后来正常Git反向；A完整finding进入C且priorDraft角色清除。parent/新旧诊断的比较另由真实elaborate冻结任务、生产elaborationMaterialContext、原物理observer与新seed回调组合覆盖，原整树比较先fail，精确投影后pass，source/tests/非角色Spec差异配对拒绝；formalNative/stop认证复用前述coordinator真实fixture。此组合不假称现场模型全链验收。
 
 新增真实Git/私有SQLite/正式ZCode stop场景：EPIPE前仅有untracked invalidJSON且HEAD==seed，旧clean门重复失败，修复后新seed保原bytes；tracked/staged亦然。核较新physical承接较旧认证稿、旧physical晚观察不覆盖更新Git、review仅续审保ready及原诊断、P1物理稿续改正常commit后独立accept；source/tests/schema/context/index/owner/session/stop/seed/root/fence/CAS反例拒绝。原record/checkpoint/Native文件/raw index/HEAD/源draft逐字保持；只证明受控真实机制，不替代现场模型恢复。
@@ -222,6 +224,8 @@ partition_seal反馈不能删除此前已接受的稳定ID，也不能弱化作�
 完整未采纳settled重验以真实临时Native工作树、正常Git提交/交付hooks与隔离SQLite验证：父自身receipt推进CAS而业务基线保持；新P0/P1和独审真实派发，原Git JSON作为未批准材料续修，旧候选不进入业务读取。新P1能力失败后再走普通failed→retry，最早原业务selection仍递归保持。受控V3 driver明确只证明协议与编排，不声称真实模型、Docker或用户场景通过；Source HEAD/index及父全部历史原值保持。
 
 历史checkpoint性能回归使用14attempt、1790唯一CAS及101分区的真实SQLite/Git协调路径，记录原30秒lease/1秒heartbeat、扫描中的控制机会和首次受控reserveDispatch；必须在同attempt/leaseToken有效时推进，零额外attempt/journal且source/index保持。纯读取对照同时计CAS读取和JSON解码：单次root/artifact/inspect每SHA读取解码一次，下次仍重读SHA而不再解码；命中后坏CAS、当前refs移除/伪raw role和返回对象污染反例继续拒绝或隔离；同一store先warm认证，再改变canonical Native停止状态或清除原resource的failed观察仍须拒绝，恢复精确原件后重新认证。受控runner仅证明引擎首派发，不冒称真实模型、业务结果或最终交付。
+
+ZCode P0 completed/events-RPC定向回归以真实分区协调器、Git/隔离SQLite及受控原生资源桥，先证A1的精确typed失败/removed/stop、原无draft/ready/result及唯一正常提交4228字节未批准稿，A2真实派发但seed漏稿；修后同场景以精确原HEAD/OID/SHA及checkpoint refs续稿，原record/Native文件/source/tests/index/failure不改，不读终态response取得成功。续稿保原业务错误与精确typed RPC诊断。错request/thread/turn/model/version、缺完整派发身份或canonical harness线程冲突、其它RPC、未结算或原失败观察/stop不符、缺/非法exit、非同turn idle、未close、坏terminal/未知结果、dirty/source/tests/schema及无新提交/失fence分别明确拒绝或沿原跳过，仅新分类的缺terminal和精确同身份失败/取消不授材料并沿原重试，即使非成功exit；普通pause/历史failed/缺exit保持。真实配置default/显式模型公开材料另走同adapter回归；受控执行不冒称实际模型、Docker或产品交付。
 
 缺final回归同时覆盖typed格式失败无packet的已停Git稿，以及旧无errorCode/failedWorktree的真实SQLite资源。后者经正式pause/cancel/recover到removed，再由新attempt从最新两次正常提交的59388等价正文续修，不能回早seed。普通安全暂停走相同材料入口但无格式分类；新观察后旧record、Native原件、全部旧attempt/checkpoint/resource及source/index逐字保持。受控公开Native fixture不调用实际模型，不代表全树、Docker或正式采纳通过。
 

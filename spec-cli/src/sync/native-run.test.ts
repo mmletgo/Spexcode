@@ -20,7 +20,7 @@ import { nativeReviewRequestMatches } from './coordinator.js'
 
 const tsxImport = createRequire(import.meta.url).resolve('tsx/esm')
 
-for (const scenario of ['turn-failed', 'events-timeout', 'foreign-session', 'foreign-turn', 'foreign-input', 'unknown-stop'] as const) test(`ZCode real failed Native settlement preserves primary cause and exact stop: ${scenario}`, () => {
+for (const scenario of ['turn-failed', 'ordinary-failure', 'events-timeout', 'foreign-session', 'foreign-turn', 'foreign-input', 'unknown-stop'] as const) test(`ZCode real failed Native settlement preserves primary cause and exact stop: ${scenario}`, () => {
   const directory = mkdtempSync(join(tmpdir(), 'sync-zcode-failure-')), root = join(directory, 'repo'), home = join(directory, 'home'), bin = join(directory, 'bin'), count = join(directory, 'sends.json')
   for (const path of [root, home, bin]) mkdirSync(path)
   const git = (...args: string[]): string => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: 'pipe' }).trim()
@@ -43,7 +43,7 @@ else if(request.method==='session/events'){
   if(scenario==='events-timeout'&&!stopping&&!delayed&&!prompt.includes('next-request')){delayed=true;setTimeout(()=>send({id:request.id,result:{events:[event('turn.completed',{inputId:input,resultType:'success',response:'{"ok":true}'})]}}),10100);return}
   const events=[];if(!p.afterSeq)events.push(event('turn.started',{inputId:input,queryId:query,messageId:'exact-user'}));
   events.push(event('session.updated',{providerId:model.providerId,modelId:model.modelId,toolCount:3}));
-  const terminal=stopping||prompt.includes('next-request')?event('turn.completed',{inputId:input,resultType:stopping?'cancelled':'success',response:stopping?'':'{"ok":true}'}):event('turn.failed',{inputId:input,error:{code:'EPIPE',message:'UNTRUSTED_PROVIDER_BODY'}});
+  const terminal=stopping||prompt.includes('next-request')?event('turn.completed',{inputId:input,resultType:stopping?'cancelled':'success',response:stopping?'':'{"ok":true}'}):event('turn.failed',{inputId:input,error:{code:scenario==='ordinary-failure'?'EACCES':'EPIPE',message:'UNTRUSTED_PROVIDER_BODY'}});
   if(!stopping&&!prompt.includes('next-request')){
     if(scenario==='foreign-session')terminal.sessionId='foreign';if(scenario==='foreign-turn')terminal.turnId='foreign';if(scenario==='foreign-input')terminal.payload.inputId='foreign';
     if(scenario==='unknown-stop'){const receipt=path.join(path.dirname(path.dirname(process.env.ZCODE_DATA_BASE_DIR)),'process.json'),value=JSON.parse(fs.readFileSync(receipt,'utf8'));fs.writeFileSync(receipt,JSON.stringify({...value,processGroupId:process.pid+1}))}
@@ -64,11 +64,16 @@ const operation=store.admitAndEnqueue({ingressKey:'failure',rootCauseId:'failure
 const failure=await runner(request).then(()=>assert.fail('failed Native cannot publish output'),error=>error),record=readRecord(failure.sessionId),state=record.structuredExecution,native=state.zcodeNative.root,resource=store.findResource(claim.attempt.id,request.requestKey),exit=JSON.parse(readFileSync(native+'/exit.json','utf8'));
 assert.equal(state.output,undefined);assert.equal(state.resultDigest,undefined);assert.equal(state.rejectedOutput,undefined);assert.equal(state.failedWorktree,undefined);assert.equal(existsSync(native+'/completed.json'),false);assert.equal(state.error.includes('UNTRUSTED_PROVIDER_BODY'),false);
 console.log(JSON.stringify({scenario,code:failure.code,message:failure.message,state:state.state,phase:resource.phase,nativeStopped:state.cancellation?.nativeStopped,idle:exit.idle,closed:exit.closed}));
-if(scenario==='turn-failed'||scenario==='events-timeout'){
-  assert.equal(failure.code,scenario==='events-timeout'?'native_rpc_timeout':'failed');assert.match(failure.message,scenario==='events-timeout'?/session\\/events/:/ZCode native turn failed \\(code=EPIPE\\)/);
+if(scenario==='turn-failed')assert.equal(failure.code,'native_turn_transport_failed','原生公开EPIPE须保专用typed失败，不能退化为generic failed');
+if(scenario==='turn-failed'||scenario==='ordinary-failure'||scenario==='events-timeout'){
+  assert.equal(failure.code,scenario==='events-timeout'?'native_rpc_timeout':scenario==='turn-failed'?'native_turn_transport_failed':'failed');
+  assert.ok(failure.message.includes(scenario==='events-timeout'?'session/events':scenario==='turn-failed'?'code=EPIPE':'code=EACCES'));
   assert.equal(state.state,'failed');assert.equal(state.cancellation.nativeStopped,true);assert.equal(resource.phase,'removed');assert.equal(exit.stopped,true);
-  if(scenario==='turn-failed'){assert.equal(exit.idle,false);assert.equal(exit.closed,false)}else{assert.equal(exit.idle,true);assert.equal(exit.closed,true);assert.equal(JSON.parse(readFileSync(native+'/terminal.json','utf8')).payload.resultType,'cancelled')}
-  const recordBefore=JSON.stringify(record),rawBefore=readFileSync(native+'/exit.json');await assert.rejects(createAttemptRunner(store,claim.fence,{pollMs:2})(request),{code:failure.code,message:failure.message});assert.equal(JSON.stringify(readRecord(failure.sessionId)),recordBefore);assert.deepEqual(readFileSync(native+'/exit.json'),rawBefore);assert.equal(JSON.parse(readFileSync(${JSON.stringify(count)},'utf8')).length,1);
+  if(scenario!=='events-timeout'){assert.equal(exit.idle,false);assert.equal(exit.closed,false)}else{assert.equal(exit.idle,true);assert.equal(exit.closed,true);assert.equal(JSON.parse(readFileSync(native+'/terminal.json','utf8')).payload.resultType,'cancelled')}
+  const saved=JSON.parse(readEvidence(snapshot.source.commonDir,resource.checkpointRef).toString());assert.deepEqual(saved.failure,{code:failure.code,message:failure.message});
+  if(scenario==='turn-failed'){assert.equal(state.errorCode,failure.code);assert.equal(failure.requestKey,request.requestKey);assert.equal(failure.inputDigest,request.inputDigest);assert.equal(failure.threadId,saved.session.threadId);assert.equal(failure.turnId,saved.session.turnId)}
+  if(scenario==='ordinary-failure')assert.equal(state.errorCode,undefined);
+  const recordBefore=JSON.stringify(record),rawBefore=readFileSync(native+'/exit.json');await assert.rejects(createAttemptRunner(store,claim.fence,{pollMs:2})(request),{code:failure.code,message:failure.message,...(scenario==='turn-failed'?{requestKey:request.requestKey,inputDigest:request.inputDigest,threadId:failure.threadId,turnId:failure.turnId}:{})});assert.equal(JSON.stringify(readRecord(failure.sessionId)),recordBefore);assert.deepEqual(readFileSync(native+'/exit.json'),rawBefore);assert.equal(JSON.parse(readFileSync(${JSON.stringify(count)},'utf8')).length,1);
   const next=await runner({...request,requestKey:'next',inputDigest:'next-input',prompt:'next-request'});assert.deepEqual(next.output,{ok:true});assert.notEqual(next.sessionId,failure.sessionId);assert.equal(store.findResource(claim.attempt.id,'next').phase,'removed');assert.equal(JSON.parse(readFileSync(${JSON.stringify(count)},'utf8')).length,2);
 }else{
   assert.notEqual(resource.phase,'removed');assert.notEqual(state.cancellation?.nativeStopped,true);

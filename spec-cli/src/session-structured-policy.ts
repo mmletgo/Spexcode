@@ -39,7 +39,7 @@ export type StructuredExecution = {
   output?: unknown
   resultDigest?: string
   error?: string
-  errorCode?: 'structured_output_retries_exhausted' | 'structured_output_format_invalid' | 'native_worktree_result_invalid' | 'native_rpc_timeout'
+  errorCode?: 'structured_output_retries_exhausted' | 'structured_output_format_invalid' | 'native_worktree_result_invalid' | 'native_rpc_timeout' | 'native_turn_transport_failed'
   rejectedOutput?: RejectedStructuredOutput
   worktree?: NativeWorktreeRequest
   zcodeToolPolicy?: ZCodeToolPolicy
@@ -148,7 +148,7 @@ export class StructuredSessionError extends Error {
   readonly failedWorktree?: NativeWorktreeResult
   readonly requestKey?: string
   readonly inputDigest?: string
-  constructor(readonly code: 'unsupported' | 'failed' | 'cancelled' | 'timeout' | 'key_reused' | 'stale_result' | 'cancellation_pending' | 'structured_output_retries_exhausted' | 'structured_output_format_invalid' | 'native_worktree_result_invalid' | 'native_rpc_timeout', message: string, identity: { sessionId?: string; threadId?: string; turnId?: string; rejectedOutput?: RejectedStructuredOutput; failedWorktree?: NativeWorktreeResult; requestKey?: string; inputDigest?: string } = {}) {
+  constructor(readonly code: 'unsupported' | 'failed' | 'cancelled' | 'timeout' | 'key_reused' | 'stale_result' | 'cancellation_pending' | NonNullable<StructuredExecution['errorCode']>, message: string, identity: { sessionId?: string; threadId?: string; turnId?: string; rejectedOutput?: RejectedStructuredOutput; failedWorktree?: NativeWorktreeResult; requestKey?: string; inputDigest?: string } = {}) {
     super(message)
     this.name = 'StructuredSessionError'
     this.sessionId = identity.sessionId

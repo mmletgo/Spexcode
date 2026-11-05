@@ -14,10 +14,13 @@ import { assertZCodeModelSnapshot, assertZCodeStoppedDraftSource, decodeZCodeStr
 
 test('Native failure diagnostics expose only safe errno codes and exact turn identity', () => {
   for (const code of ['EPIPE', 'UNTRUSTED_PROVIDER_BODY', '__proto__', null, { message: 'UNTRUSTED_PROVIDER_BODY' }]) {
-    const error = new ZCodeNativeTurnFailedError('exact-session', 'exact-turn', code)
+    const error = new ZCodeNativeTurnFailedError('exact-session', 'exact-turn', code, false)
     assert.equal(error.code, 'failed'); assert.equal(error.threadId, 'exact-session'); assert.equal(error.turnId, 'exact-turn')
     assert.equal(error.message, `ZCode native turn failed (code=${code === 'EPIPE' ? 'EPIPE' : 'unavailable'})`)
     assert.equal(error.rejectedOutput, undefined); assert.equal(error.failedWorktree, undefined)
+    const worktree = new ZCodeNativeTurnFailedError('exact-session', 'exact-turn', code, true)
+    assert.equal(worktree.code, code === 'EPIPE' ? 'native_turn_transport_failed' : 'failed')
+    assert.equal(worktree.message, error.message)
   }
 })
 
@@ -349,6 +352,16 @@ for (const profile of ['cli-config-v1-explicit', 'cli-config-v1-default', 'legac
         for (const file of originalFiles) assert.deepEqual(readFileSync(file.path), file.bytes, '只读材料认证不能追加或改写旧Native原件')
         const sendPath = join(root, 'send.json'), sendBytes = readFileSync(sendPath)
         rmSync(sendPath); assert.throws(() => assertZCodeStoppedDraftSource(prompt, stoppedExecution, workspace)); writeFileSync(sendPath, sendBytes)
+        writeFileSync(eventsPath, JSON.stringify(events)); writeFileSync(terminalPath, JSON.stringify(terminal))
+        writeFileSync(exitPath, JSON.stringify(exit)); writeFileSync(join(root, 'idle.json'), JSON.stringify({ sessionId, turnId, idle: true }))
+        const rpcExecution: ZCodeStructuredExecution = { ...stoppedExecution, errorCode: 'native_rpc_timeout', error: 'ZCode native RPC timeout (session/events)' }
+        const rpcFiles = readdirSync(root, { withFileTypes: true }).filter(entry => entry.isFile()).map(entry => ({ path: join(root, entry.name), bytes: readFileSync(join(root, entry.name)) }))
+        assert.equal(assertZCodeStoppedDraftSource(prompt, rpcExecution, workspace), true, '真实配置模型与原精确completed仅认证未批准Git材料')
+        assert.equal(assertZCodeStoppedDraftSource(prompt, { ...stoppedExecution, state: 'cancelled' }, workspace), false, '同一completed公开终态不放宽普通暂停')
+        assert.equal(assertZCodeStoppedDraftSource(prompt, { ...rpcExecution, error: 'ZCode native RPC timeout (session/messages)' }, workspace), false)
+        assert.throws(() => assertZCodeStoppedDraftSource(prompt, { ...rpcExecution, zcodeNative: { ...rpcExecution.zcodeNative!, version: 2 } }, workspace), { code: 'stale_result' })
+        for (const file of rpcFiles) assert.deepEqual(readFileSync(file.path), file.bytes)
+        assert.equal(existsSync(join(root, 'messages.json')), false); assert.equal(existsSync(join(root, 'completed.json')), false)
       } finally { if (processStartToken(child.pid)) { process.kill(-child.pid, 'SIGTERM'); await ended } }
     }
   } finally { rmSync(directory, { recursive: true, force: true }) }

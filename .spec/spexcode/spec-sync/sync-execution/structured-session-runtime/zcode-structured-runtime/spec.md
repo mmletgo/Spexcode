@@ -19,7 +19,9 @@ related:
 
 ## expanded spec
 
-新fence观察已停ZCode edit的未批准Git稿时，复用原verifyPlan、send与public model snapshot，精确核workspace、原session/model、唯一turn.started的input/query/非空messageId、所有events身份与唯一terminal原摘要。只读核原receipt/进程组与正式canonical stop/removed，不能调用会改写旧观察的进程采样或要求messages/success/final。原exit须code0、signal:null、stopped:true，idle/closed原值保持；基础认证后HEAD==seed只跳过无进度，有新HEAD仅精确turn.failed可授Git材料，cancelled终态不取得材料资格。仅打开exit.json时遇到ENOENT返回缺证据（null），将此候选标为不合格；不会用canonical stop/removed替代exit或turn.failed证明。缺plan/send、其他读取错误、坏JSON及存在但非法exit仍显式失败。新failed和旧cancelled沿[[sync-checkpoint-evidence]]各自原证明认证，不附failedWorktree/rejectedOutput，不改原计划/策略/请求或错误分类。
+新fence观察已停ZCode edit的未批准Git稿时，复用原verifyPlan、send与public model snapshot，精确核workspace、原session/model、唯一turn.started的input/query/非空messageId、所有events身份与唯一terminal原摘要。只读核原receipt/进程组与正式canonical stop/removed，不能调用会改写旧观察的进程采样或要求messages/success/final。原exit须code0、signal:null、stopped:true，idle/closed原值保持；基础认证后HEAD==seed只跳过无进度，常规有新HEAD仅精确turn.failed可授Git材料，cancelled终态不取得材料资格；已结算P0 events RPC例外见下。仅打开exit.json时遇到ENOENT返回缺证据（null），将此候选标为不合格；不会用canonical stop/removed替代exit或turn.failed证明。缺plan/send、其他读取错误、坏JSON及存在但非法exit仍显式失败。新failed和旧cancelled沿[[sync-checkpoint-evidence]]各自原证明认证，不附failedWorktree/rejectedOutput，不改原计划/策略/请求或错误分类。
+
+P0已结算的canonical failed原typed `native_rpc_timeout` 与同一adapter官方`session/events` method/message同时精确匹配时，复用上述原计划、模型、send、process/receipt及完整公开events/terminal认证。仅原同session/turn/input的唯一turn.completed/success、同session/turn的idle.json为true及原exit0/signal:null/idle/closed/stopped全真才通过未批准Git材料源检查；不解码response、不读messages或补completed、原Native版本/CLI版本/实际模型选择照原冻结策略认证。仅打开terminal.json遇到ENOENT返回无材料；同身份原失败/取消通过公开事件和相容的原stop证据后也跳过，不要求成功的exit0/idle/closed；错误身份、未知终态结果、损坏原件及互斥停止证据仍明确拒绝。该进程内分类不认普通pause、其它method或脏物理稿；仍由[[sync-coordinator]]核原正式removed/stop、正常Git、源/测试/owner及当前fence，不授成功、格式或新调用权。
 
 仅version6工作区路径在原plan/send/user/model/final消息/turn/idle/close/stop全部认证后，将格式或schema拒绝的terminal原response附为tagged untrusted_final诊断，保原字节与SHA和原请求绑定。格式失败仍不写completed/output；取消、缺terminal、身份或stop失败不授正文，旧failed缺字段不追补。不得提取thinking或放宽JSON/schema。
 
@@ -72,4 +74,4 @@ worktree 停止沿 [[native-worktree-runtime]] 正向任务域边界及 boundary
 
 唯一 stdio RPC 的原 10000ms 计时器以 native_rpc_timeout 标记本次真实超时，保留原 method/message；finally 的精确进程停止不能抹去原 typed cause。RPC 期限、pending 删除、迟到回复不接纳、未 ACK create 不发送模型请求及不自动 close 的行为保持；由 [[structured-session-runtime]] 正式消费停止证明，不以 elapsed、Promise 结束或 transport 退出自行证明停止。
 
-本次新观察的 turn.failed 必须绑定原 session、turn、已接受的 input 和唯一 turn.started 的 query；认证后以进程内专用 failed 错误保留首要失败，仅投影宿主 errno 定义中的安全原码，不透传 provider 错误正文。失败不请求成功消息历史，不授 output、rejectedOutput 或 Git witness；finally 仍原样观察并保留 error/idle=false、close=false 和 exit，不把 error 当作 idle。清理异常不覆盖已认证首要失败，正式结算仍由现有 exact adapter.stop 独立核原 plan、PID/start/receipt、整组、后代与任务域停止，未知不得释放容量。历史失败不补读或追补认证，不新增 plan/持久策略版本或自动重试资格。
+本次新观察的 turn.failed 必须绑定原 session、turn、已接受的 input 和唯一 turn.started 的 query；认证后以进程内专用错误保留首要失败，仅投影宿主 errno 定义中的安全原码，不透传 provider 错误正文。原生工作树的公开结构化 error.code 精确为 EPIPE 才投影 native_turn_transport_failed，普通 errno、未知形状及历史冻结模式仍为 failed；不按错误正文猜分类。失败不请求成功消息历史，不授 output、rejectedOutput 或 Git witness；finally 仍原样观察并保留 error/idle=false、close=false 和 exit，不把 error 当作 idle。清理异常不覆盖已认证首要失败，正式结算仍由现有 exact adapter.stop 独立核原 plan、PID/start/receipt、整组、后代与任务域停止，未知不得释放容量。历史失败不补读或追补认证，不新增 plan/持久策略版本；该专用码只在 [[sync-coordinator]] 的正式 P0 资源门作为新增重试依据。
