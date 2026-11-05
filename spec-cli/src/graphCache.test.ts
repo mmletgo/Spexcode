@@ -14,6 +14,7 @@ const permitRelease = join(bin, 'permit-release')
 const shim = join(bin, 'git')
 const argvLog = join(bin, 'argv.log')
 const pidLog = join(bin, 'pids.log')
+const hungLog = join(bin, 'hung.log')
 const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim()
 const run = (...args: string[]) => execFileSync(realGit, ['-C', project, ...args], { encoding: 'utf8' })
 
@@ -30,6 +31,7 @@ printf '%s\\n' "$$" >> "${pidLog}"
 if [ -e "${trigger}" ]; then
   for arg in "$@"; do
     if [ "$arg" = "log" ] || [ "$arg" = "rev-list" ]; then
+      printf '%s\\n' "$$" >> "${hungLog}"
       while :; do sleep 1; done
     fi
   done
@@ -57,16 +59,20 @@ const git = await import('@spexcode/spec-core')
 // lifecycle altitude so its deliberately-unref'ed background-start timer can run before test teardown.
 const backendLifetime = setInterval(() => {}, 60_000)
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+function pidAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ESRCH') return false
+    throw error
+  }
+}
 function shimPids(): number[] {
   if (!existsSync(pidLog)) return []
-  return readFileSync(pidLog, 'utf8').split(/\s+/).filter(Boolean).map(Number).filter((pid) => existsSync(`/proc/${pid}`))
+  return readFileSync(pidLog, 'utf8').split(/\s+/).filter(Boolean).map(Number).filter(pidAlive)
 }
 function hungHistoryPids(): number[] {
-  if (!existsSync(argvLog)) return []
-  return readFileSync(argvLog, 'utf8').split('\n').filter(Boolean).flatMap((line) => {
-    const [pid, ...args] = line.split(' ')
-    return args.some((arg) => arg === 'log' || arg === 'rev-list') && existsSync(`/proc/${pid}`) ? [Number(pid)] : []
-  })
+  if (!existsSync(hungLog)) return []
+  return readFileSync(hungLog, 'utf8').split(/\s+/).filter(Boolean).map(Number).filter(pidAlive)
 }
 
 test('dirty stale readers are immediate while one fresh flight owns completion', { concurrency: false }, async () => {
@@ -83,18 +89,24 @@ test('dirty stale readers are immediate while one fresh flight owns completion',
   run('commit', '-q', '--allow-empty', '-m', 'move head before wedge')
   writeFileSync(trigger, 'hang\n')
   cache.invalidateBoard('full')
-  const started = performance.now()
-  const stale = await cache.getBoardJson('stale-ok')
-  assert.ok(performance.now() - started < 100, 'stale HTTP read did not return immediately')
+  const staleRead = cache.getBoardJson('stale-ok')
+  const fresh = cache.getBoard()
+  let freshSettled = false
+  void fresh.then(() => { freshSettled = true }, () => { freshSettled = true })
+  const stale = await Promise.race([
+    staleRead,
+    new Promise<never>((_, reject) => setImmediate(() => reject(new Error('stale HTTP read waited for a producer turn')))),
+  ])
+  assert.equal(cache.getBoard(), fresh, 'fresh readers must join the same background flight')
   assert.equal(stale.freshness, 'stale')
   assert.equal(stale.refreshing, true)
   assert.equal(stale.json, JSON.stringify(warm))
 
-  const spawnDeadline = Date.now() + 500
-  while (hungHistoryPids().length === 0 && Date.now() < spawnDeadline) await delay(10)
+  while (hungHistoryPids().length === 0 && !freshSettled) await delay(10)
   assert.ok(hungHistoryPids().length > 0, `wedge fixture did not spawn a hung history child; argv=${existsSync(argvLog) ? readFileSync(argvLog, 'utf8') : '<none>'}`)
+  // The acknowledgement is emitted inside the latched hang branch; a spawn log alone races its trigger check.
   rmSync(trigger, { force: true })
-  await assert.rejects(cache.getBoard(), (error: unknown) => /did not settle|aborting|aborted/i.test(String((error as Error)?.message || error)))
+  await assert.rejects(fresh, (error: unknown) => /did not settle|aborting|aborted/i.test(String((error as Error)?.message || error)))
   await delay(250)
   assert.equal(shimPids().length, 0, 'watchdog left a git child running')
   // No second invalidation: the failed producer itself restores the full scope it consumed.
