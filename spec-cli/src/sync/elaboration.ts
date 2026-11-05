@@ -83,6 +83,7 @@ export function elaborationMaterialContext(commonDir: string, previous: Pick<Ela
 const implementationFinding = (issue: ContractFinding): boolean => ['missing-implementation', 'missing-test-file', 'missing-test-case', 'implementation-review'].includes(issue.code)
 const contextCoverageFinding = new Set(['missing-source-file', 'missing-governed-file', 'missing-test-file', 'missing-test-case', 'missing-requirement-flow', 'missing-acceptance', 'missing-implementation', 'missing-event-disposition', 'step-event-disposition-missing', 'missing-initial-state', 'missing-object-event', 'unreachable-state', 'nonterminal-no-exit', 'empty-flow', 'missing-stateless-rationale', 'incomplete-stateless-step', 'missing-flow-terminal', 'flow-no-exit', 'unreachable-step'])
 const interfaceSeedCoverageFinding = new Set([...contextCoverageFinding, 'incomplete-contract'])
+const interfaceSeedCompletionFinding = new Set(['missing-requirement-flow', 'missing-acceptance', 'missing-implementation', 'incomplete-contract'])
 const interfaceKinds = new Set(['REQ', 'RULE', 'GAP'])
 const trustedInterfaceItem = (input: ElaborationInput, item: ContractItem): boolean => interfaceKinds.has(item.kind) || item.kind === 'VERIFY' && (input.verifications?.some(policy => policy.id === item.id && JSON.stringify(policy.command) === JSON.stringify(item.command) && policy.cwd === item.cwd && policy.timeoutMs === item.timeoutMs) ?? false)
 export const gapBlockedFinding = (issue: ContractFinding, coverage: ContractCoverage | null): boolean => {
@@ -410,7 +411,7 @@ function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate
     const assigned = new Set(input.readonlySpecRepair!.findings.map(key))
     const interfaceSeed = input.phase === 'interface_seed' && sealRepair.accepted.phase === 'interface_seed' && input.partitionBinding?.interfaceSeed
     findings.push(...[...parsed.flatMap(result => result.findings), ...validateContractGraph(combined, { mode: 'final', files, nodeIds: new Set(nodeIds) })]
-      .filter(issue => repairRequired(issue, coverage) && (!priorErrors.has(key(issue)) || assigned.has(key(issue)) && !(interfaceSeed && interfaceSeedCoverageFinding.has(issue.code)))))
+      .filter(issue => repairRequired(issue, coverage) && (!priorErrors.has(key(issue)) || assigned.has(key(issue)) && !(interfaceSeed && interfaceSeedCompletionFinding.has(issue.code)))))
   }
   return { contracts, graph, findings, resolvedGapIds }
 }
