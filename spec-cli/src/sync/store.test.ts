@@ -2329,3 +2329,31 @@ test('P0 context writer25只追加marker，24旧writer拒写且online备份逐�
     assert.equal(await migrateSyncStore(f.protocol), SYNC_MIGRATIONS.length)
   } finally { backup?.close(); f.cleanup() }
 })
+
+test('stopped ZCode writer26只追加marker，25旧writer拒写且online备份逐字保留旧表', async () => {
+  const f = await fixture()
+  let backup: ReturnType<typeof openProtocol> | undefined
+  try {
+    const ready = f.ready(), journal = f.store.beginApply(ready.fence, ready.plan, ready.target)
+    for (const step of journal.steps) f.store.recordApplyStep(ready.fence, journal.id, { ...step, status: 'completed' })
+    const receipt = f.receipt(journal.id, ready.plan); f.store.recordReceipt(journal.id, receipt); f.store.settleApply(journal.id, receipt.id)
+    f.protocol.withTransaction(tx => tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=26', SYNC_COMPONENT))
+    const rows = (protocol: typeof f.protocol) => protocol.withTransaction(tx => Object.fromEntries(tx.query("SELECT name FROM sqlite_master WHERE type='table' AND name!='schema_migrations' ORDER BY name").map(row => [String(row.name), tx.query(`SELECT * FROM "${String(row.name)}"`)])))
+    const schema = f.protocol.withTransaction(tx => tx.query('SELECT * FROM sqlite_master ORDER BY type,name'))
+    const before = rows(f.protocol), markers = f.protocol.withTransaction(tx => tx.query('SELECT * FROM schema_migrations ORDER BY component,version'))
+    assert.equal(markers.filter(row => row.component === SYNC_COMPONENT).length, 25)
+    assert.equal(SYNC_MIGRATIONS[25]?.version, 26)
+    assert.match(SYNC_MIGRATIONS[25].sql, /^SELECT 1;/)
+    const backupPath = join(f.root, 'v25-before-stopped-zcode.backup')
+    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), SYNC_MIGRATIONS.length)
+    assert.deepEqual(rows(f.protocol), before)
+    assert.deepEqual(f.protocol.withTransaction(tx => tx.query('SELECT * FROM sqlite_master ORDER BY type,name')), schema)
+    assert.deepEqual(f.protocol.withTransaction(tx => tx.query('SELECT * FROM schema_migrations WHERE component!=? OR version<=25 ORDER BY component,version', SYNC_COMPONENT)), markers)
+    assert.throws(() => applyComponentMigrations(f.protocol, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 25)), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
+    backup = openProtocol(backupPath)
+    assert.equal(applyComponentMigrations(backup, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 25)), 25)
+    assert.deepEqual(rows(backup), before)
+    assert.deepEqual(backup.withTransaction(tx => tx.query('SELECT * FROM schema_migrations ORDER BY component,version')), markers)
+    assert.equal(await migrateSyncStore(f.protocol), SYNC_MIGRATIONS.length)
+  } finally { backup?.close(); f.cleanup() }
+})

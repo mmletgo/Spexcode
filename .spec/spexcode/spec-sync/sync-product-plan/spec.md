@@ -14,6 +14,10 @@ P0至P5按完整需求交付，不以阶段演示、局部测试或可修改的�
 
 ## expanded spec
 
+已停ZCode精确失败的最新正常Git编辑稿也可沿既有材料选择接缝进入合法新attempt；旧cancelled与新failed分别核原观察、完整请求/Native身份、formalstop/removed全值，原稿只作approved:false材料，原bytes和业务诊断续到新seed，不回较旧稿、不继承批准或自动重试。source/tests/Git/schema/owner及当前fence门保持，旧原件不补签；writer26在线备份/事务围栏拒旧25，回滚恢复一致旧库与evidence/Git refs，NativePlan/执行策略不变。
+
+旧inline程序草稿诊断按精确路径绑定的冻结尾段只读恢复完整JSON数组，不用[]覆盖已存在错误，也不回退较旧来源；字符串内中文标记/转义/换行不影响边界，缺损/歧义拒绝，非draft无尾段保持原语义。原prompt/业务摘要/accepted位置及git-json运输不变，无新持久协议或模型输出兼容层。
+
 共享分区调度在每项结束后真正让出事件循环，包括缓存复用、末项和失败，使既有租约心跳与暂停/取消及时运行；不通过延长时限或放宽fence掩盖缓存批次的事件循环饥饿。缓存原件、真实终态、调用预算和最终验收边界保持。
 
 当前受审分析存在冻结owner时，P1独审沿[[sync-elaboration]]的生成侧同一范围事实拒绝仅改未变owner历史文案或未知ID绑定的repair。程序给具体拒因并保完整原review；原JSON/Git稿、summary追踪、Native请求及同一candidate经当前完整机械门重核后，仅新派独审，不重复生成或扩大源码/tests写权。真正域内语义repair仍续生成；原件绑定损坏明确停止，失败小回执的认证Git稿仍仅作材料。旧请求、字段缺席、控制中断回溯、原预算及最终V1–V4/采纳门保持。
@@ -25,6 +29,8 @@ P0至P5按完整需求交付，不以阶段演示、局部测试或可修改的�
 重验重新分析和 owner 投影、P1 及独立审查，旧 accepted P0/P1、generation/review/candidate 不复用；经原 owner/schema/source/Native/Git 终态认证的原 JSON 仅作未批准材料续修，不继承 ready/accept。省略 requested model 保持原选择，显式换模型沿既有 retry 规则，不引入 CLI 版本、baseURL 或模型白名单。预算配置和原真实计数不改，不自动借新操作延长内部修复；完整 V1–V4、可信运行、正常 Git hooks 与正式采纳仍需新证明，Source/Main 不自动前进。
 
 正式retryOf换模型或恢复其后暂停的同一操作时，未批准P0/P1草稿和精确后置质疑沿同输入/source、原意、policy、readSet、selection/scope及分区plan/owner的正式祖先链取源。原Native和Git/schema/ref按原operation/attempt认证，未认证新稿不遮蔽更早合格原稿；只将精确schema匹配的原JSON字节放入新seed，旧只读成功输出标为native_output临时材料，不继承ready/accept或回签旧失败。新分析及独审、当前操作预算与最终V1–V4/采纳门保持，schema选源回调仅在进程内，不新增DB版本。材料迁接沿原v6 worktree read/edit传输协议，不将无worktree旧frozen热升级；已认证Git稿命中后不再混入备选Native诊断或来源。review格式拒绝原文仅作审查诊断，业务稿仍绑定已认证generation。
+
+P0/P1草稿业务JSON写入真实Git草稿文件；Native final是独立回执，只返回符合`DRAFT_RECEIPT_SCHEMA`的单一JSON对象，形如`{"summary":"..."}`，前后不附说明或Markdown代码围栏。业务schema仍是只读sidecar，Native schema、严格解析及旧saved/reserved请求的完整原件绑定不变；fake runner的提示合同不等于真实模型的遵循保证。
 
 失败findings的原条目、路径与严重级别必须跨草稿检查点及实际续修caller保真，不能把同码同文问题压成无法定位的重复文字。已渲染候选的完整失败只沿认证原件作为诊断继续传递，不变成旧seed、原意或新授权；历史短errors原件不回写。
 

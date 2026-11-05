@@ -58,6 +58,7 @@ export const STAGE_READING_INSTRUCTIONS = '工作目录就是本阶段固定Git�
 
 export type StageDraftBinding = Pick<ElaborationDraft, 'ownerDigest' | 'sourceInputId' | 'schemaDigest' | 'path'>
 export const DRAFT_RECEIPT_SCHEMA = { type: 'object', additionalProperties: false, properties: { summary: { type: 'string' } }, required: ['summary'] }
+export const DRAFT_RECEIPT_INSTRUCTIONS = 'Native final与业务草稿JSON是两份不同内容：业务JSON只写入此草稿文件；final必须且只能返回一个JSON对象，形式为{"summary":"简短处理摘要"}；final前后不附说明，也不使用Markdown代码围栏。'
 
 /** 冷恢复只核原Git证据；跨输入只复用同owner/schema的非权威字节，不继承旧树或批准。 */
 export function readStageDraft(commonDir: string, draft: ElaborationDraft, binding: StageDraftBinding): string {

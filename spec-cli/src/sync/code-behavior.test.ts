@@ -7,7 +7,7 @@ import { join, posix } from 'node:path'
 import test from 'node:test'
 import { isHostPrivatePath } from './candidate.js'
 import { isUtf8Text } from './composition.js'
-import { analyzeCodeBehavior, CODE_BEHAVIOR_REVIEW_SCHEMA, CODE_BEHAVIOR_SCHEMA, deriveBehaviorAuthorization, packBehaviorBodies, referenceCodeBehaviorMetadata, type FrozenBehaviorBody } from './code-behavior.js'
+import { analyzeCodeBehavior, CODE_BEHAVIOR_REVIEW_SCHEMA, CODE_BEHAVIOR_SCHEMA, deriveBehaviorAuthorization, packBehaviorBodies, readCodeBehaviorContext, referenceCodeBehaviorMetadata, type FrozenBehaviorBody } from './code-behavior.js'
 import type { CodeBehaviorInput, CodeBehaviorContinuation } from './code-behavior.js'
 import { nativeWorktreeResult } from '../native-worktree-runtime.js'
 import { readStageDraft } from './stage-worktree.js'
@@ -28,6 +28,30 @@ import { frozenBodyText, readFrozenBehaviorContext } from '../../test/frozen-beh
 import type { BodyReference } from '../../test/frozen-behavior-context.js'
 import type { CodeBehaviorAnalysis, CodeBehaviorKind } from './writeback-types.js'
 import { FROZEN_READ_MAX_BYTES, prepareFrozenPrompt, proveFrozenReads, readFrozenManifest, readFrozenRange, verifyFrozenReadProof, type FrozenNativeItem } from '../frozen-context.js'
+
+test('legacy P0程序草稿尾段只读保留原诊断，字符串标记和嵌套JSON不参与分隔', () => {
+  const path = `.spex-sync-drafts/${'a'.repeat(64)}.json`, task = { changedPaths: ['src/export.js'] }, prefix = `旧版final只返回简短summary，不重答整份JSON。\n任务:\n${JSON.stringify(task)}\n草稿文件=${path}；只改指定草稿。\n草稿业务schema只读文件=${path.replace(/\.json$/, '.schema.json')}；先读取精确schema并自检，禁止修改schema。`
+  const errors = [{ code: 'behavior_review_failed', message: '原具体错误：[假标记]；本轮修复诊断：[也是假标记]\n转义\\与引号"及括号[]{}', path: 'src/export.js', severity: 'error', detail: { nested: ['\n草稿文件=不是程序段', '\n草稿业务schema只读文件=不是程序段'] } }], repairDiagnostics = [{ code: 'behavior_review_failed', message: JSON.stringify({ findings: [{ evidence: '原完整业务证据\n；本轮修复诊断：[]', counterexample: '边界[]不改变原意' }] }) }]
+  const request = { prompt: `${prefix}原具体错误：${JSON.stringify(errors)}；本轮修复诊断：${JSON.stringify(repairDiagnostics)}`, inputDigest: 'unchanged-business', purpose: 'code_behavior_analyze' }, before = JSON.stringify(request)
+  const context = readCodeBehaviorContext(request, '/unused-legacy')
+  assert.deepEqual(context.errors, errors); assert.deepEqual(context.repairDiagnostics, repairDiagnostics); assert.deepEqual(context.task, task)
+  assert.equal(JSON.stringify(request), before, '读取不能改prompt、inputDigest或保存字段')
+  assert.deepEqual(readCodeBehaviorContext({ ...request, prompt: `${prefix}原具体错误：[]；本轮修复诊断：[]` }, '/unused-legacy').errors, [], '原空数组不混入较旧诊断')
+  for (const prompt of [
+    prefix,
+    `${request.prompt}\n草稿文件=${path}；重复段`,
+    `${request.prompt}${prefix.slice(prefix.indexOf('\n草稿业务schema只读文件='))}原具体错误：[]；本轮修复诊断：[]`,
+    request.prompt.replace(`${path.replace(/\.json$/, '.schema.json')}；先读取`, `.spex-sync-drafts/${'b'.repeat(64)}.schema.json；先读取`),
+    `${prefix}原具体错误：{}；本轮修复诊断：[]`,
+    `${prefix}原具体错误：[}；本轮修复诊断：[]`,
+    `${prefix}原具体错误：[]；本轮修复诊断：{}`,
+    `${prefix}原具体错误：[]；本轮修复诊断：[损坏]`,
+    `${prefix}原具体错误：[]；本轮修复诊断：[]额外正文`,
+    `${prefix}原具体错误：[]；本轮修复诊断:[]`,
+  ]) assert.throws(() => readCodeBehaviorContext({ ...request, prompt }, '/unused-legacy'), /legacy P0草稿诊断尾段/)
+  const nonDraft = readCodeBehaviorContext({ ...request, prompt: `普通内联任务\n任务:\n${JSON.stringify({ ...task, marker: '原具体错误：[]；本轮修复诊断：[]' })}` }, '/unused-legacy')
+  assert.deepEqual(nonDraft.errors, []); assert.deepEqual(nonDraft.repairDiagnostics, [])
+})
 
 const fixturePath = new URL('../../test/fixtures/spec-sync/export-repo/', import.meta.url)
 const git = (root: string, ...args: string[]): string => execFileSync('/usr/bin/git', ['-C', root, ...args], { encoding: 'utf8', stdio: 'pipe', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }).trim()
@@ -2625,10 +2649,11 @@ for (const contextTransport of [undefined, 'git-json-v1'] as const) for (const p
   let invalid = invalidity === 'syntax' ? '{ "原始JSON": [ BROKEN 草稿\n' : '{"原始JSON":"SCHEMA_REJECTED"}'
   const failureCode = invalidity === 'syntax' ? 'behavior_output_json' : invalidity === 'schema' ? 'behavior_output_schema' : ['invalid-path', 'context-path', 'duplicate', 'session', 'thread'].includes(invalidity) ? 'behavior_analysis_invalid' : 'behavior_review_failed'
   let checkpoint: CodeBehaviorContinuation | null = null, failed = false, violation: string | undefined, failureMessage = ''
-  let originalSchema: Buffer | undefined, originalDraftOid: string | undefined, originalSchemaOid: string | undefined
+  let originalSchema: Buffer | undefined, originalDraftOid: string | undefined, originalSchemaOid: string | undefined, originalErrors: { code: string; message: string }[] = []
   const requests: string[] = []
   const run: ElaborationRunner = async request => {
     requests.push(request.purpose)
+    assert.match(request.prompt, /Native final与业务草稿JSON是两份不同内容.*形式为\{"summary":"简短处理摘要"\}.*final前后不附说明.*Markdown代码围栏/s)
     const seed = request.worktree!
     assert.equal(seed.mode, 'edit', '仅指定JSON临时稿允许写入，业务文件保持只读')
     const draftPath = /草稿文件=([^\s；]+)/.exec(request.prompt)![1]
@@ -2637,6 +2662,7 @@ for (const contextTransport of [undefined, 'git-json-v1'] as const) for (const p
     git(f.root, 'worktree', 'add', '--detach', workspace, seed.baseCommit)
     const schema = JSON.parse(readFileSync(join(workspace, schemaPath), 'utf8')) as Record<string, unknown>
     assert.deepEqual(request.schema, { type: 'object', additionalProperties: false, properties: { summary: { type: 'string' } }, required: ['summary'] })
+    assert.notDeepEqual(request.schema, schema, 'Native final的summary回执schema与业务JSON schema分离')
     const { readCodeBehaviorContext } = await import('./code-behavior.js')
     const context = readCodeBehaviorContext(request, input.snapshot.source.commonDir)
     const brief = context.task as { requiredChangedPaths: string[] }
@@ -2660,6 +2686,10 @@ for (const contextTransport of [undefined, 'git-json-v1'] as const) for (const p
     }
     else if (request.purpose === phase) {
       assert.equal(readFileSync(join(workspace, draftPath), 'utf8'), invalid)
+      if (!violation) {
+        assert.deepEqual(context.errors, originalErrors, '实际legacy/file请求必须完整读回原对象，不能用空数组覆盖')
+        assert.deepEqual(context.repairDiagnostics, [{ code: 'prior-format', message: '本轮格式诊断不改变业务输入' }])
+      }
       if (['syntax', 'schema'].includes(invalidity)) assert.ok(diagnosticText.includes(failureCode))
       else assert.ok(diagnosticText.includes(JSON.stringify({ code: failureCode, message: failureMessage })), '续修携完整原拒因')
       assert.ok(!request.prompt.includes(invalid), '原稿从文件续改，不能在prompt重答原JSON')
@@ -2688,6 +2718,7 @@ for (const contextTransport of [undefined, 'git-json-v1'] as const) for (const p
     return true
   })
   const prior = structuredClone(checkpoint!)
+  originalErrors = structuredClone(prior.drafts[phase]!.errors)
   assert.equal(readStageDraft(input.snapshot.source.commonDir, prior.drafts[phase]!, prior.drafts[phase]!), invalid)
   const result = await analyzeCodeBehavior({ ...input, requestKey: 'next-attempt', repairDiagnostics: [{ code: 'prior-format', message: '本轮格式诊断不改变业务输入' }] }, run, undefined, continuations)
   assert.equal(result.reviewPassed, true)

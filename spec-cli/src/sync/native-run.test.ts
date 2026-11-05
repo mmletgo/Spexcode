@@ -19,6 +19,68 @@ import { SyncStore } from './store.js'
 import { nativeReviewRequestMatches } from './coordinator.js'
 
 const tsxImport = createRequire(import.meta.url).resolve('tsx/esm')
+
+for (const scenario of ['turn-failed', 'events-timeout', 'foreign-session', 'foreign-turn', 'foreign-input', 'unknown-stop'] as const) test(`ZCode real failed Native settlement preserves primary cause and exact stop: ${scenario}`, () => {
+  const directory = mkdtempSync(join(tmpdir(), 'sync-zcode-failure-')), root = join(directory, 'repo'), home = join(directory, 'home'), bin = join(directory, 'bin'), count = join(directory, 'sends.json')
+  for (const path of [root, home, bin]) mkdirSync(path)
+  const git = (...args: string[]): string => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: 'pipe' }).trim()
+  try {
+    git('init', '-q', '-b', 'main'); git('config', 'user.name', 'failure fixture'); git('config', 'user.email', 'failure@example.invalid')
+    mkdirSync(join(root, '.spec')); writeFileSync(join(root, '.spec/spexcode.json'), JSON.stringify({ mainBranch: 'main', sessions: { maxActive: 1 } }))
+    writeFileSync(join(root, 'value'), 'original seed\n'); git('add', '.'); git('commit', '-qm', 'seed')
+    const executable = join(bin, 'zcode')
+    writeFileSync(executable, `#!/usr/bin/env node
+const fs=require('node:fs'),path=require('node:path'),rl=require('node:readline');
+if(process.argv.includes('--version')){console.log('controlled-native-fixture');process.exit(0)}
+const scenario=${JSON.stringify(scenario)},count=${JSON.stringify(count)},send=x=>process.stdout.write(JSON.stringify(x)+'\\n');
+let session,model,input,query,prompt,stopping=false,delayed=false,seq=0;const turn='exact-turn';
+const event=(type,payload)=>({sessionId:session,turnId:turn,seq:++seq,eventId:'event-'+seq,type,payload});
+rl.createInterface({input:process.stdin}).on('line',line=>{const request=JSON.parse(line),p=request.params,reply=result=>send({id:request.id,result});
+if(request.method==='session/create'){session=p.sessionId;model=p.model;reply({session:{sessionId:session,model}})}
+else if(request.method==='session/read')reply({session:{sessionId:session,status:input&&!stopping&&!prompt.includes('next-request')?'error':'idle',model},settings:{model:{current:model}},runtime:{pendingRequestIds:[]},projection:{currentTurnId:input?turn:undefined,pendingPermissions:[],activeToolCalls:[]}});
+else if(request.method==='session/send'){input=p.inputId;query=p.queryId;prompt=p.content;const rows=fs.existsSync(count)?JSON.parse(fs.readFileSync(count,'utf8')):[];rows.push({sessionId:session,inputId:input});fs.writeFileSync(count,JSON.stringify(rows));reply({accepted:true,sessionId:session})}
+else if(request.method==='session/events'){
+  if(scenario==='events-timeout'&&!stopping&&!delayed&&!prompt.includes('next-request')){delayed=true;setTimeout(()=>send({id:request.id,result:{events:[event('turn.completed',{inputId:input,resultType:'success',response:'{"ok":true}'})]}}),10100);return}
+  const events=[];if(!p.afterSeq)events.push(event('turn.started',{inputId:input,queryId:query,messageId:'exact-user'}));
+  events.push(event('session.updated',{providerId:model.providerId,modelId:model.modelId,toolCount:3}));
+  const terminal=stopping||prompt.includes('next-request')?event('turn.completed',{inputId:input,resultType:stopping?'cancelled':'success',response:stopping?'':'{"ok":true}'}):event('turn.failed',{inputId:input,error:{code:'EPIPE',message:'UNTRUSTED_PROVIDER_BODY'}});
+  if(!stopping&&!prompt.includes('next-request')){
+    if(scenario==='foreign-session')terminal.sessionId='foreign';if(scenario==='foreign-turn')terminal.turnId='foreign';if(scenario==='foreign-input')terminal.payload.inputId='foreign';
+    if(scenario==='unknown-stop'){const receipt=path.join(path.dirname(path.dirname(process.env.ZCODE_DATA_BASE_DIR)),'process.json'),value=JSON.parse(fs.readFileSync(receipt,'utf8'));fs.writeFileSync(receipt,JSON.stringify({...value,processGroupId:process.pid+1}))}
+  }
+  events.push(terminal);reply({events})
+}
+else if(request.method==='session/messages')reply({hasMore:false,messages:[{info:{role:'user',id:'exact-user',semantics:{kind:'user_prompt'},anchor:{turnId:turn},modelSelection:model,sessionID:session},parts:[{type:'text',text:prompt}]},{info:{role:'assistant',semantics:{kind:'assistant_response'},anchor:{turnId:turn},providerId:model.providerId,modelId:model.modelId},parts:[{type:'text',text:'{"ok":true}'}]}]});
+else if(request.method==='session/stop'){stopping=true;reply({})}
+else if(request.method==='session/close')reply({closed:true});
+});`)
+    chmodSync(executable, 0o755)
+    const modulePath = (name: string): string => fileURLToPath(new URL(name, import.meta.url)), script = join(directory, 'runner.mts')
+    writeFileSync(script, `import assert from'node:assert/strict';import{readFileSync,existsSync}from'node:fs';
+import{openProtocol}from'${createRequire(import.meta.url).resolve('@spexcode/session-protocol')}';import{configuredSessionApplication}from${JSON.stringify(modulePath('../session-application.ts'))};
+import{migrateSyncStore}from${JSON.stringify(modulePath('./migrations.ts'))};import{SyncStore}from${JSON.stringify(modulePath('./store.ts'))};import{createAttemptRunner}from${JSON.stringify(modulePath('./native-run.ts'))};import{captureInputSnapshot,readEvidence}from${JSON.stringify(modulePath('./snapshot.ts'))};import{stageWorktree}from${JSON.stringify(modulePath('./stage-worktree.ts'))};import{readRecord}from${JSON.stringify(modulePath('../session-record.ts'))};
+const scenario=${JSON.stringify(scenario)},snapshot=await captureInputSnapshot(process.cwd(),{committed:true});configuredSessionApplication();const protocol=openProtocol(process.env.SPEX_SESSION_DATABASE_PATH);await migrateSyncStore(protocol);const store=new SyncStore(protocol,{readBlob:ref=>readEvidence(snapshot.source.commonDir,ref)}),scope={paths:['value'],contractIds:[],flowIds:[]};
+const operation=store.admitAndEnqueue({ingressKey:'failure',rootCauseId:'failure',origin:'spec',input:snapshot,scope,budget:{maxCalls:3,maxAttempts:1,maxRepairs:0,timeoutMs:60000},policyDigest:'policy',impactDigest:'impact',readSetDigest:'read',delivery:null,deliveryPlan:{canonicalRoot:process.cwd()+'/delivery',branch:'delivery',baseCommit:snapshot.headCommit}}),claim=store.claimAttempt({operationId:operation.id,source:snapshot.source,scope,leaseMs:60000,expectedMessageId:operation.dispatchMessageId}),seed=stageWorktree(snapshot.source.commonDir,snapshot.headCommit,snapshot.immutableTree,'read'),request={root:process.cwd(),base:seed.baseCommit,worktree:seed,requestKey:'failure',inputDigest:'original-input',purpose:'code_behavior_analyze',prompt:'controlled failure',schema:{type:'object',properties:{ok:{type:'boolean'}},required:['ok'],additionalProperties:false},timeoutMs:null,model:'zcode:fixture/model'},runner=createAttemptRunner(store,claim.fence,{pollMs:2});
+const failure=await runner(request).then(()=>assert.fail('failed Native cannot publish output'),error=>error),record=readRecord(failure.sessionId),state=record.structuredExecution,native=state.zcodeNative.root,resource=store.findResource(claim.attempt.id,request.requestKey),exit=JSON.parse(readFileSync(native+'/exit.json','utf8'));
+assert.equal(state.output,undefined);assert.equal(state.resultDigest,undefined);assert.equal(state.rejectedOutput,undefined);assert.equal(state.failedWorktree,undefined);assert.equal(existsSync(native+'/completed.json'),false);assert.equal(state.error.includes('UNTRUSTED_PROVIDER_BODY'),false);
+console.log(JSON.stringify({scenario,code:failure.code,message:failure.message,state:state.state,phase:resource.phase,nativeStopped:state.cancellation?.nativeStopped,idle:exit.idle,closed:exit.closed}));
+if(scenario==='turn-failed'||scenario==='events-timeout'){
+  assert.equal(failure.code,scenario==='events-timeout'?'native_rpc_timeout':'failed');assert.match(failure.message,scenario==='events-timeout'?/session\\/events/:/ZCode native turn failed \\(code=EPIPE\\)/);
+  assert.equal(state.state,'failed');assert.equal(state.cancellation.nativeStopped,true);assert.equal(resource.phase,'removed');assert.equal(exit.stopped,true);
+  if(scenario==='turn-failed'){assert.equal(exit.idle,false);assert.equal(exit.closed,false)}else{assert.equal(exit.idle,true);assert.equal(exit.closed,true);assert.equal(JSON.parse(readFileSync(native+'/terminal.json','utf8')).payload.resultType,'cancelled')}
+  const recordBefore=JSON.stringify(record),rawBefore=readFileSync(native+'/exit.json');await assert.rejects(createAttemptRunner(store,claim.fence,{pollMs:2})(request),{code:failure.code,message:failure.message});assert.equal(JSON.stringify(readRecord(failure.sessionId)),recordBefore);assert.deepEqual(readFileSync(native+'/exit.json'),rawBefore);assert.equal(JSON.parse(readFileSync(${JSON.stringify(count)},'utf8')).length,1);
+  const next=await runner({...request,requestKey:'next',inputDigest:'next-input',prompt:'next-request'});assert.deepEqual(next.output,{ok:true});assert.notEqual(next.sessionId,failure.sessionId);assert.equal(store.findResource(claim.attempt.id,'next').phase,'removed');assert.equal(JSON.parse(readFileSync(${JSON.stringify(count)},'utf8')).length,2);
+}else{
+  assert.notEqual(resource.phase,'removed');assert.notEqual(state.cancellation?.nativeStopped,true);
+  if(scenario==='unknown-stop'){assert.equal(state.state,'cancelling');assert.equal(failure.code,'cancellation_pending');assert.match(state.error,/ZCode native turn failed \\(code=EPIPE\\)/);assert(state.cancellation.error);assert.notEqual(state.error,state.cancellation.error)}else{assert.equal(failure.code,'failed');assert.match(state.error,/differs|belongs to another/);assert.doesNotMatch(state.error,/ZCode native turn failed/)}
+}
+protocol.close();process.exit(0);`)
+    const result = spawnSync(process.execPath, ['--import', tsxImport, script], { cwd: root, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, SPEXCODE_HOME: home, SPEX_SESSION_DATABASE_PATH: join(home, 'sessions.sqlite'), SPEX_RUNTIME_HOME: join(home, 'runtime'), SPEXCODE_CODEX_USAGE_GUARD: '0', SPEX_TEST: '1' }, encoding: 'utf8', timeout: 45000 })
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
+    console.log(result.stdout)
+  } finally { rmSync(directory, { recursive: true, force: true }) }
+})
+
 const hash = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const textHash = (text: string): string => createHash('sha256').update(text).digest('hex')
 async function waitUntil(predicate: () => boolean, timeoutMs = 3000): Promise<void> {

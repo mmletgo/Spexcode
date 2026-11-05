@@ -19,6 +19,8 @@ related:
 
 ## expanded spec
 
+新fence观察已停ZCode edit的未批准Git稿时，复用原verifyPlan、send与public model snapshot，精确核workspace、原session/model、唯一turn.started的input/query/非空messageId、所有events身份与唯一terminal原摘要。只读核原receipt/进程组与正式canonical stop/removed，不能调用会改写旧观察的进程采样或要求messages/success/final。原exit须code0、signal:null、stopped:true，idle/closed原值保持；基础认证后HEAD==seed只跳过无进度，有新HEAD仅精确turn.failed可授Git材料，cancelled终态不取得材料资格。新failed和旧cancelled沿[[sync-checkpoint-evidence]]各自原证明认证，不附failedWorktree/rejectedOutput，不改原计划/策略/请求或错误分类。
+
 仅version6工作区路径在原plan/send/user/model/final消息/turn/idle/close/stop全部认证后，将格式或schema拒绝的terminal原response附为tagged untrusted_final诊断，保原字节与SHA和原请求绑定。格式失败仍不写completed/output；取消、缺terminal、身份或stop失败不授正文，旧failed缺字段不追补。不得提取thinking或放宽JSON/schema。
 
 新 ZCode 原生 worktree read 请求在创建/资源登记时冻结 `zcodeToolPolicy:{version:1,toolDenylist:['ExitPlanMode']}`。其 NativePlan 与持久 native 身份为 version2，计划保存同一精准 denylist；唯一 session/send 通过 SDK 已有 per-send toolDenylist 从模型可见工具列表移除 ExitPlanMode，SDK mode 仍为 plan。完整提示明确本轮交完整 schema JSON，不请求计划审批；业务正文逐字保留。tool policy 进入固定 policy/创建摘要，effective denylist 另进入 NativePlan.requestDigest，原 send、计划与恢复逐项核验；篡改或版本不符拒绝。Read/Glob/Grep/Bash 与原读范围、Edit/Write/NotebookEdit 拒绝、read Git seed/clean 门均不变，不切 build、不增 sandbox/MCP。edit、旧冻结和 Claude 不采用该工具策略。
@@ -69,3 +71,5 @@ NativePlan v1/v2 与缺席 `nativeConfiguration` 的历史请求保持原策略�
 worktree 停止沿 [[native-worktree-runtime]] 正向任务域边界及 boundaryVersion2 追加观察，保留原 failed exit/unknown；首次派发在宿主平台的临时目录中创建唯一私有 tmp，workspace 与 tmp 随原 plan 固定，冷恢复不重选或改写。旧 macOS frozen policy 的 `/private/tmp` 短路径不变，无关联同 UID 进程仅诊断。
 
 唯一 stdio RPC 的原 10000ms 计时器以 native_rpc_timeout 标记本次真实超时，保留原 method/message；finally 的精确进程停止不能抹去原 typed cause。RPC 期限、pending 删除、迟到回复不接纳、未 ACK create 不发送模型请求及不自动 close 的行为保持；由 [[structured-session-runtime]] 正式消费停止证明，不以 elapsed、Promise 结束或 transport 退出自行证明停止。
+
+本次新观察的 turn.failed 必须绑定原 session、turn、已接受的 input 和唯一 turn.started 的 query；认证后以进程内专用 failed 错误保留首要失败，仅投影宿主 errno 定义中的安全原码，不透传 provider 错误正文。失败不请求成功消息历史，不授 output、rejectedOutput 或 Git witness；finally 仍原样观察并保留 error/idle=false、close=false 和 exit，不把 error 当作 idle。清理异常不覆盖已认证首要失败，正式结算仍由现有 exact adapter.stop 独立核原 plan、PID/start/receipt、整组、后代与任务域停止，未知不得释放容量。历史失败不补读或追补认证，不新增 plan/持久策略版本或自动重试资格。

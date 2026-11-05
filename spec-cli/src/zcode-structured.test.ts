@@ -2,14 +2,24 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { processStartToken, writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
 import { freezeContext, frozenReadTool, readFrozenRange } from './frozen-context.js'
 import { ZCODE_FROZEN_TOOL, type ZCodeFrozenWitness, type ZCodeNativeEvent } from './zcode-frozen-evidence.js'
 import { structuredExecutionPolicy } from './session-structured-policy.js'
-import { assertZCodeModelSnapshot, decodeZCodeStructuredText, stopZCodeStructuredTurn, zcodeCapability, zcodeIdleObservation, zcodeNativeConfigModel, zcodeNativeConfigSelection, zcodeNativeModel, zcodeNativeSelection, zcodeProofEvent, zcodeRuntimeConfiguration, zcodeStructuredPrompt, zcodeStructuredTurn, type ZCodeStructuredExecution } from './zcode-structured.js'
+import { sampleNativeWorktreeProcesses } from './native-worktree-runtime.js'
+import { assertZCodeModelSnapshot, assertZCodeStoppedDraftSource, decodeZCodeStructuredText, stopZCodeStructuredTurn, zcodeCapability, zcodeIdleObservation, zcodeNativeConfigModel, zcodeNativeConfigSelection, zcodeNativeModel, zcodeNativeSelection, zcodeProofEvent, zcodeRuntimeConfiguration, zcodeStructuredPrompt, zcodeStructuredTurn, ZCodeNativeTurnFailedError, type ZCodeStructuredExecution } from './zcode-structured.js'
+
+test('Native failure diagnostics expose only safe errno codes and exact turn identity', () => {
+  for (const code of ['EPIPE', 'UNTRUSTED_PROVIDER_BODY', '__proto__', null, { message: 'UNTRUSTED_PROVIDER_BODY' }]) {
+    const error = new ZCodeNativeTurnFailedError('exact-session', 'exact-turn', code)
+    assert.equal(error.code, 'failed'); assert.equal(error.threadId, 'exact-session'); assert.equal(error.turnId, 'exact-turn')
+    assert.equal(error.message, `ZCode native turn failed (code=${code === 'EPIPE' ? 'EPIPE' : 'unavailable'})`)
+    assert.equal(error.rejectedOutput, undefined); assert.equal(error.failedWorktree, undefined)
+  }
+})
 
 test('ZCode namespace requires both exact provider and model', () => {
   assert.deepEqual(zcodeNativeModel('zcode:bigmodel-api/GLM-5.3-Flash'), { providerId: 'bigmodel-api', modelId: 'GLM-5.3-Flash' })
@@ -296,6 +306,32 @@ for (const profile of ['cli-config-v1-explicit', 'cli-config-v1-default', 'legac
     writeFileSync(join(root, 'plan.json'), JSON.stringify({ ...plan, cliSha256: 'f'.repeat(64) }))
     await assert.rejects(zcodeStructuredTurn(realm, 'native', prompt, execution, callbacks, workspace), { code: 'stale_result' })
     writeFileSync(join(root, 'plan.json'), planBytes)
+    if (generic) {
+      mkdirSync(workspace); mkdirSync(tmp)
+      const receiptFile = join(root, 'process.json')
+      sampleNativeWorktreeProcesses({ root, workspace, tmp, receiptFile })
+      const child = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { cwd: workspace, detached: true, stdio: 'ignore' }); assert(child.pid)
+      const ended = new Promise<void>(resolve => child.once('close', () => resolve()))
+      try {
+        writeDetachedRuntimeReceipt(child.pid, receiptFile)
+        const ownedPlan = { ...plan, pid: child.pid }
+        sampleNativeWorktreeProcesses(ownedPlan)
+        process.kill(-child.pid, 'SIGTERM'); await ended
+        const failed = { ...terminal, type: 'turn.failed', payload: { inputId, error: { code: 'EPIPE' } } }
+        writeFileSync(join(root, 'plan.json'), JSON.stringify(ownedPlan)); writeFileSync(join(root, 'events.json'), JSON.stringify([...events.slice(0, -1), failed])); writeFileSync(join(root, 'terminal.json'), JSON.stringify(failed)); writeFileSync(join(root, 'exit.json'), JSON.stringify({ ...exit, idle: false, closed: false }))
+        rmSync(join(root, 'completed.json')); rmSync(join(root, 'messages.json'))
+        const stoppedExecution: ZCodeStructuredExecution = { ...execution, state: 'failed', output: undefined, resultDigest: undefined, zcodeNative: { ...native, pid: child.pid, receiptFile } }
+        const stop = await stopZCodeStructuredTurn(stoppedExecution)
+        assert.equal(stop.nativeStopped, true)
+        stoppedExecution.cancellation = { reason: 'cancelled', requestedAt: Date.now(), ...stop }
+        const originalFiles = readdirSync(root, { withFileTypes: true }).filter(entry => entry.isFile()).map(entry => ({ path: join(root, entry.name), bytes: readFileSync(join(root, entry.name)) }))
+        assert.equal(assertZCodeStoppedDraftSource(prompt, stoppedExecution, workspace), true, 'v3 explicit/default原失败不用messages或success身份取得未批准材料源认证')
+        assert.equal(assertZCodeStoppedDraftSource(prompt, { ...stoppedExecution, state: 'cancelled' }, workspace), true)
+        for (const file of originalFiles) assert.deepEqual(readFileSync(file.path), file.bytes, '只读材料认证不能追加或改写旧Native原件')
+        const sendPath = join(root, 'send.json'), sendBytes = readFileSync(sendPath)
+        rmSync(sendPath); assert.throws(() => assertZCodeStoppedDraftSource(prompt, stoppedExecution, workspace)); writeFileSync(sendPath, sendBytes)
+      } finally { if (processStartToken(child.pid)) { process.kill(-child.pid, 'SIGTERM'); await ended } }
+    }
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })
 
