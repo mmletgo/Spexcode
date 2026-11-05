@@ -200,7 +200,7 @@ test('14attempt/1790CAS历史扫描交还控制，同一30秒fence到达首次�
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
 })
 
-const zcodeMaterialCases = [...(['zcode-old', 'zcode-new'] as const).flatMap(mode => (['none', 'prior-draft', 'session', 'send', 'turn', 'input', 'query', 'message', 'model', 'worktree', 'stop', 'seed', 'source', 'tests', 'schema', 'scope', 'request', 'exit', 'terminal', 'no-progress-cancelled', 'progress-cancelled', 'fence'] as const).map(defect => [mode, defect] as const)), ['zcode-new', 'failed-observation'] as const, ...(['none', 'prior-draft', 'older-physical', 'staged', 'review', 'session', 'stop', 'seed', 'source', 'tests', 'schema', 'context', 'index', 'scope', 'worktree', 'fence', 'cas'] as const).map(defect => ['zcode-dirty', defect] as const), ['zcode-p1-dirty', 'none'] as const]
+const zcodeMaterialCases = [...(['zcode-old', 'zcode-new'] as const).flatMap(mode => (['none', 'prior-draft', 'session', 'send', 'turn', 'input', 'query', 'message', 'model', 'worktree', 'stop', 'seed', 'source', 'tests', 'schema', 'scope', 'request', 'exit', 'terminal', 'no-progress-cancelled', 'progress-cancelled', 'fence'] as const).map(defect => [mode, defect] as const)), ['zcode-new', 'failed-observation'] as const, ...(['none', 'prior-draft', 'older-physical', 'staged', 'review', 'session', 'stop', 'seed', 'source', 'tests', 'schema', 'context', 'index', 'scope', 'worktree', 'fence', 'cas'] as const).map(defect => ['zcode-dirty', defect] as const), ...(['none', 'prior-draft', 'older-physical'] as const).map(defect => ['zcode-p1-dirty', defect] as const)]
 for (const [mode, defect] of [['native-failure', 'no-progress-143'], ['native-failure', 'no-progress-143-foreign'], ['native-failure', 'no-progress-143-stop'], ['native-failure', 'no-progress-143-process'], ['native-failure', 'progress-143'], ['native-failure', 'none'], ['native-failure', 'prior-draft'], ['native-failure', 'session'], ['native-failure', 'user'], ['native-failure', 'exit'], ['native-failure', 'unknown'], ['native-failure', 'source'], ['native-failure', 'tests'], ['native-failure', 'stop'], ['missing-final', 'none'], ['pause', 'none'], ['pause', 'prior-draft'], ['missing-final', 'prior-draft'], ['pause', 'older-pause'], ['pause', 'not-started'], ['pause', 'no-commit'], ['missing-final', 'session'], ['missing-final', 'user'], ['missing-final', 'exit'], ['missing-final', 'unknown'], ['missing-final', 'completed'], ['pause', 'source'], ['pause', 'tests'], ['pause', 'scope'], ['pause', 'seed'], ['pause', 'thread'], ['pause', 'turn'], ['pause', 'schema'], ['pause', 'worktree'], ['pause', 'stop'], ['pause', 'request'], ...zcodeMaterialCases] as const) test(`旧Native无typed witness的新attempt仅观察最新Git材料，旧原件不补签 mode=${mode}/${defect}`, async t => {
   const p1 = mode === 'zcode-p1-dirty', dirty = mode === 'zcode-dirty' || p1, freshZCode = mode === 'zcode-new' || dirty
   const zcode = mode === 'zcode-old' || freshZCode, older = defect === 'older-pause' || defect === 'older-physical'
@@ -208,7 +208,7 @@ for (const [mode, defect] of [['native-failure', 'no-progress-143'], ['native-fa
   const f = await fixture(t, { maxAttempts: older ? 4 : 3, maxCalls: 6, maxRepairs: older ? 3 : 2, timeoutMs: 120000 }, false, original, 'project', original, { agentWorkflow: 'native-worktree-v1' }, undefined, p1 ? 'spec' : 'code', zcode ? 'zcode:bigmodel-api/GLM-5.3-Flash' : 'claude:MiniMax-M3.1-Flash')
   if (p1) f.store.startGeneration = () => { throw Object.assign(new Error('P1原物理稿经真实提交及独审后停止，不运行P2'), { code: 'unsupported' }) }
   const latest = `{LATEST_UNAPPROVED_DRAFT${'x'.repeat((mode === 'native-failure' ? 92755 : defect === 'prior-draft' || older ? 85970 : 59388) - 24)}}`, priorText = '{EARLIER_SEED_DRAFT' + 'a'.repeat(mode === 'native-failure' ? 85970 - '{EARLIER_SEED_DRAFT'.length : 59010)
-  let oldSession = '', oldPath = '', oldNativeRoot = '', originalRequest: ElaborationSessionRequest | undefined, continued = false, restartedWithoutMaterial = false
+  let oldSession = '', oldPath = '', oldNativeRoot = '', originalRequest: ElaborationSessionRequest | undefined, originalAttemptNumber = 0, continued = false, restartedWithoutMaterial = false
   const originalRunner = f.options.runner!
   let analysisCalls = 0
   f.options.runner = async request => {
@@ -254,12 +254,18 @@ for (const [mode, defect] of [['native-failure', 'no-progress-143'], ['native-fa
         for (const item of old.repairDiagnostics) assert(current.repairDiagnostics.some(value => JSON.stringify(value) === JSON.stringify(item)), '原修复诊断完整保留')
         if (onlyReview) assert.deepEqual(current.pendingAnalysis, old.pendingAnalysis, '物理review稿仅续审，原ready分析完整保持')
       }
-      assert.match(request.prompt, older ? /已有原草稿已复制/ : dirty ? /未批准的物理草稿/ : /认证的原Git分析草稿/)
+      assert.match(request.prompt, older ? p1 ? /已有草稿已复制/ : /已有原草稿已复制/ : dirty ? /未批准的物理草稿/ : /认证的原Git分析草稿/)
       if (mode === 'missing-final') assert.match(JSON.stringify(readCodeBehaviorContext(request, f.input.source.commonDir)), /missing required structured_output/)
       else assert.doesNotMatch(request.prompt, /missing required structured_output/, '普通暂停不能伪加缺final分类')
       continued = true
-      if (p1) {
+      if (p1 && !older) {
         assert.match(request.prompt, /EPIPE/)
+        if (defect === 'prior-draft') {
+          const diagnostics = (request: ElaborationSessionRequest) => JSON.parse(request.prompt.split('\n失败诊断（不是新授权）:\n')[1].split('\n草稿业务schema只读文件=')[0]) as { priorDraft: { errors: unknown[] } | null; materialErrors: unknown[] }
+          const old = diagnostics(originalRequest), current = diagnostics(request)
+          assert(old.priorDraft?.errors.length); assert.equal(current.priorDraft, null, '物理材料清旧Git draft角色')
+          for (const error of old.priorDraft.errors) assert(current.materialErrors.some(item => JSON.stringify(item) === JSON.stringify(error)), 'A原具体finding完整进入C，不只剩EPIPE')
+        }
         const protectedEntries = (tree: string) => readTree(f.input.source.commonDir, tree).filter(entry => entry.path !== path)
         assert.deepEqual(protectedEntries(seed.tree), protectedEntries(originalRequest.worktree!.tree), '新P1 seed只复制精确原稿，原readonly overlay/schema/source/tests全保')
         writeFileSync(join(workspace, path), JSON.stringify(adaptElaborationNativeOutput(request, rows(original))))
@@ -269,7 +275,7 @@ for (const [mode, defect] of [['native-failure', 'no-progress-143'], ['native-fa
       }
       throw Object.assign(new Error('已核新attempt在最新真实Git草稿续修入口'), { code: 'unsupported' })
     }
-    originalRequest = request; oldPath = workspace
+    originalRequest = request; originalAttemptNumber = attempt.number; oldPath = workspace
     mkdirSync(join(workspace, path, '..'), { recursive: true })
     for (const text of defect === 'not-started' || defect === 'no-commit' || defect.startsWith('no-progress-') ? [] : [priorText, latest]) {
       writeFileSync(join(workspace, path), text)
@@ -340,7 +346,7 @@ for (const [mode, defect] of [['native-failure', 'no-progress-143'], ['native-fa
   if (defect === 'completed') writeFileSync(join(oldNativeRoot, 'completed.json'), '{CORRUPT_COMPLETED')
   if (defect === 'source' || defect === 'tests' || defect === 'scope' || defect === 'schema' || defect === 'context' || defect === 'index') { const path = defect === 'source' || defect === 'index' ? 'src/export.js' : defect === 'tests' ? 'tests/export.test.mjs' : defect === 'scope' ? '.spex-sync-drafts/foreign.json' : /草稿文件=([^\s；]+)/.exec(originalRequest!.prompt)![1].replace(/\.json$/, defect === 'context' ? '.context.json' : '.schema.json'); writeFileSync(join(oldPath, path), 'foreign unauthorized edit'); if (!dirty || defect === 'index') execFileSync('git', ['-C', oldPath, 'add', path], { stdio: 'pipe' }); if (!dirty) execFileSync('git', ['-C', oldPath, 'commit', '-m', 'negative unauthorized edit'], { stdio: 'pipe' }) }
   if ((mode === 'pause' || mode === 'native-failure') && (defect === 'none' || defect === 'prior-draft' || older)) { rmSync(join(oldNativeRoot, 'public-history.json')); rmSync(join(oldNativeRoot, 'claude-home'), { recursive: true }) }
-  const originalRecord = readRecord(oldSession)!, originalState = originalRecord.structuredExecution!, oldAttempts = f.store.listAttempts(f.operation.id)
+  const originalRecord = readRecord(oldSession)!, originalState = originalRecord.structuredExecution!, oldAttempts = f.store.listAttempts(f.operation.id).filter(attempt => !p1 || attempt.number <= originalAttemptNumber)
   assert.equal(originalState.state, freshZCode ? 'failed' : 'cancelled'); assert.equal(originalState.cancellation?.nativeStopped, true); assert.equal(originalState.errorCode, undefined); assert.equal(originalState.failedWorktree, undefined)
   const oldResources = oldAttempts.flatMap(attempt => attempt.dispatchPlans.map(dispatch => f.store.findResource(attempt.id, dispatch.key))).filter(resource => resource !== null)
   assert(oldResources.every(resource => resource.phase === 'removed'))
@@ -358,7 +364,7 @@ for (const [mode, defect] of [['native-failure', 'no-progress-143'], ['native-fa
   if (defect === 'failed-observation') f.store.findResource = (attemptId, key) => { const resource = readResource(attemptId, key); return resource ? { ...resource, checkpoints: resource.checkpoints.filter(item => (JSON.parse(readEvidence(f.input.source.commonDir, item.checkpointRef).toString()) as NativeRunCheckpoint).nativeState !== 'failed') } : null }
   const result = await runSyncOperation(f.store, f.operation.id, f.options).finally(() => { f.store.findResource = readResource })
   if (defect === 'fence' || defect === 'cas') { assert.equal(continued, false); assert.notEqual(result.status, 'settled'); return }
-  assert.equal(result.status, 'unsupported', JSON.stringify(result.failure)); assert.equal(continued, materialExpected, JSON.stringify({ result: result.failure, attempts: f.store.listAttempts(f.operation.id).map(attempt => ({ number: attempt.number, failure: attempt.failure, calls: attempt.dispatchPlans.length })) }))
+  assert(p1 ? ['unsupported', 'budget_exhausted'].includes(result.status) : result.status === 'unsupported', JSON.stringify(result.failure)); assert.equal(continued, materialExpected, JSON.stringify({ result: result.failure, attempts: f.store.listAttempts(f.operation.id).map(attempt => ({ number: attempt.number, failure: attempt.failure, calls: attempt.dispatchPlans.length })) }))
   if (defect === 'no-progress-143') assert.equal(restartedWithoutMaterial, true, '合法owned/stopped但HEAD==seed无JSON须在终态分类前skip，允许新任务')
   if (defect === 'no-progress-cancelled') assert.equal(restartedWithoutMaterial, true, '合法ZCode无进度取消仅跳过，不授新稿或成功')
   if (defect.startsWith('no-progress-143-')) assert.equal(restartedWithoutMaterial, false, 'foreign/unknown stop不能借无进度越过认证')
@@ -371,8 +377,8 @@ for (const [mode, defect] of [['native-failure', 'no-progress-143'], ['native-fa
   assert.deepEqual(readFileSync(oldIndex), oldIndexBytes, '只读材料观察不得刷新原index')
   if (oldDraftBytes) assert.deepEqual(readFileSync(join(oldPath, oldDraftPath)), oldDraftBytes)
   assert.equal(execFileSync('git', ['-C', oldPath, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), latestHead)
-  const current = f.store.listAttempts(f.operation.id).at(-1)!, observed = (p1 ? f.store.listAttempts(f.operation.id).flatMap(attempt => attempt.checkpointRefs) : current.checkpointRefs).map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(wrapper => wrapper.stage.endsWith(dirty ? ':stopped-physical-material-provenance' : ':stopped-git-material-provenance'))
-  if (p1) {
+  const current = f.store.listAttempts(f.operation.id).at(-1)!, observed = (p1 && !older ? f.store.listAttempts(f.operation.id).flatMap(attempt => attempt.checkpointRefs) : current.checkpointRefs).map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(wrapper => wrapper.stage.endsWith(dirty ? ':stopped-physical-material-provenance' : ':stopped-git-material-provenance'))
+  if (p1 && !older) {
     const wrapper = current.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(wrapper => wrapper.stage === 'elaboration')!
     const result = JSON.parse(readEvidence(f.input.source.commonDir, wrapper.resultRef).toString()) as ElaborationResult
     assert.equal(result.reviewPassed, true, JSON.stringify(result.failure)); assert(result.rounds.at(-1)?.draft?.resultCommit)

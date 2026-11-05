@@ -107,3 +107,5 @@ Native worktree P0分析与独审共用业务语义：可由raw、源码和完�
 最终候选独审的格式/schema拒绝及已认证Native成功但只读P1定位字段无效时，沿[[sync-generation]]同一候选与reviewRepair原件把完整原JSON、精确schema、错误和trace交唯一临时Git稿续改；仅失败组新派发，兄弟accept原绑定保持。Agent正常提交并重新严格校验后才回原P1，不清洗原位置、伪造Native失败或扩业务写权；一般可写P2及合法跨owner精确诊断保持原协议，瞬态写范围复用唯一dispatch，无新持久字段或DB版本。
 
 已停物理JSON原稿仅按[[sync-stage-worktree]]、[[sync-coordinator]]的physical_draft材料接缝续修：未提交/未批准且不是旧Git或Native final，P0/P1新seed保原bytes/诊断，原成功clean/schema/独审与采纳门不变。writer27只追加SELECT1并沿[[sync-migrations]]正常私有备份升级/回滚，旧26拒写，不改现场旧记录/index或补witness。
+
+P1物理材料只可按原认证Native attempt/round严格更新既有稿，清旧Git角色且保完整原finding/冻结诊断；新父/诊断跨seed只豁免程序可信精确readonly投影并集，旧seed仍完整冷验，source/tests/非角色Spec和absence不放宽。

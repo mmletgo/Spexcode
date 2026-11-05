@@ -14,7 +14,7 @@ import type { CodeBehaviorAnalysis, CodeBehaviorEvidence, SyncDecisionInput } fr
 import { adoptedDeliveryPaths, isUtf8Text, readCompositionEvidence, selectedRetiredIds, verifyBaselineSelection } from './composition.js'
 import { readHistoryRequest, readReceiptHistoryRestorations } from './history-input.js'
 import { composeAuthoredInput } from './author-input.js'
-import { elaborate, freezeElaborationInput, gapBlockedFinding, verifyElaborationDraftCache } from './elaboration.js'
+import { elaborate, elaborationMaterialContext, freezeElaborationInput, gapBlockedFinding, verifyElaborationDraftCache } from './elaboration.js'
 import { outputErrors } from './elaboration-schema.js'
 import type { ElaborationResult, ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult, ElaborationTrace, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial } from './elaboration-types.js'
 import { claimFileMutex } from './file-mutex.js'
@@ -1265,17 +1265,18 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         for (const { owner, prior } of retryDraftSources(store, operation, attempt!.number)) {
           const source = draftMaterialStage(owner, prior, key)
           if (!source || source.result.phase === 'partitioned_final' || source.result.partitionBinding?.partitionId !== binding?.partitionId) continue
-          const draft = source.result.rounds.at(-1)?.draft
-          if (!draft || owner.id !== operation.id && (!schemaDigest || draft.schemaDigest !== schemaDigest || binding && (source.result.partitionBinding?.planDigest !== binding.planDigest || partitionStage<SyncPartitionPlan>(store, owner, prior, 'partition-plan')?.result.digest !== binding.planDigest))) continue
-          const round = source.result.rounds.at(-1)!
-          const generation = round.candidate
-            ? elaborationGenerationSource(store, owner, prior, round)
-            : authenticatedDraftResult(store, owner, prior, `sync:${prior.id}:elaborate${binding ? `:partition:${binding.partitionId}` : ''}:${round.index}:elaboration_generate`, 'elaboration_generate', draft)
-          if (round.candidate && !generation) fail('review_retry_binding', '已生成P1候选的原Native生成身份失配，不能回退为重新生成')
-          if (!generation) continue
-          // 字节只作未批准材料；完整inputDigest及accept仍由独立的缓存门核验。
-          saveStage(store, fence!, `${key}:draft-provenance`, { fromOperationId: owner.id, fromAttemptId: prior.id, resultRef: source.resultRef, resultCommit: draft.resultCommit, oid: draft.oid })
-          return owner.id === operation.id ? draft : { ...draft, errors: [...source.result.rounds.at(-1)!.findings, ...draft.errors.filter(error => !source.result.rounds.at(-1)!.findings.some(finding => finding.code === error.code && finding.message === error.message))] }
+          for (const round of [...source.result.rounds].reverse()) {
+            const draft = round.draft
+            if (!draft || owner.id !== operation.id && (!schemaDigest || draft.schemaDigest !== schemaDigest || binding && (source.result.partitionBinding?.planDigest !== binding.planDigest || partitionStage<SyncPartitionPlan>(store, owner, prior, 'partition-plan')?.result.digest !== binding.planDigest))) continue
+            const generation = round.candidate
+              ? elaborationGenerationSource(store, owner, prior, round)
+              : authenticatedDraftResult(store, owner, prior, `sync:${prior.id}:elaborate${binding ? `:partition:${binding.partitionId}` : ''}:${round.index}:elaboration_generate`, 'elaboration_generate', draft)
+            if (round.candidate && !generation) fail('review_retry_binding', '已生成P1候选的原Native生成身份失配，不能回退为重新生成')
+            if (!generation) continue
+            // 字节只作未批准材料；完整inputDigest及accept仍由独立的缓存门核验。
+            saveStage(store, fence!, `${key}:draft-provenance`, { fromOperationId: owner.id, fromAttemptId: prior.id, resultRef: source.resultRef, resultCommit: draft.resultCommit, oid: draft.oid })
+            return owner.id === operation.id ? draft : { ...draft, errors: [...round.findings, ...draft.errors.filter(error => !round.findings.some(finding => finding.code === error.code && finding.message === error.message))] }
+          }
         }
         return null
       }
@@ -1284,9 +1285,27 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         if (current.control !== 'run' || current.currentAttemptId !== active.id || current.generation !== fence!.generation || active.generation !== fence!.generation || active.leaseToken !== fence!.leaseToken || ['failed', 'superseded', 'settled'].includes(active.status) || active.expiresAtMs <= Date.now() || store.readPhysicalControl(current.input.source).control !== 'run') fail('cancelled', '新草稿材料观察已失去当前运行fence')
       }
       const loadElaborationDraftMaterial = (key: string, binding?: NonNullable<ElaborationResult['partitionBinding']>, schemaDigest?: string, request?: StageDraftMaterialRequest): ElaborationDraftMaterial | null => {
-        for (const { owner, prior } of retryDraftSources(store, operation, attempt!.number)) {
+        const sources = retryDraftSources(store, operation, attempt!.number), existingDraft = request?.existingDraft
+        const identity = ({ errors: _errors, ...draft }: ElaborationDraft) => canonical(draft)
+        const existingOrigin = existingDraft ? (() => {
+          for (const { owner, prior } of sources) {
+            const source = draftMaterialStage(owner, prior, key)
+            if (!source || source.result.partitionBinding?.partitionId !== binding?.partitionId) continue
+            for (const round of [...source.result.rounds].reverse()) {
+              if (!round.draft || identity(round.draft) !== identity(existingDraft)) continue
+              const key = `sync:${prior.id}:elaborate${binding ? `:partition:${binding.partitionId}` : ''}:${round.index}:elaboration_generate`
+              const generation = round.candidate ? elaborationGenerationSource(store, owner, prior, round) : authenticatedDraftResult(store, owner, prior, key, 'elaboration_generate', round.draft) ? { attempt: prior, key } : null
+              if (!generation) continue
+              const sourceIndex = sources.findIndex(item => item.owner.id === owner.id && item.prior.id === generation.attempt.id), roundIndex = /:(\d+):elaboration_generate$/.exec(generation.key)?.[1]
+              if (sourceIndex >= 0 && roundIndex !== undefined) return { sourceIndex, roundIndex: Number(roundIndex) }
+            }
+          }
+          return null
+        })() : null
+        for (const [sourceIndex, { owner, prior }] of sources.entries()) {
           const source = draftMaterialStage(owner, prior, key), round = source?.result.rounds.at(-1)
           if (!source || !round || source.result.phase === 'partitioned_final' || source.result.partitionBinding?.partitionId !== binding?.partitionId) continue
+          if (existingDraft && (!existingOrigin || sourceIndex > existingOrigin.sourceIndex || sourceIndex === existingOrigin.sourceIndex && round.index <= existingOrigin.roundIndex)) continue
           if (request && schemaDigest === request.binding.schemaDigest && (!binding || source.result.partitionBinding?.planDigest === binding.planDigest && partitionStage<SyncPartitionPlan>(store, owner, prior, 'partition-plan')?.result.digest === binding.planDigest) && !round.draft && (owner.id !== operation.id || priorElaborationInputMatches(prior, binding))) {
             const requestKey = `sync:${prior.id}:elaborate${binding ? `:partition:${binding.partitionId}` : ''}:${round.index}:elaboration_generate`, resource = store.findResource(prior.id, requestKey)
             if (resource?.phase === 'removed' && resource.plan.inputId === operation.input.id) {
@@ -1295,8 +1314,8 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
               const state = readRecord(native.expectedSessionId)?.structuredExecution, zcode = native.request.model?.startsWith('zcode:') === true
               if (native.request.purpose === 'elaboration_generate' && native.request.worktree?.mode === 'edit' && !native.request.frozenContext && state && (zcode || native.request.model?.startsWith('claude:')) && (state.state === 'cancelled' || zcode && state.state === 'failed') && state.cancellation?.nativeStopped && !state.failedWorktree && !state.resultWorktree && !state.rejectedOutput && !state.errorCode && state.threadId && state.turnId) {
                 const proof = authenticateNativeFailure(store, owner, prior, requestKey, { code: 'failed', message: state.state === 'failed' ? state.error! : prior.failure?.message ?? '', sessionId: checkpoint.session.sessionId, threadId: checkpoint.session.threadId ?? undefined, turnId: checkpoint.session.turnId ?? undefined }, readRecord, true)
-                const protectedEntries = (tree: string) => readTree(operation.input.source.commonDir, tree).filter(entry => entry.path !== request.binding.path && entry.path !== request.binding.path.replace(/\.json$/, '.schema.json'))
-                if (proof.record.base === native.request.worktree.baseCommit && proof.record.forkCommit === native.request.worktree.baseCommit && /草稿文件=([^\s；。]+)/.exec(native.request.prompt)?.[1] === request.binding.path && canonical(protectedEntries(native.request.worktree.tree)) === canonical(protectedEntries(request.worktree.tree))) {
+                const context = elaborationMaterialContext(operation.input.source.commonDir, native.request, request)
+                if (proof.record.base === native.request.worktree.baseCommit && proof.record.forkCommit === native.request.worktree.baseCommit && /草稿文件=([^\s；。]+)/.exec(native.request.prompt)?.[1] === request.binding.path && context) {
                   const prompt = nativeWorktreePrompt(native.request.prompt, native.request.worktree)
                   const failed = zcode ? assertZCodeStoppedDraftSource(prompt, state as ZCodeStructuredExecution, proof.record.worktreePath) : undefined
                   if (!zcode) assertClaudeStoppedDraftSource(prompt, state, proof.record.worktreePath)
@@ -1305,14 +1324,14 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
                   if (physical) {
                     if (zcode && !failed) fail('stale_result', 'ZCode物理细化草稿没有原精确失败终态')
                     const materialRef = writeEvidence(operation.input.source.commonDir, { version: 'stopped-physical-draft-v1', path: request.binding.path, source: physical.source })
-                    saveStage(store, fence!, `${key}:stopped-physical-material-provenance`, { sourceKind: 'physical_draft', approved: false, observationKind: zcode || proof.observedFailure ? 'native-failure' : 'pause', observedAt: Date.now(), fromOperationId: owner.id, fromAttemptId: prior.id, nativePlanRef: resource.plan.planBlob, checkpointRef: resource.checkpointRef, canonicalRecordSha256: contentHash(JSON.stringify(proof.record)), observedHeadCommit: physical.observedHeadCommit, observedTree: physical.observedTree, indexSha256: physical.indexSha256, materialRef, draftSha256: contentHash(physical.source), schemaDigest, originalInputDigest: native.request.inputDigest, currentInputDigest: request.inputDigest })
-                    return { source: physical.source, errors: [...round.findings, ...source.result.failure ? [{ code: source.result.failure.code, message: source.result.failure.message }] : []], sourceKind: 'physical_draft' }
+                    saveStage(store, fence!, `${key}:stopped-physical-material-provenance`, { sourceKind: 'physical_draft', approved: false, observationKind: zcode || proof.observedFailure ? 'native-failure' : 'pause', observedAt: Date.now(), fromOperationId: owner.id, fromAttemptId: prior.id, nativePlanRef: resource.plan.planBlob, checkpointRef: resource.checkpointRef, canonicalRecordSha256: contentHash(JSON.stringify(proof.record)), observedHeadCommit: physical.observedHeadCommit, observedTree: physical.observedTree, indexSha256: physical.indexSha256, readonlyOverlay: { previous: context.previousReadonlyOverlay, current: context.currentReadonlyOverlay }, materialRef, draftSha256: contentHash(physical.source), schemaDigest, originalInputDigest: native.request.inputDigest, currentInputDigest: request.inputDigest })
+                    return { source: physical.source, errors: [...existingDraft?.errors ?? [], ...round.findings, ...source.result.failure ? [{ code: source.result.failure.code, message: source.result.failure.message }] : []], diagnostics: context.diagnostics, sourceKind: 'physical_draft' }
                   }
                 }
               }
             }
           }
-          if (round.draft || stage<{ version: string }>(store, owner, prior, 'elaboration-draft-protocol')?.version === 'elaboration-draft-v1') continue
+          if (existingDraft || round.draft || stage<{ version: string }>(store, owner, prior, 'elaboration-draft-protocol')?.version === 'elaboration-draft-v1') continue
           const rejectedGeneration = round.rejectedOutput?.purpose === 'elaboration_generate' ? round.rejectedOutput : undefined
           const rejectedReview = round.rejectedOutput?.purpose === 'elaboration_review' ? round.rejectedOutput : undefined
           const version = (round.output as { version?: unknown } | null)?.version

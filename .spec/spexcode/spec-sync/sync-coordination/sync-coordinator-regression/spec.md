@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+P1追加A正常Git拒稿→B新物理EPIPE无witness→C原bytes续改并独审，以及旧物理晚观察不盖后来正常Git反向；A完整finding进入C且priorDraft角色清除。parent/新旧诊断的比较另由真实elaborate冻结任务、生产elaborationMaterialContext、原物理observer与新seed回调组合覆盖，原整树比较先fail，精确投影后pass，source/tests/非角色Spec差异配对拒绝；formalNative/stop认证复用前述coordinator真实fixture。此组合不假称现场模型全链验收。
+
 新增真实Git/私有SQLite/正式ZCode stop场景：EPIPE前仅有untracked invalidJSON且HEAD==seed，旧clean门重复失败，修复后新seed保原bytes；tracked/staged亦然。核较新physical承接较旧认证稿、旧physical晚观察不覆盖更新Git、review仅续审保ready及原诊断、P1物理稿续改正常commit后独立accept；source/tests/schema/context/index/owner/session/stop/seed/root/fence/CAS反例拒绝。原record/checkpoint/Native文件/raw index/HEAD/源draft逐字保持；只证明受控真实机制，不替代现场模型恢复。
 
 ZCode停止材料回归复用真实Git/私有SQLite及正式adapter.stop/资源恢复：旧cancelling→cancelled与新failed+exactstop均在新fence续较新正常提交的原bytes，existing较旧认证draft不能遮蔽它，原业务诊断、已accept兄弟和预算保持。v3 explicit/default另以真实receipt核无messages的只读投影；session/turn/input/query/messageId/model/workspace/stop/seed/source/tests/schema/owner/request/fence错配不授材料，cancelled终态仅无进度skip，有新稿拒绝。旧record/Native文件、原attempt/checkpoint/resource逐字不变，不追加冷停止观察，不冒称真实模型、远端EPIPE修复或交付。
