@@ -33,7 +33,7 @@ export type CodeBehaviorPostGateReview = {
   findings: { finding: ContractFinding; before: ContractItem; after: ContractItem; changedPaths: string[] }[]
   codeDiff: string
 }
-export type CodeBehaviorInput = { postGateReview?: readonly CodeBehaviorPostGateReview[]; draftProtocol?: 'code-behavior-draft-v1'; partition?: { id: string; changedPaths: readonly string[]; factSourcePaths: readonly string[]; authorizedParentSpecPaths?: readonly string[] }; model?: string; snapshot: InputSnapshot; baseline: BaselinePair | null; baselineSelection?: FrozenBaselineSelection; composed: ComposedInputRef; readSetDigest: string; policyDigest: string; plan: SyncCoordinatorPlan; requestKey: string; timeoutMs: number | null; signal?: AbortSignal; origin?: 'initial' | 'spec' | 'code' | 'combined' | 'reconcile' | 'decision'; decision?: { request: SyncDecisionInput; previous: CodeBehaviorEvidence; previousComposed?: ComposedInputRef; previousReadPaths?: readonly string[] }; repairDiagnostics?: readonly { code: string; message: string }[] }
+export type CodeBehaviorInput = { contextTransport?: 'git-json-v1'; postGateReview?: readonly CodeBehaviorPostGateReview[]; draftProtocol?: 'code-behavior-draft-v1'; partition?: { id: string; changedPaths: readonly string[]; factSourcePaths: readonly string[]; authorizedParentSpecPaths?: readonly string[] }; model?: string; snapshot: InputSnapshot; baseline: BaselinePair | null; baselineSelection?: FrozenBaselineSelection; composed: ComposedInputRef; readSetDigest: string; policyDigest: string; plan: SyncCoordinatorPlan; requestKey: string; timeoutMs: number | null; signal?: AbortSignal; origin?: 'initial' | 'spec' | 'code' | 'combined' | 'reconcile' | 'decision'; decision?: { request: SyncDecisionInput; previous: CodeBehaviorEvidence; previousComposed?: ComposedInputRef; previousReadPaths?: readonly string[] }; repairDiagnostics?: readonly { code: string; message: string }[] }
 type BehaviorPurpose = 'code_behavior_analyze' | 'code_behavior_review'
 type CompletedBehaviorDraft = { trace: ElaborationTrace; draftOid: string; resultCommit: string; requestRef: BlobRef; receipt: unknown }
 /** 未批准临时稿只记录真实Git身份；readyAnalysis仅省去独审协议失败后的重复分析，不批准独审。 */
@@ -46,6 +46,35 @@ export type CodeBehaviorContinuation = {
 }
 export type CodeBehaviorCheckpoints = { loadMaterial?(purpose: BehaviorPurpose, schemaDigest: string, inputDigest: string, request: Pick<ElaborationSessionRequest, 'prompt' | 'worktree'>, existingDraft?: ElaborationDraft): ElaborationDraftMaterial | null; load(inputDigest: string): CodeBehaviorContinuation | null; save(value: CodeBehaviorContinuation): void }
 type Proposal = { changes: Omit<CodeBehaviorChange, 'id'>[]; facts: CodeBehaviorAnalysis['facts']; acceptanceChanges: Omit<AcceptanceChangeProposal, 'action'>[]; newNodes: { codePath: string; parentNodeId: string; basis: string }[]; resolutions: CodeBehaviorAnalysis['resolutions'] }
+export type CodeBehaviorContext = {
+  task: Record<string, unknown>
+  pendingAnalysis?: { analysisDigest: string; analysis: CodeBehaviorAnalysis; newNodeProposals: Proposal['newNodes'] }
+  repairDiagnostics: NonNullable<CodeBehaviorInput['repairDiagnostics']>
+  errors: readonly { code: string; message: string }[]
+}
+
+/** 只从冻结请求的真实Git seed读取显式context指针，旧内联任务保持原语义。 */
+export function readCodeBehaviorContext(request: Pick<ElaborationSessionRequest, 'prompt' | 'worktree' | 'inputDigest' | 'purpose'>, commonDir: string): CodeBehaviorContext {
+  const body = request.prompt.split('\n任务:\n')[1].split('\n草稿文件=')[0]
+  const [taskText, reviewText] = body.split('\n待审分析:\n')
+  const task = JSON.parse(taskText) as Record<string, unknown>
+  if (task.contextTransport === undefined) return { task, ...(reviewText === undefined ? {} : { pendingAnalysis: JSON.parse(reviewText) as CodeBehaviorContext['pendingAnalysis'] }), repairDiagnostics: [], errors: [] }
+  const seed = request.worktree, path = task.path, draftPath = /草稿文件=([^\s；]+)/.exec(request.prompt)?.[1]
+  if (task.contextTransport !== 'git-json-v1' || !seed || typeof path !== 'string' || !/^\.spex-sync-drafts\/[a-f0-9]{64}\.context\.json$/.test(path)
+    || path !== draftPath?.replace(/\.json$/, '.context.json')
+    || task.inputDigest !== request.inputDigest || typeof task.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(task.sha256)
+    || objectGit(commonDir, ['rev-parse', '--verify', `${seed.baseCommit}^{tree}`]).toString().trim() !== seed.tree) throw new Error('P0 context指针不匹配冻结请求/seed')
+  const entry = readTree(commonDir, seed.tree).find(entry => entry.path === path)
+  if (!entry || entry.mode !== '100644') throw new Error('P0 context只读Git文件缺失或mode不匹配')
+  const bytes = readObject(commonDir, entry.oid)
+  if (!isUtf8Text(bytes) || contentHash(bytes) !== task.sha256) throw new Error('P0 context只读Git文件摘要不匹配')
+  const value = JSON.parse(bytes.toString('utf8')) as CodeBehaviorContext & { version: string; inputDigest: string; purpose: string }
+  if (value.version !== 'code-behavior-context-v1' || value.inputDigest !== request.inputDigest || value.purpose !== request.purpose
+    || !value.task || typeof value.task !== 'object' || Array.isArray(value.task) || !Array.isArray(value.repairDiagnostics) || !Array.isArray(value.errors)
+    || (request.purpose === 'code_behavior_review') !== (value.pendingAnalysis !== undefined)) throw new Error('P0 context正文不匹配冻结任务身份')
+  return value
+}
+
 const within = (path: string, paths: readonly string[]): boolean => paths.some(parent => path === parent || path.startsWith(`${parent}/`))
 const sorted = (ids: readonly string[]): string[] => [...new Set(ids)].sort()
 const stable = (prefix: string, value: unknown): string => `${prefix}-${contentHash(JSON.stringify(value)).slice(0, 24)}`
@@ -209,6 +238,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   const worktree = input.plan.agentWorkflow ? stageWorktree(commonDir, input.snapshot.headCommit, input.composed.tree) : undefined
   const draftMode = input.draftProtocol === 'code-behavior-draft-v1'
   if (draftMode && !worktree) throw new TypeError('P0草稿协议必须绑定真实工作树')
+  if (input.contextTransport && !draftMode) throw new TypeError('P0 context文件运输必须绑定草稿协议')
   const frozenTreeReads = new Map<string, FrozenTreeRead>()
   verifySnapshot(input.snapshot)
   const selectedEvidence = input.baselineSelection ? readCompositionEvidence(input.snapshot, input.composed, input.baselineSelection) : null
@@ -496,7 +526,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
     if (continuation.version !== input.draftProtocol || continuation.inputDigest !== inputDigest) throw new Error('P0草稿续修完整输入绑定不匹配')
   }
   let reviewWorktree = worktree
-  const dispatch = async (purpose: BehaviorPurpose, prompt: string, schema: Record<string, unknown>): Promise<unknown> => {
+  const dispatch = async (purpose: BehaviorPurpose, prompt: string, schema: Record<string, unknown>, pendingAnalysis?: CodeBehaviorContext['pendingAnalysis']): Promise<unknown> => {
     if (signal?.aborted) throw Object.assign(new Error('行为分析已停止'), { code: 'cancelled' })
     const base = purpose === 'code_behavior_review' ? reviewWorktree : worktree
     const ownerDigest = contentHash(JSON.stringify({ version: input.draftProtocol, source: canonicalSnapshotSource(input.snapshot.source), partitionId: input.partition?.id ?? null, purpose }))
@@ -515,8 +545,15 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
       return output
     }
     if (continuation && purpose === 'code_behavior_analyze') { delete continuation.drafts.code_behavior_review; delete continuation.reviewResult; delete continuation.readyAnalysis }
-    const seed = draftMode ? stageWorktree(commonDir, input.snapshot.headCommit, overlayStageTree(commonDir, base!.tree, [{ path: binding.path.replace(/\.json$/, '.schema.json'), source: JSON.stringify(schema) }, ...(source === undefined ? [] : [{ path: binding.path, source }])]), 'edit') : base
-    if (draftMode) prompt += `\n草稿文件=${binding.path}；${material ? material.sourceKind === 'git_draft' ? '认证的原Git分析草稿已按原字节复制到当前seed；沿该原文件核实分类并续修，旧批准不继承。' : material.sourceKind === 'native_output' ? '认证的旧只读Native成功结构化输出已序列化为本轮临时材料；它不是历史Git草稿或新批准，在该文件核实分类并续修。' : '旧Native原输出材料已按认证CAS原字节复制为本轮临时输入，不是既有Git草稿；在该原文件继续修复。' : source === undefined ? '首次实际创建该文件。' : '已有原草稿已复制到当前seed，在原文件继续修改，不从零重答。'}本段规定输出运输方式，替代上文只返回JSON/不修改文件的运输要求；业务文件仍只读，唯一可写例外为此草稿。结构化业务JSON写入此临时文件，Spec、源码、全部测试、其他owner文件保持不变。只允许正常git add和git commit该草稿并保持clean；无需改正文时可正常commit --allow-empty，保留hooks。final只返回简短summary，不重答整份JSON。草稿仅为非权威诊断材料，不是raw、事实、批准或新授权。\n草稿业务schema只读文件=${binding.path.replace(/\.json$/, '.schema.json')}；先读取精确schema并自检，禁止修改schema。原具体错误：${JSON.stringify(material?.errors ?? prior?.errors ?? continuation?.errors?.[purpose] ?? [])}；本轮修复诊断：${JSON.stringify(input.repairDiagnostics ?? [])}`
+    const repairErrors = material?.errors ?? prior?.errors ?? continuation?.errors?.[purpose] ?? []
+    const contextPath = binding.path.replace(/\.json$/, '.context.json')
+    const contextSource = input.contextTransport ? JSON.stringify({ version: 'code-behavior-context-v1', inputDigest, purpose, task: JSON.parse(context) as Record<string, unknown>, ...(pendingAnalysis ? { pendingAnalysis } : {}), repairDiagnostics: input.repairDiagnostics ?? [], errors: repairErrors }) : undefined
+    const seed = draftMode ? stageWorktree(commonDir, input.snapshot.headCommit, overlayStageTree(commonDir, base!.tree, [{ path: binding.path.replace(/\.json$/, '.schema.json'), source: JSON.stringify(schema) }, ...(source === undefined ? [] : [{ path: binding.path, source }]), ...(contextSource === undefined ? [] : [{ path: contextPath, source: contextSource }])]), 'edit') : base
+    if (contextSource !== undefined) {
+      prompt = prompt.replace(`\n任务:\n${context}`, `\n任务:\n${JSON.stringify({ contextTransport: input.contextTransport, path: contextPath, sha256: contentHash(contextSource), inputDigest })}`)
+      if (pendingAnalysis) prompt = prompt.replace(`\n待审分析:\n${JSON.stringify(pendingAnalysis)}`, '')
+    }
+    if (draftMode) prompt += `\n草稿文件=${binding.path}；${material ? material.sourceKind === 'git_draft' ? '认证的原Git分析草稿已按原字节复制到当前seed；沿该原文件核实分类并续修，旧批准不继承。' : material.sourceKind === 'native_output' ? '认证的旧只读Native成功结构化输出已序列化为本轮临时材料；它不是历史Git草稿或新批准，在该文件核实分类并续修。' : '旧Native原输出材料已按认证CAS原字节复制为本轮临时输入，不是既有Git草稿；在该原文件继续修复。' : source === undefined ? '首次实际创建该文件。' : '已有原草稿已复制到当前seed，在原文件继续修改，不从零重答。'}本段规定输出运输方式，替代上文只返回JSON/不修改文件的运输要求；业务文件仍只读，唯一可写例外为此草稿。结构化业务JSON写入此临时文件，Spec、源码、全部测试、其他owner文件保持不变。只允许正常git add和git commit该草稿并保持clean；无需改正文时可正常commit --allow-empty，保留hooks。final只返回简短summary，不重答整份JSON。草稿仅为非权威诊断材料，不是raw、事实、批准或新授权。\n草稿业务schema只读文件=${binding.path.replace(/\.json$/, '.schema.json')}；先读取精确schema并自检，禁止修改schema。${contextSource === undefined ? `原具体错误：${JSON.stringify(repairErrors)}；本轮修复诊断：${JSON.stringify(input.repairDiagnostics ?? [])}` : `读取任务指针指定的完整只读context JSON：task为原任务，repairDiagnostics/errors仅为非权威修复诊断，review的pendingAnalysis为本轮完整待审分析，均须保留各项具体拒因；按原JSON草稿继续修复。context、schema等临时协议文件不属于业务checkedPaths，不修改这些只读文件；仓库仍可自由读取。`}`
     const nativeSchema = draftMode ? DRAFT_RECEIPT_SCHEMA : schema
     const request = { root: input.snapshot.source.canonicalRoot, base: seed?.baseCommit ?? input.snapshot.headCommit, ...(seed ? { worktree: seed } : {}), requestKey: `${input.requestKey}:${purpose}`, inputDigest, purpose, prompt, schema: nativeSchema, timeoutMs: input.timeoutMs, signal, model: syncModel(input), effort: 'high' as const, ...(!worktree && frozenEntries.length ? { frozenEntries } : {}) }
     let result: Awaited<ReturnType<ElaborationRunner>>
@@ -744,7 +781,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   reviewProperties.analysisDigest = { ...string, enum: [analysisDigest] }
   if (worktree) reviewWorktree = stageWorktree(commonDir, input.snapshot.headCommit, overlayStageTree(commonDir, worktree.tree, proposal.resolutions.map(resolution => ({ path: resolution.path, source: resolution.content, mode: resolution.mode }))))
   const reviewStage = { analysisDigest, analysis, newNodeProposals: proposal.newNodes }
-  const review = await dispatch('code_behavior_review', worktree ? `${STAGE_READING_INSTRUCTIONS}\n${nativeBusinessSemantics}\n只读独立复查本区全部真实changedPaths、分析的change.id及引用行为，读取当前工作树及historicalRoles的Spec、源码、调用方和完整测试断言。核分类、原意/作者差量、整合与AC授权、新治理父nodeId和叶职责；不能采用构建者结论或编造政策。checkedPaths填写实际核对的具体仓库文件；必须覆盖全部changedPaths，checkedChangeIds覆盖全部本轮change.id。accept只能findings为空；否则repair并给具体证据/反例。schema已固定inputDigest=${inputDigest}及analysisDigest=${analysisDigest}，只返回JSON，不修改文件。\n任务:\n${context}\n待审分析:\n${JSON.stringify(reviewStage)}` : `${readingInstructions}${reviewNewNodeInstructions}你是独立代码行为审查者。必须独立重读全部三方源码、调用/测试assertions与raw/显式规则，重走变化路径。核对分类、完整范围、文本相容整合、原意与双方差异/反例、新归属节点与每项AC授权。代码自身错误不能授权弱化AC/REQ/VERIFY，不凭builder总结判通过。覆盖changedPaths和每项change.id；checkedPaths只填实际冻结完整读取且在plan.readPaths内的具体文件路径，baseline/manifest中的路径清单、目录名或只有链接目标路径不代表读取全文，不能填入；已完整读取nonTextFiles时可检查该binary或链接对象路径，链接仍不代表其目标文件全文。缺上下文/不相容解决方案/遗漏必要边界返回repair具体证据。真实业务conflict/GAP是被正确识别的输出，可accept分析但不能授予其依赖写权。verdict=accept时findings必须为空数组；findings只写需要修正的问题，不写通过说明或肯定评价。inputDigest必须为${inputDigest}，analysisDigest必须为${analysisDigest}，两者已固定在schema中，不从其他上下文摘要猜测。\n冻结三方输入:\n${context}\n待审分析:\n${JSON.stringify(reviewStage)}`, reviewSchema) as { inputDigest: string; analysisDigest: string; verdict: string; checkedPaths: string[]; checkedChangeIds: string[]; findings: unknown[] }
+  const review = await dispatch('code_behavior_review', worktree ? `${STAGE_READING_INSTRUCTIONS}\n${nativeBusinessSemantics}\n只读独立复查本区全部真实changedPaths、分析的change.id及引用行为，读取当前工作树及historicalRoles的Spec、源码、调用方和完整测试断言。核分类、原意/作者差量、整合与AC授权、新治理父nodeId和叶职责；不能采用构建者结论或编造政策。checkedPaths填写实际核对的具体仓库文件；必须覆盖全部changedPaths，checkedChangeIds覆盖全部本轮change.id。accept只能findings为空；否则repair并给具体证据/反例。schema已固定inputDigest=${inputDigest}及analysisDigest=${analysisDigest}，只返回JSON，不修改文件。\n任务:\n${context}\n待审分析:\n${JSON.stringify(reviewStage)}` : `${readingInstructions}${reviewNewNodeInstructions}你是独立代码行为审查者。必须独立重读全部三方源码、调用/测试assertions与raw/显式规则，重走变化路径。核对分类、完整范围、文本相容整合、原意与双方差异/反例、新归属节点与每项AC授权。代码自身错误不能授权弱化AC/REQ/VERIFY，不凭builder总结判通过。覆盖changedPaths和每项change.id；checkedPaths只填实际冻结完整读取且在plan.readPaths内的具体文件路径，baseline/manifest中的路径清单、目录名或只有链接目标路径不代表读取全文，不能填入；已完整读取nonTextFiles时可检查该binary或链接对象路径，链接仍不代表其目标文件全文。缺上下文/不相容解决方案/遗漏必要边界返回repair具体证据。真实业务conflict/GAP是被正确识别的输出，可accept分析但不能授予其依赖写权。verdict=accept时findings必须为空数组；findings只写需要修正的问题，不写通过说明或肯定评价。inputDigest必须为${inputDigest}，analysisDigest必须为${analysisDigest}，两者已固定在schema中，不从其他上下文摘要猜测。\n冻结三方输入:\n${context}\n待审分析:\n${JSON.stringify(reviewStage)}`, reviewSchema, reviewStage) as { inputDigest: string; analysisDigest: string; verdict: string; checkedPaths: string[]; checkedChangeIds: string[]; findings: unknown[] }
   const reviewDetails = {
     missingPaths: changedPaths.filter(path => !review.checkedPaths.includes(path)),
     missingChangeIds: changes.filter(item => !review.checkedChangeIds.includes(item.id)).map(item => item.id),

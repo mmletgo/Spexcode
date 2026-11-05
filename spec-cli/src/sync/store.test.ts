@@ -376,7 +376,7 @@ test('cli-config-v1 writer24只追加marker，23旧writer拒写且online备份�
     assert.equal(SYNC_MIGRATIONS[23]?.version, 24)
     assert.match(SYNC_MIGRATIONS[23].sql, /^SELECT 1;/)
     const backupPath = join(f.root, 'v23-before-native-config.backup')
-    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), 24)
+    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), SYNC_MIGRATIONS.length)
     assert.deepEqual(rows(f.protocol), before)
     assert.deepEqual(f.protocol.withTransaction(tx => tx.query('SELECT * FROM sqlite_master ORDER BY type,name')), schema)
     assert.deepEqual(f.protocol.withTransaction(tx => tx.query('SELECT * FROM schema_migrations WHERE component!=? OR version<=23 ORDER BY component,version', SYNC_COMPONENT)), markers)
@@ -385,7 +385,7 @@ test('cli-config-v1 writer24只追加marker，23旧writer拒写且online备份�
     assert.equal(applyComponentMigrations(backup, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 23)), 23)
     assert.deepEqual(rows(backup), before)
     assert.deepEqual(backup.withTransaction(tx => tx.query('SELECT * FROM schema_migrations ORDER BY component,version')), markers)
-    assert.equal(await migrateSyncStore(f.protocol), 24)
+    assert.equal(await migrateSyncStore(f.protocol), SYNC_MIGRATIONS.length)
   } finally { backup?.close(); f.cleanup() }
 })
 
@@ -2299,4 +2299,33 @@ test('P4 新intent head继承冻结selection的裁决/退役历史，readonly历
     const old = f.store.readBaselineSelection(source(), [{ kind: 'contract', id: 'RULE-OLD' }]); assert.ok('selection' in old); assert.equal(old.selection.bindings.find(binding => 'intentPair' in binding)?.intentPair?.receiptId, first.receipt.id)
     assert.ok(f.store.pinnedBlobRefs().some(ref => ref.sha256 === decision.sha256))
   } finally { f.cleanup() }
+})
+
+
+test('P0 context writer25只追加marker，24旧writer拒写且online备份逐字保留旧表', async () => {
+  const f = await fixture()
+  let backup: ReturnType<typeof openProtocol> | undefined
+  try {
+    const ready = f.ready(), journal = f.store.beginApply(ready.fence, ready.plan, ready.target)
+    for (const step of journal.steps) f.store.recordApplyStep(ready.fence, journal.id, { ...step, status: 'completed' })
+    const receipt = f.receipt(journal.id, ready.plan); f.store.recordReceipt(journal.id, receipt); f.store.settleApply(journal.id, receipt.id)
+    f.protocol.withTransaction(tx => tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=25', SYNC_COMPONENT))
+    const rows = (protocol: typeof f.protocol) => protocol.withTransaction(tx => Object.fromEntries(tx.query("SELECT name FROM sqlite_master WHERE type='table' AND name!='schema_migrations' ORDER BY name").map(row => [String(row.name), tx.query(`SELECT * FROM "${String(row.name)}"`)])))
+    const schema = f.protocol.withTransaction(tx => tx.query('SELECT * FROM sqlite_master ORDER BY type,name'))
+    const before = rows(f.protocol), markers = f.protocol.withTransaction(tx => tx.query('SELECT * FROM schema_migrations ORDER BY component,version'))
+    assert.equal(markers.filter(row => row.component === SYNC_COMPONENT).length, 24)
+    assert.equal(SYNC_MIGRATIONS[24]?.version, 25)
+    assert.match(SYNC_MIGRATIONS[24].sql, /^SELECT 1;/)
+    const backupPath = join(f.root, 'v24-before-p0-context.backup')
+    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), SYNC_MIGRATIONS.length)
+    assert.deepEqual(rows(f.protocol), before)
+    assert.deepEqual(f.protocol.withTransaction(tx => tx.query('SELECT * FROM sqlite_master ORDER BY type,name')), schema)
+    assert.deepEqual(f.protocol.withTransaction(tx => tx.query('SELECT * FROM schema_migrations WHERE component!=? OR version<=24 ORDER BY component,version', SYNC_COMPONENT)), markers)
+    assert.throws(() => applyComponentMigrations(f.protocol, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 24)), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
+    backup = openProtocol(backupPath)
+    assert.equal(applyComponentMigrations(backup, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 24)), 24)
+    assert.deepEqual(rows(backup), before)
+    assert.deepEqual(backup.withTransaction(tx => tx.query('SELECT * FROM schema_migrations ORDER BY component,version')), markers)
+    assert.equal(await migrateSyncStore(f.protocol), SYNC_MIGRATIONS.length)
+  } finally { backup?.close(); f.cleanup() }
 })

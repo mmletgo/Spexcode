@@ -12,6 +12,8 @@ related:
 
 ## expanded spec
 
+P0 git-json-v1真实Git合同回归先在旧实现复现context文件指针缺席，再验证完整task、两条不同历史拒因/旧JSON及pendingAnalysis逐项可读、blob/SHA/tree与原业务digest绑定。相同单owner fixture的23次accepted查找保持零runner，不等同真实23owner缓存验收。legacy与文件运输均覆盖syntax/schema原稿及schema字节续修、独审ID/路径/身份错误；临时context误列checkedPaths、context/schema修改或删除均拒绝。受控fixture不模拟EPIPE根因，也不宣称真实大owner独审已通过。
+
 指导版本回归覆盖旧v6及更早/无版本accept与当前v7的真实上下文摘要差异，旧分析ref及Native原件保持；原输出schema、源码保护、精确局部路径与独立审查断言不变。
 
 P0真实Git fixture对analyze/review分别复现syntax与schema失败，冷序列化checkpoint后下一attempt在相同原路径读取原bytes与schema/errors再正常提交；review格式、change.id尾字抄错、漏路径/非法路径、重复ID或同session/thread拒绝后，调用序列为analyze→review→review，原review JSON/schema字节及OID、完整原拒因和分析trace/OID/resultCommit保持，独审仍独立。ID抄错须同时给出准确missingChangeIds/unknownChangeIds，未绑定范围的repair不先采纳业务质疑。错owner/schema及损坏原分析trace输入仍拒绝；修改源码、测试或schema的真实提交必须拒绝，完整非草稿path/mode/OID及absence等于原composed。该受控runner不代表真实模型验收。

@@ -34,6 +34,7 @@ import { exportCandidate, freezeCandidate } from './candidate.js'
 import { composeInputSnapshots } from './composition.js'
 import { freezeDeliveryRuntime } from './runtime-freeze.js'
 import { captureInputSnapshot, contentHash, readEvidence, readObject, readTree, writeEvidence } from './snapshot.js'
+import { readCodeBehaviorContext } from './code-behavior.js'
 import { createAttemptRunner, type NativeRunCheckpoint, type NativeRunPlan, type NativeRunRecord } from './native-run.js'
 import { SyncStore } from './store.js'
 import { sessionIdForCreateKey } from '../sessions.js'
@@ -48,6 +49,16 @@ import { pinZCodeToolPolicy, rejectedFinalOutput, StructuredSessionError, struct
 import { nativeWorktreePrompt, nativeWorktreeResult, sampleNativeWorktreeProcesses } from '../native-worktree-runtime.js'
 import { cancelStructuredSession, SettledSessionCreateTimeoutError } from '../session-structured.js'
 import { freezeContext, prepareFrozenPrompt } from '../frozen-context.js'
+
+function nativeTask(request: ElaborationSessionRequest, commonDir: string): Record<string, unknown> {
+  return request.purpose.startsWith('code_behavior_') ? readCodeBehaviorContext(request, commonDir).task : JSON.parse(request.prompt.split('任务:\n')[1].split('\n')[0]) as Record<string, unknown>
+}
+
+function inlineBehaviorPrompt(request: ElaborationSessionRequest, commonDir: string): string {
+  const { task, pendingAnalysis } = readCodeBehaviorContext(request, commonDir)
+  const { requiredChangedPaths, ...context } = task
+  return `${request.prompt.split('\n任务:\n')[0]}\n冻结三方输入:\n${JSON.stringify({ ...context, changedPaths: requiredChangedPaths })}${pendingAnalysis ? `\n待审分析:\n${JSON.stringify(pendingAnalysis)}` : ''}`
+}
 
 const contractPath = '.spec/project/export-contract/spec.md'
 const fixturePath = new URL('../../test/fixtures/spec-sync/export-repo/', import.meta.url)
@@ -214,7 +225,7 @@ for (const [mode, defect] of [['native-failure', 'no-progress-143'], ['native-fa
       if (defect !== 'none' && defect !== 'prior-draft' && defect !== 'older-pause') { assert.equal(existsSync(join(workspace, path)), false, '不合格或无稿的旧记录不能向新seed投影正文'); restartedWithoutMaterial = true; throw Object.assign(new Error('反例安全进入新派发且无旧材料'), { code: 'unsupported' }) }
       assert.equal(contentHash(readFileSync(join(workspace, path))), contentHash(defect === 'older-pause' ? priorText : latest), '必须取最新normal Git正文SHA，不能回原seed或旧59010字节')
       assert.match(request.prompt, defect === 'older-pause' ? /已有原草稿已复制/ : /认证的原Git分析草稿/)
-      if (mode === 'missing-final') assert.match(request.prompt, /missing required structured_output/)
+      if (mode === 'missing-final') assert.match(JSON.stringify(readCodeBehaviorContext(request, f.input.source.commonDir)), /missing required structured_output/)
       else assert.doesNotMatch(request.prompt, /missing required structured_output/, '普通暂停不能伪加缺final分类')
       continued = true
       throw Object.assign(new Error('已核新attempt在最新真实Git草稿续修入口'), { code: 'unsupported' })
@@ -360,10 +371,10 @@ for (const corruptBinding of ['none', 'native', 'candidate'] as const) test(`P1�
     f.git('worktree', 'add', '--detach', workspace, seed.baseCommit)
     let output: unknown
     if (request.purpose === 'code_behavior_analyze') {
-      const task = JSON.parse(request.prompt.split('任务:\n')[1].split('\n')[0]) as { requiredChangedPaths: string[] }
+      const task = nativeTask(request, f.input.source.commonDir) as { requiredChangedPaths: string[] }
       output = { changes: task.requiredChangedPaths.map(path => ({ kind: 'refactor', paths: [path], affectedIds: ['RULE-EXPORT-05'], ruleIds: ['RULE-EXPORT-05'], originalIntent: '保留导出义务', previousBehavior: '导出行为不变', sourceBehavior: '内部文字编辑', deliveryBehavior: '导出行为不变', evidence: 'src/export.js#ExportService', counterexample: '原结果仍保留' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
     } else if (request.purpose === 'code_behavior_review') {
-      const task = JSON.parse(request.prompt.split('任务:\n')[1].split('\n')[0]) as { requiredChangedPaths: string[] }, reviewed = JSON.parse(request.prompt.split('待审分析:\n')[1].split('\n草稿文件=')[0]) as { analysisDigest: string; analysis: { changes: { id: string }[] } }
+      const task = nativeTask(request, f.input.source.commonDir) as { requiredChangedPaths: string[] }, reviewed = readCodeBehaviorContext(request, f.input.source.commonDir).pendingAnalysis! as { analysisDigest: string; analysis: { changes: { id: string }[] } }
       output = { inputDigest: request.inputDigest, analysisDigest: reviewed.analysisDigest, verdict: 'accept', checkedPaths: task.requiredChangedPaths, checkedChangeIds: reviewed.analysis.changes.map(change => change.id), findings: [] }
     } else {
       assert.equal(request.purpose, 'elaboration_generate'); assert.equal(attempt.number, 1, '后续attempt不得伪造新generate')
@@ -410,7 +421,7 @@ for (const partitioned of [false, true]) for (const keepRefactor of [false, true
       return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `postgate-${request.requestKey}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)) }
     }
     assert.ok(['code_behavior_analyze', 'code_behavior_review', 'elaboration_generate'].includes(request.purpose), request.purpose)
-    const task = JSON.parse(request.prompt.split('任务:\n')[1].split('\n')[0]) as { requiredChangedPaths: string[]; postGateReview?: { analysisRef: { sha256: string }; resultRef: { sha256: string }; candidateDigest: string; findings: { finding: { code: string; path: string; itemId: string; severity: string }; before: unknown; after: unknown }[] }[] }
+    const task = nativeTask(request, f.input.source.commonDir) as { requiredChangedPaths: string[]; postGateReview?: { analysisRef: { sha256: string }; resultRef: { sha256: string }; candidateDigest: string; findings: { finding: { code: string; path: string; itemId: string; severity: string }; before: unknown; after: unknown }[] }[] }
     const path = /草稿文件=([^\s；]+)/.exec(request.prompt)![1], workspace = join(f.parent, `postgate-${calls.length}`)
     f.git('worktree', 'add', '--detach', workspace, seed.baseCommit)
     let output: unknown
@@ -427,7 +438,7 @@ for (const partitioned of [false, true]) for (const keepRefactor of [false, true
       }
       output = { changes: task.requiredChangedPaths.map(path => ({ kind: attempt.number >= 2 && !keepRefactor ? 'allowed_change' : 'refactor', paths: [path], affectedIds: ['RULE-EXPORT-05'], ruleIds: ['RULE-EXPORT-05'], originalIntent: '保留原意，核实表示细节', previousBehavior: '原结果和失败事实', sourceBehavior: '普通序列化惯例', deliveryBehavior: '原结果和失败事实', evidence: 'src/export.js#ExportService', counterexample: '不得改变权限或AC/VERIFY' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
     } else if (request.purpose === 'code_behavior_review') {
-      const reviewed = JSON.parse(request.prompt.split('待审分析:\n')[1].split('\n草稿文件=')[0]) as { analysisDigest: string; analysis: import('./writeback-types.js').CodeBehaviorAnalysis }
+      const reviewed = readCodeBehaviorContext(request, f.input.source.commonDir).pendingAnalysis! as { analysisDigest: string; analysis: import('./writeback-types.js').CodeBehaviorAnalysis }
       output = { inputDigest: request.inputDigest, analysisDigest: reviewed.analysisDigest, verdict: 'accept', checkedPaths: task.requiredChangedPaths, checkedChangeIds: reviewed.analysis.changes.map(change => change.id), findings: [] }
     } else {
       const changed = rows(original)
@@ -489,7 +500,7 @@ for (const partitioned of [false, true]) for (const invalidBinding of partitione
     const workspace = join(f.parent, `short-errors-${calls.length}`), path = /草稿文件=([^\s；]+)/.exec(request.prompt)![1]
     f.git('worktree', 'add', '--detach', workspace, seed.baseCommit)
     let produced: ElaborationSessionResult
-    if (request.purpose.startsWith('code_behavior_')) produced = await originalRunner({ ...request, prompt: request.prompt.split('\n草稿文件=')[0].replace('\n任务:\n', '\n冻结三方输入:\n').replace('"requiredChangedPaths":', '"changedPaths":') })
+    if (request.purpose.startsWith('code_behavior_')) produced = await originalRunner({ ...request, prompt: inlineBehaviorPrompt(request, f.input.source.commonDir) })
     else {
       assert.equal(request.purpose, 'elaboration_generate')
       const generated = rows(original)
@@ -552,7 +563,7 @@ test('P1分类质疑只重做受影响P0，保留兄弟已审原ref', async t =>
   const calls: { attempt: number; domain: string; purpose: string }[] = []
   f.options.runner = async request => {
     const attempt = f.store.readAttempt(f.store.readOperation(f.operation.id).currentAttemptId!), seed = request.worktree!
-    const task = request.prompt.includes('任务:\n') ? JSON.parse(request.prompt.split('任务:\n')[1].split('\n')[0]) as { requiredChangedPaths?: string[]; targets?: { nodeId: string }[]; postGateReview?: unknown[] } : null
+    const task = request.prompt.includes('任务:\n') ? nativeTask(request, f.input.source.commonDir) as { requiredChangedPaths?: string[]; targets?: { nodeId: string }[]; postGateReview?: unknown[] } : null
     const domain = task?.requiredChangedPaths?.some(path => path.includes('import')) || task?.targets?.some(target => target.nodeId === 'import-contract') || request.purpose === 'elaboration_review' && request.prompt.includes('REQ-IMPORT-01') ? 'IMPORT' : 'EXPORT'
     calls.push({ attempt: attempt.number, domain, purpose: request.purpose })
     if (request.purpose === 'elaboration_review') {
@@ -566,7 +577,7 @@ test('P1分类质疑只重做受影响P0，保留兄弟已审原ref', async t =>
       assert.equal(Boolean(task?.postGateReview?.length), attempt.number === 2 && domain === 'EXPORT')
       output = { changes: task!.requiredChangedPaths!.map(path => ({ kind: 'refactor', paths: [path], affectedIds: [`RULE-${domain}-05`], ruleIds: [`RULE-${domain}-05`], originalIntent: '保原业务', previousBehavior: '原业务', sourceBehavior: '原业务', deliveryBehavior: '原业务', evidence: path, counterexample: '不得改变权限' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
     } else if (request.purpose === 'code_behavior_review') {
-      const state = JSON.parse(request.prompt.split('待审分析:\n')[1].split('\n草稿文件=')[0]) as { analysisDigest: string; analysis: import('./writeback-types.js').CodeBehaviorAnalysis }
+      const state = readCodeBehaviorContext(request, f.input.source.commonDir).pendingAnalysis! as { analysisDigest: string; analysis: import('./writeback-types.js').CodeBehaviorAnalysis }
       output = { inputDigest: request.inputDigest, analysisDigest: state.analysisDigest, verdict: 'accept', checkedPaths: task!.requiredChangedPaths, checkedChangeIds: state.analysis.changes.map(change => change.id), findings: [] }
     } else {
       const generated = rows(domain === 'IMPORT' ? importSpec : original, domain === 'IMPORT' ? importPath : contractPath)
@@ -4860,7 +4871,7 @@ test('已审Native JSON经P1合法null扩域及V1拒绝后，跨纯暂停attempt
     const seed = request.worktree!, workspace = join(f.parent, `accepted-draft-${attempt.number}-${request.purpose}`)
     f.git('worktree', 'add', '--detach', workspace, seed.baseCommit)
     if (request.purpose.startsWith('code_behavior_')) {
-      const generated = await originalRunner({ ...request, prompt: request.prompt.split('\n草稿文件=')[0].replace('\n任务:\n', '\n冻结三方输入:\n').replace('"requiredChangedPaths":', '"changedPaths":') })
+      const generated = await originalRunner({ ...request, prompt: inlineBehaviorPrompt(request, f.input.source.commonDir) })
       const path = /草稿文件=([^\s；]+)/.exec(request.prompt)![1]
       mkdirSync(join(workspace, path, '..'), { recursive: true }); writeFileSync(join(workspace, path), JSON.stringify(generated.output))
       execFileSync('git', ['-C', workspace, 'add', path], { stdio: 'pipe' }); execFileSync('git', ['-C', workspace, 'commit', '--allow-empty', '-m', 'normal P0 draft'], { stdio: 'pipe' })
@@ -5010,13 +5021,13 @@ test('Coordinator Native Spec→Code scratch构建后6→1→1沿原builder来�
     f.calls.push(request)
     const attempt = f.store.readAttempt(f.store.readOperation(f.operation.id).currentAttemptId!)
     calls.push({ attempt: attempt.number, purpose: request.purpose, key: request.requestKey })
-    const task = request.prompt.includes('任务:\n') ? JSON.parse(request.prompt.split('任务:\n')[1].split('\n')[0]) : null
+    const task = request.prompt.includes('任务:\n') ? nativeTask(request, f.input.source.commonDir) as { requiredChangedPaths: string[]; approvedSpecs: string[]; allowedScope: { paths: string[] } } : null
     let output: unknown, witness: ReturnType<typeof nativeWorktreeResult> | undefined
     if (request.purpose === 'code_behavior_analyze') {
-      output = { changes: task.requiredChangedPaths.map((path: string) => { const owner = definitions.find(item => item.path === path || item.sourcePath === path)!; return { kind: 'refactor', paths: [path], affectedIds: [`RULE-${owner.upper}-05`], ruleIds: [`RULE-${owner.upper}-05`], originalIntent: '原明确契约保持', previousBehavior: '当前导出流程', sourceBehavior: '当前导出流程', deliveryBehavior: '当前导出流程', evidence: '完整冻结Spec/source/tests均相同业务', counterexample: '内部注释不改变任何行为' } }), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+      output = { changes: task!.requiredChangedPaths.map((path: string) => { const owner = definitions.find(item => item.path === path || item.sourcePath === path)!; return { kind: 'refactor', paths: [path], affectedIds: [`RULE-${owner.upper}-05`], ruleIds: [`RULE-${owner.upper}-05`], originalIntent: '原明确契约保持', previousBehavior: '当前导出流程', sourceBehavior: '当前导出流程', deliveryBehavior: '当前导出流程', evidence: '完整冻结Spec/source/tests均相同业务', counterexample: '内部注释不改变任何行为' } }), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
     } else if (request.purpose === 'code_behavior_review') {
-      const state = JSON.parse(request.prompt.split('待审分析:\n')[1].split('\n草稿文件=')[0])
-      output = { inputDigest: request.inputDigest, analysisDigest: state.analysisDigest, verdict: 'accept', checkedPaths: task.requiredChangedPaths, checkedChangeIds: state.analysis.changes.map((item: { id: string }) => item.id), findings: [] }
+      const state = readCodeBehaviorContext(request, f.input.source.commonDir).pendingAnalysis!
+      output = { inputDigest: request.inputDigest, analysisDigest: state.analysisDigest, verdict: 'accept', checkedPaths: task!.requiredChangedPaths, checkedChangeIds: state.analysis.changes.map((item: { id: string }) => item.id), findings: [] }
     } else if (request.purpose === 'elaboration_generate' || request.purpose === 'code_generate') {
       assert.equal(attempt.number, 1, '格式续审不得派新P1或代码builder')
       const scratch = join(f.parent, `scratch-${calls.length}`), seed = request.worktree!
@@ -5027,7 +5038,7 @@ test('Coordinator Native Spec→Code scratch构建后6→1→1沿原builder来�
         writeFileSync(join(scratch, path), JSON.stringify({ version: 'elaboration-target-rows-v3', changes: [], applicability: ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: false, basis: '已有完整冻结契约保持不变', affectedIds: [] })) }))
         execFileSync('git', ['-C', scratch, 'add', path], { stdio: 'pipe' })
       } else {
-        const owner = definitions.find(item => task.approvedSpecs.includes(item.path))!
+        const owner = definitions.find(item => task!.approvedSpecs.includes(item.path))!
         writeFileSync(join(scratch, owner.sourcePath), readFileSync(join(scratch, owner.sourcePath), 'utf8') + '\n// actual Coordinator scratch build\n')
         execFileSync('git', ['-C', scratch, 'add', owner.sourcePath], { stdio: 'pipe' })
       }
@@ -5111,12 +5122,12 @@ test('Coordinator 已有code且P1新增managed AC.test的null路径只续原评�
     f.calls.push(request)
     const attempt = f.store.readAttempt(f.store.readOperation(f.operation.id).currentAttemptId!)
     calls.push({ attempt: attempt.number, purpose: request.purpose })
-    const task = request.prompt.includes('任务:\n') ? JSON.parse(request.prompt.split('任务:\n')[1].split('\n')[0]) : null
+    const task = request.prompt.includes('任务:\n') ? nativeTask(request, f.input.source.commonDir) as { requiredChangedPaths: string[]; approvedSpecs: string[]; allowedScope: { paths: string[] } } : null
     let output: unknown, witness: ReturnType<typeof nativeWorktreeResult> | undefined
-    if (request.purpose === 'code_behavior_analyze') output = { changes: task.requiredChangedPaths.map((path: string) => ({ kind: 'refactor', paths: [path], affectedIds: ['RULE-EXPORT-05'], ruleIds: ['RULE-EXPORT-05'], originalIntent: '保持原导出业务', previousBehavior: '原导出流程', sourceBehavior: '原导出流程', deliveryBehavior: '原导出流程', evidence: '冻结完整源码与原断言相同业务', counterexample: '测试技术绑定不改变业务语义' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+    if (request.purpose === 'code_behavior_analyze') output = { changes: task!.requiredChangedPaths.map((path: string) => ({ kind: 'refactor', paths: [path], affectedIds: ['RULE-EXPORT-05'], ruleIds: ['RULE-EXPORT-05'], originalIntent: '保持原导出业务', previousBehavior: '原导出流程', sourceBehavior: '原导出流程', deliveryBehavior: '原导出流程', evidence: '冻结完整源码与原断言相同业务', counterexample: '测试技术绑定不改变业务语义' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
     else if (request.purpose === 'code_behavior_review') {
-      const state = JSON.parse(request.prompt.split('待审分析:\n')[1].split('\n草稿文件=')[0])
-      output = { inputDigest: request.inputDigest, analysisDigest: state.analysisDigest, verdict: 'accept', checkedPaths: task.requiredChangedPaths, checkedChangeIds: state.analysis.changes.map((item: { id: string }) => item.id), findings: [] }
+      const state = readCodeBehaviorContext(request, f.input.source.commonDir).pendingAnalysis!
+      output = { inputDigest: request.inputDigest, analysisDigest: state.analysisDigest, verdict: 'accept', checkedPaths: task!.requiredChangedPaths, checkedChangeIds: state.analysis.changes.map((item: { id: string }) => item.id), findings: [] }
     } else if (request.purpose === 'elaboration_generate' || request.purpose === 'code_generate') {
       assert.equal(attempt.number, 1, '合法P1测试绑定扩域不能重派P1/builder')
       const scratch = join(f.parent, `managed-scratch-${calls.length}`), seed = request.worktree!
@@ -5127,7 +5138,7 @@ test('Coordinator 已有code且P1新增managed AC.test的null路径只续原评�
         mkdirSync(join(scratch, draft, '..'), { recursive: true }); writeFileSync(join(scratch, draft), JSON.stringify(adaptElaborationNativeOutput(request, generated)))
         execFileSync('git', ['-C', scratch, 'add', draft], { stdio: 'pipe' })
       } else {
-        assert.ok(task.allowedScope.paths.includes(managedTest))
+        assert.ok(task!.allowedScope.paths.includes(managedTest))
         writeFileSync(join(scratch, managedTest), readFileSync(new URL('tests/export.test.mjs', fixturePath), 'utf8'))
         execFileSync('git', ['-C', scratch, 'add', managedTest], { stdio: 'pipe' })
       }
@@ -5196,7 +5207,7 @@ for (const failureKind of ['format', 'business', 'protocol'] as const) for (cons
     assert.equal(seed.mode, 'edit')
     assert.deepEqual(readTree(f.input.source.commonDir, seed.tree).filter(entry => !entry.path.startsWith('.spex-sync-drafts/')), readTree(f.input.source.commonDir, f.input.immutableTree))
     let text: string
-    const produced = await originalRunner({ ...request, prompt: request.prompt.split('\n草稿文件=')[0].replace('\n任务:\n', '\n冻结三方输入:\n').replace('"requiredChangedPaths":', '"changedPaths":') })
+    const produced = await originalRunner({ ...request, prompt: inlineBehaviorPrompt(request, f.input.source.commonDir) })
     if (request.purpose === phase && !failed) {
       if (protocolRepair) {
         const review = structuredClone(produced.output) as { checkedChangeIds: string[] }
@@ -5207,12 +5218,12 @@ for (const failureKind of ['format', 'business', 'protocol'] as const) for (cons
     else {
       if (request.purpose === phase) {
         assert.equal(attempt.number, legacyRounds + 1)
-        if (businessRepair) { assert.equal(existsSync(join(workspace, path)), false); assert.match(request.prompt, /真实业务遗漏需重做分析/) }
+        if (businessRepair) { assert.equal(existsSync(join(workspace, path)), false); assert.match(JSON.stringify(readCodeBehaviorContext(request, f.input.source.commonDir)), /真实业务遗漏需重做分析/) }
         else {
           assert.equal(readFileSync(join(workspace, path), 'utf8'), invalid)
-          assert.match(request.prompt, protocolRepair ? /behavior_review_failed/ : legacyMaterial ? /structured_output_format_invalid/ : partitioned ? /behavior_output_schema/ : /behavior_output_json/)
+          assert.match(JSON.stringify(readCodeBehaviorContext(request, f.input.source.commonDir)), protocolRepair ? /behavior_review_failed/ : legacyMaterial ? /structured_output_format_invalid/ : partitioned ? /behavior_output_schema/ : /behavior_output_json/)
           if (protocolRepair) {
-            assert.match(request.prompt, /missingChangeIds/); assert.match(request.prompt, /unknownChangeIds/)
+            assert.match(JSON.stringify(readCodeBehaviorContext(request, f.input.source.commonDir)), /missingChangeIds/); assert.match(JSON.stringify(readCodeBehaviorContext(request, f.input.source.commonDir)), /unknownChangeIds/)
             assert.equal(f.git('rev-parse', `${seed.baseCommit}:${path}`), originalReview!.oid)
             assert.equal(f.git('rev-parse', `${seed.baseCommit}:${path.replace(/\.json$/, '.schema.json')}`), originalReview!.schemaOid)
             assert.deepEqual(readFileSync(join(workspace, path.replace(/\.json$/, '.schema.json'))), originalReview!.schema)
@@ -5311,7 +5322,7 @@ for (const partitioned of [false, true]) for (const legacyP0 of partitioned ? [f
       store.requestControl(active.id, 'pause')
       throw new StructuredSessionError('native_worktree_result_invalid', '受控模拟Native身份认证失败，该稿不得复用', { failedWorktree: nativeWorktreeResult(workspace, seed) })
     }
-    const task = JSON.parse(request.prompt.split('任务:\n')[1].split('\n')[0]) as { requiredChangedPaths: string[]; postGateReview?: import('./code-behavior.js').CodeBehaviorPostGateReview[] }
+    const task = nativeTask(request, f.input.source.commonDir) as { requiredChangedPaths: string[]; postGateReview?: import('./code-behavior.js').CodeBehaviorPostGateReview[] }
     if (retry && request.purpose !== 'code_behavior_review') {
       assert.ok(path)
       if (bindingMismatch !== 'none' && (!bindingMismatch.startsWith('p1-') || request.purpose === 'elaboration_generate')) {
@@ -5339,7 +5350,7 @@ for (const partitioned of [false, true]) for (const legacyP0 of partitioned ? [f
     let output: unknown
     if (request.purpose === 'code_behavior_analyze') output = { changes: task.requiredChangedPaths.map(path => ({ kind: 'refactor', paths: [path], affectedIds: ids, ruleIds: ids.filter(id => id.startsWith('RULE')), originalIntent: '保全部原业务行', previousBehavior: '原导出语义', sourceBehavior: '实现内部编辑', deliveryBehavior: '原导出语义', evidence: path, counterexample: '不改权限与状态事件' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
     else if (request.purpose === 'code_behavior_review') {
-      const reviewed = JSON.parse(request.prompt.split('待审分析:\n')[1].split('\n草稿文件=')[0]) as { analysisDigest: string; analysis: import('./writeback-types.js').CodeBehaviorAnalysis }
+      const reviewed = readCodeBehaviorContext(request, f.input.source.commonDir).pendingAnalysis! as { analysisDigest: string; analysis: import('./writeback-types.js').CodeBehaviorAnalysis }
       output = { inputDigest: request.inputDigest, analysisDigest: reviewed.analysisDigest, verdict: 'accept', checkedPaths: task.requiredChangedPaths, checkedChangeIds: reviewed.analysis.changes.map(change => change.id), findings: [] }
     } else {
       const changed = rows(original)
@@ -5472,12 +5483,12 @@ test('Native P0三attempt保留已审兄弟，analysis与review沿精确Git/Nati
   f.options.runner = async request => {
     if (!request.purpose.startsWith('code_behavior_')) throw Object.assign(new Error('三轮P0已验证，在P1前停止'), { code: 'unsupported' })
     const attempt = f.store.readAttempt(f.store.readOperation(f.operation.id).currentAttemptId!), seed = request.worktree!
-    const brief = JSON.parse(request.prompt.split('任务:\n')[1].split('\n待审分析:')[0].split('\n草稿文件=')[0]) as { requiredChangedPaths: string[] }
+    const brief = nativeTask(request, f.input.source.commonDir) as { requiredChangedPaths: string[] }
     const domain = brief.requiredChangedPaths.some(path => path.includes('import')) ? 'IMPORT' : 'EXPORT'
     calls.push({ attempt: attempt.number, domain, purpose: request.purpose })
     const workspace = join(f.parent, `three-p0-${calls.length}`), path = /草稿文件=([^\s；]+)/.exec(request.prompt)![1]
     f.git('worktree', 'add', '--detach', workspace, seed.baseCommit)
-    const reviewed = request.purpose === 'code_behavior_review' ? JSON.parse(request.prompt.split('待审分析:\n')[1].split('\n草稿文件=')[0]) as { analysisDigest: string; analysis: import('./writeback-types.js').CodeBehaviorAnalysis } : null
+    const reviewed = request.purpose === 'code_behavior_review' ? readCodeBehaviorContext(request, f.input.source.commonDir).pendingAnalysis! as { analysisDigest: string; analysis: import('./writeback-types.js').CodeBehaviorAnalysis } : null
     const output = reviewed ? { inputDigest: request.inputDigest, analysisDigest: reviewed.analysisDigest, verdict: 'accept', checkedPaths: brief.requiredChangedPaths, checkedChangeIds: reviewed.analysis.changes.map(change => change.id), findings: [] }
       : { changes: brief.requiredChangedPaths.map(path => ({ kind: 'refactor', paths: [path], affectedIds: [`RULE-${domain}-05`], ruleIds: [`RULE-${domain}-05`], originalIntent: '保留原业务', previousBehavior: '原业务', sourceBehavior: '原业务', deliveryBehavior: '原业务', evidence: path, counterexample: '不得改变权限或发布次数' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
     const text = reviewed && (attempt.number === 1 || domain === 'IMPORT' && attempt.number === 2) ? '{ ORIGINAL_THREE_ATTEMPT_REVIEW' : JSON.stringify(output)
@@ -5515,12 +5526,12 @@ for (const [protocolRounds, staleCarry, tamper] of [[1, false, 'none'], [1, true
   f.options.runner = async request => {
     if (!request.purpose.startsWith('code_behavior_')) throw Object.assign(new Error('冷恢复P0及新独审已验证，在P1前停止'), { code: 'unsupported' })
     const operation = store.readOperation(f.operation.id), attempt = store.readAttempt(operation.currentAttemptId!), seed = request.worktree!
-    const brief = JSON.parse(request.prompt.split('任务:\n')[1].split('\n待审分析:')[0].split('\n草稿文件=')[0]) as { requiredChangedPaths: string[] }
+    const brief = nativeTask(request, f.input.source.commonDir) as { requiredChangedPaths: string[] }
     const domain = brief.requiredChangedPaths.some(path => path.includes('import')) ? 'IMPORT' : 'EXPORT'
     const partitionKey = `partition:${request.requestKey.split(':partition:')[1].split(':')[0]}:analysis`
     if (domain === 'EXPORT') targetKey = partitionKey
     else siblingKey = partitionKey
-    const reviewed = request.purpose === 'code_behavior_review' ? JSON.parse(request.prompt.split('待审分析:\n')[1].split('\n草稿文件=')[0]) as { analysisDigest: string; analysis: import('./writeback-types.js').CodeBehaviorAnalysis } : null
+    const reviewed = request.purpose === 'code_behavior_review' ? readCodeBehaviorContext(request, f.input.source.commonDir).pendingAnalysis! as { analysisDigest: string; analysis: import('./writeback-types.js').CodeBehaviorAnalysis } : null
     if (reviewed && domain === 'EXPORT' && attempt.number === 1) {
       while (!latest(store.readAttempt(attempt.id), siblingKey)) {
         if (request.signal?.aborted) throw new Error('fixture已审兄弟前提尚未成立即被停止')
@@ -5537,7 +5548,7 @@ for (const [protocolRounds, staleCarry, tamper] of [[1, false, 'none'], [1, true
     const path = /草稿文件=([^\s；]+)/.exec(request.prompt)![1]
     if (domain === 'EXPORT' && attempt.number === rounds && !reviewed) {
       assert.equal(readObject(f.input.source.commonDir, readTree(f.input.source.commonDir, seed.tree).find(entry => entry.path === path)!.oid).toString('utf8'), analysisText, '语义repair必须续原分析JSON，不能从零重答')
-      for (const text of Object.values(finding)) assert.ok(request.prompt.includes(text), `新分析必须收到完整finding: ${text}`)
+      for (const text of Object.values(finding)) assert.ok(JSON.stringify(readCodeBehaviorContext(request, f.input.source.commonDir)).includes(text), `新分析必须收到完整finding: ${text}`)
     }
     const carried = domain === 'EXPORT' && attempt.number === staleRound
     const actual = carried ? undefined : committedDraftFixture(f, request, output, join(f.parent, `semantic-p0-${contentHash(request.requestKey)}`))
@@ -5713,13 +5724,13 @@ for (const tamper of ['none', 'review-identity', 'analysis-digest', 'owner'] as 
       const entry = readTree(f.input.source.commonDir, seed.tree).find(entry => entry.path === path)
       assert.ok(entry, '跨attempt原分析Git稿必须进入新seed')
       assert.equal(readObject(f.input.source.commonDir, entry.oid).toString(), analysisText)
-      const errors = JSON.parse(request.prompt.split('原具体错误：')[1].split('；本轮修复诊断：')[0]) as { code: string; message: string }[]
+      const errors = readCodeBehaviorContext(request, f.input.source.commonDir).errors
       assert.ok(errors.some(error => error.code === 'behavior_review_failed' && JSON.stringify(JSON.parse(error.message).review.findings) === JSON.stringify(finding)), '父unsupported且无partitionFailures仍须携完整原review findings，不只复制分析稿')
       newPrompt = request.prompt
       throw Object.assign(new Error('fixture已核新analyze seed和完整prompt，停止于模型调用边界'), { code: 'unsupported' })
     }
-    const brief = JSON.parse(request.prompt.split('任务:\n')[1].split('\n待审分析:')[0].split('\n草稿文件=')[0]) as { requiredChangedPaths: string[] }
-    const reviewed = request.purpose === 'code_behavior_review' ? JSON.parse(request.prompt.split('待审分析:\n')[1].split('\n草稿文件=')[0]) as { analysisDigest: string; analysis: import('./writeback-types.js').CodeBehaviorAnalysis } : null
+    const brief = nativeTask(request, f.input.source.commonDir) as { requiredChangedPaths: string[] }
+    const reviewed = request.purpose === 'code_behavior_review' ? readCodeBehaviorContext(request, f.input.source.commonDir).pendingAnalysis! as { analysisDigest: string; analysis: import('./writeback-types.js').CodeBehaviorAnalysis } : null
     const output = reviewed ? { inputDigest: request.inputDigest, analysisDigest: reviewed.analysisDigest, verdict: 'repair', checkedPaths: brief.requiredChangedPaths, checkedChangeIds: reviewed.analysis.changes.map(change => change.id), findings: finding }
       : { changes: brief.requiredChangedPaths.map(path => ({ kind: 'refactor', paths: [path], affectedIds: ['RULE-EXPORT-05'], ruleIds: ['RULE-EXPORT-05'], originalIntent: '保留原业务', previousBehavior: '原业务', sourceBehavior: '原业务', deliveryBehavior: '原业务', evidence: path, counterexample: '不得漏掉现行为' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
     if (reviewed && attempt.number === 1) output.checkedChangeIds![0] += 'e'
@@ -5815,10 +5826,10 @@ for (const invalidity of ['syntax', 'schema'] as const) for (const formalRetry o
     assert.equal(packet.text, rejectedText); assert.equal(failure.message, originalError); assert.equal(state.cancellation?.nativeStopped, true)
     authenticated = true
     const entries = readTree(f.input.source.commonDir, request.worktree!.tree).filter(entry => entry.path.startsWith('.spex-sync-drafts/'))
-    nextDrafts = entries.filter(entry => entry.path.endsWith('.json') && !entry.path.endsWith('.schema.json')).map(entry => readObject(f.input.source.commonDir, entry.oid).toString('utf8'))
-    nextSchemas = entries.filter(entry => entry.path.endsWith('.schema.json')).map(entry => readObject(f.input.source.commonDir, entry.oid).toString('utf8'))
-    const errors = request.prompt.split('原具体错误：')[1]?.split('；本轮修复诊断：')[0]
-    nextErrors = errors === undefined ? null : JSON.parse(errors) as unknown
+    const draftPath = /草稿文件=([^\s；]+)/.exec(request.prompt)![1]
+    nextDrafts = entries.filter(entry => entry.path === draftPath).map(entry => readObject(f.input.source.commonDir, entry.oid).toString('utf8'))
+    nextSchemas = entries.filter(entry => entry.path === draftPath.replace(/\.json$/, '.schema.json')).map(entry => readObject(f.input.source.commonDir, entry.oid).toString('utf8'))
+    nextErrors = readCodeBehaviorContext(request, f.input.source.commonDir).errors
     t.diagnostic(JSON.stringify({ invalidity, originalNativeAuthenticated: true, nativePlanRefSha256: resource.plan.planBlob.sha256, checkpointRefSha256: resource.checkpointRef.sha256, originalSchemaSha256: contentHash(JSON.stringify(native.request.schema)), originalFinalSha256: packet.sha256, originalFinalBytes: Buffer.byteLength(rejectedText), originalErrorCode: failure.code, originalError, nextDraftCount: nextDrafts.length, nextSchemaCount: nextSchemas.length }))
     throw Object.assign(new Error('仅核下一真实seed的失败材料，在后续模型修改前停止'), { code: 'unsupported' })
   }
@@ -5884,7 +5895,7 @@ for (const legacy of [false, true]) test(`Native completed评审位置字段续�
     const operation = f.store.readOperation(f.operation.id), attempt = f.store.readAttempt(operation.currentAttemptId!), seed = request.worktree!
     calls.push({ attempt: attempt.number, purpose: request.purpose, key: request.requestKey })
     assert.notEqual(request.purpose, 'code_generate', '代码到Spec方向不能借格式修复改源码或测试')
-    const task = request.prompt.includes('任务:\n') ? JSON.parse(request.prompt.split('任务:\n')[1].split('\n')[0]) as { requiredChangedPaths?: string[]; targets?: { nodeId: string }[]; readonlySpecRepair?: unknown } : null
+    const task = request.prompt.includes('任务:\n') ? nativeTask(request, f.input.source.commonDir) as { requiredChangedPaths?: string[]; targets?: { nodeId: string }[]; readonlySpecRepair?: unknown } : null
     const domain = task?.requiredChangedPaths?.some(path => path.includes('import')) || task?.targets?.some(target => target.nodeId === 'import-contract') ? 'IMPORT' : 'EXPORT'
     let output: unknown
     if (request.purpose === 'code_review') {
@@ -5929,7 +5940,7 @@ for (const legacy of [false, true]) test(`Native completed评审位置字段续�
     else if (request.purpose === 'implementation_plan') output = { version: 'sync-implementation-plan-v1', paths: [] }
     else if (request.purpose === 'code_behavior_analyze') output = { changes: task!.requiredChangedPaths!.map(path => ({ kind: 'refactor', paths: [path], affectedIds: [`RULE-${domain}-05`], ruleIds: [`RULE-${domain}-05`], originalIntent: '保原业务', previousBehavior: '原业务', sourceBehavior: '原业务', deliveryBehavior: '原业务', evidence: path, counterexample: '不得改变权限' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
     else if (request.purpose === 'code_behavior_review') {
-      const state = JSON.parse(request.prompt.split('待审分析:\n')[1].split('\n草稿文件=')[0]) as { analysisDigest: string; analysis: import('./writeback-types.js').CodeBehaviorAnalysis }
+      const state = readCodeBehaviorContext(request, f.input.source.commonDir).pendingAnalysis! as { analysisDigest: string; analysis: import('./writeback-types.js').CodeBehaviorAnalysis }
       output = { inputDigest: request.inputDigest, analysisDigest: state.analysisDigest, verdict: 'accept', checkedPaths: task!.requiredChangedPaths, checkedChangeIds: state.analysis.changes.map(change => change.id), findings: [] }
     } else {
       const generated = rows(domain === 'IMPORT' ? importSpec : original, domain === 'IMPORT' ? importPath : contractPath)
@@ -6011,13 +6022,13 @@ test('未采纳settled重验重新派发P0/P1并续原Git稿，坏candidate不�
     const seed = request.worktree!, path = /草稿文件=([^\s；]+)/.exec(request.prompt)![1], workspace = join(f.parent, `revalidation-${calls.length}`)
     f.git('worktree', 'add', '--detach', workspace, seed.baseCommit)
     if (retry && request.purpose !== 'code_behavior_review') assert.equal(readFileSync(join(workspace, path), 'utf8'), drafts.get(request.purpose), '新分析/P1必须继续原JSON而非丢稿')
-    const task = JSON.parse(request.prompt.split('任务:\n')[1].split('\n')[0]) as { requiredChangedPaths: string[] }
+    const task = nativeTask(request, f.input.source.commonDir) as { requiredChangedPaths: string[] }
     let output: unknown
     if (request.purpose === 'code_behavior_analyze') {
       if (retry) assert.ok(!request.prompt.includes('先前未采纳候选'), '坏candidate不能成为P0事实或业务基线')
       output = { changes: task.requiredChangedPaths.map(path => ({ kind: 'refactor', paths: [path], affectedIds: ['RULE-EXPORT-05'], ruleIds: ['RULE-EXPORT-05'], originalIntent: '保原导出行为', previousBehavior: '原语义', sourceBehavior: '原语义', deliveryBehavior: '原语义', evidence: path, counterexample: '不新增业务' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
     } else if (request.purpose === 'code_behavior_review') {
-      const reviewed = JSON.parse(request.prompt.split('待审分析:\n')[1].split('\n草稿文件=')[0]) as { analysisDigest: string; analysis: import('./writeback-types.js').CodeBehaviorAnalysis }
+      const reviewed = readCodeBehaviorContext(request, f.input.source.commonDir).pendingAnalysis! as { analysisDigest: string; analysis: import('./writeback-types.js').CodeBehaviorAnalysis }
       output = { inputDigest: request.inputDigest, analysisDigest: reviewed.analysisDigest, verdict: 'accept', checkedPaths: task.requiredChangedPaths, checkedChangeIds: reviewed.analysis.changes.map(change => change.id), findings: [] }
     } else {
       const generated = rows(original)
@@ -6052,4 +6063,41 @@ test('未采纳settled重验重新派发P0/P1并续原Git稿，坏candidate不�
   assert.equal(f.git('rev-parse', 'HEAD'), f.input.headCommit)
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
   assert.notEqual(result.receipt!.actualTree, first.receipt!.actualTree)
+})
+
+for (const frozen of ['new', 'legacy-checkpoint', 'reserved', 'null', 'empty', 'future'] as const) test(`P0 context传输只在首次冻结选择，${frozen}保留旧字段缺席与请求绑定`, async t => {
+  const f = await fixture(t, { maxAttempts: 1, maxCalls: 8, maxRepairs: 0, timeoutMs: 120_000 }, false, original, 'project', original, { agentWorkflow: 'native-worktree-v1' }, undefined, 'code', 'claude:default')
+  const claim = f.store.claimAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 30_000, expectedMessageId: f.operation.dispatchMessageId })
+  let originalProtocol: { ref: { sha256: string }; bytes: Buffer } | undefined
+  const rejectsTransport = ['null', 'empty', 'future'].includes(frozen)
+  const protocolValue = { version: 'code-behavior-draft-v1', ...(rejectsTransport ? { contextTransport: frozen === 'null' ? null : frozen === 'empty' ? '' : 'git-json-v2' } : {}) }
+  if (frozen === 'legacy-checkpoint' || rejectsTransport) {
+    const value = protocolValue, resultRef = writeEvidence(f.input.source.commonDir, value)
+    const ref = writeEvidence(f.input.source.commonDir, { version: 'sync-stage-v1', operationId: f.operation.id, attemptId: claim.attempt.id, inputId: f.input.id, policyDigest: f.operation.policyDigest, stage: 'behavior-draft-protocol', resultRef })
+    f.store.checkpoint(claim.fence, { ...ref, artifacts: syncCheckpointArtifacts(value, resultRef) })
+    originalProtocol = { ref, bytes: readEvidence(f.input.source.commonDir, ref) }
+  }
+  const reserved = frozen === 'reserved' ? f.store.reserveDispatch(claim.fence, { key: `sync:${claim.attempt.id}:original-reserved`, purpose: 'code_behavior_review', requestDigest: contentHash('原完整冻结Native请求摘要') }) : null
+  const reservedBytes = JSON.stringify(reserved)
+  let captured = false
+  f.options.runner = async request => {
+    captured = true
+    const task = JSON.parse(request.prompt.split('\n任务:\n')[1].split('\n草稿文件=')[0])
+    assert.equal(task.contextTransport, frozen === 'new' ? 'git-json-v1' : undefined)
+    assert.equal(request.worktree!.mode, frozen === 'reserved' ? 'read' : 'edit')
+    const contexts = readTree(f.input.source.commonDir, request.worktree!.tree).filter(entry => entry.path.endsWith('.context.json'))
+    assert.equal(contexts.length, frozen === 'new' ? 1 : 0)
+    if (frozen !== 'new') assert.ok(request.prompt.includes('原具体错误：[]；本轮修复诊断：[]') || frozen === 'reserved')
+    throw Object.assign(new Error('只核冻结合同，不执行任何真实业务agent'), { code: 'unsupported' })
+  }
+  const result = await runSyncOperation(f.store, f.operation.id, f.options)
+  assert.equal(captured, !rejectsTransport)
+  if (rejectsTransport) { assert.equal(result.failure?.code, 'behavior_context_transport_unsupported'); assert.match(result.failure!.message, /仅字段缺席/) }
+  const attempt = f.store.readAttempt(claim.attempt.id)
+  const protocols = attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).filter(wrapper => wrapper.stage === 'behavior-draft-protocol')
+  assert.equal(protocols.length, frozen === 'reserved' ? 0 : 1)
+  if (protocols.length) assert.deepEqual(JSON.parse(readEvidence(f.input.source.commonDir, protocols[0].resultRef).toString()), frozen === 'new' ? { version: 'code-behavior-draft-v1', contextTransport: 'git-json-v1' } : protocolValue)
+  if (rejectsTransport) assert.equal(attempt.dispatchPlans.length, 0)
+  if (originalProtocol) assert.deepEqual(readEvidence(f.input.source.commonDir, originalProtocol.ref), originalProtocol.bytes)
+  if (reserved) assert.equal(JSON.stringify(attempt.dispatchPlans.find(dispatch => dispatch.key === reserved.key)), reservedBytes)
 })

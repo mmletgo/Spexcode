@@ -29,7 +29,7 @@
 
 - ZCode使用`zcode:default`或`zcode:<provider-id>/<model>`，模型/别名交SDK解析，实际每轮选择另行留证；与Claude共用版本化原生工作树执行、队列和资源桥；换provider仍须新操作/正式retryOf，不自动fallback。旧v4只读策略和原生读取证明仅用于其历史请求。
 
-- 原生工作树使用结构化策略 v6，sync v24 组件 marker 拒绝旧 writer；ZCode 新 read 请求冻结精准 ExitPlanMode denylist 与 NativePlan v2，旧资源/记录及仅 reserved dispatch 的字段缺席保持，后者只以完整请求摘要确证；内部创建键首建保留上游冻结字段并严格验策略，不能恢复时补默认。旧数字与 null 的只读 v1–v5 原样恢复。unlimited 模型调用期限为 null，创建、租约、stop/close 及 Docker 期限仍独立有限。升级先停全部旧 backend/queue 并结算资源、备份数据库；回滚恢复升级前备份，不能只删 marker 或改工具描述。
+- 原生工作树使用结构化策略 v6，sync v25 组件 marker 拒绝旧 writer；ZCode 新 read 请求冻结精准 ExitPlanMode denylist 与 NativePlan v2，旧资源/记录及仅 reserved dispatch 的字段缺席保持，后者只以完整请求摘要确证；内部创建键首建保留上游冻结字段并严格验策略，不能恢复时补默认。旧数字与 null 的只读 v1–v5 原样恢复。unlimited 模型调用期限为 null，创建、租约、stop/close 及 Docker 期限仍独立有限。升级先停全部旧 backend/queue 并结算资源、备份数据库；回滚恢复升级前备份，不能只删 marker 或改工具描述。
 - 新P1按owner显式冻结elaboration-draft-v1，精确schema在同seed只读sidecar，v6 edit只写真实Git临时草稿并正常提交、小summary回执；程序读指定blob后再JSON/schema/renderer/独审。失败正文留Git refs，checkpoint只记身份和errors并保留原finding定位及severity，旧缺席不补写；诊断不进入raw role/业务candidate；跨父输入只迁draft不迁旧树，accept仍核完整摘要及冷Git/schema/最终正文渲染绑定，原source tag不向legacy补签；仅验证时允许保留hooks的正常空提交，不造业务diff。已冻结/仅reserved旧请求不补协议。该持久变更由writer22围栏保护；精准回归：`npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/sync/elaboration-draft.test.ts`。
 - 格式/schema拒绝的final仅经adapter原请求/身份/停止认证后保存为可选rejectedOutput诊断；历史只读请求的原文ref/SHA与完整正文进入同owner下一prompt，不能填成功output或候选、继承accept、读取thinking或追补旧缺席。review失败保留此前合法generation和candidate。 仅格式失败续审沿原P1/null扩域证明保partition计划及候选，认证原Native refs只给精确失败组的只读诊断seed；兄弟accept仍核完整原请求，ZCode policy按saved原字段重建，不追补缺席。
 
@@ -39,6 +39,8 @@
 - v21 checkpoint的typed artifacts随JSON wrapper一次动作保活，raw只作untrusted_final；读取须核真实失败round/Native身份，旧无role引用不补写，未知损坏JSON仍报错。升级走online backup，回滚恢复一致旧库与evidence，不能删marker。
 
 - v22登记owner Git草稿续修与已证停止RPC故障的显式准入。草稿只存Git对象身份，不借raw权限；旧缺席字段不追补，已接受候选仍须原绑定。只有现有停止协议确证并结算资源后，运行中的有效fence才能续修，用户暂停/取消和未知停止不自动重启。 缺final的typed格式失败可独立保Git；旧无witness及安全暂停稿只在新有效attempt按原request/owner/seed/schema、完整source/tests对象及正式stop/removed观察最新正常Git，旧record/checkpoint不补签，普通暂停不赋格式码。 明确已停CLI错误终态只授未批准Git材料，不借格式或success角色；可选native-protocol.jsonl只记安全元数据，冷验不追补。
+
+- 新P0的contextTransport:git-json-v1只在原阶段checkpoint与派发均缺席时冻结；旧字段缺席保持legacy。完整任务/诊断/原errors/独审分析在同owner/purpose只读Git context sidecar，业务摘要及accepted早退保持；临时协议文件不是业务checkedPaths。writer25仅追加SELECT1，升级须停稳旧writer、online backup，回滚恢复一致v24库及evidence/Git refs，不删marker。
 
 - writer23围栏保护新P0持久协议；升级前停稳旧writer/结算或保留资源，正常online backup迁移，回滚恢复一致旧库及evidence，不删marker。新P0按attempt显式冻结code-behavior-draft-v1，analyze/review复用stage-worktree的同owner/purpose Git草稿与只读schema；格式失败续原JSON，review格式、引用绑定或覆盖协议错误保已校验分析与完整拒因，仅续原review；完整合法独审的业务finding/repair仍续原analysis并重新独审。旧reserved不补协议；认证旧Native CAS仅作新seed临时材料，不伪造历史Git稿。仅认证且命中原变更owner/affectedIds的P1后置语义质疑才触发新analysis与独审；格式失败继续原文件及失败环节，不改kind或扩授权。
 

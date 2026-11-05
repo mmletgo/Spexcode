@@ -2617,13 +2617,13 @@ test('Native raw-only空图schema不发空enum且GAP/conflict保留空身份', a
 })
 
 
-for (const phase of ['code_behavior_analyze', 'code_behavior_review'] as const) for (const invalidity of phase === 'code_behavior_review' ? ['syntax', 'schema', 'change-id', 'missing-path', 'invalid-path', 'duplicate', 'session', 'thread', 'repair-scope'] as const : ['syntax', 'schema'] as const) test(`P0 ${phase} ${invalidity}失败跨attempt续改真实JSON草稿，review不重做分析`, async t => {
+for (const contextTransport of [undefined, 'git-json-v1'] as const) for (const phase of ['code_behavior_analyze', 'code_behavior_review'] as const) for (const invalidity of phase === 'code_behavior_review' ? ['syntax', 'schema', 'change-id', 'missing-path', 'invalid-path', 'duplicate', 'session', 'thread', 'repair-scope', 'context-path'] as const : ['syntax', 'schema'] as const) test(`P0 ${contextTransport ?? 'legacy'} ${phase} ${invalidity}失败跨attempt续改真实JSON草稿，review不重做分析`, async t => {
   const f = await fixture(t)
   writeFileSync(join(f.root, 'src/export.js'), f.source + '\n// same business\n')
   const original = await f.input()
-  const input: CodeBehaviorInput = { ...original, draftProtocol: 'code-behavior-draft-v1', model: 'claude:MiniMax-M3.1-Flash', plan: { ...original.plan, agentWorkflow: 'native-worktree-v1' } }
+  const input: CodeBehaviorInput = { ...original, ...(contextTransport ? { contextTransport } : {}), draftProtocol: 'code-behavior-draft-v1', model: 'claude:MiniMax-M3.1-Flash', plan: { ...original.plan, agentWorkflow: 'native-worktree-v1' } }
   let invalid = invalidity === 'syntax' ? '{ "原始JSON": [ BROKEN 草稿\n' : '{"原始JSON":"SCHEMA_REJECTED"}'
-  const failureCode = invalidity === 'syntax' ? 'behavior_output_json' : invalidity === 'schema' ? 'behavior_output_schema' : ['invalid-path', 'duplicate', 'session', 'thread'].includes(invalidity) ? 'behavior_analysis_invalid' : 'behavior_review_failed'
+  const failureCode = invalidity === 'syntax' ? 'behavior_output_json' : invalidity === 'schema' ? 'behavior_output_schema' : ['invalid-path', 'context-path', 'duplicate', 'session', 'thread'].includes(invalidity) ? 'behavior_analysis_invalid' : 'behavior_review_failed'
   let checkpoint: CodeBehaviorContinuation | null = null, failed = false, violation: string | undefined, failureMessage = ''
   let originalSchema: Buffer | undefined, originalDraftOid: string | undefined, originalSchemaOid: string | undefined
   const requests: string[] = []
@@ -2637,8 +2637,11 @@ for (const phase of ['code_behavior_analyze', 'code_behavior_review'] as const) 
     git(f.root, 'worktree', 'add', '--detach', workspace, seed.baseCommit)
     const schema = JSON.parse(readFileSync(join(workspace, schemaPath), 'utf8')) as Record<string, unknown>
     assert.deepEqual(request.schema, { type: 'object', additionalProperties: false, properties: { summary: { type: 'string' } }, required: ['summary'] })
-    const brief = JSON.parse(request.prompt.split('任务:\n')[1].split('\n待审分析:')[0].split('\n草稿文件=')[0]) as { requiredChangedPaths: string[] }
-    const stage = request.purpose === 'code_behavior_review' ? JSON.parse(request.prompt.split('待审分析:\n')[1].split('\n草稿文件=')[0]) as { analysisDigest: string; analysis: CodeBehaviorAnalysis } : null
+    const { readCodeBehaviorContext } = await import('./code-behavior.js')
+    const context = readCodeBehaviorContext(request, input.snapshot.source.commonDir)
+    const brief = context.task as { requiredChangedPaths: string[] }
+    const stage = context.pendingAnalysis ?? null
+    const diagnosticText = contextTransport ? JSON.stringify(context) : request.prompt
     const review = stage ? { inputDigest: request.inputDigest, analysisDigest: stage.analysisDigest, verdict: 'accept', checkedPaths: [...brief.requiredChangedPaths], checkedChangeIds: stage.analysis.changes.map(change => change.id), findings: [] as { message: string; evidence: string; counterexample: string }[] } : null
     const output = review ?? { changes: brief.requiredChangedPaths.map(path => ({ kind: 'refactor', paths: [path], affectedIds: ['RULE-EXPORT-05'], ruleIds: ['RULE-EXPORT-05'], originalIntent: '保留既有业务', previousBehavior: '既有行为', sourceBehavior: '既有行为', deliveryBehavior: '既有行为', evidence: path, counterexample: '不改变发布次数' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
     let text = JSON.stringify(output)
@@ -2648,6 +2651,7 @@ for (const phase of ['code_behavior_analyze', 'code_behavior_review'] as const) 
         if (invalidity === 'change-id' || invalidity === 'repair-scope') review.checkedChangeIds[0] += 'e'
         if (invalidity === 'missing-path') review.checkedPaths = []
         if (invalidity === 'invalid-path') review.checkedPaths.push('src/missing.js')
+        if (invalidity === 'context-path') review.checkedPaths.push(draftPath.replace(/\.json$/, '.context.json'))
         if (invalidity === 'duplicate') review.checkedChangeIds.push(review.checkedChangeIds[0])
         if (invalidity === 'repair-scope') { review.verdict = 'repair'; review.findings = [{ message: '覆盖未绑定前不能采纳的业务质疑', evidence: '原源码', counterexample: '原幂等边界' }] }
         invalid = JSON.stringify(review)
@@ -2656,8 +2660,8 @@ for (const phase of ['code_behavior_analyze', 'code_behavior_review'] as const) 
     }
     else if (request.purpose === phase) {
       assert.equal(readFileSync(join(workspace, draftPath), 'utf8'), invalid)
-      if (['syntax', 'schema'].includes(invalidity)) assert.ok(request.prompt.includes(failureCode))
-      else assert.ok(request.prompt.includes(JSON.stringify({ code: failureCode, message: failureMessage })), '续修携完整原拒因')
+      if (['syntax', 'schema'].includes(invalidity)) assert.ok(diagnosticText.includes(failureCode))
+      else assert.ok(diagnosticText.includes(JSON.stringify({ code: failureCode, message: failureMessage })), '续修携完整原拒因')
       assert.ok(!request.prompt.includes(invalid), '原稿从文件续改，不能在prompt重答原JSON')
       assert.equal(contentHash(JSON.stringify(schema)), checkpoint!.drafts[phase]!.schemaDigest)
       assert.deepEqual(readFileSync(join(workspace, schemaPath)), originalSchema)
@@ -2706,8 +2710,64 @@ for (const phase of ['code_behavior_analyze', 'code_behavior_review'] as const) 
     const corrupted = structuredClone(prior); corrupted.readyAnalysis!.trace.inputDigest = 'wrong-original-analysis-input'
     await assert.rejects(analyzeCodeBehavior(input, run, undefined, { load: () => corrupted, save() {} }), /真实trace/)
   }
-  if (invalidity === 'syntax') for (const path of ['src/export.js', 'tests/export.test.mjs', 'delete:src/export.js', 'delete:tests/export.test.mjs', prior.drafts[phase]!.path.replace(/\.json$/, '.schema.json')]) {
+  if (invalidity === 'syntax') for (const path of ['src/export.js', 'tests/export.test.mjs', 'delete:src/export.js', 'delete:tests/export.test.mjs', prior.drafts[phase]!.path.replace(/\.json$/, '.schema.json'), ...(contextTransport ? [prior.drafts[phase]!.path.replace(/\.json$/, '.context.json'), `delete:${prior.drafts[phase]!.path.replace(/\.json$/, '.context.json')}`] : [])]) {
     violation = path
     await assert.rejects(analyzeCodeBehavior(input, run, undefined, { load: () => structuredClone(prior), save() {} }), /仅允许正常提交/)
   }
+})
+
+
+test('P0 git-json-v1大上下文完整绑定Git文件且相同业务身份23次accepted查找零调用', async t => {
+  const f = await fixture(t)
+  writeFileSync(join(f.root, 'src/export.js'), f.source + '\n// same business context fixture\n')
+  const original = await f.input()
+  const oldAnalysis = { proposal: { resolutions: [{ path: 'src/export.js', content: '原稿完整业务语义\n'.repeat(1800) }] }, analysis: { findings: [{ evidence: '全部旧证据\n'.repeat(900) }] } }
+  const repairDiagnostics = [1, 2].map(round => ({ code: 'behavior_review_failed', message: JSON.stringify({ ...oldAnalysis, review: { round, findings: [{ message: `独立拒因${round}`, evidence: `原审查${round}`, counterexample: `反例${round}` }] } }) }))
+  const input: CodeBehaviorInput = { ...original, draftProtocol: 'code-behavior-draft-v1', contextTransport: 'git-json-v1', plan: { ...original.plan, agentWorkflow: 'native-worktree-v1' }, repairDiagnostics }
+  const seen: { purpose: string; requestDigest: string; tree: string; contextSha256: string; bytes: number; promptBytes: number }[] = []
+  let checkpoint: CodeBehaviorContinuation | null = null
+  const runner: ElaborationRunner = async request => {
+    const descriptor = JSON.parse(request.prompt.split('\n任务:\n')[1].split('\n草稿文件=')[0]) as { contextTransport: string; path: string; sha256: string }
+    assert.equal(descriptor.contextTransport, 'git-json-v1', '新context合同要求真实Git文件，旧inline缺席即失败；不模拟EPIPE根因')
+    const { readCodeBehaviorContext } = await import('./code-behavior.js')
+    const context = readCodeBehaviorContext(request, input.snapshot.source.commonDir)
+    assert.deepEqual(context.repairDiagnostics, repairDiagnostics)
+    assert.deepEqual(context.errors, [])
+    assert.ok(!request.prompt.includes(repairDiagnostics[0].message)); assert.ok(!request.prompt.includes(repairDiagnostics[1].message))
+    assert.match(request.prompt, /不属于业务checkedPaths/)
+    const seed = request.worktree!, workspace = join(f.root, '..', `context-${seen.length}`)
+    git(f.root, 'worktree', 'add', '--detach', workspace, seed.baseCommit)
+    const bytes = readFileSync(join(workspace, descriptor.path))
+    assert.equal(contentHash(bytes), descriptor.sha256)
+    const entry = readTree(input.snapshot.source.commonDir, seed.tree).find(entry => entry.path === descriptor.path)!
+    assert.equal(entry.mode, '100644'); assert.deepEqual(readObject(input.snapshot.source.commonDir, entry.oid), bytes)
+    assert.deepEqual(JSON.parse(bytes.toString('utf8')).task, context.task)
+    assert.throws(() => readCodeBehaviorContext({ ...request, prompt: request.prompt.replace(descriptor.sha256, 'f'.repeat(64)) }, input.snapshot.source.commonDir), /摘要不匹配/)
+    assert.throws(() => readCodeBehaviorContext({ ...request, worktree: { ...seed, tree: input.composed.tree } }, input.snapshot.source.commonDir), /seed/)
+    const task = context.task as { requiredChangedPaths: string[] }
+    const stage = context.pendingAnalysis
+    const output = stage ? { inputDigest: request.inputDigest, analysisDigest: stage.analysisDigest, verdict: 'accept', checkedPaths: task.requiredChangedPaths, checkedChangeIds: stage.analysis.changes.map(change => change.id), findings: [] } : { changes: task.requiredChangedPaths.map(path => ({ kind: 'refactor', paths: [path], affectedIds: ['RULE-EXPORT-05'], ruleIds: ['RULE-EXPORT-05'], originalIntent: '保留业务', previousBehavior: '原行为', sourceBehavior: '原行为', deliveryBehavior: '原行为', evidence: '真实源码与测试完整核对', counterexample: '重复完成只发布一次' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+    if (stage) {
+      assert.equal(contentHash(JSON.stringify(stage.analysis)), stage.analysisDigest)
+      assert.equal(stage.analysis.inputDigest, request.inputDigest)
+      assert.deepEqual(JSON.parse(bytes.toString('utf8')).pendingAnalysis, stage)
+      assert.ok(!request.prompt.includes(JSON.stringify(stage)))
+      assert.deepEqual(stage.newNodeProposals, [])
+    }
+    const path = /草稿文件=([^\s；]+)/.exec(request.prompt)![1]
+    mkdirSync(join(workspace, path, '..'), { recursive: true }); writeFileSync(join(workspace, path), JSON.stringify(output))
+    git(workspace, 'add', path); git(workspace, 'commit', '-m', `normal P0 context draft ${seen.length}`)
+    seen.push({ purpose: request.purpose, requestDigest: contentHash(JSON.stringify({ ...request, signal: undefined })), tree: seed.tree, contextSha256: descriptor.sha256, bytes: bytes.length, promptBytes: Buffer.byteLength(request.prompt) })
+    const receipt = { summary: '已正常提交原业务JSON' }
+    return { sessionId: `context-session-${seen.length}`, threadId: `context-thread-${seen.length}`, turnId: 'turn', output: receipt, resultDigest: contentHash(JSON.stringify(receipt)), worktree: nativeWorktreeResult(workspace, seed) }
+  }
+  const result = await analyzeCodeBehavior(input, runner, undefined, { load: () => checkpoint, save: value => { checkpoint = structuredClone(value) } })
+  assert.equal(result.reviewPassed, true); assert.deepEqual(seen.map(item => item.purpose), ['code_behavior_analyze', 'code_behavior_review'])
+  let calls = 0
+  const neverRun: ElaborationRunner = async () => { calls++; throw new Error('accepted不得派发') }
+  const accepted = (digest: string) => { assert.equal(digest, result.inputDigest); return result }
+  const legacy = await analyzeCodeBehavior({ ...input, contextTransport: undefined }, neverRun, accepted)
+  for (let index = 0; index < 23; index++) assert.equal(await analyzeCodeBehavior({ ...input, requestKey: `new-attempt-${index}` }, neverRun, accepted), legacy)
+  assert.equal(calls, 0)
+  t.diagnostic(JSON.stringify({ transportContractOnly: true, epipeRootCauseClaimed: false, acceptedLookups: 23, distinctFixtureOwners: 1, addedRunnerCalls: calls, stages: seen }))
 })
