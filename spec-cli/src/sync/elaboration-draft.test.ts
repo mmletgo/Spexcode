@@ -142,6 +142,7 @@ test('Native P1续修状态事件和无状态END坏稿，保留实际Git草稿�
   const failed = await elaborate(oldInput, { runner: f.run(request => {
     assert.match(request.prompt, /仓库相对测试路径#稳定用例ID/)
     assert.ok(!request.prompt.includes('TR.from、TR.event'))
+    assert.ok(!request.prompt.includes('每个业务REQ至少由一个主FLOW.req直接覆盖。'))
     return invalidSource
   }) })
   const oldDraft = failed.rounds[0].draft!
@@ -157,6 +158,7 @@ test('Native P1续修状态事件和无状态END坏稿，保留实际Git草稿�
     assert.ok(request.prompt.includes('STEP.input、STEP.output'))
     assert.ok(request.prompt.includes('不虚构状态'))
     assert.ok(request.prompt.includes('仓库相对测试路径#稳定用例ID'))
+    assert.ok(request.prompt.includes('每个业务REQ至少由一个主FLOW.req直接覆盖。'))
     return JSON.stringify(valid)
   }) })
   assert.equal(repaired.status, 'complete', JSON.stringify(repaired.failure))
