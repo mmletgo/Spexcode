@@ -1374,7 +1374,21 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         const current = store.readOperation(operation.id), active = store.readAttempt(attempt!.id)
         if (current.control !== 'run' || current.currentAttemptId !== active.id || current.generation !== fence!.generation || active.generation !== fence!.generation || active.leaseToken !== fence!.leaseToken || ['failed', 'superseded', 'settled'].includes(active.status) || active.expiresAtMs <= Date.now() || store.readPhysicalControl(current.input.source).control !== 'run') fail('cancelled', '新草稿材料观察已失去当前运行fence')
       }
+      let materialCheckpoints: ReturnType<typeof readSyncCheckpoints> | undefined
       const loadElaborationDraftMaterial = (key: string, binding?: NonNullable<ElaborationResult['partitionBinding']>, schemaDigest?: string, request?: StageDraftMaterialRequest): ElaborationDraftMaterial | null => {
+        const commonDir = operation.input.source.commonDir, provenanceKey = `${key}:stopped-git-material-provenance`
+        let allowCommitted = false
+        if (request?.allowStoppedGitDraft) {
+          const saved = stage<{ sourceKind: string; approved: boolean; currentInputDigest: string; currentSeed: StageDraftMaterialRequest['worktree']; schemaDigest: string; draftSha256: string; materialRef: BlobRef }>(store, operation, attempt!, provenanceKey, 'automatic', materialCheckpoints ??= readSyncCheckpoints(store, operation, attempt!))
+          if (saved) {
+            const packet = JSON.parse(readEvidence(commonDir, saved.materialRef).toString('utf8')) as ElaborationDraftMaterial & { version: string; path: string }
+            if (saved.sourceKind !== 'stopped_git_draft' || saved.approved !== false || saved.currentInputDigest !== request.inputDigest || canonical(saved.currentSeed) !== canonical(request.worktree) || saved.schemaDigest !== schemaDigest || schemaDigest !== request.binding.schemaDigest
+              || packet.version !== 'stopped-git-draft-v1' || packet.path !== request.binding.path || packet.sourceKind !== 'stopped_git_draft' || typeof packet.source !== 'string' || contentHash(packet.source) !== saved.draftSha256) fail('draft_material_binding', '已冻结的P1提交草稿与本轮owner、seed或原材料摘要不匹配')
+            return packet
+          }
+          const ownerRequestKey = `sync:${attempt!.id}:elaborate${binding ? `:partition:${binding.partitionId}` : ''}:`
+          allowCommitted = !attempt!.dispatchPlans.some(dispatch => dispatch.purpose === 'elaboration_generate' && dispatch.key.startsWith(ownerRequestKey))
+        }
         const sources = retryDraftSources(store, operation, attempt!.number), existingDraft = request?.existingDraft
         const identity = ({ errors: _errors, ...draft }: ElaborationDraft) => canonical(draft)
         const existingOrigin = existingDraft ? (() => {
@@ -1412,12 +1426,19 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
                   if (zcode && failed === null) continue
                   if (!zcode) assertClaudeStoppedDraftSource(prompt, state, proof.record.worktreePath)
                   assertMaterialFence()
-                  const physical = readStoppedPhysicalDraft(operation.input.source.commonDir, proof.record.worktreePath, native.request.worktree, request.binding)
+                  const physical = readStoppedPhysicalDraft(commonDir, proof.record.worktreePath, native.request.worktree, request.binding, { allowCommitted })
                   if (physical) {
                     if (zcode && !failed) fail('stale_result', 'ZCode物理细化草稿没有原精确失败终态')
+                    const errors = [...existingDraft?.errors ?? [], ...round.findings, ...source.result.failure ? [{ code: source.result.failure.code, message: source.result.failure.message }] : []]
+                    if (physical.committedOid) {
+                      const material = { source: physical.source, errors, diagnostics: context.diagnostics, sourceKind: 'stopped_git_draft' as const }
+                      const materialRef = writeEvidence(commonDir, { version: 'stopped-git-draft-v1', path: request.binding.path, ...material })
+                      saveStage(store, fence!, provenanceKey, { sourceKind: material.sourceKind, approved: false, observationKind: zcode || proof.observedFailure ? 'native-failure' : 'pause', observedAt: Date.now(), fromOperationId: owner.id, fromAttemptId: prior.id, nativePlanRef: resource.plan.planBlob, checkpointRef: resource.checkpointRef, originalFailure: prior.failure, canonicalRecordSha256: contentHash(JSON.stringify(proof.record)), resultCommit: physical.observedHeadCommit, resultTree: physical.observedTree, oid: physical.committedOid, indexSha256: physical.indexSha256, readonlyOverlay: { previous: context.previousReadonlyOverlay, current: context.currentReadonlyOverlay }, materialRef, draftSha256: contentHash(physical.source), schemaDigest, originalInputDigest: native.request.inputDigest, currentInputDigest: request.inputDigest, currentSeed: request.worktree })
+                      return material
+                    }
                     const materialRef = writeEvidence(operation.input.source.commonDir, { version: 'stopped-physical-draft-v1', path: request.binding.path, source: physical.source })
                     saveStage(store, fence!, `${key}:stopped-physical-material-provenance`, { sourceKind: 'physical_draft', approved: false, observationKind: zcode || proof.observedFailure ? 'native-failure' : 'pause', observedAt: Date.now(), fromOperationId: owner.id, fromAttemptId: prior.id, nativePlanRef: resource.plan.planBlob, checkpointRef: resource.checkpointRef, canonicalRecordSha256: contentHash(JSON.stringify(proof.record)), observedHeadCommit: physical.observedHeadCommit, observedTree: physical.observedTree, indexSha256: physical.indexSha256, readonlyOverlay: { previous: context.previousReadonlyOverlay, current: context.currentReadonlyOverlay }, materialRef, draftSha256: contentHash(physical.source), schemaDigest, originalInputDigest: native.request.inputDigest, currentInputDigest: request.inputDigest })
-                    return { source: physical.source, errors: [...existingDraft?.errors ?? [], ...round.findings, ...source.result.failure ? [{ code: source.result.failure.code, message: source.result.failure.message }] : []], diagnostics: context.diagnostics, sourceKind: 'physical_draft' }
+                    return { source: physical.source, errors, diagnostics: context.diagnostics, sourceKind: 'physical_draft' }
                   }
                 }
               }

@@ -28,6 +28,8 @@ related:
 
 P1物理选源的新鲜度来自原认证generation的attempt与round，不来自载体round、观察时间或mtime。既有draft定位时忽略非权威errors增补但完整身份必须相同，并经原Native/Git冷验；同attempt较晚真实generation亦可优于早轮稿，不能定位来源时拒绝覆盖。原candidate/合法仅续审资格不因材料被替换。
 
+完整生成`ac-test-flow-binding-v2`可在派发前沿相同来源顺序接收`stopped_git_draft`。提示明确这是已停止旧工作树的真实提交中的唯一授权草稿，仍未批准，须沿原字节和拒因继续编辑、正常提交并重新独审。冻结后的同一请求按原材料重放，旧v1、缺字段、父接口及历史派发保持原提示。已接受候选和仅续审资格仍优先，临时草稿不进入业务交付。
+
 原P1程序冻结task/诊断沿精确schema尾段只读解析，不解析模型正文；新旧可信readonly overlay只取原task的relatedSpecs、repair.baselines/specs及本轮程序context/anchor/seal投影，逐项记录精确path/mode/OID。比较仅排这些路径并集及draft/schema，处理新增或消失诊断路径；不豁免整个.spec或source/tests/其absence。旧工作树仍对原seed全量冷验，新seed保当前已审父/诊断内容。原冻结诊断对象完整作为非权威materialDiagnostics进入新请求，新provenance留双投影，旧请求/NativePlan/摘要不重签，writer27已覆盖。
 
 P1材料回调还接收当前StageDraftBinding、含完整只读overlay的真实StageWorktree及业务inputDigest，均仅进程内参数，不重签旧saved/reserved请求。原认证Git draft必须定位到其真实owner/attempt/round；仅严格较新的已认证物理来源可替换为同一observer的physical_draft，未知或更早来源保原稿，合法candidate/仅续审仍优先，提示明确它未提交、未批准且不是Native final或历史Git稿。只复制原bytes，原Native失败/全部具体诊断保留；Agent正常提交后才沿原schema、renderer、业务授权和独立审查形成新稿，原只读祖先/source/tests/absence保持。

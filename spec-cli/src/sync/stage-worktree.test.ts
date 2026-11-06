@@ -24,6 +24,46 @@ function result(seed: ReturnType<typeof stageWorktree>, headCommit = seed.baseCo
   return { sessionId: 'session', threadId: 'thread', turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)), worktree: { baseCommit: seed.baseCommit, baseTree: seed.tree, headCommit, tree, worktreePath: '/historical/closed-worktree' } }
 }
 
+for (const mode of ['clean', 'ignored', 'ignored-foreign-draft', 'untracked', 'hidden-source', 'hidden-draft', 'wrong-index', 'committed-source', 'binary', 'unchanged'] as const) test(`stopped committed draft opt-in: ${mode}`, t => {
+  const f = fixture(t), ownerDigest = 'd'.repeat(64), path = `.spex-sync-drafts/${ownerDigest}.json`, schema = '{}'
+  const binding = { ownerDigest, path, sourceInputId: 'input', schemaDigest: contentHash(schema) }
+  const seed = stageWorktree(f.commonDir, f.parent, overlayStageTree(f.commonDir, f.tree, [{ path: path.replace('.json', '.schema.json'), source: schema }]), 'edit')
+  git(f.root, 'checkout', '--detach', seed.baseCommit)
+  const source = '{未批准的真实已提交草稿', ordinaryIgnored = mode === 'ignored' || mode === 'ignored-foreign-draft'
+  if (ordinaryIgnored) {
+    writeFileSync(join(f.root, '.git/info/exclude'), '/runtime-cache/\n/.spex-sync-drafts/foreign.json\n')
+    mkdirSync(join(f.root, 'runtime-cache')); writeFileSync(join(f.root, 'runtime-cache/entry'), 'ignored')
+  }
+  if (mode !== 'unchanged') {
+    writeFileSync(join(f.root, path), mode === 'binary' ? Buffer.from([0xff, 0x00]) : source)
+    git(f.root, 'add', path)
+    if (mode === 'committed-source') { writeFileSync(join(f.root, 'source.mjs'), 'outside draft scope'); git(f.root, 'add', 'source.mjs') }
+    git(f.root, 'commit', '-m', 'normal draft progress before Native stop')
+  }
+  if (mode === 'ignored-foreign-draft') writeFileSync(join(f.root, '.spex-sync-drafts/foreign.json'), 'unauthorized')
+  if (mode === 'untracked') writeFileSync(join(f.root, 'untracked.test.mjs'), 'unauthorized')
+  if (mode === 'hidden-source' || mode === 'hidden-draft') {
+    const changed = mode === 'hidden-source' ? 'source.mjs' : path
+    git(f.root, 'update-index', '--assume-unchanged', changed)
+    writeFileSync(join(f.root, changed), 'hidden change')
+  }
+  if (mode === 'wrong-index') {
+    writeFileSync(join(f.root, path), 'different staged draft'); git(f.root, 'add', path)
+    writeFileSync(join(f.root, path), source)
+  }
+  const head = git(f.root, 'rev-parse', 'HEAD'), tree = git(f.root, 'rev-parse', 'HEAD^{tree}'), index = readFileSync(join(f.root, '.git/index'))
+  const observe = () => readStoppedPhysicalDraft(f.commonDir, f.root, seed, binding, { allowCommitted: true })
+  if (mode === 'clean' || mode === 'ignored') {
+    if (mode === 'clean') assert.equal(readStoppedPhysicalDraft(f.commonDir, f.root, seed, binding), null)
+    else assert.throws(() => readStoppedPhysicalDraft(f.commonDir, f.root, seed, binding), /越界变化/)
+    assert.deepEqual(observe(), { source, observedHeadCommit: head, observedTree: tree, indexSha256: contentHash(index), committedOid: git(f.root, 'rev-parse', `HEAD:${path}`) })
+  } else if (mode === 'unchanged') assert.equal(observe(), null)
+  else if (mode === 'wrong-index') assert.equal(observe()?.committedOid, undefined, '仅本稿暂存的物理路径仍无已提交角色')
+  else assert.throws(observe, /越界变化/)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), index)
+  assert.equal(git(f.root, 'rev-parse', 'HEAD'), head)
+})
+
 for (const kind of ['untracked', 'tracked', 'staged'] as const) test(`stopped physical draft只读保存工作区原bytes，不授clean交付 kind=${kind}`, t => {
   const f = fixture(t), ownerDigest = 'a'.repeat(64), path = `.spex-sync-drafts/${ownerDigest}.json`, schema = '{"type":"object"}'
   const binding = { ownerDigest, path, sourceInputId: 'input', schemaDigest: contentHash(schema) }

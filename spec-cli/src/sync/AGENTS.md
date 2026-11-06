@@ -52,4 +52,6 @@
 
 - 已停owner的精确物理JSON草稿只在新fence沿stage-worktree observer读取；ZCode另须原精确turn.failed（可保原canonical cancelled），普通暂停的turn.completed/turn.cancelled不在此物理准入，既有正常Git暂停材料政策保持；只此draft可dirty，source/tests/schema/context/index授权外变化拒绝，原目录/index/Native原件不改。physical_draft明确未批准且不是旧Git/final，正常提交后才形成新draft；P0保严格较新来源与ready，P1按真实Native attempt/round只取严格较新物理稿，合法candidate/续审优先；跨父/诊断只豁免程序可信精确overlay投影，其余保护面保持。writer27围栏，升级停旧writer/结算资源、0600 online backup，回滚恢复一致v26库及evidence/Git refs。
 
+- P1完整生成v2在本owner reserve前可认证同一已停来源的真实单稿提交，要求完整index与受控物理文件匹配HEAD，允许草稿命名空间外的ignored。冻结`stopped_git_draft`未批准原bytes、原诊断和Git/Native身份，已冻结的请求冷重放按同一材料。其他已reserved、历史v1、P0与物理未提交路径沿原门，writer30围栏。
+
 - 全局P1仅分析分区沿正式P0原件和同一冻结计划认证。真实P1与仅分析P0证据分别保存并完全覆盖原计划，封口返修和V1复用重核来源。writer28只追加SELECT1，升级须停稳旧writer、正式结算资源和租约并先做一致online backup；回滚恢复v27一致库及原evidence/Git refs。
