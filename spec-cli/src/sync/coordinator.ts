@@ -1,4 +1,4 @@
-import { ELABORATION_GENERATION_GUIDANCE, ELABORATION_GENERATION_GUIDANCE_V1, partitionedElaborationCoverageMatches, type AnalysisOnlyPartitionEvidence, type ElaborationGenerationGuidance } from './elaboration-types.js'
+import { ELABORATION_GENERATION_GUIDANCE, ELABORATION_GENERATION_GUIDANCE_V1, ELABORATION_GENERATION_GUIDANCE_V2, partitionedElaborationCoverageMatches, type AnalysisOnlyPartitionEvidence, type ElaborationGenerationGuidance } from './elaboration-types.js'
 import { finiteSyncBudget, syncDeadlineExpired } from './budget.js'
 import { assertWorktreeSyncModel, syncModel, syncModelBinding } from './model-selection.js'
 import { setImmediate as yieldToControl, setTimeout as waitForPublication } from 'node:timers/promises'
@@ -325,6 +325,33 @@ function elaborationGenerationSource(store: SyncStore, owner: SyncOperation, pri
   }
   return null
 }
+
+function settledElaborationReview(store: SyncStore, operation: SyncOperation, prior: SyncAttempt, ownerKey: string, result: SavedElaboration, round: ElaborationResult['rounds'][number], failure: NonNullable<ElaborationResult['failure']>): ElaborationRepairDiagnostics['settledReview'] {
+  if (result.status !== 'failed' || !result.structurePassed || result.reviewPassed || !round.draft || !round.candidate || round.review !== null || round.reviewOutput !== null || round.rejectedOutput) return
+  const key = `${ownerKey}:${round.index}:elaboration_review`
+  const resource = store.findResource(prior.id, key)
+  if (!resource || resource.phase !== 'removed' || prior.dispatchPlans.some(dispatch => store.findResource(prior.id, dispatch.key)?.phase !== 'removed')) fail('review_retry_binding', '独审超时缺少原正式资源及结算证明')
+  const { plan, checkpoint, record, state } = authenticateNativeFailure(store, operation, prior, key, failure, readRecord, true)
+  const { request } = plan, { session } = checkpoint
+  const boundInput = ({ purpose, prompt, schema, worktree }: ElaborationSessionRequest): string => contentHash(JSON.stringify({ inputDigest: result.inputDigest, purpose, prompt, schema, worktree }))
+  if (resource.attemptId !== prior.id || resource.generation !== prior.generation || plan.schemaVersion !== 1 || checkpoint.schemaVersion !== 1
+    || request.purpose !== 'elaboration_review' || request.worktree?.mode !== 'read' || request.frozenContext || !request.model?.startsWith('zcode:') || request.inputDigest !== boundInput(request)
+    || request.root !== operation.input.source.canonicalRoot || request.base !== request.worktree.baseCommit || record.base !== request.base || record.forkCommit !== request.base
+    || !checkpoint.nativeCallRequested || !checkpoint.nativeStarted || checkpoint.status !== 'failed' || checkpoint.nativeState !== 'failed' || checkpoint.stop?.nativeStatus !== 'stopped' || checkpoint.result || checkpoint.creationTermination
+    || checkpoint.candidateDigest !== null && checkpoint.candidateDigest !== round.candidateDigest
+    || !session.threadId || !session.turnId || canonical(prior.dispatchPlans.find(dispatch => dispatch.key === key)?.session) !== canonical(session)
+    || canonical(checkpoint.failure) !== canonical({ code: failure.code, message: failure.message })
+    || !isZCodeEventsRpcTimeout(state) || record.harness !== 'zcode' || record.harnessSessionId !== session.threadId || state.zcodeNative?.sessionId !== session.threadId || state.zcodeNative.turnId !== session.turnId
+    || state.failedWorktree || state.resultWorktree || state.rejectedOutput || state.output !== undefined || state.resultDigest !== undefined) fail('review_retry_binding', '独审超时缺少同owner原只读请求及精确已结算的Native失败身份')
+  const generation = elaborationGenerationSource(store, operation, prior, round)
+  const generationOwner = generation && ownerKey.replace(`sync:${prior.id}:`, `sync:${generation.attempt.id}:`)
+  if (!generation?.request || !generation.key.startsWith(`${generationOwner}:`) || generation.request.inputDigest !== boundInput(generation.request)
+    || generation.request.root !== request.root || generation.request.base !== round.draft.seed.baseCommit
+    || store.findResource(generation.attempt.id, generation.key)?.generation !== generation.attempt.generation
+    || round.candidate.inputDigest !== result.inputDigest || round.candidateDigest !== result.candidateDigest || round.candidateDigest !== contentHash(JSON.stringify(round.candidate))) fail('review_retry_binding', '独审超时缺少同owner原Native生成及其精确Git候选绑定')
+  return { prompt: request.prompt, schema: request.schema, worktree: request.worktree }
+}
+
 /** P1业务扩域与原文件规划分别作证，完整scope必须精确等于两者的实际并集。 */
 function reviewScopeProof(store: SyncStore, operation: SyncOperation, origin: SyncAttempt, approved: SavedElaboration, generation: SavedGeneration): { p1: NonNullable<SyncOperation['contractScopeExpansions']>[number]; writerRef?: BlobRef; paths: string[] } | null {
   const commonDir = operation.input.source.commonDir, approvedRef = writeEvidence(commonDir, approved)
@@ -1487,35 +1514,53 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         return { ...source, round }
       }
       const loadElaborationRepairDiagnostics = (key: string, inputDigest: string, binding?: NonNullable<ElaborationResult['partitionBinding']>): ElaborationRepairDiagnostics | null => {
+        const ownerSuffix = `elaborate${binding ? `:partition:${binding.partitionId}` : ''}`
+        const hasOwnerGeneration = (origin: SyncAttempt): boolean => origin.dispatchPlans.some(dispatch => dispatch.purpose === 'elaboration_generate' && dispatch.key.startsWith(`sync:${origin.id}:${ownerSuffix}:`))
+        let newerGeneration = hasOwnerGeneration(attempt!)
+        const carriedGenerations = new Set<string | undefined>()
         for (const prior of store.listAttempts(operation.id).filter(item => item.number < attempt!.number).reverse()) {
           if (!['failed', 'superseded', 'settled'].includes(prior.status)) return null
           const saved = stage<SavedElaboration>(store, operation, prior, key)
           const source = binding ? partitionElaborationStage(store, operation, prior, key, binding, inputDigest) : partitionStage<SavedElaboration>(store, operation, prior, key)
           if (saved && (!source || saved.inputDigest !== inputDigest || saved.phase === 'partitioned_final' || saved.reviewPassed)) return null
+          const failure = source?.result.failure, round = source?.result.rounds.at(-1), requestKey = `sync:${prior.id}:${ownerSuffix}`
+          if (!newerGeneration && source && round && failure?.code === 'native_rpc_timeout'
+            && (!carriedGenerations.size || carriedGenerations.size === 1 && carriedGenerations.has(canonical(round.traces.find(trace => trace.purpose === 'elaboration_generate'))))
+            && (prior.failure?.kind === 'repairable' || prior.status === 'superseded' && !prior.failure)
+            && isZCodeEventsRpcTimeout({ state: 'failed', errorCode: failure.code, error: failure.message }) && priorElaborationInputMatches(prior, binding)) {
+            const settledReview = settledElaborationReview(store, operation, prior, requestKey, source.result, round, failure)
+            if (settledReview) {
+              saveStage(store, fence!, `${key}:repair-diagnostics-provenance`, { fromOperationId: operation.id, fromAttemptId: prior.id, resultRef: source.resultRef })
+              return { requestKey, inputDigest, resultRef: source.resultRef, failure, round, settledReview }
+            }
+          }
           if (prior.failure?.kind !== 'repairable') {
             if (source && canRecoverInterruptedElaborationResult(prior, source, binding)) {
-              const { failure } = source.result, round = source.result.rounds.at(-1)
               if (failure && round) {
                 const runtimeFailure = source.result.status === 'failed' && source.result.candidateDigest === null && round.candidate === null && round.candidateDigest === null && structuredAnalysisRepairCodes.has(failure.code)
                 const structuralFailure = source.result.status === 'exhausted' && failure.code === 'repair_budget_exhausted' && round.candidate === null && round.findings.some(issue => issue.severity === 'error')
                 if (runtimeFailure || structuralFailure) {
                   saveStage(store, fence!, `${key}:repair-diagnostics-provenance`, { fromOperationId: operation.id, fromAttemptId: prior.id, resultRef: source.resultRef })
-                  return { requestKey: `sync:${prior.id}:elaborate${binding ? `:partition:${binding.partitionId}` : ''}`, inputDigest, resultRef: source.resultRef, failure, round }
+                  return { requestKey, inputDigest, resultRef: source.resultRef, failure, round }
                 }
               }
             }
             if (!canSkipElaborationControlAttempt(prior, saved, binding)) return null
+            newerGeneration ||= hasOwnerGeneration(prior)
+            for (const item of saved?.rounds ?? []) {
+              const generation = item.traces.find(trace => trace.purpose === 'elaboration_generate')
+              if (generation || item.draft || item.candidate) carriedGenerations.add(canonical(generation))
+            }
             continue
           }
           if (!source) return null
           if (!priorElaborationInputMatches(prior, binding)) return null
-          const { failure } = source.result, round = source.result.rounds.at(-1)
           if (!failure || !round) return null
           const runtimeFailure = source.result.status === 'failed' && structuredAnalysisRepairCodes.has(failure.code)
           const structuralFailure = source.result.status === 'exhausted' && failure.code === 'repair_budget_exhausted' && (round.candidate === null || renderedElaborationSource(operation, prior, key) !== null) && round.findings.some(issue => issue.severity === 'error')
           if (!runtimeFailure && !structuralFailure) return null
           saveStage(store, fence!, `${key}:repair-diagnostics-provenance`, { fromOperationId: operation.id, fromAttemptId: prior.id, resultRef: source.resultRef })
-          return { requestKey: `sync:${prior.id}:elaborate${binding ? `:partition:${binding.partitionId}` : ''}`, inputDigest, resultRef: source.resultRef, failure, round }
+          return { requestKey, inputDigest, resultRef: source.resultRef, failure, round }
         }
         return null
       }
@@ -2054,7 +2099,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           protocol = { version: 'elaboration-draft-v1', generationGuidance: ELABORATION_GENERATION_GUIDANCE }
           saveStage(store, fence, 'elaboration-draft-protocol', protocol)
         }
-        if (protocol && Object.hasOwn(protocol, 'generationGuidance') && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE_V1 && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE) fail('elaboration_generation_guidance_unsupported', '持久P1生成提示版本不受支持；仅字段缺席允许原提示')
+        if (protocol && Object.hasOwn(protocol, 'generationGuidance') && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE_V1 && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE_V2 && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE) fail('elaboration_generation_guidance_unsupported', '持久P1生成提示版本不受支持；仅字段缺席允许原提示')
         const draftProtocol = protocol?.version
         const elaborationInput = { ...makeElaborationInput(draftProtocol), ...(protocol?.generationGuidance ? { generationGuidance: protocol.generationGuidance } : {}) }
         const loadDraft = draftProtocol ? (schemaDigest: string): ElaborationDraft | null => {

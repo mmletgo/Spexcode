@@ -20,13 +20,15 @@ related:
 
 新的有效fence可沿原严格较新来源顺序读取已认证且正式stop/removed的精确物理JSON草稿；ZCode另须[[sync-stage-worktree]]规定的原精确turn.failed，原canonical cancelled不单独构成拒绝，普通暂停的turn.completed/turn.cancelled不取得此物理资格，既有正常Git暂停材料政策保持。P0保existingDraft来源截断，旧物理稿不因晚observedAt/mtime覆盖后来正常Git稿。仅owner draft可dirty，所有原request/dispatch/Native身份、source/tests/schema/context/index授权外变化及当前fence/lease/CAS门保持。新checkpoint仅记approved:false、sourceKind:physical_draft、原Native/stop引用、observedHEAD/tree、indexSHA与含原文的JSON材料CAS，不追补旧witness或将文件伪称Git稿/Native final。原errors及repairDiagnostics继续给新seed；P0 review仅续审且保原ready分析。P1通过内存binding/readonly seed/inputDigest/existingDraft回调精确定位旧稿真实Native attempt/round，仅严格较新的物理来源可替换；新旧程序可信readonly overlay按精确path/mode/OID投影比较，其余保护面不变，并完整保留原errors/冻结诊断；原文经真实Agent正常提交、原JSON/schema/业务/独审后才有新draft身份。writer27保护此准入，不授额外自动重试。
 
-新P1完整生成的`ac-test-flow-binding-v2`在本owner尚未reserve时，可沿同一较新顺序和原停止认证读取[[sync-stage-worktree]]精确已提交草稿。若物理托管文件与 Git blob 有差异，由原冻结 seed 的隔离重建与完整双读认证后才冻结材料。`stopped_git_draft`记录approved:false、真实commit/tree/OID和index SHA、原Native计划/检查点/失败及材料CAS。原错误和诊断随同冻结到当前owner/seed，冷恢复用同一材料CAS重放原请求。已有reserved而未冻结此材料、旧v1、缺字段及P0仍使用原准入。原Native/Git见证与批准状态不补签。
+P1完整生成的`ac-test-flow-binding-v2`与`ac-test-flow-review-binding-v3`在本owner尚未reserve时，可沿同一较新顺序和原停止认证读取[[sync-stage-worktree]]精确已提交草稿。若物理托管文件与 Git blob 有差异，由原冻结 seed 的隔离重建与完整双读认证后才冻结材料。`stopped_git_draft`记录approved:false、真实commit/tree/OID和index SHA、原Native计划/检查点/失败及材料CAS。原错误和诊断随同冻结到当前owner/seed，冷恢复用同一材料CAS重放原请求。已有reserved而未冻结此材料、旧v1、缺字段及P0仍使用原准入。原Native/Git见证与批准状态不补签。
 
 上述观察只从通过原请求和停止身份认证的 ZCode Native root 派生原树槽供 [[content-filter]] 字节核验。共用 filter root 指针不能代替原身份。无可认证树槽时仍要求物理字节匹配 Git 对象。
 
 P0 context传输选择复用behavior-draft-protocol唯一checkpoint：对象不存在且本attempt无任何code_behavior saved/reserved dispatch时，首次写version:code-behavior-draft-v1与contextTransport:git-json-v1；已有对象无字段保持legacy；字段存在但为null、空串或未知版本时在派发前明确拒绝，不能补签或因部分owner尚未派发而换运输。新请求以同owner/purpose只读Git.context.json完整承载任务、修复诊断、原errors及独审pendingAnalysis；业务输入/分析摘要与accepted查找保持，只有真实Native prompt/seed/requestDigest变化。既有材料比较冷读受完整request/tree/SHA绑定的文件并归一原inline语义，原Native/草稿/schema/独立身份和业务范围认证保持；格式失败继续原JSON，合法业务repair仍重新分析和独审。writer25围栏拒绝忽略该checkpoint字段的旧writer，沿正常online backup及一致DB/evidence/Git refs回滚。
 
 P1权限/绑定非法的独审沿[[sync-elaboration]]现有同owner repairDiagnostics重审原合法候选。续审保留原generation trace，不要求新review轮号存在generate；按真实session/thread/turn命中该operation原attempt实际dispatch，再冷验完整保存Native请求、原结果/summary摘要及Git草稿seed/result身份。只有当前局部完整输入与原candidate机械校验保持、原review重新判为越界/绑定非法时才跳过生成；旧seed排除draft的边界、原请求字段缺席、控制attempt跳过判据、预算/资源/取消及全图seal保持。多次续审与后续只读owner返修均追溯同一真实generation来源，不把新审查轮当新生成。
+
+同一operation的P1已通过结构但未获得独审输出，若原独审因ZCode `session/events` 超时正式结算，现有repairDiagnostics也可仅重开独审。单体及分区均冷验原检查点、完整冻结输入、组合树、readSet与selection；分区同时核原计划及owner。原Native生成请求、summary及Git草稿须精确绑定同一候选。失败独审须有原只读请求、已启动的精确session/thread/turn、canonical失败及逐值匹配的正式removed/positive stopped原件；原失败保留，当前fence只沿现有provenance引用原resultRef。全局失败记录前暂停时，恢复须有同owner局部原件及同样完整的结算证明。较新生成派发或不同生成来源阻止旧候选优先，同一生成的只读续审被暂停仍可续审。其他方法超时、生成失败、业务repair、未知停止及跨operation按原准入处理。当前独审仍使用冻结提示政策，原请求和检查点无需补字段。
 
 P1的whole缓存沿[[sync-elaboration]]同时核身份与当前owner范围。分区whole不直接继承ready，必须回原local input逐owner核缓存资格并重新严格seal；单体的当前saved与历史accepted入口均须消费资格结果。scope失效只放弃当前ready复用，优先沿既有草稿来源，必要时用已冷验缓存末轮Git稿继续，不丢JSON或改原reviewPassed/trace/ref，重新生成及独审后才保存新结果。
 

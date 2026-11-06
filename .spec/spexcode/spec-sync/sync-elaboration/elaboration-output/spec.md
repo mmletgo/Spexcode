@@ -58,7 +58,9 @@ P1 的 prose 和持久契约只写业务约定；V3 尚未运行、通过或失�
 
 implementationWritePaths 显式为空时，生成与独审说明本轮源码及全部测试只读。AC.test 只能绑定冻结上下文中真实文件和用例，不把新测试或实现修复留给 P2；技术缺证不改写业务原意。
 
-提供冻结verifications且只读context已有技术登记时，生成VERIFY.id只可取当前登记且未在只读context中定义的ID；全部已在context时VERIFY差量为零项，AC.command直接引用已有技术定义，不复制只读owner。不同分区首次各自声明同一精确登记不改变业务授权，全部局部独审后由[[sync-partition-execution]]确定唯一owner；非精确登记、命令漂移和重复业务ID仍受原硬门禁。
+新冻结的完整Native P1独审复用生成侧测试绑定判据。对已有测试，沿冻结VERIFY命令和包装器的实际调用核实对应断言确实执行并覆盖AC，错绑用候选AC与冻结测试证据定位为P1普通repair。原授权可写范围内合法缺失的实现、测试文件或用例，在冻结VERIFY可于补齐后执行且未触及只读测试时，沿原结构诊断交P2，待V3实测后才能证明执行。具有可绑定真实冻结证据的独审实现或测试缺陷才另报implementation-review。只读缺口仍阻断。只续审核对同一候选及原生成身份，版本冻结和历史派发见 [[sync-elaboration]]。
+
+完整Native v3生成复用已有冻结登记指令。AC.command引用已登记ID但只读context及候选均无该VERIFY行时，从精确登记声明定义。提供冻结verifications且只读context已有技术登记时，生成VERIFY.id只可取当前登记且未在只读context中定义的ID；全部已在context时VERIFY差量为零项，AC.command直接引用已有技术定义，不复制只读owner。不同分区首次各自声明同一精确登记不改变业务授权，全部局部独审后由[[sync-partition-execution]]确定唯一owner；非精确登记、命令漂移和重复业务ID仍受原硬门禁。
 
 纯父既有VERIFY与本轮新登记不同，但本target拥有经过原输入授权核验的合法update_verification时，可保留旧定义进入同一接口更新；无授权或伪造授权仍拒绝。seed模型schema仍禁止所有VERIFY差量，程序只对该target已有且合法授权的ID，从精确冻结登记补入更新行，独立审查看到完整新候选。既有验证政策的完整演进与registration检查仍要求授权和新定义精确匹配，不开放任意技术行选择。
 

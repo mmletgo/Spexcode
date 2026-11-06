@@ -2415,7 +2415,7 @@ test('P1仅分析分区writer28只追加marker，27旧writer拒写且online备�
   } finally { backup?.close(); f.cleanup() }
 })
 
-for (const oldVersion of [27, 29] as const) test(`P1生成提示writer围栏，v${oldVersion}升级只备份一次且旧writer拒绝新库`, async () => {
+for (const oldVersion of [27, 29, 30] as const) test(`P1提示writer围栏，v${oldVersion}升级只备份一次且旧writer拒绝新库`, async () => {
   const f = await fixture()
   let backup: ReturnType<typeof openProtocol> | undefined
   try {
@@ -2429,7 +2429,7 @@ for (const oldVersion of [27, 29] as const) test(`P1生成提示writer围栏，v
     assert.equal(await migrateSyncStore(f.protocol, { backupPath }), SYNC_MIGRATIONS.length)
     assert.equal(await migrateSyncStore(f.protocol), SYNC_MIGRATIONS.length)
     assert.deepEqual(actualBackups, [backupPath])
-    const previousWriter = oldVersion === 27 ? 28 : 29
+    const previousWriter = oldVersion === 27 ? 28 : oldVersion
     assert.equal(SYNC_MIGRATIONS[previousWriter]?.version, previousWriter + 1)
     assert.match(SYNC_MIGRATIONS[previousWriter].sql, /^SELECT 1;/)
     assert.deepEqual(f.store.readAttempt(original.attempt.id), before)

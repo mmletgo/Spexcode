@@ -21,7 +21,7 @@ P0分析及独审同样复用此草稿捕获/读取能力；owner与purpose共�
 
 正式停止的工作树若严格Git状态只有ignored条目，只在HEAD及tree仍为精确原seed、全部stage-0索引path/mode/OID和受控物理文件逐项相等时判定无新增材料。`.spex-sync-drafts`本身及其所有子项的ignored变化（含大小写别名和其他owner草稿/sidecar）明确拒绝。授权draft在seed中缺席则物理也须缺席，已存在则保持原普通文件模式和字节。禁止穿过父目录软链接，并在返回前复核原索引摘要、HEAD及完整严格状态。其它ignored条目不进入草稿材料或交付；隐藏只读修改、索引变化、实际dirty与已有新提交仍经原严格门。
 
-P1完整生成的`ac-test-flow-binding-v2`调用者可在原停止认证后显式观察已提交草稿。真实HEAD须为原seed后代，树差量只包含唯一授权UTF-8普通草稿，工作树须clean或只有草稿命名空间之外的ignored项。完整stage-0索引及全部受控物理文件（含草稿）逐项匹配实际HEAD的path、mode、OID和字节，返回前复读HEAD、索引、状态和所有受控物理路径的模式与字节以拒绝竞态。原停止来源与只读保护规则保持。返回真实commit/tree/OID用于未批准材料，其他调用者及无新增稿继续沿原规则。
+P1完整生成的`ac-test-flow-binding-v2`与`ac-test-flow-review-binding-v3`调用者可在原停止认证后显式观察已提交草稿。真实HEAD须为原seed后代，树差量只包含唯一授权UTF-8普通草稿，工作树须clean或只有草稿命名空间之外的ignored项。完整stage-0索引及全部受控物理文件（含草稿）逐项匹配实际HEAD的path、mode、OID和字节，返回前复读HEAD、索引、状态和所有受控物理路径的模式与字节以拒绝竞态。原停止来源与只读保护规则保持。返回真实commit/tree/OID用于未批准材料，其他调用者及无新增稿继续沿原规则。
 
 上述提交观察用 `ls-files` 枚举未跟踪和 ignored 项，完整验证索引与受控物理文件，无需由 Git 执行内容过滤器。存在字节差异时，只有冻结HEAD属性精确使用 `filter=spexcode` 的 [[content-filter]] 已知路径可用投影证明。验证原 canonical shim、commands、bindings，再按 [[content-filter]] 仅从冻结 seed 重建可信完整托管投影。两次读取的完整物理字节都须匹配该重建结果。改写 host、同时修改物理托管块和旧 payload、任意源码或测试差异均拒绝。
 
