@@ -91,6 +91,46 @@ for (const failure of ['syntax', 'schema'] as const) test(`P1真实Git草稿${fa
   assert.deepEqual(readTree(f.commonDir, last.draft!.resultTree).filter(entry => !entry.path.startsWith('.spec/') && !entry.path.startsWith('.spex-sync-drafts/')), readTree(f.commonDir, f.snapshot.immutableTree).filter(entry => !entry.path.startsWith('.spec/')))
 })
 
+test('Native P1续修AC.test坏稿只用真实已有测试ID和可信VERIFY', async t => {
+  const f = await fixture(t)
+  const invalid = draftRows(f.input.targets[0].source!), acceptance = invalid.changes[0].tables.AC
+  acceptance[0].test = 'tests/export.test.mjs'
+  acceptance[1].test = 'tests/export.test.mjs::test_export'
+  acceptance[2].test = 'tests/export.test.mjs#重复导出保留首次结果'
+  const invalidSource = JSON.stringify(invalid)
+  const failed = await elaborate({ ...f.input, maxRepairs: 0 }, { runner: f.run(request => {
+    assert.doesNotMatch(request.prompt, /AC\.test.*仓库相对测试路径#稳定用例ID/)
+    return invalidSource
+  }) })
+  const oldDraft = failed.rounds[0].draft!
+  assert.equal(failed.reviewPassed, false)
+  assert.deepEqual(failed.rounds[0].findings.filter(issue => issue.code === 'invalid-test-binding').map(issue => issue.itemId), acceptance.slice(0, 3).map(row => row.id))
+  assert.equal(readStageDraft(f.commonDir, oldDraft, oldDraft), invalidSource)
+  const nextInput = { ...f.input, requestKey: 'ac-test-binding-repair', generationGuidance: 'ac-test-binding-v1' as const }
+  const repaired = await elaborate(nextInput, { draft: oldDraft, runner: f.run((request, workspace, draftPath) => {
+    assert.equal(readFileSync(join(workspace, draftPath), 'utf8'), invalidSource)
+    assert.match(request.prompt, /invalid-test-binding/)
+    assert.match(request.prompt, /AC\.test.*仓库相对测试路径#稳定用例ID/)
+    assert.match(request.prompt, /AC\.command.*可信登记.*VERIFY/)
+    assert.match(request.prompt, /禁止裸路径、pytest `::`、自然语言.*伪造ID/)
+    assert.match(request.prompt, /包装测试只有实际声明稳定ID、确实运行并覆盖本条断言才可引用/)
+    assert.match(request.prompt, /源码与全部测试只读/)
+    return JSON.stringify(draftRows(f.input.targets[0].source!))
+  }) })
+  assert.equal(repaired.status, 'complete', JSON.stringify(repaired.failure))
+  assert.equal(repaired.inputDigest, failed.inputDigest)
+  assert.deepEqual(f.requests.map(request => request.purpose), ['elaboration_generate', 'elaboration_generate', 'elaboration_review'])
+  assert.equal(repaired.rounds[0].draft!.schemaDigest, oldDraft.schemaDigest)
+  assert.equal(readStageDraft(f.commonDir, oldDraft, oldDraft), invalidSource)
+  assert.deepEqual(readTree(f.commonDir, repaired.rounds[0].draft!.resultTree).filter(entry => !entry.path.startsWith('.spex-sync-drafts/')), readTree(f.commonDir, repaired.rounds[0].draft!.seed.tree).filter(entry => !entry.path.startsWith('.spex-sync-drafts/')))
+  const forged = draftRows(f.input.targets[0].source!)
+  forged.changes[0].tables.AC[0].test = 'tests/export.test.mjs#AC-NOT-DECLARED-01'
+  const unverified = await elaborate({ ...nextInput, requestKey: 'forged-test-id', maxRepairs: 0 }, { runner: f.run(() => JSON.stringify(forged)) })
+  assert.equal(unverified.reviewPassed, false)
+  assert.ok(unverified.rounds[0].findings.some(issue => issue.code === 'readonly_implementation_gap' && issue.message.includes('AC-NOT-DECLARED-01')))
+  assert.equal(f.requests.at(-1)!.purpose, 'elaboration_generate')
+})
+
 test('跨source/父上下文只迁移同owner草稿；新seed保留新父Spec、全部源码/tests对象与absence', async t => {
   const f = await fixture(t), invalid = '{ prior invalid draft, do not discard'
   const failed = await elaborate({ ...f.input, maxRepairs: 0 }, { runner: f.run(() => invalid) })

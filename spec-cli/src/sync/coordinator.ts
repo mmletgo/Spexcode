@@ -1,4 +1,4 @@
-import { partitionedElaborationCoverageMatches, type AnalysisOnlyPartitionEvidence } from './elaboration-types.js'
+import { ELABORATION_GENERATION_GUIDANCE, partitionedElaborationCoverageMatches, type AnalysisOnlyPartitionEvidence } from './elaboration-types.js'
 import { finiteSyncBudget, syncDeadlineExpired } from './budget.js'
 import { assertWorktreeSyncModel, syncModel, syncModelBinding } from './model-selection.js'
 import { setImmediate as yieldToControl, setTimeout as waitForPublication } from 'node:timers/promises'
@@ -2028,12 +2028,14 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       if (!elaboration) {
         store.renewLease(fence, leaseMs); await yieldToControl(); store.renewLease(fence, leaseMs)
         if (operation.phase === 'analyzing') store.startElaboration(fence)
-        let draftProtocol = stage<{ version: 'elaboration-draft-v1' }>(store, operation, attempt, 'elaboration-draft-protocol')?.version
-        if (!draftProtocol && options.plan.agentWorkflow && !attempt.dispatchPlans.some(dispatch => dispatch.purpose.startsWith('elaboration_'))) {
-          draftProtocol = 'elaboration-draft-v1'
-          saveStage(store, fence, 'elaboration-draft-protocol', { version: draftProtocol })
+        let protocol = stage<{ version: 'elaboration-draft-v1'; generationGuidance?: typeof ELABORATION_GENERATION_GUIDANCE }>(store, operation, attempt, 'elaboration-draft-protocol')
+        if (!protocol && options.plan.agentWorkflow && !attempt.dispatchPlans.some(dispatch => dispatch.purpose.startsWith('elaboration_'))) {
+          protocol = { version: 'elaboration-draft-v1', generationGuidance: ELABORATION_GENERATION_GUIDANCE }
+          saveStage(store, fence, 'elaboration-draft-protocol', protocol)
         }
-        const elaborationInput = makeElaborationInput(draftProtocol)
+        if (protocol && Object.hasOwn(protocol, 'generationGuidance') && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE) fail('elaboration_generation_guidance_unsupported', '持久P1生成提示版本不受支持；仅字段缺席允许原提示')
+        const draftProtocol = protocol?.version
+        const elaborationInput = { ...makeElaborationInput(draftProtocol), ...(protocol?.generationGuidance ? { generationGuidance: protocol.generationGuidance } : {}) }
         const loadDraft = draftProtocol ? (schemaDigest: string): ElaborationDraft | null => {
           const draft = loadElaborationDraft('elaboration', undefined, schemaDigest)
           return draft && cacheDraft ? { ...draft, errors: [...draft.errors, ...cacheDraft.errors] } : draft
