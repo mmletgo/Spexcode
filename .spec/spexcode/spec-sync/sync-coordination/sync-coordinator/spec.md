@@ -20,7 +20,7 @@ related:
 
 新的有效fence可沿原严格较新来源顺序读取已认证且正式stop/removed的精确物理JSON草稿；ZCode另须[[sync-stage-worktree]]规定的原精确turn.failed，原canonical cancelled不单独构成拒绝，普通暂停的turn.completed/turn.cancelled不取得此物理资格，既有正常Git暂停材料政策保持。P0保existingDraft来源截断，旧物理稿不因晚observedAt/mtime覆盖后来正常Git稿。仅owner draft可dirty，所有原request/dispatch/Native身份、source/tests/schema/context/index授权外变化及当前fence/lease/CAS门保持。新checkpoint仅记approved:false、sourceKind:physical_draft、原Native/stop引用、observedHEAD/tree、indexSHA与含原文的JSON材料CAS，不追补旧witness或将文件伪称Git稿/Native final。原errors及repairDiagnostics继续给新seed；P0 review仅续审且保原ready分析。P1通过内存binding/readonly seed/inputDigest/existingDraft回调精确定位旧稿真实Native attempt/round，仅严格较新的物理来源可替换；新旧程序可信readonly overlay按精确path/mode/OID投影比较，其余保护面不变，并完整保留原errors/冻结诊断；原文经真实Agent正常提交、原JSON/schema/业务/独审后才有新draft身份。writer27保护此准入，不授额外自动重试。
 
-新P1完整生成的`ac-test-flow-binding-v2`在本owner尚未reserve时，可沿同一较新顺序和原停止认证读取[[sync-stage-worktree]]精确已提交草稿。`stopped_git_draft`记录approved:false、真实commit/tree/OID和index SHA、原Native计划/检查点/失败及材料CAS。原错误和诊断随同冻结到当前owner/seed，冷恢复用同一材料CAS重放原请求。已有reserved而未冻结此材料、旧v1、缺字段及P0仍使用原准入。原Native/Git见证与批准状态不补签。
+新P1完整生成的`ac-test-flow-binding-v2`在本owner尚未reserve时，可沿同一较新顺序和原停止认证读取[[sync-stage-worktree]]精确已提交草稿。若物理托管文件与 Git blob 有差异，由原冻结 seed 的隔离重建与完整双读认证后才冻结材料。`stopped_git_draft`记录approved:false、真实commit/tree/OID和index SHA、原Native计划/检查点/失败及材料CAS。原错误和诊断随同冻结到当前owner/seed，冷恢复用同一材料CAS重放原请求。已有reserved而未冻结此材料、旧v1、缺字段及P0仍使用原准入。原Native/Git见证与批准状态不补签。
 
 上述观察只从通过原请求和停止身份认证的 ZCode Native root 派生原树槽供 [[content-filter]] 字节核验。共用 filter root 指针不能代替原身份。无可认证树槽时仍要求物理字节匹配 Git 对象。
 

@@ -1,11 +1,12 @@
-import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync, chmodSync, existsSync, lstatSync, readdirSync, statSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync, chmodSync, existsSync, lstatSync, readdirSync, statSync, readlinkSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative } from 'node:path'
-import { execFileSync } from 'node:child_process'
-import { git, gitBinary } from '@spexcode/spec-core'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
+import { encodeProject, git, gitBinary, readConfig, runtimeRoot, treeSlotDir } from '@spexcode/spec-core'
 import { writeManagedBlock, removeManagedBlock, HARNESSES } from './harness.js'
-import { encodeProject, runtimeRoot, treeSlotDir } from '@spexcode/spec-core'
 import { writeFileIfChanged } from './file-write.js'
+import { resolveHarnessTargets } from './harness-select.js'
 
 // the three field-sharpened edges this module owes ([[content-filter]]):
 //   ① the configured command points at a STABLE shim path and degrades to `cat` (identity) when the shim is
@@ -114,11 +115,11 @@ export function describeCanonicalContractFilter(common: string): { shim: { path:
   return { shim: { path: shimPath(common), source: SHIM, mode: 0o755 }, commands: { 'filter.spexcode.clean': filterCmd(shimPath(common), 'clean'), 'filter.spexcode.smudge': filterCmd(shimPath(common), 'smudge') }, metadataPaths: [rootPath(common), bindingsPath(common), attributesPath(common)] }
 }
 
-/** 从原Native的私有树槽验证完整smudge字节，不执行配置或当前共享root指针。 */
-export function matchesStoppedContractProjection(common: string, worktree: string, nativeRoot: string | undefined, configuration: readonly string[], files: readonly { path: string; git: Buffer; physical: Buffer }[]): boolean {
+/** 只读确认原树的有效过滤器归属，不调用该过滤器。 */
+export function hasCanonicalStoppedContractFilter(common: string, worktree: string, configuration: readonly string[], required: boolean): boolean {
   const canonical = describeCanonicalContractFilter(common), bindings = canonicalContractFilterBindings(worktree)
   const commands = configuration.filter((record, index) => index % 2 === 1 && record.startsWith('filter.spexcode.'))
-  if (!commands.length) return !files.length
+  if (!commands.length) return !required
   const expected = Object.entries(canonical.commands).map(([key, command]) => `${key}\n${command}`)
   if (commands.length !== expected.length || !expected.every(command => commands.includes(command)) || configuration.some((record, index) => index % 2 === 1 && record.startsWith('core.attributesfile\n'))) return false
   const regular = (path: string): Buffer | undefined => lstatSync(path, { throwIfNoEntry: false })?.isFile() ? readFileSync(path) : undefined
@@ -126,28 +127,93 @@ export function matchesStoppedContractProjection(common: string, worktree: strin
   if (!lstatSync(dirname(canonical.shim.path), { throwIfNoEntry: false })?.isDirectory() || !lstatSync(dirname(attributes), { throwIfNoEntry: false })?.isDirectory() || !lstatSync(attributes, { throwIfNoEntry: false })?.isFile()
     || ((lstatSync(canonical.shim.path, { throwIfNoEntry: false })?.mode ?? 0) & 0o777) !== canonical.shim.mode || !regular(canonical.shim.path)?.equals(Buffer.from(canonical.shim.source))
     || regular(bindingsFile)?.toString('utf8') !== bindings.map(binding => `${binding.file}\t${binding.start}\t${binding.end}`).join('\n') + '\n') return false
-  if (!files.length) return true
-  if (!nativeRoot || !lstatSync(nativeRoot, { throwIfNoEntry: false })?.isDirectory()) return false
-  let directory = nativeRoot
-  for (const segment of ['runtime', 'home', '.spexcode', 'projects', encodeProject(dirname(common)), 'trees', encodeProject(worktree), 'contract-filter']) {
-    directory = join(directory, segment)
-    if (!lstatSync(directory, { throwIfNoEntry: false })?.isDirectory()) return false
+  return true
+}
+
+/** 按路径分量解析冻结链接，且每次展开都保持在只含Git种子数据的私有树内。 */
+function containedProjectionLinks(worktree: string, entries: readonly { path: string; mode: string }[]): boolean {
+  const directories = new Set<string>()
+  const links = new Map<string, string>()
+  const paths = new Set(entries.map(entry => entry.path))
+  for (const { path, mode } of entries) {
+    const segments = path.split('/')
+    for (let i = 1; i < segments.length; i++) directories.add(segments.slice(0, i).join('/'))
+    if (mode === '120000') {
+      for (let i = 1; i < segments.length; i++) if (!lstatSync(join(worktree, ...segments.slice(0, i))).isDirectory()) return false
+      links.set(path, readlinkSync(join(worktree, path)))
+    }
   }
-  const manifest = regular(join(directory, 'manifest'))
-  if (!manifest) return false
-  const payloads = new Map<string, string>()
-  for (const row of manifest.toString('utf8').split('\n').filter(Boolean)) {
-    const [file, target, extra] = row.split('\t')
-    const name = target?.slice(target.lastIndexOf('/') + 1) ?? ''
-    if (extra !== undefined || payloads.has(file) || !bindings.some(binding => binding.file === file) || !/^\d+$/.test(name) || target !== join(directory, name)) return false
-    payloads.set(file, target)
+  const parts = (target: string): string[] | undefined => target.startsWith('/') || target.includes('\\') ? undefined : target.split('/')
+  for (const [path, target] of links) {
+    const resolved = path.split('/').slice(0, -1)
+    let pending = parts(target)
+    if (!pending) return false
+    let expansions = 0
+    while (pending.length) {
+      const segment = pending.shift()!
+      if (!segment || segment === '.') continue
+      if (segment === '..') { if (!resolved.pop()) return false; continue }
+      if (segment.toLowerCase() === '.git') return false
+      const next = [...resolved, segment].join('/')
+      const link = links.get(next)
+      if (link !== undefined) {
+        const rest = parts(link)
+        if (!rest || ++expansions > 40) return false
+        pending = [...rest, ...pending]
+      } else {
+        const stat = lstatSync(join(worktree, next), { throwIfNoEntry: false })
+        if (directories.has(next) ? !stat?.isDirectory() : !paths.has(next) || !stat?.isFile() || pending.length) return false
+        resolved.push(segment)
+      }
+    }
+    if (!resolved.length) return false
   }
-  return files.every(file => {
-    const binding = bindings.find(binding => binding.file === file.path), path = payloads.get(file.path)
-    if (!binding || !path) return false
-    const payload = regular(path)
-    return !!payload && payload.at(-1) === 10 && file.physical.equals(Buffer.concat([file.git, Buffer.from(`${file.git.length ? '\n' : ''}${binding.start}\n`), payload, Buffer.from(`${binding.end}\n`)]))
-  })
+  return true
+}
+
+/** 只从不可变 Git seed 重建产品托管正文。旧工作树及旧 runtime 均不能作为重建输入。 */
+export function rebuildStoppedContractProjection(common: string, seed: { baseCommit: string; tree: string }, entries: readonly { path: string; mode: string }[], files: readonly { path: string; git: Buffer; physical: Buffer }[]): Map<string, Buffer> | undefined {
+  const directory = realpathSync(mkdtempSync('/tmp/spex-stopped-projection-'))
+  try {
+    const checkout = join(directory, 'main'), worktree = join(directory, 'seed'), home = join(directory, 'home')
+    const objects = join(common, 'objects')
+    if (/[\r\n]/u.test(objects)) return undefined
+    mkdirSync(home)
+    const env = {
+      PATH: '/usr/bin:/bin', HOME: home, TMPDIR: directory,
+      SPEXCODE_HOME: join(home, '.spexcode'), CODEX_HOME: join(home, '.codex'),
+      SPEX_SESSION_DATABASE_PATH: join(home, '.spexcode', 'sessions.sqlite'),
+      GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_COUNT: '2',
+      GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: '/dev/null',
+      GIT_CONFIG_KEY_1: 'core.fsmonitor', GIT_CONFIG_VALUE_1: 'false',
+      GIT_NO_REPLACE_OBJECTS: '1', GIT_NO_LAZY_FETCH: '1', GIT_ALLOW_PROTOCOL: '',
+    }
+    const run = (cwd: string, command: string, args: string[]) => {
+      const result = spawnSync(command, args, { cwd, env, stdio: ['ignore', 'pipe', 'ignore'], timeout: 60_000, maxBuffer: 1024 * 1024, killSignal: 'SIGKILL' })
+      if (result.status !== 0) throw new Error('冻结 seed 的托管文件重建失败')
+      return result.stdout
+    }
+    run(directory, '/usr/bin/git', ['init', '--quiet', '--template=', `--object-format=${seed.baseCommit.length === 64 ? 'sha256' : 'sha1'}`, checkout])
+    const alternate = join(checkout, '.git', 'objects', 'info', 'alternates')
+    writeFileSync(alternate, `${objects}\n`, { mode: 0o600 })
+    run(checkout, '/usr/bin/git', ['worktree', 'add', '--quiet', '--detach', worktree, seed.baseCommit])
+    if (run(worktree, '/usr/bin/git', ['rev-parse', 'HEAD^{tree}']).toString().trim() !== seed.tree || !containedProjectionLinks(worktree, entries)) return undefined
+    for (const target of resolveHarnessTargets(readConfig(worktree).harnesses)) {
+      if (target.kind === 'plugin' && (target.folder.includes('\\') || target.folder.split('/').some(part => !part || ['.', '..', '.git'].includes(part.toLowerCase())))) return undefined
+    }
+    const materialize = fileURLToPath(new URL('../dist/materialize.js', import.meta.url))
+    run(worktree, process.execPath, ['--input-type=module', '--eval', 'await (await import(process.argv[1])).materialize()', materialize])
+    const bindings = canonicalContractFilterBindings(worktree)
+    const rebuilt = new Map<string, Buffer>()
+    for (const file of files) {
+      const binding = bindings.find(item => item.file === file.path), target = join(worktree, file.path)
+      if (!binding || !lstatSync(target, { throwIfNoEntry: false })?.isFile()) return undefined
+      const bytes = readFileSync(target)
+      if (!bytes.equals(file.physical) || !cleanCanonicalContractText(bytes, binding).equals(file.git)) return undefined
+      rebuilt.set(file.path, bytes)
+    }
+    return rebuilt
+  } finally { rmSync(directory, { recursive: true, force: true }) }
 }
 
 /** 仅对冻结 stdin 使用可信发布 SHIM；不执行仓库配置命令或触碰其 index。 */

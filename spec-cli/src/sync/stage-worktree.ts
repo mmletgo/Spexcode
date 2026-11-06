@@ -1,4 +1,4 @@
-import { matchesStoppedContractProjection } from '../contract-filter.js'
+import { canonicalContractFilterBindings, hasCanonicalStoppedContractFilter, rebuildStoppedContractProjection } from '../contract-filter.js'
 import { readFootprintConfiguration } from './trusted-footprint.js'
 import type { ElaborationDraft, ElaborationSessionRequest, ElaborationSessionResult } from './elaboration-types.js'
 import type { CandidateChanges } from './candidate.js'
@@ -62,7 +62,7 @@ export type StageDraftBinding = Pick<ElaborationDraft, 'ownerDigest' | 'sourceIn
 export type StageDraftMaterialRequest = { binding: StageDraftBinding; worktree: StageWorktree; inputDigest: string; existingDraft?: ElaborationDraft; allowStoppedGitDraft?: true; readonlyOverlay?: { path: string; mode: string; oid: string }[] }
 
 /** 调用者先认证原Native与正式停止。已提交材料须显式准入，观察不签发Native结果。 */
-export function readStoppedPhysicalDraft(commonDir: string, worktreePath: string, seed: StageWorktree, binding: StageDraftBinding, options?: { allowCommitted: boolean; nativeFilterRoot?: string }): { source: string; observedHeadCommit: string; observedTree: string; indexSha256: string; committedOid?: string } | null {
+export function readStoppedPhysicalDraft(commonDir: string, worktreePath: string, seed: StageWorktree, binding: StageDraftBinding, options?: { allowCommitted: boolean }): { source: string; observedHeadCommit: string; observedTree: string; indexSha256: string; committedOid?: string } | null {
   const invalid = (): never => { throw new Error('已停物理草稿的owner/seed、只读文件或index发生越界变化') }
   const git = (...args: string[]): Buffer => sourceGit(worktreePath, ['--no-optional-locks', ...args])
   if (seed.mode !== 'edit' || !/^[a-f0-9]{64}$/.test(binding.ownerDigest) || binding.path !== `.spex-sync-drafts/${binding.ownerDigest}.json`
@@ -116,20 +116,22 @@ export function readStoppedPhysicalDraft(commonDir: string, worktreePath: string
   const protectedIndex = new Map(index.filter(entry => compareFullIndex || entry.path !== binding.path).map(entry => [entry.path, entry]))
   if (protectedIndex.size !== protectedEntries.length || protectedEntries.some(entry => { const item = protectedIndex.get(entry.path); return !item || item.mode !== entry.mode || item.oid !== entry.oid }) || indexDraft && indexDraft.mode !== '100644') invalid()
   const projections: { path: string; git: Buffer; physical: Buffer }[] = []
+  const canonicalPaths = committedOid ? new Set(canonicalContractFilterBindings(worktreePath).map(binding => binding.file)) : undefined
   for (const entry of protectedEntries) {
     const bytes = physical(entry.path)
     if (contentHash(bytes) === entry.digest) continue
-    if (!committedOid || !options?.nativeFilterRoot || entry.mode === '120000' || entry.path === binding.path) invalid()
+    if (entry.mode === '120000' || !canonicalPaths?.has(entry.path)) invalid()
     projections.push({ path: entry.path, git: readObject(commonDir, entry.oid), physical: bytes })
   }
-  const projectionMatches = (): boolean => {
+  const canonicalFilterMatches = (): boolean => {
     const paths = projections.map(entry => entry.path)
     const expectedAttributes = Buffer.from(paths.map(path => `${path}\0filter\0spexcode\0`).join(''))
     if (paths.length && !git('check-attr', `--source=${observedTree}`, '-z', 'filter', '--', ...paths).equals(expectedAttributes)) return false
-    return matchesStoppedContractProjection(commonDir, realpathSync(worktreePath), options?.nativeFilterRoot, readFootprintConfiguration('/usr/bin/git', worktreePath).records, projections)
-      && projections.every(entry => physical(entry.path).equals(entry.physical))
+    return hasCanonicalStoppedContractFilter(commonDir, realpathSync(worktreePath), readFootprintConfiguration('/usr/bin/git', worktreePath).records, !!paths.length)
   }
-  if (committedOid && !projectionMatches()) invalid()
+  if (committedOid && !canonicalFilterMatches()) invalid()
+  const rebuilt = projections.length ? rebuildStoppedContractProjection(realpathSync(commonDir), seed, before, projections) : undefined
+  if (projections.length && !rebuilt) invalid()
   const unchanged = (): boolean => contentHash(readFileSync(indexPath)) === indexSha256
     && (ignored ? untrackedFiles('--ignored').equals(ignored) && !untrackedFiles().length : git(...statusArgs).equals(status!))
     && git('rev-parse', '--verify', 'HEAD^{commit}').toString().trim() === observedHeadCommit
@@ -138,7 +140,11 @@ export function readStoppedPhysicalDraft(commonDir: string, worktreePath: string
     return null
   }
   const bytes = physical(binding.path)
-  if (!isUtf8Text(bytes) || committedOid && !readObject(commonDir, committedOid).equals(bytes) || !unchanged() || !physical(binding.path).equals(bytes) || committedOid && !projectionMatches()) invalid()
+  if (!isUtf8Text(bytes) || committedOid && !readObject(commonDir, committedOid).equals(bytes) || !unchanged() || !physical(binding.path).equals(bytes)) invalid()
+  if (committedOid && (!canonicalFilterMatches() || protectedEntries.some(entry => {
+    const bytes = physical(entry.path), projected = rebuilt?.get(entry.path)
+    return projected ? !bytes.equals(projected) : contentHash(bytes) !== entry.digest
+  }))) invalid()
   return { source: bytes.toString('utf8'), observedHeadCommit, observedTree, indexSha256, ...(committedOid ? { committedOid } : {}) }
 }
 export const DRAFT_RECEIPT_SCHEMA = { type: 'object', additionalProperties: false, properties: { summary: { type: 'string' } }, required: ['summary'] }
