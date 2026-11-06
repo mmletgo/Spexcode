@@ -1,3 +1,4 @@
+import { contentHash } from './snapshot.js'
 import type { CodeBehaviorEvidence, ContractNodeChange, SyncDecisionAuthority } from './writeback-types.js'
 import type { RawOnlyInterfaceSeedEvidence } from './partitioning.js'
 import type { BlobRef, InputSnapshot } from './operation-types.js'
@@ -6,6 +7,7 @@ import type { RejectedStructuredOutput, StructuredExecution, ZCodeToolPolicy } f
 import type { Contract, ContractCoverage, ContractFinding, ContractGraph, Gap, ParseContractInput, Verification } from '@spexcode/spec-core/contracts'
 
 export const ELABORATION_BOUNDARIES = ['permissions', 'mutation', 'async', 'network', 'concurrency', 'callbacks', 'retries', 'cancellation', 'idempotency', 'external_side_effects'] as const
+export const ELABORATION_GENERATION_GUIDANCE = 'ac-test-binding-v1'
 export type ElaborationBoundary = typeof ELABORATION_BOUNDARIES[number]
 export type ElaborationTarget = { nodeId: string; path: string; source: string | null; sourceDigest: string | null; rawSource?: string }
 export type ElaborationFact = { source: string; text: string }
@@ -13,6 +15,22 @@ export type ElaborationFact = { source: string; text: string }
 export type ReadonlySpecRepair = { kind?: 'candidate_review' | 'partition_seal'; reviewEvidence?: { partitionId: string; resultRef: BlobRef }[]; baseInputDigest: string; candidateDigest: string; generationRef: BlobRef; acceptedRef: BlobRef; changes: ElaborationResult['changes']; output: unknown; review: ElaborationReview | null; findings: ContractFinding[] }
 export type ElaborationPhase = 'interface_seed' | 'partitioned_final'
 export type ElaborationPartitionBinding = { planDigest: string; partitionId: string; analysisRef?: BlobRef; interfaceSeed?: RawOnlyInterfaceSeedEvidence }
+export type AnalysisOnlyPartitionEvidence = { partitionId: string; analysisRef: BlobRef; wholeAnalysisRef: BlobRef }
+
+export function partitionedElaborationInputDigest(planDigest: string, inputs: readonly string[], analysisOnlyPartitions?: readonly AnalysisOnlyPartitionEvidence[]): string {
+  return contentHash(JSON.stringify({ partitionPlanDigest: planDigest, inputs, ...(analysisOnlyPartitions?.length ? { analysisOnlyPartitions } : {}) }))
+}
+
+export function partitionedElaborationCoverageMatches(partitionIds: readonly string[], writerIds: readonly string[], analysisOnlyIds: readonly string[]): boolean {
+  const writers = new Set(writerIds), analysisOnly = new Set(analysisOnlyIds)
+  return writers.size === writerIds.length && analysisOnly.size === analysisOnlyIds.length
+    && writerIds.length + analysisOnlyIds.length === partitionIds.length
+    && new Set(partitionIds).size === partitionIds.length
+    && partitionIds.every(id => writers.has(id) !== analysisOnly.has(id))
+    && partitionIds.filter(id => writers.has(id)).every((id, index) => id === writerIds[index])
+    && partitionIds.filter(id => analysisOnly.has(id)).every((id, index) => id === analysisOnlyIds[index])
+}
+
 /** 调用者已确认的用户原意或裁决变更；不是 Agent 自己生成的批准请求。 */
 export type AuthorizedContractChange = { id: string; action: 'retire' | 'update_verification'; source: 'user:raw' | `decision:${string}`; reason: string; analysisRef?: BlobRef } | { id: string; action: 'update_acceptance'; source: 'user:raw' | `decision:${string}` | `code:${string}`; reason: string; ruleIds: string[]; analysisRef: BlobRef } | { id: string; action: 'restore'; source: 'user:raw'; reason: string; history: { inputId: string; requestBlob: BlobRef } }
 export type ElaborationInput = {
@@ -22,6 +40,8 @@ export type ElaborationInput = {
   worktree?: { baseCommit: string; tree: string; mode: 'read' | 'edit' }
   /** 新派发显式冻结；缺席继续使用原请求协议，不重写历史reserved请求。 */
   draftProtocol?: 'elaboration-draft-v1'
+  /** 原attempt阶段冻结的生成提示版本，仅影响Native generation的请求摘要。 */
+  generationGuidance?: typeof ELABORATION_GENERATION_GUIDANCE
   /** 仅由分区执行器用于无源码writer的初始或既有纯父接口；结果不是完整P1或实现就绪。 */
   phase?: 'interface_seed'
   /** 原分区计划及后验纯父分类证据，只绑定本区来源，不授予写权限或完成度。 */
@@ -115,6 +135,7 @@ export type ElaborationResult = {
   retiredIds: string[]
   nodeChanges?: ContractNodeChange[]
   partitionEvidence?: { partitionId: string; resultRef: BlobRef }[]
+  analysisOnlyPartitions?: AnalysisOnlyPartitionEvidence[]
   partitionSeal?: ElaborationPartitionSeal
   verificationProjectionRef?: BlobRef
   structurePassed: boolean

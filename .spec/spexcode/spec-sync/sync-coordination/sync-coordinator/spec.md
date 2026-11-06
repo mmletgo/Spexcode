@@ -16,6 +16,8 @@ related:
 
 ## expanded spec
 
+全局P1存在仅分析分区时，首次封口、封口返修及同operation的V1来源恢复重新核原P0 whole wrapper、原读集/基线、冻结计划与各区真实原件。跨attempt承接沿严格更早的正式provenance定位原分析和独审，复算独审覆盖及精确摘要。真实P1和认证的仅分析P0在原计划上互斥且完整，后者没有返修writer资格。同operation的code_to_spec即使原V1未通过，也只凭同P1原件造成的精确null扩域恢复原计划；V1候选及后续审查仍须真实重验。原P1局部输入、派发及V1–V4和交付门槛保持。
+
 新的有效fence可沿原严格较新来源顺序读取已认证且正式stop/removed的精确物理JSON草稿；ZCode另须[[sync-stage-worktree]]规定的原精确turn.failed，原canonical cancelled不单独构成拒绝，普通暂停的turn.completed/turn.cancelled不取得此物理资格，既有正常Git暂停材料政策保持。P0保existingDraft来源截断，旧物理稿不因晚observedAt/mtime覆盖后来正常Git稿。仅owner draft可dirty，所有原request/dispatch/Native身份、source/tests/schema/context/index授权外变化及当前fence/lease/CAS门保持。新checkpoint仅记approved:false、sourceKind:physical_draft、原Native/stop引用、observedHEAD/tree、indexSHA与含原文的JSON材料CAS，不追补旧witness或将文件伪称Git稿/Native final。原errors及repairDiagnostics继续给新seed；P0 review仅续审且保原ready分析。P1通过内存binding/readonly seed/inputDigest/existingDraft回调精确定位旧稿真实Native attempt/round，仅严格较新的物理来源可替换；新旧程序可信readonly overlay按精确path/mode/OID投影比较，其余保护面不变，并完整保留原errors/冻结诊断；原文经真实Agent正常提交、原JSON/schema/业务/独审后才有新draft身份。writer27保护此准入，不授额外自动重试。
 
 P0 context传输选择复用behavior-draft-protocol唯一checkpoint：对象不存在且本attempt无任何code_behavior saved/reserved dispatch时，首次写version:code-behavior-draft-v1与contextTransport:git-json-v1；已有对象无字段保持legacy；字段存在但为null、空串或未知版本时在派发前明确拒绝，不能补签或因部分owner尚未派发而换运输。新请求以同owner/purpose只读Git.context.json完整承载任务、修复诊断、原errors及独审pendingAnalysis；业务输入/分析摘要与accepted查找保持，只有真实Native prompt/seed/requestDigest变化。既有材料比较冷读受完整request/tree/SHA绑定的文件并归一原inline语义，原Native/草稿/schema/独立身份和业务范围认证保持；格式失败继续原JSON，合法业务repair仍重新分析和独审。writer25围栏拒绝忽略该checkpoint字段的旧writer，沿正常online backup及一致DB/evidence/Git refs回滚。

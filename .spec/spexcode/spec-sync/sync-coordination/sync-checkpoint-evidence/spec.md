@@ -11,6 +11,8 @@ code:
 
 ## expanded spec
 
+含analysisOnlyPartitions的全局P1读取另核共同whole P0、同计划、每区精确原P0 ref/正文及两种分区证据的完整互斥并集，并用同一聚合算法重算新inputDigest。仅分析P0 ref保活为JSON证据，不作为P1 round或raw；原局部强认证继续仅沿partitionEvidence进行。
+
 新SyncCheckpointRef在一次正常store动作中登记JSON wrapper与全部typed artifacts，保留原resultRef、JSON材料及精确UTF8 raw引用，避免中间出现无认证来源的raw pin。raw即使是合法JSON或形似sync-stage-v1也不取得stage、candidate、review或证据引用可达权限。
 
 旧无role checkpoint引用逐字保留。只沿真实wrapper及失败Saved round（含既有repairDiagnostics原件）认证untrusted_final：原operation/attempt/input、owner及完整NativePlan/dispatch、资源原failed观察、canonical record的原策略/model/请求/错误/原文和thread/turn必须精确一致，CAS正文与SHA/ref相同。后续正式cancelled/removed保原格式错误与原文，且精确nativeStopped/stopped证明成立时仍可读；不复原旧failed或改签成功。generic failed的合法raw可读性不授予格式自动续修资格。

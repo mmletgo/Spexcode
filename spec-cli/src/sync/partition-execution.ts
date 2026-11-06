@@ -8,8 +8,8 @@ import type { CodeBehaviorInput, CodeBehaviorContinuation } from './code-behavio
 import { outputErrors } from './elaboration-schema.js'
 import { elaborate, freezeElaborationInput, verifyElaborationDraftCache, projectElaborationFlowReadiness, sealPartitionedElaboration, partitionSealRepairContext } from './elaboration.js'
 import type { Contract, ContractFinding, Verification } from '@spexcode/spec-core/contracts'
-import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
-import type { Applicability, ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationTrace, ElaborationSessionRequest, ElaborationChange, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial, ReadonlySpecRepair, VerificationOwnershipProjection } from './elaboration-types.js'
+import { ELABORATION_BOUNDARIES, partitionedElaborationInputDigest } from './elaboration-types.js'
+import type { AnalysisOnlyPartitionEvidence, Applicability, ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationTrace, ElaborationSessionRequest, ElaborationChange, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial, ReadonlySpecRepair, VerificationOwnershipProjection } from './elaboration-types.js'
 import { elaborationTargetBindings, projectVerificationTable, withoutVerificationTables } from './elaboration-markdown.js'
 import { actualTreeDiff, isHostPrivatePath, verifyCandidate } from './candidate.js'
 import type { CandidateChanges } from './candidate.js'
@@ -32,6 +32,7 @@ export type PartitionCheckpoints = {
   loadBehaviorDraftMaterial?(key: string, planDigest: string, purpose: string, schemaDigest: string, inputDigest: string, request: Pick<ElaborationSessionRequest, 'prompt' | 'worktree'>, existingDraft?: ElaborationDraft): ElaborationDraftMaterial | null
   loadBehaviorContinuation?(key: string, planDigest: string, inputDigest: string): CodeBehaviorContinuation | null
   loadAcceptedAnalysis?(key: string, planDigest: string, inputDigest: string): CodeBehaviorAnalysis | null
+  authenticateAnalysisOnly?(plan: SyncPartitionPlan, evidence: CodeBehaviorEvidence, owners: readonly AnalysisOnlyPartitionEvidence[]): boolean
   loadAcceptedElaboration?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'> | null
   loadAcceptedInterfaceSeed?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'> | null
   loadElaborationDraftMaterial?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, schemaDigest?: string, request?: StageDraftMaterialRequest): ElaborationDraftMaterial | null
@@ -304,6 +305,42 @@ export function projectPartitionVerificationOwnership(input: ElaborationInput, c
   } }
 }
 
+
+/** 只有原冻结source-only分区的正式P0可证明无P1义务。 */
+export function analysisOnlyPartitionEvidence(commonDir: string, plan: SyncPartitionPlan, evidence?: CodeBehaviorEvidence): AnalysisOnlyPartitionEvidence[] {
+  if (!evidence) return []
+  const { analysis, ref } = evidence, coverage = analysis.partitionCoverage, locals = analysis.partitionEvidence
+  const candidates = plan.partitions.filter(partition => !partition.phase && !partition.targets.length && !partition.writePaths.length && !partition.contractIds.length && !partition.flowIds.length
+    && partition.sourcePaths.length > 0 && partition.sourcePaths.length === unique(partition.sourcePaths).length
+    && JSON.stringify(unique(partition.changedPaths)) === JSON.stringify(unique(partition.sourcePaths)) && partition.changedPaths.length === partition.sourcePaths.length
+    && partition.sourcePaths.every(path => !path.startsWith('.spec/') && plan.expectedPaths.includes(path) && plan.partitions.filter(owner => owner.changedPaths.includes(path)).length === 1)
+    && !plan.dependencies.some(edge => edge.from === partition.id || edge.to === partition.id)
+    && !analysis.newNodes.some(node => partition.sourcePaths.includes(node.codePath)))
+  if (!candidates.length) return []
+  const orderedIds = plan.partitions.map(partition => partition.id)
+  if (!analysis.reviewPassed || !coverage || coverage.planDigest !== plan.digest || JSON.stringify(coverage.partitionIds) !== JSON.stringify(orderedIds)
+    || !locals || JSON.stringify(locals.map(owner => owner.partitionId)) !== JSON.stringify(orderedIds)
+    || contentHash(JSON.stringify(analysis)) !== ref.sha256 || !readEvidence(commonDir, ref).equals(Buffer.from(JSON.stringify(analysis)))
+    || analysis.inputDigest !== contentHash(JSON.stringify({ partitionPlanDigest: plan.digest, inputs: locals.map(owner => owner.analysis.inputDigest) }))
+    || JSON.stringify(analysis.traces) !== JSON.stringify(locals.flatMap(owner => owner.analysis.traces))) return reject('仅分析分区缺少精确全局P0与原冻结计划')
+  independentTraces(analysis.traces)
+  return candidates.flatMap(partition => {
+    const owner = locals.find(item => item.partitionId === partition.id)!, local = owner.analysis
+    if (local.authorChanges?.length || local.rawIntegrations?.length || local.findings.length || local.authorizedChanges.length || local.nodeChanges.length
+      || local.newNodes.length || local.resolutions.length || local.decision || local.decisionAuthorities?.length
+      || local.changes.some(change => change.kind !== 'refactor' && change.kind !== 'allowed_change' || change.affectedIds.length || change.ruleIds.length)) return []
+    if (!local.reviewPassed || local.partitionCoverage || local.partitionEvidence || local.inputId !== analysis.inputId || local.baselinePairId !== analysis.baselinePairId
+      || local.baselineSelectionDigest !== analysis.baselineSelectionDigest || local.policyDigest !== analysis.policyDigest || local.readSetDigest !== analysis.readSetDigest || local.composedDigest !== analysis.composedDigest
+      || local.traces.length !== 2 || local.traces[0].purpose !== 'code_behavior_analyze' || local.traces[1].purpose !== 'code_behavior_review'
+      || local.traces.some(trace => !trace.sessionId || !trace.threadId || !trace.turnId || !trace.resultDigest || trace.inputDigest !== local.inputDigest)
+      || owner.changedPaths.length !== partition.changedPaths.length || JSON.stringify(unique(owner.changedPaths)) !== JSON.stringify(unique(partition.changedPaths))
+      || owner.changedPaths.some(path => !coverage.changedPaths.includes(path))
+      || JSON.stringify(unique(local.changes.flatMap(change => change.paths))) !== JSON.stringify(unique(partition.changedPaths))
+      || contentHash(JSON.stringify(local)) !== owner.analysisRef.sha256 || !readEvidence(commonDir, owner.analysisRef).equals(Buffer.from(JSON.stringify(local)))) reject(`仅分析分区没有真实已审P0原件及完整覆盖: ${partition.id}`)
+    return [{ partitionId: partition.id, analysisRef: owner.analysisRef, wholeAnalysisRef: ref }]
+  })
+}
+
 /** 纯父按祖先层级先审自身原意接口；叶继承只读接口，新归属按真实 codePath 唯一分区。 */
 export async function elaborateSyncPartitions(input: ElaborationInput, plan: SyncPartitionPlan, maxParallel: number, checkpoints: PartitionCheckpoints, runner: ElaborationRunner, composed?: ComposedInputRef): Promise<ElaborationResult> {
   const { signal, ...data } = input
@@ -323,6 +360,10 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
     sealInput = { ...input, files, context: [...input.context ?? [], ...frozen.nodes.filter(node => !excluded.has(node.path)).map(node => ({ nodeId: node.id, path: node.path, source: files.get(node.path)! }))] }
   }
   const { seeds, descendants } = interfaceSeedPartitions(input, plan)
+  const analysisOnlyPartitions = analysisOnlyPartitionEvidence(commonDir, plan, input.analysis)
+  if (analysisOnlyPartitions.length && !checkpoints.authenticateAnalysisOnly?.(plan, input.analysis!, analysisOnlyPartitions)) reject('仅分析分区缺少原正式P0与独审派发证明')
+  const writers = plan.partitions.filter(partition => !analysisOnlyPartitions.some(owner => owner.partitionId === partition.id))
+
   const settledSources = new Map<string, string>()
   const run = async (partition: SyncPartition): Promise<Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>> => {
     const interfaceSeed = seeds.get(partition.id)
@@ -392,7 +433,7 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
     return compact
   }
   const byPartition = new Map<string, Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>>()
-  let pending = plan.partitions.filter(partition => seeds.has(partition.id))
+  let pending = writers.filter(partition => seeds.has(partition.id))
   while (pending.length) {
     const layer = pending.filter(partition => !pending.some(ancestor => ancestor.id !== partition.id && seeds.get(partition.id)!.parentPath.startsWith(seeds.get(ancestor.id)!.parentPath.slice(0, -'spec.md'.length))))
     const results = await mapSyncPartitions(layer, maxParallel, input.signal, run)
@@ -404,15 +445,15 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
     }
     pending = pending.filter(partition => !byPartition.has(partition.id))
   }
-  const remaining = plan.partitions.filter(partition => !byPartition.has(partition.id))
+  const remaining = writers.filter(partition => !byPartition.has(partition.id))
   const parallel = await mapSyncPartitions(remaining, maxParallel, input.signal, run)
   for (let index = 0; index < remaining.length; index++) byPartition.set(remaining[index].id, parallel[index])
-  const results = plan.partitions.map(partition => byPartition.get(partition.id)!)
+  const results = writers.map(partition => byPartition.get(partition.id)!)
   const first = results[0]
   if (!first) reject('分区细化结果为空')
   independentTraces(results.flatMap(result => result.rounds.flatMap(round => round.traces)))
   const reviewedChanges = distinct(results.flatMap(result => result.changes.map(change => result.readonlySpecRepair ? { ...change, beforeDigest: input.targets.find(target => target.nodeId === change.nodeId && target.path === change.path)!.sourceDigest } : change)), change => change.path, 'target')
-  const partitionEvidence = results.map((result, index) => ({ partitionId: plan.partitions[index].id, resultRef: writeEvidence(commonDir, result) }))
+  const partitionEvidence = results.map((result, index) => ({ partitionId: writers[index].id, resultRef: writeEvidence(commonDir, result) }))
   const projection = input.verifications && results.every(result => result.structurePassed && result.reviewPassed)
     ? projectPartitionVerificationOwnership(input, reviewedChanges, elaborationTargetBindings(input).filter(binding => plan.partitions.some(partition => partition.targets.some(target => target.path === input.targets[binding.targetIndex].path)) || descendants.some(node => node.path === binding.path)).map(binding => binding.path)) : null
   const verificationProjectionRef = projection ? checkpoints.save('partition:verification-ownership', { ...projection.evidence, partitionPlanDigest: plan.digest, partitionEvidence }) : undefined
@@ -429,7 +470,7 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
     ? results.find(result => !result.structurePassed || !result.reviewPassed)?.status ?? 'failed'
     : gaps.some(gap => gap.gapKind === 'conflict') ? 'conflict' : gaps.length ? 'needs_input' : 'complete'
   const failure = results.find(result => result.failure)?.failure ?? (!seal.seal.passed ? { code: 'partition_final_seal_failed', message: JSON.stringify(seal.seal.findings.map(({ code, itemId, message }) => ({ code, itemId, message }))) } : null)
-  const compact = { ...first, partitionBinding: undefined, readonlySpecRepair: undefined, repairDiagnostics: undefined, phase: 'partitioned_final' as const, inputDigest: contentHash(JSON.stringify({ partitionPlanDigest: plan.digest, inputs: results.map(result => result.inputDigest) })), candidateDigest: seal.seal.candidateDigest, changes,
+  const compact = { ...first, partitionBinding: undefined, readonlySpecRepair: undefined, repairDiagnostics: undefined, phase: 'partitioned_final' as const, inputDigest: partitionedElaborationInputDigest(plan.digest, results.map(result => result.inputDigest), analysisOnlyPartitions), candidateDigest: seal.seal.candidateDigest, changes,
     readyIds: structurePassed ? seal.coverage.items.filter(item => item.blockedBy.length === 0 && item.kind !== 'GAP').map(item => item.id) : [], readyFlowIds: readiness.readyFlowIds,
     blockedIds: seal.coverage.items.filter(item => item.blockedBy.length > 0).map(item => item.id), blockedFlows: readiness.blockedFlows,
     retiredIds: unique([...results.flatMap(result => result.retiredIds), ...seal.resolvedGapIds]), nodeChanges: [...input.nodeChanges ?? []],
@@ -437,7 +478,7 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
     deferredImplementationFindings: results.flatMap(result => result.deferredImplementationFindings), blockedStructureFindings: results.flatMap(result => result.blockedStructureFindings),
     structurePassed, reviewPassed, status, failure,
     contracts: seal.contracts, graph: seal.graph, coverage: seal.coverage, partitionSeal: seal.seal,
-    partitionEvidence, ...(verificationProjectionRef ? { verificationProjectionRef } : {}),
+    partitionEvidence, ...(analysisOnlyPartitions.length ? { analysisOnlyPartitions } : {}), ...(verificationProjectionRef ? { verificationProjectionRef } : {}),
   }
   return compact
 }

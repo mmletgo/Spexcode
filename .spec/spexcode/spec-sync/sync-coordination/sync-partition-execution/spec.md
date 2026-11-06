@@ -11,6 +11,8 @@ code:
 
 ## expanded spec
 
+原冻结计划中无目标、写路径、契约/流程角色或依赖边的分区，若非空精确源码集合等于变更集合，且已审P0覆盖全部路径、只含无ID和规则授权的refactor或allowed_change、没有作者/生命周期/新节点/裁决/整合/GAP等写义务，程序核原全局和局部P0、冻结计划及真实独审来源后，以仅分析证据进入全局P1。保留P0事实和原件，不派发该组的P1，也不合成局部结果或独审。既有或新派生的真实目标继续走原父/叶细化。空目标无法证明仅分析资格时仍拒绝。真实P1与仅分析分区在原计划上唯一完整覆盖，严格全图封口和后续四层验证照常执行。
+
 P1物理草稿观察所需的当前binding、含只读祖先/诊断overlay的StageWorktree及inputDigest，沿既有loadElaborationDraftMaterial仅作进程内参数传递；不进入持久请求/计划或改变缓存摘要。loadDraft认证Git来源与existingDraft传入同材料回调，只有已认证严格更新attempt/round的物理稿可替换；合法candidate/续审、分区owner/plan/schema和原source/test保护不变，未批准physical材料仍须真实新提交及独审。
 
 P0分析从原完整 compositionEvidenceBlob 读取真实冲突；每区的本次分析路径仅由原触发路径与精确source/写者/target文件角色派生，shared read不授owner。原partition-plan、digest和expectedPaths不追补；新局部输入经既有freeze/inputDigest接缝绑定实际集合，已saved accept亦须完整摘要相同，不能直接绕过新指导。新analysis的coverage及局部原件引用记录真实分析路径，所有旧分析/请求/CAS原件保持。最终合并在原完整全局冲突集合上核每个路径恰有一个owner，并要求真实已独审finding（conflict/coverage_gap）或合法resolution逐项覆盖；缺任一条、foreign路径或归属不唯一均拒绝，不合成一次全局模型accept。
