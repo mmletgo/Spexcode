@@ -100,6 +100,7 @@ test('Native P1续修AC.test坏稿只用真实已有测试ID和可信VERIFY', as
   const invalidSource = JSON.stringify(invalid)
   const failed = await elaborate({ ...f.input, maxRepairs: 0 }, { runner: f.run(request => {
     assert.doesNotMatch(request.prompt, /AC\.test.*仓库相对测试路径#稳定用例ID/)
+    assert.doesNotMatch(request.prompt, /登记JSON本身不是契约行/)
     return invalidSource
   }) })
   const oldDraft = failed.rounds[0].draft!
@@ -114,6 +115,7 @@ test('Native P1续修AC.test坏稿只用真实已有测试ID和可信VERIFY', as
     assert.match(request.prompt, /AC\.command.*可信登记.*VERIFY/)
     assert.match(request.prompt, /禁止裸路径、pytest `::`、自然语言.*伪造ID/)
     assert.match(request.prompt, /包装测试只有实际声明稳定ID、确实运行并覆盖本条断言才可引用/)
+    assert.doesNotMatch(request.prompt, /登记JSON本身不是契约行/)
     assert.match(request.prompt, /源码与全部测试只读/)
     return JSON.stringify(draftRows(f.input.targets[0].source!))
   }) })
@@ -159,6 +161,7 @@ test('Native P1续修状态事件和无状态END坏稿，保留实际Git草稿�
     assert.ok(request.prompt.includes('不虚构状态'))
     assert.ok(request.prompt.includes('仓库相对测试路径#稳定用例ID'))
     assert.ok(request.prompt.includes('每个业务REQ至少由一个主FLOW.req直接覆盖。'))
+    assert.doesNotMatch(request.prompt, /登记JSON本身不是契约行/)
     return JSON.stringify(valid)
   }) })
   assert.equal(repaired.status, 'complete', JSON.stringify(repaired.failure))
@@ -181,6 +184,36 @@ test('Native完整P1独审逐项核对冻结VERIFY实际执行并覆盖AC断言'
   assert.match(f.requests[1].prompt, /沿冻结VERIFY命令和包装器的实际调用逐项核对.*P1提出普通repair，不改文件/)
   assert.match(f.requests[1].prompt, /只读实现范围下不派发P2/)
   assert.doesNotMatch(f.requests[1].prompt, /TR.from、TR.event/)
+})
+
+for (const inherited of [false, true]) test(`Native完整P1的VERIFY冻结登记按只读父接口决定是否声明 inherited=${inherited}`, async t => {
+  const f = await fixture(t), [target] = f.input.targets
+  const verification = { id: 'VERIFY-EXPORT-01', command: ['node', '--test', 'tests/export.test.mjs'], cwd: '.', timeoutMs: 10000 }
+  const source = projectVerificationTable(target.source!, [])
+  const parent = inherited ? projectVerificationTable(ancestor('旧父接口').replace('title: 上层接口\n', 'title: 上层接口\ncontract-schema: sync-v1\n'), [verification]) : ancestor('旧父接口')
+  writeFileSync(join(f.root, path), source); writeFileSync(join(f.root, ancestorPath), parent)
+  git(f.root, 'add', path, ancestorPath); git(f.root, 'commit', '-m', 'freeze VERIFY registration fixture')
+  const snapshot = await captureInputSnapshot(f.root)
+  const input: ElaborationInput = { ...f.input, generationGuidance: ELABORATION_GENERATION_GUIDANCE, historyInput: snapshot, worktree: stageWorktree(f.commonDir, snapshot.headCommit, snapshot.immutableTree), targets: [{ ...target, source, sourceDigest: elaborationDigest(source) }], context: [{ nodeId: 'ancestor', path: ancestorPath, source: parent }], verifications: [verification], maxRepairs: 0 }
+  const result = await elaborate(input, { runner: f.run((request, workspace) => {
+    const task = JSON.parse(request.prompt.split('\n任务:\n')[1].split('\n')[0])
+    assert.deepEqual(task.verifications, [verification])
+    assert.equal(readFileSync(join(workspace, path), 'utf8'), source)
+    assert.equal(readFileSync(join(workspace, ancestorPath), 'utf8'), parent)
+    const draft = draftRows(source), [leaf] = draft.changes
+    assert.equal(leaf.tables.VERIFY.length, 0)
+    assert.ok(leaf.tables.AC.length > 0 && leaf.tables.AC.every(ac => ac.command === verification.id))
+    if (!inherited && request.prompt.includes('须从精确冻结登记新增该VERIFY定义')) {
+      leaf.tables.VERIFY = draftRows(target.source!).changes[0].tables.VERIFY
+    }
+    return JSON.stringify(draft)
+  }) })
+  assert.equal(result.status, 'complete', JSON.stringify(result.rounds[0].findings.find(issue => issue.code === 'dangling-reference') ?? result.failure))
+  assert.match(f.requests[0].prompt, /只读context已有该ID时直接引用，不得在本target重复定义.*登记JSON本身不是契约行/)
+  assert.deepEqual(f.requests.map(request => request.purpose), ['elaboration_generate', 'elaboration_review'])
+  assert.doesNotMatch(f.requests[1].prompt, /须从精确冻结登记新增该VERIFY定义/)
+  assert.deepEqual(result.contracts.flatMap(contract => contract.items.flatMap(item => item.kind === 'VERIFY' ? [[contract.path, item.id, item.command, item.cwd, item.timeoutMs]] : [])), [[inherited ? ancestorPath : path, verification.id, verification.command, verification.cwd, verification.timeoutMs]])
+  assert.equal(result.runtimeVerification, 'not_run')
 })
 
 for (const missing of ['case', 'files'] as const) test(`Native完整P1把原授权的待实现诊断交给P2，V3实测前不算既有覆盖 missing=${missing}`, async t => {
