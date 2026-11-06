@@ -201,8 +201,8 @@ export function rebuildStoppedContractProjection(common: string, seed: { baseCom
     for (const target of resolveHarnessTargets(readConfig(worktree).harnesses)) {
       if (target.kind === 'plugin' && (target.folder.includes('\\') || target.folder.split('/').some(part => !part || ['.', '..', '.git'].includes(part.toLowerCase())))) return undefined
     }
-    const materialize = fileURLToPath(new URL('../dist/materialize.js', import.meta.url))
-    run(worktree, process.execPath, ['--input-type=module', '--eval', 'await (await import(process.argv[1])).materialize()', materialize])
+    const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url))
+    run(worktree, process.execPath, [cli, 'materialize'])
     const bindings = canonicalContractFilterBindings(worktree)
     const rebuilt = new Map<string, Buffer>()
     for (const file of files) {
