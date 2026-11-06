@@ -14,7 +14,7 @@ code:
 
 ## expanded spec
 
-v31仅追加无DDL SELECT 1 marker，保护完整Native P1独审的`ac-test-flow-review-binding-v3`。v30及更旧writer须在任何写入或派发前拒绝。停稳旧backend/queue并结算资源及租约后，v30→v31做一次SQLite online backup，再在组件事务追加marker，保留旧SQL、checksum、旧表及已冻结请求。回滚先停新writer，再恢复升级前一致备份及原evidence/Git refs。
+v31仅追加无DDL SELECT 1 marker，保护完整Native P1独审的`ac-test-flow-review-binding-v3`及已结算 `session/events` 超时后仅预留P1独审的派发形态。v30及更旧writer须在任何写入或派发前拒绝。停稳旧backend/queue并结算资源及租约后，v30→v31做一次SQLite online backup，再在组件事务追加marker，保留旧SQL、checksum、旧表及已冻结请求。回滚先停新writer，再恢复升级前一致的v30备份及原evidence/Git refs。
 
 v30仅追加无DDL SELECT 1 marker，保护完整P1生成提示版本`ac-test-flow-binding-v2`。v29原能在拒绝未知阶段版本后持久化unsupported，故旧writer须在任何写入和派发前拒绝新库。升级停稳旧backend/queue并结算资源及租约后，v29→v30做一次SQLite online backup，再在组件事务追加marker，历史SQL、checksum、旧表和请求原件保持。回滚先停新writer，再恢复升级前一致备份及原evidence/Git refs。
 

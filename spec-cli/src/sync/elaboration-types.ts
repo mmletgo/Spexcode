@@ -113,7 +113,11 @@ export type ElaborationRepairSeed = {
   review: ElaborationReview | null; traces: ElaborationTrace[]
 }
 /** 已结算的生成/独审失败；完整原round仅作同绑定诊断，不伪造业务拒绝seed。 */
-export type ElaborationRepairDiagnostics = { requestKey: string; inputDigest: string; resultRef: BlobRef; failure: NonNullable<ElaborationResult['failure']>; round: ElaborationRound }
+export type ElaborationRepairDiagnostics = {
+  requestKey: string; inputDigest: string; resultRef: BlobRef; failure: NonNullable<ElaborationResult['failure']>; round: ElaborationRound
+  /** 当次派发前重验的只读审查请求绑定，检查点仍只保存原诊断。 */
+  settledReview?: Pick<ElaborationSessionRequest, 'prompt' | 'schema' | 'worktree'>
+}
 export type ElaborationPriorReference = { requestKey: string; inputDigest: string; candidateDigest: string; renderedCandidateDigest: string; traces: ElaborationTrace[] }
 export type ElaborationResult = {
   status: 'complete' | 'needs_input' | 'conflict' | 'unsupported' | 'failed' | 'cancelled' | 'exhausted' | 'interface_seed'
@@ -124,7 +128,7 @@ export type ElaborationResult = {
   inputDigest: string
   candidateDigest: string | null
   prior: ElaborationPriorReference | null
-  repairDiagnostics?: ElaborationRepairDiagnostics
+  repairDiagnostics?: Omit<ElaborationRepairDiagnostics, 'settledReview'>
   changes: (ElaborationChange & { contentDigest: string })[]
   contracts: Contract[]
   graph: ContractGraph | null

@@ -533,7 +533,8 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
   const partitionSealFiles = options.partitionSealFiles && new Map(options.partitionSealFiles)
   const draftMode = input.draftProtocol === 'elaboration-draft-v1'
   if (draftMode && (!input.worktree || !input.historyInput)) throw new TypeError('草稿协议必须绑定真实工作树及source input')
-  const runtimeDiagnostics = options.repairDiagnostics ? structuredClone(options.repairDiagnostics) : undefined
+  const { settledReview, ...diagnostics } = structuredClone(options.repairDiagnostics ?? { settledReview: undefined })
+  const runtimeDiagnostics = 'round' in diagnostics ? diagnostics : undefined
   if (runtimeDiagnostics && (runtimeDiagnostics.inputDigest !== inputDigest || runtimeDiagnostics.requestKey === input.requestKey)) throw new TypeError('原生失败诊断必须绑定同一业务输入及新的请求键')
   const rejected = runtimeDiagnostics?.round.rejectedOutput
   if (rejected && (rejected.ownerInputDigest !== inputDigest || rejected.ownerRequestKey !== runtimeDiagnostics!.requestKey || rejected.threadId !== runtimeDiagnostics!.failure.threadId || rejected.turnId !== runtimeDiagnostics!.failure.turnId || rejected.sha256 !== elaborationDigest(rejected.text) || rejected.ref && rejected.ref.sha256 !== rejected.sha256)) throw new TypeError('被拒final诊断必须绑定同owner原请求、原生身份及完整字节摘要')
@@ -607,15 +608,21 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
   if (!draftMode && runtimeDiagnostics) repairContext += `\n已结算生成/独审失败，仅作格式/修复诊断，不是raw、事实、业务批准或新授权；保留原REQ/AC及只读范围，重新生成并独立审查：\n${JSON.stringify(runtimeDiagnostics)}`
   if (draftMode) repairContext = JSON.stringify({ priorDraft: draft ? { sourceInputId: draft.sourceInputId, errors: draft.errors } : null, materialErrors: draftMaterial?.errors, materialDiagnostics: draftMaterial?.diagnostics, failures: runtimeDiagnostics ? { code: runtimeDiagnostics.failure.code, message: runtimeDiagnostics.failure.message } : null, runtimeFindings: runtimeDiagnostics?.round.findings, seedFindings: seed?.findings, readonlyFindings: anchorRepair ? undefined : input.readonlySpecRepair?.findings })
   const reviewScopeInstructions = `本轮审查修复范围（由生成侧同一owner事实派生，不新增写权）：${JSON.stringify({ targets: targetBindings.map(binding => ({ ...binding, mutable: targetHasCurrentChanges(input, input.targets[binding.targetIndex]) })), readonlyContext: input.context?.map(({ nodeId, path }) => ({ nodeId, path })) ?? [] })}。mutable=false及readonlyContext的metadata、description、prose、绑定和业务行均为冻结已接受内容，不因历史进度/文案质量在本轮要求修订。mutable=true只允许原raw/分析/逐项授权支持的字段差量；raw仍由程序保持，AC/VERIFY与生命周期继续核原授权。repair的affectedIds须全部存在且至少一个属于本轮可变owner；允许同时引用冻结祖先/依赖作为证据，须定位本轮改变造成的具体义务失败。真实扩域沿原分析重审与授权流程，不由finding扩权。`
-  const reviewRetry = (source: ElaborationRound | undefined): { round: ElaborationRound; output: unknown; errors: ContractFinding[] } | null => {
-    if (!source?.candidate || !source.review || !input.analysis) return null
+  const reviewRetry = (source: ElaborationRound | undefined, timedOut = false): { round: ElaborationRound; output: unknown; errors: ContractFinding[] } | null => {
+    if (!source?.candidate || !timedOut && (!source.review || !input.analysis)) return null
     const checked = checkCandidate(input, source.candidate, inputDigest, { partitionSealFiles })
-    if (!elaborationReviewScopeErrors(input, source.review, checked.graph).length) return null
+    if (!timedOut && !elaborationReviewScopeErrors(input, source.review!, checked.graph).length) return null
     if (source.candidate.inputDigest !== inputDigest || source.candidateDigest !== digest(source.candidate)) throw Object.assign(new TypeError('续审候选身份或摘要不匹配'), { code: 'review_retry_binding' })
-    const nativeReview = Object.fromEntries(Object.entries(source.review).filter(([key]) => key !== 'inputDigest' && key !== 'candidateDigest'))
-    if (outputErrors(nativeReview, ELABORATION_REVIEW_SCHEMA).length || source.review.inputDigest !== inputDigest || source.review.candidateDigest !== source.candidateDigest) throw Object.assign(new TypeError('续审原review schema或候选绑定不匹配'), { code: 'review_retry_binding' })
     const generation = source.traces.filter(trace => trace.purpose === 'elaboration_generate'), reviews = source.traces.filter(trace => trace.purpose === 'elaboration_review')
-    if (generation.length !== 1 || reviews.length !== 1 || source.traces.length !== 2 || generation[0].resultDigest !== digest(source.output) || reviews[0].resultDigest !== digest(source.reviewOutput) || digest(source.reviewOutput) !== digest(nativeReview)) throw Object.assign(new TypeError('续审原generation/review追踪或输出摘要不匹配'), { code: 'review_retry_binding' })
+    if (generation.length !== 1 || generation[0].resultDigest !== digest(source.output)) throw Object.assign(new TypeError('续审原generation追踪或输出摘要不匹配'), { code: 'review_retry_binding' })
+    if (timedOut) {
+      if (!draftMode || !source.draft || source.review || source.reviewOutput !== null || source.rejectedOutput || source.traces.length !== 1 || outputErrors(source.output, DRAFT_RECEIPT_SCHEMA).length) throw Object.assign(new TypeError('独审超时续审必须保留原Git生成回执及无输出的失败独审'), { code: 'review_retry_binding' })
+    } else {
+      const review = source.review!
+      const nativeReview = Object.fromEntries(Object.entries(review).filter(([key]) => key !== 'inputDigest' && key !== 'candidateDigest'))
+      if (outputErrors(nativeReview, ELABORATION_REVIEW_SCHEMA).length || review.inputDigest !== inputDigest || review.candidateDigest !== source.candidateDigest) throw Object.assign(new TypeError('续审原review schema或候选绑定不匹配'), { code: 'review_retry_binding' })
+      if (reviews.length !== 1 || source.traces.length !== 2 || reviews[0].resultDigest !== digest(source.reviewOutput) || digest(source.reviewOutput) !== digest(nativeReview)) throw Object.assign(new TypeError('续审原review追踪或输出摘要不匹配'), { code: 'review_retry_binding' })
+    }
     if (source.draft && source.draft.sourceInputId !== input.historyInput?.id) throw new TypeError('续审草稿必须绑定当前source input，不能沿用跨source材料的生成资格')
     const output = source.draft ? JSON.parse(readStageDraft(input.historyInput!.source.commonDir, source.draft, draftBinding)) as unknown : source.output
     if (['elaboration-rows-v1', 'elaboration-rows-v2'].includes(String((output as { version?: unknown })?.version))) return null
@@ -625,11 +632,12 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
     const candidate = renderElaboration(input, generated, inputDigest)
     if (digest(candidate) !== source.candidateDigest) throw Object.assign(new TypeError('续审原业务JSON与渲染候选摘要不匹配'), { code: 'review_retry_binding' })
     if (checked.findings.some(issue => repairRequired(issue, projectContractCoverage(checked.graph)))) return null
-    const errors = reviewErrors(input, source.review, inputDigest, source.candidateDigest!, checked.graph)
-    if (!errors.length || errors.some(issue => !['review_scope', 'review_binding'].includes(issue.code))) return null
+    const errors = timedOut ? [] : reviewErrors(input, source.review!, inputDigest, source.candidateDigest, checked.graph)
+    if (!timedOut && (!errors.length || errors.some(issue => !['review_scope', 'review_binding'].includes(issue.code)))) return null
     return { round: structuredClone(source), output, errors }
   }
-  let retryReview = reviewRetry(runtimeDiagnostics?.round ?? (seed ? { index: 0, ...seed, reviewOutput: seed.review ? Object.fromEntries(Object.entries(seed.review).filter(([key]) => key !== 'inputDigest' && key !== 'candidateDigest')) : null } : undefined))
+  let retryReview = reviewRetry(runtimeDiagnostics?.round ?? (seed ? { index: 0, ...seed, reviewOutput: seed.review ? Object.fromEntries(Object.entries(seed.review).filter(([key]) => key !== 'inputDigest' && key !== 'candidateDigest')) : null } : undefined), !!settledReview)
+  if (settledReview && !retryReview) throw Object.assign(new TypeError('独审超时的原Git候选未通过当前机械校验'), { code: 'review_retry_binding' })
   for (let index = 0; index <= (input.maxRepairs ?? 2); index++) {
     if (input.signal?.aborted) { result.status = 'cancelled'; result.failure = { code: 'cancelled', message: '细化已取消' }; return result }
     const round: ElaborationRound = { index, output: null, candidate: null, candidateDigest: null, findings: [], reviewOutput: null, review: null, traces: [] }
@@ -651,6 +659,7 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
       }
       const requestDigest = digest({ inputDigest, purpose, prompt, schema, ...(worktree ? { worktree } : {}) })
       try {
+        if (purpose === 'elaboration_review' && index === 0 && settledReview && (digest(worktree) !== digest(settledReview.worktree) || digest(schema) !== digest(settledReview.schema))) throw Object.assign(new TypeError('独审超时的原只读候选seed或评审schema发生变化'), { code: 'review_retry_binding' })
         const session = await runner({ root: input.root, base: worktree?.baseCommit ?? input.base, ...(worktree ? { worktree } : {}), prompt, schema, requestKey: `${input.requestKey}:${index}:${purpose}`, inputDigest: requestDigest, purpose, timeoutMs: callTimeoutMs, signal, model: input.model, effort: input.effort })
         const trace: ElaborationTrace = { purpose, sessionId: session.sessionId, threadId: session.threadId, turnId: session.turnId, resultDigest: session.resultDigest, inputDigest: requestDigest }
         round.traces.push(trace)
@@ -719,13 +728,15 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
           const parsedBusinessRows = checked.contracts
             .filter(contract => result.changes.some(change => change.nodeId === contract.nodeId && change.path === contract.path))
             .flatMap(contract => contract.items.filter(item => item.kind !== 'VERIFY'))
-          const reviewRepairInstructions = `${reviewScopeInstructions}${retryReview ? `\n本轮仅修复独审的权限/绑定错误，保留原合法生成和同一候选，不修改文件。以下完整原review及具体拒因为非权威诊断，须核实并重新独立审查，不能自行继承或改签accept：\n${JSON.stringify({ errors: retryReview.errors, reviewOutput: retryReview.round.reviewOutput, review: retryReview.round.review })}` : ''}`
-          const reviewPrompt = input.worktree ? `${STAGE_READING_INSTRUCTIONS} 独立审查工作树里的本轮真实Spec候选及相关实现/完整测试，逐项核raw、来源、授权、主流程和边界；不要信构建者结论。${reviewScope}${reviewFindingsScope} 全部适用性边界分别核对，accept只能findings为空。${implementationReviewInstructions} 弱化验收/越权业务须本轮repair，不得改文件。只返回schema JSON。${nativeReviewTestBindingInstructions}${nativeSourceInstructions}${repairInstructions}\n任务:\n${snapshot}\n候选范围及适用性:\n${JSON.stringify({ paths: round.candidate.changes.map(change => change.path), applicability: round.candidate.applicability, nodeChanges: round.candidate.nodeChanges })}` : `你是独立业务审查者。${input.phase === 'interface_seed' ? '本轮仅独立审查父接口的必要性、原始意图/事实来源、权限及对后续子叶的接口准确性；既有REQ/RULE/GAP及稳定ID必须保留，删除须逐项符合冻结retire授权，父raw追加不能弱化原义务。确认可由不同子目标承接的意图分别保留为独立REQ；父接口不要求包含流程、AC、源码或测试映射，也不能把父阶段结果当作完整P1。' : ''}${reviewScope}候选不是事实，不能信构建者结论。逐项重查所有适用性依据；${reviewFindingsScope}${implementationReviewInstructions}仅返回schema JSON，不修改文件，不生成摘要或版本身份，绑定由程序与受限runtime完成。\n${contractInstructions}\n冻结业务输入:\n${snapshot}\n候选Markdown与适用性:\n${JSON.stringify(round.candidate)}\n以下解析视图由程序从上述同一候选的变更节点提取，包含其全部业务行及解析字段，不重复只读上下文；它是数据视图，不是通过结论，不能替代完整Markdown及独立语义审查。JSON字符串和Markdown表格的转义属于展示编码，不等于业务值增加字符；应以解码后的解析字段值对照raw及冻结事实核实真实语义，不能仅按序列化文本中的反斜杠数量判定业务正则或字面值被改变。\n程序解析的候选业务行:\n${JSON.stringify(parsedBusinessRows)}`
+          const reviewRepairInstructions = `${reviewScopeInstructions}${retryReview?.errors.length ? `\n本轮仅修复独审的权限/绑定错误，保留原合法生成和同一候选，不修改文件。以下完整原review及具体拒因为非权威诊断，须核实并重新独立审查，不能自行继承或改签accept：\n${JSON.stringify({ errors: retryReview.errors, reviewOutput: retryReview.round.reviewOutput, review: retryReview.round.review })}` : ''}`
+          const nativeReviewTask = `\n任务:\n${snapshot}\n候选范围及适用性:\n${JSON.stringify({ paths: round.candidate.changes.map(change => change.path), applicability: round.candidate.applicability, nodeChanges: round.candidate.nodeChanges })}`
+          if (index === 0 && settledReview && (!settledReview.prompt.startsWith(reviewScopeInstructions) || !settledReview.prompt.endsWith(nativeReviewTask))) throw Object.assign(new TypeError('独审超时的原任务、owner范围或候选摘要不匹配'), { code: 'review_retry_binding' })
+          const reviewPrompt = input.worktree ? `${STAGE_READING_INSTRUCTIONS} 独立审查工作树里的本轮真实Spec候选及相关实现/完整测试，逐项核raw、来源、授权、主流程和边界；不要信构建者结论。${reviewScope}${reviewFindingsScope} 全部适用性边界分别核对，accept只能findings为空。${implementationReviewInstructions} 弱化验收/越权业务须本轮repair，不得改文件。只返回schema JSON。${nativeReviewTestBindingInstructions}${nativeSourceInstructions}${repairInstructions}${nativeReviewTask}` : `你是独立业务审查者。${input.phase === 'interface_seed' ? '本轮仅独立审查父接口的必要性、原始意图/事实来源、权限及对后续子叶的接口准确性；既有REQ/RULE/GAP及稳定ID必须保留，删除须逐项符合冻结retire授权，父raw追加不能弱化原义务。确认可由不同子目标承接的意图分别保留为独立REQ；父接口不要求包含流程、AC、源码或测试映射，也不能把父阶段结果当作完整P1。' : ''}${reviewScope}候选不是事实，不能信构建者结论。逐项重查所有适用性依据；${reviewFindingsScope}${implementationReviewInstructions}仅返回schema JSON，不修改文件，不生成摘要或版本身份，绑定由程序与受限runtime完成。\n${contractInstructions}\n冻结业务输入:\n${snapshot}\n候选Markdown与适用性:\n${JSON.stringify(round.candidate)}\n以下解析视图由程序从上述同一候选的变更节点提取，包含其全部业务行及解析字段，不重复只读上下文；它是数据视图，不是通过结论，不能替代完整Markdown及独立语义审查。JSON字符串和Markdown表格的转义属于展示编码，不等于业务值增加字符；应以解码后的解析字段值对照raw及冻结事实核实真实语义，不能仅按序列化文本中的反斜杠数量判定业务正则或字面值被改变。\n程序解析的候选业务行:\n${JSON.stringify(parsedBusinessRows)}`
           const reviewOutput = await call('elaboration_review', `${reviewRepairInstructions}\n${reviewPrompt}`, ELABORATION_REVIEW_SCHEMA)
           round.reviewOutput = reviewOutput
           if (input.signal?.aborted) throw Object.assign(new Error('细化已取消，保留当前候选和评审产物'), { code: 'cancelled' })
           round.findings.push(...outputErrors(reviewOutput, ELABORATION_REVIEW_SCHEMA).map(message => finding(input, 'review_schema', message)))
-          if ([...result.rounds.slice(0, -1).flatMap(previous => previous.traces), ...runtimeDiagnostics?.round.traces ?? []].some(trace => trace.sessionId === round.traces[1].sessionId || trace.threadId === round.traces[1].threadId) || round.traces[0].sessionId === round.traces[1].sessionId || round.traces[0].threadId === round.traces[1].threadId || prior?.traces.some(trace => trace.sessionId === round.traces[1].sessionId || trace.threadId === round.traces[1].threadId) || input.analysis?.analysis.traces.some(trace => trace.sessionId === round.traces[1].sessionId || trace.threadId === round.traces[1].threadId)) round.findings.push(finding(input, 'review_not_independent', '新审查必须独立于构建、行为分析及种子既有会话/线程'))
+          if ([...result.rounds.slice(0, -1).flatMap(previous => previous.traces), ...runtimeDiagnostics?.round.traces ?? [], ...(settledReview ? [runtimeDiagnostics!.failure] : [])].some(trace => trace.sessionId === round.traces[1].sessionId || trace.threadId === round.traces[1].threadId) || round.traces[0].sessionId === round.traces[1].sessionId || round.traces[0].threadId === round.traces[1].threadId || prior?.traces.some(trace => trace.sessionId === round.traces[1].sessionId || trace.threadId === round.traces[1].threadId) || input.analysis?.analysis.traces.some(trace => trace.sessionId === round.traces[1].sessionId || trace.threadId === round.traces[1].threadId)) round.findings.push(finding(input, 'review_not_independent', '新审查必须独立于构建、行为分析及种子既有会话/线程'))
           if (!round.findings.some(issue => repairRequired(issue, result.coverage))) {
             round.review = { ...(reviewOutput as Omit<ElaborationReview, 'inputDigest' | 'candidateDigest'>), inputDigest, candidateDigest: round.candidateDigest }
             round.findings.push(...reviewErrors(input, round.review, inputDigest, round.candidateDigest, checked.graph))
@@ -752,6 +763,7 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
       }
     } catch (error) {
       const failure = error as { code?: string; message?: string; sessionId?: string; threadId?: string; turnId?: string }
+      if (settledReview && failure.code === 'review_retry_binding') throw error
       result.failure = { code: failure.code ?? 'failed', message: failure.message ?? String(error), ...(failure.sessionId ? { sessionId: failure.sessionId } : {}), ...(failure.threadId ? { threadId: failure.threadId } : {}), ...(failure.turnId ? { turnId: failure.turnId } : {}) }
       if (round.draft) round.draft.errors = [...structuredClone(round.findings), { code: result.failure.code, message: result.failure.message }]
       result.status = failure.code === 'unsupported' ? 'unsupported' : failure.code === 'cancelled' ? 'cancelled' : failure.code === 'budget_exhausted' ? 'exhausted' : 'failed'

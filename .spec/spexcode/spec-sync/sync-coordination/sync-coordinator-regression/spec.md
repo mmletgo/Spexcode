@@ -213,6 +213,8 @@ partition_seal反馈不能删除此前已接受的稳定ID，也不能弱化作�
 
 多轮来源回归必须通过真实Coordinator：Native Spec→Code首轮真实scratch Git构建后6→1→1且后轮无伪prepared记录；两组交错失败为6→2→1→1，A的accept原ref/请求不变；合法文件规划新增源码和测试路径后保持同candidate只续审，不能以P1 evidence重新扩scope。有限预算剩1允许5cache+1failed，剩0由原硬限拒绝。受控Native6-owner长回归保持原30s lease及生产心跳代码，并记录续租间隔验证逐组yield，不调大生产期限。
 
+P1 `session/events` 独审超时回归用真实Git提交、隔离SQLite及受控Native资源桥。单体和分区仅新派发独审，原候选摘要、Git OID、生成trace及只读seed保持，新会话使用当前完整审查。覆盖v2原请求到v3独审、局部原件已落盘后的暂停、同一生成的仅续审暂停及较新生成保留优先权。错误停止、不同候选和任务末段不匹配在剩余预算内也不取得仅续审或重新生成资格。
+
 已有code映射、P1新增managed AC.test时无需implementation_plan；Native scratch实际创建测试后若评审格式失败，P1映射的原null扩域仍可承接，只续review，保持原candidate及原oracle/source/index。该路径与真实file-writer扩域分别证明，不借related或source字段取得写权。
 
 正式retryOf的真实Git/隔离SQLite回归先生成P0独审通过、P1八项真实refactor业务拒绝，再经正式换模型接入与SQLite重启；whole与partition的新Native请求必须含原JSON字节/OID、精确只读schema与完整finding，重跑分析及独审并到新P1独审入口。正式pause→run恢复同retry时，较新未认证Git见证不得遮蔽祖先原稿。旧只读Native成功输出须由原请求/资源/结果认证并标native_output，不冒充历史Git稿；已认证syntax/schema拒绝原文沿相同接缝续修。schema、owner、plan及readSet失配拒绝；来源认证不改旧CAS/Git/wrapper或在正式接入后的历史记录，接入本身的状态变化单独留证。schema选源回调只在进程内，未进入持久wrapper或receipt；不放宽原兄弟归属、接受缓存、独审、V1–V4或Docker门，此受控回归不代表真实模型或正式交付完成。

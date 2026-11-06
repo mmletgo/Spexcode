@@ -3478,6 +3478,204 @@ for (const target of ['code_behavior_analyze', 'elaboration_generate'] as const)
   assert.equal(f.calls.some(call => call.purpose === 'code_generate'), false)
 })
 
+for (const mode of ['whole', 'partition', 'legacy-review', 'paused', 'paused-review', 'newer-generation', 'wrong-stop', 'wrong-candidate', 'wrong-task'] as const) test(`P1已结算session/events独审超时只重审同一Git候选 ${mode}`, async t => {
+  const partitioned = mode === 'partition'
+  const plan = partitioned ? { version: 'sync-coordinator-v2' as const, direction: 'spec_to_code' as const, sourcePaths: ['src/export.js'], partitionPolicy: { version: 'sync-partition-policy-v1' as const, maxReadBytes: 524288, maxParallel: 1 } } : {}
+  const f = await fixture(t, { maxAttempts: ['newer-generation', 'paused-review', 'wrong-task'].includes(mode) ? 3 : 2, maxCalls: 30, maxRepairs: mode === 'wrong-task' ? 2 : 1, timeoutMs: 120_000 }, false, original, 'project', original, { ...plan, agentWorkflow: 'native-worktree-v1' }, undefined, 'spec', 'zcode:default', partitioned)
+  const calls: ElaborationSessionRequest[] = []
+  if (mode === 'paused' || mode === 'newer-generation') {
+    const recordFailure = f.store.recordFailure.bind(f.store)
+    f.store.recordFailure = (fence, issue) => {
+      if (issue.code === 'native_rpc_timeout' && mode === 'paused') f.store.requestControl(f.operation.id, 'pause')
+      const result = recordFailure(fence, issue)
+      if (issue.code === 'native_rpc_timeout' && mode === 'newer-generation') f.store.requestControl(f.operation.id, 'pause')
+      return result
+    }
+  }
+  if (mode === 'paused-review') {
+    const checkpoint = f.store.checkpoint.bind(f.store)
+    f.store.checkpoint = (fence, ref) => {
+      const result = checkpoint(fence, ref), commonDir = f.input.source.commonDir
+      const wrapper = JSON.parse(readEvidence(commonDir, ref).toString()) as { stage: string; resultRef: { sha256: string } }
+      if (wrapper.stage === 'elaboration') {
+        const value = JSON.parse(readEvidence(commonDir, wrapper.resultRef).toString()) as ElaborationResult
+        if (value.status === 'cancelled' && value.repairDiagnostics) f.store.requestControl(f.operation.id, 'pause')
+      }
+      return result
+    }
+  }
+  if (mode === 'legacy-review') {
+    const claimed = f.store.claimAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 30_000, expectedMessageId: f.operation.dispatchMessageId })
+    const commonDir = f.input.source.commonDir, value = { version: 'elaboration-draft-v1', generationGuidance: 'ac-test-flow-binding-v2' }, resultRef = writeEvidence(commonDir, value)
+    const wrapper = writeEvidence(commonDir, { version: 'sync-stage-v1', operationId: f.operation.id, attemptId: claimed.attempt.id, inputId: f.input.id, policyDigest: f.operation.policyDigest, stage: 'elaboration-draft-protocol', resultRef })
+    f.store.checkpoint(claimed.fence, { ...wrapper, artifacts: syncCheckpointArtifacts(value, resultRef) })
+  }
+  if (mode === 'wrong-stop') {
+    const recordFailure = f.store.recordFailure.bind(f.store), findResource = f.store.findResource.bind(f.store)
+    f.store.recordFailure = (fence, issue) => {
+      const result = recordFailure(fence, issue)
+      if (issue.code !== 'native_rpc_timeout') return result
+      f.store.findResource = (attemptId, key) => {
+        const resource = findResource(attemptId, key)
+        if (!resource || attemptId !== fence.attemptId || !key.endsWith(':elaboration_review')) return resource
+        const saved = JSON.parse(readEvidence(f.input.source.commonDir, resource.checkpointRef).toString()) as NativeRunCheckpoint
+        saved.stop!.nativeStatus = 'unknown'
+        return { ...resource, checkpointRef: writeEvidence(f.input.source.commonDir, saved) }
+      }
+      return result
+    }
+  }
+  if (mode === 'wrong-task') {
+    const recordFailure = f.store.recordFailure.bind(f.store), findResource = f.store.findResource.bind(f.store), listAttempts = f.store.listAttempts.bind(f.store)
+    f.store.recordFailure = (fence, issue) => {
+      const result = recordFailure(fence, issue)
+      if (issue.code !== 'native_rpc_timeout') return result
+      const commonDir = f.input.source.commonDir, prior = f.store.readAttempt(fence.attemptId)
+      const dispatch = prior.dispatchPlans.find(item => item.purpose === 'elaboration_review')!, resource = findResource(prior.id, dispatch.key)!
+      const native = JSON.parse(readEvidence(commonDir, resource.plan.planBlob).toString()) as NativeRunPlan
+      const local = JSON.parse(readEvidence(commonDir, issue.evidenceRefs[0]).toString()) as ElaborationResult
+      const request = native.request
+      request.prompt += '\n另一候选的任务。'
+      request.inputDigest = contentHash(JSON.stringify({ inputDigest: local.inputDigest, purpose: request.purpose, prompt: request.prompt, schema: request.schema, worktree: request.worktree }))
+      native.requestDigest = contentHash(JSON.stringify(request))
+      const bindCheckpoint = (ref: { sha256: string }) => writeEvidence(commonDir, { ...JSON.parse(readEvidence(commonDir, ref).toString()), requestDigest: native.requestDigest })
+      const alternate = { ...resource, plan: { ...resource.plan, payloadDigest: native.requestDigest, planBlob: writeEvidence(commonDir, native) }, checkpointRef: bindCheckpoint(resource.checkpointRef), checkpoints: resource.checkpoints.map(item => ({ ...item, checkpointRef: bindCheckpoint(item.checkpointRef) })) }
+      f.store.findResource = (attemptId, key) => attemptId === prior.id && key === dispatch.key ? alternate : findResource(attemptId, key)
+      f.store.listAttempts = id => listAttempts(id).map(attempt => attempt.id !== prior.id ? attempt : { ...attempt, dispatchPlans: attempt.dispatchPlans.map(item => item.key !== dispatch.key ? item : { ...item, requestDigest: native.requestDigest }) })
+      const record = readRecord(native.expectedSessionId)!
+      const prompt = nativeWorktreePrompt(request.prompt, request.worktree!), execution = structuredExecutionPolicy(request)
+      writeRecord({ ...record, structuredExecution: { ...record.structuredExecution, ...execution }, createPayloadHash: contentHash(JSON.stringify({ prompt, parent: null, launcher: null, base: request.base, structuredExecution: execution })) })
+      return result
+    }
+  }
+  if (mode === 'wrong-candidate') {
+    const checkpoint = f.store.checkpoint.bind(f.store)
+    f.store.checkpoint = (fence, ref) => {
+      const commonDir = f.input.source.commonDir, wrapper = JSON.parse(readEvidence(commonDir, ref).toString()) as { stage: string; resultRef: { sha256: string } }
+      if (wrapper.stage !== 'elaboration') return checkpoint(fence, ref)
+      const value = JSON.parse(readEvidence(commonDir, wrapper.resultRef).toString()) as ElaborationResult
+      if (value.failure?.code !== 'native_rpc_timeout') return checkpoint(fence, ref)
+      const round = value.rounds.at(-1)!
+      round.candidate!.changes[0].source += '\n这段正文没有出现在原Git稿。\n'
+      round.candidateDigest = value.candidateDigest = contentHash(JSON.stringify(round.candidate))
+      const resultRef = writeEvidence(commonDir, value)
+      return checkpoint(fence, { ...writeEvidence(commonDir, { ...wrapper, resultRef }), artifacts: syncCheckpointArtifacts(value, resultRef) })
+    }
+  }
+  f.store.startGeneration = () => { throw new StructuredSessionError('unsupported', 'fixture在P1正式独审通过后停止') }
+  f.options.runner = async request => {
+    calls.push(request)
+    const operation = f.store.readOperation(f.operation.id), attempt = f.store.readAttempt(operation.currentAttemptId!)
+    if (mode === 'paused-review' && attempt.number === 2 && request.purpose === 'elaboration_review') throw new StructuredSessionError('cancelled', '仅续审中暂停，保留同一生成来源')
+    const fence = { operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: operation.input.source.physicalFingerprint }
+    return createAttemptRunner(f.store, fence, { pollMs: 2, runtime: {
+      readRecord,
+      cancel: async () => { throw new Error('fixture禁止真实Native控制') },
+      run: async actual => {
+        const seed = actual.worktree!, execution = structuredExecutionPolicy(actual), key = actual.sessionCreateKey!, sessionId = sessionIdForCreateKey(key)
+        const identity = { threadId: `p1-timeout-${sessionId}`, turnId: 'turn' }, workspace = join(f.parent, `p1-timeout-${calls.length}`)
+        const timingOut = actual.purpose === 'elaboration_review' && attempt.number === 1
+        let draft: unknown
+        if (actual.purpose === 'code_behavior_analyze' || actual.purpose === 'code_behavior_review') {
+          const task = nativeTask(actual, f.input.source.commonDir) as { requiredChangedPaths: string[] }
+          if (actual.purpose === 'code_behavior_analyze') {
+            draft = { changes: task.requiredChangedPaths.map(path => ({ kind: 'refactor', paths: [path], affectedIds: ['RULE-EXPORT-05'], ruleIds: ['RULE-EXPORT-05'], originalIntent: '保留导出义务', previousBehavior: '导出行为不变', sourceBehavior: '内部文字编辑', deliveryBehavior: '导出行为不变', evidence: 'src/export.js#ExportService', counterexample: '原结果仍保留' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+          } else {
+            const reviewed = readCodeBehaviorContext(actual, f.input.source.commonDir).pendingAnalysis! as { analysisDigest: string; analysis: { changes: { id: string }[] } }
+            draft = { inputDigest: actual.inputDigest, analysisDigest: reviewed.analysisDigest, verdict: 'accept', checkedPaths: task.requiredChangedPaths, checkedChangeIds: reviewed.analysis.changes.map(change => change.id), findings: [] }
+          }
+        } else if (actual.purpose === 'elaboration_generate') draft = partitioned
+          ? { version: 'elaboration-target-rows-v3', changes: [], applicability: ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: true, basis: '沿用完整冻结契约及已有边界', affectedIds: ['REQ-EXPORT-01'] })) }
+          : adaptElaborationNativeOutput(actual, rows(original))
+        else assert.equal(actual.purpose, 'elaboration_review')
+        const worktree = draft ? committedDraftFixture(f, actual, draft, workspace) : undefined
+        const output = draft ? { summary: '已正常提交草稿' } : { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+        const resultDigest = contentHash(JSON.stringify(output)), message = 'ZCode native RPC timeout (session/events)'
+        if (!timingOut && !worktree) f.git('worktree', 'add', '--detach', workspace, seed.baseCommit)
+        const resultWorktree = timingOut ? undefined : worktree ?? nativeWorktreeResult(workspace, seed)
+        const prompt = nativeWorktreePrompt(actual.prompt, seed)
+        configuredSessionApplication().createSession({ sessionId, status: timingOut ? 'error' : 'awaiting' })
+        writeRecord({ session: sessionId, governed: true, worktreePath: workspace, base: seed.baseCommit, forkCommit: seed.baseCommit, branch: null, title: null, name: null, parent: null, issues: [], issue: null, proposal: null, merges: 0, note: null, sortKey: null, createdAt: Date.now(), harness: 'zcode', harnessSessionId: identity.threadId, runtimeStartToken: null, status: timingOut ? 'error' : 'awaiting', stopped: false, archived: false, closedAt: null, launcher: null, launchCmd: null, launchOwner: null,
+          createRequestId: contentHash(key), createPayloadHash: contentHash(JSON.stringify({ prompt, parent: null, launcher: null, base: seed.baseCommit, structuredExecution: execution })),
+          structuredExecution: { ...execution, ...identity, turnStartRequested: true, ...(timingOut ? { state: 'failed', errorCode: 'native_rpc_timeout', error: message, zcodeNative: { version: 1, root: workspace, sessionId: identity.threadId, inputId: 'fixture-input', turnId: identity.turnId, pid: process.pid, receiptFile: join(workspace, 'fixture-process.json') }, cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: true, acknowledged: true, nativeStatus: 'stopped' } } : { state: 'completed', output, resultDigest, resultWorktree }) },
+        })
+        if (timingOut) throw new StructuredSessionError('native_rpc_timeout', message, { sessionId, ...identity })
+        return { sessionId, ...identity, output, resultDigest, worktree: resultWorktree }
+      },
+    } })(request)
+  }
+  let result = await runSyncOperation(f.store, f.operation.id, f.options)
+  if (mode === 'paused' || mode === 'paused-review' || mode === 'newer-generation') {
+    assert.equal(result.operation.control, 'pause')
+    f.store.requestControl(f.operation.id, 'run')
+    if (mode === 'newer-generation') {
+      const original = f.store.readAttempt(result.operation.currentAttemptId!)
+      const middle = f.store.claimAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 30_000 })
+      f.store.bindComposedInput(middle.fence, original.composedInput!)
+      f.store.reserveDispatch(middle.fence, { key: `sync:${middle.attempt.id}:elaborate:0:elaboration_generate`, purpose: 'elaboration_generate', requestDigest: contentHash('较新的已冻结生成请求') })
+      f.store.requestControl(f.operation.id, 'pause')
+      f.store.requestControl(f.operation.id, 'run')
+    }
+    result = await runSyncOperation(f.store, f.operation.id, f.options)
+  }
+  const attempts = f.store.listAttempts(f.operation.id), old = attempts[0], retry = attempts.at(-1)!
+  const savedLocal = (attempt: SyncAttempt): ElaborationResult => {
+    const wrappers = attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()) as { stage: string; resultRef: { sha256: string } })
+    const wrapper = wrappers.find(entry => partitioned ? entry.stage.startsWith('partition:') && entry.stage.endsWith(':elaboration') : entry.stage === 'elaboration')!
+    assert.ok(wrapper, JSON.stringify({ result: result.failure, attempt: attempt.failure, calls: calls.map(call => call.purpose) }))
+    return JSON.parse(readEvidence(f.input.source.commonDir, wrapper.resultRef).toString()) as ElaborationResult
+  }
+  const originalResult = savedLocal(old), originalRound = originalResult.rounds.at(-1)!
+  assert.equal(old.status, 'superseded')
+  assert.equal(old.failure?.kind, mode === 'paused' ? undefined : 'repairable')
+  assert.equal(originalResult.failure?.code, 'native_rpc_timeout', JSON.stringify({ failure: originalResult.failure, findings: originalRound.findings }))
+  assert.equal(originalResult.structurePassed, true)
+  assert.equal(originalResult.reviewPassed, false)
+  assert.deepEqual(originalResult.readyIds, [])
+  assert.equal(originalRound.review, null)
+  assert.equal(originalRound.reviewOutput, null)
+  assert.equal(originalRound.traces.length, 1)
+  assert.ok(originalRound.draft?.resultCommit)
+  for (const dispatch of old.dispatchPlans) assert.equal(f.store.findResource(old.id, dispatch.key)?.phase, 'removed')
+  const elaborationCalls = calls.filter(call => call.purpose.startsWith('elaboration_'))
+  if (mode === 'newer-generation') {
+    assert.deepEqual(elaborationCalls.map(call => call.purpose), ['elaboration_generate', 'elaboration_review', 'elaboration_generate', 'elaboration_review'])
+    assert.equal(savedLocal(retry).repairDiagnostics, undefined)
+    return
+  }
+  if (mode === 'wrong-stop' || mode === 'wrong-candidate' || mode === 'wrong-task') {
+    assert.deepEqual(elaborationCalls.map(call => call.purpose), ['elaboration_generate', 'elaboration_review'])
+    assert.equal(result.failure?.code, mode === 'wrong-stop' ? 'checkpoint_artifact_binding' : 'review_retry_binding', JSON.stringify(result.failure))
+    assert.equal(retry.dispatchPlans.length, 0)
+    assert.equal(attempts.length, 2, '绑定失败在有剩余预算时也不可重派生成')
+    return
+  }
+  assert.deepEqual(elaborationCalls.map(call => call.purpose), ['elaboration_generate', 'elaboration_review', 'elaboration_review', ...(mode === 'paused-review' ? ['elaboration_review'] : [])], '正式独审已结算超时只重审同一候选')
+  const reviewed = savedLocal(retry), reviewedRound = reviewed.rounds.at(-1)!
+  assert.equal(reviewed.reviewPassed, true)
+  assert.equal(retry.failure?.code, 'unsupported', JSON.stringify(retry.failure))
+  assert.equal(reviewed.candidateDigest, originalResult.candidateDigest)
+  assert.deepEqual(reviewedRound.candidate, originalRound.candidate)
+  assert.deepEqual(reviewedRound.traces[0], originalRound.traces[0])
+  assert.equal(reviewedRound.draft?.oid, originalRound.draft.oid)
+  assert.equal(reviewedRound.draft?.resultCommit, originalRound.draft.resultCommit)
+  assert.notEqual(reviewedRound.traces[1].sessionId, originalResult.failure?.sessionId)
+  assert.notEqual(reviewedRound.traces[1].threadId, originalResult.failure?.threadId)
+  assert.notEqual(reviewedRound.traces[1].sessionId, originalRound.traces[0].sessionId)
+  assert.deepEqual(elaborationCalls[1].worktree, elaborationCalls[2].worktree)
+  assert.deepEqual(elaborationCalls[1].schema, elaborationCalls[2].schema)
+  if (mode === 'legacy-review') assert.doesNotMatch(elaborationCalls[1].prompt, /沿冻结VERIFY命令和包装器的实际调用逐项核对/)
+  assert.match(elaborationCalls[2].prompt, /沿冻结VERIFY命令和包装器的实际调用逐项核对/)
+  assert.match(elaborationCalls[2].prompt, /本轮审查修复范围.*冻结已接受内容/)
+  assert.equal(Object.hasOwn(reviewed.repairDiagnostics!, 'settledReview'), false, '原review请求绑定只在内存传递')
+  assert.deepEqual(reviewed.repairDiagnostics?.round, originalRound)
+  assert.deepEqual(reviewed.repairDiagnostics?.failure, originalResult.failure)
+  assert.equal(result.operation.callsUsed, partitioned ? 5 : mode === 'paused-review' ? 4 : 3)
+  assert.deepEqual(f.store.listJournals(f.operation.id), [])
+  assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
+})
+
 for (const target of ['code_generate', 'code_review'] as const) for (const mode of ['settled', 'partition', 'unknown', 'paused', 'wrong-proof'] as const) test(`P2 typed RPC ${target}/${mode} preserves failure identity and shares exact-stop repair admission`, async t => {
   const f = await fixture(t, { maxAttempts: 2, maxCalls: 12, maxRepairs: 2, timeoutMs: 30000 }, false, original, 'project', original, mode === 'partition' ? { version: 'sync-coordinator-v2', direction: 'spec_to_code', sourcePaths: ['src/export.js'], partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 2 } } : {})
   const originalRunner = f.options.runner!, records = new Map<string, NativeRunRecord>()

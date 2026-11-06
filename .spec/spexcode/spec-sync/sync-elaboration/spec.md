@@ -38,6 +38,8 @@ P1材料回调还接收当前StageDraftBinding、含完整只读overlay的真实
 
 此类独审权限/绑定错误仅重开独审：原生成JSON或Git稿、原summary追踪和候选必须经当前完整输入、source、schema、目标范围、唯一renderer、机械校验及candidate摘要重新证明，且原review在当前范围下仍确属权限/绑定错误；不能凭旧finding.code取得资格。沿现有rounds及同owner已结算repairDiagnostics保留原review、拒因、Git身份与generation trace，新round只派独立read审查同一候选，不重新生成，不新增业务/源码/tests写权。真正域内repair、输入/分析变化或机械检查失败仍走原修复/失效门；预算、取消、独立性与全图seal保持。新任务范围只是prompt派生数据，不追补历史请求、字段或marker。
 
+经[[sync-coordinator]]认证的原ZCode `session/events` 独审超时也沿仅续审入口。程序冷读原Git草稿，逐项重核owner、source、精确业务schema、唯一renderer和机械门，并要求候选摘要、原任务和owner范围、实际只读评审seed及评审schema一致。身份冲突在派发前明确停止，剩余预算不能转为自动生成。旧失败没有review、accept或ready。新只读评审使用当前冻结的完整独审范围，独立于原生成及原超时会话和线程；通过前原候选仍未批准，预算和后续全图封口继续生效。
+
 本轮已审分析只为实际受影响owner提供范围证据；冻结targets不自动授权重写每个已有目标。细化在生成后和完整候选检查时核本轮影响归属、作者原意及已有逐项/生命周期授权，未受影响目标的metadata、解释、绑定及行变化以可续修rows_patch阻断。范围门与原行结构核验分离：历史合法JSON和精确schema继续作为原诊断材料进入续修，不能因新增语义门直接丢弃；旧候选不取得accept或ready。省略及显式等价输出由[[elaboration-markdown]]逐字沿用冻结正文，合法受影响owner的prose-only更新继续进入原演进检查及新独审。
 
 已审缓存除原input/Git/ref/schema/渲染绑定外，必须按当前本区输入重核同一owner范围。仅范围不合格返回不可复用资格，不抛原件损坏、不改旧reviewPassed/trace/JSON/ref；原身份或正文绑定损坏仍明确报错。调用者放弃该ready承接后，优先沿现有正式草稿来源，无来源则把已冷验缓存的精确末轮Git稿作为未批准材料续修，附rows_patch诊断并重新生成及独审，不能从零丢稿。全局兄弟分析命中祖先ID不替代本区scope，whole分区结果须回各局部缓存核资格后重新seal。
