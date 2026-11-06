@@ -86,3 +86,5 @@ writer can reproduce it. That is an accepted, visible cost — unlike a whole-fi
 受控冻结交付复用 describeCanonicalContractFilter 的唯一 SHIM/filterCmd 源，只读核对精确 effective commands 和实际 shim 普通文件字节/0755 模式；不按名称信任、不执行未知命令、不改变 ordinary 安装/降级/clean-smudge 行为。当前 common 属性/root/bindings 与外部 per-tree filter 数据纳入冻结政策。strict materialize 不调用植入/撤销/filter-stat repair，所有新托管投影只落登记私有目录。
 
 同步作者字节投影复用同一 SHIM 源与 canonical bindings。cleanCanonicalContractText 在独占临时目录内只运行可信发布代码、固定绑定和冻结 stdin；不读取或执行仓库配置中的 filter 命令，不触碰工作树或用户 index，不为同步另写一套 sentinel 归一化算法。
+
+已停 P1 提交草稿的只读核验沿 [[sync-stage-worktree]] 使用同一 canonical bindings、commands 和 shim。独立临时 Git 库只从原冻结 seed 取 Git 对象，在 detached linked worktree 和私有 HOME 中用现行可信 materialize 重建托管文件。临时库排除来源配置、hooks、外部 filter、越界链接及越界插件目录。重建完整字节须匹配实际物理文件，可信 clean 后须匹配 Git host 原字节。旧 Native runtime 的 manifest、payload 和共享 root 指针都不参与证明。源码、测试以及任何无法按此证明的物理差异拒绝。

@@ -28,6 +28,8 @@ related:
 
 P1物理选源的新鲜度来自原认证generation的attempt与round，不来自载体round、观察时间或mtime。既有draft定位时忽略非权威errors增补但完整身份必须相同，并经原Native/Git冷验；同attempt较晚真实generation亦可优于早轮稿，不能定位来源时拒绝覆盖。原candidate/合法仅续审资格不因材料被替换。
 
+完整生成`ac-test-flow-binding-v2`可在派发前沿相同来源顺序接收`stopped_git_draft`。提示明确这是已停止旧工作树的真实提交中的唯一授权草稿，仍未批准，须沿原字节和拒因继续编辑、正常提交并重新独审。冻结后的同一请求按原材料重放，旧v1、缺字段、父接口及历史派发保持原提示。已接受候选和仅续审资格仍优先，临时草稿不进入业务交付。
+
 原P1程序冻结task/诊断沿精确schema尾段只读解析，不解析模型正文；新旧可信readonly overlay只取原task的relatedSpecs、repair.baselines/specs及本轮程序context/anchor/seal投影，逐项记录精确path/mode/OID。比较仅排这些路径并集及draft/schema，处理新增或消失诊断路径；不豁免整个.spec或source/tests/其absence。旧工作树仍对原seed全量冷验，新seed保当前已审父/诊断内容。原冻结诊断对象完整作为非权威materialDiagnostics进入新请求，新provenance留双投影，旧请求/NativePlan/摘要不重签，writer27已覆盖。
 
 P1材料回调还接收当前StageDraftBinding、含完整只读overlay的真实StageWorktree及业务inputDigest，均仅进程内参数，不重签旧saved/reserved请求。原认证Git draft必须定位到其真实owner/attempt/round；仅严格较新的已认证物理来源可替换为同一observer的physical_draft，未知或更早来源保原稿，合法candidate/仅续审仍优先，提示明确它未提交、未批准且不是Native final或历史Git稿。只复制原bytes，原Native失败/全部具体诊断保留；Agent正常提交后才沿原schema、renderer、业务授权和独立审查形成新稿，原只读祖先/source/tests/absence保持。
@@ -58,7 +60,9 @@ P1草稿与旧Native材料在本轮业务schema计算完成后才通过进程内
 
 当前native-worktree操作的新P1草稿生成使用[[sync-stage-worktree]]的真实edit seed，独审仍使用真实只读seed，允许按需读取完整仓库。生成seed为原composed加已审祖先接口；独审seed另覆盖本轮渲染的完整Spec候选及真实move/retire。提示只给相关Spec路径、targetIndex/首次必建indices、真实raw差量、事实、技术范围/不可改oracle、精确授权与失败诊断，schema仍规范业务行；不重复完整树或强制逐字读取运输。程序按实际seed对象补足契约引用验证所需代码/测试，不把files投影当读取权限。完整业务输入、实际seed/tree及prompt/schema参与摘要；原raw/ID/演进/全图seal、独审与预算门均保留。下文受限frozen读取说明仅用于无worktree的历史操作与旧单测。
 
-首次P1原生草稿协议登记且没有既有P1派发时，本attempt的`elaboration-draft-protocol`冻结`generationGuidance: ac-test-binding-v1`。仅完整生成提示说明`AC.test`使用仓库相对测试路径#稳定用例ID，引用现有测试必须读取其真实声明并核对用例覆盖本条断言。裸路径、pytest `::`等框架选择器、自然语言后缀、伪造ID或无关测试均不得作为绑定。`AC.command`引用可信登记中实际执行该用例的VERIFY-ID。包装测试须有真实稳定ID且执行确实覆盖本条断言，套件登记本身不构成绑定。code→spec的源码及全部测试保持只读，缺失证据仍由现有校验门阻断。提示参与派发摘要，业务输入、schema、独审、父接口提示和所有写入权限保持原样。历史stage缺该字段或已有reserved请求且无stage时使用原提示，字段存在但未知时停止。跨已结算attempt的新生成继续原Git草稿及完整拒因。[[sync-migrations]] writer29保护已冻结提示不被旧writer忽略。
+首次P1原生草稿协议登记且没有既有P1派发时，本attempt的`elaboration-draft-protocol`冻结`generationGuidance`。`ac-test-binding-v1`仅在完整生成提示说明`AC.test`使用仓库相对测试路径#稳定用例ID，引用现有测试必须读取其真实声明并核对用例覆盖本条断言。裸路径、pytest `::`等框架选择器、自然语言后缀、伪造ID或无关测试均不得作为绑定。`AC.command`引用可信登记中实际执行该用例的VERIFY-ID。包装测试须有真实稳定ID且执行确实覆盖本条断言，套件登记本身不构成绑定。code→spec的源码及全部测试保持只读，缺失证据仍由现有校验门阻断。
+
+新登记使用`ac-test-flow-binding-v2`。完整生成除原测试绑定说明外，还复用受限完整流程提示，本轮实际承接的每项业务REQ至少由一个主FLOW.req直接覆盖。`TR.from`、`TR.event`和非空`TR.to`引用同一`TR.object`。从冻结原意、事实、契约与实现识别真实有状态对象的初始状态、事件及非终态出口，不能虚构状态、事件或终点。确属无状态的`FLOW.terminal=END`在正文说明不适用依据，每个STEP提供输入、可观察输出和已定义的失败或不变量RULE。旧v1、历史stage缺字段及已有reserved请求且无stage各按原提示恢复，字段存在但未知时停止。提示参与派发摘要，业务输入、schema、独审、父接口提示及写入权限保持。跨已结算attempt的新生成继续原Git草稿及完整拒因。[[sync-migrations]] writer30阻止旧writer写入v2阶段或派发。
 
 存在当前受审P0时，Native生成与独审共用的任务快照完整保留既有analysis正文及ref（含changes分类、paths、affectedIds、ruleIds、原意/行为、evidence、反例与追踪），分区同时保留实际partitionBinding及aggregate analysisRef；本区分析沿既有分区投影选源，不另猜范围。authorChanges仅保留在analysis内，不另造重复投影。authorizedChanges只列AC/VERIFY变更、退役/恢复等特殊动作，空数组不禁止依据当前分类、raw与源码同步已审非冲突明细；历史finding原样保留并按当前分类重新核实，不能用旧refactor限制替代当前allowed_change。当前analysis不等于本轮P1批准，原preserve_business、AC/VERIFY逐项授权、退役、owner写范围及独审硬门保持；analysis缺席时不宣称已有分类，不新增持久字段或版本。受控真实Git回归覆盖whole/partition两阶段精确分析投影、原八条诊断保持与特殊动作越权拒绝，不替代真实模型业务验收。
 

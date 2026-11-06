@@ -29,8 +29,8 @@
 
 - ZCode使用`zcode:default`或`zcode:<provider-id>/<model>`，模型/别名交SDK解析，实际每轮选择另行留证；与Claude共用版本化原生工作树执行、队列和资源桥；换provider仍须新操作/正式retryOf，不自动fallback。旧v4只读策略和原生读取证明仅用于其历史请求。
 
-- 原生工作树使用结构化策略 v6，sync v29 组件 marker 拒绝旧 writer；ZCode 新 read 请求冻结精准 ExitPlanMode denylist 与 NativePlan v2，旧资源/记录及仅 reserved dispatch 的字段缺席保持，后者只以完整请求摘要确证；内部创建键首建保留上游冻结字段并严格验策略，不能恢复时补默认。旧数字与 null 的只读 v1–v5 原样恢复。unlimited 模型调用期限为 null，创建、租约、stop/close 及 Docker 期限仍独立有限。升级先停全部旧 backend/queue 并结算资源、备份数据库；回滚恢复升级前备份，不能只删 marker 或改工具描述。
-- 新P1按owner显式冻结elaboration-draft-v1，精确schema在同seed只读sidecar，v6 edit只写真实Git临时草稿并正常提交、小summary回执；程序读指定blob后再JSON/schema/renderer/独审。失败正文留Git refs，checkpoint只记身份和errors并保留原finding定位及severity，旧缺席不补写；诊断不进入raw role/业务candidate；跨父输入只迁draft不迁旧树，accept仍核完整摘要及冷Git/schema/最终正文渲染绑定，原source tag不向legacy补签；仅验证时允许保留hooks的正常空提交，不造业务diff。已冻结/仅reserved旧请求不补协议。该草稿协议由writer22围栏保护；完整生成的 AC.test/AC.command 提示仅由新attempt原stage的generationGuidance冻结，writer29保护首次登记到reserve的窗口，旧字段缺席不补；精准回归：`npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/sync/elaboration-draft.test.ts`。
+- 原生工作树使用结构化策略 v6，sync v30 组件 marker 拒绝旧 writer；ZCode 新 read 请求冻结精准 ExitPlanMode denylist 与 NativePlan v2，旧资源/记录及仅 reserved dispatch 的字段缺席保持，后者只以完整请求摘要确证；内部创建键首建保留上游冻结字段并严格验策略，不能恢复时补默认。旧数字与 null 的只读 v1–v5 原样恢复。unlimited 模型调用期限为 null，创建、租约、stop/close 及 Docker 期限仍独立有限。升级先停全部旧 backend/queue 并结算资源、备份数据库；回滚恢复升级前备份，不能只删 marker 或改工具描述。
+- 新P1按owner显式冻结elaboration-draft-v1，精确schema在同seed只读sidecar，v6 edit只写真实Git临时草稿并正常提交、小summary回执；程序读指定blob后再JSON/schema/renderer/独审。失败正文留Git refs，checkpoint只记身份和errors并保留原finding定位及severity，旧缺席不补写；诊断不进入raw role/业务candidate；跨父输入只迁draft不迁旧树，accept仍核完整摘要及冷Git/schema/最终正文渲染绑定，原source tag不向legacy补签；仅验证时允许保留hooks的正常空提交，不造业务diff。已冻结/仅reserved旧请求不补协议。该草稿协议由writer22围栏保护；完整生成的测试绑定和流程提示由新attempt原stage的generationGuidance冻结，writer30保护v2；旧v1及字段缺席按原提示恢复；精准回归：`npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/sync/elaboration-draft.test.ts`。
 - 格式/schema拒绝的final仅经adapter原请求/身份/停止认证后保存为可选rejectedOutput诊断；历史只读请求的原文ref/SHA与完整正文进入同owner下一prompt，不能填成功output或候选、继承accept、读取thinking或追补旧缺席。review失败保留此前合法generation和candidate。 仅格式失败续审沿原P1/null扩域证明保partition计划及候选，认证原Native refs只给精确失败组的只读诊断seed；兄弟accept仍核完整原请求，ZCode policy按saved原字段重建，不追补缺席。
 
 
@@ -51,5 +51,7 @@
 - ZCode最新失败Git稿沿既有严格较新来源/currentfence材料接缝；旧cancelled/新failed均核formalstop+removed全值及原公开Native身份，冷观察不改旧原件或读success history，不附failedWorktree/授自动重试。writer26保护新准入，升级先停旧writer/结算资源、online backup，回滚恢复一致v25库及evidence/Git refs。定向材料回归：`npx tsx --import ./scripts/test-home.mjs --test --test-name-pattern='mode=zcode-' spec-cli/src/sync/coordinator.test.ts`。
 
 - 已停owner的精确物理JSON草稿只在新fence沿stage-worktree observer读取；ZCode另须原精确turn.failed（可保原canonical cancelled），普通暂停的turn.completed/turn.cancelled不在此物理准入，既有正常Git暂停材料政策保持；只此draft可dirty，source/tests/schema/context/index授权外变化拒绝，原目录/index/Native原件不改。physical_draft明确未批准且不是旧Git/final，正常提交后才形成新draft；P0保严格较新来源与ready，P1按真实Native attempt/round只取严格较新物理稿，合法candidate/续审优先；跨父/诊断只豁免程序可信精确overlay投影，其余保护面保持。writer27围栏，升级停旧writer/结算资源、0600 online backup，回滚恢复一致v26库及evidence/Git refs。
+
+- P1完整生成v2在本owner reserve前可认证同一已停来源的真实单稿提交，要求完整index与两次读取的全部受控物理模式和字节匹配HEAD，允许草稿命名空间外的ignored。仅 canonical 托管路径可以用原冻结seed的隔离materialize全文件重建证明，旧runtime slot不作证。冻结`stopped_git_draft`未批准原bytes、原诊断和Git/Native身份，已冻结的请求冷重放按同一材料。其他已reserved、历史v1、P0与物理未提交路径沿原门，writer30围栏。
 
 - 全局P1仅分析分区沿正式P0原件和同一冻结计划认证。真实P1与仅分析P0证据分别保存并完全覆盖原计划，封口返修和V1复用重核来源。writer28只追加SELECT1，升级须停稳旧writer、正式结算资源和租约并先做一致online backup；回滚恢复v27一致库及原evidence/Git refs。
