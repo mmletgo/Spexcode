@@ -5,7 +5,9 @@ import { sessionIdForCreateKey } from '../sessions.js'
 import { readRecord } from '../session-record.js'
 import { contentHash, readEvidence } from './snapshot.js'
 import type { NativeRunCheckpoint, NativeRunPlan } from './native-run.js'
+import { partitionedElaborationCoverageMatches, partitionedElaborationInputDigest } from './elaboration-types.js'
 import type { ElaborationResult, ElaborationRound } from './elaboration-types.js'
+import type { CodeBehaviorAnalysis } from './writeback-types.js'
 import type { BlobRef, SyncAttempt, SyncCheckpointRef, SyncOperation } from './operation-types.js'
 import type { SyncStore } from './store.js'
 
@@ -113,12 +115,28 @@ export function readSyncCheckpoints(store: SyncStore, operation: SyncOperation, 
       if (!value || typeof value !== 'object') return
       const saved = value as Saved
       const owners = Array.isArray(saved.rounds) ? saved.partitionEvidence : undefined
+      const analysisOnly = Array.isArray(saved.rounds) ? saved.analysisOnlyPartitions : undefined
+      if (analysisOnly !== undefined && (!owners || !Array.isArray(analysisOnly) || !analysisOnly.length || saved.partitionBinding || saved.phase !== 'partitioned_final')) fail('仅分析分区必须附在真实P1全局聚合')
       if (owners) {
         const locals = owners.map(owner => read<Saved>(owner.resultRef))
         if (!locals.length || new Set(owners.map(owner => owner.partitionId)).size !== owners.length || locals.some((local, index) => local.partitionBinding?.partitionId !== owners[index].partitionId || !local.partitionBinding?.planDigest) || !isDeepStrictEqual(saved.rounds, locals.flatMap(local => local.rounds))) fail('聚合rounds必须是原partitionEvidence局部结果的精确有序并集')
+        const planDigest = locals[0].partitionBinding!.planDigest
+        if (analysisOnly) {
+          if (analysisOnly.some(owner => !owner?.partitionId || !owner.analysisRef?.sha256 || !owner.wholeAnalysisRef?.sha256)) fail('仅分析分区缺少原P0引用')
+          const wholeRef = analysisOnly[0].wholeAnalysisRef, whole = read<CodeBehaviorAnalysis>(wholeRef), coverage = whole.partitionCoverage
+          if (!whole.reviewPassed || whole.inputId !== operation.input.id || whole.policyDigest !== operation.policyDigest || coverage?.planDigest !== planDigest
+            || locals.some(local => local.partitionBinding!.analysisRef?.sha256 !== wholeRef.sha256)
+            || !partitionedElaborationCoverageMatches(coverage.partitionIds, owners.map(owner => owner.partitionId), analysisOnly.map(owner => owner.partitionId))) fail('仅分析与真实P1分区必须精确覆盖原全局P0计划')
+          for (const owner of analysisOnly) {
+            const original = whole.partitionEvidence?.find(member => member.partitionId === owner.partitionId)
+            const local = read<CodeBehaviorAnalysis>(owner.analysisRef)
+            if (owner.wholeAnalysisRef.sha256 !== wholeRef.sha256 || original?.analysisRef.sha256 !== owner.analysisRef.sha256 || !local.reviewPassed
+              || !isDeepStrictEqual(original.analysis, local)) fail('仅分析分区引用必须匹配原已审P0局部')
+          }
+        }
         const inputMatches = saved.partitionBinding
           ? owners.length === 1 && isDeepStrictEqual(saved.partitionBinding, locals[0].partitionBinding) && saved.inputDigest === locals[0].inputDigest
-          : saved.phase === 'partitioned_final' && locals.every(local => local.partitionBinding!.planDigest === locals[0].partitionBinding!.planDigest) && saved.inputDigest === hash({ partitionPlanDigest: locals[0].partitionBinding!.planDigest, inputs: locals.map(local => local.inputDigest) })
+          : saved.phase === 'partitioned_final' && locals.every(local => local.partitionBinding!.planDigest === planDigest) && saved.inputDigest === partitionedElaborationInputDigest(planDigest, locals.map(local => local.inputDigest), analysisOnly)
         if (!inputMatches) fail('聚合诊断必须保留原局部身份或精确重算全局输入，不能替代原owner认证')
         for (const owner of owners) inspect(owner.resultRef)
       } else for (const round of Array.isArray(saved.rounds) ? saved.rounds : []) if (round.rejectedOutput) authenticate(saved, round)

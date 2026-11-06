@@ -1,3 +1,4 @@
+import { contentHash } from './snapshot.js'
 import type { CodeBehaviorEvidence, ContractNodeChange, SyncDecisionAuthority } from './writeback-types.js'
 import type { RawOnlyInterfaceSeedEvidence } from './partitioning.js'
 import type { BlobRef, InputSnapshot } from './operation-types.js'
@@ -13,6 +14,22 @@ export type ElaborationFact = { source: string; text: string }
 export type ReadonlySpecRepair = { kind?: 'candidate_review' | 'partition_seal'; reviewEvidence?: { partitionId: string; resultRef: BlobRef }[]; baseInputDigest: string; candidateDigest: string; generationRef: BlobRef; acceptedRef: BlobRef; changes: ElaborationResult['changes']; output: unknown; review: ElaborationReview | null; findings: ContractFinding[] }
 export type ElaborationPhase = 'interface_seed' | 'partitioned_final'
 export type ElaborationPartitionBinding = { planDigest: string; partitionId: string; analysisRef?: BlobRef; interfaceSeed?: RawOnlyInterfaceSeedEvidence }
+export type AnalysisOnlyPartitionEvidence = { partitionId: string; analysisRef: BlobRef; wholeAnalysisRef: BlobRef }
+
+export function partitionedElaborationInputDigest(planDigest: string, inputs: readonly string[], analysisOnlyPartitions?: readonly AnalysisOnlyPartitionEvidence[]): string {
+  return contentHash(JSON.stringify({ partitionPlanDigest: planDigest, inputs, ...(analysisOnlyPartitions?.length ? { analysisOnlyPartitions } : {}) }))
+}
+
+export function partitionedElaborationCoverageMatches(partitionIds: readonly string[], writerIds: readonly string[], analysisOnlyIds: readonly string[]): boolean {
+  const writers = new Set(writerIds), analysisOnly = new Set(analysisOnlyIds)
+  return writers.size === writerIds.length && analysisOnly.size === analysisOnlyIds.length
+    && writerIds.length + analysisOnlyIds.length === partitionIds.length
+    && new Set(partitionIds).size === partitionIds.length
+    && partitionIds.every(id => writers.has(id) !== analysisOnly.has(id))
+    && partitionIds.filter(id => writers.has(id)).every((id, index) => id === writerIds[index])
+    && partitionIds.filter(id => analysisOnly.has(id)).every((id, index) => id === analysisOnlyIds[index])
+}
+
 /** 调用者已确认的用户原意或裁决变更；不是 Agent 自己生成的批准请求。 */
 export type AuthorizedContractChange = { id: string; action: 'retire' | 'update_verification'; source: 'user:raw' | `decision:${string}`; reason: string; analysisRef?: BlobRef } | { id: string; action: 'update_acceptance'; source: 'user:raw' | `decision:${string}` | `code:${string}`; reason: string; ruleIds: string[]; analysisRef: BlobRef } | { id: string; action: 'restore'; source: 'user:raw'; reason: string; history: { inputId: string; requestBlob: BlobRef } }
 export type ElaborationInput = {
@@ -115,6 +132,7 @@ export type ElaborationResult = {
   retiredIds: string[]
   nodeChanges?: ContractNodeChange[]
   partitionEvidence?: { partitionId: string; resultRef: BlobRef }[]
+  analysisOnlyPartitions?: AnalysisOnlyPartitionEvidence[]
   partitionSeal?: ElaborationPartitionSeal
   verificationProjectionRef?: BlobRef
   structurePassed: boolean

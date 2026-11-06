@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+v28仅追加无DDL SELECT 1 marker，保护P1全局证据中独立的analysisOnlyPartitions和精确摘要。v27及更旧writer必须在写入和派发前拒绝。升级先停稳旧backend/queue并正式结算资源和租约，再用SQLite online backup及组件事务迁移，v1–v27 SQL、checksum、applied_at和旧业务表原样保留。回滚先停新writer，再恢复升级前一致v27备份及原evidence/Git refs，不删marker。
+
 v27仅追加无DDL SELECT1 marker，保护已停owner物理JSON草稿的明确未批准材料准入及来源选择；v26及更旧writer必须写入/派发前拒绝。升级先停稳全部旧writer并结算或保留资源，经0600私有SQLite online backup及组件事务26→27，v1–v26完整migration/checksum/applied_at和全部旧表/请求/receipt保持。回滚停新writer后恢复一致v26库及evidence/Git refs，不删marker、不改旧计划或原工作树/index。NativePlan、structured policy与业务schema不改。
 
 v26仅追加无DDL SELECT1 marker，保护精确已停ZCode失败的未批准Git材料准入与既有严格较新来源选择，v25及更旧writer写入/派发前拒绝。NativePlan及structured policy仍按原v3/v6或原历史版本冷验，不补字段。升级前停稳旧writer并结算或保留资源，经SQLite online backup及组件事务25→26；v1–v25 migration完整行/checksum/applied_at与全部旧业务/protocol表保持。回滚停新writer并恢复升级前v25一致备份及原evidence/Git refs，不删marker、不重签旧记录或丢弃最新未批准稿。

@@ -908,6 +908,82 @@ for (const fails of [false, true]) test(`最后一个分区${fails ? '失败' : 
 })
 
 
+
+test('P1仅对真实Spec目标派发，保留独审无写义务的P0分区原件', async t => {
+  const prepared = await fixture(t), { input, plan, checkpoints, root } = prepared
+  const sourceOnly = [
+    { id: 'part-metadata', path: 'docs/sync-note.md', kind: 'refactor' },
+    { id: 'part-extra-test', path: 'tests/unowned-smoke.test.mjs', kind: 'allowed_change' },
+  ] as const
+  for (const { id, path } of sourceOnly) {
+    mkdirSync(dirname(join(root, path)), { recursive: true })
+    writeFileSync(join(root, path), path.endsWith('.md') ? '# Note\n仅记录仓库约定。\n' : 'import test from "node:test"\ntest("smoke", () => {})\n')
+    plan.partitions.splice(1, 0, { ...plan.partitions[0], id, targets: [], readPaths: [path], writePaths: [], sourcePaths: [path], changedPaths: [path], contractIds: [], flowIds: [] })
+    plan.expectedPaths.push(path)
+  }
+  for (const partition of plan.partitions.filter(item => item.targets.length)) partition.readPaths = [...new Set([...partition.readPaths, ...plan.partitions[0].readPaths])]
+  plan.digest = contentHash(JSON.stringify({ ...plan, digest: undefined }))
+  const git = (...args: string[]): void => { execFileSync('git', ['-C', root, ...args], { stdio: 'pipe' }) }
+  git('add', ...sourceOnly.map(item => item.path)); git('commit', '-m', 'add committed source-only paths')
+  const snapshot = await captureInputSnapshot(root, { committed: true }), composed = composeInputSnapshots(snapshot, null).composed!
+  const files = new Map(readTree(snapshot.source.commonDir, snapshot.immutableTree).map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString('utf8')]))
+  const facts = input.contracts.map(contract => ({ source: `decision:${contract.nodeId.split('-')[0].toUpperCase()}-POLICY`, text: '固定夹具显式业务政策' }))
+  const p0Input: CodeBehaviorInput = { snapshot, baseline: null, composed, origin: 'initial', requestKey: 'mixed-p0', readSetDigest: 'readset', policyDigest: 'policy', timeoutMs: 30000,
+    plan: { version: 'sync-coordinator-v2', direction: 'code_to_spec', intentNodeId: input.intent.nodeId, targets: plan.partitions.flatMap(partition => partition.targets), readPaths: ['.spec', 'src', 'tests', 'docs'], writePaths: ['.spec'], sourcePaths: ['src', 'docs', 'tests'], facts, verifications: [], mandatoryTests: [], partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 } },
+  }
+  let p0Calls = 0
+  const analysis = await analyzeSyncPartitions(p0Input, plan, 1, async request => {
+    const ordinal = ++p0Calls
+    const frozen = readFrozenBehaviorContext<{ partition: { id: string }; changedPaths: string[] }>(request)
+    const source = sourceOnly.find(item => item.id === frozen.partition.id)
+    const reviewed = request.purpose === 'code_behavior_review' ? JSON.parse(request.prompt.split('待审分析:\n')[1]) as { analysisDigest: string; analysis: CodeBehaviorAnalysis } : null
+    const output = reviewed
+      ? { inputDigest: request.inputDigest, analysisDigest: reviewed.analysisDigest, verdict: 'accept', checkedPaths: frozen.changedPaths, checkedChangeIds: reviewed.analysis.changes.map(change => change.id), findings: [] }
+      : { changes: frozen.changedPaths.map(path => ({ kind: source?.kind ?? 'refactor', paths: [path], affectedIds: [], ruleIds: [], originalIntent: '保留既有业务', previousBehavior: '原边界', sourceBehavior: '保留原业务', deliveryBehavior: '未有前次交付', evidence: `读取冻结文件 ${path}`, counterexample: '路径不能由另一分区代审' })), facts: source?.id === 'part-metadata' ? [{ source: `code:${source.path}#Note`, text: '仓库注记只记录约定。' }] : [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+    return { sessionId: `mixed-p0-session-${ordinal}`, threadId: `mixed-p0-thread-${ordinal}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)) }
+  }, checkpoints)
+  const wholeRef = checkpoints.save('analysis', analysis)
+  checkpoints.save('partition-plan', plan)
+  assert.equal(p0Calls, plan.partitions.length * 2)
+  const p1Input: ElaborationInput = { root, requestKey: 'mixed-p1', intent: input.intent, targets: input.contracts.map(contract => ({ nodeId: contract.nodeId, path: contract.path, source: files.get(contract.path)!, sourceDigest: contentHash(files.get(contract.path)!) })), files, facts, maxRepairs: 0, maxCalls: 2, historyInput: snapshot, analysis: { ref: wholeRef, analysis }, implementationWritePaths: [] }
+  const calls: ElaborationSessionRequest[] = []
+  const runner: ElaborationRunner = async request => {
+    const index = calls.push(request)
+    const context = JSON.parse(request.prompt.split('冻结业务输入:\n')[1].split('\n')[0]) as { targets: { nodeId: string }[] }
+    assert.equal(context.targets.length, 1)
+    const domain = context.targets[0].nodeId.split('-')[0].toUpperCase()
+    const output = request.purpose === 'elaboration_generate'
+      ? { version: 'elaboration-target-rows-v3', changes: [], applicability: ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: true, basis: '固定夹具明确业务边界', affectedIds: [`REQ-${domain}-01`] })) }
+      : { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+    return { sessionId: `mixed-p1-session-${index}`, threadId: `mixed-p1-thread-${index}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)) }
+  }
+  const mixedCheckpoints: PartitionCheckpoints = { ...checkpoints, authenticateAnalysisOnly: (frozen, whole, owners) => {
+    assert.deepEqual(frozen, checkpoints.load('partition-plan'))
+    assert.deepEqual(whole.analysis, checkpoints.load('analysis'))
+    assert.equal(whole.ref.sha256, wholeRef.sha256)
+    return owners.every(owner => {
+      const original = checkpoints.load<CodeBehaviorAnalysis>(`partition:${owner.partitionId}:analysis`)
+      return original?.reviewPassed && contentHash(JSON.stringify(original)) === owner.analysisRef.sha256
+    })
+  } }
+  const result = await elaborateSyncPartitions(p1Input, plan, 1, mixedCheckpoints, runner, composed)
+  assert.equal(result.structurePassed, true, JSON.stringify(result.partitionSeal?.findings))
+  assert.equal(result.reviewPassed, true)
+  assert.deepEqual(result.partitionEvidence?.map(item => item.partitionId), plan.partitions.filter(partition => partition.targets.length).map(partition => partition.id))
+  assert.equal(calls.length, 6)
+  assert.ok(sourceOnly.every(owner => !calls.some(request => request.requestKey.includes(owner.id))))
+  assert.deepEqual(result.analysisOnlyPartitions, plan.partitions.filter(partition => !partition.targets.length).map(partition => ({
+    partitionId: partition.id, analysisRef: analysis.partitionEvidence!.find(member => member.partitionId === partition.id)!.analysisRef, wholeAnalysisRef: wholeRef,
+  })))
+  assert.equal(result.rounds.length, 3)
+  assert.equal(analysis.facts.some(fact => fact.source === 'code:docs/sync-note.md#Note'), true)
+  assert.deepEqual(await elaborateSyncPartitions(p1Input, plan, 1, mixedCheckpoints, async () => { throw new Error('无新派发') }, composed), result)
+  await assert.rejects(elaborateSyncPartitions(p1Input, plan, 1, { ...mixedCheckpoints, authenticateAnalysisOnly: () => false }, runner, composed), /缺少原正式P0/)
+  const lostTarget = { ...p1Input, targets: p1Input.targets.slice(1) }
+  await assert.rejects(elaborateSyncPartitions(lostTarget, plan, 1, mixedCheckpoints, runner, composed), /缺少可写细化目标/)
+
+})
+
 test('分区P1原意根作为其他区只读上下文，独审原件与可写目标各自保留', async t => {
   const { input, plan, checkpoints } = await fixture(t), calls: ElaborationSessionRequest[] = []
   const rootContract = input.contracts[0], rootPaths = plan.partitions[0].readPaths
