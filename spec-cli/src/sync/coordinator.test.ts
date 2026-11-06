@@ -156,8 +156,11 @@ test('14attempt/1790CAS历史扫描交还控制，同一30秒fence到达首次�
   }
   const texts = new Set([...historyBytes.keys()].map(sha256 => readEvidence(f.input.source.commonDir, { sha256 }).toString('utf8')))
   const read = fs.readFileSync, parse = JSON.parse, clone = globalThis.structuredClone
-  let historicalReads = 0, historicalDecodes = 0, checkpointClones = 0, clonedHistoryBytes = 0
-  fs.readFileSync = ((...args: Parameters<typeof fs.readFileSync>) => { if (historyBytes.has(String(args[0]).slice(-64))) historicalReads++; return read(...args) }) as typeof fs.readFileSync
+  let historicalReads = 0, historicalDecodes = 0, checkpointClones = 0, clonedHistoryBytes = 0, scanHistoryReads = 0, inScan = false
+  fs.readFileSync = ((...args: Parameters<typeof fs.readFileSync>) => {
+    if (historyBytes.has(String(args[0]).slice(-64))) { historicalReads++; if (inScan) scanHistoryReads++ }
+    return read(...args)
+  }) as typeof fs.readFileSync
   JSON.parse = (text: string, reviver?: (key: string, value: unknown) => unknown) => { if (texts.has(text)) historicalDecodes++; return parse(text, reviver) }
   globalThis.structuredClone = ((value: unknown, options?: Parameters<typeof clone>[1]): unknown => {
     const checkpoint = value as { json?: { ref: { sha256: string } }[]; raw?: unknown }
@@ -167,7 +170,7 @@ test('14attempt/1790CAS历史扫描交还控制，同一30秒fence到达首次�
   syncBuiltinESMExports()
   t.after(() => { fs.readFileSync = read; JSON.parse = parse; globalThis.structuredClone = clone; syncBuiltinESMExports() })
   const checkpoint = f.store.checkpoint.bind(f.store), renew = f.store.renewLease.bind(f.store)
-  let inScan = false, controlOpportunity = false, controlBeforeProtocol = false, partitionCount = 0, dispatches = 0
+  let controlOpportunity = false, controlBeforeProtocol = false, partitionCount = 0, dispatches = 0
   const renewals: { at: number; attemptId: string; leaseToken: string }[] = []
   f.store.renewLease = (fence, leaseMs) => { if (inScan) renewals.push({ at: Date.now(), attemptId: fence.attemptId, leaseToken: fence.leaseToken }); return renew(fence, leaseMs) }
   f.store.checkpoint = (fence, ref) => {
@@ -189,10 +192,11 @@ test('14attempt/1790CAS历史扫描交还控制，同一30秒fence到达首次�
     throw Object.assign(new Error('受控runner只证明首次真实reserveDispatch，不调用模型'), { code: 'unsupported' })
   }
   const started = performance.now(), result = await runSyncOperation(f.store, f.operation.id, f.options)
-  t.diagnostic(JSON.stringify({ historyAttempts: 14, historyCas: historyBytes.size, partitionCount, leaseMs: f.options.leaseMs, heartbeatMs: f.options.heartbeatMs, controlBeforeProtocol, dispatches, scanRenewals: renewals.length, maximumRenewalGapMs: Math.max(0, ...renewals.slice(1).map((item, index) => item.at - renewals[index].at)), historicalReads, historicalDecodes, checkpointClones, clonedHistoryBytes, coordinatorMs: performance.now() - started, status: result.status, failure: result.failure }))
+  t.diagnostic(JSON.stringify({ historyAttempts: 14, historyCas: historyBytes.size, partitionCount, leaseMs: f.options.leaseMs, heartbeatMs: f.options.heartbeatMs, controlBeforeProtocol, dispatches, scanRenewals: renewals.length, maximumRenewalGapMs: Math.max(0, ...renewals.slice(1).map((item, index) => item.at - renewals[index].at)), scanHistoryReads, historicalReads, historicalDecodes, checkpointClones, clonedHistoryBytes, coordinatorMs: performance.now() - started, status: result.status, failure: result.failure }))
   assert.equal(historyBytes.size, 1790); assert.equal(partitionCount, 101)
   assert.equal(controlBeforeProtocol, true, 'owner×history及诊断扫描必须在下一阶段前让事件循环处理控制')
   assert.equal(historicalDecodes, historyBytes.size, '全历史协调扫描只解码每份真实CAS一次')
+  assert.ok(scanHistoryReads <= 3 * historyBytes.size, `分区间重复验读历史CAS：${scanHistoryReads} > ${3 * historyBytes.size}`)
   assert.equal(dispatches, 1); assert.equal(result.status, 'unsupported')
   assert.equal(f.store.readOperation(f.operation.id).callsUsed, 1)
   assert.equal(f.store.listAttempts(f.operation.id).length, 15)

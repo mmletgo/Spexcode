@@ -1496,10 +1496,11 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         }
         return null
       }
+      const renderedRepairAttempt = (prior: SyncAttempt): boolean => ['failed', 'superseded', 'settled'].includes(prior.status) && prior.failure?.kind === 'repairable' && canonical(prior.composedInput) === canonical(view.composed)
       // 同一原round既供P1完整定位，也供精确P0分类质疑；候选仍只是拒绝诊断。
-      const renderedElaborationSource = (owner: SyncOperation, prior: SyncAttempt, key: string): { result: SavedElaboration; resultRef: BlobRef; round: ElaborationResult['rounds'][number] } | null => {
-        if (!['failed', 'superseded', 'settled'].includes(prior.status) || prior.failure?.kind !== 'repairable' || canonical(prior.composedInput) !== canonical(view.composed)) return null
-        const source = partitionStage<SavedElaboration>(store, owner, prior, key), round = source?.result.rounds.at(-1)
+      const renderedElaborationSource = (owner: SyncOperation, prior: SyncAttempt, key: string, checkpoints?: ReturnType<typeof readSyncCheckpoints>): { result: SavedElaboration; resultRef: BlobRef; round: ElaborationResult['rounds'][number] } | null => {
+        if (!renderedRepairAttempt(prior)) return null
+        const source = partitionStage<SavedElaboration>(store, owner, prior, key, undefined, checkpoints), round = source?.result.rounds.at(-1)
         if (!source || source.result.reviewPassed || source.result.phase === 'partitioned_final' || source.result.status !== 'exhausted' || source.result.failure?.code !== 'repair_budget_exhausted' || !round?.candidate || !round.findings.some(finding => finding.severity === 'error')) return null
         if (round.candidate.inputDigest !== source.result.inputDigest || round.candidateDigest !== contentHash(JSON.stringify(round.candidate))) fail('review_retry_binding', '已生成P1候选的原输入或摘要失配，不能回退为重新生成')
         if (!elaborationGenerationSource(store, owner, prior, round)) fail('review_retry_binding', '已生成P1候选的原Native请求/结果绑定失配，不能回退为重新生成')
@@ -1928,15 +1929,34 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       const postGateReview: CodeBehaviorPostGateReview[] = []
       if (behaviorOrigin) {
         const owners = partitions?.partitions.map(partition => ({ partitionId: partition.id, key: `partition:${partition.id}:elaboration` })) ?? [{ partitionId: undefined, key: 'elaboration' }]
+        const ownerKeys = new Set(owners.map(owner => owner.key))
         const beforeFiles = priorDeliveryFiles({ ...operation, baselineSelection: store.readBusinessBaselineSelection(operation.id) }, view, [...options.plan.readPaths, ...operation.scope.paths], options.plan)
-        for (const owner of owners) for (const sourceAttempt of retryDraftSources(store, operation, attempt!.number)) {
+        const sources = retryDraftSources(store, operation, attempt!.number).filter(({ prior }) => renderedRepairAttempt(prior))
+        const history = new Map<string, { owner: SyncOperation; prior: SyncAttempt; checkpoints: ReturnType<typeof readSyncCheckpoints>; keys: Set<string> } | null>()
+        for (const owner of owners) for (const sourceAttempt of sources) {
+          let sourceView = history.get(sourceAttempt.prior.id)
+          if (sourceView === undefined) {
+            store.renewLease(fence, leaseMs); await yieldToControl(); store.renewLease(fence, leaseMs)
+            const sourceOwner = store.readOperation(sourceAttempt.owner.id), prior = store.readAttempt(sourceAttempt.prior.id)
+            sourceView = null
+            if (renderedRepairAttempt(prior)) {
+              const checkpoints = readSyncCheckpoints(store, sourceOwner, prior), keys = new Set<string>()
+              for (const { value } of checkpoints.json) {
+                const entry = value as Partial<Stage> | null
+                if (entry?.version === 'sync-stage-v1' && entry.stage && ownerKeys.has(entry.stage)) keys.add(entry.stage)
+              }
+              if (keys.size) sourceView = { owner: sourceOwner, prior, checkpoints, keys }
+            }
+            history.set(prior.id, sourceView)
+          }
+          if (!sourceView?.keys.has(owner.key)) continue
+          const { owner: sourceOwner, prior, checkpoints } = sourceView
           store.renewLease(fence, leaseMs); await yieldToControl(); store.renewLease(fence, leaseMs)
-          const sourceOwner = store.readOperation(sourceAttempt.owner.id), prior = store.readAttempt(sourceAttempt.prior.id)
-          const source = renderedElaborationSource(sourceOwner, prior, owner.key)
-          const approved = source && stage<CodeBehaviorAnalysis>(store, sourceOwner, prior, 'analysis')
+          const source = renderedElaborationSource(sourceOwner, prior, owner.key, checkpoints)
+          const approved = source && stage<CodeBehaviorAnalysis>(store, sourceOwner, prior, 'analysis', 'automatic', checkpoints)
           if (!source || !approved?.reviewPassed || !analysisStageBinding(store, sourceOwner, approved)) continue
           const local = owner.partitionId ? approved.partitionEvidence?.find(item => item.partitionId === owner.partitionId) : undefined
-          if (owner.partitionId && (!local || partitionStage<SyncPartitionPlan>(store, sourceOwner, prior, 'partition-plan')?.result.digest !== partitions!.digest || source.result.partitionBinding?.planDigest !== partitions!.digest || source.result.partitionBinding?.partitionId !== owner.partitionId)) continue
+          if (owner.partitionId && (!local || partitionStage<SyncPartitionPlan>(store, sourceOwner, prior, 'partition-plan', undefined, checkpoints)?.result.digest !== partitions!.digest || source.result.partitionBinding?.planDigest !== partitions!.digest || source.result.partitionBinding?.partitionId !== owner.partitionId)) continue
           const original = local?.analysis ?? approved, analysisRef = local?.analysisRef ?? writeEvidence(operation.input.source.commonDir, approved)
           if (contentHash(JSON.stringify(original)) !== analysisRef.sha256 || !original.reviewPassed || original.inputId !== operation.input.id || original.policyDigest !== operation.policyDigest || original.composedDigest !== view.composed.contentDigest) continue
           if (owner.partitionId && source.result.partitionBinding?.analysisRef?.sha256 !== writeEvidence(operation.input.source.commonDir, approved).sha256) continue
