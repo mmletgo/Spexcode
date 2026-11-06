@@ -8,7 +8,7 @@ import { buildContractGraph, CONTRACT_COLUMNS, parseContract, parseFrontmatter, 
 import { StructuredSessionError, rejectedFinalOutput } from '../session-structured-policy.js'
 import { nativeWorktreePrompt, nativeWorktreeResult } from '../native-worktree-runtime.js'
 import { elaborate, elaborationMaterialContext, elaborationDigest, freezeElaborationInput, sealPartitionedElaboration, verifyElaborationDraftCache } from './elaboration.js'
-import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
+import { ELABORATION_BOUNDARIES, ELABORATION_GENERATION_GUIDANCE } from './elaboration-types.js'
 import type { ElaborationInput, ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
 import { captureInputSnapshot, contentHash, readEvidence, readObject, readTree, writeEvidence, writeObject, writeTree } from './snapshot.js'
 import { captureStageDraft, overlayStageTree, readStageDraft, readStoppedPhysicalDraft, stageWorktree } from './stage-worktree.js'
@@ -165,8 +165,52 @@ test('Native P1续修状态事件和无状态END坏稿，保留实际Git草稿�
   assert.equal(repaired.inputDigest, failed.inputDigest)
   assert.deepEqual(f.requests.map(request => request.purpose), ['elaboration_generate', 'elaboration_generate', 'elaboration_review'])
   assert.ok(!f.requests[2].prompt.includes('TR.from、TR.event'))
+  assert.doesNotMatch(f.requests[2].prompt, /包装测试只有实际声明稳定ID/)
   assert.equal(repaired.rounds[0].draft!.schemaDigest, oldDraft.schemaDigest)
   assert.equal(readStageDraft(f.commonDir, oldDraft, oldDraft), invalidSource)
+})
+
+test('Native完整P1独审逐项核对冻结VERIFY实际执行并覆盖AC断言', async t => {
+  const f = await fixture(t)
+  const result = await elaborate({ ...f.input, generationGuidance: ELABORATION_GENERATION_GUIDANCE }, { runner: f.run(() => JSON.stringify(rows)) })
+  assert.equal(result.status, 'complete', JSON.stringify(result.failure))
+  assert.deepEqual(f.requests.map(request => request.purpose), ['elaboration_generate', 'elaboration_review'])
+  assert.match(f.requests[0].prompt, /包装测试只有实际声明稳定ID、确实运行并覆盖本条断言才可引用/)
+  assert.match(f.requests[0].prompt, /TR.from、TR.event/)
+  assert.match(f.requests[1].prompt, /包装测试只有实际声明稳定ID、确实运行并覆盖本条断言才可引用/)
+  assert.match(f.requests[1].prompt, /沿冻结VERIFY命令和包装器的实际调用逐项核对.*P1提出普通repair，不改文件/)
+  assert.match(f.requests[1].prompt, /只读实现范围下不派发P2/)
+  assert.doesNotMatch(f.requests[1].prompt, /TR.from、TR.event/)
+})
+
+for (const missing of ['case', 'files'] as const) test(`Native完整P1把原授权的待实现诊断交给P2，V3实测前不算既有覆盖 missing=${missing}`, async t => {
+  const f = await fixture(t), testPath = 'tests/export.test.mjs'
+  const [target] = f.input.targets, sourcePath = 'src/export.js'
+  const source = missing === 'files' ? target.source!.replace(`code:\n  - ${sourcePath}#ExportService\n`, '') : target.source!
+  if (missing === 'files') {
+    rmSync(join(f.root, testPath)); rmSync(join(f.root, sourcePath))
+    writeFileSync(join(f.root, path), source)
+  } else {
+    const frozenTests = readFileSync(join(f.root, testPath), 'utf8').replace("test('AC-EXPORT-03 ", "test('AC-EXPORT-OTHER ")
+    writeFileSync(join(f.root, testPath), frozenTests)
+  }
+  git(f.root, 'add', '-A'); git(f.root, 'commit', '-m', 'freeze pending acceptance')
+  const snapshot = await captureInputSnapshot(f.root)
+  const base = f.run(() => JSON.stringify(rows))
+  const result = await elaborate({ ...f.input, targets: [{ ...target, source, sourceDigest: elaborationDigest(source) }], generationGuidance: ELABORATION_GENERATION_GUIDANCE, historyInput: snapshot, worktree: stageWorktree(f.commonDir, snapshot.headCommit, snapshot.immutableTree), implementationWritePaths: missing === 'files' ? [sourcePath, testPath] : [testPath], maxRepairs: 0 }, { runner: async request => {
+    const native = await base(request)
+    if (request.purpose !== 'elaboration_review') return native
+    assert.match(request.prompt, /原授权可写范围.*冻结VERIFY.*原结构诊断交P2，由V3实测/)
+    assert.match(request.prompt, /仅在有可绑定的真实冻结证据.*另报implementation-review/)
+    assert.match(request.prompt, /待实现不算既有覆盖/)
+    return native
+  } })
+  assert.equal(result.status, 'complete', JSON.stringify(result.failure))
+  assert.equal(result.reviewPassed, true)
+  assert.deepEqual([...new Set(result.deferredImplementationFindings.map(issue => issue.code))].sort(), missing === 'files' ? ['missing-implementation', 'missing-test-file'] : ['missing-test-case'])
+  assert.deepEqual(result.rounds[0].review!.findings, [])
+  assert.equal(result.runtimeVerification, 'not_run')
+  assert.deepEqual(f.requests.map(request => request.purpose), ['elaboration_generate', 'elaboration_review'])
 })
 
 test('跨source/父上下文只迁移同owner草稿；新seed保留新父Spec、全部源码/tests对象与absence', async t => {
@@ -302,10 +346,12 @@ test('冻结owner的非法repair跨请求只续独审，原Git稿和候选不变
   }
   await assert.rejects(elaborate({ ...input, requestKey: 'scope-review-new-analysis', analysis: { ...input.analysis, ref: { sha256: 'e'.repeat(64) } } }, { draft, repairDiagnostics, runner: async () => assert.fail('异分析不得派发') }), /同一业务输入/)
   const before = f.requests.length
-  const restored = await elaborate({ ...input, requestKey: 'scope-review-fresh' }, { draft, repairDiagnostics, loadDraftMaterial: () => assert.fail('合法候选只续独审，不读物理材料覆盖'), runner: f.run(() => assert.fail('同一合法Git稿不得重新生成')) })
+  const restored = await elaborate({ ...input, requestKey: 'scope-review-fresh', generationGuidance: ELABORATION_GENERATION_GUIDANCE }, { draft, repairDiagnostics, loadDraftMaterial: () => assert.fail('合法候选只续独审，不读物理材料覆盖'), runner: f.run(() => assert.fail('同一合法Git稿不得重新生成')) })
   assert.equal(restored.status, 'complete', JSON.stringify(restored.failure))
   assert.deepEqual(f.requests.slice(before).map(request => request.purpose), ['elaboration_review'])
   assert.match(f.requests.at(-1)!.prompt, /review_scope/); assert.ok(f.requests.at(-1)!.prompt.includes(JSON.stringify(rawReview)))
+  assert.match(f.requests.at(-1)!.prompt, /包装测试只有实际声明稳定ID、确实运行并覆盖本条断言才可引用/)
+  assert.deepEqual(f.requests.at(-1)!.schema, f.requests[1].schema)
   assert.deepEqual(restored.rounds[0].traces[0], round.traces[0]); assert.deepEqual(restored.rounds[0].draft, { ...draft, errors: restored.rounds[0].findings })
   assert.equal(restored.candidateDigest, failed.candidateDigest); assert.deepEqual(restored.changes, failed.changes)
   assert.equal(readStageDraft(f.commonDir, draft, draft), draftText); assert.equal(JSON.stringify(failed), original)

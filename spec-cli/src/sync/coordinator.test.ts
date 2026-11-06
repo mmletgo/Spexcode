@@ -14,7 +14,7 @@ import { authenticateNativeRejectedFinal, readSyncCheckpoints, syncCheckpointArt
 import { outputErrors } from './elaboration-schema.js'
 import type { ContractCell, GeneratedElaboration, GeneratedTables } from './elaboration-markdown.js'
 import { sameContractBusinessMeaning } from './contract-evolution.js'
-import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
+import { ELABORATION_BOUNDARIES, ELABORATION_GENERATION_GUIDANCE } from './elaboration-types.js'
 import { elaborate, freezeElaborationInput } from './elaboration.js'
 import { checkGenerationContractIntent, readFrozenContracts } from './frozen-contracts.js'
 import type { ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult } from './elaboration-types.js'
@@ -5636,12 +5636,18 @@ test('已有reserved P1在SQLite冷恢复后草稿协议缺席仍不补签或改
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
 })
 
-for (const guidance of ['absent', 'ac-test-binding-v1', 'ac-test-flow-binding-v2'] as const) test(`P1生成提示按attempt冻结，冷恢复原reserved请求 guidance=${guidance}`, async t => {
+for (const [guidance, purpose] of [
+  ['absent', 'elaboration_generate'],
+  ['ac-test-binding-v1', 'elaboration_generate'],
+  ['ac-test-flow-binding-v2', 'elaboration_generate'],
+  ['ac-test-flow-binding-v2', 'elaboration_review'],
+  [ELABORATION_GENERATION_GUIDANCE, 'elaboration_review'],
+] as const) test(`P1提示按attempt冻结，冷恢复原reserved请求 guidance=${guidance} purpose=${purpose}`, async t => {
   const f = await fixture(t, { maxAttempts: 1, maxCalls: 4, maxRepairs: 0, timeoutMs: 120_000 }, false, original, 'project', original, { agentWorkflow: 'native-worktree-v1' }, undefined, 'spec', 'claude:default')
   const claimed = f.store.claimAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 30_000, expectedMessageId: f.operation.dispatchMessageId })
   const commonDir = f.input.source.commonDir
   const expectedProtocol = { version: 'elaboration-draft-v1', ...(guidance === 'absent' ? {} : { generationGuidance: guidance }) }
-  if (guidance !== 'ac-test-flow-binding-v2') {
+  if (guidance !== ELABORATION_GENERATION_GUIDANCE) {
     const value = expectedProtocol, resultRef = writeEvidence(commonDir, value)
     const wrapper = writeEvidence(commonDir, { version: 'sync-stage-v1', operationId: f.operation.id, attemptId: claimed.attempt.id, inputId: f.input.id, policyDigest: f.operation.policyDigest, stage: 'elaboration-draft-protocol', resultRef })
     f.store.checkpoint(claimed.fence, { ...wrapper, artifacts: syncCheckpointArtifacts(value, resultRef) })
@@ -5651,26 +5657,37 @@ for (const guidance of ['absent', 'ac-test-binding-v1', 'ac-test-flow-binding-v2
     if (JSON.parse(readEvidence(commonDir, ref).toString()).stage === 'elaboration') throw Object.assign(new Error('测试在写入P1结果前模拟进程边界'), { code: 'SYNC_FENCE_EXPIRED' })
     return checkpoint(fence, ref)
   }
-  const requests: ElaborationSessionRequest[] = []
+  const requests: ElaborationSessionRequest[] = [], review = purpose === 'elaboration_review'
   f.options.runner = async request => {
-    assert.equal(request.purpose, 'elaboration_generate'); assert.equal(request.worktree!.mode, 'edit')
+    if (review && request.purpose === 'elaboration_generate') {
+      assert.equal(request.worktree!.mode, 'edit')
+      const seed = request.worktree!, draftPath = /草稿文件=([^\s；]+)/.exec(request.prompt)![1], workspace = join(f.parent, 'reserved-review-draft')
+      f.git('worktree', 'add', '--detach', workspace, seed.baseCommit)
+      mkdirSync(join(workspace, draftPath, '..'), { recursive: true })
+      writeFileSync(join(workspace, draftPath), JSON.stringify({ version: 'elaboration-target-rows-v3', changes: [], applicability: ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: false, basis: '沿用完整冻结契约', affectedIds: [] })) }))
+      execFileSync('git', ['-C', workspace, 'add', draftPath], { stdio: 'pipe' })
+      execFileSync('git', ['-C', workspace, 'commit', '-m', 'reserved review fixture draft'], { stdio: 'pipe' })
+      const dispatch = f.store.readAttempt(claimed.attempt.id).dispatchPlans.find(item => item.key === request.requestKey)!, output = { summary: '实际草稿已提交' }
+      return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: 'reserved-review-generation', turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)), worktree: nativeWorktreeResult(workspace, seed) }
+    }
+    assert.equal(request.purpose, purpose); assert.equal(request.worktree!.mode, review ? 'read' : 'edit')
     requests.push(request)
     throw Object.assign(new Error('只核对reserved请求，不在此用例运行模型'), { code: 'unsupported' })
   }
   assert.equal((await runSyncOperation(f.store, f.operation.id, f.options)).status, 'recovery_required')
-  const before = f.store.readAttempt(claimed.attempt.id), [reservation] = before.dispatchPlans
-  assert.equal(before.dispatchPlans.length, 1); assert.equal(reservation.key, requests[0].requestKey); assert.equal(reservation.session, null)
+  const before = f.store.readAttempt(claimed.attempt.id), reservation = before.dispatchPlans.at(-1)!
+  assert.equal(before.dispatchPlans.length, review ? 2 : 1); assert.equal(reservation.key, requests[0].requestKey); assert.equal(reservation.session, null)
   const marker = before.checkpointRefs.find(ref => JSON.parse(readEvidence(commonDir, ref).toString()).stage === 'elaboration-draft-protocol')!
   const markerBytes = readEvidence(commonDir, marker)
   const version = JSON.parse(readEvidence(commonDir, JSON.parse(markerBytes.toString()).resultRef).toString())
   assert.deepEqual(version, expectedProtocol)
-  assert.equal(requests[0].prompt.includes('仓库相对测试路径#稳定用例ID'), guidance !== 'absent')
-  assert.equal(requests[0].prompt.includes('TR.from、TR.event'), guidance === 'ac-test-flow-binding-v2')
+  assert.equal(requests[0].prompt.includes('仓库相对测试路径#稳定用例ID'), review ? guidance === ELABORATION_GENERATION_GUIDANCE : guidance !== 'absent')
+  assert.equal(requests[0].prompt.includes('TR.from、TR.event'), !review && guidance === 'ac-test-flow-binding-v2')
   f.closeForRestart()
   const protocol = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => protocol.close())
   const store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) }); f.useStore(store)
   const resumed = await runSyncOperation(store, f.operation.id, f.options)
-  assert.equal(resumed.status, 'unsupported'); assert.equal(resumed.operation.callsUsed, 1)
+  assert.equal(resumed.status, 'unsupported'); assert.equal(resumed.operation.callsUsed, review ? 2 : 1)
   assert.equal(requests.length, 2)
   const { signal: _originalSignal, ...originalRequest } = requests[0], { signal: _resumedSignal, ...resumedRequest } = requests[1]
   assert.deepEqual(resumedRequest, originalRequest)
