@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import test from 'node:test'
+import { encodeProject } from '@spexcode/spec-core'
+import { canonicalContractFilterBindings, describeCanonicalContractFilter } from '../contract-filter.js'
 import { contentHash, objectGit, readObject, readTree, writeObject, writeTree } from './snapshot.js'
 import { importStageChanges, overlayStageTree, readStoppedPhysicalDraft, stageWorktree, verifyStageResult } from './stage-worktree.js'
 import { nativeWorktreeResult } from '../native-worktree-runtime.js'
@@ -23,6 +25,58 @@ function result(seed: ReturnType<typeof stageWorktree>, headCommit = seed.baseCo
   const output = { summary: '摘要声称的补丁不作为候选' }
   return { sessionId: 'session', threadId: 'thread', turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)), worktree: { baseCommit: seed.baseCommit, baseTree: seed.tree, headCommit, tree, worktreePath: '/historical/closed-worktree' } }
 }
+
+for (const mode of ['canonical', 'host-text', 'payload', 'payload-link', 'foreign-path', 'foreign-filter'] as const) test(`stopped committed draft requires exact canonical filter projection: ${mode}`, t => {
+  const f = fixture(t), root = realpathSync(f.root), ownerDigest = 'e'.repeat(64), path = `.spex-sync-drafts/${ownerDigest}.json`, schema = '{}'
+  const binding = { ownerDigest, path, sourceInputId: 'input', schemaDigest: contentHash(schema) }
+  const hosts = new Map([['.gitignore', 'host-pattern\n'], ['AGENTS.md', 'host instructions without newline']])
+  for (const [file, host] of hosts) writeFileSync(join(root, file), host)
+  git(root, 'add', '.gitignore', 'AGENTS.md'); git(root, 'commit', '-m', 'track pristine host files')
+  const tree = git(root, 'rev-parse', 'HEAD^{tree}'), seed = stageWorktree(f.commonDir, git(root, 'rev-parse', 'HEAD'), overlayStageTree(f.commonDir, tree, [{ path: path.replace('.json', '.schema.json'), source: schema }]), 'edit')
+  git(root, 'checkout', '--detach', seed.baseCommit)
+  const nativeRoot = join(f.commonDir, 'original-native'), runtime = join(nativeRoot, 'runtime/home/.spexcode/projects', encodeProject(dirname(f.commonDir)))
+  const directory = join(runtime, 'trees', encodeProject(root), 'contract-filter')
+  mkdirSync(directory, { recursive: true })
+  const canonical = describeCanonicalContractFilter(f.commonDir), bindings = canonicalContractFilterBindings(root)
+  mkdirSync(dirname(canonical.shim.path), { recursive: true })
+  writeFileSync(canonical.shim.path, canonical.shim.source, { mode: canonical.shim.mode })
+  const [filterRoot, bindingsPath, attributesPath] = canonical.metadataPaths
+  writeFileSync(filterRoot, `${runtime}\n`)
+  writeFileSync(bindingsPath, bindings.map(row => `${row.file}\t${row.start}\t${row.end}`).join('\n') + '\n')
+  writeFileSync(attributesPath, [...hosts.keys()].map(file => `/${file} filter=spexcode`).join('\n') + '\n')
+  const payloads = [...hosts.keys()].map((file, index) => ({ file, target: join(directory, String(index)), body: `product-managed payload ${index}\n` }))
+  for (const payload of payloads) writeFileSync(payload.target, payload.body)
+  writeFileSync(join(directory, 'manifest'), payloads.map(row => `${row.file}\t${row.target}`).join('\n') + '\n')
+  for (const [key, command] of Object.entries(canonical.commands)) git(root, 'config', key, command)
+  for (const file of hosts.keys()) rmSync(join(root, file))
+  git(root, 'checkout', '--', ...hosts.keys())
+  for (const { file, body } of payloads) {
+    const delimiters = bindings.find(row => row.file === file)!
+    assert.equal(readFileSync(join(root, file), 'utf8'), `${hosts.get(file)}\n${delimiters.start}\n${body}${delimiters.end}\n`)
+  }
+  git(root, 'add', '--renormalize', '--', ...hosts.keys())
+  const source = '{committed unapproved draft'
+  writeFileSync(join(root, path), source); git(root, 'add', path); git(root, 'commit', '-m', 'authorized draft only')
+  writeFileSync(filterRoot, `${join(f.commonDir, 'another-session')}\n`)
+  if (mode === 'host-text') writeFileSync(join(root, 'AGENTS.md'), `changed ${readFileSync(join(root, 'AGENTS.md'), 'utf8')}`)
+  if (mode === 'payload') writeFileSync(payloads[1].target, 'changed archived payload\n')
+  if (mode === 'payload-link') { renameSync(payloads[1].target, `${payloads[1].target}.old`); symlinkSync(`${payloads[1].target}.old`, payloads[1].target) }
+  if (mode === 'foreign-path') {
+    writeFileSync(attributesPath, `${readFileSync(attributesPath, 'utf8')}/source.mjs filter=spexcode\n`)
+    writeFileSync(join(root, 'source.mjs'), 'export const value = 1\n\n<!-- spexcode:start -->\nunauthorized\n<!-- spexcode:end -->\n')
+  }
+  const marker = join(f.commonDir, 'filter-executed')
+  if (mode === 'foreign-filter') {
+    git(root, 'config', 'filter.spexcode.clean', `touch '${marker}' && cat`)
+    utimesSync(join(root, 'AGENTS.md'), new Date(0), new Date(0))
+  }
+  const index = readFileSync(join(f.commonDir, 'index'))
+  const observe = () => readStoppedPhysicalDraft(f.commonDir, root, seed, binding, { allowCommitted: true, nativeFilterRoot: nativeRoot })
+  if (mode === 'canonical') assert.equal(observe()?.source, source)
+  else assert.throws(observe, /越界变化/)
+  assert.equal(existsSync(marker), false)
+  assert.deepEqual(readFileSync(join(f.commonDir, 'index')), index)
+})
 
 for (const mode of ['clean', 'ignored', 'ignored-foreign-draft', 'untracked', 'hidden-source', 'hidden-draft', 'wrong-index', 'committed-source', 'binary', 'unchanged'] as const) test(`stopped committed draft opt-in: ${mode}`, t => {
   const f = fixture(t), ownerDigest = 'd'.repeat(64), path = `.spex-sync-drafts/${ownerDigest}.json`, schema = '{}'

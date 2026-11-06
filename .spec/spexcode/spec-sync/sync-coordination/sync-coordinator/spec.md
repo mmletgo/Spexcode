@@ -22,6 +22,8 @@ related:
 
 新P1完整生成的`ac-test-flow-binding-v2`在本owner尚未reserve时，可沿同一较新顺序和原停止认证读取[[sync-stage-worktree]]精确已提交草稿。`stopped_git_draft`记录approved:false、真实commit/tree/OID和index SHA、原Native计划/检查点/失败及材料CAS。原错误和诊断随同冻结到当前owner/seed，冷恢复用同一材料CAS重放原请求。已有reserved而未冻结此材料、旧v1、缺字段及P0仍使用原准入。原Native/Git见证与批准状态不补签。
 
+上述观察只从通过原请求和停止身份认证的 ZCode Native root 派生原树槽供 [[content-filter]] 字节核验。共用 filter root 指针不能代替原身份。无可认证树槽时仍要求物理字节匹配 Git 对象。
+
 P0 context传输选择复用behavior-draft-protocol唯一checkpoint：对象不存在且本attempt无任何code_behavior saved/reserved dispatch时，首次写version:code-behavior-draft-v1与contextTransport:git-json-v1；已有对象无字段保持legacy；字段存在但为null、空串或未知版本时在派发前明确拒绝，不能补签或因部分owner尚未派发而换运输。新请求以同owner/purpose只读Git.context.json完整承载任务、修复诊断、原errors及独审pendingAnalysis；业务输入/分析摘要与accepted查找保持，只有真实Native prompt/seed/requestDigest变化。既有材料比较冷读受完整request/tree/SHA绑定的文件并归一原inline语义，原Native/草稿/schema/独立身份和业务范围认证保持；格式失败继续原JSON，合法业务repair仍重新分析和独审。writer25围栏拒绝忽略该checkpoint字段的旧writer，沿正常online backup及一致DB/evidence/Git refs回滚。
 
 P1权限/绑定非法的独审沿[[sync-elaboration]]现有同owner repairDiagnostics重审原合法候选。续审保留原generation trace，不要求新review轮号存在generate；按真实session/thread/turn命中该operation原attempt实际dispatch，再冷验完整保存Native请求、原结果/summary摘要及Git草稿seed/result身份。只有当前局部完整输入与原candidate机械校验保持、原review重新判为越界/绑定非法时才跳过生成；旧seed排除draft的边界、原请求字段缺席、控制attempt跳过判据、预算/资源/取消及全图seal保持。多次续审与后续只读owner返修均追溯同一真实generation来源，不把新审查轮当新生成。

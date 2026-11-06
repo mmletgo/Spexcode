@@ -1,6 +1,6 @@
-import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync, chmodSync, existsSync, readdirSync, statSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync, chmodSync, existsSync, lstatSync, readdirSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, relative } from 'node:path'
+import { dirname, join, relative } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { git, gitBinary } from '@spexcode/spec-core'
 import { writeManagedBlock, removeManagedBlock, HARNESSES } from './harness.js'
@@ -112,6 +112,42 @@ export function canonicalContractFilterBindings(proj: string): ContractFilterBin
 /** 受控交付复用唯一 canonical 源，只描述命令/字节，不植入或执行。 */
 export function describeCanonicalContractFilter(common: string): { shim: { path: string; source: string; mode: number }; commands: Record<string, string>; metadataPaths: string[] } {
   return { shim: { path: shimPath(common), source: SHIM, mode: 0o755 }, commands: { 'filter.spexcode.clean': filterCmd(shimPath(common), 'clean'), 'filter.spexcode.smudge': filterCmd(shimPath(common), 'smudge') }, metadataPaths: [rootPath(common), bindingsPath(common), attributesPath(common)] }
+}
+
+/** 从原Native的私有树槽验证完整smudge字节，不执行配置或当前共享root指针。 */
+export function matchesStoppedContractProjection(common: string, worktree: string, nativeRoot: string | undefined, configuration: readonly string[], files: readonly { path: string; git: Buffer; physical: Buffer }[]): boolean {
+  const canonical = describeCanonicalContractFilter(common), bindings = canonicalContractFilterBindings(worktree)
+  const commands = configuration.filter((record, index) => index % 2 === 1 && record.startsWith('filter.spexcode.'))
+  if (!commands.length) return !files.length
+  const expected = Object.entries(canonical.commands).map(([key, command]) => `${key}\n${command}`)
+  if (commands.length !== expected.length || !expected.every(command => commands.includes(command)) || configuration.some((record, index) => index % 2 === 1 && record.startsWith('core.attributesfile\n'))) return false
+  const regular = (path: string): Buffer | undefined => lstatSync(path, { throwIfNoEntry: false })?.isFile() ? readFileSync(path) : undefined
+  const [, bindingsFile, attributes] = canonical.metadataPaths
+  if (!lstatSync(dirname(canonical.shim.path), { throwIfNoEntry: false })?.isDirectory() || !lstatSync(dirname(attributes), { throwIfNoEntry: false })?.isDirectory() || !lstatSync(attributes, { throwIfNoEntry: false })?.isFile()
+    || ((lstatSync(canonical.shim.path, { throwIfNoEntry: false })?.mode ?? 0) & 0o777) !== canonical.shim.mode || !regular(canonical.shim.path)?.equals(Buffer.from(canonical.shim.source))
+    || regular(bindingsFile)?.toString('utf8') !== bindings.map(binding => `${binding.file}\t${binding.start}\t${binding.end}`).join('\n') + '\n') return false
+  if (!files.length) return true
+  if (!nativeRoot || !lstatSync(nativeRoot, { throwIfNoEntry: false })?.isDirectory()) return false
+  let directory = nativeRoot
+  for (const segment of ['runtime', 'home', '.spexcode', 'projects', encodeProject(dirname(common)), 'trees', encodeProject(worktree), 'contract-filter']) {
+    directory = join(directory, segment)
+    if (!lstatSync(directory, { throwIfNoEntry: false })?.isDirectory()) return false
+  }
+  const manifest = regular(join(directory, 'manifest'))
+  if (!manifest) return false
+  const payloads = new Map<string, string>()
+  for (const row of manifest.toString('utf8').split('\n').filter(Boolean)) {
+    const [file, target, extra] = row.split('\t')
+    const name = target?.slice(target.lastIndexOf('/') + 1) ?? ''
+    if (extra !== undefined || payloads.has(file) || !bindings.some(binding => binding.file === file) || !/^\d+$/.test(name) || target !== join(directory, name)) return false
+    payloads.set(file, target)
+  }
+  return files.every(file => {
+    const binding = bindings.find(binding => binding.file === file.path), path = payloads.get(file.path)
+    if (!binding || !path) return false
+    const payload = regular(path)
+    return !!payload && payload.at(-1) === 10 && file.physical.equals(Buffer.concat([file.git, Buffer.from(`${file.git.length ? '\n' : ''}${binding.start}\n`), payload, Buffer.from(`${binding.end}\n`)]))
+  })
 }
 
 /** 仅对冻结 stdin 使用可信发布 SHIM；不执行仓库配置命令或触碰其 index。 */

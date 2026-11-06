@@ -1426,7 +1426,8 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
                   if (zcode && failed === null) continue
                   if (!zcode) assertClaudeStoppedDraftSource(prompt, state, proof.record.worktreePath)
                   assertMaterialFence()
-                  const physical = readStoppedPhysicalDraft(commonDir, proof.record.worktreePath, native.request.worktree, request.binding, { allowCommitted })
+                  const nativeFilterRoot = zcode ? (proof.state as ZCodeStructuredExecution).zcodeNative?.root : undefined
+                  const physical = readStoppedPhysicalDraft(commonDir, proof.record.worktreePath, native.request.worktree, request.binding, { allowCommitted, nativeFilterRoot })
                   if (physical) {
                     if (zcode && !failed) fail('stale_result', 'ZCode物理细化草稿没有原精确失败终态')
                     const errors = [...existingDraft?.errors ?? [], ...round.findings, ...source.result.failure ? [{ code: source.result.failure.code, message: source.result.failure.message }] : []]
