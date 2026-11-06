@@ -2415,27 +2415,29 @@ test('P1仅分析分区writer28只追加marker，27旧writer拒写且online备�
   } finally { backup?.close(); f.cleanup() }
 })
 
-test('P1生成提示writer29围栏，27直接升级只备份一次且28拒绝新库', async () => {
+for (const oldVersion of [27, 29] as const) test(`P1生成提示writer围栏，v${oldVersion}升级只备份一次且旧writer拒绝新库`, async () => {
   const f = await fixture()
   let backup: ReturnType<typeof openProtocol> | undefined
   try {
     const original = f.claim(), before = f.store.readAttempt(original.attempt.id)
-    f.protocol.withTransaction(tx => tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=28', SYNC_COMPONENT))
+    f.protocol.withTransaction(tx => tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>?', SYNC_COMPONENT, oldVersion))
     const schema = f.protocol.withTransaction(tx => tx.query('SELECT * FROM sqlite_master ORDER BY type,name'))
     const oldMarkers = f.protocol.withTransaction(tx => tx.query('SELECT * FROM schema_migrations ORDER BY component,version'))
     const actualBackups: string[] = [], backupTo = f.protocol.backupTo.bind(f.protocol)
     f.protocol.backupTo = async destination => { actualBackups.push(destination); await backupTo(destination) }
-    const backupPath = join(f.root, 'v27-before-p1-generation-guidance.backup')
-    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), 29)
-    assert.equal(await migrateSyncStore(f.protocol), 29)
+    const backupPath = join(f.root, `v${oldVersion}-before-p1-generation-guidance.backup`)
+    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), SYNC_MIGRATIONS.length)
+    assert.equal(await migrateSyncStore(f.protocol), SYNC_MIGRATIONS.length)
     assert.deepEqual(actualBackups, [backupPath])
-    assert.equal(SYNC_MIGRATIONS[28]?.version, 29); assert.match(SYNC_MIGRATIONS[28].sql, /^SELECT 1;/)
+    const previousWriter = oldVersion === 27 ? 28 : 29
+    assert.equal(SYNC_MIGRATIONS[previousWriter]?.version, previousWriter + 1)
+    assert.match(SYNC_MIGRATIONS[previousWriter].sql, /^SELECT 1;/)
     assert.deepEqual(f.store.readAttempt(original.attempt.id), before)
     assert.deepEqual(f.protocol.withTransaction(tx => tx.query('SELECT * FROM sqlite_master ORDER BY type,name')), schema)
-    assert.deepEqual(f.protocol.withTransaction(tx => tx.query('SELECT * FROM schema_migrations WHERE component!=? OR version<=27 ORDER BY component,version', SYNC_COMPONENT)), oldMarkers)
-    assert.throws(() => applyComponentMigrations(f.protocol, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 28)), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
+    assert.deepEqual(f.protocol.withTransaction(tx => tx.query('SELECT * FROM schema_migrations WHERE component!=? OR version<=? ORDER BY component,version', SYNC_COMPONENT, oldVersion)), oldMarkers)
+    assert.throws(() => applyComponentMigrations(f.protocol, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, previousWriter)), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
     backup = openProtocol(backupPath)
-    assert.equal(applyComponentMigrations(backup, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 27)), 27)
+    assert.equal(applyComponentMigrations(backup, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, oldVersion)), oldVersion)
     assert.deepEqual(backup.withTransaction(tx => tx.query('SELECT * FROM schema_migrations ORDER BY component,version')), oldMarkers)
   } finally { backup?.close(); f.cleanup() }
 })

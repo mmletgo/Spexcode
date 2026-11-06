@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+v30仅追加无DDL SELECT 1 marker，保护完整P1生成提示版本`ac-test-flow-binding-v2`。v29原能在拒绝未知阶段版本后持久化unsupported，故旧writer须在任何写入和派发前拒绝新库。升级停稳旧backend/queue并结算资源及租约后，v29→v30做一次SQLite online backup，再在组件事务追加marker，历史SQL、checksum、旧表和请求原件保持。回滚先停新writer，再恢复升级前一致备份及原evidence/Git refs。
+
 v29仅追加无DDL SELECT 1 marker，保护P1原生草稿`elaboration-draft-protocol`已冻结的完整生成提示版本。v28及更旧writer必须在写入与派发前拒绝，包括提示版本已保存而派发尚未reserve的窗口。升级停稳旧backend/queue并结算资源和租约后，先做一次SQLite online backup，再在组件事务追加缺失marker。v27直升v29同样只备份一次。既有迁移SQL、checksum、旧表和请求原件保持，回滚先停新writer再恢复升级前一致备份及原evidence/Git refs。
 
 v28仅追加无DDL SELECT 1 marker，保护P1全局证据中独立的analysisOnlyPartitions和精确摘要。v27及更旧writer必须在写入和派发前拒绝。升级先停稳旧backend/queue并正式结算资源和租约，再用SQLite online backup及组件事务迁移，v1–v27 SQL、checksum、applied_at和旧业务表原样保留。回滚先停新writer，再恢复升级前一致v27备份及原evidence/Git refs，不删marker。

@@ -131,6 +131,42 @@ test('Native P1续修AC.test坏稿只用真实已有测试ID和可信VERIFY', as
   assert.equal(f.requests.at(-1)!.purpose, 'elaboration_generate')
 })
 
+test('Native P1续修状态事件和无状态END坏稿，保留实际Git草稿与拒因', async t => {
+  const f = await fixture(t), valid = draftRows(f.input.targets[0].source!), invalid = structuredClone(valid)
+  const tables = invalid.changes[0].tables
+  tables.STATE.find(row => row.initial === false)!.object = '无对应事件和初态的误归属对象'
+  tables.FLOW[0].terminal = 'END'
+  tables.STEP.find(row => row.flow === tables.FLOW[0].id)!.rules = []
+  const invalidSource = JSON.stringify(invalid)
+  const oldInput = { ...f.input, generationGuidance: 'ac-test-binding-v1' as const, maxRepairs: 0 }
+  const failed = await elaborate(oldInput, { runner: f.run(request => {
+    assert.match(request.prompt, /仓库相对测试路径#稳定用例ID/)
+    assert.ok(!request.prompt.includes('TR.from、TR.event'))
+    return invalidSource
+  }) })
+  const oldDraft = failed.rounds[0].draft!
+  const errorCodes = ['transition-object', 'missing-object-event', 'missing-initial-state', 'missing-stateless-rationale', 'incomplete-stateless-step']
+  for (const code of errorCodes) assert.ok(oldDraft.errors.some(issue => issue.code === code), code)
+  assert.equal(failed.reviewPassed, false)
+  assert.equal(readStageDraft(f.commonDir, oldDraft, oldDraft), invalidSource)
+  const nextInput = { ...oldInput, requestKey: 'flow-binding-repair', generationGuidance: 'ac-test-flow-binding-v2' as const }
+  const repaired = await elaborate(nextInput, { draft: oldDraft, runner: f.run((request, workspace, draftPath) => {
+    assert.equal(readFileSync(join(workspace, draftPath), 'utf8'), invalidSource)
+    for (const code of errorCodes) assert.ok(request.prompt.includes(code), code)
+    assert.ok(request.prompt.includes('TR.from、TR.event'))
+    assert.ok(request.prompt.includes('STEP.input、STEP.output'))
+    assert.ok(request.prompt.includes('不虚构状态'))
+    assert.ok(request.prompt.includes('仓库相对测试路径#稳定用例ID'))
+    return JSON.stringify(valid)
+  }) })
+  assert.equal(repaired.status, 'complete', JSON.stringify(repaired.failure))
+  assert.equal(repaired.inputDigest, failed.inputDigest)
+  assert.deepEqual(f.requests.map(request => request.purpose), ['elaboration_generate', 'elaboration_generate', 'elaboration_review'])
+  assert.ok(!f.requests[2].prompt.includes('TR.from、TR.event'))
+  assert.equal(repaired.rounds[0].draft!.schemaDigest, oldDraft.schemaDigest)
+  assert.equal(readStageDraft(f.commonDir, oldDraft, oldDraft), invalidSource)
+})
+
 test('跨source/父上下文只迁移同owner草稿；新seed保留新父Spec、全部源码/tests对象与absence', async t => {
   const f = await fixture(t), invalid = '{ prior invalid draft, do not discard'
   const failed = await elaborate({ ...f.input, maxRepairs: 0 }, { runner: f.run(() => invalid) })

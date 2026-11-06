@@ -7,7 +7,9 @@ import type { RejectedStructuredOutput, StructuredExecution, ZCodeToolPolicy } f
 import type { Contract, ContractCoverage, ContractFinding, ContractGraph, Gap, ParseContractInput, Verification } from '@spexcode/spec-core/contracts'
 
 export const ELABORATION_BOUNDARIES = ['permissions', 'mutation', 'async', 'network', 'concurrency', 'callbacks', 'retries', 'cancellation', 'idempotency', 'external_side_effects'] as const
-export const ELABORATION_GENERATION_GUIDANCE = 'ac-test-binding-v1'
+export const ELABORATION_GENERATION_GUIDANCE_V1 = 'ac-test-binding-v1'
+export const ELABORATION_GENERATION_GUIDANCE = 'ac-test-flow-binding-v2'
+export type ElaborationGenerationGuidance = typeof ELABORATION_GENERATION_GUIDANCE_V1 | typeof ELABORATION_GENERATION_GUIDANCE
 export type ElaborationBoundary = typeof ELABORATION_BOUNDARIES[number]
 export type ElaborationTarget = { nodeId: string; path: string; source: string | null; sourceDigest: string | null; rawSource?: string }
 export type ElaborationFact = { source: string; text: string }
@@ -41,7 +43,7 @@ export type ElaborationInput = {
   /** 新派发显式冻结；缺席继续使用原请求协议，不重写历史reserved请求。 */
   draftProtocol?: 'elaboration-draft-v1'
   /** 原attempt阶段冻结的生成提示版本，仅影响Native generation的请求摘要。 */
-  generationGuidance?: typeof ELABORATION_GENERATION_GUIDANCE
+  generationGuidance?: ElaborationGenerationGuidance
   /** 仅由分区执行器用于无源码writer的初始或既有纯父接口；结果不是完整P1或实现就绪。 */
   phase?: 'interface_seed'
   /** 原分区计划及后验纯父分类证据，只绑定本区来源，不授予写权限或完成度。 */

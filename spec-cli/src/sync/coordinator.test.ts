@@ -5579,12 +5579,13 @@ test('已有reserved P1在SQLite冷恢复后草稿协议缺席仍不补签或改
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
 })
 
-for (const historical of [true, false]) test(`P1 AC.test提示按attempt冻结，冷恢复原reserved请求 historical=${historical}`, async t => {
+for (const guidance of ['absent', 'ac-test-binding-v1', 'ac-test-flow-binding-v2'] as const) test(`P1生成提示按attempt冻结，冷恢复原reserved请求 guidance=${guidance}`, async t => {
   const f = await fixture(t, { maxAttempts: 1, maxCalls: 4, maxRepairs: 0, timeoutMs: 120_000 }, false, original, 'project', original, { agentWorkflow: 'native-worktree-v1' }, undefined, 'spec', 'claude:default')
   const claimed = f.store.claimAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 30_000, expectedMessageId: f.operation.dispatchMessageId })
   const commonDir = f.input.source.commonDir
-  if (historical) {
-    const value = { version: 'elaboration-draft-v1' }, resultRef = writeEvidence(commonDir, value)
+  const expectedProtocol = { version: 'elaboration-draft-v1', ...(guidance === 'absent' ? {} : { generationGuidance: guidance }) }
+  if (guidance !== 'ac-test-flow-binding-v2') {
+    const value = expectedProtocol, resultRef = writeEvidence(commonDir, value)
     const wrapper = writeEvidence(commonDir, { version: 'sync-stage-v1', operationId: f.operation.id, attemptId: claimed.attempt.id, inputId: f.input.id, policyDigest: f.operation.policyDigest, stage: 'elaboration-draft-protocol', resultRef })
     f.store.checkpoint(claimed.fence, { ...wrapper, artifacts: syncCheckpointArtifacts(value, resultRef) })
   }
@@ -5605,8 +5606,9 @@ for (const historical of [true, false]) test(`P1 AC.test提示按attempt冻结�
   const marker = before.checkpointRefs.find(ref => JSON.parse(readEvidence(commonDir, ref).toString()).stage === 'elaboration-draft-protocol')!
   const markerBytes = readEvidence(commonDir, marker)
   const version = JSON.parse(readEvidence(commonDir, JSON.parse(markerBytes.toString()).resultRef).toString())
-  assert.deepEqual(version, historical ? { version: 'elaboration-draft-v1' } : { version: 'elaboration-draft-v1', generationGuidance: 'ac-test-binding-v1' })
-  assert.equal(requests[0].prompt.includes('仓库相对测试路径#稳定用例ID'), !historical)
+  assert.deepEqual(version, expectedProtocol)
+  assert.equal(requests[0].prompt.includes('仓库相对测试路径#稳定用例ID'), guidance !== 'absent')
+  assert.equal(requests[0].prompt.includes('TR.from、TR.event'), guidance === 'ac-test-flow-binding-v2')
   f.closeForRestart()
   const protocol = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => protocol.close())
   const store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) }); f.useStore(store)
