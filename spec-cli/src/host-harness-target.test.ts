@@ -1,6 +1,5 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import net from 'node:net'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -17,14 +16,6 @@ const freshHome = (tag: string): string => {
   process.env.SPEXCODE_HOME = home
   return home
 }
-
-const freePort = () => new Promise<number>((resolvePort) => {
-  const server = net.createServer()
-  server.listen(0, '127.0.0.1', () => {
-    const port = (server.address() as net.AddressInfo).port
-    server.close(() => resolvePort(port))
-  })
-})
 
 test('harness target addition persists targets, materializes, and is exposed through the admin route', async () => {
   const home = freshHome('harness-target')
@@ -62,9 +53,11 @@ test('harness target addition persists targets, materializes, and is exposed thr
 
   const dist = mkdtempSync(join(tmpdir(), 'spex-host-harness-http-dist-'))
   writeFileSync(join(dist, 'index.html'), '<html>shell</html>')
-  const port = await freePort()
-  const dashboard = startHostDashboard({ port, host: '127.0.0.1', distDir: dist })
+  const dashboard = startHostDashboard({ port: 0, host: '127.0.0.1', distDir: dist })
   await new Promise<void>((resolveReady) => dashboard.server.once('listening', () => resolveReady()))
+  const address = dashboard.server.address()
+  assert.ok(address && typeof address !== 'string')
+  const port = address.port
   const id = encodeProject(root)
   try {
     const source = await fetch(`http://127.0.0.1:${port}/projects/${encodeURIComponent(id)}/config`)
