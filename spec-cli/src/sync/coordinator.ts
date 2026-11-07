@@ -1,4 +1,4 @@
-import { ELABORATION_GENERATION_GUIDANCE, ELABORATION_GENERATION_GUIDANCE_V1, ELABORATION_GENERATION_GUIDANCE_V2, ELABORATION_GENERATION_GUIDANCE_V3, partitionedElaborationCoverageMatches, type AnalysisOnlyPartitionEvidence, type ElaborationGenerationGuidance } from './elaboration-types.js'
+import { ELABORATION_GENERATION_GUIDANCE, ELABORATION_GENERATION_GUIDANCE_V1, ELABORATION_GENERATION_GUIDANCE_V2, ELABORATION_GENERATION_GUIDANCE_V3, ELABORATION_GENERATION_GUIDANCE_V4, partitionedElaborationCoverageMatches, type AnalysisOnlyPartitionEvidence, type ElaborationGenerationGuidance } from './elaboration-types.js'
 import { finiteSyncBudget, syncDeadlineExpired } from './budget.js'
 import { assertWorktreeSyncModel, syncModel, syncModelBinding } from './model-selection.js'
 import { setImmediate as yieldToControl, setTimeout as waitForPublication } from 'node:timers/promises'
@@ -522,7 +522,7 @@ function readonlyReviewFindings(result: SavedGeneration, changes: SavedElaborati
     const [path, id, extra] = location.split('#'), matches = items.filter(item => item.path === path && item.id === id)
     if (within(path, writable)) return []
     if (finding.kind !== 'repair' || extra !== undefined || matches.length !== 1 || !finding.affectedIds.length || new Set(finding.affectedIds).size !== finding.affectedIds.length || finding.affectedIds.some(id => items.filter(item => item.id === id).length !== 1)) fail('readonly_spec_repair_binding', '只读独审诊断必须以实际候选路径/ID及affectedIds绑定唯一契约')
-    return [{ code: 'candidate-review-repair', severity: 'error', nodeId: matches[0].nodeId, path, itemId: id, message: JSON.stringify(finding) }]
+    return [{ code: 'candidate-review-repair', severity: 'error', nodeId: matches[0].nodeId, path, itemId: id, relatedIds: finding.affectedIds, message: JSON.stringify(finding) }]
   })
 }
 
@@ -805,10 +805,23 @@ function readonlyRepairContext(store: SyncStore, operation: SyncOperation, sourc
   return context
 }
 
-function validateReadonlyRepair(store: SyncStore, operation: SyncOperation, repair: ReadonlyOwnerRepair): void {
+/** 只恢复saved的relatedIds原始缺席；其余来源、字段及差异继续完整比较。 */
+function readonlyRepairOriginalShape(derived: ReadonlyOwnerRepair | null, original: ReadonlyOwnerRepair): ReadonlyOwnerRepair | null {
+  if (original.kind !== 'candidate_review' || !derived) return derived
+  return { ...derived, ...Object.fromEntries((['findings', 'allFindings'] as const).map(key => [key, derived[key].map((finding, index) => {
+    if (!original[key][index] || Object.hasOwn(original[key][index], 'relatedIds')) return finding
+    const { relatedIds: _relatedIds, ...originalShape } = finding
+    return originalShape
+  })])) }
+}
+
+/** 原件完整冷验；只在derived对照中保留旧relatedIds缺席，不为历史冻结输入追补权限。 */
+export function validateReadonlyRepair(store: SyncStore, operation: SyncOperation, repair: ReadonlyOwnerRepair): void {
   const source = store.readAttempt(repair.fromAttemptId)
   const context = readonlyRepairContext(store, operation, source, repair.generationRef)
-  if (source.operationId !== operation.id || canonical(readonlyRepairFromAttempt(store, context, source)) !== canonical(repair)) fail('readonly_spec_repair_binding', '只读V1续修来源、owner或原件绑定失配')
+  const derived = readonlyRepairFromAttempt(store, context, source)
+  const originalShape = readonlyRepairOriginalShape(derived, repair)
+  if (source.operationId !== operation.id || canonical(originalShape) !== canonical(repair)) fail('readonly_spec_repair_binding', '只读V1续修来源、owner或原件绑定失配')
 }
 
 function refinementGeneration(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, refinement: Refinement): SavedGeneration {
@@ -1283,7 +1296,10 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       if (options.plan.version === 'sync-coordinator-v2') {
         readonlyBase = latestApprovedElaboration(store, operation, attempt.number + 1)
         const pending = pendingReadonlyRepair(store, operation, attempt, readonlyBase)
-        readonlyOwnerRepair = pending?.repair; readonlyActiveOwners = pending?.owners ?? []
+        const original = savedRepair?.readonlyOwnerRepair
+        if (original && pending && canonical(readonlyRepairOriginalShape(pending.repair, original)) !== canonical(original)) fail('readonly_spec_repair_binding', '本attempt已冻结只读诊断与当前来源不一致，不能重签原请求')
+        readonlyOwnerRepair = original && pending ? original : pending?.repair
+        readonlyActiveOwners = pending?.owners ?? []
       }
       const repairInput = { repairContext, seed, refinement, readonlyOwnerRepair, ...(readonlyOwnerRepair && readonlyBase ? { readonlyBaseRef: readonlyBase.resultRef } : {}) }
       if (savedRepair ? canonical(savedRepair) !== canonical(repairInput) : repairContext || seed || refinement || readonlyOwnerRepair) saveStage(store, fence, 'repair-input', repairInput)
@@ -1835,16 +1851,32 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           }
           return null
         },
-        loadReadonlySpecRepair: (key, binding, inputDigest) => {
+        readonlyFactRepairSource: (key, repair) => {
+          for (const origin of store.listAttempts(operation.id)) {
+            const prior = stage<SavedElaboration>(store, operation, origin, key), round = prior?.rounds.at(-1)
+            if (!prior || contentHash(JSON.stringify(prior)) !== repair.acceptedRef.sha256 || !prior.structurePassed || !prior.reviewPassed || prior.failure || prior.readonlySpecRepair?.kind !== 'candidate_review' || round?.review?.verdict !== 'accept') continue
+            if (canonical(prior.changes) !== canonical(repair.changes) || prior.partitionBinding?.partitionId !== key.slice('partition:'.length, -':elaboration'.length)) fail('readonly_spec_repair_binding', '事实继承必须逐字绑定原acceptedRef的本owner完整changes')
+            const generation = elaborationGenerationSource(store, operation, origin, round)
+            if (!generation) fail('readonly_spec_repair_binding', '事实继承缺少原已批准owner的真实generation来源')
+            const protocol = stage<{ generationGuidance?: ElaborationGenerationGuidance }>(store, operation, generation.attempt, 'elaboration-draft-protocol')
+            return protocol?.generationGuidance === ELABORATION_GENERATION_GUIDANCE
+          }
+          return false
+        },
+        loadReadonlySpecRepair: (key, binding, inputDigest, localInput) => {
           const owner = readonlyActiveOwners.find(owner => owner.key === key)
           if (!owner) return null
           const sourceAttempt = store.readAttempt(owner.fromAttemptId)
           const prior = reviewedReadonlyLocal(store, operation, sourceAttempt, key, owner.resultRef, readonlyOwnerRepair!.priorRef), round = prior.rounds.at(-1)!
-          if (canonical(prior.partitionBinding) !== canonical(binding) || (prior.readonlySpecRepair?.baseInputDigest ?? prior.inputDigest) !== inputDigest) fail('readonly_spec_repair_binding', '只读owner原件不匹配当前完整局部输入')
+          const protocol = stage<{ generationGuidance?: ElaborationGenerationGuidance }>(store, operation, sourceAttempt, 'elaboration-draft-protocol')
+          const priorInput = { ...localInput, generationGuidance: protocol?.generationGuidance }
+          if (canonical(prior.partitionBinding) !== canonical(binding) || (prior.readonlySpecRepair?.baseInputDigest ?? prior.inputDigest) !== freezeElaborationInput(priorInput).inputDigest) fail('readonly_spec_repair_binding', '只读owner原件不匹配当前完整局部输入')
+          const ids = new Set(prior.changes.flatMap(change => parseContract(change).contract!.items.map(item => item.id)))
           const findings = readonlyOwnerRepair!.findings.filter(finding => prior.changes.some(change => change.nodeId === finding.nodeId && change.path === finding.path))
+            .map(finding => localInput.generationGuidance === ELABORATION_GENERATION_GUIDANCE && finding.relatedIds ? { ...finding, relatedIds: finding.relatedIds.filter(id => ids.has(id)) } : finding)
           if (prior.changes.some(change => !within(change.path, options.plan.writePaths) || options.plan.mandatoryTests.some(test => overlap(change.path, test.testPath)))) fail('readonly_spec_repair_binding', '只读V1 owner目标越过冻结授权')
           saveStage(store, fence!, `${key}:readonly-repair-provenance`, { fromAttemptId: sourceAttempt.id, resultRef: owner.resultRef, generationRef: readonlyOwnerRepair!.generationRef })
-          return { prior, repair: { ...(readonlyOwnerRepair!.kind ? { kind: readonlyOwnerRepair!.kind, reviewEvidence: readonlyOwnerRepair!.reviewEvidence } : {}), baseInputDigest: inputDigest, candidateDigest: readonlyOwnerRepair!.candidateDigest, generationRef: readonlyOwnerRepair!.generationRef, acceptedRef: owner.resultRef, changes: prior.changes, output: round.output, review: round.review, findings } }
+          return { prior, priorInput, repair: { ...(readonlyOwnerRepair!.kind ? { kind: readonlyOwnerRepair!.kind, reviewEvidence: readonlyOwnerRepair!.reviewEvidence } : {}), baseInputDigest: inputDigest, candidateDigest: readonlyOwnerRepair!.candidateDigest, generationRef: readonlyOwnerRepair!.generationRef, acceptedRef: owner.resultRef, changes: prior.changes, output: round.output, review: round.review, findings } }
         },
         loadPartitionSealRepair: (key, binding, inputDigest) => {
           const source = loadSealRepairSource(), local = source?.locals.get(binding.partitionId), findings = source?.owners.get(binding.partitionId)
@@ -2148,7 +2180,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           protocol = { version: 'elaboration-draft-v1', generationGuidance: ELABORATION_GENERATION_GUIDANCE }
           saveStage(store, fence, 'elaboration-draft-protocol', protocol)
         }
-        if (protocol && Object.hasOwn(protocol, 'generationGuidance') && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE_V1 && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE_V2 && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE_V3 && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE) fail('elaboration_generation_guidance_unsupported', '持久P1生成提示版本不受支持；仅字段缺席允许原提示')
+        if (protocol && Object.hasOwn(protocol, 'generationGuidance') && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE_V1 && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE_V2 && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE_V3 && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE_V4 && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE) fail('elaboration_generation_guidance_unsupported', '持久P1生成提示版本不受支持；仅字段缺席允许原提示')
         const draftProtocol = protocol?.version
         const elaborationInput = { ...makeElaborationInput(draftProtocol), ...(protocol?.generationGuidance ? { generationGuidance: protocol.generationGuidance } : {}) }
         const loadDraft = draftProtocol ? (schemaDigest: string): ElaborationDraft | null => {

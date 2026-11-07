@@ -14,7 +14,7 @@ import { authenticateNativeRejectedFinal, readSyncCheckpoints, syncCheckpointArt
 import { outputErrors } from './elaboration-schema.js'
 import type { ContractCell, GeneratedElaboration, GeneratedTables } from './elaboration-markdown.js'
 import { sameContractBusinessMeaning } from './contract-evolution.js'
-import { ELABORATION_BOUNDARIES, ELABORATION_GENERATION_GUIDANCE, ELABORATION_GENERATION_GUIDANCE_V3 } from './elaboration-types.js'
+import { ELABORATION_BOUNDARIES, ELABORATION_GENERATION_GUIDANCE, ELABORATION_GENERATION_GUIDANCE_V3, ELABORATION_GENERATION_GUIDANCE_V4 } from './elaboration-types.js'
 import { elaborate, freezeElaborationInput } from './elaboration.js'
 import { checkGenerationContractIntent, readFrozenContracts } from './frozen-contracts.js'
 import type { ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult } from './elaboration-types.js'
@@ -3186,7 +3186,7 @@ for (const mode of ['repair', 'drop-id', 'author-ac', 'new-parent-error', 'paren
       }
       if (request.purpose === 'elaboration_review') return output
       if (nodeId === 'project') {
-        const parentRows: GeneratedElaboration = { version: 'elaboration-rows-v2', changes: [{ nodeId, path: parentPath, title: '导出共享接口', description: '', code: [], related: [], prose: '', removeIds: [], tables: { ...(Object.fromEntries<Record<string, ContractCell>[]>(Object.keys(CONTRACT_COLUMNS).map(kind => [kind, []])) as GeneratedTables), REQ: mode === 'drop-id' && attempt.number > 1 ? [] : [{ id: 'REQ-PARENT-SEAL', goal: '保留既有导出模块分工与主流程', source: 'user:raw', constraints: '不改变现有行为', success: '导出主流程完成', 'depends-on': [] }, ...(mode === 'new-parent-error' && attempt.number > 1 ? [{ id: 'REQ-PARENT-NEW', goal: '保留既有导出主流程', source: 'user:raw', constraints: '不改变现有行为', success: '导出主流程完成', 'depends-on': [] }] : [])] } }], applicability: rows(original).applicability.map(entry => ({ ...entry, affectedIds: ['REQ-PARENT-SEAL'] })) }
+        const parentRows: GeneratedElaboration = { version: 'elaboration-rows-v2', changes: [{ nodeId, path: parentPath, title: '导出共享接口', description: '', code: [], related: [], prose: '', removeIds: [], tables: { ...(Object.fromEntries<Record<string, ContractCell>[]>(Object.keys(CONTRACT_COLUMNS).map(kind => [kind, []])) as unknown as GeneratedTables), REQ: mode === 'drop-id' && attempt.number > 1 ? [] : [{ id: 'REQ-PARENT-SEAL', goal: '保留既有导出模块分工与主流程', source: 'user:raw', constraints: '不改变现有行为', success: '导出主流程完成', 'depends-on': [] }, ...(mode === 'new-parent-error' && attempt.number > 1 ? [{ id: 'REQ-PARENT-NEW', goal: '保留既有导出主流程', source: 'user:raw', constraints: '不改变现有行为', success: '导出主流程完成', 'depends-on': [] }] : [])] } }], applicability: rows(original).applicability.map(entry => ({ ...entry, affectedIds: ['REQ-PARENT-SEAL'] })) }
         if (mode === 'parent-missing-source') parentRows.changes[0].tables.RULE.push({ id: 'RULE-PARENT-SOURCE', scope: '导出主流程', constraint: '保持既有导出行为', basis: '冻结实现', authority: 'project', source: 'code:src/actually-absent.js#X', 'depends-on': ['REQ-PARENT-SEAL'] })
         return parentRows
       }
@@ -5904,6 +5904,8 @@ for (const [guidance, purpose] of [
   ['ac-test-flow-binding-v2', 'elaboration_review'],
   [ELABORATION_GENERATION_GUIDANCE_V3, 'elaboration_generate'],
   [ELABORATION_GENERATION_GUIDANCE_V3, 'elaboration_review'],
+  [ELABORATION_GENERATION_GUIDANCE_V4, 'elaboration_generate'],
+  [ELABORATION_GENERATION_GUIDANCE_V4, 'elaboration_review'],
   [ELABORATION_GENERATION_GUIDANCE, 'elaboration_generate'],
   [ELABORATION_GENERATION_GUIDANCE, 'elaboration_review'],
 ] as const) test(`P1提示按attempt冻结，冷恢复原reserved请求 guidance=${guidance} purpose=${purpose}`, async t => {
@@ -5945,7 +5947,7 @@ for (const [guidance, purpose] of [
   const markerBytes = readEvidence(commonDir, marker)
   const version = JSON.parse(readEvidence(commonDir, JSON.parse(markerBytes.toString()).resultRef).toString())
   assert.deepEqual(version, expectedProtocol)
-  const reviewGuidance = guidance === ELABORATION_GENERATION_GUIDANCE_V3 || guidance === ELABORATION_GENERATION_GUIDANCE
+  const reviewGuidance = guidance === ELABORATION_GENERATION_GUIDANCE_V3 || guidance === ELABORATION_GENERATION_GUIDANCE_V4 || guidance === ELABORATION_GENERATION_GUIDANCE
   assert.equal(requests[0].prompt.includes('仓库相对测试路径#稳定用例ID'), review ? reviewGuidance : guidance !== 'absent')
   assert.equal(requests[0].prompt.includes('TR.from、TR.event'), !review && (guidance === 'ac-test-flow-binding-v2' || reviewGuidance))
   f.closeForRestart()
@@ -7101,4 +7103,142 @@ for (const frozen of ['new', 'legacy-checkpoint', 'reserved', 'null', 'empty', '
   if (rejectsTransport) assert.equal(attempt.dispatchPlans.length, 0)
   if (originalProtocol) assert.deepEqual(readEvidence(f.input.source.commonDir, originalProtocol.ref), originalProtocol.bytes)
   if (reserved) assert.equal(JSON.stringify(attempt.dispatchPlans.find(dispatch => dispatch.key === reserved.key)), reservedBytes)
+})
+
+test('V4已审owner经无failure暂停和SQLite重启，新V5两次不同事实返修继承确定值且不累计权限', async t => {
+  const f = await fixture(t, { mode: 'unlimited' }, false, original, 'project', original, { version: 'sync-coordinator-v2', agentWorkflow: 'native-worktree-v1', direction: 'code_to_spec', intentNodeId: 'project', sourcePaths: ['src/export.js'], writePaths: ['.spec'], targets: [{ nodeId: 'export-contract', path: contractPath }], partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 } }, undefined, 'code', 'claude:default', true, { '.spec/project/spec.md': '---\ntitle: 导出项目\n---\n## raw source\n\n保留完整导出约定，由既有叶契约和实现承接。\n' }, true)
+  const commonDir = f.input.source.commonDir, protectedObjects = readTree(commonDir, f.input.immutableTree).filter(entry => !entry.path.startsWith('.spec/'))
+  const calls: { attempt: number; purpose: string }[] = []
+  let legacy: { ref: { sha256: string }; bytes: Buffer; attemptId: string } | undefined, finalV1 = false
+  const first = f.store.claimQueuedAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 30000, expectedRevision: f.store.readOperation(f.operation.id).revision })
+  const originalProtocol = { version: 'elaboration-draft-v1', generationGuidance: ELABORATION_GENERATION_GUIDANCE_V4 }, originalProtocolRef = writeEvidence(commonDir, originalProtocol)
+  f.store.checkpoint(first.fence, { ...writeEvidence(commonDir, { version: 'sync-stage-v1', operationId: f.operation.id, attemptId: first.attempt.id, inputId: f.input.id, policyDigest: f.operation.policyDigest, stage: 'elaboration-draft-protocol', resultRef: originalProtocolRef, readSetDigest: first.operation.readSetDigest, baselineSelectionRef: writeEvidence(commonDir, first.operation.baselineSelection) }), artifacts: syncCheckpointArtifacts(originalProtocol, originalProtocolRef) })
+  const checkpoint = f.store.checkpoint.bind(f.store)
+  f.store.checkpoint = (fence, ref) => {
+    const wrapper = JSON.parse(readEvidence(commonDir, ref).toString()) as { stage?: string; resultRef?: { sha256: string } }
+    const attempt = f.store.readAttempt(fence.attemptId)
+    if (attempt.number === 2 && wrapper.stage === 'repair-input' && wrapper.resultRef && !legacy) {
+      const value = JSON.parse(readEvidence(commonDir, wrapper.resultRef).toString()) as { readonlyOwnerRepair: Parameters<typeof continuationCoordinator.validateReadonlyRepair>[2] }
+      for (const key of ['findings', 'allFindings'] as const) for (const finding of value.readonlyOwnerRepair[key]) delete finding.relatedIds
+      const resultRef = writeEvidence(commonDir, value)
+      legacy = { ref: resultRef, bytes: readEvidence(commonDir, resultRef), attemptId: fence.attemptId }
+      const saved = checkpoint(fence, { ...writeEvidence(commonDir, { ...wrapper, resultRef }), artifacts: syncCheckpointArtifacts(value, resultRef) })
+      const protocol = { version: 'elaboration-draft-v1', generationGuidance: ELABORATION_GENERATION_GUIDANCE_V4 }, protocolRef = writeEvidence(commonDir, protocol)
+      checkpoint(fence, { ...writeEvidence(commonDir, { ...wrapper, stage: 'elaboration-draft-protocol', resultRef: protocolRef }), artifacts: syncCheckpointArtifacts(protocol, protocolRef) })
+      f.store.requestControl(f.operation.id, 'pause')
+      return saved
+    }
+    return checkpoint(fence, ref)
+  }
+  f.options.runner = async request => {
+    const attempt = f.store.readAttempt(f.store.readOperation(f.operation.id).currentAttemptId!), seed = request.worktree!
+    calls.push({ attempt: attempt.number, purpose: request.purpose })
+    assert.notEqual(request.purpose, 'code_generate')
+    let output: unknown
+    if (request.purpose === 'code_behavior_analyze') output = { changes: [], facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+    else if (request.purpose === 'code_behavior_review') {
+      const { task, pendingAnalysis } = readCodeBehaviorContext(request, commonDir)
+      assert.deepEqual(task.requiredChangedPaths, [])
+      output = { inputDigest: request.inputDigest, analysisDigest: pendingAnalysis!.analysisDigest, verdict: 'accept', checkedPaths: [], checkedChangeIds: [], findings: [] }
+    } else if (request.purpose === 'elaboration_generate') {
+      const generated = rows(original)
+      generated.changes = []
+      if (attempt.number >= 3) {
+        assert.match(request.prompt, /只允许按冻结源码核实并更新/)
+        const source = readObject(commonDir, readTree(commonDir, seed.tree).find(entry => entry.path === contractPath)!.oid).toString('utf8')
+        const node = rows(source).changes[0]
+        node.description = '当前冻结实现已满足原契约'
+        if (attempt.number === 3) {
+          node.prose = parseParts(source)!.expandedSpec.split(/^### /m)[0] + '\n当前冻结结果和幂等事实已核实。'
+          node.tables.RULE = node.tables.RULE.filter(row => row.id === 'RULE-EXPORT-05').map(row => ({ ...row, basis: '首轮V5已核实结果事实' }))
+        } else {
+          node.prose = null
+          const second = node.tables.RULE.find(row => row.id === 'RULE-EXPORT-02')!
+          const first = node.tables.RULE.find(row => row.id === 'RULE-EXPORT-05')!
+          assert.equal(first.basis, '首轮V5已核实结果事实')
+          node.tables = { ...Object.fromEntries(Object.keys(CONTRACT_COLUMNS).map(kind => [kind, []])) as unknown as GeneratedTables, RULE: [{ ...second, basis: '后轮V5已核实幂等事实' }, ...(attempt.number === 4 ? [{ ...first, basis: '未命中旧ID不可重新自由修改' }] : [])] }
+        }
+        generated.changes = [node]
+      }
+      output = adaptElaborationNativeOutput(request, generated)
+    } else if (request.purpose === 'elaboration_review') output = { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+    else if (request.purpose === 'code_review') {
+      const identity = JSON.parse(request.prompt.split('候选绑定:\n')[1].split('\n')[0]) as { inputId: string; candidateDigest: string; requiredIds: string[] }
+      if (attempt.number === 5) { finalV1 = true; throw Object.assign(new Error('V5完整P1与V1已证，Docker前停止'), { code: 'unsupported' }) }
+      const id = attempt.number === 1 ? 'RULE-EXPORT-05' : 'RULE-EXPORT-02'
+      output = { inputId: identity.inputId, candidateDigest: identity.candidateDigest, verdict: 'repair', checkedIds: identity.requiredIds, findings: [{ kind: 'repair', affectedIds: [id], ruleLocation: `${contractPath}#${id}`, codeLocation: 'src/export.js#ExportService', evidence: '原实现已满足契约，旧依据仍称待实现', counterexample: '当前代码与旧事实说明不一致', message: '仅刷新本次命中的basis和desc/expanded，保全部业务列与源码/tests及之前批准的事实值' }] }
+    } else assert.fail(request.purpose)
+    const dispatch = attempt.dispatchPlans.find(dispatch => dispatch.key === request.requestKey)!
+    let worktree: ReturnType<typeof nativeWorktreeResult> | undefined
+    if (seed.mode === 'edit') { worktree = committedDraftFixture(f, request, output, join(f.parent, `fact-stage-${calls.length}`)); output = { summary: '正常提交唯一JSON草稿' } }
+    else worktree = { baseCommit: seed.baseCommit, baseTree: seed.tree, headCommit: seed.baseCommit, tree: seed.tree, worktreePath: join(f.parent, 'closed-read') }
+    return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `fact-thread-${request.requestKey}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)), worktree }
+  }
+  let result = await runSyncOperation(f.store, f.operation.id, f.options)
+  assert.equal(result.status, 'paused', JSON.stringify({ failure: result.failure, calls })); assert(legacy)
+  const paused = f.store.readAttempt(legacy.attemptId)
+  assert.equal(paused.status, 'superseded'); assert.equal(paused.failure, null)
+  assert.equal(calls.some(call => call.attempt === 2), false)
+  f.closeForRestart()
+  let protocol = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => protocol.close())
+  let store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) }); f.useStore(store); f.store = store
+  const claim = store.claimQueuedAttempt.bind(store)
+  store.claimQueuedAttempt = input => { if (store.listAttempts(f.operation.id).length >= 5) throw new Error('禁止无派发热循环'); return claim(input) }
+  store.requestControl(f.operation.id, 'run')
+  let suspended = false
+  const save = store.checkpoint.bind(store)
+  store.checkpoint = (fence, ref) => {
+    const saved = save(fence, ref)
+    const wrapper = JSON.parse(readEvidence(commonDir, ref).toString()) as { stage?: string }
+    if (!suspended && store.readAttempt(fence.attemptId).number === 5 && wrapper.stage === 'elaboration') {
+      suspended = true
+      throw Object.assign(new Error('完整P1已保存，模拟同attempt进程边界'), { code: 'SYNC_FENCE_EXPIRED' })
+    }
+    return saved
+  }
+  result = await runSyncOperation(store, f.operation.id, f.options)
+  assert.equal(result.status, 'recovery_required', JSON.stringify(result.failure)); assert.equal(suspended, true)
+  const completedP1 = calls.filter(call => call.purpose.startsWith('elaboration_'))
+  protocol.close()
+  protocol = openProtocol(join(f.parent, 'sync.sqlite'))
+  store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) }); f.useStore(store); f.store = store
+  result = await runSyncOperation(store, f.operation.id, f.options)
+  assert.deepEqual(calls.filter(call => call.purpose.startsWith('elaboration_')), completedP1, '完整P1同attempt冷恢复不重派或丢失固定事实')
+  assert.ok(finalV1, JSON.stringify({ failure: result.failure, calls, failures: store.listAttempts(f.operation.id).map(attempt => attempt.failure) }))
+  const attempts = store.listAttempts(f.operation.id), stages = attempts.map(attempt => readSyncCheckpoints(store, store.readOperation(f.operation.id), attempt).json.map(item => item.value as { stage?: string; resultRef: { sha256: string } }).filter(item => item.stage))
+  assert.equal(attempts.length, 5)
+  assert.deepEqual(calls.filter(call => call.attempt === 3).map(call => call.purpose).filter(purpose => purpose.startsWith('elaboration_')), ['elaboration_generate', 'elaboration_review'])
+  assert.deepEqual(readEvidence(commonDir, legacy.ref), legacy.bytes)
+  assert.deepEqual(stages[1].filter(stage => stage.stage === 'repair-input').map(stage => stage.resultRef), [legacy.ref])
+  const read = <T>(index: number, key: string): T => JSON.parse(readEvidence(commonDir, stages[index].find(stage => stage.stage === key)!.resultRef).toString()) as T
+  assert.equal(read<{ generationGuidance: string }>(0, 'elaboration-draft-protocol').generationGuidance, ELABORATION_GENERATION_GUIDANCE_V4)
+  assert.equal(read<{ generationGuidance: string }>(2, 'elaboration-draft-protocol').generationGuidance, ELABORATION_GENERATION_GUIDANCE)
+  const repaired = read<{ readonlyOwnerRepair: Parameters<typeof continuationCoordinator.validateReadonlyRepair>[2] }>(2, 'repair-input').readonlyOwnerRepair
+  assert.deepEqual(repaired.findings[0].relatedIds, ['RULE-EXPORT-05'])
+  assert.deepEqual(read<{ readonlyOwnerRepair: typeof repaired }>(3, 'repair-input').readonlyOwnerRepair.findings[0].relatedIds, ['RULE-EXPORT-02'])
+  assert.deepEqual(calls.filter(call => call.attempt === 4).map(call => call.purpose), ['elaboration_generate'], '未命中05再次改值在独审前机械拒绝')
+  const refused = read<ElaborationResult>(3, 'elaboration')
+  assert.ok(refused.rounds.flatMap(round => round.findings).some(finding => finding.code === 'rows_patch'))
+  continuationCoordinator.validateReadonlyRepair(store, store.readOperation(f.operation.id), repaired)
+  const old = structuredClone(repaired)
+  for (const key of ['findings', 'allFindings'] as const) for (const finding of old[key]) delete finding.relatedIds
+  const oldBytes = JSON.stringify(old); continuationCoordinator.validateReadonlyRepair(store, store.readOperation(f.operation.id), old)
+  assert.equal(JSON.stringify(old), oldBytes)
+  assert.equal(read<ElaborationResult>(2, 'elaboration').partitionSeal!.passed, true)
+  const whole = read<ElaborationResult>(4, 'elaboration')
+  assert.equal(whole.partitionSeal!.passed, true); assert.equal(whole.reviewPassed, true)
+  assert.equal(whole.changes[0].beforeDigest, readTree(commonDir, f.input.immutableTree).find(entry => entry.path === contractPath)!.digest, 'aggregate恢复原作者beforeDigest，而非继承事实的local sourceDigest')
+  const updated = parseContract(whole.changes[0]).contract!, before = parseContract({ nodeId: 'export-contract', path: contractPath, source: original }).contract!
+  assert.equal(parseFrontmatter(whole.changes[0].source).fm.desc, '当前冻结实现已满足原契约')
+  assert.equal((updated.items.find(item => item.id === 'RULE-EXPORT-05') as { basis: string }).basis, '首轮V5已核实结果事实')
+  assert.equal((updated.items.find(item => item.id === 'RULE-EXPORT-02') as { basis: string }).basis, '后轮V5已核实幂等事实')
+  assert.equal(updated.rawSource, before.rawSource); assert.equal(updated.items.length, before.items.length)
+  for (const item of before.items) {
+    const next = updated.items.find(next => next.id === item.id)!
+    assert.deepEqual({ ...next, line: undefined, ...(item.kind === 'RULE' && ['RULE-EXPORT-02', 'RULE-EXPORT-05'].includes(item.id) ? { basis: item.basis } : {}) }, { ...item, line: undefined }, item.id)
+  }
+  const final = read<{ candidateValidated: boolean; candidate: { tree: string } }>(4, 'generation')
+  assert.equal(final.candidateValidated, true)
+  assert.deepEqual(readTree(commonDir, final.candidate.tree).filter(entry => !entry.path.startsWith('.spec/')), protectedObjects)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.equal(store.listJournals(f.operation.id).length, 0)
 })

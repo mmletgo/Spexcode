@@ -2441,3 +2441,29 @@ for (const oldVersion of [27, 29, 30, 31] as const) test(`持久协议writer围�
     assert.deepEqual(backup.withTransaction(tx => tx.query('SELECT * FROM schema_migrations ORDER BY component,version')), oldMarkers)
   } finally { backup?.close(); f.cleanup() }
 })
+
+
+test('writer33事实返修marker只追加，保V4原件、32一致备份及旧writer写前拒绝', async () => {
+  const f = await fixture()
+  let backup: ReturnType<typeof openProtocol> | undefined
+  try {
+    const claimed = f.claim(), value = { version: 'elaboration-draft-v1', generationGuidance: 'ac-test-flow-review-verify-repair-v4' }, resultRef = f.put(value)
+    f.store.checkpoint(claimed.fence, { ...f.put({ version: 'sync-stage-v1', stage: 'elaboration-draft-protocol', resultRef }), artifacts: [{ kind: 'json', ref: resultRef }] })
+    f.protocol.withTransaction(tx => tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=33', SYNC_COMPONENT))
+    const rows = (protocol: typeof f.protocol) => protocol.withTransaction(tx => Object.fromEntries(tx.query("SELECT name FROM sqlite_master WHERE type='table' AND name!='schema_migrations' ORDER BY name").map(row => [String(row.name), tx.query(`SELECT * FROM "${String(row.name)}"`)])))
+    const before = rows(f.protocol), schema = f.protocol.withTransaction(tx => tx.query('SELECT * FROM sqlite_master ORDER BY type,name')), registry = f.protocol.withTransaction(tx => tx.query('SELECT * FROM schema_migrations ORDER BY component,version'))
+    assert.equal(SYNC_MIGRATIONS[32].version, 33); assert.match(SYNC_MIGRATIONS[32].sql, /^SELECT 1;/)
+    const originalBackup = f.protocol.backupTo.bind(f.protocol); let backups = 0
+    f.protocol.backupTo = async (...args: Parameters<typeof originalBackup>) => { backups++; return originalBackup(...args) }
+    const backupPath = join(f.root, 'v32-before-fact-repair.backup')
+    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), 33)
+    assert.deepEqual(rows(f.protocol), before); assert.deepEqual(f.protocol.withTransaction(tx => tx.query('SELECT * FROM sqlite_master ORDER BY type,name')), schema)
+    assert.deepEqual(f.protocol.withTransaction(tx => tx.query('SELECT * FROM schema_migrations WHERE component!=? OR version<=32 ORDER BY component,version', SYNC_COMPONENT)), registry)
+    assert.throws(() => applyComponentMigrations(f.protocol, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 32)), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
+    assert.deepEqual(rows(f.protocol), before)
+    backup = openProtocol(backupPath); assert.equal(applyComponentMigrations(backup, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 32)), 32); assert.deepEqual(rows(backup), before)
+    assert.equal(await migrateSyncStore(f.protocol), 33); assert.equal(backups, 1)
+    assert.deepEqual(f.store.readAttempt(claimed.attempt.id).dispatchPlans, [])
+    assert.deepEqual(f.store.readAttempt(claimed.attempt.id).checkpointRefs[0].artifacts, [{ kind: 'json', ref: resultRef }])
+  } finally { backup?.close(); f.cleanup() }
+})

@@ -11,6 +11,11 @@ code:
 
 ## expanded spec
 
+
+多轮事实返修复用原acceptedRef/changes作确定值继承。仅既有checkpoint接缝认证同owner完整changes与真实原generation attempt的V5及批准身份后，才投影事实固定值到局部targets/files；当前finding不开放旧ID。全局seal接收同一进程内固定基线，先证明其仅改变作者事实字段，再作完整候选与演进比较；aggregate继续恢复原input.targets.sourceDigest为beforeDigest，原作者CAS和源码/tests对象不变。不增加持久字段或历史权限集合。
+
+只读candidate_review的V5完整叶事实资格沿原受影响owner输入参与局部冻结与新独审，已审局部原件中的同一诊断再以进程内参数交strict final seal；复用原generationGuidance冻结V5，不新增诊断字段或伪造当前P0变化。全局候选仍相对原作者基线逐值核raw、业务列、身份、源码/tests对象及absence，仅命中owner的desc/expanded和RULE.basis事实修正可通过；缺该原诊断的全局输入保持冻结。
+
 原冻结计划中无目标、写路径、契约/流程角色或依赖边的分区，若非空精确源码集合等于变更集合，且已审P0覆盖全部路径、只含无ID和规则授权的refactor或allowed_change、没有作者/生命周期/新节点/裁决/整合/GAP等写义务，程序核原全局和局部P0、冻结计划及真实独审来源后，以仅分析证据进入全局P1。保留P0事实和原件，不派发该组的P1，也不合成局部结果或独审。既有或新派生的真实目标继续走原父/叶细化。空目标无法证明仅分析资格时仍拒绝。真实P1与仅分析分区在原计划上唯一完整覆盖，严格全图封口和后续四层验证照常执行。
 
 P1物理草稿观察所需的当前binding、含只读祖先/诊断overlay的StageWorktree及inputDigest，沿既有loadElaborationDraftMaterial仅作进程内参数传递；不进入持久请求/计划或改变缓存摘要。loadDraft认证Git来源与existingDraft传入同材料回调，只有已认证严格更新attempt/round的物理稿可替换；合法candidate/续审、分区owner/plan/schema和原source/test保护不变，未批准physical材料仍须真实新提交及独审。

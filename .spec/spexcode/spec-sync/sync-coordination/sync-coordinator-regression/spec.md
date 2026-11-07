@@ -14,6 +14,11 @@ code:
 
 ## expanded spec
 
+
+连续返修的受控Native/Git/SQLite整链先在A3仅批准RULE-EXPORT-05并过strict seal，随后真实code_review仅指RULE-EXPORT-02。A4故意重改未命中05，在独审前以rows_patch拒绝；A5省略05只更新02，仍继承首轮05精确值，最终strict seal/V1通过。两轮当前relatedIds不累加，raw、其他业务列和全部源码/tests对象保持，aggregate.beforeDigest仍原作者摘要。最后一次完整P1已保存后模拟进程边界，SQLite再重启仍复用同attempt P1，零额外生成或独审，并在同一完整候选继续V1。
+
+只读事实回归使用受控Native runner的真实Git草稿、隔离SQLite和已认证当前code_review：A1的V4批准owner保持原件，A2正式暂停且superseded/failure:null，SQLite重启后仅新A3冻结V5并正常重派生relatedIds、生成及独审。两条命中RULE.basis、desc及expanded修正后strict seal和最终V1通过；raw和全部业务/AC/VERIFY字段逐值保持，code_generate为零、source/tests path-mode-OID及absence不变，Docker前停止。旧A2的repair-input只保一份原ref/字节，旧relatedIds缺席可冷验但不授事实权；已存在字段或message损坏继续拒绝。V1–V4/缺席与V5的既有reserved请求矩阵逐项核prompt/inputDigest/schema/seed完全相同，不重签旧请求。
+
 P0 transport 回归让同一 operation 的三兄弟分别精确已停 EPIPE、原业务独审拒绝和通过独审。真实 Git/隔离 SQLite 的下一 attempt 只重新分析并独审无稿失败区，业务拒绝区保 readyAnalysis 和原拒因而只续独审，已审区原 refs 承接且零派发。原端到端受控 ZCode adapter 保专用 code 和冷重放身份；普通 errno/同文本 generic、错 stop/turn、未知停止和兄弟资源未释放均拒绝自动重试。既有 P0/P1 停态稿门及完成后 events RPC 的独立回归保持。
 
 P1追加A正常Git拒稿→B新物理EPIPE无witness→C原bytes续改并独审，以及旧物理晚观察不盖后来正常Git反向；A完整finding进入C且priorDraft角色清除。parent/新旧诊断的比较另由真实elaborate冻结任务、生产elaborationMaterialContext、原物理observer与新seed回调组合覆盖，原整树比较先fail，精确投影后pass，source/tests/非角色Spec差异配对拒绝；formalNative/stop认证复用前述coordinator真实fixture。此组合不假称现场模型全链验收。
