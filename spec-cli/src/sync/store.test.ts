@@ -2415,7 +2415,7 @@ test('P1仅分析分区writer28只追加marker，27旧writer拒写且online备�
   } finally { backup?.close(); f.cleanup() }
 })
 
-for (const oldVersion of [27, 29, 30] as const) test(`P1提示writer围栏，v${oldVersion}升级只备份一次且旧writer拒绝新库`, async () => {
+for (const oldVersion of [27, 29, 30, 31] as const) test(`持久协议writer围栏，v${oldVersion}升级只备份一次且旧writer拒绝新库`, async () => {
   const f = await fixture()
   let backup: ReturnType<typeof openProtocol> | undefined
   try {

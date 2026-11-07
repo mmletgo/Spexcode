@@ -18,6 +18,10 @@ related:
 
 ## expanded spec
 
+正式 configuredSyncApplication 与 configuredSyncResourceRecoveryApplication 共用 [[verification-transport]] 的可信 server 装配。可由 server 的 SPEX_VERIFICATION_SSH_ALIAS 与 SPEX_VERIFICATION_SSH_ROOT 选择既有 SSH 配置和远端独占 root，必须成对提供；缺席保持本地。alias/host 权限和认证不进入候选 Spec、项目 sync settings 或模型请求，凭据沿 SSH 原生机制，不能因当前配置改变而重绑定旧 v1/v2 resource。此装配不增加 P0/readiness 阶段或第二业务状态机。
+
+server可选SPEX_VERIFICATION_SSH_DOCKER_ENDPOINT只接受本机Unix socket，缺省unix:///var/run/docker.sock，按原plan冻结并显式传每次Docker CLI，不使用远端默认context猜执行主机。
+
 显式offline source-continuity见 [[sync-source-registration]]，不创建缓存owner、observer、attempt或模型调用。enable与登记在commonDir共享注册锁内写启用记录，v2后续配置/实际分支授权保留continuity链；identity不永久绑定旧业务配置。普通assertSource核完整repo/root/commonDir/gitDir/branch/physical，不能因共享repo投影而给未证明旧linked source继续权。资源-only专用factory及coordinator的raw Git元数据核验不受失效v2自锁，且不进入normal恢复或准入。
 
 新操作默认冻结plan.agentWorkflow=native-worktree-v1与sync-tools-v3:{model,agentWorkflow,tools,runtimeDigest}。读取运行资料同时核请求选择及workflow，拒绝新旧协议热替换；旧v1/v2及缺字段plan按原frozen协议恢复/retry，旧已持久payload不改写。新业务裁决/revert为新操作，使用新工作流。新workflow使用Claude Code或ZCode；未显式指定且项目未配置模型时固定请求选择claude:default，交由CLI原生配置解析，不把默认或别名当成精确实际模型。模型、base URL和CLI版本无产品允许名册，实际每轮身份由[[claude-structured-runtime]]、[[zcode-structured-runtime]]记录。历史缺省sol身份不改变，不能把裸sol静默换执行器。v24组件writer marker保护新原生配置语义，固定v3运行描述仍核其请求选择。

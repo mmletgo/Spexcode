@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+v32仅追加无DDL SELECT 1 writer marker，保护远端 V3 v2 的 target/effect/closed 持久语义，以及 removed 须确证容器和临时 staging 均已清算的边界。v31及更旧 writer 在任何写入/派发前拒绝；保 v1–v31 SQL/checksum 与旧记录原字节。升级停稳旧 backend/queue并结算或保留资源，再 online backup 后事务追加。回滚停新 writer，先结算远端资源，再恢复一致 v31 备份及配套 evidence/runtime/Git refs；未知远端 effect 未结算不能用旧备份抹掉 ledger，不能删 marker 降级。
+
 v31仅追加无DDL SELECT 1 marker，保护完整Native P1独审的`ac-test-flow-review-binding-v3`及已结算 `session/events` 超时后仅预留P1独审的派发形态。v30及更旧writer须在任何写入或派发前拒绝。停稳旧backend/queue并结算资源及租约后，v30→v31做一次SQLite online backup，再在组件事务追加marker，保留旧SQL、checksum、旧表及已冻结请求。回滚先停新writer，再恢复升级前一致的v30备份及原evidence/Git refs。
 
 v30仅追加无DDL SELECT 1 marker，保护完整P1生成提示版本`ac-test-flow-binding-v2`。v29原能在拒绝未知阶段版本后持久化unsupported，故旧writer须在任何写入和派发前拒绝新库。升级停稳旧backend/queue并结算资源及租约后，v29→v30做一次SQLite online backup，再在组件事务追加marker，历史SQL、checksum、旧表和请求原件保持。回滚先停新writer，再恢复升级前一致备份及原evidence/Git refs。

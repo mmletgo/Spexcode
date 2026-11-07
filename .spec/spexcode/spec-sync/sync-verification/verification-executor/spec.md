@@ -17,6 +17,14 @@ related:
 
 ## expanded spec
 
+新远端 V3 复用唯一执行器及原 resource 四阶段，通过 [[verification-transport]] 将完整候选与 reporter 真正送到可信 server 选择的 SSH Linux Docker 主机。v2 checkpoint 在任何远端写入前持久原 target/daemon、实际远端 paths、run/input/candidate/policy/config 绑定；上传后原阶段追加实际模式、字节、链接及 runnerDigest 认证，成功持久后才 create/start。inspect 原件直接核真实远端 Source，不改写为本机路径。旧 v1 保持本地原绑定和历史缺席。
+
+旧v1本地planned取消且容器不存在时，没有远端closed/effect排空证明，保持unknown/recovery_required且不得新create；不借NoSuch追加未执行成功证明。
+
+上传/create/start 边界重新检查原业务 fence；失效只结算资源。planned 尚无容器时，可在原 target 的 closed 排空及精确不存在证明后保存 not-created terminal，再清理 staging 后 removed，不造 container evidence。终态原件先持久，随后 exact rm 与临时 candidate/runner 清算均已确认才 removed；控制历史、锁及 closed 保留不代表活跃 staging。
+
+SSH 断开不证明 worker 或 Docker CLI 停止。[[verification-remote-helper]] 按单 run 内核锁及固定 effect intent/receipt 排空；已提交 create/start 无完成证明保持 recovery_required，不以 NoSuch 自免。closed 在锁内持久后无 remote intent 的请求可证明未执行，迟到请求拒绝。原 terminal 已持久、同 target/daemon、closed 有效且全部可重建 effect 排空后，rm/cleanup 的丢回执可由 exact ID/path 不存在追加恢复观察；不改写旧调用结果、不盲重放。
+
 本叶节点实现 [[sync-verification]] 的 V3 执行边界；不单独证明 V1/V2/V4、候选交付或完整 P2 已完成。政策由上层可信校验器提供，固定镜像摘要、Linux 平台、Node 测试 argv、必需稳定测试 ID 与 CPU/内存/PID/时间/日志/scratch 预算。候选无法删减执行集合或改命令免检。
 
 实际工作目录严格采用受信 VERIFY 的仓库相对 cwd，并在容器 inspect 中复核；不能把子目录命令偷偷放到根目录执行。稳定 testID 来自 AC 的具体测试绑定，可以与 AC 的业务 ID 不同；必须在真实报告中唯一通过。
