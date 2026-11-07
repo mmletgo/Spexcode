@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+正式续验的P1冷验另覆盖原Native verdict=repair且只有合法implementation-review、P1程序已structurePassed/reviewPassed的实际持久形态：六阶段真实Git/SQLite先到V3前置unsupported，旧版readonly_spec_repair_binding误拒；修复后保原repair/diagnostics/trace/CAS，零模型续验并产生本次V3/Git交付。取消批准标记、缺deferred或自定义业务repair不获资格；缺原独审Native证据仍拒绝。现场005只读原件按同一纯查询与原Native/Git绑定逐项校准，不能把受控fixture当现场最终交付。
+
 真实临时Git、正常阶段提交、隔离SQLite和受控runner先完成P0分析/独审、P1生成/独审、代码生成/独审，冻结候选后由受控V3前置能力失败形成verification_unsupported且无验证资源。修复前正式retry再次进入P0的第七次调用；修复后SQLite重启并经公开SyncApplication.submit/retryOf继续同候选，连续两次运输失败仍零新增模型派发，最后重新产生本次V3/V4和正常Git交付。输入源码、oracle、配置、request/policy/impact/readSet/scope、candidate、P0/P1/最终review/V3原件或发布父树漂移须明确拒绝且不回退生成；原失败operation/attempt/CAS及source/index保持。新增同一完整六阶段场景在原HEAD提交后、capture前为只读oracle追加合法换行，真实冻结metadata publication parent：旧版正式retry误拒，新版认证新旧metadata与相同实际tree/frontier后零调用交付；伪造旧parent身份继续拒绝。双owner跨依赖场景实际完成两个local和一个edge独审，再只从aggregate删除edge member及其trace、保原Native/局部独审/预算及候选；旧版误入V3，新版按唯一dispatch精确集合拒绝，完整双owner对照仍零调用续验。另以公开入口显式选择新model，按原正常retry重新生成和独审六阶段，不复用旧候选批准；无模型/CLI/BaseURL白名单。受控Native与Docker driver只证明编排及Git/SQLite事实，不冒称真实模型、远端Docker或Tiny产品闭环。
 
 
