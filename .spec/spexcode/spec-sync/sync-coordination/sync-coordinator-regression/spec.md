@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+原候选零调用续验实际完成隔离driver验收并正式removed后，在V3 saveStage注入记账失败，原attempt保candidate但无V3 stage/verification aggregate；同parent仍归并失败child，正式retry最新child旧版重入第七次P0，新版只读冷验所有原资源及完整祖先，零模型产生本次V3/V4/Git。旧资源checkpoint写入计数为零，原失败/资源/checkpoint逐字保持；原业务测试failed及额外未知removed资源分别在新V3前明确拒绝，零模型零派发。该受控故障只验证业务记账边界，真实内联stdout SHA故障由[[sync-checkpoint-evidence]]治理。
+
 空失败后继整链回归先由正式续验在原P1独审证据暂不可认证时形成零调用/零派发且无candidate/verification/资源/journal的真实failed操作，恢复原证据后同parent新request仍归并原失败、不resume；随后以最新failed child为retryOf，旧版第七次调用重入P0，新版逐跳认证空后继再冷验原完整祖先，连续V3运输失败后零模型生成本次V3/V4及正常Git receipt。中间impact漂移仍拒绝，原失败及checkpoint保留，不修改store幂等或按特定failure.code授信。
 
 正式续验的P1冷验另覆盖原Native verdict=repair且只有合法implementation-review、P1程序已structurePassed/reviewPassed的实际持久形态：六阶段真实Git/SQLite先到V3前置unsupported，旧版readonly_spec_repair_binding误拒；修复后保原repair/diagnostics/trace/CAS，零模型续验并产生本次V3/Git交付。取消批准标记、缺deferred或自定义业务repair不获资格；缺原独审Native证据仍拒绝。现场005只读原件按同一纯查询与原Native/Git绑定逐项校准，不能把受控fixture当现场最终交付。

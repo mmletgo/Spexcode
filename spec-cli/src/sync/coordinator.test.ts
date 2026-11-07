@@ -6092,7 +6092,8 @@ test('Coordinator Native Spec→Code scratch构建后6→1→1沿原builder来�
   assert.equal(f.store.listJournals(f.operation.id).length, 0); assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
 })
 
-for (const defect of ['none', 'failed-continuation', 'failed-continuation-drift', 'deferred-implementation', 'deferred-native-mismatch', 'metadata-parent', 'edge', 'edge-valid', 'review-budget', 'review-budget-keys', 'model', 'source', 'oracle', 'configuration', 'request', 'policy', 'impact', 'readset', 'scope', 'partial', 'candidate', 'generation', 'analysis', 'elaboration', 'review', 'v3', 'publication'] as const) test(`正式retryOf在V3前置unsupported后零模型调用续验真实冻结候选 defect=${defect}`, { timeout: 180000 }, async t => {
+for (const defect of ['none', 'recording-continuation', 'recording-continuation-failed', 'recording-continuation-resource', 'failed-continuation', 'failed-continuation-drift', 'deferred-implementation', 'deferred-native-mismatch', 'metadata-parent', 'edge', 'edge-valid', 'review-budget', 'review-budget-keys', 'model', 'source', 'oracle', 'configuration', 'request', 'policy', 'impact', 'readset', 'scope', 'partial', 'candidate', 'generation', 'analysis', 'elaboration', 'review', 'v3', 'publication'] as const) test(`正式retryOf在V3前置unsupported后零模型调用续验真实冻结候选 defect=${defect}`, { timeout: 180000 }, async t => {
+  const recording = defect.startsWith('recording-continuation')
   const multiple = ['edge', 'edge-valid', 'review-budget-keys'].includes(defect)
   const importedPath = '.spec/project/import/import-contract/spec.md'
   const imported = original.replaceAll('export-job', 'import-job').replaceAll('EXPORT', 'IMPORT').replaceAll('export-contract', 'import-contract').replaceAll('src/export.js', 'src/import/import.js').replaceAll('tests/export.test.mjs', 'tests/import.test.mjs').replaceAll('decision:IMPORT-POLICY', 'decision:EXPORT-POLICY').replace(/(\| REQ-IMPORT-01 \|[^\n]+)\| - \|/, '$1| REQ-EXPORT-01 |')
@@ -6122,7 +6123,7 @@ for (const defect of ['none', 'failed-continuation', 'failed-continuation-drift'
     if (argv[1] === 'inspect') return containerExists ? ok(JSON.stringify([{ Id: 'a'.repeat(64), Name: `/${checkpoint.uniqueContainerName}`, Image: config.imageId, Platform: 'linux', Config: { Image: config.image, User: '1000:1000', WorkingDir: config.policy.cwd === '.' ? '/candidate' : `/candidate/${config.policy.cwd}`, Entrypoint: [config.argv[0]], Cmd: config.argv.slice(1), Labels: checkpoint.labels, Env: config.environment, Healthcheck: { Test: ['NONE'] } }, HostConfig: { ReadonlyRootfs: true, NetworkMode: 'none', Privileged: false, CapDrop: ['ALL'], CapAdd: null, SecurityOpt: ['no-new-privileges'], Init: true, AutoRemove: false, CgroupnsMode: 'private', RestartPolicy: { Name: 'no' }, Memory: config.policy.memoryBytes, MemorySwap: config.policy.memoryBytes, NanoCpus: config.policy.cpus * 1e9, PidsLimit: config.policy.pidsLimit, Tmpfs: { '/tmp': `rw,noexec,nosuid,nodev,size=${config.policy.scratchBytes},mode=1777` }, LogConfig: { Type: 'local', Config: { 'max-size': String(config.policy.logBytes), 'max-file': '1', compress: 'false' } }, Binds: null, Devices: [], PidMode: '', IpcMode: 'private' }, Mounts: [{ Type: 'bind', Source: config.candidatePath, Destination: '/candidate', RW: false }, { Type: 'bind', Source: config.runnerPath, Destination: '/runner', RW: false }], State: { Status: containerState, Running: false, ExitCode: 0, OOMKilled: false, Error: '' } }])) : { ...ok(), exitCode: 1, stderr: 'Error: No such container' }
     if (argv[1] === 'create') { containerExists = true; containerState = 'created'; return ok('a'.repeat(64)) }
     if (argv[1] === 'start') { containerState = 'exited'; return ok('a'.repeat(64)) }
-    if (argv[1] === 'logs') return ok([...config.policy.expectedTestIds.map(id => JSON.stringify({ type: 'test:pass', data: { name: `${id} controlled`, nesting: 0 } })), JSON.stringify({ type: 'test:summary', data: { counts: { tests: config.policy.expectedTestIds.length }, success: true } })].join('\n'))
+    if (argv[1] === 'logs') return ok([...config.policy.expectedTestIds.map(id => JSON.stringify({ type: defect === 'recording-continuation-failed' ? 'test:fail' : 'test:pass', data: { name: `${id} controlled`, nesting: 0 } })), JSON.stringify({ type: 'test:summary', data: { counts: { tests: config.policy.expectedTestIds.length }, success: defect !== 'recording-continuation-failed' } })].join('\n'))
     if (argv[1] === 'rm') { containerExists = false; return ok('a'.repeat(64)) }
     assert.fail(`unexpected controlled verification command ${argv}`)
   }
@@ -6184,7 +6185,7 @@ for (const defect of ['none', 'failed-continuation', 'failed-continuation-drift'
   const store = application.store; f.useStore(store); currentStore = store
   f.options.managedRoot = join(applicationRuntime, 'managed'); f.options.artifactRoot = join(applicationRuntime, 'artifacts')
   const originalRefs = origin.checkpointRefs.map(ref => ({ ref, stage: (JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()) as { stage?: string }).stage }))
-  if (!['none', 'failed-continuation', 'failed-continuation-drift', 'deferred-implementation', 'metadata-parent', 'edge-valid'].includes(defect)) {
+  if (!['none', 'recording-continuation', 'recording-continuation-failed', 'recording-continuation-resource', 'failed-continuation', 'failed-continuation-drift', 'deferred-implementation', 'metadata-parent', 'edge-valid'].includes(defect)) {
     const request = { nodeId: 'export-contract', requestId: `reject-frozen-${defect}`, retryOf: parent.id, ...(defect === 'model' ? { model: 'claude:other-model' } : {}) }
     active = (await application.submit(request)).operation!
     active = store.ackDispatch(f.input.source.repositoryId, active.dispatchMessageId); f.useOperation(active)
@@ -6276,13 +6277,54 @@ for (const defect of ['none', 'failed-continuation', 'failed-continuation-drift'
   }
   active = (await application.submit({ nodeId: 'export-contract', requestId: 'retry-transport-still-unavailable', retryOf: retryParent })).operation!
   active = store.ackDispatch(f.input.source.repositoryId, active.dispatchMessageId); f.useOperation(active)
+  const checkpoint = store.checkpoint.bind(store)
+  if (recording) {
+    preflightFails = false
+    store.checkpoint = (fence, ref) => {
+      const value = JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()) as { stage?: string }
+      if (value.stage?.startsWith('v3:')) throw new Error('controlled bookkeeping failure after real removed V3')
+      return checkpoint(fence, ref)
+    }
+  }
   const secondFailure = await runSyncOperation(store, active.id, f.options)
-  assert.equal(secondFailure.failure?.code, 'verification_unsupported', JSON.stringify({ failure: secondFailure.failure, calls })); assert.equal(secondFailure.operation.callsUsed, 0)
+  store.checkpoint = checkpoint
+  assert.equal(secondFailure.failure?.code, recording ? 'coordinator_failed' : 'verification_unsupported', JSON.stringify({ failure: secondFailure.failure, calls })); assert.equal(secondFailure.operation.callsUsed, 0)
+  const recordedFailure = store.readAttempt(secondFailure.operation.currentAttemptId!)
+  if (recording) {
+    assert.deepEqual(recordedFailure.candidate, origin.candidate); assert.equal(recordedFailure.verification, null); assert.deepEqual(recordedFailure.dispatchPlans, [])
+    assert.equal(recordedFailure.checkpointRefs.some(ref => (JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()) as { stage?: string }).stage?.startsWith('v3:')), false)
+    const resource = store.findResource(recordedFailure.id, `verification:${contentHash(`${recordedFailure.id}:${verification.id}`)}`)!
+    assert.equal(resource.phase, 'removed')
+    const original = JSON.parse(readEvidence(f.input.source.commonDir, resource.checkpointRef).toString()) as import('./verification-executor-types.js').VerificationCheckpoint
+    assert.equal(original.evidence!.outcome, defect === 'recording-continuation-failed' ? 'failed' : 'passed'); assert.equal(original.evidence!.reportComplete, defect !== 'recording-continuation-failed')
+    assert.equal(store.listRecoverableResources().length, 0); assert.equal(store.listJournals(active.id).length, 0)
+    assert.equal((await application.submit({ nodeId: 'export-contract', requestId: 'same-parent-recording-failure-coalesces', retryOf: retryParent })).operation!.id, active.id)
+  }
   const request = { nodeId: 'export-contract', requestId: 'verification-candidate-retry', retryOf: active.id }
   active = (await application.submit(request)).operation!
   assert.equal((await application.submit(request)).operation!.id, active.id, '正式请求重放沿同一operation')
   active = store.ackDispatch(f.input.source.repositoryId, active.dispatchMessageId); f.useOperation(active); preflightFails = false
+  const listResources = store.listResources.bind(store), recordResource = store.recordResourceCheckpoint.bind(store)
+  const originalResources = JSON.stringify(listResources(recordedFailure.id))
+  let oldResourceWrites = 0
+  store.recordResourceCheckpoint = (id, value) => {
+    if (value.attemptId === recordedFailure.id) { oldResourceWrites++; throw new Error('冷验不得写旧资源checkpoint') }
+    return recordResource(id, value)
+  }
+  if (defect === 'recording-continuation-resource') store.listResources = id => {
+    const values = listResources(id)
+    return id === recordedFailure.id ? [...values, { ...values[0], id: 'unknown-removed-resource', plan: { ...values[0].plan, key: 'verification:unknown-run' } }] : values
+  }
   const result = await runSyncOperation(store, active.id, f.options)
+  store.listResources = listResources; store.recordResourceCheckpoint = recordResource
+  assert.equal(oldResourceWrites, 0); assert.equal(JSON.stringify(listResources(recordedFailure.id)), originalResources, '冷验只读，全部旧资源和checkpoint原件保持')
+  if (defect === 'recording-continuation-failed' || defect === 'recording-continuation-resource') {
+    assert.equal(result.failure?.code, 'candidate_retry_binding', JSON.stringify(result.failure))
+    assert.equal(result.operation.callsUsed, 0); assert.equal(calls.length, originalCalls)
+    assert.deepEqual(versionCalls, [parent.id, secondFailure.operation.id], '业务failed或未知资源在新V3派发前拒绝')
+    assert.equal(store.listResources(result.operation.currentAttemptId!).length, 0); assert.equal(store.listJournals(active.id).length, 0)
+    return
+  }
   assert.equal(result.operation.phase, 'workspace_synced', JSON.stringify({ failure: result.failure, calls }))
   assert.equal(result.operation.callsUsed, 0)
   const verifiedAttempt = store.readAttempt(result.operation.currentAttemptId!)
@@ -6293,6 +6335,7 @@ for (const defect of ['none', 'failed-continuation', 'failed-continuation-drift'
     assert.equal(result.status, 'passed'); assert.equal(result.evidence!.runId, contentHash(`${verifiedAttempt.id}:${result.evidence!.tests[0].testId.startsWith('AC-IMPORT') ? 'VERIFY-IMPORT-01' : verification.id}`))
   }
   assert.equal(calls.length, originalCalls); assert.deepEqual(versionCalls, [parent.id, secondFailure.operation.id, ...f.plan.verifications.map(() => active.id)])
+  assert.deepEqual({ ...store.readAttempt(recordedFailure.id), status: recordedFailure.status }, recordedFailure, '原记账失败及已保存V3原件保持，不补旧stage或verification')
   assert.deepEqual(store.readAttempt(result.operation.currentAttemptId!).candidate, origin.candidate)
   const supersededParent = store.readOperation(parent.id), supersededOrigin = store.readAttempt(origin.id)
   assert.deepEqual({ ...supersededParent, phase: parent.phase, revision: parent.revision, updatedAtMs: parent.updatedAtMs }, parent, '准入仅按原重叠政策supersede祖先，不改原意/预算/绑定或失败原件')

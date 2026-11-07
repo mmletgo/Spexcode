@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+listResources(attemptId)在既有只读事务枚举该attempt全部真实资源，包含removed历史，不过滤kind或阶段、不修改记录，供协调器逐项冷验候选续验后继；它不改变retry准入、幂等、资源恢复或writer/schema约定。
+
 sourceContinuityState仅在既有assertSchema事务只读汇总同commonDir的完整来源、有效current attempt/lease、未removed资源及未settled journal，不限列表条数、不读会话正文、不改CAS。登记层结合observer/owner事实拒绝活跃的另一raw namespace；过期running元数据本身不证明活跃。连续性不修改原operation/input/预算或既有blob。
 
 共享身份属于 [[sync-operation-types]]。admitAndEnqueue 将冻结 operation、稳定派发计划与现有 protocol 的 sync.dispatch.v1 control envelope 原子写入，注册唯一 coordinator 地址；消息不是普通 Agent 文本。稳定接入 payload 包含输入内容与物理身份、policy/impact/readSet 摘要，capture 时间不参与；同键不同 payload 拒绝。claimAttempt 独立保存 attempt 与 sessionCreateKey（不超过128字符），在同一事务领取所有实际 path/规则写集合及可选 exact FIFO dequeue。dequeue 后仍由未完 attempt 恢复。
