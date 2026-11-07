@@ -35,7 +35,7 @@ import { createAttemptRunner, hasSettledNativeRpcFailure, hasSettledNativeTurnTr
 import type { NativeRunCheckpoint, NativeRunPlan } from './native-run.js'
 import type { AdmitSyncInput, ApplyReceipt, BlobRef, CandidateRef, ComposedInputRef, FrozenBaselineSelection, InputSnapshot, SyncAttempt, SyncFailure, SyncOperation, SyncScope, SyncResourceRecord, VerificationResultBlob, WriteFence } from './operation-types.js'
 import { deliverVerifiedAttempt, planPrivateDelivery } from './private-delivery.js'
-import { assemblePublicationBase } from './publication-base.js'
+import { assemblePublicationBase, verifyPublicationBase } from './publication-base.js'
 import { obligationPaths, ownedObligationPaths } from './prior-context.js'
 import { composeControlledRequest, readControlledChanges, readControlledDecision } from './request-input.js'
 import { sessionIdForCreateKey } from '../sessions.js'
@@ -1194,7 +1194,7 @@ async function verificationRetrySource(store: SyncStore, operation: SyncOperatio
       if (!round.draft || !round.candidate || round.candidateDigest !== contentHash(JSON.stringify(round.candidate)) || round.candidate.inputDigest !== local.inputDigest || local.candidateDigest !== round.candidateDigest || canonical(local.changes) !== canonical(round.candidate.changes.map(change => ({ ...change, contentDigest: contentHash(change.source) }))) || !result?.result || result.result.resultDigest !== trace.resultDigest || canonical(result.result.output) !== canonical(round.reviewOutput) || canonical(round.review) !== canonical({ ...(round.reviewOutput as object), inputDigest: local.inputDigest, candidateDigest: local.candidateDigest }) || round.review!.verdict !== 'accept' || round.review!.findings.length || ELABORATION_BOUNDARIES.some(boundary => !round.review!.checkedBoundaries.includes(boundary))) reject('原P1候选、草稿渲染或完整独立审查绑定失配')
       readStageDraft(owner.input.source.commonDir, round.draft!, round.draft!)
     }
-    const traces: ElaborationTrace[] = [], checked = new Set<string>()
+    const traces: ElaborationTrace[] = [], checked = new Set<string>(), reviewInputs: GenerationInput[] = []
     for (const member of p2.partitionEvidence!) {
       await renew()
       const key = `partition:${member.partitionId}:candidate-review`, savedInput = partitionStage<ReturnType<typeof freezeGenerationInput>['inputEvidence']>(store, owner, prior, `${key}:input`), savedReview = partitionStage<SavedGeneration>(store, owner, prior, key)
@@ -1202,6 +1202,7 @@ async function verificationRetrySource(store: SyncStore, operation: SyncOperatio
       if (!input) reject('最终独审缺少原完整冻结输入，不能猜测或重签')
       const reviewed = acceptedCandidateReviewSource(store, owner, prior, key, candidate!, plan, input)
       if (!reviewed || canonical(reviewed.result.review) !== canonical(member.review) || canonical(reviewed.result.traces) !== canonical(member.traces) || canonical(input.snapshot) !== canonical(owner.input) || input.policy.digest !== owner.policyDigest || input.model !== syncModel(owner) || canonical(input.composed) !== canonical(view.composed)) reject('最终独审的原输入、模型、候选、Native或覆盖绑定失配')
+      reviewInputs.push(input)
       for (const id of member.review.checkedIds) checked.add(id)
       traces.push(...member.traces)
       if (!specOnly && !member.partitionId.startsWith('edge:')) {
@@ -1217,6 +1218,14 @@ async function verificationRetrySource(store: SyncStore, operation: SyncOperatio
         if (replay.status !== 'prepared' || replay.inputDigest !== priorBuilder.inputDigest || canonical(replay.preparedChanges) !== canonical(priorBuilder.preparedChanges)) reject('原builder真实Git差量、schema或写范围已变化')
       }
     }
+    const acceptedFiles = new Map(view.files)
+    for (const change of p1.nodeChanges ?? []) if (change.action === 'retire' || change.from.path !== change.to.path) acceptedFiles.delete(change.from.path)
+    for (const change of p1.changes) acceptedFiles.set(change.path, change.source)
+    const accepted = await readFrozenContracts(owner.input.source.canonicalRoot, acceptedFiles)
+    // 集合复算用已审完整P1与全局ready；局部原件仅提供未参与集合选择的执行上下文。
+    const dispatch = implementationGenerationDispatch({ ...reviewInputs[0], requestKey: `sync:${prior.id}:generation`, files: view.files, manifest: view.manifest, contracts: accepted.contracts, elaboratedSpecs: p1.changes.map(change => ({ path: change.path, source: change.source })), readyIds: [...owner.readyScope.contractIds, ...owner.readyScope.flowIds], blockedIds: [], retiredIds: p1.retiredIds, retiredOwners: [...new Map(reviewInputs.flatMap(input => input.retiredOwners ?? []).map(item => [item.id, item])).values()], nodeChanges: p1.nodeChanges, analysis: analysis!, analysisEvidence: undefined, readonlyContractPaths: undefined, allowedScope: owner.readyScope, mandatoryTests: policy.mandatoryTests }, plan, specOnly)
+    const budget = partitionStage<{ requiredKeys: string[] }>(store, owner, prior, 'partition-generation-budget')?.result
+    if (!budget || !Array.isArray(budget.requiredKeys) || canonical(budget.requiredKeys.filter(key => key.endsWith(':code_review')).sort()) !== canonical(dispatch.requiredKeys.filter(key => key.endsWith(':code_review')).sort()) || canonical(unique(p2.partitionEvidence!.map(member => member.partitionId))) !== canonical(unique(dispatch.reviews.map(review => review.id)))) reject('最终独审集合未精确覆盖原冻结派发计划的全部就绪local与依赖edge')
     if (new Set(p2.partitionEvidence!.map(item => item.partitionId)).size !== p2.partitionEvidence!.length || [...owner.readyScope.contractIds, ...owner.readyScope.flowIds].some(id => !checked.has(id)) || canonical(p2.traces.filter(trace => trace.purpose === 'code_review')) !== canonical(traces)) reject('最终独审缺少真实完整覆盖或身份并集')
     verifyCandidate(owner.input.source.commonDir, candidate!)
     return { operation: owner, attempt: prior, generation: p2, elaboration: p1, analysis: analysis!, partitions: plan }
@@ -1482,8 +1491,10 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           operation = store.startGeneration(fence, { readyScope: source.readyScope, blockedScope: source.blockedScope, blockedReason: source.blockedReason })
           if (retrySource.attempt.publicationBase) {
             await acquirePublication()
-            const base = assemblePublicationBase(store, operation, store.readAttempt(attempt.id), view.composed, view.readPaths)
-            const { provenanceBlob: _newProvenance, ...currentBase } = base, { provenanceBlob: _oldProvenance, ...originalBase } = retrySource.attempt.publicationBase
+            const currentAttempt = store.readAttempt(attempt.id)
+            const base = assemblePublicationBase(store, operation, currentAttempt, view.composed, view.readPaths)
+            const { operationId: _newOperation, attemptId: _newAttempt, parentCommit: _newMetadata, ...currentBase } = verifyPublicationBase(operation, currentAttempt, base)
+            const { operationId: _oldOperation, attemptId: _oldAttempt, parentCommit: _oldMetadata, ...originalBase } = verifyPublicationBase(source, retrySource.attempt, retrySource.attempt.publicationBase)
             if (canonical(currentBase) !== canonical(originalBase)) fail('candidate_retry_binding', '原候选发布基树已变化，不能覆盖新发布')
             store.bindPublicationBase(fence, base)
           }

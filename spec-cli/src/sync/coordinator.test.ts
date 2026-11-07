@@ -952,7 +952,7 @@ function gitReadCounter(directory: string): { reset(): void; entries(): string[]
     },
   }
 }
-async function fixture(t: test.TestContext, budget: import('./operation-types.js').SyncBudget = { maxAttempts: 3, maxCalls: 16, maxRepairs: 2, timeoutMs: 300_000 }, adopt = false, specSource = original, projectId = 'project', factsSource = specSource, planPatch: Partial<SyncCoordinatorPlan> = {}, controlledEdit?: { original: string; replacement: string; intent: string; testPath: string }, origin: 'spec' | 'code' | 'combined' = 'spec', model?: string, precise = false, extraSpecs: Readonly<Record<string, string>> = {}, committedInput = false, syncSettings?: import('./settings.js').SyncSettings) {
+async function fixture(t: test.TestContext, budget: import('./operation-types.js').SyncBudget = { maxAttempts: 3, maxCalls: 16, maxRepairs: 2, timeoutMs: 300_000 }, adopt = false, specSource = original, projectId = 'project', factsSource = specSource, planPatch: Partial<SyncCoordinatorPlan> = {}, controlledEdit?: { original: string; replacement: string; intent: string; testPath: string }, origin: 'spec' | 'code' | 'combined' = 'spec', model?: string, precise = false, extraSpecs: Readonly<Record<string, string>> = {}, committedInput = false, syncSettings?: import('./settings.js').SyncSettings, postCommitOracleEdit = false) {
   const parent = realpathSync(mkdtempSync(join(tmpdir(), 'sync-coordinator-'))), root = join(parent, 'source'), managedRoot = join(parent, 'managed'), artifactRoot = join(parent, 'artifacts')
   mkdirSync(root); mkdirSync(managedRoot, { mode: 0o700 }); mkdirSync(artifactRoot, { mode: 0o700 }); cpSync(fixturePath, root, { recursive: true })
   const targetPath = `.spec/${projectId}/export-contract/spec.md`
@@ -972,6 +972,7 @@ async function fixture(t: test.TestContext, budget: import('./operation-types.js
   writeFileSync(sourcePath, `${readFileSync(sourcePath, 'utf8')}\n// staged user request\n`); git('add', 'src/export.js')
   writeFileSync(sourcePath, `${readFileSync(sourcePath, 'utf8')}\n// unstaged user request\n`)
   if (committedInput) { git('add', 'src/export.js'); git('commit', '-m', 'freeze original clean source input') }
+  if (postCommitOracleEdit) writeFileSync(join(root, 'tests/export.test.mjs'), readFileSync(join(root, 'tests/export.test.mjs'), 'utf8') + '\n')
   const input = await captureInputSnapshot(root), index = readFileSync(join(root, '.git/index')), bytes = readFileSync(sourcePath)
   const definition = parseContract({ nodeId: 'export-contract', path: contractPath, source: original }).contract!.items.find(item => item.kind === 'VERIFY')!
   assert.equal(definition.kind, 'VERIFY')
@@ -6079,13 +6080,23 @@ test('Coordinator Native Spec→Code scratch构建后6→1→1沿原builder来�
   assert.equal(f.store.listJournals(f.operation.id).length, 0); assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
 })
 
-for (const defect of ['none', 'model', 'source', 'oracle', 'configuration', 'request', 'policy', 'impact', 'readset', 'scope', 'partial', 'candidate', 'generation', 'analysis', 'elaboration', 'review', 'v3', 'publication'] as const) test(`正式retryOf在V3前置unsupported后零模型调用续验真实冻结候选 defect=${defect}`, { timeout: 180000 }, async t => {
-  const items = parseContract({ nodeId: 'export-contract', path: contractPath, source: original }).contract!.items
+for (const defect of ['none', 'metadata-parent', 'edge', 'edge-valid', 'review-budget', 'review-budget-keys', 'model', 'source', 'oracle', 'configuration', 'request', 'policy', 'impact', 'readset', 'scope', 'partial', 'candidate', 'generation', 'analysis', 'elaboration', 'review', 'v3', 'publication'] as const) test(`正式retryOf在V3前置unsupported后零模型调用续验真实冻结候选 defect=${defect}`, { timeout: 180000 }, async t => {
+  const multiple = ['edge', 'edge-valid', 'review-budget-keys'].includes(defect)
+  const importedPath = '.spec/project/import/import-contract/spec.md'
+  const imported = original.replaceAll('export-job', 'import-job').replaceAll('EXPORT', 'IMPORT').replaceAll('export-contract', 'import-contract').replaceAll('src/export.js', 'src/import/import.js').replaceAll('tests/export.test.mjs', 'tests/import.test.mjs').replaceAll('decision:IMPORT-POLICY', 'decision:EXPORT-POLICY').replace(/(\| REQ-IMPORT-01 \|[^\n]+)\| - \|/, '$1| REQ-EXPORT-01 |')
+  const definitions = [{ nodeId: 'export-contract', path: contractPath, sourcePath: 'src/export.js', source: original }, ...multiple ? [{ nodeId: 'import-contract', path: importedPath, sourcePath: 'src/import/import.js', source: imported }] : []]
+  const items = definitions.flatMap(item => parseContract(item).contract!.items)
   const verification = items.find(item => item.kind === 'VERIFY')!
   assert.equal(verification.kind, 'VERIFY')
   const syncSettings: import('./settings.js').SyncSettings = { version: 'sync-settings-v1', nodeIds: ['export-contract'], sourcePaths: ['src'], testPaths: ['managed-tests'], readPaths: ['package.json', 'tests'], verifications: [{ definition: { id: verification.id, command: verification.command, cwd: verification.cwd, timeoutMs: verification.timeoutMs }, environment: { version: 'trusted-test-v1', image: 'node@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392', platform: 'linux/arm64', memoryBytes: 134217728, cpus: 1, pidsLimit: 64, scratchBytes: 16777216, logBytes: 131072 } }], mandatoryTests: [{ verificationId: verification.id, testPath: 'tests/export.test.mjs', testId: 'AC-EXPORT-03' }], facts: [], budget: { mode: 'unlimited' } }
-  const executionScope = { paths: [contractPath, 'src/export.js'], contractIds: items.filter(item => !['FLOW', 'VERIFY'].includes(item.kind)).map(item => item.id).sort(), flowIds: items.filter(item => item.kind === 'FLOW').map(item => item.id).sort() }
-  const f = await fixture(t, { mode: 'unlimited' }, false, original, 'project', original, { version: 'sync-coordinator-v2', agentWorkflow: 'native-worktree-v1', direction: 'spec_to_code', sourcePaths: ['src'], executionScope, partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 }, commitTrigger: { before: null, paths: [contractPath] } }, undefined, 'spec', 'claude:default', true, {}, true, syncSettings)
+  const executionScope = { paths: definitions.flatMap(item => [item.path, item.sourcePath]), contractIds: items.filter(item => !['FLOW', 'VERIFY'].includes(item.kind)).map(item => item.id).sort(), flowIds: items.filter(item => item.kind === 'FLOW').map(item => item.id).sort() }
+  if (multiple) {
+    syncSettings.nodeIds = definitions.map(item => item.nodeId)
+    const verify = items.find(item => item.id === 'VERIFY-IMPORT-01')!; assert.equal(verify.kind, 'VERIFY')
+    syncSettings.verifications.push({ ...syncSettings.verifications[0], definition: { id: verify.id, command: verify.command, cwd: verify.cwd, timeoutMs: verify.timeoutMs } })
+  }
+  const extras: Readonly<Record<string, string>> = multiple ? { [importedPath]: imported, 'src/import/import.js': readFileSync(new URL('src/export.js', fixturePath), 'utf8'), 'tests/import.test.mjs': readFileSync(new URL('tests/export.test.mjs', fixturePath), 'utf8').replaceAll('EXPORT', 'IMPORT').replaceAll('src/export.js', 'src/import/import.js') } : {}
+  const f = await fixture(t, { mode: 'unlimited' }, false, original, 'project', original, { version: 'sync-coordinator-v2', agentWorkflow: 'native-worktree-v1', direction: 'spec_to_code', targets: definitions.map(({ nodeId, path }) => ({ nodeId, path })), sourcePaths: ['src'], executionScope, ...(multiple ? { verifications: syncSettings.verifications } : {}), partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 }, commitTrigger: { before: null, paths: definitions.map(item => item.path) } }, undefined, 'spec', 'claude:default', true, extras, true, syncSettings, defect === 'metadata-parent')
   await f.realTools()
   let currentStore = f.store
   let active = f.operation, preflightFails = true, containerExists = false, containerState = 'created'
@@ -6108,9 +6119,9 @@ for (const defect of ['none', 'model', 'source', 'oracle', 'configuration', 'req
     if (defect === 'model') assert.equal(request.model, active.model, '正式显式换模型沿新选择重新生成及独审')
     else assert.equal(active.id, f.operation.id, '同model续验不能重新派发P0/P1/builder/独审')
     const attempt = currentStore.readAttempt(currentStore.readOperation(active.id).currentAttemptId!), dispatch = attempt.dispatchPlans.find(item => item.key === request.requestKey)!
-    const task = request.prompt.includes('任务:\n') ? nativeTask(request, f.input.source.commonDir) as { requiredChangedPaths: string[] } : null
+    const task = request.prompt.includes('任务:\n') ? nativeTask(request, f.input.source.commonDir) as { requiredChangedPaths: string[]; approvedSpecs: string[] } : null
     let output: unknown, worktree: ReturnType<typeof nativeWorktreeResult> | undefined
-    if (request.purpose === 'code_behavior_analyze') output = { changes: task!.requiredChangedPaths.map(path => ({ kind: 'refactor', paths: [path], affectedIds: ['RULE-EXPORT-05'], ruleIds: ['RULE-EXPORT-05'], originalIntent: '保原导出业务', previousBehavior: '导出行为不变', sourceBehavior: '导出行为不变', deliveryBehavior: '导出行为不变', evidence: path, counterexample: '内部注释不改行为' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+    if (request.purpose === 'code_behavior_analyze') output = { changes: task!.requiredChangedPaths.map(path => ({ kind: 'refactor', paths: [path], affectedIds: [path.includes('import') ? 'RULE-IMPORT-05' : 'RULE-EXPORT-05'], ruleIds: [path.includes('import') ? 'RULE-IMPORT-05' : 'RULE-EXPORT-05'], originalIntent: '保原导出业务', previousBehavior: '导出行为不变', sourceBehavior: '导出行为不变', deliveryBehavior: '导出行为不变', evidence: path, counterexample: '内部注释不改行为' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
     else if (request.purpose === 'code_behavior_review') {
       const state = readCodeBehaviorContext(request, f.input.source.commonDir).pendingAnalysis!
       output = { inputDigest: request.inputDigest, analysisDigest: state.analysisDigest, verdict: 'accept', checkedPaths: task!.requiredChangedPaths, checkedChangeIds: state.analysis.changes.map((item: { id: string }) => item.id), findings: [] }
@@ -6123,7 +6134,7 @@ for (const defect of ['none', 'model', 'source', 'oracle', 'configuration', 'req
     if (request.worktree!.mode === 'edit') {
       const workspace = join(f.parent, `candidate-retry-${calls.length}`), seed = request.worktree!
       f.git('worktree', 'add', '--detach', workspace, seed.baseCommit)
-      const path = request.purpose === 'code_generate' ? 'src/export.js' : /草稿文件=([^\s；]+)/.exec(request.prompt)![1]
+      const path = request.purpose === 'code_generate' ? definitions.find(item => task!.approvedSpecs.includes(item.path))!.sourcePath : /草稿文件=([^\s；]+)/.exec(request.prompt)![1]
       mkdirSync(join(workspace, path, '..'), { recursive: true })
       writeFileSync(join(workspace, path), request.purpose === 'code_generate' ? readFileSync(join(workspace, path), 'utf8') + '\n// reviewed candidate retry fixture\n' : JSON.stringify(output))
       execFileSync('git', ['-C', workspace, 'add', path], { stdio: 'pipe' }); execFileSync('git', ['-C', workspace, 'commit', '--allow-empty', '-m', 'normal frozen candidate stage'], { stdio: 'pipe' })
@@ -6136,7 +6147,10 @@ for (const defect of ['none', 'model', 'source', 'oracle', 'configuration', 'req
   const parent = failed.operation, origin = currentStore.readAttempt(parent.currentAttemptId!)
   assert.ok(origin.candidate); assert.equal(origin.verification, null)
   assert.equal(currentStore.listRecoverableResources().length, 0); assert.equal(currentStore.listJournals(parent.id).length, 0)
-  assert.deepEqual(calls, ['code_behavior_analyze', 'code_behavior_review', 'elaboration_generate', 'elaboration_review', 'code_generate', 'code_review'])
+  const originalCalls = calls.length
+  if (!multiple) assert.deepEqual(calls, ['code_behavior_analyze', 'code_behavior_review', 'elaboration_generate', 'elaboration_review', 'code_generate', 'code_review'])
+  else assert.equal(calls.filter(purpose => purpose === 'code_review').length, 3, '双owner完整候选包含两个local及一个真实edge独审')
+  if (defect === 'metadata-parent') assert.notEqual(origin.publicationBase!.parentCommit, parent.input.headCommit, '只读oracle工作区字节形成真实metadata parent')
   const originalHistory = JSON.stringify({ operation: parent, attempts: currentStore.listAttempts(parent.id) })
   f.closeForRestart()
   const protocol = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => protocol.close())
@@ -6147,7 +6161,7 @@ for (const defect of ['none', 'model', 'source', 'oracle', 'configuration', 'req
   const store = application.store; f.useStore(store); currentStore = store
   f.options.managedRoot = join(applicationRuntime, 'managed'); f.options.artifactRoot = join(applicationRuntime, 'artifacts')
   const originalRefs = origin.checkpointRefs.map(ref => ({ ref, stage: (JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()) as { stage?: string }).stage }))
-  if (defect !== 'none') {
+  if (!['none', 'metadata-parent', 'edge-valid'].includes(defect)) {
     const request = { nodeId: 'export-contract', requestId: `reject-frozen-${defect}`, retryOf: parent.id, ...(defect === 'model' ? { model: 'claude:other-model' } : {}) }
     active = (await application.submit(request)).operation!
     active = store.ackDispatch(f.input.source.repositoryId, active.dispatchMessageId); f.useOperation(active)
@@ -6171,14 +6185,31 @@ for (const defect of ['none', 'model', 'source', 'oracle', 'configuration', 'req
       if (id !== origin.id) return attempt
       if (defect === 'candidate') return { ...attempt, candidate: { ...attempt.candidate!, tree: f.input.immutableTree } }
       if (defect === 'publication') return { ...attempt, publicationBase: { ...attempt.publicationBase!, parentCommit: f.git('rev-parse', 'HEAD^') } }
-      const removed = originalRefs.filter(item => defect === 'generation' ? item.stage === 'generation' : defect === 'analysis' ? item.stage === 'analysis' : defect === 'elaboration' ? item.stage === 'elaboration' : defect === 'review' ? item.stage?.startsWith('injected:') && item.stage.endsWith(':code_review') : defect === 'v3' ? item.stage?.startsWith('v3:') : false).map(item => item.ref.sha256)
+      if (defect === 'review-budget-keys') {
+        const budget = originalRefs.find(item => item.stage === 'partition-generation-budget')!.ref
+        const wrapper = JSON.parse(readEvidence(f.input.source.commonDir, budget).toString())
+        const value = JSON.parse(readEvidence(f.input.source.commonDir, wrapper.resultRef).toString()) as { requiredKeys: string[] }
+        const altered = { ...value, requiredKeys: value.requiredKeys.filter(key => !key.includes(':final:edge:')) }
+        const resultRef = writeEvidence(f.input.source.commonDir, altered), replacement = writeEvidence(f.input.source.commonDir, { ...wrapper, resultRef })
+        return { ...attempt, checkpointRefs: attempt.checkpointRefs.map(ref => ref.sha256 === budget.sha256 ? { ...replacement, artifacts: syncCheckpointArtifacts(altered, resultRef) } : ref) }
+      }
+      if (defect === 'edge') {
+        const aggregate = originalRefs.find(item => item.stage === 'generation')!.ref
+        const wrapper = JSON.parse(readEvidence(f.input.source.commonDir, aggregate).toString())
+        const generation = JSON.parse(readEvidence(f.input.source.commonDir, wrapper.resultRef).toString()) as import('./generation-types.js').GenerationResult
+        const edge = generation.partitionEvidence!.find(member => member.partitionId.startsWith('edge:'))!
+        const altered = { ...generation, partitionEvidence: generation.partitionEvidence!.filter(member => member !== edge), traces: generation.traces.filter(trace => !edge.traces.some(item => item.sessionId === trace.sessionId)) }
+        const resultRef = writeEvidence(f.input.source.commonDir, altered), replacement = writeEvidence(f.input.source.commonDir, { ...wrapper, resultRef })
+        return { ...attempt, checkpointRefs: attempt.checkpointRefs.map(ref => ref.sha256 === aggregate.sha256 ? { ...replacement, artifacts: syncCheckpointArtifacts(altered, resultRef) } : ref) }
+      }
+      const removed = originalRefs.filter(item => defect === 'review-budget' ? item.stage === 'partition-generation-budget' : defect === 'generation' ? item.stage === 'generation' : defect === 'analysis' ? item.stage === 'analysis' : defect === 'elaboration' ? item.stage === 'elaboration' : defect === 'review' ? item.stage?.startsWith('injected:') && item.stage.endsWith(':code_review') : defect === 'v3' ? item.stage?.startsWith('v3:') : false).map(item => item.ref.sha256)
       return { ...attempt, checkpointRefs: attempt.checkpointRefs.filter(ref => !removed.includes(ref.sha256)) }
     }
     try {
       const rejected = await runSyncOperation(store, active.id, f.options)
       assert.equal(rejected.operation.phase, path ? 'conflicted' : 'failed', JSON.stringify(rejected.failure))
-      assert.ok(path ? rejected.failure?.code === 'input_changed' : defect === 'model' ? rejected.failure?.code === 'verification_unsupported' : ['candidate_retry_binding', 'retry_provenance_binding'].includes(rejected.failure?.code ?? ''), JSON.stringify(rejected.failure))
-      assert.equal(rejected.operation.callsUsed, defect === 'model' ? 6 : 0); assert.equal(calls.length, defect === 'model' ? 12 : 6)
+      assert.ok(path ? rejected.failure?.code === 'input_changed' : defect === 'model' ? rejected.failure?.code === 'verification_unsupported' : (['candidate_retry_binding', 'retry_provenance_binding'].includes(rejected.failure?.code ?? '') || defect === 'publication' && rejected.failure?.message.includes('SYNC_PUBLICATION_BASE_BINDING')), JSON.stringify(rejected.failure))
+      assert.equal(rejected.operation.callsUsed, defect === 'model' ? 6 : 0); assert.equal(calls.length, defect === 'model' ? 12 : originalCalls)
       if (defect === 'model') assert.deepEqual(calls.slice(6), calls.slice(0, 6), '显式新model按原正常retry重做生成与独审，不取运输续验资格')
       assert.equal(store.listJournals(active.id).length, 0)
     } finally {
@@ -6204,9 +6235,9 @@ for (const defect of ['none', 'model', 'source', 'oracle', 'configuration', 'req
   const verificationResult = JSON.parse(readEvidence(f.input.source.commonDir, verifiedAttempt.verification!.resultBlob).toString()) as import('./operation-types.js').VerificationResultBlob
   for (const layer of verificationResult.layers.filter(layer => layer.layer === 'V3')) for (const ref of layer.evidenceRefs) {
     const result = JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()) as import('./verification-executor-types.js').VerificationResult
-    assert.equal(result.status, 'passed'); assert.equal(result.evidence!.runId, contentHash(`${verifiedAttempt.id}:${verification.id}`))
+    assert.equal(result.status, 'passed'); assert.equal(result.evidence!.runId, contentHash(`${verifiedAttempt.id}:${result.evidence!.tests[0].testId.startsWith('AC-IMPORT') ? 'VERIFY-IMPORT-01' : verification.id}`))
   }
-  assert.equal(calls.length, 6); assert.deepEqual(versionCalls, [parent.id, secondFailure.operation.id, active.id])
+  assert.equal(calls.length, originalCalls); assert.deepEqual(versionCalls, [parent.id, secondFailure.operation.id, ...f.plan.verifications.map(() => active.id)])
   assert.deepEqual(store.readAttempt(result.operation.currentAttemptId!).candidate, origin.candidate)
   const supersededParent = store.readOperation(parent.id), supersededOrigin = store.readAttempt(origin.id)
   assert.deepEqual({ ...supersededParent, phase: parent.phase, revision: parent.revision, updatedAtMs: parent.updatedAtMs }, parent, '准入仅按原重叠政策supersede祖先，不改原意/预算/绑定或失败原件')
