@@ -48,9 +48,8 @@ export function buildContractGraph(contracts: readonly Contract[]): ContractGrap
   return { contracts: [...contracts], items, owners, dependencies, dependents, findings }
 }
 
-export function dependencyClosure(graph: ContractGraph, ids: readonly string[]): string[] {
+export function createDependencyClosure(graph: ContractGraph): (ids: readonly string[]) => string[] {
   // STEP.next to TR executes a disposition; STEP/STATE navigation and ownership do not spread blocking.
-  const seen = new Set(ids), queue = [...ids]
   const consumers = new Map<string, Set<string>>()
   for (const item of graph.items.values()) {
     for (const ref of contractReferences(item)) {
@@ -60,8 +59,15 @@ export function dependencyClosure(graph: ContractGraph, ids: readonly string[]):
       set.add(item.id); consumers.set(ref.id, set)
     }
   }
-  for (let at = 0; at < queue.length; at++) for (const id of consumers.get(queue[at]) ?? []) {
-    if (!seen.has(id)) { seen.add(id); queue.push(id) }
+  return (ids) => {
+    const seen = new Set(ids), queue = [...ids]
+    for (let at = 0; at < queue.length; at++) for (const id of consumers.get(queue[at]) ?? []) {
+      if (!seen.has(id)) { seen.add(id); queue.push(id) }
+    }
+    return [...seen].sort()
   }
-  return [...seen].sort()
+}
+
+export function dependencyClosure(graph: ContractGraph, ids: readonly string[]): string[] {
+  return createDependencyClosure(graph)(ids)
 }
