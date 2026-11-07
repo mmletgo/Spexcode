@@ -23,6 +23,8 @@ SPEX_VERIFICATION_SSH_ALIAS 与 SPEX_VERIFICATION_SSH_ROOT 成对来自 server �
 
 可信helper原字节以gzip/base64内联进固定bootstrap，远端仅用Node内建zlib解压并导入同一data URI模块；不改helper、stdin请求/上传帧、effect/恢复身份或既有RPC与验证期限。命令压缩不得把项目载荷移入shell。
 
+新SSH RPC超时附带版本化安全诊断：仅固定action/Docker verb、单调时钟预算/耗时/迟到量、准备耗时、事件循环active/idle累计时间、首末输出观察时间、原始输出字节数/换行与流结束状态、child退出/close观察，以及模块URL摘要、helper字节摘要和bootstrap尺寸。输出时刻仅为本机回调观察；未观察到字节不证明远端未输出。换行或child退出不是成功或远端停止证明；不记录原请求、完整argv、路径、环境、stdout/stderr正文或凭据，不改15秒RPC与原上传deadline。
+
 SPEX_VERIFICATION_SSH_DOCKER_ENDPOINT可显式选择同SSH主机的本地Unix socket，缺省unix:///var/run/docker.sock。实际socket类型须通过检查，endpoint随原plan冻结；所有Docker调用显式--host并清除子进程的Docker context/host/TLS切换环境，随后仍核原daemonId。TCP/SSH网络daemon拒绝，不能仅凭Source字符串冒认同一文件系统。上传通道采用本checkpoint冻结deadline，不受普通短RPC的15秒隐形限制。
 
 每个变更前沿原 checkpoint 登记固定 effectId/requestDigest，首次才派发；恢复只查询原 intent/receipt。正常 SSH 断开不终止远端 worker。上传失败且确认已排空可用新的物化序号续传，resource-only 不上传/create/start。执行边界核 fence，资源观察不恢复业务写权。真实 mounts Source 和 inspect 原件不改写。

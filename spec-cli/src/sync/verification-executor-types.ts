@@ -105,9 +105,39 @@ export interface VerificationDependencies {
   transport?: VerificationTransportConfiguration
   assertLaunchAllowed?: () => void
 }
+/** 仅SSH超时的安全观察元数据；不包含请求、路径或输出正文，也不证明远端已停止。 */
+export interface VerificationRpcDiagnostics {
+  version: 'verification-ssh-rpc-diagnostics-v1'
+  action: string
+  dockerVerb?: string
+  budgetMs: number
+  elapsedMs: number
+  overdueMs: number
+  preparationMs: number
+  eventLoopActiveMs: number
+  eventLoopIdleMs: number
+  firstOutputAtMs: number | null
+  lastOutputAtMs: number | null
+  stdoutBytes: number
+  stderrBytes: number
+  stdinFinished: boolean
+  stdoutEnded: boolean
+  stderrEnded: boolean
+  responseLineComplete: boolean
+  childExitObserved: boolean
+  childCloseObserved: boolean
+  childExitCode: number | null
+  childSignalCode: string | null
+  moduleFile: string
+  moduleUrlSha256: string
+  helperSha256: string
+  helperBytes: number
+  bootstrapBytes: number
+}
 export interface VerificationResult {
   status: VerificationEvidence['outcome'] | 'unsupported' | 'recovery_required'
   checkpoint?: VerificationCheckpoint
   evidence?: VerificationEvidence
   reason?: string
+  rpcDiagnostics?: VerificationRpcDiagnostics
 }
