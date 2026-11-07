@@ -16,6 +16,8 @@
 - `complete` 仅表示当前细化阶段通过，不代表代码、测试、落盘或全产品已同步。
 - 细化与契约演化验证：根目录 `npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/sync/elaboration-*.test.ts spec-cli/src/sync/contract-evolution.test.ts spec-cli/src/sync/frozen-contracts.test.ts`；行为分析与实现验证：`npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/sync/code-behavior.test.ts spec-cli/src/sync/generation.test.ts`；`npx eslint spec-cli/src/sync/`；`npm run typecheck`。
 - V3 Docker 验收由 `verification-executor.ts` 运行；仅接收可信冻结政策和不含 Git/宿主依赖的 export。检查点通过调用者持久保存，`recovery_required` 不释放未知容器的容量；不使用宿主 fallback。
+- 远端V3仅由server的`SPEX_VERIFICATION_SSH_ALIAS`/`SPEX_VERIFICATION_SSH_ROOT`成对选择既有SSH与独占root，`SPEX_VERIFICATION_SSH_DOCKER_ENDPOINT`可选同机Unix socket（默认`unix:///var/run/docker.sock`），每次显式绑定、不继承Docker context。正常/恢复共用transport；v1保持本地，v2按原target/daemon、单run effect/closed排空，容器及staging均清算才removed。控制历史保留，不用SSH退出或NoSuch推定未知create已停。writer32升级沿原停稳/online backup，回滚须先结算远端资源并恢复一致旧库及evidence，不删marker。
+- 运输定向验证：`npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/sync/verification-executor.test.ts spec-cli/src/sync/verification-transport.test.ts`；fixture以隔离SSH/CLI和实际内核文件锁验证断连与迟到请求，真实Linux/产品入口证据另行验收。
 - 执行器单测：`npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/sync/verification-executor.test.ts`；真实 Linux/arm64 Docker 验收：先准备测试中冻结的镜像，再 `SPEX_DOCKER_VERIFICATION_TEST=1 npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/sync/verification-executor.docker.test.ts`。`SPEX_VERIFICATION_EVIDENCE_DIR` 可指定已存在的外部证据目录；未设置时用系统临时目录，不把运行证据写入源码。
 
 - 持久协调使用 `operation-types.ts` 共享身份，原source/composed/candidate分离；所有写入走store动作门禁及既有protocol事务，native/Git/FS副作用放事务外。

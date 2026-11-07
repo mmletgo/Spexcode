@@ -14,6 +14,8 @@ P0至P5按完整需求交付，不以阶段演示、局部测试或可修改的�
 
 ## expanded spec
 
+V3主机选择与真实候选运输遵循[[verification-transport]]，远端effect排空遵循[[verification-remote-helper]]：部署与同机Unix Docker endpoint来自可信server，原operation/attempt/fence/run及正式receipt保持。SSH断线不证明停止，原终态先持久、容器与临时staging确证清算后才释放容量；未知提交保留recovery_required，环境probe不替代正式产品V3。四层验证、作者授权、模型原生配置及最终完整产品验收边界不变。
+
 已停ZCode精确失败的最新正常Git编辑稿也可沿既有材料选择接缝进入合法新attempt；旧cancelled与新failed分别核原观察、完整请求/Native身份、formalstop/removed全值，原稿只作approved:false材料，原bytes和业务诊断续到新seed，不回较旧稿、不继承批准或自动重试。source/tests/Git/schema/owner及当前fence门保持，旧原件不补签；writer26在线备份/事务围栏拒旧25，回滚恢复一致旧库与evidence/Git refs，NativePlan/执行策略不变。
 
 旧inline程序草稿诊断按精确路径绑定的冻结尾段只读恢复完整JSON数组，不用[]覆盖已存在错误，也不回退较旧来源；字符串内中文标记/转义/换行不影响边界，缺损/歧义拒绝，非draft无尾段保持原语义。原prompt/业务摘要/accepted位置及git-json运输不变，无新持久协议或模型输出兼容层。

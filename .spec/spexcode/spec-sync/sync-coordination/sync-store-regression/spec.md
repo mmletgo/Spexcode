@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+writer32回归由隔离真实SQLite核v31→v32只追加marker、只备份一次，旧表/schema/旧registry原行保持，旧31 writer拒绝新库且备份可由31读取；不触用户库。
+
 writer28回归在隔离真实SQLite中核v27到v28无DDL，只增加一条组件marker，保留完整v1–v27 registry与业务/protocol旧表。旧writer拒绝升级库，一致online backup可由旧writer读取，重复升级幂等。
 
 writer27沿真实online backup验证旧v26一致库可独立恢复，升级无DDL且所有旧表与v1–v26完整registry行不变；旧v26 writer拒绝新代，重复迁移幂等，不触默认用户库。

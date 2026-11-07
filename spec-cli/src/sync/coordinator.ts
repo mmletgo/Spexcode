@@ -1080,7 +1080,7 @@ function acceptanceRuns(frozen: FrozenContracts, ready: SyncScope, plan: SyncCoo
   for (const run of runs) run.policy.expectedTestIds.sort()
   return runs.sort((a, b) => a.verificationId.localeCompare(b.verificationId))
 }
-async function recoverResources(store: SyncStore, operation: SyncOperation, options: Pick<SyncCoordinatorOptions, 'recoveryOnly' | 'verificationDriver'> & { resourceRecoveryOnly?: true }, all: boolean): Promise<boolean> {
+async function recoverResources(store: SyncStore, operation: SyncOperation, options: Pick<SyncCoordinatorOptions, 'recoveryOnly' | 'verificationDriver' | 'verificationTransport'> & { resourceRecoveryOnly?: true }, all: boolean): Promise<boolean> {
   for (const item of store.listRecoverableResources().filter(item => item.operation.id === operation.id && (all || item.attempt.id !== operation.currentAttemptId))) {
     const fence = fenceFor(item.operation, item.attempt), commonDir = operation.input.source.commonDir
     if (item.resource.plan.inputId !== operation.input.id) fail('resource_recovery', '既有resource不匹配原frozen input')
@@ -1088,7 +1088,7 @@ async function recoverResources(store: SyncStore, operation: SyncOperation, opti
       const request = JSON.parse(readEvidence(commonDir, item.resource.plan.planBlob).toString('utf8')) as Omit<VerificationRequest, 'previousCheckpoint'>
       if (item.resource.plan.key !== `verification:${request.runId}` || request.inputDigest !== operation.input.id || request.candidateDigest !== item.resource.plan.candidateDigest || contentHash(JSON.stringify(request)) !== item.resource.plan.payloadDigest) fail('resource_recovery', '既有verification计划不匹配原resource/runId/input/candidate')
       const driver = options.verificationDriver ?? dockerVerificationDriver
-      const recovered = await runAttemptVerification(store, fence, { ...request, signal: AbortSignal.abort() }, { driver: options.recoveryOnly ? (args, maxBytes) => {
+      const recovered = await runAttemptVerification(store, fence, { ...request, signal: AbortSignal.abort() }, { transport: options.verificationTransport, driver: options.recoveryOnly ? (args, maxBytes) => {
         if (args[0] === 'container' && ['create', 'start'].includes(args[1])) fail('resource_recovery', '只恢复既有容器，不新建或启动verification')
         return driver(args, maxBytes)
       } : driver })
@@ -1108,7 +1108,7 @@ async function recoverResources(store: SyncStore, operation: SyncOperation, opti
 export type SyncResourceRecoveryResult = { operationId: string; inputId: string; status: 'resources_recovered' | 'recovery_required' | 'busy'; resources: SyncResourceRecord[]; pendingJournalIds: string[]; failure?: { code: string; message: string } }
 
 /** 只结算显式历史输入的owned资源；身份漂移不授予业务恢复或journal写入权。 */
-export async function recoverSyncOperationResources(store: SyncStore, operationId: string, options: { root: string; inputId: string; artifactRoot: string; verificationDriver?: SyncCoordinatorOptions['verificationDriver'] }): Promise<SyncResourceRecoveryResult> {
+export async function recoverSyncOperationResources(store: SyncStore, operationId: string, options: { root: string; inputId: string; artifactRoot: string; verificationDriver?: SyncCoordinatorOptions['verificationDriver']; verificationTransport?: SyncCoordinatorOptions['verificationTransport'] }): Promise<SyncResourceRecoveryResult> {
   const operation = store.readOperation(operationId), source = identifyRawWorktree(options.root)
   if (operation.input.id !== options.inputId) fail('resource_recovery_input', '资源清理必须明确匹配原frozen input ID')
   if (source.canonicalRoot !== operation.input.source.canonicalRoot || source.commonDir !== operation.input.source.commonDir) fail('resource_recovery_source', '资源清理不属于当前canonicalRoot/commonDir')
@@ -1119,7 +1119,7 @@ export async function recoverSyncOperationResources(store: SyncStore, operationI
   const mutex = claimFileMutex(join(locks, `${contentHash(operationId)}.sqlite`))
   if (!mutex) return result('busy')
   try {
-    return result(await withoutSessionApplicationExecutionWake(() => recoverResources(store, operation, { recoveryOnly: true, resourceRecoveryOnly: true, verificationDriver: options.verificationDriver }, true)) ? 'resources_recovered' : 'recovery_required')
+    return result(await withoutSessionApplicationExecutionWake(() => recoverResources(store, operation, { recoveryOnly: true, resourceRecoveryOnly: true, verificationDriver: options.verificationDriver, verificationTransport: options.verificationTransport }, true)) ? 'resources_recovered' : 'recovery_required')
   } catch (error) {
     return result('recovery_required', { code: error instanceof SyncCoordinatorError || error instanceof SyncStoreError ? error.code : 'resource_recovery', message: error instanceof Error ? error.message : String(error) })
   } finally { mutex.release() }
@@ -2401,7 +2401,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         const name = `v3:${run.verificationId}`
         let result = stage<VerificationResult>(store, operation, store.readAttempt(attempt.id), name)
         if (!result) {
-          const verified = await runAttemptVerification(store, fence, { runId: contentHash(`${attempt.id}:${run.verificationId}`), inputDigest: operation.input.id, candidateDigest: candidate.digest, candidateExportDigest: exported.digest, candidateExportPath, privateScratchRoot: scratch, policy: run.policy, signal }, { driver: options.verificationDriver })
+          const verified = await runAttemptVerification(store, fence, { runId: contentHash(`${attempt.id}:${run.verificationId}`), inputDigest: operation.input.id, candidateDigest: candidate.digest, candidateExportDigest: exported.digest, candidateExportPath, privateScratchRoot: scratch, policy: run.policy, signal }, { driver: options.verificationDriver, transport: options.verificationTransport })
           result = verified.result
           if (store.readOperation(operationId).control === 'run' && store.readOperation(operationId).currentAttemptId === attempt.id && !signal.aborted) saveStage(store, fence, name, result)
         }

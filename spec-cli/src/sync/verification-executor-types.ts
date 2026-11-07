@@ -31,6 +31,13 @@ export interface VerificationCommandResult {
   stderr: string
   truncated: boolean
 }
+export type VerificationTransportConfiguration = { kind: 'ssh-docker-v1'; sshAlias: string; privateRoot: string; dockerEndpoint?: string }
+export type VerificationTransportPlan = {
+  version: 'verification-ssh-v1'; sshAlias: string; privateRoot: string; rootIdentity: string; daemonId: string; dockerEndpoint: string
+  runKey: string; directory: string; candidatePath: string; runnerPath: string
+}
+export type VerificationEffect = { id: string; digest: string; kind: string }
+export type VerificationTransportState = { plan: VerificationTransportPlan; effects: VerificationEffect[]; attestation?: { exportDigest: string; runnerDigest: string }; closed?: unknown; removal?: unknown; cleanup?: unknown }
 /** CLI adapter 仅接受 argv；不启动 shell。测试可注入可观察的故障驱动。 */
 export type VerificationDriver = (argv: readonly string[], maxBytes: number) => Promise<VerificationCommandResult>
 export interface VerificationConfig {
@@ -44,6 +51,7 @@ export interface VerificationConfig {
   exportDigest: string
   runnerDigest: string
   policy: VerificationPolicy
+  transport?: VerificationTransportPlan
 }
 export interface VerificationTestResult {
   testId: string
@@ -69,9 +77,11 @@ export interface VerificationEvidence {
   reportFormat: 'node-test-events-v1'
   terminalInspect: unknown
   outcome: 'passed' | 'failed' | 'cancelled' | 'timeout'
+  stdoutDigest?: string
+  stderrDigest?: string
 }
 export interface VerificationCheckpoint {
-  version: 'verification-checkpoint-v1'
+  version: 'verification-checkpoint-v1' | 'verification-checkpoint-v2'
   phase: 'planned' | 'created' | 'terminal' | 'removed'
   runId: string
   inputDigest: string
@@ -86,10 +96,14 @@ export interface VerificationCheckpoint {
   containerId?: string
   createdInspect?: unknown
   evidence?: VerificationEvidence
+  transport?: VerificationTransportState
+  notCreated?: { outcome: 'cancelled' | 'timeout'; observation: unknown }
 }
 export interface VerificationDependencies {
   onCheckpoint: (checkpoint: VerificationCheckpoint) => Promise<void>
   driver?: VerificationDriver
+  transport?: VerificationTransportConfiguration
+  assertLaunchAllowed?: () => void
 }
 export interface VerificationResult {
   status: VerificationEvidence['outcome'] | 'unsupported' | 'recovery_required'

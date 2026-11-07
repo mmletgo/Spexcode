@@ -1,4 +1,5 @@
 import { finiteSyncBudget } from './budget.js'
+import { configuredVerificationTransport } from './verification-transport.js'
 import { randomUUID } from 'node:crypto'
 import { DEFAULT_SYNC_MODEL, syncModel, syncModelBinding } from './model-selection.js'
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
@@ -39,7 +40,7 @@ export type SyncSubmitInput = { nodeId: string; requestId: string; origin?: 'spe
 export type SyncRevertEligibility = { eligible: true } | { eligible: false; reason: { code: string; message: string } }
 export type SyncAdoptEligibility = { eligible: true } | { eligible: false; reason: { code: string; message: string } }
 export type SyncOperationDetail = { operation: SyncOperation; physicalControl: PhysicalControl; attempt: ReturnType<SyncStore['readAttempt']> | null; journals: ReturnType<SyncStore['listJournals']>; stale: boolean; sourceSynced: boolean; canonicalSynced: boolean; adoptionEligibility: SyncAdoptEligibility; revertEligibility: SyncRevertEligibility; retryEligibility: ReturnType<SyncStore['readRetryEligibility']>; decisionEligibility: ReturnType<SyncStore['readDecisionEligibility']>; resources: ReturnType<SyncStore['listRecoverableResources']>[number]['resource'][]; decisionContext: { analysisRef: BlobRef; analysis: CodeBehaviorAnalysis } | null; executionAvailability: { status: 'ready' | 'recovery_required'; failure?: { code: string; message: string } } }
-export type SyncApplicationOptions = Partial<Pick<SyncCoordinatorOptions, 'runner' | 'verificationDriver'>> & {
+export type SyncApplicationOptions = Partial<Pick<SyncCoordinatorOptions, 'runner' | 'verificationDriver' | 'verificationTransport'>> & {
   protocol: SessionProtocol
   runtimeDirectory?: string
   tools?: SyncCoordinatorOptions['tools']
@@ -109,7 +110,7 @@ export class SyncApplication {
   }
   /** 显式资源入口不查询业务detail，不借清理绕过正常source身份门。 */
   async recoverResources(id: string, inputId: string): Promise<SyncResourceRecoveryResult> {
-    try { return await recoverSyncOperationResources(this.store, id, { root: this.root, inputId, artifactRoot: this.artifactRoot, verificationDriver: this.options.verificationDriver }) }
+    try { return await recoverSyncOperationResources(this.store, id, { root: this.root, inputId, artifactRoot: this.artifactRoot, verificationDriver: this.options.verificationDriver, verificationTransport: this.options.verificationTransport }) }
     catch (error) {
       if (error instanceof SyncCoordinatorError && ['resource_recovery_input', 'resource_recovery_source'].includes(error.code)) throw new SyncApplicationError(error.code, error.message, error.code === 'resource_recovery_source' ? 404 : 409)
       throw error
@@ -879,7 +880,7 @@ export class SyncApplication {
     const finished = runSyncOperation(this.store, id, { plan, ...(recoveryOnly ? { recoveryOnly: true } : {}), readCurrentPlan: async () => {
       const current = await captureInputSnapshot(this.root, { committed: operation.input.captureKind === 'commit' }); this.requireEnabled(current, operation)
       return plan
-    }, managedRoot: this.managedRoot, artifactRoot: this.artifactRoot, tools, runner: this.options.runner, verificationDriver: this.options.verificationDriver, signal: controller.signal, callTimeoutMs: settings.callTimeoutMs }).then(result => { advance = !recoveryOnly && result.status !== 'busy' && result.operation.phase !== 'queued'; return result }).finally(() => {
+    }, managedRoot: this.managedRoot, artifactRoot: this.artifactRoot, tools, runner: this.options.runner, verificationDriver: this.options.verificationDriver, verificationTransport: this.options.verificationTransport, signal: controller.signal, callTimeoutMs: settings.callTimeoutMs }).then(result => { advance = !recoveryOnly && result.status !== 'busy' && result.operation.phase !== 'queued'; return result }).finally(() => {
       this.running.delete(id)
       if (advance) {
         try { this.startNextDispatch() }
@@ -957,7 +958,7 @@ export function configuredSyncApplication(root: string, registeredSource?: Workt
   if (identity.commonDir !== identifyWorktree(repoRoot()).commonDir) throw new SyncApplicationError('sync_project_mismatch', '输入工作树不属于当前后端项目')
   let application = applications.get(key)
   if (!application) {
-    application = SyncApplication.create(identity.canonicalRoot, { protocol: configuredSessionApplication().protocol }, registeredSource)
+    application = SyncApplication.create(identity.canonicalRoot, { protocol: configuredSessionApplication().protocol, verificationTransport: configuredVerificationTransport() }, registeredSource)
     if (syncServicesOnline) application = application.then(async owner => { await owner.startService(); return owner })
     applications.set(key, application)
     void application.catch(() => applications.delete(key))
@@ -969,7 +970,7 @@ export function configuredSyncApplication(root: string, registeredSource?: Workt
 export function configuredSyncResourceRecoveryApplication(root: string): Promise<SyncApplication> {
   const identity = identifyRawWorktree(root)
   if (identity.commonDir !== identifyRawWorktree(repoRoot()).commonDir) throw new SyncApplicationError('sync_project_mismatch', '输入工作树不属于当前项目')
-  return SyncApplication.createResourceRecovery(identity.canonicalRoot, { protocol: configuredSessionApplication().protocol })
+  return SyncApplication.createResourceRecovery(identity.canonicalRoot, { protocol: configuredSessionApplication().protocol, verificationTransport: configuredVerificationTransport() })
 }
 
 export type SourceContinuityInput = { operationId: string; inputId: string; revision: number; enabledDigest: string; previousDevices: PreviousDevices }
