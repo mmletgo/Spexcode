@@ -270,7 +270,7 @@ export function elaborationScopeErrors(input: ElaborationInput, generated: Gener
   })
 }
 
-function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate, inputDigest: string, options: { strictContextCoverage?: boolean; partitionSealFiles?: ReadonlyMap<string, string>; readonlyFactRepairs?: readonly ReadonlySpecRepair[] } = {}): { contracts: Contract[]; graph: ContractGraph; findings: ContractFinding[]; resolvedGapIds: string[] } {
+function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate, inputDigest: string, options: { strictContextCoverage?: boolean; partitionSealFiles?: ReadonlyMap<string, string>; readonlyFactRepairs?: readonly ReadonlySpecRepair[]; readonlyFactBaselines?: ReadonlyMap<string, string> } = {}): { contracts: Contract[]; graph: ContractGraph; findings: ContractFinding[]; resolvedGapIds: string[] } {
   if (input.worktree && input.historyInput) {
     const files = new Map(input.files)
     for (const entry of readTree(input.historyInput.source.commonDir, input.worktree.tree)) {
@@ -284,6 +284,13 @@ function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate
     const ids = new Set([input.readonlySpecRepair, ...options.readonlyFactRepairs ?? []].flatMap(repair => [...readonlyFactRepairIds(input, target, repair)]))
     return ids.size ? [[target.path, ids] as const] : []
   }))
+  const factBaselines = new Map<string, ElaborationTarget & { source: string }>()
+  for (const [path, source] of options.readonlyFactBaselines ?? []) {
+    const target = input.targets.find(target => target.path === path)
+    const ids = new Set(target?.source ? parseContract({ ...target, source: target.source }).contract?.items.map(item => item.id) : [])
+    if (input.generationGuidance !== ELABORATION_GENERATION_GUIDANCE || !target || !options.readonlyFactRepairs?.some(repair => repair.changes.some(change => change.nodeId === target.nodeId && change.path === path && change.source === source)) || !readonlyFactRepairPreservesTarget(target, source, ids)) throw new TypeError('全图事实继承缺少同owner已审固定正文，或改变了原业务字段')
+    factBaselines.set(path, { ...target, source })
+  }
   const findings: ContractFinding[] = []
   if (candidate.inputDigest !== inputDigest) findings.push(finding(input, 'input_digest', '候选未绑定当前冻结输入'))
   const paths = new Set<string>(), nodes = new Set<string>()
@@ -291,7 +298,7 @@ function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate
   for (const change of candidate.changes) {
     const moved = input.nodeChanges?.find(node => node.action === 'move' && node.to.path === change.path && node.to.nodeId === change.nodeId)
     const target = input.targets.find(target => moved ? target.path === moved.from.path && target.nodeId === moved.from.nodeId : target.path === change.path && target.nodeId === change.nodeId)
-    if (target && !targetHasCurrentChanges(input, target) && change.source !== target.source && !readonlyFactRepairPreservesTarget(target, change.source, factRepairs.get(target.path) ?? new Set())) findings.push(finding(input, 'rows_patch', `本轮分析未影响目标，必须沿用冻结正文: ${change.path}`))
+    if (target && !targetHasCurrentChanges(input, target) && change.source !== (factBaselines.get(target.path) ?? target).source && !readonlyFactRepairPreservesTarget(factBaselines.get(target.path) ?? target, change.source, factRepairs.get(target.path) ?? new Set())) findings.push(finding(input, 'rows_patch', `本轮分析未影响目标，必须沿用冻结正文: ${change.path}`))
     if (!specPath(change.path) || !target || input.nodeChanges?.some(node => node.from.path === change.path) || paths.has(change.path) || nodes.has(change.nodeId)) {
       findings.push(finding(input, 'write_scope', `候选越界或重复: ${change.path}`)); continue
     }
@@ -332,7 +339,7 @@ function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate
     if (parsed.contract) contracts.push(parsed.contract)
   }
   const graph = buildContractGraph(contracts)
-  const before = frozenState(baselineSources(input), input.files)
+  const before = frozenState(baselineSources(input).map(source => factBaselines.get(source.path) ?? source), input.files)
   const nextSources = [...baselineSources(input).filter(source => !paths.has(source.path) && !input.nodeChanges?.some(change => change.from.path === source.path)), ...candidate.changes.map(change => ({ nodeId: change.nodeId, path: change.path, source: change.source }))]
   const afterFiles = new Map(input.files)
   for (const change of input.nodeChanges ?? []) afterFiles.delete(change.from.path)
@@ -434,7 +441,7 @@ function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate
 }
 
 /** Use the same complete final-candidate validator for the merged, real-file-backed partition result. */
-export function sealPartitionedElaboration(input: ElaborationInput, changes: readonly ElaborationChange[], applicability: readonly Applicability[], readonlyFactRepairs: readonly ReadonlySpecRepair[] = []): {
+export function sealPartitionedElaboration(input: ElaborationInput, changes: readonly ElaborationChange[], applicability: readonly Applicability[], readonlyFactRepairs: readonly ReadonlySpecRepair[] = [], readonlyFactBaselines: ReadonlyMap<string, string> = new Map()): {
   seal: ElaborationPartitionSeal
   contracts: Contract[]
   graph: ContractGraph
@@ -445,7 +452,7 @@ export function sealPartitionedElaboration(input: ElaborationInput, changes: rea
   const frozen = freezeElaborationInput({ ...input, phase: undefined, validationScope: undefined })
   checkInput(frozen.input)
   const candidate: ElaborationCandidate = { inputDigest: frozen.inputDigest, changes: changes.map(change => structuredClone(change)), applicability: applicability.map(entry => structuredClone(entry)), nodeChanges: [...input.nodeChanges ?? []] }
-  const checked = checkCandidate(frozen.input, candidate, frozen.inputDigest, { strictContextCoverage: true, readonlyFactRepairs })
+  const checked = checkCandidate(frozen.input, candidate, frozen.inputDigest, { strictContextCoverage: true, readonlyFactRepairs, readonlyFactBaselines })
   const coverage = projectContractCoverage(checked.graph)
   const seal: ElaborationPartitionSeal = {
     inputDigest: frozen.inputDigest,

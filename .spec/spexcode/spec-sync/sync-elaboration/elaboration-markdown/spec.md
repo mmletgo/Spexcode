@@ -25,6 +25,9 @@ related:
 
 ## expanded spec
 
+
+连续事实修复以认证的上一轮确定事实值为行差量基线，未列行照常继承。新relatedIds不含的旧RULE.basis既不能自由再改，也不能因省略而回滚到原作者旧值；全部非事实字段仍逐值等于作者基线。
+
 [[sync-elaboration]]的合法只读事实返修复用同一目标影响归属与行差量比较。只有V5完整叶阶段的原candidate_review结构化relatedIds命中且P0未变的owner，preserve_business才渲染description、显式prose和命中RULE.basis；保原raw及非expanded正文，未列行继承、全部业务列/绑定及其他元数据逐值保持。显式事实prose重建expanded表时使用同一canonical列序，不能吞掉修正或错配旧列。普通纯重构与旧缺席诊断继续原严格保留。
 
 [[elaboration-output]] 的临时行通过 schema 检查并按冻结目标索引补入节点身份及路径后，交给同一 Markdown 渲染机制，按 `CONTRACT_COLUMNS` 顺序和列名渲染固定标题、表头及相同列数的分隔行。未分段旧正文也沿该机制保留原表和解释，不复制另一套业务渲染规则。空类型数组不生成空表。引用数组生成逗号集合，布尔保留 true/false，空引用和 null 使用 `-`，VERIFY 命令序列化为 JSON argv。单元格转义反斜杠、反引号和管道，换行使用 `<br>`；argv 不允许 NUL 或换行，转义不改变其解析后参数。

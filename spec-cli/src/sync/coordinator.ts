@@ -1851,6 +1851,18 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           }
           return null
         },
+        readonlyFactRepairSource: (key, repair) => {
+          for (const origin of store.listAttempts(operation.id)) {
+            const prior = stage<SavedElaboration>(store, operation, origin, key), round = prior?.rounds.at(-1)
+            if (!prior || contentHash(JSON.stringify(prior)) !== repair.acceptedRef.sha256 || !prior.structurePassed || !prior.reviewPassed || prior.failure || prior.readonlySpecRepair?.kind !== 'candidate_review' || round?.review?.verdict !== 'accept') continue
+            if (canonical(prior.changes) !== canonical(repair.changes) || prior.partitionBinding?.partitionId !== key.slice('partition:'.length, -':elaboration'.length)) fail('readonly_spec_repair_binding', '事实继承必须逐字绑定原acceptedRef的本owner完整changes')
+            const generation = elaborationGenerationSource(store, operation, origin, round)
+            if (!generation) fail('readonly_spec_repair_binding', '事实继承缺少原已批准owner的真实generation来源')
+            const protocol = stage<{ generationGuidance?: ElaborationGenerationGuidance }>(store, operation, generation.attempt, 'elaboration-draft-protocol')
+            return protocol?.generationGuidance === ELABORATION_GENERATION_GUIDANCE
+          }
+          return false
+        },
         loadReadonlySpecRepair: (key, binding, inputDigest, localInput) => {
           const owner = readonlyActiveOwners.find(owner => owner.key === key)
           if (!owner) return null
@@ -1861,7 +1873,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           if (canonical(prior.partitionBinding) !== canonical(binding) || (prior.readonlySpecRepair?.baseInputDigest ?? prior.inputDigest) !== freezeElaborationInput(priorInput).inputDigest) fail('readonly_spec_repair_binding', '只读owner原件不匹配当前完整局部输入')
           const ids = new Set(prior.changes.flatMap(change => parseContract(change).contract!.items.map(item => item.id)))
           const findings = readonlyOwnerRepair!.findings.filter(finding => prior.changes.some(change => change.nodeId === finding.nodeId && change.path === finding.path))
-            .map(finding => finding.relatedIds ? { ...finding, relatedIds: finding.relatedIds.filter(id => ids.has(id)) } : finding)
+            .map(finding => localInput.generationGuidance === ELABORATION_GENERATION_GUIDANCE && finding.relatedIds ? { ...finding, relatedIds: finding.relatedIds.filter(id => ids.has(id)) } : finding)
           if (prior.changes.some(change => !within(change.path, options.plan.writePaths) || options.plan.mandatoryTests.some(test => overlap(change.path, test.testPath)))) fail('readonly_spec_repair_binding', '只读V1 owner目标越过冻结授权')
           saveStage(store, fence!, `${key}:readonly-repair-provenance`, { fromAttemptId: sourceAttempt.id, resultRef: owner.resultRef, generationRef: readonlyOwnerRepair!.generationRef })
           return { prior, priorInput, repair: { ...(readonlyOwnerRepair!.kind ? { kind: readonlyOwnerRepair!.kind, reviewEvidence: readonlyOwnerRepair!.reviewEvidence } : {}), baseInputDigest: inputDigest, candidateDigest: readonlyOwnerRepair!.candidateDigest, generationRef: readonlyOwnerRepair!.generationRef, acceptedRef: owner.resultRef, changes: prior.changes, output: round.output, review: round.review, findings } }
