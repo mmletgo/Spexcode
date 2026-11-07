@@ -1,4 +1,4 @@
-import { ELABORATION_GENERATION_GUIDANCE, ELABORATION_GENERATION_GUIDANCE_V1, ELABORATION_GENERATION_GUIDANCE_V2, partitionedElaborationCoverageMatches, type AnalysisOnlyPartitionEvidence, type ElaborationGenerationGuidance } from './elaboration-types.js'
+import { ELABORATION_GENERATION_GUIDANCE, ELABORATION_GENERATION_GUIDANCE_V1, ELABORATION_GENERATION_GUIDANCE_V2, ELABORATION_GENERATION_GUIDANCE_V3, partitionedElaborationCoverageMatches, type AnalysisOnlyPartitionEvidence, type ElaborationGenerationGuidance } from './elaboration-types.js'
 import { finiteSyncBudget, syncDeadlineExpired } from './budget.js'
 import { assertWorktreeSyncModel, syncModel, syncModelBinding } from './model-selection.js'
 import { setImmediate as yieldToControl, setTimeout as waitForPublication } from 'node:timers/promises'
@@ -2124,7 +2124,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           protocol = { version: 'elaboration-draft-v1', generationGuidance: ELABORATION_GENERATION_GUIDANCE }
           saveStage(store, fence, 'elaboration-draft-protocol', protocol)
         }
-        if (protocol && Object.hasOwn(protocol, 'generationGuidance') && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE_V1 && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE_V2 && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE) fail('elaboration_generation_guidance_unsupported', '持久P1生成提示版本不受支持；仅字段缺席允许原提示')
+        if (protocol && Object.hasOwn(protocol, 'generationGuidance') && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE_V1 && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE_V2 && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE_V3 && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE) fail('elaboration_generation_guidance_unsupported', '持久P1生成提示版本不受支持；仅字段缺席允许原提示')
         const draftProtocol = protocol?.version
         const elaborationInput = { ...makeElaborationInput(draftProtocol), ...(protocol?.generationGuidance ? { generationGuidance: protocol.generationGuidance } : {}) }
         const loadDraft = draftProtocol ? (schemaDigest: string): ElaborationDraft | null => {

@@ -14,7 +14,7 @@ import { authenticateNativeRejectedFinal, readSyncCheckpoints, syncCheckpointArt
 import { outputErrors } from './elaboration-schema.js'
 import type { ContractCell, GeneratedElaboration, GeneratedTables } from './elaboration-markdown.js'
 import { sameContractBusinessMeaning } from './contract-evolution.js'
-import { ELABORATION_BOUNDARIES, ELABORATION_GENERATION_GUIDANCE } from './elaboration-types.js'
+import { ELABORATION_BOUNDARIES, ELABORATION_GENERATION_GUIDANCE, ELABORATION_GENERATION_GUIDANCE_V3 } from './elaboration-types.js'
 import { elaborate, freezeElaborationInput } from './elaboration.js'
 import { checkGenerationContractIntent, readFrozenContracts } from './frozen-contracts.js'
 import type { ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult } from './elaboration-types.js'
@@ -5872,6 +5872,9 @@ for (const [guidance, purpose] of [
   ['ac-test-binding-v1', 'elaboration_generate'],
   ['ac-test-flow-binding-v2', 'elaboration_generate'],
   ['ac-test-flow-binding-v2', 'elaboration_review'],
+  [ELABORATION_GENERATION_GUIDANCE_V3, 'elaboration_generate'],
+  [ELABORATION_GENERATION_GUIDANCE_V3, 'elaboration_review'],
+  [ELABORATION_GENERATION_GUIDANCE, 'elaboration_generate'],
   [ELABORATION_GENERATION_GUIDANCE, 'elaboration_review'],
 ] as const) test(`P1提示按attempt冻结，冷恢复原reserved请求 guidance=${guidance} purpose=${purpose}`, async t => {
   const f = await fixture(t, { maxAttempts: 1, maxCalls: 4, maxRepairs: 0, timeoutMs: 120_000 }, false, original, 'project', original, { agentWorkflow: 'native-worktree-v1' }, undefined, 'spec', 'claude:default')
@@ -5912,8 +5915,9 @@ for (const [guidance, purpose] of [
   const markerBytes = readEvidence(commonDir, marker)
   const version = JSON.parse(readEvidence(commonDir, JSON.parse(markerBytes.toString()).resultRef).toString())
   assert.deepEqual(version, expectedProtocol)
-  assert.equal(requests[0].prompt.includes('仓库相对测试路径#稳定用例ID'), review ? guidance === ELABORATION_GENERATION_GUIDANCE : guidance !== 'absent')
-  assert.equal(requests[0].prompt.includes('TR.from、TR.event'), !review && guidance === 'ac-test-flow-binding-v2')
+  const reviewGuidance = guidance === ELABORATION_GENERATION_GUIDANCE_V3 || guidance === ELABORATION_GENERATION_GUIDANCE
+  assert.equal(requests[0].prompt.includes('仓库相对测试路径#稳定用例ID'), review ? reviewGuidance : guidance !== 'absent')
+  assert.equal(requests[0].prompt.includes('TR.from、TR.event'), !review && (guidance === 'ac-test-flow-binding-v2' || reviewGuidance))
   f.closeForRestart()
   const protocol = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => protocol.close())
   const store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) }); f.useStore(store)

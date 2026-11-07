@@ -32,7 +32,7 @@ P0至P5按完整需求交付，不以阶段演示、局部测试或可修改的�
 
 P0/P1草稿业务JSON写入真实Git草稿文件；Native final是独立回执，只返回符合`DRAFT_RECEIPT_SCHEMA`的单一JSON对象，形如`{"summary":"..."}`，前后不附说明或Markdown代码围栏。业务schema仍是只读sidecar，Native schema、严格解析及旧saved/reserved请求的完整原件绑定不变；fake runner的提示合同不等于真实模型的遵循保证。
 
-失败findings的原条目、路径与严重级别必须跨草稿检查点及实际续修caller保真，不能把同码同文问题压成无法定位的重复文字。已渲染候选的完整失败只沿认证原件作为诊断继续传递，不变成旧seed、原意或新授权；历史短errors原件不回写。
+失败findings的原条目、路径与严重级别必须跨草稿检查点及实际续修caller保真，不能把同码同文问题压成无法定位的重复文字。已渲染候选的完整失败只沿认证原件作为诊断继续传递，不变成旧seed、原意或新授权；历史短errors原件不回写。 [[sync-elaboration]] 在完整Native续修中用原诊断及冻结登记明确局部共享VERIFY的唯一位置，全部原诊断保留，源、校验及独审门槛不变。
 
 P1后置门禁对已审P0分类的质疑须精确绑定原真实变更owner、affectedIds与原分析/候选证据，在同operation和预算内重新分析及独审；可重判合法细节变化或维持refactor恢复错误候选，程序不改变分类或扩大AC/VERIFY权限。新分析使依赖P1重绑，兄弟P0保持；格式失败只续原文件与失败环节，同绑定的历史完整findings只作诊断，旧稿、引用和reserved请求不补写。
 

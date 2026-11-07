@@ -9,8 +9,9 @@ import type { Contract, ContractCoverage, ContractFinding, ContractGraph, Gap, P
 export const ELABORATION_BOUNDARIES = ['permissions', 'mutation', 'async', 'network', 'concurrency', 'callbacks', 'retries', 'cancellation', 'idempotency', 'external_side_effects'] as const
 export const ELABORATION_GENERATION_GUIDANCE_V1 = 'ac-test-binding-v1'
 export const ELABORATION_GENERATION_GUIDANCE_V2 = 'ac-test-flow-binding-v2'
-export const ELABORATION_GENERATION_GUIDANCE = 'ac-test-flow-review-binding-v3'
-export type ElaborationGenerationGuidance = typeof ELABORATION_GENERATION_GUIDANCE_V1 | typeof ELABORATION_GENERATION_GUIDANCE_V2 | typeof ELABORATION_GENERATION_GUIDANCE
+export const ELABORATION_GENERATION_GUIDANCE_V3 = 'ac-test-flow-review-binding-v3'
+export const ELABORATION_GENERATION_GUIDANCE = 'ac-test-flow-review-verify-repair-v4'
+export type ElaborationGenerationGuidance = typeof ELABORATION_GENERATION_GUIDANCE_V1 | typeof ELABORATION_GENERATION_GUIDANCE_V2 | typeof ELABORATION_GENERATION_GUIDANCE_V3 | typeof ELABORATION_GENERATION_GUIDANCE
 export type ElaborationBoundary = typeof ELABORATION_BOUNDARIES[number]
 export type ElaborationTarget = { nodeId: string; path: string; source: string | null; sourceDigest: string | null; rawSource?: string }
 export type ElaborationFact = { source: string; text: string }
