@@ -25,12 +25,12 @@ const waitUntil = async (condition: () => boolean): Promise<void> => {
   while (!condition()) { if (Date.now() > until) throw new Error('fixture condition timeout'); await new Promise(resolve => setTimeout(resolve, 20)) }
 }
 
-function fixture(t: test.TestContext) {
+function fixture(t: test.TestContext, inlineBootstrap = false) {
   const temporary = realpathSync(mkdtempSync(join(tmpdir(), 'sv3-'))), root = join(temporary, 'remote'), source = join(temporary, 'local'), calls = join(temporary, 'calls.jsonl'), state = join(temporary, 'docker.json'), settings = join(temporary, 'settings.json')
   mkdirSync(root, { mode: 0o700 }); mkdirSync(source); writeFileSync(join(source, 'test.mjs'), 'export const value = 1\n')
   const socketPath = join(temporary, 'docker.sock'), socket = createServer()
   socket.listen(socketPath)
-  const flock = join(temporary, 'flock'), docker = join(temporary, 'docker'), ssh = join(temporary, 'ssh')
+  const flock = join(temporary, 'flock'), docker = join(temporary, 'docker'), ssh = join(temporary, 'ssh'), bootstraps = join(temporary, 'bootstraps.jsonl')
   writeFileSync(flock, `#!/usr/bin/env python3\nimport fcntl,sys\ntry:\n fcntl.flock(3, fcntl.LOCK_EX | fcntl.LOCK_NB)\nexcept BlockingIOError:\n sys.exit(1)\n`, { mode: 0o755 })
   const options: { flockProgram: string; dockerProgram: string; replyWaitMs?: number } = { flockProgram: flock, dockerProgram: docker }
   const fakeDocker = `#!/usr/bin/env node
@@ -66,7 +66,15 @@ if(args[1]==='rm') {rmSync(state);console.log(data.Id);process.exit(0);}
 throw new Error('unexpected Docker request '+args.join(' '));
 `
   writeFileSync(docker, fakeDocker, { mode: 0o755 })
-  writeFileSync(ssh, `#!/usr/bin/env node\nimport { spawn } from 'node:child_process';\nconst p=spawn(process.execPath,['--input-type=module','-e',${JSON.stringify(`import(${JSON.stringify(helper)}).then(m=>m.verificationSshMain(${JSON.stringify(options)}))`)}],{stdio:'inherit'});p.on('exit',code=>process.exit(code??1));\n`, { mode: 0o755 })
+  writeFileSync(ssh, inlineBootstrap ? `#!/usr/bin/env node
+import { spawn } from 'node:child_process';
+import { appendFileSync, readFileSync } from 'node:fs';
+import { gunzipSync } from 'node:zlib';
+const command=process.argv.at(-1), source=readFileSync(new URL(${JSON.stringify(helper)}));
+const payload=/Buffer\\.from\\("([A-Za-z0-9+/=]+)","base64"\\)/.exec(command)?.[1];
+appendFileSync(${JSON.stringify(bootstraps)},JSON.stringify({sourceBytes:source.length,commandBytes:Buffer.byteLength(command),originalBase64Bytes:source.toString('base64').length,restoredOriginalBytes:payload?gunzipSync(Buffer.from(payload,'base64')).equals(source):false,containsProjectRoot:command.includes(${JSON.stringify(root)})})+'\\n');
+const p=spawn('/bin/sh',['-c',command],{stdio:'inherit'});p.on('exit',code=>process.exit(code??1));
+` : `#!/usr/bin/env node\nimport { spawn } from 'node:child_process';\nconst p=spawn(process.execPath,['--input-type=module','-e',${JSON.stringify(`import(${JSON.stringify(helper)}).then(m=>m.verificationSshMain(${JSON.stringify(options)}))`)}],{stdio:'inherit'});p.on('exit',code=>process.exit(code??1));\n`, { mode: 0o755 })
   const children: ReturnType<typeof spawn>[] = []
   const start = (request: Record<string, unknown>, frames?: AsyncIterable<string>) => {
     const child = spawn(process.execPath, ['--input-type=module', '-e', `import(${JSON.stringify(helper)}).then(m=>m.verificationSshMain(${JSON.stringify(options)}))`], { stdio: ['pipe', 'pipe', 'pipe'] })
@@ -100,8 +108,22 @@ throw new Error('unexpected Docker request '+args.join(' '));
     await new Promise(resolve => setTimeout(resolve, 50))
     rmSync(temporary, { recursive: true, force: true })
   })
-  return { temporary, root, source, state, settings, request, checkpoint, configuration, rpc, start, scoped, events, options }
+  return { temporary, root, source, state, settings, bootstraps, request, checkpoint, configuration, rpc, start, scoped, events, options }
 }
+
+test('AC-REMOTE-15 可信bootstrap压缩后恢复原helper字节，并由真实Node入口读取原stdin协议', async t => {
+  const f = fixture(t, true), previousPath = process.env.PATH
+  process.env.PATH = f.temporary + ':' + previousPath; t.after(() => { process.env.PATH = previousPath })
+  const result = await remoteVerificationEnvironment(f.configuration).driver(['version', '--format', '{{json .Server}}'], 65536)
+  assert.equal(result.exitCode, 0)
+  assert.equal(JSON.parse(result.stdout).Version, 'fixture')
+  const bootstrap = JSON.parse(readFileSync(f.bootstraps, 'utf8')) as { commandBytes: number; originalBase64Bytes: number; restoredOriginalBytes: boolean; containsProjectRoot: boolean }
+  t.diagnostic(JSON.stringify(bootstrap))
+  assert.equal(bootstrap.restoredOriginalBytes, true, '固定command必须携带可精确恢复原helper字节的gzip载荷')
+  assert.ok(bootstrap.commandBytes < bootstrap.originalBase64Bytes * 0.4, '完整command须小于原base64载荷的40%')
+  assert.equal(bootstrap.containsProjectRoot, false, '项目路径只经stdin传送')
+  assert.equal(existsSync(join(f.root, '.spex-verification-control')), false, '环境只读入口不产生远端effect')
+})
 
 test('AC-REMOTE-01 正式executor真实运输、POSIX摘要、链接/模式和remote inspect原件', async t => {
   const f = fixture(t), previousPath = process.env.PATH

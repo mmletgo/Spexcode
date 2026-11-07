@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { lstat, readdir, readFile, readlink } from 'node:fs/promises'
 import { join, posix } from 'node:path'
 import { once } from 'node:events'
-import { gunzipSync } from 'node:zlib'
+import { gunzipSync, gzipSync } from 'node:zlib'
 import { verificationEffectDigest, verificationExportDigest } from './verification-remote-helper.mjs'
 import type { VerificationCheckpoint, VerificationCommandResult, VerificationDriver, VerificationEffect, VerificationRequest, VerificationTransportConfiguration, VerificationTransportPlan, VerificationTransportState } from './verification-executor-types.js'
 
@@ -29,7 +29,7 @@ export function configuredVerificationTransport(): VerificationTransportConfigur
 export function sshVerificationRpc(configuration: VerificationTransportConfiguration): VerificationRpc {
   return async (request, frames, maxBytes = 1024 * 1024) => {
     const source = await readFile(new URL('./verification-remote-helper.mjs', import.meta.url))
-    const command = `exec node --input-type=module -e 'import("data:text/javascript;base64,${source.toString('base64')}").then(m=>m.verificationSshMain())'`
+    const command = `exec node --input-type=module -e 'import{gunzipSync}from"node:zlib";import("data:text/javascript;base64,"+gunzipSync(Buffer.from("${gzipSync(source).toString('base64')}","base64")).toString("base64")).then(m=>m.verificationSshMain())'`
     return new Promise((fulfil, reject) => {
       const child = spawn('ssh', ['-T', '-o', 'BatchMode=yes', '--', configuration.sshAlias, command], { shell: false, stdio: ['pipe', 'pipe', 'pipe'] })
       let output = Buffer.alloc(0), diagnostics = Buffer.alloc(0), excessive = false
