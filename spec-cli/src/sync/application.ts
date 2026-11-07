@@ -29,7 +29,7 @@ import type { TrustedRuntimeEntry } from './trusted-hooks.js'
 import { coveredPath, readSyncSettings, SyncApplicationError } from './settings.js'
 import { SyncInputObserver, type SyncObserverHealth } from './observer.js'
 import { SyncStore, SyncStoreError } from './store.js'
-import { readSyncCheckpoints } from './checkpoint-evidence.js'
+import { isSyncBlobRef, readSyncCheckpoints } from './checkpoint-evidence.js'
 import { prepareHistoryRequest, readHistoryRequest, readReceiptHistoryRestorations } from './history-input.js'
 import { readSyncLandingStatus } from './landing-status.js'
 import { isSyncSpecPath, readFrozenContracts } from './frozen-contracts.js'
@@ -933,7 +933,7 @@ export class SyncApplication {
     const references = (value: unknown): string[] => {
       if (!value || typeof value !== 'object') return []
       if ('kind' in value && value.kind === 'untrusted_final') return 'ref' in value ? references(value.ref) : []
-      return [...('sha256' in value && typeof value.sha256 === 'string' && /^[a-f0-9]{64}$/.test(value.sha256) ? [value.sha256] : []), ...Object.values(value).flatMap(references)]
+      return [...(isSyncBlobRef(value) ? [value.sha256] : []), ...Object.values(value).flatMap(references)]
     }
     const queue = references(detail), seen = new Set<string>()
     let belongs = false
