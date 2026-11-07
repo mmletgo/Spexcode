@@ -15,7 +15,7 @@ import { outputErrors } from './elaboration-schema.js'
 import type { ContractCell, GeneratedElaboration, GeneratedTables } from './elaboration-markdown.js'
 import { sameContractBusinessMeaning } from './contract-evolution.js'
 import { ELABORATION_BOUNDARIES, ELABORATION_GENERATION_GUIDANCE, ELABORATION_GENERATION_GUIDANCE_V3, ELABORATION_GENERATION_GUIDANCE_V4 } from './elaboration-types.js'
-import { elaborate, freezeElaborationInput } from './elaboration.js'
+import { elaborate, freezeElaborationInput, hasApprovedElaborationReview } from './elaboration.js'
 import { checkGenerationContractIntent, readFrozenContracts } from './frozen-contracts.js'
 import type { ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult } from './elaboration-types.js'
 import { buildSyncApplicationPlan } from './planning.js'
@@ -6080,7 +6080,7 @@ test('Coordinator Native Spec→Code scratch构建后6→1→1沿原builder来�
   assert.equal(f.store.listJournals(f.operation.id).length, 0); assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
 })
 
-for (const defect of ['none', 'metadata-parent', 'edge', 'edge-valid', 'review-budget', 'review-budget-keys', 'model', 'source', 'oracle', 'configuration', 'request', 'policy', 'impact', 'readset', 'scope', 'partial', 'candidate', 'generation', 'analysis', 'elaboration', 'review', 'v3', 'publication'] as const) test(`正式retryOf在V3前置unsupported后零模型调用续验真实冻结候选 defect=${defect}`, { timeout: 180000 }, async t => {
+for (const defect of ['none', 'deferred-implementation', 'deferred-native-mismatch', 'metadata-parent', 'edge', 'edge-valid', 'review-budget', 'review-budget-keys', 'model', 'source', 'oracle', 'configuration', 'request', 'policy', 'impact', 'readset', 'scope', 'partial', 'candidate', 'generation', 'analysis', 'elaboration', 'review', 'v3', 'publication'] as const) test(`正式retryOf在V3前置unsupported后零模型调用续验真实冻结候选 defect=${defect}`, { timeout: 180000 }, async t => {
   const multiple = ['edge', 'edge-valid', 'review-budget-keys'].includes(defect)
   const importedPath = '.spec/project/import/import-contract/spec.md'
   const imported = original.replaceAll('export-job', 'import-job').replaceAll('EXPORT', 'IMPORT').replaceAll('export-contract', 'import-contract').replaceAll('src/export.js', 'src/import/import.js').replaceAll('tests/export.test.mjs', 'tests/import.test.mjs').replaceAll('decision:IMPORT-POLICY', 'decision:EXPORT-POLICY').replace(/(\| REQ-IMPORT-01 \|[^\n]+)\| - \|/, '$1| REQ-EXPORT-01 |')
@@ -6126,7 +6126,7 @@ for (const defect of ['none', 'metadata-parent', 'edge', 'edge-valid', 'review-b
       const state = readCodeBehaviorContext(request, f.input.source.commonDir).pendingAnalysis!
       output = { inputDigest: request.inputDigest, analysisDigest: state.analysisDigest, verdict: 'accept', checkedPaths: task!.requiredChangedPaths, checkedChangeIds: state.analysis.changes.map((item: { id: string }) => item.id), findings: [] }
     } else if (request.purpose === 'elaboration_generate') output = { version: 'elaboration-target-rows-v3', changes: [], applicability: ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: false, basis: '完整冻结契约保持', affectedIds: [] })) }
-    else if (request.purpose === 'elaboration_review') output = { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+    else if (request.purpose === 'elaboration_review') output = defect.startsWith('deferred-') ? { verdict: 'repair', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [{ code: 'implementation-review', kind: 'repair', affectedIds: ['RULE-EXPORT-05'], message: '业务契约保持，实际实现与验收由P2完成', evidence: 'src/export.js#ExportService 与 tests/export.test.mjs#AC-EXPORT-03 的冻结实现和验收', decision: '按原授权实现并完整验证，不修改业务义务' }] } : { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
     else if (request.purpose === 'code_review') {
       const binding = JSON.parse(request.prompt.split('候选绑定:\n')[1].split('\n')[0])
       output = { inputId: binding.inputId, candidateDigest: binding.candidateDigest, verdict: 'accept', checkedIds: binding.requiredIds, findings: [] }
@@ -6151,6 +6151,17 @@ for (const defect of ['none', 'metadata-parent', 'edge', 'edge-valid', 'review-b
   if (!multiple) assert.deepEqual(calls, ['code_behavior_analyze', 'code_behavior_review', 'elaboration_generate', 'elaboration_review', 'code_generate', 'code_review'])
   else assert.equal(calls.filter(purpose => purpose === 'code_review').length, 3, '双owner完整候选包含两个local及一个真实edge独审')
   if (defect === 'metadata-parent') assert.notEqual(origin.publicationBase!.parentCommit, parent.input.headCommit, '只读oracle工作区字节形成真实metadata parent')
+  if (defect.startsWith('deferred-')) {
+    const stage = origin.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(value => value.stage === 'elaboration')
+    const approved = JSON.parse(readEvidence(f.input.source.commonDir, stage.resultRef).toString()) as ElaborationResult
+    assert.equal(approved.structurePassed, true); assert.equal(approved.reviewPassed, true); assert.equal(approved.status, 'complete')
+    assert.equal(approved.rounds.at(-1)!.review!.verdict, 'repair', '保留原独审repair，不补签为accept')
+    assert.ok(approved.deferredImplementationFindings.some(finding => finding.code === 'implementation-review'))
+    assert.equal(hasApprovedElaborationReview(approved), true)
+    assert.equal(hasApprovedElaborationReview({ ...approved, reviewPassed: false }), false)
+    assert.equal(hasApprovedElaborationReview({ ...approved, deferredImplementationFindings: [] }), false)
+    assert.equal(hasApprovedElaborationReview({ ...approved, rounds: approved.rounds.map(round => ({ ...round, review: round.review && { ...round.review, findings: round.review.findings.map(issue => ({ ...issue, code: 'business-repair' })) } })) }), false)
+  }
   const originalHistory = JSON.stringify({ operation: parent, attempts: currentStore.listAttempts(parent.id) })
   f.closeForRestart()
   const protocol = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => protocol.close())
@@ -6161,7 +6172,7 @@ for (const defect of ['none', 'metadata-parent', 'edge', 'edge-valid', 'review-b
   const store = application.store; f.useStore(store); currentStore = store
   f.options.managedRoot = join(applicationRuntime, 'managed'); f.options.artifactRoot = join(applicationRuntime, 'artifacts')
   const originalRefs = origin.checkpointRefs.map(ref => ({ ref, stage: (JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()) as { stage?: string }).stage }))
-  if (!['none', 'metadata-parent', 'edge-valid'].includes(defect)) {
+  if (!['none', 'deferred-implementation', 'metadata-parent', 'edge-valid'].includes(defect)) {
     const request = { nodeId: 'export-contract', requestId: `reject-frozen-${defect}`, retryOf: parent.id, ...(defect === 'model' ? { model: 'claude:other-model' } : {}) }
     active = (await application.submit(request)).operation!
     active = store.ackDispatch(f.input.source.repositoryId, active.dispatchMessageId); f.useOperation(active)
@@ -6202,7 +6213,7 @@ for (const defect of ['none', 'metadata-parent', 'edge', 'edge-valid', 'review-b
         const resultRef = writeEvidence(f.input.source.commonDir, altered), replacement = writeEvidence(f.input.source.commonDir, { ...wrapper, resultRef })
         return { ...attempt, checkpointRefs: attempt.checkpointRefs.map(ref => ref.sha256 === aggregate.sha256 ? { ...replacement, artifacts: syncCheckpointArtifacts(altered, resultRef) } : ref) }
       }
-      const removed = originalRefs.filter(item => defect === 'review-budget' ? item.stage === 'partition-generation-budget' : defect === 'generation' ? item.stage === 'generation' : defect === 'analysis' ? item.stage === 'analysis' : defect === 'elaboration' ? item.stage === 'elaboration' : defect === 'review' ? item.stage?.startsWith('injected:') && item.stage.endsWith(':code_review') : defect === 'v3' ? item.stage?.startsWith('v3:') : false).map(item => item.ref.sha256)
+      const removed = originalRefs.filter(item => defect === 'review-budget' ? item.stage === 'partition-generation-budget' : defect === 'generation' ? item.stage === 'generation' : defect === 'analysis' ? item.stage === 'analysis' : defect === 'elaboration' ? item.stage === 'elaboration' : defect === 'review' || defect === 'deferred-native-mismatch' ? item.stage?.startsWith('injected:') && item.stage.endsWith(':code_review') : defect === 'v3' ? item.stage?.startsWith('v3:') : false).map(item => item.ref.sha256)
       return { ...attempt, checkpointRefs: attempt.checkpointRefs.filter(ref => !removed.includes(ref.sha256)) }
     }
     try {
