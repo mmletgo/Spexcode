@@ -36,6 +36,11 @@ function readCheckpointJson<T>(store: SyncStore, operation: SyncOperation, ref: 
   return decoded.value as T
 }
 
+export function isSyncBlobRef(value: unknown): value is BlobRef {
+  return !!value && typeof value === 'object' && 'sha256' in value && typeof value.sha256 === 'string'
+    && /^[a-f0-9]{64}$/.test(value.sha256) && Object.keys(value).every(key => key === 'sha256' || key === 'artifacts')
+}
+
 export function syncCheckpointArtifacts(value: unknown, resultRef: BlobRef): NonNullable<SyncCheckpointRef['artifacts']> {
   const refs = new Map([[resultRef.sha256, resultRef]]), raw = new Set<string>()
   const visit = (entry: unknown): void => {
@@ -48,7 +53,7 @@ export function syncCheckpointArtifacts(value: unknown, resultRef: BlobRef): Non
       }
       return
     }
-    if ('sha256' in entry && typeof entry.sha256 === 'string' && /^[a-f0-9]{64}$/.test(entry.sha256)) refs.set(entry.sha256, { sha256: entry.sha256 })
+    if (isSyncBlobRef(entry)) refs.set(entry.sha256, { sha256: entry.sha256 })
     for (const child of Object.values(entry)) visit(child)
   }
   visit(value)

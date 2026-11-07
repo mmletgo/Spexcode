@@ -144,6 +144,8 @@ resources-only是独立于control(recover)的显式清理入口：要求完整op
 
 正式detail/read-current与证据BFS使用同一typed checkpoint边界。raw只在强失败来源绑定后以明确untrusted_final/text/SHA投影返回，BFS不解析或追踪raw正文伪sha字段；普通JSON证据仍按原可达链读取，未知坏JSON显式失败。
 
+证据BFS复用[[sync-checkpoint-evidence]]的精确BlobRef形状，保留裸引用、带artifacts的checkpoint及其中真实引用；内联日志字节包的sha256只是原运输校验摘要，不成为CAS可达边，也不阻断后续真实JSON证据读取。查询这种未引用摘要仍返回无关证据，真正可达CAS缺失或损坏继续显式失败。
+
 旧untrusted_final缺ref时，原文sha256仅为诊断摘要，不建立CAS可达边；正式readEvidence仍可读其原JSON材料，查询该缺席raw引用返回无关证据404，不补写旧记录。
 
 正式 retryOf 也允许完整 settled 但明确未采纳的私有交付：先认证全部 receipt/候选/验证/原输入与当前来源仍干净且冻结 HEAD 不变，再在准入事务绑定父记录与全部 journal。只允许父自身 receipt 导致的相同资源 heads 推进。新操作保持原 input/request/plan/scope/原预算，省略模型保持原请求选择，显式换 requested model 仍沿既有 retry 规则且不限制 CLI 版本/baseURL/模型配置；旧操作及其 receipt 不改写；原业务 selection 由 retryOf 派生用于分析，当前 selection 只作新操作 CAS。已采纳、部分交付、未知证据、来源漂移或第三方 heads 推进拒绝。

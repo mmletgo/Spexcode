@@ -15,6 +15,8 @@ code:
 
 新SyncCheckpointRef在一次正常store动作中登记JSON wrapper与全部typed artifacts，保留原resultRef、JSON材料及精确UTF8 raw引用，避免中间出现无认证来源的raw pin。raw即使是合法JSON或形似sync-stage-v1也不取得stage、candidate、review或证据引用可达权限。
 
+保活收集与应用证据BFS共用精确BlobRef形状：只含合法sha256的引用及带artifacts的SyncCheckpointRef扩展建立CAS边，扩展中的真实引用继续递归收集。内联字节包（如bytes/sha256/gzip）的摘要不建立独立CAS引用；其原字节、长度和SHA继续由原运输协议核验。真正引用的缺失或损坏仍显式失败，untrusted_final仍只沿精确原文/ref专门分支和原失败身份认证。
+
 旧无role checkpoint引用逐字保留。只沿真实wrapper及失败Saved round（含既有repairDiagnostics原件）认证untrusted_final：原operation/attempt/input、owner及完整NativePlan/dispatch、资源原failed观察、canonical record的原策略/model/请求/错误/原文和thread/turn必须精确一致，CAS正文与SHA/ref相同。后续正式cancelled/removed保原格式错误与原文，且精确nativeStopped/stopped证明成立时仍可读；不复原旧failed或改签成功。generic failed的合法raw可读性不授予格式自动续修资格。
 
 先收集认证结果再赋予JSON材料阶段权限；历史flat材料的解析错误只在精确强失败来源证明其为raw时豁免，任何未认证SyntaxError仍抛出，role本身不能隐藏坏材料。全部协调stage扫描与应用证据BFS共用该边界；raw只返回明确untrusted_final/text/SHA投影，不解析或追踪其正文中的伪引用。旧业务输入/授权/schema/只读范围与预算、调用、停止和交付门保持。
