@@ -235,6 +235,8 @@ Dashboard 的同步模式不能继续“先把新 Spec 独立提交到 main，�
 
 入口先以仓库身份、分支/worktree generation、源快照、影响摘要和政策版本形成稳定接入键，通过数据库唯一约束归并重复 watcher、Git 和 API 事件；不能仅靠每次新分配的 operation ID 去重。操作内再以 operation ID、attempt 和输入摘要识别执行重试。已协调的相同字节为 no-op，不制造空提交。
 
+用户对已完成生成与全部独审、候选已冻结的操作正式重试时，若原失败仅为V3资源登记前的verification_unsupported，系统保留认证候选并直接续验，不从P0/P1/P2重做。原attempt、资源、租约和journal须全部结算；原输入/来源/用户请求/模型、policy/impact/readSet/业务selection/scope及候选Git对象须精确不变，完整生成和独审原件仍可冷验。缺证据、partial或任何漂移明确拒绝，不补签旧review/checkedPaths/receipt，也不静默降级重生成。新的attempt重新核机械V1、发布基树、真实V3及V4，并经原正常Git交付生成本次receipt；连续前置运输失败可沿同一正式retry链再试。旧失败和全部历史原件保持，新V3真实行为失败按真实失败停止。此续验复用现有retry/operation/fence/四层结果与交付，无第二套会话、候选系统或持久schema变更。显式新requested model属于用户新选择，沿原正常retry重新生成与独审，不取得旧候选续验资格；同model原件失配仍拒绝。
+
 用户可以对完整结算、尚未采纳的私有交付显式发起同输入重验：沿现有执行入口提交新 requestId 和 retryOf，创建独立新操作，保留原交付、原操作阶段、attempt、原生会话、候选、journal、receipt、Git 分支及资源历史，不将旧 workspace_synced 改成失败或取消来取得资格。workspace_synced 与 awaiting_landing 使用同一严格安全边界：当前 attempt 与全部真实交付须 settled、完整验证且覆盖原范围，无未决业务范围或未结算资源；来源物理身份、干净工作区/index 与冻结 HEAD 不变，真实 receipt 证明交付尚未被 Source 或主分支采纳。阶段名称、sourceSynced=false 或按钮本身均不构成未采纳证明；已采纳、部分交付、证据缺失、来源漂移和活跃资源均拒绝。
 
 已结算交付可能推进资源头，但不因此成为新的作者意图。重验沿 retryOf 链保留最早原 business selection、原冻结 input/request/plan/readSet 与 scope 作为组合输入、目标 before 和 P0/P1 的业务基线；新操作另冻结相同资源集的当前 selection 用于事务 CAS，只允许父本次真实 receipt 对实际文件、已覆盖业务 ID 或退役头造成的推进，第三方头及未写资源不能冒领。准入事务重新核父记录、journal/receipt 与当前选择，claim/fence/验证/交付继续核新 CAS；后续普通 failed→retry 仍递归沿原业务基线，不把旧拒绝候选当作 verifiedDelivery 义务。

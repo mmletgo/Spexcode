@@ -28,7 +28,7 @@
 - P2 快照/候选仅操作明确 commonDir 的 Git 对象及私有保活 refs，禁用元数据 fsmonitor/reference hooks；开发/交付提交不可照搬禁 hooks。原输入与 ComposedInputRef 分开；实际模型 diff 和最终 apply diff 分开。
 - 快照/候选针对验证：`npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/sync/snapshot-candidate.test.ts`；build 后 `npm run typecheck`、`npx eslint spec-cli/src/sync/{snapshot,composition,candidate,snapshot-candidate.test}.ts`。
 
-- operation固定请求选择；同request/retry先沿原绑定，真正新操作取显式选择或版本化`sync.model`，再按工作流缺省（native为`claude:default`，历史frozen为sol）。旧operation缺字段仍固定sol，不回写。换模型只经新操作或显式 retryOf；resume/recover 不换模型。原生工作树任务使用 sync-tools-v3 固定工作流，旧 v1/v2 只恢复原请求；不因注入 runner 降级生产策略。
+- operation固定请求选择；同request/retry先沿原绑定，真正新操作取显式选择或版本化`sync.model`，再按工作流缺省（native为`claude:default`，历史frozen为sol）。旧operation缺字段仍固定sol，不回写。换模型只经新操作或显式 retryOf；resume/recover 不换模型。完整已审冻结候选仅在未登记V3资源的unsupported正式retry、全部原件与输入/模型/政策绑定冷验一致时零模型续验；缺证或漂移明确拒绝，不静默从P0重做。原生工作树任务使用 sync-tools-v3 固定工作流，旧 v1/v2 只恢复原请求；不因注入 runner 降级生产策略。
 
 - ZCode使用`zcode:default`或`zcode:<provider-id>/<model>`，模型/别名交SDK解析，实际每轮选择另行留证；与Claude共用版本化原生工作树执行、队列和资源桥；换provider仍须新操作/正式retryOf，不自动fallback。旧v4只读策略和原生读取证明仅用于其历史请求。
 

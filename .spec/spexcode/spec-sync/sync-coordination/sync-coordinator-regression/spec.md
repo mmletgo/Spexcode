@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+真实临时Git、正常阶段提交、隔离SQLite和受控runner先完成P0分析/独审、P1生成/独审、代码生成/独审，冻结候选后由受控V3前置能力失败形成verification_unsupported且无验证资源。修复前正式retry再次进入P0的第七次调用；修复后SQLite重启并经公开SyncApplication.submit/retryOf继续同候选，连续两次运输失败仍零新增模型派发，最后重新产生本次V3/V4和正常Git交付。输入源码、oracle、配置、request/policy/impact/readSet/scope、candidate、P0/P1/最终review/V3原件或发布父树漂移须明确拒绝且不回退生成；原失败operation/attempt/CAS及source/index保持。另以公开入口显式选择新model，按原正常retry重新生成和独审六阶段，不复用旧候选批准；无模型/CLI/BaseURL白名单。受控Native与Docker driver只证明编排及Git/SQLite事实，不冒称真实模型、远端Docker或Tiny产品闭环。
+
 
 连续返修的受控Native/Git/SQLite整链先在A3仅批准RULE-EXPORT-05并过strict seal，随后真实code_review仅指RULE-EXPORT-02。A4故意重改未命中05，在独审前以rows_patch拒绝；A5省略05只更新02，仍继承首轮05精确值，最终strict seal/V1通过。两轮当前relatedIds不累加，raw、其他业务列和全部源码/tests对象保持，aggregate.beforeDigest仍原作者摘要。最后一次完整P1已保存后模拟进程边界，SQLite再重启仍复用同attempt P1，零额外生成或独审，并在同一完整候选继续V1。
 

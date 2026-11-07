@@ -44,6 +44,8 @@ status 按节点及 bounded limit 查询，detail 返回 operation、当前 atte
 
 显式 retryOf 由用户授权为同一冻结输入、节点、政策、来源和正文请求建立关联的新 operation 及新预算；省略 patch 继承原 requestBlob，省略 origin 继承原输入来源与裁决（若是原decision），沿旧 previousBaselinePair，不丢失未落地编辑。不能混入新 patch 或改节点、来源/政策，当前 source 已变应提交正常新输入。普通重复事件继续归并原 operation 及预算，同 retry requestId 精确幂等。detail.retryEligibility 复用 store 只读 phase、所有历史 resource/journal/live authority 门禁，并附当前输入/授权及固定 plan 诊断；failed、budget_exhausted、从未交付的 cancelled，以及下述经完整证明仍未采纳的 settled 私有交付可正式重试；GAP、冲突、active 或未知资源禁止借新预算重启。准入事务重新检查门禁，不以先前只读结果代替原子检查。
 
+同一正式retry入口保留[[sync-coordinator]]的已冻结完整候选续验资格：原六阶段已审而V3前置unsupported且所有原资源/写权结算时，同输入/原意/模型及完整政策/读集/scope冷验后零新模型调用进入新的验证与交付。相同requestId仍精确重放；改变输入应发起新操作，候选/旧证据失配明确失败而不从P0静默重做。已交付未采纳的重验仍沿其原重建政策。
+
 detail.resources 只列该操作尚未 removed 的真实历史资源；暂停、取消、失败/预算、待输入/冲突或完成状态若仍有此类资源或未 settled journal，executionAvailability 显示 recovery_required 与 sync_resources_unsettled，不能因工具描述可读就显示 ready。该投影不虚构资源已释放；retryEligibility 仍由 canonical 门禁拒绝，精确资源恢复由 coordinator 负责，恢复入口单独验收，不能因尚未恢复就允许重试。
 
 control(recover) 是独立于 resume/retry 的清理入口：保原 control、输入、预算和业务结果，不要求重新启用当前已经变化的配置；先等旧执行结算，再用原固定计划和工具调用 coordinator.recoveryOnly。它只核已有 native/verification 资源与已经开始的 journal，不创建 attempt、模型调用、验证或新 apply，也不自动唤醒其它 queued 任务。资料缺失或资源仍未知时保留具体恢复诊断，不假称释放；清理后另由明确 resume/retry 推进。conflicted 状态也必须按真实未结算资源投影 recovery_required。
