@@ -39,7 +39,7 @@ export type PartitionCheckpoints = {
   loadElaborationDraft?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, schemaDigest?: string): ElaborationDraft | null
   loadElaborationRepairSeed?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): ElaborationRepairSeed | null
   loadElaborationRepairDiagnostics?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): ElaborationRepairDiagnostics | null
-  loadReadonlySpecRepair?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): { prior: Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>; repair: ReadonlySpecRepair } | null
+  loadReadonlySpecRepair?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string, localInput: ElaborationInput): { prior: Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>; repair: ReadonlySpecRepair; priorInput?: ElaborationInput } | null
   loadPartitionSealRepair?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): { prior: Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>; repair: ReadonlySpecRepair } | null
   save(key: string, value: unknown): BlobRef
 }
@@ -402,9 +402,10 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
       return draft && cacheDraft ? { ...draft, errors: [...draft.errors, ...cacheDraft.errors] } : draft
     } : undefined
     const inputDigest = freezeElaborationInput(localInput).inputDigest
-    const readonlyRepair = checkpoints.loadReadonlySpecRepair?.(key, partitionBinding, inputDigest) ?? checkpoints.loadPartitionSealRepair?.(key, partitionBinding, inputDigest)
+    const readonlyRepair = checkpoints.loadReadonlySpecRepair?.(key, partitionBinding, inputDigest, localInput) ?? checkpoints.loadPartitionSealRepair?.(key, partitionBinding, inputDigest)
     if (readonlyRepair) {
-      const priorInput = readonlyRepair.prior.readonlySpecRepair ? readonlyRepairInput(localInput, readonlyRepair.prior.readonlySpecRepair) : localInput
+      const priorBase = 'priorInput' in readonlyRepair ? (readonlyRepair as { priorInput?: ElaborationInput }).priorInput ?? localInput : localInput
+      const priorInput = readonlyRepair.prior.readonlySpecRepair ? readonlyRepairInput(priorBase, readonlyRepair.prior.readonlySpecRepair) : priorBase
       if (freezeElaborationInput(priorInput).inputDigest !== readonlyRepair.prior.inputDigest) reject('只读V1修复的已审owner不匹配当前完整局部输入')
       const repairedInput = readonlyRepairInput(localInput, readonlyRepair.repair)
       if (saved && saved.inputDigest === freezeElaborationInput(repairedInput).inputDigest && JSON.stringify(saved.readonlySpecRepair) === JSON.stringify(readonlyRepair.repair)) {
@@ -460,7 +461,7 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
   const candidateChanges = (projection?.changes ?? reviewedChanges).map(({ nodeId, path, beforeDigest, source }) => ({ nodeId, path, beforeDigest, source }))
   const changes = candidateChanges.map(change => ({ ...change, contentDigest: contentHash(change.source) }))
   const applicability = partitionApplicability(results)
-  const seal = sealPartitionedElaboration(sealInput, candidateChanges, applicability)
+  const seal = sealPartitionedElaboration(sealInput, candidateChanges, applicability, results.flatMap(result => result.readonlySpecRepair?.kind === 'candidate_review' ? [result.readonlySpecRepair] : []))
   const readiness = seal.seal.passed ? projectElaborationFlowReadiness(seal.graph, seal.coverage) : { readyFlowIds: [], blockedFlows: [] }
   const gaps = seal.contracts.flatMap(contract => contract.items.filter((item): item is import('@spexcode/spec-core/contracts').Gap => item.kind === 'GAP'))
   const localStructurePassed = results.every(result => result.structurePassed)

@@ -2,12 +2,12 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { buildContractGraph, CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
-import { elaborate, elaborationDigest, elaborationReviewScopeErrors, elaborationScopeErrors, freezeElaborationInput } from './elaboration.js'
+import { elaborate, elaborationDigest, elaborationReviewScopeErrors, elaborationScopeErrors, freezeElaborationInput, sealPartitionedElaboration } from './elaboration.js'
 import { elaborationSchema, outputErrors } from './elaboration-schema.js'
-import { bindElaborationTargets, elaborationTargetBindings, renderElaboration } from './elaboration-markdown.js'
-import type { GeneratedTargetElaboration } from './elaboration-markdown.js'
+import { bindElaborationTargets, elaborationTargetBindings, renderElaboration, readonlyFactRepairIds } from './elaboration-markdown.js'
+import type { ContractCell, GeneratedTargetElaboration } from './elaboration-markdown.js'
 import { contractBusinessProse } from './contract-evolution.js'
-import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
+import { ELABORATION_BOUNDARIES, ELABORATION_GENERATION_GUIDANCE, ELABORATION_GENERATION_GUIDANCE_V4 } from './elaboration-types.js'
 import type { ElaborationInput, ElaborationRepairSeed, ElaborationReview, ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
 import type { CodeBehaviorAnalysis } from './writeback-types.js'
 
@@ -513,4 +513,139 @@ test('调用者在await期间重排或改写targets不能改变冻结索引绑�
   const result = await elaborate(frozen, { runner: fake.run })
   assert.equal(result.status, 'complete')
   assert.equal(result.changes.find(change => change.nodeId === 'nested-leaf')?.path, leafPath)
+})
+
+
+const factRepairInput = (): ElaborationInput => {
+  const frozen = ownerScopeInput()
+  frozen.generationGuidance = ELABORATION_GENERATION_GUIDANCE
+  frozen.targets = [frozen.targets[0]]
+  frozen.analysis!.analysis.changes = []
+  frozen.analysis!.ref.sha256 = elaborationDigest(JSON.stringify(frozen.analysis!.analysis))
+  frozen.implementationWritePaths = []
+  const finding = { kind: 'repair', affectedIds: ['RULE-EXPORT-01'], ruleLocation: `${primaryPath}#RULE-EXPORT-01`, codeLocation: 'src/export.js#ExportService', evidence: '冻结源码已实现，旧basis与说明仍称待实现', counterexample: '当前源码与旧事实叙述不一致', message: '仅刷新事实basis、desc和expanded；保留所有业务字段' }
+  frozen.readonlySpecRepair = { kind: 'candidate_review', reviewEvidence: [{ partitionId: 'owner', resultRef: { sha256: '1'.repeat(64) } }], baseInputDigest: '2'.repeat(64), candidateDigest: '3'.repeat(64), generationRef: { sha256: '4'.repeat(64) }, acceptedRef: { sha256: '5'.repeat(64) }, changes: [{ nodeId: 'export-contract', path: primaryPath, beforeDigest: frozen.targets[0].sourceDigest, source: primarySource, contentDigest: elaborationDigest(primarySource) }], output: null, review: null, findings: [{ code: 'candidate-review-repair', severity: 'error', nodeId: 'export-contract', path: primaryPath, itemId: 'RULE-EXPORT-01', relatedIds: finding.affectedIds, message: JSON.stringify(finding) }] }
+  return frozen
+}
+
+const factRepairNode = (frozen: ElaborationInput): GeneratedTargetElaboration['changes'][number] => {
+  const node = unchangedOwner(frozen, 0), rule = primary.items.find(item => item.id === 'RULE-EXPORT-01')!
+  assert.equal(rule.kind, 'RULE')
+  return { ...node, description: '当前冻结实现的事实说明', prose: contractBusinessProse(primary.expandedSpec) + '\n\n当前冻结源码已实现原契约；这里只刷新事实说明。', tables: { ...node.tables, RULE: [{ id: rule.id, scope: rule.scope, constraint: rule.constraint, basis: '冻结源码src/export.js#ExportService已实现权限检查', authority: rule.authority, source: `${rule.source.kind}:${rule.source.ref}`, 'depends-on': [...rule.dependsOn] }] } }
+}
+
+for (const mode of ['preserve_business', 'reelaborate'] as const) test(`candidate_review只读事实修正穿过完整P1和全图seal mode=${mode}`, async () => {
+  const frozen = factRepairInput(); frozen.mode = mode
+  const original = structuredClone(frozen), node = factRepairNode(frozen)
+  const fake = runner(request => build(request, [node]))
+  const result = await elaborate(frozen, { runner: fake.run })
+  assert.equal(result.status, 'complete', JSON.stringify(result.rounds.flatMap(round => round.findings)))
+  assert.deepEqual(fake.calls.map(call => call.purpose), ['elaboration_generate', 'elaboration_review'])
+  const updated = parseContract(result.changes[0]).contract!
+  assert.equal(parseFrontmatter(result.changes[0].source).fm.desc, node.description)
+  assert.match(contractBusinessProse(updated.expandedSpec), /当前冻结源码已实现原契约/)
+  assert.equal(updated.rawSource, primary.rawSource)
+  for (const item of primary.items) {
+    const next = updated.items.find(next => next.id === item.id)!
+    assert.deepEqual({ ...next, line: undefined, ...(item.kind === 'RULE' && item.id === 'RULE-EXPORT-01' ? { basis: item.basis } : {}) }, { ...item, line: undefined }, item.id)
+  }
+  assert.equal(updated.items.length, primary.items.length)
+  const global = { ...frozen, readonlySpecRepair: undefined }
+  assert.equal(sealPartitionedElaboration(global, result.changes, result.rounds.at(-1)!.candidate!.applicability).seal.passed, false, '缺少原owner诊断的全局输入仍严格冻结')
+  const seal = sealPartitionedElaboration(global, result.changes, result.rounds.at(-1)!.candidate!.applicability, [frozen.readonlySpecRepair!])
+  assert.equal(seal.seal.passed, true, JSON.stringify(seal.seal.findings))
+  assert.deepEqual(frozen, original, '只读诊断不能改写原input、P0分类或授权')
+})
+
+
+test('candidate_review事实范围只消费当前结构化relatedIds，旧缺席/未知/外owner不扩权', () => {
+  const frozen = factRepairInput(), target = frozen.targets[0], original = structuredClone(frozen)
+  const parent = ownerScopeInput().targets[1]
+  frozen.context = [{ ...parent, source: parent.source! }]
+  const finding = frozen.readonlySpecRepair!.findings[0]
+  for (const relatedIds of [undefined, [], ['RULE-UNKNOWN-01'], ['RULE-EXPORT-01', 'RULE-UNKNOWN-01'], ['RULE-EXPORT-01', 'RULE-EXPORT-01'], ['REQ-PARENT-01']]) {
+    finding.relatedIds = relatedIds
+    assert.equal(readonlyFactRepairIds(frozen, target).size, 0, JSON.stringify(relatedIds))
+    assert.equal(elaborationScopeErrors(frozen, bindElaborationTargets(frozen, { version: 'elaboration-target-rows-v3', changes: [factRepairNode(frozen)], applicability: [] })).length, 1)
+  }
+  finding.relatedIds = ['RULE-EXPORT-01', 'REQ-PARENT-01']
+  assert.deepEqual([...readonlyFactRepairIds(frozen, target)], ['RULE-EXPORT-01'], '合法跨owner只映射本target交集')
+  for (const invalid of [
+    { readonlySpecRepair: undefined },
+    { readonlySpecRepair: { ...frozen.readonlySpecRepair!, reviewEvidence: [] } },
+    { readonlySpecRepair: { ...frozen.readonlySpecRepair!, kind: undefined } },
+    { readonlySpecRepair: { ...frozen.readonlySpecRepair!, findings: [{ ...finding, severity: 'warning' as const }] } },
+    { readonlySpecRepair: { ...frozen.readonlySpecRepair!, findings: [{ ...finding, nodeId: parent.nodeId, path: parent.path }] } },
+    { implementationWritePaths: ['src/export.js'] },
+  ]) assert.equal(readonlyFactRepairIds({ ...frozen, ...invalid }, target).size, 0)
+  frozen.analysis!.analysis.changes = ownerScopeInput().analysis!.analysis.changes
+  assert.equal(readonlyFactRepairIds(frozen, target).size, 0, '原currentChanges通路不升级为事实修正例外')
+  assert.equal(original.readonlySpecRepair!.findings[0].relatedIds!.length, 1)
+})
+
+test('candidate_review事实修正逐值保护所有业务列和未命中basis，完整候选另核raw/metadata', () => {
+  const frozen = factRepairInput(), node = factRepairNode(frozen)
+  for (const kind of Object.keys(CONTRACT_COLUMNS) as (keyof typeof CONTRACT_COLUMNS)[]) {
+    const item = primary.items.find(item => item.kind === kind)
+    if (!item) continue
+    for (const column of CONTRACT_COLUMNS[kind]) {
+      if (kind === 'RULE' && column === 'basis') continue
+      const row: Record<string, ContractCell> = Object.fromEntries(CONTRACT_COLUMNS[kind].map(column => {
+        const key = column === 'depends-on' ? 'dependsOn' : column === 'timeout-ms' ? 'timeoutMs' : column === 'kind' ? 'gapKind' : column
+        return [column, column === 'source' && item.kind !== 'VERIFY' ? `${item.source.kind}:${item.source.ref}` : (item as unknown as Record<string, ContractCell>)[key]]
+      }))
+      const previous = row[column]
+      row[column] = Array.isArray(previous) ? [...previous, 'CHANGED'] : typeof previous === 'boolean' ? !previous : typeof previous === 'number' ? previous + 1 : `${previous}-CHANGED`
+      const changed: GeneratedTargetElaboration['changes'][number] = { ...node, tables: { ...node.tables, [kind]: [row] } }
+      assert.equal(elaborationScopeErrors(frozen, bindElaborationTargets(frozen, { version: 'elaboration-target-rows-v3', changes: [changed], applicability: [] })).length, 1, `${kind}.${column}`)
+    }
+  }
+  const rule = primary.items.find(item => item.id === 'RULE-EXPORT-02')!; assert.equal(rule.kind, 'RULE')
+  const unassigned = { id: rule.id, scope: rule.scope, constraint: rule.constraint, basis: '未命中规则不得改事实', authority: rule.authority, source: `${rule.source.kind}:${rule.source.ref}`, 'depends-on': [...rule.dependsOn] }
+  for (const changed of [{ ...node, title: '改标题' }, { ...node, code: [] }, { ...node, related: ['src/export.js'] }, { ...node, removeIds: ['RULE-EXPORT-01'] }, { ...node, tables: { ...node.tables, RULE: [unassigned] } }]) {
+    assert.equal(elaborationScopeErrors(frozen, bindElaborationTargets(frozen, { version: 'elaboration-target-rows-v3', changes: [changed], applicability: [] })).length, 1)
+  }
+  const candidate = renderElaboration(frozen, bindElaborationTargets(frozen, { version: 'elaboration-target-rows-v3', changes: [node], applicability: [] }), 'scope-proof')
+  for (const source of [candidate.changes[0].source.replace(primary.rawSource, primary.rawSource + '变更原意'), candidate.changes[0].source.replace('status: "active"', 'status: "pending"')]) {
+    const seal = sealPartitionedElaboration(frozen, [{ ...candidate.changes[0], source }], [])
+    assert.ok(seal.seal.findings.some(finding => finding.code === 'rows_patch'))
+  }
+})
+
+
+test('candidate_review事实修正保留CRLF与scalar code的原绑定和raw', async () => {
+  const frozen = factRepairInput(); frozen.mode = 'preserve_business'
+  const source = primarySource.replace('code:\n  - src/export.js#ExportService', 'code: src/export.js#ExportService').replace(/\n/g, '\r\n')
+  frozen.targets = [{ ...frozen.targets[0], source, sourceDigest: elaborationDigest(source) }]
+  frozen.readonlySpecRepair!.changes = [{ ...frozen.readonlySpecRepair!.changes[0], source, contentDigest: elaborationDigest(source) }]
+  const fake = runner(request => build(request, [factRepairNode(frozen)]))
+  const result = await elaborate(frozen, { runner: fake.run })
+  assert.equal(result.status, 'complete', JSON.stringify(result.rounds.flatMap(round => round.findings)))
+  assert.equal(result.changes[0].source.replace(/\r\n/g, '').includes('\n'), false)
+  assert.equal(result.changes[0].source.includes('\r\r\n'), false)
+  const contract = parseContract(result.changes[0]).contract!
+  assert.deepEqual(contract.code, primary.code); assert.equal(contract.rawSource, primary.rawSource)
+})
+
+test('历史V4及缺席的prose诊断不授事实权，完整请求与原摘要保持，V5只改变新返修身份', async () => {
+  const frozen = factRepairInput(), repair = frozen.readonlySpecRepair!
+  delete repair.findings[0].itemId
+  const original = structuredClone(frozen), requests: ElaborationSessionRequest[] = []
+  for (const guidance of [undefined, ELABORATION_GENERATION_GUIDANCE_V4] as const) {
+    const legacy = { ...frozen, generationGuidance: guidance }
+    assert.equal(readonlyFactRepairIds(legacy, legacy.targets[0]).size, 0)
+    const generated = bindElaborationTargets(legacy, { version: 'elaboration-target-rows-v3', changes: [factRepairNode(legacy)], applicability: [] })
+    assert.equal(elaborationScopeErrors(legacy, generated).length, 1)
+    const unchanged = { ...unchangedOwner(legacy, 0), prose: '不得通过旧prose诊断改写事实' }
+    assert.equal(renderElaboration({ ...legacy, mode: 'preserve_business' }, bindElaborationTargets(legacy, { version: 'elaboration-target-rows-v3', changes: [unchanged], applicability: [] }), 'legacy').changes[0].source, primarySource)
+    await elaborate(legacy, { runner: async request => { requests.push(request); throw Object.assign(new Error('仅捕获旧冻结请求，不运行模型'), { code: 'unsupported' }) } })
+    assert.equal(freezeElaborationInput(legacy).frozen.generationGuidance, undefined)
+  }
+  const [{ signal: _first, ...first }, { signal: _second, ...second }] = requests
+  assert.deepEqual(first, second, '历史legacy read/prose请求的prompt、inputDigest、schema及seed不漂移')
+  assert.doesNotMatch(first.prompt, /只允许按冻结源码核实并更新/)
+  assert.notEqual(freezeElaborationInput(frozen).inputDigest, freezeElaborationInput({ ...frozen, generationGuidance: ELABORATION_GENERATION_GUIDANCE_V4 }).inputDigest)
+  assert.equal(freezeElaborationInput(frozen).frozen.generationGuidance, ELABORATION_GENERATION_GUIDANCE)
+  assert.equal(readonlyFactRepairIds({ ...frozen, phase: 'interface_seed' }, frozen.targets[0]).size, 0)
+  assert.deepEqual(frozen, original)
 })

@@ -9,6 +9,7 @@
 - 实现 Agent 在工作树真实修改、测试并正常提交；候选从实际 Git 对象差量导入。程序检查写范围、CAS、原测试和契约演进，生成摘要或自报补丁不能替代实际修改。
 - 模型临时业务行由 `CONTRACT_COLUMNS` 渲染唯一 Markdown；raw/摘要由程序复制，JSON 仅是执行证据。
 - 生成和独立评审使用不同会话。输入、候选和检查结果均按内容摘要绑定；未决 GAP 只阻塞依赖闭包。
+- P1 V5完整叶只读事实返修只消费原candidate_review认证诊断的typed relatedIds与冻结owner交集：仅desc/expanded及命中RULE.basis可变，其余业务列/raw/绑定/AC/VERIFY严格保持；旧缺席不补写、不从message或草稿errors授信，局部与strict seal共用。
 - P1独审共用生成侧owner范围；仅要求冻结owner改写的repair或未知ID绑定须给具体拒因重审。原JSON/Git稿、候选与原Native生成身份冷验相同后只续独审；域内语义repair仍续生成。已结算的ZCode session/events独审超时同样可仅续审，须同operation冷验原只读请求、canonical失败与正式removed/stop，保原失败及未批准状态。旧请求字段不追补。
 - 状态派发 STEP 显式关联实际 TR；next→TR 是依赖，next→STEP/STATE 仍为导航，独立审查核对派发集合与步骤声明范围。
 - `readyIds` 是声明级可推进；完整流程使用 `readyFlowIds`，`blockedFlows` 解释受阻步骤/GAP，不向独立子项回传父阻塞。
@@ -57,3 +58,5 @@
 - P1完整生成v2/v3在本owner reserve前可认证同一已停来源的真实单稿提交，要求完整index与两次读取的全部受控物理模式和字节匹配HEAD，允许草稿命名空间外的ignored。仅 canonical 托管路径可以用原冻结seed的隔离materialize全文件重建证明，旧runtime slot不作证。冻结`stopped_git_draft`未批准原bytes、原诊断和Git/Native身份，已冻结的请求冷重放按同一材料。其他已reserved、历史v1、P0与物理未提交路径沿原门，writer30围栏v2，writer31围栏v3。
 
 - 全局P1仅分析分区沿正式P0原件和同一冻结计划认证。真实P1与仅分析P0证据分别保存并完全覆盖原计划，封口返修和V1复用重核来源。writer28只追加SELECT1，升级须停稳旧writer、正式结算资源和租约并先做一致online backup；回滚恢复v27一致库及原evidence/Git refs。
+
+- writer33保护P1 V5事实资格；旧V1–V4/缺席、saved/reserved请求不补升级。升级先停稳旧writer/结算资源并做32一致online backup，回滚停新writer并恢复32库及配套evidence/Git refs，禁止删marker。旧批准owner按原source protocol冷验，新返修才绑定V5。

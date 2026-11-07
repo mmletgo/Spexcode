@@ -8,7 +8,6 @@ code:
   - spec-cli/src/sync/elaboration.ts#elaborationMaterialContext
   - spec-cli/src/sync/elaboration.ts#elaborationScopeErrors
   - spec-cli/src/sync/elaboration.ts#elaborationReviewScopeErrors
-  - spec-cli/src/sync/elaboration.ts#targetHasCurrentChanges
   - spec-cli/src/sync/elaboration.ts#freezeElaborationInput
   - spec-cli/src/sync/elaboration.ts#projectElaborationFlowReadiness
   - spec-cli/src/sync/elaboration.ts#verifyElaborationDraftCache
@@ -25,6 +24,8 @@ related:
 从用户原意生成可完成主流程、适用状态事件处置、规则和验收；无法确认的重要业务政策成为 GAP，只阻塞依赖分支。
 
 ## expanded spec
+
+仅新冻结的P1指导V5在完整叶阶段可消费经真实code_review原件、candidate和原P1 owner认证的candidate_review；当前P0未影响该既有owner时，只可修正事实说明：从原诊断的结构化relatedIds读取已校验affectedIds，在冻结契约图中逐项核唯一身份后取本target的nodeId/path交集。命中的owner允许desc/expanded事实说明及命中RULE.basis变化；raw、标题、code/related、全部其他业务列、行身份、AC/VERIFY、来源和depends-on逐值保持。外owner仅作证据，外owner-only、unknown/重复ID、缺provenance、非error或无candidate_review不授此权；不读取message、draft.errors或materialDiagnostics推断权限。当前真实changes、作者/生命周期及逐项授权仍走原通路，不改P0分类或伪造authorChanges。生成差量与完整候选共用此窄比较，preserve_business不再吞掉合法事实修正，仍须新独审及strict全图seal。
 
 P1物理选源的新鲜度来自原认证generation的attempt与round，不来自载体round、观察时间或mtime。既有draft定位时忽略非权威errors增补但完整身份必须相同，并经原Native/Git冷验；同attempt较晚真实generation亦可优于早轮稿，不能定位来源时拒绝覆盖。原candidate/合法仅续审资格不因材料被替换。
 

@@ -13,6 +13,8 @@ code:
 
 ## expanded spec
 
+P1生成指导保留V1–V4原值，并以ac-test-flow-review-verify-fact-repair-v5作为新阶段缺省。只有V5完整叶candidate_review返修可取得[[sync-elaboration]]的窄事实资格；该资格进入当前返修业务摘要，不改历史摘要，也不让无repair的兄弟批准失效。readonlySpecRepair本身不新增能力字段，旧缺席或旧指导不追补。新持久语义由[[sync-migrations]]的writer33围栏保护。
+
 partitioned_final的analysisOnlyPartitions仅在存在无写义务的已审P0分区时保存本区P0原件ref和whole P0 ref。它们按原分区顺序进入全局inputDigest，与真实partitionEvidence分开。无该字段的原聚合摘要保持原字节；rounds只来自真实P1局部，不为仅分析组补建review、candidate或trace。
 
 临时ElaborationDraftMaterial可显式标明git_draft、native_output或physical_draft来源：前者只复制认证Git草稿原字节，后者只序列化已认证的历史成功结构化输出，不冒称旧Git稿；physical_draft只标识经新fence观察的已停owner工作树原字节，未提交且明确未批准，原errors、可用repairDiagnostics及冻结程序诊断对象diagnostics完整传递，进入新prompt时明确为非权威materialDiagnostics；该标注仅用于新请求的材料提示，不补历史持久字段或授予已校验资格。

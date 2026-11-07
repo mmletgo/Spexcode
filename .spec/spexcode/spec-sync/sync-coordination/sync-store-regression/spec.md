@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+writer33回归在隔离SQLite保存旧V4 protocol且尚无dispatch，核32→33只追加SELECT1、恰一次online backup；完整旧schema/业务与protocol表及V1–V32 registry原行保持。旧32迁移集合在新库拒绝且不写数据，32备份可由旧writer读取，重复启动幂等。不触用户或生产数据库。
+
 writer32回归由隔离真实SQLite核v31→v32只追加marker、只备份一次，旧表/schema/旧registry原行保持，旧31 writer拒绝新库且备份可由31读取；不触用户库。
 
 writer28回归在隔离真实SQLite中核v27到v28无DDL，只增加一条组件marker，保留完整v1–v27 registry与业务/protocol旧表。旧writer拒绝升级库，一致online backup可由旧writer读取，重复升级幂等。
