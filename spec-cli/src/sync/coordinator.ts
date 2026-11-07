@@ -326,6 +326,14 @@ function elaborationGenerationSource(store: SyncStore, owner: SyncOperation, pri
   return null
 }
 
+function assertStoppedEventsRpcDraft(prior: SyncAttempt, key: string, proof: ReturnType<typeof authenticateNativeFailure>): void {
+  const { status, nativeState, failure, result, session } = proof.checkpoint
+  if (!isZCodeEventsRpcTimeout(proof.state) || status !== 'failed' || nativeState !== 'failed' || failure?.code !== 'native_rpc_timeout' || failure.message !== proof.state.error || failure.failedWorktree || failure.rejectedOutput || result
+    || proof.state.failedWorktree || proof.state.resultWorktree || proof.state.rejectedOutput || proof.state.output !== undefined || proof.state.resultDigest !== undefined) fail('stale_result', 'ZCode events RPC草稿缺少原typed失败和结算原件')
+  if (!session.threadId || !session.turnId || canonical(prior.dispatchPlans.find(dispatch => dispatch.key === key)?.session) !== canonical(session)
+    || proof.record.harnessSessionId !== null && proof.record.harnessSessionId !== session.threadId) fail('stale_result', 'ZCode events RPC草稿缺少原完整派发与canonical Native身份')
+}
+
 function settledElaborationReview(store: SyncStore, operation: SyncOperation, prior: SyncAttempt, ownerKey: string, result: SavedElaboration, round: ElaborationResult['rounds'][number], failure: NonNullable<ElaborationResult['failure']>): ElaborationRepairDiagnostics['settledReview'] {
   if (result.status !== 'failed' || !result.structurePassed || result.reviewPassed || !round.draft || !round.candidate || round.review !== null || round.reviewOutput !== null || round.rejectedOutput) return
   const key = `${ownerKey}:${round.index}:elaboration_review`
@@ -1444,17 +1452,19 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
               const checkpoint = JSON.parse(readEvidence(operation.input.source.commonDir, resource.checkpointRef).toString()) as NativeRunCheckpoint
               const state = readRecord(native.expectedSessionId)?.structuredExecution, zcode = native.request.model?.startsWith('zcode:') === true
               const stoppedTransport = zcode && state?.state === 'failed' && state.errorCode === 'native_turn_transport_failed'
-              if (native.request.purpose === 'elaboration_generate' && native.request.worktree?.mode === 'edit' && !native.request.frozenContext && state && (zcode || native.request.model?.startsWith('claude:')) && (state.state === 'cancelled' || zcode && state.state === 'failed') && state.cancellation?.nativeStopped && !state.failedWorktree && !state.resultWorktree && !state.rejectedOutput && (!state.errorCode || stoppedTransport) && state.threadId && state.turnId) {
-                const proof = authenticateNativeFailure(store, owner, prior, requestKey, { code: stoppedTransport ? 'native_turn_transport_failed' : 'failed', message: state.state === 'failed' ? state.error! : prior.failure?.message ?? '', sessionId: checkpoint.session.sessionId, threadId: checkpoint.session.threadId ?? undefined, turnId: checkpoint.session.turnId ?? undefined }, readRecord, true)
+              const completedEventsRpc = allowCommitted && zcode && !!state && isZCodeEventsRpcTimeout(state)
+              if (native.request.purpose === 'elaboration_generate' && native.request.worktree?.mode === 'edit' && !native.request.frozenContext && state && (zcode || native.request.model?.startsWith('claude:')) && (state.state === 'cancelled' || zcode && state.state === 'failed') && state.cancellation?.nativeStopped && !state.failedWorktree && !state.resultWorktree && !state.rejectedOutput && (!state.errorCode || stoppedTransport || completedEventsRpc) && state.threadId && state.turnId) {
+                const proof = authenticateNativeFailure(store, owner, prior, requestKey, { code: completedEventsRpc ? 'native_rpc_timeout' : stoppedTransport ? 'native_turn_transport_failed' : 'failed', message: state.state === 'failed' ? state.error! : prior.failure?.message ?? '', sessionId: checkpoint.session.sessionId, threadId: checkpoint.session.threadId ?? undefined, turnId: checkpoint.session.turnId ?? undefined }, readRecord, true)
+                if (completedEventsRpc) assertStoppedEventsRpcDraft(prior, requestKey, proof)
                 const context = elaborationMaterialContext(operation.input.source.commonDir, native.request, request)
                 if (proof.record.base === native.request.worktree.baseCommit && proof.record.forkCommit === native.request.worktree.baseCommit && /草稿文件=([^\s；。]+)/.exec(native.request.prompt)?.[1] === request.binding.path && context) {
                   const prompt = nativeWorktreePrompt(native.request.prompt, native.request.worktree)
-                  const failed = zcode ? assertZCodeStoppedDraftSource(prompt, state as ZCodeStructuredExecution, proof.record.worktreePath) : undefined
+                  const failed = zcode ? assertZCodeStoppedDraftSource(prompt, (completedEventsRpc ? proof.state : state) as ZCodeStructuredExecution, proof.record.worktreePath) : undefined
                   if (zcode && failed === null) continue
                   if (!zcode) assertClaudeStoppedDraftSource(prompt, state, proof.record.worktreePath)
                   assertMaterialFence()
                   const physical = readStoppedPhysicalDraft(commonDir, proof.record.worktreePath, native.request.worktree, request.binding, { allowCommitted })
-                  if (physical) {
+                  if (physical && (!completedEventsRpc || physical.committedOid)) {
                     if (zcode && !failed) fail('stale_result', 'ZCode物理细化草稿没有原精确失败终态')
                     const errors = [...existingDraft?.errors ?? [], ...round.findings, ...source.result.failure ? [{ code: source.result.failure.code, message: source.result.failure.message }] : []]
                     if (physical.committedOid) {
@@ -1656,12 +1666,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
             const stoppedTransport = zcode && state?.state === 'failed' && state.errorCode === 'native_turn_transport_failed'
             if (!state || state.state !== 'cancelled' && !(zcode && state.state === 'failed') || !state.cancellation?.nativeStopped || !(zcode ? state.zcodeNative : state.claudeNative) || !state.threadId || !state.turnId || !checkpoint.session.threadId || !checkpoint.session.turnId || state.failedWorktree || state.resultWorktree || state.rejectedOutput || state.errorCode && !completedEventsRpc && !stoppedTransport) continue
             const proof = authenticateNativeFailure(store, owner, prior, requestKey, { code: completedEventsRpc ? 'native_rpc_timeout' : stoppedTransport ? 'native_turn_transport_failed' : 'failed', message: state.state === 'failed' ? state.error! : prior.failure?.message ?? '', sessionId: checkpoint.session.sessionId, threadId: checkpoint.session.threadId ?? undefined, turnId: checkpoint.session.turnId ?? undefined }, readRecord, true)
-            if (completedEventsRpc) {
-              const { status, nativeState, failure, result, session } = proof.checkpoint
-              if (!isZCodeEventsRpcTimeout(proof.state) || status !== 'failed' || nativeState !== 'failed' || failure?.code !== 'native_rpc_timeout' || failure.message !== proof.state.error || failure.failedWorktree || failure.rejectedOutput || result
-                || proof.state.failedWorktree || proof.state.resultWorktree || proof.state.rejectedOutput || proof.state.output !== undefined || proof.state.resultDigest !== undefined) fail('stale_result', 'ZCode events RPC草稿缺少原typed失败和结算原件')
-              if (canonical(prior.dispatchPlans.find(dispatch => dispatch.key === requestKey)?.session) !== canonical(session) || proof.record.harnessSessionId !== null && proof.record.harnessSessionId !== session.threadId) fail('stale_result', 'ZCode events RPC草稿缺少原完整派发与canonical Native身份')
-            }
+            if (completedEventsRpc) assertStoppedEventsRpcDraft(prior, requestKey, proof)
             const ownerDigest = contentHash(JSON.stringify({ version: 'code-behavior-draft-v1', source: canonicalSnapshotSource(operation.input.source), partitionId: key === 'analysis' ? null : key.slice('partition:'.length, -':analysis'.length), purpose }))
             const binding = { ownerDigest, sourceInputId: operation.input.id, schemaDigest, path: `.spex-sync-drafts/${ownerDigest}.json` }
             const seedEntries = readTree(operation.input.source.commonDir, native.request.worktree.tree)

@@ -213,6 +213,8 @@ partition_seal反馈不能删除此前已接受的稳定ID，也不能弱化作�
 
 多轮来源回归必须通过真实Coordinator：Native Spec→Code首轮真实scratch Git构建后6→1→1且后轮无伪prepared记录；两组交错失败为6→2→1→1，A的accept原ref/请求不变；合法文件规划新增源码和测试路径后保持同candidate只续审，不能以P1 evidence重新扩scope。有限预算剩1允许5cache+1failed，剩0由原硬限拒绝。受控Native6-owner长回归保持原30s lease及生产心跳代码，并记录续租间隔验证逐组yield，不调大生产期限。
 
+P1生成的ZCode `session/events` 超时续稿回归使用真实Git、私有SQLite和受控Native资源桥。验证单体及code_to_spec分区的正式失败与positive stopped原件，下一生成的Git种子须逐字复用原提交草稿、原schema和保护树，并携带原RPC诊断，后续正常提交及独审。校验其他RPC方法、派发身份缺失、缺exit/terminal、失败或取消终态、未提交修改、无新提交及保护路径变化均不能带入材料。原记录、Native原件、Git/index及已通过的P0保持。
+
 P1 `session/events` 独审超时回归用真实Git提交、隔离SQLite及受控Native资源桥。单体和分区仅新派发独审，原候选摘要、Git OID、生成trace及只读seed保持，新会话使用当前完整审查。覆盖v2原请求到v3独审、局部原件已落盘后的暂停、同一生成的仅续审暂停及较新生成保留优先权。错误停止、不同候选和任务末段不匹配在剩余预算内也不取得仅续审或重新生成资格。
 
 已有code映射、P1新增managed AC.test时无需implementation_plan；Native scratch实际创建测试后若评审格式失败，P1映射的原null扩域仍可承接，只续review，保持原candidate及原oracle/source/index。该路径与真实file-writer扩域分别证明，不借related或source字段取得写权。

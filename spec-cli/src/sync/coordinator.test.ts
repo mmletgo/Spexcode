@@ -206,19 +206,22 @@ test('14attempt/1790CAS历史扫描交还控制，同一30秒fence到达首次�
 })
 
 const zcodeCompletedRpcCases = (['none', 'request', 'thread', 'turn', 'missing-dispatch-session', 'null-dispatch-thread', 'null-dispatch-turn', 'harness-thread', 'rpc-method', 'unsettled', 'failed-observation', 'rpc-proof', 'stop', 'missing-exit', 'exit', 'idle', 'closed', 'idle-identity', 'no-terminal', 'failed-terminal', 'cancelled-terminal', 'terminal-json', 'terminal-kind', 'session', 'dirty', 'source', 'tests', 'schema', 'version', 'model', 'no-commit', 'fence'] as const).map(defect => ['zcode-completed-rpc', defect] as const)
+const zcodeP1CompletedRpcCases = (['none', 'partition', 'rpc-method', 'null-dispatch-thread', 'missing-exit', 'no-terminal', 'failed-terminal', 'cancelled-terminal', 'no-commit', 'dirty', 'source', 'schema'] as const).map(defect => ['zcode-p1-completed-rpc', defect] as const)
 const zcodeP1CommittedCases = (['none', 'ordinary-ignored', 'older-physical'] as const).map(defect => ['zcode-p1-transport-committed', defect] as const)
-const zcodeMaterialCases = [...(['zcode-old', 'zcode-new'] as const).flatMap(mode => (['none', 'prior-draft', 'session', 'send', 'turn', 'input', 'query', 'message', 'model', 'worktree', 'stop', 'seed', 'source', 'tests', 'schema', 'scope', 'request', 'exit', 'terminal', 'no-progress-cancelled', 'progress-cancelled', 'fence'] as const).map(defect => [mode, defect] as const)), ['zcode-new', 'failed-observation'] as const, ...(['none', 'no-commit', 'provider-code'] as const).map(defect => ['zcode-transport-git', defect] as const), ['zcode-p1-transport-dirty', 'none'] as const, ...zcodeP1CommittedCases, ...zcodeCompletedRpcCases, ...(['none', 'prior-draft', 'older-physical', 'staged', 'review', 'session', 'stop', 'seed', 'source', 'tests', 'schema', 'context', 'index', 'scope', 'worktree', 'fence', 'cas', 'missing-exit'] as const).map(defect => ['zcode-dirty', defect] as const), ...(['none', 'prior-draft', 'older-physical', 'missing-exit'] as const).map(defect => ['zcode-p1-dirty', defect] as const)]
+const zcodeMaterialCases = [...(['zcode-old', 'zcode-new'] as const).flatMap(mode => (['none', 'prior-draft', 'session', 'send', 'turn', 'input', 'query', 'message', 'model', 'worktree', 'stop', 'seed', 'source', 'tests', 'schema', 'scope', 'request', 'exit', 'terminal', 'no-progress-cancelled', 'progress-cancelled', 'fence'] as const).map(defect => [mode, defect] as const)), ['zcode-new', 'failed-observation'] as const, ...(['none', 'no-commit', 'provider-code'] as const).map(defect => ['zcode-transport-git', defect] as const), ['zcode-p1-transport-dirty', 'none'] as const, ...zcodeP1CommittedCases, ...zcodeP1CompletedRpcCases, ...zcodeCompletedRpcCases, ...(['none', 'prior-draft', 'older-physical', 'staged', 'review', 'session', 'stop', 'seed', 'source', 'tests', 'schema', 'context', 'index', 'scope', 'worktree', 'fence', 'cas', 'missing-exit'] as const).map(defect => ['zcode-dirty', defect] as const), ...(['none', 'prior-draft', 'older-physical', 'missing-exit'] as const).map(defect => ['zcode-p1-dirty', defect] as const)]
 for (const [mode, defect] of [['native-failure', 'no-progress-143'], ['native-failure', 'no-progress-143-foreign'], ['native-failure', 'no-progress-143-stop'], ['native-failure', 'no-progress-143-process'], ['native-failure', 'progress-143'], ['native-failure', 'none'], ['native-failure', 'prior-draft'], ['native-failure', 'session'], ['native-failure', 'user'], ['native-failure', 'exit'], ['native-failure', 'unknown'], ['native-failure', 'source'], ['native-failure', 'tests'], ['native-failure', 'stop'], ['missing-final', 'none'], ['pause', 'none'], ['pause', 'prior-draft'], ['missing-final', 'prior-draft'], ['pause', 'older-pause'], ['pause', 'not-started'], ['pause', 'no-commit'], ['missing-final', 'session'], ['missing-final', 'user'], ['missing-final', 'exit'], ['missing-final', 'unknown'], ['missing-final', 'completed'], ['pause', 'source'], ['pause', 'tests'], ['pause', 'scope'], ['pause', 'seed'], ['pause', 'thread'], ['pause', 'turn'], ['pause', 'schema'], ['pause', 'worktree'], ['pause', 'stop'], ['pause', 'request'], ...zcodeMaterialCases] as const) test(`旧Native无typed witness的新attempt仅观察最新Git材料，旧原件不补签 mode=${mode}/${defect}`, async t => {
-  const completedRpc = mode === 'zcode-completed-rpc'
+  const completedP1Rpc = mode === 'zcode-p1-completed-rpc', completedRpc = mode === 'zcode-completed-rpc' || completedP1Rpc
   const rpcFailure = `ZCode native RPC timeout (${defect === 'rpc-method' ? 'session/messages' : 'session/events'})`
-  const committedP1 = mode === 'zcode-p1-transport-committed'
-  const typedTransport = mode === 'zcode-transport-git' || mode === 'zcode-p1-transport-dirty' || committedP1
+  const committedP1 = mode === 'zcode-p1-transport-committed' || completedP1Rpc
+  const typedTransport = mode === 'zcode-transport-git' || mode === 'zcode-p1-transport-dirty' || mode === 'zcode-p1-transport-committed'
   const p1 = mode === 'zcode-p1-dirty' || mode === 'zcode-p1-transport-dirty' || committedP1, dirty = mode === 'zcode-dirty' || p1 && !committedP1, freshZCode = mode === 'zcode-new' || dirty || completedRpc || typedTransport
   const zcode = mode === 'zcode-old' || freshZCode, older = defect === 'older-pause' || defect === 'older-physical'
-  const onlyReview = defect === 'review', materialExpected = defect === 'none' || defect === 'ordinary-ignored' || defect === 'prior-draft' || older || defect === 'staged' || onlyReview
-  const f = await fixture(t, { maxAttempts: older ? 4 : 3, maxCalls: 6, maxRepairs: older ? 3 : 2, timeoutMs: 120000 }, false, original, 'project', original, { agentWorkflow: 'native-worktree-v1', ...(completedRpc ? { version: 'sync-coordinator-v2', direction: 'code_to_spec', sourcePaths: ['src/export.js'], partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 } } : {}) }, undefined, p1 ? 'spec' : 'code', zcode ? 'zcode:bigmodel-api/GLM-5.3-Flash' : 'claude:MiniMax-M3.1-Flash')
+  const partitionedP1 = completedP1Rpc && defect === 'partition'
+  const onlyReview = defect === 'review', materialExpected = defect === 'none' || defect === 'ordinary-ignored' || defect === 'prior-draft' || older || defect === 'staged' || onlyReview || partitionedP1
+  const f = await fixture(t, { maxAttempts: older ? 4 : 3, maxCalls: 6, maxRepairs: older ? 3 : 2, timeoutMs: 120000 }, false, original, 'project', original, { agentWorkflow: 'native-worktree-v1', ...(completedRpc && !p1 || partitionedP1 ? { version: 'sync-coordinator-v2', direction: 'code_to_spec', sourcePaths: ['src/export.js'], partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 } } : {}), ...(partitionedP1 ? { writePaths: ['.spec'], commitTrigger: { before: null, paths: ['src/export.js'] } } : {}) }, undefined, p1 && !partitionedP1 ? 'spec' : 'code', zcode ? 'zcode:bigmodel-api/GLM-5.3-Flash' : 'claude:MiniMax-M3.1-Flash', partitionedP1)
+  if (partitionedP1) f.store.expandContractScope = () => { throw Object.assign(new Error('分区P1原稿经独审后停止'), { code: 'unsupported' }) }
   if (p1) f.store.startGeneration = () => { throw Object.assign(new Error('P1原稿经真实提交及独审后停止，不运行P2'), { code: 'unsupported' }) }
-  if (committedP1) {
+  if (committedP1 && !partitionedP1) {
     const claimed = f.store.claimAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 30_000, expectedMessageId: f.operation.dispatchMessageId })
     const commonDir = f.input.source.commonDir, value = { version: 'elaboration-draft-v1', generationGuidance: 'ac-test-binding-v1' }, resultRef = writeEvidence(commonDir, value)
     const wrapper = writeEvidence(commonDir, { version: 'sync-stage-v1', operationId: f.operation.id, attemptId: claimed.attempt.id, inputId: f.input.id, policyDigest: f.operation.policyDigest, stage: 'elaboration-draft-protocol', resultRef })
@@ -251,15 +254,24 @@ for (const [mode, defect] of [['native-failure', 'no-progress-143'], ['native-fa
       const dispatch = attempt.dispatchPlans.find(item => item.key === request.requestKey)!, output = { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
       return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `independent-${dispatch.sessionCreateKey}`, turnId: 'review-turn', output, resultDigest: contentHash(JSON.stringify(output)) }
     }
-    if (onlyReview && request.purpose === 'code_behavior_analyze') {
-      assert.equal(++analysisCalls, 1, '已校验分析不得因review物理稿恢复而重做')
-      const path = /草稿文件=([^\s；]+)/.exec(request.prompt)![1], workspace = join(f.parent, 'ready-analysis'), seed = request.worktree!
+    if (onlyReview && request.purpose === 'code_behavior_analyze' || partitionedP1 && request.purpose.startsWith('code_behavior_')) {
+      if (request.purpose === 'code_behavior_analyze') assert.equal(++analysisCalls, 1, '已校验分析不得因下游草稿恢复而重做')
+      const path = /草稿文件=([^\s；]+)/.exec(request.prompt)![1], workspace = join(f.parent, `ready-${request.purpose}`), seed = request.worktree!
       f.git('worktree', 'add', '--detach', workspace, seed.baseCommit)
       const produced = await originalRunner({ ...request, prompt: inlineBehaviorPrompt(request, f.input.source.commonDir) })
       mkdirSync(join(workspace, path, '..'), { recursive: true }); writeFileSync(join(workspace, path), JSON.stringify(produced.output))
       execFileSync('git', ['-C', workspace, 'add', path], { stdio: 'pipe' }); execFileSync('git', ['-C', workspace, 'commit', '-m', 'ready original analysis'], { stdio: 'pipe' })
       const output = { summary: '原分析正常提交并等待独审' }
-      return { ...produced, output, resultDigest: contentHash(JSON.stringify(output)), worktree: nativeWorktreeResult(workspace, seed) }
+      const result = { ...produced, output, resultDigest: contentHash(JSON.stringify(output)), worktree: nativeWorktreeResult(workspace, seed) }
+      if (!partitionedP1) return result
+      const fence = { operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: operation.input.source.physicalFingerprint }
+      return createAttemptRunner(f.store, fence, { pollMs: 2, runtime: { readRecord, cancel: cancelStructuredSession, run: async actual => {
+        const { sessionId: session, threadId, turnId, resultDigest, worktree } = result, execution = structuredExecutionPolicy(actual)
+        const prompt = nativeWorktreePrompt(actual.prompt, actual.worktree!)
+        configuredSessionApplication().createSession({ sessionId: session, status: 'awaiting' })
+        writeRecord({ session, governed: true, worktreePath: workspace, base: seed.baseCommit, forkCommit: seed.baseCommit, branch: null, title: null, name: null, parent: null, issues: [], issue: null, proposal: null, merges: 0, note: null, sortKey: null, createdAt: Date.now(), harness: 'zcode', harnessSessionId: threadId, runtimeStartToken: null, status: 'awaiting', stopped: false, archived: false, closedAt: null, launcher: null, launchCmd: null, launchOwner: null, createRequestId: contentHash(actual.sessionCreateKey!), createPayloadHash: contentHash(JSON.stringify({ prompt, parent: null, launcher: null, base: seed.baseCommit, structuredExecution: execution })), structuredExecution: { ...execution, threadId, turnId, turnStartRequested: true, state: 'completed', output, resultDigest, resultWorktree: worktree } })
+        return result
+      } } })(request)
     }
     assert.equal(request.purpose, p1 ? 'elaboration_generate' : onlyReview ? 'code_behavior_review' : 'code_behavior_analyze')
     const path = /草稿文件=([^\s；]+)/.exec(request.prompt)![1], workspace = join(f.parent, `observed-${attempt.number}${coldReserved && reservedRequest && !reservedReplayed ? '-cold' : ''}`), seed = request.worktree!
@@ -279,7 +291,7 @@ for (const [mode, defect] of [['native-failure', 'no-progress-143'], ['native-fa
     }
     if (originalRequest) {
       if (defect === 'missing-exit') assert.equal(missingExitInjected, true, 'missing-exit观察必须发生在退出sidecar移除之后')
-      if (defect === 'missing-exit' && !p1 || completedRpc && ['no-terminal', 'failed-terminal', 'cancelled-terminal'].includes(defect)) {
+      if (!p1 && (defect === 'missing-exit' || completedRpc && ['no-terminal', 'failed-terminal', 'cancelled-terminal'].includes(defect))) {
         const prior = readCodeBehaviorContext(originalRequest, f.input.source.commonDir), current = readCodeBehaviorContext(request, f.input.source.commonDir)
         assert.deepEqual(current.errors, completedRpc ? [...prior.errors, { code: 'native_rpc_timeout', message: rpcFailure }] : prior.errors, '跳过无资格材料时保原业务错误及已结算typed RPC诊断')
         for (const diagnostic of prior.repairDiagnostics) assert(current.repairDiagnostics.some(value => JSON.stringify(value) === JSON.stringify(diagnostic)), '跳过无资格材料时保原诊断')
@@ -287,7 +299,7 @@ for (const [mode, defect] of [['native-failure', 'no-progress-143'], ['native-fa
       if (!materialExpected) { assert.equal(existsSync(join(workspace, path)), false, '不合格或无稿的旧记录不能向新seed投影正文'); restartedWithoutMaterial = true; throw Object.assign(new Error('反例安全进入新派发且无旧材料'), { code: 'unsupported' }) }
       if (completedRpc) assert.equal(existsSync(join(workspace, path)), true, 'exact completed的已结算session/events RPC失败须把正常Git稿续入新seed')
       assert.equal(contentHash(readFileSync(join(workspace, path))), contentHash(older ? priorText : latest), '必须取最新normal Git正文SHA，不能回原seed或旧59010字节')
-      if (completedRpc) {
+      if (completedRpc && !p1) {
         assert.doesNotMatch(request.prompt, /untrusted terminal text/)
         const old = readCodeBehaviorContext(originalRequest, f.input.source.commonDir), current = readCodeBehaviorContext(request, f.input.source.commonDir)
         assert.deepEqual(current.errors, [...old.errors, { code: 'native_rpc_timeout', message: rpcFailure }], '续稿保原错误并保本次精确RPC诊断')
@@ -309,7 +321,10 @@ for (const [mode, defect] of [['native-failure', 'no-progress-143'], ['native-fa
       else assert.doesNotMatch(request.prompt, /missing required structured_output/, '普通暂停不能伪加缺final分类')
       continued = true
       if (p1 && !older) {
-        assert.match(request.prompt, /EPIPE/)
+        if (completedP1Rpc) {
+          assert(request.prompt.includes(rpcFailure), '续修保留原RPC超时诊断')
+          assert.doesNotMatch(request.prompt, /untrusted terminal text/)
+        } else assert.match(request.prompt, /EPIPE/)
         if (coldReserved && !reservedReplayed) {
           const { signal: _signal, ...payload } = request
           if (!reservedRequest) {
@@ -327,7 +342,8 @@ for (const [mode, defect] of [['native-failure', 'no-progress-143'], ['native-fa
         }
         const protectedEntries = (tree: string) => readTree(f.input.source.commonDir, tree).filter(entry => entry.path !== path)
         assert.deepEqual(protectedEntries(seed.tree), protectedEntries(originalRequest.worktree!.tree), '新P1 seed只复制精确原稿，原readonly overlay/schema/source/tests全保')
-        writeFileSync(join(workspace, path), JSON.stringify(adaptElaborationNativeOutput(request, rows(original))))
+        const draft = partitionedP1 ? { version: 'elaboration-target-rows-v3', changes: [], applicability: ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: true, basis: '沿用完整冻结契约及已有边界', affectedIds: ['REQ-EXPORT-01'] })) } : adaptElaborationNativeOutput(request, rows(original))
+        writeFileSync(join(workspace, path), JSON.stringify(draft))
         execFileSync('git', ['-C', workspace, 'add', path], { stdio: 'pipe' }); execFileSync('git', ['-C', workspace, 'commit', '-m', 'repair original stopped physical draft'], { stdio: 'pipe' })
         const dispatch = attempt.dispatchPlans.find(item => item.key === request.requestKey)!, output = { summary: '原物理稿续改后正常提交' }
         return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `repaired-${dispatch.sessionCreateKey}`, turnId: 'generation-turn', output, resultDigest: contentHash(JSON.stringify(output)), worktree: nativeWorktreeResult(workspace, seed) }
@@ -404,8 +420,9 @@ for (const [mode, defect] of [['native-failure', 'no-progress-143'], ['native-fa
     assert.equal(resumedAttempt.dispatchPlans.find(dispatch => dispatch.key === reservation.key)?.requestDigest, reservation.requestDigest)
     assert.equal(resumedAttempt.checkpointRefs.filter(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()).stage === 'elaboration:stopped-git-material-provenance').length, 1)
   }
-  if (defect === 'missing-exit' || completedRpc) assert.equal(initialResult.status, 'paused', JSON.stringify({ message: '先暂停首次失败，确保原资源已结算后才进入新材料观察', failure: initialResult.failure, attempts: f.store.listAttempts(f.operation.id).map(({ status, failure }) => ({ status, failure })) }))
-  if (p1 && (defect === 'none' || defect === 'ordinary-ignored')) {
+  if (partitionedP1) assert.equal(initialResult.operation.control, 'pause')
+  if (defect === 'missing-exit' || completedRpc && !partitionedP1) assert.equal(initialResult.status, 'paused', JSON.stringify({ message: '先暂停首次失败，确保原资源已结算后才进入新材料观察', failure: initialResult.failure, attempts: f.store.listAttempts(f.operation.id).map(({ status, failure }) => ({ status, failure })) }))
+  if (p1 && !completedRpc && (defect === 'none' || defect === 'ordinary-ignored')) {
     const attempts = f.store.listAttempts(f.operation.id)
     assert.equal(attempts.length, 2, '旧generic与新typed沿同一P1既有修复预算')
     assert.equal(attempts[0].failure?.kind, 'repairable')
@@ -413,18 +430,24 @@ for (const [mode, defect] of [['native-failure', 'no-progress-143'], ['native-fa
   }
   assert(oldSession, JSON.stringify({ initial: initialResult.failure, attempts: f.store.listAttempts(f.operation.id).map(attempt => ({ number: attempt.number, failure: attempt.failure })) }))
   if (completedRpc) {
-    const [attempt] = f.store.listAttempts(f.operation.id), dispatch = attempt.dispatchPlans.find(item => item.purpose === 'code_behavior_analyze')!
-    assert.match(dispatch.key, /:analysis:partition:[^:]+:code_behavior_analyze$/)
+    const [attempt] = f.store.listAttempts(f.operation.id), dispatch = attempt.dispatchPlans.find(item => item.purpose === (p1 ? 'elaboration_generate' : 'code_behavior_analyze'))!
+    assert.match(dispatch.key, p1 ? /:elaborate(?::partition:[^:]+)?:0:elaboration_generate$/ : /:analysis:partition:[^:]+:code_behavior_analyze$/)
+    if (partitionedP1) assert.match(dispatch.key, /:elaborate:partition:[^:]+:0:elaboration_generate$/)
     assert.equal(attempt.failure?.code, 'native_rpc_timeout'); assert.equal(attempt.failure?.kind, 'repairable')
     const resource = f.store.findResource(attempt.id, dispatch.key)!, checkpoint = JSON.parse(readEvidence(f.input.source.commonDir, resource.checkpointRef).toString()) as NativeRunCheckpoint
     assert.equal(resource.phase, 'removed'); assert.equal(checkpoint.nativeState, 'failed'); assert.equal(checkpoint.status, 'failed'); assert.equal(checkpoint.stop?.nativeStopped, true)
     assert.deepEqual(dispatch.session, checkpoint.session)
     assert.deepEqual(checkpoint.failure, { code: 'native_rpc_timeout', message: rpcFailure })
     assert.equal(checkpoint.result, undefined)
-    const continuation = attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(wrapper => wrapper.stage.endsWith(':analysis:continuation'))
-    assert.ok(continuation)
-    const saved = JSON.parse(readEvidence(f.input.source.commonDir, continuation.resultRef).toString())
-    assert.equal(saved.readyAnalysis, undefined); assert.deepEqual(saved.drafts, {})
+    const stage = attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(wrapper => p1 ? partitionedP1 ? /^partition:[^:]+:elaboration$/.test(wrapper.stage) : wrapper.stage === 'elaboration' : wrapper.stage.endsWith(':analysis:continuation'))
+    assert.ok(stage)
+    const saved = JSON.parse(readEvidence(f.input.source.commonDir, stage.resultRef).toString())
+    if (p1) {
+      assert.equal(saved.status, 'failed'); assert.equal(saved.failure.code, 'native_rpc_timeout')
+      assert(saved.rounds.every((round: { draft?: unknown }) => !round.draft))
+    } else {
+      assert.equal(saved.readyAnalysis, undefined); assert.deepEqual(saved.drafts, {})
+    }
     const witness = nativeWorktreeResult(oldPath, originalRequest!.worktree!)
     const path = /草稿文件=([^\s；]+)/.exec(originalRequest!.prompt)![1]
     if (defect === 'no-commit') assert.equal(witness.headCommit, witness.baseCommit)
@@ -544,19 +567,19 @@ for (const [mode, defect] of [['native-failure', 'no-progress-143'], ['native-fa
   assert.equal(execFileSync('git', ['-C', oldPath, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), latestHead)
   const current = f.store.listAttempts(f.operation.id).at(-1)!, observed = (p1 && !older ? f.store.listAttempts(f.operation.id).flatMap(attempt => attempt.checkpointRefs) : current.checkpointRefs).map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(wrapper => wrapper.stage.endsWith(dirty ? ':stopped-physical-material-provenance' : ':stopped-git-material-provenance'))
   if (completedRpc) {
-    assert.equal(current.candidate, null); assert.equal(current.verification, null)
+    if (!p1 || !materialExpected) { assert.equal(current.candidate, null); assert.equal(current.verification, null) }
     assert.equal(f.store.listJournals(f.operation.id).length, 0)
     assert.ok(current.checkpointRefs.every(ref => !JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()).stage.endsWith(':stopped-physical-material-provenance')))
     assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes); assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
     assert.deepEqual(readFileSync(join(f.root, 'tests/export.test.mjs')), readFileSync(new URL('tests/export.test.mjs', fixturePath)))
     if (!materialExpected) {
-      const skip = ['rpc-method', 'unsettled', 'missing-exit', 'no-terminal', 'failed-terminal', 'cancelled-terminal', 'no-commit'].includes(defect)
+      const skip = ['rpc-method', 'unsettled', 'missing-exit', 'no-terminal', 'failed-terminal', 'cancelled-terminal', 'no-commit'].includes(defect) || completedP1Rpc && defect === 'dirty'
       assert.equal(restartedWithoutMaterial, skip, JSON.stringify({ message: '仅无资格/无进度来源可跳过，其余须明确拒绝', failure: result.failure }))
       if (['request', 'thread', 'turn', 'stop', 'failed-observation'].includes(defect)) assert.equal(result.failure?.code, 'checkpoint_artifact_binding')
       if (['rpc-proof', 'exit', 'idle', 'closed', 'idle-identity', 'terminal-kind', 'session', 'version', 'model', 'missing-dispatch-session', 'null-dispatch-thread', 'null-dispatch-turn', 'harness-thread'].includes(defect)) assert.equal(result.failure?.code, 'stale_result', JSON.stringify(result.failure))
-      if (defect === 'dirty') assert.equal(current.failure?.code, 'native_worktree_result_invalid')
+      if (defect === 'dirty' && !p1) assert.equal(current.failure?.code, 'native_worktree_result_invalid')
       if (defect === 'terminal-json') assert.match(result.failure!.message, /JSON/)
-      if (['source', 'tests', 'schema'].includes(defect)) assert.match(result.failure!.message, /同步仅允许正常提交指定UTF8草稿文件/)
+      if (['source', 'tests', 'schema'].includes(defect)) assert.match(result.failure!.message, p1 ? /已停物理草稿的owner\/seed、只读文件或index发生越界变化/ : /同步仅允许正常提交指定UTF8草稿文件/)
     }
   }
   if (defect === 'missing-exit' && p1) {
@@ -572,11 +595,17 @@ for (const [mode, defect] of [['native-failure', 'no-progress-143'], ['native-fa
     assert.equal(restartedWithoutMaterial, true, 'P1在缺exit候选未投影后沿原失败语义结束')
     return
   }
-  if (p1 && !older) {
+  if (p1 && !older && (!completedRpc || materialExpected)) {
     const wrapper = current.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(wrapper => wrapper.stage === 'elaboration')!
     const result = JSON.parse(readEvidence(f.input.source.commonDir, wrapper.resultRef).toString()) as ElaborationResult
     assert.equal(result.reviewPassed, true, JSON.stringify(result.failure)); assert(result.rounds.at(-1)?.draft?.resultCommit)
     assert.notEqual(result.rounds.at(-1)?.traces.find(trace => trace.purpose === 'elaboration_generate')?.sessionId, result.rounds.at(-1)?.traces.find(trace => trace.purpose === 'elaboration_review')?.sessionId)
+    if (partitionedP1) {
+      const dispatches = f.store.listAttempts(f.operation.id).flatMap(attempt => attempt.dispatchPlans)
+      assert.equal(dispatches.filter(dispatch => dispatch.purpose === 'code_behavior_analyze').length, 1)
+      assert.equal(dispatches.filter(dispatch => dispatch.purpose === 'code_behavior_review').length, 1)
+      assert.equal(dispatches.some(dispatch => dispatch.purpose === 'code_generate'), false)
+    }
   }
   if (older) { assert.equal(observed, undefined, '较旧物理来源即使在新fence晚观察，也不能覆盖更新正常Git稿'); return }
   if (!materialExpected) { assert.equal(observed, undefined); return }
@@ -585,7 +614,7 @@ for (const [mode, defect] of [['native-failure', 'no-progress-143'], ['native-fa
   if (dirty) { assert.equal(provenance.resultCommit, undefined); assert.equal(provenance.oid, undefined); assert.equal(JSON.parse(readEvidence(f.input.source.commonDir, provenance.materialRef).toString()).source, latest) }
   if (committedP1) {
     const oldAttempt = oldAttempts.find(attempt => attempt.number === originalAttemptNumber)!
-    const oldResource = oldResources.find(resource => resource.attemptId === oldAttempt.id)!
+    const oldResource = completedRpcResource ?? oldResources.find(resource => resource.attemptId === oldAttempt.id)!
     assert.equal(provenance.fromAttemptId, oldAttempt.id)
     assert.deepEqual(provenance.nativePlanRef, oldResource.plan.planBlob); assert.deepEqual(provenance.checkpointRef, oldResource.checkpointRef)
     assert.deepEqual(provenance.originalFailure, oldAttempt.failure)
