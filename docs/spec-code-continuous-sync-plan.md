@@ -245,7 +245,7 @@ Dashboard 的同步模式不能继续“先把新 Spec 独立提交到 main，�
 
 自身写入只有在来源和实际字节都符合登记结果时才被归为本操作回声；Agent 运行期间的额外用户编辑仍然进入新输入。不能用一个“正在同步”布尔值忽略所有文件变化。
 
-混合旧新资源基线的采纳消费只沿当前精确selection对应的真实settled receipt证明，不按最新pair、Git消息或相同tree猜测。当前source/HEAD/tree、完整scope、四门及commit parent/effect须匹配；已消费提交到该parent仅可无差量，或完整项目配置JSON只改变sync.model且mode不变，parent与current配置仍逐字绑定原input及当前重新授权。其他配置政策或未消费code/Spec/docs继续进入原观察，外部同tree新commit也不冒认receipt。观察只复用纯只读证明与原baseline消费记录，物理暂停不制造写入准入错误，也不派模型或改写完成状态；正式adopt写入门保持。
+混合旧新资源基线的采纳消费只沿当前精确selection对应的真实settled receipt证明，不按最新pair、Git消息或相同tree猜测。当前source/HEAD/tree、完整scope、四门及commit parent/effect须匹配。已消费提交到该parent仅可无差量，或唯一普通项目配置JSON变化且mode不变，parent与current配置仍逐字绑定原input及当前重新授权。该完整交付已按input冻结的配置政策通过四门，配置字段不另设消费名册。未由该receipt逐字绑定的配置或未消费code/Spec/docs继续进入原观察，外部同tree新commit也不冒认receipt。观察只复用纯只读证明与原baseline消费记录，物理暂停不制造写入准入错误，也不派模型或改写完成状态。正式adopt写入门保持。
 
 快照采集前后核对 HEAD、分支身份、index、文件集合和内容摘要，期间发生保存或切分支则重试，不使用前后不一致的混合快照。确认的输入保存为不可变 overlay，生成与验证使用相同输入。快照与 journal 是可恢复运行记录，不是第二份可编辑源码或业务契约。
 

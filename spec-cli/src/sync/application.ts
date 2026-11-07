@@ -408,12 +408,7 @@ export class SyncApplication {
       const prior = verifySnapshot(before).find(entry => entry.path === '.spec/spexcode.json')
       if (!prior || prior.mode !== parent.mode) continue
       readSyncSettings(before)
-      const withoutModel = (oid: string): string => {
-        const project = JSON.parse(readObject(commonDir, oid).toString('utf8')) as { sync: Record<string, unknown> }
-        delete project.sync.model
-        return JSON.stringify(project, (_key, value: unknown) => value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value)
-      }
-      if (withoutModel(prior.oid) === withoutModel(parent.oid)) return true
+      return true
     }
     return false
   }
