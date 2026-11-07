@@ -9,13 +9,23 @@ import { gzipSync } from 'node:zlib'
 const hash = value => createHash('sha256').update(value).digest('hex')
 const json = value => JSON.stringify(value)
 const inside = (root, path) => path === root || path.startsWith(root + sep)
+/**
+ * @param {{effect: {kind: string}, args?: readonly string[], maxBytes?: number, reporter?: string, exportDigest?: string, runnerDigest?: string, containerId?: string, cwd?: string}} request
+ * @returns {string}
+ */
 export const verificationEffectDigest = request => hash(json({ kind: request.effect.kind, args: request.args ?? null, maxBytes: request.maxBytes ?? null, reporter: request.reporter ?? null, exportDigest: request.exportDigest ?? null, runnerDigest: request.runnerDigest ?? null, containerId: request.containerId ?? null, cwd: request.cwd ?? null }))
 const safePath = path => {
   if (!path || path.includes('\\') || path.includes('\0') || isAbsolute(path) || path.split('/').some(part => !part || part === '.' || part === '..' || part.toLowerCase() === '.git')) throw new Error('不合法的候选路径')
   return path
 }
 
-/** 本地与SSH使用同一walker；缺省保留旧本地摘要的路径字节。 */
+/**
+ * 本地与SSH使用同一walker；缺省保留旧本地摘要的路径字节。
+ * @param {string} source
+ * @param {string=} destination
+ * @param {boolean=} portable
+ * @returns {Promise<string>}
+ */
 export async function verificationExportDigest(source, destination, portable = false) {
   const root = await fs.realpath(source), digest = createHash('sha256')
   const visit = async directory => {
@@ -265,7 +275,11 @@ async function executeEffect(current, request, options, stream) {
   return receipt
 }
 
-/** 一次性worker脱离SSH；所有实际副作用在同run锁内。 */
+/**
+ * 一次性worker脱离SSH；所有实际副作用在同run锁内。
+ * @param {{dockerProgram?: string, flockProgram?: string, replyWaitMs?: number}=} options
+ * @returns {Promise<void>}
+ */
 export async function verificationSshWorker(options = {}) {
   const request = await readHeader(process.stdin)
   const initial = scope(request), reply = join(initial.control, 'replies', request.requestId + '.json')
@@ -275,7 +289,11 @@ export async function verificationSshWorker(options = {}) {
   } catch (error) { atomic(initial.root, reply, { ok: false, error: String(error) }) }
 }
 
-/** SSH入口只启动一次性worker或执行只读观察；候选帧永远只是数据。 */
+/**
+ * SSH入口只启动一次性worker或执行只读观察；候选帧永远只是数据。
+ * @param {{dockerProgram?: string, flockProgram?: string, replyWaitMs?: number}=} options
+ * @returns {Promise<void>}
+ */
 export async function verificationSshMain(options = {}) {
   try {
     const request = await readHeader(process.stdin)

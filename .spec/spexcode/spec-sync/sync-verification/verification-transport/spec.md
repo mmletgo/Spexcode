@@ -7,6 +7,7 @@ code:
   - spec-cli/src/sync/verification-transport.ts
 related:
   - spec-cli/src/sync/verification-transport.test.ts
+  - spec-cli/src/sync/verification-transport-build.test.ts
 ---
 # 验证主机与候选运输
 

@@ -6,7 +6,6 @@ desc: 可信Node helper共享摘要并用单run内核锁、effect原件与closed
 code:
   - spec-cli/src/sync/verification-remote-helper.mjs
 related:
-  - spec-cli/src/sync/verification-remote-helper.d.mts
   - spec-cli/src/sync/verification-transport.test.ts
 ---
 # 远端验证副作用排空
@@ -16,6 +15,8 @@ related:
 SSH 断线不能把仍在运行的上传、Docker CLI 或未知 API 请求当作已停止；清理后旧请求不得重建资源。
 
 ## expanded spec
+
+helper作为实际.mjs运行时随正常NodeNext/allowJs构建和dist发布，导出精确JSDoc供TypeScript使用，不放同名.d.mts遮蔽真实模块。构建回归必须正常编译后由实际consumer import并进入发布清单，source-only测试不能替代产物证明。
 
 本地与远端使用同一 export walker：逐层 JS readdir().sort() 深度优先，file 按相对POSIX路径、mode&0111、原bytes摘要，directory 与 symlink 文本按既有NUL格式摘要。原 v1 本地摘要保留；v2 运输统一POSIX路径。拒绝Git、宿主依赖、特殊文件和绝对/越界/悬空/循环链接。任何文件/目录写入、rename、清理前逐级拒绝 symlink parent，物化先普通文件后链接；末尾认证不能替代写前保护。
 
