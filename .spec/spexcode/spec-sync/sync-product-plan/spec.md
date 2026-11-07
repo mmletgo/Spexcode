@@ -14,6 +14,8 @@ P0至P5按完整需求交付，不以阶段演示、局部测试或可修改的�
 
 ## expanded spec
 
+已审只读事实返修的原因果不因pending清空而丢失，普通恢复沿最新已认证正文和原独审输入继续。旧cleared checkpoint只从同attempt原历史冷验，不补旧原件。原诊断属于请求绑定，只有无新修复输入且完整原件一致时承接，不能忽略字段来复用旧审查。
+
 V3恢复债由[[sync-coordinator]]沿同一run/resource/checkpoint在正常调度继续观察，不能永久复用recovery_required缓存。原失败、候选、deadline与资源真实性门保持，原期限后的未知副作用仅经正式排空与清算结算，不以新模型、新run或取消当前Native替代。
 
 V3主机选择与真实候选运输遵循[[verification-transport]]，远端effect排空遵循[[verification-remote-helper]]：部署与同机Unix Docker endpoint来自可信server，原operation/attempt/fence/run及正式receipt保持。SSH断线不证明停止，原终态先持久、容器与临时staging确证清算后才释放容量；未知提交保留recovery_required，环境probe不替代正式产品V3。四层验证、作者授权、模型原生配置及最终完整产品验收边界不变。

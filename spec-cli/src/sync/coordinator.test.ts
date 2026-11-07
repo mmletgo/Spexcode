@@ -7448,8 +7448,17 @@ for (const frozen of ['new', 'legacy-checkpoint', 'reserved', 'null', 'empty', '
   if (reserved) assert.equal(JSON.stringify(attempt.dispatchPlans.find(dispatch => dispatch.key === reserved.key)), reservedBytes)
 })
 
-test('V4已审owner经无failure暂停和SQLite重启，新V5两次不同事实返修继承确定值且不累计权限', async t => {
-  const f = await fixture(t, { mode: 'unlimited' }, false, original, 'project', original, { version: 'sync-coordinator-v2', agentWorkflow: 'native-worktree-v1', direction: 'code_to_spec', intentNodeId: 'project', sourcePaths: ['src/export.js'], writePaths: ['.spec'], targets: [{ nodeId: 'export-contract', path: contractPath }], partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 } }, undefined, 'code', 'claude:default', true, { '.spec/project/spec.md': '---\ntitle: 导出项目\n---\n## raw source\n\n保留完整导出约定，由既有叶契约和实现承接。\n' }, true)
+for (const mode of ['original', 'resume', 'legacy-cleared', 'missing-cause', 'conflicting-cause'] as const) test(`V4已审owner经无failure暂停和SQLite重启，新V5两次不同事实返修继承确定值且不累计权限 mode=${mode}`, { timeout: 120000 }, async t => {
+  const replay = mode !== 'original', remote = replay ? remoteVerificationFixture(t, false, true) : undefined
+  const verification = parseContract({ nodeId: 'export-contract', path: contractPath, source: original }).contract!.items.find(item => item.kind === 'VERIFY')!
+  assert.equal(verification.kind, 'VERIFY')
+  const environment = remote && (await remote.request()).policy
+  const f = await fixture(t, { mode: 'unlimited' }, false, original, 'project', original, { version: 'sync-coordinator-v2', agentWorkflow: 'native-worktree-v1', direction: 'code_to_spec', intentNodeId: 'project', sourcePaths: ['src/export.js'], writePaths: ['.spec'], targets: [{ nodeId: 'export-contract', path: contractPath }], partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 }, ...(environment ? { verifications: [{ definition: { id: verification.id, command: verification.command, cwd: verification.cwd, timeoutMs: verification.timeoutMs }, environment }] } : {}) }, undefined, 'code', 'claude:default', true, { '.spec/project/spec.md': '---\ntitle: 导出项目\n---\n## raw source\n\n保留完整导出约定，由既有叶契约和实现承接。\n' }, true)
+  if (remote) {
+    const previousPath = process.env.PATH
+    process.env.PATH = remote.temporary + ':' + previousPath; t.after(() => { process.env.PATH = previousPath })
+    f.options.verificationTransport = remote.configuration
+  }
   const commonDir = f.input.source.commonDir, protectedObjects = readTree(commonDir, f.input.immutableTree).filter(entry => !entry.path.startsWith('.spec/'))
   const calls: { attempt: number; purpose: string }[] = []
   let legacy: { ref: { sha256: string }; bytes: Buffer; attemptId: string } | undefined, finalV1 = false
@@ -7507,9 +7516,13 @@ test('V4已审owner经无failure暂停和SQLite重启，新V5两次不同事实�
     } else if (request.purpose === 'elaboration_review') output = { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
     else if (request.purpose === 'code_review') {
       const identity = JSON.parse(request.prompt.split('候选绑定:\n')[1].split('\n')[0]) as { inputId: string; candidateDigest: string; requiredIds: string[] }
-      if (attempt.number === 5) { finalV1 = true; throw Object.assign(new Error('V5完整P1与V1已证，Docker前停止'), { code: 'unsupported' }) }
+      if (attempt.number >= 5) {
+        finalV1 = true
+        if (!replay) throw Object.assign(new Error('V5完整P1与V1已证，Docker前停止'), { code: 'unsupported' })
+        output = { inputId: identity.inputId, candidateDigest: identity.candidateDigest, verdict: 'accept', checkedIds: identity.requiredIds, findings: [] }
+      }
       const id = attempt.number === 1 ? 'RULE-EXPORT-05' : 'RULE-EXPORT-02'
-      output = { inputId: identity.inputId, candidateDigest: identity.candidateDigest, verdict: 'repair', checkedIds: identity.requiredIds, findings: [{ kind: 'repair', affectedIds: [id], ruleLocation: `${contractPath}#${id}`, codeLocation: 'src/export.js#ExportService', evidence: '原实现已满足契约，旧依据仍称待实现', counterexample: '当前代码与旧事实说明不一致', message: '仅刷新本次命中的basis和desc/expanded，保全部业务列与源码/tests及之前批准的事实值' }] }
+      if (attempt.number < 5) output = { inputId: identity.inputId, candidateDigest: identity.candidateDigest, verdict: 'repair', checkedIds: identity.requiredIds, findings: [{ kind: 'repair', affectedIds: [id], ruleLocation: `${contractPath}#${id}`, codeLocation: 'src/export.js#ExportService', evidence: '原实现已满足契约，旧依据仍称待实现', counterexample: '当前代码与旧事实说明不一致', message: '仅刷新本次命中的basis和desc/expanded，保全部业务列与源码/tests及之前批准的事实值' }] }
     } else assert.fail(request.purpose)
     const dispatch = attempt.dispatchPlans.find(dispatch => dispatch.key === request.requestKey)!
     let worktree: ReturnType<typeof nativeWorktreeResult> | undefined
@@ -7584,4 +7597,58 @@ test('V4已审owner经无failure暂停和SQLite重启，新V5两次不同事实�
   assert.equal(final.candidateValidated, true)
   assert.deepEqual(readTree(commonDir, final.candidate.tree).filter(entry => !entry.path.startsWith('.spec/')), protectedObjects)
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.equal(store.listJournals(f.operation.id).length, 0)
+  if (!replay) return
+  assert.equal(result.status, 'recovery_required', JSON.stringify(result.failure))
+  const approvedAttempt = store.readAttempt(result.operation.currentAttemptId!), immutableRefs = [...approvedAttempt.checkpointRefs]
+  const callsBefore = [...calls], candidateBefore = approvedAttempt.candidate!, originalFailure = store.listResources(approvedAttempt.id).find(resource => resource.plan.kind === 'verification')!
+  const observed = await runSyncOperation(store, f.operation.id, f.options)
+  assert.equal(observed.status, 'recovery_required'); assert.deepEqual(calls, callsBefore, '同attempt清pending不重派已完成P1或独审')
+  const wrappers = () => readSyncCheckpoints(store, store.readOperation(f.operation.id), store.readAttempt(approvedAttempt.id)).json.map(item => item.value as { stage?: string; resultRef: { sha256: string } }).filter(item => item.stage)
+  const latestRepair = wrappers().find(wrapper => wrapper.stage === 'repair-input')!, savedRepair = JSON.parse(readEvidence(commonDir, latestRepair.resultRef).toString())
+  if (mode !== 'resume') {
+    const initialRepair = wrappers().filter(wrapper => wrapper.stage === 'repair-input').map(wrapper => JSON.parse(readEvidence(commonDir, wrapper.resultRef).toString())).find(value => value.readonlyOwnerRepair)!
+    const value = mode === 'conflicting-cause' ? { ...initialRepair, readonlyBaseRef: writeEvidence(commonDir, { unapproved: 'foreign readonly base' }) } : { repairContext: savedRepair.repairContext }
+    const checkpointRef = writeEvidence(commonDir, { version: 'sync-stage-v1', operationId: f.operation.id, attemptId: approvedAttempt.id, inputId: f.input.id, policyDigest: f.operation.policyDigest, stage: 'repair-input', resultRef: writeEvidence(commonDir, value), readSetDigest: store.readOperation(f.operation.id).readSetDigest, baselineSelectionRef: writeEvidence(commonDir, store.readBusinessBaselineSelection(f.operation.id)) })
+    store.checkpoint({ operationId: f.operation.id, attemptId: approvedAttempt.id, generation: approvedAttempt.generation, leaseToken: approvedAttempt.leaseToken, sourceFingerprint: f.input.source.physicalFingerprint }, { ...checkpointRef, artifacts: syncCheckpointArtifacts(value, writeEvidence(commonDir, value)) })
+    if (mode === 'missing-cause') {
+      // 仅在隔离fixture剥去因果wrapper引用，CAS原字节不变，核缺证不得回选旧正文。
+      const current = store.readAttempt(approvedAttempt.id), checkpointRefs = current.checkpointRefs.filter(ref => {
+        const wrapper = JSON.parse(readEvidence(commonDir, ref).toString())
+        return wrapper.stage !== 'repair-input' || !JSON.parse(readEvidence(commonDir, wrapper.resultRef).toString()).readonlyOwnerRepair
+      })
+      protocol.withTransaction(tx => tx.exec('UPDATE sync_attempts SET record_json=? WHERE id=?', JSON.stringify({ ...current, checkpointRefs }), current.id))
+    }
+  }
+  store.requestControl(f.operation.id, 'pause')
+  assert.equal((await runSyncOperation(store, f.operation.id, f.options)).status, 'paused')
+  assert.equal(store.readResource(originalFailure.id).phase, 'removed', '正式pause沿原恢复协议结算既有资源')
+  store.requestControl(f.operation.id, 'run')
+  result = await runSyncOperation(store, f.operation.id, f.options)
+  if (mode === 'missing-cause' || mode === 'conflicting-cause') {
+    assert.equal(result.failure?.code, 'readonly_spec_repair_binding', JSON.stringify({ status: result.status, failure: result.failure }))
+    assert.deepEqual(calls, callsBefore, '缺失或冲突因果在任何新模型前拒绝')
+    return
+  }
+  assert.equal(result.status, 'recovery_required', JSON.stringify(result.failure))
+  const resumed = store.readAttempt(result.operation.currentAttemptId!)
+  assert.equal(resumed.number, 6); assert.notEqual(resumed.leaseToken, approvedAttempt.leaseToken)
+  assert.deepEqual(resumed.candidate, candidateBefore, '新fence仍取最新两轮事实修正后的完整同一候选')
+  assert.deepEqual(calls, callsBefore, '普通pause/run不重派P0/P1或任何已accept final review')
+  const resumedStages = readSyncCheckpoints(store, result.operation, resumed).json.map(item => item.value as { stage?: string; resultRef: { sha256: string } }).filter(item => item.stage)
+  const resumedWhole = JSON.parse(readEvidence(commonDir, resumedStages.find(stage => stage.stage === 'elaboration')!.resultRef).toString()) as ElaborationResult
+  assert.deepEqual(resumedWhole.changes, whole.changes, '最新已审desc、expanded与两条basis保持，不能回选旧已审whole')
+  const reviews = wrappers().filter(stage => stage.stage?.endsWith(':candidate-review'))
+  assert.equal(reviews.length, 1)
+  for (const review of reviews) {
+    assert.deepEqual(resumedStages.find(stage => stage.stage === review.stage)?.resultRef, review.resultRef)
+    const provenance = JSON.parse(readEvidence(commonDir, resumedStages.find(stage => stage.stage === `${review.stage}:provenance`)!.resultRef).toString())
+    assert.equal(provenance.fromAttemptId, approvedAttempt.id); assert.deepEqual(provenance.resultRef, review.resultRef); assert.ok(provenance.inputRef)
+    const originalInput = JSON.parse(readEvidence(commonDir, wrappers().find(stage => stage.stage === `${review.stage}:input`)!.resultRef).toString()), carriedInput = JSON.parse(readEvidence(commonDir, provenance.inputRef).toString())
+    assert.ok(originalInput.repairContext); assert.deepEqual(carriedInput.repairContext, originalInput.repairContext, '原诊断上下文逐值保留在已认证独审input provenance')
+  }
+  const ownerKey = resumedWhole.partitionEvidence!.find(owner => JSON.parse(readEvidence(commonDir, owner.resultRef).toString()).changes.some((change: { path: string }) => change.path === contractPath))!.partitionId
+  const owner = JSON.parse(readEvidence(commonDir, resumedStages.find(stage => stage.stage === `partition:${ownerKey}:elaboration:provenance`)!.resultRef).toString())
+  assert.equal(owner.fromAttemptId, approvedAttempt.id, 'owner provenance必须指向最新事实返修Native所在attempt')
+  for (const ref of immutableRefs) assert.ok(store.readAttempt(approvedAttempt.id).checkpointRefs.some(current => current.sha256 === ref.sha256))
+  assert.deepEqual(readTree(commonDir, resumed.candidate!.tree).filter(entry => !entry.path.startsWith('.spec/')), protectedObjects)
 })

@@ -16,6 +16,10 @@ related:
 
 ## expanded spec
 
+只读P1返修的已审因果绑定与当前pending owner分开保存。正常重入即使已完成返修，也保留原readonlyOwnerRepair及其原readonlyBaseRef，历史latest repair-input已清空时只从同attempt已认证历史取最近完整绑定，不改旧CAS或以较旧绑定覆盖冲突。已审返修whole缺少该因果或与原owner/候选/独审不符时明确拒绝，不能回选较旧正文。
+
+普通暂停恢复若没有新的修复输入，只能从原每组独审的冻结input或accepted provenance承接原诊断上下文。除此字段外完整当前输入须一致，再沿原Native请求、摘要、候选与停止原件严格认证accept。新修复输入、业务变化、缺证或漂移仍失效，不向fresh模型补旧诊断，不忽略repairContext或弱化digest。
+
 
 事实继承资格通过既有checkpoint回调按acceptedRef精确命中本owner原local，逐字核完整changes、partition身份与批准状态，并复用elaborationGenerationSource认证原Native/Git来源，取实际generation attempt的V5而非复制wrapper的版本。new、prior重建和saved/accepted缓存共用此资格；当前V5、任意历史changes或草稿内容不能单独授继承权。原relatedIds只授权新差量，已批准旧事实只能作为确定值保留。
 

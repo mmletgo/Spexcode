@@ -413,6 +413,8 @@ Native已成功返回但review字段格式不合格同样保全原JSON、原错�
 
 恢复过程中发现新用户版本时，保留双方快照，不把 journal 的旧 preimage 覆盖到新文件。重新建立最新输入并自动整合；若无法同时满足业务意图则进入 conflicted。执行环境尚不允许安全恢复时维持 recovery_required，并说明需要恢复的条件，不能静默将半成品标成终态。
 
+已审只读P1事实返修的因果绑定与待处理owner分别保持。完成后清空pending不删除原返修原因，旧latest checkpoint已清空时沿同attempt完整历史冷验最新已审正文。普通暂停恢复没有新修复输入时，原独审诊断上下文只随精确冻结input/provenance和完整Native请求认证承接，不忽略diagnostics/digest，不向fresh模型补旧诊断。缺证、冲突或当前输入变化继续拒绝缓存。
+
 ## 9 一致性验证及完成条件
 
 ### 9.1 四层验证
