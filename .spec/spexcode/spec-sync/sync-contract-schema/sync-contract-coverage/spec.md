@@ -14,7 +14,7 @@ code:
 
 ## expanded spec
 
-覆盖状态和治理政策遵循 [[sync-contract-schema]]，依赖扩散由 [[sync-contract-graph]] 提供。`projectContractCoverage` 从契约图派生业务项 AC 声明、真实治理映射、测试及 VERIFY 身份、GAP 阻塞闭包和按对象区分的状态事件矩阵。需求可无本地 code，通过明确推导链找到叶节点；实现与 AC 分属不同节点仍可形成绑定，related 不计治理。
+覆盖状态和治理政策遵循 [[sync-contract-schema]]，依赖扩散由 [[sync-contract-graph]] 提供。`projectContractCoverage` 从契约图派生业务项 AC 声明、真实治理映射、测试及 VERIFY 身份、GAP 阻塞闭包和按对象区分的状态事件矩阵。需求可无本地 code，通过明确推导链找到叶节点；实现与 AC 分属不同节点仍可形成绑定，related 不计治理。一次投影中，GAP、条目治理与 REQ 验收绑定共享同一阻塞消费者索引。
 
 条目绑定结合验收声明与治理映射；矩阵显示处置及验收声明，缺失处置保持 missing。所有 bound 均只表示结构声明，不能作为真实测试通过、条件完备或功能已同步的证据。
 

@@ -1,4 +1,4 @@
-import { ELABORATION_GENERATION_GUIDANCE, ELABORATION_GENERATION_GUIDANCE_V1, ELABORATION_GENERATION_GUIDANCE_V2, partitionedElaborationCoverageMatches, type AnalysisOnlyPartitionEvidence, type ElaborationGenerationGuidance } from './elaboration-types.js'
+import { ELABORATION_GENERATION_GUIDANCE, ELABORATION_GENERATION_GUIDANCE_V1, ELABORATION_GENERATION_GUIDANCE_V2, ELABORATION_GENERATION_GUIDANCE_V3, partitionedElaborationCoverageMatches, type AnalysisOnlyPartitionEvidence, type ElaborationGenerationGuidance } from './elaboration-types.js'
 import { finiteSyncBudget, syncDeadlineExpired } from './budget.js'
 import { assertWorktreeSyncModel, syncModel, syncModelBinding } from './model-selection.js'
 import { setImmediate as yieldToControl, setTimeout as waitForPublication } from 'node:timers/promises'
@@ -326,30 +326,62 @@ function elaborationGenerationSource(store: SyncStore, owner: SyncOperation, pri
   return null
 }
 
+function assertStoppedEventsRpcDraft(prior: SyncAttempt, key: string, proof: ReturnType<typeof authenticateNativeFailure>): void {
+  const { status, nativeState, failure, result, session } = proof.checkpoint
+  if (!isZCodeEventsRpcTimeout(proof.state) || status !== 'failed' || nativeState !== 'failed' || failure?.code !== 'native_rpc_timeout' || failure.message !== proof.state.error || failure.failedWorktree || failure.rejectedOutput || result
+    || proof.state.failedWorktree || proof.state.resultWorktree || proof.state.rejectedOutput || proof.state.output !== undefined || proof.state.resultDigest !== undefined) fail('stale_result', 'ZCode events RPC草稿缺少原typed失败和结算原件')
+  if (!session.threadId || !session.turnId || canonical(prior.dispatchPlans.find(dispatch => dispatch.key === key)?.session) !== canonical(session)
+    || proof.record.harnessSessionId !== null && proof.record.harnessSessionId !== session.threadId) fail('stale_result', 'ZCode events RPC草稿缺少原完整派发与canonical Native身份')
+}
+
 function settledElaborationReview(store: SyncStore, operation: SyncOperation, prior: SyncAttempt, ownerKey: string, result: SavedElaboration, round: ElaborationResult['rounds'][number], failure: NonNullable<ElaborationResult['failure']>): ElaborationRepairDiagnostics['settledReview'] {
-  if (result.status !== 'failed' || !result.structurePassed || result.reviewPassed || !round.draft || !round.candidate || round.review !== null || round.reviewOutput !== null || round.rejectedOutput) return
+  if (result.status !== 'failed' || !result.structurePassed || result.reviewPassed || !round.draft || !round.candidate || round.review !== null || round.reviewOutput !== null) return
+  const rejection = round.rejectedOutput
+  if (rejection ? !reviewFormatRepairCodes.has(failure.code) || rejection.purpose !== 'elaboration_review' || !rejection.ref || rejection.ownerRequestKey !== ownerKey || rejection.ownerInputDigest !== result.inputDigest : failure.code !== 'native_rpc_timeout' || !isZCodeEventsRpcTimeout({ state: 'failed', errorCode: failure.code, error: failure.message })) return
   const key = `${ownerKey}:${round.index}:elaboration_review`
   const resource = store.findResource(prior.id, key)
-  if (!resource || resource.phase !== 'removed' || prior.dispatchPlans.some(dispatch => store.findResource(prior.id, dispatch.key)?.phase !== 'removed')) fail('review_retry_binding', '独审超时缺少原正式资源及结算证明')
+  if (!resource || resource.phase !== 'removed' || prior.dispatchPlans.some(dispatch => store.findResource(prior.id, dispatch.key)?.phase !== 'removed')) fail('review_retry_binding', '独审失败缺少原正式资源及结算证明')
   const { plan, checkpoint, record, state } = authenticateNativeFailure(store, operation, prior, key, failure, readRecord, true)
   const { request } = plan, { session } = checkpoint
+  const authenticateRejection = (source: SyncAttempt, sourceKey: string, sourceFailure: typeof failure, sourceRejection: NonNullable<typeof rejection>, original: NativeRunCheckpoint): void => {
+    const { ownerInputDigest: _ownerInputDigest, ownerRequestKey: _ownerRequestKey, ...packet } = sourceRejection
+    const originalPacket = original.failure?.rejectedOutput
+    if (!originalPacket || original.failure?.code !== sourceFailure.code || original.failure.message !== sourceFailure.message
+      || canonical({ ...originalPacket, ref: undefined }) !== canonical({ ...packet, ref: undefined })) fail('review_retry_binding', '独审拒稿不匹配原正式失败')
+    authenticateNativeRejectedFinal(store, operation, source, sourceKey, sourceFailure, packet)
+  }
+  if (rejection) authenticateRejection(prior, key, failure, rejection, checkpoint)
+  const transportMatches = rejection
+    ? state.state === 'failed' && (request.model?.startsWith('zcode:') && record.harness === 'zcode' || request.model?.startsWith('claude:') && record.harness === 'claude')
+    : request.model?.startsWith('zcode:') && isZCodeEventsRpcTimeout(state) && record.harness === 'zcode' && state.zcodeNative?.sessionId === session.threadId && state.zcodeNative.turnId === session.turnId && !state.rejectedOutput
   const boundInput = ({ purpose, prompt, schema, worktree }: ElaborationSessionRequest): string => contentHash(JSON.stringify({ inputDigest: result.inputDigest, purpose, prompt, schema, worktree }))
   if (resource.attemptId !== prior.id || resource.generation !== prior.generation || plan.schemaVersion !== 1 || checkpoint.schemaVersion !== 1
-    || request.purpose !== 'elaboration_review' || request.worktree?.mode !== 'read' || request.frozenContext || !request.model?.startsWith('zcode:') || request.inputDigest !== boundInput(request)
+    || request.purpose !== 'elaboration_review' || request.worktree?.mode !== 'read' || request.frozenContext || !transportMatches || request.inputDigest !== boundInput(request)
     || request.root !== operation.input.source.canonicalRoot || request.base !== request.worktree.baseCommit || record.base !== request.base || record.forkCommit !== request.base
     || !checkpoint.nativeCallRequested || !checkpoint.nativeStarted || checkpoint.status !== 'failed' || checkpoint.nativeState !== 'failed' || checkpoint.stop?.nativeStatus !== 'stopped' || checkpoint.result || checkpoint.creationTermination
     || checkpoint.candidateDigest !== null && checkpoint.candidateDigest !== round.candidateDigest
     || !session.threadId || !session.turnId || canonical(prior.dispatchPlans.find(dispatch => dispatch.key === key)?.session) !== canonical(session)
-    || canonical(checkpoint.failure) !== canonical({ code: failure.code, message: failure.message })
-    || !isZCodeEventsRpcTimeout(state) || record.harness !== 'zcode' || record.harnessSessionId !== session.threadId || state.zcodeNative?.sessionId !== session.threadId || state.zcodeNative.turnId !== session.turnId
-    || state.failedWorktree || state.resultWorktree || state.rejectedOutput || state.output !== undefined || state.resultDigest !== undefined) fail('review_retry_binding', '独审超时缺少同owner原只读请求及精确已结算的Native失败身份')
+    || canonical(checkpoint.failure) !== canonical({ code: failure.code, message: failure.message, ...(rejection ? { rejectedOutput: checkpoint.failure?.rejectedOutput } : {}) })
+    || record.harnessSessionId !== session.threadId || state.failedWorktree || state.resultWorktree || state.output !== undefined || state.resultDigest !== undefined) fail('review_retry_binding', '独审失败缺少同owner原只读请求及精确已结算的Native失败身份')
   const generation = elaborationGenerationSource(store, operation, prior, round)
   const generationOwner = generation && ownerKey.replace(`sync:${prior.id}:`, `sync:${generation.attempt.id}:`)
   if (!generation?.request || !generation.key.startsWith(`${generationOwner}:`) || generation.request.inputDigest !== boundInput(generation.request)
     || generation.request.root !== request.root || generation.request.base !== round.draft.seed.baseCommit
     || store.findResource(generation.attempt.id, generation.key)?.generation !== generation.attempt.generation
-    || round.candidate.inputDigest !== result.inputDigest || round.candidateDigest !== result.candidateDigest || round.candidateDigest !== contentHash(JSON.stringify(round.candidate))) fail('review_retry_binding', '独审超时缺少同owner原Native生成及其精确Git候选绑定')
-  return { prompt: request.prompt, schema: request.schema, worktree: request.worktree }
+    || round.candidate.inputDigest !== result.inputDigest || round.candidateDigest !== result.candidateDigest || round.candidateDigest !== contentHash(JSON.stringify(round.candidate))) fail('review_retry_binding', '独审失败缺少同owner原Native生成及其精确Git候选绑定')
+  const boundReview = { prompt: request.prompt, schema: request.schema, worktree: request.worktree }
+  const diagnostics = result.repairDiagnostics, previousRound = diagnostics?.round, previous = previousRound?.rejectedOutput
+  if (!diagnostics || !previousRound || previous?.purpose !== 'elaboration_review' || !previous.ref
+    || previousRound.candidateDigest !== round.candidateDigest || canonical(previousRound.traces[0]) !== canonical(round.traces[0])) return boundReview
+  const original = JSON.parse(readEvidence(operation.input.source.commonDir, diagnostics.resultRef).toString('utf8')) as SavedElaboration
+  const source = store.readAttempt(previous.ownerRequestKey.split(':')[1])
+  const sourceKey = `${previous.ownerRequestKey}:${previousRound.index}:elaboration_review`
+  if (source.number >= prior.number || previous.ownerRequestKey !== ownerKey.replace(`sync:${prior.id}:`, `sync:${source.id}:`)
+    || previous.ownerInputDigest !== result.inputDigest || original.inputDigest !== result.inputDigest
+    || canonical(original.failure) !== canonical(diagnostics.failure) || canonical(original.rounds.at(-1)) !== canonical(previousRound)) fail('review_retry_binding', '旧独审附件缺少同候选原失败和精确来源')
+  const authenticated = authenticateNativeFailure(store, operation, source, sourceKey, diagnostics.failure, readRecord, true)
+  authenticateRejection(source, sourceKey, diagnostics.failure, previous, authenticated.checkpoint)
+  return { ...boundReview, previousRejection: { sha256: previous.sha256, text: previous.text } }
 }
 
 /** P1业务扩域与原文件规划分别作证，完整scope必须精确等于两者的实际并集。 */
@@ -1444,17 +1476,19 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
               const checkpoint = JSON.parse(readEvidence(operation.input.source.commonDir, resource.checkpointRef).toString()) as NativeRunCheckpoint
               const state = readRecord(native.expectedSessionId)?.structuredExecution, zcode = native.request.model?.startsWith('zcode:') === true
               const stoppedTransport = zcode && state?.state === 'failed' && state.errorCode === 'native_turn_transport_failed'
-              if (native.request.purpose === 'elaboration_generate' && native.request.worktree?.mode === 'edit' && !native.request.frozenContext && state && (zcode || native.request.model?.startsWith('claude:')) && (state.state === 'cancelled' || zcode && state.state === 'failed') && state.cancellation?.nativeStopped && !state.failedWorktree && !state.resultWorktree && !state.rejectedOutput && (!state.errorCode || stoppedTransport) && state.threadId && state.turnId) {
-                const proof = authenticateNativeFailure(store, owner, prior, requestKey, { code: stoppedTransport ? 'native_turn_transport_failed' : 'failed', message: state.state === 'failed' ? state.error! : prior.failure?.message ?? '', sessionId: checkpoint.session.sessionId, threadId: checkpoint.session.threadId ?? undefined, turnId: checkpoint.session.turnId ?? undefined }, readRecord, true)
+              const completedEventsRpc = allowCommitted && zcode && !!state && isZCodeEventsRpcTimeout(state)
+              if (native.request.purpose === 'elaboration_generate' && native.request.worktree?.mode === 'edit' && !native.request.frozenContext && state && (zcode || native.request.model?.startsWith('claude:')) && (state.state === 'cancelled' || zcode && state.state === 'failed') && state.cancellation?.nativeStopped && !state.failedWorktree && !state.resultWorktree && !state.rejectedOutput && (!state.errorCode || stoppedTransport || completedEventsRpc) && state.threadId && state.turnId) {
+                const proof = authenticateNativeFailure(store, owner, prior, requestKey, { code: completedEventsRpc ? 'native_rpc_timeout' : stoppedTransport ? 'native_turn_transport_failed' : 'failed', message: state.state === 'failed' ? state.error! : prior.failure?.message ?? '', sessionId: checkpoint.session.sessionId, threadId: checkpoint.session.threadId ?? undefined, turnId: checkpoint.session.turnId ?? undefined }, readRecord, true)
+                if (completedEventsRpc) assertStoppedEventsRpcDraft(prior, requestKey, proof)
                 const context = elaborationMaterialContext(operation.input.source.commonDir, native.request, request)
                 if (proof.record.base === native.request.worktree.baseCommit && proof.record.forkCommit === native.request.worktree.baseCommit && /草稿文件=([^\s；。]+)/.exec(native.request.prompt)?.[1] === request.binding.path && context) {
                   const prompt = nativeWorktreePrompt(native.request.prompt, native.request.worktree)
-                  const failed = zcode ? assertZCodeStoppedDraftSource(prompt, state as ZCodeStructuredExecution, proof.record.worktreePath) : undefined
+                  const failed = zcode ? assertZCodeStoppedDraftSource(prompt, (completedEventsRpc ? proof.state : state) as ZCodeStructuredExecution, proof.record.worktreePath) : undefined
                   if (zcode && failed === null) continue
                   if (!zcode) assertClaudeStoppedDraftSource(prompt, state, proof.record.worktreePath)
                   assertMaterialFence()
                   const physical = readStoppedPhysicalDraft(commonDir, proof.record.worktreePath, native.request.worktree, request.binding, { allowCommitted })
-                  if (physical) {
+                  if (physical && (!completedEventsRpc || physical.committedOid)) {
                     if (zcode && !failed) fail('stale_result', 'ZCode物理细化草稿没有原精确失败终态')
                     const errors = [...existingDraft?.errors ?? [], ...round.findings, ...source.result.failure ? [{ code: source.result.failure.code, message: source.result.failure.message }] : []]
                     if (physical.committedOid) {
@@ -1496,10 +1530,11 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         }
         return null
       }
+      const renderedRepairAttempt = (prior: SyncAttempt): boolean => ['failed', 'superseded', 'settled'].includes(prior.status) && prior.failure?.kind === 'repairable' && canonical(prior.composedInput) === canonical(view.composed)
       // 同一原round既供P1完整定位，也供精确P0分类质疑；候选仍只是拒绝诊断。
-      const renderedElaborationSource = (owner: SyncOperation, prior: SyncAttempt, key: string): { result: SavedElaboration; resultRef: BlobRef; round: ElaborationResult['rounds'][number] } | null => {
-        if (!['failed', 'superseded', 'settled'].includes(prior.status) || prior.failure?.kind !== 'repairable' || canonical(prior.composedInput) !== canonical(view.composed)) return null
-        const source = partitionStage<SavedElaboration>(store, owner, prior, key), round = source?.result.rounds.at(-1)
+      const renderedElaborationSource = (owner: SyncOperation, prior: SyncAttempt, key: string, checkpoints?: ReturnType<typeof readSyncCheckpoints>): { result: SavedElaboration; resultRef: BlobRef; round: ElaborationResult['rounds'][number] } | null => {
+        if (!renderedRepairAttempt(prior)) return null
+        const source = partitionStage<SavedElaboration>(store, owner, prior, key, undefined, checkpoints), round = source?.result.rounds.at(-1)
         if (!source || source.result.reviewPassed || source.result.phase === 'partitioned_final' || source.result.status !== 'exhausted' || source.result.failure?.code !== 'repair_budget_exhausted' || !round?.candidate || !round.findings.some(finding => finding.severity === 'error')) return null
         if (round.candidate.inputDigest !== source.result.inputDigest || round.candidateDigest !== contentHash(JSON.stringify(round.candidate))) fail('review_retry_binding', '已生成P1候选的原输入或摘要失配，不能回退为重新生成')
         if (!elaborationGenerationSource(store, owner, prior, round)) fail('review_retry_binding', '已生成P1候选的原Native请求/结果绑定失配，不能回退为重新生成')
@@ -1524,10 +1559,10 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           const source = binding ? partitionElaborationStage(store, operation, prior, key, binding, inputDigest) : partitionStage<SavedElaboration>(store, operation, prior, key)
           if (saved && (!source || saved.inputDigest !== inputDigest || saved.phase === 'partitioned_final' || saved.reviewPassed)) return null
           const failure = source?.result.failure, round = source?.result.rounds.at(-1), requestKey = `sync:${prior.id}:${ownerSuffix}`
-          if (!newerGeneration && source && round && failure?.code === 'native_rpc_timeout'
+          if (!newerGeneration && source && round && failure
             && (!carriedGenerations.size || carriedGenerations.size === 1 && carriedGenerations.has(canonical(round.traces.find(trace => trace.purpose === 'elaboration_generate'))))
             && (prior.failure?.kind === 'repairable' || prior.status === 'superseded' && !prior.failure)
-            && isZCodeEventsRpcTimeout({ state: 'failed', errorCode: failure.code, error: failure.message }) && priorElaborationInputMatches(prior, binding)) {
+            && (failure.code === 'native_rpc_timeout' || reviewFormatRepairCodes.has(failure.code)) && priorElaborationInputMatches(prior, binding)) {
             const settledReview = settledElaborationReview(store, operation, prior, requestKey, source.result, round, failure)
             if (settledReview) {
               saveStage(store, fence!, `${key}:repair-diagnostics-provenance`, { fromOperationId: operation.id, fromAttemptId: prior.id, resultRef: source.resultRef })
@@ -1655,12 +1690,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
             const stoppedTransport = zcode && state?.state === 'failed' && state.errorCode === 'native_turn_transport_failed'
             if (!state || state.state !== 'cancelled' && !(zcode && state.state === 'failed') || !state.cancellation?.nativeStopped || !(zcode ? state.zcodeNative : state.claudeNative) || !state.threadId || !state.turnId || !checkpoint.session.threadId || !checkpoint.session.turnId || state.failedWorktree || state.resultWorktree || state.rejectedOutput || state.errorCode && !completedEventsRpc && !stoppedTransport) continue
             const proof = authenticateNativeFailure(store, owner, prior, requestKey, { code: completedEventsRpc ? 'native_rpc_timeout' : stoppedTransport ? 'native_turn_transport_failed' : 'failed', message: state.state === 'failed' ? state.error! : prior.failure?.message ?? '', sessionId: checkpoint.session.sessionId, threadId: checkpoint.session.threadId ?? undefined, turnId: checkpoint.session.turnId ?? undefined }, readRecord, true)
-            if (completedEventsRpc) {
-              const { status, nativeState, failure, result, session } = proof.checkpoint
-              if (!isZCodeEventsRpcTimeout(proof.state) || status !== 'failed' || nativeState !== 'failed' || failure?.code !== 'native_rpc_timeout' || failure.message !== proof.state.error || failure.failedWorktree || failure.rejectedOutput || result
-                || proof.state.failedWorktree || proof.state.resultWorktree || proof.state.rejectedOutput || proof.state.output !== undefined || proof.state.resultDigest !== undefined) fail('stale_result', 'ZCode events RPC草稿缺少原typed失败和结算原件')
-              if (canonical(prior.dispatchPlans.find(dispatch => dispatch.key === requestKey)?.session) !== canonical(session) || proof.record.harnessSessionId !== null && proof.record.harnessSessionId !== session.threadId) fail('stale_result', 'ZCode events RPC草稿缺少原完整派发与canonical Native身份')
-            }
+            if (completedEventsRpc) assertStoppedEventsRpcDraft(prior, requestKey, proof)
             const ownerDigest = contentHash(JSON.stringify({ version: 'code-behavior-draft-v1', source: canonicalSnapshotSource(operation.input.source), partitionId: key === 'analysis' ? null : key.slice('partition:'.length, -':analysis'.length), purpose }))
             const binding = { ownerDigest, sourceInputId: operation.input.id, schemaDigest, path: `.spex-sync-drafts/${ownerDigest}.json` }
             const seedEntries = readTree(operation.input.source.commonDir, native.request.worktree.tree)
@@ -1928,15 +1958,34 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       const postGateReview: CodeBehaviorPostGateReview[] = []
       if (behaviorOrigin) {
         const owners = partitions?.partitions.map(partition => ({ partitionId: partition.id, key: `partition:${partition.id}:elaboration` })) ?? [{ partitionId: undefined, key: 'elaboration' }]
+        const ownerKeys = new Set(owners.map(owner => owner.key))
         const beforeFiles = priorDeliveryFiles({ ...operation, baselineSelection: store.readBusinessBaselineSelection(operation.id) }, view, [...options.plan.readPaths, ...operation.scope.paths], options.plan)
-        for (const owner of owners) for (const sourceAttempt of retryDraftSources(store, operation, attempt!.number)) {
+        const sources = retryDraftSources(store, operation, attempt!.number).filter(({ prior }) => renderedRepairAttempt(prior))
+        const history = new Map<string, { owner: SyncOperation; prior: SyncAttempt; checkpoints: ReturnType<typeof readSyncCheckpoints>; keys: Set<string> } | null>()
+        for (const owner of owners) for (const sourceAttempt of sources) {
+          let sourceView = history.get(sourceAttempt.prior.id)
+          if (sourceView === undefined) {
+            store.renewLease(fence, leaseMs); await yieldToControl(); store.renewLease(fence, leaseMs)
+            const sourceOwner = store.readOperation(sourceAttempt.owner.id), prior = store.readAttempt(sourceAttempt.prior.id)
+            sourceView = null
+            if (renderedRepairAttempt(prior)) {
+              const checkpoints = readSyncCheckpoints(store, sourceOwner, prior), keys = new Set<string>()
+              for (const { value } of checkpoints.json) {
+                const entry = value as Partial<Stage> | null
+                if (entry?.version === 'sync-stage-v1' && entry.stage && ownerKeys.has(entry.stage)) keys.add(entry.stage)
+              }
+              if (keys.size) sourceView = { owner: sourceOwner, prior, checkpoints, keys }
+            }
+            history.set(prior.id, sourceView)
+          }
+          if (!sourceView?.keys.has(owner.key)) continue
+          const { owner: sourceOwner, prior, checkpoints } = sourceView
           store.renewLease(fence, leaseMs); await yieldToControl(); store.renewLease(fence, leaseMs)
-          const sourceOwner = store.readOperation(sourceAttempt.owner.id), prior = store.readAttempt(sourceAttempt.prior.id)
-          const source = renderedElaborationSource(sourceOwner, prior, owner.key)
-          const approved = source && stage<CodeBehaviorAnalysis>(store, sourceOwner, prior, 'analysis')
+          const source = renderedElaborationSource(sourceOwner, prior, owner.key, checkpoints)
+          const approved = source && stage<CodeBehaviorAnalysis>(store, sourceOwner, prior, 'analysis', 'automatic', checkpoints)
           if (!source || !approved?.reviewPassed || !analysisStageBinding(store, sourceOwner, approved)) continue
           const local = owner.partitionId ? approved.partitionEvidence?.find(item => item.partitionId === owner.partitionId) : undefined
-          if (owner.partitionId && (!local || partitionStage<SyncPartitionPlan>(store, sourceOwner, prior, 'partition-plan')?.result.digest !== partitions!.digest || source.result.partitionBinding?.planDigest !== partitions!.digest || source.result.partitionBinding?.partitionId !== owner.partitionId)) continue
+          if (owner.partitionId && (!local || partitionStage<SyncPartitionPlan>(store, sourceOwner, prior, 'partition-plan', undefined, checkpoints)?.result.digest !== partitions!.digest || source.result.partitionBinding?.planDigest !== partitions!.digest || source.result.partitionBinding?.partitionId !== owner.partitionId)) continue
           const original = local?.analysis ?? approved, analysisRef = local?.analysisRef ?? writeEvidence(operation.input.source.commonDir, approved)
           if (contentHash(JSON.stringify(original)) !== analysisRef.sha256 || !original.reviewPassed || original.inputId !== operation.input.id || original.policyDigest !== operation.policyDigest || original.composedDigest !== view.composed.contentDigest) continue
           if (owner.partitionId && source.result.partitionBinding?.analysisRef?.sha256 !== writeEvidence(operation.input.source.commonDir, approved).sha256) continue
@@ -2099,7 +2148,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           protocol = { version: 'elaboration-draft-v1', generationGuidance: ELABORATION_GENERATION_GUIDANCE }
           saveStage(store, fence, 'elaboration-draft-protocol', protocol)
         }
-        if (protocol && Object.hasOwn(protocol, 'generationGuidance') && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE_V1 && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE_V2 && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE) fail('elaboration_generation_guidance_unsupported', '持久P1生成提示版本不受支持；仅字段缺席允许原提示')
+        if (protocol && Object.hasOwn(protocol, 'generationGuidance') && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE_V1 && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE_V2 && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE_V3 && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE) fail('elaboration_generation_guidance_unsupported', '持久P1生成提示版本不受支持；仅字段缺席允许原提示')
         const draftProtocol = protocol?.version
         const elaborationInput = { ...makeElaborationInput(draftProtocol), ...(protocol?.generationGuidance ? { generationGuidance: protocol.generationGuidance } : {}) }
         const loadDraft = draftProtocol ? (schemaDigest: string): ElaborationDraft | null => {

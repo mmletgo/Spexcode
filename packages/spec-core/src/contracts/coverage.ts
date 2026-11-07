@@ -1,11 +1,11 @@
-import { contractReferences, dependencyClosure } from './graph.js'
+import { contractReferences, createDependencyClosure, dependencyClosure } from './graph.js'
 import type { Acceptance, BusinessItem, ContractCoverage, ContractGraph, ContractImpact, ContractItem, Transition } from './types.js'
 
 const sorted = (values: Iterable<string>): string[] => [...new Set(values)].sort()
 export const contractPath = (entry: string): string => entry.split('#')[0]
-export function acceptanceBindings(graph: ContractGraph, item: BusinessItem): Acceptance[] {
+function findAcceptanceBindings(graph: ContractGraph, item: BusinessItem, closeDependencies: (ids: readonly string[]) => string[]): Acceptance[] {
   const covers = new Set([item.id, ...(item.kind === 'TR' ? item.rules : [])])
-  if (item.kind === 'REQ') for (const id of dependencyClosure(graph, [item.id])) covers.add(id)
+  if (item.kind === 'REQ') for (const id of closeDependencies([item.id])) covers.add(id)
   if (item.kind === 'RULE') for (const candidate of graph.items.values()) {
     if (candidate.kind === 'TR' && candidate.rules.includes(item.id)) covers.add(candidate.id)
   }
@@ -14,15 +14,21 @@ export function acceptanceBindings(graph: ContractGraph, item: BusinessItem): Ac
     graph.items.get(candidate.command)?.kind === 'VERIFY' && !!candidate.test && !!candidate.assertion)
 }
 
+export function acceptanceBindings(graph: ContractGraph, item: BusinessItem): Acceptance[] {
+  return findAcceptanceBindings(graph, item, (ids) => dependencyClosure(graph, ids))
+}
+
 export function projectContractCoverage(graph: ContractGraph): ContractCoverage {
+  const closeDependencies = createDependencyClosure(graph)
+  const bindingsFor = (item: BusinessItem): Acceptance[] => findAcceptanceBindings(graph, item, closeDependencies)
   const gaps = [...graph.items.values()].filter((item) => item.kind === 'GAP').map((gap) => {
-    const affectedIds = dependencyClosure(graph, gap.affects)
+    const affectedIds = closeDependencies(gap.affects)
     return { id: gap.id, kind: gap.gapKind, affectedIds, nodeIds: sorted(affectedIds.flatMap((id) => graph.owners.get(id)?.nodeId ?? [])) }
   })
   const items = [...graph.items.values()].filter((item): item is BusinessItem => item.kind !== 'VERIFY').map((item) => {
-    const bindings = acceptanceBindings(graph, item)
+    const bindings = bindingsFor(item)
     const code = sorted([
-      ...dependencyClosure(graph, [item.id]).flatMap((id) => graph.owners.get(id)?.code ?? []),
+      ...closeDependencies([item.id]).flatMap((id) => graph.owners.get(id)?.code ?? []),
       ...bindings.flatMap((ac) => graph.owners.get(ac.id)?.code ?? []),
     ])
     return { id: item.id, kind: item.kind, nodeId: item.nodeId, status: bindings.length && code.length ? 'bound' as const : 'declared' as const,
@@ -36,9 +42,9 @@ export function projectContractCoverage(graph: ContractGraph): ContractCoverage 
     for (const event of graph.items.values()) {
       if (event.kind !== 'EVENT' || event.object !== state.object) continue
       const matches = transitions.filter((tr) => tr.object === state.object && tr.from === state.id && tr.event === event.id)
-      const acceptanceIds = sorted(matches.flatMap((tr) => acceptanceBindings(graph, tr).map((ac) => ac.id)))
+      const acceptanceIds = sorted(matches.flatMap((tr) => bindingsFor(tr).map((ac) => ac.id)))
       matrix.push({ object: state.object, stateId: state.id, eventId: event.id, transitionIds: sorted(matches.map((tr) => tr.id)), acceptanceIds,
-        status: !matches.length ? 'missing' : matches.every((tr) => acceptanceBindings(graph, tr).length > 0) ? 'bound' : 'declared' })
+        status: !matches.length ? 'missing' : matches.every((tr) => bindingsFor(tr).length > 0) ? 'bound' : 'declared' })
     }
   }
   matrix.sort((a, b) => `${a.object}/${a.stateId}/${a.eventId}`.localeCompare(`${b.object}/${b.stateId}/${b.eventId}`))

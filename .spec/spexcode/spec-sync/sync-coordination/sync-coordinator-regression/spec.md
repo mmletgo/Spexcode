@@ -213,7 +213,11 @@ partition_seal反馈不能删除此前已接受的稳定ID，也不能弱化作�
 
 多轮来源回归必须通过真实Coordinator：Native Spec→Code首轮真实scratch Git构建后6→1→1且后轮无伪prepared记录；两组交错失败为6→2→1→1，A的accept原ref/请求不变；合法文件规划新增源码和测试路径后保持同candidate只续审，不能以P1 evidence重新扩scope。有限预算剩1允许5cache+1failed，剩0由原硬限拒绝。受控Native6-owner长回归保持原30s lease及生产心跳代码，并记录续租间隔验证逐组yield，不调大生产期限。
 
+P1生成的ZCode `session/events` 超时续稿回归使用真实Git、私有SQLite和受控Native资源桥。验证单体及code_to_spec分区的正式失败与positive stopped原件，下一生成的Git种子须逐字复用原提交草稿、原schema和保护树，并携带原RPC诊断，后续正常提交及独审。校验其他RPC方法、派发身份缺失、缺exit/terminal、失败或取消终态、未提交修改、无新提交及保护路径变化均不能带入材料。原记录、Native原件、Git/index及已通过的P0保持。
+
 P1 `session/events` 独审超时回归用真实Git提交、隔离SQLite及受控Native资源桥。单体和分区仅新派发独审，原候选摘要、Git OID、生成trace及只读seed保持，新会话使用当前完整审查。覆盖v2原请求到v3独审、局部原件已落盘后的暂停、同一生成的仅续审暂停及较新生成保留优先权。错误停止、不同候选和任务末段不匹配在剩余预算内也不取得仅续审或重新生成资格。
+
+P1独审格式失败回归使用真实Git、隔离SQLite及受控Native资源桥，覆盖单体、Code→Spec分区连续两次失败、原正式拒稿失配和候选正文失配。候选、Git生成对象、原生成追踪、review schema与保护树保持，只读seed每轮只增加当轮所需的上一份拒稿原字节，后续正常审查返回前无批准。原checkpoint未存CAS ref时仍原样保留；错packet不能派发新会话；Code→Spec零代码生成。已有V3超时请求与同策略新独审在相同候选下提示逐字相等。
 
 已有code映射、P1新增managed AC.test时无需implementation_plan；Native scratch实际创建测试后若评审格式失败，P1映射的原null扩域仍可承接，只续review，保持原candidate及原oracle/source/index。该路径与真实file-writer扩域分别证明，不借related或source字段取得写权。
 
@@ -225,7 +229,7 @@ P1 `session/events` 独审超时回归用真实Git提交、隔离SQLite及受控
 
 完整未采纳settled重验以真实临时Native工作树、正常Git提交/交付hooks与隔离SQLite验证：父自身receipt推进CAS而业务基线保持；新P0/P1和独审真实派发，原Git JSON作为未批准材料续修，旧候选不进入业务读取。新P1能力失败后再走普通failed→retry，最早原业务selection仍递归保持。受控V3 driver明确只证明协议与编排，不声称真实模型、Docker或用户场景通过；Source HEAD/index及父全部历史原值保持。
 
-历史checkpoint性能回归使用14attempt、1790唯一CAS及101分区的真实SQLite/Git协调路径，记录原30秒lease/1秒heartbeat、扫描中的控制机会和首次受控reserveDispatch；必须在同attempt/leaseToken有效时推进，零额外attempt/journal且source/index保持。纯读取对照同时计CAS读取和JSON解码：单次root/artifact/inspect每SHA读取解码一次，下次仍重读SHA而不再解码；命中后坏CAS、当前refs移除/伪raw role和返回对象污染反例继续拒绝或隔离；同一store先warm认证，再改变canonical Native停止状态或清除原resource的failed观察仍须拒绝，恢复精确原件后重新认证。受控runner仅证明引擎首派发，不冒称真实模型、业务结果或最终交付。
+历史checkpoint性能回归使用14attempt、1790唯一CAS及101分区的真实SQLite/Git协调路径，记录原30秒lease/1秒heartbeat、扫描中的控制机会和首次受控reserveDispatch；必须在同attempt/leaseToken有效时推进，零额外attempt/journal且source/index保持。从分区预算到P0协议冻结的准备窗口须单独计历史CAS读取，并限制在分类质疑、原P0复用与P0诊断各一次历史规模之和。纯读取对照同时计CAS读取和JSON解码：单次root/artifact/inspect每SHA读取解码一次，下次仍重读SHA而不再解码；命中后坏CAS、当前refs移除/伪raw role和返回对象污染反例继续拒绝或隔离；同一store先warm认证，再改变canonical Native停止状态或清除原resource的failed观察仍须拒绝，恢复精确原件后重新认证。受控runner仅证明引擎首派发，不冒称真实模型、业务结果或最终交付。
 
 ZCode P0 completed/events-RPC定向回归以真实分区协调器、Git/隔离SQLite及受控原生资源桥，先证A1的精确typed失败/removed/stop、原无draft/ready/result及唯一正常提交4228字节未批准稿，A2真实派发但seed漏稿；修后同场景以精确原HEAD/OID/SHA及checkpoint refs续稿，原record/Native文件/source/tests/index/failure不改，不读终态response取得成功。续稿保原业务错误与精确typed RPC诊断。错request/thread/turn/model/version、缺完整派发身份或canonical harness线程冲突、其它RPC、未结算或原失败观察/stop不符、缺/非法exit、非同turn idle、未close、坏terminal/未知结果、dirty/source/tests/schema及无新提交/失fence分别明确拒绝或沿原跳过，仅新分类的缺terminal和精确同身份失败/取消不授材料并沿原重试，即使非成功exit；普通pause/历史failed/缺exit保持。真实配置default/显式模型公开材料另走同adapter回归；受控执行不冒称实际模型、Docker或产品交付。
 

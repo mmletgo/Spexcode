@@ -575,7 +575,7 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
     timedOut = true; interrupt()
     void Promise.resolve().then(() => callbacks.onTimeout?.()).catch(() => { protocolError = new StructuredSessionError('cancellation_pending', 'ZCode timeout cancellation could not be durably published') })
   })
-  const poll = async (): Promise<void> => {
+  const poll = async (): Promise<NativeEvent | undefined> => {
     sampleOwnedProcesses(plan)
     const page = await request('session/events', { sessionId: plan.sessionId, ...(cursor === undefined ? {} : { afterSeq: cursor }), limit: 100 }) as { events?: NativeEvent[] }
     for (const event of page.events ?? []) {
@@ -604,6 +604,7 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
       const error = terminal.payload.error as { code?: unknown } | undefined
       throw new ZCodeNativeTurnFailedError(plan.sessionId, plan.turnId!, error?.code, worktree)
     }
+    return terminal
   }
   const stop = async (): Promise<void> => {
     if (stopSent || !sessionCreated || terminal) return
@@ -640,7 +641,14 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
     while (!terminal) {
       if (protocolError) throw protocolError
       if (abortRequested) { await stop(); cancellationDeadline ??= Date.now() + 10000 }
-      await poll()
+      try {
+        await poll()
+      } catch (error) {
+        if (abortRequested || protocolError || !(error instanceof StructuredSessionError)
+          || error.code !== 'native_rpc_timeout' || error.message !== nativeRpcTimeoutMessage('session/events')) throw error
+        const recovered = await poll()
+        if (abortRequested || protocolError || recovered?.type !== 'turn.completed' || recovered.payload.resultType !== 'success') throw error
+      }
       if (cancellationDeadline && Date.now() > cancellationDeadline) throw new StructuredSessionError('cancellation_pending', 'ZCode stop ACK has no bounded exact terminal')
       if (!terminal) await sleep(100)
     }

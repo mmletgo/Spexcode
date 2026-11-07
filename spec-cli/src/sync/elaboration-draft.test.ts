@@ -216,6 +216,99 @@ for (const inherited of [false, true]) test(`Native完整P1的VERIFY冻结登记
   assert.equal(result.runtimeVerification, 'not_run')
 })
 
+test('Native完整P1在共享VERIFY由重复变为缺失后，只给原Git稿一个合法技术归属', async t => {
+  const f = await fixture(t), [target] = f.input.targets
+  const peerPath = '.spec/export/peer-contract/spec.md'
+  const verification = { id: 'VERIFY-EXPORT-01', command: ['node', '--test', 'tests/export.test.mjs'], cwd: '.', timeoutMs: 10000 }
+  const source = projectVerificationTable(target.source!, [])
+  const peer = source.replaceAll('export-job', 'peer-job').replaceAll('export-contract', 'peer-contract').replaceAll('EXPORT', 'PEER').replaceAll('VERIFY-PEER-01', verification.id).replaceAll('tests/export.test.mjs', 'tests/peer.test.mjs')
+  mkdirSync(dirname(join(f.root, peerPath)), { recursive: true })
+  writeFileSync(join(f.root, path), source); writeFileSync(join(f.root, peerPath), peer)
+  writeFileSync(join(f.root, 'tests/peer.test.mjs'), readFileSync(join(f.root, 'tests/export.test.mjs'), 'utf8').replaceAll('EXPORT', 'PEER'))
+  git(f.root, 'add', '.'); git(f.root, 'commit', '-m', 'freeze two targets for shared verification repair')
+  const snapshot = await captureInputSnapshot(f.root)
+  const input: ElaborationInput = { ...f.input, historyInput: snapshot, worktree: stageWorktree(f.commonDir, snapshot.headCommit, snapshot.immutableTree),
+    targets: [{ ...target, source, sourceDigest: elaborationDigest(source) }, { nodeId: 'peer-contract', path: peerPath, source: peer, sourceDigest: elaborationDigest(peer) }],
+    files: new Map(readTree(f.commonDir, snapshot.immutableTree).map(entry => [entry.path, readObject(f.commonDir, entry.oid).toString('utf8')])), verifications: [verification], maxRepairs: 0,
+  }
+  const broken = draftRows(source)
+  broken.changes.push({ ...draftRows(peer).changes[0], targetIndex: 1 })
+  const repeated = structuredClone(broken), verifyRows = draftRows(target.source!).changes[0].tables.VERIFY
+  for (const leaf of repeated.changes) leaf.tables.VERIFY = verifyRows
+  const historical = { ...input, generationGuidance: 'ac-test-flow-review-binding-v3' } as const
+  const duplicate = await elaborate(historical, { runner: f.run(() => JSON.stringify(repeated)) })
+  assert.equal(duplicate.status, 'exhausted')
+  assert.ok(duplicate.rounds[0].findings.some(issue => issue.code === 'duplicate-id' && issue.itemId === verification.id))
+  const missing = await elaborate({ ...historical, requestKey: 'shared-verify-deleted' }, { draft: duplicate.rounds[0].draft, runner: f.run((request, workspace, draftPath) => {
+    assert.equal(readFileSync(join(workspace, draftPath), 'utf8'), JSON.stringify(repeated))
+    assert.doesNotMatch(request.prompt, /共享VERIFY返修/)
+    return JSON.stringify(broken)
+  }) })
+  assert.equal(missing.status, 'exhausted')
+  const prior = missing.rounds[0].draft!
+  assert.ok(prior.errors.some(issue => issue.code === 'dangling-reference' && issue.relatedIds?.includes(verification.id)))
+  assert.ok(prior.errors.some(issue => issue.code === 'missing-acceptance'))
+  const repairInput: ElaborationInput = { ...input, generationGuidance: ELABORATION_GENERATION_GUIDANCE, requestKey: 'shared-verify-repaired' }
+  let firstRequest: Omit<ElaborationSessionRequest, 'signal'> | undefined
+  const interrupted = await elaborate(repairInput, { draft: prior, runner: async ({ signal: _signal, ...request }) => {
+    firstRequest = request
+    throw Object.assign(new Error('在相同请求重建前中止'), { code: 'fixture_stop' })
+  } })
+  assert.equal(interrupted.failure?.code, 'fixture_stop')
+  const repaired = await elaborate(repairInput, { draft: prior, runner: f.run(({ signal: _signal, ...request }, workspace, draftPath) => {
+    assert.deepEqual(request, firstRequest, '同一冻结输入和旧Git稿重建完整带提示请求')
+    assert.equal(readFileSync(join(workspace, draftPath), 'utf8'), JSON.stringify(broken))
+    const hint = request.prompt.split('\n').filter(line => line.startsWith('共享VERIFY返修'))
+    assert.equal(hint.length, 1, '共有验证定义的失败需要一个明确位置')
+    assert.match(hint[0], /VERIFY-EXPORT-01.*targetIndex=0/)
+    assert.doesNotMatch(hint[0], /targetIndex=1/)
+    const diagnostics = request.prompt.split('\n失败诊断（不是新授权）:\n')[1].split('\n草稿业务schema只读文件=')[0]
+    assert.equal(JSON.stringify(JSON.parse(diagnostics).priorDraft.errors), JSON.stringify(prior.errors))
+    const next = structuredClone(broken)
+    next.changes[0].tables.VERIFY = verifyRows
+    return JSON.stringify(next)
+  }) })
+  assert.equal(repaired.status, 'complete', JSON.stringify(repaired.failure))
+  assert.deepEqual(f.requests.map(request => request.purpose), ['elaboration_generate', 'elaboration_generate', 'elaboration_generate', 'elaboration_review'])
+  assert.equal(readStageDraft(f.commonDir, prior, prior), JSON.stringify(broken))
+  assert.deepEqual(repaired.contracts.flatMap(contract => contract.items.filter(item => item.kind === 'VERIFY').map(item => [contract.path, item.id])), [[path, verification.id]])
+  assert.equal(repaired.runtimeVerification, 'not_run')
+})
+
+for (const mode of ['frozen', 'readonly', 'unchanged', 'preserve', 'interface', 'unrelated', 'fresh'] as const) test(`Native共享VERIFY返修遵守冻结归属和目标写范围 mode=${mode}`, async t => {
+  const f = await fixture(t), [target] = f.input.targets
+  const verification = { id: 'VERIFY-EXPORT-01', command: ['node', '--test', 'tests/export.test.mjs'], cwd: '.', timeoutMs: 10000 }
+  const { id } = verification
+  const noVerify = projectVerificationTable(target.source!, [])
+  const readonlyParent = projectVerificationTable(ancestor('旧父接口').replace('title: 上层接口\n', 'title: 上层接口\ncontract-schema: sync-v1\n'), [verification])
+  const sha = contentHash('current unaffected verification analysis')
+  const analysis: CodeBehaviorAnalysis = { version: 'code-behavior-v1', inputId: f.snapshot.id, baselinePairId: null, composedDigest: sha, readSetDigest: sha, policyDigest: sha, inputDigest: sha, changes: [], findings: [], facts: [], authorizedChanges: [], nodeChanges: [], newNodes: [], resolutions: [], traces: [], reviewPassed: true }
+  const input: ElaborationInput = { ...f.input, generationGuidance: ELABORATION_GENERATION_GUIDANCE, verifications: [verification], maxRepairs: 0,
+    ...(mode === 'frozen' ? { targets: [{ nodeId: 'new-contract', path: '.spec/new-contract/spec.md', rawSource: '新目标', source: null, sourceDigest: null }, target] } : {}),
+    ...(mode === 'readonly' ? { targets: [{ ...target, source: noVerify, sourceDigest: elaborationDigest(noVerify) }], context: [{ nodeId: 'ancestor', path: ancestorPath, source: readonlyParent }] } : {}),
+    ...(mode === 'preserve' ? { mode: 'preserve_business', targets: [{ ...target, source: noVerify, sourceDigest: elaborationDigest(noVerify) }] } : {}),
+    ...(mode === 'unchanged' ? { analysis: { analysis, ref: { sha256: contentHash(JSON.stringify(analysis)) } } } : {}),
+    ...(mode === 'interface' ? { phase: 'interface_seed', intent: { nodeId: 'ancestor', rawSource: '祖先原意' }, targets: f.input.context!.map(parent => ({ ...parent, sourceDigest: elaborationDigest(parent.source) })), context: [] } : {}),
+  }
+  const errors = mode === 'unrelated' ? [{ code: 'missing-acceptance', message: `引用 ${id} 的其他诊断` }] : [{ code: 'duplicate-id', itemId: id, message: `${id} 必须在同步范围全局唯一` }]
+  const result = await elaborate(input, { ...(mode === 'fresh' ? {} : { draftMaterial: { source: JSON.stringify(rows), errors } }), runner: async request => {
+    assert.equal(request.purpose, 'elaboration_generate')
+    const hints = request.prompt.split('\n').filter(line => line.startsWith('共享VERIFY返修'))
+    if (mode === 'frozen') {
+      assert.equal(hints.length, 1)
+      assert.match(hints[0], /VERIFY-EXPORT-01.*targetIndex=1/)
+    } else if (mode === 'readonly') {
+      assert.equal(hints.length, 1)
+      assert.ok(hints[0].includes(ancestorPath))
+      assert.doesNotMatch(hints[0], /targetIndex=/)
+    } else {
+      assert.equal(hints.length, 0)
+    }
+    throw Object.assign(new Error('只核对生成提示'), { code: 'fixture_stop' })
+  } })
+  assert.equal(result.failure?.code, 'fixture_stop', JSON.stringify(result.failure))
+})
+
 for (const missing of ['case', 'files'] as const) test(`Native完整P1把原授权的待实现诊断交给P2，V3实测前不算既有覆盖 missing=${missing}`, async t => {
   const f = await fixture(t), testPath = 'tests/export.test.mjs'
   const [target] = f.input.targets, sourcePath = 'src/export.js'
