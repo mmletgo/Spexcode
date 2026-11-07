@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+当前及历史路径治理归属复用[[sync-governance-owners]]，与分区和细化范围共用同一纯判定，不因规划入口改变owner或写权。
+
 当前及历史实际 owned target 的 related、code 来源与 code/AC.test 义务沿共享路径匹配器展开到真实快照，纳入只读 readPaths；只读祖先接口不因此扇出其 related 实现。读取不会扩 targets、executionScope、writePaths 或 mandatoryTests。旧计划重试仍保原 planBlob/policy，通过 coordinator 的同一派生闭包绑定新的真实读集。
 
 [[sync-application]] 从 source snapshot 读取 Spec，复用 loadSpecs、readFrozenContracts 和 contractImpact，不维护第二份业务图。初始上下文仅读 Spec，不把整仓未授权文件或凭据转成字符串。目标包含意图节点、其子节点、图影响节点和共享代码治理闭包；related 不计治理。受影响 code/test 必须在 [[sync-application-settings]] 的授权或独立保护测试登记，否则显示未授权路径。

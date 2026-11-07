@@ -6,6 +6,7 @@ import type { Contract, ContractGraph } from '@spexcode/spec-core/contracts'
 import { contentHash } from './snapshot.js'
 import type { SyncCoordinatorPlan } from './coordinator-types.js'
 import { coveredPath } from './settings.js'
+import { ownerNodesForPath } from './governance-owners.js'
 
 const DEFAULT_READ_LIMIT_BYTES = 512 * 1024
 const compare = (a: string, b: string): number => a < b ? -1 : a > b ? 1 : 0
@@ -240,20 +241,6 @@ function canonical(value: unknown): string {
     return `{${Object.entries(value).sort(([a], [b]) => compare(a, b)).map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`).join(',')}}`
   }
   return JSON.stringify(value) ?? 'null'
-}
-
-/** 当前及历史冻结治理共用同一 owner 判定，related 不授予归属。 */
-export function ownerNodesForPath(path: string, contracts: readonly Contract[], governanceNodes: Iterable<Pick<GovernanceNode, 'id' | 'path' | 'code'>>): Set<string> {
-  const owners = new Set<string>()
-  for (const node of governanceNodes) if (node.path === path || node.code.some(entry => relationClaimsPath(entry.path, path))) owners.add(node.id)
-  for (const contract of contracts) {
-    for (const item of contract.items) {
-      if (item.kind === 'VERIFY') continue
-      if (item.source.kind === 'code' && relationClaimsPath(parseCodeEntry(item.source.ref).path, path)) owners.add(contract.nodeId)
-      if (item.kind === 'AC' && relationClaimsPath(parseCodeEntry(item.test).path, path)) owners.add(contract.nodeId)
-    }
-  }
-  return owners
 }
 
 function closestNode(path: string, governanceNodes: ReadonlyMap<string, GovernanceNode>, preferred: ReadonlySet<string>): GovernanceNode | undefined {

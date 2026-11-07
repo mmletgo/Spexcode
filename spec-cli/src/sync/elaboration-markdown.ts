@@ -1,5 +1,5 @@
 import { parseRelation } from '@spexcode/spec-core'
-import { ownerNodesForPath } from './partitioning.js'
+import { ownerNodesForPath } from './governance-owners.js'
 import { CONTRACT_COLUMNS, contractTableCells, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
 import type { ContractItem, ContractKind, Verification } from '@spexcode/spec-core/contracts'
 import type { Applicability, ElaborationCandidate, ElaborationInput, ElaborationTarget, ReadonlySpecRepair } from './elaboration-types.js'
