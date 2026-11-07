@@ -336,16 +336,24 @@ console.log(JSON.stringify({address:app.readAddress(id),state:app.readState(id)}
       }
       assert.deepEqual(creates.map(response => response.status), [201, 201], `different candidates share the Git registry fence: ${JSON.stringify(created)}`)
       assert.ok(created.every(session => git(session.path, 'symbolic-ref', '--short', 'HEAD') === session.branch))
-      await waitFor(async () => (await rows()).some(row => row.id === created[0].id && row.lifecycle === 'active'), 'the fake shell launcher reserves the only runtime slot')
+      let activeRows: any[] = []
+      await waitFor(async () => {
+        activeRows = (await rows()).filter(row => created.some(session => session.id === row.id) && row.lifecycle === 'active')
+        return activeRows.length === 1
+      }, 'one created candidate reserves the only runtime slot')
+      const active = created.find(session => session.id === activeRows[0].id)
+      assert.ok(active, 'the active row belongs to one of the concurrent candidates')
+      const sibling = created.find(session => session.id !== active.id)
+      assert.ok(sibling, 'the other concurrent candidate remains the sibling')
       const addStarted = (readFileSync(trace, 'utf8').match(/registry-enter .*worktree add/g) ?? []).length
       const adding = post('registry-during-close')
       await waitFor(() => (readFileSync(trace, 'utf8').match(/registry-enter .*worktree add/g) ?? []).length > addStarted, 'concurrent add registry entry')
-      const [added, closedDuringAdd] = await Promise.all([adding, close(created[1].id)])
+      const [added, closedDuringAdd] = await Promise.all([adding, close(sibling.id)])
       assert.equal(added.status, 201)
       assert.equal(closedDuringAdd.status, 200, JSON.stringify(await closedDuringAdd.json()))
       assert.ok(!readFileSync(trace, 'utf8').includes('registry-overlap'), 'add, rollback removal, and close prune never overlap for distinct candidates')
-      assert.equal(existsSync(created[1].path), false, 'the fenced close still removes its own worktree')
-      assert.equal(git(created[0].path, 'symbolic-ref', '--short', 'HEAD'), created[0].branch, 'close preserves the sibling candidate')
+      assert.equal(existsSync(sibling.path), false, 'the fenced close still removes its own worktree')
+      assert.equal(git(active.path, 'symbolic-ref', '--short', 'HEAD'), active.branch, 'close preserves the active candidate')
       return
     }
 
