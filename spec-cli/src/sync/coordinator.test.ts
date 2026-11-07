@@ -30,6 +30,7 @@ import { migrateSyncStore, SYNC_COMPONENT, SYNC_MIGRATIONS, syncCoordinatorAddre
 import { dockerVerificationDriver, verificationExportDigest } from './verification-executor.js'
 import type { VerificationCheckpoint, VerificationCommandResult, VerificationDriver, VerificationRequest } from './verification-executor-types.js'
 import { runAttemptVerification } from './verification-run.js'
+import { remoteVerificationFixture } from './verification-transport.fixture.test.js'
 import { exportCandidate, freezeCandidate } from './candidate.js'
 import { composeInputSnapshots } from './composition.js'
 import { freezeDeliveryRuntime } from './runtime-freeze.js'
@@ -2063,6 +2064,78 @@ for (const mode of ['existing', 'missing', 'foreign-label', 'wrong-run'] as cons
   if (mode === 'wrong-run') { assert.equal(commands.length, 0); assert.equal(recovered.failure!.code, 'resource_recovery') }
   assert.deepEqual(f.store.readOperation(f.operation.id), before); assert.deepEqual(f.store.readAttempt(claimed.attempt.id), beforeAttempt)
   assert.equal(f.calls.length, 0); assert.deepEqual(f.store.listJournals(f.operation.id), [])
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+})
+
+for (const mode of ['drained', 'busy'] as const) test(`当前V3恢复缓存正常重调度原run mode=${mode}；无pause且不延长deadline`, async t => {
+  const remote = remoteVerificationFixture(t, false, true), previousPath = process.env.PATH
+  process.env.PATH = remote.temporary + ':' + previousPath; t.after(() => { process.env.PATH = previousPath })
+  const { argv: _argv, cwd: _cwd, expectedTestIds: _ids, timeoutMs: _timeout, ...environment } = (await remote.request()).policy
+  const definition = parseContract({ nodeId: 'export-contract', path: contractPath, source: original }).contract!.items.find(item => item.kind === 'VERIFY')!
+  assert.equal(definition.kind, 'VERIFY')
+  const f = await fixture(t, { maxAttempts: 1, maxCalls: 8, maxRepairs: 0, timeoutMs: 120000 }, false, original, 'project', original, { verifications: [{ definition: { id: definition.id, command: definition.command, cwd: definition.cwd, timeoutMs: definition.timeoutMs }, environment }] })
+  f.options.verificationTransport = remote.configuration; f.options.leaseMs = 120000
+  const first = await runSyncOperation(f.store, f.operation.id, f.options)
+  assert.equal(first.status, 'recovery_required', JSON.stringify(first.failure)); assert.equal(first.operation.phase, 'verifying')
+  const attempt = f.store.readAttempt(first.operation.currentAttemptId!), resource = f.store.listResources(attempt.id).find(item => item.plan.kind === 'verification')!
+  const checkpoint = JSON.parse(readEvidence(f.input.source.commonDir, resource.checkpointRef).toString()) as VerificationCheckpoint
+  assert.equal(checkpoint.phase, 'planned'); assert.equal(checkpoint.transport!.effects[0].id, 'materialize-0')
+  const oldStage = readSyncCheckpoints(f.store, first.operation, attempt).json.map(item => item.value as { stage?: string; resultRef?: { sha256: string } }).find(item => item.stage === `v3:${definition.id}`)!
+  const originalFailure = readEvidence(f.input.source.commonDir, oldStage.resultRef!)
+  assert.equal(JSON.parse(originalFailure.toString()).status, 'recovery_required'); assert.match(JSON.parse(originalFailure.toString()).reason, /Broken pipe/)
+  let nativeResource: ReturnType<SyncStore['planResource']> | undefined, lock: ReturnType<typeof spawn> | undefined
+  if (mode === 'busy') {
+    await remote.rpc(remote.scoped(checkpoint, { action: 'observe', effect: checkpoint.transport!.effects[0] }))
+    lock = spawn('python3', ['-c', 'import fcntl,sys; f= open(sys.argv[1]); fcntl.flock(f, fcntl.LOCK_EX); print("ready", flush=True); sys.stdin.read()', join(remote.root, '.spex-verification-control', checkpoint.transport!.plan.runKey, 'lock')], { stdio: ['pipe', 'pipe', 'pipe'] })
+    const held = lock
+    t.after(() => { if (held.exitCode === null) held.kill('SIGKILL') })
+    await new Promise<void>((resolve, reject) => { held.once('error', reject); held.stdout!.once('data', () => resolve()); held.once('exit', () => reject(new Error('fixture lock exited before ready'))) })
+    const fence = { operationId: first.operation.id, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: f.input.source.physicalFingerprint }
+    const request = { root: f.root, base: f.input.headCommit, prompt: '当前仍受有效lease保护的Native夹具', schema: { type: 'object' }, requestKey: 'current-native', inputDigest: f.input.id, purpose: 'elaboration_review', timeoutMs: 120000 }
+    const requestDigest = contentHash(JSON.stringify(request)), dispatch = f.store.reserveDispatch(fence, { key: request.requestKey, purpose: request.purpose, requestDigest }), expectedSessionId = sessionIdForCreateKey(dispatch.sessionCreateKey)
+    const identity = { operationId: first.operation.id, attemptId: attempt.id, inputId: f.input.id, candidateDigest: attempt.candidate!.digest }
+    const plan: NativeRunPlan = { schemaVersion: 1, request, requestDigest, sessionCreateKey: dispatch.sessionCreateKey, expectedSessionId, ...identity }
+    const native: NativeRunCheckpoint = { schemaVersion: 1, ...identity, requestDigest, expectedSessionId, phase: 'planned', nativeCallRequested: true, nativeStarted: true, nativeState: 'running', session: { sessionId: expectedSessionId, threadId: 'current-thread', turnId: 'current-turn' } }
+    nativeResource = f.store.planResource(fence, { key: request.requestKey, kind: 'native_session', payloadDigest: requestDigest, inputId: f.input.id, candidateDigest: attempt.candidate!.digest, planBlob: writeEvidence(f.input.source.commonDir, plan), checkpointRef: writeEvidence(f.input.source.commonDir, native) })
+  }
+  const calls = f.calls.length, before = f.store.readOperation(f.operation.id), savedAttempt = f.store.readAttempt(attempt.id)
+  const now = Date.now.bind(Date), offset = checkpoint.deadlineAt + 1 - now()
+  t.mock.method(Date, 'now', () => now() + offset)
+  assert.ok(Date.now() >= checkpoint.deadlineAt && Date.now() < attempt.expiresAtMs, '原V3已过期且当前attempt lease仍有效')
+  const result = await runSyncOperation(f.store, f.operation.id, f.options)
+  const after = f.store.readResource(resource.id), latest = JSON.parse(readEvidence(f.input.source.commonDir, after.checkpointRef).toString()) as VerificationCheckpoint
+  assert.equal(f.store.listAttempts(f.operation.id).length, 1); assert.equal(f.calls.length, calls); assert.equal(result.operation.callsUsed, before.callsUsed)
+  assert.equal(result.operation.currentAttemptId, attempt.id); assert.equal(result.operation.control, 'run'); assert.equal(result.operation.deadlineAtMs, before.deadlineAtMs)
+  assert.deepEqual(f.store.readAttempt(attempt.id).candidate, savedAttempt.candidate); assert.deepEqual(f.store.readAttempt(attempt.id).dispatchPlans, savedAttempt.dispatchPlans)
+  assert.deepEqual(readEvidence(f.input.source.commonDir, oldStage.resultRef!), originalFailure)
+  for (const ref of attempt.checkpointRefs) assert.ok(f.store.readAttempt(attempt.id).checkpointRefs.some(current => current.sha256 === ref.sha256), '原阶段CAS根保持引用')
+  assert.equal(latest.runId, checkpoint.runId); assert.equal(latest.deadlineAt, checkpoint.deadlineAt)
+  assert.equal(f.store.listResources(attempt.id).filter(item => item.plan.kind === 'verification').length, 1)
+  assert.ok(remote.events().every(item => !['create', 'start'].includes(item.args[1])))
+  assert.equal(latest.transport!.effects.filter(item => item.kind === 'materialize').length, 1, '不重传候选或追加上传effect')
+  assert.equal(readFileSync(remote.bootstraps, 'utf8').trim().split('\n').map(line => JSON.parse(line) as { kind?: string }).filter(item => item.kind === 'materialize').length, 1, '不重发SSH上传请求')
+  assert.equal(f.store.listJournals(f.operation.id).length, 0); assert.equal(f.store.readAttempt(attempt.id).verification, null)
+  if (mode === 'busy') {
+    assert.equal(result.status, 'recovery_required'); assert.equal(after.phase, 'planned'); assert.equal(latest.transport!.closed, undefined)
+    assert.deepEqual(f.store.readResource(nativeResource!.id), nativeResource, '不能取消或恢复当前Native')
+    assert.ok(f.protocol.withTransaction(tx => tx.query('SELECT resource_key FROM sync_leases WHERE operation_id=? AND token=? AND expires_at_ms>?', f.operation.id, attempt.leaseToken, Date.now())).length > 0)
+    const newest = readSyncCheckpoints(f.store, result.operation, f.store.readAttempt(attempt.id)).json.map(item => item.value as { stage?: string; resultRef?: { sha256: string } }).find(item => item.stage === `v3:${definition.id}`)!
+    assert.match(JSON.parse(readEvidence(f.input.source.commonDir, newest.resultRef!).toString()).reason, /busy|尚未排空/)
+    lock!.stdin!.end(); await new Promise<void>(resolve => lock!.once('close', () => resolve()))
+  } else {
+    assert.equal(after.phase, 'removed'); assert.equal(latest.notCreated!.outcome, 'timeout')
+    assert.ok(after.checkpoints.findIndex(item => item.phase === 'terminal') < after.checkpoints.findIndex(item => item.phase === 'removed'))
+    const closed = latest.transport!.closed as { closed: boolean; rebuildersDrained: boolean; fencedNotExecuted: string[] }, cleanup = latest.transport!.cleanup as { cleaned: boolean; settled: boolean }
+    assert.equal(closed.closed, true); assert.equal(closed.rebuildersDrained, true); assert.ok(closed.fencedNotExecuted.includes('materialize-0'))
+    assert.equal(cleanup.cleaned, true); assert.equal(cleanup.settled, true); assert.equal(existsSync(latest.transport!.plan.directory), false)
+    assert.equal(f.store.readAttempt(attempt.id).failure!.code, 'verification_timeout'); assert.equal(f.store.readAttempt(attempt.id).status, 'failed')
+    assert.equal(f.protocol.withTransaction(tx => tx.query('SELECT resource_key FROM sync_leases WHERE operation_id=? AND token IS NOT NULL', f.operation.id)).length, 0)
+    const request = JSON.parse(readEvidence(f.input.source.commonDir, resource.plan.planBlob).toString()) as VerificationRequest
+    const frozen = f.store.readResource(resource.id), fence = { operationId: before.id, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: f.input.source.physicalFingerprint }
+    const sshBefore = readFileSync(remote.bootstraps, 'utf8')
+    const removed = await runAttemptVerification(f.store, fence, request, { transport: remote.configuration, driver: async () => assert.fail('removed不得访问driver'), onCheckpointRecorded: async () => assert.fail('removed不得写checkpoint') })
+    assert.equal(removed.result.status, 'timeout'); assert.deepEqual(f.store.readResource(resource.id), frozen); assert.equal(readFileSync(remote.bootstraps, 'utf8'), sshBefore)
+  }
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
 })
 

@@ -23,6 +23,8 @@ related:
 
 V3 正常运行、普通 recover 与 resource-only recover 共用可信注入的 [[verification-transport]]，不在 coordinator 重建远端执行器。原 operation/fence/attempt/runId/candidate/resource/receipt 保持；实际远端 evidence 仍需 V1/V2/V4 与当前写权才交付。resource-only 仅关闭和排空原绑定，不上传/create/start，不能用手工环境诊断替代正式 V3。
 
+当前有效 attempt 的 V3 `recovery_required` stage 是待续观察，不是可永久复用的终态。普通重调度沿同一 [[verification-executor]] 资源桥恢复原 run/resource/checkpoint。原候选、请求、deadline 和失败 CAS 不变，新观察另存 stage，不为恢复重做模型或新建 run。原 deadline 已过的 planned 仅经原 target/daemon 的 closed、effect 排空及精确不存在结算 timeout，再确认 staging 清算后 removed 并沿原失败策略处理。不借用户取消赋予停止证明。锁未排空、未知 effect、身份失配或缺失 receipt 时仍 recovery_required 并保容量。此重入只处理当前明确 V3，不扩大历史资源回收为停止当前 Native。removed 重入只读原结论，不访问 driver/SSH 或补 checkpoint。
+
 全局P1存在仅分析分区时，首次封口、封口返修及同operation的V1来源恢复重新核原P0 whole wrapper、原读集/基线、冻结计划与各区真实原件。跨attempt承接沿严格更早的正式provenance定位原分析和独审，复算独审覆盖及精确摘要。真实P1和认证的仅分析P0在原计划上互斥且完整，后者没有返修writer资格。同operation的code_to_spec即使原V1未通过，也只凭同P1原件造成的精确null扩域恢复原计划；V1候选及后续审查仍须真实重验。原P1局部输入、派发及V1–V4和交付门槛保持。
 
 新的有效fence可沿原严格较新来源顺序读取已认证且正式stop/removed的精确物理JSON草稿；ZCode另须[[sync-stage-worktree]]规定的原精确turn.failed，原canonical cancelled不单独构成拒绝，普通暂停的turn.completed/turn.cancelled不取得此物理资格，既有正常Git暂停材料政策保持。P0保existingDraft来源截断，旧物理稿不因晚observedAt/mtime覆盖后来正常Git稿。仅owner draft可dirty，所有原request/dispatch/Native身份、source/tests/schema/context/index授权外变化及当前fence/lease/CAS门保持。新checkpoint仅记approved:false、sourceKind:physical_draft、原Native/stop引用、observedHEAD/tree、indexSHA与含原文的JSON材料CAS，不追补旧witness或将文件伪称Git稿/Native final。原errors及repairDiagnostics继续给新seed；P0 review仅续审且保原ready分析。P1通过内存binding/readonly seed/inputDigest/existingDraft回调精确定位旧稿真实Native attempt/round，仅严格较新的物理来源可替换；新旧程序可信readonly overlay按精确path/mode/OID投影比较，其余保护面不变，并完整保留原errors/冻结诊断；原文经真实Agent正常提交、原JSON/schema/业务/独审后才有新draft身份。writer27保护此准入，不授额外自动重试。

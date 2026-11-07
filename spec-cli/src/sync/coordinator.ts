@@ -1376,7 +1376,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
     for (const run of runs) {
       const name = `v3:${run.verificationId}`
       let result = stage<VerificationResult>(store, operation, store.readAttempt(attempt.id), name)
-      if (!result) {
+      if (!result || result.status === 'recovery_required') {
         const verified = await runAttemptVerification(store, fence!, { runId: contentHash(`${attempt.id}:${run.verificationId}`), inputDigest: operation.input.id, candidateDigest: candidate.digest, candidateExportDigest: exported.digest, candidateExportPath, privateScratchRoot: scratch, policy: run.policy, signal }, { driver: options.verificationDriver, transport: options.verificationTransport })
         result = verified.result
         if (store.readOperation(operationId).control === 'run' && store.readOperation(operationId).currentAttemptId === attempt.id && !signal.aborted) saveStage(store, fence!, name, result)

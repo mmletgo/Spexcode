@@ -5,6 +5,8 @@ hue: 175
 desc: 真实 SQLite/Git 和隔离 Docker 检查编排与恢复门禁。
 code:
   - spec-cli/src/sync/coordinator.test.ts
+related:
+  - spec-cli/src/sync/verification-transport.fixture.test.ts
 ---
 # P2 中央编排集成证据
 
@@ -13,6 +15,8 @@ code:
 中央应用编排必须由实际输入、候选、验收和交付事实证明，不能把模型 stub 的通过声明当最终产品证据。
 
 ## expanded spec
+
+当前有效lease的V3首次materialize SSH故障在真实临时Git/私有SQLite保存planned资源与recovery_required stage，跨过原验证deadline后仅正常runSyncOperation重调度。旧版仍planned且复用原Broken pipe。新版沿同run/resource的生产executor/helper形成closed、effect排空、精确absence、timeout terminal和cleanup/removed，保原失败CAS根、候选、请求、deadline及源码/index，无新模型/attempt/run/upload/create/start或journal，失败按原预算结算并释放租约。实际内核锁仍被持有时，新观察须为busy且保planned/容量/有效租约，当前Native资源原件保持。removed重入不访问driver/SSH或写checkpoint。共用原运输fixture，既有AC-REMOTE断言/模式不变。新增SSH包装故障及Native账本均为受控上游，不声称真实模型、远端Docker或Tiny最终验收。
 
 原候选零调用续验实际完成隔离driver验收并正式removed后，在V3 saveStage注入记账失败，原attempt保candidate但无V3 stage/verification aggregate；同parent仍归并失败child，正式retry最新child旧版重入第七次P0，新版只读冷验所有原资源及完整祖先，零模型产生本次V3/V4/Git。旧资源checkpoint写入计数为零，原失败/资源/checkpoint逐字保持；原业务测试failed及额外未知removed资源分别在新V3前明确拒绝，零模型零派发。该受控故障只验证业务记账边界，真实内联stdout SHA故障由[[sync-checkpoint-evidence]]治理。
 

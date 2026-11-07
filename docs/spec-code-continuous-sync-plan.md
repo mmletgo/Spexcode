@@ -428,6 +428,8 @@ Native已成功返回但review字段格式不合格同样保全原JSON、原错�
 
 V3 可由可信 server 选择本地 Docker 或 SSH Linux Docker；SSH 认证和部署权限不进入候选配置。远端必须真实运输并认证完整 candidate/reporter，以实际远端 mounts 和原 inspect 形成同一正式验证证据。原 ledger 四阶段承载上传、单 run effect 排空和清理；SSH 断线不代表停止。先持久终态，再确认 exact 容器与临时 staging 已删除才释放容量；closed 与 effect receipts 作为控制历史保留。未知 create/start 提交继续 recovery_required，不由 NoSuch 猜测。环境 probe 不替代产品正式 V3/receipt。
 
+当前有效 attempt 的 V3 recovery_required 缓存只代表待续观察，普通重调度须沿原 run/resource/checkpoint 续既有执行器，不重做模型或建立新 run 来修恢复债。原失败 CAS、候选和 deadline 保留，新观察追加。原期限已过的 planned 不上传/create/start，只有 closed、effect 排空、精确不存在和 staging 清算均证实时才以 timeout/removed 结算。未知锁、effect、身份或 receipt 仍保恢复债与容量。当前 Native 不因这一 V3 重入被取消，removed 重入不访问 driver/SSH 或改写检查点。
+
 增量操作的结构 V1 从实际不可变 candidate tree 读取完整业务契约及代码/测试正文，不能用 Agent 的局部读集误判未改兄弟缺少覆盖。生成意图比较保留本轮已批准契约，候选侧仅纳入这些节点与 baseTree 到 candidate tree 的真实 Spec 差量；未读改删节点的前态只从 baseTree 取得。完整结构上下文不扩大 Agent 任务、写入或验收范围，不把未改兄弟当新增意图，也不从候选自动登记验证命令；真实覆盖缺口、未批准业务项和政策漂移仍拒绝。未读兄弟的既有 GAP 只在已通过全图封口精确记录同一发现、闭包不涉及本轮 ready/accepted，且全部 Spec、源码和测试义务在封口输入、候选基树与候选中逐对象不变时沿原闭包规则保留，不阻塞独立 Task；新增或变化的 GAP、涉及本轮依赖或缺乏继承证明仍阻断。
 
 结构结果由程序产生；语义结果使用结构化 verdict、规则/代码定位、原因和反例；测试由实际工具执行并保存退出状态及关键输出。Agent 的自然语言“已通过”没有完成权限。
