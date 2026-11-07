@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+v34只新增sync_observations的部分表达式索引：键为完整source_key、input.id、latestDifferenceDigest与outcome，成员条件逐字沿用commit、failure为NULL且outcome非blocked。索引由SQLite维护既有行及后续写入，不保存第二份观察事实，不改原查询、分组、rowid顺序或任何历史业务行。升级前停稳旧writer并结算或保留资源和租约，沿正常online backup及组件事务建索引；v1–v33 SQL/checksum与全部旧记录保持，v33及更旧writer拒绝新代。建索引失败连同marker整体回滚，重复迁移幂等。回滚先停新writer并结算或保留资源，再恢复升级前一致v33库与配套evidence/runtime/Git refs，不能删marker降级。
+
 v33仅追加SELECT 1 marker，保护P1 V5只读事实修正资格及其阶段摘要。所有旧32及更旧writer在任何claim、renew、状态写或派发前拒绝；V1–V32 SQL/checksum和全部历史记录保持。升级先停稳旧backend/queue、结算或保留真实资源及租约，做一次32一致SQLite online backup后事务追加。回滚先停新writer并结算33产生的资源，再恢复32一致备份和配套evidence/runtime/Git refs；不能删marker、改历史请求或补写旧字段。
 
 v32仅追加无DDL SELECT 1 writer marker，保护远端 V3 v2 的 target/effect/closed 持久语义，以及 removed 须确证容器和临时 staging 均已清算的边界。v31及更旧 writer 在任何写入/派发前拒绝；保 v1–v31 SQL/checksum 与旧记录原字节。升级停稳旧 backend/queue并结算或保留资源，再 online backup 后事务追加。回滚停新 writer，先结算远端资源，再恢复一致 v31 备份及配套 evidence/runtime/Git refs；未知远端 effect 未结算不能用旧备份抹掉 ledger，不能删 marker 降级。
