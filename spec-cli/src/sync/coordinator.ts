@@ -1143,7 +1143,16 @@ async function verificationRetrySource(store: SyncStore, operation: SyncOperatio
   if (!operation.retryOf) return null
   let owner = store.readOperation(operation.retryOf)
   if (syncModel(owner) !== syncModel(operation)) return null
-  const first = owner.currentAttemptId ? store.readAttempt(owner.currentAttemptId) : null
+  let ancestor = owner, first = ancestor.currentAttemptId ? store.readAttempt(ancestor.currentAttemptId) : null
+  const searched = new Set<string>()
+  while (!first?.candidate && ancestor.retryOf) {
+    if (first?.failure?.code === 'verification_unsupported') fail('candidate_retry_binding', '原验证失败缺少冻结候选，不能作为续验或重新生成')
+    if (searched.has(ancestor.id)) fail('candidate_retry_binding', '正式续验来源链存在循环')
+    searched.add(ancestor.id)
+    ancestor = store.readOperation(ancestor.retryOf)
+    first = ancestor.currentAttemptId ? store.readAttempt(ancestor.currentAttemptId) : null
+  }
+  if (syncModel(ancestor) !== syncModel(operation)) return null
   if (first?.failure?.code !== 'verification_unsupported') return null
   function reject(message: string): never { return fail('candidate_retry_binding', message) }
   const candidate = first.candidate
@@ -1157,9 +1166,15 @@ async function verificationRetrySource(store: SyncStore, operation: SyncOperatio
     const superseded = seen.size > 1 && owner.phase === 'superseded' && prior?.status === 'superseded'
     if (!eligibility.eligible && !(superseded && eligibility.reason!.code === 'SYNC_RETRY_PHASE')) reject(`原操作不能续验：${eligibility.reason!.code}：${eligibility.reason!.message}`)
     if (superseded && (store.sourceContinuityState(owner.input.source.commonDir).leasedOperationIds.includes(owner.id) || store.listRecoverableResources().some(item => item.operation.id === owner.id))) reject('原已superseded祖先仍有活租约或未结算资源')
-    if (!superseded && (owner.phase !== 'failed' || prior?.status !== 'failed') || !prior || prior.failure?.code !== 'verification_unsupported' || prior.failure.kind !== 'unsupported' || prior.verification || store.listJournals(owner.id).length || canonical(prior.candidate) !== canonical(candidate)) reject('原验证失败、执行写权、资源或journal尚未完整结算')
+    if (!superseded && (owner.phase !== 'failed' || prior?.status !== 'failed') || !prior || prior.operationId !== owner.id || !prior.failure || prior.verification || store.listJournals(owner.id).length || prior.candidate && canonical(prior.candidate) !== canonical(candidate)) reject('原验证失败、执行写权、资源或journal尚未完整结算')
     if (canonical(owner.input) !== canonical(operation.input) || syncModel(owner) !== syncModel(operation) || owner.origin !== operation.origin || (owner.requestBlob?.sha256 ?? null) !== (operation.requestBlob?.sha256 ?? null) || owner.policyDigest !== operation.policyDigest || owner.planBlob?.sha256 !== operation.planBlob?.sha256 || owner.impactDigest !== operation.impactDigest || owner.readSetDigest !== operation.readSetDigest || canonical(owner.scope) !== canonical(operation.scope) || canonical(store.readBusinessBaselineSelection(owner.id)) !== canonical(store.readBusinessBaselineSelection(operation.id)) || (owner.previousBaselinePair?.id ?? null) !== (operation.previousBaselinePair?.id ?? null) || owner.deliveryPlan.baseCommit !== operation.deliveryPlan.baseCommit || canonical(prior.composedInput) !== canonical(view.composed)) reject('续验的来源、输入、原意、模型、政策、读集、scope或组合树已变化')
     if (canonical(owner.readyScope) !== canonical(candidate!.coveredScope) || owner.blockedScope.paths.length || owner.blockedScope.contractIds.length || owner.blockedScope.flowIds.length || owner.blockedReason || canonical(owner.readyScope) !== canonical(owner.scope)) reject('部分就绪或受阻候选不能取得完整续验资格')
+    if (!prior.candidate) {
+      const history = store.listAttempts(owner.id)
+      if (!owner.retryOf || owner.callsUsed !== 0 || owner.delivery !== null || !history.some(item => item.id === prior.id) || history.some(item => !['failed', 'superseded'].includes(item.status) || item.dispatchPlans.length || item.currentSession !== null || item.candidate !== null || item.verification !== null || item.publicationBase)) reject('候选认证失败后继已有调用、派发或副作用，不能跳过它复用祖先候选')
+      owner = store.readOperation(owner.retryOf); continue
+    }
+    if (prior.failure.code !== 'verification_unsupported' || prior.failure.kind !== 'unsupported') reject('原冻结候选没有V3前置unsupported失败，不能取得续验资格')
     const unsupported = readSyncCheckpoints(store, owner, prior).json.map(({ value }) => value as Stage).filter(value => value.version === 'sync-stage-v1' && value.stage?.startsWith('v3:') && value.operationId === owner.id && value.attemptId === prior.id && value.inputId === owner.input.id && value.policyDigest === owner.policyDigest && stageSelectionMatches(store, owner, value))
     if (unsupported.length !== 1 || !prior.failure.evidenceRefs.some(ref => ref.sha256 === unsupported[0].resultRef.sha256) || stage<VerificationResult>(store, owner, prior, unsupported[0].stage)?.status !== 'unsupported' || store.findResource(prior.id, `verification:${contentHash(`${prior.id}:${unsupported[0].stage.slice(3)}`)}`)) reject('续验缺少原V3前置unsupported原件，或原验证已经登记资源')
     const generation = stage<SavedGeneration>(store, owner, prior, 'generation')
