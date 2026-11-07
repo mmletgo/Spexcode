@@ -6092,7 +6092,7 @@ test('Coordinator Native Spec→Code scratch构建后6→1→1沿原builder来�
   assert.equal(f.store.listJournals(f.operation.id).length, 0); assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
 })
 
-for (const defect of ['none', 'deferred-implementation', 'deferred-native-mismatch', 'metadata-parent', 'edge', 'edge-valid', 'review-budget', 'review-budget-keys', 'model', 'source', 'oracle', 'configuration', 'request', 'policy', 'impact', 'readset', 'scope', 'partial', 'candidate', 'generation', 'analysis', 'elaboration', 'review', 'v3', 'publication'] as const) test(`正式retryOf在V3前置unsupported后零模型调用续验真实冻结候选 defect=${defect}`, { timeout: 180000 }, async t => {
+for (const defect of ['none', 'failed-continuation', 'failed-continuation-drift', 'deferred-implementation', 'deferred-native-mismatch', 'metadata-parent', 'edge', 'edge-valid', 'review-budget', 'review-budget-keys', 'model', 'source', 'oracle', 'configuration', 'request', 'policy', 'impact', 'readset', 'scope', 'partial', 'candidate', 'generation', 'analysis', 'elaboration', 'review', 'v3', 'publication'] as const) test(`正式retryOf在V3前置unsupported后零模型调用续验真实冻结候选 defect=${defect}`, { timeout: 180000 }, async t => {
   const multiple = ['edge', 'edge-valid', 'review-budget-keys'].includes(defect)
   const importedPath = '.spec/project/import/import-contract/spec.md'
   const imported = original.replaceAll('export-job', 'import-job').replaceAll('EXPORT', 'IMPORT').replaceAll('export-contract', 'import-contract').replaceAll('src/export.js', 'src/import/import.js').replaceAll('tests/export.test.mjs', 'tests/import.test.mjs').replaceAll('decision:IMPORT-POLICY', 'decision:EXPORT-POLICY').replace(/(\| REQ-IMPORT-01 \|[^\n]+)\| - \|/, '$1| REQ-EXPORT-01 |')
@@ -6184,7 +6184,7 @@ for (const defect of ['none', 'deferred-implementation', 'deferred-native-mismat
   const store = application.store; f.useStore(store); currentStore = store
   f.options.managedRoot = join(applicationRuntime, 'managed'); f.options.artifactRoot = join(applicationRuntime, 'artifacts')
   const originalRefs = origin.checkpointRefs.map(ref => ({ ref, stage: (JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()) as { stage?: string }).stage }))
-  if (!['none', 'deferred-implementation', 'metadata-parent', 'edge-valid'].includes(defect)) {
+  if (!['none', 'failed-continuation', 'failed-continuation-drift', 'deferred-implementation', 'metadata-parent', 'edge-valid'].includes(defect)) {
     const request = { nodeId: 'export-contract', requestId: `reject-frozen-${defect}`, retryOf: parent.id, ...(defect === 'model' ? { model: 'claude:other-model' } : {}) }
     active = (await application.submit(request)).operation!
     active = store.ackDispatch(f.input.source.repositoryId, active.dispatchMessageId); f.useOperation(active)
@@ -6242,7 +6242,39 @@ for (const defect of ['none', 'deferred-implementation', 'deferred-native-mismat
     assert.equal(JSON.stringify({ operation: store.readOperation(parent.id), attempts: store.listAttempts(parent.id) }), originalHistory)
     return
   }
-  active = (await application.submit({ nodeId: 'export-contract', requestId: 'retry-transport-still-unavailable', retryOf: parent.id })).operation!
+  let retryParent = parent.id
+  let emptySuccessor: { operation: SyncOperation; attempt: SyncAttempt } | null = null
+  if (defect.startsWith('failed-continuation')) {
+    const retry = { nodeId: 'export-contract', requestId: 'first-candidate-authentication-retry', retryOf: parent.id }
+    active = (await application.submit(retry)).operation!
+    active = store.ackDispatch(f.input.source.repositoryId, active.dispatchMessageId); f.useOperation(active)
+    const readAttempt = store.readAttempt.bind(store), listAttempts = store.listAttempts.bind(store)
+    const rejectedRef = originalRefs.filter(item => item.stage?.startsWith('injected:') && item.stage.endsWith(':elaboration_review')).map(item => item.ref.sha256)
+    const missingReview = (attempt: SyncAttempt): SyncAttempt => attempt.id === origin.id ? { ...attempt, checkpointRefs: attempt.checkpointRefs.filter(ref => !rejectedRef.includes(ref.sha256)) } : attempt
+    store.readAttempt = id => missingReview(readAttempt(id)); store.listAttempts = id => listAttempts(id).map(missingReview)
+    const authenticationFailure = await runSyncOperation(store, active.id, f.options)
+    store.readAttempt = readAttempt; store.listAttempts = listAttempts
+    assert.equal(authenticationFailure.operation.phase, 'failed'); assert.equal(authenticationFailure.operation.callsUsed, 0)
+    const failedAttempt = store.readAttempt(authenticationFailure.operation.currentAttemptId!)
+    assert.deepEqual(failedAttempt.dispatchPlans, []); assert.equal(failedAttempt.candidate, null); assert.equal(failedAttempt.verification, null)
+    assert.equal(store.listRecoverableResources().length, 0); assert.equal(store.listJournals(active.id).length, 0)
+    emptySuccessor = { operation: authenticationFailure.operation, attempt: failedAttempt }
+    const originalFailure = JSON.stringify(emptySuccessor)
+    assert.equal((await application.submit({ ...retry, requestId: 'same-parent-still-coalesces' })).operation!.id, active.id, '同parent保持原幂等，不借新requestId创建新op或resume')
+    retryParent = active.id
+    if (defect === 'failed-continuation-drift') {
+      active = (await application.submit({ nodeId: 'export-contract', requestId: 'latest-failed-authentication-drift', retryOf: retryParent })).operation!
+      active = store.ackDispatch(f.input.source.repositoryId, active.dispatchMessageId); f.useOperation(active)
+      const readOperation = store.readOperation.bind(store)
+      store.readOperation = id => { const operation = readOperation(id); return id === retryParent ? { ...operation, impactDigest: contentHash('changed empty successor impact') } : operation }
+      const rejected = await runSyncOperation(store, active.id, f.options)
+      store.readOperation = readOperation
+      assert.equal(rejected.failure?.code, 'candidate_retry_binding', JSON.stringify(rejected.failure)); assert.equal(rejected.operation.callsUsed, 0)
+      assert.equal(calls.length, originalCalls); assert.equal(JSON.stringify({ operation: store.readOperation(retryParent), attempt: store.readAttempt(failedAttempt.id) }), originalFailure)
+      return
+    }
+  }
+  active = (await application.submit({ nodeId: 'export-contract', requestId: 'retry-transport-still-unavailable', retryOf: retryParent })).operation!
   active = store.ackDispatch(f.input.source.repositoryId, active.dispatchMessageId); f.useOperation(active)
   const secondFailure = await runSyncOperation(store, active.id, f.options)
   assert.equal(secondFailure.failure?.code, 'verification_unsupported', JSON.stringify({ failure: secondFailure.failure, calls })); assert.equal(secondFailure.operation.callsUsed, 0)
@@ -6265,6 +6297,11 @@ for (const defect of ['none', 'deferred-implementation', 'deferred-native-mismat
   const supersededParent = store.readOperation(parent.id), supersededOrigin = store.readAttempt(origin.id)
   assert.deepEqual({ ...supersededParent, phase: parent.phase, revision: parent.revision, updatedAtMs: parent.updatedAtMs }, parent, '准入仅按原重叠政策supersede祖先，不改原意/预算/绑定或失败原件')
   assert.deepEqual({ ...supersededOrigin, status: origin.status }, origin, '原失败和全部checkpoint/ref/Native身份逐字保持')
+  if (emptySuccessor) {
+    const current = store.readOperation(emptySuccessor.operation.id), currentAttempt = store.readAttempt(emptySuccessor.attempt.id)
+    assert.deepEqual({ ...current, phase: emptySuccessor.operation.phase, revision: emptySuccessor.operation.revision, updatedAtMs: emptySuccessor.operation.updatedAtMs }, emptySuccessor.operation, '空后继仅保正常supersede派生，不提供任何批准')
+    assert.deepEqual({ ...currentAttempt, status: emptySuccessor.attempt.status }, emptySuccessor.attempt, '空后继原failure与checkpoint逐字保持，不补candidate/verification')
+  }
   assert.ok(result.receipt); assert.equal(store.listJournals(parent.id).length, 0)
   assert.equal(f.git('rev-parse', 'HEAD'), f.input.headCommit); assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
 })
