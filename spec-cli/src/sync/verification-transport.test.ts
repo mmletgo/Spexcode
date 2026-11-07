@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer } from 'node:net'
+import { performance } from 'node:perf_hooks'
 import test from 'node:test'
 import { createRemoteVerificationRun, remoteVerificationEnvironment, type VerificationRpc } from './verification-transport.js'
 import { verificationEffectDigest, verificationExportDigest } from './verification-remote-helper.mjs'
@@ -20,17 +21,18 @@ import { runAttemptVerification } from './verification-run.js'
 
 const hash = (value: string): string => createHash('sha256').update(value).digest('hex')
 const helper = new URL('./verification-remote-helper.mjs', import.meta.url).href
+const realSetTimeout = setTimeout
 const waitUntil = async (condition: () => boolean): Promise<void> => {
   const until = Date.now() + 10_000
   while (!condition()) { if (Date.now() > until) throw new Error('fixture condition timeout'); await new Promise(resolve => setTimeout(resolve, 20)) }
 }
 
-function fixture(t: test.TestContext) {
+function fixture(t: test.TestContext, inlineBootstrap = false) {
   const temporary = realpathSync(mkdtempSync(join(tmpdir(), 'sv3-'))), root = join(temporary, 'remote'), source = join(temporary, 'local'), calls = join(temporary, 'calls.jsonl'), state = join(temporary, 'docker.json'), settings = join(temporary, 'settings.json')
   mkdirSync(root, { mode: 0o700 }); mkdirSync(source); writeFileSync(join(source, 'test.mjs'), 'export const value = 1\n')
   const socketPath = join(temporary, 'docker.sock'), socket = createServer()
   socket.listen(socketPath)
-  const flock = join(temporary, 'flock'), docker = join(temporary, 'docker'), ssh = join(temporary, 'ssh')
+  const flock = join(temporary, 'flock'), docker = join(temporary, 'docker'), ssh = join(temporary, 'ssh'), bootstraps = join(temporary, 'bootstraps.jsonl'), sshReady = join(temporary, 'ssh-ready')
   writeFileSync(flock, `#!/usr/bin/env python3\nimport fcntl,sys\ntry:\n fcntl.flock(3, fcntl.LOCK_EX | fcntl.LOCK_NB)\nexcept BlockingIOError:\n sys.exit(1)\n`, { mode: 0o755 })
   const options: { flockProgram: string; dockerProgram: string; replyWaitMs?: number } = { flockProgram: flock, dockerProgram: docker }
   const fakeDocker = `#!/usr/bin/env node
@@ -66,7 +68,20 @@ if(args[1]==='rm') {rmSync(state);console.log(data.Id);process.exit(0);}
 throw new Error('unexpected Docker request '+args.join(' '));
 `
   writeFileSync(docker, fakeDocker, { mode: 0o755 })
-  writeFileSync(ssh, `#!/usr/bin/env node\nimport { spawn } from 'node:child_process';\nconst p=spawn(process.execPath,['--input-type=module','-e',${JSON.stringify(`import(${JSON.stringify(helper)}).then(m=>m.verificationSshMain(${JSON.stringify(options)}))`)}],{stdio:'inherit'});p.on('exit',code=>process.exit(code??1));\n`, { mode: 0o755 })
+  writeFileSync(ssh, inlineBootstrap ? `#!/usr/bin/env node
+import { spawn } from 'node:child_process';
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { gunzipSync } from 'node:zlib';
+const command=process.argv.at(-1), source=readFileSync(new URL(${JSON.stringify(helper)}));
+const payload=/Buffer\\.from\\("([A-Za-z0-9+/=]+)","base64"\\)/.exec(command)?.[1];
+appendFileSync(${JSON.stringify(bootstraps)},JSON.stringify({sourceBytes:source.length,commandBytes:Buffer.byteLength(command),originalBase64Bytes:source.toString('base64').length,restoredOriginalBytes:payload?gunzipSync(Buffer.from(payload,'base64')).equals(source):false,containsProjectRoot:command.includes(${JSON.stringify(root)})})+'\\n');
+const settings=existsSync(${JSON.stringify(settings)})?JSON.parse(readFileSync(${JSON.stringify(settings)},'utf8')):{};
+if(settings.silentSsh) {process.stdin.resume();writeFileSync(${JSON.stringify(sshReady)},'ready');setInterval(()=>{},1000);}
+else {
+ const p=spawn('/bin/sh',['-c',command],{stdio:['inherit','pipe','inherit']});p.stdout.pipe(process.stdout,{end:false});
+ p.on('close',code=>{if(settings.holdSshClose){process.stderr.write(settings.sensitiveStderr);writeFileSync(${JSON.stringify(sshReady)},'ready');setInterval(()=>{},1000);}else process.exit(code??1);});
+}
+` : `#!/usr/bin/env node\nimport { spawn } from 'node:child_process';\nconst p=spawn(process.execPath,['--input-type=module','-e',${JSON.stringify(`import(${JSON.stringify(helper)}).then(m=>m.verificationSshMain(${JSON.stringify(options)}))`)}],{stdio:'inherit'});p.on('exit',code=>process.exit(code??1));\n`, { mode: 0o755 })
   const children: ReturnType<typeof spawn>[] = []
   const start = (request: Record<string, unknown>, frames?: AsyncIterable<string>) => {
     const child = spawn(process.execPath, ['--input-type=module', '-e', `import(${JSON.stringify(helper)}).then(m=>m.verificationSshMain(${JSON.stringify(options)}))`], { stdio: ['pipe', 'pipe', 'pipe'] })
@@ -100,8 +115,83 @@ throw new Error('unexpected Docker request '+args.join(' '));
     await new Promise(resolve => setTimeout(resolve, 50))
     rmSync(temporary, { recursive: true, force: true })
   })
-  return { temporary, root, source, state, settings, request, checkpoint, configuration, rpc, start, scoped, events, options }
+  return { temporary, root, source, state, settings, bootstraps, sshReady, request, checkpoint, configuration, rpc, start, scoped, events, options }
 }
+
+for (const mode of ['silent', 'complete-response'] as const) test(`AC-REMOTE-16 ${mode}超时仅保留安全元数据，区分完整响应与无响应及timer迟到`, async t => {
+  t.after(() => { t.mock.timers.reset(); t.mock.restoreAll() })
+  const f = fixture(t, true), previousPath = process.env.PATH, secret = 'sensitive-project-token-marker'
+  process.env.PATH = f.temporary + ':' + previousPath; t.after(() => { process.env.PATH = previousPath })
+  writeFileSync(f.settings, JSON.stringify(mode === 'silent' ? { silentSsh: true } : { holdSshClose: true, daemon: secret, sensitiveStderr: secret }))
+  let clock = 0
+  t.mock.method(performance, 'now', () => clock)
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const rpc = remoteVerificationEnvironment(f.configuration).rpc
+  const pending = rpc({ action: mode === 'silent' ? secret : 'probe', args: [secret], privateRoot: f.root, dockerEndpoint: f.configuration.dockerEndpoint, projectSecret: secret })
+  const rejected = assert.rejects(pending, error => {
+    const diagnostics = (error as Error & { diagnostics?: Record<string, unknown> }).diagnostics
+    assert.ok(diagnostics, 'SSH超时必须附结构化安全诊断')
+    assert.equal(diagnostics.action, mode === 'silent' ? 'unknown' : 'probe'); assert.equal(diagnostics.dockerVerb, mode === 'silent' ? undefined : 'info')
+    assert.equal(diagnostics.budgetMs, 15_000); assert.equal(diagnostics.elapsedMs, 15_075); assert.equal(diagnostics.overdueMs, 75)
+    assert.ok(Number(diagnostics.eventLoopActiveMs) >= 0); assert.ok(Number(diagnostics.eventLoopIdleMs) >= 0)
+    assert.equal(diagnostics.responseLineComplete, mode === 'complete-response')
+    assert.equal(Number(diagnostics.stdoutBytes) > 0, mode === 'complete-response')
+    assert.equal(diagnostics.firstOutputAtMs === null, mode === 'silent')
+    assert.equal(diagnostics.childCloseObserved, false)
+    assert.equal(diagnostics.moduleFile, 'verification-transport.ts')
+    assert.match(String(diagnostics.helperSha256), /^[a-f0-9]{64}$/)
+    assert.match(String(diagnostics.moduleUrlSha256), /^[a-f0-9]{64}$/)
+    assert.equal(JSON.stringify(diagnostics).includes(secret), false)
+    assert.equal(JSON.stringify(error).includes(secret), false)
+    assert.equal(JSON.stringify(diagnostics).includes(f.root), false)
+    t.diagnostic(JSON.stringify(diagnostics))
+    return true
+  })
+  const until = Date.now() + 10_000
+  while (!existsSync(f.sshReady)) { assert.ok(Date.now() < until, 'fakeSSH启动期限'); await new Promise(resolve => realSetTimeout(resolve, 20)) }
+  await new Promise(resolve => realSetTimeout(resolve, 50))
+  clock = 15_075
+  t.mock.timers.tick(15_000)
+  await rejected
+})
+
+for (const recovering of [false, true]) test(`AC-REMOTE-17 ${recovering ? '已有planned恢复' : 'planned前'}超时沿Result保诊断且不伪造资源清算`, async t => {
+  t.after(() => { t.mock.timers.reset(); t.mock.restoreAll() })
+  const f = fixture(t, true), input = await f.request(), previous = recovering ? await f.checkpoint() : undefined, previousPath = process.env.PATH
+  process.env.PATH = f.temporary + ':' + previousPath; t.after(() => { process.env.PATH = previousPath })
+  writeFileSync(f.settings, JSON.stringify({ silentSsh: true }))
+  let clock = 0
+  t.mock.method(performance, 'now', () => clock)
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const pending = executeVerification({ ...input, ...(previous ? { runId: previous.runId, previousCheckpoint: previous } : {}) }, { transport: f.configuration, onCheckpoint: async () => assert.fail('RPC超时不造checkpoint或清算') })
+  const until = Date.now() + 10_000
+  while (!existsSync(f.sshReady)) { assert.ok(Date.now() < until, 'fakeSSH启动期限'); await new Promise(resolve => realSetTimeout(resolve, 20)) }
+  clock = 15_025
+  t.mock.timers.tick(15_000)
+  const result = await pending
+  assert.equal(result.status, recovering ? 'recovery_required' : 'unsupported')
+  assert.equal(result.checkpoint?.phase, recovering ? 'planned' : undefined)
+  assert.equal(result.evidence, undefined)
+  assert.equal(result.rpcDiagnostics?.action, recovering ? 'read' : 'unscoped-read')
+  assert.equal(result.rpcDiagnostics?.dockerVerb, 'version')
+  assert.equal(result.rpcDiagnostics?.budgetMs, 15_000)
+  assert.equal(result.reason, 'SSH验证请求超时；远端worker/CLI状态仍待原effect恢复')
+  assert.equal(f.events().some(item => ['create', 'start', 'rm'].includes(item.args[1])), false)
+})
+
+test('AC-REMOTE-15 可信bootstrap压缩后恢复原helper字节，并由真实Node入口读取原stdin协议', async t => {
+  const f = fixture(t, true), previousPath = process.env.PATH
+  process.env.PATH = f.temporary + ':' + previousPath; t.after(() => { process.env.PATH = previousPath })
+  const result = await remoteVerificationEnvironment(f.configuration).driver(['version', '--format', '{{json .Server}}'], 65536)
+  assert.equal(result.exitCode, 0)
+  assert.equal(JSON.parse(result.stdout).Version, 'fixture')
+  const bootstrap = JSON.parse(readFileSync(f.bootstraps, 'utf8')) as { commandBytes: number; originalBase64Bytes: number; restoredOriginalBytes: boolean; containsProjectRoot: boolean }
+  t.diagnostic(JSON.stringify(bootstrap))
+  assert.equal(bootstrap.restoredOriginalBytes, true, '固定command必须携带可精确恢复原helper字节的gzip载荷')
+  assert.ok(bootstrap.commandBytes < bootstrap.originalBase64Bytes * 0.4, '完整command须小于原base64载荷的40%')
+  assert.equal(bootstrap.containsProjectRoot, false, '项目路径只经stdin传送')
+  assert.equal(existsSync(join(f.root, '.spex-verification-control')), false, '环境只读入口不产生远端effect')
+})
 
 test('AC-REMOTE-01 正式executor真实运输、POSIX摘要、链接/模式和remote inspect原件', async t => {
   const f = fixture(t), previousPath = process.env.PATH

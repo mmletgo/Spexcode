@@ -33,4 +33,4 @@ stopWriter 验证物理暂停先持久化，当前观察/执行者停止，recei
 
 receipt 消费边界回归复用明确受控四层种子及真实 Git journal：C0 作者 code 输入形成仅写 Spec 的已结算交付，公开 adopt 正式采纳 D；在线观察或停机采纳后启动补偿均对 D 零派发并保存 baseline 消费证据。重建应用实例后 C1 仅提交代码，origin 必须为 code，before 精确等于 D，paths 不包含生成 Spec。先复现旧 before 跨过 D 导致 combined，再证明修复；暂停期间新的 Spec/code 提交保持未消费，恢复时累计两者并沿真实前态。种子不是实际模型或 Docker 语义验收，测试禁止模型调用。
 
-混合旧新资源heads回归以两次真实settled receipt建立：初始化后仅改变sync.model并正式重新启用，局部新交付保留旧源码bytehead，再经公开adopt实际写回。先复现旧context使操作2变3的echo，再证明首次物理pause只读扫描无failure/派发，resume及重复扫描不重开；原receipt和外部操作不伪结算。frontier到parent含未消费code/业务Spec/只读docs的混合输入首次仍准入，重复后其完整真实输入与状态保留；外部同tree后继不被冒认为receipt，之后纯代码提交仍为code。四层种子明确受控，只证明消费机制与真实Git边界，不冒称模型或Docker通过。
+混合旧新资源heads回归以两次真实settled receipt建立：初始化后分别仅改变sync.model或可信Docker验证image/platform并正式重新启用，局部新交付保留旧源码bytehead，再经公开adopt实际写回。先复现旧context使操作2变3的echo，再证明首次物理pause只读扫描无failure/派发，resume及重复扫描不重开。原receipt和外部操作不伪结算。frontier到parent含未消费code/业务Spec/只读docs的混合输入首次仍准入，重复后其完整真实输入与状态保留。外部同tree后继不被冒认为receipt，之后纯代码提交仍为code。四层种子明确受控，只证明消费机制与真实Git边界，不冒称模型或Docker通过。

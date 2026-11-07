@@ -673,6 +673,7 @@ export class SyncStore {
   }
   findResource(attemptId: string, key: string): SyncResourceRecord | null { return this.write(tx => parseRecord<SyncResourceRecord>(tx.query('SELECT record_json FROM sync_resources WHERE attempt_id=? AND resource_key=?', attemptId, key)[0])) }
   readResource(id: string): SyncResourceRecord { return this.write(tx => this.resource(tx, id)) }
+  listResources(attemptId: string): SyncResourceRecord[] { return this.write(tx => tx.query('SELECT record_json FROM sync_resources WHERE attempt_id=? ORDER BY rowid', attemptId).map(row => parseRecord<SyncResourceRecord>(row)!)) }
   listRecoverableResources(): RecoverableSyncResource[] {
     return this.write(tx => tx.query("SELECT r.record_json AS resource_json,o.record_json AS operation_json,a.record_json AS attempt_json FROM sync_resources r JOIN sync_operations o ON o.id=r.operation_id JOIN sync_attempts a ON a.id=r.attempt_id WHERE r.phase!='removed' ORDER BY r.rowid").map(row => ({ operation: JSON.parse(String(row.operation_json)) as SyncOperation, attempt: JSON.parse(String(row.attempt_json)) as SyncAttempt, resource: JSON.parse(String(row.resource_json)) as SyncResourceRecord })))
   }

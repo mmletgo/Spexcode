@@ -97,6 +97,17 @@ function repairDiagnostics(findings: readonly ContractFinding[], coverage: Contr
   return { blocking: findings.filter(issue => repairRequired(issue, coverage)), deferredImplementation: findings.filter(implementationFinding), blockedByGap: findings.filter(issue => gapBlockedFinding(issue, coverage) || ['unresolved-gap', 'unresolved-conflict'].includes(issue.code)) }
 }
 
+/** 查询原P1程序批准；待实现repair保原结论，不替代调用方的Native/Git与完整输入认证。 */
+export function hasApprovedElaborationReview(result: Pick<ElaborationResult, 'rounds' | 'structurePassed' | 'reviewPassed' | 'failure' | 'deferredImplementationFindings'>): boolean {
+  const round = result.rounds.at(-1), review = round?.review
+  if (!result.structurePassed || !result.reviewPassed || result.failure !== null || !round || !review) return false
+  if (review.verdict === 'accept') return review.findings.length === 0
+  if (review.verdict !== 'repair' || !review.findings.length || review.findings.some(issue => issue.kind !== 'repair' || issue.code !== 'implementation-review')) return false
+  const diagnostics = repairDiagnostics(round.findings, null)
+  return !diagnostics.blocking.length && JSON.stringify(diagnostics.deferredImplementation) === JSON.stringify(result.deferredImplementationFindings)
+    && review.findings.every(issue => diagnostics.deferredImplementation.some(finding => finding.code === issue.code && finding.message === `${issue.message}；证据: ${issue.evidence}；修复决定: ${issue.decision}` && JSON.stringify(finding.relatedIds) === JSON.stringify(issue.affectedIds)))
+}
+
 function finding(input: ElaborationInput, code: string, message: string, itemId?: string): ContractFinding {
   const target = input.targets.find(target => target.nodeId === input.intent.nodeId) ?? input.targets[0]
   return { code, severity: 'error', nodeId: target.nodeId, path: target.path, message, ...(itemId ? { itemId } : {}) }

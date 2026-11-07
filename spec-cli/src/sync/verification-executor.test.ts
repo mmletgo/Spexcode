@@ -117,6 +117,7 @@ test('AC-VERIFIER-07 不支持政策/无 Docker/含 Git export 明确 unsupporte
   assert.equal(bad.status, 'unsupported'); assert.equal(engine.calls.length, 0)
   const missing = await executeVerification(input, { driver: async () => { throw new Error('ENOENT') }, onCheckpoint: async () => assert.fail() })
   assert.equal(missing.status, 'unsupported')
+  assert.equal(Object.hasOwn(missing, 'rpcDiagnostics'), false, '普通错误不能追补运输超时诊断')
   await mkdir(join(input.candidateExportPath, '.git'))
   await assert.rejects(verificationExportDigest(input.candidateExportPath), /不得包含 .git/)
 })
