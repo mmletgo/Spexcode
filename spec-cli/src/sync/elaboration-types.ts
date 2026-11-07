@@ -117,7 +117,9 @@ export type ElaborationRepairSeed = {
 export type ElaborationRepairDiagnostics = {
   requestKey: string; inputDigest: string; resultRef: BlobRef; failure: NonNullable<ElaborationResult['failure']>; round: ElaborationRound
   /** 当次派发前重验的只读审查请求绑定，检查点仍只保存原诊断。 */
-  settledReview?: Pick<ElaborationSessionRequest, 'prompt' | 'schema' | 'worktree'>
+  settledReview?: Pick<ElaborationSessionRequest, 'prompt' | 'schema' | 'worktree'> & {
+    previousRejection?: Pick<RejectedStructuredOutput, 'sha256' | 'text'>
+  }
 }
 export type ElaborationPriorReference = { requestKey: string; inputDigest: string; candidateDigest: string; renderedCandidateDigest: string; traces: ElaborationTrace[] }
 export type ElaborationResult = {

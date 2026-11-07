@@ -3511,10 +3511,15 @@ for (const target of ['code_behavior_analyze', 'elaboration_generate'] as const)
   assert.equal(f.calls.some(call => call.purpose === 'code_generate'), false)
 })
 
-for (const mode of ['whole', 'partition', 'legacy-review', 'paused', 'paused-review', 'newer-generation', 'wrong-stop', 'wrong-candidate', 'wrong-task'] as const) test(`P1已结算session/events独审超时只重审同一Git候选 ${mode}`, async t => {
-  const partitioned = mode === 'partition'
-  const plan = partitioned ? { version: 'sync-coordinator-v2' as const, direction: 'spec_to_code' as const, sourcePaths: ['src/export.js'], partitionPolicy: { version: 'sync-partition-policy-v1' as const, maxReadBytes: 524288, maxParallel: 1 } } : {}
-  const f = await fixture(t, { maxAttempts: ['newer-generation', 'paused-review', 'wrong-task'].includes(mode) ? 3 : 2, maxCalls: 30, maxRepairs: mode === 'wrong-task' ? 2 : 1, timeoutMs: 120_000 }, false, original, 'project', original, { ...plan, agentWorkflow: 'native-worktree-v1' }, undefined, 'spec', 'zcode:default', partitioned)
+for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-wrong-packet', 'format-wrong-candidate', 'legacy-review', 'v3-review', 'paused', 'paused-review', 'newer-generation', 'wrong-stop', 'wrong-candidate', 'wrong-task'] as const) test(`P1已结算${mode.startsWith('format') ? '格式失败独审' : 'session/events独审超时'}只重审同一Git候选 ${mode}`, async t => {
+  const formatFailure = mode.startsWith('format')
+  const formatTwice = mode === 'format-twice'
+  const wrongPacket = mode === 'format-wrong-packet'
+  const wrongCandidate = mode === 'wrong-candidate' || mode === 'format-wrong-candidate'
+  const failureCode = formatFailure ? 'structured_output_format_invalid' : 'native_rpc_timeout'
+  const partitioned = mode === 'partition' || formatTwice
+  const plan = partitioned ? { version: 'sync-coordinator-v2' as const, direction: formatTwice ? 'code_to_spec' as const : 'spec_to_code' as const, sourcePaths: ['src/export.js'], ...(formatTwice ? { writePaths: ['.spec'], commitTrigger: { before: null, paths: ['src/export.js'] } } : {}), partitionPolicy: { version: 'sync-partition-policy-v1' as const, maxReadBytes: 524288, maxParallel: 1 } } : {}
+  const f = await fixture(t, { maxAttempts: ['newer-generation', 'paused-review', 'wrong-task', 'format-twice', 'format-wrong-packet'].includes(mode) ? 3 : 2, maxCalls: 30, maxRepairs: ['wrong-task', 'format-twice', 'format-wrong-packet'].includes(mode) ? 2 : 1, timeoutMs: 120_000 }, false, original, 'project', original, { ...plan, agentWorkflow: 'native-worktree-v1' }, undefined, formatTwice ? 'code' : 'spec', 'zcode:default', partitioned)
   const calls: ElaborationSessionRequest[] = []
   if (mode === 'paused' || mode === 'newer-generation') {
     const recordFailure = f.store.recordFailure.bind(f.store)
@@ -3537,22 +3542,23 @@ for (const mode of ['whole', 'partition', 'legacy-review', 'paused', 'paused-rev
       return result
     }
   }
-  if (mode === 'legacy-review') {
+  if (mode === 'legacy-review' || mode === 'v3-review') {
     const claimed = f.store.claimAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 30_000, expectedMessageId: f.operation.dispatchMessageId })
-    const commonDir = f.input.source.commonDir, value = { version: 'elaboration-draft-v1', generationGuidance: 'ac-test-flow-binding-v2' }, resultRef = writeEvidence(commonDir, value)
+    const commonDir = f.input.source.commonDir, value = { version: 'elaboration-draft-v1', generationGuidance: mode === 'legacy-review' ? 'ac-test-flow-binding-v2' : 'ac-test-flow-review-binding-v3' }, resultRef = writeEvidence(commonDir, value)
     const wrapper = writeEvidence(commonDir, { version: 'sync-stage-v1', operationId: f.operation.id, attemptId: claimed.attempt.id, inputId: f.input.id, policyDigest: f.operation.policyDigest, stage: 'elaboration-draft-protocol', resultRef })
     f.store.checkpoint(claimed.fence, { ...wrapper, artifacts: syncCheckpointArtifacts(value, resultRef) })
   }
-  if (mode === 'wrong-stop') {
+  if (mode === 'wrong-stop' || wrongPacket) {
     const recordFailure = f.store.recordFailure.bind(f.store), findResource = f.store.findResource.bind(f.store)
     f.store.recordFailure = (fence, issue) => {
       const result = recordFailure(fence, issue)
-      if (issue.code !== 'native_rpc_timeout') return result
+      if (issue.code !== failureCode) return result
       f.store.findResource = (attemptId, key) => {
         const resource = findResource(attemptId, key)
         if (!resource || attemptId !== fence.attemptId || !key.endsWith(':elaboration_review')) return resource
         const saved = JSON.parse(readEvidence(f.input.source.commonDir, resource.checkpointRef).toString()) as NativeRunCheckpoint
-        saved.stop!.nativeStatus = 'unknown'
+        if (wrongPacket) saved.failure!.rejectedOutput!.representation = 'native_json'
+        else saved.stop!.nativeStatus = 'unknown'
         return { ...resource, checkpointRef: writeEvidence(f.input.source.commonDir, saved) }
       }
       return result
@@ -3581,13 +3587,13 @@ for (const mode of ['whole', 'partition', 'legacy-review', 'paused', 'paused-rev
       return result
     }
   }
-  if (mode === 'wrong-candidate') {
+  if (wrongCandidate) {
     const checkpoint = f.store.checkpoint.bind(f.store)
     f.store.checkpoint = (fence, ref) => {
       const commonDir = f.input.source.commonDir, wrapper = JSON.parse(readEvidence(commonDir, ref).toString()) as { stage: string; resultRef: { sha256: string } }
       if (wrapper.stage !== 'elaboration') return checkpoint(fence, ref)
       const value = JSON.parse(readEvidence(commonDir, wrapper.resultRef).toString()) as ElaborationResult
-      if (value.failure?.code !== 'native_rpc_timeout') return checkpoint(fence, ref)
+      if (value.failure?.code !== failureCode) return checkpoint(fence, ref)
       const round = value.rounds.at(-1)!
       round.candidate!.changes[0].source += '\n这段正文没有出现在原Git稿。\n'
       round.candidateDigest = value.candidateDigest = contentHash(JSON.stringify(round.candidate))
@@ -3607,7 +3613,7 @@ for (const mode of ['whole', 'partition', 'legacy-review', 'paused', 'paused-rev
       run: async actual => {
         const seed = actual.worktree!, execution = structuredExecutionPolicy(actual), key = actual.sessionCreateKey!, sessionId = sessionIdForCreateKey(key)
         const identity = { threadId: `p1-timeout-${sessionId}`, turnId: 'turn' }, workspace = join(f.parent, `p1-timeout-${calls.length}`)
-        const timingOut = actual.purpose === 'elaboration_review' && attempt.number === 1
+        const timingOut = actual.purpose === 'elaboration_review' && attempt.number <= (formatTwice ? 2 : 1)
         let draft: unknown
         if (actual.purpose === 'code_behavior_analyze' || actual.purpose === 'code_behavior_review') {
           const task = nativeTask(actual, f.input.source.commonDir) as { requiredChangedPaths: string[] }
@@ -3623,16 +3629,17 @@ for (const mode of ['whole', 'partition', 'legacy-review', 'paused', 'paused-rev
         else assert.equal(actual.purpose, 'elaboration_review')
         const worktree = draft ? committedDraftFixture(f, actual, draft, workspace) : undefined
         const output = draft ? { summary: '已正常提交草稿' } : { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
-        const resultDigest = contentHash(JSON.stringify(output)), message = 'ZCode native RPC timeout (session/events)'
+        const resultDigest = contentHash(JSON.stringify(output)), message = formatFailure ? 'fixture拒绝原格式' : 'ZCode native RPC timeout (session/events)'
         if (!timingOut && !worktree) f.git('worktree', 'add', '--detach', workspace, seed.baseCommit)
         const resultWorktree = timingOut ? undefined : worktree ?? nativeWorktreeResult(workspace, seed)
         const prompt = nativeWorktreePrompt(actual.prompt, seed)
+        const rejectedOutput = formatFailure && timingOut ? rejectedFinalOutput('invalid JSON from review ' + attempt.number + '\u0000', prompt, execution, identity) : undefined
         configuredSessionApplication().createSession({ sessionId, status: timingOut ? 'error' : 'awaiting' })
         writeRecord({ session: sessionId, governed: true, worktreePath: workspace, base: seed.baseCommit, forkCommit: seed.baseCommit, branch: null, title: null, name: null, parent: null, issues: [], issue: null, proposal: null, merges: 0, note: null, sortKey: null, createdAt: Date.now(), harness: 'zcode', harnessSessionId: identity.threadId, runtimeStartToken: null, status: timingOut ? 'error' : 'awaiting', stopped: false, archived: false, closedAt: null, launcher: null, launchCmd: null, launchOwner: null,
           createRequestId: contentHash(key), createPayloadHash: contentHash(JSON.stringify({ prompt, parent: null, launcher: null, base: seed.baseCommit, structuredExecution: execution })),
-          structuredExecution: { ...execution, ...identity, turnStartRequested: true, ...(timingOut ? { state: 'failed', errorCode: 'native_rpc_timeout', error: message, zcodeNative: { version: 1, root: workspace, sessionId: identity.threadId, inputId: 'fixture-input', turnId: identity.turnId, pid: process.pid, receiptFile: join(workspace, 'fixture-process.json') }, cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: true, acknowledged: true, nativeStatus: 'stopped' } } : { state: 'completed', output, resultDigest, resultWorktree }) },
+          structuredExecution: { ...execution, ...identity, turnStartRequested: true, ...(timingOut ? { state: 'failed', errorCode: failureCode, error: message, ...(rejectedOutput ? { rejectedOutput } : {}), zcodeNative: { version: 1, root: workspace, sessionId: identity.threadId, inputId: 'fixture-input', turnId: identity.turnId, pid: process.pid, receiptFile: join(workspace, 'fixture-process.json') }, cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: true, acknowledged: true, nativeStatus: 'stopped' } } : { state: 'completed', output, resultDigest, resultWorktree }) },
         })
-        if (timingOut) throw new StructuredSessionError('native_rpc_timeout', message, { sessionId, ...identity })
+        if (timingOut) throw new StructuredSessionError(failureCode, message, { sessionId, ...identity, ...(rejectedOutput ? { rejectedOutput } : {}) })
         return { sessionId, ...identity, output, resultDigest, worktree: resultWorktree }
       },
     } })(request)
@@ -3661,7 +3668,7 @@ for (const mode of ['whole', 'partition', 'legacy-review', 'paused', 'paused-rev
   const originalResult = savedLocal(old), originalRound = originalResult.rounds.at(-1)!
   assert.equal(old.status, 'superseded')
   assert.equal(old.failure?.kind, mode === 'paused' ? undefined : 'repairable')
-  assert.equal(originalResult.failure?.code, 'native_rpc_timeout', JSON.stringify({ failure: originalResult.failure, findings: originalRound.findings }))
+  assert.equal(originalResult.failure?.code, failureCode, JSON.stringify({ failure: originalResult.failure, findings: originalRound.findings }))
   assert.equal(originalResult.structurePassed, true)
   assert.equal(originalResult.reviewPassed, false)
   assert.deepEqual(originalResult.readyIds, [])
@@ -3676,14 +3683,14 @@ for (const mode of ['whole', 'partition', 'legacy-review', 'paused', 'paused-rev
     assert.equal(savedLocal(retry).repairDiagnostics, undefined)
     return
   }
-  if (mode === 'wrong-stop' || mode === 'wrong-candidate' || mode === 'wrong-task') {
+  if (mode === 'wrong-stop' || wrongCandidate || mode === 'wrong-task' || wrongPacket) {
     assert.deepEqual(elaborationCalls.map(call => call.purpose), ['elaboration_generate', 'elaboration_review'])
     assert.equal(result.failure?.code, mode === 'wrong-stop' ? 'checkpoint_artifact_binding' : 'review_retry_binding', JSON.stringify(result.failure))
     assert.equal(retry.dispatchPlans.length, 0)
     assert.equal(attempts.length, 2, '绑定失败在有剩余预算时也不可重派生成')
     return
   }
-  assert.deepEqual(elaborationCalls.map(call => call.purpose), ['elaboration_generate', 'elaboration_review', 'elaboration_review', ...(mode === 'paused-review' ? ['elaboration_review'] : [])], '正式独审已结算超时只重审同一候选')
+  assert.deepEqual(elaborationCalls.map(call => call.purpose), ['elaboration_generate', 'elaboration_review', 'elaboration_review', ...(mode === 'paused-review' || formatTwice ? ['elaboration_review'] : [])], '正式独审已结算失败只重审同一候选')
   const reviewed = savedLocal(retry), reviewedRound = reviewed.rounds.at(-1)!
   assert.equal(reviewed.reviewPassed, true)
   assert.equal(retry.failure?.code, 'unsupported', JSON.stringify(retry.failure))
@@ -3695,15 +3702,38 @@ for (const mode of ['whole', 'partition', 'legacy-review', 'paused', 'paused-rev
   assert.notEqual(reviewedRound.traces[1].sessionId, originalResult.failure?.sessionId)
   assert.notEqual(reviewedRound.traces[1].threadId, originalResult.failure?.threadId)
   assert.notEqual(reviewedRound.traces[1].sessionId, originalRound.traces[0].sessionId)
-  assert.deepEqual(elaborationCalls[1].worktree, elaborationCalls[2].worktree)
+  if (formatFailure) {
+    const commonDir = f.input.source.commonDir, oldTree = readTree(commonDir, elaborationCalls[1].worktree!.tree)
+    for (const [index, request] of elaborationCalls.slice(2).entries()) {
+      const rejected = savedLocal(attempts[index]).rounds.at(-1)!.rejectedOutput!
+      const path = `.spex-sync-diagnostics/${rejected.sha256}/elaboration-review-rejected.raw`
+      const tree = readTree(commonDir, request.worktree!.tree)
+      const attachment = tree.find(entry => entry.path === path)
+      assert.ok(attachment)
+      assert.equal(attachment.mode, '100644')
+      assert.equal(readObject(commonDir, attachment.oid).toString('utf8'), rejected.text)
+      assert.equal(request.worktree!.mode, 'read')
+      assert.deepEqual(tree.filter(entry => entry.path !== path), oldTree, '只允许本次拒稿，所有业务及保护对象逐字保持')
+      assert.ok(request.prompt.includes(path))
+      assert.match(request.prompt, /未可信格式诊断/)
+      assert.deepEqual(request.schema, elaborationCalls[1].schema)
+      const requestKey = attempts[index].dispatchPlans.find(dispatch => dispatch.purpose === 'elaboration_review')!.key
+      const checkpoint = JSON.parse(readEvidence(commonDir, f.store.findResource(attempts[index].id, requestKey)!.checkpointRef).toString()) as NativeRunCheckpoint
+      assert.equal(checkpoint.failure!.rejectedOutput!.ref, undefined)
+      assert.equal(checkpoint.failure!.rejectedOutput!.text, rejected.text)
+    }
+  } else assert.deepEqual(elaborationCalls[1].worktree, elaborationCalls[2].worktree)
   assert.deepEqual(elaborationCalls[1].schema, elaborationCalls[2].schema)
+  if (mode === 'v3-review') assert.equal(elaborationCalls[1].prompt, elaborationCalls[2].prompt, '已有V3超时续审提示逐字保持')
   if (mode === 'legacy-review') assert.doesNotMatch(elaborationCalls[1].prompt, /沿冻结VERIFY命令和包装器的实际调用逐项核对/)
   assert.match(elaborationCalls[2].prompt, /沿冻结VERIFY命令和包装器的实际调用逐项核对/)
   assert.match(elaborationCalls[2].prompt, /本轮审查修复范围.*冻结已接受内容/)
   assert.equal(Object.hasOwn(reviewed.repairDiagnostics!, 'settledReview'), false, '原review请求绑定只在内存传递')
-  assert.deepEqual(reviewed.repairDiagnostics?.round, originalRound)
-  assert.deepEqual(reviewed.repairDiagnostics?.failure, originalResult.failure)
-  assert.equal(result.operation.callsUsed, partitioned ? 5 : mode === 'paused-review' ? 4 : 3)
+  const previous = formatTwice ? savedLocal(attempts[1]) : originalResult
+  assert.deepEqual(reviewed.repairDiagnostics?.round, previous.rounds.at(-1))
+  assert.deepEqual(reviewed.repairDiagnostics?.failure, previous.failure)
+  assert.equal(result.operation.callsUsed, partitioned ? formatTwice ? 6 : 5 : mode === 'paused-review' ? 4 : 3)
+  assert.equal(calls.some(call => call.purpose === 'code_generate'), false)
   assert.deepEqual(f.store.listJournals(f.operation.id), [])
   assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)

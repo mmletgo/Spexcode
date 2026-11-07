@@ -335,29 +335,53 @@ function assertStoppedEventsRpcDraft(prior: SyncAttempt, key: string, proof: Ret
 }
 
 function settledElaborationReview(store: SyncStore, operation: SyncOperation, prior: SyncAttempt, ownerKey: string, result: SavedElaboration, round: ElaborationResult['rounds'][number], failure: NonNullable<ElaborationResult['failure']>): ElaborationRepairDiagnostics['settledReview'] {
-  if (result.status !== 'failed' || !result.structurePassed || result.reviewPassed || !round.draft || !round.candidate || round.review !== null || round.reviewOutput !== null || round.rejectedOutput) return
+  if (result.status !== 'failed' || !result.structurePassed || result.reviewPassed || !round.draft || !round.candidate || round.review !== null || round.reviewOutput !== null) return
+  const rejection = round.rejectedOutput
+  if (rejection ? !reviewFormatRepairCodes.has(failure.code) || rejection.purpose !== 'elaboration_review' || !rejection.ref || rejection.ownerRequestKey !== ownerKey || rejection.ownerInputDigest !== result.inputDigest : failure.code !== 'native_rpc_timeout' || !isZCodeEventsRpcTimeout({ state: 'failed', errorCode: failure.code, error: failure.message })) return
   const key = `${ownerKey}:${round.index}:elaboration_review`
   const resource = store.findResource(prior.id, key)
-  if (!resource || resource.phase !== 'removed' || prior.dispatchPlans.some(dispatch => store.findResource(prior.id, dispatch.key)?.phase !== 'removed')) fail('review_retry_binding', '独审超时缺少原正式资源及结算证明')
+  if (!resource || resource.phase !== 'removed' || prior.dispatchPlans.some(dispatch => store.findResource(prior.id, dispatch.key)?.phase !== 'removed')) fail('review_retry_binding', '独审失败缺少原正式资源及结算证明')
   const { plan, checkpoint, record, state } = authenticateNativeFailure(store, operation, prior, key, failure, readRecord, true)
   const { request } = plan, { session } = checkpoint
+  const authenticateRejection = (source: SyncAttempt, sourceKey: string, sourceFailure: typeof failure, sourceRejection: NonNullable<typeof rejection>, original: NativeRunCheckpoint): void => {
+    const { ownerInputDigest: _ownerInputDigest, ownerRequestKey: _ownerRequestKey, ...packet } = sourceRejection
+    const originalPacket = original.failure?.rejectedOutput
+    if (!originalPacket || original.failure?.code !== sourceFailure.code || original.failure.message !== sourceFailure.message
+      || canonical({ ...originalPacket, ref: undefined }) !== canonical({ ...packet, ref: undefined })) fail('review_retry_binding', '独审拒稿不匹配原正式失败')
+    authenticateNativeRejectedFinal(store, operation, source, sourceKey, sourceFailure, packet)
+  }
+  if (rejection) authenticateRejection(prior, key, failure, rejection, checkpoint)
+  const transportMatches = rejection
+    ? state.state === 'failed' && (request.model?.startsWith('zcode:') && record.harness === 'zcode' || request.model?.startsWith('claude:') && record.harness === 'claude')
+    : request.model?.startsWith('zcode:') && isZCodeEventsRpcTimeout(state) && record.harness === 'zcode' && state.zcodeNative?.sessionId === session.threadId && state.zcodeNative.turnId === session.turnId && !state.rejectedOutput
   const boundInput = ({ purpose, prompt, schema, worktree }: ElaborationSessionRequest): string => contentHash(JSON.stringify({ inputDigest: result.inputDigest, purpose, prompt, schema, worktree }))
   if (resource.attemptId !== prior.id || resource.generation !== prior.generation || plan.schemaVersion !== 1 || checkpoint.schemaVersion !== 1
-    || request.purpose !== 'elaboration_review' || request.worktree?.mode !== 'read' || request.frozenContext || !request.model?.startsWith('zcode:') || request.inputDigest !== boundInput(request)
+    || request.purpose !== 'elaboration_review' || request.worktree?.mode !== 'read' || request.frozenContext || !transportMatches || request.inputDigest !== boundInput(request)
     || request.root !== operation.input.source.canonicalRoot || request.base !== request.worktree.baseCommit || record.base !== request.base || record.forkCommit !== request.base
     || !checkpoint.nativeCallRequested || !checkpoint.nativeStarted || checkpoint.status !== 'failed' || checkpoint.nativeState !== 'failed' || checkpoint.stop?.nativeStatus !== 'stopped' || checkpoint.result || checkpoint.creationTermination
     || checkpoint.candidateDigest !== null && checkpoint.candidateDigest !== round.candidateDigest
     || !session.threadId || !session.turnId || canonical(prior.dispatchPlans.find(dispatch => dispatch.key === key)?.session) !== canonical(session)
-    || canonical(checkpoint.failure) !== canonical({ code: failure.code, message: failure.message })
-    || !isZCodeEventsRpcTimeout(state) || record.harness !== 'zcode' || record.harnessSessionId !== session.threadId || state.zcodeNative?.sessionId !== session.threadId || state.zcodeNative.turnId !== session.turnId
-    || state.failedWorktree || state.resultWorktree || state.rejectedOutput || state.output !== undefined || state.resultDigest !== undefined) fail('review_retry_binding', '独审超时缺少同owner原只读请求及精确已结算的Native失败身份')
+    || canonical(checkpoint.failure) !== canonical({ code: failure.code, message: failure.message, ...(rejection ? { rejectedOutput: checkpoint.failure?.rejectedOutput } : {}) })
+    || record.harnessSessionId !== session.threadId || state.failedWorktree || state.resultWorktree || state.output !== undefined || state.resultDigest !== undefined) fail('review_retry_binding', '独审失败缺少同owner原只读请求及精确已结算的Native失败身份')
   const generation = elaborationGenerationSource(store, operation, prior, round)
   const generationOwner = generation && ownerKey.replace(`sync:${prior.id}:`, `sync:${generation.attempt.id}:`)
   if (!generation?.request || !generation.key.startsWith(`${generationOwner}:`) || generation.request.inputDigest !== boundInput(generation.request)
     || generation.request.root !== request.root || generation.request.base !== round.draft.seed.baseCommit
     || store.findResource(generation.attempt.id, generation.key)?.generation !== generation.attempt.generation
-    || round.candidate.inputDigest !== result.inputDigest || round.candidateDigest !== result.candidateDigest || round.candidateDigest !== contentHash(JSON.stringify(round.candidate))) fail('review_retry_binding', '独审超时缺少同owner原Native生成及其精确Git候选绑定')
-  return { prompt: request.prompt, schema: request.schema, worktree: request.worktree }
+    || round.candidate.inputDigest !== result.inputDigest || round.candidateDigest !== result.candidateDigest || round.candidateDigest !== contentHash(JSON.stringify(round.candidate))) fail('review_retry_binding', '独审失败缺少同owner原Native生成及其精确Git候选绑定')
+  const boundReview = { prompt: request.prompt, schema: request.schema, worktree: request.worktree }
+  const diagnostics = result.repairDiagnostics, previousRound = diagnostics?.round, previous = previousRound?.rejectedOutput
+  if (!diagnostics || !previousRound || previous?.purpose !== 'elaboration_review' || !previous.ref
+    || previousRound.candidateDigest !== round.candidateDigest || canonical(previousRound.traces[0]) !== canonical(round.traces[0])) return boundReview
+  const original = JSON.parse(readEvidence(operation.input.source.commonDir, diagnostics.resultRef).toString('utf8')) as SavedElaboration
+  const source = store.readAttempt(previous.ownerRequestKey.split(':')[1])
+  const sourceKey = `${previous.ownerRequestKey}:${previousRound.index}:elaboration_review`
+  if (source.number >= prior.number || previous.ownerRequestKey !== ownerKey.replace(`sync:${prior.id}:`, `sync:${source.id}:`)
+    || previous.ownerInputDigest !== result.inputDigest || original.inputDigest !== result.inputDigest
+    || canonical(original.failure) !== canonical(diagnostics.failure) || canonical(original.rounds.at(-1)) !== canonical(previousRound)) fail('review_retry_binding', '旧独审附件缺少同候选原失败和精确来源')
+  const authenticated = authenticateNativeFailure(store, operation, source, sourceKey, diagnostics.failure, readRecord, true)
+  authenticateRejection(source, sourceKey, diagnostics.failure, previous, authenticated.checkpoint)
+  return { ...boundReview, previousRejection: { sha256: previous.sha256, text: previous.text } }
 }
 
 /** P1业务扩域与原文件规划分别作证，完整scope必须精确等于两者的实际并集。 */
@@ -1535,10 +1559,10 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           const source = binding ? partitionElaborationStage(store, operation, prior, key, binding, inputDigest) : partitionStage<SavedElaboration>(store, operation, prior, key)
           if (saved && (!source || saved.inputDigest !== inputDigest || saved.phase === 'partitioned_final' || saved.reviewPassed)) return null
           const failure = source?.result.failure, round = source?.result.rounds.at(-1), requestKey = `sync:${prior.id}:${ownerSuffix}`
-          if (!newerGeneration && source && round && failure?.code === 'native_rpc_timeout'
+          if (!newerGeneration && source && round && failure
             && (!carriedGenerations.size || carriedGenerations.size === 1 && carriedGenerations.has(canonical(round.traces.find(trace => trace.purpose === 'elaboration_generate'))))
             && (prior.failure?.kind === 'repairable' || prior.status === 'superseded' && !prior.failure)
-            && isZCodeEventsRpcTimeout({ state: 'failed', errorCode: failure.code, error: failure.message }) && priorElaborationInputMatches(prior, binding)) {
+            && (failure.code === 'native_rpc_timeout' || reviewFormatRepairCodes.has(failure.code)) && priorElaborationInputMatches(prior, binding)) {
             const settledReview = settledElaborationReview(store, operation, prior, requestKey, source.result, round, failure)
             if (settledReview) {
               saveStage(store, fence!, `${key}:repair-diagnostics-provenance`, { fromOperationId: operation.id, fromAttemptId: prior.id, resultRef: source.resultRef })
