@@ -16,12 +16,18 @@ related:
 
 ## expanded spec
 
+只读P1返修的已审因果绑定与当前pending owner分开保存。正常重入即使已完成返修，也保留原readonlyOwnerRepair及其原readonlyBaseRef，历史latest repair-input已清空时只从同attempt已认证历史取最近完整绑定，不改旧CAS或以较旧绑定覆盖冲突。已审返修whole缺少该因果或与原owner/候选/独审不符时明确拒绝，不能回选较旧正文。
+
+普通暂停恢复若没有新的修复输入，只能从原每组独审的冻结input或accepted provenance承接原诊断上下文。除此字段外完整当前输入须一致，再沿原Native请求、摘要、候选与停止原件严格认证accept。新修复输入、业务变化、缺证或漂移仍失效，不向fresh模型补旧诊断，不忽略repairContext或弱化digest。
+
 
 事实继承资格通过既有checkpoint回调按acceptedRef精确命中本owner原local，逐字核完整changes、partition身份与批准状态，并复用elaborationGenerationSource认证原Native/Git来源，取实际generation attempt的V5而非复制wrapper的版本。new、prior重建和saved/accepted缓存共用此资格；当前V5、任意历史changes或草稿内容不能单独授继承权。原relatedIds只授权新差量，已批准旧事实只能作为确定值保留。
 
 普通path#ID只读review诊断将已验证的原finding.affectedIds原样保存到既有ContractFinding.relatedIds，prose定位继续保同owner结构化映射。loadReadonlySpecRepair仅将已有relatedIds投影到已认证prior.changes的本owner唯一ID，原ReadonlyOwnerRepair/CAS保完整全局IDs及完整message；外owner-only为空但不删除finding，未知ID仍在完整原件门拒绝，局部不可见兄弟不当全局未知。[[sync-elaboration]]仅从该精确generationRef/reviewEvidence认证的当前readonlySpecRepair消费typed IDs，不从累计修复消息推断权限。旧已冻结诊断的relatedIds缺席不补写、不授事实权：冷验只在重算derived对照值中按saved对应finding的原始字段缺席窄投影该字段，随后仍完整canonical相等；已存在relatedIds及任何其它差异均不得忽略。同attempt的saved诊断只有在derived按原缺席投影后全部来源/候选/owner/reviewEvidence仍完整canonical相等时保原形状，来源不同明确拒绝。正常新attempt可从同一原合法review重新派生带relatedIds的新诊断，不改旧saved请求、原件或摘要。V1–V4及字段缺席不取得事实权限，旧V4的VERIFY续修提示保持。新V5事实资格参与返修inputDigest与缓存身份，普通无repair输入沿原摘要承接兄弟；旧批准owner按其真实sourceAttempt的原protocol重建输入冷验，只有新返修输入使用V5。writer33在任何写入前拒绝旧writer。
 
 V3 正常运行、普通 recover 与 resource-only recover 共用可信注入的 [[verification-transport]]，不在 coordinator 重建远端执行器。原 operation/fence/attempt/runId/candidate/resource/receipt 保持；实际远端 evidence 仍需 V1/V2/V4 与当前写权才交付。resource-only 仅关闭和排空原绑定，不上传/create/start，不能用手工环境诊断替代正式 V3。
+
+当前有效 attempt 的 V3 `recovery_required` stage 是待续观察，不是可永久复用的终态。普通重调度沿同一 [[verification-executor]] 资源桥恢复原 run/resource/checkpoint。原候选、请求、deadline 和失败 CAS 不变，新观察另存 stage，不为恢复重做模型或新建 run。原 deadline 已过的 planned 仅经原 target/daemon 的 closed、effect 排空及精确不存在结算 timeout，再确认 staging 清算后 removed 并沿原失败策略处理。不借用户取消赋予停止证明。锁未排空、未知 effect、身份失配或缺失 receipt 时仍 recovery_required 并保容量。此重入只处理当前明确 V3，不扩大历史资源回收为停止当前 Native。removed 重入只读原结论，不访问 driver/SSH 或补 checkpoint。
 
 全局P1存在仅分析分区时，首次封口、封口返修及同operation的V1来源恢复重新核原P0 whole wrapper、原读集/基线、冻结计划与各区真实原件。跨attempt承接沿严格更早的正式provenance定位原分析和独审，复算独审覆盖及精确摘要。真实P1和认证的仅分析P0在原计划上互斥且完整，后者没有返修writer资格。同operation的code_to_spec即使原V1未通过，也只凭同P1原件造成的精确null扩域恢复原计划；V1候选及后续审查仍须真实重验。原P1局部输入、派发及V1–V4和交付门槛保持。
 
@@ -246,6 +252,12 @@ P0/P1/P2 共用 typed Native RPC 已结算准入：仅当前 control/physical ru
 多轮review-only续审的builder来源沿原review-plan-provenance追到真实prepared/Native所在attempt，逐级核同候选、原计划、file-writer-plan与builder traces；不把旧prepared复制成新派发。成功续修组的原输入同时沿accepted-review provenance.inputRef恢复，跨兄弟失败仍保自己的原reviewRepair/请求与Native结论。预算预检只计已认证必须重派的失败组下界，实际缓存失配和新调用仍由原reserveDispatch逐调用硬限，不重置或扩大预算。
 
 合法scope分层证明：业务ID/Spec路径由同一已审P1的扩域原件负责，实现/测试路径可由同P1已审code/AC.test映射负责，或由原file-writer-plan及其逐owner proposal/trace/派发负责；最终完整scope必须精确等于两层实际并集，原binding逐字保留、新增binding全null，前后selection沿既有扩域记录相连。不能把代码路径伪归P1、忽略额外路径/ID或借非null漂移；已完成且精确证实的scope步骤不对同一P1 evidence重登记更宽集合。冷builder逐组沿既有renew→yieldToControl→renew让心跳/暂停处理，保持生产lease和预算。
+
+正式 `retryOf` 遇到原已冻结完整候选、全部P0/P1/生成及最终独审已认证，而唯一V3 stage在资源登记前以 `verification_unsupported` 结束时，沿原关联操作直接续验。直接父操作必须failed并经正式retryEligibility；同parent重复request仍沿原store幂等归并；正式retryOf最新失败后继时，无candidate的中间记录仅在同input/source/request/origin/model/plan/policy/impact/readSet/selection/scope/composed逐跳一致、所有attempt已结算且零调用/派发/session/candidate/verification/publication、无delivery/journal/live资源或租约并保真实failure时，作为无批准的空后继回溯。失败码不授资格、不建错误码名册，不补candidate或旧checkpoint；最终提供完整生成及独审原件的祖先必须仍是原V3前置unsupported来源，全部Native/Git/P0/P1/P2/V1再冷验。未认证的中间进度或绑定漂移明确拒绝，不静默从P0重做。更早祖先仅允许正常准入沿严格retryOf链派生的superseded，原failure及输入授权保持且重新核无活租约/资源。所有来源attempt已结算，无验证结果、journal、活租约或未removed资源；原unsupported CAS须由该attempt的V3 wrapper和failure精确共同引用，原run从未登记verification资源。input/source/request、origin、requested model、policy/impact/readSet、业务selection/scope、composed和候选Git对象全部一致，ready须完整覆盖scope且无blocked范围。各P0原分析/独审Git与Native身份、P1各owner批准（复用[[sync-elaboration]]的程序批准查询；规范deferred implementation-review可保原repair与reviewPassed，不缩窄为字面accept）及完整计划覆盖、真实builder prepared/Git差量、最终各区与依赖独审原完整输入和覆盖并集均冷验；最终review集合必须由同一implementationGenerationDispatch按已认证完整P1、原全局ready/scope与计划复算，并与原认证partition-generation-budget的review键及aggregate成员精确相等；不能仅凭IDs并集或保留locals省略edge。partial、旧字段缺席或任何失配明确 `candidate_retry_binding`（已有来源认证错误保原code），不悄悄重新生成。
+
+候选续验后继若零模型调用、零派发、唯一attempt已结算且无session/verification aggregate/交付/journal，可承载逐值相同的原候选回溯完整祖先，前提是全部实际资源由只读listResources枚举且均为当前候选、原run/attempt/generation/input精确绑定的verification removed。原export-intent/tree和真实export字节、计划载荷摘要及唯一acceptanceRuns重算的政策须一致；复用runAttemptVerification对已removed检查点的只读路径，禁止driver或checkpoint写入，逐项重解析原Node报告并核完整passed、零退出、无截断、created/terminal原件及原evidence摘要。远端v2另须原attestation、closed排空与所有effect真实settled、cleanup cleaned。业务failed、缺报告、未知/未结算资源或CAS失配明确拒绝；不按根failure文案授信，不把中间记录当新批准，也不补旧V3 stage或verification。新操作仍fresh V1/V3/V4/Git，旧失败及真实报告保持。
+
+续验与普通生成共用唯一V3/V4及private delivery路径。新旧publication-base各自先沿原operation/attempt/source、真实metadata父提交唯一parent/tree及原provenance完整认证，再比较实际parentTree/manifest/composed、原frontier/逐path来源与读写闭包；正常本次metadata commit因operation/attempt消息不同而变化，不替代对象或frontier证明。新attempt重新核机械V1与发布父树，创建自己的export、runId、V3/V4证据、verification和正常Git receipt；原P0/P1/V2只引用认证原件，不制造新调用、dispatch、审查或阶段wrapper，不复制旧V3通过。连续前置unsupported的正式retry链继续回到同一原冻结候选，每次仍须当前fence/lease/selection有效。新V3若出现真实行为失败，保实际失败并停止此运输续验，不授修绿或自动重做模型资格。原失败、Native、CAS和Git原件保持。本路径只读取既有持久表示并产生既有四层结果与交付，不新增schema、writer版本或会话/交付系统；完整但未采纳的settled重验仍按下述原政策重新分析与独审。显式新requested model属于用户新选择，沿原正常retry重新生成与独审，不取得旧候选续验资格；同model原件失配仍拒绝。
 
 对完整但明确未采纳 settled 交付的正式重验，当前 selection 仅保护 CAS；组合输入、真实读集、目标 before、P0/P1及阶段 wrapper 使用 retryOf 派生的原业务 selection，不将拒绝候选作为 verifiedDelivery 义务。跨此边界不复用旧 accepted P0/P1、generation/review/candidate；新分析和独审重建 owner 投影。原 Git/Native JSON 仍经原 operation/attempt/owner/schema/终态认证后作为未批准材料续修，不迁旧树或批准。
 

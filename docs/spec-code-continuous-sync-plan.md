@@ -235,6 +235,8 @@ Dashboard 的同步模式不能继续“先把新 Spec 独立提交到 main，�
 
 入口先以仓库身份、分支/worktree generation、源快照、影响摘要和政策版本形成稳定接入键，通过数据库唯一约束归并重复 watcher、Git 和 API 事件；不能仅靠每次新分配的 operation ID 去重。操作内再以 operation ID、attempt 和输入摘要识别执行重试。已协调的相同字节为 no-op，不制造空提交。
 
+用户对已完成生成与全部独审、候选已冻结的操作正式重试时，若原失败仅为V3资源登记前的verification_unsupported，系统保留认证候选并直接续验，不从P0/P1/P2重做。原attempt、资源、租约和journal须全部结算；原输入/来源/用户请求/模型、policy/impact/readSet/业务selection/scope及候选Git对象须精确不变，完整生成和独审原件仍可冷验。缺证据、partial或任何漂移明确拒绝，不补签旧review/checkedPaths/receipt，也不静默降级重生成。新的attempt重新核机械V1、发布基树、真实V3及V4，并经原正常Git交付生成本次receipt；连续前置运输失败可沿同一正式retry链再试。同parent请求保持原幂等归并；正式重试最新失败后继时，若中间操作从未调用模型、未派发且无会话/候选/验证/发布/交付副作用、全部执行与资源已结算，可沿严格相同输入/原意/模型/政策/读集/作用域链回到最近原V3前置unsupported已审祖先，并重新完整认证和验证。空后继不提供任何批准，原failure与checkpoint不变，不按错误码名册放行、不补旧candidate；存在中间进度或漂移须明确拒绝。零调用的候选续验后继若唯一attempt已正式结算、候选与完整祖先逐值相同且未交付，可在全部真实验证资源removed、原请求/政策/导出/完整passed报告和远端closed/cleanup原件冷验后沿原链续验；不依据记账错误文案，不补旧stage或验证结果，旧业务failed、缺报告和未知资源须拒绝。已removed原件只读重验不得调用driver或写checkpoint，新attempt仍重新产生V1/V3/V4与正常Git receipt。旧失败和全部历史原件保持，新V3真实行为失败按真实失败停止。此续验复用现有retry/operation/fence/四层结果与交付，无第二套会话、候选系统或持久schema变更。显式新requested model属于用户新选择，沿原正常retry重新生成与独审，不取得旧候选续验资格；同model原件失配仍拒绝。
+
 用户可以对完整结算、尚未采纳的私有交付显式发起同输入重验：沿现有执行入口提交新 requestId 和 retryOf，创建独立新操作，保留原交付、原操作阶段、attempt、原生会话、候选、journal、receipt、Git 分支及资源历史，不将旧 workspace_synced 改成失败或取消来取得资格。workspace_synced 与 awaiting_landing 使用同一严格安全边界：当前 attempt 与全部真实交付须 settled、完整验证且覆盖原范围，无未决业务范围或未结算资源；来源物理身份、干净工作区/index 与冻结 HEAD 不变，真实 receipt 证明交付尚未被 Source 或主分支采纳。阶段名称、sourceSynced=false 或按钮本身均不构成未采纳证明；已采纳、部分交付、证据缺失、来源漂移和活跃资源均拒绝。
 
 已结算交付可能推进资源头，但不因此成为新的作者意图。重验沿 retryOf 链保留最早原 business selection、原冻结 input/request/plan/readSet 与 scope 作为组合输入、目标 before 和 P0/P1 的业务基线；新操作另冻结相同资源集的当前 selection 用于事务 CAS，只允许父本次真实 receipt 对实际文件、已覆盖业务 ID 或退役头造成的推进，第三方头及未写资源不能冒领。准入事务重新核父记录、journal/receipt 与当前选择，claim/fence/验证/交付继续核新 CAS；后续普通 failed→retry 仍递归沿原业务基线，不把旧拒绝候选当作 verifiedDelivery 义务。
@@ -243,7 +245,7 @@ Dashboard 的同步模式不能继续“先把新 Spec 独立提交到 main，�
 
 自身写入只有在来源和实际字节都符合登记结果时才被归为本操作回声；Agent 运行期间的额外用户编辑仍然进入新输入。不能用一个“正在同步”布尔值忽略所有文件变化。
 
-混合旧新资源基线的采纳消费只沿当前精确selection对应的真实settled receipt证明，不按最新pair、Git消息或相同tree猜测。当前source/HEAD/tree、完整scope、四门及commit parent/effect须匹配；已消费提交到该parent仅可无差量，或完整项目配置JSON只改变sync.model且mode不变，parent与current配置仍逐字绑定原input及当前重新授权。其他配置政策或未消费code/Spec/docs继续进入原观察，外部同tree新commit也不冒认receipt。观察只复用纯只读证明与原baseline消费记录，物理暂停不制造写入准入错误，也不派模型或改写完成状态；正式adopt写入门保持。
+混合旧新资源基线的采纳消费只沿当前精确selection对应的真实settled receipt证明，不按最新pair、Git消息或相同tree猜测。当前source/HEAD/tree、完整scope、四门及commit parent/effect须匹配。已消费提交到该parent仅可无差量，或唯一普通项目配置JSON变化且mode不变，parent与current配置仍逐字绑定原input及当前重新授权。该完整交付已按input冻结的配置政策通过四门，配置字段不另设消费名册。未由该receipt逐字绑定的配置或未消费code/Spec/docs继续进入原观察，外部同tree新commit也不冒认receipt。观察只复用纯只读证明与原baseline消费记录，物理暂停不制造写入准入错误，也不派模型或改写完成状态。正式adopt写入门保持。
 
 快照采集前后核对 HEAD、分支身份、index、文件集合和内容摘要，期间发生保存或切分支则重试，不使用前后不一致的混合快照。确认的输入保存为不可变 overlay，生成与验证使用相同输入。快照与 journal 是可恢复运行记录，不是第二份可编辑源码或业务契约。
 
@@ -411,6 +413,8 @@ Native已成功返回但review字段格式不合格同样保全原JSON、原错�
 
 恢复过程中发现新用户版本时，保留双方快照，不把 journal 的旧 preimage 覆盖到新文件。重新建立最新输入并自动整合；若无法同时满足业务意图则进入 conflicted。执行环境尚不允许安全恢复时维持 recovery_required，并说明需要恢复的条件，不能静默将半成品标成终态。
 
+已审只读P1事实返修的因果绑定与待处理owner分别保持。完成后清空pending不删除原返修原因，旧latest checkpoint已清空时沿同attempt完整历史冷验最新已审正文。普通暂停恢复没有新修复输入时，原独审诊断上下文只随精确冻结input/provenance和完整Native请求认证承接，不忽略diagnostics/digest，不向fresh模型补旧诊断。缺证、冲突或当前输入变化继续拒绝缓存。
+
 ## 9 一致性验证及完成条件
 
 ### 9.1 四层验证
@@ -425,6 +429,8 @@ Native已成功返回但review字段格式不合格同样保全原JSON、原错�
 验证绑定到冻结候选：仓库及分支身份、相关 Spec/代码/测试、治理关系、上层规则和读集合摘要、必要依赖及验证配置。只记录 HEAD 或执行时间不够，未提交内容和工具环境同样影响结果。
 
 V3 可由可信 server 选择本地 Docker 或 SSH Linux Docker；SSH 认证和部署权限不进入候选配置。远端必须真实运输并认证完整 candidate/reporter，以实际远端 mounts 和原 inspect 形成同一正式验证证据。原 ledger 四阶段承载上传、单 run effect 排空和清理；SSH 断线不代表停止。先持久终态，再确认 exact 容器与临时 staging 已删除才释放容量；closed 与 effect receipts 作为控制历史保留。未知 create/start 提交继续 recovery_required，不由 NoSuch 猜测。环境 probe 不替代产品正式 V3/receipt。
+
+当前有效 attempt 的 V3 recovery_required 缓存只代表待续观察，普通重调度须沿原 run/resource/checkpoint 续既有执行器，不重做模型或建立新 run 来修恢复债。原失败 CAS、候选和 deadline 保留，新观察追加。原期限已过的 planned 不上传/create/start，只有 closed、effect 排空、精确不存在和 staging 清算均证实时才以 timeout/removed 结算。未知锁、effect、身份或 receipt 仍保恢复债与容量。当前 Native 不因这一 V3 重入被取消，removed 重入不访问 driver/SSH 或改写检查点。
 
 增量操作的结构 V1 从实际不可变 candidate tree 读取完整业务契约及代码/测试正文，不能用 Agent 的局部读集误判未改兄弟缺少覆盖。生成意图比较保留本轮已批准契约，候选侧仅纳入这些节点与 baseTree 到 candidate tree 的真实 Spec 差量；未读改删节点的前态只从 baseTree 取得。完整结构上下文不扩大 Agent 任务、写入或验收范围，不把未改兄弟当新增意图，也不从候选自动登记验证命令；真实覆盖缺口、未批准业务项和政策漂移仍拒绝。未读兄弟的既有 GAP 只在已通过全图封口精确记录同一发现、闭包不涉及本轮 ready/accepted，且全部 Spec、源码和测试义务在封口输入、候选基树与候选中逐对象不变时沿原闭包规则保留，不阻塞独立 Task；新增或变化的 GAP、涉及本轮依赖或缺乏继承证明仍阻断。
 

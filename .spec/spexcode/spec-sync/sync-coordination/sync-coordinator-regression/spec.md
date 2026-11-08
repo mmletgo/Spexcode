@@ -5,6 +5,8 @@ hue: 175
 desc: 真实 SQLite/Git 和隔离 Docker 检查编排与恢复门禁。
 code:
   - spec-cli/src/sync/coordinator.test.ts
+related:
+  - spec-cli/src/sync/verification-transport.fixture.test.ts
 ---
 # P2 中央编排集成证据
 
@@ -13,6 +15,18 @@ code:
 中央应用编排必须由实际输入、候选、验收和交付事实证明，不能把模型 stub 的通过声明当最终产品证据。
 
 ## expanded spec
+
+多轮V5事实返修经真实Git/隔离SQLite及独立Native审查accept进入V3恢复债后，同attempt再次调度结算pending，再正式pause/run新fence，须保持最新已审desc/expanded/basis、完整同一候选与原Native独审provenance，零新增模型。独立旧cleared历史形态只追加受控的repairContext-only stage，原因果CAS与原件保持。缺因果及冲突base在模型派发前拒绝，既有去repairContext、模型及候选漂移反例保持。受控运输及Native fixture不代替真实产品验收。
+
+当前有效lease的V3首次materialize SSH故障在真实临时Git/私有SQLite保存planned资源与recovery_required stage，跨过原验证deadline后仅正常runSyncOperation重调度。旧版仍planned且复用原Broken pipe。新版沿同run/resource的生产executor/helper形成closed、effect排空、精确absence、timeout terminal和cleanup/removed，保原失败CAS根、候选、请求、deadline及源码/index，无新模型/attempt/run/upload/create/start或journal，失败按原预算结算并释放租约。实际内核锁仍被持有时，新观察须为busy且保planned/容量/有效租约，当前Native资源原件保持。removed重入不访问driver/SSH或写checkpoint。共用原运输fixture，既有AC-REMOTE断言/模式不变。新增SSH包装故障及Native账本均为受控上游，不声称真实模型、远端Docker或Tiny最终验收。
+
+原候选零调用续验实际完成隔离driver验收并正式removed后，在V3 saveStage注入记账失败，原attempt保candidate但无V3 stage/verification aggregate；同parent仍归并失败child，正式retry最新child旧版重入第七次P0，新版只读冷验所有原资源及完整祖先，零模型产生本次V3/V4/Git。旧资源checkpoint写入计数为零，原失败/资源/checkpoint逐字保持；原业务测试failed及额外未知removed资源分别在新V3前明确拒绝，零模型零派发。该受控故障只验证业务记账边界，真实内联stdout SHA故障由[[sync-checkpoint-evidence]]治理。
+
+空失败后继整链回归先由正式续验在原P1独审证据暂不可认证时形成零调用/零派发且无candidate/verification/资源/journal的真实failed操作，恢复原证据后同parent新request仍归并原失败、不resume；随后以最新failed child为retryOf，旧版第七次调用重入P0，新版逐跳认证空后继再冷验原完整祖先，连续V3运输失败后零模型生成本次V3/V4及正常Git receipt。中间impact漂移仍拒绝，原失败及checkpoint保留，不修改store幂等或按特定failure.code授信。
+
+正式续验的P1冷验另覆盖原Native verdict=repair且只有合法implementation-review、P1程序已structurePassed/reviewPassed的实际持久形态：六阶段真实Git/SQLite先到V3前置unsupported，旧版readonly_spec_repair_binding误拒；修复后保原repair/diagnostics/trace/CAS，零模型续验并产生本次V3/Git交付。取消批准标记、缺deferred或自定义业务repair不获资格；缺原独审Native证据仍拒绝。现场005只读原件按同一纯查询与原Native/Git绑定逐项校准，不能把受控fixture当现场最终交付。
+
+真实临时Git、正常阶段提交、隔离SQLite和受控runner先完成P0分析/独审、P1生成/独审、代码生成/独审，冻结候选后由受控V3前置能力失败形成verification_unsupported且无验证资源。修复前正式retry再次进入P0的第七次调用；修复后SQLite重启并经公开SyncApplication.submit/retryOf继续同候选，连续两次运输失败仍零新增模型派发，最后重新产生本次V3/V4和正常Git交付。输入源码、oracle、配置、request/policy/impact/readSet/scope、candidate、P0/P1/最终review/V3原件或发布父树漂移须明确拒绝且不回退生成；原失败operation/attempt/CAS及source/index保持。新增同一完整六阶段场景在原HEAD提交后、capture前为只读oracle追加合法换行，真实冻结metadata publication parent：旧版正式retry误拒，新版认证新旧metadata与相同实际tree/frontier后零调用交付；伪造旧parent身份继续拒绝。双owner跨依赖场景实际完成两个local和一个edge独审，再只从aggregate删除edge member及其trace、保原Native/局部独审/预算及候选；旧版误入V3，新版按唯一dispatch精确集合拒绝，完整双owner对照仍零调用续验。另以公开入口显式选择新model，按原正常retry重新生成和独审六阶段，不复用旧候选批准；无模型/CLI/BaseURL白名单。受控Native与Docker driver只证明编排及Git/SQLite事实，不冒称真实模型、远端Docker或Tiny产品闭环。
 
 
 连续返修的受控Native/Git/SQLite整链先在A3仅批准RULE-EXPORT-05并过strict seal，随后真实code_review仅指RULE-EXPORT-02。A4故意重改未命中05，在独审前以rows_patch拒绝；A5省略05只更新02，仍继承首轮05精确值，最终strict seal/V1通过。两轮当前relatedIds不累加，raw、其他业务列和全部源码/tests对象保持，aggregate.beforeDigest仍原作者摘要。最后一次完整P1已保存后模拟进程边界，SQLite再重启仍复用同attempt P1，零额外生成或独审，并在同一完整候选继续V1。

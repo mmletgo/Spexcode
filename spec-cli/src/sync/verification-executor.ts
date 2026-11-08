@@ -4,7 +4,7 @@ import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, stat, writeFile } fro
 import { join } from 'node:path'
 import { validateRepositoryPath } from './snapshot.js'
 import { verificationExportDigest } from './verification-remote-helper.mjs'
-import { createRemoteVerificationRun, remoteVerificationEnvironment } from './verification-transport.js'
+import { createRemoteVerificationRun, remoteVerificationEnvironment, VerificationRpcTimeoutError } from './verification-transport.js'
 export { verificationExportDigest } from './verification-remote-helper.mjs'
 import type { VerificationCheckpoint, VerificationCommandResult, VerificationConfig, VerificationDependencies, VerificationDriver, VerificationEvidence, VerificationPolicy, VerificationRequest, VerificationResult, VerificationTestResult } from './verification-executor-types.js'
 
@@ -282,6 +282,6 @@ export async function executeVerification(request: VerificationRequest, dependen
     return { status: outcome, checkpoint, evidence }
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error)
-    return { status: checkpoint ? 'recovery_required' : 'unsupported', checkpoint, evidence: checkpoint?.evidence, reason }
+    return { status: checkpoint ? 'recovery_required' : 'unsupported', checkpoint, evidence: checkpoint?.evidence, reason, ...(error instanceof VerificationRpcTimeoutError ? { rpcDiagnostics: error.diagnostics } : {}) }
   }
 }

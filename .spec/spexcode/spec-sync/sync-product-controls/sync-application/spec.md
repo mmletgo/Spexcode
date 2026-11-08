@@ -44,6 +44,8 @@ status 按节点及 bounded limit 查询，detail 返回 operation、当前 atte
 
 显式 retryOf 由用户授权为同一冻结输入、节点、政策、来源和正文请求建立关联的新 operation 及新预算；省略 patch 继承原 requestBlob，省略 origin 继承原输入来源与裁决（若是原decision），沿旧 previousBaselinePair，不丢失未落地编辑。不能混入新 patch 或改节点、来源/政策，当前 source 已变应提交正常新输入。普通重复事件继续归并原 operation 及预算，同 retry requestId 精确幂等。detail.retryEligibility 复用 store 只读 phase、所有历史 resource/journal/live authority 门禁，并附当前输入/授权及固定 plan 诊断；failed、budget_exhausted、从未交付的 cancelled，以及下述经完整证明仍未采纳的 settled 私有交付可正式重试；GAP、冲突、active 或未知资源禁止借新预算重启。准入事务重新检查门禁，不以先前只读结果代替原子检查。
 
+同一正式retry入口保留[[sync-coordinator]]的已冻结完整候选续验资格：原六阶段已审而V3前置unsupported且所有原资源/写权结算时，同输入/原意/模型及完整政策/读集/scope冷验后零新模型调用进入新的验证与交付。相同requestId仍精确重放；改变输入应发起新操作，候选/旧证据失配明确失败而不从P0静默重做。已交付未采纳的重验仍沿其原重建政策。
+
 detail.resources 只列该操作尚未 removed 的真实历史资源；暂停、取消、失败/预算、待输入/冲突或完成状态若仍有此类资源或未 settled journal，executionAvailability 显示 recovery_required 与 sync_resources_unsettled，不能因工具描述可读就显示 ready。该投影不虚构资源已释放；retryEligibility 仍由 canonical 门禁拒绝，精确资源恢复由 coordinator 负责，恢复入口单独验收，不能因尚未恢复就允许重试。
 
 control(recover) 是独立于 resume/retry 的清理入口：保原 control、输入、预算和业务结果，不要求重新启用当前已经变化的配置；先等旧执行结算，再用原固定计划和工具调用 coordinator.recoveryOnly。它只核已有 native/verification 资源与已经开始的 journal，不创建 attempt、模型调用、验证或新 apply，也不自动唤醒其它 queued 任务。资料缺失或资源仍未知时保留具体恢复诊断，不假称释放；清理后另由明确 resume/retry 推进。conflicted 状态也必须按真实未结算资源投影 recovery_required。
@@ -127,7 +129,7 @@ Dashboard 的受控正文保存继续直接 submit，requestBlob 即时触发 sp
 
 自动 ingress 固定到提交快照与节点，同一 commit 重放不因 baseline 或差异证据推进而重新派发；已结算 receipt/baseline 继续按真实意图消费和采纳证明消除同步自身交付/采纳提交的回声，不按 Git author 或 session trailer 猜测作者。停机提交在 service 启动及周期补偿中继续发现。新 commit 沿既有作用域、物理控制和预算族门禁，不新增触发配置开关。
 
-混合资源heads中的旧只读context不改原差异判据。仅从当前exact selection的非null pair定位其实际receipt/journal，核原source、启用配置与节点授权、全部settled journal、四层证据、实际完整scope及Git commit/tree/parent/effect，且当前HEAD/tree精确等于该完整receipt时，观察器才可沿原baseline消费接缝消除自身写回。最近已消费frontier到真实receipt parent只允许空差量，或唯一同mode普通配置文件的有效完整项目JSON仅sync.model不同；parent/current配置原字节摘要与mode须等于receipt原input，且当前已重新授权。其他配置字段、code、业务Spec、只读docs或混合差量保原观察；外部同tree新commit不冒认receipt，同一已接入快照的重复记录仍复用既有前沿，不伪结算原外部操作。此证明复用[[sync-source-adoption]]的纯settledReceipt与[[sync-landing-status]]读取，不调用adopt写入准入、不要求物理run或无在途资源；paused观察仍健康且不派发，仅写既有observation消费证据，不新建或改写receipt、baseline、journal与业务完成状态。
+混合资源heads中的旧只读context不改原差异判据。仅从当前exact selection的非null pair定位其实际receipt/journal，核原source、启用配置与节点授权、全部settled journal、四层证据、实际完整scope及Git commit/tree/parent/effect，且当前HEAD/tree精确等于该完整receipt时，观察器才可沿原baseline消费接缝消除自身写回。最近已消费frontier到真实receipt parent只允许空差量，或唯一同mode普通配置文件的有效完整项目JSON变化。parent/current配置原字节摘要与mode须等于receipt原input，且当前已重新授权。完整交付已按该input冻结的配置及验证政策通过全部门禁，配置字段不另设可消费名册。未被该完整receipt逐字绑定的配置、code、业务Spec、只读docs或混合差量保原观察。外部同tree新commit不冒认receipt，同一已接入快照的重复记录仍复用既有前沿，不伪结算原外部操作。此证明复用[[sync-source-adoption]]的纯settledReceipt与[[sync-landing-status]]读取，不调用adopt写入准入、不要求物理run或无在途资源。paused观察仍健康且不派发，仅写既有observation消费证据，不新建或改写receipt、baseline、journal与业务完成状态。
 
 自动 operation 的 detail 当前性、retry、decide、resume 与运行前可信配置复核均按其 input.captureKind 采集同模式当前输入；旧无标记工作区操作保持原判据。status 的原树落地投影与 adoptionEligibility/adopt 仍读取真实工作文件及 index，未提交编辑不能因 commit snapshot 而获得覆盖或采纳资格。
 
@@ -141,6 +143,8 @@ Dashboard 的受控正文保存继续直接 submit，requestBlob 即时触发 sp
 resources-only是独立于control(recover)的显式清理入口：要求完整operation ID与原frozen input ID，仅准当前canonicalRoot/commonDir与历史来源相同的owned资源。它不放松read/resume/adopt的完整assertSource，不赋予身份连续性；结果只返回资源结算与pending journal摘要，不调用readOperation/detail再采集来源。专用factory不注册或复用服务owner、不启动watcher/queue、不读当前业务配置或固定交付工具，也不唤醒其它任务。资源清理成功不重签attempt.failure、accept/review、原输出/digest或预算；旧journal不回放、不新建receipt。
 
 正式detail/read-current与证据BFS使用同一typed checkpoint边界。raw只在强失败来源绑定后以明确untrusted_final/text/SHA投影返回，BFS不解析或追踪raw正文伪sha字段；普通JSON证据仍按原可达链读取，未知坏JSON显式失败。
+
+证据BFS复用[[sync-checkpoint-evidence]]的精确BlobRef形状，保留裸引用、带artifacts的checkpoint及其中真实引用；内联日志字节包的sha256只是原运输校验摘要，不成为CAS可达边，也不阻断后续真实JSON证据读取。查询这种未引用摘要仍返回无关证据，真正可达CAS缺失或损坏继续显式失败。
 
 旧untrusted_final缺ref时，原文sha256仅为诊断摘要，不建立CAS可达边；正式readEvidence仍可读其原JSON材料，查询该缺席raw引用返回无关证据404，不补写旧记录。
 

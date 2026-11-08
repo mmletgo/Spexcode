@@ -24,4 +24,6 @@ transport 配置只来自可信 server 注入，不进入模型可写的 Verific
 
 `VerificationEvidence` 保存输入/候选/export/政策摘要、Docker 平台/镜像实际 ID/daemon 版本、真实 exitCode、stdout/stderr、截断标记、完整报告标志、稳定 testID 的 passed/failed/skipped、未匹配 ID、终态 inspect 与结果。`VerificationResult` 明确 passed/failed/cancelled/timeout/unsupported/recovery_required；运行证据不是完整产品已同步的声明。上层据 recovery_required 保留执行容量并重新传递同一检查点，终态后再结算容量。
 
+VerificationResult可选rpcDiagnostics只承载新SSH RPC超时的版本化安全元数据，固定action/verb及时间、字节、流/child观察和模块/载荷摘要，不含路径、原请求、完整argv、正文、环境或凭据。它不是VerificationEvidence或资源清算证明；旧结果与非运输超时保持字段缺席，不追补。
+
 政策的可选布尔 `scratchExecutable` 缺省为 false，仅显式 true 允许独立 V3 容器私有 `/tmp` tmpfs 执行；由可信 `RegisteredVerification.environment` 继承并随政策摘要冻结。该字段不改变只读输入、宿主权限或生产候选隔离。

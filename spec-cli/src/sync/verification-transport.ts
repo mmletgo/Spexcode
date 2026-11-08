@@ -3,9 +3,10 @@ import { createHash, randomUUID } from 'node:crypto'
 import { lstat, readdir, readFile, readlink } from 'node:fs/promises'
 import { join, posix } from 'node:path'
 import { once } from 'node:events'
-import { gunzipSync } from 'node:zlib'
+import { performance } from 'node:perf_hooks'
+import { gunzipSync, gzipSync } from 'node:zlib'
 import { verificationEffectDigest, verificationExportDigest } from './verification-remote-helper.mjs'
-import type { VerificationCheckpoint, VerificationCommandResult, VerificationDriver, VerificationEffect, VerificationRequest, VerificationTransportConfiguration, VerificationTransportPlan, VerificationTransportState } from './verification-executor-types.js'
+import type { VerificationCheckpoint, VerificationCommandResult, VerificationDriver, VerificationEffect, VerificationRequest, VerificationRpcDiagnostics, VerificationTransportConfiguration, VerificationTransportPlan, VerificationTransportState } from './verification-executor-types.js'
 
 const hash = (bytes: string | Buffer): string => createHash('sha256').update(bytes).digest('hex')
 type Rpc = Record<string, unknown>
@@ -13,6 +14,14 @@ type EncodedResult = { exitCode: number; truncated: boolean; stdout: { bytes: nu
 type Receipt = { effect: VerificationEffect; settled: boolean; result?: EncodedResult; uploaded?: boolean; attestation?: { exportDigest: string; runnerDigest: string }; cleaned?: boolean; rejected?: string; reason?: string }
 export type VerificationRpc = (request: Rpc, frames?: AsyncIterable<string>, maxBytes?: number) => Promise<unknown>
 export type VerificationTransportTestOptions = { rpc?: VerificationRpc }
+
+/** 只追加可安全持久化的超时观察，保留原失败与未知远端状态。 */
+export class VerificationRpcTimeoutError extends Error {
+  constructor(readonly diagnostics: VerificationRpcDiagnostics) {
+    super('SSH验证请求超时；远端worker/CLI状态仍待原effect恢复')
+    this.name = 'VerificationRpcTimeoutError'
+  }
+}
 
 /** 部署只读server环境；项目/模型不能选择SSH权限。 */
 export function configuredVerificationTransport(): VerificationTransportConfiguration | undefined {
@@ -28,18 +37,43 @@ export function configuredVerificationTransport(): VerificationTransportConfigur
 /** 固定可信bootstrap；全部动态数据仅通过stdin传送。 */
 export function sshVerificationRpc(configuration: VerificationTransportConfiguration): VerificationRpc {
   return async (request, frames, maxBytes = 1024 * 1024) => {
+    const preparingAt = performance.now()
     const source = await readFile(new URL('./verification-remote-helper.mjs', import.meta.url))
-    const command = `exec node --input-type=module -e 'import("data:text/javascript;base64,${source.toString('base64')}").then(m=>m.verificationSshMain())'`
+    const command = `exec node --input-type=module -e 'import{gunzipSync}from"node:zlib";import("data:text/javascript;base64,"+gunzipSync(Buffer.from("${gzipSync(source).toString('base64')}","base64")).toString("base64")).then(m=>m.verificationSshMain())'`
     return new Promise((fulfil, reject) => {
       const child = spawn('ssh', ['-T', '-o', 'BatchMode=yes', '--', configuration.sshAlias, command], { shell: false, stdio: ['pipe', 'pipe', 'pipe'] })
+      const startedAt = performance.now(), preparationMs = startedAt - preparingAt, loopAtStart = performance.eventLoopUtilization()
       let output = Buffer.alloc(0), diagnostics = Buffer.alloc(0), excessive = false
-      child.stdout.on('data', (bytes: Buffer) => { const available = Math.max(0, Math.ceil(maxBytes * 1.5) + 65536 - output.length); if (bytes.length > available) excessive = true; output = Buffer.concat([output, bytes.subarray(0, available)]) })
-      child.stderr.on('data', (bytes: Buffer) => { diagnostics = Buffer.concat([diagnostics, bytes.subarray(0, Math.max(0, 65536 - diagnostics.length))]) })
+      let stdoutBytes = 0, stderrBytes = 0, firstOutputAtMs: number | null = null, lastOutputAtMs: number | null = null
+      let stdinFinished = false, stdoutEnded = false, stderrEnded = false, childExitObserved = false, childCloseObserved = false
+      child.stdout.on('data', (bytes: Buffer) => { const elapsed = performance.now() - startedAt; firstOutputAtMs ??= elapsed; lastOutputAtMs = elapsed; stdoutBytes += bytes.length; const available = Math.max(0, Math.ceil(maxBytes * 1.5) + 65536 - output.length); if (bytes.length > available) excessive = true; output = Buffer.concat([output, bytes.subarray(0, available)]) })
+      child.stderr.on('data', (bytes: Buffer) => { const elapsed = performance.now() - startedAt; firstOutputAtMs ??= elapsed; lastOutputAtMs = elapsed; stderrBytes += bytes.length; diagnostics = Buffer.concat([diagnostics, bytes.subarray(0, Math.max(0, 65536 - diagnostics.length))]) })
+      child.stdin.once('finish', () => { stdinFinished = true })
+      child.stdout.once('end', () => { stdoutEnded = true })
+      child.stderr.once('end', () => { stderrEnded = true })
+      child.once('exit', () => { childExitObserved = true })
       const materializing = request.action === 'effect' && (request.effect as VerificationEffect).kind === 'materialize'
       const timeoutMs = materializing ? Math.max(1, Number(request.deadlineAt) - Date.now()) : 15_000
-      const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('SSH验证请求超时；远端worker/CLI状态仍待原effect恢复')) }, timeoutMs)
+      const timer = setTimeout(() => {
+        const elapsedMs = performance.now() - startedAt
+        const loop = performance.eventLoopUtilization(loopAtStart)
+        const action = ['probe', 'unscoped-read', 'read', 'effect', 'observe', 'close', 'attest', 'cleanup-observation'].find(value => value === request.action) ?? 'unknown'
+        const args = Array.isArray(request.args) ? request.args : []
+        const dockerVerb = action === 'probe' ? 'info' : ['version', 'image inspect', 'container inspect', 'container logs', 'container create', 'container start', 'container stop', 'container kill', 'container rm'].find(verb => verb.split(' ').every((word, index) => args[index] === word))
+        const error = new VerificationRpcTimeoutError({
+          version: 'verification-ssh-rpc-diagnostics-v1', action, ...(dockerVerb ? { dockerVerb } : {}),
+          budgetMs: timeoutMs, elapsedMs, overdueMs: Math.max(0, elapsedMs - timeoutMs), preparationMs, firstOutputAtMs, lastOutputAtMs,
+          eventLoopActiveMs: loop.active, eventLoopIdleMs: loop.idle,
+          stdoutBytes, stderrBytes, stdinFinished, stdoutEnded, stderrEnded, responseLineComplete: output.includes(10),
+          childExitObserved, childCloseObserved, childExitCode: child.exitCode, childSignalCode: child.signalCode,
+          moduleFile: new URL(import.meta.url).pathname.split('/').at(-1)!, moduleUrlSha256: hash(import.meta.url),
+          helperSha256: hash(source), helperBytes: source.length, bootstrapBytes: Buffer.byteLength(command),
+        })
+        child.kill('SIGKILL'); reject(error)
+      }, timeoutMs)
       child.once('error', error => { clearTimeout(timer); reject(error) })
       child.once('close', code => {
+        childCloseObserved = true
         clearTimeout(timer)
         if (code !== 0 || excessive) { reject(new Error(`SSH验证通道失败：${diagnostics.toString('utf8')}`)); return }
         try {

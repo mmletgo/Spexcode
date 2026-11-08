@@ -27,6 +27,8 @@ SSH 断开不证明 worker 或 Docker CLI 停止。[[verification-remote-helper]
 
 本叶节点实现 [[sync-verification]] 的 V3 执行边界；不单独证明 V1/V2/V4、候选交付或完整 P2 已完成。政策由上层可信校验器提供，固定镜像摘要、Linux 平台、Node 测试 argv、必需稳定测试 ID 与 CPU/内存/PID/时间/日志/scratch 预算。候选无法删减执行集合或改命令免检。
 
+仅新发生的SSH RPC超时将[[verification-transport]]的安全诊断原样附在VerificationResult，planned前仍unsupported且无资源，已有checkpoint仍recovery_required并保留原资源。诊断不伪造容器证据、receipt、停止或清算证明；上层沿原结果证据接缝保存。普通错误与旧结果的字段缺席保持。
+
 实际工作目录严格采用受信 VERIFY 的仓库相对 cwd，并在容器 inspect 中复核；不能把子目录命令偷偷放到根目录执行。稳定 testID 来自 AC 的具体测试绑定，可以与 AC 的业务 ID 不同；必须在真实报告中唯一通过。
 
 只支持 Docker Linux `linux/arm64` 与 `linux/amd64`；macOS 宿主经 Docker 执行 Linux 行为，未声明原生 macOS 验收能力。Docker 不存在、平台不符、镜像未预置或政策不受支持时明确 unsupported，不回退宿主执行。镜像准备属于可信环境准备，不在宿主执行候选生命周期脚本。
