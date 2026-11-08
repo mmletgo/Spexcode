@@ -3,7 +3,7 @@ import type { AuthorizedContractChange, ElaborationFact, ElaborationRunner } fro
 import type { AdmitSyncInput, ApplyReceipt, BaselinePair, BlobRef, FrozenBaselineSelection, SyncBudget, SyncFailure, SyncOperation, SyncScope, InputSnapshot } from './operation-types.js'
 import type { DeliveryTools, PrivateDeliveryOptions } from './private-delivery.js'
 import type { RegisteredVerification } from './verification-plan.js'
-import type { VerificationDriver } from './verification-executor-types.js'
+import type { VerificationDriver, VerificationTransportConfiguration } from './verification-executor-types.js'
 
 /** 来源与执行政策由可信应用入口冻结，未来业务 ID 由真实细化结果登记。 */
 type SyncCoordinatorPlanBody = {
@@ -42,7 +42,7 @@ export type SyncCoordinatorOptions = {
   readCurrentPlan: () => SyncCoordinatorPlan | Promise<SyncCoordinatorPlan>
   managedRoot: string; artifactRoot: string; tools: DeliveryTools
   recoveryOnly?: boolean
-  runner?: ElaborationRunner; verificationDriver?: VerificationDriver; signal?: AbortSignal
+  runner?: ElaborationRunner; verificationDriver?: VerificationDriver; verificationTransport?: VerificationTransportConfiguration; signal?: AbortSignal
   leaseMs?: number; heartbeatMs?: number; callTimeoutMs?: number
   /** 故障注入只暂停已有真实副作用，不能替换 Git 完成证据。 */
   deliveryHooks?: Pick<PrivateDeliveryOptions, 'afterFileWrite' | 'afterCommit' | 'afterReceipt'>

@@ -5,6 +5,10 @@ desc: 原意及绑定由程序复制，临时业务行生成唯一可编辑契�
 code:
   - spec-cli/src/sync/elaboration-markdown.ts#renderElaboration
   - spec-cli/src/sync/elaboration-markdown.ts#elaborationPatchErrors
+  - spec-cli/src/sync/elaboration-markdown.ts#unchangedTargetOutput
+  - spec-cli/src/sync/elaboration-markdown.ts#targetHasCurrentChanges
+  - spec-cli/src/sync/elaboration-markdown.ts#readonlyFactRepairIds
+  - spec-cli/src/sync/elaboration-markdown.ts#readonlyFactRepairPreservesTarget
   - spec-cli/src/sync/elaboration-markdown.ts#elaborationTargetBindings
   - spec-cli/src/sync/elaboration-markdown.ts#bindElaborationTargets
   - spec-cli/src/sync/elaboration-markdown.ts#projectVerificationTable
@@ -20,6 +24,12 @@ related:
 模型不应承担表格语法和摘要计算；业务行必须转为唯一 Markdown 候选，保留冻结原意和来源绑定。
 
 ## expanded spec
+
+目标影响归属复用[[sync-governance-owners]]的低层纯治理判定，不经分区装配模块加载配置或细化schema；行渲染、事实权限与既有请求字节保持原合同。
+
+连续事实修复以认证的上一轮确定事实值为行差量基线，未列行照常继承。新relatedIds不含的旧RULE.basis既不能自由再改，也不能因省略而回滚到原作者旧值；全部非事实字段仍逐值等于作者基线。
+
+[[sync-elaboration]]的合法只读事实返修复用同一目标影响归属与行差量比较。只有V5完整叶阶段的原candidate_review结构化relatedIds命中且P0未变的owner，preserve_business才渲染description、显式prose和命中RULE.basis；保原raw及非expanded正文，未列行继承、全部业务列/绑定及其他元数据逐值保持。显式事实prose重建expanded表时使用同一canonical列序，不能吞掉修正或错配旧列。普通纯重构与旧缺席诊断继续原严格保留。
 
 [[elaboration-output]] 的临时行通过 schema 检查并按冻结目标索引补入节点身份及路径后，交给同一 Markdown 渲染机制，按 `CONTRACT_COLUMNS` 顺序和列名渲染固定标题、表头及相同列数的分隔行。未分段旧正文也沿该机制保留原表和解释，不复制另一套业务渲染规则。空类型数组不生成空表。引用数组生成逗号集合，布尔保留 true/false，空引用和 null 使用 `-`，VERIFY 命令序列化为 JSON argv。单元格转义反斜杠、反引号和管道，换行使用 `<br>`；argv 不允许 NUL 或换行，转义不改变其解析后参数。
 
@@ -58,3 +68,7 @@ raw/expanded 的更新位置来自 [[sync-spec-parts]] 原围栏感知扫描的�
 [[sync-partition-execution]] 的程序技术投影复用同一围栏感知真实表扫描及单元格渲染，只替换真实expanded中的VERIFY技术表。raw与围栏示例不进入投影，业务行、说明、frontmatter及绑定不重渲染；去除且仅去除真实VERIFY表后的源码必须逐字一致，LF/CRLF保持。混合换行等无法证明非技术字节不变的输入拒绝，不能用规范化掩盖改变。技术定义仍须由冻结可信登记核验，渲染器不自造验证命令。
 
 interface_seed中，已核验本target的update_verification由程序从本轮冻结可信登记补入该target已有ID的精确更新行，模型VERIFY差量保持禁止。旧定义可在合法授权后进入演进检查；raw、业务行和正文仍沿原差量及授权机制处理，不能借技术归属投影自授验证政策变更。
+
+当前已审代码分析存在时，冻结目标列表只是最大写范围，不代表全部已有 owner 均有本轮变化。已有目标的变化范围从本轮 changes 的 affectedIds/ruleIds 所属、真实变更路径的现有治理归属、明确作者原意变化及既有逐项/生命周期授权派生；related 关联不授予归属。新节点或 raw-only 的首次必建继续有效。范围命中只是范围证据，不替代业务、验收、VERIFY和来源授权。未受影响目标显式改写标题、说明、prose、code/related或业务行时，以现有语义差量错误反馈续修，不能静默丢弃或交付旧草稿的偏差；受影响目标合法 prose-only 更新不要求伪造表行变化。无本轮变化的既有 interface parent 同样逐字保留。省略或显式等价元数据、解释及旧行均沿用整份冻结文件字节，包括LF/CRLF、正文标题、VERIFY位置和表间说明。
+
+范围门禁不改冻结 targetIndex、输入身份、历史schema或Native原件，也不重新签署旧计划。被拒JSON仍是原临时稿，沿现有 rows_patch 诊断和预算续修；越界稿不能升为候选、独审通过或就绪。

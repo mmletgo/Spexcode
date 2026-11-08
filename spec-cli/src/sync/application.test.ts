@@ -238,8 +238,8 @@ test('新手动操作采用各项目版本化默认模型，显式模型优先�
   }
 })
 
-test('自动观察准入、固定工具描述和真实runner请求使用同一项目model', async () => {
-  const model = 'claude:MiniMax-M3', f = await fixture({ ...settings, model })
+for (const nativeDefault of [false, true]) test(`自动观察准入、固定工具描述和真实runner请求使用同一项目model ${nativeDefault ? '原生缺省' : '显式项目选择'}`, async () => {
+  const model = nativeDefault ? 'claude:default' : 'claude:MiniMax-M3', f = await fixture(nativeDefault ? settings : { ...settings, model }, undefined, nativeDefault)
   try {
     await f.application.enable(); await f.application.automaticControl('pause')
     await f.application.startService({ compensationMs: 40, debounceMs: 5 })
@@ -258,7 +258,7 @@ test('自动观察准入、固定工具描述和真实runner请求使用同一�
     assert.ok(f.calls.every(call => call.model === detail.operation.model))
     const toolsRef = join(f.temp, 'runtime', 'artifacts', `application-runtime-${contentHash(detail.operation.ingressKey)}.json`)
     const saved = JSON.parse(readFileSync(toolsRef, 'utf8'))
-    assert.equal(saved.version, 'sync-tools-v2')
+    assert.equal(saved.version, nativeDefault ? 'sync-tools-v3' : 'sync-tools-v2')
     assert.equal(saved.model, model)
   } finally { await f.application.stopService(); f.cleanup() }
 })
@@ -364,7 +364,7 @@ test('status复用本轮快照并让重试资格复用详情的闭包当前性',
       assert.equal(detail.retryEligibility.eligible, true)
       const entries = counter.entries()
       assert.equal(entries.filter(entry => entry === 'capture').length, 2, 'status只采一次快照（双重observe各读取一次索引）')
-      assert.equal(entries.filter(entry => entry.startsWith('tree:')).length, 9, '同一status保留其他证明读取，并仅计算一次闭包当前性')
+      assert.equal(entries.filter(entry => entry.startsWith('tree:')).length, 15, '同一status保留完整闭包证明读取，并仅计算一次闭包当前性')
     } finally { counter.restore() }
   } finally { f.cleanup() }
 })
@@ -777,6 +777,45 @@ async function resourceFixture(options: { conflict?: boolean; callRequested?: bo
   retainHistoricalFrozenWorkflow(application)
   return { ...f, application, modelCalls: (): number => calls }
 }
+
+test('AC-APPLICATION-STOPPED-04 stopWriter只诊断当前仓库身份且保留同路径旧操作与当前未结算资源', async t => {
+  const f = await resourceFixture({ callRequested: false })
+  try {
+    await f.application.enable()
+    const submitted = await f.application.submit({ nodeId: 'demo', requestId: 'old-source-resource' }); assert.ok(submitted.operation)
+    const old = await f.application.wait(submitted.operation.id), oldControl = f.application.observationStatus().control
+    assert.equal(old.resources.length, 1)
+    const queued = f.application.store.admitAndEnqueue(await prepareSyncAdmission(old.operation.input, f.application['operationPlan'](old.operation), { ingressKey: 'old-source-queued', rootCauseId: 'old-source-queued', origin: 'spec', budget: settings.budget, managedRoot: f.application['managedRoot'] }))
+    assert.ok(f.application.store.listRecoverable().some(item => item.operation.id === queued.id))
+    assert.ok(f.application.store.listRecoverableResources().some(item => item.operation.id === old.operation.id))
+    const historical = { operation: f.application.store.readOperation(old.operation.id), attempt: f.application.store.readAttempt(old.operation.currentAttemptId!), resource: f.application.store.readResource(old.resources[0].id), queued: f.application.store.readOperation(queued.id) }
+    const gitBackup = join(f.temp, 'original-git')
+    renameSync(join(f.root, '.git'), gitBackup); cpSync(gitBackup, join(f.root, '.git'), { recursive: true })
+    const source = identifyWorktree(f.root)
+    assert.equal(source.canonicalRoot, old.operation.input.source.canonicalRoot)
+    assert.notEqual(source.repositoryId, old.operation.input.source.repositoryId)
+    const current = await SyncApplication.create(f.root, { ...f.application['options'] })
+    await current.enable()
+    const currentSubmitted = await current.submit({ nodeId: 'demo', requestId: 'current-source-resource' }); assert.ok(currentSubmitted.operation)
+    const before = await current.wait(currentSubmitted.operation.id)
+    assert.equal(before.resources.length, 1)
+    const resourceBefore = current.store.readResource(before.resources[0].id)
+    const stopped = await current.stopWriter()
+    assert.equal(stopped.stopped, true); assert.equal(stopped.control.control, 'pause')
+    assert.equal(stopped.control.scope.repositoryId, source.repositoryId)
+    assert.deepEqual(stopped.operations.map(detail => detail.operation.id), [before.operation.id])
+    assert.deepEqual(stopped.operations[0].resources, before.resources)
+    assert.equal(stopped.operations[0].executionAvailability.status, 'recovery_required')
+    assert.deepEqual(current.store.readResource(resourceBefore.id), resourceBefore)
+    assert.deepEqual(current.store.readOperation(old.operation.id), historical.operation)
+    assert.deepEqual(current.store.readAttempt(old.operation.currentAttemptId!), historical.attempt)
+    assert.deepEqual(current.store.readResource(old.resources[0].id), historical.resource)
+    assert.deepEqual(current.store.readOperation(queued.id), historical.queued)
+    assert.deepEqual(current.store.readPhysicalControl(oldControl.scope), oldControl)
+    assert.equal(f.modelCalls(), 2)
+    t.diagnostic(JSON.stringify({ sameCanonicalRoot: true, repositoryIdChanged: true, foreignQueuedAndResourceRecordsUnchanged: true, currentUnsettledResourceStillReported: true, control: stopped.control.control }))
+  } finally { await f.application.stopService(); f.cleanup() }
+})
 
 test('AC-APPLICATION-STOPPED-01 stopWriter后recover仍仅结算原planned资源并保留六次预算预留与失败证据', async () => {
   const f = await resourceFixture({ callRequested: false, priorReservedCalls: 5 })
@@ -2111,6 +2150,26 @@ test('冻结snapshot的untracked related glob完整正文进入真实分派投�
     assert.equal(admitted.scope.paths.some(path => dependencyPath === path || dependencyPath.startsWith(`${path}/`)), false)
     assert.equal(readFileSync(join(f.root, dependencyPath), 'utf8'), body)
     assert.equal(f.git(['ls-files', '--', dependencyPath]), '')
+  } finally { await f.application.stopService(); f.cleanup() }
+})
+
+test('新原生操作缺省优先Claude配置，重放和省略retry保持原请求选择', async () => {
+  const f = await fixture(settings, undefined, true)
+  try {
+    await f.application.enable()
+    await f.application.automaticControl('pause')
+    const first = (await f.application.submit({ nodeId: 'demo', requestId: 'native-cli-default' })).operation!
+    assert.equal(first.model, 'claude:default')
+    assert.equal((JSON.parse(readEvidence(first.input.source.commonDir, first.planBlob!).toString()) as SyncCoordinatorPlan).agentWorkflow, 'native-worktree-v1')
+    const saved = JSON.parse(readFileSync(join(f.temp, 'runtime', 'artifacts', `application-runtime-${contentHash(first.ingressKey)}.json`), 'utf8')) as { version: string; model: string }
+    assert.deepEqual({ version: saved.version, model: saved.model }, { version: 'sync-tools-v3', model: 'claude:default' })
+    assert.equal((await f.application.submit({ nodeId: 'demo', requestId: 'native-cli-default' })).operation!.id, first.id)
+    await f.application.control(first.id, 'cancel')
+    const retry = (await f.application.submit({ nodeId: 'demo', requestId: 'native-cli-default-retry', retryOf: first.id })).operation!
+    assert.equal(retry.model, 'claude:default')
+    assert.equal(retry.callsUsed, 0)
+    assert.equal(f.calls.length, 0)
+    await f.application.control(retry.id, 'cancel')
   } finally { await f.application.stopService(); f.cleanup() }
 })
 

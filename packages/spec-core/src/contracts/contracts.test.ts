@@ -43,6 +43,22 @@ test('完整真实夹具解析、30格状态事件矩阵和argv绑定，无运�
   if (verify.kind === 'VERIFY') assert.deepEqual(verify.command, ['node', '--test', 'tests/export.test.mjs'])
 })
 
+test('一次覆盖投影只索引一次阻塞引用', () => {
+  const graph = buildContractGraph([parse(variant('missing-policy').source)])
+  const req = graph.items.get('REQ-EXPORT-01')
+  assert.ok(req?.kind === 'REQ')
+  const dependencies = req.dependsOn
+  let reads = 0
+  Object.defineProperty(req, 'dependsOn', {
+    get() { reads++; return dependencies },
+  })
+
+  const coverage = projectContractCoverage(graph)
+  assert.ok(coverage.items.find((item) => item.id === req.id)?.acceptanceIds.length)
+  assert.ok(coverage.gaps[0].affectedIds.includes('FLOW-EXPORT-02'))
+  assert.equal(reads, 1)
+})
+
 test('缺失取消完成分支拒绝；有其他TR不能冒充完整处置', () => {
   const changed = variant('missing-branch')
   const graph = buildContractGraph([parse(changed.source)])

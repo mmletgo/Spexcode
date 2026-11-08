@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
+import { readConfig } from '@spexcode/spec-core'
 import type { ApplyJournal, ApplyPlan, ApplyReceipt, InputSnapshot, SyncOperation, SyncScope, VerificationResultBlob, WorktreeIdentity } from './operation-types.js'
 import type { SyncStore } from './store.js'
 import type { DeliveryTools } from './private-delivery.js'
@@ -15,6 +16,7 @@ export type SourceAdoptionPlan = { source: WorktreeIdentity; headCommit: string;
 const same = (left: unknown, right: unknown): boolean => JSON.stringify(left) === JSON.stringify(right)
 function fail(code: string, message: string): never { throw new SyncApplicationError(code, message) }
 const covers = (outer: SyncScope, inner: SyncScope): boolean => inner.paths.every(path => outer.paths.some(parent => path === parent || path.startsWith(`${parent}/`))) && inner.contractIds.every(id => outer.contractIds.includes(id)) && inner.flowIds.every(id => outer.flowIds.includes(id))
+export { covers as sourceAdoptionScopeCovers }
 const hasScope = (scope: SyncScope): boolean => !!(scope.paths.length || scope.contractIds.length || scope.flowIds.length)
 const identity = (source: WorktreeIdentity): string => JSON.stringify(source, Object.keys(source).sort())
 const gitText = (commonDir: string, args: string[]): string => objectGit(commonDir, args).toString().trim()
@@ -34,7 +36,7 @@ export function sourceAdoptionMutexPath(artifactRoot: string, source: WorktreeId
 }
 
 /** 读取既有已结算证明，不创建交付计划、验证、receipt 或新提交。 */
-function settledReceipt(store: SyncStore, operation: SyncOperation, journal: ApplyJournal): { receipt: ApplyReceipt; intent: CommitIntent } {
+export function settledReceipt(store: SyncStore, operation: SyncOperation, journal: ApplyJournal): { receipt: ApplyReceipt; intent: CommitIntent } {
   const commonDir = operation.input.source.commonDir, attempt = store.readAttempt(journal.attemptId), candidate = attempt.candidate, verification = attempt.verification, receipt = journal.receipt, plan = journal.plan
   if (journal.operationId !== operation.id || attempt.operationId !== operation.id || journal.generation !== attempt.generation || attempt.status !== 'settled' || journal.status !== 'settled' || !receipt || !candidate || !verification?.passed || !attempt.composedInput || journal.steps.some(step => step.status !== 'completed' || !step.evidenceRef)) fail('sync_adoption_not_settled', '交付缺少完整的已结算尝试、文件步骤或验证')
   const after = verifyCandidate(commonDir, candidate)
@@ -53,6 +55,32 @@ function settledReceipt(store: SyncStore, operation: SyncOperation, journal: App
   const unchanged = gitText(commonDir, ['rev-parse', `${parent}^{tree}`]) === candidate.tree
   if (!intent || intent.version !== 1 || intent.tree !== candidate.tree || intent.parent !== parent || intent.ref !== operation.deliveryPlan.branch || intent.unchanged !== unchanged || intent.binding.root !== plan.target.canonicalRoot || intent.binding.expectedTree !== candidate.tree || intent.binding.expectedParent !== parent || intent.binding.expectedRef !== plan.target.branch || !evidence.some(value => value.version === 1 && value.journalId === journal.id && value.commit === commit && value.parent === parent && value.tree === candidate.tree) || (unchanged ? commit !== parent : gitText(commonDir, ['show', '-s', '--format=%P', commit]) !== parent || !gitText(commonDir, ['show', '-s', '--format=%B', commit]).split('\n').includes(`Spex-Sync-Effect: ${plan.effectKey}`))) fail('sync_adoption_commit_invalid', '实际提交不符合原交付 commit intent、parent 和 effect')
   return { receipt, intent }
+}
+
+/** 只认证仍停在原干净输入的完整私有交付；false 投影本身不授予重验权。 */
+export function proveUnadoptedDelivery(store: SyncStore, operation: SyncOperation): { operation: SyncOperation; journals: ApplyJournal[] } {
+  assertSourceAdoptionComplete(operation)
+  if (!operation.baselineSelection) fail('sync_revalidation_selection_missing', '正式重验需要原精确资源选择')
+  const source = operation.input.source, commonDir = source.commonDir
+  if (identity(identifyWorktree(source.canonicalRoot)) !== identity(source)) fail('sync_source_changed', '原来源物理身份或分支已变化')
+  verifySnapshot(operation.input)
+  const head = gitText(commonDir, ['rev-parse', source.branch]), headTree = gitText(commonDir, ['rev-parse', `${head}^{tree}`])
+  const status = spawnSync('git', ['--no-replace-objects', '--no-optional-locks', '-c', 'core.fsmonitor=false', '-C', source.canonicalRoot, 'status', '--porcelain=v1', '--untracked-files=all'], { encoding: 'utf8' })
+  if (status.error) throw status.error
+  if (status.status !== 0) fail('sync_revalidation_source_unavailable', status.stderr)
+  if (head !== operation.input.headCommit || operation.input.immutableTree !== headTree || operation.input.indexTree !== headTree || status.stdout.length) fail('sync_revalidation_source_changed', '重验要求原来源仍为干净的冻结 HEAD、index 与工作区')
+  const sameSource = (other: SyncOperation): boolean => identity(other.input.source) === identity(source)
+  if (store.listRecoverableResources().some(item => sameSource(item.operation)) || store.listRecoverable().some(item => sameSource(item.operation) && item.journals.some(journal => journal.status !== 'settled'))) fail('sync_resources_unsettled', '同一来源仍有未结算资源或交付日志')
+  const journals = store.listJournals(operation.id)
+  if (!journals.length || journals.at(-1)!.attemptId !== operation.currentAttemptId) fail('sync_adoption_not_settled', '当前尝试缺少真实已结算交付')
+  const deliveries = journals.map(journal => settledReceipt(store, operation, journal))
+  const scope = journals.reduce<SyncScope>((result, journal) => ({ paths: [...result.paths, ...journal.plan.coveredScope.paths], contractIds: [...result.contractIds, ...journal.plan.coveredScope.contractIds], flowIds: [...result.flowIds, ...journal.plan.coveredScope.flowIds] }), { paths: [], contractIds: [], flowIds: [] })
+  const canonicalScope = (value: SyncScope): SyncScope => ({ paths: [...new Set(value.paths)].sort(), contractIds: [...new Set(value.contractIds)].sort(), flowIds: [...new Set(value.flowIds)].sort() })
+  if (!same(canonicalScope(scope), canonicalScope(operation.scope))) fail('sync_adoption_incomplete', '真实已结算交付与完整原操作范围不一致')
+  const canonicalBranch = `refs/heads/${readConfig(source.canonicalRoot).mainBranch?.trim() || 'main'}`
+  const canonical = objectGit(commonDir, ['for-each-ref', '--format=%(refname) %(objectname)', canonicalBranch]).toString().split('\n').find(line => line.startsWith(`${canonicalBranch} `))?.slice(canonicalBranch.length + 1)
+  if (deliveries.some(({ receipt }) => ancestor(commonDir, receipt.actualCommit!, head) || canonical && ancestor(commonDir, receipt.actualCommit!, canonical))) fail('sync_revalidation_already_adopted', '交付已被来源或主分支采纳，不能作为未采纳候选重验')
+  return { operation, journals }
 }
 
 /** 应用详情与执行共用的采纳判据；所有来源业务文件、index 和 ref 保持只读。 */

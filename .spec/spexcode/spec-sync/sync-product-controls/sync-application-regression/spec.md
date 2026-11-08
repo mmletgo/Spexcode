@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+AC-APPLICATION-STOPPED-04 以真实 Git 元数据身份替换复现同 canonicalRoot、不同 repositoryId 的历史 queued 操作和未结算资源共存；当前来源 stopWriter 成功暂停，只返回当前仓库诊断及其真实未结算资源，旧操作、attempt、资源与物理控制逐值保持。使用隔离 SQLite 与受控 runner，不声称真实 Native 执行或生产恢复完成。
+
 资源专用入口用真实隔离Git的.git替换复现repoId变化，先确认正常read/recover/cancel/resume仍404，再证明只结算原operation/input的精确Native资源。错误input/foreign root拒绝，缺失/错配计划及停止未知保持未结算；pending journal原样保留，原operation/attempt.failure、输出/发现原件逐字不变，业务claim/dispatch/生成/交付方法均零调用。测试只证明正式资源接缝，不冒称真实Native停止。
 
 AC-APPLICATION-STOPPED-01/02/03用真实Git/SQLite和正式stopWriter→control(recover)入口先复现stopped门禁使finished缺席的TypeError，再证明只清理原planned且明确未派发的资源；六次真实store预算预留（模型runner一次）及原operation/失败/refs/deadline保持，observer/FIFO和物理控制不恢复。queued无资源仍零模型/attempt；stopService且物理control仍run的对照在recover后显式start仍不派发，不能靠物理pause掩盖stopped门禁。错误plan仍以resource_recovery 409保留planned及原业务失败，不以空值fallback或假removed绕过。夹具仅证明编排与原清理机制，不作为真实Native调用/清理的产品验收。
@@ -95,7 +97,7 @@ P4 partial→decide使用原P3-DELIVERY keep_intent真实链补强：fresh exact
 
 确定性细化夹具保留表格之间全部业务说明，不按首张表截断。partial裁决整合仅在冻结source与base逐字一致、Spec原raw及全部业务项和说明等价时沿完整真实delivery；双节点停机补偿则逐字核对source仅新增指定作者注释、delivery仅新增受审生成注释，再提交保留两者的完整resolution。两者均经过正式独审与候选门禁，不能以refactor分类代替文本重叠整合。
 
-真实 Git/SQLite 用例覆盖默认旧 JSON 与 v1 描述不改、正式另模型 retry、重启省略继承、普通重复换模型拒绝、全阶段请求及描述/operation 模型冲突拒绝；遵循 [[sync-model-selection]]。版本化 `sync.model` 用例先复现现有 schema 拒绝配置，再验证精确字符串及空白拒绝；两个项目独立使用各自新操作默认模型，手动模型覆盖项目默认值，同 request 与省略 retry 仍沿 prior/retry 绑定。自动观察、code/combined 接入及新裁决 operation、固定工具描述与真实 runner request 必须使用同一配置模型，配置省略继续使用旧默认语义。
+真实 Git/SQLite 用例覆盖默认旧 JSON 与 v1 描述不改、正式另模型 retry、重启省略继承、普通重复换模型拒绝、全阶段请求及描述/operation 模型冲突拒绝；遵循 [[sync-model-selection]]。版本化 `sync.model` 用例先复现现有 schema 拒绝配置，再验证精确字符串及空白拒绝；两个项目独立使用各自新操作默认选择，手动选择覆盖项目默认值，同 request 与省略 retry 仍沿 prior/retry 绑定。新原生工作树未配置时，正式手动准入和自动观察都固定claude:default，工具描述v3及runner request保持同值；手动暂停场景只证明准入/重放/取消后省略retry继承，自动服务场景才证明真实runner接缝收到默认选择。历史工作流省略配置仍保旧默认语义，受控runner不冒充真实Claude模型或最终交付。
 
 已存在或备份固定运行描述先核精确期望模型，再允许admission。未受理请求留下的原描述若与后续选择不符，明确早拒，不新建operation/receipt/FIFO且不静默重建；匹配原描述的合法显式retry或新请求仍沿既有入口。
 

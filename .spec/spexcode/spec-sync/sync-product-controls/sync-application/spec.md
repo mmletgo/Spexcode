@@ -18,9 +18,13 @@ related:
 
 ## expanded spec
 
+正式 configuredSyncApplication 与 configuredSyncResourceRecoveryApplication 共用 [[verification-transport]] 的可信 server 装配。可由 server 的 SPEX_VERIFICATION_SSH_ALIAS 与 SPEX_VERIFICATION_SSH_ROOT 选择既有 SSH 配置和远端独占 root，必须成对提供；缺席保持本地。alias/host 权限和认证不进入候选 Spec、项目 sync settings 或模型请求，凭据沿 SSH 原生机制，不能因当前配置改变而重绑定旧 v1/v2 resource。此装配不增加 P0/readiness 阶段或第二业务状态机。
+
+server可选SPEX_VERIFICATION_SSH_DOCKER_ENDPOINT只接受本机Unix socket，缺省unix:///var/run/docker.sock，按原plan冻结并显式传每次Docker CLI，不使用远端默认context猜执行主机。
+
 显式offline source-continuity见 [[sync-source-registration]]，不创建缓存owner、observer、attempt或模型调用。enable与登记在commonDir共享注册锁内写启用记录，v2后续配置/实际分支授权保留continuity链；identity不永久绑定旧业务配置。普通assertSource核完整repo/root/commonDir/gitDir/branch/physical，不能因共享repo投影而给未证明旧linked source继续权。资源-only专用factory及coordinator的raw Git元数据核验不受失效v2自锁，且不进入normal恢复或准入。
 
-新操作默认冻结plan.agentWorkflow=native-worktree-v1与sync-tools-v3:{model,agentWorkflow,tools,runtimeDigest}。读取运行资料同时核精确模型及workflow，拒绝新旧协议热替换；旧v1/v2及缺字段plan按原frozen协议恢复/retry，旧已持久payload不改写。新业务裁决/revert为新操作，使用新工作流。新workflow明确只支持Claude Code或ZCode精确模型，裸sol与其它执行器给清楚unsupported而不fallback；历史缺省sol身份不改变。v18组件writer marker使旧sync writer整体拒绝新语义，固定v3运行描述是额外能力门。
+新操作默认冻结plan.agentWorkflow=native-worktree-v1与sync-tools-v3:{model,agentWorkflow,tools,runtimeDigest}。读取运行资料同时核请求选择及workflow，拒绝新旧协议热替换；旧v1/v2及缺字段plan按原frozen协议恢复/retry，旧已持久payload不改写。新业务裁决/revert为新操作，使用新工作流。新workflow使用Claude Code或ZCode；未显式指定且项目未配置模型时固定请求选择claude:default，交由CLI原生配置解析，不把默认或别名当成精确实际模型。模型、base URL和CLI版本无产品允许名册，实际每轮身份由[[claude-structured-runtime]]、[[zcode-structured-runtime]]记录。历史缺省sol身份不改变，不能把裸sol静默换执行器。v24组件writer marker保护新原生配置语义，固定v3运行描述仍核其请求选择。
 
 本节点落实 [[sync-product-controls]] 的 P2 应用入口与 P3 手动代码意图/裁决；P4 外部 watcher由本服务实现，完整恢复矩阵与P5最终验收由上层保留。生产 configuredSyncApplication 复用后端同仓库的 canonical session protocol，按已注册 source 工作树实例化，不创建其它数据库或队列，迁移先备份。运行资料及固定 compiled CLI 位于源码外当前用户拥有的独占 0700 runtime。
 
@@ -38,7 +42,9 @@ status 按节点及 bounded limit 查询，detail 返回 operation、当前 atte
 
 派发使用 canonical protocol 中按 repositoryId 固定的真实地址，同仓库多个 source 工作树共享 FIFO，不同仓库共享 session DB 时互不堵塞。入口只唤醒当前仓库有效消息头，精确清理已停止的旧消息；同仓库来源由对应应用实例执行，禁止跨仓库 fallback。busy 返回真实 queued 状态，不自旋重试。前序结算后继续读取真实 FIFO；消息已耗尽时，从 canonical store 的 queued/run 状态恢复已出队暂停操作，不创建第二队列、不重置预算。wait 等待当前仓库实际运行中的前序和目标任务，外部互斥仍占用时诚实返回 queued 详情，不把它标为完成。
 
-显式 retryOf 由用户授权为同一冻结输入、节点、政策、来源和正文请求建立关联的新 operation 及新预算；省略 patch 继承原 requestBlob，省略 origin 继承原输入来源与裁决（若是原decision），沿旧 previousBaselinePair，不丢失未落地编辑。不能混入新 patch 或改节点、来源/政策，当前 source 已变应提交正常新输入。普通重复事件继续归并原 operation 及预算，同 retry requestId 精确幂等。detail.retryEligibility 复用 store 只读 phase、所有历史 resource/journal/live authority 门禁，并附当前输入/授权及固定 plan 诊断；只有 failed、budget_exhausted，以及从未交付的 cancelled 可重试，GAP、冲突、active 或未知资源禁止借新预算重启。准入事务重新检查门禁，不以先前只读结果代替原子检查。
+显式 retryOf 由用户授权为同一冻结输入、节点、政策、来源和正文请求建立关联的新 operation 及新预算；省略 patch 继承原 requestBlob，省略 origin 继承原输入来源与裁决（若是原decision），沿旧 previousBaselinePair，不丢失未落地编辑。不能混入新 patch 或改节点、来源/政策，当前 source 已变应提交正常新输入。普通重复事件继续归并原 operation 及预算，同 retry requestId 精确幂等。detail.retryEligibility 复用 store 只读 phase、所有历史 resource/journal/live authority 门禁，并附当前输入/授权及固定 plan 诊断；failed、budget_exhausted、从未交付的 cancelled，以及下述经完整证明仍未采纳的 settled 私有交付可正式重试；GAP、冲突、active 或未知资源禁止借新预算重启。准入事务重新检查门禁，不以先前只读结果代替原子检查。
+
+同一正式retry入口保留[[sync-coordinator]]的已冻结完整候选续验资格：原六阶段已审而V3前置unsupported且所有原资源/写权结算时，同输入/原意/模型及完整政策/读集/scope冷验后零新模型调用进入新的验证与交付。相同requestId仍精确重放；改变输入应发起新操作，候选/旧证据失配明确失败而不从P0静默重做。已交付未采纳的重验仍沿其原重建政策。
 
 detail.resources 只列该操作尚未 removed 的真实历史资源；暂停、取消、失败/预算、待输入/冲突或完成状态若仍有此类资源或未 settled journal，executionAvailability 显示 recovery_required 与 sync_resources_unsettled，不能因工具描述可读就显示 ready。该投影不虚构资源已释放；retryEligibility 仍由 canonical 门禁拒绝，精确资源恢复由 coordinator 负责，恢复入口单独验收，不能因尚未恢复就允许重试。
 
@@ -79,11 +85,11 @@ P4 的正式服务生命周期持有 [[sync-input-observer]]，不依赖浏览�
 
 健康持久记录绑定instanceId/真实PID/startToken，查询重新验证进程身份；旧online字段不能证明服务活着。热重载通过instance CAS接管，旧观察器准入前重核所有权。status.sources列明确enable的物理来源、注册意图、存在性、控制、最近观测及持久健康；缺失来源启动仍保观察职责，周期重试。删除重建改变物理身份先报需重新授权，未授权新物理树不创建快照。最后差异正文保存在同一内容寻址evidence；commonDir被删除/移动导致证据不可读时返回明确unavailable/hash/reason，仍可查询missing健康和最后已捕获snapshot身份。
 
-派发先ack真实protocol消息成为durablequeued，再使用store.nextQueued资格与原anchor FIFO；已开始的安全checkpoint仅按原anchor恢复，失败/预算/冲突不能自动重开。coordinator未领取前的明确unsupported不能触发递归自旋。fresh manual与自动输入统一exactselection规划；P4previousBaselinePair为空，逐资源真实pair不被latest伪拼。旧P3显式retry只沿原冻结pair/plan，P4retry沿原selection。
+派发先ack真实protocol消息成为durablequeued，再使用store.nextQueued资格与原anchor FIFO；已开始的安全checkpoint仅按原anchor恢复，失败/预算/冲突不能自动重开。coordinator未领取前的明确unsupported不能触发递归自旋。fresh manual与自动输入统一exactselection规划；P4previousBaselinePair为空，逐资源真实pair不被latest伪拼。旧P3显式retry只沿原冻结pair/plan，P4retry沿原业务selection；完整未采纳重验另冻结仅由父自身receipt推进的当前selection用于CAS。
 
 重新enable与新配置只保当前注册意图，不把旧branch/config下的root继续扫描。已注册意图根删除后保留missingNodeIds与真实planning failure，不能因当前nodes缺失清掉责任；上下文祖先单列contextNodeIds，不把只读上下文冒充完整业务范围已同步。
 
-P4 stale/retry/resume采用协调器唯一isSyncInputCurrent判据，比较真实source身份与读取/写入闭包的working/index/HEAD对象；无关路径或提交不使精确操作过期。retry仍绑定原完整input及原selection；裁决保原完整input/plan/analysis，仅对原最终selection相同资源重读真实heads以纳入已结算partial交付，不能借新snapshot套用旧analysis；当前分析查询复用协调器阶段校验，已审null资源扩展不得隐藏可信分析。相同request重放沿其原接入收据，scope外编辑不重新冻结旧请求。sourceSynced 由真实 settled receipt 提交被原树采纳及当前闭包字节决定，canonicalSynced 另核明确主分支；不能仅由闭包 current 推定。
+P4 stale/retry/resume采用协调器唯一isSyncInputCurrent判据，比较真实source身份与读取/写入闭包的working/index/HEAD对象；无关路径或提交不使精确操作过期。retry仍绑定原完整input及原业务selection，完整未采纳重验的执行CAS另用认证的当前selection；裁决保原完整input/plan/analysis，仅对原最终selection相同资源重读真实heads以纳入已结算partial交付，不能借新snapshot套用旧analysis；当前分析查询复用协调器阶段校验，已审null资源扩展不得隐藏可信分析。相同request重放沿其原接入收据，scope外编辑不重新冻结旧请求。sourceSynced 由真实 settled receipt 提交被原树采纳及当前闭包字节决定，canonicalSynced 另核明确主分支；不能仅由闭包 current 推定。
 
 每个operation detail单独投影其原physical scope的physicalControl；show不依赖另读status即可看见物理暂停，operation.control和phase仍保真实单操作控制与检查点，不伪造阶段。
 
@@ -101,7 +107,7 @@ partial真实receipt推进ready资源heads后，fresh decision须以相同资源
 
 revert 接受 operationId 与稳定 requestId，意图节点从原固定计划派生。仅真实完整 settled 交付、原生资源已结算且 actualCommit 已被当前来源 HEAD 采纳才可撤销；当前相关后续编辑通过 Git 反向三方合成保留。完整补偿路径逐项核当前可信写授权及独立测试边界，精确 before/next 身份删除才能产生既有 user:raw 退役授权。补偿沿 combined 来源建立新的不可变协调操作，真实冲突经同一分析/裁决，成功经同一四层验证与新提交交付；不 reset、不直接改原树。相同请求精确重放，相同补偿不同运输键归并。
 
-stopWriter 在版本回退前先持久暂停当前物理来源，停止相同来源本进程执行者和观察服务，等待已开始执行在安全边界结算；剩余 journal/resource 作为可恢复记录与具体诊断返回，不删除表、worktree 或 blob。物理暂停跨服务重启保留，未知新版 schema 继续由 store 每事务 fencing 拒旧 writer。
+stopWriter 在版本回退前先持久暂停当前物理来源，停止相同来源本进程执行者和观察服务，等待已开始执行在安全边界结算；剩余 journal/resource 作为可恢复记录与具体诊断返回，不删除表、worktree 或 blob。诊断与停止执行者共用当前数据库、canonicalRoot 和 repositoryId 范围；同路径另一仓库身份的历史操作和资源原样保留，不读取为当前来源详情，当前身份的真实未结算资源仍须完整返回。物理暂停跨服务重启保留，未知新版 schema 继续由 store 每事务 fencing 拒旧 writer。
 
 detail 的原来源采纳与主分支完成由 [[sync-landing-status]] 只读推导。sourceSynced 表示真实原树包含已验证完整交付且当前执行/读取闭包字节一致；canonicalSynced 还要求当前分支是仓库明确 mainBranch。已采纳后快照身份变化不单独制造 stale，无关提交允许保当前证据；相关工作文件、index、HEAD、配置或只读上下文变化仍过期。返回 operation 的 canonical 阶段是当前 Git 事实投影，不写虚构持久完成状态。
 
@@ -111,17 +117,19 @@ adopt(operationId) 依 [[sync-source-adoption]] 采纳实际 settled receipt.act
 
 revert 将精确历史恢复 Spec 作为可信目标，保原节点/业务 ID 与原路径；restore 授权只能由原 settled receipt 和固定 history 请求派生。原 retired ledger 保留，新完整交付推进该身份当前有效 head，后续普通操作继续使用该 head。
 
-正式 run/verify 可传 model，首次请求默认 sol，同 requestId 省略选择及显式 retry 省略选择均继承已持久模型；改同 requestId 模型拒绝，普通重复换模型不获新预算。非默认新操作保存 sync-tools-v2/model，使旧二进制明确拒绝而不静默用 sol；新执行核运行描述与 operation 精确一致。v1 及缺模型旧 operation 保原 sol/payload/证据，恢复不能换模型。完整合同属于 [[sync-model-selection]]。
+正式 run/verify 可传 model；新原生工作树操作未选择时使用项目配置或claude:default，历史工作流仍默认sol。同 requestId 省略选择及显式 retry 省略选择均继承已持久请求选择；改同 requestId 选择拒绝，普通重复换选择不获新预算。旧非默认frozen操作保存sync-tools-v2/model，新原生操作保存sync-tools-v3；运行描述与operation的请求选择精确一致。v1及缺模型旧operation保原sol/payload/证据，恢复不能换模型。完整合同属于[[sync-model-selection]]。
 
 已存在或备份固定运行描述先核精确期望模型，再允许admission。未受理请求留下的原描述若与后续选择不符，明确早拒，不新建operation/receipt/FIFO且不静默重建；匹配原描述的合法显式retry或新请求仍沿既有入口。
 
-新手动 run/verify operation 可显式选择模型以覆盖项目默认；省略模型时，同 request 的 prior 或显式 retry 的原模型优先于当前版本化配置 `sync.model`，无 prior/retry 才使用项目值或历史默认 sol。同 request 改模型拒绝，普通重复不能用模型变化重置预算。自动观察、decide 与 revert 新 operation 从同一快照配置绑定模型，admission、固定运行描述与真实 runner request 使用相同精确值。配置变化继续由授权/configDigest/currentness 门禁处理，不重开旧操作或重置预算。
+新手动 run/verify operation 可显式选择模型以覆盖项目默认；省略模型时，同 request 的 prior 或显式 retry 的原选择优先于当前版本化配置 `sync.model`，无 prior/retry 才使用项目值或该计划的工作流默认值。自动观察、decide 与 revert 新operation采用相同判据；admission、固定运行描述与真实runner request保相同请求选择，本轮实际模型由CLI证据另行绑定。同request改选择拒绝，普通重复不能用配置变化重置预算；授权/configDigest/currentness门禁保持。
 
 Dashboard 的受控正文保存继续直接 submit，requestBlob 即时触发 spec→code，不等待 Git 提交。外部编辑器的 Spec/代码保存、原子替换与 git add 均不启动自动模型；自动观察只接受已提交 HEAD tree，首次显式 enable 可从既有 committed HEAD 发起 initial，同期未提交或未暂存的新编辑不混入。enable 仅授权已提交配置及意图，不从未提交内容建立初始输入。
 
 首次无已证明自动接入快照时以 initial 纳管当前已提交树；旧无 captureKind 的操作不能被猜作 committed 前态。后续自动输入依据该节点最近已消费的真实 commit 快照到当前输入的 tree 差量区分 spec/code/combined；停机多次提交仍按累计已提交差量分类，paused 中尚未处理的新作者变化只观察而不消费边界。相关路径取当前计划与该节点最近消费记录的精确path绑定并集，已删除路径不能仅因当前树不再列出它而失去方向；不扩大到全局源码根或无关owner。v2 plan 的 commitTrigger 冻结该 before 快照（首次 initial 为 null）及真实累计 paths，after 仍为 operation.input。它是作者提交前态而非已验证交付，不替代 receipt/baseline，也不按 HEAD^ 猜测或只保存可能被 GC 的 OID。仅提交无关路径或空提交不启动模型。code 冻结 code_to_spec、combined 冻结 combined；initial 有已提交授权实现时冻结 code_to_spec，否则与 Spec 保存相同冻结 spec_to_code。沿同一 plan/selection 规划，不复制执行器或分区政策。
 
 自动 ingress 固定到提交快照与节点，同一 commit 重放不因 baseline 或差异证据推进而重新派发；已结算 receipt/baseline 继续按真实意图消费和采纳证明消除同步自身交付/采纳提交的回声，不按 Git author 或 session trailer 猜测作者。停机提交在 service 启动及周期补偿中继续发现。新 commit 沿既有作用域、物理控制和预算族门禁，不新增触发配置开关。
+
+混合资源heads中的旧只读context不改原差异判据。仅从当前exact selection的非null pair定位其实际receipt/journal，核原source、启用配置与节点授权、全部settled journal、四层证据、实际完整scope及Git commit/tree/parent/effect，且当前HEAD/tree精确等于该完整receipt时，观察器才可沿原baseline消费接缝消除自身写回。最近已消费frontier到真实receipt parent只允许空差量，或唯一同mode普通配置文件的有效完整项目JSON变化。parent/current配置原字节摘要与mode须等于receipt原input，且当前已重新授权。完整交付已按该input冻结的配置及验证政策通过全部门禁，配置字段不另设可消费名册。未被该完整receipt逐字绑定的配置、code、业务Spec、只读docs或混合差量保原观察。外部同tree新commit不冒认receipt，同一已接入快照的重复记录仍复用既有前沿，不伪结算原外部操作。此证明复用[[sync-source-adoption]]的纯settledReceipt与[[sync-landing-status]]读取，不调用adopt写入准入、不要求物理run或无在途资源。paused观察仍健康且不派发，仅写既有observation消费证据，不新建或改写receipt、baseline、journal与业务完成状态。
 
 自动 operation 的 detail 当前性、retry、decide、resume 与运行前可信配置复核均按其 input.captureKind 采集同模式当前输入；旧无标记工作区操作保持原判据。status 的原树落地投影与 adoptionEligibility/adopt 仍读取真实工作文件及 index，未提交编辑不能因 commit snapshot 而获得覆盖或采纳资格。
 
@@ -136,4 +144,10 @@ resources-only是独立于control(recover)的显式清理入口：要求完整op
 
 正式detail/read-current与证据BFS使用同一typed checkpoint边界。raw只在强失败来源绑定后以明确untrusted_final/text/SHA投影返回，BFS不解析或追踪raw正文伪sha字段；普通JSON证据仍按原可达链读取，未知坏JSON显式失败。
 
+证据BFS复用[[sync-checkpoint-evidence]]的精确BlobRef形状，保留裸引用、带artifacts的checkpoint及其中真实引用；内联日志字节包的sha256只是原运输校验摘要，不成为CAS可达边，也不阻断后续真实JSON证据读取。查询这种未引用摘要仍返回无关证据，真正可达CAS缺失或损坏继续显式失败。
+
 旧untrusted_final缺ref时，原文sha256仅为诊断摘要，不建立CAS可达边；正式readEvidence仍可读其原JSON材料，查询该缺席raw引用返回无关证据404，不补写旧记录。
+
+正式 retryOf 也允许完整 settled 但明确未采纳的私有交付：先认证全部 receipt/候选/验证/原输入与当前来源仍干净且冻结 HEAD 不变，再在准入事务绑定父记录与全部 journal。只允许父自身 receipt 导致的相同资源 heads 推进。新操作保持原 input/request/plan/scope/原预算，省略模型保持原请求选择，显式换 requested model 仍沿既有 retry 规则且不限制 CLI 版本/baseURL/模型配置；旧操作及其 receipt 不改写；原业务 selection 由 retryOf 派生用于分析，当前 selection 只作新操作 CAS。已采纳、部分交付、未知证据、来源漂移或第三方 heads 推进拒绝。
+
+resources-only 对未发布且确证从未启动的 owned Native 候选允许显式保留式终止：通过原创建拥有权、物理登记、冻结 fork、未发布与无 generation/owner 门后，v2 preserved receipt 明确 cleanupComplete:false，原场地、分支、index、初始化锁及 prepared receipt 原样保留。正式 terminal→removed 只结算执行容量，不表示场地已删除、交付已合入/采纳或保留责任消失；同键不再创建，后续清理必须识别并继续保留该场地。未知身份、已发布或 Native 停止未证仍 recovery_required；普通 recover 的未知内容删除保护不变。此入口不新建业务操作、不修改原 pause/calls/attempt/failure、不启动模型、会话、watcher 或 queue。

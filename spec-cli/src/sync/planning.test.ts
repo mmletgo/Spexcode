@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import test from 'node:test'
@@ -12,13 +12,16 @@ import { freezeCandidate } from './candidate.js'
 import { composeInputSnapshots } from './composition.js'
 import { checkGenerationContractIntent, readFrozenContracts } from './frozen-contracts.js'
 import { migrateSyncStore } from './migrations.js'
-import { syncPlanDigest } from './coordinator.js'
+import { prepareSyncAdmission, syncPlanDigest } from './coordinator.js'
 import type { SyncCoordinatorPlan } from './coordinator-types.js'
 import { buildSyncApplicationPlan, deriveSyncBaselineResources } from './planning.js'
 import { planSyncPartitions, projectSyncPartition } from './partitioning.js'
 import { captureInputSnapshot, contentHash, readEvidence, readObject, verifySnapshot, writeEvidence } from './snapshot.js'
 import { readFrozenBehaviorContext } from '../../test/frozen-behavior-context.js'
 import { SyncStore } from './store.js'
+import { SyncApplication } from './application.js'
+import { freezeDeliveryRuntime } from './runtime-freeze.js'
+import { deliverVerifiedAttempt } from './private-delivery.js'
 import type { BaselinePair, BaselineResource, FrozenBaselineSelection, InputSnapshot, SyncScope, VerificationResultBlob } from './operation-types.js'
 import type { SyncSettings } from './settings.js'
 
@@ -46,7 +49,11 @@ async function fixture(t: test.TestContext) {
   configure(); git(root, 'init', '-b', 'main'); git(root, 'config', 'user.name', '真实政策规划夹具'); git(root, 'config', 'user.email', 'test@example.invalid'); git(root, 'add', '.'); git(root, 'commit', '-m', 'two independent versioned oracle policies')
   git(root, 'worktree', 'add', '-b', 'delivery', deliveryRoot, 'HEAD')
   const source = await captureInputSnapshot(root), delivery = await captureInputSnapshot(deliveryRoot)
-  t.after(() => rmSync(parent, { recursive: true, force: true }))
+  t.after(() => {
+    const directories = [parent]
+    while (directories.length) { const directory = directories.pop()!; chmodSync(directory, 0o700); for (const entry of readdirSync(directory, { withFileTypes: true })) if (entry.isDirectory()) directories.push(join(directory, entry.name)) }
+    rmSync(parent, { recursive: true, force: true })
+  })
   return { parent, root, source, delivery, original, other, config, configure }
 }
 
@@ -330,7 +337,7 @@ function projectedSelection(pair: BaselinePair, resources: BaselineResource[]): 
   return { ...value, digest: contentHash(JSON.stringify(value, (_key, item: unknown) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b))) : item)) }
 }
 
-async function incrementalFixture(t: test.TestContext, mode: 'independent' | 'shared' | 'dependency' = 'independent') {
+async function incrementalRepository(t: test.TestContext, mode: 'independent' | 'shared' | 'dependency' = 'independent') {
   const f = await fixture(t), rootSpec = '.spec/project/spec.md'
   const paths = [specA, specB, '.spec/third/third-contract/spec.md'].map(path => path.replace('.spec/', '.spec/project/'))
   mkdirSync(join(f.root, paths[2], '..'), { recursive: true })
@@ -349,6 +356,11 @@ async function incrementalFixture(t: test.TestContext, mode: 'independent' | 'sh
   git(f.delivery.source.canonicalRoot, 'reset', '--hard', 'main')
   const before = await captureInputSnapshot(f.root, { committed: true }), delivery = await captureInputSnapshot(f.delivery.source.canonicalRoot, { committed: true })
   const fullPlan = await buildSyncApplicationPlan(before, 'project')
+  return { ...f, rootSpec, paths, before, fullPlan, delivery }
+}
+
+async function incrementalFixture(t: test.TestContext, mode: 'independent' | 'shared' | 'dependency' = 'independent') {
+  const f = await incrementalRepository(t, mode), { before, delivery, fullPlan, rootSpec, paths } = f
   const baseline: BaselinePair = { id: 'fixture-projected-settled-baseline', repositoryId: before.source.repositoryId, source: before.source, sourceInput: before, verifiedDelivery: delivery, coveredScope: fullPlan.executionScope, receiptId: 'fixture-projection-no-store-receipt', settledAtMs: 1 }
   const heads = projectedSelection(baseline, await deriveSyncBaselineResources(before, fullPlan))
   return { ...f, rootSpec, paths, before, fullPlan, baseline, heads }
@@ -486,4 +498,114 @@ test('未治理新源码commit仍完整发现纳管，不因增量owner集合为
   const discovered = partitions.partitions.filter(partition => partition.changedPaths.includes(path))
   assert.equal(discovered.length, 1); assert.deepEqual(discovered[0].targets, [])
   assert.ok(discovered[0].readPaths.includes(path)); assert.ok(discovered[0].contextNodeIds.length)
+})
+
+
+/** 正式交付/采纳只写Spec；四门仅为明确受控前置证据，不代表真实模型/Docker验收。 */
+async function settledReadonlyRepository(t: test.TestContext, mode: 'independent' | 'shared' | 'dependency' = 'independent', omitScopePath?: string) {
+  const repo = await incrementalRepository(t, mode), f = { ...repo, root: realpathSync(repo.root), parent: realpathSync(repo.parent) }
+  git(f.root, 'switch', '-c', 'author')
+  const configPath = join(f.root, '.spec/spexcode.json'); writeFileSync(configPath, JSON.stringify({ ...JSON.parse(readFileSync(configPath, 'utf8')) as object, mainBranch: 'main', harnesses: [] }))
+  writeFileSync(join(f.root, 'src/third.js'), readFileSync(join(f.root, 'src/third.js'), 'utf8') + '\nexport const saveTasks = tasks => JSON.stringify(tasks, null, 2);\n')
+  git(f.root, 'add', '.'); git(f.root, 'commit', '-m', 'readonly storage serialization input')
+  const runtime = await freezeDeliveryRuntime(join(f.parent, 'trusted-runtime'))
+  for (const name of readdirSync(runtime.canonicalHooksDir)) { copyFileSync(join(runtime.canonicalHooksDir, name), join(f.root, '.git/hooks', name)); chmodSync(join(f.root, '.git/hooks', name), 0o755) }
+  const tools = { trustedRuntimeRoot: runtime.trustedRuntimeRoot, toolEntry: runtime.toolEntry, canonicalHooksDir: runtime.canonicalHooksDir, gitPath: '/usr/bin/git' }
+  const appRoot = join(f.parent, 'readonly-app'), protocol = openProtocol(join(f.parent, 'readonly.sqlite')); t.after(() => protocol.close())
+  const application = await SyncApplication.create(f.root, { protocol, runtimeDirectory: appRoot, tools }); await application.enable()
+  const input = await captureInputSnapshot(f.root, { committed: true }), plan = await buildSyncApplicationPlan(input, 'project', null, { direction: 'code_to_spec' })
+  if (omitScopePath) plan.executionScope.paths = plan.executionScope.paths.filter(path => path !== omitScopePath)
+  const initial = application.store.readBaselineSelection(input.source, await deriveSyncBaselineResources(input, plan)); assert.ok('selection' in initial)
+  const queued = application.store.admitAndEnqueue(await prepareSyncAdmission(input, plan, { ingressKey: 'readonly-initialization', rootCauseId: 'readonly-initialization', origin: 'initial', budget: { mode: 'unlimited' }, managedRoot: join(appRoot, 'managed'), baselineSelection: initial.selection, executionScope: plan.executionScope }))
+  const operation = application.store.ackDispatch(input.source.repositoryId, queued.dispatchMessageId)
+  writeFileSync(join(appRoot, 'artifacts', `application-runtime-${contentHash(operation.ingressKey)}.json`), JSON.stringify({ version: 'sync-tools-v1', tools, runtimeDigest: null }))
+  const claim = application.store.claimQueuedAttempt({ operationId: operation.id, source: input.source, scope: operation.scope, leaseMs: 60_000, expectedRevision: operation.revision }), composed = composeInputSnapshots(input, initial.selection).composed!
+  application.store.bindComposedInput(claim.fence, composed); application.store.startGeneration(claim.fence)
+  const specPaths = [f.rootSpec, ...f.paths]
+  const entries = verifySnapshot(input)
+  const candidate = freezeCandidate(input, { version: 'sync-files-v1', changes: specPaths.map(path => { const entry = entries.find(entry => entry.path === path)!; return { path, beforeDigest: entry.digest, beforeMode: entry.mode, content: readObject(input.source.commonDir, entry.oid).toString('utf8') + '\n初始化规格核验。\n' } }) }, operation.scope, composed)
+  application.store.freezeCandidate(claim.fence, candidate)
+  const evidence = writeEvidence(input.source.commonDir, { fixture: '受控四门，仅验证真实交付、采纳与增量资格，不代表模型/Docker产品验收' })
+  const bindings = { inputId: input.id, candidateDigest: candidate.digest, policyDigest: operation.policyDigest, readSetDigest: operation.readSetDigest, baselineSelectionDigest: operation.baselineSelection!.digest, environmentDigest: 'fixture', contextDigest: 'fixture' }
+  const result: VerificationResultBlob = { schemaVersion: 1, ...bindings, coveredScope: operation.scope, layers: (['V1', 'V2', 'V3', 'V4'] as const).map(layer => ({ layer, verdict: 'pass', evidenceRefs: [evidence] })) }
+  application.store.recordVerification(claim.fence, { ...bindings, passed: true, coveredScope: operation.scope, evidenceRefs: [evidence], resultBlob: writeEvidence(input.source.commonDir, result) })
+  const delivered = await deliverVerifiedAttempt(application.store, claim.fence, { managedRoot: join(appRoot, 'managed'), tools, beforeApply: () => {} })
+  const journal = application.store.listJournals(operation.id)[0]
+  assert.deepEqual(journal.plan.files.map(file => file.path).sort(), specPaths.sort())
+  assert.equal(journal.status, 'settled')
+  const sourceAndTests = (snapshot: InputSnapshot) => verifySnapshot(snapshot).filter(entry => entry.path.startsWith('src/') || entry.path.startsWith('tests/') || entry.path.startsWith('generated-tests/'))
+  assert.deepEqual(sourceAndTests(delivered.receipt.deliverySnapshot), sourceAndTests(input), 'code→Spec正式交付不得改变源码/tests的path、mode、OID或absence')
+  const adopted = await application.adopt(operation.id); assert.equal(adopted.sourceSynced, true)
+  const before = await captureInputSnapshot(f.root, { committed: true }), store = application.store
+  const heads = store.readBaselineSelection(before.source, store.listBaselineResources(before.source)); assert.ok('selection' in heads)
+  assert.ok(operation.scope.contractIds.length > 0)
+  for (const id of [...operation.scope.contractIds, ...operation.scope.flowIds]) assert.ok(heads.selection.bindings.some(binding => binding.resource.kind !== 'path' && binding.resource.id === id && 'intentPair' in binding && binding.intentPair))
+  for (const path of ['src/export.js', 'src/other.js', 'src/third.js']) assert.equal(heads.selection.bindings.some(binding => binding.resource.kind === 'path' && binding.resource.path === path), false)
+  return { ...f, application, protocol, store, input, before, delivered, journal, discovery: heads.selection }
+}
+
+test('真实settle/adopt只写Spec且源码无byte head，Storage型单叶commit保持三轮增量', { timeout: 90_000 }, async t => {
+  const f = await settledReadonlyRepository(t)
+  const source = readFileSync(join(f.root, 'src/third.js'), 'utf8'); writeFileSync(join(f.root, 'src/third.js'), source.replace('JSON.stringify(tasks, null, 2)', 'JSON.stringify(tasks)'))
+  git(f.root, 'add', 'src/third.js'); git(f.root, 'commit', '-m', 'storage serialization formatting only')
+  const snapshot = await captureInputSnapshot(f.root, { committed: true }), options = { discoverySelection: f.discovery, direction: 'code_to_spec' as const, commitTrigger: { before: f.before, paths: ['src/third.js'] } }
+  let selection = f.discovery
+  const allFiles = await context(snapshot, verifySnapshot(snapshot).map(entry => entry.path))
+  for (let round = 0; round < 3; round++) {
+    const plan = await buildSyncApplicationPlan(snapshot, 'project', selection, options)
+    t.diagnostic(JSON.stringify({ round, settledBusinessHeads: f.discovery.bindings.filter(binding => binding.resource.kind !== 'path').length, journalFiles: f.journal.plan.files.map(file => file.path), knownByteHeads: f.discovery.bindings.filter(binding => binding.resource.kind === 'path').map(binding => binding.resource), targets: plan.targets.map(target => target.nodeId) }))
+    assert.deepEqual(plan.targets.map(target => target.nodeId), ['third-contract'], '已经正式验证并采纳但从未写过的源码不能使完整初始化资格退回全树')
+    const partitions = planSyncPartitions({ plan, files: allFiles.files, contracts: allFiles.contracts, nodes: allFiles.nodes, changedPaths: ['src/third.js'] })
+    assert.deepEqual(partitions.partitions.flatMap(partition => partition.targets.map(target => target.nodeId)), ['third-contract'])
+    const read = f.store.readBaselineSelection(snapshot.source, await deriveSyncBaselineResources(snapshot, plan, selection)); assert.ok('selection' in read); selection = read.selection
+    const storage = selection.bindings.find(binding => binding.resource.kind === 'path' && binding.resource.path === 'src/third.js')!
+    assert.equal('bytePair' in storage ? storage.bytePair : undefined, null, '只读初始化证明不能制造文件写头')
+  }
+  assert.deepEqual(f.store.listJournals(f.delivered.operation.id)[0], f.journal, '不能回写原receipt/journal')
+})
+
+
+test('只读初始化证明不借缺失头、未采纳、源码对象或owner声明漂移取得增量资格', { timeout: 90_000 }, async t => {
+  const f = await settledReadonlyRepository(t), full = [...f.fullPlan.targets.map(target => target.nodeId)].sort()
+  const bootstrap = async (before: InputSnapshot, discovery = f.discovery): Promise<void> => {
+    const plan = await buildSyncApplicationPlan(f.before, 'project', discovery, { discoverySelection: discovery, direction: 'code_to_spec', commitTrigger: { before, paths: ['src/third.js'] } })
+    assert.deepEqual(plan.targets.map(target => target.nodeId).sort(), full)
+  }
+  await bootstrap(f.input)
+  for (const key of [`path:${f.paths[1]}`, 'contract:RULE-OTHER-05']) {
+    const rows = f.protocol.withTransaction(tx => { const rows = tx.query('SELECT source_key,resource_key,pair_id,legacy_reason FROM sync_baseline_heads WHERE resource_key=?', key); tx.exec('DELETE FROM sync_baseline_heads WHERE resource_key=?', key); return rows })
+    const read = f.store.readBaselineSelection(f.before.source, f.store.listBaselineResources(f.before.source)); assert.ok('selection' in read)
+    await bootstrap(f.before, read.selection)
+    f.protocol.withTransaction(tx => { for (const row of rows) tx.exec('INSERT INTO sync_baseline_heads(source_key,resource_key,pair_id,legacy_reason) VALUES(?,?,?,?)', row.source_key as string, row.resource_key as string, row.pair_id as string | null, row.legacy_reason as string | null) })
+  }
+  for (const change of ['content', 'mode', 'absence', 'owner_claim'] as const) {
+    const path = join(f.root, change === 'owner_claim' ? f.paths[1] : 'src/other.js'), original = readFileSync(path)
+    if (change === 'content') writeFileSync(path, Buffer.concat([original, Buffer.from('\n// prior unverified code change\n')]))
+    if (change === 'mode') chmodSync(path, 0o755)
+    if (change === 'absence') rmSync(path)
+    if (change === 'owner_claim') writeFileSync(path, original.toString('utf8').replace('code:\n', 'code:\n  - src/third.js#saveTasks\n'))
+    // 历史snapshot对象的不相容本身已足以撤销只读资格；此负例不假称新的正式提交或验证。
+    await bootstrap(await captureInputSnapshot(f.root))
+    writeFileSync(path, original); chmodSync(path, 0o644)
+  }
+  f.protocol.withTransaction(tx => tx.exec("UPDATE sync_apply_journals SET status='prepared',record_json=? WHERE id=?", JSON.stringify({ ...f.journal, status: 'prepared' }), f.journal.id))
+  const missingReceipt = f.store.readBaselineSelection(f.before.source, f.store.listBaselineResources(f.before.source))
+  assert.ok('failure' in missingReceipt); assert.equal(missingReceipt.failure.kind, 'unsupported'); assert.equal(missingReceipt.failure.code, 'SYNC_PUBLICATION_BASE_BINDING')
+  f.protocol.withTransaction(tx => tx.exec('UPDATE sync_apply_journals SET status=?,record_json=? WHERE id=?', f.journal.status, JSON.stringify(f.journal), f.journal.id))
+})
+
+test('formal owner已采纳但source不在真实verified scope时仍bootstrap', { timeout: 90_000 }, async t => {
+  const f = await settledReadonlyRepository(t, 'independent', 'src/third.js')
+  const plan = await buildSyncApplicationPlan(f.before, 'project', f.discovery, { discoverySelection: f.discovery, direction: 'code_to_spec', commitTrigger: { before: f.before, paths: ['src/third.js'] } })
+  assert.deepEqual(plan.targets.map(target => target.nodeId).sort(), f.fullPlan.targets.map(target => target.nodeId).sort())
+})
+
+test('真实只读初始化的contract依赖仍进入增量targets，无关第三叶不进入写目标', { timeout: 90_000 }, async t => {
+  const f = await settledReadonlyRepository(t, 'dependency')
+  writeFileSync(join(f.root, 'src/export.js'), readFileSync(join(f.root, 'src/export.js'), 'utf8') + '\n// real committed source change\n')
+  git(f.root, 'add', 'src/export.js'); git(f.root, 'commit', '-m', 'dependency owner source commit')
+  const snapshot = await captureInputSnapshot(f.root, { committed: true })
+  const plan = await buildSyncApplicationPlan(snapshot, 'project', f.discovery, { discoverySelection: f.discovery, direction: 'code_to_spec', commitTrigger: { before: f.before, paths: ['src/export.js'] } })
+  assert.deepEqual(plan.targets.map(target => target.nodeId), ['export-contract', 'other-contract'])
+  assert.equal(plan.targets.some(target => target.nodeId === 'third-contract'), false)
 })

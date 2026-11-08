@@ -16,7 +16,13 @@ related:
 
 ## expanded spec
 
+协调器显式启用已结算工作树回收：原请求、派发、removed checkpoint与canonical Native身份必须完全相同，当前Git须clean。completed另核不可变Git结果与output；failed/cancelled另核原停止全值、error/code及允许缺席的thread/turn身份，不要求不存在的turn。复用[[archive]]的正式close先保活archive，再归档record并回收目录/登记，保留branch、原result/checkpoint、Native历史及JSON对象。返回原成功结果或抛原失败，close失败只打印pending，不增加调用或制造批准/success/failedWorktree。已归档成功仍按原请求冷重放；已归档失败的P0/P1材料观察沿原Native/CAS/owner/schema/source/tests门临时还原同一checkout，原稿续入新seed而非从零开始，观察后复用原close的物理回收段。dirty、未知停止或身份漂移保留；removed仍只表示执行/停止资源结算，不新增持久cleanup状态。
+
+ZCode 原生工作树 native_turn_transport_failed 须绑定精确非空 thread/turn、固定 requestKey/inputDigest、canonical failed/stop 及原派发身份。正式 terminal/removed 资源保原 code/message，无成功、raw 或 Git witness。同键冷重放重验 canonical 请求和 stop，不再派发。P0 重试复用既有 Native RPC 的当前 operation、lease/control、资源全 removed、原 CAS 与 checkpoint 认证；已接受 turn 的专用 code 还须 nativeStarted 和 nativeStatus=stopped。普通失败、未知 stop 及其它阶段重试政策保持。
+
 原生错误携rejectedOutput时，仅在本资源精确record为failed、证据与错误相同且固定创建请求/schema/input/purpose/thread/turn逐项一致后，经现有blobIO保存完整被拒final原文字节，并携原文ref/SHA传回；不读取provider协议目录。原error/code/身份保持，资源停止仍走原正式结算，不因诊断取得成功或removed。旧无证据不扫描补读。
+
+真正新建的 Claude/ZCode worktree 资源在 reserveDispatch/requestDigest/plan 之前冻结 nativeConfiguration:cli-config-v1，ZCode read 工具策略独立冻结。新配置同步请求在冻结前省略各业务阶段内部默认high，让原生CLI配置决定执行强度；本桥没有用户effort入口，不用内部提示限制模型资格。已有资源及reserved请求按原完整摘要保留其effort或缺席，包括已带配置标记的原件，独立结构化API显式effort仍按原请求透传。协调器对实际持久Native原件的冷验复用同一规范化接缝，不能漏配置字段或按今天默认重签历史。已有 resource 只沿原 plan.request 的字段或缺席；仅 reserved 的冷恢复先核调用者完整请求摘要；上一代只冻结 ZCode 工具策略的请求可经原工具策略重建，但只有完整摘要精确匹配原 dispatch 才保留其原配置缺席。字段参与资源 payloadDigest 与创建 execution 哈希；不能重签旧 plan/receipt、补旧缺席或只凭 key 采纳。显式变更配置、model、source/input、prompt、schema 或 seed 仍经原完整摘要拒绝，预算和停止门禁保持。
 
 新 ZCode worktree read 资源在 requestDigest/plan 登记前冻结可选 zcodeToolPolicy，策略见 [[zcode-structured-runtime]]；已登记资源只从原 plan.request 恢复其字段或缺席，显式换策略拒绝，不能给尚无 Native session/send 的旧请求补工具控制。恢复仍完整核其余请求、原 payloadDigest 与创建哈希。worktree 与 frozen 请求统一保留业务 requestKey，并通过已有 sessionCreateKey 传递精确原创建键和已冻结语义；inputDigest 不改，NativeRunPlan schemaVersion 保持1。
 
@@ -26,7 +32,7 @@ reserveDispatch 已提交而 resource 尚未登记的冷恢复窗口同样属于
 
 模型调用 timeoutMs:null 原样进入固定请求和资源计划，取消/创建清理等待仍保持独立最多15秒预算，不能对null执行Math.min而变为零等待。精确nativeStopped与terminal→removed门禁保持。
 
-明确 ZCode 版本4只进入 [[zcode-structured-runtime]]，不准备 Codex reader catalog。新结果和已结算资源重放都核对 [[zcode-frozen-proof]] 的精确 provider/model 与原始输出，沿用同一 reserveDispatch、sessionCreateKey、完整 terminal→removed 和正式取消，不另建队列或伪装其它执行器。
+明确 ZCode 版本4只进入 [[zcode-structured-runtime]]，不准备 Codex reader catalog。新结果和已结算资源重放都核对 [[zcode-frozen-evidence]] 的精确 provider/model 与原始输出，沿用同一 reserveDispatch、sessionCreateKey、完整 terminal→removed 和正式取消，不另建队列或伪装其它执行器。
 
 执行器选择只由已冻结 model 命名空间进入 [[structured-session-runtime]]；Claude 版本3结果还核对明确 provider/model 的原生 proof，不准备 Codex reader catalog。共享资源计划、checkpoint、完整 terminal→removed、预算、sessionCreateKey 及恢复门禁保持同一份，旧已持久 Codex 请求和 proof 原样重放。
 
@@ -57,3 +63,9 @@ reserveDispatch 已提交而 resource 尚未登记的冷恢复窗口同样属于
 仅独立资源入口通过非持久runner选项禁止精确取消主动drain队列；原request/NativePlan摘要、candidate刷新与停止证明保持，普通runner和cancel默认不变。
 
 已认证rejectedOutput原文是UTF8诊断artifact，保留精确ref/SHA/text及原失败身份；它不具有JSON stage角色，即使正文可解析且伪装sync-stage-v1也不能取得阶段、候选或引用可达权限。只读恢复以原failed观察与canonical失败/后续精确cancelled停止记录核验，不把后续清理改签为原通过。
+
+已失败且 canonical record 确证 nativeStopped 的资源与成功资格分离：沿原计划/创建键、请求摘要和 session/thread/turn 重核原错误、packet 与可选 failedWorktree，再保存 failed terminal→removed；同键或 terminal 冷恢复重放原失败且不重发。failedWorktree 仍须原 request/seed、已拒 final 和不可变 Git 对象验证，不成为成功 result。Native checkpoint 保留 packet 正文/SHA，Saved round 原子发布前不授独立 raw ref 可达权；live/cold 出站错误可物化精确 ref，不能修改历史 checkpoint 或跳过 owner/round 认证。typed RPC 仅在当前 run/有效 fence、全部派发资源精确 removed、故障 request/dispatch/plan/候选与原 stop 三方一致时为协调器提供已结算资格；未知、错配、旧缺席不得推断或补签。
+
+仅既有 resourceRecoveryOnly 显式资源入口将同名非持久选项传到创建恢复，允许精确未发布候选保留场地、结算执行容量。桥严格区分 v1 cleanupComplete:true 与 v2 disposition:preserved/cleanupComplete:false，不把保留冒充删除。v2 仍核完整 session/key/payload、notStarted、无 thread/turn/nativeStarted，并冷验原私有收据摘要、物理身份与登记。原收据先进入 terminal，再 CAS 到 removed；terminal 与 removed 冷重放重核 canonical receipt，缺失、错配，或本 session 的 publication/generation、原 prepared 收据、物理登记/fork 漂移均拒绝，不重派发。其他 owner 的完整异步拥有权门在首次签发保留终止时执行；签发后另一个合法 owner 引用保留场地，不改变旧 session 永久未启动终止的事实，旧收据重放只结算旧容量，不能取消、修改或删除该 owner 及其场地。removed 仅表示执行容量，原 worktree/branch/index/锁/私有收据保留且未采纳，不能据此触发删除；原 plan、pause、callsUsed、attempt/failure 不改。普通恢复仍沿未知内容保护。
+
+已认证structured_output_format_invalid或structured_output_retries_exhausted的failedWorktree可以独立于可选rejectedOutput。live出站与removed冷重放均核原request/seed、canonical失败身份与停止、原Git对象，先failed terminal再removed；缺原文不物化raw、不合成成功。旧有raw的读取权限与缺席字段保持，新增Git资格不要求旧nullable旁证被补写。

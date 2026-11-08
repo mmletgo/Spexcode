@@ -3,8 +3,8 @@ import test from 'node:test'
 import fs, { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import crypto, { createHash, type BinaryLike, type BinaryToTextEncoding } from 'node:crypto'
 import { syncBuiltinESMExports } from 'node:module'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import os, { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { pinZCodeToolPolicy, structuredExecutionPolicy } from './session-structured-policy.js'
 import { zcodeCapability, zcodeStructuredTurn, type ZCodeStructuredExecution } from './zcode-structured.js'
@@ -34,24 +34,30 @@ test('new read defaults are frozen only at admission; old absence and explicit t
 
 test('MockNative captures exact send filtering, unchanged plan mode and permissions, v1 recovery and v2 tamper refusal', async t => {
   const directory = mkdtempSync(join(tmpdir(), 'zcode-noninteractive-')), bin = join(directory, 'bin'), cli = join(bin, 'zcode'), builtin = Buffer.from('PUBLIC_MOCK_BUILTIN')
-  mkdirSync(bin)
-  const captured = join(directory, 'captured.json'), rejectedResponse = join(directory, 'rejected-response.txt')
+  const portableTmp = join(directory, 'host-tmp')
+  mkdirSync(bin); mkdirSync(portableTmp)
+  const captured = join(directory, 'captured.json'), rejectedResponse = join(directory, 'rejected-response.txt'), control = join(directory, 'control.json')
   const script = `#!/usr/bin/env node
 const fs=require('node:fs'),rl=require('node:readline');
 if(process.argv.includes('--version')){console.log('0.17.1');process.exit(0)}
-let create,send;const response=fs.existsSync(${JSON.stringify(rejectedResponse)})?fs.readFileSync(${JSON.stringify(rejectedResponse)},'utf8'):'{}';const permissions={},out=x=>console.log(JSON.stringify(x)),turn='turn',visible=['Read','Glob','Grep','Bash','Edit','Write','NotebookEdit','ExitPlanMode'];
+let create,send;const control=fs.existsSync(${JSON.stringify(control)})?JSON.parse(fs.readFileSync(${JSON.stringify(control)},'utf8')):{};const response=fs.existsSync(${JSON.stringify(rejectedResponse)})?fs.readFileSync(${JSON.stringify(rejectedResponse)},'utf8'):'{}';const permissions={},out=x=>console.log(JSON.stringify(x)),turn='turn',visible=['Read','Glob','Grep','Bash','Edit','Write','NotebookEdit','ExitPlanMode'];
 rl.createInterface({input:process.stdin}).on('line',line=>{
 if(!/^[\\x00-\\x7f]*$/.test(line))throw Error('non-ASCII RPC wire');const p=JSON.parse(line),reply=result=>out({id:p.id,result});if(!p.method){permissions[p.id]=p.result;return}
-if(p.method==='session/create'){create=p.params;reply({session:{sessionId:create.sessionId,model:create.model}})}
+if(p.method==='session/create'){create=p.params;if(control.noCreateAck)return;reply({session:{sessionId:create.sessionId,model:create.model}})}
 else if(p.method==='session/read')reply({session:{sessionId:create.sessionId,model:create.model,status:'idle'},settings:{model:{current:create.model}},runtime:{pendingRequestIds:[]},projection:{currentTurnId:send?turn:undefined,pendingPermissions:[],activeToolCalls:[]}});
-else if(p.method==='session/send'){send=p.params;for(const toolName of visible)out({id:'permission-'+toolName,method:'interaction/requestPermission',params:{sessionId:create.sessionId,toolName,input:{file_path:'value'}}});reply({accepted:true,sessionId:create.sessionId})}
+else if(p.method==='session/send'){send=p.params;if(control.git){fs.writeFileSync('draft.json','{\"draft\":true}\\n');if(control.git==='commit'){const cp=require('node:child_process');cp.execFileSync('git',['add','draft.json']);cp.execFileSync('git',['-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','agent draft'])}}for(const toolName of visible)out({id:'permission-'+toolName,method:'interaction/requestPermission',params:{sessionId:create.sessionId,toolName,input:{file_path:'value'}}});reply({accepted:true,sessionId:create.sessionId})}
 else if(p.method==='session/events'){fs.writeFileSync(${JSON.stringify(captured)},JSON.stringify({create,send,permissions,visibleTools:visible.filter(name=>!send.toolDenylist?.includes(name))}));reply({events:[{type:'turn.started',payload:{inputId:send.inputId,queryId:send.queryId,messageId:'user'}},{type:'session.updated',payload:{providerId:create.model.providerId,modelId:create.model.modelId,toolCount:visible.length-(send.toolDenylist?.length??0)}},{type:'turn.completed',payload:{inputId:send.inputId,resultType:'success',response}}].map((e,i)=>({...e,eventId:'event-'+i,seq:i+1,sessionId:create.sessionId,turnId:turn}))})}
 else if(p.method==='session/messages')reply({messages:[{info:{id:'user',sessionID:create.sessionId,role:'user',anchor:{turnId:turn},modelSelection:create.model,semantics:{kind:'user_prompt'}},parts:[{type:'text',text:send.content}]},{info:{role:'assistant',anchor:{turnId:turn},...create.model,semantics:{kind:'assistant_response'}},parts:[{type:'text',text:response}]}],hasMore:false});
 else if(p.method==='session/close')reply({closed:true});else throw Error('unexpected RPC '+p.method);
 });
 `
   writeFileSync(cli, script); chmodSync(cli, 0o755)
-  const originalHash = crypto.createHash, originalRead = fs.readFileSync, originalExists = fs.existsSync, previousPath = process.env.PATH
+  const originalHash = crypto.createHash, originalRead = fs.readFileSync, originalExists = fs.existsSync, originalMkdtemp = fs.mkdtempSync, previousPath = process.env.PATH
+  t.mock.method(os, 'tmpdir', () => portableTmp)
+  t.mock.method(fs, 'mkdtempSync', ((...args: Parameters<typeof fs.mkdtempSync>) => {
+    if (String(args[0]).startsWith('/private/tmp/spex-zcode-tmp-')) throw Object.assign(new Error(`ENOENT: no such file or directory, mkdtemp '${String(args[0])}XXXXXX'`), { code: 'ENOENT' })
+    return originalMkdtemp(...args)
+  }) as typeof fs.mkdtempSync)
   t.mock.method(fs, 'existsSync', (path: fs.PathLike) => path === zcodeCapability.builtinPath || originalExists(path))
   t.mock.method(fs, 'readFileSync', ((path: fs.PathOrFileDescriptor, options?: unknown) => path === zcodeCapability.builtinPath ? builtin : originalRead(path, options as null)) as typeof fs.readFileSync)
   t.mock.method(crypto, 'createHash', (...args: Parameters<typeof crypto.createHash>) => {
@@ -79,6 +85,7 @@ else if(p.method==='session/close')reply({closed:true});else throw Error('unexpe
       }, workspace)
       const actual = JSON.parse(readFileSync(captured, 'utf8')) as { create: { mode: string }; send: Record<string, unknown>; visibleTools: string[]; permissions: Record<string, { decision: string }> }
       const plan = JSON.parse(readFileSync(join(root, 'plan.json'), 'utf8')) as Record<string, unknown>, send = JSON.parse(readFileSync(join(root, 'send.json'), 'utf8')) as Record<string, unknown>
+      assert.equal(dirname(String(plan.tmp)), portableTmp)
       assert.equal(actual.create.mode, kind === 'edit' ? 'build' : 'plan')
       assert.deepEqual(actual.send, { ...send, queryId: plan.queryId })
       assert.equal(plan.version, kind === 'new-read' ? 2 : 1)
@@ -92,10 +99,13 @@ else if(p.method==='session/close')reply({closed:true});else throw Error('unexpe
       assert.equal(actual.permissions['permission-ExitPlanMode'].decision, 'deny')
       assert(String(send.content).endsWith('\n\n原业务正文  '))
       assert.equal(String(send.content).includes('Do not request plan approval'), kind === 'new-read')
-      const completed = { ...execution, state: 'completed' as const, output: {}, resultDigest: createHash('sha256').update('{}').digest('hex') }, before = readFileSync(captured)
+      const completed = { ...execution, state: 'completed' as const, output: {}, resultDigest: createHash('sha256').update('{}').digest('hex') }, before = readFileSync(captured), originalPlan = readFileSync(join(root, 'plan.json'))
       const noDispatch = { onNative: async () => assert.fail('no new native'), onThread: async () => assert.fail('no new thread'), onTurn: async () => assert.fail('no new turn') }
       assert.deepEqual(await zcodeStructuredTurn(realm, kind, '原业务正文  ', completed, noDispatch, workspace), result)
       assert.deepEqual(readFileSync(captured), before, 'cold replay must not send again')
+      const replayedPlan = readFileSync(join(root, 'plan.json'))
+      assert.deepEqual(replayedPlan, originalPlan, 'cold replay must preserve the saved private tmp and plan bytes')
+      t.diagnostic(JSON.stringify({ kind, tmp: plan.tmp, savedPlanSha256: createHash('sha256').update(originalPlan).digest('hex'), replayedPlanSha256: createHash('sha256').update(replayedPlan).digest('hex') }))
       if (kind === 'new-read') for (const [file, corrupt] of [
         ['plan.json', { ...plan, toolDenylist: ['ExitPlanMode', 'Bash'] }],
         ['plan.json', { ...plan, version: 1 }],
@@ -124,7 +134,8 @@ else if(p.method==='session/close')reply({closed:true});else throw Error('unexpe
           const result = await runStructuredSession({ ...request, ...(historical ? { sessionCreateKey: request.requestKey } : {}) })
           const record = readRecord(result.sessionId)!, state = record.structuredExecution!
           assert.deepEqual(state.zcodeToolPolicy, historical ? undefined : tools)
-          assert.equal(state.zcodeNative?.version, historical ? 1 : 2)
+          assert.equal(state.nativeConfiguration, historical ? undefined : 'cli-config-v1')
+          assert.equal(state.zcodeNative?.version, historical ? 1 : 3)
           assert.equal(state.resultWorktree?.tree, worktree.tree)
           const actual = readFileSync(captured), createHash = record.createPayloadHash
           assert.deepEqual(await runStructuredSession(request), result)
@@ -157,7 +168,8 @@ else if(p.method==='session/close')reply({closed:true});else throw Error('unexpe
             assert.deepEqual(readFileSync(captured), beforeInvalid)
             const run = createAttemptRunner(store, claim.fence, { pollMs: 2 }), result = await run(request), record = readRecord(result.sessionId)!
             assert.deepEqual(record.structuredExecution!.zcodeToolPolicy, tools)
-            assert.equal(record.structuredExecution!.zcodeNative!.version, 2)
+            assert.equal(record.structuredExecution!.nativeConfiguration, 'cli-config-v1')
+            assert.equal(record.structuredExecution!.zcodeNative!.version, 3)
             assert.deepEqual(JSON.parse(readFileSync(captured, 'utf8')).send.toolDenylist, ['ExitPlanMode'])
             const original = readFileSync(captured), creationHash = record.createPayloadHash
             assert.deepEqual(await createAttemptRunner(store, claim.fence, { pollMs: 2 })(request), result)
@@ -165,6 +177,40 @@ else if(p.method==='session/close')reply({closed:true});else throw Error('unexpe
             assert.equal(readRecord(result.sessionId)!.createPayloadHash, creationHash)
             assert.equal(store.readOperation(operation.id).callsUsed, 1)
           } finally { protocol.close() }
+        })
+        await creation.test('real 10 second create timeout consumes exact stop and releases the creation slot', async () => {
+          rmSync(captured, { force: true }); writeFileSync(control, JSON.stringify({ noCreateAck: true }))
+          const request = { ...read, root: repository, prompt: 'Return JSON.', requestKey: `timeout-${directory}`, worktree }
+          const started = Date.now()
+          await assert.rejects(runStructuredSession(request), { code: 'native_rpc_timeout', message: 'ZCode native RPC timeout (session/create)' })
+          assert(Date.now() - started >= 10000, 'the production RPC deadline remains exactly 10 seconds')
+          const state = readRecord(sessionIdForCreateKey(request.requestKey))!.structuredExecution!
+          assert.equal(state.state, 'failed'); assert.equal(state.cancellation?.nativeStopped, true)
+          assert.equal(state.output, undefined); assert.equal(state.rejectedOutput, undefined); assert.equal(state.failedWorktree, undefined)
+          assert.equal(fs.existsSync(captured), false, 'create without ACK never sends the model request')
+          await assert.rejects(runStructuredSession(request), { code: 'native_rpc_timeout' })
+          assert.equal(fs.existsSync(captured), false, 'same key cannot resend')
+          rmSync(control)
+          const next = await runStructuredSession({ ...request, requestKey: `after-timeout-${directory}` })
+          assert.deepEqual(next.output, {}, 'maxActive=1 slot is available to the next distinct request')
+        })
+        for (const action of ['commit', 'dirty'] as const) await creation.test(`failed native stage Git witness remains advisory: ${action}`, async () => {
+          writeFileSync(control, JSON.stringify({ git: action })); writeFileSync(rejectedResponse, '{"bad":true}')
+          const request = { ...read, root: repository, schema: { type: 'object', required: ['summary'], properties: { summary: { type: 'string' } }, additionalProperties: false }, prompt: 'Commit draft and report summary.', requestKey: `failed-git-${action}-${directory}`, worktree: { ...worktree, mode: 'edit' as const } }
+          let original: unknown
+          await assert.rejects(runStructuredSession(request), error => { original = error; assert(error instanceof Error && 'code' in error); assert.equal(error.code, 'structured_output_format_invalid'); return true })
+          const state = readRecord(sessionIdForCreateKey(request.requestKey))!.structuredExecution!
+          assert.equal(state.state, 'failed'); assert.equal(state.cancellation?.nativeStopped, true)
+          assert.equal(state.rejectedOutput?.text, '{"bad":true}'); assert.equal(state.output, undefined); assert.equal(state.resultWorktree, undefined)
+          if (action === 'commit') {
+            assert(state.failedWorktree); assert.notEqual(state.failedWorktree.headCommit, worktree.baseCommit)
+            assert.equal(execFileSync('git', ['-C', state.failedWorktree.worktreePath, 'show', `${state.failedWorktree.headCommit}:draft.json`], { encoding: 'utf8' }).trim(), '{"draft":true}')
+            assert.deepEqual((original as { failedWorktree: unknown }).failedWorktree, state.failedWorktree)
+          } else assert.equal(state.failedWorktree, undefined, 'invalid Git never replaces the original format failure or publishes a witness')
+          const before = readFileSync(captured)
+          await assert.rejects(runStructuredSession(request), error => { assert(error instanceof Error); assert.equal(error.message, (original as Error).message); return true })
+          assert.deepEqual(readFileSync(captured), before)
+          rmSync(control); rmSync(rejectedResponse)
         })
         await creation.test('authenticated rejected final bytes survive real record and resource bridge into the next owner request', async rejected => {
           const { openProtocol } = await import('@spexcode/session-protocol'), { migrateSyncStore } = await import('./sync/migrations.js'), { SyncStore } = await import('./sync/store.js')
@@ -181,7 +227,7 @@ else if(p.method==='session/close')reply({closed:true});else throw Error('unexpe
               const scope = { paths: [], contractIds: [`rejected-${kind}`], flowIds: [] }
               const operation = store.admitAndEnqueue({ ingressKey: `rejected-${kind}`, rootCauseId: `rejected-${kind}`, origin: 'spec', model: read.model, input, scope, budget: { maxCalls: 2, maxAttempts: 1, maxRepairs: 0, timeoutMs: 60000 }, policyDigest: `rejected-${kind}`, impactDigest: 'impact', readSetDigest: 'read', delivery: null, deliveryPlan: { canonicalRoot: join(repository, `delivery-${kind}`), branch: `delivery-${kind}`, baseCommit: input.headCommit } })
               const claim = store.claimAttempt({ operationId: operation.id, source: input.source, scope, leaseMs: 30000, expectedMessageId: operation.dispatchMessageId })
-              const snapshot = { root: repository, requestKey: `rejected-${kind}-first`, intent: { nodeId: `rejected-${kind}`, rawSource: '返回固定文本。' }, targets: [{ nodeId: `rejected-${kind}`, path: `.spec/rejected-${kind}/spec.md`, source: null, sourceDigest: null }], worktree, model: read.model, implementationWritePaths: [], maxRepairs: 0 }
+              const snapshot = { root: repository, requestKey: `sync:${claim.attempt.id}:elaborate`, intent: { nodeId: `rejected-${kind}`, rawSource: '返回固定文本。' }, targets: [{ nodeId: `rejected-${kind}`, path: `.spec/rejected-${kind}/spec.md`, source: null, sourceDigest: null }], worktree, model: read.model, implementationWritePaths: [], maxRepairs: 0 }
               const bridge = createAttemptRunner(store, claim.fence, { pollMs: 2 })
               let originalRequest: Parameters<typeof runStructuredSession>[0] | undefined
               const runner: typeof bridge = async request => { originalRequest ??= request; return bridge(request) }
@@ -196,6 +242,26 @@ else if(p.method==='session/close')reply({closed:true});else throw Error('unexpe
               const record = readRecord(failed.failure!.sessionId!)!
               assert.equal(record.structuredExecution!.state, 'failed')
               assert.equal(record.structuredExecution!.output, undefined)
+              assert.equal(record.structuredExecution!.resultWorktree, undefined)
+              assert.equal(record.structuredExecution!.cancellation?.nativeStopped, true)
+              assert.equal(record.structuredExecution!.failedWorktree?.tree, worktree.tree)
+              assert.equal(store.listRecoverableResources().length, 0)
+              const beforeReplay = readFileSync(captured)
+              assert(originalRequest)
+              await assert.rejects(createAttemptRunner(store, claim.fence, { pollMs: 2 })(originalRequest), error => {
+                assert(error instanceof Error && 'failedWorktree' in error && 'rejectedOutput' in error)
+                assert.deepEqual(error.failedWorktree, record.structuredExecution!.failedWorktree)
+                assert.equal((error.rejectedOutput as { text: string }).text, text)
+                return true
+              })
+              assert.deepEqual(readFileSync(captured), beforeReplay)
+              const { syncCheckpointArtifacts } = await import('./sync/checkpoint-evidence.js'), { writeEvidence } = await import('./sync/snapshot.js'), { SyncApplication } = await import('./sync/application.js')
+              const { contracts: _contracts, graph: _graph, coverage: _coverage, ...saved } = failed
+              const resultRef = writeEvidence(input.source.commonDir, saved)
+              store.checkpoint(claim.fence, { ...writeEvidence(input.source.commonDir, { version: 'sync-stage-v1', operationId: operation.id, attemptId: claim.attempt.id, inputId: input.id, policyDigest: operation.policyDigest, stage: 'diagnostic', resultRef }), artifacts: syncCheckpointArtifacts(saved, resultRef) })
+              const app = await SyncApplication.create(repository, { protocol, runtimeDirectory: join(directory, `formal-${kind}`) })
+              await app.readOperation(operation.id)
+              assert.equal((await app.readEvidence(operation.id, round.rejectedOutput.ref) as { text: string }).text, text)
               assert(originalRequest)
               const rejoin = () => runStructuredSession({ ...originalRequest!, sessionCreateKey: store.readAttempt(claim.attempt.id).dispatchPlans[0].sessionCreateKey })
               const beforeRejoin = readFileSync(captured)

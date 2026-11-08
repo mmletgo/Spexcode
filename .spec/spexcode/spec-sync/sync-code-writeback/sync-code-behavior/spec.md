@@ -12,9 +12,27 @@ related:
 
 ## expanded spec
 
+loadMaterial可返回异步材料，派发前await既有停止材料认证与正式归档checkout的临时恢复/观察/回收；恢复不启动Native。空材料按原逻辑继续，原Git/JSON字节与errors/repairDiagnostics不变，不能把关闭目录变成清空原稿的理由；原真实性、schema、保护面和批准门保持。
+
+P0的精确ZCode `session/events` typed RPC已结算失败在原公开完成/idle/close/stop及完整正常Git单稿证据通过后，沿[[sync-coordinator]]既有git_draft材料接缝只续入原未批准bytes、原请求完整errors/repairDiagnostics和本次精确typed RPC错误；原诊断顺序保持，已有相同RPC错误不再追加；不以公开完成事件替代模型final、readyAnalysis、独审或候选批准，不进入物理草稿分支，不补写旧continuation/Native原件。原owner、阶段schema/上下文、来源排序及当前fence保护保持。
+
+physical_draft是已认证停止owner工作树的未批准物理JSON材料，提示明确未提交、不是历史Git稿或Native final。仅其原bytes进入当前seed；沿同一来源保完整errors与repairDiagnostics（和本轮诊断逐对象合并），不覆盖较新认证Git稿，也不清除review的原ready分析。未使用此材料的已有请求诊断序列/字节保持，业务inputDigest、accepted早退及正常clean提交/JSON/schema/独审门不变。
+
+旧contextTransport缺席的程序草稿请求，readCodeBehaviorContext只读其精确draft/schema路径与固定说明绑定的冻结诊断尾段。线性扫描JSON字符串转义及数组层级确定原errors边界，再核精确本轮修复诊断分隔符与完整JSON数组到EOF；字符串中的中文标记、括号、换行和嵌套对象不参与分段。返回原errors/repairDiagnostics完整对象，显式空数组保持为空；缺损、重复、错路径或非数组明确拒绝，不抽取模型正文或猜字段。非draft内联请求无该程序段时保持无草稿诊断语义。生成prompt、saved字节、业务inputDigest、accepted早退、Native schema/parser及writer26版本均不改；git-json-v1仍沿原Git指针认证。
+
+新P0首次冻结阶段协议时可显式绑定contextTransport:git-json-v1；只有既有behavior-draft-protocol对象与code_behavior派发均缺席时才选择，旧对象字段缺席及全部saved/reserved请求按原prompt/tree/schema字节恢复，不补字段。分析与独审沿同owner/purpose的只读.context.json完整保存task、repairDiagnostics及原具体errors，独审另含完整pendingAnalysis（analysisDigest、analysis、newNodeProposals），不同拒因、旧JSON与findings均不截断或丢弃。prompt仅引用精确路径/SHA及原业务digest并保任务责任、直接相关Spec和自由仓库读取说明；临时context/schema不是业务checkedPaths。context与schema同seed只读，真实diff含其修改即拒绝。业务inputDigest/analysisDigest、原business worktree与accepted早退不含运输overlay，旧已审缓存仍沿完整原绑定承接；新prompt/seed另使Native requestDigest变化。材料冷验从完整冻结请求的真实Git tree读取显式context指针并核路径/SHA/任务身份，损坏明确拒绝，不信任宿主文件或fallback猜测。loadMaterial仍接原运输前语义，文件与旧inline只在既有材料比较接缝归一，不替历史请求改签。该运输改善不宣称已证明provider EPIPE根因或修复。
+
+P1精确后置门禁可对已审refactor分类提出非权威回审：只接同operation、原输入/组合/读取及计划绑定的已结算拒绝round，finding须命中原refactor的affectedIds与其真实changedPaths治理owner。原analysisRef及原分析、P1 resultRef/candidateDigest、完整finding、匹配原beforeDigest的真实旧/新业务行与代码差量一并进入postGateReview。该语义质疑参与新的分析inputDigest，使旧accept及readyAnalysis不跨质疑承接；真实Agent重新analyze并由独立Agent审查，可改判allowed_change，也可维持refactor要求P1恢复错误改写。程序不改kind、不采纳被拒候选为事实或raw，不扩AC/VERIFY/生命周期授权。认证原Git分析稿仅按原bytes迁为本轮临时材料，明确来源且不继承已校验资格；旧只读成功Native输出须沿原完整请求、schema、seed、trace及completed资源认证后才迁为临时JSON，不能伪造历史Git稿。
+
+新Native P0在本attempt尚无code_behavior派发时显式冻结code-behavior-draft-v1；已有reserved/read请求不补协议。分析与独审共用[[sync-stage-worktree]]的真实Git临时JSON草稿：每个owner与purpose独立路径，业务schema作为同seed只读sidecar，只有该草稿可正常提交；业务JSON只写入Git草稿，Native final只返回符合`DRAFT_RECEIPT_SCHEMA`的单一JSON对象，形如`{"summary":"..."}`，前后不附说明或Markdown代码围栏。程序先保活原blob再解析JSON及验证精确schema；syntax/schema错误和原bytes留在原Git证明中，下一attempt沿同input/readSet/selection/partition/schema/owner接线，只overlay原字节到当前真实seed，不在prompt重答正文，不将失败材料升格为raw、事实、批准或业务候选。repairDiagnostics仍绑定真实prompt/request，但不改变该协议的业务inputDigest；输入、schema、seed与原正常提交身份继续核验。
+
+分析通过程序语义门后保留其draft OID/resultCommit及原请求ref、summary回执与真实Native trace；独审格式/schema、摘要/独立身份绑定、检查路径或change.id覆盖/重复错误时，在同业务输入重验该原分析并只续原review文件，保留原JSON/schema字节与Git身份及完整拒因，重新开启独立审查，不重做analyze。先核独审绑定与完整范围，再解释verdict/findings；范围或绑定不合格的repair仍只续审，不能据其未绑定业务结论改分析。完整合法独审的业务repair/非空findings或后置语义拒绝清除该续审资格，回原分析草稿修复并重新独审，旧review不作为新分析的草稿。独审仍须原摘要、changedPaths/change.id完整覆盖、独立session/thread与空findings accept；任何原accept均不因续修成为批准。旧Native只读格式失败仅在authenticateNativeRejectedFinal核原请求、精确schema/input/owner和已停止removed资源后，才可将认证CAS原bytes/errors作为下一seed临时输入材料；provenance保原Native plan/checkpoint，不伪造旧Git稿，新Agent正常提交后才形成新Git身份。缺少精确旧schema/input的材料不跨绑定复用，旧已审结果不被追补草稿协议。
+
 新native-worktree操作的P0使用真实composed seed（含UI受控raw差量），以保活私有commit暴露明确的历史角色投影，代理自由读取仓库及git show角色ref。提示只含真实changedPaths、相关Spec、作者需求差量、历史角色refs、授权/不可改oracle、必要事实和诊断，不发送完整frozen树或bodyRef账本；resolutions独审以实际整合候选tree作为seed。inputDigest绑定完整逻辑输入与实际可见tree，dispatch另绑定prompt/schema；异树不得复用。readPaths是责任投影，checkedPaths可含实际存在且非host-private的自由读取文件；事实仍核真实代码、partition.factSourcePaths及原业务授权，changedPaths/所有变化与独审覆盖仍严格。新工作树不要求optional/required逐字Native消费proof；下文bodyRef、reader与完整覆盖证明规则只用于无工作流标记的旧操作/单测，原旧请求及proof不改写。
 
-分区 proposal.changes.paths 必须逐项属于该冻结 partition.changedPaths；可读 factSourcePaths、readPaths 与未来 writePaths 不等于实际变化。独审前按同一精确集合拒绝越界内容，以 behavior_analysis_invalid 保留 partitionId、expectedChangedPaths、invalidPaths 和完整原 proposal，沿既有按区 repairDiagnostics 反馈；不批准越界或新增权限。guidanceContractVersion v6 同时约束生成与独审并进入唯一输入摘要，旧v5及更早/无版本accept不被新请求缓存承接。原后置 partition_binding 及 immutable plan/ref/digest/fence 门禁保持。
+独审checkedPaths沿原仓库路径语法、host-private、legacy readPaths与真实readablePathSet判据校验，不改变允许集合。review路径校验完成整批遍历后，`invalidPaths`按输入顺序列出全部拒绝项，错误文本逐项保留原拒因和完整路径，并说明checkedPaths必须填写实际文件的仓库根相对路径、不带git/tree/commit前缀。该错误仍以`behavior_analysis_invalid`走review-only续审接缝，保留readyAnalysis与原review草稿，只重试独审；不strip、归一化或补写路径、不放宽任何路径门，普通分析的单项诊断保持原样。
+
+分区本次分析路径由原 partition.changedPaths 联合完整不可变组合证据中、精确命中本区 source/factSourcePaths、writePaths 或 target 文件角色且可读取的真实冲突推导；shared readPaths 和宽目录授权不授予 owner，单独的可读角色、未来 writer 也不制造实际变化。proposal.changes.paths 必须逐项属于该本次冻结集合，resolution 仍须满足原精确写权限。独审前按同一集合拒绝越界内容，以 behavior_analysis_invalid 保留 partitionId、expectedChangedPaths、invalidPaths 和完整原 proposal，沿既有按区 repairDiagnostics 反馈。局部只要求自身组合冲突的整合或具体业务发现；原完整全局证据由 [[sync-partition-execution]] 在最终合并逐项闭合。guidanceContractVersion v7 同时约束生成与独审并进入唯一输入摘要，旧v6及更早/无版本accept不被新请求缓存承接；已有reserved请求、旧分析/计划/ref和全部旧CAS原字节不回填或改签，摘要不匹配沿现有固定请求门拒绝，正式新attempt才形成新请求。原输出schema、partition_binding及写权限门禁保持。
 
 Native worktree分区分析brief复用本区业务约束：每个facts.source只给一个完整text；newNodes只能来自本区unownedSourcePaths和本次schema候选，候选为空或maxItems为0时返回[]；Root/接口分区不能替兄弟源码分区提出叶。此提示不收窄Native worktree自由读取，也不要求frozen-reader或逐字消费证明。
 
@@ -86,6 +104,8 @@ raw/shared prose 的 broad affected closure只保证完整路径进入分析，�
 
 冻结文本视图直接消费 [[sync-input-snapshot]] 同次批量读取中已核对 OID 的完整原字节，不在摘要读取后为每个 blob 再启动 Git。输出路径顺序、全文和摘要保持与逐对象读取一致；readPaths、symlink mode、host-private 和 UTF-8/二进制过滤保持原判据，不截断、不跨调用缓存，也不改变后续作者差量或独审语义。单次 `analyzeCodeBehavior` 的冻结输入准备阶段按同一 `commonDir` 与完整 tree OID 复用已通过 `readTree/onObject` 校验的全量entries和授权 `FrozenFile`；不同 tree 不混用，每个快照角色保持独立Map及必要对象副本，selection/受控替换只改变对应角色。复用仅覆盖本次冻结装配及其作者/交付差量树读取，不扩展 `readPaths`；路径顺序、mode、全文、UTF-8/BOM/CRLF、binary与symlink编码保持逐角色旧语义。函数本地缓存最后一次装配后立即清空，且在首个Native派发前释放；所有 `verifySnapshot`、OID校验、授权、后置归属和独审门保持原样，下一次调用仍重新验证Git对象并拒绝缺失或损坏的对象。
 
+Native worktree 的事实来源集合仍覆盖完整不可变 source tree 中非 host-private 的 UTF-8 普通文件，不按 readPaths 收窄；直接使用该次 readTree/onObject 已核对 OID 的原字节判定，不在全树批读后再逐 blob 启动 Git。symlink、非 UTF-8 与私密路径排除、分区 factSourcePaths 及后续事实授权门保持。
+
 冻结上下文中的 nonTextFiles 保留授权路径的完整非文本 Git 对象，按 path/mode/OID 去重并列出真实所属快照及 digest、kind、encoding、content；binary 以完整 base64 表示，symlink 仅保存链接 blob 的目标字节（有效 UTF-8 否则 base64），永不跟随宿主目标。精确 selection 的真实pair中base/delivery null同步表示对象缺席，不借当前HEAD伪造已验证旧全文；无pair时仅oldSource保留真实旧来源对象，verifiedDelivery仍缺席。受控 before/source 及 intent artifact 同样按真实对象投影。readablePaths 的 nonTextFiles.快照名只指向这些完整 payload，元数据和链接目标路径本身仍不能冒充目标正文；真实非文本变化、删除和 requiredChangedPaths/changes/checkedPaths 覆盖保持，不通过过滤非文本消除缺口。所有字节先经原 Git OID 核验，readPaths 与 host-private 边界保持；原文本视图只含真实 UTF-8 普通文件。完整字节可读不等于已理解图片或 wheel 业务含义，raw 真实依赖而不可解释的语义仍须具体 GAP，不自动改成 allowed_change 或产生业务批准。
 
 冻结输入显式给出真实 snapshotTree，并保留 composed.tree 身份。相同 Git 树只证明对应路径的对象字节及 mode 相同，不证明语义相容或业务通过。分析不得编造输入/工具未提供的 hash、AST 或执行校验证据，不把手工重抄、转义或反转义片段的推算冒称冻结原对象校验；真正不可解释且原意依赖的语义继续保留具体 GAP，完整独审与后续门禁不变。
@@ -120,3 +140,5 @@ v2 分区执行携带显式 partition.id/changedPaths；分析及独审仅对本
 首次纳管或changedPaths/requiredChangedPaths纳入仅表示覆盖任务，不意味着Spec作者原意已变或必须返回全文。逐路径核作者基准、oldSource/newSource/composed及真实verifiedDelivery；当Spec正文同字节、交付缺席或同字节、authorChanges无该路径且没有未消费语义残差、overlap.conflict或明确受控裁决/生命周期授权时，分析返回空resolutions，不重抄、格式化或转义Spec，也不在分析阶段扩规格。详细契约交P1，renderer复制冻结raw。独审同样不把该空输出判为遗漏；真实差量、相容重叠、逐ID语义残差及明确裁决仍要求精确完整整合并按原raw字节来源、独审与权限门禁验证。
 
 行为指导合同以guidanceContractVersion显式进入同一冻结context及唯一inputDigest；指导职责变化使旧无该版本的已审analysis不匹配，必须重新分析与独审，不改source input/policy或旧ref/findings。Native worktree分析和独审共用短业务语义：raw、冻结源码与完整测试可核实行为、但缺少治理叶/稳定ID/FLOW/AC/覆盖映射时，以facts与newNodes交P1，不将治理缺席单独报coverage_gap；真正coverage_gap须指出仍未决的重大业务事实/政策及可观察后果，conflict仅用于原意与真实外部行为不可同时成立。未违背既有REQ的表示形式、错误名、参数类型、序列化及语义等价顺序可沿合法code事实与REQ沿用；明确原意下的实现/测试缺陷不是业务GAP，只能在原写权允许时交P2修复，readonly code_to_spec缺口保留readonly_implementation_gap。独审遇到只由待生成治理工作造成的GAP必须repair；真实业务未知仍保留。此指导不以字符串匹配自动重分类，不收窄Native自由读取或改变既有ID、权限、AC及unbound门。
+
+已有认证draft不屏蔽更晚正式停止执行的最新Git观察。材料选择携当前draft作瞬态参数，仅当原正常Native/注入trace认证定位到该draft来源，暂停资源在既有retry来源顺序中严格更晚、原seed与当前业务树除本owner临时稿/schema外全部对象相同，且所有原材料门槛仍过时，才复制其最新正常Git正文到新seed。更老暂停、未知来源、不同起点及普通Native/material fallback不能覆盖已有draft；无更晚可救稿则保持原draft、错误与标签，不继承批准。该参数不进入业务摘要、旧请求或持久协议。

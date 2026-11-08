@@ -1,13 +1,18 @@
 import { Ajv } from 'ajv'
-import { candidateReviewError, candidateReviewSchema, CANDIDATE_REVIEW_INSTRUCTIONS } from './candidate-review.js'
+import { isDeepStrictEqual } from 'node:util'
+import { candidateReviewError, candidateReviewLocationError, candidateReviewSchema, CANDIDATE_REVIEW_INSTRUCTIONS } from './candidate-review.js'
 import type { CandidateReviewBinding } from './candidate-review.js'
 export { GENERATION_REVIEW_SCHEMA } from './candidate-review.js'
 import type { Contract } from '@spexcode/spec-core/contracts'
 import { parseContract } from '@spexcode/spec-core/contracts'
 import { relationClaimsPath } from '@spexcode/spec-core'
-import { importStageChanges, overlayStageTree, stageWorktree, STAGE_READING_INSTRUCTIONS } from './stage-worktree.js'
+import { assertRejectedOutput, StructuredSessionError } from '../session-structured-policy.js'
+import { nativeWorktreePrompt } from '../native-worktree-runtime.js'
+import type { NativeRunCheckpoint, NativeRunPlan } from './native-run.js'
+import { captureStageDraft, readStageDraft, importStageChanges, overlayStageTree, stageWorktree, STAGE_READING_INSTRUCTIONS } from './stage-worktree.js'
 import { CANDIDATE_RESPONSE_SCHEMA, freezeCandidate, isHostPrivatePath, verifyCandidate } from './candidate.js'
 import type { CandidateChanges } from './candidate.js'
+import type { StageDraftBinding } from './stage-worktree.js'
 import { isUtf8Text } from './composition.js'
 import type { CandidateRef } from './operation-types.js'
 import type { ElaborationSessionRequest, ElaborationSessionResult } from './elaboration-types.js'
@@ -78,9 +83,13 @@ export function contractOmissionBound(finding: GenerationFinding, contracts: rea
   return finding.kind === 'repair' && finding.ruleLocation.startsWith('contract-omission:') && extra === undefined && finding.affectedIds.includes(id) && contracts.some(contract => contract.path === path && contract.items.some(item => item.id === id))
 }
 
-export function reviewError(input: GenerationInput, review: GenerationReview, binding: CandidateReviewBinding): string | null {
+export function reviewError(input: GenerationInput, review: GenerationReview, binding: CandidateReviewBinding, candidateContracts?: readonly Contract[], specWritePaths?: readonly string[]): string | null {
   const commonError = candidateReviewError(review, binding)
   if (commonError) return commonError
+  if (input.nativeWorktree && specWritePaths !== undefined) {
+    const error = candidateReviewLocationError(review, candidateContracts ?? input.elaboratedSpecs.flatMap(spec => parseContract({ ...spec, nodeId: spec.path.split('/').at(-2)! }).contract ?? []), specWritePaths)
+    if (error) return error.message
+  }
   for (const finding of review.findings.filter(finding => finding.ruleLocation.startsWith('contract-omission:'))) {
     if (review.verdict !== 'repair' || !contractOmissionBound(finding, input.contracts)) return '契约遗漏必须以contract-omission精确绑定已审Spec路径、关联既有ID及affectedIds，并仅用于repair'
   }
@@ -134,7 +143,7 @@ function generationRequest(input: GenerationInput, inputDigest: string, purpose:
 }
 
 /** 从实际候选构造唯一独审请求；历史校验只恢复旧requestKey，不改变其余输入。 */
-export function generationReviewRequest(input: GenerationInput, candidate: CandidateRef, reviewOnly = true) {
+export function generationReviewRequest(input: GenerationInput, candidate: CandidateRef, reviewOnly = true, specWritePaths?: readonly string[]) {
   frozenEntries(input)
   const { inputDigest, context, partitionReading, priorRole } = freezeGenerationInput(input)
   const changed = JSON.parse(readEvidence(input.snapshot.source.commonDir, candidate.actualDiffBlob).toString()) as { path: string; preDigest: string | null }[]
@@ -150,9 +159,53 @@ export function generationReviewRequest(input: GenerationInput, candidate: Candi
     request.base = request.worktree.baseCommit
     request.prompt = `${STAGE_READING_INSTRUCTIONS} 独立审查当前工作树中的完整实际候选，沿调用方、完整测试断言与相关Spec重走义务；不采用构建者总结。只读，不修改文件。${CANDIDATE_REVIEW_INSTRUCTIONS}\n任务:\n${JSON.stringify(generationBrief(input))}\n候选绑定:\n${JSON.stringify({ inputId: input.snapshot.id, candidateDigest: candidate.digest, requiredIds: input.readyIds, actualIds: reviewBinding.actualIds, originalTree: candidate.baseTree, candidateTree: candidate.tree, changedPaths: changed.map(change => change.path) })}`
   }
-  return { request, binding: reviewBinding, candidateFiles }
+  let draftBinding: StageDraftBinding | undefined
+  if (input.reviewRepair) {
+    const commonDir = input.snapshot.source.commonDir
+    const prior = JSON.parse(readEvidence(commonDir, input.reviewRepair.resultRef).toString()) as GenerationResult
+    const native = JSON.parse(readEvidence(commonDir, input.reviewRepair.nativePlanRef).toString()) as NativeRunPlan
+    const checkpoint = JSON.parse(readEvidence(commonDir, input.reviewRepair.checkpointRef).toString()) as NativeRunCheckpoint
+    const packet = checkpoint.failure?.rejectedOutput
+    if (prior.reviewPassed || prior.candidate?.digest !== candidate.digest || !prior.candidateValidated || prior.inputDigest !== native.request.inputDigest || native.request.purpose !== 'code_review') throw new StructuredSessionError('stale_result', 'review repair differs from its original candidate/request')
+    let text: string, error: { code: string; message: string }, trace: unknown
+    if (prior.reviewOutput !== null) {
+      const originalTrace = prior.traces.find(trace => trace.purpose === 'code_review')
+      const schemaError = candidateReviewError(prior.reviewOutput, reviewBinding)
+      if (schemaError) throw new StructuredSessionError('stale_result', schemaError)
+      const locationError = candidateReviewLocationError(prior.reviewOutput as GenerationReview, [...candidateFiles].filter(([path]) => path.startsWith('.spec/') && path.endsWith('/spec.md')).flatMap(([path, source]) => parseContract({ nodeId: path.split('/').at(-2)!, path, source }).contract ?? []), specWritePaths)
+      if (!originalTrace || locationError?.code !== 'review_location_format' || checkpoint.status !== 'completed' || checkpoint.phase !== 'removed' || !checkpoint.result || checkpoint.result.sessionId !== originalTrace.sessionId || checkpoint.result.threadId !== originalTrace.threadId || checkpoint.result.turnId !== originalTrace.turnId || checkpoint.result.resultDigest !== originalTrace.resultDigest || originalTrace.inputDigest !== prior.inputDigest || originalTrace.resultDigest !== contentHash(JSON.stringify(prior.reviewOutput)) || JSON.stringify(checkpoint.result.output) !== JSON.stringify(prior.reviewOutput)) throw new StructuredSessionError('stale_result', 'review draft material differs from authenticated completed Native output')
+      if (!request.worktree) throw new StructuredSessionError('unsupported', 'review draft repair requires the original native worktree workflow')
+      text = JSON.stringify(prior.reviewOutput); error = locationError; trace = originalTrace
+    } else {
+      if (!prior.failure || prior.review !== null || !packet || prior.failure.requestKey !== native.request.requestKey || prior.failure.inputDigest !== native.request.inputDigest || checkpoint.failure?.code !== prior.failure.code || checkpoint.failure.message !== prior.failure.message) throw new StructuredSessionError('stale_result', 'review repair differs from its original failed candidate/request')
+      assertRejectedOutput(packet, native.request.worktree ? nativeWorktreePrompt(native.request.prompt, native.request.worktree) : native.request.prompt, native.request, prior.failure)
+      text = packet.text; error = { code: checkpoint.failure.code, message: checkpoint.failure.message }; trace = { failure: prior.failure, packet: { ...packet, text: undefined } }
+    }
+    if (request.worktree) {
+      const ownerDigest = input.reviewRepair.resultRef.sha256, path = `.spex-sync-drafts/${ownerDigest}.json`, schema = JSON.stringify(request.schema)
+      draftBinding = { ownerDigest, sourceInputId: input.snapshot.id, schemaDigest: contentHash(schema), path }
+      request.worktree = stageWorktree(commonDir, input.snapshot.headCommit, overlayStageTree(commonDir, candidate.tree, [
+        { path, source: text },
+        { path: path.replace(/\.json$/, '.schema.json'), source: schema },
+        { path: path.replace(/\.json$/, '.errors.json'), source: JSON.stringify(error) },
+        { path: path.replace(/\.json$/, '.trace.json'), source: JSON.stringify({ source: input.reviewRepair, trace }) },
+      ]), 'edit')
+      request.base = request.worktree.baseCommit
+      request.prompt = request.prompt.replace('只读，不修改文件。', '').replace('不修改文件或执行候选。', '业务文件只读，不执行候选。')
+      request.prompt += `\n未批准的历史评审格式诊断：${prior.reviewOutput !== null ? '原Native成功返回，程序拒绝字段格式' : '原Native拒绝最终JSON格式'}。完整原回答在草稿文件=${path}；精确schema、原错误、原trace分别在同名前缀.schema.json/.errors.json/.trace.json。仅续改这一组对同一candidate的原评审，不从零重答，不将未批准发现作为业务事实。读取原稿及错误，规则位置须精确实际path#ID，说明文字保留在evidence/message；禁止仅剥括号伪装已完成语义校核。只允许修改指定草稿文件，源码、测试、Spec及其他sidecar只读；正常git add/commit并保持clean。最终返回与提交草稿完全相同的严格review JSON。程序重新核验后才可能进入原P1返修。`
+    } else request.prompt += `\n未批准的历史评审格式诊断：仅纠正同一候选的最终JSON；原回答不是accept或业务事实。原错误=${JSON.stringify(error)}。读取完整原final，沿已有检查继续本次独审；必要时依原候选纠正未批准判断，最终只返回符合schema的完整JSON。\n${text}\n精确schema:\n${JSON.stringify(request.schema)}`
+  }
+  return { request, binding: reviewBinding, candidateFiles, draftBinding }
 }
 
+
+/** 同一Native输出还须来自唯一临时Git稿；任何业务文件修改或口头回执都不能替代它。 */
+export function verifyGenerationReviewDraft(commonDir: string, request: ElaborationSessionRequest, native: ElaborationSessionResult, binding: StageDraftBinding | undefined): void {
+  if (!binding) return
+  const draft = captureStageDraft(commonDir, request.worktree!, native, binding)
+  const source = readStageDraft(commonDir, draft, binding)
+  if (!isDeepStrictEqual(JSON.parse(source), native.output)) throw new StructuredSessionError('stale_result', 'Native review JSON differs from the committed review draft')
+}
 
 export const WORKTREE_GENERATION_SCHEMA = { type: 'object', additionalProperties: false, properties: { summary: { type: 'string' } }, required: ['summary'] }
 
@@ -171,17 +224,20 @@ export async function runGeneration(supplied: GenerationInput, options: Generati
   const cancelled = (): void => { if (signal?.aborted) throw Object.assign(new Error('生成已取消，拒绝后续派发或发布'), { code: 'cancelled' }) }
   let generatedNative: ElaborationSessionResult | undefined
   let generatedRequest: ElaborationSessionRequest | undefined
+  let failedRequest: ElaborationSessionRequest | undefined
+  let reviewedNative: ElaborationSessionResult | undefined
   const dispatch = async (request: ElaborationSessionRequest): Promise<unknown> => {
     cancelled()
     const purpose = request.purpose
     const { signal: dispatchSignal, ...serializable } = request
     await options.onDispatch?.({ ...structuredClone(serializable), signal: dispatchSignal })
     cancelled()
+    failedRequest = request
     const native = await options.runner(request)
     const output = structuredClone(native.output)
     result.traces.push({ purpose, sessionId: native.sessionId, threadId: native.threadId, turnId: native.turnId, resultDigest: native.resultDigest, inputDigest: result.inputDigest })
     if (purpose === 'code_generate') { result.output = output; generatedNative = native; generatedRequest = request }
-    else result.reviewOutput = output
+    else { result.reviewOutput = output; reviewedNative = native }
     if (!native.sessionId || !native.threadId || !native.turnId || native.resultDigest !== contentHash(JSON.stringify(output))) throw Object.assign(new Error('native 身份或输出摘要不匹配'), { code: 'native_result_invalid' })
     cancelled()
     return output
@@ -221,25 +277,29 @@ export async function runGeneration(supplied: GenerationInput, options: Generati
     cancelled()
     if (result.validationFindings.some(finding => finding.severity === 'error')) { result.status = 'repair'; return result }
     result.candidateValidated = true
-    const { request, binding: reviewBinding, candidateFiles } = generationReviewRequest(input, result.candidate, !!options.reviewCandidate)
+    const { request, binding: reviewBinding, candidateFiles, draftBinding } = generationReviewRequest(input, result.candidate, !!options.reviewCandidate, options.reviewSpecWritePaths)
     result.candidateFiles = candidateFiles
     stage = 'review_failed'
     const reviewOutput = await dispatch(request)
+    verifyGenerationReviewDraft(input.snapshot.source.commonDir, request, reviewedNative!, draftBinding)
     const builders = options.builderTraces ?? result.traces.slice(0, -1), reviewTrace = result.traces.at(-1)!
     if (builders.some(generate => generate.sessionId === reviewTrace.sessionId || generate.threadId === reviewTrace.threadId)) throw Object.assign(new Error('评审必须使用与构建者不同的会话及线程'), { code: 'review_not_independent' })
     const commonReviewError = candidateReviewError(reviewOutput, { inputId: input.snapshot.id, candidateDigest: result.candidate.digest, requiredIds: [], actualIds: [], priorIds: [] })
     if (commonReviewError?.startsWith('评审 schema')) throw Object.assign(new Error(commonReviewError), { code: 'review_schema' })
     const review = reviewOutput as GenerationReview
-    const error = reviewError(input, review, reviewBinding)
+    const candidateContracts = [...candidateFiles].filter(([path]) => path.startsWith('.spec/') && path.endsWith('/spec.md')).flatMap(([path, source]) => parseContract({ nodeId: path.split('/').at(-2)!, path, source }).contract ?? [])
+    const locationError = input.nativeWorktree && options.reviewSpecWritePaths !== undefined ? candidateReviewLocationError(review, candidateContracts, options.reviewSpecWritePaths) : null
+    if (locationError) throw Object.assign(new Error(locationError.message), { code: locationError.code })
+    const error = reviewError(input, review, reviewBinding, candidateContracts, options.reviewSpecWritePaths)
     if (error) throw Object.assign(new Error(error), { code: 'review_invalid' })
     result.review = review
     result.reviewPassed = review.verdict === 'accept'
     result.status = review.verdict === 'accept' ? 'reviewed' : review.verdict === 'repair' ? 'repair' : review.verdict === 'needs_input' ? 'needs_input' : 'conflict'
     return result
   } catch (error) {
-    const cause = error as { code?: string; name?: string; message?: string }
+    const cause = error as { code?: string; name?: string; message?: string; sessionId?: string; threadId?: string; turnId?: string; requestKey?: string; inputDigest?: string }
     const code = cause.code ?? stage
-    result.failure = { code, message: cause.message ?? String(error) }
+    result.failure = { code, message: cause.message ?? String(error), ...(cause.sessionId ? { sessionId: cause.sessionId, ...(cause.threadId ? { threadId: cause.threadId } : {}), ...(cause.turnId ? { turnId: cause.turnId } : {}), ...(failedRequest ? { requestKey: failedRequest.requestKey, inputDigest: failedRequest.inputDigest } : {}) } : {}) }
     result.status = code === 'unsupported' ? 'unsupported' : code === 'cancelled' || cause.name === 'AbortError' ? 'cancelled' : stage === 'candidate_invalid' ? 'repair' : 'failed'
     return result
   }

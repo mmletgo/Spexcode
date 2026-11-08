@@ -19,6 +19,10 @@ related:
 
 ## expanded spec
 
+新fence观察已停ZCode edit的未批准Git稿时，复用原verifyPlan、send与public model snapshot，精确核workspace、原session/model、唯一turn.started的input/query/非空messageId、所有events身份与唯一terminal原摘要。只读核原receipt/进程组与正式canonical stop/removed，不能调用会改写旧观察的进程采样或要求messages/success/final。原exit须code0、signal:null、stopped:true，idle/closed原值保持；基础认证后HEAD==seed只跳过无进度，常规有新HEAD仅精确turn.failed可授Git材料，cancelled终态不取得材料资格；已结算P0 events RPC例外见下。仅打开exit.json时遇到ENOENT返回缺证据（null），将此候选标为不合格；不会用canonical stop/removed替代exit或turn.failed证明。缺plan/send、其他读取错误、坏JSON及存在但非法exit仍显式失败。新failed和旧cancelled沿[[sync-checkpoint-evidence]]各自原证明认证，不附failedWorktree/rejectedOutput，不改原计划/策略/请求或错误分类。
+
+P0已结算的canonical failed原typed `native_rpc_timeout` 与同一adapter官方`session/events` method/message同时精确匹配时，复用上述原计划、模型、send、process/receipt及完整公开events/terminal认证。仅原同session/turn/input的唯一turn.completed/success、同session/turn的idle.json为true及原exit0/signal:null/idle/closed/stopped全真才通过未批准Git材料源检查；不解码response、不读messages或补completed、原Native版本/CLI版本/实际模型选择照原冻结策略认证。仅打开terminal.json遇到ENOENT返回无材料；同身份原失败/取消通过公开事件和相容的原stop证据后也跳过，不要求成功的exit0/idle/closed；错误身份、未知终态结果、损坏原件及互斥停止证据仍明确拒绝。该进程内分类不认普通pause、其它method或脏物理稿；仍由[[sync-coordinator]]核原正式removed/stop、正常Git、源/测试/owner及当前fence，不授成功、格式或新调用权。
+
 仅version6工作区路径在原plan/send/user/model/final消息/turn/idle/close/stop全部认证后，将格式或schema拒绝的terminal原response附为tagged untrusted_final诊断，保原字节与SHA和原请求绑定。格式失败仍不写completed/output；取消、缺terminal、身份或stop失败不授正文，旧failed缺字段不追补。不得提取thinking或放宽JSON/schema。
 
 新 ZCode 原生 worktree read 请求在创建/资源登记时冻结 `zcodeToolPolicy:{version:1,toolDenylist:['ExitPlanMode']}`。其 NativePlan 与持久 native 身份为 version2，计划保存同一精准 denylist；唯一 session/send 通过 SDK 已有 per-send toolDenylist 从模型可见工具列表移除 ExitPlanMode，SDK mode 仍为 plan。完整提示明确本轮交完整 schema JSON，不请求计划审批；业务正文逐字保留。tool policy 进入固定 policy/创建摘要，effective denylist 另进入 NativePlan.requestDigest，原 send、计划与恢复逐项核验；篡改或版本不符拒绝。Read/Glob/Grep/Bash 与原读范围、Edit/Write/NotebookEdit 拒绝、read Git seed/clean 门均不变，不切 build、不增 sandbox/MCP。edit、旧冻结和 Claude 不采用该工具策略。
@@ -31,7 +35,11 @@ ZCode 0.17.1 的 app-server stdin 对每个 Buffer 单独 toString('utf8')；中
 
 version5/null 请求沿原 ZCode policy、realm 与版本4读取证明执行，不装模型调用timeout timer；数字 version4 原样恢复。每次RPC、idle/close与精确停止各自期限不变。
 
-只接受 `zcode:<provider-id>/<exact-model-id>`。当前能力固定 macOS ZCode CLI 0.17.1、CLI SHA256 `9afd565a104d660259e6bdeeaa5cb8abc74a908559e21aa3c5f6a06f2a9da6c6` 和公开 builtin provider SHA256 `e537b380df05656e3757c2b220ae1044fe8a32c0ac148de265a05a94cc24b3a9`，未知版本、摘要、平台或模型别名明确拒绝，不 fallback。策略为 version4 / `zcode-frozen-read-only-v1`。
+新建的 v6/native-worktree ZCode 请求冻结 `nativeConfiguration: cli-config-v1`。执行器写 NativePlan/ZCodeNative version3，并记录本次实际解析 CLI path、`--version`、CLI SHA256、所引用 public builtin path 及可读取时的 SHA256；这些运行身份绑定 plan、model snapshot、send 与完成证据，不作为版本、摘要、provider 或模型准入名单。显式 `zcode:<provider>/<model>` 原样交给 SDK；`zcode:default` 创建 session 时省略 model，随后只从 SDK 原生 session/read 取得实际选择，不合成 provider/model。effort 原样作为请求交给 SDK，只有 session/read 的当前选项与可用项精确证实后才发送；SDK拒绝、未回显或不可用时保留真实失败，不按具体模型推断成功。既有 personal provider config、endpoint/baseurl 与凭据引用不改写，控制面不读取或输出凭据字节。
+
+NativePlan v1/v2 与缺席 `nativeConfiguration` 的历史请求保持原策略及持久字节，不补字段、不重签 plan/receipt。历史完成恢复按原 plan 中保存的 CLI、builtin、provider/model 与原 send/schema/input 重新核对，不比较当前安装的 CLI 常量；新配置 v3 冷恢复也只核原快照和全部原始 Native 证据，不新建 CLI/send。旧未完成 plan 不得由新配置启动或续发；只允许按原身份精确取消。固定冻结读取 v4/v5 的派发仍沿原固定隔离策略与 frozen proof，不借用 worktree 的新配置语义。
+
+缺席 `nativeConfiguration` 的 legacy v1/v2 与固定冻结读取路径沿原能力配置：只接受 `zcode:<provider-id>/<exact-model-id>`；新派发要求 macOS ZCode CLI 0.17.1、CLI SHA256 `9afd565a104d660259e6bdeeaa5cb8abc74a908559e21aa3c5f6a06f2a9da6c6` 和公开 builtin provider SHA256 `e537b380df05656e3757c2b220ae1044fe8a32c0ac148de265a05a94cc24b3a9`。该门槛不用于新建 `cli-config-v1` worktree，也不用于已完成历史的冷恢复。策略为 version4 / `zcode-frozen-read-only-v1`。
 
 每次派发使用专属空 workspace、私有 HOME / ZCODE_DATA_BASE_DIR 和 `/private/tmp` 下短 TMPDIR。固定配置关闭 plugins、hooks、skills/includeInstructions、memory、subagent；child-only 的两个 provider config 环境变量显式引用公开 builtin 与原 personal provider config。现有 credentials 只通过私有 home 的只读符号链接供 SDK 正常消费；控制器不读取、复制或记录凭据字节。父环境仅传必要 PATH，不继承其它配置或认证变量。
 
@@ -62,4 +70,8 @@ version5/null 请求沿原 ZCode policy、realm 与版本4读取证明执行，�
 
 已持久 completed 的 worktree 冷重放核原完成缓存、固定请求、Native 身份、schema/输出和原 exit.stopped/close 证据，不再探测历史 PID/PGID，避免无关复用导致伪 stale；running 或未结算仍必须实时证明原进程与后代停止。
 
-worktree 停止沿 [[native-worktree-runtime]] 正向任务域边界及 boundaryVersion2 追加观察，保留原 failed exit/unknown；workspace 与唯一私有 tmp 由原 plan 固定，无关联同 UID 进程仅诊断。
+worktree 停止沿 [[native-worktree-runtime]] 正向任务域边界及 boundaryVersion2 追加观察，保留原 failed exit/unknown；首次派发在宿主平台的临时目录中创建唯一私有 tmp，workspace 与 tmp 随原 plan 固定，冷恢复不重选或改写。旧 macOS frozen policy 的 `/private/tmp` 短路径不变，无关联同 UID 进程仅诊断。
+
+每次 stdio RPC 的 10000ms 计时器以 native_rpc_timeout 标记超时，删除原 pending ID 并忽略迟到回复。已 ACK 的活跃轮询仅在精确 `session/events` 超时且没有取消或协议故障时，以同一 session 和未移动的游标发一次新的只读 RPC。只有该页交回经原身份核验的本轮 `turn.completed` / `success` 才继续原 messages、idle、close、停稳与输出认证；其它结果按失败或取消结算。模型 send 保持一次，其它 RPC 超时、未 ACK create、原失败证据与停止证明仍沿既有门禁，由 [[structured-session-runtime]] 正式消费。
+
+本次新观察的 turn.failed 必须绑定原 session、turn、已接受的 input 和唯一 turn.started 的 query；认证后以进程内专用错误保留首要失败，仅投影宿主 errno 定义中的安全原码，不透传 provider 错误正文。原生工作树的公开结构化 error.code 精确为 EPIPE 才投影 native_turn_transport_failed，普通 errno、未知形状及历史冻结模式仍为 failed；不按错误正文猜分类。失败不请求成功消息历史，不授 output、rejectedOutput 或 Git witness；finally 仍原样观察并保留 error/idle=false、close=false 和 exit，不把 error 当作 idle。清理异常不覆盖已认证首要失败，正式结算仍由现有 exact adapter.stop 独立核原 plan、PID/start/receipt、整组、后代与任务域停止，未知不得释放容量。历史失败不补读或追补认证，不新增 plan/持久策略版本；该专用码只在 [[sync-coordinator]] 的正式 P0 资源门作为新增重试依据。

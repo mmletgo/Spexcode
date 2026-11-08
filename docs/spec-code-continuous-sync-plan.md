@@ -96,6 +96,8 @@ flowchart TD
 
 普通无冲突的错误名称/协议、字段表示、参数类型、序列化及等价校验顺序属于可沿用的实现约定，使用合法代码来源并追到REQ，不因可观察到差异就升级为重大业务政策或GAP。若代码细节违反明确原意，保留原要求并修复实现；独审发现误读或把技术选择当政策时须纠正。Native P1生成与独审共用这段来源语义。`implementationWritePaths`显式为空时，源码和全部测试只读，不得新建测试或把实现缺口交给无写权P2，具体阻断保持为`readonly_implementation_gap`。
 
+Native与非Native的P1独审共用完整实现发现说明：业务契约已完整且修法属于原授权源码/测试时，精确返回`verdict:"repair"`、`kind:"repair"`、`code:"implementation-review"`，禁止后缀或自定实现code；真实affectedIds、冻结治理文件的符号/行号及反例、保留业务义务的修复决定均须完整。测试绑定越权、候选业务正文待办及真实业务缺口仍在P1普通repair，不以延期实现绕过；程序的精确分类及既有历史拒绝结果保持。
+
 Agent 不得通过删除验收、弱化断言、放宽权限或改写原始需求来让验证变绿。原始需求需要改变时，将用户裁决作为新的意图输入，再自动调整全部下游。用户直接修改 raw source 本身已表达新意图，无需再次批准同一改动。
 
 验收变更提案只列本次真实变化依据；未变的上层义务继续保留。若依据只读且冻结前后未发生真实变化，分析阶段即退回原分区重新分析、独审，不能要求细化越权改动该依据或用同一不可能授权反复重试；真实已发生的只读作者变化及可写新依据仍沿完整来源与验收门禁核验。
@@ -195,10 +197,12 @@ Dashboard 的同步模式不能继续“先把新 Spec 独立提交到 main，�
 
 1. 捕获已提交 HEAD 相对上次已观察提交的代码差异；冻结实际 Git 对象和治理映射，不混入同期 index 或工作文件中尚未提交的改动。不要求提交代码的人或外部 Agent 必须由 SpexCode 启动。
    提交消费边界沿既有已接入或经真实共同基线去回声的持久观察，不受最近500条展示记录限制；同一已消费HEAD的重复采集与计划元数据变化不重开旧差量，也不能取代仍保留受控正文请求的操作。普通观察、故障及暂停中的未消费作者输入不推进该边界，真正新提交仍按累计tree差量分类；相关范围保留本节点精确前态路径，源码发现同时核当前与before，删除不能因当前文件缺失而漏掉。
-   若存在已结算且来源 Git 已真实采纳的完整验证基线，代码方向可以按本次提交路径收窄到实际 owner 与必要影响闭包。只有 `before`、完整精确 baseline selection、相关治理资源的 delivery 采纳均可证明时才收窄；freeze 的后续轮次沿用完整 discovery selection 证明 bootstrap 已结算，不能拿已裁窄 selection 代替。首次/无基线、before 缺失、未采纳或覆盖不完整、根原意或配置变化，以及未治理源码变化都按完整 bootstrap/发现处理。观察到文件变化或 admission 失败不算消费基线。
+   若存在已结算且来源 Git 已真实采纳的完整验证基线，代码方向可以按本次提交路径收窄到实际 owner 与必要影响闭包。只有 `before`、完整精确Spec/业务ID头与其正式settled receipt、delivery采纳可证明时才收窄。初始化可验证只读代码而未写它：缺binding/null源码或生成测试仅在其精确owner Spec的已审交付声明、verified scope、before owner Spec未漂移、sourceInput/delivery/before文件path/mode/OID三方一致时取得只读初始化资格；不生成byte头、不提供三方合成基线或写权，已有非null头绝不fallback。freeze 的后续轮次沿用完整 discovery selection 证明 bootstrap 已结算，不能拿已裁窄 selection 代替。首次/无基线、before 缺失、未采纳或覆盖不完整、根原意或配置变化，以及未治理源码变化都按完整 bootstrap/发现处理。观察到文件变化或 admission 失败不算消费基线。
 2. 以最近一次共同验证基线分析差异。结合源代码、调用点、测试与运行行为，识别实现重构、合法行为变化、冲突或覆盖缺口；不能只把 diff 逐行翻译成自然语言。
 3. 行为未变时保持业务正文稳定，更新失效符号映射和对应验证记录。
 4. 行为变化且不违背原始需求或显式规则时，自动改写 expanded spec 的权威规则、流程、状态、边界和验收；更新依赖这些规则的节点。实际文件必须更新，不能仅生成“建议同步”报告。
+   冻结目标列表是最大写范围；本轮已审分析的实际影响归属、明确作者变化及逐项/生命周期授权决定哪些已有 owner 可交付变化，关联文件本身不扩大归属。未受影响 owner 的标题、说明、正文和绑定继续逐字保留，旧临时稿中的越界更新按原稿反馈续修；合法受影响 owner 可以只更新业务解释，不要求构造表行差量。显式等价输出同样沿用完整原文件，不能重排 VERIFY 或格式；首次必建目标及明确技术授权仍沿原门禁处理。
+   已审缓存同样按当前局部owner范围核复用资格；兄弟变化涉及祖先要求不能授权本区旧稿。范围失效只撤销当前ready承接，原JSON/schema/Git/ref与历史批准保持，沿原稿重新生成及独审；身份或正文损坏仍明确拒绝。分区whole须回局部缓存重新核验并严格封口。
 5. 重新检查需求细化完整性。代码引入新的异步过程、状态或副作用时，在对应 Spec 如实表达已提交行为与缺口。这个方向不能自动修写代码、增加测试或把实现缺陷改成需求；与明确意图冲突时进入具体裁决。
 6. 发现行为违反原始需求或明确规则时，生成业务冲突。展示“原来要求什么、现在实际做什么、受影响路径、支持证据”，允许用户选择修复代码、采用新行为并更新需求，或输入新规则。
 7. 在同一协调操作中用可信既有测试及结构、语义检查验证 Spec 更新，保持提交代码和测试字节不变。既有验收不能因为代码改了而自动删除；无法取得证据的义务明确保留缺口，不能篡改测试自证通过。
@@ -231,7 +235,17 @@ Dashboard 的同步模式不能继续“先把新 Spec 独立提交到 main，�
 
 入口先以仓库身份、分支/worktree generation、源快照、影响摘要和政策版本形成稳定接入键，通过数据库唯一约束归并重复 watcher、Git 和 API 事件；不能仅靠每次新分配的 operation ID 去重。操作内再以 operation ID、attempt 和输入摘要识别执行重试。已协调的相同字节为 no-op，不制造空提交。
 
+用户对已完成生成与全部独审、候选已冻结的操作正式重试时，若原失败仅为V3资源登记前的verification_unsupported，系统保留认证候选并直接续验，不从P0/P1/P2重做。原attempt、资源、租约和journal须全部结算；原输入/来源/用户请求/模型、policy/impact/readSet/业务selection/scope及候选Git对象须精确不变，完整生成和独审原件仍可冷验。缺证据、partial或任何漂移明确拒绝，不补签旧review/checkedPaths/receipt，也不静默降级重生成。新的attempt重新核机械V1、发布基树、真实V3及V4，并经原正常Git交付生成本次receipt；连续前置运输失败可沿同一正式retry链再试。同parent请求保持原幂等归并；正式重试最新失败后继时，若中间操作从未调用模型、未派发且无会话/候选/验证/发布/交付副作用、全部执行与资源已结算，可沿严格相同输入/原意/模型/政策/读集/作用域链回到最近原V3前置unsupported已审祖先，并重新完整认证和验证。空后继不提供任何批准，原failure与checkpoint不变，不按错误码名册放行、不补旧candidate；存在中间进度或漂移须明确拒绝。零调用的候选续验后继若唯一attempt已正式结算、候选与完整祖先逐值相同且未交付，可在全部真实验证资源removed、原请求/政策/导出/完整passed报告和远端closed/cleanup原件冷验后沿原链续验；不依据记账错误文案，不补旧stage或验证结果，旧业务failed、缺报告和未知资源须拒绝。已removed原件只读重验不得调用driver或写checkpoint，新attempt仍重新产生V1/V3/V4与正常Git receipt。旧失败和全部历史原件保持，新V3真实行为失败按真实失败停止。此续验复用现有retry/operation/fence/四层结果与交付，无第二套会话、候选系统或持久schema变更。显式新requested model属于用户新选择，沿原正常retry重新生成与独审，不取得旧候选续验资格；同model原件失配仍拒绝。
+
+用户可以对完整结算、尚未采纳的私有交付显式发起同输入重验：沿现有执行入口提交新 requestId 和 retryOf，创建独立新操作，保留原交付、原操作阶段、attempt、原生会话、候选、journal、receipt、Git 分支及资源历史，不将旧 workspace_synced 改成失败或取消来取得资格。workspace_synced 与 awaiting_landing 使用同一严格安全边界：当前 attempt 与全部真实交付须 settled、完整验证且覆盖原范围，无未决业务范围或未结算资源；来源物理身份、干净工作区/index 与冻结 HEAD 不变，真实 receipt 证明交付尚未被 Source 或主分支采纳。阶段名称、sourceSynced=false 或按钮本身均不构成未采纳证明；已采纳、部分交付、证据缺失、来源漂移和活跃资源均拒绝。
+
+已结算交付可能推进资源头，但不因此成为新的作者意图。重验沿 retryOf 链保留最早原 business selection、原冻结 input/request/plan/readSet 与 scope 作为组合输入、目标 before 和 P0/P1 的业务基线；新操作另冻结相同资源集的当前 selection 用于事务 CAS，只允许父本次真实 receipt 对实际文件、已覆盖业务 ID 或退役头造成的推进，第三方头及未写资源不能冒领。准入事务重新核父记录、journal/receipt 与当前选择，claim/fence/验证/交付继续核新 CAS；后续普通 failed→retry 仍递归沿原业务基线，不把旧拒绝候选当作 verifiedDelivery 义务。
+
+这种显式重验重新分析、重建 owner 投影、细化并独立审查，不复用旧 accepted P0/P1、生成、评审或候选。原 Git/Native JSON 草稿只在原 owner、schema、来源和终态身份认证后作为未批准材料进入新 seed，保留正确字段供继续编辑，不能继承 ready 或 accept。省略模型仍使用原 requested model，显式切模型按既有 retry 规则处理；不新增 CLI 版本、base URL 或模型白名单。原预算配置、真实计数与历史原件保留，不能借此自动延长内部修复；新候选仍须完整程序校验、V1–V4、可信运行、正常 Git hooks 和正式采纳，Source/Main 不自动改变。
+
 自身写入只有在来源和实际字节都符合登记结果时才被归为本操作回声；Agent 运行期间的额外用户编辑仍然进入新输入。不能用一个“正在同步”布尔值忽略所有文件变化。
+
+混合旧新资源基线的采纳消费只沿当前精确selection对应的真实settled receipt证明，不按最新pair、Git消息或相同tree猜测。当前source/HEAD/tree、完整scope、四门及commit parent/effect须匹配。已消费提交到该parent仅可无差量，或唯一普通项目配置JSON变化且mode不变，parent与current配置仍逐字绑定原input及当前重新授权。该完整交付已按input冻结的配置政策通过四门，配置字段不另设消费名册。未由该receipt逐字绑定的配置或未消费code/Spec/docs继续进入原观察，外部同tree新commit也不冒认receipt。观察只复用纯只读证明与原baseline消费记录，物理暂停不制造写入准入错误，也不派模型或改写完成状态。正式adopt写入门保持。
 
 快照采集前后核对 HEAD、分支身份、index、文件集合和内容摘要，期间发生保存或切分支则重试，不使用前后不一致的混合快照。确认的输入保存为不可变 overlay，生成与验证使用相同输入。快照与 journal 是可恢复运行记录，不是第二份可编辑源码或业务契约。
 
@@ -298,9 +312,9 @@ writer20沿原online backup/事务拒旧writer，1–19 checksum不改。原enab
 
 启动、分支切换、watcher 故障恢复及周期补偿都会重新扫描相关内容摘要，捕获停机期间与漏报的变化。后台服务不依赖 Dashboard 是否打开；服务未运行时界面显示监听离线，不显示“持续同步正常”。
 
-每区复用现有原生会话、创建事务和资源桥，在独立 worktree 运行。所有阶段都允许正常文件读取与搜索；分析、细化和审查使用只输出结果的任务，构建者直接修改实现与测试并正常提交。无需冻结 reader 或逐字 API 消费证明；JSON 只约束需要机器处理的结果格式。实际 Native 身份、终态、错误、停止与工作树 Git 对象仍需持久保存。
+每区复用现有原生会话、创建事务和资源桥，在独立 worktree 运行。所有阶段都允许正常文件读取与搜索；分析、细化和审查使用只输出结果的任务，构建者直接修改实现与测试并正常提交。无需冻结 reader 或逐字 API 消费证明；JSON 只约束需要机器处理的结果格式。实际 Native 身份、终态、错误、停止与工作树 Git 对象仍需持久保存。 成功任务的原result/commit/tree已持久保存且工作树仍clean时，逐任务复用正式close保archive/ref与session记录后回收物理worktree及Git登记；原branch、Native对话、结果和JSON字节继续冷重放，后续业务schema拒绝仍沿原稿续修。已精确证实停止且clean的失败/取消目录也正式close；未来材料消费沿原Native/CAS/owner/schema/保护面认证临时恢复同一checkout，读取原稿后finally再次回收，零Native/队列启动。dirty、未知停止和identity漂移仍保留；close失败明确留pending原因且不改原结果或错误，不额外烧模型调用。removed仍是执行资源已结算，自动回收不添加全局扫描器或第二套持久状态。
 
-Claude Code 与 ZCode 共用明确版本化的 native-worktree 执行策略，固定实际模型、任务、seed commit/tree 和结果身份，沿用本机认证且不读取、输出或改写凭据。旧受限只读请求按原策略恢复，原 MCP/读取证明不能补签为新工作树结果。升级先停止旧执行器并确认资源结算，旧 writer 必须拒绝新策略。
+Claude Code 与 ZCode 共用明确版本化的 native-worktree 执行策略，绑定任务、seed commit/tree 和结果身份。新任务优先使用 Claude Code；没有显式模型及项目选择时不传模型参数，沿用用户 CLI 的原生认证、base URL、模型和供应商配置。显式模型或别名原样传递，CLI 版本、可执行文件摘要和模型名不作为产品允许名册；必要协议缺失或原生配置不可用时报告实际错误。请求选择和每轮真实 CLI/解析后模型分别记录，恢复按原始快照认证，不用今天配置改写历史或编造实际端点；控制器不读取、输出或改写凭据。新请求显式冻结nativeConfiguration:cli-config-v1，sync v24 writer保护前置创建/资源摘要，旧saved/reserved缺席保持原语义。旧受限只读请求按原策略恢复，原 MCP/读取证明不能补签为新工作树结果。升级先停止旧执行器并确认资源结算，正式备份/迁移；回滚恢复一致备份和原证据，旧 writer 必须拒绝新策略。
 
 ZCode 新只读结构化请求保留 SDK plan 模式，仅通过已有 per-send toolDenylist 移除 ExitPlanMode，并明确本轮直接交完整 schema JSON、不申请计划审批。精准工具策略在新资源/新建记录时冻结，NativePlan v2 与原 send/请求摘要共同核验；旧已持久请求（包括尚无 Native session/send 的资源）保持原字段缺席、原提示和工具集。结构化 policy6、工作流v1、正常读取/Bash 与 Git seed/clean 门不变，edit/frozen/Claude不变。sync v19 writer marker 沿原在线备份与事务升级拒绝旧writer，回滚须恢复升级前一致备份及原证据。
 
@@ -318,21 +332,52 @@ Native worktree新分析请求仅接受旧/current冻结图中的受影响ID，�
 
 Native P0分析与独审共用业务语义：raw、源码和完整测试足以核实的行为，即便治理叶、稳定ID或覆盖映射尚未生成，也以facts/newNodes交P1；coverage_gap须指出具体未决业务政策及可观察后果，conflict只用于真实互斥。明确原意下的实现/测试缺陷不是业务GAP；P2仍受原写权约束，只读code_to_spec实现缺口保留为readonly_implementation_gap。纯治理缺席误报须由独审repair，Native自由读取及既有ID、权限、AC、unbound门保持。
 
+Native P0的事实来源集合使用完整不可变source tree批读时已核对OID的原字节，不在批读后为每个blob另启Git；不按readPaths缩小来源范围，UTF-8、普通文件及host-private过滤和分区事实授权保持原判据。
+
 分区隶属同一个 operation/attempt，共用会话队列、fence、预算和最终 candidate。保存各阶段的真实 seed、会话、原输出与 Git 差量；恢复仅复用同一任务和可见 tree 的已结算结果。程序合成唯一候选，再用独立会话审查各区和跨区接口；最终仍须全图结构检查、可信真实运行、正常提交 hooks、完整 journal/receipt 和正式采纳。
 
 分析以真实 composed tree 为起点，细化叠加该阶段已审祖先或待审 Spec，构建使用已审 Spec overlay，独审使用实际候选 tree。每次派发先生成并保活不可变 seed commit，精确核对其 tree 和会话 forkCommit；不能只用来源 HEAD 而遗漏受控 Spec 修改，也不能从 live index/WIP 拼接后续编辑。生成摘要及自报补丁不作为修改事实，候选从构建者的实际 Git 对象差量导入；审查者工作树发生任何修改则拒绝该审查。
 
 全量重建可跨同一 operation 的多个 attempt 累积已独审通过的局部进度。承接必须核对原输入、政策、分区计划、依赖和该阶段实际可见的完整 tree，并保留原输出、独审及来源 attempt；未审、拒绝或仅生成的产物继续作为待处理输入，不能升格为通过。每轮保存所有失败分区的诊断，下一轮只重做仍缺失或绑定已变化的范围。分析把只读事实或未来写目标误报为实际变化时，须在独审前拒绝并按原分区反馈纠正；真实变更集合及不可变计划/摘要/写权校验不放宽。任何候选变更均使依赖旧候选摘要的审查失效，最终仍对完整候选取得独立审查覆盖。同candidate的局部及跨边独审accept仅在原完整输入、可见 seed tree、请求与来源绑定精确相同时跨attempt承接，其他失败审查继续新派发；原review/trace/ref与失败历史保留，不计缓存假调用，最终覆盖与交付门不放宽。局部进度不创建交付收据、不消费同步基线、不显示已同步。
 
-跨轮P1续修同时提供已核真的拒绝候选原结构化JSON与Markdown渲染对照，前者仅作格式诊断，后者不作为JSON模板；原诊断、独审和全部门禁保持。
+共享分区调度在每个处理单元结束后真正让出事件循环，缓存立即Promise、最后一项和失败边界同样适用，让既有心跳timer及暂停/取消控制及时运行；不延长租约或心跳周期、不放宽fence或调用预算。缓存ref/同candidate保持之外还须核真实预期终态及无活跃写权异常，不能以断言局部通过掩盖租约过期。
+
+新Native P1按owner冻结elaboration-draft-v1，复用v6 edit工作树实际创建或续改临时JSON草稿并正常提交；业务JSON只写入草稿文件，Native final只返回符合`DRAFT_RECEIPT_SCHEMA`的单一JSON对象，形如`{"summary":"..."}`，前后不附说明或Markdown代码围栏。程序从真实Git指定path/OID读完整业务行，严格JSON/schema与既有renderer/checkCandidate后再独立read审查；格式失败不是Native执行失败，syntax-invalid原字节同样由私有Git ref保留。后续只给已有草稿路径、schema和具体程序/独审错误，不把大JSON或Markdown重新塞进prompt从零重答。检查点仅保存草稿version/owner/sourceinput/schema/seed/resultCommit/tree/path/OID/errors，正文不进入raw role，也不进入业务candidate或delivery。跨父接口或输入变化仅把同owner/schema旧草稿复制到当前source与已审祖先的新seed，原代码/tests的path/mode/OID/absence与其他owner不动；旧accept继续按完整inputDigest严格失效。旧失败原件只作非权威材料，字段、Native认证与历史摘要不改写。已冻结/仅reserved请求保原协议，新持久字段上线需writer v22围栏拒绝旧v21 writer并保留完整备份和回滚路径。历史只读P1仍按原协议提供已核真的JSON与Markdown诊断对照。合法稿仅重试回执或审查时可正常git commit --allow-empty且hooks保留，不造业务diff；真实新提交要求不变。new tagged接受缓存按原source tag重核Git/schema/owner/source与最终正文渲染候选，历史失败轮只核Git身份；分区whole走既有owner重放/strict seal，legacy不由当前tag补签。
+
+当前受审分析存在冻结owner时，P1独审沿生成侧同一范围事实区分本轮可变目标与冻结历史正文。repair须以全部真实affectedIds定位至少一个可变owner，可引用冻结祖先/依赖作为证据；仅要求修改未变owner旧description/prose/进度的review及未知ID绑定由程序具体拒绝，完整原review保留并交新独审纠正，不自行过滤或改accept。原Git业务稿/summary追踪与候选经当前完整输入、schema、范围、renderer及机械gate重核相同后，只重审原候选，不重复生成；原generation按实际dispatch/保存Native请求冷验，不能借新review轮号伪造生成。域内语义repair及真实扩域仍走原分析/授权/修复流程，源码/tests写权保持零；旧请求及缺席字段不追补，不新增DB字段或marker。
 
 相同冻结绑定的局部生成若在任何输出前失败并保存空轮原件，下一轮可承接最近更早的具体业务拒绝诊断；缺局部检查点、绑定改变或已有候选的基础设施失败仍停止回溯，不改变重试资格、独审或最终验证门槛。
 
+同一操作的P1 Git稿通过结构后，若ZCode独审在 `session/events` 超时且原资源正式确认停止并移除，核实完整冻结输入、owner、分区计划、原生生成身份、Git稿和候选后，仅重新派发独立只读审查。新审查仍核完整范围和原候选，候选在审查通过前保持未批准。旧失败、预算、全局封口和后续验证照常保留。
+
 P2实际无该Spec写权的只读装配late V1锚点失败按真实候选和node/path回到唯一P1 owner，新生成和独审仅修该区，其他已审区及源码/tests保持；V1有效但全候选独审要求修订的只读Spec也沿真实ruleLocation/affectedIds回到唯一P1 owner，完整review只作诊断，原作者契约授权门及raw义务保持；同candidate且owner仍原ref的已验证反馈持续到该owner新生成/独审并进入合法aggregate，Native失败或后续accept空发现不能清除；同一候选某分区已有真实独审repair时，另一区Native失败导致aggregate failed也不能丢弃该有效诊断；失败区无review仍保原失败，完整P2重审与最终交付不放宽；新结果可经独审维持原正文，其他owner保最新已审ref，不以诊断增加授权或新round协议；明确expanded spec正文定位按真实候选path及全部唯一同owner affectedIds路由，不要求伪造#ID；普通contract:path#RULE是规则定位引用，受影响ID不必包含RULE但须非空、唯一并实际存在，可跨owner；不把它当新授权，omission特殊成员约束不变；旧续修资格按原generation wrapper的真实readSet/selection重验，仅以既有null资源扩展桥连接当前绑定；新P1增加ID后不误使原诊断失效。独审提示明确候选文件是本次分派的本地审查投影，不能仅据未提供就宣称完整候选缺文件，具体义务确需未提供证据时仍repair。源和候选manifest旁同时提供由真实数组计算的局部/完整条数与complete标记，不增加完整路径inventory或正文。最终全图seal/V1重做。 分区最终程序封口读取真实composed冻结全树中的未改动承接方，再叠加本轮候选及既有生命周期删除；Agent可在冻结工作树自行读取需要的文件，实际写范围仍由原分区约束；不以关闭严格检查或过滤缺口代替完整树核验。 whole封口原wrapper同时固定当时composed tree/contentDigest，当前缓存与跨attempt提升须精确一致；缺绑定或异树仅沿已审locals重seal，不能用扩域后已重绑的attempt最终值替旧proof补签。相同input/candidate/findings且无对应owner新agent派发时停止零调用热循环，真实多轮修订仍沿原无限预算继续。
+
+draft模式的只读V1锚点返修须让生成和独立审查同见完整finding身份与绑定已接受正文的只读baselineSpecPath；Agent据此自行恢复被拒草稿中的prose及已接受RULE等业务字段，仅修typed code来源选择器，不把mode或失败诊断当重写业务的授权，原演进、锚点、独审和单一草稿写范围不变。
+
+一般草稿续修同样保留原finding的severity、owner/路径与条目定位，不能仅把同码同文的多个问题压为重复code/message。当前draft检查点和下一实际prompt均保留原字段；旧检查点不回写，已认证原round的完整findings可作为新请求诊断继续传递。它只改善定位，不增加业务授权或放宽任何演进、校验、独审门。
+
+完整Native P1续修时，同一已登记VERIFY在局部候选中重复或被删到AC.command悬空，新attempt的冻结提示指出原唯一归属。优先保留可见冻结定义，缺定义时只为一个合法可变目标定位。先修共享定义，再逐项核对所有原诊断与剩余覆盖；原草稿、诊断、命令及业务授权保持，结构校验、独审和严格全图封口照常执行。
+
+P1后置门禁若精确质疑已审P0的refactor分类，只将命中原真实变更治理owner及affectedIds的完整finding、原分析/候选引用、真实旧新业务行和代码差量交回原owner，在原operation/fence/预算内重新分析并独审；Agent可据原意和代码重判allowed_change，也可维持refactor要求P1恢复错误改写，程序不改分类或扩AC/VERIFY授权。新analysisRef使依赖P1重绑重审，兄弟P0已审原件保持；格式/schema失败仍沿认证原文件只续失败环节。旧短errors和已渲染拒绝候选的完整原round只在同owner、完整绑定不变时供下一实际prompt诊断，不补写旧稿、旧ref或reserved请求。
+
+全局封口返修时，生成与独立审查共同读取绑定原件的真实失败并集诊断文件和精确error/owner/ref定位；只有本owner本轮未采纳的临时duplicate ID可在同义、同kind、唯一且逐条保持typed引用的条件下一致更名，作者/已采纳ID、原业务义务和源码/tests不动，程序与独审沿同一已证VERIFY技术归属投影复核，最终仍须strict全图封口。
 
 旧受限只读执行的原生续行、压缩、MCP 和逐字消费证明仅在对应版本的历史恢复中继续核验。新工作树任务不以这些读取证明作为准入或完成条件；真实终态结果、schema、独立审查及运行验证保持。
 
 已认证精确结构输出错误的重试准入与单体/分区反馈共用同一码集合；原code/message逐字交后attempt分析及独审，只投影自己的失败分区，不丢schema字段说明，也不将诊断中的建议变为policy或authority。缺码、未知failed/stale或普通Error伪码不能取得结构错误重试资格；协调器不重做Native认证。
+
+候选已通过程序校验、仅最终独审发生已认证的格式/schema失败时，沿原操作的合法批准链承接原分区计划、P1与同一真实候选，不把失败诊断变成重新生成无关Spec或代码的理由。P1合法新增null资源后，须证明旧基线绑定逐字保留、扩域来自同一已审P1、source/input、composed tree/content、readSet、scope与原政策/写权限仍相符；原plan digest、wrapper和历史批准不改签。真实原意、源码、非null基线或权限变化，以及语义repair，继续走原输入失效与业务修复流程。 业务ID与Spec扩域由已审P1负责，实现/测试路径须有同P1已审code/AC.test映射，或原文件规划的逐owner派发与结果证据；完整scope精确等于两层实际并集，不把代码路径当作P1正文权限，也不对同一P1证据重登记更宽集合。
+
+仅精确失败的owner/跨边评审取得其原Native请求、身份与停止证明认证的完整最终回答，以及当前精确schema，在同candidate的唯一临时Git评审稿中基于旧回答续修，精确schema、原错误及trace作为只读sidecar，Agent正常提交后程序从真实Git稿读取并核与最终严格review JSON一致；再次格式失败仍只续该组，诊断seed不成为业务candidate。成功组保持原无新增诊断的请求形态，逐项重核完整输入、候选、schema/seed、模型/政策、原Native结果与严格缓存。此路径同时适用于code→Spec和Spec→Code：保持已审Spec与既有代码候选，后者冷验原builder真实Git/范围及Native原件后跳过新代码生成；程序校验、全图封口、独立审查及V1–V4/Docker/Git/adopt仍照常。 多轮续审沿原来源链找回最初builder，不能把新评审轮当作新构建；已经修复accept的组即使携带自身旧诊断，也保持原冻结请求，兄弟继续失败不令它重派。预算预检只要求已证必须新派的失败组额度，实际新调用仍由原逐调用硬限控制。旧无raw/ref/policy字段保持缺席，不从原文抽取JSON升格accept、不读取thinking、不补checkedIds/完成状态，也不增加业务写权；评审稿复用现有stage-worktree/v6 edit及reviewRepair refs，不另建执行器或持久协议。
+
+
+
+同owner多轮事实修复必须保留已批准的确定值，不能在新finding未命中旧RULE时拒绝或回滚其已审basis。继承须绑定原acceptedRef、完整changes、本owner及实际原generation的V5，通过后仅作固定基线；当前relatedIds只允许新差量，未命中旧字段不得再改，全部作者业务义务、raw与源码/tests不变。
+仅新冻结的P1指导V5在完整叶阶段可消费经真实code_review原件、candidate和原P1 owner认证的candidate_review；当前P0未影响该既有owner时，只可修正事实说明：从原诊断的结构化relatedIds读取已校验affectedIds，在冻结契约图中逐项核唯一身份后取本target的nodeId/path交集。命中的owner允许desc/expanded事实说明及命中RULE.basis变化；raw、标题、code/related、全部其他业务列、行身份、AC/VERIFY、来源和depends-on逐值保持。外owner仅作证据，外owner-only、unknown/重复ID、缺provenance、非error或无candidate_review不授此权；不读取message、draft.errors或materialDiagnostics推断权限。当前真实changes、作者/生命周期及逐项授权仍走原通路，不改P0分类或伪造authorChanges。生成差量与完整候选共用此窄比较，preserve_business不再吞掉合法事实修正，仍须新独审及strict全图seal。
+
+普通path#ID诊断把已验证affectedIds保入现有relatedIds；旧冻结字段缺席不补写且不授事实修正，完整冷验仅在derived对照值保留该缺席，新attempt须正常重派生新诊断。局部与全局seal共用同一窄比较，V5资格复用既有阶段指导字段并由writer33围栏；旧V4或缺席请求不升级。升级先停稳旧writer/结算资源、做32一致online backup，再正常事务迁移；回滚停新writer、结算33资源并恢复32库及配套evidence/Git refs，禁止删marker或改历史请求。
+
+Native已成功返回但review字段格式不合格同样保全原JSON、原错误与trace续改，不能因schema中字段仅为非空string就将带说明的ruleLocation直接送入P1路由。仅实际P2不可写Spec的后继定位早验，写范围复用唯一dispatch瞬态投影；实际candidate路径/ID及全图唯一affectedIds保持原严格门槛，合法跨owner精确诊断不新增限制，格式稿续修须同owner；正确绑定但字段语法无效仅获原review临时稿权限，错误path/ID、unknown/重复affectedIds不能授予业务路由。续修、原请求冷重建及已accept组来源重验沿用唯一dispatch或既有aggregate的同一瞬态P2 Spec写范围，不把可写owner的合法missing_fact误判为只读绑定错误；该范围不加入持久输入或摘要。旧completed终态及摘要不改签，不伪造Native rejectedOutput；新独审修正字段并重新严格通过后才回原P1。
 
 行为分析resolution破坏既有可解析Spec分节时，先给精确格式诊断，保完整原proposal而不自动修正文；未消费义务真正失配则反馈原path/id及完整expected/proposed业务字段，原语义门不放宽。无真实整合必要时用空resolutions交P1生成，需要三方整合时仍保全部未消费义务；合法字面反斜线n、普通代码、裁决与null删除不因格式提示受限。
 
@@ -368,6 +413,8 @@ P2实际无该Spec写权的只读装配late V1锚点失败按真实候选和node
 
 恢复过程中发现新用户版本时，保留双方快照，不把 journal 的旧 preimage 覆盖到新文件。重新建立最新输入并自动整合；若无法同时满足业务意图则进入 conflicted。执行环境尚不允许安全恢复时维持 recovery_required，并说明需要恢复的条件，不能静默将半成品标成终态。
 
+已审只读P1事实返修的因果绑定与待处理owner分别保持。完成后清空pending不删除原返修原因，旧latest checkpoint已清空时沿同attempt完整历史冷验最新已审正文。普通暂停恢复没有新修复输入时，原独审诊断上下文只随精确冻结input/provenance和完整Native请求认证承接，不忽略diagnostics/digest，不向fresh模型补旧诊断。缺证、冲突或当前输入变化继续拒绝缓存。
+
 ## 9 一致性验证及完成条件
 
 ### 9.1 四层验证
@@ -380,6 +427,12 @@ P2实际无该Spec写权的只读装配late V1锚点失败按真实候选和node
 | V4 版本与交付检查 | 当前实际内容、上下文、依赖及工具条件与证据绑定关系 | 防止过期结果、错误分支和未落盘候选被标完成 |
 
 验证绑定到冻结候选：仓库及分支身份、相关 Spec/代码/测试、治理关系、上层规则和读集合摘要、必要依赖及验证配置。只记录 HEAD 或执行时间不够，未提交内容和工具环境同样影响结果。
+
+V3 可由可信 server 选择本地 Docker 或 SSH Linux Docker；SSH 认证和部署权限不进入候选配置。远端必须真实运输并认证完整 candidate/reporter，以实际远端 mounts 和原 inspect 形成同一正式验证证据。原 ledger 四阶段承载上传、单 run effect 排空和清理；SSH 断线不代表停止。先持久终态，再确认 exact 容器与临时 staging 已删除才释放容量；closed 与 effect receipts 作为控制历史保留。未知 create/start 提交继续 recovery_required，不由 NoSuch 猜测。环境 probe 不替代产品正式 V3/receipt。
+
+当前有效 attempt 的 V3 recovery_required 缓存只代表待续观察，普通重调度须沿原 run/resource/checkpoint 续既有执行器，不重做模型或建立新 run 来修恢复债。原失败 CAS、候选和 deadline 保留，新观察追加。原期限已过的 planned 不上传/create/start，只有 closed、effect 排空、精确不存在和 staging 清算均证实时才以 timeout/removed 结算。未知锁、effect、身份或 receipt 仍保恢复债与容量。当前 Native 不因这一 V3 重入被取消，removed 重入不访问 driver/SSH 或改写检查点。
+
+增量操作的结构 V1 从实际不可变 candidate tree 读取完整业务契约及代码/测试正文，不能用 Agent 的局部读集误判未改兄弟缺少覆盖。生成意图比较保留本轮已批准契约，候选侧仅纳入这些节点与 baseTree 到 candidate tree 的真实 Spec 差量；未读改删节点的前态只从 baseTree 取得。完整结构上下文不扩大 Agent 任务、写入或验收范围，不把未改兄弟当新增意图，也不从候选自动登记验证命令；真实覆盖缺口、未批准业务项和政策漂移仍拒绝。未读兄弟的既有 GAP 只在已通过全图封口精确记录同一发现、闭包不涉及本轮 ready/accepted，且全部 Spec、源码和测试义务在封口输入、候选基树与候选中逐对象不变时沿原闭包规则保留，不阻塞独立 Task；新增或变化的 GAP、涉及本轮依赖或缺乏继承证明仍阻断。
 
 结构结果由程序产生；语义结果使用结构化 verdict、规则/代码定位、原因和反例；测试由实际工具执行并保存退出状态及关键输出。Agent 的自然语言“已通过”没有完成权限。
 
@@ -612,6 +665,14 @@ CLI 入口包含 spex sync enable、status、run、pause、resume、verify、dec
 
 Native P1每轮生成携上一轮实际JSON、具体结构/独审发现及完整review；同owner已结算的精确格式失败即使尚无candidate，也沿原checkpoint输入、分区、readSet和selection绑定传递真实code/message与旧resultRef/末轮产物。诊断参与真实prompt/request摘要，不成为raw/facts或新授权；业务inputDigest及accept缓存门槛保持，生成已完成但未独审不算accept，已accept父接口可沿原ref承接。原readonly、REQ/AC/ID、schema、预算和strict seal保持，历史证据不改。
 
+Native P1生成与独审须同时收到当前已独审P0的完整analysis及原件ref，不只facts、mode或authorChanges；分区沿已有本区投影并显式保留partitionBinding的计划、owner与aggregate分析引用。当前changes的分类、范围、原意/行为及evidence用于重新核实历史拒绝诊断，旧refactor发现不代替当前allowed_change。authorizedChanges只承载AC/VERIFY变更、退役/恢复等特殊动作，空数组不禁止在当前受审分类、raw及源码支持下同步非冲突明细；不扩大特殊动作授权、纯refactor业务保护、原写范围或P1独审资格。无analysis则不宣称有当前分类，历史诊断及原件不改，不新增持久字段或DB版本。
+
+同operation的正式Git JSON草稿还可作为未批准材料跨合法P1全null扩域续用：原stage仍核source/input/policy和旧binding逐字保留，只有完整baseline/readSet/selection证明成立才沿已有null桥读取；无baseline旧路径继续精确匹配。暂停控制attempt没有正式草稿不遮蔽历史原稿，advisory不取得输出权限。当前seed只叠加重验owner/schema/path/ref/Git后的原字节，不搬旧树、不继承旧摘要或批准；新生成及独审继续重新核验当前业务输入。
+
+正式retryOf换模型或其后pause/resume同样沿当前操作与祖先的唯一来源链接续未批准草稿和精确后置分类质疑。来源必须保持input/source、原意、policy、readSet、selection/scope及分区plan/owner绑定，原Native请求、实际终态、Git/schema/ref分别在原operation/attempt认证；只有与本轮精确schema匹配的原JSON字节进入新seed。新近无产物、控制中断或身份未认证的稿不能遮蔽更早合格来源；旧只读成功输出仅作标明native_output的新临时材料，不能补签历史Git草稿。换模型后分析与独审均重做，不携ready/accept或重置当前操作预算，原失败/CAS/Git/wrapper不改，现有fence仅登记真实来源；schema选源回调只在进程内，无新DB版本。此材料迁接沿原v6 worktree read/edit传输协议，无worktree旧frozen继续原历史恢复；已认证Git原稿命中后不再取备选Native材料，正文、错误、标签与来源同源。原独审格式拒绝的JSON只能作诊断，续稿仍使用另外认证的generation业务输出。
+
+分析稿跨attempt仅续独审后获得的合法业务repair，即使父attempt随后因其它环境错误结束、无分区失败汇总且短errors为空，也不能丢掉已完成reviewResult的原finding。正式retryOf在原Native/Git、owner、完整input/schema、analysisDigest和独审范围冷验通过后，将全部finding字段原样交给新分析作未批准诊断；原分析来源继续逐跳认证，不迁旧ready或accept，不改历史review/continuation，原引用沿既有材料provenance可追。
+
 正式pause/resume遗留的superseded且failure:null控制attempt不清除前轮owner诊断。仅当其真实composed/selection、partition-plan原wrapper的readSet/selection及analysisRef均与当前绑定一致，且本owner没有新的已审或业务拒绝结果时，才越过该控制中断寻找最近已结算repairable来源；中间或来源的输入/分区/读取/选择变化、未结算或真实非repairable失败仍阻止继承。
 
 同一诊断接缝也保留候选渲染前的具体结构拒绝：已结算repairable来源必须为exhausted/repair_budget_exhausted、末轮candidate:null且有明确error发现（如重复业务行rows_patch）；不伪造候选seed，原schema和结构门槛保持。
@@ -631,3 +692,25 @@ Native完整叶生成提示明确区分引用类型：FLOW.req只引用REQ，并
 正式pause/resume在绑定前留下的superseded/failure:null空控制attempt，仅当checkpointRefs/dispatchPlans均空、composed/candidate/verification/currentSession均null、publicationBase缺席且原selectionDigest与当前一致时可越过；它不产生授权、不补签绑定，旧真实seal仍须完整匹配当前operation/input/policy/plan/composed/readSet/selection。任何业务/会话锚、非空产物或选择冲突仍是回溯屏障，空attempt仍消耗原计数。
 
 被拒final原文以不可信UTF8 artifact保留完整字节/SHA/ref；单次stage checkpoint原子登记JSON wrapper及全部JSON/raw保活引用。正式详情、恢复与证据BFS只依据真实失败round、原Native请求/资源/record精确区分raw，历史无role引用不改；JSON合法但schema坏或伪stage原文也不获stage或引用可达权限，未知损坏JSON仍报错。组件v21在正常online backup后拒v20旧writer；回滚停新writer并恢复升级前一致备份与原evidence，不删marker或篡改旧引用。
+
+Native RPC 的实际计时器故障保留原 typed code/message；复用精确身份停止协议后，failed 资源先 terminal 再 removed，同键不重发。只有当前 run、有效 fence 和每个故障的原 request/plan/候选及停止证明均成立时，P0/P1/P2 沿同 operation/input/总预算继续；pause、用户取消和 unknown 不自动重启。失败 Git witness 只由新 observer 在认证 rejected final、原 seed 和确证停止后保存，独立于成功结果；Git 不合法保原格式错误和 raw，旧缺席不补捕。Native checkpoint 不提前授独立 raw ref 可达权，后续 Saved round 与 typed artifacts 原子发布。统一 sync v22 迁移正常备份并拒旧21 writer，回滚须停新 writer、恢复一致备份及原 evidence，不删 marker。受控 Node/MockNative 证明上述状态链，不等于真实 ZCode timeout 根因或模型协议已验证。
+
+Native P0的新contextTransport:git-json-v1只在behavior-draft-protocol对象与code_behavior派发均缺席的首次冻结选择；已有对象缺字段及saved/reserved旧请求原字节保持，字段存在但为null、空串或未知版本须在派发前明确拒绝。分析/独审共用每owner/purpose只读.context.json，完整含task、repairDiagnostics、原errors，review另含pendingAnalysis的原analysisDigest/analysis/newNodeProposals；旧JSON、schema、不同拒因及findings均保留，不截断或增加消费proof。prompt引用精确路径/SHA及业务digest，代理仍自由读仓库，临时协议文件不列业务checkedPaths；真实Git diff修改context即拒绝。业务inputDigest/analysisDigest与accepted早退保持，新的Native prompt/seed使requestDigest变化；恢复材料只从完整冻结request/tree/hash冷读并在既有语义比较接缝归一。writer25仅追加SELECT1，升级停稳旧writer/结算资源、online backup后事务24→25，回滚恢复一致v24备份及evidence/Git refs，禁止删marker。此变更只优化完整上下文传输，不声称已证明或修复provider EPIPE。
+
+已停ZCode的精确turn.failed可在合法新fence下续最新未批准Git编辑稿，复用原严格较新来源选择；旧正式cancelled与有原failed观察的新failed均核完整request/dispatch/record、formalstop/removed原值及公开plan/send/model/start/terminal身份。只读认证不要求messages/success/final、不采样改写旧Native；原exit code0/null/stopped保持且error不当idle。基础身份与停止认证后HEAD==seed仅跳过无进度，有新HEAD才授失败Git材料；新seed保原bytes与业务诊断，source/tests对象、owner/schema/path/Git后代/clean及当前fence/lease/CAS门全保，不附failedWorktree或授自动重试。writer26仅追加SELECT1，停稳旧writer/资源后online backup及事务25→26，旧25拒写；回滚恢复升级前一致v25库及evidence/Git refs，不删marker或重签旧记录，NativePlan v3/structured v6不变。
+
+上述材料的旧inline原诊断只从程序自己生成、精确draft/schema路径绑定的冻结尾段读取，按JSON字符串/数组边界及精确分隔符完整恢复errors和repairDiagnostics；合法字符串内标记不参与切割，空数组保持为空，缺损/歧义明确拒绝。非draft无该段仍无草稿诊断；不解析模型final、不改原prompt/请求字节、业务摘要或accepted位置，git-json现有认证及writer26保持。
+
+Native P0按attempt显式冻结code-behavior-draft-v1：分析和独审复用P1的Git临时JSON草稿与精确只读schema；业务JSON只写入Git草稿，Native final只返回符合`DRAFT_RECEIPT_SCHEMA`的单一JSON对象，形如`{"summary":"..."}`，前后不附说明或Markdown代码围栏。先保活实际提交blob再验证syntax/schema；失败跨attempt在原文件续改，不从零重答。每个owner/purpose独立，源码/tests/Spec及absence保持。独审格式失败保此前已校验分析的原draft及Native trace，仅重开独立review；业务拒绝仍回分析和完整独审。诊断只进入真实请求，不改变同业务输入的缓存身份，原预算、fence、写范围与最终验证不变。旧已reserved read请求不补协议；原生格式失败仅经authenticateNativeRejectedFinal核原请求/精确schema/input/owner、canonical错误与停止证明后，将CAS原bytes/errors作为下一真实seed的临时输入，明确区别于Git稿；真实Agent正常提交后才生成新Git身份，不改写历史原件。
+
+P0草稿持久协议由sync writer23围栏保护，避免marker已落盘但dispatch未reserved时被旧writer22忽略。升级必须先停稳旧writer并结算或保留真实资源，经原SQLite online backup/组件事务22→23，保全部旧checksum、请求、记录与CAS；回滚先停新writer，恢复升级前v22一致备份与原evidence/Git refs，不删marker降级。
+
+原生exit0/success缺少必需structured_output仍严格失败；只有完整原身份/停止认证后才给typed格式诊断，正文packet保持缺席。已停真实Git草稿可独立于packet保留并沿原预算续修。历史无typed witness和正式安全暂停的最新已提交编辑稿，只在新的有效attempt中经原request/owner/input/seed/schema/path、source/tests对象与正式stop/removed全值重验，观察为未批准Git材料并复制原字节到新seed。原failed、Native记录/计划/checkpoint一律不补签，旧CLI键不重发；actual missing-final才有格式诊断，普通pause不造final/raw/错误码。新观察provenance记时间、原失败及Native引用、实际HEAD/tree/OID/正文SHA，旧批准、模型选择、总预算、fence与V1–V4/Docker/严格Git/采纳门保持。
+
+已有认证draft不屏蔽更晚正式停止执行的最新Git观察。材料选择携当前draft作瞬态参数，仅当原正常Native/注入trace认证定位到该draft来源，暂停资源在既有retry来源顺序中严格更晚、原seed与当前业务树除本owner临时稿/schema外全部对象相同，且所有原材料门槛仍过时，才复制其最新正常Git正文到新seed。更老暂停、未知来源、不同起点及普通Native/material fallback不能覆盖已有draft；无更晚可救稿则保持原draft、错误与标签，不继承批准。该参数不进入业务摘要、旧请求或持久协议。
+
+已停止的真实CLI错误与未批准Git材料资格分别验证：原root投影明确exit1/signal:null/stopped、type=result/subtype=success/is_error:true且无structured_output时，仅在完整原身份/回显/计划、正式资源停止、owner/schema/path、source/tests对象和真实干净Git后代均认证后，允许新有效attempt续最新正常提交；不将API限流或其他原生失败改判成功/格式，不要求失败前未产生的sealed history，不补旧记录或raw/final。可选协议诊断只追加init/result公开身份/parent存在位/ordinal及固定错误码和摘要，禁止正文、thinking、stderr或凭据；第二init仍拒绝，缺事件与非零退出分别准确诊断。模型/CLI版本/BaseURL选择、预算/租约、独审与V1–V4/Docker/Git/采纳门保持。
+
+原request/plan/init/echo/正式stop、source/schema与当前fence均认证后，实际干净HEAD仍等于原seed的无进度候选先沿既有分支跳过，再判断输出终态形状；不将无JSON的exit143旧失败误判为missing-final阻断新任务。该skip不代表成功或格式资格，foreign身份、未知停止/进程与真实新提交仍不得借此越过认证；exit143已有新稿不取得本轮明确exit1错误材料资格。
+
+ZCode物理草稿另须原精确turn.failed；原canonical cancelled可与之并存，普通暂停的turn.completed/turn.cancelled不在本轮physical准入，既有正常Git暂停材料政策保持。已认证且正式stop/removed的owner阶段工作树若仅精确JSON草稿未提交，新有效fence可只读保存其原bytes为明确未批准的physical_draft材料，含syntax/schema坏稿，不伪称历史Git稿、Native final或批准。HEAD可等于seed；其余源码/tests/Spec/schema/context的path-mode-OID/absence与index授权外变化全部拒绝，旧目录/index/记录不补写。P0严格按原来源attempt顺序，较旧物理稿不因晚观察盖更新Git；保全部errors/repairDiagnostics，review只续审保原ready分析。P1沿进程内binding/完整readonly seed/existingDraft回调，按原Native真实attempt/round定位，只让严格较新物理来源替换已有Git材料，保合法candidate/续审优先；原errors和冻结程序诊断完整进入新prompt，跨父/新旧diag只排程序可信精确path/mode/OID投影并集，其余source/tests/非角色Spec与absence全保，复用同observer；新Agent正常提交并经原schema/业务/独审/strict Git及最终采纳门后才形成新稿。新fence provenance留approved:false、物理来源、原Native/stop引用、observedHEAD/tree、indexSHA及原文JSON CAS。writer27仅SELECT1；升级停稳旧writer/结算资源、0600 online backup后26→27，旧26拒写，回滚恢复一致v26库与evidence/Git refs，不删marker或改旧请求。

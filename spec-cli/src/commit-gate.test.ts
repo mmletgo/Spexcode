@@ -921,7 +921,7 @@ function repo(): { main: string; wt: string } {
 function gate(cwd: string, proposal?: string): { ok: boolean; out: string } {
   const cli = join(import.meta.dirname, 'cli.ts')
   try {
-    const out = execFileSync('npx', ['tsx', cli, 'internal', 'commit-gate', ...(proposal ? [proposal] : [])], {
+    const out = execFileSync(process.execPath, ['--import', import.meta.resolve('tsx'), cli, 'internal', 'commit-gate', ...(proposal ? [proposal] : [])], {
       cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
     })
     return { ok: true, out: out.trim() }

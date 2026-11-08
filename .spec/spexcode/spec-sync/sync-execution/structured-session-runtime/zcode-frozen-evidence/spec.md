@@ -1,15 +1,15 @@
 ---
-title: ZCode 原生冻结读取证明
+title: ZCode 原生冻结读取证据
 status: active
 hue: 175
 desc: 从同轮原始消息、模型请求与终态重建冻结读取，并以完整见证支持零派发冷恢复。
 code:
-  - spec-cli/src/zcode-frozen-proof.ts
+  - spec-cli/src/zcode-frozen-evidence.ts
 related:
-  - spec-cli/src/zcode-frozen-proof.test.ts
+  - spec-cli/src/zcode-frozen-evidence.test.ts
   - spec-cli/src/frozen-context.ts
 ---
-# ZCode 原生冻结读取证明
+# ZCode 原生冻结读取证据
 
 ## raw source
 

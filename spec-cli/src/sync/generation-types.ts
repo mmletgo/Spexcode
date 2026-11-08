@@ -32,6 +32,8 @@ export type GenerationInput = {
   mandatoryTests: SyncCoordinatorPlan['mandatoryTests']
   verifications: readonly SyncCoordinatorPlan['verifications'][number]['definition'][]
   /** 已结算失败产物和诊断；修复上下文不是新的业务事实或通过证据。 */
+  /** 仅引用同组已认证格式拒绝或Native成功但字段无效的原件；原JSON仍为未批准诊断，不进入业务候选。 */
+  reviewRepair?: { resultRef: import('./operation-types.js').BlobRef; nativePlanRef: import('./operation-types.js').BlobRef; checkpointRef: import('./operation-types.js').BlobRef }
   repairContext?: { previousOutput: unknown; diagnostics: readonly { code: string; message: string }[] }
   analysis?: CodeBehaviorEvidence
   analysisEvidence?: readonly CodeBehaviorEvidence[]
@@ -66,6 +68,8 @@ export type GenerationOptions = {
   prepareOnly?: boolean
   reviewCandidate?: CandidateRef
   builderTraces?: readonly ElaborationTrace[]
+  /** 既有最终分区dispatch推导的P2 Spec写范围；只读返P1定位早验不改变冻结输入。 */
+  reviewSpecWritePaths?: readonly string[]
   implementationPolicy?: { writePaths: readonly string[]; sourcePaths: readonly string[] }
   beforePartitionGeneration?: (paths: readonly string[], evidenceRef: import('./operation-types.js').BlobRef) => Promise<{ scope: SyncScope; composed?: ComposedInputRef }>
   validateCandidate: (candidate: CandidateRef) => Promise<readonly ContractFinding[]>
@@ -95,5 +99,5 @@ export type GenerationResult = {
   reviewPassed: boolean
   runtimeVerification: 'not_run'
   delivery: 'not_applied'
-  failure: { code: string; message: string } | null
+  failure: { code: string; message: string; sessionId?: string; threadId?: string; turnId?: string; requestKey?: string; inputDigest?: string } | null
 }

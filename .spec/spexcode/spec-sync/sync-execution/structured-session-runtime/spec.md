@@ -19,15 +19,19 @@ related:
 
 ## expanded spec
 
+本次执行中新认证的 ZCode worktree 原生失败由 [[zcode-structured-runtime]] 保留 failed 首要原因，执行队列复用原 exact adapter.stop；只有独立真实停止证明成立，才以既有 failed+cancellation.nativeStopped 交给资源桥结算 terminal→removed。错误和清理事实分别保存在既有 error/cancellation，不增加持久格式或成功授权；停止未知仍 cancelling，首要失败不被清理诊断遮蔽。该路径不提供 output、rejectedOutput 或 failedWorktree，不扫描或重签历史 failed/cancelling、saved/reserved 请求。成功、schema、Git、独审与显式取消门禁保持；新不同请求只在原资源正式释放后取得容量，同键恢复不发送。
+
 新产生的已认证final格式/schema拒绝可在failed运行元数据及StructuredSessionError上携可选tagged rejectedOutput：完整final文本、SHA、prompt/schema/input/purpose及原生thread/turn绑定。它只是不可信诊断，成功output槽仍缺席，旧failed无字段不补读/不猜分类。同键读取和资源桥重核固定请求与证据身份；取消、无final、未停稳、身份不符不得附正文。可选观测不参与固定策略/创建摘要、不增加执行authority，因此不新增writer marker。
 
 资源专用恢复可在非持久取消选项中明确wakeQueue:false：仍刷新原queue candidate投影并保存精确取消/停止证明，只禁止本次主动requestQueueDrain。独立资源入口同时沿[[production-cutin]]静音本次canonical提交后的主动delivery wake；普通cancel默认行为保持。已有queued目标尚无nativeStopped时同样适用，资源结算不替旁置queued任务或watcher启动新turn；后续正常drain重新核目标stopped，仅推进仍合法的queued任务。
+
+真正新建的 Claude/ZCode worktree 会话记录冻结 nativeConfiguration:cli-config-v1；已有记录按原字段或缺席恢复。内部 sessionCreateKey 已由资源桥冻结请求时，无记录也沿上游原字段或缺席，不再添加默认；显式不一致拒绝。新配置请求只核原生命名空间与选择形状，default 或不透明模型交给对应 adapter 及真实初始化验证；旧缺席仍执行原 parser。source/input、seed Git、schema、消息、预算与精确停止门禁不因配置选择而放宽。
 
 ZCode worktree read 真正新建记录默认冻结 [[zcode-structured-runtime]] 的非交互工具策略；同创建键已有记录按原字段或缺席恢复，显式不同策略拒绝。内部 sessionCreateKey 表示资源桥已经冻结工具策略：尚无会话记录时原样保留上游显式字段或缺席，由固定策略构造严格验证 provider、mode 和精准 denylist，不能改成空策略或再补默认；已有记录仍优先核原记录。业务 requestKey、inputDigest 和创建实际键的语义保持。策略字段参与创建摘要，旧创建哈希和原 native 输入不改。
 
 同步 budget.mode=unlimited 的新模型请求使用 timeoutMs:null，表示不设置模型调用总时限；有限数字期限及旧记录语义保持。null 调用仍受独立会话创建、租约/心跳、显式取消/停止/关闭和可信 VERIFY/Docker 各自期限约束，不以大数模拟无限。 仅 null 固定执行策略采用 version5，原 policy/realm/原生读取证明版本保持各执行器语义；旧数字 version1–4 原样兼容。独立旧 queue 的固定策略比较必须在任何 Native 启动、timer 或停止副作用前拒绝新版本。创建仍取独立 sessionCreateTimeoutMs，模型无期限不解除创建限幅。
 
-明确 ZCode 命名空间进入 [[zcode-structured-runtime]]，复用现有 `zcode` harness 身份、同一创建事务、启动队列、资源桥与取消门禁，不进入普通 one-shot launcher 或 Codex generation。版本4固定策略和原生 `zcodeNative` 身份分别持久化；换 provider 仅新操作或合法 retryOf。最终文本可解码唯一完整的外层 JSON 代码围栏，正文仍由 JSON.parse 与原 object schema 严格校验，不补字段、拼接多段或接收额外说明。真实精确终态、[[zcode-frozen-proof]] 与全进程结算后才能发布；冷 completed 回放只读原证据，未知在途不追加 prompt。
+明确 ZCode 命名空间进入 [[zcode-structured-runtime]]，复用现有 `zcode` harness 身份、同一创建事务、启动队列、资源桥与取消门禁，不进入普通 one-shot launcher 或 Codex generation。版本4固定策略和原生 `zcodeNative` 身份分别持久化；换 provider 仅新操作或合法 retryOf。最终文本可解码唯一完整的外层 JSON 代码围栏，正文仍由 JSON.parse 与原 object schema 严格校验，不补字段、拼接多段或接收额外说明。真实精确终态、[[zcode-frozen-evidence]] 与全进程结算后才能发布；冷 completed 回放只读原证据，未知在途不追加 prompt。
 
 明确命名空间 `claude:<exact-native-model-id>` 选择 [[claude-structured-runtime]]，继续复用同一创建、排队、预算和结果接缝；无前缀或缺省 model 完全保持既有 Codex 策略、请求摘要和历史恢复。Claude 使用版本3 `claude-frozen-read-only-v1`，不进入 Codex generation ledger，不借用其 turn 或版本2证明。已冻结 operation 不能热切 provider，切换仅属于新 operation 或合法 retry 的新固定请求。
 
@@ -75,3 +79,9 @@ Claude 新请求在首次冻结时把完整 task 和条目生成最多65536字�
 原生 worktree 请求明确提供 worktree:{baseCommit,tree,mode} 时，走独立 version6/native-worktree-v1 策略及专属 realm，不调用 prepareFrozenPrompt，不产生 frozenReadProof，旧只读策略与证明仍完整保留。仅明确 Claude/ZCode 原生模型可执行。baseCommit 必须是完整不可变 seed commit SHA，tree 精确等于其 Git tree；创建固定 base 与 forkCommit 均为 seed，后续主 checkout 的 HEAD/index/WIP 不参与初始化。runner 用创建记录的真实 worktreePath 作为 cwd，允许正常文件读取、搜索、编辑与检查，schema 仅控制最终输出格式。read 模式完成要求 HEAD/tree 等于 seed 且工作区干净；edit 模式要求代理正常 Git add/commit（保留 hooks），HEAD 是 seed 后代且干净。结果及持久 envelope 保存 baseCommit/baseTree/headCommit/tree/worktreePath，所有差量由真实 Git 对象导出。精确原生模型、session/turn、终态、退出与完整进程停止仍必需；冷 completed 核原证据和同一不可变 Git 对象身份，正式 close 移除 worktree 不阻断复用、不重建工作区，零新派发。有限与 null 模型期限均支持，创建及取消期限独立。
 
 已认证原生成功输出通过 schema 后，Git 后置合约拒绝以 native_worktree_result_invalid 持久在 failed.errorCode；原错误及已知精确身份在同键冷重放保持，不新派 Native，不写 output/resultWorktree 或 canonical completed。原生 CLI 协议完成缓存与原 Git/index/草稿保持原件，不能代表业务通过；旧缺码失败不按文本推定新分类。
+
+ZCode 原生工作树的精确 turn.failed EPIPE 在正式 stop 肯定后保存 failed、native_turn_transport_failed 和原诊断，调用者得到原 SID/thread/turn/requestKey/inputDigest；停止未知仍保首要失败诊断且处于 cancelling，不发布该 typed 失败权限。已结算失败可按原键重放同一错误，不添成功、raw 或 Git witness。
+
+本地 Native RPC 的 typed native_rpc_timeout 先保存 cancelling 与原 code/message，再复用既有精确 adapter.stop 协议消费 PID/start/receipt 和原 session/turn 停止证明；确证后保存 failed 与原错误及 stop，未知仍 cancelling 占容量。同键只重放失败，不重发未 ACK 的 create，不把原生故障改签为用户取消；显式取消和总 timeout 保持原语义。新 observer 对已认证 rejectedOutput 且确证停稳的 version6 stage 可保存 failedWorktree：只取实际记录工作树的干净、归属原 seed 的真实 Git 结果。Git 后置合约不成立时保留原格式错误及原 final，不附 witness；冷读取只核已有事实，不补捕。该持久失败/停止语义受统一 sync v22 writer fence 约束，旧 writer 不得消费新状态。
+
+已认证typed格式错误不要求必有rejectedOutput：缺少最终结构化字段时，先核error原thread/turn与canonical一致，再复用原adapter.stop与真实nativeWorktreeResult保可选failedWorktree。Git后置合约失败保原格式错误及确证stop，绝不假造Git或final；同键只验证已存原seed/record路径/停止与Git对象，不补捕旧失败。旧无typed code/witness仍按原failed重放；后续新attempt的现在材料观察由协调器承担，不能追写原record。

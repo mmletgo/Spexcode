@@ -16,6 +16,8 @@ related:
 
 ## expanded spec
 
+新远端 v2 与旧本地 v1 通过原资源计划和 checkpoint CAS 恢复。运输装配与运行入口相同；旧记录缺席不补 SSH。每次 upload/create/start 前通过原 assertWriteFence，之后资源观察不依赖失效业务权。恢复只读取原 effect 及原容器，显式 resource-only 不上传/create/start；closed 排空可结算已登记但从未产生 remote intent 的迟到请求，真实未知 API 提交仍占容量。
+
 本节点连接 [[sync-store]] 的资源记录与 [[verification-executor]]。每次运行由 attempt 与稳定 runId 定位，计划保存固定请求摘要和输入/候选身份。首次 planned 在容器 create 前持久化；后续 created、terminal、removed 使用精确资源身份与前一检查点 CAS 保存，原业务 fence 失效不阻止真实资源结算。
 
 同一请求重入读取既有资源及内容寻址检查点；removed 回放原终态，不重新创建容器。不同请求载荷不得复用原 runId。恢复已取消、暂停或被取代的尝试时传递取消信号，只终止和清理已有资源，不启动新的验收。检查点持久后通知观察者；观察者失败按执行器恢复语义处理，已持久记录仍是下次恢复依据。
