@@ -14,6 +14,8 @@ P0至P5按完整需求交付，不以阶段演示、局部测试或可修改的�
 
 ## expanded spec
 
+同步已结算且clean的completed与确证停止failed/cancelled任务，沿[[sync-native-run]]逐任务复用正式[[archive]]回收执行目录/Git登记，保原result/error、branch/ref、会话历史与JSON。后续材料消费经原Native/CAS/owner/schema/保护面认证临时恢复同一checkout，读原稿后回收本次创建目录，零Native/队列唤醒；业务schema后置拒绝不能导致从零重做。dirty/未知停止保留，pending不改批准/计费，不新增持久清理状态、全局扫描或后台恢复用户goal。
+
 已审只读事实返修的原因果不因pending清空而丢失，普通恢复沿最新已认证正文和原独审输入继续。旧cleared checkpoint只从同attempt原历史冷验，不补旧原件。原诊断属于请求绑定，只有无新修复输入且完整原件一致时承接，不能忽略字段来复用旧审查。
 
 V3恢复债由[[sync-coordinator]]沿同一run/resource/checkpoint在正常调度继续观察，不能永久复用recovery_required缓存。原失败、候选、deadline与资源真实性门保持，原期限后的未知副作用仅经正式排空与清算结算，不以新模型、新run或取消当前Native替代。

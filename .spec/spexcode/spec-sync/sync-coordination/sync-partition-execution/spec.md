@@ -11,6 +11,8 @@ code:
 
 ## expanded spec
 
+P0/P1分区材料回调透传可await结果，使归档失败来源能沿同一checkout临时恢复/严格观察/回收接缝续原稿。分区身份、读取/预算、输入摘要、原candidate/批准与并发语义保持，无新持久字段。
+
 
 多轮事实返修复用原acceptedRef/changes作确定值继承。仅既有checkpoint接缝认证同owner完整changes与真实原generation attempt的V5及批准身份后，才投影事实固定值到局部targets/files；当前finding不开放旧ID。全局seal接收同一进程内固定基线，先证明其仅改变作者事实字段，再作完整候选与演进比较；aggregate继续恢复原input.targets.sourceDigest为beforeDigest，原作者CAS和源码/tests对象不变。不增加持久字段或历史权限集合。
 

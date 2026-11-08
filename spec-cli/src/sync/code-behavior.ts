@@ -44,7 +44,7 @@ export type CodeBehaviorContinuation = {
   readyAnalysis?: CompletedBehaviorDraft
   reviewResult?: CompletedBehaviorDraft
 }
-export type CodeBehaviorCheckpoints = { loadMaterial?(purpose: BehaviorPurpose, schemaDigest: string, inputDigest: string, request: Pick<ElaborationSessionRequest, 'prompt' | 'worktree'>, existingDraft?: ElaborationDraft): ElaborationDraftMaterial | null; load(inputDigest: string): CodeBehaviorContinuation | null; save(value: CodeBehaviorContinuation): void }
+export type CodeBehaviorCheckpoints = { loadMaterial?(purpose: BehaviorPurpose, schemaDigest: string, inputDigest: string, request: Pick<ElaborationSessionRequest, 'prompt' | 'worktree'>, existingDraft?: ElaborationDraft): ElaborationDraftMaterial | null | Promise<ElaborationDraftMaterial | null>; load(inputDigest: string): CodeBehaviorContinuation | null; save(value: CodeBehaviorContinuation): void }
 type Proposal = { changes: Omit<CodeBehaviorChange, 'id'>[]; facts: CodeBehaviorAnalysis['facts']; acceptanceChanges: Omit<AcceptanceChangeProposal, 'action'>[]; newNodes: { codePath: string; parentNodeId: string; basis: string }[]; resolutions: CodeBehaviorAnalysis['resolutions'] }
 export type CodeBehaviorContext = {
   task: Record<string, unknown>
@@ -559,7 +559,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
     const binding: StageDraftBinding = { ownerDigest, sourceInputId: input.snapshot.id, schemaDigest: contentHash(JSON.stringify(schema)), path: `.spex-sync-drafts/${ownerDigest}.json` }
     const prior = continuation?.drafts[purpose]
     if (prior && (prior.ownerDigest !== ownerDigest || prior.path !== binding.path || prior.schemaDigest !== binding.schemaDigest)) throw new Error('P0草稿owner/schema与当前阶段不匹配')
-    const material = draftMode && (purpose !== 'code_behavior_analyze' || !continuation?.readyAnalysis) ? checkpoints?.loadMaterial?.(purpose, binding.schemaDigest, inputDigest, { prompt, worktree: base }, prior) : undefined
+    const material = draftMode && (purpose !== 'code_behavior_analyze' || !continuation?.readyAnalysis) ? await checkpoints?.loadMaterial?.(purpose, binding.schemaDigest, inputDigest, { prompt, worktree: base }, prior) : undefined
     const source = material?.source ?? (prior ? readStageDraft(commonDir, prior, binding) : undefined)
     if (purpose === 'code_behavior_analyze' && continuation?.readyAnalysis) {
       const ready = continuation.readyAnalysis, trace = ready.trace

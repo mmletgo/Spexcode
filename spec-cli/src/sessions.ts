@@ -1,4 +1,4 @@
-import { assertNativeWorktreeSeed } from './native-worktree-runtime.js'
+import { assertNativeWorktreeSeed, nativeWorktreeResult } from './native-worktree-runtime.js'
 import { structuredObserverState, type StructuredExecution } from './session-structured-policy.js'
 import { spawn } from 'node:child_process'
 import { createConnection } from 'node:net'
@@ -18,7 +18,7 @@ import { mainBranch, mainRoot, repoRoot, gitCommonDir, readConfig, runtimeRoot, 
 import { readSessionFiles, sessionUploads, type SessionUpload } from './session-files.js'
 import { readSessionWebs, type SessionWeb } from './session-web.js'
 import { readSessionWidgets, type SessionWidget } from './session-widgets.js'
-import { acquireFreshSessionApplicationForCreate, configuredSessionApplication, initializeFreshSessionApplication, releaseFreshSessionApplicationForCreate, sessionApplicationCutoverState, setSessionApplicationCommitWake } from './session-application.js'
+import { acquireFreshSessionApplicationForCreate, configuredSessionApplication, initializeFreshSessionApplication, releaseFreshSessionApplicationForCreate, sessionApplicationCutoverState, setSessionApplicationCommitWake, withoutSessionApplicationExecutionWake } from './session-application.js'
 import { type ProductionSessionApplication } from '@spexcode/session-application'
 import { MESSAGE_KINDS } from '@spexcode/session-protocol'
 import { decodeEventJson } from '@spexcode/session-events'
@@ -3102,7 +3102,7 @@ function archiveWorktreeState(id: string, path: string): string {
   }
 }
 
-async function restoreArchivedWorktree(id: string, rec: SessRec): Promise<void> {
+async function restoreArchivedWorktree(id: string, rec: SessRec, temporary?: { created: boolean }): Promise<void> {
   if (!rec.branch) throw new ResourceConflict(`session ${id} has no branch to restore its archived worktree`)
   const root = mainRoot(), branch = rec.branch, ref = archiveRef(id)
   const archive = await gitTry(['-C', root, 'rev-parse', '--verify', `${ref}^{commit}`])
@@ -3115,11 +3115,13 @@ async function restoreArchivedWorktree(id: string, rec: SessRec): Promise<void> 
     const signal = AbortSignal.timeout(30_000)
     const state = await sessionCandidateState(root, rec.worktreePath, branch, signal)
     if (state.path) {
+      if (temporary) throw new ResourceConflict(`session ${id} temporary restore requires an absent checkout`)
       if (!state.worktree || !state.branch) throw new ResourceConflict(`session ${id} existing restore path has no matching Git ownership`)
       const mismatch = await proveSessionCandidate(root, rec.worktreePath, branch, signal)
       if (mismatch) throw new ResourceConflict(`session ${id} existing restore identity mismatch: ${mismatch}`)
     } else {
       const result = await gitTry(['-C', root, 'worktree', 'add', rec.worktreePath, branch], { extraEnv: DEFER_FOOTPRINT_REFRESH })
+      if (temporary && (result.ok || existsSync(rec.worktreePath) && !await proveSessionCandidate(root, rec.worktreePath, branch, signal))) temporary.created = true
       if (!result.ok) throw new ResourceConflict(`git worktree add failed: ${result.stderr.trim() || result.failure}`)
     }
   })
@@ -4054,7 +4056,7 @@ async function stopSessionUnlocked(id: string): Promise<boolean> {
 export const stopSession = (id: string): Promise<boolean> =>
   withSessionTransition(id, () => withRecordLock(id, () => stopSessionUnlocked(id)))
 
-async function coldStopSessionUnlocked(id: string): Promise<boolean> {
+async function coldStopSessionUnlocked(id: string, wakeQueue = true): Promise<boolean> {
   let wt: { path: string; branch: string | null; rec: SessRec } | null
   try { wt = await findWorktree(id) }
   catch (e) {
@@ -4143,7 +4145,7 @@ async function coldStopSessionUnlocked(id: string): Promise<boolean> {
     }
     throw error
   }
-  requestQueueDrain()
+  if (wakeQueue) requestQueueDrain()
   return true
   } finally { archiving.delete(id) }
 }
@@ -4241,14 +4243,32 @@ function scheduleCloseResidueReport(target: CloseResidueTarget): void {
   })
 }
 
-async function closeOwnedSessionUnlocked(id: string, wt: { path: string; branch: string | null; rec: SessRec }, _source: CloseSource, unboundStopped = false): Promise<boolean> {
+async function removeClosedWorktree(root: string, path: string, expectedBranch?: string): Promise<void> {
+  let slot: string | null = null
+  try { slot = existsSync(path) ? treeSlotDir(path) : null } catch { /* tree already unresolvable — nothing to key the slot by */ }
+  await withWorktreeRegistryLock(async () => {
+    if (existsSync(path)) {
+      if (expectedBranch) {
+        const mismatch = await proveSessionCandidate(root, path, expectedBranch, AbortSignal.timeout(30_000))
+        if (mismatch) throw new ResourceConflict(`refusing stopped material cleanup at ${path}: ${mismatch}`)
+      }
+      const trashed = moveWorktreeToTrash(root, path)
+      const pruned = await gitTry(['-C', root, 'worktree', 'prune'])
+      if (!pruned.ok) console.error(`spex: deferred worktree at ${path} was renamed to ${trashed}, but git worktree prune failed: ${pruned.stderr.trim() || pruned.failure}`)
+      queueWorktreeTrash(trashed)
+    }
+  })
+  if (slot) { try { rmSync(slot, { recursive: true, force: true }) } catch { /* best-effort GC */ } }
+}
+
+async function closeOwnedSessionUnlocked(id: string, wt: { path: string; branch: string | null; rec: SessRec }, _source: CloseSource, unboundStopped = false, wakeQueue = true): Promise<boolean> {
   const root = mainRoot()
   const receiptFailure = publishedSessionCandidateReceiptRetirementFailure(wt.rec, root)
   if (receiptFailure) throw new ResourceConflict(`refusing close for ${id}: ${receiptFailure}; public record and resources remain the authority fence`)
   const retired = !!retirementReason(wt.rec)
   if (!retired && wt.rec.status === 'queued') await assertQueuedCloseSafe(id, wt.rec)
   if (!retired && !unboundStopped && wt.rec.status !== 'queued') {
-    await coldStopSessionUnlocked(id)
+    await coldStopSessionUnlocked(id, wakeQueue)
     wt = (await findWorktree(id)) || wt
   }
   // The archive ref is published before any worktree removal. A failed ref write leaves the complete
@@ -4278,21 +4298,11 @@ async function closeOwnedSessionUnlocked(id: string, wt: { path: string; branch:
       parentSessionId: latest.parent,
     })
   }
-  let slot: string | null = null
-  try { slot = existsSync(wt.path) ? treeSlotDir(wt.path) : null } catch { /* tree already unresolvable — nothing to key the slot by */ }
-  await withWorktreeRegistryLock(async () => {
-    if (existsSync(wt.path)) {
-      const trashed = moveWorktreeToTrash(root, wt.path)
-      const pruned = await gitTry(['-C', root, 'worktree', 'prune'])
-      if (!pruned.ok) console.error(`spex: deferred worktree ${id} was renamed to ${trashed}, but git worktree prune failed: ${pruned.stderr.trim() || pruned.failure}`)
-      queueWorktreeTrash(trashed)
-    }
-  })
-  if (slot) { try { rmSync(slot, { recursive: true, force: true }) } catch { /* best-effort GC */ } }
-  requestQueueDrain()   // a close frees a slot — start the next queued session if any
+  await removeClosedWorktree(root, wt.path)
+  if (wakeQueue) requestQueueDrain()   // a close frees a slot — start the next queued session if any
   return true
 }
-async function closeSessionUnlocked(id: string, source: CloseSource): Promise<boolean> {
+async function closeSessionUnlocked(id: string, source: CloseSource, wakeQueue = true): Promise<boolean> {
   let wt: { path: string; branch: string | null; rec: SessRec } | null = null
   try { wt = await findWorktree(id) }
   catch (e) {
@@ -4327,8 +4337,8 @@ async function closeSessionUnlocked(id: string, source: CloseSource): Promise<bo
   }
   const target = wt
   const close = () => target.branch
-    ? withRecordLock(sessionCandidateLockId(target.path, target.branch), () => closeOwnedSessionUnlocked(id, target, source, unboundStopped))
-    : closeOwnedSessionUnlocked(id, target, source, unboundStopped)
+    ? withRecordLock(sessionCandidateLockId(target.path, target.branch), () => closeOwnedSessionUnlocked(id, target, source, unboundStopped, wakeQueue))
+    : closeOwnedSessionUnlocked(id, target, source, unboundStopped, wakeQueue)
   // Codex threads share one app-server. Its cold proof snapshots the full resident census and then
   // mutates that same census; serialize project-local Codex closes so a sibling close cannot make a
   // previously captured reference disappear during archive verification.
@@ -4336,11 +4346,30 @@ async function closeSessionUnlocked(id: string, source: CloseSource): Promise<bo
     ? withRecordLock('codex-shared-close', close)
     : close()
 }
-export const closeSession = (id: string, rawSource?: unknown): Promise<boolean> => {
+export type SessionCloseOptions = {
+  wakeQueue?: false
+  settled?: { record: SessRec; commonDir: string; worktree?: NonNullable<StructuredExecution['resultWorktree']> }
+}
+export const closeSession = (id: string, rawSource?: unknown, options: SessionCloseOptions = {}): Promise<boolean> => {
   const source = normalizeCloseSource(rawSource)
   let residueTarget: CloseResidueTarget | null = null
   return withSessionTransition(id, () => withRecordLock(id, async () => {
-    const closed = await closeSessionUnlocked(id, source)
+    if (options.settled) {
+      const { record, commonDir, worktree } = options.settled, current = readRecord(id), state = current?.structuredExecution
+      if (!current || JSON.stringify(current) !== JSON.stringify(record) || current.session !== id || current.worktreePath !== record.worktreePath
+        || !state?.worktree || state.state !== 'completed' && !(['failed', 'cancelled'].includes(state.state ?? '') && state.cancellation?.nativeStopped === true)
+        || worktree && JSON.stringify(state.resultWorktree) !== JSON.stringify(worktree))
+        throw new ResourceConflict(`deferring settled worktree close for ${id}: session identity changed`)
+      if (current.archived && current.closedAt && !existsSync(current.worktreePath)) return false
+      const path = current.worktreePath
+      const actualCommonDir = await git(['-C', path, 'rev-parse', '--git-common-dir'])
+      const branch = await git(['-C', path, 'symbolic-ref', '--short', 'HEAD'])
+      const actual = nativeWorktreeResult(path, state.worktree)
+      if (realpathSync(resolve(path, actualCommonDir.trim())) !== realpathSync(commonDir)
+        || worktree && JSON.stringify(actual) !== JSON.stringify(worktree) || branch.trim() !== current.branch)
+        throw new ResourceConflict(`deferring settled worktree close for ${id}: Git identity changed or worktree is dirty`)
+    }
+    const closed = await closeSessionUnlocked(id, source, options.wakeQueue !== false)
     if (closed) {
       revokeSenderDelivery(id)
       const archived = readRecord(id)
@@ -4354,6 +4383,28 @@ export const closeSession = (id: string, rawSource?: unknown): Promise<boolean> 
     if (closed && residueTarget) scheduleCloseResidueReport(residueTarget)
     return closed
   })
+}
+
+/** 正式归档的停止材料只临时还原checkout；沿原close收尾，不启动或唤醒会话。 */
+export function withArchivedStructuredWorktree<T>(record: SessRec, observe: (path: string) => T | Promise<T>): Promise<T> {
+  return withoutSessionApplicationExecutionWake(() => withSessionTransition(record.session, () => withRecordLock(record.session, async () => {
+    const current = readRecord(record.session), state = current?.structuredExecution
+    if (!current || JSON.stringify(current) !== JSON.stringify(record) || !state?.worktree
+      || !['failed', 'cancelled'].includes(state.state ?? '') || state.cancellation?.nativeStopped !== true || current.launchReadinessPending)
+      throw new ResourceConflict(`refusing stopped material checkout for ${record.session}: exact stopped identity changed`)
+    if (!current.archived) return observe(current.worktreePath)
+    if (!current.closedAt || !current.stopped || !hasValidColdProof(current) || existsSync(current.worktreePath))
+      throw new ResourceConflict(`refusing stopped material checkout for ${record.session}: archived checkout is not cold and absent`)
+    const archive = await gitTry(['-C', mainRoot(), 'rev-parse', '--verify', `${archiveRef(record.session)}^{commit}`])
+    if (!archive.ok) throw new ResourceConflict(`refusing stopped material checkout for ${record.session}: formal archive ref is missing`)
+    const temporary = { created: false }
+    try {
+      await restoreArchivedWorktree(record.session, current, temporary)
+      return await observe(current.worktreePath)
+    } finally {
+      if (temporary.created) await removeClosedWorktree(mainRoot(), current.worktreePath, current.branch!)
+    }
+  })))
 }
 
 function quarantineRecord(id: string): string | null {

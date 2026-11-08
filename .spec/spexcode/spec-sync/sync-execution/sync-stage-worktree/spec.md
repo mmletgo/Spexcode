@@ -13,6 +13,8 @@ Spec变更只把任务相关规格与原始需求差量告知代理，代理在�
 
 ## expanded spec
 
+已结算且clean的Native工作树可以由[[sync-native-run]]正式close；branch/archive与原不可变Git对象保持。captureStageDraft、readStageDraft和importStageChanges不依赖结果物理目录，业务JSON/schema后置拒绝仍保原bytes及未批准身份。尚未capture的已提交失败/取消稿，由调用者在原真实性/停止认证后沿[[archive]]临时还原同一checkout，再执行本模块原严格观察及capture，结束后回收。无新增提交保持空材料，不改旧witness或批准；未提交physical稿为dirty来源，未知停止及dirty仍不自动关闭。
+
 StageDraftMaterialRequest仅在进程内传当前binding/真实seed/inputDigest、可定位的existingDraft与程序可信readonly overlay的精确path/mode/OID投影，供P1按真实Native attempt/round选择严格较新物理材料及跨父/诊断比较。它不进入旧请求或NativePlan，不改变本模块对原停止工作树、index、schema/context及其他文件的完整冷验，也不能赋予旧稿新的Git或批准角色。
 
 已认证原Native身份并正式stop/removed的owner编辑工作树，可由调用者在新有效fence只读观察精确UTF8普通JSON草稿。ZCode物理来源还须原精确turn.failed；原canonical cancelled可与该失败终态并存，普通暂停的turn.completed/turn.cancelled不在本轮physical_draft准入，既有正常Git暂停材料政策保持。仅打开原exit.json时遇到ENOENT，使该物理/Git候选不合格并在读取新进度前跳过；formal stop/removed不能替代缺失的exit或失败终态。缺plan/send、其他读取错误、坏JSON及存在但非法exit仍显式失败。HEAD仍为seed或其后代；Git提交、index及工作区仅此draft允许变化，schema/context/Spec/源码/tests的path-mode-OID与absence全部保持，含隐藏index标记也不豁免。允许untracked、tracked修改及仅draft暂存；材料始终取最新工作区原bytes并记录原index SHA，syntax/schema坏稿不修正文。只读Git命令禁optional locks，旧HEAD/index/工作文件/Native原件不改写。此来源是physical_draft，不能构造ElaborationDraft或旧Git结果；正常交付仍须真实clean正常提交。

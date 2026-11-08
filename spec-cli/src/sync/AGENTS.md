@@ -23,6 +23,7 @@
 
 - 持久协调使用 `operation-types.ts` 共享身份，原source/composed/candidate分离；所有写入走store动作门禁及既有protocol事务，native/Git/FS副作用放事务外。
 - `sync resources recover` 仅结算显式 operation/input 的既有 owned 资源；普通 `sync recover` 还可回放 journal。资源清理不授予来源连续性，来源不匹配仍不得 resume/adopt。
+- 普通协调器逐任务回收已完成或精确停止且clean的Native工作树，正式close保branch/archive/record与原结果/错误；removed不代表物理删除。已归档失败稿经原认证临时restore→严格观察→复用物理回收段，保原archive/Native，零launch/wake；仅回收registry内本次created场地。dirty/未知停止保留，pending不改业务结果或烧新调用。
 - 存储验证：`npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/sync/store.test.ts packages/session-protocol/src/adopter-seams.test.ts`。
 - writer34以正常online backup/组件事务新增commit观察frontier部分表达式索引，保原SQL、全历史分组与旧记录；升级停稳旧writer/结算资源，旧writer拒新代，回滚恢复一致v33备份及配套evidence，不能删marker。
 

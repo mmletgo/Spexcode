@@ -16,6 +16,8 @@ related:
 
 ## expanded spec
 
+协调器显式启用已结算工作树回收：原请求、派发、removed checkpoint与canonical Native身份必须完全相同，当前Git须clean。completed另核不可变Git结果与output；failed/cancelled另核原停止全值、error/code及允许缺席的thread/turn身份，不要求不存在的turn。复用[[archive]]的正式close先保活archive，再归档record并回收目录/登记，保留branch、原result/checkpoint、Native历史及JSON对象。返回原成功结果或抛原失败，close失败只打印pending，不增加调用或制造批准/success/failedWorktree。已归档成功仍按原请求冷重放；已归档失败的P0/P1材料观察沿原Native/CAS/owner/schema/source/tests门临时还原同一checkout，原稿续入新seed而非从零开始，观察后复用原close的物理回收段。dirty、未知停止或身份漂移保留；removed仍只表示执行/停止资源结算，不新增持久cleanup状态。
+
 ZCode 原生工作树 native_turn_transport_failed 须绑定精确非空 thread/turn、固定 requestKey/inputDigest、canonical failed/stop 及原派发身份。正式 terminal/removed 资源保原 code/message，无成功、raw 或 Git witness。同键冷重放重验 canonical 请求和 stop，不再派发。P0 重试复用既有 Native RPC 的当前 operation、lease/control、资源全 removed、原 CAS 与 checkpoint 认证；已接受 turn 的专用 code 还须 nativeStarted 和 nativeStatus=stopped。普通失败、未知 stop 及其它阶段重试政策保持。
 
 原生错误携rejectedOutput时，仅在本资源精确record为failed、证据与错误相同且固定创建请求/schema/input/purpose/thread/turn逐项一致后，经现有blobIO保存完整被拒final原文字节，并携原文ref/SHA传回；不读取provider协议目录。原error/code/身份保持，资源停止仍走原正式结算，不因诊断取得成功或removed。旧无证据不扫描补读。

@@ -16,6 +16,8 @@ related:
 
 ## expanded spec
 
+普通协调器显式启用[[sync-native-run]]的已结算工作树回收：completed及精确停止的failed/cancelled只在原请求/资源/Native和当前clean Git相符时正式close，原结果、错误、branch/archive、会话与JSON原件保持。P0/P1既有停止材料路径先完整认证Native/removed/request/owner/schema/保护面，再await[[archive]]临时checkout接缝；callback继续原physical/Git observer、capture及未批准provenance，空稿返回null继续来源顺序，观察或恢复异常亦只回收本次创建且经原归属证明的临时checkout。已捕获Git稿直接按对象冷读。dirty/未知停止保留，pending不改业务结果或预算；全程不启动旧Native、execution wake或队列，不增加扫描器或持久状态。
+
 只读P1返修的已审因果绑定与当前pending owner分开保存。正常重入即使已完成返修，也保留原readonlyOwnerRepair及其原readonlyBaseRef，历史latest repair-input已清空时只从同attempt已认证历史取最近完整绑定，不改旧CAS或以较旧绑定覆盖冲突。已审返修whole缺少该因果或与原owner/候选/独审不符时明确拒绝，不能回选较旧正文。
 
 普通暂停恢复若没有新的修复输入，只能从原每组独审的冻结input或accepted provenance承接原诊断上下文。除此字段外完整当前输入须一致，再沿原Native请求、摘要、候选与停止原件严格认证accept。新修复输入、业务变化、缺证或漂移仍失效，不向fresh模型补旧诊断，不忽略repairContext或弱化digest。
