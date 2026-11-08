@@ -1,11 +1,18 @@
+import { contentHash } from './snapshot.js'
 import type { CodeBehaviorEvidence, ContractNodeChange, SyncDecisionAuthority } from './writeback-types.js'
 import type { RawOnlyInterfaceSeedEvidence } from './partitioning.js'
 import type { BlobRef, InputSnapshot } from './operation-types.js'
 import type { FrozenContextRef, FrozenEntryJson, FrozenReadProof } from '../frozen-context.js'
-import type { RejectedStructuredOutput, ZCodeToolPolicy } from '../session-structured-policy.js'
+import type { RejectedStructuredOutput, StructuredExecution, ZCodeToolPolicy } from '../session-structured-policy.js'
 import type { Contract, ContractCoverage, ContractFinding, ContractGraph, Gap, ParseContractInput, Verification } from '@spexcode/spec-core/contracts'
 
 export const ELABORATION_BOUNDARIES = ['permissions', 'mutation', 'async', 'network', 'concurrency', 'callbacks', 'retries', 'cancellation', 'idempotency', 'external_side_effects'] as const
+export const ELABORATION_GENERATION_GUIDANCE_V1 = 'ac-test-binding-v1'
+export const ELABORATION_GENERATION_GUIDANCE_V2 = 'ac-test-flow-binding-v2'
+export const ELABORATION_GENERATION_GUIDANCE_V3 = 'ac-test-flow-review-binding-v3'
+export const ELABORATION_GENERATION_GUIDANCE_V4 = 'ac-test-flow-review-verify-repair-v4'
+export const ELABORATION_GENERATION_GUIDANCE = 'ac-test-flow-review-verify-fact-repair-v5'
+export type ElaborationGenerationGuidance = typeof ELABORATION_GENERATION_GUIDANCE_V1 | typeof ELABORATION_GENERATION_GUIDANCE_V2 | typeof ELABORATION_GENERATION_GUIDANCE_V3 | typeof ELABORATION_GENERATION_GUIDANCE_V4 | typeof ELABORATION_GENERATION_GUIDANCE
 export type ElaborationBoundary = typeof ELABORATION_BOUNDARIES[number]
 export type ElaborationTarget = { nodeId: string; path: string; source: string | null; sourceDigest: string | null; rawSource?: string }
 export type ElaborationFact = { source: string; text: string }
@@ -13,6 +20,22 @@ export type ElaborationFact = { source: string; text: string }
 export type ReadonlySpecRepair = { kind?: 'candidate_review' | 'partition_seal'; reviewEvidence?: { partitionId: string; resultRef: BlobRef }[]; baseInputDigest: string; candidateDigest: string; generationRef: BlobRef; acceptedRef: BlobRef; changes: ElaborationResult['changes']; output: unknown; review: ElaborationReview | null; findings: ContractFinding[] }
 export type ElaborationPhase = 'interface_seed' | 'partitioned_final'
 export type ElaborationPartitionBinding = { planDigest: string; partitionId: string; analysisRef?: BlobRef; interfaceSeed?: RawOnlyInterfaceSeedEvidence }
+export type AnalysisOnlyPartitionEvidence = { partitionId: string; analysisRef: BlobRef; wholeAnalysisRef: BlobRef }
+
+export function partitionedElaborationInputDigest(planDigest: string, inputs: readonly string[], analysisOnlyPartitions?: readonly AnalysisOnlyPartitionEvidence[]): string {
+  return contentHash(JSON.stringify({ partitionPlanDigest: planDigest, inputs, ...(analysisOnlyPartitions?.length ? { analysisOnlyPartitions } : {}) }))
+}
+
+export function partitionedElaborationCoverageMatches(partitionIds: readonly string[], writerIds: readonly string[], analysisOnlyIds: readonly string[]): boolean {
+  const writers = new Set(writerIds), analysisOnly = new Set(analysisOnlyIds)
+  return writers.size === writerIds.length && analysisOnly.size === analysisOnlyIds.length
+    && writerIds.length + analysisOnlyIds.length === partitionIds.length
+    && new Set(partitionIds).size === partitionIds.length
+    && partitionIds.every(id => writers.has(id) !== analysisOnly.has(id))
+    && partitionIds.filter(id => writers.has(id)).every((id, index) => id === writerIds[index])
+    && partitionIds.filter(id => analysisOnly.has(id)).every((id, index) => id === analysisOnlyIds[index])
+}
+
 /** 调用者已确认的用户原意或裁决变更；不是 Agent 自己生成的批准请求。 */
 export type AuthorizedContractChange = { id: string; action: 'retire' | 'update_verification'; source: 'user:raw' | `decision:${string}`; reason: string; analysisRef?: BlobRef } | { id: string; action: 'update_acceptance'; source: 'user:raw' | `decision:${string}` | `code:${string}`; reason: string; ruleIds: string[]; analysisRef: BlobRef } | { id: string; action: 'restore'; source: 'user:raw'; reason: string; history: { inputId: string; requestBlob: BlobRef } }
 export type ElaborationInput = {
@@ -22,6 +45,8 @@ export type ElaborationInput = {
   worktree?: { baseCommit: string; tree: string; mode: 'read' | 'edit' }
   /** 新派发显式冻结；缺席继续使用原请求协议，不重写历史reserved请求。 */
   draftProtocol?: 'elaboration-draft-v1'
+  /** 原attempt阶段冻结的生成提示版本，仅影响Native generation的请求摘要。 */
+  generationGuidance?: ElaborationGenerationGuidance
   /** 仅由分区执行器用于无源码writer的初始或既有纯父接口；结果不是完整P1或实现就绪。 */
   phase?: 'interface_seed'
   /** 原分区计划及后验纯父分类证据，只绑定本区来源，不授予写权限或完成度。 */
@@ -80,7 +105,7 @@ export type ElaborationDraft = {
   errors: (Pick<ContractFinding, 'code' | 'message'> & Partial<ContractFinding>)[]
 }
 /** 仅在内存中从已认证历史原件读取；进入新seed后由真实提交形成draft检查点。 */
-export type ElaborationDraftMaterial = { source: string; errors: (Pick<ContractFinding, 'code' | 'message'> & Partial<ContractFinding>)[]; sourceKind?: 'git_draft' | 'native_output' }
+export type ElaborationDraftMaterial = { source: string; errors: (Pick<ContractFinding, 'code' | 'message'> & Partial<ContractFinding>)[]; repairDiagnostics?: readonly { code: string; message: string }[]; diagnostics?: Record<string, unknown>; sourceKind?: 'git_draft' | 'native_output' | 'physical_draft' | 'stopped_git_draft' }
 export type ElaborationRound = { draft?: ElaborationDraft; rejectedOutput?: RejectedStructuredOutput & { ownerInputDigest: string; ownerRequestKey: string }; index: number; output: unknown; candidate: ElaborationCandidate | null; candidateDigest: string | null; findings: ContractFinding[]; reviewOutput: unknown; review: ElaborationReview | null; traces: ElaborationTrace[] }
 export type BlockedElaborationFlow = { flowId: string; blockedStepIds: string[]; gapIds: string[] }
 /** 仅由内部协调器提供的已结算、被拒绝候选；候选不是新的业务事实。 */
@@ -90,7 +115,13 @@ export type ElaborationRepairSeed = {
   review: ElaborationReview | null; traces: ElaborationTrace[]
 }
 /** 已结算的生成/独审失败；完整原round仅作同绑定诊断，不伪造业务拒绝seed。 */
-export type ElaborationRepairDiagnostics = { requestKey: string; inputDigest: string; resultRef: BlobRef; failure: NonNullable<ElaborationResult['failure']>; round: ElaborationRound }
+export type ElaborationRepairDiagnostics = {
+  requestKey: string; inputDigest: string; resultRef: BlobRef; failure: NonNullable<ElaborationResult['failure']>; round: ElaborationRound
+  /** 当次派发前重验的只读审查请求绑定，检查点仍只保存原诊断。 */
+  settledReview?: Pick<ElaborationSessionRequest, 'prompt' | 'schema' | 'worktree'> & {
+    previousRejection?: Pick<RejectedStructuredOutput, 'sha256' | 'text'>
+  }
+}
 export type ElaborationPriorReference = { requestKey: string; inputDigest: string; candidateDigest: string; renderedCandidateDigest: string; traces: ElaborationTrace[] }
 export type ElaborationResult = {
   status: 'complete' | 'needs_input' | 'conflict' | 'unsupported' | 'failed' | 'cancelled' | 'exhausted' | 'interface_seed'
@@ -101,7 +132,7 @@ export type ElaborationResult = {
   inputDigest: string
   candidateDigest: string | null
   prior: ElaborationPriorReference | null
-  repairDiagnostics?: ElaborationRepairDiagnostics
+  repairDiagnostics?: Omit<ElaborationRepairDiagnostics, 'settledReview'>
   changes: (ElaborationChange & { contentDigest: string })[]
   contracts: Contract[]
   graph: ContractGraph | null
@@ -115,6 +146,7 @@ export type ElaborationResult = {
   retiredIds: string[]
   nodeChanges?: ContractNodeChange[]
   partitionEvidence?: { partitionId: string; resultRef: BlobRef }[]
+  analysisOnlyPartitions?: AnalysisOnlyPartitionEvidence[]
   partitionSeal?: ElaborationPartitionSeal
   verificationProjectionRef?: BlobRef
   structurePassed: boolean
@@ -130,6 +162,7 @@ export type ElaborationSessionRequest = {
   root: string; base?: string; prompt: string; schema: Record<string, unknown>; requestKey: string; inputDigest: string; purpose: string; timeoutMs: number | null; signal?: AbortSignal; model?: string; effort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
   worktree?: { baseCommit: string; tree: string; mode: 'read' | 'edit' }
   zcodeToolPolicy?: ZCodeToolPolicy
+  nativeConfiguration?: StructuredExecution['nativeConfiguration']
   frozenContext?: FrozenContextRef
   /** 派发前由 prepareFrozenPrompt 冻结的纯 JSON 条目；持久计划只保留最终 ref。 */
   frozenEntries?: readonly FrozenEntryJson[]

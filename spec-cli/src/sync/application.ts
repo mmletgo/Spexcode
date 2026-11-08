@@ -1,4 +1,5 @@
 import { finiteSyncBudget } from './budget.js'
+import { configuredVerificationTransport } from './verification-transport.js'
 import { randomUUID } from 'node:crypto'
 import { DEFAULT_SYNC_MODEL, syncModel, syncModelBinding } from './model-selection.js'
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
@@ -28,7 +29,7 @@ import type { TrustedRuntimeEntry } from './trusted-hooks.js'
 import { coveredPath, readSyncSettings, SyncApplicationError } from './settings.js'
 import { SyncInputObserver, type SyncObserverHealth } from './observer.js'
 import { SyncStore, SyncStoreError } from './store.js'
-import { readSyncCheckpoints } from './checkpoint-evidence.js'
+import { isSyncBlobRef, readSyncCheckpoints } from './checkpoint-evidence.js'
 import { prepareHistoryRequest, readHistoryRequest, readReceiptHistoryRestorations } from './history-input.js'
 import { readSyncLandingStatus } from './landing-status.js'
 import { isSyncSpecPath, readFrozenContracts } from './frozen-contracts.js'
@@ -39,7 +40,7 @@ export type SyncSubmitInput = { nodeId: string; requestId: string; origin?: 'spe
 export type SyncRevertEligibility = { eligible: true } | { eligible: false; reason: { code: string; message: string } }
 export type SyncAdoptEligibility = { eligible: true } | { eligible: false; reason: { code: string; message: string } }
 export type SyncOperationDetail = { operation: SyncOperation; physicalControl: PhysicalControl; attempt: ReturnType<SyncStore['readAttempt']> | null; journals: ReturnType<SyncStore['listJournals']>; stale: boolean; sourceSynced: boolean; canonicalSynced: boolean; adoptionEligibility: SyncAdoptEligibility; revertEligibility: SyncRevertEligibility; retryEligibility: ReturnType<SyncStore['readRetryEligibility']>; decisionEligibility: ReturnType<SyncStore['readDecisionEligibility']>; resources: ReturnType<SyncStore['listRecoverableResources']>[number]['resource'][]; decisionContext: { analysisRef: BlobRef; analysis: CodeBehaviorAnalysis } | null; executionAvailability: { status: 'ready' | 'recovery_required'; failure?: { code: string; message: string } } }
-export type SyncApplicationOptions = Partial<Pick<SyncCoordinatorOptions, 'runner' | 'verificationDriver'>> & {
+export type SyncApplicationOptions = Partial<Pick<SyncCoordinatorOptions, 'runner' | 'verificationDriver' | 'verificationTransport'>> & {
   protocol: SessionProtocol
   runtimeDirectory?: string
   tools?: SyncCoordinatorOptions['tools']
@@ -109,7 +110,7 @@ export class SyncApplication {
   }
   /** 显式资源入口不查询业务detail，不借清理绕过正常source身份门。 */
   async recoverResources(id: string, inputId: string): Promise<SyncResourceRecoveryResult> {
-    try { return await recoverSyncOperationResources(this.store, id, { root: this.root, inputId, artifactRoot: this.artifactRoot, verificationDriver: this.options.verificationDriver }) }
+    try { return await recoverSyncOperationResources(this.store, id, { root: this.root, inputId, artifactRoot: this.artifactRoot, verificationDriver: this.options.verificationDriver, verificationTransport: this.options.verificationTransport }) }
     catch (error) {
       if (error instanceof SyncCoordinatorError && ['resource_recovery_input', 'resource_recovery_source'].includes(error.code)) throw new SyncApplicationError(error.code, error.message, error.code === 'resource_recovery_source' ? 404 : 409)
       throw error
@@ -270,7 +271,7 @@ export class SyncApplication {
     this.store.requestPhysicalControl(scope, 'pause', control.revision)
     const owners = [...new Set([this, ...applicationOwners.values()])].filter(owner => owner.root === this.root && owner.repositoryId === this.repositoryId && owner.options.protocol.databasePath === this.options.protocol.databasePath)
     await Promise.all(owners.map(owner => owner.stopService()))
-    const ids = new Set([...this.store.listRecoverable().filter(item => item.operation.input.source.canonicalRoot === this.root).map(item => item.operation.id), ...this.store.listRecoverableResources().filter(item => item.operation.input.source.canonicalRoot === this.root).map(item => item.operation.id)])
+    const ids = new Set([...this.store.listRecoverable().filter(item => item.operation.input.source.canonicalRoot === this.root && item.operation.input.source.repositoryId === this.repositoryId).map(item => item.operation.id), ...this.store.listRecoverableResources().filter(item => item.operation.input.source.canonicalRoot === this.root && item.operation.input.source.repositoryId === this.repositoryId).map(item => item.operation.id)])
     const operations = await Promise.all([...ids].map(id => this.readOperation(id)))
     return { stopped: true, control: this.store.readPhysicalControl(scope), operations }
   }
@@ -407,18 +408,12 @@ export class SyncApplication {
       const prior = verifySnapshot(before).find(entry => entry.path === '.spec/spexcode.json')
       if (!prior || prior.mode !== parent.mode) continue
       readSyncSettings(before)
-      const withoutModel = (oid: string): string => {
-        const project = JSON.parse(readObject(commonDir, oid).toString('utf8')) as { sync: Record<string, unknown> }
-        delete project.sync.model
-        return JSON.stringify(project, (_key, value: unknown) => value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value)
-      }
-      if (withoutModel(prior.oid) === withoutModel(parent.oid)) return true
+      return true
     }
     return false
   }
   private async observeNode(snapshot: InputSnapshot, nodeId: string): Promise<void> {
     const { settings, configDigest } = readSyncSettings(snapshot)
-    const model = syncModel(settings)
     const configRef = writeEvidence(snapshot.source.commonDir, { version: 'sync-observed-configuration-v1', configDigest, settings })
     const control = this.store.readPhysicalControl(this.physicalScope(snapshot.source))
     let selection: FrozenBaselineSelection | null = null
@@ -430,6 +425,7 @@ export class SyncApplication {
       const direction = origin === 'combined' ? 'combined' : origin === 'code' || origin === 'initial' && hasImplementation ? 'code_to_spec' : 'spec_to_code'
       if (trigger || direction !== 'spec_to_code') frozen = await this.freezeNodePlan(snapshot, nodeId, true, direction, trigger?.commitTrigger)
       const plan = frozen.plan
+      const model = syncModel(settings, Boolean(plan.agentWorkflow))
       selection = frozen.selection
       const differenceKey = `${snapshot.id}:${selection.digest}:${syncPlanDigest(plan)}`
       let cachedDifference = this.observedDifferences.get(nodeId)
@@ -468,7 +464,7 @@ export class SyncApplication {
     if (!['spec', 'initial', 'code', 'combined', 'decision'].includes(operation.origin)) return { eligible: false, reason: { code: 'sync_origin_unsupported', message: '当前入口接受 Spec 输入，原操作来源不能在此重试' } }
     try {
       this.requireEnabled(snapshot, operation)
-      if (!(currentness ?? await isSyncInputCurrent(operation, snapshot, this.operationPlan(operation)))) return { eligible: false, reason: { code: 'sync_retry_stale', message: '原输入已变化，请为当前 Spec 发起新操作' } }
+      if (!(currentness ?? await isSyncInputCurrent(operation, snapshot, this.operationPlan(operation), this.store.readBusinessBaselineSelection(operation.id)))) return { eligible: false, reason: { code: 'sync_retry_stale', message: '原输入已变化，请为当前 Spec 发起新操作' } }
     }
     catch (error) { return { eligible: false, reason: { code: error instanceof SyncApplicationError ? error.code : 'sync_retry_plan_unavailable', message: error instanceof Error ? error.message : String(error) } } }
     return eligibility
@@ -488,7 +484,7 @@ export class SyncApplication {
     let landing = { sourceSynced: false, canonicalSynced: false, phase: operation.phase }
     try { if (available) landing = readSyncLandingStatus(operation, sourceSnapshot, journals, { canonicalBranch: `refs/heads/${readConfig(this.root).mainBranch?.trim() || 'main'}`, readPaths: plan!.readPaths }) }
     catch (error) { executionAvailability = { status: 'recovery_required', failure: { code: 'sync_delivery_evidence_invalid', message: error instanceof Error ? error.message : String(error) } } }
-    const currentness = available && !landing.sourceSynced ? await isSyncInputCurrent(operation, currentSnapshot, plan!) : undefined
+    const currentness = available && !landing.sourceSynced ? await isSyncInputCurrent(operation, currentSnapshot, plan!, this.store.readBusinessBaselineSelection(operation.id)) : undefined
     const current = available && (landing.sourceSynced || currentness)
     return { operation: landing.phase === operation.phase ? operation : { ...operation, phase: landing.phase }, physicalControl: this.store.readPhysicalControl(this.physicalScope(operation.input.source)), decisionContext: existsSync(operation.input.source.commonDir) ? this.decisionContext(operation) : null, attempt: operation.currentAttemptId ? this.store.readAttempt(operation.currentAttemptId) : null, journals, resources, stale: !current, sourceSynced: landing.sourceSynced, canonicalSynced: landing.canonicalSynced, adoptionEligibility: await this.adoptionEligibility(operation, sourceSnapshot, execution), revertEligibility: await this.revertEligibility(operation, sourceSnapshot, journals, resources), retryEligibility: await this.retryEligibility(operation, currentSnapshot, currentness), decisionEligibility: this.store.readDecisionEligibility(operation.id), executionAvailability }
   }
@@ -650,8 +646,11 @@ export class SyncApplication {
     await this.requireNodeAuthorized(snapshot, input.nodeId)
     if (retry) {
       this.assertSource(retry)
-      const eligibility = await this.retryEligibility(retry, snapshot)
-      if (!eligibility.eligible) throw new SyncApplicationError(eligibility.reason!.code, eligibility.reason!.message)
+      const replay = this.store.findOperationByIngressKey(`application:${snapshot.source.repositoryId}:${this.root}:${input.requestId}`)
+      if (!replay) {
+        const eligibility = await this.retryEligibility(retry, snapshot)
+        if (!eligibility.eligible) throw new SyncApplicationError(eligibility.reason!.code, eligibility.reason!.message)
+      }
       if (this.operationPlan(retry).intentNodeId !== input.nodeId) throw new SyncApplicationError('sync_retry_changed', '显式重试不能改为另一个节点')
       if (retry.baselineSelection) snapshot = retry.input
     }
@@ -661,18 +660,20 @@ export class SyncApplication {
     const mutex = await this.requestMutex(ingressKey, finiteSyncBudget(settings.budget)?.timeoutMs ?? 30000)
     try {
       const prior = this.store.findOperationByIngressKey(ingressKey), ingress = this.store.findIngressReceipt(ingressKey)
-      const model = input.model ?? syncModel(prior ?? retry ?? settings)
       if (prior?.baselineSelection) {
         if (prior.input.captureKind === 'commit' && snapshot.captureKind !== 'commit') snapshot = await captureInputSnapshot(this.root, { committed: true })
         this.requireEnabled(snapshot, prior)
-        if (!await isSyncInputCurrent(prior, snapshot, this.operationPlan(prior))) throw new SyncStoreError('SYNC_IDEMPOTENCY_CONFLICT', ingressKey)
+        if (!await isSyncInputCurrent(prior, snapshot, this.operationPlan(prior), this.store.readBusinessBaselineSelection(prior.id))) throw new SyncStoreError('SYNC_IDEMPOTENCY_CONFLICT', ingressKey)
         snapshot = ingress?.input ?? prior.input
       }
       const previousBaselinePair = prior ? (ingress ?? prior).previousBaselinePair : retry ? retry.previousBaselinePair : null
-      const oldSelection = (ingress ?? prior)?.baselineSelection ?? retry?.baselineSelection
+      const revalidation = retry && ['workspace_synced', 'awaiting_landing'].includes(retry.phase)
+      const oldSelection = (ingress ?? prior)?.baselineSelection ?? (revalidation ? this.store.readRevalidationSelection(retry.id) : retry?.baselineSelection)
+      const businessSelection = prior ? this.store.readBusinessBaselineSelection(prior.id) : retry ? this.store.readBusinessBaselineSelection(retry.id) : oldSelection
       const direction = origin === 'combined' ? 'combined' : origin === 'code' || origin === 'initial' && verifySnapshot(snapshot).some(entry => entry.mode !== '120000' && coveredPath(entry.path, settings.sourcePaths)) ? 'code_to_spec' : 'spec_to_code'
       const frozen = oldSelection ? { plan: this.operationPlan(prior ?? retry!), selection: oldSelection } : prior || retry ? null : await this.freezeNodePlan(snapshot, input.nodeId, false, direction)
       const plan = frozen?.plan ?? this.operationPlan((prior ?? retry)!)
+      const model = input.model ?? (prior || retry ? syncModel(prior ?? retry!) : syncModel(settings, Boolean(plan.agentWorkflow)))
       if (prior && input.nodeId !== plan.intentNodeId) throw new SyncStoreError('SYNC_IDEMPOTENCY_CONFLICT', ingressKey)
       if (retry && (origin !== retry.origin || syncPlanDigest(plan) !== retry.policyDigest)) throw new SyncApplicationError('sync_retry_changed', '显式重试必须沿用原来源和授权计划；新的输入请发起新请求')
       let requestBlob: BlobRef | undefined = retry?.requestBlob
@@ -685,7 +686,7 @@ export class SyncApplication {
         requestBlob = request.requestBlob
       }
       if (prior && (syncModel(prior) !== model || (ingress?.origin ?? prior.origin) !== origin || (prior.retryOf ?? null) !== (retry?.id ?? null) || (ingress?.input ?? prior.input).id !== snapshot.id || JSON.stringify((ingress?.input ?? prior.input).source) !== JSON.stringify(snapshot.source) || prior.policyDigest !== syncPlanDigest(plan) || ((ingress ?? prior).requestBlob?.sha256 ?? null) !== (requestBlob?.sha256 ?? null))) throw new SyncStoreError('SYNC_IDEMPOTENCY_CONFLICT', ingressKey)
-      const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: input.requestId, origin, ...syncModelBinding(model), ...(retry ? { retryOf: retry.id, ...(retry.baselineSelection ? { executionScope: retry.scope, impactDigest: retry.impactDigest } : {}) } : {}), budget: settings.budget, managedRoot: this.managedRoot, ...(requestBlob ? { requestBlob } : {}), previousBaselinePair, ...(frozen ? { baselineSelection: frozen.selection } : {}) })
+      const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: input.requestId, origin, ...syncModelBinding(model), ...(retry ? { retryOf: retry.id, ...(retry.baselineSelection ? { executionScope: retry.scope, impactDigest: retry.impactDigest } : {}) } : {}), budget: revalidation ? retry.budget : settings.budget, managedRoot: this.managedRoot, ...(requestBlob ? { requestBlob } : {}), previousBaselinePair, ...(frozen ? { baselineSelection: frozen.selection } : {}) }, businessSelection)
       if (prior) { admission.deliveryPlan = (ingress ?? prior).deliveryPlan; admission.budget = (ingress ?? prior).budget }
       this.prepareTools(admission.ingressKey, prior, model, plan.agentWorkflow)
       const operation = this.store.admitAndEnqueue(admission)
@@ -700,7 +701,7 @@ export class SyncApplication {
     const snapshot = await captureInputSnapshot(this.root); this.requireEnabled(snapshot)
     const nodeId = this.operationPlan(original).intentNodeId
     await this.requireNodeAuthorized(snapshot, nodeId)
-    const { settings } = readSyncSettings(snapshot), model = syncModel(settings), ingressKey = `application:${snapshot.source.repositoryId}:${this.root}:${input.requestId}`
+    const { settings } = readSyncSettings(snapshot), ingressKey = `application:${snapshot.source.repositoryId}:${this.root}:${input.requestId}`
     const mutex = await this.requestMutex(ingressKey, finiteSyncBudget(settings.budget)?.timeoutMs ?? 30000)
     try {
       const prior = this.store.findOperationByIngressKey(ingressKey), ingress = this.store.findIngressReceipt(ingressKey)
@@ -748,6 +749,7 @@ export class SyncApplication {
       for (const item of after.graph.items.values()) if (paths.includes(item.path) && item.kind !== 'VERIFY') { const resource = item.kind === 'FLOW' ? { kind: 'flow' as const, id: item.id } : { kind: 'contract' as const, id: item.id }; resources.set(JSON.stringify(resource), resource) }
       const selected = this.store.readBaselineSelection(snapshot.source, [...resources.values()])
       if ('failure' in selected) throw new SyncApplicationError(selected.failure.code, selected.failure.message)
+      const model = syncModel(settings, Boolean(plan.agentWorkflow))
       const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: original.rootCauseId, origin: 'combined', ...syncModelBinding(model), budget: settings.budget, managedRoot: this.managedRoot, requestBlob, baselineSelection: selected.selection })
       this.prepareTools(ingressKey, null, model, plan.agentWorkflow)
       const operation = this.store.admitAndEnqueue(admission)
@@ -790,7 +792,7 @@ export class SyncApplication {
     if (!input || typeof input.operationId !== 'string') throw new SyncApplicationError('sync_decision_invalid', '裁决需要原 operation ID', 400)
     const original = this.store.readOperation(input.operationId); this.assertSource(original)
     const current = await captureInputSnapshot(this.root, { committed: original.input.captureKind === 'commit' }); this.requireEnabled(current, original)
-    if (!await isSyncInputCurrent(original, current, this.operationPlan(original)) || input.inputId !== original.input.id) throw new SyncApplicationError('sync_decision_stale', '原输入已变化，不能对旧分歧裁决')
+    if (!await isSyncInputCurrent(original, current, this.operationPlan(original), this.store.readBusinessBaselineSelection(original.id)) || input.inputId !== original.input.id) throw new SyncApplicationError('sync_decision_stale', '原输入已变化，不能对旧分歧裁决')
     const snapshot = original.baselineSelection ? original.input : current
     const context = this.decisionContext(original)
     if (!context || context.analysisRef.sha256 !== input.analysisRef?.sha256) throw new SyncApplicationError('sync_decision_analysis', '裁决分析必须属于原操作的可信当前检查点', 400)
@@ -807,7 +809,7 @@ export class SyncApplication {
     const findings = input.findingIds.map(id => context.analysis.findings.find(finding => finding.id === id))
     if (findings.some(finding => !finding)) throw new SyncApplicationError('sync_decision_finding', '裁决只能选择分析中真实存在的分歧', 400)
     const ingressKey = `application:${snapshot.source.repositoryId}:${this.root}:${input.requestId}`
-    const { settings } = readSyncSettings(snapshot), model = syncModel(settings)
+    const { settings } = readSyncSettings(snapshot)
     const mutex = await this.requestMutex(ingressKey, finiteSyncBudget(settings.budget)?.timeoutMs ?? 30000)
     try {
       const prior = this.store.findOperationByIngressKey(ingressKey), ingress = this.store.findIngressReceipt(ingressKey)
@@ -824,6 +826,7 @@ export class SyncApplication {
       if (selected && 'failure' in selected) throw Object.assign(new SyncApplicationError(selected.failure.code, selected.failure.message), { syncFailure: selected.failure })
       const selection = selected?.selection, plan = this.operationPlan(original)
       plan.agentWorkflow = 'native-worktree-v1'
+      const model = syncModel(settings, true)
       this.decorateDecisionPlan(plan, snapshot, input, context.analysis, requestBlob, selection ?? previousBaselinePair)
       const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: original.rootCauseId, origin: 'decision', ...syncModelBinding(model), budget: settings.budget, managedRoot: this.managedRoot, requestBlob, previousBaselinePair, ...(selection ? { baselineSelection: selection, executionScope: original.scope, impactDigest: original.impactDigest } : {}) })
       this.prepareTools(ingressKey, null, model, plan.agentWorkflow)
@@ -872,7 +875,7 @@ export class SyncApplication {
     const finished = runSyncOperation(this.store, id, { plan, ...(recoveryOnly ? { recoveryOnly: true } : {}), readCurrentPlan: async () => {
       const current = await captureInputSnapshot(this.root, { committed: operation.input.captureKind === 'commit' }); this.requireEnabled(current, operation)
       return plan
-    }, managedRoot: this.managedRoot, artifactRoot: this.artifactRoot, tools, runner: this.options.runner, verificationDriver: this.options.verificationDriver, signal: controller.signal, callTimeoutMs: settings.callTimeoutMs }).then(result => { advance = !recoveryOnly && result.status !== 'busy' && result.operation.phase !== 'queued'; return result }).finally(() => {
+    }, managedRoot: this.managedRoot, artifactRoot: this.artifactRoot, tools, runner: this.options.runner, verificationDriver: this.options.verificationDriver, verificationTransport: this.options.verificationTransport, signal: controller.signal, callTimeoutMs: settings.callTimeoutMs }).then(result => { advance = !recoveryOnly && result.status !== 'busy' && result.operation.phase !== 'queued'; return result }).finally(() => {
       this.running.delete(id)
       if (advance) {
         try { this.startNextDispatch() }
@@ -909,7 +912,7 @@ export class SyncApplication {
     } else if (action === 'resume') {
       await this.running.get(id)?.finished
       const current = await captureInputSnapshot(this.root, { committed: operation.input.captureKind === 'commit' }); this.requireEnabled(current, operation)
-      if (!await isSyncInputCurrent(operation, current, this.operationPlan(operation))) throw new SyncApplicationError('sync_input_stale', '恢复输入已变化，请为最新 Spec 发起新操作')
+      if (!await isSyncInputCurrent(operation, current, this.operationPlan(operation), this.store.readBusinessBaselineSelection(operation.id))) throw new SyncApplicationError('sync_input_stale', '恢复输入已变化，请为最新 Spec 发起新操作')
       this.store.requestControl(id, 'run')
       this.start(id)
     } else {
@@ -925,7 +928,7 @@ export class SyncApplication {
     const references = (value: unknown): string[] => {
       if (!value || typeof value !== 'object') return []
       if ('kind' in value && value.kind === 'untrusted_final') return 'ref' in value ? references(value.ref) : []
-      return [...('sha256' in value && typeof value.sha256 === 'string' && /^[a-f0-9]{64}$/.test(value.sha256) ? [value.sha256] : []), ...Object.values(value).flatMap(references)]
+      return [...(isSyncBlobRef(value) ? [value.sha256] : []), ...Object.values(value).flatMap(references)]
     }
     const queue = references(detail), seen = new Set<string>()
     let belongs = false
@@ -950,7 +953,7 @@ export function configuredSyncApplication(root: string, registeredSource?: Workt
   if (identity.commonDir !== identifyWorktree(repoRoot()).commonDir) throw new SyncApplicationError('sync_project_mismatch', '输入工作树不属于当前后端项目')
   let application = applications.get(key)
   if (!application) {
-    application = SyncApplication.create(identity.canonicalRoot, { protocol: configuredSessionApplication().protocol }, registeredSource)
+    application = SyncApplication.create(identity.canonicalRoot, { protocol: configuredSessionApplication().protocol, verificationTransport: configuredVerificationTransport() }, registeredSource)
     if (syncServicesOnline) application = application.then(async owner => { await owner.startService(); return owner })
     applications.set(key, application)
     void application.catch(() => applications.delete(key))
@@ -962,7 +965,7 @@ export function configuredSyncApplication(root: string, registeredSource?: Workt
 export function configuredSyncResourceRecoveryApplication(root: string): Promise<SyncApplication> {
   const identity = identifyRawWorktree(root)
   if (identity.commonDir !== identifyRawWorktree(repoRoot()).commonDir) throw new SyncApplicationError('sync_project_mismatch', '输入工作树不属于当前项目')
-  return SyncApplication.createResourceRecovery(identity.canonicalRoot, { protocol: configuredSessionApplication().protocol })
+  return SyncApplication.createResourceRecovery(identity.canonicalRoot, { protocol: configuredSessionApplication().protocol, verificationTransport: configuredVerificationTransport() })
 }
 
 export type SourceContinuityInput = { operationId: string; inputId: string; revision: number; enabledDigest: string; previousDevices: PreviousDevices }

@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { freezeContext, readFrozenManifest } from './frozen-context.js'
-import { verifyZCodeFrozenReadProof } from './zcode-frozen-proof.js'
+import { verifyZCodeFrozenReadProof } from './zcode-frozen-evidence.js'
 import { stopZCodeStructuredTurn, zcodeNativeSelection, zcodeStructuredPrompt, zcodeStructuredTurn, type ZCodeStructuredExecution } from './zcode-structured.js'
 
 const enabled = process.env.SPEX_ZCODE_NATIVE_TEST === '1'

@@ -7,19 +7,20 @@ import test from 'node:test'
 import { buildContractGraph, CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
 import { StructuredSessionError, rejectedFinalOutput } from '../session-structured-policy.js'
 import { nativeWorktreePrompt, nativeWorktreeResult } from '../native-worktree-runtime.js'
-import { elaborate, elaborationDigest, sealPartitionedElaboration, verifyElaborationDraftCache } from './elaboration.js'
-import { ELABORATION_BOUNDARIES } from './elaboration-types.js'
+import { elaborate, elaborationMaterialContext, elaborationDigest, freezeElaborationInput, sealPartitionedElaboration, verifyElaborationDraftCache } from './elaboration.js'
+import { ELABORATION_BOUNDARIES, ELABORATION_GENERATION_GUIDANCE } from './elaboration-types.js'
 import type { ElaborationInput, ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
 import { captureInputSnapshot, contentHash, readEvidence, readObject, readTree, writeEvidence, writeObject, writeTree } from './snapshot.js'
-import { captureStageDraft, overlayStageTree, readStageDraft, stageWorktree } from './stage-worktree.js'
+import { captureStageDraft, overlayStageTree, readStageDraft, readStoppedPhysicalDraft, stageWorktree } from './stage-worktree.js'
 import { syncCheckpointArtifacts } from './checkpoint-evidence.js'
 import { freezeCandidate } from './candidate.js'
-import { projectVerificationTable } from './elaboration-markdown.js'
+import { bindElaborationTargets, projectVerificationTable, renderElaboration } from './elaboration-markdown.js'
 import { elaborateSyncPartitions } from './partition-execution.js'
 import type { PartitionCheckpoints } from './partition-execution.js'
 import type { ElaborationResult, ReadonlySpecRepair } from './elaboration-types.js'
 import type { GeneratedTargetElaboration, ContractCell } from './elaboration-markdown.js'
 import type { SyncPartitionPlan } from './partitioning.js'
+import type { CodeBehaviorAnalysis, CodeBehaviorEvidence } from './writeback-types.js'
 
 const git = (root: string, ...args: string[]): string => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: 'pipe', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }).trim()
 const path = '.spec/export/export-contract/spec.md'
@@ -43,10 +44,15 @@ async function fixture(t: test.TestContext) {
     const workspace = join(root, `wt-${requests.length}`); workspaces.push(workspace)
     git(root, 'worktree', 'add', '--detach', workspace, seed.baseCommit)
     if (request.purpose === 'elaboration_generate') {
+      assert.match(request.prompt, /Native final与业务草稿JSON是两份不同内容.*形式为\{"summary":"简短处理摘要"\}.*final前后不附说明.*Markdown代码围栏/s)
       const draftPath = /草稿文件=([^\s]+)/.exec(request.prompt)![1]
       assert.deepEqual(request.schema, { type: 'object', additionalProperties: false, properties: { summary: { type: 'string' } }, required: ['summary'] })
-      const schemaPath = /草稿业务schema只读文件=([^；]+)/.exec(request.prompt)![1]
-      assert.equal(JSON.parse(readFileSync(join(workspace, schemaPath), 'utf8')).type, 'object')
+      const schemaPath = /\n草稿业务schema只读文件=([^；]+)/.exec(request.prompt)![1]
+      const businessSchema = JSON.parse(readFileSync(join(workspace, schemaPath), 'utf8')) as Record<string, unknown>
+      const businessProperties = businessSchema.properties as Record<string, unknown>
+      assert.deepEqual(Object.keys(businessProperties).sort(), ['applicability', 'changes', 'version'])
+      assert.deepEqual(businessProperties.version, { enum: ['elaboration-target-rows-v3'] }, '只读sidecar保留原业务行schema')
+      assert.notDeepEqual(request.schema, businessSchema, 'Native final使用独立的summary回执schema')
       assert.match(request.prompt, /禁止修改schema/)
       const text = generate(request, workspace, draftPath)
       mkdirSync(dirname(join(workspace, draftPath)), { recursive: true }); writeFileSync(join(workspace, draftPath), text)
@@ -83,6 +89,254 @@ for (const failure of ['syntax', 'schema'] as const) test(`P1真实Git草稿${fa
   assert.deepEqual(readTree(f.commonDir, f.requests[2].worktree!.tree).filter(entry => entry.path.startsWith('.spex-sync-drafts/')), [])
   assert.ok(result.changes.every(change => change.path.startsWith('.spec/')))
   assert.deepEqual(readTree(f.commonDir, last.draft!.resultTree).filter(entry => !entry.path.startsWith('.spec/') && !entry.path.startsWith('.spex-sync-drafts/')), readTree(f.commonDir, f.snapshot.immutableTree).filter(entry => !entry.path.startsWith('.spec/')))
+})
+
+test('Native P1续修AC.test坏稿只用真实已有测试ID和可信VERIFY', async t => {
+  const f = await fixture(t)
+  const invalid = draftRows(f.input.targets[0].source!), acceptance = invalid.changes[0].tables.AC
+  acceptance[0].test = 'tests/export.test.mjs'
+  acceptance[1].test = 'tests/export.test.mjs::test_export'
+  acceptance[2].test = 'tests/export.test.mjs#重复导出保留首次结果'
+  const invalidSource = JSON.stringify(invalid)
+  const failed = await elaborate({ ...f.input, maxRepairs: 0 }, { runner: f.run(request => {
+    assert.doesNotMatch(request.prompt, /AC\.test.*仓库相对测试路径#稳定用例ID/)
+    assert.doesNotMatch(request.prompt, /登记JSON本身不是契约行/)
+    return invalidSource
+  }) })
+  const oldDraft = failed.rounds[0].draft!
+  assert.equal(failed.reviewPassed, false)
+  assert.deepEqual(failed.rounds[0].findings.filter(issue => issue.code === 'invalid-test-binding').map(issue => issue.itemId), acceptance.slice(0, 3).map(row => row.id))
+  assert.equal(readStageDraft(f.commonDir, oldDraft, oldDraft), invalidSource)
+  const nextInput = { ...f.input, requestKey: 'ac-test-binding-repair', generationGuidance: 'ac-test-binding-v1' as const }
+  const repaired = await elaborate(nextInput, { draft: oldDraft, runner: f.run((request, workspace, draftPath) => {
+    assert.equal(readFileSync(join(workspace, draftPath), 'utf8'), invalidSource)
+    assert.match(request.prompt, /invalid-test-binding/)
+    assert.match(request.prompt, /AC\.test.*仓库相对测试路径#稳定用例ID/)
+    assert.match(request.prompt, /AC\.command.*可信登记.*VERIFY/)
+    assert.match(request.prompt, /禁止裸路径、pytest `::`、自然语言.*伪造ID/)
+    assert.match(request.prompt, /包装测试只有实际声明稳定ID、确实运行并覆盖本条断言才可引用/)
+    assert.doesNotMatch(request.prompt, /登记JSON本身不是契约行/)
+    assert.match(request.prompt, /源码与全部测试只读/)
+    return JSON.stringify(draftRows(f.input.targets[0].source!))
+  }) })
+  assert.equal(repaired.status, 'complete', JSON.stringify(repaired.failure))
+  assert.equal(repaired.inputDigest, failed.inputDigest)
+  assert.deepEqual(f.requests.map(request => request.purpose), ['elaboration_generate', 'elaboration_generate', 'elaboration_review'])
+  assert.equal(repaired.rounds[0].draft!.schemaDigest, oldDraft.schemaDigest)
+  assert.equal(readStageDraft(f.commonDir, oldDraft, oldDraft), invalidSource)
+  assert.deepEqual(readTree(f.commonDir, repaired.rounds[0].draft!.resultTree).filter(entry => !entry.path.startsWith('.spex-sync-drafts/')), readTree(f.commonDir, repaired.rounds[0].draft!.seed.tree).filter(entry => !entry.path.startsWith('.spex-sync-drafts/')))
+  const forged = draftRows(f.input.targets[0].source!)
+  forged.changes[0].tables.AC[0].test = 'tests/export.test.mjs#AC-NOT-DECLARED-01'
+  const unverified = await elaborate({ ...nextInput, requestKey: 'forged-test-id', maxRepairs: 0 }, { runner: f.run(() => JSON.stringify(forged)) })
+  assert.equal(unverified.reviewPassed, false)
+  assert.ok(unverified.rounds[0].findings.some(issue => issue.code === 'readonly_implementation_gap' && issue.message.includes('AC-NOT-DECLARED-01')))
+  assert.equal(f.requests.at(-1)!.purpose, 'elaboration_generate')
+})
+
+test('Native P1续修状态事件和无状态END坏稿，保留实际Git草稿与拒因', async t => {
+  const f = await fixture(t), valid = draftRows(f.input.targets[0].source!), invalid = structuredClone(valid)
+  const tables = invalid.changes[0].tables
+  tables.STATE.find(row => row.initial === false)!.object = '无对应事件和初态的误归属对象'
+  tables.FLOW[0].terminal = 'END'
+  tables.STEP.find(row => row.flow === tables.FLOW[0].id)!.rules = []
+  const invalidSource = JSON.stringify(invalid)
+  const oldInput = { ...f.input, generationGuidance: 'ac-test-binding-v1' as const, maxRepairs: 0 }
+  const failed = await elaborate(oldInput, { runner: f.run(request => {
+    assert.match(request.prompt, /仓库相对测试路径#稳定用例ID/)
+    assert.ok(!request.prompt.includes('TR.from、TR.event'))
+    assert.ok(!request.prompt.includes('每个业务REQ至少由一个主FLOW.req直接覆盖。'))
+    return invalidSource
+  }) })
+  const oldDraft = failed.rounds[0].draft!
+  const errorCodes = ['transition-object', 'missing-object-event', 'missing-initial-state', 'missing-stateless-rationale', 'incomplete-stateless-step']
+  for (const code of errorCodes) assert.ok(oldDraft.errors.some(issue => issue.code === code), code)
+  assert.equal(failed.reviewPassed, false)
+  assert.equal(readStageDraft(f.commonDir, oldDraft, oldDraft), invalidSource)
+  const nextInput = { ...oldInput, requestKey: 'flow-binding-repair', generationGuidance: 'ac-test-flow-binding-v2' as const }
+  const repaired = await elaborate(nextInput, { draft: oldDraft, runner: f.run((request, workspace, draftPath) => {
+    assert.equal(readFileSync(join(workspace, draftPath), 'utf8'), invalidSource)
+    for (const code of errorCodes) assert.ok(request.prompt.includes(code), code)
+    assert.ok(request.prompt.includes('TR.from、TR.event'))
+    assert.ok(request.prompt.includes('STEP.input、STEP.output'))
+    assert.ok(request.prompt.includes('不虚构状态'))
+    assert.ok(request.prompt.includes('仓库相对测试路径#稳定用例ID'))
+    assert.ok(request.prompt.includes('每个业务REQ至少由一个主FLOW.req直接覆盖。'))
+    assert.doesNotMatch(request.prompt, /登记JSON本身不是契约行/)
+    return JSON.stringify(valid)
+  }) })
+  assert.equal(repaired.status, 'complete', JSON.stringify(repaired.failure))
+  assert.equal(repaired.inputDigest, failed.inputDigest)
+  assert.deepEqual(f.requests.map(request => request.purpose), ['elaboration_generate', 'elaboration_generate', 'elaboration_review'])
+  assert.ok(!f.requests[2].prompt.includes('TR.from、TR.event'))
+  assert.doesNotMatch(f.requests[2].prompt, /包装测试只有实际声明稳定ID/)
+  assert.equal(repaired.rounds[0].draft!.schemaDigest, oldDraft.schemaDigest)
+  assert.equal(readStageDraft(f.commonDir, oldDraft, oldDraft), invalidSource)
+})
+
+test('Native完整P1独审逐项核对冻结VERIFY实际执行并覆盖AC断言', async t => {
+  const f = await fixture(t)
+  const result = await elaborate({ ...f.input, generationGuidance: ELABORATION_GENERATION_GUIDANCE }, { runner: f.run(() => JSON.stringify(rows)) })
+  assert.equal(result.status, 'complete', JSON.stringify(result.failure))
+  assert.deepEqual(f.requests.map(request => request.purpose), ['elaboration_generate', 'elaboration_review'])
+  assert.match(f.requests[0].prompt, /包装测试只有实际声明稳定ID、确实运行并覆盖本条断言才可引用/)
+  assert.match(f.requests[0].prompt, /TR.from、TR.event/)
+  assert.match(f.requests[1].prompt, /包装测试只有实际声明稳定ID、确实运行并覆盖本条断言才可引用/)
+  assert.match(f.requests[1].prompt, /沿冻结VERIFY命令和包装器的实际调用逐项核对.*P1提出普通repair，不改文件/)
+  assert.match(f.requests[1].prompt, /只读实现范围下不派发P2/)
+  assert.doesNotMatch(f.requests[1].prompt, /TR.from、TR.event/)
+})
+
+for (const inherited of [false, true]) test(`Native完整P1的VERIFY冻结登记按只读父接口决定是否声明 inherited=${inherited}`, async t => {
+  const f = await fixture(t), [target] = f.input.targets
+  const verification = { id: 'VERIFY-EXPORT-01', command: ['node', '--test', 'tests/export.test.mjs'], cwd: '.', timeoutMs: 10000 }
+  const source = projectVerificationTable(target.source!, [])
+  const parent = inherited ? projectVerificationTable(ancestor('旧父接口').replace('title: 上层接口\n', 'title: 上层接口\ncontract-schema: sync-v1\n'), [verification]) : ancestor('旧父接口')
+  writeFileSync(join(f.root, path), source); writeFileSync(join(f.root, ancestorPath), parent)
+  git(f.root, 'add', path, ancestorPath); git(f.root, 'commit', '-m', 'freeze VERIFY registration fixture')
+  const snapshot = await captureInputSnapshot(f.root)
+  const input: ElaborationInput = { ...f.input, generationGuidance: ELABORATION_GENERATION_GUIDANCE, historyInput: snapshot, worktree: stageWorktree(f.commonDir, snapshot.headCommit, snapshot.immutableTree), targets: [{ ...target, source, sourceDigest: elaborationDigest(source) }], context: [{ nodeId: 'ancestor', path: ancestorPath, source: parent }], verifications: [verification], maxRepairs: 0 }
+  const result = await elaborate(input, { runner: f.run((request, workspace) => {
+    const task = JSON.parse(request.prompt.split('\n任务:\n')[1].split('\n')[0])
+    assert.deepEqual(task.verifications, [verification])
+    assert.equal(readFileSync(join(workspace, path), 'utf8'), source)
+    assert.equal(readFileSync(join(workspace, ancestorPath), 'utf8'), parent)
+    const draft = draftRows(source), [leaf] = draft.changes
+    assert.equal(leaf.tables.VERIFY.length, 0)
+    assert.ok(leaf.tables.AC.length > 0 && leaf.tables.AC.every(ac => ac.command === verification.id))
+    if (!inherited && request.prompt.includes('须从精确冻结登记新增该VERIFY定义')) {
+      leaf.tables.VERIFY = draftRows(target.source!).changes[0].tables.VERIFY
+    }
+    return JSON.stringify(draft)
+  }) })
+  assert.equal(result.status, 'complete', JSON.stringify(result.rounds[0].findings.find(issue => issue.code === 'dangling-reference') ?? result.failure))
+  assert.match(f.requests[0].prompt, /只读context已有该ID时直接引用，不得在本target重复定义.*登记JSON本身不是契约行/)
+  assert.deepEqual(f.requests.map(request => request.purpose), ['elaboration_generate', 'elaboration_review'])
+  assert.doesNotMatch(f.requests[1].prompt, /须从精确冻结登记新增该VERIFY定义/)
+  assert.deepEqual(result.contracts.flatMap(contract => contract.items.flatMap(item => item.kind === 'VERIFY' ? [[contract.path, item.id, item.command, item.cwd, item.timeoutMs]] : [])), [[inherited ? ancestorPath : path, verification.id, verification.command, verification.cwd, verification.timeoutMs]])
+  assert.equal(result.runtimeVerification, 'not_run')
+})
+
+test('Native完整P1在共享VERIFY由重复变为缺失后，只给原Git稿一个合法技术归属', async t => {
+  const f = await fixture(t), [target] = f.input.targets
+  const peerPath = '.spec/export/peer-contract/spec.md'
+  const verification = { id: 'VERIFY-EXPORT-01', command: ['node', '--test', 'tests/export.test.mjs'], cwd: '.', timeoutMs: 10000 }
+  const source = projectVerificationTable(target.source!, [])
+  const peer = source.replaceAll('export-job', 'peer-job').replaceAll('export-contract', 'peer-contract').replaceAll('EXPORT', 'PEER').replaceAll('VERIFY-PEER-01', verification.id).replaceAll('tests/export.test.mjs', 'tests/peer.test.mjs')
+  mkdirSync(dirname(join(f.root, peerPath)), { recursive: true })
+  writeFileSync(join(f.root, path), source); writeFileSync(join(f.root, peerPath), peer)
+  writeFileSync(join(f.root, 'tests/peer.test.mjs'), readFileSync(join(f.root, 'tests/export.test.mjs'), 'utf8').replaceAll('EXPORT', 'PEER'))
+  git(f.root, 'add', '.'); git(f.root, 'commit', '-m', 'freeze two targets for shared verification repair')
+  const snapshot = await captureInputSnapshot(f.root)
+  const input: ElaborationInput = { ...f.input, historyInput: snapshot, worktree: stageWorktree(f.commonDir, snapshot.headCommit, snapshot.immutableTree),
+    targets: [{ ...target, source, sourceDigest: elaborationDigest(source) }, { nodeId: 'peer-contract', path: peerPath, source: peer, sourceDigest: elaborationDigest(peer) }],
+    files: new Map(readTree(f.commonDir, snapshot.immutableTree).map(entry => [entry.path, readObject(f.commonDir, entry.oid).toString('utf8')])), verifications: [verification], maxRepairs: 0,
+  }
+  const broken = draftRows(source)
+  broken.changes.push({ ...draftRows(peer).changes[0], targetIndex: 1 })
+  const repeated = structuredClone(broken), verifyRows = draftRows(target.source!).changes[0].tables.VERIFY
+  for (const leaf of repeated.changes) leaf.tables.VERIFY = verifyRows
+  const historical = { ...input, generationGuidance: 'ac-test-flow-review-binding-v3' } as const
+  const duplicate = await elaborate(historical, { runner: f.run(() => JSON.stringify(repeated)) })
+  assert.equal(duplicate.status, 'exhausted')
+  assert.ok(duplicate.rounds[0].findings.some(issue => issue.code === 'duplicate-id' && issue.itemId === verification.id))
+  const missing = await elaborate({ ...historical, requestKey: 'shared-verify-deleted' }, { draft: duplicate.rounds[0].draft, runner: f.run((request, workspace, draftPath) => {
+    assert.equal(readFileSync(join(workspace, draftPath), 'utf8'), JSON.stringify(repeated))
+    assert.doesNotMatch(request.prompt, /共享VERIFY返修/)
+    return JSON.stringify(broken)
+  }) })
+  assert.equal(missing.status, 'exhausted')
+  const prior = missing.rounds[0].draft!
+  assert.ok(prior.errors.some(issue => issue.code === 'dangling-reference' && issue.relatedIds?.includes(verification.id)))
+  assert.ok(prior.errors.some(issue => issue.code === 'missing-acceptance'))
+  const repairInput: ElaborationInput = { ...input, generationGuidance: ELABORATION_GENERATION_GUIDANCE, requestKey: 'shared-verify-repaired' }
+  let firstRequest: Omit<ElaborationSessionRequest, 'signal'> | undefined
+  const interrupted = await elaborate(repairInput, { draft: prior, runner: async ({ signal: _signal, ...request }) => {
+    firstRequest = request
+    throw Object.assign(new Error('在相同请求重建前中止'), { code: 'fixture_stop' })
+  } })
+  assert.equal(interrupted.failure?.code, 'fixture_stop')
+  const repaired = await elaborate(repairInput, { draft: prior, runner: f.run(({ signal: _signal, ...request }, workspace, draftPath) => {
+    assert.deepEqual(request, firstRequest, '同一冻结输入和旧Git稿重建完整带提示请求')
+    assert.equal(readFileSync(join(workspace, draftPath), 'utf8'), JSON.stringify(broken))
+    const hint = request.prompt.split('\n').filter(line => line.startsWith('共享VERIFY返修'))
+    assert.equal(hint.length, 1, '共有验证定义的失败需要一个明确位置')
+    assert.match(hint[0], /VERIFY-EXPORT-01.*targetIndex=0/)
+    assert.doesNotMatch(hint[0], /targetIndex=1/)
+    const diagnostics = request.prompt.split('\n失败诊断（不是新授权）:\n')[1].split('\n草稿业务schema只读文件=')[0]
+    assert.equal(JSON.stringify(JSON.parse(diagnostics).priorDraft.errors), JSON.stringify(prior.errors))
+    const next = structuredClone(broken)
+    next.changes[0].tables.VERIFY = verifyRows
+    return JSON.stringify(next)
+  }) })
+  assert.equal(repaired.status, 'complete', JSON.stringify(repaired.failure))
+  assert.deepEqual(f.requests.map(request => request.purpose), ['elaboration_generate', 'elaboration_generate', 'elaboration_generate', 'elaboration_review'])
+  assert.equal(readStageDraft(f.commonDir, prior, prior), JSON.stringify(broken))
+  assert.deepEqual(repaired.contracts.flatMap(contract => contract.items.filter(item => item.kind === 'VERIFY').map(item => [contract.path, item.id])), [[path, verification.id]])
+  assert.equal(repaired.runtimeVerification, 'not_run')
+})
+
+for (const mode of ['frozen', 'readonly', 'unchanged', 'preserve', 'interface', 'unrelated', 'fresh'] as const) test(`Native共享VERIFY返修遵守冻结归属和目标写范围 mode=${mode}`, async t => {
+  const f = await fixture(t), [target] = f.input.targets
+  const verification = { id: 'VERIFY-EXPORT-01', command: ['node', '--test', 'tests/export.test.mjs'], cwd: '.', timeoutMs: 10000 }
+  const { id } = verification
+  const noVerify = projectVerificationTable(target.source!, [])
+  const readonlyParent = projectVerificationTable(ancestor('旧父接口').replace('title: 上层接口\n', 'title: 上层接口\ncontract-schema: sync-v1\n'), [verification])
+  const sha = contentHash('current unaffected verification analysis')
+  const analysis: CodeBehaviorAnalysis = { version: 'code-behavior-v1', inputId: f.snapshot.id, baselinePairId: null, composedDigest: sha, readSetDigest: sha, policyDigest: sha, inputDigest: sha, changes: [], findings: [], facts: [], authorizedChanges: [], nodeChanges: [], newNodes: [], resolutions: [], traces: [], reviewPassed: true }
+  const input: ElaborationInput = { ...f.input, generationGuidance: ELABORATION_GENERATION_GUIDANCE, verifications: [verification], maxRepairs: 0,
+    ...(mode === 'frozen' ? { targets: [{ nodeId: 'new-contract', path: '.spec/new-contract/spec.md', rawSource: '新目标', source: null, sourceDigest: null }, target] } : {}),
+    ...(mode === 'readonly' ? { targets: [{ ...target, source: noVerify, sourceDigest: elaborationDigest(noVerify) }], context: [{ nodeId: 'ancestor', path: ancestorPath, source: readonlyParent }] } : {}),
+    ...(mode === 'preserve' ? { mode: 'preserve_business', targets: [{ ...target, source: noVerify, sourceDigest: elaborationDigest(noVerify) }] } : {}),
+    ...(mode === 'unchanged' ? { analysis: { analysis, ref: { sha256: contentHash(JSON.stringify(analysis)) } } } : {}),
+    ...(mode === 'interface' ? { phase: 'interface_seed', intent: { nodeId: 'ancestor', rawSource: '祖先原意' }, targets: f.input.context!.map(parent => ({ ...parent, sourceDigest: elaborationDigest(parent.source) })), context: [] } : {}),
+  }
+  const errors = mode === 'unrelated' ? [{ code: 'missing-acceptance', message: `引用 ${id} 的其他诊断` }] : [{ code: 'duplicate-id', itemId: id, message: `${id} 必须在同步范围全局唯一` }]
+  const result = await elaborate(input, { ...(mode === 'fresh' ? {} : { draftMaterial: { source: JSON.stringify(rows), errors } }), runner: async request => {
+    assert.equal(request.purpose, 'elaboration_generate')
+    const hints = request.prompt.split('\n').filter(line => line.startsWith('共享VERIFY返修'))
+    if (mode === 'frozen') {
+      assert.equal(hints.length, 1)
+      assert.match(hints[0], /VERIFY-EXPORT-01.*targetIndex=1/)
+    } else if (mode === 'readonly') {
+      assert.equal(hints.length, 1)
+      assert.ok(hints[0].includes(ancestorPath))
+      assert.doesNotMatch(hints[0], /targetIndex=/)
+    } else {
+      assert.equal(hints.length, 0)
+    }
+    throw Object.assign(new Error('只核对生成提示'), { code: 'fixture_stop' })
+  } })
+  assert.equal(result.failure?.code, 'fixture_stop', JSON.stringify(result.failure))
+})
+
+for (const missing of ['case', 'files'] as const) test(`Native完整P1把原授权的待实现诊断交给P2，V3实测前不算既有覆盖 missing=${missing}`, async t => {
+  const f = await fixture(t), testPath = 'tests/export.test.mjs'
+  const [target] = f.input.targets, sourcePath = 'src/export.js'
+  const source = missing === 'files' ? target.source!.replace(`code:\n  - ${sourcePath}#ExportService\n`, '') : target.source!
+  if (missing === 'files') {
+    rmSync(join(f.root, testPath)); rmSync(join(f.root, sourcePath))
+    writeFileSync(join(f.root, path), source)
+  } else {
+    const frozenTests = readFileSync(join(f.root, testPath), 'utf8').replace("test('AC-EXPORT-03 ", "test('AC-EXPORT-OTHER ")
+    writeFileSync(join(f.root, testPath), frozenTests)
+  }
+  git(f.root, 'add', '-A'); git(f.root, 'commit', '-m', 'freeze pending acceptance')
+  const snapshot = await captureInputSnapshot(f.root)
+  const base = f.run(() => JSON.stringify(rows))
+  const result = await elaborate({ ...f.input, targets: [{ ...target, source, sourceDigest: elaborationDigest(source) }], generationGuidance: ELABORATION_GENERATION_GUIDANCE, historyInput: snapshot, worktree: stageWorktree(f.commonDir, snapshot.headCommit, snapshot.immutableTree), implementationWritePaths: missing === 'files' ? [sourcePath, testPath] : [testPath], maxRepairs: 0 }, { runner: async request => {
+    const native = await base(request)
+    if (request.purpose !== 'elaboration_review') return native
+    assert.match(request.prompt, /原授权可写范围.*冻结VERIFY.*原结构诊断交P2，由V3实测/)
+    assert.match(request.prompt, /仅在有可绑定的真实冻结证据.*另报implementation-review/)
+    assert.match(request.prompt, /待实现不算既有覆盖/)
+    return native
+  } })
+  assert.equal(result.status, 'complete', JSON.stringify(result.failure))
+  assert.equal(result.reviewPassed, true)
+  assert.deepEqual([...new Set(result.deferredImplementationFindings.map(issue => issue.code))].sort(), missing === 'files' ? ['missing-implementation', 'missing-test-file'] : ['missing-test-case'])
+  assert.deepEqual(result.rounds[0].review!.findings, [])
+  assert.equal(result.runtimeVerification, 'not_run')
+  assert.deepEqual(f.requests.map(request => request.purpose), ['elaboration_generate', 'elaboration_review'])
 })
 
 test('跨source/父上下文只迁移同owner草稿；新seed保留新父Spec、全部源码/tests对象与absence', async t => {
@@ -188,6 +442,47 @@ test('草稿业务schema合法但独审repair时继续原文件，审查错误�
   assert.ok(result.rounds[0].draft!.errors.some(issue => issue.code === 'draft-review-repair'))
   assert.equal(result.rounds[0].review!.verdict, 'repair'); assert.equal(result.rounds[1].review!.verdict, 'accept')
   assert.notEqual(result.rounds[0].traces[0].sessionId, result.rounds[1].traces[1].sessionId)
+})
+
+test('冻结owner的非法repair跨请求只续独审，原Git稿和候选不变，取消不派发', async t => {
+  const f = await fixture(t), sha = contentHash('current unaffected analysis')
+  const analysis: CodeBehaviorAnalysis = { version: 'code-behavior-v1', inputId: f.snapshot.id, baselinePairId: null, composedDigest: sha, readSetDigest: sha, policyDigest: sha, inputDigest: sha, changes: [], findings: [], facts: [], authorizedChanges: [], nodeChanges: [], newNodes: [], resolutions: [], traces: [], reviewPassed: true }
+  const input = { ...f.input, maxRepairs: 0, analysis: { analysis, ref: { sha256: contentHash(JSON.stringify(analysis)) } } }
+  const rawReview = { verdict: 'repair', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [{ code: 'arbitrary-history-prose', kind: 'repair', message: '旧轮实现待写和5/5进度文案不符合冻结实现7/7；业务行不必修改', affectedIds: ['RULE-EXPORT-01'], evidence: `${path}:3及:26旧desc/prose`, decision: '仅改未变owner的desc/prose和运行计数，业务行保留' }] }
+  const base = f.run(() => JSON.stringify(rows))
+  const failed = await elaborate(input, { runner: async request => {
+    const result = await base(request)
+    return request.purpose === 'elaboration_review' ? { ...result, output: rawReview, resultDigest: contentHash(JSON.stringify(rawReview)) } : result
+  } })
+  assert.equal(failed.status, 'exhausted'); assert.equal(failed.structurePassed, true); assert.equal(failed.reviewPassed, false)
+  const original = JSON.stringify(failed), round = failed.rounds[0], draft = structuredClone(round.draft!), draftText = readStageDraft(f.commonDir, draft, draft)
+  const repairDiagnostics = { requestKey: input.requestKey, inputDigest: failed.inputDigest, resultRef: writeEvidence(f.commonDir, failed), failure: failed.failure!, round }
+  const cancelled = await elaborate({ ...input, requestKey: 'scope-review-cancelled', signal: AbortSignal.abort() }, { draft, repairDiagnostics, runner: async () => assert.fail('取消后不得派发') })
+  assert.equal(cancelled.status, 'cancelled')
+  for (const patch of [{ schemaDigest: 'e'.repeat(64) }, { oid: 'e'.repeat(40) }]) {
+    await assert.rejects(elaborate({ ...input, requestKey: 'scope-review-corrupt' }, { draft: { ...draft, ...patch }, repairDiagnostics, runner: async () => assert.fail('损坏原稿不得派发') }))
+  }
+  await assert.rejects(elaborate({ ...input, requestKey: 'scope-review-corrupt-source' }, { draft, repairDiagnostics: { ...repairDiagnostics, round: { ...round, draft: { ...draft, sourceInputId: 'foreign-input' } } }, runner: async () => assert.fail('异source生成资格不得派发') }), /source input/)
+  for (const corrupt of ['generation-trace', 'candidate-digest', 'review-output'] as const) {
+    const bad = structuredClone(repairDiagnostics)
+    if (corrupt === 'generation-trace') bad.round.traces[0].resultDigest = 'e'.repeat(64)
+    else if (corrupt === 'candidate-digest') bad.round.candidateDigest = 'e'.repeat(64)
+    else bad.round.reviewOutput = { ...rawReview, findings: [] }
+    await assert.rejects(elaborate({ ...input, requestKey: `scope-review-${corrupt}` }, { draft, repairDiagnostics: bad, runner: async () => assert.fail('身份摘要损坏不得fallback生成') }), { code: 'review_retry_binding' })
+  }
+  await assert.rejects(elaborate({ ...input, requestKey: 'scope-review-new-analysis', analysis: { ...input.analysis, ref: { sha256: 'e'.repeat(64) } } }, { draft, repairDiagnostics, runner: async () => assert.fail('异分析不得派发') }), /同一业务输入/)
+  const before = f.requests.length
+  const restored = await elaborate({ ...input, requestKey: 'scope-review-fresh', generationGuidance: ELABORATION_GENERATION_GUIDANCE }, { draft, repairDiagnostics, loadDraftMaterial: () => assert.fail('合法候选只续独审，不读物理材料覆盖'), runner: f.run(() => assert.fail('同一合法Git稿不得重新生成')) })
+  assert.equal(restored.status, 'complete', JSON.stringify(restored.failure))
+  assert.deepEqual(f.requests.slice(before).map(request => request.purpose), ['elaboration_review'])
+  assert.match(f.requests.at(-1)!.prompt, /review_scope/); assert.ok(f.requests.at(-1)!.prompt.includes(JSON.stringify(rawReview)))
+  assert.match(f.requests.at(-1)!.prompt, /包装测试只有实际声明稳定ID、确实运行并覆盖本条断言才可引用/)
+  assert.deepEqual(f.requests.at(-1)!.schema, f.requests[1].schema)
+  assert.deepEqual(restored.rounds[0].traces[0], round.traces[0]); assert.deepEqual(restored.rounds[0].draft, { ...draft, errors: restored.rounds[0].findings })
+  assert.equal(restored.candidateDigest, failed.candidateDigest); assert.deepEqual(restored.changes, failed.changes)
+  assert.equal(readStageDraft(f.commonDir, draft, draft), draftText); assert.equal(JSON.stringify(failed), original)
+  const reviewEntries = readTree(f.commonDir, f.requests.at(-1)!.worktree!.tree)
+  assert.deepEqual(reviewEntries.filter(entry => !entry.path.startsWith('.spec/')), readTree(f.commonDir, f.snapshot.immutableTree).filter(entry => !entry.path.startsWith('.spec/')), '源码/tests全部path/mode/OID与absence保持')
 })
 
 test('分区checkpoint按owner承接草稿且跨父输入重派；当前局部accept缓存摘要失配仍拒绝', async t => {
@@ -324,6 +619,49 @@ test('tagged draft saved/accepted冷缓存重核Git及body候选绑定，历史�
 })
 
 
+for (const kind of ['saved', 'accepted'] as const) test(`${kind}旧ready缓存按原local空analysis失效，兄弟全局REQ影响不扩权且真实Git原稿继续修`, async t => {
+  const f = await fixture(t), source = f.input.targets[0].source!
+  const analysis: CodeBehaviorAnalysis = { version: 'code-behavior-v1', inputId: f.snapshot.id, baselinePairId: null, composedDigest: 'a'.repeat(64), readSetDigest: 'a'.repeat(64), policyDigest: 'a'.repeat(64), inputDigest: 'a'.repeat(64), changes: [], findings: [], facts: [], authorizedChanges: [], nodeChanges: [], newNodes: [], resolutions: [], traces: [], reviewPassed: true }
+  const localAnalysis: CodeBehaviorEvidence = { ref: writeEvidence(f.commonDir, analysis), analysis }, partitionId = 'scope-cache-owner', planDigest = contentHash('scope-cache-plan')
+  const combined = { ...analysis, changes: [{ id: 'sibling-change', kind: 'allowed_change' as const, paths: ['src/sibling.js'], affectedIds: ['REQ-EXPORT-01'], ruleIds: ['REQ-EXPORT-01'], originalIntent: '兄弟承接祖先要求', previousBehavior: '旧兄弟行为', sourceBehavior: '当前兄弟行为', deliveryBehavior: '当前兄弟行为', evidence: '兄弟变化不授权此owner文案', counterexample: '本owner没有代码变化' }], partitionEvidence: [{ partitionId, changedPaths: [], analysisRef: localAnalysis.ref, analysis }] }
+  f.input.analysis = { analysis: combined, ref: writeEvidence(f.commonDir, combined) }
+  const plan: SyncPartitionPlan = { version: 'sync-partitions-v1', digest: planDigest, expectedPaths: [], dependencies: [], partitions: [{ id: partitionId, intentNodeId: 'export-contract', targets: [{ nodeId: 'export-contract', path }], readPaths: readTree(f.commonDir, f.snapshot.immutableTree).map(entry => entry.path), writePaths: [path], sourcePaths: ['src/export.js'], changedPaths: [], contextNodeIds: ['ancestor'], contractIds: [], flowIds: [], readBytes: 100, readLimitBytes: 524288, oversizedReads: [] }] }
+  type Local = Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>
+  const key = `partition:${partitionId}:elaboration`, output = draftRows(source)
+  output.changes[0].title = '旧版本已接受但本区未受影响的标题'
+  const bytes = JSON.stringify(output)
+  let captured: Local | undefined
+  await elaborateSyncPartitions(f.input, plan, 1, { load: () => null, save: (name, value) => { if (name === key) captured = structuredClone(value) as Local; return writeEvidence(f.commonDir, value) } }, f.run(() => bytes))
+  assert.ok(captured); assert.equal(captured.reviewPassed, false)
+  const localInput: ElaborationInput = { ...f.input, analysis: localAnalysis, partitionBinding: { planDigest, partitionId, analysisRef: f.input.analysis.ref }, validationScope: 'partition_local', authorizedChanges: [] }
+  assert.equal(freezeElaborationInput(localInput).inputDigest, captured.inputDigest)
+  const candidate = renderElaboration(localInput, bindElaborationTargets(localInput, output), captured.inputDigest), candidateDigest = contentHash(JSON.stringify(candidate))
+  // 旧版本已审回执是显式测试夹具；真实Git稿、schema及渲染身份仍逐项绑定，生产不改历史原件。
+  const old: Local = { ...captured, status: 'complete', structurePassed: true, reviewPassed: true, candidateDigest, changes: candidate.changes.map(change => ({ ...change, contentDigest: contentHash(change.source) })), rounds: [{ ...captured.rounds[0], findings: [], candidate, candidateDigest, draft: { ...captured.rounds[0].draft!, errors: [] }, reviewOutput: { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }, review: { inputDigest: captured.inputDigest, candidateDigest, verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] } }] }
+  const original = JSON.stringify(old), draft = old.rounds[0].draft!
+  assert.equal(readStageDraft(f.commonDir, draft, draft), bytes)
+  assert.equal(sealPartitionedElaboration(f.input, old.changes, candidate.applicability).seal.passed, true, '全局兄弟影响不能代替本区缓存资格')
+  let resumed = 0
+  const result = await elaborateSyncPartitions(f.input, plan, 1, {
+    load: <T>(name: string) => kind === 'saved' && name === key ? structuredClone(old) as T : null,
+    loadAcceptedElaboration: () => kind === 'accepted' ? structuredClone(old) : null,
+    loadElaborationDraft: kind === 'accepted' ? () => structuredClone(draft) : undefined,
+    elaborationDraftTagged: () => true,
+    save: (_name, value) => writeEvidence(f.commonDir, value),
+  }, f.run((request, workspace, draftPath) => {
+    resumed++
+    assert.equal(readFileSync(join(workspace, draftPath), 'utf8'), bytes, '不能丢弃已认证旧稿从零开始')
+    assert.match(request.prompt, /rows_patch/)
+    return JSON.stringify(rows)
+  }))
+  assert.equal(resumed, 1, '不合格旧ready必须重开生成及新独审')
+  assert.equal(result.status, 'complete', JSON.stringify(result.failure))
+  assert.equal(result.changes[0].source, source)
+  assert.deepEqual(f.requests.slice(-2).map(request => request.purpose), ['elaboration_generate', 'elaboration_review'])
+  assert.equal(verifyElaborationDraftCache(localInput, old, true), false)
+  assert.equal(JSON.stringify(old), original); assert.equal(readStageDraft(f.commonDir, draft, draft), bytes)
+})
+
 test('当前新input tag不能给原legacy无draft接受结果补协议', async t => {
   const f = await fixture(t)
   const legacy = await elaborate({ ...f.input, draftProtocol: undefined, maxRepairs: 0 }, { runner: async request => {
@@ -345,6 +683,89 @@ function draftRows(source: string): GeneratedTargetElaboration {
     })))])) as GeneratedTargetElaboration['changes'][number]['tables'],
   }] }
 }
+
+async function reviewedDetailFixture(t: test.TestContext, scope: 'whole' | 'partition' = 'whole') {
+  const f = await fixture(t)
+  const before = f.input.targets[0].source!.replace('QUEUED或既有任务；错误退出', 'QUEUED且新任务attempt=0或既有任务；错误退出')
+  const input: ElaborationInput = { ...f.input, targets: [{ ...f.input.targets[0], source: before, sourceDigest: contentHash(before) }], worktree: stageWorktree(f.commonDir, f.snapshot.headCommit, overlayStageTree(f.commonDir, f.snapshot.immutableTree, [{ path, source: before }])), maxRepairs: 0, authorizedChanges: [], ...(scope === 'partition' ? { partitionBinding: { planDigest: contentHash('controlled detail partition plan'), partitionId: 'detail-owner' }, validationScope: 'partition_local' } : {}) }
+  const corrected = draftRows(before)
+  corrected.changes[0].tables.STEP.find(row => row.id === 'STEP-EXPORT-01')!.output = 'QUEUED且新任务attempt=1或既有任务；错误退出'
+  const drifted = structuredClone(corrected)
+  for (const row of drifted.changes[0].tables.RULE.slice(0, 6)) row.constraint += '；无关历史漂移'
+  drifted.changes[0].tables.REQ[0].goal += '；无关历史漂移'
+  const rejected = await elaborate({ ...input, mode: 'preserve_business' }, { runner: f.run(() => JSON.stringify(drifted)) })
+  assert.equal(rejected.status, 'exhausted')
+  assert.equal(rejected.rounds[0].findings.filter(issue => issue.code === 'refactor_business_meaning_changed').length, 8)
+  const sha = contentHash('controlled reviewed P0 detail')
+  const analysis: CodeBehaviorEvidence['analysis'] = { version: 'code-behavior-v1', inputId: f.snapshot.id, baselinePairId: null, composedDigest: f.snapshot.id, readSetDigest: sha, policyDigest: sha, inputDigest: sha,
+    changes: [{ id: 'current-reviewed-attempt-detail', kind: 'allowed_change', paths: ['src/export.js'], affectedIds: ['STEP-EXPORT-01'], ruleIds: ['RULE-EXPORT-02'], originalIntent: input.intent.rawSource, previousBehavior: '旧Spec记新任务attempt=0', sourceBehavior: 'src/export.js#ExportService.submit创建新任务attempt=1', deliveryBehavior: '同步该非冲突实现明细，其他权限、状态和验收保持', evidence: '冻结源码const job含attempt: 1；非用户政策变化，无AC或退役动作', counterexample: '复制旧诊断回滚为attempt=0将与当前源码不符' }],
+    findings: [], facts: [{ source: 'code:src/export.js#ExportService', text: '新任务attempt=1' }], authorizedChanges: [], nodeChanges: [], newNodes: [], resolutions: [], authorChanges: [],
+    traces: ['code_behavior_analyze', 'code_behavior_review'].map((purpose, index) => ({ purpose, sessionId: `controlled-analysis-${index}`, threadId: `controlled-analysis-thread-${index}`, turnId: 'turn', resultDigest: sha, inputDigest: sha })), reviewPassed: true }
+  return { ...f, input: { ...input, mode: 'reelaborate' as const, facts: analysis.facts }, corrected, rejected, evidence: { ref: writeEvidence(f.commonDir, analysis), analysis } }
+}
+
+for (const scope of ['whole', 'partition'] as const) test(`Native P1当前受审analysis完整同入${scope}生成与独审，空特殊授权不遮盖非冲突明细`, async t => {
+  const f = await reviewedDetailFixture(t, scope), original = JSON.stringify(f.rejected), draft = f.rejected.rounds[0].draft!
+  const local = f.evidence, planDigest = contentHash('controlled detail partition plan')
+  const combined = { ...local.analysis, partitionCoverage: { planDigest, partitionIds: ['detail-owner'], changedPaths: ['src/export.js'] }, partitionEvidence: [{ partitionId: 'detail-owner', changedPaths: ['src/export.js'], analysisRef: local.ref, analysis: local.analysis }] }
+  const analysis = scope === 'whole' ? local : { ref: writeEvidence(f.commonDir, combined), analysis: combined }
+  const input = { ...f.input, requestKey: `current-analysis-${scope}`, analysis }
+  const callStart = f.requests.length, runner = f.run((_request, workspace, draftPath) => {
+    assert.equal(readFileSync(join(workspace, draftPath), 'utf8'), readStageDraft(f.commonDir, draft, draft))
+    return JSON.stringify(f.corrected)
+  })
+  const plan: SyncPartitionPlan = { version: 'sync-partitions-v1', digest: planDigest, expectedPaths: ['src/export.js'], dependencies: [], partitions: [{ id: 'detail-owner', intentNodeId: 'export-contract', targets: [{ nodeId: 'export-contract', path }], readPaths: readTree(f.commonDir, f.snapshot.immutableTree).map(entry => entry.path), writePaths: [path], sourcePaths: ['src/export.js'], changedPaths: ['src/export.js'], contextNodeIds: ['ancestor'], contractIds: [], flowIds: [], readBytes: 100, readLimitBytes: 524288, oversizedReads: [] }] }
+  const result = scope === 'whole'
+    ? await elaborate(input, { draft, runner })
+    : await elaborateSyncPartitions(input, plan, 1, { load: () => null, save: (_key, value) => writeEvidence(f.commonDir, value), loadElaborationDraft: () => draft }, runner)
+  const requests = f.requests.slice(callStart)
+  const evidenceDir = process.env.SPEX_NATIVE_ANALYSIS_BRIEF_EVIDENCE_DIR
+  if (evidenceDir) writeFileSync(join(evidenceDir, `${scope}.json`), JSON.stringify({ controlledNative: true, scope, analysis, local, oldResult: f.rejected, originalDraft: readStageDraft(f.commonDir, draft, draft), requests, result }, null, 2))
+  assert.equal(result.status, 'complete', JSON.stringify(result.rounds.map(round => round.findings)))
+  assert.deepEqual(requests.map(request => request.purpose), ['elaboration_generate', 'elaboration_review'])
+  for (const request of requests) {
+    const task = JSON.parse(request.prompt.split('\n任务:\n')[1].split('\n')[0])
+    assert.deepEqual(task.analysis, local, '生成与独审必须收到当前真实受审分析ref和完整正文，不只authorChanges或facts')
+    assert.equal(task.authorChanges, undefined, '原authorChanges仅在完整analysis内出现，不另造重复投影')
+    assert.deepEqual(task.targets, [{ targetIndex: 0, nodeId: 'export-contract', path }])
+    assert.equal(task.mode, 'reelaborate'); assert.deepEqual(task.authorizedChanges, [])
+    assert.deepEqual(task.partitionBinding, scope === 'whole' ? undefined : { planDigest, partitionId: 'detail-owner', analysisRef: analysis.ref })
+    assert.match(request.prompt, /authorizedChanges.*特殊动作/)
+    assert.match(request.prompt, /历史.*诊断.*当前.*分类/)
+  }
+  assert.ok(requests[0].prompt.includes(`"errors":${JSON.stringify(draft.errors)}`), '原8处历史finding逐项保持')
+  const before = parseContract({ nodeId: 'export-contract', path, source: f.input.targets[0].source! }).contract!
+  const after = result.contracts.find(contract => contract.nodeId === 'export-contract')!
+  assert.equal(after.items.find(item => item.id === 'STEP-EXPORT-01')!.kind, 'STEP')
+  assert.equal((after.items.find(item => item.id === 'STEP-EXPORT-01') as { output: string }).output, 'QUEUED且新任务attempt=1或既有任务；错误退出')
+  assert.deepEqual(after.items.filter(item => item.id !== 'STEP-EXPORT-01'), before.items.filter(item => item.id !== 'STEP-EXPORT-01'))
+  assert.equal(JSON.stringify(f.rejected), original); assert.deepEqual(analysis.analysis.authorizedChanges, [])
+})
+
+test('Native当前analysis可见不授予纯refactor、AC、VERIFY或退役越权', async t => {
+  const f = await reviewedDetailFixture(t)
+  for (const change of ['refactor', 'acceptance', 'verification', 'retire'] as const) {
+    const output = structuredClone(f.corrected)
+    if (change === 'acceptance') output.changes[0].tables.AC[0].assertion += '；越权改变既有验收'
+    if (change === 'verification') output.changes[0].tables.VERIFY[0].command = ['node', '--version']
+    if (change === 'retire') { output.changes[0].tables.AC.shift(); output.changes[0].removeIds = ['AC-EXPORT-01'] }
+    const calls = f.requests.length
+    const result = await elaborate({ ...f.input, requestKey: `no-extra-authorization-${change}`, analysis: f.evidence, mode: change === 'refactor' ? 'preserve_business' : 'reelaborate' }, { runner: f.run(() => JSON.stringify(output)) })
+    assert.equal(result.reviewPassed, false)
+    assert.ok(result.rounds[0].findings.some(issue => issue.code === ({ refactor: 'refactor_business_meaning_changed', acceptance: 'acceptance_update_unauthorized', verification: 'verification_policy_changed', retire: 'protected_item_removed' })[change]), JSON.stringify(result.rounds[0].findings))
+    assert.deepEqual(f.requests.slice(calls).map(request => request.purpose), ['elaboration_generate'])
+  }
+})
+
+test('Native P1无analysis时不宣称已有受审分类', async t => {
+  const f = await fixture(t)
+  const result = await elaborate({ ...f.input, maxRepairs: 0 }, { runner: f.run(() => JSON.stringify(rows)) })
+  assert.equal(result.status, 'complete')
+  for (const request of f.requests) {
+    assert.equal(JSON.parse(request.prompt.split('\n任务:\n')[1].split('\n')[0]).analysis, undefined)
+    assert.doesNotMatch(request.prompt, /任务analysis为本轮冻结受审P0分析/)
+  }
+})
 
 async function sealFixture(t: test.TestContext, sharedVerification = false, redundantGeneratedAcceptance = false) {
   const f = await fixture(t), peerPath = '.spec/export/peer-contract/spec.md'
@@ -425,6 +846,7 @@ test('全局返修负向：不更名、删义务、旧作者身份、错引用�
     ['作者已采纳FLOW更名', f.repaired.replaceAll('FLOW-PEER-02', 'FLOW-PEER-AUTHOR-RENAMED'), ['FLOW-PEER-02']],
     ['作者AC弱化', f.repaired.replace('全部拒绝，原结果可由所有者下载', '部分拒绝即可'), []],
     ['作者VERIFY弱化', f.repaired.replace('10000 |', '1000 |'), []],
+    ['新增不存在的源码治理', f.repaired.replaceAll('src/export.js', 'src/missing-export.js'), []],
     ['仅FLOW改名未更新STEP', f.repaired.replaceAll('| FLOW-PEER-REPAIRED-01 | 校验', '| FLOW-SHARED-01 | 校验'), []],
     ['抢兄弟稳定ID', f.repaired.replaceAll('FLOW-PEER-REPAIRED-01', 'FLOW-EXPORT-02'), []],
     ['同kind更名却删除流程义务', f.repaired.replace('提交请求', '跳过提交'), []],
@@ -436,6 +858,7 @@ test('全局返修负向：不更名、删义务、旧作者身份、错引用�
     const result = await elaborateSyncPartitions({ ...f.input, requestKey: name }, f.plan, 1, f.checkpoints, f.run(() => JSON.stringify(output)))
     assert.equal(result.reviewPassed, false, name)
     assert.ok(result.rounds.some(round => round.findings.some(issue => issue.severity === 'error')), name)
+    if (name === '新增不存在的源码治理') assert.ok(result.rounds.some(round => round.findings.some(issue => issue.code === 'missing-governed-file' && issue.path === f.peerPath)))
     assert.deepEqual(f.requests.slice(callsBefore).map(request => request.purpose), ['elaboration_generate'], name)
   })
   await t.test('非duplicate或非本owner真实finding不给临时ID改名资格', async () => {
@@ -544,6 +967,54 @@ async function anchorRepairFixture(t: test.TestContext) {
   assert.equal(readStageDraft(f.commonDir, draft, draft), badText)
   return { ...f, input, repair, baseline, corrected, badText, draft, failed }
 }
+
+test('P1物理材料跨新父与新旧诊断精确overlay，原seed仍完整冷验且source/tests不豁免', async t => {
+  const f = await anchorRepairFixture(t), source = '{ ORIGINAL_UNCOMMITTED_EPIPE\n', before = f.requests.length
+  const richError = { code: 'program-diagnostic', message: '字符串中含\n任务:\n[]、\n草稿业务schema只读文件=、\\与"引号"', severity: 'error' as const, nodeId: 'export-contract', path, line: 17, itemId: 'STEP-EXPORT-01' }
+  const failed = await elaborate({ ...f.input, requestKey: 'physical-old-parent' }, { draft: { ...f.draft, errors: [...f.draft.errors, richError] }, runner: f.run((_request, workspace, draftPath) => {
+    mkdirSync(dirname(join(workspace, draftPath)), { recursive: true }); writeFileSync(join(workspace, draftPath), source)
+    throw new StructuredSessionError('failed', 'controlled EPIPE')
+  }) })
+  assert.equal(failed.status, 'failed'); assert.equal(failed.failure?.code, 'failed'); assert.equal(failed.rounds[0].draft, undefined)
+  const oldRequest = f.requests[before], oldWorkspace = f.workspaces[before], originalRequest = JSON.stringify(oldRequest)
+  const indexPath = git(oldWorkspace, 'rev-parse', '--git-path', 'index'), index = readFileSync(indexPath)
+  const context = [{ nodeId: 'ancestor', path: ancestorPath, source: ancestor('已审新父接口') }]
+  const accepted = await elaborate({ ...f.input, readonlySpecRepair: undefined, context, requestKey: 'new-parent-accepted' }, { runner: f.run(() => JSON.stringify(draftRows(f.baseline))) })
+  assert.equal(accepted.status, 'complete')
+  const repair = { ...f.repair, baseInputDigest: accepted.inputDigest, candidateDigest: accepted.candidateDigest!, acceptedRef: writeEvidence(f.commonDir, accepted), changes: accepted.changes, output: accepted.rounds[0].output, review: accepted.rounds[0].review }
+  let originalDiagnostics: Record<string, unknown> | undefined, projections: { previous: string[]; current: string[] } | undefined
+  const result = await elaborate({ ...f.input, context, readonlySpecRepair: repair, requestKey: 'new-parent-physical' }, {
+    loadDraftMaterial: (_schema, current) => {
+      assert(current)
+      const binding = elaborationMaterialContext(f.commonDir, oldRequest, current)
+      assert(binding, '新父/精确诊断overlay变化不应清空合法旧物理材料')
+      originalDiagnostics = binding.diagnostics
+      assert((binding.diagnostics.priorDraft as { errors: unknown[] }).errors.some(error => JSON.stringify(error) === JSON.stringify(richError)))
+      projections = { previous: binding.previousReadonlyOverlay.map(entry => entry.path), current: binding.currentReadonlyOverlay.map(entry => entry.path) }
+      for (const prompt of [oldRequest.prompt + '\nambiguous suffix', oldRequest.prompt.replace('\n失败诊断（不是新授权）:', '\nwrong marker'), oldRequest.prompt.replace('\n草稿业务schema只读文件=', '\nwrong schema marker=')]) assert.throws(() => elaborationMaterialContext(f.commonDir, { ...oldRequest, prompt }, current), /精确程序任务/)
+      for (const path of ['src/export.js', 'tests/export.test.mjs', '.spec/unauthorized/spec.md']) {
+        const tree = overlayStageTree(f.commonDir, current.worktree.tree, [{ path, source: 'unauthorized' }]), worktree = stageWorktree(f.commonDir, f.snapshot.headCommit, tree, 'edit')
+        assert.equal(elaborationMaterialContext(f.commonDir, oldRequest, { ...current, worktree }), null, '只排精确可信overlay，其他Spec/source/tests仍拒绝')
+      }
+      const physical = readStoppedPhysicalDraft(f.commonDir, oldWorkspace, oldRequest.worktree!, current.binding)!
+      assert.equal(physical.source, source)
+      return { source: physical.source, errors: f.draft.errors, diagnostics: binding.diagnostics, sourceKind: 'physical_draft' }
+    }, runner: f.run((request, workspace, draftPath) => {
+      assert.equal(readFileSync(join(workspace, draftPath), 'utf8'), source)
+      assert.equal(readFileSync(join(workspace, ancestorPath), 'utf8'), context[0].source)
+      assert.equal(readFileSync(join(workspace, `.spex-sync-diagnostics/${repair.acceptedRef.sha256}/${path}`), 'utf8'), f.baseline)
+      const diagnostic = JSON.parse(request.prompt.split('\n失败诊断（不是新授权）:\n')[1].split('\n草稿业务schema只读文件=')[0])
+      assert.deepEqual(diagnostic.materialDiagnostics, originalDiagnostics, 'B原冻结诊断完整进入新请求，不仅保EPIPE')
+      assert.deepEqual(readTree(f.commonDir, request.worktree!.tree).filter(entry => !entry.path.startsWith('.spec/') && !entry.path.startsWith('.spex-sync-')), readTree(f.commonDir, f.input.worktree!.tree).filter(entry => !entry.path.startsWith('.spec/')))
+      return JSON.stringify(f.corrected)
+    }),
+  })
+  assert.equal(result.status, 'complete', JSON.stringify(result.failure)); assert.equal(result.reviewPassed, true)
+  assert(projections!.previous.includes(`.spex-sync-diagnostics/${f.repair.acceptedRef.sha256}/${path}`)); assert(projections!.current.includes(`.spex-sync-diagnostics/${repair.acceptedRef.sha256}/${path}`))
+  assert.notEqual(f.repair.acceptedRef.sha256, repair.acceptedRef.sha256)
+  assert.equal(JSON.stringify(oldRequest), originalRequest); assert.deepEqual(readFileSync(indexPath), index)
+  assert.equal(readFileSync(join(oldWorkspace, /草稿文件=([^\s]+)/.exec(oldRequest.prompt)![1]), 'utf8'), source)
+})
 
 for (const purpose of ['elaboration_generate', 'elaboration_review']) test(`V1锚点返修${purpose}保留完整任务与真实baseline，坏草稿自行恢复而不改旧证据`, async t => {
   const f = await anchorRepairFixture(t), prior = JSON.stringify(f.draft), requestsBefore = f.requests.length

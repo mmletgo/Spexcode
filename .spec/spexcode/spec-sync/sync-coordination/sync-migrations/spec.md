@@ -14,6 +14,28 @@ code:
 
 ## expanded spec
 
+v34只新增sync_observations的部分表达式索引：键为完整source_key、input.id、latestDifferenceDigest与outcome，成员条件逐字沿用commit、failure为NULL且outcome非blocked。索引由SQLite维护既有行及后续写入，不保存第二份观察事实，不改原查询、分组、rowid顺序或任何历史业务行。升级前停稳旧writer并结算或保留资源和租约，沿正常online backup及组件事务建索引；v1–v33 SQL/checksum与全部旧记录保持，v33及更旧writer拒绝新代。建索引失败连同marker整体回滚，重复迁移幂等。回滚先停新writer并结算或保留资源，再恢复升级前一致v33库与配套evidence/runtime/Git refs，不能删marker降级。
+
+v33仅追加SELECT 1 marker，保护P1 V5只读事实修正资格及其阶段摘要。所有旧32及更旧writer在任何claim、renew、状态写或派发前拒绝；V1–V32 SQL/checksum和全部历史记录保持。升级先停稳旧backend/queue、结算或保留真实资源及租约，做一次32一致SQLite online backup后事务追加。回滚先停新writer并结算33产生的资源，再恢复32一致备份和配套evidence/runtime/Git refs；不能删marker、改历史请求或补写旧字段。
+
+v32仅追加无DDL SELECT 1 writer marker，保护远端 V3 v2 的 target/effect/closed 持久语义，以及 removed 须确证容器和临时 staging 均已清算的边界。v31及更旧 writer 在任何写入/派发前拒绝；保 v1–v31 SQL/checksum 与旧记录原字节。升级停稳旧 backend/queue并结算或保留资源，再 online backup 后事务追加。回滚停新 writer，先结算远端资源，再恢复一致 v31 备份及配套 evidence/runtime/Git refs；未知远端 effect 未结算不能用旧备份抹掉 ledger，不能删 marker 降级。
+
+v31仅追加无DDL SELECT 1 marker，保护完整Native P1独审的`ac-test-flow-review-binding-v3`及已结算 `session/events` 超时后仅预留P1独审的派发形态。v30及更旧writer须在任何写入或派发前拒绝。停稳旧backend/queue并结算资源及租约后，v30→v31做一次SQLite online backup，再在组件事务追加marker，保留旧SQL、checksum、旧表及已冻结请求。回滚先停新writer，再恢复升级前一致的v30备份及原evidence/Git refs。
+
+v30仅追加无DDL SELECT 1 marker，保护完整P1生成提示版本`ac-test-flow-binding-v2`。v29原能在拒绝未知阶段版本后持久化unsupported，故旧writer须在任何写入和派发前拒绝新库。升级停稳旧backend/queue并结算资源及租约后，v29→v30做一次SQLite online backup，再在组件事务追加marker，历史SQL、checksum、旧表和请求原件保持。回滚先停新writer，再恢复升级前一致备份及原evidence/Git refs。
+
+v29仅追加无DDL SELECT 1 marker，保护P1原生草稿`elaboration-draft-protocol`已冻结的完整生成提示版本。v28及更旧writer必须在写入与派发前拒绝，包括提示版本已保存而派发尚未reserve的窗口。升级停稳旧backend/queue并结算资源和租约后，先做一次SQLite online backup，再在组件事务追加缺失marker。v27直升v29同样只备份一次。既有迁移SQL、checksum、旧表和请求原件保持，回滚先停新writer再恢复升级前一致备份及原evidence/Git refs。
+
+v28仅追加无DDL SELECT 1 marker，保护P1全局证据中独立的analysisOnlyPartitions和精确摘要。v27及更旧writer必须在写入和派发前拒绝。升级先停稳旧backend/queue并正式结算资源和租约，再用SQLite online backup及组件事务迁移，v1–v27 SQL、checksum、applied_at和旧业务表原样保留。回滚先停新writer，再恢复升级前一致v27备份及原evidence/Git refs，不删marker。
+
+v27仅追加无DDL SELECT1 marker，保护已停owner物理JSON草稿的明确未批准材料准入及来源选择；v26及更旧writer必须写入/派发前拒绝。升级先停稳全部旧writer并结算或保留资源，经0600私有SQLite online backup及组件事务26→27，v1–v26完整migration/checksum/applied_at和全部旧表/请求/receipt保持。回滚停新writer后恢复一致v26库及evidence/Git refs，不删marker、不改旧计划或原工作树/index。NativePlan、structured policy与业务schema不改。
+
+v26仅追加无DDL SELECT1 marker，保护精确已停ZCode失败的未批准Git材料准入与既有严格较新来源选择，v25及更旧writer写入/派发前拒绝。NativePlan及structured policy仍按原v3/v6或原历史版本冷验，不补字段。升级前停稳旧writer并结算或保留资源，经SQLite online backup及组件事务25→26；v1–v25 migration完整行/checksum/applied_at与全部旧业务/protocol表保持。回滚停新writer并恢复升级前v25一致备份及原evidence/Git refs，不删marker、不重签旧记录或丢弃最新未批准稿。
+
+v25仅追加无DDL SELECT 1 marker，保护P0 behavior-draft-protocol可选contextTransport:git-json-v1及同owner/purpose只读Git context文件运输。v24及更旧writer必须在写入或派发前拒绝，避免已冻结传输选择被忽略。升级先停稳全部旧backend/queue并结算或保留资源，再沿既有SQLite online backup及组件事务迁移；v1–v24 SQL/checksum/applied_at、全部旧表、请求、缓存和receipt原字节保持，不补历史缺席。回滚先停新writer，再恢复升级前v24一致备份及原evidence/Git refs；不能删marker或重签旧请求。
+
+v24仅追加无DDL SELECT 1 marker，保护 nativeConfiguration:cli-config-v1、Claude NativePlan v2 与 ZCode NativePlan v3 的实际每轮配置/模型证据协议。v23及更旧writer在写入或派发前拒绝；正常升级先停稳全部旧backend/queue并结算或保留资源，按既有online backup后事务迁移。v1–v23 SQL/checksum/applied_at及全部旧表/请求/receipt原字节保持，不补历史字段。回滚先停新writer，再恢复升级前v23一致备份及配套evidence/Git refs；不能删marker或重签旧计划。
+
 v23以无DDL SELECT 1登记P0按purpose的Git草稿、认证Native材料和精确分析续审协议；关闭behavior-draft-protocol已保存而dispatch尚未reserved的崩溃窗口，v22及更旧writer必须在任何业务写入/派发前拒绝。沿既有online backup及组件事务保v1–v22 checksum、原记录/请求/CAS不变；既有reserved请求仍按原绑定恢复。升级先停稳全部旧writer并结算或保留真实资源，回滚先停新writer，再恢复升级前v22一致备份及原evidence/Git refs，不删marker或补造历史草稿。
 
 v20仅以SELECT 1登记 [[sync-source-registration]] 及EnabledRecord v2的writer语义。沿原online backup与组件事务，旧v19 writer逐事务拒绝，v1–v19 checksum及全部旧记录/CAS保持。continuity记录另在私有global runtime保存；回滚停新writer后恢复升级前一致DB备份、原enabled字节及原continuity-evidence链，不删marker或用新见证改旧input。失败暂停可能已生效，文件CAS和DB不是跨介质原子事务，不自动恢复run。

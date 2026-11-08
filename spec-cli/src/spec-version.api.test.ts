@@ -183,6 +183,12 @@ test('/api/specs/:id/version and /diff answer only for the node\'s own versions,
     }
     writeFileSync(configPath, JSON.stringify({ ...config, sync }))
     assert.equal((await post('/api/sync/automatic/pause', {})).status, 200)
+    const uncommittedActivation = await post('/api/sync/settings', {})
+    assert.equal(uncommittedActivation.status, 409, 'activation requires the configuration in committed source')
+    assert.equal((await uncommittedActivation.json()).code, 'sync_configuration_invalid')
+    git(project, 'add', '.spec/spexcode.json')
+    git(project, 'commit', '-qm', 'sync: authorize HTTP fixture')
+    const beforeEnableHead = git(project, 'rev-parse', 'HEAD')
     const beforeEnable = readFileSync(join(project, '.git/index'))
     const activation = await post('/api/sync/settings', {})
     assert.equal(activation.status, 200, await activation.text())
@@ -194,12 +200,12 @@ test('/api/specs/:id/version and /diff answer only for the node\'s own versions,
     const noOp = await post('/api/specs/alpha/body', patch, { 'idempotency-key': 'http-noop' })
     assert.equal(noOp.status, 200); assert.deepEqual(await noOp.json(), { ok: true, changed: false, commit: null, syncOperation: null })
     assert.equal((await (await fetch(`${base}/api/sync/status`)).json()).operations.length, 0)
-    assert.equal(git(project, 'rev-parse', 'HEAD'), beforeHead)
+    assert.equal(git(project, 'rev-parse', 'HEAD'), beforeEnableHead)
     assert.deepEqual(readFileSync(join(project, '.git/index')), beforeEnable)
     writeFileSync(configPath, '{broken')
     const refused = await post('/api/specs/alpha/body', { ...patch, replacement: '# changed' }, { 'idempotency-key': 'invalidated' })
     assert.equal(refused.status, 409, 'invalidated synchronization must never fall back to a standalone prose commit')
-    assert.equal(git(project, 'rev-parse', 'HEAD'), beforeHead)
+    assert.equal(git(project, 'rev-parse', 'HEAD'), beforeEnableHead)
     assert.deepEqual(readFileSync(join(project, '.git/index')), beforeEnable)
   } finally {
     if (backend?.pid) {

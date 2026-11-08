@@ -2,10 +2,11 @@ import type { SyncResourceRecord, WriteFence } from './operation-types.js'
 import { contentHash, readEvidence, writeEvidence } from './snapshot.js'
 import type { SyncStore } from './store.js'
 import { executeVerification } from './verification-executor.js'
-import type { VerificationCheckpoint, VerificationDriver, VerificationRequest, VerificationResult } from './verification-executor-types.js'
+import type { VerificationCheckpoint, VerificationDriver, VerificationRequest, VerificationResult, VerificationTransportConfiguration } from './verification-executor-types.js'
 
 export type AttemptVerificationOptions = {
   driver?: VerificationDriver
+  transport?: VerificationTransportConfiguration
   onCheckpointRecorded?: (resource: SyncResourceRecord) => Promise<void>
 }
 
@@ -24,11 +25,13 @@ export async function runAttemptVerification(store: SyncStore, fence: WriteFence
   if (resource) {
     if (resource.plan.kind !== 'verification' || resource.plan.payloadDigest !== payloadDigest || resource.plan.inputId !== request.inputDigest || resource.plan.candidateDigest !== request.candidateDigest) throw new Error('验证 runId 已绑定另一请求')
     previousCheckpoint = JSON.parse(readEvidence(commonDir, resource.checkpointRef).toString('utf8')) as VerificationCheckpoint
-    if (previousCheckpoint.version !== 'verification-checkpoint-v1' || previousCheckpoint.phase !== resource.phase) throw new Error('验证资源与实际检查点阶段不一致')
+    if (!['verification-checkpoint-v1', 'verification-checkpoint-v2'].includes(previousCheckpoint.version) || previousCheckpoint.phase !== resource.phase) throw new Error('验证资源与实际检查点阶段不一致')
   }
   const obsolete = operation.control !== 'run' || operation.currentAttemptId !== attempt.id || ['superseded', 'failed'].includes(attempt.status)
   const result = await executeVerification({ ...request, signal: obsolete ? AbortSignal.abort() : signal, previousCheckpoint }, {
     driver: options.driver,
+    transport: options.transport,
+    assertLaunchAllowed: () => { store.assertWriteFence(fence) },
     onCheckpoint: async checkpoint => {
       const checkpointRef = writeEvidence(commonDir, checkpoint)
       if (!resource) {

@@ -5,6 +5,9 @@ hue: 175
 desc: 从高层原意生成可追踪的主流程与状态处置，经独立审查和有限修复，精确保留未知政策。
 code:
   - spec-cli/src/sync/elaboration.ts#elaborate
+  - spec-cli/src/sync/elaboration.ts#elaborationMaterialContext
+  - spec-cli/src/sync/elaboration.ts#elaborationScopeErrors
+  - spec-cli/src/sync/elaboration.ts#elaborationReviewScopeErrors
   - spec-cli/src/sync/elaboration.ts#freezeElaborationInput
   - spec-cli/src/sync/elaboration.ts#projectElaborationFlowReadiness
   - spec-cli/src/sync/elaboration.ts#verifyElaborationDraftCache
@@ -22,19 +25,60 @@ related:
 
 ## expanded spec
 
+loadDraftMaterial可异步完成已认证停止来源的临时checkout观察；新生成前等待原JSON/Git材料及finally正式回收。归档后的原稿仍沿既有owner/seed/schema、较新来源和未批准身份进入新seed，空稿保持原恢复；不启动旧Native或新造历史witness。
+
+
+同owner连续事实返修把原acceptedRef认证、原generation实际attempt为V5的已批准事实值作为固定继承基线。先逐值证明其相对原作者仅desc/prose/RULE.basis变化，raw、元数据、身份、全部非事实业务列和绑定保持；局部targets/sourceDigest/files自洽且进入现有输入摘要。当前relatedIds只开放本次命中字段，未命中旧basis必须等于固定已批准值；省略旧行也继承该值，不回滚到作者旧事实，不累计旧IDs为自由修改权限。new、prior冷重建及saved/accepted缓存共用同一原件资格接缝。
+
+仅新冻结的P1指导V5在完整叶阶段可消费经真实code_review原件、candidate和原P1 owner认证的candidate_review；当前P0未影响该既有owner时，只可修正事实说明：从原诊断的结构化relatedIds读取已校验affectedIds，在冻结契约图中逐项核唯一身份后取本target的nodeId/path交集。命中的owner允许desc/expanded事实说明及命中RULE.basis变化；raw、标题、code/related、全部其他业务列、行身份、AC/VERIFY、来源和depends-on逐值保持。外owner仅作证据，外owner-only、unknown/重复ID、缺provenance、非error或无candidate_review不授此权；不读取message、draft.errors或materialDiagnostics推断权限。当前真实changes、作者/生命周期及逐项授权仍走原通路，不改P0分类或伪造authorChanges。生成差量与完整候选共用此窄比较，preserve_business不再吞掉合法事实修正，仍须新独审及strict全图seal。
+
+P1物理选源的新鲜度来自原认证generation的attempt与round，不来自载体round、观察时间或mtime。既有draft定位时忽略非权威errors增补但完整身份必须相同，并经原Native/Git冷验；同attempt较晚真实generation亦可优于早轮稿，不能定位来源时拒绝覆盖。原candidate/合法仅续审资格不因材料被替换。
+
+完整生成`ac-test-flow-binding-v2`可在派发前沿相同来源顺序接收`stopped_git_draft`。提示明确这是已停止旧工作树的真实提交中的唯一授权草稿，仍未批准，须沿原字节和拒因继续编辑、正常提交并重新独审。冻结后的同一请求按原材料重放，旧v1、缺字段、父接口及历史派发保持原提示。已接受候选和仅续审资格仍优先，临时草稿不进入业务交付。
+
+原P1程序冻结task/诊断沿精确schema尾段只读解析，不解析模型正文；新旧可信readonly overlay只取原task的relatedSpecs、repair.baselines/specs及本轮程序context/anchor/seal投影，逐项记录精确path/mode/OID。比较仅排这些路径并集及draft/schema，处理新增或消失诊断路径；不豁免整个.spec或source/tests/其absence。旧工作树仍对原seed全量冷验，新seed保当前已审父/诊断内容。原冻结诊断对象完整作为非权威materialDiagnostics进入新请求，新provenance留双投影，旧请求/NativePlan/摘要不重签，writer27已覆盖。
+
+P1材料回调还接收当前StageDraftBinding、含完整只读overlay的真实StageWorktree及业务inputDigest，均仅进程内参数，不重签旧saved/reserved请求。原认证Git draft必须定位到其真实owner/attempt/round；仅严格较新的已认证物理来源可替换为同一observer的physical_draft，未知或更早来源保原稿，合法candidate/仅续审仍优先，提示明确它未提交、未批准且不是Native final或历史Git稿。只复制原bytes，原Native失败/全部具体诊断保留；Agent正常提交后才沿原schema、renderer、业务授权和独立审查形成新稿，原只读祖先/source/tests/absence保持。
+
+存在当前受审分析及冻结owner时，独审与生成共享同一owner范围事实及生命周期目标绑定；新独审任务明确可变目标与冻结目标/上下文。repair的affectedIds必须全部真实存在，并至少定位一个本轮可变owner；可同时引用冻结祖先或依赖作为证据，真实受影响owner的语义修复继续原生成修复与分析回审通道。仅指向未变owner的历史description/prose/进度文案，不能取得本轮写权。程序在转换业务finding前拒绝越界或未知ID绑定，给出具体review_scope/review_binding拒因并保留完整原review JSON，不过滤发现或替模型改accept。历史无当前分析的请求不顺带改变绑定语义。
+
+此类独审权限/绑定错误仅重开独审：原生成JSON或Git稿、原summary追踪和候选必须经当前完整输入、source、schema、目标范围、唯一renderer、机械校验及candidate摘要重新证明，且原review在当前范围下仍确属权限/绑定错误；不能凭旧finding.code取得资格。沿现有rounds及同owner已结算repairDiagnostics保留原review、拒因、Git身份与generation trace，新round只派独立read审查同一候选，不重新生成，不新增业务/源码/tests写权。真正域内repair、输入/分析变化或机械检查失败仍走原修复/失效门；预算、取消、独立性与全图seal保持。新任务范围只是prompt派生数据，不追补历史请求、字段或marker。
+
+经[[sync-coordinator]]认证的原ZCode `session/events` 独审超时也沿仅续审入口。程序冷读原Git草稿，逐项重核owner、source、精确业务schema、唯一renderer和机械门，并要求候选摘要、原任务和owner范围、实际只读评审seed及评审schema一致。身份冲突在派发前明确停止，剩余预算不能转为自动生成。旧失败没有review、accept或ready。新只读评审使用当前冻结的完整独审范围，独立于原生成及原超时会话和线程；通过前原候选仍未批准，预算和后续全图封口继续生效。
+
+同一候选的独审因严格JSON/schema失败且原拒稿经[[sync-coordinator]]认证时，也仅续独审。程序先按原schema和当前冻结输入冷验同一生成稿、候选、任务和完整只读树。连续失败时，旧评审树只可比同一候选树多原请求实际承载且已认证的一份拒稿附件，按真实路径、原始字节和全部保护对象逐值重建。当前独审seed仅附上一轮完整拒稿的精确字节，路径由其摘要确定且不能覆盖候选；仍只读。拒稿不作裁决、批准、指令或业务事实，新独立审查须核原候选并提交精确schema的完整JSON。临时附件不进入业务candidate或交付，任何绑定不符停止派发。
+
+本轮已审分析只为实际受影响owner提供范围证据；冻结targets不自动授权重写每个已有目标。细化在生成后和完整候选检查时核本轮影响归属、作者原意及已有逐项/生命周期授权，未受影响目标的metadata、解释、绑定及行变化以可续修rows_patch阻断。范围门与原行结构核验分离：历史合法JSON和精确schema继续作为原诊断材料进入续修，不能因新增语义门直接丢弃；旧候选不取得accept或ready。省略及显式等价输出由[[elaboration-markdown]]逐字沿用冻结正文，合法受影响owner的prose-only更新继续进入原演进检查及新独审。
+
+已审缓存除原input/Git/ref/schema/渲染绑定外，必须按当前本区输入重核同一owner范围。仅范围不合格返回不可复用资格，不抛原件损坏、不改旧reviewPassed/trace/JSON/ref；原身份或正文绑定损坏仍明确报错。调用者放弃该ready承接后，优先沿现有正式草稿来源，无来源则把已冷验缓存的精确末轮Git稿作为未批准材料续修，附rows_patch诊断并重新生成及独审，不能从零丢稿。全局兄弟分析命中祖先ID不替代本区scope，whole分区结果须回各局部缓存核资格后重新seal。
+
+P1草稿与旧Native材料在本轮业务schema计算完成后才通过进程内回调选源，跨正式retryOf的材料必须精确匹配schema；旧只读成功输出明确标为新临时材料，不能冒充历史Git草稿或批准。该回调不进入持久输入、wrapper或receipt。实际Git稿已按当前binding读出后，材料回调仅可按认证来源顺序选择严格较新的物理稿，不读普通Native fallback；命中物理稿须清旧draft角色并保原完整errors和冻结程序诊断，不能把新bytes包成旧Git身份。原review final格式失败时保留已认证generation业务稿，review原文只作untrusted诊断，不能覆为业务JSON。
+
 临时草稿的续修诊断保留原finding完整身份，包括原有severity、nodeId、path、line、itemId及relatedIds；同码同文但定位不同的发现不得压成重复code/message。当前轮检查点、跨请求的已结算诊断及其实际生成prompt均保留这些字段，未提供的字段保持缺席。诊断仅帮助定位与区分error/warning，不改变业务授权、拒绝门、原稿或独审资格。
 
 显式draft-v1的只读V1锚点返修沿既有未定义kind分支，把完整finding身份、原candidate/accepted/generation引用及真实baselineSpecPath同时交给生成与独审；不能只压成重复code/message或把mode=reelaborate误当重新细化授权。baseline只从当前acceptedRef核验的真实owner完整正文复制为只读诊断文件，独审候选overlay不能覆盖它；文件不成为raw、事实、新义务或写权限。Agent依据该正文自行恢复坏草稿中被改写的prose及已接受RULE等业务字段，仅修finding定位的typed code来源选择器，选择冻结源码真实可索引声明，不猜局部变量或调用符号，不顺手改basis、政策、流程/验收和稳定ID。原草稿字节、错误及trace不改写，schema、单一draft写范围、源码/tests对象与absence、契约演进及锚点门保持；candidate_review、partition_seal和旧无草稿请求不取得此V1任务。提示或seed改变不能为旧同attempt reserved请求重签，冷切换须在原请求结算后通过新attempt冻结。
 
-跨owner全局封口返修中，生成与独审共用由原失败aggregate/local refs核验的完整error定位、owner、原candidate身份和Spec路径映射。真实失败并集只在以aggregate SHA命名的只读诊断目录呈现，不覆盖作者基线、raw或事实；程序图与独审诊断副本复用同一原VERIFY技术归属投影，将本owner替为本轮候选，兄弟原件保持，本区候选原件不重写。只可修改原单一draft，schema、诊断文件、源码和全部测试不可写；正常提交hooks继续面对原作者Spec。候选先以现有parser/严格契约图替回原失败并集，本区候选先完整经过当前登记及演进门，再沿原aggregate相对原已审local确证的VERIFY移除集合复用原技术表投影，不重选owner，不隐藏漂移定义、删除义务或未登记VERIFY。原分配错误未消除或新增跨owner结构错误时不得进入独审，其他owner既有错误仍留最终strict seal。仅原真实duplicate-id精确绑定的本owner、本轮新增且不在冻结作者/已采纳基线的临时ID，可推导唯一一对一、同kind同业务字段（含代码/测试绑定）的更名，并逐项保留本owner每条原typed引用的field及其更名后身份，不能用冗余覆盖掩盖删除引用；原作者/已采纳及非冲突ID保护保持，不把兄弟同ID当成本区义务仍存在。旧draft错误只保历史，不覆盖当前已认证资格；新输入或诊断仍须新生成、新独审及严格全局封口。此回归的受控Git runner不代表真实模型全链验收。
+跨owner全局封口返修中，生成与独审共用由原失败aggregate/local refs核验的完整error定位、owner、原candidate身份和Spec路径映射。真实失败并集只在以aggregate SHA命名的只读诊断目录呈现，不覆盖作者基线、raw或事实；程序图与独审诊断副本复用同一原VERIFY技术归属投影，将本owner替为本轮候选，兄弟原件保持，本区候选原件不重写。只可修改原单一draft，schema、诊断文件、源码和全部测试不可写；正常提交hooks继续面对原作者Spec。候选先以现有parser/严格契约图替回原失败并集，本区候选先完整经过当前登记及演进门，再沿原aggregate相对原已审local确证的VERIFY移除集合复用原技术表投影，不重选owner，不隐藏漂移定义、删除义务或未登记VERIFY。本owner可修的原分配错误未消除或新增跨owner结构错误时不得进入独审，其他owner既有错误仍留最终strict seal。仅原真实duplicate-id精确绑定的本owner、本轮新增且不在冻结作者/已采纳基线的临时ID，可推导唯一一对一、同kind同业务字段（含代码/测试绑定）的更名，并逐项保留本owner每条原typed引用的field及其更名后身份，不能用冗余覆盖掩盖删除引用；原作者/已采纳及非冲突ID保护保持，不把兄弟同ID当成本区义务仍存在。旧draft错误只保历史，不覆盖当前已认证资格；新输入或诊断仍须新生成、新独审及严格全局封口。此回归的受控Git runner不代表真实模型全链验收。
+
+仅当前及原已审局部均为同一已认证interface_seed分类时，原失败并集已存在且确由后代补齐的missing-requirement-flow、missing-acceptance、missing-implementation或incomplete-contract完成性错误可留给真实full后代承接；纯父仍真实生成及独审，不被要求添加FLOW/AC。代码来源、治理源码或测试的真实缺席不属于可委派完成性，父RULE自身missing-source-file须由父修复，不能交无父写权的叶或先获父独审accept。新增跨owner错误、父自身可修结构错误及full owner未消除的原分配错误仍在独审前阻断。失败并集替回校验与最终strict seal共用同一真实composed补全后的全图文件集；partitionSealFiles只作进程内程序参数，复制后overlay原aggregate和本区候选，不进入ElaborationInput、冻结摘要、prompt或checkpoint，不扩大Agent局部files与写权。真实源码或测试缺席不能由此补造，完整全图seal仍在全部局部完成后执行。
 
 新草稿的接受缓存沿同一readStageDraft边界重核全部tagged轮的Git/ref/owner/schema/source身份，历史syntax/schema坏稿不要求满足成功schema。仅最终已接受轮严格解析正文、校验当前schema/行差量，并用现有绑定与renderer重算candidate、candidateDigest和完整changes；原JSON缓存不能替代Git正文。新tag但最终draft缺席拒绝。source tag只取原attempt已冻结的协议stage，沿同一原件provenance读取，不用当前attempt新tag给legacy补签；旧无tag无draft批准沿旧门。合法正文无需改动、仅重试回执或审查时，任务明确允许保留hooks的正常git commit --allow-empty，不制造业务diff；仍须真实新提交，不放宽head/seed证据。
 
-新P1按owner使用显式`elaboration-draft-v1`：Agent把完整elaboration-target-rows-v3业务JSON实际写入私有临时草稿文件，正常Git提交后只返回简短summary；精确schema留同seed只读sidecar供读取、自检，仍仅draft可写。程序经真实seed/result Git校验，从指定path/OID读取完整字节，再严格JSON/schema、目标绑定、唯一renderer/checkCandidate及不同会话的read审查。语法损坏、38KB级业务行或schema错误保留原始Git字节，下一轮明确给已有草稿路径、精确schema与程序/独审错误，让Agent实际编辑续修，不把旧大JSON/Markdown塞回prompt重答。历史已认证failed output或合法旧行可先复制为非权威材料，原字段和失败认证保持；不能成为raw、事实或批准。草稿元数据只作检查点身份，正文不成为第二份业务权威，也不进入最终candidate/delivery。输入或已审父接口改变时只复制同owner/schema的旧草稿到当前冻结source及新祖先seed，旧seed整树和旧accept都不继承；所有当前业务门、只读源码/tests对象与absence及独审仍完整执行。草稿失败在现有预算内修复，Native成功回执与业务draft拒绝分开，不伪造Native rejected final。已认证且停稳的Native小回执失败若由现有资源桥提供精确failedWorktree，只从该真实提交经同样scope校验保留非权威草稿；原Native错误和旧缺席不变，下一实际编辑继续该文件，不把失败回执文本当业务JSON。无安全Git见证或未提交文件不猜路径恢复。受控runner的真实Git回归不代表真实ClaudeCode/ZCode全链验收。
+新P1按owner使用显式`elaboration-draft-v1`：Agent把完整elaboration-target-rows-v3业务JSON实际写入私有临时草稿文件，正常Git提交后，Native final只返回符合`DRAFT_RECEIPT_SCHEMA`的单一JSON对象，形如`{"summary":"..."}`，前后不附说明或Markdown代码围栏；业务JSON只写入草稿文件。精确schema留同seed只读sidecar供读取、自检，仍仅draft可写。程序经真实seed/result Git校验，从指定path/OID读取完整字节，再严格JSON/schema、目标绑定、唯一renderer/checkCandidate及不同会话的read审查。语法损坏、38KB级业务行或schema错误保留原始Git字节，下一轮明确给已有草稿路径、精确schema与程序/独审错误，让Agent实际编辑续修，不把旧大JSON/Markdown塞回prompt重答。历史已认证failed output或合法旧行可先复制为非权威材料，原字段和失败认证保持；不能成为raw、事实或批准。草稿元数据只作检查点身份，正文不成为第二份业务权威，也不进入最终candidate/delivery。输入或已审父接口改变时只复制同owner/schema的旧草稿到当前冻结source及新祖先seed，旧seed整树和旧accept都不继承；所有当前业务门、只读源码/tests对象与absence及独审仍完整执行。草稿失败在现有预算内修复，Native成功回执与业务draft拒绝分开，不伪造Native rejected final。已认证且停稳的Native小回执失败若由现有资源桥提供精确failedWorktree，只从该真实提交经同样scope校验保留非权威草稿；原Native错误和旧缺席不变，下一实际编辑继续该文件，不把失败回执文本当业务JSON。无安全Git见证不补Git身份；未提交文件仅可按已认证停止的精确physical_draft材料接缝读取，不猜路径或补签。受控runner的真实Git回归不代表真实ClaudeCode/ZCode全链验收。
 
 历史未启用草稿协议的同owner已结算原生格式/schema失败可通过既有repairDiagnostics传递round.rejectedOutput完整文本及原文ref/SHA，提示明确untrusted prior failed output。原生边界先认证final与停止，资源桥再核原请求；本轮call重核请求摘要/schema/purpose/身份后才保诊断。它不是业务输出、候选、raw/facts或批准，所有JSON/schema/引用/业务/独审门不变，旧缺席不补。
 
 当前native-worktree操作的新P1草稿生成使用[[sync-stage-worktree]]的真实edit seed，独审仍使用真实只读seed，允许按需读取完整仓库。生成seed为原composed加已审祖先接口；独审seed另覆盖本轮渲染的完整Spec候选及真实move/retire。提示只给相关Spec路径、targetIndex/首次必建indices、真实raw差量、事实、技术范围/不可改oracle、精确授权与失败诊断，schema仍规范业务行；不重复完整树或强制逐字读取运输。程序按实际seed对象补足契约引用验证所需代码/测试，不把files投影当读取权限。完整业务输入、实际seed/tree及prompt/schema参与摘要；原raw/ID/演进/全图seal、独审与预算门均保留。下文受限frozen读取说明仅用于无worktree的历史操作与旧单测。
+
+首次P1原生草稿协议登记且没有既有P1派发时，本attempt的`elaboration-draft-protocol`冻结`generationGuidance`。`ac-test-binding-v1`仅在完整生成提示说明`AC.test`使用仓库相对测试路径#稳定用例ID，引用现有测试必须读取其真实声明并核对用例覆盖本条断言。裸路径、pytest `::`等框架选择器、自然语言后缀、伪造ID或无关测试均不得作为绑定。`AC.command`引用可信登记中实际执行该用例的VERIFY-ID。包装测试须有真实稳定ID且执行确实覆盖本条断言，套件登记本身不构成绑定。code→spec的源码及全部测试保持只读，缺失证据仍由现有校验门阻断。
+
+`ac-test-flow-binding-v2`的完整生成除原测试绑定说明外，还复用受限完整流程提示，本轮实际承接的每项业务REQ至少由一个主FLOW.req直接覆盖。`TR.from`、`TR.event`和非空`TR.to`引用同一`TR.object`。从冻结原意、事实、契约与实现识别真实有状态对象的初始状态、事件及非终态出口，不能虚构状态、事件或终点。确属无状态的`FLOW.terminal=END`在正文说明不适用依据，每个STEP提供输入、可观察输出和已定义的失败或不变量RULE。旧v1、历史stage缺字段及已有reserved请求且无stage各按原提示恢复，字段存在但未知时停止。提示参与派发摘要，业务输入、schema、独审、父接口提示及写入权限保持。跨已结算attempt的新生成继续原Git草稿及完整拒因。[[sync-migrations]] writer30阻止旧writer写入v2阶段或派发。
+
+`ac-test-flow-review-binding-v3`完整生成沿v2的测试与流程提示和已停Git草稿准入，并复用 [[elaboration-output]] 的冻结VERIFY登记规则。正常独审与仅续审复用生成侧测试绑定判据。对已有测试，沿冻结VERIFY命令和包装器的实际调用核实其选中并执行覆盖当前AC的断言。套件登记或包装器的稳定ID不足以证明覆盖。已有证据错绑须结合候选AC及冻结测试证据提出普通P1 repair。原授权可写范围内合法缺失的实现、测试文件或用例，若冻结VERIFY可在补齐后执行且未触及只读测试，沿原结构诊断交P2，由V3实测。仅有可绑定的真实冻结证据时，独审发现的实现或测试缺陷才另报implementation-review。待实现不算既有覆盖，明确原意下的只读实现或测试缺口仍以readonly_implementation_gap阻断。保持候选、原生成身份、独审隔离和权限。父接口及已冻结v1、v2、字段缺席或仅reserved无阶段记录的请求按原提示恢复，不重派已接受结果。[[sync-migrations]] writer31保护新冻结版本。
+
+新登记使用`ac-test-flow-review-verify-repair-v4`，继承v3的生成与独审约定。完整Native生成沿原稿续修时，若真实失败诊断指出可信登记中同一VERIFY的重复定义或AC.command悬空，在任务前给出该ID在本轮完整局部候选中的单一位置。已有冻结定义优先保留，处于只读context或本轮未受影响目标时直接引用。无已有归属时，仅在原冻结绑定允许且当前分析可修改的一个targetIndex给出精确登记的声明位置。多个冻结归属无法唯一决定、已退役、本轮没有可变目标、纯重构、纯父接口或非此类失败不提示新增定义。Agent先核对共享定义，再逐项复查全部原诊断，不能删AC、改变验证政策或借诊断扩写权。原Git字节、完整诊断、任务与诊断JSON边界保持，生成后继续通过原结构、演进、独审及最终全图封口；程序不改候选。v1、v2、v3和缺字段的已冻结请求按原字节恢复。
+
+存在当前受审P0时，Native生成与独审共用的任务快照完整保留既有analysis正文及ref（含changes分类、paths、affectedIds、ruleIds、原意/行为、evidence、反例与追踪），分区同时保留实际partitionBinding及aggregate analysisRef；本区分析沿既有分区投影选源，不另猜范围。authorChanges仅保留在analysis内，不另造重复投影。authorizedChanges只列AC/VERIFY变更、退役/恢复等特殊动作，空数组不禁止依据当前分类、raw与源码同步已审非冲突明细；历史finding原样保留并按当前分类重新核实，不能用旧refactor限制替代当前allowed_change。当前analysis不等于本轮P1批准，原preserve_business、AC/VERIFY逐项授权、退役、owner写范围及独审硬门保持；analysis缺席时不宣称已有分类，不新增持久字段或版本。受控真实Git回归覆盖whole/partition两阶段精确分析投影、原八条诊断保持与特殊动作越权拒绝，不替代真实模型业务验收。
 
 Native P1生成和独审共用既有短来源语义：可观察不等于重大业务政策；普通无冲突实现细节可沿合法code来源并追到REQ；明确原意下的实现/测试缺陷不是未知政策或业务GAP，独审须纠正对实现的误读。显式空`implementationWritePaths`时，提示须明确源码和全部测试只读，不发明或新增测试，也不把实现差异交给无写权P2；缺口继续以`readonly_implementation_gap`阻断。共享这段来源语义不改变`interface_seed`只维护父接口、不要求完整FLOW/AC/实现的阶段边界。历史请求及原件不改写。
 
@@ -42,7 +86,7 @@ Native P1生成和独审共用既有短来源语义：可观察不等于重大�
 
 interface_seed的生成与独审只承担必要REQ/RULE/GAP及跨子区共享接口，不混入完整P1的全对象、FLOW/STATE/TR和AC覆盖任务。父层已经声明的条款仍须准确、相容且有原意/事实来源；尚未确定的普通字段表示、缺省值或等价校验顺序留给对应子分区读取实现后细化，不强迫父层提前穷举或制造GAP。description与prose只保存稳定业务用途、接口与不适用依据，不保存上一候选、本轮修复或去重过程。共用表列、来源、null、权限/原意保护规则保持；非父完整细化与独审指令逐字保持原契约。schema门槛、独审、预算/修复循环和严格全局seal不改变。
 
-生成与独审共同读取冻结技术写范围及只读测试清单。既有只读 oracle 继续执行；需要新增断言时，P1 先把 AC.test 绑定到原授权可写测试路径，不能把修改只读 oracle 的要求延后交给 P2。候选业务正文的待办/进度问题也须在 P1 普通 repair 修正。implementation-review 仅用于可在原授权实现/测试范围完成且无需改业务正文的实现修复；含此发现的原生 verdict 同样须为 repair，accept 仍严格要求无发现。
+生成与独审共同读取冻结技术写范围及只读测试清单。既有只读 oracle 继续执行；需要新增断言时，P1 先把 AC.test 绑定到原授权可写测试路径，不能把修改只读 oracle 的要求延后交给 P2。本轮可变owner候选业务正文的待办/进度问题须在 P1 普通 repair 修正。implementation-review 仅用于可在原授权实现/测试范围完成且无需改业务正文的实现修复；含此发现的原生 verdict 同样须为 repair，accept 仍严格要求无发现。
 
 范围映射：REQ-SYNC-03、04；P1；AC-SYNC-01、02、03、08、14、25。实施依据为 `docs/spec-code-continuous-sync-plan.md`。本节点交付需求细化、声明追踪及独立语义审查；完整代码、运行验收和落盘由 [[sync-execution]] 与 [[sync-verification]] 继续完成，不能把细化通过作为已同步证明。
 
@@ -60,7 +104,7 @@ interface_seed的生成与独审只承担必要REQ/RULE/GAP及跨子区共享接
 
 这些均是细化阶段结果；`runtimeVerification: not_run`、`implementationReady: false` 不能作为已同步证据。尚无实现锚点或测试的具体缺口保留给 P2，不制造虚构 `code:` 或运行通过结论。
 
-独立审查发现完整业务契约下的源码或测试缺陷时，Native与非Native请求共用完整说明，明确 `verdict: "repair"`、`kind: "repair"`、`code: "implementation-review"` 三个精确值，不得添加后缀或自定实现code；例如代码 TypeError、DTO 被当完整对象递归、修改返回值后按污染结构比较导致误断言，不触发业务细化或新 REQ/RULE/GAP。该发现必须关联当前契约图真实且非空的 affectedIds，并在 evidence 中提供冻结上下文中受治理 code 或 AC.test 的具体相对路径加符号或行号、失败反例；decision 明确仅修实现并保留业务义务。程序核对身份和冻结治理位置，绑定不成立仍作为具体阻断发现。原 review 完整留存，待实现发现保留受影响身份、位置、证据及修复决定；review 新增发现后刷新 deferredImplementationFindings。任意自定义业务 repair、真实遗漏边界、重大未知和冲突继续按原门禁处理；reviewPassed 仅表示业务独审通过，不是运行通过。仅有待实现发现的候选不能成为要求具体业务阻断的 repair seed。AC-ELABORATION-41–43 覆盖完整契约不变与实现证据延后、位置/身份不合法的硬拒和混合业务缺口阻断。Native请求的受控消费者回归验证精确协议经真实P1门禁后产生待实现发现并可进入现有code_generate派发，后缀code仍阻断；该模拟不证明真实模型必然遵守，实际新Native仍须产品验收，旧拒绝结果不变接受。
+独立审查发现完整业务契约下的源码或测试缺陷时，Native与非Native请求共用完整说明，明确 `verdict: "repair"`、`kind: "repair"`、`code: "implementation-review"` 三个精确值，不得添加后缀或自定实现code；例如代码 TypeError、DTO 被当完整对象递归、修改返回值后按污染结构比较导致误断言，不触发业务细化或新 REQ/RULE/GAP。该发现必须关联当前契约图真实且非空的 affectedIds，并在 evidence 中提供冻结上下文中受治理 code 或 AC.test 的具体相对路径加符号或行号、失败反例；decision 明确仅修实现并保留业务义务。程序核对身份和冻结治理位置，绑定不成立仍作为具体阻断发现。原 review 完整留存，待实现发现保留受影响身份、位置、证据及修复决定；review 新增发现后刷新 deferredImplementationFindings。原已审结果冷验共用hasApprovedElaborationReview查询：accept仍须findings为空；规范repair仅implementation-review、原structurePassed/reviewPassed且无failure、原round发现按同一repairRequired分类没有业务阻断、deferredImplementationFindings与原规范化发现及relatedIds逐值精确绑定时，才沿原P1业务批准资格承接。原Native/Git/完整input及schema绑定仍由调用方冷验，不把repair改签accept、不补旧诊断字段、不把任意repair或只读实现缺口算批准。任意自定义业务 repair、真实遗漏边界、重大未知和冲突继续按原门禁处理；reviewPassed 仅表示业务独审通过，不是运行通过。仅有待实现发现的候选不能成为要求具体业务阻断的 repair seed。AC-ELABORATION-41–43 覆盖完整契约不变与实现证据延后、位置/身份不合法的硬拒和混合业务缺口阻断。Native请求的受控消费者回归验证精确协议经真实P1门禁后产生待实现发现并可进入现有code_generate派发，后缀code仍阻断；该模拟不证明真实模型必然遵守，实际新Native仍须产品验收，旧拒绝结果不变接受。
 
 编排回归由 `AC-ELABORATION-01` 至 `AC-ELABORATION-31` 覆盖解析/矩阵/独立审查、状态缺支修复、语义发现修复、GAP 独立分支、冲突证据、路径/摘要/raw 边界、既有验收保护、无效结构与重复会话、待实现证据、伪造裁决、安全失败/取消、输入冻结、合法退役、验证政策演进、围栏原意、未知矩阵单元、调用/总时间预算、行 schema、固定格式渲染、幂等预算身份及字符/argv 转义、未停稳取消、证据支持的可覆盖默认超时、真实 GAP 候选的父流程聚合及已结算拒绝候选的摘要/输入/原生审查追踪核对、渲染升级和新独立审查，以及 GAP 仅影响 TR 时经派发步骤传递的父流程阻塞、旧种子在当前结构检查新增缺口后的准确修复反馈。注入 runner 仅用于控制这些编排路径；P1 的真实 Agent 自然语言细化验收仍由完整产品链路单独验证。
 

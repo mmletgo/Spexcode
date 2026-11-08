@@ -22,3 +22,5 @@ preflight 产出计划后切支或改动 HEAD，最终同步写入边界必须�
 已结算后仅向真实 hooks 目录加入非执行 sample，不改变 canonical 可执行 hook digests，仍必须因冻结 footprint.files 的目录清单摘要改变拒绝；拒绝前后业务 source、index 与 HEAD 保持不变。
 
 成功采纳后再加入相同非执行 sample，重复 adopt 仍须按已验证 receipt 与当前 landing 幂等成功；post-merge trace 不增加，证明没有再次 merge。
+
+未采纳正式重验使用真实临时 Git/SQLite 和正常交付 hooks，先复现 workspace_synced 的 retry phase 拒绝，再核新 retryOf 独立记录、原输入/readSet/预算模型保持、父自身 heads 推进、同 request 幂等与旧 operation/attempt/journal/source/index 原值保持。已采纳、dirty/index/HEAD漂移、部分与缺 receipt、活跃资源及第三方 heads 均拒绝。受控四层 fixture 不冒称真实模型或 Docker 通过。

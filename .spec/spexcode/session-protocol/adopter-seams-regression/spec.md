@@ -14,7 +14,7 @@ code:
 
 ## expanded spec
 
-治理 tx.dequeue 与 backupTo 的针对性测试。指定非FIFO首消息时，前置采用层SQL也回滚，消息不被消费；匹配首消息时claim及dequeue一起提交。online backup保存已提交WAL消息，独立open能读出相同messageId；已存在目标拒绝覆盖。此处不引入业务专用队列或connection handle。
+治理 tx.dequeue 与 backupTo 的针对性测试。指定非FIFO首消息时，前置采用层SQL也回滚，消息不被消费；匹配首消息时claim及dequeue一起提交。online backup在宽松umask下从创建到完成均为0600，保存已提交WAL消息，独立open能读出相同messageId且integrity_check为ok；已存在目标保持原拒绝错误码，内容与权限均不改写。此处不引入业务专用队列或connection handle。
 
 运行：`npx tsx --import ./scripts/test-home.mjs --test packages/session-protocol/src/adopter-seams.test.ts`。
 

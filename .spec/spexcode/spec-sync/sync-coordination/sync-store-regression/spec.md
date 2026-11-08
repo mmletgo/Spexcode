@@ -14,6 +14,22 @@ code:
 
 ## expanded spec
 
+writer34索引回归核v33→v34先一次online backup、只新增目标索引，全部业务/protocol表和v1–v33 registry原行保持；DDL失败时索引及marker整体回滚，旧v33 writer拒绝升级库，备份可按v33读取，重复启动不再备份。历史marker用例模拟旧schema时同时移除该新增索引，旧schema不变断言仅排除这个由v34独立验证的新增对象。完整commit观察以禁用索引的原SQL重算作对照，覆盖超过500条重复、来源/input/difference/outcome分组、failure/blocked及缺失captureKind/outcome、显式null failure、新写和重开；执行计划使用表达式索引、无历史JSON函数及临时GROUP BY，不用固定耗时阈值替代结构证明。
+
+writer33回归在隔离SQLite保存旧V4 protocol且尚无dispatch，核32→33只追加SELECT1、恰一次online backup；完整旧schema/业务与protocol表及V1–V32 registry原行保持。旧32迁移集合在新库拒绝且不写数据，32备份可由旧writer读取，重复启动幂等。不触用户或生产数据库。
+
+writer32回归由隔离真实SQLite核v31→v32只追加marker、只备份一次，旧表/schema/旧registry原行保持，旧31 writer拒绝新库且备份可由31读取；不触用户库。
+
+writer28回归在隔离真实SQLite中核v27到v28无DDL，只增加一条组件marker，保留完整v1–v27 registry与业务/protocol旧表。旧writer拒绝升级库，一致online backup可由旧writer读取，重复升级幂等。
+
+writer27沿真实online backup验证旧v26一致库可独立恢复，升级无DDL且所有旧表与v1–v26完整registry行不变；旧v26 writer拒绝新代，重复迁移幂等，不触默认用户库。
+
+v26 ZCode停止材料marker回归仅操作专用临时SQLite：25→26只追加SELECT1，完整保v1–v25 migration行/checksum/applied_at及全部业务/protocol旧表与schema，旧25 writer拒26，online backup可由25 writer读取且原行相等，重复迁移幂等。不得操作生产数据库或删除真实marker。
+
+v25 P0 context marker回归使用专用临时SQLite：24→25仅追加SELECT1，逐行保全部业务/protocol表及v1–v24完整migration行和checksum/applied_at；旧24 writer拒绝升级库，online backup可由24 writer读取且原行一致，重复迁移幂等。不打开用户或生产数据库。
+
+v24 cli-config-v1回归在专用临时SQLite保存已结算journal/receipt，23→24只追加SELECT1 marker。online backup前后比较全部旧业务/protocol表逐行原值与v1–v23完整migration行（含checksum/applied_at）；旧23 writer拒绝24库，升级前备份可由23 writer读取并保持全部旧行，重复迁移幂等。不得操作用户或真实同步库。
+
 v23回归在隔离真实SQLite保存behavior-draft-protocol checkpoint且dispatch为空，明确复现未reserved崩溃窗口；正式online backup后22→23保持原operation/attempt/resource/ingress/journal/pair/lease行与v1–v22 checksum逐字不变，旧slice(0,22) writer被组件围栏拒绝，备份仍可由v22打开并保原数据，重入迁移幂等。仅验证专用私库，不访问用户或生产数据库。
 
 v17语义marker的隔离真实SQLite迁移先online backup，逐字保留历史payload/receipt与v1–v16 checksum；旧v16组件writer拒绝升级后库，备份仍可按v16读取，不修改实际用户库。

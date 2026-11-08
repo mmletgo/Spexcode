@@ -147,7 +147,7 @@ test('unlimited v15 marker先online备份且旧writer拒绝，历史记录和v1-
     const ready = f.ready(), journal = f.store.beginApply(ready.fence, ready.plan, ready.target)
     for (const step of journal.steps) f.store.recordApplyStep(ready.fence, journal.id, { ...step, status: 'completed' })
     const receipt = f.receipt(journal.id, ready.plan); f.store.recordReceipt(journal.id, receipt); f.store.settleApply(journal.id, receipt.id)
-    f.protocol.withTransaction(tx => tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=15', SYNC_COMPONENT))
+    f.protocol.withTransaction(tx => { tx.exec('DROP INDEX sync_observations_committed_frontiers'); tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=15', SYNC_COMPONENT) })
     const rows = (protocol: typeof f.protocol) => protocol.withTransaction(tx => Object.fromEntries(['sync_operations', 'sync_attempts', 'sync_resources', 'sync_ingress_receipts', 'sync_apply_journals', 'sync_baseline_pairs'].map(table => [table, tx.query(`SELECT * FROM ${table}`)])))
     const before = rows(f.protocol), checksums = f.protocol.withTransaction(tx => tx.query('SELECT version,checksum FROM schema_migrations WHERE component=? ORDER BY version', SYNC_COMPONENT))
     const backupPath = join(f.root, 'v14-before-unlimited.backup')
@@ -170,7 +170,7 @@ test('ZCode v16 marker拒绝v15 writer，备份与升级逐字保留旧payload�
     for (const step of journal.steps) f.store.recordApplyStep(ready.fence, journal.id, { ...step, status: 'completed' })
     const receipt = f.receipt(journal.id, ready.plan)
     f.store.recordReceipt(journal.id, receipt); f.store.settleApply(journal.id, receipt.id)
-    f.protocol.withTransaction(tx => tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=16', SYNC_COMPONENT))
+    f.protocol.withTransaction(tx => { tx.exec('DROP INDEX sync_observations_committed_frontiers'); tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=16', SYNC_COMPONENT) })
     const rows = (protocol: typeof f.protocol) => protocol.withTransaction(tx => Object.fromEntries(['sync_operations', 'sync_attempts', 'sync_resources', 'sync_ingress_receipts', 'sync_apply_journals', 'sync_baseline_pairs'].map(table => [table, tx.query(`SELECT * FROM ${table}`)])))
     const before = rows(f.protocol)
     const checksums = f.protocol.withTransaction(tx => tx.query('SELECT version,checksum FROM schema_migrations WHERE component=? ORDER BY version', SYNC_COMPONENT))
@@ -194,7 +194,7 @@ test('null模型调用 v17 marker拒绝v16 writer，备份与升级逐字保留�
     for (const step of journal.steps) f.store.recordApplyStep(ready.fence, journal.id, { ...step, status: 'completed' })
     const receipt = f.receipt(journal.id, ready.plan)
     f.store.recordReceipt(journal.id, receipt); f.store.settleApply(journal.id, receipt.id)
-    f.protocol.withTransaction(tx => tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=17', SYNC_COMPONENT))
+    f.protocol.withTransaction(tx => { tx.exec('DROP INDEX sync_observations_committed_frontiers'); tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=17', SYNC_COMPONENT) })
     const rows = (protocol: typeof f.protocol) => protocol.withTransaction(tx => Object.fromEntries(['sync_operations', 'sync_attempts', 'sync_resources', 'sync_ingress_receipts', 'sync_apply_journals', 'sync_baseline_pairs'].map(table => [table, tx.query(`SELECT * FROM ${table}`)])))
     const before = rows(f.protocol)
     const checksums = f.protocol.withTransaction(tx => tx.query('SELECT version,checksum FROM schema_migrations WHERE component=? ORDER BY version', SYNC_COMPONENT))
@@ -218,7 +218,7 @@ test('native工作树 v18 marker拒绝v17 writer，备份与升级逐字保留�
     for (const step of journal.steps) f.store.recordApplyStep(ready.fence, journal.id, { ...step, status: 'completed' })
     const receipt = f.receipt(journal.id, ready.plan)
     f.store.recordReceipt(journal.id, receipt); f.store.settleApply(journal.id, receipt.id)
-    f.protocol.withTransaction(tx => tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=18', SYNC_COMPONENT))
+    f.protocol.withTransaction(tx => { tx.exec('DROP INDEX sync_observations_committed_frontiers'); tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=18', SYNC_COMPONENT) })
     const rows = (protocol: typeof f.protocol) => protocol.withTransaction(tx => Object.fromEntries(['sync_operations', 'sync_attempts', 'sync_resources', 'sync_ingress_receipts', 'sync_apply_journals', 'sync_baseline_pairs'].map(table => [table, tx.query(`SELECT * FROM ${table}`)])))
     const before = rows(f.protocol)
     const checksums = f.protocol.withTransaction(tx => tx.query('SELECT version,checksum FROM schema_migrations WHERE component=? ORDER BY version', SYNC_COMPONENT))
@@ -241,7 +241,7 @@ test('ZCode noninteractive v19 marker rejects v18 writers and preserves legacy p
     const ready = f.ready(), journal = f.store.beginApply(ready.fence, ready.plan, ready.target)
     for (const step of journal.steps) f.store.recordApplyStep(ready.fence, journal.id, { ...step, status: 'completed' })
     const receipt = f.receipt(journal.id, ready.plan); f.store.recordReceipt(journal.id, receipt); f.store.settleApply(journal.id, receipt.id)
-    f.protocol.withTransaction(tx => tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=19', SYNC_COMPONENT))
+    f.protocol.withTransaction(tx => { tx.exec('DROP INDEX sync_observations_committed_frontiers'); tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=19', SYNC_COMPONENT) })
     const rows = (protocol: typeof f.protocol) => protocol.withTransaction(tx => Object.fromEntries(['sync_operations', 'sync_attempts', 'sync_resources', 'sync_ingress_receipts', 'sync_apply_journals', 'sync_baseline_pairs'].map(table => [table, tx.query(`SELECT * FROM ${table}`)])))
     const before = rows(f.protocol), checksums = f.protocol.withTransaction(tx => tx.query('SELECT version,checksum FROM schema_migrations WHERE component=? ORDER BY version', SYNC_COMPONENT))
     const backupPath = join(f.root, 'v18-before-noninteractive.backup')
@@ -261,7 +261,7 @@ test('source continuity v20 marker backs up v19 and preserves old records and ch
   let backup: ReturnType<typeof openProtocol> | undefined
   try {
     f.store.admitAndEnqueue(f.admit())
-    f.protocol.withTransaction(tx => tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=20', SYNC_COMPONENT))
+    f.protocol.withTransaction(tx => { tx.exec('DROP INDEX sync_observations_committed_frontiers'); tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=20', SYNC_COMPONENT) })
     const rows = (protocol: typeof f.protocol) => protocol.withTransaction(tx => Object.fromEntries(['sync_operations', 'sync_attempts', 'sync_resources', 'sync_ingress_receipts', 'sync_apply_journals', 'sync_baseline_pairs', 'sync_leases'].map(table => [table, tx.query(`SELECT * FROM ${table}`)])))
     const before = rows(f.protocol), checksums = f.protocol.withTransaction(tx => tx.query('SELECT version,checksum FROM schema_migrations WHERE component=? ORDER BY version', SYNC_COMPONENT))
     const backupPath = join(f.root, 'v19-before-continuity.backup')
@@ -283,7 +283,7 @@ test('typed checkpoint v21 atomically pins all materials, preserves v20 records 
     const claim = f.claim(), rawBytes = Buffer.from('{"untrusted":[}'), raw = { sha256: createHash('sha256').update(rawBytes).digest('hex') }
     f.blobs.set(raw.sha256, rawBytes)
     f.store.checkpoint(claim.fence, raw)
-    f.protocol.withTransaction(tx => tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=21', SYNC_COMPONENT))
+    f.protocol.withTransaction(tx => { tx.exec('DROP INDEX sync_observations_committed_frontiers'); tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=21', SYNC_COMPONENT) })
     const records = () => f.protocol.withTransaction(tx => Object.fromEntries(['sync_operations', 'sync_attempts', 'sync_resources', 'sync_leases'].map(table => [table, tx.query(`SELECT * FROM ${table}`)])))
     const before = records(), checksums = f.protocol.withTransaction(tx => tx.query('SELECT version,checksum FROM schema_migrations WHERE component=? ORDER BY version', SYNC_COMPONENT)), backupPath = join(f.root, 'v20-before-artifacts.backup')
     assert.equal(await migrateSyncStore(f.protocol, { backupPath }), SYNC_MIGRATIONS.length)
@@ -317,7 +317,7 @@ test('v22 draft and settled native RPC writer marker preserves v21 records and r
     const wrapper = f.put({ version: 'sync-stage-v1', stage: 'historical', resultRef: material })
     f.store.checkpoint(claim.fence, { ...wrapper, artifacts: [{ kind: 'json', ref: material }] })
     const refs = f.store.readAttempt(claim.attempt.id).checkpointRefs
-    f.protocol.withTransaction(tx => tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=22', SYNC_COMPONENT))
+    f.protocol.withTransaction(tx => { tx.exec('DROP INDEX sync_observations_committed_frontiers'); tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=22', SYNC_COMPONENT) })
     const tables = ['sync_operations', 'sync_attempts', 'sync_resources', 'sync_ingress_receipts', 'sync_apply_journals', 'sync_baseline_pairs', 'sync_leases']
     const rows = (protocol: typeof f.protocol) => protocol.withTransaction(tx => Object.fromEntries(tables.map(table => [table, tx.query(`SELECT * FROM ${table}`)])))
     const before = rows(f.protocol)
@@ -344,20 +344,48 @@ test('v23 P0 draft marker fences v22 before any dispatch reservation and keeps b
     const wrapper = f.put({ version: 'sync-stage-v1', stage: 'behavior-draft-protocol', resultRef: marker })
     f.store.checkpoint(claim.fence, { ...wrapper, artifacts: [{ kind: 'json', ref: marker }] })
     assert.deepEqual(f.store.readAttempt(claim.attempt.id).dispatchPlans, [], '模拟协议已冻结但尚未reserve的崩溃窗口')
-    f.protocol.withTransaction(tx => tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=23', SYNC_COMPONENT))
+    f.protocol.withTransaction(tx => { tx.exec('DROP INDEX sync_observations_committed_frontiers'); tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=23', SYNC_COMPONENT) })
     const tables = ['sync_operations', 'sync_attempts', 'sync_resources', 'sync_ingress_receipts', 'sync_apply_journals', 'sync_baseline_pairs', 'sync_leases']
     const rows = (protocol: typeof f.protocol) => protocol.withTransaction(tx => Object.fromEntries(tables.map(table => [table, tx.query(`SELECT * FROM ${table}`)])))
     const before = rows(f.protocol), checksums = f.protocol.withTransaction(tx => tx.query('SELECT version,checksum,applied_at_ms FROM schema_migrations WHERE component=? ORDER BY version', SYNC_COMPONENT))
     assert.ok(SYNC_MIGRATIONS.some(migration => migration.version === 23), 'P0 draft protocol needs its own writer fence')
     const backupPath = join(f.root, 'v22-before-p0-drafts.backup')
-    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), 23)
+    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), SYNC_MIGRATIONS.length)
     assert.deepEqual(rows(f.protocol), before)
     assert.deepEqual(f.protocol.withTransaction(tx => tx.query('SELECT version,checksum,applied_at_ms FROM schema_migrations WHERE component=? AND version<=22 ORDER BY version', SYNC_COMPONENT)), checksums)
     assert.throws(() => applyComponentMigrations(f.protocol, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 22)), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
     backup = openProtocol(backupPath)
     assert.equal(applyComponentMigrations(backup, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 22)), 22)
     assert.deepEqual(rows(backup), before)
-    assert.equal(await migrateSyncStore(f.protocol), 23)
+    assert.equal(await migrateSyncStore(f.protocol), SYNC_MIGRATIONS.length)
+  } finally { backup?.close(); f.cleanup() }
+})
+
+test('cli-config-v1 writer24只追加marker，23旧writer拒写且online备份逐字保留旧表', async () => {
+  const f = await fixture()
+  let backup: ReturnType<typeof openProtocol> | undefined
+  try {
+    const ready = f.ready(), journal = f.store.beginApply(ready.fence, ready.plan, ready.target)
+    for (const step of journal.steps) f.store.recordApplyStep(ready.fence, journal.id, { ...step, status: 'completed' })
+    const receipt = f.receipt(journal.id, ready.plan); f.store.recordReceipt(journal.id, receipt); f.store.settleApply(journal.id, receipt.id)
+    f.protocol.withTransaction(tx => { tx.exec('DROP INDEX sync_observations_committed_frontiers'); tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=24', SYNC_COMPONENT) })
+    const rows = (protocol: typeof f.protocol) => protocol.withTransaction(tx => Object.fromEntries(tx.query("SELECT name FROM sqlite_master WHERE type='table' AND name!='schema_migrations' ORDER BY name").map(row => [String(row.name), tx.query(`SELECT * FROM "${String(row.name)}"`)])))
+    const schema = f.protocol.withTransaction(tx => tx.query("SELECT * FROM sqlite_master WHERE name!='sync_observations_committed_frontiers' ORDER BY type,name"))
+    const before = rows(f.protocol), markers = f.protocol.withTransaction(tx => tx.query('SELECT * FROM schema_migrations ORDER BY component,version'))
+    assert.equal(markers.filter(row => row.component === SYNC_COMPONENT).length, 23)
+    assert.equal(SYNC_MIGRATIONS[23]?.version, 24)
+    assert.match(SYNC_MIGRATIONS[23].sql, /^SELECT 1;/)
+    const backupPath = join(f.root, 'v23-before-native-config.backup')
+    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), SYNC_MIGRATIONS.length)
+    assert.deepEqual(rows(f.protocol), before)
+    assert.deepEqual(f.protocol.withTransaction(tx => tx.query("SELECT * FROM sqlite_master WHERE name!='sync_observations_committed_frontiers' ORDER BY type,name")), schema)
+    assert.deepEqual(f.protocol.withTransaction(tx => tx.query('SELECT * FROM schema_migrations WHERE component!=? OR version<=23 ORDER BY component,version', SYNC_COMPONENT)), markers)
+    assert.throws(() => applyComponentMigrations(f.protocol, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 23)), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
+    backup = openProtocol(backupPath)
+    assert.equal(applyComponentMigrations(backup, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 23)), 23)
+    assert.deepEqual(rows(backup), before)
+    assert.deepEqual(backup.withTransaction(tx => tx.query('SELECT * FROM schema_migrations ORDER BY component,version')), markers)
+    assert.equal(await migrateSyncStore(f.protocol), SYNC_MIGRATIONS.length)
   } finally { backup?.close(); f.cleanup() }
 })
 
@@ -389,7 +417,7 @@ test('固定模型marker升级先备份，旧operation/payload/receipt逐字保�
     const receipt = f.receipt(journal.id, r.plan); f.store.recordReceipt(journal.id, receipt)
     f.store.settleApply(journal.id, receipt.id)
     // Marker-only upgrades preserve the original v12 schema and business rows.
-    f.protocol.withTransaction(tx => tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=13', SYNC_COMPONENT))
+    f.protocol.withTransaction(tx => { tx.exec('DROP INDEX sync_observations_committed_frontiers'); tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=13', SYNC_COMPONENT) })
     const records = (protocol: typeof f.protocol) => protocol.withTransaction(tx => Object.fromEntries(['sync_operations', 'sync_attempts', 'sync_ingress_receipts', 'sync_apply_journals', 'sync_baseline_pairs'].map(table => [table, tx.query(`SELECT * FROM ${table}`)])))
     const before = records(f.protocol), backupPath = join(f.root, 'v12-before-model.backup')
     assert.equal(await migrateSyncStore(f.protocol, { backupPath }), SYNC_MIGRATIONS.length); assert.ok(existsSync(backupPath))
@@ -410,7 +438,7 @@ test('分区与提交快照v14 marker保留旧记录及资源，备份可供旧w
   try {
     const claimed = f.claim()
     f.store.checkpoint(claimed.fence, f.put({ oldSingleTask: true }))
-    f.protocol.withTransaction(tx => tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=14', SYNC_COMPONENT))
+    f.protocol.withTransaction(tx => { tx.exec('DROP INDEX sync_observations_committed_frontiers'); tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=14', SYNC_COMPONENT) })
     const records = (protocol: typeof f.protocol) => protocol.withTransaction(tx => Object.fromEntries(['sync_operations', 'sync_attempts', 'sync_resources', 'sync_ingress_receipts', 'sync_apply_journals', 'sync_baseline_pairs'].map(table => [table, tx.query(`SELECT * FROM ${table}`)])))
     const before = records(f.protocol), backupPath = join(f.root, 'v13-before-partitions.backup')
     assert.equal(await migrateSyncStore(f.protocol, { backupPath }), SYNC_MIGRATIONS.length)
@@ -1847,6 +1875,41 @@ test('commit观察的差异摘要在重开和真实evidence GC后保留，消费
   } finally { f.cleanup() }
 })
 
+test('commit观察索引保持完整历史分组及legacy过滤，新写不再扫描JSON', async () => {
+  const f = await fixture()
+  try {
+    const selected = f.store.readBaselineSelection(source(), [{ kind: 'path', path: 'src/a.ts' }, { kind: 'contract', id: 'RULE-A' }]); assert.ok('selection' in selected)
+    const input = { ...f.input(), captureKind: 'commit' as const }, configRef = f.put({ fixture: 'indexed committed history' }), expected = { controlRevision: 0, selectionDigest: selected.selection.digest }
+    const value = { input, configRef, selection: selected.selection, latestDifferenceDigest: 'same-difference' }
+    const admitted = f.store.observeAndAdmit(value, { ...f.admit(), input, baselineSelection: selected.selection }, expected)
+    let latest = admitted.observation
+    for (let index = 0; index < 502; index++) latest = f.store.recordObservation(value, expected)
+    const distinctInput = f.store.recordObservation({ ...value, input: { ...input, id: 'input-2' } }, expected)
+    const distinctDifference = f.store.recordObservation({ ...value, latestDifferenceDigest: 'other-difference' }, expected)
+    f.store.recordObservation({ ...value, input: f.input() }, expected)
+    f.store.recordObservation({ ...value, input: { ...input, source: source('other') } }, expected)
+    f.store.recordObservation({ ...value, failure: { code: 'PLAN_FAILED', message: 'failed observation', kind: 'unsupported', evidenceRefs: [] } }, expected)
+    const blocked = f.store.observeAndAdmit(value, { ...f.admit(), input: { ...input, id: 'wrong-input' }, baselineSelection: selected.selection }, expected)
+    assert.equal(blocked.outcome, 'blocked')
+    const sourceKey = f.protocol.withTransaction(tx => String(tx.query('SELECT source_key FROM sync_observations WHERE id=?', latest.id)[0].source_key))
+    const nullFailure = { ...latest, id: 'legacy-null-failure', latestDifferenceDigest: 'legacy-null', failure: null }, missingOutcome: Record<string, unknown> = { ...latest, id: 'legacy-missing-outcome' }
+    delete missingOutcome.outcome
+    f.protocol.withTransaction(tx => {
+      for (const record of [nullFailure, missingOutcome]) tx.exec('INSERT INTO sync_observations(id,source_key,operation_id,record_json) VALUES(?,?,NULL,?)', String(record.id), sourceKey, JSON.stringify(record))
+    })
+    const query = "SELECT record_json FROM sync_observations WHERE rowid IN (SELECT MAX(rowid) FROM sync_observations WHERE source_key=? AND json_extract(record_json,'$.input.captureKind')='commit' AND json_extract(record_json,'$.failure') IS NULL AND json_extract(record_json,'$.outcome')!='blocked' GROUP BY json_extract(record_json,'$.input.id'),json_extract(record_json,'$.latestDifferenceDigest'),json_extract(record_json,'$.outcome')) ORDER BY rowid DESC"
+    const reference = f.protocol.withTransaction(tx => tx.query(query.replace('SELECT MAX(rowid) FROM sync_observations WHERE', 'SELECT MAX(rowid) FROM sync_observations NOT INDEXED WHERE'), sourceKey))
+    const frontiers = f.store.listCommittedObservationFrontiers(source())
+    assert.deepEqual(frontiers, reference.map(row => JSON.parse(String(row.record_json)) as unknown))
+    assert.deepEqual(frontiers.map(row => row.id), [nullFailure.id, distinctDifference.id, distinctInput.id, latest.id, admitted.observation.id])
+    const plan = f.protocol.withTransaction(tx => tx.query(`EXPLAIN QUERY PLAN ${query}`, sourceKey)).map(row => String(row.detail)).join('\n')
+    assert.match(plan, /USING INDEX sync_observations_committed_frontiers/)
+    assert.doesNotMatch(plan, /SCAN sync_observations|TEMP B-TREE FOR GROUP BY/)
+    const instructions = f.protocol.withTransaction(tx => tx.query(`EXPLAIN ${query}`, sourceKey))
+    assert.equal(instructions.some(row => /Function|PureFunc/.test(String(row.opcode)) && /json_/.test(String(row.p4))), false)
+  } finally { f.cleanup() }
+})
+
 test('P4 FIFO ack 与 claim 分离，暂停的重叠前序阻 A后继而独立 B 可执行', async () => {
   const f = await fixture()
   try {
@@ -2271,4 +2334,213 @@ test('P4 新intent head继承冻结selection的裁决/退役历史，readonly历
     const old = f.store.readBaselineSelection(source(), [{ kind: 'contract', id: 'RULE-OLD' }]); assert.ok('selection' in old); assert.equal(old.selection.bindings.find(binding => 'intentPair' in binding)?.intentPair?.receiptId, first.receipt.id)
     assert.ok(f.store.pinnedBlobRefs().some(ref => ref.sha256 === decision.sha256))
   } finally { f.cleanup() }
+})
+
+
+test('P0 context writer25只追加marker，24旧writer拒写且online备份逐字保留旧表', async () => {
+  const f = await fixture()
+  let backup: ReturnType<typeof openProtocol> | undefined
+  try {
+    const ready = f.ready(), journal = f.store.beginApply(ready.fence, ready.plan, ready.target)
+    for (const step of journal.steps) f.store.recordApplyStep(ready.fence, journal.id, { ...step, status: 'completed' })
+    const receipt = f.receipt(journal.id, ready.plan); f.store.recordReceipt(journal.id, receipt); f.store.settleApply(journal.id, receipt.id)
+    f.protocol.withTransaction(tx => { tx.exec('DROP INDEX sync_observations_committed_frontiers'); tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=25', SYNC_COMPONENT) })
+    const rows = (protocol: typeof f.protocol) => protocol.withTransaction(tx => Object.fromEntries(tx.query("SELECT name FROM sqlite_master WHERE type='table' AND name!='schema_migrations' ORDER BY name").map(row => [String(row.name), tx.query(`SELECT * FROM "${String(row.name)}"`)])))
+    const schema = f.protocol.withTransaction(tx => tx.query("SELECT * FROM sqlite_master WHERE name!='sync_observations_committed_frontiers' ORDER BY type,name"))
+    const before = rows(f.protocol), markers = f.protocol.withTransaction(tx => tx.query('SELECT * FROM schema_migrations ORDER BY component,version'))
+    assert.equal(markers.filter(row => row.component === SYNC_COMPONENT).length, 24)
+    assert.equal(SYNC_MIGRATIONS[24]?.version, 25)
+    assert.match(SYNC_MIGRATIONS[24].sql, /^SELECT 1;/)
+    const backupPath = join(f.root, 'v24-before-p0-context.backup')
+    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), SYNC_MIGRATIONS.length)
+    assert.deepEqual(rows(f.protocol), before)
+    assert.deepEqual(f.protocol.withTransaction(tx => tx.query("SELECT * FROM sqlite_master WHERE name!='sync_observations_committed_frontiers' ORDER BY type,name")), schema)
+    assert.deepEqual(f.protocol.withTransaction(tx => tx.query('SELECT * FROM schema_migrations WHERE component!=? OR version<=24 ORDER BY component,version', SYNC_COMPONENT)), markers)
+    assert.throws(() => applyComponentMigrations(f.protocol, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 24)), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
+    backup = openProtocol(backupPath)
+    assert.equal(applyComponentMigrations(backup, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 24)), 24)
+    assert.deepEqual(rows(backup), before)
+    assert.deepEqual(backup.withTransaction(tx => tx.query('SELECT * FROM schema_migrations ORDER BY component,version')), markers)
+    assert.equal(await migrateSyncStore(f.protocol), SYNC_MIGRATIONS.length)
+  } finally { backup?.close(); f.cleanup() }
+})
+
+test('stopped ZCode writer26只追加marker，25旧writer拒写且online备份逐字保留旧表', async () => {
+  const f = await fixture()
+  let backup: ReturnType<typeof openProtocol> | undefined
+  try {
+    const ready = f.ready(), journal = f.store.beginApply(ready.fence, ready.plan, ready.target)
+    for (const step of journal.steps) f.store.recordApplyStep(ready.fence, journal.id, { ...step, status: 'completed' })
+    const receipt = f.receipt(journal.id, ready.plan); f.store.recordReceipt(journal.id, receipt); f.store.settleApply(journal.id, receipt.id)
+    f.protocol.withTransaction(tx => { tx.exec('DROP INDEX sync_observations_committed_frontiers'); tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=26', SYNC_COMPONENT) })
+    const rows = (protocol: typeof f.protocol) => protocol.withTransaction(tx => Object.fromEntries(tx.query("SELECT name FROM sqlite_master WHERE type='table' AND name!='schema_migrations' ORDER BY name").map(row => [String(row.name), tx.query(`SELECT * FROM "${String(row.name)}"`)])))
+    const schema = f.protocol.withTransaction(tx => tx.query("SELECT * FROM sqlite_master WHERE name!='sync_observations_committed_frontiers' ORDER BY type,name"))
+    const before = rows(f.protocol), markers = f.protocol.withTransaction(tx => tx.query('SELECT * FROM schema_migrations ORDER BY component,version'))
+    assert.equal(markers.filter(row => row.component === SYNC_COMPONENT).length, 25)
+    assert.equal(SYNC_MIGRATIONS[25]?.version, 26)
+    assert.match(SYNC_MIGRATIONS[25].sql, /^SELECT 1;/)
+    const backupPath = join(f.root, 'v25-before-stopped-zcode.backup')
+    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), SYNC_MIGRATIONS.length)
+    assert.deepEqual(rows(f.protocol), before)
+    assert.deepEqual(f.protocol.withTransaction(tx => tx.query("SELECT * FROM sqlite_master WHERE name!='sync_observations_committed_frontiers' ORDER BY type,name")), schema)
+    assert.deepEqual(f.protocol.withTransaction(tx => tx.query('SELECT * FROM schema_migrations WHERE component!=? OR version<=25 ORDER BY component,version', SYNC_COMPONENT)), markers)
+    assert.throws(() => applyComponentMigrations(f.protocol, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 25)), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
+    backup = openProtocol(backupPath)
+    assert.equal(applyComponentMigrations(backup, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 25)), 25)
+    assert.deepEqual(rows(backup), before)
+    assert.deepEqual(backup.withTransaction(tx => tx.query('SELECT * FROM schema_migrations ORDER BY component,version')), markers)
+    assert.equal(await migrateSyncStore(f.protocol), SYNC_MIGRATIONS.length)
+  } finally { backup?.close(); f.cleanup() }
+})
+
+
+test('stopped ZCode writer27只追加marker，26旧writer拒写且online备份逐字保留旧表', async () => {
+  const f = await fixture()
+  let backup: ReturnType<typeof openProtocol> | undefined
+  try {
+    const ready = f.ready(), journal = f.store.beginApply(ready.fence, ready.plan, ready.target)
+    for (const step of journal.steps) f.store.recordApplyStep(ready.fence, journal.id, { ...step, status: 'completed' })
+    const receipt = f.receipt(journal.id, ready.plan); f.store.recordReceipt(journal.id, receipt); f.store.settleApply(journal.id, receipt.id)
+    f.protocol.withTransaction(tx => { tx.exec('DROP INDEX sync_observations_committed_frontiers'); tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=27', SYNC_COMPONENT) })
+    const rows = (protocol: typeof f.protocol) => protocol.withTransaction(tx => Object.fromEntries(tx.query("SELECT name FROM sqlite_master WHERE type='table' AND name!='schema_migrations' ORDER BY name").map(row => [String(row.name), tx.query(`SELECT * FROM "${String(row.name)}"`)])))
+    const schema = f.protocol.withTransaction(tx => tx.query("SELECT * FROM sqlite_master WHERE name!='sync_observations_committed_frontiers' ORDER BY type,name"))
+    const before = rows(f.protocol), markers = f.protocol.withTransaction(tx => tx.query('SELECT * FROM schema_migrations ORDER BY component,version'))
+    assert.equal(markers.filter(row => row.component === SYNC_COMPONENT).length, 26)
+    assert.equal(SYNC_MIGRATIONS[26]?.version, 27)
+    assert.match(SYNC_MIGRATIONS[26].sql, /^SELECT 1;/)
+    const backupPath = join(f.root, 'v26-before-stopped-physical-draft.backup')
+    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), SYNC_MIGRATIONS.length)
+    assert.deepEqual(rows(f.protocol), before)
+    assert.deepEqual(f.protocol.withTransaction(tx => tx.query("SELECT * FROM sqlite_master WHERE name!='sync_observations_committed_frontiers' ORDER BY type,name")), schema)
+    assert.deepEqual(f.protocol.withTransaction(tx => tx.query('SELECT * FROM schema_migrations WHERE component!=? OR version<=26 ORDER BY component,version', SYNC_COMPONENT)), markers)
+    assert.throws(() => applyComponentMigrations(f.protocol, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 26)), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
+    backup = openProtocol(backupPath)
+    assert.equal(applyComponentMigrations(backup, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 26)), 26)
+    assert.deepEqual(rows(backup), before)
+    assert.deepEqual(backup.withTransaction(tx => tx.query('SELECT * FROM schema_migrations ORDER BY component,version')), markers)
+    assert.equal(await migrateSyncStore(f.protocol), SYNC_MIGRATIONS.length)
+  } finally { backup?.close(); f.cleanup() }
+})
+
+test('P1仅分析分区writer28只追加marker，27旧writer拒写且online备份逐字保留旧表', async () => {
+  const f = await fixture()
+  let backup: ReturnType<typeof openProtocol> | undefined
+  try {
+    const ready = f.ready(), journal = f.store.beginApply(ready.fence, ready.plan, ready.target)
+    for (const step of journal.steps) f.store.recordApplyStep(ready.fence, journal.id, { ...step, status: 'completed' })
+    const receipt = f.receipt(journal.id, ready.plan); f.store.recordReceipt(journal.id, receipt); f.store.settleApply(journal.id, receipt.id)
+    f.protocol.withTransaction(tx => { tx.exec('DROP INDEX sync_observations_committed_frontiers'); tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=28', SYNC_COMPONENT) })
+    const rows = (protocol: typeof f.protocol) => protocol.withTransaction(tx => Object.fromEntries(tx.query("SELECT name FROM sqlite_master WHERE type='table' AND name!='schema_migrations' ORDER BY name").map(row => [String(row.name), tx.query(`SELECT * FROM "${String(row.name)}"`)])))
+    const schema = f.protocol.withTransaction(tx => tx.query("SELECT * FROM sqlite_master WHERE name!='sync_observations_committed_frontiers' ORDER BY type,name"))
+    const before = rows(f.protocol), markers = f.protocol.withTransaction(tx => tx.query('SELECT * FROM schema_migrations ORDER BY component,version'))
+    assert.equal(markers.filter(row => row.component === SYNC_COMPONENT).length, 27)
+    assert.equal(SYNC_MIGRATIONS[27]?.version, 28)
+    assert.match(SYNC_MIGRATIONS[27].sql, /^SELECT 1;/)
+    const backupPath = join(f.root, 'v27-before-p1-analysis-only.backup')
+    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), SYNC_MIGRATIONS.length)
+    assert.deepEqual(rows(f.protocol), before)
+    assert.deepEqual(f.protocol.withTransaction(tx => tx.query("SELECT * FROM sqlite_master WHERE name!='sync_observations_committed_frontiers' ORDER BY type,name")), schema)
+    assert.deepEqual(f.protocol.withTransaction(tx => tx.query('SELECT * FROM schema_migrations WHERE component!=? OR version<=27 ORDER BY component,version', SYNC_COMPONENT)), markers)
+    assert.throws(() => applyComponentMigrations(f.protocol, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 27)), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
+    backup = openProtocol(backupPath)
+    assert.equal(applyComponentMigrations(backup, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 27)), 27)
+    assert.deepEqual(rows(backup), before)
+    assert.deepEqual(backup.withTransaction(tx => tx.query('SELECT * FROM schema_migrations ORDER BY component,version')), markers)
+    assert.equal(await migrateSyncStore(f.protocol), SYNC_MIGRATIONS.length)
+  } finally { backup?.close(); f.cleanup() }
+})
+
+for (const oldVersion of [27, 29, 30, 31] as const) test(`持久协议writer围栏，v${oldVersion}升级只备份一次且旧writer拒绝新库`, async () => {
+  const f = await fixture()
+  let backup: ReturnType<typeof openProtocol> | undefined
+  try {
+    const original = f.claim(), before = f.store.readAttempt(original.attempt.id)
+    f.protocol.withTransaction(tx => { tx.exec('DROP INDEX sync_observations_committed_frontiers'); tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>?', SYNC_COMPONENT, oldVersion) })
+    const schema = f.protocol.withTransaction(tx => tx.query("SELECT * FROM sqlite_master WHERE name!='sync_observations_committed_frontiers' ORDER BY type,name"))
+    const oldMarkers = f.protocol.withTransaction(tx => tx.query('SELECT * FROM schema_migrations ORDER BY component,version'))
+    const actualBackups: string[] = [], backupTo = f.protocol.backupTo.bind(f.protocol)
+    f.protocol.backupTo = async destination => { actualBackups.push(destination); await backupTo(destination) }
+    const backupPath = join(f.root, `v${oldVersion}-before-p1-generation-guidance.backup`)
+    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), SYNC_MIGRATIONS.length)
+    assert.equal(await migrateSyncStore(f.protocol), SYNC_MIGRATIONS.length)
+    assert.deepEqual(actualBackups, [backupPath])
+    const previousWriter = oldVersion === 27 ? 28 : oldVersion
+    assert.equal(SYNC_MIGRATIONS[previousWriter]?.version, previousWriter + 1)
+    assert.match(SYNC_MIGRATIONS[previousWriter].sql, /^SELECT 1;/)
+    assert.deepEqual(f.store.readAttempt(original.attempt.id), before)
+    assert.deepEqual(f.protocol.withTransaction(tx => tx.query("SELECT * FROM sqlite_master WHERE name!='sync_observations_committed_frontiers' ORDER BY type,name")), schema)
+    assert.deepEqual(f.protocol.withTransaction(tx => tx.query('SELECT * FROM schema_migrations WHERE component!=? OR version<=? ORDER BY component,version', SYNC_COMPONENT, oldVersion)), oldMarkers)
+    assert.throws(() => applyComponentMigrations(f.protocol, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, previousWriter)), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
+    backup = openProtocol(backupPath)
+    assert.equal(applyComponentMigrations(backup, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, oldVersion)), oldVersion)
+    assert.deepEqual(backup.withTransaction(tx => tx.query('SELECT * FROM schema_migrations ORDER BY component,version')), oldMarkers)
+  } finally { backup?.close(); f.cleanup() }
+})
+
+
+test('writer33事实返修marker只追加，保V4原件、32一致备份及旧writer写前拒绝', async () => {
+  const f = await fixture()
+  let backup: ReturnType<typeof openProtocol> | undefined
+  try {
+    const claimed = f.claim(), value = { version: 'elaboration-draft-v1', generationGuidance: 'ac-test-flow-review-verify-repair-v4' }, resultRef = f.put(value)
+    f.store.checkpoint(claimed.fence, { ...f.put({ version: 'sync-stage-v1', stage: 'elaboration-draft-protocol', resultRef }), artifacts: [{ kind: 'json', ref: resultRef }] })
+    f.protocol.withTransaction(tx => { tx.exec('DROP INDEX sync_observations_committed_frontiers'); tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>=33', SYNC_COMPONENT) })
+    const rows = (protocol: typeof f.protocol) => protocol.withTransaction(tx => Object.fromEntries(tx.query("SELECT name FROM sqlite_master WHERE type='table' AND name!='schema_migrations' ORDER BY name").map(row => [String(row.name), tx.query(`SELECT * FROM "${String(row.name)}"`)])))
+    const before = rows(f.protocol), schema = f.protocol.withTransaction(tx => tx.query("SELECT * FROM sqlite_master WHERE name!='sync_observations_committed_frontiers' ORDER BY type,name")), registry = f.protocol.withTransaction(tx => tx.query('SELECT * FROM schema_migrations ORDER BY component,version'))
+    assert.equal(SYNC_MIGRATIONS[32].version, 33); assert.match(SYNC_MIGRATIONS[32].sql, /^SELECT 1;/)
+    const originalBackup = f.protocol.backupTo.bind(f.protocol); let backups = 0
+    f.protocol.backupTo = async (...args: Parameters<typeof originalBackup>) => { backups++; return originalBackup(...args) }
+    const backupPath = join(f.root, 'v32-before-fact-repair.backup')
+    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), SYNC_MIGRATIONS.length)
+    assert.deepEqual(rows(f.protocol), before); assert.deepEqual(f.protocol.withTransaction(tx => tx.query("SELECT * FROM sqlite_master WHERE name!='sync_observations_committed_frontiers' ORDER BY type,name")), schema)
+    assert.deepEqual(f.protocol.withTransaction(tx => tx.query('SELECT * FROM schema_migrations WHERE component!=? OR version<=32 ORDER BY component,version', SYNC_COMPONENT)), registry)
+    assert.throws(() => applyComponentMigrations(f.protocol, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 32)), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
+    assert.deepEqual(rows(f.protocol), before)
+    backup = openProtocol(backupPath); assert.equal(applyComponentMigrations(backup, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 32)), 32); assert.deepEqual(rows(backup), before)
+    assert.equal(await migrateSyncStore(f.protocol), SYNC_MIGRATIONS.length); assert.equal(backups, 1)
+    assert.deepEqual(f.store.readAttempt(claimed.attempt.id).dispatchPlans, [])
+    assert.deepEqual(f.store.readAttempt(claimed.attempt.id).checkpointRefs[0].artifacts, [{ kind: 'json', ref: resultRef }])
+  } finally { backup?.close(); f.cleanup() }
+})
+
+test('writer34观察索引正常备份升级、失败原子回滚、保旧行且旧writer拒绝', async () => {
+  const f = await fixture()
+  let backup: ReturnType<typeof openProtocol> | undefined
+  try {
+    const claimed = f.claim(), value = { input: { ...f.input(), captureKind: 'commit' as const }, configRef: f.put({ fixture: 'v33 observation' }), selection: null, latestDifferenceDigest: 'legacy-difference' }
+    const observation = f.store.recordObservation(value, { controlRevision: 0, selectionDigest: null })
+    f.protocol.withTransaction(tx => { tx.exec('DROP INDEX sync_observations_committed_frontiers'); tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>33', SYNC_COMPONENT) })
+    const rows = (protocol: typeof f.protocol) => protocol.withTransaction(tx => Object.fromEntries(tx.query("SELECT name FROM sqlite_master WHERE type='table' AND name!='schema_migrations' ORDER BY name").map(row => [String(row.name), tx.query(`SELECT * FROM "${String(row.name)}"`)])))
+    const before = rows(f.protocol), schema = f.protocol.withTransaction(tx => tx.query('SELECT * FROM sqlite_master ORDER BY type,name')), registry = f.protocol.withTransaction(tx => tx.query('SELECT * FROM schema_migrations ORDER BY component,version'))
+    const migration = SYNC_MIGRATIONS[33]
+    assert.equal(migration.version, 34)
+    assert.throws(() => applyComponentMigrations(f.protocol, SYNC_COMPONENT, [...SYNC_MIGRATIONS.slice(0, 33), { ...migration, sql: `${migration.sql}\nINSERT INTO missing_index_migration_table VALUES(1);` }]), { code: 'PROTOCOL_SQLITE_ERROR' })
+    assert.deepEqual(f.protocol.withTransaction(tx => tx.query('SELECT * FROM sqlite_master ORDER BY type,name')), schema)
+    assert.deepEqual(f.protocol.withTransaction(tx => tx.query('SELECT * FROM schema_migrations ORDER BY component,version')), registry)
+    assert.deepEqual(rows(f.protocol), before)
+    const originalBackup = f.protocol.backupTo.bind(f.protocol); let backups = 0
+    f.protocol.backupTo = async destination => { backups++; await originalBackup(destination) }
+    const backupPath = join(f.root, 'v33-before-observation-index.backup')
+    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), SYNC_MIGRATIONS.length)
+    assert.deepEqual(rows(f.protocol), before)
+    assert.deepEqual(f.protocol.withTransaction(tx => tx.query("SELECT * FROM sqlite_master WHERE name!='sync_observations_committed_frontiers' ORDER BY type,name")), schema)
+    assert.deepEqual(f.protocol.withTransaction(tx => tx.query('SELECT * FROM schema_migrations WHERE component!=? OR version<=33 ORDER BY component,version', SYNC_COMPONENT)), registry)
+    assert.equal(f.protocol.withTransaction(tx => tx.query("SELECT name FROM sqlite_master WHERE type='index' AND name='sync_observations_committed_frontiers'")).length, 1)
+    assert.throws(() => applyComponentMigrations(f.protocol, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 33)), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
+    assert.deepEqual(rows(f.protocol), before)
+    backup = openProtocol(backupPath)
+    assert.equal(applyComponentMigrations(backup, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 33)), 33)
+    assert.deepEqual(rows(backup), before)
+    assert.deepEqual(backup.withTransaction(tx => tx.query('SELECT * FROM sqlite_master ORDER BY type,name')), schema)
+    const reopened = openProtocol(f.path)
+    try {
+      const store = new SyncStore(reopened, f.options)
+      assert.deepEqual(store.listCommittedObservationFrontiers(source()), [observation])
+      const fresh = store.recordObservation(value, { controlRevision: 0, selectionDigest: null })
+      assert.deepEqual(store.listCommittedObservationFrontiers(source()), [fresh])
+      assert.deepEqual(store.readAttempt(claimed.attempt.id), f.store.readAttempt(claimed.attempt.id))
+    } finally { reopened.close() }
+    assert.equal(await migrateSyncStore(f.protocol), SYNC_MIGRATIONS.length)
+    assert.equal(backups, 1)
+  } finally { backup?.close(); f.cleanup() }
 })

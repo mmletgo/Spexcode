@@ -117,6 +117,7 @@ test('AC-VERIFIER-07 不支持政策/无 Docker/含 Git export 明确 unsupporte
   assert.equal(bad.status, 'unsupported'); assert.equal(engine.calls.length, 0)
   const missing = await executeVerification(input, { driver: async () => { throw new Error('ENOENT') }, onCheckpoint: async () => assert.fail() })
   assert.equal(missing.status, 'unsupported')
+  assert.equal(Object.hasOwn(missing, 'rpcDiagnostics'), false, '普通错误不能追补运输超时诊断')
   await mkdir(join(input.candidateExportPath, '.git'))
   await assert.rejects(verificationExportDigest(input.candidateExportPath), /不得包含 .git/)
 })
@@ -192,4 +193,26 @@ test('AC-VERIFIER-13 恢复不能改变 scratch 执行政策，实际挂载不�
     assert.match(result.reason!, mutation === 'inspect' ? /mounts\/scratch 不匹配/ : /政策不匹配/)
     assert.ok(!engine.calls.some(call => call[1] === 'start' || call[1] === 'rm'))
   }
+})
+
+test('AC-VERIFIER-14 旧本地planned取消恢复不创建容器，无排空证明保持unknown', async () => {
+  const input = await request(); const engine = fake(); let planned: VerificationCheckpoint | undefined
+  await executeVerification(input, { driver: engine.driver, onCheckpoint: async checkpoint => { engine.save(checkpoint); planned = checkpoint; throw new Error('planned observer interrupted') } })
+  let creates = 0
+  const recovered = await executeVerification({ ...input, signal: AbortSignal.abort(), previousCheckpoint: planned }, { driver: async (args, bytes) => { if (args[1] === 'create') creates++; return engine.driver(args, bytes) }, onCheckpoint: async checkpoint => engine.save(checkpoint) })
+  assert.equal(creates, 0, '取消恢复不能创建尚不存在的容器')
+  assert.equal(recovered.status, 'recovery_required', recovered.reason)
+  assert.equal(recovered.checkpoint!.phase, 'planned')
+  assert.equal(recovered.evidence, undefined)
+})
+
+test('AC-VERIFIER-15 旧v1检查点保持本地绑定，当前SSH配置不能热迁移', async () => {
+  const input = await request(), engine = fake(); let original: VerificationCheckpoint | undefined
+  await executeVerification(input, { driver: engine.driver, onCheckpoint: async checkpoint => { original = structuredClone(checkpoint); engine.save(checkpoint); throw new Error('planned interrupted') } })
+  assert.equal(original!.version, 'verification-checkpoint-v1')
+  const recovered = await executeVerification({ ...input, previousCheckpoint: original }, { driver: engine.driver, transport: { kind: 'ssh-docker-v1', sshAlias: 'must-not-be-contacted', privateRoot: '/must-not-be-created' }, onCheckpoint: async checkpoint => engine.save(checkpoint) })
+  assert.equal(recovered.status, 'passed', recovered.reason)
+  assert.equal(recovered.checkpoint!.version, 'verification-checkpoint-v1')
+  assert.equal(recovered.checkpoint!.config.transport, undefined)
+  assert.equal(recovered.checkpoint!.transport, undefined)
 })

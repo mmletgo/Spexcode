@@ -255,7 +255,7 @@ test('post-merge nudge names `issue open` only where the store would accept it',
   const linked = join(dir, 'landing')
   const cli = join(import.meta.dirname, 'cli.ts')
   const run = (cwd: string) =>
-    execFileSync('npx', ['tsx', cli, 'internal', 'nudge', 'node/demo'], { cwd, encoding: 'utf8' })
+    execFileSync(process.execPath, ['--import', import.meta.resolve('tsx'), cli, 'internal', 'nudge', 'node/demo'], { cwd, encoding: 'utf8' })
   try {
     mkdirSync(trunk, { recursive: true })
     execFileSync('git', ['init', '-q', '-b', 'main', '.'], { cwd: trunk })

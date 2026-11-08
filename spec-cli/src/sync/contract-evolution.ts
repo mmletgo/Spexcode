@@ -11,6 +11,8 @@ export type ContractEvolutionPolicy = {
   mode: 'preserve_business' | 'reelaborate'
   /** 实现诊断允许细节增补，不能改变已接受原意、验收和政策。 */
   preserveAcceptedItems?: boolean
+  /** 从原candidate_review逐owner派生的事实差量；仅过程内使用，不改变业务授权。 */
+  readonlyFactRepairs?: ReadonlyMap<string, ReadonlySet<string>>
   authorizedChanges: readonly AuthorizedContractChange[]
   nodeChanges: readonly ContractNodeChange[]
   retiredIds: readonly string[]
@@ -226,12 +228,13 @@ export function validateContractEvolution(before: FrozenContracts, after: Frozen
   const onlyDiagnosticDependenciesChanged = (item: ContractItem, next: ContractItem | undefined): boolean => item.kind !== 'VERIFY' && next?.kind === item.kind && item.dependsOn.some(id => resolvedGaps.has(id)) && same({ ...contractBusinessMeaning(item), dependsOn: item.dependsOn.filter(id => !resolvedGaps.has(id)) }, contractBusinessMeaning(next))
   if (authorizations.size !== policy.authorizedChanges.length && before.nodes.length) issue('contract_authorization_duplicate', before.nodes[0], '同一身份不能收到重复契约变更授权')
   const authorities = policy.decisionAuthorities ?? policy.analysis?.analysis.decisionAuthorities ?? []
+  const sameMeaning = (item: ContractItem, next: ContractItem): boolean => sameContractBusinessMeaning(item, next) || item.kind === 'RULE' && next.kind === 'RULE' && policy.readonlyFactRepairs?.get(item.path)?.has(item.id) === true && sameContractBusinessMeaning(item, { ...next, basis: item.basis })
   const decision = policy.analysis?.analysis.decision
   const current = decision ? authorities.find(authority => authority.requestRef.sha256 === decision.requestRef.sha256 && authority.analysisRef.sha256 === decision.analysisRef.sha256 && authority.findingIds.length === decision.findingIds.length && authority.findingIds.every(id => decision.findingIds.includes(id))) : undefined
   const currentScope = current ? decisionScopeIds(before, current, decision, after) : new Set<string>()
   if (decision) for (const item of before.graph.items.values()) {
     const next = after.graph.items.get(item.id)
-    if (resolvedGaps.has(item.id) || onlyDiagnosticDependenciesChanged(item, next) || next && sameContractBusinessMeaning(item, next)) continue
+    if (resolvedGaps.has(item.id) || onlyDiagnosticDependenciesChanged(item, next) || next && sameMeaning(item, next)) continue
     if (item.kind !== 'VERIFY' && item.source.kind === 'code' && next && next.kind !== 'VERIFY' && next.source.kind === 'code') continue
     const authorization = authorizations.get(item.id)
     if (authorization && independentlyAuthoredChange(authorization, before, policy)) continue
@@ -283,7 +286,7 @@ export function validateContractEvolution(before: FrozenContracts, after: Frozen
     if (change?.action !== 'retire' && !after.contracts.some(next => next.path === expectedPath)) issue('contract_schema_removed', contract, '启用契约节点不能删除 schema 退出检查')
     if ((policy.mode === 'preserve_business' || policy.preserveAcceptedItems) && change?.action !== 'retire') {
       const next = after.contracts.find(next => next.path === expectedPath)
-      if (next && (policy.preserveAcceptedItems ? !contractBusinessProse(next.expandedSpec).includes(contractBusinessProse(contract.expandedSpec)) : contractBusinessProse(next.expandedSpec) !== contractBusinessProse(contract.expandedSpec))) issue(policy.preserveAcceptedItems ? 'refinement_accepted_prose_changed' : 'refactor_business_prose_changed', next, '既有 expanded 业务正文必须保留')
+      if (next && !policy.readonlyFactRepairs?.has(contract.path) && (policy.preserveAcceptedItems ? !contractBusinessProse(next.expandedSpec).includes(contractBusinessProse(contract.expandedSpec)) : contractBusinessProse(next.expandedSpec) !== contractBusinessProse(contract.expandedSpec))) issue(policy.preserveAcceptedItems ? 'refinement_accepted_prose_changed' : 'refactor_business_prose_changed', next, '既有 expanded 业务正文必须保留')
     }
   }
   for (const change of policy.authorizedChanges) {
@@ -321,7 +324,7 @@ export function validateContractEvolution(before: FrozenContracts, after: Frozen
       if (policy.mode === 'preserve_business' || policy.preserveAcceptedItems || authorization?.action !== 'retire') issue('protected_item_removed', item, '删除契约项必须有用户原意或可信裁决的退役依据', item.id)
       continue
     }
-    if (sameContractBusinessMeaning(item, next)) continue
+    if (sameMeaning(item, next)) continue
     if (!current && next.kind !== 'VERIFY' && next.source.kind === 'decision' && (authorities.some(authority => authority.stableDecisionId === next.source.ref) || item.kind === 'VERIFY' || item.source.kind !== 'decision' || item.source.ref !== next.source.ref)) for (const error of decisionAuthorizationErrors(`decision:${next.source.ref}`, [item.id], before, policy)) issue('decision_scope_exceeded', next, error, item.id)
     if (policy.mode === 'preserve_business' || policy.preserveAcceptedItems && ['REQ', 'AC', 'VERIFY', 'RULE'].includes(item.kind)) issue(policy.preserveAcceptedItems ? 'refinement_accepted_meaning_changed' : 'refactor_business_meaning_changed', next, policy.preserveAcceptedItems ? '再细化诊断不能改写已接受业务字段' : '纯重构只允许实现与测试符号绑定变化', item.id)
     else if (policy.preserveAcceptedItems && item.kind === 'TR' && next.kind === 'TR' && item.disposition !== 'not_applicable' && next.disposition === 'not_applicable') issue('refinement_accepted_disposition_removed', next, '已接受状态处置不能改为不适用逃避义务', item.id)

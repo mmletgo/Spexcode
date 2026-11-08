@@ -34,13 +34,17 @@ code:
 
 读取 blob 后在本进程按完整 OID 的 SHA-1/SHA-256 格式校验 `blob <原始字节长度>\0` 和全部原始字节，不借助第二次 Git stdin 调用或 UTF-8 转换。写对象、更新临时 index 等需 stdin 的元数据命令仅从 owned 私有普通文件读取（目录私有、文件权限 0600），包括空输入；无输入命令关闭 stdin。成功、失败和超时均关闭 fd 并清理 owned 输入目录。每次外部 Git 命令沿用 `SPEXCODE_GIT_TIMEOUT_MS`（默认 120000ms）上界，超时杀死该命令并透传错误；这不是整体操作预算或 heartbeat 保证，不改变已冻结操作的预算。
 
-同一轮观察把已读取的原字节写入 owned 私有普通文件，使用 Git `hash-object --stdin-paths --no-filters` 一次写入，仍逐文件保留 mode、摘要及前后观察。读树由 Git 长列表取得对象大小，按原 128 MiB 输出容量分组使用 `cat-file --batch`；每个对象按 framing、完整原字节与 OID 核对。没有显式只读查询作用域时仍逐调用重读，不共享全局缓存。聚合字节不能收紧或放宽单对象容量：framing 超过批次容量的单对象沿用原 `cat-file blob` 路径。空树、缺失 index、二进制、有效 UTF-8 路径及 symlink 语义保持不变，真实 Git 失败继续透传。
+同一轮观察把已读取的原字节写入 owned 私有普通文件，使用 Git `hash-object --stdin-paths --no-filters` 一次写入，仍逐文件保留 mode、摘要及前后观察。读树由 Git 长列表取得对象大小，按原 128 MiB 输出容量分组使用 `cat-file --batch`；每个对象按 framing、完整原字节与 OID 核对。没有显式只读查询作用域或调用级树缓存时仍逐调用重读，不共享全局缓存。聚合字节不能收紧或放宽单对象容量：framing 超过批次容量的单对象沿用原 `cat-file blob` 路径。空树、缺失 index、二进制、有效 UTF-8 路径及 symlink 语义保持不变，真实 Git 失败继续透传。
 
 读树调用者可同时接收同次批量校验后的条目和完整原始 bytes，复用已经读取的正文，避免摘要之后再逐对象启动 Git。回调只在该对象 framing、完整字节与 OID 核对成功后交出字节，返回的 TreeEntry 顺序、digest 和全部快照身份计算保持不变；带 `onObject` 的调用每次逐调用完整读取，不共享缓存。
 
-仅只读 HTTP status/detail 查询可用 `withReadonlySnapshotQuery` 在本次异步上下文内重用无回调且完整读回/OID 核验成功的 TreeEntry。key 同时绑定 commonDir 的 realpath、既有物理 dev/ino/birthtime 与完整 tree OID；命中返回独立副本。`onObject` 始终走原批量字节路径并交出每个对象；失败读不留下成功项。作用域结束或失败后立即停用并清空，继承上下文的遗留异步任务也不能命中。verifySnapshot 每次仍核对 HEAD/tree、manifest blob、contentDigest 与 snapshot id，不缓存验证结论。业务写入、派发、采纳、验证交付等真实动作入口保持在作用域外；只读查询保留快照自身原有 owned private evidence/ref 写入。未显式作用域的读对象继续逐次完整读取。
+[[sync-coordinator]] 的一次输入装配或当前性检查可显式传递本地树缓存，按该调用已绑定的 commonDir 与完整 tree OID 复用完整校验成功的 entries，命中返回独立副本。缓存不保存快照验证结论：各次 verifySnapshot 仍核原 HEAD/tree/index、manifest SHA、contentDigest 和身份；原/现快照各保留一次完整对象读取。作者投影、真实组合正文、只读引用闭包和 index/HEAD 清单沿用同一读取接缝；不同 OID 不混用，onObject 仍完整读回并逐对象交出真实 bytes。缓存只在该业务调用内传递，不进入持久状态或跨调用复用，也不扩大只读 HTTP 查询作用域。
+
+仅只读 HTTP status/detail 查询可用 `withReadonlySnapshotQuery` 在本次异步上下文内重用无回调且完整读回/OID 核验成功的 TreeEntry。key 同时绑定 commonDir 的 realpath、既有物理 dev/ino/birthtime 与完整 tree OID；命中返回独立副本。`onObject` 始终走原批量字节路径并交出每个对象；失败读不留下成功项。作用域结束或失败后立即停用并清空，继承上下文的遗留异步任务也不能命中。verifySnapshot 每次仍核对 HEAD/tree、manifest blob、contentDigest 与 snapshot id，不缓存验证结论。业务写入、派发、采纳、验证交付等真实动作入口保持在作用域外；只读查询保留快照自身原有 owned private evidence/ref 写入。未显式传入调用级树缓存且无只读查询作用域的读树继续逐次完整读取。
 
 自动提交输入使用同一 captureInputSnapshot 的 committed 模式：前后核对物理来源、分支、HEAD 与其不可变 tree，仅从 Git 对象读取条目和原字节。它不读取工作文件、用户 index 或 untracked 字节；同期保存、暂存和冲突 index 不影响该输入，HEAD 变化仍有限重试。InputSnapshot.captureKind=commit 参与新身份摘要，immutableTree/indexTree 均等于已冻结 HEAD tree，indexDigest 是该 tree OID 的 SHA256，不伪称保存了用户 index。读回同时验证 HEAD/tree/index 绑定。缺 captureKind 的历史记录及默认显式工作区采集保原摘要算法、index 与完整工作字节语义，不能升级重写历史快照身份。
 
 
 物理source的身份字段按既有固定顺序参与SHA，JSON键排序不是身份变化。固定计划规范序列化后的历史before快照仍可验证；字段值、树、mode、摘要篡改继续拒绝，不重写历史快照或接收另一来源。
+
+内部CAS读取只交出原始字节并逐次核SHA，不为不存在的展示需求嗅探MIME或预先解码JSON；不合法摘要、缺失或损坏的证据仍显式失败，JSON语法由实际读取方判断。

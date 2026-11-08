@@ -3,8 +3,8 @@ import test from 'node:test'
 import fs, { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import crypto, { createHash, type BinaryLike, type BinaryToTextEncoding } from 'node:crypto'
 import { syncBuiltinESMExports } from 'node:module'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import os, { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { pinZCodeToolPolicy, structuredExecutionPolicy } from './session-structured-policy.js'
 import { zcodeCapability, zcodeStructuredTurn, type ZCodeStructuredExecution } from './zcode-structured.js'
@@ -34,7 +34,8 @@ test('new read defaults are frozen only at admission; old absence and explicit t
 
 test('MockNative captures exact send filtering, unchanged plan mode and permissions, v1 recovery and v2 tamper refusal', async t => {
   const directory = mkdtempSync(join(tmpdir(), 'zcode-noninteractive-')), bin = join(directory, 'bin'), cli = join(bin, 'zcode'), builtin = Buffer.from('PUBLIC_MOCK_BUILTIN')
-  mkdirSync(bin)
+  const portableTmp = join(directory, 'host-tmp')
+  mkdirSync(bin); mkdirSync(portableTmp)
   const captured = join(directory, 'captured.json'), rejectedResponse = join(directory, 'rejected-response.txt'), control = join(directory, 'control.json')
   const script = `#!/usr/bin/env node
 const fs=require('node:fs'),rl=require('node:readline');
@@ -51,7 +52,12 @@ else if(p.method==='session/close')reply({closed:true});else throw Error('unexpe
 });
 `
   writeFileSync(cli, script); chmodSync(cli, 0o755)
-  const originalHash = crypto.createHash, originalRead = fs.readFileSync, originalExists = fs.existsSync, previousPath = process.env.PATH
+  const originalHash = crypto.createHash, originalRead = fs.readFileSync, originalExists = fs.existsSync, originalMkdtemp = fs.mkdtempSync, previousPath = process.env.PATH
+  t.mock.method(os, 'tmpdir', () => portableTmp)
+  t.mock.method(fs, 'mkdtempSync', ((...args: Parameters<typeof fs.mkdtempSync>) => {
+    if (String(args[0]).startsWith('/private/tmp/spex-zcode-tmp-')) throw Object.assign(new Error(`ENOENT: no such file or directory, mkdtemp '${String(args[0])}XXXXXX'`), { code: 'ENOENT' })
+    return originalMkdtemp(...args)
+  }) as typeof fs.mkdtempSync)
   t.mock.method(fs, 'existsSync', (path: fs.PathLike) => path === zcodeCapability.builtinPath || originalExists(path))
   t.mock.method(fs, 'readFileSync', ((path: fs.PathOrFileDescriptor, options?: unknown) => path === zcodeCapability.builtinPath ? builtin : originalRead(path, options as null)) as typeof fs.readFileSync)
   t.mock.method(crypto, 'createHash', (...args: Parameters<typeof crypto.createHash>) => {
@@ -79,6 +85,7 @@ else if(p.method==='session/close')reply({closed:true});else throw Error('unexpe
       }, workspace)
       const actual = JSON.parse(readFileSync(captured, 'utf8')) as { create: { mode: string }; send: Record<string, unknown>; visibleTools: string[]; permissions: Record<string, { decision: string }> }
       const plan = JSON.parse(readFileSync(join(root, 'plan.json'), 'utf8')) as Record<string, unknown>, send = JSON.parse(readFileSync(join(root, 'send.json'), 'utf8')) as Record<string, unknown>
+      assert.equal(dirname(String(plan.tmp)), portableTmp)
       assert.equal(actual.create.mode, kind === 'edit' ? 'build' : 'plan')
       assert.deepEqual(actual.send, { ...send, queryId: plan.queryId })
       assert.equal(plan.version, kind === 'new-read' ? 2 : 1)
@@ -92,10 +99,13 @@ else if(p.method==='session/close')reply({closed:true});else throw Error('unexpe
       assert.equal(actual.permissions['permission-ExitPlanMode'].decision, 'deny')
       assert(String(send.content).endsWith('\n\n原业务正文  '))
       assert.equal(String(send.content).includes('Do not request plan approval'), kind === 'new-read')
-      const completed = { ...execution, state: 'completed' as const, output: {}, resultDigest: createHash('sha256').update('{}').digest('hex') }, before = readFileSync(captured)
+      const completed = { ...execution, state: 'completed' as const, output: {}, resultDigest: createHash('sha256').update('{}').digest('hex') }, before = readFileSync(captured), originalPlan = readFileSync(join(root, 'plan.json'))
       const noDispatch = { onNative: async () => assert.fail('no new native'), onThread: async () => assert.fail('no new thread'), onTurn: async () => assert.fail('no new turn') }
       assert.deepEqual(await zcodeStructuredTurn(realm, kind, '原业务正文  ', completed, noDispatch, workspace), result)
       assert.deepEqual(readFileSync(captured), before, 'cold replay must not send again')
+      const replayedPlan = readFileSync(join(root, 'plan.json'))
+      assert.deepEqual(replayedPlan, originalPlan, 'cold replay must preserve the saved private tmp and plan bytes')
+      t.diagnostic(JSON.stringify({ kind, tmp: plan.tmp, savedPlanSha256: createHash('sha256').update(originalPlan).digest('hex'), replayedPlanSha256: createHash('sha256').update(replayedPlan).digest('hex') }))
       if (kind === 'new-read') for (const [file, corrupt] of [
         ['plan.json', { ...plan, toolDenylist: ['ExitPlanMode', 'Bash'] }],
         ['plan.json', { ...plan, version: 1 }],
@@ -124,7 +134,8 @@ else if(p.method==='session/close')reply({closed:true});else throw Error('unexpe
           const result = await runStructuredSession({ ...request, ...(historical ? { sessionCreateKey: request.requestKey } : {}) })
           const record = readRecord(result.sessionId)!, state = record.structuredExecution!
           assert.deepEqual(state.zcodeToolPolicy, historical ? undefined : tools)
-          assert.equal(state.zcodeNative?.version, historical ? 1 : 2)
+          assert.equal(state.nativeConfiguration, historical ? undefined : 'cli-config-v1')
+          assert.equal(state.zcodeNative?.version, historical ? 1 : 3)
           assert.equal(state.resultWorktree?.tree, worktree.tree)
           const actual = readFileSync(captured), createHash = record.createPayloadHash
           assert.deepEqual(await runStructuredSession(request), result)
@@ -157,7 +168,8 @@ else if(p.method==='session/close')reply({closed:true});else throw Error('unexpe
             assert.deepEqual(readFileSync(captured), beforeInvalid)
             const run = createAttemptRunner(store, claim.fence, { pollMs: 2 }), result = await run(request), record = readRecord(result.sessionId)!
             assert.deepEqual(record.structuredExecution!.zcodeToolPolicy, tools)
-            assert.equal(record.structuredExecution!.zcodeNative!.version, 2)
+            assert.equal(record.structuredExecution!.nativeConfiguration, 'cli-config-v1')
+            assert.equal(record.structuredExecution!.zcodeNative!.version, 3)
             assert.deepEqual(JSON.parse(readFileSync(captured, 'utf8')).send.toolDenylist, ['ExitPlanMode'])
             const original = readFileSync(captured), creationHash = record.createPayloadHash
             assert.deepEqual(await createAttemptRunner(store, claim.fence, { pollMs: 2 })(request), result)

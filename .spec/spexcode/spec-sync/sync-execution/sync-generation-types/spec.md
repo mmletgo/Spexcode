@@ -47,4 +47,6 @@ readonlyContractPaths只用于sync-coordinator-v2局部只读接口上下文，�
 
 失败值可携原 Native session/thread/turn、requestKey/inputDigest，仅绑定原故障来源，不表示成功或自动续修授权；已结算资格由 [[sync-native-run]] 与 [[sync-coordinator]] 重核。
 
-GenerationInput可选reviewRepair仅携既有失败resultRef、nativePlanRef、checkpointRef，交精确失败组的未批准格式诊断；不新增GenerationResult raw字段或评审草稿协议，不追补旧ref/缺席。该引用进入失败组真实请求摘要，兄弟输入不带它。
+GenerationInput可选reviewRepair只携既有resultRef、nativePlanRef、checkpointRef，交精确失败组的未批准格式诊断；既可来自Native格式拒绝，也可来自已认证Native成功但程序位置字段格式拒绝。复用既有stage-worktree临时Git稿，不新增持久字段，不追补旧ref/缺席。该引用进入失败组真实请求摘要，兄弟输入不带它。
+
+GenerationOptions.reviewSpecWritePaths只接唯一最终dispatch已派生的P2 Spec写范围，供实际只读P1位置早验使用；不进入GenerationInput、inputDigest或持久记录，不是新的权限配置。一般可写P2与合法跨owner精确诊断保持原协议。

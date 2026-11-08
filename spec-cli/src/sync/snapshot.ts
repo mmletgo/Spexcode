@@ -4,13 +4,14 @@ import { execFileSync } from 'node:child_process'
 import { closeSync, existsSync, lstatSync, mkdtempSync, openSync, readFileSync, readlinkSync, realpathSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
-import { putBlob, readBlobByHash } from '@spexcode/spec-core'
+import { putBlob, getBlob } from '@spexcode/spec-core'
 import { withWorktreeRegistryLock } from '../session-record-lock.js'
 import type { BlobRef, InputSnapshot, WorktreeIdentity } from './operation-types.js'
 import { projectSourceHashes, projectSourceIdentity, rawPhysicalFingerprint, rawRepositoryId, readSourceStat, readSourceStats, sourceStatText, type SourceStats } from './source-registration.js'
 
 export type TreeEntry = { path: string; mode: '100644' | '100755' | '120000'; oid: string; digest: string }
 export type SnapshotManifest = { version: 1; entries: TreeEntry[] }
+export type TreeReadCache = Map<string, TreeEntry[]>
 type ReadonlySnapshotQuery = { active: boolean; trees: Map<string, TreeEntry[]> }
 const readonlySnapshotQuery = new AsyncLocalStorage<ReadonlySnapshotQuery>()
 
@@ -52,10 +53,10 @@ export function objectGit(commonDir: string, args: string[], input?: Buffer, ind
 export const sourceGit = (root: string, args: string[]): Buffer => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'core.splitIndex=false', '-C', root, ...args], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...gitEnv(), GIT_NO_REPLACE_OBJECTS: '1' }, timeout: GIT_TIMEOUT_MS, killSignal: 'SIGKILL', maxBuffer: 128 * 1024 * 1024 })
 export function writeEvidence(commonDir: string, value: unknown): BlobRef { return { sha256: putBlob(Buffer.from(JSON.stringify(value)), evidenceDir(commonDir)) } }
 export function readEvidence(commonDir: string, ref: BlobRef): Buffer {
-  const result = readBlobByHash(ref.sha256, evidenceDir(commonDir))
-  if (!result.ok) throw new Error(`缺失证据 ${ref.sha256}`)
-  if (contentHash(result.bytes) !== ref.sha256) throw new Error(`证据摘要不匹配 ${ref.sha256}`)
-  return result.bytes
+  const bytes = /^[a-f0-9]{64}$/.test(ref.sha256) ? getBlob(ref.sha256, evidenceDir(commonDir)) : null
+  if (!bytes) throw new Error(`缺失证据 ${ref.sha256}`)
+  if (contentHash(bytes) !== ref.sha256) throw new Error(`证据摘要不匹配 ${ref.sha256}`)
+  return bytes
 }
 export function validateRepositoryPath(path: string): string {
   if (!path || path.includes('\\') || path.includes('\0') || path.startsWith('/') || path.split('/').some(part => !part || part === '.' || part === '..' || part.toLowerCase() === '.git')) throw new Error(`不合法仓库路径: ${path}`)
@@ -99,13 +100,14 @@ export function captureContinuityConfiguration(root: string): InputSnapshot {
   const tree = objectGit(source.commonDir, ['rev-parse', `${headCommit}^{tree}`]).toString().trim()
   return snapshotFromTree({ id: '', captureKind: 'commit', source, headCommit, immutableTree: tree, indexTree: tree, indexDigest: contentHash(tree), manifestBlob: { sha256: '' }, contentDigest: '', capturedAtMs: Date.now() }, tree)
 }
-export function readTree(commonDir: string, tree: string, onObject?: (entry: TreeEntry, bytes: Buffer) => void): TreeEntry[] {
+export function readTree(commonDir: string, tree: string, onObject?: (entry: TreeEntry, bytes: Buffer) => void, treeCache?: TreeReadCache): TreeEntry[] {
   if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(tree)) throw new Error('tree 必须为不可变 Git OID')
-  const query = readonlySnapshotQuery.getStore(), cacheKey = query?.active ? readonlyTreeKey(commonDir, tree) : undefined
-  if (cacheKey && query) {
-    if (onObject) query.trees.delete(cacheKey)
+  const query = readonlySnapshotQuery.getStore(), cache = treeCache ?? (query?.active ? query.trees : undefined)
+  const cacheKey = treeCache ? `${commonDir}\0${tree}` : query?.active ? readonlyTreeKey(commonDir, tree) : undefined
+  if (cacheKey && cache) {
+    if (onObject) cache.delete(cacheKey)
     else {
-      const cached = query.trees.get(cacheKey)
+      const cached = cache.get(cacheKey)
       if (cached) return copyTreeEntries(cached)
     }
   }
@@ -124,7 +126,7 @@ export function readTree(commonDir: string, tree: string, onObject?: (entry: Tre
     result.push(verified); onObject?.(verified, bytes)
   })
   const sortedEntries = result.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
-  if (cacheKey && query?.active && !onObject) query.trees.set(cacheKey, copyTreeEntries(sortedEntries))
+  if (cacheKey && cache && !onObject) cache.set(cacheKey, copyTreeEntries(sortedEntries))
   return sortedEntries
 }
 function verifyObjectOid(oid: string, bytes: Buffer): void {
@@ -168,7 +170,7 @@ export function readObject(commonDir: string, oid: string): Buffer {
 /** 批读一组明确的 blob OID，沿用读树的容量分组、原字节及完整 OID 校验。 */
 export function readObjectBatch(commonDir: string, oids: readonly string[]): Map<string, Buffer> {
   const unique = [...new Set(oids)], result = new Map<string, Buffer>()
-  if (unique.some(oid => !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(oid))) throw new Error('blob 必须为不可变 Git OID')
+  if (unique.some(oid => !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(oid))) throw new Error('Git 对象必须使用不可变 OID')
   if (unique.length === 0) return result
   if (unique.length === 1) return new Map([[unique[0], readObject(commonDir, unique[0])]])
   const metadata = objectGit(commonDir, ['cat-file', '--batch-check'], Buffer.from(unique.map(oid => `${oid}\n`).join('')))
@@ -297,9 +299,9 @@ export async function captureInputSnapshot(root: string, options: { committed?: 
   throw new UnstableSnapshotError('输入在采集期间持续变化或Git读取失败，未形成稳定快照', { cause: readFailure })
 }
 /** 只验证 tree 与 evidence；不读取可能继续被 Agent 写入的旧 attempt。 */
-export function verifySnapshot(snapshot: InputSnapshot): TreeEntry[] {
+export function verifySnapshot(snapshot: InputSnapshot, treeCache?: TreeReadCache): TreeEntry[] {
   if (snapshot.captureKind === 'commit' && (snapshot.immutableTree !== objectGit(snapshot.source.commonDir, ['rev-parse', `${snapshot.headCommit}^{tree}`]).toString().trim() || snapshot.indexTree !== snapshot.immutableTree || snapshot.indexDigest !== contentHash(snapshot.indexTree))) throw new Error('提交快照必须绑定同一 HEAD tree')
-  const entries = readTree(snapshot.source.commonDir, snapshot.immutableTree)
+  const entries = readTree(snapshot.source.commonDir, snapshot.immutableTree, undefined, treeCache)
   const actual = JSON.stringify({ version: 1, entries } satisfies SnapshotManifest)
   if (readEvidence(snapshot.source.commonDir, snapshot.manifestBlob).toString() !== actual || contentHash(JSON.stringify(entries)) !== snapshot.contentDigest) throw new Error('快照 manifest/contentDigest 不匹配 Git 对象')
   const expectedId = contentHash(JSON.stringify({ ...(snapshot.captureKind ? { captureKind: snapshot.captureKind } : {}), source: canonicalSnapshotSource(snapshot.source), headCommit: snapshot.headCommit, indexTree: snapshot.indexTree, indexDigest: snapshot.indexDigest, tree: snapshot.immutableTree, contentDigest: snapshot.contentDigest }))

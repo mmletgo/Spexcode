@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -27,17 +27,32 @@ test('adopter claim and exact FIFO dequeue commit or roll back together', () => 
   } finally { protocol.close(); rmSync(root, { recursive: true, force: true }) }
 })
 
-test('online backup preserves committed WAL bytes and opens independently', async () => {
+test('online backup is private from creation, preserves committed WAL bytes and opens independently', async () => {
   const root = mkdtempSync(join(tmpdir(), 'protocol-backup-'))
   const protocol = openProtocol(join(root, 'db.sqlite'))
   try {
     protocol.initialize('coordinator')
     const message = protocol.enqueue('coordinator', { kind: 'adopter.control.v1', body: Buffer.from('durable') })
-    await protocol.backupTo(join(root, 'backup.sqlite'))
-    const recovered = openProtocol(join(root, 'backup.sqlite'))
-    try { assert.equal(recovered.listPending('coordinator')[0].messageId, message.messageId) }
+    const destination = join(root, 'backup.sqlite')
+    const previousMask = process.umask(0)
+    let creationMode: number | undefined
+    try {
+      const copying = protocol.backupTo(destination)
+      creationMode = existsSync(destination) ? statSync(destination).mode & 0o777 : undefined
+      await copying
+    } finally { process.umask(previousMask) }
+    assert.equal(creationMode, 0o600)
+    assert.equal(statSync(destination).mode & 0o777, 0o600)
+    const recovered = openProtocol(destination)
+    try {
+      assert.equal(recovered.listPending('coordinator')[0].messageId, message.messageId)
+      assert.equal(recovered.withTransaction(tx => tx.query('PRAGMA integrity_check'))[0].integrity_check, 'ok')
+    }
     finally { recovered.close() }
-    await assert.rejects(protocol.backupTo(join(root, 'backup.sqlite')), /new file/)
+    const original = readFileSync(destination), mode = statSync(destination).mode
+    await assert.rejects(protocol.backupTo(destination), { code: 'PROTOCOL_PATH_INVALID' })
+    assert.deepEqual(readFileSync(destination), original)
+    assert.equal(statSync(destination).mode, mode)
   } finally { protocol.close(); rmSync(root, { recursive: true, force: true }) }
 })
 

@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+SyncCoordinatorOptions 可携可信 verificationTransport server 配置，与 VerificationPolicy 分离；正常与恢复入口原样传给每次独立 run adapter。verificationDriver 保留本地测试接缝，不能使旧 v1 checkpoint 随当前远端配置换主机。
+
 SyncCoordinatorPlanBody可选agentWorkflow:native-worktree-v1固定新工作流并参与完整policyDigest。新应用操作默认带该字段；历史缺席继续原frozen执行，不能由当前配置/重启猜为新协议。它只选择执行合同，不改变scope、partition、预算或业务授权。
 
 P4 计划的 executionScope 单独冻结本次实际写入文件及目标契约/流程；writePaths 继续表达生成授权，不能作为写锁或已验证覆盖范围。baselineSelection 完整记录精确读取、保护和写入资源的独立字节/意图基线，接入使用同一已捕获 InputSnapshot，不为观察事件重新采集另一版本。既有 P3 冻结操作缺少这些字段时仍按其原计划恢复。

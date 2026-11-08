@@ -10,7 +10,7 @@ import { controlledDecisionIdentity } from './request-input.js'
 import { readDecisionAuthority } from './code-behavior.js'
 import type { CodeBehaviorAnalysis, SyncDecisionInput } from './writeback-types.js'
 import { coveredPath, readSyncSettings, SyncApplicationError } from './settings.js'
-import { ownerNodesForPath } from './partitioning.js'
+import { ownerNodesForPath } from './governance-owners.js'
 import { ownedObligationPaths } from './prior-context.js'
 
 /** 授权范围只枚举实际未治理源码；当前及真实交付治理均排除，发现不授予归属或执行范围。 */

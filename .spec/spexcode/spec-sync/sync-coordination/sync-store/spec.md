@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+listResources(attemptId)在既有只读事务枚举该attempt全部真实资源，包含removed历史，不过滤kind或阶段、不修改记录，供协调器逐项冷验候选续验后继；它不改变retry准入、幂等、资源恢复或writer/schema约定。
+
 sourceContinuityState仅在既有assertSchema事务只读汇总同commonDir的完整来源、有效current attempt/lease、未removed资源及未settled journal，不限列表条数、不读会话正文、不改CAS。登记层结合observer/owner事实拒绝活跃的另一raw namespace；过期running元数据本身不证明活跃。连续性不修改原operation/input/预算或既有blob。
 
 共享身份属于 [[sync-operation-types]]。admitAndEnqueue 将冻结 operation、稳定派发计划与现有 protocol 的 sync.dispatch.v1 control envelope 原子写入，注册唯一 coordinator 地址；消息不是普通 Agent 文本。稳定接入 payload 包含输入内容与物理身份、policy/impact/readSet 摘要，capture 时间不参与；同键不同 payload 拒绝。claimAttempt 独立保存 attempt 与 sessionCreateKey（不超过128字符），在同一事务领取所有实际 path/规则写集合及可选 exact FIFO dequeue。dequeue 后仍由未完 attempt 恢复。
@@ -52,7 +54,7 @@ findResource(attemptId,key)按精确身份查询包括removed的资源，供同�
 
 listOperations(repositoryId, {limit?, sourceRoot?}) 在 SQL 内按仓库及可选精确来源根筛选，并按 rowid DESC 返回最新接入操作，包含运行中及终态。默认 limit=100，只接受整数1..500；读取仍校验组件版本，不以壁钟决定顺序，也不读全库后过滤。
 
-listCommittedObservationFrontiers只读既有observation历史，按真实source身份筛选commit且无failure/blocked的记录；同input、差异摘要与outcome只保最新行，按rowid倒序。它不受展示分页上限影响，普通重复观察不丢历史admitted或baseline消费事实；应用在事务外核差异证据的node与consumption，不把任意观察当已处理，不引入第二份消费游标。pinnedBlobRefs包含完整observations中以latestDifferenceDigest字符串保存的差异blob，GC不得删掉仍由持久消费记录引用的证明。
+listCommittedObservationFrontiers只读既有observation历史，按真实source身份筛选commit且无failure/blocked的记录；同input、差异摘要与outcome只保最新行，按rowid倒序。它不受展示分页上限影响，普通重复观察不丢历史admitted或baseline消费事实；应用在事务外核差异证据的node与consumption，不把任意观察当已处理，不引入第二份消费游标。v34部分表达式索引沿原SQL及完整历史分组，读取不反复解析全历史record_json；索引与禁用索引的完整重算结果逐值、逐序一致，不因暂停观察或历史增长截断消费事实。pinnedBlobRefs包含完整observations中以latestDifferenceDigest字符串保存的差异blob，GC不得删掉仍由持久消费记录引用的证明。
 
 listJournals(operationId)先核operation存在，再按rowid顺序读取该操作全部journal及已结算receipt；终态交付事实不从恢复列表推断。
 
@@ -72,7 +74,7 @@ paused且尚无attempt的头已被合法消费后resume，claim可依据同op精
 
 接入payload纳入origin，primary/alias重放必须同origin且精确命中已存在new或旧legacy摘要；不重写既有operation摘要。sameInput归并仅相同origin，不能用Spec旧结果隐式执行code/initial等另一来源。派发地址按repositoryId稳定摘要分区，nextDispatch(repositoryId)读取该真实地址头，同仓库多worktree仍严格FIFO，跨仓库不互堵。
 
-readRetryEligibility(id)只读返回{eligible,reason?:{code,message}}真实事实，admit复用同事务门禁。仅failed/budget_exhausted或从未receipt的cancelled；旧operation所有历史resource必须removed、journals全部settled、无liveattempt/lease。retryOf绑定旧source物理身份、input、requestBlob、policy/readset/impact、scope、baseline与origin；完整复用未落地用户请求，只允许新显式ingress/rootCause、交付私有plan和执行budget/deadline。新operation记录retryOf，同retry ingress/payload重放幂等；原失败及原预算记录不改，不用自动事件重开。
+readRetryEligibility(id)只读返回{eligible,reason?:{code,message}}真实事实，admit复用同事务门禁。failed/budget_exhausted、从未receipt的cancelled，或下述认证完整未采纳的settled交付；旧operation所有历史resource必须removed、journals全部settled、无liveattempt/lease。retryOf绑定旧source物理身份、input、requestBlob、policy/readset/impact、scope、baseline与origin；完整复用未落地用户请求，只允许新显式ingress/rootCause、交付私有plan和执行budget/deadline。新operation记录retryOf，同retry ingress/payload重放幂等；原失败及原预算记录不改，不用自动事件重开。
 
 预算耗尽的未消费dispatch已无自动执行资格，作为stopped头由同事务精确消费，避免显式新retry在旧budget头之后永远阻塞；不将可修复failed阶段机械归为终态。
 
@@ -122,3 +124,5 @@ sync.history 请求采用固定输入、目标真实交付及完整成组差量�
 预算支持旧numeric有限对象及精确unlimited对象。无限operation保存deadlineAtMs=null，claim与reserveDispatch持续累计真实calls/attempts/repair失败，但不因总计数或总时间耗尽；recordBudgetExhaustion拒绝将无限操作伪标耗尽。自动前驱继承原budget及显式null期限，暂停/恢复、幂等、防回声不重置或另建预算。取消、物理控制、未结资源、lease过期、旧fence及交付门禁保持；有限maxRepairs=0继续禁止修复。
 
 SyncCheckpointRef可含typed artifacts，单次checkpoint在事务外校验wrapper及全部材料CAS后原子登记wrapper与保活引用；pinnedBlobRefs递归保留原resultRef、全部JSON材料及原始raw。旧flat refs不改写或删除，不以role授予stage权。
+
+完整未采纳 settled 交付的正式 retryOf 先在事务外认证真实 Git 与全部 settledReceipt，准入事务再核父完整记录及 journal 摘要未变、历史资源已清空、当前 attempt 已结算。selection 只允许同资源集逐项保持原 binding 或推进为该父实际 journal 的 source BaselinePair；pair 的原输入、receipt 与覆盖必须逐项一致，第三方推进拒绝。子保存当前 CAS selection，业务组合及阶段仍沿 retryOf 派生的原 selection，bindComposedInput 仅接受该认证业务摘要；claim/fence/verification/apply 始终核子当前 CAS。没有新持久字段，不改旧记录或资源头。

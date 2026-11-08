@@ -21,3 +21,5 @@ related:
 每次派发从基础 schema 复制原生输出约束：inputId/candidateDigest 为当前冻结身份的单值枚举，checkedIds 只允许真实候选及本轮退役项，最小数量为预定完整集合大小，最大数量为实际候选集合大小，并明确列出必须独审的项。程序不填充或修正模型回执；未知、重复、遗漏及不诚实的覆盖仍由消费者和独立语义审查拒绝，共享基础 schema 不随请求改变。
 
 调用既有 runner，核 native session/thread/turn 非空及实际输出摘要；不自行调用模型 SDK、不新建队列或信任本地 passed 标记。完整输入由调用者从不可变对象构造，返回原结构化 review 与真实 trace，不能等同于真实运行或交付完成。
+
+Native候选独审仅对实际不可由P2写入、可能授予后继只读P1路由的Spec发现早验定位；实际P2 Spec写范围来自唯一dispatch的瞬态投影，一般可写P2评审协议不变。普通ruleLocation为真实Spec路径#唯一既有ID，affectedIds保持原全图唯一语义，可关联不同owner；同一路径的非空expanded spec正文定位及格式稿续修才要求全部affectedIds属于同一唯一owner。专用contract-omission/oracle-policy仍由原业务门处理。正确路径及affectedIds已绑定、但位置字段夹入说明等格式错误属于review_location_format，仅能续改原review临时稿；未知/重复affectedIds、错路径、形状合法但不存在的ID属于review_location_binding，不取得P1路由或业务写权。原输出不被剥括号或程序修正，Native schema成功也不能替代后继定位协议校验。

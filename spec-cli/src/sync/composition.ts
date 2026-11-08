@@ -11,28 +11,28 @@ import { isSyncSpecPath } from './frozen-contracts.js'
 import type { HistoryChange } from './history-input.js'
 import type { BaselinePair, BaselineResource, BlobRef, ComposedInputRef, FrozenBaselineSelection, InputSnapshot } from './operation-types.js'
 import { contentHash, objectGit, readEvidence, readObject, readObjectBatch, readTree, validateRepositoryPath, verifySnapshot, writeEvidence, writeObject, writeTree } from './snapshot.js'
-import type { TreeEntry } from './snapshot.js'
+import type { TreeEntry, TreeReadCache } from './snapshot.js'
 
 export type CompositionConflict = { path: string; base: TreeEntry | null; source: TreeEntry | null; delivery: TreeEntry | null }
 export const isUtf8Text = (bytes: Buffer): boolean => !bytes.includes(0) && Buffer.from(bytes.toString('utf8')).equals(bytes)
 const same = (a: TreeEntry | undefined, b: TreeEntry | undefined): boolean => a?.oid === b?.oid && a?.mode === b?.mode
 
 /** 已验证交付被来源 Git 采纳后，以实际已提交的覆盖路径作为作者差量基准。 */
-export function adoptedDeliveryPaths(source: InputSnapshot, prior?: BaselinePair | null): Set<string> {
+export function adoptedDeliveryPaths(source: InputSnapshot, prior?: BaselinePair | null, treeCache?: TreeReadCache): Set<string> {
   if (!prior) return new Set()
   try { objectGit(source.source.commonDir, ['merge-base', '--is-ancestor', prior.verifiedDelivery.headCommit, source.headCommit]) }
   catch (error) { if ((error as { status?: number }).status === 1) return new Set(); throw error }
-  const committed = new Map(readTree(source.source.commonDir, objectGit(source.source.commonDir, ['rev-parse', `${prior.verifiedDelivery.headCommit}^{tree}`]).toString().trim()).map(entry => [entry.path, entry]))
-  const delivered = new Map(verifySnapshot(prior.verifiedDelivery).map(entry => [entry.path, entry]))
-  const paths = new Set([...verifySnapshot(prior.sourceInput).map(entry => entry.path), ...delivered.keys()])
+  const committed = new Map(readTree(source.source.commonDir, objectGit(source.source.commonDir, ['rev-parse', `${prior.verifiedDelivery.headCommit}^{tree}`]).toString().trim(), undefined, treeCache).map(entry => [entry.path, entry]))
+  const delivered = new Map(verifySnapshot(prior.verifiedDelivery, treeCache).map(entry => [entry.path, entry]))
+  const paths = new Set([...verifySnapshot(prior.sourceInput, treeCache).map(entry => entry.path), ...delivered.keys()])
   return new Set([...paths].filter(path => same(delivered.get(path), committed.get(path)) && prior.coveredScope.paths.some(scope => path === scope || path.startsWith(`${scope}/`))))
 }
 
 /** source 的真实差量叠加到前次已验证 delivery；任何重叠歧义保留三方对象而不自动覆盖。 */
-export type CompositionOptions = { projectEntries?: (snapshot: InputSnapshot, entries: TreeEntry[]) => TreeEntry[]; retainConflicts?: boolean; executionPaths?: readonly string[]; contextPaths?: readonly string[] }
+export type CompositionOptions = { projectEntries?: (snapshot: InputSnapshot, entries: TreeEntry[]) => TreeEntry[]; retainConflicts?: boolean; executionPaths?: readonly string[]; contextPaths?: readonly string[]; treeCache?: TreeReadCache }
 export function composeInputSnapshots(newSource: InputSnapshot, prior?: BaselinePair | FrozenBaselineSelection | null, options: CompositionOptions = {}): { composed: ComposedInputRef | null; conflicts: CompositionConflict[] } {
   if (prior && 'version' in prior) return composeSelectedInput(newSource, prior, options)
-  const project = (snapshot: InputSnapshot): TreeEntry[] => { const entries = verifySnapshot(snapshot); return options.projectEntries ? options.projectEntries(snapshot, entries) : entries }
+  const project = (snapshot: InputSnapshot): TreeEntry[] => { const entries = verifySnapshot(snapshot, options.treeCache); return options.projectEntries ? options.projectEntries(snapshot, entries) : entries }
   const commonDir = newSource.source.commonDir, incoming = project(newSource)
   let entries = incoming
   const conflicts: CompositionConflict[] = []
@@ -41,7 +41,7 @@ export function composeInputSnapshots(newSource: InputSnapshot, prior?: Baseline
     const base = new Map(project(prior.sourceInput).map(entry => [entry.path, entry]))
     const delivery = new Map(project(prior.verifiedDelivery).map(entry => [entry.path, entry]))
     const source = new Map(incoming.map(entry => [entry.path, entry]))
-    const adopted = adoptedDeliveryPaths(newSource, prior)
+    const adopted = adoptedDeliveryPaths(newSource, prior, options.treeCache)
     const result = new Map(delivery)
     for (const path of new Set([...base.keys(), ...source.keys(), ...delivery.keys()])) {
       const old = adopted.has(path) ? delivery.get(path) : base.get(path), next = source.get(path), delivered = delivery.get(path)
@@ -109,7 +109,7 @@ export type IntentArtifactResidual = {
 const canonical = (value: unknown): string => JSON.stringify(value, (_key, item: unknown) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b))) : item)
 
 /** 精确选择是边界输入；不接受遗漏、错误归属或由全局 latest 补出的基线。 */
-export function verifyBaselineSelection(input: InputSnapshot, selection: FrozenBaselineSelection): void {
+export function verifyBaselineSelection(input: InputSnapshot, selection: FrozenBaselineSelection, treeCache?: TreeReadCache): void {
   if (selection.version !== 'sync-baseline-selection-v1' || canonical(selection.source) !== canonical(input.source) || selection.digest !== contentHash(canonical({ version: selection.version, source: selection.source, bindings: selection.bindings }))) throw new Error('SYNC_BASELINE_SELECTION_INVALID: identity or digest')
   const keys = new Set<string>(), checkedPairs = new Map<string, string>()
   for (const binding of selection.bindings) {
@@ -123,7 +123,7 @@ export function verifyBaselineSelection(input: InputSnapshot, selection: FrozenB
     if (!covered) throw new Error(`SYNC_BASELINE_SELECTION_INVALID: uncovered ${key}`)
     const pairDigest = canonical(pair), checked = checkedPairs.get(pair.id)
     if (checked && checked !== pairDigest) throw new Error(`SYNC_BASELINE_SELECTION_INVALID: pair payload differs ${pair.id}`)
-    if (!checked) { verifySnapshot(pair.sourceInput); verifySnapshot(pair.verifiedDelivery); checkedPairs.set(pair.id, pairDigest) }
+    if (!checked) { verifySnapshot(pair.sourceInput, treeCache); verifySnapshot(pair.verifiedDelivery, treeCache); checkedPairs.set(pair.id, pairDigest) }
   }
 }
 
@@ -157,7 +157,7 @@ function intentObjects(commonDir: string, entries: readonly TreeEntry[]): Map<st
 const sameIntent = (a: IntentObject | null, b: IntentObject | null): boolean => a && b ? sameContractBusinessMeaning(a.item, b.item) : a === b
 
 /** ID语义未变化也不能证明其实际治理源码已消费；每个对象保真实pair和Git采纳来源。 */
-function intentArtifactResiduals(input: InputSnapshot, selection: FrozenBaselineSelection, intents: readonly IntentResidual[], entries: (snapshot: InputSnapshot) => readonly TreeEntry[], adoptedPaths: (pair: BaselinePair) => ReadonlySet<string>, authoredEntries?: readonly TreeEntry[]): IntentArtifactResidual[] {
+function intentArtifactResiduals(input: InputSnapshot, selection: FrozenBaselineSelection, intents: readonly IntentResidual[], entries: (snapshot: InputSnapshot) => readonly TreeEntry[], adoptedPaths: (pair: BaselinePair) => ReadonlySet<string>, authoredEntries?: readonly TreeEntry[], treeCache?: TreeReadCache): IntentArtifactResidual[] {
   const maps = new Map<string, Map<string, TreeEntry>>()
   const files = (snapshot: InputSnapshot): Map<string, TreeEntry> => { let value = maps.get(snapshot.id); if (!value) { value = new Map(entries(snapshot).map(entry => [entry.path, entry])); maps.set(snapshot.id, value) }; return value }
   const ownerMaps = new Map<string, Map<string, IntentObject>>()
@@ -179,7 +179,7 @@ function intentArtifactResiduals(input: InputSnapshot, selection: FrozenBaseline
         if (pair && bytePair && adoptedByte) {
           const key = `${pair.sourceInput.id}:${bytePair.id}`
           let paths = consumedAdoptions.get(key)
-          if (!paths) { paths = adoptedDeliveryPaths(pair.sourceInput, bytePair); consumedAdoptions.set(key, paths) }
+          if (!paths) { paths = adoptedDeliveryPaths(pair.sourceInput, bytePair, treeCache); consumedAdoptions.set(key, paths) }
           consumedByteAdoption = paths.has(path)
         }
         const adoptedPair = adoptedByte && !consumedByteAdoption ? bytePair : pair && adoptedPaths(pair).has(path) ? pair : null
@@ -193,21 +193,21 @@ function intentArtifactResiduals(input: InputSnapshot, selection: FrozenBaseline
 
 /** 文件只做真实 byte-pair 三方；逐 ID 的 source 残差独立于文件级未变化判定。 */
 function composeSelectedInput(input: InputSnapshot, selection: FrozenBaselineSelection, options: CompositionOptions): ReturnType<typeof composeInputSnapshots> {
-  verifyBaselineSelection(input, selection)
+  verifyBaselineSelection(input, selection, options.treeCache)
   for (const path of options.executionPaths ?? []) if (!selection.bindings.some(binding => binding.resource.kind === 'path' && binding.resource.path === path)) throw new Error(`SYNC_COMPOSITION_BLOCKED: execution path missing exact byte binding ${path}`)
   const commonDir = input.source.commonDir, cache = new Map<string, TreeEntry[]>()
   const project = (snapshot: InputSnapshot): TreeEntry[] => {
     let entries = cache.get(snapshot.id)
-    if (!entries) { const actual = verifySnapshot(snapshot); entries = options.projectEntries ? options.projectEntries(snapshot, actual) : actual; cache.set(snapshot.id, entries) }
+    if (!entries) { const actual = verifySnapshot(snapshot, options.treeCache); entries = options.projectEntries ? options.projectEntries(snapshot, actual) : actual; cache.set(snapshot.id, entries) }
     return entries
   }
   const incoming = project(input), next = new Map(incoming.map(entry => [entry.path, entry]))
-  const headEntries = readTree(commonDir, objectGit(commonDir, ['rev-parse', `${input.headCommit}^{tree}`]).toString().trim())
+  const headEntries = readTree(commonDir, objectGit(commonDir, ['rev-parse', `${input.headCommit}^{tree}`]).toString().trim(), undefined, options.treeCache)
   const executionPaths = [...new Set(options.executionPaths ?? selection.bindings.flatMap(binding => binding.resource.kind === 'path' ? [binding.resource.path] : []))].sort()
   const writable = (path: string): boolean => executionPaths.includes(path)
   const result = new Map(headEntries.map(entry => [entry.path, entry])), paths: SelectedCompositionEvidence['paths'] = [], conflicts: CompositionConflict[] = []
   const adoption = new Map<string, Set<string>>()
-  const adoptedPaths = (pair: BaselinePair): Set<string> => { let value = adoption.get(pair.id); if (!value) { value = adoptedDeliveryPaths(input, pair); adoption.set(pair.id, value) }; return value }
+  const adoptedPaths = (pair: BaselinePair): Set<string> => { let value = adoption.get(pair.id); if (!value) { value = adoptedDeliveryPaths(input, pair, options.treeCache); adoption.set(pair.id, value) }; return value }
   for (const binding of selection.bindings) {
     const pair = 'bytePair' in binding ? binding.bytePair : binding.intentPair
     if (!('bytePair' in binding)) continue
@@ -255,7 +255,7 @@ function composeSelectedInput(input: InputSnapshot, selection: FrozenBaselineSel
       }
     }
   }
-  const artifacts = intentArtifactResiduals(input, selection, intents, project, adoptedPaths)
+  const artifacts = intentArtifactResiduals(input, selection, intents, project, adoptedPaths, undefined, options.treeCache)
   for (const artifact of artifacts.filter(item => item.changed)) {
     residualPaths.add(artifact.path)
     if (!writable(artifact.path) || same(artifact.source ?? undefined, result.get(artifact.path))) continue
@@ -265,7 +265,7 @@ function composeSelectedInput(input: InputSnapshot, selection: FrozenBaselineSel
       conflicts.push({ path: artifact.path, base: byte.base, source: byte.source, delivery: byte.delivery })
     }
   }
-  const physicalSource = new Map(verifySnapshot(input).map(entry => [entry.path, entry]))
+  const physicalSource = new Map(verifySnapshot(input, options.treeCache).map(entry => [entry.path, entry]))
   const requestedContext = (options.contextPaths ?? []).map(validateRepositoryPath)
   const contextPaths = [...new Set(requestedContext.flatMap(parent => {
     const known = [...new Set([...physicalSource.keys(), ...headEntries.map(entry => entry.path)])].filter(path => path === parent || path.startsWith(`${parent}/`))

@@ -238,6 +238,8 @@ test('AC-SYNC-24 正式revert入口经同一协调器、真实Docker与新提交
 
 test('AC-SYNC-24 真正Git重叠进入同一业务冲突，无补偿提交且不覆盖人类编辑', { timeout: 180000 }, async t => {
   const f = await fixture(t), path = join(f.root, 'src/export.js')
+  f.git('switch', f.original.input.source.branch.slice('refs/heads/'.length)); await f.application.enable()
+  assert.deepEqual(identifyWorktree(f.root), f.original.input.source)
   writeFileSync(path, readFileSync(path, 'utf8').replace('// FEATURE-MARK', '// CURRENT-HUMAN-CHOICE'))
   const head = f.git('rev-parse', 'HEAD'), index = readFileSync(join(f.root, '.git/index')), current = readFileSync(path)
   const submitted = await f.application.revert({ operationId: f.original.id, requestId: 'overlapping-revert' }); assert.ok(submitted.operation)
@@ -330,7 +332,7 @@ test('已结算交付被原来源采纳后，提交观察沿真实receipt/baseli
   assert.ok(f.application.store.listJournals(f.original.id)[0].receipt)
 })
 
-for (const mixed of [false, true]) test(`混合资源heads的model配置更新与局部receipt采纳：${mixed ? '未消费业务差量不吞掉' : '不回声且后继提交仍观察'}`, { timeout: 180000 }, async t => {
+for (const configuration of ['model', 'verification'] as const) for (const mixed of [false, true]) test(`混合资源heads的${configuration}配置更新与局部receipt采纳：${mixed ? '未消费业务差量不吞掉' : '不回声且后继提交仍观察'}`, { timeout: 180000 }, async t => {
   const f = await fixture(t, 'content', { deferAdoption: true, model: 'claude:MiniMax-M3.1-Flash', readonlyDocs: true })
   let dispatched = 0
   f.application.start = () => { dispatched++ }; f.application['startNextDispatch'] = () => false
@@ -343,13 +345,15 @@ for (const mixed of [false, true]) test(`混合资源heads的model配置更新�
   let observing = false
   f.application['scanObservedInput'] = async () => { if (observing) await scan() }
   const configPath = join(f.root, '.spec/spexcode.json'), project = JSON.parse(readFileSync(configPath, 'utf8')) as { sync: SyncSettings }
-  project.sync.model = 'zcode:fixture/GLM'; writeFileSync(configPath, JSON.stringify(project))
+  if (configuration === 'model') project.sync.model = 'zcode:fixture/GLM'
+  else project.sync.verifications[0].environment = { ...project.sync.verifications[0].environment, image: `registry.example.invalid/verified-node@sha256:${'b'.repeat(64)}`, platform: 'linux/amd64' }
+  writeFileSync(configPath, JSON.stringify(project))
   if (mixed) {
     writeFileSync(join(f.root, 'src/export.js'), readFileSync(join(f.root, 'src/export.js'), 'utf8') + '// UNCONSUMED EXTERNAL CODE\n')
     writeFileSync(join(f.root, f.path), readFileSync(join(f.root, f.path), 'utf8') + '\n外部新增业务细节。\n')
     writeFileSync(join(f.root, 'README.md'), 'unconsumed readonly business documentation\n')
   }
-  f.git('add', '.'); f.git('commit', '-m', 'reauthorize model and preserve external input')
+  f.git('add', '.'); f.git('commit', '-m', `reauthorize ${configuration} and preserve external input`)
   await f.application.enable()
   const input = await captureInputSnapshot(f.root, { committed: true }), frozen = await f.application['freezeNodePlan'](input, 'export-contract')
   const scope = { ...frozen.plan.executionScope!, paths: [f.path, 'generated-tests/export.test.mjs'] }
@@ -397,7 +401,7 @@ for (const mixed of [false, true]) test(`混合资源heads的model配置更新�
     assert.equal(JSON.stringify(f.application.store.listOperations(input.source.repositoryId).find(item => item.input.headCommit === delivery.receipt.actualCommit)), externalSnapshots[0], '重复观察不伪结算或删除已准入的外部真实输入')
     return
   }
-  assert.equal(count, countBefore, '旧pair的model只读上下文不能把已验证写回重开为echo')
+  assert.equal(count, countBefore, '旧pair的配置只读上下文不能把已验证写回重开为echo')
   assert.equal(dispatched, dispatchBefore); assert.equal(difference.consumption, 'baseline')
   assert.ok(difference.intents?.every(intent => !intent.changed)); assert.deepEqual(difference.residualPaths, [])
   const adopted = await captureInputSnapshot(f.root, { committed: true }), selected = await f.application['freezeNodePlan'](adopted, 'export-contract')

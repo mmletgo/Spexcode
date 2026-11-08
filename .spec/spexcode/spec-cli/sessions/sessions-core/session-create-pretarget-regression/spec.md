@@ -18,3 +18,5 @@ related:
 真实 sessionCreateRequest 在 target-resolution 开始处随进程退出，下一进程持同一请求键、冻结载荷和结构化策略调用正式恢复入口。只有从未初始化 canonical 地址且无原生登记、目录、worktree、分支、session store 或候选拥有权时，原双锁才允许写精确 notStarted 终止收据；同键创建重放返回同一终态，不发布会话或启动原生调用。
 
 路径内未知用户文件、已有分支或 store、异常私有收据、错误载荷和已有 canonical 地址全部保留且不出具证明。候选资源锁竞争先等待原持有者，锁内重读其新建内容后拒绝恢复。原作者 HEAD、index、status 及 Git worktree 注册前后相同；本回归不调用实际模型，不冒称业务同步或 Docker 验收通过。
+
+显式资源保留回归以真实 Git --no-checkout/initializing lock 的部分初始化候选证明普通恢复拒绝未知内容、resources-only 则出具 v2 preserved/notStarted，原 worktree 所有路径/类型/mode/字节/缺席、原 index 缺席、锁、branch、prepared receipt、来源 index/status 和其它外部 symlink 目标均不改。新旧终止版本不能混用；首次签发完整核其他 published owner，原收据、物理登记、当前 session 的发布/Native/fork 漂移拒绝。终止后其他合法 owner 引用场地时，旧收据重放不取消或改写该 owner 及原场地。该证据验证执行容量与场地保留责任分离，不声称业务采纳、归档备份、真实模型或 Docker 通过。

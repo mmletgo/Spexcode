@@ -12,7 +12,15 @@ related:
 
 ## expanded spec
 
-P0真实Git fixture对analyze/review分别复现syntax与schema失败，冷序列化checkpoint后下一attempt在相同原路径读取原bytes与schema/errors再正常提交；review格式失败调用序列为analyze→review→review，原分析trace/OID/resultCommit保持，独审仍独立。错owner/schema输入及修改源码、测试或schema的真实提交必须拒绝，完整非草稿path/mode/OID及absence等于原composed。该受控runner不代表真实模型验收。
+legacy冻结程序尾段先复现errors被[]替代，再核完整原对象及repairDiagnostics只读返回；字符串含相同分隔标记、转义引号/反斜线/换行、嵌套JSON和旧summary文字均正确，重复/缺尾/错schema路径/非数组/损坏或额外正文拒绝。原空数组不混旧错误，非draft请求无段保原空诊断。真实Git legacy/file续改夹具核新seed原稿/schema/OID与读回原错误对象相同，request原bytes不改；git-json业务摘要及23次accepted早退零调用保持。不代表真实模型或正式交付。
+
+P0 git-json-v1真实Git合同回归先在旧实现复现context文件指针缺席，再验证完整task、两条不同历史拒因/旧JSON及pendingAnalysis逐项可读、blob/SHA/tree与原业务digest绑定。相同单owner fixture的23次accepted查找保持零runner，不等同真实23owner缓存验收。legacy与文件运输均覆盖syntax/schema原稿及schema字节续修、独审ID/路径/身份错误；临时context误列checkedPaths、context/schema修改或删除均拒绝。受控fixture不模拟EPIPE根因，也不宣称真实大owner独审已通过。
+
+指导版本回归覆盖旧v6及更早/无版本accept与当前v7的真实上下文摘要差异，旧分析ref及Native原件保持；原输出schema、源码保护、精确局部路径与独立审查断言不变。
+
+P0真实Git fixture对analyze/review分别复现syntax与schema失败，冷序列化checkpoint后下一attempt在相同原路径读取原bytes与schema/errors再正常提交；review格式、change.id尾字抄错、漏路径/非法路径、重复ID或同session/thread拒绝后，调用序列为analyze→review→review，原review JSON/schema字节及OID、完整原拒因和分析trace/OID/resultCommit保持，独审仍独立。ID抄错须同时给出准确missingChangeIds/unknownChangeIds，未绑定范围的repair不先采纳业务质疑。错owner/schema及损坏原分析trace输入仍拒绝；修改源码、测试或schema的真实提交必须拒绝，完整非草稿path/mode/OID及absence等于原composed。该受控runner不代表真实模型验收。
+
+P0草稿回执prompt回归检查runner捕获的analyze/review请求明确区分Git草稿中的业务JSON与Native final单一JSON回执`{"summary":"..."}`，要求final不带前后说明或Markdown围栏，并核Native使用既有DRAFT_RECEIPT_SCHEMA、业务schema仍为只读sidecar。fake runner只证明提示措辞和schema分离，不证明模型必然遵循。
 
 Spec分节格式以真实Git快照和精确byte/intent选择等价重放整份正文双重转义及分节消失：旧门误报首个未消费义务，新门仍analysis_invalid但返回具体分节格式/计数且原proposal逐字保留、独审零派发。真实未授权AC依赖误改与缺项仍由同一义务谓词拒绝，新增expected/proposed完整业务字段及path/id便于修复；不变policy/scope/原输入或授业务权。有效Spec及正文内字面反斜线n、普通单行代码、原rawless保护、真实三方/raw整合和null删除回归保持；确定性模型接缝不冒充真实Native或产品交付。
 

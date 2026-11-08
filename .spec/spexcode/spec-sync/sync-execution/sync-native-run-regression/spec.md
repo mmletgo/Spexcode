@@ -14,6 +14,16 @@ code:
 
 ## expanded spec
 
+真实Git/受控Native先复现失败正式close后原材料读取路径丢失，再证明临时恢复能取同一JSON/commit并finally消除checkout。覆盖failed/cancelled编辑稿、read空稿null、callback抛错、restore在checkout创建后失败、registry锁前插入matching checkout，以及原record/Native/checkpoint/archive SHA不变、零新增send/launch/wake；自动回收仅确证停止且clean，dirty/unknown保留，completed既有回归保持。
+
+受控真实CLI/SQLite/Git夹具须先复现completed/removed仍留目录，再证明read/edit完成后正式close消除物理目录及Git登记，branch/archive/record/Native历史和原result保持。同键归档冷重放不新send或计费；syntax-invalid及schema-invalid业务JSON均能在删目录后由原Git capture/read并逐字overlay到新seed。dirty、完整expected record漂移、archive-ref写入失败明确defer/pending且保目录与成功结果；dirty/未知停止保物理材料。已有真实queued sibling在wakeQueue:false及无execution-wake关闭期间原record/launch不变且零新send，随后仅fixture显式drain的正控制须可真实完成。
+
+受控 ZCode 真实创建/队列/Git 结算复现已接受 turn 的 EPIPE。原公开失败和 exit=0、idle=false、closed=false、acknowledged=false 经正式肯定停止后成为 native_turn_transport_failed，原 canonical/CAS 与完整请求身份在同键冷重放保持，派发数不增加。EACCES 保持普通失败，错 session/turn/input 与未知停止无此资格。
+
+同一夹具让第二页 `session/events` 超过原 RPC 期限，并先交回原 ID 的迟到回复，再以原游标交付精确的本轮成功终态。校验原消息、idle/close、Git 草稿、正式 removed 和单次 send/计费。同一重读无终态时继续原 stop；重读若看到 `turn.completed` / `cancelled` 则直接核停稳。两者都保留原 typed 超时，输出仍为空。
+
+隔离真实SQLite及受控runtime覆盖新Claude/ZCode worktree冻结nativeConfiguration:cli-config-v1、旧plan与仅reserved缺席、上一代工具策略已冻结但配置仍缺席的完整摘要恢复；schema/prompt/purpose/tree/配置篡改均不得派发。dispatch/requestDigest/plan/payload及callsUsed原绑定保持。同一真实创建/queue/fake CLI集成核新配置进入创建哈希、正常Git提交及冷完成不重发；已认证格式失败确证停止后自动removed，cold replay保原错误而不改为cancelled。此证明使用专用私库与进程级fake CLI，不访问真实provider。
+
 被拒final回归用真实SQLite及受控runtime逐项拒绝session/thread/turn/input/schema/prompt/purpose/SHA、未settled或record缺证据；匹配原failed record才生成可读原文字节ref，legacy无字段不补且不把诊断当removed。实际Git/正式创建队列与MockNative组合另证syntax/schema两种失败完整正文进入下一实际send、候选仍null和同键不重发；此证据不冒充真实LLM通过。
 
 有限与null请求均通过精确取消/回执丢失场景结算原资源，null的取消清理预算仍为15秒；未知停止不释放容量。
@@ -41,3 +51,7 @@ code:
 固定非默认 terra/high 运行通过原完整 frozenReadProof 接缝，plan/requestDigest及实际结构化记录均保精确模型；同key换模型或published record模型错配拒绝。此为受控runtime协议证明，不冒称实时容量或真实LLM完成；操作选择属于 [[sync-model-selection]]。
 
 纯JSON frozenEntries经真实资源桥绑定当前attempt/policy，派发前转换为不可变ref，保存计划不含正文载荷；重启与terminal重放继续使用原请求/证明，不增加调用或预算。小prompt也可有显式冻结条目，旧已有ref及旧inline恢复不被新传输重写。
+
+资源-only 保留回归使用真实 Git 候选与真实 SQLite 资源计划，确认只有显式选项传入创建恢复；严格认证 v2 preserved/cleanupComplete:false 的原收据和物理身份后 terminal→removed，不调用模型/新会话、不增调用预算、不改变原 pause/attempt/failure。terminal 和 removed 冷重放都重新认证 canonical receipt，伪造/缺失/错配或当前 session 的 Native 已启动均拒绝，未结算资源继续保留；原场地保留不能变成清理或采纳证明。
+
+真实queue/SQLite/Git桥中，受控Claude exit0/success缺structured_output必须失败为typed格式错误，原文缺席但实际正常提交可成为failedWorktree；资源先terminal再removed，同键冷重放无新CLI/预算/record变化。合法schema坏final原packet继续同门续修；completed损坏、错session/user/turn、非零退出/signal及未停稳保持拒绝。

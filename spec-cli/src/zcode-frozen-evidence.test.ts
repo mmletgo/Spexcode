@@ -5,7 +5,7 @@ import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSyn
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { frozenReadTool, freezeContext, proveFrozenReads, readFrozenManifest, readFrozenRange, type FrozenNativeItem } from './frozen-context.js'
-import { decodeZCodeJsonText, proveZCodeFrozenReads, verifyZCodeFrozenReadProof, ZCODE_FROZEN_TOOL, type ZCodeFrozenWitness, type ZCodeNativeEvent } from './zcode-frozen-proof.js'
+import { decodeZCodeJsonText, proveZCodeFrozenReads, verifyZCodeFrozenReadProof, ZCODE_FROZEN_TOOL, type ZCodeFrozenWitness, type ZCodeNativeEvent } from './zcode-frozen-evidence.js'
 
 function fixture(options: { modelChange?: boolean; reasoningLevel?: string; textRepeats?: number } = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'spex-zcode-proof-'))

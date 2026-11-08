@@ -1,8 +1,11 @@
 import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, readlink, realpath, stat, symlink, writeFile } from 'node:fs/promises'
-import { join, relative, sep } from 'node:path'
-import { safeSymlinkTarget, validateRepositoryPath } from './snapshot.js'
+import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, stat, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { validateRepositoryPath } from './snapshot.js'
+import { verificationExportDigest } from './verification-remote-helper.mjs'
+import { createRemoteVerificationRun, remoteVerificationEnvironment, VerificationRpcTimeoutError } from './verification-transport.js'
+export { verificationExportDigest } from './verification-remote-helper.mjs'
 import type { VerificationCheckpoint, VerificationCommandResult, VerificationConfig, VerificationDependencies, VerificationDriver, VerificationEvidence, VerificationPolicy, VerificationRequest, VerificationResult, VerificationTestResult } from './verification-executor-types.js'
 
 const digest = (value: string): string => createHash('sha256').update(value).digest('hex')
@@ -52,42 +55,6 @@ function validatePolicy(policy: VerificationPolicy): void {
 
 function scratchMountOptions(policy: VerificationPolicy): string {
   return `rw,${policy.scratchExecutable === true ? 'exec' : 'noexec'},nosuid,nodev,size=${policy.scratchBytes},mode=1777`
-}
-
-/** 复制完整 export，并拒绝 Git 元数据、宿主依赖和可逃逸的文件；不运行候选脚本。 */
-export async function verificationExportDigest(source: string, destination?: string): Promise<string> {
-  const root = await realpath(source)
-  const hash = createHash('sha256')
-  const visit = async (directory: string): Promise<void> => {
-    for (const name of (await readdir(directory)).sort()) {
-      const path = join(directory, name)
-      const entry = await lstat(path)
-      const local = relative(root, path)
-      if (name === '.git' || name === 'node_modules') throw new Error(`unsupported: export 不得包含 ${name}`)
-      if (entry.isSymbolicLink()) {
-        const target = await readlink(path)
-        safeSymlinkTarget(root, local, target)
-        const resolved = await realpath(path)
-        if (!resolved.startsWith(root + sep) || relative(root, resolved).split(sep).some(part => part === '.git' || part === 'node_modules')) throw new Error(`unsupported: 符号链接越界或指向排除内容 ${local}`)
-        hash.update(`symlink:${local}\0${target}\0`)
-        if (destination) await symlink(target, join(destination, local))
-      } else if (entry.isDirectory()) {
-        hash.update(`directory:${local}\0`)
-        if (destination) await mkdir(join(destination, local), { recursive: true, mode: 0o755 })
-        await visit(path)
-      } else if (entry.isFile()) {
-        const bytes = await readFile(path)
-        hash.update(`file:${local}:${entry.mode & 0o111}\0`).update(bytes).update('\0')
-        if (destination) {
-          const target = join(destination, local)
-          await writeFile(target, bytes)
-          await chmod(target, entry.mode & 0o111 ? 0o555 : 0o444)
-        }
-      } else throw new Error(`unsupported: export 包含非常规文件 ${local}`)
-    }
-  }
-  await visit(root)
-  return hash.digest('hex')
 }
 
 type Inspect = {
@@ -149,8 +116,12 @@ export function parseVerificationReport(stdout: string, expectedIds: readonly st
 /** 运行/恢复一次真实隔离验收；持久失败保留容器，绝不释放未知资源。 */
 export async function executeVerification(request: VerificationRequest, dependencies: VerificationDependencies): Promise<VerificationResult> {
   request = { ...request, policy: structuredClone(request.policy), ...(request.previousCheckpoint ? { previousCheckpoint: structuredClone(request.previousCheckpoint) } : {}) }
-  const driver = dependencies.driver ?? dockerVerificationDriver
   let checkpoint = request.previousCheckpoint
+  const remoteConfiguration = checkpoint?.version === 'verification-checkpoint-v1' ? undefined : dependencies.transport ? structuredClone(dependencies.transport) : undefined
+  const remoteEnvironment = remoteConfiguration ? remoteVerificationEnvironment(remoteConfiguration) : undefined
+  let driver = remoteEnvironment?.driver ?? dependencies.driver ?? dockerVerificationDriver
+  let remote: ReturnType<typeof createRemoteVerificationRun> | undefined
+  const assertLaunchAllowed = (): void => { if (request.signal?.aborted || checkpoint && Date.now() >= checkpoint.deadlineAt) throw new Error('运行已取消或验收期限已过'); dependencies.assertLaunchAllowed?.() }
   const command = async (args: string[], bytes = MAX_INSPECT): Promise<VerificationCommandResult> => {
     const result = await driver(args, bytes)
     if (result.exitCode !== 0 || result.truncated) throw new Error(`Docker ${args.slice(0, 2).join(' ')} 失败：${result.stderr || result.stdout}`)
@@ -166,45 +137,78 @@ export async function executeVerification(request: VerificationRequest, dependen
     if (!request.runId || !request.inputDigest || !request.candidateDigest || !request.candidateExportDigest) throw new Error('unsupported: 缺少执行身份/内容绑定')
     const policyDigest = digest(JSON.stringify(request.policy))
     if (checkpoint && (checkpoint.runId !== request.runId || checkpoint.inputDigest !== request.inputDigest || checkpoint.candidateDigest !== request.candidateDigest || checkpoint.policyDigest !== policyDigest || checkpoint.config.exportDigest !== request.candidateExportDigest || checkpoint.configDigest !== digest(JSON.stringify(checkpoint.config)))) throw new Error('恢复检查点与输入/政策不匹配')
-    if (checkpoint?.phase === 'removed') return { status: checkpoint.evidence!.outcome, checkpoint, evidence: checkpoint.evidence }
-    const environment = JSON.parse((await command(['version', '--format', '{{json .Server}}'])).stdout) as { Os: string; Arch: string; Version: string }
+    if (checkpoint?.phase === 'removed') return { status: checkpoint.evidence?.outcome ?? checkpoint.notCreated!.outcome, checkpoint, evidence: checkpoint.evidence }
+    if (checkpoint?.version === 'verification-checkpoint-v2' && !remoteConfiguration) throw new Error('缺少原远端transport配置，不能回退本地')
+    if (checkpoint?.version === 'verification-checkpoint-v2') {
+      remote = createRemoteVerificationRun(remoteConfiguration!, () => checkpoint!, persist, assertLaunchAllowed)
+      driver = remote.driver
+    }
+    let environment = JSON.parse((await command(['version', '--format', '{{json .Server}}'])).stdout) as { Os: string; Arch: string; Version: string }
     if (environment.Os !== 'linux' || `linux/${environment.Arch}` !== request.policy.platform) throw new Error('unsupported: Docker platform 不满足政策')
     if (!checkpoint) {
       if (request.signal?.aborted) return { status: 'cancelled', reason: '开始前取消' }
       const image = JSON.parse((await command(['image', 'inspect', request.policy.image])).stdout)[0] as { Id: string; Os: string; Architecture: string; Config: { Env: string[]; Volumes: Record<string, unknown> | null } }
       if (`${image.Os}/${image.Architecture}` !== request.policy.platform || Object.keys(image.Config.Volumes ?? {}).length) throw new Error('unsupported: 镜像 platform/anonymous volume 不满足政策')
-      await mkdir(request.privateScratchRoot, { recursive: true, mode: 0o700 })
-      const scratchRoot = await realpath(request.privateScratchRoot)
-      const scratchStat = await lstat(scratchRoot)
-      if (scratchStat.uid !== process.getuid?.() || (scratchStat.mode & 0o077) !== 0) throw new Error('unsupported: scratch root 必须是当前用户独占的目录')
-      const directory = await mkdtemp(join(scratchRoot, 'spex-verify-'))
-      const candidatePath = join(directory, 'candidate')
-      const runnerPath = join(directory, 'runner')
-      await mkdir(candidatePath, { mode: 0o755 })
-      await mkdir(runnerPath, { mode: 0o755 })
-      const exportDigest = await verificationExportDigest(request.candidateExportPath, candidatePath)
-      if (exportDigest !== request.candidateExportDigest) throw new Error('unsupported: 候选 export 与冻结摘要不匹配')
-      if (!(await stat(join(candidatePath, request.policy.cwd))).isDirectory()) throw new Error('unsupported: 验证 cwd 必须为候选中的目录')
-      await writeFile(join(runnerPath, 'reporter.mjs'), reporter(request.policy.logBytes), { mode: 0o444 })
-      await chmod(directory, 0o755)
-      const config: VerificationConfig = { image: request.policy.image, imageId: image.Id, environment: [...image.Config.Env.filter(value => !/^(HOME|NODE_OPTIONS)=/.test(value)), 'HOME=/tmp', 'NODE_OPTIONS='], platform: request.policy.platform, argv: ['node', '--test-reporter=/runner/reporter.mjs', ...request.policy.argv.slice(1)], candidatePath, runnerPath, exportDigest, policy: structuredClone(request.policy), runnerDigest: digest(reporter(request.policy.logBytes)) }
+      const uniqueContainerName = `spex-verify-${randomUUID()}`
+      const transportPlan = await remoteEnvironment?.plan(request.runId, uniqueContainerName)
+      let candidatePath: string, runnerPath: string, exportDigest: string
+      if (transportPlan) {
+        candidatePath = transportPlan.candidatePath; runnerPath = transportPlan.runnerPath; exportDigest = request.candidateExportDigest
+      } else {
+        await mkdir(request.privateScratchRoot, { recursive: true, mode: 0o700 })
+        const scratchRoot = await realpath(request.privateScratchRoot)
+        const scratchStat = await lstat(scratchRoot)
+        if (scratchStat.uid !== process.getuid?.() || (scratchStat.mode & 0o077) !== 0) throw new Error('unsupported: scratch root 必须是当前用户独占的目录')
+        const directory = await mkdtemp(join(scratchRoot, 'spex-verify-'))
+        candidatePath = join(directory, 'candidate')
+        runnerPath = join(directory, 'runner')
+        await mkdir(candidatePath, { mode: 0o755 })
+        await mkdir(runnerPath, { mode: 0o755 })
+        exportDigest = await verificationExportDigest(request.candidateExportPath, candidatePath)
+        if (exportDigest !== request.candidateExportDigest) throw new Error('unsupported: 候选 export 与冻结摘要不匹配')
+        if (!(await stat(join(candidatePath, request.policy.cwd))).isDirectory()) throw new Error('unsupported: 验证 cwd 必须为候选中的目录')
+        await writeFile(join(runnerPath, 'reporter.mjs'), reporter(request.policy.logBytes), { mode: 0o444 })
+        await chmod(directory, 0o755)
+      }
+      const config: VerificationConfig = { image: request.policy.image, imageId: image.Id, environment: [...image.Config.Env.filter(value => !/^(HOME|NODE_OPTIONS)=/.test(value)), 'HOME=/tmp', 'NODE_OPTIONS='], platform: request.policy.platform, argv: ['node', '--test-reporter=/runner/reporter.mjs', ...request.policy.argv.slice(1)], candidatePath, runnerPath, exportDigest, policy: structuredClone(request.policy), runnerDigest: digest(reporter(request.policy.logBytes)), ...(transportPlan ? { transport: transportPlan } : {}) }
       if ([candidatePath, runnerPath].some(path => path.includes(','))) throw new Error('unsupported: mount 路径包含逗号')
       const configDigest = digest(JSON.stringify(config))
-      const uniqueContainerName = `spex-verify-${randomUUID()}`
       const labels = { 'spex.owner': 'verification-v1', 'spex.run': request.runId, 'spex.input': request.inputDigest, 'spex.candidate': request.candidateDigest, 'spex.config': configDigest }
-      await persist({ version: 'verification-checkpoint-v1', phase: 'planned', runId: request.runId, inputDigest: request.inputDigest, candidateDigest: request.candidateDigest, policyDigest, uniqueContainerName, labels, configDigest, config, daemonVersion: environment.Version, deadlineAt: Date.now() + request.policy.timeoutMs })
+      await persist({ version: transportPlan ? 'verification-checkpoint-v2' : 'verification-checkpoint-v1', phase: 'planned', runId: request.runId, inputDigest: request.inputDigest, candidateDigest: request.candidateDigest, policyDigest, uniqueContainerName, labels, configDigest, config, daemonVersion: environment.Version, deadlineAt: Date.now() + request.policy.timeoutMs, ...(transportPlan ? { transport: { plan: transportPlan, effects: [] } } : {}) })
+    }
+    if (checkpoint!.version === 'verification-checkpoint-v2') {
+      if (!remote) {
+        remote = createRemoteVerificationRun(remoteConfiguration!, () => checkpoint!, persist, assertLaunchAllowed)
+        driver = remote.driver
+        environment = JSON.parse((await command(['version', '--format', '{{json .Server}}'])).stdout) as typeof environment
+        if (environment.Os !== 'linux' || `linux/${environment.Arch}` !== request.policy.platform) throw new Error('原daemon实际platform不满足政策')
+      }
+      if (checkpoint!.phase === 'planned' && !checkpoint!.transport!.attestation && !request.signal?.aborted && Date.now() < checkpoint!.deadlineAt) await remote.materialize(request, reporter(request.policy.logBytes))
     }
     const current = checkpoint!
-    if (current.phase !== 'terminal' && (await verificationExportDigest(current.config.candidatePath) !== current.config.exportDigest || digest(await readFile(join(current.config.runnerPath, 'reporter.mjs'), 'utf8')) !== current.config.runnerDigest)) throw new Error('恢复 export/reporter 字节不匹配')
+    if (current.phase !== 'terminal' && !(current.phase === 'planned' && (request.signal?.aborted || Date.now() >= current.deadlineAt))) {
+      if (remote) await remote.attest()
+      else if (await verificationExportDigest(current.config.candidatePath) !== current.config.exportDigest || digest(await readFile(join(current.config.runnerPath, 'reporter.mjs'), 'utf8')) !== current.config.runnerDigest) throw new Error('恢复 export/reporter 字节不匹配')
+    }
     if (current.phase === 'terminal') {
+      if (remote) await remote.close()
+      if (current.notCreated) {
+        if (remote) await remote.cleanup()
+        await persist({ ...checkpoint!, phase: 'removed' })
+        return { status: current.notCreated.outcome, checkpoint }
+      }
       const existing = await driver(['container', 'inspect', current.containerId!], MAX_INSPECT)
       if (existing.exitCode === 0) {
         const actual = JSON.parse(existing.stdout)[0] as Inspect
         assertInspect(actual, current)
         if (actual.State.Running || (!['exited', 'dead'].includes(actual.State.Status) && !(actual.State.Status === 'created' && ['cancelled', 'timeout'].includes(current.evidence!.outcome)))) throw new Error('终态检查点对应容器仍未终止')
         await command(['container', 'rm', current.containerId!])
-      } else if (!/No such (object|container)/i.test(existing.stderr)) throw new Error('无法确认终态容器是否已清理')
-      await persist({ ...current, phase: 'removed' })
+      } else {
+        if (existing.truncated || !/No such (object|container)/i.test(existing.stderr)) throw new Error('无法确认终态容器是否已清理')
+        if (remote) await remote.recordRemovalObservation(existing)
+      }
+      if (remote) await remote.cleanup()
+      await persist({ ...checkpoint!, phase: 'removed' })
       return { status: checkpoint!.evidence!.outcome, checkpoint, evidence: checkpoint!.evidence }
     }
     let actual: Inspect
@@ -213,11 +217,23 @@ export async function executeVerification(request: VerificationRequest, dependen
       if (existing.exitCode === 0 && !existing.truncated) actual = JSON.parse(existing.stdout)[0] as Inspect
       else {
         if (!/No such (object|container)/i.test(existing.stderr)) throw new Error('无法确认计划容器不存在')
+        if (request.signal?.aborted || Date.now() >= current.deadlineAt) {
+          if (!remote) throw new Error('旧本地planned无create排空证明；不新建容器，保留unknown资源')
+          const closed = await remote.close()
+          const absence = await driver(['container', 'inspect', current.uniqueContainerName], MAX_INSPECT)
+          if (absence.exitCode === 0 || absence.truncated || !/No such (object|container)/i.test(absence.stderr)) throw new Error('无法确认未执行容器已排空且不存在')
+          const outcome = request.signal?.aborted ? 'cancelled' : 'timeout'
+          await persist({ ...checkpoint!, phase: 'terminal', notCreated: { outcome, observation: { absence, closed } } })
+          await remote.cleanup()
+          await persist({ ...checkpoint!, phase: 'removed' })
+          return { status: outcome, checkpoint }
+        }
+        assertLaunchAllowed()
         await command(createArgs(current))
         actual = await inspect(current.uniqueContainerName)
       }
       assertInspect(actual, current)
-      await persist({ ...current, phase: 'created', containerId: actual.Id, createdInspect: actual })
+      await persist({ ...checkpoint!, phase: 'created', containerId: actual.Id, createdInspect: actual })
     } else {
       actual = await inspect(current.containerId!)
       assertInspect(actual, current)
@@ -227,6 +243,7 @@ export async function executeVerification(request: VerificationRequest, dependen
     assertInspect(actual, checkpoint!)
     let outcome: VerificationEvidence['outcome'] | undefined
     if (actual.State.Status === 'created' && !request.signal?.aborted && Date.now() < checkpoint!.deadlineAt) {
+      assertLaunchAllowed()
       await command(['container', 'start', id])
       actual = await inspect(id)
       assertInspect(actual, checkpoint!)
@@ -256,13 +273,15 @@ export async function executeVerification(request: VerificationRequest, dependen
     if (logs.exitCode !== 0) throw new Error('容器 logs 获取失败')
     const report = parseVerificationReport(logs.stdout, request.policy.expectedTestIds)
     outcome ??= actual.State.ExitCode === 0 && !actual.State.OOMKilled && !actual.State.Error && !logs.truncated && report.reportComplete && !report.unmatchedTestIds.length && report.tests.every(test => test.status === 'passed') ? 'passed' : 'failed'
-    const evidence: VerificationEvidence = { runId: request.runId, inputDigest: request.inputDigest, candidateDigest: request.candidateDigest, exportDigest: checkpoint!.config.exportDigest, policyDigest, configDigest: checkpoint!.configDigest, runnerDigest: checkpoint!.config.runnerDigest, environment: { driver: 'docker', platform: request.policy.platform, image: request.policy.image, imageId: actual.Image, daemonVersion: environment.Version }, containerId: id, exitCode: actual.State.ExitCode, stdout: logs.stdout, stderr: logs.stderr, logsTruncated: logs.truncated || report.reportTruncated, reportFormat: 'node-test-events-v1', ...report, terminalInspect: actual, outcome }
+    const evidence: VerificationEvidence = { runId: request.runId, inputDigest: request.inputDigest, candidateDigest: request.candidateDigest, exportDigest: checkpoint!.config.exportDigest, policyDigest, configDigest: checkpoint!.configDigest, runnerDigest: checkpoint!.config.runnerDigest, environment: { driver: 'docker', platform: request.policy.platform, image: request.policy.image, imageId: actual.Image, daemonVersion: environment.Version }, containerId: id, exitCode: actual.State.ExitCode, stdout: logs.stdout, stderr: logs.stderr, logsTruncated: logs.truncated || report.reportTruncated, reportFormat: 'node-test-events-v1', ...report, terminalInspect: actual, outcome, ...(remote ? { stdoutDigest: digest(logs.stdout), stderrDigest: digest(logs.stderr) } : {}) }
     await persist({ ...checkpoint!, phase: 'terminal', evidence })
+    if (remote) await remote.close()
     await command(['container', 'rm', id])
+    if (remote) await remote.cleanup()
     await persist({ ...checkpoint!, phase: 'removed' })
     return { status: outcome, checkpoint, evidence }
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error)
-    return { status: checkpoint ? 'recovery_required' : 'unsupported', checkpoint, evidence: checkpoint?.evidence, reason }
+    return { status: checkpoint ? 'recovery_required' : 'unsupported', checkpoint, evidence: checkpoint?.evidence, reason, ...(error instanceof VerificationRpcTimeoutError ? { rpcDiagnostics: error.diagnostics } : {}) }
   }
 }

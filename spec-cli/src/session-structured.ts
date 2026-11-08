@@ -7,13 +7,13 @@ import { mainRoot, runtimeRoot, sessionArtifactPath } from '@spexcode/spec-core'
 import { readRecord, withRecordLock, writeRecord } from './session-record.js'
 import { codexStructuredTurn, codexStopStructuredTurn } from './codex-harness.js'
 import { commitCodexGenerationRegistration, prepareCodexGenerationRegistration, readCodexGenerationLedger, resolveCodexGenerationForClose } from './codex-runtime-generations.js'
-import { assertRejectedOutput, structuredGeneration, prepareStructuredRealm, prepareFrozenReaderRuntime, assertFrozenReaderRuntime, StructuredSessionError, StructuredSessionTransportError, structuredObserverState, structuredExecutionPolicy, structuredRealmRoot, pinZCodeToolPolicy, type StructuredExecution, type FrozenReaderRuntime } from './session-structured-policy.js'
+import { assertRejectedOutput, structuredGeneration, prepareStructuredRealm, prepareFrozenReaderRuntime, assertFrozenReaderRuntime, StructuredSessionError, StructuredSessionTransportError, structuredObserverState, structuredExecutionPolicy, structuredRealmRoot, pinNativeConfiguration, pinZCodeToolPolicy, type StructuredExecution, type FrozenReaderRuntime } from './session-structured-policy.js'
 import { assertFrozenBinding, prepareFrozenPrompt, readFrozenManifest, type FrozenContextRef, type FrozenEntryJson, type FrozenReadProof, type FrozenReadReceipt } from './frozen-context.js'
-import { verifyStructuredFrozenReadProof as verifyFrozenReadProof } from './structured-frozen-proof.js'
+import { verifyStructuredFrozenReadProof as verifyFrozenReadProof } from './structured-frozen-evidence.js'
 import { configuredSessionApplication } from './session-application.js'
 import { withDeliveryLocks } from './delivery-lock.js'
 import { claudeNativeModel, claudeStructuredTurn, stopClaudeStructuredTurn } from './claude-structured.js'
-import { zcodeNativeModel, zcodeStructuredTurn, stopZCodeStructuredTurn } from './zcode-structured.js'
+import { zcodeNativeModel, zcodeStructuredTurn, stopZCodeStructuredTurn, ZCodeNativeTurnFailedError } from './zcode-structured.js'
 import type { SessionCreateTermination } from './sessions.js'
 export { StructuredSessionError } from './session-structured-policy.js'
 
@@ -38,6 +38,7 @@ export type StructuredSessionRequest = {
   effort?: StructuredExecution['effort']
   worktree?: NativeWorktreeRequest
   zcodeToolPolicy?: StructuredExecution['zcodeToolPolicy']
+  nativeConfiguration?: StructuredExecution['nativeConfiguration']
   frozenContext?: FrozenContextRef
   /** 通用纯 JSON 冻结条目；prepareFrozenPrompt 在派发前物化并从持久请求中去掉载荷。 */
   frozenEntries?: readonly FrozenEntryJson[]
@@ -123,9 +124,15 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
       ? await claudeStructuredTurn(requiredRealmRoot(execution), id, prompt, execution, { ...callbacks, onNative: async native => update({ claudeNative: native }) }, nativeWorktree ? rec.worktreePath : undefined)
       : await codexStructuredTurn(generation!.endpoint.socketPath, rec.worktreePath, readFileSync(sessionArtifactPath(id, 'launch'), 'utf8'), execution, callbacks)
     } catch (error) {
-      if (nativeWorktree && error instanceof StructuredSessionError && error.rejectedOutput) {
+      if (nativeWorktree && error instanceof ZCodeNativeTurnFailedError) {
         const current = readRecord(id)!.structuredExecution!
-        assertRejectedOutput(error.rejectedOutput, prompt, execution, current)
+        if (error.threadId !== current.threadId || error.turnId !== current.turnId) throw new StructuredSessionError('stale_result', 'failed native terminal differs from its exact pinned identity')
+        failedStage = { stop: await stopZCodeStructuredTurn(current as Parameters<typeof stopZCodeStructuredTurn>[0]) }
+      }
+      if (nativeWorktree && error instanceof StructuredSessionError && (error.rejectedOutput || ['structured_output_format_invalid', 'structured_output_retries_exhausted'].includes(error.code))) {
+        const current = readRecord(id)!.structuredExecution!
+        if (!error.threadId || !error.turnId || error.threadId !== current.threadId || error.turnId !== current.turnId) throw new StructuredSessionError('stale_result', 'failed stage format error differs from its exact native identity')
+        if (error.rejectedOutput) assertRejectedOutput(error.rejectedOutput, prompt, execution, current)
         const stop = zcode ? await stopZCodeStructuredTurn(current as Parameters<typeof stopZCodeStructuredTurn>[0]) : await stopClaudeStructuredTurn(current)
         if (!stop.nativeStopped) throw new StructuredSessionError('cancellation_pending', stop.error || 'failed native stage stop remains unproven')
         failedStage = { stop }
@@ -143,7 +150,7 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
     }
     if (claude && !nativeWorktree && (result.frozenReadProof?.version !== 3 || result.frozenReadProof.model !== claudeNativeModel(execution.model))) throw new StructuredSessionError('stale_result', 'Claude result has no exact native provider/model witness')
     if (execution.readerRuntime?.version === 2 && result.frozenReadProof?.version !== 2)
-      throw new StructuredSessionError('stale_result', 'current frozen execution cannot publish legacy coverage as model-visible proof')
+      throw new StructuredSessionError('stale_result', 'current frozen execution cannot publish legacy coverage as model-visible evidence')
     const output: unknown = JSON.parse(result.text)
     const validate = new Ajv({ allErrors: true }).compile(execution.schema)
     if (!validate(output)) throw new StructuredSessionError('failed', `structured output does not match JSON schema: ${JSON.stringify(validate.errors)}`)
@@ -156,6 +163,10 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
     const pendingStop = readRecord(id)?.structuredExecution
     if (pendingStop?.state === 'completed' || pendingStop?.state === 'cancelling' || pendingStop?.state === 'cancelled' || pendingStop?.state === 'timeout') return pendingStop.state
     if (error instanceof StructuredSessionTransportError) throw error
+    if (error instanceof ZCodeNativeTurnFailedError && failedStage && !failedStage.stop.nativeStopped) {
+      await update({ state: 'cancelling', error: error.message, cancellation: { reason: 'cancelled', requestedAt: Date.now(), ...failedStage.stop } })
+      return 'cancelling'
+    }
     if (error instanceof StructuredSessionError && (error.code === 'cancellation_pending' || error.code === 'native_rpc_timeout')) {
       await update({ state: 'cancelling', ...(error.code === 'native_rpc_timeout' ? { errorCode: error.code } : {}), cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: false, acknowledged: false, error: error.message }, error: error.message })
       return 'cancelling'
@@ -163,7 +174,10 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
     const rejectedOutput = error instanceof StructuredSessionError ? error.rejectedOutput : undefined
     if (rejectedOutput) assertRejectedOutput(rejectedOutput, readFileSync(sessionArtifactPath(id, 'launch'), 'utf8'), execution, { threadId: pendingStop?.threadId, turnId: pendingStop?.turnId })
     const state = error instanceof StructuredSessionError && (error.code === 'cancelled' || error.code === 'timeout') ? error.code : 'failed'
-    await update({ state, ...(rejectedOutput ? { rejectedOutput } : {}), ...(failedStage ? { ...(failedStage.worktree ? { failedWorktree: failedStage.worktree } : {}), cancellation: { reason: 'cancelled', requestedAt: Date.now(), ...failedStage.stop } } : {}), error: error instanceof Error ? error.message : String(error), ...(error instanceof StructuredSessionError && (error.code === 'structured_output_retries_exhausted' || error.code === 'structured_output_format_invalid' || error.code === 'native_worktree_result_invalid') ? { errorCode: error.code } : {}) })
+    const errorCode = error instanceof ZCodeNativeTurnFailedError && error.code === 'native_turn_transport_failed' && failedStage?.stop.nativeStopped
+      ? error.code
+      : error instanceof StructuredSessionError && (error.code === 'structured_output_retries_exhausted' || error.code === 'structured_output_format_invalid' || error.code === 'native_worktree_result_invalid') ? error.code : undefined
+    await update({ state, ...(rejectedOutput ? { rejectedOutput } : {}), ...(failedStage ? { ...(failedStage.worktree ? { failedWorktree: failedStage.worktree } : {}), cancellation: { reason: 'cancelled', requestedAt: Date.now(), ...failedStage.stop } } : {}), error: error instanceof Error ? error.message : String(error), ...(errorCode ? { errorCode } : {}) })
     return state
   } finally { activeControllers.delete(id); activeFinished.delete(id); finish() }
 }
@@ -176,8 +190,13 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
     throw new StructuredSessionError('failed', 'structured execution requires a prompt, input digest, purpose, positive or null timeout and object JSON schema')
   const claude = request.model?.startsWith('claude:') === true
   const zcode = request.model?.startsWith('zcode:') === true
-  if (claude) claudeNativeModel(request.model)
-  if (zcode) zcodeNativeModel(request.model)
+  const { sessionCreateRequest, sessionCreateTimeoutMs, requestQueueDrain, queueStructuredRecovery, refreshQueueCandidate, sessionIdForCreateKey } = await import('./sessions.js')
+  const saved = (claude || zcode) && request.worktree ? readRecord(sessionIdForCreateKey(request.sessionCreateKey ?? request.requestKey))?.structuredExecution : undefined
+  const original = saved ?? (request.sessionCreateKey ? request : null)
+  const nativeConfiguration = pinNativeConfiguration(request, original)
+  if (nativeConfiguration) request = { ...request, nativeConfiguration }
+  if (!nativeConfiguration && claude) claudeNativeModel(request.model)
+  if (!nativeConfiguration && zcode) zcodeNativeModel(request.model)
   if (request.worktree) {
     assertNativeWorktreeSeed(request.root, request.worktree)
     if (request.base && request.base !== request.worktree.baseCommit) throw new StructuredSessionError('failed', 'native worktree base differs from immutable seed')
@@ -189,9 +208,7 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
   const validate = new Ajv().compile(request.schema)
   if (!claude && !zcode && request.frozenContext && !request.readerRuntime) request = { ...request, readerRuntime: await prepareFrozenReaderRuntime(join(runtimeRoot(), 'structured-frozen-read-only-v2'), request.frozenContext) }
   if (request.readerRuntime) assertFrozenReaderRuntime(request.readerRuntime, request.model)
-  const { sessionCreateRequest, sessionCreateTimeoutMs, requestQueueDrain, queueStructuredRecovery, refreshQueueCandidate, sessionIdForCreateKey } = await import('./sessions.js')
-  const saved = zcode && request.worktree ? readRecord(sessionIdForCreateKey(request.sessionCreateKey ?? request.requestKey))?.structuredExecution : undefined
-  const zcodeToolPolicy = pinZCodeToolPolicy(request, saved ?? (request.sessionCreateKey ? request : null))
+  const zcodeToolPolicy = pinZCodeToolPolicy(request, original)
   if (zcodeToolPolicy) request = { ...request, zcodeToolPolicy }
   const execution = structuredExecutionPolicy(request)
   if (!claude && !zcode) prepareStructuredRealm(requiredRealmRoot(execution), request.readerRuntime)
@@ -270,7 +287,7 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
           const stopped = await (cancelTask ??= cancelStructuredSession(id, { reason: state.cancellation?.reason ?? 'cancelled', settleFailure: true }))
           throw new StructuredSessionError(stopped.nativeStopped ? stopped.state === 'failed' && !request.signal?.aborted ? 'native_rpc_timeout' : state.cancellation?.reason ?? 'cancelled' : 'cancellation_pending', state.error || 'native RPC failed before exact stop')
         }
-        if (state.cancellation?.error) throw new StructuredSessionError('cancellation_pending', state.cancellation.error)
+        if (state.cancellation?.error) throw new StructuredSessionError('cancellation_pending', state.error || state.cancellation.error)
         const stopped = await cancel(state.cancellation?.reason ?? 'cancelled')
         throw new StructuredSessionError(stopped.nativeStopped ? state.cancellation?.reason ?? 'cancelled' : 'cancellation_pending', stopped.error || 'structured cancellation settled')
       }
@@ -281,7 +298,7 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
       if (state.state === 'failed') {
         if (state.rejectedOutput) assertRejectedOutput(state.rejectedOutput, request.prompt, execution, state)
         if (state.failedWorktree) {
-          if (!request.worktree || !state.rejectedOutput || !state.cancellation?.nativeStopped || state.failedWorktree.worktreePath !== rec!.worktreePath) throw new StructuredSessionError('stale_result', 'failed stage Git witness lacks its original stopped request and record')
+          if (!request.worktree || !state.rejectedOutput && !['structured_output_format_invalid', 'structured_output_retries_exhausted'].includes(state.errorCode ?? '') || !state.cancellation?.nativeStopped || state.failedWorktree.worktreePath !== rec!.worktreePath) throw new StructuredSessionError('stale_result', 'failed stage Git witness lacks its original stopped request and record')
           assertNativeWorktreeResult(request.root, request.worktree, state.failedWorktree)
         }
         throw new StructuredSessionError(state.errorCode ?? 'failed', state.error || 'structured execution failed', { rejectedOutput: state.rejectedOutput, failedWorktree: state.failedWorktree })
@@ -297,7 +314,7 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
   } catch (error) {
     if (error instanceof StructuredSessionError) {
       const state = readRecord(id)?.structuredExecution
-      throw new StructuredSessionError(error.code, error.message, { sessionId: id, threadId: state?.threadId, turnId: state?.turnId, rejectedOutput: error.rejectedOutput, failedWorktree: error.failedWorktree })
+      throw new StructuredSessionError(error.code, error.message, { sessionId: id, threadId: state?.threadId, turnId: state?.turnId, rejectedOutput: error.rejectedOutput, failedWorktree: error.failedWorktree, ...(error.code === 'native_turn_transport_failed' ? { requestKey: request.requestKey, inputDigest: request.inputDigest } : {}) })
     }
     throw error
   } finally { request.signal?.removeEventListener('abort', onAbort) }
