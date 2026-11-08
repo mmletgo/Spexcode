@@ -1,20 +1,144 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { StructuredSessionError, structuredExecutionPolicy, structuredRealmRoot, type StructuredExecution } from './session-structured-policy.js'
-import { execFileSync, spawn } from 'node:child_process'
+import childProcess, { ChildProcess, execFileSync, spawn, type SpawnOptions } from 'node:child_process'
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
-import { assertNativeWorktreeSeed, assertNativeWorktreeResult, nativeWorktreeResult, nativeWorktreePrompt, sampleNativeWorktreeProcesses, nativeWorktreeProcessesStopped } from './native-worktree-runtime.js'
+import { assertNativeWorktreeSeed, assertNativeWorktreeResult, nativeWorktreeResult, nativeWorktreePrompt, sampleNativeWorktreeProcesses, nativeWorktreeProcessesStopped, classifyNativeWorktreeOrphans } from './native-worktree-runtime.js'
 import { claudeWorktreeArgs, claudeStructuredArgs, claudeStructuredTurn, observeClaudeWorktreeMissingFinal, stopClaudeStructuredTurn } from './claude-structured.js'
 import { zcodeWorktreePermission, zcodeWorktreeConfiguration, zcodeRuntimeConfiguration, zcodeStructuredTurn, zcodeCapability, zcodeNativeSelection, type ZCodeStructuredExecution } from './zcode-structured.js'
 import { spawnSync } from 'node:child_process'
-import { createRequire } from 'node:module'
+import { createRequire, syncBuiltinESMExports } from 'node:module'
+import { PassThrough } from 'node:stream'
 import { fileURLToPath } from 'node:url'
 const seed = { baseCommit: 'a'.repeat(40), tree: 'b'.repeat(40), mode: 'edit' as const }
 const request = { schema: { type: 'object' }, inputDigest: 'input', purpose: 'worktree-test', timeoutMs: null, model: 'claude:MiniMax-M3.1-Flash', worktree: seed }
+
+function controlledCwdProbe(t: test.TestContext, slow: boolean) {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'spex-controlled-cwd-'))), platform = Object.getOwnPropertyDescriptor(process, 'platform')!
+  const execute = childProcess.execFile, executeSync = childProcess.spawnSync, launch = childProcess.spawn, kill = process.kill
+  const census = `${process.getuid!()} 999991 1 Mon Nov 9 00:00:00 2026\n`, cwd = `p999991\nn${root}\n`, probePid = 999993
+  writeFileSync(join(root, 'process-baseline.json'), '[]'); writeFileSync(join(root, 'owned-processes.json'), '[]')
+  Object.defineProperty(process, 'platform', { value: 'darwin' })
+  let probeStarted!: () => void
+  const ready = new Promise<void>(resolve => { probeStarted = resolve })
+  let probeClosed!: () => void
+  const closed = new Promise<void>(resolve => { probeClosed = resolve })
+  let probes = 0, active = 0, maximum = 0, late: (() => void) | undefined, groupPresent = true, unreferenced = false
+  const signals: { pid: number; signal: NodeJS.Signals | number | undefined }[] = []
+  t.mock.method(process, 'kill', (pid: number, signal?: NodeJS.Signals | number) => {
+    if (signal !== undefined && signal !== 0) signals.push({ pid, signal })
+    if (pid !== -probePid) return kill(pid, signal)
+    if (signal === 0) { if (groupPresent) return true; throw Object.assign(new Error('synthetic group gone'), { code: 'ESRCH' }) }
+    return true
+  })
+  t.mock.method(childProcess, 'spawnSync', (file: string) => executeSync(process.execPath, ['-e', `${file.endsWith('lsof') && slow ? 'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,350);' : ''}process.stdout.write(${JSON.stringify(file.endsWith('lsof') ? cwd : census)})`], { encoding: 'utf8' }))
+  t.mock.method(childProcess, 'spawn', (file: string, args: string[], options: SpawnOptions) => {
+    if (!['/bin/ps', '/usr/sbin/lsof'].includes(file)) return launch(file, args, options)
+    if (file.endsWith('lsof')) {
+      probes++; active++; maximum = Math.max(maximum, active)
+      if (!slow && probes === 1) {
+        const child = new ChildProcess()
+        Object.defineProperty(child, 'pid', { value: probePid })
+        child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough()
+        child.unref = () => { unreferenced = true }
+        late = () => { active--; child.stdout!.emit('data', Buffer.from(cwd)); child.emit('close', 0, null); probeClosed() }
+        probeStarted()
+        return child
+      }
+    }
+    const child = launch(process.execPath, ['-e', `${file.endsWith('lsof') ? 'setTimeout(()=>process.stdout.write(' + JSON.stringify(cwd) + '),350)' : 'process.stdout.write(' + JSON.stringify(census) + ')'}`], options)
+    if (file.endsWith('lsof')) { probeStarted(); child.once('close', () => { active--; probeClosed() }) }
+    return child
+  })
+  syncBuiltinESMExports()
+  t.after(() => { groupPresent = false; late?.(); t.mock.restoreAll(); syncBuiltinESMExports(); Object.defineProperty(process, 'platform', platform); rmSync(root, { recursive: true, force: true }) })
+  return { plan: { root, receiptFile: join(root, 'process.json') }, execute, ready, closed, parentClosed: () => { const close = late; late = undefined; close?.() }, groupGone: () => { groupPresent = false }, state: () => ({ probes, maximum, signals, unreferenced }) }
+}
+
+test('slow cwd observation yields heartbeat, asynchronous Git and cancellation callbacks', async t => {
+  const f = controlledCwdProbe(t, true), controller = new AbortController()
+  let ticks = 0, gitFinished = false
+  const heartbeat = setInterval(() => { ticks++ }, 5), cancel = setTimeout(() => controller.abort(), 20)
+  const gitFinishedPromise = new Promise<void>((resolve, reject) => f.execute('git', ['--version'], { encoding: 'utf8' }, error => { if (error) reject(error); else { gitFinished = true; resolve() } }))
+  try {
+    const observation = await classifyNativeWorktreeOrphans(f.plan)
+    assert.equal(observation.pending.length, 1)
+    assert.ok(ticks > 0, 'cwd观察期间必须让心跳执行')
+    assert.equal(gitFinished, true, '快速异步Git回调不能等cwd探针返回')
+    assert.equal(controller.signal.aborted, true, '取消/创建预算timer必须在探针期间响应')
+  } finally { clearInterval(heartbeat); clearTimeout(cancel); await gitFinishedPromise }
+})
+
+test('cwd deadline rejects without close and keeps probe debt until the actual close', async t => {
+  const f = controlledCwdProbe(t, false)
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() })
+  const flight = classifyNativeWorktreeOrphans(f.plan), rejected = assert.rejects(flight, { code: 'cancellation_pending' })
+  await f.ready
+  t.mock.timers.tick(10_000)
+  await rejected
+  assert.deepEqual(f.state().signals, [{ pid: -999993, signal: 'SIGKILL' }]); assert.equal(f.state().unreferenced, true)
+  await assert.rejects(Promise.resolve().then(() => classifyNativeWorktreeOrphans(f.plan)), { code: 'cancellation_pending' })
+  assert.equal(f.state().probes, 1, '未close的探针不得叠加新进程')
+  assert.equal(existsSync(join(f.plan.root, 'task-related-processes.json')), false, '超时不能伪造正向关联或停止收据')
+  f.parentClosed()
+  await assert.rejects(Promise.resolve().then(() => classifyNativeWorktreeOrphans(f.plan)), { code: 'cancellation_pending' })
+  assert.equal(f.state().probes, 1, '仅父close不能清除仍存helper的组债务')
+  assert.equal(f.state().signals.length, 1, '后续只读观察不能补发任何信号')
+  f.groupGone()
+  assert.equal((await classifyNativeWorktreeOrphans(f.plan)).pending.length, 1, '自有probe整组确证gone后可以重新真实观察')
+  assert.equal(f.state().maximum, 1)
+})
+
+test('same-root sampling, classification and final stop serialize and preserve sticky evidence', async t => {
+  const f = controlledCwdProbe(t, true), plan = { ...f.plan, pid: 999992 }
+  const sampling = sampleNativeWorktreeProcesses(plan), inspection = classifyNativeWorktreeOrphans(plan), stopping = nativeWorktreeProcessesStopped(plan)
+  await sampling
+  const original = readFileSync(join(plan.root, 'task-related-processes.json'))
+  assert.equal((await inspection).pending.length, 1)
+  assert.equal(await stopping, false, '未证实Native停止时不能释放容量或移除工作区')
+  assert.equal(f.state().maximum, 1, '同root定时采样与finally/stop不能叠加探针')
+  assert.equal(f.state().probes, 1, '已登记的正向关联粘性保留，不因后续读取重选cwd')
+  assert.deepEqual(readFileSync(join(plan.root, 'task-related-processes.json')), original)
+  await new Promise<void>(resolve => setTimeout(resolve, 400))
+  assert.deepEqual(readFileSync(join(plan.root, 'task-related-processes.json')), original, '收尾后不能有迟到采样覆盖关联证据')
+})
+
+test('a short absolute stop deadline bounds an active probe without late evidence', async t => {
+  const f = controlledCwdProbe(t, true), plan = { ...f.plan, pid: 999992 }
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() })
+  const flight = sampleNativeWorktreeProcesses(plan, Date.now() + 50), rejected = assert.rejects(flight, { code: 'cancellation_pending' })
+  await f.ready
+  t.mock.timers.tick(50)
+  await rejected
+  assert.equal(f.state().signals.length, 1); assert.equal(f.state().signals[0].signal, 'SIGKILL')
+  assert.ok(f.state().signals[0].pid < 0, '只终止自有probe组，不按cwd发Native信号')
+  const keepAlive = setInterval(() => {}, 5)
+  try { await f.closed } finally { clearInterval(keepAlive) }
+  assert.equal(existsSync(join(plan.root, 'task-related-processes.json')), false)
+  assert.equal(existsSync(join(plan.root, 'process-stop-observations.jsonl')), false)
+})
+
+test('an expired queued stop cannot dispatch, signal or publish after the first sample settles', async t => {
+  const f = controlledCwdProbe(t, true), plan = { ...f.plan, pid: 999992 }
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() })
+  const first = sampleNativeWorktreeProcesses(plan)
+  await f.ready
+  let settled = false
+  const later = nativeWorktreeProcessesStopped(plan, true, Date.now() + 50), rejected = assert.rejects(later, { code: 'cancellation_pending' })
+  first.then(() => { settled = true })
+  t.mock.timers.tick(50)
+  await rejected
+  assert.equal(settled, false, '排队截止不能等前一个慢观察完成')
+  await first
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(f.state().probes, 1); assert.deepEqual(f.state().signals, [])
+  assert.equal(existsSync(join(plan.root, 'process-stop-observations.jsonl')), false, '过期排队stop不能迟到写停止证明')
+})
+
 test('native worktree uses independent policy and native realm without frozen reader', () => {
   const execution = structuredExecutionPolicy(request)
   assert.equal(execution.version, 6)
@@ -134,7 +258,7 @@ test('normal worktree capabilities and prompt remain distinct from the frozen re
 })
 
 async function deadProcess(root: string) {
-  sampleNativeWorktreeProcesses({ root, receiptFile: join(root, 'process.json') })
+  await sampleNativeWorktreeProcesses({ root, receiptFile: join(root, 'process.json') })
   const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' })
   assert(child.pid)
   const exited = new Promise<void>(resolve => child.once('close', () => resolve())), receiptFile = join(root, 'process.json')
@@ -446,9 +570,9 @@ else send({type:'result',subtype:'success',is_error:false,session_id:session,use
     const modulePath = (name: string): string => fileURLToPath(new URL(name, import.meta.url))
     writeFileSync(runner, String.raw`import assert from 'node:assert/strict';import{readFileSync,writeFileSync,existsSync,renameSync,chmodSync}from'node:fs';import{join}from'node:path';import{randomUUID,createHash}from'node:crypto';
 import{claudeStructuredTurn,stopClaudeStructuredTurn}from${JSON.stringify(modulePath('./claude-structured.ts'))};import{structuredExecutionPolicy}from${JSON.stringify(modulePath('./session-structured-policy.ts'))};
-const originalTimeout=globalThis.setTimeout,armed=[];globalThis.setTimeout=(callback,delay,...args)=>{if(delay===10000||delay===15000)armed.push(delay);return originalTimeout(callback,delay===10000?200:delay===15000?700:delay,...args)};
+const originalTimeout=globalThis.setTimeout,armed=[];globalThis.setTimeout=(callback,delay,...args)=>{const control=delay===15000||delay===10000&&callback.name==='killOwnGroup';if(control)armed.push(delay);return originalTimeout(callback,control?(delay===10000?200:700):delay,...args)};
 const sleep=ms=>new Promise(resolve=>originalTimeout(resolve,ms)),hash=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex'),count=${JSON.stringify(count)},realm=${JSON.stringify(join(f.root, 'lifecycle-realm'))},workspace=${JSON.stringify(f.path)},seed=${JSON.stringify(f.seed)},schema={type:'object',properties:{items:{type:'array',maxItems:0}},required:['items'],additionalProperties:false};
-const errors=[],originalKill=process.kill;
+const errors=[],unhandled=[],originalKill=process.kill;process.on('unhandledRejection',error=>unhandled.push(error?.code??'unknown'));
 for(const mode of ['natural-success','natural-exhausted','hanging-exhausted','hanging-success','term-exit-zero','hanging-exhausted-exit1','esrch-race','cancel-closed','ignore-term','wrong-receipt']){
   const execution={...structuredExecutionPolicy({schema,inputDigest:mode,purpose:'lifecycle',timeoutMs:null,model:'claude:MiniMax-M3.1-Flash',worktree:{...seed,mode:'read'}}),state:'running'},id=randomUUID(),root=join(realm,id),controller=new AbortController(),start=armed.length;
   const callbacks={signal:controller.signal,onThread:async value=>{execution.threadId=value},onTurn:async value=>{execution.turnId=value},onTurnStarting:async()=>{execution.turnStartRequested=true},onNative:async value=>{execution.claudeNative=value}};
@@ -491,7 +615,7 @@ for(const mode of ['natural-success','natural-exhausted','hanging-exhausted','ha
     await Promise.race([flight,sleep(1000)]);
   }
 }
-assert.deepEqual(errors,[]);`)
+assert.deepEqual(errors,[]);assert.deepEqual(unhandled,[],'async settle rejection must be consumed before awaited final stop');`)
     const result = spawnSync(process.execPath, ['--import', createRequire(import.meta.url).resolve('tsx/esm'), runner], { cwd: f.repo, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, ANTHROPIC_BASE_URL: 'https://example.invalid', SPEX_TEST: '1' }, encoding: 'utf8', timeout: 30000 })
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
     console.log(result.stdout)
@@ -503,7 +627,7 @@ for (const taskScoped of [true, false]) test(taskScoped ? 'task cwd orphan stays
   const directory = mkdtempSync(join(tmpdir(), 'spex-native-orphan-')), root = join(directory, 'native'), workspace = join(directory, 'worktree'), outside = join(directory, 'outside')
   for (const path of [root, workspace, outside]) mkdirSync(path)
   const receiptFile = join(root, 'process.json'), daemonFile = join(directory, 'daemon.json'), plan = { root, workspace, receiptFile, pid: undefined as number | undefined }
-  sampleNativeWorktreeProcesses(plan)
+  await sampleNativeWorktreeProcesses(plan)
   const daemonSource = `const fs=require('node:fs');const publish=()=>fs.writeFileSync(process.argv[1],JSON.stringify({pid:process.pid,cwd:process.cwd()}));process.on('SIGUSR1',()=>{process.chdir(process.argv[2]);publish()});publish();setInterval(()=>{},1000)`
   const leader = spawn(process.execPath, ['-e', `const {spawn}=require('node:child_process');process.stdin.once('data',()=>{spawn(process.execPath,['-e',process.argv[4],process.argv[1],process.argv[3]],{detached:true,stdio:'ignore',cwd:process.argv[2]}).unref();process.exit(0)});process.stdout.write('READY')`, daemonFile, taskScoped ? workspace : outside, outside, daemonSource], { cwd: workspace, detached: true, stdio: ['pipe', 'pipe', 'ignore'] })
   assert(leader.pid)
@@ -512,7 +636,7 @@ for (const taskScoped of [true, false]) test(taskScoped ? 'task cwd orphan stays
   try {
     await new Promise<void>(resolve => leader.stdout.once('data', () => resolve()))
     writeDetachedRuntimeReceipt(leader.pid, receiptFile); plan.pid = leader.pid
-    sampleNativeWorktreeProcesses(plan); leader.stdin.end('GO'); await closed
+    await sampleNativeWorktreeProcesses(plan); leader.stdin.end('GO'); await closed
     for (let retry = 0; !existsSync(daemonFile) && retry < 100; retry++) await new Promise(resolve => setTimeout(resolve, 10))
     daemonPid = (JSON.parse(readFileSync(daemonFile, 'utf8')) as { pid: number }).pid
     process.kill(daemonPid, 0)
@@ -520,8 +644,8 @@ for (const taskScoped of [true, false]) test(taskScoped ? 'task cwd orphan stays
     writeFileSync(join(root, 'unknown-processes.json'), oldUnknown); writeFileSync(join(root, 'exit.json'), oldExit)
     if (!taskScoped) writeFileSync(join(root, 'task-related-processes.json'), JSON.stringify([{ pid: daemonPid, startToken: 'historical-other-identity', cwd: workspace, boundaryVersion: 2, observedAt: 1 }]))
     assert.equal((JSON.parse(readFileSync(join(root, 'owned-processes.json'), 'utf8')) as Array<{ pid: number }>).some(row => row.pid === daemonPid), false)
-    assert.equal(nativeWorktreeProcessesStopped(plan), !taskScoped)
-    assert.equal(nativeWorktreeProcessesStopped(plan, true), !taskScoped)
+    assert.equal(await nativeWorktreeProcessesStopped(plan), !taskScoped)
+    assert.equal(await nativeWorktreeProcessesStopped(plan, true), !taskScoped)
     process.kill(daemonPid, 0)
     assert.equal(readFileSync(join(root, 'unknown-processes.json'), 'utf8'), oldUnknown)
     assert.equal(readFileSync(join(root, 'exit.json'), 'utf8'), oldExit)
@@ -540,7 +664,7 @@ for (const taskScoped of [true, false]) test(taskScoped ? 'task cwd orphan stays
       process.kill(daemonPid, 'SIGUSR1')
       for (let retry = 0; retry < 100 && JSON.parse(readFileSync(daemonFile, 'utf8')).cwd !== realpathSync(outside); retry++) await new Promise(resolve => setTimeout(resolve, 10))
       assert.equal(JSON.parse(readFileSync(daemonFile, 'utf8')).cwd, realpathSync(outside))
-      assert.equal(nativeWorktreeProcessesStopped(plan), false, 'positive task association remains sticky after chdir')
+      assert.equal(await nativeWorktreeProcessesStopped(plan), false, 'positive task association remains sticky after chdir')
     } else {
       const diagnostic = JSON.parse(readFileSync(join(root, 'unattributed-processes.json'), 'utf8')) as Array<{ pid: number }>
       assert(diagnostic.some(row => row.pid === daemonPid))
@@ -553,7 +677,7 @@ for (const taskScoped of [true, false]) test(taskScoped ? 'task cwd orphan stays
       await new Promise(resolve => setTimeout(resolve, 20))
     }
     daemonPid = undefined
-    assert.equal(nativeWorktreeProcessesStopped(plan), true)
+    assert.equal(await nativeWorktreeProcessesStopped(plan), true)
   } finally {
     if (daemonPid) { try { process.kill(-daemonPid, 'SIGTERM') } catch (error) { assert.equal((error as NodeJS.ErrnoException).code, 'ESRCH') } }
     if (leader.exitCode === null && leader.signalCode === null) {

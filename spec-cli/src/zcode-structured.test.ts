@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { processStartToken, writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
+import { processStartToken, verifyDetachedRuntime, writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
 import { freezeContext, frozenReadTool, readFrozenRange } from './frozen-context.js'
 import { ZCODE_FROZEN_TOOL, type ZCodeFrozenWitness, type ZCodeNativeEvent } from './zcode-frozen-evidence.js'
 import { structuredExecutionPolicy, type StructuredExecution } from './session-structured-policy.js'
@@ -96,7 +96,7 @@ for (const mode of ['frozen', 'worktree', 'unknown-plan', 'wrong-receipt', 'lega
   const root = join(runtimeRoot(), worktree ? 'structured-native-worktree-v1/zcode' : 'structured-zcode-read-only-v1', id), runtime = join(root, 'runtime'), workspace = join(directory, 'workspace'), tmp = join(directory, 'tmp')
   for (const path of [runtime, workspace, tmp]) mkdirSync(path, { recursive: true })
   const ownedPlan = { root, runtime, workspace, tmp, receiptFile: join(root, 'process.json') }
-  if (worktree) sampleNativeWorktreeProcesses(ownedPlan)
+  if (worktree) await sampleNativeWorktreeProcesses(ownedPlan)
   const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { cwd: workspace, detached: true, stdio: 'ignore' })
   assert(child.pid)
   const exited = new Promise<void>(resolve => child.once('close', () => resolve()))
@@ -345,13 +345,13 @@ for (const profile of ['cli-config-v1-explicit', 'cli-config-v1-default', 'legac
     if (generic) {
       mkdirSync(workspace); mkdirSync(tmp)
       const receiptFile = join(root, 'process.json')
-      sampleNativeWorktreeProcesses({ root, workspace, tmp, receiptFile })
+      await sampleNativeWorktreeProcesses({ root, workspace, tmp, receiptFile })
       const child = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { cwd: workspace, detached: true, stdio: 'ignore' }); assert(child.pid)
       const ended = new Promise<void>(resolve => child.once('close', () => resolve()))
       try {
         writeDetachedRuntimeReceipt(child.pid, receiptFile)
         const ownedPlan = { ...plan, pid: child.pid }
-        sampleNativeWorktreeProcesses(ownedPlan)
+        await sampleNativeWorktreeProcesses(ownedPlan)
         process.kill(-child.pid, 'SIGTERM'); await ended
         const failed = { ...terminal, type: 'turn.failed', payload: { inputId, error: { code: 'EPIPE' } } }
         writeFileSync(join(root, 'plan.json'), JSON.stringify(ownedPlan)); writeFileSync(join(root, 'events.json'), JSON.stringify([...events.slice(0, -1), failed])); writeFileSync(join(root, 'terminal.json'), JSON.stringify(failed)); writeFileSync(join(root, 'exit.json'), JSON.stringify({ ...exit, idle: false, closed: false }))
@@ -479,6 +479,36 @@ test('cold ZCode cancellation verifies the original group and null-token MCP thr
     if (processStartToken(reader.pid)) { process.kill(-reader.pid, 'SIGTERM'); await readerExited }
     rmSync(directory, { recursive: true, force: true })
   }
+})
+
+test('cold ZCode cancellation rechecks exact receipt after awaited process observation', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'spex-zcode-stop-recheck-')), root = join(directory, 'native')
+  mkdirSync(root)
+  const receiptFile = join(root, 'process.json')
+  await sampleNativeWorktreeProcesses({ root, receiptFile })
+  const child = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { cwd: root, detached: true, stdio: 'ignore' }); assert(child.pid)
+  const ended = new Promise<void>(resolve => child.once('close', () => resolve())), kill = process.kill
+  try {
+    writeDetachedRuntimeReceipt(child.pid, receiptFile)
+    const original = JSON.parse(readFileSync(receiptFile, 'utf8'))
+    const policy = { ...structuredExecutionPolicy({ schema: {}, inputDigest: 'input', purpose: 'stop', timeoutMs: 1000, model: 'zcode:bigmodel-api/GLM-5.3-Flash', worktree: { baseCommit: 'a'.repeat(40), tree: 'b'.repeat(40), mode: 'read' } }), version: 6 as const, policy: 'native-worktree-v1' as const, frozenReadProof: undefined }
+    const native = { version: 1 as const, root, sessionId: 'session', inputId: 'input', pid: child.pid, receiptFile }
+    const execution: ZCodeStructuredExecution = { ...policy, zcodeNative: native, turnStartRequested: true }
+    const hash = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex')
+    const plan = { ...native, workspace: root, worktreeProcessBaseline: 1, policyDigest: hash(policy), requestDigest: 'unused-cold-request-digest', cliVersion: zcodeCapability.cliVersion, cliSha256: zcodeCapability.cliSha256, builtinSha256: zcodeCapability.builtinSha256, ...zcodeNativeSelection(execution.model), runtime: join(root, 'runtime') }
+    writeFileSync(join(root, 'plan.json'), JSON.stringify(plan))
+    assert.equal(verifyDetachedRuntime(child.pid, receiptFile).ok, true)
+    let signals = 0
+    t.mock.method(process, 'kill', (pid: number, signal?: NodeJS.Signals | number) => {
+      if (Math.abs(pid) === child.pid && signal === 'SIGTERM') { signals++; return true }
+      return kill(pid, signal)
+    })
+    queueMicrotask(() => writeFileSync(receiptFile, JSON.stringify({ ...original, pid: process.pid })))
+    const stopped = await stopZCodeStructuredTurn(execution, 1000)
+    assert.equal(signals, 0, '观察期间身份变为未证实，不能沿等待前的proof发TERM')
+    assert.equal(stopped.nativeStopped, false)
+    kill(child.pid, 0)
+  } finally { t.mock.restoreAll(); kill(-child.pid, 'SIGTERM'); await ended; rmSync(directory, { recursive: true, force: true }) }
 })
 
 test('an existing native dispatch cannot be resumed with another send or new process', async () => {

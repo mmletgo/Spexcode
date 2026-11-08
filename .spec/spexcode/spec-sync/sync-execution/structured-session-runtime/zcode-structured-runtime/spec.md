@@ -70,6 +70,8 @@ NativePlan v1/v2 与缺席 `nativeConfiguration` 的历史请求保持原策略�
 
 已持久 completed 的 worktree 冷重放核原完成缓存、固定请求、Native 身份、schema/输出和原 exit.stopped/close 证据，不再探测历史 PID/PGID，避免无关复用导致伪 stale；running 或未结算仍必须实时证明原进程与后代停止。
 
+worktree轮询、取消、未结算恢复与finally逐次等待[[native-worktree-runtime]]的异步有界进程观察，同root采样和停止串行，不让慢cwd探针阻塞RPC/取消timer或叠加观察。取消的原15秒与清理的原分段窗口以绝对截止沿排队/观察传递，内部剩余不重置；过期不追加Native信号或真停止原件，最后取消分类消费已保存的同一次fresh停止事实，不在截止后另开采样。探针失败保原未知停止及容量，不据此写成功exit/完成证据；已completed和sealed材料读取继续核原件，不活探历史PID或增加Native杀权。冷取消及清理在等待观察后、实际发TERM前重新核同一原receipt/专属组身份，等待前的proof不能跨异步窗口授信号权。
+
 worktree 停止沿 [[native-worktree-runtime]] 正向任务域边界及 boundaryVersion2 追加观察，保留原 failed exit/unknown；首次派发在宿主平台的临时目录中创建唯一私有 tmp，workspace 与 tmp 随原 plan 固定，冷恢复不重选或改写。旧 macOS frozen policy 的 `/private/tmp` 短路径不变，无关联同 UID 进程仅诊断。
 
 每次 stdio RPC 的 10000ms 计时器以 native_rpc_timeout 标记超时，删除原 pending ID 并忽略迟到回复。已 ACK 的活跃轮询仅在精确 `session/events` 超时且没有取消或协议故障时，以同一 session 和未移动的游标发一次新的只读 RPC。只有该页交回经原身份核验的本轮 `turn.completed` / `success` 才继续原 messages、idle、close、停稳与输出认证；其它结果按失败或取消结算。模型 send 保持一次，其它 RPC 超时、未 ACK create、原失败证据与停止证明仍沿既有门禁，由 [[structured-session-runtime]] 正式消费。
