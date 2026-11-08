@@ -169,7 +169,7 @@ async function nativeProcessWorkingDirectories(plan: NativeOwnedPlan, pids: numb
     }
     return paths
   }
-  const output = await nativeProcessOutput(plan, '/usr/sbin/lsof', ['-a', '-p', pids.join(','), '-d', 'cwd', '-Fn'], deadline, true)
+  const output = await nativeProcessOutput(plan, '/usr/sbin/lsof', [...(process.platform === 'darwin' ? ['-b'] : []), '-a', '-p', pids.join(','), '-d', 'cwd', '-Fn'], deadline, true)
   let pid: number | undefined
   for (const line of output.split('\n')) {
     if (/^p\d+$/.test(line)) pid = Number(line.slice(1))

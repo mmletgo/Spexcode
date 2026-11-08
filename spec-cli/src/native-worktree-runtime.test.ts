@@ -39,6 +39,7 @@ function controlledCwdProbe(t: test.TestContext, slow: boolean) {
   t.mock.method(childProcess, 'spawn', (file: string, args: string[], options: SpawnOptions) => {
     if (!['/bin/ps', '/usr/sbin/lsof'].includes(file)) return launch(file, args, options)
     if (file.endsWith('lsof')) {
+      assert.deepEqual(args, ['-b', '-a', '-p', '999991', '-d', 'cwd', '-Fn'], 'cwd查询只增加-b并保留精确PID/descriptor/输出范围')
       probes++; active++; maximum = Math.max(maximum, active)
       if (!slow && probes === 1) {
         const child = new ChildProcess()
