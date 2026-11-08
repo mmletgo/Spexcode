@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { processStartToken, writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
 import { freezeContext, frozenReadTool, readFrozenRange } from './frozen-context.js'
-import { ZCODE_FROZEN_TOOL, type ZCodeFrozenWitness, type ZCodeNativeEvent } from './zcode-frozen-proof.js'
+import { proveZCodeFrozenReads, ZCODE_FROZEN_TOOL, type ZCodeFrozenWitness, type ZCodeNativeEvent } from './zcode-frozen-proof.js'
 import { structuredExecutionPolicy } from './session-structured-policy.js'
 import { assertZCodeModelSnapshot, decodeZCodeStructuredText, stopZCodeStructuredTurn, zcodeCapability, zcodeIdleObservation, zcodeNativeModel, zcodeNativeSelection, zcodeProofEvent, zcodeRuntimeConfiguration, zcodeStructuredPrompt, zcodeStructuredTurn, type ZCodeStructuredExecution } from './zcode-structured.js'
 
@@ -103,13 +103,13 @@ for (const mode of ['frozen', 'worktree', 'unknown-plan', 'wrong-receipt', 'lega
   }
 })
 
-for (const timeoutMs of [1000, null]) test(`ZCode strict JSON failure with timeout=${timeoutMs} requires complete native proof and preserves durable identity`, async t => {
+for (const profile of ['current-candidate', 'historical'] as const) for (const timeoutMs of [1000, null]) test(`ZCode strict JSON failure with profile=${profile}, timeout=${timeoutMs} requires complete native proof and preserves durable identity`, async t => {
   const { runtimeRoot, sessionArtifactPath } = await import('@spexcode/spec-core')
   const { sessionIdForCreateKey } = await import('./sessions.js')
   const { fromRaw, writeRecord, readRecord } = await import('./session-record.js')
   const { configuredSessionApplication } = await import('./session-application.js')
   const { executeQueuedStructuredSession, runStructuredSession } = await import('./session-structured.js')
-  const directory = mkdtempSync(join(tmpdir(), 'spex-zcode-format-')), requestKey = `zcode-format-failure-${timeoutMs}`, id = sessionIdForCreateKey(requestKey)
+  const directory = mkdtempSync(join(tmpdir(), 'spex-zcode-format-')), requestKey = `zcode-format-failure-${profile}-${timeoutMs}`, id = sessionIdForCreateKey(requestKey)
   const root = join(runtimeRoot(), 'structured-zcode-read-only-v1', id), runtime = join(root, 'runtime')
   mkdirSync(join(runtime, 'frozen-mcp'), { recursive: true })
   const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' })
@@ -122,7 +122,8 @@ for (const timeoutMs of [1000, null]) test(`ZCode strict JSON failure with timeo
     const receiptFile = join(root, 'process.json'), identity = writeDetachedRuntimeReceipt(child.pid, receiptFile)
     const native = { version: 1 as const, root, sessionId: 'session', inputId: 'input', turnId: 'turn', pid: child.pid, receiptFile }
     const nativePrompt = zcodeStructuredPrompt(prompt, policy.schema), modelSnapshot = { sessionId: native.sessionId, model: zcodeNativeModel(policy.model) }
-    const plan = { ...native, runtime, policyDigest: hash(policy), requestDigest: hash({ prompt, nativePrompt, policy, selection: zcodeNativeSelection(policy.model) }), cliVersion: zcodeCapability.cliVersion, cliSha256: zcodeCapability.cliSha256, builtinSha256: zcodeCapability.builtinSha256, model: zcodeNativeModel(policy.model), modelSnapshotDigest: hash(modelSnapshot) }
+    const cliSha256: string = profile === 'current-candidate' ? 'd9afd58d694f98a5279bf548cdc7646413c125762e86730605a6071f9e0346d6' : zcodeCapability.cliSha256
+    const plan = { ...native, runtime, policyDigest: hash(policy), requestDigest: hash({ prompt, nativePrompt, policy, selection: zcodeNativeSelection(policy.model) }), cliVersion: zcodeCapability.cliVersion, cliSha256, builtinSha256: zcodeCapability.builtinSha256, model: zcodeNativeModel(policy.model), modelSnapshotDigest: hash(modelSnapshot) }
     writeFileSync(join(root, 'plan.json'), JSON.stringify(plan)); writeFileSync(join(root, 'model-snapshot.json'), JSON.stringify(modelSnapshot))
     writeFileSync(join(root, 'send.json'), JSON.stringify({ sessionId: native.sessionId, content: nativePrompt, inputId: native.inputId, modelSelection: plan.model }))
     const response = 'Analysis is complete:\n{"answer":"exact"}', args = { contextDigest: ref.contextDigest, entryId: 'task', startByte: 0, endByte: Buffer.byteLength('public task') }
@@ -177,6 +178,7 @@ for (const timeoutMs of [1000, null]) test(`ZCode strict JSON failure with timeo
     writeFileSync(join(root, 'messages.json'), JSON.stringify(messages)); writeFileSync(join(root, 'events.json'), JSON.stringify(events))
     writeFileSync(join(root, 'terminal.json'), JSON.stringify(events.at(-1)))
     writeFileSync(mcpPath, records.map(row => JSON.stringify(row)).join('\n') + '\n')
+    await assert.rejects(zcodeStructuredTurn(join(root, '..'), id, prompt, execution, callbacks), { code: 'structured_output_format_invalid' })
     configuredSessionApplication().createSession({ sessionId: id, status: 'awaiting', proposal: 'nothing' })
     const record = fromRaw({ session_id: id, governed: true, worktree_path: process.cwd(), branch: null, title: null, name: null, status: 'awaiting', proposal: 'nothing', merges: 0, note: null, sortkey: null, createdAt: 1, stopped: false, archived: false, harness: 'zcode', launch_cmd: 'zcode', create_request_id: createHash('sha256').update(requestKey).digest('hex'), create_payload_hash: hash({ prompt, parent: null, launcher: null, structuredExecution: policy }) })
     record.structuredExecution = { ...policy, state: 'running', threadId: native.sessionId, turnId: native.turnId, turnStartRequested: true, zcodeNative: native }
@@ -198,6 +200,33 @@ for (const timeoutMs of [1000, null]) test(`ZCode strict JSON failure with timeo
     writeFileSync(join(root, 'terminal.json'), JSON.stringify(validEvents.at(-1)))
     const completed = await zcodeStructuredTurn(join(root, '..'), id, prompt, execution, callbacks)
     assert.equal(completed.text, '{}')
+    if (profile === 'historical') {
+      const historicalPlan = JSON.parse(readFileSync(join(root, 'plan.json'), 'utf8')) as typeof plan
+      const historicalWitness = JSON.parse(readFileSync(join(root, 'witness.json'), 'utf8')) as ZCodeFrozenWitness
+      historicalPlan.cliSha256 = '9afd565a104d660259e6bdeeaa5cb8abc74a908559e21aa3c5f6a06f2a9da6c6'
+      historicalWitness.cliSha256 = historicalPlan.cliSha256
+      const proof = proveZCodeFrozenReads(ref, historicalWitness)
+      const saved = JSON.parse(readFileSync(join(root, 'completed.json'), 'utf8')) as { plan: typeof plan; witness: ZCodeFrozenWitness; result: { frozenReadProof: typeof proof } }
+      saved.plan = historicalPlan
+      saved.witness = historicalWitness
+      saved.result.frozenReadProof = proof
+      writeFileSync(join(root, 'plan.json'), JSON.stringify(historicalPlan))
+      rmSync(join(root, 'witness.json'))
+      rmSync(join(root, 'completed.json'))
+      writeFileSync(join(root, 'witness.json'), JSON.stringify(historicalWitness))
+      writeFileSync(join(root, 'completed.json'), JSON.stringify(saved))
+    }
+    const replay = await zcodeStructuredTurn(join(root, '..'), id, prompt, execution, callbacks)
+    assert.equal(replay.text, '{}', 'cold replay must authenticate the exact completed profile')
+    const planBytes = readFileSync(join(root, 'plan.json'))
+    for (const changed of [
+      { ...JSON.parse(planBytes.toString('utf8')), cliSha256: 'a'.repeat(64) },
+      { ...JSON.parse(planBytes.toString('utf8')), builtinSha256: 'b'.repeat(64) },
+    ]) {
+      writeFileSync(join(root, 'plan.json'), JSON.stringify(changed))
+      await assert.rejects(zcodeStructuredTurn(join(root, '..'), id, prompt, execution, callbacks), { code: 'stale_result' })
+    }
+    writeFileSync(join(root, 'plan.json'), planBytes)
     writeFileSync(join(root, 'terminal.json'), JSON.stringify(events.at(-1)))
     await assert.rejects(zcodeStructuredTurn(join(root, '..'), id, prompt, execution, callbacks), { code: 'stale_result' })
 
@@ -336,12 +365,21 @@ test('cold replay binds schema and the exact original native send before reading
     const policy = { ...structuredExecutionPolicy({ schema, inputDigest: 'input', purpose: 'prompt-binding', timeoutMs: 1000, model: 'zcode:bigmodel-api/GLM-5.3-Flash', frozenContext: ref }), version: 4 as const, policy: 'zcode-frozen-read-only-v1' as const, frozenReadProof: undefined }
     const native = { version: 1 as const, root, sessionId: 'session', inputId: 'input' }, execution: ZCodeStructuredExecution = { ...policy, zcodeNative: native, turnStartRequested: true }
     const nativePrompt = zcodeStructuredPrompt(prompt, schema), send = { sessionId: native.sessionId, content: nativePrompt, inputId: native.inputId, modelSelection: zcodeNativeModel(execution.model) }, modelSnapshot = { sessionId: native.sessionId, model: zcodeNativeModel(execution.model) }
-    const plan = { ...native, policyDigest: hash(policy), requestDigest: hash({ prompt, nativePrompt, policy, selection: zcodeNativeSelection(execution.model) }), cliVersion: zcodeCapability.cliVersion, cliSha256: zcodeCapability.cliSha256, builtinSha256: zcodeCapability.builtinSha256, model: zcodeNativeModel(execution.model), receiptFile: join(root, 'process.json'), modelSnapshotDigest: hash(modelSnapshot) }
+    const plan = { ...native, policyDigest: hash(policy), requestDigest: hash({ prompt, nativePrompt, policy, selection: zcodeNativeSelection(execution.model) }), cliVersion: zcodeCapability.cliVersion, cliSha256: zcodeCapability.historicalCliSha256, builtinSha256: zcodeCapability.builtinSha256, model: zcodeNativeModel(execution.model), receiptFile: join(root, 'process.json'), modelSnapshotDigest: hash(modelSnapshot) }
     writeFileSync(join(root, 'plan.json'), JSON.stringify(plan)); writeFileSync(join(root, 'model-snapshot.json'), JSON.stringify(modelSnapshot)); writeFileSync(join(root, 'send.json'), JSON.stringify(send))
     const fixedManifest = readFileSync(ref.manifestPath), callbacks = { onThread: async () => assert.fail('no new thread'), onTurn: async () => assert.fail('no new turn'), onNative: async () => assert.fail('no new native') }
     assert((JSON.parse(readFileSync(join(root, 'send.json'), 'utf8')) as { content: string }).content.includes(JSON.stringify(schema)))
     await assert.rejects(zcodeStructuredTurn(directory, 'native', prompt, execution, callbacks), { code: 'cancellation_pending' })
     writeFileSync(join(root, 'completed.json'), 'must not be read before fixed input validation')
+    const planBytes = readFileSync(join(root, 'plan.json'))
+    for (const changed of [
+      { ...plan, cliSha256: 'a'.repeat(64) },
+      { ...plan, builtinSha256: 'b'.repeat(64) },
+    ]) {
+      writeFileSync(join(root, 'plan.json'), JSON.stringify(changed))
+      await assert.rejects(zcodeStructuredTurn(directory, 'native', prompt, execution, callbacks), { code: 'stale_result' })
+    }
+    writeFileSync(join(root, 'plan.json'), planBytes)
     await assert.rejects(zcodeStructuredTurn(directory, 'native', prompt, { ...execution, schema: { ...schema, additionalProperties: true } }, callbacks), { code: 'stale_result' })
     await assert.rejects(zcodeStructuredTurn(directory, 'native', prompt + ' changed', execution, callbacks), { code: 'stale_result' })
     for (const content of [prompt, nativePrompt + '\nchanged', zcodeStructuredPrompt(prompt, { type: 'string' })]) {

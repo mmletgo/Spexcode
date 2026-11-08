@@ -14,7 +14,8 @@ import { decodeZCodeJsonText, type ZCodeFrozenReadProof, type ZCodeFrozenWitness
 
 export const zcodeCapability = Object.freeze({
   cliVersion: '0.17.1',
-  cliSha256: '9afd565a104d660259e6bdeeaa5cb8abc74a908559e21aa3c5f6a06f2a9da6c6',
+  cliSha256: 'd9afd58d694f98a5279bf548cdc7646413c125762e86730605a6071f9e0346d6',
+  historicalCliSha256: '9afd565a104d660259e6bdeeaa5cb8abc74a908559e21aa3c5f6a06f2a9da6c6',
   builtinSha256: 'e537b380df05656e3757c2b220ae1044fe8a32c0ac148de265a05a94cc24b3a9',
   builtinPath: '/Applications/ZCode.app/Contents/Resources/config/provider/zcode-builtin.json',
   tool: 'mcp__frozen__spex_read_frozen',
@@ -32,6 +33,7 @@ type NativeSelection = { model: NativeModel; thoughtLevel?: 'high' }
 type ModelSnapshot = { session?: { sessionId: string; model: NativeModel }; settings?: { model?: { current?: { providerId: string; modelId: string; options?: Record<string, unknown> } }; thoughtLevel?: { current?: string; available?: { label: string; value: string }[] } } }
 type IdleSnapshot = { session?: { sessionId: string; status: string }; runtime?: { activeTurnId?: string; activeTurnKind?: string; pendingRequestIds?: string[] }; projection?: { currentTurnId?: string; status?: string; pendingPermissions?: { requestId?: string; toolCallId?: string }[]; activeToolCalls?: { toolCallId: string; toolName: string; status: string }[] } }
 type NativePlan = ZCodeNativeState & NativeSelection & { toolDenylist?: readonly ['ExitPlanMode']; worktreeProcessBaseline?: 1; requestDigest: string; policyDigest: string; cliPath: string; cliVersion: string; cliSha256: string; builtinSha256: string; queryId: string; runtime: string; tmp: string; workspace: string; receiptFile: string; modelSnapshotDigest?: string }
+type ZCodeCapabilityProfile = 'current' | 'historical'
 type StopResult = { nativeStopped: boolean; acknowledged: boolean; nativeStatus?: string; error?: string }
 type StopEvidence = { code: number | null; signal: NodeJS.Signals | null; stopped: boolean; acknowledged: boolean; idle: boolean; closed: boolean; stderrBytes: number; stderrSha256: string }
 type Completed = { plan: NativePlan; witness: ZCodeFrozenWitness; result: NativeResult }
@@ -40,6 +42,13 @@ const bytesDigest = (path: string): string => createHash('sha256').update(readFi
 const sleep = (milliseconds: number): Promise<void> => new Promise(resolve => setTimeout(resolve, milliseconds))
 const active = new Map<string, { interrupt(): void }>()
 const fixedPolicy = (execution: ZCodeStructuredExecution) => execution.policy === 'native-worktree-v1' ? structuredExecutionPolicy(execution) : ({ ...structuredExecutionPolicy(execution), version: execution.timeoutMs === null ? 5 : 4, policy: 'zcode-frozen-read-only-v1' })
+
+function zcodePlanCapabilityProfile(plan: Pick<NativePlan, 'cliVersion' | 'cliSha256' | 'builtinSha256'>): ZCodeCapabilityProfile | undefined {
+  if (plan.cliVersion !== zcodeCapability.cliVersion || plan.builtinSha256 !== zcodeCapability.builtinSha256) return undefined
+  if (plan.cliSha256 === zcodeCapability.cliSha256) return 'current'
+  if (plan.cliSha256 === zcodeCapability.historicalCliSha256) return 'historical'
+  return undefined
+}
 
 /** 原业务正文逐字保留；唯一原生user输入前置固定、只读的精确JSON schema控制段。 */
 export function zcodeStructuredPrompt(prompt: string, schema: Record<string, unknown>): string {
@@ -228,22 +237,25 @@ function ownedProcessesStopped(plan: NativePlan, terminate = false): boolean {
   return stopped
 }
 
-function verifyPlan(plan: NativePlan, root: string, prompt: string | undefined, execution: ZCodeStructuredExecution): void {
+function verifyPlan(plan: NativePlan, root: string, prompt: string | undefined, execution: ZCodeStructuredExecution): ZCodeCapabilityProfile {
   const native = execution.zcodeNative
+  const capabilityProfile = zcodePlanCapabilityProfile(plan)
   if (plan.version !== (execution.zcodeToolPolicy ? 2 : 1) || native?.version !== plan.version || !isDeepStrictEqual(plan.toolDenylist, execution.zcodeToolPolicy?.toolDenylist)
     || execution.policy === 'native-worktree-v1' && plan.worktreeProcessBaseline !== 1 || plan.root !== root || native?.root !== root || plan.sessionId !== native.sessionId || plan.inputId !== native.inputId
     || plan.policyDigest !== digest(fixedPolicy(execution)) || prompt !== undefined && plan.requestDigest !== requestDigest(prompt, execution)
-    || plan.cliVersion !== zcodeCapability.cliVersion || plan.cliSha256 !== zcodeCapability.cliSha256 || plan.builtinSha256 !== zcodeCapability.builtinSha256
+    || !capabilityProfile
     || digest({ model: plan.model, ...(plan.thoughtLevel ? { thoughtLevel: plan.thoughtLevel } : {}) }) !== digest(zcodeNativeSelection(execution.model, execution.effort)) || native.turnId && native.turnId !== plan.turnId || native.pid !== plan.pid || native.receiptFile && native.receiptFile !== plan.receiptFile
     || execution.threadId && execution.threadId !== plan.sessionId || execution.turnId && execution.turnId !== plan.turnId)
     throw new StructuredSessionError('stale_result', 'ZCode fixed native plan or durable identity differs')
   if (existsSync(join(root, 'send.json')) && (!plan.modelSnapshotDigest || !existsSync(join(root, 'model-snapshot.json')) || plan.modelSnapshotDigest !== digest(JSON.parse(readFileSync(join(root, 'model-snapshot.json'), 'utf8'))))) throw new StructuredSessionError('stale_result', 'ZCode saved pre-send model selection differs')
   if (prompt !== undefined && existsSync(join(root, 'send.json')) && digest(JSON.parse(readFileSync(join(root, 'send.json'), 'utf8'))) !== digest(nativeSend(plan, prompt, execution))) throw new StructuredSessionError('stale_result', 'ZCode original send differs from the exact native schema/prompt input')
+  return capabilityProfile
 }
 
 /** 同一原生 session/input/query/turn 和实际模型选择证明正常工具执行的终态。 */
 function settleWorktreeResult(plan: NativePlan, prompt: string, execution: ZCodeStructuredExecution): WorktreeNativeResult {
-  verifyPlan(plan, plan.root, prompt, execution)
+  const capabilityProfile = verifyPlan(plan, plan.root, prompt, execution)
+  if (capabilityProfile === 'historical' && !existsSync(join(plan.root, 'completed.json'))) throw new StructuredSessionError('cancellation_pending', 'Historical ZCode worktree plan has no completed cold proof')
   if (execution.state !== 'completed' && !ownedProcessesStopped(plan)) throw new StructuredSessionError('cancellation_pending', 'ZCode worktree native or unknown orphan stop remains unproven')
   const read = (name: string): unknown => JSON.parse(readFileSync(join(plan.root, name), 'utf8'))
   const terminal = read('terminal.json') as NativeEvent, events = read('events.json') as NativeEvent[], messages = read('messages.json') as Array<{ info?: Record<string, unknown>; parts?: Array<Record<string, unknown>> }>
@@ -306,9 +318,10 @@ async function settleResult(plan: NativePlan, prompt: string, execution: ZCodeSt
 async function completedResult(root: string, prompt: string, execution: ZCodeStructuredExecution): Promise<NativeResult | null> {
   if (!existsSync(join(root, 'plan.json'))) return null
   const plan = JSON.parse(readFileSync(join(root, 'plan.json'), 'utf8')) as NativePlan
-  verifyPlan(plan, root, prompt, execution)
+  const capabilityProfile = verifyPlan(plan, root, prompt, execution)
   const path = join(root, 'completed.json')
   if (!existsSync(path)) {
+    if (capabilityProfile === 'historical') throw new StructuredSessionError('cancellation_pending', 'Historical ZCode plan has no completed cold proof')
     if (!['terminal.json', 'messages.json', 'events.json', 'exit.json', 'send.json'].every(name => existsSync(join(root, name))) || !ownedProcessesStopped(plan)) return null
     const exit = JSON.parse(readFileSync(join(root, 'exit.json'), 'utf8')) as StopEvidence
     const terminal = JSON.parse(readFileSync(join(root, 'terminal.json'), 'utf8')) as NativeEvent
@@ -386,7 +399,7 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
   const resolved = spawnSync('/usr/bin/which', ['zcode'], { env: { PATH: process.env.PATH }, encoding: 'utf8' })
   if (resolved.error || resolved.status !== 0) throw new StructuredSessionError('unsupported', 'ZCode CLI is unavailable')
   const cliPath = realpathSync(resolved.stdout.trim())
-  if (bytesDigest(cliPath) !== zcodeCapability.cliSha256 || !existsSync(zcodeCapability.builtinPath) || bytesDigest(zcodeCapability.builtinPath) !== zcodeCapability.builtinSha256) throw new StructuredSessionError('unsupported', 'ZCode CLI or public builtin capability digest is unverified')
+  if (!existsSync(zcodeCapability.builtinPath) || zcodePlanCapabilityProfile({ cliVersion: zcodeCapability.cliVersion, cliSha256: bytesDigest(cliPath), builtinSha256: bytesDigest(zcodeCapability.builtinPath) }) !== 'current') throw new StructuredSessionError('unsupported', 'ZCode CLI or public builtin capability digest is unverified')
   mkdirSync(root, { recursive: true, mode: 0o700 })
   const runtime = join(root, 'runtime'), home = join(runtime, 'home'), ledgerRoot = join(runtime, 'frozen-mcp'), tmp = mkdtempSync('/private/tmp/spex-zcode-tmp-'), workspace = worktree ? worktreePath! : mkdtempSync('/private/tmp/spex-zcode-frozen-')
   for (const path of [runtime, home, ledgerRoot, join(home, '.zcode/cli'), join(home, '.zcode/v2')]) mkdirSync(path, { recursive: true, mode: 0o700 })
