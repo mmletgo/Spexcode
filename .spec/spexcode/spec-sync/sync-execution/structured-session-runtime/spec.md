@@ -24,7 +24,7 @@ related:
 
 新发生的 Claude worktree 普通 failed 同样只在记录的 thread/turn 与原 claudeNative session/user 精确一致时复用既有精确停止协议；确证后保存原 failed/error 与独立 cancellation.nativeStopped，未知保持原失败诊断和 cancelling。此清理事实不授予格式失败、output、rejectedOutput 或 failedWorktree；历史 failed 冷读取不补签停止证明。
 
-正式取消或资源恢复重试后仍未证实停止时，已有首要 error 保持，新的停止诊断只写 cancellation.error；不能用清理诊断覆盖原执行失败。
+正式取消或资源恢复重试，无论停止仍未知还是随后确证，已有首要 error 均保持，控制结果保存在 note/cancellation，新的停止诊断写 cancellation.error；不能用清理诊断覆盖原执行失败，也不将正式取消状态改回 failed。
 
 新产生的已认证final格式/schema拒绝可在failed运行元数据及StructuredSessionError上携可选tagged rejectedOutput：完整final文本、SHA、prompt/schema/input/purpose及原生thread/turn绑定。它只是不可信诊断，成功output槽仍缺席，旧failed无字段不补读/不猜分类。同键读取和资源桥重核固定请求与证据身份；取消、无final、未停稳、身份不符不得附正文。可选观测不参与固定策略/创建摘要、不增加执行authority，因此不新增writer marker。
 

@@ -22,7 +22,7 @@ import { stageWorktree } from './sync/stage-worktree.js'
 import { SyncStore } from './sync/store.js'
 
 async function runFixture(scenario: string): Promise<void> {
-  const recovering = scenario.startsWith('recovery-'), dirty = scenario.endsWith('dirty'), unknown = scenario === 'unknown-stop' || scenario === 'recovery-unknown'
+  const laterStop = scenario === 'recovery-later-stop', recovering = scenario.startsWith('recovery-'), dirty = scenario.endsWith('dirty'), unknown = scenario === 'unknown-stop' || scenario === 'recovery-unknown' || laterStop
   const git = (...args: string[]): string => execFileSync('git', args, { encoding: 'utf8', stdio: 'pipe' }).trim()
   const input = await captureInputSnapshot(process.cwd(), { committed: true })
   configuredSessionApplication()
@@ -56,6 +56,7 @@ async function runFixture(scenario: string): Promise<void> {
   for (const key of ['errorCode', 'output', 'rejectedOutput', 'failedWorktree', 'resultWorktree', 'resultDigest'] as const) assert.equal(state[key], undefined)
   assert.equal(JSON.parse(fs.readFileSync(process.env.SPEX_TERMINAL_CALLS_PATH!, 'utf8')).length, 1)
   assert.equal(store.readOperation(operation.id).callsUsed, 1)
+  let wakes = 0
   if (recovering) {
     assert.equal(fs.existsSync(record.worktreePath), true)
     if (scenario === 'recovery-removed-unknown') writeRecord({ ...record, structuredExecution: { ...state, cancellation: { ...state.cancellation!, nativeStopped: false, error: 'fixture stop remains unknown' } } })
@@ -67,24 +68,39 @@ async function runFixture(scenario: string): Promise<void> {
     refreshQueueCandidate(sibling)
     const queuedBefore = JSON.stringify(readRecord(sibling))
     const beforeOperation = JSON.stringify(store.readOperation(operation.id)), beforeResource = JSON.stringify(resource)
-    let wakes = 0
     setSessionApplicationCommitWake(() => { wakes++ })
     const artifacts = fs.realpathSync(fs.mkdtempSync(join(dirname(process.env.SPEX_SESSION_DATABASE_PATH!), 'artifacts-')))
+    if (laterStop) {
+      const receipt = state.claudeNative!.receiptFile!, bytes = fs.readFileSync(receipt + '.held')
+      fs.renameSync(receipt + '.held', receipt)
+      assert.deepEqual(fs.readFileSync(receipt), bytes, 'restore only the original receipt bytes')
+    }
     const recovered = await recoverSyncOperationResources(store, operation.id, { root: process.cwd(), inputId: input.id, artifactRoot: artifacts })
-    assert.equal(recovered.status, unknown ? 'recovery_required' : 'resources_recovered', JSON.stringify(recovered.failure))
+    assert.equal(recovered.status, unknown && !laterStop ? 'recovery_required' : 'resources_recovered', JSON.stringify(recovered.failure))
     assert.equal(JSON.stringify(store.readOperation(operation.id)), beforeOperation)
     if (!unknown) assert.equal(JSON.stringify(store.findResource(claim.attempt.id, request.requestKey)), beforeResource, 'retirement cannot rewrite a removed checkpoint')
     await new Promise(resolve => setTimeout(resolve, 250))
     assert.equal(wakes, 0, 'offline recovery cannot request an execution wake')
     assert.equal(JSON.stringify(readRecord(sibling)), queuedBefore, 'offline recovery cannot wake a queued sibling')
     record = readRecord(record.session)!
-    assert.equal(fs.existsSync(record.worktreePath), dirty || unknown || scenario === 'recovery-removed-unknown', 'formal recovery retires only clean exactly stopped checkouts')
+    assert.equal(fs.existsSync(record.worktreePath), dirty || unknown && !laterStop || scenario === 'recovery-removed-unknown', 'formal recovery retires only clean exactly stopped checkouts')
     assert.equal(record.structuredExecution!.error, message, 'resource cleanup preserves the original business failure')
   }
   if (unknown) {
     assert.equal(failure.code, 'cancellation_pending'); assert.equal(state.state, 'cancelling')
     assert.equal(state.cancellation?.nativeStopped, false); assert(state.cancellation?.error); assert.notEqual(state.cancellation.error, message)
-    assert.notEqual(resource.phase, 'removed'); assert.equal(fs.existsSync(record.worktreePath), true)
+    assert.notEqual(resource.phase, 'removed')
+    if (laterStop) {
+      assert.equal(record.structuredExecution!.state, 'cancelled', 'exact recovery retains the existing cancellation state protocol')
+      assert.equal(record.structuredExecution!.cancellation?.nativeStopped, true)
+      assert.match(record.note!, /structured execution cancelled/)
+      const removed = store.findResource(claim.attempt.id, request.requestKey)!
+      assert.equal(removed.phase, 'removed')
+      const checkpoint = JSON.parse(readEvidence(input.source.commonDir, removed.checkpointRef).toString())
+      assert.equal(checkpoint.stop.state, 'cancelled'); assert.equal(checkpoint.stop.nativeStopped, true)
+      assert.equal(checkpoint.stop.sessionId, record.session)
+      assert.equal(record.archived, true)
+    } else assert.equal(fs.existsSync(record.worktreePath), true)
   } else {
     assert.equal(failure.code, 'failed'); assert.equal(state.state, 'failed')
     assert.equal(state.cancellation?.nativeStopped, true, 'new exact terminal failure must persist its stop proof')
@@ -100,23 +116,28 @@ async function runFixture(scenario: string): Promise<void> {
       assert.equal(fs.readFileSync(join(record.worktreePath, '.spex-sync-drafts/draft.json'), 'utf8'), '{"unapproved":true}\n')
     } else {
       assert.equal(fs.existsSync(record.worktreePath), false, 'clean failed Native checkout must be retired'); assert.equal(record.archived, true)
-      const head = git('rev-parse', record.branch!)
-      assert.equal(head, fs.readFileSync(process.env.SPEX_TERMINAL_HEAD_PATH!, 'utf8'))
-      assert.equal(git('show', 'refs/spex-archive/' + record.session + ':.spex-sync-drafts/draft.json'), '{"unapproved":true}')
-      assert.equal(git('show', head + ':.spex-sync-drafts/draft.json'), '{"unapproved":true}')
-      const before = JSON.stringify(readRecord(record.session))
-      await assert.rejects(createAttemptRunner(store, claim.fence, { pollMs: 2, retireSettledWorktrees: true })(request), { code: 'failed', message })
-      assert.equal(JSON.stringify(readRecord(record.session)), before)
-      const checkpointBefore = readEvidence(input.source.commonDir, resource.checkpointRef), archiveBefore = git('rev-parse', 'refs/spex-archive/' + record.session)
-      assert.equal(await withArchivedStructuredWorktree(record, path => fs.readFileSync(join(path, '.spex-sync-drafts/draft.json'), 'utf8')), '{"unapproved":true}\n', 'existing archive seam retains the unapproved draft')
-      assert.equal(fs.existsSync(record.worktreePath), false)
-      assert.equal(JSON.stringify(readRecord(record.session)), before)
-      assert.deepEqual(readEvidence(input.source.commonDir, resource.checkpointRef), checkpointBefore)
-      assert.equal(git('rev-parse', 'refs/spex-archive/' + record.session), archiveBefore)
     }
   }
+  if (record.archived) {
+    const head = git('rev-parse', record.branch!)
+    assert.equal(head, fs.readFileSync(process.env.SPEX_TERMINAL_HEAD_PATH!, 'utf8'))
+    assert.equal(git('show', 'refs/spex-archive/' + record.session + ':.spex-sync-drafts/draft.json'), '{"unapproved":true}')
+    assert.equal(git('show', head + ':.spex-sync-drafts/draft.json'), '{"unapproved":true}')
+    const before = JSON.stringify(readRecord(record.session)), currentResource = store.findResource(claim.attempt.id, request.requestKey)!
+    await assert.rejects(createAttemptRunner(store, claim.fence, { pollMs: 2, retireSettledWorktrees: true })(request), laterStop ? { code: 'cancelled' } : { code: 'failed', message })
+    assert.equal(JSON.stringify(readRecord(record.session)), before)
+    const checkpointBefore = readEvidence(input.source.commonDir, currentResource.checkpointRef), archiveBefore = git('rev-parse', 'refs/spex-archive/' + record.session)
+    assert.equal(await withArchivedStructuredWorktree(record, path => fs.readFileSync(join(path, '.spex-sync-drafts/draft.json'), 'utf8')), '{"unapproved":true}\n', 'existing archive seam retains the unapproved draft')
+    assert.equal(fs.existsSync(record.worktreePath), false)
+    assert.equal(JSON.stringify(readRecord(record.session)), before)
+    assert.deepEqual(readEvidence(input.source.commonDir, currentResource.checkpointRef), checkpointBefore)
+    assert.equal(git('rev-parse', 'refs/spex-archive/' + record.session), archiveBefore)
+  }
   assert.equal(JSON.parse(fs.readFileSync(process.env.SPEX_TERMINAL_CALLS_PATH!, 'utf8')).length, 1, 'cleanup and replay cannot send another Native call')
-  console.log(JSON.stringify({ scenario, state: state.state, phase: resource.phase, nativeStopped: state.cancellation?.nativeStopped, archived: record.archived }))
+  if (recovering) assert.equal(wakes, 0, 'cold replay and archived draft observation cannot request an execution wake')
+  for (const key of ['output', 'rejectedOutput', 'failedWorktree', 'resultWorktree', 'resultDigest'] as const) assert.equal(record.structuredExecution![key], undefined)
+  const finalRecord = readRecord(record.session)!, finalState = finalRecord.structuredExecution!
+  console.log(JSON.stringify({ scenario, state: finalState.state, phase: store.findResource(claim.attempt.id, request.requestKey)!.phase, nativeStopped: finalState.cancellation?.nativeStopped, archived: finalRecord.archived }))
   protocol.close()
 }
 
@@ -124,7 +145,7 @@ const scenario = process.env.SPEX_TERMINAL_SCENARIO
 if (scenario) {
   await runFixture(scenario)
   process.exit(0)
-} else for (const mode of ['clean', 'dirty', 'unknown-stop', 'legacy-failed', 'recovery-clean', 'recovery-dirty', 'recovery-unknown', 'recovery-removed-unknown']) test('Claude terminal failure preserves its error and exact cleanup boundary: ' + mode, () => {
+} else for (const mode of ['clean', 'dirty', 'unknown-stop', 'legacy-failed', 'recovery-clean', 'recovery-dirty', 'recovery-unknown', 'recovery-removed-unknown', 'recovery-later-stop']) test('Claude terminal failure preserves its error and exact cleanup boundary: ' + mode, () => {
   const directory = fs.mkdtempSync(join(tmpdir(), 'spex-terminal-cleanup-')), root = join(directory, 'repo'), home = join(directory, 'home'), bin = join(directory, 'bin'), count = join(directory, 'calls.json')
   for (const path of [root, home, bin]) fs.mkdirSync(path)
   const git = (...args: string[]): string => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: 'pipe' }).trim()
