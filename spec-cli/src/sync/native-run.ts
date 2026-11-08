@@ -3,13 +3,14 @@ import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { getBlob, putBlob, runtimeRoot } from '@spexcode/spec-core'
 import { readRecord, type SessRec } from '../session-record.js'
-import { sessionIdForCreateKey, readSessionCreateTermination, recoverSessionCreateTermination, verifyPreservedSessionCreateTermination, type SessionCreateTermination } from '../sessions.js'
+import { closeSession, sessionIdForCreateKey, readSessionCreateTermination, recoverSessionCreateTermination, verifyPreservedSessionCreateTermination, type SessionCreateTermination } from '../sessions.js'
 import { cancelStructuredSession, runStructuredSession, SettledSessionCreateTimeoutError, StructuredSessionError, type StructuredCancellationResult } from '../session-structured.js'
 import { assertRejectedOutput, prepareFrozenReaderRuntime, structuredExecutionPolicy, pinNativeConfiguration, pinZCodeToolPolicy, type FrozenReaderRuntime, type StructuredExecution } from '../session-structured-policy.js'
 import { assertFrozenBinding, prepareFrozenPrompt } from '../frozen-context.js'
 import { verifyStructuredFrozenReadProof as verifyFrozenReadProof } from '../structured-frozen-evidence.js'
 import { nativeWorktreePrompt } from '../native-worktree-runtime.js'
 import { verifyStageResult } from './stage-worktree.js'
+import { withoutSessionApplicationExecutionWake } from '../session-application.js'
 import { zcodeNativeModel } from '../zcode-structured.js'
 import type { ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult } from './elaboration-types.js'
 import { SyncStoreError, type SyncStore } from './store.js'
@@ -28,6 +29,7 @@ export function pinSyncNativeRequest(request: FrozenRequest, saved: Pick<Structu
 export type NativeRunRecord = Pick<SessRec, 'session' | 'status' | 'harnessSessionId' | 'structuredExecution' | 'createRequestId' | 'createPayloadHash'> & Partial<Pick<SessRec, 'worktreePath'>>
 export type AttemptRunnerOptions = {
   resourceRecoveryOnly?: true
+  retireCompletedWorktrees?: true
   runtime?: { run: typeof runStructuredSession; cancel: typeof cancelStructuredSession; readRecord: (id: string) => NativeRunRecord | null; readCreateTermination?: typeof readSessionCreateTermination; recoverCreateTermination?: typeof recoverSessionCreateTermination }
   blobIO?: { put: (bytes: Buffer) => BlobRef; read: (ref: BlobRef) => Buffer }
   pollMs?: number
@@ -381,7 +383,28 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
     if (signal?.aborted) current.controller.abort()
     const abort = (): void => current.controller.abort()
     signal?.addEventListener('abort', abort, { once: true })
-    try { return copy(await current.promise) }
+    try {
+      const result = await current.promise
+      if (options.retireCompletedWorktrees && frozen.worktree && !signal?.aborted) {
+        try {
+          const record = readRecord(result.sessionId), state = record?.structuredExecution
+          const attempt = store.readAttempt(fence.attemptId), dispatch = attempt.dispatchPlans.find(plan => plan.key === frozen.requestKey)
+          const execution = structuredExecutionPolicy(frozen), prompt = nativeWorktreePrompt(frozen.prompt, frozen.worktree)
+          const payloadHash = hash({ prompt, parent: null, launcher: null, base: frozen.worktree.baseCommit, structuredExecution: execution })
+          if (!record || !state || !dispatch || record.createRequestId !== sha(dispatch.sessionCreateKey) || record.createPayloadHash !== payloadHash
+            || record.session !== sessionIdForCreateKey(dispatch.sessionCreateKey) || hash(structuredExecutionPolicy(state)) !== hash(execution)
+            || state.state !== 'completed' || state.threadId !== result.threadId || state.turnId !== result.turnId
+            || state.resultDigest !== result.resultDigest || hash(state.output) !== result.resultDigest || hash(state.resultWorktree) !== hash(result.worktree))
+            throw new Error('completed native identity no longer matches its durable result')
+          await withoutSessionApplicationExecutionWake(() => closeSession(result.sessionId, undefined, {
+            wakeQueue: false, completed: { record, commonDir: operation.input.source.commonDir, worktree: result.worktree! },
+          }))
+        } catch (error) {
+          console.warn(`spex sync: completed worktree cleanup pending for ${result.sessionId}: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+      return copy(result)
+    }
     finally { signal?.removeEventListener('abort', abort); if (flights.get(frozen.requestKey) === current) flights.delete(frozen.requestKey) }
   }
 }

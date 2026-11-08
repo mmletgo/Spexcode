@@ -16,6 +16,8 @@ related:
 
 ## expanded spec
 
+普通协调执行显式启用[[sync-native-run]]的已完成工作树回收。每次成功及原结果冷重放在结果CAS已持久保存后、交给业务消费前复用正式close；只回收相同completed身份且精确Git结果clean的同步owned工作树。原Git对象、branch/archive、会话与JSON原件可冷读，业务schema后置拒绝不从零开始。失败/取消/未知停止和未捕获物理草稿保留；回收pending不改成功结果、资源removed或预算，不启动另一套扫描器。回收沿已有无execution-wake上下文且不主动drain队列，独立resource recovery的原语义保持。
+
 只读P1返修的已审因果绑定与当前pending owner分开保存。正常重入即使已完成返修，也保留原readonlyOwnerRepair及其原readonlyBaseRef，历史latest repair-input已清空时只从同attempt已认证历史取最近完整绑定，不改旧CAS或以较旧绑定覆盖冲突。已审返修whole缺少该因果或与原owner/候选/独审不符时明确拒绝，不能回选较旧正文。
 
 普通暂停恢复若没有新的修复输入，只能从原每组独审的冻结input或accepted provenance承接原诊断上下文。除此字段外完整当前输入须一致，再沿原Native请求、摘要、候选与停止原件严格认证accept。新修复输入、业务变化、缺证或漂移仍失效，不向fresh模型补旧诊断，不忽略repairContext或弱化digest。
