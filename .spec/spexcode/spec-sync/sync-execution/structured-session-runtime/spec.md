@@ -6,6 +6,7 @@ desc: 复用会话创建和启动队列，持久化精确 thread/turn 的结构�
 code:
   - spec-cli/src/session-structured.ts
 related:
+  - spec-cli/src/native-terminal-cleanup.test.ts
   - spec-cli/src/session-structured.test.ts
   - spec-cli/src/session-structured-queue.test.ts
   - spec-cli/src/sessions.ts
@@ -20,6 +21,10 @@ related:
 ## expanded spec
 
 本次执行中新认证的 ZCode worktree 原生失败由 [[zcode-structured-runtime]] 保留 failed 首要原因，执行队列复用原 exact adapter.stop；只有独立真实停止证明成立，才以既有 failed+cancellation.nativeStopped 交给资源桥结算 terminal→removed。错误和清理事实分别保存在既有 error/cancellation，不增加持久格式或成功授权；停止未知仍 cancelling，首要失败不被清理诊断遮蔽。该路径不提供 output、rejectedOutput 或 failedWorktree，不扫描或重签历史 failed/cancelling、saved/reserved 请求。成功、schema、Git、独审与显式取消门禁保持；新不同请求只在原资源正式释放后取得容量，同键恢复不发送。
+
+新发生的 Claude worktree 普通 failed 同样只在记录的 thread/turn 与原 claudeNative session/user 精确一致时复用既有精确停止协议；确证后保存原 failed/error 与独立 cancellation.nativeStopped，未知保持原失败诊断和 cancelling。此清理事实不授予格式失败、output、rejectedOutput 或 failedWorktree；历史 failed 冷读取不补签停止证明。
+
+正式取消或资源恢复重试后仍未证实停止时，已有首要 error 保持，新的停止诊断只写 cancellation.error；不能用清理诊断覆盖原执行失败。
 
 新产生的已认证final格式/schema拒绝可在failed运行元数据及StructuredSessionError上携可选tagged rejectedOutput：完整final文本、SHA、prompt/schema/input/purpose及原生thread/turn绑定。它只是不可信诊断，成功output槽仍缺席，旧failed无字段不补读/不猜分类。同键读取和资源桥重核固定请求与证据身份；取消、无final、未停稳、身份不符不得附正文。可选观测不参与固定策略/创建摘要、不增加执行authority，因此不新增writer marker。
 

@@ -6,6 +6,7 @@ desc: 从稳定输入经独立细化生成及四层验证结算真实私有交�
 code:
   - spec-cli/src/sync/coordinator.ts
 related:
+  - spec-cli/src/native-terminal-cleanup.test.ts
   - spec-cli/src/sync/coordinator.test.ts
 ---
 # 持续同步中央编排
@@ -17,6 +18,8 @@ related:
 ## expanded spec
 
 普通协调器显式启用[[sync-native-run]]的已结算工作树回收：completed及精确停止的failed/cancelled只在原请求/资源/Native和当前clean Git相符时正式close，原结果、错误、branch/archive、会话与JSON原件保持。P0/P1既有停止材料路径先完整认证Native/removed/request/owner/schema/保护面，再await[[archive]]临时checkout接缝；callback继续原physical/Git observer、capture及未批准provenance，空稿返回null继续来源顺序，观察或恢复异常亦只回收本次创建且经原归属证明的临时checkout。已捕获Git稿直接按对象冷读。dirty/未知停止保留，pending不改业务结果或预算；全程不启动旧Native、execution wake或队列，不增加扫描器或持久状态。
+
+正式恢复复用同一回收入口，也检查本 operation 已 removed 但尚未 close 的原生工作树；仅从既有 attempt/resource 的冻结计划冷重放，完整请求、checkpoint、canonical 停止及 clean Git 门禁保持。removed 只结算容量，不独立授予删除；缺停止证明、dirty 或身份漂移保留，历史 failed 不补签。资源专用离线恢复继续禁止 Native/模型派发、队列和 execution wake。
 
 只读P1返修的已审因果绑定与当前pending owner分开保存。正常重入即使已完成返修，也保留原readonlyOwnerRepair及其原readonlyBaseRef，历史latest repair-input已清空时只从同attempt已认证历史取最近完整绑定，不改旧CAS或以较旧绑定覆盖冲突。已审返修whole缺少该因果或与原owner/候选/独审不符时明确拒绝，不能回选较旧正文。
 
