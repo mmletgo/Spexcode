@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameS
 import { homedir } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
 import { createInterface } from 'node:readline'
+import type { Writable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
 import { detachedRuntimeIsGone, processStartToken, verifyDetachedRuntime, writeDetachedRuntimeReceipt, type ProcessIdentity } from '@spexcode/spec-core'
@@ -49,6 +50,31 @@ export function zcodeStructuredPrompt(prompt: string, schema: Record<string, unk
 /** SDK stdin 逐 Buffer 解码；ASCII 线路避免跨块拆坏 Unicode，持久 send 仍为原语义对象。 */
 export function zcodeProtocolLine(packet: Record<string, unknown>): string {
   return `${JSON.stringify(packet).replace(/[\u0080-\uffff]/g, character => '\\u' + character.charCodeAt(0).toString(16).padStart(4, '0'))}\n`
+}
+
+type RpcReply = { id?: number | string; result?: unknown; error?: { code?: number } }
+type RpcTraceIdentity = { ownerSessionId: string; nativeSessionId: string; inputId: string; queryId: string; pid: number; startToken: string }
+export function createZCodeStdioRpc(stdin: Pick<Writable, 'writable' | 'write'>, exited: () => boolean, options: { traceFile: string; identity: RpcTraceIdentity; onTraceError(error: unknown): void }) {
+  void options
+  let nextId = 0
+  const pending = new Map<number, { resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>()
+  return {
+    request: (method: string, params: Record<string, unknown>): Promise<unknown> => new Promise((resolve, reject) => {
+      if (exited() || !stdin.writable) { reject(new StructuredSessionError('cancellation_pending', 'ZCode native transport ended before exact settlement')); return }
+      const id = ++nextId, timer = setTimeout(() => { pending.delete(id); reject(new StructuredSessionError('cancellation_pending', `ZCode native RPC timeout (${method})`)) }, 10000)
+      pending.set(id, { resolve, reject, timer }); stdin.write(zcodeProtocolLine({ id, method, params }))
+    }),
+    receive: (packet: RpcReply): void => {
+      if (typeof packet.id !== 'number') return
+      const waiter = pending.get(packet.id)
+      if (!waiter) return
+      pending.delete(packet.id); clearTimeout(waiter.timer)
+      if (packet.error) waiter.reject(new StructuredSessionError('failed', `ZCode native RPC rejected (code ${typeof packet.error.code === 'number' ? packet.error.code : 'unknown'})`))
+      else waiter.resolve(packet.result)
+    },
+    transportClosed: (): void => {},
+    finish: (): void => { for (const waiter of pending.values()) { clearTimeout(waiter.timer); waiter.reject(new StructuredSessionError('cancellation_pending', 'ZCode transport closed')) } },
+  }
 }
 
 /** 只有新请求冻结的非交互策略增加控制段；历史请求保留原输入字节。 */
@@ -432,13 +458,11 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
     child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy(); child.unref()
     throw new StructuredSessionError('cancellation_pending', 'ZCode spawned ownership could not be durably published; exact stop is required')
   }
-  let nextId = 0, protocolError: Error | undefined = launchFailure, abortRequested = false, timedOut = false, acknowledged = false, sessionCreated = false, sent = false, closeAcknowledged = false, idle = false
-  const pending = new Map<number, { resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>()
-  const request = (method: string, params: Record<string, unknown>): Promise<unknown> => new Promise((resolve, reject) => {
-    if (exited || !child.stdin.writable) { reject(new StructuredSessionError('cancellation_pending', 'ZCode native transport ended before exact settlement')); return }
-    const id = ++nextId, timer = setTimeout(() => { pending.delete(id); reject(new StructuredSessionError('cancellation_pending', `ZCode native RPC timeout (${method})`)) }, 10000)
-    pending.set(id, { resolve, reject, timer }); child.stdin.write(zcodeProtocolLine({ id, method, params }))
-  })
+  let protocolError: Error | undefined = launchFailure, abortRequested = false, timedOut = false, acknowledged = false, sessionCreated = false, sent = false, closeAcknowledged = false, idle = false
+  const receipt = JSON.parse(readFileSync(plan.receiptFile, 'utf8')) as ProcessIdentity
+  const rpc = createZCodeStdioRpc(child.stdin, () => exited, { traceFile: join(root, 'rpc-trace.jsonl'), identity: { ownerSessionId: id, nativeSessionId: plan.sessionId, inputId: plan.inputId, queryId: plan.queryId, pid: plan.pid!, startToken: receipt.startToken }, onTraceError: () => { protocolError = new StructuredSessionError('cancellation_pending', 'ZCode RPC trace could not be persisted') } })
+  const request = rpc.request
+  void closed.then(() => rpc.transportClosed())
   const lines = createInterface({ input: child.stdout })
   lines.on('line', line => {
     let packet: { id?: number | string; method?: string; params?: { sessionId?: string; toolName?: string; input?: { file_path?: string; path?: string } }; result?: unknown; error?: { code?: number } }
@@ -452,12 +476,7 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
       else child.stdin.write(zcodeProtocolLine({ id: packet.id, error: { code: -32601, message: 'Unavailable in frozen read-only runtime' } }))
       return
     }
-    if (typeof packet.id !== 'number') return
-    const waiter = pending.get(packet.id)
-    if (!waiter) return
-    pending.delete(packet.id); clearTimeout(waiter.timer)
-    if (packet.error) waiter.reject(new StructuredSessionError('failed', `ZCode native RPC rejected (code ${typeof packet.error.code === 'number' ? packet.error.code : 'unknown'})`))
-    else waiter.resolve(packet.result)
+    rpc.receive(packet)
   })
   const stderrHash = createHash('sha256'); let stderrBytes = 0
   child.stderr.on('data', (bytes: Buffer) => { stderrBytes += bytes.length; stderrHash.update(bytes) })
@@ -576,7 +595,7 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
     child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy(); child.unref()
   } finally {
     clearTimeout(timeout); callbacks.signal?.removeEventListener('abort', interrupt); active.delete(root); lines.close()
-    for (const waiter of pending.values()) { clearTimeout(waiter.timer); waiter.reject(new StructuredSessionError('cancellation_pending', 'ZCode transport closed')) }
+    rpc.finish()
   }
   if (abortRequested) throw new StructuredSessionError(ownedProcessesStopped(plan) ? timedOut ? 'timeout' : 'cancelled' : 'cancellation_pending', 'ZCode cancellation revoked result publication')
   if (resultError) throw resultError
