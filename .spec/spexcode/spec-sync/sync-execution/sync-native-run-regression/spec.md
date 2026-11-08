@@ -14,7 +14,9 @@ code:
 
 ## expanded spec
 
-受控真实CLI/SQLite/Git夹具须先复现completed/removed仍留目录，再证明read/edit完成后正式close消除物理目录及Git登记，branch/archive/record/Native历史和原result保持。同键归档冷重放不新send或计费；syntax-invalid及schema-invalid业务JSON均能在删目录后由原Git capture/read并逐字overlay到新seed。dirty、完整expected record漂移、archive-ref写入失败明确defer/pending且保目录与成功结果；失败/取消/未知停止保物理材料。已有真实queued sibling在wakeQueue:false及无execution-wake关闭期间原record/launch不变且零新send，随后仅fixture显式drain的正控制须可真实完成。
+真实Git/受控Native先复现失败正式close后原材料读取路径丢失，再证明临时恢复能取同一JSON/commit并finally消除checkout。覆盖failed/cancelled编辑稿、read空稿null、callback抛错、restore在checkout创建后失败、registry锁前插入matching checkout，以及原record/Native/checkpoint/archive SHA不变、零新增send/launch/wake；自动回收仅确证停止且clean，dirty/unknown保留，completed既有回归保持。
+
+受控真实CLI/SQLite/Git夹具须先复现completed/removed仍留目录，再证明read/edit完成后正式close消除物理目录及Git登记，branch/archive/record/Native历史和原result保持。同键归档冷重放不新send或计费；syntax-invalid及schema-invalid业务JSON均能在删目录后由原Git capture/read并逐字overlay到新seed。dirty、完整expected record漂移、archive-ref写入失败明确defer/pending且保目录与成功结果；dirty/未知停止保物理材料。已有真实queued sibling在wakeQueue:false及无execution-wake关闭期间原record/launch不变且零新send，随后仅fixture显式drain的正控制须可真实完成。
 
 受控 ZCode 真实创建/队列/Git 结算复现已接受 turn 的 EPIPE。原公开失败和 exit=0、idle=false、closed=false、acknowledged=false 经正式肯定停止后成为 native_turn_transport_failed，原 canonical/CAS 与完整请求身份在同键冷重放保持，派发数不增加。EACCES 保持普通失败，错 session/turn/input 与未知停止无此资格。
 

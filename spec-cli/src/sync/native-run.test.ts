@@ -20,7 +20,7 @@ import { nativeReviewRequestMatches } from './coordinator.js'
 
 const tsxImport = createRequire(import.meta.url).resolve('tsx/esm')
 
-for (const scenario of ['turn-failed', 'ordinary-failure', 'events-timeout', 'events-recover', 'events-recover-schema', 'completed-read', 'completed-preserve', 'events-cancelled', 'foreign-session', 'foreign-turn', 'foreign-input', 'unknown-stop'] as const) test(`ZCode Native settlement binds one original send and exact stop: ${scenario}`, () => {
+for (const scenario of ['turn-failed', 'archived-edit', 'cancelled-edit', 'cancelled-empty', 'dirty-failed', 'ordinary-failure', 'events-timeout', 'events-recover', 'events-recover-schema', 'completed-read', 'completed-preserve', 'events-cancelled', 'foreign-session', 'foreign-turn', 'foreign-input', 'unknown-stop'] as const) test(`ZCode Native settlement binds one original send and exact stop: ${scenario}`, () => {
   const directory = mkdtempSync(join(tmpdir(), 'sync-zcode-failure-')), root = join(directory, 'repo'), home = join(directory, 'home'), bin = join(directory, 'bin'), count = join(directory, 'sends.json')
   for (const path of [root, home, bin]) mkdirSync(path)
   const git = (...args: string[]): string => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: 'pipe' }).trim()
@@ -40,9 +40,9 @@ if(request.method==='session/create'){session=p.sessionId;model=p.model;reply({s
 else if(request.method==='session/read')reply({session:{sessionId:session,status:input&&!stopping&&!completed&&!prompt.includes('next-request')?'error':'idle',model},settings:{model:{current:model}},runtime:{pendingRequestIds:[]},projection:{currentTurnId:input?turn:undefined,pendingPermissions:[],activeToolCalls:[]}});
 else if(request.method==='session/send'){
   input=p.inputId;query=p.queryId;prompt=p.content;const rows=fs.existsSync(count)?JSON.parse(fs.readFileSync(count,'utf8')):[];rows.push({sessionId:session,inputId:input});fs.writeFileSync(count,JSON.stringify(rows));
-  if(scenario.startsWith('events-recover')){
+  if((scenario.startsWith('events-recover')||['archived-edit','cancelled-edit','dirty-failed'].includes(scenario))&&!prompt.includes('next-request')){
     fs.mkdirSync('.spex-sync-drafts',{recursive:true});fs.writeFileSync('.spex-sync-drafts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json',scenario==='events-recover-schema'?'{"draft":42}':'{"draft":');const cp=require('node:child_process');
-    cp.execFileSync('git',['add','.spex-sync-drafts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json']);cp.execFileSync('git',['-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','agent draft']);
+    if(scenario!=='dirty-failed'){cp.execFileSync('git',['add','.spex-sync-drafts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json']);cp.execFileSync('git',['-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','agent draft'])}
   }
   reply({accepted:true,sessionId:session})
 }
@@ -59,6 +59,7 @@ else if(request.method==='session/events'){
   }
   const events=[];if(!p.afterSeq)events.push(event('turn.started',{inputId:input,queryId:query,messageId:'exact-user'}));
   events.push(event('session.updated',{providerId:model.providerId,modelId:model.modelId,toolCount:3}));
+  if(scenario.startsWith('cancelled-')&&!stopping){reply({events});return}
   if(scenario.startsWith('completed-'))completed=true;
   const terminal=stopping||scenario.startsWith('completed-')||prompt.includes('next-request')?event('turn.completed',{inputId:input,resultType:stopping?'cancelled':'success',response:stopping?'':'{"ok":true}'}):event('turn.failed',{inputId:input,error:{code:scenario==='ordinary-failure'?'EACCES':'EPIPE',message:'UNTRUSTED_PROVIDER_BODY'}});
   if(!stopping&&!prompt.includes('next-request')){
@@ -73,12 +74,47 @@ else if(request.method==='session/close')reply({closed:true});
 });`)
     chmodSync(executable, 0o755)
     const modulePath = (name: string): string => fileURLToPath(new URL(name, import.meta.url)), script = join(directory, 'runner.mts')
-    writeFileSync(script, `import assert from'node:assert/strict';import{readFileSync,existsSync,writeFileSync,chmodSync,rmSync}from'node:fs';import{execFileSync}from'node:child_process';
-import{Ajv}from'${createRequire(import.meta.url).resolve('ajv')}';import{openProtocol}from'${createRequire(import.meta.url).resolve('@spexcode/session-protocol')}';import{configuredSessionApplication,setSessionApplicationCommitWake}from${JSON.stringify(modulePath('../session-application.ts'))};import{sessionArtifactPath}from'${createRequire(import.meta.url).resolve('@spexcode/spec-core')}';import{structuredExecutionPolicy}from${JSON.stringify(modulePath('../session-structured-policy.ts'))};
-import{migrateSyncStore}from${JSON.stringify(modulePath('./migrations.ts'))};import{SyncStore}from${JSON.stringify(modulePath('./store.ts'))};import{createAttemptRunner}from${JSON.stringify(modulePath('./native-run.ts'))};import{captureInputSnapshot,readEvidence,contentHash}from${JSON.stringify(modulePath('./snapshot.ts'))};import{stageWorktree,overlayStageTree,captureStageDraft,readStageDraft}from${JSON.stringify(modulePath('./stage-worktree.ts'))};import{readRecord,writeRecord}from${JSON.stringify(modulePath('../session-record.ts'))};import{closeSession,refreshQueueCandidate,drainQueue}from${JSON.stringify(modulePath('../sessions.ts'))};
+    const gitExecutable = execFileSync('which', ['git'], { encoding: 'utf8' }).trim()
+    const failRestoreGit = `#!/usr/bin/env node
+const {spawnSync}=require('node:child_process');const args=process.argv.slice(2);if(args.includes('diff')){process.stderr.write('controlled restore diff failure');process.exit(23)}const result=spawnSync(${JSON.stringify(gitExecutable)},args,{stdio:'inherit'});process.exit(result.status??1);`
+    const intrudingGit = `#!/usr/bin/env node
+const {spawnSync}=require('node:child_process'),{existsSync}=require('node:fs');const args=process.argv.slice(2),target=__TARGET__,branch=__BRANCH__;if(args.includes('list')&&args.includes('--porcelain')&&!existsSync(target)){const added=spawnSync(${JSON.stringify(gitExecutable)},['worktree','add',target,branch],{stdio:'inherit'});if(added.status)process.exit(added.status)}const result=spawnSync(${JSON.stringify(gitExecutable)},args,{stdio:'inherit'});process.exit(result.status??1);`
+    writeFileSync(script, `import assert from'node:assert/strict';import{readFileSync,existsSync,writeFileSync,chmodSync,rmSync,mkdirSync}from'node:fs';import{execFileSync}from'node:child_process';
+import{Ajv}from'${createRequire(import.meta.url).resolve('ajv')}';import{openProtocol}from'${createRequire(import.meta.url).resolve('@spexcode/session-protocol')}';import{configuredSessionApplication,setSessionApplicationCommitWake,withoutSessionApplicationExecutionWake}from${JSON.stringify(modulePath('../session-application.ts'))};import{sessionArtifactPath}from'${createRequire(import.meta.url).resolve('@spexcode/spec-core')}';import{structuredExecutionPolicy}from${JSON.stringify(modulePath('../session-structured-policy.ts'))};
+import{migrateSyncStore}from${JSON.stringify(modulePath('./migrations.ts'))};import{SyncStore}from${JSON.stringify(modulePath('./store.ts'))};import{createAttemptRunner}from${JSON.stringify(modulePath('./native-run.ts'))};import{captureInputSnapshot,readEvidence,contentHash}from${JSON.stringify(modulePath('./snapshot.ts'))};import{nativeWorktreeResult}from${JSON.stringify(modulePath('../native-worktree-runtime.ts'))};import{stageWorktree,overlayStageTree,captureStageDraft,readStageDraft,readStoppedPhysicalDraft}from${JSON.stringify(modulePath('./stage-worktree.ts'))};import{readRecord,writeRecord}from${JSON.stringify(modulePath('../session-record.ts'))};import{closeSession,refreshQueueCandidate,drainQueue,withArchivedStructuredWorktree}from${JSON.stringify(modulePath('../sessions.ts'))};
 const scenario=${JSON.stringify(scenario)},owner='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',draftPath='.spex-sync-drafts/'+owner+'.json',draftSource=scenario==='events-recover-schema'?'{"draft":42}':'{"draft":',schema=JSON.stringify({type:'object',properties:{draft:{type:'boolean'}},required:['draft']}),snapshot=await captureInputSnapshot(process.cwd(),{committed:true});configuredSessionApplication();const protocol=openProtocol(process.env.SPEX_SESSION_DATABASE_PATH);await migrateSyncStore(protocol);const store=new SyncStore(protocol,{readBlob:ref=>readEvidence(snapshot.source.commonDir,ref)}),scope={paths:['value'],contractIds:[],flowIds:[]};
-const operation=store.admitAndEnqueue({ingressKey:'failure',rootCauseId:'failure',origin:'spec',input:snapshot,scope,budget:{maxCalls:3,maxAttempts:1,maxRepairs:0,timeoutMs:60000},policyDigest:'policy',impactDigest:'impact',readSetDigest:'read',delivery:null,deliveryPlan:{canonicalRoot:process.cwd()+'/delivery',branch:'delivery',baseCommit:snapshot.headCommit}}),claim=store.claimAttempt({operationId:operation.id,source:snapshot.source,scope,leaseMs:60000,expectedMessageId:operation.dispatchMessageId}),seed=stageWorktree(snapshot.source.commonDir,snapshot.headCommit,scenario.startsWith('events-recover')?overlayStageTree(snapshot.source.commonDir,snapshot.immutableTree,[{path:draftPath.replace(/\\.json$/,'.schema.json'),source:schema}]):snapshot.immutableTree,scenario.startsWith('events-recover')?'edit':'read'),request={root:process.cwd(),base:seed.baseCommit,worktree:seed,requestKey:'failure',inputDigest:'original-input',purpose:'code_behavior_analyze',prompt:'controlled failure',schema:{type:'object',properties:{ok:{type:'boolean'}},required:['ok'],additionalProperties:false},timeoutMs:null,model:'zcode:fixture/model'},runner=createAttemptRunner(store,claim.fence,{pollMs:2,retireCompletedWorktrees:scenario==='completed-preserve'?undefined:true});
+const operation=store.admitAndEnqueue({ingressKey:'failure',rootCauseId:'failure',origin:'spec',input:snapshot,scope,budget:{maxCalls:3,maxAttempts:1,maxRepairs:0,timeoutMs:60000},policyDigest:'policy',impactDigest:'impact',readSetDigest:'read',delivery:null,deliveryPlan:{canonicalRoot:process.cwd()+'/delivery',branch:'delivery',baseCommit:snapshot.headCommit}}),claim=store.claimAttempt({operationId:operation.id,source:snapshot.source,scope,leaseMs:60000,expectedMessageId:operation.dispatchMessageId}),seed=stageWorktree(snapshot.source.commonDir,snapshot.headCommit,scenario.startsWith('events-recover')||['archived-edit','cancelled-edit','dirty-failed'].includes(scenario)?overlayStageTree(snapshot.source.commonDir,snapshot.immutableTree,[{path:draftPath.replace(/\\.json$/,'.schema.json'),source:schema}]):snapshot.immutableTree,scenario.startsWith('events-recover')||['archived-edit','cancelled-edit','dirty-failed'].includes(scenario)?'edit':'read'),request={root:process.cwd(),base:seed.baseCommit,worktree:seed,requestKey:'failure',inputDigest:'original-input',purpose:'code_behavior_analyze',prompt:'controlled failure',schema:{type:'object',properties:{ok:{type:'boolean'}},required:['ok'],additionalProperties:false},timeoutMs:null,model:'zcode:fixture/model'},runner=createAttemptRunner(store,claim.fence,{pollMs:2,retireSettledWorktrees:scenario==='completed-preserve'||scenario==='archived-edit'?undefined:true});
+if(scenario.startsWith('cancelled-')){const controller=new AbortController();request.signal=controller.signal;const timer=setInterval(()=>{const dispatch=store.readAttempt(claim.attempt.id).dispatchPlans[0],current=dispatch?.session?.sessionId?readRecord(dispatch.session.sessionId):null;if(current?.structuredExecution?.turnId){clearInterval(timer);controller.abort()}},10)}
 const {result,failure}=await runner(request).then(result=>({result}),failure=>({failure})),record=readRecord((result??failure).sessionId),state=record.structuredExecution,native=state.zcodeNative.root,resource=store.findResource(claim.attempt.id,request.requestKey),exit=JSON.parse(readFileSync(native+'/exit.json','utf8'));
+if(scenario==='archived-edit'||scenario.startsWith('cancelled-')){
+  assert.equal(failure.code,scenario==='archived-edit'?'native_turn_transport_failed':'cancelled');assert.equal(resource.phase,'removed');assert.equal(state.cancellation.nativeStopped,true);
+  const before=JSON.stringify(state);if(!record.archived)await withoutSessionApplicationExecutionWake(()=>closeSession(record.session,undefined,{wakeQueue:false}));
+  assert.equal(existsSync(record.worktreePath),false);
+  const archived=readRecord(record.session),originalRecord=JSON.stringify(archived),originalCheckpoint=readEvidence(snapshot.source.commonDir,resource.checkpointRef),archiveRef=execFileSync('git',['rev-parse','refs/spex-archive/'+record.session],{encoding:'utf8'}),binding={ownerDigest:owner,sourceInputId:snapshot.id,schemaDigest:contentHash(schema),path:draftPath};
+  let wakes=0;setSessionApplicationCommitWake(()=>wakes++);
+  const material=await withArchivedStructuredWorktree(archived,path=>{
+    const witness=nativeWorktreeResult(path,seed);if(seed.mode==='read'){assert.equal(witness.headCommit,seed.baseCommit);return null}
+    const physical=readStoppedPhysicalDraft(snapshot.source.commonDir,path,seed,binding,{allowCommitted:true}),draft=captureStageDraft(snapshot.source.commonDir,seed,{worktree:witness},binding);
+    assert.equal(readStageDraft(snapshot.source.commonDir,draft,binding),draftSource);return physical;
+  });
+  if(seed.mode==='read')assert.equal(material,null);else assert.equal(material.source,draftSource,'正式close后仍沿原Git稿续修');
+  assert.equal(JSON.stringify(readRecord(record.session)),originalRecord);assert.equal(JSON.stringify(readRecord(record.session).structuredExecution),before);assert.equal(existsSync(record.worktreePath),false);assert.deepEqual(readEvidence(snapshot.source.commonDir,resource.checkpointRef),originalCheckpoint);assert.equal(execFileSync('git',['rev-parse','refs/spex-archive/'+record.session],{encoding:'utf8'}),archiveRef);
+  await assert.rejects(withArchivedStructuredWorktree(readRecord(record.session),path=>{assert.equal(existsSync(path),true);throw Error('material callback failure')}),/material callback failure/);
+  assert.equal(existsSync(record.worktreePath),false);assert.equal(JSON.stringify(readRecord(record.session)),originalRecord);
+  writeRecord({...archived,coldProof:'foreign-proof'});await assert.rejects(withArchivedStructuredWorktree(readRecord(record.session),()=>assert.fail('invalid cold proof must not observe')),/cold and absent/);writeRecord(archived);
+  if(scenario==='archived-edit'){
+    const shim=process.cwd()+'/restore-fault-bin';mkdirSync(shim);writeFileSync(shim+'/git',${JSON.stringify(failRestoreGit)});chmodSync(shim+'/git',0o755);const originalPath=process.env.PATH;process.env.PATH=shim+':'+originalPath;
+    try{await assert.rejects(withArchivedStructuredWorktree(archived,()=>assert.fail('failed restore must not observe')),/archived changes could not be restored/)}finally{process.env.PATH=originalPath}
+    assert.equal(existsSync(record.worktreePath),false,'restore后半失败也回收本次checkout');assert.equal(JSON.stringify(readRecord(record.session)),originalRecord);assert.equal(execFileSync('git',['rev-parse','refs/spex-archive/'+record.session],{encoding:'utf8'}),archiveRef);
+    assert.equal(await withArchivedStructuredWorktree(archived,path=>readFileSync(path+'/'+draftPath,'utf8')),draftSource,'去故障后同一archive可重试');assert.equal(existsSync(record.worktreePath),false);
+    writeFileSync(shim+'/git',${JSON.stringify(intrudingGit)}.replace('__TARGET__',JSON.stringify(record.worktreePath)).replace('__BRANCH__',JSON.stringify(archived.branch)));process.env.PATH=shim+':'+originalPath;
+    try{await assert.rejects(withArchivedStructuredWorktree(archived,()=>assert.fail('matching path inserted before registry must not observe')),/temporary restore requires an absent checkout/)}finally{process.env.PATH=originalPath}
+    assert.equal(existsSync(record.worktreePath),true,'registry锁前出现的matching checkout不是本次创建，不可删除');assert.equal(JSON.stringify(readRecord(record.session)),originalRecord);assert.equal(execFileSync('git',['rev-parse','refs/spex-archive/'+record.session],{encoding:'utf8'}),archiveRef);
+    execFileSync('git',['worktree','remove',record.worktreePath],{stdio:'pipe'});
+  }
+  assert.equal(wakes,0);assert.equal(JSON.parse(readFileSync(${JSON.stringify(count)},'utf8')).length,1);assert.equal(store.readOperation(operation.id).callsUsed,1);
+  console.log(JSON.stringify({scenario,material:seed.mode==='read'?'null':'original-json',checkoutRemoved:true,nativeUnchanged:true,checkpointUnchanged:true,sends:1,wakes}));protocol.close();process.exit(0);
+}
 if(scenario.startsWith('events-recover')||scenario.startsWith('completed-')){
   assert.equal(JSON.parse(readFileSync(native+'/terminal.json','utf8')).payload.resultType,'success');
   assert.deepEqual({idle:exit.idle,closed:exit.closed,stopped:exit.stopped},{idle:true,closed:true,stopped:true});
@@ -88,12 +124,12 @@ if(scenario.startsWith('events-recover')||scenario.startsWith('completed-')){
   assert.equal(worktree.baseCommit,seed.baseCommit);
   if(scenario==='completed-preserve'){
     const warnings=[],warn=console.warn;console.warn=(...args)=>warnings.push(args.join(' '));
-    const replay=()=>createAttemptRunner(store,claim.fence,{pollMs:2,retireCompletedWorktrees:true})(request),path=worktree.worktreePath,original=JSON.stringify(readRecord(result.sessionId));
+    const replay=()=>createAttemptRunner(store,claim.fence,{pollMs:2,retireSettledWorktrees:true})(request),path=worktree.worktreePath,original=JSON.stringify(readRecord(result.sessionId));
     writeFileSync(path+'/uncommitted.json','{"unfinished":');
     assert.deepEqual(await replay(),result);assert.equal(existsSync(path),true);assert.equal(JSON.stringify(readRecord(result.sessionId)),original);assert.match(warnings.at(-1),/cleanup pending.*clean/);assert.equal(readFileSync(path+'/uncommitted.json','utf8'),'{"unfinished":');
     rmSync(path+'/uncommitted.json');
     const expected=readRecord(result.sessionId);writeRecord({...expected,runtimeStartToken:'new-user-runtime'});
-    await assert.rejects(closeSession(result.sessionId,undefined,{wakeQueue:false,completed:{record:expected,commonDir:snapshot.source.commonDir,worktree}}),/identity changed/);assert.equal(existsSync(path),true);assert.equal(readRecord(result.sessionId).runtimeStartToken,'new-user-runtime');
+    await assert.rejects(closeSession(result.sessionId,undefined,{wakeQueue:false,settled:{record:expected,commonDir:snapshot.source.commonDir,worktree}}),/identity changed/);assert.equal(existsSync(path),true);assert.equal(readRecord(result.sessionId).runtimeStartToken,'new-user-runtime');
     writeRecord(expected);
     const sibling='cleanup-queued-sibling',siblingPath=process.cwd()+'/queued-sibling',siblingBranch='queued-sibling',siblingPrompt='next-request';
     git('worktree','add','-q','-b',siblingBranch,siblingPath,seed.baseCommit);
@@ -129,7 +165,7 @@ if(scenario.startsWith('events-recover')||scenario.startsWith('completed-')){
   assert.equal(git('rev-parse','refs/spex-archive/'+result.sessionId).length,worktree.headCommit.length);
   assert.equal(git('rev-parse',record.branch),worktree.headCommit);
   assert.equal(git('worktree','list','--porcelain').includes(worktree.worktreePath),false);
-  assert.deepEqual(await createAttemptRunner(store,claim.fence,{pollMs:2,retireCompletedWorktrees:true})(request),result,'归档后从原removed结果冷重放');
+  assert.deepEqual(await createAttemptRunner(store,claim.fence,{pollMs:2,retireSettledWorktrees:true})(request),result,'归档后从原removed结果冷重放');
   assert.equal(JSON.parse(readFileSync(${JSON.stringify(count)},'utf8')).length,scenario==='completed-preserve'?2:1);
   assert.equal(store.readOperation(operation.id).callsUsed,1);assert.equal(exit.acknowledged,false,'恢复读取不得发送 stop');
   protocol.close();process.exit(0);
@@ -138,11 +174,11 @@ assert(failure,'failed Native cannot publish output');
 assert.equal(state.output,undefined);assert.equal(state.resultDigest,undefined);assert.equal(state.rejectedOutput,undefined);assert.equal(state.failedWorktree,undefined);assert.equal(existsSync(native+'/completed.json'),false);assert.equal(state.error.includes('UNTRUSTED_PROVIDER_BODY'),false);
 console.log(JSON.stringify({scenario,code:failure.code,message:failure.message,state:state.state,phase:resource.phase,nativeStopped:state.cancellation?.nativeStopped,idle:exit.idle,closed:exit.closed}));
 if(scenario==='turn-failed')assert.equal(failure.code,'native_turn_transport_failed','原生公开EPIPE须保专用typed失败，不能退化为generic failed');
-assert.equal(existsSync(record.worktreePath),true,'失败/取消/未知停止保留原物理工作树与未捕获材料');
+assert.equal(existsSync(record.worktreePath),resource.phase!=='removed'||scenario==='dirty-failed','仅已精确停止且clean的失败目录自动回收，未知停止保留');
 const eventsFailure=scenario==='events-timeout'||scenario==='events-cancelled';
-if(scenario==='turn-failed'||scenario==='ordinary-failure'||eventsFailure){
-  assert.equal(failure.code,eventsFailure?'native_rpc_timeout':scenario==='turn-failed'?'native_turn_transport_failed':'failed');
-  assert.ok(failure.message.includes(eventsFailure?'session/events':scenario==='turn-failed'?'code=EPIPE':'code=EACCES'));
+if(scenario==='turn-failed'||scenario==='dirty-failed'||scenario==='ordinary-failure'||eventsFailure){
+  assert.equal(failure.code,eventsFailure?'native_rpc_timeout':scenario==='turn-failed'||scenario==='dirty-failed'?'native_turn_transport_failed':'failed');
+  assert.ok(failure.message.includes(eventsFailure?'session/events':scenario==='turn-failed'||scenario==='dirty-failed'?'code=EPIPE':'code=EACCES'));
   assert.equal(state.state,'failed');assert.equal(state.cancellation.nativeStopped,true);assert.equal(resource.phase,'removed');assert.equal(exit.stopped,true);
   if(!eventsFailure){assert.equal(exit.idle,false);assert.equal(exit.closed,false)}else{assert.equal(exit.idle,true);assert.equal(exit.closed,true);assert.equal(exit.acknowledged,scenario==='events-timeout');assert.equal(JSON.parse(readFileSync(native+'/terminal.json','utf8')).payload.resultType,'cancelled')}
   const saved=JSON.parse(readEvidence(snapshot.source.commonDir,resource.checkpointRef).toString());assert.deepEqual(saved.failure,{code:failure.code,message:failure.message});

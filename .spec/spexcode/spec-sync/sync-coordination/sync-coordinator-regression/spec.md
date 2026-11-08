@@ -16,6 +16,8 @@ related:
 
 ## expanded spec
 
+Claude P0暂停/失败与ZCode P1已提交稿经正式close后，在新attempt沿原Native/CAS/owner/schema及source/tests保护面取同一原JSON，继承未批准材料而非从零派发。私有fixture从首个session创建起固定cwd/commonDir；临时恢复后目录再移除，原record/Native文件、checkpoint/resource及archive SHA逐字不变。callback失败、restore后半失败和registry前出现matching checkout的边界由[[sync-native-run-regression]]证明；均不得启动旧Native或改旧批准。
+
 多轮V5事实返修经真实Git/隔离SQLite及独立Native审查accept进入V3恢复债后，同attempt再次调度结算pending，再正式pause/run新fence，须保持最新已审desc/expanded/basis、完整同一候选与原Native独审provenance，零新增模型。独立旧cleared历史形态只追加受控的repairContext-only stage，原因果CAS与原件保持。缺因果及冲突base在模型派发前拒绝，既有去repairContext、模型及候选漂移反例保持。受控运输及Native fixture不代替真实产品验收。
 
 当前有效lease的V3首次materialize SSH故障在真实临时Git/私有SQLite保存planned资源与recovery_required stage，跨过原验证deadline后仅正常runSyncOperation重调度。旧版仍planned且复用原Broken pipe。新版沿同run/resource的生产executor/helper形成closed、effect排空、精确absence、timeout terminal和cleanup/removed，保原失败CAS根、候选、请求、deadline及源码/index，无新模型/attempt/run/upload/create/start或journal，失败按原预算结算并释放租约。实际内核锁仍被持有时，新观察须为busy且保planned/容量/有效租约，当前Native资源原件保持。removed重入不访问driver/SSH或写checkpoint。共用原运输fixture，既有AC-REMOTE断言/模式不变。新增SSH包装故障及Native账本均为受控上游，不声称真实模型、远端Docker或Tiny最终验收。
