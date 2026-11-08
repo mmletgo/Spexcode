@@ -39,7 +39,7 @@ export type StructuredExecution = {
   output?: unknown
   resultDigest?: string
   error?: string
-  errorCode?: 'structured_output_retries_exhausted' | 'structured_output_format_invalid' | 'native_worktree_result_invalid' | 'native_rpc_timeout' | 'native_turn_transport_failed'
+  errorCode?: 'structured_output_retries_exhausted' | 'structured_output_format_invalid' | 'native_worktree_result_invalid' | 'native_rpc_timeout' | 'native_turn_transport_failed' | 'unsupported'
   rejectedOutput?: RejectedStructuredOutput
   worktree?: NativeWorktreeRequest
   zcodeToolPolicy?: ZCodeToolPolicy

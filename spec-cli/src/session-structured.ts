@@ -179,7 +179,7 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
     const rejectedOutput = error instanceof StructuredSessionError ? error.rejectedOutput : undefined
     if (rejectedOutput) assertRejectedOutput(rejectedOutput, readFileSync(sessionArtifactPath(id, 'launch'), 'utf8'), execution, { threadId: pendingStop?.threadId, turnId: pendingStop?.turnId })
     const state = error instanceof StructuredSessionError && (error.code === 'cancelled' || error.code === 'timeout') ? error.code : 'failed'
-    const errorCode = error instanceof ZCodeNativeTurnFailedError && error.code === 'native_turn_transport_failed' && failedStage?.stop.nativeStopped
+    const errorCode = error instanceof ZCodeNativeTurnFailedError && (error.code === 'native_turn_transport_failed' || error.code === 'unsupported') && failedStage?.stop.nativeStopped
       ? error.code
       : error instanceof StructuredSessionError && (error.code === 'structured_output_retries_exhausted' || error.code === 'structured_output_format_invalid' || error.code === 'native_worktree_result_invalid') ? error.code : undefined
     await update({ state, ...(rejectedOutput ? { rejectedOutput } : {}), ...(failedStage ? { ...(failedStage.worktree ? { failedWorktree: failedStage.worktree } : {}), cancellation: { reason: 'cancelled', requestedAt: Date.now(), ...failedStage.stop } } : {}), error: error instanceof Error ? error.message : String(error), ...(errorCode ? { errorCode } : {}) })

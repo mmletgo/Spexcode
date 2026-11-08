@@ -57,4 +57,4 @@ Codex 原生 readOnly 策略保留，P1 使用提供正文的纯推理，不依�
 
 native_worktree_result_invalid 仅为原生 Git 结果后置合约的精确失败观测；不改变固定 policy、创建摘要、正常读取能力或旧冻结证明门禁。原 nativeWorktreePrompt 字节与历史创建哈希保持。
 
-计时器产生的 native_rpc_timeout 是显式原生故障观测，不能从错误文本补分类。ZCode 原生工作树正式停止后可在原 errorCode 保存由精确公开 EPIPE 终态产生的 native_turn_transport_failed；无新策略或持久字段，历史缺席保持。失败可选 failedWorktree 仅承载原 seed 下已认证且确证停止的 Git 事实，与成功 resultWorktree 分离，不参与固定策略摘要、不授予成功 output 或候选；旧记录缺席保持。资源终态及续修准入由 [[sync-native-run]] 与 [[sync-coordinator]] 分别核验。
+计时器产生的 native_rpc_timeout 是显式原生故障观测，不能从错误文本补分类。ZCode 原生工作树正式停止后可在原 errorCode 保存由精确公开 EPIPE 终态产生的 native_turn_transport_failed；仅由 [[zcode-structured-runtime]] 精确认定的不可重试 provider 业务拒绝可保存既有 unsupported。errorCode 是终态观测，不进入固定 policy/创建哈希；无新策略、字段、版本或迁移，历史码与缺席保持。失败可选 failedWorktree 仅承载原 seed 下已认证且确证停止的 Git 事实，与成功 resultWorktree 分离，不参与固定策略摘要、不授予成功 output 或候选；旧记录缺席保持。资源终态及续修准入由 [[sync-native-run]] 与 [[sync-coordinator]] 分别核验。

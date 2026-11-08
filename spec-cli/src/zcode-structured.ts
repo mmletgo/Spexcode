@@ -44,9 +44,11 @@ const fixedPolicy = (execution: ZCodeStructuredExecution) => execution.policy ==
 
 /** 只认证本次精确失败终态；原生正文不进入错误诊断，停止权限仍由既有adapter独立证明。 */
 export class ZCodeNativeTurnFailedError extends StructuredSessionError {
-  constructor(threadId: string, turnId: string, nativeCode: unknown, worktree: boolean) {
+  constructor(threadId: string, turnId: string, nativeCode: unknown, worktree: boolean, nativeAttribution?: unknown) {
     const code = typeof nativeCode === 'string' && Object.hasOwn(constants.errno, nativeCode) ? nativeCode : 'unavailable'
-    super(worktree && code === 'EPIPE' ? 'native_turn_transport_failed' : 'failed', `ZCode native turn failed (code=${code})`, { threadId, turnId })
+    const attribution = nativeAttribution as { source?: unknown; exceptionKind?: unknown; retryable?: unknown } | null | undefined
+    const providerRejection = worktree && code === 'EPIPE' && attribution?.source === 'provider' && attribution.exceptionKind === 'provider_business' && attribution.retryable === false
+    super(providerRejection ? 'unsupported' : worktree && code === 'EPIPE' ? 'native_turn_transport_failed' : 'failed', providerRejection ? 'ZCode provider rejected the native turn (retryable=false)' : `ZCode native turn failed (code=${code})`, { threadId, turnId })
   }
 }
 
@@ -601,8 +603,8 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
     }
     writeJson(join(root, 'events.json'), events); writeJson(join(root, 'event-counts.json'), counts)
     if (terminal?.type === 'turn.failed') {
-      const error = terminal.payload.error as { code?: unknown } | undefined
-      throw new ZCodeNativeTurnFailedError(plan.sessionId, plan.turnId!, error?.code, worktree)
+      const error = terminal.payload.error as { code?: unknown; attribution?: unknown } | undefined
+      throw new ZCodeNativeTurnFailedError(plan.sessionId, plan.turnId!, error?.code, worktree, error?.attribution)
     }
     return terminal
   }

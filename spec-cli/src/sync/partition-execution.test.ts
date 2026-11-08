@@ -15,7 +15,7 @@ import type { ElaborationInput, ElaborationResult } from './elaboration-types.js
 import { CONTRACT_COLUMNS, parseParts } from '@spexcode/spec-core/contracts'
 import { withoutVerificationTables } from './elaboration-markdown.js'
 import type { GeneratedTables, GeneratedTargetElaboration } from './elaboration-markdown.js'
-import type { GenerationInput } from './generation-types.js'
+import type { GenerationInput, GenerationResult } from './generation-types.js'
 import { freezeGenerationInput, generationReviewRequest, restoreGenerationInput } from './generation.js'
 import { analyzeSyncPartitions, completeSyncPartitionPlan, elaborateSyncPartitions, generateSyncPartitions, implementationGenerationDispatch, implementationPartitionSelection, mapSyncPartitions, partitionSealRepairOwners, projectPartitionVerificationOwnership } from './partition-execution.js'
 import type { PartitionCheckpoints } from './partition-execution.js'
@@ -871,6 +871,98 @@ test('取消停止小批后续派发，已在途任务先结算；失败亦不�
   assert.deepEqual(dispatched, [1])
   await assert.rejects(mapSyncPartitions([1, 2, 3], 1, undefined, async value => { throw new Error(`failed-${value}`) }), /failed-1/)
 })
+
+const failurePriorityCases = [
+  { codes: ['repair', 'unsupported'], winner: 1 },
+  { codes: ['unsupported', 'repair'], winner: 0 },
+  { codes: ['unsupported', 'cancellation_pending'], winner: 1 },
+  { codes: ['cancellation_pending', 'unsupported'], winner: 0 },
+] as const
+
+for (const { codes, winner } of [...failurePriorityCases, { codes: ['native_rpc_timeout', 'unsupported'], winner: 1 }, { codes: ['repair', 'native_rpc_timeout'], winner: -1 }])
+  for (const reverse of [false, true]) test('分区主失败优先级保原错误并等待在途 ' + codes.join('/') + ' reverse=' + reverse, async () => {
+    const errors = codes.map((code, index) => Object.assign(new Error('原诊断-' + code + '-' + index), { code }))
+    const dispatched: number[] = [], settled: number[] = [], release: (() => void)[] = []
+    const gates = [0, 1].map(index => new Promise<void>(resolve => { release[index] = resolve }))
+    let started!: () => void, ticks = 0
+    const bothStarted = new Promise<void>(resolve => { started = resolve })
+    const outcome = mapSyncPartitions([0, 1, 2, 3], 2, undefined, async index => {
+      dispatched.push(index); if (dispatched.length === 2) started()
+      await gates[index]
+      settled.push(index); setImmediate(() => { ticks++ })
+      throw errors[index]
+    }).then(() => assert.fail('所有在途分区均失败'), (error: unknown) => error)
+    await bothStarted
+    const order = reverse ? [1, 0] : [0, 1]
+    release[order[0]](); await new Promise<void>(resolve => setImmediate(resolve))
+    assert.deepEqual(dispatched, [0, 1], '首错后不得派发第三项')
+    release[order[1]]()
+    assert.equal(await outcome, errors[winner < 0 ? order[0] : winner], '必须保留同一个原错误对象与message')
+    assert.deepEqual(settled, order); assert.equal(ticks, 2, '最后失败也须真正让控制回调执行')
+  })
+
+for (const phase of ['ordinary', 'interface'] as const) for (const { codes, winner } of failurePriorityCases)
+  test('P1主失败优先级保完整分区原件 phase=' + phase + ' ' + codes.join('/'), async t => {
+    const { input, plan, checkpoints, paths } = await rawParentInterfaceFixture(t)
+    let ids: string[]
+    if (phase === 'ordinary') {
+      const parent = input.targets.find(target => target.path === paths.root)!
+      input.context = [{ nodeId: parent.nodeId, path: parent.path, source: parent.source! }]
+      input.targets = input.targets.filter(target => target.path !== paths.root)
+      plan.partitions = plan.partitions.filter(partition => partition.id !== 'parent')
+      ids = ['alpha', 'beta']
+    } else {
+      const parent = input.targets[0], leaf = input.targets[1], sourcePath = 'src/other-copy.mjs'
+      const otherParent = { ...parent, nodeId: 'other-root', path: '.spec/other-root/spec.md' }
+      const source = leaf.source!.replace(paths.alphaSource, sourcePath)
+      const otherLeaf = { ...leaf, nodeId: 'other-leaf', path: '.spec/other-root/other-leaf/spec.md', source, sourceDigest: contentHash(source) }
+      for (const target of [otherParent, otherLeaf]) { mkdirSync(join(input.root, dirname(target.path)), { recursive: true }); writeFileSync(join(input.root, target.path), target.source!) }
+      writeFileSync(join(input.root, sourcePath), input.files!.get(paths.alphaSource)!)
+      execFileSync('git', ['-C', input.root, 'add', '.'], { stdio: 'pipe' }); execFileSync('git', ['-C', input.root, 'commit', '-m', 'second independent interface fixture'], { stdio: 'pipe' })
+      input.historyInput = await captureInputSnapshot(input.root); input.base = input.historyInput.headCommit
+      input.files = new Map(readTree(input.historyInput.source.commonDir, input.historyInput.immutableTree).map(entry => [entry.path, readObject(input.historyInput!.source.commonDir, entry.oid).toString('utf8')]))
+      input.targets = [...input.targets, otherParent, otherLeaf]
+      plan.partitions.splice(1, 0, { ...plan.partitions[0], id: 'other-parent', intentNodeId: otherParent.nodeId, targets: [{ nodeId: otherParent.nodeId, path: otherParent.path }], readPaths: [otherParent.path], writePaths: [otherParent.path], changedPaths: [otherParent.path] })
+      plan.partitions.push({ ...plan.partitions[2], id: 'other-child', intentNodeId: otherParent.nodeId, targets: [{ nodeId: otherLeaf.nodeId, path: otherLeaf.path }], readPaths: [otherParent.path, otherLeaf.path, sourcePath], writePaths: [otherLeaf.path], sourcePaths: [sourcePath], changedPaths: [otherLeaf.path], contextNodeIds: [otherParent.nodeId] })
+      plan.expectedPaths.push(otherParent.path, otherLeaf.path); plan.digest = contentHash(JSON.stringify(plan))
+      ids = ['parent', 'other-parent']
+    }
+    input.maxRepairs = 0
+    const calls: ElaborationSessionRequest[] = []
+    const result = await elaborateSyncPartitions(input, plan, 2, checkpoints, async request => {
+      calls.push(request)
+      const index = ids.findIndex(id => request.requestKey.includes(':partition:' + id + ':'))
+      assert.notEqual(index, -1, '失败层不得继续派发子节点')
+      const code = codes[index]
+      if (code !== 'repair') throw Object.assign(new Error('原分区诊断-' + ids[index] + '-' + code), { code })
+      const output = {}
+      return { sessionId: 'repair-session', threadId: 'repair-thread', turnId: 'repair-turn', output, resultDigest: contentHash(JSON.stringify(output)) }
+    })
+    const saved = ids.map(id => checkpoints.load<ElaborationResult>('partition:' + id + ':elaboration')!)
+    assert(saved.every(Boolean)); assert.equal(calls.length, 2)
+    assert.equal(result.status, saved[winner].status); assert.deepEqual(result.failure, saved[winner].failure)
+    assert.equal(result.failure?.code, codes[winner])
+    assert.deepEqual(result.partitionEvidence!.map(item => item.partitionId), ids)
+    for (const item of result.partitionEvidence!) assert.deepEqual(JSON.parse(readEvidence(input.historyInput!.source.commonDir, item.resultRef).toString()).failure, saved[ids.indexOf(item.partitionId)].failure)
+  })
+
+for (const phase of ['prepared', 'review'] as const) for (const { codes, winner } of failurePriorityCases)
+  test('P2主失败优先级保完整分区结果 phase=' + phase + ' ' + codes.join('/'), async t => {
+    const { input, plan, checkpoints } = await fixture(t), runtime = native()
+    assert.equal((await generateSyncPartitions(input, plan, 2, false, { runner: runtime.runner, validateCandidate: async () => [] }, checkpoints)).status, 'reviewed')
+    const keys = plan.partitions.slice(0, 2).map(partition => 'partition:' + partition.id + (phase === 'prepared' ? ':generation' : ':candidate-review'))
+    const saved = keys.map((key, index) => {
+      const original = checkpoints.load<Omit<GenerationResult, 'candidateFiles'>>(key)!, code = codes[index]
+      const status: GenerationResult['status'] = code === 'repair' ? 'repair' : code === 'unsupported' ? 'unsupported' : 'failed'
+      const failure = { code, message: '原P2诊断-' + key + '-' + code }
+      const result = { ...original, status, failure, reviewPassed: false, review: null }
+      checkpoints.save(key, result); return result
+    })
+    const result = await generateSyncPartitions(input, plan, 2, false, { runner: async () => assert.fail('只回放已存分区原件'), validateCandidate: async () => [] }, checkpoints)
+    assert.equal(result.status, saved[winner].status); assert.deepEqual(result.failure, saved[winner].failure)
+    if (phase === 'prepared') assert.deepEqual(result.output, saved[winner].output)
+    for (let index = 0; index < keys.length; index++) assert.deepEqual(checkpoints.load(keys[index]), saved[index])
+  })
 
 test('立即缓存分区在边界响应timer取消，不耗完余下任务', async t => {
   const controller = new AbortController(), dispatched: number[] = [], wait = new Int32Array(new SharedArrayBuffer(4))
@@ -1731,6 +1823,25 @@ test('分区响应不能以完成顺序覆盖同文件writer，过期beforeDiges
   }
   await assert.rejects(generateSyncPartitions(second.input, second.plan, 2, false, { runner, validateCandidate: async () => [] }, second.checkpoints))
   assert.ok(invalid.calls.every(call => call.purpose === 'code_generate'))
+})
+
+for (const abort of [false, true]) test('原生实现规划保留unsupported且显式取消优先 abort=' + abort, async t => {
+  const { input, plan, checkpoints } = await fixture(t), controller = new AbortController(), calls: ElaborationSessionRequest[] = []
+  input.nativeWorktree = true; input.model = 'zcode:fixture/model'; input.signal = controller.signal
+  for (const contract of input.contracts) contract.code = []
+  const message = 'ZCode provider rejected the native turn (retryable=false)'
+  const result = await generateSyncPartitions(input, plan, 1, false, {
+    runner: async request => {
+      calls.push(request)
+      assert.equal(request.purpose, 'implementation_plan'); assert.equal(request.worktree?.mode, 'read')
+      if (abort) controller.abort()
+      throw Object.assign(new Error(message), { code: 'unsupported', sessionId: 'planning-session', threadId: 'planning-thread', turnId: 'planning-turn', requestKey: request.requestKey, inputDigest: request.inputDigest })
+    },
+    implementationPolicy: { writePaths: ['src', 'tests'], sourcePaths: ['src'] }, validateCandidate: async () => assert.fail('规划拒绝后不能进入候选验证'),
+  }, checkpoints)
+  assert.equal(result.status, abort ? 'cancelled' : 'unsupported')
+  assert.deepEqual(result.failure, { code: 'unsupported', message, sessionId: 'planning-session', threadId: 'planning-thread', turnId: 'planning-turn', requestKey: calls[0].requestKey, inputDigest: calls[0].inputDigest })
+  assert.equal(calls.length, 1); assert.equal(result.candidate, null); assert.equal(result.runtimeVerification, 'not_run')
 })
 
 test('多节点新功能先规划互斥精确文件，再只向对应writer授予新增路径', async t => {
